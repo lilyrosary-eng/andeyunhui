@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/src-tauri/icons/32x32.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>岸灯鸢花</title>
+    <style>
+      /* 防白屏：脚本执行前先给页面一个底色（浅色默认，深色由预加载脚本切换） */
+      html, body { margin: 0; height: 100%; background: #f4f2ec; }
+      body { overflow: hidden; }
+    </style>
+    <script>
+      // ===== 定制加载层（哥特风 · 浅/深双主题） =====
+      // 设计目标（按用户要求）：
+      // 1) 软件开启后【先】只加载哥特加载界面 + 识别浅/深模式，【再】加载其它（React 应用）；
+      // 2) 杜绝主题色空白：本脚本在 <head> 同步执行，创建 #boot 并立即铺底色，
+      //    早于 <body> 绘制，因此首帧即为哥特加载界面，不会露出原生窗口主题底色；
+      // 3) 加载层必定自毁：window load + 硬超时兜底，任何异常都不会让全屏层永久遮挡点击。
+      (function () {
+        function getSystemDark() {
+          return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        }
+        function resolveDark() {
+          var t = null;
+          try { t = localStorage.getItem('theme'); } catch (e) {}
+          if (t === 'dark') return true;
+          if (t === 'light') return false;
+          return getSystemDark();
+        }
+
+        var dark = resolveDark();
+        var bg = dark
+          ? 'linear-gradient(160deg,#14141a,#1c1c24)'
+          : 'linear-gradient(160deg,#f4f2ec,#ece9e1)';
+        var ink = dark ? '#ccc8be' : '#3a3a37';
+        var accent = dark ? '#9b8fb5' : '#8b948a';
+
+        // 立即给 html / body 铺同款渐变，避免 webview 原生窗口闪出主题色空白
+        document.documentElement.classList.toggle('dark', dark);
+        try {
+          document.documentElement.style.background = bg;
+          document.body.style.background = bg;
+        } catch (e) {}
+
+        // 浮窗子窗口（floating-note）无需加载层，仅保持底色即可放行
+        if (/[?&]floating=true\b/.test(location.search)) return;
+
+
+        // ---- 真实进度引擎 ----
+        var state = { target: 0, current: 0, done: false, dom: null, text: '', phase: '' };
+        var raf = null;
+
+        function apply() {
+          var d = state.dom;
+          if (!d) return;
+          var fill = d.fill || d.bootFill;
+          if (fill) {
+            fill.style.transition = 'none';
+            fill.style.width = state.current.toFixed(2) + '%';
+          }
+          if (d.pct) d.pct.textContent = Math.floor(state.current) + '%';
+          if (d.st && state.text) d.st.textContent = state.text;
+          if (d.ph && state.phase) d.ph.textContent = state.phase;
+        }
+
+        function bindDom() {
+          var b = document.getElementById('boot');
+          if (!b) return;
+          // iframe 模式下 #boot 是 <iframe>，需经 contentDocument 取内部节点；
+          // 兜底（内联）模式下 #boot 即普通 <div>，直接用自身。
+          var doc = b.contentDocument || b;
+          state.dom = {
+            fill: doc.querySelector('.progress .fill') || doc.querySelector('#bootFill'),
+            pct: doc.querySelector('.progress .pct'),
+            st: doc.querySelector('#statusText'),
+            ph: doc.querySelector('#phase'),
+          };
+          apply();
+        }
+
+        function finish() {
+          if (finish._done) return;
+          finish._done = true;
+          if (raf) { cancelAnimationFrame(raf); raf = null; }
+          var b = document.getElementById('boot');
+          if (!b) return;
+          // 立即让加载层不再拦截点击（即使淡出动画进行中），杜绝"点不了"
+          b.style.pointerEvents = 'none';
+          b.style.transition = 'opacity .45s ease';
+          b.style.opacity = '0';
+          setTimeout(function () {
+            if (b && b.parentNode) b.parentNode.removeChild(b);
+          }, 480);
+        }
+
+        function tick() {
+          if (!state.done && state.current < state.target) {
+            state.current += Math.max(0.4, (state.target - state.current) * 0.08);
+            if (state.current > state.target) state.current = state.target;
+          } else if (state.done && state.current < 100) {
+            state.current += Math.max(0.6, (100 - state.current) * 0.12);
+            if (state.current > 100) state.current = 100;
+          }
+          apply();
+          if (state.done && state.current >= 99.5) { finish(); return; }
+          raf = requestAnimationFrame(tick);
+        }
+        function ensureRaf() { if (!raf) raf = requestAnimationFrame(tick); }
+
+        window.__bootProgress = function (pct, opts) {
+          opts = opts || {};
+          if (typeof pct === 'number') state.target = Math.max(state.target, Math.min(100, pct));
+          if (opts.text) state.text = opts.text;
+          if (opts.phase) state.phase = opts.phase;
+          bindDom();
+          ensureRaf();
+        };
+        window.__bootDone = function (opts) {
+          if (state.done) return;
+          state.done = true;
+          if (opts && opts.text) state.text = opts.text;
+          if (opts && opts.phase) state.phase = opts.phase;
+          bindDom();
+          ensureRaf();
+        };
+
+        // 兜底（双保险）：窗口 load 即收尾；若 8s 内仍未主动完成（如启动异常），强制结束，绝不卡在加载层
+        window.addEventListener('load', function () {
+          if (!state.done) window.__bootDone({ text: '准备就绪', phase: 'PHASE 05 / 05' });
+        });
+        setTimeout(function () {
+          if (!state.done) window.__bootDone({ text: '准备就绪', phase: 'PHASE 05 / 05' });
+        }, 8000);
+
+        // ===== 全量哥特加载页（iframe 隔离，Vite 构建时注入 base64，零外部依赖）=====
+        (function installBootHtml() {
+          try {
+            // atob() 返回 Latin-1 二进制字符串，需用 TextDecoder 正确解码 UTF-8
+            // 否则中文（岸灯鸢花、建立连接…等）会乱码
+            var b64 = dark ? "___WAITING_DARK_B64___" : "___WAITING_LIGHT_B64___";
+            var binStr = atob(b64);
+            var bytes = new Uint8Array(binStr.length);
+            for (var i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+            var html = new TextDecoder('utf-8').decode(bytes);
+
+            html = html.replace(/<head[^>]*>/i, function (m) {
+              return m + '<script>window.__BOOT_HOSTED__=true;<\/script>';
+            });
+            var ifr = document.createElement('iframe');
+            ifr.id = 'boot';
+            ifr.setAttribute('title', '加载中');
+            ifr.setAttribute('aria-hidden', 'true');
+            ifr.style.cssText =
+              'position:fixed;inset:0;z-index:2147483647;border:0;width:100%;height:100%;' +
+              'background:' + bg + ';';
+            ifr.onload = function () { bindDom(); apply(); };
+            document.documentElement.appendChild(ifr);
+            ifr.srcdoc = html;
+          } catch (e) {
+            // 解码或 iframe 创建失败时，用内联兜底加载层（保证不白屏）
+            var div = document.createElement('div');
+            div.id = 'boot';
+            div.style.cssText =
+              'position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;' +
+              'align-items:center;justify-content:center;background:' + bg + ';' +
+              'color:' + ink + ';font-family:serif;';
+            div.innerHTML =
+              '<div style="font-size:28px;letter-spacing:4px;margin-bottom:24px;font-family:Cinzel,Playfair Display,serif;">岸灯鸢花</div>' +
+              '<div class="progress" style="width:240px;height:2px;background:rgba(128,128,128,.2);overflow:hidden;">' +
+              '<div class="fill" style="width:0%;height:100%;background:' + accent + ';transition:width .3s ease;"></div></div>' +
+              '<div id="statusText" style="margin-top:12px;font-size:12px;opacity:.6;"></div>' +
+              '<div id="phase" style="margin-top:4px;font-size:10px;opacity:.4;letter-spacing:2px;"></div>';
+            document.documentElement.appendChild(div);
+            bindDom();
+          }
+        })();
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

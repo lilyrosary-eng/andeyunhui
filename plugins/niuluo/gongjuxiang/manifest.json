@@ -1,0 +1,11 @@
+{
+  "id": "gongjuxiang",
+  "name": "文本工具箱",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": false,
+  "entry": "index.js",
+  "iconName": "Wrench",
+  "hostApiVersion": 1,
+  "parent": "niuluo"
+}
