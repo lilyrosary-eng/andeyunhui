@@ -1,0 +1,9 @@
+    Checking andengyuanhua v0.1.0 (C:\Users\Rosary\Desktop\tauri-best\src-tauri)
+src\services\mod.rs:10:1: error[E0428]: the name `transfer_station` is defined multiple times: `transfer_station` redefined here
+src\commands.rs:13:5: error[E0252]: the name `transfer_station` is defined multiple times: `transfer_station` reimported here
+src\services\document_parser.rs:20:18: error[E0603]: crate `lopdf` is private: private crate
+src\services\document_parser.rs:21:18: error[E0603]: crate `lopdf` is private: private crate
+src\commands.rs:13:5: warning: unused import: `crate::services::transfer_station`
+src\services\reading_service.rs:301:28: error[E0308]: mismatched types: expected `&Path`, found `PathBuf`
+warning: `andengyuanhua` (lib) generated 1 warning
+error: could not compile `andengyuanhua` (lib) due to 5 previous errors; 1 warning emitted

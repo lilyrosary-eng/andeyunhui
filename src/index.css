@@ -1,0 +1,424 @@
+/*
+ * ============================================================================
+ *  安灯花园 · 设计令牌（Design Tokens）单一事实来源
+ * ============================================================================
+ *  所有颜色 / 间距 / 字号 / 圆角 / 阴影 / 动效曲线全部以 CSS 变量集中定义于此。
+ *
+ *  消费方：
+ *   1. 宿主应用（src/**）：通过 Tailwind 工具类引用。tailwind.config.js 已把
+ *      语义色映射为 var(--token)，并扩展了 shadow / radius / easing / duration
+ *      工具类（shadow-card / rounded-xl / ease-standard / duration-base 等）。
+ *   2. 沙箱插件（plugins/**）：在 IIFE 内联 style 中直接写 var(--token)，
+ *      或复用宿主已注入的 Tailwind 类（其 CSS 由宿主打包，全局可用）。
+ *
+ *  约定：
+ *    - 颜色优先用语义令牌（--background/--foreground/--element-* 等），
+ *      禁止在组件里写死 #xxxxxx，保证深/浅主题与「主题面板色」统一切换。
+ *    - 新增颜色请先加令牌，再引用；间距/字号/圆角/阴影同理。
+ * ============================================================================
+ */
+
+@import "tw-animate-css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.145 0 0);
+    --primary: oklch(0.205 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.97 0 0);
+    --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: oklch(0.97 0 0);
+    --accent-foreground: oklch(0.205 0 0);
+    --destructive: oklch(0.577 0.245 27.325);
+    --destructive-foreground: oklch(0.98 0 0);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.708 0 0);
+    --outline: 0.922 0 0;
+    --outline-ring: 0.708 0 0;
+    --radius: 0.625rem;
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar-primary: oklch(0.205 0 0);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent-foreground: oklch(0.205 0 0);
+    --sidebar-border: oklch(0.922 0 0);
+    --sidebar-ring: oklch(0.708 0 0);
+
+    --element-color-raw: #5a7f5d;
+    --element-bg: var(--element-color-raw);
+    --element-fg: white;
+    --element-hover: #4a6f4d;
+    --element-muted: rgba(90, 127, 93, 0.1);
+    --element-border: rgba(90, 127, 93, 0.3);
+    --panel-opacity: 0.8;
+
+    /* 主题面板色：改变面板/导航栏背景（通过 color-mix 混合白色） */
+    --theme-panel-color: #5a7f5d;
+    --nav-primary-bg: color-mix(in srgb, #ffffff 95%, var(--theme-panel-color) 5%);
+    --nav-secondary-bg: color-mix(in srgb, #ffffff 90%, var(--theme-panel-color) 10%);
+    --main-panel-bg: color-mix(in srgb, #ffffff 85%, var(--theme-panel-color) 15%);
+
+    /* ========== 设计令牌：间距（供插件内联 style 与 host 统一引用）========== */
+    --space-1: 0.25rem;
+    --space-2: 0.5rem;
+    --space-3: 0.75rem;
+    --space-4: 1rem;
+    --space-5: 1.25rem;
+    --space-6: 1.5rem;
+    --space-8: 2rem;
+    --space-10: 2.5rem;
+    --space-12: 3rem;
+
+    /* ========== 设计令牌：字号（与 Tailwind text-* 对齐）========== */
+    --text-xs: 0.75rem;
+    --text-sm: 0.875rem;
+    --text-base: 1rem;
+    --text-lg: 1.125rem;
+    --text-xl: 1.25rem;
+    --text-2xl: 1.5rem;
+    --text-3xl: 1.875rem;
+
+    /* ========== 设计令牌：圆角（显式，供插件内联 style 使用）========== */
+    --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
+    --radius-full: 9999px;
+
+    /* ========== 设计令牌：层级阴影（elevation）========== */
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.10);
+    --shadow-lg: 0 12px 32px -6px rgb(0 0 0 / 0.16);
+    --shadow-xl: 0 20px 48px -8px rgb(0 0 0 / 0.22);
+
+    /* ========== 设计令牌：动效曲线与时长 ========== */
+    --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --dur-fast: 100ms;
+    --dur-base: 200ms;
+    --dur-slow: 300ms;
+  }
+  .dark {
+    --background: oklch(0.18 0.005 60);
+    --foreground: oklch(0.95 0.005 80);
+    --card: oklch(0.22 0.005 60);
+    --card-foreground: oklch(0.95 0.005 80);
+    --popover: oklch(0.22 0.005 60);
+    --popover-foreground: oklch(0.95 0.005 80);
+    --primary: oklch(0.95 0.005 80);
+    --primary-foreground: oklch(0.18 0.005 60);
+    --secondary: oklch(0.32 0.01 60);
+    --secondary-foreground: oklch(0.95 0.005 80);
+    --muted: oklch(0.32 0.01 60);
+    --muted-foreground: oklch(0.65 0.01 60);
+    --accent: oklch(0.32 0.01 60);
+    --accent-foreground: oklch(0.95 0.005 80);
+    --destructive: oklch(0.396 0.141 25.723);
+    --destructive-foreground: oklch(0.98 0 0);
+    --border: oklch(0.30 0.01 60);
+    --input: oklch(0.28 0.01 60);
+    --ring: oklch(0.45 0.02 60);
+    --outline: 0.30 0.01 60;
+    --outline-ring: 0.45 0.02 60;
+    --sidebar: oklch(0.25 0.008 60);
+    --sidebar-foreground: oklch(0.95 0.005 80);
+    --sidebar-primary: oklch(0.95 0.005 80);
+    --sidebar-primary-foreground: oklch(0.18 0.005 60);
+    --sidebar-accent: oklch(0.32 0.01 60);
+    --sidebar-accent-foreground: oklch(0.95 0.005 80);
+    --sidebar-border: oklch(0.30 0.01 60);
+    --sidebar-ring: oklch(0.45 0.02 60);
+
+    --element-bg: var(--element-color-raw);
+    --element-fg: white;
+    --element-hover: #4a6f4d;
+    --element-muted: rgba(90, 127, 93, 0.15);
+    --element-border: rgba(90, 127, 93, 0.4);
+
+    /* 主题面板色（深色模式，混合深色背景） */
+    --nav-primary-bg: color-mix(in srgb, #1c1917 95%, var(--theme-panel-color) 5%);
+    --nav-secondary-bg: color-mix(in srgb, #1c1917 90%, var(--theme-panel-color) 10%);
+    --main-panel-bg: color-mix(in srgb, #1c1917 85%, var(--theme-panel-color) 15%);
+  }
+  .reverse-color {
+    --element-bg: white;
+    --element-fg: var(--element-color-raw);
+    --element-hover: #f0f0f0;
+    --element-muted: rgba(90, 127, 93, 0.08);
+    --element-border: rgba(90, 127, 93, 0.2);
+  }
+  .dark.reverse-color {
+    --element-bg: #2a2724;
+    --element-fg: var(--element-color-raw);
+    --element-hover: #3a3734;
+    --element-muted: color-mix(in srgb, var(--element-color-raw) 10%, transparent);
+    --element-border: color-mix(in srgb, var(--element-color-raw) 20%, transparent);
+  }
+  * {
+    @apply border-border outline-ring;
+  }
+  body {
+    color: var(--foreground);
+    @apply antialiased;
+    background-color: var(--main-panel-bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-white/70 backdrop-blur-md border border-white/80 shadow-sm rounded-2xl;
+    @apply dark:bg-stone-800/60 dark:border-stone-600/30 dark:text-stone-200;
+  }
+  .glass-bg {
+    background-color: rgb(255 255 255 / var(--panel-opacity)) !important;
+  }
+  .dark .glass-bg {
+    background-color: rgb(41 37 36 / calc(var(--panel-opacity) * 0.75)) !important;
+  }
+  .divider {
+    @apply border-b border-neutral-200/50;
+    @apply dark:border-stone-700/50;
+  }
+  .element-primary {
+    background-color: var(--element-bg);
+    color: var(--element-fg);
+  }
+  .element-muted {
+    background-color: var(--element-muted);
+    color: var(--element-bg);
+  }
+  .element-hover:hover {
+    background-color: var(--element-hover);
+  }
+  .element-border {
+    border-color: var(--element-border);
+  }
+  .element-ring:focus-visible {
+    --tw-ring-color: var(--element-border);
+  }
+  /* 共享滑条样式 */
+  .slider-themed {
+    @apply [&_.rounded-full]:h-4 [&_.rounded-full]:w-4 [&_.rounded-full]:bg-white [&_.rounded-full]:border [&_.rounded-full]:border-neutral-200 [&_.rounded-full]:shadow-md;
+    @apply dark:[&_.rounded-full]:bg-stone-600 dark:[&_.rounded-full]:border-stone-500;
+  }
+  .slider-themed [data-slot="slider-range"] {
+    background-color: var(--element-bg) !important;
+  }
+  /* 主题面板色：导航栏与面板背景 */
+  .nav-primary-bg {
+    background-color: var(--nav-primary-bg);
+  }
+  .nav-secondary-bg {
+    background-color: var(--nav-secondary-bg);
+  }
+  .main-panel-bg {
+    background-color: var(--main-panel-bg);
+  }
+  /* 极细边框质感 — 适用于播放器、编辑器、查看器等模块的主内容区 */
+  .subtle-frame {
+    border: 5px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  /* 全屏时移除边框和圆角 */
+  .subtle-frame:fullscreen {
+    border: none !important;
+    border-radius: 0 !important;
+  }
+}
+
+@layer utilities {
+  /* 按钮点击缩放 */
+  .btn-press {
+    @apply active:scale-95 transition-transform duration-100;
+  }
+  /* 面板淡入 */
+  .fade-in {
+    animation: fadeIn 0.2s ease-out;
+  }
+  /* 侧边栏滑入 */
+  .slide-in-left {
+    animation: slideInLeft 0.25s ease-out;
+  }
+  /* 设置面板滑入 */
+  .slide-in-up {
+    animation: slideInUp 0.2s ease-out;
+  }
+  /* 自定义滚动条 */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* 全局滚动条样式 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.3);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.5);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.2);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
+}
+
+/* 原生 range 滑条 — thumb hover/active 变深 */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--element-bg);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+input[type="range"]:hover::-webkit-slider-thumb {
+  background: color-mix(in srgb, var(--element-bg), black 15%);
+}
+input[type="range"]:active::-webkit-slider-thumb {
+  background: color-mix(in srgb, var(--element-bg), black 30%);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--element-bg);
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+input[type="range"]:hover::-moz-range-thumb {
+  background: color-mix(in srgb, var(--element-bg), black 15%);
+}
+input[type="range"]:active::-moz-range-thumb {
+  background: color-mix(in srgb, var(--element-bg), black 30%);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slideInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ========== 跨平台降级处理 ========== */
+
+/* Linux WebKitGTK 不支持 backdrop-filter，使用实色背景替代 */
+@supports not (backdrop-filter: blur(1px)) {
+  .backdrop-blur,
+  .backdrop-blur-sm,
+  .backdrop-blur-md {
+    backdrop-filter: none !important;
+  }
+  /* 毛玻璃面板降级为高不透明度实色 */
+  .glass-panel {
+    @apply bg-white/90;
+  }
+  .dark .glass-panel {
+    @apply bg-stone-800/90;
+  }
+  /* 所有带 blur 的容器降级 */
+  [class*="backdrop-blur"] {
+    --tw-bg-opacity: 0.9;
+  }
+}
+
+/* 旧版浏览器不支持 color-mix，使用硬编码 fallback（默认绿色）；现代浏览器动态派生 */
+@supports (color: color-mix(in srgb, red, blue)) {
+  :root {
+    --element-hover: color-mix(in srgb, var(--element-color-raw), black 20%);
+    --element-muted: color-mix(in srgb, var(--element-color-raw), transparent 90%);
+    --element-border: color-mix(in srgb, var(--element-color-raw), transparent 70%);
+  }
+  .dark {
+    --element-hover: color-mix(in srgb, var(--element-color-raw), black 20%);
+    --element-muted: color-mix(in srgb, var(--element-color-raw), transparent 85%);
+    --element-border: color-mix(in srgb, var(--element-color-raw), transparent 60%);
+  }
+  .reverse-color {
+    --element-muted: color-mix(in srgb, var(--element-color-raw), transparent 92%);
+    --element-border: color-mix(in srgb, var(--element-color-raw), transparent 80%);
+  }
+}
+
+/* ========== 阅读模块：多栏分页排版（R.3）==========
+   .reader-columns 是 CSS multicol 容器，<p> 由 dangerouslySetInnerHTML 注入，
+   必须用全局 CSS 命中（Tailwind 类无法作用于注入内容）。
+   字号由 --reader-font-size 控制（组件内联设置），R.5 字体设置会改这个变量。
+   段落允许跨栏断开（break-inside: auto），保证长段落（如 txt 整章）能跨页流动。 */
+.reader-columns {
+  font-size: var(--reader-font-size, 17px);
+  line-height: 1.85;
+  color: #1c1917;
+  text-align: justify;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  line-break: strict;
+  -webkit-hyphens: auto;
+  hyphens: auto;
+}
+.dark .reader-columns {
+  color: #e7e5e4;
+}
+.reader-columns p {
+  margin: 0 0 0.85em 0;
+  text-indent: 2em;
+}
+.reader-columns p:last-child {
+  margin-bottom: 0;
+}
+.reader-columns em {
+  font-style: italic;
+}
+.reader-columns strong {
+  font-weight: 600;
+  font-style: normal;
+}

@@ -1,0 +1,10 @@
+{
+  "id": "plugin-id",
+  "name": "插件名称",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "Puzzle",
+  "hostApiVersion": 1
+}

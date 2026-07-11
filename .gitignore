@@ -1,0 +1,48 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Build artifacts
+bundled-plugins
+plugins/*/dist
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 调试/检查输出（脚本临时产物，不应入库）
+chk*.txt
+_chk*.txt
+error.txt
+deploy_err.txt
+ts_errors.txt
+ts_final.txt
+check_*.txt
+chk_pdf*.txt
+research_report_*.md
+
+# 其他 AI 工具本地缓存
+.codebuddy/
+
+# 增量编译缓存
+*.tsbuildinfo
+
+# external-deps 本地构建产物
+external-deps/_build/

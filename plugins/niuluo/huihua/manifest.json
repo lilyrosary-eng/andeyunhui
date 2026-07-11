@@ -1,0 +1,11 @@
+{
+  "id": "huihua",
+  "name": "绘画",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": false,
+  "entry": "index.js",
+  "iconName": "Paintbrush",
+  "hostApiVersion": 1,
+  "parent": "niuluo"
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main", "lyrics-widget", "floating-note-*", "screenshot-overlay", "tray-menu"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "dialog:default",
+    "dialog:allow-save",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-position",
+    "core:window:allow-set-focus",
+    "core:window:allow-is-visible",
+    "core:webview:allow-create-webview-window"
+  ]
+}

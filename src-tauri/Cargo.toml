@@ -1,0 +1,72 @@
+[package]
+name = "andengyuanhua"
+version = "0.1.0"
+description = "岸灯鸢花 · 笔记"
+authors = ["一只线布球"]
+edition = "2021"
+
+[lib]
+name = "andengyuanhua_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
+# 原生文件拖出：基于 Windows DoDragDrop，根治 WebView2 不支持 JS dataTransfer 拖出的问题
+drag = "2.1.1"
+tauri-plugin-opener = "=2.5.3"
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+# 文件系统监听：实现插件/图片目录热插拔（实时检测新增/删除/修改）
+# 后端由 notify::recommended_watcher 按编译目标自动选择：
+#   - Windows  → ReadDirectoryChangesWatcher（windows-sys 为非特性门控的硬性依赖，始终可用）
+#   - macOS    → FSEvents（macos_fsevent，比 kqueue 更稳定、资源占用更低）
+#   - Linux    → inotify
+# 注意：Windows 原生后端与 features 无关，无需单独开启任何 windows 特性。
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+lofty = "0.24.0"
+walkdir = "2"
+rayon = "1"
+reqwest = { version = "0.12", features = ["json"] }
+regex = "1"
+mimalloc = "0.1"
+epub = "=2.1.5"
+ammonia = "4"
+pulldown-cmark = "0.12"
+encoding_rs = "0.8"
+chardetng = "0.1"
+# 专业模块「薄荷」工具依赖
+image = "0.25"
+sysinfo = "0.30"
+arboard = "3"
+base64 = "0.22"
+# 微信式截图：屏幕捕获（GDI BitBlt）+ 可见窗口枚举（EnumWindows）
+winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi"] }
+uuid = { version = "1", features = ["v4"] }
+# 原生 Office 文档解析（OOXML = zip + XML），毫秒级、不依赖 Python
+zip = "3"
+quick-xml = "0.39"
+# 原生 PDF 解析（文字 + 图片提取），替代 markitdown
+pdf-extract = "0.12"
+# pdf-extract 内部使用 lopdf 抽取图片，但对其为私有依赖，这里显式声明以便直接使用
+lopdf = "0.42"
+# 一次性预编译正则（html_to_md 等热路径）
+once_cell = "1"
+# 统一日志门面：release 默认 warn 级别，dev 开 debug；替代散落的 eprintln!
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+# 全链路优化：跨 crate 内联 + 死代码消除，性能提升 10-20%
+lto = true
+# 单代码生成单元：允许更激进的内联优化
+codegen-units = 1
+# 放弃 unwind 表：减小二进制体积约 50%，减少 CPU 分支预测失败
+panic = "abort"
+# 最高优化等级（3 = 速度优先，s = 体积优先）
+opt-level = 3

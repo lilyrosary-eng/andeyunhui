@@ -1,0 +1,14 @@
+{
+  "id": "wps",
+  "name": "办公",
+  "version": "0.1.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "FileText",
+  "hostApiVersion": 1,
+  "deps": ["tiptap"],
+  "parent": "niuluo",
+  "category": "办公",
+  "desc": "办公套件：文档、演示文件、表格（演示文件与表格编辑器即将推出）"
+}
