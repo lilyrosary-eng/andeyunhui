@@ -1,0 +1,10 @@
+{
+  "id": "music",
+  "name": "音乐",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "Music2",
+  "hostApiVersion": 1
+}

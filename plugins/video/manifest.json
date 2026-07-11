@@ -1,0 +1,10 @@
+{
+  "id": "video",
+  "name": "视频",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "Video",
+  "hostApiVersion": 1
+}

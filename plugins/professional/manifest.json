@@ -1,0 +1,10 @@
+{
+  "id": "professional",
+  "name": "专业",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "Briefcase",
+  "hostApiVersion": 1
+}

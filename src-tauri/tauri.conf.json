@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "岸灯鸢花",
+  "version": "0.1.0",
+  "identifier": "com.rosary.andengyuanhua",
+  "build": {
+    "beforeDevCommand": "pnpm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "node scripts/deploy-plugins.mjs && node scripts/copy-waiting.mjs && pnpm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "岸 · 笔记",
+        "width": 1100,
+        "height": 720,
+        "decorations": false,
+        "dragDropEnabled": false,
+        "backgroundColor": "#f5f5f0"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' asset: https://asset.localhost http://asset.localhost blob:; script-src 'self' 'unsafe-inline' plugin: 'unsafe-eval'; style-src 'self' 'unsafe-inline' plugin: https://fonts.googleapis.com; font-src 'self' asset: https://fonts.googleapis.com https://fonts.gstatic.com data:; img-src 'self' asset: data: blob: plugin: https://asset.localhost http://asset.localhost; media-src 'self' asset: blob: https://asset.localhost http://asset.localhost; frame-src 'self'",
+      "assetProtocol": {
+      "enable": true,
+      "scope": ["**"]
+    }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}

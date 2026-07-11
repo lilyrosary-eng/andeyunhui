@@ -1,0 +1,10 @@
+{
+  "id": "image",
+  "name": "图片",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "Image",
+  "hostApiVersion": 1
+}

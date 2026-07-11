@@ -1,0 +1,897 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Noto+Serif+SC:wght@400;500;600&display=swap" rel="stylesheet" />
+<title>岸灯鸢花 · 等待页面（PC / 哥特 / 暗色）</title>
+<style>
+  /* ===== 哥特暗色调配色 ===== */
+  :root {
+    --bg:        #14141a;   /* 深炭底（微蓝） */
+    --bg-2:      #0e0e12;   /* 渐变辅底（更暗） */
+    --surface:   #1c1c24;   /* 面板 */
+    --ink:       #ccc8be;   /* 苍白墨色（主文字，暗底上显形） */
+    --ink-soft:  #6f6c78;   /* 次要灰 */
+    --accent:    #9b8fb5;   /* 冷淡紫，哥特点缀（线描花/进度/呼吸光） */
+    --accent-2:  #7a8e99;   /* 雾蓝灰，辅助 */
+    --line:      rgba(204,200,190,.14);
+    --line-soft: rgba(204,200,190,.07);
+    --spark:     #efe9fb;   /* 光点（暗底上用浅紫白显形） */
+    --sans: "Noto Serif SC", "Source Han Serif SC", "PingFang SC", "Microsoft YaHei", Georgia, serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    --gothic: "Cinzel", "Playfair Display", "Noto Serif SC", serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: var(--sans);
+    color: var(--ink);
+    background: linear-gradient(160deg, var(--bg), var(--bg-2));
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 夜色教堂：四角压暗的暗角（vignette），中央莲花如被烛光照亮 */
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(125% 95% at 50% 38%, transparent 36%, rgba(0,0,0,.55) 100%);
+  }
+
+  /* 细线网格暗纹（浅底上的低对比点阵） */
+  .grid {
+    position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background-image: radial-gradient(rgba(204,200,190,.06) 1px, transparent 1.5px);
+    background-size: 32px 32px;
+    background-position: -16px -16px;
+  }
+  /* 极大号线描花卉水印 */
+  .watermark {
+    position: fixed; right: -120px; bottom: -140px;
+    width: 600px; height: 600px; z-index: 0; pointer-events: none;
+    opacity: .06; color: var(--ink);
+  }
+
+  .app { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100vh; }
+
+  /* ===== 顶栏（品牌 + 状态）===== */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 26px 48px; border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand .logo { width: 32px; height: 32px; color: var(--accent); flex: none; }
+  .brand .name { font-family: var(--gothic); font-size: 17px; font-weight: 500; letter-spacing: .18em; padding-left: .14em; text-transform: uppercase; }
+  .brand .en {
+    font-family: var(--gothic); font-size: 10px; letter-spacing: .4em;
+    color: var(--ink-soft); margin-top: 4px; padding-left: .34em; text-transform: uppercase;
+  }
+  .topbar .meta {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .18em;
+    color: var(--ink-soft);
+  }
+  .topbar .meta b { color: var(--accent); font-weight: 500; }
+
+  /* ===== 主区（上下结构 · PC 端）===== */
+  .main {
+    flex: 1; display: flex; flex-direction: column; align-items: stretch; min-height: 0;
+    position: relative;
+  }
+  .pane-loader {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    position: relative; padding: 16px;
+    min-height: 0; overflow: visible;
+  }
+  /* 夜色教堂：莲花背后的柔光（冷紫烛光 + 一丝暖调），似彩色玻璃透出的光 */
+  .pane-loader::before {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: min(80vw, 720px); height: min(80vw, 720px);
+    transform: translate(-50%, -50%);
+    background:
+      radial-gradient(circle at 50% 46%, rgba(155,143,181,.24), rgba(120,110,150,.10) 38%, transparent 66%),
+      radial-gradient(circle at 50% 46%, rgba(196,170,140,.10), transparent 48%);
+    filter: blur(28px);
+    z-index: -1; pointer-events: none;
+    animation: candle 6.5s ease-in-out infinite;   /* 烛火般轻微呼吸 / 闪烁 */
+  }
+  /* 伪彩色玻璃（stained-glass）：极淡的红/蓝/琥珀分块，像玫瑰窗透出的彩光，垫在烛光之后 */
+  .pane-loader::after {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: min(82vw, 740px); height: min(82vw, 740px);
+    transform: translate(-50%, -50%);
+    background: conic-gradient(from 12deg at 50% 50%,
+      rgba(150, 88, 120, .14)   0deg  56deg,
+      rgba( 78,112,176, .14)  56deg 112deg,
+      rgba(176,132, 80, .11) 112deg 168deg,
+      rgba(108,152,140, .11) 168deg 224deg,
+      rgba(142,100,162, .14) 224deg 280deg,
+      rgba( 84,124,176, .14) 280deg 336deg,
+      rgba(150, 88,120, .14) 336deg 360deg);
+    -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 58%, transparent 72%);
+            mask-image: radial-gradient(circle at 50% 50%, #000 58%, transparent 72%);
+    filter: blur(40px);
+    z-index: -2; pointer-events: none;
+    animation: candle 9s ease-in-out infinite reverse;  /* 更缓、且反向，与烛光错相 */
+  }
+  /* 烛火呼吸：opacity + 极轻缩放，刻意不规整、幅度更明显以模拟真实烛光 */
+  @keyframes candle {
+    0%   { opacity: .55; transform: translate(-50%, -50%) scale(1.000); }
+    18%  { opacity: 1;   transform: translate(-50%, -50%) scale(1.024); }
+    34%  { opacity: .38; transform: translate(-50%, -50%) scale(.984); }
+    52%  { opacity: .90; transform: translate(-50%, -50%) scale(1.010); }
+    68%  { opacity: .30; transform: translate(-50%, -50%) scale(.978); }
+    84%  { opacity: .96; transform: translate(-50%, -50%) scale(1.018); }
+    100% { opacity: .58; transform: translate(-50%, -50%) scale(1.000); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pane-loader::before, .pane-loader::after { animation: none; }
+  }
+
+  /* 随机星点闪烁（夜空尘埃 / 烛火飞星） */
+  .stars {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden;
+  }
+  .stars .star {
+    position: absolute; border-radius: 50%;
+    background: var(--spark);
+    box-shadow: 0 0 5px 1px rgba(239,233,251,.5);
+    animation: twinkle linear infinite;
+  }
+  /* 漂移外壳：承载缓慢位移（萤火感），内层 .star 继续闪烁，二者 transform 不冲突 */
+  .stars .star-wrap {
+    position: absolute;
+    animation: drift ease-in-out infinite;
+  }
+  @keyframes twinkle {
+    0%   { opacity: .12; transform: scale(.6); }
+    45%  { opacity: 1;   transform: scale(1); }
+    55%  { opacity: .85; transform: scale(1.05); }
+    100% { opacity: .12; transform: scale(.6); }
+  }
+  @keyframes drift {
+    0%   { transform: translate(0, 0); }
+    25%  { transform: translate(7px, -9px); }
+    50%  { transform: translate(-5px, -3px); }
+    75%  { transform: translate(4px, 7px); }
+    100% { transform: translate(0, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .stars .star, .stars .star-wrap { animation: none; }
+    .stars .star { opacity: .5; }
+  }
+  .pane-text {
+    border-top: 1px solid var(--line);
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    justify-content: center; gap: 18px;
+    max-width: 560px; margin: 0 auto; width: 100%;
+    padding: 28px clamp(24px, 4vw, 48px) 36px;
+    flex: none; /* 固定不被压缩 */
+    min-height: 0;
+  }
+
+  /* 线描花卉 loader（哥特暗色 · 大幅莲花） */
+  .loader { width: clamp(360px, 40vw, 560px); height: clamp(360px, 40vw, 560px); color: var(--accent); position: relative; }
+  .loader .petal {
+    fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round;
+    stroke-dasharray: var(--len); stroke-dashoffset: var(--len);
+    animation: bloom 3.6s ease-in-out infinite;
+    animation-delay: var(--d);
+  }
+  @keyframes bloom {
+    0%   { stroke-dashoffset: var(--len); opacity: .4; }
+    45%  { stroke-dashoffset: 0; opacity: 1; }
+    55%  { stroke-dashoffset: 0; opacity: 1; }
+    100% { stroke-dashoffset: var(--len); opacity: .4; }
+  }
+  /* 极小流光光点 + 拖尾（绘制阶段沿花辦往返掠过） */
+  .loader .spark, .loader .spark-trail {
+    fill: var(--spark); opacity: 0; filter: url(#glow); pointer-events: none;
+  }
+  .loader.drawing .spark { opacity: 1; }
+  .loader.drawing .spark-trail { opacity: .5; }
+
+  /* 呼吸渐变闪烁（光点走两圈后切换） */
+  .loader.breathing .petal {
+    stroke-dashoffset: 0;
+    animation: breathe 2.8s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { opacity: .5;  filter: drop-shadow(0 0 1px var(--accent)); }
+    50%      { opacity: 1;   filter: drop-shadow(0 0 8px var(--accent)); }
+  }
+
+  .eyebrow {
+    font-family: var(--gothic); font-size: 11px; letter-spacing: .4em;
+    color: var(--accent); padding-left: .34em; text-transform: uppercase;
+  }
+  .heading {
+    font-family: var(--gothic); font-size: clamp(22px, 2.2vw, 30px); font-weight: 500; letter-spacing: .08em;
+    margin: 0; line-height: 1.3;
+  }
+  .status {
+    font-family: var(--mono); font-size: 13px; letter-spacing: .06em;
+    color: var(--ink-soft); display: flex; align-items: center; gap: 10px;
+  }
+  .status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
+
+  /* 进度条 */
+  .progress { margin-top: 6px; }
+  .progress .track {
+    height: 2px; background: var(--line-soft); border-radius: 2px; overflow: hidden; position: relative;
+  }
+  .progress .fill {
+    position: absolute; left: 0; top: 0; height: 100%; width: 0%;
+    background: var(--accent); border-radius: 2px;
+    transition: width .25s linear;
+  }
+  .progress .row {
+    display: flex; justify-content: space-between; margin-top: 10px;
+    font-family: var(--mono); font-size: 12px; letter-spacing: .1em; color: var(--ink-soft);
+  }
+  .progress .pct { color: var(--ink); }
+
+  /* ===== 底栏（构建信息）===== */
+  .footer {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 48px; border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .14em; color: var(--ink-soft);
+  }
+  .footer .right { display: flex; gap: 28px; }
+  .footer b { color: var(--ink); font-weight: 500; }
+
+  /* ===== 哥特元素（暗色底上的克制点缀 · 不抢戏）===== */
+  /* 中央莲花外的尖拱窗棂（lancet arch · 哥特标志形） */
+  .pane-loader .arch {
+    position: absolute; left: 50%; top: 50%; z-index: 0;
+    width: clamp(380px, 44vw, 600px); height: clamp(380px, 44vw, 600px);
+    transform: translate(-50%, -52%);
+    color: var(--accent); opacity: .42; pointer-events: none;
+  }
+  /* 哥特玫瑰窗（rose window · 中央莲花后的圆形花格） */
+  .pane-loader .rose {
+    position: absolute; left: 50%; top: 50%; z-index: 0;
+    width: clamp(300px, 34vw, 440px); height: clamp(300px, 34vw, 440px);
+    transform: translate(-50%, -50%);
+    transform-origin: center;
+    color: var(--accent); opacity: .13; pointer-events: none;
+    stroke: currentColor; stroke-width: 1.1;
+    animation: roseSpin 90s linear infinite;   /* 中央玫瑰窗缓缓旋转 */
+  }
+  @keyframes roseSpin {
+    from { transform: translate(-50%, -50%) rotate(0deg); }
+    to   { transform: translate(-50%, -50%) rotate(360deg); }
+  }
+  /* 整页尖拱门廊（portal · 把主区框成一座小教堂） */
+  .main .portal {
+    position: absolute; inset: 0; z-index: 0; pointer-events: none;
+    width: 100%; height: 100%;
+    color: var(--accent); opacity: .3;
+  }
+  .main .portal path, .main .portal line {
+    fill: none; stroke: currentColor; stroke-width: 1.3;
+    vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round;
+  }
+  /* 门廊顶端冠饰：玫瑰窗 + 钟塔尖顶 + 双小尖塔（非拉伸，保持圆形） */
+  .main .portal-crest {
+    position: absolute; left: 50%; top: 0; transform: translateX(-50%);
+    width: clamp(140px, 18vw, 220px); height: clamp(120px, 15vw, 190px);
+    z-index: 1; pointer-events: none; color: var(--accent); opacity: .34;
+    stroke: currentColor; stroke-width: 1.1;
+  }
+  .main .portal-crest path, .main .portal-crest line {
+    fill: none; stroke: currentColor; stroke-linejoin: round; stroke-linecap: round;
+  }
+  /* 门廊顶端小玫瑰窗：与中央大窗反向缓缓旋转 */
+  .main .portal-crest #crestRoseG {
+    transform-box: fill-box; transform-origin: center;
+    animation: crestSpin 60s linear infinite reverse;
+  }
+  @keyframes crestSpin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+  /* 顶/底栏中央四叶饰铆钉（把整页框成哥特） */
+  .topbar, .footer { position: relative; }
+  .stud {
+    position: absolute; left: 50%; bottom: -10px; transform: translateX(-50%);
+    width: 20px; height: 20px; color: var(--accent); opacity: .6;
+    z-index: 3; pointer-events: none;
+  }
+  .footer .stud { bottom: auto; top: -10px; }
+  /* 四角哥特花饰（尖角托架 + 菱形 fleuron） */
+  .corner { position: absolute; width: 60px; height: 60px; z-index: 2;
+            color: var(--accent); opacity: .42; pointer-events: none; }
+  .corner.tl { top: 16px;    left: 16px; }
+  .corner.tr { top: 16px;    right: 16px;  transform: rotate(90deg); }
+  .corner.br { bottom: 16px; right: 16px; transform: rotate(180deg); }
+  .corner.bl { bottom: 16px; left: 16px;  transform: rotate(270deg); }
+  /* 文案区哥特 fleuron 分隔（线—菱形—线） */
+  .fleur { display: flex; justify-content: center; color: var(--accent); opacity: .6; margin: 2px 0; }
+  .fleur svg { width: 160px; height: 16px; }
+
+  /* 两侧哥特窗（lancet window · 填补主区左右空白，似教堂侧廊的窗） */
+  .main .side {
+    position: absolute; top: 0; bottom: 0; z-index: 0; pointer-events: none;
+    width: clamp(80px, 10vw, 132px); color: var(--accent); opacity: .28;
+  }
+  .main .side.left  { left:  clamp(6px, 1.6vw, 26px); }
+  .main .side.right { right: clamp(6px, 1.6vw, 26px); }
+  .main .side path, .main .side line {
+    fill: none; stroke: currentColor; stroke-width: 1.2;
+    stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke;
+  }
+  @media (max-width: 760px) { .main .side { display: none; } }
+
+  /* 哥特菱形/四角星满铺暗纹（diaper · 主区墙面花格） */
+  .main .diaper {
+    position: absolute; inset: 0; z-index: 0; pointer-events: none;
+    width: 100%; height: 100%; color: var(--accent); opacity: .26;
+  }
+
+  @media (max-width: 560px) {
+    .pane-text { padding: 24px 20px 30px; }
+    .topbar, .footer { padding-left: 24px; padding-right: 24px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .loader .petal, .status .dot, .pane-loader .rose, .main .portal-crest #crestRoseG { animation: none; }
+    .loader .petal { stroke-dashoffset: 0; }
+  }
+</style>
+</head>
+<body>
+
+  <!-- 共用符号：四角星 / 菱形（供哥特暗纹与各处装饰 <use>） -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <path id="star4" d="M7 0 L1.56 1.56 L0 7 L-1.56 1.56 L-7 0 L-1.56 -1.56 L0 -7 L1.56 -1.56 Z"/>
+      <path id="diamond" d="M0 -7 L7 0 L0 7 L-7 0 Z"/>
+    </defs>
+  </svg>
+
+  <!-- 随机星点闪烁层 -->
+  <div class="stars" id="stars" aria-hidden="true"></div>
+
+  <!-- 几何花卉暗纹（treatment 3）：点阵 + 巨型水印 -->
+  <div class="grid"></div>
+  <svg class="watermark" viewBox="0 0 240 240" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+    <g transform="translate(120,120)">
+      <!-- 莲花水印（俯视双层莲座 · 尖顶莲瓣） -->
+      <!-- 外层 8 瓣（360° 放射） -->
+      <g>
+        <path d="M0,0 C-18,-10 -26,-34 -12,-80 C-4,-70 4,-70 12,-80 C26,-34 18,-10 0,0 Z" transform="rotate(0)"/>
+        <path d="M0,0 C-18,-10 -26,-34 -12,-80 C-4,-70 4,-70 12,-80 C26,-34 18,-10 0,0 Z" transform="rotate(45)"/>
+        <path d="M0,0 C-18,-10 -26,-34 -12,-80 C-4,-70 4,-70 12,-80 C26,-34 18,-10 0,0 Z" transform="rotate(90)"/>
+        <path d="M0,0 C-18,-10 -26,-34 -12,-80 C-4,-70 4,-70 12,-80 C26,-34 18,-10 0,0 Z" transform="rotate(135)"/>
+        <path d="M0,0 C-18,-10 -26,-34 -12,-80 C-4,-70 4,-70 12,-80 C26,-34 18,-10 0,0 Z" transform="rotate(180)"/>
+        <path d="M0,0 C-18,-10 -26,-34 -12,-80 C-4,-70 4,-70 12,-80 C26,-34 18,-10 0,0 Z" transform="rotate(225)"/>
+        <path d="M0,0 C-18,-10 -26,-34 -12,-80 C-4,-70 4,-70 12,-80 C26,-34 18,-10 0,0 Z" transform="rotate(270)"/>
+        <path d="M0,0 C-18,-10 -26,-34 -12,-80 C-4,-70 4,-70 12,-80 C26,-34 18,-10 0,0 Z" transform="rotate(315)"/>
+      </g>
+      <!-- 内层 8 瓣（错开 22.5°，更短更窄） -->
+      <g>
+        <path d="M0,0 C-11,-6 -16,-22 -8,-50 C-3,-44 3,-44 8,-50 C16,-22 11,-6 0,0 Z" transform="rotate(22.5)"/>
+        <path d="M0,0 C-11,-6 -16,-22 -8,-50 C-3,-44 3,-44 8,-50 C16,-22 11,-6 0,0 Z" transform="rotate(67.5)"/>
+        <path d="M0,0 C-11,-6 -16,-22 -8,-50 C-3,-44 3,-44 8,-50 C16,-22 11,-6 0,0 Z" transform="rotate(112.5)"/>
+        <path d="M0,0 C-11,-6 -16,-22 -8,-50 C-3,-44 3,-44 8,-50 C16,-22 11,-6 0,0 Z" transform="rotate(157.5)"/>
+        <path d="M0,0 C-11,-6 -16,-22 -8,-50 C-3,-44 3,-44 8,-50 C16,-22 11,-6 0,0 Z" transform="rotate(202.5)"/>
+        <path d="M0,0 C-11,-6 -16,-22 -8,-50 C-3,-44 3,-44 8,-50 C16,-22 11,-6 0,0 Z" transform="rotate(247.5)"/>
+        <path d="M0,0 C-11,-6 -16,-22 -8,-50 C-3,-44 3,-44 8,-50 C16,-22 11,-6 0,0 Z" transform="rotate(292.5)"/>
+        <path d="M0,0 C-11,-6 -16,-22 -8,-50 C-3,-44 3,-44 8,-50 C16,-22 11,-6 0,0 Z" transform="rotate(337.5)"/>
+      </g>
+      <!-- 莲蓬 -->
+      <circle cx="0" cy="0" r="10"/>
+    </g>
+  </svg>
+
+  <div class="app">
+
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <div class="brand">
+        <!-- 线稿 logo 点缀（treatment 2） -->
+        <!-- 矢车菊 logo（Cornflower · 细瓣放射 + 中心花芯） -->
+        <svg class="logo" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <g transform="translate(30,30)">
+            <!-- 外层 8 枚细长瓣（矢车菊特征性放射状） -->
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(0)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(45)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(90)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(135)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(180)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(225)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(270)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(315)"/>
+            <!-- 中心花芯（矢车菊标志性的深色圆心） -->
+            <circle cx="0" cy="-2" r="5"/>
+            <circle cx="0" cy="-2" r="2.5" fill="currentColor" opacity=".35"/>
+          </g>
+        </svg>
+        <div>
+          <div class="name" id="brand">岸灯鸢花</div>
+          <div class="en" id="brandEn">AN DENG YUAN HUA</div>
+        </div>
+      </div>
+      <div class="meta">SYSTEM · <b>BOOTING</b></div>
+      <!-- 顶栏中央四叶饰铆钉 -->
+      <svg class="stud" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" fill="var(--bg)" stroke="none"/>
+        <g transform="translate(12,12)" fill="currentColor" stroke="none">
+          <circle cx="0" cy="-4" r="2.6"/><circle cx="0" cy="4" r="2.6"/>
+          <circle cx="-4" cy="0" r="2.6"/><circle cx="4" cy="0" r="2.6"/>
+          <circle cx="0" cy="0" r="2"/>
+        </g>
+      </svg>
+    </header>
+
+    <!-- 主区 -->
+    <div class="main">
+      <!-- 哥特菱形/四角星满铺暗纹（diaper · 似教堂墙面花格） -->
+      <svg class="diaper" aria-hidden="true">
+        <defs>
+          <pattern id="diaperPat" width="84" height="84" patternUnits="userSpaceOnUse">
+            <path d="M42 4 L80 42 L42 80 L4 42 Z" fill="none" stroke="currentColor" stroke-width="0.8" opacity=".55"/>
+            <use href="#star4" transform="translate(42,42) scale(.85)" fill="currentColor" opacity=".5"/>
+            <use href="#star4" transform="translate(42,4) scale(.62)" fill="currentColor" opacity=".5"/>
+            <use href="#star4" transform="translate(80,42) scale(.62)" fill="currentColor" opacity=".5"/>
+            <use href="#star4" transform="translate(42,80) scale(.62)" fill="currentColor" opacity=".5"/>
+            <use href="#star4" transform="translate(4,42) scale(.62)" fill="currentColor" opacity=".5"/>
+          </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#diaperPat)"/>
+      </svg>
+      <!-- 尖拱门廊（portal · 整页框成一座小教堂） -->
+      <svg class="portal" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <path d="M6 99 L6 40 Q50 30 50 8 Q50 30 94 40 L94 99" opacity=".9"/>
+        <path d="M12 99 L12 43 Q50 35 50 15 Q50 35 88 43 L88 99" opacity=".55"/>
+        <line x1="6" y1="40" x2="94" y2="40" opacity=".4"/>
+        <path d="M50 8 L50 0 M46 4 L50 0 L54 4" opacity=".8"/>
+        <!-- 底部基座线脚（教堂地坪感） -->
+        <line x1="6" y1="93" x2="94" y2="93" opacity=".35"/>
+        <line x1="6" y1="97" x2="94" y2="97" opacity=".5"/>
+      </svg>
+      <!-- 门廊顶端冠饰：玫瑰窗 + 钟塔尖顶 + 双小尖塔 -->
+      <svg class="portal-crest" viewBox="0 0 200 170" aria-hidden="true">
+        <g transform="translate(100,78)"><g id="crestRoseG"></g></g>
+        <!-- 钟塔尖顶 spire -->
+        <path d="M100 42 L89 18 L100 6 L111 18 Z" opacity=".9"/>
+        <use href="#star4" transform="translate(100,6) scale(.42)" fill="currentColor" stroke="none" opacity=".7"/>
+        <path d="M100 6 L100 0 M96 3 L104 3" opacity=".8"/>
+        <!-- 左小尖塔 pinnacle -->
+        <path d="M46 132 L37 100 L46 90 L55 100 Z" opacity=".8"/>
+        <use href="#star4" transform="translate(46,90) scale(.32)" fill="currentColor" stroke="none" opacity=".6"/>
+        <path d="M46 90 L46 84 M43 87 L49 87" opacity=".7"/>
+        <!-- 右小尖塔 pinnacle -->
+        <path d="M154 132 L145 100 L154 90 L163 100 Z" opacity=".8"/>
+        <use href="#star4" transform="translate(154,90) scale(.32)" fill="currentColor" stroke="none" opacity=".6"/>
+        <path d="M154 90 L154 84 M151 87 L157 87" opacity=".7"/>
+        <!-- 冠饰基座线 -->
+        <line x1="20" y1="142" x2="180" y2="142" opacity=".5"/>
+      </svg>
+      <!-- 四角哥特花饰（尖角托架 + 菱形 fleuron） -->
+      <svg class="corner tl" viewBox="0 0 66 66" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8 58 L8 18 Q8 8 18 8 L58 8"/>
+        <path d="M18 18 L24 24 L18 30 L12 24 Z" fill="currentColor" stroke="none" opacity=".7"/>
+        <use href="#star4" transform="translate(8,8) scale(.32)" fill="currentColor" stroke="none"/>
+      </svg>
+      <svg class="corner tr" viewBox="0 0 66 66" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8 58 L8 18 Q8 8 18 8 L58 8"/>
+        <path d="M18 18 L24 24 L18 30 L12 24 Z" fill="currentColor" stroke="none" opacity=".7"/>
+        <use href="#star4" transform="translate(8,8) scale(.32)" fill="currentColor" stroke="none"/>
+      </svg>
+      <svg class="corner br" viewBox="0 0 66 66" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8 58 L8 18 Q8 8 18 8 L58 8"/>
+        <path d="M18 18 L24 24 L18 30 L12 24 Z" fill="currentColor" stroke="none" opacity=".7"/>
+        <use href="#star4" transform="translate(8,8) scale(.32)" fill="currentColor" stroke="none"/>
+      </svg>
+      <svg class="corner bl" viewBox="0 0 66 66" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8 58 L8 18 Q8 8 18 8 L58 8"/>
+        <path d="M18 18 L24 24 L18 30 L12 24 Z" fill="currentColor" stroke="none" opacity=".7"/>
+        <use href="#star4" transform="translate(8,8) scale(.32)" fill="currentColor" stroke="none"/>
+      </svg>
+      <!-- 两侧哥特窗（lancet window · 填补主区左右空白） -->
+      <svg class="side left" viewBox="0 -10 120 710" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+        <!-- 顶部小尖塔 pinnacle -->
+        <path d="M60 30 L52 12 L60 2 L68 12 Z" opacity=".75"/>
+        <circle cx="60" cy="2" r="2.4" fill="currentColor" stroke="none" opacity=".5"/>
+        <!-- 整窗外缘 lancet（尖拱） -->
+        <path d="M28 660 L28 175 Q28 62 60 32 Q92 62 92 175 L92 660"/>
+        <!-- 内缘双线棂 -->
+        <path d="M38 660 L38 180 Q38 82 60 56 Q82 82 82 180 L82 660" opacity=".5"/>
+        <!-- 3 竖棂 mullions（分成 3 窗格） -->
+        <line x1="46" y1="178" x2="46" y2="660" opacity=".5"/>
+        <line x1="60" y1="172" x2="60" y2="660" opacity=".5"/>
+        <line x1="74" y1="178" x2="74" y2="660" opacity=".5"/>
+        <!-- 横棂 transom -->
+        <line x1="28" y1="430" x2="92" y2="430" opacity=".5"/>
+        <!-- 拱肩三叶饰 trefoils -->
+        <g fill="currentColor" stroke="none" opacity=".4">
+          <circle cx="44" cy="120" r="4.5"/><circle cx="36" cy="128" r="4.5"/><circle cx="52" cy="128" r="4.5"/>
+          <circle cx="76" cy="120" r="4.5"/><circle cx="68" cy="128" r="4.5"/><circle cx="84" cy="128" r="4.5"/>
+        </g>
+        <!-- 基座 base + 中央菱形 -->
+        <line x1="20" y1="660" x2="100" y2="660" opacity=".7"/>
+        <path d="M16 660 L16 682 L104 682 L104 660" opacity=".6"/>
+        <use href="#diamond" transform="translate(60,671) scale(.9)" fill="currentColor" stroke="none" opacity=".5"/>
+      </svg>
+      <svg class="side right" viewBox="0 -10 120 710" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+        <!-- 顶部小尖塔 pinnacle -->
+        <path d="M60 30 L52 12 L60 2 L68 12 Z" opacity=".75"/>
+        <circle cx="60" cy="2" r="2.4" fill="currentColor" stroke="none" opacity=".5"/>
+        <!-- 整窗外缘 lancet（尖拱） -->
+        <path d="M28 660 L28 175 Q28 62 60 32 Q92 62 92 175 L92 660"/>
+        <!-- 内缘双线棂 -->
+        <path d="M38 660 L38 180 Q38 82 60 56 Q82 82 82 180 L82 660" opacity=".5"/>
+        <!-- 3 竖棂 mullions（分成 3 窗格） -->
+        <line x1="46" y1="178" x2="46" y2="660" opacity=".5"/>
+        <line x1="60" y1="172" x2="60" y2="660" opacity=".5"/>
+        <line x1="74" y1="178" x2="74" y2="660" opacity=".5"/>
+        <!-- 横棂 transom -->
+        <line x1="28" y1="430" x2="92" y2="430" opacity=".5"/>
+        <!-- 拱肩三叶饰 trefoils -->
+        <g fill="currentColor" stroke="none" opacity=".4">
+          <circle cx="44" cy="120" r="4.5"/><circle cx="36" cy="128" r="4.5"/><circle cx="52" cy="128" r="4.5"/>
+          <circle cx="76" cy="120" r="4.5"/><circle cx="68" cy="128" r="4.5"/><circle cx="84" cy="128" r="4.5"/>
+        </g>
+        <!-- 基座 base + 中央菱形 -->
+        <line x1="20" y1="660" x2="100" y2="660" opacity=".7"/>
+        <path d="M16 660 L16 682 L104 682 L104 660" opacity=".6"/>
+        <use href="#diamond" transform="translate(60,671) scale(.9)" fill="currentColor" stroke="none" opacity=".5"/>
+      </svg>
+      <!-- 左：线描花卉 loader -->
+      <div class="pane-loader">
+        <!-- 哥特尖拱窗棂（loose framing，暗色底） -->
+        <svg class="arch" viewBox="0 0 300 360" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M40 340 L40 150 Q40 52 150 30 Q260 52 260 150 L260 340"/>
+          <path d="M58 340 L58 152 Q58 70 150 50 Q242 70 242 152 L242 340" opacity=".7"/>
+          <g opacity=".65">
+            <circle cx="150" cy="84" r="11"/>
+            <circle cx="139" cy="103" r="11"/>
+            <circle cx="161" cy="103" r="11"/>
+          </g>
+          <circle cx="150" cy="96" r="4" fill="currentColor" stroke="none" opacity=".5"/>
+          <line x1="24" y1="340" x2="276" y2="340" opacity=".55"/>
+          <!-- 顶端尖顶饰 finial（哥特尖塔收头） -->
+          <g class="finial" opacity=".8">
+            <line x1="150" y1="30" x2="150" y2="8"/>
+            <path d="M150 3 L155 12 L145 12 Z" fill="currentColor" stroke="none" opacity=".7"/>
+            <circle cx="150" cy="13" r="3" fill="currentColor" stroke="none" opacity=".6"/>
+          </g>
+          <!-- 两侧卷叶饰 crockets（沿尖拱竖边的小三叶芽，JS 生成 · 5 组/侧） -->
+          <g id="crocketG" class="crocket" opacity=".75" fill="currentColor" stroke="none"></g>
+        </svg>
+        <!-- 哥特玫瑰窗（rose window · 中央莲花后的圆形花格，JS 生成） -->
+        <svg class="rose" viewBox="0 0 200 200" aria-hidden="true"><g id="roseG" transform="translate(100,100)"></g></svg>
+        <svg class="loader" viewBox="0 0 240 240">
+          <defs>
+            <filter id="glow" x="-200%" y="-200%" width="500%" height="500%">
+              <feGaussianBlur stdDeviation="2.2" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <g transform="translate(120,125)">
+            <!-- 莲花（正面俯视 · 阔瓣 rosette · 尖锐） -->
+            <!-- 最外层：宽大阔瓣，尖端收成利尖 -->
+            <g transform="translate(0,0)">
+              <path class="petal" style="--len:185; --d:0s"   d="M0,2 C-16,-9 -25,-34 -8,-66 C-2,-73 2,-73 8,-66 C25,-34 16,-9 0,2 Z" transform="rotate(-72)"/>
+              <path class="petal" style="--len:185; --d:.1s"  d="M0,2 C-16,-9 -25,-34 -8,-66 C-2,-73 2,-73 8,-66 C25,-34 16,-9 0,2 Z" transform="rotate(-36)"/>
+              <path class="petal" style="--len:185; --d:.2s"  d="M0,2 C-16,-9 -25,-34 -8,-66 C-2,-73 2,-73 8,-66 C25,-34 16,-9 0,2 Z" transform="rotate(0)"/>
+              <path class="petal" style="--len:185; --d:.3s"  d="M0,2 C-16,-9 -25,-34 -8,-66 C-2,-73 2,-73 8,-66 C25,-34 16,-9 0,2 Z" transform="rotate(36)"/>
+              <path class="petal" style="--len:185; --d:.4s"  d="M0,2 C-16,-9 -25,-34 -8,-66 C-2,-73 2,-73 8,-66 C25,-34 16,-9 0,2 Z" transform="rotate(72)"/>
+            </g>
+            <!-- 中层：稍窄、弧度更柔和但仍然宽阔 -->
+            <g transform="translate(0,0)">
+              <path class="petal" style="--len:150; --d:.5s"  d="M0,3 C-12,-7 -18,-23 -6,-52 C-1,-57 1,-57 6,-52 C18,-23 12,-7 0,3 Z" transform="rotate(-54)"/>
+              <path class="petal" style="--len:150; --d:.6s"  d="M0,3 C-12,-7 -18,-23 -6,-52 C-1,-57 1,-57 6,-52 C18,-23 12,-7 0,3 Z" transform="rotate(-18)"/>
+              <path class="petal" style="--len:150; --d:.7s"  d="M0,3 C-12,-7 -18,-23 -6,-52 C-1,-57 1,-57 6,-52 C18,-23 12,-7 0,3 Z" transform="rotate(18)"/>
+              <path class="petal" style="--len:150; --d:.8s"  d="M0,3 C-12,-7 -18,-23 -6,-52 C-1,-57 1,-57 6,-52 C18,-23 12,-7 0,3 Z" transform="rotate(54)"/>
+            </g>
+            <!-- 内层心瓣：短而收拢成莲蓬芯 -->
+            <g transform="translate(0,0)">
+              <path class="petal" style="--len:100; --d:.9s"  d="M0,4 C-9,-5 -13,-17 -5,-40 C-1,-44 1,-44 5,-40 C13,-17 9,-5 0,4 Z" transform="rotate(-30)"/>
+              <path class="petal" style="--len:100; --d:1.0s" d="M0,4 C-9,-5 -13,-17 -5,-40 C-1,-44 1,-44 5,-40 C13,-17 9,-5 0,4 Z" transform="rotate(30)"/>
+            </g>
+            <!-- 流星光点由脚本动态生成（白色炽核 + 紫色光晕 + 彗星拖尾） -->
+          </g>
+        </svg>
+      </div>
+
+      <!-- 右：文案 + 进度 -->
+      <div class="pane-text">
+        <div class="eyebrow">SYSTEM · BOOTING</div>
+        <h1 class="heading" id="heading">正在为您准备</h1>
+        <div class="fleur" aria-hidden="true">
+          <svg viewBox="0 0 160 16" fill="none" stroke="currentColor" stroke-width="1">
+            <!-- 左四叶饰 -->
+            <g transform="translate(16,8)" fill="currentColor" stroke="none" opacity=".8">
+              <circle cx="0" cy="-4.5" r="3"/><circle cx="0" cy="4.5" r="3"/>
+              <circle cx="-4.5" cy="0" r="3"/><circle cx="4.5" cy="0" r="3"/>
+              <circle cx="0" cy="0" r="2.4"/>
+            </g>
+            <line x1="36" y1="8" x2="72" y2="8"/>
+            <path d="M80 2 L87 8 L80 14 L73 8 Z" fill="currentColor" stroke="none"/>
+            <line x1="88" y1="8" x2="124" y2="8"/>
+            <!-- 右四叶饰 -->
+            <g transform="translate(144,8)" fill="currentColor" stroke="none" opacity=".8">
+              <circle cx="0" cy="-4.5" r="3"/><circle cx="0" cy="4.5" r="3"/>
+              <circle cx="-4.5" cy="0" r="3"/><circle cx="4.5" cy="0" r="3"/>
+              <circle cx="0" cy="0" r="2.4"/>
+            </g>
+          </svg>
+        </div>
+        <div class="status">
+          <span class="dot"></span>
+          <span id="statusText">建立连接…</span>
+        </div>
+        <div class="progress">
+          <div class="track"><div class="fill" id="fill"></div></div>
+          <div class="row">
+            <span id="phase">PHASE 01 / 04</span>
+            <span class="pct" id="pct">0%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底栏 -->
+    <footer class="footer">
+      <div>BUILD <b id="build">a1f3c9e</b> · <span id="brandFoot">岸灯鸢花</span></div>
+      <div class="right">
+        <span>ENV <b>production</b></span>
+        <span>REGION <b>ap-shanghai</b></span>
+        <span id="clock">--:--:--</span>
+      </div>
+      <!-- 底栏中央四叶饰铆钉 -->
+      <svg class="stud" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" fill="var(--bg)" stroke="none"/>
+        <g transform="translate(12,12)" fill="currentColor" stroke="none">
+          <circle cx="0" cy="-4" r="2.6"/><circle cx="0" cy="4" r="2.6"/>
+          <circle cx="-4" cy="0" r="2.6"/><circle cx="4" cy="0" r="2.6"/>
+          <circle cx="0" cy="0" r="2"/>
+        </g>
+      </svg>
+    </footer>
+
+  </div>
+
+  <script>
+    // —— 个性化配置 ——
+    const config = {
+      brand: "岸灯鸢花",
+      brandEn: "AN DENG YUAN HUA",
+      heading: "正在为您准备",
+      visitorName: ""   // 填访客名（如 "Rosary"），留空不显示
+    };
+    document.getElementById("brand").textContent = config.brand;
+    document.getElementById("brandEn").textContent = config.brandEn;
+    document.getElementById("heading").textContent = config.heading;
+    document.getElementById("brandFoot").textContent = config.brand;
+
+    // 随机星点闪烁：在整页随机散布若干星点，各自随机大小 / 节奏 / 延迟地明灭
+    (function () {
+      const box = document.getElementById("stars");
+      if (!box) return;
+      const N = 52;                                  // 更少
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < N; i++) {
+        const size = (Math.random() * 1.2 + 0.6).toFixed(2);   // 0.6~1.8px 更小
+        const dur  = (Math.random() * 4 + 2.5).toFixed(2);      // 2.5~6.5s 闪烁周期
+        const delay = (Math.random() * -dur).toFixed(2);        // 负延迟 → 起始即错相
+        const gold = Math.random() < 0.12;                      // 少量暖金星
+        const drift = Math.random() < 0.4;                      // ~40% 带缓慢漂移（萤火感）
+
+        let node;
+        if (drift) {
+          node = document.createElement("div");
+          node.className = "star-wrap";
+          node.style.left = (Math.random() * 100).toFixed(2) + "vw";
+          node.style.top  = (Math.random() * 100).toFixed(2) + "vh";
+          const ddur = (Math.random() * 8 + 10).toFixed(2);     // 漂移更缓 10~18s
+          const ddelay = (Math.random() * -ddur).toFixed(2);
+          node.style.animationDuration = ddur + "s";
+          node.style.animationDelay = ddelay + "s";
+
+          const s = document.createElement("div");
+          s.className = "star";
+          s.style.width = size + "px";
+          s.style.height = size + "px";
+          s.style.animationDuration = dur + "s";
+          s.style.animationDelay = delay + "s";
+          if (gold) s.style.boxShadow = "0 0 8px 1.5px rgba(196,170,140,.6)";
+          node.appendChild(s);
+        } else {
+          node = document.createElement("div");
+          node.className = "star";
+          node.style.left = (Math.random() * 100).toFixed(2) + "vw";
+          node.style.top  = (Math.random() * 100).toFixed(2) + "vh";
+          node.style.width = size + "px";
+          node.style.height = size + "px";
+          node.style.animationDuration = dur + "s";
+          node.style.animationDelay = delay + "s";
+          if (gold) node.style.boxShadow = "0 0 8px 1.5px rgba(196,170,140,.6)";
+        }
+        frag.appendChild(node);
+      }
+      box.appendChild(frag);
+    })();
+
+    // 进度模拟
+    const phases = [
+      { max: 25,  text: "建立连接…",     phase: "PHASE 01 / 04" },
+      { max: 50,  text: "加载模块…",     phase: "PHASE 02 / 04" },
+      { max: 75,  text: "校验资源…",     phase: "PHASE 03 / 04" },
+      { max: 100, text: "渲染界面…",     phase: "PHASE 04 / 04" }
+    ];
+    const fill = document.getElementById("fill");
+    const pct  = document.getElementById("pct");
+    const st   = document.getElementById("statusText");
+    const ph   = document.getElementById("phase");
+    let p = 0;
+    setInterval(() => {
+      p += Math.random() * 1.4 + 0.5;
+      if (p >= 100) p = 0;
+      const v = Math.floor(p);
+      fill.style.width = v + "%";
+      pct.textContent = v + "%";
+      const cur = phases.find(x => v < x.max) || phases[phases.length - 1];
+      st.textContent = cur.text;
+      ph.textContent = cur.phase;
+    }, 130);
+
+    // 时钟
+    const clock = document.getElementById("clock");
+    setInterval(() => {
+      clock.textContent = new Date().toTimeString().slice(0, 8);
+    }, 1000);
+
+    // 极小流光光点：从花心单向射向瓣尖（heart→tip，不往返）；
+    // 依次掠过 ORDER 中的花瓣，每瓣尖端短暂停顿并淡出、下一瓣起笔再淡入；到达 TOTAL_MS 时线条与光点一起停止 / 切呼吸。
+    // 光点极细小、带极轻流光拖尾，被掠过的线状态与其余线完全一致。
+    // —— 可调参数集中放在下方 CFG，微调只改这一块即可 ——
+    (function () {
+      const loader = document.querySelector(".loader");
+      const g = document.querySelector(".loader > g");
+      if (!loader || !g) return;
+      const petals = Array.from(document.querySelectorAll(".loader .petal"));
+      const N = petals.length;
+      if (!N) return;
+
+      // ===== 可调参数（像之前那样微调，只改这一块）=====
+      const CFG = {
+        PER: 3200,            // 单瓣单向时长(ms)：光点从花心掠到瓣尖的速度
+        TOTAL_MS: 6400,       // 合计运行(ms)：到达后线条与光点一起停止 / 切呼吸
+        ORDER: [0, 1, 2],     // 掠过的花瓣索引顺序（外瓣从左到右）
+        TRAIL: 12,            // 拖尾小圆数量（流光长度）
+        SPARK_R: 1.6,         // 光点半径
+        TRAIL_R: 1.4,         // 拖尾最大半径（逐颗递减到 ~0）
+        TRAIL_OPACITY: 0.5,   // 拖尾最大透明度
+        HOLD: 0.22,           // 每瓣尖端停顿占比：末段停在瓣尖并淡出、下一瓣起笔再淡入
+        HIDE_ON_STOP: false,  // true=停止时隐藏光点；false=停止时光点暂停、定格在当前位置
+      };
+      const { PER, TOTAL_MS, ORDER, TRAIL } = CFG;
+      const svgNS = "http://www.w3.org/2000/svg";
+
+      const reduce = window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (reduce) {                         // 尊重「减少动态效果」偏好（无光点，直接呼吸）
+        loader.classList.add("breathing");
+        return;
+      }
+
+      // 缓存每瓣：路径总长、自身旋转角(弧度)
+      const lens = petals.map(p => p.getTotalLength());
+      const angles = petals.map(p => {
+        const m = /rotate\(([-\d.]+)\)/.exec(p.getAttribute("transform") || "");
+        return m ? parseFloat(m[1]) * Math.PI / 180 : 0;
+      });
+
+      // 极小流光光点
+      const head = document.createElementNS(svgNS, "circle");
+      head.setAttribute("class", "spark");
+      head.setAttribute("r", CFG.SPARK_R);
+      g.appendChild(head);
+
+      const trails = [];
+      for (let i = 0; i < TRAIL; i++) {
+        const c = document.createElementNS(svgNS, "circle");
+        c.setAttribute("class", "spark-trail");
+        c.setAttribute("r", (CFG.TRAIL_R * (1 - i / TRAIL)).toFixed(2));
+        g.appendChild(c);
+        trails.push(c);
+      }
+
+      const hist = [];
+      let start = null, lastTrip = -1;
+
+      function frame(ts) {
+        if (start === null) start = ts;
+        const elapsed = ts - start;
+        const trip = Math.floor(elapsed / PER);
+        if (trip !== lastTrip) { hist.length = 0; lastTrip = trip; }  // 换瓣清空拖尾，避免跨瓣拉丝
+
+        if (elapsed >= TOTAL_MS) {          // 到达合计时长 → 线条停止(呼吸) + 光点也暂停
+          loader.classList.remove("drawing");
+          loader.classList.add("breathing");
+          if (CFG.HIDE_ON_STOP) head.style.opacity = 0;   // 隐藏；否则定格在当前位置(暂停)
+          trails.forEach(t => (t.style.opacity = 0));     // 拖尾淡出
+          return;                                         // 停止 rAF → 光点冻结
+        }
+
+        const p = (elapsed - trip * PER) / PER;        // 0..1 本瓣进度（0=花心，1=瓣尖）
+        const curIdx = ORDER[trip % ORDER.length];
+        const L = lens[curIdx];
+        // 单向：前段(1-HOLD)花心直射瓣尖；末段(HOLD)停在尖端并淡出，下一瓣起笔再淡入
+        const travelEnd = 1 - CFG.HOLD;
+        const drawnFrac = Math.min(1, p / travelEnd);  // 0→1 单向，不往返
+        const len = L * drawnFrac;
+        const pt = petals[curIdx].getPointAtLength(len);
+        const a = angles[curIdx];                      // 局部坐标 → 叠加该瓣旋转 → g 坐标系
+        const x = pt.x * Math.cos(a) - pt.y * Math.sin(a);
+        const y = pt.x * Math.sin(a) + pt.y * Math.cos(a);
+
+        // 起笔淡入 + 尖端淡出（瓣尖微微停顿后再起笔下一瓣）
+        let op = 1;
+        if (p < CFG.HOLD)          op = p / CFG.HOLD;          // 起笔处淡入
+        else if (p > 1 - CFG.HOLD) op = (1 - p) / CFG.HOLD;    // 尖端淡出
+        head.style.opacity = op.toFixed(3);
+
+        head.setAttribute("cx", x.toFixed(2));
+        head.setAttribute("cy", y.toFixed(2));
+
+        hist.unshift({ x, y });
+        if (hist.length > TRAIL + 1) hist.pop();
+        for (let i = 0; i < TRAIL; i++) {
+          const h = hist[i + 1] || hist[hist.length - 1] || { x, y };
+          trails[i].setAttribute("cx", h.x.toFixed(2));
+          trails[i].setAttribute("cy", h.y.toFixed(2));
+          trails[i].style.opacity = (CFG.TRAIL_OPACITY * (1 - i / TRAIL) * op).toFixed(3);
+        }
+
+        loader.classList.add("drawing");
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    })();
+
+    // 哥特玫瑰窗（rose window）生成器：中央花格底纹 + 门廊顶端冠饰共用
+    function buildRose(g, R) {
+      if (!g) return;
+      const NS = "http://www.w3.org/2000/svg";
+      const add = (t, a) => {
+        const e = document.createElementNS(NS, t);
+        for (const k in a) e.setAttribute(k, a[k]);
+        g.appendChild(e);
+      };
+      add("circle", { r: R.toFixed(1), fill: "none" });
+      add("circle", { r: (R * 0.82).toFixed(1), fill: "none" });
+      add("circle", { r: (R * 0.26).toFixed(1), fill: "none" });
+      add("circle", { r: (R * 0.13).toFixed(1), fill: "currentColor", opacity: ".35" });
+      const K = 12;
+      for (let i = 0; i < K; i++) {
+        const a = i * 2 * Math.PI / K, ca = Math.cos(a), sa = Math.sin(a);
+        add("line", { x1: (R * 0.26 * ca).toFixed(2), y1: (R * 0.26 * sa).toFixed(2), x2: (R * 0.82 * ca).toFixed(2), y2: (R * 0.82 * sa).toFixed(2), fill: "none" });
+        add("circle", { cx: (R * 0.54 * ca).toFixed(2), cy: (R * 0.54 * sa).toFixed(2), r: (R * 0.14).toFixed(1), fill: "none" });
+      }
+    }
+    buildRose(document.getElementById("roseG"), 92);       // 中央莲花后的大玫瑰窗
+    buildRose(document.getElementById("crestRoseG"), 40);  // 门廊顶端冠饰的小玫瑰窗
+
+    // 尖拱两侧卷叶饰（crockets）：沿竖边每侧 5 组三叶芽（比之前更密）
+    (function () {
+      const g = document.getElementById("crocketG");
+      if (!g) return;
+      const NS = "http://www.w3.org/2000/svg";
+      const add = (x, y, dir) => {
+        [[dir * 6, 0], [0, -5], [0, 5]].forEach(([dx, dy]) => {
+          const c = document.createElementNS(NS, "circle");
+          c.setAttribute("cx", x + dx); c.setAttribute("cy", y + dy); c.setAttribute("r", 4);
+          g.appendChild(c);
+        });
+      };
+      [318, 278, 238, 198, 158].forEach(y => { add(40, y, -1); add(260, y, 1); });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "id": "reading",
+  "name": "阅读",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "BookOpen",
+  "hostApiVersion": 1
+}

@@ -1,0 +1,10 @@
+{
+  "id": "markitdown",
+  "name": "格式转换",
+  "version": "1.0.0",
+  "kind": "service",
+  "visible": false,
+  "entry": "index.js",
+  "iconName": "FileText",
+  "hostApiVersion": 1
+}
