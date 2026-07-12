@@ -1630,6 +1630,7 @@ pub fn copy_file_to_dropzone(
     app_data: &std::path::Path,
     source_path: &str,
     original_name: Option<&str>,
+    content: Option<Vec<u8>>,
 ) -> Result<std::path::PathBuf, String> {
     use std::path::Path as P;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1654,12 +1655,17 @@ pub fn copy_file_to_dropzone(
     std::fs::create_dir_all(&dropzone_dir).map_err(|e| format!("创建目录失败: {}", e))?;
     let dest = dropzone_dir.join(format!("{}_{}", timestamp, file_name));
     std::fs::copy(source_path, &dest).map_err(|e| format!("复制文件失败: {}", e))?;
+    // 优先使用调用方已持有的内存字节（如刚编码好的 PNG），避免「写盘后又整文件读回」的冗余 I/O
+    let snapshot_bytes: Vec<u8> = match content {
+        Some(bytes) => bytes,
+        None => std::fs::read(&dest).unwrap_or_default(),
+    };
     transfer_station::archive_snapshot(
         app_data,
         "file",
         &format!("{}", timestamp),
         &file_name,
-        &std::fs::read(&dest).unwrap_or_default(),
+        &snapshot_bytes,
         &extension,
     );
     Ok(dest)
@@ -1680,7 +1686,7 @@ pub async fn convert_to_markdown(app: tauri::AppHandle, file_path: String) -> Re
     .await
     .map_err(|e| format!("解析线程异常: {}", e))??;
     // 原始文档存入图标栏中转站（轻量，主线程即可）
-    let _ = copy_file_to_dropzone(&app_data, &file_path, None);
+    let _ = copy_file_to_dropzone(&app_data, &file_path, None, None);
     Ok(parsed)
 }
 
@@ -1735,7 +1741,7 @@ pub async fn convert_bytes_to_markdown(
         let tmp_str = tmp.to_string_lossy().to_string();
         let result = document_parser::convert_document_to_markdown(&tmp_str, &ad);
         // 原始文档存入图标栏中转站（使用原始文件名）
-        let _ = copy_file_to_dropzone(&ad, &tmp_str, oname.as_deref());
+        let _ = copy_file_to_dropzone(&ad, &tmp_str, oname.as_deref(), None);
         let _ = std::fs::remove_file(&tmp);
         result
     })
@@ -1754,7 +1760,7 @@ pub fn add_image_to_dropzone(
     original_name: Option<String>,
 ) -> Result<String, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let dest = copy_file_to_dropzone(&app_data, &source_path, original_name.as_deref())?;
+    let dest = copy_file_to_dropzone(&app_data, &source_path, original_name.as_deref(), None)?;
     Ok(format!(
         "localimg://{}",
         crate::services::document_parser::js_encode_uri_component(&dest.to_string_lossy())
@@ -1782,7 +1788,7 @@ pub fn add_image_bytes_to_dropzone(
     std::fs::write(&tmp, &decoded).map_err(|e| format!("写临时文件失败: {}", e))?;
     let tmp_str = tmp.to_string_lossy().to_string();
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let dest = copy_file_to_dropzone(&app_data, &tmp_str, Some(&original_name))?;
+    let dest = copy_file_to_dropzone(&app_data, &tmp_str, Some(&original_name), None)?;
     let _ = std::fs::remove_file(&tmp);
     Ok(format!(
         "localimg://{}",
@@ -1812,7 +1818,7 @@ pub fn add_bytes_to_dropzone(
     std::fs::write(&tmp, &decoded).map_err(|e| format!("写临时文件失败: {}", e))?;
     let tmp_str = tmp.to_string_lossy().to_string();
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let dest = copy_file_to_dropzone(&app_data, &tmp_str, Some(&original_name))?;
+    let dest = copy_file_to_dropzone(&app_data, &tmp_str, Some(&original_name), None)?;
     let _ = std::fs::remove_file(&tmp);
 
     let file_name = dest
