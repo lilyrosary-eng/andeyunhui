@@ -390,7 +390,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       onClick: togglePlay,
     },
       React.createElement('div', {
-        className: 'w-16 h-16 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center cursor-pointer hover:bg-white/30 transition-colors',
+        className: 'w-16 h-16 rounded-full bg-white/50 backdrop-blur-sm flex items-center justify-center cursor-pointer hover:bg-white/70 transition-colors text-white shadow-lg',
         children: React.createElement(PlayIcon),
       }),
     ),
@@ -401,7 +401,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
         showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
       }`,
     },
-      React.createElement('div', { className: 'px-4 pb-3 pt-8' },
+      React.createElement('div', { className: 'px-4 pb-3 pt-8 text-white/90' },
         // 第一行：进度条（跨满宽度）
         React.createElement('div', { className: 'flex items-center gap-2.5 mb-3' },
           React.createElement('span', { className: 'text-[11px] text-white/60 w-9 text-right tabular-nums flex-shrink-0' }, formatTime(currentTime)),

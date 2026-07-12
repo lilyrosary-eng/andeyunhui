@@ -315,7 +315,7 @@ function ReadingModule() {
             bookCount={books.length}
           />
         ) : currentBook ? (
-          <ReadingView book={currentBook} onBack={handleBackToList} externalChapterIndex={selectedChapterIndex} />
+          <ReadingView book={currentBook} onBack={handleBackToList} externalChapterIndex={selectedChapterIndex} onChapterChange={setSelectedChapterIndex} />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">
             <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="opacity-40">
