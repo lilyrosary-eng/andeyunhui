@@ -463,6 +463,12 @@ fn main() {
                     if let Some(tw) = app.get_webview_window("tray-menu") {
                         let _ = tw.destroy();
                     }
+                    // 同时关闭所有浮窗笔记窗口（关闭主程序时一并关掉，避免进程残留 / 浮窗孤立）
+                    for (label, w) in app.webview_windows() {
+                        if label.starts_with("floating-note-") {
+                            let _ = w.destroy();
+                        }
+                    }
                 }
             }
         })
@@ -609,6 +615,7 @@ fn main() {
             crop_native_rgba,
             save_screenshot,
             save_cropped,
+            save_annotated,
             capture_window_full,
             get_screenshot_shortcut,
             set_screenshot_shortcut,

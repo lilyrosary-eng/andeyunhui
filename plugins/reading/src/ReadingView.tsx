@@ -58,6 +58,8 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   const [verticalScrollProgress, setVerticalScrollProgress] = useState(0);
   // 3章滑动窗口中心章节索引（仅渲染 windowCenter±1 三章，避免大书全拼接卡死）
   const [windowCenter, setWindowCenter] = useState(0);
+  // 竖版当前阅读章节（独立于 windowCenter，随滚动位置实时更新，不影响窗口渲染）
+  const [displayedChapter, setDisplayedChapter] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -75,6 +77,8 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   const windowCenterRef = useRef(0);
   useEffect(() => { chapterIndexRef.current = chapterIndex; }, [chapterIndex]);
   useEffect(() => { windowCenterRef.current = windowCenter; }, [windowCenter]);
+  const displayedChapterRef = useRef(0);
+  useEffect(() => { displayedChapterRef.current = displayedChapter; }, [displayedChapter]);
 
   const isBookMode = layoutMode === 'book';
   const pagesPerStep = isBookMode ? 2 : 1;
@@ -100,8 +104,9 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   const currentChapter = book.chapters[chapterIndex] || book.chapters[0] || { title: '—', content: '' };
 
   // ============ 测量页数和章节边界 ============
-  // offsetLeft 不受 CSS transform 影响，可直接在带 transform 的容器上读取
-  // 注意：offsetLeft 包含容器 padding，需减去 PAD 与 scrollW 对齐
+  // 核心规则：当章节标题出现在页面第一行（栏顶部）时，该页定为新章节起始页。
+  // 标题不在第一行 → 该页属于上一章，新章节从下一页开始。
+  // 不使用 break-before: column（避免短章节产生空白页），内容自然流动。
   const measure = useCallback(() => {
     const vp = viewportRef.current;
     const c = contentRef.current;
@@ -114,29 +119,46 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
 
     const step = (pw + colGap) * pagesPerStep;
     const scrollW = Math.max(0, c.scrollWidth - 2 * PAD);
-    // 容差：5% of step，消除 CSS multicol 子像素误差 + break-before:column 产生的空白尾页
     const TOLERANCE = Math.max(2, step * 0.05);
     let pages = Math.max(1, Math.ceil((scrollW - TOLERANCE) / step));
-    // 二次校验：最后一页内容极少则视为空白尾页
-    if (pages > 1 && (pages - 1) * step >= scrollW - TOLERANCE) pages -= 1;
     setPageCount(pages);
 
-    // 测量章节边界：通过 offsetLeft 获取每个 chapter-marker 的水平位置
+    // ===== 章节边界检测：两遍扫描 =====
     const markers = c.querySelectorAll('.chapter-marker');
+
+    // 第一遍：计算每个章节的原始起始页
+    const rawStartPages: number[] = [];
+    for (let i = 0; i < markers.length; i++) {
+      const m = markers[i] as HTMLElement;
+      const startOffset = m.offsetLeft - PAD;
+      const rawPage = Math.max(0, Math.floor((startOffset + TOLERANCE) / step));
+
+      // 检测标题是否在页面第一行（栏顶部）
+      // 方法1：offsetTop — multicol 中标题在栏顶部时 offsetTop ≈ padding-top (24px)
+      // 方法2：offsetWithinPage — 章节标记在栏起始位置时，offsetWithinPage ≈ 0
+      const title = m.querySelector('.chapter-title-display') as HTMLElement | null;
+      const offsetWithinPage = startOffset - rawPage * step;
+      const titleAtTop = title
+        ? (title.offsetTop <= 32 || offsetWithinPage <= TOLERANCE)
+        : true;
+
+      if (titleAtTop || rawPage === 0) {
+        rawStartPages.push(rawPage);
+      } else {
+        // 标题不在第一行 → 该页属于上一章，新章节从下一页开始
+        rawStartPages.push(Math.min(rawPage + 1, pages - 1));
+      }
+    }
+
+    // 第二遍：计算最终边界（endPage = 下一章 startPage - 1）
     const boundaries: ChapterBoundary[] = [];
     for (let i = 0; i < markers.length; i++) {
       const m = markers[i] as HTMLElement;
-      // offsetLeft 包含 padding-left，减去 PAD 与 scrollW 对齐
-      const startOffset = m.offsetLeft - PAD;
-      let endOffset: number;
-      if (i < markers.length - 1) {
-        endOffset = (markers[i + 1] as HTMLElement).offsetLeft - PAD;
-      } else {
-        endOffset = scrollW;
-      }
-      const startPage = Math.max(0, Math.floor((startOffset + TOLERANCE) / step));
-      const endPage = Math.max(startPage, Math.ceil((endOffset - TOLERANCE) / step) - 1);
       const idx = parseInt(m.getAttribute('data-chapter-index') || '0', 10);
+      const startPage = rawStartPages[i];
+      const endPage = i < markers.length - 1
+        ? Math.max(startPage, rawStartPages[i + 1] - 1)
+        : pages - 1;
       boundaries.push({ index: idx, startPage, endPage });
     }
     boundariesRef.current = boundaries;
@@ -148,17 +170,14 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       const b = boundaries.find(x => x.index === targetIdx);
       if (b) {
         setNoTransition(true);
-        // pageInChapter=-1 表示跳到该章最后一页
         const page = pageInChapter === -1 ? b.endPage : Math.min(b.startPage + pageInChapter, b.endPage);
         setAbsolutePage(page);
-        // 同步更新 chapterIndex，避免渲染时用旧 chapterIndex 导致页码显示错误（1/1 或 -13/11）
         setChapterIndex(targetIdx);
         requestAnimationFrame(() => setNoTransition(false));
         return;
       }
     }
 
-    // 限制当前页在有效范围内
     setAbsolutePage((p) => Math.min(p, pages - 1));
   }, [isBookMode, pagesPerStep]);
 
@@ -171,14 +190,15 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     measure();
   }, [combinedHtml, isPaginatedMode, measure]);
 
-  // 布局模式切换
-  useEffect(() => {
+  // 布局模式切换 — 用 useLayoutEffect 在绘制前同步状态，避免切换闪烁
+  useLayoutEffect(() => {
     if (isPaginatedMode) {
       measure();
     } else {
-      // 切换到竖版时同步 windowCenter 到当前 chapterIndex，
+      // 切换到竖版时同步 windowCenter 和 displayedChapter 到当前 chapterIndex，
       // 避免用户在横板读到第N章切竖版后内容跳回第1章导致闪烁
       setWindowCenter(chapterIndexRef.current);
+      setDisplayedChapter(chapterIndexRef.current);
     }
   }, [layoutMode, measure, isPaginatedMode]);
 
@@ -203,7 +223,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   }, [absolutePage, isPaginatedMode, chapterIndex]);
 
   // 通知父组件章节变化
-  const reportedChapter = isPaginatedMode ? chapterIndex : windowCenter;
+  const reportedChapter = isPaginatedMode ? chapterIndex : displayedChapter;
   useEffect(() => {
     onChapterChange?.(reportedChapter);
   }, [reportedChapter, onChapterChange]);
@@ -238,9 +258,10 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       }
     } else {
       // 竖版：滑动窗口到目标章节，跳到该章顶部
-      if (externalChapterIndex !== windowCenterRef.current) {
+      if (externalChapterIndex !== displayedChapterRef.current) {
         verticalJumpRef.current = { chapterIndex: externalChapterIndex, position: 'top' };
         setWindowCenter(externalChapterIndex);
+        setDisplayedChapter(externalChapterIndex);
       }
     }
   }, [externalChapterIndex, isPaginatedMode, book.chapters.length]);
@@ -251,6 +272,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     setChapterIndex(0);
     setVerticalScrollProgress(0);
     setWindowCenter(0);
+    setDisplayedChapter(0);
     pendingJumpRef.current = null;
     verticalJumpRef.current = null;
     if (verticalRef.current) verticalRef.current.scrollTop = 0;
@@ -284,11 +306,21 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
 
   const goPrevChapter = useCallback(() => {
     if (!isPaginatedMode) {
-      // 竖版：滑动窗口到上一章，跳到该章顶部
-      if (windowStart > 0) {
-        verticalJumpRef.current = { chapterIndex: windowStart - 1, position: 'top' };
-        setWindowCenter(windowStart - 1);
+      // 竖版：上一章（基于实际阅读章节 displayedChapter，而非窗口中心）
+      const prevIdx = displayedChapter - 1;
+      if (prevIdx < 0) return;
+      if (prevIdx >= windowStart) {
+        // 上一章在当前窗口内 → 平滑滚动到该章顶部
+        const marker = verticalRef.current?.querySelector(`[data-chapter-index="${prevIdx}"]`) as HTMLElement | null;
+        if (marker && verticalRef.current) {
+          verticalRef.current.scrollTo({ top: marker.offsetTop, behavior: 'smooth' });
+          return;
+        }
       }
+      // 不在窗口内 → 滑动窗口
+      verticalJumpRef.current = { chapterIndex: prevIdx, position: 'top' };
+      setWindowCenter(prevIdx);
+      setDisplayedChapter(prevIdx);
       return;
     }
     const prevIdx = chapterIndex - 1;
@@ -307,15 +339,25 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     pendingJumpRef.current = { chapterIndex: prevIdx, pageInChapter: -1 };
     setNoTransition(true);
     setWindowCenter(prevIdx);
-  }, [isPaginatedMode, chapterIndex, windowStart]);
+  }, [isPaginatedMode, chapterIndex, displayedChapter, windowStart]);
 
   const goNextChapter = useCallback(() => {
     if (!isPaginatedMode) {
-      // 竖版：滑动窗口到下一章，跳到该章顶部
-      if (windowEnd < book.chapters.length) {
-        verticalJumpRef.current = { chapterIndex: windowEnd, position: 'top' };
-        setWindowCenter(windowEnd);
+      // 竖版：下一章（基于实际阅读章节 displayedChapter，而非窗口中心）
+      const nextIdx = displayedChapter + 1;
+      if (nextIdx >= book.chapters.length) return;
+      if (nextIdx < windowEnd) {
+        // 下一章在当前窗口内 → 平滑滚动到该章顶部
+        const marker = verticalRef.current?.querySelector(`[data-chapter-index="${nextIdx}"]`) as HTMLElement | null;
+        if (marker && verticalRef.current) {
+          verticalRef.current.scrollTo({ top: marker.offsetTop, behavior: 'smooth' });
+          return;
+        }
       }
+      // 不在窗口内 → 滑动窗口
+      verticalJumpRef.current = { chapterIndex: nextIdx, position: 'top' };
+      setWindowCenter(nextIdx);
+      setDisplayedChapter(nextIdx);
       return;
     }
     const nextIdx = chapterIndex + 1;
@@ -334,7 +376,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     pendingJumpRef.current = { chapterIndex: nextIdx, pageInChapter: 0 };
     setNoTransition(true);
     setWindowCenter(nextIdx);
-  }, [isPaginatedMode, chapterIndex, book.chapters.length, windowEnd]);
+  }, [isPaginatedMode, chapterIndex, displayedChapter, book.chapters.length, windowEnd]);
 
   // ============ 键盘 ============
   useEffect(() => {
@@ -385,19 +427,51 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
         } else {
           verticalRef.current.scrollTop = marker.offsetTop + marker.offsetHeight - verticalRef.current.clientHeight;
         }
+        // 同步 displayedChapter（窗口滑动后立即更新，不等 scroll 事件）
+        setDisplayedChapter(chapterIndex);
       }
     }
   }, [combinedHtml, isPaginatedMode]);
 
   // ============ 竖版滚动 ============
+  // 通过 chapter-marker 的 offsetTop 检测当前阅读章节，计算章节内进度（非整个窗口的进度）
   const onVerticalScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
-    // 计算当前滚动进度（0-100）
-    const scrollable = el.scrollHeight - el.clientHeight;
-    const progress = scrollable > 0 ? Math.round((el.scrollTop / scrollable) * 100) : 0;
+    const markers = el.querySelectorAll('[data-chapter-index]');
+    if (markers.length === 0) return;
+
+    // 检测当前章节：找到最后一个 offsetTop <= 阅读中线（scrollTop + clientHeight/2）的标记
+    const centerLine = el.scrollTop + el.clientHeight / 2;
+    let currentIdx = parseInt(markers[0].getAttribute('data-chapter-index') || '0', 10);
+    let currentMarker = markers[0] as HTMLElement;
+    let nextMarkerTop: number | null = null;
+    for (let i = 0; i < markers.length; i++) {
+      const m = markers[i] as HTMLElement;
+      if (m.offsetTop <= centerLine) {
+        currentIdx = parseInt(m.getAttribute('data-chapter-index') || '0', 10);
+        currentMarker = m;
+        nextMarkerTop = (i < markers.length - 1)
+          ? (markers[i + 1] as HTMLElement).offsetTop
+          : null;
+      } else {
+        break;
+      }
+    }
+
+    // 计算章节内进度（0-100）：基于当前章在视口中的可滚动范围
+    const chapterStart = currentMarker.offsetTop;
+    const chapterEnd = nextMarkerTop ?? el.scrollHeight;
+    const chapterScrollable = chapterEnd - chapterStart - el.clientHeight;
+    const progress = chapterScrollable > 0
+      ? Math.round(Math.max(0, Math.min(100, ((el.scrollTop - chapterStart) / chapterScrollable) * 100)))
+      : 100;
+
+    setDisplayedChapter(currentIdx);
     setVerticalScrollProgress(progress);
+
+    // 滑动窗口（仅在顶/底边界时触发，不干扰中间阅读）
+    const scrollable = el.scrollHeight - el.clientHeight;
     if (scrollable <= 0) return;
-    // 到底 → 滑动窗口向下（保持当前最后一章在视口底部）
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
     if (atBottom && windowEnd < book.chapters.length) {
       const now = Date.now();
@@ -407,7 +481,6 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       setWindowCenter(windowCenter + 1);
       return;
     }
-    // 到顶 → 滑动窗口向上（保持当前第一章在视口顶部）
     const atTop = el.scrollTop <= 0;
     if (atTop && windowStart > 0) {
       const now = Date.now();
@@ -610,16 +683,16 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       {/* 竖版底部状态栏 — 与横板/双栏一致：显示本章进度 + 章节进度 */}
       {!isPaginatedMode && (
         <div className="shrink-0 px-6 py-2.5 border-t border-neutral-200/60 dark:border-stone-700/50 flex items-center justify-between gap-4">
-          <button onClick={goPrevChapter} disabled={windowCenter === 0} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
+          <button onClick={goPrevChapter} disabled={displayedChapter === 0} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
             上一章
           </button>
           <div className="flex items-center gap-2 text-xs text-neutral-400 dark:text-stone-500 min-w-0">
             <span className="tabular-nums">{verticalScrollProgress}%</span>
             <span className="text-neutral-300 dark:text-stone-600">·</span>
-            <span className="tabular-nums flex-shrink-0">{windowCenter + 1} / {book.chapters.length} 章</span>
+            <span className="tabular-nums flex-shrink-0">{displayedChapter + 1} / {book.chapters.length} 章</span>
           </div>
-          <button onClick={goNextChapter} disabled={windowCenter >= book.chapters.length - 1} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
+          <button onClick={goNextChapter} disabled={displayedChapter >= book.chapters.length - 1} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
             下一章
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
           </button>
