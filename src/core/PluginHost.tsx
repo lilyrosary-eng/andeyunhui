@@ -9,6 +9,7 @@ import { PluginRegistry, HOST_API_VERSION } from '@/core/pluginRegistry';
 import { api } from '@/lib/api';
 import { pluginDiagnostics } from '@/core/pluginDiagnostics';
 import { logger } from '@/lib/logger';
+import { createFrameBuffer } from '@/lib/frameBuffer';
 import {
   createSandboxGlobals,
   executeInSandbox,
@@ -93,7 +94,7 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
     initialized = true;
 
     // 挂载宿主 React 和 API 到全局（仅首次设置，后续不可覆盖）
-    const hostApi = { invoke, convertFileSrc, listen, emit };
+    const hostApi = { invoke, convertFileSrc, listen, emit, createFrameBuffer };
     const hostUi = { ModuleSidebarShell, SecondaryNavShell, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator };
     const defNonWritable = (key: string, value: unknown) => {
       Object.defineProperty(window, key, { value, writable: false, configurable: false });

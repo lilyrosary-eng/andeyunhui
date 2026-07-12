@@ -33,6 +33,13 @@ export function FloatingNoteView() {
   // 加载完成后才允许自动保存（避免首次渲染触发保存）
   const loadedRef = useRef(false);
 
+  // 浮窗透明效果：覆盖全局 body 背景色，让窗口透明生效
+  useEffect(() => {
+    const prev = document.body.style.backgroundColor;
+    document.body.style.backgroundColor = 'transparent';
+    return () => { document.body.style.backgroundColor = prev; };
+  }, []);
+
   // 加载笔记内容
   useEffect(() => {
     if (!noteId) {
@@ -123,12 +130,12 @@ export function FloatingNoteView() {
   }
 
   return (
-    <div className={`flex flex-col h-screen bg-white/95 dark:bg-stone-800/95 text-neutral-800 dark:text-stone-200 overflow-hidden ${isFixed ? 'pointer-events-none' : ''}`}>
+    <div className={`flex flex-col h-screen bg-white/15 dark:bg-stone-800/15 text-neutral-800 dark:text-stone-200 overflow-hidden ${isFixed ? 'pointer-events-none' : ''}`}>
       {/* ====== 自定义标题栏（拖拽区；固定时移除拖拽属性，不可拖动）====== */}
       <div
         data-tauri-drag-region={isFixed ? undefined : ''}
         style={isFixed ? undefined : DRAG_STYLE}
-        className="flex items-center justify-between gap-2 px-3 py-2.5 bg-white/80 dark:bg-stone-800/80 border-b border-neutral-200/30 dark:border-stone-700/30 select-none"
+        className="flex items-center justify-between gap-2 px-3 py-2.5 bg-white/15 dark:bg-stone-800/15 border-b border-neutral-200/30 dark:border-stone-700/30 select-none"
       >
         {/* 标题（浮窗只读） */}
         <span className="flex-1 min-w-0 text-sm font-medium truncate ml-1 select-none">

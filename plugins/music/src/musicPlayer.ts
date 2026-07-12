@@ -69,6 +69,9 @@ class MusicPlayer {
 
   setTracks(tracks: Track[], startIndex: number = 0): void {
     this.tracks = tracks;
+    // 切换歌单时必须重置随机序列：旧 shuffleIndices 基于旧歌单长度，
+    // 若新歌单更长则超出旧长度的歌曲永远不会被随机到，反之则索引越界。
+    this.shuffleIndices = [];
     if (startIndex >= 0 && startIndex < tracks.length) {
       this.currentIndex = startIndex;
       this.loadTrack(startIndex);

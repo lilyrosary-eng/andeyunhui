@@ -144,12 +144,14 @@ export function useStreamingOpen<TMeta, TItem>(
       try { c.destroy(); } catch (e) { /* 忽略 */ }
       c.unsub.forEach(fn => { try { fn(); } catch (e) { /* 忽略 */ } });
       cleanupRef.current = null;
+      // 仅在确有进行中任务时才通知 Rust 取消——避免空 cancel 无谓递增
+      // OPEN_BOOK_GENERATION，否则 open_book_streaming 的代次检查可能误判为
+      // "已被取消"而静默返回，前端收不到任何事件（表现为"点击无反应"）。
+      if (options?.cancelCommand) {
+        hostApi.invoke(options.cancelCommand).catch(() => {});
+      }
     }
     cancelledRef.current = true;
-    // 通知 Rust 侧取消进行中的任务（如 open_book），防止并发锁占用导致后续操作失败
-    if (options?.cancelCommand) {
-      hostApi.invoke(options.cancelCommand).catch(() => {});
-    }
   }, [options?.cancelCommand]);
 
   const open = useCallback(async (command: string, args: Record<string, unknown>) => {
@@ -157,37 +159,53 @@ export function useStreamingOpen<TMeta, TItem>(
     cancel();
     cancelledRef.current = false;
 
-    // 帧缓冲：meta/item/progress 各自批量合并到单帧，避免高频 setState 渲染风暴
-    const metaBuffer = hostApi.createFrameBuffer<TMeta>((items) => {
-      if (cancelledRef.current) return;
-      handlersRef.current.onMeta(items[items.length - 1]);
-    });
-    const itemBuffer = hostApi.createFrameBuffer<TItem[]>((chunks) => {
-      if (cancelledRef.current) return;
-      handlersRef.current.onItems(chunks.flat());
-    });
-    const progressBuffer = hostApi.createFrameBuffer<{ sent: number; total: number; done: boolean }>((items) => {
-      if (cancelledRef.current) return;
-      const last = items[items.length - 1];
-      handlersRef.current.onProgress?.(last);
-      if (last.done) {
-        cancel();
-        handlersRef.current.onDone?.();
-      }
-    });
+    // 诊断：确认 hostApi 和 createFrameBuffer 可用
+    if (typeof hostApi.createFrameBuffer !== 'function') {
+      console.error('[useStreamingOpen] hostApi.createFrameBuffer 不可用! hostApi keys:', Object.keys(hostApi || {}));
+      handlersRef.current.onError?.(new Error('hostApi.createFrameBuffer is not a function'));
+      return;
+    }
 
-    const unsubMeta = await hostApi.listen(events.metaEvent, (e: { payload: TMeta }) => metaBuffer.push(e.payload));
-    const unsubItem = await hostApi.listen(events.itemEvent, (e: { payload: TItem[] }) => itemBuffer.push(e.payload));
-    const unsubProgress = await hostApi.listen(events.progressEvent, (e: { payload: { sent: number; total: number; done: boolean } }) => progressBuffer.push(e.payload));
-    cleanupRef.current = {
-      destroy: () => { metaBuffer.destroy(); itemBuffer.destroy(); progressBuffer.destroy(); },
-      unsub: [unsubMeta, unsubItem, unsubProgress],
-    };
-
+    // 整个 open 过程（建缓冲 → 注册监听 → invoke）统一 try/catch，
+    // 避免任何环节的异常被 React async 事件处理静默吞掉（表现为"点击无反应"）
+    let metaBuffer: ReturnType<typeof hostApi.createFrameBuffer<TMeta>> | null = null;
+    let itemBuffer: ReturnType<typeof hostApi.createFrameBuffer<TItem[]>> | null = null;
+    let progressBuffer: ReturnType<typeof hostApi.createFrameBuffer<{ sent: number; total: number; done: boolean }>> | null = null;
     try {
+      // 帧缓冲：meta/item/progress 各自批量合并到单帧，避免高频 setState 渲染风暴
+      metaBuffer = hostApi.createFrameBuffer<TMeta>((items) => {
+        if (cancelledRef.current) return;
+        handlersRef.current.onMeta(items[items.length - 1]);
+      });
+      itemBuffer = hostApi.createFrameBuffer<TItem[]>((chunks) => {
+        if (cancelledRef.current) return;
+        handlersRef.current.onItems(chunks.flat());
+      });
+      progressBuffer = hostApi.createFrameBuffer<{ sent: number; total: number; done: boolean }>((items) => {
+        if (cancelledRef.current) return;
+        const last = items[items.length - 1];
+        handlersRef.current.onProgress?.(last);
+        if (last.done) {
+          cancel();
+          handlersRef.current.onDone?.();
+        }
+      });
+
+      const unsubMeta = await hostApi.listen(events.metaEvent, (e: { payload: TMeta }) => metaBuffer!.push(e.payload));
+      const unsubItem = await hostApi.listen(events.itemEvent, (e: { payload: TItem[] }) => itemBuffer!.push(e.payload));
+      const unsubProgress = await hostApi.listen(events.progressEvent, (e: { payload: { sent: number; total: number; done: boolean } }) => progressBuffer!.push(e.payload));
+      cleanupRef.current = {
+        destroy: () => { metaBuffer?.destroy(); itemBuffer?.destroy(); progressBuffer?.destroy(); },
+        unsub: [unsubMeta, unsubItem, unsubProgress],
+      };
+
       await hostApi.invoke(command, args);
     } catch (err) {
-      cancel();
+      console.error('[useStreamingOpen] open 失败:', err);
+      metaBuffer?.destroy();
+      itemBuffer?.destroy();
+      progressBuffer?.destroy();
+      cleanupRef.current = null;
       handlersRef.current.onError?.(err);
     }
   }, [cancel, events]);
