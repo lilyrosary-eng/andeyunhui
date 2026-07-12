@@ -55,6 +55,8 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   // 章节追踪
   const [chapterIndex, setChapterIndex] = useState(0);
   const [verticalChapter, setVerticalChapter] = useState(0);
+  // 竖版滚动进度（0-100，表示当前章内的滚动位置）
+  const [verticalScrollProgress, setVerticalScrollProgress] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -63,18 +65,39 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   const wheelLock = useRef(0);
   const boundariesRef = useRef<ChapterBoundary[]>([]);
   const pendingJumpRef = useRef<number | null>(null);
+  // measureTrigger: 递增值，用于触发 useLayoutEffect 中的 measure()
+  // 确保章节跳转的测量在 DOM 变更后、浏览器绘制前同步执行（消除弹簧动画）
+  const [measureTrigger, setMeasureTrigger] = useState(0);
+  // chapterIndexRef / verticalChapterRef: 让 externalChapterIndex effect
+  // 能读取最新值而不需要将其放入依赖数组（避免内部 chapterIndex 变化触发该 effect）
+  const chapterIndexRef = useRef(0);
+  const verticalChapterRef = useRef(0);
+  useEffect(() => { chapterIndexRef.current = chapterIndex; }, [chapterIndex]);
+  useEffect(() => { verticalChapterRef.current = verticalChapter; }, [verticalChapter]);
 
   const isBookMode = layoutMode === 'book';
   const pagesPerStep = isBookMode ? 2 : 1;
   const isPaginatedMode = layoutMode !== 'vertical';
 
   // ============ 拼接 HTML：所有章节合并到一个容器 ============
+  // 防抖：流式加载时 chapters 每次追加都会触发 recompute + DOM 重新布局，
+  // 对大书（几百章）非常慢。debounce 500ms，流式期间只取最后一次。
+  const [debouncedChapters, setDebouncedChapters] = useState(book.chapters);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedChapters(book.chapters), 500);
+    return () => clearTimeout(timer);
+  }, [book.chapters]);
+  // 书籍切换时立即同步（不等 debounce）
+  useEffect(() => {
+    setDebouncedChapters(book.chapters);
+  }, [book.filePath]);
+
   const combinedHtml = useMemo(() => {
-    if (book.chapters.length === 0) return '';
-    return book.chapters.map((ch, idx) =>
+    if (debouncedChapters.length === 0) return '';
+    return debouncedChapters.map((ch, idx) =>
       `<div class="chapter-marker" data-chapter-index="${idx}">${ch.content || ''}</div>`
     ).join('');
-  }, [book.chapters]);
+  }, [debouncedChapters]);
 
   const currentChapter = book.chapters[chapterIndex] || book.chapters[0] || { title: '—', content: '' };
 
@@ -87,7 +110,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     const vw = vp.clientWidth;
     const colCount = isBookMode ? 2 : 1;
     const colGap = isBookMode ? BOOK_GUTTER : GAP;
-    const pw = Math.max(200, (vw - 2 * PAD - (colCount - 1) * colGap) / colCount);
+    const pw = Math.floor(Math.max(200, (vw - 2 * PAD - (colCount - 1) * colGap) / colCount));
     setPageWidth(pw);
 
     const step = (pw + colGap) * pagesPerStep;
@@ -136,10 +159,11 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   // ============ 同步测量：在 useLayoutEffect 中直接调用（消除弹簧动画）============
   // useLayoutEffect 在 DOM 变更后、浏览器绘制前同步执行
   // 在此设置状态，用户永远看不到中间帧 → 无弹簧动画
+  // measureTrigger 用于章节跳转时触发重新测量（goNextChapter/goPrevChapter/外部章节跳转）
   useLayoutEffect(() => {
     if (!isPaginatedMode) return;
     measure();
-  }, [combinedHtml, isPaginatedMode, measure]);
+  }, [combinedHtml, isPaginatedMode, measure, measureTrigger]);
 
   // 布局模式切换
   useEffect(() => {
@@ -173,26 +197,30 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   }, [reportedChapter, onChapterChange]);
 
   // ============ 外部章节索引（侧边栏点击）============
+  // 关键：依赖数组只含 externalChapterIndex，不含 chapterIndex/verticalChapter
+  // 否则内部 chapterIndex 变化时会重新触发此 effect，导致"跳到新章 → 弹回旧章 → 再跳新章"的弹簧动画
   useEffect(() => {
     if (externalChapterIndex === undefined) return;
     if (isPaginatedMode) {
-      if (externalChapterIndex !== chapterIndex) {
+      // 用 ref 读取最新 chapterIndex，避免将其放入依赖数组
+      if (externalChapterIndex !== chapterIndexRef.current) {
         pendingJumpRef.current = externalChapterIndex;
         setNoTransition(true);
-        measure();
+        setMeasureTrigger(t => t + 1);
       }
     } else {
-      if (externalChapterIndex !== verticalChapter) {
+      if (externalChapterIndex !== verticalChapterRef.current) {
         setVerticalChapter(externalChapterIndex);
       }
     }
-  }, [externalChapterIndex, isPaginatedMode, measure, chapterIndex, verticalChapter]);
+  }, [externalChapterIndex, isPaginatedMode]);
 
   // 书籍切换重置
   useEffect(() => {
     setAbsolutePage(0);
     setChapterIndex(0);
     setVerticalChapter(0);
+    setVerticalScrollProgress(0);
     pendingJumpRef.current = null;
     if (verticalRef.current) verticalRef.current.scrollTop = 0;
   }, [book.filePath]);
@@ -217,9 +245,9 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     if (chapterIndex > 0) {
       pendingJumpRef.current = chapterIndex - 1;
       setNoTransition(true);
-      measure();
+      setMeasureTrigger(t => t + 1);
     }
-  }, [isPaginatedMode, chapterIndex, verticalChapter, measure]);
+  }, [isPaginatedMode, chapterIndex, verticalChapter]);
 
   const goNextChapter = useCallback(() => {
     if (!isPaginatedMode) {
@@ -229,9 +257,9 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     if (chapterIndex < book.chapters.length - 1) {
       pendingJumpRef.current = chapterIndex + 1;
       setNoTransition(true);
-      measure();
+      setMeasureTrigger(t => t + 1);
     }
-  }, [isPaginatedMode, chapterIndex, book.chapters.length, verticalChapter, measure]);
+  }, [isPaginatedMode, chapterIndex, book.chapters.length, verticalChapter]);
 
   // ============ 键盘 ============
   useEffect(() => {
@@ -266,12 +294,17 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   // ============ 竖版滚动 ============
   const onVerticalScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
+    // 计算当前章内滚动进度（0-100）
+    const scrollable = el.scrollHeight - el.clientHeight;
+    const progress = scrollable > 0 ? Math.round((el.scrollTop / scrollable) * 100) : 0;
+    setVerticalScrollProgress(progress);
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
     if (atBottom && verticalChapter < book.chapters.length - 1) {
       const now = Date.now();
       if (now < wheelLock.current) return;
       wheelLock.current = now + 600;
       setVerticalChapter(verticalChapter + 1);
+      setVerticalScrollProgress(0);
       requestAnimationFrame(() => { if (verticalRef.current) verticalRef.current.scrollTop = 0; });
     }
   }, [verticalChapter, book.chapters.length]);
@@ -300,7 +333,8 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   };
 
   // ============ 渲染 ============
-  const translate = -absolutePage * step + dragOffset;
+  // 整数化 translate 避免子像素渲染导致相邻页内容露出几px
+  const translate = Math.round(-absolutePage * step + dragOffset);
   const canPrev = absolutePage > 0;
   const canNext = absolutePage < pageCount - 1;
 
@@ -478,7 +512,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
         </div>
       )}
 
-      {/* 竖版底部状态栏 */}
+      {/* 竖版底部状态栏 — 与横板/双栏一致：显示本章进度 + 章节进度 */}
       {!isPaginatedMode && (
         <div className="shrink-0 px-6 py-2.5 border-t border-neutral-200/60 dark:border-stone-700/50 flex items-center justify-between gap-4">
           <button onClick={goPrevChapter} disabled={verticalChapter === 0} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
@@ -486,7 +520,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
             上一章
           </button>
           <div className="flex items-center gap-2 text-xs text-neutral-400 dark:text-stone-500 min-w-0">
-            <span className="truncate">{verticalChapterData?.title || '—'}</span>
+            <span className="tabular-nums">{verticalScrollProgress}%</span>
             <span className="text-neutral-300 dark:text-stone-600">·</span>
             <span className="tabular-nums flex-shrink-0">{verticalChapter + 1} / {book.chapters.length} 章</span>
           </div>

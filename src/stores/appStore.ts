@@ -84,15 +84,10 @@ export const useAppStore = create<AppState>((set) => ({
       }
     });
 
-    // 浮窗关闭 → 从集合移除 + 刷新笔记列表 + 恢复歌词窗口
+    // 浮窗关闭 → 从集合移除 + 刷新笔记列表
     const unlistenClose = listen<{ noteId: string }>('floating-note-closed', (event) => {
       const { noteId } = event.payload;
       useFloatingNoteStore.getState().removeFloating(noteId);
-      // 所有浮窗都关闭后，恢复之前因 DWM 冲突而隐藏的歌词窗口
-      const { floatingNoteIds } = useFloatingNoteStore.getState();
-      if (floatingNoteIds.size === 0) {
-        api.restoreLyricsIfNeeded();
-      }
       api.getAllNotes().then(data => {
         useNotesStore.getState().setNotes(data);
         logger.notes.listLoaded(data.length);

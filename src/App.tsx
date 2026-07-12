@@ -20,6 +20,7 @@ function App() {
   const pluginRegistry = useAppStore(s => s.pluginRegistry);
   const visibilityTick = useAppStore(s => s.visibilityTick);
   const activeModule = useAppStore(s => s.activeModule);
+  const showExtensionSettings = useAppStore(s => s.showExtensionSettings);
   const setPluginRegistry = useAppStore(s => s.setPluginRegistry);
   const bumpVisibility = useAppStore(s => s.bumpVisibility);
   const setActiveModule = useAppStore(s => s.setActiveModule);
@@ -226,6 +227,15 @@ function App() {
       return <NotesModule />;
     }
     if (activeModule === 'extensions' && pluginRegistry) {
+      return <ExtensionsHub registry={pluginRegistry} parentId="niuluo" excludePluginIds={mainPluginIds} />;
+    }
+    // 茑萝子插件模式下，若用户点击了"管理拓展设置"，优先渲染 ExtensionsHub（内部会检测 showExtensionSettings）
+    // 这样设置面板能顶掉当前子插件的主面板页面
+    if (
+      showExtensionSettings &&
+      pluginRegistry &&
+      pluginRegistry.get(activeModule)?.parent === 'niuluo'
+    ) {
       return <ExtensionsHub registry={pluginRegistry} parentId="niuluo" excludePluginIds={mainPluginIds} />;
     }
     if (pluginRegistry && (mainPluginIds.includes(activeModule) || subPluginIds.includes(activeModule))) {
