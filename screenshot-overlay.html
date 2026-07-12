@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>截图</title>
     <style>
-      html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+      /* 首帧即透明、且用 !important 永久压住 index.css 在 @layer base 里注入的
+         不透明 body 背景（var(--main-panel-bg) ≈ 主题色）。dev 下 CSS 经 JS 异步注入，
+         index.css 会先于 overlay-transparent.css 生效一帧 → 触发瞬间「全屏主题色闪烁」，
+         内联 !important 从第一帧起就透明，彻底消除该闪烁。 */
+      html, body, #root { margin: 0; height: 100%; background: transparent !important; overflow: hidden; }
     </style>
   </head>
   <body>

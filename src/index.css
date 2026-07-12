@@ -429,6 +429,19 @@ input[type="range"]:active::-moz-range-thumb {
 .reader-columns .chapter-marker:first-child {
   break-before: auto;
 }
+/* 章节标题：加大加粗，便于区分前后章节 */
+.reader-columns .chapter-title-display {
+  font-size: 1.6em;
+  font-weight: 700;
+  margin: 1.2em 0 0.8em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+  text-indent: 0;
+  break-after: avoid;
+}
+.reader-columns .chapter-marker:first-child .chapter-title-display {
+  margin-top: 0;
+}
 
 /* ========== 双栏模式：继承 reader-columns 的文本排版 ==========
    .reader-columns-book 必须具备与 .reader-columns 相同的 word-break / overflow-wrap /
@@ -468,4 +481,33 @@ input[type="range"]:active::-moz-range-thumb {
 }
 .reader-columns-book .chapter-marker:first-child {
   break-before: auto;
+}
+/* 章节标题：加大加粗，便于区分前后章节 */
+.reader-columns-book .chapter-title-display {
+  font-size: 1.6em;
+  font-weight: 700;
+  margin: 1.2em 0 0.8em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+  text-indent: 0;
+  break-after: avoid;
+}
+.reader-columns-book .chapter-marker:first-child .chapter-title-display {
+  margin-top: 0;
+}
+/* 竖版章节标题：加大加粗 + 章节间分隔（竖版无分栏，无需 break-after）*/
+.reader-vertical .chapter-title-display {
+  font-size: 1.6em;
+  font-weight: 700;
+  margin: 1.2em 0 0.8em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+  text-indent: 0;
+}
+.reader-vertical .chapter-marker:first-child .chapter-title-display {
+  margin-top: 0;
+}
+/* 竖版章节之间留出间距，便于视觉区分 */
+.reader-vertical .chapter-marker {
+  padding-bottom: 2em;
 }

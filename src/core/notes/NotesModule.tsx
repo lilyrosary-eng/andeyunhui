@@ -13,7 +13,7 @@ export function NotesModule() {
   return (
     <div className="flex flex-1 h-full overflow-hidden">
       <NotesSidebar />
-      <div className="flex-1 h-full overflow-hidden main-panel-bg p-6">
+      <div className={`flex-1 h-full overflow-hidden ${showNoteSettings ? '' : 'main-panel-bg p-6'}`}>
         {showNoteSettings ? <NoteSettingsPanel /> : <NotesEditor />}
       </div>
     </div>

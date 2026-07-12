@@ -48,6 +48,13 @@
 - `__HOST_REACT_DOM__` 必须是完整 `react-dom`（含 flushSync，@tiptap/react 需要）
 - IDE 加载失败不降级，显错误面板+构建命令+重试
 
+## EPUB 解析选型（2026-07-12 核实）
+- 后端 `reading_service.rs` 用 `epub = "=2.1.5"`（danigm/epub-rs，**GPL-3.0**）+ `ammonia` 消毒，**非手写 roxmltree**；容错 = epub crate 自身 + 自写包装（toc→spine 映射、spine 空报错、标题兜底、超大章节切片、ammonia 白名单）。
+- 核实结论：DeepSeek 汇报「epub crate 最后更新 2020」**错误**，2.1.5 发布于 2025-10-29，维护活跃；近 90 天下载 45,032（≈1.5 万/月）、反向依赖 34 个、`get_cover()` 存在。
+- 候选（仅当现方案翻车时评估，License 作一票否决优先核对）：`epub-parser`(zhangwfjh) 0.3.4/2026-02/**license 未确认**；`lib-epub`(KikkiZ) 0.3.1/2026-04/**MIT**。
+- **GPL-3.0 合规隐患**：Rust 默认静态链接，若闭源分发有源码义务；`lib-epub`(MIT) 更有利。不构成现在就换的理由（重新验证成本高）。
+- 决策：维持现状不主动换；R.5 排版设置本就是路线图下一步，继续推进。详见 `research_report_epub_ecosystem.md`。
+
 ## ★ 易回归坑（精简）
 1. **deploy 同步路径**：`external-deps/` 同步到 `appDataRoot/external-deps`（不含 extensions）
 2. **Windows 路径前缀**：`read_external_dep_file` 比较 root 也要 `canonicalize()`

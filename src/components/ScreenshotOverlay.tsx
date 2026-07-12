@@ -573,11 +573,29 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     savingRef.current = true;
     setSaving(true);
     try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const name = `截图_${stamp}.png`;
+      const n = selNativeRef.current;
+      const hasDraw = !!drawRef.current && !isCanvasBlank(drawRef.current);
+      // 无标注普通截图：零传输快路径，Rust 端直接从 SHOT 原生字节裁剪并落盘，
+      // 彻底避免「整图 RGBA 经 IPC 传前端再回传」导致的漫长保存与界面无响应。
+      if (n && !hasDraw && !isLong) {
+        const ref = await invoke<string>("save_cropped", {
+          x: n.x,
+          y: n.y,
+          w: n.w,
+          h: n.h,
+          name,
+        });
+        if (noteId) {
+          const { emit } = await import("@tauri-apps/api/event");
+          await emit("screenshot-note-import", { ref, name, noteId });
+        }
+        return;
+      }
       const composed = await composeBytes();
       if (!composed) return;
       const { bytes, width, height } = composed;
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      const name = `截图_${stamp}.png`;
       // 保存同时复制到剪贴板：save_screenshot 内部已写入剪贴板，并存入中转站
       const ref = await invoke<string>("save_screenshot", { bytes, width, height, name });
       if (noteId) {

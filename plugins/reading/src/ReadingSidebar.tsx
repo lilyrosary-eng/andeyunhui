@@ -4,7 +4,7 @@
 // 第二层：选中书后切换为章节目录（点击章节在主区域跳转）
 const React = window.__HOST_REACT__;
 const { useMemo, useState } = React;
-const { ModuleSidebarShell, SecondaryNavShell } = window.__HOST_UI__ || {};
+const { ModuleSidebarShell, NestedNavList } = window.__HOST_UI__ || {};
 
 interface BookSummary {
   filePath: string;
@@ -272,45 +272,63 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
   } = props;
 
   // ====== 第二层：章节目录（选中书后显示）======
+  // 使用 NestedNavList 模板：返回按钮在内容区顶部（不占用 primaryAction 导入按钮），
+  // 设置通过 ModuleSidebarShell 底部齿轮（与视频模块一致）
   if (currentBook) {
-    const chapterItems: React.ReactNode[] = [];
-    if (currentBook.chapters.length === 0) {
-      chapterItems.push(React.createElement('div', {
-        key: 'loading',
-        className: 'flex items-center justify-center py-12 text-xs text-neutral-400 dark:text-stone-500',
-      },
-        React.createElement('div', {
-          className: 'w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin mr-2',
-        }),
-        '正在加载章节...',
-      ));
-    } else {
-      currentBook.chapters.forEach((ch, i) => {
-        const isCurrent = i === currentChapterIndex;
-        chapterItems.push(React.createElement('button', {
-          key: ch.id || i,
-          onClick: () => onChapterClick(i),
-          className: `w-full text-left px-2 py-1.5 rounded-lg transition-colors flex items-center gap-2 text-sm ${
-            isCurrent
-              ? 'bg-[var(--element-bg)]/10 text-[var(--element-bg)]'
-              : 'text-neutral-600 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5'
-          }`,
-        },
-          React.createElement('span', { className: 'flex-shrink-0 opacity-60' }, React.createElement(ChapterIcon)),
-          React.createElement('span', { className: 'flex-1 truncate' },
-            React.createElement('span', { className: 'text-[10px] text-neutral-400 dark:text-stone-500 mr-1.5' }, `${i + 1}.`),
-            ch.title || `第 ${i + 1} 章`,
-          ),
-        ));
-      });
-    }
+    const chapterLayers = currentBook.chapters.length === 0
+      ? [
+          { title: '书列表' },
+          { title: currentBook.title, children: React.createElement('div', {
+              className: 'flex items-center justify-center py-12 text-xs text-neutral-400 dark:text-stone-500',
+            },
+              React.createElement('div', {
+                className: 'w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin mr-2',
+              }),
+              '正在加载章节...',
+            ) },
+        ]
+      : [
+          { title: '书列表' },
+          {
+            title: currentBook.title,
+            items: currentBook.chapters.map((ch, i) => ({
+              id: String(i),
+              icon: React.createElement(ChapterIcon),
+              title: `${i + 1}. ${ch.title || '第 ' + (i + 1) + ' 章'}`,
+              active: i === currentChapterIndex,
+            })),
+          },
+        ];
 
-    const chapterList = React.createElement('div', { className: 'space-y-0.5' }, ...chapterItems);
-    const wrappedChapterList = SecondaryNavShell
-      ? React.createElement(SecondaryNavShell, null,
-          React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1' }, chapterList),
-        )
-      : React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1' }, chapterList);
+    const nestedContent = NestedNavList
+      ? React.createElement(NestedNavList, {
+          layers: chapterLayers,
+          onBack: onBackToBooks,
+          onItemClick: (item: { id: string }) => onChapterClick(parseInt(item.id, 10)),
+        })
+      : React.createElement(React.Fragment, null,
+          React.createElement('button', {
+            onClick: onBackToBooks,
+            className: 'w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-stone-400 mb-1',
+          }, '← 返回书列表'),
+          React.createElement('div', { className: 'space-y-0.5' },
+            ...currentBook.chapters.map((ch, i) => React.createElement('button', {
+              key: ch.id || i,
+              onClick: () => onChapterClick(i),
+              className: `w-full text-left px-2 py-1.5 rounded-lg transition-colors flex items-center gap-2 text-sm ${
+                i === currentChapterIndex
+                  ? 'bg-[var(--element-bg)]/10 text-[var(--element-bg)]'
+                  : 'text-neutral-600 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5'
+              }`,
+            },
+              React.createElement('span', { className: 'flex-shrink-0 opacity-60' }, React.createElement(ChapterIcon)),
+              React.createElement('span', { className: 'flex-1 truncate' },
+                React.createElement('span', { className: 'text-[10px] text-neutral-400 dark:text-stone-500 mr-1.5' }, `${i + 1}.`),
+                ch.title || `第 ${i + 1} 章`,
+              ),
+            )),
+          ),
+        );
 
     return ModuleSidebarShell
       ? React.createElement(ModuleSidebarShell, {
@@ -321,8 +339,8 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
           searchQuery: '',
           onSearchChange: () => {},
           searchPlaceholder: `${currentBook.chapters.length} 章`,
-          primaryAction: { label: '← 返回书列表', onClick: onBackToBooks },
-          children: wrappedChapterList,
+          // 不使用 primaryAction —— 返回按钮由 NestedNavList 内容区提供（与视频模块一致）
+          children: nestedContent,
         })
       : null;
   }
@@ -393,11 +411,8 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
     ...childrenParts,
   );
 
-  const wrappedList = SecondaryNavShell
-    ? React.createElement(SecondaryNavShell, null,
-        React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1' }, treeContent),
-      )
-    : React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1' }, treeContent);
+  // 不再用 SecondaryNavShell 包裹 — ModuleSidebarShell 列表区已是滚动容器，避免双重 overflow-y-auto
+  const wrappedList = treeContent;
 
   return ModuleSidebarShell
     ? React.createElement(ModuleSidebarShell, {

@@ -432,6 +432,14 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
+                let win_label = window.label();
+
+                // 浮窗笔记等辅助窗口关闭时，不影响歌词悬浮窗和其他辅助窗口。
+                // 仅主窗口（label = "main"）关闭时才执行托盘隐藏或辅助窗口销毁逻辑。
+                if win_label != "main" {
+                    return;
+                }
+
                 let tray_enabled = {
                     app.state::<Mutex<TrayModeState>>().lock().unwrap_or_else(|e| e.into_inner()).enabled
                 };
@@ -600,6 +608,7 @@ fn main() {
             crop_native,
             crop_native_rgba,
             save_screenshot,
+            save_cropped,
             capture_window_full,
             get_screenshot_shortcut,
             set_screenshot_shortcut,
