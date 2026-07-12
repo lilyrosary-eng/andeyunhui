@@ -114,6 +114,7 @@ export const api = {
       minHeight: 200,
       decorations: false,
       resizable: true,
+      transparent: true, // 浮窗 30% 透明效果：窗口本身必须透明，CSS 背景透明才有意义
       x,
       y,
     });

@@ -71,6 +71,10 @@ async function bootstrap() {
     );
   } else if (windowKind === "floating-note") {
     // 浮窗子窗口：独立渲染，不初始化整个 App（性能优化）
+    // 必须和歌词窗口一样强制 html/body 背景透明，否则 index.css 的
+    // body { background-color: var(--main-panel-bg); } 会阻挡 transparent: true 效果。
+    document.documentElement.style.background = 'transparent';
+    document.body.style.background = 'transparent';
     ReactDOM.createRoot(root).render(
       <React.StrictMode>
         <FloatingNoteView />

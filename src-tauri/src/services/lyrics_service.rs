@@ -66,7 +66,7 @@ pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::E
     let window = WebviewWindowBuilder::new(app, LYRICS_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
         .title("歌词")
         .inner_size(400.0, 80.0)
-        .resizable(false)
+        .resizable(true)
         .decorations(false)
         .always_on_top(true)
         .skip_taskbar(true)

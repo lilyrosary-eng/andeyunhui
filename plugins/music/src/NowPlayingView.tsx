@@ -496,10 +496,12 @@ export function NowPlayingView({
           style: {
             scrollBehavior: 'smooth',
             willChange: 'scroll-position',
-            maskImage: 'linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%)',
-            WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%)',
-            paddingTop: 'clamp(24px, 6vh, 72px)',
-            paddingBottom: 'clamp(24px, 6vh, 72px)',
+            maskImage: 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)',
+            WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)',
+            // padding 设为约容器高度的一半：确保第一行/最后一行也能滚动到容器正中央，
+            // 不会被 mask 渐变的 transparent 区域遮住（原 6vh 太小，首尾歌词看不清）。
+            paddingTop: 'calc(50vh - 80px)',
+            paddingBottom: 'calc(50vh - 80px)',
           },
         },
           React.createElement(LyricsList, {
