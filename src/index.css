@@ -422,3 +422,50 @@ input[type="range"]:active::-moz-range-thumb {
   font-weight: 600;
   font-style: normal;
 }
+/* 章节拼接分隔符：标记章节边界，用于"拼接+动态缓存"模式下的页码计算 */
+.reader-columns .chapter-marker {
+  break-before: column;
+}
+.reader-columns .chapter-marker:first-child {
+  break-before: auto;
+}
+
+/* ========== 双栏模式：继承 reader-columns 的文本排版 ==========
+   .reader-columns-book 必须具备与 .reader-columns 相同的 word-break / overflow-wrap /
+   hyphens / text-align 等属性，否则 CSS columns 容器内的文本无法正确断行，
+   导致"内容一大块"不分列的问题。 */
+.reader-columns-book {
+  font-size: var(--reader-font-size, 16px);
+  line-height: 1.85;
+  color: #1c1917;
+  text-align: justify;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  line-break: strict;
+  -webkit-hyphens: auto;
+  hyphens: auto;
+}
+.dark .reader-columns-book {
+  color: #e7e5e4;
+}
+.reader-columns-book p {
+  margin: 0 0 0.85em 0;
+  text-indent: 2em;
+}
+.reader-columns-book p:last-child {
+  margin-bottom: 0;
+}
+.reader-columns-book em {
+  font-style: italic;
+}
+.reader-columns-book strong {
+  font-weight: 600;
+  font-style: normal;
+}
+/* 章节拼接分隔符：用于"拼接+动态缓存"模式下标记章节边界 */
+.reader-columns-book .chapter-marker {
+  break-before: column;
+}
+.reader-columns-book .chapter-marker:first-child {
+  break-before: auto;
+}

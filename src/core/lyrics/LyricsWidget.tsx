@@ -118,18 +118,23 @@ export function LyricsWidget() {
     };
   }, []);
 
-  // 字号变化时动态调整窗口大小，防止大字号文字被截断。
-  // 窗口高度 = 当前行高 + 下一行预览(可选) + 上下 padding + textShadow 延伸。
-  // 旧值 1.2 行高 + 32px padding 不够，textShadow 向下延伸 4px+ 未计算，
-  // 导致大字号时文字上下被截断。
+  // 窗口高度：基于 fontSize 和 showNextLine 的固定公式计算，绝不监听内容变化。
+  // 旧实现用 ResizeObserver 监听 scrollHeight 变化 → 每次歌词更新都触发 setSize →
+  // Windows 透明窗口高频 setSize 触发 DWM 同步卡死（DevTools 不报错，但整个窗口管理器冻结）。
+  // textShadow 不参与 scrollHeight 计算（向下 6px / 向上 8px），所以公式需额外补偿。
+  const contentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    // 高度 = 当前行(含行距) + 下一行(可选) + 上下 padding(补偿 textShadow 延伸)
+    // 当前行高度 ≈ fontSize * 1.25（leading-tight）
+    // 下一行高度 ≈ fontSize * 0.7 * 1.25 + mt-1(4px)
+    // padding 上下各 12px（py-3）补偿 textShadow 向上 8px + 向下 6px
+    const currentLineH = fontSize * 1.25;
+    const nextLineH = showNextLine ? fontSize * 0.7 * 1.25 + 4 : 0;
+    const padding = 24; // py-3 = 12px * 2
+    const h = Math.ceil(currentLineH + nextLineH + padding);
     const win = getCurrentWindow();
-    const lineH = fontSize * 1.5; // 行高留足空间（leading-tight + textShadow）
-    const nextH = showNextLine ? fontSize * 0.7 * 1.5 + 4 : 0; // mt-1 ≈ 4px
-    const height = Math.ceil(lineH + nextH + 48); // 上下 padding 各 24px
     isResizingRef.current = true;
-    win.setSize(new LogicalSize(400, height)).finally(() => {
-      // setSize 完成后恢复 onMoved 监听（延迟 100ms 避免 setSize 触发的尾随事件）
+    win.setSize(new LogicalSize(400, h)).finally(() => {
       setTimeout(() => { isResizingRef.current = false; }, 100);
     });
   }, [fontSize, showNextLine]);
@@ -170,37 +175,40 @@ export function LyricsWidget() {
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      {/* 当前行 */}
-      <div
-        className="text-center leading-tight px-4 transition-all duration-300"
-        style={{
-          fontSize: `${fontSize}px`,
-          fontWeight: 700,
-          color: '#ffffff',
-          textShadow: '0 0 8px rgba(0,0,0,0.8), 0 0 16px rgba(0,0,0,0.6), 0 2px 4px rgba(0,0,0,0.5)',
-          WebkitTextStroke: '1px rgba(0,0,0,0.3)',
-          opacity: currentLine ? 1 : 0,
-        }}
-      >
-        {currentLine || '\u00A0'}
-      </div>
-
-      {/* 下一行预览 */}
-      {showNextLine && nextLine && (
+      {/* 内容容器：py-3 补偿 textShadow 向上 8px / 向下 6px 的视觉延伸（textShadow 不参与 scrollHeight 计算） */}
+      <div ref={contentRef} className="flex flex-col items-center py-3">
+        {/* 当前行 */}
         <div
-          className="text-center leading-tight px-4 mt-1 transition-all duration-300"
+          className="text-center leading-tight px-4 transition-all duration-300"
           style={{
-            fontSize: `${fontSize * 0.7}px`,
-            fontWeight: 400,
+            fontSize: `${fontSize}px`,
+            fontWeight: 700,
             color: '#ffffff',
-            textShadow: '0 0 6px rgba(0,0,0,0.7), 0 0 12px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4)',
-            WebkitTextStroke: '0.5px rgba(0,0,0,0.2)',
-            opacity: DEFAULT_NEXT_LINE_OPACITY,
+            textShadow: '0 0 8px rgba(0,0,0,0.8), 0 0 16px rgba(0,0,0,0.6), 0 2px 4px rgba(0,0,0,0.5)',
+            WebkitTextStroke: '1px rgba(0,0,0,0.3)',
+            opacity: currentLine ? 1 : 0,
           }}
         >
-          {nextLine}
+          {currentLine || '\u00A0'}
         </div>
-      )}
+
+        {/* 下一行预览 */}
+        {showNextLine && nextLine && (
+          <div
+            className="text-center leading-tight px-4 mt-1 transition-all duration-300"
+            style={{
+              fontSize: `${fontSize * 0.7}px`,
+              fontWeight: 400,
+              color: '#ffffff',
+              textShadow: '0 0 6px rgba(0,0,0,0.7), 0 0 12px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4)',
+              WebkitTextStroke: '0.5px rgba(0,0,0,0.2)',
+              opacity: DEFAULT_NEXT_LINE_OPACITY,
+            }}
+          >
+            {nextLine}
+          </div>
+        )}
+      </div>
 
       {/* 锁定/解锁图标：hover 时淡入；锁定态常驻显示并可点击解锁（穿透下仍保持可交互） */}
       <div
