@@ -450,9 +450,8 @@ function MusicModule() {
   const handleSelectPlaylist = useCallback((playlist: Playlist) => {
     setSelectedPlaylist(playlist);
     musicPlayer.currentPlaylistId = playlist.id;
-    if (playlist.tracks.length > 0) {
-      musicPlayer.setTracks(playlist.tracks, 0);
-    }
+    // 状态保持：切换歌单不重置播放器，当前音乐继续播放。
+    // 用户点击新歌单中的歌曲时，handleSelectTrack 会调用 setTracks 刷新。
   }, []);
 
   const handleSelectTrack = useCallback((track: Track, index: number) => {
@@ -725,34 +724,34 @@ function MusicModule() {
             playlistCount={playlists.length}
           />
         ) : selectedPlaylist ? (
-          <>
-            <TrackList
-              tracks={filteredTracks}
-              playlistName={selectedPlaylist.name}
-              onSelectTrack={handleSelectTrack}
-              onAddSong={handleAddSong}
-              showAlbum={showAlbum}
-            />
-            {currentTrack && (
-              <PlayerBar
-                key={currentTrack.filePath}
-                track={currentTrack}
-                isPlaying={isPlaying}
-                onTogglePlay={togglePlay}
-                onPrev={prevTrack}
-                onNext={nextTrack}
-                volume={volume}
-                onVolumeChange={handleVolume}
-                playMode={playMode}
-                onPlayModeChange={handlePlayModeChange}
-                onCoverClick={handleCoverClick}
-              />
-            )}
-          </>
+          <TrackList
+            tracks={filteredTracks}
+            playlistName={selectedPlaylist.name}
+            onSelectTrack={handleSelectTrack}
+            onAddSong={handleAddSong}
+            showAlbum={showAlbum}
+          />
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <p className="text-sm text-neutral-400 dark:text-stone-500">选择一个歌单开始播放</p>
           </div>
+        )}
+        {/* PlayerBar 独立持久渲染：切换歌单时不卸载，保持播放状态连续。
+            仅在非设置面板且有当前曲目时显示。 */}
+        {!showSettings && currentTrack && (
+          <PlayerBar
+            key={currentTrack.filePath}
+            track={currentTrack}
+            isPlaying={isPlaying}
+            onTogglePlay={togglePlay}
+            onPrev={prevTrack}
+            onNext={nextTrack}
+            volume={volume}
+            onVolumeChange={handleVolume}
+            playMode={playMode}
+            onPlayModeChange={handlePlayModeChange}
+            onCoverClick={handleCoverClick}
+          />
         )}
       </div>
       {showNowPlaying && currentTrack && (

@@ -1,5 +1,7 @@
 /// <reference path="../../global.d.ts" />
-// 阅读模块侧边栏 — 嵌套目录树：母目录 + 子目录 + 书籍
+// 阅读模块侧边栏 — 双层 drill-down：
+// 第一层：嵌套目录树（母目录 + 子目录 + 书籍）
+// 第二层：选中书后切换为章节目录（点击章节在主区域跳转）
 const React = window.__HOST_REACT__;
 const { useMemo, useState } = React;
 const { ModuleSidebarShell, SecondaryNavShell } = window.__HOST_UI__ || {};
@@ -9,6 +11,19 @@ interface BookSummary {
   title: string;
   format: 'txt' | 'epub' | 'pdf' | 'docx';
   parentDir: string;
+}
+
+interface ReadingChapter {
+  id: string;
+  title: string;
+  content: string;
+}
+
+interface ReadingBook {
+  filePath: string;
+  title: string;
+  author: string | null;
+  chapters: ReadingChapter[];
 }
 
 interface DirNode {
@@ -27,6 +42,11 @@ interface ReadingSidebarProps {
   onBookClick: (book: BookSummary) => void;
   onOpenSettings: () => void;
   onChangeRoot: () => void;
+  // drill-down 第二层：章节目录
+  currentBook: ReadingBook | null;
+  currentChapterIndex: number;
+  onChapterClick: (index: number) => void;
+  onBackToBooks: () => void;
 }
 
 // ========== 图标 ==========
@@ -226,14 +246,88 @@ function DirTreeNode({
   );
 }
 
+// ========== 章节列表项图标 ==========
+function ChapterIcon() {
+  return React.createElement('svg', {
+    width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none',
+    stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
+    children: [
+      React.createElement('line', { key: '1', x1: 8, y1: 6, x2: 21, y2: 6 }),
+      React.createElement('line', { key: '2', x1: 8, y1: 12, x2: 21, y2: 12 }),
+      React.createElement('line', { key: '3', x1: 8, y1: 18, x2: 21, y2: 18 }),
+      React.createElement('line', { key: '4', x1: 3, y1: 6, x2: 3.01, y2: 6 }),
+      React.createElement('line', { key: '5', x1: 3, y1: 12, x2: 3.01, y2: 12 }),
+      React.createElement('line', { key: '6', x1: 3, y1: 18, x2: 3.01, y2: 18 }),
+    ],
+  });
+}
+
 // ========== 侧边栏主组件 ==========
 export function ReadingSidebar(props: ReadingSidebarProps) {
   const {
     books, currentFilePath, openingFilePath,
     searchQuery, onSearchChange,
     onBookClick, onOpenSettings, onChangeRoot,
+    currentBook, currentChapterIndex, onChapterClick, onBackToBooks,
   } = props;
 
+  // ====== 第二层：章节目录（选中书后显示）======
+  if (currentBook) {
+    const chapterItems: React.ReactNode[] = [];
+    if (currentBook.chapters.length === 0) {
+      chapterItems.push(React.createElement('div', {
+        key: 'loading',
+        className: 'flex items-center justify-center py-12 text-xs text-neutral-400 dark:text-stone-500',
+      },
+        React.createElement('div', {
+          className: 'w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin mr-2',
+        }),
+        '正在加载章节...',
+      ));
+    } else {
+      currentBook.chapters.forEach((ch, i) => {
+        const isCurrent = i === currentChapterIndex;
+        chapterItems.push(React.createElement('button', {
+          key: ch.id || i,
+          onClick: () => onChapterClick(i),
+          className: `w-full text-left px-2 py-1.5 rounded-lg transition-colors flex items-center gap-2 text-sm ${
+            isCurrent
+              ? 'bg-[var(--element-bg)]/10 text-[var(--element-bg)]'
+              : 'text-neutral-600 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5'
+          }`,
+        },
+          React.createElement('span', { className: 'flex-shrink-0 opacity-60' }, React.createElement(ChapterIcon)),
+          React.createElement('span', { className: 'flex-1 truncate' },
+            React.createElement('span', { className: 'text-[10px] text-neutral-400 dark:text-stone-500 mr-1.5' }, `${i + 1}.`),
+            ch.title || `第 ${i + 1} 章`,
+          ),
+        ));
+      });
+    }
+
+    const chapterList = React.createElement('div', { className: 'space-y-0.5' }, ...chapterItems);
+    const wrappedChapterList = SecondaryNavShell
+      ? React.createElement(SecondaryNavShell, null,
+          React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1' }, chapterList),
+        )
+      : React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1' }, chapterList);
+
+    return ModuleSidebarShell
+      ? React.createElement(ModuleSidebarShell, {
+          moduleId: 'reading',
+          icon: React.createElement(BookIcon),
+          title: currentBook.title,
+          onOpenModuleSettings: undefined,
+          searchQuery: '',
+          onSearchChange: () => {},
+          searchPlaceholder: `${currentBook.chapters.length} 章`,
+          primaryAction: { label: '← 返回书列表', onClick: onBackToBooks },
+          children: wrappedChapterList,
+        })
+      : null;
+  }
+
+  // ====== 第一层：书籍列表（默认）======
   const { rootBooks, rootDirs } = useMemo(() => buildTree(books), [books]);
   const hasDirs = rootDirs.length > 0;
 

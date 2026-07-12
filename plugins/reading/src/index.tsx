@@ -112,6 +112,7 @@ function ReadingModule() {
   const [currentBook, setCurrentBook] = useState<ReadingBook | null>(null);
   const [openingFilePath, setOpeningFilePath] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [selectedChapterIndex, setSelectedChapterIndex] = useState(0);
 
   // 根目录变化 → 扫描所有根（缓存优先 + 流式增量加载）
   useEffect(() => {
@@ -202,6 +203,7 @@ function ReadingModule() {
           author: meta.author,
           chapters: [],
         });
+        setSelectedChapterIndex(0);
         setOpeningFilePath(meta.filePath);
         setShowSettings(false);
       },
@@ -224,12 +226,25 @@ function ReadingModule() {
   );
 
   const handleBookClick = useCallback(async (book: BookSummary) => {
-    if (openingFilePath) return;
-    await openBook('open_book', { filePath: book.filePath });
+    console.log('[Reading] 点击书籍:', book.title, 'filePath:', book.filePath, 'openingFilePath:', openingFilePath);
+    if (openingFilePath) {
+      console.log('[Reading] 跳过：openingFilePath 非空（有书正在打开中）');
+      return;
+    }
+    try {
+      await openBook('open_book', { filePath: book.filePath });
+    } catch (err) {
+      console.error('[Reading] openBook 异常:', err);
+    }
   }, [openingFilePath, openBook]);
 
   const handleBackToList = useCallback(() => {
     setCurrentBook(null);
+    setSelectedChapterIndex(0);
+  }, []);
+
+  const handleChapterClick = useCallback((index: number) => {
+    setSelectedChapterIndex(index);
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -286,6 +301,10 @@ function ReadingModule() {
         onBookClick={handleBookClick}
         onOpenSettings={handleOpenSettings}
         onChangeRoot={handleSelectRoot}
+        currentBook={currentBook}
+        currentChapterIndex={selectedChapterIndex}
+        onChapterClick={handleChapterClick}
+        onBackToBooks={handleBackToList}
       />
       <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]">
         {showSettings ? (
@@ -296,7 +315,7 @@ function ReadingModule() {
             bookCount={books.length}
           />
         ) : currentBook ? (
-          <ReadingView book={currentBook} onBack={handleBackToList} />
+          <ReadingView book={currentBook} onBack={handleBackToList} externalChapterIndex={selectedChapterIndex} />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">
             <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="opacity-40">

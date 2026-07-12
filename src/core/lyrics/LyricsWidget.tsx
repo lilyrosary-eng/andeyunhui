@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { LogicalSize } from '@tauri-apps/api/dpi';
 import { invoke } from '@tauri-apps/api/core';
 
 const LYRICS_EVENT = 'lyrics-update';
@@ -85,29 +86,53 @@ export function LyricsWidget() {
       .catch(() => {});
   }, []);
 
-  // 拖拽结束后保存位置（仅在位置真正变化时保存）
+  // 拖拽结束后保存位置 — 事件驱动（onMoved）+ 节流（debounce 400ms）。
+  // 旧实现用 setInterval(savePos, 2000) 每 2 秒调用 win.outerPosition()，
+  // 当歌词窗口与笔记浮窗都 always_on_top 时，Windows 窗口层级竞争会导致
+  // outerPosition() 卡住，定时器堆积未完成 Promise → JS 线程卡死。
+  // onMoved 是 Rust 侧推送的事件，不会阻塞 JS 线程。
+  // 但 onMoved 在拖动时每像素触发一次，直接 invoke 会导致 IPC 风暴 + 文件 I/O 堆塞，
+  // 最终整个应用卡死（右上角按钮、托盘都无响应）。
+  // 解决：debounce 400ms，拖动结束后只保存一次。
+  const savePosTimerRef = useRef<ReturnType<typeof setTimeout>>(0);
+  const isResizingRef = useRef(false); // setSize 期间忽略 onMoved，避免循环
   useEffect(() => {
-    if (locked) return;
     const win = getCurrentWindow();
-    let timer: ReturnType<typeof setInterval>;
-
-    const savePos = async () => {
-      try {
-        const pos = await win.outerPosition();
-        const prev = lastSavedPos.current;
-        if (prev && Math.abs(prev.x - pos.x) < 1 && Math.abs(prev.y - pos.y) < 1) {
-          return; // 位置未变化，跳过保存
-        }
-        lastSavedPos.current = { x: pos.x, y: pos.y };
-        invoke('save_lyrics_widget_position', { x: pos.x, y: pos.y }).catch(() => {});
-      } catch { /* 窗口可能已关闭 */ }
+    const unlisten = win.onMoved(({ payload }) => {
+      // setSize 触发的窗口移动不保存
+      if (isResizingRef.current) return;
+      const x = payload.x;
+      const y = payload.y;
+      const prev = lastSavedPos.current;
+      if (prev && Math.abs(prev.x - x) < 1 && Math.abs(prev.y - y) < 1) return;
+      lastSavedPos.current = { x, y };
+      // debounce：拖动过程中不写盘，停止移动 400ms 后才保存
+      if (savePosTimerRef.current) clearTimeout(savePosTimerRef.current);
+      savePosTimerRef.current = setTimeout(() => {
+        invoke('save_lyrics_widget_position', { x, y }).catch(() => {});
+      }, 400);
+    });
+    return () => {
+      unlisten.then(fn => fn());
+      if (savePosTimerRef.current) clearTimeout(savePosTimerRef.current);
     };
+  }, []);
 
-    // 每 2 秒检测一次位置变化并保存
-    timer = setInterval(savePos, 2000);
-
-    return () => clearInterval(timer);
-  }, [locked]);
+  // 字号变化时动态调整窗口大小，防止大字号文字被截断。
+  // 窗口高度 = 当前行高 + 下一行预览(可选) + 上下 padding + textShadow 延伸。
+  // 旧值 1.2 行高 + 32px padding 不够，textShadow 向下延伸 4px+ 未计算，
+  // 导致大字号时文字上下被截断。
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const lineH = fontSize * 1.5; // 行高留足空间（leading-tight + textShadow）
+    const nextH = showNextLine ? fontSize * 0.7 * 1.5 + 4 : 0; // mt-1 ≈ 4px
+    const height = Math.ceil(lineH + nextH + 48); // 上下 padding 各 24px
+    isResizingRef.current = true;
+    win.setSize(new LogicalSize(400, height)).finally(() => {
+      // setSize 完成后恢复 onMoved 监听（延迟 100ms 避免 setSize 触发的尾随事件）
+      setTimeout(() => { isResizingRef.current = false; }, 100);
+    });
+  }, [fontSize, showNextLine]);
 
   // 鼠标悬停显示锁图标
   const handleMouseEnter = useCallback(() => {

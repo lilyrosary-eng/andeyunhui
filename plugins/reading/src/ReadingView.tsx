@@ -20,6 +20,8 @@ interface ReadingBook {
 interface ReadingViewProps {
   book: ReadingBook;
   onBack: () => void;
+  // 外部章节索引（由侧边栏章节列表点击控制），不传则内部管理
+  externalChapterIndex?: number;
 }
 
 // ============ 布局常量 ============
@@ -31,7 +33,7 @@ const BOOK_GUTTER = 24; // 双栏中缝
 
 type LayoutMode = 'horizontal' | 'vertical' | 'book';
 
-export function ReadingView({ book, onBack }: ReadingViewProps) {
+export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewProps) {
   const [chapterIndex, setChapterIndex] = useState(0);
   const [page, setPage] = useState(0);
   const [pageCount, setPageCount] = useState(1);
@@ -56,6 +58,14 @@ export function ReadingView({ book, onBack }: ReadingViewProps) {
     // 竖版模式滚到顶部
     if (verticalRef.current) verticalRef.current.scrollTop = 0;
   }, [book.filePath]);
+
+  // 外部章节索引变化（侧边栏点击章节）→ 同步内部状态
+  useEffect(() => {
+    if (externalChapterIndex !== undefined && externalChapterIndex !== chapterIndex) {
+      setChapterIndex(externalChapterIndex);
+      setPage(0);
+    }
+  }, [externalChapterIndex]);
 
   const safeChapterIndex = Math.max(0, Math.min(chapterIndex, book.chapters.length - 1));
   const chapter = book.chapters[safeChapterIndex];
