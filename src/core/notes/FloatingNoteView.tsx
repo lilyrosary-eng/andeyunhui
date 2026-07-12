@@ -32,6 +32,11 @@ export function FloatingNoteView() {
 
   // 加载完成后才允许自动保存（避免首次渲染触发保存）
   const loadedRef = useRef(false);
+  // 持有最新标题/内容，供 onCloseRequested（任意关闭路径）读取，避免闭包拿到旧值
+  const titleRef = useRef(title);
+  const contentRef = useRef(content);
+  titleRef.current = title;
+  contentRef.current = content;
 
   // 浮窗透明效果：覆盖全局 body 背景色，让窗口透明生效
   useEffect(() => {
@@ -76,18 +81,49 @@ export function FloatingNoteView() {
     };
   }, [content, title, noteId]);
 
-  /** 关闭子窗口并通知主窗口 */
-  const handleClose = useCallback(async () => {
-    try {
-      // 先尝试 flush 最后的编辑内容
+  /**
+   * 统一收口：flush 未保存内容并 emit floating-note-closed，
+   * 主窗口据此把笔记从 floatingNoteIds 移除、回到原笔记栏
+   * （修复任务栏关闭后“消失/被删”，同时避免丢未保存内容）。
+   * 带 2s 兜底：即使 saveNote/emit 异常也不会让窗口永远关不掉。
+   */
+  const flushAndNotify = useCallback(async () => {
+    const guard = new Promise<void>((r) => setTimeout(r, 2000));
+    const work = (async () => {
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = undefined; }
-      if (noteId && title) {
-        await api.saveNote(noteId, title, content).catch(() => {});
+      if (noteId && titleRef.current) {
+        await api.saveNote(noteId, titleRef.current, contentRef.current).catch(() => {});
       }
-      await emit('floating-note-closed', { noteId });
-      await appWindow.close();
-    } catch (err) { logger.warn('[FloatingNoteView] 关闭失败:', err); }
-  }, [noteId, title, content]);
+      await emit('floating-note-closed', { noteId }).catch(() => {});
+    })();
+    await Promise.race([work, guard]);
+  }, [noteId]);
+
+  /**
+   * 右上角 X：先保存 + 通知，再用 destroy() 强制关闭。
+   * 关键：destroy() 不触发 CloseRequested 事件，因此不会与下面的
+   * onCloseRequested 重复，且无论事件语义如何都能保证关闭（彻底修复“关不掉”）。
+   */
+  const handleClose = useCallback(async () => {
+    await flushAndNotify().catch(() => {});
+    try {
+      await appWindow.destroy();
+    } catch {
+      try { await appWindow.close(); } catch (err) { logger.warn('[FloatingNoteView] 关闭失败:', err); }
+    }
+  }, [flushAndNotify]);
+
+  /**
+   * OS 级关闭（任务栏右键关闭 / Alt+F4）：Tauri 会 await 此 handler，
+   * 从而保证 emit 在窗口销毁前送达，笔记正常回原栏。
+   * 2s 兜底由 flushAndNotify 内部的 guard 保证窗口不会卡死。
+   */
+  useEffect(() => {
+    const un = appWindow.onCloseRequested(async () => {
+      await flushAndNotify().catch(() => {});
+    });
+    return () => { un.then((u) => u()).catch(() => {}); };
+  }, [flushAndNotify]);
 
   /** 切换置顶 */
   const handleTogglePin = useCallback(async () => {

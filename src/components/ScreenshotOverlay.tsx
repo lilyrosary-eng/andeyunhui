@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Save, Undo2, Eraser, Pen, Square, ArrowUpRight, Type, Trash2, StretchVertical } from "lucide-react";
+import { emitDropzoneChange } from "@/components/TransferStationPanel";
 
 interface Win {
   hwnd: number;
@@ -30,6 +31,21 @@ interface ScreenshotOverlayProps {
 type Tool = "pen" | "eraser" | "rect" | "arrow" | "text";
 
 const GREEN = "rgba(74, 222, 128, 0.95)";
+
+/** 把画布导出为 PNG 字节（用于标注层回传，透明区域压缩后极小）。 */
+const canvasToPng = (c: HTMLCanvasElement): Promise<Uint8Array> =>
+  new Promise((resolve, reject) => {
+    c.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("标注层 toBlob 失败"));
+          return;
+        }
+        blob.arrayBuffer().then((b) => resolve(new Uint8Array(b))).catch(reject);
+      },
+      "image/png",
+    );
+  });
 
 export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClose }: ScreenshotOverlayProps) {
   const [ready, setReady] = useState(false);
@@ -568,47 +584,85 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     };
   };
 
-  const save = async () => {
+  const save = () => {
     if (savingRef.current) return;
     savingRef.current = true;
-    setSaving(true);
-    try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      const name = `截图_${stamp}.png`;
-      const n = selNativeRef.current;
-      const hasDraw = !!drawRef.current && !isCanvasBlank(drawRef.current);
-      // 无标注普通截图：零传输快路径，Rust 端直接从 SHOT 原生字节裁剪并落盘，
-      // 彻底避免「整图 RGBA 经 IPC 传前端再回传」导致的漫长保存与界面无响应。
-      if (n && !hasDraw && !isLong) {
-        const ref = await invoke<string>("save_cropped", {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const name = `截图_${stamp}.png`;
+    const n = selNativeRef.current;
+    const hasDraw = !!drawRef.current && !isCanvasBlank(drawRef.current);
+    const noteIdLocal = noteId;
+
+    // 保存成功后：立即刷新图标栏中转站（让刚保存的截图秒出现），
+    // 若处于笔记页则同时把图片引用导入当前笔记
+    const finish = (ref: string | null) => {
+      if (ref) {
+        emitDropzoneChange();
+        if (noteIdLocal) {
+          import("@tauri-apps/api/event").then(({ emit }) =>
+            emit("screenshot-note-import", { ref, name, noteId: noteIdLocal }),
+          );
+        }
+      }
+    };
+    const fail = (err: unknown) => console.error("[截图] 保存失败:", err);
+
+    // 关键 UX：先异步合成（有标注时需从底图绘制，毫秒级），随后**立即关闭覆盖窗**，
+    // 把最慢的「剪贴板写入 + PNG 落盘」放到后台 Rust 线程执行，用户点击保存即可瞬间回到桌面，
+    // 无需傻等（即便后端已 async 化，等待结果本身仍是糟糕体验）。
+    const run = async () => {
+      try {
+        // 无标注普通截图：零传输快路径，立即关窗 + 后台保存
+        if (n && !hasDraw && !isLong) {
+          const p = invoke<string>("save_cropped", {
+            x: n.x,
+            y: n.y,
+            w: n.w,
+            h: n.h,
+            name,
+          });
+          onClose();
+          p.then(finish).catch(fail);
+          return;
+        }
+    // 有标注（非长截图）：前端只回传极小标注层 PNG，Rust 在 SHOT 原生裁剪图上合成，
+    // 彻底消除整屏 132MB 像素的 getImageData 冻结与 IPC 回传（极致优化）
+    if (n && hasDraw && !isLong) {
+      const draw = drawRef.current;
+      if (draw) {
+        const ann = await canvasToPng(draw);
+        const p = invoke<string>("save_annotated", {
           x: n.x,
           y: n.y,
           w: n.w,
           h: n.h,
+          annotation_png: ann,
           name,
         });
-        if (noteId) {
-          const { emit } = await import("@tauri-apps/api/event");
-          await emit("screenshot-note-import", { ref, name, noteId });
-        }
+        onClose();
+        p.then(finish).catch(fail);
         return;
       }
-      const composed = await composeBytes();
-      if (!composed) return;
-      const { bytes, width, height } = composed;
-      // 保存同时复制到剪贴板：save_screenshot 内部已写入剪贴板，并存入中转站
-      const ref = await invoke<string>("save_screenshot", { bytes, width, height, name });
-      if (noteId) {
-        const { emit } = await import("@tauri-apps/api/event");
-        await emit("screenshot-note-import", { ref, name, noteId });
-      }
-    } catch (err) {
-      console.error("[截图] 保存失败:", err);
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-      onClose();
     }
+    // 长截图（含长图标注）：保留画布合成路径
+    const composed = await composeBytes();
+        if (!composed) {
+          onClose();
+          return;
+        }
+        const { bytes, width, height } = composed;
+        const p = invoke<string>("save_screenshot", { bytes, width, height, name });
+        onClose();
+        p.then(finish).catch(fail);
+      } catch (err) {
+        fail(err);
+        onClose();
+      } finally {
+        savingRef.current = false;
+        setSaving(false);
+      }
+    };
+    run();
   };
 
   // 编辑态：建立 draw 画布尺寸（与底图一致）
@@ -793,9 +847,23 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   // 普通编辑：保持整屏为底（暗化），选区明亮浮起 + 浮动工具栏（微信式）
   if (selRect && base) {
     const tw = 360;
-    const above = selRect.y > 60;
-    const tx = Math.min(Math.max(selRect.x + selRect.w / 2 - tw / 2, 8), window.innerWidth - tw - 8);
-    const ty = above ? selRect.y - 52 : selRect.y + selRect.h + 12;
+    const toolbarH = 52;
+    const margin = 8;
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
+    // 工具栏优先置于选区下方；下方空间不够且上方够则置上方；都不足则贴底（允许压住选区，同微信全屏截图）。
+    // 关键修复：ty 必须 clamp 在视口内 —— 旧逻辑对全屏选区（selRect.y≈0 且 selRect.h≈窗口高）会把
+    // 工具栏放到 selRect.y+selRect.h+12 = 窗口高+12，超出视口被裁掉，导致「全屏截图时操作框看不见」。
+    const roomBelow = vh - (selRect.y + selRect.h) - 12;
+    const roomAbove = selRect.y - 12;
+    const toolbarBelow = roomBelow >= toolbarH || roomAbove < toolbarH;
+    let ty = toolbarBelow ? selRect.y + selRect.h + 12 : selRect.y - toolbarH - 4;
+    ty = Math.max(margin, Math.min(ty, vh - toolbarH - margin));
+    const tx = Math.min(Math.max(selRect.x + selRect.w / 2 - tw / 2, margin), vw - tw - margin);
+    // 尺寸标注与工具栏分居选区两侧；全屏时选区上沿无空间，则贴选区内部下沿，确保始终可见。
+    let labelTop = toolbarBelow ? selRect.y - 22 : selRect.y + selRect.h + 8;
+    if (toolbarBelow && selRect.y < 24) labelTop = selRect.y + selRect.h - 24;
+    labelTop = Math.max(margin, Math.min(labelTop, vh - 20));
     return (
       <div
         className="fixed inset-0 z-[9999] select-none"
@@ -818,7 +886,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
         {/* 浮动工具栏 */}
         <div className="absolute z-10" style={{ left: tx, top: ty }}>{toolbar}</div>
         {/* 选区尺寸标注 */}
-        <span className="absolute z-10 px-1.5 py-0.5 rounded bg-black/70 text-white text-[11px] tabular-nums" style={{ left: selRect.x, top: above ? selRect.y - 22 : selRect.y + selRect.h + 8 }}>
+        <span className="absolute z-10 px-1.5 py-0.5 rounded bg-black/70 text-white text-[11px] tabular-nums" style={{ left: selRect.x, top: labelTop }}>
           {Math.round(selRect.w * scale)} × {Math.round(selRect.h * scale)}
         </span>
         {textInputPos && (
