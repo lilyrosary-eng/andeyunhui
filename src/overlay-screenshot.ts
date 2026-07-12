@@ -6,6 +6,9 @@ import { ScreenshotOverlay } from "./components/ScreenshotOverlay";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import "./index.css";
+// 必须在 index.css 之后导入：用 !important 覆盖其 @layer base 里
+// body 设置的不透明背景（var(--main-panel-bg) ≈ 85% 白），消除触发瞬间「全屏变白」。
+import "./overlay-transparent.css";
 
 interface OverlayData {
   image: string;
@@ -30,14 +33,34 @@ function OverlayApp() {
         windows: payload.windows || [],
         noteId: payload.noteId || "",
       };
-      invoke<ArrayBuffer>("read_screenshot")
+      invoke<ArrayBuffer>("read_screenshot", { scale: meta.scale || 1 })
         .then((buf) => {
           if (cancelled) return;
-          const url = URL.createObjectURL(new Blob([buf], { type: "image/jpeg" }));
-          setData((prev) => {
-            if (prev && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
-            return { image: url, ...meta };
-          });
+          // 前 8 字节为逻辑分辨率宽/高（u32 LE），其后为已降采样的 RGBA 字节
+          // （Rust 侧按 scale 降采样，体积约为原图 1/scale²，前端不再建 33MP 画布）
+          const dv = new DataView(buf);
+          const w = dv.getUint32(0, true);
+          const h = dv.getUint32(4, true);
+          const rgba = new Uint8ClampedArray(buf, 8);
+          const src = document.createElement("canvas");
+          src.width = w;
+          src.height = h;
+          const sctx = src.getContext("2d");
+          if (!sctx) return;
+          sctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+          // 浏览器原生编码（release 级性能，不受 Tauri dev 放大），取代 Rust 侧 CatmullRom+JPEG
+          src.toBlob(
+            (blob) => {
+              if (!blob || cancelled) return;
+              const url = URL.createObjectURL(blob);
+              setData((prev) => {
+                if (prev && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+                return { image: url, ...meta };
+              });
+            },
+            "image/jpeg",
+            0.92,
+          );
         })
         .catch((err) => console.error("[截图] 读取失败:", err));
     });

@@ -1,5 +1,4 @@
-import { type ReactNode, useMemo } from 'react';
-import { SecondaryNavShell } from '@/components/SecondaryNavShell';
+import { type ReactNode, useMemo, Fragment } from 'react';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent } from '@/components/ui/context-menu';
 
 // ========== 类型 ==========
@@ -57,7 +56,8 @@ function BackArrowIcon() {
  * 嵌套导航内容区模板 — 支持多层钻取的侧边栏内容区。
  *
  * 与 ModuleSidebarShell（框架模板）分离：本组件仅负责内容区的层级导航逻辑，
- * 放在 ModuleSidebarShell 的 children 中使用。
+ * 直接返回内容 Fragment（返回按钮 + 当前层内容），不包裹滚动容器。
+ * 放在 ModuleSidebarShell 的 children 中使用，由 ModuleSidebarShell 的列表区管理滚动和布局。
  *
  * 用法示例：
  * ```tsx
@@ -105,10 +105,10 @@ export function NestedNavList({ layers, onBack, onItemClick }: NestedNavListProp
   }
 
   return (
-    <SecondaryNavShell>
+    <Fragment>
       {backButton}
       {layerContent}
-    </SecondaryNavShell>
+    </Fragment>
   );
 }
 

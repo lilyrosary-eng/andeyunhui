@@ -13,7 +13,6 @@
 //   映射退化为恒等，彻底消除偏移；且「捕获区域 == 覆盖窗显示区域」，边缘必然完整覆盖，无白边、无截不到。
 
 use base64::Engine;
-use image::imageops::FilterType;
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use serde::Serialize;
 use serde_json::json;
@@ -359,15 +358,15 @@ fn do_capture_region(x: i32, y: i32, w: i32, h: i32) -> Result<RgbaImage, String
             return Err("BitBlt / GetDIBits 失败".into());
         }
 
-        let mut rgba = vec![0u8; buf.len()];
-        for i in 0..((w as usize) * (h as usize)) {
-            let j = i * 4;
-            rgba[j] = buf[j + 2];
-            rgba[j + 1] = buf[j + 1];
-            rgba[j + 2] = buf[j];
-            rgba[j + 3] = 255;
+        // BGRA → RGBA：原地交换 R/B 并置 alpha=255，避免额外分配整屏缓冲
+        let len = buf.len();
+        let mut p = 0usize;
+        while p + 3 < len {
+            buf.swap(p, p + 2);
+            buf[p + 3] = 255;
+            p += 4;
         }
-        RgbaImage::from_raw(w as u32, h as u32, rgba)
+        RgbaImage::from_raw(w as u32, h as u32, buf)
             .ok_or_else(|| "图像构造失败".into())
     }
 }
@@ -406,14 +405,12 @@ impl Default for ScreenshotData {
 }
 
 /// 最近一次截屏的数据：
-/// - `preview`：降采样后的 JPEG（逻辑分辨率），供覆盖窗秒开显示（体积小、编码快）。
-/// - `raw`：原生物理分辨率的 RGBA 字节（整屏捕获区），保存/复制时直接在此字节上裁剪，
-///   不再编码/解码整张全屏 PNG —— 这是「触发不再卡几秒」「保存从数秒降到毫秒级」的关键。
+/// - `raw`：原生物理分辨率的 RGBA 字节（整屏捕获区）。保存/复制时直接在此字节上按选区裁剪，零编码；
+///   这正与微信/QQ 一致——抓屏后几乎不做图像处理，故能毫秒级响应。
 /// - `native_w/h`：raw 图的像素尺寸。
 /// - `native_ox/oy`：raw 图左上角对应的**屏幕物理坐标**（覆盖窗真实客户区原点），
 ///   用于把前端的物理选区换算到 native 图像坐标。
 pub struct Shot {
-    pub preview: Vec<u8>,
     pub raw: Vec<u8>,
     pub native_w: u32,
     pub native_h: u32,
@@ -488,50 +485,26 @@ pub fn start_screenshot(
 
     let (rx, ry, rw, rh) = virtual_desktop_rect();
 
-    // 用 HWND + SetWindowPos 同步定位覆盖窗到「所有显示器物理并集」，
-    // 随后取其真实「客户区」矩形（GetClientRect + ClientToScreen）作为捕获区域，
-    // 使捕获原点 == 覆盖窗客户区左上角，预览图 object-fill 1:1 铺满后「图像像素 ≡ 屏幕区域」，
-    // 绿框与截图区域彻底对齐，根除「几 px 偏移」（DWM 隐形边框 / 多屏负坐标）。
-    let hwnd = match overlay.hwnd().ok() {
-        Some(h) => h,
-        None => {
-            return Err("无法获取覆盖窗句柄".into());
-        }
+    // 用「运行时 scale_factor」把覆盖窗精确设为全虚拟桌面物理尺寸。
+    // 关键：创建期用的是 min_monitor_scale 换算逻辑尺寸，若与窗口实际所处显示器的
+    // scale 不一致，物理尺寸会比真实桌面少几 px → 捕获区右下缺几 px、底部操作框被截断
+    // （即用户反馈的「全屏截图时底部几 px 截断操作框」）。改用同一 scale 设窗 + 捕获全桌面，
+    // 窗口必然精确铺满，且 ox/oy 取桌面原点，二者自洽。
+    // 先定位到目标坐标，再读 scale（确保取的是最终所处显示器的缩放比），最后按同 scale 设窗。
+    let _ = overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: rx, y: ry }));
+    let scale = match overlay.scale_factor() {
+        Ok(s) => s,
+        Err(_) => return Err("无法获取缩放比".into()),
     };
-    let hw = hwnd.0 as winapi::shared::windef::HWND;
-    unsafe {
-        winapi::um::winuser::SetWindowPos(
-            hw,
-            winapi::um::winuser::HWND_TOPMOST,
-            rx,
-            ry,
-            rw,
-            rh,
-            winapi::um::winuser::SWP_NOACTIVATE
-                | winapi::um::winuser::SWP_NOREDRAW
-                | winapi::um::winuser::SWP_NOSENDCHANGING,
-        );
-    }
-    let (mut ox, mut oy, mut ow, mut oh) = (rx, ry, rw, rh);
-    unsafe {
-        let mut client: winapi::shared::windef::RECT = std::mem::zeroed();
-        if winapi::um::winuser::GetClientRect(hw, &mut client) != 0 {
-            let mut pt: winapi::shared::windef::POINT = std::mem::zeroed();
-            if winapi::um::winuser::ClientToScreen(hw, &mut pt) != 0 {
-                ox = pt.x;
-                oy = pt.y;
-                ow = client.right - client.left;
-                oh = client.bottom - client.top;
-            }
-        }
-    }
+    let lw = rw as f64 / scale;
+    let lh = rh as f64 / scale;
+    let _ = overlay.set_size(tauri::Size::Logical(tauri::LogicalSize { width: lw, height: lh }));
 
-    let scale = match overlay.scale_factor().ok() {
-        Some(s) => s,
-        None => {
-            return Err("无法获取缩放比".into());
-        }
-    };
+    // 捕获区域＝权威的全虚拟桌面矩形；ox/oy 同步为桌面原点，与前端 toPhys 映射一致。
+    let ox = rx;
+    let oy = ry;
+    let ow = rw;
+    let oh = rh;
 
     // 捕获区域：DC 坐标系以虚拟桌面原点 (rx,ry) 为 (0,0)，故屏幕 (ox,oy) 对应 DC (ox-rx, oy-ry)
     let full = match capture_region(ox - rx, oy - ry, ow, oh) {
@@ -541,31 +514,13 @@ pub fn start_screenshot(
             return Err(e);
         }
     };
-    // 原生 RGBA 原始字节直接留存（保存时按选区裁剪，不再编码/解码整张全屏 PNG，毫秒级）
+    // 留存「原生物理分辨率 RGBA 字节」：保存/复制时直接在此字节上按选区裁剪，零编码。
+    // 预览不再在 Rust 侧做 CatmullRom 缩放 + JPEG 编码（debug 下最慢的两步），
+    // 改为把原始 RGBA 交给前端，由浏览器 GPU 缩放 + 原生编码显示（性能不受 Tauri dev 放大）。
     let raw = full.as_raw().to_vec();
-    let full_dyn = DynamicImage::ImageRgba8(full);
-
-    // 预览：降采样到逻辑分辨率 + JPEG（编码快、体积小，是「截图秒开」的关键）
-    let nw = ((ow as f64) / scale).round().max(1.0) as u32;
-    let nh = ((oh as f64) / scale).round().max(1.0) as u32;
-    let preview_dyn: DynamicImage = if nw < (ow as u32) || nh < (oh as u32) {
-        full_dyn.resize(nw, nh, FilterType::CatmullRom)
-    } else {
-        full_dyn
-    };
-    let preview_rgb = preview_dyn.to_rgb8();
-    let mut pv_buf = Cursor::new(Vec::new());
-    if let Err(e) = DynamicImage::ImageRgb8(preview_rgb)
-        .write_to(&mut pv_buf, ImageFormat::Jpeg)
-    {
-        eprintln!("[截图] 预览 JPEG 编码失败: {}", e);
-        return Err(format!("预览编码失败: {}", e));
-    }
-
     {
         let mut slot = SHOT.lock().expect("截图状态锁失败");
         *slot = Some(Shot {
-            preview: pv_buf.into_inner(),
             raw,
             native_w: ow as u32,
             native_h: oh as u32,
@@ -594,14 +549,36 @@ pub fn start_screenshot(
     Ok(())
 }
 
-/// 覆盖窗读取预览 JPEG（二进制通道，前端 new Blob 解码）。
+/// 覆盖窗读取截图预览：前 8 字节为宽/高（u32 LE，逻辑分辨率），其后为 RGBA 字节。
+/// 在 Rust 侧直接「最近邻」降采样到逻辑分辨率（≈窗口 CSS 像素），体积约为原图的 1/scale²，
+/// 大幅减少 IPC 传输与前端建图开销（这是截图「2-3×微信」耗时的主要来源之一）；
+/// 裁剪/保存仍走 SHOT 原生字节（save_cropped / crop_native_rgba），不损失最终清晰度。
 #[tauri::command]
-pub fn read_screenshot() -> Result<tauri::ipc::Response, String> {
+pub fn read_screenshot(scale: f64) -> Result<tauri::ipc::Response, String> {
     let slot = SHOT.lock().map_err(|e| format!("锁失败: {}", e))?;
     let shot = slot
         .as_ref()
         .ok_or_else(|| "尚无截屏数据，请先触发截图".to_string())?;
-    Ok(tauri::ipc::Response::new(shot.preview.clone()))
+    let fw = shot.native_w as usize;
+    let fh = shot.native_h as usize;
+    // 目标逻辑分辨率：整屏物理 ÷ scale，再用最近邻重采样铺满，与窗口 CSS 尺寸 1:1 对齐。
+    let pw = ((fw as f64 / scale.max(1.0)).round().max(1.0)) as usize;
+    let ph = ((fh as f64 / scale.max(1.0)).round().max(1.0)) as usize;
+    let src = &shot.raw;
+    let row = fw * 4;
+    let mut out: Vec<u8> = Vec::with_capacity(8 + pw * ph * 4);
+    out.extend_from_slice(&(pw as u32).to_le_bytes());
+    out.extend_from_slice(&(ph as u32).to_le_bytes());
+    for py in 0..ph {
+        let sy = ((py as f64 * fh as f64 / ph as f64).round() as usize).min(fh - 1);
+        let base = sy * row;
+        for px in 0..pw {
+            let sx = ((px as f64 * fw as f64 / pw as f64).round() as usize).min(fw - 1);
+            let o = base + sx * 4;
+            out.extend_from_slice(&src[o..o + 4]);
+        }
+    }
+    Ok(tauri::ipc::Response::new(out))
 }
 
 /// 按「原生物理像素」选区从原生 RGBA 字节重裁，返回 PNG（保证最终输出清晰，而非降采样预览）。
@@ -677,27 +654,16 @@ pub fn crop_native_rgba(
 /// - `bytes` 为原生 RGBA 时直接用 `width/height` 构造图像，零解码；
 ///   仅当 `bytes` 以 PNG 魔数开头（长截图等旧路径）时才回退到解码，保证兼容。
 ///   注意：PNG 路径下传入的 `width` / `height` 参数被忽略（尺寸从 PNG 文件头解码），仅 RGBA 直传路径使用这两个参数。
-#[tauri::command]
-pub fn save_screenshot(
+/// 把已合成的 RGBA 图像写入剪贴板 + 落盘中转站，返回 `localimg://` 引用。
+/// `save_screenshot`（前端传像素）与 `save_cropped`（Rust 端直裁）共用，避免逻辑重复。
+fn write_clipboard_and_dropzone(
     app: tauri::AppHandle,
-    bytes: Vec<u8>,
-    width: u32,
-    height: u32,
+    rgba: RgbaImage,
     name: String,
 ) -> Result<String, String> {
-    // 1) 还原 RGBA 图像（原始像素直通，跳过 PNG 编解码）
-    let rgba = if bytes.starts_with(b"\x89PNG") {
-        // 兼容长截图：其 bytes 仍是 PNG
-        image::load_from_memory(&bytes)
-            .map_err(|e| format!("图片解码失败: {}", e))?
-            .into_rgba8()
-    } else {
-        RgbaImage::from_raw(width, height, bytes)
-            .ok_or_else(|| "图像尺寸与字节长度不匹配，保存失败".to_string())?
-    };
     let (w, h) = rgba.dimensions();
 
-    // 2) 写入剪贴板（直传原生 RGBA，arboard 内部按位图写入，无额外编码）
+    // 1) 写入剪贴板（直传原生 RGBA，arboard 内部按位图写入，无额外编码）
     let raw = rgba.into_raw();
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法访问剪贴板: {}", e))?;
     let data = arboard::ImageData {
@@ -708,7 +674,7 @@ pub fn save_screenshot(
     cb.set_image(data)
         .map_err(|e| format!("写入剪贴板失败: {}", e))?;
 
-    // 3) 编码一次 PNG 落盘中转站（保存的最终产物必须是 PNG，仅此一次编码）
+    // 2) 编码一次 PNG 落盘中转站（保存的最终产物必须是 PNG，仅此一次编码）
     let png = {
         let img = image::RgbaImage::from_raw(w, h, raw)
             .ok_or_else(|| "重建图像失败".to_string())?;
@@ -719,7 +685,7 @@ pub fn save_screenshot(
         buf.into_inner()
     };
 
-    // 4) 存入中转站（bytes 已是 PNG，直接落盘，不再 base64 往返）
+    // 3) 存入中转站（bytes 已是 PNG，直接落盘，不再 base64 往返）
     let tmp = std::env::temp_dir().join(format!(
         "andeng_shot_{}_{}",
         std::time::SystemTime::now()
@@ -731,7 +697,7 @@ pub fn save_screenshot(
     std::fs::write(&tmp, &png).map_err(|e| format!("写临时文件失败: {}", e))?;
     let tmp_str = tmp.to_string_lossy().to_string();
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let dest = crate::commands::copy_file_to_dropzone(&app_data, &tmp_str, Some(&name));
+    let dest = crate::commands::copy_file_to_dropzone(&app_data, &tmp_str, Some(&name), Some(png));
     let _ = std::fs::remove_file(&tmp);
     match dest {
         Ok(d) => Ok(format!(
@@ -740,6 +706,70 @@ pub fn save_screenshot(
         )),
         Err(e) => Err(e),
     }
+}
+
+/// 一键保存：把合成好的图像「写入剪贴板 + 存入中转站」，返回 `localimg://` 引用。
+///
+/// 性能（毫秒级保存的关键）：
+/// - 前端直接传**原生 RGBA 字节**（来自 `crop_native_rgba` 或 canvas.getImageData），
+///   不再走「前端 PNG 编码 → IPC base64 → Rust 再解码」这一最慢环节；
+/// - `bytes` 为原生 RGBA 时直接用 `width/height` 构造图像，零解码；
+///   仅当 `bytes` 以 PNG 魔数开头（长截图等旧路径）时才回退到解码，保证兼容。
+///   注意：PNG 路径下传入的 `width` / `height` 参数被忽略（尺寸从 PNG 文件头解码），仅 RGBA 直传路径使用这两个参数。
+#[tauri::command]
+pub fn save_screenshot(
+    app: tauri::AppHandle,
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    name: String,
+) -> Result<String, String> {
+    // 还原 RGBA 图像（原始像素直通，跳过 PNG 编解码）
+    let rgba = if bytes.starts_with(b"\x89PNG") {
+        // 兼容长截图：其 bytes 仍是 PNG
+        image::load_from_memory(&bytes)
+            .map_err(|e| format!("图片解码失败: {}", e))?
+            .into_rgba8()
+    } else {
+        RgbaImage::from_raw(width, height, bytes)
+            .ok_or_else(|| "图像尺寸与字节长度不匹配，保存失败".to_string())?
+    };
+    write_clipboard_and_dropzone(app, rgba, name)
+}
+
+/// 无标注普通截图快路径：直接从 SHOT 原生 RGBA 字节按选区裁剪，
+/// 全程在 Rust 端完成（剪贴板 + 落盘中转站），前端只传一个极小矩形，
+/// 彻底省去「整图 RGBA 经 IPC 传给前端、再由前端回传」这一最慢、最易卡死（无响应）的环节。
+#[tauri::command]
+pub fn save_cropped(
+    app: tauri::AppHandle,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    name: String,
+) -> Result<String, String> {
+    let slot = SHOT.lock().map_err(|e| format!("锁失败: {}", e))?;
+    let shot = slot
+        .as_ref()
+        .ok_or_else(|| "尚无截屏数据，请先触发截图".to_string())?;
+    let iw = shot.native_w as i32;
+    let ih = shot.native_h as i32;
+    // 选区物理坐标 → native 图像坐标（减去捕获原点），与 crop_native 同逻辑
+    let x0 = (x - shot.native_ox).max(0).min(iw - 1);
+    let y0 = (y - shot.native_oy).max(0).min(ih - 1);
+    let ww = ((w as u32).min((iw - x0) as u32)).max(1);
+    let hh = ((h as u32).min((ih - y0) as u32)).max(1);
+    let row_bytes = iw as usize * 4;
+    let mut out: Vec<u8> = Vec::with_capacity((ww as usize) * (hh as usize) * 4);
+    let src = &shot.raw;
+    for yy in 0..(hh as usize) {
+        let start = ((y0 as usize + yy) * row_bytes) + (x0 as usize * 4);
+        out.extend_from_slice(&src[start..start + (ww as usize) * 4]);
+    }
+    let img = RgbaImage::from_raw(ww, hh, out)
+        .ok_or_else(|| "裁剪图像构造失败".to_string())?;
+    write_clipboard_and_dropzone(app, img, name)
 }
 
 /// 长截图：以「可见窗口 PrintWindow(flag 0) + 程序化滚动 + BitBlt 逐屏拼接」的方式，
