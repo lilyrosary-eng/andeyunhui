@@ -1,9 +1,10 @@
 /// <reference path="../../global.d.ts" />
 // 阅读视图 — CSS 多栏分页 + 三种布局模式
-// 横板：单页左右翻 | 竖版：章节拼接滚轮上下翻 | 双栏：左右对页仿真书
+// 横板/双栏：所有章节拼接渲染，无缝翻页（拼接+动态缓存）
+// 竖版：单章节滚动，到底部自动下一章
 
 const React = window.__HOST_REACT__;
-const { useState, useRef, useEffect, useLayoutEffect, useCallback } = React;
+const { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } = React;
 
 interface ReadingChapter {
   id: string;
@@ -20,8 +21,8 @@ interface ReadingBook {
 interface ReadingViewProps {
   book: ReadingBook;
   onBack: () => void;
-  // 外部章节索引（由侧边栏章节列表点击控制），不传则内部管理
   externalChapterIndex?: number;
+  onChapterChange?: (index: number) => void;
 }
 
 // ============ 布局常量 ============
@@ -29,162 +30,230 @@ const GAP = 48;
 const PAD = 44;
 const DRAG_THRESHOLD = 60;
 const WHEEL_COOLDOWN = 280;
-const BOOK_GUTTER = 24; // 双栏中缝
+const BOOK_GUTTER = 24;
 
 type LayoutMode = 'horizontal' | 'vertical' | 'book';
 
-export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewProps) {
-  const [chapterIndex, setChapterIndex] = useState(0);
-  const [page, setPage] = useState(0);
+interface ChapterBoundary {
+  index: number;
+  startPage: number;
+  endPage: number;
+}
+
+export function ReadingView({ book, onBack, externalChapterIndex, onChapterChange }: ReadingViewProps) {
+  // 分页状态（横板/双栏模式）
+  const [absolutePage, setAbsolutePage] = useState(0);
   const [pageCount, setPageCount] = useState(1);
   const [pageWidth, setPageWidth] = useState(0);
+
+  // UI 状态
   const [dragOffset, setDragOffset] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [noTransition, setNoTransition] = useState(false);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('horizontal');
+
+  // 章节追踪
+  const [chapterIndex, setChapterIndex] = useState(0);
+  const [verticalChapter, setVerticalChapter] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const verticalRef = useRef<HTMLDivElement | null>(null);
   const dragState = useRef({ startX: 0, active: false, offset: 0 });
   const wheelLock = useRef(0);
-  const pendingIntent = useRef<'first' | 'last' | null>(null);
-  const landOnLastPage = useRef(false);
+  const boundariesRef = useRef<ChapterBoundary[]>([]);
+  const pendingJumpRef = useRef<number | null>(null);
 
-  // 书籍切换 → 重置
-  useEffect(() => {
-    setChapterIndex(0);
-    setPage(0);
-    // 竖版模式滚到顶部
-    if (verticalRef.current) verticalRef.current.scrollTop = 0;
-  }, [book.filePath]);
-
-  // 外部章节索引变化（侧边栏点击章节）→ 同步内部状态
-  useEffect(() => {
-    if (externalChapterIndex !== undefined && externalChapterIndex !== chapterIndex) {
-      setChapterIndex(externalChapterIndex);
-      setPage(0);
-    }
-  }, [externalChapterIndex]);
-
-  const safeChapterIndex = Math.max(0, Math.min(chapterIndex, book.chapters.length - 1));
-  const chapter = book.chapters[safeChapterIndex];
   const isBookMode = layoutMode === 'book';
-  // 双栏模式下每"逻辑页" = 2 个 CSS column
   const pagesPerStep = isBookMode ? 2 : 1;
+  const isPaginatedMode = layoutMode !== 'vertical';
 
-  // ============ 测量页数 ============
+  // ============ 拼接 HTML：所有章节合并到一个容器 ============
+  const combinedHtml = useMemo(() => {
+    if (book.chapters.length === 0) return '';
+    return book.chapters.map((ch, idx) =>
+      `<div class="chapter-marker" data-chapter-index="${idx}">${ch.content || ''}</div>`
+    ).join('');
+  }, [book.chapters]);
+
+  const currentChapter = book.chapters[chapterIndex] || book.chapters[0] || { title: '—', content: '' };
+
+  // ============ 测量页数和章节边界 ============
+  // offsetLeft 不受 CSS transform 影响，可直接在带 transform 的容器上读取
   const measure = useCallback(() => {
     const vp = viewportRef.current;
     const c = contentRef.current;
     if (!vp || !c) return;
     const vw = vp.clientWidth;
     const colCount = isBookMode ? 2 : 1;
-    const gutter = isBookMode ? BOOK_GUTTER : 0;
-    const raw = colCount * ((vw - 2 * PAD - gutter) / colCount) + gutter;
-    const pw = Math.max(200, (vw - 2 * PAD - (isBookMode ? gutter : 0)) / colCount);
+    const colGap = isBookMode ? BOOK_GUTTER : GAP;
+    const pw = Math.max(200, (vw - 2 * PAD - (colCount - 1) * colGap) / colCount);
     setPageWidth(pw);
-    const scrollW = c.scrollWidth;
-    const step = pw + GAP;
-    const rawPages = Math.max(1, Math.ceil(scrollW / step));
-    let pages = rawPages;
-    if (pages > 1 && (pages - 1) * step >= scrollW - 1) pages -= 1;
-    // 双栏：逻辑页数 = ceil(totalColumns / 2)
-    if (isBookMode) pages = Math.max(1, Math.ceil(pages / 2));
-    setPageCount(pages);
-    const intent = pendingIntent.current;
-    pendingIntent.current = null;
-    if (intent === 'last') {
-      setNoTransition(true);
-      setPage(pages - 1);
-      requestAnimationFrame(() => setNoTransition(false));
-    } else if (intent === 'first') {
-      setPage(0);
-    } else {
-      setPage((p) => Math.min(p, pages - 1));
-    }
-  }, [isBookMode]);
 
+    const step = (pw + colGap) * pagesPerStep;
+    const scrollW = Math.max(0, c.scrollWidth - 2 * PAD);
+    let pages = Math.max(1, Math.ceil(scrollW / step));
+    // 容差：消除浮点误差导致的空白尾页
+    if (pages > 1 && (pages - 1) * step >= scrollW - 1) pages -= 1;
+    setPageCount(pages);
+
+    // 测量章节边界：通过 offsetLeft 获取每个 chapter-marker 的水平位置
+    const markers = c.querySelectorAll('.chapter-marker');
+    const boundaries: ChapterBoundary[] = [];
+    for (let i = 0; i < markers.length; i++) {
+      const m = markers[i] as HTMLElement;
+      const startOffset = m.offsetLeft;
+      let endOffset: number;
+      if (i < markers.length - 1) {
+        endOffset = (markers[i + 1] as HTMLElement).offsetLeft;
+      } else {
+        endOffset = scrollW;
+      }
+      const startPage = Math.max(0, Math.floor(startOffset / step));
+      const endPage = Math.max(startPage, Math.ceil(endOffset / step) - 1);
+      const idx = parseInt(m.getAttribute('data-chapter-index') || '0', 10);
+      boundaries.push({ index: idx, startPage, endPage });
+    }
+    boundariesRef.current = boundaries;
+
+    // 处理待跳转
+    if (pendingJumpRef.current !== null) {
+      const targetIdx = pendingJumpRef.current;
+      pendingJumpRef.current = null;
+      const b = boundaries.find(x => x.index === targetIdx);
+      if (b) {
+        setNoTransition(true);
+        setAbsolutePage(b.startPage);
+        requestAnimationFrame(() => setNoTransition(false));
+        return;
+      }
+    }
+
+    // 限制当前页在有效范围内
+    setAbsolutePage((p) => Math.min(p, pages - 1));
+  }, [isBookMode, pagesPerStep]);
+
+  // ============ 同步测量：在 useLayoutEffect 中直接调用（消除弹簧动画）============
+  // useLayoutEffect 在 DOM 变更后、浏览器绘制前同步执行
+  // 在此设置状态，用户永远看不到中间帧 → 无弹簧动画
   useLayoutEffect(() => {
-    pendingIntent.current = landOnLastPage.current ? 'last' : 'first';
-    landOnLastPage.current = false;
-    setDragOffset(0);
-    const id = requestAnimationFrame(measure);
-    return () => cancelAnimationFrame(id);
-  }, [chapterIndex, measure]);
+    if (!isPaginatedMode) return;
+    measure();
+  }, [combinedHtml, isPaginatedMode, measure]);
 
   // 布局模式切换
   useEffect(() => {
-    measure();
-  }, [layoutMode, measure]);
+    if (isPaginatedMode) measure();
+  }, [layoutMode, measure, isPaginatedMode]);
 
+  // 尺寸变化
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => measure());
+    const ro = new ResizeObserver(() => { if (isPaginatedMode) measure(); });
     ro.observe(vp);
     return () => ro.disconnect();
-  }, [measure]);
+  }, [measure, isPaginatedMode]);
 
-  // ============ 翻页（双栏模式步进 2） ============
-  const step = (pageWidth + GAP) * pagesPerStep;
+  // ============ 从 absolutePage 推导 chapterIndex ============
+  useEffect(() => {
+    if (!isPaginatedMode) return;
+    const boundaries = boundariesRef.current;
+    if (boundaries.length === 0) return;
+    const current = boundaries.find(b => absolutePage >= b.startPage && absolutePage <= b.endPage);
+    if (current && current.index !== chapterIndex) {
+      setChapterIndex(current.index);
+    }
+  }, [absolutePage, isPaginatedMode, chapterIndex]);
+
+  // 通知父组件章节变化
+  const reportedChapter = isPaginatedMode ? chapterIndex : verticalChapter;
+  useEffect(() => {
+    onChapterChange?.(reportedChapter);
+  }, [reportedChapter, onChapterChange]);
+
+  // ============ 外部章节索引（侧边栏点击）============
+  useEffect(() => {
+    if (externalChapterIndex === undefined) return;
+    if (isPaginatedMode) {
+      if (externalChapterIndex !== chapterIndex) {
+        pendingJumpRef.current = externalChapterIndex;
+        setNoTransition(true);
+        measure();
+      }
+    } else {
+      if (externalChapterIndex !== verticalChapter) {
+        setVerticalChapter(externalChapterIndex);
+      }
+    }
+  }, [externalChapterIndex, isPaginatedMode, measure, chapterIndex, verticalChapter]);
+
+  // 书籍切换重置
+  useEffect(() => {
+    setAbsolutePage(0);
+    setChapterIndex(0);
+    setVerticalChapter(0);
+    pendingJumpRef.current = null;
+    if (verticalRef.current) verticalRef.current.scrollTop = 0;
+  }, [book.filePath]);
+
+  // ============ 翻页 ============
+  const colGapForStep = isBookMode ? BOOK_GUTTER : GAP;
+  const step = (pageWidth + colGapForStep) * pagesPerStep;
 
   const nextPage = useCallback(() => {
-    setPage((p) => {
-      if (p < pageCount - 1) return p + 1;
-      if (chapterIndex < book.chapters.length - 1) {
-        setChapterIndex(chapterIndex + 1);
-        return 0;
-      }
-      return p;
-    });
-  }, [pageCount, chapterIndex, book.chapters.length]);
+    setAbsolutePage((p) => Math.min(p + 1, pageCount - 1));
+  }, [pageCount]);
 
   const prevPage = useCallback(() => {
-    setPage((p) => {
-      if (p > 0) return p - 1;
-      if (chapterIndex > 0) {
-        landOnLastPage.current = true;
-        setChapterIndex(chapterIndex - 1);
-      }
-      return p;
-    });
-  }, [chapterIndex]);
+    setAbsolutePage((p) => Math.max(p - 1, 0));
+  }, []);
 
   const goPrevChapter = useCallback(() => {
-    if (chapterIndex > 0) {
-      landOnLastPage.current = true;
-      setChapterIndex(chapterIndex - 1);
+    if (!isPaginatedMode) {
+      if (verticalChapter > 0) setVerticalChapter(verticalChapter - 1);
+      return;
     }
-  }, [chapterIndex]);
+    if (chapterIndex > 0) {
+      pendingJumpRef.current = chapterIndex - 1;
+      setNoTransition(true);
+      measure();
+    }
+  }, [isPaginatedMode, chapterIndex, verticalChapter, measure]);
 
   const goNextChapter = useCallback(() => {
-    if (chapterIndex < book.chapters.length - 1) {
-      setChapterIndex(chapterIndex + 1);
+    if (!isPaginatedMode) {
+      if (verticalChapter < book.chapters.length - 1) setVerticalChapter(verticalChapter + 1);
+      return;
     }
-  }, [chapterIndex, book.chapters.length]);
+    if (chapterIndex < book.chapters.length - 1) {
+      pendingJumpRef.current = chapterIndex + 1;
+      setNoTransition(true);
+      measure();
+    }
+  }, [isPaginatedMode, chapterIndex, book.chapters.length, verticalChapter, measure]);
 
   // ============ 键盘 ============
   useEffect(() => {
+    if (!isPaginatedMode) return;
     const onKey = (e: KeyboardEvent) => {
-      if (layoutMode === 'vertical') return;
       switch (e.key) {
         case 'ArrowRight':
         case 'PageDown':
         case ' ': e.preventDefault(); nextPage(); break;
         case 'ArrowLeft':
         case 'PageUp': e.preventDefault(); prevPage(); break;
-        case 'Home': e.preventDefault(); setPage(0); break;
-        case 'End': e.preventDefault(); setPage(pageCount - 1); break;
+        case 'Home': e.preventDefault(); setAbsolutePage(0); break;
+        case 'End': e.preventDefault(); setAbsolutePage(pageCount - 1); break;
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [nextPage, prevPage, pageCount, layoutMode]);
+  }, [nextPage, prevPage, pageCount, isPaginatedMode]);
 
-  // ============ 滚轮（竖版用原生滚动，横板/双栏翻页）============
+  // ============ 滚轮 ============
   const onWheel = (e: React.WheelEvent) => {
-    if (layoutMode === 'vertical') return;
+    if (!isPaginatedMode) return;
     const now = Date.now();
     if (now < wheelLock.current) return;
     const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
@@ -194,20 +263,31 @@ export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewP
     else prevPage();
   };
 
+  // ============ 竖版滚动 ============
+  const onVerticalScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
+    if (atBottom && verticalChapter < book.chapters.length - 1) {
+      const now = Date.now();
+      if (now < wheelLock.current) return;
+      wheelLock.current = now + 600;
+      setVerticalChapter(verticalChapter + 1);
+      requestAnimationFrame(() => { if (verticalRef.current) verticalRef.current.scrollTop = 0; });
+    }
+  }, [verticalChapter, book.chapters.length]);
+
   // ============ 拖拽 ============
   const onPointerDown = (e: React.PointerEvent) => {
-    if (e.button !== 0 || layoutMode === 'vertical') return;
+    if (e.button !== 0 || !isPaginatedMode) return;
     dragState.current = { startX: e.clientX, active: true, offset: 0 };
     setDragging(true);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   };
-
   const onPointerMove = (e: React.PointerEvent) => {
     if (!dragState.current.active) return;
     dragState.current.offset = e.clientX - dragState.current.startX;
     setDragOffset(dragState.current.offset);
   };
-
   const finishDrag = (e: React.PointerEvent) => {
     if (!dragState.current.active) return;
     const offset = dragState.current.offset;
@@ -220,11 +300,10 @@ export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewP
   };
 
   // ============ 渲染 ============
-  const translate = -page * step + dragOffset;
-  const canPrev = page > 0 || chapterIndex > 0;
-  const canNext = page < pageCount - 1 || chapterIndex < book.chapters.length - 1;
+  const translate = -absolutePage * step + dragOffset;
+  const canPrev = absolutePage > 0;
+  const canNext = absolutePage < pageCount - 1;
 
-  // 空章节：加载中
   if (book.chapters.length === 0) {
     return (
       <div className="h-full flex items-center justify-center bg-[#f5f5f0] dark:bg-[#1c1917]">
@@ -236,8 +315,8 @@ export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewP
     );
   }
 
-  // 竖版已加载但内容为空
-  const emptyChapter = !chapter || !chapter.content;
+  const verticalChapterData = book.chapters[verticalChapter] || book.chapters[0];
+  const emptyVerticalChapter = !verticalChapterData || !verticalChapterData.content;
 
   return (
     <div className="h-full flex flex-col bg-[#f5f5f0] dark:bg-[#1c1917]">
@@ -253,7 +332,7 @@ export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewP
         <div className="min-w-0 flex-1">
           <h1 className="text-base font-semibold truncate text-neutral-800 dark:text-stone-100">{book.title}</h1>
           <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
-            {chapter?.title || '—'}
+            {currentChapter?.title || '—'}
             {book.author ? ` · ${book.author}` : ''}
             {book.chapters.length > 0 ? ` · ${book.chapters.length} 章` : ''}
           </p>
@@ -276,59 +355,14 @@ export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewP
       <div
         ref={viewportRef}
         className="flex-1 overflow-hidden relative"
-        style={{ touchAction: layoutMode === 'vertical' ? 'auto' : 'none' }}
+        style={{ touchAction: isPaginatedMode ? 'none' : 'auto' }}
         onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={finishDrag}
         onPointerCancel={finishDrag}
       >
-        {layoutMode === 'vertical' ? (
-          /* 竖版：章节拼接，连贯滚轮 */
-          <div ref={verticalRef} className="h-full overflow-y-auto scroll-smooth">
-            {book.chapters.length === 0 ? (
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center text-neutral-400 dark:text-stone-500">
-                  <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin mx-auto mb-2" />
-                  <p className="text-xs">正在加载内容...</p>
-                </div>
-              </div>
-            ) : (
-              <div className="max-w-2xl mx-auto px-6 py-8 space-y-6">
-                {book.chapters.map((ch, i) => {
-                  const hasContent = ch.content && ch.content.length > 20;
-                  return (
-                    <div key={ch.id} id={`ch-${ch.id}`}>
-                      {i > 0 && (
-                        <div className="flex items-center gap-3 mb-4 mt-2">
-                          <div className="flex-1 h-px bg-neutral-200 dark:bg-stone-700" />
-                          <span className="text-xs text-neutral-400 dark:text-stone-500 flex-shrink-0 font-medium">{ch.title}</span>
-                          <div className="flex-1 h-px bg-neutral-200 dark:bg-stone-700" />
-                        </div>
-                      )}
-                      {hasContent ? (
-                        <div
-                          className="prose prose-sm text-neutral-700 dark:text-stone-300 leading-relaxed"
-                          style={{ fontSize: '16px', lineHeight: 1.8 } as Record<string, string | number>}
-                          dangerouslySetInnerHTML={{ __html: ch.content }}
-                        />
-                      ) : (
-                        <div className="py-12 text-center">
-                          <div className="w-4 h-4 border-2 border-neutral-300 dark:border-stone-600 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
-                          <p className="text-xs text-neutral-400 dark:text-stone-500">加载中 ({ch.title})</p>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-                {/* 章节进度 */}
-                <div className="pt-6 pb-12 text-center text-xs text-neutral-400 dark:text-stone-500">
-                  共 {book.chapters.length} 章 · {book.title}
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
+        {isPaginatedMode ? (
           <>
             {/* 翻页热区 */}
             {!dragging && (
@@ -337,40 +371,48 @@ export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewP
                 {canNext && <button aria-label="下一页" onClick={nextPage} className="absolute right-0 top-0 bottom-0 w-[10%] z-10 cursor-e-resize bg-transparent" />}
               </>
             )}
-            {/* 双栏模式：宽容器显示两个 CSS column，视觉中缝 */}
+            {/* 双栏模式：所有章节拼接渲染 */}
             {isBookMode ? (
-              <div className="h-full flex items-center justify-center overflow-hidden">
-                <div
-                  className="reader-columns-book h-full"
-                  style={{
-                    width: `${pageWidth * 2 + BOOK_GUTTER}px`,
-                    columnWidth: `${pageWidth}px`,
-                    columnGap: `${GAP + BOOK_GUTTER / 2}px`,
-                    columnFill: 'auto',
-                    padding: `24px ${PAD}px`,
-                    transform: `translateX(${-(page * pagesPerStep) * (pageWidth + GAP + BOOK_GUTTER / 4) + dragOffset}px)`,
-                    transition: dragging || noTransition ? 'none' : 'transform 0.28s ease',
-                    '--reader-font-size': '16px',
-                  } as Record<string, string | number>}
-                  dangerouslySetInnerHTML={{ __html: chapter?.content || '' }}
-                />
-              </div>
-            ) : (
-              /* 横板：单页 */
+              <div className="h-full overflow-hidden relative">
                 <div
                   ref={contentRef}
-                  className="reader-columns h-full"
+                  className="reader-columns-book h-full"
                   style={{
+                    width: '100%',
                     columnWidth: `${pageWidth}px`,
-                    columnGap: `${GAP}px`,
+                    columnGap: `${BOOK_GUTTER}px`,
                     columnFill: 'auto',
+                    columnRule: '1px solid rgba(128,128,128,0.25)',
                     padding: `24px ${PAD}px`,
                     transform: `translateX(${translate}px)`,
                     transition: dragging || noTransition ? 'none' : 'transform 0.28s ease',
-                    '--reader-font-size': '17px',
+                    '--reader-font-size': '16px',
                   } as Record<string, string | number>}
-                  dangerouslySetInnerHTML={{ __html: chapter?.content || '' }}
+                  dangerouslySetInnerHTML={{ __html: combinedHtml }}
                 />
+                {/* 书脊阴影 */}
+                <div className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 w-16 z-20 flex justify-center">
+                  <div className="w-8 h-full" style={{ background: 'linear-gradient(to right, transparent, rgba(0,0,0,0.04))' }} />
+                  <div className="w-px h-full bg-neutral-400/20 dark:bg-stone-500/30" />
+                  <div className="w-8 h-full" style={{ background: 'linear-gradient(to left, transparent, rgba(0,0,0,0.04))' }} />
+                </div>
+              </div>
+            ) : (
+              /* 横板：所有章节拼接渲染 */
+              <div
+                ref={contentRef}
+                className="reader-columns h-full"
+                style={{
+                  columnWidth: `${pageWidth}px`,
+                  columnGap: `${GAP}px`,
+                  columnFill: 'auto',
+                  padding: `24px ${PAD}px`,
+                  transform: `translateX(${translate}px)`,
+                  transition: dragging || noTransition ? 'none' : 'transform 0.28s ease',
+                  '--reader-font-size': '17px',
+                } as Record<string, string | number>}
+                dangerouslySetInnerHTML={{ __html: combinedHtml }}
+              />
             )}
             {!isBookMode && (
               <>
@@ -379,18 +421,53 @@ export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewP
               </>
             )}
           </>
+        ) : (
+          /* 竖版：单章节滚动 */
+          <div ref={verticalRef} className="h-full overflow-y-auto scroll-smooth" onScroll={onVerticalScroll}>
+            {emptyVerticalChapter ? (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center text-neutral-400 dark:text-stone-500">
+                  <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                  <p className="text-xs">正在加载内容...</p>
+                </div>
+              </div>
+            ) : (
+              <div className="max-w-2xl mx-auto px-6 py-8">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="flex-1 h-px bg-neutral-200 dark:bg-stone-700" />
+                  <span className="text-sm text-neutral-500 dark:text-stone-400 flex-shrink-0 font-medium">{verticalChapterData.title}</span>
+                  <div className="flex-1 h-px bg-neutral-200 dark:bg-stone-700" />
+                </div>
+                <div
+                  className="prose prose-sm text-neutral-700 dark:text-stone-300 leading-relaxed"
+                  style={{ fontSize: '16px', lineHeight: 1.8 } as Record<string, string | number>}
+                  dangerouslySetInnerHTML={{ __html: verticalChapterData.content }}
+                />
+                {verticalChapter < book.chapters.length - 1 && (
+                  <div className="pt-8 pb-12 text-center">
+                    <button onClick={goNextChapter} className="btn-press px-4 py-2 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+                      下一章：{book.chapters[verticalChapter + 1].title} →
+                    </button>
+                  </div>
+                )}
+                {verticalChapter === book.chapters.length - 1 && (
+                  <div className="pt-8 pb-12 text-center text-xs text-neutral-400 dark:text-stone-500">· 全书完 ·</div>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
-      {/* 底部栏（横板/双栏） */}
-      {layoutMode !== 'vertical' && (
+      {/* 底部栏（横板/双栏）*/}
+      {isPaginatedMode && (
         <div className="shrink-0 px-6 py-2.5 border-t border-neutral-200/60 dark:border-stone-700/50 flex items-center justify-between gap-4">
           <button onClick={goPrevChapter} disabled={chapterIndex === 0} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
             上一章
           </button>
           <div className="flex items-center gap-2 text-xs text-neutral-400 dark:text-stone-500 min-w-0">
-            <span className="tabular-nums">{page + 1} / {pageCount}</span>
+            <span className="tabular-nums">{absolutePage + 1} / {pageCount}</span>
             <span className="text-neutral-300 dark:text-stone-600">·</span>
             <span className="truncate">{chapterIndex + 1} / {book.chapters.length} 章</span>
           </div>
@@ -402,9 +479,21 @@ export function ReadingView({ book, onBack, externalChapterIndex }: ReadingViewP
       )}
 
       {/* 竖版底部状态栏 */}
-      {layoutMode === 'vertical' && (
-        <div className="shrink-0 px-6 py-2 border-t border-neutral-200/60 dark:border-stone-700/50 text-center text-xs text-neutral-400 dark:text-stone-500">
-          共 {book.chapters.length} 章 · 上下滚动阅读
+      {!isPaginatedMode && (
+        <div className="shrink-0 px-6 py-2.5 border-t border-neutral-200/60 dark:border-stone-700/50 flex items-center justify-between gap-4">
+          <button onClick={goPrevChapter} disabled={verticalChapter === 0} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+            上一章
+          </button>
+          <div className="flex items-center gap-2 text-xs text-neutral-400 dark:text-stone-500 min-w-0">
+            <span className="truncate">{verticalChapterData?.title || '—'}</span>
+            <span className="text-neutral-300 dark:text-stone-600">·</span>
+            <span className="tabular-nums flex-shrink-0">{verticalChapter + 1} / {book.chapters.length} 章</span>
+          </div>
+          <button onClick={goNextChapter} disabled={verticalChapter === book.chapters.length - 1} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
+            下一章
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
+          </button>
         </div>
       )}
     </div>
