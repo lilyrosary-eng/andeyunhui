@@ -391,6 +391,18 @@ function VideoModule() {
 
   // 主内容区
   const renderContent = () => {
+    // 设置面板（优先级最高，参考音乐模块：设置可顶掉当前主面板页面）
+    if (showSettings) {
+      return React.createElement(SettingsContent, {
+        settings,
+        onSettingsChange: handleSettingsChange,
+        folders,
+        rootPaths,
+        onRemoveRoot: handleRemoveRoot,
+        onClose: () => setShowSettings(false),
+      });
+    }
+
     // 播放视图
     if (playingFile) {
       return React.createElement(VideoPlayer, {
@@ -400,18 +412,6 @@ function VideoModule() {
         onBack: handleBackFromPlayer,
         settings,
         onSettingsChange: handleSettingsChange,
-      });
-    }
-
-    // 设置面板
-    if (showSettings) {
-      return React.createElement(SettingsContent, {
-        settings,
-        onSettingsChange: handleSettingsChange,
-        folders,
-        rootPaths,
-        onRemoveRoot: handleRemoveRoot,
-        onClose: () => setShowSettings(false),
       });
     }
 

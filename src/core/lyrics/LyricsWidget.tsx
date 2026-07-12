@@ -118,26 +118,32 @@ export function LyricsWidget() {
     };
   }, []);
 
-  // 窗口高度：基于 fontSize 和 showNextLine 的固定公式计算，绝不监听内容变化。
-  // 旧实现用 ResizeObserver 监听 scrollHeight 变化 → 每次歌词更新都触发 setSize →
-  // Windows 透明窗口高频 setSize 触发 DWM 同步卡死（DevTools 不报错，但整个窗口管理器冻结）。
-  // textShadow 不参与 scrollHeight 计算（向下 6px / 向上 8px），所以公式需额外补偿。
+  // 窗口高度：基于实际内容测量（scrollHeight，含换行）+ 防抖 setSize
+  // 旧实现用固定公式（fontSize * 1.25），不 accounting for 长歌词换行 → 截断
+  // 更早的实现用 ResizeObserver 高频 setSize → DWM 卡死
+  // 折中方案：歌词内容变化后测量 scrollHeight，300ms 防抖后 setSize，频率安全
   const contentRef = useRef<HTMLDivElement>(null);
+  const resizeTimerRef = useRef<ReturnType<typeof setTimeout>>(0);
   useEffect(() => {
-    // 高度 = 当前行(含行距) + 下一行(可选) + 上下 padding(补偿 textShadow 延伸)
-    // 当前行高度 ≈ fontSize * 1.25（leading-tight）
-    // 下一行高度 ≈ fontSize * 0.7 * 1.25 + mt-1(4px)
-    // padding 上下各 12px（py-3）补偿 textShadow 向上 8px + 向下 6px
-    const currentLineH = fontSize * 1.25;
-    const nextLineH = showNextLine ? fontSize * 0.7 * 1.25 + 4 : 0;
-    const padding = 24; // py-3 = 12px * 2
-    const h = Math.ceil(currentLineH + nextLineH + padding);
-    const win = getCurrentWindow();
-    isResizingRef.current = true;
-    win.setSize(new LogicalSize(400, h)).finally(() => {
-      setTimeout(() => { isResizingRef.current = false; }, 100);
-    });
-  }, [fontSize, showNextLine]);
+    const measureAndResize = () => {
+      if (!contentRef.current) return;
+      // scrollHeight 包含 py-3 padding(24px) 和换行高度，但不包含 textShadow 延伸
+      // textShadow 向上 8px + 向下 6px = 14px 补偿
+      const actualH = contentRef.current.scrollHeight;
+      const h = Math.ceil(actualH) + 14;
+      const win = getCurrentWindow();
+      isResizingRef.current = true;
+      win.setSize(new LogicalSize(400, h)).finally(() => {
+        setTimeout(() => { isResizingRef.current = false; }, 100);
+      });
+    };
+    // 防抖 300ms：歌词快速更新时只取最后一次，避免高频 setSize
+    if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+    resizeTimerRef.current = setTimeout(measureAndResize, 300);
+    return () => {
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+    };
+  }, [fontSize, showNextLine, currentLine, nextLine]);
 
   // 鼠标悬停显示锁图标
   const handleMouseEnter = useCallback(() => {

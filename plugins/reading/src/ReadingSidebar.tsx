@@ -317,7 +317,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
           moduleId: 'reading',
           icon: React.createElement(BookIcon),
           title: currentBook.title,
-          onOpenModuleSettings: undefined,
+          onOpenModuleSettings: onOpenSettings,
           searchQuery: '',
           onSearchChange: () => {},
           searchPlaceholder: `${currentBook.chapters.length} 章`,

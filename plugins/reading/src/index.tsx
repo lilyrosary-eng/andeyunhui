@@ -5,7 +5,7 @@ import { ReadingView } from './ReadingView';
 import { useRootPaths, EmptyState, NoResultsState, useStreamingOpen } from '../../_shared/pluginRuntime';
 
 const React = window.__HOST_REACT__;
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, startTransition } = React;
 const hostApi = window.__HOST_API__;
 
 const STORAGE_KEY_ROOT = 'reading_plugin_root_paths';
@@ -238,9 +238,12 @@ function ReadingModule() {
     }
   }, [openingFilePath, openBook]);
 
+  // startTransition：大 DOM 卸载非阻塞，避免返回书列表时卡顿
   const handleBackToList = useCallback(() => {
-    setCurrentBook(null);
-    setSelectedChapterIndex(0);
+    startTransition(() => {
+      setCurrentBook(null);
+      setSelectedChapterIndex(0);
+    });
   }, []);
 
   const handleChapterClick = useCallback((index: number) => {

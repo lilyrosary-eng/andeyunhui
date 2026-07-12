@@ -87,9 +87,8 @@ pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::E
 #[tauri::command]
 pub fn show_lyrics_widget(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
+        // 仅 show，不重复设置 always_on_top（创建时已设置，重复调用会触发 DWM 重组合）
         window.show().map_err(|e| format!("显示歌词窗口失败: {}", e))?;
-        // 总是置顶
-        window.set_always_on_top(true).ok();
         eprintln!("[Lyrics] 歌词窗口已显示");
     } else {
         eprintln!("[Lyrics] 歌词窗口不存在，尝试重新创建");
