@@ -422,13 +422,8 @@ input[type="range"]:active::-moz-range-thumb {
   font-weight: 600;
   font-style: normal;
 }
-/* 章节拼接分隔符：标记章节边界，用于"拼接+动态缓存"模式下的页码计算 */
-.reader-columns .chapter-marker {
-  break-before: column;
-}
-.reader-columns .chapter-marker:first-child {
-  break-before: auto;
-}
+/* 章节拼接：不强制 break-before: column（避免短章节产生大面积空白页）。
+   章节边界由 JS measure() 通过 offsetTop 检测标题是否在页面第一行来判定。*/
 /* 章节标题：加大加粗，便于区分前后章节 */
 .reader-columns .chapter-title-display {
   font-size: 1.6em;
@@ -475,13 +470,7 @@ input[type="range"]:active::-moz-range-thumb {
   font-weight: 600;
   font-style: normal;
 }
-/* 章节拼接分隔符：用于"拼接+动态缓存"模式下标记章节边界 */
-.reader-columns-book .chapter-marker {
-  break-before: column;
-}
-.reader-columns-book .chapter-marker:first-child {
-  break-before: auto;
-}
+/* 章节拼接：不强制 break-before: column（同 .reader-columns，避免空白页）*/
 /* 章节标题：加大加粗，便于区分前后章节 */
 .reader-columns-book .chapter-title-display {
   font-size: 1.6em;
