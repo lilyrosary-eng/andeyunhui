@@ -17,6 +17,7 @@ import {
 import { pluginPerformanceMonitor } from '@/core/pluginPerformanceMonitor';
 import { ModuleSidebarShell } from '@/components/ModuleSidebarShell';
 import { SecondaryNavShell } from '@/components/SecondaryNavShell';
+import { NestedNavList } from '@/components/NestedNavList';
 import { ModuleSettingsPanel } from '@/components/ModuleSettingsPanel';
 import { CollapsibleSearch } from '@/components/CollapsibleSearch';
 import { IconButton } from '@/components/IconButton';
@@ -95,7 +96,7 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
 
     // 挂载宿主 React 和 API 到全局（仅首次设置，后续不可覆盖）
     const hostApi = { invoke, convertFileSrc, listen, emit, createFrameBuffer };
-    const hostUi = { ModuleSidebarShell, SecondaryNavShell, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator };
+    const hostUi = { ModuleSidebarShell, SecondaryNavShell, NestedNavList, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator };
     const defNonWritable = (key: string, value: unknown) => {
       Object.defineProperty(window, key, { value, writable: false, configurable: false });
     };

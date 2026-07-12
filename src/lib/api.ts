@@ -2,10 +2,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { emit } from '@tauri-apps/api/event';
 
-// DWM 冲突防护：两个 transparent:true 窗口同时存在会导致 Windows DWM 冻结。
-// 此标记记录歌词窗口是否因浮窗打开而被临时隐藏，浮窗全部关闭后恢复。
-let lyricsSuppressed = false;
-
 // 定义笔记的数据类型（与 Rust 端保持一致）
 export interface NoteInfo {
   id: string;
@@ -100,9 +96,6 @@ export const api = {
   // 主线程「重入死锁」（build 等待的创建完成回调需要被同一消息循环派发，而
   // 该闭包正占用着消息循环）→ 整个应用卡死。Tauri 官方运行时建窗路径由
   // 框架内部正确在主线程创建窗口，不会重入死锁。
-  //
-  // DWM 冲突防护：两个 transparent:true 窗口同时存在会导致 Windows DWM 冻结
-  // （整个应用卡死，DevTools 不报错）。创建浮窗前必须先隐藏歌词窗口。
   createFloatingNoteWindow: async (noteId: string, title: string, x: number, y: number) => {
     const label = `floating-note-${noteId}`;
     // getByLabel 返回 Promise<WebviewWindow | null>，必须 await
@@ -111,20 +104,6 @@ export const api = {
       existing.show().catch(() => {});
       existing.setFocus().catch(() => {});
       return;
-    }
-    // 防护：创建第二个透明窗口前先隐藏歌词窗口（如果它当前可见）
-    // 标签必须是 'lyrics-widget'（与 lyrics_service.rs LYRICS_WINDOW_LABEL 一致）
-    if (!lyricsSuppressed) {
-      try {
-        const lyricsWin = await WebviewWindow.getByLabel('lyrics-widget');
-        if (lyricsWin) {
-          const visible = await lyricsWin.isVisible();
-          if (visible) {
-            await invoke('hide_lyrics_widget');
-            lyricsSuppressed = true;
-          }
-        }
-      } catch { /* 歌词窗口不存在或查询失败，忽略 */ }
     }
     const win = new WebviewWindow(label, {
       url: `index.html?floating=true&noteId=${encodeURIComponent(noteId)}`,
@@ -145,16 +124,6 @@ export const api = {
     win.once('tauri://error', (e: unknown) => {
       console.error('[api] 创建浮窗窗口失败:', e);
     });
-  },
-
-  // 所有浮窗关闭后恢复歌词窗口（如果之前因浮窗而隐藏）
-  restoreLyricsIfNeeded: async () => {
-    if (lyricsSuppressed) {
-      try {
-        await invoke('show_lyrics_widget');
-      } catch { /* 忽略 */ }
-      lyricsSuppressed = false;
-    }
   },
 
   // 标签系统
