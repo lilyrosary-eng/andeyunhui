@@ -1,6 +1,6 @@
 /// <reference path="../../global.d.ts" />
 // 阅读视图 — CSS 多栏分页 + 三种布局模式
-// 横板/双栏：3章滑动窗口动态缓存（前一章+当前章+后一章），无缝翻页
+// 横板/双栏：多章滑动窗口动态缓存（当前章前后各若干章），无缝翻页
 // 竖版：单章节滚动，到底部自动下一章
 
 const React = window.__HOST_REACT__;
@@ -31,6 +31,10 @@ const PAD = 44;
 const DRAG_THRESHOLD = 60;
 const WHEEL_COOLDOWN = 280;
 const BOOK_GUTTER = 24;
+// 动态缓存：当前章前后各缓存 WINDOW_RADIUS 章（越大越不易在切章时露白页，
+// 但拼接的 DOM 也越多）。共渲染 WINDOW_SIZE 章的滑动窗口。
+const WINDOW_RADIUS = 2;
+const WINDOW_SIZE = WINDOW_RADIUS * 2 + 1;
 
 type LayoutMode = 'horizontal' | 'vertical' | 'book';
 
@@ -81,14 +85,16 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   useEffect(() => { displayedChapterRef.current = displayedChapter; }, [displayedChapter]);
 
   const isBookMode = layoutMode === 'book';
-  const pagesPerStep = isBookMode ? 2 : 1;
+  // 双栏模式改为"连续对页翻页"：始终展示两栏，但每次仅前进一栏
+  //（原右栏滑到左栏位置、右栏显示新的一页），因此翻页步长恒为 1 栏。
+  const pagesPerStep = 1;
   const isPaginatedMode = layoutMode !== 'vertical';
 
-  // ============ 3章滑动窗口动态缓存 ============
-  // 仅渲染 windowCenter±1（前一章、当前章、后一章），避免大书全章节拼接卡死。
+  // ============ 滑动窗口动态缓存 ============
+  // 仅渲染 windowCenter±WINDOW_RADIUS 的若干章，避免大书全章节拼接卡死。
   // windowStart 只随 windowCenter 变化，不随 book.chapters.length 变化（流式加载稳定）。
-  const windowStart = Math.max(0, windowCenter - 1);
-  const windowEnd = Math.min(book.chapters.length, windowStart + 3);
+  const windowStart = Math.max(0, windowCenter - WINDOW_RADIUS);
+  const windowEnd = Math.min(book.chapters.length, windowStart + WINDOW_SIZE);
 
   const combinedHtml = useMemo(() => {
     if (book.chapters.length === 0) return '';
@@ -133,13 +139,16 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       const startOffset = m.offsetLeft - PAD;
       const rawPage = Math.max(0, Math.floor((startOffset + TOLERANCE) / step));
 
-      // 检测标题是否在页面第一行（栏顶部）
-      // 方法1：offsetTop — multicol 中标题在栏顶部时 offsetTop ≈ padding-top (24px)
-      // 方法2：offsetWithinPage — 章节标记在栏起始位置时，offsetWithinPage ≈ 0
+      // 检测标题是否在页面第一行（栏顶部）——只能用「垂直位置」判断。
+      // multicol 中栏水平铺开、共用同一垂直坐标：栏顶元素 offsetTop ≈
+      // 容器 padding-top(24) + 标题 margin-top(约 30)，栏中标题则远大于此。
+      // 【关键修复】不可用 offsetWithinPage（水平方向）判断：block 章节标记
+      // 的 offsetLeft 恒为其所在栏的左边缘，offsetWithinPage 恒 ≈0，会让
+      // titleAtTop 恒真、退化为"标记在哪栏即算该章首页"，忽略标题在栏内的
+      // 垂直位置，导致横板页码/章节边界识别错乱。
       const title = m.querySelector('.chapter-title-display') as HTMLElement | null;
-      const offsetWithinPage = startOffset - rawPage * step;
       const titleAtTop = title
-        ? (title.offsetTop <= 32 || offsetWithinPage <= TOLERANCE)
+        ? title.offsetTop <= 64
         : true;
 
       if (titleAtTop || rawPage === 0) {
@@ -237,8 +246,8 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       // 用 ref 读取最新 chapterIndex，避免将其放入依赖数组
       if (externalChapterIndex !== chapterIndexRef.current) {
         // 检查目标章是否在当前窗口内
-        const ws = Math.max(0, windowCenterRef.current - 1);
-        const we = Math.min(book.chapters.length, ws + 3);
+        const ws = Math.max(0, windowCenterRef.current - WINDOW_RADIUS);
+        const we = Math.min(book.chapters.length, ws + WINDOW_SIZE);
         if (externalChapterIndex >= ws && externalChapterIndex < we) {
           // 在窗口内 → 直接跳到该章首页
           const b = boundariesRef.current.find(x => x.index === externalChapterIndex);
@@ -647,7 +656,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
             )}
           </>
         ) : (
-          /* 竖版：3章拼接滚动（与横板共用 combinedHtml，切换模式不闪烁）*/
+          /* 竖版：多章拼接滚动（与横板共用 combinedHtml，切换模式不闪烁）*/
           <div ref={verticalRef} className="h-full overflow-y-auto relative" onScroll={onVerticalScroll}>
             <div
               className="reader-vertical max-w-2xl mx-auto"

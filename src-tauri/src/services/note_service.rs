@@ -126,7 +126,9 @@ pub fn save_note(notes_dir: PathBuf, note_id: &str, title: &str, content: &str) 
     let final_content = if content.lines().next().map(|s| s.starts_with("# ")).unwrap_or(false) {
         content.to_string()
     } else {
-        format!("# {}\n\n{}", title, content)
+        // trim_start：正文前导空白无意义，且可防止「# 标题\n\n」与残留前导空行叠加，
+        // 根治浮窗反复开合时正文上方不断累加空行的问题。
+        format!("# {}\n\n{}", title, content.trim_start())
     };
     fs::write(&note_path, final_content).map_err(|e| format!("写入笔记文件失败: {}", e))?;
     Ok(())
