@@ -743,7 +743,7 @@ window.__PLUGIN_REGISTRY__.register({
   iconName: 'Paintbrush',
   kind: 'module',
   visible: false,
-  parent: 'niuluo',
+  parent: 'niaoluo',
   category: '创作',
   desc: '图层化画板：多图层 / 画笔压感硬度 / 填充吸管 / 图片导入 / 缩放平移 / 导出',
   component: HuihuaBoard,

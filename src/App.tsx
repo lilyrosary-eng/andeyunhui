@@ -227,16 +227,16 @@ function App() {
       return <NotesModule />;
     }
     if (activeModule === 'extensions' && pluginRegistry) {
-      return <ExtensionsHub registry={pluginRegistry} parentId="niuluo" excludePluginIds={mainPluginIds} />;
+      return <ExtensionsHub registry={pluginRegistry} parentId="niaoluo" excludePluginIds={mainPluginIds} />;
     }
     // 茑萝子插件模式下，若用户点击了"管理拓展设置"，优先渲染 ExtensionsHub（内部会检测 showExtensionSettings）
     // 这样设置面板能顶掉当前子插件的主面板页面
     if (
       showExtensionSettings &&
       pluginRegistry &&
-      pluginRegistry.get(activeModule)?.parent === 'niuluo'
+      pluginRegistry.get(activeModule)?.parent === 'niaoluo'
     ) {
-      return <ExtensionsHub registry={pluginRegistry} parentId="niuluo" excludePluginIds={mainPluginIds} />;
+      return <ExtensionsHub registry={pluginRegistry} parentId="niaoluo" excludePluginIds={mainPluginIds} />;
     }
     if (pluginRegistry && (mainPluginIds.includes(activeModule) || subPluginIds.includes(activeModule))) {
       logger.app.mainPluginRenderStart(activeModule, !!pluginRegistry);

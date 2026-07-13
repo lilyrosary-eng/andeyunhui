@@ -24,7 +24,7 @@ export function AppNav({ mainPluginIds }: AppNavProps) {
   const setActiveModule = useAppStore(s => s.setActiveModule);
 
   const activeDef = pluginRegistry?.get(activeModule);
-  const isNiaoluoChild = !!(activeDef && activeDef.parent === 'niuluo');
+  const isNiaoluoChild = !!(activeDef && activeDef.parent === 'niaoluo');
 
   const handleSwitchModule = useCallback((moduleId: string) => {
     logger.app.switchModule(moduleId);
@@ -87,7 +87,7 @@ export function AppNav({ mainPluginIds }: AppNavProps) {
           const def = pluginRegistry.get(pluginId);
           if (!def || !def.visible) return null;
           return (
-            <button key={pluginId} onClick={() => handleSwitchModule(pluginId)} className={navBtnClass(activeModule === pluginId)} title={def.name}>
+            <button key={pluginId} onClick={() => handleSwitchModule(pluginId)} className={navBtnClass(activeModule === pluginId)} title={def.codename ? `${def.name}（${def.codename}）` : def.name}>
               <PluginIcon name={def.iconName} size={20} fallback={<span className="text-xs">{def.name[0]}</span>} />
             </button>
           );

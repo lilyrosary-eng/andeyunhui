@@ -11,7 +11,7 @@ window.__PLUGIN_REGISTRY__.register({
   iconName: 'Wrench',
   kind: 'module',
   visible: false,
-  parent: 'niuluo',
+  parent: 'niaoluo',
   component: GongjuxiangModule,
   sidebar: undefined,
   settings: undefined,

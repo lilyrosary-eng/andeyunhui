@@ -6,7 +6,7 @@ import ReactDOM from 'react-dom';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
 import { PluginRegistry, HOST_API_VERSION } from '@/core/pluginRegistry';
-import { api } from '@/lib/api';
+import { api, type PluginManifest } from '@/lib/api';
 import { pluginDiagnostics } from '@/core/pluginDiagnostics';
 import { logger } from '@/lib/logger';
 import { createFrameBuffer } from '@/lib/frameBuffer';
@@ -190,7 +190,7 @@ function safeDestroyPlugin(id: string, registry: PluginRegistry): void {
 async function reloadSinglePlugin(id: string, registry: PluginRegistry): Promise<void> {
   try {
     const manifestText = await api.readPluginFile(id, 'manifest.json');
-    const manifest = JSON.parse(manifestText) as { entry?: string; deps?: string[] };
+    const manifest = JSON.parse(manifestText) as PluginManifest;
     const entry = manifest.entry || 'index.js';
     const scriptText = await api.readPluginFile(id, entry);
     // 先调用 destroy 释放旧实例资源，再注销（register 有重复 id 守卫，必须先清）
@@ -200,6 +200,10 @@ async function reloadSinglePlugin(id: string, registry: PluginRegistry): Promise
     executeInSandbox(scriptText, sandbox, id);
     const def = registry.get(id);
     if (def) {
+      // 热重载路径也需从 manifest 注入 codename（与首次加载保持一致）
+      if (manifest.codename) {
+        def.codename = manifest.codename;
+      }
       window.dispatchEvent(new CustomEvent('plugin-registered', { detail: def }));
     } else {
       logger.log(`[pluginHot] register 未被调用，registry 无 def: ${id}`);
@@ -239,7 +243,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, pluginId: string): Prom
 }
 
 async function loadSinglePlugin(
-  manifest: { id: string; name: string; version: string; kind: 'module' | 'service'; visible: boolean; entry: string; iconName: string; hostApiVersion: number; deps?: string[]; path?: string },
+  manifest: PluginManifest,
   registry: PluginRegistry,
 ): Promise<void> {
   pluginPerformanceMonitor.startMeasure(manifest.id, 'load');
@@ -378,6 +382,12 @@ async function loadPlugins(registry: PluginRegistry) {
       logger.plugins.stage3FailCleanup(manifest.id, reason);
       registry.unregister(manifest.id);
       continue;
+    }
+
+    // 从 manifest 注入元数据（codename 等）到已注册的 PluginDef。
+    // 插件注册时无需重复声明 codename，统一由 manifest.json 管理。
+    if (manifest.codename) {
+      registered.codename = manifest.codename;
     }
 
     successCount++;
