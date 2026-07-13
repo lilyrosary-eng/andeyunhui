@@ -48,7 +48,22 @@ export function AppNav({ mainPluginIds }: AppNavProps) {
           if (activeModule === 'transfer') return <Inbox size={18} />;
           if (activeModule === 'settings') return <Settings size={18} />;
           if (activeDef) {
-            return <PluginIcon name={activeDef.iconName} size={18} fallback={<span className="text-sm font-bold">岸</span>} />;
+            return <PluginIcon name={activeDef.iconName} size={18} fallback={
+              <svg viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
+                <g transform="translate(30,30)">
+                  <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(0)"/>
+                  <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(45)"/>
+                  <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(90)"/>
+                  <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(135)"/>
+                  <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(180)"/>
+                  <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(225)"/>
+                  <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(270)"/>
+                  <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(315)"/>
+                  <circle cx="0" cy="-2" r="5"/>
+                  <circle cx="0" cy="-2" r="2.5" fill="currentColor" opacity=".35"/>
+                </g>
+              </svg>
+            } />;
           }
           return (
             <svg viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">

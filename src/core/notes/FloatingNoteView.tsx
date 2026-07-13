@@ -54,8 +54,10 @@ export function FloatingNoteView() {
     }
     api.getNoteContent(noteId).then((data) => {
       setTitle(data.title || '无标题笔记');
-      // 去除内容首行 # 大标题（标题栏已显示，无需重复）
-      const c = (data.content || '').replace(/^#\s+[^\n]*\n?/, '');
+      // 去除内容首行 # 大标题（标题栏已显示，无需重复）。
+      // 必须 trimStart()：磁盘格式为「# 标题\n\n正文」，去掉标题后会残留前导空行，
+      // 若不清理，保存时后端又补「\n\n」，每次开浮窗往返都会在正文上方累加一行空白。
+      const c = (data.content || '').replace(/^#\s+[^\n]*\n?/, '').trimStart();
       setContent(c);
       setLoading(false);
       loadedRef.current = true;

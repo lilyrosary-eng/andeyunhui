@@ -27,9 +27,20 @@ export function Titlebar() {
     >
       {/* 左侧：拖拽区域 + 标题 */}
       <div className="flex items-center h-full pl-4 gap-2">
-        <div className="w-5 h-5 rounded-full element-primary flex items-center justify-center text-[10px] font-bold">
-          岸
-        </div>
+        <svg viewBox="0 0 60 60" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px] text-[#8b948a] dark:text-[#9b8fb5] flex-shrink-0">
+          <g transform="translate(30,30)">
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(0)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(45)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(90)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(135)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(180)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(225)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(270)"/>
+            <path d="M0,-3 C-3,-10 -4,-22 0,-28 C4,-22 3,-10 0,-3 Z" transform="rotate(315)"/>
+            <circle cx="0" cy="-2" r="5"/>
+            <circle cx="0" cy="-2" r="2.5" fill="currentColor" opacity=".35"/>
+          </g>
+        </svg>
         <span className="text-xs text-neutral-400 dark:text-stone-500 font-medium tracking-wide">岸灯鸳花</span>
       </div>
 
