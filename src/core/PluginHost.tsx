@@ -131,9 +131,9 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
           const updatedIds = new Set(updated.valid.map((m: { id: string }) => m.id));
           const currentIds = new Set(registry.getAll().map((p: { id: string }) => p.id));
 
-          // 新增的插件：加载
+          // 新增的插件：加载（跳过 visible=false 的已禁用插件）
           for (const m of updated.valid) {
-            if (!currentIds.has(m.id)) {
+            if (!currentIds.has(m.id) && m.visible !== false) {
               try {
                 await loadSinglePlugin(m as Parameters<typeof loadSinglePlugin>[0], registry);
               } catch (err) {
@@ -156,6 +156,8 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
     (window as unknown as { __pluginHot__?: unknown }).__pluginHot__ = {
       reload: (id: string) => reloadSinglePlugin(id, registry),
       unload: (id: string) => unloadSinglePlugin(id, registry),
+      // 加载单个插件（用于"启用"按钮，传入 manifest 对象）
+      load: (manifest: PluginManifest) => loadSinglePlugin(manifest, registry),
     };
 
     loadPlugins(registry).then(() => {
@@ -304,7 +306,9 @@ async function loadPlugins(registry: PluginRegistry) {
     return;
   }
 
-  // 阶段 1：hostApiVersion 版本过滤
+  // 阶段 1：hostApiVersion 版本过滤 + visible 检查
+  // visible=false 的插件不加载（用户在拓展管理中禁用的），但仍会出现在 getInstalledPlugins 结果中，
+  // 供 ExtensionManagerPanel 显示为"已禁用"状态，用户可随时重新启用。
   const compatible = manifests.filter(m => {
     if (m.hostApiVersion !== HOST_API_VERSION) {
       const reason = `版本不兼容 (需要 v${HOST_API_VERSION}, 插件要求 v${m.hostApiVersion})`;
@@ -315,6 +319,10 @@ async function loadPlugins(registry: PluginRegistry) {
         timestamp: Date.now(),
       });
       logger.plugins.versionRejected(reason, m.id);
+      return false;
+    }
+    if (m.visible === false) {
+      logger.log(`[plugins] ${m.id} 已禁用 (visible=false)，跳过加载`);
       return false;
     }
     return true;
