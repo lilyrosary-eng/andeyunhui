@@ -3,7 +3,7 @@ import { FolderOpen, AlertTriangle, RefreshCw, Package, Trash2, Download, Loader
 import { Switch } from "@/components/ui/switch"
 import { pluginDiagnostics, type DiagnosticEntry } from '@/core/pluginDiagnostics';
 import { PluginIcon } from '@/components/PluginIcon';
-import { api } from '@/lib/api';
+import { api, type PluginManifest } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { createSandboxGlobals, executeInSandbox } from '@/core/pluginSandbox';
 
@@ -15,6 +15,8 @@ export function ExtensionManagerPanel() {
   );
 
   const registry = window.__PLUGIN_REGISTRY__;
+  const pluginHot = (window as unknown as { __pluginHot__?: { load: (m: PluginManifest) => Promise<void>; unload: (id: string) => void; reload: (id: string) => Promise<void> } }).__pluginHot__;
+
   // tick：订阅插件注册表事件，重载/卸载后强制重算列表
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -28,16 +30,27 @@ export function ExtensionManagerPanel() {
       window.removeEventListener('plugin-visibility-changed', bump);
     };
   }, []);
-  const plugins = useMemo(() => (registry ? registry.getAll() : []), [registry, tick]);
 
-  // 本地状态：跟踪每个插件的开关位置（初始值从注册表读取）
-  const [visibilityMap, setVisibilityMap] = useState<Record<string, boolean>>(() => {
-    const map: Record<string, boolean> = {};
-    for (const p of plugins) {
-      map[p.id] = p.visible !== false;
+  // 列表来源：从 getInstalledPlugins 获取所有已安装插件（包括 visible=false 的已禁用插件），
+  // 而非仅从 registry.getAll() 获取已加载的。这样已禁用的插件也显示在列表中，用户可重新启用。
+  const [installedPlugins, setInstalledPlugins] = useState<PluginManifest[]>([]);
+  const refreshInstalledList = useCallback(async () => {
+    try {
+      const result = await api.getInstalledPlugins();
+      setInstalledPlugins(result.valid);
+    } catch (err) {
+      logger.log('[ExtManager] 获取已安装插件列表失败:', err);
     }
-    return map;
-  });
+  }, []);
+  useEffect(() => { void refreshInstalledList(); }, [refreshInstalledList, tick]);
+
+  // plugins = 所有已安装插件（包括 visible=false），用 registry.get(id) 判断是否"运行中"
+  const plugins = installedPlugins;
+  const loadedIds = useMemo(() => {
+    const s = new Set<string>();
+    if (registry) for (const p of registry.getAll()) s.add(p.id);
+    return s;
+  }, [registry, tick]);
 
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState('');
@@ -54,10 +67,10 @@ export function ExtensionManagerPanel() {
   }, []);
 
   const installablePlugins = useMemo(() => {
-    if (!manifest?.plugins || !registry) return [];
+    if (!manifest?.plugins) return [];
     const installed = new Set(plugins.map((p: any) => p.id));
     return manifest.plugins.filter((p: any) => !installed.has(p.id));
-  }, [manifest, plugins, registry]);
+  }, [manifest, plugins]);
 
   const handleInstall = async (plugin: any) => {
     const { invoke } = window.__HOST_API__;
@@ -66,43 +79,70 @@ export function ExtensionManagerPanel() {
       const name = await invoke<string>('install_bundled_plugin', { pluginId: plugin.id });
       await invoke('refresh_plugins');
       setRefreshMsg(`${name} 安装完成。`);
+      await refreshInstalledList();
     } catch (e: any) {
       setRefreshMsg(`安装失败: ${e}`);
     }
     setInstalling((s) => { const n = new Set(s); n.delete(plugin.id); return n; });
   };
 
-  const handleTogglePlugin = useCallback((pluginId: string, visible: boolean) => {
-    setVisibilityMap(prev => ({ ...prev, [pluginId]: visible }));
-    api.setPluginVisibility(pluginId, visible).then(() => {
-      logger.plugins.visibilityUpdated(pluginId, visible);
-    }).catch((err) => {
-      logger.plugins.visibilityFailed(pluginId, err);
-    });
-  }, []);
+  // 启用/禁用：立即生效（不再"重启后生效"）
+  // 禁用 → set_plugin_visibility(false) + unloadSinglePlugin
+  // 启用 → set_plugin_visibility(true) + loadSinglePlugin
+  const handleTogglePlugin = useCallback(async (manifest: PluginManifest, visible: boolean) => {
+    try {
+      await api.setPluginVisibility(manifest.id, visible);
+      if (visible) {
+        // 启用：加载插件到内存
+        await pluginHot?.load(manifest);
+      } else {
+        // 禁用：从内存卸载
+        pluginHot?.unload(manifest.id);
+      }
+      logger.plugins.visibilityUpdated(manifest.id, visible);
+      // 刷新本地列表状态
+      setInstalledPlugins(prev => prev.map(p => p.id === manifest.id ? { ...p, visible } : p));
+      window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id: manifest.id, visible } }));
+    } catch (err) {
+      logger.plugins.visibilityFailed(manifest.id, err);
+    }
+  }, [pluginHot]);
 
-  // 检测新插件（先刷新 Rust 侧缓存，再读取最新扫描结果）
+  // 热卸载：等同于禁用（set_plugin_visibility(false) + unload）
+  // 这样"检测新插件"时 visible=false 不会重新加载，避免"卸载后又回来"的问题
+  const handleHotUnload = useCallback(async (pluginId: string) => {
+    try {
+      await api.setPluginVisibility(pluginId, false);
+      pluginHot?.unload(pluginId);
+      setInstalledPlugins(prev => prev.map(p => p.id === pluginId ? { ...p, visible: false } : p));
+      window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id: pluginId, visible: false } }));
+      logger.log(`[ExtManager] 热卸载 ${pluginId}（已标记 visible=false）`);
+    } catch (err) {
+      logger.log(`[ExtManager] 热卸载失败 ${pluginId}:`, err);
+    }
+  }, [pluginHot]);
+
+  // 检测新插件：重新扫描，只加载 visible=true 且不在 registry 中的插件
   const handleRefresh = async () => {
     setRefreshing(true);
     setRefreshMsg('');
     try {
       const result = await api.refreshPlugins();
+      setInstalledPlugins(result.valid);
       for (const m of result.valid) {
-        if (!registry.get(m.id)) {
+        // 只加载 visible=true 且未在 registry 中的插件
+        if (!registry?.get(m.id) && m.visible !== false) {
           try {
             const scriptText = await api.readPluginFile(m.id, m.entry);
-
-            // 直接沙箱执行（CSP 禁止 blob: URL import，故不走动态 import）
             const sandbox = createSandboxGlobals(m.id, registry, m.deps);
             executeInSandbox(scriptText, sandbox, m.id);
-
             logger.plugins.newPluginLoaded(m.id);
           } catch (err) {
             logger.plugins.newPluginFailed(m.id, err);
           }
         }
       }
-      setRefreshMsg('检测完成。已运行的插件修改后需重启应用生效。');
+      setRefreshMsg('检测完成。');
     } catch (_err) {
       setRefreshMsg('检测失败，请查看控制台。');
     }
@@ -131,16 +171,16 @@ export function ExtensionManagerPanel() {
         </div>
       </div>
 
-      {/* 已启用插件 */}
+      {/* 已安装插件（包括已启用和已禁用） */}
       <section>
         <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">
-          已启用插件 ({plugins.length})
+          已安装插件 ({plugins.length})
         </h2>
         <div className="bg-white/70 dark:bg-stone-800/70 backdrop-blur rounded-2xl border border-white/80 divide-y divide-neutral-200/50 overflow-hidden">
           {plugins.length === 0 ? (
             <div className="p-6 text-center text-sm text-neutral-400 dark:text-stone-500 space-y-4">
               <Package size={24} className="mx-auto text-neutral-300 dark:text-neutral-600" />
-              <p>暂无已启用的插件</p>
+              <p>暂无已安装的插件</p>
               {installablePlugins.length > 0 && (
                 <button
                   onClick={async () => {
@@ -152,6 +192,7 @@ export function ExtensionManagerPanel() {
                     await invoke('refresh_plugins');
                     setInstalling(new Set());
                     setRefreshMsg('所有推荐模块已安装。');
+                    await refreshInstalledList();
                   }}
                   className="btn-press inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[var(--element-bg)] text-white text-sm hover:opacity-90 transition-opacity"
                 >
@@ -162,53 +203,43 @@ export function ExtensionManagerPanel() {
             </div>
           ) : (
             plugins.map((p) => {
+              const isLoaded = loadedIds.has(p.id);
+              const isVisible = p.visible !== false;
               return (
-                <div key={p.id} className="flex items-center justify-between p-4">
+                <div key={p.id} className={`flex items-center justify-between p-4 ${!isVisible ? 'opacity-50' : ''}`}>
                   <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-lg element-muted flex items-center justify-center">
                       <PluginIcon name={p.iconName} size={18} fallback={<Package size={18} />} />
                     </div>
                     <div>
                       <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">{p.name}</div>
-                      <div className="text-xs text-neutral-400 dark:text-stone-500">{p.id} · {p.kind}</div>
+                      <div className="text-xs text-neutral-400 dark:text-stone-500">{p.id} · {p.kind}{p.codename ? ` · ${p.codename}` : ''}</div>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    {(() => {
-                      const def = registry ? registry.get(p.id) : undefined;
-                      const isLoaded = !!def;
-                      return (
-                        <span className={`flex items-center gap-1 text-xs ${isLoaded ? 'text-emerald-600' : 'text-neutral-400 dark:text-stone-500'}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${isLoaded ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-stone-600'}`} />
-                          {isLoaded ? '运行中' : '已卸载'}
-                        </span>
-                      );
-                    })()}
+                    <span className={`flex items-center gap-1 text-xs ${isLoaded ? 'text-emerald-600' : 'text-neutral-400 dark:text-stone-500'}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${isLoaded ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-stone-600'}`} />
+                      {isLoaded ? '运行中' : '已禁用'}
+                    </span>
                     <button
-                      onClick={() => {
-                        const { invoke } = window.__HOST_API__;
-                        invoke('reload_plugin', { pluginId: p.id }).catch(() => {});
-                      }}
+                      onClick={() => pluginHot?.reload(p.id)}
                       className="btn-press p-1.5 rounded-lg hover:bg-black/5 text-neutral-400 dark:text-stone-500 hover:text-emerald-500 transition-colors"
                       title="热重载（应用内重新加载，无需重启）"
                     >
                       <RefreshCw size={16} />
                     </button>
                     <button
-                      onClick={() => {
-                        const { invoke } = window.__HOST_API__;
-                        invoke('unload_plugin', { pluginId: p.id }).catch(() => {});
-                      }}
+                      onClick={() => handleHotUnload(p.id)}
                       className="btn-press p-1.5 rounded-lg hover:bg-black/5 text-neutral-400 dark:text-stone-500 hover:text-red-500 transition-colors"
-                      title="热卸载（应用内卸载，无需重启）"
+                      title="热卸载（禁用并从内存卸载，检测新插件时不会重新加载）"
                     >
                       <Trash2 size={16} />
                     </button>
                     <Switch
-                      checked={visibilityMap[p.id] ?? true}
-                      onCheckedChange={(val: boolean) => handleTogglePlugin(p.id, val)}
+                      checked={isVisible}
+                      onCheckedChange={(val: boolean) => handleTogglePlugin(p, val)}
                       className="data-[state=checked]:bg-[var(--element-bg)]"
-                      title="启用/禁用（重启后生效）"
+                      title="启用/禁用（立即生效）"
                     />
                     <button
                       onClick={() => {
