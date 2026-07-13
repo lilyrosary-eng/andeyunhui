@@ -642,19 +642,62 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     Ok(())
 }
 
-/// 如果 src 存在，清空 dst 并递归复制 src → dst，记录日志
+/// 增量更新：如果 src 存在，逐个子目录与 dst 对比，
+/// - dst 不存在的子目录 → 直接复制（新插件）
+/// - dst 存在但 manifest.json 版本号不同 → 覆盖（版本更新）
+/// - dst 存在且版本号相同 → 跳过（保留用户对 manifest.json visible 字段的修改）
+/// 不删除 dst 中不存在于 src 的目录（保留用户安装的第三方插件 / 用户禁用状态）
 fn extract_if_exists(src: &std::path::Path, dst: &std::path::Path, label: &str) {
     if !src.exists() {
         eprintln!("[Setup] {} 不存在于: {:?}", label, src);
         return;
     }
-    eprintln!("[Setup] 从资源目录提取 {}: {:?}", label, src);
-    if dst.exists() {
-        let _ = std::fs::remove_dir_all(dst);
+    eprintln!("[Setup] 增量提取 {}: {:?} → {:?}", label, src, dst);
+    if !dst.exists() {
+        let _ = std::fs::create_dir_all(dst);
     }
-    if let Err(e) = copy_dir_recursive(src, dst) {
-        eprintln!("[Setup] 复制 {} 失败: {}", label, e);
-    } else {
-        eprintln!("[Setup] {} 复制完成", label);
+    let mut copied = 0u32;
+    let mut skipped = 0u32;
+    if let Ok(entries) = std::fs::read_dir(src) {
+        for entry in entries.flatten() {
+            let sub_src = entry.path();
+            if !sub_src.is_dir() { continue; }
+            let name = entry.file_name();
+            let sub_dst = dst.join(&name);
+
+            if !sub_dst.exists() {
+                // 新插件/新依赖 → 直接复制
+                if let Err(e) = copy_dir_recursive(&sub_src, &sub_dst) {
+                    eprintln!("[Setup] 复制 {}/{} 失败: {}", label, name.to_string_lossy(), e);
+                } else { copied += 1; }
+                continue;
+            }
+
+            // 已存在 → 检查 manifest.json 版本号
+            let src_manifest = sub_src.join("manifest.json");
+            let dst_manifest = sub_dst.join("manifest.json");
+            if src_manifest.exists() && dst_manifest.exists() {
+                let src_ver = std::fs::read_to_string(&src_manifest)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(String::from));
+                let dst_ver = std::fs::read_to_string(&dst_manifest)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(String::from));
+                if src_ver.is_some() && src_ver == dst_ver {
+                    // 版本相同 → 跳过（保留用户对 visible 字段的修改）
+                    skipped += 1;
+                    continue;
+                }
+            }
+
+            // 版本不同或无 manifest.json（如 external-deps 子目录）→ 覆盖
+            let _ = std::fs::remove_dir_all(&sub_dst);
+            if let Err(e) = copy_dir_recursive(&sub_src, &sub_dst) {
+                eprintln!("[Setup] 覆盖 {}/{} 失败: {}", label, name.to_string_lossy(), e);
+            } else { copied += 1; }
+        }
     }
+    eprintln!("[Setup] {} 增量完成：新增/更新 {}，跳过 {}（版本相同）", label, copied, skipped);
 }
