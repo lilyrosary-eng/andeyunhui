@@ -7,5 +7,7 @@
   "entry": "index.js",
   "iconName": "Code",
   "hostApiVersion": 1,
-  "parent": "niuluo"
+  "parent": "niaoluo",
+  "codename": "茑萝",
+  "requiredAssets": ["niaoluo/ide/codemirror/index.js"]
 }

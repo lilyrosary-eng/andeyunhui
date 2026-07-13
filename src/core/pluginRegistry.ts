@@ -14,13 +14,16 @@ export interface PluginDef {
   component: ComponentType<any>;
   sidebar?: ComponentType<any>;
   settings?: ComponentType<any>;
-  // 子插件：归属的父模块 id（如 'niuluo' / 'professional'）。
+  // 子插件：归属的父模块 id（如 'niaoluo' / 'professional'）。
   // 设置后该插件不再作为顶层模块出现在导航栏 / 茑萝列表，
   // 而是嵌套在其父模块内部（如薄荷的 16 个功能、茑萝下的工具箱）。
   parent?: string;
   // 子插件分组 / 描述（供父模块 UI 渲染时使用）
   category?: string;
   desc?: string;
+  // 模块代号（如 "铃兰"、"莲花"）：由 PluginHost 从 manifest 注入，插件注册时无需提供。
+  // UI 可据此展示代号（如导航栏 tooltip、模块标题副标）。
+  codename?: string;
   // 生命周期钩子：插件卸载/重载前调用，用于释放 audio、定时器、事件监听等资源。
   // 不抛错时由 PluginHost 在 unregister 前调用。
   destroy?: () => void;

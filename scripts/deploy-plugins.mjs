@@ -1,7 +1,15 @@
-// 插件部署脚本：构建插件并复制到 Tauri app_data_dir/extensions/
-// 同时复制到 bundled-plugins/ 供 Tauri bundle.resources 打包使用
+// 插件部署脚本：构建插件并复制到 Tauri app_data_dir/extensions/{id}/
+// 同时复制到 bundled-plugins/{id}/ 供 Tauri bundle.resources 打包使用
 //
-// 自动发现：扫描 plugins/ 目录下所有含 manifest.json 的子目录（排除 _shared/_template）
+// 自动发现：递归扫描 plugins/ 下所有含 manifest.json 的子目录（排除 _shared/_template）
+// 嵌套目录（如 niaoluo/gongjuxiang）也支持，但部署时按 manifest.id 平铺到根目录，
+// 不再保留嵌套层级（避免路径耦合，Rust 端 find_plugin_root 按 id 递归匹配即可定位）
+//
+// 增量更新策略：
+//   - 不再全删重建 bundled-plugins/，仅按 id 更新有变化的插件
+//   - 清理源码中已不存在的插件目录（cleanStalePlugins）
+//   - 占位文件夹（含 .gitkeep）不会被清理
+//
 // 新增插件只需在 plugins/ 下创建目录 + manifest.json，无需修改此脚本
 import { execSync } from 'node:child_process';
 import { mkdirSync, cpSync, copyFileSync, readFileSync, existsSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -25,7 +33,7 @@ const appDataRoot = join(homedir(), 'AppData', 'Roaming', appIdentifier);
 const bundledDir = join(rootDir, 'bundled-plugins');
 
 // 递归自动发现插件：扫描 plugins/ 下所有含 manifest.json 的目录（排除 _shared/_template），
-// 支持子插件嵌套目录（如 niuluo/gongjuxiang），返回相对路径（以 "/" 分隔，如 "niuluo/gongjuxiang"）
+// 支持子插件嵌套目录（如 niaoluo/gongjuxiang），返回 {relPath, id, manifest} 对象数组
 const EXCLUDED = new Set(['_shared', '_template', 'global.d.ts']);
 
 function discoverPlugins(dir, prefix, out) {
@@ -34,8 +42,18 @@ function discoverPlugins(dir, prefix, out) {
     const full = join(dir, name);
     if (!statSync(full).isDirectory()) continue;
     const rel = prefix ? `${prefix}/${name}` : name;
-    if (existsSync(join(full, 'manifest.json'))) {
-      out.push(rel);
+    const manifestPath = join(full, 'manifest.json');
+    if (existsSync(manifestPath)) {
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+        if (!manifest.id) {
+          console.warn(`[Deploy] ⚠ ${rel}/manifest.json 缺少 id 字段，跳过`);
+          continue;
+        }
+        out.push({ relPath: rel, id: manifest.id, manifest });
+      } catch (e) {
+        console.warn(`[Deploy] ⚠ ${rel}/manifest.json 解析失败: ${e.message}`);
+      }
       continue; // 本目录已是插件根，不再下钻（与 Rust get_installed_plugins 行为一致）
     }
     discoverPlugins(full, rel, out);
@@ -45,67 +63,102 @@ function discoverPlugins(dir, prefix, out) {
 const plugins = [];
 discoverPlugins(pluginsDir, '', plugins);
 
-console.log(`[Deploy] 发现 ${plugins.length} 个插件: ${plugins.join(', ')}`);
+console.log(`[Deploy] 发现 ${plugins.length} 个插件:`);
+plugins.forEach(p => console.log(`  - id=${p.id}  src=${p.relPath}`));
 
-// 清理并重建 bundled-plugins
-if (existsSync(bundledDir)) {
-  rmSync(bundledDir, { recursive: true });
+// ===== 增量更新：清理已不存在的插件 =====
+// 对比源码 plugins/ 的 id 列表与部署目录，删除源码中已不存在的插件目录
+// 全局/ 目录本身保留（占位），但其下的插件子目录会被清理（避免与按 id 平铺的副本冲突，
+// 导致 Rust 端 find_plugin_root 递归查找时命中不确定的副本）
+function cleanStalePlugins(targetDir, validIds, label) {
+  if (!existsSync(targetDir)) return;
+  const keepPlaceholders = new Set(['全局', 'global', '.gitkeep', 'manifest.json']);
+  for (const name of readdirSync(targetDir)) {
+    const full = join(targetDir, name);
+    if (!statSync(full).isDirectory()) continue;
+    // 跨平台兼容：中文名 "全局" 与英文名 "global" 都视为非插件目录
+    if (name === '全局' || name === 'global') {
+      cleanGlobalSubplugins(full, validIds, `${label}/${name}`);
+      continue;
+    }
+    if (keepPlaceholders.has(name)) continue;
+    if (!validIds.has(name)) {
+      console.log(`[Deploy] 清理已移除的 ${label}: ${name}/`);
+      rmSync(full, { recursive: true, force: true });
+    }
+  }
 }
-mkdirSync(bundledDir, { recursive: true });
 
-for (const pluginId of plugins) {
-  const pluginDir = join(pluginsDir, pluginId);
+// 清理 全局 目录下的插件子目录（新逻辑下所有插件按 id 平铺到根目录，全局/ 只存放非插件资源）
+function cleanGlobalSubplugins(globalDir, validIds, label) {
+  for (const name of readdirSync(globalDir)) {
+    if (name === '.gitkeep') continue;
+    const full = join(globalDir, name);
+    if (!statSync(full).isDirectory()) continue;
+    // 子目录含 manifest.json 即视为插件副本，删除（无论 id 是否有效，平铺副本已存在于根目录）
+    if (existsSync(join(full, 'manifest.json'))) {
+      console.log(`[Deploy] 清理 ${label}/ 下的冗余插件副本: ${name}/`);
+      rmSync(full, { recursive: true, force: true });
+    }
+  }
+}
+
+const validIds = new Set(plugins.map(p => p.id));
+cleanStalePlugins(bundledDir, validIds, 'bundled-plugins');
+cleanStalePlugins(appDataDir, validIds, 'app_data/extensions');
+
+// ===== 部署每个插件（按 id 平铺到根目录） =====
+for (const { relPath, id, manifest } of plugins) {
+  const pluginDir = join(pluginsDir, relPath);
   if (!existsSync(pluginDir)) continue;
 
   const hasViteConfig = existsSync(join(pluginDir, 'vite.config.ts')) || existsSync(join(pluginDir, 'vite.config.js'));
-  console.log(`\n[Deploy] ${hasViteConfig ? '构建' : '复制'}插件: ${pluginId}`);
+  console.log(`\n[Deploy] ${hasViteConfig ? '构建' : '复制'}插件: ${id} (源: ${relPath})`);
 
   // 1. 构建（有 vite 配置）或跳过（预构建插件）
   if (hasViteConfig) {
     try {
       execSync('pnpm exec vite build', { cwd: pluginDir, stdio: 'inherit', timeout: 120_000 });
     } catch (e) {
-      console.error(`[Deploy] 构建失败: ${pluginId}`, e.message);
+      console.error(`[Deploy] 构建失败: ${id}`, e.message);
       continue;
     }
   }
 
-  // 2. 复制到 app_data_dir（开发环境）
-  const targetDir = join(appDataDir, pluginId);
+  // 2. 复制到 app_data_dir（开发环境）—— 按 id 平铺
+  const targetDir = join(appDataDir, id);
+  if (existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true });
   mkdirSync(targetDir, { recursive: true });
 
   // 复制 manifest.json
   const manifestSrc = join(pluginDir, 'manifest.json');
-  if (existsSync(manifestSrc)) {
-    cpSync(manifestSrc, join(targetDir, 'manifest.json'));
-    console.log(`  ✓ manifest.json -> app_data`);
-  }
+  cpSync(manifestSrc, join(targetDir, 'manifest.json'));
+  console.log(`  ✓ manifest.json -> app_data/extensions/${id}`);
 
   // 复制产物：优先 dist/（vite 构建），其次 index.js（预构建）
   const distDir = join(pluginDir, 'dist');
   const entryFile = join(pluginDir, 'index.js');
   if (existsSync(distDir)) {
     cpSync(distDir, targetDir, { recursive: true });
-    console.log(`  ✓ dist/ -> app_data`);
+    console.log(`  ✓ dist/ -> app_data/extensions/${id}`);
   } else if (existsSync(entryFile)) {
     cpSync(entryFile, join(targetDir, 'index.js'));
-    console.log(`  ✓ index.js -> app_data`);
+    console.log(`  ✓ index.js -> app_data/extensions/${id}`);
   }
 
-  // 3. 复制到 bundled-plugins（生产打包）
-  const bundleTarget = join(bundledDir, pluginId);
+  // 3. 复制到 bundled-plugins（生产打包）—— 按 id 平铺
+  const bundleTarget = join(bundledDir, id);
+  if (existsSync(bundleTarget)) rmSync(bundleTarget, { recursive: true, force: true });
   mkdirSync(bundleTarget, { recursive: true });
-  if (existsSync(manifestSrc)) {
-    cpSync(manifestSrc, join(bundleTarget, 'manifest.json'));
-  }
+  cpSync(manifestSrc, join(bundleTarget, 'manifest.json'));
   if (existsSync(distDir)) {
     cpSync(distDir, bundleTarget, { recursive: true });
   } else if (existsSync(entryFile)) {
     cpSync(entryFile, join(bundleTarget, 'index.js'));
   }
-  console.log(`  ✓ -> bundled-plugins`);
+  console.log(`  ✓ -> bundled-plugins/${id}`);
 
-  console.log(`[Deploy] ${pluginId} 部署完成`);
+  console.log(`[Deploy] ${id} 部署完成`);
 }
 
 console.log('\n[Deploy] 所有插件部署完成');
@@ -118,8 +171,8 @@ if (readdirSync(globalBundle).length === 0) {
   console.log('[Deploy] 空 bundled-plugins/全局 文件夹已保留');
 }
 
-// 确保每个插件（模块）在 bundled-plugins 下都有文件夹；空文件夹补 .gitkeep，
-// 避免 NSIS 打包时丢弃空目录（用户要求：每个模块一个文件夹，无插件则为空白文件夹）
+// 确保每个模块在 bundled-plugins 下都有文件夹；空文件夹补 .gitkeep，
+// 避免 NSIS 打包时丢弃空目录（占位模块如 note/image 等无产物时仍保留目录）
 for (const name of readdirSync(pluginsDir)) {
   const dir = join(pluginsDir, name);
   if (!statSync(dir).isDirectory() || EXCLUDED.has(name)) continue;
@@ -152,7 +205,7 @@ if (readdirSync(globalExternal).length === 0) {
 // 即 app_data 根目录下，而非 extensions/ 之下；开发期每次 predev 都刷新，
 // 避免新增外部依赖未随版本号变更而被 setup 跳过复制）
 const wrongExternal = join(appDataDir, 'external-deps');
-if (existsSync(wrongExternal)) rmSync(wrongExternal, { recursive: true });
+if (existsSync(wrongExternal)) rmSync(wrongExternal, { recursive: true, force: true });
 if (existsSync(externalDir)) {
   cpSync(externalDir, join(appDataRoot, 'external-deps'), { recursive: true });
   console.log('[Deploy] external-deps 已同步到 app_data');

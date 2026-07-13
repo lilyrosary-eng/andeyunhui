@@ -32,7 +32,7 @@ function scanRecursive(dir, base) {
   return files;
 }
 
-// 递归查找所有含 manifest.json 的插件目录（支持嵌套如 niuluo/wps）
+// 递归查找所有含 manifest.json 的插件目录（支持嵌套如 niaoluo/wps）
 function findPlugins(dir, plugins) {
   const entries = readdirSync(dir, { withFileTypes: true });
   for (const e of entries) {
@@ -54,11 +54,14 @@ function findPlugins(dir, plugins) {
         desc: meta.desc || "",
         iconName: meta.iconName || "",
         hostApiVersion: meta.hostApiVersion || 1,
+        codename: meta.codename || "",
+        requiredAssets: meta.requiredAssets || [],
+        capabilities: meta.capabilities || [],
         size: totalSize,
         files,
       });
     } catch {
-      // 不是插件目录 → 递归深入（如 niuluo/）
+      // 不是插件目录 → 递归深入（如 niaoluo/）
       findPlugins(full, plugins);
     }
   }
