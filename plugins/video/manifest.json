@@ -6,5 +6,6 @@
   "visible": true,
   "entry": "index.js",
   "iconName": "Video",
-  "hostApiVersion": 1
+  "hostApiVersion": 1,
+  "codename": "玉兰"
 }

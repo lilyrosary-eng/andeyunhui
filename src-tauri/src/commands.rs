@@ -180,13 +180,19 @@ pub struct PluginManifest {
     pub icon_name: String,      // lucide 图标名，如 "Music2"
     pub host_api_version: u32,
     #[serde(default)]
-    pub parent: Option<String>, // 子插件归属的父模块 id（如 "niuluo" / "professional"）
+    pub parent: Option<String>, // 子插件归属的父模块 id（如 "niaoluo" / "professional"）
     #[serde(default)]
     pub path: String,           // 相对 extensions/ 的路径（"/" 分隔），用于嵌套子插件读取
     #[serde(default)]
     pub deps: Vec<String>,     // 依赖的其它插件 id（缺一则拒绝加载，reason 提示）
     #[serde(default)]
     pub min_app_version: String,// 要求的最低应用版本（如 "1.2.0"），为空表示不限制
+    #[serde(default)]
+    pub codename: String,       // 模块代号（如 "铃兰"、"莲花"），为空表示无代号
+    #[serde(default)]
+    pub required_assets: Vec<String>, // 需要的外部依赖资源路径（如 "niaoluo/ide/codemirror/index.js"）
+    #[serde(default)]
+    pub capabilities: Vec<String>,    // 插件能力声明（如 "file-system"、"network"）
 }
 
 /// 扫描结果：有效插件 + 被拒绝的插件
@@ -218,6 +224,42 @@ fn version_lt(a: &str, b: &str) -> bool {
         }
     }
     false
+}
+
+/// 校验 requiredAssets：检查 external-deps 下是否存在 manifest 声明的外部依赖资源。
+/// 查找顺序与 read_external_dep_file 一致：① app_data/external-deps；② resource_dir/external-deps。
+/// 缺失任一资源即返回 Err（含缺失清单），调用方应将插件加入 rejected 列表，
+/// 避免运行时才发现依赖缺失导致白屏（ide 的 CodeMirror / wps 的 tiptap 等）。
+fn validate_required_assets(app: &tauri::AppHandle, manifest: &PluginManifest) -> Result<(), String> {
+    if manifest.required_assets.is_empty() {
+        return Ok(());
+    }
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(ad) = app.path().app_data_dir() {
+        candidates.push(ad.join("external-deps"));
+    }
+    if let Ok(rd) = app.path().resource_dir() {
+        candidates.push(rd.join("external-deps"));
+    }
+    if candidates.is_empty() {
+        return Err("无法解析 external-deps 目录（app_data 与 resource 均不可用）".into());
+    }
+    let mut missing: Vec<&String> = Vec::new();
+    for asset in &manifest.required_assets {
+        let rel = asset.trim_start_matches(['/', '\\']);
+        let found = candidates.iter().any(|root| root.join(rel).exists());
+        if !found {
+            missing.push(asset);
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "缺失外部依赖资源: {}（在 external-deps 下未找到）",
+            missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        ))
+    }
 }
 
 /// 获取两个插件目录中最近修改时间（秒），用于缓存失效判断
@@ -348,7 +390,7 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
                 continue;
             }
         };
-        // 记录相对路径（嵌套子插件如 "niuluo/gongjuxiang"），供 read_plugin_file 使用
+        // 记录相对路径（嵌套子插件如 "niaoluo/gongjuxiang"），供 read_plugin_file 使用
         manifest.path = rel_path;
 
         // 必填字段校验
@@ -388,6 +430,15 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
             });
             continue;
         }
+        // requiredAssets 校验：检查 external-deps 下是否存在声明的资源（ide 的 CodeMirror / wps 的 tiptap）。
+        // 缺失时拒绝插件，避免运行时白屏。空列表直接通过。
+        if let Err(reason) = validate_required_assets(&app, &manifest) {
+            rejected.push(RejectedPlugin {
+                folder_name,
+                reason,
+            });
+            continue;
+        }
         // 依赖校验：manifest.deps 在此架构中专指「外部依赖」(external-deps)，
         // 如 "tiptap" / "codemirror"，由 read_external_dep_file 在运行时按需加载，
         // 并不对应某个插件 id。外部依赖随包或 app_data 始终可用，缺失时插件自身会
@@ -407,7 +458,7 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
     Ok(result)
 }
 
-/// 根据插件 id 在 extensions/ 下递归查找其所在目录（支持子插件嵌套，如 niuluo/gongjuxiang）。
+/// 根据插件 id 在 extensions/ 下递归查找其所在目录（支持子插件嵌套，如 niaoluo/gongjuxiang）。
 /// 这样前端只需传入 manifest 中的干净 id，Rust 端自动定位真实路径。
 fn find_plugin_root(app: &tauri::AppHandle, plugin_id: &str) -> Result<std::path::PathBuf, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;

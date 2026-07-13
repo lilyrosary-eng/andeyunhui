@@ -31,13 +31,13 @@ export function HostSidebar() {
     };
   }, []);
 
-  // 子插件列表（归属 niuluo 的模块类插件）
+  // 子插件列表（归属 niaoluo 的模块类插件）
   const children = useMemo(
     () =>
       pluginRegistry
         ? pluginRegistry
             .getAll()
-            .filter((p) => p.kind === 'module' && p.parent === 'niuluo')
+            .filter((p) => p.kind === 'module' && p.parent === 'niaoluo')
         : [],
     [pluginRegistry, tick],
   );
@@ -140,7 +140,7 @@ export function HostSidebar() {
 
   return (
     <ModuleSidebarShell
-      moduleId="niuluo"
+      moduleId="niaoluo"
       icon={<Puzzle size={20} className="text-[var(--element-bg)]" />}
       title="茑萝"
       onOpenModuleSettings={toggleExtensionSettings}

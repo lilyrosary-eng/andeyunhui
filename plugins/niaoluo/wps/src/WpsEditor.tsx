@@ -22,7 +22,7 @@ import { marked } from 'marked';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
 // TipTap 懒加载（与插件沙箱同源：read_external_dep_file + new Function 挂载到 window.__EXT_TIPTAP__）
-// 依赖本身在 external-deps/tiptap（由 scripts/build-external-deps.mjs 构建，react/react-dom 复用宿主实例）。
+// 依赖本身在 external-deps/niaoluo/wps/tiptap（由 scripts/build-external-deps.mjs 构建，react/react-dom 复用宿主实例）。
 interface TiptapApi {
   Editor: any;
   EditorContent: any;
@@ -44,8 +44,8 @@ function loadTiptap(): Promise<TiptapApi> {
   tiptapPromise = (async () => {
     const w = window as any;
     if (w.__EXT_TIPTAP__) return w.__EXT_TIPTAP__ as TiptapApi;
-    const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: 'tiptap/index.js' });
-    if (!code) throw new Error('未找到 TipTap 依赖（external-deps/tiptap/index.js），请先运行 node scripts/build-external-deps.mjs');
+    const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: 'niaoluo/wps/tiptap/index.js' });
+    if (!code) throw new Error('未找到 TipTap 依赖（external-deps/niaoluo/wps/tiptap/index.js），请先运行 node scripts/build-external-deps.mjs');
     new Function(code)();
     if (!w.__EXT_TIPTAP__) throw new Error('TipTap 依赖已读取但挂载失败（window.__EXT_TIPTAP__ 未定义）');
     return w.__EXT_TIPTAP__ as TiptapApi;

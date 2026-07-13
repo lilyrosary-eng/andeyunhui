@@ -8,7 +8,9 @@
   "iconName": "FileText",
   "hostApiVersion": 1,
   "deps": ["tiptap"],
-  "parent": "niuluo",
+  "parent": "niaoluo",
+  "codename": "茑萝",
+  "requiredAssets": ["niaoluo/wps/tiptap/index.js"],
   "category": "办公",
   "desc": "办公套件：文档、演示文件、表格（演示文件与表格编辑器即将推出）"
 }

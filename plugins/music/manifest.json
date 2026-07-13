@@ -6,5 +6,6 @@
   "visible": true,
   "entry": "index.js",
   "iconName": "Music2",
-  "hostApiVersion": 1
+  "hostApiVersion": 1,
+  "codename": "铃兰"
 }
