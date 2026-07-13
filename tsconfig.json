@@ -16,7 +16,9 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@tiptap/core": ["./node_modules/@tiptap/core"],
+      "@tiptap/pm": ["./node_modules/@tiptap/pm"]
     },
     "types": []
   },
