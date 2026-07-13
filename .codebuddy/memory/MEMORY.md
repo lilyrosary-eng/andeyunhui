@@ -63,3 +63,4 @@
 5. **deps 不是插件依赖**：`deps` 专指 external-deps，不做缺失拒绝
 6. **gongjuxiang 重复 id**：`deploy-plugins.mjs` 按结构部署不会再生孤儿
 7. **node_modules symlink 损坏**：Windows reparse point 不可跟随时运行 `scripts/fix-node-modules.mjs`
+8. **pnpm 物化导致 @tiptap 类型实例重复**：`fix-node-modules.mjs` 把 peer 依赖复制成独立物理目录（如 `.pnpm/@tiptap+react…/node_modules/@tiptap/core` 与 `.pnpm/@tiptap+extension-image…/node_modules/@tiptap/core` 各一份），使 `tsc` 报 `Types have separate declarations of a private property 'commandManager'` / `TS2769`。物化脚本不会自愈。兜底：根 `tsconfig.json` 的 `paths` 加 `@tiptap/core`/`@tiptap/pm` 指向顶层 `node_modules/@tiptap/*`，强制统一解析。
