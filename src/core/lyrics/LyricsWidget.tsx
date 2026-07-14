@@ -127,13 +127,23 @@ export function LyricsWidget() {
   useEffect(() => {
     const measureAndResize = () => {
       if (!contentRef.current) return;
-      // scrollHeight 包含 py-3 padding(24px) 和换行高度，但不包含 textShadow 延伸
-      // textShadow 向上 8px + 向下 6px = 14px 补偿
-      const actualH = contentRef.current.scrollHeight;
+      const content = contentRef.current;
+      // 先放开宽度约束，测出「不换行时的真实内容宽度」，使窗口宽度随字号增大而增大
+      content.style.maxWidth = 'none';
+      const naturalW = content.scrollWidth;
+      // 桌面歌词最大宽度限制（避免超长歌词把窗口拉到全屏），超出则换行、高度随之增长
+      const availW = (typeof window !== 'undefined' && window.screen) ? window.screen.availWidth : 1920;
+      const capW = Math.max(240, Math.min(1000, Math.floor(availW * 0.85)));
+      const padX = 32; // px-4 左右各 16px
+      const w = Math.min(Math.max(naturalW + padX, 180), capW);
+      // 限定内容宽度，超宽歌词换行（高度自然增长），同时避免横向溢出被窗口裁切
+      content.style.maxWidth = `${w - padX}px`;
+      // scrollHeight 含 py-3 padding(24px) 与换行高度，不含 textShadow 延伸（上 8 + 下 6 = 14px 补偿）
+      const actualH = content.scrollHeight;
       const h = Math.ceil(actualH) + 14;
       const win = getCurrentWindow();
       isResizingRef.current = true;
-      win.setSize(new LogicalSize(400, h)).finally(() => {
+      win.setSize(new LogicalSize(w, h)).finally(() => {
         setTimeout(() => { isResizingRef.current = false; }, 100);
       });
     };
