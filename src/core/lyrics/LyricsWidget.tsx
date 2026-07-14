@@ -118,55 +118,117 @@ export function LyricsWidget() {
     };
   }, []);
 
-  // 窗口高度：基于实际内容测量（scrollHeight，含换行）+ 防抖 setSize
-  // 旧实现用固定公式（fontSize * 1.25），不 accounting for 长歌词换行 → 截断
-  // 更早的实现用 ResizeObserver 高频 setSize → DWM 卡死
-  // 折中方案：歌词内容变化后测量 scrollHeight，300ms 防抖后 setSize，频率安全
+  // 窗口尺寸：基于实际内容测量（换行后真实高度）+ 防抖 setSize
+  // 旧实现用固定公式（fontSize * 1.25）→ 不 accounting 长歌词换行 → 截断；
+  // ResizeObserver 高频 setSize → DWM 卡死。折中：内容变化后测量，200ms 防抖 setSize。
+  //
+  // 左右截断修复（2026-07-14）：content 用 width:auto + maxWidth 让 flex 自然收缩、文字在最大宽度内
+  // 换行；窗口宽度 = 内容宽 + 固定两侧留白 MARGIN_X（给足阴影空间），绝不挤压文字、杜绝左右裁切。
+  //
+  // 2026-07-15 自适应兜底（终结多轮截断）：前几轮在「估算高度公式」上反复打补丁（留白/过渡/FOUT），
+  // 但估算高度一旦系统性偏小，窗口即偏低、底部被裁，且偏差随行数/字号累积（越长越截、42 必截）。
+  // 故改为「两阶段自适应」：stage1 按估算高度+安全冗余定高（宁可高估，内容居中绝不裁）；stage2 等
+  // WebView 以真实窗口宽度重排后，直接量 content 自身真实渲染高度（含 padding 的 border-box 高度），
+  // 再精确 setSize。无论估算因何偏小（过渡插值/FOUT/换行差异/contain block），最终都由真实布局兜底。
+  // 仍保留：①测量前关闭子元素过渡+强制回流→字号跳到目标值；②显式 width:contentW 解除对旧窗口宽度
+  // 依赖；③await document.fonts.ready 防 FOUT；④上下留白内嵌为 content padding(safeY)，左右 MARGIN_X。
+  const MARGIN_X = 20; // 左右留白：容纳 textShadow(16px)/WebkitTextStroke 水平外延，防左右被窗口裁切
   const contentRef = useRef<HTMLDivElement>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout>>(0);
   useEffect(() => {
-    const measureAndResize = () => {
-      if (!contentRef.current) return;
+    let cancelled = false;
+    const run = async () => {
+      if (cancelled) return;
+      // ③等字体就绪：WebFont 未加载时回退字体行高偏小 → 测出的高度偏低 → 真实字体载入后溢出截断
+      const fonts = (typeof document !== 'undefined' && (document as any).fonts) ? (document as any).fonts : null;
+      if (fonts?.ready) { try { await fonts.ready; } catch { /* ignore */ } }
+      if (cancelled || !contentRef.current) return;
+
       const content = contentRef.current;
-      // 关键修复：「真实内容宽度」必须脱离父容器约束来测。外层是 w-full(=当前窗口宽，
-      // 初始约 400px)，若直接 content.scrollWidth 会在「当前窗口宽」下测量 → 大字号仍被
-      // 当前窗口宽卡住、容器不随字体变大、横向截断/换行错乱。临时改为绝对定位使其宽度
-      // 由内容本身决定（shrink-to-fit），测完立即还原，无视觉闪烁。
-      const prevPosition = content.style.position;
-      const prevMaxWidth = content.style.maxWidth;
+      const children = Array.from(content.children) as HTMLElement[];
+
+      // ①关闭过渡并强制回流：让字号立即跳到目标值（而非插值中途），避免测量拿到偏小字号高度
+      content.style.transition = 'none';
+      const childPrevTrans = children.map((c) => c.style.transition);
+      children.forEach((c) => { c.style.transition = 'none'; });
+      void content.offsetHeight; // 强制回流，应用目标字号
+
+      const prev = {
+        position: content.style.position,
+        width: content.style.width,
+        maxWidth: content.style.maxWidth,
+        whiteSpace: content.style.whiteSpace,
+        paddingTop: content.style.paddingTop,
+        paddingBottom: content.style.paddingBottom,
+        transition: content.style.transition,
+      };
+      // 测量期间清空上下 padding：padding 留白改由「显示态」承担
+      content.style.paddingTop = '0px';
+      content.style.paddingBottom = '0px';
+
+      // 1) 测「单行自然宽」：绝对定位 + 不换行（已用目标字号），单行宽度可靠、无按行累计误差
       content.style.position = 'absolute';
+      content.style.width = 'auto';
       content.style.maxWidth = 'none';
+      content.style.whiteSpace = 'nowrap';
       const naturalW = content.scrollWidth;
-      content.style.position = prevPosition;
-      content.style.maxWidth = prevMaxWidth;
-      // 桌面歌词最大宽度限制（避免超长歌词把窗口拉到全屏），超出则换行、高度随之增长
+
+      // 2) 内容最大宽（封顶屏幕 92% 减两侧留白）；超长歌词在此宽度内换行
       const availW = (typeof window !== 'undefined' && window.screen) ? window.screen.availWidth : 1920;
-      // 取消此前固定 1000px 上限：大字号下容器需随文字自然变宽，否则横向被截断。
-      // 仅以屏幕 92% 作为安全上限，兼顾「容器随字体变大而变大」与「不占满全屏」。
       const capW = Math.max(240, Math.floor(availW * 0.92));
-      const padX = 32; // px-4 左右各 16px
-      // textShadow(0 0 16px) + WebkitTextStroke 会向左右各延伸，且随字号增大更明显，
-      // 宽度按字号动态补偿，避免大字号下文字边缘（含阴影/描边）被窗口裁切。
-      const shadowPadX = Math.ceil(fontSize * 0.5) + 16;
-      const w = Math.min(Math.max(naturalW + padX + shadowPadX, 180), capW);
-      // 限定内容宽度，超宽歌词换行（高度自然增长），同时避免横向溢出被窗口裁切
-      content.style.maxWidth = `${w - padX}px`;
-      // scrollHeight 含 py-3 padding(24px) 与换行高度，但不含 textShadow 上下延伸。
-      // 旧实现用固定 14px 补偿，大字号时阴影延伸远超 14px → 上/下缘被裁切。
-      // 改为随字号动态补偿，从根本上解决「加大字体上下被截断」。
-      const actualH = content.scrollHeight;
-      const shadowPadY = Math.ceil(fontSize * 0.5) + 8;
-      const h = Math.ceil(actualH) + shadowPadY;
+      const contentW = Math.min(naturalW, capW - MARGIN_X * 2);
+      const w = contentW + MARGIN_X * 2; // 窗口比内容宽 2*MARGIN_X，左右留白给阴影
+
+      // 3) 估算高度（仅作首帧下界，宁可高估；真实高度由 stage2 精修，故估算偏小也无妨）
+      content.style.position = 'absolute';
+      content.style.width = `${contentW}px`;
+      content.style.maxWidth = 'none';
+      content.style.whiteSpace = 'normal';
+      const estH = Math.ceil(content.getBoundingClientRect().height);
+
+      // 还原临时样式（含过渡）
+      content.style.position = prev.position;
+      content.style.width = prev.width;
+      content.style.maxWidth = prev.maxWidth;
+      content.style.whiteSpace = prev.whiteSpace;
+      content.style.paddingTop = prev.paddingTop;
+      content.style.paddingBottom = prev.paddingBottom;
+      content.style.transition = prev.transition;
+      children.forEach((c, i) => { c.style.transition = childPrevTrans[i]; });
+
+      const safeY = Math.ceil(fontSize * 0.5) + 22;
+
+      // 显示态：width:auto + maxWidth（flex 自然收缩、文字换行不错位），以内嵌 padding 承载上下留白
+      content.style.width = 'auto';
+      content.style.maxWidth = `${contentW}px`;
+      content.style.whiteSpace = 'normal';
+      content.style.paddingTop = `${safeY}px`;
+      content.style.paddingBottom = `${safeY}px`;
+
       const win = getCurrentWindow();
       isResizingRef.current = true;
-      win.setSize(new LogicalSize(w, h)).finally(() => {
-        setTimeout(() => { isResizingRef.current = false; }, 100);
-      });
+
+      // stage1：先按「估算高度 + 安全冗余」定高（高估 → 内容居中不裁，仅多留白）；
+      // stage2：等 WebView 以真实窗口宽度重排后，直接量 content 自身真实渲染高度（含 padding 的
+      //         border-box 高度），再精确 setSize。无论估算为何偏小（过渡/FOUT/换行差异），最终都按
+      //         真实布局兜底 → 上下尤其下方绝不裁。
+      const provisionalH = estH + safeY * 2 + 120;
+      const applyExact = () => {
+        if (cancelled) { isResizingRef.current = false; return; }
+        const realH = Math.ceil(content.getBoundingClientRect().height); // 含 safeY padding
+        win.setSize(new LogicalSize(w, realH)).finally(() => {
+          setTimeout(() => { isResizingRef.current = false; }, 100);
+        });
+      };
+      win.setSize(new LogicalSize(w, provisionalH))
+        .then(() => requestAnimationFrame(() => requestAnimationFrame(applyExact)))
+        .catch(() => { isResizingRef.current = false; });
     };
-    // 防抖 300ms：歌词快速更新时只取最后一次，避免高频 setSize
+    // 防抖 200ms：歌词快速更新时只取最后一次，避免高频 setSize
     if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
-    resizeTimerRef.current = setTimeout(measureAndResize, 300);
+    resizeTimerRef.current = setTimeout(run, 200);
     return () => {
+      cancelled = true;
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
     };
   }, [fontSize, showNextLine, currentLine, nextLine]);
@@ -207,8 +269,8 @@ export function LyricsWidget() {
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      {/* 内容容器：py-3 补偿 textShadow 向上 8px / 向下 6px 的视觉延伸（textShadow 不参与 scrollHeight 计算） */}
-      <div ref={contentRef} className="flex flex-col items-center py-3">
+      {/* 内容容器：上下留白由窗口 safeY 提供（不再用 py-3，避免与纵向缓冲重复占用导致上下被裁） */}
+      <div ref={contentRef} className="flex flex-col items-center">
         {/* 当前行 */}
         <div
           className="text-center leading-tight px-4 transition-all duration-300"
@@ -226,17 +288,17 @@ export function LyricsWidget() {
 
         {/* 下一行预览 */}
         {showNextLine && nextLine && (
-          <div
-            className="text-center leading-tight px-4 mt-1 transition-all duration-300"
-            style={{
-              fontSize: `${fontSize * 0.7}px`,
-              fontWeight: 400,
+        <div
+          className="text-center leading-tight px-4 mt-1 transition-all duration-300"
+          style={{
+            fontSize: `${fontSize * 0.7}px`,
+            fontWeight: 400,
               color: '#ffffff',
               textShadow: '0 0 6px rgba(0,0,0,0.7), 0 0 12px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4)',
-              WebkitTextStroke: '0.5px rgba(0,0,0,0.2)',
-              opacity: DEFAULT_NEXT_LINE_OPACITY,
-            }}
-          >
+            WebkitTextStroke: '0.5px rgba(0,0,0,0.2)',
+            opacity: DEFAULT_NEXT_LINE_OPACITY,
+          }}
+        >
             {nextLine}
           </div>
         )}

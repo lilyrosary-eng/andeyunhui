@@ -1,0 +1,11 @@
+{
+  "id": "screen-recorder",
+  "name": "录屏",
+  "version": "1.0.0",
+  "kind": "service",
+  "visible": false,
+  "entry": "index.js",
+  "iconName": "Video",
+  "hostApiVersion": 1,
+  "desc": "屏幕录制（Ctrl+Alt+R 开始/停止）"
+}

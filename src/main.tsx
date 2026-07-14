@@ -4,7 +4,11 @@ import App from "./App"
 import { ThemeProvider } from "./lib/ThemeProvider"
 import { LyricsWidget } from "./core/lyrics/LyricsWidget"
 import { FloatingNoteView } from "./core/notes/FloatingNoteView"
+import { initFileLogger } from "./lib/file-logger"
 import "./index.css"
+
+// 尽早初始化前端全局错误捕获：把 window.onerror / unhandledrejection / console.error 写入会话日志文件
+initFileLogger();
 
 // 启动进度上报（由 index.html 预加载脚本提供的真实进度引擎消费）
 const boot = (window as unknown as {

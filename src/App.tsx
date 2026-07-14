@@ -36,13 +36,28 @@ function App() {
   // （已在 UI 层说明取舍）。截图覆盖窗口在 setup 预创建并复用，避免卡顿。
   const startScreenshot = useCallback(async () => {
     try {
-      // 记录当前笔记页 id（主窗口即便最小化，store 仍在内存中），供「导入当前笔记」使用
+      // 记录当前笔记页 id（非阻塞：与截图启动并行，减少一次 IPC 往返延迟）
       const noteId = useNotesStore.getState().currentNoteId ?? '';
-      await invoke('store_screenshot_note_id', { noteId });
-      // 捕获与窗口枚举改在 Rust 侧完成，并经一次事件直接推送给覆盖窗，避免大体积 base64 多次往返卡顿
+      invoke('store_screenshot_note_id', { noteId }).catch(() => {});
+      // 立即启动截图捕获（不等 note_id 存储）
       await invoke('start_screenshot');
     } catch (e) {
+      // 失败时给出可见提示（而非「按了毫无反应」），并复位覆盖窗状态避免卡死
       console.error('[截图] 启动失败:', e);
+      const msg = typeof e === 'string' ? e : (e as { message?: string })?.message || '截图启动失败';
+      try { await invoke('hide_overlay_window'); } catch { /* ignore */ }
+      let tip = document.getElementById('screenshot-err-tip');
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.id = 'screenshot-err-tip';
+        tip.style.cssText =
+          'position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:2147483647;' +
+          'background:rgba(220,38,38,.95);color:#fff;padding:8px 14px;border-radius:8px;' +
+          'font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3);max-width:80vw;';
+        document.body.appendChild(tip);
+      }
+      tip.textContent = '截图失败：' + msg;
+      window.setTimeout(() => tip?.remove(), 4000);
     }
   }, []);
 
@@ -96,11 +111,19 @@ function App() {
   useEffect(() => { clearStaleBootPreview(); }, []);
 
   // ====== 全局 effect ======
-  // 初始化
+  // 初始化（「加载页优先」：推后到哥特加载动画稳态之后）
+  // 不立即同步跑笔记初始化 + 浮窗监听——否则会与 React 挂载、插件加载在启动头几秒抢占主线程，
+  // 导致哥特加载页动画掉帧（用户 Issue 4）。延迟 ~1.2s 后执行，此时加载页已流畅播放、且仍盖在上方。
+  const initCleanupRef = useRef<() => void>(() => {});
   useEffect(() => {
-    initNotes();
-    const cleanup = initFloatingListeners();
-    return cleanup;
+    const t = window.setTimeout(() => {
+      initNotes();
+      initCleanupRef.current = initFloatingListeners() || (() => {});
+    }, 1200);
+    return () => {
+      window.clearTimeout(t);
+      initCleanupRef.current();
+    };
   }, [initNotes, initFloatingListeners]);
 
   // 插件可见性变化

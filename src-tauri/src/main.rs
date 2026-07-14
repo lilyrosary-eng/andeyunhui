@@ -26,6 +26,8 @@ use andengyuanhua_lib::screenshot::*;
 use andengyuanhua_lib::TrayModeState;
 use andengyuanhua_lib::TrayHolder;
 use andengyuanhua_lib::services::lyrics_service;
+use andengyuanhua_lib::services::recording_service;
+use andengyuanhua_lib::services::log_service;
 use std::sync::Mutex;
 
 /// 创建托盘右键菜单窗口（独立 WebView，承载「我们的 UI」样式菜单）。
@@ -84,13 +86,8 @@ fn tray_quit(app: tauri::AppHandle) {
 }
 
 fn main() {
-    // 初始化日志：dev 默认 debug，release 默认 warn（RUST_LOG 可覆盖）
-    let level = if cfg!(debug_assertions) { "debug" } else { "warn" };
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().filter_or("RUST_LOG", level)
-    )
-    .format_timestamp_secs()
-    .try_init();
+    // 日志系统在 setup 阶段初始化（需要 app_data 路径），此处仅用 eprintln 兜底早期日志。
+    // setup 之前的少量 eprintln 输出到 stderr，setup 之后所有 log:: 宏自动写入会话日志文件。
 
     tauri::Builder::default()
         .manage(Mutex::new(TrayModeState { enabled: false }))
@@ -228,6 +225,11 @@ fn main() {
             let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
 
+            // 初始化会话日志系统（替换 env_logger）：每次启动创建新会话日志文件，保留最近 10 个
+            if let Err(e) = log_service::init_logger(&app_data) {
+                eprintln!("[Log] 日志系统初始化失败: {}", e);
+            }
+
             // 确保「中转站」暂存目录存在（打包后运行时自动创建，无需随包附带）
             let dropzone_dir = app_data.join("transfer_station").join("dropzone");
             std::fs::create_dir_all(&dropzone_dir).map_err(|e| e.to_string())?;
@@ -290,6 +292,8 @@ fn main() {
 
             // 预创建截图覆盖窗口与托盘菜单窗口（隐藏复用，避免截图/菜单时的卡顿）
             let _ = create_overlay_window(app.handle().clone());
+            // 预创建录屏区域选择覆盖窗（隐藏），首次使用时无需等待 WebView2 初始化
+            let _ = recording_service::create_recorder_select_window(app.handle());
             let _ = create_tray_menu_window(app.handle());
 
             // 托盘图标：优先使用默认窗口图标；若极端情况下为 None，则从资源目录
@@ -349,6 +353,17 @@ fn main() {
                 }
                 if let Ok(mut s) = app.state::<Mutex<ScreenshotData>>().lock() {
                     s.shortcut = sc;
+                }
+            }
+
+            // 注册录屏热键（从持久化配置读取，默认 Ctrl+Alt+R；设置面板可改写并即时生效）
+            {
+                let sc = recording_service::read_recorder_shortcut(app.handle());
+                if let Err(e) = recording_service::register_recorder_shortcut(app.handle(), &sc) {
+                    eprintln!("[Shortcut] 注册录屏热键失败: {}", e);
+                }
+                if let Ok(mut state) = recording_service::recorder_shortcut_state().lock() {
+                    *state = sc;
                 }
             }
 
@@ -466,7 +481,7 @@ fn main() {
                     }
                     eprintln!("[TrayMode] 关闭事件已拦截，窗口已隐藏到托盘");
                 } else {
-                    // 非托盘模式：销毁所有隐藏的辅助窗口（歌词悬浮窗、截图覆盖窗、托盘菜单窗），
+                    // 非托盘模式：销毁所有隐藏的辅助窗口（歌词悬浮窗、截图覆盖窗、托盘菜单窗、录屏窗），
                     // 否则这些预创建且一直存在的隐藏窗口会让进程无法退出（表现为「关了窗口却仍在运行」）
                     if let Some(lw) = app.get_webview_window(lyrics_service::LYRICS_WINDOW_LABEL) {
                         let _ = lw.destroy();
@@ -476,6 +491,12 @@ fn main() {
                     }
                     if let Some(tw) = app.get_webview_window("tray-menu") {
                         let _ = tw.destroy();
+                    }
+                    if let Some(rw) = app.get_webview_window(recording_service::RECORDER_WINDOW_LABEL) {
+                        let _ = rw.destroy();
+                    }
+                    if let Some(rsw) = app.get_webview_window(recording_service::RECORDER_SELECT_LABEL) {
+                        let _ = rsw.destroy();
                     }
                     // 同时关闭所有浮窗笔记窗口（关闭主程序时一并关掉，避免进程残留 / 浮窗孤立）
                     for (label, w) in app.webview_windows() {
@@ -490,9 +511,42 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
-                        let _ = app.emit("open-screenshot", ());
+                        // 从内存态读取当前录屏热键（支持设置面板自定义）
+                        let recorder_sc_str = recording_service::recorder_shortcut_state()
+                            .lock()
+                            .map(|s| s.clone())
+                            .unwrap_or_else(|_| recording_service::DEFAULT_RECORDER_SHORTCUT.to_string());
+                        let is_recorder = parse_shortcut(&recorder_sc_str)
+                            .map(|sc| shortcut == &sc)
+                            .unwrap_or(false);
+
+                        if is_recorder {
+                            // 录屏流程：先选择区域 → 开始录制 → 显示控制台
+                            let is_recording = recording_service::get_recording_status().is_recording;
+                            if is_recording {
+                                // 正在录制 → 停止（向控制台发 toggle 事件）
+                                if let Some(win) = app.get_webview_window(recording_service::RECORDER_WINDOW_LABEL) {
+                                    let _ = win.show();
+                                    let _ = win.emit("recorder-toggle", ());
+                                }
+                            } else if app
+                                .get_webview_window(recording_service::RECORDER_SELECT_LABEL)
+                                .map(|w| w.is_visible().unwrap_or(false))
+                                .unwrap_or(false)
+                            {
+                                // 区域选择覆盖窗已显示 → 取消选择
+                                if let Some(w) = app.get_webview_window(recording_service::RECORDER_SELECT_LABEL) {
+                                    let _ = w.emit("recorder-select-cancel", ());
+                                }
+                            } else {
+                                // 未录制 → 显示区域选择覆盖窗
+                                let _ = recording_service::show_recorder_select(app.clone());
+                            }
+                        } else {
+                            let _ = app.emit("open-screenshot", ());
+                        }
                     }
                 })
                 .build(),
@@ -635,6 +689,24 @@ fn main() {
             capture_window_full,
             get_screenshot_shortcut,
             set_screenshot_shortcut,
+            // ========== 模块：录屏系统（全局热键 / WGC 捕获 / ffmpeg 编码）==========
+            recording_service::start_recording,
+            recording_service::stop_recording,
+            recording_service::pause_recording,
+            recording_service::resume_recording,
+            recording_service::get_recording_status,
+            recording_service::list_recording_monitors,
+            recording_service::show_recorder_widget,
+            recording_service::hide_recorder_widget,
+            recording_service::show_recorder_select,
+            recording_service::hide_recorder_select,
+            recording_service::get_recorder_shortcut,
+            recording_service::set_recorder_shortcut,
+            // ========== 模块：日志系统（用户可见 log 文件 + 前端错误捕获）==========
+            log_service::write_frontend_log,
+            log_service::open_log_dir,
+            log_service::get_log_files,
+            log_service::get_current_log_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

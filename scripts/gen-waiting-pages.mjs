@@ -6,6 +6,10 @@
 import fs from 'node:fs';
 import { resolve } from 'node:path';
 const root = process.cwd();
+// 源文件以 wait-page/waiting-page-*.html（哥特加载页）为准——它已是「完整的莲花逐笔构建动画」
+// （CSS @keyframes bloom + JS 流光光点，与 flower-waiting-page--*.html 完全一致），并额外保留了
+// 两项关键修复：①candle 关键帧去掉 transform:scale()（避免加载页卡顿）；②prefers-reduced-motion
+// 下仍保留莲花构建动画（避免「打包后消失」）。flower-waiting-page--*.html 仅作原始完整动画的参考副本。
 const light = fs.readFileSync(resolve(root, 'wait-page/waiting-page-light.html'), 'utf-8');
 const dark = fs.readFileSync(resolve(root, 'wait-page/waiting-page-dark.html'), 'utf-8');
 const out = resolve(root, 'src/lib/_waitingPages.generated.ts');

@@ -157,7 +157,10 @@ pub fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Tra
         .unwrap_or("未知曲目")
         .to_string();
 
-    match read_from_path(file_path) {
+    // canonicalize 归一化路径（Windows 上 dialog 可能返回带空格/符号链接的非常规形式），
+    // 失败则回退原路径，不影响后续解析。
+    let resolved = file_path.canonicalize().unwrap_or_else(|_| file_path.to_path_buf());
+    match read_from_path(&resolved) {
         Ok(tagged_file) => {
             let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
             let title = tag
@@ -207,14 +210,17 @@ pub fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Tra
                 cover_path,
             }
         }
-        Err(_) => Track {
-            id: path_str.clone(),
-            file_path: path_str,
-            title: fallback_title,
-            artist: String::new(),
-            album: String::new(),
-            duration_secs: 0,
-            cover_path: None,
-        },
+        Err(e) => {
+            eprintln!("[music_service] 元信息读取失败: {} ({})", file_path.display(), e);
+            Track {
+                id: path_str.clone(),
+                file_path: path_str,
+                title: fallback_title,
+                artist: String::new(),
+                album: String::new(),
+                duration_secs: 0,
+                cover_path: None,
+            }
+        }
     }
 }

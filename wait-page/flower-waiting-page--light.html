@@ -3,6 +3,21 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<script>
+  (function () {
+    try {
+      var w = window.innerWidth || document.documentElement.clientWidth || 1100;
+      var m = document.createElement('meta');
+      m.name = 'viewport';
+      m.content = 'width=' + w;
+      document.head.appendChild(m);
+      window.addEventListener('resize', function () {
+        var vm = document.querySelector('meta[name="viewport"]');
+        if (vm) vm.setAttribute('content', 'width=' + (window.innerWidth || document.documentElement.clientWidth || 1100));
+      });
+    } catch (e) {}
+  })();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Noto+Serif+SC:wght@400;500;600&display=swap" rel="stylesheet" />

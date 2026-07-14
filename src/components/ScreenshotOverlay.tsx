@@ -197,13 +197,21 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     (rect: { x: number; y: number; w: number; h: number }) => {
       const img = fullImgRef.current;
       if (!img) return;
+      // 预览图实际分辨率（原生物理像素）与覆盖窗 CSS 宽度的比值。
+      // 关键：read_screenshot 自 Issue6 起返回原生物理分辨率（不再降采样到 CSS），
+      // 故「图像像素 ≠ CSS 像素」。必须用 ps 把 CSS 选区坐标换算到预览图像坐标，
+      // 否则在 scale>1 的高 DPI 屏上会采样到错误的（更小）区域，导致选区被放大 / 左移显示。
+      const cssW = window.innerWidth || img.naturalWidth;
+      const ps = img.naturalWidth / cssW;
+      const cw = Math.max(1, Math.round(rect.w * ps));
+      const ch = Math.max(1, Math.round(rect.h * ps));
       const c = document.createElement("canvas");
-      c.width = Math.max(1, Math.round(rect.w));
-      c.height = Math.max(1, Math.round(rect.h));
+      c.width = cw;
+      c.height = ch;
       const ctx = c.getContext("2d");
       if (!ctx) return;
-      // 预览图分辨率 == CSS 像素，直接按选区偏移绘制即可截取该区域
-      ctx.drawImage(img, -rect.x, -rect.y);
+      // 按缩放比用「物理坐标」从原图截取该区域（canvas 物理像素 → 显示 CSS 像素 1:1，清晰且无放大）
+      ctx.drawImage(img, -rect.x * ps, -rect.y * ps);
       baseRef.current = c;
       undoRef.current = [];
       setSelRect(rect);
@@ -932,9 +940,12 @@ function Magnifier({ off, x, y, zoom, size }: { off: HTMLCanvasElement; x: numbe
     ctx.beginPath();
     ctx.arc(size / 2, size / 2, size / 2 - 2, 0, Math.PI * 2);
     ctx.clip();
+    // off 为原生物理分辨率画布，光标坐标 x/y 是 CSS 像素，需按预览比例 ps 换算到原图坐标
+    const ps = off.width / (window.innerWidth || off.width);
     const sw = size / zoom;
+    const swp = sw * ps;
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(off, x - sw / 2, y - sw / 2, sw, sw, 0, 0, size, size);
+    ctx.drawImage(off, x * ps - swp / 2, y * ps - swp / 2, swp, swp, 0, 0, size, size);
     ctx.restore();
     // 十字准线
     ctx.strokeStyle = "rgba(16,185,129,0.9)";
