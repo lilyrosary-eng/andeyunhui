@@ -358,7 +358,7 @@ export function GlobalSettingsPanel() {
                         setTrayMode(val);
                         invoke('toggle_tray_mode', { enabled: val }).catch(() => {});
                       }}
-                      className="data-[state=checked]:bg-[var(--element-bg)]"
+                      className="data-[state=checked]:bg-[var(--element-color-raw)]"
                     />
                   </div>
                   <div className="flex justify-between items-center p-4">
@@ -369,7 +369,7 @@ export function GlobalSettingsPanel() {
                     <Switch checked={autoSave} onCheckedChange={(val: boolean) => {
                       setAutoSave(val);
                       syncAutoSave(val, autoSaveInterval[0]);
-                    }} className="data-[state=checked]:bg-[var(--element-bg)]" />
+                    }} className="data-[state=checked]:bg-[var(--element-color-raw)]" />
                   </div>
                   {autoSave && (
                     <div className="p-4">
@@ -470,7 +470,7 @@ export function GlobalSettingsPanel() {
                   </div>
                   <div className="flex justify-between items-center p-4">
                     <span className="text-sm text-neutral-600 dark:text-stone-300">反转元素配色</span>
-                    <Switch checked={reverseColor} onCheckedChange={setReverseColor} className="data-[state=checked]:bg-[var(--element-bg)]" />
+                    <Switch checked={reverseColor} onCheckedChange={setReverseColor} className="data-[state=checked]:bg-[var(--element-color-raw)]" />
                   </div>
                   <div className="flex justify-between items-center p-4">
                     <span className="text-sm text-neutral-600 dark:text-stone-300">自定义背景图</span>

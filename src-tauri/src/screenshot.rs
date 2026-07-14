@@ -146,6 +146,7 @@ pub fn create_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
     .transparent(true) // 透明：触发瞬间显示覆盖窗时「透出桌面」，用户感知毫秒级响应，不闪白
     .visible(false) // 预创建时隐藏；截图时由 start_screenshot 显示
     .resizable(false)
+    .shadow(false) // 去除 Windows 11 不可见调整边框（~7px），否则覆盖窗左侧有几像素不覆盖 → 用户无法选中左边
     .build()
     .map_err(|e| format!("创建截图窗口失败: {}", e))?;
 
@@ -698,9 +699,20 @@ pub async fn start_screenshot(
 
     let (rx, ry, rw, rh) = virtual_desktop_rect();
 
-    // 用物理坐标把覆盖窗精确贴在虚拟桌面原点并铺满。
-    let _ = overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: rx, y: ry }));
-    let _ = overlay.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: rw as u32, height: rh as u32 }));
+    // 缓存上次的虚拟桌面矩形：若未变化（显示器配置未改），跳过 set_position/set_size，
+    // 省 ~16ms DWM 重排时间。只有首次或分辨率变更时才重新贴位。
+    // shadow(false) + decorations(false) 确保窗口尺寸 == 客户区尺寸，无隐藏边框偏移。
+    static LAST_VD_RECT: std::sync::OnceLock<std::sync::Mutex<(i32, i32, i32, i32)>> = std::sync::OnceLock::new();
+    let cache = LAST_VD_RECT.get_or_init(|| std::sync::Mutex::new((0, 0, 0, 0)));
+    let need_reposition = {
+        let last = cache.lock().unwrap();
+        *last != (rx, ry, rw, rh)
+    };
+    if need_reposition {
+        let _ = overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: rx, y: ry }));
+        let _ = overlay.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: rw as u32, height: rh as u32 }));
+        *cache.lock().unwrap() = (rx, ry, rw, rh);
+    }
 
     // 直接使用 virtual_desktop_rect 作为捕获区域——不再读 outer_position()/outer_size()。
     // 原因：set_position 是异步的，Windows 下 outer_position() 可能返回旧值或带 DWM 边框偏移
@@ -717,8 +729,15 @@ pub async fn start_screenshot(
         Err(_) => return Err("无法获取缩放比".into()),
     };
 
-    // 捕获整虚拟桌面（GDI 优先，失败才兜底 WGC）。区域 == 虚拟桌面权威矩形，1:1 对齐、无偏移无白边。
-    let full = match capture_full(ox, oy, ow, oh) {
+    // 并行执行屏幕捕获 + 窗口枚举（两者互不依赖，串行 ~80-100ms → 并行 ~50ms）
+    // std::thread::scope 允许子线程借用栈上变量，且在 scope 结束时自动 join，安全无泄漏。
+    let (full_result, windows_result) = std::thread::scope(|s| {
+        let capture_handle = s.spawn(|| capture_full(ox, oy, ow, oh));
+        let windows_handle = s.spawn(|| list_windows().unwrap_or_default());
+        (capture_handle.join().unwrap_or(Err("捕获线程 panic".into())), windows_handle.join().unwrap_or_default())
+    });
+
+    let full = match full_result {
         Ok(f) => f,
         Err(e) => {
             eprintln!("[截图] 捕获失败: {}", e);
@@ -740,7 +759,7 @@ pub async fn start_screenshot(
         });
     }
 
-    let windows = list_windows().unwrap_or_default();
+    let windows = windows_result;
     // 写入跨窗口快照 + 自增 session：这是「兜底恢复」的权威数据源。
     // 即便下面的 push 事件在打包版 WebView2 里丢失，覆盖层也能通过 peek_screenshot
     // 轮询到新的 session 并主动拉取，彻底根治「只有透明遮罩、全屏卡死」。
@@ -905,16 +924,100 @@ pub async fn crop_native_rgba(
     Ok(tauri::ipc::Response::new(out))
 }
 
+/// Win32 剪贴板写入位图（CF_DIB）。
+///
+/// 替代 `arboard`：`arboard::Clipboard::new()` 内部调用 `OleInitialize(NULL)` 需要 STA，
+/// 即便 spawn 新线程也可能因进程级 COM 状态冲突而静默失败。
+/// Win32 API（`OpenClipboard` + `SetClipboardData`）不依赖 COM/OLE，任何线程均可调用，是最可靠的路径。
+///
+/// 数据格式：`BITMAPINFOHEADER` + BGRA 像素（bottom-up，正高度）。
+/// 输入 `raw` 为 RGBA top-down，需逐行翻转并转 BGRA。
+fn write_clipboard_bitmap(raw: &[u8], w: u32, h: u32) -> Result<(), String> {
+    if w == 0 || h == 0 {
+        return Err("无效图像尺寸".into());
+    }
+    let row_bytes = (w as usize) * 4;
+    let pixel_bytes = (w as usize) * (h as usize) * 4;
+    let header_size = std::mem::size_of::<winapi::um::wingdi::BITMAPINFOHEADER>();
+    let total = header_size + pixel_bytes;
+
+    unsafe {
+        // 1) 分配全局内存（SetClipboardData 要求 GMEM_MOVEABLE）
+        let h_global = winapi::um::winbase::GlobalAlloc(
+            winapi::um::winbase::GMEM_MOVEABLE,
+            total,
+        );
+        if h_global.is_null() {
+            return Err("GlobalAlloc 失败".into());
+        }
+        let ptr = winapi::um::winbase::GlobalLock(h_global);
+        if ptr.is_null() {
+            winapi::um::winbase::GlobalFree(h_global);
+            return Err("GlobalLock 失败".into());
+        }
+
+        // 2) 写 BITMAPINFOHEADER（正高度 = bottom-up DIB）
+        let hdr = ptr as *mut winapi::um::wingdi::BITMAPINFOHEADER;
+        (*hdr).biSize = header_size as u32;
+        (*hdr).biWidth = w as i32;
+        (*hdr).biHeight = h as i32;
+        (*hdr).biPlanes = 1;
+        (*hdr).biBitCount = 32;
+        (*hdr).biCompression = winapi::um::wingdi::BI_RGB;
+        (*hdr).biSizeImage = pixel_bytes as u32;
+        (*hdr).biXPelsPerMeter = 0;
+        (*hdr).biYPelsPerMeter = 0;
+        (*hdr).biClrUsed = 0;
+        (*hdr).biClrImportant = 0;
+
+        // 3) 写像素：RGBA top-down → BGRA bottom-up（行翻转 + 通道交换）
+        let px = (ptr as *mut u8).add(header_size);
+        let dst = std::slice::from_raw_parts_mut(px, pixel_bytes);
+        for y in 0..(h as usize) {
+            let src_off = y * row_bytes;
+            let dst_off = (h as usize - 1 - y) * row_bytes;
+            let src_row = &raw[src_off..src_off + row_bytes];
+            let dst_row = &mut dst[dst_off..dst_off + row_bytes];
+            for x in 0..(w as usize) {
+                let si = x * 4;
+                dst_row[si] = src_row[si + 2];     // B
+                dst_row[si + 1] = src_row[si + 1]; // G
+                dst_row[si + 2] = src_row[si];     // R
+                dst_row[si + 3] = 255;              // A
+            }
+        }
+        winapi::um::winbase::GlobalUnlock(h_global);
+
+        // 4) 写入剪贴板
+        if winapi::um::winuser::OpenClipboard(std::ptr::null_mut()) == 0 {
+            winapi::um::winbase::GlobalFree(h_global);
+            return Err("OpenClipboard 失败".into());
+        }
+        winapi::um::winuser::EmptyClipboard();
+        let r = winapi::um::winuser::SetClipboardData(
+            winapi::um::winuser::CF_DIB,
+            h_global as *mut _,
+        );
+        winapi::um::winuser::CloseClipboard();
+        if r.is_null() {
+            // SetClipboardData 失败时所有权未转移，需手动释放
+            winapi::um::winbase::GlobalFree(h_global);
+            return Err("SetClipboardData 失败".into());
+        }
+        // 成功：h_global 所有权转移给系统，不可再释放
+    }
+    Ok(())
+}
+
 /// 一键保存：把合成好的图像「写入剪贴板 + 存入中转站」，返回 `localimg://` 引用。
 ///
-/// 性能优化（对比旧实现）：
-/// - PNG 编码改用 `png` crate 的 `CompressionType::Fast`（zlib level 1），
-///   全屏 33MP 编码从默认 level 6 的 ~1.5s 降到 ~0.3s；
-/// - 剪贴板写入（大位图 `SetClipboardData` 较慢）放到**独立线程**，与 PNG 编码**并行**，
-///   串行 ~0.6s → 并行 ~0.3s；
-/// - 不再对 RGBA 做额外 clone 给剪贴板（旧实现 `raw.clone()` 多占 132MB 并多一次整块拷贝），
-///   直接在 PNG 编码用的同一份 `raw` 上取切片编码、把副本 move 进剪贴板线程。
-/// `save_screenshot`（前端传像素）与 `save_cropped`（Rust 端直裁）共用，避免逻辑重复。
+/// 极致优化（对比旧实现）：
+/// - 剪贴板改用 Win32 API（`OpenClipboard` + `SetClipboardData`），不依赖 COM/OLE，
+///   彻底解决 arboard 在 tokio MTA 线程下 `OleInitialize` 失败导致剪贴板静默不写入的问题；
+/// - 不再写临时文件 + `std::fs::copy` + `archive_snapshot`（旧流程 3 次磁盘写入），
+///   改为直接写入 dropzone 目录（1 次磁盘写入）；
+/// - 截图无需 `archive_snapshot` 备份（截图是新增文件，不存在「旧版本需要存档」的语义）；
+/// - 保存后 emit `dropzone-changed` 事件，前端立即刷新中转站列表。
 fn write_clipboard_and_dropzone(
     app: tauri::AppHandle,
     rgba: RgbaImage,
@@ -923,46 +1026,30 @@ fn write_clipboard_and_dropzone(
     let (w, h) = rgba.dimensions();
     let raw = rgba.into_raw();
 
-    // 1) 快速 PNG 编码（从切片，无额外整块拷贝）
+    // 1) 快速 PNG 编码（zlib level 1，全屏 33MP ~0.3s）
     let png = encode_png_fast(&raw, w, h)?;
 
-    // 2) 剪贴板写入（同步）：arboard::Clipboard::new() 内部调用 OleInitialize，
-    //    在后台 std::thread::spawn 线程中 COM apartment 未初始化会导致静默失败
-    //    （表现为保存成功但 Ctrl+V 粘贴不出图片）。
-    //    SetClipboardData 本身仅分配全局内存 + 设置句柄，耗时 ~10ms，无需后台化。
-    //    必须在主线程或 COM 已初始化的线程中调用。
-    {
-        let data = arboard::ImageData {
-            width: w as usize,
-            height: h as usize,
-            bytes: std::borrow::Cow::Borrowed(&raw),
-        };
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            let _ = cb.set_image(data);
-        }
-    }
+    // 2) 剪贴板写入（Win32 API，~5-15ms，不依赖 COM）
+    let _ = write_clipboard_bitmap(&raw, w, h);
 
-    // 3) 落盘中转站（PNG 已在内存，直接写盘；存档快照复用同一份字节，避免写盘后整文件回读）
-    let tmp = std::env::temp_dir().join(format!(
-        "andeng_shot_{}_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-        name
-    ));
-    std::fs::write(&tmp, &png).map_err(|e| format!("写临时文件失败: {}", e))?;
-    let tmp_str = tmp.to_string_lossy().to_string();
+    // 3) 直接写入 dropzone 目录（跳过临时文件 + copy + archive_snapshot）
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let dest = crate::commands::copy_file_to_dropzone(&app_data, &tmp_str, Some(&name), Some(png));
-    let _ = std::fs::remove_file(&tmp);
-    match dest {
-        Ok(d) => Ok(format!(
-            "localimg://{}",
-            crate::services::document_parser::js_encode_uri_component(&d.to_string_lossy())
-        )),
-        Err(e) => Err(e),
-    }
+    let dropzone_dir = app_data.join("transfer_station").join("dropzone");
+    std::fs::create_dir_all(&dropzone_dir).map_err(|e| format!("创建目录失败: {}", e))?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dest = dropzone_dir.join(format!("{}_{}", timestamp, name));
+    std::fs::write(&dest, &png).map_err(|e| format!("写入 dropzone 失败: {}", e))?;
+
+    // 4) 通知前端刷新中转站列表（Tauri 事件，前端 TransferStationPanel 监听后自动 reload）
+    let _ = app.emit("dropzone-changed", ());
+
+    Ok(format!(
+        "localimg://{}",
+        crate::services::document_parser::js_encode_uri_component(&dest.to_string_lossy())
+    ))
 }
 
 /// 快速 PNG 编码：使用 `CompressionType::Fast`（zlib level 1）替代 `image` 默认 level 6，

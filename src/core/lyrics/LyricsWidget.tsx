@@ -127,9 +127,11 @@ export function LyricsWidget() {
   //
   // 2026-07-15 自适应兜底（终结多轮截断）：前几轮在「估算高度公式」上反复打补丁（留白/过渡/FOUT），
   // 但估算高度一旦系统性偏小，窗口即偏低、底部被裁，且偏差随行数/字号累积（越长越截、42 必截）。
-  // 故改为「两阶段自适应」：stage1 按估算高度+安全冗余定高（宁可高估，内容居中绝不裁）；stage2 等
-  // WebView 以真实窗口宽度重排后，直接量 content 自身真实渲染高度（含 padding 的 border-box 高度），
-  // 再精确 setSize。无论估算因何偏小（过渡插值/FOUT/换行差异/contain block），最终都由真实布局兜底。
+  // 故改为：stage1 用「绝对定位隔离上下文」测得 estH（脱离窗口高度的 flex 容器，不会被 h-full 父容器
+  // 按当前窗口高 shrink 失真）；最终高度 = estH + 上下留白 safeY*2，直接精确 setSize。
+  // 曾用 stage2 在 in-flow 状态重测 content，但 content 是 flex-shrink:1 子项，窗口未长大时被压缩成窗口高
+  // → 量得 realH≈窗口高 → 又 setSize 回窗口高 → 死锁（content 真实 133、窗口恒 80、永不长大）。
+  // 故彻底废弃 in-flow 重测，只用隔离测量的 estH。
   // 仍保留：①测量前关闭子元素过渡+强制回流→字号跳到目标值；②显式 width:contentW 解除对旧窗口宽度
   // 依赖；③await document.fonts.ready 防 FOUT；④上下留白内嵌为 content padding(safeY)，左右 MARGIN_X。
   const MARGIN_X = 20; // 左右留白：容纳 textShadow(16px)/WebkitTextStroke 水平外延，防左右被窗口裁切
@@ -208,21 +210,16 @@ export function LyricsWidget() {
       const win = getCurrentWindow();
       isResizingRef.current = true;
 
-      // stage1：先按「估算高度 + 安全冗余」定高（高估 → 内容居中不裁，仅多留白）；
-      // stage2：等 WebView 以真实窗口宽度重排后，直接量 content 自身真实渲染高度（含 padding 的
-      //         border-box 高度），再精确 setSize。无论估算为何偏小（过渡/FOUT/换行差异），最终都按
-      //         真实布局兜底 → 上下尤其下方绝不裁。
-      const provisionalH = estH + safeY * 2 + 120;
-      const applyExact = () => {
-        if (cancelled) { isResizingRef.current = false; return; }
-        const realH = Math.ceil(content.getBoundingClientRect().height); // 含 safeY padding
-        win.setSize(new LogicalSize(w, realH)).finally(() => {
-          setTimeout(() => { isResizingRef.current = false; }, 100);
-        });
-      };
-      win.setSize(new LogicalSize(w, provisionalH))
-        .then(() => requestAnimationFrame(() => requestAnimationFrame(applyExact)))
-        .catch(() => { isResizingRef.current = false; });
+      // 最终高度直接用 stage1 的「隔离测量」estH（绝对定位、脱离窗口高度的 flex 容器，不会被
+      // h-full 父容器按当前窗口高 shrink 而失真）+ 上下留白 safeY*2。
+      // 旧实现的 stage2 在 in-flow 状态重测 content 真实高度：content 是 flex 子项(flex-shrink:1)，
+      // 当窗口尚未长大/被 h-full 锁到窗口高时会被压缩成窗口高，量得 realH≈窗口高(如 80) →
+      // 又 setSize 回 80 → 死锁（稳定后 content 真实 133、窗口却恒为 80、永不长大）。
+      // 隔离测量的 estH 不受父容器高度影响，故直接采用它作为最终高度，彻底消除死锁。
+      const finalH = estH + safeY * 2;
+      win.setSize(new LogicalSize(w, finalH)).finally(() => {
+        setTimeout(() => { isResizingRef.current = false; }, 100);
+      });
     };
     // 防抖 200ms：歌词快速更新时只取最后一次，避免高频 setSize
     if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);

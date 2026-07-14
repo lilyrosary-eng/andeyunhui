@@ -140,9 +140,22 @@ struct RecordingHandle {
 /// 全局录屏状态
 static RECORDING: Mutex<Option<RecordingHandle>> = Mutex::new(None);
 
-/// 检查系统是否安装了 ffmpeg
-fn check_ffmpeg() -> bool {
-    std::process::Command::new("ffmpeg")
+/// 解析 ffmpeg 可执行文件路径：
+/// 1. 优先使用 external-deps/ffmpeg/ffmpeg.exe（随应用打包，无需用户安装）
+/// 2. 回退到系统 PATH 中的 ffmpeg（用户自行安装）
+fn get_ffmpeg_path(app: &AppHandle) -> String {
+    if let Some(deps_dir) = crate::commands::get_external_deps_dir(app) {
+        let ffmpeg = deps_dir.join("ffmpeg").join("ffmpeg.exe");
+        if ffmpeg.exists() {
+            return ffmpeg.to_string_lossy().to_string();
+        }
+    }
+    "ffmpeg".to_string() // 回退到系统 PATH
+}
+
+/// 检查 ffmpeg 是否可用（bundled 或系统安装）
+fn check_ffmpeg_with(path: &str) -> bool {
+    std::process::Command::new(path)
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -165,8 +178,9 @@ pub fn start_recording(
     monitor_index: Option<usize>,
     region: Option<(i32, i32, i32, i32)>,
 ) -> Result<(), String> {
-    // 检查 ffmpeg
-    if !check_ffmpeg() {
+    // 检查 ffmpeg（优先 bundled，回退系统 PATH）
+    let ffmpeg_path = get_ffmpeg_path(&app);
+    if !check_ffmpeg_with(&ffmpeg_path) {
         return Err("未检测到 ffmpeg，无法录屏。请在系统中安装 ffmpeg 后重试。".into());
     }
 
@@ -220,7 +234,7 @@ pub fn start_recording(
     };
 
     // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(&ffmpeg_path)
         .args([
             "-y",
             "-f", "rawvideo",
@@ -499,6 +513,7 @@ pub fn create_recorder_select_window(app: &AppHandle) -> Result<(), String> {
     .transparent(true)
     .resizable(false)
     .visible(false) // 预创建时隐藏
+    .shadow(false) // 去除 Windows 11 不可见调整边框，与截图覆盖窗一致
     .build()
     .map_err(|e| format!("创建录屏区域选择窗口失败: {}", e))?;
 

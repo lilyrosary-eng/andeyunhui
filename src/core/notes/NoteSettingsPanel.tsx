@@ -51,7 +51,7 @@ export function NoteSettingsPanel() {
           <Switch checked={autoSave} onCheckedChange={(val: boolean) => {
             setAutoSave(val);
             syncAutoSave(val, autoSaveInterval[0]);
-          }} className="data-[state=checked]:bg-[var(--element-bg)]" />
+          }} className="data-[state=checked]:bg-[var(--element-color-raw)]" />
         </div>
         {autoSave && (
           <div>
@@ -80,7 +80,7 @@ export function NoteSettingsPanel() {
           <span className="text-sm font-medium block">Vim 模式</span>
           <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">在代码编辑器中启用 Vim 键盘绑定</p>
         </div>
-        <Switch checked={vimMode} onCheckedChange={(v) => onVimModeChange(v)} className="data-[state=checked]:bg-[var(--element-bg)]" />
+        <Switch checked={vimMode} onCheckedChange={(v) => onVimModeChange(v)} className="data-[state=checked]:bg-[var(--element-color-raw)]" />
       </div>
 
       {/* 自动换行 */}
@@ -89,7 +89,7 @@ export function NoteSettingsPanel() {
           <span className="text-sm font-medium block">自动换行</span>
           <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">长行自动换行，无需横向滚动</p>
         </div>
-        <Switch checked={wordWrap} onCheckedChange={onWordWrapChange} className="data-[state=checked]:bg-[var(--element-bg)]" />
+        <Switch checked={wordWrap} onCheckedChange={onWordWrapChange} className="data-[state=checked]:bg-[var(--element-color-raw)]" />
       </div>
     </ModuleSettingsPanel>
   )

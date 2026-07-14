@@ -46,7 +46,7 @@ sysinfo = "0.30"
 arboard = "3"
 base64 = "0.22"
 # 微信式截图：可见窗口枚举（EnumWindows）+ 长截图 PrintWindow（仍走 GDI）
-winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi"] }
+winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase"] }
 # WGC 屏幕捕获后端（替换 GDI BitBlt）：基于 Windows.Graphics.Capture，硬件加速、可截独占全屏游戏；
 # windows-capture 1.5 依赖 windows ^0.61.3，与 Tauri 锁定的 0.61.3 完全一致，零双份编译、无版本冲突
 windows-capture = "1.5"

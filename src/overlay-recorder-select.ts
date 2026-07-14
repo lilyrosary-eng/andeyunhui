@@ -123,6 +123,7 @@ root.appendChild(hint);
 
 // ========== 交互状态 ==========
 let dragging = false;
+let pointerDown = false; // 必须先 pointerdown 才能进入拖拽判定，否则 mousemove 会因 downX=0 立即触发
 let startX = 0;
 let startY = 0;
 let downX = 0;
@@ -232,6 +233,7 @@ overlay.addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
   // 捕获指针：即使光标移出 overlay 元素，后续 pointermove/up 仍发到此元素
   (e.target as Element).setPointerCapture?.(e.pointerId);
+  pointerDown = true;
   downX = e.clientX;
   downY = e.clientY;
   downWin = hitWindow(e.clientX, e.clientY);
@@ -248,8 +250,8 @@ overlay.addEventListener("pointermove", (e) => {
     const w = Math.abs(e.clientX - startX);
     const h = Math.abs(e.clientY - startY);
     scheduleUpdate(() => updateSelection(x, y, w, h));
-  } else {
-    // 未拖拽：检查是否超过阈值（从 pointerdown 位置移动 > 5px → 转为拖拽）
+  } else if (pointerDown) {
+    // 已按下但未拖拽：检查是否超过阈值（从 pointerdown 位置移动 > 5px → 转为拖拽）
     const dx = e.clientX - downX;
     const dy = e.clientY - downY;
     if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
@@ -264,16 +266,17 @@ overlay.addEventListener("pointermove", (e) => {
       const w = Math.abs(e.clientX - startX);
       const h = Math.abs(e.clientY - startY);
       updateSelection(x, y, w, h);
-    } else {
-      // 悬停：高亮当前窗口
-      hoverWin = hitWindow(e.clientX, e.clientY);
-      updateWinHighlight(hoverWin);
     }
+  } else {
+    // 纯悬停（未按下）：高亮当前窗口
+    hoverWin = hitWindow(e.clientX, e.clientY);
+    updateWinHighlight(hoverWin);
   }
 });
 
 overlay.addEventListener("pointerup", (e) => {
   if (e.button !== 0) return;
+  pointerDown = false;
   // 释放指针捕获
   (e.target as Element).releasePointerCapture?.(e.pointerId);
 

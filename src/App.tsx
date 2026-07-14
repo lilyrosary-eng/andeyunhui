@@ -80,6 +80,14 @@ function App() {
     return () => { void un.then((fn) => fn()); };
   }, []);
 
+  // Rust 端写入 dropzone 后 emit 'dropzone-changed'，前端立即刷新中转站列表
+  // （ScreenshotOverlay 的 finish 回调也会调 emitDropzoneChange，但 Tauri 事件更可靠：
+  // 即便覆盖窗已关闭、finish 未执行也能触发刷新）
+  useEffect(() => {
+    const un = listen('dropzone-changed', () => emitDropzoneChange());
+    return () => { void un.then((fn) => fn()); };
+  }, []);
+
   // ====== 派生数据 ======
   const mainPluginIds = useMemo(() => {
     if (!pluginRegistry) return [] as string[];
