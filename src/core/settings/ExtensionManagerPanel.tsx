@@ -238,7 +238,7 @@ export function ExtensionManagerPanel() {
                     <Switch
                       checked={isVisible}
                       onCheckedChange={(val: boolean) => handleTogglePlugin(p, val)}
-                      className="data-[state=checked]:bg-[var(--element-bg)]"
+                      className="data-[state=checked]:bg-[var(--element-color-raw)]"
                       title="启用/禁用（立即生效）"
                     />
                     <button
