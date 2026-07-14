@@ -128,19 +128,35 @@ export function LyricsWidget() {
     const measureAndResize = () => {
       if (!contentRef.current) return;
       const content = contentRef.current;
-      // 先放开宽度约束，测出「不换行时的真实内容宽度」，使窗口宽度随字号增大而增大
+      // 关键修复：「真实内容宽度」必须脱离父容器约束来测。外层是 w-full(=当前窗口宽，
+      // 初始约 400px)，若直接 content.scrollWidth 会在「当前窗口宽」下测量 → 大字号仍被
+      // 当前窗口宽卡住、容器不随字体变大、横向截断/换行错乱。临时改为绝对定位使其宽度
+      // 由内容本身决定（shrink-to-fit），测完立即还原，无视觉闪烁。
+      const prevPosition = content.style.position;
+      const prevMaxWidth = content.style.maxWidth;
+      content.style.position = 'absolute';
       content.style.maxWidth = 'none';
       const naturalW = content.scrollWidth;
+      content.style.position = prevPosition;
+      content.style.maxWidth = prevMaxWidth;
       // 桌面歌词最大宽度限制（避免超长歌词把窗口拉到全屏），超出则换行、高度随之增长
       const availW = (typeof window !== 'undefined' && window.screen) ? window.screen.availWidth : 1920;
-      const capW = Math.max(240, Math.min(1000, Math.floor(availW * 0.85)));
+      // 取消此前固定 1000px 上限：大字号下容器需随文字自然变宽，否则横向被截断。
+      // 仅以屏幕 92% 作为安全上限，兼顾「容器随字体变大而变大」与「不占满全屏」。
+      const capW = Math.max(240, Math.floor(availW * 0.92));
       const padX = 32; // px-4 左右各 16px
-      const w = Math.min(Math.max(naturalW + padX, 180), capW);
+      // textShadow(0 0 16px) + WebkitTextStroke 会向左右各延伸，且随字号增大更明显，
+      // 宽度按字号动态补偿，避免大字号下文字边缘（含阴影/描边）被窗口裁切。
+      const shadowPadX = Math.ceil(fontSize * 0.5) + 16;
+      const w = Math.min(Math.max(naturalW + padX + shadowPadX, 180), capW);
       // 限定内容宽度，超宽歌词换行（高度自然增长），同时避免横向溢出被窗口裁切
       content.style.maxWidth = `${w - padX}px`;
-      // scrollHeight 含 py-3 padding(24px) 与换行高度，不含 textShadow 延伸（上 8 + 下 6 = 14px 补偿）
+      // scrollHeight 含 py-3 padding(24px) 与换行高度，但不含 textShadow 上下延伸。
+      // 旧实现用固定 14px 补偿，大字号时阴影延伸远超 14px → 上/下缘被裁切。
+      // 改为随字号动态补偿，从根本上解决「加大字体上下被截断」。
       const actualH = content.scrollHeight;
-      const h = Math.ceil(actualH) + 14;
+      const shadowPadY = Math.ceil(fontSize * 0.5) + 8;
+      const h = Math.ceil(actualH) + shadowPadY;
       const win = getCurrentWindow();
       isResizingRef.current = true;
       win.setSize(new LogicalSize(w, h)).finally(() => {

@@ -6,8 +6,8 @@
 // 在 DPI 感知进程中，GetSystemMetrics / GetWindowRect 返回**真实物理像素**，GDI BitBlt 同坐标系。
 //
 // 坐标方案（根治「边缘偏移 / 白边 / 截不到」）：
-//   覆盖窗的尺寸/位置以「逻辑像素」设定（物理 = 逻辑 × scale_factor）；我们捕获的是
-//   **覆盖窗自身的真实矩形**（outer_position/outer_size，物理像素），而非另算的虚拟桌面。
+//   覆盖窗的尺寸/位置以**物理像素**直接设定（set_position + set_size 均用 Physical）；
+//   设置后读取窗口的 outer_position / outer_size（真实矩形），用实际值作为捕获区域。
 //   截图图在 WebView 内 object-fill 铺满覆盖窗，故：
 //     图像像素(x,y) ≡ 窗口内 CSS 像素(x,y)   （预览图已按 scale_factor 降采样，1 CSS px = 1 图像 px）
 //   映射退化为恒等，彻底消除偏移；且「捕获区域 == 覆盖窗显示区域」，边缘必然完整覆盖，无白边、无截不到。
@@ -63,40 +63,18 @@ fn dpi_scale() -> f64 {
     }
 }
 
-/// 多屏枚举结果：物理矩形并集 + 所有显示器中的最小 DPI 缩放比。
-struct MonitorLayout {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    min_scale: f64,
-}
-
-/// 枚举所有显示器，计算物理矩形并集，同时用 `GetDpiForMonitor` 取每屏独立 DPI，
-/// 返回最小缩放比以避免混合 DPI 场景下覆盖窗尺寸偏小 / 边缘裁剪。
-fn monitor_layout() -> MonitorLayout {
-    #[derive(Clone)]
-    struct MData {
-        x: i32, y: i32, w: i32, h: i32,
-        min_scale: f64,
-    }
-    let mut data = MData { x: i32::MAX, y: i32::MAX, w: 0, h: 0, min_scale: f64::MAX };
+/// 取所有显示器中的最小 DPI 缩放比（覆盖窗创建时逻辑像素换算用，确保在高 DPI 屏上不被裁剪）。
+/// 枚举每屏独立 DPI（`GetDpiForMonitor`），返回最小值以避免混合 DPI 场景下覆盖窗尺寸偏小。
+fn min_monitor_scale() -> f64 {
+    let mut min_scale = f64::MAX;
 
     unsafe extern "system" fn proc(
         hmon: winapi::shared::windef::HMONITOR,
         _hdc: winapi::shared::windef::HDC,
-        rect: *mut winapi::shared::windef::RECT,
+        _rect: *mut winapi::shared::windef::RECT,
         lparam: winapi::shared::minwindef::LPARAM,
     ) -> i32 {
-        let data = &mut *(lparam as *mut MData);
-        let r = &*rect;
-        data.x = data.x.min(r.left);
-        data.y = data.y.min(r.top);
-        let _rw = r.right - r.left;
-        let _rh = r.bottom - r.top;
-        if r.right > data.x + data.w { data.w = r.right - data.x; }
-        if r.bottom > data.y + data.h { data.h = r.bottom - data.y; }
-
+        let min_scale = &mut *(lparam as *mut f64);
         let mut dpi = 96u32;
         let _ = winapi::um::shellscalingapi::GetDpiForMonitor(
             hmon,
@@ -105,7 +83,7 @@ fn monitor_layout() -> MonitorLayout {
             &mut 0u32,
         );
         let scale = if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 };
-        data.min_scale = data.min_scale.min(scale);
+        *min_scale = (*min_scale).min(scale);
         1
     }
 
@@ -114,32 +92,26 @@ fn monitor_layout() -> MonitorLayout {
             std::ptr::null_mut(),
             std::ptr::null(),
             Some(proc),
-            &mut data as *mut _ as winapi::shared::minwindef::LPARAM,
+            &mut min_scale as *mut _ as winapi::shared::minwindef::LPARAM,
         );
     }
 
-    if data.x == i32::MAX {
-        let ls = dpi_scale();
-        return MonitorLayout {
-            x: unsafe { winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_XVIRTUALSCREEN) },
-            y: unsafe { winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_YVIRTUALSCREEN) },
-            w: unsafe { winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CXVIRTUALSCREEN) },
-            h: unsafe { winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CYVIRTUALSCREEN) },
-            min_scale: ls,
-        };
-    }
-    MonitorLayout { x: data.x, y: data.y, w: data.w, h: data.h, min_scale: if data.min_scale == f64::MAX { 1.0 } else { data.min_scale } }
-}
-
-/// 取所有显示器中的最小 DPI 缩放比（覆盖窗逻辑像素换算用，确保在高 DPI 屏上不被裁剪）。
-fn min_monitor_scale() -> f64 {
-    monitor_layout().min_scale
+    if min_scale == f64::MAX { dpi_scale() } else { min_scale }
 }
 
 /// 计算「所有显示器物理矩形」的并集（多屏覆盖）。
+///
+/// 数据源统一：直接用 `GetSystemMetrics(SM_XVIRTUALSCREEN / SM_CXVIRTUALSCREEN)`，
+/// 与 `do_capture_region_wgc` 内部的虚拟桌面原点完全一致，消除双数据源不一致风险。
+/// PM-DPI-Aware V2 下 `GetSystemMetrics` 返回物理像素，与 `EnumDisplayMonitors` 同坐标系。
 fn virtual_desktop_rect() -> (i32, i32, i32, i32) {
-    let m = monitor_layout();
-    (m.x, m.y, m.w, m.h)
+    unsafe {
+        let x = winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_XVIRTUALSCREEN);
+        let y = winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_YVIRTUALSCREEN);
+        let w = winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CXVIRTUALSCREEN);
+        let h = winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CYVIRTUALSCREEN);
+        (x, y, w, h)
+    }
 }
 
 /// 创建悬浮置顶截图窗口（覆盖全虚拟桌面）。
@@ -152,10 +124,9 @@ pub fn create_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
         return Ok(()); // 已存在则复用，不重复创建
     }
 
-    // 用多屏最小 DPI 缩放比换算逻辑尺寸，确保混合 DPI 场景下不会有显示器被裁剪。
+    // 覆盖窗精确覆盖「所有显示器物理并集」。builder API 只接受逻辑像素，
+    // 用 min_monitor_scale 换算；start_screenshot 时会改用 PhysicalSize 精确重设。
     let scale = min_monitor_scale();
-    // 覆盖窗精确覆盖「所有显示器物理并集」，否则捕获区域错位 / 绿框偏移。
-    // 用 Win32 显示器枚举拿真实物理矩形（GetSystemMetrics 在 PM-DPI-Aware 下返回系统 DPI 逻辑像素，会双重缩小）。
     let (rx, ry, rw, rh) = virtual_desktop_rect();
     let lw = rw as f64 / scale;
     let lh = rh as f64 / scale;
@@ -465,11 +436,11 @@ fn do_capture_region_wgc(x: i32, y: i32, w: i32, h: i32) -> Result<RgbaImage, St
     Ok(full)
 }
 
-/// 检测 RGBA 图像是否全部为非零（全黑）像素。
+/// 检测 RGBA 图像是否全部为零（全黑）像素。
 fn is_all_black(img: &RgbaImage) -> bool {
     let pixels = img.as_raw();
     for chunk in pixels.chunks_exact(4) {
-        // BGRA: 检查 R+G+B 三个通道
+        // RGBA: 检查 R+G+B 三个通道（WGC ColorFormat::Rgba8 输出 RGBA，非 BGRA）
         if chunk[0] != 0 || chunk[1] != 0 || chunk[2] != 0 {
             return false;
         }
@@ -486,6 +457,15 @@ pub struct ScreenshotData {
     pub note_id: String,
     pub shortcut: String,
     pub capturing: bool,
+    // 最近一次截图推送的载荷快照：覆盖层在「screenshot-start」push 事件丢失时，
+    // 通过 peek_screenshot 主动拉取作为兜底恢复路径（根治打包版偶发「只有透明遮罩、全屏卡死」）。
+    // `session` 每次 start_screenshot 自增；覆盖层轮询到 session 变大即视为「有新截图待显示」，
+    // 天然规避事件丢失、窗口复用导致的重复触发问题。
+    pub last_ox: f64,
+    pub last_oy: f64,
+    pub last_scale: f64,
+    pub last_windows: Vec<WindowInfo>,
+    pub session: u64,
 }
 
 impl Default for ScreenshotData {
@@ -494,6 +474,11 @@ impl Default for ScreenshotData {
             note_id: String::new(),
             shortcut: "Ctrl+Shift+S".to_string(),
             capturing: false,
+            last_ox: 0.0,
+            last_oy: 0.0,
+            last_scale: 1.0,
+            last_windows: Vec::new(),
+            session: 0,
         }
     }
 }
@@ -582,26 +567,31 @@ pub async fn start_screenshot(
 
     let (rx, ry, rw, rh) = virtual_desktop_rect();
 
-    // 用「运行时 scale_factor」把覆盖窗精确设为全虚拟桌面物理尺寸。
-    // 关键：创建期用的是 min_monitor_scale 换算逻辑尺寸，若与窗口实际所处显示器的
-    // scale 不一致，物理尺寸会比真实桌面少几 px → 捕获区右下缺几 px、底部操作框被截断
-    // （即用户反馈的「全屏截图时底部几 px 截断操作框」）。改用同一 scale 设窗 + 捕获全桌面，
-    // 窗口必然精确铺满，且 ox/oy 取桌面原点，二者自洽。
-    // 先定位到目标坐标，再读 scale（确保取的是最终所处显示器的缩放比），最后按同 scale 设窗。
+    // 用物理坐标直接设置窗口位置和大小，不经过逻辑像素换算——彻底消除
+    // min_monitor_scale vs scale_factor 不一致 + set_position 异步导致读 scale 时机错误。
     let _ = overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: rx, y: ry }));
+    let _ = overlay.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: rw as u32, height: rh as u32 }));
+
+    // 关键修复：读取窗口的真实矩形（outer_position/outer_size），用实际值作为捕获区域。
+    // set_position/set_size 在 Windows 上是异步的，DWM 不可见边框、DPI 取整等因素
+    // 可能导致窗口实际位置与设置值有几 px 偏差。用实际值确保「捕获区域 == 窗口显示区域」，
+    // 图像像素与窗口 CSS 像素 1:1 对齐，彻底消除「左边几px没覆盖到」的偏移问题。
+    let win_pos = match overlay.outer_position() {
+        Ok(p) => p,
+        Err(e) => return Err(format!("获取窗口位置失败: {}", e)),
+    };
+    let win_size = match overlay.outer_size() {
+        Ok(s) => s,
+        Err(e) => return Err(format!("获取窗口大小失败: {}", e)),
+    };
     let scale = match overlay.scale_factor() {
         Ok(s) => s,
         Err(_) => return Err("无法获取缩放比".into()),
     };
-    let lw = rw as f64 / scale;
-    let lh = rh as f64 / scale;
-    let _ = overlay.set_size(tauri::Size::Logical(tauri::LogicalSize { width: lw, height: lh }));
-
-    // 捕获区域＝权威的全虚拟桌面矩形；ox/oy 同步为桌面原点，与前端 toPhys 映射一致。
-    let ox = rx;
-    let oy = ry;
-    let ow = rw;
-    let oh = rh;
+    let ox = win_pos.x;
+    let oy = win_pos.y;
+    let ow = win_size.width as i32;
+    let oh = win_size.height as i32;
 
     // 捕获区域：DC 坐标系以虚拟桌面原点 (rx,ry) 为 (0,0)，故屏幕 (ox,oy) 对应 DC (ox-rx, oy-ry)
     let full = match capture_region(ox - rx, oy - ry, ow, oh) {
@@ -627,11 +617,21 @@ pub async fn start_screenshot(
     }
 
     let windows = list_windows().unwrap_or_default();
-    let note_id = app
-        .state::<std::sync::Mutex<ScreenshotData>>()
-        .lock()
-        .map(|s| s.note_id.clone())
-        .unwrap_or_default();
+    // 写入跨窗口快照 + 自增 session：这是「兜底恢复」的权威数据源。
+    // 即便下面的 push 事件在打包版 WebView2 里丢失，覆盖层也能通过 peek_screenshot
+    // 轮询到新的 session 并主动拉取，彻底根治「只有透明遮罩、全屏卡死」。
+    let note_id = {
+        let state = app.state::<std::sync::Mutex<ScreenshotData>>();
+        let mut s = state
+            .lock()
+            .map_err(|e| format!("锁失败: {}", e))?;
+        s.last_ox = ox as f64;
+        s.last_oy = oy as f64;
+        s.last_scale = scale;
+        s.last_windows = windows.clone();
+        s.session = s.session.wrapping_add(1);
+        s.note_id.clone()
+    };
     let payload = json!({
         "ox": ox,
         "oy": oy,
@@ -644,6 +644,24 @@ pub async fn start_screenshot(
     let _ = overlay.show();
     let _ = overlay.set_focus();
     Ok(())
+}
+
+/// 覆盖层兜底拉取：返回最近一次截图的载荷快照 + 单调递增的 `session`。
+/// 覆盖层轮询本命令，一旦发现 `session` 大于自己已处理的值，即视为「有新截图待显示」，
+/// 主动读取冻结图渲染——即使 `screenshot-start` push 事件在打包版里丢失也能自愈。
+#[tauri::command]
+pub fn peek_screenshot(
+    state: tauri::State<'_, std::sync::Mutex<ScreenshotData>>,
+) -> Result<serde_json::Value, String> {
+    let s = state.lock().map_err(|e| format!("锁失败: {}", e))?;
+    Ok(json!({
+        "ox": s.last_ox,
+        "oy": s.last_oy,
+        "scale": s.last_scale,
+        "windows": s.last_windows,
+        "noteId": s.note_id,
+        "session": s.session,
+    }))
 }
 
 /// 覆盖窗读取截图预览：前 8 字节为宽/高（u32 LE，逻辑分辨率），其后为 RGBA 字节。
@@ -1132,9 +1150,10 @@ fn capture_window_full_inner(hwnd: u64) -> Result<Vec<u8>, String> {
         let mut prev_pos: i32 = -1;
         let mut guard = 0u32;
 
-        // 保存原光标位置，将光标移到目标窗口中心（SendInput 滚轮相对于光标所在窗口）
+        // 保存原光标位置 + 原前台窗口，将光标移到目标窗口中心（SendInput 滚轮相对于光标所在窗口）
         let mut saved_cursor: winapi::shared::windef::POINT = std::mem::zeroed();
         winapi::um::winuser::GetCursorPos(&mut saved_cursor);
+        let saved_fg = winapi::um::winuser::GetForegroundWindow();
         let cx = rect.left + w / 2;
         let cy = rect.top + h / 2;
         winapi::um::winuser::SetCursorPos(cx, cy);
@@ -1195,8 +1214,11 @@ fn capture_window_full_inner(hwnd: u64) -> Result<Vec<u8>, String> {
                 break; // 到达底部
             }
         }
-        // 恢复原光标位置
+        // 恢复原光标位置 + 原前台窗口（避免长截图后用户焦点被意外切换）
         winapi::um::winuser::SetCursorPos(saved_cursor.x, saved_cursor.y);
+        if !saved_fg.is_null() {
+            let _ = winapi::um::winuser::SetForegroundWindow(saved_fg);
+        }
         encode_png(full)
     }
 }
