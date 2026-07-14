@@ -17,6 +17,95 @@ use crate::services::reading_service;
 static PLUGIN_SCAN_CACHE: once_cell::sync::Lazy<Mutex<Option<(PluginScanResult, SystemTime)>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
 
+// ========== 路径解析：统一开发期与打包后的插件/依赖目录 ==========
+// 开发时 resource_dir() = src-tauri/，打包后 resource_dir() = 安装目录
+// 开发时插件在 项目根/bundled-plugins/，打包后在 安装目录/bundled-plugins/
+
+/// 获取内置插件目录（bundled-plugins/）
+/// 打包后：resource_dir/bundled-plugins/ 或 resource_dir/_up_/bundled-plugins/
+///   （Tauri 对 bundle.resources 中 "../bundled-plugins" 会保留 _up_ 前缀）
+/// 开发时：resource_dir/../bundled-plugins/（resource_dir 是 src-tauri/）
+pub fn get_bundled_plugins_dir(app: &AppHandle) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    // 打包后：直接路径
+    let bundled = resource_dir.join("bundled-plugins");
+    if bundled.exists() {
+        return Some(bundled);
+    }
+    // 打包后 NSIS 备选：_up_/bundled-plugins/
+    let up_bundled = resource_dir.join("_up_").join("bundled-plugins");
+    if up_bundled.exists() {
+        return Some(up_bundled);
+    }
+    // 开发时（resource_dir = src-tauri/，向上一层到项目根）
+    let dev_bundled = resource_dir.join("..").join("bundled-plugins");
+    if dev_bundled.exists() {
+        return Some(dev_bundled);
+    }
+    None
+}
+
+/// 获取外部依赖目录（external-deps/）
+/// 打包后：resource_dir/external-deps/ 或 resource_dir/_up_/external-deps/
+/// 开发时：resource_dir/../external-deps/
+pub fn get_external_deps_dir(app: &AppHandle) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    let deps = resource_dir.join("external-deps");
+    if deps.exists() {
+        return Some(deps);
+    }
+    let up_deps = resource_dir.join("_up_").join("external-deps");
+    if up_deps.exists() {
+        return Some(up_deps);
+    }
+    let dev_deps = resource_dir.join("..").join("external-deps");
+    if dev_deps.exists() {
+        return Some(dev_deps);
+    }
+    None
+}
+
+/// 获取用户插件目录（user_plugins/，始终在 AppData 下，用于第三方插件）
+pub fn get_user_plugins_dir(app: &AppHandle) -> Option<PathBuf> {
+    let app_data = app.path().app_data_dir().ok()?;
+    Some(app_data.join("user_plugins"))
+}
+
+// ========== 插件可见性持久化 ==========
+// 禁用状态持久化到 AppData/plugin_visibility.json（一个简单的 id→bool 映射）。
+// 这样 bundled-plugins/ 在打包后即使只读（Program Files）也能正常启用/禁用插件，
+// 且不污染源码 manifest.json。get_installed_plugins 读取此文件覆盖 manifest.visible。
+
+/// 读取 plugin_visibility.json，返回 id→visible 映射
+fn load_plugin_visibility_map(app: &AppHandle) -> std::collections::HashMap<String, bool> {
+    let map = std::collections::HashMap::new();
+    let app_data = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let path = app_data.join("plugin_visibility.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return map,
+    };
+    match serde_json::from_str::<std::collections::HashMap<String, bool>>(&content) {
+        Ok(m) => m,
+        Err(_) => map,
+    }
+}
+
+/// 写入单个插件的可见性到 plugin_visibility.json（合并已有记录）
+fn save_plugin_visibility(app: &AppHandle, plugin_id: &str, visible: bool) -> Result<(), String> {
+    let app_data = app.path().app_data_dir().map_err(|e| format!("获取 app_data_dir 失败: {}", e))?;
+    std::fs::create_dir_all(&app_data).map_err(|e| format!("创建 app_data_dir 失败: {}", e))?;
+    let path = app_data.join("plugin_visibility.json");
+    let mut map = load_plugin_visibility_map(app);
+    map.insert(plugin_id.to_string(), visible);
+    let content = serde_json::to_string_pretty(&map).map_err(|e| format!("序列化失败: {}", e))?;
+    std::fs::write(&path, content).map_err(|e| format!("写入 plugin_visibility.json 失败: {}", e))?;
+    Ok(())
+}
+
 // ================= 原有的笔记服务函数 =================
 fn notes_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -227,28 +316,19 @@ fn version_lt(a: &str, b: &str) -> bool {
 }
 
 /// 校验 requiredAssets：检查 external-deps 下是否存在 manifest 声明的外部依赖资源。
-/// 查找顺序与 read_external_dep_file 一致：① app_data/external-deps；② resource_dir/external-deps。
+/// 使用 get_external_deps_dir 统一路径解析（开发时项目根/external-deps，打包后 resource_dir/external-deps）。
 /// 缺失任一资源即返回 Err（含缺失清单），调用方应将插件加入 rejected 列表，
 /// 避免运行时才发现依赖缺失导致白屏（ide 的 CodeMirror / wps 的 tiptap 等）。
 fn validate_required_assets(app: &tauri::AppHandle, manifest: &PluginManifest) -> Result<(), String> {
     if manifest.required_assets.is_empty() {
         return Ok(());
     }
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(ad) = app.path().app_data_dir() {
-        candidates.push(ad.join("external-deps"));
-    }
-    if let Ok(rd) = app.path().resource_dir() {
-        candidates.push(rd.join("external-deps"));
-    }
-    if candidates.is_empty() {
-        return Err("无法解析 external-deps 目录（app_data 与 resource 均不可用）".into());
-    }
+    let deps_dir = get_external_deps_dir(app)
+        .ok_or_else(|| "无法解析 external-deps 目录".to_string())?;
     let mut missing: Vec<&String> = Vec::new();
     for asset in &manifest.required_assets {
         let rel = asset.trim_start_matches(['/', '\\']);
-        let found = candidates.iter().any(|root| root.join(rel).exists());
-        if !found {
+        if !deps_dir.join(rel).exists() {
             missing.push(asset);
         }
     }
@@ -263,8 +343,11 @@ fn validate_required_assets(app: &tauri::AppHandle, manifest: &PluginManifest) -
 }
 
 /// 获取两个插件目录中最近修改时间（秒），用于缓存失效判断
-fn plugins_max_mtime(app_data: &std::path::Path) -> u64 {
-    let dirs = [app_data.join("extensions"), app_data.join("user_plugins")];
+fn plugins_max_mtime(app: &AppHandle) -> u64 {
+    let dirs: Vec<PathBuf> = [
+        get_bundled_plugins_dir(app),
+        get_user_plugins_dir(app),
+    ].into_iter().flatten().collect();
     let mut max = 0u64;
     for d in &dirs {
         if let Ok(meta) = std::fs::metadata(d) {
@@ -292,13 +375,12 @@ fn plugins_max_mtime(app_data: &std::path::Path) -> u64 {
     max
 }
 
-/// 扫描 extensions/ 与 user_plugins/ 下所有子目录，校验 manifest.json 并返回有效 + 被拒绝的插件列表
+/// 扫描 bundled-plugins/ 与 user_plugins/ 下所有子目录，校验 manifest.json 并返回有效 + 被拒绝的插件列表
 /// 阶段 0：Rust 端完成 manifest 存在性、解析、必填字段、版本与依赖校验
 /// 结果会被缓存，仅当插件目录 mtime 变化时重新扫描
 #[tauri::command]
 pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let current_mtime = plugins_max_mtime(&app_data);
+    let current_mtime = plugins_max_mtime(&app);
 
     // 检查缓存
     if let Ok(cache) = PLUGIN_SCAN_CACHE.lock() {
@@ -309,11 +391,11 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
         }
     }
 
-    // 早期返回：extensions 与 user_plugins 两个根目录都不存在才认为无插件
-    // 顺序：user_plugins（用户态）优先于 extensions（打包），用户插件可覆盖打包插件
-    let ext = app_data.join("extensions");
-    let usr = app_data.join("user_plugins");
-    if !ext.exists() && !usr.exists() {
+    // 早期返回：bundled-plugins 与 user_plugins 两个根目录都不存在才认为无插件
+    // 顺序：user_plugins（用户态）优先于 bundled-plugins（打包），用户插件可覆盖打包插件
+    let ext = get_bundled_plugins_dir(&app);
+    let usr = get_user_plugins_dir(&app);
+    if ext.is_none() && usr.is_none() {
         return Ok(PluginScanResult { valid: vec![], rejected: vec![] });
     }
 
@@ -321,8 +403,12 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
     let mut rejected = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
-    // 递归收集 extensions/ 与 user_plugins/ 下所有 manifest.json
-    // （user_plugins 用于用户态插件持久化，不会被版本更新清空）
+    // 加载用户可见性覆盖（AppData/plugin_visibility.json）
+    // 优先级：plugin_visibility.json > manifest.json 的 visible 字段
+    let visibility_map = load_plugin_visibility_map(&app);
+
+    // 递归收集 bundled-plugins/ 与 user_plugins/ 下所有 manifest.json
+    // （user_plugins 用于第三方插件，不会被版本更新清空）
     let mut manifest_files: Vec<(std::path::PathBuf, String)> = Vec::new();
     fn walk(
         dir: &std::path::Path,
@@ -356,9 +442,9 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
             }
         }
     }
-    // user_plugins 优先（用户覆盖打包）；再扫 extensions
-    if usr.exists() { walk(&usr, &usr, &mut manifest_files); }
-    if ext.exists() { walk(&ext, &ext, &mut manifest_files); }
+    // user_plugins 优先（用户覆盖打包）；再扫 bundled-plugins
+    if let Some(ref usr) = usr { walk(usr, usr, &mut manifest_files); }
+    if let Some(ref ext) = ext { walk(ext, ext, &mut manifest_files); }
 
     for (manifest_path, rel_path) in manifest_files {
         let folder_name = manifest_path
@@ -448,6 +534,11 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
 
         seen_ids.insert(manifest.id.clone());
 
+        // 应用用户可见性覆盖（AppData/plugin_visibility.json 优先于 manifest.json）
+        if let Some(override_visible) = visibility_map.get(&manifest.id) {
+            manifest.visible = *override_visible;
+        }
+
         valid.push(manifest);
     }
 
@@ -458,12 +549,14 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
     Ok(result)
 }
 
-/// 根据插件 id 在 extensions/ 下递归查找其所在目录（支持子插件嵌套，如 niaoluo/gongjuxiang）。
-/// 这样前端只需传入 manifest 中的干净 id，Rust 端自动定位真实路径。
+/// 根据插件 id 在 bundled-plugins/ 与 user_plugins/ 下递归查找其所在目录。
+/// 前端只需传入 manifest 中的干净 id，Rust 端自动定位真实路径。
 fn find_plugin_root(app: &tauri::AppHandle, plugin_id: &str) -> Result<std::path::PathBuf, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    // 同时搜索 extensions 与 user_plugins（用户态插件持久化目录）
-    let roots = [app_data.join("user_plugins"), app_data.join("extensions")];
+    // 搜索顺序：user_plugins（第三方）优先，bundled-plugins（内置）兜底
+    let roots: Vec<PathBuf> = [
+        get_user_plugins_dir(app),
+        get_bundled_plugins_dir(app),
+    ].into_iter().flatten().collect();
     fn walk(dir: &std::path::Path, plugin_id: &str, out: &mut Option<std::path::PathBuf>) {
         if out.is_some() {
             return;
@@ -494,7 +587,7 @@ fn find_plugin_root(app: &tauri::AppHandle, plugin_id: &str) -> Result<std::path
     let mut found = None;
     for base in roots.iter() {
         if base.exists() {
-            walk(&base, plugin_id, &mut found);
+            walk(base, plugin_id, &mut found);
             if found.is_some() {
                 break;
             }
@@ -513,36 +606,24 @@ pub fn read_plugin_file(app: tauri::AppHandle, plugin_id: String, file_name: Str
 /// 读取「外部依赖」(external-deps) 下的文件内容（IDE 的 CodeMirror 等重量级依赖按需从此加载，
 /// 不打包进插件本体，保持插件文件夹轻量）。relative_path 为相对于 external-deps 的路径，含越界防护。
 ///
-/// 查找顺序：① app_data/external-deps（开发期由 deploy 脚本注入，或生产首次抽取得到）；
-/// ② resource_dir/external-deps（打包资源，作为兜底，避免 dev 下 resource_dir 与 app_data 不同步时读不到）。
-/// 关键修复：Windows 下 canonicalize() 会给路径加 `\\?\` 前缀，故 root 也一并 canonicalize 再比较，
-/// 否则前缀不匹配会被误判为"越界"导致读取失败。
+/// 使用 get_external_deps_dir 统一路径解析：
+/// 开发时：项目根/external-deps/
+/// 打包后：resource_dir/external-deps/
 #[tauri::command]
 pub fn read_external_dep_file(app: tauri::AppHandle, relative_path: String) -> Result<String, String> {
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(ad) = app.path().app_data_dir() {
-        candidates.push(ad.join("external-deps"));
-    }
-    if let Ok(rd) = app.path().resource_dir() {
-        candidates.push(rd.join("external-deps"));
-    }
-    if candidates.is_empty() {
-        return Err("无法解析外部依赖目录（app_data 与 resource 均不可用）".into());
-    }
-
+    let root = get_external_deps_dir(&app)
+        .ok_or_else(|| "无法解析 external-deps 目录".to_string())?;
     let rel = relative_path.trim_start_matches(['/', '\\']);
-    for root in &candidates {
-        // root 也 canonicalize，确保 Windows 的 `\\?\` 前缀两侧一致
-        let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
-        let file_path = root.join(rel);
-        if let Ok(canonical) = file_path.canonicalize() {
-            if !canonical.starts_with(&root_canon) {
-                continue; // 越界，尝试下一个候选
-            }
-            match std::fs::read_to_string(&canonical) {
-                Ok(content) => return Ok(content),
-                Err(e) => return Err(format!("读取外部依赖文件失败: {}", e)),
-            }
+    let file_path = root.join(rel);
+    // 越界防护：canonicalize 后确保在 root 之下
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
+    if let Ok(canonical) = file_path.canonicalize() {
+        if !canonical.starts_with(&root_canon) {
+            return Err(format!("越界访问被拒绝: {}", relative_path));
+        }
+        match std::fs::read_to_string(&canonical) {
+            Ok(content) => return Ok(content),
+            Err(e) => return Err(format!("读取外部依赖文件失败: {}", e)),
         }
     }
     Err(format!("外部依赖文件不存在: {}", relative_path))
@@ -567,32 +648,21 @@ pub fn get_auto_save_config(app: tauri::AppHandle) -> Result<transfer_station::A
 
 // ================= 插件管理命令 =================
 
-/// 设置插件可见性（启用/禁用，重启后生效）
+/// 设置插件可见性（启用/禁用，立即生效）
+/// 持久化到 AppData/plugin_visibility.json，不修改 manifest.json
+/// （bundled-plugins/ 打包后可能只读，且不污染源码）
 #[tauri::command]
 pub fn set_plugin_visibility(app: tauri::AppHandle, plugin_id: String, visible: bool) -> Result<(), String> {
-    let root = find_plugin_root(&app, &plugin_id)?;
-    let manifest_path = root.join("manifest.json");
-
-    if !manifest_path.exists() {
-        return Err(format!("插件 '{}' 的 manifest.json 不存在", plugin_id));
+    // 校验插件存在
+    find_plugin_root(&app, &plugin_id)?;
+    // 持久化到 AppData/plugin_visibility.json
+    save_plugin_visibility(&app, &plugin_id, visible)?;
+    // 清除扫描缓存，让下次 get_installed_plugins 重新读取可见性
+    if let Ok(mut cache) = PLUGIN_SCAN_CACHE.lock() {
+        *cache = None;
     }
-
-    let content = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("读取 manifest.json 失败: {}", e))?;
-
-    let mut manifest: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("解析 manifest.json 失败: {}", e))?;
-
-    manifest["visible"] = serde_json::Value::Bool(visible);
-
-    let new_content = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| format!("序列化 manifest.json 失败: {}", e))?;
-
-    std::fs::write(&manifest_path, &new_content)
-        .map_err(|e| format!("写入 manifest.json 失败: {}", e))?;
-
     eprintln!(
-        "[PluginVisibility] 插件 '{}' visible={}, 重启后生效",
+        "[PluginVisibility] 插件 '{}' visible={}, 已持久化到 plugin_visibility.json",
         plugin_id, visible
     );
     Ok(())
@@ -1972,8 +2042,9 @@ pub fn install_plugin_file(
     file_name: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let dir = app_data.join("user_plugins").join(&plugin_id);
+    let user_plugins_dir = get_user_plugins_dir(&app)
+        .ok_or_else(|| "无法解析 user_plugins 目录".to_string())?;
+    let dir = user_plugins_dir.join(&plugin_id);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("创建目录失败: {}", e))?;
     let safe_name = sanitize_filename(&file_name);
@@ -1983,60 +2054,40 @@ pub fn install_plugin_file(
 }
 
 /// 读取插件清单（JSON），返回原始文本。
-/// 查找顺序：app_data/extensions/manifest.json → resource_dir/bundled-plugins/manifest.json
+/// 统一从 bundled-plugins/manifest.json 读取（开发时项目根，打包后 resource_dir）
 #[tauri::command]
 pub fn read_manifest(app: tauri::AppHandle) -> Result<String, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let candidates = [
-        app_data.join("extensions").join("manifest.json"),
-        app.path().resource_dir()
-            .map_err(|e| e.to_string())?
-            .join("bundled-plugins")
-            .join("manifest.json"),
-        // NSIS 打包层备用路径
-        app.path().resource_dir()
-            .map_err(|e| e.to_string())?
-            .join("_up_")
-            .join("bundled-plugins")
-            .join("manifest.json"),
-    ];
-    for p in &candidates {
-        if p.exists() {
-            return std::fs::read_to_string(p)
+    if let Some(bundled_dir) = get_bundled_plugins_dir(&app) {
+        let manifest_path = bundled_dir.join("manifest.json");
+        if manifest_path.exists() {
+            return std::fs::read_to_string(&manifest_path)
                 .map_err(|e| format!("读取清单失败: {}", e));
         }
     }
     Err("未找到插件清单 manifest.json".into())
 }
 
-/// 路线 A 分发解耦：从 resource_dir/bundled-plugins 一次性复制整个插件到 user_plugins，
+/// 路线 A 分发解耦：从 bundled-plugins 一次性复制整个插件到 user_plugins，
 /// 然后触发热加载。省去前端逐文件 fetch 的复杂性。
 #[tauri::command]
 pub fn install_bundled_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<String, String> {
-    let resource_base = app.path().resource_dir()
-        .map_err(|e| e.to_string())?
-        .join("bundled-plugins");
-    // NSIS 安装包备选路径
-    let alt_base = app.path().resource_dir()
-        .map_err(|e| e.to_string())?
-        .join("_up_")
-        .join("bundled-plugins");
-    let src =     if resource_base.join(&plugin_id).exists() {
-        resource_base.join(&plugin_id)
-    } else if alt_base.join(&plugin_id).exists() {
-        alt_base.join(&plugin_id)
+    let bundled_base = get_bundled_plugins_dir(&app)
+        .ok_or_else(|| "无法解析 bundled-plugins 目录".to_string())?;
+    let src = if bundled_base.join(&plugin_id).exists() {
+        bundled_base.join(&plugin_id)
     } else {
-        let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let user_plugins_dir = get_user_plugins_dir(&app)
+            .ok_or_else(|| "无法解析 user_plugins 目录".to_string())?;
         return Err(format!(
-            "未找到插件包。请将 {} 的 manifest.json 与 index.js 放入:\n  {}\\user_plugins\\{}\\\n然后点击「检测新插件」。",
+            "未找到插件包。请将 {} 的 manifest.json 与 index.js 放入:\n  {}\\\n然后点击「检测新插件」。",
             plugin_id,
-            app_data.display(),
-            plugin_id
+            user_plugins_dir.display()
         ));
     };
 
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let dst = app_data.join("user_plugins").join(&plugin_id);
+    let dst = get_user_plugins_dir(&app)
+        .ok_or_else(|| "无法解析 user_plugins 目录".to_string())?
+        .join(&plugin_id);
 
     // 递归复制
     copy_dir_recursive(&src, &dst)

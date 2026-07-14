@@ -22,7 +22,7 @@ export interface PluginManifest {
   hostApiVersion: number;
   deps?: string[];
   parent?: string;          // 子插件归属的父模块 id
-  path?: string;            // 相对 extensions/ 的路径（嵌套子插件用）
+  path?: string;            // 相对 bundled-plugins/ 的路径（嵌套子插件用）
   minAppVersion?: string;   // 要求的最低应用版本
   codename?: string;        // 模块代号（如 "铃兰"、"莲花"），空表示无代号
   requiredAssets?: string[];// 需要的外部依赖资源路径（如 "niaoluo/ide/codemirror/index.js"）

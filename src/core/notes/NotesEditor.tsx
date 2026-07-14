@@ -1,10 +1,14 @@
-import { useRef, useCallback, useState, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useRef, useCallback, useState, useEffect, lazy, Suspense, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { api } from '@/lib/api';
 import { useNotesStore } from '@/stores/notesStore';
 import { useAppStore } from '@/stores/appStore';
-import { RichTextEditor, type RichTextEditorHandle } from './RichTextEditor';
+import type { RichTextEditorHandle } from './RichTextEditor';
+
+// 富文本编辑器（TipTap + prosemirror + 转换逻辑，约 300KB+）改为懒加载：
+// 首屏只加载主程序，打开笔记时才按需拉取该 chunk，明显加快启动速度。
+const LazyRichTextEditor = lazy(() => import('./RichTextEditor').then(m => ({ default: m.RichTextEditor })));
 
 type EditorMode = 'split' | 'edit-only';
 
@@ -21,7 +25,7 @@ export function NotesEditor() {
   const onTagsChange = useNotesStore(s => s.saveTags);
   const wordWrap = useAppStore(s => s.wordWrap);
 
-  const editorRef = useRef<RichTextEditorHandle>(null);
+  const editorRef = useRef<RichTextEditorHandle | null>(null);
   // 用于触发 onUpdate 之外的 content 同步（如外部修改）
   const contentRef = useRef(content);
   contentRef.current = content;
@@ -295,14 +299,16 @@ export function NotesEditor() {
           <div className="px-4 py-3 border-b border-neutral-200/30 flex-shrink-0 dark:border-stone-700/30">
             <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">编辑</span>
           </div>
-          <RichTextEditor
-            ref={editorRef}
-            content={content}
-            onContentChange={onContentChange}
-            placeholder="在此输入内容..."
-            wordWrap={wordWrap}
-            onKeyDown={handleEditorKeyDown}
-          />
+          <Suspense fallback={<div className="flex-1 flex items-center justify-center text-sm text-neutral-400 dark:text-stone-500">编辑器加载中…</div>}>
+            <LazyRichTextEditor
+              editorRef={editorRef}
+              content={content}
+              onContentChange={onContentChange}
+              placeholder="在此输入内容..."
+              wordWrap={wordWrap}
+              onKeyDown={handleEditorKeyDown}
+            />
+          </Suspense>
         </div>
 
         {/* 右侧：实时预览区（仅双栏模式） */}

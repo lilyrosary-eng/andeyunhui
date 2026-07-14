@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useEffect, type MutableRefObject } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import ImageExtension from '@tiptap/extension-image';
@@ -102,15 +102,18 @@ interface RichTextEditorProps {
   wordWrap?: boolean;
   /** 键盘事件透传 */
   onKeyDown?: (e: React.KeyboardEvent) => void;
+  /** 编辑器实例句柄（用普通 prop 透传，便于本组件被 React.lazy 懒加载时父组件仍能拿到实例） */
+  editorRef?: MutableRefObject<RichTextEditorHandle | null>;
 }
 
-export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(function RichTextEditor({
+export function RichTextEditor({
   content,
   onContentChange,
   placeholder = '在此输入内容...',
   wordWrap = true,
   onKeyDown,
-}, ref) {
+  editorRef,
+}: RichTextEditorProps) {
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -147,8 +150,10 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
     },
   });
 
-  // 暴露 editor 实例给父组件的工具栏（Bold/Italic/Code 等）
-  useImperativeHandle(ref, () => ({ editor }), [editor]);
+  // 通过普通 prop 把编辑器实例暴露给父组件（本组件被 lazy 懒加载，forwardRef 无法跨 lazy 边界透传）
+  useEffect(() => {
+    if (editorRef) editorRef.current = { editor };
+  }, [editor, editorRef]);
 
   // 外部内容变化时同步到编辑器（如切换笔记）
   useEffect(() => {
@@ -164,6 +169,6 @@ export const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorPro
       <EditorContent editor={editor} className="h-full" />
     </div>
   );
-});
+}
 
 export default RichTextEditor;

@@ -117,18 +117,36 @@ fn main() {
             }
 
             let app_handle = ctx.app_handle();
-            let app_data = match app_handle.path().app_data_dir() {
-                Ok(dir) => dir,
-                Err(_) => {
+            // 统一路径解析：先尝试 user_plugins（第三方），再尝试 bundled-plugins（内置）
+            // 与 find_plugin_root 的搜索顺序一致，确保第三方插件可覆盖内置插件
+            let candidates: Vec<std::path::PathBuf> = [
+                get_user_plugins_dir(app_handle),
+                get_bundled_plugins_dir(app_handle),
+            ].into_iter().flatten().collect();
+
+            let mut found_file: Option<std::path::PathBuf> = None;
+            let mut allowed_roots: Vec<std::path::PathBuf> = Vec::new();
+            for base in &candidates {
+                let full = base.join(plugin_id).join(file_path);
+                if full.exists() && found_file.is_none() {
+                    found_file = Some(full);
+                }
+                if let Ok(c) = base.canonicalize() {
+                    allowed_roots.push(c);
+                }
+            }
+
+            let file_path_full = match found_file {
+                Some(p) => p,
+                None => {
                     return Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .status(StatusCode::NOT_FOUND)
                         .body(Vec::new())
                         .unwrap();
                 }
             };
-            let file_path_full = app_data.join("extensions").join(plugin_id).join(file_path);
 
-            // 规范化路径后验证仍在扩展目录内
+            // 规范化路径后验证仍在允许的根目录内（防穿越）
             let canonical = match file_path_full.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {
@@ -138,8 +156,7 @@ fn main() {
                         .unwrap();
                 }
             };
-            let extensions_root = app_data.join("extensions");
-            if !canonical.starts_with(&extensions_root) {
+            if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
                     .body(Vec::new())
@@ -214,48 +231,43 @@ fn main() {
             // 确保「中转站」暂存目录存在（打包后运行时自动创建，无需随包附带）
             let dropzone_dir = app_data.join("transfer_station").join("dropzone");
             std::fs::create_dir_all(&dropzone_dir).map_err(|e| e.to_string())?;
-            
-            // 首次启动或更新后：从资源目录复制插件到 app_data/extensions/
-            let extensions_target = app_data.join("extensions");
-            let version_marker = app_data.join(".plugin_version");
-            let current_version = env!("CARGO_PKG_VERSION");
-            let need_extract = !version_marker.exists() 
-                || std::fs::read_to_string(&version_marker).unwrap_or_default() != current_version;
-            
-            if need_extract {
-                // 尝试从资源目录提取打包的插件
-                if let Ok(resource_dir) = app.path().resource_dir() {
-                    eprintln!("[Setup] resource_dir: {:?}", resource_dir);
-                    
-                    // 1. 提取插件
-                    let bundled_plugins = resource_dir.join("bundled-plugins");
-                    // 备选：NSIS 安装包可能把资源放在不同层级
-                    if !bundled_plugins.exists() {
-                        let alt = resource_dir.join("_up_").join("bundled-plugins");
-                        if alt.exists() {
-                            eprintln!("[Setup] 使用备选路径: {:?}", alt);
-                            extract_if_exists(&alt, &extensions_target, "bundled-plugins");
-                        }
-                    }
-                    extract_if_exists(&bundled_plugins, &extensions_target, "bundled-plugins");
 
-                    // 2. 提取外部依赖
-                    let bundled_deps = resource_dir.join("external-deps");
-                    if !bundled_deps.exists() {
-                        let alt = resource_dir.join("_up_").join("external-deps");
-                        if alt.exists() {
-                            eprintln!("[Setup] 使用备选路径: {:?}", alt);
-                            extract_if_exists(&alt, &app_data.join("external-deps"), "external-deps");
-                        }
-                    }
-                    extract_if_exists(&bundled_deps, &app_data.join("external-deps"), "external-deps");
-
-                    let _ = std::fs::write(&version_marker, current_version);
-                } else {
-                    eprintln!("[Setup] resource_dir() 不可用，跳过资源提取");
-                }
+            // 插件与依赖直接从 bundled-plugins/ 与 external-deps/ 加载（开发时项目根，打包后 resource_dir）
+            // 不再复制到 app_data/extensions/，确保开发与打包路径一致
+            // 确保 user_plugins/ 目录存在（第三方插件热插拔目录，始终在 app_data 下）
+            if let Some(user_plugins_dir) = get_user_plugins_dir(app.handle()) {
+                let _ = std::fs::create_dir_all(&user_plugins_dir);
             }
-            
+
+            // 调试日志：打印解析到的插件/依赖目录路径（帮助排查打包后路径问题）
+            // 写到 AppData/plugin_paths.log 方便 release 模式下查看（无控制台）
+            {
+                let mut log_lines: Vec<String> = Vec::new();
+                log_lines.push(format!("[{}] 插件路径解析日志", chrono::Utc::now().to_rfc3339()));
+                if let Ok(rd) = app.path().resource_dir() {
+                    log_lines.push(format!("resource_dir = {}", rd.display()));
+                }
+                if let Some(bundled) = get_bundled_plugins_dir(app.handle()) {
+                    log_lines.push(format!("✓ bundled-plugins = {}", bundled.display()));
+                } else {
+                    log_lines.push("✗ bundled-plugins 未找到！尝试过的路径:".into());
+                    if let Ok(rd) = app.path().resource_dir() {
+                        log_lines.push(format!("  - {}", rd.join("bundled-plugins").display()));
+                        log_lines.push(format!("  - {}", rd.join("_up_").join("bundled-plugins").display()));
+                        log_lines.push(format!("  - {}", rd.join("..").join("bundled-plugins").display()));
+                    }
+                }
+                if let Some(deps) = get_external_deps_dir(app.handle()) {
+                    log_lines.push(format!("✓ external-deps = {}", deps.display()));
+                } else {
+                    log_lines.push("✗ external-deps 未找到！".into());
+                }
+                let log_content = log_lines.join("\n") + "\n";
+                let log_path = app_data.join("plugin_paths.log");
+                let _ = std::fs::write(&log_path, &log_content);
+                eprintln!("[Setup] 插件路径日志已写入: {:?}", log_path);
+            }
+
             let tray_config_path = app_data.join("tray_config.json");
             let tray_enabled = if tray_config_path.exists() {
                 std::fs::read_to_string(&tray_config_path)
@@ -346,26 +358,28 @@ fn main() {
             }
 
             // ============ 文件系统热插拔监听 ============
-            // 监听 extensions/ 和 user_plugins/ 目录变化，检测到新增/删除/修改时
+            // 监听 bundled-plugins/ 和 user_plugins/ 目录变化，检测到新增/删除/修改时
             // 向前端派发 `plugin-fs-change` 事件，前端 PluginHost 自动 load/reload/unload。
             {
-                let ext_target = app_data.join("extensions");
-                let user_target = app_data.join("user_plugins");
+                let ext_target = get_bundled_plugins_dir(app.handle());
+                let user_target = get_user_plugins_dir(app.handle());
                 let app_handle = app.handle().clone();
                 let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
                 match notify::recommended_watcher(move |res| {
                     let _ = tx.send(res);
                 }) {
                     Ok(mut watcher) => {
-                        if watcher.watch(&ext_target, RecursiveMode::Recursive).is_ok() {
-                            eprintln!("[FSWatch] 监听 extensions/");
+                        if let Some(ref ext) = ext_target {
+                            if watcher.watch(ext, RecursiveMode::Recursive).is_ok() {
+                                eprintln!("[FSWatch] 监听 bundled-plugins/");
+                            }
                         }
-                        if user_target.exists() {
-                            let _ = watcher.watch(&user_target, RecursiveMode::Recursive);
+                        if let Some(ref usr) = user_target {
+                            // 确保 user_plugins 目录存在（便于后续热插拔）
+                            let _ = std::fs::create_dir_all(usr);
+                            let _ = watcher.watch(usr, RecursiveMode::Recursive);
                             eprintln!("[FSWatch] 监听 user_plugins/");
                         }
-                        // 确保 user_plugins 目录存在（便于后续热插拔）
-                        let _ = std::fs::create_dir_all(&user_target);
                         std::thread::spawn(move || {
                             let _w = watcher; // keep alive
                             let mut batch: Vec<String> = Vec::new();
@@ -622,82 +636,4 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// 递归复制目录（用于从资源目录提取插件到 app_data_dir）
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), std::io::Error> {
-    if !dst.exists() {
-        std::fs::create_dir_all(dst)?;
-    }
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let dest_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)?;
-        }
-    }
-    Ok(())
-}
-
-/// 增量更新：如果 src 存在，逐个子目录与 dst 对比，
-/// - dst 不存在的子目录 → 直接复制（新插件）
-/// - dst 存在但 manifest.json 版本号不同 → 覆盖（版本更新）
-/// - dst 存在且版本号相同 → 跳过（保留用户对 manifest.json visible 字段的修改）
-/// 不删除 dst 中不存在于 src 的目录（保留用户安装的第三方插件 / 用户禁用状态）
-fn extract_if_exists(src: &std::path::Path, dst: &std::path::Path, label: &str) {
-    if !src.exists() {
-        eprintln!("[Setup] {} 不存在于: {:?}", label, src);
-        return;
-    }
-    eprintln!("[Setup] 增量提取 {}: {:?} → {:?}", label, src, dst);
-    if !dst.exists() {
-        let _ = std::fs::create_dir_all(dst);
-    }
-    let mut copied = 0u32;
-    let mut skipped = 0u32;
-    if let Ok(entries) = std::fs::read_dir(src) {
-        for entry in entries.flatten() {
-            let sub_src = entry.path();
-            if !sub_src.is_dir() { continue; }
-            let name = entry.file_name();
-            let sub_dst = dst.join(&name);
-
-            if !sub_dst.exists() {
-                // 新插件/新依赖 → 直接复制
-                if let Err(e) = copy_dir_recursive(&sub_src, &sub_dst) {
-                    eprintln!("[Setup] 复制 {}/{} 失败: {}", label, name.to_string_lossy(), e);
-                } else { copied += 1; }
-                continue;
-            }
-
-            // 已存在 → 检查 manifest.json 版本号
-            let src_manifest = sub_src.join("manifest.json");
-            let dst_manifest = sub_dst.join("manifest.json");
-            if src_manifest.exists() && dst_manifest.exists() {
-                let src_ver = std::fs::read_to_string(&src_manifest)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(String::from));
-                let dst_ver = std::fs::read_to_string(&dst_manifest)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(String::from));
-                if src_ver.is_some() && src_ver == dst_ver {
-                    // 版本相同 → 跳过（保留用户对 visible 字段的修改）
-                    skipped += 1;
-                    continue;
-                }
-            }
-
-            // 版本不同或无 manifest.json（如 external-deps 子目录）→ 覆盖
-            let _ = std::fs::remove_dir_all(&sub_dst);
-            if let Err(e) = copy_dir_recursive(&sub_src, &sub_dst) {
-                eprintln!("[Setup] 覆盖 {}/{} 失败: {}", label, name.to_string_lossy(), e);
-            } else { copied += 1; }
-        }
-    }
-    eprintln!("[Setup] {} 增量完成：新增/更新 {}，跳过 {}（版本相同）", label, copied, skipped);
 }
