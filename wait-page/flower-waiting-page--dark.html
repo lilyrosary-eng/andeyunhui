@@ -2,25 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<!-- 注意：不写「width=device-width」——该值会让 iframe 内 vw/vh 绑定「设备逻辑宽度」而非窗口实宽，
-     桌面 Tauri 生产 webview 下导致加载页被放大约 2.3×、装饰溢出只剩莲花。
-     改为由下方内联脚本运行时注入「width=窗口实宽(px)」：既避开了 device-width 的坑，又让本文件在
-     ①直接双击打开 ②关于→预览（bootPreview 的 iframe）③被 index.html 注入 三种场景下 vw 都正确。 -->
-<script>
-  (function () {
-    try {
-      var w = window.innerWidth || document.documentElement.clientWidth || 1100;
-      var m = document.createElement('meta');
-      m.name = 'viewport';
-      m.content = 'width=' + w;
-      document.head.appendChild(m);
-      window.addEventListener('resize', function () {
-        var vm = document.querySelector('meta[name="viewport"]');
-        if (vm) vm.setAttribute('content', 'width=' + (window.innerWidth || document.documentElement.clientWidth || 1100));
-      });
-    } catch (e) {}
-  })();
-</script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Noto+Serif+SC:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -193,10 +175,15 @@
   .loader { width: clamp(360px, 40vw, 560px); height: clamp(360px, 40vw, 560px); color: var(--accent); position: relative; }
   .loader .petal {
     fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round;
-    /* 逐笔构建动画改由 JS 在 rAF 循环里直接驱动 strokeDashoffset（引擎无关），
-       规避打包版 WebView2 对「@keyframes 内 var()」支持不一致导致构建动画缺失。 */
-    stroke-dasharray: var(--len);
-    stroke-dashoffset: var(--len);
+    stroke-dasharray: var(--len); stroke-dashoffset: var(--len);
+    animation: bloom 3.6s ease-in-out infinite;
+    animation-delay: var(--d);
+  }
+  @keyframes bloom {
+    0%   { stroke-dashoffset: var(--len); opacity: .4; }
+    45%  { stroke-dashoffset: 0; opacity: 1; }
+    55%  { stroke-dashoffset: 0; opacity: 1; }
+    100% { stroke-dashoffset: var(--len); opacity: .4; }
   }
   /* 极小流光光点 + 拖尾（绘制阶段沿花辦往返掠过） */
   .loader .spark, .loader .spark-trail {
@@ -349,9 +336,8 @@
     .topbar, .footer { padding-left: 24px; padding-right: 24px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    /* 中央莲花「构建动画」是核心加载反馈，即便系统开启「减少动态效果」也保持播放；
-       仅背景装饰（状态点 / 玫瑰窗旋转 / 门廊小玫瑰窗）遵循 reduced-motion 降级。 */
-    .status .dot, .pane-loader .rose, .main .portal-crest #crestRoseG { animation: none; }
+    .loader .petal, .status .dot, .pane-loader .rose, .main .portal-crest #crestRoseG { animation: none; }
+    .loader .petal { stroke-dashoffset: 0; }
   }
 </style>
 </head>
@@ -787,22 +773,19 @@
       const { PER, TOTAL_MS, ORDER, TRAIL } = CFG;
       const svgNS = "http://www.w3.org/2000/svg";
 
-      // 注：中央莲花「构建动画」+ 流光是核心加载反馈且极短暂，即便系统开启「减少动态效果」也保持播放；
-      // 仅背景装饰（烛光 / 星点 / 玫瑰窗旋转 / 状态点）遵循 reduced-motion 降级（见上方 @media 块）。
+      const reduce = window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (reduce) {                         // 尊重「减少动态效果」偏好（无光点，直接呼吸）
+        loader.classList.add("breathing");
+        return;
+      }
+
       // 缓存每瓣：路径总长、自身旋转角(弧度)
       const lens = petals.map(p => p.getTotalLength());
       const angles = petals.map(p => {
         const m = /rotate\(([-\d.]+)\)/.exec(p.getAttribute("transform") || "");
         return m ? parseFloat(m[1]) * Math.PI / 180 : 0;
       });
-      // 逐瓣「构建动画」改为 JS 直接驱动 strokeDashoffset（替代 CSS bloom）：
-      // 规避打包版 WebView2 对 @keyframes 内 var() 支持不一致导致构建动画缺失。
-      const delays = petals.map(p => {
-        const m = /([\d.]+)s/.exec(p.style.getPropertyValue("--d") || "0s");
-        return m ? parseFloat(m[1]) * 1000 : 0;
-      });
-      const DRAW = 900; // 单瓣描边时长(ms)
-      petals.forEach((p, i) => { p.style.strokeDasharray = String(lens[i]); });
 
       // 极小流光光点
       const head = document.createElementNS(svgNS, "circle");
@@ -831,7 +814,6 @@
         if (elapsed >= TOTAL_MS) {          // 到达合计时长 → 线条停止(呼吸) + 光点也暂停
           loader.classList.remove("drawing");
           loader.classList.add("breathing");
-          petals.forEach((p, i) => (p.style.strokeDashoffset = "0"));  // 全部描完，定格完整线条
           if (CFG.HIDE_ON_STOP) head.style.opacity = 0;   // 隐藏；否则定格在当前位置(暂停)
           trails.forEach(t => (t.style.opacity = 0));     // 拖尾淡出
           return;                                         // 停止 rAF → 光点冻结
@@ -865,13 +847,6 @@
           trails[i].setAttribute("cx", h.x.toFixed(2));
           trails[i].setAttribute("cy", h.y.toFixed(2));
           trails[i].style.opacity = (CFG.TRAIL_OPACITY * (1 - i / TRAIL) * op).toFixed(3);
-        }
-
-        // 驱动每瓣描边进度（各自延迟），实现「逐笔构建」。JS 直接写 strokeDashoffset，
-        // 引擎无关，彻底规避打包版 @keyframes 内 var() 不被插值导致构建动画缺失。
-        for (let i = 0; i < petals.length; i++) {
-          const prog = Math.max(0, Math.min(1, (elapsed - delays[i]) / DRAW));
-          petals[i].style.strokeDashoffset = String(lens[i] * (1 - prog));
         }
 
         loader.classList.add("drawing");
@@ -917,8 +892,6 @@
       };
       [318, 278, 238, 198, 158].forEach(y => { add(40, y, -1); add(260, y, 1); });
     })();
-
-
   </script>
 </body>
 </html>

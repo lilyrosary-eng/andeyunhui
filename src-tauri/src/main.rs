@@ -576,6 +576,7 @@ fn main() {
             scan_music_root,
             load_music_cache,
             delete_music_cache,
+            read_track_metadata,
             // ========== 模块：视频 / 玉兰 ==========
             scan_video_root,
             load_video_cache,
@@ -617,6 +618,7 @@ fn main() {
             capture_screen,
             start_screenshot,
             read_screenshot,
+            peek_screenshot,
             store_screenshot_note_id,
             get_screenshot_note_id,
             create_overlay_window,

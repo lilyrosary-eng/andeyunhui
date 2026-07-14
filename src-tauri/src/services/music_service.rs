@@ -149,7 +149,7 @@ pub fn scan_music_root_streaming(
     Ok(())
 }
 
-fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Track {
+pub fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Track {
     let path_str = file_path.to_string_lossy().to_string();
     let fallback_title = file_path
         .file_stem()

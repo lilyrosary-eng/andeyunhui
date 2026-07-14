@@ -545,19 +545,33 @@ function MusicModule() {
       return;
     }
     if (!files || files.length === 0) return;
-    const newTracks: Track[] = files.map((f) => {
-      const base = f.split(/[\\/]/).pop() || '未知曲目';
-      const title = base.replace(/\.[^.]+$/, '') || '未知曲目';
-      return {
-        id: f,
-        filePath: f,
-        title,
-        artist: '',
-        album: '',
-        durationSecs: 0,
-        coverPath: undefined,
-      };
-    });
+    // 手动添加歌曲：复用与目录扫描完全一致的元信息解析（read_track_metadata → lofty），
+    // 识别标题/艺术家/专辑/时长/内嵌封面；解析失败时回退为「文件名当标题」。
+    const newTracks: Track[] = await Promise.all(
+      files.map(async (f) => {
+        const base = f.split(/[\\/]/).pop() || '未知曲目';
+        const fallbackTitle = base.replace(/\.[^.]+$/, '') || '未知曲目';
+        try {
+          const t = await hostApi.invoke<Track>('read_track_metadata', { filePath: f });
+          return {
+            ...t,
+            id: t.filePath || f,
+            title: t.title || fallbackTitle,
+          };
+        } catch (err) {
+          console.warn('[Music] 读取元信息失败，回退文件名:', f, err);
+          return {
+            id: f,
+            filePath: f,
+            title: fallbackTitle,
+            artist: '',
+            album: '',
+            durationSecs: 0,
+            coverPath: undefined,
+          };
+        }
+      }),
+    );
     setPlaylists((prev) => {
       const updated = prev.map((p) =>
         p.id === selectedPlaylist.id ? { ...p, tracks: [...p.tracks, ...newTracks] } : p,
