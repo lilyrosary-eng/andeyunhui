@@ -141,11 +141,11 @@ struct RecordingHandle {
 static RECORDING: Mutex<Option<RecordingHandle>> = Mutex::new(None);
 
 /// 解析 ffmpeg 可执行文件路径：
-/// 1. 优先使用 external-deps/ffmpeg/ffmpeg.exe（随应用打包，无需用户安装）
+/// 1. 优先使用 external-deps/全局/ffmpeg/ffmpeg.exe（随应用打包，无需用户安装）
 /// 2. 回退到系统 PATH 中的 ffmpeg（用户自行安装）
 fn get_ffmpeg_path(app: &AppHandle) -> String {
     if let Some(deps_dir) = crate::commands::get_external_deps_dir(app) {
-        let ffmpeg = deps_dir.join("ffmpeg").join("ffmpeg.exe");
+        let ffmpeg = deps_dir.join("全局").join("ffmpeg").join("ffmpeg.exe");
         if ffmpeg.exists() {
             return ffmpeg.to_string_lossy().to_string();
         }
@@ -453,11 +453,15 @@ pub fn show_recorder_widget(app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    // 获取主窗口位置，控制台显示在屏幕正上方居中
+    // 控制台显示在屏幕正上方居中（需将物理像素转换为逻辑像素以正确居中）
     let (screen_w, _screen_h) = screen_size();
+    let scale = unsafe {
+        let dpi = winapi::um::winuser::GetDpiForSystem();
+        if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
+    };
     let widget_w = 320.0_f64;
     let widget_h = 52.0_f64;
-    let x = (screen_w as f64 - widget_w) / 2.0;
+    let x = (screen_w as f64 / scale - widget_w) / 2.0;
     let y = 8.0_f64; // 距离屏幕顶部 8px
 
     let _win = WebviewWindowBuilder::new(
@@ -499,14 +503,24 @@ pub fn create_recorder_select_window(app: &AppHandle) -> Result<(), String> {
         return Err("无法获取虚拟桌面尺寸".into());
     }
 
+    // builder API 接受逻辑像素，需将物理像素除以 DPI 缩放比（与 screenshot.rs 的 create_overlay_window 一致）
+    let scale = unsafe {
+        let dpi = winapi::um::winuser::GetDpiForSystem();
+        if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
+    };
+    let lw = vw as f64 / scale;
+    let lh = vh as f64 / scale;
+    let lx = vx as f64 / scale;
+    let ly = vy as f64 / scale;
+
     let _win = WebviewWindowBuilder::new(
         app,
         RECORDER_SELECT_LABEL,
         WebviewUrl::App("recorder-select.html".into()),
     )
     .title("选择录屏区域")
-    .inner_size(vw as f64, vh as f64)
-    .position(vx as f64, vy as f64)
+    .inner_size(lw, lh)
+    .position(lx, ly)
     .decorations(false)
     .always_on_top(true)
     .skip_taskbar(true)
@@ -563,6 +577,22 @@ pub fn hide_recorder_select(app: AppHandle) {
     if let Some(w) = app.get_webview_window(RECORDER_SELECT_LABEL) {
         let _ = w.hide();
     }
+}
+
+/// 获取录屏区域选择覆盖窗的坐标信息（前端主动拉取，解决 push 事件竞态）
+/// 与 `recorder-select-ready` 事件数据格式一致，前端在事件未到达时用此命令兜底。
+#[tauri::command]
+pub fn get_recorder_select_coords(app: AppHandle) -> Result<serde_json::Value, String> {
+    let (vx, vy, _vw, _vh) = virtual_desktop_rect();
+    let win = app
+        .get_webview_window(RECORDER_SELECT_LABEL)
+        .ok_or_else(|| "录屏区域选择窗口不存在".to_string())?;
+    let scale = win.scale_factor().unwrap_or(1.0);
+    Ok(serde_json::json!({
+        "ox": vx,
+        "oy": vy,
+        "scale": scale,
+    }))
 }
 
 // =================录屏热键持久化（镜像截图热键系统）=================
