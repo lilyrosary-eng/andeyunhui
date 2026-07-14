@@ -79,9 +79,15 @@
           apply();
         }
 
-        function finish() {
-          if (finish._done) return;
-          finish._done = true;
+        // 哥特加载页最短展示时长：即便应用「秒开」，也保证用户真正看到加载界面，
+        // 避免加载层一闪即逝、看起来像「哥特页没生效」。计时从 boot 层创建（本 IIFE）起算。
+        var BOOT_START = Date.now();
+        var MIN_BOOT_MS = 2600;
+        var _finishScheduled = false;
+
+        function dismissBoot() {
+          if (dismissBoot._done) return;
+          dismissBoot._done = true;
           if (raf) { cancelAnimationFrame(raf); raf = null; }
           var b = document.getElementById('boot');
           if (!b) return;
@@ -94,13 +100,30 @@
           }, 480);
         }
 
+        function finish() {
+          if (_finishScheduled) return;
+          _finishScheduled = true;
+          // 应用就绪但不足最短时长 → 延迟到最短时长再淡出，确保加载页真实可见；
+          // 应用慢于最短时长 → 直接淡出（不会提前露出未就绪的主程序）。
+          var remain = MIN_BOOT_MS - (Date.now() - BOOT_START);
+          if (remain > 0) setTimeout(dismissBoot, remain);
+          else dismissBoot();
+        }
+
         function tick() {
-          if (!state.done && state.current < state.target) {
+          // 若加载层已被移除，立即停止进度循环，避免空转 rAF
+          if (!document.getElementById('boot')) { return; }
+          if (state.done) {
+            // 最短展示时长内先停在 ~92%，避免「秒到 100% 后干等」显假；
+            // 时长到达后再推进到 100% 并触发淡出，视觉上更连贯。
+            var goal = (Date.now() - BOOT_START < MIN_BOOT_MS) ? 92 : 100;
+            if (state.current < goal) {
+              state.current += Math.max(0.6, (goal - state.current) * 0.12);
+              if (state.current > goal) state.current = goal;
+            }
+          } else if (state.current < state.target) {
             state.current += Math.max(0.4, (state.target - state.current) * 0.08);
             if (state.current > state.target) state.current = state.target;
-          } else if (state.done && state.current < 100) {
-            state.current += Math.max(0.6, (100 - state.current) * 0.12);
-            if (state.current > 100) state.current = 100;
           }
           apply();
           if (state.done && state.current >= 99.5) { finish(); return; }
@@ -145,16 +168,88 @@
             var html = new TextDecoder('utf-8').decode(bytes);
 
             html = html.replace(/<head[^>]*>/i, function (m) {
-              return m + '<script>window.__BOOT_HOSTED__=true;<\/script>';
+              // 运行时注入 viewport meta：宽度 = 宿主窗口实际宽度（如 1100）。
+              // 强制 iframe 内 vw/vh 绑定窗口实际宽度，而非 WebView2 默认的「设备逻辑宽度」，
+              // 否则桌面打包版加载页装饰被放大、四角/玫瑰窗/水印溢出消失、只剩居中莲花。
+              // 若 wait-page 已自带 viewport（其内联脚本注入），则不重复添加，避免双 meta。
+              if (/<meta\s+name=["']viewport["']/i.test(html)) return m;
+              return m + '<meta name="viewport" content="width=' + window.innerWidth + '">';
             });
             var ifr = document.createElement('iframe');
             ifr.id = 'boot';
             ifr.setAttribute('title', '加载中');
             ifr.setAttribute('aria-hidden', 'true');
             ifr.style.cssText =
-              'position:fixed;inset:0;z-index:2147483647;border:0;width:100%;height:100%;' +
+              'position:fixed;inset:0;z-index:2147483646;border:0;width:100%;height:100%;' +
               'background:' + bg + ';';
-            ifr.onload = function () { bindDom(); apply(); };
+            ifr.onload = function () {
+              bindDom(); apply();
+              // 自愈：检测 srcdoc 内联样式/脚本是否生效，未生效则 CSP 免疫重注（见下方 try 块）
+              try {
+                var idoc = ifr.contentDocument;
+                if (idoc && idoc.body) {
+                  // —— 自修复：打包版 srcdoc 偶发不执行内联 <style>/<script>，致装饰塌陷、rose=0 ——
+                  // 用 CSP 免疫的方式注入：样式走 adoptedStyleSheets（构造样式表，不受 style-src 限制），
+                  // 脚本走 eval（配置允许 'unsafe-eval'，绕过内联脚本 CSP）；均失败时兜底注入 <style>/<script> 元素。
+                  var _healStyle = false, _healScript = false;
+                  try {
+                    var _appEl = idoc.querySelector('.app');
+                    var _styleOk = !!(_appEl && /flex/.test(getComputedStyle(_appEl).display));
+                    if (!_styleOk) {
+                      var _sm = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+                      if (_sm) {
+                        var _css = _sm[1];
+                        try {
+                          if (idoc.adoptedStyleSheets && idoc.defaultView.CSSStyleSheet) {
+                            var _sheet = new idoc.defaultView.CSSStyleSheet();
+                            _sheet.replaceSync(_css);
+                            idoc.adoptedStyleSheets = [_sheet];
+                            _healStyle = true;
+                          }
+                        } catch (_csse) { console.log('[boot-heal-css-err]', _csse && _csse.message); }
+                        if (!_healStyle) {
+                          var _st = idoc.createElement('style');
+                          _st.textContent = _css;
+                          (idoc.head || idoc.documentElement).appendChild(_st);
+                          _healStyle = true;
+                        }
+                      }
+                    }
+                    var _roseG = idoc.getElementById('roseG');
+                    if (!_roseG || _roseG.childElementCount === 0) {
+                      var _scrs = html.match(/<script>([\s\S]*?)<\/script>/gi) || [];
+                      var _init = null;
+                      for (var _i = _scrs.length - 1; _i >= 0; _i--) {
+                        if (/buildRose/.test(_scrs[_i])) { _init = _scrs[_i]; break; }
+                      }
+                      if (_init) {
+                        var _code = _init.replace(/^<script>/i, '').replace(/<\/script>\s*$/i, '');
+                        try {
+                          idoc.defaultView.eval(_code);
+                          _healScript = true;
+                        } catch (_evale) {
+                          try {
+                            var _sc = idoc.createElement('script');
+                            _sc.textContent = _code;
+                            (idoc.body || idoc.documentElement).appendChild(_sc);
+                            _healScript = true;
+                          } catch (_sce) { console.log('[boot-heal-script-err]', _sce && _sce.message); }
+                        }
+                      }
+                    }
+                  } catch (_he) { console.log('[boot-heal-err]', _he && _he.message); }
+                }
+              } catch (e) {}
+            };
+            // 窗口尺寸变化时同步更新 iframe 内 viewport，保持 vw 与窗口一致
+            window.addEventListener('resize', function () {
+              try {
+                var idoc = ifr.contentDocument;
+                if (!idoc) return;
+                var vm = idoc.querySelector('meta[name="viewport"]');
+                if (vm) vm.setAttribute('content', 'width=' + window.innerWidth);
+              } catch (e) {}
+            });
             document.documentElement.appendChild(ifr);
             ifr.srcdoc = html;
           } catch (e) {

@@ -2,7 +2,25 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- 注意：不写「width=device-width」——该值会让 iframe 内 vw/vh 绑定「设备逻辑宽度」而非窗口实宽，
+     桌面 Tauri 生产 webview 下导致加载页被放大约 2.3×、装饰溢出只剩莲花。
+     改为由下方内联脚本运行时注入「width=窗口实宽(px)」：既避开了 device-width 的坑，又让本文件在
+     ①直接双击打开 ②关于→预览（bootPreview 的 iframe）③被 index.html 注入 三种场景下 vw 都正确。 -->
+<script>
+  (function () {
+    try {
+      var w = window.innerWidth || document.documentElement.clientWidth || 1100;
+      var m = document.createElement('meta');
+      m.name = 'viewport';
+      m.content = 'width=' + w;
+      document.head.appendChild(m);
+      window.addEventListener('resize', function () {
+        var vm = document.querySelector('meta[name="viewport"]');
+        if (vm) vm.setAttribute('content', 'width=' + (window.innerWidth || document.documentElement.clientWidth || 1100));
+      });
+    } catch (e) {}
+  })();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Noto+Serif+SC:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -892,6 +910,8 @@
       };
       [318, 278, 238, 198, 158].forEach(y => { add(40, y, -1); add(260, y, 1); });
     })();
+
+
   </script>
 </body>
 </html>

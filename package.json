@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "predev": "node scripts/kill-port.mjs && node scripts/build-external-deps.mjs && node scripts/deploy-plugins.mjs && node scripts/copy-waiting.mjs",
+    "predev": "node scripts/kill-port.mjs && node scripts/build-external-deps.mjs && node scripts/gen-waiting-pages.mjs && node scripts/deploy-plugins.mjs && node scripts/copy-waiting.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

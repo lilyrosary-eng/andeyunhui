@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 
 type Theme = 'system' | 'light' | 'dark';
 
@@ -105,6 +105,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return localStorage.getItem('fontFamily') || '系统默认';
   });
 
+  // UI 缩放包裹层：zoom 只作用于应用内容，不作用于 documentElement，
+  // 因此挂在 documentElement/body 上的加载页 iframe、预览 overlay 不受缩放影响
+  // （否则被放大后装饰层越界消失、只剩居中莲花）。App 根容器用 h-screen，不受包裹层高度影响。
+  const zoomRef = useRef<HTMLDivElement>(null);
+
   const setTheme = useCallback((t: Theme) => {
     setThemeState(t);
     localStorage.setItem('theme', t);
@@ -133,7 +138,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const setZoom = useCallback((val: number) => {
     setZoomState(val);
     localStorage.setItem('zoom', String(val));
-    document.documentElement.style.zoom = `${val}%`;
   }, []);
 
   const setPanelOpacity = useCallback((val: number) => {
@@ -165,7 +169,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   // 初始化缩放和透明度
   useEffect(() => {
-    document.documentElement.style.zoom = `${zoom}%`;
     document.documentElement.style.setProperty('--panel-opacity', String(panelOpacity / 100));
     if (fontFamily !== '系统默认') {
       document.body.style.fontFamily = `"${fontFamily}", sans-serif`;
@@ -192,7 +195,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   return (
     <ThemeContext.Provider value={{ theme, resolved, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily }}>
-      {children}
+      <div ref={zoomRef} style={{ zoom: `${zoom}%` }}>
+        {children}
+      </div>
     </ThemeContext.Provider>
   );
 }

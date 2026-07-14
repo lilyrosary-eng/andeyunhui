@@ -1,66 +1,47 @@
 # 项目长期记忆 — tauri-best
 
 ## 项目概述
-- 项目名称：andengyuanhua（岸灯鸢花），Tauri v2 桌面应用（React 前端 + Rust 后端），笔记应用 + 插件系统
-- 插件系统：music/image/video/reading/professional/markitdown + 扩展中心 gongjuxiang，IIFE 沙箱执行，`window.__HOST_*` 全局注入宿主 API
-- 打包：NSIS，`bundled-plugins/` 随 `bundle.resources` 打包
+- 项目：andengyuanhua（岸灯鸢花），Tauri v2 桌面应用（React 前端 + Rust 后端），笔记 + 插件系统
+- 插件系统：music/image/video/reading/professional/markitdown + 扩展中心 gongjuxiang（IIFE 沙箱，`window.__HOST_*` 注入）；打包 NSIS，`bundled-plugins/` 随 `bundle.resources`
 
-## ★ 核心构建约定
-- **重依赖走 `external-deps/`，插件走 `bundled-plugins/`**。重依赖（CodeMirror/TipTap 等 >100KB）必须外部化到 `external-deps/<name>/index.js`（esbuild IIFE，`scripts/build-external-deps.mjs` 构建），绝不可打包进插件本体。插件产出经 `scripts/deploy-plugins.mjs` 部署到 `bundled-plugins/` + `app_data/extensions/` + `app_data/user_plugins/`。
-- 运行时加载：`read_external_dep_file({relativePath})` → `new Function(code)()` → 读 `window.__EXT_<NAME>__` 全局
-- 共享 React 实例：ESM 依赖构建时外部化 react/react-dom 到 `__HOST_REACT__`/`__HOST_REACT_DOM__`
-- `build-external-deps.mjs` 已接入 `pnpm predev`（自动重生成）
-- 自检：插件 `dist/index.js` 不得含 tiptap/prosemirror/codemirror 字样
+## 核心构建约定
+- 重依赖走 `external-deps/`（esbuild IIFE，`scripts/build-external-deps.mjs`，接入 `predev`），绝不可进插件本体；运行时 `read_external_dep_file` → `new Function` → `window.__EXT_<NAME>__`
+- 共享 React 走 `__HOST_REACT__`/`__HOST_REACT_DOM__`；`window.__HOST_UI__`(PluginHost) 主应用可直接用
+- 自检：插件 `dist/index.js` 不得含 tiptap/prosemirror/codemirror
 
-## ★ Windows node_modules symlink 问题（2026-07-11 修复）
-- **症状**：pnpm 的 symlink/junction 全部损坏，`fs.statSync('node_modules/react')` 返回 "UNKNOWN: unknown error"，导致 TypeScript 找不到 `@types/react`（TS2688），级联出 3303 个错误
-- **根因**：Windows 系统 reparse point 不可跟随（可能是 Defender/NTFS 权限），symlink 和 junction 都无法被 `fs.statSync` 解析
-- **修复**：`scripts/fix-node-modules.mjs` 将所有断掉的 symlink 替换为真实目录拷贝（从 `.pnpm` store 复制）；`.npmrc` 添加 `node-linker=hoisted`（未来 pnpm install 使用扁平模式避免 symlink）
-- **tsconfig 修复**：根 `tsconfig.json` 和 `plugins/tsconfig.json` 的 `types` 从 `["react","react-dom"]` 改回 `[]`（React 类型通过模块导入解析，不需要全局 types 声明）
+## 易回归坑（必读）
+1. deploy 同步：`external-deps/` → `appDataRoot/external-deps`
+2. Windows 路径：`read_external_dep_file` 比较 root 也 `canonicalize()`
+3. 沙箱遮蔽 Function：非受信插件 `Function` 形参 undefined；`TRUSTED_FUNCTION_PLUGINS={'ide','wps'}` 或 manifest 声明 `deps`
+4. TipTap Table 需 TableRow/TableHeader/TableCell + Table，大版本一致
+5. `deps` 专指 external-deps，不做缺失拒绝
+6. node_modules symlink 损坏（Windows reparse 不可跟随）→ 跑 `scripts/fix-node-modules.mjs`；`.npmrc` 已 `node-linker=hoisted`
+7. @tiptap 类型实例重复（pnpm 物化）→ 根 tsconfig `paths` 加 `@tiptap/core`/`@tiptap/pm` 指向顶层 `node_modules/@tiptap/*`；Radix UI 类型缺 className/children → 组件类型显式补 `& {className?...}` 或 `const P = X as any`
+8. **UI 缩放 zoom 只能挂在 ThemeProvider 包裹 children 的一层 `<div>` 上，绝不能挂 `document.documentElement`**：否则覆盖层（启动加载页、关于→预览）继承 zoom 被放大，装饰/莲花越界只剩居中莲花
+9. **wait-page `vw/vh` 在打包版 WebView2 按"设备逻辑宽度"解析（非 iframe 实宽）** → 装饰放大溢出、只剩居中莲花（"打包后只剩莲花+放大"）。真正修复：wait-page 源 `<head>` 顶部内联脚本运行时自注入 `width=窗口实宽px` viewport（见 #15）。dev 用 localhost 按 iframe 实宽解析故正常，此 bug 只在打包版出现。
+10. **打包 exe「有 HUD 无红条/装饰」几乎总是旧包**：`public/waiting-page-*.html` 是死副本（不参与注入）；`vite.config.ts` 读 `wait-page/*.html` 注入。验证解码 `dist/index.html` base64 确认。
+11. **`pnpm tauri build` 走 PowerShell `pnpm.ps1` 会多传反斜杠 `\` 给 cargo，Rust 不编译、exe 不更新**：用 `build.bat`（`cmd /c`，后台 detached 跑，release 首次 ~8min，避开 5min 超时）。成功标志：build.log 有 `Compiling andengyuanhua` → `Finished release` → `makensis ... setup.exe` → `Finished 1 bundle`
+12. **`pnpm` 卡 "Blocking waiting for file lock"**：删 `node_modules/.pnpm/lock.yaml`（陈旧锁，删了安全）
+13. **哥特加载页有两条消费路径，修复须落在 wait-page 源本身**：①`index.html` 启动嵌入（iframe srcdoc，带父文档自愈注入）；②`wait-page` standalone（关于→预览 `bootPreview.ts` 的 `iframe.srcdoc=lightPageHtml`、双击打开 .html）。仅改 index.html 会漏掉 standalone 路径。
 
-## 架构
-- **状态管理**：Zustand 3 store（notesStore/appStore/floatingNoteStore），零 prop drilling
-- **插件共享运行时**：`plugins/_shared/pluginRuntime.tsx`（useRootPaths/useBlacklist/EmptyState 等）
-- **ESLint**：flat config，rules-of-hooks: error
-- **热插拔**：`reload_plugin`/`unload_plugin` Rust 命令 + 前端事件监听，`window.__pluginHot__`
-- **扫描双根**：`app_data/extensions` + `app_data/user_plugins`；`deps` 专指 external-deps，不做缺失依赖拒绝
+## 哥特加载页 / 莲花构建动画（2026-07-14 重点，动刀相关）
+- 哥特加载页 = wait-page（哥特风 + 莲花 `@keyframes bloom` 描边绘制动画 + `buildRose()` 线描几何 + 四角/玫瑰窗/水印装饰），由 `wait-page/*.html` 源经 base64 注入。
+- **启动页根因（#14，已修复）**：打包版 WebView2 偶发丢弃 srcdoc iframe 内联 `<style>`+`<script>` → 样式没上 bloom 不播、脚本没跑 `#roseG` 为空（莲花构建动画消失）。dev 同机制正常。`index.html` 的 `installBootHtml` onload 已加 **CSP 免疫自愈**：检测 `.app` 是否 flex、roseG 是否有子节点；未生效则样式用 `idoc.adoptedStyleSheets=[new CSSStyleSheet(); sheet.replaceSync(css)]`、脚本用 `idoc.defaultView.eval(code)` 重注（配置含 `unsafe-inline`/`unsafe-eval`）。
+- **viewport 修复（#15，已落实）**：wait-page 源 `<head>` 顶部内联脚本运行时自注入 `width=窗口实宽(px)` viewport；index.html 注入检测到已有 viewport 则跳过（避免双 meta）。三路径（双击/关于预览/启动嵌入）均正确。
+- **#18 关于→预览缺口（动刀目标）**：`bootPreview.ts` 的 `previewBootScreen` 直接 `iframe.srcdoc=lightPageHtml`，有 wait-page 自带 viewport 注入，但**缺 #14 的 style/script 自愈兜底** → 若发生同样的 srcdoc 丢弃，莲花构建动画会消失且无人修复。修复方向：① 给 bootPreview iframe `onload` 复用 #14 自愈；② 把 wait-page 从 base64 srcdoc 改为随包真实 HTML 用 `src` 加载（根因法）。诊断报告 `research_report_lotus_build_animation.md`。
+- 用户澄清：消失的是**莲花构建动画**（bloom+buildRose），**不是**流光 streamlight；此前把流光改 SVG SMIL 的尝试已被用户回退（SMIL 非根因）。包版本 2.1.1。
+- 诊断仪（HUD `#bootDiag`/红条 `bootDiagIframeHost`/`postMessage` 探针/`DISABLE_BOOT_SCREEN`/`PREVIEW_BOOT_DISABLED`）已全部删除，仅保留自愈 + viewport 注入。
 
-## 命名易混淆
-- **「茑萝」**= 扩展中心模块（`src/core/extensions/ExtensionsHub.tsx`，导航 id `extensions`），不是插件
-- **gongjuxiang**（原 niaoluo）= 茑萝内的 `visible:false` 子扩展（文本工具箱），2026-07-07 更名
-- `window.__HOST_UI__` 由 PluginHost 设在全局 window，主应用模块也能直接用 `ModuleSidebarShell` 等
+## 等待页打包链路（复用）
+- `vite.config.ts` + `scripts/gen-waiting-pages.mjs`（接入 `predev`/beforeBuildCommand）读 `wait-page/*.html` 生成 `src/lib/_waitingPages.generated.ts`（gitignored，构建期重生成），`bootPreview.ts` 导入解码后 `iframe.srcdoc`。此机制规避了此前 `?raw` 导入被 Vite 生产构建当 HTML 入口拦截、dev 正常 build 丢内容的坑。
 
-## 关键配置
-- CSP 含 `connect-src 'self' asset: https://asset.localhost http://asset.localhost`
-- `localStorage.setItem('log_level', 'debug')` 开启调试日志
-- TS Node 类型隔离：根 tsconfig `"types":[]`（防 @types/node 污染 DOM 类型），`tsconfig.node.json` `"types":["node"]`
-- `.npmrc`：`shamefully-hoist=true`、`public-hoist-pattern[]=*types*`、`node-linker=hoisted`
+## 前端包体积优化（#17）
+- `RichTextEditor.tsx` 改普通函数组件 + `editorRef` prop，由 `NotesEditor.tsx` 用 `React.lazy` 懒加载；`vite.config.ts` `manualChunks` 精确匹配 `react|react-dom|scheduler|use-sync-external-store`→react-vendor，`@radix-ui`→radix，`@tauri-apps`→tauri-vendor，`lucide-react`→icons，`chunkSizeWarningLimit:600`。eager ≈616KB(gzip205KB)。
 
-## Radix UI 类型修复（2026-07-11）
-- Radix UI 2.3+/1.4+ 的 TypeScript 类型不包含 `className`/`children`/`onClick` 等标准 HTML 属性
-- 修复模式：在 shadcn/ui 组件的类型注解中显式添加 `& { className?: string; children?: React.ReactNode; onClick?: ... }`，JSX 中用 `const P = SomePrimitive as any` 绕过 Radix 类型限制
-- 受影响文件：`src/components/ui/context-menu.tsx`、`slider.tsx`、`switch.tsx`
-- TipTap `Editor` 类型：用 `type Editor = NonNullable<ReturnType<typeof useEditor>>` 替代 `import { Editor } from '@tiptap/core'`（后者是传递依赖，可能未 hoist）
+## 外部依赖 / EPUB
+- CodeMirror 6(IDE)、TipTap 2(wps) 走 external-deps；`__HOST_REACT_DOM__` 须完整 react-dom（flushSync）。
+- EPUB：`reading_service.rs` 用 `epub=2.1.5`(GPL-3.0)+ammonia；维持现状不主动换（MIT 的 lib-epub 更有利但翻车成本高）。详见 `research_report_epub_ecosystem.md`。
 
-## 外部依赖
-- CodeMirror 6（IDE 插件）、TipTap 2（wps 文档编辑器）→ `external-deps/` 按需 IIFE 加载
-- TipTap 表格需 TableRow/TableHeader/TableCell 三个独立包 + Table，四者大版本须一致
-- `__HOST_REACT_DOM__` 必须是完整 `react-dom`（含 flushSync，@tiptap/react 需要）
-- IDE 加载失败不降级，显错误面板+构建命令+重试
-
-## EPUB 解析选型（2026-07-12 核实）
-- 后端 `reading_service.rs` 用 `epub = "=2.1.5"`（danigm/epub-rs，**GPL-3.0**）+ `ammonia` 消毒，**非手写 roxmltree**；容错 = epub crate 自身 + 自写包装（toc→spine 映射、spine 空报错、标题兜底、超大章节切片、ammonia 白名单）。
-- 核实结论：DeepSeek 汇报「epub crate 最后更新 2020」**错误**，2.1.5 发布于 2025-10-29，维护活跃；近 90 天下载 45,032（≈1.5 万/月）、反向依赖 34 个、`get_cover()` 存在。
-- 候选（仅当现方案翻车时评估，License 作一票否决优先核对）：`epub-parser`(zhangwfjh) 0.3.4/2026-02/**license 未确认**；`lib-epub`(KikkiZ) 0.3.1/2026-04/**MIT**。
-- **GPL-3.0 合规隐患**：Rust 默认静态链接，若闭源分发有源码义务；`lib-epub`(MIT) 更有利。不构成现在就换的理由（重新验证成本高）。
-- 决策：维持现状不主动换；R.5 排版设置本就是路线图下一步，继续推进。详见 `research_report_epub_ecosystem.md`。
-
-## ★ 易回归坑（精简）
-1. **deploy 同步路径**：`external-deps/` 同步到 `appDataRoot/external-deps`（不含 extensions）
-2. **Windows 路径前缀**：`read_external_dep_file` 比较 root 也要 `canonicalize()`
-3. **沙箱遮蔽 Function**：非受信插件 `Function` 形参为 undefined；`TRUSTED_FUNCTION_PLUGINS={'ide','wps'}` 或 manifest 声明 `deps` 自动开放
-4. **TipTap tableRow**：Table 不自带 tableRow/cell/header，需独立安装注册
-5. **deps 不是插件依赖**：`deps` 专指 external-deps，不做缺失拒绝
-6. **gongjuxiang 重复 id**：`deploy-plugins.mjs` 按结构部署不会再生孤儿
-7. **node_modules symlink 损坏**：Windows reparse point 不可跟随时运行 `scripts/fix-node-modules.mjs`
-8. **pnpm 物化导致 @tiptap 类型实例重复**：`fix-node-modules.mjs` 把 peer 依赖复制成独立物理目录（如 `.pnpm/@tiptap+react…/node_modules/@tiptap/core` 与 `.pnpm/@tiptap+extension-image…/node_modules/@tiptap/core` 各一份），使 `tsc` 报 `Types have separate declarations of a private property 'commandManager'` / `TS2769`。物化脚本不会自愈。兜底：根 `tsconfig.json` 的 `paths` 加 `@tiptap/core`/`@tiptap/pm` 指向顶层 `node_modules/@tiptap/*`，强制统一解析。
+## 命名 / 配置
+- 「茑萝」= 扩展中心 `ExtensionsHub.tsx`(id `extensions`)；gongjuxiang(原 niaoluo) 是其 `visible:false` 子扩展
+- CSP 含 `connect-src 'self' asset: https://asset.localhost`；`localStorage.log_level='debug'` 开调试；根 tsconfig `types:[]`、tsconfig.node `types:["node"]`
