@@ -46,3 +46,9 @@
 ## 命名 / 配置
 - 「茑萝」= 扩展中心 `ExtensionsHub.tsx`(id `extensions`)；gongjuxiang(原 niaoluo) 是其 `visible:false` 子扩展
 - CSP 含 `connect-src 'self' asset: https://asset.localhost`；`localStorage.log_level='debug'` 开调试；根 tsconfig `types:[]`、tsconfig.node `types:["node"]`
+
+## 跨平台规划（Linux / macOS，2026-07-15 调研）
+- 现状：应用重绑定 Windows。`screenshot.rs`/`recording_service.rs` 用 `winapi`+`windows-capture`(WGC)、Win32 剪贴板直写、`drag` crate(DoDragDrop)、NSIS 打包、前端 WebView2 专属 hack。已跨平台：`arboard`(剪贴板)、`notify`(已开 macos_fsevent)、`external-deps` 随包机制。
+- 设计路线（详见 `research_report_tauri_crossplatform.md`）：用 `#[cfg(target_os)]` 隔离 Windows 专属；抽象 `CaptureBackend` trait，macOS 用 `screencapturekit-rs`、Linux 用 `scrap`/`xcap`；剪贴板统一切 `arboard`；ffmpeg 按平台命名（去 `.exe`）；拖出 Windows 保留 `drag`，mac/Linux 接 `tauri-plugin-native-drag` 或 reveal 兜底。
+- 平台限制：Wayland 下「枚举他窗矩形 / 窗口级长截图」不可行，需降级；macOS 屏幕录制走 TCC 运行时授权（非 entitlements）；macOS 必做 Developer ID 签名 + notarization（`bundle.macOS` 配 `signingIdentity`/`hardenedRuntime`/`entitlements`）；Linux 需 webkit2gtk-4.1 依赖。
+- 分阶段：M1 三端可编译启动 → M2 截图/录屏跨平台后端 → M3 打包签名CI+拖出 → M4 打磨降级。估算 2–3 个月可用版。

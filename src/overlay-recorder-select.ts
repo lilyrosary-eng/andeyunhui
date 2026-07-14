@@ -29,6 +29,7 @@ interface Win {
   y: number;
   width: number;
   height: number;
+  is_self?: boolean;
 }
 
 // ========== 坐标信息（从 Rust recorder-select-ready 事件获取）==========
@@ -155,21 +156,17 @@ function toPhys(cx: number, cy: number): { x: number; y: number } {
   return { x: ox + cx * scale, y: oy + cy * scale };
 }
 
-// 命中窗口：取光标下面积最小者（最精确匹配）
+// 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标且非本进程的窗口。
+// 与微信/QQ 截图的 WindowFromPoint 语义等价——避免「面积最小者」误选非顶层小窗口导致偏移。
 function hitWindow(cx: number, cy: number): Win | null {
   const p = toPhys(cx, cy);
-  let best: Win | null = null;
-  let bestArea = Infinity;
   for (const w of windows) {
+    if (w.is_self) continue;
     if (p.x >= w.x && p.x <= w.x + w.width && p.y >= w.y && p.y <= w.y + w.height) {
-      const area = w.width * w.height;
-      if (area < bestArea) {
-        bestArea = area;
-        best = w;
-      }
+      return w;
     }
   }
-  return best;
+  return null;
 }
 
 // 更新窗口高亮框位置
@@ -336,25 +333,27 @@ async function startRecordingWithRegion(x: number, y: number, w: number, h: numb
     await invoke("hide_recorder_select");
     await getCurrentWindow().hide();
 
-    // 2. 生成输出路径（使用 Tauri 标准 videoDir API）
+    // 2. 先显示控制台（给用户即时反馈，避免录屏启动期间的空白等待）
+    await invoke("show_recorder_widget");
+
+    // 3. 生成输出路径（使用 Tauri 标准 videoDir API）
     const dir = await videoDir();
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, "0");
     const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const outputPath = `${dir.replace(/\\/g, "/")}/录屏_${ts}.mp4`;
 
-    // 3. 启动录屏（传入区域参数 [x, y, w, h]）
+    // 4. 启动录屏（传入区域参数 [x, y, w, h]）
     await invoke("start_recording", {
       outputPath,
       fps: 30,
       monitorIndex: null,
       region: [x, y, w, h],
     });
-
-    // 4. 显示录屏控制台
-    await invoke("show_recorder_widget");
   } catch (e) {
     console.error("[录屏区域] 启动失败:", e);
+    // 启动失败 → 隐藏控制台
+    await invoke("hide_recorder_widget").catch(() => {});
     const msg = typeof e === "string" ? e : (e as { message?: string })?.message || "录屏启动失败";
     // 重新显示窗口以展示错误
     await getCurrentWindow().show();
@@ -363,10 +362,10 @@ async function startRecordingWithRegion(x: number, y: number, w: number, h: numb
   }
 }
 
-// ========== 初始化：从 recorder-select-ready 事件获取坐标 ==========
-// 坐标来源：Rust 的 show_recorder_select 发出，使用 virtual_desktop_rect() 权威值。
-// 不再读 outerPosition()——它在 set_position 后可能返回带 DWM 边框偏移的值（如 +7px），
-// 导致选区坐标左边偏移（与 screenshot.rs 同理）。
+// ========== 初始化：轮询获取坐标（比事件+超时更可靠）==========
+// Rust 的 show_recorder_select 在窗口显示前就 emit 了 recorder-select-ready 事件，
+// 但此时 WebView 的 listen() 可能尚未注册 → 事件丢失。
+// 改用轮询：每 50ms 尝试拉取坐标，最多 20 次（1 秒），确保初始化完成。
 async function initFromEvent(data: { ox: number; oy: number; scale: number }) {
   ox = data.ox;
   oy = data.oy;
@@ -389,22 +388,28 @@ async function initFromEvent(data: { ox: number; oy: number; scale: number }) {
   selection.style.display = "none";
 }
 
-// 监听 Rust 的 recorder-select-ready 事件（窗口显示时由 show_recorder_select 发出）
-let readyEventReceived = false;
+// 保留事件监听（快速路径：如果事件能到达，立即初始化）
 listen<{ ox: number; oy: number; scale: number }>("recorder-select-ready", (event) => {
-  readyEventReceived = true;
   void initFromEvent(event.payload);
 });
 
-// 兜底：push 事件可能因竞态丢失（listen 尚未注册时 Rust 已 emit）。
-// 200ms 后若仍未收到事件，主动拉取坐标（与截图覆盖窗的 peek_screenshot 轮询同理）。
-setTimeout(() => {
-  if (!readyEventReceived && !ready) {
-    invoke<{ ox: number; oy: number; scale: number }>("get_recorder_select_coords")
-      .then((data) => { void initFromEvent(data); })
-      .catch((e) => console.error("[录屏区域] 兜底拉取坐标失败:", e));
+// 轮询兜底：确保即使事件丢失也能初始化（与截图覆盖窗的 peek_screenshot 轮询同理）
+async function pollInit() {
+  for (let i = 0; i < 20; i++) {
+    if (ready) return; // 已初始化
+    try {
+      const data = await invoke<{ ox: number; oy: number; scale: number }>("get_recorder_select_coords");
+      await initFromEvent(data);
+      return;
+    } catch {
+      // 窗口可能尚未就绪，稍后重试
+      await new Promise(r => setTimeout(r, 50));
+    }
   }
-}, 200);
+  console.error("[录屏区域] 初始化超时：无法获取坐标");
+}
+
+void pollInit();
 
 // 接收取消事件（Ctrl+Alt+R 再次按下时触发）
 listen<null>("recorder-select-cancel", () => {

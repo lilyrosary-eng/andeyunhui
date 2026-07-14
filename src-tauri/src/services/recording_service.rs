@@ -171,129 +171,135 @@ fn check_ffmpeg_with(path: &str) -> bool {
 /// - `monitor_index`：显示器索引（默认 0 = 主屏），仅当 region 为 None 时使用
 /// - `region`：录制区域 `Option<(x, y, w, h)>`，虚拟桌面物理像素坐标；None = 全屏
 #[tauri::command]
-pub fn start_recording(
+pub async fn start_recording(
     app: AppHandle,
     output_path: String,
     fps: Option<u32>,
     monitor_index: Option<usize>,
     region: Option<(i32, i32, i32, i32)>,
 ) -> Result<(), String> {
-    // 检查 ffmpeg（优先 bundled，回退系统 PATH）
-    let ffmpeg_path = get_ffmpeg_path(&app);
-    if !check_ffmpeg_with(&ffmpeg_path) {
-        return Err("未检测到 ffmpeg，无法录屏。请在系统中安装 ffmpeg 后重试。".into());
-    }
-
-    let fps = fps.unwrap_or(30);
-
-    // 检查是否已在录制
-    {
-        let recording = RECORDING.lock().unwrap();
-        if recording.is_some() {
-            return Err("已在录制中，请先停止当前录制".into());
+    // async + spawn_blocking：将 ffmpeg 检测、显示器枚举、进程启动等阻塞操作移至线程池，
+    // 避免阻塞主线程导致 UI 冻结（卡死）。
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // 检查 ffmpeg（优先 bundled，回退系统 PATH）
+        let ffmpeg_path = get_ffmpeg_path(&app);
+        if !check_ffmpeg_with(&ffmpeg_path) {
+            return Err("未检测到 ffmpeg，无法录屏。请在系统中安装 ffmpeg 后重试。".into());
         }
-    }
 
-    // 获取显示器 + 计算裁剪区域 + 编码尺寸
-    let monitors = Monitor::enumerate().map_err(|e| format!("枚举显示器失败: {}", e))?;
-    let total = monitors.len();
+        let fps = fps.unwrap_or(30);
 
-    let (monitor, crop, enc_w, enc_h) = if let Some((rx, ry, rw, rh)) = region {
-        if rw <= 0 || rh <= 0 {
-            return Err("录制区域尺寸无效".into());
+        // 检查是否已在录制
+        {
+            let recording = RECORDING.lock().unwrap();
+            if recording.is_some() {
+                return Err("已在录制中，请先停止当前录制".into());
+            }
         }
-        // 找到包含区域原点的显示器
-        let mon = monitors
-            .into_iter()
-            .find(|m| {
-                let (ml, mt, mr, mb) = monitor_rect_phys(m);
-                rx >= ml && rx < mr && ry >= mt && ry < mb
-            })
-            .ok_or_else(|| "录制区域不在任何显示器范围内".to_string())?;
-        let (ml, mt, _, _) = monitor_rect_phys(&mon);
-        let crop_offset = Some((
-            (rx - ml) as u32,
-            (ry - mt) as u32,
-            rw as u32,
-            rh as u32,
-        ));
-        (mon, crop_offset, rw as u32, rh as u32)
-    } else {
-        let idx = monitor_index.unwrap_or(0);
-        let mon = monitors
-            .into_iter()
-            .nth(idx)
-            .ok_or_else(|| format!("无效的显示器索引: {}（共 {} 个显示器）", idx, total))?;
-        let info = monitor_rect_phys(&mon);
-        let w = (info.2 - info.0) as u32;
-        let h = (info.3 - info.1) as u32;
-        if w == 0 || h == 0 {
-            return Err("显示器分辨率无效".into());
-        }
-        (mon, None, w, h)
-    };
 
-    // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）
-    let mut child = Command::new(&ffmpeg_path)
-        .args([
-            "-y",
-            "-f", "rawvideo",
-            "-pix_fmt", "rgba",
-            "-s", &format!("{}x{}", enc_w, enc_h),
-            "-r", &fps.to_string(),
-            "-i", "-",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            &output_path,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped()) // 捕获 stderr 用于错误诊断
-        .spawn()
-        .map_err(|e| format!("启动 ffmpeg 失败: {}（请确认 ffmpeg 已安装）", e))?;
+        // 获取显示器 + 计算裁剪区域 + 编码尺寸
+        let monitors = Monitor::enumerate().map_err(|e| format!("枚举显示器失败: {}", e))?;
+        let total = monitors.len();
 
-    let stdin = child.stdin.take().ok_or("无法获取 ffmpeg stdin")?;
-    let stdin_arc = Arc::new(Mutex::new(Some(stdin)));
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let paused = Arc::new(AtomicBool::new(false));
+        let (monitor, crop, enc_w, enc_h) = if let Some((rx, ry, rw, rh)) = region {
+            if rw <= 0 || rh <= 0 {
+                return Err("录制区域尺寸无效".into());
+            }
+            // 找到包含区域原点的显示器
+            let mon = monitors
+                .into_iter()
+                .find(|m| {
+                    let (ml, mt, mr, mb) = monitor_rect_phys(m);
+                    rx >= ml && rx < mr && ry >= mt && ry < mb
+                })
+                .ok_or_else(|| "录制区域不在任何显示器范围内".to_string())?;
+            let (ml, mt, _, _) = monitor_rect_phys(&mon);
+            let crop_offset = Some((
+                (rx - ml) as u32,
+                (ry - mt) as u32,
+                rw as u32,
+                rh as u32,
+            ));
+            (mon, crop_offset, rw as u32, rh as u32)
+        } else {
+            let idx = monitor_index.unwrap_or(0);
+            let mon = monitors
+                .into_iter()
+                .nth(idx)
+                .ok_or_else(|| format!("无效的显示器索引: {}（共 {} 个显示器）", idx, total))?;
+            let info = monitor_rect_phys(&mon);
+            let w = (info.2 - info.0) as u32;
+            let h = (info.3 - info.1) as u32;
+            if w == 0 || h == 0 {
+                return Err("显示器分辨率无效".into());
+            }
+            (mon, None, w, h)
+        };
 
-    // 启动 WGC 捕获线程
-    let stdin_for_capture = stdin_arc.clone();
-    let stop_for_capture = stop_flag.clone();
-    let paused_for_capture = paused.clone();
-    let capture_thread = std::thread::spawn(move || {
-        let settings = Settings::new(
-            monitor,
-            CursorCaptureSettings::Default,
-            DrawBorderSettings::Default,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default,
-            ColorFormat::Rgba8,
-            (stdin_for_capture, stop_for_capture, paused_for_capture, crop),
-        );
-        if let Err(e) = WgcRecorder::start(settings) {
-            eprintln!("[录屏] WGC 捕获异常: {}", e);
-        }
-    });
+        // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）
+        let mut child = Command::new(&ffmpeg_path)
+            .args([
+                "-y",
+                "-f", "rawvideo",
+                "-pix_fmt", "rgba",
+                "-s", &format!("{}x{}", enc_w, enc_h),
+                "-r", &fps.to_string(),
+                "-i", "-",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                &output_path,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()) // 捕获 stderr 用于错误诊断
+            .spawn()
+            .map_err(|e| format!("启动 ffmpeg 失败: {}（请确认 ffmpeg 已安装）", e))?;
 
-    // 保存录屏句柄
-    *RECORDING.lock().unwrap() = Some(RecordingHandle {
-        ffmpeg_child: Some(child),
-        capture_thread: Some(capture_thread),
-        stop_flag,
-        paused,
-        start_time: SystemTime::now(),
-        output_path: output_path.clone(),
-    });
+        let stdin = child.stdin.take().ok_or("无法获取 ffmpeg stdin")?;
+        let stdin_arc = Arc::new(Mutex::new(Some(stdin)));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
 
-    // 通知前端开始录制
-    let _ = app.emit("recording-started", &output_path);
+        // 启动 WGC 捕获线程
+        let stdin_for_capture = stdin_arc.clone();
+        let stop_for_capture = stop_flag.clone();
+        let paused_for_capture = paused.clone();
+        let capture_thread = std::thread::spawn(move || {
+            let settings = Settings::new(
+                monitor,
+                CursorCaptureSettings::Default,
+                DrawBorderSettings::Default,
+                SecondaryWindowSettings::Default,
+                MinimumUpdateIntervalSettings::Default,
+                DirtyRegionSettings::Default,
+                ColorFormat::Rgba8,
+                (stdin_for_capture, stop_for_capture, paused_for_capture, crop),
+            );
+            if let Err(e) = WgcRecorder::start(settings) {
+                eprintln!("[录屏] WGC 捕获异常: {}", e);
+            }
+        });
 
-    Ok(())
+        // 保存录屏句柄
+        *RECORDING.lock().unwrap() = Some(RecordingHandle {
+            ffmpeg_child: Some(child),
+            capture_thread: Some(capture_thread),
+            stop_flag,
+            paused,
+            start_time: SystemTime::now(),
+            output_path: output_path.clone(),
+        });
+
+        // 通知前端开始录制
+        let _ = app.emit("recording-started", &output_path);
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("录屏任务执行失败: {}", e))?
 }
 
 /// 停止录屏，返回输出文件路径
