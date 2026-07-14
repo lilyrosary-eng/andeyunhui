@@ -182,7 +182,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
         const page = pageInChapter === -1 ? b.endPage : Math.min(b.startPage + pageInChapter, b.endPage);
         setAbsolutePage(page);
         setChapterIndex(targetIdx);
-        requestAnimationFrame(() => setNoTransition(false));
+    AppData/    requestAnimationFrame(() => setNoTransition(false));
         return;
       }
     }
