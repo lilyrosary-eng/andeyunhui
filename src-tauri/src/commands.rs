@@ -1177,6 +1177,18 @@ pub fn delete_music_cache(app: tauri::AppHandle, root_path: String) -> Result<()
     cache_service::delete_cache(&app_data, "music_scan", &root_path)
 }
 
+/// 读取单个音频文件的元数据（标题/歌手/专辑/时长/内嵌封面）。
+/// 供「手动添加歌曲」（非目录扫描）复用与目录扫描完全一致的解析逻辑
+/// （music_service::extract_track_metadata），从而识别手动添加歌曲的元信息。
+#[tauri::command]
+pub fn read_track_metadata(app: tauri::AppHandle, file_path: String) -> music_service::Track {
+    let cover_dir = app.path().app_data_dir().ok().map(|d| d.join("music_covers"));
+    if let Some(ref dir) = cover_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    music_service::extract_track_metadata(std::path::Path::new(&file_path), cover_dir.as_deref())
+}
+
 // ================= 视频模块命令 =================
 
 /// 扫描视频根目录，流式推送结果（适合大目录）

@@ -2,42 +2,24 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<!-- 注意：不写「width=device-width」——该值会让 iframe 内 vw/vh 绑定「设备逻辑宽度」而非窗口实宽，
-     桌面 Tauri 生产 webview 下导致加载页被放大约 2.3×、装饰溢出只剩莲花。
-     改为由下方内联脚本运行时注入「width=窗口实宽(px)」：既避开了 device-width 的坑，又让本文件在
-     ①直接双击打开 ②关于→预览（bootPreview 的 iframe）③被 index.html 注入 三种场景下 vw 都正确。 -->
-<script>
-  (function () {
-    try {
-      var w = window.innerWidth || document.documentElement.clientWidth || 1100;
-      var m = document.createElement('meta');
-      m.name = 'viewport';
-      m.content = 'width=' + w;
-      document.head.appendChild(m);
-      window.addEventListener('resize', function () {
-        var vm = document.querySelector('meta[name="viewport"]');
-        if (vm) vm.setAttribute('content', 'width=' + (window.innerWidth || document.documentElement.clientWidth || 1100));
-      });
-    } catch (e) {}
-  })();
-</script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Noto+Serif+SC:wght@400;500;600&display=swap" rel="stylesheet" />
-<title>岸灯鸢花 · 等待页面（PC / 哥特 / 暗色）</title>
+<title>岸灯鸢花 · 等待页面（PC / 哥特 / 亮色）</title>
 <style>
-  /* ===== 哥特暗色调配色 ===== */
+  /* ===== 亮色 / 浅底调配色（保留哥特线饰，整体翻亮） ===== */
   :root {
-    --bg:        #14141a;   /* 深炭底（微蓝） */
-    --bg-2:      #0e0e12;   /* 渐变辅底（更暗） */
-    --surface:   #1c1c24;   /* 面板 */
-    --ink:       #ccc8be;   /* 苍白墨色（主文字，暗底上显形） */
-    --ink-soft:  #6f6c78;   /* 次要灰 */
-    --accent:    #9b8fb5;   /* 冷淡紫，哥特点缀（线描花/进度/呼吸光） */
-    --accent-2:  #7a8e99;   /* 雾蓝灰，辅助 */
-    --line:      rgba(204,200,190,.14);
-    --line-soft: rgba(204,200,190,.07);
-    --spark:     #efe9fb;   /* 光点（暗底上用浅紫白显形） */
+    --bg:        #f4f2ec;   /* 暖瓷白底 */
+    --bg-2:      #ece9e1;   /* 渐变辅底 */
+    --surface:   #faf9f5;   /* 面板 */
+    --ink:       #3a3a37;   /* 暖深灰（主文字，浅底上显形） */
+    --ink-soft:  #8b867e;   /* 次要灰 */
+    --accent:    #8b948a;   /* 莫兰迪·雾感灰绿，浅底上的哥特点缀（线描花/进度/呼吸光） */
+    --accent-2:  #a99c8b;   /* 莫兰迪·灰陶土，辅助 */
+    --line:      rgba(60,58,55,.14);
+    --line-soft: rgba(60,58,55,.07);
+    --spark:     #97a08f;   /* 莫兰迪·灰绿光点（浅底上显形） */
     --sans: "Noto Serif SC", "Source Han Serif SC", "PingFang SC", "Microsoft YaHei", Georgia, serif;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Roboto Mono", Menlo, Consolas, monospace;
     --gothic: "Cinzel", "Playfair Display", "Noto Serif SC", serif;
@@ -52,16 +34,16 @@
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
   }
-  /* 夜色教堂：四角压暗的暗角（vignette），中央莲花如被烛光照亮 */
+  /* 亮底下的极淡边角压暗，仅留一丝纵深感，不抢戏 */
   body::after {
     content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
-    background: radial-gradient(125% 95% at 50% 38%, transparent 36%, rgba(0,0,0,.55) 100%);
+    background: radial-gradient(130% 100% at 50% 40%, transparent 62%, rgba(58,55,52,.10) 100%);
   }
 
   /* 细线网格暗纹（浅底上的低对比点阵） */
   .grid {
     position: fixed; inset: 0; pointer-events: none; z-index: 0;
-    background-image: radial-gradient(rgba(204,200,190,.06) 1px, transparent 1.5px);
+    background-image: radial-gradient(rgba(60,58,55,.05) 1px, transparent 1.5px);
     background-size: 32px 32px;
     background-position: -16px -16px;
   }
@@ -102,14 +84,14 @@
     position: relative; padding: 16px;
     min-height: 0; overflow: visible;
   }
-  /* 夜色教堂：莲花背后的柔光（冷紫烛光 + 一丝暖调），似彩色玻璃透出的光 */
+  /* 夜色教堂：莲花背后的柔光（莫兰迪冷调灰绿烛光 + 一丝暖陶土），似彩色玻璃透出的光 */
   .pane-loader::before {
     content: ""; position: absolute; left: 50%; top: 50%;
     width: min(80vw, 720px); height: min(80vw, 720px);
     transform: translate(-50%, -50%);
     background:
-      radial-gradient(circle at 50% 46%, rgba(155,143,181,.24), rgba(120,110,150,.10) 38%, transparent 66%),
-      radial-gradient(circle at 50% 46%, rgba(196,170,140,.10), transparent 48%);
+      radial-gradient(circle at 50% 46%, rgba(150,166,160,.15), rgba(138,156,150,.07) 38%, transparent 66%),
+      radial-gradient(circle at 50% 46%, rgba(190,166,140,.07), transparent 48%);
     filter: blur(28px);
     z-index: -1; pointer-events: none;
     animation: candle 6.5s ease-in-out infinite;   /* 烛火般轻微呼吸 / 闪烁 */
@@ -124,7 +106,7 @@
       rgba( 78,112,176, .14)  56deg 112deg,
       rgba(176,132, 80, .11) 112deg 168deg,
       rgba(108,152,140, .11) 168deg 224deg,
-      rgba(142,100,162, .14) 224deg 280deg,
+      rgba(150,162,142, .13) 224deg 280deg,
       rgba( 84,124,176, .14) 280deg 336deg,
       rgba(150, 88,120, .14) 336deg 360deg);
     -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 58%, transparent 72%);
@@ -154,7 +136,7 @@
   .stars .star {
     position: absolute; border-radius: 50%;
     background: var(--spark);
-    box-shadow: 0 0 5px 1px rgba(239,233,251,.5);
+    box-shadow: 0 0 5px 1px rgba(235,229,217,.5);
     animation: twinkle linear infinite;
   }
   /* 漂移外壳：承载缓慢位移（萤火感），内层 .star 继续闪烁，二者 transform 不冲突 */
@@ -189,14 +171,19 @@
     min-height: 0;
   }
 
-  /* 线描花卉 loader（哥特暗色 · 大幅莲花） */
+  /* 线描花卉 loader（哥特 · 大幅莲花） */
   .loader { width: clamp(360px, 40vw, 560px); height: clamp(360px, 40vw, 560px); color: var(--accent); position: relative; }
   .loader .petal {
     fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round;
-    /* 逐笔构建动画改由 JS 在 rAF 循环里直接驱动 strokeDashoffset（引擎无关），
-       规避打包版 WebView2 对「@keyframes 内 var()」支持不一致导致构建动画缺失。 */
-    stroke-dasharray: var(--len);
-    stroke-dashoffset: var(--len);
+    stroke-dasharray: var(--len); stroke-dashoffset: var(--len);
+    animation: bloom 3.6s ease-in-out infinite;
+    animation-delay: var(--d);
+  }
+  @keyframes bloom {
+    0%   { stroke-dashoffset: var(--len); opacity: .4; }
+    45%  { stroke-dashoffset: 0; opacity: 1; }
+    55%  { stroke-dashoffset: 0; opacity: 1; }
+    100% { stroke-dashoffset: var(--len); opacity: .4; }
   }
   /* 极小流光光点 + 拖尾（绘制阶段沿花辦往返掠过） */
   .loader .spark, .loader .spark-trail {
@@ -255,7 +242,7 @@
   .footer .right { display: flex; gap: 28px; }
   .footer b { color: var(--ink); font-weight: 500; }
 
-  /* ===== 哥特元素（暗色底上的克制点缀 · 不抢戏）===== */
+  /* ===== 哥特元素（亮底上的克制点缀 · 不抢戏）===== */
   /* 中央莲花外的尖拱窗棂（lancet arch · 哥特标志形） */
   .pane-loader .arch {
     position: absolute; left: 50%; top: 50%; z-index: 0;
@@ -349,9 +336,8 @@
     .topbar, .footer { padding-left: 24px; padding-right: 24px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    /* 中央莲花「构建动画」是核心加载反馈，即便系统开启「减少动态效果」也保持播放；
-       仅背景装饰（状态点 / 玫瑰窗旋转 / 门廊小玫瑰窗）遵循 reduced-motion 降级。 */
-    .status .dot, .pane-loader .rose, .main .portal-crest #crestRoseG { animation: none; }
+    .loader .petal, .status .dot, .pane-loader .rose, .main .portal-crest #crestRoseG { animation: none; }
+    .loader .petal { stroke-dashoffset: 0; }
   }
 </style>
 </head>
@@ -556,7 +542,7 @@
       </svg>
       <!-- 左：线描花卉 loader -->
       <div class="pane-loader">
-        <!-- 哥特尖拱窗棂（loose framing，暗色底） -->
+        <!-- 哥特尖拱窗棂（loose framing，亮色底） -->
         <svg class="arch" viewBox="0 0 300 360" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M40 340 L40 150 Q40 52 150 30 Q260 52 260 150 L260 340"/>
           <path d="M58 340 L58 152 Q58 70 150 50 Q242 70 242 152 L242 340" opacity=".7"/>
@@ -607,7 +593,7 @@
               <path class="petal" style="--len:100; --d:.9s"  d="M0,4 C-9,-5 -13,-17 -5,-40 C-1,-44 1,-44 5,-40 C13,-17 9,-5 0,4 Z" transform="rotate(-30)"/>
               <path class="petal" style="--len:100; --d:1.0s" d="M0,4 C-9,-5 -13,-17 -5,-40 C-1,-44 1,-44 5,-40 C13,-17 9,-5 0,4 Z" transform="rotate(30)"/>
             </g>
-            <!-- 流星光点由脚本动态生成（白色炽核 + 紫色光晕 + 彗星拖尾） -->
+            <!-- 流星光点由脚本动态生成（白色炽核 + 莫兰迪灰绿光晕 + 彗星拖尾） -->
           </g>
         </svg>
       </div>
@@ -787,22 +773,19 @@
       const { PER, TOTAL_MS, ORDER, TRAIL } = CFG;
       const svgNS = "http://www.w3.org/2000/svg";
 
-      // 注：中央莲花「构建动画」+ 流光是核心加载反馈且极短暂，即便系统开启「减少动态效果」也保持播放；
-      // 仅背景装饰（烛光 / 星点 / 玫瑰窗旋转 / 状态点）遵循 reduced-motion 降级（见上方 @media 块）。
+      const reduce = window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (reduce) {                         // 尊重「减少动态效果」偏好（无光点，直接呼吸）
+        loader.classList.add("breathing");
+        return;
+      }
+
       // 缓存每瓣：路径总长、自身旋转角(弧度)
       const lens = petals.map(p => p.getTotalLength());
       const angles = petals.map(p => {
         const m = /rotate\(([-\d.]+)\)/.exec(p.getAttribute("transform") || "");
         return m ? parseFloat(m[1]) * Math.PI / 180 : 0;
       });
-      // 逐瓣「构建动画」改为 JS 直接驱动 strokeDashoffset（替代 CSS bloom）：
-      // 规避打包版 WebView2 对 @keyframes 内 var() 支持不一致导致构建动画缺失。
-      const delays = petals.map(p => {
-        const m = /([\d.]+)s/.exec(p.style.getPropertyValue("--d") || "0s");
-        return m ? parseFloat(m[1]) * 1000 : 0;
-      });
-      const DRAW = 900; // 单瓣描边时长(ms)
-      petals.forEach((p, i) => { p.style.strokeDasharray = String(lens[i]); });
 
       // 极小流光光点
       const head = document.createElementNS(svgNS, "circle");
@@ -831,7 +814,6 @@
         if (elapsed >= TOTAL_MS) {          // 到达合计时长 → 线条停止(呼吸) + 光点也暂停
           loader.classList.remove("drawing");
           loader.classList.add("breathing");
-          petals.forEach((p, i) => (p.style.strokeDashoffset = "0"));  // 全部描完，定格完整线条
           if (CFG.HIDE_ON_STOP) head.style.opacity = 0;   // 隐藏；否则定格在当前位置(暂停)
           trails.forEach(t => (t.style.opacity = 0));     // 拖尾淡出
           return;                                         // 停止 rAF → 光点冻结
@@ -865,13 +847,6 @@
           trails[i].setAttribute("cx", h.x.toFixed(2));
           trails[i].setAttribute("cy", h.y.toFixed(2));
           trails[i].style.opacity = (CFG.TRAIL_OPACITY * (1 - i / TRAIL) * op).toFixed(3);
-        }
-
-        // 驱动每瓣描边进度（各自延迟），实现「逐笔构建」。JS 直接写 strokeDashoffset，
-        // 引擎无关，彻底规避打包版 @keyframes 内 var() 不被插值导致构建动画缺失。
-        for (let i = 0; i < petals.length; i++) {
-          const prog = Math.max(0, Math.min(1, (elapsed - delays[i]) / DRAW));
-          petals[i].style.strokeDashoffset = String(lens[i] * (1 - prog));
         }
 
         loader.classList.add("drawing");
@@ -917,8 +892,6 @@
       };
       [318, 278, 238, 198, 158].forEach(y => { add(40, y, -1); add(260, y, 1); });
     })();
-
-
   </script>
 </body>
 </html>
