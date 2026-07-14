@@ -2,7 +2,6 @@
 // 音乐侧边栏 — 一级导航：歌单列表
 const React = window.__HOST_REACT__;
 const { useState, useCallback } = React;
-const hostApi = window.__HOST_API__;
 const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
 
 interface Track {
@@ -27,6 +26,7 @@ interface MusicSidebarProps {
   selectedPlaylistId: string | null;
   onSelectPlaylist: (playlist: Playlist) => void;
   onSelectFolder: () => void;
+  onCreatePlaylist?: (name: string) => void;
   onRenamePlaylist?: (playlist: Playlist, newName: string) => void;
   onDeletePlaylist?: (playlist: Playlist) => void;
   onOpenModuleSettings?: () => void;
@@ -69,39 +69,19 @@ function PlusIcon() {
   });
 }
 
-export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, onSelectFolder, onRenamePlaylist, onDeletePlaylist, onOpenModuleSettings, searchQuery, onSearchChange }: MusicSidebarProps) {
+export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, onSelectFolder, onCreatePlaylist, onRenamePlaylist, onDeletePlaylist, onOpenModuleSettings, searchQuery, onSearchChange }: MusicSidebarProps) {
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState('');
 
   const handleCreatePlaylist = useCallback(() => {
-    if (!newPlaylistName.trim()) return;
-    const newPlaylist: Playlist = {
-      id: Date.now().toString(),
-      name: newPlaylistName.trim(),
-      tracks: [],
-      type: 'custom',
-    };
-    const saved = localStorage.getItem('music_playlists');
-    const existing = saved ? JSON.parse(saved) : [];
-    existing.push(newPlaylist);
-    localStorage.setItem('music_playlists', JSON.stringify(existing));
-    onSelectPlaylist(newPlaylist);
+    const name = newPlaylistName.trim();
+    if (!name) return;
+    onCreatePlaylist?.(name);
     setNewPlaylistName('');
     setShowNewInput(false);
-  }, [newPlaylistName, onSelectPlaylist]);
-
-  const handleAddSong = useCallback(() => {
-    hostApi.invoke('pick_file', { filters: [{ name: 'Audio', extensions: ['mp3', 'flac', 'wav', 'ogg', 'm4a'] }] })
-      .then((files: unknown) => {
-        const f = files as string[];
-        if (f && f.length > 0) {
-          console.log('[Music] 添加歌曲:', f);
-        }
-      })
-      .catch(() => {});
-  }, []);
+  }, [newPlaylistName, onCreatePlaylist]);
 
   const startRename = (playlist: Playlist) => {
     setRenamingId(playlist.id);
@@ -163,8 +143,6 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
           onClick: () => onDeletePlaylist?.(playlist),
           variant: 'destructive',
         }, '删除歌单') : null,
-        React.createElement(ContextMenuSeparator),
-        React.createElement(ContextMenuItem, { onClick: handleAddSong }, '添加歌曲'),
       )
     );
   };
@@ -182,24 +160,6 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
         children: [
           React.createElement(PlusIcon),
           React.createElement('span', null, '+ 添加歌单'),
-        ],
-      }),
-      React.createElement('button', {
-        key: 'add-folder',
-        onClick: onSelectFolder,
-        className: 'w-full text-left px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 text-sm flex items-center gap-2',
-        children: [
-          React.createElement(PlusIcon),
-          React.createElement('span', null, '+ 添加文件夹'),
-        ],
-      }),
-      React.createElement('button', {
-        key: 'add-song',
-        onClick: handleAddSong,
-        className: 'w-full text-left px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 text-sm flex items-center gap-2',
-        children: [
-          React.createElement(PlusIcon),
-          React.createElement('span', null, '+ 添加歌曲'),
         ],
       }),
     )
@@ -228,7 +188,7 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
     searchQuery,
     onSearchChange,
     searchPlaceholder: '搜索歌单...',
-    primaryAction: { label: '+ 添加歌单', onClick: () => setShowNewInput(true) },
+    primaryAction: { label: '+ 添加文件夹', onClick: onSelectFolder },
     children: React.createElement(React.Fragment, null,
       showNewInput && React.createElement('div', { className: 'mb-4' },
         React.createElement('input', {

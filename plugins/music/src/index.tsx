@@ -234,6 +234,43 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
   );
 }
 
+// ====== 音乐导入：按子文件夹分组（与图片模块一致）======
+// 导入总文件夹后，自动识别其下的一级子文件夹，并以每个子文件夹创建一张歌单，
+// 子文件夹内的音频（递归）归入对应歌单；根目录下的散落音频归入以根目录命名的歌单。
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/$/, '');
+}
+
+function groupTracksIntoPlaylists(tracks: Track[], rootPath: string): Playlist[] {
+  const root = normalizePath(rootPath);
+  const groups = new Map<string, { name: string; tracks: Track[] }>();
+  for (const t of tracks) {
+    const fp = normalizePath(t.filePath);
+    const parent = fp.includes('/') ? fp.slice(0, fp.lastIndexOf('/')) : fp;
+    const rel = parent.startsWith(root + '/')
+      ? parent.slice(root.length + 1)
+      : parent === root ? '' : parent;
+    let key: string;
+    let name: string;
+    if (rel === '') {
+      key = root;
+      name = root.split('/').pop() || '音乐';
+    } else {
+      const first = rel.split('/')[0];
+      key = root + '/' + first;
+      name = first;
+    }
+    if (!groups.has(key)) groups.set(key, { name, tracks: [] });
+    groups.get(key)!.tracks.push(t);
+  }
+  return Array.from(groups.entries()).map(([id, g]) => ({
+    id,
+    name: g.name,
+    tracks: g.tracks,
+    type: 'directory' as const,
+  }));
+}
+
 function MusicModule() {
   // 共享运行时：根目录管理（localStorage 持久化）
   const { rootPaths, setRootPaths, addRoot, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
@@ -328,8 +365,7 @@ function MusicModule() {
           if (cached && cached.length > 0) {
             if (cancelled) return;
             console.log('[Music] 缓存命中:', cached.length, '首 (路径:', rp, ')');
-            const dirName = rp.split(/[\\/]/).pop() || '音乐';
-            allDirectoryPlaylists.push({ id: rp, name: dirName, tracks: cached, type: 'directory' });
+            allDirectoryPlaylists.push(...groupTracksIntoPlaylists(cached, rp));
             continue;
           }
           console.log('[Music] 缓存未命中，需要扫描:', rp);
@@ -386,13 +422,7 @@ function MusicModule() {
         }
 
         if (cancelled) return;
-        const dirName = rp.split(/[\\/]/).pop() || '音乐';
-        allDirectoryPlaylists.push({
-          id: rp,
-          name: dirName,
-          tracks: [...currentScanTracks],
-          type: 'directory',
-        });
+        allDirectoryPlaylists.push(...groupTracksIntoPlaylists([...currentScanTracks], rp));
       }
 
       if (cancelled) return;
@@ -433,16 +463,34 @@ function MusicModule() {
     // 不重置 selectedPlaylist：新文件夹的扫描结果会自动合并，当前播放不中断
   }, [addRoot]);
 
+  // #3 创建自定义歌单：写入状态 + 持久化 + 立即选中（侧边栏即时刷新）
+  const handleCreatePlaylist = useCallback((name: string) => {
+    const newPlaylist: Playlist = {
+      id: Date.now().toString(),
+      name,
+      tracks: [],
+      type: 'custom',
+    };
+    setPlaylists(prev => {
+      const updated = [...prev, newPlaylist];
+      const customPlaylists = updated.filter(p => p.type === 'custom');
+      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      return updated;
+    });
+    setSelectedPlaylist(newPlaylist);
+  }, []);
+
   const handleRemoveRoot = useCallback((pathToRemove: string) => {
     removeRoot(pathToRemove);
-    // 同时移除该路径对应的目录歌单数据
+    const rootF = normalizePath(pathToRemove);
+    // 同时移除该根目录下所有（按子文件夹分组的）目录歌单数据
     setPlaylists(prev => {
-      const filtered = prev.filter(p => p.id !== pathToRemove);
+      const filtered = prev.filter(p => !(p.id === rootF || p.id.startsWith(rootF + '/')));
       const customPlaylists = filtered.filter(p => p.type === 'custom');
       localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
       return filtered;
     });
-    if (selectedPlaylist?.id === pathToRemove) {
+    if (selectedPlaylist && (selectedPlaylist.id === rootF || selectedPlaylist.id.startsWith(rootF + '/'))) {
       setSelectedPlaylist(null);
     }
   }, [removeRoot, selectedPlaylist]);
@@ -484,13 +532,42 @@ function MusicModule() {
     setPlayMode(mode);
   }, []);
 
-  const handleAddSong = useCallback(() => {
-    hostApi.invoke<string[]>('pick_file', { filters: [{ name: 'Audio', extensions: ['mp3', 'flac', 'wav', 'ogg', 'm4a'] }] })
-      .then((files) => {
-        if (files && files.length > 0) console.debug('[Music] 添加歌曲:', files);
-      })
-      .catch((err: unknown) => console.warn('[Music] 选择文件失败:', err));
-  }, []);
+  // #4 添加歌曲：选择音频文件后真正加入当前歌单（自定义歌单持久化，目录歌单仅内存）
+  const handleAddSong = useCallback(async () => {
+    if (!selectedPlaylist) return;
+    let files: string[] = [];
+    try {
+      files = await hostApi.invoke<string[]>('pick_file', {
+        filters: [{ name: 'Audio', extensions: ['mp3', 'flac', 'wav', 'ogg', 'm4a'] }],
+      });
+    } catch (err) {
+      console.warn('[Music] 选择文件失败:', err);
+      return;
+    }
+    if (!files || files.length === 0) return;
+    const newTracks: Track[] = files.map((f) => {
+      const base = f.split(/[\\/]/).pop() || '未知曲目';
+      const title = base.replace(/\.[^.]+$/, '') || '未知曲目';
+      return {
+        id: f,
+        filePath: f,
+        title,
+        artist: '',
+        album: '',
+        durationSecs: 0,
+        coverPath: undefined,
+      };
+    });
+    setPlaylists((prev) => {
+      const updated = prev.map((p) =>
+        p.id === selectedPlaylist.id ? { ...p, tracks: [...p.tracks, ...newTracks] } : p,
+      );
+      const customPlaylists = updated.filter((p) => p.type === 'custom');
+      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      return updated;
+    });
+    setSelectedPlaylist((prev) => (prev ? { ...prev, tracks: [...prev.tracks, ...newTracks] } : prev));
+  }, [selectedPlaylist]);
 
   const handleRenamePlaylist = useCallback((playlist: Playlist, newName: string) => {
     setPlaylists(prev => {
@@ -691,6 +768,7 @@ function MusicModule() {
         selectedPlaylistId={selectedPlaylist?.id || null}
         onSelectPlaylist={handleSelectPlaylist}
         onSelectFolder={handleAddRoot}
+        onCreatePlaylist={handleCreatePlaylist}
         onRenamePlaylist={handleRenamePlaylist}
         onDeletePlaylist={handleDeletePlaylist}
         onOpenModuleSettings={handleOpenModuleSettings}
