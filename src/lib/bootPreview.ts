@@ -103,10 +103,68 @@ export function previewBootScreen(theme: BootTheme): void {
   // getElementById 全部隔离在 iframe 内，零跨预览状态污染 —— 根治「第二次开始少了点什么」。
   // rAF / 计时器随 iframe 销毁一并回收，cleanup 只需移除节点，不再劫持 setInterval 或清理样式。
   const iframe = document.createElement('iframe');
-  iframe.setAttribute('srcdoc', theme === 'dark' ? darkPageHtml : lightPageHtml);
+  // 复用同一份解码后的 HTML：既作为 srcdoc 源，也作为自愈抽取 <style>/<script> 的基准
+  const pageHtml = theme === 'dark' ? darkPageHtml : lightPageHtml;
+  iframe.setAttribute('srcdoc', pageHtml);
   // pointer-events:none：加载页无可交互元素，点击穿透到 overlay 仍可「点任意处关闭」；
   // 不影响 iframe 内 CSS 动画 / rAF / 计时器运行。
   iframe.style.cssText = 'width:100%;height:100%;border:0;display:block;pointer-events:none;';
+
+  // 自愈（与 index.html 启动页同款）：打包版 WebView2 偶发丢弃 srcdoc 内联 <style>/<script>，
+  // 致莲花 @keyframes bloom 描边动画与 buildRose() 生成的 #roseG 几何消失。
+  // 检测 .app 是否 flex、#roseG 是否有子节点；未生效则样式走 adoptedStyleSheets（CSP 免疫）、
+  // 脚本走 eval（配置允许 unsafe-eval）重注，均失败时兜底注入 <style>/<script> 元素。
+  iframe.onload = () => {
+    try {
+      const idoc = iframe.contentDocument;
+      if (!idoc || !idoc.body) return;
+      try {
+        const appEl = idoc.querySelector('.app');
+        const styleOk = !!(appEl && /flex/.test(getComputedStyle(appEl).display));
+        if (!styleOk) {
+          const sm = pageHtml.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+          if (sm) {
+            const css = sm[1];
+            let healed = false;
+            try {
+              if (idoc.adoptedStyleSheets && idoc.defaultView?.CSSStyleSheet) {
+                const sheet = new idoc.defaultView.CSSStyleSheet();
+                sheet.replaceSync(css);
+                idoc.adoptedStyleSheets = [sheet];
+                healed = true;
+              }
+            } catch { /* adoptedStyleSheets 不可用，走兜底 */ }
+            if (!healed) {
+              const st = idoc.createElement('style');
+              st.textContent = css;
+              (idoc.head || idoc.documentElement).appendChild(st);
+            }
+          }
+        }
+        const roseG = idoc.getElementById('roseG');
+        if (!roseG || roseG.childElementCount === 0) {
+          const scrs = pageHtml.match(/<script>([\s\S]*?)<\/script>/gi) || [];
+          let init: string | null = null;
+          for (let i = scrs.length - 1; i >= 0; i--) {
+            if (/buildRose/.test(scrs[i])) { init = scrs[i]; break; }
+          }
+          if (init) {
+            const code = init.replace(/^<script>/i, '').replace(/<\/script>\s*$/i, '');
+            try {
+              idoc.defaultView?.eval(code);
+            } catch {
+              try {
+                const sc = idoc.createElement('script');
+                sc.textContent = code;
+                (idoc.body || idoc.documentElement).appendChild(sc);
+              } catch { /* 脚本兜底也失败：静态页仍可显示，非致命 */ }
+            }
+          }
+        }
+      } catch { /* 自愈失败：页面静态显示，非致命 */ }
+    } catch { /* noop */ }
+  };
+
   overlay.appendChild(iframe);
 
   // 全局 Esc 退出
