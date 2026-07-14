@@ -62,6 +62,12 @@ pub fn get_external_deps_dir(app: &AppHandle) -> Option<PathBuf> {
     if dev_deps.exists() {
         return Some(dev_deps);
     }
+    // 开发模式兜底：CARGO_MANIFEST_DIR（编译期常量，= src-tauri/ 绝对路径）
+    // ../external-deps = 项目根 external-deps/。release 在用户机器上此路径不存在，exists() 返回 false 自动跳过。
+    let manifest_deps = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("external-deps");
+    if manifest_deps.exists() {
+        return Some(manifest_deps);
+    }
     None
 }
 
