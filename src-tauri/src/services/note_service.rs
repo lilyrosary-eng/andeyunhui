@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::Value;
-use chrono::DateTime;
+use chrono::{DateTime, Local};
 use crate::services::safe_join_ext;
 
 // 从 Markdown 内容中提取标题（首行 # 开头的内容）
@@ -54,13 +54,13 @@ pub fn get_all_notes(notes_dir: PathBuf, pins_dir: PathBuf) -> Result<Vec<NoteIn
             let first_line = read_first_line(&path);
             let title = extract_title(&first_line);
             let metadata = fs::metadata(&path).map_err(|e| format!("获取文件元数据失败: {}", e))?;
+            // 使用本地时区的精确修改时间（含时分秒），前端据此做「X 分钟/小时前」分组与排序，
+            // 旧实现只取日期（%Y-%m-%d）会丢失当天内的时间精度，导致相对时间不准。
             let date = metadata.modified()
                 .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| {
-                    let datetime = DateTime::from_timestamp(d.as_secs() as i64, 0)
-                        .unwrap_or(DateTime::UNIX_EPOCH);
-                    datetime.format("%Y-%m-%d").to_string()
+                .map(|m| {
+                    let dt = DateTime::<Local>::from(m);
+                    dt.format("%Y-%m-%dT%H:%M:%S").to_string()
                 })
                 .unwrap_or_else(|| "未知日期".to_string());
             let pinned = pins_dir.join(format!("{}.pin", id)).exists();

@@ -354,8 +354,9 @@
     .topbar, .footer { padding-left: 24px; padding-right: 24px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .loader .petal, .status .dot, .pane-loader .rose, .main .portal-crest #crestRoseG { animation: none; }
-    .loader .petal { stroke-dashoffset: 0; }
+    /* 中央莲花「构建动画」是核心加载反馈，即便系统开启「减少动态效果」也保持播放；
+       仅背景装饰（状态点 / 玫瑰窗旋转 / 门廊小玫瑰窗）遵循 reduced-motion 降级。 */
+    .status .dot, .pane-loader .rose, .main .portal-crest #crestRoseG { animation: none; }
   }
 </style>
 </head>
@@ -791,13 +792,8 @@
       const { PER, TOTAL_MS, ORDER, TRAIL } = CFG;
       const svgNS = "http://www.w3.org/2000/svg";
 
-      const reduce = window.matchMedia &&
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (reduce) {                         // 尊重「减少动态效果」偏好（无光点，直接呼吸）
-        loader.classList.add("breathing");
-        return;
-      }
-
+      // 注：中央莲花「构建动画」+ 流光是核心加载反馈且极短暂，即便系统开启「减少动态效果」也保持播放；
+      // 仅背景装饰（烛光 / 星点 / 玫瑰窗旋转 / 状态点）遵循 reduced-motion 降级（见上方 @media 块）。
       // 缓存每瓣：路径总长、自身旋转角(弧度)
       const lens = petals.map(p => p.getTotalLength());
       const angles = petals.map(p => {
