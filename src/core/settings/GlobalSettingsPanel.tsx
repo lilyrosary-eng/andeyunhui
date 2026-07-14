@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Switch } from "@/components/ui/switch"
 import { Slider } from "@/components/ui/slider"
-import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye } from 'lucide-react'
+import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen } from 'lucide-react'
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { invoke } from '@tauri-apps/api/core';
@@ -24,6 +24,7 @@ const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   { id: 'italic', label: '斜体', keys: 'Ctrl + I' },
   { id: 'link', label: '链接', keys: 'Ctrl + K' },
   { id: 'screenshot', label: '全局截图', keys: 'Ctrl + Shift + S' },
+  { id: 'recorder', label: '全局录屏', keys: 'Ctrl + Alt + R' },
 ];
 
 function loadShortcuts(): ShortcutDef[] {
@@ -121,20 +122,23 @@ export function GlobalSettingsPanel() {
       .catch(() => {});
   }, []);
 
-  // 启动时从 Rust 读取实际生效的截图热键，与设置面板展示同步（设置改键会真正注册）
+  // 启动时从 Rust 读取实际生效的截图/录屏热键，与设置面板展示同步（设置改键会真正注册）
   useEffect(() => {
+    const updateDisplay = (id: string, sc: string) => {
+      const display = normalizeForDisplay(sc);
+      setShortcuts((prev) => {
+        const updated = prev.map((s) =>
+          s.id === id ? { ...s, keys: display } : s,
+        );
+        saveShortcuts(updated);
+        return updated;
+      });
+    };
     invoke<string>('get_screenshot_shortcut')
-      .then((sc) => {
-        const display = normalizeForDisplay(sc);
-        setShortcuts((prev) => {
-          const updated = prev.map((s) =>
-            s.id === 'screenshot' ? { ...s, keys: display } : s,
-          );
-          // 把 Rust 权威值写回 localStorage，避免刷新时与后端不一致导致「变回默认」
-          saveShortcuts(updated);
-          return updated;
-        });
-      })
+      .then((sc) => updateDisplay('screenshot', sc))
+      .catch(() => {});
+    invoke<string>('get_recorder_shortcut')
+      .then((sc) => updateDisplay('recorder', sc))
       .catch(() => {});
   }, []);
 
@@ -157,10 +161,14 @@ export function GlobalSettingsPanel() {
           logger.shortcuts.editConfirm(editingShortcutId, shortcut);
           return updated;
         });
-        // 截图热键：真正注册到系统（解析失败则忽略，保留本地展示）
+        // 截图/录屏热键：真正注册到系统（解析失败则忽略，保留本地展示）
         if (editingShortcutId === 'screenshot') {
           invoke('set_screenshot_shortcut', { shortcut }).catch((err) => {
             console.error('[截图] 设置热键失败:', err);
+          });
+        } else if (editingShortcutId === 'recorder') {
+          invoke('set_recorder_shortcut', { shortcut }).catch((err) => {
+            console.error('[录屏] 设置热键失败:', err);
           });
         }
         setEditingShortcutId(null);
@@ -174,9 +182,11 @@ export function GlobalSettingsPanel() {
     setShortcuts(DEFAULT_SHORTCUTS);
     saveShortcuts(DEFAULT_SHORTCUTS);
     logger.shortcuts.reset();
-    // 重置时把截图热键恢复为默认并重新注册
+    // 重置时把截图/录屏热键恢复为默认并重新注册
     const sc = DEFAULT_SHORTCUTS.find((s) => s.id === 'screenshot');
     if (sc) invoke('set_screenshot_shortcut', { shortcut: sc.keys }).catch(() => {});
+    const rc = DEFAULT_SHORTCUTS.find((s) => s.id === 'recorder');
+    if (rc) invoke('set_recorder_shortcut', { shortcut: rc.keys }).catch(() => {});
   };
 
   const handleStartEditShortcut = (id: string) => {
@@ -435,6 +445,7 @@ export function GlobalSettingsPanel() {
                       onChange={(e) => setElementColor(e.target.value)}
                       className={`px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 outline-none focus:ring-2 focus:ring-[var(--element-border)]`}
                     >
+                      <option value="默认">默认</option>
                       <option value="经典绿">经典绿</option>
                       <option value="经典蓝">经典蓝</option>
                       <option value="紫色">紫色</option>
@@ -737,7 +748,25 @@ export function GlobalSettingsPanel() {
                 </div>
               </section>
 
-              
+              <section className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
+                <div className="flex justify-between items-center p-4">
+                  <div className="flex items-center gap-2">
+                    <FolderOpen size={16} className="text-neutral-400 dark:text-stone-500" />
+                    <div>
+                      <span className="text-sm text-neutral-600 dark:text-stone-300">报错日志</span>
+                      <p className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">打开日志文件夹，可直接提交 log 文件给开发者排查问题</p>
+                    </div>
+                  </div>
+                  <button
+                    className="px-3 py-1.5 rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-600 dark:text-stone-300 text-sm hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
+                    onClick={() => invoke('open_log_dir').catch(() => {})}
+                  >
+                    打开文件夹
+                  </button>
+                </div>
+              </section>
+
+
             </div>
           )}
         </div>
