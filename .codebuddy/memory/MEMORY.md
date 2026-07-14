@@ -28,7 +28,7 @@
 - 哥特加载页 = wait-page（哥特风 + 莲花 `@keyframes bloom` 描边绘制动画 + `buildRose()` 线描几何 + 四角/玫瑰窗/水印装饰），由 `wait-page/*.html` 源经 base64 注入。
 - **启动页根因（#14，已修复）**：打包版 WebView2 偶发丢弃 srcdoc iframe 内联 `<style>`+`<script>` → 样式没上 bloom 不播、脚本没跑 `#roseG` 为空（莲花构建动画消失）。dev 同机制正常。`index.html` 的 `installBootHtml` onload 已加 **CSP 免疫自愈**：检测 `.app` 是否 flex、roseG 是否有子节点；未生效则样式用 `idoc.adoptedStyleSheets=[new CSSStyleSheet(); sheet.replaceSync(css)]`、脚本用 `idoc.defaultView.eval(code)` 重注（配置含 `unsafe-inline`/`unsafe-eval`）。
 - **viewport 修复（#15，已落实）**：wait-page 源 `<head>` 顶部内联脚本运行时自注入 `width=窗口实宽(px)` viewport；index.html 注入检测到已有 viewport 则跳过（避免双 meta）。三路径（双击/关于预览/启动嵌入）均正确。
-- **#18 关于→预览缺口（动刀目标）**：`bootPreview.ts` 的 `previewBootScreen` 直接 `iframe.srcdoc=lightPageHtml`，有 wait-page 自带 viewport 注入，但**缺 #14 的 style/script 自愈兜底** → 若发生同样的 srcdoc 丢弃，莲花构建动画会消失且无人修复。修复方向：① 给 bootPreview iframe `onload` 复用 #14 自愈；② 把 wait-page 从 base64 srcdoc 改为随包真实 HTML 用 `src` 加载（根因法）。诊断报告 `research_report_lotus_build_animation.md`。
+- **#18 关于→预览缺口（已修复 ✅）**：原 `bootPreview.ts` 的 `previewBootScreen` 直接 `iframe.srcdoc=lightPageHtml`，有 wait-page 自带 viewport 注入，但**缺 #14 的 style/script 自愈兜底**。已采用方向①：在 `bootPreview.ts` 的 iframe `onload` 移植 `index.html` 同款自愈（检测 `.app` 是否 flex、`#roseG` 是否有子节点；未生效则 `adoptedStyleSheets` 重注样式 + `eval` 重跑脚本，兜底 `<style>/<script>` 元素）。预览与启动页行为一致，根因覆盖。方向②（wait-page 改真实 HTML + `iframe.src`）未采用。
 - 用户澄清：消失的是**莲花构建动画**（bloom+buildRose），**不是**流光 streamlight；此前把流光改 SVG SMIL 的尝试已被用户回退（SMIL 非根因）。包版本 2.1.1。
 - 诊断仪（HUD `#bootDiag`/红条 `bootDiagIframeHost`/`postMessage` 探针/`DISABLE_BOOT_SCREEN`/`PREVIEW_BOOT_DISABLED`）已全部删除，仅保留自愈 + viewport 注入。
 
