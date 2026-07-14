@@ -74,7 +74,7 @@ function OverlayApp() {
               });
             },
             "image/jpeg",
-            0.92,
+            0.96,
           );
         })
         .catch((err) => {

@@ -26,7 +26,7 @@ const ThemeContext = createContext<ThemeContextType>({
   setTheme: () => {},
   themeColor: '默认',
   setThemeColor: () => {},
-  elementColor: '经典绿',
+  elementColor: '默认',
   setElementColor: () => {},
   reverseColor: false,
   setReverseColor: () => {},
@@ -56,7 +56,7 @@ function applyThemeClass(resolved: 'light' | 'dark') {
   document.documentElement.classList.toggle('dark', resolved === 'dark');
 }
 
-// 主题配色定义（元素强调色）
+// 主题配色定义
 const COLOR_PRESETS: Record<string, string> = {
   '经典绿': '#5a7f5d',
   '经典蓝': '#4a6fa5',
@@ -64,21 +64,30 @@ const COLOR_PRESETS: Record<string, string> = {
   '橙色':   '#c97a3a',
 };
 
+// "默认"色名解析：浅色→经典绿，深色→紫色。
+// 仅当用户选择"默认"时动态生效；选择具体色名则直接使用，不受主题切换影响。
+// themeColor 和 elementColor 独立判断：其中一个为"默认"另一个为具体色时，仅"默认"那个随主题切换。
+function resolveColorName(colorName: string, resolved: 'light' | 'dark'): string {
+  if (colorName === '默认') {
+    return resolved === 'dark' ? '紫色' : '经典绿';
+  }
+  return colorName;
+}
+
 // 元素强调色：应用到 --element-color-raw（按钮、hover、激活态等）
-function applyElementColor(colorName: string) {
-  const color = COLOR_PRESETS[colorName];
+function applyElementColor(colorName: string, resolved: 'light' | 'dark') {
+  const resolvedName = resolveColorName(colorName, resolved);
+  const color = COLOR_PRESETS[resolvedName];
   if (!color) return;
-  const root = document.documentElement;
-  root.style.setProperty('--element-color-raw', color);
+  document.documentElement.style.setProperty('--element-color-raw', color);
 }
 
 // 主题面板色：应用到 --theme-panel-color（导航栏、面板背景色）
-// 通过 color-mix 混合白色/深色得到不同层级的背景色
-function applyThemePanelColor(colorName: string) {
-  const color = COLOR_PRESETS[colorName];
+function applyThemePanelColor(colorName: string, resolved: 'light' | 'dark') {
+  const resolvedName = resolveColorName(colorName, resolved);
+  const color = COLOR_PRESETS[resolvedName];
   if (!color) return;
-  const root = document.documentElement;
-  root.style.setProperty('--theme-panel-color', color);
+  document.documentElement.style.setProperty('--theme-panel-color', color);
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
@@ -90,7 +99,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return localStorage.getItem('themeColor') || '默认';
   });
   const [elementColor, setElementColorState] = useState<string>(() => {
-    return localStorage.getItem('elementColor') || '经典绿';
+    return localStorage.getItem('elementColor') || '默认';
   });
   const [reverseColor, setReverseColorState] = useState<boolean>(() => {
     return localStorage.getItem('reverseColor') === 'true';
@@ -105,9 +114,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return localStorage.getItem('fontFamily') || '系统默认';
   });
 
+  // resolved 的 ref，供 useCallback 内读取最新值而不触发依赖变化
+  const resolvedRef = useRef(resolved);
+  useEffect(() => { resolvedRef.current = resolved; }, [resolved]);
+
   // UI 缩放包裹层：zoom 只作用于应用内容，不作用于 documentElement，
   // 因此挂在 documentElement/body 上的加载页 iframe、预览 overlay 不受缩放影响
-  // （否则被放大后装饰层越界消失、只剩居中莲花）。App 根容器用 h-screen，不受包裹层高度影响。
   const zoomRef = useRef<HTMLDivElement>(null);
 
   const setTheme = useCallback((t: Theme) => {
@@ -121,13 +133,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const setThemeColor = useCallback((color: string) => {
     setThemeColorState(color);
     localStorage.setItem('themeColor', color);
-    applyThemePanelColor(color);
+    applyThemePanelColor(color, resolvedRef.current);
   }, []);
 
   const setElementColor = useCallback((color: string) => {
     setElementColorState(color);
     localStorage.setItem('elementColor', color);
-    applyElementColor(color);
+    applyElementColor(color, resolvedRef.current);
   }, []);
 
   const setReverseColor = useCallback((val: boolean) => {
@@ -156,16 +168,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // 应用主题 + 反转配色
+  // 应用主题类 + 反转配色 + 重新应用配色（"默认"会随 resolved 动态切换）
   useEffect(() => {
     applyThemeClass(resolved);
     document.documentElement.classList.toggle('reverse-color', reverseColor);
-  }, [resolved, reverseColor]);
-
-  // 应用元素配色
-  useEffect(() => {
-    applyElementColor(elementColor);
-  }, [elementColor]);
+    applyThemePanelColor(themeColor, resolved);
+    applyElementColor(elementColor, resolved);
+  }, [resolved, reverseColor, themeColor, elementColor]);
 
   // 初始化缩放和透明度
   useEffect(() => {
@@ -173,11 +182,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (fontFamily !== '系统默认') {
       document.body.style.fontFamily = `"${fontFamily}", sans-serif`;
     }
-    // 初始化主题面板色
-    applyThemePanelColor(themeColor);
-    // 初始化元素强调色
-    applyElementColor(elementColor);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 mount 时批量应用全部主题设置
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 mount 时批量应用
   }, []);
 
   // 监听系统主题变化

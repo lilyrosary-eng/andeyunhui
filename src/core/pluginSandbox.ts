@@ -39,6 +39,7 @@ const ALLOWED_COMMANDS = new Set([
   'load_music_cache',
   'scan_music_root',
   'delete_music_cache',
+  'read_track_metadata',
   'get_lyrics',
   'show_lyrics_widget',
   'hide_lyrics_widget',

@@ -133,15 +133,19 @@
     z-index: -2; pointer-events: none;
     animation: candle 9s ease-in-out infinite reverse;  /* 更缓、且反向，与烛光错相 */
   }
-  /* 烛火呼吸：opacity + 极轻缩放，刻意不规整、幅度更明显以模拟真实烛光 */
+  /* 烛火呼吸：仅 opacity（compositor 合成，零重栅格化）。
+     关键性能修复：旧版同时动画 transform: scale()，而本元素带 filter: blur(28~40px)，
+     每帧缩放都会强制重栅格化模糊层 → 启动期 WebView2 渲染卡顿（哥特加载页发涩）。
+     现去掉 scale、仅保留 opacity（居中由元素自身 transform: translate(-50%,-50%) 承担），
+     模糊层只栅格化一次，动画纯合成 → 加载页流畅。 */
   @keyframes candle {
-    0%   { opacity: .55; transform: translate(-50%, -50%) scale(1.000); }
-    18%  { opacity: 1;   transform: translate(-50%, -50%) scale(1.024); }
-    34%  { opacity: .38; transform: translate(-50%, -50%) scale(.984); }
-    52%  { opacity: .90; transform: translate(-50%, -50%) scale(1.010); }
-    68%  { opacity: .30; transform: translate(-50%, -50%) scale(.978); }
-    84%  { opacity: .96; transform: translate(-50%, -50%) scale(1.018); }
-    100% { opacity: .58; transform: translate(-50%, -50%) scale(1.000); }
+    0%   { opacity: .55; }
+    18%  { opacity: 1;   }
+    34%  { opacity: .38; }
+    52%  { opacity: .90; }
+    68%  { opacity: .30; }
+    84%  { opacity: .96; }
+    100% { opacity: .58; }
   }
   @media (prefers-reduced-motion: reduce) {
     .pane-loader::before, .pane-loader::after { animation: none; }
@@ -193,14 +197,21 @@
   .loader { width: clamp(360px, 40vw, 560px); height: clamp(360px, 40vw, 560px); color: var(--accent); position: relative; }
   .loader .petal {
     fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round;
-    /* 逐笔构建动画改由 JS 在 rAF 循环里直接驱动 strokeDashoffset（引擎无关），
-       规避打包版 WebView2 对「@keyframes 内 var()」支持不一致导致构建动画缺失。 */
     stroke-dasharray: var(--len);
     stroke-dashoffset: var(--len);
+    animation: bloom 3.6s ease-in-out infinite;
+    animation-delay: var(--d);
+  }
+  @keyframes bloom {
+    0%   { stroke-dashoffset: var(--len); opacity: .4; }
+    45%  { stroke-dashoffset: 0; opacity: 1; }
+    55%  { stroke-dashoffset: 0; opacity: 1; }
+    100% { stroke-dashoffset: var(--len); opacity: .4; }
   }
   /* 极小流光光点 + 拖尾（绘制阶段沿花辦往返掠过） */
+  /* 流光光点：见 light 版同位置注释——省去 SVG 高斯模糊滤镜，主线程高负载下加载页依然流畅。 */
   .loader .spark, .loader .spark-trail {
-    fill: var(--spark); opacity: 0; filter: url(#glow); pointer-events: none;
+    fill: var(--spark); opacity: 0; pointer-events: none;
   }
   .loader.drawing .spark { opacity: 1; }
   .loader.drawing .spark-trail { opacity: .5; }
@@ -687,7 +698,7 @@
     (function () {
       const box = document.getElementById("stars");
       if (!box) return;
-      const N = 52;                                  // 更少
+      const N = 26;                                  // 减半：见 light 版注释
       const frag = document.createDocumentFragment();
       for (let i = 0; i < N; i++) {
         const size = (Math.random() * 1.2 + 0.6).toFixed(2);   // 0.6~1.8px 更小
@@ -795,14 +806,8 @@
         const m = /rotate\(([-\d.]+)\)/.exec(p.getAttribute("transform") || "");
         return m ? parseFloat(m[1]) * Math.PI / 180 : 0;
       });
-      // 逐瓣「构建动画」改为 JS 直接驱动 strokeDashoffset（替代 CSS bloom）：
-      // 规避打包版 WebView2 对 @keyframes 内 var() 支持不一致导致构建动画缺失。
-      const delays = petals.map(p => {
-        const m = /([\d.]+)s/.exec(p.style.getPropertyValue("--d") || "0s");
-        return m ? parseFloat(m[1]) * 1000 : 0;
-      });
-      const DRAW = 900; // 单瓣描边时长(ms)
-      petals.forEach((p, i) => { p.style.strokeDasharray = String(lens[i]); });
+      // 逐瓣「构建动画」由 CSS @keyframes bloom 驱动（var(--len)/var(--d)），
+      // 配合 #14 自愈 + #15 viewport 注入，打包版 WebView2 下可正常播放。
 
       // 极小流光光点
       const head = document.createElementNS(svgNS, "circle");
@@ -831,7 +836,6 @@
         if (elapsed >= TOTAL_MS) {          // 到达合计时长 → 线条停止(呼吸) + 光点也暂停
           loader.classList.remove("drawing");
           loader.classList.add("breathing");
-          petals.forEach((p, i) => (p.style.strokeDashoffset = "0"));  // 全部描完，定格完整线条
           if (CFG.HIDE_ON_STOP) head.style.opacity = 0;   // 隐藏；否则定格在当前位置(暂停)
           trails.forEach(t => (t.style.opacity = 0));     // 拖尾淡出
           return;                                         // 停止 rAF → 光点冻结
@@ -867,13 +871,7 @@
           trails[i].style.opacity = (CFG.TRAIL_OPACITY * (1 - i / TRAIL) * op).toFixed(3);
         }
 
-        // 驱动每瓣描边进度（各自延迟），实现「逐笔构建」。JS 直接写 strokeDashoffset，
-        // 引擎无关，彻底规避打包版 @keyframes 内 var() 不被插值导致构建动画缺失。
-        for (let i = 0; i < petals.length; i++) {
-          const prog = Math.max(0, Math.min(1, (elapsed - delays[i]) / DRAW));
-          petals[i].style.strokeDashoffset = String(lens[i] * (1 - prog));
-        }
-
+        // 莲花逐笔构建由 CSS @keyframes bloom 驱动（见 .loader .petal），此处仅驱动流光光点。
         loader.classList.add("drawing");
         requestAnimationFrame(frame);
       }

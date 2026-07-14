@@ -20,7 +20,6 @@ use serde::Serialize;
 use serde_json::json;
 use std::borrow::Cow;
 use std::io::Cursor;
-use std::process;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -171,6 +170,10 @@ pub fn hide_overlay_window(app: tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("screenshot-overlay") {
         let _ = w.hide();
     }
+    // 复位 showing：下次按下热键才能再次触发（否则会被 start_screenshot 的防重入静默忽略）。
+    if let Ok(mut s) = app.state::<std::sync::Mutex<ScreenshotData>>().lock() {
+        s.showing = false;
+    }
 }
 
 /// 枚举「其他进程」的可见窗口，返回**物理像素**矩形，供前端绘制绿色轮廓与窗口识别。
@@ -192,13 +195,19 @@ unsafe extern "system" fn enum_callback(
     lparam: winapi::shared::minwindef::LPARAM,
 ) -> i32 {
     let state = &mut *(lparam as *mut Vec<WindowInfo>);
-    // 跳过本进程（岸灯鸢花）自身的窗口：主窗口 / 截图覆盖窗 / 托盘菜单 / 歌词悬浮窗。
-    let mut pid: u32 = 0;
-    winapi::um::winuser::GetWindowThreadProcessId(hwnd, &mut pid);
-    if pid == process::id() {
+    // 不再排除本进程（岸灯鸢花）自身窗口：窗口识别统一处理所有可见窗口，
+    // 避免为「自我屏蔽」增加特殊分支与维护成本（截图 / 录屏共用本枚举）。
+    // 截图覆盖窗本身在枚举时已隐藏（IsWindowVisible 跳过），不会出现在列表中。
+    if winapi::um::winuser::IsWindowVisible(hwnd) == 0 {
         return 1;
     }
-    if winapi::um::winuser::IsWindowVisible(hwnd) == 0 {
+    // 过滤最小化窗口（IsIconic = true 时窗口已最小化到任务栏，rect 无意义）
+    if winapi::um::winuser::IsIconic(hwnd) != 0 {
+        return 1;
+    }
+    // 过滤子窗口（WS_CHILD）：子窗口嵌套在父窗口内，会产生重复/碎片化的高亮框
+    let gwl_style = winapi::um::winuser::GetWindowLongW(hwnd, winapi::um::winuser::GWL_STYLE);
+    if gwl_style & winapi::um::winuser::WS_CHILD as i32 != 0 {
         return 1;
     }
     // 跳过 shell 窗口（整屏桌面背景 / 任务栏 / 桌面合成层等）
@@ -213,9 +222,23 @@ unsafe extern "system" fn enum_callback(
             _ => {}
         }
     }
+    // 使用 DWM 扩展边框（DWMWA_EXTENDED_FRAME_BOUNDS）替代 GetWindowRect。
+    // GetWindowRect 包含 Windows 10/11 的不可见调整边框（每侧约 7px），导致高亮框比实际窗口大一圈。
+    // DWM 扩展边框精确匹配可见窗口边缘，消除「多了一点」的视觉偏差。
+    // 失败时回退到 GetWindowRect（旧系统或无 DWM 合成的窗口）。
+    const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 4;
     let mut rect: winapi::shared::windef::RECT = std::mem::zeroed();
-    if winapi::um::winuser::GetWindowRect(hwnd, &mut rect) == 0 {
-        return 1;
+    let hr = winapi::um::dwmapi::DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_EXTENDED_FRAME_BOUNDS,
+        &mut rect as *mut _ as *mut _,
+        std::mem::size_of::<winapi::shared::windef::RECT>() as u32,
+    );
+    if hr != 0 {
+        // DWM 查询失败，回退到 GetWindowRect
+        if winapi::um::winuser::GetWindowRect(hwnd, &mut rect) == 0 {
+            return 1;
+        }
     }
     let x = rect.left;
     let y = rect.top;
@@ -448,6 +471,106 @@ fn is_all_black(img: &RgbaImage) -> bool {
     true
 }
 
+/// GDI BitBlt 兜底捕获：直接抓「虚拟桌面」(x, y, w, h) 区域（物理像素）。
+///
+/// 在 PM-DPI-Aware V2 进程里，`GetDC(NULL)` 原点即虚拟桌面左上角、坐标即物理像素，
+/// 与 WGC 同坐标系。当 WGC 失败或返回全黑帧（驱动/初始化空帧/受保护内容）时，
+/// 此路径作为可靠兜底——旧版本即采用 GDI，在各类机器上稳定可用，可截常规桌面内容。
+/// （注意：GDI 无法截「独占全屏」DirectX 游戏，那是 WGC 的强项；故二者互补而非互斥。）
+fn capture_region_gdi(x: i32, y: i32, w: i32, h: i32) -> Result<RgbaImage, String> {
+    if w <= 0 || h <= 0 {
+        return Err("无效的截图区域".into());
+    }
+    unsafe {
+        let screen = winapi::um::winuser::GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            return Err("获取屏幕 DC 失败".into());
+        }
+        let mem = winapi::um::wingdi::CreateCompatibleDC(screen);
+        if mem.is_null() {
+            winapi::um::winuser::ReleaseDC(std::ptr::null_mut(), screen);
+            return Err("创建兼容 DC 失败".into());
+        }
+        let bitmap = winapi::um::wingdi::CreateCompatibleBitmap(screen, w, h);
+        if bitmap.is_null() {
+            winapi::um::wingdi::DeleteDC(mem);
+            winapi::um::winuser::ReleaseDC(std::ptr::null_mut(), screen);
+            return Err("创建兼容位图失败".into());
+        }
+        let old = winapi::um::wingdi::SelectObject(mem, bitmap as *mut winapi::ctypes::c_void);
+        let ok = winapi::um::wingdi::BitBlt(mem, 0, 0, w, h, screen, x, y, winapi::um::wingdi::SRCCOPY);
+
+        let result = if ok != 0 {
+            let mut bi: winapi::um::wingdi::BITMAPINFOHEADER = std::mem::zeroed();
+            bi.biSize = std::mem::size_of::<winapi::um::wingdi::BITMAPINFOHEADER>() as u32;
+            bi.biWidth = w;
+            bi.biHeight = -(h); // 顶行在前（自下而上 → 自上而下）
+            bi.biPlanes = 1;
+            bi.biBitCount = 32;
+            bi.biCompression = winapi::um::wingdi::BI_RGB;
+            let mut buf: Vec<u8> = vec![0u8; (w as usize) * (h as usize) * 4];
+            let lines = winapi::um::wingdi::GetDIBits(
+                mem,
+                bitmap,
+                0,
+                h as u32,
+                buf.as_mut_ptr() as *mut winapi::ctypes::c_void,
+                &mut bi as *mut _ as *mut winapi::um::wingdi::BITMAPINFO,
+                winapi::um::wingdi::DIB_RGB_COLORS,
+            );
+            if lines == 0 {
+                Err("GetDIBits 失败".into())
+            } else {
+                // BGRA → RGBA，alpha 强制 255（桌面像素无意义）
+                let mut rgba = vec![0u8; buf.len()];
+                for i in 0..((w as usize) * (h as usize)) {
+                    let j = i * 4;
+                    rgba[j] = buf[j + 2];
+                    rgba[j + 1] = buf[j + 1];
+                    rgba[j + 2] = buf[j];
+                    rgba[j + 3] = 255;
+                }
+                match RgbaImage::from_raw(w as u32, h as u32, rgba) {
+                    Some(im) => Ok(im),
+                    None => Err("GDI 图像构造失败".into()),
+                }
+            }
+        } else {
+            Err("BitBlt 失败".into())
+        };
+
+        // 清理 GDI 资源（顺序：还原选中的旧对象 → 删位图 → 删 DC → 释放屏幕 DC）
+        if old != winapi::um::wingdi::HGDI_ERROR {
+            winapi::um::wingdi::SelectObject(mem, old);
+        }
+        winapi::um::wingdi::DeleteObject(bitmap as *mut winapi::ctypes::c_void);
+        winapi::um::wingdi::DeleteDC(mem);
+        winapi::um::winuser::ReleaseDC(std::ptr::null_mut(), screen);
+        result
+    }
+}
+
+/// 全虚拟桌面捕获（区域始终为整虚拟桌面 (ox,oy,ow,oh)）。
+///
+/// GDI BitBlt 为主路径（同步、毫秒级），仅当 GDI 失败时回退 WGC（可截独占全屏游戏）。
+/// 返回图像尺寸严格为 (ow, oh)，与覆盖窗显示区域 1:1 对齐，
+/// 彻底消除「边缘偏移 / 左侧几 px 间隙无法截屏」问题。
+fn capture_full(ox: i32, oy: i32, ow: i32, oh: i32) -> Result<RgbaImage, String> {
+    // GDI BitBlt 为主路径：同步可靠、无 WGC 会话启动开销（~500ms-1s）。
+    // GDI 成功即直接返回——不再做 is_all_black 检查：
+    //   1) GDI BitBlt 是同步的，不像 WGC 有「首帧初始化空帧」问题；
+    //   2) is_all_black 会在屏幕较暗（深色壁纸/夜间模式）时误判为全黑 → 触发 WGC 回退，
+    //      导致每次截图都卡 ~1s（用户 Issue: 截图启动速度慢）；
+    //   3) 仅当 GDI 本身失败（Err）时才回退 WGC（可截独占全屏 DirectX/OpenGL 游戏）。
+    match capture_region_gdi(ox, oy, ow, oh) {
+        Ok(img) => Ok(img),
+        Err(e) => {
+            eprintln!("[截图] GDI 捕获失败，回退 WGC: {}", e);
+            capture_region(0, 0, ow, oh)
+        }
+    }
+}
+
 // ========== 截图数据跨窗口传输（Rust 管理态） ==========
 /// 保存截图过程的跨窗口共享状态：
 /// - `note_id`：触发截图时主窗口所在笔记 id（用于「导入当前笔记」；空串表示不在笔记页）。
@@ -457,6 +580,11 @@ pub struct ScreenshotData {
     pub note_id: String,
     pub shortcut: String,
     pub capturing: bool,
+    // 覆盖窗当前是否正在显示（用于防重入）：由 start_screenshot 显示后置 true、
+    // hide_overlay_window 关闭后置 false。替代 overlay.is_visible() 判定——
+    // 后者在 hide 后有 1 帧状态延迟，会误判为「仍在显示」而静默 return Ok(())，
+    // 表现为「按截图键毫无反应」（用户 Issue 5）。
+    pub showing: bool,
     // 最近一次截图推送的载荷快照：覆盖层在「screenshot-start」push 事件丢失时，
     // 通过 peek_screenshot 主动拉取作为兜底恢复路径（根治打包版偶发「只有透明遮罩、全屏卡死」）。
     // `session` 每次 start_screenshot 自增；覆盖层轮询到 session 变大即视为「有新截图待显示」，
@@ -474,6 +602,7 @@ impl Default for ScreenshotData {
             note_id: String::new(),
             shortcut: "Ctrl+Shift+S".to_string(),
             capturing: false,
+            showing: false,
             last_ox: 0.0,
             last_oy: 0.0,
             last_scale: 1.0,
@@ -553,48 +682,43 @@ pub async fn start_screenshot(
         .get_webview_window("screenshot-overlay")
         .ok_or_else(|| "覆盖窗缺失".to_string())?;
 
-    // 防重入：正在捕获或已可见则忽略（避免连按热键重复触发造成卡顿 / 状态错乱）
-    if CAPTURING.load(std::sync::atomic::Ordering::SeqCst)
-        || overlay.is_visible().unwrap_or(false)
-    {
+    // 防重入：正在捕获（CAPTURING 原子）或覆盖窗正在显示（state.showing）则忽略。
+    // 注意：不再用 overlay.is_visible() —— 窗口 hide 后状态上报有 1 帧延迟，会误判为「仍在显示」
+    // 从而静默 return Ok(())，表现为「按截图键毫无反应」（用户 Issue 5）。
+    let st = _state.lock().map_err(|e| format!("锁失败: {}", e))?;
+    if CAPTURING.load(std::sync::atomic::Ordering::SeqCst) || st.showing {
         return Ok(());
     }
-    // RAII guard：自此之后直到函数退出（正常 / 错误 / panic），CAPTURING 由 Drop 自动复位。
+    // RAII guard：函数退出（正常 / 错误 / panic）时 CAPTURING 自动复位。
     let _guard = CaptureGuard::acquire();
+    drop(st); // 尽早释放锁，避免后续长操作持锁
 
     // 先隐藏覆盖窗，避免把覆盖窗自身截入画面；捕获完成后才显示（带冻结图，无「透明→填充」闪烁）。
     let _ = overlay.hide();
 
     let (rx, ry, rw, rh) = virtual_desktop_rect();
 
-    // 用物理坐标直接设置窗口位置和大小，不经过逻辑像素换算——彻底消除
-    // min_monitor_scale vs scale_factor 不一致 + set_position 异步导致读 scale 时机错误。
+    // 用物理坐标把覆盖窗精确贴在虚拟桌面原点并铺满。
     let _ = overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: rx, y: ry }));
     let _ = overlay.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: rw as u32, height: rh as u32 }));
 
-    // 关键修复：读取窗口的真实矩形（outer_position/outer_size），用实际值作为捕获区域。
-    // set_position/set_size 在 Windows 上是异步的，DWM 不可见边框、DPI 取整等因素
-    // 可能导致窗口实际位置与设置值有几 px 偏差。用实际值确保「捕获区域 == 窗口显示区域」，
-    // 图像像素与窗口 CSS 像素 1:1 对齐，彻底消除「左边几px没覆盖到」的偏移问题。
-    let win_pos = match overlay.outer_position() {
-        Ok(p) => p,
-        Err(e) => return Err(format!("获取窗口位置失败: {}", e)),
-    };
-    let win_size = match overlay.outer_size() {
-        Ok(s) => s,
-        Err(e) => return Err(format!("获取窗口大小失败: {}", e)),
-    };
+    // 直接使用 virtual_desktop_rect 作为捕获区域——不再读 outer_position()/outer_size()。
+    // 原因：set_position 是异步的，Windows 下 outer_position() 可能返回旧值或带 DWM 边框偏移
+    // （如 +7px），导致 BitBlt 从 x=7 开始捕获，丢失左侧像素（用户 Issue: 左边总是有一部分不能截图）。
+    // virtual_desktop_rect() 取自 GetSystemMetrics(SM_XVIRTUALSCREEN)，与 GetDC(NULL) 坐标系完全一致，
+    // 是权威的虚拟桌面原点。覆盖窗以 Physical 坐标设置到此原点，二者必然重合。
+    let ox = rx;
+    let oy = ry;
+    let ow = rw;
+    let oh = rh;
+
     let scale = match overlay.scale_factor() {
         Ok(s) => s,
         Err(_) => return Err("无法获取缩放比".into()),
     };
-    let ox = win_pos.x;
-    let oy = win_pos.y;
-    let ow = win_size.width as i32;
-    let oh = win_size.height as i32;
 
-    // 捕获区域：DC 坐标系以虚拟桌面原点 (rx,ry) 为 (0,0)，故屏幕 (ox,oy) 对应 DC (ox-rx, oy-ry)
-    let full = match capture_region(ox - rx, oy - ry, ow, oh) {
+    // 捕获整虚拟桌面（GDI 优先，失败才兜底 WGC）。区域 == 虚拟桌面权威矩形，1:1 对齐、无偏移无白边。
+    let full = match capture_full(ox, oy, ow, oh) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("[截图] 捕获失败: {}", e);
@@ -643,6 +767,10 @@ pub async fn start_screenshot(
     let _ = overlay.emit("screenshot-start", payload);
     let _ = overlay.show();
     let _ = overlay.set_focus();
+    // 标记覆盖窗正在显示：用于防重入（用户再次按下热键时忽略，直到关闭）。
+    if let Ok(mut s) = app.state::<std::sync::Mutex<ScreenshotData>>().lock() {
+        s.showing = true;
+    }
     Ok(())
 }
 
@@ -671,29 +799,42 @@ pub fn peek_screenshot(
 // async：最近邻降采样整屏图在主线程外执行，覆盖窗预览「秒开」且不卡 UI。
 #[tauri::command]
 pub async fn read_screenshot(scale: f64) -> Result<tauri::ipc::Response, String> {
+    // `scale`（覆盖窗 devicePixelRatio）保留为契约参数：预览已改为「原图交前端按 CSS 尺寸
+    // 降采样显示」，不再在 Rust 侧按 scale 下采样，故此处不再直接使用，仅占位以兼容前端调用。
+    let _ = scale;
     let slot = SHOT.lock().map_err(|e| format!("锁失败: {}", e))?;
     let shot = slot
         .as_ref()
         .ok_or_else(|| "尚无截屏数据，请先触发截图".to_string())?;
-    let fw = shot.native_w as usize;
-    let fh = shot.native_h as usize;
-    // 目标逻辑分辨率：整屏物理 ÷ scale，再用最近邻重采样铺满，与窗口 CSS 尺寸 1:1 对齐。
-    let pw = ((fw as f64 / scale.max(1.0)).round().max(1.0)) as usize;
-    let ph = ((fh as f64 / scale.max(1.0)).round().max(1.0)) as usize;
-    let src = &shot.raw;
-    let row = fw * 4;
-    let mut out: Vec<u8> = Vec::with_capacity(8 + pw * ph * 4);
+    let fw = shot.native_w as u32;
+    let fh = shot.native_h as u32;
+    // 预览分辨率：默认「原生物理分辨率」直接交给前端，由浏览器按窗口 CSS 尺寸（= 物理 ÷ scale）
+    // GPU 降采样显示——此时图像像素 ≥ 显示像素，1:1 对齐且天然清晰；同时前端以 object-fit:fill
+    // 铺满覆盖窗时，预览像素与屏幕物理像素严格一一对应，选区映射零偏移（旧方案在 >2800px 时做
+    // Triangle 降采样，预览被拉伸 → 边缘偏移、左边几 px 截不到、画面发糊，即用户 Issue 6）。
+    // 仅当单边超过 CAP（≈4K+ 超大屏）才做一次轻微平滑降采样，约束 IPC 体积、避免极端卡顿。
+    const CAP: u32 = 4500;
+    let max_dim = fw.max(fh);
+    let factor = if max_dim > CAP {
+        CAP as f64 / max_dim as f64
+    } else {
+        1.0
+    };
+    let pw = ((fw as f64 * factor).round().max(1.0)) as u32;
+    let ph = ((fh as f64 * factor).round().max(1.0)) as u32;
+    let src_img = image::RgbaImage::from_raw(fw, fh, shot.raw.clone())
+        .ok_or_else(|| "截屏数据构造失败".to_string())?;
+    // factor == 1.0 时直接透传原图（零重采样、绝对清晰）；仅超限时平滑降采样（Triangle）。
+    let resized = if factor < 1.0 {
+        image::imageops::resize(&src_img, pw, ph, image::imageops::FilterType::Triangle)
+    } else {
+        src_img
+    };
+    let raw = resized.into_raw();
+    let mut out: Vec<u8> = Vec::with_capacity(8 + raw.len());
     out.extend_from_slice(&(pw as u32).to_le_bytes());
     out.extend_from_slice(&(ph as u32).to_le_bytes());
-    for py in 0..ph {
-        let sy = ((py as f64 * fh as f64 / ph as f64).round() as usize).min(fh - 1);
-        let base = sy * row;
-        for px in 0..pw {
-            let sx = ((px as f64 * fw as f64 / pw as f64).round() as usize).min(fw - 1);
-            let o = base + sx * 4;
-            out.extend_from_slice(&src[o..o + 4]);
-        }
-    }
+    out.extend_from_slice(&raw);
     Ok(tauri::ipc::Response::new(out))
 }
 
@@ -785,18 +926,21 @@ fn write_clipboard_and_dropzone(
     // 1) 快速 PNG 编码（从切片，无额外整块拷贝）
     let png = encode_png_fast(&raw, w, h)?;
 
-    // 2) 剪贴板写入：完全后台，不 join —— 用户点保存即关窗，剪贴板在后台几十 ms 内就绪
-    //    （粘贴可用），不再阻塞落盘与命令返回。原生 RGBA 字节 move 进线程，零额外克隆。
-    std::thread::spawn(move || {
+    // 2) 剪贴板写入（同步）：arboard::Clipboard::new() 内部调用 OleInitialize，
+    //    在后台 std::thread::spawn 线程中 COM apartment 未初始化会导致静默失败
+    //    （表现为保存成功但 Ctrl+V 粘贴不出图片）。
+    //    SetClipboardData 本身仅分配全局内存 + 设置句柄，耗时 ~10ms，无需后台化。
+    //    必须在主线程或 COM 已初始化的线程中调用。
+    {
+        let data = arboard::ImageData {
+            width: w as usize,
+            height: h as usize,
+            bytes: std::borrow::Cow::Borrowed(&raw),
+        };
         if let Ok(mut cb) = arboard::Clipboard::new() {
-            let data = arboard::ImageData {
-                width: w as usize,
-                height: h as usize,
-                bytes: std::borrow::Cow::Owned(raw),
-            };
             let _ = cb.set_image(data);
         }
-    });
+    }
 
     // 3) 落盘中转站（PNG 已在内存，直接写盘；存档快照复用同一份字节，避免写盘后整文件回读）
     let tmp = std::env::temp_dir().join(format!(
@@ -1300,7 +1444,7 @@ fn write_screenshot_shortcut(app: &tauri::AppHandle, sc: &str) -> Result<(), Str
 }
 
 /// 解析快捷键字符串（如 "Ctrl+Shift+S" 或 "Ctrl + Shift + S"）为 tauri global_shortcut::Shortcut
-fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
+pub fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
     let s = s.replace(' ', "");
     if s.is_empty() {
         return Err("空快捷键".to_string());

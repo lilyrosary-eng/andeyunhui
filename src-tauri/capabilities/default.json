@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main", "lyrics-widget", "floating-note-*", "screenshot-overlay", "tray-menu"],
+  "windows": ["main", "lyrics-widget", "floating-note-*", "screenshot-overlay", "tray-menu", "recorder-widget", "recorder-select"],
   "permissions": [
     "core:default",
     "opener:default",

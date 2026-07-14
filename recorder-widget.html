@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>录屏</title>
+    <style>
+      /* 首帧即透明，且用 !important 压住 index.css 可能注入的不透明背景 */
+      html, body { margin: 0; height: 100%; background: transparent !important; overflow: hidden; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/overlay-recorder.ts"></script>
+  </body>
+</html>
