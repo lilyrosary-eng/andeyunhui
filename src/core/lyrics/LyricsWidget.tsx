@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { LogicalSize } from '@tauri-apps/api/dpi';
+import { LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { invoke } from '@tauri-apps/api/core';
 
 const LYRICS_EVENT = 'lyrics-update';
@@ -134,6 +134,11 @@ export function LyricsWidget() {
   // 故彻底废弃 in-flow 重测，只用隔离测量的 estH。
   // 仍保留：①测量前关闭子元素过渡+强制回流→字号跳到目标值；②显式 width:contentW 解除对旧窗口宽度
   // 依赖；③await document.fonts.ready 防 FOUT；④上下留白内嵌为 content padding(safeY)，左右 MARGIN_X。
+  //
+  // 2026-07-15 稳定锚点（杜绝跳动）：setSize 默认从窗口左上角增长，而 content 居中(justify-center)，
+  // 故宽高随歌词长度变化时窗口中心会移动→文字跳动。修复：setSize 前先读当前 innerSize/outerPosition
+  // 算出屏幕中心(物理像素，乘 scaleFactor 对齐 DPI)，再按新尺寸反推 top-left 并 setPosition，使文字
+  // 中心恒定。拖拽后中心随 onMoved 更新，锚定尊重手动摆放。
   const MARGIN_X = 20; // 左右留白：容纳 textShadow(16px)/WebkitTextStroke 水平外延，防左右被窗口裁切
   const contentRef = useRef<HTMLDivElement>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout>>(0);
@@ -210,16 +215,28 @@ export function LyricsWidget() {
       const win = getCurrentWindow();
       isResizingRef.current = true;
 
-      // 最终高度直接用 stage1 的「隔离测量」estH（绝对定位、脱离窗口高度的 flex 容器，不会被
-      // h-full 父容器按当前窗口高 shrink 而失真）+ 上下留白 safeY*2。
-      // 旧实现的 stage2 在 in-flow 状态重测 content 真实高度：content 是 flex 子项(flex-shrink:1)，
-      // 当窗口尚未长大/被 h-full 锁到窗口高时会被压缩成窗口高，量得 realH≈窗口高(如 80) →
-      // 又 setSize 回 80 → 死锁（稳定后 content 真实 133、窗口却恒为 80、永不长大）。
-      // 隔离测量的 estH 不受父容器高度影响，故直接采用它作为最终高度，彻底消除死锁。
+      // 最终高度用隔离测量的 estH + 上下留白 safeY*2（estH 脱离窗口高度的 flex 容器 shrink 影响）。
       const finalH = estH + safeY * 2;
-      win.setSize(new LogicalSize(w, finalH)).finally(() => {
+
+      // 稳定锚点：保持窗口「中心」在屏幕上的位置不变，避免随歌词长度/字号变化而跳变。
+      // 先读当前尺寸/位置算出屏幕中心(物理像素)，再按新尺寸反推新 top-left，使文字中心恒定。
+      // 拖拽后中心会更新到用户放置处（onMoved 已同步位置），故锚定尊重手动摆放。
+      try {
+        const sf = await win.scaleFactor();
+        const curSize = await win.innerSize();      // 物理像素
+        const curPos = await win.outerPosition();   // 物理像素
+        const cx = curPos.x + curSize.width / 2;
+        const cy = curPos.y + curSize.height / 2;
+        const newLeft = Math.round(cx - (w * sf) / 2);
+        const newTop = Math.round(cy - (finalH * sf) / 2);
+        await win.setSize(new LogicalSize(w, finalH));
+        await win.setPosition(new PhysicalPosition(newLeft, newTop));
+      } catch {
+        // 极端情况（首次无位置信息）退化为仅 setSize，不移动位置
+        try { await win.setSize(new LogicalSize(w, finalH)); } catch { /* ignore */ }
+      } finally {
         setTimeout(() => { isResizingRef.current = false; }, 100);
-      });
+      }
     };
     // 防抖 200ms：歌词快速更新时只取最后一次，避免高频 setSize
     if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);

@@ -932,6 +932,8 @@ pub async fn crop_native_rgba(
 ///
 /// 数据格式：`BITMAPINFOHEADER` + BGRA 像素（bottom-up，正高度）。
 /// 输入 `raw` 为 RGBA top-down，需逐行翻转并转 BGRA。
+///
+/// 重试机制：`OpenClipboard` 可能因其他应用占用剪贴板而失败，最多重试 5 次（每次间隔 30ms）。
 fn write_clipboard_bitmap(raw: &[u8], w: u32, h: u32) -> Result<(), String> {
     if w == 0 || h == 0 {
         return Err("无效图像尺寸".into());
@@ -988,10 +990,18 @@ fn write_clipboard_bitmap(raw: &[u8], w: u32, h: u32) -> Result<(), String> {
         }
         winapi::um::winbase::GlobalUnlock(h_global);
 
-        // 4) 写入剪贴板
-        if winapi::um::winuser::OpenClipboard(std::ptr::null_mut()) == 0 {
+        // 4) 写入剪贴板（带重试：其他应用可能正占用剪贴板）
+        let mut opened = false;
+        for _attempt in 0..5u32 {
+            if winapi::um::winuser::OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        if !opened {
             winapi::um::winbase::GlobalFree(h_global);
-            return Err("OpenClipboard 失败".into());
+            return Err("OpenClipboard 失败（重试 5 次仍被占用）".into());
         }
         winapi::um::winuser::EmptyClipboard();
         let r = winapi::um::winuser::SetClipboardData(
@@ -1029,8 +1039,10 @@ fn write_clipboard_and_dropzone(
     // 1) 快速 PNG 编码（zlib level 1，全屏 33MP ~0.3s）
     let png = encode_png_fast(&raw, w, h)?;
 
-    // 2) 剪贴板写入（Win32 API，~5-15ms，不依赖 COM）
-    let _ = write_clipboard_bitmap(&raw, w, h);
+    // 2) 剪贴板写入（Win32 API，带重试，不依赖 COM）
+    if let Err(e) = write_clipboard_bitmap(&raw, w, h) {
+        eprintln!("[截图] 剪贴板写入失败: {}", e);
+    }
 
     // 3) 直接写入 dropzone 目录（跳过临时文件 + copy + archive_snapshot）
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;

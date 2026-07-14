@@ -1,6 +1,6 @@
 // 构建 external-deps 下的外部依赖为独立 IIFE 包（按需加载，不进插件本体）。
-// 目前：CodeMirror 6 → external-deps/codemirror/index.js
-//       TipTap 2     → external-deps/tiptap/index.js（茑萝「文档编辑器」插件内核，与宿主共享 React）
+// 目前：CodeMirror 6 → external-deps/niaoluo/ide/codemirror/index.js
+//       TipTap 2     → external-deps/niaoluo/wps/tiptap/index.js（茑萝「文档编辑器」插件内核，与宿主共享 React）
 // 用法：node scripts/build-external-deps.mjs
 import { build } from 'esbuild';
 import { mkdirSync, existsSync } from 'node:fs';
@@ -34,19 +34,19 @@ const hostExternalsPlugin = {
   },
 };
 
-// 各外部依赖：name 输出目录，entry 为 _build 下入口，global 为 IIFE 内部全局名（仅打包用）
+// 各外部依赖：outDir 输出目录（分类到对应插件子目录），entry 为 _build 下入口，global 为 IIFE 内部全局名（仅打包用）
 const TARGETS = [
-  { name: 'codemirror', entry: 'codemirror-entry.js', global: '__CM_BUNDLE__' },
-  { name: 'tiptap', entry: 'tiptap-entry.js', global: '__TIPTAP_BUNDLE__' },
+  { outDir: 'niaoluo/ide/codemirror', entry: 'codemirror-entry.js', global: '__CM_BUNDLE__' },
+  { outDir: 'niaoluo/wps/tiptap', entry: 'tiptap-entry.js', global: '__TIPTAP_BUNDLE__' },
 ];
 
 for (const t of TARGETS) {
   const entry = join(buildDir, t.entry);
   if (!existsSync(entry)) {
-    console.warn(`[Build] 跳过 ${t.name}：入口缺失 → ${entry}`);
+    console.warn(`[Build] 跳过 ${t.outDir}：入口缺失 → ${entry}`);
     continue;
   }
-  const outDir = join(rootDir, 'external-deps', t.name);
+  const outDir = join(rootDir, 'external-deps', t.outDir);
   mkdirSync(outDir, { recursive: true });
   await build({
     entryPoints: [entry],
@@ -60,7 +60,7 @@ for (const t of TARGETS) {
     define: { 'process.env.NODE_ENV': '"production"' },
     logLevel: 'info',
   });
-  console.log(`[Build] external-deps/${t.name}/index.js 已生成`);
+  console.log(`[Build] external-deps/${t.outDir}/index.js 已生成`);
 }
 
 console.log('[Build] external-deps 构建完成');

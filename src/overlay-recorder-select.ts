@@ -390,9 +390,21 @@ async function initFromEvent(data: { ox: number; oy: number; scale: number }) {
 }
 
 // 监听 Rust 的 recorder-select-ready 事件（窗口显示时由 show_recorder_select 发出）
+let readyEventReceived = false;
 listen<{ ox: number; oy: number; scale: number }>("recorder-select-ready", (event) => {
+  readyEventReceived = true;
   void initFromEvent(event.payload);
 });
+
+// 兜底：push 事件可能因竞态丢失（listen 尚未注册时 Rust 已 emit）。
+// 200ms 后若仍未收到事件，主动拉取坐标（与截图覆盖窗的 peek_screenshot 轮询同理）。
+setTimeout(() => {
+  if (!readyEventReceived && !ready) {
+    invoke<{ ox: number; oy: number; scale: number }>("get_recorder_select_coords")
+      .then((data) => { void initFromEvent(data); })
+      .catch((e) => console.error("[录屏区域] 兜底拉取坐标失败:", e));
+  }
+}, 200);
 
 // 接收取消事件（Ctrl+Alt+R 再次按下时触发）
 listen<null>("recorder-select-cancel", () => {

@@ -700,6 +700,7 @@ fn main() {
             recording_service::hide_recorder_widget,
             recording_service::show_recorder_select,
             recording_service::hide_recorder_select,
+            recording_service::get_recorder_select_coords,
             recording_service::get_recorder_shortcut,
             recording_service::set_recorder_shortcut,
             // ========== 模块：日志系统（用户可见 log 文件 + 前端错误捕获）==========
