@@ -46,6 +46,9 @@ pub struct WindowInfo {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    /// 是否为本进程自身窗口（截图覆盖窗 / 主窗等）。
+    /// 前端命中测试时跳过自身窗口，确保高亮的是「桌面上的目标窗口」而非我们的遮罩。
+    pub is_self: bool,
 }
 
 /// 系统 DPI 缩放比（如 150% 显示 → 1.5）。
@@ -252,6 +255,11 @@ unsafe extern "system" fn enum_callback(
     // 遇「活着但响应极慢」的窗口会阻塞数秒 → 每次截图都卡 4-5s。即便改用 SendMessageTimeout，
     // 一旦误加 SMTO_NOTIMEOUTIFNOTHUNG 该超时即失效，仍会挂起。因此这里彻底不发跨线程消息，
     // 标题改由 get_window_title 在悬停时按需懒加载（单次、30ms 超时、绝不挂起）。
+    // is_self：标记本进程窗口（截图覆盖窗 / 主窗）。GetWindowThreadProcessId 是轻量本机调用
+    // （不发跨线程消息），不会阻塞。前端命中时跳过 is_self，确保高亮的是桌面目标窗口而非遮罩。
+    let mut pid: u32 = 0;
+    winapi::um::winuser::GetWindowThreadProcessId(hwnd, &mut pid);
+    let is_self = pid == winapi::um::processthreadsapi::GetCurrentProcessId();
     state.push(WindowInfo {
         hwnd: hwnd as u64,
         title: String::new(),
@@ -259,6 +267,7 @@ unsafe extern "system" fn enum_callback(
         y,
         width,
         height,
+        is_self,
     });
     1
 }
@@ -930,67 +939,94 @@ pub async fn crop_native_rgba(
 /// 即便 spawn 新线程也可能因进程级 COM 状态冲突而静默失败。
 /// Win32 API（`OpenClipboard` + `SetClipboardData`）不依赖 COM/OLE，任何线程均可调用，是最可靠的路径。
 ///
-/// 数据格式：`BITMAPINFOHEADER` + BGRA 像素（bottom-up，正高度）。
+/// 双格式写入（解决 Ctrl+V 粘贴失败问题）：
+/// - CF_DIB：传统 Win32 应用（画图、Office 等）
+/// - PNG（RegisterClipboardFormat("PNG")）：现代应用（浏览器、微信、QQ、Electron、Tiptap 等）
+///   许多现代应用仅识别 PNG 格式，不识别 CF_DIB，导致 Ctrl+V 粘贴失败。
+///
+/// 数据格式（CF_DIB）：`BITMAPINFOHEADER` + BGRA 像素（bottom-up，正高度）。
 /// 输入 `raw` 为 RGBA top-down，需逐行翻转并转 BGRA。
 ///
 /// 重试机制：`OpenClipboard` 可能因其他应用占用剪贴板而失败，最多重试 5 次（每次间隔 30ms）。
-fn write_clipboard_bitmap(raw: &[u8], w: u32, h: u32) -> Result<(), String> {
+fn write_clipboard_with_formats(raw: &[u8], w: u32, h: u32, png: &[u8]) -> Result<(), String> {
     if w == 0 || h == 0 {
         return Err("无效图像尺寸".into());
     }
     let row_bytes = (w as usize) * 4;
     let pixel_bytes = (w as usize) * (h as usize) * 4;
     let header_size = std::mem::size_of::<winapi::um::wingdi::BITMAPINFOHEADER>();
-    let total = header_size + pixel_bytes;
+    let dib_total = header_size + pixel_bytes;
 
     unsafe {
-        // 1) 分配全局内存（SetClipboardData 要求 GMEM_MOVEABLE）
-        let h_global = winapi::um::winbase::GlobalAlloc(
+        // 1) 分配 DIB 全局内存（SetClipboardData 要求 GMEM_MOVEABLE）
+        let h_dib = winapi::um::winbase::GlobalAlloc(
             winapi::um::winbase::GMEM_MOVEABLE,
-            total,
+            dib_total,
         );
-        if h_global.is_null() {
-            return Err("GlobalAlloc 失败".into());
+        if h_dib.is_null() {
+            return Err("GlobalAlloc (DIB) 失败".into());
         }
-        let ptr = winapi::um::winbase::GlobalLock(h_global);
-        if ptr.is_null() {
-            winapi::um::winbase::GlobalFree(h_global);
-            return Err("GlobalLock 失败".into());
-        }
-
-        // 2) 写 BITMAPINFOHEADER（正高度 = bottom-up DIB）
-        let hdr = ptr as *mut winapi::um::wingdi::BITMAPINFOHEADER;
-        (*hdr).biSize = header_size as u32;
-        (*hdr).biWidth = w as i32;
-        (*hdr).biHeight = h as i32;
-        (*hdr).biPlanes = 1;
-        (*hdr).biBitCount = 32;
-        (*hdr).biCompression = winapi::um::wingdi::BI_RGB;
-        (*hdr).biSizeImage = pixel_bytes as u32;
-        (*hdr).biXPelsPerMeter = 0;
-        (*hdr).biYPelsPerMeter = 0;
-        (*hdr).biClrUsed = 0;
-        (*hdr).biClrImportant = 0;
-
-        // 3) 写像素：RGBA top-down → BGRA bottom-up（行翻转 + 通道交换）
-        let px = (ptr as *mut u8).add(header_size);
-        let dst = std::slice::from_raw_parts_mut(px, pixel_bytes);
-        for y in 0..(h as usize) {
-            let src_off = y * row_bytes;
-            let dst_off = (h as usize - 1 - y) * row_bytes;
-            let src_row = &raw[src_off..src_off + row_bytes];
-            let dst_row = &mut dst[dst_off..dst_off + row_bytes];
-            for x in 0..(w as usize) {
-                let si = x * 4;
-                dst_row[si] = src_row[si + 2];     // B
-                dst_row[si + 1] = src_row[si + 1]; // G
-                dst_row[si + 2] = src_row[si];     // R
-                dst_row[si + 3] = 255;              // A
+        {
+            let ptr = winapi::um::winbase::GlobalLock(h_dib);
+            if ptr.is_null() {
+                winapi::um::winbase::GlobalFree(h_dib);
+                return Err("GlobalLock (DIB) 失败".into());
             }
-        }
-        winapi::um::winbase::GlobalUnlock(h_global);
 
-        // 4) 写入剪贴板（带重试：其他应用可能正占用剪贴板）
+            // 写 BITMAPINFOHEADER（正高度 = bottom-up DIB）
+            let hdr = ptr as *mut winapi::um::wingdi::BITMAPINFOHEADER;
+            (*hdr).biSize = header_size as u32;
+            (*hdr).biWidth = w as i32;
+            (*hdr).biHeight = h as i32;
+            (*hdr).biPlanes = 1;
+            (*hdr).biBitCount = 32;
+            (*hdr).biCompression = winapi::um::wingdi::BI_RGB;
+            (*hdr).biSizeImage = pixel_bytes as u32;
+            (*hdr).biXPelsPerMeter = 0;
+            (*hdr).biYPelsPerMeter = 0;
+            (*hdr).biClrUsed = 0;
+            (*hdr).biClrImportant = 0;
+
+            // 写像素：RGBA top-down → BGRA bottom-up（行翻转 + 通道交换）
+            let px = (ptr as *mut u8).add(header_size);
+            let dst = std::slice::from_raw_parts_mut(px, pixel_bytes);
+            for y in 0..(h as usize) {
+                let src_off = y * row_bytes;
+                let dst_off = (h as usize - 1 - y) * row_bytes;
+                let src_row = &raw[src_off..src_off + row_bytes];
+                let dst_row = &mut dst[dst_off..dst_off + row_bytes];
+                for x in 0..(w as usize) {
+                    let si = x * 4;
+                    dst_row[si] = src_row[si + 2];     // B
+                    dst_row[si + 1] = src_row[si + 1]; // G
+                    dst_row[si + 2] = src_row[si];     // R
+                    dst_row[si + 3] = 255;              // A
+                }
+            }
+            winapi::um::winbase::GlobalUnlock(h_dib);
+        }
+
+        // 2) 分配 PNG 全局内存（现代应用优先读取 PNG 格式）
+        let h_png = winapi::um::winbase::GlobalAlloc(
+            winapi::um::winbase::GMEM_MOVEABLE,
+            png.len(),
+        );
+        if h_png.is_null() {
+            winapi::um::winbase::GlobalFree(h_dib);
+            return Err("GlobalAlloc (PNG) 失败".into());
+        }
+        {
+            let ptr = winapi::um::winbase::GlobalLock(h_png);
+            if ptr.is_null() {
+                winapi::um::winbase::GlobalFree(h_dib);
+                winapi::um::winbase::GlobalFree(h_png);
+                return Err("GlobalLock (PNG) 失败".into());
+            }
+            std::ptr::copy_nonoverlapping(png.as_ptr(), ptr as *mut u8, png.len());
+            winapi::um::winbase::GlobalUnlock(h_png);
+        }
+
+        // 3) 打开剪贴板（带重试：其他应用可能正占用剪贴板）
         let mut opened = false;
         for _attempt in 0..5u32 {
             if winapi::um::winuser::OpenClipboard(std::ptr::null_mut()) != 0 {
@@ -1000,21 +1036,44 @@ fn write_clipboard_bitmap(raw: &[u8], w: u32, h: u32) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(30));
         }
         if !opened {
-            winapi::um::winbase::GlobalFree(h_global);
+            winapi::um::winbase::GlobalFree(h_dib);
+            winapi::um::winbase::GlobalFree(h_png);
             return Err("OpenClipboard 失败（重试 5 次仍被占用）".into());
         }
+
+        // 4) 写入两种格式
         winapi::um::winuser::EmptyClipboard();
-        let r = winapi::um::winuser::SetClipboardData(
+
+        // CF_DIB：传统 Win32 应用
+        let r_dib = winapi::um::winuser::SetClipboardData(
             winapi::um::winuser::CF_DIB,
-            h_global as *mut _,
+            h_dib as *mut _,
         );
+
+        // PNG：现代应用（浏览器、微信、QQ、Electron、Tiptap 等）
+        // RegisterClipboardFormatA 接受 LPCSTR（*const i8），b"PNG\0" 是 *const u8，需显式转换。
+        let png_format = winapi::um::winuser::RegisterClipboardFormatA(
+            b"PNG\0".as_ptr() as *const i8,
+        );
+        let r_png = if png_format != 0 {
+            winapi::um::winuser::SetClipboardData(png_format, h_png as *mut _)
+        } else {
+            std::ptr::null_mut()
+        };
+
         winapi::um::winuser::CloseClipboard();
-        if r.is_null() {
-            // SetClipboardData 失败时所有权未转移，需手动释放
-            winapi::um::winbase::GlobalFree(h_global);
-            return Err("SetClipboardData 失败".into());
+
+        // 5) 释放未成功转移的句柄（SetClipboardData 成功时所有权转移给系统）
+        if r_dib.is_null() {
+            winapi::um::winbase::GlobalFree(h_dib);
         }
-        // 成功：h_global 所有权转移给系统，不可再释放
+        if r_png.is_null() {
+            winapi::um::winbase::GlobalFree(h_png);
+        }
+
+        if r_dib.is_null() && r_png.is_null() {
+            return Err("SetClipboardData 失败（DIB 和 PNG 均失败）".into());
+        }
     }
     Ok(())
 }
@@ -1039,8 +1098,8 @@ fn write_clipboard_and_dropzone(
     // 1) 快速 PNG 编码（zlib level 1，全屏 33MP ~0.3s）
     let png = encode_png_fast(&raw, w, h)?;
 
-    // 2) 剪贴板写入（Win32 API，带重试，不依赖 COM）
-    if let Err(e) = write_clipboard_bitmap(&raw, w, h) {
+    // 2) 剪贴板写入（CF_DIB + PNG 双格式，兼容传统应用和现代应用）
+    if let Err(e) = write_clipboard_with_formats(&raw, w, h, &png) {
         eprintln!("[截图] 剪贴板写入失败: {}", e);
     }
 
