@@ -120,7 +120,7 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
       void reloadSinglePlugin(e.payload, registry)) as never);
     listen('plugin-unload', ((e: { payload: string }) =>
       unloadSinglePlugin(e.payload, registry)) as never);
-    // 文件系统热插拔：Rust notify watcher 检测到 extensions/ 或 user_plugins/ 变化时
+    // 文件系统热插拔：Rust notify watcher 检测到 bundled-plugins/ 或 user_plugins/ 变化时
     // 自动重新扫描并加载新增/卸载移除的插件（真正的免重启热插拔）
     listen('plugin-fs-change', ((_e: { payload: unknown }) => {
       void (async () => {

@@ -13,12 +13,26 @@
 
 type BootTheme = 'light' | 'dark';
 
-// Vite ?raw 导入：构建时将 wait-page 下的 HTML 内联为字符串，零运行时开销
-import lightPageHtml from '../../wait-page/waiting-page-light.html?raw';
-import darkPageHtml from '../../wait-page/waiting-page-dark.html?raw';
+// 复用构建期由 vite.config.ts 生成的 base64（与 index.html 启动页同一可信源）。
+// 注意：此前用 `?raw` 导入 wait-page 的 .html，Vite 生产构建会把 .html 当 HTML 入口拦截、
+// ?raw 静默失效（dev 正常、build 丢内容），导致打包后预览为空。改用生成模块绕开该坑。
+import { WAITING_LIGHT_B64, WAITING_DARK_B64 } from './_waitingPages.generated';
+
+function decodeWaitingPage(b64: string): string {
+  // atob() 返回 Latin-1 二进制字符串，需用 TextDecoder 正确解码 UTF-8（否则中文乱码）
+  const binStr = atob(b64);
+  const bytes = new Uint8Array(binStr.length);
+  for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+const lightPageHtml = decodeWaitingPage(WAITING_LIGHT_B64);
+const darkPageHtml = decodeWaitingPage(WAITING_DARK_B64);
 
 const PREVIEW_ID = 'boot-preview';
 const RETURN_ID = 'boot-preview-return';
+
+
 
 // 保存当前活动的清理函数，保证重复调用 / 快捷键都能正确移除
 let activeCleanup: (() => void) | null = null;
@@ -66,6 +80,7 @@ function makeReturnButton(onClose: () => void): HTMLButtonElement {
 }
 
 export function previewBootScreen(theme: BootTheme): void {
+
   // 若已有预览残留（例如上次没关掉），先彻底清掉再重建，避免覆盖层卡死挡住所有点击
   if (activeCleanup) {
     activeCleanup();

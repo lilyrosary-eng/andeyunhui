@@ -2,7 +2,7 @@
  *
  * 本文件必须在 overlay-screenshot.ts 中于 `./index.css` 之后 import，
  * 用 !important 覆盖 index.css `@layer base` 里
- *   body { background-color: var(--main-panel-bg) }   /* ≈ 85% 白，不透明 */
+ *   body { background-color: var(--main-panel-bg) }  （≈ 85% 白，不透明）
  * 否则覆盖窗（铺满所有显示器）一显示就整片不透明 → 触发瞬间全屏变白。
  *
  * 覆盖窗在启动期即预创建（main.rs），始终透明；触发时直接显示冻结图，

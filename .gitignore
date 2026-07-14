@@ -46,3 +46,6 @@ research_report_*.md
 
 # external-deps 本地构建产物
 external-deps/_build/
+
+# 构建期自动生成的 wait-page base64 模块（由 scripts/gen-waiting-pages.mjs 生成）
+src/lib/_waitingPages.generated.ts
