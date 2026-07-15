@@ -31,6 +31,7 @@ use andengyuanhua_lib::services::lyrics_service;
 use andengyuanhua_lib::services::recording_service;
 use andengyuanhua_lib::services::log_service;
 use andengyuanhua_lib::services::ai_service;
+use andengyuanhua_lib::services::shell_service;
 use std::sync::Mutex;
 
 /// 创建托盘右键菜单窗口（独立 WebView，承载「我们的 UI」样式菜单）。
@@ -622,7 +623,9 @@ fn main() {
             pick_save_file,
             write_text_file,
             read_text_file,
+            delete_file,
             list_directory,
+            ensure_directory,
             check_file_exists,
             cancel_scan,
             // ========== 模块：图片 / 莲花 ==========
@@ -671,6 +674,7 @@ fn main() {
             clipboard_write,
             clipboard_read_image,
             clipboard_clear,
+            clipboard_poll_image,
             convert_image,
             convert_document,
             check_ffmpeg,
@@ -688,6 +692,7 @@ fn main() {
             list_windows,
             get_window_title,
             clipboard_write_image,
+            clipboard_write_image_from_path,
             crop_native,
             crop_native_rgba,
             save_screenshot,
@@ -716,10 +721,14 @@ fn main() {
             log_service::get_log_files,
             log_service::get_current_log_path,
             // ========== 全局：AI 能力（茑萝 · AI 编程 子插件调用）==========
-            ai_service::ai_get_config,
-            ai_service::ai_set_config,
+            ai_service::ai_get_profiles,
+            ai_service::ai_set_profiles,
             ai_service::ai_chat,
             ai_service::ai_test_connection,
+            // ========== 全局：IDE 终端（本地 shell 命令执行）==========
+            shell_service::run_shell_command,
+            // ========== 全局：AI agent 受限 shell（白名单 + Dry-Run 黑名单 + 超时）==========
+            shell_service::run_agent_shell,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

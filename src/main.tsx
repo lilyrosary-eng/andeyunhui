@@ -1,10 +1,5 @@
 import React from "react"
 import ReactDOM from "react-dom/client"
-import App from "./App"
-import { ThemeProvider } from "./lib/ThemeProvider"
-import { LyricsWidget } from "./core/lyrics/LyricsWidget"
-import { FloatingNoteView } from "./core/notes/FloatingNoteView"
-import { FloatingClipboardView } from "./core/clipboard/FloatingClipboardView"
 import { initFileLogger } from "./lib/file-logger"
 import "./index.css"
 
@@ -21,28 +16,28 @@ const boot = (window as unknown as {
 boot.__bootProgress?.(10, { text: "初始化内核", phase: "PHASE 01 / 05" });
 
 // 窗口分流：检测当前窗口标签，分别走轻量组件，避免主 App 初始化开销
-// 这样 App 组件本身不需要条件 return，符合 React Hooks 规则
+// 关键：使用动态 import，子窗口（浮窗/歌词）不会加载主 App 的 JS bundle
 async function bootstrap() {
   let windowKind: "lyrics" | "floating-note" | "floating-clipboard" | "main" = "main";
   try {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const label = getCurrentWindow().label;
+    const params = new URLSearchParams(window.location.search);
+    const floating = params.get("floating");
     if (label === "lyrics-widget") {
       windowKind = "lyrics";
-    } else if (new URLSearchParams(window.location.search).get("floating") === "true") {
+    } else if (floating === "true") {
       windowKind = "floating-note";
-    } else if (new URLSearchParams(window.location.search).get("floating") === "clipboard") {
+    } else if (floating === "clipboard") {
       windowKind = "floating-clipboard";
     }
   } catch {
     // 非 Tauri 环境（浏览器开发），检查 URL 参数
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
-      if (params.get("floating") === "true") {
-        windowKind = "floating-note";
-      } else if (params.get("floating") === "clipboard") {
-        windowKind = "floating-clipboard";
-      }
+      const floating = params.get("floating");
+      if (floating === "true") windowKind = "floating-note";
+      else if (floating === "clipboard") windowKind = "floating-clipboard";
     }
   }
 
@@ -63,19 +58,19 @@ async function bootstrap() {
     document.body.style.margin = '0';
     document.body.style.overflow = 'hidden';
     const root = document.getElementById("root") as HTMLElement;
-    import('./components/TrayMenu').then(({ TrayMenu }) => {
-      ReactDOM.createRoot(root).render(
-        React.createElement(React.StrictMode, null, React.createElement(TrayMenu))
-      );
-    }).catch(() => {});
+    const { TrayMenu } = await import('./components/TrayMenu');
+    ReactDOM.createRoot(root).render(
+      React.createElement(React.StrictMode, null, React.createElement(TrayMenu))
+    );
     return;
   }
 
   const root = document.getElementById("root") as HTMLElement;
   if (windowKind === "lyrics") {
-    // 歌词窗口：强制 html/body 背景透明（index.html 默认 CSS 是 #f4f2ec 不透明白底）
+    // 歌词窗口：强制 html/body 背景透明
     document.documentElement.style.background = 'transparent';
     document.body.style.background = 'transparent';
+    const { LyricsWidget } = await import('./core/lyrics/LyricsWidget');
     ReactDOM.createRoot(root).render(
       <React.StrictMode>
         <LyricsWidget />
@@ -83,10 +78,9 @@ async function bootstrap() {
     );
   } else if (windowKind === "floating-note") {
     // 浮窗子窗口：独立渲染，不初始化整个 App（性能优化）
-    // 必须和歌词窗口一样强制 html/body 背景透明，否则 index.css 的
-    // body { background-color: var(--main-panel-bg); } 会阻挡 transparent: true 效果。
     document.documentElement.style.background = 'transparent';
     document.body.style.background = 'transparent';
+    const { FloatingNoteView } = await import('./core/notes/FloatingNoteView');
     ReactDOM.createRoot(root).render(
       <React.StrictMode>
         <FloatingNoteView />
@@ -96,6 +90,7 @@ async function bootstrap() {
     // 剪贴板浮窗：透明背景，独立渲染，不初始化主 App
     document.documentElement.style.background = 'transparent';
     document.body.style.background = 'transparent';
+    const { FloatingClipboardView } = await import('./core/clipboard/FloatingClipboardView');
     ReactDOM.createRoot(root).render(
       <React.StrictMode>
         <FloatingClipboardView />
@@ -104,6 +99,10 @@ async function bootstrap() {
   } else {
     // 主界面即将构建（React 将挂载 App）
     boot.__bootProgress?.(28, { text: "构建界面", phase: "PHASE 02 / 05" });
+    const [{ default: App }, { ThemeProvider }] = await Promise.all([
+      import('./App'),
+      import('./lib/ThemeProvider'),
+    ]);
     ReactDOM.createRoot(root).render(
       <React.StrictMode>
         <ThemeProvider>

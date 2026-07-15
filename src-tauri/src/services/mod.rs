@@ -13,6 +13,7 @@ pub mod reading_service;
 pub mod recording_service;
 pub mod log_service;
 pub mod ai_service;
+pub mod shell_service;
 
 use std::path::{Path, PathBuf};
 

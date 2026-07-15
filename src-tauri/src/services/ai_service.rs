@@ -7,17 +7,28 @@
 //   可对接 OpenAI / DeepSeek / Moonshot / 通义 / 本地 Ollama 等一切兼容端点。
 // - 流式输出：SSE 分块解析后通过 Tauri 事件 ai-delta / ai-done / ai-error 推给前端，
 //   实现 Cursor / Claude Code 那样的逐字流式体验。
-// - 配置（base_url / api_key / model / temperature）持久化到 app_data_dir/ai_config.json，
-//   全局共享，任意插件都可读写。
+// - 配置（多份「模型档案」profiles，每份含 base_url / api_key / model / temperature 等）
+//   持久化到 app_data_dir/ai_config.json，全局共享，任意插件都可读写；
+//   ai_chat 可指定 profile_id 选用某份档案，未指定则用 active 激活项。
 
 use std::fs;
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// AI 全局配置
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AiConfig {
+fn default_temperature() -> f32 {
+    0.3
+}
+
+/// 单份模型档案（可配置多份，互不影响；IDE / 其他插件按 id 选用）
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AiProfile {
+    /// 档案唯一 id（如 "deepseek" / "p_xxx"）
+    #[serde(default)]
+    pub id: String,
+    /// 显示名（下拉框展示，如 "DeepSeek" / "我的 OpenAI"）
+    #[serde(default)]
+    pub name: String,
     /// OpenAI 兼容端点基址，如 https://api.deepseek.com/v1
     pub base_url: String,
     /// API Key（Bearer）
@@ -38,21 +49,40 @@ pub struct AiConfig {
     pub system_prompt: Option<String>,
 }
 
-fn default_temperature() -> f32 {
-    0.3
+impl AiProfile {
+    /// 下拉框展示名：优先 name，其次 model，再次端点
+    fn display_name(&self) -> String {
+        if !self.name.trim().is_empty() {
+            return self.name.trim().to_string();
+        }
+        if !self.model.trim().is_empty() {
+            return self.model.trim().to_string();
+        }
+        self.base_url.trim().to_string()
+    }
 }
 
-impl Default for AiConfig {
-    fn default() -> Self {
-        Self {
-            base_url: "https://api.deepseek.com/v1".to_string(),
-            api_key: String::new(),
-            model: "deepseek-chat".to_string(),
-            temperature: default_temperature(),
-            max_tokens: None,
-            top_p: None,
-            system_prompt: None,
-        }
+/// 全部模型档案集合 + 当前默认激活的档案 id
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AiProfiles {
+    #[serde(default)]
+    pub profiles: Vec<AiProfile>,
+    #[serde(default)]
+    pub active: Option<String>,
+}
+
+/// 首份默认档案（DeepSeek 占位，未填 key 时引导用户去设置）
+fn default_profile() -> AiProfile {
+    AiProfile {
+        id: "deepseek".to_string(),
+        name: "DeepSeek".to_string(),
+        base_url: "https://api.deepseek.com/v1".to_string(),
+        api_key: String::new(),
+        model: "deepseek-chat".to_string(),
+        temperature: default_temperature(),
+        max_tokens: None,
+        top_p: None,
+        system_prompt: None,
     }
 }
 
@@ -65,27 +95,76 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("ai_config.json"))
 }
 
-fn load_config(app: &AppHandle) -> AiConfig {
-    match config_path(app) {
-        Ok(p) if p.exists() => fs::read_to_string(&p)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default(),
-        _ => AiConfig::default(),
+/// 读取全部模型档案；兼容旧版「单份 AiConfig」格式（无 id/name 字段）自动升级为单档案。
+fn load_profiles(app: &AppHandle) -> AiProfiles {
+    let path = match config_path(app) {
+        Ok(p) => p,
+        Err(_) => return AiProfiles::default(),
+    };
+    if !path.exists() {
+        return AiProfiles::default();
     }
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return AiProfiles::default(),
+    };
+    // 新格式：多档案
+    if let Ok(p) = serde_json::from_str::<AiProfiles>(&text) {
+        return p;
+    }
+    // 旧格式：单份配置（字段兼容 AiProfile，id/name 走默认值）
+    if let Ok(legacy) = serde_json::from_str::<AiProfile>(&text) {
+        let id = if legacy.id.trim().is_empty() {
+            "legacy".to_string()
+        } else {
+            legacy.id.clone()
+        };
+        let name = if legacy.name.trim().is_empty() {
+            legacy.display_name()
+        } else {
+            legacy.name.clone()
+        };
+        return AiProfiles {
+            profiles: vec![AiProfile {
+                id: id.clone(),
+                name,
+                ..legacy
+            }],
+            active: Some(id),
+        };
+    }
+    AiProfiles::default()
 }
 
-/// 读取 AI 全局配置（返回给前端；api_key 原样返回，仅本机存储）
-#[tauri::command]
-pub fn ai_get_config(app: AppHandle) -> AiConfig {
-    load_config(&app)
+/// 按 profile_id 解析实际使用的档案：指定 > 激活项 > 首个 > 默认
+fn resolve_profile(profiles: &AiProfiles, profile_id: Option<String>) -> AiProfile {
+    if let Some(pid) = profile_id {
+        if let Some(p) = profiles.profiles.iter().find(|p| p.id == pid) {
+            return p.clone();
+        }
+    }
+    if let Some(aid) = &profiles.active {
+        if let Some(p) = profiles.profiles.iter().find(|p| p.id == *aid) {
+            return p.clone();
+        }
+    }
+    if let Some(first) = profiles.profiles.first() {
+        return first.clone();
+    }
+    default_profile()
 }
 
-/// 保存 AI 全局配置
+/// 读取全部模型档案（返回前端用于下拉框 / 配置页；api_key 原样返回，仅本机存储）
 #[tauri::command]
-pub fn ai_set_config(app: AppHandle, config: AiConfig) -> Result<(), String> {
+pub fn ai_get_profiles(app: AppHandle) -> AiProfiles {
+    load_profiles(&app)
+}
+
+/// 保存全部模型档案 + 激活项
+#[tauri::command]
+pub fn ai_set_profiles(app: AppHandle, payload: AiProfiles) -> Result<(), String> {
     let path = config_path(&app)?;
-    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| format!("写入配置失败: {}", e))?;
     Ok(())
 }
@@ -108,10 +187,12 @@ pub async fn ai_chat(
     app: AppHandle,
     request_id: String,
     messages: Vec<ChatMessage>,
+    profile_id: Option<String>,
 ) -> Result<(), String> {
-    let cfg = load_config(&app);
+    let profiles = load_profiles(&app);
+    let cfg = resolve_profile(&profiles, profile_id);
     if cfg.api_key.trim().is_empty() {
-        let msg = "未配置 API Key，请先在 AI 编程设置里填写".to_string();
+        let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
         let _ = app.emit(
             "ai-error",
             serde_json::json!({ "requestId": request_id, "error": msg }),
@@ -218,7 +299,7 @@ pub async fn ai_chat(
 /// 测试 AI 配置是否可用：向端点发起一次极小开销的非流式请求，
 /// 校验 base_url / api_key / model 是否正确，并返回耗时。不消耗对话额度（max_tokens=5）。
 #[tauri::command]
-pub async fn ai_test_connection(config: AiConfig) -> Result<String, String> {
+pub async fn ai_test_connection(config: AiProfile) -> Result<String, String> {
     if config.api_key.trim().is_empty() {
         return Err("未填写 API Key，无法测试连接".to_string());
     }
