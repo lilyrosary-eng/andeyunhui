@@ -49,3 +49,24 @@ external-deps/_build/
 
 # 构建期自动生成的 wait-page base64 模块（由 scripts/gen-waiting-pages.mjs 生成）
 src/lib/_waitingPages.generated.ts
+
+# ---- 本地构建产物 / AI 协作记录：不应推送到 GitHub ----
+# 仓库正式名称：andengyuanhua（GitHub 仓库名请对应 rosary/andengyuanhua）
+
+# Rust 编译产物（cargo，体积极大，必须忽略）
+src-tauri/target/
+target/
+
+# 前端 / 脚本临时构建日志
+fe_build*.txt
+cargo_check.txt
+_diff_light.txt
+
+# AI 协作记录 / 研究计划 / 路线图（本地设计笔记，不随仓库发布）
+ROADMAP.md
+research_plan_*.md
+research_report_*.md
+截图功能.md
+
+# 设计 / 诊断类内部文档（非对外文档；截图等资源 .png/.gif 仍会被跟踪）
+docs/*.md

@@ -8,15 +8,15 @@
 //! 剥离 epub 内嵌的字体/颜色/脚本/样式，视觉呈现交给前端字体设置。
 //! 内嵌图片 V1 不处理（小说类内容极少依赖插图，刻意简化）。
 //!
-//! epub 解析使用 epub crate（danigm/epub-rs，GPL-3.0），
-//! HTML 消毒使用 ammonia（MIT）。两者均现成生态库，不手搓 OPF/NCX/spine。
+//! epub 解析使用 epub-parser（MIT，zhangwfjh/epub-parser），
+//! 抽取 metadata / toc / 纯文本章节；HTML 消毒使用 ammonia（MIT）。
+//! 不手搓 OPF/NCX/spine；章节纯文本经 text_to_html 转回带 <p> 的消毒 HTML。
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::io::BufReader;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use epub::doc::EpubDoc;
+use epub_parser::{Epub, TocEntry};
 use pulldown_cmark::{Parser, html};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -708,63 +708,49 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-// ---- EPUB：epub crate 解析 + ammonia 消毒 ----
+// ---- EPUB：epub-parser 解析（纯文本）+ text_to_html 转 HTML；ammonia 消毒用于 pdf/docx 路径 ----
 
 fn open_epub(file_path: &str) -> Result<ReadingBook, String> {
-    let mut doc = EpubDoc::new(file_path)
+    let epub = Epub::parse(Path::new(file_path))
         .map_err(|e| format!("EPUB 解析失败: {}", e))?;
 
     // 元数据
-    let title = doc.get_title().unwrap_or_else(|| {
-        Path::new(file_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("未命名")
-            .to_string()
-    });
-    let author = doc
-        .mdata("creator")
-        .map(|m| m.value.clone())
-        .or_else(|| {
-            // EPUB2 常用 <dc:creator>，部分用 OPF meta；epub crate 已收纳到 metadata
-            doc.metadata
-                .iter()
-                .find(|m| m.property == "creator")
-                .map(|m| m.value.clone())
+    let title = epub
+        .metadata
+        .title
+        .clone()
+        .unwrap_or_else(|| {
+            Path::new(file_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("未命名")
+                .to_string()
         });
+    let author = epub.metadata.author.clone();
 
-    // 章节标题：从 toc (NCX NavPoint) 建立 spine 索引 → 标题 映射
-    // 嵌套 toc 递归收集；href 去掉 #fragment 后用 resource_uri_to_chapter 转 spine 索引
-    let mut title_map: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-    collect_chapter_titles(&doc.toc.clone(), &doc, &mut title_map);
+    // 章节标题：toc（含嵌套 children）DFS 展平为有序 label 列表，
+    // 按阅读顺序与 pages 对应。epub-parser 0.3.4 的 Page 不含 href，
+    // 无法像旧 EpubDoc 那样精确映射 spine 索引，故用位置对应；
+    // 超出 toc 长度的页面回退"第 N 章"。
+    let labels = flatten_toc_labels(&epub.toc);
 
-    let num = doc.get_num_chapters();
-    let mut chapters = Vec::with_capacity(num);
+    let pages = &epub.pages;
+    if pages.is_empty() {
+        return Err("EPUB 无可读章节（spine 为空）".to_string());
+    }
 
-    for i in 0..num {
-        if !doc.set_current_chapter(i) {
-            break;
-        }
-        let chapter_title = title_map
-            .get(&i)
+    let mut chapters = Vec::with_capacity(pages.len());
+    for (i, page) in pages.iter().enumerate() {
+        let chapter_title = labels
+            .get(i)
             .cloned()
             .unwrap_or_else(|| format!("第 {} 章", i + 1));
-
-        let content = match doc.get_current_str() {
-            Some((xhtml, _mime)) => sanitize_xhtml(&xhtml),
-            None => String::new(),
-        };
-
+        let content = text_to_html(&page.content);
         chapters.push(ReadingChapter {
             id: format!("ch-{}", i),
             title: chapter_title,
             content,
         });
-    }
-
-    // 极端情况：spine 为空（破损 epub）
-    if chapters.is_empty() {
-        return Err("EPUB 无可读章节（spine 为空）".to_string());
     }
 
     Ok(ReadingBook {
@@ -823,22 +809,45 @@ fn markdown_to_html(markdown: &str) -> String {
     html_output
 }
 
-/// 递归收集 toc → spine 索引 的标题映射。
-/// 同一 spine 索引被多个 NavPoint 引用时，保留首个（toc 顺序通常即章节顺序）。
-fn collect_chapter_titles(
-    toc: &[epub::doc::NavPoint],
-    doc: &EpubDoc<BufReader<std::fs::File>>,
-    map: &mut std::collections::HashMap<usize, String>,
-) {
-    for np in toc {
-        // 去掉 href 中的 #fragment，避免路径匹配失败
-        let href = np.content.to_string_lossy();
-        let clean = href.split('#').next().unwrap_or(&href);
-        if let Some(idx) = doc.resource_uri_to_chapter(&PathBuf::from(clean)) {
-            map.entry(idx).or_insert_with(|| np.label.clone());
-        }
-        collect_chapter_titles(&np.children, doc, map);
+/// 把 toc（含嵌套 children）DFS 展平为有序 label 列表，
+/// 用于按阅读顺序为 pages 标注章节标题。
+fn flatten_toc_labels(toc: &[TocEntry]) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in toc {
+        out.push(entry.label.clone());
+        out.extend(flatten_toc_labels(&entry.children));
     }
+    out
+}
+
+/// 将 epub-parser 抽取的纯文本转为前端可渲染的消毒 HTML。
+/// 该库已剥离标签、块级元素以换行分隔；此处做 HTML 转义，
+/// 空行作为段落分隔、段内换行转为 <br>，保留段落结构供多栏排版。
+fn text_to_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 4);
+    let mut para = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            if !para.is_empty() {
+                out.push_str("<p>");
+                out.push_str(&html_escape(&para));
+                out.push_str("</p>");
+                para.clear();
+            }
+        } else {
+            if !para.is_empty() {
+                para.push_str("<br>");
+            }
+            para.push_str(line);
+        }
+    }
+    if !para.is_empty() {
+        out.push_str("<p>");
+        out.push_str(&html_escape(&para));
+        out.push_str("</p>");
+    }
+    out
 }
 
 /// 消毒 XHTML：只保留 <p>/<em>/<strong>/<br>，剥离其余一切。

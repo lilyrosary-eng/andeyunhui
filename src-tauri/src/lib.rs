@@ -1,7 +1,8 @@
 pub mod commands;
-pub mod pro_tools;
 pub mod screenshot;
 pub mod services;
+// 专业模块「薄荷」工具以内部依赖包形式存在（crates/pro-tools-kit）
+// 主 crate 通过 `use pro_tools_kit::*;` 直接引入命令（见 main.rs）
 
 /// 托盘模式状态：Rust 侧全局共享
 pub struct TrayModeState {

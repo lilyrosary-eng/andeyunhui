@@ -10,7 +10,6 @@ interface Win {
   y: number;
   width: number;
   height: number;
-  is_self?: boolean;
 }
 
 interface ScreenshotOverlayProps {
@@ -120,14 +119,14 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     [ox, oy, scale],
   );
 
-  // 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标且非本进程的窗口。
-  // 这与微信/QQ 截图的 WindowFromPoint 语义等价——光标下「最顶层的外部窗口」即用户视觉目标。
-  // 旧实现用「面积最小者」会在存在透明/层叠窗口时误选更小但非顶层的窗口，导致小窗口「多出一点」。
+  // 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标的窗口。
+  // 这与微信/QQ 截图的 WindowFromPoint 语义等价——光标下「最顶层的窗口」即用户视觉目标。
+  // 工具覆盖窗（screenshot-overlay/recorder-select/recorder-widget/tray-menu）已在 Rust 侧排除，
+  // 主窗口保留可被高亮（用户明确要求不屏蔽本软件）。
   const hitWindow = useCallback(
     (cx: number, cy: number): Win | null => {
       const p = toPhys(cx, cy);
       for (const w of windows) {
-        if (w.is_self) continue;
         if (p.x >= w.x && p.x <= w.x + w.width && p.y >= w.y && p.y <= w.y + w.height) {
           return w;
         }

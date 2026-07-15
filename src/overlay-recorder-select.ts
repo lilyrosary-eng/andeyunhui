@@ -29,7 +29,6 @@ interface Win {
   y: number;
   width: number;
   height: number;
-  is_self?: boolean;
 }
 
 // ========== 坐标信息（从 Rust recorder-select-ready 事件获取）==========
@@ -156,12 +155,13 @@ function toPhys(cx: number, cy: number): { x: number; y: number } {
   return { x: ox + cx * scale, y: oy + cy * scale };
 }
 
-// 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标且非本进程的窗口。
+// 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标的窗口。
 // 与微信/QQ 截图的 WindowFromPoint 语义等价——避免「面积最小者」误选非顶层小窗口导致偏移。
+// 工具覆盖窗（screenshot-overlay/recorder-select/recorder-widget/tray-menu）已在 Rust 侧排除，
+// 主窗口保留可被高亮（用户明确要求不屏蔽本软件）。
 function hitWindow(cx: number, cy: number): Win | null {
   const p = toPhys(cx, cy);
   for (const w of windows) {
-    if (w.is_self) continue;
     if (p.x >= w.x && p.x <= w.x + w.width && p.y >= w.y && p.y <= w.y + w.height) {
       return w;
     }

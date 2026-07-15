@@ -1,15 +1,21 @@
-// 插件部署脚本：构建插件并复制到 bundled-plugins/{id}/ 供 Tauri bundle.resources 打包使用
+// 插件部署脚本：构建插件并复制到 bundled-plugins/ 供 Tauri bundle.resources 打包使用
 //
 // 开发与打包统一路径：插件始终从 bundled-plugins/ 加载，external-deps 始终从 external-deps/ 加载
 // 不再复制到 AppData，确保开发时与打包后的运行环境完全一致
 //
+// 目录结构：bundled-plugins/ 镜像 plugins/ 的目录结构（按模块归类）
+//   - 顶级主模块：image/, music/, professional/, reading/, video/
+//   - 茑萝子插件：niaoluo/gongjuxiang/, niaoluo/huihua/, niaoluo/ide/, niaoluo/wps/
+//   - 服务插件：  全局/markitdown/, 全局/screen-recorder/
+//   - 空占位：    note/（.gitkeep）
+// Rust 端 walk() / find_plugin_root() 递归扫描，天然支持嵌套目录结构。
+//
 // 自动发现：递归扫描 plugins/ 下所有含 manifest.json 的子目录（排除 _shared/_template）
-// 嵌套目录（如 niaoluo/gongjuxiang）也支持，但部署时按 manifest.id 平铺到根目录，
-// 不再保留嵌套层级（避免路径耦合，Rust 端 find_plugin_root 按 id 递归匹配即可定位）
+// 嵌套目录（如 niaoluo/gongjuxiang）保留层级部署到 bundled-plugins/niaoluo/gongjuxiang/
 //
 // 增量更新策略：
-//   - 不再全删重建 bundled-plugins/，仅按 id 更新有变化的插件
-//   - 清理源码中已不存在的插件目录（cleanStalePlugins）
+//   - 不再全删重建 bundled-plugins/，仅按 relPath 更新有变化的插件
+//   - 递归清理源码中已不存在的插件目录（按 relPath 比对，非 id）
 //   - 占位文件夹（含 .gitkeep）不会被清理
 //
 // 新增插件只需在 plugins/ 下创建目录 + manifest.json，无需修改此脚本
@@ -22,7 +28,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
 const pluginsDir = join(rootDir, 'plugins');
 
-// 目标目录：bundled-plugins/{plugin_id}/ （开发时直接加载 + 生产打包嵌入资源）
+// 目标目录：bundled-plugins/ （开发时直接加载 + 生产打包嵌入资源）
 const bundledDir = join(rootDir, 'bundled-plugins');
 
 // 递归自动发现插件：扫描 plugins/ 下所有含 manifest.json 的目录（排除 _shared/_template），
@@ -59,47 +65,53 @@ discoverPlugins(pluginsDir, '', plugins);
 console.log(`[Deploy] 发现 ${plugins.length} 个插件:`);
 plugins.forEach(p => console.log(`  - id=${p.id}  src=${p.relPath}`));
 
-// ===== 增量更新：清理已不存在的插件 =====
-// 对比源码 plugins/ 的 id 列表与部署目录，删除源码中已不存在的插件目录
-// 全局/ 目录本身保留（占位），但其下的插件子目录会被清理（避免与按 id 平铺的副本冲突，
-// 导致 Rust 端 find_plugin_root 递归查找时命中不确定的副本）
-function cleanStalePlugins(targetDir, validIds, label) {
+// ===== 增量更新：递归清理已不存在的插件（按 relPath 比对） =====
+// 对比源码 plugins/ 的 relPath 集合与部署目录，递归删除源码中已不存在的插件目录。
+// 容器目录（如 niaoluo/、全局/）本身保留——它们可能仍是其他有效插件的父目录。
+function cleanStalePlugins(targetDir, validRelPaths, label) {
   if (!existsSync(targetDir)) return;
-  const keepPlaceholders = new Set(['全局', 'global', '.gitkeep', 'manifest.json']);
-  for (const name of readdirSync(targetDir)) {
-    const full = join(targetDir, name);
-    if (!statSync(full).isDirectory()) continue;
-    // 跨平台兼容：中文名 "全局" 与英文名 "global" 都视为非插件目录
-    if (name === '全局' || name === 'global') {
-      cleanGlobalSubplugins(full, validIds, `${label}/${name}`);
-      continue;
+  // 递归扫描：找到所有含 manifest.json 的目录，若其相对路径不在 validRelPaths 中则删除
+  function walk(dir, prefix) {
+    let remaining = 0; // 该层下剩余的有效条目数（用于判断是否需清理空容器）
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      const stat = statSync(full);
+      if (!stat.isDirectory()) {
+        // 保留 .gitkeep 与 manifest.json（根清单）等非插件文件
+        remaining++;
+        continue;
+      }
+      const rel = prefix ? `${prefix}/${name}` : name;
+      const manifestPath = join(full, 'manifest.json');
+      if (existsSync(manifestPath)) {
+        // 这是一个插件目录：按 relPath 判定是否保留
+        if (validRelPaths.has(rel)) {
+          remaining++;
+        } else {
+          console.log(`[Deploy] 清理已移除的 ${label}: ${rel}/`);
+          rmSync(full, { recursive: true, force: true });
+        }
+        // 不再下钻（插件目录内部由部署阶段全量重建）
+        continue;
+      }
+      // 非插件目录：递归下钻（如 niaoluo/ 容器目录）
+      const subRemaining = walk(full, rel);
+      if (subRemaining > 0) {
+        remaining++;
+      } else if (prefix !== '') {
+        // 子容器已空且非顶层（顶层容器如 niaoluo/、全局/ 保留以便用户手动放入插件）
+        // 这里仅记录，不自动删除——避免误删用户手动创建的占位目录
+      }
     }
-    if (keepPlaceholders.has(name)) continue;
-    if (!validIds.has(name)) {
-      console.log(`[Deploy] 清理已移除的 ${label}: ${name}/`);
-      rmSync(full, { recursive: true, force: true });
-    }
+    return remaining;
   }
+  walk(targetDir, '');
 }
 
-// 清理 全局 目录下的插件子目录（新逻辑下所有插件按 id 平铺到根目录，全局/ 只存放非插件资源）
-function cleanGlobalSubplugins(globalDir, validIds, label) {
-  for (const name of readdirSync(globalDir)) {
-    if (name === '.gitkeep') continue;
-    const full = join(globalDir, name);
-    if (!statSync(full).isDirectory()) continue;
-    // 子目录含 manifest.json 即视为插件副本，删除（无论 id 是否有效，平铺副本已存在于根目录）
-    if (existsSync(join(full, 'manifest.json'))) {
-      console.log(`[Deploy] 清理 ${label}/ 下的冗余插件副本: ${name}/`);
-      rmSync(full, { recursive: true, force: true });
-    }
-  }
-}
+const validRelPaths = new Set(plugins.map(p => p.relPath));
+cleanStalePlugins(bundledDir, validRelPaths, 'bundled-plugins');
 
-const validIds = new Set(plugins.map(p => p.id));
-cleanStalePlugins(bundledDir, validIds, 'bundled-plugins');
-
-// ===== 部署每个插件（按 id 平铺到根目录） =====
+// ===== 部署每个插件（保留源码相对路径，与 plugins/ 结构一致） =====
 for (const { relPath, id, manifest } of plugins) {
   const pluginDir = join(pluginsDir, relPath);
   if (!existsSync(pluginDir)) continue;
@@ -108,9 +120,11 @@ for (const { relPath, id, manifest } of plugins) {
   console.log(`\n[Deploy] ${hasViteConfig ? '构建' : '复制'}插件: ${id} (源: ${relPath})`);
 
   // 1. 构建（有 vite 配置）或跳过（预构建插件）
+  //    使用 npx 而非 pnpm exec：避免 pnpm 的 deps status check 触发 install，
+  //    而 install 在 node_modules 被占用时会 EPERM 失败（Windows 常见问题）
   if (hasViteConfig) {
     try {
-      execSync('pnpm exec vite build', { cwd: pluginDir, stdio: 'inherit', timeout: 120_000 });
+      execSync('npx vite build', { cwd: pluginDir, stdio: 'inherit', timeout: 120_000 });
     } catch (e) {
       console.error(`[Deploy] 构建失败: ${id}`, e.message);
       continue;
@@ -122,8 +136,9 @@ for (const { relPath, id, manifest } of plugins) {
   const entryFile = join(pluginDir, 'index.js');
   const manifestSrc = join(pluginDir, 'manifest.json');
 
-  // 2. 复制到 bundled-plugins（开发时直接加载 + 生产打包嵌入资源）—— 按 id 平铺
-  const bundleTarget = join(bundledDir, id);
+  // 2. 复制到 bundled-plugins（保留源码相对路径，与 plugins/ 结构一致）
+  //    Rust 端 walk() / find_plugin_root() 递归扫描，天然支持嵌套目录结构
+  const bundleTarget = join(bundledDir, relPath);
   if (existsSync(bundleTarget)) rmSync(bundleTarget, { recursive: true, force: true });
   mkdirSync(bundleTarget, { recursive: true });
   cpSync(manifestSrc, join(bundleTarget, 'manifest.json'));
@@ -132,7 +147,7 @@ for (const { relPath, id, manifest } of plugins) {
   } else if (existsSync(entryFile)) {
     cpSync(entryFile, join(bundleTarget, 'index.js'));
   }
-  console.log(`  ✓ -> bundled-plugins/${id}`);
+  console.log(`  ✓ -> bundled-plugins/${relPath}`);
 
   console.log(`[Deploy] ${id} 部署完成`);
 }
