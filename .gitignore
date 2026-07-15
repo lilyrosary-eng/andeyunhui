@@ -44,8 +44,10 @@ research_report_*.md
 # 增量编译缓存
 *.tsbuildinfo
 
-# external-deps 本地构建产物
-external-deps/_build/
+# external-deps 构建入口源（*-entry.js）：随仓库分发，以便在干净克隆上重建 CodeMirror / TipTap 等外部依赖。
+# 注意：构建产物落在 external-deps/<plugin>/.../index.js（随包分发），不在此忽略。
+external-deps/_build/*
+!external-deps/_build/*-entry.js
 
 # 构建期自动生成的 wait-page base64 模块（由 scripts/gen-waiting-pages.mjs 生成）
 src/lib/_waitingPages.generated.ts

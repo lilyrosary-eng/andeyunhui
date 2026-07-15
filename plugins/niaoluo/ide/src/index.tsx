@@ -139,7 +139,9 @@ function CmEditor({
         cm.basicSetup,
         cm.keymap.of([cm.indentWithTab]),
         cm.search(),
-        cm.searchKeymap,
+        // 注意：searchKeymap 是一组裸 KeyBinding（{key,run} 普通对象），
+        // 必须用 keymap.of 包裹成合法扩展，否则 CM6 报 "Unrecognized extension value ([object Object])"。
+        cm.keymap.of(cm.searchKeymap),
         langCpt.current.of(cmLang(cm, effectiveLang)),
         themeCpt.current.of(
           resolvedTheme === 'dark'
@@ -469,18 +471,22 @@ function IdeSidebar() {
   const [root, setRoot] = useState<string | null>(null);
   const [tree, setTree] = useState<DirEntry[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [folderError, setFolderError] = useState<string | null>(null);
 
   const pickFolder = async () => {
     try {
       const dirs = await hostApi.invoke<string[] | null>('pick_directory', {});
-      if (dirs && dirs.length > 0) {
-        setRoot(dirs[0]);
-        const list = await hostApi.invoke<DirEntry[]>('list_directory', { path: dirs[0] });
-        setTree(list);
-        setExpanded(new Set());
-      }
+      const dir = dirs && dirs[0] ? dirs[0].trim() : '';
+      if (!dir) return;
+      setRoot(dir);
+      setFolderError(null);
+      const list = await hostApi.invoke<DirEntry[]>('list_directory', { path: dir });
+      setTree(list);
+      setExpanded(new Set());
     } catch (e) {
       console.error('[IDE] 打开文件夹失败:', e);
+      // 路径不存在（os error 3 等）时显式提示用户，而非仅留控制台报错
+      setFolderError('打开文件夹失败：' + (e as Error).message);
     }
   };
 
@@ -495,7 +501,9 @@ function IdeSidebar() {
           return [...filtered, ...list];
         });
         setExpanded((prev) => new Set([...prev, dirPath]));
-      } catch { /* ignore */ }
+      } catch (e) {
+        setFolderError('展开目录失败：' + (e as Error).message);
+      }
     }
   };
 
@@ -522,6 +530,11 @@ function IdeSidebar() {
           className="w-full py-1.5 rounded-lg text-xs font-medium bg-[var(--element-bg)]/10 text-[var(--element-bg)] hover:bg-[var(--element-bg)]/20 transition-colors">
           {root ? baseName(root) : '打开文件夹'}
         </button>
+        {folderError && (
+          <div className="mt-1 px-2 py-1 text-[11px] text-red-500 dark:text-red-400 bg-red-500/10 rounded">
+            {folderError}
+          </div>
+        )}
       </div>
       <div className="flex-1 overflow-auto min-h-0">
         {!root ? (

@@ -120,11 +120,13 @@ for (const { relPath, id, manifest } of plugins) {
   console.log(`\n[Deploy] ${hasViteConfig ? '构建' : '复制'}插件: ${id} (源: ${relPath})`);
 
   // 1. 构建（有 vite 配置）或跳过（预构建插件）
-  //    使用 npx 而非 pnpm exec：避免 pnpm 的 deps status check 触发 install，
-  //    而 install 在 node_modules 被占用时会 EPERM 失败（Windows 常见问题）
+  //    用 pnpm exec 而非 npx：项目本身是 pnpm 体系（根 .npmrc 含 pnpm 专属键），
+  //    npx 底层走 npm 会不识别这些键并报 "Unknown project config" 警告。
+  //    pnpm exec 只执行已存在的二进制、不触发 install（避免 node_modules 被占用时 EPERM），
+  //    且能正确识别根 .npmrc 的 pnpm 配置，警告即消除。
   if (hasViteConfig) {
     try {
-      execSync('npx vite build', { cwd: pluginDir, stdio: 'inherit', timeout: 120_000 });
+      execSync('pnpm exec vite build', { cwd: pluginDir, stdio: 'inherit', timeout: 120_000 });
     } catch (e) {
       console.error(`[Deploy] 构建失败: ${id}`, e.message);
       continue;

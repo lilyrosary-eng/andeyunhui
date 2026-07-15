@@ -35,6 +35,10 @@ external-deps/
 
 ## 添加新依赖
 
+**JS / 前端重库（推荐走构建链路）**：需要 CodeMirror / TipTap 这类重库时，不要直接丢文件，而是用构建脚本打成 IIFE 按需加载。完整步骤与模板入口见 **`templates/external-dep/`**（复制 `templates/external-dep/entry.js` → `external-deps/_build/<dep>-entry.js`，在 `scripts/build-external-deps.mjs` 的 `TARGETS` 登记，跑 `node scripts/build-external-deps.mjs`）。这样重库不进插件包、可被多个插件复用、仅在用到时加载。
+
+**其它第三方项目 / 工具（直接放置）**：
+
 1. 在 `external-deps/` 下新建子文件夹，命名与依赖项目一致
 2. 将第三方项目文件放入该子文件夹
 3. 在本 README 的"已集成依赖"表中添加条目
