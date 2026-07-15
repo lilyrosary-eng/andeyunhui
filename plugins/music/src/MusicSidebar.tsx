@@ -132,14 +132,15 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
     }
 
     return React.createElement(ContextMenu, { key: playlist.id },
-      React.createElement(ContextMenuTrigger, { className: 'w-full' },
+      React.createElement(ContextMenuTrigger, { key: 'trigger', className: 'w-full' },
         buttonContent
       ),
-      React.createElement(ContextMenuContent, null,
-        React.createElement(ContextMenuItem, { onClick: () => onSelectPlaylist(playlist) }, '播放歌单'),
-        React.createElement(ContextMenuSeparator),
-        React.createElement(ContextMenuItem, { onClick: () => startRename(playlist) }, '重命名'),
+      React.createElement(ContextMenuContent, { key: 'content' },
+        React.createElement(ContextMenuItem, { key: 'play', onClick: () => onSelectPlaylist(playlist) }, '播放歌单'),
+        React.createElement(ContextMenuSeparator, { key: 'sep1' }),
+        React.createElement(ContextMenuItem, { key: 'rename', onClick: () => startRename(playlist) }, '重命名'),
         playlist.type === 'custom' ? React.createElement(ContextMenuItem, {
+          key: 'delete',
           onClick: () => onDeletePlaylist?.(playlist),
           variant: 'destructive',
         }, '删除歌单') : null,
@@ -190,7 +191,7 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
     searchPlaceholder: '搜索歌单...',
     primaryAction: { label: '+ 添加文件夹', onClick: onSelectFolder },
     children: React.createElement(React.Fragment, null,
-      showNewInput && React.createElement('div', { className: 'mb-4' },
+      showNewInput && React.createElement('div', { key: 'new-input', className: 'mb-4' },
         React.createElement('input', {
           type: 'text',
           className: 'w-full px-3 py-2 bg-white/50 dark:bg-stone-700/50 border border-white/80 dark:border-stone-600/50 rounded-xl text-sm text-neutral-700 dark:text-stone-200 focus:outline-none focus:ring-1 focus:ring-[var(--element-border)]',
@@ -206,12 +207,12 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
       ),
       SecondaryNavShell
         ? React.createElement(SecondaryNavShell, null,
-            playlistItems,
-            actionItems
+            React.createElement(React.Fragment, { key: 'playlists' }, playlistItems),
+            React.createElement(React.Fragment, { key: 'actions' }, actionItems)
           )
         : React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1 space-y-3' },
-            playlistItems,
-            actionItems
+            React.createElement(React.Fragment, { key: 'playlists' }, playlistItems),
+            React.createElement(React.Fragment, { key: 'actions' }, actionItems)
           )
     ),
   });

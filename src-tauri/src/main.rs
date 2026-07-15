@@ -296,6 +296,8 @@ fn main() {
             let _ = create_overlay_window(app.handle().clone());
             // 预创建录屏区域选择覆盖窗（隐藏），首次使用时无需等待 WebView2 初始化
             let _ = recording_service::create_recorder_select_window(app.handle());
+            // 预创建录屏控制台窗口（隐藏），避免在 sync 命令中 build 导致 WebView2 主线程重入死锁
+            let _ = recording_service::create_recorder_widget_window(app.handle());
             let _ = create_tray_menu_window(app.handle());
 
             // 托盘图标：优先使用默认窗口图标；若极端情况下为 None，则从资源目录
@@ -666,6 +668,8 @@ fn main() {
             list_processes,
             clipboard_read,
             clipboard_write,
+            clipboard_read_image,
+            clipboard_clear,
             convert_image,
             convert_document,
             check_ffmpeg,

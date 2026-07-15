@@ -117,10 +117,22 @@ function CmEditor({
   const langCpt = useRef<any>(null);
   const themeCpt = useRef<any>(null);
   const wrapCpt = useRef<any>(null);
+  const selCpt = useRef<any>(null);
   const onChangeRef = useRef(onChange);
   const onCursorRef = useRef(onCursor);
   onChangeRef.current = onChange;
   onCursorRef.current = onCursor;
+
+  // 显式定义选区背景，避免浅色主题下鼠标拖动选择无可见高亮（drawSelection 已绘制 DOM，
+  // 但 lightTheme 未提供背景色导致选区"看不见"）。
+  const selectionTheme = (dark: boolean) => cm.EditorView.theme({
+    '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
+      backgroundColor: dark ? 'rgba(75, 110, 175, 0.45)' : 'rgba(30, 110, 200, 0.28)',
+    },
+    '.cm-selectionMatch': {
+      backgroundColor: dark ? 'rgba(75, 110, 175, 0.35)' : 'rgba(30, 110, 200, 0.22)',
+    },
+  }, { dark });
 
   const effectiveLang = tab.lang === 'auto' ? (tab.path ? langFromPath(tab.path) : 'plaintext') : tab.lang;
 
@@ -131,6 +143,7 @@ function CmEditor({
     langCpt.current = new cm.Compartment();
     themeCpt.current = new cm.Compartment();
     wrapCpt.current = new cm.Compartment();
+    selCpt.current = new cm.Compartment();
     const resolvedTheme = theme === 'auto' ? (isDark() ? 'dark' : 'light') : theme;
     const view = new cm.EditorView({
       doc: tab.doc,
@@ -148,6 +161,7 @@ function CmEditor({
             ? cm.oneDark
             : [cm.lightTheme, cm.syntaxHighlighting(cm.defaultHighlightStyle)],
         ),
+        selCpt.current.of(selectionTheme(resolvedTheme === 'dark')),
         wrapCpt.current.of(wrap ? cm.EditorView.lineWrapping : []),
         cm.EditorView.updateListener.of((u: any) => {
           if (u.docChanged) {
@@ -171,10 +185,14 @@ function CmEditor({
     const view = viewRef.current;
     if (!view) return;
     const resolvedTheme = theme === 'auto' ? (isDark() ? 'dark' : 'light') : theme;
+    const dark = resolvedTheme === 'dark';
     view.dispatch({
-      effects: themeCpt.current.reconfigure(
-        resolvedTheme === 'dark' ? cm.oneDark : [cm.lightTheme, cm.syntaxHighlighting(cm.defaultHighlightStyle)],
-      ),
+      effects: [
+        themeCpt.current.reconfigure(
+          dark ? cm.oneDark : [cm.lightTheme, cm.syntaxHighlighting(cm.defaultHighlightStyle)],
+        ),
+        selCpt.current.reconfigure(selectionTheme(dark)),
+      ],
     });
   }, [theme, cm]);
 
@@ -475,8 +493,8 @@ function IdeSidebar() {
 
   const pickFolder = async () => {
     try {
-      const dirs = await hostApi.invoke<string[] | null>('pick_directory', {});
-      const dir = dirs && dirs[0] ? dirs[0].trim() : '';
+      const picked = await hostApi.invoke<string | null>('pick_directory', {});
+      const dir = picked ? picked.trim() : '';
       if (!dir) return;
       setRoot(dir);
       setFolderError(null);

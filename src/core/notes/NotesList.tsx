@@ -216,7 +216,7 @@ export function NotesList() {
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent>
-                  <ContextMenuItem onClick={() => {
+                  <ContextMenuItem key="duplicate" onClick={() => {
                     logger.sidebar.duplicate(note.id);
                     api.duplicateNote(note.id).then(() => {
                       logger.sidebar.duplicateDone();
@@ -225,13 +225,13 @@ export function NotesList() {
                   }}>
                     <Copy size={14} />复制笔记
                   </ContextMenuItem>
-                  <ContextMenuItem onClick={() => {
+                  <ContextMenuItem key="pin" onClick={() => {
                     logger.sidebar.togglePin(note.id);
                     api.togglePinNote(note.id).then(() => api.getAllNotes().then(onRefreshNotes));
                   }}>
                     <Pin size={14} />{note.pinned ? '取消置顶' : '置顶笔记'}
                   </ContextMenuItem>
-                  <ContextMenuItem onClick={() => {
+                  <ContextMenuItem key="float" onClick={() => {
                     // 为了简化，使用默认坐标
                     api.createFloatingNoteWindow(note.id, note.title, 100, 100)
                       .catch((err) => console.error('[NotesList] createFloatingNoteWindow 调用失败:', err));
@@ -242,8 +242,8 @@ export function NotesList() {
                     </svg>
                     分离浮窗
                   </ContextMenuItem>
-                  <ContextMenuSeparator />
-                  <ContextMenuItem variant="destructive" onClick={() => {
+                  <ContextMenuSeparator key="sep" />
+                  <ContextMenuItem key="delete" variant="destructive" onClick={() => {
                     logger.sidebar.deleteConfirm(note.id);
                     if (window.confirm('确定要把这篇笔记移到回收站吗？')) {
                       logger.sidebar.deleteConfirmed(note.id);

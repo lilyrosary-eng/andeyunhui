@@ -443,66 +443,321 @@ function EnvVars() {
   );
 }
 
-// ========== t16 剪贴板历史 ==========
+// ========== t16 剪贴板历史（极致专业版）==========
+interface ClipItem {
+  id: string;
+  type: 'text' | 'image';
+  content: string; // 文本内容 或 data URL
+  preview: string; // 预览文本（图片为尺寸信息）
+  timestamp: number;
+  pinned: boolean;
+  charCount?: number;
+}
+
+const CLIP_STORAGE_KEY = 'clipboard_history_v1';
+const CLIP_MAX_TEXT = 200;
+const CLIP_MAX_IMAGE = 20;
+
+function formatTime(ts: number): string {
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
 function ClipboardHistory() {
+  const [items, setItems] = useState<ClipItem[]>([]);
   const [current, setCurrent] = useState('');
-  const [history, setHistory] = useState<string[]>([]);
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState<'all' | 'text' | 'image' | 'pinned'>('all');
   const [error, setError] = useState('');
   const [polling, setPolling] = useState(true);
-  const lastRef = useRef('');
+  const lastTextRef = useRef('');
+  const lastImageRef = useRef('');
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const readNow = async (): Promise<string> => {
-    try { const t: string = await hostInvoke('clipboard_read'); setCurrent(t); lastRef.current = t; return t; }
-    catch (e) { setError((e as Error).message); return ''; }
-  };
+  // 从 localStorage 加载持久化文本历史
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(CLIP_STORAGE_KEY);
+      if (saved) {
+        const parsed: ClipItem[] = JSON.parse(saved);
+        setItems(parsed);
+        if (parsed.length > 0 && parsed[0].type === 'text') {
+          lastTextRef.current = parsed[0].content;
+        }
+      }
+    } catch { /* ignore */ }
+    // 初始读取当前剪贴板
+    hostInvoke('clipboard_read').then((t: string) => { setCurrent(t); lastTextRef.current = t; }).catch(() => {});
+  }, []);
 
-  const writeNow = async (text: string) => {
-    if (!text) return;
-    try { await hostInvoke('clipboard_write', { text }); setCurrent(text); lastRef.current = text; }
-    catch (e) { setError((e as Error).message); }
-  };
+  // 持久化文本历史到 localStorage（图片不持久化，太占空间）
+  useEffect(() => {
+    try {
+      const textItems = items.filter(i => i.type === 'text').slice(0, CLIP_MAX_TEXT);
+      localStorage.setItem(CLIP_STORAGE_KEY, JSON.stringify(textItems));
+    } catch { /* localStorage 满了，忽略 */ }
+  }, [items]);
 
-  useEffect(() => { readNow(); }, []);
+  // 轮询剪贴板（1s 间隔，比原来 1.5s 更快）
   useEffect(() => {
     if (!polling) return;
     const id = setInterval(async () => {
       try {
-        const t: string = await hostInvoke('clipboard_read');
-        if (t && t !== lastRef.current) {
-          lastRef.current = t;
-          setCurrent(t);
-          setHistory(h => [t, ...h].slice(0, 50));
+        // 先读图片（截图后剪贴板是图片，优先级高）
+        const img: string | null = await hostInvoke('clipboard_read_image');
+        if (img && img !== lastImageRef.current) {
+          lastImageRef.current = img;
+          lastTextRef.current = '';
+          const newItem: ClipItem = {
+            id: Date.now() + '_img',
+            type: 'image',
+            content: img,
+            preview: '图片',
+            timestamp: Date.now(),
+            pinned: false,
+          };
+          setItems(prev => [newItem, ...prev.filter(i => i.type !== 'image' || i.content !== img)].slice(0, CLIP_MAX_TEXT + CLIP_MAX_IMAGE));
+          return;
         }
-      } catch (_) { /* 忽略轮询错误 */ }
-    }, 1500);
+        // 再读文本
+        const text: string = await hostInvoke('clipboard_read');
+        if (text && text !== lastTextRef.current) {
+          lastTextRef.current = text;
+          lastImageRef.current = '';
+          setCurrent(text);
+          const newItem: ClipItem = {
+            id: Date.now() + '_txt',
+            type: 'text',
+            content: text,
+            preview: text.slice(0, 200),
+            timestamp: Date.now(),
+            pinned: false,
+            charCount: text.length,
+          };
+          setItems(prev => [newItem, ...prev.filter(i => !(i.type === 'text' && i.content === text))].slice(0, CLIP_MAX_TEXT + CLIP_MAX_IMAGE));
+        }
+      } catch { /* 忽略轮询错误 */ }
+    }, 1000);
     return () => clearInterval(id);
   }, [polling]);
 
+  // 过滤 + 搜索
+  const filtered = useMemo(() => {
+    let result = items;
+    if (filter === 'text') result = result.filter(i => i.type === 'text');
+    else if (filter === 'image') result = result.filter(i => i.type === 'image');
+    else if (filter === 'pinned') result = result.filter(i => i.pinned);
+    if (search) {
+      const q = search.toLowerCase();
+      result = result.filter(i => i.type === 'text' && i.content.toLowerCase().includes(q));
+    }
+    return result;
+  }, [items, filter, search]);
+
+  // 统计
+  const stats = useMemo(() => ({
+    total: items.length,
+    text: items.filter(i => i.type === 'text').length,
+    image: items.filter(i => i.type === 'image').length,
+    pinned: items.filter(i => i.pinned).length,
+  }), [items]);
+
+  // 操作：写入剪贴板
+  const writeToClipboard = async (item: ClipItem) => {
+    try {
+      if (item.type === 'text') {
+        await hostInvoke('clipboard_write', { text: item.content });
+        setCurrent(item.content);
+        lastTextRef.current = item.content;
+        lastImageRef.current = '';
+      } else {
+        await hostInvoke('clipboard_write_image', { base64Png: item.content });
+        lastImageRef.current = item.content;
+        lastTextRef.current = '';
+      }
+      // 显示复制成功反馈
+      setCopiedId(item.id);
+      setTimeout(() => setCopiedId(null), 1500);
+    } catch (e) { setError((e as Error).message); }
+  };
+
+  // 写入编辑后的文本
+  const writeCurrent = async () => {
+    if (!current) return;
+    try {
+      await hostInvoke('clipboard_write', { text: current });
+      lastTextRef.current = current;
+      lastImageRef.current = '';
+    } catch (e) { setError((e as Error).message); }
+  };
+
+  const refreshNow = async () => {
+    try {
+      const img: string | null = await hostInvoke('clipboard_read_image');
+      if (img) { lastImageRef.current = img; setCurrent(''); return; }
+      const t: string = await hostInvoke('clipboard_read');
+      setCurrent(t); lastTextRef.current = t;
+    } catch (e) { setError((e as Error).message); }
+  };
+
+  const togglePin = (id: string) => {
+    setItems(prev => prev.map(i => i.id === id ? { ...i, pinned: !i.pinned } : i));
+  };
+
+  const deleteItem = (id: string) => {
+    setItems(prev => prev.filter(i => i.id !== id));
+  };
+
+  const clearAll = () => {
+    setItems(prev => prev.filter(i => i.pinned)); // 保留固定的
+  };
+
+  const clearSystemClipboard = async () => {
+    try { await hostInvoke('clipboard_clear'); setCurrent(''); lastTextRef.current = ''; lastImageRef.current = ''; }
+    catch (e) { setError((e as Error).message); }
+  };
+
+  const exportHistory = () => {
+    const text = items
+      .filter(i => i.type === 'text')
+      .map(i => `[${new Date(i.timestamp).toLocaleString()}]\n${i.content}`)
+      .join('\n\n---\n\n');
+    const blob = new Blob([text || '（无历史记录）'], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `clipboard_history_${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // 打开浮窗
+  const openFloating = async () => {
+    try {
+      await window.__HOST_API__.createFloatingWindow('floating-clipboard', 'index.html?floating=clipboard', {
+        title: '剪贴板浮窗',
+        width: 360,
+        height: 480,
+        minWidth: 280,
+        minHeight: 320,
+        decorations: false,
+        resizable: true,
+        transparent: true,
+      });
+    } catch (e) { setError((e as Error).message); }
+  };
+
+  const filterTabs: Array<{ id: 'all' | 'text' | 'image' | 'pinned'; label: string; count: number }> = [
+    { id: 'all', label: '全部', count: stats.total },
+    { id: 'text', label: '文本', count: stats.text },
+    { id: 'image', label: '图片', count: stats.image },
+    { id: 'pinned', label: '固定', count: stats.pinned },
+  ];
+
   return (
     <div className="space-y-3">
+      {/* 顶部操作栏 */}
       <div className="flex items-center gap-2 flex-wrap">
         <textarea value={current} onChange={e => setCurrent(e.target.value)} spellCheck={false}
           placeholder="当前剪贴板内容（可编辑后写入）…"
-          className="w-full h-24 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
+          className="w-full h-20 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
       </div>
       <div className="flex items-center gap-2 flex-wrap">
-        <button onClick={() => writeNow(current)} className="btn-press px-3 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors text-sm">写入剪贴板</button>
-        <button onClick={() => readNow()} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">刷新</button>
+        <button onClick={writeCurrent} className="btn-press px-3 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors text-sm">写入</button>
+        <button onClick={refreshNow} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">刷新</button>
+        <button onClick={clearSystemClipboard} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">清空剪贴板</button>
         <label className="flex items-center gap-1 text-xs text-neutral-600 dark:text-stone-300 cursor-pointer select-none">
-          <input type="checkbox" checked={polling} onChange={e => setPolling(e.target.checked)} className="accent-[var(--element-bg)]" /> 自动记录历史
+          <input type="checkbox" checked={polling} onChange={e => setPolling(e.target.checked)} className="accent-[var(--element-bg)]" /> 自动记录
         </label>
-        <button onClick={() => setHistory([])} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm ml-auto">清空历史</button>
+        <div className="flex-1" />
+        <button onClick={openFloating} className="btn-press px-3 py-1.5 rounded-lg bg-blue-500/90 text-white hover:bg-blue-500 transition-colors text-sm flex items-center gap-1" title="以透明浮窗形式打开">
+          {HostIcon ? React.createElement(HostIcon, { name: 'PanelTopOpen', className: 'w-3.5 h-3.5' }) : null}
+          浮窗
+        </button>
+        <button onClick={exportHistory} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">导出</button>
+        <button onClick={clearAll} className="btn-press px-3 py-1.5 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200/50 dark:border-red-700/30 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors text-sm">清空</button>
       </div>
-      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{error}</div>}
-      <div className="text-xs text-neutral-400 dark:text-stone-500">历史记录（{history.length} 条，最新在前）</div>
-      <div className="rounded-xl bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 divide-y divide-white/60 dark:divide-stone-700/40 max-h-[40vh] overflow-y-auto">
-        {history.length === 0 ? (
-          <div className="p-6 text-center text-sm text-neutral-400 dark:text-stone-500">暂无历史，复制内容后将自动记录</div>
-        ) : history.map((h, i) => (
-          <div key={i} className="px-3 py-2 text-sm text-neutral-700 dark:text-stone-200 flex items-start gap-2">
-            <span className="text-neutral-400 dark:text-stone-500 flex-shrink-0 w-6">{i + 1}.</span>
-            <span className="flex-1 break-all whitespace-pre-wrap">{h}</span>
-            <button onClick={() => writeNow(h)} className="btn-press text-xs text-neutral-500 dark:text-stone-400 hover:text-[var(--element-color-raw)] flex-shrink-0">回填</button>
+
+      {/* 统计信息 */}
+      <div className="flex items-center gap-3 text-xs text-neutral-400 dark:text-stone-500 px-1">
+        <span>共 {stats.total} 条</span>
+        <span>·</span>
+        <span>文本 {stats.text}</span>
+        <span>·</span>
+        <span>图片 {stats.image}</span>
+        {stats.pinned > 0 && <><span>·</span><span>固定 {stats.pinned}</span></>}
+      </div>
+
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3 flex items-center justify-between">
+        <span>{error}</span>
+        <button onClick={() => setError('')} className="text-xs text-red-400 hover:text-red-600">✕</button>
+      </div>}
+
+      {/* 搜索 + 分类 */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索文本历史…"
+          className="flex-1 min-w-[120px] px-3 py-1.5 rounded-lg bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)]" />
+        <div className="flex items-center gap-1 rounded-lg bg-white/40 dark:bg-stone-800/40 p-0.5">
+          {filterTabs.map(tab => (
+            <button key={tab.id} onClick={() => setFilter(tab.id)}
+              className={`px-2.5 py-1 rounded-md text-xs transition-colors ${filter === tab.id
+                ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 font-medium'
+                : 'text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200'}`}>
+              {tab.label} <span className="opacity-50">{tab.count}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 历史列表 */}
+      <div className="rounded-xl bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 max-h-[45vh] overflow-y-auto">
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-neutral-400 dark:text-stone-500">
+            {search ? '未找到匹配的记录' : '暂无历史，复制内容后将自动记录'}
+          </div>
+        ) : filtered.map((item) => (
+          <div key={item.id} className="px-3 py-2 border-b border-white/40 dark:border-stone-700/30 last:border-0 flex items-start gap-2 group hover:bg-white/30 dark:hover:bg-stone-700/20 transition-colors">
+            {/* 内容区 */}
+            <div className="flex-1 min-w-0">
+              {item.type === 'image' ? (
+                <div className="space-y-1">
+                  <img src={item.content} alt="剪贴板图片" className="max-h-32 rounded-lg border border-white/40 dark:border-stone-700/40" />
+                  <div className="text-xs text-neutral-400 dark:text-stone-500">{formatTime(item.timestamp)}</div>
+                </div>
+              ) : (
+                <div className="space-y-0.5">
+                  <div className="text-sm text-neutral-700 dark:text-stone-200 break-all whitespace-pre-wrap line-clamp-3">{item.preview}</div>
+                  <div className="text-xs text-neutral-400 dark:text-stone-500 flex items-center gap-2">
+                    <span>{formatTime(item.timestamp)}</span>
+                    {item.charCount && <span>{item.charCount} 字符</span>}
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* 操作按钮 */}
+            <div className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button onClick={() => writeToClipboard(item)}
+                className={`btn-press text-xs px-2 py-1 rounded transition-colors ${copiedId === item.id ? 'text-green-500' : 'text-neutral-500 dark:text-stone-400 hover:text-[var(--element-color-raw)]'}`}
+                title="复制到剪贴板">
+                {copiedId === item.id ? '✓' : '复制'}
+              </button>
+              <button onClick={() => togglePin(item.id)}
+                className={`btn-press text-xs px-2 py-1 rounded transition-colors ${item.pinned ? 'text-amber-500' : 'text-neutral-500 dark:text-stone-400 hover:text-amber-500'}`}
+                title={item.pinned ? '取消固定' : '固定'}>
+                {item.pinned ? '★' : '☆'}
+              </button>
+              <button onClick={() => deleteItem(item.id)}
+                className="btn-press text-xs px-2 py-1 rounded text-neutral-500 dark:text-stone-400 hover:text-red-500 transition-colors"
+                title="删除">✕</button>
+            </div>
+            {item.pinned && <span className="text-amber-500 text-xs flex-shrink-0">★</span>}
           </div>
         ))}
       </div>

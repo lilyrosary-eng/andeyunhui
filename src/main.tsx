@@ -4,6 +4,7 @@ import App from "./App"
 import { ThemeProvider } from "./lib/ThemeProvider"
 import { LyricsWidget } from "./core/lyrics/LyricsWidget"
 import { FloatingNoteView } from "./core/notes/FloatingNoteView"
+import { FloatingClipboardView } from "./core/clipboard/FloatingClipboardView"
 import { initFileLogger } from "./lib/file-logger"
 import "./index.css"
 
@@ -22,7 +23,7 @@ boot.__bootProgress?.(10, { text: "初始化内核", phase: "PHASE 01 / 05" });
 // 窗口分流：检测当前窗口标签，分别走轻量组件，避免主 App 初始化开销
 // 这样 App 组件本身不需要条件 return，符合 React Hooks 规则
 async function bootstrap() {
-  let windowKind: "lyrics" | "floating-note" | "main" = "main";
+  let windowKind: "lyrics" | "floating-note" | "floating-clipboard" | "main" = "main";
   try {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const label = getCurrentWindow().label;
@@ -30,11 +31,18 @@ async function bootstrap() {
       windowKind = "lyrics";
     } else if (new URLSearchParams(window.location.search).get("floating") === "true") {
       windowKind = "floating-note";
+    } else if (new URLSearchParams(window.location.search).get("floating") === "clipboard") {
+      windowKind = "floating-clipboard";
     }
   } catch {
     // 非 Tauri 环境（浏览器开发），检查 URL 参数
-    if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("floating") === "true") {
-      windowKind = "floating-note";
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("floating") === "true") {
+        windowKind = "floating-note";
+      } else if (params.get("floating") === "clipboard") {
+        windowKind = "floating-clipboard";
+      }
     }
   }
 
@@ -82,6 +90,15 @@ async function bootstrap() {
     ReactDOM.createRoot(root).render(
       <React.StrictMode>
         <FloatingNoteView />
+      </React.StrictMode>,
+    );
+  } else if (windowKind === "floating-clipboard") {
+    // 剪贴板浮窗：透明背景，独立渲染，不初始化主 App
+    document.documentElement.style.background = 'transparent';
+    document.body.style.background = 'transparent';
+    ReactDOM.createRoot(root).render(
+      <React.StrictMode>
+        <FloatingClipboardView />
       </React.StrictMode>,
     );
   } else {
