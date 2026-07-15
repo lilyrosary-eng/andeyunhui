@@ -29,6 +29,7 @@ interface Win {
   y: number;
   width: number;
   height: number;
+  is_self?: boolean;
 }
 
 // ========== 坐标信息（从 Rust recorder-select-ready 事件获取）==========
@@ -161,12 +162,12 @@ function toPhys(cx: number, cy: number): { x: number; y: number } {
 }
 
 // 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标的窗口。
-// 与微信/QQ 截图的 WindowFromPoint 语义等价——避免「面积最小者」误选非顶层小窗口导致偏移。
-// 工具覆盖窗（screenshot-overlay/recorder-select/recorder-widget/tray-menu）已在 Rust 侧排除，
-// 主窗口保留可被高亮（用户明确要求不屏蔽本软件）。
+// 跳过 is_self 窗口（本进程的主窗口），避免高亮自身应用窗口。
+// 覆盖窗不在列表中（Rust 侧在 win.show() 之前已获取窗口列表）。
 function hitWindow(cx: number, cy: number): Win | null {
   const p = toPhys(cx, cy);
   for (const w of windows) {
+    if (w.is_self) continue; // 跳过本进程主窗口
     if (p.x >= w.x && p.x <= w.x + w.width && p.y >= w.y && p.y <= w.y + w.height) {
       return w;
     }
@@ -367,22 +368,16 @@ async function startRecordingWithRegion(x: number, y: number, w: number, h: numb
   }
 }
 
-// ========== 初始化：轮询获取坐标（比事件+超时更可靠）==========
-// Rust 的 show_recorder_select 在窗口显示前就 emit 了 recorder-select-ready 事件，
-// 但此时 WebView 的 listen() 可能尚未注册 → 事件丢失。
-// 改用轮询：每 50ms 尝试拉取坐标，最多 20 次（1 秒），确保初始化完成。
-async function initFromEvent(data: { ox: number; oy: number; scale: number }) {
+// ========== 初始化：使用 Rust 侧预获取的窗口列表 ==========
+// Rust 的 show_recorder_select 在 win.show() 之前调用 list_windows 并将窗口列表
+// 包含在 recorder-select-ready 事件中。此时覆盖窗尚未可见，不在列表中。
+// 前端无需单独调用 list_windows（避免覆盖窗显示后调用导致 is_self 过滤问题）。
+async function initFromEvent(data: { ox: number; oy: number; scale: number; windows?: Win[] }) {
   ox = data.ox;
   oy = data.oy;
   scale = data.scale;
-  try {
-    windows = await invoke<Win[]>("list_windows");
-    ready = true;
-  } catch (e) {
-    console.error("[录屏区域] 获取窗口列表失败:", e);
-    windows = [];
-    ready = false;
-  }
+  windows = data.windows ?? [];
+  ready = true;
   // 重置状态
   titleCache = {};
   hoverWin = null;
@@ -394,22 +389,30 @@ async function initFromEvent(data: { ox: number; oy: number; scale: number }) {
 }
 
 // 保留事件监听（快速路径：如果事件能到达，立即初始化）
-listen<{ ox: number; oy: number; scale: number }>("recorder-select-ready", (event) => {
+listen<{ ox: number; oy: number; scale: number; windows?: Win[] }>("recorder-select-ready", (event) => {
   void initFromEvent(event.payload);
 });
 
-// 轮询兜底：确保即使事件丢失也能初始化（与截图覆盖窗的 peek_screenshot 轮询同理）
+// 持续轮询兜底（参考截图覆盖窗的 peek_screenshot 机制）：
+// 1. 首次加载时如果事件丢失，轮询能初始化
+// 2. 持续更新窗口列表（用户在录屏覆盖窗打开期间切换窗口 Z 序时也能识别）
+// 每 50ms 轮询一次，直到 ready 后停止
+//
+// **重要**：不要求 windows.length > 0。即使窗口列表为空（极端情况），
+// 也必须初始化 ox/oy/scale，否则拖拽选区时坐标换算错误 → region 坐标错误 → 录屏退化为全屏。
 async function pollInit() {
-  for (let i = 0; i < 20; i++) {
-    if (ready) return; // 已初始化
+  for (let i = 0; i < 40; i++) {  // 最多重试 40 次（2s）
+    if (ready) return;
     try {
-      const data = await invoke<{ ox: number; oy: number; scale: number }>("get_recorder_select_coords");
-      await initFromEvent(data);
-      return;
+      const data = await invoke<{ ox: number; oy: number; scale: number; windows?: Win[] }>("get_recorder_select_coords");
+      if (data && typeof data.ox === 'number' && typeof data.scale === 'number') {
+        await initFromEvent(data);
+        return;
+      }
     } catch {
       // 窗口可能尚未就绪，稍后重试
-      await new Promise(r => setTimeout(r, 50));
     }
+    await new Promise(r => setTimeout(r, 50));
   }
   console.error("[录屏区域] 初始化超时：无法获取坐标");
 }

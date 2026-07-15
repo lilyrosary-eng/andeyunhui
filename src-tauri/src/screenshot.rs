@@ -1569,6 +1569,251 @@ pub fn clipboard_write_image(base64_png: String) -> Result<(), String> {
     write_clipboard_with_formats(&raw, w, h, &bytes)
 }
 
+/// 从文件路径读取图片并写入系统剪贴板（Win32 API，可靠）
+/// 用于剪贴板历史浮窗：前端只存临时文件路径，复制时从此命令写入
+#[tauri::command]
+pub fn clipboard_write_image_from_path(path: String) -> Result<(), String> {
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("读取文件失败: {}", e))?;
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| format!("图片解码失败: {}", e))?;
+    let rgba = img.into_rgba8();
+    let (w, h) = rgba.dimensions();
+    let raw = rgba.into_raw();
+    write_clipboard_with_formats(&raw, w, h, &bytes)
+}
+
+// ============ 剪贴板图片高效轮询（Win32 API，不依赖 OLE，任何线程可用）============
+//
+// 问题：pro-tools-kit 中的 clipboard_poll_image 使用 arboard，而 arboard::Clipboard::new()
+// 调用 OleInitialize(None)，在 tokio spawn_blocking 的 MTA 线程上返回 RPC_E_CHANGED_MODE。
+// 且原实现是同步 #[tauri::command]，在主线程执行 PNG 编码 + 缩略图生成，大图阻塞 1.5-3s。
+//
+// 方案：在主 crate（已有 winapi 依赖）中用 Win32 API 读取剪贴板，改为 async + spawn_blocking。
+// Win32 API（OpenClipboard + GetClipboardData）不依赖 COM/OLE，任何线程均可用。
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardPollResult {
+    hash: String,
+    temp_path: String,
+    thumbnail: String,
+}
+
+/// 快速计算图片 hash：尺寸 + 首尾采样像素
+fn clip_fast_image_hash(bytes: &[u8], w: u32, h: u32) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    w.hash(&mut hasher);
+    h.hash(&mut hasher);
+    let len = bytes.len();
+    let mid = len / 2;
+    let head = &bytes[..len.min(256)];
+    let middle = &bytes[mid..len.min(mid + 256)];
+    let tail = &bytes[len.saturating_sub(256)..];
+    head.hash(&mut hasher);
+    middle.hash(&mut hasher);
+    tail.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// 将 RGBA 图片保存到临时文件（PNG 格式）
+fn clip_save_image_to_temp(bytes: &[u8], w: u32, h: u32) -> Result<String, String> {
+    let mut buf = Vec::with_capacity(bytes.len() / 2 + 4096);
+    let encoder = PngEncoder::new(&mut buf);
+    encoder
+        .write_image(bytes, w, h, ExtendedColorType::Rgba8)
+        .map_err(|e| format!("PNG 编码失败: {}", e))?;
+
+    let temp_dir = std::env::temp_dir();
+    let file_name = format!("andeng_clip_{}.png", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0));
+    let path = temp_dir.join(&file_name);
+    use std::io::Write;
+    let mut file = std::fs::File::create(&path)
+        .map_err(|e| format!("创建临时文件失败: {}", e))?;
+    file.write_all(&buf)
+        .map_err(|e| format!("写入临时文件失败: {}", e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// 生成缩略图 data URL（JPEG 70%，最大 120px）
+fn clip_generate_thumbnail(bytes: &[u8], w: u32, h: u32, max_size: u32) -> Result<String, String> {
+    let img = RgbaImage::from_raw(w, h, bytes.to_vec())
+        .ok_or("图片数据无效")?;
+    let dyn_img = DynamicImage::ImageRgba8(img);
+    let scale = (max_size as f32 / w.max(h) as f32).min(1.0);
+    let tw = (w as f32 * scale).round() as u32;
+    let th = (h as f32 * scale).round() as u32;
+    let thumbnail = dyn_img.resize(tw, th, image::imageops::FilterType::Nearest);
+    let thumb_rgba = thumbnail.to_rgba8();
+    let (tw2, th2) = thumb_rgba.dimensions();
+    let mut buf = Vec::with_capacity(8192);
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 70);
+    encoder
+        .write_image(&thumb_rgba.into_raw(), tw2, th2, ExtendedColorType::Rgba8)
+        .map_err(|e| format!("JPEG 编码失败: {}", e))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+    Ok(format!("data:image/jpeg;base64,{}", b64))
+}
+
+/// 读取剪贴板图片（Win32 API，不依赖 OLE）
+/// 优先读取 PNG 格式（截图功能写入的原始数据），回退到 CF_DIB
+/// 返回 (rgba_bytes, width, height)；无图片返回 None
+fn read_clipboard_image_win32() -> Result<Option<(Vec<u8>, u32, u32)>, String> {
+    unsafe {
+        // 打开剪贴板（带重试：其他应用可能正占用剪贴板）
+        let mut opened = false;
+        for _ in 0..5u32 {
+            if winapi::um::winuser::OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        if !opened {
+            return Err("OpenClipboard 失败（重试 5 次仍被占用）".into());
+        }
+
+        let result: Option<(Vec<u8>, u32, u32)>;
+
+        // 1) 优先读取 PNG 格式（截图功能写入的原始 PNG 数据）
+        let png_format = winapi::um::winuser::RegisterClipboardFormatA(b"PNG\0".as_ptr() as *const i8);
+        if png_format != 0 {
+            let h_png = winapi::um::winuser::GetClipboardData(png_format);
+            if !h_png.is_null() {
+                let ptr = winapi::um::winbase::GlobalLock(h_png);
+                if !ptr.is_null() {
+                    let size = winapi::um::winbase::GlobalSize(h_png);
+                    let png_bytes = std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
+                    winapi::um::winbase::GlobalUnlock(h_png);
+                    // 解码 PNG → RGBA
+                    if let Ok(img) = image::load_from_memory(&png_bytes) {
+                        let rgba = img.into_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        result = Some((rgba.into_raw(), w, h));
+                    } else {
+                        result = None;
+                    }
+                } else {
+                    result = None;
+                }
+            } else {
+                result = None;
+            }
+        } else {
+            result = None;
+        }
+
+        // 2) 回退到 CF_DIB（传统 Win32 应用写入的 DIB 数据）
+        let result = if result.is_some() {
+            result
+        } else {
+            let h_dib = winapi::um::winuser::GetClipboardData(winapi::um::winuser::CF_DIB);
+            if !h_dib.is_null() {
+                let ptr = winapi::um::winbase::GlobalLock(h_dib);
+                if !ptr.is_null() {
+                    let size = winapi::um::winbase::GlobalSize(h_dib);
+                    let dib_bytes = std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
+                    winapi::um::winbase::GlobalUnlock(h_dib);
+                    parse_cf_dib_to_rgba(&dib_bytes)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        winapi::um::winuser::CloseClipboard();
+        Ok(result)
+    }
+}
+
+/// 解析 CF_DIB 数据（BITMAPINFOHEADER + BGRA bottom-up）为 RGBA top-down
+fn parse_cf_dib_to_rgba(dib: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    let header_size = std::mem::size_of::<winapi::um::wingdi::BITMAPINFOHEADER>();
+    if dib.len() < header_size {
+        return None;
+    }
+    let hdr = unsafe { &*(dib.as_ptr() as *const winapi::um::wingdi::BITMAPINFOHEADER) };
+    let w = hdr.biWidth as u32;
+    let h = (hdr.biHeight).unsigned_abs();
+    let bit_count = hdr.biBitCount;
+    let compression = hdr.biCompression;
+
+    // 仅支持 32 位未压缩 DIB（BGRA）
+    if bit_count != 32 || compression != winapi::um::wingdi::BI_RGB {
+        return None;
+    }
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    let row_bytes = (w * 4) as usize;
+    let pixel_offset = header_size;
+    let pixel_size = row_bytes * h as usize;
+
+    if dib.len() < pixel_offset + pixel_size {
+        return None;
+    }
+
+    // BGRA bottom-up → RGBA top-down（行翻转 + 通道交换）
+    let mut rgba = vec![0u8; pixel_size];
+    let is_bottom_up = hdr.biHeight > 0;
+    for y in 0..(h as usize) {
+        let src_y = if is_bottom_up { h as usize - 1 - y } else { y };
+        let src_off = pixel_offset + src_y * row_bytes;
+        let dst_off = y * row_bytes;
+        for x in 0..(w as usize) {
+            let si = x * 4;
+            rgba[dst_off + si] = dib[src_off + si + 2];     // R <- B
+            rgba[dst_off + si + 1] = dib[src_off + si + 1]; // G
+            rgba[dst_off + si + 2] = dib[src_off + si];     // B <- R
+            rgba[dst_off + si + 3] = 255;                    // A（DIB 无 alpha，强制 255）
+        }
+    }
+    Some((rgba, w, h))
+}
+
+/// 高效剪贴板图片轮询（Win32 API + spawn_blocking）
+///
+/// - Win32 API 读取剪贴板（CF_DIB / PNG），不依赖 OLE，任何线程可用
+/// - spawn_blocking 在线程池执行，不阻塞主线程
+/// - hash 检测变化：前端传入上次已知的 hash（lastHash），仅当 hash 不同时才处理并返回
+///   这样多个视图（浮窗 + 主面板）可独立轮询，互不干扰，无全局状态竞争
+#[tauri::command]
+pub async fn clipboard_poll_image(last_hash: Option<String>) -> Result<Option<ClipboardPollResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<ClipboardPollResult>, String> {
+        let img_data = read_clipboard_image_win32()?;
+        match img_data {
+            Some((rgba, w, h)) => {
+                let hash = clip_fast_image_hash(&rgba, w, h);
+                let hash_str = format!("{:016x}", hash);
+                // 前端传入的 hash 与当前一致 → 图片未变化，跳过
+                if last_hash.as_deref() == Some(&hash_str) {
+                    return Ok(None);
+                }
+                // 图片变化：保存到临时文件 + 生成缩略图
+                let temp_path = clip_save_image_to_temp(&rgba, w, h)?;
+                let thumbnail = clip_generate_thumbnail(&rgba, w, h, 120)?;
+                eprintln!("[剪贴板轮询] 检测到新图片: {}x{}, hash={}", w, h, hash_str);
+                Ok(Some(ClipboardPollResult {
+                    hash: hash_str,
+                    temp_path,
+                    thumbnail,
+                }))
+            }
+            None => Ok(None), // 剪贴板无图片
+        }
+    })
+    .await
+    .map_err(|e| format!("剪贴板轮询任务失败: {}", e))?
+}
+
 // ============ 截图热键：设置面板可改写并持久化 ============
 /// 截图热键持久化路径（app_data_dir/screenshot_shortcut.json）
 fn screenshot_shortcut_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {

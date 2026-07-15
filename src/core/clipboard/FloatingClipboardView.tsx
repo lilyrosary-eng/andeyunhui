@@ -1,23 +1,22 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { Pin, X, Clipboard, Search, Lock } from 'lucide-react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { Pin, X, Clipboard, Search, Lock, ImageIcon } from 'lucide-react';
 
-const appWindow = getCurrentWebviewWindow();
-
-const DRAG_STYLE = { WebkitAppRegion: 'drag' } as React.CSSProperties;
-const NO_DRAG_STYLE = { WebkitAppRegion: 'no-drag' } as React.CSSProperties;
+const win = getCurrentWindow();
 
 const CLIP_STORAGE_KEY = 'clipboard_history_v1';
+const MAX_IMAGE_HISTORY = 5;
 
 interface ClipItem {
   id: string;
   type: 'text' | 'image';
-  content: string;
+  content: string;       // 文本内容 或 图片临时文件路径
   preview: string;
   timestamp: number;
   pinned: boolean;
   charCount?: number;
+  thumbnail?: string;    // 缩略图 data URL（仅图片）
 }
 
 function formatTime(ts: number): string {
@@ -29,6 +28,9 @@ function formatTime(ts: number): string {
 /**
  * 剪贴板浮窗子窗口 — 透明背景、可拖拽、实时监测剪贴板。
  * 与主面板 ClipboardHistory 共享 localStorage 历史。
+ *
+ * 拖拽方案：不使用 data-tauri-drag-region（会吞掉子元素点击），
+ * 改用 mousedown → startDragging()，与录屏控制台一致。
  */
 export function FloatingClipboardView() {
   const [items, setItems] = useState<ClipItem[]>([]);
@@ -38,7 +40,7 @@ export function FloatingClipboardView() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; itemId: string } | null>(null);
   const lastTextRef = useRef('');
-  const lastImageRef = useRef('');
+  const lastImgHashRef = useRef('');
 
   // 浮窗透明效果
   useEffect(() => {
@@ -46,7 +48,7 @@ export function FloatingClipboardView() {
     document.documentElement.style.backgroundColor = 'transparent';
   }, []);
 
-  // 从 localStorage 加载历史
+  // 从 localStorage 加载文本历史
   const loadFromStorage = useCallback(() => {
     try {
       const saved = localStorage.getItem(CLIP_STORAGE_KEY);
@@ -73,29 +75,40 @@ export function FloatingClipboardView() {
     return () => window.removeEventListener('storage', onStorage);
   }, [loadFromStorage]);
 
-  // 轮询剪贴板
+  // 轮询剪贴板（hash 检测，避免每秒读取大图）
   useEffect(() => {
     const id = setInterval(async () => {
       try {
-        const img: string | null = await invoke('clipboard_read_image');
-        if (img && img !== lastImageRef.current) {
-          lastImageRef.current = img;
+        // 先用轻量 hash 检测图片变化（传入上次已知的 hash，后端比对后仅变化时返回数据）
+        const imgInfo: { hash: string; tempPath: string; thumbnail: string } | null =
+          await invoke('clipboard_poll_image', { lastHash: lastImgHashRef.current || null });
+        if (imgInfo) {
+          lastImgHashRef.current = imgInfo.hash;
           lastTextRef.current = '';
           const newItem: ClipItem = {
             id: Date.now() + '_img',
             type: 'image',
-            content: img,
+            content: imgInfo.tempPath,  // 仅存路径，不存 base64
             preview: '图片',
             timestamp: Date.now(),
             pinned: false,
+            thumbnail: imgInfo.thumbnail,
           };
-          setItems(prev => [newItem, ...prev.filter(i => i.content !== img)].slice(0, 50));
+          setItems(prev => {
+            const existing = prev.filter(i => !(i.type === 'image' && i.content === imgInfo.tempPath));
+            const imageCount = existing.filter(i => i.type === 'image' && !i.pinned).length;
+            const trimmed = imageCount >= MAX_IMAGE_HISTORY
+              ? existing.filter(i => i.type !== 'image' || i.pinned)
+              : existing;
+            return [newItem, ...trimmed].slice(0, 50);
+          });
           return;
         }
+        // 无新图片 → 检测文本
         const text: string = await invoke('clipboard_read');
         if (text && text !== lastTextRef.current) {
           lastTextRef.current = text;
-          lastImageRef.current = '';
+          lastImgHashRef.current = '';
           const newItem: ClipItem = {
             id: Date.now() + '_txt',
             type: 'text',
@@ -108,7 +121,7 @@ export function FloatingClipboardView() {
           setItems(prev => [newItem, ...prev.filter(i => !(i.type === 'text' && i.content === text))].slice(0, 50));
         }
       } catch { /* ignore */ }
-    }, 1000);
+    }, 1500);
     return () => clearInterval(id);
   }, []);
 
@@ -128,30 +141,37 @@ export function FloatingClipboardView() {
   const handleTogglePin = useCallback(async () => {
     const next = !isPinned;
     setIsPinned(next);
-    try {
-      await appWindow.setAlwaysOnTop(next);
-    } catch { /* ignore */ }
+    try { await win.setAlwaysOnTop(next); } catch { /* ignore */ }
   }, [isPinned]);
 
-  /** 切换固定（置顶 + 内容区 CSS 穿透；标题栏始终可交互）—— 与笔记浮窗逻辑一致 */
+  /** 切换固定（置顶 + 内容区 CSS 穿透；标题栏始终可交互） */
   const handleToggleFix = useCallback(async () => {
     const next = !isFixed;
     setIsFixed(next);
     try {
-      await appWindow.setAlwaysOnTop(next);
+      await win.setAlwaysOnTop(next);
       if (next) setIsPinned(true);
       else setIsPinned(false);
     } catch { /* ignore */ }
   }, [isFixed]);
 
-  /** 关闭：用 destroy() 强制关闭，不依赖 CloseRequested 事件 */
+  /** 关闭 */
   const handleClose = useCallback(async () => {
-    try {
-      await appWindow.destroy();
-    } catch {
-      try { await appWindow.close(); } catch { /* ignore */ }
+    try { await win.destroy(); }
+    catch {
+      try { await win.close(); } catch { /* ignore */ }
     }
   }, []);
+
+  // 拖拽：mousedown 启动 startDragging，按钮点击不受影响
+  const handleTitleMouseDown = useCallback((e: React.MouseEvent) => {
+    // 仅左键拖拽
+    if (e.button !== 0) return;
+    // 按钮/输入框不触发拖拽
+    if ((e.target as HTMLElement).closest('button, input, [data-no-drag]')) return;
+    if (isFixed) return;
+    void win.startDragging();
+  }, [isFixed]);
 
   // 复制到剪贴板
   const writeToClipboard = useCallback(async (item: ClipItem) => {
@@ -159,11 +179,12 @@ export function FloatingClipboardView() {
       if (item.type === 'text') {
         await invoke('clipboard_write', { text: item.content });
         lastTextRef.current = item.content;
-        lastImageRef.current = '';
+        lastImgHashRef.current = '';
       } else {
-        await invoke('clipboard_write_image', { base64Png: item.content });
-        lastImageRef.current = item.content;
-        lastTextRef.current = '';
+        // 图片：从临时文件路径写入剪贴板
+        await invoke('clipboard_write_image_from_path', { path: item.content });
+        // 重置 hash，让下次轮询重新检测并更新（避免重复添加）
+        lastImgHashRef.current = '';
       }
       setCopiedId(item.id);
       setTimeout(() => setCopiedId(null), 1200);
@@ -181,7 +202,6 @@ export function FloatingClipboardView() {
   const deleteItem = useCallback((itemId: string) => {
     setItems(prev => prev.filter(i => i.id !== itemId));
     setContextMenu(null);
-    // 同步到 localStorage（只同步文本）
     try {
       const saved = localStorage.getItem(CLIP_STORAGE_KEY);
       if (saved) {
@@ -204,7 +224,7 @@ export function FloatingClipboardView() {
         height: '100vh',
         display: 'flex',
         flexDirection: 'column',
-        backgroundColor: 'rgba(30, 30, 35, 0.85)',
+        backgroundColor: 'rgba(30, 30, 35, 0.92)',
         backdropFilter: 'blur(16px)',
         WebkitBackdropFilter: 'blur(16px)',
         borderRadius: '12px',
@@ -214,28 +234,29 @@ export function FloatingClipboardView() {
         color: '#e5e5e5',
         fontFamily: '-apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
         fontSize: '13px',
-        ...(isFixed ? { pointerEvents: 'none' } : {}),
+        // 不再使用 pointerEvents: 'none' 穿透 — 之前固定后内容区无法交互导致"失控"
+        // 固定语义简化为：仅置顶，不穿透
       }}
     >
-      {/* 标题栏 */}
+      {/* 标题栏 — mousedown 拖拽，不使用 data-tauri-drag-region */}
       <div
-        data-tauri-drag-region={isFixed ? undefined : ''}
+        onMouseDown={handleTitleMouseDown}
         style={{
-          ...(isFixed ? {} : DRAG_STYLE),
           display: 'flex',
           alignItems: 'center',
           gap: '8px',
           padding: '8px 12px',
           borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
           cursor: isFixed ? 'default' : 'move',
+          userSelect: 'none',
         }}
       >
         <Clipboard size={14} style={{ opacity: 0.7, flexShrink: 0 }} />
         <span style={{ flex: 1, fontWeight: 600, fontSize: '12px', letterSpacing: '0.5px' }}>
           剪贴板历史
         </span>
-        {/* 按钮组 — 必须用 NO_DRAG_STYLE 容器包裹，否则父级 drag-region 会吞掉点击事件 */}
-        <div style={NO_DRAG_STYLE} className="flex items-center gap-0.5">
+        {/* 按钮组 */}
+        <div data-no-drag style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
           {/* 置顶 */}
           <button
             onClick={handleTogglePin}
@@ -253,7 +274,7 @@ export function FloatingClipboardView() {
           >
             <Pin size={13} fill={isPinned ? 'currentColor' : 'none'} />
           </button>
-          {/* 固定（置顶+穿透）—— 唯一在 isFixed 时仍可交互的按钮 */}
+          {/* 固定 */}
           <button
             onClick={handleToggleFix}
             title={isFixed ? '取消固定' : '固定（置顶+穿透）'}
@@ -266,7 +287,6 @@ export function FloatingClipboardView() {
               borderRadius: '4px',
               display: 'flex',
               alignItems: 'center',
-              pointerEvents: 'auto',
             }}
           >
             <Lock size={13} fill={isFixed ? 'currentColor' : 'none'} />
@@ -292,7 +312,7 @@ export function FloatingClipboardView() {
       </div>
 
       {/* 搜索栏 */}
-      <div style={{ padding: '6px 10px', ...NO_DRAG_STYLE }}>
+      <div data-no-drag style={{ padding: '6px 10px' }}>
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -321,8 +341,8 @@ export function FloatingClipboardView() {
 
       {/* 历史列表 */}
       <div
+        data-no-drag
         style={{
-          ...NO_DRAG_STYLE,
           flex: 1,
           overflowY: 'auto',
           padding: '4px 6px',
@@ -347,7 +367,6 @@ export function FloatingClipboardView() {
               marginBottom: '2px',
               borderRadius: '6px',
               cursor: 'pointer',
-              transition: 'background 0.15s',
               display: 'flex',
               alignItems: 'flex-start',
               gap: '6px',
@@ -356,16 +375,51 @@ export function FloatingClipboardView() {
             onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
           >
             {item.type === 'image' ? (
-              <img
-                src={item.content}
-                alt=""
-                style={{
-                  maxWidth: '100%',
-                  maxHeight: '80px',
-                  borderRadius: '4px',
-                  objectFit: 'contain',
-                }}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
+                {item.thumbnail ? (
+                  <img
+                    src={item.thumbnail}
+                    alt="缩略图"
+                    loading="lazy"
+                    decoding="async"
+                    style={{
+                      maxWidth: '80px',
+                      maxHeight: '60px',
+                      borderRadius: '4px',
+                      objectFit: 'cover',
+                      flexShrink: 0,
+                    }}
+                  />
+                ) : (
+                  <div style={{
+                    width: '60px',
+                    height: '40px',
+                    borderRadius: '4px',
+                    background: 'rgba(255,255,255,0.1)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}>
+                    <ImageIcon size={16} style={{ opacity: 0.4 }} />
+                  </div>
+                )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    fontSize: '12px',
+                    color: copiedId === item.id ? '#4ade80' : '#d4d4d4',
+                  }}>
+                    {copiedId === item.id ? '✓ 已复制图片' : '图片'}
+                  </div>
+                  <div style={{
+                    fontSize: '10px',
+                    color: 'rgba(255,255,255,0.3)',
+                    marginTop: '2px',
+                  }}>
+                    {formatTime(item.timestamp)} · 点击复制
+                  </div>
+                </div>
+              </div>
             ) : (
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{
@@ -396,14 +450,13 @@ export function FloatingClipboardView() {
       </div>
 
       {/* 底部状态栏 */}
-      <div style={{
+      <div data-no-drag style={{
         padding: '4px 10px',
         borderTop: '1px solid rgba(255,255,255,0.06)',
         fontSize: '10px',
         color: 'rgba(255,255,255,0.3)',
         display: 'flex',
         justifyContent: 'space-between',
-        ...NO_DRAG_STYLE,
       }}>
         <span>{filtered.length} 条</span>
         <span>点击复制 · 右键删除</span>
@@ -412,6 +465,7 @@ export function FloatingClipboardView() {
       {/* 右键菜单 */}
       {contextMenu && (
         <div
+          data-no-drag
           style={{
             position: 'fixed',
             left: contextMenu.x,
@@ -424,7 +478,6 @@ export function FloatingClipboardView() {
             padding: '4px',
             zIndex: 9999,
             minWidth: '120px',
-            ...NO_DRAG_STYLE,
           }}
           onClick={e => e.stopPropagation()}
         >

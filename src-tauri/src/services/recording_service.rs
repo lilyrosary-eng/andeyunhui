@@ -169,14 +169,18 @@ fn check_ffmpeg_with(path: &str) -> bool {
 /// - `output_path`：输出 MP4 文件路径
 /// - `fps`：帧率（默认 30）
 /// - `monitor_index`：显示器索引（默认 0 = 主屏），仅当 region 为 None 时使用
-/// - `region`：录制区域 `Option<(x, y, w, h)>`，虚拟桌面物理像素坐标；None = 全屏
+/// - `region`：录制区域 `Option<Vec<i32>>` = `[x, y, w, h]`，虚拟桌面物理像素坐标；None/空 = 全屏
+///
+/// **设计说明**：region 使用 `Vec<i32>` 而非 tuple `(i32,i32,i32,i32)`，
+/// 因为 Tauri v2 IPC 对 tuple 反序列化在某些场景下会静默回退为 None，
+/// 导致区域录制退化为全屏录制。Vec 反序列化更稳健。
 #[tauri::command]
 pub async fn start_recording(
     app: AppHandle,
     output_path: String,
     fps: Option<u32>,
     monitor_index: Option<usize>,
-    region: Option<(i32, i32, i32, i32)>,
+    region: Option<Vec<i32>>,
 ) -> Result<(), String> {
     // async + spawn_blocking：将 ffmpeg 检测、显示器枚举、进程启动等阻塞操作移至线程池，
     // 避免阻塞主线程导致 UI 冻结（卡死）。
@@ -197,14 +201,33 @@ pub async fn start_recording(
             }
         }
 
+        // 解析 region：Vec<i32> → (rx, ry, rw, rh)
+        // 前端传递 [x, y, w, h] 数组，此处手动解构，避免 tuple 反序列化问题
+        let region_parsed: Option<(i32, i32, i32, i32)> = match region {
+            Some(arr) if arr.len() == 4 => {
+                let rx = arr[0];
+                let ry = arr[1];
+                let rw = arr[2];
+                let rh = arr[3];
+                if rw > 0 && rh > 0 {
+                    eprintln!("[录屏] region=[{},{},{},{}]", rx, ry, rw, rh);
+                    Some((rx, ry, rw, rh))
+                } else {
+                    eprintln!("[录屏] region 尺寸无效: rw={}, rh={}，回退全屏", rw, rh);
+                    None
+                }
+            }
+            other => {
+                eprintln!("[录屏] region 未提供或格式不符: {:?}，回退全屏", other);
+                None
+            }
+        };
+
         // 获取显示器 + 计算裁剪区域 + 编码尺寸
         let monitors = Monitor::enumerate().map_err(|e| format!("枚举显示器失败: {}", e))?;
         let total = monitors.len();
 
-        let (monitor, crop, enc_w, enc_h) = if let Some((rx, ry, rw, rh)) = region {
-            if rw <= 0 || rh <= 0 {
-                return Err("录制区域尺寸无效".into());
-            }
+        let (monitor, crop, enc_w, enc_h) = if let Some((rx, ry, rw, rh)) = region_parsed {
             // 找到包含区域原点的显示器
             let mon = monitors
                 .into_iter()
@@ -212,7 +235,10 @@ pub async fn start_recording(
                     let (ml, mt, mr, mb) = monitor_rect_phys(m);
                     rx >= ml && rx < mr && ry >= mt && ry < mb
                 })
-                .ok_or_else(|| "录制区域不在任何显示器范围内".to_string())?;
+                .ok_or_else(|| {
+                    eprintln!("[录屏] 区域原点 ({},{}) 不在任何显示器范围内", rx, ry);
+                    "录制区域不在任何显示器范围内".to_string()
+                })?;
             let (ml, mt, _, _) = monitor_rect_phys(&mon);
             let crop_offset = Some((
                 (rx - ml) as u32,
@@ -220,6 +246,7 @@ pub async fn start_recording(
                 rw as u32,
                 rh as u32,
             ));
+            eprintln!("[录屏] 区域录制: crop=({},{},{},{})", rx - ml, ry - mt, rw, rh);
             (mon, crop_offset, rw as u32, rh as u32)
         } else {
             let idx = monitor_index.unwrap_or(0);
@@ -233,6 +260,7 @@ pub async fn start_recording(
             if w == 0 || h == 0 {
                 return Err("显示器分辨率无效".into());
             }
+            eprintln!("[录屏] 全屏录制: monitor[{}] {}x{}", idx, w, h);
             (mon, None, w, h)
         };
 
@@ -591,15 +619,23 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     let _ = win.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: vw as u32, height: vh as u32 }));
 
     // 直接使用 virtual_desktop_rect 作为坐标原点——不读 outer_position()。
-    // 原因与 screenshot.rs 的 start_screenshot 相同：set_position 异步，outer_position()
-    // 可能返回带 DWM 边框偏移的值（如 +7px），导致选区坐标左边偏移。
-    // virtual_desktop_rect 与 GetDC(NULL) 同源，是权威的虚拟桌面原点。
     let scale = win.scale_factor().unwrap_or(1.0);
+
+    // 关键：在 win.show() 之前获取窗口列表。此时覆盖窗尚未可见，
+    // IsWindowVisible 会跳过它 → 覆盖窗不在列表中 → 前端 hitWindow 无需特殊过滤。
+    // 主窗口仍会在列表中（is_self=true），前端按需跳过。
+    let windows = crate::screenshot::list_windows().unwrap_or_default();
+    eprintln!(
+        "[录屏区域] show_recorder_select: ox={}, oy={}, scale={}, 窗口数={}, 非self窗口数={}",
+        vx, vy, scale, windows.len(),
+        windows.iter().filter(|w| !w.is_self).count()
+    );
 
     let _ = win.emit("recorder-select-ready", serde_json::json!({
         "ox": vx,
         "oy": vy,
         "scale": scale,
+        "windows": windows,
     }));
     let _ = win.show();
     let _ = win.set_focus();
@@ -624,10 +660,12 @@ pub fn get_recorder_select_coords(app: AppHandle) -> Result<serde_json::Value, S
         .get_webview_window(RECORDER_SELECT_LABEL)
         .ok_or_else(|| "录屏区域选择窗口不存在".to_string())?;
     let scale = win.scale_factor().unwrap_or(1.0);
+    let windows = crate::screenshot::list_windows().unwrap_or_default();
     Ok(serde_json::json!({
         "ox": vx,
         "oy": vy,
         "scale": scale,
+        "windows": windows,
     }))
 }
 

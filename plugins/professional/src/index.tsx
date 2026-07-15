@@ -447,16 +447,17 @@ function EnvVars() {
 interface ClipItem {
   id: string;
   type: 'text' | 'image';
-  content: string; // 文本内容 或 data URL
+  content: string; // 文本内容 或 图片临时文件路径
   preview: string; // 预览文本（图片为尺寸信息）
   timestamp: number;
   pinned: boolean;
   charCount?: number;
+  thumbnail?: string; // 缩略图 data URL（后端生成，减轻大图渲染压力）
 }
 
 const CLIP_STORAGE_KEY = 'clipboard_history_v1';
 const CLIP_MAX_TEXT = 200;
-const CLIP_MAX_IMAGE = 20;
+const CLIP_MAX_IMAGE = 5; // 限制图片数量，避免内存爆炸
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
@@ -479,6 +480,7 @@ function ClipboardHistory() {
   const [polling, setPolling] = useState(true);
   const lastTextRef = useRef('');
   const lastImageRef = useRef('');
+  const lastImgHashRef = useRef('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // 从 localStorage 加载持久化文本历史
@@ -510,27 +512,39 @@ function ClipboardHistory() {
     if (!polling) return;
     const id = setInterval(async () => {
       try {
-        // 先读图片（截图后剪贴板是图片，优先级高）
-        const img: string | null = await hostInvoke('clipboard_read_image');
-        if (img && img !== lastImageRef.current) {
-          lastImageRef.current = img;
+        // 高效图片轮询：传入上次已知的 hash，后端比对后仅变化时返回数据
+        const imgInfo: { hash: string; tempPath: string; thumbnail: string } | null =
+          await hostInvoke('clipboard_poll_image', { lastHash: lastImgHashRef.current || null });
+        if (imgInfo) {
+          lastImageRef.current = imgInfo.tempPath;
+          lastImgHashRef.current = imgInfo.hash;
           lastTextRef.current = '';
           const newItem: ClipItem = {
             id: Date.now() + '_img',
             type: 'image',
-            content: img,
+            content: imgInfo.tempPath,  // 仅存路径，不存 base64
             preview: '图片',
             timestamp: Date.now(),
             pinned: false,
+            thumbnail: imgInfo.thumbnail, // 后端生成的缩略图
           };
-          setItems(prev => [newItem, ...prev.filter(i => i.type !== 'image' || i.content !== img)].slice(0, CLIP_MAX_TEXT + CLIP_MAX_IMAGE));
+          setItems(prev => {
+            const existing = prev.filter(i => i.type !== 'image' || i.content !== imgInfo.tempPath);
+            // 限制图片数量，保留固定项
+            const imageCount = existing.filter(i => i.type === 'image' && !i.pinned).length;
+            const trimmed = imageCount >= CLIP_MAX_IMAGE
+              ? existing.filter(i => i.type !== 'image' || i.pinned)
+              : existing;
+            return [newItem, ...trimmed].slice(0, CLIP_MAX_TEXT + CLIP_MAX_IMAGE);
+          });
           return;
         }
-        // 再读文本
+        // 无新图片 → 检测文本
         const text: string = await hostInvoke('clipboard_read');
         if (text && text !== lastTextRef.current) {
           lastTextRef.current = text;
           lastImageRef.current = '';
+          lastImgHashRef.current = '';
           setCurrent(text);
           const newItem: ClipItem = {
             id: Date.now() + '_txt',
@@ -544,7 +558,7 @@ function ClipboardHistory() {
           setItems(prev => [newItem, ...prev.filter(i => !(i.type === 'text' && i.content === text))].slice(0, CLIP_MAX_TEXT + CLIP_MAX_IMAGE));
         }
       } catch { /* 忽略轮询错误 */ }
-    }, 1000);
+    }, 1500);
     return () => clearInterval(id);
   }, [polling]);
 
@@ -577,10 +591,14 @@ function ClipboardHistory() {
         setCurrent(item.content);
         lastTextRef.current = item.content;
         lastImageRef.current = '';
+        lastImgHashRef.current = '';
       } else {
-        await hostInvoke('clipboard_write_image', { base64Png: item.content });
+        // 图片：从临时文件路径写入剪贴板（Win32 API，可靠）
+        await hostInvoke('clipboard_write_image_from_path', { path: item.content });
         lastImageRef.current = item.content;
         lastTextRef.current = '';
+        // 重置 hash，让下次轮询重新检测并更新（避免重复添加）
+        lastImgHashRef.current = '';
       }
       // 显示复制成功反馈
       setCopiedId(item.id);
@@ -595,13 +613,21 @@ function ClipboardHistory() {
       await hostInvoke('clipboard_write', { text: current });
       lastTextRef.current = current;
       lastImageRef.current = '';
+      lastImgHashRef.current = '';
     } catch (e) { setError((e as Error).message); }
   };
 
   const refreshNow = async () => {
     try {
-      const img: string | null = await hostInvoke('clipboard_read_image');
-      if (img) { lastImageRef.current = img; setCurrent(''); return; }
+      // 手动刷新：传 null 强制获取当前图片（绕过 hash 检查）
+      const imgInfo: { hash: string; tempPath: string; thumbnail: string } | null =
+        await hostInvoke('clipboard_poll_image', { lastHash: null });
+      if (imgInfo) {
+        lastImageRef.current = imgInfo.tempPath;
+        lastImgHashRef.current = imgInfo.hash;
+        setCurrent('');
+        return;
+      }
       const t: string = await hostInvoke('clipboard_read');
       setCurrent(t); lastTextRef.current = t;
     } catch (e) { setError((e as Error).message); }
@@ -620,7 +646,7 @@ function ClipboardHistory() {
   };
 
   const clearSystemClipboard = async () => {
-    try { await hostInvoke('clipboard_clear'); setCurrent(''); lastTextRef.current = ''; lastImageRef.current = ''; }
+    try { await hostInvoke('clipboard_clear'); setCurrent(''); lastTextRef.current = ''; lastImageRef.current = ''; lastImgHashRef.current = ''; }
     catch (e) { setError((e as Error).message); }
   };
 
@@ -727,9 +753,26 @@ function ClipboardHistory() {
             {/* 内容区 */}
             <div className="flex-1 min-w-0">
               {item.type === 'image' ? (
-                <div className="space-y-1">
-                  <img src={item.content} alt="剪贴板图片" className="max-h-32 rounded-lg border border-white/40 dark:border-stone-700/40" />
-                  <div className="text-xs text-neutral-400 dark:text-stone-500">{formatTime(item.timestamp)}</div>
+                // 使用缩略图渲染，减轻大图内存压力
+                <div className="flex items-center gap-2">
+                  {item.thumbnail ? (
+                    <img 
+                      src={item.thumbnail} 
+                      alt="缩略图" 
+                      loading="lazy"
+                      decoding="async"
+                      className="w-20 h-14 object-cover rounded-lg border border-white/40 dark:border-stone-700/40 flex-shrink-0" 
+                    />
+                  ) : (
+                    <div className="w-20 h-14 rounded-lg bg-neutral-100 dark:bg-stone-700 flex items-center justify-center flex-shrink-0">
+                      <span className="text-xs text-neutral-400">图片</span>
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-neutral-400 dark:text-stone-500">
+                      {formatTime(item.timestamp)} · 图片
+                    </div>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-0.5">

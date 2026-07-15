@@ -72,6 +72,7 @@ const ALLOWED_COMMANDS = new Set([
   'clipboard_write',
   'clipboard_read_image',
   'clipboard_clear',
+  'clipboard_poll_image',
   'convert_image',
   'convert_document',
   'check_ffmpeg',
@@ -82,19 +83,25 @@ const ALLOWED_COMMANDS = new Set([
   'read_external_dep_file',
   // 绘画子插件：导出到剪贴板 / 中转站
   'clipboard_write_image',
+  'clipboard_write_image_from_path',
   'add_bytes_to_dropzone',
   // IDE 子插件：读取文本文件 / 目录列表
   'read_text_file',
   'list_directory',
+  'ensure_directory',
   // IDE 子插件：保存 / 另存为（Rust 端已实现并注册，此前漏加白名单导致被沙箱拦截）
   'write_text_file',
   'pick_save_file',
   // 图片模块：读取文件为 data URI（GIF 绕过 asset: 协议动画限制）
   'read_file_base64',
   // 全局 AI 能力：茑萝 · AI 编程 子插件调用（LLM 走后端，规避沙箱屏蔽 fetch）
-  'ai_get_config',
-  'ai_set_config',
+  'ai_get_profiles',
+  'ai_set_profiles',
   'ai_chat',
+  // IDE 终端：本地 shell 命令执行（沙箱屏蔽了 child_process，需走 Rust）
+  'run_shell_command',
+  // AI agent 受限 shell：白名单 + Dry-Run 黑名单 + 超时（仅 agent 自主编辑模式使用）
+  'run_agent_shell',
 ]);
 
 // ========== 安全 Console：所有输出带插件前缀 ==========
