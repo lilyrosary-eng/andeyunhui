@@ -54,7 +54,8 @@ React + Rust，基于 Tauri v2 构建。
 
 - 全局截图（Ctrl+Shift+S）：![截图演示](docs/screenshots/screenshot.gif)
 - 插件热插拔：![热插拔](docs/screenshots/plugins.gif)
-- 哥特风莲花启动动画：![启动动画](docs/screenshots/boot.gif)
+- 哥特风莲花启动动画（浅色）：![启动动画](docs/screenshots/boot-light.gif)
+- 哥特风莲花启动动画（深色）：![启动动画](docs/screenshots/boot.gif)
 
 ## 技术栈
 

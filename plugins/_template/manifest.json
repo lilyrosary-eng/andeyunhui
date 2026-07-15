@@ -1,10 +1,14 @@
 {
-  "id": "plugin-id",
-  "name": "插件名称",
+  "id": "my-plugin",
+  "name": "我的插件",
   "version": "1.0.0",
   "kind": "module",
   "visible": true,
   "entry": "index.js",
   "iconName": "Puzzle",
-  "hostApiVersion": 1
+  "hostApiVersion": 1,
+  "category": "示例",
+  "desc": "插件模板：演示宿主 API / 共享运行时 / 注册。",
+  "deps": [],
+  "requiredAssets": []
 }
