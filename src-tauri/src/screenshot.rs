@@ -1025,19 +1025,22 @@ fn write_clipboard_with_formats(raw: &[u8], w: u32, h: u32, png: &[u8]) -> Resul
             winapi::um::winbase::GlobalUnlock(h_png);
         }
 
-        // 3) 打开剪贴板（带重试：其他应用可能正占用剪贴板）
+        // 3) 打开剪贴板（带重试：其他应用/剪贴板轮询可能正占用剪贴板）
+        //    增加 retry 次数到 10 次（500ms 总超时），避免与剪贴板轮询器竞争时失败
         let mut opened = false;
-        for _attempt in 0..5u32 {
+        for attempt in 0..10u32 {
             if winapi::um::winuser::OpenClipboard(std::ptr::null_mut()) != 0 {
                 opened = true;
+                eprintln!("[剪贴板写入] OpenClipboard 成功（第 {} 次尝试）", attempt + 1);
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(30));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         if !opened {
+            eprintln!("[剪贴板写入] OpenClipboard 失败（重试 10 次仍被占用）");
             winapi::um::winbase::GlobalFree(h_dib);
             winapi::um::winbase::GlobalFree(h_png);
-            return Err("OpenClipboard 失败（重试 5 次仍被占用）".into());
+            return Err("OpenClipboard 失败（重试 10 次仍被占用）".into());
         }
 
         // 4) 写入两种格式
@@ -1048,6 +1051,7 @@ fn write_clipboard_with_formats(raw: &[u8], w: u32, h: u32, png: &[u8]) -> Resul
             winapi::um::winuser::CF_DIB,
             h_dib as *mut _,
         );
+        eprintln!("[剪贴板写入] SetClipboardData(CF_DIB) = {}", if r_dib.is_null() { "失败" } else { "成功" });
 
         // PNG：现代应用（浏览器、微信、QQ、Electron、Tiptap 等）
         // RegisterClipboardFormatA 接受 LPCSTR（*const i8），b"PNG\0" 是 *const u8，需显式转换。
@@ -1055,8 +1059,11 @@ fn write_clipboard_with_formats(raw: &[u8], w: u32, h: u32, png: &[u8]) -> Resul
             b"PNG\0".as_ptr() as *const i8,
         );
         let r_png = if png_format != 0 {
-            winapi::um::winuser::SetClipboardData(png_format, h_png as *mut _)
+            let r = winapi::um::winuser::SetClipboardData(png_format, h_png as *mut _);
+            eprintln!("[剪贴板写入] SetClipboardData(PNG, format={}) = {}", png_format, if r.is_null() { "失败" } else { "成功" });
+            r
         } else {
+            eprintln!("[剪贴板写入] RegisterClipboardFormatA(PNG) 失败");
             std::ptr::null_mut()
         };
 
@@ -1073,6 +1080,9 @@ fn write_clipboard_with_formats(raw: &[u8], w: u32, h: u32, png: &[u8]) -> Resul
         if r_dib.is_null() && r_png.is_null() {
             return Err("SetClipboardData 失败（DIB 和 PNG 均失败）".into());
         }
+        eprintln!("[剪贴板写入] 完成: {}x{} 像素, DIB={} PNG={}", w, h,
+            if r_dib.is_null() { "✗" } else { "✓" },
+            if r_png.is_null() { "✗" } else { "✓" });
     }
     Ok(())
 }
@@ -1092,15 +1102,20 @@ fn write_clipboard_and_dropzone(
     name: String,
 ) -> Result<String, String> {
     let (w, h) = rgba.dimensions();
+    eprintln!("[截图保存] write_clipboard_and_dropzone: {}x{}, name={}", w, h, name);
     let raw = rgba.into_raw();
 
     // 1) 快速 PNG 编码（zlib level 1，全屏 33MP ~0.3s）
     let png = encode_png_fast(&raw, w, h)?;
+    eprintln!("[截图保存] PNG 编码完成: {} 字节", png.len());
 
     // 2) 剪贴板写入（CF_DIB + PNG 双格式，兼容传统应用和现代应用）
+    //    错误传播到前端：如果剪贴板写入失败，前端能看到错误信息（不再静默吞掉）
     if let Err(e) = write_clipboard_with_formats(&raw, w, h, &png) {
-        eprintln!("[截图] 剪贴板写入失败: {}", e);
+        eprintln!("[截图保存] ✗ 剪贴板写入失败: {}", e);
+        return Err(format!("剪贴板写入失败: {}", e));
     }
+    eprintln!("[截图保存] ✓ 剪贴板写入成功");
 
     // 3) 直接写入 dropzone 目录（跳过临时文件 + copy + archive_snapshot）
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -1169,7 +1184,11 @@ pub async fn save_screenshot(
         RgbaImage::from_raw(width, height, bytes)
             .ok_or_else(|| "图像尺寸与字节长度不匹配，保存失败".to_string())?
     };
-    write_clipboard_and_dropzone(app, rgba, name)
+    tauri::async_runtime::spawn_blocking(move || {
+        write_clipboard_and_dropzone(app, rgba, name)
+    })
+    .await
+    .map_err(|e| format!("保存任务失败: {}", e))?
 }
 
 /// 无标注普通截图快路径：直接从 SHOT 原生 RGBA 字节按选区裁剪，
@@ -1210,8 +1229,15 @@ pub async fn save_cropped(
     h: i32,
     name: String,
 ) -> Result<String, String> {
+    eprintln!("[截图保存] save_cropped: ({},{},{},{})", x, y, w, h);
     let img = crop_shot_rgba(x, y, w, h)?;
-    write_clipboard_and_dropzone(app, img, name)
+    // spawn_blocking: 确保剪贴板 Win32 API + 文件 I/O 在专用阻塞线程执行，
+    // 不占用 tokio async 线程，也避免与剪贴板轮询器在同一线程池竞争
+    tauri::async_runtime::spawn_blocking(move || {
+        write_clipboard_and_dropzone(app, img, name)
+    })
+    .await
+    .map_err(|e| format!("保存任务失败: {}", e))?
 }
 
 /// 标注截图「极致优化」路径：前端只回传**极小的标注层 PNG**（drawRef 画布，预览分辨率、
@@ -1233,6 +1259,7 @@ pub async fn save_annotated(
     annotation_png: Vec<u8>,
     name: String,
 ) -> Result<String, String> {
+    eprintln!("[截图保存] save_annotated: ({},{},{},{})", x, y, w, h);
     let mut base = crop_shot_rgba(x, y, w, h)?;
     let ann = image::load_from_memory(&annotation_png)
         .map_err(|e| format!("标注层解码失败: {}", e))?
@@ -1247,7 +1274,11 @@ pub async fn save_annotated(
     } else {
         image::imageops::overlay(&mut base, &ann, 0, 0);
     }
-    write_clipboard_and_dropzone(app, base, name)
+    tauri::async_runtime::spawn_blocking(move || {
+        write_clipboard_and_dropzone(app, base, name)
+    })
+    .await
+    .map_err(|e| format!("保存任务失败: {}", e))?
 }
 
 /// 长截图：以「可见窗口 PrintWindow(flag 0) + 程序化滚动 + BitBlt 逐屏拼接」的方式，
