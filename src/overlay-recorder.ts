@@ -250,7 +250,8 @@ style.textContent = `
 `;
 document.head.appendChild(style);
 
-// 初始化：仅刷新状态，不自动开始录制（录制由区域选择流程启动）
+// 初始化：刷新状态并启动轮询（录制由区域选择流程启动）
 void (async () => {
   await refreshStatus();
+  startPolling();
 })();

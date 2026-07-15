@@ -5,6 +5,7 @@
 // 不提供降级编辑器：若内核加载失败，给出明确错误与构建提示。
 const React = window.__HOST_REACT__;
 const hostApi = window.__HOST_API__;
+const registry = (window as any).__PLUGIN_REGISTRY__;
 const { useState, useRef, useCallback, useEffect } = React;
 
 // ============ CodeMirror 懒加载（与插件沙箱同源：read_external_dep_file + new Function） ============
@@ -123,14 +124,16 @@ function CmEditor({
   onChangeRef.current = onChange;
   onCursorRef.current = onCursor;
 
-  // 显式定义选区背景，避免浅色主题下鼠标拖动选择无可见高亮（drawSelection 已绘制 DOM，
-  // 但 lightTheme 未提供背景色导致选区"看不见"）。
+  // 显式定义选区背景，避免浅色主题下鼠标拖动选择无可见高亮。
+  // 关键：CM6 核心 baseTheme 的 "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground"
+  // 选择器特异性更高，聚焦（拖选）时会盖过普通自定义主题 → 浅色下选区几乎不可见；
+  // 深色的 oneDark 用了 !important 故正常。这里同样加 !important 强制生效（覆盖 baseTheme）。
   const selectionTheme = (dark: boolean) => cm.EditorView.theme({
     '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
-      backgroundColor: dark ? 'rgba(75, 110, 175, 0.45)' : 'rgba(30, 110, 200, 0.28)',
+      backgroundColor: (dark ? 'rgba(75, 110, 175, 0.55)' : 'rgba(30, 110, 200, 0.35)') + ' !important',
     },
     '.cm-selectionMatch': {
-      backgroundColor: dark ? 'rgba(75, 110, 175, 0.35)' : 'rgba(30, 110, 200, 0.22)',
+      backgroundColor: (dark ? 'rgba(75, 110, 175, 0.35)' : 'rgba(30, 110, 200, 0.22)') + ' !important',
     },
   }, { dark });
 
@@ -231,7 +234,14 @@ function IdeEditor() {
   const [theme, setTheme] = useState<'auto' | 'dark' | 'light'>('auto');
   const [wrap, setWrap] = useState<boolean>(true);
   const [recent, setRecent] = useState<string[]>([]);
+  const [recentOpen, setRecentOpen] = useState(false);
   const [cursor, setCursor] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
+
+  // 多级嵌套：AI 编程（ai）是 IDE 的子插件，由 IDE 内部以「右侧对话抽屉」形式呈现，
+  // 与编辑器并排（Cursor / Codex / Claude Code 风格），而非整面板切换。
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiWidth, setAiWidth] = useState(420);
+  const [hasAi, setHasAi] = useState(false);
 
   const viewRef = useRef<any>(null);
   const suppressDirty = useRef<boolean>(false);
@@ -246,6 +256,23 @@ function IdeEditor() {
       .then((api) => { if (alive) { setCm(api); setEngine('cm'); } })
       .catch((e: Error) => { if (alive) { setErrorMsg(e.message); setEngine('error'); } });
     return () => { alive = false; };
+  }, []);
+
+  // 同步「AI 编程」子插件（ai）是否就绪：插件并行加载存在竞态，
+  // 故初次检查 + 监听 plugin-registered/unregistered 动态更新。
+  useEffect(() => {
+    const sync = () => {
+      const kids = registry && registry.getChildren ? registry.getChildren('ide') : [];
+      setHasAi(kids.some((c: any) => c.id === 'ai'));
+    };
+    sync();
+    const handler = () => sync();
+    window.addEventListener('plugin-registered', handler);
+    window.addEventListener('plugin-unregistered', handler);
+    return () => {
+      window.removeEventListener('plugin-registered', handler);
+      window.removeEventListener('plugin-unregistered', handler);
+    };
   }, []);
 
   const setTabDoc = useCallback((id: string, doc: string, dirty: boolean) => {
@@ -351,8 +378,41 @@ function IdeEditor() {
     });
   }, [activeId]);
 
+  const closeAllTabs = useCallback(() => {
+    setTabs([]);
+    setActiveId(null);
+    setStatus('未打开文件');
+    setSavedFlash(true);
+  }, []);
+
   const find = useCallback(() => { if (viewRef.current && cm) cm.openSearchPanel(viewRef.current); }, [cm]);
   const replace = useCallback(() => { if (viewRef.current && cm) cm.openSearchPanel(viewRef.current); }, [cm]);
+
+  // AI 编程右侧抽屉的拖拽调宽（所有 hook 之后、任何提前返回之前，保持 hooks 顺序稳定）
+  const startAiResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = aiWidth;
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.min(760, Math.max(320, startW + (startX - ev.clientX)));
+      setAiWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [aiWidth]);
+
+  const aiChild = registry && registry.getChildren
+    ? registry.getChildren('ide').find((c: any) => c.id === 'ai')
+    : null;
+  const AiComp = aiChild?.component as React.ComponentType<any> | undefined;
 
   const effectiveLang = activeTab ? (activeTab.lang === 'auto' ? (activeTab.path ? langFromPath(activeTab.path) : 'plaintext') : activeTab.lang) : 'plaintext';
 
@@ -367,23 +427,8 @@ function IdeEditor() {
       <button onClick={replace} className="btn-press px-2.5 py-1 rounded-lg bg-[#37373d] hover:bg-[#45454d] text-white">替换</button>
       <span className="w-px h-5 bg-white/10 mx-0.5" />
       <div className="relative">
-        <button onClick={() => {
-          const input = document.createElement('input');
-          input.type = 'file';
-          input.multiple = false;
-          input.onchange = async () => {
-            const p = input.files && input.files[0] ? (input.files[0] as any).path : '';
-            if (!p) return;
-            const content = await hostApi.invoke<string>('read_text_file', { path: p });
-            const id = 'f_' + Date.now().toString(36);
-            setTabs((prev) => [...prev, { id, path: p, name: baseName(p), doc: content, lang: 'auto', dirty: false }]);
-            setRecent((prev) => [p, ...prev.filter((x) => x !== p)].slice(0, 12));
-            activateTab(id);
-            setStatus('已打开：' + baseName(p));
-          };
-          input.click();
-        }} className="btn-press px-2.5 py-1 rounded-lg bg-[#37373d] hover:bg-[#45454d] text-white">最近▾</button>
-        {recent.length > 0 && (
+        <button onClick={() => setRecentOpen((o) => !o)} className="btn-press px-2.5 py-1 rounded-lg bg-[#37373d] hover:bg-[#45454d] text-white" title="最近打开的文件">最近{recentOpen ? '▴' : '▾'}</button>
+        {recentOpen && recent.length > 0 && (
           <div className="absolute z-30 mt-1 w-72 max-h-64 overflow-auto rounded-lg bg-[#2d2d30] border border-white/10 shadow-xl py-1">
             {recent.map((p) => (
               <button key={p} onClick={async () => {
@@ -392,6 +437,7 @@ function IdeEditor() {
                 setTabs((prev) => [...prev, { id, path: p, name: baseName(p), doc: content, lang: 'auto', dirty: false }]);
                 activateTab(id);
                 setStatus('已打开：' + baseName(p));
+                setRecentOpen(false);
               }} className="block w-full text-left px-3 py-1.5 text-xs text-neutral-300 hover:bg-white/10 truncate">{p}</button>
             ))}
           </div>
@@ -408,6 +454,9 @@ function IdeEditor() {
       <button onClick={() => setTheme((t) => (t === 'auto' ? 'dark' : t === 'dark' ? 'light' : 'auto'))} className="btn-press px-2.5 py-1 rounded-lg bg-[#37373d] hover:bg-[#45454d] text-white text-xs">
         {theme === 'auto' ? '跟随' : theme === 'dark' ? '深色' : '浅色'}
       </button>
+      {hasAi && (
+        <button onClick={() => setAiOpen((o) => !o)} className={`btn-press px-2.5 py-1 rounded-lg text-white text-xs font-medium ${aiOpen ? 'bg-[#1177bb]' : 'bg-[#0e639c] hover:bg-[#1177bb]'}`} title="AI 编程（右侧对话面板）">AI 编程</button>
+      )}
       <span className="flex-1" />
       <span className={`text-xs ${savedFlash ? 'text-emerald-400' : 'text-amber-400'}`}>{status}</span>
     </div>
@@ -438,35 +487,67 @@ function IdeEditor() {
   return (
     <div className="flex-1 flex flex-col h-full bg-[#1e1e1e] text-[#d4d4d4]">
       {toolbar}
-      {/* 标签页 */}
-      <div className="flex items-stretch bg-[#252526] border-b border-black/30 overflow-x-auto">
-        {tabs.map((t) => (
-          <div key={t.id}
-            onClick={() => activateTab(t.id)}
-            className={`group flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer border-r border-black/30 whitespace-nowrap ${t.id === activeId ? 'bg-[#1e1e1e] text-white' : 'text-neutral-400 hover:bg-white/5'}`}>
-            <span className={t.dirty ? 'w-2 h-2 rounded-full bg-amber-400' : 'w-2 h-2 rounded-full bg-transparent'} />
-            <span className="max-w-40 truncate">{t.name}</span>
-            <button onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
-              className="opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-white">✕</button>
+      {/* 标签页：左侧可滚动标签区 + 右侧常驻「关闭全部」按钮 */}
+      {tabs.length > 0 && (
+        <div className="flex items-stretch bg-[#252526] border-b border-black/30">
+          <div className="flex items-stretch overflow-x-auto flex-1 min-w-0">
+            {tabs.map((t) => (
+              <div key={t.id}
+                onClick={() => activateTab(t.id)}
+                className={`group flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer border-r border-black/30 whitespace-nowrap ${t.id === activeId ? 'bg-[#1e1e1e] text-white' : 'text-neutral-400 hover:bg-white/5'}`}>
+                <span className={t.dirty ? 'w-2 h-2 rounded-full bg-amber-400' : 'w-2 h-2 rounded-full bg-transparent'} />
+                <span className="max-w-40 truncate">{t.name}</span>
+                <button onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
+                  className="text-neutral-500 hover:text-white hover:bg-white/10 rounded w-4 h-4 flex items-center justify-center shrink-0" title="关闭">✕</button>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-      {/* 编辑器 */}
-      <div className="flex-1 h-full overflow-hidden">
-        {activeTab ? (
-          <CmEditor
-            key={activeTab.id}
-            cm={cm!}
-            tab={activeTab}
-            theme={theme}
-            wrap={wrap}
-            onViewReady={(v) => { viewRef.current = v; }}
-            onChange={onChange}
-            onCursor={(line, col) => setCursor({ line, col })}
-            suppressDirtyRef={suppressDirty}
-          />
-        ) : (
-          <div className="flex-1 flex items-center justify-center text-neutral-600 text-sm">打开文件或新建文档开始编辑</div>
+          <button onClick={closeAllTabs}
+            className="btn-press shrink-0 px-2.5 flex items-center gap-1 text-xs text-neutral-400 hover:text-white hover:bg-white/10 border-l border-black/30"
+            title="关闭全部标签页">
+            <span className="text-sm leading-none">✕</span>
+            <span>全部</span>
+          </button>
+        </div>
+      )}
+      {/* 编辑器 + AI 编程右侧抽屉（并排，Cursor / Codex / Claude Code 风格） */}
+      <div className="flex-1 flex min-h-0">
+        <div className="flex-1 h-full overflow-hidden min-w-0">
+          {activeTab ? (
+            <CmEditor
+              key={activeTab.id}
+              cm={cm!}
+              tab={activeTab}
+              theme={theme}
+              wrap={wrap}
+              onViewReady={(v) => { viewRef.current = v; }}
+              onChange={onChange}
+              onCursor={(line, col) => setCursor({ line, col })}
+              suppressDirtyRef={suppressDirty}
+            />
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-neutral-600 text-sm">打开文件或新建文档开始编辑</div>
+          )}
+        </div>
+        {aiOpen && hasAi && (
+          <div
+            className="relative shrink-0 h-full flex flex-col border-l border-black/30 bg-[#1e1e1e]"
+            style={{ width: aiWidth }}
+          >
+            {/* 拖拽调宽手柄 */}
+            <div
+              onMouseDown={startAiResize}
+              title="拖动调整宽度"
+              className="absolute left-0 top-0 h-full w-1.5 -ml-0.5 cursor-col-resize z-20 hover:bg-[#0e639c]/60 transition-colors"
+            />
+            <div className="flex-1 min-h-0 overflow-hidden">
+              {AiComp ? (
+                <AiComp docked onClose={() => setAiOpen(false)} />
+              ) : (
+                <div className="flex-1 flex items-center justify-center text-neutral-600 text-sm">AI 编程模块未加载</div>
+              )}
+            </div>
+          </div>
         )}
       </div>
       {/* 状态栏 */}
@@ -485,10 +566,22 @@ function IdeEditor() {
 // ============ 项目目录侧边栏（文件树） ============
 type DirEntry = { name: string; path: string; is_dir: boolean };
 
+// 目录优先、同类按名称排序（不改后端顺序，仅前端展示）
+function sortEntries(list: DirEntry[]): DirEntry[] {
+  return [...list].sort((a, b) => {
+    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+    return a.name.localeCompare(b.name, 'zh-Hans-CN');
+  });
+}
+
 function IdeSidebar() {
   const [root, setRoot] = useState<string | null>(null);
-  const [tree, setTree] = useState<DirEntry[]>([]);
+  // 根级条目
+  const [rootEntries, setRootEntries] = useState<DirEntry[]>([]);
+  // 每个已展开目录的子项（按目录 path 索引），实现真正的层级嵌套而非「堆在下面」
+  const [childrenMap, setChildrenMap] = useState<Record<string, DirEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState<Set<string>>(new Set());
   const [folderError, setFolderError] = useState<string | null>(null);
 
   const pickFolder = async () => {
@@ -499,7 +592,8 @@ function IdeSidebar() {
       setRoot(dir);
       setFolderError(null);
       const list = await hostApi.invoke<DirEntry[]>('list_directory', { path: dir });
-      setTree(list);
+      setRootEntries(sortEntries(list));
+      setChildrenMap({});
       setExpanded(new Set());
     } catch (e) {
       console.error('[IDE] 打开文件夹失败:', e);
@@ -511,18 +605,22 @@ function IdeSidebar() {
   const toggleDir = async (dirPath: string) => {
     if (expanded.has(dirPath)) {
       setExpanded((prev) => { const n = new Set(prev); n.delete(dirPath); return n; });
-    } else {
+      return;
+    }
+    // 展开：已缓存则直接展开，否则先加载子项
+    if (!childrenMap[dirPath]) {
+      setLoading((prev) => new Set([...prev, dirPath]));
       try {
         const list = await hostApi.invoke<DirEntry[]>('list_directory', { path: dirPath });
-        setTree((prev) => {
-          const filtered = prev.filter((e) => !e.path.startsWith(dirPath + '/') && !e.path.startsWith(dirPath + '\\'));
-          return [...filtered, ...list];
-        });
-        setExpanded((prev) => new Set([...prev, dirPath]));
+        setChildrenMap((prev) => ({ ...prev, [dirPath]: sortEntries(list) }));
       } catch (e) {
         setFolderError('展开目录失败：' + (e as Error).message);
+        setLoading((prev) => { const n = new Set(prev); n.delete(dirPath); return n; });
+        return;
       }
+      setLoading((prev) => { const n = new Set(prev); n.delete(dirPath); return n; });
     }
+    setExpanded((prev) => new Set([...prev, dirPath]));
   };
 
   const openFile = async (p: string) => {
@@ -535,11 +633,32 @@ function IdeSidebar() {
     }
   };
 
-  const visibleTree = tree.filter((e) => {
-    if (!root) return true;
-    const parent = e.path.substring(0, e.path.lastIndexOf(e.path.includes('\\') ? '\\' : '/'));
-    return parent === root || expanded.has(parent);
-  });
+  // 递归渲染：目录展开时其子项作为「子集」缩进显示在该目录正下方
+  const renderLevel = (entries: DirEntry[], depth: number): React.ReactNode =>
+    entries.map((e) => (
+      <React.Fragment key={e.path}>
+        <div
+          onClick={() => (e.is_dir ? toggleDir(e.path) : openFile(e.path))}
+          style={{ paddingLeft: 8 + depth * 12 }}
+          className={`flex items-center gap-1.5 pr-3 py-1 cursor-pointer text-xs transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${
+            e.is_dir ? 'text-neutral-600 dark:text-stone-300' : 'text-neutral-500 dark:text-stone-400'
+          }`}
+        >
+          <span className="w-3 text-center text-[11px] shrink-0">
+            {e.is_dir ? (loading.has(e.path) ? '…' : expanded.has(e.path) ? '▾' : '▸') : ''}
+          </span>
+          <span className="shrink-0">{e.is_dir ? '📁' : '📄'}</span>
+          <span className="flex-1 truncate">{e.name}</span>
+        </div>
+        {e.is_dir && expanded.has(e.path) && childrenMap[e.path] && (
+          childrenMap[e.path].length === 0 ? (
+            <div style={{ paddingLeft: 8 + (depth + 1) * 12 }} className="pr-3 py-1 text-[11px] text-neutral-300 dark:text-stone-600">（空）</div>
+          ) : (
+            renderLevel(childrenMap[e.path], depth + 1)
+          )
+        )}
+      </React.Fragment>
+    ));
 
   return (
     <div className="flex flex-col h-full">
@@ -557,23 +676,10 @@ function IdeSidebar() {
       <div className="flex-1 overflow-auto min-h-0">
         {!root ? (
           <div className="px-2 py-4 text-xs text-neutral-400 dark:text-stone-500 text-center">选择项目目录开始浏览</div>
-        ) : visibleTree.length === 0 ? (
+        ) : rootEntries.length === 0 ? (
           <div className="px-2 py-4 text-xs text-neutral-400 dark:text-stone-500 text-center">目录为空</div>
         ) : (
-          <div className="py-1">
-            {visibleTree.map((e) => (
-              <div key={e.path}
-                onClick={() => e.is_dir ? toggleDir(e.path) : openFile(e.path)}
-                className={`flex items-center gap-1.5 px-3 py-1 cursor-pointer text-xs transition-colors ${
-                  e.is_dir ? 'text-neutral-600 dark:text-stone-300' : 'text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5'
-                }`}>
-                <span className="w-3 text-center text-[11px]">
-                  {e.is_dir ? (expanded.has(e.path) ? '▾' : '▸') : ''}
-                </span>
-                <span className="flex-1 truncate">{e.name}</span>
-              </div>
-            ))}
-          </div>
+          <div className="py-1">{renderLevel(rootEntries, 0)}</div>
         )}
       </div>
     </div>

@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Switch } from "@/components/ui/switch"
 import { Slider } from "@/components/ui/slider"
-import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen } from 'lucide-react'
+import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu } from 'lucide-react'
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
+import { ModelSettings } from '@/core/settings/ModelSettings'
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { logger } from '@/lib/logger';
@@ -12,7 +13,7 @@ import { useTheme } from '@/lib/ThemeProvider';
 import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
 
-type TabId = 'general' | 'themes' | 'extensions' | 'transfer' | 'blacklist' | 'about';
+type TabId = 'general' | 'themes' | 'extensions' | 'transfer' | 'model' | 'blacklist' | 'about';
 
 interface ShortcutDef {
   id: string;
@@ -241,6 +242,7 @@ export function GlobalSettingsPanel() {
     { id: 'themes' as const, label: '主题', icon: Palette },
     { id: 'extensions' as const, label: '茑萝', icon: Puzzle },
     { id: 'transfer' as const, label: '中转', icon: Archive },
+    { id: 'model' as const, label: '模型', icon: Cpu },
     { id: 'blacklist' as const, label: '黑名单', icon: Ban },
     { id: 'about' as const, label: '关于', icon: Info },
   ];
@@ -664,6 +666,10 @@ export function GlobalSettingsPanel() {
                 </div>
               </section>
             </div>
+          )}
+
+          {activeTab === 'model' && (
+            <ModelSettings />
           )}
 
           {activeTab === 'blacklist' && (
