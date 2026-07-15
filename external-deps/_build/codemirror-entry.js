@@ -32,7 +32,7 @@ const lightTheme = EditorView.theme(
     '.cm-activeLine': { backgroundColor: '#f0f3f6' },
     '.cm-activeLineGutter': { backgroundColor: '#f0f3f6' },
     '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection': {
-      backgroundColor: '#c8e1ff',
+      backgroundColor: '#c8e1ff !important',
     },
     '.cm-tooltip': { border: '1px solid #c8c8c8', backgroundColor: '#f6f8fa' },
   },
