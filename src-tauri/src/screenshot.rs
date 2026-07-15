@@ -18,7 +18,6 @@ use image::ImageEncoder;
 use image::{DynamicImage, ExtendedColorType, ImageFormat, RgbaImage};
 use serde::Serialize;
 use serde_json::json;
-use std::borrow::Cow;
 use std::io::Cursor;
 use std::sync::mpsc;
 use std::thread;
@@ -1548,6 +1547,10 @@ pub fn capture_screen() -> Result<Vec<u8>, String> {
 }
 
 /// 将 PNG（data URL 或纯 base64）写入系统剪贴板
+///
+/// 改用 Win32 API（`OpenClipboard` + `SetClipboardData`，CF_DIB + PNG 双格式），
+/// 彻底解决 arboard 在 tokio MTA 线程下 `OleInitialize` 静默失败导致
+/// Ctrl+V 粘贴截图无反应的问题。Win32 路径不依赖 COM/OLE，任何线程均可用。
 #[tauri::command]
 pub fn clipboard_write_image(base64_png: String) -> Result<(), String> {
     let b64 = base64_png
@@ -1561,14 +1564,9 @@ pub fn clipboard_write_image(base64_png: String) -> Result<(), String> {
         .map_err(|e| format!("图片解码失败: {}", e))?;
     let rgba = img.into_rgba8();
     let (w, h) = rgba.dimensions();
-    let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法访问剪贴板: {}", e))?;
-    let data = arboard::ImageData {
-        width: w as usize,
-        height: h as usize,
-        bytes: Cow::Owned(rgba.into_raw()),
-    };
-    cb.set_image(data)
-        .map_err(|e| format!("写入图片到剪贴板失败: {}", e))
+    let raw = rgba.into_raw();
+    // 复用截图保存路径的 Win32 双格式写入（CF_DIB + PNG）
+    write_clipboard_with_formats(&raw, w, h, &bytes)
 }
 
 // ============ 截图热键：设置面板可改写并持久化 ============

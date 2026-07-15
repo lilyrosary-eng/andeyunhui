@@ -87,6 +87,10 @@ pub fn list_processes() -> Result<Vec<ProcessInfo>, String> {
 }
 
 // ============ t16 剪贴板 ============
+// 文本读写：arboard 在 MTA 线程下 OleInitialize 可能静默失败，但纯文本路径会
+// 回退到 Win32 OpenClipboard + GetClipboardData(CF_UNICODETEXT)，不依赖 OLE，可靠。
+// 图片写入在主 crate screenshot.rs 的 clipboard_write_image 中用 Win32 API 实现。
+
 #[tauri::command]
 pub fn clipboard_read() -> Result<String, String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法访问剪贴板: {}", e))?;
@@ -98,6 +102,35 @@ pub fn clipboard_write(text: String) -> Result<(), String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法访问剪贴板: {}", e))?;
     cb.set_text(text)
         .map_err(|e| format!("写入剪贴板失败: {}", e))
+}
+
+/// 读取剪贴板图片，返回 base64 data URL（PNG）。无图片时返回 None。
+/// arboard 的 get_image 使用 GetClipboardData(CF_DIB)，不依赖 OLE，读取可靠。
+#[tauri::command]
+pub fn clipboard_read_image() -> Result<Option<String>, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法访问剪贴板: {}", e))?;
+    match cb.get_image() {
+        Ok(img) => {
+            let w = img.width as u32;
+            let h = img.height as u32;
+            // arboard 返回 RGBA，用 image crate 编码为 PNG
+            let mut buf = Vec::with_capacity(img.bytes.len() / 2 + 4096);
+            let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+            encoder
+                .write_image(&img.bytes, w, h, image::ExtendedColorType::Rgba8)
+                .map_err(|e| format!("PNG 编码失败: {}", e))?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+            Ok(Some(format!("data:image/png;base64,{}", b64)))
+        }
+        Err(_) => Ok(None), // 剪贴板无图片（不视为错误）
+    }
+}
+
+/// 清空系统剪贴板
+#[tauri::command]
+pub fn clipboard_clear() -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法访问剪贴板: {}", e))?;
+    cb.clear().map_err(|e| format!("清空剪贴板失败: {}", e))
 }
 
 // ============ t1 图片格式转换 ============

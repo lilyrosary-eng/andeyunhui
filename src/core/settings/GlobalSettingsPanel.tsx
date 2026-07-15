@@ -5,6 +5,7 @@ import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, External
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { logger } from '@/lib/logger';
 import { api, type ArchiveEntry } from '@/lib/api';
 import { useTheme } from '@/lib/ThemeProvider';
@@ -489,7 +490,7 @@ export function GlobalSettingsPanel() {
                     <div className="relative font-dropdown">
                       <button
                         onClick={() => { setFontDropdownOpen(!fontDropdownOpen); setFontSearch(''); }}
-                        className="btn-press flex items-center gap-2 px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-stone-600/50 transition-colors min-w-[140px] justify-between"
+                        className="btn-press flex items-center gap-2 px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-stone-600/50 transition-colors w-56 justify-between"
                       >
                         <span className="truncate">{fontsLoading ? '检测中...' : currentFontDisplay}</span>
                         <ChevronDown size={14} className={`transition-transform ${fontDropdownOpen ? 'rotate-180' : ''}`} />
@@ -715,7 +716,10 @@ export function GlobalSettingsPanel() {
                     <ExternalLink size={16} className="text-neutral-400 dark:text-stone-500" />
                     <span className="text-sm text-neutral-600 dark:text-stone-300">前往 GitHub 发布页</span>
                   </div>
-                  <button className="px-3 py-1.5 rounded-lg bg-neutral-800 text-white text-sm hover:bg-neutral-700 transition-colors">
+                  <button
+                    className="px-3 py-1.5 rounded-lg bg-neutral-800 text-white text-sm hover:bg-neutral-700 transition-colors"
+                    onClick={() => { openUrl('https://github.com/lilyrosary-eng/andengyuanhua').catch(() => {}); }}
+                  >
                     检查更新
                   </button>
                 </div>

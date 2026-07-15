@@ -89,8 +89,8 @@ export function DrillDownSidebarList({
       // 若提供 contextMenu，用 ContextMenu 包裹
       if (item.contextMenu && ContextMenu) {
         return React.createElement(ContextMenu, { key: itemKey },
-          React.createElement(ContextMenuTrigger, { className: 'w-full' }, button),
-          React.createElement(ContextMenuContent, null, item.contextMenu),
+          React.createElement(ContextMenuTrigger, { key: 'trigger', className: 'w-full' }, button),
+          React.createElement(ContextMenuContent, { key: 'content' }, item.contextMenu),
         );
       }
       return button;
