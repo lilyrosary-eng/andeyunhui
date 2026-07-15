@@ -83,6 +83,9 @@ const ALLOWED_COMMANDS = new Set([
   // IDE 子插件：读取文本文件 / 目录列表
   'read_text_file',
   'list_directory',
+  // IDE 子插件：保存 / 另存为（Rust 端已实现并注册，此前漏加白名单导致被沙箱拦截）
+  'write_text_file',
+  'pick_save_file',
   // 图片模块：读取文件为 data URI（GIF 绕过 asset: 协议动画限制）
   'read_file_base64',
 ]);

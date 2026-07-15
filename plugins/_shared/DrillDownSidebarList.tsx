@@ -65,9 +65,11 @@ export function DrillDownSidebarList({
       }, emptyText);
     }
 
-    const itemElements = items.map((item) => {
+    const itemElements = items.map((item, index) => {
+      // 兜底：部分调用方可能未提供 id，使用 index 防止 React key 缺失/重复告警
+      const itemKey = item.id != null ? item.id : `drilldown-${index}`;
       const button = React.createElement('button', {
-        key: item.id,
+        key: itemKey,
         onClick: () => onItemClick(item),
         className: `w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center gap-2.5 ${
           item.active
@@ -86,7 +88,7 @@ export function DrillDownSidebarList({
 
       // 若提供 contextMenu，用 ContextMenu 包裹
       if (item.contextMenu && ContextMenu) {
-        return React.createElement(ContextMenu, { key: item.id },
+        return React.createElement(ContextMenu, { key: itemKey },
           React.createElement(ContextMenuTrigger, { className: 'w-full' }, button),
           React.createElement(ContextMenuContent, null, item.contextMenu),
         );
