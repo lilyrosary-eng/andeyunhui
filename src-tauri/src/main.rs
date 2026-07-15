@@ -21,7 +21,9 @@ use tauri_plugin_global_shortcut::ShortcutState;
 /// 从而避免反复启动产生多个托盘图标。
 const INSTANCE_PORT: u16 = 45991;
 use andengyuanhua_lib::commands::*;
-use andengyuanhua_lib::pro_tools::*;
+// 专业模块「薄荷」工具：从内部依赖包 pro-tools-kit 引入（不再集成于主 crate 源码树）
+// Tauri 2 限制：命令不能放在 crate 根（lib.rs），故置于 commands 子模块
+use pro_tools_kit::commands::*;
 use andengyuanhua_lib::screenshot::*;
 use andengyuanhua_lib::TrayModeState;
 use andengyuanhua_lib::TrayHolder;
