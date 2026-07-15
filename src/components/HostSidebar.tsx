@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { Puzzle } from 'lucide-react';
 import type { PluginRegistry, PluginDef } from '@/core/pluginRegistry';
 import { PluginIcon } from '@/components/PluginIcon';
@@ -64,6 +64,20 @@ export function HostSidebar() {
   const showSidebar =
     activeModule === 'extensions' ||
     !!(pluginRegistry?.get(activeModule)?.parent);
+
+  // 子插件模式（如绘画/IDE）：在「茑萝」标题下提供返回按钮（不改动图标栏逻辑）
+  const isChild = activeModule !== 'extensions' && !!pluginRegistry?.get(activeModule)?.parent;
+
+  // 侧边栏齿轮：茑萝母目录打开「管理拓展设置」；子插件（如 IDE）复用同一齿轮，
+  // 派发 module-settings-toggle 事件由对应子插件自行打开其独立模块设置页（而非另设按钮）。
+  // 必须在早期 return 之前声明，遵守 Hooks 调用顺序。
+  const onOpenModuleSettings = useCallback(() => {
+    if (activeModule === 'extensions') {
+      toggleExtensionSettings();
+    } else if (isChild) {
+      window.dispatchEvent(new CustomEvent('module-settings-toggle', { detail: { moduleId: activeModule } }));
+    }
+  }, [activeModule, isChild, toggleExtensionSettings]);
 
   if (!showSidebar || !pluginRegistry) return null;
 
@@ -135,16 +149,17 @@ export function HostSidebar() {
     }
   }
 
-  // 子插件模式（如绘画/IDE）：在「茑萝」标题下提供返回按钮（不改动图标栏逻辑）
-  const isChild = activeModule !== 'extensions' && !!pluginRegistry?.get(activeModule)?.parent;
+  const moduleSettingsLabel = activeModule === 'extensions'
+    ? (showExtensionSettings ? '返回拓展列表' : '管理拓展设置')
+    : '模块设置';
 
   return (
     <ModuleSidebarShell
       moduleId="niaoluo"
       icon={<Puzzle size={20} className="text-[var(--element-bg)]" />}
       title="茑萝"
-      onOpenModuleSettings={toggleExtensionSettings}
-      moduleSettingsLabel={showExtensionSettings ? '返回拓展列表' : '管理拓展设置'}
+      onOpenModuleSettings={onOpenModuleSettings}
+      moduleSettingsLabel={moduleSettingsLabel}
       backAction={isChild ? { onClick: () => setActiveModule('extensions'), label: '返回' } : undefined}
       {...searchProps}
     >

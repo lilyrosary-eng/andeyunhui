@@ -133,6 +133,12 @@ pub fn clipboard_clear() -> Result<(), String> {
     cb.clear().map_err(|e| format!("清空剪贴板失败: {}", e))
 }
 
+// ============ 剪贴板图片高效轮询 ============
+// 注意：clipboard_poll_image 已迁移至主 crate screenshot.rs 中实现，
+// 使用 Win32 API（不依赖 OLE）+ spawn_blocking，避免 arboard 在 MTA 线程下
+// OleInitialize 失败 + 同步命令阻塞主线程的问题。
+// 此处仅保留注释说明迁移原因，避免命令名冲突。
+
 // ============ t1 图片格式转换 ============
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;

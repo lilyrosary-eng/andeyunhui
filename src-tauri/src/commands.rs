@@ -1137,10 +1137,22 @@ pub async fn pick_save_file(app: tauri::AppHandle, default_name: String) -> Resu
     Ok(path.map(|p| p.to_string()))
 }
 
-// 写入纯文本文件（IDE 子插件「保存」用）
+// 写入纯文本文件（IDE 子插件「保存」用）。原子写入：先写同目录临时文件，再 rename 替换，
+// 避免 AI 生成到一半断网/崩溃导致原文件被截断为 0 字节（写前锁定 / 原子替换）。
 #[tauri::command]
 pub fn write_text_file(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, content.as_bytes()).map_err(|e| format!("写入失败: {}", e))
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+        }
+    }
+    let tmp = format!("{}.{}.tmp", path, std::process::id());
+    std::fs::write(&tmp, content.as_bytes()).map_err(|e| format!("写入失败: {}", e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("写入失败: {}", e)
+    })
 }
 
 // 读取文本文件内容（IDE 子插件用），以 UTF-8 解析（含非法字节时容错替换）
@@ -1148,6 +1160,15 @@ pub fn write_text_file(path: String, content: String) -> Result<(), String> {
 pub fn read_text_file(path: String) -> Result<String, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("读取失败: {}", e))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+// 删除文件（IDE 自主编辑「撤销新建文件」用；不存在时视为成功）
+#[tauri::command]
+pub fn delete_file(path: String) -> Result<(), String> {
+    if !std::path::Path::new(&path).exists() {
+        return Ok(());
+    }
+    std::fs::remove_file(&path).map_err(|e| format!("删除失败: {}", e))
 }
 
 // ================= 音乐模块命令 =================
@@ -1643,6 +1664,12 @@ pub fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
         else { a.name.to_lowercase().cmp(&b.name.to_lowercase()) }
     });
     Ok(result)
+}
+
+// 确保目录存在（IDE 自主编辑「记忆/原则」文件夹自动创建用）
+#[tauri::command]
+pub fn ensure_directory(path: String) -> Result<(), String> {
+    std::fs::create_dir_all(&path).map_err(|e| format!("创建目录失败: {}", e))
 }
 
 // ================= 内容黑名单管理（统一管理图库/音乐/视频的被屏蔽文件夹） =================
