@@ -109,8 +109,8 @@ export function HostSidebar() {
     } else {
       content = (
         <SecondaryNavShell>
-          {groups.map(([cat, items]) => (
-            <div key={cat || '_'} className="mb-1">
+          {groups.map(([cat, items], gi) => (
+            <div key={cat ? `g-${cat}` : `g-empty-${gi}`} className="mb-1">
               {cat && (
                 <div className="px-3 pt-2 pb-1 text-[11px] font-medium text-neutral-400 dark:text-stone-500">
                   {cat}

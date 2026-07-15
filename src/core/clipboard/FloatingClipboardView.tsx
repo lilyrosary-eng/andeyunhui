@@ -199,9 +199,7 @@ export function FloatingClipboardView() {
 
   return (
     <div
-      data-tauri-drag-region={isFixed ? undefined : ''}
       style={{
-        ...(isFixed ? {} : DRAG_STYLE),
         width: '100vw',
         height: '100vh',
         display: 'flex',

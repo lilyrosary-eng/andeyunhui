@@ -12,6 +12,7 @@ pub mod lyrics_service;
 pub mod reading_service;
 pub mod recording_service;
 pub mod log_service;
+pub mod ai_service;
 
 use std::path::{Path, PathBuf};
 

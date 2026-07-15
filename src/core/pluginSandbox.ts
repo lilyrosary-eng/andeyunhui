@@ -91,6 +91,10 @@ const ALLOWED_COMMANDS = new Set([
   'pick_save_file',
   // 图片模块：读取文件为 data URI（GIF 绕过 asset: 协议动画限制）
   'read_file_base64',
+  // 全局 AI 能力：茑萝 · AI 编程 子插件调用（LLM 走后端，规避沙箱屏蔽 fetch）
+  'ai_get_config',
+  'ai_set_config',
+  'ai_chat',
 ]);
 
 // ========== 安全 Console：所有输出带插件前缀 ==========

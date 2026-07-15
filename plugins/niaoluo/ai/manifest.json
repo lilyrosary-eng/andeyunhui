@@ -1,0 +1,12 @@
+{
+  "id": "ai",
+  "name": "AI 编程",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "Bot",
+  "hostApiVersion": 1,
+  "parent": "ide",
+  "codename": "茑萝"
+}

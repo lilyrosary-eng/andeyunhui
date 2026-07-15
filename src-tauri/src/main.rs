@@ -30,6 +30,7 @@ use andengyuanhua_lib::TrayHolder;
 use andengyuanhua_lib::services::lyrics_service;
 use andengyuanhua_lib::services::recording_service;
 use andengyuanhua_lib::services::log_service;
+use andengyuanhua_lib::services::ai_service;
 use std::sync::Mutex;
 
 /// 创建托盘右键菜单窗口（独立 WebView，承载「我们的 UI」样式菜单）。
@@ -714,6 +715,11 @@ fn main() {
             log_service::open_log_dir,
             log_service::get_log_files,
             log_service::get_current_log_path,
+            // ========== 全局：AI 能力（茑萝 · AI 编程 子插件调用）==========
+            ai_service::ai_get_config,
+            ai_service::ai_set_config,
+            ai_service::ai_chat,
+            ai_service::ai_test_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
