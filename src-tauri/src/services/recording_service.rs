@@ -131,6 +131,9 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
 struct RecordingHandle {
     ffmpeg_child: Option<Child>,
     capture_thread: Option<std::thread::JoinHandle<()>>,
+    /// ffmpeg stdin 的 Arc 引用——stop 时显式置 None 关闭管道，
+    /// 让 ffmpeg 收到 EOF 并正常刷新编码器输出文件。
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
     stop_flag: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     start_time: SystemTime,
@@ -264,6 +267,15 @@ pub async fn start_recording(
             (mon, None, w, h)
         };
 
+        // H.264 (libx264) 要求宽高为偶数。向下取整避免超出捕获区域，
+        // 同时调整 crop 以匹配 enc_w/enc_h（裁剪数据字节数必须与 ffmpeg 预期帧大小一致）。
+        let enc_w = enc_w & !1;
+        let enc_h = enc_h & !1;
+        let crop = crop.map(|(cx, cy, cw, ch)| (cx, cy, cw & !1, ch & !1));
+        if enc_w == 0 || enc_h == 0 {
+            return Err("录制区域尺寸过小（取整后为 0）".into());
+        }
+
         // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）
         let mut child = Command::new(&ffmpeg_path)
             .args([
@@ -282,7 +294,12 @@ pub async fn start_recording(
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped()) // 捕获 stderr 用于错误诊断
+            // 关键：stderr 必须用 null，不能用 piped。
+            // piped 时若不持续读取，stderr 管道缓冲区（~64KB）填满后 ffmpeg 阻塞在
+            // stderr 写入 → 停止消费 stdin → stdin 管道填满 → 捕获线程 write_all 阻塞
+            // （同时持有 stdin 锁）→ stop_recording 无法获取锁关闭 stdin → 死锁 → UI 卡死。
+            // 区域录屏尤其严重：奇数尺寸会产生每帧一条 ffmpeg 警告，瞬间填满 stderr 管道。
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("启动 ffmpeg 失败: {}（请确认 ffmpeg 已安装）", e))?;
 
@@ -315,6 +332,7 @@ pub async fn start_recording(
         *RECORDING.lock().unwrap() = Some(RecordingHandle {
             ffmpeg_child: Some(child),
             capture_thread: Some(capture_thread),
+            stdin: stdin_arc, // 保存 Arc 引用，stop 时显式关闭
             stop_flag,
             paused,
             start_time: SystemTime::now(),
@@ -331,58 +349,73 @@ pub async fn start_recording(
 }
 
 /// 停止录屏，返回输出文件路径
+///
+/// **关键修复（区域录屏卡死）**：
+/// 旧实现是 sync `#[tauri::command]`，在主线程执行 `thread.join()`（无超时的阻塞调用）
+/// + `child.wait_timeout(10s)`。如果捕获线程卡住（WGC 消息循环未退出），`join()` 永远
+/// 阻塞 → 主线程冻结 → 整个应用卡死。
+///
+/// 修复方案：
+/// 1. 改为 `async fn` + `spawn_blocking`：阻塞操作在线程池执行，主线程（UI）不受影响
+/// 2. **不 join 捕获线程**（detach）：设 stop_flag 后捕获线程会在下一帧自动退出
+/// 3. 关闭 stdin（try_lock + 短暂重试，避免与捕获线程的 write_all 死锁）
+/// 4. 等待 ffmpeg 退出（最多 5s），超时则 kill 进程
+/// 5. stderr 已改为 `Stdio::null()`，不会因管道满导致 ffmpeg 阻塞
 #[tauri::command]
-pub fn stop_recording(app: AppHandle) -> Result<String, String> {
-    let mut handle_opt = RECORDING.lock().unwrap();
-    let handle = handle_opt
-        .take()
-        .ok_or_else(|| "未在录制中".to_string())?;
-
-    // 1. 设置停止标志 → WGC 下一帧回调中 stop()
-    handle.stop_flag.store(true, Ordering::SeqCst);
-
-    // 2. 等待捕获线程结束（最多 5s）
-    if let Some(thread) = handle.capture_thread {
-        let _ = thread.join();
-    }
-
-    // 3. 关闭 ffmpeg stdin（drop → ffmpeg flush 编码器并输出文件）
-    // stdin 已在 WgcRecorder 中通过 Arc<Mutex> 持有，这里不需要额外操作
-    // 但需要确保 stdin 被关闭。由于 WgcRecorder 已 stop，stdin 会被 drop
-
-    // 4. 等待 ffmpeg 进程结束（最多 30s，大文件编码需要时间）
-    let mut child = handle.ffmpeg_child.ok_or("ffmpeg 进程丢失")?;
-    // drop stdin 以触发 ffmpeg EOF
-    drop_stdin();
-    let status = child
-        .wait_timeout(std::time::Duration::from_secs(30))
-        .map_err(|e| format!("等待 ffmpeg 结束失败: {}", e))?
-        .ok_or_else(|| "ffmpeg 编码超时（30s），可能输出文件不完整".to_string())?;
-
-    if !status.success() {
-        // 读取 ffmpeg stderr 用于诊断
-        let stderr = child
-            .stderr
+pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let mut handle_opt = RECORDING.lock().unwrap();
+        let handle = handle_opt
             .take()
-            .and_then(|mut s| {
-                use std::io::Read;
-                let mut buf = String::new();
-                s.read_to_string(&mut buf).ok().map(|_| buf)
-            })
-            .unwrap_or_default();
-        return Err(format!("ffmpeg 编码失败: {}", stderr.chars().take(500).collect::<String>()));
-    }
+            .ok_or_else(|| "未在录制中".to_string())?;
 
-    let output_path = handle.output_path.clone();
-    let _ = app.emit("recording-stopped", &output_path);
-    Ok(output_path)
-}
+        // 1. 设置停止标志 → WGC 下一帧回调中 stop() 捕获 → 捕获线程退出
+        handle.stop_flag.store(true, Ordering::SeqCst);
 
-/// 辅助函数：确保 ffmpeg stdin 被关闭
-fn drop_stdin() {
-    // stdin 已经在 WgcRecorder 的 Arc<Mutex<Option<ChildStdin>>> 中
-    // 当 WGC 线程结束时，WgcRecorder 被 drop，stdin 也会被 drop
-    // 但为了确保，这里不需要额外操作——child.wait() 会等待进程结束
+        // 2. 关闭 ffmpeg stdin → ffmpeg 收到 EOF → 刷新编码器并输出文件
+        //    使用 try_lock + 短暂重试：如果捕获线程正持有锁（write_all 中），
+        //    等一帧间隔后重试。stderr 已 null，write_all 不会长时间阻塞。
+        for _attempt in 0..10u32 {
+            if let Ok(mut guard) = handle.stdin.try_lock() {
+                *guard = None;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // 如果 200ms 后仍无法获取锁，强制等待（此时捕获线程应已因 stop_flag 退出）
+        {
+            let mut guard = handle.stdin.lock().unwrap();
+            *guard = None;
+        }
+
+        // 3. 不 join 捕获线程（detach）。捕获线程会在下一帧检查 stop_flag 并退出。
+        //    丢弃 JoinHandle 即可，线程结束后自动回收。
+        drop(handle.capture_thread);
+
+        // 4. 等待 ffmpeg 进程结束（最多 5s），超时则 kill
+        let mut child = handle.ffmpeg_child.ok_or("ffmpeg 进程丢失")?;
+        match child.wait_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return Err("ffmpeg 编码失败（进程异常退出）".to_string());
+                }
+            }
+            Ok(None) => {
+                // 超时：ffmpeg 未退出，强制 kill（输出文件可能不完整，但避免无限等待）
+                eprintln!("[录屏] ffmpeg 5s 内未退出，强制终止");
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("ffmpeg 编码超时，已强制终止（输出文件可能不完整）".to_string());
+            }
+            Err(e) => return Err(format!("等待 ffmpeg 结束失败: {}", e)),
+        }
+
+        let output_path = handle.output_path.clone();
+        let _ = app.emit("recording-stopped", &output_path);
+        Ok(output_path)
+    })
+    .await
+    .map_err(|e| format!("停止录屏任务失败: {}", e))?
 }
 
 /// 暂停录制
