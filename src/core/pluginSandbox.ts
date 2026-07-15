@@ -16,6 +16,7 @@ import React from 'react';
 import ReactDOM from 'react-dom';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { PluginRegistry, type PluginDef } from '@/core/pluginRegistry';
 import { logger } from '@/lib/logger';
 import { createFrameBuffer } from '@/lib/frameBuffer';
@@ -69,6 +70,8 @@ const ALLOWED_COMMANDS = new Set([
   'list_processes',
   'clipboard_read',
   'clipboard_write',
+  'clipboard_read_image',
+  'clipboard_clear',
   'convert_image',
   'convert_document',
   'check_ffmpeg',
@@ -140,6 +143,17 @@ function createSafeApi(pluginId: string) {
     convertFileSrc: convertFileSrc,
     // 帧缓冲工具：高频数据推送批处理，避免渲染风暴
     createFrameBuffer: createFrameBuffer,
+    // 创建浮窗窗口（前端 WebviewWindow API，规避 sync 命令中 build 导致的主线程重入死锁）
+    // 用于剪贴板浮窗等场景，label 由插件指定（如 'floating-clipboard'）
+    createFloatingWindow: async (label: string, url: string, options: Record<string, unknown>) => {
+      const existing = await WebviewWindow.getByLabel(label);
+      if (existing) {
+        existing.show().catch(() => {});
+        existing.setFocus().catch(() => {});
+        return;
+      }
+      new WebviewWindow(label, { url, ...options });
+    },
   };
 }
 

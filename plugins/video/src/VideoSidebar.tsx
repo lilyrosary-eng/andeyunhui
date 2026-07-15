@@ -100,9 +100,9 @@ export function VideoSidebar(props: VideoSidebarProps) {
       badge: folder.videoCount,
       active: selectedFolder?.folderPath === folder.folderPath,
       contextMenu: ContextMenuItem ? React.createElement(React.Fragment, null,
-        React.createElement(ContextMenuItem, { onClick: () => onFolderClick(folder) }, '打开'),
-        React.createElement(ContextMenuSeparator),
-        React.createElement(ContextMenuItem, { onClick: () => { try { navigator.clipboard?.writeText(folder.folderName); } catch {} } }, '复制名称'),
+        React.createElement(ContextMenuItem, { key: 'open', onClick: () => onFolderClick(folder) }, '打开'),
+        React.createElement(ContextMenuSeparator, { key: 'sep' }),
+        React.createElement(ContextMenuItem, { key: 'copy', onClick: () => { try { navigator.clipboard?.writeText(folder.folderName); } catch {} } }, '复制名称'),
       ) : undefined,
     }));
   }, [filteredFolders, selectedFolder, onFolderClick]);

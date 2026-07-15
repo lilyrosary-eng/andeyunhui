@@ -18,6 +18,7 @@ declare global {
       listen: <T = unknown>(event: string, handler: (event: { payload: T }) => void) => Promise<() => void>;
       emit: (event: string, payload?: unknown) => Promise<void>;
       createFrameBuffer: <T>(onFlush: (items: T[]) => void) => FrameBuffer<T>;
+      createFloatingWindow: (label: string, url: string, options: Record<string, unknown>) => Promise<void>;
     };
     __PLUGIN_REGISTRY__: {
       register: (def: {

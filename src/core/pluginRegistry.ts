@@ -80,4 +80,6 @@ export interface HostAPI {
   invoke: typeof import('@tauri-apps/api/core').invoke;
   convertFileSrc: typeof import('@tauri-apps/api/core').convertFileSrc;
   listen: typeof import('@tauri-apps/api/event').listen;
+  // 创建浮窗窗口（前端 WebviewWindow API，规避主线程重入死锁）
+  createFloatingWindow?: (label: string, url: string, options: Record<string, unknown>) => Promise<void>;
 }

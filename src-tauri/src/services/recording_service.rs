@@ -450,13 +450,42 @@ fn monitor_rect_phys(monitor: &Monitor) -> (i32, i32, i32, i32) {
 }
 
 /// 显示录屏控制台窗口
+///
+/// **重要**：本函数为 sync `#[tauri::command]`，在主线程执行。
+/// 严禁在此调用 `WebviewWindowBuilder::build()` —— 会触发 WebView2 主线程
+/// 「重入死锁」（build 等待的创建完成回调需要被同一消息循环派发，而该命令
+/// 闭包正占用着消息循环），导致整个应用卡死（右上角按钮、托盘菜单全部失效）。
+///
+/// 窗口由 `create_recorder_widget_window` 在 setup 阶段预创建，本函数仅做
+/// show + set_focus + 重新定位（避免多显示器切换后位置不正确）。
 #[tauri::command]
 pub fn show_recorder_widget(app: AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window(RECORDER_WINDOW_LABEL)
+        .ok_or_else(|| "录屏控制台窗口未预创建，请重启应用".to_string())?;
+
+    // 重新居中（多显示器切换或分辨率变化后保持正确位置）
+    let (screen_w, _screen_h) = screen_size();
+    let scale = unsafe {
+        let dpi = winapi::um::winuser::GetDpiForSystem();
+        if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
+    };
+    let widget_w = 320.0_f64;
+    let _widget_h = 52.0_f64;
+    let x = (screen_w as f64 / scale - widget_w) / 2.0;
+    let y = 8.0_f64; // 距离屏幕顶部 8px
+    let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+
+    let _ = win.show();
+    let _ = win.set_focus();
+    Ok(())
+}
+
+/// 预创建录屏控制台窗口（隐藏），setup 阶段调用，避免运行时在 sync 命令中
+/// 创建 WebView2 窗口导致主线程「重入死锁」（详见 show_recorder_widget 注释）。
+pub fn create_recorder_widget_window(app: &AppHandle) -> Result<(), String> {
     if app.get_webview_window(RECORDER_WINDOW_LABEL).is_some() {
-        let win = app.get_webview_window(RECORDER_WINDOW_LABEL).unwrap();
-        let _ = win.show();
-        let _ = win.set_focus();
-        return Ok(());
+        return Ok(()); // 已存在则复用
     }
 
     // 控制台显示在屏幕正上方居中（需将物理像素转换为逻辑像素以正确居中）
@@ -471,7 +500,7 @@ pub fn show_recorder_widget(app: AppHandle) -> Result<(), String> {
     let y = 8.0_f64; // 距离屏幕顶部 8px
 
     let _win = WebviewWindowBuilder::new(
-        &app,
+        app,
         RECORDER_WINDOW_LABEL,
         WebviewUrl::App("recorder-widget.html".into()),
     )
@@ -484,6 +513,7 @@ pub fn show_recorder_widget(app: AppHandle) -> Result<(), String> {
     .transparent(true)
     .resizable(false)
     .shadow(false)
+    .visible(false) // 预创建时隐藏
     .build()
     .map_err(|e| format!("创建录屏控制台失败: {}", e))?;
 

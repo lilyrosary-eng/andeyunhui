@@ -42,10 +42,12 @@ let ready = false;
 const root = document.getElementById("root")!;
 
 // 全屏遮罩层（捕获层）
+// 背景保持透明：暗化效果由 winHighlight / selection 的 box-shadow 负责扩散
+// （与截图覆盖窗一致），否则 30% 暗色 overlay 会盖住高亮的 10% 蓝色填充，几乎不可见。
 const overlay = document.createElement("div");
 overlay.style.cssText = `
   position: fixed; inset: 0;
-  background: rgba(0, 0, 0, 0.3);
+  background: transparent;
   cursor: crosshair;
   user-select: none; -webkit-user-select: none;
   z-index: 1;
@@ -69,6 +71,8 @@ hint.style.cssText = `
 hint.textContent = "拖拽选择区域 / 单击选择窗口 · Esc 取消";
 
 // 窗口高亮框（蓝色，悬停时显示）—— will-change 提示浏览器 GPU 加速
+// 关键：box-shadow: 0 0 0 9999px rgba(0,0,0,0.5) 让高亮外部全屏暗化，高亮区域保持原色明亮可见。
+// 与截图覆盖窗 ScreenshotOverlay.tsx 第 707-718 行的实现一致。
 const winHighlight = document.createElement("div");
 winHighlight.style.cssText = `
   position: fixed;
@@ -78,6 +82,7 @@ winHighlight.style.cssText = `
   display: none;
   z-index: 2;
   will-change: transform, width, height;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
 `;
 
 // 窗口标题标签

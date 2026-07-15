@@ -137,7 +137,7 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
       onClick: isRenaming ? undefined : () => onSelectFolder(folder),
       children: [
         // 封面缩略图
-        React.createElement('div', { className: 'aspect-square bg-[var(--element-muted)]' },
+        React.createElement('div', { key: 'cover', className: 'aspect-square bg-[var(--element-muted)]' },
           coverUrl
             ? React.createElement('img', { src: coverUrl, alt: folder.folderName, className: 'w-full h-full object-cover', loading: 'lazy' })
             : React.createElement('div', { className: 'w-full h-full flex items-center justify-center text-[var(--element-bg)]' },
@@ -145,9 +145,10 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
               )
         ),
         // 底部信息覆层
-        React.createElement('div', { className: 'absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2' },
+        React.createElement('div', { key: 'overlay', className: 'absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2' },
           isRenaming
             ? React.createElement('input', {
+                key: 'title',
                 type: 'text',
                 className: 'w-full px-1 py-0.5 bg-white/20 border border-white/30 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-white/50',
                 value: renameText,
@@ -160,8 +161,8 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
                 autoFocus: true,
                 onClick: (e: React.MouseEvent) => e.stopPropagation(),
               })
-            : React.createElement('div', { className: 'text-white text-xs font-medium truncate' }, folder.folderName),
-          React.createElement('div', { className: 'text-white/70 text-[10px]' }, `${folder.imageCount} 张`)
+            : React.createElement('div', { key: 'title', className: 'text-white text-xs font-medium truncate' }, folder.folderName),
+          React.createElement('div', { key: 'count', className: 'text-white/70 text-[10px]' }, `${folder.imageCount} 张`)
         ),
       ]
     });
@@ -171,17 +172,18 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
     }
 
     return React.createElement(ContextMenu, { key: folder.folderPath },
-      React.createElement(ContextMenuTrigger, null, cardContent),
-      React.createElement(ContextMenuContent, null,
-        React.createElement(ContextMenuItem, { onClick: () => onSelectFolder(folder) }, '打开相册'),
-        React.createElement(ContextMenuSeparator),
-        React.createElement(ContextMenuItem, { onClick: () => startRename(folder) }, '重命名'),
+      React.createElement(ContextMenuTrigger, { key: 'trigger', className: 'w-full' }, cardContent),
+      React.createElement(ContextMenuContent, { key: 'content' },
+        React.createElement(ContextMenuItem, { key: 'open', onClick: () => onSelectFolder(folder) }, '打开相册'),
+        React.createElement(ContextMenuSeparator, { key: 'sep1' }),
+        React.createElement(ContextMenuItem, { key: 'rename', onClick: () => startRename(folder) }, '重命名'),
         React.createElement(ContextMenuItem, {
+          key: 'remove',
           onClick: () => onDeleteFolder?.(folder),
           variant: 'destructive',
         }, '从列表移除'),
-        React.createElement(ContextMenuSeparator),
-        React.createElement(ContextMenuItem, { onClick: onRescan }, '重新扫描'),
+        React.createElement(ContextMenuSeparator, { key: 'sep2' }),
+        React.createElement(ContextMenuItem, { key: 'rescan', onClick: onRescan }, '重新扫描'),
       )
     );
   };
@@ -192,14 +194,15 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
       ? React.createElement('div', { className: 'text-xs text-neutral-400 dark:text-stone-500 px-1 py-2' }, '暂无文件夹')
       : React.createElement(React.Fragment, null,
           // 自定义相册
-          customAlbums.length > 0 && React.createElement('div', { className: 'mb-2' },
-            React.createElement('div', { className: 'text-[10px] font-semibold text-neutral-400 dark:text-stone-500 uppercase tracking-wider px-2 py-1' }, '自定义相册'),
+          customAlbums.length > 0 && React.createElement('div', { key: 'custom-albums', className: 'mb-2' },
+            React.createElement('div', { key: 'hdr', className: 'text-[10px] font-semibold text-neutral-400 dark:text-stone-500 uppercase tracking-wider px-2 py-1' }, '自定义相册'),
             customAlbums.map(album => {
               return React.createElement('div', { key: `album-${album.id}`, className: 'w-full text-left px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400 text-sm flex items-center gap-2' },
-                React.createElement(FolderIcon),
-                React.createElement('span', { className: 'font-medium truncate flex-1' }, album.name),
-                React.createElement('span', { className: 'text-xs text-neutral-400 dark:text-stone-500' }, `${album.images.length} 张`),
+                React.createElement(FolderIcon, { key: 'icon' }),
+                React.createElement('span', { key: 'name', className: 'font-medium truncate flex-1' }, album.name),
+                React.createElement('span', { key: 'count', className: 'text-xs text-neutral-400 dark:text-stone-500' }, `${album.images.length} 张`),
                 onDeleteAlbum && React.createElement('button', {
+                  key: 'del',
                   onClick: (e: React.MouseEvent) => { e.stopPropagation(); onDeleteAlbum(album.id); },
                   className: 'text-neutral-300 dark:text-stone-600 hover:text-red-400 transition-colors',
                   title: '删除相册',
@@ -211,9 +214,9 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
             })
           ),
           // 扫描到的文件夹 - 双列缩略图网格
-          folders.length > 0 && React.createElement(React.Fragment, null,
-            customAlbums.length > 0 && React.createElement('div', { className: 'text-[10px] font-semibold text-neutral-400 dark:text-stone-500 uppercase tracking-wider px-2 py-1' }, '扫描文件夹'),
-            React.createElement('div', { className: 'grid grid-cols-2 gap-2' },
+          folders.length > 0 && React.createElement(React.Fragment, { key: 'folders' },
+            customAlbums.length > 0 && React.createElement('div', { key: 'hdr', className: 'text-[10px] font-semibold text-neutral-400 dark:text-stone-500 uppercase tracking-wider px-2 py-1' }, '扫描文件夹'),
+            React.createElement('div', { key: 'grid', className: 'grid grid-cols-2 gap-2' },
               folders.map(renderFolderGridItem)
             )
           ),
