@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>录屏区域</title>
+    <style>
+      /* 首帧即透明，压住 index.css 可能注入的不透明背景 */
+      html, body { margin: 0; height: 100%; background: transparent !important; overflow: hidden; }
+      #border {
+        position: fixed; inset: 0;
+        border: 1px solid #ff4d4f;
+        border-radius: 2px;
+        pointer-events: none;
+        box-shadow: 0 0 5px rgba(255, 77, 79, 0.5), inset 0 0 5px rgba(255, 77, 79, 0.25);
+        animation: rec-border-pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes rec-border-pulse {
+        0%, 100% { box-shadow: 0 0 4px rgba(255, 77, 79, 0.4), inset 0 0 4px rgba(255, 77, 79, 0.2); }
+        50%      { box-shadow: 0 0 9px rgba(255, 77, 79, 0.75), inset 0 0 9px rgba(255, 77, 79, 0.4); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="border"></div>
+  </body>
+</html>

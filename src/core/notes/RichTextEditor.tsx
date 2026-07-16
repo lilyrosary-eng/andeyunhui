@@ -5,6 +5,7 @@ import ImageExtension from '@tiptap/extension-image';
 import LinkExtension from '@tiptap/extension-link';
 import PlaceholderExtension from '@tiptap/extension-placeholder';
 import { marked } from 'marked';
+import { resolveLocalImage } from '@/lib/localImage';
 
 type Editor = NonNullable<ReturnType<typeof useEditor>>;
 
@@ -95,6 +96,38 @@ export interface RichTextEditorHandle {
   editor: Editor | null;
 }
 
+/**
+ * 自定义图片扩展：渲染时用 NodeView 把 localimg:// 占位引用解析为 data URL，
+ * 避免浏览器直接 GET localimg:// 触发 ERR_UNKNOWN_URL_SCHEME，
+ * 同时保留文档模型里依然是 localimg:// 引用（笔记不膨胀）。
+ * 其它格式（http/https/data URL）原样渲染；解析失败则隐藏破图。
+ */
+const LocalImageExtension = ImageExtension.extend({
+  addNodeView() {
+    return ({ node }) => {
+      const img = document.createElement('img');
+      const attrs = node.attrs as Record<string, unknown>;
+      const src = attrs.src as string | undefined;
+      Object.entries(attrs).forEach(([k, v]) => {
+        if (k === 'src') return;
+        if (v != null && v !== '') img.setAttribute(k, String(v));
+      });
+      img.addEventListener('error', () => {
+        img.style.display = 'none';
+      });
+      if (src && src.startsWith('localimg://')) {
+        const enc = src.slice('localimg://'.length);
+        void resolveLocalImage(enc).then((url) => {
+          if (url) img.src = url;
+        });
+      } else if (src) {
+        img.src = src;
+      }
+      return { dom: img };
+    };
+  },
+});
+
 interface RichTextEditorProps {
   content: string;
   onContentChange: (md: string) => void;
@@ -119,7 +152,7 @@ export function RichTextEditor({
       StarterKit.configure({
         heading: { levels: [1, 2, 3] },
       }),
-      ImageExtension.configure({
+      LocalImageExtension.configure({
         inline: false,
         allowBase64: false,
       }),

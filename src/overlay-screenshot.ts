@@ -36,6 +36,16 @@ function OverlayApp() {
 
   React.useEffect(() => {
     let cancelled = false;
+    let loaded = false;
+    let safetyTimer: number | null = null;
+
+    const buildMeta = (payload: any) => ({
+      ox: payload?.ox || 0,
+      oy: payload?.oy || 0,
+      scale: payload?.scale || 1,
+      windows: payload?.windows || [],
+      noteId: payload?.noteId || "",
+    });
 
     // 读取冻结图并渲染。meta 为本次截图的坐标/窗口信息。
     const loadShot = (meta: {
@@ -52,7 +62,6 @@ function OverlayApp() {
           loadingRef.current = false;
           if (cancelled) return;
           // 前 8 字节为逻辑分辨率宽/高（u32 LE），其后为已降采样的 RGBA 字节
-          // （Rust 侧按 scale 降采样，体积约为原图 1/scale²，前端不再建 33MP 画布）
           const dv = new DataView(buf);
           const w = dv.getUint32(0, true);
           const h = dv.getUint32(4, true);
@@ -68,8 +77,9 @@ function OverlayApp() {
             (blob) => {
               if (!blob || cancelled) return;
               const url = URL.createObjectURL(blob);
+              loaded = true;
               setData((prev) => {
-                if (prev && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+                if (prev && prev.image && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
                 return { image: url, ...meta };
               });
             },
@@ -79,28 +89,27 @@ function OverlayApp() {
         })
         .catch((err) => {
           loadingRef.current = false;
-          console.error("[截图] 读取失败:", err);
-          // 读取失败也要退出覆盖层，杜绝「透明遮罩卡死、全屏无法操作」。
-          if (!cancelled) handleClose();
+          // 捕获尚未完成时 read_screenshot 会失败：不关闭覆盖窗，等待 screenshot-ready / 轮询兜底。
+          console.warn("[截图] 读取冻结图失败（可能捕获进行中，稍后重试）:", err);
         });
     };
 
-    // 快路径：push 事件（正常情况下毫秒级到达）
-    const p = listen("screenshot-start", (event: any) => {
-      const payload = event.payload || {};
-      const meta = {
-        ox: payload.ox || 0,
-        oy: payload.oy || 0,
-        scale: payload.scale || 1,
-        windows: payload.windows || [],
-        noteId: payload.noteId || "",
-      };
-      loadShot(meta);
+    // 快路径①：截图启动（仅推送 meta，进入透明待加载态，选区交互立即可用）
+    const p1 = listen("screenshot-start", (event: any) => {
+      const meta = buildMeta(event.payload);
+      setData((prev) => {
+        if (prev && prev.image && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+        return { image: "", ...meta };
+      });
+    });
+
+    // 快路径②：冻结图就绪（后台捕获线程完成）→ 注入截图
+    const p2 = listen("screenshot-ready", (event: any) => {
+      loadShot(buildMeta(event.payload));
     });
 
     // 兜底路径：轮询 peek_screenshot。打包版 WebView2 偶发丢失 push 事件时，
-    // 只要 session 增大即主动拉取冻结图渲染，根治「只有透明遮罩、无实际功能」。
-    // 首次挂载时把 handledSession 同步为当前 session，避免加载启动时的历史空快照。
+    // 只要 session 增大且尚未注入冻结图，即主动拉取渲染，根治「只有透明遮罩、无实际功能」。
     let initialized = false;
     const poll = window.setInterval(() => {
       invoke<any>("peek_screenshot")
@@ -114,22 +123,28 @@ function OverlayApp() {
           }
           if (session > handledSession.current) {
             handledSession.current = session;
-            loadShot({
-              ox: snap.ox || 0,
-              oy: snap.oy || 0,
-              scale: snap.scale || 1,
-              windows: snap.windows || [],
-              noteId: snap.noteId || "",
-            });
+            if (!loaded) {
+              loadShot(buildMeta(snap));
+            }
           }
         })
         .catch(() => {});
     }, 120);
 
+    // 安全时限：若 4s 内仍未注入冻结图（捕获异常等），关闭覆盖窗避免永久卡死。
+    safetyTimer = window.setTimeout(() => {
+      if (!loaded && !cancelled) {
+        console.error("[截图] 4s 内未获取到冻结图，关闭覆盖窗");
+        handleClose();
+      }
+    }, 4000);
+
     return () => {
       cancelled = true;
+      if (safetyTimer !== null) window.clearTimeout(safetyTimer);
       window.clearInterval(poll);
-      p.then((un) => un());
+      p1.then((un) => un());
+      p2.then((un) => un());
     };
   }, [handleClose]);
 

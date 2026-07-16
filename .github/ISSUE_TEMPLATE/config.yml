@@ -1,0 +1,6 @@
+# Issue 创建体验配置（GitHub 自动读取）
+blank_issues_enabled: false
+contact_links:
+  - name: "💬 讨论区 / Discussions"
+    url: https://github.com/lilyrosary-eng/andengyuanhua/discussions
+    about: 想聊想法、提问或分享用法，欢迎到 Discussions（需先在仓库设置中启用）。

@@ -39,6 +39,8 @@ export function FloatingClipboardView() {
   const [isFixed, setIsFixed] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; itemId: string } | null>(null);
+  // 分类标签：全部 / 文本 / 图片（对应「剪贴板浮窗分两类」需求）
+  const [tab, setTab] = useState<'all' | 'text' | 'image'>('all');
   const lastTextRef = useRef('');
   const lastImgHashRef = useRef('');
 
@@ -212,10 +214,13 @@ export function FloatingClipboardView() {
     } catch { /* ignore */ }
   }, []);
 
-  // 过滤
-  const filtered = search
-    ? items.filter(i => i.type === 'text' && i.content.toLowerCase().includes(search.toLowerCase()))
-    : items;
+  // 过滤（先按分类标签，再按搜索关键字）
+  const filtered = items.filter((i) => {
+    if (tab === 'text' && i.type !== 'text') return false;
+    if (tab === 'image' && i.type !== 'image') return false;
+    if (search && i.type === 'text' && !i.content.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
 
   return (
     <div
@@ -337,6 +342,28 @@ export function FloatingClipboardView() {
             }}
           />
         </div>
+      </div>
+
+      {/* 分类标签：全部 / 文本 / 图片 */}
+      <div data-no-drag style={{ display: 'flex', gap: '4px', padding: '0 10px 6px' }}>
+        {([['all', '全部'], ['text', '文本'], ['image', '图片']] as const).map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setTab(k)}
+            style={{
+              flex: 1,
+              padding: '4px 0',
+              fontSize: '12px',
+              borderRadius: '6px',
+              border: 'none',
+              cursor: 'pointer',
+              color: tab === k ? '#1e1e23' : 'rgba(255,255,255,0.55)',
+              background: tab === k ? '#60a5fa' : 'rgba(255,255,255,0.08)',
+            }}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {/* 历史列表 */}

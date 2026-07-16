@@ -18,6 +18,7 @@ import {
   type PptSection,
 } from './docStore';
 import { PptEditor } from './PptEditor';
+import { SheetEditor } from './SheetEditor';
 import { marked } from 'marked';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
@@ -440,6 +441,20 @@ function WpsEditorBody({ t }: { t: TiptapApi }) {
     [],
   );
 
+  // 表格内容落盘：写回 content（Univer workbook snapshot）并刷新索引 updatedAt，经共享总线同步侧栏。
+  const persistSheet = useCallback(
+    (id: string, content: unknown) => {
+      if (!id) return;
+      const now = Date.now();
+      saveDoc({ id, title: titleRef.current, content, kind: 'sheet', header: '', footer: '', updatedAt: now });
+      const next = docsRef.current.map((m) => (m.id === id ? { ...m, updatedAt: now } : m));
+      docsRef.current = next;
+      saveIndex(next);
+      publishDocs(next, id);
+    },
+    [],
+  );
+
   const scheduleSave = useCallback(
     (content?: unknown) => {
       setSaving(true);
@@ -650,8 +665,8 @@ function WpsEditorBody({ t }: { t: TiptapApi }) {
 
   // 演示文件：交由 PptEditor 处理（自身管理幻灯片内容与持久化）
   if (kind === 'ppt') return <PptEditor activeId={activeId} title={title} onPersist={persistPpt} />;
-  // 表格：正式编辑器在 P3 实现，现展示占位
-  if (kind === 'sheet') return <ComingSoon kind={kind} />;
+  // 表格：Univer 引擎驱动的专业表格编辑器（公式 / 图表 / 排序 / 筛选 / 冻结 / 合并）
+  if (kind === 'sheet') return <SheetEditor activeId={activeId} title={title} onPersist={persistSheet} />;
 
   return (
     <div className="wps-root flex-1 flex h-full min-h-0 bg-[#f5f5f0] dark:bg-[#1c1917]">

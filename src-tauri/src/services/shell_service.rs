@@ -131,7 +131,7 @@ pub fn run_agent_shell(
 
 /// 根因分析优先于错误修复（确定性兜底）：拦截已知「环境/配置问题」，给出直接修复步骤，
 /// 不让 LLM 把端口占用、缺依赖等误判为代码逻辑错误而白烧 token。仅做确定性匹配，绝不臆测。
-fn classify_shell_error(cmd: &str, stdout: &str, stderr: &str) -> Option<String> {
+fn classify_shell_error(_cmd: &str, stdout: &str, stderr: &str) -> Option<String> {
     let text = format!("{}\n{}", stdout, stderr);
     let lower = text.to_lowercase();
     // 端口被占用：这是环境冲突，不是代码 bug
@@ -638,14 +638,14 @@ mod tests {
     fn e2e_allowed_command_runs_and_returns_output() {
         // 直接调用 run_captured 隔离（绕过白名单/黑名单），验证外部程序 node 与 cmd 内部命令的输出捕获。
         // 用无内嵌引号的命令（node -p 1+1 打印 "2"）避免 cmd 引号解析干扰；含引号命令见 e2e 末尾说明。
-        let r = run_captured("node -p 1+1", None, 8, 32_000);
+        let r = run_captured("node -p 1+1", None, 8, 32_000, &[]);
         assert!(r.ok);
         assert!(!r.blocked);
         assert!(!r.timed_out);
         assert!(r.stdout.contains("2") || r.stderr.contains("2"));
         assert_eq!(r.exit_code, Some(0));
 
-        let r2 = run_captured("echo hi-echo", None, 8, 32_000);
+        let r2 = run_captured("echo hi-echo", None, 8, 32_000, &[]);
         assert!(r2.ok);
         assert!(!r2.timed_out);
         assert!(r2.stdout.contains("hi-echo"));
@@ -712,7 +712,7 @@ mod tests {
         let (h4, _e4) = harden_noninteractive("npm install --yes");
         assert_eq!(h4.matches("--yes").count(), 1);
         // Node 脚本注入 NODE_OPTIONS 内存上限，防 OOM
-        let (h5, e5) = harden_noninteractive("npm run build");
+        let (_h5, e5) = harden_noninteractive("npm run build");
         assert!(e5.iter().any(|(k, v)| k == "NODE_OPTIONS" && v == "--max-old-space-size=2048"));
         let (_h6, e6) = harden_noninteractive("node dist/server.js");
         assert!(e6.iter().any(|(k, _)| k == "NODE_OPTIONS"));

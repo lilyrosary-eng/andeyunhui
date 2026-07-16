@@ -2,7 +2,7 @@
 
 # 岸灯鸢花 · andengyuanhua
 
-一款以「笔记」为核心、可热插拔插件系统为骨架的现代桌面应用。
+一个本地优先的轻量保险库，把你的阅读、图片、视频、音乐与笔记收纳进同一个私密空间——数据自主、离线可用、插件可热插拔。
 React + Rust，基于 Tauri v2 构建。
 
 [![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
@@ -11,8 +11,8 @@ React + Rust，基于 Tauri v2 构建。
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](#系统要求)
-[![Release](https://img.shields.io/github/v/release/rosary/andengyuanhua?label=Release)](https://github.com/rosary/andengyuanhua/releases)
-[![Downloads](https://img.shields.io/github/downloads/rosary/andengyuanhua/total)](https://github.com/rosary/andengyuanhua/releases)
+[![Release](https://img.shields.io/github/v/release/lilyrosary-eng/andengyuanhua?label=Release)](https://github.com/lilyrosary-eng/andengyuanhua/releases)
+[![Downloads](https://img.shields.io/github/downloads/lilyrosary-eng/andengyuanhua/total)](https://github.com/lilyrosary-eng/andengyuanhua/releases)
 
 > 安装包下载徽章对应 GitHub Releases，发布后自动显示版本号与累计下载量。
 

@@ -53,7 +53,7 @@ external-deps/_build/*
 src/lib/_waitingPages.generated.ts
 
 # ---- 本地构建产物不应推送到 GitHub ----
-# 仓库正式名称：andengyuanhua（GitHub 仓库名请对应 rosary/andengyuanhua）
+# 当前 GitHub 远程：lilyrosary-eng/andengyuanhua
 
 # Rust 编译产物（cargo，体积极大，必须忽略）
 src-tauri/target/
@@ -72,3 +72,14 @@ research_report_*.md
 
 # 设计 / 诊断类内部文档（非对外文档；截图等资源 .png/.gif 仍会被跟踪）
 docs/*.md
+# 例外：对外门面文档需纳入版本控制（定位话术、发布草稿）
+!docs/POSITIONING.md
+!docs/release-v2.1.0-draft.md
+
+# ---- 安全：环境变量 / 密钥（避免误提交） ----
+.env
+.env.*
+!.env.example
+
+# 额外构建产物（dist 变体，避免误提交大型产物）
+dist-dlc/

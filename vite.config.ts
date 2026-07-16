@@ -66,6 +66,7 @@ export default defineConfig(() => ({
         "screenshot-overlay": "screenshot-overlay.html",
         "recorder-widget": "recorder-widget.html",
         "recorder-select": "recorder-select.html",
+        "recording-border": "recording-border.html",
       },
       output: {
         manualChunks(id: string) {

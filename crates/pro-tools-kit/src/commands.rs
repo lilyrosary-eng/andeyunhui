@@ -272,9 +272,54 @@ pub fn convert_document(text: String, from: String, to: String) -> Result<String
 }
 
 // ============ t3 / t4 音视频转码 (ffmpeg) ============
+// ffmpeg 路径解析：优先 external-deps/全局/ffmpeg/ffmpeg.exe（随应用打包），
+// 回退到系统 PATH 中的 ffmpeg。
+// 与主 crate recording_service::get_ffmpeg_path 逻辑一致，但 pro-tools-kit 是
+// 独立 crate，无法调用主 crate 的 get_external_deps_dir，故在此独立实现。
+use tauri::Manager;
+
+fn get_ffmpeg_path(app: &tauri::AppHandle) -> String {
+    // 1. 打包后：resource_dir/external-deps/全局/ffmpeg/ffmpeg.exe
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let ffmpeg = resource_dir
+            .join("external-deps")
+            .join("全局")
+            .join("ffmpeg")
+            .join("ffmpeg.exe");
+        if ffmpeg.exists() {
+            return ffmpeg.to_string_lossy().to_string();
+        }
+        // Tauri 打包时 external-deps 可能在 _up_ 下
+        let ffmpeg_up = resource_dir
+            .join("_up_")
+            .join("external-deps")
+            .join("全局")
+            .join("ffmpeg")
+            .join("ffmpeg.exe");
+        if ffmpeg_up.exists() {
+            return ffmpeg_up.to_string_lossy().to_string();
+        }
+    }
+    // 2. 开发模式：CARGO_MANIFEST_DIR/../../external-deps/全局/ffmpeg/ffmpeg.exe
+    // CARGO_MANIFEST_DIR = crates/pro-tools-kit/，../../ = 项目根
+    let dev_ffmpeg = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("external-deps")
+        .join("全局")
+        .join("ffmpeg")
+        .join("ffmpeg.exe");
+    if dev_ffmpeg.exists() {
+        return dev_ffmpeg.to_string_lossy().to_string();
+    }
+    // 3. 回退到系统 PATH
+    "ffmpeg".to_string()
+}
+
 #[tauri::command]
-pub fn check_ffmpeg() -> bool {
-    std::process::Command::new("ffmpeg")
+pub fn check_ffmpeg(app: tauri::AppHandle) -> bool {
+    let path = get_ffmpeg_path(&app);
+    std::process::Command::new(&path)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -284,9 +329,25 @@ pub fn check_ffmpeg() -> bool {
 }
 
 #[tauri::command]
-pub fn transcode_media(input_path: String, output_format: String) -> Result<String, String> {
-    if !check_ffmpeg() {
-        return Err("未检测到 ffmpeg，无法转码。请在系统中安装 ffmpeg 后重试。".to_string());
+pub fn transcode_media(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_format: String,
+) -> Result<String, String> {
+    let ffmpeg_path = get_ffmpeg_path(&app);
+    // 检查 ffmpeg 是否可用（用解析出的路径，不回退系统 PATH）
+    let ok = std::process::Command::new(&ffmpeg_path)
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return Err(
+            "未检测到 ffmpeg，无法转码。请确保 external-deps/全局/ffmpeg/ffmpeg.exe 存在。"
+                .to_string(),
+        );
     }
     let path = std::path::Path::new(&input_path);
     if !path.exists() {
@@ -295,13 +356,13 @@ pub fn transcode_media(input_path: String, output_format: String) -> Result<Stri
     let ext = output_format.to_lowercase();
     let out_path = path.with_extension(&ext);
     let out_str = out_path.to_string_lossy().to_string();
-    let status = std::process::Command::new("ffmpeg")
+    let status = std::process::Command::new(&ffmpeg_path)
         .arg("-y")
         .arg("-i")
         .arg(&input_path)
         .arg(&out_str)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| format!("启动 ffmpeg 失败: {}", e))?;
     if !status.success() {

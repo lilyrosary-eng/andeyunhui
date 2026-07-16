@@ -1,0 +1,16 @@
+{
+  "id": "gongfang",
+  "name": "攻防",
+  "version": "0.1.0",
+  "kind": "module",
+  "visible": false,
+  "entry": "index.js",
+  "iconName": "Shield",
+  "hostApiVersion": 1,
+  "parent": "niaoluo",
+  "codename": "茑萝",
+  "requiredAssets": [],
+  "capabilities": ["network", "process-spawn"],
+  "category": "安全攻防",
+  "desc": "安全攻防套件：网络爬虫 / 逆向工程 / 渗透测试 / 自动化测试四大框架"
+}

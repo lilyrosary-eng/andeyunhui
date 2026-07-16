@@ -24,7 +24,9 @@ use andengyuanhua_lib::commands::*;
 // 专业模块「薄荷」工具：从内部依赖包 pro-tools-kit 引入（不再集成于主 crate 源码树）
 // Tauri 2 限制：命令不能放在 crate 根（lib.rs），故置于 commands 子模块
 use pro_tools_kit::commands::*;
-use andengyuanhua_lib::screenshot::*;
+// 攻防模块后端命令（gongfang-kit crate，默认仅骨架，--features gongfang 启用爬虫等）
+use gongfang_kit::commands::*;
+use andengyuanhua_lib::screenshot::{self, *};
 use andengyuanhua_lib::TrayModeState;
 use andengyuanhua_lib::TrayHolder;
 use andengyuanhua_lib::services::lyrics_service;
@@ -300,6 +302,8 @@ fn main() {
             let _ = recording_service::create_recorder_select_window(app.handle());
             // 预创建录屏控制台窗口（隐藏），避免在 sync 命令中 build 导致 WebView2 主线程重入死锁
             let _ = recording_service::create_recorder_widget_window(app.handle());
+            // 预创建录屏区域边框窗（隐藏），start_recording 时按录制区域定位并显示
+            let _ = recording_service::create_recording_border_window(app.handle());
             let _ = create_tray_menu_window(app.handle());
 
             // 托盘图标：优先使用默认窗口图标；若极端情况下为 None，则从资源目录
@@ -369,6 +373,28 @@ fn main() {
                     eprintln!("[Shortcut] 注册录屏热键失败: {}", e);
                 }
                 if let Ok(mut state) = recording_service::recorder_shortcut_state().lock() {
+                    *state = sc;
+                }
+            }
+
+            // 注册剪贴板浮窗热键（默认 Ctrl+Alt+C；设置面板可改写并即时生效）
+            {
+                let sc = read_clipboard_shortcut(app.handle());
+                if let Err(e) = register_clipboard_shortcut(app.handle(), &sc) {
+                    eprintln!("[Shortcut] 注册剪贴板热键失败: {}", e);
+                }
+                if let Ok(mut state) = clipboard_shortcut_state().lock() {
+                    *state = sc;
+                }
+            }
+
+            // 注册中转站浮窗热键（默认 Ctrl+Alt+V；设置面板可改写并即时生效）
+            {
+                let sc = read_dropzone_shortcut(app.handle());
+                if let Err(e) = register_dropzone_shortcut(app.handle(), &sc) {
+                    eprintln!("[Shortcut] 注册中转站热键失败: {}", e);
+                }
+                if let Ok(mut state) = dropzone_shortcut_state().lock() {
                     *state = sc;
                 }
             }
@@ -504,9 +530,14 @@ fn main() {
                     if let Some(rsw) = app.get_webview_window(recording_service::RECORDER_SELECT_LABEL) {
                         let _ = rsw.destroy();
                     }
-                    // 同时关闭所有浮窗笔记窗口（关闭主程序时一并关掉，避免进程残留 / 浮窗孤立）
+                    // 录屏区域边框窗（1px 红框，常驻隐藏）也必须销毁，否则进程无法退出
+                    if let Some(rbw) = app.get_webview_window(recording_service::RECORDING_BORDER_LABEL) {
+                        let _ = rbw.destroy();
+                    }
+                    // 销毁所有浮窗（剪贴板浮窗 / 中转站浮窗 / 浮窗笔记等，label 均以 floating- 开头），
+                    // 避免进程残留或浮窗孤立。「关了主窗却仍在运行」多由这些常驻辅助窗口导致。
                     for (label, w) in app.webview_windows() {
-                        if label.starts_with("floating-note-") {
+                        if label.starts_with("floating-") {
                             let _ = w.destroy();
                         }
                     }
@@ -532,10 +563,18 @@ fn main() {
                             // 录屏流程：先选择区域 → 开始录制 → 显示控制台
                             let is_recording = recording_service::get_recording_status().is_recording;
                             if is_recording {
-                                // 正在录制 → 停止（向控制台发 toggle 事件）
+                                // 正在录制：控制台仍可见 → 停止（toggle）；
+                                // 控制台已被自动隐藏 → 仅唤出控制台（不停止），
+                                // 让用户能继续查看/操作，再次按热键才停止。
                                 if let Some(win) = app.get_webview_window(recording_service::RECORDER_WINDOW_LABEL) {
-                                    let _ = win.show();
-                                    let _ = win.emit("recorder-toggle", ());
+                                    let visible = win.is_visible().unwrap_or(false);
+                                    if visible {
+                                        let _ = win.emit("recorder-toggle", ());
+                                    } else {
+                                        let _ = win.show();
+                                        let _ = win.set_focus();
+                                        let _ = win.emit("recorder-reveal", ());
+                                    }
                                 }
                             } else if app
                                 .get_webview_window(recording_service::RECORDER_SELECT_LABEL)
@@ -551,6 +590,30 @@ fn main() {
                                 let _ = recording_service::show_recorder_select(app.clone());
                             }
                         } else {
+                            // 剪贴板浮窗热键
+                            let clip_sc = screenshot::clipboard_shortcut_state()
+                                .lock()
+                                .map(|s| s.clone())
+                                .unwrap_or_else(|_| screenshot::DEFAULT_CLIPBOARD_SHORTCUT.to_string());
+                            let is_clip = screenshot::parse_shortcut(&clip_sc)
+                                .map(|sc| shortcut == &sc)
+                                .unwrap_or(false);
+                            if is_clip {
+                                let _ = app.emit("open-clipboard-floating", ());
+                                return;
+                            }
+                            // 中转站浮窗热键
+                            let dz_sc = screenshot::dropzone_shortcut_state()
+                                .lock()
+                                .map(|s| s.clone())
+                                .unwrap_or_else(|_| screenshot::DEFAULT_DROPZONE_SHORTCUT.to_string());
+                            let is_dz = screenshot::parse_shortcut(&dz_sc)
+                                .map(|sc| shortcut == &sc)
+                                .unwrap_or(false);
+                            if is_dz {
+                                let _ = app.emit("open-dropzone-floating", ());
+                                return;
+                            }
                             let _ = app.emit("open-screenshot", ());
                         }
                     }
@@ -679,6 +742,11 @@ fn main() {
             convert_document,
             check_ffmpeg,
             transcode_media,
+            // ========== 模块：攻防（双轨制内核 + AI 常驻推理）==========
+            gongfang_status,
+            gongfang_start,
+            gongfang_stop,
+            gongfang_inject,
             // ========== 模块：截图系统（全局热键 / 多屏 / 标注）==========
             capture_screen,
             start_screenshot,
@@ -693,6 +761,8 @@ fn main() {
             get_window_title,
             clipboard_write_image,
             clipboard_write_image_from_path,
+            clipboard_diagnose,
+            recording_service::recording_border_probe,
             crop_native,
             crop_native_rgba,
             save_screenshot,
@@ -701,6 +771,10 @@ fn main() {
             capture_window_full,
             get_screenshot_shortcut,
             set_screenshot_shortcut,
+            get_clipboard_shortcut,
+            set_clipboard_shortcut,
+            get_dropzone_shortcut,
+            set_dropzone_shortcut,
             // ========== 模块：录屏系统（全局热键 / WGC 捕获 / ffmpeg 编码）==========
             recording_service::start_recording,
             recording_service::stop_recording,
@@ -715,6 +789,8 @@ fn main() {
             recording_service::get_recorder_select_coords,
             recording_service::get_recorder_shortcut,
             recording_service::set_recorder_shortcut,
+            recording_service::convert_recording_to_gif,
+            recording_service::delete_recording_file,
             // ========== 模块：日志系统（用户可见 log 文件 + 前端错误捕获）==========
             log_service::write_frontend_log,
             log_service::open_log_dir,
