@@ -18,8 +18,8 @@ use std::time::SystemTime;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
-use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
 use winapi::shared::windef::HWND;
+use winapi::um::wingdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF};
 
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
@@ -39,57 +39,29 @@ pub const RECORDER_SELECT_LABEL: &str = "recorder-select";
 /// 录屏区域边框窗标签（透明、点击穿透、排除捕获，仅用于屏幕可视化提示录制区域）
 pub const RECORDING_BORDER_LABEL: &str = "recording-border";
 
-// ---- 录屏边框窗点击穿透 ----
-// 仅 WS_EX_TRANSPARENT 对 WebView2 内部子窗口不可靠，必须配合 WM_NCHITTEST → HTTRANSPARENT。
-// 这里对整窗及其所有后代窗口子类化窗口过程，命中测试统一返回 HTTRANSPARENT，
-// 使红框区域（含 WebView2 渲染区）的鼠标点击真正穿透到下层应用窗口。
-type ClickThroughWndProc =
-    unsafe extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT;
+// ---- 录屏边框窗「区域镂空」实现点击穿透 ----
+// 旧方案用 WS_EX_TRANSPARENT + 子类化 WM_NCHITTEST，但 WebView2 在页面加载后才创建子 HWND，
+// 预创建时子类化来不及，且 WebView2 会重置窗口过程 → 红框内点击被 WebView2 子窗拦截，无法操作。
+// 改为更稳健的做法：用窗口区域（HRGN）把边框做成「画框」——仅保留四周 FRAME 像素属于窗口，
+// 内部全部镂空（不属于窗口）。镂空区域在 OS 命中测试里本就不存在窗口，点击必然穿透到下层应用，
+// 与 WebView2 实现、DPI、样式时机都无关，彻底可靠。
+const BORDER_FRAME_PX: i32 = 2;
 
-static CLICK_THROUGH_OLD: OnceLock<Mutex<HashMap<isize, isize>>> = OnceLock::new();
-
-unsafe extern "system" fn click_through_wndproc(
-    hwnd: HWND,
-    msg: UINT,
-    w: WPARAM,
-    l: LPARAM,
-) -> LRESULT {
-    if msg == winapi::um::winuser::WM_NCHITTEST {
-        return winapi::um::winuser::HTTRANSPARENT as LRESULT;
+/// 设置边框窗为「画框」区域：外框 = 整窗矩形，内框 = 向内缩 FRAME 的矩形，二者差分得到仅四周的环。
+/// 之后窗口内部（录制区域）完全镂空，鼠标点击自然穿透，无需任何透明/子类化 hack。
+unsafe fn set_border_region(hwnd: HWND, w: i32, h: i32) {
+    if w <= 0 || h <= 0 {
+        return;
     }
-    let map = CLICK_THROUGH_OLD.get().expect("CLICK_THROUGH_OLD 未初始化");
-    let guard = map.lock().unwrap();
-    match guard.get(&(hwnd as isize)) {
-        Some(&old) => {
-            drop(guard);
-            let old_proc: ClickThroughWndProc = std::mem::transmute(old);
-            winapi::um::winuser::CallWindowProcW(Some(old_proc), hwnd, msg, w, l)
-        }
-        None => winapi::um::winuser::DefWindowProcW(hwnd, msg, w, l),
-    }
-}
-
-unsafe extern "system" fn enum_child_for_click_through(hwnd: HWND, _lp: LPARAM) -> i32 {
-    click_through_subclass(hwnd);
-    1
-}
-
-unsafe fn click_through_subclass(hwnd: HWND) {
-    let map = CLICK_THROUGH_OLD.get_or_init(|| Mutex::new(HashMap::new()));
-    {
-        let mut guard = map.lock().unwrap();
-        if guard.contains_key(&(hwnd as isize)) {
-            return;
-        }
-        let old = winapi::um::winuser::SetWindowLongPtrW(
-            hwnd,
-            winapi::um::winuser::GWLP_WNDPROC,
-            click_through_wndproc as isize,
-        );
-        guard.insert(hwnd as isize, old);
-    }
-    // 释放锁后再递归子类后代窗口，避免重入死锁
-    winapi::um::winuser::EnumChildWindows(hwnd, Some(enum_child_for_click_through), 0);
+    let t = BORDER_FRAME_PX;
+    let outer = winapi::um::wingdi::CreateRectRgn(0, 0, w, h);
+    let inner = winapi::um::wingdi::CreateRectRgn(t, t, (w - t).max(0), (h - t).max(0));
+    let rgn = winapi::um::wingdi::CreateRectRgn(0, 0, 0, 0);
+    winapi::um::wingdi::CombineRgn(rgn, outer, inner, winapi::um::wingdi::RGN_DIFF);
+    // SetWindowRgn 接管 rgn 所有权，由系统负责释放；outer/inner 由我们释放。
+    winapi::um::winuser::SetWindowRgn(hwnd, rgn, 1);
+    winapi::um::wingdi::DeleteObject(outer as *mut _);
+    winapi::um::wingdi::DeleteObject(inner as *mut _);
 }
 
 /// 录屏状态（返回给前端）
@@ -547,6 +519,10 @@ pub async fn start_recording(
                 width: border_w,
                 height: border_h,
             }));
+            // 按实际录制区域大小重设「画框」区域，确保内部真正镂空、点击穿透
+            if let Ok(hwnd) = bw.hwnd() {
+                unsafe { set_border_region(hwnd.0 as HWND, border_w as i32, border_h as i32) };
+            }
             let _ = bw.show();
         }
 
@@ -585,6 +561,13 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
         };
         // 锁已释放：后续 stop 流程不再阻塞 start_recording / get_recording_status
 
+        // 立即停止即隐藏录屏区域边框窗：无论后面 ffmpeg 是否超时，都保证红框立刻消失、
+        // 且不再拦截点击（之前若 ffmpeg 5s 超时提前 return，会漏掉 hide，导致红框残留）。
+        if let Some(bw) = app.get_webview_window(RECORDING_BORDER_LABEL) {
+            let _ = bw.hide();
+        }
+
+
         // 1. 设置停止标志 → WGC 下一帧回调中 stop() 捕获 → 捕获线程退出（drop 其 sender 副本）
         handle.stop_flag.store(true, Ordering::SeqCst);
 
@@ -619,10 +602,7 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
         let output_path = handle.output_path.clone();
         let _ = app.emit("recording-stopped", &output_path);
 
-        // 停止后隐藏录屏区域边框窗（不再需要提示录制区域）
-        if let Some(bw) = app.get_webview_window(RECORDING_BORDER_LABEL) {
-            let _ = bw.hide();
-        }
+        // 边框窗已在 stop 起始处立即隐藏（见上文），此处无需重复处理。
 
         Ok(output_path)
     })
@@ -830,42 +810,15 @@ pub fn create_recording_border_window(app: &AppHandle) -> Result<(), String> {
     .build()
     .map_err(|e| format!("创建录屏边框窗失败: {}", e))?;
 
-    // 设为点击穿透（WS_EX_TRANSPARENT），避免遮挡录制区域内的鼠标操作；
-    // 并排除在屏幕捕获之外（WDA_EXCLUDEFROMCAPTURE），边框不进入录屏画面。
+    // 排除在屏幕捕获之外（WDA_EXCLUDEFROMCAPTURE），边框不进入录屏画面；
+    // transparent(true) 已由 Tauri 设置 WS_EX_LAYERED，保证窗口背景透明、只显示 CSS 红框。
     if let Some(win) = app.get_webview_window(RECORDING_BORDER_LABEL) {
         if let Ok(hwnd) = win.hwnd() {
             unsafe {
-                let ex = winapi::um::winuser::GetWindowLongPtrW(
-                    hwnd.0 as *mut _,
-                    winapi::um::winuser::GWL_EXSTYLE,
-                );
-                let new_ex = ex
-                    | (winapi::um::winuser::WS_EX_TRANSPARENT
-                        | winapi::um::winuser::WS_EX_LAYERED) as isize;
-                winapi::um::winuser::SetWindowLongPtrW(
-                    hwnd.0 as *mut _,
-                    winapi::um::winuser::GWL_EXSTYLE,
-                    new_ex,
-                );
-                // 关键：重新应用扩展样式，否则 WS_EX_TRANSPARENT 可能不生效（点击仍被拦截）
-                winapi::um::winuser::SetWindowPos(
-                    hwnd.0 as *mut _,
-                    std::ptr::null_mut(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    winapi::um::winuser::SWP_FRAMECHANGED
-                        | winapi::um::winuser::SWP_NOMOVE
-                        | winapi::um::winuser::SWP_NOSIZE
-                        | winapi::um::winuser::SWP_NOZORDER
-                        | winapi::um::winuser::SWP_NOACTIVATE,
-                );
                 // WDA_EXCLUDEFROMCAPTURE = 0x11：从 WGC/DXGI 捕获中隐藏本窗
                 winapi::um::winuser::SetWindowDisplayAffinity(hwnd.0 as *mut _, 0x11);
-                // 让整窗（含 WebView2 子窗口）真正点击穿透：WS_EX_TRANSPARENT 对 WebView2
-                // 子窗口不可靠，必须在窗口过程里对 WM_NCHITTEST 返回 HTTRANSPARENT。
-                click_through_subclass(hwnd.0 as HWND);
+                // 画框镂空：仅四周 FRAME 像素属于窗口，内部镂空 → 点击自然穿透（无需透明/子类化 hack）
+                set_border_region(hwnd.0 as HWND, 100, 100);
             }
         }
     }

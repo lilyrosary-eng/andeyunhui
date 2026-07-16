@@ -207,6 +207,8 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
   const [convOpen, setConvOpen] = useState(false);
   // 「关联项目」文件浏览器开合（#12）
   const [projOpen, setProjOpen] = useState(false);
+  // 对话持久化加载完成标记：加载完成前不写盘，避免初始空 state 覆盖磁盘已有数据
+  const [convLoaded, setConvLoaded] = useState(false);
 
   const activeReq = useRef<string | null>(null);
   const assistantId = useRef<string | null>(null);
@@ -235,6 +237,71 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
       })
       .catch((e) => console.warn('[AI] 读取模型档案失败:', e));
   }, []);
+
+  // 对话持久化：挂载时从后端加载（避免关闭软件后丢失），变更时防抖 500ms 写盘。
+  // 不用 localStorage（5MB 限制 + WebView 数据目录清理风险）；
+  // 不引入 NPSL/SQLite（用户明确拒绝强传染协议，桌面对话量级 JSON 文件足够）。
+  useEffect(() => {
+    let cancelled = false;
+    hostApi.invoke<{ conversations: Conversation[]; active_id?: string | null }>('ai_get_conversations')
+      .then((data) => {
+        if (cancelled) return;
+        const list = (data && Array.isArray(data.conversations) && data.conversations.length > 0)
+          ? data.conversations.map((c) => ({
+              // 兼容旧字段：role/content 必有；id/title 兜底
+              id: c.id || ('c_' + Math.random().toString(36).slice(2, 8)),
+              title: c.title || '新对话',
+              // 加载后默认 streaming=false（流式状态不持久化）
+              messages: (c.messages || []).map((m) => ({
+                id: m.id || ('m_' + Math.random().toString(36).slice(2, 8)),
+                role: (m.role === 'user' || m.role === 'assistant') ? m.role : 'assistant',
+                content: m.content || '',
+                streaming: false,
+                error: m.error || false,
+              }) as Msg),
+            }))
+          : [{ id: INITIAL_CONV_ID, title: '新对话', messages: [] }];
+        setConversations(list);
+        // 恢复激活对话：优先 active_id，其次首条
+        const aid = (data?.active_id && list.some((c) => c.id === data.active_id))
+          ? data.active_id!
+          : list[0].id;
+        setActiveConvId(aid);
+        setConvLoaded(true);
+      })
+      .catch((e) => {
+        console.warn('[AI] 读取对话持久化失败（已降级为新对话）:', e);
+        setConvLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // 防抖保存：conversations / activeConvId 变化时延迟 500ms 写盘，避免流式增量触发频繁 I/O。
+  // convLoaded 为 false 时跳过（加载阶段不写盘，防止空 state 覆盖磁盘）。
+  useEffect(() => {
+    if (!convLoaded) return;
+    // 跳过流式中的中间态：仅当不 busy 或最后一条消息非 streaming 时立即保存，
+    // 但因 500ms 防抖已足够降频，这里不再额外过滤，保持逻辑简单。
+    const timer = setTimeout(() => {
+      // 序列化时剥离 streaming 字段（后端不需要，减小文件体积）
+      const payload = {
+        conversations: conversations.map((c) => ({
+          id: c.id,
+          title: c.title,
+          messages: c.messages.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            ...(m.error ? { error: true } : {}),
+          })),
+        })),
+        active_id: activeConvId,
+      };
+      hostApi.invoke('ai_save_conversations', { payload })
+        .catch((e) => console.warn('[AI] 对话持久化保存失败:', e));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [conversations, activeConvId, convLoaded]);
 
   // 注册流式事件监听（全局事件，用 requestId 区分本次请求）
   // 注意：hostApi.listen 是异步的，若清理时 unlisten 还没 resolve 就会泄漏监听器，

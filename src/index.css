@@ -268,6 +268,24 @@
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
   }
+  /* 按压波纹容器 */
+  .ripple-host {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .ripple-dot {
+    position: absolute;
+    border-radius: 9999px;
+    background: var(--ripple-color, rgba(90, 127, 93, 0.30));
+    transform: scale(0);
+    pointer-events: none;
+    animation: ripple 0.6s ease-out forwards;
+  }
+  /* 推进滑动：内容从右侧滑入 */
+  .slide-in-right {
+    animation: slideInRight 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  }
 }
 
 /* 全局滚动条样式 */
@@ -347,6 +365,22 @@ input[type="range"]:active::-moz-range-thumb {
 @keyframes slideInUp {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ripple {
+  0% { transform: scale(0); opacity: 0.5; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(28px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* 降低动效偏好：关闭非必要入场/波纹动画 */
+@media (prefers-reduced-motion: reduce) {
+  .ripple-dot { display: none; }
+  .fade-in, .slide-in-left, .slide-in-up, .slide-in-right { animation: none; }
 }
 
 /* ========== 跨平台降级处理 ========== */

@@ -747,6 +747,18 @@ fn main() {
             gongfang_start,
             gongfang_stop,
             gongfang_inject,
+            gongfang_scan,
+            gongfang_waf_detect,
+            gongfang_crypto_identify,
+            gongfang_symbols,
+            gongfang_humanize,
+            gongfang_fitness,
+            gongfang_fitness_migrate,
+            gongfang_fitness_reset,
+            gongfang_gateway_status,
+            gongfang_gateway_rotate,
+            gongfang_gateway_throttle,
+            gongfang_gateway_pool,
             // ========== 模块：截图系统（全局热键 / 多屏 / 标注）==========
             capture_screen,
             start_screenshot,
@@ -801,6 +813,8 @@ fn main() {
             ai_service::ai_set_profiles,
             ai_service::ai_chat,
             ai_service::ai_test_connection,
+            ai_service::ai_get_conversations,
+            ai_service::ai_save_conversations,
             // ========== 全局：IDE 终端（本地 shell 命令执行）==========
             shell_service::run_shell_command,
             // ========== 全局：AI agent 受限 shell（白名单 + Dry-Run 黑名单 + 超时）==========

@@ -24,4 +24,8 @@ pub mod automation;
 #[cfg(feature = "gateway")]
 pub mod gateway;
 
+// pentest 模块的无 feature 依赖子模块（encoder/payload/probe/regex_dfa）始终编译，
+// 仅 topology.rs（依赖 petgraph）在 pentest feature 后。
+// 注意：lib.rs 中 pentest 整体被 feature gate 控制，所以需要 pentest feature 才能使用。
+
 pub use kernel::KernelEngine;

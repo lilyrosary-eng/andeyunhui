@@ -12,6 +12,7 @@ import { api, type ArchiveEntry } from '@/lib/api';
 import { useTheme } from '@/lib/ThemeProvider';
 import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
+import { SlidingTabs } from '@/components/motion/SlidingTabs';
 
 type TabId = 'general' | 'themes' | 'extensions' | 'transfer' | 'model' | 'blacklist' | 'about';
 
@@ -271,22 +272,12 @@ export function GlobalSettingsPanel() {
     <div className="w-full h-full flex flex-col">
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-2xl mx-auto px-6 py-8">
-          <div className="flex items-center gap-1 mb-8 bg-white dark:bg-stone-700/60 backdrop-blur border border-white/80 dark:border-stone-700/50 rounded-xl p-1 w-fit">
-            {tabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`btn-press flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                  activeTab === tab.id
-                    ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm'
-                    : 'text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200'
-                }`}
-              >
-                <tab.icon size={14} />
-                {tab.label}
-              </button>
-            ))}
-          </div>
+          <SlidingTabs
+            tabs={tabs.map((t) => ({ id: t.id, label: t.label, icon: <t.icon size={14} /> }))}
+            value={activeTab}
+            onChange={(id) => setActiveTab(id)}
+            className="mb-8 bg-white dark:bg-stone-700/60 backdrop-blur border border-white/80 dark:border-stone-700/50 rounded-xl p-1 w-fit"
+          />
 
           {activeTab === 'general' && (
             <div className="space-y-6">
