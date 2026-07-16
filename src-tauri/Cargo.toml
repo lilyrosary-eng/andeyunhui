@@ -45,6 +45,7 @@ pro-tools-kit = { path = "../crates/pro-tools-kit" }
 # 攻防模块后端：双轨制事件溯源 + AI 常驻推理（gongfang-kit crate）
 # 默认 default-features=false，仅编译 kernel 骨架 + commands stub，主二进制零污染
 # 启用 `gongfang` feature 时拉入 crawler 等重型依赖
+# 一次注入后续无忧：`pnpm tauri dev -- --features gongfang,gongfang-reverse,gongfang-pentest,gongfang-automation,gongfang-gateway` 编译后功能永久可用
 gongfang-kit = { path = "../crates/gongfang-kit", default-features = false }
 # image / base64 / arboard 同时被截图模块（screenshot.rs）使用，保留在主 crate
 image = "0.25"
@@ -77,6 +78,12 @@ gongfang = ["gongfang-kit/crawler"]
 gongfang-browser = ["gongfang-kit/crawler-browser"]
 # 攻防 + 逆向框架（L*协议文法 + 卡方加密识别 + petgraph 控制流反混淆）
 gongfang-reverse = ["gongfang-kit/reverse"]
+# 攻防 + 渗透框架（编码变异 + SSTI 载荷 + 香农熵指纹 + petgraph 攻击拓扑）
+gongfang-pentest = ["gongfang-kit/pentest"]
+# 攻防 + 自动化测试（贝塞尔轨迹 + 粉红噪声 + SendInput HID 注入 + arc-swap 模板热迁移）
+gongfang-automation = ["gongfang-kit/automation"]
+# 攻防 + API 网关（代理池 + 流量整形 + arc-swap 策略热交换 + 预测性故障转移）
+gongfang-gateway = ["gongfang-kit/gateway"]
 
 [profile.release]
 # 全链路优化：跨 crate 内联 + 死代码消除，性能提升 10-20%

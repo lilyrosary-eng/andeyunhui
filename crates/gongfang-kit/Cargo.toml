@@ -18,10 +18,13 @@ crawler-browser = ["crawler", "dep:chromiumoxide"]
 # 启用逆向框架（L*协议文法归纳 + 卡方加密识别 + petgraph 控制流反混淆 + 符号持久化）
 # ghidra_headless 外部进程调用 + frida-gum 动态插桩后续阶段接入
 reverse = ["dep:petgraph"]
-# 启用渗透框架（nuclei/sqlmap 外部进程 + 文法变异）—— 后续阶段
-pentest = []
-# 启用自动化测试（贝塞尔轨迹 + SendInput + ONNX OCR）—— 后续阶段
-automation = []
+# 启用渗透框架（编码变异 + SSTI 载荷 + 香农熵指纹 + petgraph 攻击拓扑）
+# 替代原计划 6 维度（SMT 求解器/ReDoS fuzzing/JIT Shellcode/FFT 频谱等已删除或降级）
+pentest = ["dep:petgraph"]
+# 启用自动化测试框架（贝塞尔轨迹 + 粉红噪声 + SendInput HID 注入 + arc-swap 模板热迁移）
+# 替代原计划 6 维度（IRL/MPC/uinput/Wasserstein/元学习等已删除或降级）
+# Windows 平台自动拉入 winapi（SendInput），非 Windows 平台 hid.rs 不编译
+automation = ["dep:winapi"]
 # 启用 API 网关（reqwest 代理调度 + EWMA/PID 限流）—— 后续阶段
 gateway = []
 # 一键全开
@@ -51,3 +54,9 @@ url = { version = "2", optional = true }
 chromiumoxide = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime"] }
 # === reverse feature 依赖（轻量图论库，MIT 协议）===
 petgraph = { version = "0.6", optional = true, default-features = false }
+
+# === automation feature 依赖（Windows SendInput HID 注入）===
+# 仅 Windows 平台 + automation feature 启用时拉入；非 Windows 平台 hid.rs 不编译
+# winapi 是 MIT 协议，winuser feature 仅增加几 KB 头文件绑定，无运行时依赖
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", optional = true, features = ["winuser"] }

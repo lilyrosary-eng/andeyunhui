@@ -22,6 +22,10 @@ import { ModuleSettingsPanel } from '@/components/ModuleSettingsPanel';
 import { CollapsibleSearch } from '@/components/CollapsibleSearch';
 import { IconButton } from '@/components/IconButton';
 import { PluginIcon } from '@/components/PluginIcon';
+import { Ripple } from '@/components/motion/Ripple';
+import { SlidingTabs } from '@/components/motion/SlidingTabs';
+import { ScrollReveal } from '@/components/motion/ScrollReveal';
+import { PushView } from '@/components/motion/PushView';
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -96,7 +100,7 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
 
     // 挂载宿主 React 和 API 到全局（仅首次设置，后续不可覆盖）
     const hostApi = { invoke, convertFileSrc, listen, emit, createFrameBuffer };
-    const hostUi = { ModuleSidebarShell, SecondaryNavShell, NestedNavList, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator };
+    const hostUi = { ModuleSidebarShell, SecondaryNavShell, NestedNavList, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, Ripple, SlidingTabs, ScrollReveal, PushView };
     const defNonWritable = (key: string, value: unknown) => {
       Object.defineProperty(window, key, { value, writable: false, configurable: false });
     };

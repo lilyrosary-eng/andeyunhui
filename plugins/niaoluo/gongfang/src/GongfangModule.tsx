@@ -4,13 +4,14 @@
 // 设计：攻防一体、专业合法、极致高效、稳定防追踪
 // 当前为 UI 骨架占位，框架能力后续逐步填充。
 const React = window.__HOST_REACT__;
-const { useState, useCallback } = React;
+const { useState, useCallback, useEffect } = React;
 
-import { CrawlerPanel, ReversePanel, PentestPanel, AutomationPanel } from './frameworks';
-import { useAuditLog, AuditLogDrawer } from './audit';
+import { CrawlerPanel, ReversePanel, PentestPanel, AutomationPanel, GatewayPanel } from './frameworks';
+import { useAuditLog, AuditLogDrawer, type AuditInput } from './audit';
 import { RiskConfirm, isDisclaimerAccepted, revokeDisclaimer } from './RiskConfirm';
+import { GongfangAiSidebar } from './GongfangAiSidebar';
 
-type TabKey = 'crawler' | 'reverse' | 'pentest' | 'automation';
+type TabKey = 'crawler' | 'reverse' | 'pentest' | 'automation' | 'gateway';
 
 // ============ 图标（内联 SVG，避免引入新依赖） ============
 const ShieldIcon = (
@@ -41,6 +42,11 @@ const AutoIcon = (
     <path d="M12 8V4H8" />
     <rect x="4" y="8" width="16" height="12" rx="2" />
     <path d="M2 14h2M20 14h2M15 13v2M9 13v2" />
+  </svg>
+);
+const GatewayIcon = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 12h4l3-9 4 18 3-9h4" />
   </svg>
 );
 const LogIcon = (
@@ -93,9 +99,19 @@ function GongfangModule() {
   const [showLog, setShowLog] = useState(false);
   const { logs, addLog, clearLog } = useAuditLog();
 
+  // 监听来自 AI 侧边栏的审计事件（侧边栏组件无 props，通过全局事件通信）
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<AuditInput>).detail;
+      if (detail) addLog(detail);
+    };
+    window.addEventListener('gongfang-audit', handler as EventListener);
+    return () => window.removeEventListener('gongfang-audit', handler as EventListener);
+  }, [addLog]);
+
   // 包裹 setTab：切换 Tab 时记录审计
   const switchTab = useCallback((next: TabKey) => {
-    const labels: Record<TabKey, string> = { crawler: '网络爬虫', reverse: '逆向工程', pentest: '渗透测试', automation: '自动化测试' };
+    const labels: Record<TabKey, string> = { crawler: '网络爬虫', reverse: '逆向工程', pentest: '渗透测试', automation: '自动化测试', gateway: 'API 网关' };
     addLog({ action: '切换框架', target: labels[next], status: 'info' });
     setTab(next);
   }, [addLog]);
@@ -145,12 +161,13 @@ function GongfangModule() {
         </div>
       </div>
 
-      {/* 四大框架 Tab */}
+      {/* 五大框架 Tab */}
       <div className="flex items-center gap-1 px-5 py-2 border-b border-white/60 dark:border-stone-700/30">
         <TabButton active={tab === 'crawler'} onClick={() => switchTab('crawler')} icon={CrawlerIcon} label="网络爬虫" badge="就绪" />
         <TabButton active={tab === 'reverse'} onClick={() => switchTab('reverse')} icon={ReverseIcon} label="逆向工程" badge="骨架" />
         <TabButton active={tab === 'pentest'} onClick={() => switchTab('pentest')} icon={PentestIcon} label="渗透测试" badge="骨架" />
         <TabButton active={tab === 'automation'} onClick={() => switchTab('automation')} icon={AutoIcon} label="自动化测试" badge="骨架" />
+        <TabButton active={tab === 'gateway'} onClick={() => switchTab('gateway')} icon={GatewayIcon} label="API 网关" badge="骨架" />
       </div>
 
       {/* 框架内容区 */}
@@ -159,6 +176,7 @@ function GongfangModule() {
         {tab === 'reverse' && <ReversePanel addLog={addLog} />}
         {tab === 'pentest' && <PentestPanel addLog={addLog} />}
         {tab === 'automation' && <AutomationPanel addLog={addLog} />}
+        {tab === 'gateway' && <GatewayPanel addLog={addLog} />}
       </div>
 
       {/* 审计日志抽屉 */}
@@ -167,22 +185,8 @@ function GongfangModule() {
   );
 }
 
-// ============ 侧边栏（茑萝母目录下展示，复用宿主 ModuleSidebarShell 渲染） ============
-function GongfangSidebar() {
-  return (
-    <div className="p-4 text-sm text-neutral-500 dark:text-stone-400">
-      <div className="flex items-center gap-2 mb-3 text-[var(--element-bg)]">
-        {ShieldIcon}
-        <span className="font-medium">攻防套件</span>
-      </div>
-      <ul className="space-y-1.5 text-xs">
-        <li>· 网络爬虫（反检测/反封锁）</li>
-        <li>· 逆向工程（协议/加解密）</li>
-        <li>· 渗透测试（扫描/WAF绕过）</li>
-        <li>· 自动化测试（验证码/行为）</li>
-      </ul>
-    </div>
-  );
-}
+// ============ 侧边栏（AI 指挥官控制枢纽，复用宿主 ModuleSidebarShell 渲染） ============
+// 侧边栏组件无 props（宿主以 <PluginContent /> 渲染），通过全局事件与主模块通信
+const GongfangSidebar = GongfangAiSidebar;
 
 export { GongfangModule, GongfangSidebar };

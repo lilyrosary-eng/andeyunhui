@@ -1,6 +1,7 @@
 import { type ReactNode, useState, useEffect, useCallback, useRef } from 'react';
 import { Settings, PanelLeftClose, PanelLeftOpen, Home } from 'lucide-react';
 import { CollapsibleSearch } from '@/components/CollapsibleSearch';
+import { Ripple } from '@/components/motion/Ripple';
 
 const SIDEBAR_COLLAPSE_KEY = 'module_sidebar_collapsed';
 const SIDEBAR_EXPANDED_WIDTH = 260;
@@ -96,13 +97,14 @@ export function ModuleSidebarShell({
             {icon}
           </div>
           {/* 底部：展开按钮 */}
-          <button
+          <Ripple
+            as="button"
             onClick={toggleCollapse}
             title="展开侧边栏"
             className="btn-press w-9 h-9 flex items-center justify-center rounded-xl text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors"
           >
             <PanelLeftOpen size={18} />
-          </button>
+          </Ripple>
         </div>
       ) : (
         <div
@@ -179,21 +181,23 @@ export function ModuleSidebarShell({
 
           {/* 底部栏：收起按钮 + 设置齿轮 */}
           <div className="shrink-0 border-t border-neutral-200/30 dark:border-stone-700/30 px-4 py-2.5 flex items-center gap-1">
-            <button
+            <Ripple
+              as="button"
               onClick={toggleCollapse}
               title="收起侧边栏"
               className="btn-press w-9 h-9 flex items-center justify-center rounded-xl text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors"
             >
               <PanelLeftClose size={18} />
-            </button>
+            </Ripple>
             {onOpenModuleSettings && (
-              <button
+              <Ripple
+                as="button"
                 onClick={onOpenModuleSettings}
                 title={moduleSettingsLabel}
                 className="btn-press w-9 h-9 flex items-center justify-center rounded-xl text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors"
               >
                 <Settings size={18} />
-              </button>
+              </Ripple>
             )}
             {footerExtra}
           </div>

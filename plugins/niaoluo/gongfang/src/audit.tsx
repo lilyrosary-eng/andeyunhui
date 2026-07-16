@@ -20,7 +20,7 @@ export interface AuditEntry {
   detail?: string;     // 可选备注（非敏感）
 }
 
-interface AuditInput {
+export interface AuditInput {
   action: string;
   target: string;
   status: AuditStatus;

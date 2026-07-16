@@ -1321,6 +1321,7 @@ dependencies = [
  "tauri",
  "tokio",
  "url",
+ "winapi",
 ]
 
 [[package]]
