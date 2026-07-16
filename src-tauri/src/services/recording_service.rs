@@ -9,13 +9,17 @@
 //! 不经过 channel 中转，零拷贝（WGC 帧缓冲直接写管道），性能最佳。
 
 use std::io::Write;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
+use winapi::shared::windef::HWND;
 
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
@@ -32,6 +36,62 @@ pub const RECORDER_WINDOW_LABEL: &str = "recorder-widget";
 /// 录屏区域选择覆盖窗标签
 pub const RECORDER_SELECT_LABEL: &str = "recorder-select";
 
+/// 录屏区域边框窗标签（透明、点击穿透、排除捕获，仅用于屏幕可视化提示录制区域）
+pub const RECORDING_BORDER_LABEL: &str = "recording-border";
+
+// ---- 录屏边框窗点击穿透 ----
+// 仅 WS_EX_TRANSPARENT 对 WebView2 内部子窗口不可靠，必须配合 WM_NCHITTEST → HTTRANSPARENT。
+// 这里对整窗及其所有后代窗口子类化窗口过程，命中测试统一返回 HTTRANSPARENT，
+// 使红框区域（含 WebView2 渲染区）的鼠标点击真正穿透到下层应用窗口。
+type ClickThroughWndProc =
+    unsafe extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT;
+
+static CLICK_THROUGH_OLD: OnceLock<Mutex<HashMap<isize, isize>>> = OnceLock::new();
+
+unsafe extern "system" fn click_through_wndproc(
+    hwnd: HWND,
+    msg: UINT,
+    w: WPARAM,
+    l: LPARAM,
+) -> LRESULT {
+    if msg == winapi::um::winuser::WM_NCHITTEST {
+        return winapi::um::winuser::HTTRANSPARENT as LRESULT;
+    }
+    let map = CLICK_THROUGH_OLD.get().expect("CLICK_THROUGH_OLD 未初始化");
+    let guard = map.lock().unwrap();
+    match guard.get(&(hwnd as isize)) {
+        Some(&old) => {
+            drop(guard);
+            let old_proc: ClickThroughWndProc = std::mem::transmute(old);
+            winapi::um::winuser::CallWindowProcW(Some(old_proc), hwnd, msg, w, l)
+        }
+        None => winapi::um::winuser::DefWindowProcW(hwnd, msg, w, l),
+    }
+}
+
+unsafe extern "system" fn enum_child_for_click_through(hwnd: HWND, _lp: LPARAM) -> i32 {
+    click_through_subclass(hwnd);
+    1
+}
+
+unsafe fn click_through_subclass(hwnd: HWND) {
+    let map = CLICK_THROUGH_OLD.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let mut guard = map.lock().unwrap();
+        if guard.contains_key(&(hwnd as isize)) {
+            return;
+        }
+        let old = winapi::um::winuser::SetWindowLongPtrW(
+            hwnd,
+            winapi::um::winuser::GWLP_WNDPROC,
+            click_through_wndproc as isize,
+        );
+        guard.insert(hwnd as isize, old);
+    }
+    // 释放锁后再递归子类后代窗口，避免重入死锁
+    winapi::um::winuser::EnumChildWindows(hwnd, Some(enum_child_for_click_through), 0);
+}
+
 /// 录屏状态（返回给前端）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,23 +102,26 @@ pub struct RecordingStatus {
     pub output_path: String,
 }
 
-/// WGC 持续捕获 handler：每帧直接写入 ffmpeg stdin
+/// WGC 持续捕获 handler：每帧组装字节后**非阻塞**投递给编码线程（try_send，满则丢帧）。
+///
+/// **关键设计（根治「录屏时点击主窗即整体卡死」）**：绝不在 WGC 回调里直接 write_all 到
+/// ffmpeg stdin。4K 录屏时 libx264 编码跟不上 → stdin 管道写满 → 回调阻塞在 write_all →
+/// WGC 帧池耗尽、DWM 合成停摆 → 整个应用（含主窗、控制台）卡死。改为把每帧丢进有界通道，
+/// 由独立编码线程消费；通道满时直接丢弃当前帧（背压降级），回调始终瞬时返回。
 struct WgcRecorder {
-    /// ffmpeg stdin（多线程安全访问）
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    /// 帧数据发送端（有界，满则丢帧）
+    sender: SyncSender<Vec<u8>>,
     /// 停止标志：设为 true 后下一帧回调中 stop() 捕获
     stop_flag: Arc<AtomicBool>,
-    /// 暂停标志：暂停时不写入帧（ffmpeg 保持等待）
+    /// 暂停标志：暂停时不投递帧
     paused: Arc<AtomicBool>,
     /// 裁剪区域（相对于帧原点的物理像素偏移）：None = 全帧，Some((x,y,w,h)) = 逐行裁剪
     crop: Option<(u32, u32, u32, u32)>,
-    /// 可复用的裁剪缓冲区：避免每帧分配 Vec（性能关键路径）
-    crop_buffer: Vec<u8>,
 }
 
 impl GraphicsCaptureApiHandler for WgcRecorder {
     type Flags = (
-        Arc<Mutex<Option<ChildStdin>>>,
+        SyncSender<Vec<u8>>,
         Arc<AtomicBool>,
         Arc<AtomicBool>,
         Option<(u32, u32, u32, u32)>,
@@ -66,13 +129,12 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (stdin, stop_flag, paused, crop) = ctx.flags;
+        let (sender, stop_flag, paused, crop) = ctx.flags;
         Ok(Self {
-            stdin,
+            sender,
             stop_flag,
             paused,
             crop,
-            crop_buffer: Vec::new(),
         })
     }
 
@@ -86,7 +148,7 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
             capture_control.stop();
             return Ok(());
         }
-        // 暂停时跳过（不写入 ffmpeg，ffmpeg 会等待 stdin）
+        // 暂停时跳过
         if self.paused.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -96,44 +158,49 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         let mut buffer = frame.buffer().map_err(|e| e.to_string())?;
         let src = buffer.as_nopadding_buffer().map_err(|e| e.to_string())?;
 
-        if let Some(stdin) = self.stdin.lock().unwrap().as_mut() {
-            if let Some((cx, cy, cw, ch)) = self.crop {
-                // 区域裁剪：先汇总到 crop_buffer，再单次 write_all（避免逐行小写入卡顿）
-                let cx = cx.min(fw);
-                let cy = cy.min(fh);
-                let cw = cw.min(fw.saturating_sub(cx));
-                let ch = ch.min(fh.saturating_sub(cy));
-                if cw == 0 || ch == 0 {
-                    return Ok(());
-                }
-                let row_bytes = (cw * 4) as usize;
-                let total = row_bytes * ch as usize;
-                self.crop_buffer.clear();
-                self.crop_buffer.reserve(total);
-                for y in cy..(cy + ch) {
-                    let start = ((y * fw + cx) * 4) as usize;
-                    let end = start + row_bytes;
-                    if end <= src.len() {
-                        self.crop_buffer.extend_from_slice(&src[start..end]);
-                    }
-                }
-                let _ = stdin.write_all(&self.crop_buffer);
-            } else {
-                // 全帧写入（原行为）
-                let _ = stdin.write_all(src);
+        // 组装该帧字节（裁剪或全帧）
+        let payload: Vec<u8> = if let Some((cx, cy, cw, ch)) = self.crop {
+            let cx = cx.min(fw);
+            let cy = cy.min(fh);
+            let cw = cw.min(fw.saturating_sub(cx));
+            let ch = ch.min(fh.saturating_sub(cy));
+            if cw == 0 || ch == 0 {
+                return Ok(());
             }
+            let row_bytes = (cw * 4) as usize;
+            let mut v = Vec::with_capacity(row_bytes * ch as usize);
+            for y in cy..(cy + ch) {
+                let start = ((y * fw + cx) * 4) as usize;
+                let end = start + row_bytes;
+                if end <= src.len() {
+                    v.extend_from_slice(&src[start..end]);
+                }
+            }
+            v
+        } else {
+            src.to_vec()
+        };
+
+        // 非阻塞投递：编码线程跟不上（如 4K libx264 打满 CPU）时丢弃当前帧，
+        // 绝不阻塞 WGC 回调——阻塞回调会耗尽帧池、拖垮 DWM 合成，导致录制时整体卡死。
+        match self.sender.try_send(payload) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => { /* 背压：丢帧 */ }
+            Err(TrySendError::Disconnected(_)) => capture_control.stop(),
         }
         Ok(())
     }
 }
 
-/// 全局录屏句柄（管理 ffmpeg 进程 + 捕获线程）
+/// 全局录屏句柄（管理 ffmpeg 进程 + 捕获线程 + 编码写入线程）
 struct RecordingHandle {
     ffmpeg_child: Option<Child>,
     capture_thread: Option<std::thread::JoinHandle<()>>,
-    /// ffmpeg stdin 的 Arc 引用——stop 时显式置 None 关闭管道，
-    /// 让 ffmpeg 收到 EOF 并正常刷新编码器输出文件。
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    /// 编码写入线程：从通道取帧 write_all 到 ffmpeg stdin，收到 EOF（所有发送端 drop）后
+    /// 关闭 stdin 并退出，让 ffmpeg 刷新编码器输出文件。
+    writer_thread: Option<std::thread::JoinHandle<()>>,
+    /// 主发送端——stop 时显式 drop，配合捕获线程退出（drop 其副本）让编码线程收到 EOF。
+    frame_tx: Option<SyncSender<Vec<u8>>>,
     stop_flag: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     start_time: SystemTime,
@@ -166,24 +233,55 @@ fn check_ffmpeg_with(path: &str) -> bool {
         .is_ok()
 }
 
+/// 探测可用的硬件加速 H.264 编码器（按优先级 nvenc > qsv > amf）。
+///
+/// 4K 录屏用 libx264（CPU 软编码）会打满所有核心，导致「整个电脑都卡卡的」、
+/// 录屏控制台（WebView2）因抢不到 CPU 而无法交互。硬件编码器把编码卸载到 GPU，
+/// CPU 占用骤降，录屏期间系统依旧流畅。无硬件编码器时返回 None，调用方回退 libx264。
+fn probe_hw_encoder(ffmpeg: &str) -> Option<&'static str> {
+    let out = std::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .stderr(Stdio::null())
+        .output();
+    let s = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_lowercase(),
+        Err(_) => return None,
+    };
+    if s.contains("h264_nvenc") {
+        Some("h264_nvenc")
+    } else if s.contains("h264_qsv") {
+        Some("h264_qsv")
+    } else if s.contains("h264_amf") {
+        Some("h264_amf")
+    } else {
+        None
+    }
+}
+
+
 /// 启动录屏
 ///
 /// 参数：
 /// - `output_path`：输出 MP4 文件路径
 /// - `fps`：帧率（默认 30）
 /// - `monitor_index`：显示器索引（默认 0 = 主屏），仅当 region 为 None 时使用
-/// - `region`：录制区域 `Option<Vec<i32>>` = `[x, y, w, h]`，虚拟桌面物理像素坐标；None/空 = 全屏
+/// - `region_x/y/w/h`：录制区域（虚拟桌面物理像素坐标）。四个均为 `Some` 且 w>0、h>0 时
+///   视为有效区域；任一为 `None` 或尺寸非正 → 退化为全屏。
 ///
-/// **设计说明**：region 使用 `Vec<i32>` 而非 tuple `(i32,i32,i32,i32)`，
-/// 因为 Tauri v2 IPC 对 tuple 反序列化在某些场景下会静默回退为 None，
-/// 导致区域录制退化为全屏录制。Vec 反序列化更稳健。
+/// **设计说明（关键！）**：旧实现用 `region: Option<Vec<i32>>` 传 `[x,y,w,h]` 数组，
+/// 但 Tauri v2 IPC 把 JS 数组反序列化成 `Vec<i32>` 会在某些场景下**静默回退为 None**
+/// （与 tuple 同样的坑），导致区域录制退化成全屏录制——这正是「选了区域却录全屏」的根因。
+/// 改用 4 个独立的 `Option<i32>` 参数，i32 是 Tauri 序列化最稳妥的类型，彻底消除该风险。
 #[tauri::command]
 pub async fn start_recording(
     app: AppHandle,
     output_path: String,
     fps: Option<u32>,
     monitor_index: Option<usize>,
-    region: Option<Vec<i32>>,
+    region_x: Option<i32>,
+    region_y: Option<i32>,
+    region_w: Option<i32>,
+    region_h: Option<i32>,
 ) -> Result<(), String> {
     // async + spawn_blocking：将 ffmpeg 检测、显示器枚举、进程启动等阻塞操作移至线程池，
     // 避免阻塞主线程导致 UI 冻结（卡死）。
@@ -204,24 +302,18 @@ pub async fn start_recording(
             }
         }
 
-        // 解析 region：Vec<i32> → (rx, ry, rw, rh)
-        // 前端传递 [x, y, w, h] 数组，此处手动解构，避免 tuple 反序列化问题
-        let region_parsed: Option<(i32, i32, i32, i32)> = match region {
-            Some(arr) if arr.len() == 4 => {
-                let rx = arr[0];
-                let ry = arr[1];
-                let rw = arr[2];
-                let rh = arr[3];
-                if rw > 0 && rh > 0 {
-                    eprintln!("[录屏] region=[{},{},{},{}]", rx, ry, rw, rh);
-                    Some((rx, ry, rw, rh))
-                } else {
-                    eprintln!("[录屏] region 尺寸无效: rw={}, rh={}，回退全屏", rw, rh);
-                    None
-                }
+        // 解析 region：4 个独立 Option<i32> → (rx, ry, rw, rh)
+        // 全部为 Some 且尺寸为正才视为有效区域，否则退化全屏（并打日志便于排查）
+        let region_parsed: Option<(i32, i32, i32, i32)> = match (region_x, region_y, region_w, region_h) {
+            (Some(rx), Some(ry), Some(rw), Some(rh)) if rw > 0 && rh > 0 => {
+                eprintln!("[录屏] region=[{},{},{},{}]", rx, ry, rw, rh);
+                Some((rx, ry, rw, rh))
             }
-            other => {
-                eprintln!("[录屏] region 未提供或格式不符: {:?}，回退全屏", other);
+            _ => {
+                eprintln!(
+                    "[录屏] region 未提供或无效: x={:?} y={:?} w={:?} h={:?}，回退全屏",
+                    region_x, region_y, region_w, region_h
+                );
                 None
             }
         };
@@ -276,22 +368,105 @@ pub async fn start_recording(
             return Err("录制区域尺寸过小（取整后为 0）".into());
         }
 
+        // 计算录屏区域边框窗的物理像素矩形（精确贴合实际录制区域）。
+        // 区域录制：显示器物理原点 + 裁剪偏移；全屏：整个显示器矩形。
+        let (mon_l, mon_t, _, _) = monitor_rect_phys(&monitor);
+        let (border_x, border_y, border_w, border_h) = match crop {
+            Some((cx, cy, cw, ch)) => (
+                mon_l + cx as i32,
+                mon_t + cy as i32,
+                cw,
+                ch,
+            ),
+            None => {
+                let info = monitor_rect_phys(&monitor);
+                (info.0, info.1, (info.2 - info.0) as u32, (info.3 - info.1) as u32)
+            }
+        };
+
+        // 选择编码器：优先硬件加速（nvenc/qsv/amf），避免 4K 软编码打满 CPU 导致整机卡顿；
+        // 无硬件编码器时回退 libx264（ultrafast）。
+        let hw = probe_hw_encoder(&ffmpeg_path);
+        let mut ffmpeg_args: Vec<String> = vec![
+            "-y".into(),
+            "-f".into(),
+            "rawvideo".into(),
+            "-pix_fmt".into(),
+            "rgba".into(),
+            "-s".into(),
+            format!("{}x{}", enc_w, enc_h),
+            "-r".into(),
+            fps.to_string(),
+            "-i".into(),
+            "-".into(),
+        ];
+        match hw {
+            Some("h264_nvenc") => {
+                ffmpeg_args.extend([
+                    "-c:v".into(),
+                    "h264_nvenc".into(),
+                    "-preset".into(),
+                    "p1".into(),
+                    "-rc".into(),
+                    "constqp".into(),
+                    "-qp".into(),
+                    "23".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                ]);
+                eprintln!("[录屏] 使用硬件编码器 h264_nvenc（GPU 编码，CPU 占用低）");
+            }
+            Some("h264_qsv") => {
+                ffmpeg_args.extend([
+                    "-c:v".into(),
+                    "h264_qsv".into(),
+                    "-preset".into(),
+                    "veryfast".into(),
+                    "-global_quality".into(),
+                    "23".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                ]);
+                eprintln!("[录屏] 使用硬件编码器 h264_qsv（GPU 编码，CPU 占用低）");
+            }
+            Some("h264_amf") => {
+                ffmpeg_args.extend([
+                    "-c:v".into(),
+                    "h264_amf".into(),
+                    "-quality".into(),
+                    "speed".into(),
+                    "-rc".into(),
+                    "cqp".into(),
+                    "-qp_p".into(),
+                    "23".into(),
+                    "-qp_b".into(),
+                    "23".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                ]);
+                eprintln!("[录屏] 使用硬件编码器 h264_amf（GPU 编码，CPU 占用低）");
+            }
+            _ => {
+                ffmpeg_args.extend([
+                    "-c:v".into(),
+                    "libx264".into(),
+                    "-preset".into(),
+                    "ultrafast".into(),
+                    "-crf".into(),
+                    "23".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                ]);
+                eprintln!(
+                    "[录屏] 未检测到硬件编码器，回退 libx264（CPU 软编码；4K 可能仍较吃 CPU）"
+                );
+            }
+        }
+        ffmpeg_args.extend(["-movflags".into(), "+faststart".into(), output_path.clone()]);
+
         // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）
         let mut child = Command::new(&ffmpeg_path)
-            .args([
-                "-y",
-                "-f", "rawvideo",
-                "-pix_fmt", "rgba",
-                "-s", &format!("{}x{}", enc_w, enc_h),
-                "-r", &fps.to_string(),
-                "-i", "-",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", "23",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                &output_path,
-            ])
+            .args(&ffmpeg_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             // 关键：stderr 必须用 null，不能用 piped。
@@ -303,36 +478,55 @@ pub async fn start_recording(
             .spawn()
             .map_err(|e| format!("启动 ffmpeg 失败: {}（请确认 ffmpeg 已安装）", e))?;
 
-        let stdin = child.stdin.take().ok_or("无法获取 ffmpeg stdin")?;
-        let stdin_arc = Arc::new(Mutex::new(Some(stdin)));
+        let mut stdin = child.stdin.take().ok_or("无法获取 ffmpeg stdin")?;
         let stop_flag = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
 
+        // 帧数据有界通道：容量 4。捕获线程 try_send（满则丢帧），编码线程 recv 后 write_all。
+        // 有界 + 丢帧 = 背压降级，杜绝捕获回调阻塞导致的整体卡死。
+        let (frame_tx, frame_rx) = sync_channel::<Vec<u8>>(4);
+
+        // 编码写入线程：唯一持有 ffmpeg stdin。所有发送端 drop 后 recv 返回 Err → 退出循环
+        // → stdin 在此 drop → ffmpeg 收到 EOF 并刷新编码器输出文件。
+        let writer_thread = std::thread::spawn(move || {
+            while let Ok(buf) = frame_rx.recv() {
+                if stdin.write_all(&buf).is_err() {
+                    break; // ffmpeg 已退出/管道断开
+                }
+            }
+            // 循环结束：stdin 于此作用域 drop，关闭管道触发 ffmpeg EOF
+        });
+
         // 启动 WGC 捕获线程
-        let stdin_for_capture = stdin_arc.clone();
+        let tx_for_capture = frame_tx.clone();
         let stop_for_capture = stop_flag.clone();
         let paused_for_capture = paused.clone();
         let capture_thread = std::thread::spawn(move || {
             let settings = Settings::new(
                 monitor,
                 CursorCaptureSettings::Default,
-                DrawBorderSettings::Default,
+                // 关闭 WGC 默认黄框：该边框画在「捕获项（整块显示器）」边界上，
+                // 区域录屏时裁剪发生在 ffmpeg 阶段，故黄框永远显示全屏边缘而非录制区域。
+                // 去掉后区域录屏不再有误导性的全屏黄框。
+                DrawBorderSettings::WithoutBorder,
                 SecondaryWindowSettings::Default,
                 MinimumUpdateIntervalSettings::Default,
                 DirtyRegionSettings::Default,
                 ColorFormat::Rgba8,
-                (stdin_for_capture, stop_for_capture, paused_for_capture, crop),
+                (tx_for_capture, stop_for_capture, paused_for_capture, crop),
             );
             if let Err(e) = WgcRecorder::start(settings) {
                 eprintln!("[录屏] WGC 捕获异常: {}", e);
             }
+            // 捕获结束：WgcRecorder（持 sender 副本）在此 drop
         });
 
         // 保存录屏句柄
         *RECORDING.lock().unwrap() = Some(RecordingHandle {
             ffmpeg_child: Some(child),
             capture_thread: Some(capture_thread),
-            stdin: stdin_arc, // 保存 Arc 引用，stop 时显式关闭
+            writer_thread: Some(writer_thread),
+            frame_tx: Some(frame_tx), // 主发送端：stop 时 drop 以尽快断开
             stop_flag,
             paused,
             start_time: SystemTime::now(),
@@ -341,6 +535,20 @@ pub async fn start_recording(
 
         // 通知前端开始录制
         let _ = app.emit("recording-started", &output_path);
+
+        // 显示并精确定位录屏区域边框窗（透明、点击穿透、排除捕获，仅作屏幕可视化提示）。
+        // 边框紧贴实际录制区域，替代 WGC 默认（总是画整屏边缘、误导性的）黄框。
+        if let Some(bw) = app.get_webview_window(RECORDING_BORDER_LABEL) {
+            let _ = bw.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                x: border_x,
+                y: border_y,
+            }));
+            let _ = bw.set_size(tauri::Size::Physical(tauri::PhysicalSize {
+                width: border_w,
+                height: border_h,
+            }));
+            let _ = bw.show();
+        }
 
         Ok(())
     })
@@ -364,36 +572,34 @@ pub async fn start_recording(
 #[tauri::command]
 pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let mut handle_opt = RECORDING.lock().unwrap();
-        let handle = handle_opt
-            .take()
-            .ok_or_else(|| "未在录制中".to_string())?;
+        // **关键修复**：take() 后立即释放 RECORDING 锁。
+        // 旧实现将 `handle_opt` 的 MutexGuard 保留到整个 stop 流程结束（最多 5s），
+        // 导致 `start_recording`（检查 `recording.is_some()`）和 `get_recording_status`
+        // （控制台每秒轮询）阻塞 → 二次录屏失败 + 控制台不计时。
+        // 现在将 take() 包在独立作用域内，guard 出作用域即释放锁。
+        let mut handle = {
+            let mut handle_opt = RECORDING.lock().unwrap();
+            handle_opt
+                .take()
+                .ok_or_else(|| "未在录制中".to_string())?
+        };
+        // 锁已释放：后续 stop 流程不再阻塞 start_recording / get_recording_status
 
-        // 1. 设置停止标志 → WGC 下一帧回调中 stop() 捕获 → 捕获线程退出
+        // 1. 设置停止标志 → WGC 下一帧回调中 stop() 捕获 → 捕获线程退出（drop 其 sender 副本）
         handle.stop_flag.store(true, Ordering::SeqCst);
 
-        // 2. 关闭 ffmpeg stdin → ffmpeg 收到 EOF → 刷新编码器并输出文件
-        //    使用 try_lock + 短暂重试：如果捕获线程正持有锁（write_all 中），
-        //    等一帧间隔后重试。stderr 已 null，write_all 不会长时间阻塞。
-        for _attempt in 0..10u32 {
-            if let Ok(mut guard) = handle.stdin.try_lock() {
-                *guard = None;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        // 如果 200ms 后仍无法获取锁，强制等待（此时捕获线程应已因 stop_flag 退出）
-        {
-            let mut guard = handle.stdin.lock().unwrap();
-            *guard = None;
-        }
+        // 2. drop 主发送端。配合捕获线程退出时 drop 的副本，编码线程通道的所有发送端归零
+        //    → recv 返回 Err → 编码线程退出并关闭 stdin → ffmpeg 收到 EOF 刷新输出文件。
+        //    非阻塞：不再需要 try_lock stdin（stdin 已由编码线程独占，无跨线程锁竞争）。
+        drop(handle.frame_tx.take());
 
-        // 3. 不 join 捕获线程（detach）。捕获线程会在下一帧检查 stop_flag 并退出。
-        //    丢弃 JoinHandle 即可，线程结束后自动回收。
-        drop(handle.capture_thread);
+        // 3. detach 捕获线程与编码线程：捕获线程下一帧检查 stop_flag 后退出；
+        //    编码线程排空通道剩余帧、关闭 stdin 后自行结束。均无需 join。
+        drop(handle.capture_thread.take());
+        drop(handle.writer_thread.take());
 
         // 4. 等待 ffmpeg 进程结束（最多 5s），超时则 kill
-        let mut child = handle.ffmpeg_child.ok_or("ffmpeg 进程丢失")?;
+        let mut child = handle.ffmpeg_child.take().ok_or("ffmpeg 进程丢失")?;
         match child.wait_timeout(std::time::Duration::from_secs(5)) {
             Ok(Some(status)) => {
                 if !status.success() {
@@ -412,6 +618,12 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
 
         let output_path = handle.output_path.clone();
         let _ = app.emit("recording-stopped", &output_path);
+
+        // 停止后隐藏录屏区域边框窗（不再需要提示录制区域）
+        if let Some(bw) = app.get_webview_window(RECORDING_BORDER_LABEL) {
+            let _ = bw.hide();
+        }
+
         Ok(output_path)
     })
     .await
@@ -578,7 +790,160 @@ pub fn create_recorder_widget_window(app: &AppHandle) -> Result<(), String> {
     .build()
     .map_err(|e| format!("创建录屏控制台失败: {}", e))?;
 
+    // 将录屏控制台排除在屏幕捕获之外（WDA_EXCLUDEFROMCAPTURE = 0x11）：
+    // 操作者屏幕上可见并可点击操作，但 WGC/DXGI 捕获时被跳过 —— 录出的视频里看不到控制台。
+    // 与边框窗不同：控制台需要接收点击，故**不**设置 WS_EX_TRANSPARENT 点击穿透。
+    if let Some(win) = app.get_webview_window(RECORDER_WINDOW_LABEL) {
+        if let Ok(hwnd) = win.hwnd() {
+            unsafe {
+                winapi::um::winuser::SetWindowDisplayAffinity(hwnd.0 as *mut _, 0x11);
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// 预创建录屏区域边框窗（隐藏），setup 阶段调用。
+/// 该窗透明、置顶、点击穿透、且通过 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`
+/// 排除在屏幕捕获之外——因此边框只在屏幕上可见、不会录进视频，用于精确提示「正在录制的区域」。
+pub fn create_recording_border_window(app: &AppHandle) -> Result<(), String> {
+    if app.get_webview_window(RECORDING_BORDER_LABEL).is_some() {
+        return Ok(()); // 已存在则复用
+    }
+
+    let _win = WebviewWindowBuilder::new(
+        app,
+        RECORDING_BORDER_LABEL,
+        WebviewUrl::App("recording-border.html".into()),
+    )
+    .title("录屏区域")
+    .inner_size(100.0, 100.0)
+    .position(0.0, 0.0)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .transparent(true)
+    .resizable(false)
+    .shadow(false)
+    .visible(false) // 预创建时隐藏，start_recording 时按区域定位并显示
+    .build()
+    .map_err(|e| format!("创建录屏边框窗失败: {}", e))?;
+
+    // 设为点击穿透（WS_EX_TRANSPARENT），避免遮挡录制区域内的鼠标操作；
+    // 并排除在屏幕捕获之外（WDA_EXCLUDEFROMCAPTURE），边框不进入录屏画面。
+    if let Some(win) = app.get_webview_window(RECORDING_BORDER_LABEL) {
+        if let Ok(hwnd) = win.hwnd() {
+            unsafe {
+                let ex = winapi::um::winuser::GetWindowLongPtrW(
+                    hwnd.0 as *mut _,
+                    winapi::um::winuser::GWL_EXSTYLE,
+                );
+                let new_ex = ex
+                    | (winapi::um::winuser::WS_EX_TRANSPARENT
+                        | winapi::um::winuser::WS_EX_LAYERED) as isize;
+                winapi::um::winuser::SetWindowLongPtrW(
+                    hwnd.0 as *mut _,
+                    winapi::um::winuser::GWL_EXSTYLE,
+                    new_ex,
+                );
+                // 关键：重新应用扩展样式，否则 WS_EX_TRANSPARENT 可能不生效（点击仍被拦截）
+                winapi::um::winuser::SetWindowPos(
+                    hwnd.0 as *mut _,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    winapi::um::winuser::SWP_FRAMECHANGED
+                        | winapi::um::winuser::SWP_NOMOVE
+                        | winapi::um::winuser::SWP_NOSIZE
+                        | winapi::um::winuser::SWP_NOZORDER
+                        | winapi::um::winuser::SWP_NOACTIVATE,
+                );
+                // WDA_EXCLUDEFROMCAPTURE = 0x11：从 WGC/DXGI 捕获中隐藏本窗
+                winapi::um::winuser::SetWindowDisplayAffinity(hwnd.0 as *mut _, 0x11);
+                // 让整窗（含 WebView2 子窗口）真正点击穿透：WS_EX_TRANSPARENT 对 WebView2
+                // 子窗口不可靠，必须在窗口过程里对 WM_NCHITTEST 返回 HTTRANSPARENT。
+                click_through_subclass(hwnd.0 as HWND);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 诊断「红框区域内无法操作」：返回边框窗实际 EXSTYLE（是否真的带 WS_EX_TRANSPARENT）、
+/// 窗口矩形，以及在录制区域中心点做 `WindowFromPoint` 命中测试，看该点归属于哪个 HWND/类。
+/// 若中心点仍归属于本边框窗 → 点击被本窗拦截（未真正穿透）；若归属于别的窗口 → 穿透正常。
+#[tauri::command]
+pub fn recording_border_probe(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let win = app
+        .get_webview_window(RECORDING_BORDER_LABEL)
+        .ok_or_else(|| "边框窗不存在（可能未开始录屏）".to_string())?;
+    let hwnd = win.hwnd().map_err(|e| e.to_string())?;
+    let ex = unsafe {
+        winapi::um::winuser::GetWindowLongPtrW(hwnd.0 as *mut _, winapi::um::winuser::GWL_EXSTYLE)
+    };
+    let has_transparent = (ex & (winapi::um::winuser::WS_EX_TRANSPARENT as isize)) != 0;
+    let has_layered = (ex & (winapi::um::winuser::WS_EX_LAYERED as isize)) != 0;
+    let rect = unsafe {
+        let mut r = winapi::shared::windef::RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        winapi::um::winuser::GetWindowRect(hwnd.0 as *mut _, &mut r);
+        r
+    };
+    let cx = (rect.left + rect.right) / 2;
+    let cy = (rect.top + rect.bottom) / 2;
+    let hit = unsafe {
+        winapi::um::winuser::WindowFromPoint(winapi::shared::windef::POINT { x: cx, y: cy })
+    };
+    let hit_info = if hit.is_null() {
+        "null".to_string()
+    } else {
+        unsafe {
+            let mut buf = [0u16; 256];
+            let n = winapi::um::winuser::GetClassNameW(hit, buf.as_mut_ptr(), buf.len() as i32);
+            let class = if n > 0 {
+                String::from_utf16_lossy(&buf[..n as usize])
+            } else {
+                "?".into()
+            };
+            let is_self = hit == hwnd.0 as *mut _;
+            format!(
+                "hwnd=0x{:X} class={} isBorderSelf={}",
+                hit as usize, class, is_self
+            )
+        }
+    };
+    let verdict = if has_transparent && hit_info.contains("isBorderSelf=false") {
+        "WS_EX_TRANSPARENT 已置位且中心点击穿透到下层窗口 → 穿透正常，问题在别处"
+    } else if has_transparent {
+        "WS_EX_TRANSPARENT 已置位但中心命中仍归本边框窗 → WebView2 子控件拦截，需 WM_NCHITTEST 返回 HTTRANSPARENT"
+    } else {
+        "✗ WS_EX_TRANSPARENT 未真正生效（SetWindowLongPtr 后缺 SetWindowPos SWP_FRAMECHANGED）→ 整块区域被拦截"
+    };
+    Ok(serde_json::json!({
+        "exStyle": format!("0x{:X}", ex),
+        "hasTransparent": has_transparent,
+        "hasLayered": has_layered,
+        "rect": format!(
+            "{}x{} @({},{})=>({},{})",
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom
+        ),
+        "centerPoint": format!("({},{}", cx, cy),
+        "hitTestAtCenter": hit_info,
+        "verdict": verdict,
+    }))
 }
 
 /// 隐藏录屏控制台窗口
@@ -631,6 +996,39 @@ pub fn create_recorder_select_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 过滤掉本进程的覆盖窗/控制台/截图覆盖窗 hwnd。
+/// 这些 fullscreen 或 always-on-top 窗口若出现在列表中会挡住其他窗口的命中测试
+/// （overlay 是 fullscreen，hitWindow 总是先命中它 → 区域录屏退化为全屏）。
+/// 主窗口（is_self）**不**过滤：用户明确要求"不需要屏蔽"，应允许识别应用主窗口。
+fn filter_self_overlay_windows(app: &AppHandle, mut windows: Vec<crate::screenshot::WindowInfo>) -> Vec<crate::screenshot::WindowInfo> {
+    // 收集需排除的 hwnd。关键：Tauri 的 `WebviewWindow::hwnd()` 在 Windows 上返回的是
+    // WebView2 **子控件**的 HWND，而 `EnumWindows`/`list_windows` 枚举的是**顶层父窗口**
+    // HWND —— 二者不同，若只排除子控件 HWND，全屏覆盖窗的顶层窗口仍留在列表里，
+    // 于是前端 hitWindow 永远先命中它（fullscreen + always-on-top）→「只能识别一个窗口 /
+    // 鼠标移动没用」。因此这里同时排除「raw hwnd」与「其顶层祖先(GA_ROOT)」，确保覆盖窗被剔除。
+    let mut excluded: Vec<u64> = Vec::new();
+    for label in [
+        RECORDER_SELECT_LABEL,
+        RECORDER_WINDOW_LABEL,
+        "screenshot-overlay",
+        "floating-clipboard",
+    ] {
+        if let Some(w) = app.get_webview_window(label) {
+            if let Ok(h) = w.hwnd() {
+                let raw = h.0 as u64;
+                excluded.push(raw);
+                let hwnd = h.0 as winapi::shared::windef::HWND;
+                let root = unsafe { winapi::um::winuser::GetAncestor(hwnd, winapi::um::winuser::GA_ROOT) };
+                if !root.is_null() {
+                    excluded.push(root as u64);
+                }
+            }
+        }
+    }
+    windows.retain(|w| !excluded.contains(&w.hwnd));
+    windows
+}
+
 /// 显示录屏区域选择覆盖窗（全屏透明，用户拖拽选择录制区域）
 /// 复用预创建的窗口（setup 阶段已创建），避免每次创建 WebView2 的卡顿
 #[tauri::command]
@@ -654,14 +1052,15 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     // 直接使用 virtual_desktop_rect 作为坐标原点——不读 outer_position()。
     let scale = win.scale_factor().unwrap_or(1.0);
 
-    // 关键：在 win.show() 之前获取窗口列表。此时覆盖窗尚未可见，
-    // IsWindowVisible 会跳过它 → 覆盖窗不在列表中 → 前端 hitWindow 无需特殊过滤。
-    // 主窗口仍会在列表中（is_self=true），前端按需跳过。
+    // 在 win.show() 之前获取窗口列表。此时覆盖窗尚未可见，IsWindowVisible 会跳过它。
+    // 但控制台（recorder-widget）若上次录屏后未隐藏可能仍可见，需过滤。
+    // 同时过滤 screenshot-overlay / floating-clipboard 等 fullscreen / always-on-top 窗口，
+    // 避免它们挡住其他窗口的命中测试。
     let windows = crate::screenshot::list_windows().unwrap_or_default();
+    let windows = filter_self_overlay_windows(&app, windows);
     eprintln!(
-        "[录屏区域] show_recorder_select: ox={}, oy={}, scale={}, 窗口数={}, 非self窗口数={}",
-        vx, vy, scale, windows.len(),
-        windows.iter().filter(|w| !w.is_self).count()
+        "[录屏区域] show_recorder_select: ox={}, oy={}, scale={}, 窗口数={}",
+        vx, vy, scale, windows.len()
     );
 
     let _ = win.emit("recorder-select-ready", serde_json::json!({
@@ -686,6 +1085,9 @@ pub fn hide_recorder_select(app: AppHandle) {
 
 /// 获取录屏区域选择覆盖窗的坐标信息（前端主动拉取，解决 push 事件竞态）
 /// 与 `recorder-select-ready` 事件数据格式一致，前端在事件未到达时用此命令兜底。
+///
+/// **关键**：此时 overlay 已可见，list_windows 会包含 overlay 自身（fullscreen）。
+/// 若不过滤，前端 hitWindow 总是先命中 overlay → 区域录屏退化为全屏。
 #[tauri::command]
 pub fn get_recorder_select_coords(app: AppHandle) -> Result<serde_json::Value, String> {
     let (vx, vy, _vw, _vh) = virtual_desktop_rect();
@@ -694,6 +1096,8 @@ pub fn get_recorder_select_coords(app: AppHandle) -> Result<serde_json::Value, S
         .ok_or_else(|| "录屏区域选择窗口不存在".to_string())?;
     let scale = win.scale_factor().unwrap_or(1.0);
     let windows = crate::screenshot::list_windows().unwrap_or_default();
+    // 过滤掉本进程的 overlay / 控制台 / 截图覆盖窗 / 浮窗剪贴板
+    let windows = filter_self_overlay_windows(&app, windows);
     Ok(serde_json::json!({
         "ox": vx,
         "oy": vy,
@@ -811,6 +1215,57 @@ fn screen_size() -> (i32, i32) {
         let h = winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CYSCREEN);
         (w, h)
     }
+}
+
+/// 将录屏 MP4 转换为 GIF（供「保存为 GIF」使用）。
+///
+/// 限制尺寸（宽 480）与帧率（15fps）并启用 lanczos 缩放，避免 GIF 体积爆炸。
+/// 输出路径与输入同目录、扩展名改为 `.gif`。
+#[tauri::command]
+pub async fn convert_recording_to_gif(app: AppHandle, mp4_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let ffmpeg_path = get_ffmpeg_path(&app);
+        if !check_ffmpeg_with(&ffmpeg_path) {
+            return Err("未检测到 ffmpeg，无法转换为 GIF。请安装 ffmpeg 后重试。".into());
+        }
+        if !std::path::Path::new(&mp4_path).exists() {
+            return Err(format!("录屏文件不存在: {}", mp4_path));
+        }
+        let gif_path = mp4_path.trim_end_matches(".mp4").to_string() + ".gif";
+        let output = std::process::Command::new(&ffmpeg_path)
+            .args([
+                "-y",
+                "-i",
+                &mp4_path,
+                "-vf",
+                "fps=15,scale=480:-1:flags=lanczos",
+                "-loop",
+                "0",
+                &gif_path,
+            ])
+            .output()
+            .map_err(|e| format!("GIF 转换失败: {}", e))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("GIF 转换失败: {}", err));
+        }
+        Ok(gif_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 删除临时录屏文件（取消保存时清理，避免 videoDir 留下孤儿文件）。
+/// 安全护栏：仅删除以 .mp4 / .gif 结尾的路径，防止误删其他文件。
+#[tauri::command]
+pub fn delete_recording_file(path: String) -> Result<(), String> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    if path.ends_with(".mp4") || path.ends_with(".gif") {
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(())
 }
 
 /// Child::wait_timeout 的辅助 trait（标准库没有直接提供）

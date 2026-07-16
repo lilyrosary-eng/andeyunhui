@@ -36,6 +36,8 @@
     "@tiptap/pm": "^2.27.2",
     "@tiptap/react": "^2.27.2",
     "@tiptap/starter-kit": "^2.27.2",
+    "@univerjs/preset-sheets-core": "^0.25.1",
+    "@univerjs/presets": "^0.25.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.21.0",
     "marked": "^18.0.5",

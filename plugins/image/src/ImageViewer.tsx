@@ -199,6 +199,7 @@ export function ImageViewer({ folderPath, folderName, onBack }: ImageViewerProps
         {viewMode === 'full' && (
           <FullView
             imgUrls={imgUrls}
+            imgPaths={images}
             currentIndex={currentIndex}
             setCurrentIndex={setCurrentIndex}
             onWheel={handleWheelFull}
@@ -276,36 +277,38 @@ function ModeIcon({ mode }: { mode: ViewMode }) {
 // ========== 完整模式 ==========
 function FullView({
   imgUrls,
+  imgPaths,
   currentIndex,
   setCurrentIndex,
   onWheel,
   containerRef,
 }: {
   imgUrls: string[];
+  imgPaths: string[];
   currentIndex: number;
   setCurrentIndex: (i: number) => void;
   onWheel: (e: any) => void;
   containerRef: React.RefObject<HTMLDivElement>;
 }) {
   const [imgError, setImgError] = useState(false);
-  // GIF 用 fetch → blob: URL 渲染（绕过 WebView asset: 协议下动图不播放的问题）
-  const [gifBlobUrl, setGifBlobUrl] = useState<string | null>(null);
+  // GIF 读取为 data URL 渲染（绕过 WebView asset: 协议下动图不播放的问题）
+  // 沙箱屏蔽了 fetch，改用后端 read_file_base64 读取原始文件路径为 data URI。
+  const [gifDataUrl, setGifDataUrl] = useState<string | null>(null);
   const currentUrl = imgUrls[currentIndex];
+  const currentPath = imgPaths[currentIndex];
   const isCurrentGif = isGif(currentUrl);
 
   useEffect(() => {
     setImgError(false);
-    if (gifBlobUrl) { URL.revokeObjectURL(gifBlobUrl); }
-    setGifBlobUrl(null);
-    if (isCurrentGif) {
+    setGifDataUrl(null);
+    if (isCurrentGif && currentPath) {
       let cancelled = false;
-      fetch(currentUrl)
-        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
-        .then(blob => { if (!cancelled) setGifBlobUrl(URL.createObjectURL(blob)); })
+      hostApi.invoke<string>('read_file_base64', { filePath: currentPath })
+        .then((dataUrl) => { if (!cancelled) setGifDataUrl(dataUrl); })
         .catch(() => { if (!cancelled) setImgError(true); });
       return () => { cancelled = true; };
     }
-  }, [currentIndex, isCurrentGif, currentUrl]);
+  }, [currentIndex, isCurrentGif, currentPath]);
 
   const goPrev = () => setCurrentIndex(Math.max(0, currentIndex - 1));
   const goNext = () => setCurrentIndex(Math.min(imgUrls.length - 1, currentIndex + 1));
@@ -329,7 +332,7 @@ function FullView({
         <div className="text-neutral-300 dark:text-stone-600 text-sm">图片加载失败</div>
       ) : (
         <img
-          src={isCurrentGif ? (gifBlobUrl || currentUrl) : currentUrl}
+          src={isCurrentGif ? (gifDataUrl || currentUrl) : currentUrl}
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}

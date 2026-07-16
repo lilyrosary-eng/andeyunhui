@@ -77,6 +77,111 @@ pub fn get_user_plugins_dir(app: &AppHandle) -> Option<PathBuf> {
     Some(app_data.join("user_plugins"))
 }
 
+// ========== .mufurong 专属格式自动解压 ==========
+// .mufurong = ZIP 改后缀。用户把 .mufurong 文件放到 user_plugins/（或子目录）下，
+// 应用启动或刷新插件列表时自动扫描并解压到同名目录。
+// 已解压且 version 匹配则跳过（速度极快），不匹配则重新解压。
+// 大型模块（茑萝/全局/阅读）保留母文件夹：子插件 .mufurong 放在母文件夹下，
+// 如 user_plugins/niaoluo/ai.mufurong → 解压到 user_plugins/niaoluo/ai/
+
+/// 专属格式文件后缀
+const MUFURONG_EXT: &str = "mufurong";
+
+/// 扫描 user_plugins/ 下的 .mufurong 文件，自动解压到同名目录。
+/// 递归子目录以支持母文件夹结构（niaoluo/、全局/ 等）。
+pub fn extract_mufurong_plugins(app: &AppHandle) {
+    let user_dir = match get_user_plugins_dir(app) {
+        Some(d) => d,
+        None => return,
+    };
+    if !user_dir.exists() {
+        return;
+    }
+    walk_and_extract_mufurong(&user_dir);
+}
+
+/// 递归扫描目录下的 .mufurong 文件并解压
+fn walk_and_extract_mufurong(dir: &std::path::Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // 递归子目录（支持 niaoluo/ 等母文件夹）
+            walk_and_extract_mufurong(&path);
+        } else if path.extension().and_then(|e| e.to_str()) == Some(MUFURONG_EXT) {
+            if let Err(e) = extract_one_mufurong(&path) {
+                eprintln!("[mufurong] 解压失败 {}: {}", path.display(), e);
+            }
+        }
+    }
+}
+
+/// 解压单个 .mufurong 文件到同名目录（去掉 .mufurong 后缀）
+fn extract_one_mufurong(mufurong_path: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::File::open(mufurong_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    // 读取 manifest.json 获取 version（用于版本比对）
+    let version = {
+        let manifest_entry = archive.by_name("manifest.json").map_err(|e| e.to_string())?;
+        let manifest: serde_json::Value =
+            serde_json::from_reader(manifest_entry).map_err(|e| e.to_string())?;
+        manifest.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+
+    // 解压目标目录：去掉 .mufurong 后缀
+    let target_dir = mufurong_path.with_extension("");
+
+    // 检查是否已解压且版本匹配 → 跳过（速度极快）
+    let target_manifest = target_dir.join("manifest.json");
+    if target_manifest.exists() {
+        if let Ok(content) = std::fs::read_to_string(&target_manifest) {
+            if let Ok(existing) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(existing_ver) = existing.get("version").and_then(|v| v.as_str()) {
+                    if existing_ver == version {
+                        return Ok(()); // 版本匹配，跳过
+                    }
+                }
+            }
+        }
+    }
+
+    // 版本不匹配或未解压 → 重新解压
+    if target_dir.exists() {
+        let _ = std::fs::remove_dir_all(&target_dir);
+    }
+    std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        // 安全检查：防止路径穿越（zip slip 攻击）
+        if name.contains("..") {
+            continue;
+        }
+        let outpath = target_dir.join(&name);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&outpath).ok();
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+        }
+    }
+
+    eprintln!(
+        "[mufurong] 已解压: {} -> {}",
+        mufurong_path.display(),
+        target_dir.display()
+    );
+    Ok(())
+}
+
 // ========== 插件可见性持久化 ==========
 // 禁用状态持久化到 AppData/plugin_visibility.json（一个简单的 id→bool 映射）。
 // 这样 bundled-plugins/ 在打包后即使只读（Program Files）也能正常启用/禁用插件，
@@ -386,6 +491,10 @@ fn plugins_max_mtime(app: &AppHandle) -> u64 {
 /// 结果会被缓存，仅当插件目录 mtime 变化时重新扫描
 #[tauri::command]
 pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, String> {
+    // 先解压 user_plugins/ 下的 .mufurong 文件（版本匹配的跳过，极快）
+    // 解压后新目录会改变 mtime，缓存自动失效
+    extract_mufurong_plugins(&app);
+
     let current_mtime = plugins_max_mtime(&app);
 
     // 检查缓存

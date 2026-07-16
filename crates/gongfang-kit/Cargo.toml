@@ -1,0 +1,53 @@
+[package]
+name = "gongfang-kit"
+version = "0.1.0"
+description = "攻防模块后端内核（双轨制事件溯源 + AI 常驻推理 + 爬虫/逆向/渗透/自动化/网关）"
+edition = "2021"
+
+[lib]
+name = "gongfang_kit"
+path = "src/lib.rs"
+
+[features]
+# 默认零重型依赖：仅编译 kernel 骨架 + commands stub，主二进制零污染
+default = []
+# 启用爬虫框架（reqwest 代理池 + 双令牌桶 + EWMA + CDP 隐身 JS 脚本）
+crawler = ["dep:futures-util", "dep:url"]
+# 启用浏览器隐身（chromiumoxide 真实浏览器 + CDP 注入，较重，按需开启）
+crawler-browser = ["crawler", "dep:chromiumoxide"]
+# 启用逆向框架（L*协议文法归纳 + 卡方加密识别 + petgraph 控制流反混淆 + 符号持久化）
+# ghidra_headless 外部进程调用 + frida-gum 动态插桩后续阶段接入
+reverse = ["dep:petgraph"]
+# 启用渗透框架（nuclei/sqlmap 外部进程 + 文法变异）—— 后续阶段
+pentest = []
+# 启用自动化测试（贝塞尔轨迹 + SendInput + ONNX OCR）—— 后续阶段
+automation = []
+# 启用 API 网关（reqwest 代理调度 + EWMA/PID 限流）—— 后续阶段
+gateway = []
+# 一键全开
+full = ["crawler-browser", "reverse", "pentest", "automation", "gateway"]
+
+[dependencies]
+# === 基础（始终编译，极轻量）===
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt", "macros", "time", "process", "fs"] }
+log = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+# 无锁策略热交换（ArcSwap）：双轨制核心，亚毫秒级策略切换
+arc-swap = "1"
+# 无锁 MPMC 队列：用户提示词 @focus/@bypass 抢占式优先级队列
+crossbeam-queue = "0.3"
+# 异步互斥（比 std::sync::Mutex 更适合 tokio 场景）
+parking_lot = "0.12"
+once_cell = "1"
+chrono = "0.4"
+
+# === crawler feature 依赖 ===
+futures-util = { version = "0.3", optional = true }
+url = { version = "2", optional = true }
+# === crawler-browser feature 依赖（较重，按需）===
+chromiumoxide = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime"] }
+# === reverse feature 依赖（轻量图论库，MIT 协议）===
+petgraph = { version = "0.6", optional = true, default-features = false }

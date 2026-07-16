@@ -42,12 +42,16 @@ encoding_rs = "0.8"
 chardetng = "0.1"
 # 专业模块「薄荷」工具：以内部依赖包形式独立存在（pro-tools-kit crate）
 pro-tools-kit = { path = "../crates/pro-tools-kit" }
+# 攻防模块后端：双轨制事件溯源 + AI 常驻推理（gongfang-kit crate）
+# 默认 default-features=false，仅编译 kernel 骨架 + commands stub，主二进制零污染
+# 启用 `gongfang` feature 时拉入 crawler 等重型依赖
+gongfang-kit = { path = "../crates/gongfang-kit", default-features = false }
 # image / base64 / arboard 同时被截图模块（screenshot.rs）使用，保留在主 crate
 image = "0.25"
 base64 = "0.22"
 arboard = "3"
 # 微信式截图：可见窗口枚举（EnumWindows）+ 长截图 PrintWindow（仍走 GDI）
-winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase", "objbase", "combaseapi", "jobapi2"] }
+winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase", "objbase", "combaseapi", "jobapi2", "objidl", "unknwnbase", "winerror", "ole2", "wtypes", "minwindef", "windef", "guiddef"] }
 # WGC 屏幕捕获后端（替换 GDI BitBlt）：基于 Windows.Graphics.Capture，硬件加速、可截独占全屏游戏；
 # windows-capture 1.5 依赖 windows ^0.61.3，与 Tauri 锁定的 0.61.3 完全一致，零双份编译、无版本冲突
 windows-capture = "1.5"
@@ -64,6 +68,15 @@ once_cell = "1"
 # 统一日志门面：release 默认 warn 级别，dev 开 debug；替代散落的 eprintln!
 log = "0.4"
 env_logger = "0.11"
+
+[features]
+# 攻防模块：启用爬虫框架（reqwest 代理池 + 双令牌桶 + EWMA + CDP 隐身 JS）
+# 默认不启用，主二进制零污染；构建时 --features gongfang 开启
+gongfang = ["gongfang-kit/crawler"]
+# 攻防 + 浏览器隐身（chromiumoxide 真实浏览器，较重）
+gongfang-browser = ["gongfang-kit/crawler-browser"]
+# 攻防 + 逆向框架（L*协议文法 + 卡方加密识别 + petgraph 控制流反混淆）
+gongfang-reverse = ["gongfang-kit/reverse"]
 
 [profile.release]
 # 全链路优化：跨 crate 内联 + 死代码消除，性能提升 10-20%

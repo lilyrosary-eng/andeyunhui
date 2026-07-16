@@ -35,8 +35,8 @@ const TOOLS: Record<string, ToolMeta[]> = {
   convert: [
     { id: 't1', name: '图片格式转换', desc: 'PNG/JPEG/BMP/GIF/TIFF 互转', icon: 'Images', category: 'convert' },
     { id: 't2', name: '文档格式转换', desc: 'Markdown / HTML 互转', icon: 'FileType', category: 'convert' },
-    { id: 't3', name: '视频转码', desc: '调用 ffmpeg 转码视频（需安装 ffmpeg）', icon: 'Film', category: 'convert' },
-    { id: 't4', name: '音频转码', desc: '调用 ffmpeg 转码音频（需安装 ffmpeg）', icon: 'AudioLines', category: 'convert' },
+    { id: 't3', name: '视频转码', desc: '调用 ffmpeg 转码视频（内置 ffmpeg）', icon: 'Film', category: 'convert' },
+    { id: 't4', name: '音频转码', desc: '调用 ffmpeg 转码音频（内置 ffmpeg）', icon: 'AudioLines', category: 'convert' },
   ],
   text: [
     { id: 't5', name: '正则表达式测试', desc: '实时正则匹配和替换', icon: 'Regex', category: 'text' },
@@ -848,7 +848,7 @@ function MediaTranscoder({ kind }: { kind: 'video' | 'audio' }) {
     <div className="space-y-3">
       {available === false && (
         <div className="text-sm text-amber-600 bg-amber-50 dark:bg-amber-900/20 rounded-xl p-3">
-          未检测到系统 ffmpeg。请先安装 ffmpeg 并确保在 PATH 中，再使用本功能。
+          未检测到 ffmpeg。请确保 external-deps/全局/ffmpeg/ffmpeg.exe 存在。
         </div>
       )}
       {available === null && <div className="text-xs text-neutral-400 dark:text-stone-500">正在检测 ffmpeg…</div>}
@@ -1607,7 +1607,7 @@ function ProfessionalModule() {
     <div className="flex-1 flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">
       <BriefcaseIcon />
       <p className="text-sm">从左侧选择一个分类开始使用工具</p>
-      <p className="text-xs text-neutral-400/60 dark:text-stone-600">全部 {ALL_TOOLS.length} 个工具已实装（音视频转码需系统安装 ffmpeg）</p>
+      <p className="text-xs text-neutral-400/60 dark:text-stone-600">全部 {ALL_TOOLS.length} 个工具已实装（音视频转码使用内置 ffmpeg）</p>
     </div>
   ) : (
     <div className="flex-1 flex flex-col items-center justify-center h-full gap-2 text-neutral-400 dark:text-stone-500">
@@ -1674,7 +1674,7 @@ function ProfessionalModule() {
         ),
         React.createElement('div', { className: 'glass-panel p-4' },
           React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500' },
-            '图片 / 文档 / 端口 / 进程 / 环境变量 / 剪贴板 工具均依赖 Tauri 后端命令，已实装。音视频转码依赖系统 ffmpeg，未安装时将提示先安装。'
+            '图片 / 文档 / 端口 / 进程 / 环境变量 / 剪贴板 工具均依赖 Tauri 后端命令，已实装。音视频转码使用内置 ffmpeg（external-deps/全局/ffmpeg）。'
           ),
         ),
       ),

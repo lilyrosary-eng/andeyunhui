@@ -138,6 +138,38 @@ let downWin: Win | null = null;
 let hoverWin: Win | null = null;
 let titleCache: Record<number, string> = {};
 
+// 窗口列表实时刷新（修复「只能识别当前一个窗口 / 不随鼠标变化 / 概率卡住」）：
+// 覆盖窗复用模式下，仅靠初始化时的事件拉一次窗口列表容易陈旧/残缺。这里在可见期间
+// 每 200ms 重新拉取窗口列表（Rust 端已过滤掉自身覆盖窗/控制台/浮窗），
+// 保证切换窗口 Z 序、新开窗口时高亮能实时更新。拖拽/按下期间不刷新，避免抖动。
+let liveTimer: number | null = null;
+let firstMoveLogged = false;
+
+function startLiveWindowRefresh() {
+  stopLiveWindowRefresh();
+  liveTimer = window.setInterval(async () => {
+    if (!ready || dragging || pointerDown) return;
+    try {
+      const data = await invoke<{ ox: number; oy: number; scale: number; windows?: Win[] }>(
+        "get_recorder_select_coords",
+      );
+      // 仅更新窗口列表，**不**调用 initFromEvent（那会每 200ms 清空 hoverWin / titleCache /
+      // 重置 hint，导致高亮框每 200ms 闪烁消失 —— 表现为「鼠标移动没用 / 只能识别一个窗口」）。
+      // ox/oy/scale 在初始化后不变，这里只同步窗口矩形（Z 序变化 / 新开窗口实时生效）。
+      if (data?.windows) windows = data.windows;
+    } catch {
+      // 拉取失败忽略，下一周期重试
+    }
+  }, 200);
+}
+
+function stopLiveWindowRefresh() {
+  if (liveTimer !== null) {
+    clearInterval(liveTimer);
+    liveTimer = null;
+  }
+}
+
 // ========== rAF 批量更新（避免一帧内多次 DOM 写入触发重排）==========
 let rafPending = false;
 let pendingUpdate: (() => void) | null = null;
@@ -162,12 +194,12 @@ function toPhys(cx: number, cy: number): { x: number; y: number } {
 }
 
 // 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标的窗口。
-// 跳过 is_self 窗口（本进程的主窗口），避免高亮自身应用窗口。
-// 覆盖窗不在列表中（Rust 侧在 win.show() 之前已获取窗口列表）。
+// **不再跳过 is_self**：用户明确要求"不需要屏蔽"，应允许识别应用主窗口。
+// fullscreen overlay / 控制台 / 截图覆盖窗 / 浮窗剪贴板已在 Rust 端
+// filter_self_overlay_windows 中按 hwnd 过滤，不会出现在 windows 列表中。
 function hitWindow(cx: number, cy: number): Win | null {
   const p = toPhys(cx, cy);
   for (const w of windows) {
-    if (w.is_self) continue; // 跳过本进程主窗口
     if (p.x >= w.x && p.x <= w.x + w.width && p.y >= w.y && p.y <= w.y + w.height) {
       return w;
     }
@@ -273,6 +305,10 @@ overlay.addEventListener("pointermove", (e) => {
   } else {
     // 纯悬停（未按下）：高亮当前窗口
     hoverWin = hitWindow(e.clientX, e.clientY);
+    if (!firstMoveLogged) {
+      firstMoveLogged = true;
+      console.log("[录屏区域] 首次 pointermove 触发，当前窗口列表数:", windows.length);
+    }
     updateWinHighlight(hoverWin);
   }
 });
@@ -325,6 +361,7 @@ window.addEventListener("keydown", (e) => {
 
 // ========== 核心流程 ==========
 async function cancel() {
+  stopLiveWindowRefresh();
   try {
     await invoke("hide_recorder_select");
   } catch {
@@ -334,6 +371,17 @@ async function cancel() {
 }
 
 async function startRecordingWithRegion(x: number, y: number, w: number, h: number) {
+  // 守卫：坐标无效（如初始化未完成导致 NaN/非正值）时绝不应退化成「录全屏」，
+  // 而是提示用户重新框选，避免静默录下整个屏幕。
+  if (
+    !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h) ||
+    w < 1 || h < 1
+  ) {
+    showError("录屏区域无效，请重新框选区域");
+    await invoke("hide_recorder_select").catch(() => {});
+    await getCurrentWindow().hide();
+    return;
+  }
   try {
     // 1. 隐藏区域选择覆盖窗（必须先隐藏，否则会被截入录屏）
     await invoke("hide_recorder_select");
@@ -349,13 +397,21 @@ async function startRecordingWithRegion(x: number, y: number, w: number, h: numb
     const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const outputPath = `${dir.replace(/\\/g, "/")}/录屏_${ts}.mp4`;
 
-    // 4. 启动录屏（传入区域参数 [x, y, w, h]）
+    // 4. 启动录屏（传入区域物理像素坐标）。
+    //    **关键修复（录全屏根因）**：旧实现把区域作为 JS 数组 `region:[x,y,w,h]` 传给后端
+    //    `Option<Vec<i32>>`，Tauri v2 反序列化数组为 Vec 会静默回退为 None → 退化全屏。
+    //    现改为 4 个独立数字参数（regionX/Y/W/H），i32 序列化最稳妥，彻底修复「选区域却录全屏」。
+    console.log("[录屏区域] 传递 region(物理像素):", { x, y, w, h, regionX: x, regionY: y, regionW: w, regionH: h });
     await invoke("start_recording", {
       outputPath,
       fps: 30,
       monitorIndex: null,
-      region: [x, y, w, h],
+      regionX: x,
+      regionY: y,
+      regionW: w,
+      regionH: h,
     });
+    console.log("[录屏区域] start_recording 调用成功");
   } catch (e) {
     console.error("[录屏区域] 启动失败:", e);
     // 启动失败 → 隐藏控制台
@@ -375,6 +431,12 @@ async function startRecordingWithRegion(x: number, y: number, w: number, h: numb
 async function initFromEvent(data: { ox: number; oy: number; scale: number; windows?: Win[] }) {
   ox = data.ox;
   oy = data.oy;
+  // 必须使用 Rust 端 recorder-select-ready 事件下发的同一 `scale`（= 覆盖窗 win.scale_factor()）。
+  // 坐标契约：physical = ox + clientX * scale（ox 为虚拟桌面物理原点，scale 为覆盖窗物理/逻辑比）。
+  // 覆盖窗的尺寸正是按此 scale 创建，浏览器把 clientX（CSS）映射到物理像素时也使用同一 scale，
+  // 因此这里 MUST 沿用 data.scale，绝不能换成 window.devicePixelRatio——
+  // 二者在混合 DPI / 多显示器下可能不一致，一旦不一致：选区被放大到超出屏幕 → 裁剪被夹到整屏
+  // （既「录全屏」又因编码面积过大而「卡卡」）。
   scale = data.scale;
   windows = data.windows ?? [];
   ready = true;
@@ -383,9 +445,12 @@ async function initFromEvent(data: { ox: number; oy: number; scale: number; wind
   hoverWin = null;
   dragging = false;
   downWin = null;
+  firstMoveLogged = false;
   hint.style.display = "block";
   winHighlight.style.display = "none";
   selection.style.display = "none";
+  // 启动窗口列表实时刷新（可见期间持续更新，避免识别陈旧/卡住）
+  startLiveWindowRefresh();
 }
 
 // 保留事件监听（快速路径：如果事件能到达，立即初始化）
