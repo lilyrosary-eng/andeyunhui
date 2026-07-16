@@ -44,10 +44,27 @@ export function FloatingClipboardView() {
   const lastTextRef = useRef('');
   const lastImgHashRef = useRef('');
 
-  // 浮窗透明效果
+  // 浮窗透明效果 + 细滚动条 + 淡入动画
   useEffect(() => {
     document.body.style.backgroundColor = 'transparent';
     document.documentElement.style.backgroundColor = 'transparent';
+
+    // WebView2(Chromium) 的细滚动条样式（scrollbarWidth 仅 Firefox 生效，这里补 Chromium）
+    const style = document.createElement('style');
+    style.textContent = `
+      .clip-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+      .clip-scroll::-webkit-scrollbar-track { background: transparent; }
+      .clip-scroll::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.28); border-radius: 4px;
+      }
+      .clip-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.45); }
+      @keyframes clipFadeIn {
+        from { opacity: 0; transform: scale(0.96); }
+        to   { opacity: 1; transform: scale(1); }
+      }
+    `;
+    document.head.appendChild(style);
+    return () => { style.remove(); };
   }, []);
 
   // 从 localStorage 加载文本历史
@@ -241,6 +258,7 @@ export function FloatingClipboardView() {
         fontSize: '13px',
         // 不再使用 pointerEvents: 'none' 穿透 — 之前固定后内容区无法交互导致"失控"
         // 固定语义简化为：仅置顶，不穿透
+        animation: 'clipFadeIn 0.18s ease-out',
       }}
     >
       {/* 标题栏 — mousedown 拖拽，不使用 data-tauri-drag-region */}
@@ -369,10 +387,17 @@ export function FloatingClipboardView() {
       {/* 历史列表 */}
       <div
         data-no-drag
+        className="clip-scroll"
         style={{
           flex: 1,
+          minHeight: 0,
+          minWidth: 0,
           overflowY: 'auto',
+          overscrollBehavior: 'contain',
+          WebkitOverflowScrolling: 'touch',
           padding: '4px 6px',
+          scrollbarWidth: 'thin',
+          scrollbarColor: 'rgba(255,255,255,0.28) transparent',
         }}
       >
         {filtered.length === 0 ? (

@@ -111,6 +111,8 @@ const ALLOWED_COMMANDS = new Set([
   'run_shell_command',
   // AI agent 受限 shell：白名单 + Dry-Run 黑名单 + 超时（仅 agent 自主编辑模式使用）
   'run_agent_shell',
+  // 薄荷·网络测速：用系统默认浏览器打开外链（test.ustc.edu.cn）
+  'plugin:opener|open_url',
 ]);
 
 // ========== 安全 Console：所有输出带插件前缀 ==========

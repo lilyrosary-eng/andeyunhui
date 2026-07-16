@@ -3,6 +3,14 @@
 const React = window.__HOST_REACT__;
 const { useState, useMemo, useCallback, useRef, useEffect } = React;
 const { ModuleSidebarShell, SecondaryNavShell, Icon: HostIcon } = window.__HOST_UI__ || {};
+const _HOST_UI = window.__HOST_UI__ || {};
+// 统一动效原语（宿主提供，失败回退到原生标签，保证旧宿主也能跑）
+const Ripple = _HOST_UI.Ripple;
+const ScrollReveal = _HOST_UI.ScrollReveal;
+const PushView = _HOST_UI.PushView;
+const RippleBtn = (props: any) => React.createElement(Ripple || 'button', props);
+const ScrollRevealBox = (props: any) => React.createElement(ScrollReveal || 'div', props);
+const PushViewBox = (props: any) => React.createElement(PushView || 'div', props);
 
 // ========== 数据 ==========
 interface ToolMeta {
@@ -28,7 +36,7 @@ const CATEGORIES: Category[] = [
   { id: 'convert', name: '格式转换', count: 4, icon: 'Repeat' },
   { id: 'text', name: '文本处理', count: 5, icon: 'Type' },
   { id: 'data', name: '数据分析', count: 3, icon: 'ChartColumn' },
-  { id: 'system', name: '系统工具', count: 4, icon: 'SlidersHorizontal' },
+  { id: 'system', name: '系统工具', count: 5, icon: 'SlidersHorizontal' },
 ];
 
 const TOOLS: Record<string, ToolMeta[]> = {
@@ -55,6 +63,7 @@ const TOOLS: Record<string, ToolMeta[]> = {
     { id: 't14', name: '进程管理', desc: '查看系统进程', icon: 'Cpu', category: 'system' },
     { id: 't15', name: '环境变量', desc: '查看和编辑环境变量', icon: 'Variable', category: 'system' },
     { id: 't16', name: '剪贴板历史', desc: '剪贴板读写与历史', icon: 'Clipboard', category: 'system' },
+    { id: 't17', name: '网络测速', desc: '基于 LibreSpeed 的网速测试', icon: 'Gauge', category: 'system' },
   ],
 };
 
@@ -101,7 +110,8 @@ function ToolShell({ tool, onBack, children }: { tool: LiteTool; onBack: () => v
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-3 px-6 py-4 border-b border-white/80 dark:border-stone-700/50 flex-shrink-0">
-        <button
+        <RippleBtn
+          as="button"
           onClick={onBack}
           className="btn-press w-8 h-8 flex items-center justify-center rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
           title="返回"
@@ -109,7 +119,7 @@ function ToolShell({ tool, onBack, children }: { tool: LiteTool; onBack: () => v
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
           </svg>
-        </button>
+        </RippleBtn>
         <ToolGlyph name={tool.icon} size={22} className="text-neutral-600 dark:text-stone-300" />
         <div>
           <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">{tool.name}</div>
@@ -878,6 +888,183 @@ function MediaTranscoder({ kind }: { kind: 'video' | 'audio' }) {
   );
 }
 
+// ========== t17 网络测速（LibreSpeed 本地化 + 自定义 UI）==========
+// 前端逻辑本地化于 public/speedtest.js（LibreSpeed v6.1.0，LGPLv3；以独立未修改文件分发，符合条款）。
+// 不再 iframe 外链整页；后端连用户自托管的 LibreSpeed 兼容服务器（标准端点 garbage.php / backend.php / empty.php / getIP.php，需开启 CORS 允许本应用域）。
+// UI 完全自定义，深度匹配薄荷风格。
+function MetricCard({ label, value, unit, p, active }: { label: string; value: string; unit: string; p: number; active: boolean }) {
+  return (
+    <div className={`flex-1 rounded-xl p-4 bg-white/60 dark:bg-stone-800/60 border transition-colors ${active ? 'border-[var(--element-border)] shadow-md' : 'border-white/80 dark:border-stone-700/50'}`}>
+      <div className="text-xs text-neutral-400 dark:text-stone-500 mb-1">{label}</div>
+      <div className="text-2xl font-semibold text-neutral-800 dark:text-stone-100 tabular-nums leading-none">
+        {value}<span className="text-sm font-normal text-neutral-400 dark:text-stone-500 ml-1">{unit}</span>
+      </div>
+      <div className="mt-3 h-1.5 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
+        <div className="h-full rounded-full bg-[var(--element-border)] transition-all duration-200" style={{ width: `${Math.round(Math.max(0, Math.min(1, p)) * 100)}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function loadSpeedtestScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const w = window as any;
+    if (w.Speedtest) return resolve();
+    const existing = document.querySelector('script[data-librespeed]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () => reject(new Error('LibreSpeed 脚本加载失败')));
+      return;
+    }
+    const sc = document.createElement('script');
+    sc.src = '/speedtest.js';
+    sc.setAttribute('data-librespeed', '1');
+    sc.onload = () => resolve();
+    sc.onerror = () => reject(new Error('LibreSpeed 脚本加载失败'));
+    document.head.appendChild(sc);
+  });
+}
+
+const LS_BACKEND_KEY = 'librespeed_backend';
+const LS_HISTORY_KEY = 'librespeed_history';
+
+function SpeedTest() {
+  const [backend, setBackend] = useState(() => {
+    try { return localStorage.getItem(LS_BACKEND_KEY) || ''; } catch { return ''; }
+  });
+  const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [stage, setStage] = useState('');
+  const [ping, setPing] = useState<number | null>(null);
+  const [jitter, setJitter] = useState<number | null>(null);
+  const [dl, setDl] = useState<number | null>(null);
+  const [ul, setUl] = useState<number | null>(null);
+  const [prog, setProg] = useState({ dl: 0, ul: 0, ping: 0 });
+  const [hist, setHist] = useState<Array<{ t: number; ping: number | null; jitter: number | null; dl: number | null; ul: number | null }>>(() => {
+    try { return JSON.parse(localStorage.getItem(LS_HISTORY_KEY) || '[]'); } catch { return []; }
+  });
+  const [errMsg, setErrMsg] = useState('');
+  const testRef = useRef<any>(null);
+  const latest = useRef<{ ping: number | null; jitter: number | null; dl: number | null; ul: number | null }>({ ping: null, jitter: null, dl: null, ul: null });
+
+  const stop = () => { try { if (testRef.current) testRef.current.abort(); } catch (_e) { /* ignore */ } };
+
+  const start = async () => {
+    setErrMsg('');
+    const url = backend.trim();
+    if (!url) { setErrMsg('请先填写测速服务器地址（你自托管的 LibreSpeed 后端）'); return; }
+    setStatus('running');
+    setPing(null); setJitter(null); setDl(null); setUl(null);
+    setProg({ dl: 0, ul: 0, ping: 0 });
+    setStage('初始化…');
+    try { await loadSpeedtestScript(); }
+    catch (e: any) { setStatus('error'); setErrMsg(e?.message || 'LibreSpeed 脚本加载失败'); return; }
+    const Speedtest = (window as any).Speedtest;
+    if (!Speedtest) { setStatus('error'); setErrMsg('LibreSpeed 未就绪'); return; }
+    const base = url.replace(/\/+$/, '') + '/';
+    try { localStorage.setItem(LS_BACKEND_KEY, url); } catch { /* ignore */ }
+    const server = {
+      name: '自定义服务器',
+      server: base,
+      dlURL: 'garbage.php',
+      ulURL: 'backend.php',
+      pingURL: 'empty.php',
+      getIpURL: 'getIP.php',
+    };
+    latest.current = { ping: null, jitter: null, dl: null, ul: null };
+    const s = new Speedtest();
+    s.setParameter('getIp', false);
+    s.addTestPoint(server);
+    s.setSelectedServer(server);
+    s.onupdate = (d: any) => {
+      latest.current = {
+        ping: d.pingStatus != null ? d.pingStatus : latest.current.ping,
+        jitter: d.jitterStatus != null ? d.jitterStatus : latest.current.jitter,
+        dl: d.dlStatus != null ? d.dlStatus : latest.current.dl,
+        ul: d.ulStatus != null ? d.ulStatus : latest.current.ul,
+      };
+      setPing(latest.current.ping);
+      setJitter(latest.current.jitter);
+      setDl(latest.current.dl);
+      setUl(latest.current.ul);
+      setProg({ dl: d.dlProgress || 0, ul: d.ulProgress || 0, ping: d.pingProgress || 0 });
+      const st = d.testState;
+      setStage(st === 0 ? '准备中…' : st === 1 ? '下载测速中…' : st === 2 ? '延迟 / 抖动测速中…' : st === 3 ? '上传测速中…' : st === 4 ? '完成' : '');
+    };
+    s.onend = (aborted: boolean) => {
+      setStatus(aborted ? 'idle' : 'done');
+      setStage(aborted ? '已停止' : '测试完成');
+      if (!aborted) {
+        const rec = { t: Date.now(), ...latest.current };
+        const next = [rec, ...hist].slice(0, 10);
+        setHist(next);
+        try { localStorage.setItem(LS_HISTORY_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+      }
+    };
+    testRef.current = s;
+    try { s.start(); }
+    catch (e: any) { setStatus('error'); setErrMsg(e?.message || '启动失败'); }
+  };
+
+  const running = status === 'running';
+  const fNum = (v: number | null) => (v == null || isNaN(v)) ? '—' : (v >= 1000 ? (v / 1000).toFixed(2) : v.toFixed(1));
+
+  return (
+    <div className="h-full flex flex-col gap-4 fade-in">
+      {/* 服务器设置 */}
+      <div className="flex-shrink-0 rounded-xl p-4 bg-white/50 dark:bg-stone-800/50 border border-white/80 dark:border-stone-700/50">
+        <label className="text-xs text-neutral-500 dark:text-stone-400">测速服务器地址（自托管 LibreSpeed 后端）</label>
+        <div className="mt-1.5 flex items-center gap-2">
+          <input
+            value={backend}
+            disabled={running}
+            onChange={(e) => setBackend(e.target.value)}
+            placeholder="https://your-server.com/speedtest"
+            className="flex-1 px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900/60 border border-white/80 dark:border-stone-700/50 text-neutral-800 dark:text-stone-100 outline-none focus:border-[var(--element-border)] disabled:opacity-60"
+          />
+          <RippleBtn as="button" onClick={running ? stop : start}
+            className={`btn-press px-4 py-2 rounded-lg text-sm font-medium transition-colors ${running ? 'bg-red-500/90 text-white hover:bg-red-500' : 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 hover:brightness-105'}`}>
+            {running ? '停止' : '开始测速'}
+          </RippleBtn>
+        </div>
+        <p className="mt-1.5 text-[11px] text-neutral-400 dark:text-stone-500 leading-relaxed">
+          需标准 LibreSpeed 后端（garbage.php / backend.php / empty.php / getIP.php）。后端请开启 CORS 允许本应用域（tauri://localhost）。
+        </p>
+        {errMsg && <p className="mt-1.5 text-[11px] text-red-500">{errMsg}</p>}
+      </div>
+
+      {/* 指标 */}
+      <div className="flex items-stretch gap-3 flex-shrink-0">
+        <MetricCard label="下载" value={fNum(dl)} unit="Mbps" p={prog.dl} active={running && stage.indexOf('下载') >= 0} />
+        <MetricCard label="上传" value={fNum(ul)} unit="Mbps" p={prog.ul} active={running && stage.indexOf('上传') >= 0} />
+        <MetricCard label="延迟" value={fNum(ping)} unit="ms" p={prog.ping} active={running && stage.indexOf('延迟') >= 0} />
+      </div>
+
+      {/* 状态 */}
+      <div className="text-center text-sm text-neutral-500 dark:text-stone-400 flex-shrink-0">
+        {status === 'running' && <span className="inline-flex items-center gap-2"><span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--element-border)] border-t-transparent animate-spin" />{stage}</span>}
+        {status === 'done' && <span className="text-[var(--element-color-raw)]">测试完成 · 抖动 {fNum(jitter)} ms</span>}
+        {status === 'idle' && <span>填写服务器地址后开始测速</span>}
+        {status === 'error' && <span className="text-red-500">出错了，请检查服务器地址与 CORS 配置</span>}
+      </div>
+
+      {/* 历史 */}
+      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide">
+        {hist.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-xs text-neutral-400 dark:text-stone-500 px-1">历史记录</div>
+            {hist.map((h, i) => (
+              <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg bg-white/40 dark:bg-stone-800/40 text-sm">
+                <span className="text-neutral-400 dark:text-stone-500 text-xs">{new Date(h.t).toLocaleString()}</span>
+                <span className="tabular-nums text-neutral-700 dark:text-stone-200">↓ {fNum(h.dl)} · ↑ {fNum(h.ul)} · {fNum(h.ping)} ms</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ========== 图标 ==========
 function BriefcaseIcon() {
   return (
@@ -1525,6 +1712,7 @@ const TOOL_VIEWS: Record<string, () => JSX.Element> = {
   t14: ProcessManager,
   t15: EnvVars,
   t16: ClipboardHistory,
+  t17: SpeedTest,
 };
 
 // ========== 主组件 ==========
@@ -1556,38 +1744,42 @@ function ProfessionalModule() {
   // 二级导航：分类列表
   const categoryList = (
     <div className="space-y-0.5">
-      {CATEGORIES.map((cat) => (
-        <button
-          key={cat.id}
-          onClick={() => handleSelectCategory(cat.id)}
-          className={`w-full text-left px-3 py-2 rounded-xl transition-colors text-sm ${
-            selectedCategory === cat.id
-              ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
-              : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
-          }`}
-        >
-          <div className="font-medium truncate flex items-center gap-2">
-            <ToolGlyph name={cat.icon} size={18} className="text-neutral-500 dark:text-stone-400" />
-            {cat.name}
-          </div>
-          <div className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">{cat.count} 个工具</div>
-        </button>
+      {CATEGORIES.map((cat, i) => (
+        <ScrollRevealBox key={cat.id} delay={Math.min(i, 8) * 30}>
+          <RippleBtn
+            as="button"
+            onClick={() => handleSelectCategory(cat.id)}
+            className={`w-full text-left px-3 py-2 rounded-xl transition-colors text-sm ${
+              selectedCategory === cat.id
+                ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
+                : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
+            }`}
+          >
+            <div className="font-medium truncate flex items-center gap-2">
+              <ToolGlyph name={cat.icon} size={18} className="text-neutral-500 dark:text-stone-400" />
+              {cat.name}
+            </div>
+            <div className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">{cat.count} 个工具</div>
+          </RippleBtn>
+        </ScrollRevealBox>
       ))}
     </div>
   );
 
   // 工具卡片网格
   const toolGrid = filteredTools.length > 0 ? (
-    <div className="p-6">
-      <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100 mb-4">
+    <div className="p-6 fade-in">
+      <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100 mb-4 slide-in-up">
         {selectedCat?.name || '全部工具'}
       </h2>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-        {filteredTools.map((tool) => (
-          <button
+        {filteredTools.map((tool, idx) => (
+          <RippleBtn
+            as="button"
             key={tool.id}
             onClick={() => setSelectedToolId(tool.id)}
-            className="group rounded-xl p-4 bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 hover:border-[var(--element-border)] dark:hover:border-[var(--element-border)] transition-all cursor-pointer text-left"
+            style={{ animationDelay: `${Math.min(idx, 12) * 35}ms`, animationFillMode: 'both' }}
+            className="group slide-in-up rounded-xl p-4 bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 hover:border-[var(--element-border)] dark:hover:border-[var(--element-border)] hover:-translate-y-0.5 hover:shadow-md transition-all duration-200 cursor-pointer text-left"
           >
             <div className="w-10 h-10 rounded-xl bg-[var(--element-muted)] flex items-center justify-center mb-3 text-lg text-neutral-600 dark:text-stone-300">
               <ToolGlyph name={tool.icon} size={20} />
@@ -1597,7 +1789,7 @@ function ProfessionalModule() {
             {tool.needBackend && (
               <span className="inline-block mt-2 text-[10px] text-amber-500 bg-amber-50 dark:bg-amber-900/20 px-1.5 py-0.5 rounded">待后端</span>
             )}
-          </button>
+          </RippleBtn>
         ))}
       </div>
     </div>
@@ -1684,7 +1876,10 @@ function ProfessionalModule() {
   return (
     <div className="flex-1 flex h-full overflow-hidden">
       {sidebar}
-      <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]">
+      <PushViewBox
+        className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]"
+        activeKey={showSettings ? 'settings' : selectedTool ? `tool:${selectedTool.id}` : 'list'}
+      >
         {showSettings ? (
           settingsPanel
         ) : selectedTool ? (
@@ -1697,7 +1892,7 @@ function ProfessionalModule() {
             {emptyHint}
           </>
         )}
-      </div>
+      </PushViewBox>
     </div>
   );
 }
