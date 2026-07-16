@@ -27,6 +27,7 @@ function App() {
   const initFloatingListeners = useAppStore(s => s.initFloatingNoteListeners);
   const openExternalContent = useNotesStore(s => s.openExternalContent);
   const initNotes = useNotesStore(s => s.init);
+  const notes = useNotesStore(s => s.notes);
 
   // 热重载生效：当前活动模块被重新注册时，强制重挂其组件（画布重新初始化，给出可见反馈）
   const [activeReloadKey, setActiveReloadKey] = useState(0);
@@ -67,6 +68,62 @@ function App() {
     const un = listen<null>('open-screenshot', () => { void startScreenshot(); });
     return () => { void un.then((fn) => fn()); };
   }, [startScreenshot]);
+
+  // 唤出剪贴板浮窗（全局热键，复用 Rust 已注册的 floating-clipboard 窗口）
+  const openClipboardFloating = useCallback(async () => {
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    let w = await WebviewWindow.getByLabel('floating-clipboard');
+    if (w) {
+      await w.show();
+      await w.setFocus();
+      return;
+    }
+    w = new WebviewWindow('floating-clipboard', {
+      url: 'index.html?floating=clipboard',
+      title: '剪贴板',
+      width: 360,
+      height: 480,
+      minWidth: 280,
+      minHeight: 320,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      resizable: false,
+    });
+  }, []);
+
+  // 唤出中转站浮窗（全局热键，与图标栏中转站共享数据源、实时同步）
+  const openDropzoneFloating = useCallback(async () => {
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    let w = await WebviewWindow.getByLabel('floating-dropzone');
+    if (w) {
+      await w.show();
+      await w.setFocus();
+      return;
+    }
+    w = new WebviewWindow('floating-dropzone', {
+      url: 'index.html?floating=dropzone',
+      title: '中转站',
+      width: 420,
+      height: 520,
+      minWidth: 320,
+      minHeight: 360,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      resizable: false,
+    });
+  }, []);
+
+  useEffect(() => {
+    const un = listen<null>('open-clipboard-floating', () => { void openClipboardFloating(); });
+    return () => { void un.then((fn) => fn()); };
+  }, [openClipboardFloating]);
+
+  useEffect(() => {
+    const un = listen<null>('open-dropzone-floating', () => { void openDropzoneFloating(); });
+    return () => { void un.then((fn) => fn()); };
+  }, [openDropzoneFloating]);
 
   // 截图保存后：若触发时正处于某篇笔记页，由覆盖窗口转发事件，在此追加图片到该笔记
   useEffect(() => {
@@ -121,18 +178,39 @@ function App() {
   // ====== 全局 effect ======
   // 初始化（「加载页优先」：推后到哥特加载动画稳态之后）
   // 不立即同步跑笔记初始化 + 浮窗监听——否则会与 React 挂载、插件加载在启动头几秒抢占主线程，
-  // 导致哥特加载页动画掉帧（用户 Issue 4）。延迟 ~1.2s 后执行，此时加载页已流畅播放、且仍盖在上方。
+  // 导致哥特加载页动画掉帧（用户 Issue 4）。延迟 ~200ms 后执行，此时加载页已流畅播放、且仍盖在上方。
   const initCleanupRef = useRef<() => void>(() => {});
   useEffect(() => {
     const t = window.setTimeout(() => {
       initNotes();
       initCleanupRef.current = initFloatingListeners() || (() => {});
-    }, 1200);
+    }, 200);
     return () => {
       window.clearTimeout(t);
       initCleanupRef.current();
     };
   }, [initNotes, initFloatingListeners]);
+
+  // 加载页收尾：不再「UI 一渲染就关加载页」，而是**等笔记列表真正加载完毕**再淡出
+  // （用户 Issue 4：之前加载页先结束、笔记目录再过 ~2s 才出现，体验割裂）。
+  // 笔记在加载页盖住期间已在后台加载；加载页最短展示时长（index.html MIN_BOOT_MS=2600ms）
+  // 仍保证用户能看到哥特动画。最多等 4s，避免极端情况下加载页卡住。
+  const bootDoneRef = useRef(false);
+  const finishBoot = useCallback(() => {
+    if (bootDoneRef.current) return;
+    bootDoneRef.current = true;
+    const boot = window as unknown as {
+      __bootDone?: (opts?: { text?: string; phase?: string }) => void;
+    };
+    boot.__bootDone?.({ text: "准备就绪", phase: "PHASE 05 / 05" });
+  }, []);
+  useEffect(() => {
+    if (notes.length > 0) finishBoot();
+  }, [notes, finishBoot]);
+  useEffect(() => {
+    const t = window.setTimeout(finishBoot, 4000);
+    return () => window.clearTimeout(t);
+  }, [finishBoot]);
 
   // 插件可见性变化
   useEffect(() => {
@@ -289,13 +367,12 @@ function App() {
   return (
     <PluginHost onPluginsLoaded={(registry) => {
       setPluginRegistry(registry);
-      // 进度：全部模块就绪，收尾加载层（100% → 淡出）
+      // 进度：全部模块就绪，进度拉满（100%）。加载页淡出改由 App 内
+      // 笔记列表加载完毕后统一触发（见 finishBoot），确保笔记与 UI 同步出现。
       const boot = window as unknown as {
         __bootProgress?: (pct: number, opts?: { text?: string; phase?: string }) => void;
-        __bootDone?: (opts?: { text?: string; phase?: string }) => void;
       };
       boot.__bootProgress?.(100, { text: "准备就绪", phase: "PHASE 05 / 05" });
-      boot.__bootDone?.({ text: "准备就绪", phase: "PHASE 05 / 05" });
     }}>
       <div className="flex flex-col h-screen w-screen main-panel-bg text-foreground antialiased overflow-hidden">
         <Titlebar />

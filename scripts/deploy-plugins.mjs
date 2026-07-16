@@ -19,6 +19,9 @@
 //   - 占位文件夹（含 .gitkeep）不会被清理
 //
 // 新增插件只需在 plugins/ 下创建目录 + manifest.json，无需修改此脚本
+//
+// BUILD_CLEAN=1 环境变量：跳过所有插件构建和部署，只保留空模块文件夹 + .gitkeep。
+// 用于 build_clean.bat 打包精简版安装包（不含插件代码，用户后续导入 .mufurong）。
 import { execSync } from 'node:child_process';
 import { mkdirSync, cpSync, readFileSync, existsSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -28,8 +31,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
 const pluginsDir = join(rootDir, 'plugins');
 
+// vite 二进制路径：直接调用以绕过 pnpm exec 的 install 检查（pnpm 11 的 ERR_PNPM_IGNORED_BUILDS 会阻止构建）
+const viteBin = join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js');
+
 // 目标目录：bundled-plugins/ （开发时直接加载 + 生产打包嵌入资源）
 const bundledDir = join(rootDir, 'bundled-plugins');
+
+// BUILD_CLEAN=1 时跳过插件构建，只保留空目录占位
+const BUILD_CLEAN = process.env.BUILD_CLEAN === '1';
+if (BUILD_CLEAN) {
+  console.log('[Deploy] BUILD_CLEAN=1：跳过所有插件构建，只保留空模块文件夹');
+}
 
 // 递归自动发现插件：扫描 plugins/ 下所有含 manifest.json 的目录（排除 _shared/_template），
 // 支持子插件嵌套目录（如 niaoluo/gongjuxiang），返回 {relPath, id, manifest} 对象数组
@@ -116,17 +128,25 @@ for (const { relPath, id, manifest } of plugins) {
   const pluginDir = join(pluginsDir, relPath);
   if (!existsSync(pluginDir)) continue;
 
+  // BUILD_CLEAN=1：跳过插件构建和部署，只保留空模块文件夹
+  if (BUILD_CLEAN) {
+    console.log(`[Deploy] BUILD_CLEAN=1，跳过插件: ${id}`);
+    continue;
+  }
+
   const hasViteConfig = existsSync(join(pluginDir, 'vite.config.ts')) || existsSync(join(pluginDir, 'vite.config.js'));
   console.log(`\n[Deploy] ${hasViteConfig ? '构建' : '复制'}插件: ${id} (源: ${relPath})`);
 
   // 1. 构建（有 vite 配置）或跳过（预构建插件）
-  //    用 pnpm exec 而非 npx：项目本身是 pnpm 体系（根 .npmrc 含 pnpm 专属键），
-  //    npx 底层走 npm 会不识别这些键并报 "Unknown project config" 警告。
-  //    pnpm exec 只执行已存在的二进制、不触发 install（避免 node_modules 被占用时 EPERM），
-  //    且能正确识别根 .npmrc 的 pnpm 配置，警告即消除。
+  //    直接通过 node 调用 vite 二进制（而非 pnpm exec / npx）：
+  //    - pnpm 11 的 ERR_PNPM_IGNORED_BUILDS 会导致 pnpm exec 内部的 install 检查失败
+  //    - npx 底层走 npm，不识别根 .npmrc 的 pnpm 专属键
+  //    - vite 已通过 shamefully-hoist=true 提升到根 node_modules，直接调用最稳定
   if (hasViteConfig) {
     try {
-      execSync('pnpm exec vite build', { cwd: pluginDir, stdio: 'inherit', timeout: 120_000 });
+      // 直接通过 node 调用 vite 二进制，绕过 pnpm exec（pnpm 11 的 ERR_PNPM_IGNORED_BUILDS 会导致 install 失败）
+      // vite 已通过 shamefully-hoist=true 提升到根 node_modules，cwd 设为插件目录以找到 vite.config.ts
+      execSync(`node "${viteBin}" build`, { cwd: pluginDir, stdio: 'inherit', timeout: 120_000 });
     } catch (e) {
       console.error(`[Deploy] 构建失败: ${id}`, e.message);
       continue;

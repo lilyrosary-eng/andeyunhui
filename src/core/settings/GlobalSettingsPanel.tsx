@@ -27,6 +27,8 @@ const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   { id: 'link', label: '链接', keys: 'Ctrl + K' },
   { id: 'screenshot', label: '全局截图', keys: 'Ctrl + Shift + S' },
   { id: 'recorder', label: '全局录屏', keys: 'Ctrl + Alt + R' },
+  { id: 'clipboard', label: '剪贴板浮窗', keys: 'Ctrl + Alt + C' },
+  { id: 'dropzone', label: '中转站浮窗', keys: 'Ctrl + Alt + V' },
 ];
 
 function loadShortcuts(): ShortcutDef[] {
@@ -142,6 +144,12 @@ export function GlobalSettingsPanel() {
     invoke<string>('get_recorder_shortcut')
       .then((sc) => updateDisplay('recorder', sc))
       .catch(() => {});
+    invoke<string>('get_clipboard_shortcut')
+      .then((sc) => updateDisplay('clipboard', sc))
+      .catch(() => {});
+    invoke<string>('get_dropzone_shortcut')
+      .then((sc) => updateDisplay('dropzone', sc))
+      .catch(() => {});
   }, []);
 
   // 键盘捕获：编辑快捷键时监听按键
@@ -172,6 +180,14 @@ export function GlobalSettingsPanel() {
           invoke('set_recorder_shortcut', { shortcut }).catch((err) => {
             console.error('[录屏] 设置热键失败:', err);
           });
+        } else if (editingShortcutId === 'clipboard') {
+          invoke('set_clipboard_shortcut', { shortcut }).catch((err) => {
+            console.error('[剪贴板] 设置热键失败:', err);
+          });
+        } else if (editingShortcutId === 'dropzone') {
+          invoke('set_dropzone_shortcut', { shortcut }).catch((err) => {
+            console.error('[中转站] 设置热键失败:', err);
+          });
         }
         setEditingShortcutId(null);
       }
@@ -189,6 +205,10 @@ export function GlobalSettingsPanel() {
     if (sc) invoke('set_screenshot_shortcut', { shortcut: sc.keys }).catch(() => {});
     const rc = DEFAULT_SHORTCUTS.find((s) => s.id === 'recorder');
     if (rc) invoke('set_recorder_shortcut', { shortcut: rc.keys }).catch(() => {});
+    const cc = DEFAULT_SHORTCUTS.find((s) => s.id === 'clipboard');
+    if (cc) invoke('set_clipboard_shortcut', { shortcut: cc.keys }).catch(() => {});
+    const dc = DEFAULT_SHORTCUTS.find((s) => s.id === 'dropzone');
+    if (dc) invoke('set_dropzone_shortcut', { shortcut: dc.keys }).catch(() => {});
   };
 
   const handleStartEditShortcut = (id: string) => {

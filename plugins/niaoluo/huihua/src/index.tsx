@@ -18,7 +18,51 @@ const PALETTE = [
   '#1c1917', '#451f1e', '#7d1d1d', '#cc4e3c', '#e8a0a0', '#f6c6c6',
 ];
 type Tool = 'pen' | 'eraser' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'fill' | 'pick';
+type ColorMode = 'wheel' | 'rgb' | 'hsv' | 'palette';
 const UNDO_LIMIT = 20;
+const RECENT_MAX = 10;
+
+// ============ 颜色空间转换工具（hex / rgb / hsv）============
+function clamp255(v: number) { return Math.max(0, Math.min(255, Math.round(v))); }
+function hexToRgb(hex: string): [number, number, number] {
+  const m = hex.replace('#', '');
+  return [parseInt(m.slice(0, 2), 16), parseInt(m.slice(2, 4), 16), parseInt(m.slice(4, 6), 16)];
+}
+function rgbToHex(r: number, g: number, b: number): string {
+  return '#' + [clamp255(r), clamp255(g), clamp255(b)].map((v) => v.toString(16).padStart(2, '0')).join('');
+}
+function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const d = max - min;
+  const v = max;
+  const s = max === 0 ? 0 : d / max;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return [h, s * 100, v * 100];
+}
+function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  h = ((h % 360) + 360) % 360;
+  s = Math.max(0, Math.min(100, s)) / 100;
+  v = Math.max(0, Math.min(100, v)) / 100;
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+  return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+}
 
 interface Layer {
   id: string;
@@ -66,11 +110,22 @@ let toolSnapshot = {
   tool: 'pen' as Tool, color: '#111827', size: 4, opacity: 1, hardness: 1,
   zoom: 1, transparent: false, canUndo: false, canRedo: false,
   status: '图层化画板：选择工具开始绘制',
+  recentColors: [] as string[],   // 最近使用色（去重 + LIFO，最多 10）
+  colorMode: 'wheel' as ColorMode, // 当前颜色模式 tab
 };
 const toolListeners = new Set<() => void>();
 function publishTools(partial: Partial<typeof toolSnapshot>) {
   Object.assign(toolSnapshot, partial);
   toolListeners.forEach((fn) => fn());
+}
+// 把 hex 推入最近使用（去重 + 最新在前，最多 10）
+function pushRecentColor(hex: string) {
+  const norm = hex.toLowerCase();
+  const cur = toolSnapshot.recentColors;
+  const next = [norm, ...cur.filter((c) => c !== norm)].slice(0, RECENT_MAX);
+  if (next.length !== cur.length || next.some((c, i) => c !== cur[i])) {
+    publishTools({ recentColors: next });
+  }
 }
 // 由画布在挂载时注册；侧栏调用这些来修改绘图参数
 const toolOps = {
@@ -246,7 +301,7 @@ function HuihuaBoard() {
     publishLayers(layersRef.current, activeIdRef.current);
     // 注册工具/颜色/笔刷状态操作（侧栏调用 → 画布 setter）
     toolOps.setTool = (t) => { setTool(t); publishTools({ tool: t }); };
-    toolOps.setColor = (c) => { setColor(c); publishTools({ color: c }); };
+    toolOps.setColor = (c) => { setColor(c); pushRecentColor(c); publishTools({ color: c }); };
     toolOps.setSize = (s) => { setSize(s); publishTools({ size: s }); };
     toolOps.setOpacity = (v) => { setOpacity(v); publishTools({ opacity: v }); };
     toolOps.setHardness = (h) => { setHardness(h); publishTools({ hardness: h }); };
@@ -593,6 +648,336 @@ function HuihuaBoard() {
   );
 }
 
+// ============ 4 个 tab 按钮的内嵌 SVG 图标（不依赖宿主 lucide 表，体积更小）============
+function IconWheel({ active }: { active: boolean }) {
+  const stroke = active ? '#fff' : 'currentColor';
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <defs>
+        <linearGradient id="wh-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#ff5252" /><stop offset=".17" stopColor="#ffd24a" />
+          <stop offset=".34" stopColor="#7cf06a" /><stop offset=".5" stopColor="#3ad6ff" />
+          <stop offset=".67" stopColor="#5b6cff" /><stop offset=".84" stopColor="#c64cff" />
+          <stop offset="1" stopColor="#ff4ea1" />
+        </linearGradient>
+      </defs>
+      <circle cx="8" cy="8" r="6" stroke={`url(#wh-grad)`} strokeWidth="2" fill="none" />
+      <circle cx="8" cy="8" r="2" fill={stroke} />
+    </svg>
+  );
+}
+function IconRgb({ active }: { active: boolean }) {
+  const stroke = active ? '#fff' : 'currentColor';
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <rect x="2"  y="3" width="12" height="2.4" rx=".6" fill="#ef4444" />
+      <rect x="2"  y="6.8" width="12" height="2.4" rx=".6" fill="#22c55e" />
+      <rect x="2"  y="10.6" width="12" height="2.4" rx=".6" fill="#3b82f6" />
+      <line x1="13.5" y1="3" x2="13.5" y2="5.4" stroke={stroke} strokeWidth=".6" />
+    </svg>
+  );
+}
+function IconHsv({ active }: { active: boolean }) {
+  const stroke = active ? '#fff' : 'currentColor';
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <defs>
+        <linearGradient id="hsg-h" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#fff" /><stop offset="1" stopColor="#ff5252" />
+        </linearGradient>
+        <linearGradient id="hsg-s" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#fff" /><stop offset="1" stopColor="#22c55e" />
+        </linearGradient>
+      </defs>
+      <rect x="3"    y="2" width="2.4" height="12" rx=".6" fill="url(#hsg-h)" />
+      <rect x="6.8"  y="2" width="2.4" height="12" rx=".6" fill="url(#hsg-s)" />
+      <rect x="10.6" y="2" width="2.4" height="12" rx=".6" fill={stroke} />
+    </svg>
+  );
+}
+function IconPalette({ active }: { active: boolean }) {
+  const stroke = active ? '#fff' : 'currentColor';
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <rect x="2"  y="2"  width="5" height="5" rx="1" fill="#ef4444" />
+      <rect x="9"  y="2"  width="5" height="5" rx="1" fill="#22c55e" />
+      <rect x="2"  y="9"  width="5" height="5" rx="1" fill="#3b82f6" />
+      <rect x="9"  y="9"  width="5" height="5" rx="1" fill="#facc15" />
+      <circle cx="12.5" cy="12.5" r="0" />
+      <path d="M2 14 L14 14" stroke={stroke} strokeWidth=".4" opacity=".4" />
+    </svg>
+  );
+}
+
+// ============ 共用：色条（带渐变背景的水平滑块）============
+function ColorSlider(props: {
+  label: string;
+  min: number; max: number; step?: number; value: number;
+  onChange: (v: number) => void;
+  bgGradient: string;  // CSS background, e.g. 'linear-gradient(90deg, #000, #fff)'
+  width?: number;      // CSS px, default 160
+  showValue?: boolean; // default true
+}) {
+  const { label, min, max, step = 1, value, onChange, bgGradient, showValue = true } = props;
+  return (
+    <div className="flex items-center gap-1.5 text-[11px]">
+      <span className="w-3.5 text-neutral-500 dark:text-stone-400 font-medium tabular-nums">{label}</span>
+      <div
+        className="relative flex-1 h-3 rounded-full border border-black/10 dark:border-white/10 overflow-hidden"
+        style={{ background: bgGradient }}
+      >
+        <input
+          type="range" min={min} max={max} step={step} value={value}
+          onChange={(e) => onChange(parseFloat(e.target.value))}
+          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+        />
+        {/* 三角游标（SAI 风格） */}
+        <div
+          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-0 h-0 pointer-events-none"
+          style={{
+            left: `${((value - min) / (max - min)) * 100}%`,
+            borderLeft: '4px solid transparent',
+            borderRight: '4px solid transparent',
+            borderTop: '6px solid #fff',
+            filter: 'drop-shadow(0 0 1px rgba(0,0,0,.8))',
+          }}
+        />
+      </div>
+      {showValue && (
+        <span className="w-7 text-right text-neutral-500 dark:text-stone-400 tabular-nums">{Math.round(value)}</span>
+      )}
+    </div>
+  );
+}
+
+// ============ 视图 1：色轮（Hue 环 + 中心 SV 方块）============
+function ColorWheelView({ color, onChange }: { color: string; onChange: (c: string) => void }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dragRef = useRef<'ring' | 'square' | null>(null);
+  const SIZE = 184; // CSS px
+  const RING_THICK = 22;
+  const getHsv = (h: string) => { const [r, g, b] = hexToRgb(h); return rgbToHsv(r, g, b); };
+  const [hue, sat, val] = getHsv(color);
+
+  // 绘制色轮 + SV 方块 + 当前色指示
+  useEffect(() => {
+    const c = canvasRef.current; if (!c) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = SIZE, H = SIZE;
+    if (c.width !== W * dpr) c.width = W * dpr;
+    if (c.height !== H * dpr) c.height = H * dpr;
+    const ctx = c.getContext('2d')!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const cx = W / 2, cy = H / 2;
+    const outerR = W / 2 - 4;
+    const innerR = outerR - RING_THICK;
+
+    // Hue 环（conic gradient 描边 + 内圆 destination-out 挖空）
+    const conic = ctx.createConicGradient(-Math.PI / 2, cx, cy);
+    for (let i = 0; i <= 12; i++) conic.addColorStop(i / 12, `hsl(${i * 30}, 100%, 50%)`);
+    ctx.save();
+    ctx.fillStyle = conic;
+    ctx.beginPath();
+    ctx.arc(cx, cy, outerR, 0, Math.PI * 2);
+    ctx.arc(cx, cy, innerR, 0, Math.PI * 2, true);
+    ctx.fill('evenodd');
+    ctx.restore();
+
+    // 中心 SV 方块
+    const sq = innerR * 1.35; // 撑满内圈
+    const sqX = cx - sq / 2, sqY = cy - sq / 2;
+    // 底色：当前 hue
+    ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+    ctx.fillRect(sqX, sqY, sq, sq);
+    // 白色 → 透明（饱和度）
+    const g1 = ctx.createLinearGradient(sqX, sqY, sqX + sq, sqY);
+    g1.addColorStop(0, 'rgba(255,255,255,1)');
+    g1.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g1; ctx.fillRect(sqX, sqY, sq, sq);
+    // 透明 → 黑色（明度）
+    const g2 = ctx.createLinearGradient(sqX, sqY, sqX, sqY + sq);
+    g2.addColorStop(0, 'rgba(0,0,0,0)');
+    g2.addColorStop(1, 'rgba(0,0,0,1)');
+    ctx.fillStyle = g2; ctx.fillRect(sqX, sqY, sq, sq);
+    // 边框
+    ctx.strokeStyle = 'rgba(0,0,0,.25)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(sqX + .5, sqY + .5, sq - 1, sq - 1);
+
+    // Hue 指示圈（环上）
+    const hueAng = ((hue - 90) * Math.PI) / 180;
+    const hueR = (outerR + innerR) / 2;
+    const hx = cx + Math.cos(hueAng) * hueR;
+    const hy = cy + Math.sin(hueAng) * hueR;
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(hx, hy, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke();
+
+    // SV 指示圈（方块内）
+    const svX = sqX + (sat / 100) * sq;
+    const svY = sqY + (1 - val / 100) * sq;
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(svX, svY, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke();
+  }, [hue, sat, val]);
+
+  // 通用：把客户端坐标转画布数学坐标
+  const ptToXY = (clientX: number, clientY: number) => {
+    const c = canvasRef.current!; const rect = c.getBoundingClientRect();
+    return { x: clientX - rect.left - SIZE / 2, y: clientY - rect.top - SIZE / 2 };
+  };
+
+  const apply = (mx: number, my: number, region: 'ring' | 'square') => {
+    const sq = (SIZE / 2 - 4 - RING_THICK) * 1.35;
+    if (region === 'ring') {
+      let ang = (Math.atan2(my, mx) * 180) / Math.PI + 90;
+      if (ang < 0) ang += 360; if (ang >= 360) ang -= 360;
+      const [r, g, b] = hsvToRgb(ang, sat, val);
+      onChange(rgbToHex(r, g, b));
+    } else {
+      const sx = Math.max(0, Math.min(sq, mx + sq / 2));
+      const sy = Math.max(0, Math.min(sq, my + sq / 2));
+      const newS = (sx / sq) * 100;
+      const newV = (1 - sy / sq) * 100;
+      const [r, g, b] = hsvToRgb(hue, newS, newV);
+      onChange(rgbToHex(r, g, b));
+    }
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    const { x, y } = ptToXY(e.clientX, e.clientY);
+    const d = Math.sqrt(x * x + y * y);
+    const outerR = SIZE / 2 - 4, innerR = outerR - RING_THICK;
+    const sqHalf = innerR * 1.35 / 2;
+    if (d <= sqHalf) { dragRef.current = 'square'; apply(x, y, 'square'); }
+    else if (d <= outerR && d >= innerR) { dragRef.current = 'ring'; apply(x, y, 'ring'); }
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    const { x, y } = ptToXY(e.clientX, e.clientY);
+    apply(x, y, dragRef.current);
+  };
+  const onPointerUp = () => { dragRef.current = null; };
+
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      <canvas
+        ref={canvasRef}
+        width={SIZE} height={SIZE}
+        style={{ width: SIZE, height: SIZE }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerUp}
+        className="touch-none select-none rounded-full"
+      />
+      <HexRow color={color} onChange={onChange} />
+    </div>
+  );
+}
+
+// ============ 视图 2：RGB 滑块（R/G/B 各自带渐变背景）============
+function RgbSliders({ color, onChange }: { color: string; onChange: (c: string) => void }) {
+  const [r, g, b] = hexToRgb(color);
+  const set = (nr: number, ng: number, nb: number) => onChange(rgbToHex(nr, ng, nb));
+  return (
+    <div className="space-y-1.5">
+      <ColorSlider label="R" min={0} max={255} value={r} onChange={(v) => set(v, g, b)}
+        bgGradient={`linear-gradient(90deg, rgb(0,${g},${b}), rgb(255,${g},${b}))`} />
+      <ColorSlider label="G" min={0} max={255} value={g} onChange={(v) => set(r, v, b)}
+        bgGradient={`linear-gradient(90deg, rgb(${r},0,${b}), rgb(${r},255,${b}))`} />
+      <ColorSlider label="B" min={0} max={255} value={b} onChange={(v) => set(r, g, v)}
+        bgGradient={`linear-gradient(90deg, rgb(${r},${g},0), rgb(${r},${g},255))`} />
+      <HexRow color={color} onChange={onChange} />
+    </div>
+  );
+}
+
+// ============ 视图 3：HSV 滑块（色相 / 饱和度 / 明度）============
+function HsvSliders({ color, onChange }: { color: string; onChange: (c: string) => void }) {
+  const [r, g, b] = hexToRgb(color);
+  const [h, s, v] = rgbToHsv(r, g, b);
+  const set = (nh: number, ns: number, nv: number) => {
+    const [nr, ng, nb] = hsvToRgb(nh, ns, nv);
+    onChange(rgbToHex(nr, ng, nb));
+  };
+  // 渐变端点（用 HSL/HSV 字符串做色）
+  const hueStops = (() => { let s = 'linear-gradient(90deg'; for (let i = 0; i <= 12; i++) s += `, hsl(${i * 30} 100% 50%)`; return s + ')'; })();
+  const satStops = `linear-gradient(90deg, hsl(${h}, 0%, ${v / 2}%), hsl(${h}, 100%, 50%))`;
+  const valStops = `linear-gradient(90deg, #000, hsl(${h}, ${s}%, 50%))`;
+  return (
+    <div className="space-y-1.5">
+      <ColorSlider label="H" min={0} max={360} step={1} value={h} onChange={(x) => set(x, s, v)} bgGradient={hueStops} />
+      <ColorSlider label="S" min={0} max={100} step={1} value={s} onChange={(x) => set(h, x, v)} bgGradient={satStops} />
+      <ColorSlider label="V" min={0} max={100} step={1} value={v} onChange={(x) => set(h, s, x)} bgGradient={valStops} />
+      <HexRow color={color} onChange={onChange} />
+    </div>
+  );
+}
+
+// ============ 视图 4：色板（30 色预设 + 最近 10 色）============
+function PaletteView({
+  color, recent, onPick,
+}: { color: string; recent: string[]; onPick: (c: string) => void }) {
+  const cur = color.toLowerCase();
+  return (
+    <div className="space-y-2">
+      {/* 当前色 + HEX 输入 */}
+      <HexRow color={color} onChange={onPick} />
+      {/* 最近使用 */}
+      <div>
+        <div className="text-[10px] font-medium text-neutral-400 dark:text-stone-500 mb-1">最近使用</div>
+        <div className="grid grid-cols-10 gap-[3px]">
+          {Array.from({ length: RECENT_MAX }).map((_, i) => {
+            const c = recent[i];
+            if (!c) return <div key={i} className="w-full aspect-square rounded-sm border border-dashed border-black/10 dark:border-white/10" />;
+            return (
+              <button key={i} onClick={() => onPick(c)} title={c}
+                className={`w-full aspect-square rounded-sm transition-transform hover:scale-110 ${cur === c ? 'ring-1 ring-offset-1 ring-[var(--element-bg)]' : ''}`}
+                style={{ backgroundColor: c, borderColor: c === '#ffffff' ? '#cbd5e1' : 'transparent' }}
+              />
+            );
+          })}
+        </div>
+      </div>
+      {/* 预设色板 */}
+      <div>
+        <div className="text-[10px] font-medium text-neutral-400 dark:text-stone-500 mb-1">色板</div>
+        <div className="grid grid-cols-10 gap-[3px]">
+          {PALETTE.map((c) => (
+            <button key={c} onClick={() => onPick(c)} title={c}
+              className={`w-full aspect-square rounded-sm transition-transform hover:scale-110 ${cur === c.toLowerCase() ? 'ring-1 ring-offset-1 ring-[var(--element-bg)]' : ''}`}
+              style={{ backgroundColor: c, border: c.toLowerCase() === '#ffffff' ? '1px solid #cbd5e1' : '1px solid transparent' }}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============ 共用：当前色块 + HEX 文本输入 + 系统拾色器 ============
+function HexRow({ color, onChange }: { color: string; onChange: (c: string) => void }) {
+  return (
+    <div className="flex items-center gap-1 w-full">
+      <span className="w-7 h-7 rounded-md border border-black/10 dark:border-white/10 shrink-0 shadow-inner" style={{ backgroundColor: color }} />
+      <input
+        type="text" value={color.toUpperCase()}
+        onChange={(e) => {
+          const v = e.target.value.trim();
+          if (/^#?[0-9a-fA-F]{6}$/.test(v)) onChange((v.startsWith('#') ? v : '#' + v).toLowerCase());
+        }}
+        className="flex-1 min-w-0 px-1.5 py-0.5 text-[11px] rounded border border-black/10 dark:border-white/10 bg-white/60 dark:bg-black/20 text-neutral-700 dark:text-stone-200 tabular-nums font-mono"
+        maxLength={7}
+      />
+      <label className="w-7 h-7 rounded-md border border-black/10 dark:border-white/10 cursor-pointer overflow-hidden relative shrink-0" title="系统拾色器">
+        <input type="color" value={color} onChange={(e) => onChange(e.target.value)}
+          className="absolute -top-2 -left-2 w-12 h-12 cursor-pointer border-0 p-0" />
+      </label>
+    </div>
+  );
+}
+
 // ============ 左侧「图层」子目录（母目录+子目录范式） ============
 // 作为 def.sidebar 由宿主渲染在左侧主侧栏；与画布共享 layerBus 状态。
 function HuihuaSidebar() {
@@ -614,11 +999,34 @@ function HuihuaSidebar() {
     return () => { toolListeners.delete(fn); };
   }, []);
 
+  // 颜色模式 tab 状态（默认「色轮」）
+  const [colorMode, setColorMode] = useState<ColorMode>(toolSnapshot.colorMode);
+  useEffect(() => { setColorMode(toolSnapshot.colorMode); }, [ts.colorMode]);
+  const switchMode = (m: ColorMode) => { setColorMode(m); publishTools({ colorMode: m }); };
+
+  // 颜色变更包装：setColor 已自动 pushRecent
+  const pickColor = useCallback((c: string) => { toolOps.setColor(c); }, []);
+
+  const tabBtn = (mode: ColorMode, label: string, Icon: (p: { active: boolean }) => any) => {
+    const active = colorMode === mode;
+    return (
+      <button onClick={() => switchMode(mode)} title={label}
+        className={`flex-1 flex flex-col items-center gap-0.5 py-1 rounded-md transition-colors ${
+          active
+            ? 'bg-[var(--element-bg)] text-white shadow-sm'
+            : 'text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5'
+        }`}>
+        <Icon active={active} />
+        <span className="text-[9px] leading-none">{label}</span>
+      </button>
+    );
+  };
+
   return (
     <div className="flex flex-col h-full">
-      {/* 图层 — 限高 40%，独立滚动 */}
-      <div className="overflow-auto shrink-0" style={{ maxHeight: '42%' }}>
-        <div className="space-y-1 px-1">
+      {/* 图层 — 限高 38%，独立滚动 */}
+      <div className="overflow-auto shrink-0 px-1 pt-1" style={{ maxHeight: '38%' }}>
+        <div className="space-y-1">
           <div className="flex items-center justify-between mb-1">
             <span className="text-[11px] font-medium text-neutral-400 dark:text-stone-500">图层</span>
             <button onClick={() => layerOps.add()} className="btn-press px-2 py-0.5 rounded text-xs bg-[var(--element-bg)] text-white" title="新建图层">
@@ -655,18 +1063,32 @@ function HuihuaSidebar() {
       </div>
 
       {/* 分隔 */}
-      <div className="border-t border-neutral-200/30 dark:border-stone-700/30 my-0.5 shrink-0" />
+      <div className="border-t border-neutral-200/60 dark:border-stone-700/40 my-0.5 shrink-0" />
 
-      {/* 工具 + 调色板 + 笔刷 — flex-1 占剩余高度，独立滚动 */}
+      {/* 颜色 / 工具 / 笔刷 — flex-1 占剩余高度，独立滚动 */}
       <div className="flex-1 overflow-auto min-h-0">
-        <div className="px-1 space-y-2">
+        <div className="px-1.5 py-1.5 space-y-2">
+          {/* 4-tab 颜色模式（SAI2 风） */}
+          <div className="flex items-center gap-1 p-0.5 rounded-lg bg-black/[.04] dark:bg-white/[.04]">
+            {tabBtn('wheel',   '色轮', IconWheel)}
+            {tabBtn('rgb',     'RGB',  IconRgb)}
+            {tabBtn('hsv',     'HSV',  IconHsv)}
+            {tabBtn('palette', '色板', IconPalette)}
+          </div>
+
+          {/* 当前颜色模式对应的视图 */}
+          {colorMode === 'wheel'   && <ColorWheelView color={ts.color} onChange={pickColor} />}
+          {colorMode === 'rgb'     && <RgbSliders    color={ts.color} onChange={pickColor} />}
+          {colorMode === 'hsv'     && <HsvSliders    color={ts.color} onChange={pickColor} />}
+          {colorMode === 'palette' && <PaletteView   color={ts.color} recent={ts.recentColors} onPick={pickColor} />}
+
           {/* 工具 */}
           <div>
-            <div className="text-[11px] font-medium text-neutral-400 dark:text-stone-500 mb-1">工具</div>
-            <div className="grid grid-cols-2 gap-1">
+            <div className="text-[10px] font-medium text-neutral-400 dark:text-stone-500 mb-1 mt-1">工具</div>
+            <div className="grid grid-cols-4 gap-1">
               {TOOLS.map((t) => (
                 <button key={t.id} onClick={() => toolOps.setTool(t.id)}
-                  className={`py-1.5 rounded-lg text-[11px] font-medium transition-all ${
+                  className={`py-1 rounded-md text-[10px] font-medium transition-all ${
                     ts.tool === t.id
                       ? 'bg-[var(--element-bg)] text-white shadow-sm'
                       : 'bg-black/5 dark:bg-white/5 text-neutral-600 dark:text-stone-300 hover:bg-black/10 dark:hover:bg-white/10'
@@ -677,55 +1099,33 @@ function HuihuaSidebar() {
             </div>
           </div>
 
-          {/* 调色板 */}
-          <div>
-            <div className="text-[11px] font-medium text-neutral-400 dark:text-stone-500 mb-1">调色板</div>
-            <div className="flex items-center gap-1.5 mb-1">
-              <span className="w-6 h-6 rounded-md border border-black/10 shadow-inner" style={{ backgroundColor: ts.color }} />
-              <input type="color" value={ts.color}
-                onChange={(e) => toolOps.setColor(e.target.value)}
-                className="w-6 h-6 rounded cursor-pointer bg-transparent border border-black/10" title="自定义颜色" />
-              <span className="text-[11px] text-neutral-500 dark:text-stone-400 tabular-nums">{ts.color.toUpperCase()}</span>
-            </div>
-            <div className="grid grid-cols-6 gap-1">
-              {PALETTE.map((c) => (
-                <button key={c} onClick={() => toolOps.setColor(c)}
-                  className={`w-5 h-5 rounded border transition-transform hover:scale-110 ${
-                    ts.color.toLowerCase() === c.toLowerCase() ? 'ring-1 ring-offset-1 ring-[var(--element-bg)]' : ''
-                  }`}
-                  style={{ backgroundColor: c, borderColor: c.toLowerCase() === '#ffffff' ? '#cbd5e1' : 'transparent' }}
-                  title={c} />
-              ))}
-            </div>
-          </div>
-
           {/* 笔刷 */}
           <div>
-            <div className="text-[11px] font-medium text-neutral-400 dark:text-stone-500 mb-1">笔刷</div>
+            <div className="text-[10px] font-medium text-neutral-400 dark:text-stone-500 mb-1">笔刷</div>
             <div className="space-y-1">
               <div className="flex items-center gap-1.5">
-                <label className="text-[11px] text-neutral-500 dark:text-stone-400 w-8">粗细</label>
+                <label className="text-[10px] text-neutral-500 dark:text-stone-400 w-7 shrink-0">粗细</label>
                 <input type="range" min={1} max={60} value={ts.size}
                   onChange={(e) => toolOps.setSize(parseInt(e.target.value, 10))}
                   className="flex-1 accent-emerald-500" />
-                <span className="text-[11px] text-neutral-400 w-5 text-right tabular-nums">{ts.size}</span>
+                <span className="text-[10px] text-neutral-400 w-5 text-right tabular-nums">{ts.size}</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <label className="text-[11px] text-neutral-500 dark:text-stone-400 w-8">透明</label>
+                <label className="text-[10px] text-neutral-500 dark:text-stone-400 w-7 shrink-0">透明</label>
                 <input type="range" min={0.1} max={1} step={0.05} value={ts.opacity}
                   onChange={(e) => toolOps.setOpacity(parseFloat(e.target.value))}
                   className="flex-1 accent-emerald-500" />
-                <span className="text-[11px] text-neutral-400 w-5 text-right tabular-nums">{Math.round(ts.opacity * 100)}</span>
+                <span className="text-[10px] text-neutral-400 w-5 text-right tabular-nums">{Math.round(ts.opacity * 100)}</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <label className="text-[11px] text-neutral-500 dark:text-stone-400 w-8">硬度</label>
+                <label className="text-[10px] text-neutral-500 dark:text-stone-400 w-7 shrink-0">硬度</label>
                 <input type="range" min={0} max={1} step={0.05} value={ts.hardness}
                   onChange={(e) => toolOps.setHardness(parseFloat(e.target.value))}
                   className="flex-1 accent-emerald-500" />
-                <span className="text-[11px] text-neutral-400 w-5 text-right tabular-nums">{Math.round(ts.hardness * 100)}</span>
+                <span className="text-[10px] text-neutral-400 w-5 text-right tabular-nums">{Math.round(ts.hardness * 100)}</span>
               </div>
             </div>
-            <label className="flex items-center gap-1.5 cursor-pointer text-[11px] text-neutral-500 dark:text-stone-400 mt-1">
+            <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-neutral-500 dark:text-stone-400 mt-1">
               <input type="checkbox" checked={ts.transparent}
                 onChange={(e) => toolOps.setTransparent(e.target.checked)} className="accent-emerald-500" />
               透明背景

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api, type NoteInfo } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { marked } from 'marked';
-import { invoke } from '@tauri-apps/api/core';
+import { resolveLocalImagesInHtml } from '@/lib/localImage';
 
 const AUTO_SAVE_DEBOUNCE_MS = 1000;
 
@@ -209,34 +209,7 @@ function scheduleMarkdownRender(
     );
     const html = await marked.parse(preserved, { gfm: true, breaks: true });
     // 解析 localimg:// 占位引用为 data URL（图片不内联进笔记文本，渲染时再读取，带缓存）
-    const resolved = await resolveLocalImages(html);
+    const resolved = await resolveLocalImagesInHtml(html);
     set({ htmlContent: resolved });
-  });
-}
-
-// localimg://<percent-encoded-path> → data URL 缓存，避免每次渲染重复读盘
-const localImageCache = new Map<string, string>();
-
-async function resolveLocalImages(html: string): Promise<string> {
-  const re = /src="localimg:\/\/([^"]+)"/g;
-  const matches = [...html.matchAll(re)];
-  if (matches.length === 0) return html;
-  const unique = [...new Set(matches.map((m) => m[1]))];
-  await Promise.all(
-    unique.map(async (enc) => {
-      if (localImageCache.has(enc)) return;
-      try {
-        const filePath = decodeURIComponent(enc);
-        const dataUrl = await invoke<string>('read_file_base64', { filePath });
-        localImageCache.set(enc, dataUrl);
-      } catch (err) {
-        console.error('[Notes] 解析本地图片失败:', enc, err);
-        localImageCache.set(enc, ''); // 标记失败，避免反复重试
-      }
-    }),
-  );
-  return html.replace(re, (_full, enc: string) => {
-    const url = localImageCache.get(enc) || '';
-    return url ? `src="${url}"` : 'src=""';
   });
 }

@@ -43,8 +43,9 @@
           document.body.style.background = bg;
         } catch (e) {}
 
-        // 浮窗子窗口（floating-note）无需加载层，仅保持底色即可放行
-        if (/[?&]floating=true\b/.test(location.search)) return;
+        // 浮窗子窗口（floating-note / floating-clipboard / floating-dropzone）无需加载层，
+        // 仅保持底色即可放行，确保「即点即用」与主窗口一致的手感。
+        if (/[?&]floating=(true|clipboard|dropzone)\b/.test(location.search)) return;
 
 
         // ---- 真实进度引擎 ----

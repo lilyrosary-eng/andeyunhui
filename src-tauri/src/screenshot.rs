@@ -20,6 +20,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::io::Cursor;
 use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tauri::Emitter;
@@ -702,9 +703,9 @@ pub async fn start_screenshot(
     let _guard = CaptureGuard::acquire();
     drop(st); // 尽早释放锁，避免后续长操作持锁
 
-    // 先隐藏覆盖窗，避免把覆盖窗自身截入画面；捕获完成后才显示（带冻结图，无「透明→填充」闪烁）。
-    let _ = overlay.hide();
-
+    // 立即显示透明覆盖窗（秒开选区 UI，与录屏选区窗一致），捕获完成后再注入冻结图，
+    // 消除「先冻结全屏捕获、再显示」带来的等待感。透明覆盖窗在 GDI BitBlt 主路径下
+    // 不参与桌面合成像素、不会被截入画面；WGC 兜底路径同样只截到「透明→桌面」，安全。
     let (rx, ry, rw, rh) = virtual_desktop_rect();
 
     // 缓存上次的虚拟桌面矩形：若未变化（显示器配置未改），跳过 set_position/set_size，
@@ -722,11 +723,6 @@ pub async fn start_screenshot(
         *cache.lock().unwrap() = (rx, ry, rw, rh);
     }
 
-    // 直接使用 virtual_desktop_rect 作为捕获区域——不再读 outer_position()/outer_size()。
-    // 原因：set_position 是异步的，Windows 下 outer_position() 可能返回旧值或带 DWM 边框偏移
-    // （如 +7px），导致 BitBlt 从 x=7 开始捕获，丢失左侧像素（用户 Issue: 左边总是有一部分不能截图）。
-    // virtual_desktop_rect() 取自 GetSystemMetrics(SM_XVIRTUALSCREEN)，与 GetDC(NULL) 坐标系完全一致，
-    // 是权威的虚拟桌面原点。覆盖窗以 Physical 坐标设置到此原点，二者必然重合。
     let ox = rx;
     let oy = ry;
     let ow = rw;
@@ -737,67 +733,77 @@ pub async fn start_screenshot(
         Err(_) => return Err("无法获取缩放比".into()),
     };
 
-    // 并行执行屏幕捕获 + 窗口枚举（两者互不依赖，串行 ~80-100ms → 并行 ~50ms）
-    // std::thread::scope 允许子线程借用栈上变量，且在 scope 结束时自动 join，安全无泄漏。
-    let (full_result, windows_result) = std::thread::scope(|s| {
-        let capture_handle = s.spawn(|| capture_full(ox, oy, ow, oh));
-        let windows_handle = s.spawn(|| list_windows().unwrap_or_default());
-        (capture_handle.join().unwrap_or(Err("捕获线程 panic".into())), windows_handle.join().unwrap_or_default())
-    });
+    // 先枚举窗口（轻量、~几 ms），让窗口识别在选区阶段立即可用；重捕获放后台。
+    // 注意：list_windows 必须早于 overlay 显示，否则「透明待加载态」期间 windows 为空，
+    // 导致鼠标悬停无法高亮窗口（只能框选全屏）。
+    let windows_now = list_windows().unwrap_or_default();
 
-    let full = match full_result {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("[截图] 捕获失败: {}", e);
-            return Err(e);
-        }
-    };
-    // 留存「原生物理分辨率 RGBA 字节」：保存/复制时直接在此字节上按选区裁剪，零编码。
-    // 预览不再在 Rust 侧做 CatmullRom 缩放 + JPEG 编码（debug 下最慢的两步），
-    // 改为把原始 RGBA 交给前端，由浏览器 GPU 缩放 + 原生编码显示（性能不受 Tauri dev 放大）。
-    let raw = full.as_raw().to_vec();
-    {
-        let mut slot = SHOT.lock().expect("截图状态锁失败");
-        *slot = Some(Shot {
-            raw,
-            native_w: ow as u32,
-            native_h: oh as u32,
-            native_ox: ox,
-            native_oy: oy,
-        });
-    }
-
-    let windows = windows_result;
-    // 写入跨窗口快照 + 自增 session：这是「兜底恢复」的权威数据源。
-    // 即便下面的 push 事件在打包版 WebView2 里丢失，覆盖层也能通过 peek_screenshot
-    // 轮询到新的 session 并主动拉取，彻底根治「只有透明遮罩、全屏卡死」。
-    let note_id = {
-        let state = app.state::<std::sync::Mutex<ScreenshotData>>();
-        let mut s = state
-            .lock()
-            .map_err(|e| format!("锁失败: {}", e))?;
-        s.last_ox = ox as f64;
-        s.last_oy = oy as f64;
-        s.last_scale = scale;
-        s.last_windows = windows.clone();
-        s.session = s.session.wrapping_add(1);
-        s.note_id.clone()
-    };
-    let payload = json!({
+    // 先推送 meta 并立即可见（前端进入透明待加载态，选区交互 + 窗口识别立即可用）。
+    let init_payload = json!({
         "ox": ox,
         "oy": oy,
         "scale": scale,
-        "windows": windows,
-        "noteId": note_id,
+        "windows": windows_now,
+        "noteId": "",
     });
-    // 捕获完成后再显示覆盖窗（已是冻结图，无需「透明→填充」的二次刷新）
-    let _ = overlay.emit("screenshot-start", payload);
+    let _ = overlay.emit("screenshot-start", &init_payload);
     let _ = overlay.show();
     let _ = overlay.set_focus();
     // 标记覆盖窗正在显示：用于防重入（用户再次按下热键时忽略，直到关闭）。
     if let Ok(mut s) = app.state::<std::sync::Mutex<ScreenshotData>>().lock() {
         s.showing = true;
     }
+
+    // 重捕获放后台线程执行；窗口枚举已完成（windows_now），完成后推送 screenshot-ready 注入冻结图。
+    // 期间选区交互 + 窗口识别已在透明覆盖窗上进行，用户无需等待捕获完成即可框选/识别窗口。
+    let app2 = app.clone();
+    let windows_for_ready = windows_now.clone();
+    std::thread::spawn(move || {
+        let full_result = std::thread::scope(|s| {
+            let capture_handle = s.spawn(|| capture_full(ox, oy, ow, oh));
+            capture_handle.join().unwrap_or(Err("捕获线程 panic".into()))
+        });
+        let full = match full_result {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[截图] 捕获失败: {}", e);
+                return;
+            }
+        };
+        // 留存「原生物理分辨率 RGBA 字节」：保存/复制时直接在此字节上按选区裁剪，零编码。
+        let raw = full.as_raw().to_vec();
+        {
+            let mut slot = SHOT.lock().expect("截图状态锁失败");
+            *slot = Some(Shot {
+                raw,
+                native_w: ow as u32,
+                native_h: oh as u32,
+                native_ox: ox,
+                native_oy: oy,
+            });
+        }
+        // 写入跨窗口快照 + 自增 session：这是「兜底恢复」的权威数据源。
+        let note_id = {
+            let state = app2.state::<std::sync::Mutex<ScreenshotData>>();
+            let mut s = state.lock().map_err(|e| format!("锁失败: {}", e)).unwrap();
+            s.last_ox = ox as f64;
+            s.last_oy = oy as f64;
+            s.last_scale = scale;
+            s.last_windows = windows_for_ready.clone();
+            s.session = s.session.wrapping_add(1);
+            s.note_id.clone()
+        };
+        let payload = json!({
+            "ox": ox,
+            "oy": oy,
+            "scale": scale,
+            "windows": windows_for_ready,
+            "noteId": note_id,
+        });
+        if let Some(w) = app2.get_webview_window("screenshot-overlay") {
+            let _ = w.emit("screenshot-ready", payload);
+        }
+    });
     Ok(())
 }
 
@@ -946,143 +952,212 @@ pub async fn crop_native_rgba(
 /// 数据格式（CF_DIB）：`BITMAPINFOHEADER` + BGRA 像素（bottom-up，正高度）。
 /// 输入 `raw` 为 RGBA top-down，需逐行翻转并转 BGRA。
 ///
-/// 重试机制：`OpenClipboard` 可能因其他应用占用剪贴板而失败，最多重试 5 次（每次间隔 30ms）。
-fn write_clipboard_with_formats(raw: &[u8], w: u32, h: u32, png: &[u8]) -> Result<(), String> {
+/// 剪贴板写入：`CF_DIB`（32bit BGRA bottom-up）+ `PNG` 双格式。
+///
+/// **持久化修复（根治「写入成功却粘贴为空」）**：裸 Win32 `SetClipboardData` 写入的数据，
+/// 所有权绑定到 `OpenClipboard` 时传入的窗口；截图覆盖窗（WebView2）关闭 / 失焦时，
+/// Chromium 的 OLE 剪贴板控制器会清空系统剪贴板，导致「写入返回成功、但用户切到微信粘贴时
+/// 数据已空」。故改用 OLE `IDataObject` + `OleSetClipboard` + `OleFlushClipboard`：
+/// `OleFlushClipboard` 把数据固化进系统剪贴板，与窗口生命周期彻底解耦，关闭 / 失焦后仍可粘贴。
+/// 若 OLE 路径异常，回退到经典 Win32 `SetClipboardData`（至少保证「写入成功」）。
+fn write_clipboard_with_formats(
+    raw: &[u8],
+    w: u32,
+    h: u32,
+    png: &[u8],
+) -> Result<(), String> {
     if w == 0 || h == 0 {
         return Err("无效图像尺寸".into());
     }
+
+    // 复制为 owned 数据交给独立线程：Vec<u8> 满足 Send；HWND 转 usize 规避 !Send。
+    // 用独立 std 线程（非 tokio worker）执行，彻底避开 tokio MTA 线程与进程级 COM 状态冲突。
+    let raw_v = raw.to_vec();
+    let png_v = png.to_vec();
+    let ww = w as usize;
+    let hh = h as usize;
+
+    let handle = std::thread::spawn(move || -> Result<(), String> {
+        let png_format = unsafe {
+            winapi::um::winuser::RegisterClipboardFormatA(b"PNG\0".as_ptr() as *const i8)
+        };
+
+        // 主路径：**单次** OpenClipboard 会话内 EmptyClipboard → SetClipboardData(CF_DIB) +
+        // SetClipboardData("PNG")。关键点：
+        // - NULL 所有者：数据归系统所有，与本进程任意 WebView2 窗口解耦，覆盖窗关闭/失焦后仍可粘贴
+        //   （根治「写入成功却粘贴为空」——旧路径把剪贴板挂到主窗 HWND，Chromium 失焦即清空）。
+        // - 同一会话：EmptyClipboard 使本次调用成为剪贴板所有者，两个 SetClipboardData 才会成功
+        //   （旧实现 arboard 写完即关闭会话，再新开会话 append PNG 时并非所有者 → PNG 静默失败）。
+        // - 仅写 CF_DIB（32bit BGRA，alpha 置 255）：Windows 会从 CF_DIB **自动合成** CF_BITMAP /
+        //   CF_DIBV5 / CF_PALETTE，传统应用（画图/Office）与现代应用（微信/QQ/浏览器，识别 "PNG"）
+        //   均可粘贴；且避开 arboard 写 CF_DIBV5 的预乘 alpha 被部分应用渲染成黑图的问题。
+        let win32_ok = unsafe {
+            match build_dib_and_png(&raw_v, w, h, &png_v) {
+                Ok((h_dib, h_png)) => match write_clipboard_win32_fallback(h_dib, h_png, png_format)
+                {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("[剪贴板写入] Win32 写入失败，转 arboard 兜底: {}", e);
+                        false
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[剪贴板写入] 构建 DIB/PNG 失败，转 arboard 兜底: {}", e);
+                    false
+                }
+            }
+        };
+
+        // 兜底：Win32 路径异常时用 arboard 写入位图（CF_DIB + CF_DIBV5），至少保证有位图可粘贴。
+        if !win32_ok {
+            match arboard::Clipboard::new() {
+                Ok(mut cb) => {
+                    let img = arboard::ImageData {
+                        width: ww,
+                        height: hh,
+                        bytes: std::borrow::Cow::Borrowed(&raw_v),
+                    };
+                    cb.set_image(img)
+                        .map_err(|e| format!("arboard 兜底写入失败: {}", e))?;
+                }
+                Err(e) => return Err(format!("arboard 初始化失败: {}", e)),
+            }
+        }
+
+        // 读回校验：确认剪贴板确有位图或 PNG，杜绝「返回成功却为空」。
+        unsafe {
+            let ok = winapi::um::winuser::IsClipboardFormatAvailable(winapi::um::winuser::CF_DIB)
+                != 0
+                || (png_format != 0
+                    && winapi::um::winuser::IsClipboardFormatAvailable(png_format) != 0);
+            if ok {
+                Ok(())
+            } else {
+                Err("剪贴板读回校验失败（内容为空）".into())
+            }
+        }
+    });
+
+    handle
+        .join()
+        .map_err(|_| "剪贴板写入线程异常".to_string())?
+}
+
+/// 构建 CF_DIB（32bit BGRA bottom-up）与 PNG 两个 HGLOBAL，供单会话 Win32 剪贴板写入。
+unsafe fn build_dib_and_png(
+    raw: &[u8],
+    w: u32,
+    h: u32,
+    png: &[u8],
+) -> Result<
+    (
+        winapi::shared::minwindef::HGLOBAL,
+        winapi::shared::minwindef::HGLOBAL,
+    ),
+    String,
+> {
     let row_bytes = (w as usize) * 4;
     let pixel_bytes = (w as usize) * (h as usize) * 4;
     let header_size = std::mem::size_of::<winapi::um::wingdi::BITMAPINFOHEADER>();
     let dib_total = header_size + pixel_bytes;
 
-    unsafe {
-        // 1) 分配 DIB 全局内存（SetClipboardData 要求 GMEM_MOVEABLE）
-        let h_dib = winapi::um::winbase::GlobalAlloc(
-            winapi::um::winbase::GMEM_MOVEABLE,
-            dib_total,
-        );
-        if h_dib.is_null() {
-            return Err("GlobalAlloc (DIB) 失败".into());
+    let h_dib = winapi::um::winbase::GlobalAlloc(winapi::um::winbase::GMEM_MOVEABLE, dib_total);
+    if h_dib.is_null() {
+        return Err("GlobalAlloc (DIB) 失败".into());
+    }
+    let ptr = winapi::um::winbase::GlobalLock(h_dib);
+    if ptr.is_null() {
+        winapi::um::winbase::GlobalFree(h_dib);
+        return Err("GlobalLock (DIB) 失败".into());
+    }
+    let hdr = ptr as *mut winapi::um::wingdi::BITMAPINFOHEADER;
+    (*hdr).biSize = header_size as u32;
+    (*hdr).biWidth = w as i32;
+    (*hdr).biHeight = h as i32;
+    (*hdr).biPlanes = 1;
+    (*hdr).biBitCount = 32;
+    (*hdr).biCompression = winapi::um::wingdi::BI_RGB;
+    (*hdr).biSizeImage = pixel_bytes as u32;
+    (*hdr).biXPelsPerMeter = 0;
+    (*hdr).biYPelsPerMeter = 0;
+    (*hdr).biClrUsed = 0;
+    (*hdr).biClrImportant = 0;
+    let px = (ptr as *mut u8).add(header_size);
+    let dst = std::slice::from_raw_parts_mut(px, pixel_bytes);
+    for y in 0..(h as usize) {
+        let src_off = y * row_bytes;
+        let dst_off = (h as usize - 1 - y) * row_bytes;
+        let src_row = &raw[src_off..src_off + row_bytes];
+        let dst_row = &mut dst[dst_off..dst_off + row_bytes];
+        for x in 0..(w as usize) {
+            let si = x * 4;
+            dst_row[si] = src_row[si + 2];
+            dst_row[si + 1] = src_row[si + 1];
+            dst_row[si + 2] = src_row[si];
+            dst_row[si + 3] = 255;
         }
-        {
-            let ptr = winapi::um::winbase::GlobalLock(h_dib);
-            if ptr.is_null() {
-                winapi::um::winbase::GlobalFree(h_dib);
-                return Err("GlobalLock (DIB) 失败".into());
-            }
+    }
+    winapi::um::winbase::GlobalUnlock(h_dib);
 
-            // 写 BITMAPINFOHEADER（正高度 = bottom-up DIB）
-            let hdr = ptr as *mut winapi::um::wingdi::BITMAPINFOHEADER;
-            (*hdr).biSize = header_size as u32;
-            (*hdr).biWidth = w as i32;
-            (*hdr).biHeight = h as i32;
-            (*hdr).biPlanes = 1;
-            (*hdr).biBitCount = 32;
-            (*hdr).biCompression = winapi::um::wingdi::BI_RGB;
-            (*hdr).biSizeImage = pixel_bytes as u32;
-            (*hdr).biXPelsPerMeter = 0;
-            (*hdr).biYPelsPerMeter = 0;
-            (*hdr).biClrUsed = 0;
-            (*hdr).biClrImportant = 0;
+    let h_png = winapi::um::winbase::GlobalAlloc(winapi::um::winbase::GMEM_MOVEABLE, png.len());
+    if h_png.is_null() {
+        winapi::um::winbase::GlobalFree(h_dib);
+        return Err("GlobalAlloc (PNG) 失败".into());
+    }
+    let pptr = winapi::um::winbase::GlobalLock(h_png);
+    if pptr.is_null() {
+        winapi::um::winbase::GlobalFree(h_dib);
+        winapi::um::winbase::GlobalFree(h_png);
+        return Err("GlobalLock (PNG) 失败".into());
+    }
+    std::ptr::copy_nonoverlapping(png.as_ptr(), pptr as *mut u8, png.len());
+    winapi::um::winbase::GlobalUnlock(h_png);
 
-            // 写像素：RGBA top-down → BGRA bottom-up（行翻转 + 通道交换）
-            let px = (ptr as *mut u8).add(header_size);
-            let dst = std::slice::from_raw_parts_mut(px, pixel_bytes);
-            for y in 0..(h as usize) {
-                let src_off = y * row_bytes;
-                let dst_off = (h as usize - 1 - y) * row_bytes;
-                let src_row = &raw[src_off..src_off + row_bytes];
-                let dst_row = &mut dst[dst_off..dst_off + row_bytes];
-                for x in 0..(w as usize) {
-                    let si = x * 4;
-                    dst_row[si] = src_row[si + 2];     // B
-                    dst_row[si + 1] = src_row[si + 1]; // G
-                    dst_row[si + 2] = src_row[si];     // R
-                    dst_row[si + 3] = 255;              // A
-                }
-            }
-            winapi::um::winbase::GlobalUnlock(h_dib);
+    Ok((h_dib, h_png))
+}
+
+/// OLE 失败时的经典 Win32 兜底：直接用 `SetClipboardData` 写入（至少保证「写入成功」）。
+/// 调用前 OLE 未接管 `h_dib`/`h_png`，故所有权可安全转移给系统；失败则自行释放。
+unsafe fn write_clipboard_win32_fallback(
+    h_dib: winapi::shared::minwindef::HGLOBAL,
+    h_png: winapi::shared::minwindef::HGLOBAL,
+    png_format: u32,
+) -> Result<(), String> {
+    let mut opened = false;
+    for _attempt in 0..10u32 {
+        // NULL 所有者：数据归系统所有，避免 WebView2 失焦时清空剪贴板。
+        let h = std::ptr::null_mut();
+        if winapi::um::winuser::OpenClipboard(h) != 0 {
+            opened = true;
+            eprintln!("[剪贴板写入] OpenClipboard 成功（兜底, owner=null）");
+            break;
         }
-
-        // 2) 分配 PNG 全局内存（现代应用优先读取 PNG 格式）
-        let h_png = winapi::um::winbase::GlobalAlloc(
-            winapi::um::winbase::GMEM_MOVEABLE,
-            png.len(),
-        );
-        if h_png.is_null() {
-            winapi::um::winbase::GlobalFree(h_dib);
-            return Err("GlobalAlloc (PNG) 失败".into());
-        }
-        {
-            let ptr = winapi::um::winbase::GlobalLock(h_png);
-            if ptr.is_null() {
-                winapi::um::winbase::GlobalFree(h_dib);
-                winapi::um::winbase::GlobalFree(h_png);
-                return Err("GlobalLock (PNG) 失败".into());
-            }
-            std::ptr::copy_nonoverlapping(png.as_ptr(), ptr as *mut u8, png.len());
-            winapi::um::winbase::GlobalUnlock(h_png);
-        }
-
-        // 3) 打开剪贴板（带重试：其他应用/剪贴板轮询可能正占用剪贴板）
-        //    增加 retry 次数到 10 次（500ms 总超时），避免与剪贴板轮询器竞争时失败
-        let mut opened = false;
-        for attempt in 0..10u32 {
-            if winapi::um::winuser::OpenClipboard(std::ptr::null_mut()) != 0 {
-                opened = true;
-                eprintln!("[剪贴板写入] OpenClipboard 成功（第 {} 次尝试）", attempt + 1);
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        if !opened {
-            eprintln!("[剪贴板写入] OpenClipboard 失败（重试 10 次仍被占用）");
-            winapi::um::winbase::GlobalFree(h_dib);
-            winapi::um::winbase::GlobalFree(h_png);
-            return Err("OpenClipboard 失败（重试 10 次仍被占用）".into());
-        }
-
-        // 4) 写入两种格式
-        winapi::um::winuser::EmptyClipboard();
-
-        // CF_DIB：传统 Win32 应用
-        let r_dib = winapi::um::winuser::SetClipboardData(
-            winapi::um::winuser::CF_DIB,
-            h_dib as *mut _,
-        );
-        eprintln!("[剪贴板写入] SetClipboardData(CF_DIB) = {}", if r_dib.is_null() { "失败" } else { "成功" });
-
-        // PNG：现代应用（浏览器、微信、QQ、Electron、Tiptap 等）
-        // RegisterClipboardFormatA 接受 LPCSTR（*const i8），b"PNG\0" 是 *const u8，需显式转换。
-        let png_format = winapi::um::winuser::RegisterClipboardFormatA(
-            b"PNG\0".as_ptr() as *const i8,
-        );
-        let r_png = if png_format != 0 {
-            let r = winapi::um::winuser::SetClipboardData(png_format, h_png as *mut _);
-            eprintln!("[剪贴板写入] SetClipboardData(PNG, format={}) = {}", png_format, if r.is_null() { "失败" } else { "成功" });
-            r
-        } else {
-            eprintln!("[剪贴板写入] RegisterClipboardFormatA(PNG) 失败");
-            std::ptr::null_mut()
-        };
-
-        winapi::um::winuser::CloseClipboard();
-
-        // 5) 释放未成功转移的句柄（SetClipboardData 成功时所有权转移给系统）
-        if r_dib.is_null() {
-            winapi::um::winbase::GlobalFree(h_dib);
-        }
-        if r_png.is_null() {
-            winapi::um::winbase::GlobalFree(h_png);
-        }
-
-        if r_dib.is_null() && r_png.is_null() {
-            return Err("SetClipboardData 失败（DIB 和 PNG 均失败）".into());
-        }
-        eprintln!("[剪贴板写入] 完成: {}x{} 像素, DIB={} PNG={}", w, h,
-            if r_dib.is_null() { "✗" } else { "✓" },
-            if r_png.is_null() { "✗" } else { "✓" });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !opened {
+        winapi::um::winbase::GlobalFree(h_dib);
+        winapi::um::winbase::GlobalFree(h_png);
+        return Err("OpenClipboard 失败（重试 10 次仍被占用）".into());
+    }
+    winapi::um::winuser::EmptyClipboard();
+    let r_dib = winapi::um::winuser::SetClipboardData(winapi::um::winuser::CF_DIB, h_dib as *mut _);
+    eprintln!("[剪贴板写入] SetClipboardData(CF_DIB) = {}", if r_dib.is_null() { "失败" } else { "成功" });
+    let r_png = if png_format != 0 {
+        let r = winapi::um::winuser::SetClipboardData(png_format, h_png as *mut _);
+        eprintln!("[剪贴板写入] SetClipboardData(PNG) = {}", if r.is_null() { "失败" } else { "成功" });
+        r
+    } else {
+        std::ptr::null_mut()
+    };
+    winapi::um::winuser::CloseClipboard();
+    if r_dib.is_null() {
+        winapi::um::winbase::GlobalFree(h_dib);
+    }
+    if r_png.is_null() {
+        winapi::um::winbase::GlobalFree(h_png);
+    }
+    if r_dib.is_null() && r_png.is_null() {
+        return Err("SetClipboardData 失败（DIB 和 PNG 均失败）".into());
     }
     Ok(())
 }
@@ -1110,12 +1185,17 @@ fn write_clipboard_and_dropzone(
     eprintln!("[截图保存] PNG 编码完成: {} 字节", png.len());
 
     // 2) 剪贴板写入（CF_DIB + PNG 双格式，兼容传统应用和现代应用）
-    //    错误传播到前端：如果剪贴板写入失败，前端能看到错误信息（不再静默吞掉）
-    if let Err(e) = write_clipboard_with_formats(&raw, w, h, &png) {
-        eprintln!("[截图保存] ✗ 剪贴板写入失败: {}", e);
-        return Err(format!("剪贴板写入失败: {}", e));
+    //    **关键修复（截图「保存」被拖垮）**：剪贴板写入是「尽力而为」的便利功能，
+    //    绝不能因为某次 OpenClipboard 被占用 / owner 跨线程不被接受就整段 return Err，
+    //    否则 save_cropped/save_screenshot/save_annotated 全部失败 → 用户「截图都截不了」。
+    //    因此这里把写入失败降级为警告：仍继续写中转站、仍返回 localimg:// 引用。
+    match write_clipboard_with_formats(&raw, w, h, &png) {
+        Ok(()) => eprintln!("[截图保存] ✓ 剪贴板写入成功"),
+        Err(e) => eprintln!(
+            "[截图保存] ⚠ 剪贴板写入失败（不影响保存到中转站）: {}",
+            e
+        ),
     }
-    eprintln!("[截图保存] ✓ 剪贴板写入成功");
 
     // 3) 直接写入 dropzone 目录（跳过临时文件 + copy + archive_snapshot）
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -1583,7 +1663,7 @@ pub fn capture_screen() -> Result<Vec<u8>, String> {
 /// 彻底解决 arboard 在 tokio MTA 线程下 `OleInitialize` 静默失败导致
 /// Ctrl+V 粘贴截图无反应的问题。Win32 路径不依赖 COM/OLE，任何线程均可用。
 #[tauri::command]
-pub fn clipboard_write_image(base64_png: String) -> Result<(), String> {
+pub fn clipboard_write_image(_app: tauri::AppHandle, base64_png: String) -> Result<(), String> {
     let b64 = base64_png
         .split(',')
         .nth(1)
@@ -1596,14 +1676,14 @@ pub fn clipboard_write_image(base64_png: String) -> Result<(), String> {
     let rgba = img.into_rgba8();
     let (w, h) = rgba.dimensions();
     let raw = rgba.into_raw();
-    // 复用截图保存路径的 Win32 双格式写入（CF_DIB + PNG）
+    // 复用截图保存路径的 Win32 双格式写入（CF_DIB + PNG），数据归系统所有（NULL 所有者）
     write_clipboard_with_formats(&raw, w, h, &bytes)
 }
 
 /// 从文件路径读取图片并写入系统剪贴板（Win32 API，可靠）
 /// 用于剪贴板历史浮窗：前端只存临时文件路径，复制时从此命令写入
 #[tauri::command]
-pub fn clipboard_write_image_from_path(path: String) -> Result<(), String> {
+pub fn clipboard_write_image_from_path(_app: tauri::AppHandle, path: String) -> Result<(), String> {
     let bytes = std::fs::read(&path)
         .map_err(|e| format!("读取文件失败: {}", e))?;
     let img = image::load_from_memory(&bytes)
@@ -1611,8 +1691,249 @@ pub fn clipboard_write_image_from_path(path: String) -> Result<(), String> {
     let rgba = img.into_rgba8();
     let (w, h) = rgba.dimensions();
     let raw = rgba.into_raw();
+    // 复用截图保存路径的 Win32 双格式写入（CF_DIB + PNG），数据归系统所有（NULL 所有者）
     write_clipboard_with_formats(&raw, w, h, &bytes)
 }
+
+/// 「全面彻底」的剪贴板诊断 / 验证。两种用法：
+///
+/// 1) 算法自测（writeTest=true，默认）：写入一张 400x300 测试图，再跨进程验证，
+///    用于确认「写入算法本身 + 不被本进程清空」。开发者可在 DevTools 调
+///    `invoke('clipboard_diagnose')` 单独跑。
+///
+/// 2) 真实截图验证（writeTest=false，并传 expectW/expectH）：**不写入任何数据**，
+///    只回读当前系统剪贴板里的图片，对比尺寸是否与本次截图一致。这样既能在截完即复制后
+///    确认「真实截图真的存活在系统剪贴板」，又不会把用户的截图覆盖成测试图。
+///
+/// 两个维度：进程内回读（OpenClipboard + GetClipboardData）确认本进程写成功；
+/// 跨进程回读（powershell Get-Clipboard -Format Image，模拟微信 Ctrl+V）确认数据在多窗口
+/// 环境下存活（不被本进程 WebView2 / 焦点变化清空）。
+///
+/// 返回 JSON 报告。关键判断：若「进程内 OK 但跨进程空」→ 写入算法没问题，问题在
+/// 「写入后被本进程 / WebView2 清空」；若跨进程尺寸与 expect 一致 → 真实截图已成功存活。
+/// 跨进程读取剪贴板图片（模拟微信 Ctrl+V）：powershell Get-Clipboard -Format Image
+fn cross_process_image() -> String {
+    match std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-Clipboard -Format Image | ForEach-Object { \"$($_.Width)x$($_.Height)\" })",
+        ])
+        .output()
+    {
+        Ok(o) => {
+            let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if out.is_empty() {
+                if err.is_empty() {
+                    "空（无图片）".to_string()
+                } else {
+                    format!("空（stderr: {}）", err)
+                }
+            } else {
+                format!("OK {}", out)
+            }
+        }
+        Err(e) => format!("无法启动 powershell: {}", e),
+    }
+}
+
+/// 当前剪贴板所有者 HWND + 窗口类 + 标题（NULL 表示归系统所有 / 无所有者）。
+fn clipboard_owner_str() -> String {
+    unsafe {
+        let hwnd = winapi::um::winuser::GetClipboardOwner();
+        if hwnd.is_null() {
+            return "owner=NULL(归系统所有)".into();
+        }
+        let mut buf = [0u16; 256];
+        let n = winapi::um::winuser::GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        let class = if n > 0 {
+            String::from_utf16_lossy(&buf[..n as usize])
+        } else {
+            "?".into()
+        };
+        let mut tbuf = [0u16; 256];
+        let tn = winapi::um::winuser::GetWindowTextW(hwnd, tbuf.as_mut_ptr(), tbuf.len() as i32);
+        let title = if tn > 0 {
+            String::from_utf16_lossy(&tbuf[..tn as usize])
+        } else {
+            "".into()
+        };
+        format!(
+            "owner=0x{:X} class={} title={}",
+            hwnd as usize, class, title
+        )
+    }
+}
+
+#[tauri::command]
+pub fn clipboard_diagnose(
+    _app: tauri::AppHandle,
+    write_test: Option<bool>,
+    expect_w: Option<u32>,
+    expect_h: Option<u32>,
+    series: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    use image::{ImageBuffer, Rgba};
+
+    let do_write = write_test.unwrap_or(true);
+
+    // 生成测试图（仅自测模式写入）
+    let (w, h, raw, png_buf): (u32, u32, Vec<u8>, Vec<u8>) = if do_write {
+        let tw = 400u32;
+        let th = 300u32;
+        let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(tw, th);
+        for y in 0..th {
+            for x in 0..tw {
+                let r = ((x as f32 / tw as f32) * 255.0) as u8;
+                let g = ((y as f32 / th as f32) * 255.0) as u8;
+                img.put_pixel(x, y, Rgba([r, g, 128, 255]));
+            }
+        }
+        let mut pb: Vec<u8> = Vec::new();
+        {
+            let mut cur = Cursor::new(&mut pb);
+            img.write_to(&mut cur, ImageFormat::Png)
+                .map_err(|e| format!("PNG 编码失败: {}", e))?;
+        }
+        let rw = img.into_raw();
+        (tw, th, rw, pb)
+    } else {
+        // 验证模式：不生成测试图（避免覆盖真实截图）
+        (0, 0, Vec::new(), Vec::new())
+    };
+
+    // 1) 自测模式才真正写入（与截图保存完全相同的路径）
+    if do_write {
+        write_clipboard_with_formats(&raw, w, h, &png_buf)?;
+    }
+
+    // 2) 进程内回读
+    let in_proc = unsafe {
+        let mut opened = false;
+        for _ in 0..5u32 {
+            if winapi::um::winuser::OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !opened {
+            "进程内回读：OpenClipboard 失败".to_string()
+        } else {
+            let mut s = String::new();
+            if winapi::um::winuser::IsClipboardFormatAvailable(winapi::um::winuser::CF_DIB) != 0 {
+                let hd = winapi::um::winuser::GetClipboardData(winapi::um::winuser::CF_DIB);
+                if !hd.is_null() {
+                    let p = winapi::um::winbase::GlobalLock(hd);
+                    if !p.is_null() {
+                        let hdr = p as *const winapi::um::wingdi::BITMAPINFOHEADER;
+                        s.push_str(&format!(
+                            "CF_DIB OK {}x{}; ",
+                            (*hdr).biWidth, (*hdr).biHeight
+                        ));
+                        winapi::um::winbase::GlobalUnlock(hd);
+                    } else {
+                        s.push_str("CF_DIB GetData 锁失败; ");
+                    }
+                } else {
+                    s.push_str("CF_DIB 无数据; ");
+                }
+            } else {
+                s.push_str("无 CF_DIB; ");
+            }
+            let pf = winapi::um::winuser::RegisterClipboardFormatA(b"PNG\0".as_ptr() as *const i8);
+            if pf != 0 && winapi::um::winuser::IsClipboardFormatAvailable(pf) != 0 {
+                let hp = winapi::um::winuser::GetClipboardData(pf);
+                if !hp.is_null() {
+                    let p = winapi::um::winbase::GlobalLock(hp);
+                    if !p.is_null() {
+                        s.push_str(&format!("PNG OK {} 字节", winapi::um::winbase::GlobalSize(hp)));
+                        winapi::um::winbase::GlobalUnlock(hp);
+                    } else {
+                        s.push_str("PNG 锁失败");
+                    }
+                } else {
+                    s.push_str("PNG 无数据");
+                }
+            } else {
+                s.push_str("无 PNG");
+            }
+            winapi::um::winuser::CloseClipboard();
+            s
+        }
+    };
+
+    // 3) 跨进程回读（模拟微信 Ctrl+V）+ 当前所有者
+    std::thread::sleep(Duration::from_millis(200));
+    let cross_proc = cross_process_image();
+    let owner_now = clipboard_owner_str();
+
+    // 验证模式 + 时间序列：在 T+0.2/1/3/10s 各回读一次，看数据何时、被谁清空。
+    // （仅在不写测试图的验证模式下做，避免覆盖用户的真实截图）
+    let series_out = if !do_write && series.unwrap_or(false) {
+        let mut arr: Vec<serde_json::Value> = Vec::new();
+        for (label, delay) in [
+            ("T+0.2s", 0u64),
+            ("T+1s", 800u64),
+            ("T+3s", 2800u64),
+            ("T+10s", 9800u64),
+        ] {
+            if delay > 0 {
+                std::thread::sleep(Duration::from_millis(delay));
+            }
+            arr.push(json!({
+                "t": label,
+                "crossProcess": cross_process_image(),
+                "owner": clipboard_owner_str(),
+            }));
+        }
+        Some(arr)
+    } else {
+        None
+    };
+
+    // 验证模式：比对跨进程读回的尺寸与本次截图是否一致
+    let matches = if !do_write {
+        if let (Some(ew), Some(eh)) = (expect_w, expect_h) {
+            let expected = format!("{}x{}", ew, eh);
+            Some(cross_proc.contains(&expected))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let verdict = if do_write {
+        if cross_proc.contains("OK") {
+            "算法正确且跨进程存活：写入本身没问题，若真实粘贴仍为空，请检查粘贴目标（微信需先点一下窗口）或粘贴时机"
+        } else {
+            "跨进程为空：写入后数据被本进程/WebView2 清空 —— 需改用主窗 JS Clipboard API 写入"
+        }
+    } else if let Some(m) = matches {
+        if m {
+            "✓ 真实截图已成功存活在系统剪贴板（跨进程尺寸一致），可直接 Ctrl+V 粘贴"
+        } else if cross_proc.contains("OK") {
+            "跨进程有图但尺寸与本次截图不一致（可能被其它来源覆盖），请检查写入时机"
+        } else {
+            "✗ 跨进程为空：真实截图写入后被清空 —— 看 series 各时间点 owner 变化判断是谁清空"
+        }
+    } else {
+        "验证模式：未提供期望尺寸，仅回读"
+    };
+
+    Ok(json!({
+        "written": do_write,
+        "inProcess": in_proc,
+        "crossProcess": cross_proc,
+        "ownerNow": owner_now,
+        "series": series_out,
+        "matches": matches,
+        "verdict": verdict,
+    }))
+}
+
 
 // ============ 剪贴板图片高效轮询（Win32 API，不依赖 OLE，任何线程可用）============
 //
@@ -1976,6 +2297,156 @@ pub fn set_screenshot_shortcut(app: tauri::AppHandle, shortcut: String) -> Resul
     write_screenshot_shortcut(&app, &shortcut)?;
     if let Ok(mut s) = app.state::<std::sync::Mutex<ScreenshotData>>().lock() {
         s.shortcut = shortcut;
+    }
+    Ok(())
+}
+
+// ============ 剪贴板浮窗热键（设置面板可改写并持久化）============
+pub const DEFAULT_CLIPBOARD_SHORTCUT: &str = "Ctrl+Alt+C";
+
+pub static CLIPBOARD_SHORTCUT_STR: OnceLock<Mutex<String>> = OnceLock::new();
+pub fn clipboard_shortcut_state() -> &'static Mutex<String> {
+    CLIPBOARD_SHORTCUT_STR.get_or_init(|| Mutex::new(DEFAULT_CLIPBOARD_SHORTCUT.to_string()))
+}
+
+fn clipboard_shortcut_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("clipboard_shortcut.json"))
+}
+
+pub fn read_clipboard_shortcut(app: &tauri::AppHandle) -> String {
+    if let Some(p) = clipboard_shortcut_path(app) {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(s2) = v.get("shortcut").and_then(|x| x.as_str()) {
+                    if !s2.is_empty() {
+                        return s2.to_string();
+                    }
+                }
+            }
+        }
+    }
+    DEFAULT_CLIPBOARD_SHORTCUT.to_string()
+}
+
+fn write_clipboard_shortcut(app: &tauri::AppHandle, sc: &str) -> Result<(), String> {
+    let p = clipboard_shortcut_path(app).ok_or_else(|| "无法获取 app_data 目录".to_string())?;
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&p, serde_json::json!({ "shortcut": sc }).to_string())
+        .map_err(|e| e.to_string())
+}
+
+pub fn register_clipboard_shortcut(app: &tauri::AppHandle, sc: &str) -> Result<(), String> {
+    let shortcut = parse_shortcut(sc)?;
+    app.global_shortcut()
+        .register(shortcut)
+        .map_err(|e| format!("注册剪贴板热键失败: {}", e))
+}
+
+#[tauri::command]
+pub fn get_clipboard_shortcut(app: tauri::AppHandle) -> String {
+    let sc = read_clipboard_shortcut(&app);
+    if let Ok(mut state) = clipboard_shortcut_state().lock() {
+        *state = sc.clone();
+    }
+    sc
+}
+
+#[tauri::command]
+pub fn set_clipboard_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
+    let new = parse_shortcut(&shortcut)?;
+    let old = clipboard_shortcut_state()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| DEFAULT_CLIPBOARD_SHORTCUT.to_string());
+    if let Ok(old_sc) = parse_shortcut(&old) {
+        let _ = app.global_shortcut().unregister(old_sc);
+    }
+    app.global_shortcut().register(new).map_err(|e| {
+        if let Ok(old_sc) = parse_shortcut(&old) {
+            let _ = app.global_shortcut().register(old_sc);
+        }
+        format!("注册失败（已回退原热键）: {}", e)
+    })?;
+    write_clipboard_shortcut(&app, &shortcut)?;
+    if let Ok(mut state) = clipboard_shortcut_state().lock() {
+        *state = shortcut;
+    }
+    Ok(())
+}
+
+// ============ 中转站浮窗热键（设置面板可改写并持久化）============
+pub const DEFAULT_DROPZONE_SHORTCUT: &str = "Ctrl+Alt+V";
+
+pub static DROPZONE_SHORTCUT_STR: OnceLock<Mutex<String>> = OnceLock::new();
+pub fn dropzone_shortcut_state() -> &'static Mutex<String> {
+    DROPZONE_SHORTCUT_STR.get_or_init(|| Mutex::new(DEFAULT_DROPZONE_SHORTCUT.to_string()))
+}
+
+fn dropzone_shortcut_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("dropzone_shortcut.json"))
+}
+
+pub fn read_dropzone_shortcut(app: &tauri::AppHandle) -> String {
+    if let Some(p) = dropzone_shortcut_path(app) {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(s2) = v.get("shortcut").and_then(|x| x.as_str()) {
+                    if !s2.is_empty() {
+                        return s2.to_string();
+                    }
+                }
+            }
+        }
+    }
+    DEFAULT_DROPZONE_SHORTCUT.to_string()
+}
+
+fn write_dropzone_shortcut(app: &tauri::AppHandle, sc: &str) -> Result<(), String> {
+    let p = dropzone_shortcut_path(app).ok_or_else(|| "无法获取 app_data 目录".to_string())?;
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&p, serde_json::json!({ "shortcut": sc }).to_string())
+        .map_err(|e| e.to_string())
+}
+
+pub fn register_dropzone_shortcut(app: &tauri::AppHandle, sc: &str) -> Result<(), String> {
+    let shortcut = parse_shortcut(sc)?;
+    app.global_shortcut()
+        .register(shortcut)
+        .map_err(|e| format!("注册中转站热键失败: {}", e))
+}
+
+#[tauri::command]
+pub fn get_dropzone_shortcut(app: tauri::AppHandle) -> String {
+    let sc = read_dropzone_shortcut(&app);
+    if let Ok(mut state) = dropzone_shortcut_state().lock() {
+        *state = sc.clone();
+    }
+    sc
+}
+
+#[tauri::command]
+pub fn set_dropzone_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
+    let new = parse_shortcut(&shortcut)?;
+    let old = dropzone_shortcut_state()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| DEFAULT_DROPZONE_SHORTCUT.to_string());
+    if let Ok(old_sc) = parse_shortcut(&old) {
+        let _ = app.global_shortcut().unregister(old_sc);
+    }
+    app.global_shortcut().register(new).map_err(|e| {
+        if let Ok(old_sc) = parse_shortcut(&old) {
+            let _ = app.global_shortcut().register(old_sc);
+        }
+        format!("注册失败（已回退原热键）: {}", e)
+    })?;
+    write_dropzone_shortcut(&app, &shortcut)?;
+    if let Ok(mut state) = dropzone_shortcut_state().lock() {
+        *state = shortcut;
     }
     Ok(())
 }

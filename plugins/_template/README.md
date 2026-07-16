@@ -93,3 +93,67 @@ pnpm exec vite build      # 产物在 dist/index.js
 - 不要用 `fetch` 直接联网——走 Rust 命令。
 - 不要把重库打进插件包——放 external-deps。
 - 不要硬编码绝对路径——用 `invoke` 拿到的路径或 `convertFileSrc`。
+
+## 9. 打包为 .mufurong 专属格式（分发）
+
+插件开发完成后，可打包为 `.mufurong` 专属格式分发。`.mufurong` 本质是 ZIP 改后缀，用户放到 `user_plugins/` 目录即可自动解压。
+
+### 打包方式
+
+```bash
+# 方式 1：用项目提供的打包脚本（自动扫描 bundled-plugins/ 下所有插件）
+node scripts/pack-mufurong.mjs
+
+# 方式 2：手动打包单个插件（PowerShell）
+# 先构建插件产物（dist/index.js + manifest.json），然后：
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory(
+  "bundled-plugins/my-plugin",           # 源目录（含 manifest.json + dist/）
+  "my-plugin.mufurong",                  # 输出文件（.mufurong 后缀）
+  [System.IO.Compression.CompressionLevel]::Optimal,
+  $false
+)
+```
+
+### .mufurong 内部结构
+
+```
+my-plugin.mufurong (ZIP)
+├── manifest.json    （插件清单，必须含 version 字段）
+├── dist/
+│   └── index.js     （Vite 构建产物）
+└── [其他资源文件]    （如有）
+```
+
+### 用户安装方式
+
+1. 把 `.mufurong` 文件放到应用数据目录的 `user_plugins/` 文件夹
+   - Windows: `%APPDATA%\com.rosary.andengyuanhua\user_plugins\`
+2. 应用启动时自动扫描并解压到同名目录
+3. 版本匹配时跳过解压（速度极快），版本更新时自动重新解压
+
+### 大型模块（母文件夹）
+
+茑萝（niaoluo）、全局、阅读 等大型模块保留母文件夹结构：
+
+```
+user_plugins/
+├── niaoluo/                    # 母文件夹（手动创建）
+│   ├── ai.mufurong             # 子插件
+│   ├── gongjuxiang.mufurong
+│   └── ...
+├── 全局/
+│   ├── markitdown.mufurong
+│   └── ...
+└── image.mufurong              # 顶级插件直接放 user_plugins/ 根目录
+```
+
+### 制作模板（供其他人复用）
+
+1. 复制 `plugins/_template/` 目录
+2. 修改 `manifest.json`（id、name、version、iconName）
+3. 编写 `src/index.tsx`
+4. 运行 `pnpm exec vite build`（在插件目录下）
+5. 把 `manifest.json` + `dist/` 打包成 `.mufurong`
+6. 分发给用户，用户放到 `user_plugins/` 即可
+

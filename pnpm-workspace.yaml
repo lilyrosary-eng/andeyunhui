@@ -1,3 +1,10 @@
-allowBuilds:
-  esbuild: false
+# pnpm 10+ 配置：构建脚本白名单与生命周期控制
+# onlyBuiltDependencies: 允许运行 install 期间构建脚本的依赖列表
+#   - esbuild: 需下载平台原生二进制
+#   - protobufjs: 需运行 postinstall 生成动态代码（Univer 间接依赖）
+onlyBuiltDependencies:
+  - esbuild
+  - protobufjs
 enablePrePostScripts: true
+allowBuilds:
+  protobufjs: set this to true or false

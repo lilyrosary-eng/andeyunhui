@@ -1,10 +1,14 @@
 import React from "react"
 import ReactDOM from "react-dom/client"
 import { initFileLogger } from "./lib/file-logger"
+import { installLocalImageSanitizer } from "./lib/localImage"
 import "./index.css"
 
 // 尽早初始化前端全局错误捕获：把 window.onerror / unhandledrejection / console.error 写入会话日志文件
 initFileLogger();
+// 全局兜底：拦截任何把 localimg:// 直接写进 <img>/<source> 的渲染路径，避免浏览器报
+// net::ERR_UNKNOWN_URL_SCHEME（兜底上层 NodeView / markdown 预览的解析遗漏）
+installLocalImageSanitizer();
 
 // 启动进度上报（由 index.html 预加载脚本提供的真实进度引擎消费）
 const boot = (window as unknown as {
@@ -18,7 +22,7 @@ boot.__bootProgress?.(10, { text: "初始化内核", phase: "PHASE 01 / 05" });
 // 窗口分流：检测当前窗口标签，分别走轻量组件，避免主 App 初始化开销
 // 关键：使用动态 import，子窗口（浮窗/歌词）不会加载主 App 的 JS bundle
 async function bootstrap() {
-  let windowKind: "lyrics" | "floating-note" | "floating-clipboard" | "main" = "main";
+  let windowKind: "lyrics" | "floating-note" | "floating-clipboard" | "floating-dropzone" | "main" = "main";
   try {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const label = getCurrentWindow().label;
@@ -30,6 +34,8 @@ async function bootstrap() {
       windowKind = "floating-note";
     } else if (floating === "clipboard") {
       windowKind = "floating-clipboard";
+    } else if (floating === "dropzone") {
+      windowKind = "floating-dropzone";
     }
   } catch {
     // 非 Tauri 环境（浏览器开发），检查 URL 参数
@@ -38,6 +44,7 @@ async function bootstrap() {
       const floating = params.get("floating");
       if (floating === "true") windowKind = "floating-note";
       else if (floating === "clipboard") windowKind = "floating-clipboard";
+      else if (floating === "dropzone") windowKind = "floating-dropzone";
     }
   }
 
@@ -94,6 +101,16 @@ async function bootstrap() {
     ReactDOM.createRoot(root).render(
       <React.StrictMode>
         <FloatingClipboardView />
+      </React.StrictMode>,
+    );
+  } else if (windowKind === "floating-dropzone") {
+    // 中转站浮窗：透明背景，独立渲染，不初始化主 App
+    document.documentElement.style.background = 'transparent';
+    document.body.style.background = 'transparent';
+    const { FloatingDropzoneView } = await import('./components/FloatingDropzoneView');
+    ReactDOM.createRoot(root).render(
+      <React.StrictMode>
+        <FloatingDropzoneView />
       </React.StrictMode>,
     );
   } else {

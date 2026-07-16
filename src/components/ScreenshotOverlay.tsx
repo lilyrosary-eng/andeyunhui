@@ -13,8 +13,8 @@ interface Win {
 }
 
 interface ScreenshotOverlayProps {
-  /** 预览图（降采样 JPEG，分辨率 == 窗口 CSS 像素，故「图像像素 ≡ CSS 像素」） */
-  image: string;
+  /** 预览图（降采样 JPEG，分辨率 == 窗口 CSS 像素，故「图像像素 ≡ CSS 像素」）；空串表示冻结图尚未注入（透明待加载态） */
+  image?: string;
   /** 覆盖窗真实原点（物理像素），用于把 CSS 坐标换算回物理/原生坐标 */
   ox: number;
   oy: number;
@@ -47,6 +47,41 @@ const canvasToPng = (c: HTMLCanvasElement): Promise<Uint8Array> =>
     );
   });
 
+/**
+ * 截完即复制：把选区图写入系统剪贴板。
+ *
+ * 优先用 WebView2 的 JS Clipboard API（navigator.clipboard.write + ClipboardItem）。
+ * 原因：Chromium 会正确设置自身剪贴板状态，粘到微信/QQ/浏览器等场景最兼容，
+ * 且不受本进程其它 WebView2 窗口（录屏浮窗等）焦点变化清空的影响。
+ * 若 JS 不可用（非安全上下文 / 权限被拒 / 旧环境），回退 Rust Win32 双格式写入。
+ *
+ * 注意：本函数内部自行处理 async，调用处无需 await（截完即复制是「尽力而为」的旁路）。
+ */
+async function copyScreenshotToClipboard(
+  dataUrl: string,
+  onResult?: (msg: string) => void,
+): Promise<void> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard && "write" in navigator.clipboard) {
+      const res = await fetch(dataUrl);
+      const blob = await res.blob();
+      if (typeof ClipboardItem === "undefined") throw new Error("ClipboardItem 不可用");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      onResult?.("✓ 已复制到剪贴板，去任意应用 Ctrl+V");
+      return;
+    }
+    throw new Error("navigator.clipboard.write 不可用");
+  } catch {
+    // 回退 Rust Win32 写入
+    try {
+      await invoke("clipboard_write_image", { base64Png: dataUrl });
+      onResult?.("✓ 已用系统接口复制到剪贴板（Ctrl+V）");
+    } catch {
+      onResult?.("⚠ 复制到剪贴板失败，已存入中转站，可从中转站取用");
+    }
+  }
+}
+
 export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClose }: ScreenshotOverlayProps) {
   const [ready, setReady] = useState(false);
   const [mode, setMode] = useState<"select" | "edit">("select");
@@ -70,6 +105,8 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   // 标注脏标记：进入编辑态后是否真正画过标注（用于决定走「原生裁剪快路径」还是「画布合成路径」）
   const dirtyRef = useRef(false);
   const [selRect, setSelRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  // 截图复制到剪贴板的结果提示（可见反馈，替代仅输出到 DevTools 的日志）
+  const [copyTip, setCopyTip] = useState<string | null>(null);
   const [mag, setMag] = useState<{ x: number; y: number; show: boolean }>({ x: 0, y: 0, show: false });
 
   // 编辑态
@@ -94,6 +131,12 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
 
   // 载入整屏预览图，并构建放大镜源画布
   useEffect(() => {
+    // 截图会话已建立但冻结图尚未注入（image 为空）：立即渲染透明选区 UI，
+    // 让框选交互秒开（与录屏选区窗一致），无需等待冻结图加载完成。
+    if (!image) {
+      setReady(true);
+      return;
+    }
     const img = new Image();
     img.onload = () => {
       fullImgRef.current = img;
@@ -224,6 +267,24 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       setIsLong(false);
       dirtyRef.current = false;
       setMode("edit");
+      // 微信/QQ 式「截完即复制」：确认选区的瞬间就把选区图写入系统剪贴板，
+      // 用户无需点「保存」即可直接 Ctrl+V 粘贴（CF_DIB + PNG 双格式，兼容传统与现代应用）。
+      // 优先用 WebView2 的 JS Clipboard API 写入（Chromium 自身 clipboard 状态被正确设置，
+      // 最兼容「粘到微信/QQ/浏览器」等场景，且不受本进程其它 WebView2 窗口焦点变化影响）；
+      // 若 JS 不可用则回退 Rust Win32 双格式写入。
+      try {
+        const cc = baseRef.current;
+        if (cc && cc.width > 0 && cc.height > 0) {
+          const dataUrl = cc.toDataURL("image/png");
+          copyScreenshotToClipboard(dataUrl, setCopyTip);
+          // 复制结果提示自动消失（不再阻塞后端命令线程）
+          window.setTimeout(() => setCopyTip(null), 2600);
+        } else {
+          console.warn("[截图] 自动复制跳过：底图为空，未写入剪贴板");
+        }
+      } catch (e) {
+        console.error("[截图] 自动复制异常:", e);
+      }
       // 异步拉取原生分辨率底图（保存标注时使用）；不阻塞 UI。
       fetchBaseNative();
       force((n) => n + 1);
@@ -694,8 +755,10 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
           onClose();
         }}
       >
-        {/* 整屏预览（object-fill 铺满，分辨率==CSS 像素 → 1:1，无缩放无偏移） */}
-        <img src={image} alt="" className="absolute inset-0 w-full h-full object-fill pointer-events-none" draggable={false} />
+        {/* 整屏预览（object-fill 铺满，分辨率==CSS 像素 → 1:1，无缩放无偏移）；冻结图未注入前不渲染，保留透明底 */}
+        {image && (
+          <img src={image} alt="" className="absolute inset-0 w-full h-full object-fill pointer-events-none" draggable={false} />
+        )}
 
         {/* 窗口绿色轮廓（悬停高亮当前窗口） */}
         {(() => {
@@ -874,6 +937,11 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
         className="fixed inset-0 z-[9999] select-none"
         onContextMenu={(e) => { e.preventDefault(); onClose(); }}
       >
+        {copyTip && (
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[10001] px-3 py-1.5 rounded-md bg-black/80 text-white text-sm shadow-lg pointer-events-none">
+            {copyTip}
+          </div>
+        )}
         {/* 整屏底图（暗化） */}
         <img src={image} alt="" className="absolute inset-0 w-full h-full object-fill pointer-events-none opacity-100" draggable={false} />
         <div className="absolute inset-0 bg-black/45 pointer-events-none" />

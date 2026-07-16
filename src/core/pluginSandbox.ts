@@ -11,15 +11,24 @@
  */
 
 import React from 'react';
-// 完整 react-dom（含 flushSync），作为 __HOST_REACT_DOM__ 提供给插件沙箱；
-// 插件（如 tiptap）外部化的 'react-dom' 需要 flushSync。
-import ReactDOM from 'react-dom';
+// 完整 react-dom（含 flushSync）+ react-dom/client（createRoot / hydrateRoot）
+// 作为 __HOST_REACT_DOM__ 提供给插件沙箱：
+//   - TipTap 等老库外部化 'react-dom'，需要 flushSync / render
+//   - Univer 等 React 18 库外部化 'react-dom/client'，需要 createRoot
+// 两者合并到同一全局变量，兼容新旧 React 渲染 API
+import * as ReactDOMNS from 'react-dom';
+import * as ReactDOMClient from 'react-dom/client';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { PluginRegistry, type PluginDef } from '@/core/pluginRegistry';
 import { logger } from '@/lib/logger';
 import { createFrameBuffer } from '@/lib/frameBuffer';
+
+// 合并 react-dom（legacy: render / flushSync）+ react-dom/client（React 18: createRoot / hydrateRoot）
+// esbuild 的 hostExternals 将 'react-dom' 和 'react-dom/client' 都映射到 __HOST_REACT_DOM__，
+// 故此对象需同时承载两套 API
+const ReactDOM = { ...ReactDOMNS, ...ReactDOMClient } as unknown as typeof ReactDOMNS;
 
 // ========== 插件可调用的 Tauri 命令白名单 ==========
 // 内置插件（图片、音乐等）需要的所有命令
