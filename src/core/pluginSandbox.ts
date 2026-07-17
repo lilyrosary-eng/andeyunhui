@@ -68,6 +68,10 @@ const ALLOWED_COMMANDS = new Set([
   'cancel_open_book',
   // 通用
   'check_file_exists',
+  // 办公（wps）插件：文档导入（docx→markdown）、演示导入（pptx→json）
+  'convert_to_markdown',
+  'wps_import_pptx',
+  'wps_import_pptx_diagnose',
   // 黑名单管理
   'get_blacklist_paths',
   'add_to_blacklist',
@@ -86,6 +90,8 @@ const ALLOWED_COMMANDS = new Set([
   'convert_document',
   'check_ffmpeg',
   'transcode_media',
+  // 薄荷音频转换：音频 → MIDI 转写（basic-pitch，MIT）
+  'audio_to_midi',
   // 通用：插件按需读取自身入口脚本与文件
   'read_plugin_file',
   // IDE 子插件：按需加载 CodeMirror 等外部依赖
@@ -100,6 +106,8 @@ const ALLOWED_COMMANDS = new Set([
   'ensure_directory',
   // IDE 子插件：保存 / 另存为（Rust 端已实现并注册，此前漏加白名单导致被沙箱拦截）
   'write_text_file',
+  // 通用：插件导出二进制文件（XLSX / 图片等），base64 解码后原子写盘
+  'write_file_bytes',
   'pick_save_file',
   // 图片模块：读取文件为 data URI（GIF 绕过 asset: 协议动画限制）
   'read_file_base64',

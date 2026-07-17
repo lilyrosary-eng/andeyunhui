@@ -68,6 +68,13 @@ bar.appendChild(timer);
 bar.appendChild(sep);
 bar.appendChild(pauseBtn);
 bar.appendChild(stopBtn);
+
+// 诊断按钮：运行录屏自测（真正捕获几秒 + 捕获 ffmpeg stderr），结果在结果面板展示，可复制发给开发者。
+const diagBtn = document.createElement("button");
+diagBtn.textContent = "诊断";
+diagBtn.title = "运行录屏自测并查看报告";
+diagBtn.style.cssText = btnStyle() + " width:auto; padding:0 8px; font-size:11px;";
+bar.appendChild(diagBtn);
 root.appendChild(bar);
 
 // ========== 录屏结果面板（停止后显示：保存 MP4 / 保存 GIF / 取消）==========
@@ -171,6 +178,10 @@ function backToRecording() {
   resultPanel.style.display = "none";
   bar.style.display = "flex";
   resultPath = "";
+  // 复位结果面板按钮（异常态可能隐藏了保存按钮）
+  saveMp4Btn.style.display = "";
+  saveGifBtn.style.display = "";
+  cancelBtn.textContent = "取消";
   void setWidgetSize(320, 52);
 }
 
@@ -181,7 +192,28 @@ function showResult(outputPath: string) {
   bar.style.display = "none";
   resultPanel.style.display = "flex";
   resultStatus.textContent = "选择保存格式，或取消丢弃";
+  saveMp4Btn.style.display = "";
+  saveGifBtn.style.display = "";
+  cancelBtn.textContent = "取消";
+  // 录屏结束后控制台可能已被自动隐藏，弹面板时强制唤出并聚焦，确保用户一定看到保存选项
+  void getCurrentWindow().show();
+  void getCurrentWindow().setFocus();
   void setWidgetSize(320, 150);
+}
+
+// 进入「错误面板」视图：录制失败/无产出时，给出明确提示并仅保留「关闭」
+function showErrorPanel(msg: string) {
+  resultPath = "";
+  clearAutoHide();
+  bar.style.display = "none";
+  resultPanel.style.display = "flex";
+  resultStatus.textContent = msg;
+  saveMp4Btn.style.display = "none";
+  saveGifBtn.style.display = "none";
+  cancelBtn.textContent = "关闭";
+  void getCurrentWindow().show();
+  void getCurrentWindow().setFocus();
+  void setWidgetSize(320, 120);
 }
 
 async function refreshStatus() {
@@ -223,20 +255,22 @@ async function refreshStatus() {
   }
 }
 
-// 停止录制 → 展示结果面板（不再自动存入中转站，交由用户选择 MP4 / GIF / 取消）
+// 停止录制 → Rust 现已「即时返回」（停止信号一发即返回，ffmpeg 后台封装）。
+// 最终结果面板由 recording-saving（占位「保存中」）与 recording-stopped（完成）事件驱动，
+// 这里不再直接弹面板，避免文件尚未封装好就显示保存按钮。
 async function stopRecording() {
   try {
     const outputPath = await invoke<string>("stop_recording");
-    if (outputPath) {
-      showResult(outputPath);
-      return;
+    if (!outputPath) {
+      // 无输出（如未真正开始录制）→ 直接收起
+      backToRecording();
+      await getCurrentWindow().hide();
     }
   } catch (e) {
     console.error("[录屏] 停止失败:", e);
+    backToRecording();
+    await getCurrentWindow().hide();
   }
-  // 无输出（如未真正开始录制）→ 直接收起
-  backToRecording();
-  await getCurrentWindow().hide();
 }
 
 // 保存为 MP4：存入中转站后隐藏
@@ -247,12 +281,29 @@ async function saveAsMp4() {
     return;
   }
   try {
-    await invoke("import_to_dropzone", { sourcePath: resultPath });
+    // 保存期间禁用按钮，避免重复点击；Rust 会立即在中转站显示「保存中」占位
+    saveMp4Btn.style.display = "none";
+    saveGifBtn.style.display = "none";
+    cancelBtn.style.display = "none";
+    resultStatus.textContent = "已存入中转站（保存中…）";
+    await invoke("import_to_dropzone", {
+      sourcePath: resultPath,
+      placeholderLabel: "录屏文件保存中",
+    });
+    resultStatus.textContent = "已存入中转站";
+    setTimeout(() => {
+      backToRecording();
+      void getCurrentWindow().hide();
+    }, 1000);
+    return;
   } catch (e) {
-    console.error("[录屏] 存入中转站失败:", e);
+    const msg = e instanceof Error ? e.message : String(e);
+    resultStatus.textContent = "存入中转站失败：" + msg;
+    saveMp4Btn.style.display = "";
+    saveGifBtn.style.display = "";
+    cancelBtn.style.display = "";
+    return; // 保留面板，让用户看到错误
   }
-  backToRecording();
-  await getCurrentWindow().hide();
 }
 
 // 保存为 GIF：ffmpeg 转换后存入中转站（原 MP4 临时文件清理）
@@ -265,14 +316,20 @@ async function saveAsGif() {
   resultStatus.textContent = "GIF 转换中…";
   try {
     const gifPath: string = await invoke("convert_recording_to_gif", { mp4Path: resultPath });
-    await invoke("import_to_dropzone", { sourcePath: gifPath }).catch(() => {});
+    await invoke("import_to_dropzone", {
+      sourcePath: gifPath,
+      placeholderLabel: "录屏文件保存中",
+    }).catch(() => {});
     // 转换成功，清理原始 MP4 临时文件
     await invoke("delete_recording_file", { path: resultPath }).catch(() => {});
-    backToRecording();
-    await getCurrentWindow().hide();
+    resultStatus.textContent = "已存入中转站";
+    setTimeout(() => {
+      backToRecording();
+      void getCurrentWindow().hide();
+    }, 1200);
   } catch (e) {
-    console.error("[录屏] GIF 转换失败:", e);
-    resultStatus.textContent = "GIF 转换失败，可改用 MP4";
+    const msg = e instanceof Error ? e.message : String(e);
+    resultStatus.textContent = "GIF 转换失败：" + msg;
     setTimeout(() => {
       if (resultPanel.style.display === "flex") resultStatus.textContent = "选择保存格式，或取消丢弃";
     }, 2500);
@@ -358,6 +415,44 @@ saveGifBtn.addEventListener("click", (e) => {
   void saveAsGif();
 });
 
+// 运行录屏自测：真正捕获几秒，统计交付帧数并抓取 ffmpeg stderr，结果展示在结果面板供复制。
+async function runSelfTest() {
+  try {
+    resultTitle.textContent = "录屏自测中…";
+    resultStatus.textContent = "正在捕获 3 秒，请稍候…";
+    resultStatus.style.whiteSpace = "pre-wrap";
+    resultStatus.style.fontSize = "10px";
+    saveMp4Btn.style.display = "none";
+    saveGifBtn.style.display = "none";
+    cancelBtn.textContent = "关闭";
+    bar.style.display = "none";
+    resultPanel.style.display = "flex";
+    void getCurrentWindow().show();
+    void getCurrentWindow().setFocus();
+    void setWidgetSize(320, 168);
+    const r = await invoke<any>("recording_self_test", { durationSecs: 3 });
+    const kb = (r.outputBytes || 0) / 1024;
+    const summary =
+      `ffmpeg: ${r.ffmpegPath}\n` +
+      `编码器: ${r.encoder ?? "libx264(软编码)"}\n` +
+      `捕获尺寸: ${r.captureW}x${r.captureH}\n` +
+      `交付帧数: ${r.framesCaptured}\n` +
+      `输出体积: ${kb | 0} KB\n` +
+      `ffmpeg 退出正常: ${r.ffmpegExitedOk}\n` +
+      `\n--- ffmpeg stderr 尾部 ---\n${r.ffmpegStderrTail || "(无)"}`;
+    resultTitle.textContent = r.ok ? "自测通过 ✅" : "自测失败 ❌";
+    resultStatus.textContent = summary;
+  } catch (e) {
+    resultTitle.textContent = "自测调用失败";
+    resultStatus.textContent = String(e);
+  }
+  clearAutoHide();
+}
+diagBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  void runSelfTest();
+});
+
 cancelBtn.addEventListener("click", (e) => {
   e.stopPropagation();
   void cancelRecording();
@@ -410,6 +505,48 @@ listen<string>("recording-started", async () => {
   backToRecording();
   await refreshStatus(); // 必须先拿到 isRecording=true，否则 scheduleAutoHide 会直接 return
   scheduleAutoHide(3000); // 录制开始后短暂显示，随后自动隐藏
+});
+
+// 录制真正停止后（Rust 在 stop_recording 末尾 emit），直接弹出结果面板。
+// 这是最可靠的触发：无论用户是用控制台「停止」按钮、还是再次按热键停止，
+// 只要录制结束就会带 output_path 触发。失败分支会 emit 空路径 → 弹错误面板。
+listen<string>("recording-stopped", async (e) => {
+  const p = e.payload;
+  if (p) {
+    // 校验文件确实存在，避免 ffmpeg 静默产出 0 字节时仍显示保存选项
+    try {
+      const ok = await invoke<boolean>("check_file_exists", { path: p });
+      if (ok) {
+        showResult(p);
+        return;
+      }
+    } catch {
+      /* 校验失败则仍尝试展示保存面板 */
+    }
+    showResult(p);
+  } else {
+    showErrorPanel("录制已停止，但未生成录屏文件（ffmpeg 编码失败）。请确认 external-deps/全局/ffmpeg 可用。");
+  }
+});
+
+// 停止已生效、ffmpeg 正在后台封装文件：立即显示「录屏文件保存中」占位面板，
+// 绝不静默等待（巨大录屏封装也看得见进度）。
+listen("recording-saving", () => {
+  resultTitle.textContent = "正在结束录制…";
+  resultStatus.textContent = "录屏文件保存中…";
+  resultPanel.style.display = "flex";
+  bar.style.display = "none";
+  saveMp4Btn.style.display = "none";
+  saveGifBtn.style.display = "none";
+  cancelBtn.style.display = "none"; // 封装中不可取消
+  void getCurrentWindow().show();
+  void getCurrentWindow().setFocus();
+  void setWidgetSize(320, 120);
+});
+
+// 录制过程出错（Rust 在 stop 失败分支 emit），直接弹错误面板
+listen<string>("recording-error", (e) => {
+  showErrorPanel("录屏出错：" + (e.payload || "未知错误"));
 });
 
 // 监听「唤出控制台」事件（热键在控制台已隐藏时触发）：重新显示并安排自动隐藏

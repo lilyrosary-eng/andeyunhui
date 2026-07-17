@@ -126,20 +126,39 @@ fn str_of(v: &Value, key: &str) -> String {
 }
 
 fn parse_data_url(src: &str) -> Option<(String, Vec<u8>)> {
-    // 仅支持 data:image/(png|jpeg|jpg);base64,XXXX
-    let rest = src.strip_prefix("data:")?;
-    let (mime, data) = rest.split_once(',')?;
-    let ext = if mime.contains("png") {
-        "png"
-    } else if mime.contains("jpeg") || mime.contains("jpg") {
-        "jpeg"
+    // 1) data:image/(png|jpeg|jpg);base64,XXXX —— 历史/手动插入的内嵌图片
+    if let Some(rest) = src.strip_prefix("data:") {
+        let (mime, data) = rest.split_once(',')?;
+        let ext = if mime.contains("png") {
+            "png"
+        } else if mime.contains("jpeg") || mime.contains("jpg") {
+            "jpeg"
+        } else {
+            return None;
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .ok()?;
+        return Some((ext.to_string(), bytes));
+    }
+    // 2) 本地文件路径（导入时落盘到 app_data/pptx_media/ 的图片）——读出字节后内嵌回 pptx
+    if !src.is_empty() {
+        let bytes = std::fs::read(src).ok()?;
+        let ext = guess_image_ext(&bytes);
+        return ext.map(|e| (e.to_string(), bytes));
+    }
+    None
+}
+
+/// 根据文件内容魔数判断图片扩展名（png / jpeg），无法识别返回 None。
+fn guess_image_ext(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+        Some("png")
+    } else if bytes.len() >= 3 && &bytes[..3] == b"\xff\xd8\xff" {
+        Some("jpeg")
     } else {
-        return None;
-    };
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data.trim())
-        .ok()?;
-    Some((ext.to_string(), bytes))
+        None
+    }
 }
 
 // ===================== 元素 → DrawingML =====================

@@ -370,3 +370,115 @@ pub fn transcode_media(
     }
     Ok(out_str)
 }
+
+// ============ t4 音频 → MIDI 转写（basic-pitch，MIT） ============
+// ffmpeg 只能做格式封装互转，无法把音频「转写」成 MIDI；
+// MIDI 转写需专门的音频转写库，这里用 MIT 协议的 basic-pitch（Python + TensorFlow）。
+// 流程：先用 bundled ffmpeg 把输入统一转成单声道 44.1k wav，再起 Python 子进程跑 basic-pitch 转写。
+#[tauri::command]
+pub async fn audio_to_midi(app: tauri::AppHandle, input_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let ffmpeg_path = get_ffmpeg_path(&app);
+        if !std::process::Command::new(&ffmpeg_path)
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Err("未检测到 ffmpeg，无法预处理音频。".to_string());
+        }
+        let input = std::path::Path::new(&input_path);
+        if !input.exists() {
+            return Err(format!("输入文件不存在: {}", input_path));
+        }
+        // 归一化到单声道 44.1k wav（basic-pitch 推荐输入）
+        let wav = input.with_extension("midi_tmp.wav");
+        let wav_str = wav.to_string_lossy().to_string();
+        let st = std::process::Command::new(&ffmpeg_path)
+            .args(["-y", "-i", &input_path, "-ar", "44100", "-ac", "1", &wav_str])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("ffmpeg 预处理失败: {}", e))?;
+        if !st.success() {
+            let _ = std::fs::remove_file(&wav);
+            return Err("ffmpeg 预处理音频失败，请检查输入格式。".to_string());
+        }
+        // 查找 python 可执行文件（优先 python3）
+        let py = if std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            "python3"
+        } else {
+            "python"
+        };
+        // 查找 basic-pitch 转写脚本（与 ffmpeg 同目录推导）
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            roots.push(resource_dir.join("external-deps").join("全局").join("basic-pitch"));
+            roots.push(
+                resource_dir
+                    .join("_up_")
+                    .join("external-deps")
+                    .join("全局")
+                    .join("basic-pitch"),
+            );
+        }
+        roots.push(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("external-deps")
+                .join("全局")
+                .join("basic-pitch"),
+        );
+        let script = roots.iter().map(|r| r.join("transcribe.py")).find(|p| p.exists());
+        let script = match script {
+            Some(s) => s,
+            None => {
+                let _ = std::fs::remove_file(&wav);
+                return Err(
+                    "未找到 basic-pitch 转写脚本（external-deps/全局/basic-pitch/transcribe.py）。\n请先安装：pip install basic-pitch（MIT 协议，需 Python 3.10+）。"
+                        .to_string(),
+                );
+            }
+        };
+        let out = input.with_extension("mid");
+        let out_str = out.to_string_lossy().to_string();
+        let res = std::process::Command::new(py)
+            .arg(&script)
+            .arg(&wav_str)
+            .arg(&out_str)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&wav);
+                format!(
+                    "启动 Python 失败：{}（请确认已安装 Python 3.10+ 与 basic-pitch）",
+                    e
+                )
+            })?;
+        let _ = std::fs::remove_file(&wav);
+        if !res.status.success() {
+            let msg = String::from_utf8_lossy(&res.stderr);
+            return Err(format!(
+                "MIDI 转写失败：{}\n请确认已 `pip install basic-pitch`（MIT 协议）。",
+                msg.lines().last().unwrap_or("未知错误")
+            ));
+        }
+        if !out.exists() {
+            return Err("MIDI 转写完成但未生成 .mid 文件。".to_string());
+        }
+        Ok(out_str)
+    })
+    .await
+    .map_err(|e| format!("MIDI 转写任务失败: {}", e))?
+}

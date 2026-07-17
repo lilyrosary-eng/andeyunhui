@@ -1,5 +1,6 @@
 /// <reference path="../../global.d.ts" />
 // 专业模块入口（薄荷）
+import * as XLSX from 'xlsx';
 const React = window.__HOST_REACT__;
 const { useState, useMemo, useCallback, useRef, useEffect } = React;
 const { ModuleSidebarShell, SecondaryNavShell, Icon: HostIcon } = window.__HOST_UI__ || {};
@@ -846,12 +847,19 @@ function MediaTranscoder({ kind }: { kind: 'video' | 'audio' }) {
   const run = async () => {
     if (!input) { setError('请先选择文件'); return; }
     setBusy(true); setError(''); setOutput('');
-    try { setOutput(await hostInvoke('transcode_media', { inputPath: input, outputFormat: fmt })); }
+    try {
+      // MIDI 转写走独立命令（basic-pitch，MIT）；其余格式走 ffmpeg 封装互转
+      if (kind === 'audio' && fmt === 'midi') {
+        setOutput(await hostInvoke('audio_to_midi', { inputPath: input }));
+      } else {
+        setOutput(await hostInvoke('transcode_media', { inputPath: input, outputFormat: fmt }));
+      }
+    }
     catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   };
 
-  const fmts = kind === 'video' ? ['mp4', 'mkv', 'webm', 'mov', 'avi'] : ['mp3', 'flac', 'wav', 'ogg'];
+  const fmts = kind === 'video' ? ['mp4', 'mkv', 'webm', 'mov', 'avi'] : ['mp3', 'flac', 'wav', 'ogg', 'midi'];
   const selCls = 'px-2 py-1.5 rounded-lg bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm outline-none focus:border-[var(--element-border)]';
 
   return (
@@ -872,6 +880,9 @@ function MediaTranscoder({ kind }: { kind: 'video' | 'audio' }) {
             {fmts.map(f => <option key={f} value={f}>{f}</option>)}
           </select>
         </label>
+        {kind === 'audio' && fmt === 'midi' && (
+          <span className="text-xs text-amber-600 dark:text-amber-400">MIDI 转写需 Python 3.10+ 与 basic-pitch（MIT）</span>
+        )}
         <button onClick={run} disabled={busy || available === false || !input} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto disabled:opacity-50">
           {busy ? '转码中…' : '开始转码'}
         </button>
@@ -1426,6 +1437,7 @@ function parseCsv(text: string): string[][] {
 function CsvViewer() {
   const [text, setText] = useState('name,age,city\nAlice,30,Beijing\nBob,25,Shanghai\nCharlie,35,Guangzhou');
   const [fileError, setFileError] = useState('');
+  const [exporting, setExporting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const rows = useMemo(() => (text.trim() ? parseCsv(text) : []), [text]);
@@ -1442,11 +1454,32 @@ function CsvViewer() {
 
   const exportCsv = () => { copyText(text); };
 
+  // CSV → XLSX：用 sheetjs 把解析后的二维数组写成 .xlsx，经 write_file_bytes 落盘
+  const exportXlsx = async () => {
+    if (rows.length === 0) return;
+    setExporting(true);
+    try {
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+      const b64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+      const path = await hostInvoke('pick_save_file', { defaultName: 'data.xlsx' });
+      if (!path) return;
+      await hostInvoke('write_file_bytes', { path, contentBase64: b64 });
+      setFileError('');
+    } catch (e) {
+      setFileError('导出 XLSX 失败：' + ((e as Error)?.message || String(e)));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
         <button onClick={() => fileRef.current?.click()} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">选择 CSV 文件</button>
         <button onClick={exportCsv} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">复制全部</button>
+        <button onClick={exportXlsx} disabled={exporting} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm disabled:opacity-50">{exporting ? '导出中…' : '导出 XLSX'}</button>
         <span className="text-xs text-neutral-400 dark:text-stone-500 ml-auto">{rows.length} 行 × {rows[0]?.length || 0} 列</span>
         <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} />
       </div>

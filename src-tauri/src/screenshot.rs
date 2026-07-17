@@ -238,16 +238,24 @@ unsafe extern "system" fn enum_callback(
         &mut rect as *mut _ as *mut _,
         std::mem::size_of::<winapi::shared::windef::RECT>() as u32,
     );
-    if hr != 0 {
-        // DWM 查询失败，回退到 GetWindowRect
-        if winapi::um::winuser::GetWindowRect(hwnd, &mut rect) == 0 {
+    // **关键修复（窗口识别只剩一个）**：旧实现仅在 `hr != 0`（DWM 查询失败）时回退
+    // GetWindowRect。但在部分机器/配置下，DWM 对大多数窗口返回 `hr == 0` 却给出**退化矩形**
+    // （right<=left 或 bottom<=top，即宽高≤0），这些窗口随后被 `width<=0||height<=0`
+    // 分支跳过 → 列表里只剩个别矩形正常的窗口 → 表现为「只识别一个窗口 / 鼠标移动无效」。
+    // 因此只要 DWM 返回失败**或**矩形退化，一律回退到 GetWindowRect（最稳妥的兜底）。
+    let use_rect = if hr != 0 || rect.right <= rect.left || rect.bottom <= rect.top {
+        let mut gwr: winapi::shared::windef::RECT = std::mem::zeroed();
+        if winapi::um::winuser::GetWindowRect(hwnd, &mut gwr) == 0 {
             return 1;
         }
-    }
-    let x = rect.left;
-    let y = rect.top;
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
+        gwr
+    } else {
+        rect
+    };
+    let x = use_rect.left;
+    let y = use_rect.top;
+    let width = use_rect.right - use_rect.left;
+    let height = use_rect.bottom - use_rect.top;
     if width <= 0 || height <= 0 {
         return 1;
     }

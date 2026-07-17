@@ -11,6 +11,7 @@ pub mod pptx_import;
 pub mod lyrics_service;
 pub mod reading_service;
 pub mod recording_service;
+pub mod diagnostics;
 pub mod log_service;
 pub mod ai_service;
 pub mod shell_service;
