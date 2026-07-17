@@ -176,6 +176,54 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+// ============ Prompt Cache 支持（借鉴 claw-code-main/api/src/prompt_cache.rs） ============
+// Anthropic 的 OpenAI 兼容端点支持 cache_control: { type: "ephemeral" } 做前缀缓存，
+// 把 system + 稳定历史段标记为 ephemeral 后，provider 侧缓存 5 分钟，
+// 后续请求命中缓存时 cache_read_input_tokens 大幅降低成本与延迟。
+// Anthropic 允许最多 4 个 cache breakpoint；这里放 2 个：system + 倒数第 3 条消息。
+
+/// 检测是否为 Anthropic 提供商（通过模型名或 base_url 判断）
+fn is_anthropic_provider(cfg: &AiProfile) -> bool {
+    let model = cfg.model.to_lowercase();
+    let base = cfg.base_url.to_lowercase();
+    model.starts_with("claude")
+        || base.contains("anthropic.com")
+        || base.contains("claude.ai")
+}
+
+/// 为 Anthropic 提供商构建带 cache_control 的 messages 数组。
+/// 把 system 消息和倒数第 3 条消息的 content 从字符串转为 block 数组格式，
+/// 并在最后一个 block 上加 cache_control: { type: "ephemeral" }。
+/// 这样 provider 侧会缓存 system + 稳定历史前缀，后续请求命中即省 token。
+fn build_anthropic_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+    let n = messages.len();
+    // 倒数第 3 条的位置（稳定历史段的末尾，放 cache breakpoint）
+    // 保留最后 2 条为 volatile（用户最新输入 + 可能的 tool result）
+    let stable_end = if n > 4 { n.saturating_sub(3) } else { 0 };
+    messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            // system 消息 或 倒数第 3 条消息（稳定段末尾）加 cache_control
+            let needs_cache = m.role == "system" || (stable_end > 0 && i + 1 == stable_end);
+            if needs_cache && !m.content.is_empty() {
+                serde_json::json!({
+                    "role": m.role,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": m.content,
+                            "cache_control": { "type": "ephemeral" }
+                        }
+                    ]
+                })
+            } else {
+                serde_json::json!({ "role": m.role, "content": m.content })
+            }
+        })
+        .collect()
+}
+
 /// 流式对话：向 OpenAI 兼容端点发起 stream 请求，
 /// 逐块解析 SSE 并通过事件推给前端。
 /// 事件（payload 含 requestId 以便前端多请求区分）：
@@ -201,14 +249,25 @@ pub async fn ai_chat(
     }
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let mut body = serde_json::json!({
-        "model": cfg.model,
-        "messages": messages
+    // Prompt Cache：Anthropic 提供商用 cache_control block 格式，其他提供商用标准字符串格式。
+    // 对齐 claw-code-main/api/src/prompt_cache.rs 的设计：system + 稳定历史段标记 ephemeral。
+    let use_anthropic_cache = is_anthropic_provider(&cfg);
+    let messages_json: Vec<serde_json::Value> = if use_anthropic_cache {
+        build_anthropic_messages(&messages)
+    } else {
+        messages
             .iter()
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>()
+    };
+    let mut body = serde_json::json!({
+        "model": cfg.model,
+        "messages": messages_json,
         "temperature": cfg.temperature,
         "stream": true,
+        // stream_options.include_usage：让 OpenAI 兼容端点在最终 chunk 返回 usage 字段
+        // （OpenAI / DeepSeek / Anthropic OpenAI-compat 均支持）
+        "stream_options": { "include_usage": true },
     });
     if let Some(mt) = cfg.max_tokens {
         body["max_tokens"] = serde_json::json!(mt);
@@ -251,6 +310,9 @@ pub async fn ai_chat(
     // 逐块读取 SSE。reqwest::Response::chunk() 无需 stream 特性 / futures-util。
     let mut resp = resp;
     let mut buf = String::new();
+    // 累积 usage 字段（OpenAI 在最终 chunk 返回 usage；DeepSeek 返回 prompt_cache_hit_tokens；
+    // Anthropic OpenAI-compat 返回 cache_read_input_tokens / cache_creation_input_tokens）
+    let mut last_usage: Option<serde_json::Value> = None;
     loop {
         match resp.chunk().await {
             Ok(Some(bytes)) => {
@@ -264,11 +326,19 @@ pub async fn ai_chat(
                         None => continue,
                     };
                     if data == "[DONE]" {
-                        let _ =
-                            app.emit("ai-done", serde_json::json!({ "requestId": request_id }));
+                        let _ = app.emit("ai-done", serde_json::json!({
+                            "requestId": request_id,
+                            "usage": last_usage,
+                        }));
                         return Ok(());
                     }
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                        // 提取 usage（最终 chunk 含完整 usage 字段）
+                        if let Some(usage) = v.get("usage") {
+                            if !usage.is_null() {
+                                last_usage = Some(usage.clone());
+                            }
+                        }
                         if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
                             if !delta.is_empty() {
                                 let _ = app.emit(
@@ -292,7 +362,10 @@ pub async fn ai_chat(
         }
     }
 
-    let _ = app.emit("ai-done", serde_json::json!({ "requestId": request_id }));
+    let _ = app.emit("ai-done", serde_json::json!({
+        "requestId": request_id,
+        "usage": last_usage,
+    }));
     Ok(())
 }
 
@@ -346,6 +419,153 @@ pub async fn ai_test_connection(config: AiProfile) -> Result<String, String> {
     let _ = resp.text().await;
     let ms = start.elapsed().as_millis();
     Ok(format!("连接成功（{}，耗时 {} ms）", config.model, ms))
+}
+
+// ========== 视觉 OCR + 翻译（非流式便捷命令） ==========
+//
+// 设计：
+// - 复用 ai_config.json 中的模型档案（profile_id 选某份，None 用激活项）
+// - 非流式（stream:false）：OCR / 翻译不需要逐字呈现，直接返回完整结果
+// - 视觉 OCR：构造 OpenAI Vision 协议的 content 数组（image_url + text）
+//   兼容 OpenAI gpt-4o / Anthropic claude-3-opus / 通义 qwen-vl / gemini-2.x 等
+// - 翻译：构造 system + user 单轮对话，提示模型只返回译文
+// - 失败时返回详细错误信息（含 HTTP 状态码 + 响应体片段），前端直接展示
+
+/// 视觉 OCR：传入图片 base64 + prompt，返回模型识别的文本
+/// 兼容 OpenAI Vision 协议（content 数组：[{type:"text",text:...},{type:"image_url",image_url:{url:"data:..."}}]）
+#[tauri::command]
+pub async fn ai_vision_ocr(
+    app: AppHandle,
+    image_base64: String,
+    image_mime: String,
+    prompt: Option<String>,
+    profile_id: Option<String>,
+) -> Result<String, String> {
+    let profiles = load_profiles(&app);
+    let cfg = resolve_profile(&profiles, profile_id);
+    if cfg.api_key.trim().is_empty() {
+        return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
+    }
+
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let p = prompt.unwrap_or_else(|| "请提取图片中的全部文字，保持原始排版与顺序，仅输出识别结果不要任何说明".to_string());
+    let data_url = format!("data:{};base64,{}", image_mime, image_base64);
+
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": p },
+                { "type": "image_url", "image_url": { "url": data_url } }
+            ]
+        }],
+        "temperature": 0.0,
+        "max_tokens": cfg.max_tokens.unwrap_or(4096),
+        "stream": false,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "HTTP {}（模型可能不支持视觉输入）: {}",
+            status,
+            text.chars().take(300).collect::<String>()
+        ));
+    }
+
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+    let content = v["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "响应中未找到 content 字段".to_string())?
+        .to_string();
+    Ok(content)
+}
+
+/// 翻译：传入文本 + 目标语言代码（如 "en"/"zh"/"ja"），返回译文
+/// 走非流式 AI 对话；若未配置 AI 则返回错误供前端降级提示
+#[tauri::command]
+pub async fn translate_text(
+    app: AppHandle,
+    text: String,
+    target_lang: Option<String>,
+    profile_id: Option<String>,
+) -> Result<String, String> {
+    let profiles = load_profiles(&app);
+    let cfg = resolve_profile(&profiles, profile_id);
+    if cfg.api_key.trim().is_empty() {
+        return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
+    }
+
+    let lang = target_lang.unwrap_or_else(|| "中文".to_string());
+    let system = format!(
+        "你是专业翻译助手。将用户输入的文本翻译为{}，仅输出译文，不加注释、不加引号、不保留原文。如果原文已是目标语言则原样返回。",
+        lang
+    );
+
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": text }
+        ],
+        "temperature": 0.1,
+        "max_tokens": cfg.max_tokens.unwrap_or(4096),
+        "stream": false,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "HTTP {}: {}",
+            status,
+            text.chars().take(300).collect::<String>()
+        ));
+    }
+
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+    let content = v["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "响应中未找到 content 字段".to_string())?
+        .to_string();
+    Ok(content)
 }
 
 // ========== 对话持久化 ==========

@@ -7,10 +7,10 @@
   "entry": "index.js",
   "iconName": "FileText",
   "hostApiVersion": 1,
-  "deps": ["tiptap", "univer"],
+  "deps": ["tiptap"],
   "parent": "niaoluo",
   "codename": "茑萝",
-  "requiredAssets": ["niaoluo/wps/tiptap/index.js", "niaoluo/wps/univer/index.js"],
+  "requiredAssets": ["niaoluo/wps/tiptap/index.js"],
   "category": "办公",
-  "desc": "办公套件：文档、演示文件、表格（Univer 引擎驱动）"
+  "desc": "办公套件：文档、演示文件、表格"
 }

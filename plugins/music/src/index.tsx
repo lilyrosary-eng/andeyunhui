@@ -480,6 +480,11 @@ function MusicModule() {
     setSelectedPlaylist(newPlaylist);
   }, []);
 
+// 模块加载探针（console.error 必然可见，用于确认 music 插件脚本是否真正执行）
+try { console.error('[music-diag] index.tsx 模块开始求值; __HOST_API__=' + typeof window.__HOST_API__); } catch {}
+// 模块加载时写入 Rust 端日志，便于确认插件脚本是否真正被加载执行（某些 dev 环境会使用 sandbox）。
+try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).catch(()=>{}); } catch {}
+
   const handleRemoveRoot = useCallback((pathToRemove: string) => {
     removeRoot(pathToRemove);
     const rootF = normalizePath(pathToRemove);
@@ -508,18 +513,23 @@ function MusicModule() {
     if (searchQuery.trim()) {
       const originalIndex = tracks.findIndex(t => t.id === track.id);
       if (originalIndex !== -1) {
+        try { window.__HOST_API__?.invoke('debug_log', { msg: `UI_SELECT_TRACK idx=${originalIndex} id=${track.id}` }).catch(()=>{}); } catch {}
         musicPlayer.setTracks(tracks, originalIndex);
         musicPlayer.play();
         return;
       }
     }
+    try { window.__HOST_API__?.invoke('debug_log', { msg: `UI_SELECT_TRACK idx=${index} id=${track.id}` }).catch(()=>{}); } catch {}
     musicPlayer.setTracks(tracks, index);
     musicPlayer.play();
   }, [selectedPlaylist?.tracks, searchQuery]);
 
-  const togglePlay = useCallback(() => musicPlayer.togglePlay(), []);
-  const prevTrack = useCallback(() => musicPlayer.prev(), []);
-  const nextTrack = useCallback(() => musicPlayer.next(), []);
+  const togglePlay = useCallback(() => {
+    try { window.__HOST_API__?.invoke('debug_log', { msg: `UI_TOGGLE_PLAY` }).catch(()=>{}); } catch {}
+    musicPlayer.togglePlay();
+  }, []);
+  const prevTrack = useCallback(() => { try { window.__HOST_API__?.invoke('debug_log', { msg: `UI_PREV` }).catch(()=>{}); } catch {} ; musicPlayer.prev(); }, []);
+  const nextTrack = useCallback(() => { try { window.__HOST_API__?.invoke('debug_log', { msg: `UI_NEXT` }).catch(()=>{}); } catch {} ; musicPlayer.next(); }, []);
 
   const handleVolume = useCallback((vol: number) => {
     musicPlayer.setVolume(vol);

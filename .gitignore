@@ -14,6 +14,7 @@ dist-ssr
 
 # Build artifacts
 bundled-plugins
+bundled-dlc
 plugins/*/dist
 
 # Editor directories and files
@@ -83,3 +84,7 @@ docs/*.md
 
 # 额外构建产物（dist 变体，避免误提交大型产物）
 dist-dlc/
+got-it/
+test/
+external-deps.bak/
+dump_media/

@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node scripts/gen-waiting-pages.mjs && node scripts/deploy-plugins.mjs && node scripts/copy-waiting.mjs && pnpm run build",
+    "beforeBuildCommand": "node scripts/gen-waiting-pages.mjs && node scripts/build-external-deps.mjs && node scripts/deploy-plugins.mjs && node scripts/copy-waiting.mjs && pnpm run build && node scripts/prepare-bundled-dlc.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -40,8 +40,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../bundled-plugins": "bundled-plugins/",
-      "../external-deps": "external-deps/"
+      "../bundled-dlc": "bundled-dlc/"
     },
     "windows": {
       "nsis": {

@@ -6,6 +6,9 @@ const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback } = React;
 
 import type { AuditInput } from './audit';
+import { CrawlerUrlQueue, PentestAssetTree, GatewayStrategyHistory, AutomationTaskList } from './frameworkExtras';
+import { DisassemblyView, ScriptEditor } from './professionalExtras';
+import { CollapsibleSection } from './ui';
 
 // ============ Tauri invoke 封装 ============
 // 攻防命令（gongfang_*）尚未加入插件沙箱白名单，直接走 __TAURI_INTERNALS__.invoke。
@@ -38,6 +41,19 @@ interface GongfangStatus {
   reward: number;
   error_rate: number;
   features: { crawler: boolean; reverse: boolean; pentest: boolean; automation: boolean; gateway: boolean };
+}
+
+// ============ 爬虫实际爬取结果类型（与 Rust 端 FetchResult 对齐） ============
+interface FetchResult {
+  url: string;
+  status: number;
+  content_type: string;
+  content_length: number;
+  title: string | null;
+  body_preview: string;
+  links: string[];
+  duration_ms: number;
+  error: string | null;
 }
 
 // ============ 渗透框架结果类型（与 Rust 端 commands.rs 字段对齐） ============
@@ -152,8 +168,7 @@ function FrameworkPlaceholder({ meta, addLog }: { meta: FrameworkMeta; addLog: (
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{meta.subtitle}</p>
 
         {/* 核心能力 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4">
-          <h3 className="text-sm font-medium text-[var(--element-bg)] mb-3">核心能力规划</h3>
+        <CollapsibleSection title="核心能力规划" storageKey="fw_placeholder_capabilities" defaultOpen={false}>
           <div className="grid grid-cols-2 gap-2">
             {meta.capabilities.map((cap) => (
               <div key={cap} className="flex items-center gap-2 text-[13px] text-neutral-600 dark:text-stone-300">
@@ -162,11 +177,10 @@ function FrameworkPlaceholder({ meta, addLog }: { meta: FrameworkMeta; addLog: (
               </div>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* 技术选型 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4">
-          <h3 className="text-sm font-medium text-[var(--element-bg)] mb-3">技术选型（优先 MIT/Apache 协议）</h3>
+        <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_placeholder_techstack" defaultOpen={false}>
           <div className="flex flex-wrap gap-2">
             {meta.techStack.map((t) => (
               <span
@@ -178,7 +192,7 @@ function FrameworkPlaceholder({ meta, addLog }: { meta: FrameworkMeta; addLog: (
               </span>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* 操作占位区 */}
         <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-dashed border-black/10 dark:border-stone-700/60 p-6">
@@ -253,6 +267,11 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const [busy, setBusy] = useState(false);
   const [injectType, setInjectType] = useState<InjectType>('Focus');
   const [injectInput, setInjectInput] = useState('');
+  // 快速爬取：直接发 HTTP GET，看实际页面数据（不需要启动内核）
+  const [fetchUrl, setFetchUrl] = useState('');
+  const [fetchResult, setFetchResult] = useState<FetchResult | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [fetchHistory, setFetchHistory] = useState<FetchResult[]>([]);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -340,6 +359,49 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     }
   }, [injectType, injectInput, addLog, fetchStatus]);
 
+  // 快速爬取：直接发 HTTP GET，立即返回页面数据（不需要启动内核）
+  // 这是"看到数据"的核心入口 —— 用户输入 URL → 立刻看到标题/链接/内容
+  const handleFetch = useCallback(async (targetUrl?: string) => {
+    let url = (targetUrl ?? fetchUrl).trim();
+    if (!url) {
+      setError('请输入要爬取的 URL');
+      return;
+    }
+    // URL 自动补全：无协议时补 https://
+    if (!/^https?:\/\//i.test(url)) {
+      url = 'https://' + url;
+    }
+    setFetching(true);
+    setError(null);
+    try {
+      const r = await tauriInvoke<FetchResult>('gongfang_fetch', { url });
+      setFetchResult(r);
+      if (!r.error) {
+        setFetchHistory((prev) => [r, ...prev.filter((h) => h.url !== r.url)].slice(0, 10));
+        addLog({
+          action: '快速爬取',
+          target: r.url,
+          status: 'success',
+          detail: `${r.status} · ${r.title ?? '无标题'} · ${r.content_length}B · ${r.links.length} 链接 · ${r.duration_ms}ms`,
+        });
+      } else {
+        addLog({ action: '快速爬取', target: r.url, status: 'error', detail: r.error });
+      }
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      setError(msg);
+      addLog({ action: '快速爬取', target: url, status: 'error', detail: msg });
+    } finally {
+      setFetching(false);
+    }
+  }, [fetchUrl, addLog]);
+
+  // 从爬取结果中点击链接 → 自动爬取该链接（形成"爬取链"工作流）
+  const handleFetchLink = useCallback((link: string) => {
+    setFetchUrl(link);
+    handleFetch(link);
+  }, [handleFetch]);
+
   const running = status?.running ?? false;
   const strategy = status?.strategy;
   const phase = strategy ? (PHASE_MAP[strategy.phase] ?? PHASE_MAP.Idle) : PHASE_MAP.Idle;
@@ -357,8 +419,7 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{crawlerMeta.subtitle}</p>
 
         {/* 核心能力 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4">
-          <h3 className="text-sm font-medium text-[var(--element-bg)] mb-3">核心能力规划</h3>
+        <CollapsibleSection title="核心能力规划" storageKey="fw_crawler_capabilities" defaultOpen={false} accent="attack">
           <div className="grid grid-cols-2 gap-2">
             {crawlerMeta.capabilities.map((cap) => (
               <div key={cap} className="flex items-center gap-2 text-[13px] text-neutral-600 dark:text-stone-300">
@@ -367,11 +428,10 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </div>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* 技术选型 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4">
-          <h3 className="text-sm font-medium text-[var(--element-bg)] mb-3">技术选型（优先 MIT/Apache 协议）</h3>
+        <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_crawler_techstack" defaultOpen={false} accent="attack">
           <div className="flex flex-wrap gap-2">
             {crawlerMeta.techStack.map((t) => (
               <span
@@ -383,19 +443,227 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </span>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
 
-        {/* 内核控制面板 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">内核控制</h3>
-            {status && !status.features.crawler && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400">
-                后端未启用 crawler feature
-              </span>
-            )}
+        {/* 使用指引（解决"不知道怎么用、不知道下一步"） */}
+        <CollapsibleSection
+          title="使用指引（4 步上手）"
+          storageKey="fw_crawler_guide"
+          defaultOpen={true}
+          accent="attack"
+        >
+          <ol className="space-y-2 text-[13px] text-neutral-600 dark:text-stone-300">
+            <li className="flex gap-2">
+              <span className="shrink-0 w-5 h-5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[11px] font-semibold flex items-center justify-center">1</span>
+              <div>
+                <span className="font-medium">快速爬取</span>：在下方"快速爬取"区输入 URL（如 <code className="px-1 rounded bg-black/5 dark:bg-white/10 text-[11px]">https://example.com</code>），点"爬取"按钮，立刻看到页面标题、链接、内容预览。<span className="text-neutral-400">无需启动内核。</span>
+              </div>
+            </li>
+            <li className="flex gap-2">
+              <span className="shrink-0 w-5 h-5 rounded-full bg-sky-500/15 text-sky-600 dark:text-sky-400 text-[11px] font-semibold flex items-center justify-center">2</span>
+              <div>
+                <span className="font-medium">点击链接递归爬取</span>：爬取结果里的每个链接都可点击，点击后自动爬取该 URL，形成"爬取链"。
+              </div>
+            </li>
+            <li className="flex gap-2">
+              <span className="shrink-0 w-5 h-5 rounded-full bg-violet-500/15 text-violet-600 dark:text-violet-400 text-[11px] font-semibold flex items-center justify-center">3</span>
+              <div>
+                <span className="font-medium">启动内核</span>：需要自动化侦察（持续监控、策略自适应）时，在"内核控制"区点"启动内核"，然后注入 <code className="px-1 rounded bg-black/5 dark:bg-white/10 text-[11px]">Focus</code> 指令锁定目标 URL。
+              </div>
+            </li>
+            <li className="flex gap-2">
+              <span className="shrink-0 w-5 h-5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[11px] font-semibold flex items-center justify-center">4</span>
+              <div>
+                <span className="font-medium">用 AI 对话</span>：右侧 AI 对话框直接说"爬取 xxx"，AI 会自动调用 <code className="px-1 rounded bg-black/5 dark:bg-white/10 text-[11px]">fetch</code> 命令并总结结果。<span className="text-neutral-400">对话即攻防。</span>
+              </div>
+            </li>
+          </ol>
+        </CollapsibleSection>
+
+        {/* 快速爬取（核心数据入口 —— 解决"没有数据、不知道进度"） */}
+        <CollapsibleSection
+          title="快速爬取（立即看到数据）"
+          storageKey="fw_crawler_fetch"
+          defaultOpen={true}
+          accent="attack"
+          right={fetching ? (
+            <span className="flex items-center gap-1 text-[10px] text-sky-600 dark:text-sky-400">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse" />
+              爬取中...
+            </span>
+          ) : fetchResult ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+              {fetchResult.status} · {fetchResult.links.length} 链接
+            </span>
+          ) : null}
+        >
+          {/* URL 输入区 */}
+          <div className="flex gap-2 mb-3">
+            <input
+              type="text"
+              value={fetchUrl}
+              onChange={(e) => setFetchUrl(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !fetching) handleFetch(); }}
+              placeholder="输入 URL，如 https://example.com 或 example.com"
+              className="flex-1 px-3 py-1.5 rounded-lg text-[13px] bg-black/[0.03] dark:bg-white/[0.05] border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+            />
+            <button
+              onClick={() => handleFetch()}
+              disabled={fetching || !fetchUrl.trim()}
+              className="btn-press px-4 py-1.5 rounded-lg text-xs font-medium text-white bg-sky-500 hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+            >
+              {fetching ? (
+                <>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin">
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                  </svg>
+                  爬取中
+                </>
+              ) : '爬取'}
+            </button>
           </div>
 
+          {/* URL 自动补全提示（未输入时） */}
+          {!fetchUrl && !fetchResult && (
+            <div className="text-[11px] text-neutral-400 mb-3">
+              提示：URL 可不带协议（自动补 https://）。按回车键也可触发爬取。
+            </div>
+          )}
+
+          {/* 错误提示 */}
+          {error && (
+            <div className="flex items-center gap-2 text-xs text-rose-600 dark:text-rose-400 bg-rose-500/10 rounded-lg px-2.5 py-1.5 mb-3">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <span className="truncate flex-1">{error}</span>
+              <button onClick={() => setError(null)} className="text-[10px] hover:underline shrink-0">忽略</button>
+            </div>
+          )}
+
+          {/* 爬取结果卡片（核心数据展示） */}
+          {fetchResult && (
+            <div className="rounded-lg border border-black/10 dark:border-stone-700/50 overflow-hidden mb-3">
+              {/* 状态栏 */}
+              <div className="flex items-center gap-2 px-3 py-2 bg-black/[0.03] dark:bg-white/[0.05] border-b border-black/5 dark:border-stone-700/50">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold ${
+                  fetchResult.error ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                  : fetchResult.status >= 200 && fetchResult.status < 300 ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                  : fetchResult.status >= 300 && fetchResult.status < 400 ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+                  : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                }`}>
+                  {fetchResult.error ? 'ERR' : fetchResult.status}
+                </span>
+                <span className="text-[11px] text-neutral-500 dark:text-stone-400 truncate flex-1 font-mono">{fetchResult.url}</span>
+                <span className="text-[10px] text-neutral-400 shrink-0">{fetchResult.duration_ms}ms</span>
+              </div>
+
+              {fetchResult.error ? (
+                <div className="px-3 py-3 text-xs text-rose-600 dark:text-rose-400">
+                  {fetchResult.error}
+                </div>
+              ) : (
+                <div className="px-3 py-3 space-y-2.5">
+                  {/* 标题 */}
+                  {fetchResult.title && (
+                    <div>
+                      <div className="text-[10px] text-neutral-400 mb-0.5">页面标题</div>
+                      <div className="text-sm font-medium text-[var(--element-bg)]">{fetchResult.title}</div>
+                    </div>
+                  )}
+
+                  {/* 元信息 */}
+                  <div className="grid grid-cols-3 gap-2 text-[11px]">
+                    <div className="bg-black/[0.03] dark:bg-white/[0.05] rounded px-2 py-1">
+                      <div className="text-neutral-400">内容类型</div>
+                      <div className="text-neutral-600 dark:text-stone-300 truncate font-mono">{fetchResult.content_type || '未知'}</div>
+                    </div>
+                    <div className="bg-black/[0.03] dark:bg-white/[0.05] rounded px-2 py-1">
+                      <div className="text-neutral-400">内容长度</div>
+                      <div className="text-neutral-600 dark:text-stone-300 font-mono">{fetchResult.content_length.toLocaleString()} B</div>
+                    </div>
+                    <div className="bg-black/[0.03] dark:bg-white/[0.05] rounded px-2 py-1">
+                      <div className="text-neutral-400">发现链接</div>
+                      <div className="text-neutral-600 dark:text-stone-300 font-mono">{fetchResult.links.length} 个</div>
+                    </div>
+                  </div>
+
+                  {/* 链接列表（可点击递归爬取） */}
+                  {fetchResult.links.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-neutral-400 mb-1">链接列表（点击可递归爬取）</div>
+                      <div className="max-h-40 overflow-y-auto rounded border border-black/5 dark:border-stone-700/50 divide-y divide-black/5 dark:divide-stone-700/50">
+                        {fetchResult.links.slice(0, 30).map((link, i) => (
+                          <button
+                            key={i}
+                            onClick={() => handleFetchLink(link)}
+                            disabled={fetching}
+                            className="block w-full text-left px-2 py-1 text-[11px] font-mono text-sky-600 dark:text-sky-400 hover:bg-sky-500/10 disabled:opacity-40 truncate transition-colors"
+                            title={link}
+                          >
+                            <span className="text-neutral-400 mr-1.5">{i + 1}.</span>{link}
+                          </button>
+                        ))}
+                        {fetchResult.links.length > 30 && (
+                          <div className="px-2 py-1 text-[10px] text-neutral-400">... 还有 {fetchResult.links.length - 30} 个链接</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 内容预览（可折叠） */}
+                  {fetchResult.body_preview && (
+                    <details className="group">
+                      <summary className="cursor-pointer text-[11px] text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200 select-none">
+                        ▶ 查看内容预览（前 2000 字符）
+                      </summary>
+                      <pre className="mt-1.5 max-h-60 overflow-auto text-[10px] font-mono text-neutral-600 dark:text-stone-300 bg-black/[0.03] dark:bg-white/[0.05] rounded p-2 whitespace-pre-wrap break-all">
+                        {fetchResult.body_preview}
+                      </pre>
+                    </details>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 爬取历史（最近 10 次，可点击重新查看） */}
+          {fetchHistory.length > 0 && (
+            <div>
+              <div className="text-[10px] text-neutral-400 mb-1.5">爬取历史（{fetchHistory.length}）</div>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {fetchHistory.map((h, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setFetchResult(h)}
+                    className="block w-full text-left px-2 py-1 rounded text-[11px] hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors"
+                  >
+                    <span className={`inline-block px-1 py-0.5 rounded text-[9px] font-mono mr-1.5 ${
+                      h.status >= 200 && h.status < 300 ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                      : h.status >= 300 && h.status < 400 ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+                      : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                    }`}>{h.status}</span>
+                    <span className="text-neutral-600 dark:text-stone-300 font-mono truncate">{h.url}</span>
+                    <span className="text-neutral-400 ml-1.5">· {h.links.length} 链接</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </CollapsibleSection>
+
+        {/* 内核控制面板 */}
+        <CollapsibleSection
+          title="内核控制"
+          storageKey="fw_crawler_kernel"
+          defaultOpen={false}
+          accent="attack"
+          right={status && !status.features.crawler ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400">
+              后端未启用 crawler feature
+            </span>
+          ) : null}
+        >
           {/* 启动/停止按钮 */}
           <div className="flex items-center gap-2">
             <button
@@ -483,7 +751,10 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               指令经优先级队列抢占：P0（Focus/Pause/Resume）立即生效，P1（Bypass）下一推理周期注入。
             </p>
           </div>
-        </section>
+        </CollapsibleSection>
+
+        {/* P1：URL 队列（事件累积 + 手动添加） */}
+        <CrawlerUrlQueue />
       </div>
     </div>
   );
@@ -601,8 +872,7 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{reverseMeta.subtitle}</p>
 
         {/* 技术选型 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4">
-          <h3 className="text-sm font-medium text-[var(--element-bg)] mb-3">技术选型（优先 MIT/Apache 协议）</h3>
+        <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_reverse_techstack" defaultOpen={false} accent="info">
           <div className="flex flex-wrap gap-2">
             {reverseMeta.techStack.map((t) => (
               <span key={t.name} className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50">
@@ -610,14 +880,16 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </span>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* 加密识别 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">加密算法识别（卡方检验 + 特征向量库）</h3>
-            <span className="text-[10px] text-neutral-400">零依赖自实现 · 替代 DFA/Gröbner</span>
-          </div>
+        <CollapsibleSection
+          title="加密算法识别（卡方检验 + 特征向量库）"
+          storageKey="fw_reverse_crypto"
+          defaultOpen={true}
+          accent="info"
+          right={<span className="text-[10px] text-neutral-400">零依赖自实现 · 替代 DFA/Gröbner</span>}
+        >
           <div className="space-y-2">
             <textarea
               value={hexInput}
@@ -698,14 +970,16 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </p>
             </div>
           )}
-        </section>
+        </CollapsibleSection>
 
         {/* 符号库查询 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">符号库查询（跨会话复用资产）</h3>
-            <span className="text-[10px] text-neutral-400">内存 HashMap · @reset 仅清断点</span>
-          </div>
+        <CollapsibleSection
+          title="符号库查询（跨会话复用资产）"
+          storageKey="fw_reverse_symbols"
+          defaultOpen={true}
+          accent="info"
+          right={<span className="text-[10px] text-neutral-400">内存 HashMap · @reset 仅清断点</span>}
+        >
           <div className="flex items-center gap-2">
             <input
               type="text"
@@ -767,7 +1041,10 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           {symbols.length === 0 && !symBusy && !symError && symUrl !== '' && (
             <p className="text-[11px] text-neutral-400">该 URL 暂无已学习符号。逆向过程中识别到的函数/S盒/协议字段会自动入库。</p>
           )}
-        </section>
+        </CollapsibleSection>
+
+        {/* P2：反汇编视图（IDA/Ghidra 风格符号表 + 伪反汇编预览） */}
+        <DisassemblyView symbols={symbols} />
       </div>
     </div>
   );
@@ -805,6 +1082,8 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const [useCustomPorts, setUseCustomPorts] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
+  // P1：累积所有扫描结果（用于资产树聚合）
+  const [scanHistory, setScanHistory] = useState<ScanResult[]>([]);
 
   const [wafUrl, setWafUrl] = useState('');
   const [wafResult, setWafResult] = useState<WafDetectResult | null>(null);
@@ -819,6 +1098,10 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         : null;
       const r = await tauriInvoke<ScanResult>('gongfang_scan', { host: scanHost.trim(), ports });
       setScanResult(r);
+      // P1：累积到历史
+      if (!r.error && r.open_ports.length > 0) {
+        setScanHistory((prev) => [...prev, r]);
+      }
       addLog({
         action: '端口扫描',
         target: scanHost.trim(),
@@ -865,8 +1148,7 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{pentestMeta.subtitle}</p>
 
         {/* 技术选型 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4">
-          <h3 className="text-sm font-medium text-[var(--element-bg)] mb-3">技术选型（全 MIT 协议，替代 NPSL/GPL）</h3>
+        <CollapsibleSection title="技术选型（全 MIT 协议，替代 NPSL/GPL）" storageKey="fw_pentest_techstack" defaultOpen={false} accent="attack">
           <div className="flex flex-wrap gap-2">
             {pentestMeta.techStack.map((t) => (
               <span key={t.name} className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50">
@@ -874,14 +1156,16 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </span>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* 端口扫描 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">端口扫描（naabu 外部进程）</h3>
-            <span className="text-[10px] text-neutral-400">MIT 协议 · 替代 nmap/masscan</span>
-          </div>
+        <CollapsibleSection
+          title="端口扫描（naabu 外部进程）"
+          storageKey="fw_pentest_scan"
+          defaultOpen={true}
+          accent="attack"
+          right={<span className="text-[10px] text-neutral-400">MIT 协议 · 替代 nmap/masscan</span>}
+        >
           <div className="flex items-center gap-2">
             <input
               type="text"
@@ -955,11 +1239,10 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               )}
             </div>
           )}
-        </section>
+        </CollapsibleSection>
 
         {/* WAF 检测 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <h3 className="text-sm font-medium text-[var(--element-bg)]">WAF 指纹检测</h3>
+        <CollapsibleSection title="WAF 指纹检测" storageKey="fw_pentest_waf" defaultOpen={true} accent="attack">
           <div className="flex items-center gap-2">
             <input
               type="text"
@@ -995,7 +1278,10 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               )}
             </div>
           )}
-        </section>
+        </CollapsibleSection>
+
+        {/* P1：资产树 + Payload 库（按主机聚合扫描结果 + 预设注入模板） */}
+        <PentestAssetTree scanResults={scanHistory} />
       </div>
     </div>
   );
@@ -1155,8 +1441,7 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{automationMeta.subtitle}</p>
 
         {/* 技术选型 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4">
-          <h3 className="text-sm font-medium text-[var(--element-bg)] mb-3">技术选型（优先 MIT/Apache 协议）</h3>
+        <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_automation_techstack" defaultOpen={false} accent="info">
           <div className="flex flex-wrap gap-2">
             {automationMeta.techStack.map((t) => (
               <span key={t.name} className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50">
@@ -1164,14 +1449,16 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </span>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* 拟人化等级控制 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">行为拟人化等级（@humanize）</h3>
-            <span className="text-[10px] text-neutral-400">arc-swap 策略热交换</span>
-          </div>
+        <CollapsibleSection
+          title="行为拟人化等级（@humanize）"
+          storageKey="fw_automation_humanize"
+          defaultOpen={true}
+          accent="info"
+          right={<span className="text-[10px] text-neutral-400">arc-swap 策略热交换</span>}
+        >
           <div className="space-y-2">
             <div className="flex items-center gap-3">
               <input
@@ -1217,12 +1504,15 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               等级越高，鼠标贝塞尔曲线噪声越大、键盘延迟越长，越接近人类疲劳/醉酒状态；L0 关闭所有噪声，用于压力测试。
             </p>
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* 适应度报告 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">模板适应度报告</h3>
+        <CollapsibleSection
+          title="模板适应度报告"
+          storageKey="fw_automation_fitness"
+          defaultOpen={true}
+          accent="info"
+          right={
             <div className="flex items-center gap-1.5">
               <button
                 onClick={handleRefreshFitness}
@@ -1248,8 +1538,8 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                 重置
               </button>
             </div>
-          </div>
-
+          }
+        >
           {migrateMsg && (
             <div className="text-xs text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 rounded-lg px-2.5 py-1.5">
               {migrateMsg}
@@ -1310,7 +1600,13 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           <p className="text-[10px] text-neutral-400 leading-relaxed">
             热迁移：在运行时不重启内核的前提下，通过 arc-swap 切换策略指针到最优模板；偏离度越低，行为越接近真实人类。
           </p>
-        </section>
+        </CollapsibleSection>
+
+        {/* P1：任务列表 + 模板对比（前端状态机 + 基于 fitness 找最优模板） */}
+        <AutomationTaskList fitness={fitness} />
+
+        {/* P2：脚本编辑器（CodeMirror 6 + 语法高亮 + 模板插入 + localStorage 持久化） */}
+        <ScriptEditor storageKey="gongfang_automation_script" />
       </div>
     </div>
   );
@@ -1460,8 +1756,7 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{gatewayMeta.subtitle}</p>
 
         {/* 技术选型 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4">
-          <h3 className="text-sm font-medium text-[var(--element-bg)] mb-3">技术选型（优先 MIT/Apache 协议）</h3>
+        <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_gateway_techstack" defaultOpen={false} accent="defense">
           <div className="flex flex-wrap gap-2">
             {gatewayMeta.techStack.map((t) => (
               <span key={t.name} className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50">
@@ -1469,7 +1764,7 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </span>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* 错误提示 */}
         {error && (
@@ -1480,11 +1775,13 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         )}
 
         {/* 状态概览 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">网关状态</h3>
-            <span className="text-[10px] text-neutral-400">策略 v{status?.policy_version ?? '-'} · 生效 {fmtTime(status?.effective_ts ?? 0)}</span>
-          </div>
+        <CollapsibleSection
+          title="网关状态"
+          storageKey="fw_gateway_status"
+          defaultOpen={true}
+          accent="defense"
+          right={<span className="text-[10px] text-neutral-400">策略 v{status?.policy_version ?? '-'} · 生效 {fmtTime(status?.effective_ts ?? 0)}</span>}
+        >
           <div className="grid grid-cols-4 gap-2">
             <StatusCard
               label="路由模式"
@@ -1511,14 +1808,16 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           {routingInfo && (
             <p className="text-[11px] text-neutral-400 leading-relaxed">{routingInfo.desc}</p>
           )}
-        </section>
+        </CollapsibleSection>
 
         {/* 路由模式切换（@rotate） */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">路由模式切换（@rotate）</h3>
-            <span className="text-[10px] text-neutral-400">arc-swap 无锁热交换</span>
-          </div>
+        <CollapsibleSection
+          title="路由模式切换（@rotate）"
+          storageKey="fw_gateway_rotate"
+          defaultOpen={true}
+          accent="defense"
+          right={<span className="text-[10px] text-neutral-400">arc-swap 无锁热交换</span>}
+        >
           <div className="grid grid-cols-3 gap-2">
             {(['direct', 'proxy', 'stealth'] as const).map((mode) => {
               const info = ROUTING_BADGE[mode];
@@ -1545,14 +1844,16 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           {rotateMsg && (
             <p className="text-[11px] text-emerald-600 dark:text-emerald-400">{rotateMsg}</p>
           )}
-        </section>
+        </CollapsibleSection>
 
         {/* 带宽调节（@throttle） */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">带宽调节（@throttle）</h3>
-            <span className="text-[10px] text-neutral-400">超时/并发联动调整</span>
-          </div>
+        <CollapsibleSection
+          title="带宽调节（@throttle）"
+          storageKey="fw_gateway_throttle"
+          defaultOpen={true}
+          accent="defense"
+          right={<span className="text-[10px] text-neutral-400">超时/并发联动调整</span>}
+        >
           <div className="flex items-center gap-3">
             <input
               type="range"
@@ -1588,19 +1889,23 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           {throttleMsg && (
             <p className="text-[11px] text-emerald-600 dark:text-emerald-400">{throttleMsg}</p>
           )}
-        </section>
+        </CollapsibleSection>
 
         {/* 节点池表格 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-[var(--element-bg)]">代理节点池</h3>
+        <CollapsibleSection
+          title="代理节点池"
+          storageKey="fw_gateway_pool"
+          defaultOpen={true}
+          accent="defense"
+          right={
             <button
               onClick={fetchNodes}
               className="btn-press px-2 py-1 rounded text-[11px] text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5"
             >
               刷新
             </button>
-          </div>
+          }
+        >
           {nodes.length === 0 ? (
             <p className="text-[11px] text-neutral-400 text-center py-4">暂无节点数据。默认包含一个 direct 虚拟节点。</p>
           ) : (
@@ -1651,11 +1956,13 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           <p className="text-[10px] text-neutral-400 leading-relaxed">
             信誉评分综合错误率（40%权重）+ EWMA RTT（10-20%权重）+ RTT 梯度（15%权重）。梯度 &gt; 10ms/样本 时触发预测性切换；错误率 &gt; 10% 或梯度 &gt; 15ms/样本 时标记故障。
           </p>
-        </section>
+        </CollapsibleSection>
+
+        {/* P1：策略历史时间轴（订阅 strategy_committed 事件 + 拉取历史） */}
+        <GatewayStrategyHistory />
 
         {/* 核心能力清单 */}
-        <section className="bg-white/60 dark:bg-white/[0.03] rounded-xl border border-black/5 dark:border-stone-700/50 p-4">
-          <h3 className="text-sm font-medium text-[var(--element-bg)] mb-3">核心能力</h3>
+        <CollapsibleSection title="核心能力" storageKey="fw_gateway_capabilities" defaultOpen={false} accent="defense">
           <div className="grid grid-cols-2 gap-2">
             {gatewayMeta.capabilities.map((cap) => (
               <div key={cap} className="flex items-start gap-2 text-[13px] text-neutral-600 dark:text-stone-300">
@@ -1664,7 +1971,7 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </div>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
       </div>
     </div>
   );

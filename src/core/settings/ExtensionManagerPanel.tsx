@@ -108,19 +108,48 @@ export function ExtensionManagerPanel() {
     }
   }, [pluginHot]);
 
-  // 热卸载：等同于禁用（set_plugin_visibility(false) + unload）
-  // 这样"检测新插件"时 visible=false 不会重新加载，避免"卸载后又回来"的问题
-  const handleHotUnload = useCallback(async (pluginId: string) => {
+  // 彻底删除：删除插件目录 + .mufurong 源包 + 可见性记录，并从内存卸载
+  // 带二次确认（与笔记删除一致的危险操作防护）
+  const handleDeletePlugin = useCallback(async (plugin: PluginManifest) => {
+    const pluginId = plugin.id;
+    const name = plugin.name || pluginId;
+    // 浏览器原生 confirm 在 Tauri WebView 中可用，避免引入额外 Dialog 组件
+    const ok = window.confirm(
+      `确定要彻底删除模块「${name}」吗？\n\n` +
+      `此操作会：\n` +
+      `• 删除插件目录（${pluginId}）\n` +
+      `• 删除对应的 .mufurong 源包（若存在，避免下次启动重新解压）\n` +
+      `• 清除启用/禁用配置\n` +
+      `• 从内存中卸载\n\n` +
+      `此操作不可撤销。`
+    );
+    if (!ok) return;
     try {
+      // 先从内存卸载（避免文件被删后仍有残留实例）
       await api.setPluginVisibility(pluginId, false);
       pluginHot?.unload(pluginId);
-      setInstalledPlugins(prev => prev.map(p => p.id === pluginId ? { ...p, visible: false } : p));
+      // 调用后端删除命令
+      await api.deletePlugin(pluginId);
+      // 从本地列表移除
+      setInstalledPlugins(prev => prev.filter(p => p.id !== pluginId));
       window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id: pluginId, visible: false } }));
-      logger.log(`[ExtManager] 热卸载 ${pluginId}（已标记 visible=false）`);
+      setRefreshMsg(`已彻底删除「${name}」`);
+      logger.log(`[ExtManager] 彻底删除 ${pluginId}`);
     } catch (err) {
-      logger.log(`[ExtManager] 热卸载失败 ${pluginId}:`, err);
+      setRefreshMsg(`删除失败: ${err}`);
+      logger.log(`[ExtManager] 彻底删除失败 ${pluginId}:`, err);
     }
   }, [pluginHot]);
+
+  // 打开插件所在文件夹（系统文件管理器）
+  const handleOpenFolder = useCallback(async (pluginId: string) => {
+    try {
+      await api.openPluginFolder(pluginId);
+    } catch (err) {
+      setRefreshMsg(`打开文件夹失败: ${err}`);
+      logger.log(`[ExtManager] 打开文件夹失败 ${pluginId}:`, err);
+    }
+  }, []);
 
   // 检测新插件：重新扫描，只加载 visible=true 且不在 registry 中的插件
   const handleRefresh = async () => {
@@ -221,20 +250,6 @@ export function ExtensionManagerPanel() {
                       <span className={`w-1.5 h-1.5 rounded-full ${isLoaded ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-stone-600'}`} />
                       {isLoaded ? '运行中' : '已禁用'}
                     </span>
-                    <button
-                      onClick={() => pluginHot?.reload(p.id)}
-                      className="btn-press p-1.5 rounded-lg hover:bg-black/5 text-neutral-400 dark:text-stone-500 hover:text-emerald-500 transition-colors"
-                      title="热重载（应用内重新加载，无需重启）"
-                    >
-                      <RefreshCw size={16} />
-                    </button>
-                    <button
-                      onClick={() => handleHotUnload(p.id)}
-                      className="btn-press p-1.5 rounded-lg hover:bg-black/5 text-neutral-400 dark:text-stone-500 hover:text-red-500 transition-colors"
-                      title="热卸载（禁用并从内存卸载，检测新插件时不会重新加载）"
-                    >
-                      <Trash2 size={16} />
-                    </button>
                     <Switch
                       checked={isVisible}
                       onCheckedChange={(val: boolean) => handleTogglePlugin(p, val)}
@@ -242,14 +257,18 @@ export function ExtensionManagerPanel() {
                       title="启用/禁用（立即生效）"
                     />
                     <button
-                      onClick={() => {
-                        const { invoke } = window.__HOST_API__;
-                        invoke('plugin:opener|open_path', { path: '' }).catch(() => {});
-                      }}
+                      onClick={() => handleOpenFolder(p.id)}
                       className="btn-press p-1.5 rounded-lg hover:bg-black/5 text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 transition-colors"
                       title="打开插件文件夹"
                     >
                       <FolderOpen size={16} />
+                    </button>
+                    <button
+                      onClick={() => handleDeletePlugin(p)}
+                      className="btn-press p-1.5 rounded-lg hover:bg-black/5 text-neutral-400 dark:text-stone-500 hover:text-red-500 transition-colors"
+                      title="彻底删除（连同文件，不可撤销）"
+                    >
+                      <Trash2 size={16} />
                     </button>
                   </div>
                 </div>
@@ -366,9 +385,17 @@ function DiagnosticRow({ pluginId, entries }: { pluginId: string; entries: Diagn
 }
 
 /** 按 pluginId 分组诊断条目 */
+/// 良性、无需告警的拒绝原因（扫描阶段因"插件 id 重复，已跳过"产生的噪声）。
+/// 这类情况只是同一个插件在 user_plugins 与 bundled-plugins 各有一份、第二份被跳过的正常去重，
+/// 并不表示插件加载失败，故从诊断面板中过滤，避免误导用户以为有 13 个插件损坏。
+function isBenignReject(e: DiagnosticEntry): boolean {
+  return e.stage === 'scan' && /重复/.test(e.reason);
+}
+
 function groupDiagnostics(entries: DiagnosticEntry[]): { pluginId: string; entries: DiagnosticEntry[] }[] {
   const map = new Map<string, DiagnosticEntry[]>();
   for (const e of entries) {
+    if (isBenignReject(e)) continue; // 过滤良性去重噪声，仅保留真实加载失败
     const list = map.get(e.pluginId) || [];
     list.push(e);
     map.set(e.pluginId, list);

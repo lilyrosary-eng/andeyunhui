@@ -1,4 +1,25 @@
 // 音乐播放器单例 — 在插件 IIFE 作用域内，不依赖宿主
+// debugLog 现在双写：①直接 console.log（在 WebView DevTools 控制台可见，不经 Rust 桥、
+// 永不被沙箱/ACL 吞掉，是最可靠的排查手段）；②再经 debug_log 命令转发到 Rust 终端。
+const debugLog = (m: string) => {
+  try { console.error('[music-smtc]', m); } catch { /* 忽略 */ }
+  try {
+    window.__HOST_API__?.invoke('debug_log', { msg: `[music] ${m}` }).catch(() => {});
+  } catch {
+    /* 忽略 */
+  }
+};
+// 一次性模块加载探针（console.error 不受沙箱 safe-console 吞没，dev/prod 均可见）
+try {
+  console.error(
+    '[music-diag] musicPlayer.ts 模块开始求值; __HOST_API__=' +
+      typeof window.__HOST_API__ +
+      '; __HOST_REACT__=' +
+      typeof window.__HOST_REACT__ +
+      '; 已存在实例=' +
+      (typeof (window as unknown as { __MUSIC_PLAYER__?: unknown }).__MUSIC_PLAYER__),
+  );
+} catch {}
 interface Track {
   id: string;
   filePath: string;
@@ -20,6 +41,8 @@ class MusicPlayer {
   private volume: number = 0.7;
   private playMode: PlayMode = 'list';
   private shuffleIndices: number[] = [];
+  // 系统媒体键（smtc-control 事件）监听的注销函数
+  private smtcUnlisten: (() => void) | null = null;
   // 持久化：当前播放的歌单 ID，组件重载时恢复选中状态
   currentPlaylistId: string | null = null;
   private eventListeners: Record<PlayerEvent, Set<(data: unknown) => void>> = {
@@ -35,15 +58,21 @@ class MusicPlayer {
     this.audio.volume = this.volume;
     this.audio.preload = 'metadata';
     this.bindEvents();
+    this.setupMediaSessionHandlers();
+    this.setupSmtc();
   }
 
   private bindEvents(): void {
     this.audio.addEventListener('play', () => {
       this.isPlaying = true;
+      this.setMediaSessionState('playing');
+      this.pushSmtc();
       this.emit('play', null);
     });
     this.audio.addEventListener('pause', () => {
       this.isPlaying = false;
+      this.setMediaSessionState('paused');
+      this.pushSmtc();
       this.emit('pause', null);
     });
     this.audio.addEventListener('ended', () => {
@@ -51,11 +80,153 @@ class MusicPlayer {
       this.handleEnded();
     });
     this.audio.addEventListener('timeupdate', () => {
+      this.updateMediaSessionPosition();
       this.emit('progress', {
         currentTime: this.audio.currentTime,
         duration: this.audio.duration || 0,
       });
     });
+  }
+
+  // ===== Windows 任务栏「正在播放」媒体控件（Media Session API）=====
+  // WebView2/Chromium 会把 mediaSession 元信息推送到 Windows 任务栏媒体浮窗，
+  // 显示歌曲标题/艺术家/专辑/封面，并响应系统媒体按键（播放/暂停/上一首/下一首）。
+  private setMediaSessionState(state: 'playing' | 'paused' | 'none'): void {
+    try {
+      const ms = (navigator as unknown as { mediaSession?: { playbackState?: string } }).mediaSession;
+      if (ms) ms.playbackState = state;
+    } catch {
+      /* mediaSession 不支持时忽略 */
+    }
+  }
+
+  // 注意：我们刻意【不】通过 JS navigator.mediaSession 设置系统媒体元信息。
+  // 原因：WebView2/Chromium 的媒体会话跑在 msedgewebview2.exe 子进程，无法继承主进程
+  // AUMID，会在任务栏生成一张「未知应用」卡片（且可能带封面，造成与 Rust SMTC 卡片并存、
+  // 互相打架的诡异现象）。任务栏「正在播放」卡片统一由 Rust 进程内的 SystemMediaTransportControls
+  // 会话（smtc.rs）负责，它使用正确的 AUMID + 显示名「岸灯鸢花」。故此处不再设置 metadata。
+  private updateMediaSessionMeta(_track: Track): void {
+    /* 故意留空：OS 媒体卡片由 Rust SMTC 接管 */
+  }
+
+  private updateMediaSessionPosition(): void {
+    try {
+      const ms = navigator as unknown as { mediaSession?: { setPositionState?: (s: { duration: number; position: number; playbackRate: number }) => void } };
+      if (!ms.mediaSession || !ms.mediaSession.setPositionState) return;
+      const d = this.audio.duration;
+      if (!d || !isFinite(d) || d <= 0) return;
+      ms.mediaSession.setPositionState({
+        duration: d,
+        position: Math.min(this.audio.currentTime, d),
+        playbackRate: this.audio.playbackRate || 1,
+      });
+    } catch {
+      /* 忽略 */
+    }
+  }
+
+  // 注意：媒体键（键盘/触摸板/任务栏）统一由 Rust SMTC 的 ButtonPressed 事件回传前端处理，
+  // 见 setupSmtc() 中监听的 "smtc-control"。若此处再用 JS 注册媒体键处理器，会与 Rust 路径
+  // 重复触发（同一按键执行两次），故刻意留空。
+  private setupMediaSessionHandlers(): void {
+    /* 故意留空：媒体键由 Rust SMTC 回传处理 */
+  }
+
+  // ===== 本进程 SMTC 会话（Rust 端）=====
+  // 与 JS mediaSession 不同：该会话运行在 .exe 进程内，任务栏显示「岸灯鸢花」并回传
+  // 系统媒体键（键盘/触摸板/任务栏浮窗）。前端只负责推送状态 + 接收控制事件。
+  private pushSmtc(): void {
+    const track = this.getCurrentTrack();
+    const has = !!track && this.tracks.length > 0;
+    // 标题兜底：很多音频文件没有标题元数据，空标题会让任务栏回退显示 AUMID；
+    // 优先用文件名（去路径），再退到「未知曲目」。
+    const fallbackTitle = track?.title?.trim()
+      ? track.title
+      : (track?.filePath ? track.filePath.split(/[\\/]/).pop()! : '未知曲目');
+    const api = window.__HOST_API__;
+    debugLog(`music push title=${fallbackTitle} playing=${this.isPlaying} can_prev=${has} can_next=${has} tracks=${this.tracks.length}`);
+    if (!api?.invoke) {
+      debugLog('music push: NO API');
+      return;
+    }
+    // debug_log 以 [FE] 前缀必定出现在 Rust 终端，作为"推送是否真发出"的不可抵赖证据。
+    api.invoke('debug_log', { msg: `MUSIC_PUSH title=${fallbackTitle} playing=${this.isPlaying} can_prev=${has} can_next=${has}` }).catch(() => {});
+    api
+      .invoke('smtc_update', {
+        info: {
+          title: fallbackTitle,
+          artist: track?.artist ?? '',
+          album: track?.album ?? '',
+          cover_path: track?.coverPath ?? null,
+          media_type: 'music',
+          is_playing: this.isPlaying,
+          can_prev: has,
+          can_next: has,
+        },
+      })
+      .then(() => {
+        api.invoke('debug_log', { msg: 'MUSIC_PUSH_OK' }).catch(() => {});
+        // 浏览器控制台可见：确认 sMTc_update 是否真正送达 Rust（决定任务栏卡片是否出现）。
+        console.error('[SMTC] push OK', { title: fallbackTitle, playing: this.isPlaying });
+      })
+      .catch((e: unknown) => {
+        api.invoke('debug_log', { msg: 'MUSIC_PUSH_FAIL ' + String(e) }).catch(() => {});
+        console.error('[SMTC] push FAIL', e);
+      });
+  }
+
+  private setupSmtc(): void {
+    const api = window.__HOST_API__;
+    if (!api?.listen) { debugLog('music: no listen api, skip'); return; }
+    debugLog('music: listener registering');
+    // 启动时主动拉取一次 SMTC 诊断（进程级 AUMID / 窗口 AUMID / 注册表 DisplayName 等），
+    // 打印到浏览器控制台，便于排查任务栏「未知应用」。Rust 端 [SMTC] 日志走终端，这里补一份控制台可见的。
+    api.invoke<Record<string, unknown>>('smtc_status')
+      .then((s: Record<string, unknown>) => console.log('[SMTC诊断]', s))
+      .catch(() => {});
+    api
+      .listen<{ action?: string; target?: string } | string>('smtc-control', (e) => {
+        // 兼容新旧载荷：新版为 {action,target}，旧版为纯字符串。
+        const raw = e.payload as { action?: string; target?: string } | string;
+        const action = typeof raw === 'string' ? raw : raw?.action;
+        const target = typeof raw === 'string' ? '' : raw?.target;
+        // 关键：仅当任务栏当前胜出来源是音乐时才响应；target 为空则兼容旧行为（都响应）。
+        if (target && target !== 'music') {
+          debugLog(`music BTN ignored action=${action} target=${target}`);
+          return;
+        }
+        debugLog(`music BTN ${action} (target=${target || 'any'})`);
+        switch (action) {
+          case 'play':
+            this.play();
+            break;
+          case 'pause':
+            this.pause();
+            break;
+          case 'next':
+            this.next();
+            break;
+          case 'previous':
+            this.prev();
+            break;
+          case 'stop':
+            this.pause();
+            this.audio.currentTime = 0;
+            this.updateMediaSessionPosition();
+            break;
+          case 'seekforward':
+            this.seek(this.audio.currentTime + 10);
+            break;
+          case 'seekbackward':
+            this.seek(this.audio.currentTime - 10);
+            break;
+        }
+      })
+      .then((u) => {
+        this.smtcUnlisten = u;
+        debugLog('music: listener registered');
+      })
+      .catch(() => {});
   }
 
   private emit(event: PlayerEvent, data: unknown): void {
@@ -81,15 +252,20 @@ class MusicPlayer {
   private loadTrack(index: number): void {
     if (index < 0 || index >= this.tracks.length) return;
     const track = this.tracks[index];
-    const src = window.__HOST_API__?.convertFileSrc(track.filePath);
+    const api = window.__HOST_API__;
+    try { api?.invoke('debug_log', { msg: `MUSIC_LOAD_TRACK idx=${index} file=${track.filePath}` }).catch(()=>{}); } catch {}
+    const src = api?.convertFileSrc(track.filePath);
     if (src) {
       this.audio.src = src;
       this.currentIndex = index;
       this.emit('trackChange', track);
+      this.updateMediaSessionMeta(track);
+      this.pushSmtc();
     }
   }
 
   play(): void {
+    try { window.__HOST_API__?.invoke('debug_log', { msg: `MUSIC_PLAY idx=${this.currentIndex}` }).catch(()=>{}); } catch {}
     if (this.currentIndex < 0 && this.tracks.length > 0) {
       this.currentIndex = 0;
       this.loadTrack(0);
@@ -150,12 +326,12 @@ class MusicPlayer {
 
   next(): void {
     const idx = this.getNextIndex();
-    if (idx >= 0) { this.loadTrack(idx); if (this.isPlaying) this.play(); }
+    if (idx >= 0) { this.loadTrack(idx); this.play(); }
   }
 
   prev(): void {
     const idx = this.getPrevIndex();
-    if (idx >= 0) { this.loadTrack(idx); if (this.isPlaying) this.play(); }
+    if (idx >= 0) { this.loadTrack(idx); this.play(); }
   }
 
   seek(time: number): void { this.audio.currentTime = time; }
@@ -177,6 +353,13 @@ class MusicPlayer {
    * 避免复用「已销毁」的旧实例（audio.src 已清空、监听器已清空）导致功能失效。
    */
   destroy(): void {
+    try {
+      this.smtcUnlisten?.();
+      this.smtcUnlisten = null;
+      debugLog('music: listener removed');
+    } catch {
+      /* 忽略 */
+    }
     try {
       this.audio.pause();
       this.audio.src = '';
@@ -203,4 +386,9 @@ class MusicPlayer {
 const globalWin = window as unknown as { __MUSIC_PLAYER__?: MusicPlayer };
 export const musicPlayer: MusicPlayer = globalWin.__MUSIC_PLAYER__ ?? new MusicPlayer();
 globalWin.__MUSIC_PLAYER__ = musicPlayer;
+// 也尝试把播放器暴露到顶层 window，方便 DevTools 控制台直接访问（插件可能跑在 sandbox/iframe）。
+try {
+  ((window.top as unknown) as any).__MUSIC_PLAYER__ = musicPlayer;
+} catch {}
+try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLAYER_READY' }).catch(()=>{}); } catch {}
 export type { Track, PlayMode };

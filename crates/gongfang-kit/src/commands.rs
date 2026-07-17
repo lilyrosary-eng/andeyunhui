@@ -9,7 +9,7 @@
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::AppHandle;
 
@@ -226,6 +226,183 @@ pub async fn gongfang_waf_detect(url: String) -> Result<WafDetectResult, String>
         let _ = url;
         Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
     }
+}
+
+// ============ 爬虫实际爬取命令 ============
+
+/// 爬取结果（实际 HTTP 请求返回的页面数据）
+#[derive(Serialize)]
+pub struct FetchResult {
+    pub url: String,
+    pub status: u16,
+    pub content_type: String,
+    pub content_length: usize,
+    pub title: Option<String>,
+    pub body_preview: String,
+    pub links: Vec<String>,
+    pub duration_ms: u64,
+    pub error: Option<String>,
+}
+
+/// 实际爬取 URL — 发 HTTP GET 请求，返回页面内容 + 提取的标题和链接
+///
+/// 这是"对话即攻防"的核心：用户输入 URL，AI 调用 fetch，返回真实数据
+#[tauri::command]
+pub async fn gongfang_fetch(url: String) -> Result<FetchResult, String> {
+    if url.trim().is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    #[cfg(feature = "crawler")]
+    {
+        let start = std::time::Instant::now();
+        let ua = crate::crawler::stealth::user_agent("chrome_122");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|e| format!("HTTP 客户端构建失败: {}", e))?;
+
+        match client.get(&url).header("User-Agent", ua).send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let body = resp.text().await.unwrap_or_default();
+                let content_length = body.len();
+
+                // 提取 <title>
+                let title = extract_title(&body);
+
+                // 提取 <a href="..."> 链接（最多 50 个）
+                let links = extract_links(&body, &url);
+
+                let body_preview: String = body.chars().take(2000).collect();
+                let duration_ms = start.elapsed().as_millis() as u64;
+
+                Ok(FetchResult {
+                    url,
+                    status,
+                    content_type,
+                    content_length,
+                    title,
+                    body_preview,
+                    links,
+                    duration_ms,
+                    error: None,
+                })
+            }
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                Ok(FetchResult {
+                    url,
+                    status: 0,
+                    content_type: String::new(),
+                    content_length: 0,
+                    title: None,
+                    body_preview: String::new(),
+                    links: vec![],
+                    duration_ms,
+                    error: Some(e.to_string()),
+                })
+            }
+        }
+    }
+    #[cfg(not(feature = "crawler"))]
+    {
+        let _ = url;
+        Err("crawler feature 未启用，请用 --features gongfang-crawler 编译".to_string())
+    }
+}
+
+/// 从 HTML 提取 <title>
+fn extract_title(html: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    let start = lower.find("<title")?;
+    let content_start = html[start..].find('>')? + start + 1;
+    let end = lower[content_start..].find("</title>")? + content_start;
+    let title = html[content_start..end].trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    }
+}
+
+/// 从 HTML 提取 <a href="..."> 链接，转为绝对 URL（纯字符串匹配，无需 regex 依赖）
+fn extract_links(html: &str, base_url: &str) -> Vec<String> {
+    let mut links = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for part in html.split("href") {
+        if part.is_empty() {
+            continue;
+        }
+        let trimmed = part.trim_start();
+        if !trimmed.starts_with('=') {
+            continue;
+        }
+        let after_eq = trimmed[1..].trim_start();
+        // 找引号
+        let (quote, rest) = if after_eq.starts_with('"') {
+            ('"', &after_eq[1..])
+        } else if after_eq.starts_with('\'') {
+            ('\'', &after_eq[1..])
+        } else {
+            continue;
+        };
+        // 找结束引号
+        if let Some(end) = rest.find(quote) {
+            let href = &rest[..end];
+            if href.is_empty()
+                || href.starts_with('#')
+                || href.starts_with("javascript:")
+                || href.starts_with("mailto:")
+            {
+                continue;
+            }
+            let absolute = resolve_url(href, base_url);
+            if seen.insert(absolute.clone()) && links.len() < 50 {
+                links.push(absolute);
+            }
+        }
+    }
+    links
+}
+
+/// 相对 URL 转绝对 URL
+fn resolve_url(href: &str, base: &str) -> String {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
+    }
+    // 提取 base 的 scheme://host
+    if let Some(scheme_end) = base.find("://") {
+        let after_scheme = &base[scheme_end + 3..];
+        if let Some(path_start) = after_scheme.find('/') {
+            let origin = &base[..scheme_end + 3 + path_start];
+            if href.starts_with('/') {
+                return format!("{}{}", origin, href);
+            } else {
+                // 相对路径
+                let base_path = &after_scheme[path_start..];
+                if let Some(last_slash) = base_path.rfind('/') {
+                    return format!("{}/{}", &base[..scheme_end + 3 + path_start + last_slash], href);
+                }
+                return format!("{}/{}", origin, href);
+            }
+        } else {
+            // base 无路径（如 https://example.com）
+            if href.starts_with('/') {
+                return format!("{}{}", base, href);
+            } else {
+                return format!("{}/{}", base, href);
+            }
+        }
+    }
+    href.to_string()
 }
 
 // ============ 逆向框架专属命令 ============
@@ -550,4 +727,185 @@ pub fn gongfang_gateway_pool() -> Result<Vec<GatewayNodeSummary>, String> {
     {
         Err("gateway feature 未启用".to_string())
     }
+}
+
+// ============ P0 通用信息层命令 ============
+
+/// 拉取最近 N 条内核事件（前端 EventStream 初始化时调用，之后靠订阅 gongfang_event 实时推送）
+#[tauri::command]
+pub fn gongfang_events_recent(n: Option<usize>) -> Result<Vec<crate::kernel::events::KernelEvent>, String> {
+    let n = n.unwrap_or(100).min(500);
+    match crate::kernel::events::global() {
+        Some(bus) => Ok(bus.recent_events(n)),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// 拉取最近 N 秒的时序指标（前端 MetricsChart 渲染 4 曲线）
+#[tauri::command]
+pub fn gongfang_metrics_history(seconds: Option<u32>) -> Result<Vec<crate::kernel::events::MetricSample>, String> {
+    let seconds = seconds.unwrap_or(300).min(3600);
+    match crate::kernel::events::global() {
+        Some(bus) => Ok(bus.recent_metrics(seconds)),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// 拉取最近 N 条 AI 推理日志（前端 AiReasoningPanel 展示推理过程）
+#[tauri::command]
+pub fn gongfang_ai_reasoning_recent(n: Option<usize>) -> Result<Vec<crate::kernel::events::ReasoningEntry>, String> {
+    let n = n.unwrap_or(20).min(50);
+    match crate::kernel::events::global() {
+        Some(bus) => Ok(bus.recent_reasoning(n)),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// 设置是否推送 Tick 事件到前端（默认不推送，避免 50ms 一次的洪水；前端按需开启）
+#[tauri::command]
+pub fn gongfang_set_emit_tick(enabled: bool) -> Result<(), String> {
+    match crate::kernel::events::global() {
+        Some(bus) => {
+            bus.set_emit_tick(enabled);
+            Ok(())
+        }
+        None => Err("攻防内核未启动".to_string()),
+    }
+}
+
+// ============ 目标工作区命令族 ============
+
+use crate::kernel::workspace::{Target, TargetKind};
+
+/// 目标摘要（前端展示用）
+#[derive(Serialize)]
+pub struct TargetSummary {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub kind: String,
+    pub created_at: i64,
+    pub last_active_at: i64,
+    pub note: String,
+    pub tags: Vec<String>,
+    pub is_active: bool,
+}
+
+/// 保存目标请求
+#[derive(Deserialize)]
+pub struct SaveTargetRequest {
+    pub name: String,
+    pub address: String,
+    pub kind: Option<String>,
+    pub note: Option<String>,
+    pub tags: Option<Vec<String>>,
+}
+
+/// 列出所有目标（按 last_active_at 倒序）
+#[tauri::command]
+pub fn gongfang_target_list(app: AppHandle) -> Result<Vec<TargetSummary>, String> {
+    let ws = crate::kernel::workspace::load(&app);
+    let active_id = ws.active_id.clone();
+    let summary: Vec<TargetSummary> = ws
+        .list_sorted()
+        .into_iter()
+        .map(|t| TargetSummary {
+            id: t.id.clone(),
+            name: t.name.clone(),
+            address: t.address.clone(),
+            kind: t.kind.as_str().to_string(),
+            created_at: t.created_at,
+            last_active_at: t.last_active_at,
+            note: t.note.clone(),
+            tags: t.tags.clone(),
+            is_active: Some(t.id.clone()) == active_id,
+        })
+        .collect();
+    Ok(summary)
+}
+
+/// 保存（新建或更新）目标
+#[tauri::command]
+pub fn gongfang_target_save(app: AppHandle, req: SaveTargetRequest) -> Result<TargetSummary, String> {
+    if req.name.trim().is_empty() {
+        return Err("name 不能为空".to_string());
+    }
+    if req.address.trim().is_empty() {
+        return Err("address 不能为空".to_string());
+    }
+    let mut ws = crate::kernel::workspace::load(&app);
+    let kind = req
+        .kind
+        .as_deref()
+        .and_then(TargetKind::from_str)
+        .unwrap_or_default();
+    let name_clone = req.name.clone();
+    let address_clone = req.address.clone();
+    let mut target = Target::new(req.name, req.address, kind);
+    let target_id = target.id.clone();
+    let target_created_at = target.created_at;
+    let target_kind = target.kind.as_str().to_string();
+    // 应用可选字段
+    if let Some(note) = req.note {
+        target.note = note;
+    }
+    if let Some(tags) = req.tags {
+        target.tags = tags;
+    }
+    ws.add(target);
+    crate::kernel::workspace::save(&app, &ws)?;
+    Ok(TargetSummary {
+        id: target_id,
+        name: name_clone,
+        address: address_clone,
+        kind: target_kind,
+        created_at: target_created_at,
+        last_active_at: target_created_at,
+        note: String::new(),
+        tags: Vec::new(),
+        is_active: true,
+    })
+}
+
+/// 删除目标
+#[tauri::command]
+pub fn gongfang_target_delete(app: AppHandle, id: String) -> Result<(), String> {
+    let mut ws = crate::kernel::workspace::load(&app);
+    if !ws.remove(&id) {
+        return Err("目标不存在".to_string());
+    }
+    crate::kernel::workspace::save(&app, &ws)
+}
+
+/// 激活目标
+#[tauri::command]
+pub fn gongfang_target_activate(app: AppHandle, id: String) -> Result<(), String> {
+    let mut ws = crate::kernel::workspace::load(&app);
+    if !ws.activate(&id) {
+        return Err("目标不存在".to_string());
+    }
+    crate::kernel::workspace::save(&app, &ws)
+}
+
+/// 获取目标详情（含 metadata）
+#[tauri::command]
+pub fn gongfang_target_get(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    let ws = crate::kernel::workspace::load(&app);
+    let t = ws.get(&id).ok_or("目标不存在".to_string())?;
+    serde_json::to_value(t).map_err(|e| format!("序列化失败: {}", e))
+}
+
+/// 设置目标元数据字段（各框架可挂载自己的状态：扫描结果/符号表/策略等）
+#[tauri::command]
+pub fn gongfang_target_set_metadata(
+    app: AppHandle,
+    id: String,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let mut ws = crate::kernel::workspace::load(&app);
+    if !ws.set_metadata(&id, &key, value) {
+        return Err("目标不存在".to_string());
+    }
+    crate::kernel::workspace::save(&app, &ws)
 }

@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod smtc;
 pub mod screenshot;
 pub mod services;
 // 专业模块「薄荷」工具以内部依赖包形式存在（crates/pro-tools-kit）

@@ -17,21 +17,10 @@ external-deps/
 ├── _build/             # 外部依赖的「构建入口」源（如 codemirror-entry.js），由 scripts/build-external-deps.mjs 打成 IIFE
 ├── codemirror/         # CodeMirror 6 — IDE 插件的专业编辑器内核（IIFE，按需加载，不进插件包）
 │   └── index.js
-├── markitdown/         # Microsoft MarkItDown — 多格式文档转 Markdown (Python)
 └── <future-deps>/       # 未来引入的外部依赖...
 ```
 
 ## 已集成依赖
-
-### markitdown
-
-- **来源**：[microsoft/markitdown](https://github.com/microsoft/markitdown)
-- **用途**：将 PDF、DOCX、PPTX、XLSX、HTML、EPUB 等格式转 Markdown
-- **被引用位置**：
-  - `src-tauri/src/services/markitdown_service.rs` — Rust 后端通过 Python 子进程调用
-  - `src/core/notes/NotesEditor.tsx` — 笔记编辑器"导入文档"功能
-  - `src-tauri/src/services/reading_service.rs` — 阅读模块 PDF/DOCX 兜底解析
-- **运行时依赖**：用户系统需安装 `pip install markitdown`
 
 ## 添加新依赖
 
@@ -43,6 +32,23 @@ external-deps/
 2. 将第三方项目文件放入该子文件夹
 3. 在本 README 的"已集成依赖"表中添加条目
 4. 如需从代码引用路径，建议通过环境变量或配置而非硬编码
+
+## 用户侧依赖安装（运行时）
+
+应用启动后从 `bundled-dlc/` 复制 `.mujin` 到 `user_external_deps/` 自动解压，无需用户干预。
+用户也可手动安装依赖（两种方式皆可识别）：
+
+1. **`.mujin` 私有格式**：把 `.mujin` 文件放到 `user_external_deps/` 对应母文件夹下
+   - 例：`user_external_deps/niaoluo/ide/codemirror.mujin`
+   - 应用启动时自动解压，源文件 mtime 匹配则跳过（速度极快）
+2. **源文件目录（直接放置）**：把解压后的依赖原始目录放到 `user_external_deps/` 对应位置
+   - 例：`user_external_deps/niaoluo/ide/codemirror/index.js`
+   - 应用直接识别目录，不解压也不覆盖
+   - 适合从 GitHub 直接下载源码使用的场景
+   - 若已存在 `.mujin` 解压产物（含 `.mujin.extracted` marker），新版 `.mujin` 会覆盖旧解压；
+     若目录是用户手动放置（无 marker），`.mujin` 解压会自动跳过，保护用户源文件
+
+> 路径优先级：`user_external_deps/`（用户安装，优先）> `bundled-dlc/` 解压产物（次之）
 
 ## 已集成依赖（JS / 前端）
 

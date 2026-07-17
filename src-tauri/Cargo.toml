@@ -34,6 +34,9 @@ walkdir = "2"
 rayon = "1"
 reqwest = { version = "0.12", features = ["json"] }
 regex = "1"
+# tokio 显式依赖：mcp_service 用 tokio::task::spawn_blocking 在独立线程跑 stdio JSON-RPC
+# （tauri 2 内部用 tokio，但应用代码需显式声明才能 use tokio::）
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
 mimalloc = "0.1"
 epub-parser = "=0.3.4"
 ammonia = "4"
@@ -54,8 +57,8 @@ arboard = "3"
 # 微信式截图：可见窗口枚举（EnumWindows）+ 长截图 PrintWindow（仍走 GDI）
 winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase", "objbase", "combaseapi", "jobapi2", "objidl", "unknwnbase", "winerror", "ole2", "wtypes", "minwindef", "windef", "guiddef"] }
 # WGC 屏幕捕获后端（替换 GDI BitBlt）：基于 Windows.Graphics.Capture，硬件加速、可截独占全屏游戏；
-# windows-capture 1.5 依赖 windows ^0.61.3，与 Tauri 锁定的 0.61.3 完全一致，零双份编译、无版本冲突
-windows-capture = "1.5"
+# windows-capture 2.0 支持更高版本的 windows crate，推荐搭配 windows 0.62 使用
+windows-capture = "2.0"
 uuid = { version = "1", features = ["v4"] }
 # 原生 Office 文档解析（OOXML = zip + XML），毫秒级、不依赖 Python
 zip = "3"
@@ -69,6 +72,27 @@ once_cell = "1"
 # 统一日志门面：release 默认 warn 级别，dev 开 debug；替代散落的 eprintln!
 log = "0.4"
 env_logger = "0.11"
+
+# Windows 任务栏「正在播放」显示名修正：设置本进程 AUMID + 注册表显示名「岸灯鸢花」，
+# 使 WebView2/Chromium 注册的媒体会话显示为「岸灯鸢花」而非「未知应用」。
+# 注：本环境 windows crate (0.61/0.62) 的 Media_Control 仅生成会话的传输方法，未生成
+# Set*（TrySetMediaPropertiesAsync 等）/GetSessionControls 等写入方法，故无法用 Rust 原生
+# 任务栏「正在播放」：在 Rust 进程内创建 WinRT SystemMediaTransportControls 会话
+# （正确显示名「岸灯鸢花」+ 响应系统媒体键）。需要 Media/Media_Playback（SMTC 类型）
+# 与 Win32_System_WinRT（ISystemMediaTransportControlsInterop / RoGetActivationFactory）。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_Storage_EnhancedStorage",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Registry",
+  "Win32_System_Variant",
+  "Win32_System_WinRT",
+  "Media",
+  "Media_Playback",
+] }
 
 [features]
 # 攻防模块：启用爬虫框架（reqwest 代理池 + 双令牌桶 + EWMA + CDP 隐身 JS）
@@ -94,3 +118,7 @@ codegen-units = 1
 panic = "abort"
 # 最高优化等级（3 = 速度优先，s = 体积优先）
 opt-level = 3
+# 整数溢出检查：debug 默认开启（panic），release 默认关闭（静默回绕）。
+# 开启后 dev 与 release 行为一致，避免出现 "dev 正常、release 算出诡异数字" 的难定位 bug；
+# 代价是热点数值循环性能下降约 5-10%，但本应用非数值密集型，可接受。
+overflow-checks = true
