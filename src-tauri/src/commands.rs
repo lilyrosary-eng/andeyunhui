@@ -1264,6 +1264,28 @@ pub fn write_text_file(path: String, content: String) -> Result<(), String> {
     })
 }
 
+/// 写入二进制文件（base64 解码）。供前端导出 XLSX / 图片等二进制产物到磁盘。
+/// 采用与 `write_text_file` 一致的原子写（临时文件 + rename），避免写一半被读取导致损坏。
+#[tauri::command]
+pub fn write_file_bytes(path: String, content_base64: String) -> Result<(), String> {
+    use base64::Engine as _;
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+        }
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(content_base64)
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    let tmp = format!("{}.{}.tmp", path, std::process::id());
+    std::fs::write(&tmp, &bytes).map_err(|e| format!("写入失败: {}", e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("写入失败: {}", e)
+    })
+}
+
 // 读取文本文件内容（IDE 子插件用），以 UTF-8 解析（含非法字节时容错替换）
 #[tauri::command]
 pub fn read_text_file(path: String) -> Result<String, String> {
@@ -1481,8 +1503,17 @@ const READABLE_EXTENSIONS: &[&str] = &[
 ];
 
 /// 将文件导入中转站（复制到 app_data/transfer_station/dropzone/）
+///
+/// `placeholder_label`：可选。提供时（如录屏保存），先立即广播 `dropzone-saving` 占位事件
+/// （前端展示「录屏文件保存中」），再把实际复制/快照放进后台线程；复制完成后广播
+/// `dropzone-changed`（真实文件就位）与 `dropzone-saving-done`（移除占位）。这样巨大文件也
+/// 能「保存秒结束」，且中转站即时出现占位、绝不静默处理。
 #[tauri::command]
-pub fn import_to_dropzone(app: tauri::AppHandle, source_path: String) -> Result<ImportedFile, String> {
+pub fn import_to_dropzone(
+    app: tauri::AppHandle,
+    source_path: String,
+    placeholder_label: Option<String>,
+) -> Result<ImportedFile, String> {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1513,33 +1544,65 @@ pub fn import_to_dropzone(app: tauri::AppHandle, source_path: String) -> Result<
     std::fs::create_dir_all(&dropzone_dir).map_err(|e| format!("创建目录失败: {}", e))?;
     
     let dest_path = dropzone_dir.join(&file_id);
-    std::fs::copy(&source_path, &dest_path).map_err(|e| format!("复制文件失败: {}", e))?;
-
-    // 同时生成「存档」快照（设置「中转站 / 存档」：文件一拖入即快照，可恢复/删除）。
-    // 超大文件（>100MB）跳过快照，避免整文件读入内存导致 OOM。
-    if size <= 100 * 1024 * 1024 {
-        let _ = transfer_station::archive_snapshot(
-            &app_data,
-            "file",
-            &format!("{}", timestamp),
-            &file_name,
-            &std::fs::read(&dest_path).unwrap_or_default(),
-            &extension,
-        );
-    }
-    
     let imported_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    
-    Ok(ImportedFile {
+
+    let result = ImportedFile {
         file_id: file_id.clone(),
-        original_name: file_name,
-        extension,
+        original_name: file_name.clone(),
+        extension: extension.clone(),
         size,
         stored_path: file_id.clone(),
         absolute_path: dest_path.to_string_lossy().to_string(),
         imported_at,
         is_readable,
-    })
+    };
+
+    // 占位事件：立即让中转站显示「保存中」，绝不静默。
+    if let Some(label) = &placeholder_label {
+        let _ = app.emit(
+            "dropzone-saving",
+            serde_json::json!({ "tempId": file_id, "name": file_name, "label": label }),
+        );
+    }
+
+    // 后台线程执行实际复制与快照，避免巨大文件阻塞命令/前台（保存秒结束）。
+    let app_thread = app.clone();
+    let source_path_t = source_path;
+    let dest_path_t = dest_path;
+    let extension_t = extension;
+    let size_t = size;
+    let timestamp_t = timestamp;
+    let file_name_t = file_name;
+    let temp_id_t = file_id;
+    std::thread::spawn(move || {
+        if std::fs::copy(&source_path_t, &dest_path_t).is_err() {
+            let _ = app_thread.emit(
+                "dropzone-saving-done",
+                serde_json::json!({ "tempId": temp_id_t }),
+            );
+            return;
+        }
+        // 同时生成「存档」快照（设置「中转站 / 存档」：文件一拖入即快照，可恢复/删除）。
+        // 超大文件（>100MB）跳过快照，避免整文件读入内存导致 OOM。
+        if size_t <= 100 * 1024 * 1024 {
+            let _ = transfer_station::archive_snapshot(
+                &app_data,
+                "file",
+                &format!("{}", timestamp_t),
+                &file_name_t,
+                &std::fs::read(&dest_path_t).unwrap_or_default(),
+                &extension_t,
+            );
+        }
+        // 复制完成：广播真实文件已就位，并移除占位。
+        let _ = app_thread.emit("dropzone-changed", ());
+        let _ = app_thread.emit(
+            "dropzone-saving-done",
+            serde_json::json!({ "tempId": temp_id_t }),
+        );
+    });
+
+    Ok(result)
 }
 
 /// 读取中转站中的文本文件内容
@@ -1626,7 +1689,10 @@ pub fn delete_dropzone_file(app: tauri::AppHandle, stored_path: String) -> Resul
     if file_path.exists() {
         std::fs::remove_file(&file_path).map_err(|e| format!("删除文件失败: {}", e))?;
     }
-    
+
+    // 删除完成：广播事件让中转站实时刷新
+    let _ = app.emit("dropzone-changed", ());
+
     Ok(())
 }
 
@@ -1650,7 +1716,10 @@ pub fn clear_dropzone(app: tauri::AppHandle) -> Result<u32, String> {
             }
         }
     }
-    
+
+    // 清空完成：广播事件让中转站实时刷新
+    let _ = app.emit("dropzone-changed", ());
+
     Ok(count)
 }
 
@@ -1982,10 +2051,28 @@ pub fn wps_export_pptx(path: String, json: String) -> Result<(), String> {
 }
 
 /// wps 演示文件编辑器：从 .pptx 文件导入为幻灯片 JSON。
+///
+/// 图片以本地文件形式落盘到 app_data/pptx_media/，src 仅记录路径（前端用 asset: 协议加载），
+/// 避免 base64 内联导致内存/JSON 体积爆炸、导入大文件时卡死或闪退。
 #[tauri::command]
-pub fn wps_import_pptx(path: String) -> Result<String, String> {
+pub fn wps_import_pptx(app: AppHandle, path: String) -> Result<String, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("读取 {} 失败: {}", path, e))?;
-    crate::services::pptx_import::pptx_to_json(&bytes)
+    let media_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("pptx_media");
+    std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建图片目录失败: {}", e))?;
+    // 防御：解析若 panic，返回错误而非崩溃整个应用（之前解析崩溃会导致导入闪退）
+    let work = std::panic::AssertUnwindSafe(|| {
+        crate::services::pptx_import::pptx_to_json(&bytes, &media_dir)
+    });
+    match std::panic::catch_unwind(work) {
+        Ok(r) => r,
+        Err(_) => Err(
+            "导入解析发生崩溃（panic）。请重新导入并查看弹出的「导入诊断」摘要，或把 app_data/logs/app.log 发我定位。".into(),
+        ),
+    }
 }
 
 /// 将 base64 文件内容写入临时文件，调用原生解析器转换为 Markdown。
@@ -2036,6 +2123,7 @@ pub fn add_image_to_dropzone(
 ) -> Result<String, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let dest = copy_file_to_dropzone(&app_data, &source_path, original_name.as_deref(), None)?;
+    let _ = app.emit("dropzone-changed", ());
     Ok(format!(
         "localimg://{}",
         crate::services::document_parser::js_encode_uri_component(&dest.to_string_lossy())
@@ -2065,6 +2153,7 @@ pub fn add_image_bytes_to_dropzone(
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let dest = copy_file_to_dropzone(&app_data, &tmp_str, Some(&original_name), None)?;
     let _ = std::fs::remove_file(&tmp);
+    let _ = app.emit("dropzone-changed", ());
     Ok(format!(
         "localimg://{}",
         crate::services::document_parser::js_encode_uri_component(&dest.to_string_lossy())
@@ -2095,6 +2184,9 @@ pub fn add_bytes_to_dropzone(
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let dest = copy_file_to_dropzone(&app_data, &tmp_str, Some(&original_name), None)?;
     let _ = std::fs::remove_file(&tmp);
+
+    // 写入完成：广播事件让中转站实时刷新
+    let _ = app.emit("dropzone-changed", ());
 
     let file_name = dest
         .file_name()

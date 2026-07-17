@@ -6,5 +6,8 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch"
+  },
+  "dependencies": {
+    "xlsx": "0.18.5"
   }
 }

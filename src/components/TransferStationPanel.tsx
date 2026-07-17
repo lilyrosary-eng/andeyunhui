@@ -1,6 +1,7 @@
 import { useSyncExternalStore, useCallback, useEffect, useState } from 'react';
 import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 import { api, type ImportedFile } from '@/lib/api';
 
@@ -52,6 +53,28 @@ export function TransferStationPanel({ onOpenReadableFile }: TransferStationPane
   const [loading, setLoading] = useState(false);
   // 悬停时预取图片字节仅用于显示缩略图；原生拖出由 Rust 端 DoDragDrop 完成，无需前端字节缓存
   const [imgUrls, setImgUrls] = useState<Record<string, string>>({});
+  // 中转站「保存中」占位：录屏等巨大文件保存时，Rust 先广播 dropzone-saving 占位，
+  // 后台拷贝完成再广播 dropzone-saving-done 移除占位（绝不静默）。仅前端临时态，不落盘。
+  const [savingItems, setSavingItems] = useState<{ tempId: string; name: string; label: string }[]>([]);
+  useEffect(() => {
+    const unSaving = listen<{ tempId: string; name: string; label: string }>(
+      'dropzone-saving',
+      (e) => {
+        const p = e.payload;
+        setSavingItems((prev) =>
+          prev.some((x) => x.tempId === p.tempId) ? prev : [...prev, p],
+        );
+      },
+    );
+    const unDone = listen<{ tempId: string }>('dropzone-saving-done', (e) => {
+      const t = e.payload.tempId;
+      setSavingItems((prev) => prev.filter((x) => x.tempId !== t));
+    });
+    return () => {
+      void unSaving.then((fn) => fn());
+      void unDone.then((fn) => fn());
+    };
+  }, []);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -169,11 +192,11 @@ export function TransferStationPanel({ onOpenReadableFile }: TransferStationPane
         </div>
 
         {/* 文件列表 */}
-        {loading && files.length === 0 ? (
+        {loading && files.length === 0 && savingItems.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 gap-3 text-neutral-400 dark:text-stone-500">
             <p className="text-sm">加载中…</p>
           </div>
-        ) : files.length === 0 ? (
+        ) : files.length === 0 && savingItems.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 gap-3 text-neutral-400 dark:text-stone-500">
             <Inbox size={40} className="opacity-30" />
             <p className="text-sm">暂无文件</p>
@@ -181,6 +204,25 @@ export function TransferStationPanel({ onOpenReadableFile }: TransferStationPane
           </div>
         ) : (
           <div className="space-y-2">
+            {/* 中转站「保存中」占位行：巨大文件后台拷贝时即时占位，绝不静默 */}
+            {savingItems.map((s) => (
+              <div
+                key={s.tempId}
+                className="glass-panel p-3 flex items-center gap-3 opacity-80"
+                title="文件正在后台存入中转站"
+              >
+                <div className="w-9 h-9 rounded-lg bg-[var(--element-muted)] flex items-center justify-center text-[var(--element-bg)] flex-shrink-0 animate-pulse">
+                  <File size={16} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">
+                    {s.name}
+                  </div>
+                  <div className="text-xs text-neutral-400 dark:text-stone-500">{s.label}…</div>
+                </div>
+                <div className="text-xs text-[var(--element-bg)] animate-pulse flex-shrink-0">保存中</div>
+              </div>
+            ))}
             {files.map((file) => {
               const imgSrc = isImageFile(file.extension) ? imgUrls[file.storedPath] : undefined;
               const rowContent = (

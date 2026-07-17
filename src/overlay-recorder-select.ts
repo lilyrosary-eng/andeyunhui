@@ -194,12 +194,16 @@ function toPhys(cx: number, cy: number): { x: number; y: number } {
 }
 
 // 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标的窗口。
-// **不再跳过 is_self**：用户明确要求"不需要屏蔽"，应允许识别应用主窗口。
+// **关键修复（录屏窗口识别只识别一个 / 鼠标不动）**：本进程主窗口（is_self）在录屏
+// 场景下通常是最大化、且位于其他窗口之上的顶层窗口，若纳入命中测试，光标下任何位置
+// 都会先命中它 → 永远只识别到主窗口、鼠标移动无效。因此此处跳过 is_self，让光标能
+// 穿透到其下方的真实目标窗口。录制主窗口自身可用自由框选（拖拽）实现。
 // fullscreen overlay / 控制台 / 截图覆盖窗 / 浮窗剪贴板已在 Rust 端
 // filter_self_overlay_windows 中按 hwnd 过滤，不会出现在 windows 列表中。
 function hitWindow(cx: number, cy: number): Win | null {
   const p = toPhys(cx, cy);
   for (const w of windows) {
+    if (w.is_self) continue;
     if (p.x >= w.x && p.x <= w.x + w.width && p.y >= w.y && p.y <= w.y + w.height) {
       return w;
     }
@@ -404,7 +408,7 @@ async function startRecordingWithRegion(x: number, y: number, w: number, h: numb
     console.log("[录屏区域] 传递 region(物理像素):", { x, y, w, h, regionX: x, regionY: y, regionW: w, regionH: h });
     await invoke("start_recording", {
       outputPath,
-      fps: 30,
+      fps: 60,
       monitorIndex: null,
       regionX: x,
       regionY: y,
