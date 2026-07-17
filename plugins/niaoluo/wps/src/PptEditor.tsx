@@ -104,6 +104,18 @@ const SHAPE_LABEL: Record<PptShapeKind, string> = {
   line: '直线',
 };
 
+// 解析图片 src：data:/http(s): 直接使用；本地落盘路径（导入图片）经 asset: 协议加载，
+// 避免把整张图以巨大 base64 塞进 DOM / localStorage。
+function resolveImg(src?: string): string {
+  if (!src) return '';
+  if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) return src;
+  try {
+    return hostApi.convertFileSrc(src);
+  } catch {
+    return src;
+  }
+}
+
 // 统一以 SVG 渲染形状：画布、缩略图、属性面板视觉一致，并支持圆角矩形 / 三角 / 箭头。
 function ShapeSvg({ el, scale }: { el: PptElement; scale: number }) {
   const w = el.w * scale;
@@ -268,7 +280,7 @@ function SlideView({ slide, scale }: { slide: PptSlide; scale: number }) {
             );
           }
           if (el.type === 'image') {
-            return <img key={el.id} src={el.src} draggable={false} className="pointer-events-none" style={{ ...base, objectFit: 'fill' }} alt="" />;
+            return <img key={el.id} src={resolveImg(el.src)} draggable={false} className="pointer-events-none" style={{ ...base, objectFit: 'fill' }} alt="" />;
           }
           // shape（矩形 / 圆角矩形 / 椭圆 / 直线 / 三角 / 箭头），统一用 SVG 渲染
           return (
@@ -281,16 +293,56 @@ function SlideView({ slide, scale }: { slide: PptSlide; scale: number }) {
   );
 }
 
-// 放映模式：全屏逐页，方向键/空格/点击翻页，Esc 退出。
+// 放映模式：真正全屏逐页，方向键/空格/点击翻页，Esc 退出。
+// 标注工具：多种颜色画笔、荧光笔、橡皮擦，工具栏半透明并自动隐藏（鼠标移到屏幕顶部复现），
+// 标注画在幻灯片之上的透明画布，不影响播放与翻页（仅当选中画笔/橡皮时拦截指针，默认指针模式可点击翻页）。
+type AnnoTool = 'nav' | 'pen' | 'highlighter' | 'eraser';
+const ANNO_COLORS = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#a855f7', '#ffffff', '#111111'];
+
+// 橡皮光标：用与橡皮等大的圆环 SVG 作为光标，提供清晰的大小反馈
+// （之前用 'cell'/crosshair，看不到橡皮实际大小）。直径 = size*3，与 applyStroke 的 lineWidth 一致。
+const eraserCursor = (size: number) => {
+  const d = Math.max(10, Math.min(240, Math.round(size * 3))); // CSS px
+  const r = d / 2;
+  const svg =
+    `<svg xmlns='http://www.w3.org/2000/svg' width='${d}' height='${d}'>` +
+    `<circle cx='${r}' cy='${r}' r='${r - 1.5}' fill='rgba(255,255,255,0.12)' stroke='black' stroke-width='1.5'/>` +
+    `<circle cx='${r}' cy='${r}' r='${r - 1.5}' fill='none' stroke='white' stroke-width='1'/>` +
+    `</svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${r} ${r}, crosshair`;
+};
+
 function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: number; onExit: () => void }) {
   const [idx, setIdx] = useState(start);
   const [stage, setStage] = useState({ w: 960, h: 540 });
+  const [tool, setTool] = useState<AnnoTool>('nav');
+  const [color, setColor] = useState(ANNO_COLORS[0]);
+  const [size, setSize] = useState(4);
+  const [barVisible, setBarVisible] = useState(true);
 
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const drawing = useRef(false);
+  const last = useRef<{ x: number; y: number } | null>(null);
+  const hideTimer = useRef<number | null>(null);
+  const barVisibleRef = useRef(true); // 避免每次鼠标移动都触发整页重渲染（卡顿根因）
+  const undoStack = useRef<ImageData[]>([]); // 标注撤销栈（快照式）
+  const wheelCooldown = useRef(false); // 滚轮翻页防抖
+
+  // 进入真正全屏（隐藏任务栏等），退出时退出全屏
+  useEffect(() => {
+    const el = containerRef.current;
+    if (el && el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    return () => {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    };
+  }, []);
+
+  // 适配舞台尺寸（保持 16:9）
   useEffect(() => {
     const fit = () => {
-      const pad = 0;
-      const vw = window.innerWidth - pad;
-      const vh = window.innerHeight - pad;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
       const w = Math.min(vw, (vh * LOGICAL_W) / LOGICAL_H);
       const h = (w * LOGICAL_H) / LOGICAL_W;
       setStage({ w, h });
@@ -300,6 +352,7 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
     return () => window.removeEventListener('resize', fit);
   }, []);
 
+  // 键盘翻页
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onExit();
@@ -310,29 +363,221 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
     return () => window.removeEventListener('keydown', onKey);
   }, [slides.length, onExit]);
 
+  // 画布尺寸（随舞台 + DPR 缩放，切换页时重置）
   const scale = stage.w / LOGICAL_W;
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const dpr = window.devicePixelRatio || 1;
+    c.width = Math.max(1, Math.round(stage.w * dpr));
+    c.height = Math.max(1, Math.round(stage.h * dpr));
+    const ctx = c.getContext('2d');
+    if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    undoStack.current = []; // 切换页/缩放时清空撤销栈（标注按页瞬时）
+  }, [stage.w, stage.h, idx]);
+
+  // 工具栏自动隐藏：鼠标移到屏幕顶部区域即复现，静止 2.8s 后淡出
+  const revealBar = useCallback(() => {
+    barVisibleRef.current = true;
+    setBarVisible(true);
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = window.setTimeout(() => {
+      barVisibleRef.current = false;
+      setBarVisible(false);
+    }, 2800);
+  }, []);
+  useEffect(() => {
+    revealBar();
+    return () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    };
+  }, [revealBar]);
+
+  const applyStroke = (ctx: CanvasRenderingContext2D) => {
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    if (tool === 'eraser') {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.strokeStyle = 'rgba(0,0,0,1)';
+      ctx.lineWidth = size * 3.0; // 橡皮擦大小由笔触滑杆控制（可调大小）
+    } else if (tool === 'highlighter') {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = color + '55'; // 半透明
+      ctx.lineWidth = size * 3;
+    } else {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = size;
+    }
+  };
+
+  const pointerPos = (e: React.PointerEvent) => {
+    const c = canvasRef.current!;
+    const rect = c.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  };
+
+  // 撤销：绘制前/清除前先快照画布，撤销时还原
+  const pushUndo = () => {
+    const c = canvasRef.current;
+    const ctx = c?.getContext('2d');
+    if (!c || !ctx) return;
+    try {
+      const snap = ctx.getImageData(0, 0, c.width, c.height);
+      undoStack.current.push(snap);
+      if (undoStack.current.length > 60) undoStack.current.shift();
+    } catch {
+      /* 画布为空或跨域污染时忽略 */
+    }
+  };
+  const undo = () => {
+    const c = canvasRef.current;
+    const ctx = c?.getContext('2d');
+    const snap = undoStack.current.pop();
+    if (c && ctx && snap) ctx.putImageData(snap, 0, 0);
+  };
+
+  const onCanvasDown = (e: React.PointerEvent) => {
+    if (tool === 'nav') return;
+    e.preventDefault();
+    const c = canvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    pushUndo(); // 绘制前快照，供撤销
+    const p = pointerPos(e);
+    drawing.current = true;
+    last.current = p;
+    applyStroke(ctx);
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke(); // 点
+  };
+  const onCanvasMove = (e: React.PointerEvent) => {
+    if (!drawing.current || !last.current) return;
+    const c = canvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    const p = pointerPos(e);
+    applyStroke(ctx);
+    ctx.beginPath();
+    ctx.moveTo(last.current.x, last.current.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    last.current = p;
+  };
+  const onCanvasUp = () => {
+    drawing.current = false;
+    last.current = null;
+  };
+  const clearCanvas = () => {
+    pushUndo(); // 清除也可撤销
+    const c = canvasRef.current;
+    const ctx = c?.getContext('2d');
+    if (c && ctx) ctx.clearRect(0, 0, c.width, c.height);
+  };
+
   const go = (d: number) => setIdx((i) => Math.max(0, Math.min(slides.length - 1, i + d)));
   const trans = slides[idx]?.transition || 'fade';
   const animClass = trans === 'fade' ? 'ppt-anim-fade' : trans === 'slide' ? 'ppt-anim-slide' : '';
+  const drawingActive = tool !== 'nav';
+
+  const toolBtn = (active: boolean) =>
+    `h-8 min-w-8 px-2 rounded-md text-xs flex items-center justify-center transition-colors ${
+      active ? 'bg-white/25 text-white' : 'text-white/80 hover:bg-white/15'
+    }`;
 
   return (
     <>
     <style>{'@keyframes pptFade{from{opacity:0}to{opacity:1}}@keyframes pptSlide{from{transform:translateX(40px);opacity:0}to{transform:translateX(0);opacity:1}}.ppt-anim-fade{animation:pptFade .35s ease}.ppt-anim-slide{animation:pptSlide .35s ease}'}</style>
     <div
+      ref={containerRef}
       className="fixed inset-0 z-[9999] bg-black flex items-center justify-center select-none"
       onDoubleClick={onExit}
+      onMouseMove={(e) => {
+        // 仅在工具栏隐藏时复现，避免每次鼠标移动都触发整页重渲染（卡顿根因）
+        if (!barVisibleRef.current && e.clientY < window.innerHeight * 0.14) revealBar();
+      }}
+      onWheel={(e) => {
+        if (wheelCooldown.current) return;
+        wheelCooldown.current = true;
+        window.setTimeout(() => { wheelCooldown.current = false; }, 350);
+        go(e.deltaY > 0 ? 1 : -1);
+      }}
     >
       <div key={idx} style={{ width: stage.w, height: stage.h, position: 'relative' }} className={`shadow-2xl ${animClass}`}>
         {slides[idx] && <SlideView slide={slides[idx]} scale={scale} />}
+        {/* 标注画布：覆盖在幻灯片之上，仅标注工具激活时拦截指针 */}
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0"
+          style={{
+            width: stage.w,
+            height: stage.h,
+            pointerEvents: drawingActive ? 'auto' : 'none',
+            cursor: drawingActive ? (tool === 'eraser' ? eraserCursor(size) : 'crosshair') : 'default',
+            touchAction: 'none',
+          }}
+          onPointerDown={onCanvasDown}
+          onPointerMove={onCanvasMove}
+          onPointerUp={onCanvasUp}
+          onPointerLeave={onCanvasUp}
+        />
       </div>
-      {/* 上栏：页码 + 退出 */}
-      <div className="absolute top-0 left-0 right-0 flex items-center justify-between px-4 py-2 text-white/80 text-sm">
-        <span className="tabular-nums">{idx + 1} / {slides.length}</span>
-        <button onClick={onExit} className="px-3 py-1 rounded bg-white/10 hover:bg-white/20">退出 (Esc)</button>
+
+      {/* 标注工具栏：半透明、自动隐藏，鼠标移到屏幕顶部复现 */}
+      <div
+        onMouseEnter={revealBar}
+        className={`absolute top-3 left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-1.5 px-3 py-2 rounded-xl bg-black/45 backdrop-blur-md text-white shadow-lg transition-opacity duration-300 ${
+          barVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        }`}
+      >
+        <button className={toolBtn(tool === 'nav')} title="指针/翻页（默认）" onClick={() => setTool('nav')}>指针</button>
+        <button className={toolBtn(tool === 'pen')} title="画笔" onClick={() => setTool('pen')}>画笔</button>
+        <button className={toolBtn(tool === 'highlighter')} title="荧光笔" onClick={() => setTool('highlighter')}>荧光</button>
+        <button className={toolBtn(tool === 'eraser')} title="橡皮擦" onClick={() => setTool('eraser')}>擦除</button>
+        <span className="w-px h-5 bg-white/20 mx-0.5" />
+        {ANNO_COLORS.map((c) => (
+          <button
+            key={c}
+            title={c}
+            onClick={() => { setColor(c); if (tool === 'nav' || tool === 'eraser') setTool('pen'); }}
+            className={`h-6 w-6 rounded-full border-2 transition-transform ${
+              color === c && tool !== 'eraser' ? 'border-white scale-110' : 'border-white/40'
+            }`}
+            style={{ background: c }}
+          />
+        ))}
+        <span className="w-px h-5 bg-white/20 mx-0.5" />
+        <input
+          type="range"
+          min={1}
+          max={24}
+          value={size}
+          onChange={(e) => setSize(parseInt(e.target.value || '4', 10))}
+          title="笔触粗细"
+          className="w-20 accent-white"
+        />
+        <button className={toolBtn(false)} title="撤销（恢复上一步标注）" onClick={undo}>撤销</button>
+        <button className={toolBtn(false)} title="清除本页标注" onClick={clearCanvas}>清除</button>
+        <span className="w-px h-5 bg-white/20 mx-0.5" />
+        <button className={toolBtn(false)} title="退出放映 (Esc)" onClick={onExit}>退出</button>
       </div>
-      {/* 左右半屏翻页热区 */}
-      <button className="absolute left-0 top-0 bottom-0 w-1/3 bg-transparent cursor-pointer" onClick={() => go(-1)} aria-label="上一页" />
-      <button className="absolute right-0 top-0 bottom-0 w-1/3 bg-transparent cursor-pointer" onClick={() => go(1)} aria-label="下一页" />
+
+      {/* 上栏：页码 */}
+      <div className="absolute top-0 left-0 px-4 py-2 text-white/70 text-sm tabular-nums pointer-events-none">
+        {idx + 1} / {slides.length}
+      </div>
+
+      {/* 左右半屏翻页热区（指针模式下可用；标注模式下让位给画布） */}
+      {!drawingActive && (
+        <>
+          <button className="absolute left-0 top-0 bottom-0 w-1/3 bg-transparent cursor-pointer" onClick={() => go(-1)} aria-label="上一页" />
+          <button className="absolute right-0 top-0 bottom-0 w-1/3 bg-transparent cursor-pointer" onClick={() => go(1)} aria-label="下一页" />
+        </>
+      )}
     </div>
     </>
   );
@@ -343,18 +588,22 @@ function preloadImages(srcs: string[]): Promise<Map<string, HTMLImageElement>> {
   const map = new Map<string, HTMLImageElement>();
   return Promise.all(
     srcs.map(
-      (src) =>
-        new Promise<[string, HTMLImageElement | null]>((resolve) => {
-          if (!src || src.startsWith('http://') || src.startsWith('https://')) {
-            // 跨域图片无法写回 canvas（CORS），跳过占位
-            resolve([src, null]);
-            return;
-          }
-          const img = new Image();
-          img.onload = () => resolve([src, img]);
-          img.onerror = () => resolve([src, null]);
-          img.src = src;
-        }),
+        (src) =>
+          new Promise<[string, HTMLImageElement | null]>((resolve) => {
+            if (!src || src.startsWith('http://') || src.startsWith('https://')) {
+              // 跨域图片无法写回 canvas（CORS），跳过占位
+              resolve([src, null]);
+              return;
+            }
+            // 本地落盘图片（导入）经 asset: 协议加载；data: 直用。键仍用原始 src 以便渲染时对齐。
+            const loadSrc = src.startsWith('data:')
+              ? src
+              : hostApi.convertFileSrc(src);
+            const img = new Image();
+            img.onload = () => resolve([src, img]);
+            img.onerror = () => resolve([src, null]);
+            img.src = loadSrc;
+          }),
     ),
   ).then((pairs) => {
     for (const [src, img] of pairs) if (img) map.set(src, img);
@@ -851,7 +1100,8 @@ export function PptEditor({
     setPresenting(true);
   };
 
-  // 导入 .pptx：调用原生 wps_import_pptx 解析为 JSON，载入到当前文件。
+  // 导入 .pptx：先跑诊断（统计 + 捕获 panic），再正式解析载入。
+  // 诊断同时把数据写入 app_data/logs/app.log，便于定位"导入闪退"根因。
   const importPptx = async () => {
     try {
       const selected = await open({
@@ -859,10 +1109,25 @@ export function PptEditor({
         filters: [{ name: 'PowerPoint 演示文稿', extensions: ['pptx'] }],
       });
       if (typeof selected !== 'string' || !selected) return;
+      // 1) 诊断：拿到统计与是否 panic，不返回巨大 payload（避免再次卡死）
+      let diag = '';
+      try {
+        const d = await hostApi.invoke<any>('wps_import_pptx_diagnose', { path: selected });
+        diag = `【诊断】ok=${d.ok} 幻灯片=${d.slideCount} 元素=${d.elementCount} 图片=${d.imageCount} 输出JSON=${(d.outputJsonBytes ?? 0) / 1024 | 0}KB 落盘图片=${d.mediaFilesWritten}` +
+          (d.ok ? '' : ` 失败阶段=${d.stage} 原因=${d.error}`);
+      } catch (e) {
+        diag = '【诊断】调用失败：' + (e instanceof Error ? e.message : String(e));
+      }
+      // 2) 诊断已失败 → 直接报告，不继续（避免用可能有问题的解析再跑一次）
+      if (!diag.includes('ok=true')) {
+        window.alert('导入前置诊断未通过，疑似解析崩溃或异常。\n' + diag + '\n\n请把这段发给我排查。');
+        return;
+      }
+      // 3) 正式解析
       const json = await hostApi.invoke<string>('wps_import_pptx', { path: selected });
       const content = JSON.parse(json) as PptContent;
       if (!content.slides || !Array.isArray(content.slides) || content.slides.length === 0) {
-        window.alert('导入的演示文件中未找到幻灯片。');
+        window.alert('导入的演示文件中未找到幻灯片。\n' + diag);
         return;
       }
       const secs: PptSection[] = Array.isArray(content.sections) ? content.sections : [];
@@ -874,7 +1139,7 @@ export function PptEditor({
       setSelId(null);
       setEditingId(null);
       commit(content.slides, secs);
-      window.alert(`已导入 ${content.slides.length} 张幻灯片。`);
+      window.alert(`已导入 ${content.slides.length} 张幻灯片。\n` + diag);
     } catch (e) {
       window.alert('导入失败：' + (e instanceof Error ? e.message : String(e)));
     }
@@ -1076,7 +1341,7 @@ export function PptEditor({
                     >{el.text}</div>
                   );
                 } else if (el.type === 'image') {
-                  visual = <img src={el.src} draggable={false} className="w-full h-full object-fill pointer-events-none" alt="" />;
+                  visual = <img src={resolveImg(el.src)} draggable={false} className="w-full h-full object-fill pointer-events-none" alt="" />;
                 } else {
                   // shape
                   const s: Record<string, string | number> = { width: '100%', height: '100%', boxSizing: 'border-box' };

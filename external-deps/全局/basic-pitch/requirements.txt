@@ -1,0 +1,4 @@
+# 音频 → MIDI 转写依赖（MIT 协议）
+# 安装：pip install -r requirements.txt
+# 需 Python 3.10+；basic-pitch 会自动拉取 TensorFlow / pretty_midi 等。
+basic-pitch

@@ -31,6 +31,7 @@ use andengyuanhua_lib::TrayModeState;
 use andengyuanhua_lib::TrayHolder;
 use andengyuanhua_lib::services::lyrics_service;
 use andengyuanhua_lib::services::recording_service;
+use andengyuanhua_lib::services::diagnostics;
 use andengyuanhua_lib::services::log_service;
 use andengyuanhua_lib::services::ai_service;
 use andengyuanhua_lib::services::shell_service;
@@ -685,6 +686,7 @@ fn main() {
             pick_file,
             pick_save_file,
             write_text_file,
+            write_file_bytes,
             read_text_file,
             delete_file,
             list_directory,
@@ -727,6 +729,7 @@ fn main() {
             wps_export_docx,
             wps_export_pptx,
             wps_import_pptx,
+            diagnostics::wps_import_pptx_diagnose,
             read_file_base64,
             // ========== 模块：薄荷（专业工具 16 合 1）==========
             get_env_vars,
@@ -742,6 +745,7 @@ fn main() {
             convert_document,
             check_ffmpeg,
             transcode_media,
+            audio_to_midi,
             // ========== 模块：攻防（双轨制内核 + AI 常驻推理）==========
             gongfang_status,
             gongfang_start,
@@ -803,6 +807,7 @@ fn main() {
             recording_service::set_recorder_shortcut,
             recording_service::convert_recording_to_gif,
             recording_service::delete_recording_file,
+            diagnostics::recording_self_test,
             // ========== 模块：日志系统（用户可见 log 文件 + 前端错误捕获）==========
             log_service::write_frontend_log,
             log_service::open_log_dir,

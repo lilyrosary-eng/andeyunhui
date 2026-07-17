@@ -424,19 +424,12 @@ pub fn shaper() -> &'static AdaptiveTrafficShaper {
 /// 生成 GatewayStatus（Tauri 命令便捷入口）
 pub fn status() -> GatewayStatus {
     let policy = GLOBAL_SHAPER.policy();
+    // 先获取 advice（内部会获取 pool 锁，但此时我们还没持有 pool 锁，避免死锁）
+    let advice = GLOBAL_SHAPER.next_advice();
+    let entropy = advice.shaping.current_entropy;
+    // 然后获取 pool 锁
     let pool = GLOBAL_SHAPER.pool.lock();
     let active = pool.active();
-    let (_, _, entropy) = {
-        let p = policy.clone();
-        let _ = p;
-        // 通过 next_advice 间接读取熵值
-        let advice = GLOBAL_SHAPER.next_advice();
-        (
-            advice.shaping.needs_noise,
-            advice.shaping.current_entropy,
-            advice.shaping.current_entropy,
-        )
-    };
 
     GatewayStatus {
         policy_version: policy.version,

@@ -185,7 +185,7 @@ static RECORDING: Mutex<Option<RecordingHandle>> = Mutex::new(None);
 /// 解析 ffmpeg 可执行文件路径：
 /// 1. 优先使用 external-deps/全局/ffmpeg/ffmpeg.exe（随应用打包，无需用户安装）
 /// 2. 回退到系统 PATH 中的 ffmpeg（用户自行安装）
-fn get_ffmpeg_path(app: &AppHandle) -> String {
+pub fn get_ffmpeg_path(app: &AppHandle) -> String {
     if let Some(deps_dir) = crate::commands::get_external_deps_dir(app) {
         let ffmpeg = deps_dir.join("全局").join("ffmpeg").join("ffmpeg.exe");
         if ffmpeg.exists() {
@@ -210,23 +210,49 @@ fn check_ffmpeg_with(path: &str) -> bool {
 /// 4K 录屏用 libx264（CPU 软编码）会打满所有核心，导致「整个电脑都卡卡的」、
 /// 录屏控制台（WebView2）因抢不到 CPU 而无法交互。硬件编码器把编码卸载到 GPU，
 /// CPU 占用骤降，录屏期间系统依旧流畅。无硬件编码器时返回 None，调用方回退 libx264。
-fn probe_hw_encoder(ffmpeg: &str) -> Option<&'static str> {
+/// 探测可用的硬件加速 H.264 编码器（按优先级 nvenc > qsv > amf）。
+///
+/// **关键修复（录屏 0 字节 / 自测失败根因）**：旧实现只在 `-encoders` 列表里 grep 名字，
+/// 但「列表里有」≠「运行时能用」。例如本机 N 卡驱动过旧（支持 nvenc API 13.0，而 ffmpeg
+/// 需要 13.1 / 驱动 610+），`h264_nvenc` 在列表里能看到，但真正初始化时 ffmpeg 直接异常退出
+/// → 录屏产出 0 字节、自测 `交付帧数=4 输出体积=0 ffmpeg退出正常=false`。
+/// 因此这里**真正跑一次极小编码测试**验证运行时能否初始化，只有能初始化成功的编码器才被选用；
+/// 全部失败则回退 libx264（软件编码，4K 也能用，只是更吃 CPU）。
+pub fn probe_hw_encoder(ffmpeg: &str) -> Option<&'static str> {
+    let candidates: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf"];
+    for &enc in candidates {
+        if encoder_listed(ffmpeg, enc) && encoder_runtime_ok(ffmpeg, enc) {
+            return Some(enc);
+        }
+    }
+    None
+}
+
+/// 编码器是否在 ffmpeg 的 `-encoders` 列表中出现。
+fn encoder_listed(ffmpeg: &str, enc: &str) -> bool {
     let out = std::process::Command::new(ffmpeg)
         .args(["-hide_banner", "-encoders"])
         .stderr(Stdio::null())
         .output();
-    let s = match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).to_lowercase(),
-        Err(_) => return None,
-    };
-    if s.contains("h264_nvenc") {
-        Some("h264_nvenc")
-    } else if s.contains("h264_qsv") {
-        Some("h264_qsv")
-    } else if s.contains("h264_amf") {
-        Some("h264_amf")
-    } else {
-        None
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(enc),
+        Err(_) => false,
+    }
+}
+
+/// **运行时**能否用该编码器真正编码一帧（验证驱动 / 授权等是否支持）。
+/// 用 lavfi 极小分辨率跑 0.2s 编码到 null，成功才算可用。
+fn encoder_runtime_ok(ffmpeg: &str, enc: &str) -> bool {
+    let out = std::process::Command::new(ffmpeg)
+        .args([
+            "-hide_banner", "-y", "-f", "lavfi", "-i", "nullsrc=s=128x128",
+            "-t", "0.2", "-c:v", enc, "-f", "null", "-",
+        ])
+        .stderr(Stdio::null())
+        .output();
+    match out {
+        Ok(o) => o.status.success(),
+        Err(_) => false,
     }
 }
 
@@ -264,7 +290,19 @@ pub async fn start_recording(
             return Err("未检测到 ffmpeg，无法录屏。请在系统中安装 ffmpeg 后重试。".into());
         }
 
-        let fps = fps.unwrap_or(30);
+        // 默认 60fps：高刷屏（144Hz 游戏等）下降采样到 60 仍均匀平滑，且 60fps 比 30fps
+        // 在时间分辨率上更接近高刷源，肉眼更难察觉顿挫。无硬件编码器（纯 libx264）时
+        // 60fps 软编码更吃 CPU，但属可接受代价；硬件编码器（nvenc/qsv/amf）下毫无压力。
+        let fps = fps.unwrap_or(60);
+
+        // 确保输出目录存在：videoDir 可能被重定向或不存在，若不先建目录，
+        // ffmpeg 打开输出文件失败 → 编码 0 字节 / 进程异常退出 → stop_recording 走 Err 分支
+        // → 根本不 emit recording-stopped → 前端保存面板永远不弹（表现为「录屏完全没效果」）。
+        if let Some(parent) = std::path::Path::new(&output_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
 
         // 检查是否已在录制
         {
@@ -367,6 +405,8 @@ pub async fn start_recording(
             "rgba".into(),
             "-s".into(),
             format!("{}x{}", enc_w, enc_h),
+            // 恒定输入帧率：ffmpeg 据此为每帧生成绝对均匀的 PTS（n × 1/fps），
+            // 不受管道读取抖动 / 系统调度 / WGC 突发投帧影响 → 高刷屏下也看不出卡顿。
             "-r".into(),
             fps.to_string(),
             "-i".into(),
@@ -474,6 +514,16 @@ pub async fn start_recording(
         let stop_for_capture = stop_flag.clone();
         let paused_for_capture = paused.clone();
         let capture_thread = std::thread::spawn(move || {
+            // 捕获最小更新间隔限制为「目标 fps」：WGC 最多每 1/fps 秒投一帧，
+            // 与恒定输入帧率对齐 → 输出严格均匀（极致平滑），同时把高刷显示器
+            // （144Hz）下涌入的超额帧砍掉，显著降低每帧 ~33MB 的 CPU 拷贝/分配压力
+            // （极致优化：4K 录制 CPU 占用随帧率线性下降，整机依旧丝滑）。
+            // 脏区域机制（DirtyRegionSettings::Default）保留：内容不变时不投帧，
+            // 静态幻灯片/桌面零开销；仅在有变化时按上限 fps 投帧。
+            // 注意：**不要**用 Custom(Duration::ZERO) 强制满帧率——会绕过此限流，
+            // 4K RGBA 在 60fps 下每帧 ~33MB 拷贝吃满 CPU，导致录屏卡顿、区域选择覆盖窗
+            // 的 JS 线程与 200ms 实时刷新被饿死（表现为「窗口识别只识别一个 / 鼠标无效」）。
+            let cap_interval = std::time::Duration::from_millis((1000 / fps.max(1)) as u64);
             let settings = Settings::new(
                 monitor,
                 CursorCaptureSettings::Default,
@@ -482,7 +532,7 @@ pub async fn start_recording(
                 // 去掉后区域录屏不再有误导性的全屏黄框。
                 DrawBorderSettings::WithoutBorder,
                 SecondaryWindowSettings::Default,
-                MinimumUpdateIntervalSettings::Default,
+                MinimumUpdateIntervalSettings::Custom(cap_interval),
                 DirtyRegionSettings::Default,
                 ColorFormat::Rgba8,
                 (tx_for_capture, stop_for_capture, paused_for_capture, crop),
@@ -548,32 +598,29 @@ pub async fn start_recording(
 #[tauri::command]
 pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        // **关键修复**：take() 后立即释放 RECORDING 锁。
-        // 旧实现将 `handle_opt` 的 MutexGuard 保留到整个 stop 流程结束（最多 5s），
-        // 导致 `start_recording`（检查 `recording.is_some()`）和 `get_recording_status`
-        // （控制台每秒轮询）阻塞 → 二次录屏失败 + 控制台不计时。
-        // 现在将 take() 包在独立作用域内，guard 出作用域即释放锁。
+        // **关键修复（保存秒结束 / 巨大录屏不再被 kill）**：
+        // 旧实现在命令内 `wait_timeout(5s)` 阻塞等 ffmpeg 封装完成才返回——巨大录屏
+        // 封装/快启（faststart 重写 moov）远超 5s → 被强制 kill，文件丢失；且前台
+        // 「卡一下」（控制台窗口冻结等待）。现改为：停止信号一发即返回，ffmpeg 封装交给
+        // 后台监视线程，结束后再广播「最终」事件；同时立即广播 `recording-saving` 占位，
+        // 让前端显示「录屏文件保存中」，绝不静默。
         let mut handle = {
             let mut handle_opt = RECORDING.lock().unwrap();
             handle_opt
                 .take()
                 .ok_or_else(|| "未在录制中".to_string())?
         };
-        // 锁已释放：后续 stop 流程不再阻塞 start_recording / get_recording_status
 
-        // 立即停止即隐藏录屏区域边框窗：无论后面 ffmpeg 是否超时，都保证红框立刻消失、
-        // 且不再拦截点击（之前若 ffmpeg 5s 超时提前 return，会漏掉 hide，导致红框残留）。
+        // 立即隐藏录屏区域边框窗：停止即时生效，红框立刻消失、不再拦截点击。
         if let Some(bw) = app.get_webview_window(RECORDING_BORDER_LABEL) {
             let _ = bw.hide();
         }
-
 
         // 1. 设置停止标志 → WGC 下一帧回调中 stop() 捕获 → 捕获线程退出（drop 其 sender 副本）
         handle.stop_flag.store(true, Ordering::SeqCst);
 
         // 2. drop 主发送端。配合捕获线程退出时 drop 的副本，编码线程通道的所有发送端归零
         //    → recv 返回 Err → 编码线程退出并关闭 stdin → ffmpeg 收到 EOF 刷新输出文件。
-        //    非阻塞：不再需要 try_lock stdin（stdin 已由编码线程独占，无跨线程锁竞争）。
         drop(handle.frame_tx.take());
 
         // 3. detach 捕获线程与编码线程：捕获线程下一帧检查 stop_flag 后退出；
@@ -581,29 +628,66 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
         drop(handle.capture_thread.take());
         drop(handle.writer_thread.take());
 
-        // 4. 等待 ffmpeg 进程结束（最多 5s），超时则 kill
+        let output_path = handle.output_path.clone();
         let mut child = handle.ffmpeg_child.take().ok_or("ffmpeg 进程丢失")?;
-        match child.wait_timeout(std::time::Duration::from_secs(5)) {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return Err("ffmpeg 编码失败（进程异常退出）".to_string());
+
+        // 4. 立即广播「保存中」占位（前端显示「录屏文件保存中」，不静默等待）。
+        //    用 &output_path 借用，避免把 output_path 移入 json! 宏（后续还需返回）。
+        let _ = app.emit(
+            "recording-saving",
+            serde_json::json!({ "path": &output_path, "status": "saving" }),
+        );
+
+        // 5. 后台监视线程：等 ffmpeg 真正退出（封装/快启完成）后再广播最终事件。
+        //    超时放宽到 120s（远超原 5s），巨大录屏也能安全封装完成、不再被误杀。
+        let app2 = app.clone();
+        let out_path = output_path.clone();
+        std::thread::spawn(move || {
+            match child.wait_timeout(std::time::Duration::from_secs(120)) {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        // 编码失败也要广播：否则前端保存面板永远不弹（表现为「录屏没效果」）
+                        let _ = app2.emit("recording-stopped", "");
+                        let _ = app2.emit(
+                            "recording-error",
+                            "ffmpeg 编码失败（进程异常退出），未生成录屏文件",
+                        );
+                        return;
+                    }
+                    // 体积校验：ffmpeg 偶发「静默成功」产出 0/极小文件（如未捕获到任何画面、
+                    // 或捕获会话异常）。若文件过小，说明录制实际无效，必须报错而非假装成功，
+                    // 否则用户看到「保存 MP4」却得到打不开的空文件 → 以为「录屏还是不行」。
+                    if let Ok(meta) = std::fs::metadata(&out_path) {
+                        if meta.len() <= 1024 {
+                            let _ = app2.emit("recording-stopped", "");
+                            let _ = app2.emit(
+                                "recording-error",
+                                "录制文件异常（体积过小，可能未捕获到画面）。请确认 external-deps/全局/ffmpeg 可用，或尝试较小的录制区域/降低分辨率。",
+                            );
+                            return;
+                        }
+                    }
+                    let _ = app2.emit("recording-stopped", &out_path);
+                }
+                Ok(None) => {
+                    // 超时：ffmpeg 未退出，强制 kill（输出文件可能不完整，但避免无限等待）
+                    eprintln!("[录屏] ffmpeg 120s 内未退出，强制终止");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = app2.emit("recording-stopped", "");
+                    let _ = app2.emit(
+                        "recording-error",
+                        "ffmpeg 编码超时，已强制终止（未生成录屏文件）",
+                    );
+                }
+                Err(e) => {
+                    let _ = app2.emit("recording-stopped", "");
+                    let _ = app2.emit("recording-error", format!("等待 ffmpeg 结束失败: {}", e));
                 }
             }
-            Ok(None) => {
-                // 超时：ffmpeg 未退出，强制 kill（输出文件可能不完整，但避免无限等待）
-                eprintln!("[录屏] ffmpeg 5s 内未退出，强制终止");
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("ffmpeg 编码超时，已强制终止（输出文件可能不完整）".to_string());
-            }
-            Err(e) => return Err(format!("等待 ffmpeg 结束失败: {}", e)),
-        }
+        });
 
-        let output_path = handle.output_path.clone();
-        let _ = app.emit("recording-stopped", &output_path);
-
-        // 边框窗已在 stop 起始处立即隐藏（见上文），此处无需重复处理。
-
+        // 命令立即返回（不再阻塞）：前台「停止」即刻完成，文件在后台封装。
         Ok(output_path)
     })
     .await
@@ -687,7 +771,7 @@ pub struct MonitorInfo {
 }
 
 /// 取显示器物理像素矩形（复用 screenshot.rs 的同名函数逻辑）
-fn monitor_rect_phys(monitor: &Monitor) -> (i32, i32, i32, i32) {
+pub fn monitor_rect_phys(monitor: &Monitor) -> (i32, i32, i32, i32) {
     unsafe {
         let hmon = monitor.as_raw_hmonitor() as winapi::shared::windef::HMONITOR;
         let mut info: winapi::um::winuser::MONITORINFO = std::mem::zeroed();
