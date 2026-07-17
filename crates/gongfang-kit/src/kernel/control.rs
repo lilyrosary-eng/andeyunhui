@@ -12,17 +12,20 @@
 //! 降级链：L0 命中 → 跳过 LLM；L1 超时 → 保持当前策略；L2 失败 → 回退 L0
 //! 自加速：L2 成功后回写 L0 RuleCache，相同场景第二次 <1ms 命中
 //!
-//! 替代 LLM 多卡分片+PagedAttention（桌面无多 GPU，HTTP API 调用外部 LLM 即可）
-//! 替代 Prompt JIT 字节码（JSON 策略足够，不自造 VM）
-//! 替代 OPA/Rego 规则引擎（场景签名 HashMap 足够，零依赖）
+//! 事件总线集成：
+//! - 每次推理（无论 L0/L1/L2/失败）都推送 AiReasoning 事件，让前端看到 AI 在想什么
+//! - 每 500ms 采样一次时序指标（reward/error_rate/qps/stealth），供前端时序图
+//! - 每次 commit 推送 StrategyCommitted 事件，含 delta + new_strategy
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tokio::sync::broadcast;
 
 use crate::ai::{self, AiProfile, ChatMessage};
 
+use super::events::{self, EventBus, ReasoningLevel};
 use super::knowledge::{self, KnowledgeBase, SceneSignature};
 use super::priority::{PriorityCommandQueue, UserCommand};
 use super::reward::RewardSignal;
@@ -31,6 +34,10 @@ use super::strategy::{Phase, StrategyDelta, StrategyStore};
 const REASONING_INTERVAL: Duration = Duration::from_millis(500);
 const L1_TIMEOUT: Duration = Duration::from_millis(500);
 const L2_TIMEOUT: Duration = Duration::from_millis(5000);
+/// 连续失败多少次后进入熔断（仅用 L0 规则，跳过 LLM）
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+/// 退避上限
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 const SYSTEM_PROMPT: &str = r#"你是攻防模块的策略生成器。根据当前观测与用户指令，输出策略补丁 JSON。
 仅输出 JSON，不要解释。字段均可选，仅包含需要变更的项：
@@ -54,7 +61,10 @@ pub struct ControlPlane {
     priority: Arc<PriorityCommandQueue>,
     reward: Arc<RewardSignal>,
     tx: broadcast::Sender<StrategyDelta>,
+    event_bus: Arc<EventBus>,
     kb: Arc<KnowledgeBase>,
+    /// L1 连续失败计数（用于指数退避 + 熔断）
+    failures: Arc<AtomicU32>,
 }
 
 impl ControlPlane {
@@ -66,6 +76,7 @@ impl ControlPlane {
         priority: Arc<PriorityCommandQueue>,
         reward: Arc<RewardSignal>,
         tx: broadcast::Sender<StrategyDelta>,
+        event_bus: Arc<EventBus>,
     ) -> Self {
         Self {
             app,
@@ -74,23 +85,109 @@ impl ControlPlane {
             priority,
             reward,
             tx,
+            event_bus,
             kb: knowledge::global(),
+            failures: Arc::new(AtomicU32::new(0)),
         }
     }
 
+    /// 当前连续失败次数
+    fn failure_count(&self) -> u32 {
+        self.failures.load(Ordering::Relaxed)
+    }
+
+    /// 记录失败（fetch_add）
+    fn record_failure(&self) {
+        self.failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 重置失败计数（L1 成功时调用）
+    fn reset_failures(&self) {
+        self.failures.store(0, Ordering::Relaxed);
+    }
+
+    /// 根据连续失败次数计算退避间隔（指数退避：500ms → 1s → 2s → 4s → 8s → 16s → 30s）
+    fn backoff_interval(&self) -> Duration {
+        let n = self.failure_count();
+        if n == 0 {
+            REASONING_INTERVAL
+        } else {
+            let multiplier = 2u64.saturating_pow(n.min(6));
+            REASONING_INTERVAL
+                .checked_mul(multiplier as u32)
+                .unwrap_or(MAX_BACKOFF)
+                .min(MAX_BACKOFF)
+        }
+    }
+
+    /// 是否处于熔断状态（连续失败 ≥ 阈值）
+    fn circuit_open(&self) -> bool {
+        self.failure_count() >= CIRCUIT_BREAKER_THRESHOLD
+    }
+
     pub async fn run(self) {
+        let mut last_observation: String = String::new();
+
         loop {
-            tokio::time::sleep(REASONING_INTERVAL).await;
+            // 动态退避间隔：连续失败时指数退避（500ms → 1s → 2s → ... → 30s）
+            let interval = self.backoff_interval();
+            tokio::time::sleep(interval).await;
+
+            // 采样时序指标（每次循环都采样，保证时序图连续）
+            let s = self.strategy.load();
+            let reward = self.reward.total_reward();
+            let err_rate = self.reward.error_rate();
+            self.event_bus.sample_metrics(&s, reward, err_rate);
 
             // 优先处理用户指令（抢占自主推理）
             if let Some(cmd) = self.priority.pop() {
                 if let Some(delta) = self.handle_user_command(&cmd).await {
                     self.commit(delta);
                 }
+                // 用户指令处理后重置失败计数（用户介入相当于"心跳")
+                self.reset_failures();
                 continue;
             }
 
-            // 自主推理（L0 → L1 → L2 级联）
+            // Idle 时跳过自主推理（无任务不需要 AI 调整策略）
+            if s.phase == Phase::Idle {
+                continue;
+            }
+
+            // 熔断状态：连续失败 ≥ 5 次，仅用 L0 规则，跳过 LLM 调用
+            // 冷却恢复：每轮把失败计数减 1，降到阈值以下后自动恢复 L1
+            if self.circuit_open() {
+                let delta = self.l0_fallback();
+                let fails = self.failure_count();
+                events::emit_ai_reasoning(
+                    &self.event_bus,
+                    ReasoningLevel::L0Fallback,
+                    0,
+                    true,
+                    None,
+                    &format!(
+                        "熔断模式（连续失败 {} 次，退避 {:?}），仅用 L0 规则",
+                        fails, interval
+                    ),
+                    "(L0 规则兜底，跳过 LLM 调用避免请求堆积)",
+                    delta.clone(),
+                );
+                if !delta_is_empty(&delta) {
+                    self.commit(delta);
+                }
+                // 冷却：失败计数减 1（降到 0 时自动退出熔断，恢复 L1 尝试）
+                self.failures.fetch_sub(1, Ordering::Relaxed);
+                continue;
+            }
+
+            // 观测去重：上次观测与本次相同 + 上次失败了 → 跳过（避免无意义重试）
+            let obs = self.build_observation();
+            if obs == last_observation && self.failure_count() > 0 {
+                continue;
+            }
+            last_observation = obs;
+
+            // 正常自主推理（L0 → L1 → L2 级联）
             let delta = self.autonomous_reasoning().await;
             self.commit(delta);
         }
@@ -149,8 +246,19 @@ impl ControlPlane {
         let sig = self.build_signature();
 
         // L0：规则缓存命中（<1ms，跳过 LLM）
+        let l0_start = Instant::now();
         if let Some(delta) = self.kb.lookup_rule(&sig) {
-            log::debug!("[control] L0 规则命中 sig={}", sig.0);
+            let latency = l0_start.elapsed().as_millis() as u64;
+            events::emit_ai_reasoning(
+                &self.event_bus,
+                ReasoningLevel::L0,
+                latency,
+                true,
+                None,
+                &format!("sig={:?} obs={}", sig.0, obs),
+                "(规则缓存命中，跳过 LLM)",
+                delta.clone(),
+            );
             return delta;
         }
 
@@ -159,19 +267,71 @@ impl ControlPlane {
             "当前观测：{}\n输出策略补丁 JSON（仅变更项）。",
             obs
         );
+        let l1_start = Instant::now();
         match tokio::time::timeout(L1_TIMEOUT, self.l1_reason(&prompt)).await {
             Ok(Ok(delta)) => {
-                // L1 成功，回写 L0 规则缓存（自加速）
+                let latency = l1_start.elapsed().as_millis() as u64;
+                // L1 成功：重置失败计数 + 回写 L0 规则缓存（自加速）
+                self.reset_failures();
                 self.kb.record_rule(sig, delta.clone());
+                events::emit_ai_reasoning(
+                    &self.event_bus,
+                    ReasoningLevel::L1,
+                    latency,
+                    true,
+                    None,
+                    &prompt,
+                    "(L1 LLM 推理成功)",
+                    delta.clone(),
+                );
                 delta
             }
             Ok(Err(e)) => {
-                log::warn!("[control] L1 推理失败，回退 L0 规则: {}", e);
-                self.l0_fallback()
+                let latency = l1_start.elapsed().as_millis() as u64;
+                log::warn!("[control] L1 推理失败（第 {} 次），回退 L0 规则: {}", self.failure_count() + 1, e);
+                self.record_failure();
+                let delta = self.l0_fallback();
+                events::emit_ai_reasoning(
+                    &self.event_bus,
+                    ReasoningLevel::L1,
+                    latency,
+                    false,
+                    Some(e.clone()),
+                    &prompt,
+                    "",
+                    delta.clone(),
+                );
+                events::emit_ai_reasoning(
+                    &self.event_bus,
+                    ReasoningLevel::L0Fallback,
+                    0,
+                    true,
+                    None,
+                    "L0 fallback (L1 失败后)",
+                    "(启发式规则兜底)",
+                    delta.clone(),
+                );
+                delta
             }
             Err(_) => {
-                log::warn!("[control] L1 推理超时 500ms，保持当前策略（数据面继续执行）");
-                StrategyDelta::default()
+                let latency = l1_start.elapsed().as_millis() as u64;
+                log::warn!(
+                    "[control] L1 推理超时 500ms（第 {} 次），保持当前策略（数据面继续执行）",
+                    self.failure_count() + 1
+                );
+                self.record_failure();
+                let delta = StrategyDelta::default();
+                events::emit_ai_reasoning(
+                    &self.event_bus,
+                    ReasoningLevel::L1,
+                    latency,
+                    false,
+                    Some("L1 推理超时 500ms".to_string()),
+                    &prompt,
+                    "",
+                    delta.clone(),
+                );
+                delta
             }
         }
     }
@@ -197,10 +357,52 @@ impl ControlPlane {
         };
 
         let prompt_with_kb = format!("{}{}", prompt, kb_context);
-        match tokio::time::timeout(L2_TIMEOUT, self.ai_reason(&prompt_with_kb)).await {
-            Ok(Ok(delta)) => Ok(delta),
-            Ok(Err(e)) => Err(format!("L2 推理失败: {}", e)),
-            Err(_) => Err("L2 推理超时 5s".to_string()),
+        let l2_start = Instant::now();
+        let result = tokio::time::timeout(L2_TIMEOUT, self.ai_reason(&prompt_with_kb)).await;
+        let latency = l2_start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(Ok(delta)) => {
+                events::emit_ai_reasoning(
+                    &self.event_bus,
+                    ReasoningLevel::L2,
+                    latency,
+                    true,
+                    None,
+                    prompt,
+                    "(L2 深度推理成功)",
+                    delta.clone(),
+                );
+                Ok(delta)
+            }
+            Ok(Err(e)) => {
+                let err = format!("L2 推理失败: {}", e);
+                events::emit_ai_reasoning(
+                    &self.event_bus,
+                    ReasoningLevel::L2,
+                    latency,
+                    false,
+                    Some(err.clone()),
+                    prompt,
+                    "",
+                    StrategyDelta::default(),
+                );
+                Err(err)
+            }
+            Err(_) => {
+                let err = "L2 推理超时 5s".to_string();
+                events::emit_ai_reasoning(
+                    &self.event_bus,
+                    ReasoningLevel::L2,
+                    latency,
+                    false,
+                    Some(err.clone()),
+                    prompt,
+                    "",
+                    StrategyDelta::default(),
+                );
+                Err(err)
+            }
         }
     }
 
@@ -281,8 +483,9 @@ impl ControlPlane {
         if delta_is_empty(&delta) {
             return;
         }
-        self.strategy.commit(&delta);
-        let _ = self.tx.send(delta);
+        let new_strategy = self.strategy.commit(&delta);
+        let _ = self.tx.send(delta.clone());
+        events::emit_strategy_committed(&self.event_bus, delta, new_strategy);
     }
 }
 

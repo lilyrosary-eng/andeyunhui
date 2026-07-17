@@ -1,5 +1,5 @@
 import { useSyncExternalStore, useCallback, useEffect, useState } from 'react';
-import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save } from 'lucide-react';
+import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save, ScanText, Languages } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -162,6 +162,64 @@ export function TransferStationPanel({ onOpenReadableFile }: TransferStationPane
     }
   }, []);
 
+  // OCR / 翻译：AI 优先，失败时给出与 AI 编程一致的降级提示
+  // 结果 / 错误 / loading 状态按 storedPath 维度存储，展开时显示
+  const [aiResults, setAiResults] = useState<Record<string, { kind: 'ocr' | 'translate'; text: string } | { kind: 'error'; text: string } | { kind: 'loading'; kindLabel: string }>>({});
+
+  const runOcr = useCallback(async (file: ImportedFile) => {
+    if (!isImageFile(file.extension)) return;
+    setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'loading', kindLabel: 'OCR' } }));
+    try {
+      // 复用现有 imgUrls（data URL: data:image/png;base64,xxx）
+      let dataUrl = imgUrls[file.storedPath];
+      if (!dataUrl) {
+        dataUrl = await api.readDropzoneBase64(file.storedPath);
+        setImgUrls(m => ({ ...m, [file.storedPath]: dataUrl }));
+      }
+      // 拆分 mime 与 base64 部分
+      const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
+      if (!m) throw new Error('图片数据格式错误');
+      const mime = m[1];
+      const b64 = m[2];
+      const text = await api.aiVisionOcr(b64, mime);
+      setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'ocr', text } }));
+    } catch (err) {
+      setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'error', text: '⚠ OCR 失败：' + String(err).slice(0, 200) + ' — 可在「全局设置 → 模型」检查模型是否支持视觉输入' } }));
+    }
+  }, [imgUrls]);
+
+  const runTranslate = useCallback(async (file: ImportedFile) => {
+    if (!isImageFile(file.extension)) return;
+    setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'loading', kindLabel: '翻译' } }));
+    try {
+      // 先做 OCR，再翻译
+      let dataUrl = imgUrls[file.storedPath];
+      if (!dataUrl) {
+        dataUrl = await api.readDropzoneBase64(file.storedPath);
+        setImgUrls(m => ({ ...m, [file.storedPath]: dataUrl }));
+      }
+      const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
+      if (!m) throw new Error('图片数据格式错误');
+      const ocrText = await api.aiVisionOcr(m[2], m[1]);
+      if (!ocrText.trim()) {
+        setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'error', text: '⚠ 未识别到文字（图片可能不含文字或模型识别失败）' } }));
+        return;
+      }
+      const translated = await api.translateText(ocrText, '中文');
+      setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'translate', text: translated } }));
+    } catch (err) {
+      setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'error', text: '⚠ 翻译失败：' + String(err).slice(0, 200) } }));
+    }
+  }, [imgUrls]);
+
+  const clearAiResult = useCallback((storedPath: string) => {
+    setAiResults(prev => {
+      const next = { ...prev };
+      delete next[storedPath];
+      return next;
+    });
+  }, []);
+
   return (
     <div className="flex-1 h-full overflow-hidden main-panel-bg p-6 fade-in">
       <div className="max-w-lg mx-auto">
@@ -268,6 +326,24 @@ export function TransferStationPanel({ onOpenReadableFile }: TransferStationPane
                     >
                       <Save size={15} />
                     </button>
+                    {isImageFile(file.extension) && (
+                      <>
+                        <button
+                          onClick={() => runOcr(file)}
+                          className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors"
+                          title="AI 视觉 OCR（提取图片文字）"
+                        >
+                          <ScanText size={15} />
+                        </button>
+                        <button
+                          onClick={() => runTranslate(file)}
+                          className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors"
+                          title="AI 翻译（OCR + 中译）"
+                        >
+                          <Languages size={15} />
+                        </button>
+                      </>
+                    )}
                     {file.isReadable && onOpenReadableFile && (
                       <button
                         onClick={() => handleOpenFile(file)}
@@ -289,15 +365,59 @@ export function TransferStationPanel({ onOpenReadableFile }: TransferStationPane
               );
               // 图片行：按下即发起原生系统拖拽（拖出由 Rust 完成），根治 WebView2 限制
               if (imgSrc) {
+                const aiResult = aiResults[file.storedPath];
                 return (
                   <div
                     key={file.storedPath}
-                    onMouseEnter={() => prefetch(file)}
-                    onMouseDown={(e) => startNativeDrag(e, file)}
-                    className="glass-panel p-3 flex items-center gap-3 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-grab active:cursor-grabbing"
-                    title="拖动此行到桌面或文件夹即可导出真实文件"
+                    className="glass-panel p-3 flex flex-col gap-2 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
                   >
-                    {rowContent}
+                    <div
+                      onMouseEnter={() => prefetch(file)}
+                      onMouseDown={(e) => startNativeDrag(e, file)}
+                      className="flex items-center gap-3 cursor-grab active:cursor-grabbing"
+                      title="拖动此行到桌面或文件夹即可导出真实文件"
+                    >
+                      {rowContent}
+                    </div>
+                    {aiResult && (
+                      <div className={`rounded-lg border px-3 py-2 text-xs ${
+                        aiResult.kind === 'error'
+                          ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800/40 text-amber-700 dark:text-amber-300'
+                          : aiResult.kind === 'loading'
+                            ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800/40 text-blue-700 dark:text-blue-300 animate-pulse'
+                            : 'bg-white/60 dark:bg-stone-800/60 border-white/80 dark:border-stone-700/50 text-neutral-700 dark:text-stone-200'
+                      }`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-medium">
+                            {aiResult.kind === 'ocr' && '🔍 OCR 识别结果'}
+                            {aiResult.kind === 'translate' && '🌐 翻译结果（中译）'}
+                            {aiResult.kind === 'loading' && `⏳ ${aiResult.kindLabel}处理中…`}
+                            {aiResult.kind === 'error' && '⚠ 降级提示'}
+                          </span>
+                          {aiResult.kind !== 'loading' && (
+                            <div className="flex gap-1">
+                              {(aiResult.kind === 'ocr' || aiResult.kind === 'translate') && (
+                                <button
+                                  onClick={() => navigator.clipboard?.writeText(aiResult.text)}
+                                  className="px-2 py-0.5 rounded text-[10px] bg-white/70 dark:bg-stone-700/70 hover:bg-white"
+                                >
+                                  复制
+                                </button>
+                              )}
+                              <button
+                                onClick={() => clearAiResult(file.storedPath)}
+                                className="px-2 py-0.5 rounded text-[10px] bg-white/70 dark:bg-stone-700/70 hover:bg-white"
+                              >
+                                关闭
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        {(aiResult.kind === 'ocr' || aiResult.kind === 'translate' || aiResult.kind === 'error') && (
+                          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">{aiResult.text}</pre>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               }

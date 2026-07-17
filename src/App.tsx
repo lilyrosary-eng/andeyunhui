@@ -112,6 +112,9 @@ function App() {
       transparent: true,
       alwaysOnTop: true,
       resizable: false,
+      // 关闭 Tauri 原生拖放，改由前端 HTML5 dragover/drop 处理，
+      // 否则原生拖放会吞掉 drop 事件，导致文件拖入浮窗无法导入 / 同步主站。
+      dragDropEnabled: false,
     });
   }, []);
 

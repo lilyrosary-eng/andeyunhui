@@ -19,7 +19,9 @@ use tauri_plugin_global_shortcut::ShortcutState;
 /// 单实例互斥端口：主实例绑定此 UDP 端口并监听聚焦请求，
 /// 后续重复启动的实例检测到端口被占用后发送聚焦信号并退出，
 /// 从而避免反复启动产生多个托盘图标。
-const INSTANCE_PORT: u16 = 45991;
+/// dev（debug）与打包（release）使用不同端口，二者可同时运行互不阻塞；
+/// 否则用户开着打包版（托盘常驻占用 45991）时，`pnpm tauri dev` 会被误判为重复实例而直接退出。
+const INSTANCE_PORT: u16 = if cfg!(debug_assertions) { 45992 } else { 45991 };
 use andengyuanhua_lib::commands::*;
 // 专业模块「薄荷」工具：从内部依赖包 pro-tools-kit 引入（不再集成于主 crate 源码树）
 // Tauri 2 限制：命令不能放在 crate 根（lib.rs），故置于 commands 子模块
@@ -35,6 +37,9 @@ use andengyuanhua_lib::services::diagnostics;
 use andengyuanhua_lib::services::log_service;
 use andengyuanhua_lib::services::ai_service;
 use andengyuanhua_lib::services::shell_service;
+use andengyuanhua_lib::services::lsp_service;
+use andengyuanhua_lib::services::mcp_service;
+use andengyuanhua_lib::smtc::*;
 use std::sync::Mutex;
 
 /// 创建托盘右键菜单窗口（独立 WebView，承载「我们的 UI」样式菜单）。
@@ -82,6 +87,8 @@ fn tray_summon_main(app: tauri::AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+    // 从托盘恢复：窗口重新可见，恢复按激活模块裁决媒体会话优先级
+    set_window_hidden(false);
     if let Some(m) = app.get_webview_window("tray-menu") {
         let _ = m.hide();
     }
@@ -93,6 +100,35 @@ fn tray_quit(app: tauri::AppHandle) {
 }
 
 fn main() {
+    // 尽早设置本进程 AUMID + 注册表显示名「岸灯鸢花」，使随后创建的主窗口继承该 AUMID，
+    // 任务栏媒体浮窗据此显示「岸灯鸢花」而非「未知应用」。（早于窗口创建，故窗口可继承）
+    andengyuanhua_lib::smtc::ensure_app_identity();
+
+    // 禁用 Chromium/WebView2 自带的系统媒体会话（MediaSession 特性），避免它与我们在 Rust
+    // 进程内创建的 SystemMediaTransportControls 会话重复，导致任务栏出现两个「正在播放」
+    // （WebView2 那个会显示为「未知应用」）。必须在 WebView2 启动前设置（env 在进程启动时被读取）。
+    // 注意：不能仅在「环境变量为空」时才设置——若环境已被占用会跳过我们的 flag，导致 Chromium
+    // 会话泄漏。这里改为：无论是否为空，都确保 --disable-features=MediaSession 一定存在。
+    {
+        let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        // 始终确保 MediaSession 与 HardwareMediaKeyHandling 被禁用：
+        //  - MediaSession：禁用 navigator.mediaSession，阻止 WebView2 注册 OS 媒体会话
+        //    （任务栏「未知应用」卡片的来源）；
+        //  - HardwareMediaKeyHandling：阻止 WebView2 抢占键盘/触摸板媒体键。
+        // 此前用 `if !args.contains("MediaSession")` 守卫——若环境变量已被占用会跳过禁用，
+        // 导致 WebView2 会话泄漏、媒体键被抢。改为：只要两项缺其一就补齐，确保一定生效。
+        let need_media = !args.contains("MediaSession");
+        let need_hwkey = !args.contains("HardwareMediaKeyHandling");
+        if need_media || need_hwkey {
+            if !args.is_empty() {
+                args.push(' ');
+            }
+            args.push_str("--disable-features=MediaSession,HardwareMediaKeyHandling");
+            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &args);
+        }
+        log::info!("[SMTC] WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS={}", args);
+    }
+
     // 日志系统在 setup 阶段初始化（需要 app_data 路径），此处仅用 eprintln 兜底早期日志。
     // setup 之前的少量 eprintln 输出到 stderr，setup 之后所有 log:: 宏自动写入会话日志文件。
 
@@ -197,6 +233,10 @@ fn main() {
                 .unwrap()
         })
         .setup(|app| {
+            // ============ Windows 原生 SMTC（任务栏「正在播放」）============
+            // 注册本进程媒体会话，显示「岸灯鸢花」+ 元信息，并接管系统媒体键。
+            init_smtc(app.handle().clone());
+
             // ============ 单实例守卫 ============
             // 主实例：绑定 UDP 端口并后台监听聚焦请求；
             // 重复实例：发送聚焦信号后直接退出，避免生成多个托盘图标。
@@ -248,6 +288,11 @@ fn main() {
                 let _ = std::fs::create_dir_all(&user_plugins_dir);
             }
 
+            // 从 bundled-dlc/ 复制 .mufurong/.mujin 私有格式包到用户目录
+            // （仅打包后 resource_dir 含 bundled-dlc/ 时生效；开发时该目录通常不存在）
+            // 复制后由既有的 extract_mufurong_plugins / extract_mujin_deps 自动解压
+            extract_bundled_dlc(app.handle());
+
             // 调试日志：打印解析到的插件/依赖目录路径（帮助排查打包后路径问题）
             // 写到 AppData/plugin_paths.log 方便 release 模式下查看（无控制台）
             {
@@ -259,17 +304,17 @@ fn main() {
                 if let Some(bundled) = get_bundled_plugins_dir(app.handle()) {
                     log_lines.push(format!("✓ bundled-plugins = {}", bundled.display()));
                 } else {
-                    log_lines.push("✗ bundled-plugins 未找到！尝试过的路径:".into());
-                    if let Ok(rd) = app.path().resource_dir() {
-                        log_lines.push(format!("  - {}", rd.join("bundled-plugins").display()));
-                        log_lines.push(format!("  - {}", rd.join("_up_").join("bundled-plugins").display()));
-                        log_lines.push(format!("  - {}", rd.join("..").join("bundled-plugins").display()));
-                    }
+                    log_lines.push("· bundled-plugins 未找到（打包后改用 bundled-dlc/.mufurong）".into());
                 }
                 if let Some(deps) = get_external_deps_dir(app.handle()) {
                     log_lines.push(format!("✓ external-deps = {}", deps.display()));
                 } else {
-                    log_lines.push("✗ external-deps 未找到！".into());
+                    log_lines.push("· external-deps 未找到（打包后改用 bundled-dlc/.mujin）".into());
+                }
+                if let Some(dlc) = get_bundled_dlc_dir(app.handle()) {
+                    log_lines.push(format!("✓ bundled-dlc = {}", dlc.display()));
+                } else {
+                    log_lines.push("· bundled-dlc 未找到（开发模式正常，prepare-bundled-dlc.mjs 仅 build 前运行）".into());
                 }
                 let log_content = log_lines.join("\n") + "\n";
                 let log_path = app_data.join("plugin_paths.log");
@@ -492,6 +537,18 @@ fn main() {
         })
         // 拦截窗口关闭事件：托盘模式启用时隐藏而不是关闭
         .on_window_event(|window, event| {
+            // 主窗口最小化/移动时，据 is_minimized 上报显隐，用于任务栏媒体会话优先级
+            // （最小化→强制音乐优先）。恢复时 is_minimized 为 false，自动切回按激活模块裁决。
+            if window.label() == "main" {
+                if matches!(
+                    event,
+                    tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
+                ) {
+                    let hidden = window.is_minimized().unwrap_or(false);
+                    andengyuanhua_lib::smtc::set_window_hidden(hidden);
+                }
+            }
+
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 let win_label = window.label();
@@ -508,6 +565,8 @@ fn main() {
                 if tray_enabled {
                     api.prevent_close();
                     window.hide().ok();
+                    // 窗口隐藏到托盘：强制任务栏媒体会话切回音乐优先
+                    andengyuanhua_lib::smtc::set_window_hidden(true);
                     // 托盘模式下同时隐藏歌词悬浮窗，避免它孤立悬浮
                     if let Some(lw) = app.get_webview_window(lyrics_service::LYRICS_WINDOW_LABEL) {
                         let _ = lw.hide();
@@ -642,11 +701,15 @@ fn main() {
             read_manifest,
             install_bundled_plugin,
             install_plugin_file,
+            install_dep_file,
+            install_user_plugin_file,
             configure_auto_save,
             get_auto_save_config,
             set_plugin_visibility,
             reload_plugin,
             unload_plugin,
+            delete_plugin,
+            open_plugin_folder,
             // ========== 核心：中转站 / 原生拖拽 ==========
             list_transfer_station_files,
             restore_transfer_station_file,
@@ -704,6 +767,12 @@ fn main() {
             load_music_cache,
             delete_music_cache,
             read_track_metadata,
+            // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
+            smtc_update,
+            set_active_module,
+            set_window_hidden,
+            smtc_status,
+            debug_log,
             // ========== 模块：视频 / 玉兰 ==========
             scan_video_root,
             load_video_cache,
@@ -753,6 +822,7 @@ fn main() {
             gongfang_inject,
             gongfang_scan,
             gongfang_waf_detect,
+            gongfang_fetch,
             gongfang_crypto_identify,
             gongfang_symbols,
             gongfang_humanize,
@@ -763,6 +833,17 @@ fn main() {
             gongfang_gateway_rotate,
             gongfang_gateway_throttle,
             gongfang_gateway_pool,
+            // 攻防 P0：通用信息层 + 目标工作区
+            gongfang_events_recent,
+            gongfang_metrics_history,
+            gongfang_ai_reasoning_recent,
+            gongfang_set_emit_tick,
+            gongfang_target_list,
+            gongfang_target_save,
+            gongfang_target_delete,
+            gongfang_target_activate,
+            gongfang_target_get,
+            gongfang_target_set_metadata,
             // ========== 模块：截图系统（全局热键 / 多屏 / 标注）==========
             capture_screen,
             start_screenshot,
@@ -818,12 +899,25 @@ fn main() {
             ai_service::ai_set_profiles,
             ai_service::ai_chat,
             ai_service::ai_test_connection,
+            ai_service::ai_vision_ocr,
+            ai_service::translate_text,
             ai_service::ai_get_conversations,
             ai_service::ai_save_conversations,
             // ========== 全局：IDE 终端（本地 shell 命令执行）==========
             shell_service::run_shell_command,
             // ========== 全局：AI agent 受限 shell（白名单 + Dry-Run 黑名单 + 超时）==========
             shell_service::run_agent_shell,
+            // ========== 全局：IDE LSP 诊断（伪 LSP：tsc/cargo check/pyright 一次性命令）==========
+            lsp_service::lsp_diagnostics,
+            // ========== 全局：IDE MCP 客户端（stdio JSON-RPC，扩展 agent 工具能力）==========
+            mcp_service::mcp_list_servers,
+            mcp_service::mcp_save_server,
+            mcp_service::mcp_remove_server,
+            mcp_service::mcp_list_tools,
+            mcp_service::mcp_list_all_tools,
+            mcp_service::mcp_call_tool,
+            // ========== 全局：开发者控制台（关于页面 · 联网/依赖安装）==========
+            dev_console_http,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

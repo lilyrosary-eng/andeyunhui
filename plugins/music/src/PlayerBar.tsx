@@ -4,7 +4,7 @@ import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { lyricsSync } from './lyricsSync';
 import { formatTime } from '../../_shared/utils';
 import {
-  PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, VolumeIcon,
+  PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, VolumeIcon, VolumeMuteIcon,
   ListIcon, SingleIcon, ShuffleIcon, MusicIcon, LyricsIcon, LockIcon, UnlockIcon,
 } from '../../_shared/icons';
 
@@ -70,6 +70,21 @@ function VolumePopup({
   const trackRef = useRef<HTMLDivElement>(null);
   const hideTimerRef = useRef<number>(0);
   const [isDragging, setIsDragging] = useState(false);
+  // 记住最近一次非零音量，作为取消静音时的恢复值（点击静音图标再点恢复时用）。
+  const lastVolumeRef = useRef(volume > 0 ? volume : 0.7);
+  // 音量变化且非零时记录，供取消静音恢复使用。
+  useEffect(() => {
+    if (volume > 0) lastVolumeRef.current = volume;
+  }, [volume]);
+  const isMuted = volume === 0;
+  // 点击音量图标：静音↔恢复。静音时把音量置 0，恢复时回到静音前的音量。
+  const toggleMute = useCallback(() => {
+    if (isMuted) {
+      onVolumeChange(lastVolumeRef.current > 0 ? lastVolumeRef.current : 0.7);
+    } else {
+      onVolumeChange(0);
+    }
+  }, [isMuted, onVolumeChange]);
 
   const updateFromEvent = useCallback((clientY: number) => {
     if (!trackRef.current) return;
@@ -109,10 +124,12 @@ function VolumePopup({
     onMouseLeave: handleMouseLeave,
   },
     React.createElement(IconButton, {
-      onClick: () => {},
-      title: `音量 ${Math.round(volume * 100)}%`,
+      onClick: toggleMute,
+      title: isMuted
+        ? `已静音（点击恢复 ${Math.round((lastVolumeRef.current || 0.7) * 100)}%）`
+        : `音量 ${Math.round(volume * 100)}%（点击静音）`,
       active: showPopup,
-      children: React.createElement(VolumeIcon),
+      children: React.createElement(isMuted ? VolumeMuteIcon : VolumeIcon),
     }),
     showPopup && React.createElement('div', {
       className: 'absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 rounded-xl shadow-lg border border-neutral-200/30 dark:border-stone-700/30 z-50',

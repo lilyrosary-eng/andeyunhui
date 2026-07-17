@@ -1,95 +1,69 @@
 @echo off
 chcp 65001 >nul 2>&1
 REM ============================================================
-REM build_clean.bat - 精简版打包，不带插件和外部依赖
+REM build_clean.bat - Lite build, no bundled plugins or external deps
 REM
-REM 打包后只留空目录占位（.gitkeep），不含实际插件内容
-REM 用户安装后可下载 .mufurong 插件或恢复 external-deps/ 到原位
+REM Under the new bundled-dlc architecture the flow is minimal:
+REM   1. Set BUILD_CLEAN=1
+REM   2. pnpm tauri build
+REM      - deploy-plugins.mjs in beforeBuildCommand detects BUILD_CLEAN=1
+REM        and skips plugin build, only creates empty placeholder dirs
+REM      - prepare-bundled-dlc.mjs detects BUILD_CLEAN=1 and creates empty bundled-dlc/
+REM        (only .gitkeep), embedded via tauri.conf.json bundle.resources
+REM   3. Clear the env var
 REM
-REM 原理：
-REM 1. 设置 BUILD_CLEAN=1 环境变量
-REM 2. deploy-plugins.mjs 检测此变量，跳过插件构建，只创建空目录
-REM 3. 临时重命名 external-deps/（保留原目录结构占位）
-REM 4. 执行 tauri build（beforeBuildCommand 会运行 deploy-plugins.mjs，但跳过插件）
-REM 5. 恢复 external-deps/
+REM Output:
+REM   Lite installer (src-tauri/target/release/bundle/)
+REM     - Contains no plugins/deps
+REM     - Users can later download .mufurong/.mujin (from build_dlc.bat),
+REM       drag into user_plugins/ and user_external_deps/ for auto-extract
 REM ============================================================
 
 cd /d "%~dp0"
 
-echo [BUILD_CLEAN] 开始精简打包...
-echo [BUILD_CLEAN] 工作目录: %CD%
+REM 0. Ensure placeholder folder scaffold (.gitkeep) so no directory is dropped by NSIS/git
+echo [BUILD_CLEAN] [pre] Ensuring placeholder folders...
+node scripts/ensure-placeholders.mjs
 
-REM 1. 设置 BUILD_CLEAN 环境变量，让 deploy-plugins.mjs 跳过插件构建
+echo [BUILD_CLEAN] Starting lite build...
+echo [BUILD_CLEAN] Working dir: %CD%
+
+REM 1. Set BUILD_CLEAN env var
+REM    - deploy-plugins.mjs detects it and skips plugin build
+REM    - prepare-bundled-dlc.mjs detects it and creates empty bundled-dlc/ placeholder
 set BUILD_CLEAN=1
 
-REM 2. 临时重命名 external-deps/（避免被打包进去，且非空！）
-set "EXTERNAL_DIR=%CD%\external-deps"
-set "EXTERNAL_BAK=%CD%\external-deps.bak"
-
-if exist "%EXTERNAL_BAK%" (
-  echo [BUILD_CLEAN] 清理旧备份...
-  rmdir /s /q "%EXTERNAL_BAK%"
-)
-
-if exist "%EXTERNAL_DIR%" (
-  echo [BUILD_CLEAN] 备份 external-deps/...
-  ren "%EXTERNAL_DIR%" "external-deps.bak"
-  if %ERRORLEVEL% neq 0 (
-    echo [BUILD_CLEAN] [X] 备份 external-deps/ 失败（可能被占用）
-    set BUILD_CLEAN=
-    pause
-    exit /b 1
-  )
-)
-
-REM 3. 创建空 external-deps/ 目录结构（只放 .gitkeep 占位）
-mkdir "%EXTERNAL_DIR%" 2>nul
-mkdir "%EXTERNAL_DIR%\全局" 2>nul
-echo. > "%EXTERNAL_DIR%\.gitkeep"
-echo. > "%EXTERNAL_DIR%\全局\.gitkeep"
-echo [BUILD_CLEAN] 已创建空 external-deps/ 占位
-
-REM 4. 清理 bundled-plugins/ 中的旧产物（只保留 .gitkeep）
-set "BUNDLED_DIR=%CD%\bundled-plugins"
-if exist "%BUNDLED_DIR%" (
-  echo [BUILD_CLEAN] 清理 bundled-plugins/ 旧产物...
-  for /d %%D in ("%BUNDLED_DIR%\*") do (
-    rmdir /s /q "%%D" 2>nul
-  )
-  del /q "%BUNDLED_DIR%\*.js" 2>nul
-  del /q "%BUNDLED_DIR%\*.json" 2>nul
-)
-
-REM 5. 执行 Tauri 构建（beforeBuildCommand 会运行 deploy-plugins.mjs）
-REM    检测到 BUILD_CLEAN=1 会跳过插件构建，只创建空目录占位
-echo [BUILD_CLEAN] 开始 Tauri 构建（日志写入 build_clean.log）...
-call pnpm tauri build > "%CD%\build_clean.log" 2>&1
+REM 2. Run Tauri build (beforeBuildCommand handles the BUILD_CLEAN branch)
+REM    gongfang is a plugin module (plugins/niaoluo/gongfang). The clean installer does
+REM    NOT bundle the gongfang plugin or its heavy external deps - they are distributed
+REM    independently as DLC via build_dlc.bat (.mufurong plugin + .mujin deps). However,
+REM    the gongfang backend (Rust Tauri commands) must be compiled into the binary so
+REM    that the imported gongfang plugin works fully, so we keep all gongfang features.
+echo [BUILD_CLEAN] Running pnpm tauri build --features gongfang,... (log -> build_clean.log)...
+call pnpm tauri build -- --features gongfang,gongfang-reverse,gongfang-pentest,gongfang-automation,gongfang-gateway > "%CD%\build_clean.log" 2>&1
 set BUILD_EXIT=%ERRORLEVEL%
 echo BUILD_EXIT=%BUILD_EXIT% >> "%CD%\build_clean.log"
 
-REM 6. 恢复 external-deps/
-echo [BUILD_CLEAN] 恢复 external-deps/...
-if exist "%EXTERNAL_DIR%" rmdir /s /q "%EXTERNAL_DIR%"
-if exist "%EXTERNAL_BAK%" ren "%EXTERNAL_BAK%" "external-deps"
-
-REM 7. 清理环境变量
+REM 3. Clear the env var
 set BUILD_CLEAN=
 
 if "%BUILD_EXIT%"=="0" (
   echo.
   echo [BUILD_CLEAN] ========================================
-  echo [BUILD_CLEAN] [OK] 精简打包完成！
-  echo [BUILD_CLEAN] 安装包不含插件，用户可下载 .mufurong 插件
-  echo [BUILD_CLEAN] 日志: %CD%\build_clean.log
+  echo [BUILD_CLEAN] [OK] Lite build complete!
+  echo [BUILD_CLEAN] Installer has no plugins, users download .mufurong/.mujin
+  echo [BUILD_CLEAN]   - drag .mufurong into user_plugins\
+  echo [BUILD_CLEAN]   - drag .mujin     into user_external_deps\
+  echo [BUILD_CLEAN] Log: %CD%\build_clean.log
   echo [BUILD_CLEAN] ========================================
 ) else (
   echo.
   echo [BUILD_CLEAN] ========================================
-  echo [BUILD_CLEAN] [X] 打包失败（错误码 %BUILD_EXIT%）
-  echo [BUILD_CLEAN] 查看日志: %CD%\build_clean.log
+  echo [BUILD_CLEAN] [X] Build failed (exit %BUILD_EXIT%)
+  echo [BUILD_CLEAN] Log: %CD%\build_clean.log
   echo [BUILD_CLEAN] ========================================
 )
 
 echo.
-echo [BUILD_CLEAN] 按任意键关闭...
+echo [BUILD_CLEAN] Press any key to close...
 pause >nul

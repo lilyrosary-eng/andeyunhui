@@ -5,15 +5,21 @@
 const React = window.__HOST_REACT__;
 const hostApi = window.__HOST_API__;
 const { useState, useEffect, useRef, useCallback } = React;
+// 放映层 portal 到 body：避开 ThemeProvider 包裹层（zoom / 任何 transformed 祖先）对 position:fixed 的影响，确保覆盖层铺满视口。
+type ReactDOMLike = { createPortal: (el: React.ReactNode, node: Element) => React.ReactNode };
+const ReactDOM = window.__HOST_REACT_DOM__ as unknown as ReactDOMLike;
 
 import {
   loadDoc,
   newId,
   type PptSlide,
   type PptElement,
+  type PptGradient,
+  type PptGradientStop,
   type PptContent,
   type PptSection,
   type PptShapeKind,
+  type PptAnim,
 } from './docStore';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
@@ -25,9 +31,9 @@ type Box = { x: number; y: number; w: number; h: number };
 type Guide = { axis: 'x' | 'y'; pos: number };
 
 // 移动吸附：把元素的左/中/右、上/中/下锚点对齐到其它元素或画布边界，返回修正后的位置与参考线。
-function snapMove(box: Box, others: PptElement[], thr: number): { box: Box; guides: Guide[] } {
-  const tx = [0, LOGICAL_W / 2, LOGICAL_W];
-  const ty = [0, LOGICAL_H / 2, LOGICAL_H];
+function snapMove(box: Box, others: PptElement[], thr: number, sw = LOGICAL_W, sh = LOGICAL_H): { box: Box; guides: Guide[] } {
+  const tx = [0, sw / 2, sw];
+  const ty = [0, sh / 2, sh];
   for (const o of others) {
     tx.push(o.x, o.x + o.w / 2, o.x + o.w);
     ty.push(o.y, o.y + o.h / 2, o.y + o.h);
@@ -64,13 +70,13 @@ function snapMove(box: Box, others: PptElement[], thr: number): { box: Box; guid
 }
 
 // 缩放吸附（右下角手柄）：固定左上角，仅让右/下边对齐目标。
-function snapResize(box: Box, others: PptElement[], thr: number): { box: Box; guides: Guide[] } {
+function snapResize(box: Box, others: PptElement[], thr: number, sw = LOGICAL_W, sh = LOGICAL_H): { box: Box; guides: Guide[] } {
   const { x, y } = box;
   let { w, h } = box;
   const right = x + w;
   const bottom = y + h;
-  const rightTargets = [LOGICAL_W, ...others.map((o) => o.x + o.w), ...others.map((o) => o.x + o.w / 2), ...others.map((o) => o.x)];
-  const bottomTargets = [LOGICAL_H, ...others.map((o) => o.y + o.h), ...others.map((o) => o.y + o.h / 2), ...others.map((o) => o.y)];
+  const rightTargets = [sw, ...others.map((o) => o.x + o.w), ...others.map((o) => o.x + o.w / 2), ...others.map((o) => o.x)];
+  const bottomTargets = [sh, ...others.map((o) => o.y + o.h), ...others.map((o) => o.y + o.h / 2), ...others.map((o) => o.y)];
   let gx: number | null = null;
   let gy: number | null = null;
   let bd = thr;
@@ -117,12 +123,26 @@ function resolveImg(src?: string): string {
 }
 
 // 统一以 SVG 渲染形状：画布、缩略图、属性面板视觉一致，并支持圆角矩形 / 三角 / 箭头。
+// 支持渐变填充：若 element.fillGradient 存在，用 SVG <linearGradient> 绘制真实渐变，
+// 比旧版取首色近似的方式大幅提升学科类 pptx 的土壤剖面/磁感线等渐变图形的还原度。
 function ShapeSvg({ el, scale }: { el: PptElement; scale: number }) {
   const w = el.w * scale;
   const h = el.h * scale;
-  const sw = Math.max(0.5, (el.strokeWidth ?? 2) * scale);
-  const stroke = el.stroke ?? '#000';
+  const hasStroke = !!el.stroke && el.stroke !== 'none';
+  const sw = hasStroke ? Math.max(0.5, (el.strokeWidth ?? 2) * scale) : 0;
+  const stroke = hasStroke ? el.stroke! : 'none';
   const fill = el.fill && el.fill !== 'transparent' ? el.fill : 'none';
+  const gid = `gs-${el.id}`;
+  const gradDef = el.fillGradient ? (
+    <defs>
+      <linearGradient id={gid} gradientTransform={`rotate(${el.fillGradient.angle})`}>
+        {el.fillGradient.stops.map((s, i) => (
+          <stop key={i} offset={s.pos} stopColor={s.color} />
+        ))}
+      </linearGradient>
+    </defs>
+  ) : null;
+  const gFill = el.fillGradient ? `url(#${gid})` : fill;
   if (el.shape === 'line') {
     return (
       <svg width={w} height={h} className="pointer-events-none block">
@@ -138,7 +158,7 @@ function ShapeSvg({ el, scale }: { el: PptElement; scale: number }) {
         cy={h / 2}
         rx={Math.max(0, w / 2 - sw / 2)}
         ry={Math.max(0, h / 2 - sw / 2)}
-        fill={fill}
+        fill={gFill}
         stroke={stroke}
         strokeWidth={sw}
       />
@@ -153,7 +173,7 @@ function ShapeSvg({ el, scale }: { el: PptElement; scale: number }) {
         height={Math.max(0, h - sw)}
         rx={r}
         ry={r}
-        fill={fill}
+        fill={gFill}
         stroke={stroke}
         strokeWidth={sw}
       />
@@ -162,7 +182,7 @@ function ShapeSvg({ el, scale }: { el: PptElement; scale: number }) {
     geom = (
       <polygon
         points={`0,${h} ${w / 2},0 ${w},${h}`}
-        fill={fill}
+        fill={gFill}
         stroke={stroke}
         strokeWidth={sw}
         strokeLinejoin="round"
@@ -180,7 +200,7 @@ function ShapeSvg({ el, scale }: { el: PptElement; scale: number }) {
       `L${w - aw},${(h + sh) / 2}`,
       'Z',
     ].join(' ');
-    geom = <path d={d} fill={fill} stroke={stroke} strokeWidth={sw} strokeLinejoin="round" />;
+    geom = <path d={d} fill={gFill} stroke={stroke} strokeWidth={sw} strokeLinejoin="round" />;
   } else {
     geom = (
       <rect
@@ -188,7 +208,7 @@ function ShapeSvg({ el, scale }: { el: PptElement; scale: number }) {
         y={sw / 2}
         width={Math.max(0, w - sw)}
         height={Math.max(0, h - sw)}
-        fill={fill}
+        fill={gFill}
         stroke={stroke}
         strokeWidth={sw}
       />
@@ -196,37 +216,90 @@ function ShapeSvg({ el, scale }: { el: PptElement; scale: number }) {
   }
   return (
     <svg width={w} height={h} className="pointer-events-none block">
+      {gradDef}
       {geom}
     </svg>
   );
 }
 
-function PptThumb({ slide, scale, active, onClick }: {
+function PptThumb({ slide, active, onClick }: {
   slide: PptSlide;
-  scale: number;
   active: boolean;
   onClick: () => void;
 }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  // 实测缩略图容器宽度，反推缩放比，保证内容铺满整张缩略图（不再挤在左上角）。
+  const [tw, setTw] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setTw(el.clientWidth);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const scale = tw > 0 ? tw / (slide.width ?? LOGICAL_W) : 0.075;
   return (
     <button
+      ref={ref}
       onClick={onClick}
       className={`relative w-full rounded-md overflow-hidden border transition-colors
         ${active ? 'border-[var(--element-bg)] ring-1 ring-[var(--element-bg)]' : 'border-black/10 dark:border-white/10 hover:border-black/30 dark:hover:border-white/30'}`}
       style={{ aspectRatio: '16 / 9', background: slide.background }}
     >
       {slide.elements.map((el) => {
-        if (el.type !== 'shape') return null;
+        const base: React.CSSProperties = {
+          position: 'absolute',
+          left: el.x * scale,
+          top: el.y * scale,
+          width: el.w * scale,
+          height: el.h * scale,
+          ...rotateStyle(el),
+        };
+        if (el.type === 'image') {
+          return (
+            <img
+              key={el.id}
+              src={resolveImg(el.src)}
+              draggable={false}
+              className="pointer-events-none"
+              style={{ ...base, objectFit: 'fill' }}
+              alt=""
+            />
+          );
+        }
+        if (el.type === 'text') {
+          const st = el.style || { fontSize: 24, color: '#000' };
+          const textBg = el.fill && el.fill !== 'transparent' ? el.fill : 'transparent';
+          // 缩略图里字号按比例缩放，用 max 兜底保证可读下限
+          return (
+            <div
+              key={el.id}
+              style={{
+                ...base,
+                fontSize: Math.max(4, st.fontSize * scale),
+                color: st.color,
+                fontWeight: st.bold ? 700 : 400,
+                fontStyle: st.italic ? 'italic' : 'normal',
+                textDecoration: st.underline ? 'underline' : 'none',
+                textAlign: st.align,
+                background: textBg,
+                display: 'flex',
+                alignItems: st.align === 'center' ? 'center' : st.align === 'right' ? 'flex-end' : 'flex-start',
+                lineHeight: st.lineHeight || 1.3,
+                overflow: 'hidden',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}
+            >
+              {el.text}
+            </div>
+          );
+        }
+        // shape（矩形 / 圆角矩形 / 椭圆 / 直线 / 三角 / 箭头），统一用 SVG 渲染
         return (
-          <div
-            key={el.id}
-            style={{
-              position: 'absolute',
-              left: el.x * scale,
-              top: el.y * scale,
-              width: el.w * scale,
-              height: el.h * scale,
-            }}
-          >
+          <div key={el.id} style={base} className="pointer-events-none">
             <ShapeSvg el={el} scale={scale} />
           </div>
         );
@@ -235,62 +308,176 @@ function PptThumb({ slide, scale, active, onClick }: {
   );
 }
 
-// 只读渲染一张幻灯片（编辑画布与放映模式共用视觉），scale 为「逻辑像素→屏幕像素」倍数。
-function SlideView({ slide, scale }: { slide: PptSlide; scale: number }) {
+// ===================== 元素级动画（放映用） =====================
+// 元素动画的 CSS keyframes（进场 In / 退场 Out / 强调）。放映时按 pptx 导入解析出的动画播放。
+const ANIM_KEYFRAMES =
+  '@keyframes aeFadeIn{from{opacity:0}to{opacity:1}}' +
+  '@keyframes aeFadeOut{from{opacity:1}to{opacity:0}}' +
+  '@keyframes aeZoomIn{from{opacity:0;transform:scale(.3)}to{opacity:1;transform:scale(1)}}' +
+  '@keyframes aeZoomOut{from{opacity:1;transform:scale(1)}to{opacity:0;transform:scale(.3)}}' +
+  '@keyframes aeGrowIn{from{opacity:0;transform:scale(0)}to{opacity:1;transform:scale(1)}}' +
+  '@keyframes aeFloatIn{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}' +
+  '@keyframes aeFloatOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-40px)}}' +
+  '@keyframes aeFlyInLeft{from{opacity:0;transform:translateX(-70px)}to{opacity:1;transform:translateX(0)}}' +
+  '@keyframes aeFlyInRight{from{opacity:0;transform:translateX(70px)}to{opacity:1;transform:translateX(0)}}' +
+  '@keyframes aeFlyInTop{from{opacity:0;transform:translateY(-70px)}to{opacity:1;transform:translateY(0)}}' +
+  '@keyframes aeFlyInBottom{from{opacity:0;transform:translateY(70px)}to{opacity:1;transform:translateY(0)}}' +
+  '@keyframes aeFlyOutLeft{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(-70px)}}' +
+  '@keyframes aeFlyOutRight{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(70px)}}' +
+  '@keyframes aeFlyOutTop{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-70px)}}' +
+  '@keyframes aeFlyOutBottom{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(70px)}}' +
+  '@keyframes aeWipeInLeft{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}' +
+  '@keyframes aeWipeInRight{from{clip-path:inset(0 0 0 100%)}to{clip-path:inset(0 0 0 0)}}' +
+  '@keyframes aeWipeInTop{from{clip-path:inset(100% 0 0 0)}to{clip-path:inset(0 0 0 0)}}' +
+  '@keyframes aeWipeInBottom{from{clip-path:inset(0 0 100% 0)}to{clip-path:inset(0 0 0 0)}}' +
+  '@keyframes aeSplitIn{from{clip-path:inset(0 50% 0 50%)}to{clip-path:inset(0 0 0 0)}}' +
+  '@keyframes aeBounceIn{0%{opacity:0;transform:translateY(-60px)}60%{opacity:1;transform:translateY(12px)}80%{transform:translateY(-6px)}100%{transform:translateY(0)}}' +
+  '@keyframes aeSpin{from{transform:rotate(0)}to{transform:rotate(360deg)}}' +
+  '@keyframes aePulse{0%{transform:scale(1)}50%{transform:scale(1.18)}100%{transform:scale(1)}}' +
+  '@keyframes aeGrowEmph{0%{transform:scale(1)}50%{transform:scale(1.35)}100%{transform:scale(1)}}';
+
+function cap(s?: string): string {
+  const d = s || 'bottom';
+  return d.charAt(0).toUpperCase() + d.slice(1);
+}
+
+// 由动画描述得到 CSS animation-name；返回空串表示「无动效」（如 appear，仅显隐）。
+function animName(a: PptAnim): string {
+  if (a.type === 'emphasis') {
+    return a.preset === 'spin' ? 'aeSpin' : a.preset === 'grow' ? 'aeGrowEmph' : 'aePulse';
+  }
+  const out = a.type === 'exit';
+  switch (a.preset) {
+    case 'appear': return '';
+    case 'fade': return out ? 'aeFadeOut' : 'aeFadeIn';
+    case 'zoom': return out ? 'aeZoomOut' : 'aeZoomIn';
+    case 'grow': return out ? 'aeZoomOut' : 'aeGrowIn';
+    case 'float': return out ? 'aeFloatOut' : 'aeFloatIn';
+    case 'bounce': return out ? 'aeFadeOut' : 'aeBounceIn';
+    case 'fly': return (out ? 'aeFlyOut' : 'aeFlyIn') + cap(a.dir);
+    case 'wipe': return out ? 'aeFadeOut' : 'aeWipeIn' + cap(a.dir);
+    case 'split': return out ? 'aeFadeOut' : 'aeSplitIn';
+    default: return out ? 'aeFadeOut' : 'aeFadeIn';
+  }
+}
+
+function animStyle(a: PptAnim): React.CSSProperties {
+  const name = animName(a);
+  if (!name) return {};
+  const dur = Math.max(0.05, (a.duration || 500) / 1000);
+  const ease = a.type === 'emphasis' ? 'ease-in-out' : 'ease';
+  return { animation: `${name} ${dur}s ${ease} both` };
+}
+
+// 元素内容（不含定位包裹层），供 AnimatedSlideView 复用 SlideView 的视觉。
+function cssGradient(g: PptGradient): string {
+  return `linear-gradient(${g.angle}deg, ${g.stops.map((s: PptGradientStop) => `${s.color} ${s.pos * 100}%`).join(', ')})`;
+}
+
+function rotateStyle(el: PptElement): React.CSSProperties {
+  const s: React.CSSProperties = {};
+  if (el.rotation) {
+    s.transform = `rotate(${el.rotation}deg)`;
+    s.transformOrigin = 'center';
+  }
+  if (el.flipH || el.flipV) {
+    const sx = el.flipH ? -1 : 1;
+    const sy = el.flipV ? -1 : 1;
+    s.transform = (s.transform ? s.transform + ' ' : '') + `scale(${sx}, ${sy})`;
+  }
+  return s;
+}
+
+function elementVisual(el: PptElement, scale: number): React.ReactNode {
+  if (el.type === 'text') {
+    const st = el.style || { fontSize: 24, color: '#000' };
+    const textBg = el.fillGradient ? cssGradient(el.fillGradient) : (el.fill && el.fill !== 'transparent' ? el.fill : 'transparent');
+    return (
+      <div
+        style={{
+          width: '100%',
+          height: '100%',
+          fontSize: st.fontSize * scale,
+          color: st.color,
+          fontWeight: st.bold ? 700 : 400,
+          fontStyle: st.italic ? 'italic' : 'normal',
+          textDecoration: st.underline ? 'underline' : 'none',
+          textAlign: st.align,
+          background: textBg,
+          display: 'flex',
+          alignItems: st.align === 'center' ? 'center' : st.align === 'right' ? 'flex-end' : 'flex-start',
+          lineHeight: st.lineHeight || 1.3,
+          overflow: 'hidden',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          padding: 4 * scale,
+        }}
+      >
+        {el.text}
+      </div>
+    );
+  }
+  if (el.type === 'image') {
+    return <img src={resolveImg(el.src)} draggable={false} className="pointer-events-none" style={{ width: '100%', height: '100%', objectFit: 'fill' }} alt="" />;
+  }
+  return <ShapeSvg el={el} scale={scale} />;
+}
+
+// 放映用：按 buildStep（构建步）逐组播放元素动画。
+// 规则（对齐 PowerPoint）：无动画元素始终可见；有进场动画的元素在其构建组到达前隐藏、到达当步播放进场；
+// 退场动画在其组到达当步播放退场，之后隐藏；强调动画在其组到达当步播放。group=0 表示进入页面即自动播。
+function AnimatedSlideView({ slide, scale, buildStep }: { slide: PptSlide; scale: number; buildStep: number }) {
+  const anims = slide.animations || [];
+  const byEl = new Map<string, PptAnim[]>();
+  for (const a of anims) {
+    const list = byEl.get(a.elId);
+    if (list) list.push(a);
+    else byEl.set(a.elId, [a]);
+  }
   return (
-    <div
-      className="relative overflow-hidden"
-      style={{ width: LOGICAL_W * scale, height: LOGICAL_H * scale, background: slide.background }}
-    >
+    <div className="relative overflow-hidden" style={{ width: (slide.width ?? LOGICAL_W) * scale, height: (slide.height ?? LOGICAL_H) * scale, background: slide.background }}>
       {slide.elements
         .slice()
         .sort((a, b) => a.z - b.z)
         .map((el) => {
+          const list = byEl.get(el.id) || [];
+          const entr = list.find((a) => a.type === 'entrance');
+          const exit = list.find((a) => a.type === 'exit');
+          const emph = list.find((a) => a.type === 'emphasis');
+          // 可见性：未到进场组 → 隐藏；已过退场组 → 隐藏
+          if (entr && buildStep < entr.group) return null;
+          if (exit && buildStep > exit.group) return null;
+          // 当步是否有活动动画
+          let active: PptAnim | null = null;
+          if (entr && buildStep === entr.group) active = entr;
+          else if (exit && buildStep === exit.group) active = exit;
+          else if (emph && buildStep === emph.group) active = emph;
           const base: React.CSSProperties = {
             position: 'absolute',
             left: el.x * scale,
             top: el.y * scale,
             width: el.w * scale,
             height: el.h * scale,
+            ...rotateStyle(el),
           };
-          if (el.type === 'text') {
-            const st = el.style || { fontSize: 24, color: '#000' };
-            return (
-              <div
-                key={el.id}
-                style={{
-                  ...base,
-                  fontSize: st.fontSize * scale,
-                  color: st.color,
-                  fontWeight: st.bold ? 700 : 400,
-                  fontStyle: st.italic ? 'italic' : 'normal',
-                  textDecoration: st.underline ? 'underline' : 'none',
-                  textAlign: st.align,
-                  display: 'flex',
-                  alignItems: st.align === 'center' ? 'center' : st.align === 'right' ? 'flex-end' : 'flex-start',
-                  lineHeight: 1.3,
-                  overflow: 'hidden',
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                  padding: 4 * scale,
-                }}
-              >
-                {el.text}
-              </div>
-            );
-          }
-          if (el.type === 'image') {
-            return <img key={el.id} src={resolveImg(el.src)} draggable={false} className="pointer-events-none" style={{ ...base, objectFit: 'fill' }} alt="" />;
-          }
-          // shape（矩形 / 圆角矩形 / 椭圆 / 直线 / 三角 / 箭头），统一用 SVG 渲染
+          const aStyle = active ? animStyle(active) : {};
+          // 仅在有活动动画时把 buildStep 编入 key，触发 CSS 动画重放；静态时保持稳定 key 避免重复播放。
+          const key = active ? `${el.id}-b${buildStep}` : el.id;
           return (
-            <div key={el.id} style={base} className="pointer-events-none">
-              <ShapeSvg el={el} scale={scale} />
+            <div key={key} style={{ ...base, ...aStyle }} className="pointer-events-none">
+              {elementVisual(el, scale)}
             </div>
           );
         })}
     </div>
   );
+}
+
+// 计算某页的最大构建组数（放映按此决定单击多少次后才翻到下一页）。
+function maxBuildStep(slide?: PptSlide): number {
+  const anims = slide?.animations;
+  if (!anims || anims.length === 0) return 0;
+  return anims.reduce((m, a) => Math.max(m, a.group || 0), 0);
 }
 
 // 放映模式：真正全屏逐页，方向键/空格/点击翻页，Esc 退出。
@@ -314,11 +501,13 @@ const eraserCursor = (size: number) => {
 
 function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: number; onExit: () => void }) {
   const [idx, setIdx] = useState(start);
+  const [buildStep, setBuildStep] = useState(0); // 当前页的动画构建步（单击构建）
   const [stage, setStage] = useState({ w: 960, h: 540 });
   const [tool, setTool] = useState<AnnoTool>('nav');
   const [color, setColor] = useState(ANNO_COLORS[0]);
   const [size, setSize] = useState(4);
   const [barVisible, setBarVisible] = useState(true);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null); // 右键菜单（仅「退出放映」）
 
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -328,43 +517,72 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
   const barVisibleRef = useRef(true); // 避免每次鼠标移动都触发整页重渲染（卡顿根因）
   const undoStack = useRef<ImageData[]>([]); // 标注撤销栈（快照式）
   const wheelCooldown = useRef(false); // 滚轮翻页防抖
+  const onExitRef = useRef(onExit); // 避免 effect 因 onExit 引用变化反复重绑
+  onExitRef.current = onExit;
 
-  // 进入真正全屏（隐藏任务栏等），退出时退出全屏
+  // 真正全屏：对覆盖层【元素本身】requestFullscreen，而非窗口级全屏。
+  // 覆盖层已 portal 到 body，脱离了 ThemeProvider 的 zoom / 任何 transformed 祖先，
+  // 因此元素级全屏不会再被祖先 transform 偏移（旧版「右推」根因）。元素级全屏不会重排
+  // 底层编辑器（webview 尺寸不变），ESC 由浏览器退出全屏、下方 fullscreenchange 监听同步退出放映。
   useEffect(() => {
     const el = containerRef.current;
-    if (el && el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    if (el && el.requestFullscreen) {
+      el.requestFullscreen().catch(() => {});
+    }
+    const onFsChange = () => {
+      // 退出元素全屏（含按 ESC）→ 同步退出放映
+      if (!document.fullscreenElement) onExitRef.current();
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
     return () => {
-      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      document.removeEventListener('fullscreenchange', onFsChange);
+      if (document.fullscreenElement && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
     };
   }, []);
 
-  // 适配舞台尺寸（保持 16:9）
+  // 适配舞台尺寸（保持当前幻灯片宽高比）
   useEffect(() => {
     const fit = () => {
+      const cs = slides[idx];
+      const sw = cs?.width ?? LOGICAL_W;
+      const sh = cs?.height ?? LOGICAL_H;
       const vw = window.innerWidth;
       const vh = window.innerHeight;
-      const w = Math.min(vw, (vh * LOGICAL_W) / LOGICAL_H);
-      const h = (w * LOGICAL_H) / LOGICAL_W;
+      const w = Math.min(vw, (vh * sw) / sh);
+      const h = (w * sh) / sw;
       setStage({ w, h });
     };
     fit();
     window.addEventListener('resize', fit);
     return () => window.removeEventListener('resize', fit);
-  }, []);
+  }, [idx, slides]);
 
-  // 键盘翻页
+  // 前进：先把当前页的动画逐组构建播完，再翻到下一页；后退：先退构建组，再翻上一页。
+  const advance = useCallback(() => {
+    const maxB = maxBuildStep(slides[idx]);
+    if (buildStep < maxB) setBuildStep((s) => s + 1);
+    else if (idx < slides.length - 1) { setIdx(idx + 1); setBuildStep(0); }
+  }, [idx, buildStep, slides]);
+  const retreat = useCallback(() => {
+    if (buildStep > 0) setBuildStep((s) => s - 1);
+    else if (idx > 0) { const pi = idx - 1; setIdx(pi); setBuildStep(maxBuildStep(slides[pi])); }
+  }, [idx, buildStep, slides]);
+
+  // 键盘翻页 / 构建
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onExit();
-      else if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') setIdx((i) => Math.min(slides.length - 1, i + 1));
-      else if (e.key === 'ArrowLeft' || e.key === 'PageUp') setIdx((i) => Math.max(0, i - 1));
+      if (e.key === 'Escape') { onExitRef.current(); return; }
+      else if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown' || e.key === 'ArrowDown') advance();
+      else if (e.key === 'ArrowLeft' || e.key === 'PageUp' || e.key === 'ArrowUp') retreat();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [slides.length, onExit]);
+  }, [advance, retreat]);
 
   // 画布尺寸（随舞台 + DPR 缩放，切换页时重置）
-  const scale = stage.w / LOGICAL_W;
+  const scale = stage.w / (slides[idx]?.width ?? LOGICAL_W);
   useEffect(() => {
     const c = canvasRef.current;
     if (!c) return;
@@ -384,7 +602,7 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
     hideTimer.current = window.setTimeout(() => {
       barVisibleRef.current = false;
       setBarVisible(false);
-    }, 2800);
+    }, 1400);
   }, []);
   useEffect(() => {
     revealBar();
@@ -479,7 +697,6 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
     if (c && ctx) ctx.clearRect(0, 0, c.width, c.height);
   };
 
-  const go = (d: number) => setIdx((i) => Math.max(0, Math.min(slides.length - 1, i + d)));
   const trans = slides[idx]?.transition || 'fade';
   const animClass = trans === 'fade' ? 'ppt-anim-fade' : trans === 'slide' ? 'ppt-anim-slide' : '';
   const drawingActive = tool !== 'nav';
@@ -491,11 +708,13 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
 
   return (
     <>
-    <style>{'@keyframes pptFade{from{opacity:0}to{opacity:1}}@keyframes pptSlide{from{transform:translateX(40px);opacity:0}to{transform:translateX(0);opacity:1}}.ppt-anim-fade{animation:pptFade .35s ease}.ppt-anim-slide{animation:pptSlide .35s ease}'}</style>
+    <style>{'@keyframes pptFade{from{opacity:0}to{opacity:1}}@keyframes pptSlide{from{transform:translateX(40px);opacity:0}to{transform:translateX(0);opacity:1}}.ppt-anim-fade{animation:pptFade .35s ease}.ppt-anim-slide{animation:pptSlide .35s ease}' + ANIM_KEYFRAMES}</style>
     <div
       ref={containerRef}
       className="fixed inset-0 z-[9999] bg-black flex items-center justify-center select-none"
       onDoubleClick={onExit}
+      onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
+      onClick={() => setMenu(null)}
       onMouseMove={(e) => {
         // 仅在工具栏隐藏时复现，避免每次鼠标移动都触发整页重渲染（卡顿根因）
         if (!barVisibleRef.current && e.clientY < window.innerHeight * 0.14) revealBar();
@@ -504,11 +723,17 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
         if (wheelCooldown.current) return;
         wheelCooldown.current = true;
         window.setTimeout(() => { wheelCooldown.current = false; }, 350);
-        go(e.deltaY > 0 ? 1 : -1);
+        if (e.deltaY > 0) advance();
+        else retreat();
       }}
     >
       <div key={idx} style={{ width: stage.w, height: stage.h, position: 'relative' }} className={`shadow-2xl ${animClass}`}>
-        {slides[idx] && <SlideView slide={slides[idx]} scale={scale} />}
+        {/* PNG 模式（LibreOffice 导出可用）：直接展示高保真图片，跳过逐元素渲染 */}
+        {slides[idx]?.pngSrc ? (
+          <img src={resolveImg(slides[idx].pngSrc!)} alt="" className="absolute inset-0 w-full h-full object-contain" />
+        ) : (
+          slides[idx] && <AnimatedSlideView slide={slides[idx]} scale={scale} buildStep={buildStep} />
+        )}
         {/* 标注画布：覆盖在幻灯片之上，仅标注工具激活时拦截指针 */}
         <canvas
           ref={canvasRef}
@@ -574,9 +799,23 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
       {/* 左右半屏翻页热区（指针模式下可用；标注模式下让位给画布） */}
       {!drawingActive && (
         <>
-          <button className="absolute left-0 top-0 bottom-0 w-1/3 bg-transparent cursor-pointer" onClick={() => go(-1)} aria-label="上一页" />
-          <button className="absolute right-0 top-0 bottom-0 w-1/3 bg-transparent cursor-pointer" onClick={() => go(1)} aria-label="下一页" />
+          <button className="absolute left-0 top-0 bottom-0 w-1/3 bg-transparent cursor-pointer" onClick={() => retreat()} aria-label="上一页" />
+          <button className="absolute right-0 top-0 bottom-0 w-1/3 bg-transparent cursor-pointer" onClick={() => advance()} aria-label="下一页" />
         </>
+      )}
+
+      {/* 右键菜单：仅一个「退出放映」入口，低成本高可用 */}
+      {menu && (
+        <div
+          className="absolute z-[10000] rounded-lg bg-[#1f2937] text-white text-sm shadow-2xl py-1 w-36 ring-1 ring-white/10"
+          style={{ top: Math.min(menu.y, window.innerHeight - 44), left: Math.min(menu.x, window.innerWidth - 148) }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="w-full text-left px-3 py-1.5 hover:bg-white/10 rounded"
+            onClick={() => { setMenu(null); onExitRef.current(); }}
+          >退出放映</button>
+        </div>
       )}
     </div>
     </>
@@ -613,8 +852,8 @@ function preloadImages(srcs: string[]): Promise<Map<string, HTMLImageElement>> {
 
 // 在 canvas 上绘制一张幻灯片（逻辑坐标 960×540 → 以 scale 放大），返回 JPEG Blob。
 async function renderSlideToJpeg(slide: PptSlide, scale: number, imgs: Map<string, HTMLImageElement>): Promise<Blob> {
-  const W = Math.round(LOGICAL_W * scale);
-  const H = Math.round(LOGICAL_H * scale);
+  const W = Math.round((slide.width ?? LOGICAL_W) * scale);
+  const H = Math.round((slide.height ?? LOGICAL_H) * scale);
   const canvas = document.createElement('canvas');
   canvas.width = W;
   canvas.height = H;
@@ -630,6 +869,11 @@ async function renderSlideToJpeg(slide: PptSlide, scale: number, imgs: Map<strin
     const h = el.h * scale;
     if (el.type === 'text') {
       const st = el.style || { fontSize: 24, color: '#000' };
+      // 文本框底色
+      if (el.fill && el.fill !== 'transparent') {
+        ctx.fillStyle = el.fill;
+        ctx.fillRect(x, y, w, h);
+      }
       ctx.fillStyle = st.color || '#000000';
       ctx.font = `${st.italic ? 'italic ' : ''}${st.bold ? 'bold ' : ''}${Math.round(st.fontSize * scale)}px sans-serif`;
       ctx.textBaseline = 'top';
@@ -667,19 +911,24 @@ async function renderSlideToJpeg(slide: PptSlide, scale: number, imgs: Map<strin
       }
     } else {
       // shape
+      const hasStroke = !!el.stroke && el.stroke !== 'none';
       if (el.shape === 'line') {
-        ctx.fillStyle = el.stroke || '#000';
-        ctx.fillRect(x, y, w, Math.max(1, (el.strokeWidth ?? 2) * scale));
+        if (hasStroke) {
+          ctx.fillStyle = el.stroke!;
+          ctx.fillRect(x, y, w, Math.max(1, (el.strokeWidth ?? 2) * scale));
+        }
       } else {
-        ctx.strokeStyle = el.stroke || '#000';
-        ctx.lineWidth = (el.strokeWidth ?? 2) * scale;
+        if (hasStroke) {
+          ctx.strokeStyle = el.stroke!;
+          ctx.lineWidth = (el.strokeWidth ?? 2) * scale;
+        }
         const hasFill = !!el.fill && el.fill !== 'transparent';
         if (hasFill) ctx.fillStyle = el.fill!;
         if (el.shape === 'ellipse') {
           ctx.beginPath();
           ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
           if (hasFill) ctx.fill();
-          ctx.stroke();
+          if (hasStroke) ctx.stroke();
         } else if (el.shape === 'triangle') {
           ctx.beginPath();
           ctx.moveTo(x, y + h);
@@ -687,7 +936,7 @@ async function renderSlideToJpeg(slide: PptSlide, scale: number, imgs: Map<strin
           ctx.lineTo(x + w, y + h);
           ctx.closePath();
           if (hasFill) ctx.fill();
-          ctx.stroke();
+          if (hasStroke) ctx.stroke();
         } else if (el.shape === 'arrow') {
           const aw = Math.min(w * 0.45, h);
           const sh = h * 0.28;
@@ -700,11 +949,11 @@ async function renderSlideToJpeg(slide: PptSlide, scale: number, imgs: Map<strin
           ctx.lineTo(x + (w - aw), y + (h + sh) / 2);
           ctx.closePath();
           if (hasFill) ctx.fill();
-          ctx.stroke();
+          if (hasStroke) ctx.stroke();
         } else {
           // rect / roundRect（canvas 描边矩形近似）
           if (hasFill) ctx.fillRect(x, y, w, h);
-          ctx.strokeRect(x, y, w, h);
+          if (hasStroke) ctx.strokeRect(x, y, w, h);
         }
       }
     }
@@ -895,22 +1144,25 @@ export function PptEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
-  // ---- 画布区域尺寸 → 计算缩放（保持 16:9 适配）----
+  // ---- 画布区域尺寸 → 计算缩放（保持幻灯片宽高比适配）----
   useEffect(() => {
+    const cs = slides[activeSlide];
+    const sw = cs?.width ?? LOGICAL_W;
+    const sh = cs?.height ?? LOGICAL_H;
     const el = areaRef.current;
     if (!el) return;
     const update = () => {
       const pad = 32;
       const aw = el.clientWidth - pad;
       const ah = el.clientHeight - pad;
-      const s = Math.max(0.1, Math.min(aw / LOGICAL_W, ah / LOGICAL_H));
+      const s = Math.max(0.1, Math.min(aw / sw, ah / sh));
       setScale(s);
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [activeSlide, slides]);
 
   // ---- 卸载时落盘 ----
   useEffect(() => {
@@ -1163,12 +1415,16 @@ export function PptEditor({
     if (!d) return;
     const dx = (e.clientX - d.sx) / scale;
     const dy = (e.clientY - d.sy) / scale;
-    const others = (slidesRef.current[activeSlide]?.elements || []).filter((x) => x.id !== d.id);
+    const cs = slidesRef.current[activeSlide];
+    const others = (cs?.elements || []).filter((x) => x.id !== d.id);
+    const sw = cs?.width ?? LOGICAL_W;
+    const sh = cs?.height ?? LOGICAL_H;
     if (d.mode === 'move') {
       const { box, guides: g } = snapMove(
         { x: Math.max(0, d.ox + dx), y: Math.max(0, d.oy + dy), w: d.ow, h: d.oh },
         others,
         SNAP,
+        sw, sh,
       );
       setGuides(g);
       updateElement(d.id, { x: Math.round(box.x), y: Math.round(box.y) });
@@ -1177,6 +1433,7 @@ export function PptEditor({
         { x: d.ox, y: d.oy, w: Math.max(20, d.ow + dx), h: Math.max(20, d.oh + dy) },
         others,
         SNAP,
+        sw, sh,
       );
       setGuides(g);
       updateElement(d.id, { w: Math.round(box.w), h: Math.round(box.h) });
@@ -1267,7 +1524,7 @@ export function PptEditor({
                   )}
                   {!collapsed && block.slides.map(({ slide: s, idx: i }) => (
                     <div key={s.id} className={`relative group ${sec ? 'ml-3' : ''}`}>
-                      <PptThumb slide={s} scale={0.075} active={i === activeSlide} onClick={() => { setActiveSlide(i); setSelId(null); }} />
+                      <PptThumb slide={s} active={i === activeSlide} onClick={() => { setActiveSlide(i); setSelId(null); }} />
                       <span className="absolute top-0.5 left-1 text-[10px] text-neutral-500 dark:text-stone-400 tabular-nums">{i + 1}</span>
                       <div className="absolute top-0.5 right-0.5 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
@@ -1299,7 +1556,7 @@ export function PptEditor({
           {curSlide && (
             <div
               className="relative shadow-xl bg-white select-none"
-              style={{ width: LOGICAL_W * scale, height: LOGICAL_H * scale, background: curSlide.background }}
+              style={{ width: (curSlide.width ?? LOGICAL_W) * scale, height: (curSlide.height ?? LOGICAL_H) * scale, background: curSlide.background }}
               onPointerDown={(e) => e.stopPropagation()}
             >
               {curSlide.elements.map((el) => {
@@ -1310,10 +1567,13 @@ export function PptEditor({
                   top: el.y * scale,
                   width: el.w * scale,
                   height: el.h * scale,
+                  ...rotateStyle(el),
                 };
                 let visual: React.ReactNode;
                 if (el.type === 'text') {
                   const st = el.style || { fontSize: 24, color: '#000' };
+                  // 文本框底色：导入的着色文本框 / 带填充的自选图形文字，按原填充呈现（透明则无底色）。
+                  const textBg = el.fill && el.fill !== 'transparent' ? el.fill : 'transparent';
                   visual = editingId === el.id ? (
                     <textarea
                       autoFocus
@@ -1321,8 +1581,8 @@ export function PptEditor({
                       onPointerDown={(e) => e.stopPropagation()}
                       onChange={(e) => updateElement(el.id, { text: e.target.value })}
                       onBlur={() => { setEditingId(null); scheduleSave(slidesRef.current); }}
-                      className="w-full h-full resize-none bg-transparent outline-none border-none p-1"
-                      style={{ fontSize: st.fontSize * scale, color: st.color, fontWeight: st.bold ? 700 : 400, fontStyle: st.italic ? 'italic' : 'normal', textDecoration: st.underline ? 'underline' : 'none', textAlign: st.align }}
+                      className="w-full h-full resize-none outline-none border-none p-1"
+                      style={{ fontSize: st.fontSize * scale, color: st.color, fontWeight: st.bold ? 700 : 400, fontStyle: st.italic ? 'italic' : 'normal', textDecoration: st.underline ? 'underline' : 'none', textAlign: st.align, background: textBg }}
                     />
                   ) : (
                     <div
@@ -1334,9 +1594,10 @@ export function PptEditor({
                         fontStyle: st.italic ? 'italic' : 'normal',
                         textDecoration: st.underline ? 'underline' : 'none',
                         textAlign: st.align,
+                        background: textBg,
                         display: 'flex',
                         alignItems: st.align === 'center' ? 'center' : st.align === 'right' ? 'flex-end' : 'flex-start',
-                        lineHeight: 1.3,
+                        lineHeight: st.lineHeight || 1.3,
                       }}
                     >{el.text}</div>
                   );
@@ -1344,15 +1605,21 @@ export function PptEditor({
                   visual = <img src={resolveImg(el.src)} draggable={false} className="w-full h-full object-fill pointer-events-none" alt="" />;
                 } else {
                   // shape
+                  const hasStroke = !!el.stroke && el.stroke !== 'none';
                   const s: Record<string, string | number> = { width: '100%', height: '100%', boxSizing: 'border-box' };
                   if (el.shape === 'line') {
-                    s.background = el.stroke || '#000';
+                    s.background = hasStroke ? (el.stroke || '#000') : 'transparent';
                     s.height = Math.max(1, (el.strokeWidth ?? 2) * scale);
                   } else {
-                    s.background = el.fill || 'transparent';
-                    s.border = `${(el.strokeWidth ?? 2) * scale}px solid ${el.stroke || '#000'}`;
+                    if (el.fillGradient) {
+                      s.background = cssGradient(el.fillGradient);
+                    } else {
+                      s.background = el.fill || 'transparent';
+                    }
+                    if (hasStroke) s.border = `${(el.strokeWidth ?? 2) * scale}px solid ${el.stroke}`;
                     if (el.shape === 'ellipse') s.borderRadius = '50%';
                   }
+                  if (el.shadow) s.boxShadow = el.shadow;
                   visual = <div style={s} className="pointer-events-none" />;
                 }
                 return (
@@ -1543,7 +1810,10 @@ export function PptEditor({
         </div>
       </div>
     </div>
-    {presenting && <PresentMode slides={slides} start={presentIndex} onExit={() => setPresenting(false)} />}
+    {presenting && ReactDOM.createPortal(
+      <PresentMode slides={slides} start={presentIndex} onExit={() => setPresenting(false)} />,
+      document.body,
+    )}
     </>
   );
 }

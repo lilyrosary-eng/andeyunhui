@@ -45,9 +45,23 @@ export interface PptTextStyle {
   underline?: boolean;
   align?: 'left' | 'center' | 'right';
   fontFamily?: string;
+  lineHeight?: number;   // 行距倍率（如 1.5）
+  marginTop?: number;    // 段前间距 (pt)
+  marginBottom?: number; // 段后间距 (pt)
 }
 
 export type PptElementType = 'text' | 'image' | 'shape';
+
+export interface PptGradientStop {
+  pos: number;    // 0..1
+  color: string;  // "#rrggbb"
+}
+
+export interface PptGradient {
+  type: 'linear' | 'radial';
+  angle: number;     // CSS degrees (0=top, 90=right, ...)
+  stops: PptGradientStop[];
+}
 
 // 形状类型：矩形 / 圆角矩形 / 椭圆 / 直线 / 三角 / 右箭头
 export type PptShapeKind = 'rect' | 'roundRect' | 'ellipse' | 'line' | 'triangle' | 'arrow';
@@ -59,7 +73,9 @@ export interface PptElement {
   y: number;
   w: number;
   h: number;
-  rotation?: number;
+  rotation?: number;   // degrees
+  flipH?: boolean;
+  flipV?: boolean;
   z: number;
   // text
   text?: string;
@@ -69,15 +85,37 @@ export interface PptElement {
   // shape
   shape?: PptShapeKind;
   fill?: string;
+  fillGradient?: PptGradient;  // 渐变填充（优于 fill）；null 表示纯色填充
+  shadow?: string;           // CSS box-shadow 字符串（从 PPTX 阴影效果解析）
   stroke?: string;
   strokeWidth?: number;
+  // 导入时保留的原始 PowerPoint 形状 id（用于元素级动画 spid 关联，前端一般不使用）
+  spid?: string;
+}
+
+// 元素级动画（进场/强调/退场），由 pptx 导入时解析 `<p:timing>` 得到，放映时逐组「单击构建」播放。
+export type PptAnimType = 'entrance' | 'emphasis' | 'exit';
+export type PptAnimTrigger = 'onClick' | 'withPrev' | 'afterPrev';
+export interface PptAnim {
+  elId: string;              // 目标元素 id
+  type: PptAnimType;         // 进场 / 强调 / 退场
+  preset: string;            // fade|fly|wipe|split|zoom|grow|float|bounce|appear|spin|pulse
+  dir?: 'left' | 'right' | 'top' | 'bottom'; // 方向（飞入/擦除）
+  trigger: PptAnimTrigger;   // 触发方式
+  delay?: number;            // 延迟（ms，预留）
+  duration?: number;         // 时长（ms）
+  group: number;             // 构建组序号（同组一起播放；0=进入页面即自动播）
 }
 
 export interface PptSlide {
   id: string;
   background: string; // CSS 颜色
   elements: PptElement[];
+  width?: number; // 逻辑画布宽（前端可能不是 960；缺省回退 960）
+  height?: number; // 逻辑画布高（缺省回退 540）
+  pngSrc?: string; // LibreOffice 导出的高保真 PNG 路径（放映优先使用）
   transition?: 'none' | 'fade' | 'slide'; // 放映切换到本页时的动画
+  animations?: PptAnim[]; // 元素级动画（有序），放映逐组构建播放
   sectionId?: string | null; // 归属的章节（嵌套），null/缺省为未分组
 }
 

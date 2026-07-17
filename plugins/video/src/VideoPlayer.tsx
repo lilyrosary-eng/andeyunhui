@@ -9,6 +9,16 @@ const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
 const { IconButton } = window.__HOST_UI__ || {};
+// debugLog 双写：①直接 console.log（WebView DevTools 控制台可见，不经 Rust 桥、永不被吞，
+// 最可靠的排查手段）；②再经 debug_log 命令转发到 Rust 终端。
+const debugLog = (m: string) => {
+  try { console.log('[video-smtc]', m); } catch { /* 忽略 */ }
+  try {
+    hostApi?.invoke?.('debug_log', { msg: `[video] ${m}` }).catch(() => {});
+  } catch {
+    /* 忽略 */
+  }
+};
 
 interface VideoFile {
   filePath: string;
@@ -45,6 +55,11 @@ function VolumePopup({ volume, onVolumeChange }: { volume: number; onVolumeChang
   const trackRef = useRef<HTMLDivElement>(null);
   const hideTimerRef = useRef<number>(0);
   const [isDragging, setIsDragging] = useState(false);
+  // 记住最近一次非零音量，作为取消静音时的恢复值（点击静音图标再点恢复时用）。
+  const lastVolumeRef = useRef(volume > 0 ? volume : 0.7);
+  useEffect(() => {
+    if (volume > 0) lastVolumeRef.current = volume;
+  }, [volume]);
 
   const updateFromEvent = useCallback((clientY: number) => {
     if (!trackRef.current) return;
@@ -79,16 +94,17 @@ function VolumePopup({ volume, onVolumeChange }: { volume: number; onVolumeChang
   }, []);
 
   const isMuted = volume === 0;
+  const restoreVolume = lastVolumeRef.current > 0 ? lastVolumeRef.current : 0.7;
   const btn = IconButton
     ? React.createElement(IconButton, {
-        onClick: () => onVolumeChange(isMuted ? 0.7 : 0),
-        title: `音量 ${Math.round(volume * 100)}%`,
+        onClick: () => onVolumeChange(isMuted ? restoreVolume : 0),
+        title: isMuted ? `已静音（点击恢复 ${Math.round(restoreVolume * 100)}%）` : `音量 ${Math.round(volume * 100)}%（点击静音）`,
         active: showPopup,
         children: React.createElement(isMuted ? VolumeMuteIcon : VolumeIcon),
       })
     : React.createElement('button', {
-        onClick: () => onVolumeChange(isMuted ? 0.7 : 0),
-        title: `音量 ${Math.round(volume * 100)}%`,
+        onClick: () => onVolumeChange(isMuted ? restoreVolume : 0),
+        title: isMuted ? `已静音（点击恢复 ${Math.round(restoreVolume * 100)}%）` : `音量 ${Math.round(volume * 100)}%（点击静音）`,
         className: 'btn-press p-1.5 rounded-full transition-all duration-150 text-white/70 hover:text-white',
         children: React.createElement(isMuted ? VolumeMuteIcon : VolumeIcon),
       });
@@ -157,6 +173,46 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
   const isFirst = currentIndex <= 0;
   const isLast = currentIndex >= videoList.length - 1;
 
+  // 用 ref 保存最新导航状态，避免 smtc-control 监听器闭包捕获到过期的 currentIndex/isFirst/isLast。
+  const navRef = useRef({ currentIndex, isFirst, isLast, videoList, onFileChange });
+  navRef.current = { currentIndex, isFirst, isLast, videoList, onFileChange };
+
+  // 直接推送（不走 useEffect，避免 effect 不触发导致推送丢失）：在 <video> 原生
+  // play/pause/loadedmetadata 事件里调用，保证真实播放时一定把元信息推到 Rust。
+  // console.error 在沙箱里永不被吞（safe console 仅 noop 掉 log/info/debug），
+  // 故用它做诊断，Rust 终端必能看见，便于确认推送是否真发出。
+  const pushSmtcNow = useCallback((playing: boolean) => {
+    const api = (window.__HOST_API__ as any) || hostApi;
+    if (!api || !api.invoke) {
+      console.error('[video-smtc][DIAG] pushSmtcNow: NO API');
+      return;
+    }
+    const title = file?.fileName || '视频';
+    const nav = navRef.current;
+    console.error('[video-smtc][DIAG] pushSmtcNow playing=', playing, 'title=', title);
+    api.invoke('debug_log', { msg: `VIDEO_PUSH_NOW playing=${playing} title=${title}` }).catch(() => {});
+    api
+      .invoke('smtc_update', {
+        info: {
+          title,
+          artist: '',
+          album: '',
+          media_type: 'video',
+          is_playing: playing,
+          can_prev: !nav.isFirst,
+          can_next: !nav.isLast,
+        },
+      })
+      .then(() => {
+        console.error('[video-smtc][DIAG] push OK');
+        api.invoke('debug_log', { msg: 'VIDEO_PUSH_NOW_OK' }).catch(() => {});
+      })
+      .catch((e: unknown) => {
+        console.error('[video-smtc][DIAG] push FAIL', String(e));
+        api.invoke('debug_log', { msg: 'VIDEO_PUSH_NOW_FAIL ' + String(e) }).catch(() => {});
+      });
+  }, [file?.fileName]);
+
   // 记住进度
   useEffect(() => {
     if (!settings.rememberProgress) return;
@@ -224,6 +280,126 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       video.removeEventListener('ended', onEnded);
     };
   }, [file.filePath]);
+
+  // Windows 任务栏「正在播放」媒体控件：
+  //  - JS mediaSession：把文件名作为标题推送（兜底；Chromium 可能已被 --disable-features=MediaSession 禁用，故全程 guard）。
+  //  - 本进程 SMTC 会话（Rust 端）：任务栏显「岸灯鸢花」并回传系统媒体键。
+  // 关键：smtc-control 监听必须【无条件】注册，不能依赖 Chromium mediaSession 是否存在——
+  // 否则一旦 mediaSession 被禁用，视频就完全收不到任务栏/触摸板的播放、上一集、下一集指令。
+  // JS mediaSession（仅作兜底，存在才用）：绑定系统媒体键处理器 + 同步 Chromium 播放态。
+  // 本进程 SMTC 的元信息推送已拆到下方独立 effect，不依赖 <video> 元素是否存在，
+  // 避免 video 元素未挂载导致推送不执行（→ 任务栏回退 com.andengyuanhua.desktop + 媒体键被丢弃）。
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const ms = (navigator as unknown as { mediaSession?: Record<string, unknown> }).mediaSession as
+      | { metadata?: unknown; playbackState?: string; setPositionState?: (s: { duration: number; position: number; playbackRate: number }) => void; setActionHandler?: (a: string, h: ((d?: { seekTime?: number }) => void) | null) => void }
+      | undefined;
+    // 注意：与 music 插件同理，任务栏「正在播放」卡片统一由 Rust SMTC 会话负责，
+    // 且媒体键由 Rust ButtonPressed 回传处理。此处【不】设置 JS navigator.mediaSession
+    // 的 metadata 与处理器，避免 WebView2 生成一张「未知应用」的重复卡片、并与 Rust 路径
+    // 重复触发媒体键。Rust 侧的元信息推送在下方独立的 useEffect（pushSmtcNow）中完成。
+    if (ms) {
+      /* 故意留空：OS 媒体卡片由 Rust SMTC 接管，媒体键由 Rust 回传处理 */
+    }
+    const onPlay = () => { try { if (ms) ms.playbackState = 'playing'; } catch { /* */ } };
+    const onPause = () => { try { if (ms) ms.playbackState = 'paused'; } catch { /* */ } };
+    const onTime = () => {
+      try {
+        if (ms && ms.setPositionState && video.duration) {
+          ms.setPositionState({ duration: video.duration, position: video.currentTime, playbackRate: video.playbackRate });
+        }
+      } catch { /* */ }
+    };
+    video.addEventListener('play', onPlay);
+    video.addEventListener('pause', onPause);
+    video.addEventListener('timeupdate', onTime);
+    return () => {
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+      video.removeEventListener('timeupdate', onTime);
+      if (ms && ms.setActionHandler) {
+        ms.setActionHandler('play', null);
+        ms.setActionHandler('pause', null);
+        ms.setActionHandler('seekto', null);
+        ms.setActionHandler('seekbackward', null);
+        ms.setActionHandler('seekforward', null);
+        ms.setActionHandler('stop', null);
+      }
+    };
+  }, [file.filePath]);
+
+  // 本进程 SMTC 会话元信息推送：【独立于 <video> 元素】，文件/播放态变化时即推。
+  // 修复此前 video 元素未挂载导致 pushSmtc 不执行 → video_ok 恒为 false → 媒体键被判定
+  // 「无活动会话」丢弃、任务栏回退显示 com.andengyuanhua.desktop。
+  useEffect(() => {
+    const api = (window.__HOST_API__ as any) || hostApi;
+    if (!api || !api.invoke) {
+      console.error('[video-smtc][DIAG] effect: NO API');
+      return;
+    }
+    if (!file) {
+      // 早期 file 为空时直接跳过（不再静默丢推送），并用 debug_log 留痕便于定位。
+      api.invoke('debug_log', { msg: 'VIDEO_PUSH_EFFECT skip: file 为空' }).catch(() => {});
+      return;
+    }
+    const title = file.fileName || '视频';
+    // debug_log 会以 [FE] 前缀必定出现在 Rust 终端，作为"推送是否真发出"的不可抵赖证据。
+    api.invoke('debug_log', { msg: `VIDEO_PUSH_EFFECT fileName=${title} playing=${isPlaying} isFirst=${isFirst} isLast=${isLast}` }).catch(() => {});
+    api.invoke('smtc_update', {
+      info: {
+        title,
+        artist: '',
+        album: '',
+        media_type: 'video',
+        is_playing: isPlaying,
+        can_prev: !isFirst,
+        can_next: !isLast,
+      },
+    })
+      .then(() => api.invoke('debug_log', { msg: 'VIDEO_PUSH_EFFECT_OK' }).catch(() => {}))
+      .catch((e: unknown) => api.invoke('debug_log', { msg: 'VIDEO_PUSH_EFFECT_FAIL ' + String(e) }).catch(() => {}));
+  }, [file?.filePath, isPlaying, isFirst, isLast]);
+
+  // 系统媒体键监听：独立成 effect，【挂载即注册】，不依赖 <video> 元素是否存在，
+  // 内部动态读取 videoRef/navRef，彻底避免被上面的 if (!video) return 早退而漏注册
+  //（此前"视频模块按键无效果、DevTools 无日志"的根因）。
+  useEffect(() => {
+    if (!window.__HOST_API__) {
+      console.warn('[video] 缺少 __HOST_API__，媒体键监听未注册');
+      return;
+    }
+    let cleaned = false;
+    let unsub: (() => void) | null = null;
+    debugLog('video: smtc listener registering (always-on)');
+    hostApi
+      .listen<{ action?: string; target?: string } | string>('smtc-control', (e) => {
+        const raw = e.payload as { action?: string; target?: string } | string;
+        const b = typeof raw === 'string' ? raw : raw?.action;
+        const t = typeof raw === 'string' ? '' : raw?.target;
+        if (t && t !== 'video') {
+          debugLog(`video BTN ignored action=${b} target=${t}`);
+          return;
+        }
+        const nav = navRef.current;
+        const video = videoRef.current;
+        debugLog(`video BTN ${b} (target=${t || 'any'}) isFirst=${nav?.isFirst} isLast=${nav?.isLast} idx=${nav?.currentIndex}`);
+        if (b === 'play') { if (video) video.play().catch(() => {}); }
+        else if (b === 'pause') { if (video) video.pause(); }
+        else if (b === 'toggle' || b === 'playpause') { if (video) { if (video.paused) video.play().catch(() => {}); else video.pause(); } }
+        else if (b === 'next') { if (nav && !nav.isLast) { const n = nav.videoList[nav.currentIndex + 1]; if (n) nav.onFileChange(n); } }
+        else if (b === 'previous') { if (nav && !nav.isFirst) { const p = nav.videoList[nav.currentIndex - 1]; if (p) nav.onFileChange(p); } }
+        else if (b === 'stop') { if (video) { video.pause(); video.currentTime = 0; } }
+        else if (b === 'seekforward') { if (video) video.currentTime = Math.min(video.duration || 0, video.currentTime + 10); }
+        else if (b === 'seekbackward') { if (video) video.currentTime = Math.max(0, video.currentTime - 10); }
+      })
+      .then((u) => { if (cleaned) u(); else { unsub = u; debugLog('video: smtc listener registered'); } })
+      .catch((e) => { console.warn('[video] smtc-control 监听注册失败（媒体键将失效）', e); debugLog('video: smtc listener register FAILED ' + String(e)); });
+    return () => {
+      cleaned = true;
+      if (unsub) { unsub(); debugLog('video: smtc listener removed'); }
+    };
+  }, []);
 
   // 音量/播放速度变动同步到 video
   useEffect(() => {
@@ -369,6 +545,19 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       onClick: togglePlay,
       onDoubleClick: handleDblClick,
       autoPlay: true,
+      // 原生播放事件内联推送：真实播放/暂停时必定触发，不依赖 useEffect 时机。
+      onPlay: () => {
+        setIsPlaying(true);
+        pushSmtcNow(true);
+      },
+      onPause: () => {
+        setIsPlaying(false);
+        pushSmtcNow(false);
+      },
+      onLoadedMetadata: () => {
+        if (videoRef.current) setDuration(videoRef.current.duration);
+        pushSmtcNow(isPlaying);
+      },
       style: { cursor: canHide && !showControls ? 'none' : 'default' },
     }),
 

@@ -55,6 +55,11 @@ export const useAppStore = create<AppState>((set) => ({
 
   setActiveModule: (m) => {
     logger.app.switchModule(m);
+    // 上报当前激活模块给 Rust，用于任务栏媒体会话优先级：视频模块→视频优先，其余→音乐优先。
+    window.__HOST_API__?.invoke('debug_log', { msg: `FE set_active_module ${m}` }).catch(() => {});
+    window.__HOST_API__?.invoke('set_active_module', { module: m }).catch(() => {
+      /* 忽略：Rust 端未实现或非 Windows 时不阻塞前端 */
+    });
     set(state => ({
       activeModule: m,
       showNoteSettings: false,

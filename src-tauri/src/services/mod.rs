@@ -15,6 +15,8 @@ pub mod diagnostics;
 pub mod log_service;
 pub mod ai_service;
 pub mod shell_service;
+pub mod lsp_service;
+pub mod mcp_service;
 
 use std::path::{Path, PathBuf};
 

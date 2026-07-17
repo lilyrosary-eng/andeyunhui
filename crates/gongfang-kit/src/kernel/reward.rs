@@ -77,6 +77,23 @@ impl RewardSignal {
         }
         inner.total_reward += kind.reward() as i64;
         inner.window.push_back(kind);
+        // 计算快照值并推送事件（避免在锁内调用 try_emit 触发事件总线锁）
+        let total = inner.total_reward;
+        let err_rate = if inner.window.is_empty() {
+            0.0
+        } else {
+            let errors = inner.window.iter().filter(|e| e.is_error()).count();
+            errors as f64 / inner.window.len() as f64
+        };
+        drop(inner);
+
+        // 通过全局事件总线推送（如果内核已启动，则前端能收到）
+        super::events::try_emit(super::events::KernelEvent::RewardRecorded {
+            ts: super::events::now_ts(),
+            event_kind: kind,
+            total_reward: total,
+            error_rate: err_rate,
+        });
     }
 
     /// 当前错误率（0.0-1.0），用于数据面回滚判断

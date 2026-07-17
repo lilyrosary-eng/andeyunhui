@@ -60,8 +60,8 @@ const hostExternalsPlugin = {
 // loader: 可选，为该目标指定 esbuild loader（如 Univer 的 CSS 用 text 内联到 JS）
 const TARGETS = [
   { outDir: 'niaoluo/ide/codemirror', entry: 'codemirror-entry.js', global: '__CM_BUNDLE__' },
+  { outDir: 'niaoluo/ide/minisearch', entry: 'minisearch-entry.js', global: '__MINISEARCH_BUNDLE__' },
   { outDir: 'niaoluo/wps/tiptap', entry: 'tiptap-entry.js', global: '__TIPTAP_BUNDLE__' },
-  { outDir: 'niaoluo/wps/univer', entry: 'univer-entry.js', global: '__UNIVER_BUNDLE__', loader: { '.css': 'text' } },
 ];
 
 for (const t of TARGETS) {

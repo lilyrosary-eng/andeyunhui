@@ -167,8 +167,14 @@ pub fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Tra
                 .and_then(|t| t.title())
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| fallback_title.clone());
+            // 优先用「艺人」字段；很多文件只写了「专辑艺人」(album artist) 而无独立艺人，
+            // 此时回退到 AlbumArtist，避免任务栏/播放器显示为空歌手。
             let artist = tag
                 .and_then(|t| t.artist())
+                .or_else(|| {
+                    tag.and_then(|t| t.get(lofty::tag::ItemKey::AlbumArtist))
+                        .and_then(|item| item.value().text().map(std::borrow::Cow::Borrowed))
+                })
                 .map(|c| c.to_string())
                 .unwrap_or_default();
             let album = tag

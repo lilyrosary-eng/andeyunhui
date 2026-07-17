@@ -36,6 +36,7 @@ interface Category {
 const CATEGORIES: Category[] = [
   { id: 'convert', name: '格式转换', count: 4, icon: 'Repeat' },
   { id: 'text', name: '文本处理', count: 5, icon: 'Type' },
+  { id: 'crypto', name: '加密解密', count: 4, icon: 'KeyRound' },
   { id: 'data', name: '数据分析', count: 3, icon: 'ChartColumn' },
   { id: 'system', name: '系统工具', count: 5, icon: 'SlidersHorizontal' },
 ];
@@ -53,6 +54,12 @@ const TOOLS: Record<string, ToolMeta[]> = {
     { id: 't7', name: 'JSON 格式化', desc: 'JSON 美化与校验', icon: 'Braces', category: 'text' },
     { id: 't8', name: 'Base64 编解码', desc: 'Base64 编码与解码', icon: 'Binary', category: 'text' },
     { id: 't9', name: 'URL 编解码', desc: 'URL 编码与解码', icon: 'Link', category: 'text' },
+  ],
+  crypto: [
+    { id: 't18', name: 'AES 加解密', desc: 'AES-GCM 256，Web Crypto 原生实现', icon: 'Lock', category: 'crypto' },
+    { id: 't19', name: 'Base32 编解码', desc: 'RFC 4648 Base32', icon: 'Binary', category: 'crypto' },
+    { id: 't20', name: 'Hex 编解码', desc: '十六进制字符串互转', icon: 'Binary', category: 'crypto' },
+    { id: 't21', name: '摩斯密码', desc: 'ITM-R M.1677 标准', icon: 'Radio', category: 'crypto' },
   ],
   data: [
     { id: 't10', name: 'CSV 查看器', desc: 'CSV 数据浏览与导出', icon: 'Table', category: 'data' },
@@ -1728,6 +1735,318 @@ function UuidTool() {
   );
 }
 
+// ========== t18 AES 加解密（AES-GCM 256，Web Crypto API） ==========
+// 零依赖：直接使用浏览器原生 crypto.subtle
+// 输出格式：base64(iv) : base64(cipherText) : base64(salt) —— 复合字符串便于复制
+function aesBytesToB64(bytes: Uint8Array): string {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+function aesB64ToBytes(s: string): Uint8Array {
+  const bin = atob(s.trim());
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function deriveAesKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
+  const subtle = (window.crypto as Crypto).subtle;
+  const keyMaterial = await subtle.importKey(
+    'raw', toBytes(passphrase) as BufferSource, 'PBKDF2', false, ['deriveKey']
+  );
+  return subtle.deriveKey(
+    { name: 'PBKDF2', salt: salt as BufferSource, iterations: 100000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+function AesTool() {
+  const [mode, setMode] = useState<'encrypt' | 'decrypt'>('encrypt');
+  const [text, setText] = useState('');
+  const [pass, setPass] = useState('');
+  const [output, setOutput] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setError(''); setOutput(''); setBusy(true);
+    try {
+      if (!pass) throw new Error('请输入密钥口令');
+      if (!text) throw new Error('请输入文本');
+      const subtle = (window.crypto as Crypto).subtle;
+      if (!subtle) throw new Error('当前环境不支持 Web Crypto');
+      if (mode === 'encrypt') {
+        const salt = (window.crypto as Crypto).getRandomValues(new Uint8Array(16));
+        const iv = (window.crypto as Crypto).getRandomValues(new Uint8Array(12));
+        const key = await deriveAesKey(pass, salt);
+        const cipher = new Uint8Array(
+          await subtle.encrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, toBytes(text) as BufferSource)
+        );
+        setOutput(`${aesBytesToB64(iv)}:${aesBytesToB64(cipher)}:${aesBytesToB64(salt)}`);
+      } else {
+        const parts = text.trim().split(':');
+        if (parts.length !== 3) throw new Error('密文格式应为 iv:cipher:salt');
+        const iv = aesB64ToBytes(parts[0]);
+        const cipher = aesB64ToBytes(parts[1]);
+        const salt = aesB64ToBytes(parts[2]);
+        const key = await deriveAesKey(pass, salt);
+        const plain = new Uint8Array(
+          await subtle.decrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, cipher as BufferSource)
+        );
+        setOutput(new TextDecoder().decode(plain));
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
+          <button onClick={() => setMode('encrypt')} className={`px-4 py-1.5 text-sm ${mode === 'encrypt' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>加密</button>
+          <button onClick={() => setMode('decrypt')} className={`px-4 py-1.5 text-sm ${mode === 'decrypt' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解密</button>
+        </div>
+        <button onClick={run} disabled={busy} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto disabled:opacity-60">
+          {busy ? '处理中…' : (mode === 'encrypt' ? '加密' : '解密')}
+        </button>
+      </div>
+      <input type="password" value={pass} onChange={e => setPass(e.target.value)}
+        placeholder="密钥口令（PBKDF2 100k 轮派生 AES-256 密钥）"
+        className="w-full px-3 py-2 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm outline-none focus:border-[var(--element-border)]" />
+      <textarea value={text} onChange={e => setText(e.target.value)} spellCheck={false}
+        placeholder={mode === 'encrypt' ? '输入明文…' : '输入密文（iv:cipher:salt）…'}
+        className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
+      <div className="text-xs text-neutral-400 dark:text-stone-500">
+        算法：AES-GCM-256 · 派生：PBKDF2-SHA-256 / 100k 轮 · 输出：base64(iv):base64(cipher):base64(salt)
+      </div>
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {output && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <CopyButton text={output} />
+          </div>
+          <textarea readOnly value={output} spellCheck={false}
+            className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none resize-y break-all" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ========== t19 Base32 编解码（RFC 4648） ==========
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(bytes: Uint8Array): string {
+  let out = '';
+  let bits = 0, value = 0;
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  while (out.length % 8 !== 0) out += '=';
+  return out;
+}
+function base32Decode(str: string): Uint8Array {
+  const cleaned = str.trim().toUpperCase().replace(/=+$/, '');
+  const out: number[] = [];
+  let bits = 0, value = 0;
+  for (const ch of cleaned) {
+    const idx = BASE32_ALPHABET.indexOf(ch);
+    if (idx < 0) continue;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return new Uint8Array(out);
+}
+function Base32Tool() {
+  const [mode, setMode] = useState<'encode' | 'decode'>('encode');
+  const [input, setInput] = useState('薄荷 Base32');
+  const [output, setOutput] = useState('');
+  const [error, setError] = useState('');
+
+  const run = () => {
+    try {
+      if (mode === 'encode') setOutput(base32Encode(toBytes(input)));
+      else setOutput(new TextDecoder().decode(base32Decode(input)));
+      setError('');
+    } catch (e) { setError((e as Error).message); setOutput(''); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
+          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>编码</button>
+          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解码</button>
+        </div>
+        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? '编码' : '解码'}</button>
+      </div>
+      <textarea value={input} onChange={e => setInput(e.target.value)} spellCheck={false}
+        placeholder={mode === 'encode' ? '输入原始文本…' : '输入 Base32（A-Z2-7, =）…'}
+        className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {output && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <CopyButton text={output} />
+          </div>
+          <textarea readOnly value={output} spellCheck={false}
+            className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none resize-y" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ========== t20 Hex 编解码 ==========
+function hexEncode(bytes: Uint8Array): string {
+  let out = '';
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out;
+}
+function hexDecode(str: string): Uint8Array {
+  const cleaned = str.trim().replace(/\s+/g, '').replace(/0x/gi, '');
+  if (cleaned.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(cleaned)) {
+    throw new Error('无效的十六进制字符串');
+  }
+  const out = new Uint8Array(cleaned.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(cleaned.substr(i * 2, 2), 16);
+  return out;
+}
+function HexTool() {
+  const [mode, setMode] = useState<'encode' | 'decode'>('encode');
+  const [input, setInput] = useState('薄荷 Hex');
+  const [output, setOutput] = useState('');
+  const [error, setError] = useState('');
+  const [upper, setUpper] = useState(false);
+
+  const run = () => {
+    try {
+      if (mode === 'encode') setOutput((upper ? hexEncode(toBytes(input)).toUpperCase() : hexEncode(toBytes(input))));
+      else setOutput(new TextDecoder().decode(hexDecode(input)));
+      setError('');
+    } catch (e) { setError((e as Error).message); setOutput(''); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
+          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>编码</button>
+          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解码</button>
+        </div>
+        {mode === 'encode' && (
+          <label className="flex items-center gap-1 text-xs text-neutral-600 dark:text-stone-300 cursor-pointer select-none">
+            <input type="checkbox" checked={upper} onChange={e => setUpper(e.target.checked)} className="accent-[var(--element-bg)]" /> 大写
+          </label>
+        )}
+        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? '编码' : '解码'}</button>
+      </div>
+      <textarea value={input} onChange={e => setInput(e.target.value)} spellCheck={false}
+        placeholder={mode === 'encode' ? '输入原始文本…' : '输入十六进制字符串…'}
+        className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {output && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <CopyButton text={output} />
+          </div>
+          <textarea readOnly value={output} spellCheck={false}
+            className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none resize-y break-all" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ========== t21 摩斯密码（ITU-R M.1677） ==========
+const MORSE_TABLE: Record<string, string> = {
+  'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.', 'G': '--.', 'H': '....', 'I': '..', 'J': '.---',
+  'K': '-.-', 'L': '.-..', 'M': '--', 'N': '-.', 'O': '---', 'P': '.--.', 'Q': '--.-', 'R': '.-.', 'S': '...', 'T': '-',
+  'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-', 'Y': '-.--', 'Z': '--..',
+  '0': '-----', '1': '.----', '2': '..---', '3': '...--', '4': '....-', '5': '.....',
+  '6': '-....', '7': '--...', '8': '---..', '9': '----.',
+  '.': '.-.-.-', ',': '--..--', '?': '..--..', "'": '.----.', '!': '-.-.--', '/': '-..-.',
+  '(': '-.--.', ')': '-.--.-', '&': '.-...', ':': '---...', ';': '-.-.-.', '=': '-...-', '+': '.-.-.',
+  '-': '-....-', '_': '..--.-', '"': '.-..-.', '$': '...-..-', '@': '.--.-.',
+};
+const MORSE_REVERSE: Record<string, string> = Object.fromEntries(Object.entries(MORSE_TABLE).map(([k, v]) => [v, k]));
+function morseEncode(text: string, letterSep = ' ', wordSep = ' / '): string {
+  return text.toUpperCase().split(/(\s+)/).map(word => {
+    if (/^\s+$/.test(word)) return word.includes('\n') ? '\n' : wordSep;
+    return word.split('').map(ch => MORSE_TABLE[ch] || '').filter(Boolean).join(letterSep);
+  }).filter(Boolean).join(wordSep);
+}
+function morseDecode(text: string): string {
+  return text.split(/\n/).map(line =>
+    line.split(/\s*\/\s*|\s{3,}|\s{2,}/).map(seg => {
+      if (!seg) return ' ';
+      return seg.split(/\s+/).map(s => MORSE_REVERSE[s] || '').join('');
+    }).join('')
+  ).join('\n');
+}
+function MorseTool() {
+  const [mode, setMode] = useState<'encode' | 'decode'>('encode');
+  const [input, setInput] = useState('HELLO MORSE 薄荷');
+  const [output, setOutput] = useState('');
+  const [error, setError] = useState('');
+
+  const run = () => {
+    try {
+      if (mode === 'encode') {
+        const result = morseEncode(input);
+        if (!result.trim()) throw new Error('输入不包含可编码字符（仅支持字母 / 数字 / 标点）');
+        setOutput(result);
+      } else {
+        setOutput(morseDecode(input));
+      }
+      setError('');
+    } catch (e) { setError((e as Error).message); setOutput(''); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
+          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>编码</button>
+          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解码</button>
+        </div>
+        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? '编码' : '解码'}</button>
+      </div>
+      <textarea value={input} onChange={e => setInput(e.target.value)} spellCheck={false}
+        placeholder={mode === 'encode' ? '输入文本（字母 / 数字 / 标点，非 ASCII 字符将被忽略）…' : '输入摩斯码（. 和 -，空格分字符，/ 分词）…'}
+        className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {output && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <CopyButton text={output} />
+          </div>
+          <textarea readOnly value={output} spellCheck={false}
+            className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none resize-y" />
+        </div>
+      )}
+    </div>
+  );
+}
+
 const TOOL_VIEWS: Record<string, () => JSX.Element> = {
   t1: ImageConverter,
   t2: DocConverter,
@@ -1746,6 +2065,10 @@ const TOOL_VIEWS: Record<string, () => JSX.Element> = {
   t15: EnvVars,
   t16: ClipboardHistory,
   t17: SpeedTest,
+  t18: AesTool,
+  t19: Base32Tool,
+  t20: HexTool,
+  t21: MorseTool,
 };
 
 // ========== 主组件 ==========
