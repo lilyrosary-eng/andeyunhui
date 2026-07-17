@@ -151,6 +151,24 @@ export const api = {
   setPluginVisibility: (pluginId: string, visible: boolean) =>
     invoke<void>('set_plugin_visibility', { pluginId, visible }),
 
+  // 彻底删除插件（连同文件 + .mufurong 包 + 可见性记录）
+  deletePlugin: (pluginId: string) =>
+    invoke<void>('delete_plugin', { pluginId }),
+
+  // 在系统文件管理器中打开插件所在目录
+  openPluginFolder: (pluginId: string) =>
+    invoke<void>('open_plugin_folder', { pluginId }),
+
+  // AI 视觉 OCR：传入图片 base64（不含 data: 前缀）+ mime + 可选 prompt，返回识别文本
+  // 失败时抛错（含 HTTP 状态码 + 响应体片段），调用方需 try/catch 并展示降级提示
+  aiVisionOcr: (imageBase64: string, imageMime: string, prompt?: string, profileId?: string) =>
+    invoke<string>('ai_vision_ocr', { imageBase64, imageMime, prompt, profileId }),
+
+  // AI 翻译：传入文本 + 目标语言（如 "en"/"zh"/"ja"），返回译文
+  // 未配置 AI 时抛错，调用方需展示降级提示（与 ai 编程模块一致）
+  translateText: (text: string, targetLang?: string, profileId?: string) =>
+    invoke<string>('translate_text', { text, targetLang, profileId }),
+
   // 列出中转站文件
   listTransferStationFiles: () => invoke<TransferStationFile[]>('list_transfer_station_files'),
 

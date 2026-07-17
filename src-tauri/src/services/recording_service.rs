@@ -12,14 +12,13 @@ use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use winapi::shared::windef::HWND;
-use winapi::um::wingdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF};
+
 
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
@@ -128,7 +127,8 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         let fw = frame.width();
         let fh = frame.height();
         let mut buffer = frame.buffer().map_err(|e| e.to_string())?;
-        let src = buffer.as_nopadding_buffer().map_err(|e| e.to_string())?;
+        let mut scratch = Vec::new();
+        let src = buffer.as_nopadding_buffer(&mut scratch);
 
         // 组装该帧字节（裁剪或全帧）
         let payload: Vec<u8> = if let Some((cx, cy, cw, ch)) = self.crop {

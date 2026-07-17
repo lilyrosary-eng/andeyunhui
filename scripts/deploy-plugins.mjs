@@ -6,7 +6,7 @@
 // 目录结构：bundled-plugins/ 镜像 plugins/ 的目录结构（按模块归类）
 //   - 顶级主模块：image/, music/, professional/, reading/, video/
 //   - 茑萝子插件：niaoluo/gongjuxiang/, niaoluo/huihua/, niaoluo/ide/, niaoluo/wps/
-//   - 服务插件：  全局/markitdown/, 全局/screen-recorder/
+//   - 服务插件：  全局/screen-recorder/
 //   - 空占位：    note/（.gitkeep）
 // Rust 端 walk() / find_plugin_root() 递归扫描，天然支持嵌套目录结构。
 //
@@ -73,6 +73,10 @@ function discoverPlugins(dir, prefix, out) {
 
 const plugins = [];
 discoverPlugins(pluginsDir, '', plugins);
+
+// 记录构建失败的插件；结束时若非空则以非零码退出，让 tauri build / dev 整体中止，
+// 避免"某插件构建失败被静默跳过、继续打包旧包"这一极隐蔽的陷阱（曾多次踩坑）。
+const failedPlugins = [];
 
 console.log(`[Deploy] 发现 ${plugins.length} 个插件:`);
 plugins.forEach(p => console.log(`  - id=${p.id}  src=${p.relPath}`));
@@ -148,7 +152,8 @@ for (const { relPath, id, manifest } of plugins) {
       // vite 已通过 shamefully-hoist=true 提升到根 node_modules，cwd 设为插件目录以找到 vite.config.ts
       execSync(`node "${viteBin}" build`, { cwd: pluginDir, stdio: 'inherit', timeout: 120_000 });
     } catch (e) {
-      console.error(`[Deploy] 构建失败: ${id}`, e.message);
+      console.error(`[Deploy] ✗ 构建失败: ${id}`, e.message);
+      failedPlugins.push(id);
       continue;
     }
   }
@@ -223,3 +228,10 @@ try {
 }
 
 console.log(`[Deploy] bundled-plugins / external-deps 已准备好用于 Tauri bundle.resources`);
+
+// 关键：任一插件构建失败则整体失败退出，避免打包/开发环境静默使用旧包。
+if (failedPlugins.length > 0) {
+  console.error(`\n[Deploy] ✗ 以下插件构建失败，已中止：${failedPlugins.join(', ')}`);
+  console.error('[Deploy] 请修复上述插件的构建错误后重试（打包已阻止以免装入旧包）。');
+  process.exit(1);
+}

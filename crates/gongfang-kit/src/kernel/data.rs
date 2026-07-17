@@ -5,12 +5,17 @@
 //! 错误率回滚：reward.should_rollback() 触发 strategy.rollback()。
 //! 软着陆：Barrier 指令（Pause/Focus）3 Tick 过渡 Idle，连接保持 Active。
 //!
-//! 替代 3 级流水线 FETCH/DECODE/COMMIT（Tick 循环 + 原子指针读取足够）
+//! 事件总线集成：
+//! - 每 Tick 推送 KernelEvent::Tick（默认不 emit 前端，仅入缓冲区）
+//! - Phase 分发执行后推送 PhaseExecuted（含 focus_url）
+//! - 软着陆进度推送 SoftLanding
+//! - 错误率回滚推送 Rollback（含 from_gen/to_gen）
 
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
+use super::events::{self, EventBus};
 use super::reward::RewardSignal;
 use super::strategy::{Phase, StrategyDelta, StrategyStore};
 
@@ -21,6 +26,7 @@ pub struct DataPlane {
     strategy: Arc<StrategyStore>,
     reward: Arc<RewardSignal>,
     rx: broadcast::Receiver<StrategyDelta>,
+    event_bus: Arc<EventBus>,
     barrier_ticks: u8,
 }
 
@@ -29,11 +35,13 @@ impl DataPlane {
         strategy: Arc<StrategyStore>,
         reward: Arc<RewardSignal>,
         rx: broadcast::Receiver<StrategyDelta>,
+        event_bus: Arc<EventBus>,
     ) -> Self {
         Self {
             strategy,
             reward,
             rx,
+            event_bus,
             barrier_ticks: 0,
         }
     }
@@ -54,6 +62,13 @@ impl DataPlane {
     async fn tick(&mut self) {
         let s = self.strategy.load();
 
+        // 推送 Tick 事件（默认不 emit 前端，仅入缓冲区）
+        self.event_bus.push(events::KernelEvent::Tick {
+            ts: events::now_ts(),
+            generation: s.generation,
+            phase: s.phase,
+        });
+
         // 软着陆：Barrier 指令触发后 3 Tick 过渡 Idle
         if self.barrier_ticks > 0 {
             self.barrier_ticks -= 1;
@@ -61,6 +76,7 @@ impl DataPlane {
                 "[data] 软着陆中，剩余 {} Tick",
                 self.barrier_ticks
             );
+            events::emit_soft_landing(&self.event_bus, self.barrier_ticks);
             if self.barrier_ticks == 0 {
                 self.strategy.commit(&StrategyDelta {
                     phase: Some(Phase::Idle),
@@ -71,18 +87,32 @@ impl DataPlane {
 
         // 错误率回滚（数据面自动触发，无需 AI 介入）
         if self.reward.should_rollback() {
-            if self.strategy.rollback().is_some() {
+            let from_gen = s.generation;
+            if let Some(rolled) = self.strategy.rollback() {
                 log::warn!("[data] 错误率 >50%，已回滚策略");
+                events::emit_rollback(&self.event_bus, from_gen, rolled.generation);
             }
         }
 
         // 按 Phase 分发执行
         match s.phase {
             Phase::Idle => {}
-            Phase::Recon => self.execute_recon(&s).await,
-            Phase::Exploit => self.execute_exploit(&s).await,
-            Phase::Pivot => self.execute_pivot(&s).await,
-            Phase::Clean => self.execute_clean(&s).await,
+            Phase::Recon => {
+                self.execute_recon(&s).await;
+                events::emit_phase_executed(&self.event_bus, Phase::Recon, s.focus_url.clone());
+            }
+            Phase::Exploit => {
+                self.execute_exploit(&s).await;
+                events::emit_phase_executed(&self.event_bus, Phase::Exploit, s.focus_url.clone());
+            }
+            Phase::Pivot => {
+                self.execute_pivot(&s).await;
+                events::emit_phase_executed(&self.event_bus, Phase::Pivot, s.focus_url.clone());
+            }
+            Phase::Clean => {
+                self.execute_clean(&s).await;
+                events::emit_phase_executed(&self.event_bus, Phase::Clean, s.focus_url.clone());
+            }
         }
     }
 

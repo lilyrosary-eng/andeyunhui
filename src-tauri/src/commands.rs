@@ -24,23 +24,42 @@ static PLUGIN_SCAN_CACHE: once_cell::sync::Lazy<Mutex<Option<(PluginScanResult, 
 /// 获取内置插件目录（bundled-plugins/）
 /// 打包后：resource_dir/bundled-plugins/ 或 resource_dir/_up_/bundled-plugins/
 ///   （Tauri 对 bundle.resources 中 "../bundled-plugins" 会保留 _up_ 前缀）
-/// 开发时：resource_dir/../bundled-plugins/（resource_dir 是 src-tauri/）
+/// 开发时：resource_dir 实际是 src-tauri/target/(debug|release)/，项目根在向上三层处；
+///   权威 bundled-plugins/ 由 predev 的 deploy-plugins.mjs 写入项目根，必须优先加载它，
+///   不能误用 target/(debug|release)/bundled-plugins 这份陈旧构建副本。
 pub fn get_bundled_plugins_dir(app: &AppHandle) -> Option<PathBuf> {
     let resource_dir = app.path().resource_dir().ok()?;
-    // 打包后：直接路径
+    // 打包后：直接路径（仅当不在 target/ 下时才是有效安装目录）
     let bundled = resource_dir.join("bundled-plugins");
     if bundled.exists() {
-        return Some(bundled);
+        let p = bundled.to_string_lossy().replace('\\', "/");
+        // 跳过 dev 构建残留的 target/(debug|release)/bundled-plugins 陈旧副本，避免加载到旧插件
+        if !(p.contains("/target/debug/bundled-plugins")
+            || p.contains("/target/release/bundled-plugins"))
+        {
+            return Some(bundled);
+        }
     }
     // 打包后 NSIS 备选：_up_/bundled-plugins/
     let up_bundled = resource_dir.join("_up_").join("bundled-plugins");
     if up_bundled.exists() {
         return Some(up_bundled);
     }
-    // 开发时（resource_dir = src-tauri/，向上一层到项目根）
-    let dev_bundled = resource_dir.join("..").join("bundled-plugins");
+    // 开发时：resource_dir = src-tauri/target/(debug|release)/，向上三层到项目根
+    let dev_bundled = resource_dir
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("bundled-plugins");
     if dev_bundled.exists() {
         return Some(dev_bundled);
+    }
+    // 兜底：CARGO_MANIFEST_DIR（编译期常量，= src-tauri/ 绝对路径）向上一层即项目根
+    // ../bundled-plugins 正是 predev 写入、且始终是最新的那份。
+    let manifest_bundled =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("bundled-plugins");
+    if manifest_bundled.exists() {
+        return Some(manifest_bundled);
     }
     None
 }
@@ -52,7 +71,13 @@ pub fn get_external_deps_dir(app: &AppHandle) -> Option<PathBuf> {
     let resource_dir = app.path().resource_dir().ok()?;
     let deps = resource_dir.join("external-deps");
     if deps.exists() {
-        return Some(deps);
+        let p = deps.to_string_lossy().replace('\\', "/");
+        // 跳过 dev 构建残留的 target/(debug|release)/external-deps 陈旧副本
+        if !(p.contains("/target/debug/external-deps")
+            || p.contains("/target/release/external-deps"))
+        {
+            return Some(deps);
+        }
     }
     let up_deps = resource_dir.join("_up_").join("external-deps");
     if up_deps.exists() {
@@ -77,15 +102,26 @@ pub fn get_user_plugins_dir(app: &AppHandle) -> Option<PathBuf> {
     Some(app_data.join("user_plugins"))
 }
 
+/// 获取用户外部依赖目录（user_external_deps/，始终在 AppData 下，用于第三方 .mujin 依赖）
+/// 与 user_plugins 平级，结构与 external-deps/ 一致（支持 niaoluo/ide/ 等母文件夹）
+pub fn get_user_external_deps_dir(app: &AppHandle) -> Option<PathBuf> {
+    let app_data = app.path().app_data_dir().ok()?;
+    Some(app_data.join("user_external_deps"))
+}
+
 // ========== .mufurong 专属格式自动解压 ==========
 // .mufurong = ZIP 改后缀。用户把 .mufurong 文件放到 user_plugins/（或子目录）下，
 // 应用启动或刷新插件列表时自动扫描并解压到同名目录。
-// 已解压且 version 匹配则跳过（速度极快），不匹配则重新解压。
+// 已解压且 .mufurong 源文件 mtime 匹配则跳过（速度极快），不匹配则重新解压。
 // 大型模块（茑萝/全局/阅读）保留母文件夹：子插件 .mufurong 放在母文件夹下，
 // 如 user_plugins/niaoluo/ai.mufurong → 解压到 user_plugins/niaoluo/ai/
 
 /// 专属格式文件后缀
 const MUFURONG_EXT: &str = "mufurong";
+
+/// marker 文件名：解压后在目标目录写入 .mufurong 源文件的 mtime（UNIX 秒数），
+/// 用于下次扫描时跳过未变更的插件。与 .mujin 的 MUJIN_MARKER 对称。
+const MUFURONG_MARKER: &str = ".mufurong.extracted";
 
 /// 扫描 user_plugins/ 下的 .mufurong 文件，自动解压到同名目录。
 /// 递归子目录以支持母文件夹结构（niaoluo/、全局/ 等）。
@@ -119,47 +155,129 @@ fn walk_and_extract_mufurong(dir: &std::path::Path) {
     }
 }
 
-/// 解压单个 .mufurong 文件到同名目录（去掉 .mufurong 后缀）
+/// 解压单个 .mufurong 文件到同名目录（去掉 .mufurong 后缀）。
+/// 版本比对策略：用 .mufurong 源文件 mtime 与目标目录下的 marker 文件
+/// （.mufurong.extracted）内容比对，匹配则跳过。与 .mujin 的策略完全对称。
+///
+/// 用户源文件保护（3 道防线，与 extract_one_mujin 一致）：
+/// 1. marker 不存在 + 目标目录已存在 → 视为用户手动放置的源文件，跳过避免覆盖
+/// 2. marker 存在 + mtime 匹配 → 跳过（已解压最新）
+/// 3. marker 存在 + mtime 不匹配 + 目标目录含 .mufurong 之外的用户文件 → 跳过避免覆盖
+/// 仅当 marker 存在 + mtime 不匹配 + 无用户自定义文件时才执行 clean upgrade（DELETE + 重新解压）
 fn extract_one_mufurong(mufurong_path: &std::path::Path) -> Result<(), String> {
-    let file = std::fs::File::open(mufurong_path).map_err(|e| e.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-
-    // 读取 manifest.json 获取 version（用于版本比对）
-    let version = {
-        let manifest_entry = archive.by_name("manifest.json").map_err(|e| e.to_string())?;
-        let manifest: serde_json::Value =
-            serde_json::from_reader(manifest_entry).map_err(|e| e.to_string())?;
-        manifest.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string()
-    };
+    // 读取 .mufurong 源文件的 mtime（UNIX 秒数）
+    let src_mtime = std::fs::metadata(mufurong_path)
+        .and_then(|m| m.modified())
+        .map_err(|e| format!("读取 mtime 失败: {}", e))?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     // 解压目标目录：去掉 .mufurong 后缀
     let target_dir = mufurong_path.with_extension("");
+    let marker_path = target_dir.join(MUFURONG_MARKER);
 
-    // 检查是否已解压且版本匹配 → 跳过（速度极快）
-    let target_manifest = target_dir.join("manifest.json");
-    if target_manifest.exists() {
-        if let Ok(content) = std::fs::read_to_string(&target_manifest) {
-            if let Ok(existing) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(existing_ver) = existing.get("version").and_then(|v| v.as_str()) {
-                    if existing_ver == version {
-                        return Ok(()); // 版本匹配，跳过
-                    }
+    if marker_path.exists() {
+        // marker 存在 → 之前我们解压过，比较 mtime 决定是否重新解压
+        if let Ok(content) = std::fs::read_to_string(&marker_path) {
+            if let Ok(existing_mtime) = content.trim().parse::<u64>() {
+                if existing_mtime == src_mtime {
+                    return Ok(()); // mtime 匹配，跳过
                 }
             }
         }
+        // marker 存在但 mtime 不匹配 → .mufurong 已更新，需要重新解压
+        // 但先打开 .mufurong 检查目标目录是否有用户自定义文件
+        let file = std::fs::File::open(mufurong_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+        if target_dir.exists() {
+            // 收集 .mufurong 内的文件清单
+            let mut archive_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for i in 0..archive.len() {
+                if let Ok(entry) = archive.by_index(i) {
+                    let name = entry.name().to_string();
+                    if !name.ends_with('/') {
+                        archive_files.insert(name.replace('\\', "/"));
+                    }
+                }
+            }
+            // 扫描目标目录，找出 .mufurong 之外的用户自定义文件
+            let mut extra_files: Vec<String> = Vec::new();
+            collect_extra_files(&target_dir, &target_dir, &archive_files, &mut extra_files);
+            if !extra_files.is_empty() {
+                eprintln!(
+                    "[mufurong] 跳过升级（目标目录含 {} 个 .mufurong 之外的用户文件，避免覆盖）: {}",
+                    extra_files.len(),
+                    mufurong_path.display()
+                );
+                // 不更新 marker，下次扫描仍会触发检查（用户可手动删除 target 后恢复自动升级）
+                return Ok(());
+            }
+            // 无用户文件，安全清理 + 重新解压
+            let _ = std::fs::remove_dir_all(&target_dir);
+        }
+        std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+
+        // 重新解压
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = entry.name().to_string();
+            // 安全检查：防止路径穿越（zip slip 攻击）
+            if name.contains("..") {
+                continue;
+            }
+            // 跳过自身 marker 文件（防止历史 .mufurong 内嵌的 marker 覆盖本次写入）
+            if name == MUFURONG_MARKER || name.ends_with(&format!("/{}", MUFURONG_MARKER)) {
+                continue;
+            }
+            let outpath = target_dir.join(&name);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&outpath).ok();
+            } else {
+                if let Some(parent) = outpath.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
+                std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+            }
+        }
+
+        // 写入 marker 文件，记录源文件 mtime，供下次扫描比对
+        std::fs::write(&marker_path, src_mtime.to_string())
+            .map_err(|e| format!("写入 marker 失败: {}", e))?;
+
+        eprintln!(
+            "[mufurong] 已升级解压: {} -> {}",
+            mufurong_path.display(),
+            target_dir.display()
+        );
+        return Ok(());
     }
 
-    // 版本不匹配或未解压 → 重新解压
+    // marker 不存在的情况
     if target_dir.exists() {
-        let _ = std::fs::remove_dir_all(&target_dir);
+        // marker 不存在但目标目录已存在 → 视为用户手动放置的源文件，跳过避免覆盖
+        eprintln!(
+            "[mufurong] 跳过（目标已存在但无 marker，视为用户源文件）: {}",
+            mufurong_path.display()
+        );
+        return Ok(());
     }
+
+    // marker 不存在 + 目标目录不存在 → 首次解压
     std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+
+    let file = std::fs::File::open(mufurong_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().to_string();
-        // 安全检查：防止路径穿越（zip slip 攻击）
         if name.contains("..") {
+            continue;
+        }
+        if name == MUFURONG_MARKER || name.ends_with(&format!("/{}", MUFURONG_MARKER)) {
             continue;
         }
         let outpath = target_dir.join(&name);
@@ -174,10 +292,362 @@ fn extract_one_mufurong(mufurong_path: &std::path::Path) -> Result<(), String> {
         }
     }
 
+    // 写入 marker 文件，记录源文件 mtime，供下次扫描比对
+    std::fs::write(&marker_path, src_mtime.to_string())
+        .map_err(|e| format!("写入 marker 失败: {}", e))?;
+
     eprintln!(
         "[mufurong] 已解压: {} -> {}",
         mufurong_path.display(),
         target_dir.display()
+    );
+    Ok(())
+}
+
+// ========== .mujin 专属格式自动解压（外部依赖版） ==========
+// .mujin = ZIP 改后缀，与 .mufurong 同源机制，但用于外部依赖（external-deps）。
+// 用户把 .mujin 文件放到 user_external_deps/（或子目录）下，
+// 应用启动或刷新插件列表时自动扫描并解压到同名目录。
+// 已解压且 .mujin 源文件 mtime 匹配则跳过（速度极快），不匹配则重新解压。
+//
+// 大型模块（茑萝/全局/阅读）保留母文件夹：子依赖 .mujin 放在母文件夹下，
+// 如 user_external_deps/niaoluo/ide/codemirror.mujin → 解压到 user_external_deps/niaoluo/ide/codemirror/
+// 不可再分的依赖（markitdown/tiptap 等即使内部有子文件夹）整体打包成单个 .mujin。
+
+/// 专属格式文件后缀
+const MUJIN_EXT: &str = "mujin";
+
+/// marker 文件名：解压后在目标目录写入 .mujin 源文件的 mtime（UNIX 秒数），
+/// 用于下次扫描时跳过未变更的依赖。
+const MUJIN_MARKER: &str = ".mujin.extracted";
+
+/// 扫描 user_external_deps/ 下的 .mujin 文件，自动解压到同名目录。
+/// 递归子目录以支持母文件夹结构（niaoluo/ide/、全局/ 等）。
+pub fn extract_mujin_deps(app: &AppHandle) {
+    let user_dir = match get_user_external_deps_dir(app) {
+        Some(d) => d,
+        None => return,
+    };
+    if !user_dir.exists() {
+        return;
+    }
+    walk_and_extract_mujin(&user_dir);
+}
+
+/// 递归扫描目录下的 .mujin 文件并解压
+fn walk_and_extract_mujin(dir: &std::path::Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // 递归子目录（支持 niaoluo/ide/ 等母文件夹）
+            walk_and_extract_mujin(&path);
+        } else if path.extension().and_then(|e| e.to_str()) == Some(MUJIN_EXT) {
+            if let Err(e) = extract_one_mujin(&path) {
+                eprintln!("[mujin] 解压失败 {}: {}", path.display(), e);
+            }
+        }
+    }
+}
+
+/// 解压单个 .mujin 文件到同名目录（去掉 .mujin 后缀）。
+/// 版本比对策略：依赖可能没有 manifest.json，故用 .mujin 源文件 mtime 与
+/// 目标目录下的 marker 文件（.mujin.extracted）内容比对，匹配则跳过。
+///
+/// 用户源文件保护（3 道防线）：
+/// 1. marker 不存在 + 目标目录已存在 → 视为用户手动放置的源文件，跳过避免覆盖
+/// 2. marker 存在 + mtime 匹配 → 跳过（已解压最新）
+/// 3. marker 存在 + mtime 不匹配 + 目标目录含 .mujin 之外的用户文件 → 跳过避免覆盖
+/// 仅当 marker 存在 + mtime 不匹配 + 无用户自定义文件时才执行 clean upgrade（DELETE + 重新解压）
+fn extract_one_mujin(mujin_path: &std::path::Path) -> Result<(), String> {
+    // 读取 .mujin 源文件的 mtime（UNIX 秒数）
+    let src_mtime = std::fs::metadata(mujin_path)
+        .and_then(|m| m.modified())
+        .map_err(|e| format!("读取 mtime 失败: {}", e))?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // 解压目标目录：去掉 .mujin 后缀
+    let target_dir = mujin_path.with_extension("");
+    let marker_path = target_dir.join(MUJIN_MARKER);
+
+    if marker_path.exists() {
+        // marker 存在 → 之前我们解压过，比较 mtime 决定是否重新解压
+        if let Ok(content) = std::fs::read_to_string(&marker_path) {
+            if let Ok(existing_mtime) = content.trim().parse::<u64>() {
+                if existing_mtime == src_mtime {
+                    return Ok(()); // mtime 匹配，跳过
+                }
+            }
+        }
+        // marker 存在但 mtime 不匹配 → .mujin 已更新，需要重新解压
+        // 但先打开 .mujin 检查目标目录是否有用户自定义文件
+        let file = std::fs::File::open(mujin_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+        if target_dir.exists() {
+            // 收集 .mujin 内的文件清单
+            let mut archive_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for i in 0..archive.len() {
+                if let Ok(entry) = archive.by_index(i) {
+                    let name = entry.name().to_string();
+                    if !name.ends_with('/') {
+                        archive_files.insert(name.replace('\\', "/"));
+                    }
+                }
+            }
+            // 扫描目标目录，找出 .mujin 之外的用户自定义文件
+            let mut extra_files: Vec<String> = Vec::new();
+            collect_extra_files(&target_dir, &target_dir, &archive_files, &mut extra_files);
+            if !extra_files.is_empty() {
+                eprintln!(
+                    "[mujin] 跳过升级（目标目录含 {} 个 .mujin 之外的用户文件，避免覆盖）: {}",
+                    extra_files.len(),
+                    mujin_path.display()
+                );
+                // 不更新 marker，下次扫描仍会触发检查（用户可手动删除 target 后恢复自动升级）
+                return Ok(());
+            }
+            // 无用户文件，安全清理 + 重新解压
+            let _ = std::fs::remove_dir_all(&target_dir);
+        }
+        std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+
+        // 重新解压
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = entry.name().to_string();
+            // 安全检查：防止路径穿越（zip slip 攻击）
+            if name.contains("..") {
+                continue;
+            }
+            // 跳过自身 marker 文件（防止历史 .mujin 内嵌的 marker 覆盖本次写入）
+            if name == MUJIN_MARKER || name.ends_with(&format!("/{}", MUJIN_MARKER)) {
+                continue;
+            }
+            let outpath = target_dir.join(&name);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&outpath).ok();
+            } else {
+                if let Some(parent) = outpath.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
+                std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+            }
+        }
+
+        // 写入 marker 文件，记录源文件 mtime，供下次扫描比对
+        std::fs::write(&marker_path, src_mtime.to_string())
+            .map_err(|e| format!("写入 marker 失败: {}", e))?;
+
+        eprintln!(
+            "[mujin] 已升级解压: {} -> {}",
+            mujin_path.display(),
+            target_dir.display()
+        );
+        return Ok(());
+    }
+
+    // marker 不存在的情况
+    if target_dir.exists() {
+        // marker 不存在但目标目录已存在 → 视为用户手动放置的源文件，跳过避免覆盖
+        eprintln!(
+            "[mujin] 跳过（目标已存在但无 marker，视为用户源文件）: {}",
+            mujin_path.display()
+        );
+        return Ok(());
+    }
+
+    // marker 不存在 + 目标目录不存在 → 首次解压
+    std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+
+    let file = std::fs::File::open(mujin_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        if name.contains("..") {
+            continue;
+        }
+        if name == MUJIN_MARKER || name.ends_with(&format!("/{}", MUJIN_MARKER)) {
+            continue;
+        }
+        let outpath = target_dir.join(&name);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&outpath).ok();
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 写入 marker 文件
+    std::fs::write(&marker_path, src_mtime.to_string())
+        .map_err(|e| format!("写入 marker 失败: {}", e))?;
+
+    eprintln!(
+        "[mujin] 已解压: {} -> {}",
+        mujin_path.display(),
+        target_dir.display()
+    );
+    Ok(())
+}
+
+/// 递归收集 target_dir 中不在 archive_files 集合内的额外文件（用户自定义文件）。
+/// 跳过所有 marker 文件（.mufurong.extracted / .mujin.extracted 等 .extracted 后缀文件），
+/// rel_base 用于计算相对路径以便与 archive 内名称比对。
+/// 同时供 extract_one_mufurong 与 extract_one_mujin 调用。
+fn collect_extra_files(
+    dir: &std::path::Path,
+    rel_base: &std::path::Path,
+    archive_files: &std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_extra_files(&path, rel_base, archive_files, out);
+        } else {
+            // 计算相对路径（用 / 分隔，与 archive 内名称一致）
+            if let Ok(rel) = path.strip_prefix(rel_base) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                // 跳过所有 marker 文件（.mufurong.extracted / .mujin.extracted 等）
+                // 约定式：所有以 ".extracted" 结尾的隐藏文件都是 marker，不属于用户文件
+                if rel_str.ends_with(".extracted") {
+                    continue;
+                }
+                if !archive_files.contains(&rel_str) {
+                    out.push(rel_str);
+                }
+            }
+        }
+    }
+}
+
+// ========== bundled-dlc 内置私有格式分发 ==========
+// 安装包不再含 raw bundled-plugins/ 与 external-deps/ 目录，
+// 改为在 bundled-dlc/ 下放置 .mufurong/.mujin 私有格式包。
+// 应用启动时一次性复制到 user_plugins/ 与 user_external_deps/，
+// 然后由既有的 extract_mufurong_plugins / extract_mujin_deps 自动解压。
+//
+// 优势：
+//   1. 安装包内只有压缩包（ZIP 改后缀），体积更小
+//   2. 用户安装位置始终在 AppData 下，避免 Program Files 只读冲突
+//   3. 与 .mufurong/.mujin DLC 分发渠道完全统一
+
+/// 获取 bundled-dlc/ 目录（含 .mufurong/.mujin 私有格式资源）
+/// 打包后：resource_dir/bundled-dlc/ 或 resource_dir/_up_/bundled-dlc/
+/// 开发时：通常不存在（prepare-bundled-dlc.mjs 仅在 tauri build 前运行）
+pub fn get_bundled_dlc_dir(app: &AppHandle) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    let dlc = resource_dir.join("bundled-dlc");
+    if dlc.exists() {
+        return Some(dlc);
+    }
+    let up_dlc = resource_dir.join("_up_").join("bundled-dlc");
+    if up_dlc.exists() {
+        return Some(up_dlc);
+    }
+    let dev_dlc = resource_dir.join("..").join("bundled-dlc");
+    if dev_dlc.exists() {
+        return Some(dev_dlc);
+    }
+    None
+}
+
+/// 从 bundled-dlc/ 复制 .mufurong/.mujin 到 user_plugins/ 与 user_external_deps/。
+/// - .mufurong → user_plugins/<rel_path>（保留母文件夹结构 niaoluo/、全局/）
+/// - .mujin    → user_external_deps/<rel_path>（保留母文件夹结构 niaoluo/ide/、全局/）
+/// 已存在且大小相同的文件跳过（速度极快）。
+/// 复制后由既有的 extract_mufurong_plugins / extract_mujin_deps 自动解压。
+pub fn extract_bundled_dlc(app: &AppHandle) {
+    let bundled_dlc = match get_bundled_dlc_dir(app) {
+        Some(d) => d,
+        None => return,
+    };
+    let user_plugins = match get_user_plugins_dir(app) {
+        Some(d) => d,
+        None => return,
+    };
+    let user_deps = match get_user_external_deps_dir(app) {
+        Some(d) => d,
+        None => return,
+    };
+    let _ = std::fs::create_dir_all(&user_plugins);
+    let _ = std::fs::create_dir_all(&user_deps);
+
+    // bundled-dlc/plugins/ → user_plugins/
+    let bundled_plugins_dlc = bundled_dlc.join("plugins");
+    if bundled_plugins_dlc.exists() {
+        walk_copy_dlc(&bundled_plugins_dlc, &user_plugins, MUFURONG_EXT);
+    }
+    // bundled-dlc/external-deps/ → user_external_deps/
+    let bundled_deps_dlc = bundled_dlc.join("external-deps");
+    if bundled_deps_dlc.exists() {
+        walk_copy_dlc(&bundled_deps_dlc, &user_deps, MUJIN_EXT);
+    }
+}
+
+/// 递归扫描 src 目录下的 .<ext> 文件，复制到 dst 下保持相对路径。
+/// 若目标已存在且 size 相同则跳过。
+fn walk_copy_dlc(src: &std::path::Path, dst: &std::path::Path, ext: &str) {
+    let entries = match std::fs::read_dir(src) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Ok(rel) = path.strip_prefix(src) {
+                let sub_dst = dst.join(rel);
+                walk_copy_dlc(&path, &sub_dst, ext);
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+            if let Err(e) = copy_dlc_file(&path, src, dst) {
+                eprintln!("[bundled-dlc] 复制失败 {}: {}", path.display(), e);
+            }
+        }
+    }
+}
+
+/// 复制单个 .mufurong/.mujin 到 dst 下保持相对路径。
+/// 已存在且 size 相同则跳过；否则覆盖（用户可手动删除 user 端文件后重启恢复）。
+fn copy_dlc_file(
+    src_file: &std::path::Path,
+    src_root: &std::path::Path,
+    dst_root: &std::path::Path,
+) -> Result<(), String> {
+    let rel = src_file.strip_prefix(src_root).map_err(|e| e.to_string())?;
+    let dst_file = dst_root.join(rel);
+    if let Some(parent) = dst_file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    if let (Ok(src_meta), Ok(dst_meta)) = (
+        std::fs::metadata(src_file),
+        std::fs::metadata(&dst_file),
+    ) {
+        if src_meta.len() == dst_meta.len() {
+            return Ok(());
+        }
+    }
+    std::fs::copy(src_file, &dst_file).map_err(|e| format!("复制文件失败: {}", e))?;
+    eprintln!(
+        "[bundled-dlc] 已复制: {} -> {}",
+        src_file.display(),
+        dst_file.display()
     );
     Ok(())
 }
@@ -212,6 +682,22 @@ fn save_plugin_visibility(app: &AppHandle, plugin_id: &str, visible: bool) -> Re
     let path = app_data.join("plugin_visibility.json");
     let mut map = load_plugin_visibility_map(app);
     map.insert(plugin_id.to_string(), visible);
+    let content = serde_json::to_string_pretty(&map).map_err(|e| format!("序列化失败: {}", e))?;
+    std::fs::write(&path, content).map_err(|e| format!("写入 plugin_visibility.json 失败: {}", e))?;
+    Ok(())
+}
+
+/// 从 plugin_visibility.json 中移除指定插件 id 的记录（删除插件时调用，避免残留无效配置）
+fn remove_plugin_visibility(app: &AppHandle, plugin_id: &str) -> Result<(), String> {
+    let app_data = app.path().app_data_dir().map_err(|e| format!("获取 app_data_dir 失败: {}", e))?;
+    let path = app_data.join("plugin_visibility.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut map = load_plugin_visibility_map(app);
+    if map.remove(plugin_id).is_none() {
+        return Ok(()); // 原本就没有该 id 的记录
+    }
     let content = serde_json::to_string_pretty(&map).map_err(|e| format!("序列化失败: {}", e))?;
     std::fs::write(&path, content).map_err(|e| format!("写入 plugin_visibility.json 失败: {}", e))?;
     Ok(())
@@ -426,20 +912,34 @@ fn version_lt(a: &str, b: &str) -> bool {
     false
 }
 
+/// 在 user_external_deps/ 与 external-deps/ 中查找相对路径对应的实际文件路径。
+/// 优先级：user_external_deps（用户解压，可覆盖）> external-deps（打包资源，兜底）。
+/// 用于 validate_required_assets 和 read_external_dep_file 的统一路径解析。
+/// 返回 None 表示两处都不存在。
+fn find_external_dep_path(app: &tauri::AppHandle, relative_path: &str) -> Option<PathBuf> {
+    let rel = relative_path.trim_start_matches(['/', '\\']);
+    // 1. 优先用户解压目录（user_external_deps/）
+    if let Some(user_deps_dir) = get_user_external_deps_dir(app) {
+        let candidate = user_deps_dir.join(rel);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    // 2. 回退打包资源（external-deps/）
+    get_external_deps_dir(app).map(|d| d.join(rel)).filter(|p| p.exists())
+}
+
 /// 校验 requiredAssets：检查 external-deps 下是否存在 manifest 声明的外部依赖资源。
-/// 使用 get_external_deps_dir 统一路径解析（开发时项目根/external-deps，打包后 resource_dir/external-deps）。
+/// 查找顺序：user_external_deps（用户解压，可覆盖）> external-deps（打包资源，兜底）。
 /// 缺失任一资源即返回 Err（含缺失清单），调用方应将插件加入 rejected 列表，
 /// 避免运行时才发现依赖缺失导致白屏（ide 的 CodeMirror / wps 的 tiptap 等）。
 fn validate_required_assets(app: &tauri::AppHandle, manifest: &PluginManifest) -> Result<(), String> {
     if manifest.required_assets.is_empty() {
         return Ok(());
     }
-    let deps_dir = get_external_deps_dir(app)
-        .ok_or_else(|| "无法解析 external-deps 目录".to_string())?;
     let mut missing: Vec<&String> = Vec::new();
     for asset in &manifest.required_assets {
-        let rel = asset.trim_start_matches(['/', '\\']);
-        if !deps_dir.join(rel).exists() {
+        if find_external_dep_path(app, asset).is_none() {
             missing.push(asset);
         }
     }
@@ -447,7 +947,7 @@ fn validate_required_assets(app: &tauri::AppHandle, manifest: &PluginManifest) -
         Ok(())
     } else {
         Err(format!(
-            "缺失外部依赖资源: {}（在 external-deps 下未找到）",
+            "缺失外部依赖资源: {}（在 external-deps / user_external_deps 下均未找到）",
             missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
         ))
     }
@@ -494,6 +994,10 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
     // 先解压 user_plugins/ 下的 .mufurong 文件（版本匹配的跳过，极快）
     // 解压后新目录会改变 mtime，缓存自动失效
     extract_mufurong_plugins(&app);
+
+    // 同步解压 user_external_deps/ 下的 .mujin 文件（mtime 匹配的跳过，极快）
+    // 必须在 validate_required_assets 之前完成，否则用户安装的 .mujin 依赖会被误判为缺失
+    extract_mujin_deps(&app);
 
     let current_mtime = plugins_max_mtime(&app);
 
@@ -721,25 +1225,41 @@ pub fn read_plugin_file(app: tauri::AppHandle, plugin_id: String, file_name: Str
 /// 读取「外部依赖」(external-deps) 下的文件内容（IDE 的 CodeMirror 等重量级依赖按需从此加载，
 /// 不打包进插件本体，保持插件文件夹轻量）。relative_path 为相对于 external-deps 的路径，含越界防护。
 ///
-/// 使用 get_external_deps_dir 统一路径解析：
-/// 开发时：项目根/external-deps/
-/// 打包后：resource_dir/external-deps/
+/// 查找顺序（与 validate_required_assets 一致）：
+/// 1. user_external_deps/（用户解压的 .mujin，可覆盖打包依赖）
+/// 2. external-deps/（打包资源，兜底）
+///
+/// 越界防护：以实际命中的根目录（user_external_deps 或 external-deps）为基准做 canonicalize 校验。
 #[tauri::command]
 pub fn read_external_dep_file(app: tauri::AppHandle, relative_path: String) -> Result<String, String> {
+    let rel = relative_path.trim_start_matches(['/', '\\']);
+
+    // 1. 优先 user_external_deps/（含越界防护）
+    if let Some(user_deps_dir) = get_user_external_deps_dir(&app) {
+        let file_path = user_deps_dir.join(rel);
+        if file_path.exists() {
+            let root_canon = user_deps_dir.canonicalize().unwrap_or_else(|_| user_deps_dir.clone());
+            if let Ok(canonical) = file_path.canonicalize() {
+                if canonical.starts_with(&root_canon) {
+                    return std::fs::read_to_string(&canonical)
+                        .map_err(|e| format!("读取外部依赖文件失败: {}", e));
+                }
+                return Err(format!("越界访问被拒绝: {}", relative_path));
+            }
+        }
+    }
+
+    // 2. 回退 external-deps/（原逻辑，含越界防护）
     let root = get_external_deps_dir(&app)
         .ok_or_else(|| "无法解析 external-deps 目录".to_string())?;
-    let rel = relative_path.trim_start_matches(['/', '\\']);
     let file_path = root.join(rel);
-    // 越界防护：canonicalize 后确保在 root 之下
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
     if let Ok(canonical) = file_path.canonicalize() {
         if !canonical.starts_with(&root_canon) {
             return Err(format!("越界访问被拒绝: {}", relative_path));
         }
-        match std::fs::read_to_string(&canonical) {
-            Ok(content) => return Ok(content),
-            Err(e) => return Err(format!("读取外部依赖文件失败: {}", e)),
-        }
+        return std::fs::read_to_string(&canonical)
+            .map_err(|e| format!("读取外部依赖文件失败: {}", e));
     }
     Err(format!("外部依赖文件不存在: {}", relative_path))
 }
@@ -808,6 +1328,68 @@ pub fn unload_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), Str
     find_plugin_root(&app, &plugin_id)?;
     app.emit("plugin-unload", plugin_id)
         .map_err(|e| format!("派发 unload 事件失败: {}", e))
+}
+
+/// 删除插件（连同文件）。
+///
+/// 行为：
+/// 1. 用 `find_plugin_root` 在 user_plugins/ 与 bundled-plugins/ 中定位真实目录
+/// 2. 删除该目录本身
+/// 3. 在父目录中查找 `<plugin_id>.mufurong` 源包并删除（否则下次启动会被重新解压回来）
+/// 4. 从 `plugin_visibility.json` 中移除该 id 的可见性记录
+/// 5. 清除插件扫描缓存，使下次 get_installed_plugins 重新读取
+/// 6. 派发 `plugin-unload` 事件，让 PluginHost 从注册表中移除
+///
+/// 注意：bundled-plugins/ 在开发期可能位于源码仓库；打包后位于安装目录。
+/// 用户主动点击「垃圾桶」即视为授权删除，本命令不做 user/bundled 区分。
+#[tauri::command]
+pub fn delete_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
+    let plugin_dir = find_plugin_root(&app, &plugin_id)?;
+
+    // 1) 删除插件目录
+    if plugin_dir.exists() {
+        std::fs::remove_dir_all(&plugin_dir)
+            .map_err(|e| format!("删除插件目录失败: {}", e))?;
+    }
+
+    // 2) 删除同目录下的 <plugin_id>.mufurong 源包（防止下次启动重新解压）
+    if let Some(parent) = plugin_dir.parent() {
+        let mufurong_path = parent.join(format!("{}.{}", plugin_id, MUFURONG_EXT));
+        if mufurong_path.exists() {
+            let _ = std::fs::remove_file(&mufurong_path);
+        }
+    }
+
+    // 3) 从 plugin_visibility.json 中移除该 id 的记录
+    remove_plugin_visibility(&app, &plugin_id)?;
+
+    // 4) 清除扫描缓存，让下次 get_installed_plugins 反映删除后的状态
+    if let Ok(mut cache) = PLUGIN_SCAN_CACHE.lock() {
+        *cache = None;
+    }
+
+    eprintln!(
+        "[PluginDelete] 插件 '{}' 已彻底删除（目录 + .mufurong 包 + 可见性记录）",
+        plugin_id
+    );
+
+    // 5) 派发 unload 事件，让 PluginHost 从注册表移除运行时实例
+    let _ = app.emit("plugin-unload", plugin_id.clone());
+    // 同时派发 unregistered 事件（与 PluginHost 卸载流程对齐，触发 ExtManager 列表刷新）
+    let _ = app.emit("plugin-unregistered", plugin_id);
+    Ok(())
+}
+
+/// 在系统文件管理器中打开插件所在目录。
+/// 用 `tauri_plugin_opener` 的 `open_path` 打开 `find_plugin_root` 返回的路径。
+#[tauri::command]
+pub fn open_plugin_folder(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let plugin_dir = find_plugin_root(&app, &plugin_id)?;
+    let path_str = plugin_dir.to_string_lossy().to_string();
+    app.opener()
+        .open_path(path_str, None::<&str>)
+        .map_err(|e| format!("打开文件夹失败: {}", e))
 }
 
 // ================= 中转站管理命令 =================
@@ -2067,12 +2649,99 @@ pub fn wps_import_pptx(app: AppHandle, path: String) -> Result<String, String> {
     let work = std::panic::AssertUnwindSafe(|| {
         crate::services::pptx_import::pptx_to_json(&bytes, &media_dir)
     });
-    match std::panic::catch_unwind(work) {
-        Ok(r) => r,
-        Err(_) => Err(
+    let mut json = match std::panic::catch_unwind(work) {
+        Ok(r) => r?,
+        Err(_) => return Err(
             "导入解析发生崩溃（panic）。请重新导入并查看弹出的「导入诊断」摘要，或把 app_data/logs/app.log 发我定位。".into(),
         ),
+    };
+
+    // 尝试用 LibreOffice headless 生成每页高精度 PNG，注入到幻灯片数据中。
+    // 成功则放映时直接展示图片（像素级还原）；失败或不装 LibreOffice 则退回自定义渲染。
+    let png_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("pptx_png");
+    if let Ok(pngs) = export_slides_png_libreoffice(&path, &png_dir) {
+        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) {
+            if let Some(slides) = v.get_mut("slides").and_then(|s| s.as_array_mut()) {
+                for (i, png) in pngs.iter().enumerate() {
+                    if let Some(s) = slides.get_mut(i) {
+                        if let Some(obj) = s.as_object_mut() {
+                            let asset_path = format!("asset://localhost/{}", png.replace('\\', "/"));
+                            obj.insert("pngSrc".into(), serde_json::json!(png));
+                        }
+                    }
+                }
+            }
+            json = serde_json::to_string(&v).map_err(|e| e.to_string())?;
+        }
     }
+
+    Ok(json)
+}
+
+// ---- LibreOffice headless：PPTX → 每页 PNG ----
+
+/// 探测系统是否已装 LibreOffice（`soffice` / `libreoffice`）
+fn find_libreoffice() -> Option<std::path::PathBuf> {
+    let cands = [
+        "soffice", "soffice.exe", "libreoffice",
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        r"/usr/bin/soffice",
+        r"/Applications/LibreOffice.app/Contents/MacOS/soffice",
+    ];
+    for c in &cands {
+        let p = std::path::Path::new(c);
+        if p.is_file() || p.is_absolute() && p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+    // PATH 中查找
+    if let Ok(output) = std::process::Command::new("soffice")
+        .arg("--version")
+        .output()
+    {
+        if output.status.success() {
+            return Some(std::path::PathBuf::from("soffice"));
+        }
+    }
+    None
+}
+
+fn export_slides_png_libreoffice(
+    pptx_path: &str,
+    out_dir: &std::path::Path,
+) -> Result<Vec<String>, String> {
+    let soffice = find_libreoffice().ok_or_else(|| "未检测到 LibreOffice（可安装 libreoffice.org 后重试）".to_string())?;
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {:?}: {}", out_dir, e))?;
+
+    let out_str = out_dir.to_string_lossy().to_string();
+    let child = std::process::Command::new(&soffice)
+        .args(["--headless", "--convert-to", "png", "--outdir", &out_str, pptx_path])
+        .output()
+        .map_err(|e| format!("执行 LibreOffice 失败: {}", e))?;
+
+    if !child.status.success() {
+        let stderr = String::from_utf8_lossy(&child.stderr);
+        return Err(format!("LibreOffice 导出失败: {}", stderr.trim()));
+    }
+
+    // LibreOffice 生成文件命名为 Slide1.png, Slide2.png ……
+    let mut pngs: Vec<String> = Vec::new();
+    for i in 1..=200 {
+        let name = format!("Slide{}.png", i);
+        let p = out_dir.join(&name);
+        if p.exists() {
+            // 转换成 Tauri asset 可用的绝对路径
+            pngs.push(p.to_string_lossy().to_string());
+        } else if i > 1 {
+            break; // 连续编号停止
+        }
+    }
+    Ok(pngs)
 }
 
 /// 将 base64 文件内容写入临时文件，调用原生解析器转换为 Markdown。
@@ -2363,4 +3032,105 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
         }
     }
     Ok(())
+}
+
+// ================= 开发者控制台 =================
+// 全局设置-关于 内置的轻量级命令行 REPL：
+//   - 前端通过命令白名单 + 危险关键词黑名单双重过滤
+//   - 联网能力通过 dev_console_http 走 Rust 端 reqwest
+//   - 安装 .mujin 依赖通过 install_dep_file 写入 user_external_deps/
+
+/// 安装 .mujin 依赖文件到 user_external_deps/<target_subpath>。
+/// target_subpath 形如 "niaoluo/ide/codemirror.mujin" 或 "全局/markitdown.mujin"，
+/// 自动创建母文件夹。data 为 .mujin 文件原始字节。
+/// 安装完成后下次扫描会自动解压（extract_mujin_deps）。
+#[tauri::command]
+pub fn install_dep_file(
+    app: tauri::AppHandle,
+    target_subpath: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    // 路径越界防护：禁止 .. 与绝对路径
+    let trimmed = target_subpath.trim_start_matches(['/', '\\']);
+    if trimmed.contains("..") || trimmed.contains(':') {
+        return Err(format!("非法 target_subpath: {}", target_subpath));
+    }
+    let user_deps_dir = get_user_external_deps_dir(&app)
+        .ok_or_else(|| "无法解析 user_external_deps 目录".to_string())?;
+    let path = user_deps_dir.join(trimmed);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    std::fs::write(&path, &data).map_err(|e| format!("写入依赖文件失败: {}", e))?;
+    eprintln!("[DevConsole] 已安装依赖: {} -> {}", trimmed, path.display());
+    Ok(())
+}
+
+/// 安装 .mufurong 插件文件到 user_plugins/<target_subpath>。
+/// target_subpath 形如 "niaoluo/ai.mufurong" 或 "全局/markitdown.mufurong"，
+/// 自动创建母文件夹。data 为 .mufurong 文件原始字节。
+/// 安装完成后下次扫描会自动解压（extract_mufurong_plugins）。
+#[tauri::command]
+pub fn install_user_plugin_file(
+    app: tauri::AppHandle,
+    target_subpath: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let trimmed = target_subpath.trim_start_matches(['/', '\\']);
+    if trimmed.contains("..") || trimmed.contains(':') {
+        return Err(format!("非法 target_subpath: {}", target_subpath));
+    }
+    let user_plugins_dir = get_user_plugins_dir(&app)
+        .ok_or_else(|| "无法解析 user_plugins 目录".to_string())?;
+    let path = user_plugins_dir.join(trimmed);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    std::fs::write(&path, &data).map_err(|e| format!("写入插件文件失败: {}", e))?;
+    eprintln!("[DevConsole] 已安装插件: {} -> {}", trimmed, path.display());
+    Ok(())
+}
+
+/// 开发者控制台 HTTP 联网命令。
+/// 仅支持 http/https 协议；GET/POST 方法；可选 body 与 headers。
+/// 超时 30s；返回 "HTTP <status>\n\n<response_body>"。
+/// 用于开发者控制台中的 `http GET <url>` / `http POST <url> <body>` 热指令。
+#[tauri::command]
+pub async fn dev_console_http(
+    method: String,
+    url: String,
+    body: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+) -> Result<String, String> {
+    // 协议白名单：仅 http/https
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("仅支持 http/https 协议".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("构建 client 失败: {}", e))?;
+
+    let method_upper = method.to_uppercase();
+    let mut req = match method_upper.as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        "PUT" => client.put(&url),
+        "DELETE" => client.delete(&url),
+        _ => return Err(format!("不支持的方法: {}", method)),
+    };
+
+    if let Some(h) = headers {
+        for (k, v) in h {
+            req = req.header(k, v);
+        }
+    }
+    if let Some(b) = body {
+        req = req.body(b);
+    }
+
+    let resp = req.send().await.map_err(|e| format!("请求失败: {}", e))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    Ok(format!("HTTP {} {}\n\n{}", status.as_u16(), status.canonical_reason().unwrap_or_default(), text))
 }

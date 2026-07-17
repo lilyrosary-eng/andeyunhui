@@ -5,6 +5,7 @@ import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, External
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { ModelSettings } from '@/core/settings/ModelSettings'
+import { DevConsole } from '@/core/settings/DevConsole'
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { logger } from '@/lib/logger';
@@ -275,7 +276,7 @@ export function GlobalSettingsPanel() {
           <SlidingTabs
             tabs={tabs.map((t) => ({ id: t.id, label: t.label, icon: <t.icon size={14} /> }))}
             value={activeTab}
-            onChange={(id) => setActiveTab(id)}
+            onChange={(id) => setActiveTab(id as TabId)}
             className="mb-8 bg-white dark:bg-stone-700/60 backdrop-blur border border-white/80 dark:border-stone-700/50 rounded-xl p-1 w-fit"
           />
 
@@ -786,6 +787,9 @@ export function GlobalSettingsPanel() {
                   </button>
                 </div>
               </section>
+
+              {/* 开发者控制台：命令行 REPL，热指令+危险过滤+联网 */}
+              <DevConsole />
 
 
             </div>

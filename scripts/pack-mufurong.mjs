@@ -5,12 +5,12 @@
 //
 // 大型模块（茑萝/全局/阅读）保留母文件夹结构：
 //   niaoluo/ai.mufurong, niaoluo/gongjuxiang.mufurong, ...
-//   全局/markitdown.mufurong, 全局/screen-recorder.mufurong
+//   全局/screen-recorder.mufurong
 //
 // 打包工具：PowerShell [System.IO.Compression.ZipFile]::CreateFromDirectory()
 // （Windows 10+ 内置 .NET，无需额外依赖，MIT 协议）
 import { execSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync, mkdirSync, rmSync, cpSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -79,27 +79,23 @@ for (const { relPath, dir } of plugins) {
   }
 }
 
-// 5. 复制 external-deps/ 到输出目录（依赖保持原始结构，不打包成 .mufurong）
+// 5. 调用 pack-mujin.mjs 把 external-deps/ 打包成 .mujin（与 .mufurong 同源机制）
+// .mujin 输出到 dist-dlc/external-deps/ 下，保留母文件夹结构（niaoluo/ide/、全局/ 等）
 if (existsSync(externalDir)) {
-  const destExternal = join(outputDir, 'external-deps');
-  console.log('[Pack] 复制 external-deps/ ...');
-  cpSync(externalDir, destExternal, { recursive: true, filter: (src) => {
-    // 跳过 node_modules / __pycache__ / .git 等开发产物
-    const rel = relative(externalDir, src);
-    if (rel && (rel.includes('node_modules') || rel.includes('__pycache__') || rel.includes('.git'))) {
-      return false;
-    }
-    return true;
-  }});
-  console.log(`[Pack] ✓ external-deps/ -> ${relative(rootDir, destExternal)}`);
+  console.log('[Pack] 调用 pack-mujin.mjs 打包 .mujin 依赖 ...');
+  try {
+    execSync('node scripts/pack-mujin.mjs', { cwd: rootDir, stdio: 'inherit' });
+  } catch (e) {
+    console.warn(`[Pack] ⚠ .mujin 依赖打包失败（非致命）: ${e.message}`);
+  }
 }
 
 // 6. 生成使用说明
 const readmePath = join(outputDir, '使用说明.txt');
-const readmeContent = `岸灯鸢花 · DLC 插件包
-========================
+const readmeContent = `岸灯鸢花 · DLC 插件与依赖包
+==============================
 
-本目录包含 ${packed} 个插件和外部依赖。
+本目录包含 ${packed} 个 .mufurong 插件与若干 .mujin 外部依赖。
 
 安装方式：
 1. 插件（.mufurong 文件）：
@@ -108,10 +104,12 @@ const readmeContent = `岸灯鸢花 · DLC 插件包
    - 例如：user_plugins/niaoluo/ai.mufurong
    - 应用启动时自动解压，版本匹配时跳过（速度极快）
 
-2. 外部依赖（external-deps/ 文件夹）：
-   把 external-deps/ 文件夹整体复制到应用安装目录下。
-   - 与安装程序同级目录
-   - 包含 ffmpeg、markitdown 等运行时依赖
+2. 外部依赖（.mujin 文件）：
+   把 .mujin 文件放到应用数据目录的 user_external_deps/ 文件夹下。
+   - 母文件夹（如 niaoluo/ide/、niaoluo/wps/、全局/）需要手动创建
+   - 例如：user_external_deps/niaoluo/ide/codemirror.mujin
+   - 应用启动时自动解压，源文件 mtime 匹配时跳过（速度极快）
+   - 用户安装的 .mujin 优先于打包资源 external-deps/，可覆盖同名依赖
 
 插件列表：
 ${plugins.map(p => `  - ${p.relPath}`).join('\n')}
@@ -119,8 +117,14 @@ ${plugins.map(p => `  - ${p.relPath}`).join('\n')}
 制作 .mufurong 插件：
   1. 在 plugins/ 下创建插件目录（参考 _template/）
   2. 编写 manifest.json + src/index.tsx
-  3. 运行 node scripts/pack-mufurong.mjs 打包
+  3. 运行 node scripts/pack-mufurong.mjs 打包（同时会调用 pack-mujin.mjs）
   4. .mufurong 本质是 ZIP 改后缀，可用任何 ZIP 工具查看内容
+
+制作 .mujin 依赖：
+  1. 把第三方依赖项目放到 external-deps/<模块>/<子模块>/<依赖名>/ 下
+  2. 在 scripts/pack-mujin.mjs 的 TARGETS 数组追加一条声明
+  3. 运行 node scripts/pack-mujin.mjs 打包（或通过 pack-mufurong.mjs 自动调用）
+  4. .mujin 本质是 ZIP 改后缀，可用任何 ZIP 工具查看内容
 `;
 mkdirSync(outputDir, { recursive: true });
 writeFileSync(readmePath, readmeContent, 'utf-8');

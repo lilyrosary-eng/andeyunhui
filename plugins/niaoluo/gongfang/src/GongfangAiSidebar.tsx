@@ -87,8 +87,40 @@ async function executeCmd(cmd: CmdDirective): Promise<string> {
         break;
       }
       case 'inject': {
-        await tauriInvoke('gongfang_inject', { cmd: attrs.cmd || 'Focus' });
-        result = `已注入指令: ${attrs.cmd || 'Focus'}`;
+        // 支持 <cmd action="inject" cmd="Focus" url="https://..." />
+        //       <cmd action="inject" cmd="Bypass" challenge="captcha" />
+        //       <cmd action="inject" cmd="Pause" /> / <cmd action="inject" cmd="Resume" />
+        let cmdObj: unknown;
+        const cmdName = attrs.cmd || 'Focus';
+        if (cmdName === 'Focus' && attrs.url) {
+          cmdObj = { Focus: { url: attrs.url } };
+        } else if (cmdName === 'Bypass' && attrs.challenge) {
+          cmdObj = { Bypass: { challenge: attrs.challenge } };
+        } else {
+          cmdObj = cmdName;
+        }
+        await tauriInvoke('gongfang_inject', { cmd: cmdObj });
+        result = `已注入指令: ${cmdName}${attrs.url ? ` (url=${attrs.url})` : ''}${attrs.challenge ? ` (challenge=${attrs.challenge})` : ''}`;
+        break;
+      }
+      case 'fetch': {
+        // <cmd action="fetch" url="https://..." /> — 实际爬取 URL，返回页面内容+标题+链接
+        const r = await tauriInvoke<any>('gongfang_fetch', { url: attrs.url });
+        if (r.error) {
+          result = `爬取失败: ${r.error}`;
+        } else {
+          const linksList = (r.links || []).slice(0, 10).join('\n  ');
+          result = [
+            `✅ 爬取成功: ${r.url}`,
+            `- 状态码: ${r.status}`,
+            `- 内容类型: ${r.content_type || '未知'}`,
+            `- 内容长度: ${r.content_length} 字节`,
+            `- 页面标题: ${r.title || '无'}`,
+            `- 耗时: ${r.duration_ms}ms`,
+            `- 发现链接 (${r.links?.length ?? 0} 个):`,
+            `  ${linksList}${r.links?.length > 10 ? '\n  ...' : ''}`,
+          ].join('\n');
+        }
         break;
       }
       case 'scan': {
@@ -155,6 +187,31 @@ async function executeCmd(cmd: CmdDirective): Promise<string> {
         result = JSON.stringify(r, null, 2);
         break;
       }
+      case 'wait': {
+        // <cmd action="wait" seconds="3" /> — 等待 N 秒（让爬虫运行后再查状态）
+        const sec = Math.min(Math.max(parseInt(attrs.seconds || '2', 10), 1), 15);
+        await new Promise((r) => setTimeout(r, sec * 1000));
+        result = `已等待 ${sec} 秒`;
+        break;
+      }
+      case 'targets': {
+        const r = await tauriInvoke('gongfang_target_list');
+        result = `共 ${(r as any[])?.length ?? 0} 个目标\n${JSON.stringify(r, null, 2)}`;
+        break;
+      }
+      case 'metrics': {
+        const r = await tauriInvoke('gongfang_metrics_history');
+        const arr = (r as any[]) ?? [];
+        const last = arr[arr.length - 1];
+        result = `共 ${arr.length} 个指标点${last ? `\n最新: reward=${last.reward} err=${(last.error_rate * 100).toFixed(1)}% qps=${last.qps} phase=${last.phase}` : ''}`;
+        break;
+      }
+      case 'events': {
+        const r = await tauriInvoke('gongfang_events_recent');
+        const arr = (r as any[]) ?? [];
+        result = `共 ${arr.length} 条事件\n${arr.slice(-10).map((e: any) => `[${e.kind}] ${JSON.stringify(e).slice(0, 120)}`).join('\n')}`;
+        break;
+      }
       default:
         result = `未知命令: ${action}`;
     }
@@ -170,12 +227,17 @@ async function executeCmd(cmd: CmdDirective): Promise<string> {
 function actionLabel(action: string, attrs: Record<string, string>): string {
   switch (action) {
     case 'scan': return `扫描 ${attrs.host || '?'}`;
+    case 'fetch': return `爬取 ${attrs.url || '?'}`;
     case 'waf': return `WAF 检测 ${attrs.url || '?'}`;
     case 'crypto': return `加密识别 (${attrs.hex?.length || 0} 字符)`;
     case 'humanize': return `拟人化 L${attrs.level || '5'}`;
     case 'inject': return `注入 ${attrs.cmd || 'Focus'}`;
     case 'rotate': return `切换出口 ${attrs.mode || 'direct'}`;
     case 'throttle': return `限速 ${attrs.percent || '100'}%`;
+    case 'wait': return `等待 ${attrs.seconds || '2'}s`;
+    case 'targets': return '查询目标列表';
+    case 'metrics': return '查询指标';
+    case 'events': return '查询事件流';
     default: return action;
   }
 }
@@ -190,33 +252,173 @@ function buildSystemPrompt(): string {
   return [
     '你是攻防套件的 AI 指挥官，运行在「茑萝」平台的「攻防」模块侧边栏中。',
     '你可以根据用户的自然语言指令，调度五大框架（网络爬虫/逆向工程/渗透测试/自动化测试/API网关）。',
+    '你的核心能力是「对话即攻防」——用户只需用自然语言描述意图，你自动完成全部操作链路。',
     '',
-    '可用命令（通过 <cmd> 标签输出，前端自动执行并回填结果）：',
-    '1. <cmd action="status" /> — 查询内核运行状态',
-    '2. <cmd action="start" profile="可选" /> — 启动双轨制内核',
-    '3. <cmd action="stop" /> — 停止内核',
-    '4. <cmd action="inject" cmd="Focus|Bypass|Pause|Resume" /> — 注入控制指令（P0/P1/P2 优先级）',
-    '5. <cmd action="scan" host="目标主机" ports="80,443,8080" /> — 端口扫描（ports 可选，不填用 Top-100）',
-    '6. <cmd action="waf" url="https://目标URL" /> — WAF 检测',
-    '7. <cmd action="crypto" hex="6e3a5f2c..." /> — 加密算法识别（卡方检验 + 特征向量库）',
-    '8. <cmd action="symbols" url="可选目标URL" /> — 符号库查询',
-    '9. <cmd action="humanize" level="5" /> — 设置拟人化等级（0机械-10疲劳）',
-    '10. <cmd action="fitness" /> — 查询模板适应度报告',
-    '11. <cmd action="migrate" /> — 触发热迁移（切换到最优模板）',
-    '12. <cmd action="reset" /> — 重置适应度统计',
-    '13. <cmd action="rotate" mode="direct|proxy|stealth" /> — 切换出口流量模式',
-    '14. <cmd action="throttle" percent="50" /> — 调整全局带宽上限',
-    '15. <cmd action="gateway_status" /> — 查询网关状态',
-    '16. <cmd action="gateway_pool" /> — 查询代理节点池',
+    '## 标准操作流程（SOP）',
+    '1. 感知状态：每轮 system 消息末尾自动注入当前内核状态，你无需手动调 status',
+    '2. 判断意图：识别用户要做什么（爬取/扫描/检测/逆向/调度）',
+    '3. 自动启动：如内核未运行且任务需要内核 → 先 <cmd action="start" />',
+    '4. 聚焦目标：如用户给了 URL → <cmd action="inject" cmd="Focus" url="..." />',
+    '5. 执行任务：输出对应的 <cmd> 标签',
+    '6. 监控反馈：如需观察运行效果 → <cmd action="wait" seconds="3" /> 再看状态',
+    '7. 总结收尾：输出 <done/> 并附简短中文总结',
     '',
-    '规则：',
-    '- 每次回复可以包含多个 <cmd> 标签，也可以混合自然语言说明',
-    '- 命令执行结果会以 tool 角色自动回填，你可以根据结果继续分析或执行下一步',
-    '- 完成所有操作后输出 <done/> 并附上简短中文总结',
-    '- 仅限授权测试场景，拒绝任何非法操作',
-    '- 保持简洁，只在必要时输出说明性文字',
-    '- 不要在对话中贴大段代码，用 <cmd> 标签让前端执行',
-    '- 如果用户意图不明确，先简短询问再执行',
+    '## 可用命令（通过 <cmd> 标签输出，前端自动执行并回填结果）',
+    '',
+    '### 内核控制',
+    '| 命令 | 格式 | 说明 |',
+    '|------|------|------|',
+    '| 启动 | `<cmd action="start" />` | 启动双轨制内核（爬取前必须先启动） |',
+    '| 停止 | `<cmd action="stop" />` | 停止内核 |',
+    '| 聚焦 | `<cmd action="inject" cmd="Focus" url="https://目标URL" />` | 让爬虫聚焦某个 URL |',
+    '| 绕过 | `<cmd action="inject" cmd="Bypass" challenge="验证码类型" />` | 绕过反爬挑战 |',
+    '| 暂停 | `<cmd action="inject" cmd="Pause" />` | 暂停内核 |',
+    '| 恢复 | `<cmd action="inject" cmd="Resume" />` | 恢复内核 |',
+    '',
+    '### 侦察扫描',
+    '| 命令 | 格式 | 说明 |',
+    '|------|------|------|',
+    '| 实际爬取 | `<cmd action="fetch" url="https://目标URL" />` | 发 HTTP GET，返回页面内容+标题+链接 |',
+    '| 端口扫描 | `<cmd action="scan" host="127.0.0.1" ports="80,443" />` | ports 可选 |',
+    '| WAF 检测 | `<cmd action="waf" url="https://目标URL" />` | 检测目标 WAF |',
+    '',
+    '### 逆向分析',
+    '| 命令 | 格式 | 说明 |',
+    '|------|------|------|',
+    '| 加密识别 | `<cmd action="crypto" hex="6e3a5f2c..." />` | 识别加密算法 |',
+    '| 符号查询 | `<cmd action="symbols" url="可选" />` | 查询已学习符号 |',
+    '',
+    '### 监控反馈',
+    '| 命令 | 格式 | 说明 |',
+    '|------|------|------|',
+    '| 等待 | `<cmd action="wait" seconds="3" />` | 等待 N 秒（1-15s，让爬虫运行后再看状态） |',
+    '| 指标 | `<cmd action="metrics" />` | 查询最近时序指标 |',
+    '| 事件 | `<cmd action="events" />` | 查询最近事件流 |',
+    '| 目标列表 | `<cmd action="targets" />` | 查询目标工作区 |',
+    '',
+    '### 自动化与网关',
+    '| 命令 | 格式 | 说明 |',
+    '|------|------|------|',
+    '| 拟人化 | `<cmd action="humanize" level="5" />` | 0机械-10疲劳 |',
+    '| 适应度 | `<cmd action="fitness" />` | 查询模板适应度 |',
+    '| 热迁移 | `<cmd action="migrate" />` | 切换到最优模板 |',
+    '| 重置 | `<cmd action="reset" />` | 重置适应度 |',
+    '| 切换出口 | `<cmd action="rotate" mode="direct\|proxy\|stealth" />` | 切换流量模式 |',
+    '| 限速 | `<cmd action="throttle" percent="50" />` | 调整带宽上限 |',
+    '| 网关状态 | `<cmd action="gateway_status" />` | 查询网关状态 |',
+    '| 节点池 | `<cmd action="gateway_pool" />` | 查询代理节点池 |',
+    '',
+    '## 执行规则',
+    '- 每次回复可包含多个 <cmd> 标签，混合自然语言说明',
+    '- 命令执行结果会以 tool 角色自动回填，你根据结果继续分析或执行下一步',
+    '- 完成所有操作后输出 <done/> 并附简短中文总结',
+    '- 如果用户意图不明确（如没给 URL），先简短询问再执行',
+    '- 仅限授权测试场景，拒绝非法操作',
+    '- 保持简洁，不要贴大段代码',
+    '- 优先自动完成全链路，不要让用户手动操作',
+    '',
+    '## 示例（few-shot）',
+    '',
+    '### 示例 1：爬取网站（全链路自动 + 实际数据）',
+    '用户：爬取 https://example.com 的页面资源',
+    '助手：好的，我先实际爬取页面看看内容，再启动内核持续跟踪。',
+    '<cmd action="fetch" url="https://example.com" />',
+    '（工具结果回填：状态=200, 标题=Example Domain, 5个链接, 1256字节）',
+    '助手：页面爬取成功！标题: Example Domain，发现 5 个链接。现在启动内核持续跟踪。',
+    '<cmd action="start" />',
+    '<cmd action="inject" cmd="Focus" url="https://example.com" />',
+    '（工具结果回填：内核已启动 + 已聚焦）',
+    '助手：内核已启动并聚焦到 https://example.com。',
+    '<done/>',
+    '',
+    '### 示例 2：扫描目标',
+    '用户：帮我扫描 192.168.1.1 开了哪些端口',
+    '助手：<cmd action="scan" host="192.168.1.1" />',
+    '（工具结果回填后）',
+    '助手：扫描完成，发现 N 个开放端口。建议进一步检测 WAF。',
+    '<done/>',
+    '',
+    '### 示例 3：意图不明确',
+    '用户：爬取我的网站',
+    '助手：请提供您的网站 URL，例如 `https://example.com`，我好启动爬虫聚焦目标。',
+    '',
+    '### 示例 4：复合任务',
+    '用户：扫描 10.0.0.1 然后检测 WAF',
+    '助手：<cmd action="scan" host="10.0.0.1" />',
+    '（工具结果回填后）',
+    '助手：扫描完成。现在检测 WAF。',
+    '<cmd action="waf" url="http://10.0.0.1" />',
+    '（工具结果回填后）',
+    '助手：WAF 检测完成。以下是汇总结果。',
+    '<done/>',
+    '',
+    '### 示例 5：监控运行',
+    '用户：爬虫跑得怎么样了？',
+    '助手：（看到状态注入：running=true, reward=42, err=5%）',
+    '内核运行正常，累计奖励 42，错误率 5%。让我查看最近指标。',
+    '<cmd action="metrics" />',
+    '（工具结果回填后）',
+    '助手：最近 5 分钟指标平稳，无异常。',
+    '<done/>',
+    '',
+    '### 示例 6：渗透测试全流程',
+    '用户：对 10.0.0.5 做一次渗透侦察',
+    '助手：好的，我来做端口扫描 + WAF 检测。',
+    '<cmd action="scan" host="10.0.0.5" />',
+    '（工具结果回填：发现 22/80/443 开放）',
+    '助手：扫描到 3 个开放端口。现在检测 80 端口的 WAF。',
+    '<cmd action="waf" url="http://10.0.0.5" />',
+    '（工具结果回填：无 WAF）',
+    '助手：渗透侦察完成：',
+    '- 开放端口：22(SSH)、80(HTTP)、443(HTTPS)',
+    '- WAF：未检测到',
+    '- 建议：80 端口可直接测试，443 需 TLS 指纹伪装',
+    '<done/>',
+    '',
+    '### 示例 7：逆向分析',
+    '用户：帮我识别这段加密数据 6e3a5f2c8b1e4a7f',
+    '助手：<cmd action="crypto" hex="6e3a5f2c8b1e4a7f" />',
+    '（工具结果回填：block_size=16, entropy=3.2, matched=AES-ECB）',
+    '助手：加密分析完成：',
+    '- 分块大小：16 字节（AES 分组）',
+    '- 熵值：3.2（偏低，可能 ECB 模式）',
+    '- 匹配算法：AES-ECB（置信度 85%）',
+    '- 建议：ECB 模式有模式泄露，可利用分组重放',
+    '<done/>',
+    '',
+    '### 示例 8：自动化模板优化',
+    '用户：优化一下爬虫模板',
+    '助手：好的，我来查看当前适应度并优化。',
+    '<cmd action="fitness" />',
+    '（工具结果回填：模板A成功率80%，模板B成功率65%）',
+    '助手：当前模板A成功率最高（80%）。执行热迁移切换到最优模板。',
+    '<cmd action="migrate" />',
+    '（工具结果回填：已迁移到模板A）',
+    '助手：已切换到最优模板。设置拟人化等级为 5（中等疲劳模拟）。',
+    '<cmd action="humanize" level="5" />',
+    '（工具结果回填：已设置）',
+    '助手：模板优化完成：已迁移到成功率最高的模板 + 拟人化等级 5。',
+    '<done/>',
+    '',
+    '### 示例 9：网关流量调度',
+    '用户：切换到隐身模式，限速 30%',
+    '助手：<cmd action="rotate" mode="stealth" />',
+    '（工具结果回填：已切换到隐身模式）',
+    '助手：<cmd action="throttle" percent="30" />',
+    '（工具结果回填：已限速 30%）',
+    '助手：已切换到隐身模式 + 限速 30%。让我确认网关状态。',
+    '<cmd action="gateway_status" />',
+    '（工具结果回填：routing=stealth, bandwidth=0.3）',
+    '助手：网关调度完成：隐身模式 + 30% 带宽，请求熵已提升。',
+    '<done/>',
+    '',
+    '### 示例 10：停止内核',
+    '用户：停下来吧',
+    '助手：（看到状态注入：running=true）',
+    '<cmd action="stop" />',
+    '（工具结果回填：内核已停止）',
+    '助手：内核已停止，所有任务已终止。',
+    '<done/>',
   ].join('\n');
 }
 
@@ -378,7 +580,9 @@ export function GongfangAiSidebar() {
     dispatchAudit('AI 对话', text.slice(0, 60), 'info');
 
     // agent 循环：AI 输出 → 解析 <cmd> → 执行 → 回填结果 → 继续
+    // 最多 8 轮（支持 wait + 多步任务），单次 AI 调用 60s 超时，连续 2 轮无命令自动终止
     let loopGuard = 0;
+    let noCmdRounds = 0;
     while (loopGuard < 8 && !cancelRef.current) {
       loopGuard++;
       const aid = 'a_' + Date.now().toString(36) + loopGuard;
@@ -386,11 +590,43 @@ export function GongfangAiSidebar() {
       bufRef.current = '';
       setConv((prev) => [...prev, { id: aid, role: 'assistant', content: '', streaming: true }]);
 
+      // 自动状态注入：每轮查询内核状态并注入到 system 消息（AI 无需手动调 status 即可感知当前状态）
+      let statusSnapshot = '';
+      try {
+        const s = await tauriInvoke<any>('gongfang_status');
+        const strat = s.strategy;
+        statusSnapshot = [
+          '',
+          '## 当前内核状态（每轮自动注入，无需手动查询）',
+          `- 运行状态: ${s.running ? '✅ 运行中' : '⏹ 未启动'}`,
+          `- 阶段: ${strat?.phase ?? 'Idle'}`,
+          `- QPS: ${strat?.qps ?? 0}`,
+          `- 聚焦目标: ${strat?.focus_url ?? '未设置'}`,
+          `- 累计奖励: ${s.reward}`,
+          `- 错误率: ${((s.error_rate ?? 0) * 100).toFixed(1)}%`,
+          `- 策略代次: #${strat?.generation ?? 0}`,
+          s.running ? '' : '⚠ 内核未启动，如需爬取/扫描请先 <cmd action="start" />',
+        ].join('\n');
+      } catch {
+        statusSnapshot = '\n## 当前内核状态\n内核查询失败（可能未启动）';
+      }
+
       const messages = [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: SYSTEM_PROMPT + statusSnapshot },
         ...historyRef.current,
       ];
-      await callChat(messages);
+
+      // 单次 AI 调用 60s 超时保护（防止本地模型卡死整个循环）
+      await Promise.race([
+        callChat(messages),
+        new Promise<void>((resolve) => setTimeout(() => {
+          if (reqRef.current) {
+            cancelRef.current = true;
+            setConv((prev) => prev.map((m) => (m.id === aid ? { ...m, content: (m.content ? m.content + '\n' : '') + '⚠ AI 响应超时（60s），已自动终止', error: true, streaming: false } : m)));
+          }
+          resolve();
+        }, 60000)),
+      ]);
 
       if (cancelRef.current) break;
 
@@ -401,10 +637,13 @@ export function GongfangAiSidebar() {
       setConv((prev) => prev.map((m) => (m.id === aid ? { ...m, content: cleaned || '（执行指令中...）', streaming: false } : m)));
       historyRef.current.push({ role: 'assistant', content: rawOutput });
 
-      // 无命令 → 检查 <done/>
+      // 无命令 → 检查是否连续无命令
       if (cmds.length === 0) {
-        break;
+        noCmdRounds++;
+        if (noCmdRounds >= 2) break; // 连续 2 轮无命令，终止
+        break; // 无命令说明 AI 在等用户输入或已输出 <done/>
       }
+      noCmdRounds = 0;
 
       // 执行所有命令，收集结果
       for (const cmd of cmds) {
@@ -456,6 +695,30 @@ export function GongfangAiSidebar() {
 
   // 快捷指令定义
   const quickActions: QuickAction[] = useMemo(() => [
+    {
+      label: '启动',
+      fn: async () => {
+        await tauriInvoke('gongfang_start', { profileId: null });
+        return '内核已启动（双轨制：控制面 AI 推理 + 数据面 Tick 执行）';
+      },
+    },
+    {
+      label: '爬取',
+      fn: async () => {
+        const url = prompt('输入要爬取的目标 URL（如 https://example.com）');
+        if (!url) return '已取消';
+        await tauriInvoke('gongfang_start', { profileId: null }).catch(() => {});
+        await tauriInvoke('gongfang_inject', { cmd: { Focus: { url } } });
+        return `已启动内核并聚焦到 ${url}\n爬虫将以此 URL 为目标开始采集（可在主面板查看实时指标）`;
+      },
+    },
+    {
+      label: '停止',
+      fn: async () => {
+        await tauriInvoke('gongfang_stop');
+        return '内核已停止';
+      },
+    },
     {
       label: '状态',
       fn: async () => {
@@ -590,7 +853,7 @@ export function GongfangAiSidebar() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
             rows={1}
-            placeholder="输入指令，如「扫描 127.0.0.1」..."
+            placeholder="自然语言指挥，如「爬取 https://example.com」或「扫描 127.0.0.1」..."
             className="flex-1 resize-none px-2 py-1.5 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 outline-none focus:ring-1 focus:ring-[var(--element-bg)] leading-relaxed"
           />
           <button

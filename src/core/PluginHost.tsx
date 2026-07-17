@@ -126,7 +126,7 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
       unloadSinglePlugin(e.payload, registry)) as never);
     // 文件系统热插拔：Rust notify watcher 检测到 bundled-plugins/ 或 user_plugins/ 变化时
     // 自动重新扫描并加载新增/卸载移除的插件（真正的免重启热插拔）
-    listen('plugin-fs-change', ((_e: { payload: unknown }) => {
+    listen('plugin-fs-change', ((e: { payload?: { kind?: string; paths?: string[] } }) => {
       void (async () => {
         try {
           // 200ms 防抖已在 Rust 侧完成，这里直接触发重扫
@@ -149,6 +149,26 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
           for (const id of currentIds) {
             if (!updatedIds.has(id)) {
               try { unloadSinglePlugin(id, registry); } catch {}
+            }
+          }
+          // 内容变更：从 Rust 派发的变更路径解析出插件 id，重载"变更前后都存在"的插件。
+          // 修复：此前仅处理新增/移除，导致重新部署已存在插件（如 music）后运行中的 app
+          // 仍执行旧代码（改动不生效、无日志输出）。
+          const paths = Array.isArray(e?.payload?.paths) ? e.payload!.paths! : [];
+          const changedIds = new Set<string>();
+          for (const raw of paths) {
+            const norm = String(raw).replace(/\\/g, '/');
+            const m = norm.match(/(?:bundled-plugins|user_plugins)\/([^/]+)\//);
+            if (m) changedIds.add(m[1]);
+          }
+          for (const id of changedIds) {
+            if (currentIds.has(id) && updatedIds.has(id)) {
+              try {
+                await reloadSinglePlugin(id, registry);
+                console.log('[PluginHost] 检测到内容变更，已热重载插件:', id);
+              } catch (err) {
+                console.warn('[PluginHost] 热重载失败:', id, err);
+              }
             }
           }
         } catch (err) {

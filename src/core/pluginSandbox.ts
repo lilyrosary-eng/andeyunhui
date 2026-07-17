@@ -55,6 +55,13 @@ const ALLOWED_COMMANDS = new Set([
   'hide_lyrics_widget',
   'set_lyrics_widget_locked',
   'get_lyrics_widget_locked',
+  // SMTC（任务栏「正在播放」）：前端推送播放状态 + 上报激活模块 + 诊断日志。
+  // 注意：这些命令此前漏加白名单，导致沙箱内 music/video 插件的 invoke 被静默拦截
+  // （插件侧 .catch 吞错），元信息永远到不了 Rust，任务栏卡片不显示。
+  'smtc_update',
+  'set_active_module',
+  'set_window_hidden',
+  'debug_log',
   // 视频模块
   'load_video_cache',
   'scan_video_root',
@@ -157,15 +164,29 @@ function createSafeConsole(pluginId: string): Console {
 }
 
 // ========== 安全 API 代理：白名单拦截 + 安全事件透传 ==========
+// 关键诊断改进（2026-07-18）：此前插件侧 `invoke(...).catch(() => {})` 会静默吞掉所有
+// 错误（未授权命令 / Tauri ACL 拦截 / 命令执行异常），导致"明明调了却毫无反应、日志还被吞"。
+// 这里在代理层把三件事显式打印出来，全部经宿主真实 console，会被 tauri dev 转发到终端 stdout：
+//   1) 未授权命令 → console.error（红色，明确提示漏加白名单）
+//   2) 命令执行失败 → console.error（暴露被插件 .catch 吞掉的真正错误，如权限拒绝）
+//   3) 放行命令 → 仅开发环境 console.warn（确认调用确实发出了，便于对照 Rust 侧是否收到）
 function createSafeApi(pluginId: string) {
   return {
     invoke: async (command: string, args?: Record<string, unknown>) => {
       if (!ALLOWED_COMMANDS.has(command)) {
         const msg = `插件 "${pluginId}" 尝试调用未授权命令: ${command}`;
-        logger.log(`[pluginSandbox] ${msg}`);
+        console.error(`[pluginSandbox] 拦截未授权命令: ${command} (插件:${pluginId}) —— 若需放开请在 ALLOWED_COMMANDS 白名单追加`);
         throw new Error(msg);
       }
-      return invoke(command, { ...args, pluginId });
+      if (import.meta.env.DEV) {
+        console.warn(`[pluginSandbox] 放行命令: ${command} (插件:${pluginId})`);
+      }
+      try {
+        return await invoke(command, { ...args, pluginId });
+      } catch (err) {
+        console.error(`[pluginSandbox] 命令执行失败: ${command} (插件:${pluginId})`, err);
+        throw err;
+      }
     },
     // 以下方法安全透传——事件监听和资产转换无安全风险
     listen: listen,
