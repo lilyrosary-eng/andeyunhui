@@ -98,6 +98,9 @@ mod imp {
         Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor},
         core::{PCWSTR, PWSTR},
     };
+    use windows::Media::Control::{
+        GlobalSystemMediaTransportControlsSessionManager, SessionsChangedEventArgs,
+    };
 
     /// 本进程 AppUserModelID：SMTC 据此在任务栏解析显示名。
     /// dev（debug）与 release 使用不同 AUMID，使测试版与打包版在任务栏分属不同条目、
@@ -205,7 +208,7 @@ mod imp {
         let raw = match app.get_webview_window("main").and_then(|w| w.hwnd().ok()) {
             Some(h) => HWND(h.0 as *mut std::ffi::c_void),
             None => {
-                log::warn!("[SMTC] 无法获取主窗口 HWND，跳过系统媒体会话创建");
+                eprintln!("[SMTC-DIAG] 无法获取主窗口 HWND，跳过系统媒体会话创建");
                 return;
             }
         };
@@ -217,21 +220,21 @@ mod imp {
         let _ = TOP_HWND.set(hwnd.0 as isize);
         // 探针：确认 Tauri v2 WebviewWindow::hwnd() 是否返回了 webview 子控件 HWND（根因假设）。
         if (raw.0 as isize) != (hwnd.0 as isize) {
-            log::info!("[SMTC] 探针 WebviewWindow::hwnd 实为子控件 HWND，已用顶层窗口替代（raw≠top，根因命中）");
+            eprintln!("[SMTC-DIAG] 探针 WebviewWindow::hwnd 实为子控件 HWND，已用顶层窗口替代（raw≠top）");
         } else {
-            log::info!("[SMTC] 探针 WebviewWindow::hwnd 即顶层窗口 HWND（raw==top，根因未命中，转向注册表排查）");
+            eprintln!("[SMTC-DIAG] 探针 WebviewWindow::hwnd 即顶层窗口 HWND（raw==top）");
         }
         set_window_aumid(raw); // 顺手写在 webview 子窗口上（无害）
         set_window_aumid(hwnd); // 关键：写在顶层窗口（任务栏窗口）上
 
         // 探针：读回顶层窗口真实 AUMID 属性 + 注册表 DisplayName，确认任务栏应能解析到的名字。
         match read_window_aumid(hwnd) {
-            Some(a) => log::info!("[SMTC] 探针 顶层窗口 AUMID 属性 = {a}"),
-            None => log::warn!("[SMTC] 探针 顶层窗口未读到 AUMID 属性（任务栏可能显「未知应用」）"),
+            Some(a) => eprintln!("[SMTC-DIAG] 顶层窗口 AUMID 属性 = {a}"),
+            None => eprintln!("[SMTC-DIAG] 顶层窗口未读到 AUMID 属性（任务栏可能显「未知应用」）"),
         }
         match read_reg_displayname() {
-            Some(d) => log::info!("[SMTC] 探针 注册表 DisplayName = {d}"),
-            None => log::warn!("[SMTC] 探针 注册表无 DisplayName（任务栏将显「未知应用」或 AUMID 字符串）"),
+            Some(d) => eprintln!("[SMTC-DIAG] 注册表 DisplayName = {d}"),
+            None => eprintln!("[SMTC-DIAG] 注册表无 DisplayName（任务栏将显「未知应用」或 AUMID 字符串）"),
         }
 
         // 在创建 SMTC 会话之前，兜底重新声明一次进程级 AUMID（确保会话能读到，而非 exe 默认 AUMID）。
@@ -241,21 +244,16 @@ mod imp {
         // 这是判定「未知应用」真因的决定性日志，无需再开 DevTools 探针。
         let pa = read_process_aumid();
         if pa.is_empty() {
-            log::warn!(
-                "[SMTC] 进程级 AUMID 回读为空！SetCurrentProcessExplicitAppUserModelID 未生效 → 卡片必显「未知应用」"
-            );
+            eprintln!("[SMTC-DIAG] 进程级 AUMID 回读为空！SetCurrentProcessExplicitAppUserModelID 未生效 → 卡片必显「未知应用」");
         } else {
-            log::info!(
-                "[SMTC] 进程级 AUMID 回读={}（与窗口属性/注册表一致，卡片应显示「岸灯鸢花」）",
-                pa
-            );
+            eprintln!("[SMTC-DIAG] 进程级 AUMID 回读={}（与窗口属性/注册表一致，卡片应显示「岸灯鸢花」）", pa);
         }
 
         let interop: ISystemMediaTransportControlsInterop =
             match unsafe { RoGetActivationFactory(&HSTRING::from("Windows.Media.SystemMediaTransportControls")) } {
                 Ok(i) => i,
                 Err(e) => {
-                    log::warn!("[SMTC] 获取 ISystemMediaTransportControlsInterop 失败: {e:?}");
+                    eprintln!("[SMTC-DIAG] 获取 ISystemMediaTransportControlsInterop 失败: {e:?}");
                     return;
                 }
             };
@@ -264,7 +262,7 @@ mod imp {
             match unsafe { interop.GetForWindow::<SystemMediaTransportControls>(hwnd) } {
                 Ok(s) => s,
                 Err(e) => {
-                    log::warn!("[SMTC] GetForWindow 创建媒体会话失败: {e:?}");
+                    eprintln!("[SMTC-DIAG] GetForWindow 创建媒体会话失败: {e:?}");
                     return;
                 }
             };
@@ -348,7 +346,92 @@ mod imp {
         });
 
         let _ = SMTC.set(smtc);
-        log::info!("[SMTC] 已创建系统媒体会话（任务栏「正在播放」将显示「岸灯鸢花」并可响应媒体键）");
+        eprintln!("[SMTC-DIAG] 已创建系统媒体会话（GetForWindow 成功，AUMID={}）", AUMID);
+        // 枚举并压制 WebView2 等"非本进程"媒体会话，避免任务栏出现「未知应用」卡片。
+        diag_and_suppress_other_sessions();
+    }
+
+    /// 本进程内复用的 tokio 运行时，用于在同步上下文里 block_on / spawn WinRT 异步调用
+    /// （GlobalSystemMediaTransportControlsSessionManager::RequestAsync 返回 IAsyncOperation，
+    /// windows-rs 0.62 下只能 .await，没有同步 get()）。
+    static SUPPRESS_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+    fn suppress_rt() -> &'static tokio::runtime::Runtime {
+        SUPPRESS_RT.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("[SMTC] 创建压制用 tokio 运行时失败")
+        })
+    }
+
+    /// 枚举系统里所有媒体会话并打印诊断，用于确认任务栏「未知应用」卡片到底是不是
+    /// msedgewebview2.exe 的音频会话（它无 AUMID → 任务栏显「未知应用」）。每次系统会话
+    /// 集合变化（WebView2 开始/停止播放会新建或回收会话）也会重新打印，方便观察。
+    fn diag_and_suppress_other_sessions() {
+        std::thread::spawn(|| {
+            suppress_rt().block_on(async {
+                unsafe {
+                    let _ = RoInitialize(RO_INIT_MULTITHREADED);
+                }
+                match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+                    Ok(op) => match op.await {
+                        Ok(mgr) => {
+                        let handler = TypedEventHandler::<
+                            GlobalSystemMediaTransportControlsSessionManager,
+                            SessionsChangedEventArgs,
+                        >::new(|_s, _a| {
+                            suppress_rt().spawn(async {
+                                unsafe {
+                                    let _ = RoInitialize(RO_INIT_MULTITHREADED);
+                                }
+                                let _ = dump_sessions().await;
+                            });
+                            Ok(())
+                        });
+                        // SessionsChanged 处理器需常驻保活，故泄漏（进程级单例，可接受）。
+                        let leaked: &'static TypedEventHandler<
+                            GlobalSystemMediaTransportControlsSessionManager,
+                            SessionsChangedEventArgs,
+                        > = Box::leak(Box::new(handler));
+                        if let Err(e) = mgr.SessionsChanged(leaked) {
+                            eprintln!("[SMTC-DIAG] 注册 SessionsChanged 失败: {e:?}");
+                        }
+                        if let Err(e) = dump_sessions().await {
+                            eprintln!("[SMTC-DIAG] 初次枚举失败: {e:?}");
+                        }
+                        // 周期性枚举（约 45s），便于用户播放音频、WebView2 新建会话时自动抓到，
+                        // 无需精确对齐时机。
+                        suppress_rt().spawn(async {
+                            unsafe {
+                                let _ = RoInitialize(RO_INIT_MULTITHREADED);
+                            }
+                            for _ in 0..15 {
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                let _ = dump_sessions().await;
+                            }
+                        });
+                    }
+                        Err(e) => eprintln!("[SMTC-DIAG] 会话管理器 RequestAsync.await 失败: {e:?}"),
+                    }
+                    Err(e) => eprintln!("[SMTC-DIAG] 会话管理器 RequestAsync 失败: {e:?}"),
+                }});
+        });
+    }
+
+    /// 枚举所有系统媒体会话并打印每个会话的 AUMID（ours 标记是否为本进程会话）。
+    async fn dump_sessions() -> Result<()> {
+        let mgr = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.await?;
+        let sessions = mgr.GetSessions()?;
+        let n = sessions.Size()?;
+        eprintln!("[SMTC-DIAG] 系统媒体会话数量 = {n}");
+        for i in 0..n {
+            let s = sessions.GetAt(i)?;
+            let aumid = s.SourceAppUserModelId()?;
+            let ours = aumid == HSTRING::from(AUMID);
+            eprintln!("[SMTC-DIAG] 会话[{i}] AUMID = {aumid} | ours={ours}");
+        }
+        Ok(())
     }
 
     /// 取窗口的顶层祖先（任务栏按钮所在窗口）。Tauri v2 的 WebviewWindow::hwnd() 实际返回

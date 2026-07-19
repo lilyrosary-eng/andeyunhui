@@ -88,3 +88,11 @@ got-it/
 test/
 external-deps.bak/
 dump_media/
+ide改造计划.txt
+test_real.pptx
+devlog.txt
+devdiag.txt
+deploy_out.txt
+checklog2.txt
+*.txt
+*.pptx
