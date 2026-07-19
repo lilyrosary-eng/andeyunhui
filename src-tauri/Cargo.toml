@@ -1,7 +1,7 @@
 [package]
 name = "andengyuanhua"
 version = "0.1.0"
-description = "岸灯鸢花 · 笔记"
+description = "安得云荟 · 笔记"
 authors = ["Rosary"]
 edition = "2021"
 
@@ -73,12 +73,12 @@ once_cell = "1"
 log = "0.4"
 env_logger = "0.11"
 
-# Windows 任务栏「正在播放」显示名修正：设置本进程 AUMID + 注册表显示名「岸灯鸢花」，
-# 使 WebView2/Chromium 注册的媒体会话显示为「岸灯鸢花」而非「未知应用」。
+# Windows 任务栏「正在播放」显示名修正：设置本进程 AUMID + 注册表显示名「安得云荟」，
+# 使 WebView2/Chromium 注册的媒体会话显示为「安得云荟」而非「未知应用」。
 # 注：本环境 windows crate (0.61/0.62) 的 Media_Control 仅生成会话的传输方法，未生成
 # Set*（TrySetMediaPropertiesAsync 等）/GetSessionControls 等写入方法，故无法用 Rust 原生
 # 任务栏「正在播放」：在 Rust 进程内创建 WinRT SystemMediaTransportControls 会话
-# （正确显示名「岸灯鸢花」+ 响应系统媒体键）。需要 Media/Media_Playback（SMTC 类型）
+# （正确显示名「安得云荟」+ 响应系统媒体键）。需要 Media/Media_Playback（SMTC 类型）
 # 与 Win32_System_WinRT（ISystemMediaTransportControlsInterop / RoGetActivationFactory）。
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

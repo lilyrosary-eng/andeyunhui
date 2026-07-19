@@ -87,7 +87,7 @@ for (const { src, out } of TARGETS) {
 
 // 生成使用说明（与 pack-mufurong 配套，单独一份依赖说明）
 const readmePath = join(outputDir, '依赖安装说明.txt');
-const readmeContent = `岸灯鸢花 · 外部依赖包（.mujin）
+const readmeContent = `安得云荟 · 外部依赖包（.mujin）
 ================================
 
 本目录包含 ${packed} 个外部依赖（.mujin 格式）。

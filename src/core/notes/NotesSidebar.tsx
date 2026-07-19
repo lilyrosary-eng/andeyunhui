@@ -17,7 +17,7 @@ export function NotesSidebar() {
     <ModuleSidebarShell
       moduleId="notes"
       icon={<PenTool size={22} />}
-      title="鸢尾花"
+      title="安得云荟"
       onOpenModuleSettings={onModuleSetting}
       primaryAction={{ label: '+ 新建笔记', onClick: onCreateNote }}
       searchQuery={searchQuery}

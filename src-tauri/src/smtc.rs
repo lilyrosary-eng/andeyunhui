@@ -8,7 +8,7 @@
 // 正解：用 WinRT 的 Windows.Media.SystemMediaTransportControls，通过
 // ISystemMediaTransportControlsInterop::GetForWindow(主窗口 HWND) 在我们自己的
 // 进程里创建一个媒体会话。该会话：
-//   1) 使用我们设置的 AUMID + 注册表显示名「岸灯鸢花」→ 任务栏正确显示应用名；
+//   1) 使用我们设置的 AUMID + 注册表显示名「安得云荟」→ 任务栏正确显示应用名；
 //   2) 元信息（标题/艺术家/专辑）由前端经 smtc_update 命令推送；
 //   3) 系统媒体键通过 ButtonPressed 事件回传前端（smtc-control 事件）。
 //
@@ -84,7 +84,7 @@ pub struct SmtcDiag {
     pub process_aumid: String,
     /// 顶层窗口真实 AUMID 属性（任务栏据此解析显示名）。应为 com.andengyuanhua.desktop。
     pub window_aumid: String,
-    /// 注册表 DisplayName，任务栏应能解析到的应用名（应为「岸灯鸢花」）。
+    /// 注册表 DisplayName，任务栏应能解析到的应用名（应为「安得云荟」）。
     pub reg_displayname: String,
     /// apply_priority 实际写入的 IsEnabled（true 才会在任务栏出现媒体控件）。
     pub is_enabled: bool,
@@ -132,7 +132,7 @@ mod imp {
     /// 就会显「未知应用」。Tauri NSIS 用 bundle identifier（tauri.conf.json 的 identifier
     /// = com.rosary.andengyuanhua）作为快捷方式 AUMID，故 release 必须用它。
     /// dev（debug）无安装快捷方式，AUMID 无从解析，任务栏必然显「未知应用」——这是
-    /// 开发态固有限制，只有打包安装版才能正确显示「岸灯鸢花」。
+    /// 开发态固有限制，只有打包安装版才能正确显示「安得云荟」。
     const AUMID: &str = if cfg!(debug_assertions) {
         "com.rosary.andengyuanhua.dev"
     } else {
@@ -140,9 +140,9 @@ mod imp {
     };
     /// 与 AUMID 对应的注册表显示名（任务栏据此显示应用名）。
     const DISPLAY_NAME: &str = if cfg!(debug_assertions) {
-        "岸灯鸢花·测试"
+        "安得云荟·测试"
     } else {
-        "岸灯鸢花"
+        "安得云荟"
     };
 
     /// 本进程拥有的系统媒体会话（应用生命周期内常驻）。
@@ -226,7 +226,7 @@ mod imp {
                     let _ = RegCloseKey(hkey);
                 }
             }
-            log::info!("[SMTC] 已设置进程 AUMID={} 与显示名「岸灯鸢花」", AUMID);
+            log::info!("[SMTC] 已设置进程 AUMID={} 与显示名「安得云荟」", AUMID);
         });
     }
 
@@ -258,7 +258,7 @@ mod imp {
         };
 
         // Tauri v2 的 WebviewWindow::hwnd() 返回的是 WebView2 子控件 HWND，而任务栏按钮挂在
-        // 【顶层窗口】上。SMTC 会话与 AUMID 属性必须设在顶层窗口，任务栏才能解析出「岸灯鸢花」。
+        // 【顶层窗口】上。SMTC 会话与 AUMID 属性必须设在顶层窗口，任务栏才能解析出「安得云荟」。
         // 用 GetAncestor(GA_ROOT) 取顶层窗口（对顶层窗口自身调用也返回自身，安全）。
         let hwnd = top_level(raw);
         let _ = TOP_HWND.set(hwnd.0 as isize);
@@ -290,7 +290,7 @@ mod imp {
         if pa.is_empty() {
             eprintln!("[SMTC-DIAG] 进程级 AUMID 回读为空！SetCurrentProcessExplicitAppUserModelID 未生效 → 卡片必显「未知应用」");
         } else {
-            eprintln!("[SMTC-DIAG] 进程级 AUMID 回读={}（与窗口属性/注册表一致，卡片应显示「岸灯鸢花」）", pa);
+            eprintln!("[SMTC-DIAG] 进程级 AUMID 回读={}（与窗口属性/注册表一致，卡片应显示「安得云荟」）", pa);
         }
 
         let interop: ISystemMediaTransportControlsInterop =
@@ -394,7 +394,7 @@ mod imp {
         let _ = SMTC.set(smtc);
         eprintln!("[SMTC-DIAG] 已创建系统媒体会话（GetForWindow 成功，AUMID={}）", AUMID);
         // 把主窗口及其后代（含 msedgewebview2.exe 的浏览器窗口）的 AUMID 都写成我们的，
-        // 使 WebView2 的媒体会话归入「岸灯鸢花」而非默认的 MSEdge（任务栏显「未知应用」）。
+        // 使 WebView2 的媒体会话归入「安得云荟」而非默认的 MSEdge（任务栏显「未知应用」）。
         set_webview_aumid_recursive(hwnd.0 as isize);
         // 枚举并压制 WebView2 等"非本进程"媒体会话，避免任务栏出现「未知应用」卡片。
         diag_and_suppress_other_sessions(hwnd.0 as isize);
@@ -448,7 +448,7 @@ mod imp {
                             eprintln!("[SMTC-DIAG] 初次枚举失败: {e:?}");
                         }
                         // 常驻线程：每 3s 把 WebView2 窗口的 AUMID 写成我们的，作为「flag 万一未
-                        // 生效」的兜底——即使 WebView2 仍注册 OS 媒体会话，也会归入「岸灯鸢花」
+                        // 生效」的兜底——即使 WebView2 仍注册 OS 媒体会话，也会归入「安得云荟」
                         // 而非「未知应用」。WebView2 通常在应用启动后、用户点播放前很久才创建其
                         // 浏览器窗口，此时属性已被写入，后续新建的会话即采用我们的 AUMID；即使
                         // WebView2 中途重建窗口，下一次周期也会补设。进程级常驻，开销极小。
@@ -589,7 +589,7 @@ mod imp {
     }
 
     /// 枚举主窗口的所有后代窗口（含 msedgewebview2.exe 的浏览器窗口），逐个写我们的 AUMID。
-    /// 这样 WebView2 后续创建/复用的媒体会话会归入「岸灯鸢花」，而不是默认的 MSEdge
+    /// 这样 WebView2 后续创建/复用的媒体会话会归入「安得云荟」，而不是默认的 MSEdge
     ///（MSEdge 无 DisplayName → 任务栏显「未知应用」）。在 init 主线程调用一次即可覆盖
     /// WebView2 已存在的窗口；播放期间若 WebView2 新建窗口，可再次调用补设。
     extern "system" fn enum_set_aumid(h: HWND, _lparam: LPARAM) -> BOOL {
@@ -608,7 +608,7 @@ mod imp {
     /// 把本进程 AUMID 写到指定窗口 HWND 的属性存储（PKEY_AppUserModel_ID，VT_LPWSTR）。
     /// 必须在本进程已 SetCurrentProcessExplicitAppUserModelID 之后调用。该属性使任务栏把
     /// 此窗口（及其 SMTC 会话）识别为 com.andengyuanhua.desktop，并据此从注册表读取
-    /// DisplayName=岸灯鸢花，而不是显示「未知应用」或原始 AUMID 字符串。
+    /// DisplayName=安得云荟，而不是显示「未知应用」或原始 AUMID 字符串。
     ///
     /// 注意：PROPVARIANT 的 pwszVal 指向的宽字符串（wide）必须在 SetValue+Commit 期间保持
     /// 存活，故放在函数作用域内、在 unsafe 块外用其生命周期兜底。
@@ -1138,14 +1138,14 @@ mod imp {
     }
 }
 
-/// 应用启动阶段调用：创建本进程拥有的系统媒体会话（任务栏显示「岸灯鸢花」、可响应媒体键）。
+/// 应用启动阶段调用：创建本进程拥有的系统媒体会话（任务栏显示「安得云荟」、可响应媒体键）。
 pub fn init_smtc(app: AppHandle) {
     #[cfg(windows)]
     imp::init(&app);
 }
 
 /// 在窗口创建前（main 起始处）尽早设置进程 AUMID + 注册表显示名，使随后创建的主窗口
-/// 继承该 AUMID，任务栏据此显示「岸灯鸢花」而非「未知应用」。幂等。
+/// 继承该 AUMID，任务栏据此显示「安得云荟」而非「未知应用」。幂等。
 pub fn ensure_app_identity() {
     #[cfg(windows)]
     imp::set_app_identity();

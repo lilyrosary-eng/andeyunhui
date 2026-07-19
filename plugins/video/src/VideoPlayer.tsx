@@ -283,7 +283,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
 
   // Windows 任务栏「正在播放」媒体控件：
   //  - JS mediaSession：把文件名作为标题推送（兜底；Chromium 可能已被 --disable-features=MediaSession 禁用，故全程 guard）。
-  //  - 本进程 SMTC 会话（Rust 端）：任务栏显「岸灯鸢花」并回传系统媒体键。
+  //  - 本进程 SMTC 会话（Rust 端）：任务栏显「安得云荟」并回传系统媒体键。
   // 关键：smtc-control 监听必须【无条件】注册，不能依赖 Chromium mediaSession 是否存在——
   // 否则一旦 mediaSession 被禁用，视频就完全收不到任务栏/触摸板的播放、上一集、下一集指令。
   // JS mediaSession（仅作兜底，存在才用）：绑定系统媒体键处理器 + 同步 Chromium 播放态。

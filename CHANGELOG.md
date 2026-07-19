@@ -5,7 +5,7 @@
 
 ## [2.1.0-alpha.1] - 待发布（草稿）
 
-> 对应安装包：`岸灯鸢花_2.1.0_x64-setup.exe`（产品版本 2.1.0，GitHub Release 标签为 `v2.1.0-alpha.1`）。
+> 对应安装包：`安得云荟_2.1.0_x64-setup.exe`（产品版本 2.1.0，GitHub Release 标签为 `v2.1.0-alpha.1`）。
 > 完整发布说明见 `docs/release-v2.1.0-draft.md`。
 
 ### 新增

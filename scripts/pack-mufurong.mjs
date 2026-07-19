@@ -92,7 +92,7 @@ if (existsSync(externalDir)) {
 
 // 6. 生成使用说明
 const readmePath = join(outputDir, '使用说明.txt');
-const readmeContent = `岸灯鸢花 · DLC 插件与依赖包
+const readmeContent = `安得云荟 · DLC 插件与依赖包
 ==============================
 
 本目录包含 ${packed} 个 .mufurong 插件与若干 .mujin 外部依赖。

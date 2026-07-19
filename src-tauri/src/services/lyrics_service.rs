@@ -381,7 +381,7 @@ async fn fetch_lyrics_online(
     duration_secs: u64,
 ) -> Result<(String, String), String> {
     let client = reqwest::Client::builder()
-        .user_agent("岸灯鸢花/1.0")
+        .user_agent("安得云荟/1.0")
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;

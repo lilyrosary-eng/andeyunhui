@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "岸灯鸢花",
+  "productName": "安得云荟",
   "version": "2.1.0",
   "identifier": "com.rosary.andengyuanhua",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "岸 · 笔记",
+        "title": "安得云荟 · 笔记",
         "width": 1300,
         "height": 740,
         "center": true,

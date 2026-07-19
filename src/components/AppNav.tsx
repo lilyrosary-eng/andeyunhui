@@ -6,7 +6,7 @@ import { useAppStore } from '@/stores/appStore';
 import type { PluginRegistry } from '@/core/pluginRegistry';
 
 const BUILTIN_NAV = [
-  { id: 'notes', icon: NotebookText, label: '鸢尾花' },
+  { id: 'notes', icon: NotebookText, label: '安得云荟' },
   { id: 'extensions', icon: Puzzle, label: '茑萝' },
 ];
 
