@@ -2669,7 +2669,6 @@ pub fn wps_import_pptx(app: AppHandle, path: String) -> Result<String, String> {
                 for (i, png) in pngs.iter().enumerate() {
                     if let Some(s) = slides.get_mut(i) {
                         if let Some(obj) = s.as_object_mut() {
-                            let asset_path = format!("asset://localhost/{}", png.replace('\\', "/"));
                             obj.insert("pngSrc".into(), serde_json::json!(png));
                         }
                     }

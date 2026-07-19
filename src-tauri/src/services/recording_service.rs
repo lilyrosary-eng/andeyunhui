@@ -126,7 +126,7 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         // 取帧数据（先获取尺寸再 borrow buffer，避免 mutable/immutable 借用冲突）
         let fw = frame.width();
         let fh = frame.height();
-        let mut buffer = frame.buffer().map_err(|e| e.to_string())?;
+        let buffer = frame.buffer().map_err(|e| e.to_string())?;
         let mut scratch = Vec::new();
         let src = buffer.as_nopadding_buffer(&mut scratch);
 
