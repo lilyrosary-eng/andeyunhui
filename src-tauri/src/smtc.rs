@@ -95,7 +95,9 @@ mod imp {
         },
         Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
         Win32::UI::Shell::{GetCurrentProcessExplicitAppUserModelID, SetCurrentProcessExplicitAppUserModelID},
-        Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor},
+        Win32::UI::WindowsAndMessaging::{
+            EnumChildWindows, BOOL, GA_ROOT, GetAncestor, LPARAM,
+        },
         core::{PCWSTR, PWSTR},
     };
     use windows::Media::Control::{
