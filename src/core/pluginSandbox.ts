@@ -59,6 +59,7 @@ const ALLOWED_COMMANDS = new Set([
   // 注意：这些命令此前漏加白名单，导致沙箱内 music/video 插件的 invoke 被静默拦截
   // （插件侧 .catch 吞错），元信息永远到不了 Rust，任务栏卡片不显示。
   'smtc_update',
+  'smtc_status',
   'set_active_module',
   'set_window_hidden',
   'debug_log',

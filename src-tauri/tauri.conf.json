@@ -18,7 +18,8 @@
         "center": true,
         "decorations": false,
         "dragDropEnabled": false,
-        "backgroundColor": "#f5f5f0"
+        "backgroundColor": "#f5f5f0",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaSession,HardwareMediaKeyHandling"
       }
     ],
     "security": {

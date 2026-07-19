@@ -70,6 +70,29 @@ pub struct SmtcStatus {
     pub actual_top_aumid: String,
     /// 探针：注册表 DisplayName，任务栏应能解析到的应用名。
     pub reg_displayname: String,
+    /// 系统里所有活动媒体会话的 AUMID（含 WebView2 的 MSEdge）。用于确认是否出现双卡片。
+    pub system_sessions: Vec<String>,
+}
+
+/// 精简诊断（同步字段，无需枚举系统会话），事件化暴露到前端日志，
+/// 便于在打包版通过 file-logger 观察真实运行状态（终端 [SMTC-DIAG] 在打包版不可见）。
+#[derive(serde::Serialize, Clone, Debug, Default)]
+pub struct SmtcDiag {
+    /// 本进程 SMTC 会话是否已创建（GetForWindow 成功）。false→任务栏只剩 WebView2 的卡。
+    pub session_created: bool,
+    /// 回读进程级 AUMID。空=SetCurrentProcessExplicitAppUserModelID 未生效→卡片显「未知应用」。
+    pub process_aumid: String,
+    /// 顶层窗口真实 AUMID 属性（任务栏据此解析显示名）。应为 com.andengyuanhua.desktop。
+    pub window_aumid: String,
+    /// 注册表 DisplayName，任务栏应能解析到的应用名（应为「岸灯鸢花」）。
+    pub reg_displayname: String,
+    /// apply_priority 实际写入的 IsEnabled（true 才会在任务栏出现媒体控件）。
+    pub is_enabled: bool,
+    /// apply_priority 实际写入的 PlaybackStatus。
+    pub playback_status: String,
+    /// 系统里所有活动媒体会话的 AUMID（含 WebView2 的）。播放时若多出非 ours 的条目，
+    /// 说明 WebView2 仍会建「未知应用」卡，需另寻压制手段。
+    pub system_sessions: Vec<String>,
 }
 
 #[cfg(windows)]
@@ -83,7 +106,7 @@ mod imp {
             MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls,
             SystemMediaTransportControlsButton, SystemMediaTransportControlsButtonPressedEventArgs,
         },
-        Win32::Foundation::{ERROR_SUCCESS, HWND},
+        Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, RPC_E_CHANGED_MODE},
         Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID,
         Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0_0},
         Win32::System::Com::CoTaskMemFree,
@@ -91,13 +114,11 @@ mod imp {
         Win32::System::Variant::VT_LPWSTR,
         Win32::System::WinRT::{
             ISystemMediaTransportControlsInterop, RoGetActivationFactory, RoInitialize,
-            RO_INIT_MULTITHREADED,
+            RO_INIT_MULTITHREADED, RO_INIT_SINGLETHREADED,
         },
         Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
         Win32::UI::Shell::{GetCurrentProcessExplicitAppUserModelID, SetCurrentProcessExplicitAppUserModelID},
-        Win32::UI::WindowsAndMessaging::{
-            EnumChildWindows, BOOL, GA_ROOT, GetAncestor, LPARAM,
-        },
+        Win32::UI::WindowsAndMessaging::{EnumChildWindows, GA_ROOT, GetAncestor},
         core::{PCWSTR, PWSTR},
     };
     use windows::Media::Control::{
@@ -153,6 +174,22 @@ mod imp {
     /// 探针用：apply_priority 实际写入的 PlaybackStatus 文本（Playing/Paused/Stopped/Closed）。
     static LAST_PLAYBACK_STATUS: OnceLock<Mutex<String>> = OnceLock::new();
 
+    /// 确保当前线程已初始化 Windows Runtime，并正确处理公寓模型冲突。
+    /// 关键陷阱：tauri/winit 在主线程经 OleInitialize 把线程置于 STA。若此后再调用
+    /// RoInitialize(RO_INIT_MULTITHREADED) 会返回 RPC_E_CHANGED_MODE，且【不会】初始化
+    /// WinRT——于是 RoGetActivationFactory / GetForWindow 全部失败，媒体会话建不出来，
+    /// 任务栏只剩 WebView2 的「未知应用」卡片。故先尝试 STA（与已在 STA 的主线程兼容，
+    /// 返回 S_FALSE 视为成功），仅当因模式冲突时才退回 MTA。
+    fn ensure_winrt() {
+        unsafe {
+            if let Err(e) = RoInitialize(RO_INIT_SINGLETHREADED) {
+                if e.code() == RPC_E_CHANGED_MODE {
+                    ensure_winrt();
+                }
+            }
+        }
+    }
+
     /// 设置进程 AUMID + 注册表显示名。幂等（仅执行一次）。
     pub fn set_app_identity() {
         let _ = IDENTITY_DONE.get_or_init(|| {
@@ -204,13 +241,14 @@ mod imp {
         set_app_identity();
         // 确保当前线程已初始化 WinRT（MTA），后续命令线程也会各自 RoInitialize。
         unsafe {
-            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+            ensure_winrt();
         }
 
         let raw = match app.get_webview_window("main").and_then(|w| w.hwnd().ok()) {
             Some(h) => HWND(h.0 as *mut std::ffi::c_void),
             None => {
                 eprintln!("[SMTC-DIAG] 无法获取主窗口 HWND，跳过系统媒体会话创建");
+                emit_diag(app);
                 return;
             }
         };
@@ -256,6 +294,7 @@ mod imp {
                 Ok(i) => i,
                 Err(e) => {
                     eprintln!("[SMTC-DIAG] 获取 ISystemMediaTransportControlsInterop 失败: {e:?}");
+                    emit_diag(app);
                     return;
                 }
             };
@@ -265,6 +304,7 @@ mod imp {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("[SMTC-DIAG] GetForWindow 创建媒体会话失败: {e:?}");
+                    emit_diag(app);
                     return;
                 }
             };
@@ -349,8 +389,12 @@ mod imp {
 
         let _ = SMTC.set(smtc);
         eprintln!("[SMTC-DIAG] 已创建系统媒体会话（GetForWindow 成功，AUMID={}）", AUMID);
+        // 把主窗口及其后代（含 msedgewebview2.exe 的浏览器窗口）的 AUMID 都写成我们的，
+        // 使 WebView2 的媒体会话归入「岸灯鸢花」而非默认的 MSEdge（任务栏显「未知应用」）。
+        set_webview_aumid_recursive(hwnd.0 as isize);
         // 枚举并压制 WebView2 等"非本进程"媒体会话，避免任务栏出现「未知应用」卡片。
-        diag_and_suppress_other_sessions();
+        diag_and_suppress_other_sessions(hwnd.0 as isize);
+        emit_diag(app);
     }
 
     /// 本进程内复用的 tokio 运行时，用于在同步上下文里 block_on / spawn WinRT 异步调用
@@ -370,11 +414,11 @@ mod imp {
     /// 枚举系统里所有媒体会话并打印诊断，用于确认任务栏「未知应用」卡片到底是不是
     /// msedgewebview2.exe 的音频会话（它无 AUMID → 任务栏显「未知应用」）。每次系统会话
     /// 集合变化（WebView2 开始/停止播放会新建或回收会话）也会重新打印，方便观察。
-    fn diag_and_suppress_other_sessions() {
-        std::thread::spawn(|| {
+    fn diag_and_suppress_other_sessions(hwnd: isize) {
+        std::thread::spawn(move || {
             suppress_rt().block_on(async {
                 unsafe {
-                    let _ = RoInitialize(RO_INIT_MULTITHREADED);
+                    ensure_winrt();
                 }
                 match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
                     Ok(op) => match op.await {
@@ -382,11 +426,12 @@ mod imp {
                         let handler = TypedEventHandler::<
                             GlobalSystemMediaTransportControlsSessionManager,
                             SessionsChangedEventArgs,
-                        >::new(|_s, _a| {
-                            suppress_rt().spawn(async {
+                        >::new(move |_s, _a| {
+                            suppress_rt().spawn(async move {
                                 unsafe {
-                                    let _ = RoInitialize(RO_INIT_MULTITHREADED);
+                                    ensure_winrt();
                                 }
+                                set_webview_aumid_recursive(hwnd);
                                 let _ = dump_sessions().await;
                             });
                             Ok(())
@@ -402,15 +447,23 @@ mod imp {
                         if let Err(e) = dump_sessions().await {
                             eprintln!("[SMTC-DIAG] 初次枚举失败: {e:?}");
                         }
-                        // 周期性枚举（约 45s），便于用户播放音频、WebView2 新建会话时自动抓到，
-                        // 无需精确对齐时机。
-                        suppress_rt().spawn(async {
+                        // 常驻线程：每 3s 把 WebView2 窗口的 AUMID 写成我们的，作为「flag 万一未
+                        // 生效」的兜底——即使 WebView2 仍注册 OS 媒体会话，也会归入「岸灯鸢花」
+                        // 而非「未知应用」。WebView2 通常在应用启动后、用户点播放前很久才创建其
+                        // 浏览器窗口，此时属性已被写入，后续新建的会话即采用我们的 AUMID；即使
+                        // WebView2 中途重建窗口，下一次周期也会补设。进程级常驻，开销极小。
+                        suppress_rt().spawn(async move {
                             unsafe {
-                                let _ = RoInitialize(RO_INIT_MULTITHREADED);
+                                ensure_winrt();
                             }
-                            for _ in 0..15 {
+                            let mut tick = 0u32;
+                            loop {
                                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                let _ = dump_sessions().await;
+                                set_webview_aumid_recursive(hwnd);
+                                tick += 1;
+                                if tick % 10 == 0 {
+                                    let _ = dump_sessions().await;
+                                }
                             }
                         });
                     }
@@ -534,6 +587,23 @@ mod imp {
                 }
                 Err(_) => String::new(),
             }
+        }
+    }
+
+    /// 枚举主窗口的所有后代窗口（含 msedgewebview2.exe 的浏览器窗口），逐个写我们的 AUMID。
+    /// 这样 WebView2 后续创建/复用的媒体会话会归入「岸灯鸢花」，而不是默认的 MSEdge
+    ///（MSEdge 无 DisplayName → 任务栏显「未知应用」）。在 init 主线程调用一次即可覆盖
+    /// WebView2 已存在的窗口；播放期间若 WebView2 新建窗口，可再次调用补设。
+    extern "system" fn enum_set_aumid(h: HWND, _lparam: LPARAM) -> BOOL {
+        let _ = set_window_aumid(h);
+        BOOL(1)
+    }
+
+    fn set_webview_aumid_recursive(hwnd: isize) {
+        let h = HWND(hwnd as *mut std::ffi::c_void);
+        let _ = set_window_aumid(h);
+        unsafe {
+            let _ = EnumChildWindows(Some(h), Some(enum_set_aumid), LPARAM(0));
         }
     }
 
@@ -675,6 +745,60 @@ mod imp {
         }
     }
 
+    /// 把当前 SMTC 真实运行状态以 `smtc-diag` 事件发给前端（由 host 监听后写 file-logger），
+    /// 这是打包版下打破「盲调」的关键：终端 [SMTC-DIAG] 在打包版不可见。
+    /// 改为异步：额外枚举系统里所有媒体会话 AUMID（system_sessions），用于确认播放时
+    /// WebView2 是否仍会冒出「未知应用」卡（多出的非 ours 条目即证据）。
+    fn emit_diag(app: &AppHandle) {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let session_created = SMTC.get().is_some();
+            let process_aumid = read_process_aumid();
+            let mut window_aumid = String::new();
+            if let Some(raw) = app
+                .get_webview_window("main")
+                .and_then(|w| w.hwnd().ok())
+            {
+                window_aumid =
+                    read_window_aumid(top_level(HWND(raw.0 as *mut std::ffi::c_void)))
+                        .unwrap_or_default();
+            }
+            let reg_displayname = read_reg_displayname().unwrap_or_default();
+            let is_enabled = *LAST_IS_ENABLED.get_or_init(|| Mutex::new(false)).lock().unwrap();
+            let playback_status = LAST_PLAYBACK_STATUS
+                .get_or_init(|| Mutex::new(String::new()))
+                .lock()
+                .unwrap()
+                .clone();
+            // 枚举系统里所有活动媒体会话（异步），确认 WebView2 是否在播放时抢占任务栏。
+            let mut system_sessions: Vec<String> = Vec::new();
+            if let Ok(op) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+                if let Ok(mgr) = op.await {
+                    if let Ok(sessions) = mgr.GetSessions() {
+                        let size = sessions.Size().unwrap_or(0);
+                        for i in 0..size {
+                            if let Ok(s) = sessions.GetAt(i) {
+                                if let Ok(a) = s.SourceAppUserModelId() {
+                                    system_sessions.push(a.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let diag = SmtcDiag {
+                session_created,
+                process_aumid,
+                window_aumid,
+                reg_displayname,
+                is_enabled,
+                playback_status,
+                system_sessions,
+            };
+            let _ = app.emit("smtc-diag", diag);
+        });
+    }
+
     /// 用前端推送的状态刷新会话：写缓存后按优先级重新计算并应用。
     pub fn update(info: SmtcUpdate) {
         if SMTC.get().is_none() {
@@ -692,10 +816,13 @@ mod imp {
             info.media_type, info.title, info.is_playing, info.can_prev, info.can_next
         );
         unsafe {
-            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+            ensure_winrt();
         }
         let _ = store_source(&info);
         apply_priority();
+        if let Some(app) = APP.get() {
+            emit_diag(app);
+        }
     }
 
     /// 把胜出来源应用到系统媒体会话（推送/切换模块/窗口显隐时都会调用）。
@@ -704,7 +831,7 @@ mod imp {
             return;
         };
         unsafe {
-            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+            ensure_winrt();
         }
         let Some(eff) = pick_winner() else {
             log::info!("[SMTC] APPLY none -> Stopped (并禁用会话，任务栏不再常驻媒体控件)");
@@ -798,7 +925,8 @@ mod imp {
     }
 
     /// 诊断：返回 Rust 端 SMTC 会话的真实状态，供前端 DevTools 探针调用。
-    pub fn status() -> SmtcStatus {
+    pub async fn status() -> SmtcStatus {
+        ensure_winrt();
         let session_created = SMTC.get().is_some();
         let window_aumid_set = *WINDOW_AUMID_SET.get().unwrap_or(&false);
         let active_module = ACTIVE_MODULE
@@ -834,6 +962,24 @@ mod imp {
             .flatten()
             .unwrap_or_default();
         let reg_displayname = read_reg_displayname().unwrap_or_default();
+
+        // 枚举系统里所有活动媒体会话，确认 WebView2(MSEdge) 是否在抢占任务栏（双卡片）。
+        let mut system_sessions: Vec<String> = Vec::new();
+        if let Ok(op) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            if let Ok(mgr) = op.await {
+                if let Ok(sessions) = mgr.GetSessions() {
+                    let size = sessions.Size().unwrap_or(0);
+                    for i in 0..size {
+                        if let Ok(s) = sessions.GetAt(i) {
+                            if let Ok(aumid) = s.SourceAppUserModelId() {
+                                system_sessions.push(aumid.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         SmtcStatus {
             session_created,
             window_aumid_set,
@@ -847,6 +993,7 @@ mod imp {
             playback_status,
             actual_top_aumid,
             reg_displayname,
+            system_sessions,
         }
     }
 
@@ -909,10 +1056,10 @@ pub fn debug_log(msg: String) {
 
 /// 诊断用：返回 Rust 端 SMTC 会话的真实运行状态（DevTools 探针）。
 #[tauri::command]
-pub fn smtc_status() -> SmtcStatus {
+pub async fn smtc_status() -> SmtcStatus {
     #[cfg(windows)]
     {
-        imp::status()
+        imp::status().await
     }
     #[cfg(not(windows))]
     {
