@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>赞助支持 · 岸灯鸢花</title>
+
+    <!-- ===== 网站图标 ===== -->
+    <link rel="icon" type="image/png" href="logo.png" />
+
+    <!-- ===== Lucide 图标库 ===== -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" />
+
+    <style>
+        /* ===== 莫兰迪配色（与主页一致） ===== */
+        :root {
+            --bg: #f4f2ec;
+            --surface: #fcfaf7;
+            --surface-hover: #f0ede8;
+            --text-primary: #3d3a36;
+            --text-secondary: #8a8580;
+            --text-muted: #b5b0aa;
+            --border: #e5e0da;
+            --accent: #b8a9c9;
+            --shadow: rgba(60, 58, 55, 0.06);
+            --radius: 1.2rem;
+            --transition: 0.3s ease;
+            --gold: #e8d5b5;
+            --gold-dark: #dcc8a8;
+            --gold-text: #5a4a3a;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background-color: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1.5rem 4rem;
+        }
+
+        .container {
+            max-width: 820px;
+            width: 100%;
+        }
+
+        /* ===== 导航栏 ===== */
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.6rem 1.8rem;
+            background: var(--surface);
+            border-radius: 3rem;
+            border: 1px solid var(--border);
+            box-shadow: 0 2px 12px var(--shadow);
+            margin-bottom: 3rem;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+
+        .logo {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+        }
+        .logo i {
+            color: var(--accent);
+            font-size: 1.6rem;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color var(--transition);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+        .nav-links .btn-ghost {
+            background: var(--surface-hover);
+            padding: 0.3rem 1.4rem;
+            border-radius: 2rem;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        .nav-links .btn-ghost:hover {
+            background: var(--border);
+        }
+
+        /* ===== 页面标题 ===== */
+        .support-hero {
+            text-align: center;
+            padding: 0.5rem 0 2rem;
+        }
+        .support-hero h1 {
+            font-size: 2.6rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+        }
+        .support-hero h1 i {
+            color: #e8a87c;
+        }
+        .support-hero .sub {
+            color: var(--text-secondary);
+            margin-top: 0.3rem;
+            font-size: 1.05rem;
+            max-width: 500px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        /* ===== 赞助卡片列表 ===== */
+        .support-cards {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            margin: 2rem 0;
+        }
+
+        .support-card {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            padding: 1.2rem 1.8rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+            transition: box-shadow var(--transition), transform var(--transition);
+            text-decoration: none;
+            color: inherit;
+        }
+        .support-card:hover {
+            box-shadow: 0 8px 24px var(--shadow);
+            transform: translateY(-2px);
+        }
+
+        .support-card .info {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+        .support-card .info .icon-box {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.4rem;
+            flex-shrink: 0;
+        }
+        .support-card .info .name {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+        .support-card .info .desc {
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+        }
+
+        .support-card .action .arrow {
+            color: var(--text-muted);
+            transition: color var(--transition);
+            font-size: 1.2rem;
+        }
+        .support-card:hover .action .arrow {
+            color: var(--text-primary);
+        }
+
+        /* ===== 各平台配色 ===== */
+        .support-card.github .icon-box {
+            background: #e8e8f0;
+            color: #333;
+        }
+        .support-card.afdian .icon-box {
+            background: #fce8e8;
+            color: #e06060;
+        }
+        .support-card.buymeacoffee .icon-box {
+            background: #fef0e0;
+            color: #ff813f;
+        }
+        .support-card.paypal .icon-box {
+            background: #e0edf5;
+            color: #003087;
+        }
+        .support-card.wechat .icon-box {
+            background: #e0f0e0;
+            color: #07c160;
+        }
+        .support-card.alipay .icon-box {
+            background: #e0ecf5;
+            color: #1677ff;
+        }
+
+        /* ===== 微信/支付宝扫码区 ===== */
+        .qr-section {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            padding: 2rem;
+            margin: 1.5rem 0 1rem;
+            text-align: center;
+        }
+        .qr-section h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 0.3rem;
+        }
+        .qr-section .sub {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 1.2rem;
+        }
+        .qr-grid {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            flex-wrap: wrap;
+        }
+        .qr-item {
+            text-align: center;
+        }
+        .qr-item .qr-placeholder {
+            width: 140px;
+            height: 140px;
+            background: var(--bg);
+            border-radius: var(--radius);
+            border: 2px dashed var(--border);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            gap: 6px;
+            margin-bottom: 0.5rem;
+        }
+        .qr-item .qr-placeholder i {
+            font-size: 2rem;
+        }
+        .qr-item .label {
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        /* ===== 感谢语 ===== */
+        .thanks {
+            text-align: center;
+            padding: 2rem 0 1rem;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+        .thanks i {
+            color: #e8a87c;
+        }
+
+        /* ===== 页脚 ===== */
+        .footer {
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+        .footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin-left: 1.5rem;
+            transition: color var(--transition);
+        }
+        .footer a:hover {
+            color: var(--text-primary);
+        }
+
+        @media (max-width: 640px) {
+            .navbar {
+                flex-direction: column;
+                align-items: stretch;
+                padding: 0.8rem 1.2rem;
+            }
+            .nav-links {
+                justify-content: center;
+                gap: 1rem;
+            }
+            .support-card {
+                flex-direction: row;
+                padding: 1rem 1.2rem;
+            }
+            .support-card .info .desc {
+                display: none;
+            }
+            .support-hero h1 {
+                font-size: 1.8rem;
+            }
+            .qr-grid {
+                gap: 1rem;
+            }
+            .qr-item .qr-placeholder {
+                width: 110px;
+                height: 110px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- ===== 导航栏 ===== -->
+        <nav class="navbar">
+            <a href="index.html" class="logo">
+                <i class="lucide lucide-flower"></i>
+                岸灯鸢花
+            </a>
+            <div class="nav-links">
+                <a href="index.html"><i class="lucide lucide-house"></i> 首页</a>
+                <a href="download.html"><i class="lucide lucide-download"></i> 下载</a>
+                <a href="changelog.html"><i class="lucide lucide-scroll"></i> 更新日志</a>
+                <a href="https://github.com/lilyrosary-eng/andengyuanhua" target="_blank" class="btn-ghost">
+                    <i class="lucide lucide-github"></i> GitHub
+                </a>
+            </div>
+        </nav>
+
+        <!-- ===== 标题 ===== -->
+        <div class="support-hero">
+            <h1><i class="lucide lucide-heart"></i> 赞助支持</h1>
+            <p class="sub">
+                如果你喜欢岸灯鸢花，欢迎通过以下方式支持项目持续发展。
+                每一份心意都是我们前进的动力 ❤️
+            </p>
+        </div>
+
+        <!-- ===== 赞助方式列表 ===== -->
+        <div class="support-cards">
+
+            <!-- GitHub Sponsors -->
+            <a href="https://github.com/sponsors/lilyrosary-eng" target="_blank" class="support-card github">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-github"></i></div>
+                    <div>
+                        <div class="name">GitHub Sponsors</div>
+                        <div class="desc">按月赞助，支持开源</div>
+                    </div>
+                </div>
+                <div class="action"><span class="arrow">→</span></div>
+            </a>
+
+            <!-- 爱发电 -->
+            <a href="https://afdian.com/a/你的ID" target="_blank" class="support-card afdian">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-zap"></i></div>
+                    <div>
+                        <div class="name">爱发电</div>
+                        <div class="desc">国内平台 · 支持微信/支付宝</div>
+                    </div>
+                </div>
+                <div class="action"><span class="arrow">→</span></div>
+            </a>
+
+            <!-- Buy Me a Coffee -->
+            <a href="https://buymeacoffee.com/你的ID" target="_blank" class="support-card buymeacoffee">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-coffee"></i></div>
+                    <div>
+                        <div class="name">Buy Me a Coffee</div>
+                        <div class="desc">国际平台 · 支持 PayPal / 信用卡</div>
+                    </div>
+                </div>
+                <div class="action"><span class="arrow">→</span></div>
+            </a>
+
+            <!-- PayPal -->
+            <a href="https://paypal.me/你的ID" target="_blank" class="support-card paypal">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-credit-card"></i></div>
+                    <div>
+                        <div class="name">PayPal</div>
+                        <div class="desc">国际通用 · 一键转账</div>
+                    </div>
+                </div>
+                <div class="action"><span class="arrow">→</span></div>
+            </a>
+
+        </div>
+
+        <!-- ===== 微信/支付宝扫码 ===== -->
+        <div class="qr-section">
+            <h3>📱 微信 / 支付宝</h3>
+            <p class="sub">扫码即可赞助，金额随喜</p>
+            <div class="qr-grid">
+                <div class="qr-item">
+                    <div class="qr-placeholder">
+                        <i class="lucide lucide-qr-code"></i>
+                        <span>微信收款码</span>
+                    </div>
+                    <div class="label">微信</div>
+                </div>
+                <div class="qr-item">
+                    <div class="qr-placeholder">
+                        <i class="lucide lucide-qr-code"></i>
+                        <span>支付宝收款码</span>
+                    </div>
+                    <div class="label">支付宝</div>
+                </div>
+            </div>
+            <p style="font-size:0.8rem;color:var(--text-muted);margin-top:0.8rem;">
+                提示：扫码后请备注 “岸灯鸢花” 以便我们知晓 ❤️
+            </p>
+        </div>
+
+        <!-- ===== 感谢语 ===== -->
+        <div class="thanks">
+            <i class="lucide lucide-heart" style="color:#e8a87c;"></i>
+            感谢每一位支持者，是你们让开源走得更远。
+        </div>
+
+        <!-- ===== 页脚 ===== -->
+        <footer class="footer">
+            <span>© 2026 岸灯鸢花 · Rosary</span>
+            <div>
+                <a href="privacy.html"><i class="lucide lucide-shield"></i> 隐私政策</a>
+                <a href="https://github.com/lilyrosary-eng/andengyuanhua" target="_blank"><i class="lucide lucide-github"></i> GitHub</a>
+            </div>
+        </footer>
+
+    </div>
+</body>
+</html>
