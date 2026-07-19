@@ -114,7 +114,7 @@ mod imp {
         Win32::System::Variant::VT_LPWSTR,
         Win32::System::WinRT::{
             ISystemMediaTransportControlsInterop, RoGetActivationFactory, RoInitialize,
-            RO_INIT_MULTITHREADED, RO_INIT_SINGLETHREADED,
+            RO_INIT_SINGLETHREADED,
         },
         Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
         Win32::UI::Shell::{GetCurrentProcessExplicitAppUserModelID, SetCurrentProcessExplicitAppUserModelID},
@@ -244,9 +244,7 @@ mod imp {
         let _ = APP.set(app.clone());
         set_app_identity();
         // 确保当前线程已初始化 WinRT（MTA），后续命令线程也会各自 RoInitialize。
-        unsafe {
-            ensure_winrt();
-        }
+        ensure_winrt();
 
         let raw = match app.get_webview_window("main").and_then(|w| w.hwnd().ok()) {
             Some(h) => HWND(h.0 as *mut std::ffi::c_void),
@@ -421,9 +419,7 @@ mod imp {
     fn diag_and_suppress_other_sessions(hwnd: isize) {
         std::thread::spawn(move || {
             suppress_rt().block_on(async {
-                unsafe {
-                    ensure_winrt();
-                }
+                ensure_winrt();
                 match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
                     Ok(op) => match op.await {
                         Ok(mgr) => {
@@ -432,9 +428,7 @@ mod imp {
                             SessionsChangedEventArgs,
                         >::new(move |_s, _a| {
                             suppress_rt().spawn(async move {
-                                unsafe {
-                                    ensure_winrt();
-                                }
+                                ensure_winrt();
                                 set_webview_aumid_recursive(hwnd);
                                 let _ = dump_sessions().await;
                             });
@@ -457,9 +451,7 @@ mod imp {
                         // 浏览器窗口，此时属性已被写入，后续新建的会话即采用我们的 AUMID；即使
                         // WebView2 中途重建窗口，下一次周期也会补设。进程级常驻，开销极小。
                         suppress_rt().spawn(async move {
-                            unsafe {
-                                ensure_winrt();
-                            }
+                            ensure_winrt();
                             let mut tick = 0u32;
                             loop {
                                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -819,9 +811,7 @@ mod imp {
             "[SMTC] UPDATE type={} title={:?} playing={} can_prev={} can_next={}",
             info.media_type, info.title, info.is_playing, info.can_prev, info.can_next
         );
-        unsafe {
-            ensure_winrt();
-        }
+        ensure_winrt();
         let _ = store_source(&info);
         apply_priority();
         if let Some(app) = APP.get() {
@@ -834,9 +824,7 @@ mod imp {
         let Some(smtc) = SMTC.get() else {
             return;
         };
-        unsafe {
-            ensure_winrt();
-        }
+        ensure_winrt();
         let Some(eff) = pick_winner() else {
             log::info!("[SMTC] APPLY none -> Stopped (并禁用会话，任务栏不再常驻媒体控件)");
             let _ = smtc.SetPlaybackStatus(MediaPlaybackStatus::Stopped);

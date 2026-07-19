@@ -541,6 +541,7 @@ impl GroupXform {
 }
 
 // 收集片段：kind + 原始 XML 切片 + 已应用祖先组合变换后的绝对幻灯片 EMU 矩形。
+#[allow(dead_code)]
 struct Piece<'a> {
     kind: &'static str,
     raw: &'a str,

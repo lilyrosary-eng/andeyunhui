@@ -319,6 +319,7 @@ pub async fn gongfang_fetch(url: String) -> Result<FetchResult, String> {
 }
 
 /// 从 HTML 提取 <title>
+#[allow(dead_code)]
 fn extract_title(html: &str) -> Option<String> {
     let lower = html.to_lowercase();
     let start = lower.find("<title")?;
@@ -333,6 +334,7 @@ fn extract_title(html: &str) -> Option<String> {
 }
 
 /// 从 HTML 提取 <a href="..."> 链接，转为绝对 URL（纯字符串匹配，无需 regex 依赖）
+#[allow(dead_code)]
 fn extract_links(html: &str, base_url: &str) -> Vec<String> {
     let mut links = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -374,6 +376,7 @@ fn extract_links(html: &str, base_url: &str) -> Vec<String> {
 }
 
 /// 相对 URL 转绝对 URL
+#[allow(dead_code)]
 fn resolve_url(href: &str, base: &str) -> String {
     if href.starts_with("http://") || href.starts_with("https://") {
         return href.to_string();
