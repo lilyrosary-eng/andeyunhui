@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>下载 · 岸灯鸢花</title>
+
+    <!-- ===== 网站图标 ===== -->
+    <link rel="icon" type="image/png" href="logo.png" />
+
+    <!-- ===== Lucide 图标库 ===== -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" />
+
+    <style>
+        /* ===== 莫兰迪配色（与主页一致） ===== */
+        :root {
+            --bg: #f4f2ec;
+            --surface: #fcfaf7;
+            --surface-hover: #f0ede8;
+            --text-primary: #3d3a36;
+            --text-secondary: #8a8580;
+            --text-muted: #b5b0aa;
+            --border: #e5e0da;
+            --accent: #b8a9c9;
+            --shadow: rgba(60, 58, 55, 0.06);
+            --radius: 1.2rem;
+            --transition: 0.3s ease;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background-color: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1.5rem 4rem;
+        }
+
+        .container {
+            max-width: 820px;
+            width: 100%;
+        }
+
+        /* ===== 导航栏 ===== */
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.6rem 1.8rem;
+            background: var(--surface);
+            border-radius: 3rem;
+            border: 1px solid var(--border);
+            box-shadow: 0 2px 12px var(--shadow);
+            margin-bottom: 3rem;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+
+        .logo {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+        }
+        .logo i {
+            color: var(--accent);
+            font-size: 1.6rem;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color var(--transition);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+        .nav-links .btn-ghost {
+            background: var(--surface-hover);
+            padding: 0.3rem 1.4rem;
+            border-radius: 2rem;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        .nav-links .btn-ghost:hover {
+            background: var(--border);
+        }
+
+        /* ===== 下载页标题 ===== */
+        .download-hero {
+            text-align: center;
+            padding: 0.5rem 0 2rem;
+        }
+        .download-hero h1 {
+            font-size: 2.6rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+        }
+        .download-hero h1 i {
+            color: var(--accent);
+        }
+        .download-hero .sub {
+            color: var(--text-secondary);
+            margin-top: 0.3rem;
+            font-size: 1.05rem;
+        }
+
+        /* ===== 下载卡片列表 ===== */
+        .download-cards {
+            display: flex;
+            flex-direction: column;
+            gap: 1.2rem;
+            margin: 2rem 0;
+        }
+
+        .download-card {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            padding: 1.5rem 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+            transition: box-shadow var(--transition), transform var(--transition);
+        }
+        .download-card:hover {
+            box-shadow: 0 8px 24px var(--shadow);
+            transform: translateY(-2px);
+        }
+
+        .download-card .info {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .download-card .info .icon-box {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: #ede8f0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.6rem;
+            color: var(--accent);
+            flex-shrink: 0;
+        }
+        .download-card .info .name {
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+        .download-card .info .desc {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        .download-card .info .status-badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            padding: 0.1rem 0.8rem;
+            border-radius: 2rem;
+            font-weight: 500;
+            margin-left: 8px;
+        }
+        .status-badge.available {
+            background: #d4e0d4;
+            color: #3d6b3d;
+        }
+        .status-badge.coming {
+            background: #ede8f0;
+            color: #8a8580;
+        }
+
+        .download-card .action .btn-download {
+            background: var(--accent);
+            color: #fff;
+            padding: 0.5rem 1.8rem;
+            border-radius: 3rem;
+            text-decoration: none;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: background var(--transition);
+            font-size: 0.9rem;
+        }
+        .download-card .action .btn-download:hover {
+            background: #a898b8;
+        }
+        .download-card .action .btn-download.disabled {
+            background: var(--surface-hover);
+            color: var(--text-muted);
+            pointer-events: none;
+        }
+        .download-card .action .version-tag {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-right: 8px;
+        }
+
+        /* ===== 历史版本链接 ===== */
+        .release-link {
+            text-align: center;
+            margin: 1.5rem 0 2rem;
+        }
+        .release-link a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: color var(--transition);
+        }
+        .release-link a:hover {
+            color: var(--text-primary);
+        }
+
+        /* ===== 页脚 ===== */
+        .footer {
+            margin-top: 4rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+        .footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin-left: 1.5rem;
+            transition: color var(--transition);
+        }
+        .footer a:hover {
+            color: var(--text-primary);
+        }
+
+        /* ===== 响应式 ===== */
+        @media (max-width: 640px) {
+            .navbar {
+                flex-direction: column;
+                align-items: stretch;
+                padding: 0.8rem 1.2rem;
+            }
+            .nav-links {
+                justify-content: center;
+                gap: 1rem;
+            }
+            .download-card {
+                flex-direction: column;
+                align-items: stretch;
+                text-align: center;
+            }
+            .download-card .info {
+                flex-direction: column;
+                text-align: center;
+            }
+            .download-card .action {
+                text-align: center;
+            }
+            .download-hero h1 {
+                font-size: 1.8rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- ===== 导航栏 ===== -->
+        <nav class="navbar">
+            <a href="index.html" class="logo">
+                <i class="lucide lucide-flower"></i>
+                岸灯鸢花
+            </a>
+            <div class="nav-links">
+                <a href="index.html"><i class="lucide lucide-house"></i> 首页</a>
+                <a href="changelog.html"><i class="lucide lucide-scroll"></i> 更新日志</a>
+                <a href="https://github.com/lilyrosary-eng/andengyuanhua" target="_blank" class="btn-ghost">
+                    <i class="lucide lucide-github"></i> GitHub
+                </a>
+            </div>
+        </nav>
+
+        <!-- ===== 标题 ===== -->
+        <div class="download-hero">
+            <h1><i class="lucide lucide-download"></i> 下载岸灯鸢花</h1>
+            <p class="sub">选择你的平台，获取最新版本</p>
+        </div>
+
+        <!-- ===== 下载卡片 ===== -->
+        <div class="download-cards">
+
+            <!-- Windows -->
+            <div class="download-card">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-monitor"></i></div>
+                    <div>
+                        <div class="name">
+                            Windows
+                            <span class="status-badge available">可用</span>
+                        </div>
+                        <div class="desc">Windows 10 / 11 · 安装包 (.exe)</div>
+                    </div>
+                </div>
+                <div class="action">
+                    <span class="version-tag">v0.1.0</span>
+                    <a href="https://github.com/lilyrosary-eng/andengyuanhua/releases/latest/download/andengyuanhua-windows-setup.exe" class="btn-download">
+                        <i class="lucide lucide-download"></i> 下载
+                    </a>
+                </div>
+            </div>
+
+            <!-- macOS -->
+            <div class="download-card">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-apple"></i></div>
+                    <div>
+                        <div class="name">
+                            macOS
+                            <span class="status-badge coming">即将推出</span>
+                        </div>
+                        <div class="desc">Intel / Apple Silicon · 通用包</div>
+                    </div>
+                </div>
+                <div class="action">
+                    <span class="version-tag">—</span>
+                    <a href="#" class="btn-download disabled">
+                        <i class="lucide lucide-clock"></i> 敬请期待
+                    </a>
+                </div>
+            </div>
+
+            <!-- Linux -->
+            <div class="download-card">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-linux"></i></div>
+                    <div>
+                        <div class="name">
+                            Linux
+                            <span class="status-badge coming">即将推出</span>
+                        </div>
+                        <div class="desc">AppImage · 各发行版通用</div>
+                    </div>
+                </div>
+                <div class="action">
+                    <span class="version-tag">—</span>
+                    <a href="#" class="btn-download disabled">
+                        <i class="lucide lucide-clock"></i> 敬请期待
+                    </a>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ===== 查看所有版本（指向 GitHub Releases） ===== -->
+        <div class="release-link">
+            <a href="https://github.com/lilyrosary-eng/andengyuanhua/releases" target="_blank">
+                <i class="lucide lucide-history"></i> 查看所有历史版本
+            </a>
+        </div>
+
+        <!-- ===== 页脚 ===== -->
+        <footer class="footer">
+            <span>© 2026 岸灯鸢花 · 用 ❤️ 和 Rust 打造</span>
+            <div>
+                <a href="privacy.html"><i class="lucide lucide-shield"></i> 隐私政策</a>
+                <a href="https://github.com/lilyrosary-eng/andengyuanhua" target="_blank"><i class="lucide lucide-github"></i> GitHub</a>
+            </div>
+        </footer>
+
+    </div>
+</body>
+</html>
