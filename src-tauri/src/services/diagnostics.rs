@@ -89,7 +89,7 @@ impl GraphicsCaptureApiHandler for TestCapture {
         }
         let _fw = frame.width();
         let _fh = frame.height();
-        let mut buffer = frame.buffer().map_err(|e| e.to_string())?;
+        let buffer = frame.buffer().map_err(|e| e.to_string())?;
         let mut scratch = Vec::new();
         let src = buffer.as_nopadding_buffer(&mut scratch);
         let payload: Vec<u8> = src.to_vec();

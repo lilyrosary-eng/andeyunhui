@@ -357,7 +357,7 @@ impl GraphicsCaptureApiHandler for WgcSingleFrame {
     ) -> Result<(), Self::Error> {
         let w = frame.width();
         let h = frame.height();
-        let mut buffer = frame.buffer().map_err(|e| e.to_string())?;
+        let buffer = frame.buffer().map_err(|e| e.to_string())?;
         // `ColorFormat::Rgba8` 下 WGC 帧池即输出 RGBA，`as_nopadding_buffer` 返回无 pitch
         // 填充的连续 RGBA 字节（长度 = w * h * 4），可直接构造 RgbaImage。
         let mut scratch = Vec::new();
