@@ -92,6 +92,7 @@ windows = { version = "0.62", features = [
   "Win32_System_WinRT",
   "Media",
   "Media_Playback",
+  "Media_Control",
 ] }
 
 [features]
