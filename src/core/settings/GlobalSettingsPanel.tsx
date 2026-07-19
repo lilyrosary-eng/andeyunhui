@@ -741,6 +741,18 @@ export function GlobalSettingsPanel() {
                     检查更新
                   </button>
                 </div>
+                <div className="flex justify-between items-center p-4">
+                  <div className="flex items-center gap-2">
+                    <ExternalLink size={16} className="text-neutral-400 dark:text-stone-500" />
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">前往岸灯鸢花发布页</span>
+                  </div>
+                  <button
+                    className="px-3 py-1.5 rounded-lg bg-neutral-800 text-white text-sm hover:bg-neutral-700 transition-colors"
+                    onClick={() => { openUrl('https://adyh.cc.cd').catch(() => {}); }}
+                  >
+                    打开
+                  </button>
+                </div>
               </section>
 
               <section className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
