@@ -44,7 +44,7 @@ export function TrayMenu() {
       }}
     >
       <div className="px-4 pt-3 pb-2 text-[11px] tracking-[0.18em] text-white/40 select-none">
-        岸灯鸢花
+        安得云荟
       </div>
       <button
         onClick={summon}

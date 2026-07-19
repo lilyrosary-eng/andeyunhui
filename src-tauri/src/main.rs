@@ -100,8 +100,8 @@ fn tray_quit(app: tauri::AppHandle) {
 }
 
 fn main() {
-    // 尽早设置本进程 AUMID + 注册表显示名「岸灯鸢花」，使随后创建的主窗口继承该 AUMID，
-    // 任务栏媒体浮窗据此显示「岸灯鸢花」而非「未知应用」。（早于窗口创建，故窗口可继承）
+    // 尽早设置本进程 AUMID + 注册表显示名「安得云荟」，使随后创建的主窗口继承该 AUMID，
+    // 任务栏媒体浮窗据此显示「安得云荟」而非「未知应用」。（早于窗口创建，故窗口可继承）
     andengyuanhua_lib::smtc::ensure_app_identity();
 
     // 禁用 Chromium/WebView2 自带的系统媒体会话（MediaSession 特性），避免它在任务栏注册一个
@@ -220,7 +220,7 @@ fn main() {
         })
         .setup(|app| {
             // ============ Windows 原生 SMTC（任务栏「正在播放」）============
-            // 注册本进程媒体会话，显示「岸灯鸢花」+ 元信息，并接管系统媒体键。
+            // 注册本进程媒体会话，显示「安得云荟」+ 元信息，并接管系统媒体键。
             init_smtc(app.handle().clone());
 
             // ============ 单实例守卫 ============
@@ -361,7 +361,7 @@ fn main() {
             });
             let tray = TrayIconBuilder::new()
                 .icon(tray_icon)
-                .tooltip("岸灯鸢花")
+                .tooltip("安得云荟")
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click { button, button_state, position, .. } = event {
                         // 仅在「抬起」时响应，避免按下/抬起双重触发

@@ -199,7 +199,7 @@ unsafe extern "system" fn enum_callback(
     lparam: winapi::shared::minwindef::LPARAM,
 ) -> i32 {
     let state = &mut *(lparam as *mut Vec<WindowInfo>);
-    // 不再排除本进程（岸灯鸢花）自身窗口：窗口识别统一处理所有可见窗口，
+    // 不再排除本进程（安得云荟）自身窗口：窗口识别统一处理所有可见窗口，
     // 避免为「自我屏蔽」增加特殊分支与维护成本（截图 / 录屏共用本枚举）。
     // 截图覆盖窗本身在枚举时已隐藏（IsWindowVisible 跳过），不会出现在列表中。
     if winapi::um::winuser::IsWindowVisible(hwnd) == 0 {

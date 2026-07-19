@@ -24,7 +24,7 @@ export function emitDropzoneChange() {
 }
 
 interface TransferStationPanelProps {
-  /** 文本类文件读取后传到外部（如「鸢尾花」页面打开编辑） */
+  /** 文本类文件读取后传到外部（如「安得云荟」页面打开编辑） */
   onOpenReadableFile?: (file: ImportedFile, content: string) => void;
 }
 
@@ -245,7 +245,7 @@ export function TransferStationPanel({ onOpenReadableFile }: TransferStationPane
         <div className="glass-panel p-3 mb-5">
           <p className="text-xs text-neutral-400 dark:text-stone-500">
             拖放任意文件到应用窗口、或导入文档/图片（docx/pptx/xlsx/pdf、png/jpg…）都会自动存入此处；图片会同时进入笔记预览与图标栏中转站。
-            文本类文件在「鸢尾花」页面拖入时可直接打开编辑；把文件拖到桌面或文件夹即可导出原始文件，也可用「保存到…」另存。
+            文本类文件在「安得云荟」页面拖入时可直接打开编辑；把文件拖到桌面或文件夹即可导出原始文件，也可用「保存到…」另存。
           </p>
         </div>
 

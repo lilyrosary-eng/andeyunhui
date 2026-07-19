@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/src-tauri/icons/32x32.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>岸灯鸢花</title>
+    <title>安得云荟</title>
     <style>
       /* 防白屏：脚本执行前先给页面一个底色（浅色默认，深色由预加载脚本切换） */
       html, body { margin: 0; height: 100%; background: #f4f2ec; }
@@ -161,7 +161,7 @@
         (function installBootHtml() {
           try {
             // atob() 返回 Latin-1 二进制字符串，需用 TextDecoder 正确解码 UTF-8
-            // 否则中文（岸灯鸢花、建立连接…等）会乱码
+            // 否则中文（安得云荟、建立连接…等）会乱码
             var b64 = dark ? "___WAITING_DARK_B64___" : "___WAITING_LIGHT_B64___";
             var binStr = atob(b64);
             var bytes = new Uint8Array(binStr.length);
@@ -262,7 +262,7 @@
               'align-items:center;justify-content:center;background:' + bg + ';' +
               'color:' + ink + ';font-family:serif;';
             div.innerHTML =
-              '<div style="font-size:28px;letter-spacing:4px;margin-bottom:24px;font-family:Cinzel,Playfair Display,serif;">岸灯鸢花</div>' +
+              '<div style="font-size:28px;letter-spacing:4px;margin-bottom:24px;font-family:Cinzel,Playfair Display,serif;">安得云荟</div>' +
               '<div class="progress" style="width:240px;height:2px;background:rgba(128,128,128,.2);overflow:hidden;">' +
               '<div class="fill" style="width:0%;height:100%;background:' + accent + ';transition:width .3s ease;"></div></div>' +
               '<div id="statusText" style="margin-top:12px;font-size:12px;opacity:.6;"></div>' +

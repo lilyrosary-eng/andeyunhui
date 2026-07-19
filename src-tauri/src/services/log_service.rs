@@ -121,7 +121,7 @@ pub fn init_logger(app_data: &std::path::Path) -> Result<(), String> {
         let mut f = file;
         let _ = writeln!(
             f,
-            "=== 岸灯鸢花 会话日志 ===\n时间: {}\n版本: {}\n================================\n",
+            "=== 安得云荟 会话日志 ===\n时间: {}\n版本: {}\n================================\n",
             Local::now().format("%Y-%m-%d %H:%M:%S"),
             env!("CARGO_PKG_VERSION")
         );

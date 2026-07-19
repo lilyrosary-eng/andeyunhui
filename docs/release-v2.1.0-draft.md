@@ -1,4 +1,4 @@
-# 岸灯鸢花 v2.1.0-alpha.1 发布草稿
+# 安得云荟 v2.1.0-alpha.1 发布草稿
 
 > ⚠️ 状态：**alpha 草稿**，请勿直接对外宣布。
 > 本文档用于内部对齐首个公开发布的范围与措辞，发布前需补充真实链接、校验和与最终确认。
@@ -6,7 +6,7 @@
 ## 版本
 
 - Release 标签：**v2.1.0-alpha.1**（首个 alpha 通道；产品内部版本仍为 2.1.0）
-- 安装包示例名：`岸灯鸢花_2.1.0_x64-setup.exe`（由 `src-tauri/tauri.conf.json` 的 `version=2.1.0` 生成）
+- 安装包示例名：`安得云荟_2.1.0_x64-setup.exe`（由 `src-tauri/tauri.conf.json` 的 `version=2.1.0` 生成）
 - 通道：**alpha**（首个公开版本，稳定性与覆盖面仍在打磨，请勿用于生产关键数据）
 
 ## 定位
@@ -35,7 +35,7 @@
 ## 获取方式（占位）
 
 - GitHub Releases：`<发布后填入 https://github.com/lilyrosary-eng/andengyuanhua/releases 对应版本链接>`
-- 安装包：`岸灯鸢花_2.1.0_x64-setup.exe`（NSIS，perMachine 安装）
+- 安装包：`安得云荟_2.1.0_x64-setup.exe`（NSIS，perMachine 安装）
 - 校验和：`<发布前用 Get-FileHash 生成 SHA-256 并填入>`
 
 ## 升级说明

@@ -37,7 +37,7 @@ export function NoteSettingsPanel() {
 
   return (
     <ModuleSettingsPanel
-      title="鸢尾花"
+      title="安得云荟"
       icon={<StickyNote size={20} />}
       onClose={toggleNoteSettings}
     >
