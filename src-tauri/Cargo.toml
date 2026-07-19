@@ -94,6 +94,7 @@ windows = { version = "0.62", features = [
   "Media",
   "Media_Playback",
   "Media_Control",
+  "Storage_Streams",
 ] }
 
 [features]

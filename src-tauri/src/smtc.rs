@@ -119,6 +119,7 @@ mod imp {
         Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
         Win32::UI::Shell::{GetCurrentProcessExplicitAppUserModelID, SetCurrentProcessExplicitAppUserModelID},
         Win32::UI::WindowsAndMessaging::{EnumChildWindows, GA_ROOT, GetAncestor},
+        Storage::Streams::{DataWriter, InMemoryRandomAccessStream, RandomAccessStreamReference},
         core::{PCWSTR, PWSTR},
     };
     use windows::Media::Control::{
@@ -126,13 +127,16 @@ mod imp {
     };
 
     /// 本进程 AppUserModelID：SMTC 据此在任务栏解析显示名。
-    /// dev（debug）与 release 使用不同 AUMID，使测试版与打包版在任务栏分属不同条目、
-    /// 互不合并（避免「共用一个主窗口」的观感），也便于区分二者。
-    /// release 显示「岸灯鸢花」，dev 显示「岸灯鸢花·测试」。
+    /// 【关键】必须与 NSIS 安装器写到开始菜单/桌面快捷方式上的 AUMID 完全一致，否则
+    /// Windows「正在播放」浮窗按【会话 AUMID → 已安装应用（快捷方式）】解析不到应用，
+    /// 就会显「未知应用」。Tauri NSIS 用 bundle identifier（tauri.conf.json 的 identifier
+    /// = com.rosary.andengyuanhua）作为快捷方式 AUMID，故 release 必须用它。
+    /// dev（debug）无安装快捷方式，AUMID 无从解析，任务栏必然显「未知应用」——这是
+    /// 开发态固有限制，只有打包安装版才能正确显示「岸灯鸢花」。
     const AUMID: &str = if cfg!(debug_assertions) {
-        "com.andengyuanhua.desktop.dev"
+        "com.rosary.andengyuanhua.dev"
     } else {
-        "com.andengyuanhua.desktop"
+        "com.rosary.andengyuanhua"
     };
     /// 与 AUMID 对应的注册表显示名（任务栏据此显示应用名）。
     const DISPLAY_NAME: &str = if cfg!(debug_assertions) {
@@ -881,15 +885,142 @@ mod imp {
             let _ = updater.SetType(mt);
             if let Ok(music) = updater.MusicProperties() {
                 let _ = music.SetTitle(&HSTRING::from(&eff.title));
-                let _ = music.SetArtist(&HSTRING::from(&eff.artist));
-                let _ = music.SetAlbumArtist(&HSTRING::from(&eff.album));
+                // 第二行（浮窗“艺术家”行）合并 歌手 + 专辑，让标题/歌手/专辑三者都可见。
+                // 同时修正旧 bug：AlbumArtist 之前被错填成专辑名，当 Artist 为空时 Windows
+                // 会回退显示 AlbumArtist → 任务栏显成专辑名；现改回真实歌手。
+                let mut second_line = String::new();
+                if !eff.artist.trim().is_empty() {
+                    second_line.push_str(eff.artist.trim());
+                }
+                if !eff.album.trim().is_empty() {
+                    if !second_line.is_empty() {
+                        second_line.push_str("  ·  ");
+                    }
+                    second_line.push_str(eff.album.trim());
+                }
+                if second_line.is_empty() {
+                    second_line.push_str("未知歌手");
+                }
+                let second_h = HSTRING::from(&second_line);
+                let _ = music.SetArtist(&second_h);
+                let _ = music.SetAlbumArtist(&HSTRING::from(eff.artist.trim()));
                 let _ = music.SetAlbumTitle(&HSTRING::from(&eff.album));
+            }
+            // 封面：优先用曲目内嵌封面；无封面则按 标题+歌手 哈希生成对角渐变占位图，
+            // 保证任务栏始终有图、且不同曲目配色不同、显得高级。
+            let cover_bytes: Option<Vec<u8>> = match &eff.cover_path {
+                Some(p) if !p.trim().is_empty() => std::fs::read(p.trim()).ok(),
+                _ => None,
+            };
+            let bytes: Vec<u8> = match cover_bytes {
+                Some(b) if !b.is_empty() => b,
+                _ => generate_gradient_cover(&eff.title, &eff.artist),
+            };
+            match suppress_rt().block_on(async {
+                build_thumbnail_stream(&bytes)
+                    .await
+                    .and_then(|stream| updater.SetThumbnail(&stream))
+            }) {
+                Ok(()) => {}
+                Err(e) => log::warn!("[SMTC] set thumbnail failed: {e:?}"),
             }
             if let Ok(video) = updater.VideoProperties() {
                 let _ = video.SetTitle(&HSTRING::from(&eff.title));
             }
             let _ = updater.Update();
         }
+    }
+
+    /// 把图片字节写入一个 RandomAccessStreamReference，供 DisplayUpdater.SetThumbnail 使用。
+    /// windows-rs 0.62 下流写入是异步的，故本函数为 async（调用处用 suppress_rt().block_on 驱动）。
+    async fn build_thumbnail_stream(bytes: &[u8]) -> windows::core::Result<RandomAccessStreamReference> {
+        let stream = InMemoryRandomAccessStream::new()?;
+        {
+            let writer = DataWriter::CreateDataWriter(&stream)?;
+            writer.WriteBytes(bytes)?;
+            writer.StoreAsync()?.await?;
+        }
+        stream.Seek(0)?;
+        RandomAccessStreamReference::CreateFromStream(&stream)
+    }
+
+    /// 无内嵌封面时，按 标题+歌手 的哈希生成一张对角渐变占位图（PNG），
+    /// 不同曲目配色不同、始终有图，任务栏媒体控件更显高级。
+    fn generate_gradient_cover(title: &str, artist: &str) -> Vec<u8> {
+        use image::{ImageBuffer, ImageFormat, Rgb};
+
+        const W: u32 = 512;
+        const H: u32 = 512;
+        // 由 标题+歌手 得稳定色相种子
+        let mut seed: u32 = 2166136261;
+        for b in format!("{}/{}", title, artist).bytes() {
+            seed ^= b as u32;
+            seed = seed.wrapping_mul(16777619);
+        }
+        let hue = (seed % 360) as f32;
+        let base1 = hsl_to_rgb(hue, 0.58, 0.46);
+        let base2 = hsl_to_rgb((hue + 38.0) % 360.0, 0.62, 0.30);
+        let hi = hsl_to_rgb((hue + 18.0) % 360.0, 0.45, 0.62); // 中心高光
+
+        let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(W, H);
+        let cx = W as f32 / 2.0;
+        let cy = H as f32 / 2.0;
+        let max_d = (cx * cx + cy * cy).sqrt();
+        for y in 0..H {
+            for x in 0..W {
+                let t = ((x + y) as f32) / ((W + H) as f32); // 对角渐变
+                let mut r = lerp(base1.0, base2.0, t);
+                let mut g = lerp(base1.1, base2.1, t);
+                let mut b = lerp(base1.2, base2.2, t);
+                // 中心径向高光，增加质感
+                let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+                let glow = (1.0 - d / max_d).max(0.0).powf(1.6) * 0.35;
+                r = (r as f32 + hi.0 as f32 * glow).min(255.0) as u8;
+                g = (g as f32 + hi.1 as f32 * glow).min(255.0) as u8;
+                b = (b as f32 + hi.2 as f32 * glow).min(255.0) as u8;
+                img.put_pixel(x, y, Rgb([r, g, b]));
+            }
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        if img.write_to(&mut std::io::Cursor::new(&mut buf), ImageFormat::Png).is_ok() {
+            buf
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn lerp(a: u8, b: u8, t: f32) -> u8 {
+        (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)) as u8
+    }
+
+    /// HSL(0..360, 0..1, 0..1) → RGB(0..255)
+    fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+        let h = h / 360.0;
+        let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+        let p = 2.0 * l - q;
+        let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+        let g = hue_to_rgb(p, q, h);
+        let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+        ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+    }
+
+    fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            return p + (q - p) * 6.0 * t;
+        }
+        if t < 1.0 / 2.0 {
+            return q;
+        }
+        if t < 2.0 / 3.0 {
+            return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+        }
+        p
     }
 
     /// 前端上报当前激活模块。视频模块时视频媒体优先；其余模块（笔记/音乐/扩展等）音乐优先。

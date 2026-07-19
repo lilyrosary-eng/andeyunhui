@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>更新日志 · 岸灯鸢花</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" />
+    <!-- 用于渲染 Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        /* ===== 与发布页一致的莫兰迪配色 ===== */
+        :root {
+            --bg: #f4f2ec;
+            --surface: #fcfaf7;
+            --surface-hover: #f0ede8;
+            --text-primary: #3d3a36;
+            --text-secondary: #8a8580;
+            --text-muted: #b5b0aa;
+            --border: #e5e0da;
+            --accent: #b8a9c9;
+            --shadow: rgba(60, 58, 55, 0.06);
+            --radius: 1.2rem;
+            --transition: 0.3s ease;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background-color: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 2rem 1.5rem 4rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .container {
+            max-width: 1100px;
+            width: 100%;
+        }
+
+        /* ===== 导航（复用发布页样式） ===== */
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.6rem 1.8rem;
+            background: var(--surface);
+            border-radius: 3rem;
+            border: 1px solid var(--border);
+            box-shadow: 0 2px 12px var(--shadow);
+            margin-bottom: 3rem;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+        .logo {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .logo i { color: var(--accent); font-size: 1.6rem; }
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color var(--transition);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .nav-links a:hover { color: var(--text-primary); }
+        .nav-links .btn-ghost {
+            background: var(--surface-hover);
+            padding: 0.3rem 1.4rem;
+            border-radius: 2rem;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        .nav-links .btn-ghost:hover { background: var(--border); }
+
+        /* ===== 主标题 ===== */
+        .page-header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+        .page-header h1 {
+            font-size: 2.4rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+        .page-header h1 i { color: var(--accent); }
+        .page-header .sub {
+            color: var(--text-secondary);
+            margin-top: 0.3rem;
+        }
+
+        /* ===== 版本卡片列表 ===== */
+        .changelog-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1.8rem;
+        }
+        .release-card {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            padding: 1.8rem 2rem;
+            transition: box-shadow var(--transition);
+        }
+        .release-card:hover {
+            box-shadow: 0 8px 24px var(--shadow);
+        }
+        .release-header {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 0.8rem;
+        }
+        .release-version {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .release-version .tag {
+            background: var(--accent);
+            color: #fff;
+            font-size: 0.7rem;
+            padding: 0.15rem 0.8rem;
+            border-radius: 2rem;
+            margin-left: 0.6rem;
+            font-weight: 500;
+        }
+        .release-date {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        .release-body {
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            line-height: 1.7;
+        }
+        .release-body ul, .release-body ol {
+            padding-left: 1.5rem;
+            margin: 0.5rem 0;
+        }
+        .release-body p {
+            margin: 0.5rem 0;
+        }
+        .release-body code {
+            background: var(--surface-hover);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+        .release-body pre {
+            background: var(--surface-hover);
+            padding: 0.8rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.85rem;
+        }
+
+        /* ===== 加载状态 ===== */
+        .loading {
+            text-align: center;
+            padding: 4rem 0;
+            color: var(--text-secondary);
+        }
+        .loading i {
+            font-size: 2rem;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .error {
+            text-align: center;
+            padding: 4rem 0;
+            color: #c0392b;
+        }
+        .error i { font-size: 2rem; margin-bottom: 0.5rem; }
+
+        /* ===== 页脚 ===== */
+        .footer {
+            margin-top: 4rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+        .footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin-left: 1.5rem;
+            transition: color var(--transition);
+        }
+        .footer a:hover { color: var(--text-primary); }
+
+        /* ===== 响应式 ===== */
+        @media (max-width: 640px) {
+            .navbar {
+                flex-direction: column;
+                align-items: stretch;
+                padding: 0.8rem 1.2rem;
+            }
+            .nav-links {
+                justify-content: center;
+                gap: 1rem;
+            }
+            .release-header {
+                flex-direction: column;
+                gap: 0.3rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 导航 -->
+        <nav class="navbar">
+            <div class="logo">
+                <i class="lucide lucide-flower"></i>
+                岸灯鸢花
+            </div>
+            <div class="nav-links">
+                <a href="index.html"><i class="lucide lucide-house"></i> 首页</a>
+                <a href="index.html#features"><i class="lucide lucide-layout-grid"></i> 特性</a>
+                <a href="index.html#screenshots"><i class="lucide lucide-image"></i> 截图</a>
+                <a href="index.html#download"><i class="lucide lucide-download"></i> 下载</a>
+                <a href="#" class="btn-ghost"><i class="lucide lucide-github"></i> GitHub</a>
+            </div>
+        </nav>
+
+        <!-- 页面头部 -->
+        <div class="page-header">
+            <h1><i class="lucide lucide-scroll"></i> 更新日志</h1>
+            <p class="sub">从 GitHub Releases 实时同步</p>
+        </div>
+
+        <!-- 容器 -->
+        <div id="changelog-container">
+            <div class="loading" id="loading">
+                <i class="lucide lucide-loader"></i>
+                <p>正在获取更新记录…</p>
+            </div>
+        </div>
+
+        <!-- 页脚 -->
+        <footer class="footer">
+            <span>© 2026 岸灯鸢花 · 用 ❤️ 和 Rust 打造</span>
+            <div>
+                <a href="#"><i class="lucide lucide-github"></i> GitHub</a>
+                <a href="privacy.html"><i class="lucide lucide-shield"></i> 隐私政策</a>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        (async function() {
+            const container = document.getElementById('changelog-container');
+            const loadingEl = document.getElementById('loading');
+
+            // ===== 配置你的仓库信息 =====
+            const REPO_OWNER = 'lilyrosary-eng';      // 替换为你的 GitHub 用户名
+            const REPO_NAME = 'andengyuanhua';        // 替换为你的仓库名
+            const API_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases`;
+
+            try {
+                const response = await fetch(API_URL);
+                if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+
+                const releases = await response.json();
+
+                if (!releases || releases.length === 0) {
+                    container.innerHTML = `
+                        <div class="error">
+                            <i class="lucide lucide-inbox"></i>
+                            <p>暂无发布版本，请稍后再来。</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                // 过滤掉 draft 和 prerelease（可选）
+                const published = releases.filter(r => !r.draft && !r.prerelease);
+
+                if (published.length === 0) {
+                    container.innerHTML = `
+                        <div class="error">
+                            <i class="lucide lucide-inbox"></i>
+                            <p>当前没有正式版本，请关注开发动态。</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                // 渲染卡片
+                const html = published.map(release => {
+                    const version = release.tag_name || release.name || 'v0.0.0';
+                    const date = new Date(release.published_at).toLocaleDateString('zh-CN', {
+                        year: 'numeric', month: 'long', day: 'numeric'
+                    });
+                    // 用 marked 解析 Markdown body，保留基本样式
+                    const bodyHtml = release.body ? marked.parse(release.body) : '<p>暂无详细说明。</p>';
+                    // 标记是否为最新版本（第一个）
+                    const isLatest = published.indexOf(release) === 0;
+                    const tagHtml = isLatest ? `<span class="tag">最新</span>` : '';
+
+                    return `
+                        <div class="release-card">
+                            <div class="release-header">
+                                <span class="release-version">
+                                    ${version} ${tagHtml}
+                                </span>
+                                <span class="release-date">${date}</span>
+                            </div>
+                            <div class="release-body">${bodyHtml}</div>
+                        </div>
+                    `;
+                }).join('');
+
+                container.innerHTML = `<div class="changelog-list">${html}</div>`;
+
+            } catch (err) {
+                console.error('获取更新日志失败:', err);
+                container.innerHTML = `
+                    <div class="error">
+                        <i class="lucide lucide-alert-circle"></i>
+                        <p>加载失败，请刷新重试或检查网络。</p>
+                        <p style="font-size:0.85rem;color:var(--text-muted);">${err.message}</p>
+                    </div>
+                `;
+            }
+        })();
+    </script>
+</body>
+</html>
