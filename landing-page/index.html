@@ -190,6 +190,24 @@
             background: var(--surface-hover);
         }
 
+        .btn-support {
+            background: #e8d5b5;  /* 暖金色调，区别于其他按钮 */
+            color: #5a4a3a;
+            padding: 0.7rem 2.0rem;
+            border-radius: 3rem;
+            text-decoration: none;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            transition: background var(--transition), transform var(--transition);
+            border: 1px solid #dcc8a8;
+        }
+        .btn-support:hover {
+            background: #dcc8a8;
+            transform: translateY(-2px);
+        }        
+
         /* ===== 特性 ===== */
         .features {
             display: grid;
@@ -407,7 +425,7 @@
                 <a href="changelog.html"><i class="lucide lucide-scroll"></i> 更新日志</a>
                 <!-- ===== 新增：下载按钮（指向 download.html）===== -->
                 <a href="download.html"><i class="lucide lucide-download"></i> 下载</a>
-                <!-- ===== GitHub 链接指向你的仓库 ===== -->
+                <a href="support.html"><i class="lucide lucide-heart"></i> 赞助</a>     
                 <a href="https://github.com/lilyrosary-eng/andengyuanhua" target="_blank" class="btn-ghost">
                     <i class="lucide lucide-github"></i> GitHub
                 </a>
@@ -417,7 +435,7 @@
         <!-- ===== Hero ===== -->
         <section class="hero">
             <div class="badge">
-                <i class="lucide lucide-sparkle" style="font-size:0.8rem;"></i> v0.1.0 · 刚刚发布
+                <i class="lucide lucide-sparkle" style="font-size:0.8rem;"></i> v2.1.0 · 刚刚发布
             </div>
             <h1>
                 本地优先的<br />
@@ -433,6 +451,9 @@
                 </a>
                 <a href="https://github.com/lilyrosary-eng/andengyuanhua" target="_blank" class="btn-secondary">
                     <i class="lucide lucide-github"></i> 查看源码
+                </a>
+                <a href="support.html" class="btn-support">
+                    <i class="lucide lucide-heart"></i> 赞助支持
                 </a>
             </div>
         </section>
@@ -504,7 +525,7 @@
                 </a>
             </div>
             <p class="version-info">
-                当前版本 v0.1.0 · 仅 Windows 可用，macOS / Linux 正在开发中
+                当前版本 v2.1.0 · 仅 Windows 可用，macOS / Linux 正在开发中
                 <br />
                 <a href="download.html" style="color:var(--accent);">查看所有下载版本 →</a>
             </p>
