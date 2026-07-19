@@ -2,10 +2,16 @@ import React from "react"
 import ReactDOM from "react-dom/client"
 import { initFileLogger } from "./lib/file-logger"
 import { installLocalImageSanitizer } from "./lib/localImage"
+import { listen } from "@tauri-apps/api/event"
 import "./index.css"
 
 // 尽早初始化前端全局错误捕获：把 window.onerror / unhandledrejection / console.error 写入会话日志文件
 initFileLogger();
+// 把 Rust 端 SMTC 诊断事件转发到会话日志文件（console.error 会被 file-logger 捕获），
+// 便于在打包版下看到任务栏媒体会话的真实状态，定位「未知应用」根因。
+listen("smtc-diag", (event) => {
+  console.error("[SMTC-DIAG-FE]", JSON.stringify((event as { payload: unknown }).payload));
+}).catch(() => {});
 // 全局兜底：拦截任何把 localimg:// 直接写进 <img>/<source> 的渲染路径，避免浏览器报
 // net::ERR_UNKNOWN_URL_SCHEME（兜底上层 NodeView / markdown 预览的解析遗漏）
 installLocalImageSanitizer();

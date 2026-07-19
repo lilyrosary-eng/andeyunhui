@@ -94,5 +94,6 @@ devlog.txt
 devdiag.txt
 deploy_out.txt
 checklog2.txt
+build_err.txt
 *.txt
 *.pptx

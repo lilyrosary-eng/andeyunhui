@@ -104,30 +104,16 @@ fn main() {
     // 任务栏媒体浮窗据此显示「岸灯鸢花」而非「未知应用」。（早于窗口创建，故窗口可继承）
     andengyuanhua_lib::smtc::ensure_app_identity();
 
-    // 禁用 Chromium/WebView2 自带的系统媒体会话（MediaSession 特性），避免它与我们在 Rust
-    // 进程内创建的 SystemMediaTransportControls 会话重复，导致任务栏出现两个「正在播放」
-    // （WebView2 那个会显示为「未知应用」）。必须在 WebView2 启动前设置（env 在进程启动时被读取）。
-    // 注意：不能仅在「环境变量为空」时才设置——若环境已被占用会跳过我们的 flag，导致 Chromium
-    // 会话泄漏。这里改为：无论是否为空，都确保 --disable-features=MediaSession 一定存在。
-    {
-        let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-        // 始终确保 MediaSession 与 HardwareMediaKeyHandling 被禁用：
-        //  - MediaSession：禁用 navigator.mediaSession，阻止 WebView2 注册 OS 媒体会话
-        //    （任务栏「未知应用」卡片的来源）；
-        //  - HardwareMediaKeyHandling：阻止 WebView2 抢占键盘/触摸板媒体键。
-        // 此前用 `if !args.contains("MediaSession")` 守卫——若环境变量已被占用会跳过禁用，
-        // 导致 WebView2 会话泄漏、媒体键被抢。改为：只要两项缺其一就补齐，确保一定生效。
-        let need_media = !args.contains("MediaSession");
-        let need_hwkey = !args.contains("HardwareMediaKeyHandling");
-        if need_media || need_hwkey {
-            if !args.is_empty() {
-                args.push(' ');
-            }
-            args.push_str("--disable-features=MediaSession,HardwareMediaKeyHandling");
-            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &args);
-        }
-        log::info!("[SMTC] WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS={}", args);
-    }
+    // 禁用 Chromium/WebView2 自带的系统媒体会话（MediaSession 特性），避免它在任务栏注册一个
+    // 「未知应用」卡片，与我们在 Rust 进程内创建的 SystemMediaTransportControls 会话重复。
+    //
+    // 重要机制更正：Tauri/wry 在创建 WebView2 环境时【总会】传入非空的 AdditionalBrowserArguments
+    // （create_environment 里 options.SetAdditionalBrowserArguments(...)），而
+    // CreateCoreWebView2EnvironmentWithOptions 一旦收到非 null 的 options，就会【忽略】环境变量
+    // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS。因此此前在 main() 里 set_var 该环境变量完全无效，
+    // WebView2 的 MediaSession 从未被禁用。正确做法是把 flag 写进 tauri.conf.json 的窗口配置
+    // `additionalBrowserArgs`，它会透传到 wry 真正读取的 pl_attrs.additional_browser_args。
+    // 见 tauri.conf.json -> app.windows[0].additionalBrowserArgs（含 wry 默认 flag + MediaSession）。
 
     // 日志系统在 setup 阶段初始化（需要 app_data 路径），此处仅用 eprintln 兜底早期日志。
     // setup 之前的少量 eprintln 输出到 stderr，setup 之后所有 log:: 宏自动写入会话日志文件。

@@ -168,6 +168,12 @@ class MusicPlayer {
         api.invoke('debug_log', { msg: 'MUSIC_PUSH_OK' }).catch(() => {});
         // 浏览器控制台可见：确认 sMTc_update 是否真正送达 Rust（决定任务栏卡片是否出现）。
         console.error('[SMTC] push OK', { title: fallbackTitle, playing: this.isPlaying });
+        // 把 Rust 端真实状态打到控制台，便于排查：session_created(会话是否建出)、
+        // is_enabled/playback_status(任务栏卡片是否出现)、process_aumid/actual_top_aumid/
+        // reg_displayname(是否解析为「岸灯鸢花」而非「未知应用」)。
+        api.invoke<Record<string, unknown>>('smtc_status')
+          .then((s) => console.log('[SMTC状态]', s))
+          .catch(() => {});
       })
       .catch((e: unknown) => {
         api.invoke('debug_log', { msg: 'MUSIC_PUSH_FAIL ' + String(e) }).catch(() => {});
