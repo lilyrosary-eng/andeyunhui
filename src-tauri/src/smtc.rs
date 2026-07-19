@@ -169,6 +169,8 @@ mod imp {
     }
     /// 窗口 HWND 的 AUMID 属性是否成功写入（诊断用）。
     static WINDOW_AUMID_SET: OnceLock<bool> = OnceLock::new();
+    /// 一次性标志：AUMID 写入成功日志是否已打印过，避免常驻线程每 3s 重复枚举窗口刷屏。
+    static AUMID_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     /// 顶层窗口 HWND（任务栏按钮所在窗口）的原始指针值，供探针读回 AUMID 属性。
     static TOP_HWND: OnceLock<isize> = OnceLock::new();
     /// 最近一次 apply 的播放态（Playing/Paused/Stopped），用于状态查询。
@@ -639,7 +641,10 @@ mod imp {
                 return;
             }
             let _ = WINDOW_AUMID_SET.set(true);
-            log::info!("[SMTC] 已将 AUMID 写入主窗口 HWND 属性存储");
+            // 仅在首次成功写入时打印一次，避免常驻线程每 3s 重复枚举窗口刷屏。
+            if !AUMID_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::info!("[SMTC] 已将 AUMID 写入主窗口 HWND 属性存储");
+            }
             // 关键：PROPVARIANT 的 Drop 会调用 PropVariantClear，对 VT_LPWSTR 它会
             // CoTaskMemFree(pwszVal)。但我们的 pwszVal 指向 Rust 的 Vec<u16>（wide），
             // 不是 COM 分配的，若让其正常 drop 会用错误分配器释放，导致 STATUS_HEAP_CORRUPTION。
