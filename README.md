@@ -32,16 +32,16 @@ React + Rust，基于 Tauri v2 构建。
 
 - 笔记核心：富文本编辑（TipTap）、全文搜索、标签管理、置顶、复制、快照存档与恢复、整库备份导出、浮窗笔记。
 - 插件系统：`plugin://` 私有协议动态加载，IIFE 沙箱隔离，`window.__HOST_*` 能力注入，文件系统监听实现插件目录热插拔，支持内置插件与第三方用户插件并存（用户插件可覆盖内置）。
-- 音乐 · 铃兰：本地音乐扫描与播放、元数据/歌词解析、可锁定的桌面悬浮歌词窗。
+- 音乐 · 铃兰：本地音乐扫描与播放、元数据/歌词解析、可锁定的桌面悬浮歌词窗；并接管 Windows 任务栏「正在播放」媒体控件（显示名「岸灯鸢花」、封面与「歌手 · 专辑」、回传系统媒体键）。
 - 图片 · 莲花：图库扫描、缩略图生成与缓存。
 - 视频 · 玉兰：视频库扫描与文件夹浏览。
 - 阅读 · 三色堇：EPUB 等电子书解析阅读（`epub-parser` 抽取纯文本 + `ammonia` 消毒）。
-- 办公 · 茑萝：docx / pptx 的导入与导出（原生 OOXML 解析，无需 Python），配套 TipTap 文档编辑器；含 CodeMirror IDE 与绘画子模块。
+- 办公 · 茑萝：文档（docx）、演示（pptx）、表格（xlsx / csv）的导入、编辑与导出；文档用 TipTap 编辑、演示用原生幻灯片编辑器、表格用自研轻量表格引擎（SheetJS 读写 xlsx）；含 CodeMirror IDE 与绘画子模块。
 - 专业 · 薄荷：环境变量管理、端口扫描、进程列表、剪贴板读写、图片/文档格式转换、ffmpeg 媒体转码等工具集合。
 - 格式转换 · markitdown：多格式转 Markdown 服务。
 - 全局截图：默认 `Ctrl+Shift+S`，多显示器捕获、拖拽框选、悬停点窗、窗口长截图、画笔/矩形/箭头/文字标注，毫秒级保存（原生 RGBA 直通），可复制、存中转站或导入当前笔记。基于 WGC（Windows.Graphics.Capture）硬件加速捕获。
 - 屏幕录制 · 全局：默认 `Ctrl+Alt+R`，区域选择、暂停/继续、ffmpeg 编码。
-- 系统集成：单实例守卫、系统托盘（自定义 UI 菜单）、原生文件拖出（基于 Windows DoDragDrop）、跨模块「中转站」暂存区、会话日志系统。
+- 系统集成：单实例守卫、系统托盘（自定义 UI 菜单）、原生文件拖出（基于 Windows DoDragDrop）、跨模块「中转站」暂存区、会话日志系统、Windows 任务栏媒体集成（SMTC：自定义显示名「岸灯鸢花」、封面、媒体键回传）。
 - 扩展中心：内置扩展管理界面，浏览与管理已安装插件。
 
 ## 截图 / 演示
@@ -61,7 +61,7 @@ React + Rust，基于 Tauri v2 构建。
 
 | 层 | 技术 |
 | --- | --- |
-| 前端 | React 18、TypeScript、Vite 7、Tailwind CSS、Radix UI、Zustand、TipTap、lucide-react |
+| 前端 | React 18、TypeScript、Vite 7、Tailwind CSS、Radix UI、Zustand、TipTap、lucide-react、SheetJS（xlsx）、lightweight-charts |
 | 后端 | Rust 2021、Tauri v2、mimalloc、rayon |
 | 桌面能力 | global-shortcut、tray-icon、dialog、opener、notify（跨平台文件监听） |
 | 媒体/解析 | lofty、image、epub-parser、ammonia、pulldown-cmark、zip + quick-xml（OOXML）、pdf-extract |
@@ -83,10 +83,12 @@ andengyuanhua/
 │     ├─ commands.rs        # Tauri command 汇总（笔记/插件/中转站/托盘/工具…）
 │     ├─ screenshot.rs      # 截图捕获与覆盖窗
 │     └─ services/          # 各模块服务（音乐/图片/视频/阅读/办公/录屏/日志…）
-├─ plugins/                 # 插件源码（music/image/video/reading/professional/…）
+├─ plugins/                 # 插件源码（niaoluo 宿主：办公等；music/image/video/reading/professional…）
 ├─ external-deps/           # 重依赖预打包（esbuild IIFE，运行时按需注入）
+├─ crates/                  # Rust 子 crate（pro-tools-kit 专业工具、gongfang-kit 攻防内核）
 ├─ scripts/                 # 构建脚本（external-deps、等待页、部署插件等）
 ├─ wait-page/               # 哥特风莲花描边启动/等待页
+├─ landing-page/            # 对外营销落地页（静态 HTML / CSS / JS）
 └─ docs/                    # 设计与诊断文档
 ```
 

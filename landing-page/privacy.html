@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>隐私政策 · 岸灯鸢花</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" />
+    <style>
+        /* ===== 与发布页一致的莫兰迪配色 ===== */
+        :root {
+            --bg: #f4f2ec;
+            --surface: #fcfaf7;
+            --surface-hover: #f0ede8;
+            --text-primary: #3d3a36;
+            --text-secondary: #8a8580;
+            --text-muted: #b5b0aa;
+            --border: #e5e0da;
+            --accent: #b8a9c9;
+            --shadow: rgba(60, 58, 55, 0.06);
+            --radius: 1.2rem;
+            --transition: 0.3s ease;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background-color: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.7;
+            min-height: 100vh;
+            padding: 2rem 1.5rem 4rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .container {
+            max-width: 880px;
+            width: 100%;
+        }
+
+        /* ===== 导航 ===== */
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.6rem 1.8rem;
+            background: var(--surface);
+            border-radius: 3rem;
+            border: 1px solid var(--border);
+            box-shadow: 0 2px 12px var(--shadow);
+            margin-bottom: 3rem;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+        .logo {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .logo i { color: var(--accent); font-size: 1.6rem; }
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color var(--transition);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .nav-links a:hover { color: var(--text-primary); }
+        .nav-links .btn-ghost {
+            background: var(--surface-hover);
+            padding: 0.3rem 1.4rem;
+            border-radius: 2rem;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        .nav-links .btn-ghost:hover { background: var(--border); }
+
+        /* ===== 内容区 ===== */
+        .privacy-content {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            padding: 2.8rem 2.8rem;
+            box-shadow: 0 2px 12px var(--shadow);
+        }
+
+        .privacy-content h1 {
+            font-size: 2.2rem;
+            font-weight: 600;
+            margin-bottom: 0.3rem;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .privacy-content h1 i { color: var(--accent); }
+
+        .privacy-content .last-updated {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .privacy-content h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin: 2rem 0 0.8rem 0;
+            color: var(--text-primary);
+        }
+
+        .privacy-content h3 {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin: 1.2rem 0 0.5rem 0;
+            color: var(--text-primary);
+        }
+
+        .privacy-content p {
+            color: var(--text-secondary);
+            margin-bottom: 0.8rem;
+        }
+
+        .privacy-content ul {
+            padding-left: 1.5rem;
+            margin: 0.5rem 0 1rem 0;
+            color: var(--text-secondary);
+        }
+        .privacy-content ul li {
+            margin-bottom: 0.3rem;
+        }
+
+        .privacy-content strong {
+            color: var(--text-primary);
+        }
+
+        .privacy-content .highlight-box {
+            background: var(--bg);
+            border-left: 4px solid var(--accent);
+            padding: 1rem 1.5rem;
+            border-radius: 0 8px 8px 0;
+            margin: 1.2rem 0;
+        }
+        .privacy-content .highlight-box p {
+            margin-bottom: 0;
+            color: var(--text-primary);
+        }
+
+        /* ===== 页脚 ===== */
+        .footer {
+            margin-top: 4rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+        .footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin-left: 1.5rem;
+            transition: color var(--transition);
+        }
+        .footer a:hover { color: var(--text-primary); }
+
+        @media (max-width: 640px) {
+            .navbar {
+                flex-direction: column;
+                align-items: stretch;
+                padding: 0.8rem 1.2rem;
+            }
+            .nav-links {
+                justify-content: center;
+                gap: 1rem;
+            }
+            .privacy-content {
+                padding: 1.8rem 1.2rem;
+            }
+            .privacy-content h1 {
+                font-size: 1.6rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- ===== 导航 ===== -->
+        <nav class="navbar">
+            <div class="logo">
+                <i class="lucide lucide-flower"></i>
+                岸灯鸢花
+            </div>
+            <div class="nav-links">
+                <a href="index.html"><i class="lucide lucide-house"></i> 首页</a>
+                <a href="index.html#features"><i class="lucide lucide-layout-grid"></i> 特性</a>
+                <a href="changelog.html"><i class="lucide lucide-scroll"></i> 更新日志</a>
+                <a href="#" class="btn-ghost"><i class="lucide lucide-github"></i> GitHub</a>
+            </div>
+        </nav>
+
+        <!-- ===== 内容 ===== -->
+        <div class="privacy-content">
+            <h1><i class="lucide lucide-shield"></i>隐私政策</h1>
+            <div class="last-updated"> 最后更新：2026 年 7 月 19 日</div>
+
+            <p><strong>岸灯鸢花</strong>（以下简称“本应用”）是一款本地优先的桌面工具，由 React + Rust（Tauri）构建。我们深知隐私的重要性，因此本应用在设计之初就遵循 <strong>“数据自主、隐私为本”</strong> 的核心原则。</p>
+
+            <p>本隐私政策旨在帮助您了解本应用如何处理您的信息。请在使用本应用前仔细阅读。</p>
+
+            <div class="highlight-box">
+                <p><strong> 核心承诺：</strong> 本应用 <strong>不上传</strong> 您的任何个人数据至云端。所有笔记、插件数据、媒体库信息、截图、录屏等，<strong>默认全部存储在您本地设备上</strong>，由您完全掌控。</p>
+            </div>
+
+            <h2>1. 我们收集的信息</h2>
+
+            <h3>1.1 主动提供的信息</h3>
+            <p>当您使用本应用时，您可以主动创建或导入以下数据：</p>
+            <ul>
+                <li><strong>笔记内容</strong>：您编写的富文本笔记、标签、分类等。</li>
+                <li><strong>媒体文件</strong>：您导入的本地音乐、图片、视频、电子书等。</li>
+                <li><strong>文档数据</strong>：您编辑或导入的办公文档（docx、pptx、xlsx 等）。</li>
+                <li><strong>截图与录屏</strong>：您通过全局截图或录屏功能生成的图像/视频文件。</li>
+                <li><strong>插件配置</strong>：您安装或配置的插件相关设置。</li>
+            </ul>
+            <p>所有这些数据 <strong>仅保存在您的本地磁盘</strong>，本应用不会主动收集或上传这些内容。</p>
+
+            <h3>1.2 自动收集的信息</h3>
+            <p>本应用 <strong>不会</strong> 自动收集任何个人信息，包括但不限于：</p>
+            <ul>
+                <li>设备唯一标识符（如 MAC 地址、硬盘序列号）</li>
+                <li>IP 地址</li>
+                <li>地理位置</li>
+                <li>浏览历史或使用习惯</li>
+                <li>崩溃报告或使用统计数据</li>
+            </ul>
+            <p>本应用 <strong>不包含任何跟踪器、分析 SDK 或第三方统计工具</strong>。</p>
+
+            <h2>2. 数据的存储与安全</h2>
+
+            <h3>2.1 存储位置</h3>
+            <ul>
+                <li>所有用户数据默认存储在您的本地应用数据目录中（例如 Windows 下的 <code>/Downloads/岸灯鸢花</code>）。</li>
+                <li>您可以通过应用内的“备份”功能将数据导出到您指定的位置。</li>
+                <li>您也可以手动删除应用数据目录来清除所有数据。</li>
+            </ul>
+
+            <h3>2.2 数据传输</h3>
+            <p>本应用 <strong>不会</strong> 通过网络传输您的任何数据。所有操作均在本地完成。</p>
+
+            <h3>2.3 安全措施</h3>
+            <ul>
+                <li>本应用不涉及网络通信，从根本上避免了数据在传输过程中被截获的风险。</li>
+                <li>应用本身遵循 Rust 和 Tauri 的安全最佳实践，包括沙箱隔离、最小权限原则等。</li>
+                <li>您导入的插件在独立的 IIFE 沙箱中运行，受限的 API 访问确保插件无法越权访问您的系统或数据。</li>
+            </ul>
+
+            <h2>3. 第三方服务</h2>
+            <p>本应用 <strong>暂不依赖任何第三方云服务</strong> 来存储或处理您的数据。所有功能在离线状态下完整可用。</p>
+            <p>应用内置的插件系统允许您加载第三方插件，但这些插件同样运行在本地沙箱中，其隐私行为由插件开发者自行声明。建议您仅从可信来源安装插件。</p>
+
+            <h2>4. 您的权利</h2>
+            <p>由于所有数据均存储在本地，您对您的数据拥有 <strong>完全的控制权</strong>：</p>
+            <ul>
+                <li><strong>查阅</strong>：您可以随时通过应用界面查看您的笔记、媒体库等所有数据。</li>
+                <li><strong>修改</strong>：您可以随时编辑或更新您的数据。</li>
+                <li><strong>删除</strong>：您可以随时删除单个条目或通过清除应用数据目录来删除全部数据。</li>
+                <li><strong>导出</strong>：您可以通过内置的备份功能将数据导出到您指定的位置。</li>
+            </ul>
+
+            <h2>5. 儿童隐私</h2>
+            <p>本应用不面向 13 岁以下儿童。我们不会故意收集儿童的个人信息。如果您是家长或监护人，并且认为您的孩子向我们提供了个人信息，请通过下方联系方式与我们联系。</p>
+
+            <h2>6. 隐私政策的变更</h2>
+            <p>我们可能会不时更新本隐私政策。我们会在本页面顶部更新“最后更新”日期。建议您定期查看本页面以了解任何变化。</p>
+            <p>由于本应用不联网，我们无法通过应用内推送通知告知您变更，因此请您主动关注应用发布页或 GitHub 仓库的公告。</p>
+
+            <h2>7. 联系我们</h2>
+            <p>如果您对本隐私政策有任何疑问、建议或担忧，请通过以下方式联系我们：</p>
+            <ul>
+                <li>在 <strong>GitHub Issues</strong> 中提交反馈：<a href="#" style="color:var(--accent);">github.com/lilyrosary-eng/andengyuanhua/issues</a></li>
+            </ul>
+
+            <div class="highlight-box" style="margin-top: 2rem;">
+                <p><strong>✅ 总结：</strong> 岸灯鸢花是一款 <strong>完全本地、离线的桌面应用</strong>。我们不会收集、上传或分享您的任何数据。您的数据只属于您自己。</p>
+            </div>
+        </div>
+
+        <!-- ===== 页脚 ===== -->
+        <footer class="footer">
+            <span>© 2026 岸灯鸢花 · 用 ❤️ 和 Rust 打造</span>
+            <div>
+                <a href="privacy.html"><i class="lucide lucide-shield"></i> 隐私政策</a>
+                <a href="#"><i class="lucide lucide-github"></i> GitHub</a>
+            </div>
+        </footer>
+
+    </div>
+</body>
+</html>
