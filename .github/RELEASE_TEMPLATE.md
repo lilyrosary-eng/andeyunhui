@@ -2,7 +2,7 @@
 Release 模板说明（发布前请删除本注释块，并据实填写下方各节）：
 - 版本号与标题：建议 `vX.Y.Z`（例如 v2.1.0）。
 - 校验和：Windows NSIS 安装包请提供 SHA-256（可在 PowerShell 用
-  `Get-FileHash -Algorithm SHA256 岸灯鸢花_2.1.0_x64-setup.exe` 生成）。
+  `Get-FileHash -Algorithm SHA256 安得云荟_2.1.0_x64-setup.exe` 生成）。
 - 已知问题：诚实列出本版本的平台 / 功能范围与待修复项。
 - 升级说明：增量覆盖安装即可；如涉及数据格式变更需单独提示。
 -->
@@ -34,4 +34,4 @@ vX.Y.Z
 
 | 文件 | 算法 | 校验值 |
 | --- | --- | --- |
-| 岸灯鸢花_X.Y.Z_x64-setup.exe | SHA-256 | `<填写安装包 SHA-256>` |
+| 安得云荟_X.Y.Z_x64-setup.exe | SHA-256 | `<填写安装包 SHA-256>` |

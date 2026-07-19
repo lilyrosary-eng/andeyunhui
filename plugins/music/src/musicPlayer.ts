@@ -104,7 +104,7 @@ class MusicPlayer {
   // 原因：WebView2/Chromium 的媒体会话跑在 msedgewebview2.exe 子进程，无法继承主进程
   // AUMID，会在任务栏生成一张「未知应用」卡片（且可能带封面，造成与 Rust SMTC 卡片并存、
   // 互相打架的诡异现象）。任务栏「正在播放」卡片统一由 Rust 进程内的 SystemMediaTransportControls
-  // 会话（smtc.rs）负责，它使用正确的 AUMID + 显示名「岸灯鸢花」。故此处不再设置 metadata。
+  // 会话（smtc.rs）负责，它使用正确的 AUMID + 显示名「安得云荟」。故此处不再设置 metadata。
   private updateMediaSessionMeta(_track: Track): void {
     /* 故意留空：OS 媒体卡片由 Rust SMTC 接管 */
   }
@@ -133,7 +133,7 @@ class MusicPlayer {
   }
 
   // ===== 本进程 SMTC 会话（Rust 端）=====
-  // 与 JS mediaSession 不同：该会话运行在 .exe 进程内，任务栏显示「岸灯鸢花」并回传
+  // 与 JS mediaSession 不同：该会话运行在 .exe 进程内，任务栏显示「安得云荟」并回传
   // 系统媒体键（键盘/触摸板/任务栏浮窗）。前端只负责推送状态 + 接收控制事件。
   private pushSmtc(): void {
     const track = this.getCurrentTrack();
@@ -170,7 +170,7 @@ class MusicPlayer {
         console.error('[SMTC] push OK', { title: fallbackTitle, playing: this.isPlaying });
         // 把 Rust 端真实状态打到控制台，便于排查：session_created(会话是否建出)、
         // is_enabled/playback_status(任务栏卡片是否出现)、process_aumid/actual_top_aumid/
-        // reg_displayname(是否解析为「岸灯鸢花」而非「未知应用」)。
+        // reg_displayname(是否解析为「安得云荟」而非「未知应用」)。
         api.invoke<Record<string, unknown>>('smtc_status')
           .then((s) => console.log('[SMTC状态]', s))
           .catch(() => {});

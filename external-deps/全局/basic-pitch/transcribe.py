@@ -1,5 +1,5 @@
 # basic-pitch 音频转 MIDI 转写脚本（MIT 协议）
-# 由岸灯鸢花「薄荷 · 音频转换」的 MIDI 输出调用。
+# 由安得云荟「薄荷 · 音频转换」的 MIDI 输出调用。
 # 依赖：pip install basic-pitch（含 TensorFlow / pretty_midi 等）
 # 用法：python transcribe.py <input.wav> <output.mid>
 import sys

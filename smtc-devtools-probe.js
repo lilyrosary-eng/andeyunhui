@@ -48,7 +48,7 @@
     } else if (s0.is_enabled === false || s0.playback_status === 'Stopped' || !s0.playback_status) {
       warn('【结论·关键】会话被禁用/处于 Stopped，任务栏不会显示任何媒体卡片。这说明前台从未成功推送 smtc_update（smtc_update 未送达 Rust，或你还没真正播放）。请在音乐模块播放一首，看浏览器控制台是否出现绿字「[SMTC] push OK」；若出现红字「[SMTC] push FAIL」即推送失败，把报错贴出。');
     } else if (s0.is_enabled === true && (s0.playback_status === 'Playing' || s0.playback_status === 'Paused')) {
-      log('【结论】会话已启用且处于 ' + s0.playback_status + '，任务栏理应显示「岸灯鸢花」媒体卡片。若仍空白 → 属 Windows 任务栏/Shell 显示缓存，重启 explorer（任务管理器结束 Windows 资源管理器后重新运行）即可。');
+      log('【结论】会话已启用且处于 ' + s0.playback_status + '，任务栏理应显示「安得云荟」媒体卡片。若仍空白 → 属 Windows 任务栏/Shell 显示缓存，重启 explorer（任务管理器结束 Windows 资源管理器后重新运行）即可。');
     } else {
       log('【结论】窗口/进程 AUMID 与注册表 DisplayName 均齐全，状态见上。');
     }

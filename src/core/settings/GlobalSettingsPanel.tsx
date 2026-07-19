@@ -696,7 +696,7 @@ export function GlobalSettingsPanel() {
                   <h2 className="text-xl font-bold text-neutral-800 dark:text-stone-100">关于软件</h2>
                 </div>
                 <div className="space-y-2 text-sm">
-                  <p className="text-neutral-600 dark:text-stone-300">岸灯鸢花</p>
+                  <p className="text-neutral-600 dark:text-stone-300">安得云荟</p>
                   <p className="text-neutral-500 dark:text-stone-400">版本: 2.0</p>
                   <p className="text-neutral-500 dark:text-stone-400">作者: Rosary · 感谢你的使用</p>
                 </div>
@@ -744,7 +744,7 @@ export function GlobalSettingsPanel() {
                 <div className="flex justify-between items-center p-4">
                   <div className="flex items-center gap-2">
                     <ExternalLink size={16} className="text-neutral-400 dark:text-stone-500" />
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">前往岸灯鸢花发布页</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">前往安得云荟发布页</span>
                   </div>
                   <button
                     className="px-3 py-1.5 rounded-lg bg-neutral-800 text-white text-sm hover:bg-neutral-700 transition-colors"
