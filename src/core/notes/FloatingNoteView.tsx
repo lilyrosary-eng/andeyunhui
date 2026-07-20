@@ -168,12 +168,12 @@ export function FloatingNoteView() {
   }
 
   return (
-    <div className={`flex flex-col h-screen bg-white/15 dark:bg-stone-800/15 text-neutral-800 dark:text-stone-200 overflow-hidden ${isFixed ? 'pointer-events-none' : ''}`}>
+    <div className={`flex flex-col h-screen rounded-2xl border border-white/25 dark:border-stone-700/40 bg-white/[0.18] dark:bg-stone-800/[0.18] text-neutral-800 dark:text-stone-200 overflow-hidden ${isFixed ? 'pointer-events-none' : ''}`}>
       {/* ====== 自定义标题栏（拖拽区；固定时移除拖拽属性，不可拖动）====== */}
       <div
         data-tauri-drag-region={isFixed ? undefined : ''}
         style={isFixed ? undefined : DRAG_STYLE}
-        className="flex items-center justify-between gap-2 px-3 py-2.5 bg-white/15 dark:bg-stone-800/15 border-b border-neutral-200/30 dark:border-stone-700/30 select-none"
+        className="flex items-center justify-between gap-2 px-3 py-2.5 bg-white/[0.18] dark:bg-stone-800/[0.18] border-b border-neutral-200/30 dark:border-stone-700/30 select-none"
       >
         {/* 标题（浮窗只读） */}
         <span className="flex-1 min-w-0 text-sm font-medium truncate ml-1 select-none">

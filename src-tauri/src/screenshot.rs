@@ -49,6 +49,10 @@ pub struct WindowInfo {
     /// 是否为本进程自身窗口（截图覆盖窗 / 主窗等）。
     /// 前端命中测试时跳过自身窗口，确保高亮的是「桌面上的目标窗口」而非我们的遮罩。
     pub is_self: bool,
+    /// 是否为任务栏（屏幕底部那条系统栏）。前端点选它 = 整屏捕获（含任务栏），
+    /// 其余窗口 / 框选一律裁剪掉任务栏那条带，做到「仅点任务栏才截任务栏」。
+    #[serde(rename = "isTaskbar")]
+    pub is_taskbar: bool,
 }
 
 /// 计算「所有显示器物理矩形」的并集（多屏覆盖）。
@@ -114,18 +118,23 @@ unsafe extern "system" fn enum_callback(
     if gwl_style & winapi::um::winuser::WS_CHILD as i32 != 0 {
         return 1;
     }
-    // 跳过 shell 窗口（整屏桌面背景 / 任务栏 / 桌面合成层等）
+    // 跳过 shell 窗口（整屏桌面背景 / 桌面合成层等）。
+    // 注意：任务栏（Shell_TrayWnd / Shell_SecondaryTrayWnd）**不再跳过**，改为纳入可识别列表
+    // （标记 is_taskbar），供前端实现「点任务栏=整屏（含任务栏）、其余一律不截任务栏」。
     let mut cls: [u16; 256] = [0; 256];
     let cls_len = winapi::um::winuser::GetClassNameW(hwnd, cls.as_mut_ptr(), 256);
-    if cls_len > 0 {
-        let class = String::from_utf16_lossy(&cls[..cls_len as usize]);
-        match class.as_str() {
-            "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
-            | "Windows.UI.Composition.DesktopWindowManager"
-            | "ApplicationFrameInputSinkWindow" | "MsgBox" => return 1,
-            _ => {}
-        }
+    let class = if cls_len > 0 {
+        String::from_utf16_lossy(&cls[..cls_len as usize])
+    } else {
+        String::new()
+    };
+    match class.as_str() {
+        "Progman" | "WorkerW"
+        | "Windows.UI.Composition.DesktopWindowManager"
+        | "ApplicationFrameInputSinkWindow" | "MsgBox" => return 1,
+        _ => {}
     }
+    let is_taskbar = class == "Shell_TrayWnd" || class == "Shell_SecondaryTrayWnd";
     // 使用 DWM 扩展边框（DWMWA_EXTENDED_FRAME_BOUNDS）替代 GetWindowRect。
     // GetWindowRect 包含 Windows 10/11 的不可见调整边框（每侧约 7px），导致高亮框比实际窗口大一圈。
     // DWM 扩展边框精确匹配可见窗口边缘，消除「多了一点」的视觉偏差。
@@ -176,6 +185,7 @@ unsafe extern "system" fn enum_callback(
         width,
         height,
         is_self,
+        is_taskbar,
     });
     1
 }

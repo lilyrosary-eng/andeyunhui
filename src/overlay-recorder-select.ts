@@ -30,6 +30,7 @@ interface Win {
   width: number;
   height: number;
   is_self?: boolean;
+  isTaskbar?: boolean;
 }
 
 // ========== 坐标信息（从 Rust recorder-select-ready 事件获取）==========
@@ -317,6 +318,24 @@ overlay.addEventListener("pointermove", (e) => {
   }
 });
 
+// 工作区裁剪：把任务栏那条带从录屏区域中剔除（仅点任务栏本身才整屏含任务栏）
+function clipToWorkArea(r: { x: number; y: number; w: number; h: number }) {
+  const tb = windows.find((win) => win.isTaskbar);
+  if (!tb) return r;
+  const vw = window.innerWidth * scale;
+  const vh = window.innerHeight * scale;
+  const tbx = tb.x, tby = tb.y, tbw = tb.width, tbh = tb.height;
+  let wa: { x: number; y: number; w: number; h: number };
+  if (tby + tbh >= vh - 2) wa = { x: 0, y: 0, w: vw, h: tby };
+  else if (tby <= 2) wa = { x: 0, y: tby + tbh, w: vw, h: vh - (tby + tbh) };
+  else if (tbx + tbw >= vw - 2) wa = { x: 0, y: 0, w: tbx, h: vh };
+  else wa = { x: tbx + tbw, y: 0, w: vw - (tbx + tbw), h: vh };
+  const nx = Math.max(r.x, wa.x), ny = Math.max(r.y, wa.y);
+  const nx2 = Math.min(r.x + r.w, wa.x + wa.w), ny2 = Math.min(r.y + r.h, wa.y + wa.h);
+  if (nx2 <= nx || ny2 <= ny) return r;
+  return { x: nx, y: ny, w: nx2 - nx, h: ny2 - ny };
+}
+
 overlay.addEventListener("pointerup", (e) => {
   if (e.button !== 0) return;
   pointerDown = false;
@@ -324,7 +343,7 @@ overlay.addEventListener("pointerup", (e) => {
   (e.target as Element).releasePointerCapture?.(e.pointerId);
 
   if (dragging) {
-    // 拖拽结束：使用选区
+    // 拖拽结束：使用选区（物理像素），并剔除任务栏那条带
     dragging = false;
     const x = Math.min(startX, e.clientX);
     const y = Math.min(startY, e.clientY);
@@ -338,10 +357,19 @@ overlay.addEventListener("pointerup", (e) => {
     const physY = Math.round(oy + y * scale);
     const physW = Math.round(w * scale);
     const physH = Math.round(h * scale);
-    void startRecordingWithRegion(physX, physY, physW, physH);
+    const clipped = clipToWorkArea({ x: physX, y: physY, w: physW, h: physH });
+    void startRecordingWithRegion(clipped.x, clipped.y, clipped.w, clipped.h);
   } else if (downWin) {
-    // 干净单击窗口：使用窗口矩形作为录屏区域
-    void startRecordingWithRegion(downWin.x, downWin.y, downWin.width, downWin.height);
+    if (downWin.isTaskbar) {
+      // 点任务栏本身 = 整屏录制（含任务栏）
+      const vw = Math.round(window.innerWidth * scale);
+      const vh = Math.round(window.innerHeight * scale);
+      void startRecordingWithRegion(ox, oy, vw, vh);
+    } else {
+      // 干净单击窗口：使用窗口矩形（物理像素），并剔除任务栏那条带
+      const clipped = clipToWorkArea({ x: downWin.x, y: downWin.y, w: downWin.width, h: downWin.height });
+      void startRecordingWithRegion(clipped.x, clipped.y, clipped.w, clipped.h);
+    }
   } else {
     cancel();
   }
