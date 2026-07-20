@@ -736,7 +736,7 @@ export function GlobalSettingsPanel() {
                   </div>
                   <button
                     className="px-3 py-1.5 rounded-lg bg-neutral-800 text-white text-sm hover:bg-neutral-700 transition-colors"
-                    onClick={() => { openUrl('https://github.com/lilyrosary-eng/andengyuanhua').catch(() => {}); }}
+                    onClick={() => { openUrl('https://github.com/lilyrosary-eng/andeyunhui').catch(() => {}); }}
                   >
                     检查更新
                   </button>
