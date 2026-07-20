@@ -233,7 +233,7 @@ impl McpStdioSession {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {
-                "name": "andengyuanhua-ide",
+                "name": "andeyunhui-ide",
                 "version": "1.0.0"
             }
         });
