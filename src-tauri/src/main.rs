@@ -42,43 +42,17 @@ use andeyunhui_lib::services::mcp_service;
 use andeyunhui_lib::smtc::*;
 use std::sync::Mutex;
 
-/// 创建托盘右键菜单窗口（独立 WebView，承载「我们的 UI」样式菜单）。
-/// 设计为「创建一次、反复复用」：首次创建后隐藏，右键托盘时 only show。
-fn create_tray_menu_window(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::WebviewUrl;
-    if app.get_webview_window("tray-menu").is_some() {
-        return Ok(());
-    }
-    tauri::WebviewWindowBuilder::new(
-        app,
-        "tray-menu",
-        WebviewUrl::App("index.html?overlay=tray-menu".into()),
-    )
-    .title("菜单")
-    .inner_size(220.0, 156.0)
-    .decorations(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .transparent(true)
-    .shadow(false)
-    .resizable(false)
-    .visible(false)
-    .build()?;
-    Ok(())
-}
-
-/// 在托盘图标附近弹出菜单窗口（默认任务栏在底部 → 置于图标上方）
+/// 在托盘图标附近弹出菜单窗口（默认任务栏在底部 → 置于图标上方）。
+///
+/// 注意：菜单窗口改由前端 `new WebviewWindow` 创建（与浮窗同款安全路径）。
+/// Rust 侧在 setup / 托盘事件回调里同步 `WebviewWindowBuilder::build()` 会因 WebView2
+/// 初始化时序或主线程重入而死锁 / 0x8007139F，前端 API 由 Tauri 正确派发、不会死锁。
+/// 此处仅把光标物理像素位置发给主窗，由前端建窗并定位、显示。
 fn open_tray_menu(app: &tauri::AppHandle, pos: tauri::PhysicalPosition<f64>) {
-    let _ = create_tray_menu_window(app);
-    if let Some(w) = app.get_webview_window("tray-menu") {
-        // 事件 position 已是物理像素，直接用 PhysicalPosition，避免 DPI 二次缩放错位
-        let _ = w.set_position(tauri::PhysicalPosition::new(
-            (pos.x - 110.0).max(4.0),
-            (pos.y - 160.0).max(4.0),
-        ));
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
+    let _ = app.emit(
+        "open-tray-menu",
+        serde_json::json!({ "x": pos.x, "y": pos.y }),
+    );
 }
 
 #[tauri::command]
@@ -328,15 +302,16 @@ fn main() {
             // 托盘菜单改为自定义 UI 窗口（tray-menu），不再使用原生菜单。
             // 交互：左键 → 唤出主界面；右键 → 弹出「我们的 UI」菜单（回到主界面 / 关闭软件）。
 
-            // 预创建截图覆盖窗口与托盘菜单窗口（隐藏复用，避免截图/菜单时的卡顿）
-            let _ = create_overlay_window(app.handle().clone());
+            // 注：截图覆盖窗(screenshot-overlay)与托盘菜单窗(tray-menu)不再在此同步 build()——
+            // setup 阶段 WebView2 环境往往尚未就绪，同步创建会导致 HWND 建出但 WebView2 初始化失败
+            // (0x8007139F)，进而 scale_factor() 报 "无法获取缩放比"、show() 显示坏窗。
+            // 二者改由前端 new WebviewWindow 在环境就绪后创建（与浮窗同款安全路径）。
             // 预创建录屏区域选择覆盖窗（隐藏），首次使用时无需等待 WebView2 初始化
             let _ = recording_service::create_recorder_select_window(app.handle());
             // 预创建录屏控制台窗口（隐藏），避免在 sync 命令中 build 导致 WebView2 主线程重入死锁
             let _ = recording_service::create_recorder_widget_window(app.handle());
             // 预创建录屏区域边框窗（隐藏），start_recording 时按录制区域定位并显示
             let _ = recording_service::create_recording_border_window(app.handle());
-            let _ = create_tray_menu_window(app.handle());
 
             // 托盘图标：优先使用默认窗口图标；若极端情况下为 None，则从资源目录
             // 回退到实际图标文件，避免回退成全透明不可见图标导致"无法交互"

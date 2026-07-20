@@ -9,5 +9,5 @@
   "hostApiVersion": 1,
   "parent": "niaoluo",
   "codename": "茑萝",
-  "requiredAssets": ["niaoluo/ide/codemirror/index.js"]
+  "requiredAssets": ["茑萝/ide/codemirror/index.js"]
 }

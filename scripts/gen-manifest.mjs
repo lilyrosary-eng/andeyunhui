@@ -32,7 +32,7 @@ function scanRecursive(dir, base) {
   return files;
 }
 
-// 递归查找所有含 manifest.json 的插件目录（支持嵌套如 niaoluo/wps）
+// 递归查找所有含 manifest.json 的插件目录（支持嵌套如 茑萝/wps）
 function findPlugins(dir, plugins) {
   const entries = readdirSync(dir, { withFileTypes: true });
   for (const e of entries) {
@@ -61,7 +61,7 @@ function findPlugins(dir, plugins) {
         files,
       });
     } catch {
-      // 不是插件目录 → 递归深入（如 niaoluo/）
+      // 不是插件目录 → 递归深入（如 茑萝/）
       findPlugins(full, plugins);
     }
   }

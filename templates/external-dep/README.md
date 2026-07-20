@@ -21,7 +21,7 @@
 
 3. **登记构建目标**：在 `scripts/build-external-deps.mjs` 的 `TARGETS` 数组追加一项：
    ```js
-   { outDir: 'niaoluo/myplugin/mydep', entry: 'mydep-entry.js', global: '__EXT_MYDEP__' },
+   { outDir: '茑萝/myplugin/mydep', entry: 'mydep-entry.js', global: '__EXT_MYDEP__' },
    ```
    `outDir` 是相对 `external-deps/` 的输出目录，`entry` 是 `_build/` 下的入口文件名，`global` 是 IIFE 内部全局名（仅打包用，不影响挂载）。
 
@@ -29,17 +29,17 @@
    ```bash
    node scripts/build-external-deps.mjs
    ```
-   该脚本已接入 `pnpm predev`，开发启动会自动重建。`external-deps/niaoluo/myplugin/mydep/index.js` 即生成。
+   该脚本已接入 `pnpm predev`，开发启动会自动重建。`external-deps/茑萝/myplugin/mydep/index.js` 即生成。
 
 5. **声明与加载**：在插件 `manifest.json`：
    ```json
-   { "deps": ["mydep"], "requiredAssets": ["niaoluo/myplugin/mydep/index.js"] }
+   { "deps": ["mydep"], "requiredAssets": ["茑萝/myplugin/mydep/index.js"] }
    ```
    插件里加载（沙箱已因 `deps` 放开 `Function`）：
    ```ts
    const w = window as any;
    if (w.__EXT_MYDEP__) return w.__EXT_MYDEP__;
-   const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: 'niaoluo/myplugin/mydep/index.js' });
+   const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: '茑萝/myplugin/mydep/index.js' });
    if (!code) throw new Error('外部依赖未找到');
    new Function(code)();           // 全局作用域执行，挂载到 window.__EXT_MYDEP__
    return w.__EXT_MYDEP__;
@@ -48,5 +48,5 @@
 ## 注意
 
 - `external-deps/_build/` 被 gitignore 忽略：入口源只在本地存在，**不要**把重要依赖的「唯一来源」只放在 `_build`；本 `templates/external-dep/entry.js` 才是随仓库分发的模板。若希望入口源也入库，可调整 `.gitignore` 或把真实入口放在别处（如本 `templates/` 下）。
-- 加载失败不要静默降级到内联实现（除非必要）；参考 `plugins/niaoluo/ide` 给出明确错误与构建提示，便于排查。
+- 加载失败不要静默降级到内联实现（除非必要）；参考 `plugins/茑萝/ide` 给出明确错误与构建提示，便于排查。
 - Windows 下 `read_external_dep_file` 会规范化路径（含 `\\?\` 前缀）做越界防护，正常无需关心。

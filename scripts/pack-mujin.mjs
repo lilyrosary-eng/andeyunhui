@@ -4,7 +4,7 @@
 // 用户把 .mujin 放到 user_external_deps/ 目录，应用自动解压（Rust 端 zip crate）。
 //
 // 大型模块（茑萝/全局/阅读）保留母文件夹结构：
-//   niaoluo/ide/codemirror.mujin, niaoluo/wps/tiptap.mujin, ...
+//   茑萝/ide/codemirror.mujin, 茑萝/ide/minisearch.mujin, 茑萝/wps/tiptap.mujin, ...
 //   全局/ffmpeg.mujin, 全局/basic-pitch.mujin
 //
 // 不可再分的依赖（tiptap 等即使内部有子文件夹）整体打包成单个 .mujin。
@@ -30,9 +30,10 @@ const outputDir = join(rootDir, 'dist-dlc', 'external-deps');
 //     也整体打包成单个 .mujin（CreateFromDirectory 会递归整个目录树）
 //   - 新增依赖只需在此数组追加一条声明
 const TARGETS = [
-  // 茑萝子模块（niaoluo/ide/、niaoluo/wps/ 母文件夹结构）
-  { src: 'niaoluo/ide/codemirror', out: 'niaoluo/ide/codemirror.mujin' },
-  { src: 'niaoluo/wps/tiptap',     out: 'niaoluo/wps/tiptap.mujin' },
+  // 茑萝子模块（茑萝/ide/、茑萝/wps/ 母文件夹结构）
+  { src: '茑萝/ide/codemirror', out: '茑萝/ide/codemirror.mujin' },
+  { src: '茑萝/ide/minisearch', out: '茑萝/ide/minisearch.mujin' },
+  { src: '茑萝/wps/tiptap',     out: '茑萝/wps/tiptap.mujin' },
   // 全局模块（全局/ 母文件夹结构）
   { src: '全局/ffmpeg',            out: '全局/ffmpeg.mujin' },
   { src: '全局/basic-pitch',       out: '全局/basic-pitch.mujin' },
@@ -94,10 +95,10 @@ const readmeContent = `安得云荟 · 外部依赖包（.mujin）
 
 安装方式：
   把 .mujin 文件放到应用数据目录的 user_external_deps/ 文件夹下。
-  - 母文件夹（如 niaoluo/ide/、niaoluo/wps/、全局/）需要手动创建
+  - 母文件夹（如 茑萝/ide/、茑萝/wps/、全局/）需要手动创建
   - 例如：
-      user_external_deps/niaoluo/ide/codemirror.mujin
-      user_external_deps/niaoluo/wps/tiptap.mujin
+      user_external_deps/茑萝/ide/codemirror.mujin
+      user_external_deps/茑萝/wps/tiptap.mujin
   - 应用启动时自动解压，源文件 mtime 匹配时跳过（速度极快）
   - 用户安装的依赖可覆盖打包资源（external-deps/）的同名依赖
 

@@ -4,7 +4,7 @@
 // 用户把 .mufurong 放到 user_plugins/ 目录，应用自动解压（Rust 端 zip crate）
 //
 // 大型模块（茑萝/全局/阅读）保留母文件夹结构：
-//   niaoluo/ai.mufurong, niaoluo/gongjuxiang.mufurong, ...
+//   茑萝/ai.mufurong, 茑萝/gongjuxiang.mufurong, ...
 //   全局/screen-recorder.mufurong
 //
 // 打包工具：PowerShell [System.IO.Compression.ZipFile]::CreateFromDirectory()
@@ -80,7 +80,7 @@ for (const { relPath, dir } of plugins) {
 }
 
 // 5. 调用 pack-mujin.mjs 把 external-deps/ 打包成 .mujin（与 .mufurong 同源机制）
-// .mujin 输出到 dist-dlc/external-deps/ 下，保留母文件夹结构（niaoluo/ide/、全局/ 等）
+// .mujin 输出到 dist-dlc/external-deps/ 下，保留母文件夹结构（茑萝/ide/、全局/ 等）
 if (existsSync(externalDir)) {
   console.log('[Pack] 调用 pack-mujin.mjs 打包 .mujin 依赖 ...');
   try {
@@ -100,14 +100,14 @@ const readmeContent = `安得云荟 · DLC 插件与依赖包
 安装方式：
 1. 插件（.mufurong 文件）：
    把 .mufurong 文件放到应用数据目录的 user_plugins/ 文件夹下。
-   - 母文件夹（如 niaoluo/、全局/）需要手动创建
-   - 例如：user_plugins/niaoluo/ai.mufurong
+   - 母文件夹（如 茑萝/、全局/）需要手动创建
+   - 例如：user_plugins/茑萝/ai.mufurong
    - 应用启动时自动解压，版本匹配时跳过（速度极快）
 
 2. 外部依赖（.mujin 文件）：
    把 .mujin 文件放到应用数据目录的 user_external_deps/ 文件夹下。
-   - 母文件夹（如 niaoluo/ide/、niaoluo/wps/、全局/）需要手动创建
-   - 例如：user_external_deps/niaoluo/ide/codemirror.mujin
+   - 母文件夹（如 茑萝/ide/、茑萝/wps/、全局/）需要手动创建
+   - 例如：user_external_deps/茑萝/ide/codemirror.mujin
    - 应用启动时自动解压，源文件 mtime 匹配时跳过（速度极快）
    - 用户安装的 .mujin 优先于打包资源 external-deps/，可覆盖同名依赖
 

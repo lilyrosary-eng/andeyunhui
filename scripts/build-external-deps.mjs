@@ -1,6 +1,6 @@
 // 构建 external-deps 下的外部依赖为独立 IIFE 包（按需加载，不进插件本体）。
-// 目前：CodeMirror 6 → external-deps/niaoluo/ide/codemirror/index.js
-//       TipTap 2     → external-deps/niaoluo/wps/tiptap/index.js（茑萝「文档编辑器」插件内核，与宿主共享 React）
+// 目前：CodeMirror 6 → external-deps/茑萝/ide/codemirror/index.js
+//       TipTap 2     → external-deps/茑萝/wps/tiptap/index.js（茑萝「文档编辑器」插件内核，与宿主共享 React）
 // 用法：node scripts/build-external-deps.mjs
 import { build } from 'esbuild';
 import { mkdirSync, existsSync } from 'node:fs';
@@ -59,9 +59,9 @@ const hostExternalsPlugin = {
 // 各外部依赖：outDir 输出目录（分类到对应插件子目录），entry 为 _build 下入口，global 为 IIFE 内部全局名（仅打包用）
 // loader: 可选，为该目标指定 esbuild loader（如 Univer 的 CSS 用 text 内联到 JS）
 const TARGETS = [
-  { outDir: 'niaoluo/ide/codemirror', entry: 'codemirror-entry.js', global: '__CM_BUNDLE__' },
-  { outDir: 'niaoluo/ide/minisearch', entry: 'minisearch-entry.js', global: '__MINISEARCH_BUNDLE__' },
-  { outDir: 'niaoluo/wps/tiptap', entry: 'tiptap-entry.js', global: '__TIPTAP_BUNDLE__' },
+  { outDir: '茑萝/ide/codemirror', entry: 'codemirror-entry.js', global: '__CM_BUNDLE__' },
+  { outDir: '茑萝/ide/minisearch', entry: 'minisearch-entry.js', global: '__MINISEARCH_BUNDLE__' },
+  { outDir: '茑萝/wps/tiptap', entry: 'tiptap-entry.js', global: '__TIPTAP_BUNDLE__' },
 ];
 
 for (const t of TARGETS) {

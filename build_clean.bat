@@ -34,7 +34,7 @@ REM    - prepare-bundled-dlc.mjs detects it and creates empty bundled-dlc/ place
 set BUILD_CLEAN=1
 
 REM 2. Run Tauri build (beforeBuildCommand handles the BUILD_CLEAN branch)
-REM    gongfang is a plugin module (plugins/niaoluo/gongfang). The clean installer does
+REM    gongfang is a plugin module (plugins/茑萝/gongfang). The clean installer does
 REM    NOT bundle the gongfang plugin or its heavy external deps - they are distributed
 REM    independently as DLC via build_dlc.bat (.mufurong plugin + .mujin deps). However,
 REM    the gongfang backend (Rust Tauri commands) must be compiled into the binary so

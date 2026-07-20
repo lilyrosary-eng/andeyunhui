@@ -10,7 +10,7 @@
   "deps": ["tiptap"],
   "parent": "niaoluo",
   "codename": "茑萝",
-  "requiredAssets": ["niaoluo/wps/tiptap/index.js"],
+  "requiredAssets": ["茑萝/wps/tiptap/index.js"],
   "category": "办公",
   "desc": "办公套件：文档、演示文件、表格"
 }

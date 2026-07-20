@@ -8,8 +8,8 @@
 //
 // 产物结构：
 //   bundled-dlc/
-//     plugins/         *.mufurong（含母文件夹 niaoluo/、全局/）
-//     external-deps/   *.mujin（含母文件夹 niaoluo/ide/、全局/）
+//     plugins/         *.mufurong（含母文件夹 茑萝/、全局/）
+//     external-deps/   *.mujin（含母文件夹 茑萝/ide/、全局/）
 //
 // BUILD_CLEAN=1（精简打包）：跳过打包，只创建空 bundled-dlc/ + .gitkeep，
 // 安装包不含任何插件/依赖，用户后续可下载 .mufurong/.mujin 自行导入。

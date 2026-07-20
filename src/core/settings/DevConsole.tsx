@@ -286,14 +286,14 @@ export function DevConsole() {
       // 写到 user_plugins/<fileName>，extract_mufurong_plugins 会自动扫描并解压
       await invoke('install_user_plugin_file', { targetSubpath: fileName, data: bytes });
       await invoke('refresh_plugins');
-      pushOutput('out', `✓ 已安装插件 ${fileName}（位于 user_plugins/ 根，建议按需移动到母文件夹如 niaoluo/）`);
+      pushOutput('out', `✓ 已安装插件 ${fileName}（位于 user_plugins/ 根，建议按需移动到母文件夹如 茑萝/）`);
     } else if (lower.endsWith('.mujin')) {
       pushOutput('sys', `→ 安装依赖: ${fileName}`);
       const bytes = await readBytesViaRust(filePath);
       // 写到 user_external_deps/ 根目录，用户可后续移动到母文件夹
       await invoke('install_dep_file', { targetSubpath: fileName, data: bytes });
       await invoke('refresh_plugins');
-      pushOutput('out', `✓ 已安装依赖 ${fileName}（位于 user_external_deps/ 根，建议按需移动到母文件夹如 niaoluo/ide/）`);
+      pushOutput('out', `✓ 已安装依赖 ${fileName}（位于 user_external_deps/ 根，建议按需移动到母文件夹如 茑萝/ide/）`);
     } else {
       pushOutput('err', '不支持的文件类型（仅 .mufurong / .mujin）');
     }
