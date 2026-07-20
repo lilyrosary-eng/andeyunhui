@@ -1115,6 +1115,25 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     let _ = win.show();
     let _ = win.set_focus();
 
+    // 首开兜底：首个覆盖窗 WebView2 冷启动 + 事件竞态常导致「首次打开窗口识别失效 /
+    // 鼠标移动无反应」，延时 150ms 重推一次窗口列表，确保前端拿到完整列表（第二次已预热）。
+    if let Some(rec) = app.get_webview_window(RECORDER_SELECT_LABEL) {
+        let app_h = app.clone();
+        let rec_h = rec.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let (vx, vy, _, _) = virtual_desktop_rect();
+            let scale = rec_h.scale_factor().unwrap_or(1.0);
+            if let Ok(windows) = crate::screenshot::list_windows() {
+                let windows = filter_self_overlay_windows(&app_h, windows);
+                let _ = rec_h.emit(
+                    "recorder-select-ready",
+                    serde_json::json!({ "ox": vx, "oy": vy, "scale": scale, "windows": windows }),
+                );
+            }
+        });
+    }
+
     Ok(())
 }
 

@@ -30,6 +30,42 @@ use pro_tools_kit::commands::*;
 use gongfang_kit::commands::*;
 use andeyunhui_lib::screenshot::{self, *};
 use andeyunhui_lib::TrayModeState;
+
+// 文件关联：以安得云荟打开（一次性列表，进程退出即销毁）
+struct PendingOpenFiles(pub std::sync::Mutex<Vec<String>>);
+
+#[tauri::command]
+fn take_pending_open_files(state: tauri::State<PendingOpenFiles>) -> Vec<String> {
+    let mut v = state.0.lock().unwrap();
+    let out = v.clone();
+    v.clear();
+    out
+}
+
+// 支持「以安得云荟打开」的扩展名（与前端 openWith.ts 的 MODULE_BY_EXT 保持一致）
+fn is_supported_file_assoc(arg: &str) -> Option<std::path::PathBuf> {
+    const EXTS: &[&str] = &[
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff",
+        "mp4", "mkv", "mov", "avi", "webm", "flv",
+        "mp3", "flac", "wav", "ogg", "m4a", "aac",
+        "pdf", "epub", "txt", "md", "docx", "pptx", "xlsx", "csv",
+    ];
+    // Windows 文件关联启动时会把文件路径作为启动参数传入（也可能是 file:// 形式）
+    let path = if let Some(rest) = arg.strip_prefix("file://") {
+        std::path::PathBuf::from(rest.strip_prefix('/').unwrap_or(rest))
+    } else {
+        std::path::PathBuf::from(arg)
+    };
+    if !path.is_file() {
+        return None;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase());
+    if ext.map(|e| EXTS.contains(&e.as_str())).unwrap_or(false) {
+        Some(path)
+    } else {
+        None
+    }
+}
 use andeyunhui_lib::TrayHolder;
 use andeyunhui_lib::services::lyrics_service;
 use andeyunhui_lib::services::recording_service;
@@ -200,6 +236,22 @@ fn main() {
                 .unwrap()
         })
         .setup(|app| {
+            app.manage(PendingOpenFiles(Default::default()));
+            // 文件关联：以安得云荟打开（Windows 上通过启动参数传入文件路径）。
+            // 存入一次性列表（关闭软件即销毁），并广播给前端路由到对应模块。
+            {
+                let paths: Vec<String> = std::env::args()
+                    .skip(1)
+                    .filter_map(|a| is_supported_file_assoc(&a))
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                if !paths.is_empty() {
+                    if let Some(st) = app.try_state::<PendingOpenFiles>() {
+                        st.0.lock().unwrap().extend(paths.clone());
+                    }
+                    let _ = app.emit("open-with-files", paths);
+                }
+            }
             // ============ Windows 原生 SMTC（任务栏「正在播放」）============
             // 注册本进程媒体会话，显示「安得云荟」+ 元信息，并接管系统媒体键。
             init_smtc(app.handle().clone());
@@ -929,6 +981,7 @@ fn main() {
             mcp_service::mcp_call_tool,
             // ========== 全局：开发者控制台（关于页面 · 联网/依赖安装）==========
             dev_console_http,
+            take_pending_open_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

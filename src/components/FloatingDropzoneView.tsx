@@ -131,15 +131,19 @@ export function FloatingDropzoneView() {
 
   return (
     <div
+      className="floating-dropzone-root"
       style={{
         width: '100vw',
         height: '100vh',
         display: 'flex',
         flexDirection: 'column',
         backgroundColor: 'transparent',
-        color: '#e5e5e5',
+        color: '#23402f',
         fontFamily: '-apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
         fontSize: '13px',
+        borderRadius: '16px',
+        overflow: 'hidden',
+        border: '1px solid rgba(110, 175, 135, 0.55)',
       }}
     >
       {/* 顶部拖拽条 + 关闭 */}
@@ -154,8 +158,8 @@ export function FloatingDropzoneView() {
           padding: '0 8px',
           cursor: 'move',
           userSelect: 'none',
-          background: 'rgba(20, 20, 22, 0.92)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+          background: 'rgba(208, 232, 214, 0.5)',
+          borderBottom: '1px solid rgba(110, 175, 135, 0.4)',
         }}
       >
         <Inbox size={14} style={{ opacity: 0.7, flexShrink: 0 }} />
@@ -168,7 +172,7 @@ export function FloatingDropzoneView() {
           style={{
             background: 'none',
             border: 'none',
-            color: 'rgba(255,255,255,0.5)',
+            color: 'rgba(35,64,47,0.6)',
             cursor: 'pointer',
             padding: '4px',
             borderRadius: '4px',
@@ -181,7 +185,7 @@ export function FloatingDropzoneView() {
       </div>
 
       {/* 中转站主体（与图标栏共享数据源，自动同步；文本文件可「打开」） */}
-      <div style={{ flex: 1, overflow: 'hidden', background: 'rgba(28, 28, 32, 0.96)' }}>
+      <div style={{ flex: 1, overflow: 'hidden', background: 'rgba(224, 240, 228, 0.45)' }}>
         <TransferStationPanel onOpenReadableFile={handleOpenReadableFile} />
       </div>
     </div>

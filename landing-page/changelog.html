@@ -5,7 +5,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>更新日志 · 安得云荟</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" />
+    <!-- lucide 图标：非阻塞预加载，避免外部 CDN 阻塞首屏渲染 -->
+    <link rel="preload" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" onload="this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css"></noscript>
     <!-- 用于渲染 Markdown -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>

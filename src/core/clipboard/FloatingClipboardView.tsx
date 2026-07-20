@@ -246,7 +246,7 @@ export function FloatingClipboardView() {
         height: '100vh',
         display: 'flex',
         flexDirection: 'column',
-        backgroundColor: 'rgba(30, 30, 35, 0.92)',
+        backgroundColor: 'rgba(28, 28, 33, 0.6)',
         backdropFilter: 'blur(16px)',
         WebkitBackdropFilter: 'blur(16px)',
         borderRadius: '12px',

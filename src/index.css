@@ -230,6 +230,14 @@
   .main-panel-bg {
     background-color: var(--main-panel-bg);
   }
+  /* ========== 中转站浮窗：低饱和度浅绿整体配色（仅作用于浮窗，不影响主窗图标栏的中转站）========== */
+  .floating-dropzone-root .main-panel-bg {
+    background-color: rgba(224, 240, 228, 0.42) !important;
+  }
+  .floating-dropzone-root .glass-panel {
+    background-color: rgba(255, 255, 255, 0.30) !important;
+    border-color: rgba(110, 175, 135, 0.40) !important;
+  }
   /* 极细边框质感 — 适用于播放器、编辑器、查看器等模块的主内容区 */
   .subtle-frame {
     border: 5px solid var(--border);

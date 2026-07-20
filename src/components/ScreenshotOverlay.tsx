@@ -419,6 +419,27 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     }
   };
 
+  // 工作区裁剪：把任务栏那条带从选区中剔除（仅点任务栏本身才整屏含任务栏）。
+  // 任务栏窗口由 Rust list_windows 以 isTaskbar 标记并加入列表；其矩形为物理像素，
+  // 这里换算到覆盖窗 CSS 坐标后，与「整屏剔除任务栏所在那条边」求交。
+  const clipToWorkArea = (r: { x: number; y: number; w: number; h: number }) => {
+    const tb = windows.find((w) => w.isTaskbar);
+    if (!tb) return r;
+    const iw = window.innerWidth, ih = window.innerHeight;
+    const tbx = (tb.x - ox) / scale, tby = (tb.y - oy) / scale;
+    const tbw = tb.width / scale, tbh = tb.height / scale;
+    // 工作区 = 整屏去掉任务栏那条带（底 / 顶 / 右 / 左）
+    let wa: { x: number; y: number; w: number; h: number };
+    if (tby + tbh >= ih - 2) wa = { x: 0, y: 0, w: iw, h: tby };
+    else if (tby <= 2) wa = { x: 0, y: tby + tbh, w: iw, h: ih - (tby + tbh) };
+    else if (tbx + tbw >= iw - 2) wa = { x: 0, y: 0, w: tbx, h: ih };
+    else wa = { x: tbx + tbw, y: 0, w: iw - (tbx + tbw), h: ih };
+    const nx = Math.max(r.x, wa.x), ny = Math.max(r.y, wa.y);
+    const nx2 = Math.min(r.x + r.w, wa.x + wa.w), ny2 = Math.min(r.y + r.h, wa.y + wa.h);
+    if (nx2 <= nx || ny2 <= ny) return r; // 完全落在任务栏内等极端情况保持原样
+    return { x: nx, y: ny, w: nx2 - nx, h: ny2 - ny };
+  };
+
   const onPointerUp = () => {
     if (mode !== "select") return;
     const p = pendingRef.current;
@@ -428,13 +449,20 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     setMag((m) => ({ ...m, show: false }));
     if (!p) return;
     if (p.win && !p.dragging) {
-      // 干净单击窗口 → 整窗截取：窗口矩形是物理像素，需换算成覆盖窗 CSS 像素（÷scale）再截取，避免放大偏移
-      commitCrop({
+      // 干净单击窗口 → 整窗截取
+      if (p.win.isTaskbar) {
+        // 点任务栏本身 = 整屏捕获（含任务栏）
+        commitCrop({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+        return;
+      }
+      // 普通窗口：矩形是物理像素，需换算成覆盖窗 CSS 像素（÷scale）再截取，
+      // 并剔除任务栏那条带，做到「其余一律不截任务栏」。
+      commitCrop(clipToWorkArea({
         x: (p.win.x - ox) / scale,
         y: (p.win.y - oy) / scale,
         w: p.win.width / scale,
         h: p.win.height / scale,
-      });
+      }));
       return;
     }
     if (drag) {
@@ -442,7 +470,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       const w = Math.abs(x1 - x0);
       const h = Math.abs(y1 - y0);
       if (w > 12 && h > 12) {
-        commitCrop({ x: Math.min(x0, x1), y: Math.min(y0, y1), w, h });
+        commitCrop(clipToWorkArea({ x: Math.min(x0, x1), y: Math.min(y0, y1), w, h }));
       } else {
         setSelRect(null);
       }
