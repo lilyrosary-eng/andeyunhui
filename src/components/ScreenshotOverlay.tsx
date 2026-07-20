@@ -10,6 +10,7 @@ interface Win {
   y: number;
   width: number;
   height: number;
+  isTaskbar?: boolean;
 }
 
 interface ScreenshotOverlayProps {
