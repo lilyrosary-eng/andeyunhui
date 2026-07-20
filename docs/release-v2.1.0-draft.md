@@ -34,7 +34,7 @@
 
 ## 获取方式（占位）
 
-- GitHub Releases：`<发布后填入 https://github.com/lilyrosary-eng/andengyuanhua/releases 对应版本链接>`
+- GitHub Releases：`<发布后填入 https://github.com/lilyrosary-eng/andeyunhui/releases 对应版本链接>`
 - 安装包：`安得云荟_2.1.0_x64-setup.exe`（NSIS，perMachine 安装）
 - 校验和：`<发布前用 Get-FileHash 生成 SHA-256 并填入>`
 
@@ -47,6 +47,5 @@
 
 - [ ] 真实 Releases 下载链接
 - [ ] 安装包 SHA-256 校验和
-- [ ] 主界面 / 阅读等截图（见独立资产仓库 `andengyuanhua-assets`）
 - [ ] 确认最终公开发布名与仓库地址是否变更
 - [ ] 用户确认 alpha 标识（v2.1.0-alpha.1）的对外口径

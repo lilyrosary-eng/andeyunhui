@@ -1,12 +1,12 @@
 [package]
-name = "andengyuanhua"
+name = "andeyunhui"
 version = "0.1.0"
 description = "安得云荟 · 笔记"
 authors = ["Rosary"]
 edition = "2021"
 
 [lib]
-name = "andengyuanhua_lib"
+name = "andeyunhui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

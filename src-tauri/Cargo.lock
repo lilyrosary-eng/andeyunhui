@@ -89,7 +89,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "andengyuanhua"
+name = "andeyunhui"
 version = "0.1.0"
 dependencies = [
  "ammonia",

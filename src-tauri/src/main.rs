@@ -22,24 +22,24 @@ use tauri_plugin_global_shortcut::ShortcutState;
 /// dev（debug）与打包（release）使用不同端口，二者可同时运行互不阻塞；
 /// 否则用户开着打包版（托盘常驻占用 45991）时，`pnpm tauri dev` 会被误判为重复实例而直接退出。
 const INSTANCE_PORT: u16 = if cfg!(debug_assertions) { 45992 } else { 45991 };
-use andengyuanhua_lib::commands::*;
+use andeyunhui_lib::commands::*;
 // 专业模块「薄荷」工具：从内部依赖包 pro-tools-kit 引入（不再集成于主 crate 源码树）
 // Tauri 2 限制：命令不能放在 crate 根（lib.rs），故置于 commands 子模块
 use pro_tools_kit::commands::*;
 // 攻防模块后端命令（gongfang-kit crate，默认仅骨架，--features gongfang 启用爬虫等）
 use gongfang_kit::commands::*;
-use andengyuanhua_lib::screenshot::{self, *};
-use andengyuanhua_lib::TrayModeState;
-use andengyuanhua_lib::TrayHolder;
-use andengyuanhua_lib::services::lyrics_service;
-use andengyuanhua_lib::services::recording_service;
-use andengyuanhua_lib::services::diagnostics;
-use andengyuanhua_lib::services::log_service;
-use andengyuanhua_lib::services::ai_service;
-use andengyuanhua_lib::services::shell_service;
-use andengyuanhua_lib::services::lsp_service;
-use andengyuanhua_lib::services::mcp_service;
-use andengyuanhua_lib::smtc::*;
+use andeyunhui_lib::screenshot::{self, *};
+use andeyunhui_lib::TrayModeState;
+use andeyunhui_lib::TrayHolder;
+use andeyunhui_lib::services::lyrics_service;
+use andeyunhui_lib::services::recording_service;
+use andeyunhui_lib::services::diagnostics;
+use andeyunhui_lib::services::log_service;
+use andeyunhui_lib::services::ai_service;
+use andeyunhui_lib::services::shell_service;
+use andeyunhui_lib::services::lsp_service;
+use andeyunhui_lib::services::mcp_service;
+use andeyunhui_lib::smtc::*;
 use std::sync::Mutex;
 
 /// 创建托盘右键菜单窗口（独立 WebView，承载「我们的 UI」样式菜单）。
@@ -102,7 +102,7 @@ fn tray_quit(app: tauri::AppHandle) {
 fn main() {
     // 尽早设置本进程 AUMID + 注册表显示名「安得云荟」，使随后创建的主窗口继承该 AUMID，
     // 任务栏媒体浮窗据此显示「安得云荟」而非「未知应用」。（早于窗口创建，故窗口可继承）
-    andengyuanhua_lib::smtc::ensure_app_identity();
+    andeyunhui_lib::smtc::ensure_app_identity();
 
     // 禁用 Chromium/WebView2 自带的系统媒体会话（MediaSession 特性），避免它在任务栏注册一个
     // 「未知应用」卡片，与我们在 Rust 进程内创建的 SystemMediaTransportControls 会话重复。
@@ -385,7 +385,7 @@ fn main() {
                 })
                 .build(app)?;
             app.manage(TrayHolder(tray));
-            app.manage(std::sync::Mutex::new(andengyuanhua_lib::screenshot::ScreenshotData::default()));
+            app.manage(std::sync::Mutex::new(andeyunhui_lib::screenshot::ScreenshotData::default()));
 
             // 注册系统级截图热键（从持久化配置读取，默认 Ctrl+Shift+S；设置面板可改写并即时生效）
             {
@@ -531,7 +531,7 @@ fn main() {
                     tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
                 ) {
                     let hidden = window.is_minimized().unwrap_or(false);
-                    andengyuanhua_lib::smtc::set_window_hidden(hidden);
+                    andeyunhui_lib::smtc::set_window_hidden(hidden);
                 }
             }
 
@@ -552,7 +552,7 @@ fn main() {
                     api.prevent_close();
                     window.hide().ok();
                     // 窗口隐藏到托盘：强制任务栏媒体会话切回音乐优先
-                    andengyuanhua_lib::smtc::set_window_hidden(true);
+                    andeyunhui_lib::smtc::set_window_hidden(true);
                     // 托盘模式下同时隐藏歌词悬浮窗，避免它孤立悬浮
                     if let Some(lw) = app.get_webview_window(lyrics_service::LYRICS_WINDOW_LABEL) {
                         let _ = lw.hide();
