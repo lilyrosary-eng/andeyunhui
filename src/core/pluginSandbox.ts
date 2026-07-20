@@ -20,7 +20,7 @@ import * as ReactDOMNS from 'react-dom';
 import * as ReactDOMClient from 'react-dom/client';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { ensureOverlayWindow, type OverlayProfile } from '@/core/overlayWindow';
 import { PluginRegistry, type PluginDef } from '@/core/pluginRegistry';
 import { logger } from '@/lib/logger';
 import { createFrameBuffer } from '@/lib/frameBuffer';
@@ -198,13 +198,12 @@ function createSafeApi(pluginId: string) {
     // 创建浮窗窗口（前端 WebviewWindow API，规避 sync 命令中 build 导致的主线程重入死锁）
     // 用于剪贴板浮窗等场景，label 由插件指定（如 'floating-clipboard'）
     createFloatingWindow: async (label: string, url: string, options: Record<string, unknown>) => {
-      const existing = await WebviewWindow.getByLabel(label);
-      if (existing) {
-        existing.show().catch(() => {});
-        existing.setFocus().catch(() => {});
-        return;
+      // 统一走 window_manager 引擎；options 即 OverlayProfile（camelCase 字段已由 Rust 端解析）
+      const win = await ensureOverlayWindow(label, url, options as OverlayProfile);
+      if (win) {
+        await win.show().catch(() => {});
+        await win.setFocus().catch(() => {});
       }
-      new WebviewWindow(label, { url, ...options });
     },
   };
 }
