@@ -51,56 +51,6 @@ pub struct WindowInfo {
     pub is_self: bool,
 }
 
-/// 系统 DPI 缩放比（如 150% 显示 → 1.5）。
-/// **注意**：此函数返回 `GetDpiForSystem()` 的全局值，混合 DPI 多屏场景下不准确。
-/// 覆盖窗创建应使用 `min_monitor_scale()` 取多屏最小缩放比，避免个别显示器裁剪。
-fn dpi_scale() -> f64 {
-    unsafe {
-        let dpi = winapi::um::winuser::GetDpiForSystem();
-        if dpi == 0 {
-            1.0
-        } else {
-            dpi as f64 / 96.0
-        }
-    }
-}
-
-/// 取所有显示器中的最小 DPI 缩放比（覆盖窗创建时逻辑像素换算用，确保在高 DPI 屏上不被裁剪）。
-/// 枚举每屏独立 DPI（`GetDpiForMonitor`），返回最小值以避免混合 DPI 场景下覆盖窗尺寸偏小。
-fn min_monitor_scale() -> f64 {
-    let mut min_scale = f64::MAX;
-
-    unsafe extern "system" fn proc(
-        hmon: winapi::shared::windef::HMONITOR,
-        _hdc: winapi::shared::windef::HDC,
-        _rect: *mut winapi::shared::windef::RECT,
-        lparam: winapi::shared::minwindef::LPARAM,
-    ) -> i32 {
-        let min_scale = &mut *(lparam as *mut f64);
-        let mut dpi = 96u32;
-        let _ = winapi::um::shellscalingapi::GetDpiForMonitor(
-            hmon,
-            winapi::um::shellscalingapi::MDT_EFFECTIVE_DPI,
-            &mut dpi,
-            &mut 0u32,
-        );
-        let scale = if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 };
-        *min_scale = (*min_scale).min(scale);
-        1
-    }
-
-    unsafe {
-        winapi::um::winuser::EnumDisplayMonitors(
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            Some(proc),
-            &mut min_scale as *mut _ as winapi::shared::minwindef::LPARAM,
-        );
-    }
-
-    if min_scale == f64::MAX { dpi_scale() } else { min_scale }
-}
-
 /// 计算「所有显示器物理矩形」的并集（多屏覆盖）。
 ///
 /// 数据源统一：直接用 `GetSystemMetrics(SM_XVIRTUALSCREEN / SM_CXVIRTUALSCREEN)`，
@@ -116,57 +66,7 @@ fn virtual_desktop_rect() -> (i32, i32, i32, i32) {
     }
 }
 
-/// 创建悬浮置顶截图窗口（覆盖全虚拟桌面）。
-/// 设计为「创建一次、反复复用」：setup 阶段预创建（隐藏），截图时仅 show + 派发事件，避免每次新建 WebView2 实例的卡顿。
-/// 尺寸/位置以「逻辑像素」设定，物理像素 = 逻辑 × scale，配合 WebView devicePixelRatio 实现 1:1 对齐。
-#[tauri::command]
-pub fn create_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::WebviewUrl;
-    if app.get_webview_window("screenshot-overlay").is_some() {
-        return Ok(()); // 已存在则复用，不重复创建
-    }
 
-    // 覆盖窗精确覆盖「所有显示器物理并集」。builder API 只接受逻辑像素，
-    // 用 min_monitor_scale 换算；start_screenshot 时会改用 PhysicalSize 精确重设。
-    let scale = min_monitor_scale();
-    let (rx, ry, rw, rh) = virtual_desktop_rect();
-    let lw = rw as f64 / scale;
-    let lh = rh as f64 / scale;
-    let lx = rx as f64 / scale;
-    let ly = ry as f64 / scale;
-
-    let _win = tauri::WebviewWindowBuilder::new(
-        &app,
-        "screenshot-overlay",
-        WebviewUrl::App("screenshot-overlay.html".into()),
-    )
-    .title("截图")
-    .inner_size(lw, lh)
-    .position(lx, ly)
-    .decorations(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .transparent(true) // 透明：触发瞬间显示覆盖窗时「透出桌面」，用户感知毫秒级响应，不闪白
-    .visible(false) // 预创建时隐藏；截图时由 start_screenshot 显示
-    .resizable(false)
-    .shadow(false) // 去除 Windows 11 不可见调整边框（~7px），否则覆盖窗左侧有几像素不覆盖 → 用户无法选中左边
-    .build()
-    .map_err(|e| format!("创建截图窗口失败: {}", e))?;
-
-    Ok(())
-}
-
-/// 显示截图覆盖窗口（仅 show，不重新捕获）。保留以备他用。
-#[tauri::command]
-pub fn show_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
-    // 覆盖窗已改由前端创建；此处仅 show，不在此同步 build()（避免异步线程 0x8007139F / 主线程重入死锁）。
-    if let Some(w) = app.get_webview_window("screenshot-overlay") {
-        let _ = w.show();
-        let _ = w.set_focus();
-        let _ = w.emit("screenshot-start", ());
-    }
-    Ok(())
-}
 
 /// 关闭截图覆盖窗口（仅隐藏，复用不销毁）。主窗口全程保持原状。
 #[tauri::command]
