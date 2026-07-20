@@ -17,6 +17,7 @@ import { useAppStore } from '@/stores/appStore';
 import { useNotesStore } from '@/stores/notesStore';
 import { clearStaleBootPreview } from '@/lib/bootPreview';
 import { initOpenWith } from '@/lib/openWith';
+import { PhysicalPosition } from '@tauri-apps/api/dpi';
 
 function App() {
   // ====== store 订阅 ======
@@ -158,21 +159,16 @@ function App() {
     try {
       // 透明窗不能 visible:false 创建（会 0x8007139F 变坏窗）；改离屏坐标创建后定位到托盘附近再 show。
       // 统一走 window_manager 引擎：主线程安全创建 + 重试 + 坏窗自愈。
-      // 全屏透明覆盖窗：铺满主屏，菜单面板按任务栏锚点（ax/ay，物理像素）定位。
-      // 点击面板外的透明层即关闭，实现「点旁边自动消失」。
-      const sw = window.screen.width;
-      const sh = window.screen.height;
-      w = await ensureOverlayWindow('tray-menu', `index.html?overlay=tray-menu&ax=${x}&ay=${y}`, {
-        width: sw,
-        height: sh,
-        x: 0,
-        y: 0,
+      w = await ensureOverlayWindow('tray-menu', 'index.html?overlay=tray-menu', {
+        width: 220,
+        height: 156,
+        x: -4000,
+        y: -4000,
         decorations: false,
         transparent: true,
         alwaysOnTop: true,
         resizable: false,
         shadow: false,
-        skipTaskbar: true,
       });
     } catch (err) {
       console.error('[托盘] 创建菜单窗失败:', err);
@@ -180,6 +176,7 @@ function App() {
     }
     if (!w) return;
     try {
+      await w.setPosition(new PhysicalPosition(Math.max(4, x - 110), Math.max(4, y - 160)));
       await w.show();
       await w.setFocus();
     } catch (err) {
