@@ -33,6 +33,7 @@ use andeyunhui_lib::TrayModeState;
 use andeyunhui_lib::TrayHolder;
 use andeyunhui_lib::services::lyrics_service;
 use andeyunhui_lib::services::recording_service;
+use andeyunhui_lib::services::window_manager;
 use andeyunhui_lib::services::diagnostics;
 use andeyunhui_lib::services::log_service;
 use andeyunhui_lib::services::ai_service;
@@ -77,6 +78,12 @@ fn main() {
     // 尽早设置本进程 AUMID + 注册表显示名「安得云荟」，使随后创建的主窗口继承该 AUMID，
     // 任务栏媒体浮窗据此显示「安得云荟」而非「未知应用」。（早于窗口创建，故窗口可继承）
     andeyunhui_lib::smtc::ensure_app_identity();
+
+    // 环境级自动修复：必须在任何 WebView2 窗口创建之前（tauri::Builder 之前）执行——此时
+    // EBWebView 目录无进程占用，清理才可靠。检测 WebView2 运行时大版本变化（如 149→150）后
+    // 自动清掉不兼容的 GPU/着色器合成缓存（保留 cookie/localStorage），从根本上消除运行时
+    // 升级导致的透明窗 0x8007139F（详见 window_manager 模块头注释）。
+    window_manager::maybe_clear_gpu_cache_on_runtime_change_early();
 
     // 禁用 Chromium/WebView2 自带的系统媒体会话（MediaSession 特性），避免它在任务栏注册一个
     // 「未知应用」卡片，与我们在 Rust 进程内创建的 SystemMediaTransportControls 会话重复。
@@ -306,12 +313,27 @@ fn main() {
             // setup 阶段 WebView2 环境往往尚未就绪，同步创建会导致 HWND 建出但 WebView2 初始化失败
             // (0x8007139F)，进而 scale_factor() 报 "无法获取缩放比"、show() 显示坏窗。
             // 二者改由前端 new WebviewWindow 在环境就绪后创建（与浮窗同款安全路径）。
+            // 透明(layered)窗创建统一走 window_manager 的重试引擎：识别 0x8007139F 瞬态故障、
+            // 退避重试（150/300/600/1000ms，最多 5 次）、每次失败先销毁残留坏窗。透明窗依赖
+            // WebView2 DirectComposition 合成面，冷启动（尤其刚清过 GPU 缓存后）合成面可能头几百
+            // 毫秒未就绪，接连创建多个透明窗易撞 0x8007139F。create_* 幂等，故重试绝对安全。
+            // 诊断模式（ANDY_DIAG=1）：跳过正常浮窗预创建，避免污染隔离实验
+            let diag_mode = std::env::var("ANDY_DIAG").as_deref() == Ok("1");
             // 预创建录屏区域选择覆盖窗（隐藏），首次使用时无需等待 WebView2 初始化
-            let _ = recording_service::create_recorder_select_window(app.handle());
+            let mut boot_windows_ok = true;
+            if !diag_mode {
+            boot_windows_ok &= window_manager::create_transparent_with_retry(app.handle(), "recorder-select", || {
+                recording_service::create_recorder_select_window(app.handle())
+            });
             // 预创建录屏控制台窗口（隐藏），避免在 sync 命令中 build 导致 WebView2 主线程重入死锁
-            let _ = recording_service::create_recorder_widget_window(app.handle());
+            boot_windows_ok &= window_manager::create_transparent_with_retry(app.handle(), "recorder-widget", || {
+                recording_service::create_recorder_widget_window(app.handle())
+            });
             // 预创建录屏区域边框窗（隐藏），start_recording 时按录制区域定位并显示
-            let _ = recording_service::create_recording_border_window(app.handle());
+            boot_windows_ok &= window_manager::create_transparent_with_retry(app.handle(), "recording-border", || {
+                recording_service::create_recording_border_window(app.handle())
+            });
+            } // if !diag_mode
 
             // 托盘图标：优先使用默认窗口图标；若极端情况下为 None，则从资源目录
             // 回退到实际图标文件，避免回退成全透明不可见图标导致"无法交互"
@@ -406,9 +428,33 @@ fn main() {
                 }
             }
 
-            // 创建悬浮歌词窗口
-            if let Err(e) = lyrics_service::create_lyrics_widget(app.handle()) {
-                eprintln!("[Lyrics] 创建歌词窗口失败: {}", e);
+            // 创建悬浮歌词窗口（同样走统一重试引擎，避免冷启动 GPU 合成面未就绪撞 0x8007139F）
+            if !diag_mode {
+            boot_windows_ok &= window_manager::create_transparent_with_retry(app.handle(), "lyrics-widget", || {
+                lyrics_service::create_lyrics_widget(app.handle())
+            });
+            }
+
+            // 诊断模式：事件循环起来后自动跑隔离实验（4 种窗配置），结果打到 session 日志
+            if diag_mode {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let r = window_manager::overlay_window_diag(h).await;
+                    eprintln!("[DIAG-RESULT] {}", r);
+                });
+            } else {
+            // 四个启动透明窗全部创建成功 → 标记本次启动正常，清掉失败标记，避免下次无意义清缓存。
+            // 若启动窗失败 → 自动跑隔离诊断（overlay_window_diag），把 4 种窗配置（不透明/透明 × 正常位/离屏）
+            // 的建窗+探活结果打到 session 日志，用户无需手动设 ANDY_DIAG 即可拿到真因数据。
+            if boot_windows_ok {
+                window_manager::mark_boot_success();
+            } else {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let r = window_manager::overlay_window_diag(h).await;
+                    eprintln!("[DIAG-RESULT] {}", r);
+                });
+            }
             }
 
             // ============ 文件系统热插拔监听 ============
@@ -812,9 +858,13 @@ fn main() {
             peek_screenshot,
             store_screenshot_note_id,
             get_screenshot_note_id,
-            create_overlay_window,
-            show_overlay_window,
             hide_overlay_window,
+            // 浮窗统一创建引擎（window_manager 引擎）
+            window_manager::overlay_window_get_or_create,
+            window_manager::overlay_window_destroy,
+            window_manager::overlay_window_health,
+            window_manager::overlay_window_diag,
+            window_manager::overlay_clear_gpu_cache,
             list_windows,
             get_window_title,
             clipboard_write_image,

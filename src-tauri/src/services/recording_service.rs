@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::services::window_manager::per_window_data_dir;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use winapi::shared::windef::HWND;
 
@@ -826,15 +827,13 @@ pub fn create_recorder_widget_window(app: &AppHandle) -> Result<(), String> {
     }
 
     // 控制台显示在屏幕正上方居中（需将物理像素转换为逻辑像素以正确居中）
-    let (screen_w, _screen_h) = screen_size();
-    let scale = unsafe {
+    let (_screen_w, _screen_h) = screen_size();
+    let _scale = unsafe {
         let dpi = winapi::um::winuser::GetDpiForSystem();
         if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
     };
     let widget_w = 320.0_f64;
     let widget_h = 52.0_f64;
-    let x = (screen_w as f64 / scale - widget_w) / 2.0;
-    let y = 8.0_f64; // 距离屏幕顶部 8px
 
     let _win = WebviewWindowBuilder::new(
         app,
@@ -843,16 +842,19 @@ pub fn create_recorder_widget_window(app: &AppHandle) -> Result<(), String> {
     )
     .title("录屏")
     .inner_size(widget_w, widget_h)
-    .position(x, y)
+    .position(-4000.0, -4000.0) // 离屏创建，待 show_recorder_widget 时再定位显示
     .decorations(false)
     .always_on_top(true)
-    .skip_taskbar(true)
     .transparent(true)
     .resizable(false)
     .shadow(false)
-    .visible(false) // 预创建时隐藏
+    .visible(true) // 透明(layered)子窗绝不能用 visible:false 创建，否则 WebView2 报 0x8007139F 坏窗
+    .data_directory(per_window_data_dir(app, RECORDER_WINDOW_LABEL))
     .build()
     .map_err(|e| format!("创建录屏控制台失败: {}", e))?;
+
+    // 离屏创建后先隐藏，待 show_recorder_widget 时再显示（避免启动期在主屏闪现 / 出现在任务栏）
+    let _ = _win.hide();
 
     // 将录屏控制台排除在屏幕捕获之外（WDA_EXCLUDEFROMCAPTURE = 0x11）：
     // 操作者屏幕上可见并可点击操作，但 WGC/DXGI 捕获时被跳过 —— 录出的视频里看不到控制台。
@@ -883,16 +885,19 @@ pub fn create_recording_border_window(app: &AppHandle) -> Result<(), String> {
     )
     .title("录屏区域")
     .inner_size(100.0, 100.0)
-    .position(0.0, 0.0)
+    .position(-4000.0, -4000.0) // 离屏创建，start_recording 时按录制区域定位并显示
     .decorations(false)
     .always_on_top(true)
-    .skip_taskbar(true)
     .transparent(true)
     .resizable(false)
     .shadow(false)
-    .visible(false) // 预创建时隐藏，start_recording 时按区域定位并显示
+    .visible(true) // 透明(layered)子窗绝不能用 visible:false 创建，否则 WebView2 报 0x8007139F 坏窗
+    .data_directory(per_window_data_dir(app, RECORDING_BORDER_LABEL))
     .build()
     .map_err(|e| format!("创建录屏边框窗失败: {}", e))?;
+
+    // 离屏创建后先隐藏，待 start_recording 时再显示
+    let _ = _win.hide();
 
     // 排除在屏幕捕获之外（WDA_EXCLUDEFROMCAPTURE），边框不进入录屏画面；
     // transparent(true) 已由 Tauri 设置 WS_EX_LAYERED，保证窗口背景透明、只显示 CSS 红框。
@@ -997,7 +1002,7 @@ pub fn create_recorder_select_window(app: &AppHandle) -> Result<(), String> {
         return Ok(()); // 已存在则复用
     }
 
-    let (vx, vy, vw, vh) = virtual_desktop_rect();
+    let (_vx, _vy, vw, vh) = virtual_desktop_rect();
     if vw <= 0 || vh <= 0 {
         return Err("无法获取虚拟桌面尺寸".into());
     }
@@ -1009,8 +1014,6 @@ pub fn create_recorder_select_window(app: &AppHandle) -> Result<(), String> {
     };
     let lw = vw as f64 / scale;
     let lh = vh as f64 / scale;
-    let lx = vx as f64 / scale;
-    let ly = vy as f64 / scale;
 
     let _win = WebviewWindowBuilder::new(
         app,
@@ -1019,16 +1022,19 @@ pub fn create_recorder_select_window(app: &AppHandle) -> Result<(), String> {
     )
     .title("选择录屏区域")
     .inner_size(lw, lh)
-    .position(lx, ly)
+    .position(-4000.0, -4000.0) // 离屏创建，show_recorder_select 时再定位显示
     .decorations(false)
     .always_on_top(true)
-    .skip_taskbar(true)
     .transparent(true)
     .resizable(false)
-    .visible(false) // 预创建时隐藏
+    .visible(true) // 透明(layered)子窗绝不能用 visible:false 创建，否则 WebView2 报 0x8007139F 坏窗
     .shadow(false) // 去除 Windows 11 不可见调整边框，与截图覆盖窗一致
+    .data_directory(per_window_data_dir(app, RECORDER_SELECT_LABEL))
     .build()
     .map_err(|e| format!("创建录屏区域选择窗口失败: {}", e))?;
+
+    // 离屏创建后先隐藏，待 show_recorder_select 时再显示
+    let _ = _win.hide();
 
     Ok(())
 }

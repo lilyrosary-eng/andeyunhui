@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { emit } from '@tauri-apps/api/event';
+import { ensureOverlayWindow } from '@/core/overlayWindow';
 
 // 定义笔记的数据类型（与 Rust 端保持一致）
 export interface NoteInfo {
@@ -104,16 +104,8 @@ export const api = {
   // 框架内部正确在主线程创建窗口，不会重入死锁。
   createFloatingNoteWindow: async (noteId: string, title: string, x: number, y: number) => {
     const label = `floating-note-${noteId}`;
-    // getByLabel 返回 Promise<WebviewWindow | null>，必须 await
-    const existing = await WebviewWindow.getByLabel(label);
-    if (existing) {
-      existing.show().catch(() => {});
-      existing.setFocus().catch(() => {});
-      return;
-    }
-    const win = new WebviewWindow(label, {
-      url: `index.html?floating=true&noteId=${encodeURIComponent(noteId)}`,
-      title,
+    // 统一走 window_manager 引擎：主线程安全创建 + 重试 + 坏窗自愈；复用（已存在）由引擎内部处理
+    const win = await ensureOverlayWindow(label, `index.html?floating=true&noteId=${encodeURIComponent(noteId)}`, {
       width: 480,
       height: 420,
       minWidth: 300,
@@ -124,12 +116,11 @@ export const api = {
       x,
       y,
     });
-    win.once('tauri://created', () => {
+    if (win) {
+      await win.show().catch(() => {});
+      await win.setFocus().catch(() => {});
       emit('floating-note-opened', noteId).catch(() => {});
-    });
-    win.once('tauri://error', (e: unknown) => {
-      console.error('[api] 创建浮窗窗口失败:', e);
-    });
+    }
   },
 
   // 标签系统

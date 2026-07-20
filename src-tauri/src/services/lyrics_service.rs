@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::services::window_manager::per_window_data_dir;
 use lofty::read_from_path;
 use lofty::file::AudioFile;
 use lofty::file::TaggedFileExt;
@@ -69,13 +70,16 @@ pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::E
         .resizable(true)
         .decorations(false)
         .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false)
+        .visible(true) // 透明(layered)子窗绝不能用 visible:false 创建，否则 WebView2 报 0x8007139F 坏窗
+        .position(-4000.0, -4000.0) // 先置于离屏，待 show_lyrics_widget 时再移到配置位置
         .transparent(true)
         .shadow(false)
+        .data_directory(per_window_data_dir(app, LYRICS_WINDOW_LABEL))
         .build()?;
 
-    // 设置初始位置
+    // 离屏创建后先隐藏（此时 WebView2 已在离屏态完成初始化，hide 不会触发 0x8007139F），
+    // 再移动到配置坐标，待用时由 show_lyrics_widget 显示——避免启动瞬间在主屏闪现。
+    let _ = window.hide();
     let _ = window.set_position(tauri::PhysicalPosition::new(config.x as i32, config.y as i32));
 
     eprintln!("[Lyrics] 悬浮歌词窗口已创建（初始隐藏）位置: ({}, {})", config.x, config.y);

@@ -44,6 +44,10 @@
       "../bundled-dlc": "bundled-dlc/"
     },
     "windows": {
+      "webviewInstallMode": {
+        "type": "fixedRuntime",
+        "path": "./webview2-runtime"
+      },
       "nsis": {
         "installMode": "perMachine",
         "installerIcon": "icons/icon.ico"
