@@ -43,10 +43,31 @@
     "resources": {
       "../bundled-dlc": "bundled-dlc/"
     },
+    "fileAssociations": [
+      {
+        "ext": ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff"],
+        "name": "image",
+        "description": "用安得云荟·莲花打开图片"
+      },
+      {
+        "ext": ["mp4", "mkv", "mov", "avi", "webm", "flv"],
+        "name": "video",
+        "description": "用安得云荟·玉兰打开视频"
+      },
+      {
+        "ext": ["mp3", "flac", "wav", "ogg", "m4a", "aac"],
+        "name": "audio",
+        "description": "用安得云荟·铃兰打开音频"
+      },
+      {
+        "ext": ["pdf", "epub", "txt", "md", "docx", "pptx", "xlsx", "csv"],
+        "name": "document",
+        "description": "用安得云荟打开文档"
+      }
+    ],
     "windows": {
       "webviewInstallMode": {
-        "type": "fixedRuntime",
-        "path": "./webview2-runtime"
+        "type": "downloadBootstrapper"
       },
       "nsis": {
         "installMode": "perMachine",

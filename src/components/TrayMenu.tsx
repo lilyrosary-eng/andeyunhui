@@ -1,65 +1,119 @@
-// 托盘右键菜单 — 自定义 UI 窗口（tray-menu），风格与软件主界面一致。
-// 仅两个动作：回到主界面、关闭软件。失焦或 Esc 自动收起。
-import { useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { Home, Power } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 
-export function TrayMenu() {
-  const closeSelf = () => {
-    getCurrentWebviewWindow().hide().catch(() => {});
-  };
+const w = getCurrentWebviewWindow();
 
+// 由 App.tsx 传入的任务栏锚点（物理像素 ax/ay），换算为 CSS 像素定位菜单面板
+const params = new URLSearchParams(location.search);
+const dpr = window.devicePixelRatio || 1;
+const anchorX = Number(params.get('ax') || 0) / dpr;
+const anchorY = Number(params.get('ay') || 0) / dpr;
+const panelLeft = Math.max(4, Math.min(anchorX - 110, window.innerWidth - 224));
+const panelTop = Math.max(4, Math.min(anchorY - 160, window.innerHeight - 170));
+
+const btnStyle: React.CSSProperties = {
+  width: '100%',
+  textAlign: 'left',
+  padding: '9px 12px',
+  background: 'transparent',
+  border: 'none',
+  color: '#e5e5e5',
+  fontSize: 13,
+  cursor: 'pointer',
+  borderRadius: 8,
+};
+
+export default function TrayMenu() {
+  const [summoning, setSummoning] = useState(false);
+  const [quitting, setQuitting] = useState(false);
+
+  // 兜底：极少数未被透明层捕获的外部交互，仍可失焦关闭
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeSelf();
-    };
-    window.addEventListener('keydown', onKey);
-    // 失焦自动收起（点击菜单外区域 / 切换到其他窗口）
-    const unBlur = getCurrentWebviewWindow().listen('blur', () => closeSelf());
+    const un = w.listen('blur', () => w.hide());
     return () => {
-      window.removeEventListener('keydown', onKey);
-      unBlur.then((fn) => fn()).catch(() => {});
+      un.then((u) => u());
     };
   }, []);
 
-  const summon = () => {
-    invoke('tray_summon_main').catch(() => {});
+  const closeSelf = () => w.hide();
+
+  const onSummon = async () => {
+    if (summoning || quitting) return;
+    setSummoning(true);
+    try {
+      await invoke('tray_summon_main');
+    } finally {
+      setSummoning(false);
+      closeSelf();
+    }
   };
-  const quit = () => {
-    invoke('tray_quit').catch(() => {});
+
+  const onQuit = async () => {
+    if (quitting || summoning) return;
+    setQuitting(true);
+    try {
+      await invoke('tray_quit_app');
+    } finally {
+      setQuitting(false);
+      closeSelf();
+    }
   };
 
   return (
     <div
-      className="w-full h-full flex flex-col rounded-2xl overflow-hidden"
+      onClick={closeSelf}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        closeSelf();
+      }}
       style={{
-        background: 'rgba(22,22,26,0.94)',
-        backdropFilter: 'blur(22px)',
-        WebkitBackdropFilter: 'blur(22px)',
-        border: '1px solid rgba(255,255,255,0.10)',
-        boxShadow: '0 12px 40px rgba(0,0,0,0.55)',
-        color: '#fff',
-        fontFamily: 'system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+        position: 'fixed',
+        inset: 0,
+        width: '100vw',
+        height: '100vh',
+        background: 'transparent',
       }}
     >
-      <div className="px-4 pt-3 pb-2 text-[11px] tracking-[0.18em] text-white/40 select-none">
-        安得云荟
+      <div
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
+        style={{
+          position: 'fixed',
+          left: panelLeft,
+          top: panelTop,
+          width: 220,
+          background: 'rgba(32, 32, 36, 0.92)',
+          backdropFilter: 'blur(10px)',
+          borderRadius: 12,
+          boxShadow: '0 8px 30px rgba(0,0,0,0.35)',
+          padding: 6,
+          color: '#e5e5e5',
+          fontFamily: '-apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
+          fontSize: 13,
+          userSelect: 'none',
+        }}
+      >
+        <button
+          onClick={onSummon}
+          disabled={summoning}
+          style={btnStyle}
+          onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
+          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+        >
+          {summoning ? '打开中…' : '打开安得云荟'}
+        </button>
+        <div style={{ height: 1, background: 'rgba(255,255,255,0.1)', margin: '4px 2px' }} />
+        <button
+          onClick={onQuit}
+          disabled={quitting}
+          style={btnStyle}
+          onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
+          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+        >
+          {quitting ? '退出中…' : '退出'}
+        </button>
       </div>
-      <button
-        onClick={summon}
-        className="flex items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-white/10 active:bg-white/15 transition-colors"
-      >
-        <Home size={16} className="text-emerald-400" />
-        回到主界面
-      </button>
-      <button
-        onClick={quit}
-        className="flex items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-red-500/20 active:bg-red-500/30 transition-colors"
-      >
-        <Power size={16} className="text-red-400" />
-        关闭软件
-      </button>
     </div>
   );
 }

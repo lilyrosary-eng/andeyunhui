@@ -43,9 +43,10 @@
           document.body.style.background = bg;
         } catch (e) {}
 
-        // 浮窗子窗口（floating-note / floating-clipboard / floating-dropzone）无需加载层，
-        // 仅保持底色即可放行，确保「即点即用」与主窗口一致的手感。
-        if (/[?&]floating=(true|clipboard|dropzone)\b/.test(location.search)) return;
+        // 浮窗 / 覆盖层子窗口（floating-note / floating-clipboard / floating-dropzone /
+        // lyrics-widget / tray-menu 等）一律不跑哥特加载页，保证「即点即用」、
+        // 轻量高效、毫秒级响应。仅主窗口（无 query）才展示加载层。
+        if (/[?&](floating|overlay|widget)=/.test(location.search)) return;
 
 
         // ---- 真实进度引擎 ----

@@ -77,8 +77,9 @@ interface NowPlayingViewProps {
   lyricsAlign?: LyricsAlign;
 }
 
-// 歌词模糊离散档位：当前行 0，相邻行 1px，距离 2 行 2px，更远统一 3px
-const BLUR_LEVELS = [0, 1, 2, 3];
+// 歌词模糊离散档位：当前行 0，相邻行 1px，更远 1.5/2px。
+// 录屏场景下大幅降低模糊半径，避免逐行 blur 叠加抬高 GPU/合成开销。
+const BLUR_LEVELS = [0, 1, 1.5, 2];
 function getBlurLevel(dist: number): number {
   if (dist === 0) return BLUR_LEVELS[0];
   if (dist === 1) return BLUR_LEVELS[1];
@@ -349,8 +350,10 @@ export function NowPlayingView({
   return React.createElement('div', {
     className: 'absolute inset-0 z-40 flex flex-col',
     style: {
+      // 不透明底色即可，移除全屏 backdrop-filter 实时高斯模糊：
+      // 录屏（WGC 捕获 + ffmpeg 编码）时，全屏 blur(20px) 每帧重绘会严重抬升 GPU 开销、
+      // 直接导致卡顿；底色本身已不透明，去掉模糊视觉几乎无差、性能大幅改善。
       background: 'var(--nav-primary-bg)',
-      backdropFilter: 'blur(20px)',
       overflow: 'hidden',
     },
   },

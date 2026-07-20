@@ -64,7 +64,9 @@ fn save_lyrics_config(app: &AppHandle, config: &LyricsWidgetConfig) {
 pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_lyrics_config(app);
 
-    let window = WebviewWindowBuilder::new(app, LYRICS_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
+    // 带 floating=lyrics 查询参数：让 index.html 预载脚本跳过哥特加载页，
+    // 与 floating-note/clipboard/dropzone 同款「即点即用」，毫秒级响应。
+    let window = WebviewWindowBuilder::new(app, LYRICS_WINDOW_LABEL, WebviewUrl::App("index.html?floating=lyrics".into()))
         .title("歌词")
         .inner_size(400.0, 80.0)
         .resizable(true)

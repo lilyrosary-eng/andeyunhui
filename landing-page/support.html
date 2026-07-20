@@ -9,7 +9,9 @@
     <link rel="icon" type="image/png" href="logo.png" />
 
     <!-- ===== Lucide 图标库 ===== -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" />
+    <!-- lucide 图标：非阻塞预加载，避免外部 CDN 阻塞首屏渲染 -->
+    <link rel="preload" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" onload="this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css"></noscript>
 
     <style>
         /* ===== 莫兰迪配色（与主页一致） ===== */
