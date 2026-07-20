@@ -103,7 +103,7 @@ pub fn get_user_plugins_dir(app: &AppHandle) -> Option<PathBuf> {
 }
 
 /// 获取用户外部依赖目录（user_external_deps/，始终在 AppData 下，用于第三方 .mujin 依赖）
-/// 与 user_plugins 平级，结构与 external-deps/ 一致（支持 niaoluo/ide/ 等母文件夹）
+/// 与 user_plugins 平级，结构与 external-deps/ 一致（支持 茑萝/ide/ 等母文件夹）
 pub fn get_user_external_deps_dir(app: &AppHandle) -> Option<PathBuf> {
     let app_data = app.path().app_data_dir().ok()?;
     Some(app_data.join("user_external_deps"))
@@ -114,7 +114,7 @@ pub fn get_user_external_deps_dir(app: &AppHandle) -> Option<PathBuf> {
 // 应用启动或刷新插件列表时自动扫描并解压到同名目录。
 // 已解压且 .mufurong 源文件 mtime 匹配则跳过（速度极快），不匹配则重新解压。
 // 大型模块（茑萝/全局/阅读）保留母文件夹：子插件 .mufurong 放在母文件夹下，
-// 如 user_plugins/niaoluo/ai.mufurong → 解压到 user_plugins/niaoluo/ai/
+// 如 user_plugins/茑萝/ai.mufurong → 解压到 user_plugins/茑萝/ai/
 
 /// 专属格式文件后缀
 const MUFURONG_EXT: &str = "mufurong";
@@ -124,7 +124,7 @@ const MUFURONG_EXT: &str = "mufurong";
 const MUFURONG_MARKER: &str = ".mufurong.extracted";
 
 /// 扫描 user_plugins/ 下的 .mufurong 文件，自动解压到同名目录。
-/// 递归子目录以支持母文件夹结构（niaoluo/、全局/ 等）。
+/// 递归子目录以支持母文件夹结构（茑萝/、全局/ 等）。
 pub fn extract_mufurong_plugins(app: &AppHandle) {
     let user_dir = match get_user_plugins_dir(app) {
         Some(d) => d,
@@ -145,7 +145,7 @@ fn walk_and_extract_mufurong(dir: &std::path::Path) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // 递归子目录（支持 niaoluo/ 等母文件夹）
+            // 递归子目录（支持 茑萝/ 等母文件夹）
             walk_and_extract_mufurong(&path);
         } else if path.extension().and_then(|e| e.to_str()) == Some(MUFURONG_EXT) {
             if let Err(e) = extract_one_mufurong(&path) {
@@ -311,7 +311,7 @@ fn extract_one_mufurong(mufurong_path: &std::path::Path) -> Result<(), String> {
 // 已解压且 .mujin 源文件 mtime 匹配则跳过（速度极快），不匹配则重新解压。
 //
 // 大型模块（茑萝/全局/阅读）保留母文件夹：子依赖 .mujin 放在母文件夹下，
-// 如 user_external_deps/niaoluo/ide/codemirror.mujin → 解压到 user_external_deps/niaoluo/ide/codemirror/
+// 如 user_external_deps/茑萝/ide/codemirror.mujin → 解压到 user_external_deps/茑萝/ide/codemirror/
 // 不可再分的依赖（markitdown/tiptap 等即使内部有子文件夹）整体打包成单个 .mujin。
 
 /// 专属格式文件后缀
@@ -322,7 +322,7 @@ const MUJIN_EXT: &str = "mujin";
 const MUJIN_MARKER: &str = ".mujin.extracted";
 
 /// 扫描 user_external_deps/ 下的 .mujin 文件，自动解压到同名目录。
-/// 递归子目录以支持母文件夹结构（niaoluo/ide/、全局/ 等）。
+/// 递归子目录以支持母文件夹结构（茑萝/ide/、全局/ 等）。
 pub fn extract_mujin_deps(app: &AppHandle) {
     let user_dir = match get_user_external_deps_dir(app) {
         Some(d) => d,
@@ -343,7 +343,7 @@ fn walk_and_extract_mujin(dir: &std::path::Path) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // 递归子目录（支持 niaoluo/ide/ 等母文件夹）
+            // 递归子目录（支持 茑萝/ide/ 等母文件夹）
             walk_and_extract_mujin(&path);
         } else if path.extension().and_then(|e| e.to_str()) == Some(MUJIN_EXT) {
             if let Err(e) = extract_one_mujin(&path) {
@@ -569,8 +569,8 @@ pub fn get_bundled_dlc_dir(app: &AppHandle) -> Option<PathBuf> {
 }
 
 /// 从 bundled-dlc/ 复制 .mufurong/.mujin 到 user_plugins/ 与 user_external_deps/。
-/// - .mufurong → user_plugins/<rel_path>（保留母文件夹结构 niaoluo/、全局/）
-/// - .mujin    → user_external_deps/<rel_path>（保留母文件夹结构 niaoluo/ide/、全局/）
+/// - .mufurong → user_plugins/<rel_path>（保留母文件夹结构 茑萝/、全局/）
+/// - .mujin    → user_external_deps/<rel_path>（保留母文件夹结构 茑萝/ide/、全局/）
 /// 已存在且大小相同的文件跳过（速度极快）。
 /// 复制后由既有的 extract_mufurong_plugins / extract_mujin_deps 自动解压。
 pub fn extract_bundled_dlc(app: &AppHandle) {
@@ -876,7 +876,7 @@ pub struct PluginManifest {
     #[serde(default)]
     pub codename: String,       // 模块代号（如 "铃兰"、"莲花"），为空表示无代号
     #[serde(default)]
-    pub required_assets: Vec<String>, // 需要的外部依赖资源路径（如 "niaoluo/ide/codemirror/index.js"）
+    pub required_assets: Vec<String>, // 需要的外部依赖资源路径（如 "茑萝/ide/codemirror/index.js"）
     #[serde(default)]
     pub capabilities: Vec<String>,    // 插件能力声明（如 "file-system"、"network"）
 }
@@ -1095,7 +1095,7 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
                 continue;
             }
         };
-        // 记录相对路径（嵌套子插件如 "niaoluo/gongjuxiang"），供 read_plugin_file 使用
+        // 记录相对路径（嵌套子插件如 "茑萝/gongjuxiang"），供 read_plugin_file 使用
         manifest.path = rel_path;
 
         // 必填字段校验
@@ -3040,7 +3040,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
 //   - 安装 .mujin 依赖通过 install_dep_file 写入 user_external_deps/
 
 /// 安装 .mujin 依赖文件到 user_external_deps/<target_subpath>。
-/// target_subpath 形如 "niaoluo/ide/codemirror.mujin" 或 "全局/markitdown.mujin"，
+/// target_subpath 形如 "茑萝/ide/codemirror.mujin" 或 "全局/markitdown.mujin"，
 /// 自动创建母文件夹。data 为 .mujin 文件原始字节。
 /// 安装完成后下次扫描会自动解压（extract_mujin_deps）。
 #[tauri::command]
@@ -3066,7 +3066,7 @@ pub fn install_dep_file(
 }
 
 /// 安装 .mufurong 插件文件到 user_plugins/<target_subpath>。
-/// target_subpath 形如 "niaoluo/ai.mufurong" 或 "全局/markitdown.mufurong"，
+/// target_subpath 形如 "茑萝/ai.mufurong" 或 "全局/markitdown.mufurong"，
 /// 自动创建母文件夹。data 为 .mufurong 文件原始字节。
 /// 安装完成后下次扫描会自动解压（extract_mufurong_plugins）。
 #[tauri::command]

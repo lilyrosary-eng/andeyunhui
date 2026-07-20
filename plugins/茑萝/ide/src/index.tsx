@@ -1,6 +1,6 @@
 /// <reference path="../../../global.d.ts" />
 // 茑萝 · IDE 子插件（专业代码编辑器）
-// 内核：CodeMirror 6（按需从 external-deps/niaoluo/ide/codemirror 加载，不进插件包，保持本体轻量）。
+// 内核：CodeMirror 6（按需从 external-deps/茑萝/ide/codemirror 加载，不进插件包，保持本体轻量）。
 // 功能：多标签页、查找/替换、状态栏、最近文件、主题/自动换行切换。
 // 不提供降级编辑器：若内核加载失败，给出明确错误与构建提示。
 const React = window.__HOST_REACT__;
@@ -41,8 +41,8 @@ function loadCM(): Promise<CM> {
   cmPromise = (async () => {
     const w = window as any;
     if (w.__EXT_CM__) return w.__EXT_CM__ as CM;
-    const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: 'niaoluo/ide/codemirror/index.js' });
-    if (!code) throw new Error('未找到 CodeMirror 依赖文件（external-deps/niaoluo/ide/codemirror/index.js）');
+    const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: '茑萝/ide/codemirror/index.js' });
+    if (!code) throw new Error('未找到 CodeMirror 依赖文件（external-deps/茑萝/ide/codemirror/index.js）');
     const fn = new Function(code);
     fn();
     if (!w.__EXT_CM__) throw new Error('CodeMirror 依赖已读取但挂载失败（window.__EXT_CM__ 未定义）');
@@ -70,8 +70,8 @@ function loadMiniSearch(): Promise<MiniSearchCtor> {
   msPromise = (async () => {
     const w = window as any;
     if (w.__EXT_MINISEARCH__) return w.__EXT_MINISEARCH__.MiniSearch as MiniSearchCtor;
-    const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: 'niaoluo/ide/minisearch/index.js' });
-    if (!code) throw new Error('未找到 MiniSearch 依赖文件（external-deps/niaoluo/ide/minisearch/index.js）');
+    const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: '茑萝/ide/minisearch/index.js' });
+    if (!code) throw new Error('未找到 MiniSearch 依赖文件（external-deps/茑萝/ide/minisearch/index.js）');
     const fn = new Function(code);
     fn();
     if (!w.__EXT_MINISEARCH__) throw new Error('MiniSearch 依赖已读取但挂载失败（window.__EXT_MINISEARCH__ 未定义）');

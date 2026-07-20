@@ -46,7 +46,7 @@ React + Rust，基于 Tauri v2 构建。
 
 ## 截图 / 演示
 
-> 待补充：把截图与 GIF 放到 `docs/screenshots/` 下，替换下方占位路径即可（也可换成图床外链）。
+> 敬请期待
 
 | 主界面 | 阅读 · 三色堇 |
 | --- | --- |
@@ -83,7 +83,7 @@ andeyunhui/
 │     ├─ commands.rs        # Tauri command 汇总（笔记/插件/中转站/托盘/工具…）
 │     ├─ screenshot.rs      # 截图捕获与覆盖窗
 │     └─ services/          # 各模块服务（音乐/图片/视频/阅读/办公/录屏/日志…）
-├─ plugins/                 # 插件源码（niaoluo 宿主：办公等；music/image/video/reading/professional…）
+├─ plugins/                 # 插件源码（茑萝 宿主：办公等；莲花/铃兰/玉兰/三色堇/薄荷/鸢尾花…）
 ├─ external-deps/           # 重依赖预打包（esbuild IIFE，运行时按需注入）
 ├─ crates/                  # Rust 子 crate（pro-tools-kit 专业工具、gongfang-kit 攻防内核）
 ├─ scripts/                 # 构建脚本（external-deps、等待页、部署插件等）

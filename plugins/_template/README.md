@@ -36,7 +36,7 @@ pnpm exec vite build      # 产物在 dist/index.js
 | `category` | 否 | 子插件分组名 |
 | `desc` | 否 | 一句话描述 |
 | `deps` | 否 | 字符串数组，声明本插件依赖的「外部依赖」名；**只要非空，沙箱就开放 `new Function`**，用于运行时加载重库 |
-| `requiredAssets` | 否 | 字符串数组，声明运行所需的外部依赖资源相对路径（如 `niaoluo/ide/codemirror/index.js`）；缺失时 Rust 会在加载阶段拒绝该插件，避免白屏 |
+| `requiredAssets` | 否 | 字符串数组，声明运行所需的外部依赖资源相对路径（如 `茑萝/ide/codemirror/index.js`）；缺失时 Rust 会在加载阶段拒绝该插件，避免白屏 |
 
 ## 3. 入口（src/index.tsx）
 
@@ -138,7 +138,7 @@ my-plugin.mufurong (ZIP)
 
 ```
 user_plugins/
-├── niaoluo/                    # 母文件夹（手动创建）
+├── 茑萝/                    # 母文件夹（手动创建）
 │   ├── ai.mufurong             # 子插件
 │   ├── gongjuxiang.mufurong
 │   └── ...

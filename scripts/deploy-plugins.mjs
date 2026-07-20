@@ -5,13 +5,13 @@
 //
 // 目录结构：bundled-plugins/ 镜像 plugins/ 的目录结构（按模块归类）
 //   - 顶级主模块：image/, music/, professional/, reading/, video/
-//   - 茑萝子插件：niaoluo/gongjuxiang/, niaoluo/huihua/, niaoluo/ide/, niaoluo/wps/
+//   - 茑萝子插件：茑萝/gongjuxiang/, 茑萝/huihua/, 茑萝/ide/, 茑萝/wps/
 //   - 服务插件：  全局/screen-recorder/
 //   - 空占位：    note/（.gitkeep）
 // Rust 端 walk() / find_plugin_root() 递归扫描，天然支持嵌套目录结构。
 //
 // 自动发现：递归扫描 plugins/ 下所有含 manifest.json 的子目录（排除 _shared/_template）
-// 嵌套目录（如 niaoluo/gongjuxiang）保留层级部署到 bundled-plugins/niaoluo/gongjuxiang/
+// 嵌套目录（如 茑萝/gongjuxiang）保留层级部署到 bundled-plugins/茑萝/gongjuxiang/
 //
 // 增量更新策略：
 //   - 不再全删重建 bundled-plugins/，仅按 relPath 更新有变化的插件
@@ -44,7 +44,7 @@ if (BUILD_CLEAN) {
 }
 
 // 递归自动发现插件：扫描 plugins/ 下所有含 manifest.json 的目录（排除 _shared/_template），
-// 支持子插件嵌套目录（如 niaoluo/gongjuxiang），返回 {relPath, id, manifest} 对象数组
+// 支持子插件嵌套目录（如 茑萝/gongjuxiang），返回 {relPath, id, manifest} 对象数组
 const EXCLUDED = new Set(['_shared', '_template', 'global.d.ts']);
 
 function discoverPlugins(dir, prefix, out) {
@@ -83,7 +83,7 @@ plugins.forEach(p => console.log(`  - id=${p.id}  src=${p.relPath}`));
 
 // ===== 增量更新：递归清理已不存在的插件（按 relPath 比对） =====
 // 对比源码 plugins/ 的 relPath 集合与部署目录，递归删除源码中已不存在的插件目录。
-// 容器目录（如 niaoluo/、全局/）本身保留——它们可能仍是其他有效插件的父目录。
+// 容器目录（如 茑萝/、全局/）本身保留——它们可能仍是其他有效插件的父目录。
 function cleanStalePlugins(targetDir, validRelPaths, label) {
   if (!existsSync(targetDir)) return;
   // 递归扫描：找到所有含 manifest.json 的目录，若其相对路径不在 validRelPaths 中则删除
@@ -110,12 +110,12 @@ function cleanStalePlugins(targetDir, validRelPaths, label) {
         // 不再下钻（插件目录内部由部署阶段全量重建）
         continue;
       }
-      // 非插件目录：递归下钻（如 niaoluo/ 容器目录）
+      // 非插件目录：递归下钻（如 茑萝/ 容器目录）
       const subRemaining = walk(full, rel);
       if (subRemaining > 0) {
         remaining++;
       } else if (prefix !== '') {
-        // 子容器已空且非顶层（顶层容器如 niaoluo/、全局/ 保留以便用户手动放入插件）
+        // 子容器已空且非顶层（顶层容器如 茑萝/、全局/ 保留以便用户手动放入插件）
         // 这里仅记录，不自动删除——避免误删用户手动创建的占位目录
       }
     }
@@ -190,7 +190,7 @@ if (readdirSync(globalBundle).length === 0) {
 }
 
 // 确保每个模块在 bundled-plugins 下都有文件夹；空文件夹补 .gitkeep，
-// 避免 NSIS 打包时丢弃空目录（占位模块如 note/image 等无产物时仍保留目录）
+// 避免 NSIS 打包时丢弃空目录（占位模块如 鸢尾花/莲花 等无产物时仍保留目录）
 for (const name of readdirSync(pluginsDir)) {
   const dir = join(pluginsDir, name);
   if (!statSync(dir).isDirectory() || EXCLUDED.has(name)) continue;

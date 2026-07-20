@@ -1,8 +1,8 @@
 // CodeMirror 6 外部依赖入口：打包为 IIFE，挂载到 window.__EXT_CM__
-// 供 IDE 子插件按需加载（external-deps/niaoluo/ide/codemirror）。
+// 供 IDE 子插件按需加载（external-deps/茑萝/ide/codemirror）。
 // 与 TipTap 入口不同，CodeMirror 不依赖 react，故无需外部化宿主 react。
 // 构建脚本（scripts/build-external-deps.mjs）会将本入口打成
-// external-deps/niaoluo/ide/codemirror/index.js，由 IDE 运行时 read_external_dep_file + new Function 加载。
+// external-deps/茑萝/ide/codemirror/index.js，由 IDE 运行时 read_external_dep_file + new Function 加载。
 import { EditorView, basicSetup } from 'codemirror';
 import { EditorState, Compartment } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
