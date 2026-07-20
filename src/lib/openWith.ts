@@ -29,11 +29,9 @@ function route(files: string[]) {
     message(`暂不支持以安得云荟打开该类型文件（.${ext}）`, { title: '安得云荟' });
     return;
   }
-  const registry = useAppStore.getState().pluginRegistry as
-    | { plugins?: { id: string }[] }
-    | undefined;
-  const installed =
-    !registry || !registry.plugins || registry.plugins.some((p) => p.id === moduleId);
+  const registry = useAppStore.getState().pluginRegistry;
+  // pluginRegistry 未初始化（null）时放行；否则用公开的 get(id) 判断是否已安装该模块
+  const installed = !registry || !!registry.get(moduleId);
   if (!installed) {
     message(`未安装「${MODULE_NAME[moduleId] ?? moduleId}」模块，无法以安得云荟打开该文件。`, {
       title: '安得云荟',
