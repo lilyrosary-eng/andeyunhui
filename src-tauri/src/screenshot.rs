@@ -159,7 +159,7 @@ pub fn create_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
 /// 显示截图覆盖窗口（仅 show，不重新捕获）。保留以备他用。
 #[tauri::command]
 pub fn show_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
-    create_overlay_window(app.clone())?;
+    // 覆盖窗已改由前端创建；此处仅 show，不在此同步 build()（避免异步线程 0x8007139F / 主线程重入死锁）。
     if let Some(w) = app.get_webview_window("screenshot-overlay") {
         let _ = w.show();
         let _ = w.set_focus();
@@ -696,10 +696,14 @@ pub async fn start_screenshot(
     app: tauri::AppHandle,
     _state: tauri::State<'_, std::sync::Mutex<ScreenshotData>>,
 ) -> Result<(), String> {
-    create_overlay_window(app.clone())?;
+    // 覆盖窗由前端 new WebviewWindow 在 WebView2 环境就绪后创建（与浮窗同款安全路径）。
+    // 注意：切勿在此 async 命令内调用 create_overlay_window 同步 build()——
+    // async 命令运行于 Tauri 异步线程（MTA），在该线程创建 WebView2 会触发
+    // 0x8007139F（"组或资源状态不正确"），且窗口 HWND 建出后 WebView2 初始化失败，
+    // 导致下方 scale_factor() 返回 Err（"无法获取缩放比"）。
     let overlay = app
         .get_webview_window("screenshot-overlay")
-        .ok_or_else(|| "覆盖窗缺失".to_string())?;
+        .ok_or_else(|| "覆盖窗缺失，请重启应用".to_string())?;
 
     // 防重入：正在捕获（CAPTURING 原子）或覆盖窗正在显示（state.showing）则忽略。
     // 注意：不再用 overlay.is_visible() —— 窗口 hide 后状态上报有 1 帧延迟，会误判为「仍在显示」

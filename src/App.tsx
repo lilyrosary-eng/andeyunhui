@@ -11,6 +11,7 @@ import { logger } from '@/lib/logger';
 import { api } from '@/lib/api';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { PhysicalPosition } from '@tauri-apps/api/dpi';
 import { useAppStore } from '@/stores/appStore';
 import { useNotesStore } from '@/stores/notesStore';
 import { clearStaleBootPreview } from '@/lib/bootPreview';
@@ -34,12 +35,47 @@ function App() {
 
   // ====== 微信式截图 ======
   // 不隐藏主窗口：软件运行（含最小化/托盘）时随时可截图；主窗口可见时会被截入画面
-  // （已在 UI 层说明取舍）。截图覆盖窗口在 setup 预创建并复用，避免卡顿。
+  // （已在 UI 层说明取舍）。截图覆盖窗由前端 new WebviewWindow 创建并复用（与浮窗同款安全路径），
+  // 不在 Rust 异步命令里同步 build()，避免 WebView2 0x8007139F / "无法获取缩放比"。
+  // 截图覆盖窗：由前端创建（与浮窗同款已验证安全路径）。Rust start_screenshot 仅操作已存在的窗。
+  const ensureScreenshotOverlay = useCallback(async () => {
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    let w = await WebviewWindow.getByLabel('screenshot-overlay');
+    if (w) return w;
+    try {
+      // 关键：绝不能设 visible:false / skipTaskbar。透明(layered) WebView2 窗口若以隐藏状态创建，
+      // DWM 从未合成过该窗口，WebView2 初始化会失败并抛 0x8007139F（"组或资源状态不正确"），
+      // 窗口变成坏窗，导致 Rust scale_factor() 报 "无法获取缩放比"。浮窗(Ctrl+Alt+V)同款
+      // transparent:true 却正常，差异正是它没用 visible:false/skipTaskbar。
+      // 此处改为「可见但放在离屏坐标 + 透明」创建，创建成功后再由 start_screenshot 定位显示。
+      w = new WebviewWindow('screenshot-overlay', {
+        url: 'screenshot-overlay.html',
+        title: '截图',
+        width: 1280,
+        height: 720,
+        x: -4000,
+        y: -4000,
+        decorations: false,
+        transparent: true,
+        alwaysOnTop: true,
+        resizable: false,
+        shadow: false,
+      });
+      // 等窗口创建完成（WebView2 初始化）再交予 Rust scale_factor()，避免首建竞态
+      await new Promise<void>((r) => setTimeout(r, 200));
+    } catch (err) {
+      console.error('[截图] 创建覆盖窗失败:', err);
+    }
+    return w;
+  }, []);
+
   const startScreenshot = useCallback(async () => {
     try {
       // 记录当前笔记页 id（非阻塞：与截图启动并行，减少一次 IPC 往返延迟）
       const noteId = useNotesStore.getState().currentNoteId ?? '';
       invoke('store_screenshot_note_id', { noteId }).catch(() => {});
+      // 确保覆盖窗已创建（前端 new WebviewWindow，环境就绪后创建，避免 WebView2 初始化失败）
+      await ensureScreenshotOverlay();
       // 立即启动截图捕获（不等 note_id 存储）
       await invoke('start_screenshot');
     } catch (e) {
@@ -78,18 +114,22 @@ function App() {
       await w.setFocus();
       return;
     }
-    w = new WebviewWindow('floating-clipboard', {
-      url: 'index.html?floating=clipboard',
-      title: '剪贴板',
-      width: 360,
-      height: 480,
-      minWidth: 280,
-      minHeight: 320,
-      decorations: false,
-      transparent: true,
-      alwaysOnTop: true,
-      resizable: false,
-    });
+    try {
+      w = new WebviewWindow('floating-clipboard', {
+        url: 'index.html?floating=clipboard',
+        title: '剪贴板',
+        width: 360,
+        height: 480,
+        minWidth: 280,
+        minHeight: 320,
+        decorations: false,
+        transparent: true,
+        alwaysOnTop: true,
+        resizable: false,
+      });
+    } catch (err) {
+      console.error('[Floating] 创建剪贴板浮窗失败:', err);
+    }
   }, []);
 
   // 唤出中转站浮窗（全局热键，与图标栏中转站共享数据源、实时同步）
@@ -101,21 +141,61 @@ function App() {
       await w.setFocus();
       return;
     }
-    w = new WebviewWindow('floating-dropzone', {
-      url: 'index.html?floating=dropzone',
-      title: '中转站',
-      width: 420,
-      height: 520,
-      minWidth: 320,
-      minHeight: 360,
-      decorations: false,
-      transparent: true,
-      alwaysOnTop: true,
-      resizable: false,
-      // 关闭 Tauri 原生拖放，改由前端 HTML5 dragover/drop 处理，
-      // 否则原生拖放会吞掉 drop 事件，导致文件拖入浮窗无法导入 / 同步主站。
-      dragDropEnabled: false,
-    });
+    try {
+      w = new WebviewWindow('floating-dropzone', {
+        url: 'index.html?floating=dropzone',
+        title: '中转站',
+        width: 420,
+        height: 520,
+        minWidth: 320,
+        minHeight: 360,
+        decorations: false,
+        transparent: true,
+        alwaysOnTop: true,
+        resizable: false,
+        // 关闭 Tauri 原生拖放，改由前端 HTML5 dragover/drop 处理，
+        // 否则原生拖放会吞掉 drop 事件，导致文件拖入浮窗无法导入 / 同步主站。
+        dragDropEnabled: false,
+      });
+    } catch (err) {
+      console.error('[Floating] 创建中转站浮窗失败:', err);
+    }
+  }, []);
+
+  // 托盘菜单窗：由前端 new WebviewWindow 创建（与浮窗同款安全路径）。
+  // Rust 侧 open_tray_menu 仅在右键时 emit 光标位置（open-tray-menu），避免 Rust 同步 build() 死锁/异常。
+  const openTrayMenu = useCallback(async (x: number, y: number) => {
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    let w = await WebviewWindow.getByLabel('tray-menu');
+    if (!w) {
+      try {
+        // 同截图覆盖窗：透明窗不能 visible:false / skipTaskbar 创建（会 0x8007139F 变坏窗）。
+        // 改离屏坐标创建，下面立即定位到托盘附近再 show。
+        w = new WebviewWindow('tray-menu', {
+          url: 'index.html?overlay=tray-menu',
+          title: '菜单',
+          width: 220,
+          height: 156,
+          x: -4000,
+          y: -4000,
+          decorations: false,
+          transparent: true,
+          alwaysOnTop: true,
+          resizable: false,
+          shadow: false,
+        });
+      } catch (err) {
+        console.error('[托盘] 创建菜单窗失败:', err);
+        return;
+      }
+    }
+    try {
+      await w.setPosition(new PhysicalPosition(Math.max(4, x - 110), Math.max(4, y - 160)));
+      await w.show();
+      await w.setFocus();
+    } catch (err) {
+      console.error('[托盘] 显示菜单窗失败:', err);
+    }
   }, []);
 
   useEffect(() => {
@@ -127,6 +207,14 @@ function App() {
     const un = listen<null>('open-dropzone-floating', () => { void openDropzoneFloating(); });
     return () => { void un.then((fn) => fn()); };
   }, [openDropzoneFloating]);
+
+  // Rust 托盘右键 → emit 光标位置，前端建窗并定位显示
+  useEffect(() => {
+    const un = listen<{ x: number; y: number }>('open-tray-menu', (e) => {
+      void openTrayMenu(e.payload.x, e.payload.y);
+    });
+    return () => { void un.then((fn) => fn()); };
+  }, [openTrayMenu]);
 
   // 截图保存后：若触发时正处于某篇笔记页，由覆盖窗口转发事件，在此追加图片到该笔记
   useEffect(() => {

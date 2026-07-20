@@ -10,8 +10,8 @@ const rootDir = join(__dirname, '..');
 
 // module folders mirrored from plugins/ + external-deps/ structure
 const MODULES = [
-  'image', 'music', 'note', 'professional', 'reading', 'video',
-  'niaoluo', 'niaoluo/ide', 'niaoluo/wps', '全局',
+  '莲花', '铃兰', '鸢尾花', '薄荷', '三色堇', '玉兰',
+  '茑萝', '茑萝/ide', '茑萝/wps', '全局',
 ];
 
 function ensure(dir) {

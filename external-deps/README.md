@@ -39,10 +39,10 @@ external-deps/
 用户也可手动安装依赖（两种方式皆可识别）：
 
 1. **`.mujin` 私有格式**：把 `.mujin` 文件放到 `user_external_deps/` 对应母文件夹下
-   - 例：`user_external_deps/niaoluo/ide/codemirror.mujin`
+   - 例：`user_external_deps/茑萝/ide/codemirror.mujin`
    - 应用启动时自动解压，源文件 mtime 匹配则跳过（速度极快）
 2. **源文件目录（直接放置）**：把解压后的依赖原始目录放到 `user_external_deps/` 对应位置
-   - 例：`user_external_deps/niaoluo/ide/codemirror/index.js`
+   - 例：`user_external_deps/茑萝/ide/codemirror/index.js`
    - 应用直接识别目录，不解压也不覆盖
    - 适合从 GitHub 直接下载源码使用的场景
    - 若已存在 `.mujin` 解压产物（含 `.mujin.extracted` marker），新版 `.mujin` 会覆盖旧解压；
@@ -58,7 +58,7 @@ external-deps/
 - **设计**：作为「重依赖」单独打包为 IIFE（`external-deps/codemirror/index.js`），**不打包进插件本体**，运行时由 IDE 插件经 Rust 命令 `read_external_dep_file({ relativePath: 'codemirror/index.js' })` 读取，再以 `new Function(code)()` 在全局作用域执行，挂载到 `window.__EXT_CM__`（与插件沙箱加载同源机制）。这样前端插件包保持极轻，CodeMirror 仅在打开 IDE 时按需加载。
 - **构建**：`node scripts/build-external-deps.mjs`（基于 esbuild）。入口源在 `external-deps/_build/codemirror-entry.js`，npm 依赖声明在根 `package.json` 的 devDependencies（`codemirror` 及 `@codemirror/*`，含 `@codemirror/search` 提供查找/替换面板）。
 - **读取路径（重要）**：`read_external_dep_file`（src-tauri/src/commands.rs）按序尝试 ① `app_data/external-deps`（dev 期由 `scripts/deploy-plugins.mjs` 同步而来）与 ② `resource_dir()/external-deps`（打包资源，兜底）。注意 Windows 下 `canonicalize()` 会加 `\\?\` 前缀，故 root 也一并规范化再比较，否则会被误判"越界"拒绝。加载失败时不降级，IDE 直接显示错误面板与构建命令。
-- **被引用位置**：`plugins/niuluo/ide/src/index.tsx`。
+- **被引用位置**：`plugins/茑萝/ide/src/index.tsx`。
 
 ### tiptap（TipTap 2）
 
@@ -68,4 +68,4 @@ external-deps/
 - **构建**：`node scripts/build-external-deps.mjs`（基于 esbuild）。入口源在 `external-deps/_build/tiptap-entry.js`，依赖声明在根 `package.json` 的 dependencies（`@tiptap/*`）。该脚本已接入 `pnpm predev`，每次启动开发自动重新生成。
 - **已挂载到 `window.__EXT_TIPTAP__` 的成员**：`Editor` / `EditorContent` / `useEditor` / `StarterKit` / `Image` / `Link` / `Placeholder` / `Table` / `TableRow` / `TableHeader` / `TableCell` / `TextAlign` / `Underline`。
 - **表格扩展注意（易踩坑）**：`@tiptap/extension-table` 在 2.x 的 `Table` 节点 `content: 'tableRow+'`，但**不会**自带 `tableRow` / `tableCell` / `tableHeader` 节点类型，必须**同时**注册 `@tiptap/extension-table-row` / `-header` / `-cell` 三个独立包（否则建表报 `No node type or group 'tableRow' found`）。本项目已将这三个包加进根 `package.json` 并在 `tiptap-entry.js` 一并打包导出，wps 编辑器 `extensions` 中也显式注册了 `TableRow` / `TableHeader` / `TableCell`。TipTap 各子包版本号独立，`@tiptap/extension-table` 解析到的 2.x 最高线可能与 `react`/`starter-kit` 的 `2.27.x` 不同（pnpm 目录名可能显示 `2.2`），但实际安装版本以各包 `package.json` 为准；务必保证 table 与 row/header/cell 三者大版本一致。
-- **被引用位置**：`plugins/niuluo/wps/src/WpsEditor.tsx`。
+- **被引用位置**：`plugins/茑萝/wps/src/WpsEditor.tsx`。

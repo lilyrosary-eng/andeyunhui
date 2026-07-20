@@ -85,7 +85,7 @@ async function loadMyDep(): Promise<any> {
   const w = window as any;
   if (w.__EXT_MYDEP__) return w.__EXT_MYDEP__;
   const code = await hostApi.invoke<string>('read_external_dep_file', {
-    relativePath: 'niaoluo/myplugin/mydep/index.js',
+    relativePath: '茑萝/myplugin/mydep/index.js',
   });
   if (!code) throw new Error('外部依赖未找到');
   new Function(code)(); // 在全局作用域执行，挂载到 window.__EXT_MYDEP__

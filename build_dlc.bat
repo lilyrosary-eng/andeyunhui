@@ -16,8 +16,8 @@ REM
 REM .mufurong = renamed ZIP, users drag into user_plugins/ for auto-extract
 REM .mujin    = renamed ZIP, users drag into user_external_deps/ for auto-extract
 REM Large modules keep their parent folder:
-REM   - plugins:  niaoluo/ai.mufurong, global/markitdown.mufurong
-REM   - deps:     niaoluo/ide/codemirror.mujin, global/markitdown.mujin
+REM   - plugins:  茑萝/ai.mufurong, global/markitdown.mufurong
+REM   - deps:     茑萝/ide/codemirror.mujin, global/markitdown.mujin
 REM
 REM Does NOT run tauri build, only generates distribution files
 REM ============================================================
