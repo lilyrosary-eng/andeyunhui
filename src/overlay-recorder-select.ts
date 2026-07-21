@@ -31,6 +31,7 @@ interface Win {
   height: number;
   is_self?: boolean;
   isTaskbar?: boolean;
+  z?: number;
 }
 
 // ========== 坐标信息（从 Rust recorder-select-ready 事件获取）==========
@@ -128,6 +129,40 @@ root.appendChild(winHighlight);
 root.appendChild(selection);
 root.appendChild(hint);
 
+// 倒计时提示（选择窗口/区域后、正式开录前的 2 秒醒目提示）。
+// 屏幕在倒计时期间保持实时（仅暗化遮罩 + 选区/窗口高亮 + 此红字提示），
+// 倒计时结束才隐藏覆盖窗并 start_recording，因此倒计时提示绝不会被录进去。
+const countdownEl = document.createElement("div");
+countdownEl.style.cssText = `
+  position: fixed; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  display: none; z-index: 50; pointer-events: none;
+  flex-direction: column; align-items: center; gap: 14px;
+  color: #fff; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  text-shadow: 0 2px 12px rgba(0,0,0,0.7);
+`;
+const cdNum = document.createElement("div");
+cdNum.style.cssText = `
+  font-size: 150px; font-weight: 800; line-height: 1;
+  color: #ff4d4f; text-shadow: 0 0 48px rgba(255,77,79,0.9), 0 6px 20px rgba(0,0,0,0.6);
+`;
+const cdText = document.createElement("div");
+cdText.style.cssText = `font-size: 22px; font-weight: 700; letter-spacing: 3px;`;
+cdText.textContent = "即将开始录制…";
+countdownEl.appendChild(cdNum);
+countdownEl.appendChild(cdText);
+root.appendChild(countdownEl);
+
+// 倒计时数字弹跳动画（每次换数字重新触发）
+const cdStyle = document.createElement("style");
+cdStyle.textContent = `
+@keyframes cd-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  30% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}`;
+document.head.appendChild(cdStyle);
+
 // ========== 交互状态 ==========
 let dragging = false;
 let pointerDown = false; // 必须先 pointerdown 才能进入拖拽判定，否则 mousemove 会因 downX=0 立即触发
@@ -135,39 +170,86 @@ let startX = 0;
 let startY = 0;
 let downX = 0;
 let downY = 0;
-let downWin: Win | null = null;
-let hoverWin: Win | null = null;
 let titleCache: Record<number, string> = {};
 
-// 窗口列表实时刷新（修复「只能识别当前一个窗口 / 不随鼠标变化 / 概率卡住」）：
-// 覆盖窗复用模式下，仅靠初始化时的事件拉一次窗口列表容易陈旧/残缺。这里在可见期间
-// 每 200ms 重新拉取窗口列表（Rust 端已过滤掉自身覆盖窗/控制台/浮窗），
-// 保证切换窗口 Z 序、新开窗口时高亮能实时更新。拖拽/按下期间不刷新，避免抖动。
-let liveTimer: number | null = null;
-let firstMoveLogged = false;
+// 最近一次悬停坐标（用于列表刷新后用新列表重算高亮）
+let hoverLast: { x: number; y: number } | null = null;
+let refreshTimer: number | null = null;
 
-function startLiveWindowRefresh() {
-  stopLiveWindowRefresh();
-  liveTimer = window.setInterval(async () => {
-    if (!ready || dragging || pointerDown) return;
-    try {
-      const data = await invoke<{ ox: number; oy: number; scale: number; windows?: Win[] }>(
-        "get_recorder_select_coords",
-      );
-      // 仅更新窗口列表，**不**调用 initFromEvent（那会每 200ms 清空 hoverWin / titleCache /
-      // 重置 hint，导致高亮框每 200ms 闪烁消失 —— 表现为「鼠标移动没用 / 只能识别一个窗口」）。
-      // ox/oy/scale 在初始化后不变，这里只同步窗口矩形（Z 序变化 / 新开窗口实时生效）。
-      if (data?.windows) windows = data.windows;
-    } catch {
-      // 拉取失败忽略，下一周期重试
+// 倒计时状态：选择窗口/区域后、正式开录前的 2 秒醒目倒计时期间为 true，
+// 此时忽略所有指针交互，避免误触重新选择。
+let countingDown = false;
+let countdownTimer: number | null = null;
+const COUNTDOWN_SECONDS = 2;
+
+// 悬停命中测试（纯前端，零 IPC）：在实时窗口列表里找包含光标、且 z 序最靠前（最上层可见）的窗口。
+// 用 z 序而非最小面积，才能正确识别「重叠窗口」之上真实可见的那个，避免被遮挡的小窗口误判为命中。
+// 不跳过 is_self：本应用自身的窗口（主窗 / 浮窗）同样是用户可能想录制的可见窗口，
+// 截图/录屏覆盖窗本身已在枚举时隐藏或经 filter_self_overlay_windows 剔除，不会混入列表。
+function hitWindow(cx: number, cy: number): Win | null {
+  const p = toPhys(cx, cy);
+  let best: Win | null = null;
+  let bestZ = Infinity;
+  for (const w of windows) {
+    if (p.x >= w.x && p.x <= w.x + w.width && p.y >= w.y && p.y <= w.y + w.height) {
+      const z = w.z == null ? Infinity : w.z;
+      if (z < bestZ) { best = w; bestZ = z; }
     }
-  }, 200);
+  }
+  return best;
 }
 
-function stopLiveWindowRefresh() {
-  if (liveTimer !== null) {
-    clearInterval(liveTimer);
-    liveTimer = null;
+// 覆盖窗打开期间每 200ms 增量刷新窗口列表（单次 IPC），让悬停识别在切换窗口时依然跟手。
+function startListRefresh() {
+  if (refreshTimer !== null) return;
+  const tick = () => {
+    invoke<Win[]>("list_windows")
+      .then((ws) => {
+        if (ws && ws.length) {
+          windows = ws;
+          if (!pointerDown && !dragging && hoverLast && !countingDown) {
+            updateWinHighlight(hitWindow(hoverLast.x, hoverLast.y));
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => { refreshTimer = window.setTimeout(tick, 200); });
+  };
+  tick();
+}
+function stopListRefresh() {
+  if (refreshTimer !== null) { clearTimeout(refreshTimer); refreshTimer = null; }
+}
+
+// 实时命中测试（根治「只识别出一个窗口 / 移动鼠标无用」）：
+// 直接以 OS 为权威 —— Rust `window_at_point` 内部以 `WindowFromPoint` 取光标下真实顶层窗口，
+// 并沿 Z 序跳过本应用自身覆盖窗/控制台/浮窗，任何时刻都返回光标下真实窗口；
+// 天然处理 z 序裁剪、透明区域、被遮挡窗口与 UWP 现代应用。
+// 彻底摆脱对「枚举全窗口列表 + JS 矩形求交」的依赖：那份列表偶发残缺/陈旧就会漏窗，
+// 表现为只命中一个窗口。前端仅用 rAF 节流做悬停高亮，每帧最多一次 IPC，零列表缓存、零陈旧。
+async function hitAt(cx: number, cy: number): Promise<Win | null> {
+  const p = toPhys(cx, cy);
+  try {
+    return await invoke<Win | null>("window_at_point", { x: p.x, y: p.y });
+  } catch {
+    return null;
+  }
+}
+
+// rAF 节流的悬停高亮：合并同一帧内的多次 pointermove，每帧最多一次同步命中测试（无 IPC）。
+let hoverRaf: number | null = null;
+let hoverPending: { x: number; y: number } | null = null;
+function requestHover(cx: number, cy: number) {
+  hoverLast = { x: cx, y: cy };
+  hoverPending = { x: cx, y: cy };
+  if (hoverRaf === null) {
+    hoverRaf = requestAnimationFrame(() => {
+      hoverRaf = null;
+      const pt = hoverPending;
+      hoverPending = null;
+      if (!pt) return;
+      updateWinHighlight(hitWindow(pt.x, pt.y));
+    });
   }
 }
 
@@ -192,24 +274,6 @@ function scheduleUpdate(fn: () => void) {
 // ========== 坐标换算 ==========
 function toPhys(cx: number, cy: number): { x: number; y: number } {
   return { x: ox + cx * scale, y: oy + cy * scale };
-}
-
-// 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标的窗口。
-// **关键修复（录屏窗口识别只识别一个 / 鼠标不动）**：本进程主窗口（is_self）在录屏
-// 场景下通常是最大化、且位于其他窗口之上的顶层窗口，若纳入命中测试，光标下任何位置
-// 都会先命中它 → 永远只识别到主窗口、鼠标移动无效。因此此处跳过 is_self，让光标能
-// 穿透到其下方的真实目标窗口。录制主窗口自身可用自由框选（拖拽）实现。
-// fullscreen overlay / 控制台 / 截图覆盖窗 / 浮窗剪贴板已在 Rust 端
-// filter_self_overlay_windows 中按 hwnd 过滤，不会出现在 windows 列表中。
-function hitWindow(cx: number, cy: number): Win | null {
-  const p = toPhys(cx, cy);
-  for (const w of windows) {
-    if (w.is_self) continue;
-    if (p.x >= w.x && p.x <= w.x + w.width && p.y >= w.y && p.y <= w.y + w.height) {
-      return w;
-    }
-  }
-  return null;
 }
 
 // 更新窗口高亮框位置
@@ -270,19 +334,20 @@ function showError(msg: string) {
 
 // ========== Pointer Events（比 mouse 事件更可靠：setPointerCapture 确保拖拽中不丢失追踪）==========
 overlay.addEventListener("pointerdown", (e) => {
+  if (countingDown) return;
   if (e.button !== 0) return;
   // 捕获指针：即使光标移出 overlay 元素，后续 pointermove/up 仍发到此元素
   (e.target as Element).setPointerCapture?.(e.pointerId);
   pointerDown = true;
   downX = e.clientX;
   downY = e.clientY;
-  downWin = hitWindow(e.clientX, e.clientY);
   dragging = false;
   startX = e.clientX;
   startY = e.clientY;
 });
 
 overlay.addEventListener("pointermove", (e) => {
+  if (countingDown) return;
   if (dragging) {
     // 拖拽中：用 rAF 批量更新选区
     const x = Math.min(startX, e.clientX);
@@ -308,13 +373,8 @@ overlay.addEventListener("pointermove", (e) => {
       updateSelection(x, y, w, h);
     }
   } else {
-    // 纯悬停（未按下）：高亮当前窗口
-    hoverWin = hitWindow(e.clientX, e.clientY);
-    if (!firstMoveLogged) {
-      firstMoveLogged = true;
-      console.log("[录屏区域] 首次 pointermove 触发，当前窗口列表数:", windows.length);
-    }
-    updateWinHighlight(hoverWin);
+    // 纯悬停（未按下）：实时命中测试高亮当前窗口（rAF 节流，OS 权威，永不残缺）
+    requestHover(e.clientX, e.clientY);
   }
 });
 
@@ -336,7 +396,8 @@ function clipToWorkArea(r: { x: number; y: number; w: number; h: number }) {
   return { x: nx, y: ny, w: nx2 - nx, h: ny2 - ny };
 }
 
-overlay.addEventListener("pointerup", (e) => {
+overlay.addEventListener("pointerup", async (e) => {
+  if (countingDown) return;
   if (e.button !== 0) return;
   pointerDown = false;
   // 释放指针捕获
@@ -358,23 +419,26 @@ overlay.addEventListener("pointerup", (e) => {
     const physW = Math.round(w * scale);
     const physH = Math.round(h * scale);
     const clipped = clipToWorkArea({ x: physX, y: physY, w: physW, h: physH });
-    void startRecordingWithRegion(clipped.x, clipped.y, clipped.w, clipped.h);
-  } else if (downWin) {
-    if (downWin.isTaskbar) {
-      // 点任务栏本身 = 整屏录制（含任务栏）
-      const vw = Math.round(window.innerWidth * scale);
-      const vh = Math.round(window.innerHeight * scale);
-      void startRecordingWithRegion(ox, oy, vw, vh);
-    } else {
-      // 干净单击窗口：使用窗口矩形（物理像素），并剔除任务栏那条带
-      const clipped = clipToWorkArea({ x: downWin.x, y: downWin.y, w: downWin.width, h: downWin.height });
-      void startRecordingWithRegion(clipped.x, clipped.y, clipped.w, clipped.h);
-    }
+    void startCountdown(clipped.x, clipped.y, clipped.w, clipped.h);
   } else {
-    cancel();
+    // 干净单击：以 OS 实时命中测试取光标下真实窗口（down 位置，最权威）；为空时回退列表命中。
+    const w = await hitAt(downX, downY);
+    const downWin = w ?? hitWindow(downX, downY);
+    if (downWin) {
+      if (downWin.isTaskbar) {
+        // 点任务栏本身 = 整屏录制（含任务栏）
+        const vw = Math.round(window.innerWidth * scale);
+        const vh = Math.round(window.innerHeight * scale);
+        void startCountdown(ox, oy, vw, vh);
+      } else {
+        // 干净单击窗口：使用窗口矩形（物理像素），并剔除任务栏那条带
+        const clipped = clipToWorkArea({ x: downWin.x, y: downWin.y, w: downWin.width, h: downWin.height });
+        void startCountdown(clipped.x, clipped.y, clipped.w, clipped.h);
+      }
+    } else {
+      cancel();
+    }
   }
-
-  downWin = null;
 });
 
 // 右键取消
@@ -393,7 +457,10 @@ window.addEventListener("keydown", (e) => {
 
 // ========== 核心流程 ==========
 async function cancel() {
-  stopLiveWindowRefresh();
+  if (countdownTimer !== null) { clearInterval(countdownTimer); countdownTimer = null; }
+  countingDown = false;
+  countdownEl.style.display = "none";
+  stopListRefresh();
   try {
     await invoke("hide_recorder_select");
   } catch {
@@ -402,18 +469,47 @@ async function cancel() {
   await getCurrentWindow().hide();
 }
 
-async function startRecordingWithRegion(x: number, y: number, w: number, h: number) {
-  // 守卫：坐标无效（如初始化未完成导致 NaN/非正值）时绝不应退化成「录全屏」，
-  // 而是提示用户重新框选，避免静默录下整个屏幕。
+// 倒计时数字弹跳动画（每次换数字重新触发一次）
+function showCountdownNumber(n: number) {
+  cdNum.textContent = String(n);
+  cdNum.style.animation = "none";
+  void cdNum.offsetWidth; // 触发重排以重启 CSS 动画
+  cdNum.style.animation = "cd-pop 1s ease-out";
+}
+
+// 选择窗口/区域后：先展示 2 秒醒目倒计时，屏幕在此期间保持实时（仅暗化遮罩 + 选区/窗口高亮 + 红字提示），
+// 倒计时结束才隐藏覆盖窗并真正开录 —— 因此倒计时提示绝不会被录进视频。
+function startCountdown(x: number, y: number, w: number, h: number) {
+  // 守卫：坐标无效时提示重新框选，绝不退化全屏（也不必走倒计时）
   if (
     !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h) ||
     w < 1 || h < 1
   ) {
     showError("录屏区域无效，请重新框选区域");
-    await invoke("hide_recorder_select").catch(() => {});
-    await getCurrentWindow().hide();
+    void cancel();
     return;
   }
+  countingDown = true;
+  hint.style.display = "none";
+  // 保留当前已选中的选区/窗口高亮（selection 或 winHighlight），让用户看清将录制的范围。
+  let remaining = COUNTDOWN_SECONDS;
+  countdownEl.style.display = "flex";
+  showCountdownNumber(remaining);
+  countdownTimer = window.setInterval(() => {
+    remaining -= 1;
+    if (remaining <= 0) {
+      if (countdownTimer !== null) { clearInterval(countdownTimer); countdownTimer = null; }
+      countdownEl.style.display = "none";
+      countingDown = false;
+      void beginRecording(x, y, w, h);
+    } else {
+      showCountdownNumber(remaining);
+    }
+  }, 1000);
+}
+
+// 正式开录：隐藏选择覆盖窗（避免被截入）→ 显示控制台 → 启动录屏。
+async function beginRecording(x: number, y: number, w: number, h: number) {
   try {
     // 1. 隐藏区域选择覆盖窗（必须先隐藏，否则会被截入录屏）
     await invoke("hide_recorder_select");
@@ -472,17 +568,18 @@ async function initFromEvent(data: { ox: number; oy: number; scale: number; wind
   scale = data.scale;
   windows = data.windows ?? [];
   ready = true;
+  // 复位倒计时状态（防止上次中断残留）
+  countingDown = false;
+  if (countdownTimer !== null) { clearInterval(countdownTimer); countdownTimer = null; }
+  countdownEl.style.display = "none";
+  // 启动窗口列表增量刷新（每 200ms），让悬停高亮在切换窗口时仍跟手。
+  startListRefresh();
   // 重置状态
   titleCache = {};
-  hoverWin = null;
   dragging = false;
-  downWin = null;
-  firstMoveLogged = false;
   hint.style.display = "block";
   winHighlight.style.display = "none";
   selection.style.display = "none";
-  // 启动窗口列表实时刷新（可见期间持续更新，避免识别陈旧/卡住）
-  startLiveWindowRefresh();
 }
 
 // 保留事件监听（快速路径：如果事件能到达，立即初始化）

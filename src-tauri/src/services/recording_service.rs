@@ -1083,6 +1083,22 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
         .get_webview_window(RECORDER_SELECT_LABEL)
         .ok_or_else(|| "录屏区域选择窗口不存在".to_string())?;
 
+    // 清理上一段录屏遗留的常驻置顶窗（控制台 recorder-widget / 录屏区域边框窗）。
+    // 它们 stop 后不会自动隐藏（结果面板需手动关闭），若仍可见会与新选择窗争夺
+    // 激活/焦点（set_focus 需先停用上一个置顶窗口）。多次录屏后该竞争会累积，
+    // 表现为「首次不卡、频繁启动卡」——截图流程无此常驻置顶窗生命周期，故从不卡。
+    // 此处强制隐藏，保证每次打开选择窗都是干净的（隐藏仅收起 UI，后台保存线程不受影响）。
+    if let Some(w) = app.get_webview_window(RECORDER_WINDOW_LABEL) {
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.hide();
+        }
+    }
+    if let Some(bw) = app.get_webview_window(RECORDING_BORDER_LABEL) {
+        if bw.is_visible().unwrap_or(false) {
+            let _ = bw.hide();
+        }
+    }
+
     let (vx, vy, vw, vh) = virtual_desktop_rect();
     if vw <= 0 || vh <= 0 {
         return Err("无法获取虚拟桌面尺寸".into());
@@ -1099,7 +1115,7 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     // 但控制台（recorder-widget）若上次录屏后未隐藏可能仍可见，需过滤。
     // 同时过滤 screenshot-overlay / floating-clipboard 等 fullscreen / always-on-top 窗口，
     // 避免它们挡住其他窗口的命中测试。
-    let windows = crate::screenshot::list_windows().unwrap_or_default();
+    let windows = crate::screenshot::list_windows(app.clone()).unwrap_or_default();
     let windows = filter_self_overlay_windows(&app, windows);
     eprintln!(
         "[录屏区域] show_recorder_select: ox={}, oy={}, scale={}, 窗口数={}",
@@ -1124,7 +1140,7 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(150));
             let (vx, vy, _, _) = virtual_desktop_rect();
             let scale = rec_h.scale_factor().unwrap_or(1.0);
-            if let Ok(windows) = crate::screenshot::list_windows() {
+            if let Ok(windows) = crate::screenshot::list_windows(app_h.clone()) {
                 let windows = filter_self_overlay_windows(&app_h, windows);
                 let _ = rec_h.emit(
                     "recorder-select-ready",
@@ -1157,7 +1173,7 @@ pub fn get_recorder_select_coords(app: AppHandle) -> Result<serde_json::Value, S
         .get_webview_window(RECORDER_SELECT_LABEL)
         .ok_or_else(|| "录屏区域选择窗口不存在".to_string())?;
     let scale = win.scale_factor().unwrap_or(1.0);
-    let windows = crate::screenshot::list_windows().unwrap_or_default();
+    let windows = crate::screenshot::list_windows(app.clone()).unwrap_or_default();
     // 过滤掉本进程的 overlay / 控制台 / 截图覆盖窗 / 浮窗剪贴板
     let windows = filter_self_overlay_windows(&app, windows);
     Ok(serde_json::json!({
