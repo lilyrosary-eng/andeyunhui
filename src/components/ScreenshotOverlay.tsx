@@ -11,6 +11,8 @@ interface Win {
   width: number;
   height: number;
   isTaskbar?: boolean;
+  is_self?: boolean;
+  z?: number;
 }
 
 interface ScreenshotOverlayProps {
@@ -88,7 +90,13 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   const [mode, setMode] = useState<"select" | "edit">("select");
   const [longMode, setLongMode] = useState(false); // 长截图：窗口挑选态
   const [isLong, setIsLong] = useState(false); // 当前编辑的是长截图（整窗）
-  const [hoverHwnd, setHoverHwnd] = useState<number | null>(null);
+  const [hoverWin, setHoverWin] = useState<Win | null>(null);
+  // 实时窗口列表（悬停命中测试用）：以 props.windows 初始化，覆盖窗打开期间每 200ms 由
+  // list_windows 增量刷新，保证「实时跟手」且零每帧 IPC（彻底消除开启覆盖窗时的卡顿）。
+  const [liveWindows, setLiveWindows] = useState<Win[]>(windows ?? []);
+  const liveWindowsRef = useRef<Win[]>(windows ?? []);
+  const lastListSigRef = useRef<string>(""); // 窗口列表变化签名，避免无谓重渲染
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
   // 窗口标题懒加载缓存：枚举时不再读标题（避免跨线程阻塞导致截图卡 4-5s），悬停时按需拉取单个窗口标题
   const [titleMap, setTitleMap] = useState<Record<number, string>>({});
 
@@ -163,38 +171,124 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     [ox, oy, scale],
   );
 
-  // 命中窗口：EnumWindows 返回顺序即 Z 序（顶→底），取首个包含光标的窗口。
-  // 这与微信/QQ 截图的 WindowFromPoint 语义等价——光标下「最顶层的窗口」即用户视觉目标。
-  // 工具覆盖窗（screenshot-overlay/recorder-select/recorder-widget/tray-menu）已在 Rust 侧排除，
-  // 主窗口保留可被高亮（用户明确要求不屏蔽本软件）。
+  // 实时命中测试：直接以 OS 为权威（Rust window_at_point 内部用 WindowFromPoint +
+  // 沿 Z 序跳过自身覆盖窗），彻底摆脱对「冻结窗口列表 + JS 矩形求交」的依赖——
+  // 那份列表是截图时刻的一次性枚举，偶发漏窗时表现为「只识别一个窗口 / 悬停高亮不动」。
+  // 每次悬停/单击都实时问 OS，永远返回光标下真实窗口，天然处理 z 序/透明/UWP 现代应用。
+  // 单击/长截图取窗口：仍以 OS 为权威（window_at_point），单次调用不卡；返回 null 时回退列表命中。
+  const hitAt = useCallback(
+    async (cx: number, cy: number): Promise<Win | null> => {
+      const p = toPhys(cx, cy);
+      try {
+        return await invoke<Win | null>("window_at_point", { x: p.x, y: p.y });
+      } catch {
+        return null;
+      }
+    },
+    [toPhys],
+  );
+
+  // 悬停命中测试（纯前端，零 IPC）：在实时窗口列表里找包含光标、且 z 序最靠前（最上层可见）的窗口。
+  // 用 z 序而非最小面积，才能正确识别「重叠窗口」之上真实可见的那个，避免被遮挡的小窗口误判为命中。
+  // 不跳过 is_self：本应用自身窗口（主窗 / 浮窗）同样可见、可截图，覆盖窗不在列表中。
   const hitWindow = useCallback(
     (cx: number, cy: number): Win | null => {
       const p = toPhys(cx, cy);
-      for (const w of windows) {
-        if (p.x >= w.x && p.x <= w.x + w.width && p.y >= w.y && p.y <= w.y + w.height) {
-          return w;
+      const list = liveWindowsRef.current;
+      let best: Win | null = null;
+      let bestZ = Infinity;
+      for (const w of list) {
+        if (
+          p.x >= w.x && p.x <= w.x + w.width &&
+          p.y >= w.y && p.y <= w.y + w.height
+        ) {
+          const z = w.z == null ? Infinity : w.z;
+          if (z < bestZ) {
+            best = w;
+            bestZ = z;
+          }
         }
       }
-      return null;
+      return best;
     },
-    [windows, toPhys],
+    [toPhys],
+  );
+
+  // rAF 节流的悬停高亮：合并同一帧多次 pointermove，每帧最多一次同步命中测试（无 IPC）。
+  const hoverRafRef = useRef<number | null>(null);
+  const hoverPendingRef = useRef<{ x: number; y: number } | null>(null);
+  const requestHover = useCallback(
+    (x: number, y: number) => {
+      lastPointerRef.current = { x, y };
+      hoverPendingRef.current = { x, y };
+      if (hoverRafRef.current == null) {
+        hoverRafRef.current = requestAnimationFrame(() => {
+          hoverRafRef.current = null;
+          const pt = hoverPendingRef.current;
+          hoverPendingRef.current = null;
+          if (!pt) return;
+          setHoverWin(hitWindow(pt.x, pt.y));
+        });
+      }
+    },
+    [hitWindow],
   );
 
   // 悬停窗口时按需拉取标题（单次、Rust 侧 30ms 超时、绝不阻塞截图路径）
   useEffect(() => {
-    if (hoverHwnd == null || titleMap[hoverHwnd] !== undefined) return;
+    if (hoverWin?.hwnd == null || titleMap[hoverWin.hwnd] !== undefined) return;
+    const hw = hoverWin.hwnd;
     let cancelled = false;
-    invoke<string>("get_window_title", { hwnd: hoverHwnd })
+    invoke<string>("get_window_title", { hwnd: hw })
       .then((t) => {
-        if (!cancelled) setTitleMap((m) => ({ ...m, [hoverHwnd]: t }));
+        if (!cancelled) setTitleMap((m) => ({ ...m, [hw]: t }));
       })
       .catch(() => {
-        if (!cancelled) setTitleMap((m) => ({ ...m, [hoverHwnd]: "" }));
+        if (!cancelled) setTitleMap((m) => ({ ...m, [hw]: "" }));
       });
     return () => {
       cancelled = true;
     };
-  }, [hoverHwnd, titleMap]);
+  }, [hoverWin, titleMap]);
+
+  // 覆盖窗打开期间每 200ms 增量刷新窗口列表（单次 IPC、后台执行，开销极低），
+  // 让悬停识别在用户切换窗口 / 打开新窗口时依然跟手；同时用最新列表重算当前光标下的高亮。
+  useEffect(() => {
+    if (mode !== "select") return;
+    let alive = true;
+    let timer: number | undefined;
+    const tick = () => {
+      if (!alive) return;
+      invoke<Win[]>("list_windows")
+        .then((ws) => {
+          if (!alive || !ws || ws.length === 0) return;
+          // 仅在窗口集合真正变化（位置/尺寸/数量变化）时才触发 setState 重渲染，
+          // 避免每 200ms 无条件重渲染导致的偶发卡顿；引用始终更新以保证命中测试用最新数据。
+          const sig = ws.map((w) => `${w.hwnd}:${w.x},${w.y},${w.width},${w.height},${w.z}`).join("|");
+          if (sig !== lastListSigRef.current) {
+            lastListSigRef.current = sig;
+            liveWindowsRef.current = ws;
+            setLiveWindows(ws);
+          } else {
+            liveWindowsRef.current = ws;
+          }
+          // 当前处于纯悬停（未拖拽）时，用新列表立即重算高亮，避免切换窗口后绿框滞后。
+          const lp = lastPointerRef.current;
+          if (lp && !dragRef.current && !pendingRef.current?.dragging) {
+            setHoverWin(hitWindow(lp.x, lp.y));
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (alive) timer = window.setTimeout(tick, 200);
+        });
+    };
+    tick();
+    return () => {
+      alive = false;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [mode, hitWindow]);
 
   // Esc 取消 / Enter 确认 / 方向键微调选区
   useEffect(() => {
@@ -355,17 +449,17 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   );
 
   // ====== 选择态交互 ======
-  const onPointerDown = (e: React.PointerEvent) => {
+  const onPointerDown = async (e: React.PointerEvent) => {
     if (mode !== "select") return;
     (e.target as Element).setPointerCapture?.(e.pointerId);
     const x = e.clientX;
     const y = e.clientY;
+    // 实时命中测试取光标下真实窗口（OS 权威，null 时回退列表命中）
+    const w = (await hitAt(x, y)) ?? hitWindow(x, y);
     if (longMode) {
-      const w = hitWindow(x, y);
       if (w) captureLong(w.hwnd);
       return;
     }
-    const w = hitWindow(x, y);
     pendingRef.current = { x0: x, y0: y, win: w, dragging: false };
   };
 
@@ -384,8 +478,8 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
         p.dragging = true;
         dragRef.current = { x0: p.x0, y0: p.y0, x1: x, y1: y, aspect: undefined };
       } else {
-        const w = hitWindow(x, y);
-        setHoverHwnd(w ? w.hwnd : null);
+        // 实时命中测试高亮（rAF 节流，OS 权威，永不残缺）
+        requestHover(x, y);
         return;
       }
     }
@@ -415,8 +509,8 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
         h: Math.abs(cy - y0),
       });
     } else {
-      const w = hitWindow(x, y);
-      setHoverHwnd(w ? w.hwnd : null);
+      // 实时命中测试高亮（rAF 节流，OS 权威，永不残缺）
+      requestHover(x, y);
     }
   };
 
@@ -424,7 +518,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   // 任务栏窗口由 Rust list_windows 以 isTaskbar 标记并加入列表；其矩形为物理像素，
   // 这里换算到覆盖窗 CSS 坐标后，与「整屏剔除任务栏所在那条边」求交。
   const clipToWorkArea = (r: { x: number; y: number; w: number; h: number }) => {
-    const tb = windows.find((w) => w.isTaskbar);
+    const tb = liveWindows.find((w) => w.isTaskbar);
     if (!tb) return r;
     const iw = window.innerWidth, ih = window.innerHeight;
     const tbx = (tb.x - ox) / scale, tby = (tb.y - oy) / scale;
@@ -441,7 +535,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     return { x: nx, y: ny, w: nx2 - nx, h: ny2 - ny };
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = async () => {
     if (mode !== "select") return;
     const p = pendingRef.current;
     const drag = dragRef.current;
@@ -449,21 +543,26 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     dragRef.current = null;
     setMag((m) => ({ ...m, show: false }));
     if (!p) return;
-    if (p.win && !p.dragging) {
-      // 干净单击窗口 → 整窗截取
-      if (p.win.isTaskbar) {
-        // 点任务栏本身 = 整屏捕获（含任务栏）
-        commitCrop({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+    if (!p.dragging) {
+      // 干净单击窗口 → 整窗截取（OS 实时命中，最权威，绝不依赖冻结列表）
+      const w = (await hitAt(p.x0, p.y0)) ?? hitWindow(p.x0, p.y0);
+      if (w) {
+        if (w.isTaskbar) {
+          // 点任务栏本身 = 整屏捕获（含任务栏）
+          commitCrop({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+          return;
+        }
+        // 普通窗口：矩形是物理像素，需换算成覆盖窗 CSS 像素（÷scale）再截取，
+        // 并剔除任务栏那条带，做到「其余一律不截任务栏」。
+        commitCrop(clipToWorkArea({
+          x: (w.x - ox) / scale,
+          y: (w.y - oy) / scale,
+          w: w.width / scale,
+          h: w.height / scale,
+        }));
         return;
       }
-      // 普通窗口：矩形是物理像素，需换算成覆盖窗 CSS 像素（÷scale）再截取，
-      // 并剔除任务栏那条带，做到「其余一律不截任务栏」。
-      commitCrop(clipToWorkArea({
-        x: (p.win.x - ox) / scale,
-        y: (p.win.y - oy) / scale,
-        w: p.win.width / scale,
-        h: p.win.height / scale,
-      }));
+      setSelRect(null);
       return;
     }
     if (drag) {
@@ -791,7 +890,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
 
         {/* 窗口绿色轮廓（悬停高亮当前窗口） */}
         {(() => {
-          const activeWin = windows.find((w) => w.hwnd === hoverHwnd);
+          const activeWin = hoverWin;
           if (!activeWin) return null;
           const w = activeWin;
           const wtitle = titleMap[w.hwnd] ?? w.title;
