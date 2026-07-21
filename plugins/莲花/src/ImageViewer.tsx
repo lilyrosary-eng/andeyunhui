@@ -15,6 +15,8 @@ interface ImageViewerProps {
   folderPath: string;
   folderName: string;
   onBack: () => void;
+  /** 以安得云荟打开 / 拖入时，定位到指定图片 */
+  initialPath?: string;
 }
 
 const ModeLabels: Record<ViewMode, string> = {
@@ -27,7 +29,7 @@ const ModeLabels: Record<ViewMode, string> = {
 const MODES: ViewMode[] = ['full', 'vertical', 'horizontal-forward', 'horizontal-reverse'];
 
 // ========== 主组件 ==========
-export function ImageViewer({ folderPath, folderName, onBack }: ImageViewerProps) {
+export function ImageViewer({ folderPath, folderName, onBack, initialPath }: ImageViewerProps) {
   const [images, setImages] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('full');
@@ -53,6 +55,10 @@ export function ImageViewer({ folderPath, folderName, onBack }: ImageViewerProps
       .then((paths) => {
         if (cancelled) return;
         setImages(paths);
+        if (initialPath) {
+          const idx = paths.indexOf(initialPath);
+          if (idx >= 0) setCurrentIndex(idx);
+        }
         setLoading(false);
       })
       .catch((err: unknown) => {

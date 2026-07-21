@@ -57,7 +57,17 @@ export function useRootPaths(storageKey: string) {
     });
   }, [storageKey]);
 
-  return { rootPaths, setRootPaths, addRoot, removeRoot };
+  /** 静默加入根目录（不弹选择器，持久化）。用于「以安得云荟打开 / 拖入主窗口」的临时目录注册。 */
+  const addRootPath = useCallback((pathToAdd: string) => {
+    setRootPaths(prev => {
+      if (prev.includes(pathToAdd)) return prev;
+      const updated = [...prev, pathToAdd];
+      localStorage.setItem(storageKey, JSON.stringify(updated));
+      return updated;
+    });
+  }, [storageKey]);
+
+  return { rootPaths, setRootPaths, addRoot, addRootPath, removeRoot };
 }
 
 /**

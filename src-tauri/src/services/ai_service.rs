@@ -35,6 +35,10 @@ pub struct AiProfile {
     pub api_key: String,
     /// 模型名，如 deepseek-chat / gpt-4o-mini
     pub model: String,
+    /// 视觉模型名（OCR / 图片理解用，可选）：留空则复用 model。
+    /// 多数供应商的对话模型无视觉能力，单独指定视觉模型可避免 OCR 报「模型不支持图片」。
+    #[serde(default)]
+    pub vision_model: Option<String>,
     /// 采样温度（0~2），编程场景建议偏低
     #[serde(default = "default_temperature")]
     pub temperature: f32,
@@ -79,6 +83,7 @@ fn default_profile() -> AiProfile {
         base_url: "https://api.deepseek.com/v1".to_string(),
         api_key: String::new(),
         model: "deepseek-chat".to_string(),
+        vision_model: None,
         temperature: default_temperature(),
         max_tokens: None,
         top_p: None,
@@ -451,8 +456,15 @@ pub async fn ai_vision_ocr(
     let p = prompt.unwrap_or_else(|| "请提取图片中的全部文字，保持原始排版与顺序，仅输出识别结果不要任何说明".to_string());
     let data_url = format!("data:{};base64,{}", image_mime, image_base64);
 
+    // OCR 优先使用独立的视觉模型；未单独配置时回落到对话模型（兼容旧配置）。
+    let ocr_model = cfg
+        .vision_model
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| cfg.model.clone());
+
     let body = serde_json::json!({
-        "model": cfg.model,
+        "model": ocr_model,
         "messages": [{
             "role": "user",
             "content": [
@@ -489,14 +501,47 @@ pub async fn ai_vision_ocr(
         ));
     }
 
-    let v: serde_json::Value = resp
-        .json()
+    // 先取原始文本再解析：某些供应商（如纯文本模型收到图片时）会返回非 JSON 或非标准结构，
+    // 直接 .json() 会得到模糊的「error decoding response body」，丢失服务端真实信息。
+    let raw = resp
+        .text()
         .await
-        .map_err(|e| format!("解析响应失败: {}", e))?;
-    let content = v["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or_else(|| "响应中未找到 content 字段".to_string())?
-        .to_string();
+        .map_err(|e| format!("读取响应失败: {}", e))?;
+
+    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "解析响应失败: {}；服务端原始返回：{}",
+            e,
+            raw.chars().take(300).collect::<String>()
+        )
+    })?;
+
+    // 若服务端在 200 里夹带 error 字段（部分 OpenAI 兼容网关的做法），直接暴露。
+    if let Some(err_obj) = v.get("error") {
+        let em = err_obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("未知错误");
+        return Err(format!("服务端返回错误：{}", em));
+    }
+
+    // 兼容两种返回结构：content 为字符串（OpenAI/gpt-4o、Qwen-VL、GLM-4V 多数情况），
+    // 或 content 为文本块数组（[{type:"text",text:"..."}]，部分 VL 模型会这样返回）。
+    let content_val = &v["choices"][0]["message"]["content"];
+    let content = match content_val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => {
+            return Err(format!(
+                "响应中未找到 content 字段；服务端原始返回：{}",
+                raw.chars().take(300).collect::<String>()
+            ))
+        }
+    };
     Ok(content)
 }
 

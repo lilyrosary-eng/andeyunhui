@@ -16,7 +16,8 @@ import { listen } from '@tauri-apps/api/event';
 import { useAppStore } from '@/stores/appStore';
 import { useNotesStore } from '@/stores/notesStore';
 import { clearStaleBootPreview } from '@/lib/bootPreview';
-import { initOpenWith } from '@/lib/openWith';
+import { initOpenWith, MEDIA_MODULES, detectModule } from '@/lib/openWith';
+import { dispatchOpenWith } from '../plugins/_shared/openWithFiles';
 import { PhysicalPosition } from '@tauri-apps/api/dpi';
 
 function App() {
@@ -360,6 +361,10 @@ function App() {
       e.preventDefault();
       // 笔记模块：交给编辑器自身的 onDrop 在光标处插入，避免重复处理
       if (activeModuleRef.current === 'notes') return;
+      // 处于媒体模块时，把匹配类型的文件收集起来，拖入后一并「以安得云荟打开」（复制进固定临时目录并打开）
+      const activeMod = activeModuleRef.current;
+      const isMediaActive = MEDIA_MODULES.includes(activeMod);
+      const openWithItems: { path: string; name: string }[] = [];
       for (const file of Array.from(dt.files)) {
         try {
           const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -382,10 +387,15 @@ function App() {
               logger.dropzone.readFailed(imported.storedPath, readErr);
             }
           }
+          // 媒体模块 + 类型匹配：记录为「以安得云荟打开」项（用中转站落地真实路径作复制源）
+          if (isMediaActive && detectModule(file.name) === activeMod && imported.absolutePath) {
+            openWithItems.push({ path: imported.absolutePath, name: file.name });
+          }
         } catch (err) {
           logger.dropzone.importFailed(file.name, err);
         }
       }
+      if (openWithItems.length) dispatchOpenWith(activeMod, openWithItems);
     };
     window.addEventListener('dragover', onDragOver);
     window.addEventListener('drop', onDrop);

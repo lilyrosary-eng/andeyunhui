@@ -182,8 +182,9 @@ export function FloatingDropzoneView() {
   const [mode, setMode] = useState<'list' | 'ocr' | 'translate'>('list');
   const switchMode = async (m: 'list' | 'ocr' | 'translate') => {
     setMode(m);
-    const w = m === 'list' ? 420 : 480;
-    const h = m === 'list' ? 520 : 640;
+    // 切换 OCR / 翻译 工作区时保持浮窗原尺寸，不再扩展为大窗
+    const w = 420;
+    const h = 520;
     try {
       await win.setSize(new LogicalSize(w, h));
     } catch {
@@ -301,7 +302,21 @@ function OcrBox() {
       const res = await api.aiVisionOcr(b64, mime);
       setText(res || '');
     } catch (e) {
-      setError(typeof e === 'string' ? e : 'OCR 失败，请检查 AI 配置');
+      const msg = typeof e === 'string' ? e : (e as any)?.message || 'OCR 失败，请检查 AI 配置';
+      // 与中转站主站一致：云端未配置 API Key 时自动降级到本地 PaddleOCR 引擎
+      const local = (window as any).__PLUGIN_REGISTRY__?.__ocrLocal;
+      if ((msg.includes('未配置') || msg.includes('API Key')) && local && typeof local.recognize === 'function') {
+        try {
+          const text = await local.recognize(dataUrl);
+          setText(text || '');
+          setError(null);
+          return;
+        } catch (e2) {
+          setError('本地 OCR 引擎识别失败：' + (typeof e2 === 'string' ? e2 : (e2 as any)?.message || e2));
+          return;
+        }
+      }
+      setError(msg);
     } finally {
       setLoading(false);
     }

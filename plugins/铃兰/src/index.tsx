@@ -6,6 +6,7 @@ import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState } from '../../_shared/pluginRuntime';
+import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
 const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
@@ -273,7 +274,7 @@ function groupTracksIntoPlaylists(tracks: Track[], rootPath: string): Playlist[]
 
 function MusicModule() {
   // 共享运行时：根目录管理（localStorage 持久化）
-  const { rootPaths, setRootPaths, addRoot, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, setRootPaths, addRoot, addRootPath, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   // 共享运行时：黑名单管理（Rust 集中管理，必须在 filteredPlaylists useMemo 之前声明）
   const { hidden: hiddenPlaylists, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('music');
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -523,6 +524,38 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     musicPlayer.setTracks(tracks, index);
     musicPlayer.play();
   }, [selectedPlaylist?.tracks, searchQuery]);
+
+  // 以安得云荟打开 / 拖入主窗口：复制进固定临时目录 → 注册为常驻库文件夹 → 播放目标
+  const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
+    try {
+      const { dir, paths } = await importToOpenWithDir('music', items);
+      addRootPath(dir);
+      if (paths[0]) {
+        const name = paths[0].split(/[\\/]/).pop() || paths[0];
+        const track: Track = {
+          id: paths[0],
+          filePath: paths[0],
+          title: name,
+          artist: '',
+          album: '',
+          durationSecs: 0,
+        };
+        musicPlayer.setTracks([track], 0);
+        musicPlayer.play();
+      }
+    } catch (err) {
+      console.error('[Music] 以安得云荟打开失败:', err);
+    }
+  }, [addRootPath]);
+
+  useEffect(() => {
+    const unsub = registerOpenWithListener((m, files) => {
+      if (m === 'music') processOpenWith(files);
+    });
+    const pending = getPendingOpenWith('music');
+    if (pending) processOpenWith(pending);
+    return unsub;
+  }, [processOpenWith]);
 
   const togglePlay = useCallback(() => {
     try { window.__HOST_API__?.invoke('debug_log', { msg: `UI_TOGGLE_PLAY` }).catch(()=>{}); } catch {}

@@ -170,7 +170,12 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
       const text = await api.aiVisionOcr(b64, mime);
       setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'ocr', text } }));
     } catch (err) {
-      setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'error', text: '⚠ OCR 失败：' + String(err).slice(0, 200) + ' — 可在「全局设置 → 模型」检查模型是否支持视觉输入' } }));
+      console.error('[OCR] 云端识别失败:', err);
+      const msg = String(err);
+      const hint = /不支持|support|image|vision|400|模型/i.test(msg)
+        ? ' — 可在「全局设置 → 模型」确认已为 OCR 单独指定「视觉模型」（对话模型往往不支持图片）'
+        : '';
+      setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'error', text: '⚠ OCR 失败：' + msg.slice(0, 300) + hint } }));
     }
   }, [imgUrls]);
 
@@ -557,25 +562,39 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
     try {
       const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
       if (!m) throw new Error('图片数据格式错误');
-      // 优先本地 OCR（PaddleOCR 依赖包，纯前端 WebGL 推理，不联网）；
-      // 若依赖包缺失或识别失败，自动降级回云端 AI 视觉 OCR。
-      // 提供方由 ocr 插件在共享 registry 上登记（window.__PLUGIN_REGISTRY__.__ocrLocal）。
-      const local = (window as any).__PLUGIN_REGISTRY__?.__ocrLocal;
-      if (local?.recognize) {
-        try {
-          const text = await local.recognize(url);
-          if (text && text.trim()) {
-            setText(text);
-            return;
+      // API 优先：优先调用云端 AI 视觉 OCR（质量更高、无需本机推理）。
+      // 仅当「未配置 API Key」（即无可用 API）时，才降级到本地 PaddleOCR 依赖包
+      // （纯前端 WebGL 推理，离线可用）。本地识别仍失败则抛错，不再回云端。
+      // 本地提供方由 ocr 插件在共享 registry 上登记（window.__PLUGIN_REGISTRY__.__ocrLocal）。
+      try {
+        const res = await api.aiVisionOcr(m[2], m[1]);
+        setText(res || '');
+        return;
+      } catch (apiErr) {
+        const msg = String(apiErr ?? '');
+        const noApi = msg.includes('未配置') || msg.includes('API Key');
+        if (!noApi) throw apiErr; // 其余错误（网络/鉴权/超时等）不降级，直接抛出
+        const local = (window as any).__PLUGIN_REGISTRY__?.__ocrLocal;
+        if (local?.recognize) {
+          try {
+            const text = await local.recognize(url);
+            if (text && text.trim()) {
+              setText(text);
+              return;
+            }
+          } catch (e) {
+            console.warn('[OCR] 本地识别失败：', e);
           }
-        } catch (e) {
-          console.warn('[OCR] 本地识别失败，降级云端：', e);
         }
+        throw apiErr; // 无 API 且本地也不可用，抛出原始「未配置」提示
       }
-      const res = await api.aiVisionOcr(m[2], m[1]);
-      setText(res || '');
     } catch (e) {
-      setError('⚠ OCR 失败：' + String(e).slice(0, 200) + ' — 可在「全局设置 → 模型」检查模型是否支持视觉输入');
+      console.error('[OCR] 云端识别失败:', e);
+      const msg = String(e);
+      const hint = /不支持|support|image|vision|400|模型/i.test(msg)
+        ? ' — 可在「全局设置 → 模型」确认已为 OCR 单独指定「视觉模型」（对话模型往往不支持图片）'
+        : '';
+      setError('⚠ OCR 失败：' + msg.slice(0, 300) + hint);
     } finally {
       setLoading(false);
     }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   Cpu, Server, KeyRound, Bot, SlidersHorizontal, TestTube2, Check, X, Plus,
@@ -12,6 +12,7 @@ interface ProfileUi {
   base_url: string;
   api_key: string;
   model: string;
+  vision_model: string;
   temperature: number;
   max_tokens: string;
   top_p: string;
@@ -19,17 +20,21 @@ interface ProfileUi {
 }
 
 // 主流 OpenAI 兼容供应商预设（一键填充端点与推荐模型）
-const PROVIDERS: { id: string; name: string; base_url: string; models: string[] }[] = [
-  { id: 'deepseek', name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
-  { id: 'openai', name: 'OpenAI', base_url: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1-mini', 'o3-mini'] },
-  { id: 'custom', name: '自定义', base_url: '', models: [] },
-  { id: 'qwen', name: '通义千问', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen2.5-coder-32b-instruct', 'qwen3-coder-plus'] },
-  { id: 'zhipu', name: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-air', 'glm-4-flash', 'glm-4-long'] },
-  { id: 'ollama', name: 'Ollama (本地)', base_url: 'http://localhost:11434/v1', models: ['llama3', 'qwen2.5', 'codellama', 'deepseek-coder'] },
+// visionModels：该供应商支持视觉（图片 OCR / 理解）的模型，留空表示无视觉模型。
+// 多数供应商的「对话模型」并不带视觉能力，OCR 需单独指定视觉模型，否则会报「模型不支持图片」。
+const PROVIDERS: { id: string; name: string; base_url: string; models: string[]; visionModels: string[] }[] = [
+  { id: 'deepseek', name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'], visionModels: [] },
+  { id: 'openai', name: 'OpenAI', base_url: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1-mini', 'o3-mini'], visionModels: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'] },
+  { id: 'custom', name: '自定义', base_url: '', models: [], visionModels: [] },
+  { id: 'qwen', name: '通义千问', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen2.5-coder-32b-instruct', 'qwen3-coder-plus'], visionModels: ['qwen-vl-max', 'qwen-vl-plus', 'qwen2.5-vl-72b-instruct', 'qwen2.5-vl-32b-instruct'] },
+  { id: 'zhipu', name: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-air', 'glm-4-flash', 'glm-4-long'], visionModels: ['glm-4v-plus', 'glm-4v', 'glm-4v-flash'] },
+  { id: 'ollama', name: 'Ollama (本地)', base_url: 'http://localhost:11434/v1', models: ['llama3', 'qwen2.5', 'codellama', 'deepseek-coder'], visionModels: ['llava', 'llama3.2-vision', 'qwen2.5vl:7b'] },
 ];
 
 // 所有供应商模型聚合，作为模型名输入的联想建议
 const ALL_MODELS = Array.from(new Set(PROVIDERS.flatMap((p) => p.models)));
+// 所有视觉模型聚合，作为视觉模型输入的联想建议
+const ALL_VISION_MODELS = Array.from(new Set(PROVIDERS.flatMap((p) => p.visionModels)));
 
 function defaultProfile(name = 'DeepSeek'): ProfileUi {
   const p = PROVIDERS.find((x) => x.name === name) || PROVIDERS[0];
@@ -39,6 +44,7 @@ function defaultProfile(name = 'DeepSeek'): ProfileUi {
     base_url: p.base_url,
     api_key: '',
     model: p.models[0] || '',
+    vision_model: '',
     temperature: 0.3,
     max_tokens: '',
     top_p: '',
@@ -53,6 +59,7 @@ function fromPayload(p: any): ProfileUi {
     base_url: p.base_url || '',
     api_key: p.api_key || '',
     model: p.model || '',
+    vision_model: p.vision_model || '',
     temperature: typeof p.temperature === 'number' ? p.temperature : 0.3,
     max_tokens: p.max_tokens != null ? String(p.max_tokens) : '',
     top_p: p.top_p != null ? String(p.top_p) : '',
@@ -67,6 +74,7 @@ function toPayload(p: ProfileUi) {
     base_url: p.base_url,
     api_key: p.api_key,
     model: p.model,
+    vision_model: p.vision_model.trim() ? p.vision_model.trim() : null,
     temperature: p.temperature,
     max_tokens: p.max_tokens.trim() ? Math.max(1, parseInt(p.max_tokens, 10) || 0) : null,
     top_p: p.top_p.trim() ? Math.min(1, Math.max(0, parseFloat(p.top_p) || 0)) : null,
@@ -119,6 +127,23 @@ export function ModelSettings() {
       });
   }, []);
 
+  // 自动持久化：任何配置变更（含「设为默认」、预设新增、字段编辑）都在 800ms 后静默落盘，
+  // 避免「忘了点保存全部」导致配置丢失。首屏从 Rust 读取后不触发写入。
+  const firstRunRef = useRef(true);
+  useEffect(() => {
+    if (firstRunRef.current) {
+      firstRunRef.current = false;
+      return;
+    }
+    if (profiles.length === 0) return;
+    const t = setTimeout(() => {
+      invoke('ai_set_profiles', {
+        payload: { profiles: profiles.map(toPayload), active: activeId },
+      }).catch((e) => console.warn('[模型] 自动保存失败:', e));
+    }, 800);
+    return () => clearTimeout(t);
+  }, [profiles, activeId]);
+
   const updateProfile = useCallback((id: string, patch: Partial<ProfileUi>) => {
     setProfiles((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   }, []);
@@ -165,17 +190,42 @@ export function ModelSettings() {
     }
   }, [editProfile]);
 
-  // 供应商预设一键填充到「当前编辑档案」
+  // 供应商预设：保护已配置档案，绝不覆盖。
+  // - 若当前档案仍是空白（刚添加、尚未填任何连接信息），则用预设填充，方便从预设起步；
+  // - 若当前档案已配置（填过端点 / Key / 模型 / 视觉模型任一），则新建一份该供应商档案，
+  //   已配好的那份原封不动，避免「手滑点了一下预设，辛苦配的没了」。
   const selectProvider = useCallback((id: string) => {
-    if (!editProfile) return;
     const p = PROVIDERS.find((x) => x.id === id);
     if (!p) return;
-    updateProfile(editProfile.id, {
-      name: p.id === 'custom' ? '' : p.name,
-      base_url: p.base_url,
-      model: p.models[0] || editProfile.model,
-    });
-  }, [editProfile, updateProfile]);
+    const isBlank =
+      !editProfile ||
+      (!editProfile.base_url.trim() &&
+        !editProfile.api_key.trim() &&
+        !editProfile.model.trim() &&
+        !editProfile.vision_model.trim());
+    if (isBlank && editProfile) {
+      updateProfile(editProfile.id, {
+        name: p.id === 'custom' ? '' : p.name,
+        base_url: p.base_url,
+        model: p.models[0] || '',
+      });
+    } else {
+      const np: ProfileUi = {
+        id: 'p_' + Math.random().toString(36).slice(2, 8),
+        name: p.id === 'custom' ? '' : p.name,
+        base_url: p.base_url,
+        api_key: '',
+        model: p.models[0] || '',
+        vision_model: '',
+        temperature: 0.3,
+        max_tokens: '',
+        top_p: '',
+        system_prompt: '',
+      };
+      setProfiles((prev) => [...prev, np]);
+      setEditId(np.id);
+    }
+  }, [editProfile, updateProfile, setProfiles]);
 
   const addProfile = useCallback(() => {
     const np = defaultProfile('OpenAI');
@@ -290,7 +340,7 @@ export function ModelSettings() {
             <>
               {/* 供应商预设 */}
               <div className="p-4">
-                <label className={labelCls}>供应商预设（一键填充当前档案）</label>
+                <label className={labelCls}>供应商预设（添加新档案 / 填充空白档案，绝不覆盖已配好的）</label>
                 <div className="grid grid-cols-3 gap-2">
                   {PROVIDERS.map((p) => (
                     <button
@@ -366,6 +416,25 @@ export function ModelSettings() {
                   <datalist id="ai-model-suggestions">
                     {ALL_MODELS.map((m) => <option key={m} value={m} />)}
                   </datalist>
+                  <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1">
+                    用于对话 / 编程的模型。若该模型不带视觉能力，OCR 会失败——请在下方的「视觉模型」单独指定。
+                  </p>
+                </div>
+                <div>
+                  <label className={labelCls}><Bot size={12} className="inline mr-1" />视觉模型（OCR / 图片理解用，可选）</label>
+                  <input
+                    className={inputCls}
+                    list="ai-vision-model-suggestions"
+                    value={editProfile.vision_model}
+                    placeholder="留空则复用上方模型"
+                    onChange={(e) => updateProfile(editProfile.id, { vision_model: e.target.value })}
+                  />
+                  <datalist id="ai-vision-model-suggestions">
+                    {ALL_VISION_MODELS.map((m) => <option key={m} value={m} />)}
+                  </datalist>
+                  <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1">
+                    多数供应商的对话模型（如 deepseek-chat、qwen-plus、glm-4-plus）无视觉能力。OCR 会优先使用此处的视觉模型（如 gpt-4o、qwen-vl-max、glm-4v），留空则回落到上方模型。
+                  </p>
                 </div>
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
@@ -460,7 +529,11 @@ export function ModelSettings() {
               {saving ? '保存中…' : '保存全部'}
             </button>
             <button
-              onClick={resetDefaults}
+              onClick={() => {
+                if (window.confirm('确定恢复当前档案为默认？这将清空该档案已填写的端点 / Key / 模型等。')) {
+                  resetDefaults();
+                }
+              }}
               className="btn-press px-3 py-1.5 rounded-lg text-xs bg-neutral-100 dark:bg-stone-700 text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200 transition-colors flex items-center gap-1.5"
               title="恢复当前档案默认"
             >
