@@ -84,7 +84,7 @@
         // 哥特加载页最短展示时长：即便应用「秒开」，也保证用户真正看到加载界面，
         // 避免加载层一闪即逝、看起来像「哥特页没生效」。计时从 boot 层创建（本 IIFE）起算。
         var BOOT_START = Date.now();
-        var MIN_BOOT_MS = 2600;
+        var MIN_BOOT_MS = 1500;
         var _finishScheduled = false;
 
         function dismissBoot() {

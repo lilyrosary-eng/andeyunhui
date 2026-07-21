@@ -1,4 +1,5 @@
 import { Minus, Square, X } from 'lucide-react';
+import { useI18n } from '@/lib/i18n';
 
 // 安全获取 Tauri 窗口引用（打包后静态导入更可靠）
 let appWindow: { minimize: () => void; toggleMaximize: () => void; close: () => void } | null = null;
@@ -20,6 +21,7 @@ if (!appWindow && typeof window !== 'undefined') {
 }
 
 export function Titlebar() {
+  const { t } = useI18n();
   return (
     <div
       data-tauri-drag-region
@@ -49,21 +51,21 @@ export function Titlebar() {
         <button
           onClick={() => appWindow?.minimize()}
           className="btn-press w-[46px] h-full flex items-center justify-center text-neutral-400 hover:text-neutral-700 hover:bg-black/5 dark:text-stone-500 dark:hover:text-stone-300 dark:hover:bg-white/5 transition-colors"
-          title="最小化"
+          title={t('titlebar.minimize')}
         >
           <Minus size={15} />
         </button>
         <button
           onClick={() => appWindow?.toggleMaximize()}
           className="btn-press w-[46px] h-full flex items-center justify-center text-neutral-400 hover:text-neutral-700 hover:bg-black/5 dark:text-stone-500 dark:hover:text-stone-300 dark:hover:bg-white/5 transition-colors"
-          title="最大化"
+          title={t('titlebar.maximize')}
         >
           <Square size={13} />
         </button>
         <button
           onClick={() => appWindow?.close()}
           className="btn-press w-[46px] h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-red-500 transition-colors"
-          title="关闭"
+          title={t('titlebar.close')}
         >
           <X size={16} />
         </button>

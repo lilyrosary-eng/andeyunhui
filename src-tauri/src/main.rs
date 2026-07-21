@@ -371,21 +371,10 @@ fn main() {
             // 毫秒未就绪，接连创建多个透明窗易撞 0x8007139F。create_* 幂等，故重试绝对安全。
             // 诊断模式（ANDY_DIAG=1）：跳过正常浮窗预创建，避免污染隔离实验
             let diag_mode = std::env::var("ANDY_DIAG").as_deref() == Ok("1");
-            // 预创建录屏区域选择覆盖窗（隐藏），首次使用时无需等待 WebView2 初始化
-            let mut boot_windows_ok = true;
-            if !diag_mode {
-            boot_windows_ok &= window_manager::create_transparent_with_retry(app.handle(), "recorder-select", || {
-                recording_service::create_recorder_select_window(app.handle())
-            });
-            // 预创建录屏控制台窗口（隐藏），避免在 sync 命令中 build 导致 WebView2 主线程重入死锁
-            boot_windows_ok &= window_manager::create_transparent_with_retry(app.handle(), "recorder-widget", || {
-                recording_service::create_recorder_widget_window(app.handle())
-            });
-            // 预创建录屏区域边框窗（隐藏），start_recording 时按录制区域定位并显示
-            boot_windows_ok &= window_manager::create_transparent_with_retry(app.handle(), "recording-border", || {
-                recording_service::create_recording_border_window(app.handle())
-            });
-            } // if !diag_mode
+            // 四个启动透明窗（录屏选窗/控制台/边框 + 歌词窗）改为【异步预创建】：
+            // 不再在此同步创建（否则 300ms×4 健康探针 + 可能的退避重试会串行阻塞 setup 主线程，
+            // 导致主窗加载页迟迟不出现）。统一在下方经 run_on_main_thread 延后到主线程创建，
+            // setup 立即返回，主窗加载页可立即显示。详见下方 diag/boot 分支。
 
             // 托盘图标：优先使用默认窗口图标；若极端情况下为 None，则从资源目录
             // 回退到实际图标文件，避免回退成全透明不可见图标导致"无法交互"
@@ -480,12 +469,7 @@ fn main() {
                 }
             }
 
-            // 创建悬浮歌词窗口（同样走统一重试引擎，避免冷启动 GPU 合成面未就绪撞 0x8007139F）
-            if !diag_mode {
-            boot_windows_ok &= window_manager::create_transparent_with_retry(app.handle(), "lyrics-widget", || {
-                lyrics_service::create_lyrics_widget(app.handle())
-            });
-            }
+            // 悬浮歌词窗口的创建已并入下方 run_on_main_thread 异步预创建任务（不再在此同步阻塞 setup）。
 
             // 诊断模式：事件循环起来后自动跑隔离实验（4 种窗配置），结果打到 session 日志
             if diag_mode {
@@ -495,18 +479,37 @@ fn main() {
                     eprintln!("[DIAG-RESULT] {}", r);
                 });
             } else {
-            // 四个启动透明窗全部创建成功 → 标记本次启动正常，清掉失败标记，避免下次无意义清缓存。
-            // 若启动窗失败 → 自动跑隔离诊断（overlay_window_diag），把 4 种窗配置（不透明/透明 × 正常位/离屏）
-            // 的建窗+探活结果打到 session 日志，用户无需手动设 ANDY_DIAG 即可拿到真因数据。
-            if boot_windows_ok {
-                window_manager::mark_boot_success();
-            } else {
-                let h = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let r = window_manager::overlay_window_diag(h).await;
-                    eprintln!("[DIAG-RESULT] {}", r);
+            // 四个启动透明窗改为【异步预创建】：经 run_on_main_thread 派发到主线程，
+            // setup 立即返回 → 主窗加载页可立即显示（不再被 300ms×4 健康探针 + 可能的退避重试阻塞）。
+            // 窗口创建在加载页盖屏期间于主线程完成，不影响主窗首次渲染与前端笔记加载派发。
+            // 窗均隐藏且仅首次使用时才需要，正常启动后数秒内用户不会立即录屏/看歌词，届时早已建好。
+            // 任一窗创建失败 → 标记 failed，下一启动自愈清缓存；同时跑隔离诊断输出真因。
+            let h = app.handle().clone();
+            let _ = app.run_on_main_thread(move || {
+                let mut boot_windows_ok = true;
+                boot_windows_ok &= window_manager::create_transparent_with_retry(&h, "recorder-select", || {
+                    recording_service::create_recorder_select_window(&h)
                 });
-            }
+                boot_windows_ok &= window_manager::create_transparent_with_retry(&h, "recorder-widget", || {
+                    recording_service::create_recorder_widget_window(&h)
+                });
+                boot_windows_ok &= window_manager::create_transparent_with_retry(&h, "recording-border", || {
+                    recording_service::create_recording_border_window(&h)
+                });
+                boot_windows_ok &= window_manager::create_transparent_with_retry(&h, "lyrics-widget", || {
+                    lyrics_service::create_lyrics_widget(&h)
+                });
+                if boot_windows_ok {
+                    window_manager::mark_boot_success();
+                } else {
+                    window_manager::mark_boot_failure();
+                    let h2 = h.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let r = window_manager::overlay_window_diag(h2).await;
+                        eprintln!("[DIAG-RESULT] {}", r);
+                    });
+                }
+            });
             }
 
             // ============ 文件系统热插拔监听 ============

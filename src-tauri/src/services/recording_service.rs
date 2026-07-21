@@ -11,7 +11,6 @@
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use serde::Serialize;
@@ -74,39 +73,54 @@ pub struct RecordingStatus {
     pub output_path: String,
 }
 
-/// WGC 持续捕获 handler：每帧组装字节后**非阻塞**投递给编码线程（try_send，满则丢帧）。
+/// WGC 持续捕获 handler：每帧组装字节后**非阻塞**写入共享「最新帧槽」（Arc 覆盖，瞬时返回），
+/// 由独立节拍器线程按恒定 fps 取用写入 ffmpeg。
 ///
-/// **关键设计（根治「录屏时点击主窗即整体卡死」）**：绝不在 WGC 回调里直接 write_all 到
+/// **关键设计一（根治「录屏时点击主窗即整体卡死」）**：绝不在 WGC 回调里直接 write_all 到
 /// ffmpeg stdin。4K 录屏时 libx264 编码跟不上 → stdin 管道写满 → 回调阻塞在 write_all →
-/// WGC 帧池耗尽、DWM 合成停摆 → 整个应用（含主窗、控制台）卡死。改为把每帧丢进有界通道，
-/// 由独立编码线程消费；通道满时直接丢弃当前帧（背压降级），回调始终瞬时返回。
+/// WGC 帧池耗尽、DWM 合成停摆 → 整个应用（含主窗、控制台）卡死。回调只做一次 Arc 覆盖写入
+/// 共享槽，永不阻塞。
+///
+/// **关键设计二（根治「画面卡卡的不够丝滑」）**：旧方案用「有界通道 + 满则丢帧」，一旦丢帧
+/// 或脏区域跳帧，ffmpeg 恒定 `-r fps` 会把「实际到达的少量帧」按 n/fps 均匀打时间戳 →
+/// 播放时被**时间压缩**（该慢处快、该停处跳）= 卡顿感。改为「最新帧槽 + 节拍器补帧」：
+/// 节拍器每 1/fps 取当前最新帧写一份（无新帧则复用上一帧），ffmpeg 恒定收到 fps 帧/秒、
+/// 时间戳与真实墙钟对齐 → 严格 CFR、零时间压缩 = 极致丝滑。
 struct WgcRecorder {
-    /// 帧数据发送端（有界，满则丢帧）
-    sender: SyncSender<Vec<u8>>,
+    /// 最新帧共享槽（Arc 便于节拍器零拷贝取用；None = 尚无帧）
+    latest: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
     /// 停止标志：设为 true 后下一帧回调中 stop() 捕获
     stop_flag: Arc<AtomicBool>,
-    /// 暂停标志：暂停时不投递帧
+    /// 暂停标志：暂停时不写入帧槽
     paused: Arc<AtomicBool>,
     /// 裁剪区域（相对于帧原点的物理像素偏移）：None = 全帧，Some((x,y,w,h)) = 逐行裁剪
     crop: Option<(u32, u32, u32, u32)>,
+    /// 帧缓冲对象池：复用已分配的 Vec，避免 4K 每帧 ~33MB 反复分配触发分配器周期性停顿
+    /// （录制卡顿主因之一）。回调取缓冲→填充→覆盖进 latest；旧帧（节拍器不再持有时）回收进池循环复用。
+    free: Arc<Mutex<Vec<Arc<Vec<u8>>>>>,
+    /// 复用的 nopadding 输出缓冲，避免每帧重新分配
+    scratch: Vec<u8>,
 }
 
 impl GraphicsCaptureApiHandler for WgcRecorder {
     type Flags = (
-        SyncSender<Vec<u8>>,
+        Arc<Mutex<Option<Arc<Vec<u8>>>>>,
         Arc<AtomicBool>,
         Arc<AtomicBool>,
         Option<(u32, u32, u32, u32)>,
+        Arc<Mutex<Vec<Arc<Vec<u8>>>>>,
     );
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (sender, stop_flag, paused, crop) = ctx.flags;
+        let (latest, stop_flag, paused, crop, free) = ctx.flags;
         Ok(Self {
-            sender,
+            latest,
             stop_flag,
             paused,
             crop,
+            free,
+            scratch: Vec::new(),
         })
     }
 
@@ -128,52 +142,76 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         let fw = frame.width();
         let fh = frame.height();
         let buffer = frame.buffer().map_err(|e| e.to_string())?;
-        let mut scratch = Vec::new();
-        let src = buffer.as_nopadding_buffer(&mut scratch);
+        // 复用 scratch（nopadding 输出缓冲），避免每帧 ~33MB 分配抖动
+        let src = buffer.as_nopadding_buffer(&mut self.scratch);
 
-        // 组装该帧字节（裁剪或全帧）
-        let payload: Vec<u8> = if let Some((cx, cy, cw, ch)) = self.crop {
-            let cx = cx.min(fw);
-            let cy = cy.min(fh);
-            let cw = cw.min(fw.saturating_sub(cx));
-            let ch = ch.min(fh.saturating_sub(cy));
-            if cw == 0 || ch == 0 {
-                return Ok(());
+        // 从对象池取一个可复用的帧缓冲（零拷贝回收，避免每帧分配 ~33MB 触发分配器周期性停顿）。
+        // 若该缓冲仍被节拍器持有（Arc 引用计数 >1），则临时新建，绝不损坏数据。
+        let mut payload = self
+            .free
+            .lock()
+            .ok()
+            .and_then(|mut fl| fl.pop())
+            .map(|mut a| {
+                if Arc::get_mut(&mut a).is_some() {
+                    a
+                } else {
+                    Arc::new(Vec::new())
+                }
+            })
+            .unwrap_or_else(|| Arc::new(Vec::new()));
+        {
+            let p = Arc::get_mut(&mut payload).expect("刚取得的缓冲必为独占引用");
+            p.clear();
+            // 组装该帧字节（裁剪或全帧）直接写入复用缓冲
+            if let Some((cx, cy, cw, ch)) = self.crop {
+                let cx = cx.min(fw);
+                let cy = cy.min(fh);
+                let cw = cw.min(fw.saturating_sub(cx));
+                let ch = ch.min(fh.saturating_sub(cy));
+                if cw == 0 || ch == 0 {
+                    return Ok(());
+                }
+                let row_bytes = (cw * 4) as usize;
+                p.reserve(row_bytes * ch as usize);
+                for y in cy..(cy + ch) {
+                    let start = ((y * fw + cx) * 4) as usize;
+                    let end = start + row_bytes;
+                    if end <= src.len() {
+                        p.extend_from_slice(&src[start..end]);
+                    }
+                }
+            } else {
+                p.extend_from_slice(src);
             }
-            let row_bytes = (cw * 4) as usize;
-            let mut v = Vec::with_capacity(row_bytes * ch as usize);
-            for y in cy..(cy + ch) {
-                let start = ((y * fw + cx) * 4) as usize;
-                let end = start + row_bytes;
-                if end <= src.len() {
-                    v.extend_from_slice(&src[start..end]);
+        }
+
+        // 非阻塞写入最新帧槽（Arc 覆盖，瞬时返回；绝不阻塞回调 → 不耗尽帧池、不拖垮 DWM 合成）。
+        // 节拍器线程按恒定 fps 从此槽取帧写 ffmpeg，实现严格 CFR 补帧。
+        // 旧帧缓冲（若节拍器已不再持有）回收进对象池循环复用 → 录制全程零额外分配。
+        if let Ok(mut slot) = self.latest.lock() {
+            let old = std::mem::replace(&mut *slot, Some(payload));
+            drop(slot);
+            if let Some(o) = old {
+                if let Ok(mut fl) = self.free.lock() {
+                    if fl.len() < 4 {
+                        fl.push(o);
+                    }
                 }
             }
-            v
-        } else {
-            src.to_vec()
-        };
-
-        // 非阻塞投递：编码线程跟不上（如 4K libx264 打满 CPU）时丢弃当前帧，
-        // 绝不阻塞 WGC 回调——阻塞回调会耗尽帧池、拖垮 DWM 合成，导致录制时整体卡死。
-        match self.sender.try_send(payload) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => { /* 背压：丢帧 */ }
-            Err(TrySendError::Disconnected(_)) => capture_control.stop(),
         }
         Ok(())
     }
 }
 
-/// 全局录屏句柄（管理 ffmpeg 进程 + 捕获线程 + 编码写入线程）
+/// 全局录屏句柄（管理 ffmpeg 进程 + 捕获线程 + 节拍器写入线程）
 struct RecordingHandle {
     ffmpeg_child: Option<Child>,
     capture_thread: Option<std::thread::JoinHandle<()>>,
-    /// 编码写入线程：从通道取帧 write_all 到 ffmpeg stdin，收到 EOF（所有发送端 drop）后
-    /// 关闭 stdin 并退出，让 ffmpeg 刷新编码器输出文件。
+    /// 节拍器线程：唯一持有 ffmpeg stdin，按恒定 fps 从共享最新帧槽取帧 write_all（无新帧则
+    /// 补上一帧），实现严格 CFR。检测到 stop_flag 后退出 → stdin 于此 drop → ffmpeg 收到 EOF
+    /// 刷新编码器输出文件。
     writer_thread: Option<std::thread::JoinHandle<()>>,
-    /// 主发送端——stop 时显式 drop，配合捕获线程退出（drop 其副本）让编码线程收到 EOF。
-    frame_tx: Option<SyncSender<Vec<u8>>>,
     stop_flag: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     start_time: SystemTime,
@@ -473,6 +511,12 @@ pub async fn start_recording(
                 eprintln!(
                     "[录屏] 未检测到硬件编码器，回退 libx264（CPU 软编码；4K 可能仍较吃 CPU）"
                 );
+                // 无硬件编码器：4K 软编码会打满 CPU → 整机卡顿。自动降到 1080p（宽 1920、保持比例）
+                // 以保流畅；有硬件编码器时不降分辨率（用户要求「丝滑第一、不牺牲效果」）。
+                if (enc_w as u64) * (enc_h as u64) > 1920u64 * 1080u64 {
+                    ffmpeg_args.extend(["-vf".into(), "scale=1920:-2".into()]);
+                    eprintln!("[录屏] 无硬件编码器，自动降分辨率到 1920 宽（保持比例）以保护 CPU 流畅度");
+                }
             }
         }
         ffmpeg_args.extend(["-movflags".into(), "+faststart".into(), output_path.clone()]);
@@ -495,23 +539,71 @@ pub async fn start_recording(
         let stop_flag = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
 
-        // 帧数据有界通道：容量 4。捕获线程 try_send（满则丢帧），编码线程 recv 后 write_all。
-        // 有界 + 丢帧 = 背压降级，杜绝捕获回调阻塞导致的整体卡死。
-        let (frame_tx, frame_rx) = sync_channel::<Vec<u8>>(4);
+        // 共享「最新帧槽」：WGC 回调覆盖写入（非阻塞），节拍器线程按恒定 fps 取用。
+        let latest: Arc<Mutex<Option<Arc<Vec<u8>>>>> = Arc::new(Mutex::new(None));
+        // 帧缓冲对象池：WGC 回调复用已分配的 Vec，避免 4K 每帧 ~33MB 分配触发分配器周期性停顿（卡顿主因）。
+        let free: Arc<Mutex<Vec<Arc<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // 编码写入线程：唯一持有 ffmpeg stdin。所有发送端 drop 后 recv 返回 Err → 退出循环
-        // → stdin 在此 drop → ffmpeg 收到 EOF 并刷新编码器输出文件。
+        // 节拍器（pacer）线程：唯一持有 ffmpeg stdin。等首帧到达后，按精确 1/fps 墙钟节拍写帧；
+        // 无新帧时复用上一帧（补帧）→ ffmpeg 恒定收到 fps 帧/秒、时间戳与真实时间对齐 = 严格 CFR、
+        // 零时间压缩，彻底消除「丢帧/脏区域跳帧 → 播放被时间压缩」的卡顿感（极致丝滑）。暂停时不写
+        // （暂停段不计入录像）且同步推进节拍基准，避免恢复瞬间补帧爆发。
+        let pacer_latest = latest.clone();
+        let pacer_stop = stop_flag.clone();
+        let pacer_paused = paused.clone();
+        let frame_dur = std::time::Duration::from_nanos(1_000_000_000u64 / (fps.max(1) as u64));
         let writer_thread = std::thread::spawn(move || {
-            while let Ok(buf) = frame_rx.recv() {
-                if stdin.write_all(&buf).is_err() {
-                    break; // ffmpeg 已退出/管道断开
+            // 等待首帧（期间若已 stop 则直接退出）
+            loop {
+                if pacer_stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if pacer_latest.lock().map(|s| s.is_some()).unwrap_or(false) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let mut last: Option<Arc<Vec<u8>>> = None;
+            let mut next = std::time::Instant::now();
+            loop {
+                if pacer_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                if pacer_paused.load(Ordering::SeqCst) {
+                    // 暂停：不写帧，保持节拍基准贴近当前，恢复后不做补偿爆发。
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    next = std::time::Instant::now();
+                    continue;
+                }
+                // 取当前最新帧（Arc 克隆，零数据拷贝）；无新帧则复用上一帧补帧。
+                let frame = {
+                    let cur = pacer_latest.lock().ok().and_then(|s| s.clone());
+                    if cur.is_some() {
+                        last = cur.clone();
+                        cur
+                    } else {
+                        last.clone()
+                    }
+                };
+                if let Some(f) = frame {
+                    if stdin.write_all(&f).is_err() {
+                        break; // ffmpeg 已退出/管道断开
+                    }
+                }
+                // 精确节拍：累加 deadline 避免漂移；若已落后（编码/写入慢）则不补偿爆发，重置基准。
+                next += frame_dur;
+                let now = std::time::Instant::now();
+                if next > now {
+                    std::thread::sleep(next - now);
+                } else {
+                    next = now;
                 }
             }
             // 循环结束：stdin 于此作用域 drop，关闭管道触发 ffmpeg EOF
         });
 
         // 启动 WGC 捕获线程
-        let tx_for_capture = frame_tx.clone();
+        let latest_for_capture = latest.clone();
         let stop_for_capture = stop_flag.clone();
         let paused_for_capture = paused.clone();
         let capture_thread = std::thread::spawn(move || {
@@ -536,12 +628,12 @@ pub async fn start_recording(
                 MinimumUpdateIntervalSettings::Custom(cap_interval),
                 DirtyRegionSettings::Default,
                 ColorFormat::Rgba8,
-                (tx_for_capture, stop_for_capture, paused_for_capture, crop),
+                (latest_for_capture, stop_for_capture, paused_for_capture, crop, free.clone()),
             );
             if let Err(e) = WgcRecorder::start(settings) {
                 eprintln!("[录屏] WGC 捕获异常: {}", e);
             }
-            // 捕获结束：WgcRecorder（持 sender 副本）在此 drop
+            // 捕获结束：WgcRecorder 在此 drop
         });
 
         // 保存录屏句柄
@@ -549,7 +641,6 @@ pub async fn start_recording(
             ffmpeg_child: Some(child),
             capture_thread: Some(capture_thread),
             writer_thread: Some(writer_thread),
-            frame_tx: Some(frame_tx), // 主发送端：stop 时 drop 以尽快断开
             stop_flag,
             paused,
             start_time: SystemTime::now(),
@@ -617,15 +708,12 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
             let _ = bw.hide();
         }
 
-        // 1. 设置停止标志 → WGC 下一帧回调中 stop() 捕获 → 捕获线程退出（drop 其 sender 副本）
+        // 1. 设置停止标志 → WGC 下一帧回调中 stop() 捕获 → 捕获线程退出；
+        //    节拍器线程亦在下一拍（≤1/fps）检测到 stop_flag 后退出 → stdin 于此 drop
+        //    → ffmpeg 收到 EOF 刷新编码器输出文件。
         handle.stop_flag.store(true, Ordering::SeqCst);
 
-        // 2. drop 主发送端。配合捕获线程退出时 drop 的副本，编码线程通道的所有发送端归零
-        //    → recv 返回 Err → 编码线程退出并关闭 stdin → ffmpeg 收到 EOF 刷新输出文件。
-        drop(handle.frame_tx.take());
-
-        // 3. detach 捕获线程与编码线程：捕获线程下一帧检查 stop_flag 后退出；
-        //    编码线程排空通道剩余帧、关闭 stdin 后自行结束。均无需 join。
+        // 2. detach 捕获线程与节拍器线程：均在检测到 stop_flag 后自行退出，无需 join（避免阻塞 UI）。
         drop(handle.capture_thread.take());
         drop(handle.writer_thread.take());
 
@@ -1043,19 +1131,14 @@ pub fn create_recorder_select_window(app: &AppHandle) -> Result<(), String> {
 /// 这些 fullscreen 或 always-on-top 窗口若出现在列表中会挡住其他窗口的命中测试
 /// （overlay 是 fullscreen，hitWindow 总是先命中它 → 区域录屏退化为全屏）。
 /// 主窗口（is_self）**不**过滤：用户明确要求"不需要屏蔽"，应允许识别应用主窗口。
-fn filter_self_overlay_windows(app: &AppHandle, mut windows: Vec<crate::screenshot::WindowInfo>) -> Vec<crate::screenshot::WindowInfo> {
+pub(crate) fn filter_self_overlay_windows(app: &AppHandle, mut windows: Vec<crate::screenshot::WindowInfo>) -> Vec<crate::screenshot::WindowInfo> {
     // 收集需排除的 hwnd。关键：Tauri 的 `WebviewWindow::hwnd()` 在 Windows 上返回的是
     // WebView2 **子控件**的 HWND，而 `EnumWindows`/`list_windows` 枚举的是**顶层父窗口**
     // HWND —— 二者不同，若只排除子控件 HWND，全屏覆盖窗的顶层窗口仍留在列表里，
     // 于是前端 hitWindow 永远先命中它（fullscreen + always-on-top）→「只能识别一个窗口 /
     // 鼠标移动没用」。因此这里同时排除「raw hwnd」与「其顶层祖先(GA_ROOT)」，确保覆盖窗被剔除。
     let mut excluded: Vec<u64> = Vec::new();
-    for label in [
-        RECORDER_SELECT_LABEL,
-        RECORDER_WINDOW_LABEL,
-        "screenshot-overlay",
-        "floating-clipboard",
-    ] {
+    for &label in crate::screenshot::SELF_OVERLAY_LABELS {
         if let Some(w) = app.get_webview_window(label) {
             if let Ok(h) = w.hwnd() {
                 let raw = h.0 as u64;
@@ -1088,15 +1171,13 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     // 激活/焦点（set_focus 需先停用上一个置顶窗口）。多次录屏后该竞争会累积，
     // 表现为「首次不卡、频繁启动卡」——截图流程无此常驻置顶窗生命周期，故从不卡。
     // 此处强制隐藏，保证每次打开选择窗都是干净的（隐藏仅收起 UI，后台保存线程不受影响）。
+    // 注：去掉 is_visible() 查询（需走 WebView2 IPC，高频调用时累加延迟），直接 hide()。
+    //     hide() 对已隐藏窗口为 no-op，速度远快于 IPC 查询。
     if let Some(w) = app.get_webview_window(RECORDER_WINDOW_LABEL) {
-        if w.is_visible().unwrap_or(false) {
-            let _ = w.hide();
-        }
+        let _ = w.hide();
     }
     if let Some(bw) = app.get_webview_window(RECORDING_BORDER_LABEL) {
-        if bw.is_visible().unwrap_or(false) {
-            let _ = bw.hide();
-        }
+        let _ = bw.hide();
     }
 
     let (vx, vy, vw, vh) = virtual_desktop_rect();
@@ -1131,22 +1212,25 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     let _ = win.show();
     let _ = win.set_focus();
 
+    // 启动窗口变化事件监听（B.2）：选区可见期间，窗口 创建/移动/前台变化 时事件驱动刷新
+    // 命中测试列表，替代已删除的 hover 轮询。空闲零开销。
+    crate::screenshot::ensure_window_watch(&app);
+
     // 首开兜底：首个覆盖窗 WebView2 冷启动 + 事件竞态常导致「首次打开窗口识别失效 /
     // 鼠标移动无反应」，延时 150ms 重推一次窗口列表，确保前端拿到完整列表（第二次已预热）。
     if let Some(rec) = app.get_webview_window(RECORDER_SELECT_LABEL) {
-        let app_h = app.clone();
+        // 复用首开已算好的窗口列表，避免 150ms 兜底重推时再跑一次主线程枚举（省一次 EnumWindows + zorder_ranks）。
+        // 窗口在 150ms 内几乎不会变化，兜底重推用同一份即可；若首次事件竞态丢失，这份同样完整。
         let rec_h = rec.clone();
+        let windows2 = windows.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(150));
             let (vx, vy, _, _) = virtual_desktop_rect();
             let scale = rec_h.scale_factor().unwrap_or(1.0);
-            if let Ok(windows) = crate::screenshot::list_windows(app_h.clone()) {
-                let windows = filter_self_overlay_windows(&app_h, windows);
-                let _ = rec_h.emit(
-                    "recorder-select-ready",
-                    serde_json::json!({ "ox": vx, "oy": vy, "scale": scale, "windows": windows }),
-                );
-            }
+            let _ = rec_h.emit(
+                "recorder-select-ready",
+                serde_json::json!({ "ox": vx, "oy": vy, "scale": scale, "windows": windows2 }),
+            );
         });
     }
 
