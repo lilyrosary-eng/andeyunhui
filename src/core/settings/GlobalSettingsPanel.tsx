@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Switch } from "@/components/ui/switch"
 import { Slider } from "@/components/ui/slider"
-import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu } from 'lucide-react'
+import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu, Languages } from 'lucide-react'
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { ModelSettings } from '@/core/settings/ModelSettings'
@@ -14,6 +14,7 @@ import { useTheme } from '@/lib/ThemeProvider';
 import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
 import { SlidingTabs } from '@/components/motion/SlidingTabs';
+import { useI18n, LANGUAGES, type Language } from '@/lib/i18n';
 
 type TabId = 'general' | 'themes' | 'extensions' | 'transfer' | 'model' | 'blacklist' | 'about';
 
@@ -71,13 +72,6 @@ function normalizeForDisplay(s: string): string {
   return s.split('+').map((p) => p.trim()).join(' + ');
 }
 
-function kindLabel(kind: string): string {
-  if (kind === 'note') return '笔记';
-  if (kind === 'image') return '图片';
-  if (kind === 'file') return '文件';
-  return kind;
-}
-
 // 存档 modified 形如 "YYYYMMDD_HHMMSS" → "YYYY-MM-DD HH:MM:SS"
 function formatArchiveTime(modified: string): string {
   const m = modified.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/);
@@ -87,6 +81,7 @@ function formatArchiveTime(modified: string): string {
 
 export function GlobalSettingsPanel() {
   const [activeTab, setActiveTab] = useState<TabId>('general');
+  const { t, lang, setLang } = useI18n();
   const { theme, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily } = useTheme();
   const [autoSave, setAutoSave] = useState(true);
   const [autoSaveInterval, setAutoSaveInterval] = useState([30]);
@@ -260,13 +255,13 @@ export function GlobalSettingsPanel() {
   };
 
   const tabs = [
-    { id: 'general' as const, label: '常规', icon: Settings },
-    { id: 'themes' as const, label: '主题', icon: Palette },
-    { id: 'extensions' as const, label: '茑萝', icon: Puzzle },
-    { id: 'transfer' as const, label: '中转', icon: Archive },
-    { id: 'model' as const, label: '模型', icon: Cpu },
-    { id: 'blacklist' as const, label: '黑名单', icon: Ban },
-    { id: 'about' as const, label: '关于', icon: Info },
+    { id: 'general' as const, label: t('settings.tab.general'), icon: Settings },
+    { id: 'themes' as const, label: t('settings.tab.themes'), icon: Palette },
+    { id: 'extensions' as const, label: t('settings.tab.extensions'), icon: Puzzle },
+    { id: 'transfer' as const, label: t('settings.tab.transfer'), icon: Archive },
+    { id: 'model' as const, label: t('settings.tab.model'), icon: Cpu },
+    { id: 'blacklist' as const, label: t('settings.tab.blacklist'), icon: Ban },
+    { id: 'about' as const, label: t('settings.tab.about'), icon: Info },
   ];
 
   return (
@@ -274,7 +269,7 @@ export function GlobalSettingsPanel() {
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-2xl mx-auto px-6 py-8">
           <SlidingTabs
-            tabs={tabs.map((t) => ({ id: t.id, label: t.label, icon: <t.icon size={14} /> }))}
+            tabs={tabs.map((tab) => ({ id: tab.id, label: tab.label, icon: <tab.icon size={14} /> }))}
             value={activeTab}
             onChange={(id) => setActiveTab(id as TabId)}
             className="mb-8 bg-white dark:bg-stone-700/60 backdrop-blur border border-white/80 dark:border-stone-700/50 rounded-xl p-1 w-fit"
@@ -283,10 +278,38 @@ export function GlobalSettingsPanel() {
           {activeTab === 'general' && (
             <div className="space-y-6">
               <section>
-                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">缩放</h2>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
+                  <Languages size={14} />
+                  {t('settings.general.language.title')}
+                </h2>
+                <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 p-4">
+                  <div className="flex justify-between items-center gap-4">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-neutral-700 dark:text-stone-200">{t('settings.general.language.label')}</div>
+                      <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('settings.general.language.desc')}</div>
+                    </div>
+                    <div className="flex-shrink-0">
+                      <select
+                        value={lang}
+                        onChange={(e) => setLang(e.target.value as Language)}
+                        className="px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-200 outline-none cursor-pointer hover:border-neutral-300 dark:hover:border-stone-500 focus:ring-2 focus:ring-[var(--element-border)]"
+                      >
+                        {LANGUAGES.map((l) => (
+                          <option key={l.code} value={l.code}>
+                            {l.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">{t('settings.general.zoom.title')}</h2>
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 p-4">
                   <div className="flex justify-between items-center text-sm font-medium mb-3">
-                    <span>UI 缩放级别</span>
+                    <span>{t('settings.general.zoom.level')}</span>
                     <span className="text-neutral-500 dark:text-stone-400">{zoom}%</span>
                   </div>
                   <Slider
@@ -303,7 +326,7 @@ export function GlobalSettingsPanel() {
               <section>
                 <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
                   <Keyboard size={14} />
-                  快捷键配置
+                  {t('settings.general.shortcuts.title')}
                 </h2>
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 overflow-hidden">
                   {/* 折叠标题栏 */}
@@ -315,13 +338,13 @@ export function GlobalSettingsPanel() {
                     onKeyDown={(e) => { if (e.key === 'Enter') setShortcutsOpen(!shortcutsOpen); }}
                   >
                     <span className="text-sm font-medium text-neutral-700 dark:text-stone-200">
-                      快捷键列表 ({shortcuts.length})
+                      {t('settings.general.shortcuts.title')} ({shortcuts.length})
                     </span>
                     <div className="flex items-center gap-2">
                       <button
                         onClick={(e) => { e.stopPropagation(); handleResetShortcuts(); }}
                         className="btn-press p-1 rounded-md text-neutral-400 dark:text-stone-500 hover:text-amber-500 transition-colors"
-                        title="恢复默认"
+                        title={t('settings.general.shortcuts.resetDefault')}
                       >
                         <RotateCcw size={14} />
                       </button>
@@ -333,16 +356,16 @@ export function GlobalSettingsPanel() {
                     <div className="divide-y divide-neutral-200/50 dark:divide-stone-700/50">
                       {shortcuts.map((shortcut) => (
                         <div key={shortcut.id} className="flex justify-between items-center p-4">
-                          <span className="text-sm text-neutral-600 dark:text-stone-300">{shortcut.label}</span>
+                          <span className="text-sm text-neutral-600 dark:text-stone-300">{t('shortcut.' + shortcut.id)}</span>
                           {editingShortcutId === shortcut.id ? (
                             <kbd className="px-3 py-1 rounded-md bg-[var(--element-muted)] text-xs font-medium text-[var(--element-bg)] animate-pulse">
-                              请按键...
+                              {t('settings.general.shortcuts.pressKey')}
                             </kbd>
                           ) : (
                             <button
                               onClick={() => handleStartEditShortcut(shortcut.id)}
                               className="btn-press px-3 py-1 rounded-md bg-neutral-100 dark:bg-stone-700 text-xs font-medium text-neutral-500 dark:text-stone-400 hover:bg-[var(--element-muted)] hover:text-[var(--element-bg)] transition-colors cursor-pointer"
-                              title="点击修改快捷键"
+                              title={t('settings.general.shortcuts.editTip')}
                             >
                               {shortcut.keys}
                             </button>
@@ -360,12 +383,12 @@ export function GlobalSettingsPanel() {
               </section>
 
               <section>
-                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">通用</h2>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">{t('settings.general.common.title')}</h2>
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
                   <div className="flex justify-between items-center p-4">
                     <div>
-                      <span className="text-sm font-medium block">最小化回托盘</span>
-                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">关闭窗口时隐藏到系统托盘，而非退出程序</p>
+                      <span className="text-sm font-medium block">{t('settings.general.tray.title')}</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('settings.general.tray.desc')}</p>
                     </div>
                     <Switch
                       checked={trayMode}
@@ -378,8 +401,8 @@ export function GlobalSettingsPanel() {
                   </div>
                   <div className="flex justify-between items-center p-4">
                     <div>
-                      <span className="text-sm font-medium block">自动保存</span>
-                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">检测到更改后自动备份原文件并保存到中转站</p>
+                      <span className="text-sm font-medium block">{t('settings.general.autosave.title')}</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('settings.general.autosave.desc')}</p>
                     </div>
                     <Switch checked={autoSave} onCheckedChange={(val: boolean) => {
                       setAutoSave(val);
@@ -389,7 +412,7 @@ export function GlobalSettingsPanel() {
                   {autoSave && (
                     <div className="p-4">
                       <div className="flex justify-between items-center mb-3">
-                        <span className="text-sm text-neutral-600 dark:text-stone-300">保存间隔（秒）</span>
+                        <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.general.autosave.interval')}</span>
                         <span className="text-xs text-neutral-500 dark:text-stone-400">{autoSaveInterval[0]}s</span>
                       </div>
                       <Slider
@@ -413,12 +436,12 @@ export function GlobalSettingsPanel() {
           {activeTab === 'themes' && (
             <div className="space-y-6">
               <section>
-                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">外观</h2>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">{t('settings.themes.appearance')}</h2>
                 <div className="grid grid-cols-3 gap-3">
                   {[
-                    { id: 'system' as const, label: '跟随系统', icon: Monitor },
-                    { id: 'light' as const, label: '浅色', icon: Sun },
-                    { id: 'dark' as const, label: '深色', icon: Moon },
+                    { id: 'system' as const, label: t('settings.theme.system'), icon: Monitor },
+                    { id: 'light' as const, label: t('settings.theme.light'), icon: Sun },
+                    { id: 'dark' as const, label: t('settings.theme.dark'), icon: Moon },
                   ].map((m) => (
                     <button
                       key={m.id}
@@ -437,76 +460,76 @@ export function GlobalSettingsPanel() {
               </section>
 
               <section>
-                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">原生主题配置</h2>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">{t('settings.themes.nativeConfig')}</h2>
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
                   <div className="flex justify-between items-center p-4">
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">主题配色</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.themeColor')}</span>
                     <select
                       value={themeColor}
                       onChange={(e) => setThemeColor(e.target.value)}
                       className={`px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 outline-none focus:ring-2 focus:ring-[var(--element-border)]`}
                     >
-                      <option value="默认">默认</option>
-                      <option value="经典绿">经典绿</option>
-                      <option value="经典蓝">经典蓝</option>
-                      <option value="紫色">紫色</option>
-                      <option value="橙色">橙色</option>
+                      <option value="默认">{t('color.default')}</option>
+                      <option value="经典绿">{t('color.green')}</option>
+                      <option value="经典蓝">{t('color.blue')}</option>
+                      <option value="紫色">{t('color.purple')}</option>
+                      <option value="橙色">{t('color.orange')}</option>
                     </select>
                   </div>
                   <div className="flex justify-between items-center p-4">
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">元素配色</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.elementColor')}</span>
                     <select
                       value={elementColor}
                       onChange={(e) => setElementColor(e.target.value)}
                       className={`px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 outline-none focus:ring-2 focus:ring-[var(--element-border)]`}
                     >
-                      <option value="默认">默认</option>
-                      <option value="经典绿">经典绿</option>
-                      <option value="经典蓝">经典蓝</option>
-                      <option value="紫色">紫色</option>
-                      <option value="橙色">橙色</option>
+                      <option value="默认">{t('color.default')}</option>
+                      <option value="经典绿">{t('color.green')}</option>
+                      <option value="经典蓝">{t('color.blue')}</option>
+                      <option value="紫色">{t('color.purple')}</option>
+                      <option value="橙色">{t('color.orange')}</option>
                     </select>
                   </div>
                 </div>
               </section>
 
               <section>
-                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">主题包配置</h2>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">{t('settings.themes.packConfig')}</h2>
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
                   <div className="flex justify-between items-center p-4">
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">选择主题包</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.selectPack')}</span>
                     <select
                       value={themePack}
                       onChange={(e) => setThemePack(e.target.value)}
                       className="px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 outline-none focus:ring-2 focus:ring-[var(--element-border)]"
                     >
-                      <option value="默认">默认</option>
+                      <option value="默认">{t('color.default')}</option>
                     </select>
                   </div>
                   <div className="flex justify-between items-center p-4">
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">反转元素配色</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.reverseColor')}</span>
                     <Switch checked={reverseColor} onCheckedChange={setReverseColor} className="data-[state=checked]:bg-[var(--element-color-raw)]" />
                   </div>
                   <div className="flex justify-between items-center p-4">
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">自定义背景图</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.customBg')}</span>
                     <button className="btn-press px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm text-neutral-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors">
-                      选择图片
+                      {t('settings.themes.selectImage')}
                     </button>
                   </div>
                 </div>
               </section>
 
               <section>
-                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">显示设置</h2>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">{t('settings.themes.display')}</h2>
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50">
                   <div className="flex justify-between items-center p-4">
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">正文字体</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.bodyFont')}</span>
                     <div className="relative font-dropdown">
                       <button
                         onClick={() => { setFontDropdownOpen(!fontDropdownOpen); setFontSearch(''); }}
                         className="btn-press flex items-center gap-2 px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-stone-600/50 transition-colors w-56 justify-between"
                       >
-                        <span className="truncate">{fontsLoading ? '检测中...' : currentFontDisplay}</span>
+                        <span className="truncate">{fontsLoading ? t('settings.themes.detecting') : currentFontDisplay}</span>
                         <ChevronDown size={14} className={`transition-transform ${fontDropdownOpen ? 'rotate-180' : ''}`} />
                       </button>
                       {fontDropdownOpen && (
@@ -517,7 +540,7 @@ export function GlobalSettingsPanel() {
                               <Search size={14} className="text-neutral-400 dark:text-stone-500 shrink-0" />
                               <input
                                 type="text"
-                                placeholder="搜索字体..."
+                                placeholder={t('settings.themes.searchFont')}
                                 value={fontSearch}
                                 onChange={(e) => setFontSearch(e.target.value)}
                                 className="flex-1 bg-transparent text-sm text-neutral-700 dark:text-stone-200 outline-none placeholder:text-neutral-400 dark:placeholder:text-stone-500"
@@ -534,13 +557,13 @@ export function GlobalSettingsPanel() {
                                 fontFamily === '系统默认' ? 'bg-[var(--element-muted)] text-[var(--element-bg)]' : 'text-neutral-600 dark:text-stone-300'
                               }`}
                             >
-                              <span>系统默认</span>
-                              <span className="text-xs text-neutral-400 dark:text-stone-500">跟随系统</span>
+                              <span>{t('settings.themes.systemDefault')}</span>
+                              <span className="text-xs text-neutral-400 dark:text-stone-500">{t('settings.themes.followSystem')}</span>
                             </button>
                             {fontsLoading ? (
-                              <div className="px-4 py-6 text-center text-sm text-neutral-400 dark:text-stone-500">正在检测系统字体...</div>
+                              <div className="px-4 py-6 text-center text-sm text-neutral-400 dark:text-stone-500">{t('settings.themes.detectingFonts')}</div>
                             ) : filteredFonts.length === 0 ? (
-                              <div className="px-4 py-6 text-center text-sm text-neutral-400 dark:text-stone-500">无匹配字体</div>
+                              <div className="px-4 py-6 text-center text-sm text-neutral-400 dark:text-stone-500">{t('settings.themes.noFont')}</div>
                             ) : (
                               filteredFonts.map((font) => (
                                 <button
@@ -552,7 +575,7 @@ export function GlobalSettingsPanel() {
                                 >
                                   <span className="truncate" style={{ fontFamily: font.family !== '系统默认' ? `"${font.family}", sans-serif` : undefined }}>{font.displayName}</span>
                                   {font.isChinese && (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--element-muted)] text-[var(--element-bg)] shrink-0 ml-2">中</span>
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--element-muted)] text-[var(--element-bg)] shrink-0 ml-2">{t('settings.themes.cn')}</span>
                                   )}
                                 </button>
                               ))
@@ -564,7 +587,7 @@ export function GlobalSettingsPanel() {
                   </div>
                   <div className="p-4">
                     <div className="flex justify-between items-center mb-3">
-                      <span className="text-sm text-neutral-600 dark:text-stone-300">面板透明度</span>
+                      <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.panelOpacity')}</span>
                       <span className="text-xs text-neutral-500 dark:text-stone-400">{panelOpacity}%</span>
                     </div>
                     <Slider
@@ -592,27 +615,27 @@ export function GlobalSettingsPanel() {
               <section>
                 <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
                   <Archive size={14} />
-                  存档（笔记 / 文件 / 图片）
+                  {t('settings.transfer.archiveTitle')}
                 </h2>
                 <p className="text-xs text-neutral-400 dark:text-stone-500 mb-3">
-                  任何内容变动（编辑笔记、拖入文件）都会立即生成快照，且每个来源只保留最新一份，可随时恢复或删除。
+                  {t('settings.transfer.archiveDesc')}
                 </p>
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 overflow-hidden">
                   {archiveLoading ? (
-                    <div className="p-6 text-center text-sm text-neutral-400 dark:text-stone-500">加载中...</div>
+                    <div className="p-6 text-center text-sm text-neutral-400 dark:text-stone-500">{t('common.loading')}</div>
                   ) : archives.length === 0 ? (
                     <div className="p-6 text-center text-sm text-neutral-400 dark:text-stone-500">
                       <Archive size={24} className="mx-auto mb-2 text-neutral-300 dark:text-stone-500" />
-                      暂无存档
-                      <p className="text-xs mt-1 text-neutral-300 dark:text-stone-500">编辑或导入内容后会自动生成快照</p>
+                      {t('settings.transfer.noArchive')}
+                      <p className="text-xs mt-1 text-neutral-300 dark:text-stone-500">{t('settings.transfer.noArchiveDesc')}</p>
                     </div>
                   ) : (
                     <>
                       <div className="px-4 py-2 bg-neutral-50/50 dark:bg-stone-700/50 text-xs font-medium text-neutral-500 dark:text-stone-400 flex items-center justify-between">
-                        <span>共 {archives.length} 个快照</span>
+                        <span>{t('settings.transfer.snapshotCount', { count: archives.length })}</span>
                         <button
                           onClick={() => {
-                            if (confirm('确定清空所有存档快照？此操作不可恢复。')) {
+                            if (confirm(t('settings.transfer.confirmClear'))) {
                               api.clearArchives()
                                 .then(() => loadArchives())
                                 .catch(err => logger.transferStation.clearFailed(err));
@@ -620,7 +643,7 @@ export function GlobalSettingsPanel() {
                           }}
                           className="btn-press text-xs text-red-400 hover:text-red-500 transition-colors"
                         >
-                          清空存档
+                          {t('settings.transfer.clearArchive')}
                         </button>
                       </div>
                       <div className="divide-y divide-neutral-200/50 dark:divide-stone-700/50 max-h-[60vh] overflow-y-auto">
@@ -633,7 +656,7 @@ export function GlobalSettingsPanel() {
                               <div className="min-w-0">
                                 <div className="flex items-center gap-2">
                                   <span className="text-sm font-medium text-neutral-800 dark:text-stone-100 truncate">{a.name}</span>
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--element-muted)] text-[var(--element-bg)] flex-shrink-0">{kindLabel(a.kind)}</span>
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--element-muted)] text-[var(--element-bg)] flex-shrink-0">{t('kind.' + a.kind)}</span>
                                 </div>
                                 <div className="text-xs text-neutral-400 dark:text-stone-500 flex items-center gap-2">
                                   <span>{formatArchiveTime(a.modified)}</span>
@@ -646,26 +669,26 @@ export function GlobalSettingsPanel() {
                                 onClick={() => {
                                   api.restoreArchive(a.id)
                                     .then(() => {
-                                      alert('已恢复：' + a.name);
+                                      alert(t('settings.transfer.restored', { name: a.name }));
                                       loadArchives();
                                     })
-                                    .catch(err => alert('恢复失败：' + String(err)));
+                                    .catch(err => alert(t('settings.transfer.restoreFailed', { err: String(err) })));
                                 }}
                                 className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors"
-                                title="恢复"
+                                title={t('settings.transfer.restore')}
                               >
                                 <Undo2 size={16} />
                               </button>
                               <button
                                 onClick={() => {
-                                  if (confirm(`确定删除存档「${a.name}」？`)) {
+                                  if (confirm(t('settings.transfer.confirmDelete', { name: a.name }))) {
                                     api.deleteArchive(a.id)
                                       .then(() => loadArchives())
                                       .catch(err => logger.transferStation.deleteFailed(a.name, err));
                                   }
                                 }}
                                 className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                                title="删除"
+                                title={t('settings.transfer.delete')}
                               >
                                 <Trash2 size={16} />
                               </button>
@@ -693,22 +716,22 @@ export function GlobalSettingsPanel() {
               <section className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 p-6">
                 <div className="flex items-center gap-3 mb-4">
                   <Info size={24} className="text-[var(--element-bg)]" />
-                  <h2 className="text-xl font-bold text-neutral-800 dark:text-stone-100">关于软件</h2>
+                  <h2 className="text-xl font-bold text-neutral-800 dark:text-stone-100">{t('settings.about.title')}</h2>
                 </div>
                 <div className="space-y-2 text-sm">
                   <p className="text-neutral-600 dark:text-stone-300">安得云荟</p>
-                  <p className="text-neutral-500 dark:text-stone-400">版本: 2.0</p>
-                  <p className="text-neutral-500 dark:text-stone-400">作者: Rosary · 感谢你的使用</p>
+                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.version', { v: '2.0' })}</p>
+                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.author')}</p>
                 </div>
               </section>
 
               <section className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 p-6">
                 <div className="flex items-center gap-3 mb-3">
                   <Eye size={20} className="text-[var(--element-bg)]" />
-                  <h2 className="text-lg font-bold text-neutral-800 dark:text-stone-100">预览加载界面</h2>
+                  <h2 className="text-lg font-bold text-neutral-800 dark:text-stone-100">{t('settings.about.previewBoot')}</h2>
                 </div>
                 <p className="text-sm text-neutral-500 dark:text-stone-400 mb-4">
-                  选择主题即可全屏预览启动加载动画与进度条效果，点击「返回」或按 Esc 退出。
+                  {t('settings.about.previewDesc')}
                 </p>
                 <div className="grid grid-cols-2 gap-3">
                   <button
@@ -716,14 +739,14 @@ export function GlobalSettingsPanel() {
                     className="btn-press h-16 rounded-xl border flex flex-col items-center justify-center transition-all bg-white dark:bg-stone-800/70 border-neutral-200/50 dark:border-stone-600/50 text-neutral-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-stone-700"
                   >
                     <Sun size={18} className="mb-1.5" />
-                    <span className="text-xs font-medium">浅色</span>
+                    <span className="text-xs font-medium">{t('settings.theme.light')}</span>
                   </button>
                   <button
                     onClick={() => previewBootScreen('dark')}
                     className="btn-press h-16 rounded-xl border flex flex-col items-center justify-center transition-all bg-white dark:bg-stone-800/70 border-neutral-200/50 dark:border-stone-600/50 text-neutral-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-stone-700"
                   >
                     <Moon size={18} className="mb-1.5" />
-                    <span className="text-xs font-medium">深色</span>
+                    <span className="text-xs font-medium">{t('settings.theme.dark')}</span>
                   </button>
                 </div>
               </section>
@@ -732,25 +755,25 @@ export function GlobalSettingsPanel() {
                 <div className="flex justify-between items-center p-4">
                   <div className="flex items-center gap-2">
                     <ExternalLink size={16} className="text-neutral-400 dark:text-stone-500" />
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">前往 GitHub 发布页</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.about.githubRelease')}</span>
                   </div>
                   <button
                     className="px-3 py-1.5 rounded-lg bg-neutral-800 text-white text-sm hover:bg-neutral-700 transition-colors"
                     onClick={() => { openUrl('https://github.com/lilyrosary-eng/andeyunhui').catch(() => {}); }}
                   >
-                    检查更新
+                    {t('settings.about.checkUpdate')}
                   </button>
                 </div>
                 <div className="flex justify-between items-center p-4">
                   <div className="flex items-center gap-2">
                     <ExternalLink size={16} className="text-neutral-400 dark:text-stone-500" />
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">前往安得云荟发布页</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.about.officialRelease')}</span>
                   </div>
                   <button
                     className="px-3 py-1.5 rounded-lg bg-neutral-800 text-white text-sm hover:bg-neutral-700 transition-colors"
                     onClick={() => { openUrl('https://adyh.cc.cd').catch(() => {}); }}
                   >
-                    打开
+                    {t('settings.about.open')}
                   </button>
                 </div>
               </section>
@@ -759,25 +782,25 @@ export function GlobalSettingsPanel() {
                 <div className="flex justify-between items-center p-4">
                   <div className="flex items-center gap-2">
                     <Database size={16} className="text-neutral-400 dark:text-stone-500" />
-                    <span className="text-sm text-neutral-600 dark:text-stone-300">数据备份</span>
+                    <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.about.dataBackup')}</span>
                   </div>
                   <button className="px-3 py-1.5 rounded-lg element-primary text-sm hover:bg-[var(--element-hover)] transition-colors" onClick={async () => {
                     try {
                       const { save } = await import('@tauri-apps/plugin-dialog');
                       const path = await save({
                         defaultPath: 'notes_backup.zip',
-                        filters: [{ name: '备份', extensions: ['zip'] }],
+                        filters: [{ name: t('settings.about.backupName'), extensions: ['zip'] }],
                       });
                       if (path) {
                         await invoke('export_backup', { path });
-                        alert('备份导出成功！');
+                        alert(t('settings.about.exportSuccess'));
                       }
                     } catch (e) {
                       logger.export.failed(e);
-                      alert('导出失败，请重试');
+                      alert(t('settings.about.exportFailed'));
                     }
                   }}>
-                    导出备份
+                    {t('settings.about.exportBackup')}
                   </button>
                 </div>
               </section>
@@ -787,15 +810,15 @@ export function GlobalSettingsPanel() {
                   <div className="flex items-center gap-2">
                     <FolderOpen size={16} className="text-neutral-400 dark:text-stone-500" />
                     <div>
-                      <span className="text-sm text-neutral-600 dark:text-stone-300">报错日志</span>
-                      <p className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">打开日志文件夹，可直接提交 log 文件给开发者排查问题</p>
+                      <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.about.errorLog')}</span>
+                      <p className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">{t('settings.about.errorLogDesc')}</p>
                     </div>
                   </div>
                   <button
                     className="px-3 py-1.5 rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-600 dark:text-stone-300 text-sm hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
                     onClick={() => invoke('open_log_dir').catch(() => {})}
                   >
-                    打开文件夹
+                    {t('settings.about.openFolder')}
                   </button>
                 </div>
               </section>

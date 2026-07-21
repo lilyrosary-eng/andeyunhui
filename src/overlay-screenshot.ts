@@ -89,8 +89,12 @@ function OverlayApp() {
         })
         .catch((err) => {
           loadingRef.current = false;
-          // 捕获尚未完成时 read_screenshot 会失败：不关闭覆盖窗，等待 screenshot-ready / 轮询兜底。
-          console.warn("[截图] 读取冻结图失败（可能捕获进行中，稍后重试）:", err);
+          const msg = String(err || "");
+          // 「尚无截屏数据」是捕获线程尚未完成的预期瞬时态，轮询会重试，无需告警刷屏。
+          // 不关闭覆盖窗，等待 screenshot-ready / 轮询兜底真正注入冻结图。
+          if (!msg.includes("尚无截屏数据")) {
+            console.warn("[截图] 读取冻结图失败（可能捕获进行中，稍后重试）:", err);
+          }
         });
     };
 
@@ -121,12 +125,22 @@ function OverlayApp() {
             handledSession.current = session;
             return;
           }
-          if (session > handledSession.current) {
-            handledSession.current = session;
-            if (!loaded) {
-              loadShot(buildMeta(snap));
-            }
-          }
+        if (session > handledSession.current) {
+          // 检测到新一次截图：复位就绪标记并立即尝试加载。
+          // 不保留上次截图的 loaded=true，否则后续截图会被轮询兜底漏掉。
+          handledSession.current = session;
+          loaded = false;
+          if (!loaded) loadShot(buildMeta(snap));
+          return;
+        }
+        // 关键修复：start_screenshot 在进入捕获线程前就同步把 session 自增，
+        // 而冻结图要等捕获线程写完 SHOT 才就绪。若本轮轮询抢在捕获完成前检测到
+        // session 变化并调用一次 read_screenshot，会拿到「尚无截屏数据」。
+        // 此处持续重试直到真正注入冻结图，避免「screenshot-ready 事件丢失时
+        // 只失败一次就 4s 超时关窗」的问题。
+        if (session === handledSession.current && session > 0 && !loaded && !loadingRef.current) {
+          loadShot(buildMeta(snap));
+        }
         })
         .catch(() => {});
     }, 120);

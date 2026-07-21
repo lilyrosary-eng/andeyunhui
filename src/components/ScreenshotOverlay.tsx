@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { X, Save, Undo2, Eraser, Pen, Square, ArrowUpRight, Type, Trash2, StretchVertical } from "lucide-react";
 import { emitDropzoneChange } from "@/components/TransferStationPanel";
 
@@ -91,11 +92,11 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   const [longMode, setLongMode] = useState(false); // 长截图：窗口挑选态
   const [isLong, setIsLong] = useState(false); // 当前编辑的是长截图（整窗）
   const [hoverWin, setHoverWin] = useState<Win | null>(null);
-  // 实时窗口列表（悬停命中测试用）：以 props.windows 初始化，覆盖窗打开期间每 200ms 由
-  // list_windows 增量刷新，保证「实时跟手」且零每帧 IPC（彻底消除开启覆盖窗时的卡顿）。
-  const [liveWindows, setLiveWindows] = useState<Win[]>(windows ?? []);
+  // 窗口列表（悬停命中测试 + 任务栏识别用）：以 props.windows 在开启时一次性种子（Rust 已预取完整列表）。
+  // **hover 期间不再轮询 list_windows**——同步命令会阻塞 Tauri 主线程跑整条窗口树枚举，正是「更卡 / 开启卡」根因。
+  // 静态完整列表 + 缓存 miss 时 window_at_point 兜底即可，零后台枚举、零卡顿。
+  const [liveWindows] = useState<Win[]>(windows ?? []);
   const liveWindowsRef = useRef<Win[]>(windows ?? []);
-  const lastListSigRef = useRef<string>(""); // 窗口列表变化签名，避免无谓重渲染
   const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
   // 窗口标题懒加载缓存：枚举时不再读标题（避免跨线程阻塞导致截图卡 4-5s），悬停时按需拉取单个窗口标题
   const [titleMap, setTitleMap] = useState<Record<number, string>>({});
@@ -214,9 +215,23 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     [toPhys],
   );
 
-  // rAF 节流的悬停高亮：合并同一帧多次 pointermove，每帧最多一次同步命中测试（无 IPC）。
+  // rAF 节流的悬停高亮：合并同一帧多次 pointermove，每帧最多一次同步命中测试（零 IPC，平滑跟手）。
+  // 命中走纯前端 hitWindow（基于 list_windows 缓存列表，经 3.1 修复后完整且权威），不每帧发重型 IPC；
+  // 仅在「缓存未命中」（新开/移动窗口尚未进缓存的 ≤100ms 窗口期）才以 OS window_at_point 兜底。
+  // 这样正常悬停零 IPC、零卡顿、实时跟手；边缘场景仍由 OS 权威修正。单击/长截图仍走 OS 单次权威。
+  // applyHover 内部按命中 hwnd 去重，命中窗口不变时不重渲染，进一步消除卡顿。
   const hoverRafRef = useRef<number | null>(null);
   const hoverPendingRef = useRef<{ x: number; y: number } | null>(null);
+  const lastHoverHwndRef = useRef<number | null>(null);
+  const lastOsFallbackRef = useRef(0); // 缓存 miss 时 OS 兜底（window_at_point）节流时间戳
+  const hoverSeqRef = useRef(0);       // 异步 OS 兜底结果乱序防护
+  // 命中窗口未变时不重渲染（仅在 hwnd 变化时 setHoverWin），消除每帧 React 重渲染卡顿。
+  const applyHover = useCallback((w: Win | null) => {
+    const hw = w?.hwnd ?? null;
+    if (hw === lastHoverHwndRef.current) return;
+    lastHoverHwndRef.current = hw;
+    setHoverWin(w);
+  }, []);
   const requestHover = useCallback(
     (x: number, y: number) => {
       lastPointerRef.current = { x, y };
@@ -227,11 +242,28 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
           const pt = hoverPendingRef.current;
           hoverPendingRef.current = null;
           if (!pt) return;
-          setHoverWin(hitWindow(pt.x, pt.y));
+          const now = performance.now();
+          // 主命中：同步 hitWindow（零 IPC、实时跟手、不卡）。列表经 3.1 修复后完整，正常悬停始终命中。
+          const hit = hitWindow(pt.x, pt.y);
+          applyHover(hit);
+          // 缓存未命中（列表短暂陈旧）时，才以 OS 权威兜底：40ms 节流 + seq 防乱序，
+          // 仅在 miss 时触发 → 正常悬停零 IPC、零卡顿，边缘场景仍精准。
+          if (!hit && now - lastOsFallbackRef.current >= 40) {
+            lastOsFallbackRef.current = now;
+            const seq = ++hoverSeqRef.current;
+            hitAt(pt.x, pt.y)
+              .then((w) => {
+                if (seq !== hoverSeqRef.current) return; // 丢弃过期结果，防快移跳回旧窗
+                applyHover(w ?? null);
+              })
+              .catch(() => {});
+          }
+          // 注：hover 期**不再**轮询 list_windows（同步命令阻塞主线程跑整窗树枚举 = 卡顿真凶）。
+          // 列表在开启时由 screenshot-start / screenshot-ready 事件一次性种子（完整），静态即可；新窗由上方兜底覆盖。
         });
       }
     },
-    [hitWindow],
+    [hitWindow, applyHover],
   );
 
   // 悬停窗口时按需拉取标题（单次、Rust 侧 30ms 超时、绝不阻塞截图路径）
@@ -251,44 +283,26 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     };
   }, [hoverWin, titleMap]);
 
-  // 覆盖窗打开期间每 200ms 增量刷新窗口列表（单次 IPC、后台执行，开销极低），
-  // 让悬停识别在用户切换窗口 / 打开新窗口时依然跟手；同时用最新列表重算当前光标下的高亮。
+  // 窗口列表缓存**完全不轮询**：hover 期间任何 list_windows 调用都会在 Tauri 主线程跑整条窗口树枚举
+  // （EnumWindows + zorder_ranks），正是「频繁更卡 / 开启卡」根因。初始化列表来自 props.windows /
+  // show 事件种子（Rust 已预取完整列表，见 start_screenshot / show_recorder_select）；hover 命中走
+  // 静态 hitWindow，缓存 miss 时由 window_at_point 兜底。零后台枚举、零卡顿。
+  //
+  // 窗口变化事件驱动更新（B.2）：Rust 侧 WinEventHook 在窗口 创建/销毁/移动/前台变化 时防抖推送
+  // 最新列表，替代 hover 期轮询。仅更新命中测试用的 liveWindowsRef 并重算当前高亮（任务栏
+  // clipToWorkArea 用开启时种子的 liveWindows 即可，任务栏不移动）。静止桌面零事件、零开销。
   useEffect(() => {
-    if (mode !== "select") return;
-    let alive = true;
-    let timer: number | undefined;
-    const tick = () => {
-      if (!alive) return;
-      invoke<Win[]>("list_windows")
-        .then((ws) => {
-          if (!alive || !ws || ws.length === 0) return;
-          // 仅在窗口集合真正变化（位置/尺寸/数量变化）时才触发 setState 重渲染，
-          // 避免每 200ms 无条件重渲染导致的偶发卡顿；引用始终更新以保证命中测试用最新数据。
-          const sig = ws.map((w) => `${w.hwnd}:${w.x},${w.y},${w.width},${w.height},${w.z}`).join("|");
-          if (sig !== lastListSigRef.current) {
-            lastListSigRef.current = sig;
-            liveWindowsRef.current = ws;
-            setLiveWindows(ws);
-          } else {
-            liveWindowsRef.current = ws;
-          }
-          // 当前处于纯悬停（未拖拽）时，用新列表立即重算高亮，避免切换窗口后绿框滞后。
-          const lp = lastPointerRef.current;
-          if (lp && !dragRef.current && !pendingRef.current?.dragging) {
-            setHoverWin(hitWindow(lp.x, lp.y));
-          }
-        })
-        .catch(() => {})
-        .finally(() => {
-          if (alive) timer = window.setTimeout(tick, 200);
-        });
-    };
-    tick();
+    const un = listen<{ windows?: Win[] }>("window-list-changed", (event) => {
+      const ws = event.payload?.windows;
+      if (!ws || ws.length === 0) return;
+      liveWindowsRef.current = ws;
+      const lp = lastPointerRef.current;
+      if (lp) applyHover(hitWindow(lp.x, lp.y));
+    });
     return () => {
-      alive = false;
-      if (timer) window.clearTimeout(timer);
+      void un.then((f) => f());
     };
-  }, [mode, hitWindow]);
+  }, [applyHover, hitWindow]);
 
   // Esc 取消 / Enter 确认 / 方向键微调选区
   useEffect(() => {
@@ -478,7 +492,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
         p.dragging = true;
         dragRef.current = { x0: p.x0, y0: p.y0, x1: x, y1: y, aspect: undefined };
       } else {
-        // 实时命中测试高亮（rAF 节流，OS 权威，永不残缺）
+        // 悬停高亮（rAF 节流：同步 hitWindow 主命中，缓存 miss 时 OS 兜底）
         requestHover(x, y);
         return;
       }

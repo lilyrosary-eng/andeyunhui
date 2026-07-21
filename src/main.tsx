@@ -122,15 +122,18 @@ async function bootstrap() {
   } else {
     // 主界面即将构建（React 将挂载 App）
     boot.__bootProgress?.(28, { text: "构建界面", phase: "PHASE 02 / 05" });
-    const [{ default: App }, { ThemeProvider }] = await Promise.all([
+    const [{ default: App }, { ThemeProvider }, { I18nProvider }] = await Promise.all([
       import('./App'),
       import('./lib/ThemeProvider'),
+      import('./lib/i18n'),
     ]);
     ReactDOM.createRoot(root).render(
       <React.StrictMode>
-        <ThemeProvider>
-          <App />
-        </ThemeProvider>
+        <I18nProvider>
+          <ThemeProvider>
+            <App />
+          </ThemeProvider>
+        </I18nProvider>
       </React.StrictMode>,
     );
   }

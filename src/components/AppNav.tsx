@@ -3,11 +3,12 @@ import { NotebookText, Settings, Puzzle, Inbox } from 'lucide-react';
 import { PluginIcon } from '@/components/PluginIcon';
 import { logger } from '@/lib/logger';
 import { useAppStore } from '@/stores/appStore';
+import { useI18n } from '@/lib/i18n';
 import type { PluginRegistry } from '@/core/pluginRegistry';
 
 const BUILTIN_NAV = [
-  { id: 'notes', icon: NotebookText, label: '安得云荟' },
-  { id: 'extensions', icon: Puzzle, label: '茑萝' },
+  { id: 'notes', icon: NotebookText, labelKey: 'nav.notes' },
+  { id: 'extensions', icon: Puzzle, labelKey: 'nav.extensions' },
 ];
 
 const navBtnClass = (active: boolean) =>
@@ -19,6 +20,7 @@ interface AppNavProps {
 
 /** 极简导航栏 — 始终显示全部模块图标，子目录切换逻辑已移至左侧侧边栏 */
 export function AppNav({ mainPluginIds }: AppNavProps) {
+  const { t } = useI18n();
   const activeModule = useAppStore(s => s.activeModule);
   const pluginRegistry = useAppStore(s => s.pluginRegistry) as PluginRegistry | null;
   const setActiveModule = useAppStore(s => s.setActiveModule);
@@ -87,12 +89,12 @@ export function AppNav({ mainPluginIds }: AppNavProps) {
       <div className="flex-1 flex flex-col gap-2">
         {/* 茑萝子模块时：茑萝保持高亮（返回按钮已移至侧边栏标题下方） */}
         {/* 内置导航 */}
-        {BUILTIN_NAV.map(({ id, icon: Icon, label }) => (
+        {BUILTIN_NAV.map(({ id, icon: Icon, labelKey }) => (
           <button
             key={id}
             onClick={() => handleSwitchModule(id)}
             className={navBtnClass(activeModule === id || (id === 'extensions' && isNiaoluoChild))}
-            title={label}
+            title={t(labelKey)}
           >
             <Icon size={20} />
           </button>
@@ -110,11 +112,11 @@ export function AppNav({ mainPluginIds }: AppNavProps) {
       </div>
 
       {/* 中转站 */}
-      <button onClick={() => handleSwitchModule('transfer')} className={`mb-1 ${navBtnClass(activeModule === 'transfer')}`} title="中转站">
+      <button onClick={() => handleSwitchModule('transfer')} className={`mb-1 ${navBtnClass(activeModule === 'transfer')}`} title={t('nav.transfer')}>
         <Inbox size={20} />
       </button>
       {/* 全局设置 */}
-      <button onClick={() => handleSwitchModule('settings')} className={navBtnClass(activeModule === 'settings')} title="设置">
+      <button onClick={() => handleSwitchModule('settings')} className={navBtnClass(activeModule === 'settings')} title={t('nav.settings')}>
         <Settings size={20} />
       </button>
     </div>
