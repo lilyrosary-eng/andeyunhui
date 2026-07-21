@@ -6,9 +6,11 @@ import { ModuleSidebarShell } from '@/components/ModuleSidebarShell';
 import { SecondaryNavShell } from '@/components/SecondaryNavShell';
 import { PluginErrorBoundary } from '@/core/PluginHost';
 import { useAppStore } from '@/stores/appStore';
+import { useI18n } from '@/lib/i18n';
 
 /** 统一侧边栏 — 始终复用同一个 ModuleSidebarShell，仅中间的 children 内容根据 activeModule 切换。 */
 export function HostSidebar() {
+  const { t } = useI18n();
   const pluginRegistry = useAppStore(s => s.pluginRegistry) as PluginRegistry | null;
   const activeModule = useAppStore(s => s.activeModule);
   const setActiveModule = useAppStore(s => s.setActiveModule);
@@ -84,7 +86,7 @@ export function HostSidebar() {
   // 茑萝模式下显示搜索框，子插件模式不显示
   const searchProps =
     activeModule === 'extensions'
-      ? { searchQuery: search, onSearchChange: setSearch, searchPlaceholder: '搜索拓展...' as const }
+      ? { searchQuery: search, onSearchChange: setSearch, searchPlaceholder: t('sidebar.searchExt') }
       : {};
 
   // ---- 渲染 children 内容 ----
@@ -117,7 +119,7 @@ export function HostSidebar() {
     if (filtered.length === 0) {
       content = (
         <div className="px-2 py-4 text-xs text-neutral-400 dark:text-stone-500 text-center">
-          {children.length === 0 ? '暂无已安装的拓展' : '未找到匹配的拓展'}
+          {children.length === 0 ? t('sidebar.noExtInstalled') : t('sidebar.noExtMatch')}
         </div>
       );
     } else {
@@ -150,17 +152,17 @@ export function HostSidebar() {
   }
 
   const moduleSettingsLabel = activeModule === 'extensions'
-    ? (showExtensionSettings ? '返回拓展列表' : '管理拓展设置')
-    : '模块设置';
+    ? (showExtensionSettings ? t('sidebar.backToList') : t('sidebar.manageExtSettings'))
+    : t('sidebar.moduleSettings');
 
   return (
     <ModuleSidebarShell
       moduleId="niaoluo"
       icon={<Puzzle size={20} className="text-[var(--element-bg)]" />}
-      title="茑萝"
+      title={t('sidebar.niaoluo')}
       onOpenModuleSettings={onOpenModuleSettings}
       moduleSettingsLabel={moduleSettingsLabel}
-      backAction={isChild ? { onClick: () => setActiveModule('extensions'), label: '返回' } : undefined}
+      backAction={isChild ? { onClick: () => setActiveModule('extensions'), label: t('sidebar.back') } : undefined}
       {...searchProps}
     >
       {content}

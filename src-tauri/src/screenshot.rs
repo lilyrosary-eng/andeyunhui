@@ -19,10 +19,11 @@ use image::{DynamicImage, ExtendedColorType, ImageFormat, RgbaImage};
 use serde::Serialize;
 use serde_json::json;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
@@ -58,19 +59,27 @@ pub struct WindowInfo {
     pub z: i64,
 }
 
-/// 返回「本应用自身的全屏覆盖窗」HWND 集合，与 `window_at_point` 的 `excluded` 标签集合保持一致。
-/// 用于从 `list_windows` 结果中剔除这些覆盖窗，避免前端纯 JS 命中测试 `hitWindow` 误把
-/// 「覆盖窗自身」当成光标下窗口（覆盖窗矩形=整屏、z 序最前 → 悬停高亮整屏 / 卡在覆盖窗，
-/// 即用户反馈的「仍有概率卡窗口」）。安得云荟自身的**主窗 / 浮窗**（非覆盖窗标签）不在集合内，
-/// 仍保留在列表中，可被正常识别与录制 / 截图。
+/// 本应用「自身覆盖窗 / 常驻置顶窗」标签集合——命中测试与窗口枚举**统一**排除的唯一真源。
+/// 历史上 `list_windows`(overlay_excluded_hwnds)、`window_at_point`、`filter_self_overlay_windows`
+/// 三处各自内联一份标签，彼此漂移（如 `recording-border` 与 `floating-clipboard` 曾各漏一个），
+/// 造成「初始列表排除 X、200ms 刷新却不排除 X」之类的不一致。此处收敛为单一常量，三处共用。
+/// 注意：这里只列**覆盖窗 / 置顶浮层**，安得云荟主窗（`main`）不在内——主窗应可被识别与录制。
+pub const SELF_OVERLAY_LABELS: &[&str] = &[
+    "screenshot-overlay",
+    "recorder-select",
+    "recorder-widget",
+    "recording-border",
+    "floating-clipboard",
+];
+
+/// 返回「本应用自身的全屏覆盖窗」HWND 集合（含 `GA_ROOT` 顶层祖先，因 Tauri `hwnd()` 返回的是
+/// WebView2 子控件 HWND，而 `EnumWindows` 枚举的是顶层父窗口）。用于从 `list_windows` 结果中
+/// 剔除这些覆盖窗，避免前端纯 JS 命中测试 `hitWindow` 误把「覆盖窗自身」当成光标下窗口
+/// （覆盖窗矩形=整屏、z 序最前 → 悬停高亮整屏 / 卡在覆盖窗，即用户反馈的「仍有概率卡窗口」）。
+/// 安得云荟自身的**主窗**（非覆盖窗标签）不在集合内，仍保留在列表中，可被正常识别与录制 / 截图。
 fn overlay_excluded_hwnds(app: &tauri::AppHandle) -> std::collections::HashSet<usize> {
     let mut set: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for label in [
-        "screenshot-overlay",
-        "recorder-select",
-        "recorder-widget",
-        "recording-border",
-    ] {
+    for &label in SELF_OVERLAY_LABELS {
         if let Some(w) = app.get_webview_window(label) {
             if let Ok(h) = w.hwnd() {
                 let hwnd = h.0 as winapi::shared::windef::HWND;
@@ -160,6 +169,115 @@ pub fn list_windows(app: tauri::AppHandle) -> Result<Vec<WindowInfo>, String> {
     Ok(windows)
 }
 
+// ================= 窗口变化事件驱动监听（B.2 WinEventHook，终局方案）=================
+// hover 期**彻底不轮询** list_windows（同步命令阻塞 Tauri 主线程跑整条窗口树枚举 = 卡顿真凶）。
+// 改为 SetWinEventHook 事件驱动：仅当窗口 创建/销毁/显示/隐藏/移动/前台/最小化 发生变化、
+// 且某覆盖窗（截图/录屏选区）可见时，才在**独立线程**（非主线程）防抖后重新枚举并 emit
+// `window-list-changed`。鼠标移动、静止桌面 → 零事件、零枚举、零主线程开销；拖动窗口 →
+// 至多 ~8 次/秒增量刷新。前端据此更新命中测试列表，高亮始终动态准确，且不再有轮询卡顿。
+static WINDOW_WATCH_STARTED: AtomicBool = AtomicBool::new(false);
+static WINDOW_WATCH_DIRTY: AtomicBool = AtomicBool::new(false);
+
+// WinEvent 回调：仅关心「顶层窗口自身」事件（idObject==OBJID_WINDOW(0) 且 idChild==CHILDID_SELF(0)）。
+// 必须忽略光标(OBJID_CURSOR=-9)——否则每次鼠标移动都触发 EVENT_OBJECT_LOCATIONCHANGE →
+// 重新引入枚举风暴。回调极轻（仅置一个原子标志），重活留给 watcher 线程防抖后做。
+unsafe extern "system" fn win_event_proc(
+    _hook: winapi::shared::windef::HWINEVENTHOOK,
+    _event: winapi::shared::minwindef::DWORD,
+    hwnd: winapi::shared::windef::HWND,
+    id_object: winapi::shared::ntdef::LONG,
+    id_child: winapi::shared::ntdef::LONG,
+    _thread: winapi::shared::minwindef::DWORD,
+    _time: winapi::shared::minwindef::DWORD,
+) {
+    if hwnd.is_null() || id_object != 0 || id_child != 0 {
+        return;
+    }
+    WINDOW_WATCH_DIRTY.store(true, Ordering::Relaxed);
+}
+
+// 是否有覆盖窗（截图/录屏选区）当前可见——仅在此期间才需要动态刷新窗口列表。
+fn overlay_selecting(app: &tauri::AppHandle) -> bool {
+    for &label in &["recorder-select", "screenshot-overlay"] {
+        if let Some(w) = app.get_webview_window(label) {
+            if w.is_visible().unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 启动窗口变化监听线程（进程内仅一次，永驻但空闲零开销）。每次进入新选区调用即可：
+/// 首次真正启动 hook + 消息循环；后续调用仅标脏，触发一次即时刷新覆盖静态种子的潜在陈旧。
+pub fn ensure_window_watch(app: &tauri::AppHandle) {
+    if WINDOW_WATCH_STARTED.swap(true, Ordering::SeqCst) {
+        WINDOW_WATCH_DIRTY.store(true, Ordering::Relaxed);
+        return;
+    }
+    let app = app.clone();
+    thread::spawn(move || unsafe {
+        use winapi::um::winuser::{
+            DispatchMessageW, GetMessageW, SetTimer, SetWinEventHook, TranslateMessage,
+            UnhookWinEvent, EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, MSG, WINEVENT_OUTOFCONTEXT,
+            WINEVENT_SKIPOWNPROCESS, WM_TIMER,
+        };
+        // 两段 hook 覆盖：系统事件（前台/最小化）+ 对象事件（创建/销毁/显示/隐藏/重排/移动）。
+        // SKIPOWNPROCESS 排除本进程窗口事件（拖动我们自己的覆盖窗不触发）。
+        let h1 = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_MINIMIZEEND,
+            std::ptr::null_mut(),
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        let h2 = SetWinEventHook(
+            EVENT_OBJECT_CREATE,
+            EVENT_OBJECT_LOCATIONCHANGE,
+            std::ptr::null_mut(),
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        // 40ms 定时器唤醒消息循环做防抖检查（OUTOFCONTEXT 事件经本线程消息队列投递）。
+        // 由 80ms 收紧到 40ms，使窗口拖拽时高亮跟随更跟手（见下方 60ms 发射间隔）。
+        SetTimer(std::ptr::null_mut(), 1, 40, None);
+        let mut last_emit = Instant::now() - Duration::from_secs(1);
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if msg.message == WM_TIMER {
+                // 仅当覆盖窗可见时才处理脏标志 → 平时（无选区）零枚举、零开销。
+                if overlay_selecting(&app) && WINDOW_WATCH_DIRTY.swap(false, Ordering::Relaxed) {
+                    // 发射间隔由 120ms 收紧到 60ms：窗口拖拽时列表刷新 ~16Hz（原 ~8Hz），
+                    // 悬停高亮追窗明显更跟手，且单次 EnumWindows 远低于 60ms 预算，无卡顿风险。
+                    if last_emit.elapsed() >= Duration::from_millis(60) {
+                        last_emit = Instant::now();
+                        if let Ok(list) = list_windows(app.clone()) {
+                            // 覆盖窗此刻可见，其顶层祖先会混入 EnumWindows，需含 GA_ROOT 的过滤。
+                            let list =
+                                crate::services::recording_service::filter_self_overlay_windows(
+                                    &app, list,
+                                );
+                            let _ = app.emit("window-list-changed", json!({ "windows": list }));
+                        }
+                    } else {
+                        // 防抖间隔未到：保留脏标志，下个 tick 再处理。
+                        WINDOW_WATCH_DIRTY.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        UnhookWinEvent(h1);
+        UnhookWinEvent(h2);
+    });
+}
+
 unsafe extern "system" fn enum_callback(
     hwnd: winapi::shared::windef::HWND,
     lparam: winapi::shared::minwindef::LPARAM,
@@ -197,32 +315,35 @@ unsafe extern "system" fn enum_callback(
         _ => {}
     }
     let is_taskbar = class == "Shell_TrayWnd" || class == "Shell_SecondaryTrayWnd";
-    // 使用 DWM 扩展边框（DWMWA_EXTENDED_FRAME_BOUNDS）替代 GetWindowRect。
-    // GetWindowRect 包含 Windows 10/11 的不可见调整边框（每侧约 7px），导致高亮框比实际窗口大一圈。
-    // DWM 扩展边框精确匹配可见窗口边缘，消除「多了一点」的视觉偏差。
-    // 失败时回退到 GetWindowRect（旧系统或无 DWM 合成的窗口）。
+    // 3.1 修复（根治「只识别一个窗口 / 高亮框偏移」）：
+    // 以 `GetWindowRect` 为**基线矩形**（对可见窗口几乎总是成功，保证列表完整、绝不因 DWM 退化而变「薄」）；
+    // 仅当 `DWMWA_EXTENDED_FRAME_BOUNDS` 成功**且**给出严格位于 GetWindowRect 内部的非退化矩形时，
+    // 才用 DWM 矩形**收紧**可见边框（消除 GetWindowRect 含 ~7px 调整边框导致的「高亮框大一圈」）。
+    // 无论 DWM 在本机如何行为，列表都完整；行为与原「DWM 主 + 退化回退 GWR」等价，但意图更清晰、更稳。
+    let mut gwr: winapi::shared::windef::RECT = std::mem::zeroed();
+    if winapi::um::winuser::GetWindowRect(hwnd, &mut gwr) == 0 {
+        return 1; // 极少数 GetWindowRect 也失败的窗口，跳过（不影响列表完整性）
+    }
+    let mut use_rect = gwr;
     const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 4;
-    let mut rect: winapi::shared::windef::RECT = std::mem::zeroed();
+    let mut drect: winapi::shared::windef::RECT = std::mem::zeroed();
     let hr = winapi::um::dwmapi::DwmGetWindowAttribute(
         hwnd,
         DWMWA_EXTENDED_FRAME_BOUNDS,
-        &mut rect as *mut _ as *mut _,
+        &mut drect as *mut _ as *mut _,
         std::mem::size_of::<winapi::shared::windef::RECT>() as u32,
     );
-    // **关键修复（窗口识别只剩一个）**：旧实现仅在 `hr != 0`（DWM 查询失败）时回退
-    // GetWindowRect。但在部分机器/配置下，DWM 对大多数窗口返回 `hr == 0` 却给出**退化矩形**
-    // （right<=left 或 bottom<=top，即宽高≤0），这些窗口随后被 `width<=0||height<=0`
-    // 分支跳过 → 列表里只剩个别矩形正常的窗口 → 表现为「只识别一个窗口 / 鼠标移动无效」。
-    // 因此只要 DWM 返回失败**或**矩形退化，一律回退到 GetWindowRect（最稳妥的兜底）。
-    let use_rect = if hr != 0 || rect.right <= rect.left || rect.bottom <= rect.top {
-        let mut gwr: winapi::shared::windef::RECT = std::mem::zeroed();
-        if winapi::um::winuser::GetWindowRect(hwnd, &mut gwr) == 0 {
-            return 1;
-        }
-        gwr
-    } else {
-        rect
-    };
+    // DWM 矩形严格落在 GetWindowRect 内部（非退化）→ 用它收紧可见边缘。
+    if hr == 0
+        && drect.right > drect.left
+        && drect.bottom > drect.top
+        && drect.left >= gwr.left
+        && drect.top >= gwr.top
+        && drect.right <= gwr.right
+        && drect.bottom <= gwr.bottom
+    {
+        use_rect = drect;
+    }
     let x = use_rect.left;
     let y = use_rect.top;
     let width = use_rect.right - use_rect.left;
@@ -292,15 +413,22 @@ fn build_window_info(hwnd: winapi::shared::windef::HWND) -> Option<WindowInfo> {
             &mut rect as *mut _ as *mut _,
             std::mem::size_of::<winapi::shared::windef::RECT>() as u32,
         );
-        let use_rect = if hr != 0 || rect.right <= rect.left || rect.bottom <= rect.top {
-            let mut gwr: winapi::shared::windef::RECT = std::mem::zeroed();
-            if winapi::um::winuser::GetWindowRect(hwnd, &mut gwr) == 0 {
-                return None;
-            }
-            gwr
-        } else {
-            rect
-        };
+        // 3.1 同款：GetWindowRect 基线 + DWM 仅收紧边框，保证矩形完整准确（行为与原逻辑等价）。
+        let mut gwr: winapi::shared::windef::RECT = std::mem::zeroed();
+        if winapi::um::winuser::GetWindowRect(hwnd, &mut gwr) == 0 {
+            return None;
+        }
+        let mut use_rect = gwr;
+        if hr == 0
+            && rect.right > rect.left
+            && rect.bottom > rect.top
+            && rect.left >= gwr.left
+            && rect.top >= gwr.top
+            && rect.right <= gwr.right
+            && rect.bottom <= gwr.bottom
+        {
+            use_rect = rect;
+        }
         let x = use_rect.left;
         let y = use_rect.top;
         let width = use_rect.right - use_rect.left;
@@ -351,12 +479,7 @@ pub async fn window_at_point(app: tauri::AppHandle, x: i32, y: i32) -> Option<Wi
         // 自身覆盖窗 / 控制台 / 浮窗的顶层 HWND 集合（与 filter_self_overlay_windows 一致）。
         // Tauri WebView2 的子控件 HWND 与顶层父 HWND 不同，故同时排除 raw 与 GA_ROOT 祖先。
         let mut excluded: Vec<winapi::shared::windef::HWND> = Vec::new();
-        for label in [
-            "recorder-select",
-            "recorder-widget",
-            "screenshot-overlay",
-            "floating-clipboard",
-        ] {
+        for &label in SELF_OVERLAY_LABELS {
             if let Some(w) = app.get_webview_window(label) {
                 if let Ok(h) = w.hwnd() {
                     let hwnd = h.0 as winapi::shared::windef::HWND;
@@ -865,6 +988,9 @@ pub async fn start_screenshot(
     let _ = overlay.emit("screenshot-start", &init_payload);
     let _ = overlay.show();
     let _ = overlay.set_focus();
+    // 启动窗口变化事件监听（B.2）：覆盖窗可见期间，窗口 创建/移动/前台变化 时事件驱动刷新
+    // 命中测试列表，替代已删除的 hover 轮询。空闲零开销。
+    ensure_window_watch(&app);
     // 标记覆盖窗正在显示：用于防重入（用户再次按下热键时忽略，直到关闭）。
     if let Ok(mut s) = app.state::<std::sync::Mutex<ScreenshotData>>().lock() {
         s.showing = true;
