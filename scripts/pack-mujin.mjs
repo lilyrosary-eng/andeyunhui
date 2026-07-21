@@ -37,6 +37,8 @@ const TARGETS = [
   // 全局模块（全局/ 母文件夹结构）
   { src: '全局/ffmpeg',            out: '全局/ffmpeg.mujin' },
   { src: '全局/basic-pitch',       out: '全局/basic-pitch.mujin' },
+  // 本地 OCR 依赖包（引擎 + ONNX 模型 + 字符表，用户自行下载放入「依赖」目录）
+  { src: '全局/paddleocr',         out: '全局/paddleocr.mujin' },
 ];
 
 // 用 PowerShell .NET API 打包目录为 .mujin（ZIP 格式，不自动添加 .zip 后缀）
