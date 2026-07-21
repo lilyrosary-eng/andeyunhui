@@ -1264,6 +1264,40 @@ pub fn read_external_dep_file(app: tauri::AppHandle, relative_path: String) -> R
     Err(format!("外部依赖文件不存在: {}", relative_path))
 }
 
+/// 读取外部依赖（用户侧载 user_external_deps 优先，其次 bundled external-deps），以 base64 文本返回。
+/// 与 `read_external_dep_file` 同源路径解析与越界防护，但面向二进制资产（WASM / ONNX 模型 / 权重），
+/// 先读字节再用 STANDARD 编码为 base64，调用方（如前端 PaddleOCR 引擎）解码为 Uint8Array/字符串。
+#[tauri::command]
+pub fn read_external_dep_bytes(app: tauri::AppHandle, relative_path: String) -> Result<String, String> {
+    let user_external_deps = get_user_external_deps_dir(&app);
+    let external_deps = get_external_deps_dir(&app);
+    let candidates = [user_external_deps, external_deps];
+
+    for root in candidates.iter() {
+        if root.is_none() {
+            continue;
+        }
+        let root = root.as_ref().unwrap();
+        let full = root.join(&relative_path);
+
+        let canon_root = root
+            .canonicalize()
+            .map_err(|e| format!("解析根目录失败：{}", e))?;
+        let canon_full = match full.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue, // 文件不存在，尝试下一个候选根
+        };
+        if !canon_full.starts_with(&canon_root) {
+            continue; // 越界防护：禁止跳出依赖根目录
+        }
+
+        let bytes = std::fs::read(&canon_full).map_err(|e| format!("读取依赖字节失败：{}", e))?;
+        return Ok(base64::engine::general_purpose::STANDARD.encode(bytes));
+    }
+
+    Err(format!("外部依赖未找到：{}", relative_path))
+}
+
 // ================= 中转站自动保存命令 =================
 
 /// 配置自动保存（启用/禁用 + 间隔秒数）

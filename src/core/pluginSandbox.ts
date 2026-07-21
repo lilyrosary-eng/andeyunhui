@@ -104,6 +104,8 @@ const ALLOWED_COMMANDS = new Set([
   'read_plugin_file',
   // IDE 子插件：按需加载 CodeMirror 等外部依赖
   'read_external_dep_file',
+  // 本地 OCR 引擎（PaddleOCR 依赖包）：按相对路径读取二进制资产（ONNX 模型 / 权重）为 base64
+  'read_external_dep_bytes',
   // 绘画子插件：导出到剪贴板 / 中转站
   'clipboard_write_image',
   'clipboard_write_image_from_path',
@@ -278,7 +280,7 @@ export interface SandboxGlobals {
 // 当前 'ide'：它需要 new Function() 运行时加载 CodeMirror 外部依赖（external-deps/codemirror）。
 // 注意：只要插件 manifest 声明了 deps（即依赖 external-deps 并需 new Function 加载），
 // 会自动开放 Function，无需在此逐个登记——契合「依赖全走 external-deps」约定。
-const TRUSTED_FUNCTION_PLUGINS = new Set(['ide', 'wps']);
+const TRUSTED_FUNCTION_PLUGINS = new Set(['ide', 'wps', 'ocr']);
 
 export function createSandboxGlobals(
   pluginId: string,

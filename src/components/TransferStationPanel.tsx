@@ -557,6 +557,21 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
     try {
       const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
       if (!m) throw new Error('图片数据格式错误');
+      // 优先本地 OCR（PaddleOCR 依赖包，纯前端 WebGL 推理，不联网）；
+      // 若依赖包缺失或识别失败，自动降级回云端 AI 视觉 OCR。
+      // 提供方由 ocr 插件在共享 registry 上登记（window.__PLUGIN_REGISTRY__.__ocrLocal）。
+      const local = (window as any).__PLUGIN_REGISTRY__?.__ocrLocal;
+      if (local?.recognize) {
+        try {
+          const text = await local.recognize(url);
+          if (text && text.trim()) {
+            setText(text);
+            return;
+          }
+        } catch (e) {
+          console.warn('[OCR] 本地识别失败，降级云端：', e);
+        }
+      }
       const res = await api.aiVisionOcr(m[2], m[1]);
       setText(res || '');
     } catch (e) {

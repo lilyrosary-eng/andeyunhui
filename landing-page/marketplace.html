@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>拓展市场 · 安得云荟</title>
+
+    <!-- ===== 图标 ===== -->
+    <link rel="icon" type="image/png" href="logo.png" />
+    <link rel="preload" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" onload="this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css"></noscript>
+
+    <style>
+        /* ===== 莫兰迪配色 ===== */
+        :root {
+            --bg: #f4f2ec;
+            --surface: #fcfaf7;
+            --surface-hover: #f0ede8;
+            --text-primary: #3d3a36;
+            --text-secondary: #8a8580;
+            --text-muted: #b5b0aa;
+            --border: #e5e0da;
+            --accent: #b8a9c9;
+            --accent-green: #b8c9b8;
+            --shadow: rgba(60, 58, 55, 0.06);
+            --radius: 1.2rem;
+            --transition: 0.3s ease;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background-color: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1.5rem 4rem;
+        }
+
+        .container { max-width: 920px; width: 100%; }
+
+        /* ===== 导航栏 ===== */
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.6rem 1.8rem;
+            background: var(--surface);
+            border-radius: 3rem;
+            border: 1px solid var(--border);
+            box-shadow: 0 2px 12px var(--shadow);
+            margin-bottom: 3rem;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+
+        .logo {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+        }
+        .logo i { color: var(--accent); font-size: 1.6rem; }
+
+        .nav-links {
+            display: flex;
+            gap: 1.8rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color var(--transition);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .nav-links a:hover { color: var(--text-primary); }
+        .nav-links a.active {
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+        .nav-links .btn-ghost {
+            background: var(--surface-hover);
+            padding: 0.3rem 1.4rem;
+            border-radius: 2rem;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        .nav-links .btn-ghost:hover { background: var(--border); }
+
+        /* ===== 页面标题 ===== */
+        .page-hero {
+            text-align: center;
+            padding: 0.5rem 0 2rem;
+        }
+        .page-hero h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+        }
+        .page-hero h1 i { color: var(--accent); }
+        .page-hero .sub {
+            color: var(--text-secondary);
+            margin-top: 0.3rem;
+            font-size: 1.05rem;
+        }
+
+        /* ===== 分区标题 ===== */
+        .section-title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 2.5rem 0 1.2rem 0;
+            font-size: 1.3rem;
+            font-weight: 600;
+        }
+        .section-title .line {
+            flex: 1;
+            height: 1px;
+            background: var(--border);
+        }
+        .section-title .badge-count {
+            font-size: 0.75rem;
+            font-weight: 400;
+            color: var(--text-muted);
+            background: var(--surface-hover);
+            padding: 0.1rem 0.8rem;
+            border-radius: 2rem;
+        }
+
+        /* ===== 筛选标签（插件分类） ===== */
+        .filter-tabs {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .filter-tabs a {
+            padding: 0.25rem 1.2rem;
+            border-radius: 2rem;
+            text-decoration: none;
+            font-size: 0.85rem;
+            font-weight: 500;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-secondary);
+            transition: background var(--transition), color var(--transition), border-color var(--transition);
+        }
+        .filter-tabs a:hover {
+            background: var(--surface-hover);
+            border-color: #ccc6c0;
+        }
+        .filter-tabs a.active {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
+        }
+
+        /* ===== 列表卡片 ===== */
+        .item-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
+        }
+
+        .item-card {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            padding: 1rem 1.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.8rem 1rem;
+            transition: box-shadow var(--transition), transform var(--transition);
+        }
+        .item-card:hover {
+            box-shadow: 0 4px 16px var(--shadow);
+            transform: translateY(-2px);
+        }
+
+        .item-card .info {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex: 1;
+            min-width: 180px;
+        }
+        .item-card .info .icon-box {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #ede8f0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            color: var(--accent);
+            flex-shrink: 0;
+        }
+        .item-card .info .name {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+        .item-card .info .desc {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        .item-card .info .meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.3rem 0.8rem;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 0.1rem;
+        }
+        .item-card .info .meta .tag {
+            background: var(--surface-hover);
+            padding: 0.05rem 0.6rem;
+            border-radius: 2rem;
+        }
+        .item-card .info .meta .tag.official {
+            background: #d4e0d4;
+            color: #3d6b3d;
+        }
+        .item-card .info .meta .tag.community {
+            background: #ede8f0;
+            color: #8a8580;
+        }
+        .item-card .info .meta .tag.stable {
+            background: #d4e0d4;
+            color: #3d6b3d;
+        }
+        .item-card .info .meta .tag.beta {
+            background: #f0e8d4;
+            color: #8a7a3d;
+        }
+
+        .item-card .action {
+            flex-shrink: 0;
+        }
+        .item-card .action .btn-download {
+            background: var(--accent);
+            color: #fff;
+            padding: 0.3rem 1.4rem;
+            border-radius: 2rem;
+            text-decoration: none;
+            font-size: 0.85rem;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: background var(--transition);
+        }
+        .item-card .action .btn-download:hover {
+            background: #a898b8;
+        }
+        .item-card .action .btn-download.secondary {
+            background: var(--surface-hover);
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+        .item-card .action .btn-download.secondary:hover {
+            background: var(--border);
+        }
+        .item-card .action .btn-download .version {
+            font-weight: 400;
+            font-size: 0.7rem;
+            opacity: 0.8;
+        }
+
+        /* ===== 提示框 ===== */
+        .tip-box {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            padding: 1.2rem 1.8rem;
+            margin: 2rem 0 1rem;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        .tip-box i {
+            color: var(--accent);
+            font-size: 1.4rem;
+            flex-shrink: 0;
+            margin-top: 0.1rem;
+        }
+        .tip-box strong {
+            color: var(--text-primary);
+        }
+
+        /* ===== 页脚 ===== */
+        .footer {
+            margin-top: 4rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+        .footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin-left: 1.5rem;
+            transition: color var(--transition);
+        }
+        .footer a:hover { color: var(--text-primary); }
+
+        /* ===== 响应式 ===== */
+        @media (max-width: 640px) {
+            .navbar {
+                flex-direction: column;
+                align-items: stretch;
+                padding: 0.8rem 1.2rem;
+            }
+            .nav-links {
+                justify-content: center;
+                gap: 1rem;
+            }
+            .page-hero h1 { font-size: 1.8rem; }
+            .item-card {
+                flex-direction: column;
+                align-items: stretch;
+                text-align: center;
+                padding: 1rem 1.2rem;
+            }
+            .item-card .info {
+                flex-direction: column;
+                text-align: center;
+            }
+            .item-card .action {
+                text-align: center;
+            }
+            .filter-tabs {
+                justify-content: center;
+            }
+            .section-title { font-size: 1.1rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- ===== 导航栏 ===== -->
+        <nav class="navbar">
+            <a href="index.html" class="logo">
+                <i class="lucide lucide-flower"></i>
+                安得云荟
+            </a>
+            <div class="nav-links">
+                <a href="index.html"><i class="lucide lucide-house"></i> 首页</a>
+                <a href="download.html"><i class="lucide lucide-download"></i> 下载</a>
+                <a href="changelog.html"><i class="lucide lucide-scroll"></i> 更新日志</a>
+                <a href="marketplace.html" class="active"><i class="lucide lucide-package"></i> 拓展市场</a>
+                <a href="support.html"><i class="lucide lucide-heart"></i> 赞助</a>
+                <a href="https://github.com/lilyrosary-eng/andeyunhui" target="_blank" class="btn-ghost">
+                    <i class="lucide lucide-github"></i> GitHub
+                </a>
+            </div>
+        </nav>
+
+        <!-- ===== 标题 ===== -->
+        <div class="page-hero">
+            <h1><i class="lucide lucide-package"></i> 拓展市场</h1>
+            <p class="sub">探索可用的依赖与插件，扩展「安得云荟」的能力</p>
+        </div>
+
+        <!-- ============================================================ -->
+        <!--  依赖区                                                       -->
+        <!-- ============================================================ -->
+        <div class="section-title">
+            <span> 依赖 (Dependencies)</span>
+            <span class="badge-count">4</span>
+            <span class="line"></span>
+        </div>
+
+        <div class="item-list">
+
+            <div class="item-card">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-cpu"></i></div>
+                    <div>
+                        <div class="name">Tauri v2</div>
+                        <div class="desc">桌面应用框架 · 系统后端</div>
+                        <div class="meta">
+                            <span class="tag">核心</span>
+                            <span>v2.11.1</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="action">
+                    <a href="https://tauri.app" target="_blank" class="btn-download secondary">
+                        <i class="lucide lucide-external-link"></i> 查看
+                    </a>
+                </div>
+            </div>
+
+            <div class="item-card">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-code"></i></div>
+                    <div>
+                        <div class="name">React 18</div>
+                        <div class="desc">前端 UI 框架</div>
+                        <div class="meta">
+                            <span class="tag">核心</span>
+                            <span>v18.3.31</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="action">
+                    <a href="https://react.dev" target="_blank" class="btn-download secondary">
+                        <i class="lucide lucide-external-link"></i> 查看
+                    </a>
+                </div>
+            </div>
+
+            <div class="item-card">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-terminal"></i></div>
+                    <div>
+                        <div class="name">Rust 2021</div>
+                        <div class="desc">后端语言 · 系统级开发</div>
+                        <div class="meta">
+                            <span class="tag">核心</span>
+                            <span>1.82.0</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="action">
+                    <a href="https://rust-lang.org" target="_blank" class="btn-download secondary">
+                        <i class="lucide lucide-external-link"></i> 查看
+                    </a>
+                </div>
+            </div>
+
+            <div class="item-card">
+                <div class="info">
+                    <div class="icon-box"><i class="lucide lucide-package"></i></div>
+                    <div>
+                        <div class="name">pnpm 9</div>
+                        <div class="desc">包管理器</div>
+                        <div class="meta">
+                            <span class="tag">核心</span>
+                            <span>v9.15.0</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="action">
+                    <a href="https://pnpm.io" target="_blank" class="btn-download secondary">
+                        <i class="lucide lucide-external-link"></i> 查看
+                    </a>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ============================================================ -->
+        <!--  插件区                                                       -->
+        <!-- ============================================================ -->
+        <div class="section-title" style="margin-top:3rem;">
+            <span> 插件 (Plugins)</span>
+            <span class="badge-count">6</span>
+            <span class="line"></span>
+        </div>
+
+        <!-- 分类筛选 -->
+        <div class="filter-tabs" id="filterTabs">
+            <a href="#" class="active" data-filter="all">全部</a>
+            <a href="#" data-filter="music"> 音乐</a>
+            <a href="#" data-filter="image"> 图片</a>
+            <a href="#" data-filter="video"> 视频</a>
+            <a href="#" data-filter="reading"> 阅读</a>
+            <a href="#" data-filter="office"> 拓展</a>
+            <a href="#" data-filter="professional"> 专业</a>
+        </div>
+
+        <div class="item-list" id="pluginList">
+
+            <!-- 插件数据由 JavaScript 动态渲染 -->
+            <div id="pluginContainer"></div>
+
+        </div>
+
+        <!-- ===== 提示框 ===== -->
+        <div class="tip-box">
+            <i class="lucide lucide-info"></i>
+            <div>
+                <strong>插件如何安装？</strong><br />
+                下载插件包后，解压到用户数据目录下的 <code style="background:var(--surface-hover);padding:0.1rem 0.4rem;border-radius:4px;">user_plugins/</code> 文件夹中，应用将自动识别并加载。<br />
+                第三方插件可覆盖同名内置插件，实现热插拔。
+            </div>
+        </div>
+
+        <!-- ===== 页脚 ===== -->
+        <footer class="footer">
+            <span>© 2026 安得云荟 · Rosary</span>
+            <div>
+                <a href="privacy.html"><i class="lucide lucide-shield"></i> 隐私政策</a>
+                <a href="https://github.com/lilyrosary-eng/andeyunhui" target="_blank"><i class="lucide lucide-github"></i> GitHub</a>
+            </div>
+        </footer>
+
+    </div>
+
+    <script>
+        // ================================================================
+        //  插件数据
+        //  每次新增插件时，在这里添加一条记录即可
+        // ================================================================
+        const plugins = [
+            {
+                id: 'music',
+                name: '铃兰 · 音乐',
+                icon: 'music',
+                category: 'music',
+                version: 'v1.2.0',
+                author: '官方',
+                status: 'stable',
+                desc: '本地音乐扫描、播放、歌词解析，悬浮歌词窗',
+                downloadUrl: 'https://github.com/lilyrosary-eng/andeyunhui/releases/download/v2.1.0/plugin-music-v1.2.0.zip'
+            },
+            {
+                id: 'image',
+                name: '莲花 · 图片',
+                icon: 'image',
+                category: 'image',
+                version: 'v1.1.0',
+                author: '官方',
+                status: 'stable',
+                desc: '图库扫描、缩略图生成与缓存',
+                downloadUrl: 'https://github.com/lilyrosary-eng/andeyunhui/releases/download/v2.1.0/plugin-image-v1.1.0.zip'
+            },
+            {
+                id: 'video',
+                name: '玉兰 · 视频',
+                icon: 'video',
+                category: 'video',
+                version: 'v1.0.0',
+                author: '官方',
+                status: 'beta',
+                desc: '视频库扫描与文件夹浏览',
+                downloadUrl: 'https://github.com/lilyrosary-eng/andeyunhui/releases/download/v2.1.0/plugin-video-v1.0.0.zip'
+            },
+            {
+                id: 'reading',
+                name: '三色堇 · 阅读',
+                icon: 'book-open',
+                category: 'reading',
+                version: 'v1.0.0',
+                author: '官方',
+                status: 'beta',
+                desc: 'EPUB 等电子书解析阅读',
+                downloadUrl: 'https://github.com/lilyrosary-eng/andeyunhui/releases/download/v2.1.0/plugin-reading-v1.0.0.zip'
+            },
+            {
+                id: 'office',
+                name: '茑萝 · 拓展',
+                icon: 'file-text',
+                category: 'office',
+                version: 'v1.0.0',
+                author: '官方',
+                status: 'stable',
+                desc: '文档/演示/表格编辑，CodeMirror IDE，绘画',
+                downloadUrl: 'https://github.com/lilyrosary-eng/andeyunhui/releases/download/v2.1.0/plugin-office-v1.0.0.zip'
+            },
+            {
+                id: 'professional',
+                name: '薄荷 · 专业',
+                icon: 'wrench',
+                category: 'professional',
+                version: 'v1.0.0',
+                author: '官方',
+                status: 'beta',
+                desc: '环境变量、端口扫描、格式转换、ffmpeg 转码',
+                downloadUrl: 'https://github.com/lilyrosary-eng/andeyunhui/releases/download/v2.1.0/plugin-professional-v1.0.0.zip'
+            }
+        ];
+
+        // ================================================================
+        //  渲染函数
+        // ================================================================
+        function renderPlugins(filter = 'all') {
+            const container = document.getElementById('pluginContainer');
+            const filtered = filter === 'all'
+                ? plugins
+                : plugins.filter(p => p.category === filter);
+
+            if (filtered.length === 0) {
+                container.innerHTML = `
+                    <div style="text-align:center;padding:2rem 0;color:var(--text-muted);">
+                        <i class="lucide lucide-inbox" style="font-size:2rem;display:block;margin-bottom:0.5rem;"></i>
+                        暂无此分类的插件
+                    </div>
+                `;
+                return;
+            }
+
+            const html = filtered.map(p => {
+                const statusMap = {
+                    stable: '<span class="tag stable">稳定</span>',
+                    beta: '<span class="tag beta">测试</span>'
+                };
+                const authorMap = {
+                    '官方': '<span class="tag official">官方</span>',
+                    '社区': '<span class="tag community">社区</span>'
+                };
+                // 图标映射
+                const iconMap = {
+                    'music': 'music',
+                    'image': 'image',
+                    'video': 'video',
+                    'book-open': 'book-open',
+                    'file-text': 'file-text',
+                    'wrench': 'wrench'
+                };
+                const iconName = iconMap[p.icon] || 'package';
+
+                return `
+                    <div class="item-card" data-category="${p.category}">
+                        <div class="info">
+                            <div class="icon-box"><i class="lucide lucide-${iconName}"></i></div>
+                            <div>
+                                <div class="name">${p.name}</div>
+                                <div class="desc">${p.desc}</div>
+                                <div class="meta">
+                                    ${authorMap[p.author] || ''}
+                                    ${statusMap[p.status] || ''}
+                                    <span>${p.version}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="action">
+                            <a href="${p.downloadUrl}" class="btn-download">
+                                <i class="lucide lucide-download"></i> 下载
+                                <span class="version">${p.version}</span>
+                            </a>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = html;
+        }
+
+        // ================================================================
+        //  筛选逻辑
+        // ================================================================
+        document.addEventListener('DOMContentLoaded', function() {
+            // 初始渲染
+            renderPlugins('all');
+
+            // 筛选点击
+            const tabs = document.querySelectorAll('.filter-tabs a');
+            tabs.forEach(tab => {
+                tab.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    // 更新高亮
+                    tabs.forEach(t => t.classList.remove('active'));
+                    this.classList.add('active');
+                    // 渲染
+                    const filter = this.dataset.filter;
+                    renderPlugins(filter);
+                });
+            });
+        });
+    </script>
+</body>
+</html>

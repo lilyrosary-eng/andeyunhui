@@ -760,6 +760,7 @@ fn main() {
             refresh_plugins,
             read_plugin_file,
             read_external_dep_file,
+            read_external_dep_bytes,
             read_manifest,
             install_bundled_plugin,
             install_plugin_file,
