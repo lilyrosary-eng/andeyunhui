@@ -3,6 +3,7 @@
 import { VideoPlayer } from './VideoPlayer';
 import { VideoSidebar } from './VideoSidebar';
 import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState } from '../../_shared/pluginRuntime';
+import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
 const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
@@ -207,7 +208,7 @@ function SettingsContent({
 // ========== 主组件 ==========
 function VideoModule() {
   // 共享运行时：根目录管理（localStorage 持久化）
-  const { rootPaths, addRoot, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, addRoot, addRootPath, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   // 共享运行时：黑名单管理（Rust 集中管理）
   const { hidden: hiddenFolders, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('video');
   const [folders, setFolders] = useState<VideoFolder[]>([]);
@@ -316,6 +317,33 @@ function VideoModule() {
   const handleFileChange = useCallback((file: VideoFile) => {
     setPlayingFile(file);
   }, []);
+
+  // 以安得云荟打开 / 拖入主窗口：复制进固定临时目录 → 注册为常驻库文件夹 → 播放目标
+  const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
+    try {
+      const { dir, paths } = await importToOpenWithDir('video', items);
+      addRootPath(dir);
+      setRescanCounter((c) => c + 1);
+      if (paths[0]) {
+        setPlayingFile({
+          filePath: paths[0],
+          fileName: paths[0].split(/[\\/]/).pop() || paths[0],
+          sizeBytes: 0,
+        });
+      }
+    } catch (err) {
+      console.error('[Video] 以安得云荟打开失败:', err);
+    }
+  }, [addRootPath]);
+
+  useEffect(() => {
+    const unsub = registerOpenWithListener((m, files) => {
+      if (m === 'video') processOpenWith(files);
+    });
+    const pending = getPendingOpenWith('video');
+    if (pending) processOpenWith(pending);
+    return unsub;
+  }, [processOpenWith]);
 
   // 模块设置
   const handleOpenModuleSettings = useCallback(() => {

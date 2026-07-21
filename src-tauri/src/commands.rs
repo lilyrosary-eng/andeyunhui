@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::SystemTime;
 use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
+use base64::Engine;
 use crate::services::note_service;
 use crate::services::transfer_station;
 use crate::services::image_service;
@@ -2219,6 +2221,73 @@ pub fn import_to_dropzone(
     });
 
     Ok(result)
+}
+
+/// 将文件导入「以安得云荟打开」固定临时目录。
+///
+/// 目录位于 `<app_data>/openwith/<module>/`，作为对应媒体模块的常驻库文件夹
+/// （与右键「以安得云荟打开」行为一致）。复制（不移动）源文件，保留原始文件名。
+///
+/// `files` 每项：
+/// - `{ kind: "path", path, name? }`：真实 OS 路径（右键打开 / 拖入中转站落地路径）
+/// - `{ kind: "bytes", name, bytes }`：内存字节（HTML5 拖放的 Blob）
+///
+/// 返回固定目录路径与该目录下最终落地文件的绝对路径列表。
+#[derive(Deserialize)]
+#[serde(tag = "kind")]
+pub enum OpenWithItem {
+    Path { path: String, name: Option<String> },
+    Bytes { name: String, bytes: Vec<u8> },
+}
+
+#[derive(Serialize)]
+pub struct OpenWithDirResult {
+    dir: String,
+    paths: Vec<String>,
+}
+
+#[tauri::command]
+pub fn import_to_openwith_dir(
+    app: tauri::AppHandle,
+    module: String,
+    files: Vec<OpenWithItem>,
+) -> Result<OpenWithDirResult, String> {
+    if module.is_empty() {
+        return Err("module 不能为空".to_string());
+    }
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取 app_data 失败: {}", e))?;
+    let dir = app_data.join("openwith").join(&module);
+    fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {}", e))?;
+
+    let mut final_paths: Vec<String> = Vec::new();
+    for item in files {
+        let (file_name, data): (String, Vec<u8>) = match item {
+            OpenWithItem::Path { path, name } => {
+                let src = std::path::Path::new(&path);
+                let name = name
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| {
+                        src.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                    })
+                    .ok_or_else(|| format!("无效路径: {}", path))?;
+                let bytes = fs::read(&src).map_err(|e| format!("读取源文件失败: {}", e))?;
+                (name, bytes)
+            }
+            OpenWithItem::Bytes { name, bytes } => (name, bytes),
+        };
+        let dest = dir.join(&file_name);
+        fs::write(&dest, &data).map_err(|e| format!("写入临时目录失败: {}", e))?;
+        final_paths.push(dest.to_string_lossy().to_string());
+    }
+
+    Ok(OpenWithDirResult {
+        dir: dir.to_string_lossy().to_string(),
+        paths: final_paths,
+    })
 }
 
 /// 读取中转站中的文本文件内容

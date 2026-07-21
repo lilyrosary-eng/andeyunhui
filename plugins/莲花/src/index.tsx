@@ -2,6 +2,7 @@
 import { ImageViewer } from './ImageViewer';
 import { ImageSidebar } from './ImageSidebar';
 import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState } from '../../_shared/pluginRuntime';
+import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
@@ -32,7 +33,7 @@ interface CustomAlbum {
 
 function ImageModule() {
   // 共享运行时：根目录管理（localStorage 持久化）
-  const { rootPaths, setRootPaths, addRoot, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, setRootPaths, addRoot, addRootPath, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   const [folders, setFolders] = useState<ImageFolder[]>([]);
   const [loading, setLoading] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
@@ -40,6 +41,9 @@ function ImageModule() {
   const [rescanCounter, setRescanCounter] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  // 以安得云荟打开 / 拖入：定位打开的图片 + 强制重挂载查看器
+  const [openWithInitialPath, setOpenWithInitialPath] = useState<string | null>(null);
+  const [openWithNonce, setOpenWithNonce] = useState(0);
 
   // 自定义相册（仅存在于应用内部列表，不涉及文件系统操作）
   const [customAlbums, setCustomAlbums] = useState<CustomAlbum[]>(() => {
@@ -113,6 +117,30 @@ function ImageModule() {
   const handleBack = useCallback(() => {
     setSelectedFolder(null);
   }, []);
+
+  // 以安得云荟打开 / 拖入主窗口：复制进固定临时目录 → 注册为常驻库文件夹 → 打开目标图片
+  const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
+    try {
+      const { dir, paths } = await importToOpenWithDir('image', items);
+      addRootPath(dir);
+      if (paths[0]) {
+        setOpenWithInitialPath(paths[0]);
+        setOpenWithNonce((n) => n + 1);
+        setSelectedFolder({ folderPath: dir, folderName: '以安得云荟打开' });
+      }
+    } catch (err) {
+      console.error('[Image] 以安得云荟打开失败:', err);
+    }
+  }, [addRootPath]);
+
+  useEffect(() => {
+    const unsub = registerOpenWithListener((m, files) => {
+      if (m === 'image') processOpenWith(files);
+    });
+    const pending = getPendingOpenWith('image');
+    if (pending) processOpenWith(pending);
+    return unsub;
+  }, [processOpenWith]);
 
   const handleRescan = useCallback(async () => {
     // 清除所有路径的缓存，重新扫描
@@ -291,9 +319,11 @@ function ImageModule() {
           })
         ) : selectedFolder ? (
           <ImageViewer
+            key={`openwith-${openWithNonce}`}
             folderPath={selectedFolder.folderPath}
             folderName={selectedFolder.folderName}
             onBack={handleBack}
+            initialPath={openWithInitialPath ?? undefined}
           />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">

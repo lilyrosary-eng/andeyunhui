@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type Event } from '@tauri-apps/api/event';
 import { message } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '@/stores/appStore';
+import { dispatchOpenWith } from '../../plugins/_shared/openWithFiles';
 
 // 扩展名 → 模块 id（与 appStore.activeModule 一致）
 const MODULE_BY_EXT: Record<string, string> = {
@@ -14,18 +15,19 @@ const MODULE_NAME: Record<string, string> = {
   image: '莲花', video: '玉兰', music: '铃兰', reading: '三色堇',
 };
 
-// 一次性列表：进程存活期间有效，关闭软件即销毁（模块挂载时通过 consumeOpenWith 取走）
-let pending: { moduleId: string; files: string[] } | null = null;
-export function consumeOpenWith() {
-  const v = pending;
-  pending = null;
-  return v;
+// 走「以安得云荟打开 / 拖入主窗口」流程的媒体模块
+export const MEDIA_MODULES = ['video', 'music', 'image', 'reading'];
+
+/** 根据文件名或扩展名推断所属模块 id；无法识别返回 null。 */
+export function detectModule(s: string): string | null {
+  const ext = s.includes('.') ? (s.split('.').pop() || '').toLowerCase() : s.toLowerCase();
+  return MODULE_BY_EXT[ext] || null;
 }
 
 function route(files: string[]) {
-  const ext = (files[0].split('.').pop() || '').toLowerCase();
-  const moduleId = MODULE_BY_EXT[ext];
+  const moduleId = detectModule(files[0]);
   if (!moduleId) {
+    const ext = (files[0].split('.').pop() || '').toLowerCase();
     message(`暂不支持以安得云荟打开该类型文件（.${ext}）`, { title: '安得云荟' });
     return;
   }
@@ -38,10 +40,9 @@ function route(files: string[]) {
     });
     return;
   }
-  // 跳转到对应模块工作，并创建一次性文件列表（关闭软件即销毁）
+  // 跳转到对应模块工作，并将真实文件路径交给统一处理流程（复制进固定临时目录）
   useAppStore.getState().setActiveModule(moduleId);
-  pending = { moduleId, files };
-  window.dispatchEvent(new CustomEvent('adyh-open-with', { detail: { moduleId, files } }));
+  dispatchOpenWith(moduleId, files.map((p) => ({ path: p })));
 }
 
 export function initOpenWith(): () => void {
