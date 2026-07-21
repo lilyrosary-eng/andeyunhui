@@ -3,6 +3,7 @@
 import { ReadingSidebar } from './ReadingSidebar';
 import { ReadingView } from './ReadingView';
 import { useRootPaths, EmptyState, NoResultsState, useStreamingOpen } from '../../_shared/pluginRuntime';
+import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
 const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, startTransition } = React;
@@ -105,7 +106,7 @@ function SettingsContent({
 
 // ========== 主组件 ==========
 function ReadingModule() {
-  const { rootPaths, addRoot, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, addRoot, addRootPath, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   const [books, setBooks] = useState<BookSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -237,6 +238,30 @@ function ReadingModule() {
       console.error('[Reading] openBook 异常:', err);
     }
   }, [openingFilePath, openBook]);
+
+  // 以安得云荟打开 / 拖入主窗口：复制进固定临时目录 → 注册为常驻库文件夹 → 打开目标书籍
+  const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
+    try {
+      const { dir, paths } = await importToOpenWithDir('reading', items);
+      addRootPath(dir);
+      if (paths[0]) {
+        await openBook('open_book', { filePath: paths[0] }).catch((e) =>
+          console.error('[Reading] 以安得云荟打开失败:', e),
+        );
+      }
+    } catch (err) {
+      console.error('[Reading] 以安得云荟打开失败:', err);
+    }
+  }, [addRootPath, openBook]);
+
+  useEffect(() => {
+    const unsub = registerOpenWithListener((m, files) => {
+      if (m === 'reading') processOpenWith(files);
+    });
+    const pending = getPendingOpenWith('reading');
+    if (pending) processOpenWith(pending);
+    return unsub;
+  }, [processOpenWith]);
 
   // startTransition：大 DOM 卸载非阻塞，避免返回书列表时卡顿
   const handleBackToList = useCallback(() => {

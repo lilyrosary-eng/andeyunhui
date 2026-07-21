@@ -1,6 +1,6 @@
 /// <reference path="../../../../global.d.ts" />
 // ============================================================================
-// 本地 OCR 引擎（PaddleOCR PP-OCRv4，纯前端 WASM/WebGL，不进本体安装包）
+// 本地 OCR 引擎（PaddleOCR PP-OCRv6，纯前端 WASM/WebGL，不进本体安装包）
 // ----------------------------------------------------------------------------
 // 打包形态：本源文件由 scripts/build-external-deps.mjs 经 esbuild 打成 IIFE，
 // 产物 external-deps/全局/paddleocr/index.js 挂载 window.__EXT_PADDLEOCR__。
@@ -30,9 +30,9 @@ const MEAN = [0.485, 0.456, 0.406];
 const STD = [0.229, 0.224, 0.225];
 
 // 模型与字符表相对路径（位于 .mujin 包的 models/ 下）
-const DET_PATH = `${REL}/models/ch_PP-OCRv4_det_infer.onnx`;
-const REC_PATH = `${REL}/models/ch_PP-OCRv4_rec_infer.onnx`;
-const DICT_PATH = `${REL}/models/ppocr_keys_v1.txt`;
+const DET_PATH = `${REL}/models/ch_PP-OCRv6_det_infer.onnx`;
+const REC_PATH = `${REL}/models/ch_PP-OCRv6_rec_infer.onnx`;
+const DICT_PATH = `${REL}/models/ppocrv6_dict.txt`;
 
 let detSession: ort.InferenceSession | null = null;
 let recSession: ort.InferenceSession | null = null;
@@ -98,20 +98,24 @@ function imageDataOf(img: HTMLImageElement): ImageData {
   return ctx.getImageData(0, 0, canvas.width, canvas.height);
 }
 
-// 将 RGBA ImageData 转为归一化 CHW Float32Array
-function toCHW(img: ImageData): { data: Float32Array; w: number; h: number } {
+// 将 RGBA ImageData 转为归一化 CHW Float32Array（norm: 'imagenet' 检测用；'m1' 为 PP-OCRv6 识别的 [-1,1]）
+function toCHW(img: ImageData, norm: 'imagenet' | 'm1' = 'imagenet'): { data: Float32Array; w: number; h: number } {
   const { data, width: w, height: h } = img;
   const out = new Float32Array(3 * w * h);
+  const m1 = (v: number) => (v / 255 - 0.5) / 0.5;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      const r = data[i] / 255;
-      const g = data[i + 1] / 255;
-      const b = data[i + 2] / 255;
       const o = y * w + x;
-      out[o] = (r - MEAN[0]) / STD[0];
-      out[w * h + o] = (g - MEAN[1]) / STD[1];
-      out[2 * w * h + o] = (b - MEAN[2]) / STD[2];
+      if (norm === 'm1') {
+        out[o] = m1(data[i]);
+        out[w * h + o] = m1(data[i + 1]);
+        out[2 * w * h + o] = m1(data[i + 2]);
+      } else {
+        out[o] = (data[i] / 255 - MEAN[0]) / STD[0];
+        out[w * h + o] = (data[i + 1] / 255 - MEAN[1]) / STD[1];
+        out[2 * w * h + o] = (data[i + 2] / 255 - MEAN[2]) / STD[2];
+      }
     }
   }
   return { data: out, w, h };
@@ -196,7 +200,7 @@ function ctcDecode(logits: Float32Array, dims: number[], dictLen: number): strin
   const timeAxis = classAxis === 1 ? 2 : 1;
   const T = classAxis === 1 ? b : a;
   const C = classAxis === 1 ? a : b;
-  const blank = dictLen; // PaddleOCR CTC blank 为最后一个类别
+  const blank = 0; // PaddleOCR CTC：blank 为类别 0；实际字符 class c(>=1) 对应 dict[c-1]
   let prev = -1;
   let out = '';
   for (let t = 0; t < T; t++) {
@@ -214,8 +218,13 @@ function ctcDecode(logits: Float32Array, dims: number[], dictLen: number): strin
       prev = -1;
       continue;
     }
+    const charIdx = bestC - 1;
+    if (charIdx < 0 || charIdx >= dictLen) {
+      prev = bestC;
+      continue;
+    }
     if (bestC === prev) continue;
-    out += dict[bestC] ?? '';
+    out += dict[charIdx];
     prev = bestC;
   }
   return out;
@@ -230,25 +239,33 @@ async function recognize(dataUrl: string): Promise<string> {
   const ow = img.width;
   const oh = img.height;
 
-  // ---- 检测：最长边缩放至 <= 960，并补齐到 32 倍数 ----
-  const maxSide = 960;
-  let scale = 1;
-  let detW = ow;
-  let detH = oh;
-  if (Math.max(ow, oh) > maxSide) {
-    scale = maxSide / Math.max(ow, oh);
-    detW = Math.round(ow * scale);
-    detH = Math.round(oh * scale);
+  // ---- 检测：固定画布尺寸，规避 onnxruntime-web 在可变输入尺寸下触发的缓冲区复用崩溃（wasm/webgl 均触发）----
+  const DET_CANVAS = 1536;
+  const s = DET_CANVAS / Math.max(ow, oh);
+  const rw = Math.max(1, Math.round(ow * s));
+  const rh = Math.max(1, Math.round(oh * s));
+  // 构建固定 DET_CANVAS×DET_CANVAS 画布，原图左上对齐缩放放入，其余填 0（黑底）
+  const canvasImg = new ImageData(DET_CANVAS, DET_CANVAS);
+  for (let y = 0; y < rh; y++) {
+    for (let x = 0; x < rw; x++) {
+      const sx = Math.min(ow - 1, Math.floor(x / s));
+      const sy = Math.min(oh - 1, Math.floor(y / s));
+      const si = (sy * ow + sx) * 4;
+      const di = (y * DET_CANVAS + x) * 4;
+      canvasImg.data[di] = img.data[si];
+      canvasImg.data[di + 1] = img.data[si + 1];
+      canvasImg.data[di + 2] = img.data[si + 2];
+      canvasImg.data[di + 3] = 255;
+    }
   }
-  detW = Math.max(32, Math.ceil(detW / 32) * 32);
-  detH = Math.max(32, Math.ceil(detH / 32) * 32);
-  const detCHW = resizeCHW(toCHW(img), detW, detH);
-  const detInput = new ort.Tensor('float32', detCHW, [1, 3, detH, detW]);
+  const detCHW = toCHW(canvasImg).data;
+  const detInput = new ort.Tensor('float32', detCHW, [1, 3, DET_CANVAS, DET_CANVAS]);
   const detOut = await detSession.run({ [detSession.inputNames[0]]: detInput });
   const detData = detOut[detSession.outputNames[0]].data as Float32Array;
-  // 输出可能是 [1,1,H,W] 概率图；取最后一维展开
-  const prob = detData; // 已为 0..1 概率（det onnx 内含 sigmoid）
-  const boxes = detectBoxes(prob, detW, detH, ow / detW).filter(
+  // 输出 [1,1,H,W] 概率图（det onnx 内含 sigmoid），取最后一维展开
+  const prob = detData;
+  const mapScale = ow / rw; // det 空间 -> 原图坐标映射
+  const boxes = detectBoxes(prob, DET_CANVAS, DET_CANVAS, mapScale).filter(
     ([x1, y1, x2, y2]) => x2 - x1 > 2 && y2 - y1 > 2,
   );
 
@@ -275,7 +292,7 @@ async function recognize(dataUrl: string): Promise<string> {
     const cw = cropCanvas.width;
     const ch = cropCanvas.height;
     const recW = Math.max(48, Math.min(320, Math.round((48 * cw) / ch)));
-    const recCHW = resizeCHW(toCHW(cropImg), recW, 48);
+    const recCHW = resizeCHW(toCHW(cropImg, 'm1'), recW, 48);
     const recInput = new ort.Tensor('float32', recCHW, [1, 3, 48, recW]);
     const recOut = await recSession.run({ [recSession.inputNames[0]]: recInput });
     const recData = recOut[recSession.outputNames[0]].data as Float32Array;

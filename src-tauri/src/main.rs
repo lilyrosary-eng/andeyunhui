@@ -779,6 +779,7 @@ fn main() {
             delete_transfer_station_file,
             clear_transfer_station,
             import_to_dropzone,
+            import_to_openwith_dir,
             read_dropzone_file,
             read_dropzone_base64,
             prepare_drop_export,
