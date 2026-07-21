@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>历史版本 · 安得云荟</title>
+    <link rel="icon" type="image/png" href="logo.png" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" />
+    <style>
+        /* ===== 莫兰迪配色 ===== */
+        :root {
+            --bg: #f4f2ec;
+            --surface: #fcfaf7;
+            --surface-hover: #f0ede8;
+            --text-primary: #3d3a36;
+            --text-secondary: #8a8580;
+            --text-muted: #b5b0aa;
+            --border: #e5e0da;
+            --accent: #b8a9c9;
+            --shadow: rgba(60, 58, 55, 0.06);
+            --radius: 1.2rem;
+            --transition: 0.3s ease;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background-color: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1.5rem 4rem;
+        }
+        .container { max-width: 820px; width: 100%; }
+
+        /* ===== 导航栏 ===== */
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.6rem 1.8rem;
+            background: var(--surface);
+            border-radius: 3rem;
+            border: 1px solid var(--border);
+            box-shadow: 0 2px 12px var(--shadow);
+            margin-bottom: 3rem;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+        .logo {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+        }
+        .logo i { color: var(--accent); font-size: 1.6rem; }
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color var(--transition);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .nav-links a:hover { color: var(--text-primary); }
+        .nav-links .btn-ghost {
+            background: var(--surface-hover);
+            padding: 0.3rem 1.4rem;
+            border-radius: 2rem;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+
+        /* ===== 平台切换标签 ===== */
+        .platform-tabs {
+            display: flex;
+            gap: 0.8rem;
+            justify-content: center;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+        .platform-tabs a {
+            padding: 0.4rem 1.6rem;
+            border-radius: 2rem;
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 0.95rem;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-secondary);
+            transition: background var(--transition), color var(--transition), border-color var(--transition);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .platform-tabs a:hover {
+            background: var(--surface-hover);
+            border-color: #ccc6c0;
+        }
+        .platform-tabs a.active {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
+        }
+
+        /* ===== 页面标题 ===== */
+        .page-header {
+            text-align: center;
+            padding: 0.5rem 0 0.5rem;
+        }
+        .page-header h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+        .page-header h1 i { color: var(--accent); }
+        .page-header .sub {
+            color: var(--text-secondary);
+            margin-top: 0.3rem;
+            font-size: 1rem;
+        }
+
+        /* ===== 版本表格 ===== */
+        .version-table {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            overflow: hidden;
+            margin: 1.5rem 0;
+        }
+        .version-table table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+        }
+        .version-table th {
+            text-align: left;
+            padding: 0.8rem 1.2rem;
+            background: var(--surface-hover);
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: 0.85rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .version-table td {
+            padding: 0.7rem 1.2rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .version-table tr:last-child td { border-bottom: none; }
+        .version-table .version-tag {
+            background: var(--accent);
+            color: #fff;
+            font-size: 0.65rem;
+            padding: 0.1rem 0.6rem;
+            border-radius: 2rem;
+            margin-left: 8px;
+        }
+        .version-table .download-link {
+            color: var(--accent);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color var(--transition);
+        }
+        .version-table .download-link:hover { color: #a898b8; }
+        .version-table .empty-state {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 2rem 0;
+        }
+
+        /* ===== 返回按钮 ===== */
+        .back-link {
+            text-align: center;
+            margin: 1.5rem 0;
+        }
+        .back-link a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: color var(--transition);
+        }
+        .back-link a:hover { color: var(--text-primary); }
+
+        /* ===== 页脚 ===== */
+        .footer {
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+        .footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin-left: 1.5rem;
+            transition: color var(--transition);
+        }
+        .footer a:hover { color: var(--text-primary); }
+
+        @media (max-width: 640px) {
+            .navbar { flex-direction: column; align-items: stretch; padding: 0.8rem 1.2rem; }
+            .nav-links { justify-content: center; gap: 1rem; }
+            .page-header h1 { font-size: 1.6rem; }
+            .version-table { font-size: 0.85rem; }
+            .version-table th, .version-table td { padding: 0.5rem 0.8rem; }
+            .platform-tabs a { padding: 0.3rem 1rem; font-size: 0.85rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- ===== 导航栏 ===== -->
+        <nav class="navbar">
+            <a href="index.html" class="logo">
+                <i class="lucide lucide-flower"></i>
+                安得云荟
+            </a>
+            <div class="nav-links">
+                <a href="index.html"><i class="lucide lucide-house"></i> 首页</a>
+                <a href="download.html"><i class="lucide lucide-download"></i> 下载</a>
+                <a href="changelog.html"><i class="lucide lucide-scroll"></i> 更新日志</a>
+                <a href="https://github.com/lilyrosary-eng/andeyunhui" target="_blank" class="btn-ghost">
+                    <i class="lucide lucide-github"></i> GitHub
+                </a>
+            </div>
+        </nav>
+
+        <!-- ===== 平台切换标签 ===== -->
+        <div class="platform-tabs" id="platformTabs">
+            <a href="?platform=windows" data-platform="windows">
+                <i class="lucide lucide-monitor"></i> Windows
+            </a>
+            <a href="?platform=macos" data-platform="macos">
+                <i class="lucide lucide-apple"></i> macOS
+            </a>
+            <a href="?platform=linux" data-platform="linux">
+                <i class="lucide lucide-linux"></i> Linux
+            </a>
+        </div>
+
+        <!-- ===== 标题 ===== -->
+        <div class="page-header">
+            <h1 id="pageTitle"><i class="lucide lucide-monitor"></i> Windows 历史版本</h1>
+            <p class="sub">所有版本均存储在缤纷云 · 国内高速下载</p>
+        </div>
+
+        <!-- ===== 版本表格容器 ===== -->
+        <div class="version-table" id="versionTable">
+            <!-- JavaScript 动态渲染 -->
+        </div>
+
+        <!-- ===== 返回 ===== -->
+        <div class="back-link">
+            <a href="download.html">
+                <i class="lucide lucide-arrow-left"></i> 返回下载页
+            </a>
+        </div>
+
+        <!-- ===== 页脚 ===== -->
+        <footer class="footer">
+            <span>© 2026 安得云荟 · Rosary</span>
+            <div>
+                <a href="privacy.html"><i class="lucide lucide-shield"></i> 隐私政策</a>
+                <a href="https://github.com/lilyrosary-eng/andeyunhui" target="_blank"><i class="lucide lucide-github"></i> GitHub</a>
+            </div>
+        </footer>
+
+    </div>
+
+    <script>
+        // ================================================================
+        //  数据：各平台历史版本（按发布时间倒序排列）
+        //  每次发布新版本时，在对应平台数组的 最前面 插入一条新记录
+        // ================================================================
+        const VERSIONS = {
+            windows: [
+                { version: 'v2.1.0', date: '2026-07-20', url: 'https://andeyunhui.s3.bitiful.net/安得云荟_2.1.0_x64-setup.exe', latest: true },
+                { version: 'v2.0.0', date: '2026-07-01', url: 'https://bitiful.com/your-bucket/andengyuanhua-windows-v1.0.0.exe', latest: false },
+                { version: 'v1.9.0', date: '2026-06-15', url: 'https://bitiful.com/your-bucket/andengyuanhua-windows-v0.9.9.exe', latest: false },
+                { version: 'v1.9.5', date: '2026-06-01', url: 'https://bitiful.com/your-bucket/andengyuanhua-windows-v0.9.8.exe', latest: false },
+            ],
+            macos: [
+                // 占位：等有 macOS 版本后，取消注释并填入真实数据
+                // { version: 'v1.0.1', date: '2026-07-20', url: 'https://bitiful.com/your-bucket/andengyuanhua-macos-v1.0.1.dmg', latest: true },
+            ],
+            linux: [
+                // 占位：等有 Linux 版本后，取消注释并填入真实数据
+                // { version: 'v1.0.1', date: '2026-07-20', url: 'https://bitiful.com/your-bucket/andengyuanhua-linux-v1.0.1.AppImage', latest: true },
+            ]
+        };
+
+        // ================================================================
+        //  平台显示名称 & 图标
+        // ================================================================
+        const PLATFORM_META = {
+            windows: { name: 'Windows', icon: 'monitor' },
+            macos:   { name: 'macOS',   icon: 'apple' },
+            linux:   { name: 'Linux',   icon: 'linux' },
+        };
+
+        // ================================================================
+        //  渲染逻辑
+        // ================================================================
+        function getPlatformFromURL() {
+            const params = new URLSearchParams(window.location.search);
+            const p = params.get('platform');
+            if (p && PLATFORM_META[p]) return p;
+            return 'windows'; // 默认 Windows
+        }
+
+        function renderTable(platform) {
+            const container = document.getElementById('versionTable');
+            const titleEl = document.getElementById('pageTitle');
+            const meta = PLATFORM_META[platform];
+            const versions = VERSIONS[platform] || [];
+
+            // 更新标题
+            titleEl.innerHTML = `<i class="lucide lucide-${meta.icon}"></i> ${meta.name} 历史版本`;
+
+            // 更新标签高亮
+            document.querySelectorAll('.platform-tabs a').forEach(el => {
+                el.classList.toggle('active', el.dataset.platform === platform);
+            });
+
+            // 渲染表格
+            if (versions.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <i class="lucide lucide-inbox" style="font-size:2rem;display:block;margin-bottom:0.5rem;"></i>
+                        ${meta.name} 版本尚未发布，敬请期待 🚀
+                    </div>
+                `;
+                return;
+            }
+
+            let rows = versions.map(v => `
+                <tr>
+                    <td>
+                        <strong>${v.version}</strong>
+                        ${v.latest ? '<span class="version-tag">最新</span>' : ''}
+                    </td>
+                    <td>${v.date}</td>
+                    <td>
+                        <a href="${v.url}" class="download-link">⬇ 下载</a>
+                    </td>
+                </tr>
+            `).join('');
+
+            container.innerHTML = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>版本</th>
+                            <th>发布日期</th>
+                            <th>下载</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            `;
+        }
+
+        // ================================================================
+        //  初始化：监听 URL 变化 + 首次加载
+        // ================================================================
+        function init() {
+            const platform = getPlatformFromURL();
+            renderTable(platform);
+
+            // 监听浏览器前进/后退
+            window.addEventListener('popstate', () => {
+                const newPlatform = getPlatformFromURL();
+                renderTable(newPlatform);
+            });
+        }
+
+        // 页面加载完成后执行
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

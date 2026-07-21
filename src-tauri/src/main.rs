@@ -919,6 +919,7 @@ fn main() {
             window_manager::overlay_clear_gpu_cache,
             list_windows,
             get_window_title,
+            crate::screenshot::window_at_point,
             clipboard_write_image,
             clipboard_write_image_from_path,
             clipboard_diagnose,

@@ -53,6 +53,54 @@ pub struct WindowInfo {
     /// 其余窗口 / 框选一律裁剪掉任务栏那条带，做到「仅点任务栏才截任务栏」。
     #[serde(rename = "isTaskbar")]
     pub is_taskbar: bool,
+    /// z 序排名（0 = 最顶层，数值越大越靠后）。前端命中测试在「光标落在多个重叠窗口矩形内」
+    /// 时用它选出真正最上层可见的窗口，而不是盲目取最小面积（那会误判被遮挡的小窗口为命中）。
+    pub z: i64,
+}
+
+/// 返回「本应用自身的全屏覆盖窗」HWND 集合，与 `window_at_point` 的 `excluded` 标签集合保持一致。
+/// 用于从 `list_windows` 结果中剔除这些覆盖窗，避免前端纯 JS 命中测试 `hitWindow` 误把
+/// 「覆盖窗自身」当成光标下窗口（覆盖窗矩形=整屏、z 序最前 → 悬停高亮整屏 / 卡在覆盖窗，
+/// 即用户反馈的「仍有概率卡窗口」）。安得云荟自身的**主窗 / 浮窗**（非覆盖窗标签）不在集合内，
+/// 仍保留在列表中，可被正常识别与录制 / 截图。
+fn overlay_excluded_hwnds(app: &tauri::AppHandle) -> std::collections::HashSet<usize> {
+    let mut set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for label in [
+        "screenshot-overlay",
+        "recorder-select",
+        "recorder-widget",
+        "recording-border",
+    ] {
+        if let Some(w) = app.get_webview_window(label) {
+            if let Ok(h) = w.hwnd() {
+                let hwnd = h.0 as winapi::shared::windef::HWND;
+                set.insert(hwnd as usize);
+                // Tauri WebView2 子控件 HWND 与顶层父 HWND 不同，同时排除 raw 与 GA_ROOT 祖先。
+                let root = unsafe { winapi::um::winuser::GetAncestor(hwnd, winapi::um::winuser::GA_ROOT) };
+                if !root.is_null() {
+                    set.insert(root as usize);
+                }
+            }
+        }
+    }
+    set
+}
+
+/// 计算当前桌面所有顶层窗口的 z 序排名（0 = 最顶层）。
+/// 从 `GetTopWindow(NULL)` 出发沿 `GW_HWNDNEXT` 遍历整条 z 序链，hwnd -> rank。
+/// 供 `list_windows` 给每个窗口标注 z，使前端命中测试能正确识别「重叠窗口」之上真实可见的那个。
+fn zorder_ranks() -> std::collections::HashMap<usize, i64> {
+    let mut map: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+    unsafe {
+        let mut hwnd = winapi::um::winuser::GetTopWindow(std::ptr::null_mut());
+        let mut rank: i64 = 0;
+        while !hwnd.is_null() {
+            map.insert(hwnd as usize, rank);
+            rank += 1;
+            hwnd = winapi::um::winuser::GetWindow(hwnd, winapi::um::winuser::GW_HWNDNEXT);
+        }
+    }
+    map
 }
 
 /// 计算「所有显示器物理矩形」的并集（多屏覆盖）。
@@ -86,7 +134,7 @@ pub fn hide_overlay_window(app: tauri::AppHandle) {
 
 /// 枚举「其他进程」的可见窗口，返回**物理像素**矩形，供前端绘制绿色轮廓与窗口识别。
 #[tauri::command]
-pub fn list_windows() -> Result<Vec<WindowInfo>, String> {
+pub fn list_windows(app: tauri::AppHandle) -> Result<Vec<WindowInfo>, String> {
     let mut windows: Vec<WindowInfo> = Vec::new();
     unsafe {
         winapi::um::winuser::EnumWindows(
@@ -95,6 +143,20 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, String> {
         );
     }
     windows.retain(|w| w.width > 8 && w.height > 8);
+    // 标注 z 序排名（0 = 最顶层），供前端命中测试在重叠窗口场景取最上层窗口。
+    let ranks = zorder_ranks();
+    for w in &mut windows {
+        w.z = ranks.get(&(w.hwnd as usize)).copied().unwrap_or(i64::MAX);
+    }
+    // 剔除「本应用自身的全屏覆盖窗」（截图/录屏选区窗、录屏控制台、录制边框）。
+    // 关键修复（卡窗口根因）：上一轮为让安得云荟自身窗口（主窗/浮窗）可被识别，移除了命中测试的
+    // `is_self` 跳过；但选区覆盖窗本身同为 `is_self` 且是「全屏 + z 序最前」的可见窗口。录屏/截图
+    // 的 200ms 增量刷新会在**覆盖窗已显示**时调用本函数，于是覆盖窗被 EnumWindows 枚举进来，
+    // 前端纯 JS 命中测试 `hitWindow` 便把「覆盖窗自身」当成光标下窗口 → 悬停高亮整屏 / 卡在覆盖窗
+    // （即「仍有概率卡窗口」，且截图、录屏同源）。此处按标签剔除，与 `window_at_point` 的 `excluded`
+    // 集合一致；安得云荟的主窗/浮窗（非覆盖窗标签）保留在列表中，仍可被正常识别与录制。
+    let excluded = overlay_excluded_hwnds(&app);
+    windows.retain(|w| !excluded.contains(&(w.hwnd as usize)));
     Ok(windows)
 }
 
@@ -186,6 +248,7 @@ unsafe extern "system" fn enum_callback(
         height,
         is_self,
         is_taskbar,
+        z: 0,
     });
     1
 }
@@ -214,6 +277,136 @@ pub fn get_window_title(hwnd: u64) -> String {
     } else {
         String::new()
     }
+}
+
+/// 由 HWND 构造 `WindowInfo`：矩形优先用 `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`
+/// （不含阴影/边框，贴合用户感知），失败时回退 `GetWindowRect`；附带 `is_self`（是否本进程）与
+/// `is_taskbar`。矩形退化（宽高<=0）返回 None，调用方跳过该窗口。
+fn build_window_info(hwnd: winapi::shared::windef::HWND) -> Option<WindowInfo> {
+    unsafe {
+        const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 4;
+        let mut rect: winapi::shared::windef::RECT = std::mem::zeroed();
+        let hr = winapi::um::dwmapi::DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut _ as *mut _,
+            std::mem::size_of::<winapi::shared::windef::RECT>() as u32,
+        );
+        let use_rect = if hr != 0 || rect.right <= rect.left || rect.bottom <= rect.top {
+            let mut gwr: winapi::shared::windef::RECT = std::mem::zeroed();
+            if winapi::um::winuser::GetWindowRect(hwnd, &mut gwr) == 0 {
+                return None;
+            }
+            gwr
+        } else {
+            rect
+        };
+        let x = use_rect.left;
+        let y = use_rect.top;
+        let width = use_rect.right - use_rect.left;
+        let height = use_rect.bottom - use_rect.top;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let mut pid: u32 = 0;
+        winapi::um::winuser::GetWindowThreadProcessId(hwnd, &mut pid);
+        let is_self = pid == winapi::um::processthreadsapi::GetCurrentProcessId();
+        let mut cls: [u16; 256] = [0; 256];
+        let cls_len = winapi::um::winuser::GetClassNameW(hwnd, cls.as_mut_ptr(), 256);
+        let class = if cls_len > 0 {
+            String::from_utf16_lossy(&cls[..cls_len as usize])
+        } else {
+            String::new()
+        };
+        let is_taskbar = class == "Shell_TrayWnd" || class == "Shell_SecondaryTrayWnd";
+        Some(WindowInfo {
+            hwnd: hwnd as u64,
+            title: String::new(),
+            x,
+            y,
+            width,
+            height,
+            is_self,
+            is_taskbar,
+            z: 0,
+        })
+    }
+}
+
+/// 实时命中测试：返回光标下（物理屏幕坐标 x,y）真实的顶层窗口，**排除本应用自身的全屏透明
+/// 覆盖窗 / 控制台 / 浮窗**。用于悬停高亮与单击选取，替代「枚举全列表 + JS 矩形求交」——
+/// 后者依赖一份可能残缺/陈旧的窗口列表，偶发漏窗时表现为「只识别一个窗口 / 鼠标移动无效」。
+/// 本函数直接以 OS 为权威（等价于 `WindowFromPoint`，但跳过自身覆盖窗），任何时刻都返回光标下
+/// 真实窗口，彻底消除该问题，且天然处理 z 序裁剪、透明区域、被遮挡窗口与 UWP 现代应用。
+///
+/// 实现：从 `WindowFromPoint(pt)` 得到的真实顶层窗口出发，沿全局 Z 序（`GetWindow(GW_HWNDNEXT)`）
+/// 向下遍历，跳过「自身覆盖窗集合」与不可见窗口，返回第一个矩形包含该点的真实窗口。
+/// 桌面合成层（Progman / WorkerW 等）返回 None，避免悬停桌面时高亮整屏。
+#[tauri::command]
+pub async fn window_at_point(app: tauri::AppHandle, x: i32, y: i32) -> Option<WindowInfo> {
+    // 放工作线程执行：WindowFromPoint / GetWindowRect / DwmGetWindowAttribute 等 OS 调用
+    // 若在主线程同步跑，悬停/单击期间会阻塞 Tauri UI 线程导致卡顿。单击仅调用一次，开销可忽略。
+    let result = tauri::async_runtime::spawn_blocking(move || unsafe {
+        let pt = winapi::shared::windef::POINT { x, y };
+        // 自身覆盖窗 / 控制台 / 浮窗的顶层 HWND 集合（与 filter_self_overlay_windows 一致）。
+        // Tauri WebView2 的子控件 HWND 与顶层父 HWND 不同，故同时排除 raw 与 GA_ROOT 祖先。
+        let mut excluded: Vec<winapi::shared::windef::HWND> = Vec::new();
+        for label in [
+            "recorder-select",
+            "recorder-widget",
+            "screenshot-overlay",
+            "floating-clipboard",
+        ] {
+            if let Some(w) = app.get_webview_window(label) {
+                if let Ok(h) = w.hwnd() {
+                    let hwnd = h.0 as winapi::shared::windef::HWND;
+                    excluded.push(hwnd);
+                    let root = winapi::um::winuser::GetAncestor(hwnd, winapi::um::winuser::GA_ROOT);
+                    if !root.is_null() {
+                        excluded.push(root);
+                    }
+                }
+            }
+        }
+        let mut hwnd = winapi::um::winuser::WindowFromPoint(pt);
+        let mut guard: u32 = 0;
+        while !hwnd.is_null() && guard < 256 {
+            if !excluded.contains(&hwnd) && winapi::um::winuser::IsWindowVisible(hwnd) != 0 {
+                let mut r = std::mem::zeroed();
+                if winapi::um::winuser::GetWindowRect(hwnd, &mut r) != 0
+                    && pt.x >= r.left
+                    && pt.x <= r.right
+                    && pt.y >= r.top
+                    && pt.y <= r.bottom
+                {
+                    if let Some(info) = build_window_info(hwnd) {
+                        // 不再跳过 is_self：本应用自身的窗口（主窗 / 浮窗）同样是用户可能
+                        // 想截图/录制的可见窗口。截图/录屏覆盖窗已通过上方 `excluded` 集合按标签排除，
+                        // 不会在这里被误返回。
+                        // 桌面合成层不高亮（返回 None），避免悬停桌面时高亮整屏。
+                        let mut cls_buf: [u16; 256] = [0; 256];
+                        let cls_len =
+                            winapi::um::winuser::GetClassNameW(hwnd, cls_buf.as_mut_ptr(), 256);
+                        let class = if cls_len > 0 {
+                            String::from_utf16_lossy(&cls_buf[..cls_len as usize])
+                        } else {
+                            String::new()
+                        };
+                        match class.as_str() {
+                            "Progman" | "WorkerW"
+                            | "Windows.UI.Composition.DesktopWindowManager"
+                            | "ApplicationFrameInputSinkWindow" | "MsgBox" => return None,
+                            _ => return Some(info),
+                        }
+                    }
+                }
+            }
+            hwnd = winapi::um::winuser::GetWindow(hwnd, winapi::um::winuser::GW_HWNDNEXT);
+            guard += 1;
+        }
+        None
+    });
+    result.await.unwrap_or(None)
 }
 
 /// 将 (x, y, w, h) 区域从整屏捕获为 RgbaImage（物理像素，RGBA）。
@@ -659,7 +852,7 @@ pub async fn start_screenshot(
     // 先枚举窗口（轻量、~几 ms），让窗口识别在选区阶段立即可用；重捕获放后台。
     // 注意：list_windows 必须早于 overlay 显示，否则「透明待加载态」期间 windows 为空，
     // 导致鼠标悬停无法高亮窗口（只能框选全屏）。
-    let windows_now = list_windows().unwrap_or_default();
+    let windows_now = list_windows(app.clone()).unwrap_or_default();
 
     // 先推送 meta 并立即可见（前端进入透明待加载态，选区交互 + 窗口识别立即可用）。
     let init_payload = json!({
