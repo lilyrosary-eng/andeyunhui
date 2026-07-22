@@ -310,7 +310,23 @@ fn main() {
             // 从 bundled-dlc/ 复制 .mufurong/.mujin 私有格式包到用户目录
             // （仅打包后 resource_dir 含 bundled-dlc/ 时生效；开发时该目录通常不存在）
             // 复制后由既有的 extract_mufurong_plugins / extract_mujin_deps 自动解压
-            extract_bundled_dlc(app.handle());
+            //
+            // ⚠️ 关键 dev 修复：开发模式下跳过解压。dev 以项目根 bundled-plugins/ 为权威源，
+            // 若把 bundled-dlc/*.mufurong 解压进 AppData/user_plugins/，会因
+            // find_plugin_root 优先查 user_plugins 而盖过 bundled-plugins 的最新代码，
+            // 导致"部署成功但 app 始终跑旧插件"（复选框常驻、「...」菜单缺失等）。
+            // 仅当 resource_dir 非 target/debug|release（即打包后安装目录）时才解压。
+            let is_dev_resource = app
+                .path()
+                .resource_dir()
+                .map(|p| {
+                    let s = p.to_string_lossy().replace('\\', "/");
+                    s.contains("/target/debug") || s.contains("/target/release")
+                })
+                .unwrap_or(false);
+            if !is_dev_resource {
+                extract_bundled_dlc(app.handle());
+            }
 
             // 调试日志：打印解析到的插件/依赖目录路径（帮助排查打包后路径问题）
             // 写到 AppData/plugin_paths.log 方便 release 模式下查看（无控制台）

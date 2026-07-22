@@ -166,8 +166,17 @@ for (const { relPath, id, manifest } of plugins) {
   // 2. 复制到 bundled-plugins（保留源码相对路径，与 plugins/ 结构一致）
   //    Rust 端 walk() / find_plugin_root() 递归扫描，天然支持嵌套目录结构
   const bundleTarget = join(bundledDir, relPath);
-  if (existsSync(bundleTarget)) rmSync(bundleTarget, { recursive: true, force: true });
-  mkdirSync(bundleTarget, { recursive: true });
+  // 关键：保留 bundleTarget 目录节点本身，仅清空其内容，不要 rmSync(recursive) 删除目录。
+  // 否则 dev 模式下 Rust 端对 bundled-plugins/ 的递归文件监听（ReadDirectoryChangesW）
+  // 在子目录被删除后会失效，导致 plugin-fs-change 不再派发、运行中 app 始终使用
+  // 旧的内存插件副本，部署改动不生效。清空内容后监听句柄保持有效，热重载可持续触发。
+  if (existsSync(bundleTarget)) {
+    for (const entry of readdirSync(bundleTarget)) {
+      rmSync(join(bundleTarget, entry), { recursive: true, force: true });
+    }
+  } else {
+    mkdirSync(bundleTarget, { recursive: true });
+  }
   cpSync(manifestSrc, join(bundleTarget, 'manifest.json'));
   if (existsSync(distDir)) {
     cpSync(distDir, bundleTarget, { recursive: true });
@@ -176,7 +185,28 @@ for (const { relPath, id, manifest } of plugins) {
   }
   console.log(`  ✓ -> bundled-plugins/${relPath}`);
 
+  // 清理 AppData/user_plugins 下与本插件同 id/relPath 的陈旧影子副本。
+  // dev 下以项目根 bundled-plugins/ 为权威源；若 user_plugins 残留旧副本，
+  // find_plugin_root 优先查 user_plugins 会盖过最新代码，导致"部署成功但 app 跑旧插件"。
+  // 每次部署顺手清掉影子，使 FS 监听触发的自动热重载能拿到新代码。
+  clearUserPluginShadow(relPath, id);
+
   console.log(`[Deploy] ${id} 部署完成`);
+}
+
+// 清理 user_plugins 影子（见上方调用处注释）。仅 Windows（有 APPDATA）时生效。
+function clearUserPluginShadow(relPath, id) {
+  const appData = process.env.APPDATA;
+  if (!appData) return;
+  const userPlugins = join(appData, 'com.rosary.andengyuanhua', 'user_plugins');
+  if (!existsSync(userPlugins)) return;
+  for (const key of [relPath, id, `${relPath}.mufurong`, `${id}.mufurong`]) {
+    const p = join(userPlugins, key);
+    if (existsSync(p)) {
+      rmSync(p, { recursive: true, force: true });
+      console.log(`  ✓ 清理陈旧影子: user_plugins/${key}`);
+    }
+  }
 }
 
 console.log('\n[Deploy] 所有插件部署完成');

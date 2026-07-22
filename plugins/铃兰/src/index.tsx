@@ -317,6 +317,12 @@ function MusicModule() {
   const [showNowPlaying, setShowNowPlaying] = useState(false);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(() => musicPlayer.getCurrentTrack());
   const unlistenRef = useRef<(() => void)[]>([]);
+  // 当前选中歌单 ID 的 ref：供 handleMoveTrack / handleRemoveTrack 等闭包使用，
+  // 避免依赖 selectedPlaylist 导致回调频繁重建
+  const selectedPlaylistIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedPlaylistIdRef.current = selectedPlaylist?.id ?? null;
+  }, [selectedPlaylist?.id]);
 
   // F.11 模块本地设置
   const [onlineLyricsEnabled, setOnlineLyricsEnabled] = useState(() => {
@@ -659,6 +665,65 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     }
   }, [selectedPlaylist, addToBlacklist]);
 
+  // 移动歌曲到其他歌单：源/目标都更新；自定义歌单持久化到 localStorage
+  const handleMoveTrack = useCallback((track: Track, targetPlaylistId: string) => {
+    const currentId = selectedPlaylistIdRef.current;
+    if (!currentId || currentId === targetPlaylistId) return;
+    setPlaylists(prev => {
+      const updated = prev.map(p => {
+        if (p.id === currentId) {
+          return { ...p, tracks: p.tracks.filter(t => t.id !== track.id) };
+        }
+        if (p.id === targetPlaylistId) {
+          // 避免重复：若目标歌单已有该曲目则跳过
+          if (p.tracks.some(t => t.id === track.id)) return p;
+          return { ...p, tracks: [...p.tracks, track] };
+        }
+        return p;
+      });
+      // 仅自定义歌单需要持久化
+      const customPlaylists = updated.filter(p => p.type === 'custom');
+      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      return updated;
+    });
+    // 同步更新当前歌单的 selectedPlaylist
+    setSelectedPlaylist(prev => {
+      if (!prev || prev.id !== currentId) return prev;
+      return { ...prev, tracks: prev.tracks.filter(t => t.id !== track.id) };
+    });
+  }, []);
+
+  // 移除歌曲：从当前歌单中删除
+  // - 自定义歌单：内存删除 + 持久化
+  // - 目录歌单：仅内存删除（下次扫描会重新出现，因为源文件仍在）
+  const handleRemoveTrack = useCallback((track: Track) => {
+    const currentId = selectedPlaylistIdRef.current;
+    if (!currentId) return;
+    setPlaylists(prev => {
+      const updated = prev.map(p => {
+        if (p.id === currentId) {
+          return { ...p, tracks: p.tracks.filter(t => t.id !== track.id) };
+        }
+        return p;
+      });
+      const customPlaylists = updated.filter(p => p.type === 'custom');
+      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      return updated;
+    });
+    setSelectedPlaylist(prev => {
+      if (!prev || prev.id !== currentId) return prev;
+      return { ...prev, tracks: prev.tracks.filter(t => t.id !== track.id) };
+    });
+  }, []);
+
+  // 供 TrackList 下拉菜单使用：除当前歌单外的所有歌单
+  const otherPlaylistsForMenu = useMemo(() => {
+    if (!selectedPlaylist) return [];
+    return playlists
+      .filter(p => p.id !== selectedPlaylist.id)
+      .map(p => ({ id: p.id, name: p.name }));
+  }, [playlists, selectedPlaylist]);
+
   // 模块设置（当前为占位，后续扩展）
   const handleOpenModuleSettings = useCallback(() => {
     setShowSettings(prev => !prev);
@@ -864,6 +929,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             playlistName={selectedPlaylist.name}
             onSelectTrack={handleSelectTrack}
             onAddSong={handleAddSong}
+            onMoveTrack={handleMoveTrack}
+            onRemoveTrack={handleRemoveTrack}
+            otherPlaylists={otherPlaylistsForMenu}
             showAlbum={showAlbum}
           />
         ) : (
