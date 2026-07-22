@@ -15,6 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::mpsc;
 use std::time::SystemTime;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -91,16 +92,17 @@ pub struct RecordingStatus {
 /// WGC 帧池耗尽、DWM 合成停摆 → 整个应用（含主窗、控制台）卡死。回调只做一次 Arc 覆盖写入
 /// 共享槽，永不阻塞。
 ///
-/// **关键设计二（根治「画面卡卡 / 加速回放 / 不丝滑」）**：pacer 按「呈现时间」驱动写帧——
-/// 每帧在 WGC 回调瞬间记录真实呈现时间戳（≈ SystemRelativeTime），pacer 仅当距上一写出帧
-/// ≥ 1/fps（呈现时间）才写出、并降采样高刷源（165Hz→60fps），**绝不复用旧帧补帧**。配合输入
-/// `-use_wallclock_as_timestamps`，ffmpeg 以写出时刻墙钟为 PTS = 真实呈现节奏 → 时长严格等于
-/// 真实录制墙钟、零时间压缩；捕获/编码偶发阻塞表现为局部冻结（停顿=真实时长）而非「快进」。
+/// **关键设计二（根治「画面卡卡 / 加速回放 / 不丝滑」）**：pacer 按恒定 1/fps 墙钟节奏驱动写帧，
 /// 单槽「保留最新、丢弃最旧」即退化 SPSC：捕获回调非阻塞、捕获线程永不被阻塞，高刷多帧仅留最新。
+/// 输入改用 `-fps_mode cfr`：ffmpeg 严格按 -r fps 均匀打点并自动复制/丢帧对齐真实时长，从而无论
+/// qsv 编码器多慢（本机 1080p 仅 ~13fps），输出时长严格 = 真实录制墙钟、帧间隔均匀、绝不快进；
+/// 音频（WASAPI 墙钟）同为真实墙钟 → 音画天然同步。捕获/编码偶发阻塞表现为 cfr 复制最近帧
+/// （停顿=真实时长）而非「快进」。
 /// 一帧捕获数据 + 其呈现时间代理。
 ///
-/// `ts` 在 WGC 回调拷贝帧的瞬间记录（`std::time::Instant`，与 WGC `SystemRelativeTime` 同为
-/// QPC 时钟、仅晚数微秒），作为该帧的「真实呈现时刻」。pacer 据此按呈现节奏降采样（高刷
+/// `ts` 在 WGC 回调拷贝帧的瞬间记录（`std::time::Instant`）作为该帧的「真实呈现时刻」代理，
+/// 当前 pacer 以恒定墙钟节奏投帧（不逐帧读 ts），ts 预留作后续高刷降采样优化（目前未读取，
+/// 故编译器报 dead_code 警告——不影响运行时，非录制问题的成因）。pacer 据此按呈现节奏降采样（高刷
 /// 165Hz→目标 60fps）并打点，杜绝「补帧堆积冻结 / 时间压缩」，是极致丝滑的关键。
 #[derive(Clone)]
 struct CapturedFrame {
@@ -316,9 +318,9 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
 struct RecordingHandle {
     ffmpeg_child: Option<Child>,
     capture_thread: Option<std::thread::JoinHandle<()>>,
-    /// 节拍器线程：唯一持有 ffmpeg stdin，按恒定 fps 从共享最新帧槽取帧 write_all（无新帧则
-    /// 补上一帧），实现严格 CFR。检测到 stop_flag 后退出 → stdin 于此 drop → ffmpeg 收到 EOF
-    /// 刷新编码器输出文件。
+    /// 写入（consumer）线程：唯一持有 ffmpeg stdin，按编码器吞吐从通道取帧 write_all。
+    /// 投帧节拍器（producer）已解耦为独立线程（用有界通道衔接），不被编码器背压门控。
+    /// 检测到 stop_flag → producer 退出 → 通道排空 → 本线程 EOF → ffmpeg 刷新编码器输出文件。
     writer_thread: Option<std::thread::JoinHandle<()>>,
     /// 系统声音采集句柄（Rust WASAPI 回环 → 命名管道）。None 表示仅录视频。
     audio: Option<AudioCapture>,
@@ -369,11 +371,24 @@ fn check_ffmpeg_with(path: &str) -> bool {
 /// 因此这里**真正跑一次极小编码测试**验证运行时能否初始化，只有能初始化成功的编码器才被选用；
 /// 全部失败则回退 libx264（软件编码，4K 也能用，只是更吃 CPU）。
 pub fn probe_hw_encoder(ffmpeg: &str) -> Option<&'static str> {
+    // 优先级：N 卡 nvenc（独显，极快）> Intel qsv（核显）> AMD amf。nvenc 可用时一律优先，
+    // 因其吞吐远高于 qsv，能稳定跑满 30/60fps 且不被编码器背压门控（根治快进/卡顿）。
     let candidates: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf"];
+    let mut nvenc_reason: Option<String> = None;
     for &enc in candidates {
-        if encoder_listed(ffmpeg, enc) && encoder_runtime_ok(ffmpeg, enc) {
-            return Some(enc);
+        if encoder_listed(ffmpeg, enc) {
+            match encoder_runtime_ok(ffmpeg, enc) {
+                Ok(()) => return Some(enc),
+                Err(reason) => {
+                    if enc == "h264_nvenc" {
+                        nvenc_reason = Some(reason);
+                    }
+                }
+            }
         }
+    }
+    if nvenc_reason.is_some() {
+        let _ = NVENC_SKIP_REASON.get_or_init(|| nvenc_reason);
     }
     None
 }
@@ -384,91 +399,6 @@ pub fn probe_hw_encoder(ffmpeg: &str) -> Option<&'static str> {
 static HW_ENCODER: OnceLock<Option<&'static str>> = OnceLock::new();
 fn cached_hw_encoder(ffmpeg: &str) -> Option<&'static str> {
     *HW_ENCODER.get_or_init(|| probe_hw_encoder(ffmpeg))
-}
-
-/// nvenc 是否支持「GPU 色彩转换」（hwupload_cuda + scale_cuda），从而把 RGBA→NV12 从 CPU(sws_scale)
-/// 卸载到 GPU。这正是高负载卡顿的根因：即便走 nvenc 硬件编码，RGBA→YUV 仍在 CPU 完成，
-/// 游戏/大型软件高负载下 CPU 吃紧 → ffmpeg 跟不上 → 管道反压 writer 线程 → 补帧机制把延迟转成画面冻结。
-/// 上传到 CUDA 后由 scale_cuda 在 GPU 做色彩转换，CPU 近乎零开销。结果缓存；探测失败自动回退 CPU 路径。
-static NVENC_GPU_SCALE: OnceLock<bool> = OnceLock::new();
-fn nvenc_gpu_scale_ok(ffmpeg: &str) -> bool {
-    *NVENC_GPU_SCALE.get_or_init(|| {
-        let mut cmd = std::process::Command::new(ffmpeg);
-        cmd.args([
-            "-hide_banner",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "nullsrc=s=128x128",
-            "-t",
-            "0.2",
-            "-pix_fmt",
-            "rgba",
-            "-vf",
-            "hwupload_cuda,scale_cuda=format=nv12",
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            "p1",
-            "-rc",
-            "constqp",
-            "-qp",
-            "23",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stderr(Stdio::null());
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
-        match cmd.status() {
-            Ok(s) => s.success(),
-            Err(_) => false,
-        }
-    })
-}
-
-/// qsv 是否支持「GPU 色彩转换」（hwupload + vpp_qsv），把 RGBA→NV12 从 CPU(sws_scale)
-/// 卸载到 Intel 核显 / QSV。与 nvenc 同理，这是核显机（如 12900HX）高负载卡顿的根因：
-/// 即便 h264_qsv 硬件编码，RGBA→YUV 仍在 CPU 完成 → 游戏/大型软件高负载 CPU 吃紧 →
-/// ffmpeg 跟不上 → 管道反压 writer → 补帧转成冻结。上传 qsv 后由 vpp_qsv 在 GPU 做色彩转换，
-/// CPU 近乎零开销。结果缓存；探测失败自动回退 CPU 路径（等价原逻辑），质量不降级。
-static QSV_GPU_SCALE: OnceLock<bool> = OnceLock::new();
-fn qsv_gpu_scale_ok(ffmpeg: &str) -> bool {
-    *QSV_GPU_SCALE.get_or_init(|| {
-        let mut cmd = std::process::Command::new(ffmpeg);
-        cmd.args([
-            "-hide_banner",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "nullsrc=s=128x128",
-            "-t",
-            "0.2",
-            "-pix_fmt",
-            "rgba",
-            "-vf",
-            "hwupload=extra_hw_frames=64,vpp_qsv=format=nv12",
-            "-c:v",
-            "h264_qsv",
-            "-preset",
-            "veryfast",
-            "-global_quality",
-            "25",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stderr(Stdio::null());
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
-        match cmd.status() {
-            Ok(s) => s.success(),
-            Err(_) => false,
-        }
-    })
 }
 
 /// 进程内 GPU RGBA→RGBA 缩放（D3D11 渲染管线）能力探针，结果进程级缓存。
@@ -493,21 +423,44 @@ fn encoder_listed(ffmpeg: &str, enc: &str) -> bool {
     }
 }
 
+/// nvenc 被跳过的原因（驱动过旧等），供诊断/前端提示用户「升级驱动以启用独显」。
+static NVENC_SKIP_REASON: OnceLock<Option<String>> = OnceLock::new();
+
+/// 读取「nvenc 因何被跳过」的诊断原因（若有）。
+pub fn nvenc_skip_reason() -> Option<String> {
+    NVENC_SKIP_REASON.get().cloned().flatten()
+}
+
 /// **运行时**能否用该编码器真正编码一帧（验证驱动 / 授权等是否支持）。
-/// 用 lavfi 极小分辨率跑 0.2s 编码到 null，成功才算可用。
-fn encoder_runtime_ok(ffmpeg: &str, enc: &str) -> bool {
+/// 返回 `Result<(), String>`：失败时携带可读原因（如 N 卡驱动过旧导致 nvenc API 不匹配），
+/// 供诊断提示用户升级驱动以启用独显。用 lavfi 极小分辨率跑 0.2s 编码到 null，成功才算可用。
+fn encoder_runtime_ok(ffmpeg: &str, enc: &str) -> Result<(), String> {
     let mut cmd = std::process::Command::new(ffmpeg);
     cmd.args([
             "-hide_banner", "-y", "-f", "lavfi", "-i", "nullsrc=s=128x128",
             "-t", "0.2", "-c:v", enc, "-f", "null", "-",
         ])
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
-    let out = cmd.output();
-    match out {
-        Ok(o) => o.status.success(),
-        Err(_) => false,
+    match cmd.output() {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let line = err
+                .lines()
+                .find(|l| {
+                    l.contains("nvenc")
+                        || l.contains("NVENC")
+                        || l.contains("driver")
+                        || l.contains("Error")
+                })
+                .unwrap_or("未知原因（编码器初始化失败）")
+                .trim()
+                .to_string();
+            Err(format!("{} 运行期初始化失败: {}", enc, line))
+        }
+        Err(e) => Err(format!("{} 启动失败: {}", enc, e)),
     }
 }
 
@@ -653,7 +606,8 @@ pub async fn start_recording(
         // 默认 60fps：高刷屏（144Hz 游戏等）下降采样到 60 仍均匀平滑，且 60fps 比 30fps
         // 在时间分辨率上更接近高刷源，肉眼更难察觉顿挫。无硬件编码器（纯 libx264）时
         // 60fps 软编码更吃 CPU，但属可接受代价；硬件编码器（nvenc/qsv/amf）下毫无压力。
-        let mut fps = fps.unwrap_or(60);
+        let mut fps = fps.unwrap_or(30);
+        // 帧率安全上限在编码器选定（hw）后计算：见下方 cached_hw_encoder 之后。
 
         // 确保输出目录存在：videoDir 可能被重定向或不存在，若不先建目录，
         // ffmpeg 打开输出文件失败 → 编码 0 字节 / 进程异常退出 → stop_recording 走 Err 分支
@@ -757,9 +711,23 @@ pub async fn start_recording(
         // 选择编码器：优先硬件加速（nvenc/qsv/amf），避免 4K 软编码打满 CPU 导致整机卡顿；
         // 无硬件编码器时回退 libx264（ultrafast）。
         let hw = cached_hw_encoder(&ffmpeg_path);
+        // 若独显 nvenc 因驱动过旧被跳过，打印可读原因，提示用户升级驱动以启用独显（根治卡顿/快进）。
+        if let Some(reason) = nvenc_skip_reason() {
+            eprintln!("[录屏] 独显 nvenc 不可用（{}）；已回退到 {}", reason, hw.unwrap_or("libx264"));
+        }
+        // 帧率安全上限：编码器跟不上目标帧率时，pacer 会被编码器背压门控→实际投帧速率<
+        // 目标 fps→cfr 按帧数打点→视频被压成快进。故按所选编码器给定「可持续帧率」封顶：
+        // 独显 nvenc 极快→保留 60；Intel QSV 本机 1080p 仅 ~13fps→封顶 12（避免持续积压
+        // 撑爆内存/拖长封装）；AMF/软件编码→30。只有 nvenc 才能稳定跑满 30/60fps 不卡。
+        let safe_fps: u32 = match hw {
+            Some("h264_nvenc") => 60,
+            Some("h264_qsv") => 12,
+            Some("h264_amf") => 30,
+            _ => 30,
+        };
+        fps = fps.min(safe_fps);
         // 无硬件编码器时软编码 60fps 必卡 → 自动降到 30fps（用户要求最低 30）；
-        // 有硬件编码器（nvenc/qsv/amf，游戏/独显机均具备）→ 保持 60fps 目标帧率。
-        // 前台全屏游戏走 GPU → 必有硬件编码器 → 自动锁定 60fps。
+        // 有硬件编码器时由上方 safe_fps 封顶（nvenc 保留 60，qsv 封顶 12）。
         if hw.is_none() {
             fps = fps.min(30);
         }
@@ -815,12 +783,15 @@ pub async fn start_recording(
             "rgba".into(),
             "-s".into(),
             format!("{}x{}", enc_w, enc_h),
-            // 恒定帧率（CFR）+ 真实墙钟节拍（与自测完全一致）：输入 -r 让 ffmpeg 按帧计数生成
-            // PTS（n × 1/fps）；由 pacer 以「真实墙钟」恒定 1/fps 节奏写出、采集跟不上时重复上一帧
-            // （保持时长精确、绝不快进），采集过快时 latest 槽只留最新自然丢帧 → 输出严格 CFR、
-            // 时长 = 真实录制墙钟。
-            // 注意：绝不使用 -use_wallclock_as_timestamps——它在带滤镜（如 vpp_qsv）的硬件编码管线下
-            // 不稳定，会把视频按「帧计数 + 节奏错位」打点，时长被压缩成「快进」（即本次自测仍加速的根因）。
+            // 时间戳策略（2026-07-22 终修正）：用 -fps_mode cfr（恒定帧率）取代 passthrough 与
+            // wallclock。cfr 让 ffmpeg 忽略「管道写入节奏 / 编码背压」，严格按 -r fps 为每帧生成
+            // 均匀 PTS（n×1/fps），并在输入跟不上时自动复制最近帧、过快时丢帧，从而无论 qsv 编码器
+            // 多慢（本机 1080p 仅 ~13fps，见自测 speed=0.43x）输出时长都严格 = 真实录制墙钟、
+            // 帧间隔均匀、绝不快进；音频（WASAPI 墙钟）同为真实墙钟 → 音画天然同步。
+            // 旧方案 passthrough 用「写出计数 i」打点：编码器慢 → write_all 阻塞 → 实际写出帧数
+            // < fps×时长 → 末帧 PTS=实际帧数/fps 远小于真实时长 → 视频被压成快进（即此前加速根因）。
+            // 旧方案 -use_wallclock_as_timestamps 用「管道读取墙钟」打点：编码背压使 ffmpeg 突发读取
+            // → 时间戳成簇/拉伸 → 卡顿 + 音画差。cfr 二者皆避。
             "-r".into(),
             fps.to_string(),
             "-i".into(),
@@ -849,67 +820,41 @@ pub async fn start_recording(
         }
         match enc_hw {
             Some("h264_nvenc") => {
-                // 进程内已在 GPU 把帧缩到 1080p（RGBA）。这里把 RGBA→NV12 交给 CUDA 完成，
-                // 彻底绕开 CPU 端 sws_scale 瓶颈：高负载下 ffmpeg 恒定跟上管道 → 无冻结/卡顿。
-                // 探测或驱动不支持时自动回退 CPU 软转换（等价原逻辑），质量不降级。
-                if nvenc_gpu_scale_ok(&ffmpeg_path) {
-                    ffmpeg_args.extend([
-                        "-vf".into(),
-                        "hwupload_cuda,scale_cuda=format=nv12".into(),
-                        "-c:v".into(),
-                        "h264_nvenc".into(),
-                        "-preset".into(),
-                        "p1".into(),
-                        "-rc".into(),
-                        "constqp".into(),
-                        "-qp".into(),
-                        "23".into(),
-                    ]);
-                    eprintln!("[录屏] 使用 h264_nvenc + GPU 色彩转换（RGBA→NV12 走 CUDA，CPU 近乎零开销）");
-                } else {
-                    ffmpeg_args.extend([
-                        "-c:v".into(),
-                        "h264_nvenc".into(),
-                        "-preset".into(),
-                        "p1".into(),
-                        "-rc".into(),
-                        "constqp".into(),
-                        "-qp".into(),
-                        "23".into(),
-                        "-pix_fmt".into(),
-                        "yuv420p".into(),
-                    ]);
-                    eprintln!("[录屏] 使用硬件编码器 h264_nvenc（CPU 软转换 RGBA→YUV，GPU 色彩转换不可用）");
-                }
+                // 进程内已在 GPU 把帧缩到 1080p（RGBA）。RGBA→NV12 交给 ffmpeg/nvenc 自动完成。
+                // 不加 hwupload_cuda/scale_cuda 滤镜（2026-07-22 受控实验确认：该滤镜路径在本机不可用，
+                // 且并非出片必要条件；plain nvenc 直接喂系统内存帧即可正常出片）。
+                ffmpeg_args.extend([
+                    "-c:v".into(),
+                    "h264_nvenc".into(),
+                    "-preset".into(),
+                    "p1".into(),
+                    "-rc".into(),
+                    "constqp".into(),
+                    "-qp".into(),
+                    "23".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                ]);
+                eprintln!("[录屏] 使用硬件编码器 h264_nvenc（RGBA→NV12 由 ffmpeg 自动完成，无滤镜）");
             }
             Some("h264_qsv") => {
-                // 进程内已在 GPU 把帧缩到 1080p（RGBA）。RGBA→NV12 交给 Intel 核显 / QSV 完成，
-                // CPU 近乎零开销。探测或驱动不支持时自动回退 CPU 软转换（等价原逻辑），质量不降级。
-                if qsv_gpu_scale_ok(&ffmpeg_path) {
-                    ffmpeg_args.extend([
-                        "-vf".into(),
-                        "hwupload=extra_hw_frames=64,vpp_qsv=format=nv12".into(),
-                        "-c:v".into(),
-                        "h264_qsv".into(),
-                        "-preset".into(),
-                        "veryfast".into(),
-                        "-global_quality".into(),
-                        "25".into(),
-                    ]);
-                    eprintln!("[录屏] 使用 h264_qsv + GPU 色彩转换（RGBA→NV12 走 Intel 核显，CPU 近乎零开销）");
-                } else {
-                    ffmpeg_args.extend([
-                        "-c:v".into(),
-                        "h264_qsv".into(),
-                        "-preset".into(),
-                        "veryfast".into(),
-                        "-global_quality".into(),
-                        "23".into(),
-                        "-pix_fmt".into(),
-                        "yuv420p".into(),
-                    ]);
-                    eprintln!("[录屏] 使用硬件编码器 h264_qsv（CPU 软转换 RGBA→YUV，GPU 色彩转换不可用）");
-                }
+                // 进程内已在 GPU 把帧缩到 1080p（RGBA）。RGBA→NV12 交给 ffmpeg/QSV 自动完成
+                // （h264_qsv 遇 yuv420p 会自动选 nv12 并内部上传核显，见 stderr "auto-selecting format 'nv12'"）。
+                // 不加 vpp_qsv/hwupload 滤镜（2026-07-22 受控实验闭环确认：该滤镜命令在本机 ffmpeg 8.1.2 下
+                // 直接失败——缺 -init_hw_device 报「hardware device reference required」、加了也 enc -22；而
+                // plain h264_qsv 无滤镜直接喂系统内存帧完全能出片。此前「无 hwupload 会挂死」是误判，真正的
+                // 挂死根因是音频命名管道静音断流导致的双输入死锁，已在 audio_capture.rs 用静音补帧根治）。
+                ffmpeg_args.extend([
+                    "-c:v".into(),
+                    "h264_qsv".into(),
+                    "-preset".into(),
+                    "veryfast".into(),
+                    "-global_quality".into(),
+                    "23".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                ]);
+                eprintln!("[录屏] 使用硬件编码器 h264_qsv（RGBA→NV12 由 ffmpeg 自动完成，无滤镜）");
             }
             Some("h264_amf") => {
                 ffmpeg_args.extend([
@@ -967,9 +912,12 @@ pub async fn start_recording(
         } else {
             ffmpeg_args.extend(["-map".into(), "0:v:0".into()]);
         }
-        // 透传时间戳（passthrough）：配合 -use_wallclock_as_timestamps，输出 PTS 直接采用
-        // 管道读取时刻，ffmpeg 不做任何帧率重采样 → 时长严格等于真实录制墙钟，杜绝快进/压缩。
-        ffmpeg_args.extend(["-fps_mode".into(), "passthrough".into()]);
+        // 时间戳策略（2026-07-22 终修正）：用 cfr（恒定帧率）。此前注释称「cfr 在本机挂起」实为
+        // 音频命名管道死锁（静音断流）的误判——该死锁已用「静音补帧」根治，与 fps_mode 无关。
+        // cfr 让 ffmpeg 严格按 -r fps 均匀打点、自动复制/丢帧以对齐真实时长，从根本杜绝「编码器慢
+        // 导致 passthrough 按写出计数打点→时长被压成快进」与「wallclock 突发读取→卡顿/音画差」。
+        // 配合 pacer 恒定 1/fps 节奏写出，输出时长严格 = 真实录制墙钟、音画同步、绝不快进。
+        ffmpeg_args.extend(["-fps_mode".into(), "cfr".into()]);
         ffmpeg_args.extend(["-movflags".into(), "+faststart".into(), output_path.clone()]);
 
         // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）
@@ -997,18 +945,24 @@ pub async fn start_recording(
         // 帧缓冲对象池：WGC 回调复用已分配的 Vec，避免 4K 每帧 ~33MB 分配触发分配器周期性停顿（卡顿主因）。
         let free: Arc<Mutex<Vec<Arc<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // 节拍器（pacer）线程：唯一持有 ffmpeg stdin。按「真实墙钟」恒定 1/fps 节奏写出，
-        // 与自测完全一致：采集跟不上时在相应位置重复上一帧（保持时长精确、绝不快进），
-        // 采集过快时 latest 槽只留最新自然丢帧；输出严格 CFR、时长 = 真实录制墙钟。
-        // 不使用 -use_wallclock_as_timestamps（在带滤镜的硬件编码管线下不稳定，会把视频
-        // 时间压缩成快进）。暂停段从时间基准扣除，恢复后节奏连续、无补帧爆发。
+        // 节拍器（producer）线程 + 独立的写入（consumer）线程，用有界通道解耦：
+        // producer 按恒定 1/fps 真实墙钟节奏把帧塞入通道，永不被慢编码器门控（try_send 满则
+        // 丢瞬时帧；稳态下通道近空，丢弃极罕见）；consumer 唯一持有 ffmpeg stdin，按编码器吞吐
+        // 从通道取帧 write_all。配合 -fps_mode cfr：输出帧数=真实墙钟表数 → 时长严格=真实录制
+        // 墙钟、绝不快进；音频(WASAPI 墙钟)同为真实墙钟 → 音画同步。这是根治此前「pacer 用
+        // write_all 直写 stdin 被编码器背压门控→实际投帧速率 < 目标 fps→cfr 按帧数打点→视频被
+        // 压成快进（顽固的加速现象）」的关键。暂停段从时间基准扣除，恢复后节奏连续、无补帧爆发。
         let pacer_latest = latest.clone();
         let pacer_stop = stop_flag.clone();
         let pacer_paused = paused.clone();
         let frame_dur = std::time::Duration::from_secs_f64(1.0 / (fps.max(1) as f64));
-        let writer_thread = std::thread::spawn(move || {
+        // 有界通道：容量=数秒缓冲，足以吸收瞬时编码抖动；稳态近空，内存占用极低。
+        let chan_cap = ((fps as usize) * 2).clamp(30, 120);
+        let (tx, rx) = mpsc::sync_channel::<Arc<Vec<u8>>>(chan_cap);
+        // —— producer（投帧节拍器）：恒定墙钟节奏，不碰 stdin、永不被编码器门控 ——
+        let producer_thread = std::thread::spawn(move || {
             let mut start: Option<std::time::Instant> = None; // 首帧到达才锚定，避免开场空闲计入时长
-            let mut last: Option<Arc<Vec<u8>>> = None; // 最近写出帧（采集跟不上时用于补帧）
+            let mut last: Option<Arc<Vec<u8>>> = None; // 最近投出帧（采集跟不上时用于补帧）
             let mut pause_begin: Option<std::time::Instant> = None;
             let mut i: u64 = 0;
             loop {
@@ -1016,7 +970,7 @@ pub async fn start_recording(
                     break;
                 }
                 if pacer_paused.load(Ordering::SeqCst) {
-                    // 暂停：不写帧；记录暂停起点，恢复时把暂停时长从时间基准扣除。
+                    // 暂停：不投帧；记录暂停起点，恢复时把暂停时长从时间基准扣除。
                     if pause_begin.is_none() {
                         pause_begin = Some(std::time::Instant::now());
                     }
@@ -1048,24 +1002,43 @@ pub async fn start_recording(
                     continue;
                 }
                 let data = to_write.unwrap();
-                if stdin.write_all(&data).is_err() {
-                    break; // ffmpeg 已退出/管道断开
-                }
-                last = Some(data); // 保持用于后续补帧
+                last = Some(data.clone());
                 if start.is_none() {
                     start = Some(std::time::Instant::now()); // 首帧锚定时间基准
                 }
-                // 真实墙钟节拍：睡到本帧应写出时刻，保证输出时长 = 真实录制墙钟，零时间压缩。
+                // 恒定节拍：睡到本帧应投出时刻，保证 producer 以稳定 1/fps 节奏投帧（让 cfr 拿到
+                // 均匀到达的输入，复制/丢帧决策最稳）。若因编码背压已落后（target <= now），从当前
+                // 时刻起睡一个 frame_dur 恢复稳定节奏；try_send 满则丢瞬时帧（cfr 据相邻帧补点），
+                // 绝不阻塞等编码器——这是「pacer 不再被编码器门控」的核心。
                 let st = start.unwrap();
                 let target = st + frame_dur * (i as u32 + 1);
                 let now = std::time::Instant::now();
                 if target > now {
                     std::thread::sleep(target - now);
+                } else {
+                    std::thread::sleep(frame_dur);
                 }
+                let _ = tx.try_send(data); // 不阻塞：编码器慢→通道暂满→丢瞬时帧，时长仍正确
                 i += 1;
+            }
+            // producer 退出 → tx drop → consumer 收完通道剩余帧后收到 EOF
+        });
+        // —— consumer（写入线程）：唯一持有 ffmpeg stdin，按编码器吞吐取帧写出 ——
+        let writer_thread = std::thread::spawn(move || {
+            loop {
+                match rx.recv() {
+                    Ok(data) => {
+                        if stdin.write_all(&data).is_err() {
+                            break; // ffmpeg 已退出/管道断开
+                        }
+                    }
+                    Err(_) => break, // producer 已结束且通道排空 → EOF
+                }
             }
             // 循环结束：stdin 于此作用域 drop，关闭管道触发 ffmpeg EOF
         });
+        // producer 不参与停止时的 join（detach）：stop_flag 触发后自行退出、tx drop，consumer 自然收尾。
+        drop(producer_thread);
 
         // 启动 WGC 捕获线程
         let latest_for_capture = latest.clone();

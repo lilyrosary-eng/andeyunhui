@@ -2238,7 +2238,7 @@ pub fn import_to_dropzone(
 ///
 /// 返回固定目录路径与该目录下最终落地文件的绝对路径列表。
 #[derive(Deserialize)]
-#[serde(tag = "kind")]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum OpenWithItem {
     Path { path: String, name: Option<String> },
     Bytes { name: String, bytes: Vec<u8> },

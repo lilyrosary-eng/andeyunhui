@@ -189,31 +189,75 @@ fn capture_entry(
         let _ = unsafe { client.Stop() };
         return Err("音频格式回传失败".into());
     }
-    let block_align = fmt.block_align as usize;
+    let block_align = (fmt.block_align as usize).max(1);
+    let bytes_per_sec = fmt.rate as u64 * block_align as u64;
     unsafe {
         if ConnectNamedPipe(handle, None).is_err() {
             let _ = client.Stop();
             return Err("ConnectNamedPipe 失败（ffmpeg 未连接音频管道）".into());
         }
-        while !stop.load(Ordering::SeqCst) {
-            let mut data: *mut u8 = std::ptr::null_mut();
-            let mut frames: u32 = 0;
-            let mut flags: u32 = 0;
-            if capture
-                .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
-                .is_ok()
-            {
-                if frames > 0 && !data.is_null() {
-                    let bytes = (frames as usize) * block_align;
-                    let slice = std::slice::from_raw_parts(data, bytes);
-                    let mut written: u32 = 0;
-                    let _ = WriteFile(handle, Some(slice), Some(&mut written), None);
-                }
-                let _ = capture.ReleaseBuffer(frames);
-            } else {
-                thread::sleep(Duration::from_millis(10));
+        // 关键根治（2026-07-22，经 ffmpeg 受控实验闭环确认）：WASAPI 回环在「系统静音 / 无音频播放」
+        // 时 GetBuffer 返回 0 帧、不产生任何采集包 → 命名管道断流。ffmpeg 双输入（视频 stdin + 音频管道）
+        // 会阻塞在音频读上、不排空视频 stdin，与视频写线程互相死锁 → 卡在 "Stream mapping" 后 0 帧、
+        // 输出 0KB（这正是自测/真实录制反复失败的真正根因；文件音频恒有数据故实验能出片）。
+        // 修法：按墙钟持续补静音，让音频流恒定、实时、连续，ffmpeg 永不饿死，A/V 也据此对齐。
+        let start = std::time::Instant::now();
+        let mut written_bytes: u64 = 0;
+        // 首包：连上管道后立刻写一小段静音（~20ms），确保 ffmpeg 立即读到数据、尽早进入编码循环。
+        {
+            let mut primer_len = (bytes_per_sec as usize) / 50;
+            primer_len -= primer_len % block_align;
+            if primer_len > 0 {
+                let primer = vec![0u8; primer_len];
+                let mut w: u32 = 0;
+                let _ = WriteFile(handle, Some(&primer), Some(&mut w), None);
+                written_bytes += primer_len as u64;
             }
-            thread::sleep(Duration::from_millis(8));
+        }
+        while !stop.load(Ordering::SeqCst) {
+            // 尽量排空 WASAPI 当前所有可用采集包（一次可能有多包）。
+            loop {
+                let mut data: *mut u8 = std::ptr::null_mut();
+                let mut frames: u32 = 0;
+                let mut flags: u32 = 0;
+                if capture
+                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                    .is_ok()
+                {
+                    if frames == 0 {
+                        let _ = capture.ReleaseBuffer(0);
+                        break;
+                    }
+                    let bytes = (frames as usize) * block_align;
+                    let silent = (flags & 0x2) != 0; // AUDCLNT_BUFFERFLAGS_SILENT：数据无效，须补零
+                    let mut written: u32 = 0;
+                    if silent || data.is_null() {
+                        let zeros = vec![0u8; bytes];
+                        let _ = WriteFile(handle, Some(&zeros), Some(&mut written), None);
+                    } else {
+                        let slice = std::slice::from_raw_parts(data, bytes);
+                        let _ = WriteFile(handle, Some(slice), Some(&mut written), None);
+                    }
+                    written_bytes += bytes as u64;
+                    let _ = capture.ReleaseBuffer(frames);
+                } else {
+                    break;
+                }
+            }
+            // 按墙钟补足静音：期望字节 = 采样率×块对齐×已过秒；不足部分（静音期）用静音填平。
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            let expected = bytes_per_sec.saturating_mul(elapsed_ms) / 1000;
+            if expected > written_bytes {
+                let mut gap = (expected - written_bytes) as usize;
+                gap -= gap % block_align; // 对齐整帧，避免半帧杂音
+                if gap > 0 {
+                    let zeros = vec![0u8; gap];
+                    let mut w: u32 = 0;
+                    let _ = WriteFile(handle, Some(&zeros), Some(&mut w), None);
+                    written_bytes += gap as u64;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
         }
         let _ = client.Stop();
     }
