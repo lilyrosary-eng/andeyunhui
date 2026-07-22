@@ -119,6 +119,16 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   const [copyTip, setCopyTip] = useState<string | null>(null);
   const [mag, setMag] = useState<{ x: number; y: number; show: boolean }>({ x: 0, y: 0, show: false });
 
+  // 选区外暗化遮罩：用 4 个纯色矩形（上/下/左/右）围出选区外区域，替代
+  // `box-shadow: 0 0 0 9999px` 的超大模糊——后者在 4K 全屏每帧重绘代价极高，
+  // 是悬停高亮/选区拖拽卡顿主因之一（录屏选区覆盖窗 overlay-recorder-select.ts 已采用同方案）。
+  // 4 矩形均为纯色、由 GPU 合成，移动时几乎零重绘成本。
+  const dimmerRef = useRef<HTMLDivElement | null>(null);
+  const dTopRef = useRef<HTMLDivElement | null>(null);
+  const dBotRef = useRef<HTMLDivElement | null>(null);
+  const dLeftRef = useRef<HTMLDivElement | null>(null);
+  const dRightRef = useRef<HTMLDivElement | null>(null);
+
   // 编辑态
   const baseRef = useRef<HTMLCanvasElement | null>(null);           // 预览分辨率底图（用于 UI 显示/编辑）
   const baseNativeRef = useRef<HTMLCanvasElement | null>(null);     // 原生分辨率底图（用于保存时合成，消除标注分辨率降级）
@@ -303,6 +313,31 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       void un.then((f) => f());
     };
   }, [applyHover, hitWindow]);
+
+  // 选区外暗化遮罩：随 selRect 更新 4 矩形（纯 GPU 合成，零全屏重绘）。
+  useEffect(() => {
+    const dimmer = dimmerRef.current;
+    if (!dimmer) return;
+    if (!selRect) {
+      dimmer.style.display = "none";
+      return;
+    }
+    const VW = window.innerWidth;
+    const VH = window.innerHeight;
+    const { x, y, w, h } = selRect;
+    const place = (el: HTMLDivElement | null, left: number, top: number, width: number, height: number) => {
+      if (!el) return;
+      el.style.left = left + "px";
+      el.style.top = top + "px";
+      el.style.width = Math.max(0, width) + "px";
+      el.style.height = Math.max(0, height) + "px";
+    };
+    place(dTopRef.current, 0, 0, VW, y);
+    place(dBotRef.current, 0, y + h, VW, VH - (y + h));
+    place(dLeftRef.current, 0, y, x, h);
+    place(dRightRef.current, x + w, y, VW - (x + w), h);
+    dimmer.style.display = "block";
+  }, [selRect]);
 
   // Esc 取消 / Enter 确认 / 方向键微调选区
   useEffect(() => {
@@ -902,6 +937,14 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
           <img src={image} alt="" className="absolute inset-0 w-full h-full object-fill pointer-events-none" draggable={false} />
         )}
 
+        {/* 选区外暗化遮罩：4 矩形（纯 GPU 合成，替代 box-shadow 9999px 全屏重绘）。zIndex 低于高亮框，高于冻结图。 */}
+        <div ref={dimmerRef} className="absolute inset-0 pointer-events-none" style={{ display: "none", zIndex: 1 }}>
+          <div ref={dTopRef} style={{ position: "absolute", background: "rgba(0,0,0,0.5)" }} />
+          <div ref={dBotRef} style={{ position: "absolute", background: "rgba(0,0,0,0.5)" }} />
+          <div ref={dLeftRef} style={{ position: "absolute", background: "rgba(0,0,0,0.5)" }} />
+          <div ref={dRightRef} style={{ position: "absolute", background: "rgba(0,0,0,0.5)" }} />
+        </div>
+
         {/* 窗口绿色轮廓（悬停高亮当前窗口） */}
         {(() => {
           const activeWin = hoverWin;
@@ -918,7 +961,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
                 height: w.height / scale,
                 borderColor: GREEN,
                 backgroundColor: "rgba(74,222,128,0.10)",
-                boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)",
+                zIndex: 2,
               }}
             >
               {wtitle && (
@@ -939,7 +982,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
               top: selRect.y,
               width: selRect.w,
               height: selRect.h,
-              boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)",
+              zIndex: 3,
             }}
           >
             <span className="absolute -top-6 left-0 px-1.5 py-0.5 rounded bg-black/70 text-white text-[11px] tabular-nums">

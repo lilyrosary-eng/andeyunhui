@@ -131,6 +131,8 @@ const ALLOWED_COMMANDS = new Set([
   'run_agent_shell',
   // 薄荷·网络测速：用系统默认浏览器打开外链（test.ustc.edu.cn）
   'plugin:opener|open_url',
+  // 桌宠引擎：销毁其常驻浮窗（与 overlay_window_get_or_create 配对）
+  'overlay_window_destroy',
 ]);
 
 // ========== 安全 Console：所有输出带插件前缀 ==========
