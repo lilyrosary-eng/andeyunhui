@@ -10,6 +10,8 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -236,12 +238,13 @@ pub fn get_ffmpeg_path(app: &AppHandle) -> String {
 
 /// 检查 ffmpeg 是否可用（bundled 或系统安装）
 fn check_ffmpeg_with(path: &str) -> bool {
-    std::process::Command::new(path)
-        .arg("-version")
+    let mut cmd = std::process::Command::new(path);
+    cmd.arg("-version")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    cmd.status().is_ok()
 }
 
 /// 探测可用的硬件加速 H.264 编码器（按优先级 nvenc > qsv > amf）。
@@ -269,10 +272,12 @@ pub fn probe_hw_encoder(ffmpeg: &str) -> Option<&'static str> {
 
 /// 编码器是否在 ffmpeg 的 `-encoders` 列表中出现。
 fn encoder_listed(ffmpeg: &str, enc: &str) -> bool {
-    let out = std::process::Command::new(ffmpeg)
-        .args(["-hide_banner", "-encoders"])
-        .stderr(Stdio::null())
-        .output();
+    let mut cmd = std::process::Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-encoders"])
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    let out = cmd.output();
     match out {
         Ok(o) => String::from_utf8_lossy(&o.stdout).contains(enc),
         Err(_) => false,
@@ -282,13 +287,15 @@ fn encoder_listed(ffmpeg: &str, enc: &str) -> bool {
 /// **运行时**能否用该编码器真正编码一帧（验证驱动 / 授权等是否支持）。
 /// 用 lavfi 极小分辨率跑 0.2s 编码到 null，成功才算可用。
 fn encoder_runtime_ok(ffmpeg: &str, enc: &str) -> bool {
-    let out = std::process::Command::new(ffmpeg)
-        .args([
+    let mut cmd = std::process::Command::new(ffmpeg);
+    cmd.args([
             "-hide_banner", "-y", "-f", "lavfi", "-i", "nullsrc=s=128x128",
             "-t", "0.2", "-c:v", enc, "-f", "null", "-",
         ])
-        .stderr(Stdio::null())
-        .output();
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    let out = cmd.output();
     match out {
         Ok(o) => o.status.success(),
         Err(_) => false,
@@ -522,8 +529,8 @@ pub async fn start_recording(
         ffmpeg_args.extend(["-movflags".into(), "+faststart".into(), output_path.clone()]);
 
         // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）
-        let mut child = Command::new(&ffmpeg_path)
-            .args(&ffmpeg_args)
+        let mut cmd = Command::new(&ffmpeg_path);
+        cmd.args(&ffmpeg_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             // 关键：stderr 必须用 null，不能用 piped。
@@ -531,8 +538,10 @@ pub async fn start_recording(
             // stderr 写入 → 停止消费 stdin → stdin 管道填满 → 捕获线程 write_all 阻塞
             // （同时持有 stdin 锁）→ stop_recording 无法获取锁关闭 stdin → 死锁 → UI 卡死。
             // 区域录屏尤其严重：奇数尺寸会产生每帧一条 ffmpeg 警告，瞬间填满 stderr 管道。
-            .stderr(Stdio::null())
-            .spawn()
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        let mut child = cmd.spawn()
             .map_err(|e| format!("启动 ffmpeg 失败: {}（请确认 ffmpeg 已安装）", e))?;
 
         let mut stdin = child.stdin.take().ok_or("无法获取 ffmpeg stdin")?;
@@ -1394,8 +1403,8 @@ pub async fn convert_recording_to_gif(app: AppHandle, mp4_path: String) -> Resul
             return Err(format!("录屏文件不存在: {}", mp4_path));
         }
         let gif_path = mp4_path.trim_end_matches(".mp4").to_string() + ".gif";
-        let output = std::process::Command::new(&ffmpeg_path)
-            .args([
+        let mut cmd = std::process::Command::new(&ffmpeg_path);
+        cmd.args([
                 "-y",
                 "-i",
                 &mp4_path,
@@ -1404,8 +1413,10 @@ pub async fn convert_recording_to_gif(app: AppHandle, mp4_path: String) -> Resul
                 "-loop",
                 "0",
                 &gif_path,
-            ])
-            .output()
+            ]);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        let output = cmd.output()
             .map_err(|e| format!("GIF 转换失败: {}", e))?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);

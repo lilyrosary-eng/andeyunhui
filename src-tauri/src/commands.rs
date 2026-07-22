@@ -2,6 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::SystemTime;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use serde_json::Value;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -1576,16 +1578,18 @@ pub fn export_backup(app: tauri::AppHandle, path: String) -> Result<(), String> 
     copy_dir(&notes_dir, &tmp_dir.join("notes"))?;
 
     // 使用系统命令创建 zip（Windows 内置）
-    let output = std::process::Command::new("powershell")
-        .args([
+    let mut zip_cmd = std::process::Command::new("powershell");
+    zip_cmd.args([
             "-NoProfile", "-Command",
             &format!(
                 "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
                 tmp_dir.join("notes").display(),
                 path,
             ),
-        ])
-        .output()
+        ]);
+    #[cfg(windows)]
+    zip_cmd.creation_flags(0x08000000);
+    let output = zip_cmd.output()
         .map_err(|e| format!("执行打包命令失败: {}", e))?;
 
     if !output.status.success() {
@@ -2802,9 +2806,11 @@ fn find_libreoffice() -> Option<std::path::PathBuf> {
         }
     }
     // PATH 中查找
-    if let Ok(output) = std::process::Command::new("soffice")
-        .arg("--version")
-        .output()
+    let mut so_cmd = std::process::Command::new("soffice");
+    so_cmd.arg("--version");
+    #[cfg(windows)]
+    so_cmd.creation_flags(0x08000000);
+    if let Ok(output) = so_cmd.output()
     {
         if output.status.success() {
             return Some(std::path::PathBuf::from("soffice"));
@@ -2821,9 +2827,11 @@ fn export_slides_png_libreoffice(
     std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {:?}: {}", out_dir, e))?;
 
     let out_str = out_dir.to_string_lossy().to_string();
-    let child = std::process::Command::new(&soffice)
-        .args(["--headless", "--convert-to", "png", "--outdir", &out_str, pptx_path])
-        .output()
+    let mut lo_cmd = std::process::Command::new(&soffice);
+    lo_cmd.args(["--headless", "--convert-to", "png", "--outdir", &out_str, pptx_path]);
+    #[cfg(windows)]
+    lo_cmd.creation_flags(0x08000000);
+    let child = lo_cmd.output()
         .map_err(|e| format!("执行 LibreOffice 失败: {}", e))?;
 
     if !child.status.success() {
