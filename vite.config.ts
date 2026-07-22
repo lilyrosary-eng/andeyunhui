@@ -67,6 +67,7 @@ export default defineConfig(() => ({
         "recorder-widget": "recorder-widget.html",
         "recorder-select": "recorder-select.html",
         "recording-border": "recording-border.html",
+        "deskpet": "deskpet.html",
       },
       output: {
         manualChunks(id: string) {

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Switch } from "@/components/ui/switch"
 import { Slider } from "@/components/ui/slider"
-import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu, Languages } from 'lucide-react'
+import { Settings, Sparkles, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, ExternalLink, Database, Archive, FileText, File, Undo2, Trash2, ChevronDown, ChevronUp, RotateCcw, Search, Ban, Eye, FolderOpen, Cpu, Languages } from 'lucide-react'
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { ModelSettings } from '@/core/settings/ModelSettings'
@@ -9,7 +9,7 @@ import { DevConsole } from '@/core/settings/DevConsole'
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { logger } from '@/lib/logger';
-import { api, type ArchiveEntry } from '@/lib/api';
+import { api, type ArchiveEntry, type PluginManifest } from '@/lib/api';
 import { useTheme } from '@/lib/ThemeProvider';
 import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
@@ -254,6 +254,41 @@ export function GlobalSettingsPanel() {
     });
   };
 
+  // ---- 桌宠显隐：与「管理拓展」共享单一可见性状态（单一事实源，避免两处开关脱节）----
+  const [deskpetVisible, setDeskpetVisible] = useState<boolean | null>(null);
+  const [deskpetManifest, setDeskpetManifest] = useState<PluginManifest | null>(null);
+  const deskpetHot = (window as unknown as { __pluginHot__?: { load: (m: PluginManifest) => Promise<void>; unload: (id: string) => void } }).__pluginHot__;
+
+  useEffect(() => {
+    let alive = true;
+    api.getInstalledPlugins().then((res) => {
+      if (!alive) return;
+      const d = (res.valid ?? []).find((p) => p.id === 'deskpet');
+      if (d) { setDeskpetManifest(d); setDeskpetVisible(d.visible !== false); }
+    }).catch(() => {});
+    const onVis = (e: Event) => {
+      const detail = (e as CustomEvent<{ id: string; visible: boolean }>).detail;
+      if (detail && detail.id === 'deskpet') setDeskpetVisible(detail.visible);
+    };
+    window.addEventListener('plugin-visibility-changed', onVis);
+    return () => { alive = false; window.removeEventListener('plugin-visibility-changed', onVis); };
+  }, []);
+
+  const toggleDeskpet = useCallback(async (val: boolean) => {
+    if (!deskpetManifest) return;
+    setDeskpetVisible(val);
+    try {
+      await api.setPluginVisibility('deskpet', val);
+      if (val) await deskpetHot?.load(deskpetManifest);
+      else deskpetHot?.unload('deskpet');
+      // 派发与「管理拓展」相同的事件，保证两处开关状态一致
+      window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id: 'deskpet', visible: val } }));
+    } catch (err) {
+      logger.log('[GlobalSettings] 桌宠显隐切换失败:', err);
+      setDeskpetVisible(!val);
+    }
+  }, [deskpetManifest, deskpetHot]);
+
   const tabs = [
     { id: 'general' as const, label: t('settings.tab.general'), icon: Settings },
     { id: 'themes' as const, label: t('settings.tab.themes'), icon: Palette },
@@ -428,6 +463,26 @@ export function GlobalSettingsPanel() {
                       />
                     </div>
                   )}
+                </div>
+              </section>
+
+              {/* 桌宠显隐：与「管理拓展」共享单一可见性状态（单一事实源） */}
+              <section>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
+                  <Sparkles size={14} />
+                  桌宠
+                </h2>
+                <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 p-4 flex justify-between items-center gap-4">
+                  <div>
+                    <span className="text-sm font-medium block">桌宠显示</span>
+                    <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">启用后桌宠常驻桌面漫步；关闭即卸载插件。</p>
+                  </div>
+                  <Switch
+                    checked={deskpetVisible ?? false}
+                    disabled={deskpetManifest === null}
+                    onCheckedChange={(val: boolean) => { void toggleDeskpet(val); }}
+                    className="data-[state=checked]:bg-[var(--element-color-raw)]"
+                  />
                 </div>
               </section>
             </div>

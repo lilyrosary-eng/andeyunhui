@@ -31,8 +31,11 @@ use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
-/// 进程内 GPU RGBA→NV12 零拷贝色彩转换（阶段二核心，见 gpu_nv12.rs）
-mod gpu_nv12;
+/// 进程内 GPU RGBA→RGBA 缩放（阶段二核心，见 gpu_nv12.rs）
+pub(crate) mod gpu_nv12;
+/// WASAPI 回环音频采集（命名管道喂给 ffmpeg，见 audio_capture.rs）
+pub(crate) mod audio_capture;
+use audio_capture::{start_audio_capture, AudioCapture, AudioFormat};
 use gpu_nv12::{GpuNv12Converter, probe_nv12};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
 
@@ -121,12 +124,17 @@ struct WgcRecorder {
     free: Arc<Mutex<Vec<Arc<Vec<u8>>>>>,
     /// 复用的 nopadding 输出缓冲，避免每帧重新分配
     scratch: Vec<u8>,
+    /// 编码输出尺寸（4K 全屏时在 GPU 内降采样到此；区域/1080p 时等于捕获尺寸）
+    out_w: u32,
+    out_h: u32,
     /// 是否启用进程内 GPU RGBA→NV12（全帧录制 + 驱动支持 Video Processor 时）
     gpu_nv12: bool,
     /// 进程内 GPU 转换器（懒初始化；None = 未初始化/不可用）
     gpu: Option<GpuNv12Converter>,
     /// GPU 转换器初始化是否曾失败（失败则不再重试，整段回退 RGBA）
     gpu_failed: bool,
+    /// 是否需要降采样（超 1080p 时恒为 true；GPU 不可用时走 CPU 双线性兜底）
+    downscale_4k: bool,
 }
 
 impl GraphicsCaptureApiHandler for WgcRecorder {
@@ -137,21 +145,26 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         Option<(u32, u32, u32, u32)>,
         Arc<Mutex<Vec<Arc<Vec<u8>>>>>,
         bool, // gpu_nv12: 是否启用进程内 GPU RGBA→NV12
+        bool, // downscale_4k: 是否需要降采样（超 1080p 时）
+        (u32, u32), // 编码输出尺寸（4K 全屏降采样目标；否则等于捕获尺寸）
     );
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (latest, stop_flag, paused, crop, free, gpu_nv12) = ctx.flags;
+        let (latest, stop_flag, paused, crop, free, gpu_nv12, downscale_4k, (out_w, out_h)) = ctx.flags;
         Ok(Self {
             latest,
             stop_flag,
             paused,
             crop,
             free,
+            out_w,
+            out_h,
             scratch: Vec::new(),
             gpu_nv12,
             gpu: None,
             gpu_failed: false,
+            downscale_4k,
         })
     }
 
@@ -182,6 +195,8 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                     frame.device_context(),
                     fw,
                     fh,
+                    self.out_w,
+                    self.out_h,
                     frame.desc().Format,
                 ) {
                     Ok(g) => self.gpu = Some(g),
@@ -220,9 +235,7 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                 None
             }
         } else {
-            // 原 RGBA 路径（区域裁剪 / 未启用 GPU 转换）
-            let buffer = frame.buffer().map_err(|e| e.to_string())?;
-            let src = buffer.as_nopadding_buffer(&mut self.scratch);
+            // 原 RGBA 路径（区域裁剪 / 未启用 GPU 转换）：缓冲从池中复用
             let mut payload = self
                 .free
                 .lock()
@@ -239,7 +252,13 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
             {
                 let p = Arc::get_mut(&mut payload).expect("刚取得的缓冲必为独占引用");
                 p.clear();
-                if let Some((cx, cy, cw, ch)) = self.crop {
+                if self.downscale_4k && self.crop.is_none() {
+                    // GPU 缩放不可用时的兜底：直接读回原生 4K RGBA（4K 全帧回读，较慢），
+                    // 由 ffmpeg 的 scale 滤镜缩到 1080p。性能不如 GPU 路径，但兼容性兜底。
+                    let buffer = frame.buffer().map_err(|e| e.to_string())?;
+                    let src = buffer.as_nopadding_buffer(&mut self.scratch);
+                    p.extend_from_slice(src);
+                } else if let Some((cx, cy, cw, ch)) = self.crop {
                     let cx = cx.min(fw);
                     let cy = cy.min(fh);
                     let cw = cw.min(fw.saturating_sub(cx));
@@ -247,6 +266,8 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                     if cw == 0 || ch == 0 {
                         return Ok(());
                     }
+                    let buffer = frame.buffer().map_err(|e| e.to_string())?;
+                    let src = buffer.as_nopadding_buffer(&mut self.scratch);
                     let row_bytes = (cw * 4) as usize;
                     p.reserve(row_bytes * ch as usize);
                     for y in cy..(cy + ch) {
@@ -257,6 +278,8 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                         }
                     }
                 } else {
+                    let buffer = frame.buffer().map_err(|e| e.to_string())?;
+                    let src = buffer.as_nopadding_buffer(&mut self.scratch);
                     p.extend_from_slice(src);
                 }
             }
@@ -297,6 +320,8 @@ struct RecordingHandle {
     /// 补上一帧），实现严格 CFR。检测到 stop_flag 后退出 → stdin 于此 drop → ffmpeg 收到 EOF
     /// 刷新编码器输出文件。
     writer_thread: Option<std::thread::JoinHandle<()>>,
+    /// 系统声音采集句柄（Rust WASAPI 回环 → 命名管道）。None 表示仅录视频。
+    audio: Option<AudioCapture>,
     stop_flag: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     start_time: SystemTime,
@@ -451,7 +476,7 @@ fn qsv_gpu_scale_ok(ffmpeg: &str) -> bool {
 /// 以 NV12 喂 ffmpeg，彻底去掉 CPU 端 sws_scale 与一半管道带宽（常态卡顿真源）。
 /// 探针用临时 D3D11 设备构建完整 Video Processor 管线并实测一次转换，避免对不支持的驱动误启用。
 static NV12_IN_PROCESS: OnceLock<bool> = OnceLock::new();
-fn nv12_in_process_supported() -> bool {
+pub(crate) fn nv12_in_process_supported() -> bool {
     *NV12_IN_PROCESS.get_or_init(|| probe_nv12(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM))
 }
 
@@ -575,7 +600,7 @@ fn ffmpeg_supports_wasapi(ffmpeg_path: &str) -> bool {
 ///   3) ffmpeg 能真正打开该设备（`-t 0.2 -f null` 实测），避免「列表有 wasapi 但本机打开失败」
 ///      仍导致整段录制失败。任一环节失败都退回 None，绝不阻断录制。
 static AUDIO_INPUT: OnceLock<Option<String>> = OnceLock::new();
-fn resolve_audio_input(ffmpeg_path: &str) -> Option<String> {
+pub(crate) fn resolve_audio_input(ffmpeg_path: &str) -> Option<String> {
     AUDIO_INPUT
         .get_or_init(|| {
             if !ffmpeg_supports_wasapi(ffmpeg_path) {
@@ -739,32 +764,56 @@ pub async fn start_recording(
         if hw.is_none() {
             fps = fps.min(30);
         }
-        // 系统声音（best-effort）：仅在 ffmpeg 支持 wasapi 且默认播放设备可被成功打开时才加入。
-        // 关键：打包的 ffmpeg 默认不含 wasapi demuxer，若无条件加 `-f wasapi` 会让 ffmpeg 直接报
-        // “Unknown input format 'wasapi'” 并异常退出（即用户遇到的「ffmpeg 编码失败（进程异常退出）」）。
-        // 故先探测能力，不支持则静默仅录视频、绝不阻断录制。
-        let audio_input = resolve_audio_input(&ffmpeg_path);
-        // 进程内 GPU RGBA→NV12 是否可用（全帧录制 + 驱动支持 Video Processor）。
-        // 若可用，捕获阶段直接在 GPU 完成色彩转换、以 NV12 喂 ffmpeg，彻底去掉 CPU 端 sws_scale
-        // 与一半管道带宽 = 消除「常态卡顿」的关键。区域录制仍走 RGBA（裁剪在 CPU 完成）。
-        let gpu_nv12 = crop.is_none() && nv12_in_process_supported();
-        let mut ffmpeg_args: Vec<String> = vec!["-y".into()];
-        if let Some(ref ain) = audio_input {
-            ffmpeg_args.extend([
-                "-f".into(),
-                "wasapi".into(),
-                "-i".into(),
-                ain.clone(),
-            ]);
-            eprintln!("[录屏] 已加入系统声音（WASAPI 回环，默认播放设备）");
+        // 系统声音（best-effort）：优先 ffmpeg 原生 wasapi 回环采集「正在播放的声音」
+        // （需打包 ffmpeg 含 wasapi demuxer，即「全量版」ffmpeg；精简版 essentials 不含，会探测失败）。
+        // 全量 ffmpeg 直接 `-f wasapi -i audio=@{设备}` 采集，最稳定。若 ffmpeg 无 wasapi（仍用精简版），
+        // 则回退到 Rust 侧 WASAPI 回环采集经命名管道喂给 ffmpeg。任一不可用均静默仅录视频，绝不阻断录制。
+        let audio_wasapi: Option<String> = resolve_audio_input(&ffmpeg_path);
+        let audio_pipe: Option<(AudioCapture, String, AudioFormat)> = if audio_wasapi.is_none() {
+            match start_audio_capture() {
+                Ok(triple) => Some(triple),
+                Err(e) => {
+                    eprintln!("[录屏] 系统声音采集不可用，仅录视频（无声音）: {e}");
+                    None
+                }
+            }
         } else {
-            eprintln!("[录屏] 当前 ffmpeg 不支持 wasapi 或设备不可用，仅录视频（无声音）");
+            None
+        };
+        if audio_wasapi.is_some() {
+            eprintln!("[录屏] 已加入系统声音（ffmpeg 原生 WASAPI 回环）");
+        } else if let Some((_c, _p, f)) = &audio_pipe {
+            eprintln!("[录屏] 已加入系统声音（Rust WASAPI 回环，命名管道；{} {}ch {}Hz）", f.sample_fmt, f.channels, f.rate);
         }
+        // 进程内 GPU RGBA→RGBA 缩放是否可用（所有支持 D3D11 渲染管线的硬件均为 true）。
+        // 若可用，捕获阶段直接在 GPU 把帧缩到 1080p 再只读回 8MB，彻底去掉 33MB 4K 读回与 CPU 缩放
+        // = 消除「常态卡顿」的关键。区域录制仍走 RGBA（裁剪在 CPU 完成）。
+        let native_w = enc_w;
+        let native_h = enc_h;
+        let downscale_4k = crop.is_none() && ((native_w as u64) * (native_h as u64) > 1920u64 * 1080u64);
+        let gpu_nv12 = crop.is_none() && downscale_4k && nv12_in_process_supported();
+        // 喂给 ffmpeg 的帧尺寸：GPU 缩放成功 → 1080p；否则喂原生 4K，由 ffmpeg 的 scale 滤镜
+        // 在编码阶段缩到 1080p（兼容兜展，较慢）。enc_w/enc_h 现表示喂给尺寸 = 最终分辨率。
+        let (feed_w, feed_h) = if downscale_4k && gpu_nv12 {
+            let mut ow = 1920u32;
+            let mut oh = (((1920.0 * native_h as f64 / native_w as f64) / 2.0).round() as u32) * 2;
+            ow &= !1;
+            oh &= !1;
+            (ow, oh)
+        } else {
+            (native_w, native_h)
+        };
+        let enc_w = feed_w;
+        let enc_h = feed_h;
+        // GPU 缩放不可用的兜底：真实录制回退到 CPU 软编码 4K→1080p（保证视频可生成、不崩溃）。
+        let need_fallback_scale = downscale_4k && !gpu_nv12;
+        let enc_hw = if need_fallback_scale { None } else { hw };
+        let mut ffmpeg_args: Vec<String> = vec!["-y".into()];
         ffmpeg_args.extend([
             "-f".into(),
             "rawvideo".into(),
             "-pix_fmt".into(),
-            (if gpu_nv12 { "nv12" } else { "rgba" }).into(),
+            "rgba".into(),
             "-s".into(),
             format!("{}x{}", enc_w, enc_h),
             // 真实时间戳（修复「加速回放 / 时长缩短」）：
@@ -782,25 +831,33 @@ pub async fn start_recording(
             "-i".into(),
             "-".into(), // 视频来自 stdin 管道（RGBA 帧）
         ]);
-        match hw {
+        // 系统声音输入（视频为第 0 路、音频为第 1 路）：
+        // 优先 ffmpeg 原生 WASAPI；否则 Rust WASAPI 采集的命名管道。
+        if let Some(ref dev) = audio_wasapi {
+            ffmpeg_args.extend([
+                "-f".into(),
+                "wasapi".into(),
+                "-i".into(),
+                dev.clone(),
+            ]);
+        } else if let Some((_cap, apath, afmt)) = &audio_pipe {
+            ffmpeg_args.extend([
+                "-f".into(),
+                afmt.sample_fmt.into(),
+                "-ar".into(),
+                afmt.rate.to_string(),
+                "-ac".into(),
+                afmt.channels.to_string(),
+                "-i".into(),
+                apath.clone(),
+            ]);
+        }
+        match enc_hw {
             Some("h264_nvenc") => {
-                // 优先 GPU 色彩转换（RGBA→NV12 走 CUDA），彻底绕开 CPU 端 sws_scale 瓶颈：
-                // 高负载下 CPU 不再被色彩转换占满，ffmpeg 恒定跟上管道 → 无冻结/卡顿。
-                // 探测或驱动不支持时（如老卡 / 驱动限制）自动回退 CPU 软转换（等价原逻辑），质量不降级。
-                if gpu_nv12 {
-                    // 进程内已转 NV12，直接喂 nvenc（nvenc 自行上传 GPU 编码），无需 hwupload/scale_cuda
-                    ffmpeg_args.extend([
-                        "-c:v".into(),
-                        "h264_nvenc".into(),
-                        "-preset".into(),
-                        "p1".into(),
-                        "-rc".into(),
-                        "constqp".into(),
-                        "-qp".into(),
-                        "23".into(),
-                    ]);
-                    eprintln!("[录屏] 使用 h264_nvenc + 进程内 GPU RGBA→NV12（零 CPU 色彩转换）");
-                } else if nvenc_gpu_scale_ok(&ffmpeg_path) {
+                // 进程内已在 GPU 把帧缩到 1080p（RGBA）。这里把 RGBA→NV12 交给 CUDA 完成，
+                // 彻底绕开 CPU 端 sws_scale 瓶颈：高负载下 ffmpeg 恒定跟上管道 → 无冻结/卡顿。
+                // 探测或驱动不支持时自动回退 CPU 软转换（等价原逻辑），质量不降级。
+                if nvenc_gpu_scale_ok(&ffmpeg_path) {
                     ffmpeg_args.extend([
                         "-vf".into(),
                         "hwupload_cuda,scale_cuda=format=nv12".into(),
@@ -831,22 +888,9 @@ pub async fn start_recording(
                 }
             }
             Some("h264_qsv") => {
-                // 优先 GPU 色彩转换（RGBA→NV12 走 Intel 核显 / QSV），彻底绕开 CPU 端 sws_scale 瓶颈：
-                // 核显机（如 12900HX）即便 h264_qsv 硬件编码，RGBA→YUV 仍在 CPU 完成 → 游戏/大型软件
-                // 高负载 CPU 吃紧 → ffmpeg 跟不上 → 管道反压 writer → 补帧转成冻结。上传 qsv 后由
-                // vpp_qsv 在 GPU 做色彩转换，CPU 近乎零开销。探测或驱动不支持时自动回退 CPU 软转换
-                // （等价原逻辑），质量不降级。
-                if gpu_nv12 {
-                    ffmpeg_args.extend([
-                        "-c:v".into(),
-                        "h264_qsv".into(),
-                        "-preset".into(),
-                        "veryfast".into(),
-                        "-global_quality".into(),
-                        "25".into(),
-                    ]);
-                    eprintln!("[录屏] 使用 h264_qsv + 进程内 GPU RGBA→NV12（零 CPU 色彩转换）");
-                } else if qsv_gpu_scale_ok(&ffmpeg_path) {
+                // 进程内已在 GPU 把帧缩到 1080p（RGBA）。RGBA→NV12 交给 Intel 核显 / QSV 完成，
+                // CPU 近乎零开销。探测或驱动不支持时自动回退 CPU 软转换（等价原逻辑），质量不降级。
+                if qsv_gpu_scale_ok(&ffmpeg_path) {
                     ffmpeg_args.extend([
                         "-vf".into(),
                         "hwupload=extra_hw_frames=64,vpp_qsv=format=nv12".into(),
@@ -911,15 +955,14 @@ pub async fn start_recording(
                 }
             }
         }
-        // 音视频映射：视频取自管道输入，音频取自 WASAPI 回环（若有）。
-        if audio_input.is_some() {
-            // 视频为第 1 路输入（-i -）、音频为第 0 路输入（wasapi）；
+        // 音视频映射：视频取自 stdin 管道（第 0 路输入），音频取自 WASAPI 或命名管道（第 1 路输入，若有）。
+        if audio_wasapi.is_some() || audio_pipe.is_some() {
             // -shortest 保证视频管道 EOF 后 ffmpeg 即退出，不被实时音频输入挂起。
             ffmpeg_args.extend([
                 "-map".into(),
-                "1:v:0".into(),
+                "0:v:0".into(),
                 "-map".into(),
-                "0:a:0".into(),
+                "1:a:0".into(),
                 "-c:a".into(),
                 "aac".into(),
                 "-b:a".into(),
@@ -1057,7 +1100,7 @@ pub async fn start_recording(
                 MinimumUpdateIntervalSettings::Custom(cap_interval),
                 DirtyRegionSettings::Default,
                 ColorFormat::Rgba8,
-                (latest_for_capture, stop_for_capture, paused_for_capture, crop, free.clone(), gpu_nv12),
+                (latest_for_capture, stop_for_capture, paused_for_capture, crop, free.clone(), gpu_nv12, downscale_4k, (enc_w, enc_h)),
             );
             if let Err(e) = WgcRecorder::start(settings) {
                 eprintln!("[录屏] WGC 捕获异常: {}", e);
@@ -1065,11 +1108,15 @@ pub async fn start_recording(
             // 捕获结束：WgcRecorder 在此 drop
         });
 
+        // 取出 Rust 音频采集句柄（仅命名管道路径有；ffmpeg 原生 WASAPI 无需此句柄），
+        // 移入全局录屏句柄，停止录制时一并关闭管道/线程。
+        let audio_cap = audio_pipe.map(|(cap, _p, _f)| cap);
         // 保存录屏句柄
         *RECORDING.lock().unwrap() = Some(RecordingHandle {
             ffmpeg_child: Some(child),
             capture_thread: Some(capture_thread),
             writer_thread: Some(writer_thread),
+            audio: audio_cap,
             stop_flag,
             paused,
             start_time: SystemTime::now(),
@@ -1148,6 +1195,9 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
 
         let output_path = handle.output_path.clone();
         let mut child = handle.ffmpeg_child.take().ok_or("ffmpeg 进程丢失")?;
+        // 取出音频采集句柄：录制结束（ffmpeg 退出）后再关闭管道/线程，
+        // 不可提前关闭——否则 -shortest 会以「音频 EOF」为最短输入截断视频。
+        let audio_cap = handle.audio.take();
 
         // 4. 立即广播「保存中」占位（前端显示「录屏文件保存中」，不静默等待）。
         //    用 &output_path 借用，避免把 output_path 移入 json! 宏（后续还需返回）。
@@ -1202,6 +1252,10 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
                     let _ = app2.emit("recording-stopped", "");
                     let _ = app2.emit("recording-error", format!("等待 ffmpeg 结束失败: {}", e));
                 }
+            }
+            // 录制结束（ffmpeg 已退出或超时）：关闭系统声音采集管道与线程，释放 COM/句柄。
+            if let Some(mut a) = audio_cap {
+                a.stop();
             }
         });
 

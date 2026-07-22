@@ -432,10 +432,23 @@ async function runSelfTest() {
     void setWidgetSize(320, 168);
     const r = await invoke<any>("recording_self_test", { durationSecs: 3 });
     const kb = (r.outputBytes || 0) / 1024;
+    const capLine = r.downscale4k
+      ? `捕获尺寸: ${r.captureW}x${r.captureH} → 输出 ${r.outW}x${r.outH}（已降采样到 1080p，根除回读卡顿）`
+      : `捕获尺寸: ${r.captureW}x${r.captureH}`;
+    const gpuLine = r.downscale4k
+      ? (r.gpuNv12
+          ? `处理路径: GPU 渲染管线缩放 RGBA→1080p（读回仅 8MB，根除卡顿）`
+          : `处理路径: CPU 4K 读回兜底（GPU 缩放不可用，较慢）`)
+      : `处理路径: CPU RGBA 全帧`;
+    const audioLine = r.audio
+      ? `音频: 系统声音 WASAPI 回环（${r.audioFmt ?? "已采集"}）`
+      : `音频: 无（采集不可用，仅视频）`;
     const summary =
       `ffmpeg: ${r.ffmpegPath}\n` +
       `编码器: ${r.encoder ?? "libx264(软编码)"}\n` +
-      `捕获尺寸: ${r.captureW}x${r.captureH}\n` +
+      `${capLine}\n` +
+      `${gpuLine}\n` +
+      `${audioLine}\n` +
       `交付帧数: ${r.framesCaptured}\n` +
       `输出体积: ${kb | 0} KB\n` +
       `ffmpeg 退出正常: ${r.ffmpegExitedOk}\n` +
