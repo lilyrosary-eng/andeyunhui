@@ -190,7 +190,7 @@ impl GpuNv12Converter {
                 pInputSurfaceRight: ManuallyDrop::new(None),
                 ppFutureSurfacesRight: std::ptr::null_mut(),
             };
-            let streams = [stream];
+            let mut streams = [stream];
             self.video_ctx.VideoProcessorBlt(
                 Some(&self.video_processor),
                 Some(&self.output_view),
