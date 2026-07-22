@@ -31,6 +31,10 @@ use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
+/// 进程内 GPU RGBA→NV12 零拷贝色彩转换（阶段二核心，见 gpu_nv12.rs）
+mod gpu_nv12;
+use gpu_nv12::{GpuNv12Converter, probe_nv12};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
 
 /// 录屏控制台窗口标签
 pub const RECORDER_WINDOW_LABEL: &str = "recorder-widget";
@@ -117,6 +121,12 @@ struct WgcRecorder {
     free: Arc<Mutex<Vec<Arc<Vec<u8>>>>>,
     /// 复用的 nopadding 输出缓冲，避免每帧重新分配
     scratch: Vec<u8>,
+    /// 是否启用进程内 GPU RGBA→NV12（全帧录制 + 驱动支持 Video Processor 时）
+    gpu_nv12: bool,
+    /// 进程内 GPU 转换器（懒初始化；None = 未初始化/不可用）
+    gpu: Option<GpuNv12Converter>,
+    /// GPU 转换器初始化是否曾失败（失败则不再重试，整段回退 RGBA）
+    gpu_failed: bool,
 }
 
 impl GraphicsCaptureApiHandler for WgcRecorder {
@@ -126,11 +136,12 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         Arc<AtomicBool>,
         Option<(u32, u32, u32, u32)>,
         Arc<Mutex<Vec<Arc<Vec<u8>>>>>,
+        bool, // gpu_nv12: 是否启用进程内 GPU RGBA→NV12
     );
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (latest, stop_flag, paused, crop, free) = ctx.flags;
+        let (latest, stop_flag, paused, crop, free, gpu_nv12) = ctx.flags;
         Ok(Self {
             latest,
             stop_flag,
@@ -138,6 +149,9 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
             crop,
             free,
             scratch: Vec::new(),
+            gpu_nv12,
+            gpu: None,
+            gpu_failed: false,
         })
     }
 
@@ -155,70 +169,118 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         if self.paused.load(Ordering::SeqCst) {
             return Ok(());
         }
-        // 取帧数据（先获取尺寸再 borrow buffer，避免 mutable/immutable 借用冲突）
         let fw = frame.width();
         let fh = frame.height();
-        let buffer = frame.buffer().map_err(|e| e.to_string())?;
-        // 复用 scratch（nopadding 输出缓冲），避免每帧 ~33MB 分配抖动
-        let src = buffer.as_nopadding_buffer(&mut self.scratch);
 
-        // 从对象池取一个可复用的帧缓冲（零拷贝回收，避免每帧分配 ~33MB 触发分配器周期性停顿）。
-        // 若该缓冲仍被节拍器持有（Arc 引用计数 >1），则临时新建，绝不损坏数据。
-        let mut payload = self
-            .free
-            .lock()
-            .ok()
-            .and_then(|mut fl| fl.pop())
-            .map(|mut a| {
-                if Arc::get_mut(&mut a).is_some() {
-                    a
-                } else {
-                    Arc::new(Vec::new())
-                }
-            })
-            .unwrap_or_else(|| Arc::new(Vec::new()));
-        {
-            let p = Arc::get_mut(&mut payload).expect("刚取得的缓冲必为独占引用");
-            p.clear();
-            // 组装该帧字节（裁剪或全帧）直接写入复用缓冲
-            if let Some((cx, cy, cw, ch)) = self.crop {
-                let cx = cx.min(fw);
-                let cy = cy.min(fh);
-                let cw = cw.min(fw.saturating_sub(cx));
-                let ch = ch.min(fh.saturating_sub(cy));
-                if cw == 0 || ch == 0 {
-                    return Ok(());
-                }
-                let row_bytes = (cw * 4) as usize;
-                p.reserve(row_bytes * ch as usize);
-                for y in cy..(cy + ch) {
-                    let start = ((y * fw + cx) * 4) as usize;
-                    let end = start + row_bytes;
-                    if end <= src.len() {
-                        p.extend_from_slice(&src[start..end]);
+        // 进程内 GPU RGBA→NV12（仅全帧 + 已探测驱动支持）：在捕获同 GPU 上直接完成色彩转换，
+        // 跳过 CPU readback 后的逐行拷贝 + ffmpeg 的 sws_scale，是消除「常态卡顿」的 CPU 瓶颈关键。
+        // 失败（极少见，驱动不支持时探针已预先排除）则本帧不写，避免 RGBA 错格式损坏视频。
+        let payload: Option<Arc<Vec<u8>>> = if self.gpu_nv12 {
+            if self.gpu.is_none() && !self.gpu_failed {
+                match GpuNv12Converter::new(
+                    frame.device(),
+                    frame.device_context(),
+                    fw,
+                    fh,
+                    frame.desc().Format,
+                ) {
+                    Ok(g) => self.gpu = Some(g),
+                    Err(e) => {
+                        self.gpu_failed = true;
+                        eprintln!("[录屏] GPU NV12 转换器初始化失败，停止 GPU 路径: {e}");
                     }
                 }
-            } else {
-                p.extend_from_slice(src);
             }
-        }
+            if let Some(gpu) = &self.gpu {
+                let mut buf = self
+                    .free
+                    .lock()
+                    .ok()
+                    .and_then(|mut fl| fl.pop())
+                    .map(|mut a| {
+                        if Arc::get_mut(&mut a).is_some() {
+                            a
+                        } else {
+                            Arc::new(Vec::new())
+                        }
+                    })
+                    .unwrap_or_else(|| Arc::new(Vec::new()));
+                let ok = {
+                    let p = Arc::get_mut(&mut buf).expect("刚取得的缓冲必为独占引用");
+                    p.clear();
+                    gpu.convert(frame.as_raw_texture(), p).is_ok()
+                };
+                if ok {
+                    Some(buf)
+                } else {
+                    eprintln!("[录屏] GPU NV12 转换失败，本帧跳过");
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            // 原 RGBA 路径（区域裁剪 / 未启用 GPU 转换）
+            let buffer = frame.buffer().map_err(|e| e.to_string())?;
+            let src = buffer.as_nopadding_buffer(&mut self.scratch);
+            let mut payload = self
+                .free
+                .lock()
+                .ok()
+                .and_then(|mut fl| fl.pop())
+                .map(|mut a| {
+                    if Arc::get_mut(&mut a).is_some() {
+                        a
+                    } else {
+                        Arc::new(Vec::new())
+                    }
+                })
+                .unwrap_or_else(|| Arc::new(Vec::new()));
+            {
+                let p = Arc::get_mut(&mut payload).expect("刚取得的缓冲必为独占引用");
+                p.clear();
+                if let Some((cx, cy, cw, ch)) = self.crop {
+                    let cx = cx.min(fw);
+                    let cy = cy.min(fh);
+                    let cw = cw.min(fw.saturating_sub(cx));
+                    let ch = ch.min(fh.saturating_sub(cy));
+                    if cw == 0 || ch == 0 {
+                        return Ok(());
+                    }
+                    let row_bytes = (cw * 4) as usize;
+                    p.reserve(row_bytes * ch as usize);
+                    for y in cy..(cy + ch) {
+                        let start = ((y * fw + cx) * 4) as usize;
+                        let end = start + row_bytes;
+                        if end <= src.len() {
+                            p.extend_from_slice(&src[start..end]);
+                        }
+                    }
+                } else {
+                    p.extend_from_slice(src);
+                }
+            }
+            Some(payload)
+        };
 
         // 非阻塞写入最新帧槽（Arc 覆盖，瞬时返回；绝不阻塞回调 → 不耗尽帧池、不拖垮 DWM 合成）。
         // 记录呈现时间 ts（≈ WGC SystemRelativeTime），供 pacer 按真实呈现节奏降采样/打点。
         // 旧帧缓冲（若节拍器已不再持有）回收进对象池循环复用 → 录制全程零额外分配。
-        if let Ok(mut slot) = self.latest.lock() {
-            let old = std::mem::replace(
-                &mut *slot,
-                Some(CapturedFrame {
-                    data: payload,
-                    ts: std::time::Instant::now(),
-                }),
-            );
-            drop(slot);
-            if let Some(o) = old {
-                if let Ok(mut fl) = self.free.lock() {
-                    if fl.len() < 4 {
-                        fl.push(o.data);
+        if let Some(payload) = payload {
+            if let Ok(mut slot) = self.latest.lock() {
+                let old = std::mem::replace(
+                    &mut *slot,
+                    Some(CapturedFrame {
+                        data: payload,
+                        ts: std::time::Instant::now(),
+                    }),
+                );
+                drop(slot);
+                if let Some(o) = old {
+                    if let Ok(mut fl) = self.free.lock() {
+                        if fl.len() < 4 {
+                            fl.push(o.data);
+                        }
                     }
                 }
             }
@@ -382,6 +444,15 @@ fn qsv_gpu_scale_ok(ffmpeg: &str) -> bool {
             Err(_) => false,
         }
     })
+}
+
+/// 进程内 GPU RGBA→NV12（D3D11 Video Processor）能力探针，结果进程级缓存。
+/// 仅全帧录制且驱动支持时在 start_capture 启用；启用后捕获阶段直接在 GPU 完成色彩转换，
+/// 以 NV12 喂 ffmpeg，彻底去掉 CPU 端 sws_scale 与一半管道带宽（常态卡顿真源）。
+/// 探针用临时 D3D11 设备构建完整 Video Processor 管线并实测一次转换，避免对不支持的驱动误启用。
+static NV12_IN_PROCESS: OnceLock<bool> = OnceLock::new();
+fn nv12_in_process_supported() -> bool {
+    *NV12_IN_PROCESS.get_or_init(|| probe_nv12(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM))
 }
 
 /// 编码器是否在 ffmpeg 的 `-encoders` 列表中出现。
@@ -673,6 +744,10 @@ pub async fn start_recording(
         // “Unknown input format 'wasapi'” 并异常退出（即用户遇到的「ffmpeg 编码失败（进程异常退出）」）。
         // 故先探测能力，不支持则静默仅录视频、绝不阻断录制。
         let audio_input = resolve_audio_input(&ffmpeg_path);
+        // 进程内 GPU RGBA→NV12 是否可用（全帧录制 + 驱动支持 Video Processor）。
+        // 若可用，捕获阶段直接在 GPU 完成色彩转换、以 NV12 喂 ffmpeg，彻底去掉 CPU 端 sws_scale
+        // 与一半管道带宽 = 消除「常态卡顿」的关键。区域录制仍走 RGBA（裁剪在 CPU 完成）。
+        let gpu_nv12 = crop.is_none() && nv12_in_process_supported();
         let mut ffmpeg_args: Vec<String> = vec!["-y".into()];
         if let Some(ref ain) = audio_input {
             ffmpeg_args.extend([
@@ -689,7 +764,7 @@ pub async fn start_recording(
             "-f".into(),
             "rawvideo".into(),
             "-pix_fmt".into(),
-            "rgba".into(),
+            (if gpu_nv12 { "nv12" } else { "rgba" }).into(),
             "-s".into(),
             format!("{}x{}", enc_w, enc_h),
             // 真实时间戳（修复「加速回放 / 时长缩短」）：
@@ -712,7 +787,20 @@ pub async fn start_recording(
                 // 优先 GPU 色彩转换（RGBA→NV12 走 CUDA），彻底绕开 CPU 端 sws_scale 瓶颈：
                 // 高负载下 CPU 不再被色彩转换占满，ffmpeg 恒定跟上管道 → 无冻结/卡顿。
                 // 探测或驱动不支持时（如老卡 / 驱动限制）自动回退 CPU 软转换（等价原逻辑），质量不降级。
-                if nvenc_gpu_scale_ok(&ffmpeg_path) {
+                if gpu_nv12 {
+                    // 进程内已转 NV12，直接喂 nvenc（nvenc 自行上传 GPU 编码），无需 hwupload/scale_cuda
+                    ffmpeg_args.extend([
+                        "-c:v".into(),
+                        "h264_nvenc".into(),
+                        "-preset".into(),
+                        "p1".into(),
+                        "-rc".into(),
+                        "constqp".into(),
+                        "-qp".into(),
+                        "23".into(),
+                    ]);
+                    eprintln!("[录屏] 使用 h264_nvenc + 进程内 GPU RGBA→NV12（零 CPU 色彩转换）");
+                } else if nvenc_gpu_scale_ok(&ffmpeg_path) {
                     ffmpeg_args.extend([
                         "-vf".into(),
                         "hwupload_cuda,scale_cuda=format=nv12".into(),
@@ -748,7 +836,17 @@ pub async fn start_recording(
                 // 高负载 CPU 吃紧 → ffmpeg 跟不上 → 管道反压 writer → 补帧转成冻结。上传 qsv 后由
                 // vpp_qsv 在 GPU 做色彩转换，CPU 近乎零开销。探测或驱动不支持时自动回退 CPU 软转换
                 // （等价原逻辑），质量不降级。
-                if qsv_gpu_scale_ok(&ffmpeg_path) {
+                if gpu_nv12 {
+                    ffmpeg_args.extend([
+                        "-c:v".into(),
+                        "h264_qsv".into(),
+                        "-preset".into(),
+                        "veryfast".into(),
+                        "-global_quality".into(),
+                        "25".into(),
+                    ]);
+                    eprintln!("[录屏] 使用 h264_qsv + 进程内 GPU RGBA→NV12（零 CPU 色彩转换）");
+                } else if qsv_gpu_scale_ok(&ffmpeg_path) {
                     ffmpeg_args.extend([
                         "-vf".into(),
                         "hwupload=extra_hw_frames=64,vpp_qsv=format=nv12".into(),
@@ -959,7 +1057,7 @@ pub async fn start_recording(
                 MinimumUpdateIntervalSettings::Custom(cap_interval),
                 DirtyRegionSettings::Default,
                 ColorFormat::Rgba8,
-                (latest_for_capture, stop_for_capture, paused_for_capture, crop, free.clone()),
+                (latest_for_capture, stop_for_capture, paused_for_capture, crop, free.clone(), gpu_nv12),
             );
             if let Err(e) = WgcRecorder::start(settings) {
                 eprintln!("[录屏] WGC 捕获异常: {}", e);
