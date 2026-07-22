@@ -47,19 +47,26 @@ pub struct AudioCapture {
     stop: Arc<AtomicBool>,
     /// 命名管道句柄以 usize 保存以满足 Send（HANDLE 本身不 Send）。
     handle: usize,
-    thread: Option<JoinHandle<()>>,
+    /// 采集线程：初始化 WASAPI 回环并把「真实音频 + 静音补帧」推入通道（不碰 WriteFile）。
+    capture_thread: Option<JoinHandle<()>>,
+    /// 写入线程：连接管道后按 ffmpeg 读取节奏从通道取数据 WriteFile（被管道门控只阻塞本线程）。
+    writer: Option<JoinHandle<()>>,
 }
 
 impl AudioCapture {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        // 关闭管道句柄会令仍在阻塞 ConnectNamedPipe / WriteFile 的采集线程立即出错返回，从而退出。
+        // 关闭管道句柄会令仍在阻塞 ConnectNamedPipe / WriteFile 的写入线程立即出错返回，从而退出；
+        // 采集线程在下一轮检测到 stop_flag 后退出并 drop 通道发送端 → 写入线程排空后退出。
         unsafe {
             let h = HANDLE(self.handle as *mut std::ffi::c_void);
             let _ = DisconnectNamedPipe(h);
             let _ = windows::Win32::Foundation::CloseHandle(h);
         }
-        if let Some(t) = self.thread.take() {
+        if let Some(t) = self.capture_thread.take() {
+            let _ = t.join();
+        }
+        if let Some(t) = self.writer.take() {
             let _ = t.join();
         }
     }
@@ -97,30 +104,57 @@ pub fn start_audio_capture() -> Result<(AudioCapture, String, AudioFormat), Stri
     let handle_raw = handle.0 as usize;
 
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel::<Result<AudioFormat, String>>();
-    let stop2 = stop.clone();
-        let thread = thread::spawn(move || {
-        let res = capture_entry(handle_raw, stop2, tx);
-        if res.is_err() {
-            // 已通过 tx 回传过错误；此处无需再处理。
+    // 采集线程把「真实音频 + 静音补帧」推入 data_tx；写入线程从 data_rx 取数据 WriteFile 到管道。
+    // 两线程解耦：写入线程被 ffmpeg 读管道门控（WriteFile 阻塞）时，采集线程时间轴不受影响，
+    // 从根本上杜绝「WriteFile 阻塞→墙钟照走→恢复后把真实声音段用静音填掉」导致的几乎无声/卡顿。
+    let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>();
+    let (fmt_tx, fmt_rx) = mpsc::channel::<Result<AudioFormat, String>>();
+
+    // 写入线程：连上管道后按 ffmpeg 读取节奏写；未连上时阻塞在 ConnectNamedPipe，stop 关句柄即解除。
+    let w_handle = handle_raw;
+    let w_stop = stop.clone();
+    let writer = thread::spawn(move || {
+        unsafe {
+            if ConnectNamedPipe(HANDLE(w_handle as *mut std::ffi::c_void), None).is_err() {
+                return; // ffmpeg 未连接（音频未启用 / 录制异常）→ 直接退出
+            }
+            while let Ok(buf) = data_rx.recv() {
+                if w_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let mut written: u32 = 0;
+                if WriteFile(HANDLE(w_handle as *mut std::ffi::c_void), Some(&buf), Some(&mut written), None).is_err() {
+                    break; // ffmpeg 退出 / 管道断开
+                }
+            }
         }
     });
 
-    match rx.recv() {
+    // 采集线程：初始化 WASAPI 回环并把音频推入通道；格式经 fmt_tx 回传调用方。
+    let c_stop = stop.clone();
+    let capture_thread = thread::spawn(move || {
+        capture_loop(c_stop, data_tx, fmt_tx);
+    });
+
+    match fmt_rx.recv() {
         Ok(Ok(fmt)) => Ok((
             AudioCapture {
                 stop,
                 handle: handle_raw,
-                thread: Some(thread),
+                capture_thread: Some(capture_thread),
+                writer: Some(writer),
             },
             pipe_path,
             fmt,
         )),
         Ok(Err(e)) => {
+            // 初始化失败：关闭句柄解除写入线程的 ConnectNamedPipe 阻塞并回收两线程。
             unsafe {
+                let _ = DisconnectNamedPipe(HANDLE(handle_raw as *mut std::ffi::c_void));
                 let _ = windows::Win32::Foundation::CloseHandle(HANDLE(handle_raw as *mut std::ffi::c_void));
             }
-            let _ = thread.join();
+            let _ = writer.join();
+            let _ = capture_thread.join();
             Err(e)
         }
         Err(_) => {
@@ -170,98 +204,99 @@ fn init_audio() -> Result<(IAudioClient, IAudioCaptureClient, AudioFormat), Stri
     }
 }
 
-fn capture_entry(
-    handle_raw: usize,
+/// 采集线程主体：初始化 WASAPI 回环后，按墙钟把「真实音频 + 静音补帧」推入 data_tx。
+/// 不碰 WriteFile / 管道：时间轴由「推入通道的字节（意图）」驱动，而非 WriteFile 实际写出量，
+/// 故即便写入线程被 ffmpeg 读管道门控（慢编码器 qsv 导致），采集时间轴也绝不被拖歪——
+/// 这是根治「几乎无声 / 偶尔卡一下」的关键（与视频 pacer/consumer 解耦同源）。
+fn capture_loop(
     stop: Arc<AtomicBool>,
-    tx: mpsc::Sender<Result<AudioFormat, String>>,
-) -> Result<AudioFormat, String> {
-    let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
-    // 阶段一：初始化失败 → 把真实错误经 tx 回传（不再让 tx 随 `?` 提前 drop 而丢失原因）。
+    data_tx: mpsc::Sender<Vec<u8>>,
+    fmt_tx: mpsc::Sender<Result<AudioFormat, String>>,
+) {
+    unsafe {
+    // 阶段一：初始化失败 → 把真实错误经 fmt_tx 回传（不再让 tx 随 `?` 提前 drop 而丢失原因）。
     let (client, capture, fmt) = match init_audio() {
         Ok(t) => t,
         Err(e) => {
-            let _ = tx.send(Err(e));
-            return Err("音频初始化失败".into());
+            let _ = fmt_tx.send(Err(e));
+            return;
         }
     };
-    // 先把格式回传给调用方（调用方据此拼 ffmpeg 音频输入参数），再阻塞等待 ffmpeg 连接管道。
-    if tx.send(Ok(fmt)).is_err() {
-        let _ = unsafe { client.Stop() };
-        return Err("音频格式回传失败".into());
-    }
     let block_align = (fmt.block_align as usize).max(1);
     let bytes_per_sec = fmt.rate as u64 * block_align as u64;
-    unsafe {
-        if ConnectNamedPipe(handle, None).is_err() {
-            let _ = client.Stop();
-            return Err("ConnectNamedPipe 失败（ffmpeg 未连接音频管道）".into());
+    // 先把格式回传给调用方（调用方据此拼 ffmpeg 音频输入参数），再进入采集循环。
+    if fmt_tx.send(Ok(fmt)).is_err() {
+        let _ = unsafe { client.Stop() };
+        return;
+    }
+    let mut real_bytes: u64 = 0;
+    let start = std::time::Instant::now();
+    let mut timeline: u64 = 0; // 已推入通道的字节数 = 音频时间轴（独立于 WriteFile 实际写出）
+    // 首包：先推一小段静音（~20ms）占位，确保 ffmpeg 一连接就有数据可读、尽早进入编码循环。
+    {
+        let mut primer_len = (bytes_per_sec as usize) / 50;
+        primer_len -= primer_len % block_align;
+        if primer_len > 0 {
+            let _ = data_tx.send(vec![0u8; primer_len]);
+            timeline += primer_len as u64;
         }
-        // 关键根治（2026-07-22，经 ffmpeg 受控实验闭环确认）：WASAPI 回环在「系统静音 / 无音频播放」
-        // 时 GetBuffer 返回 0 帧、不产生任何采集包 → 命名管道断流。ffmpeg 双输入（视频 stdin + 音频管道）
-        // 会阻塞在音频读上、不排空视频 stdin，与视频写线程互相死锁 → 卡在 "Stream mapping" 后 0 帧、
-        // 输出 0KB（这正是自测/真实录制反复失败的真正根因；文件音频恒有数据故实验能出片）。
-        // 修法：按墙钟持续补静音，让音频流恒定、实时、连续，ffmpeg 永不饿死，A/V 也据此对齐。
-        let start = std::time::Instant::now();
-        let mut written_bytes: u64 = 0;
-        // 首包：连上管道后立刻写一小段静音（~20ms），确保 ffmpeg 立即读到数据、尽早进入编码循环。
-        {
-            let mut primer_len = (bytes_per_sec as usize) / 50;
-            primer_len -= primer_len % block_align;
-            if primer_len > 0 {
-                let primer = vec![0u8; primer_len];
-                let mut w: u32 = 0;
-                let _ = WriteFile(handle, Some(&primer), Some(&mut w), None);
-                written_bytes += primer_len as u64;
-            }
-        }
-        while !stop.load(Ordering::SeqCst) {
-            // 尽量排空 WASAPI 当前所有可用采集包（一次可能有多包）。
-            loop {
-                let mut data: *mut u8 = std::ptr::null_mut();
-                let mut frames: u32 = 0;
-                let mut flags: u32 = 0;
-                if capture
-                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
-                    .is_ok()
-                {
-                    if frames == 0 {
-                        let _ = capture.ReleaseBuffer(0);
-                        break;
-                    }
-                    let bytes = (frames as usize) * block_align;
-                    let silent = (flags & 0x2) != 0; // AUDCLNT_BUFFERFLAGS_SILENT：数据无效，须补零
-                    let mut written: u32 = 0;
-                    if silent || data.is_null() {
-                        let zeros = vec![0u8; bytes];
-                        let _ = WriteFile(handle, Some(&zeros), Some(&mut written), None);
-                    } else {
-                        let slice = std::slice::from_raw_parts(data, bytes);
-                        let _ = WriteFile(handle, Some(slice), Some(&mut written), None);
-                    }
-                    written_bytes += bytes as u64;
-                    let _ = capture.ReleaseBuffer(frames);
-                } else {
+    }
+    while !stop.load(Ordering::SeqCst) {
+        // 尽量排空 WASAPI 当前所有可用采集包（一次可能有多包）。
+        loop {
+            let mut data: *mut u8 = std::ptr::null_mut();
+            let mut frames: u32 = 0;
+            let mut flags: u32 = 0;
+            if capture
+                .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                .is_ok()
+            {
+                if frames == 0 {
+                    let _ = capture.ReleaseBuffer(0);
                     break;
                 }
-            }
-            // 按墙钟补足静音：期望字节 = 采样率×块对齐×已过秒；不足部分（静音期）用静音填平。
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            let expected = bytes_per_sec.saturating_mul(elapsed_ms) / 1000;
-            if expected > written_bytes {
-                let mut gap = (expected - written_bytes) as usize;
-                gap -= gap % block_align; // 对齐整帧，避免半帧杂音
-                if gap > 0 {
-                    let zeros = vec![0u8; gap];
-                    let mut w: u32 = 0;
-                    let _ = WriteFile(handle, Some(&zeros), Some(&mut w), None);
-                    written_bytes += gap as u64;
+                let bytes = (frames as usize) * block_align;
+                let silent = (flags & 0x2) != 0; // AUDCLNT_BUFFERFLAGS_SILENT：数据无效，须补零
+                if silent || data.is_null() {
+                    let zeros = vec![0u8; bytes];
+                    let _ = data_tx.send(zeros);
+                } else {
+                    let slice = std::slice::from_raw_parts(data, bytes);
+                    let _ = data_tx.send(slice.to_vec());
+                    real_bytes += bytes as u64;
                 }
+                timeline += bytes as u64;
+                let _ = capture.ReleaseBuffer(frames);
+            } else {
+                break;
             }
-            thread::sleep(Duration::from_millis(10));
         }
-        let _ = client.Stop();
+        // 按墙钟补足静音：期望字节 = 采样率×块对齐×已过秒；不足部分（静音期）用静音填平。
+        // 由于 timeline 由「推入通道字节」驱动（与 WriteFile 是否阻塞无关），这段静音只会补在真正的
+        // 静音期，不会因写入线程被门控而把真实声音段误填成静音。
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let expected = bytes_per_sec.saturating_mul(elapsed_ms) / 1000;
+        if expected > timeline {
+            let mut gap = (expected - timeline) as usize;
+            gap -= gap % block_align; // 对齐整帧，避免半帧杂音
+            if gap > 0 {
+                let zeros = vec![0u8; gap];
+                let _ = data_tx.send(zeros);
+                timeline += gap as u64;
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
     }
-    Ok(fmt)
+    let _ = client.Stop();
+    // data_tx 于此作用域 drop → 写入线程收完剩余数据后退出
+    eprintln!(
+        "[音频] 采集结束：真实音频 {:.0} KiB / 总推流 {:.0} KiB（≈{:.1}s，静音补帧 {:.0} KiB）",
+        real_bytes as f64 / 1024.0,
+        timeline as f64 / 1024.0,
+        timeline as f64 / bytes_per_sec as f64,
+        (timeline - real_bytes) as f64 / 1024.0
+    );
+    }
 }
 
 /// 解析 WAVEFORMATEX（含 WAVEFORMATEXTENSIBLE）为 ffmpeg 可用的 PCM 格式描述。
