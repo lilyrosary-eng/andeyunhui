@@ -112,6 +112,13 @@ function OverlayApp() {
       loadShot(buildMeta(event.payload));
     });
 
+    // 快路径③：后台枚举完成的窗口列表 → 仅补充 data.windows（不影响已注入的冻结图 / 选区交互），
+    // 使鼠标悬停窗口高亮立即可用，同时避免 list_windows 同步阻塞覆盖窗显示（截图启动卡顿根因）。
+    const p3 = listen("screenshot-windows", (event: any) => {
+      const wins = event.payload?.windows || [];
+      setData((prev) => (prev ? { ...prev, windows: wins } : prev));
+    });
+
     // 兜底路径：轮询 peek_screenshot。打包版 WebView2 偶发丢失 push 事件时，
     // 只要 session 增大且尚未注入冻结图，即主动拉取渲染，根治「只有透明遮罩、无实际功能」。
     let initialized = false;
@@ -159,6 +166,7 @@ function OverlayApp() {
       window.clearInterval(poll);
       p1.then((un) => un());
       p2.then((un) => un());
+      p3.then((un) => un());
     };
   }, [handleClose]);
 

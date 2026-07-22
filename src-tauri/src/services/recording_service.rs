@@ -5,8 +5,9 @@
 //! - 编码：系统 ffmpeg 管道编码（H.264 + MP4），最成熟稳定
 //! - 控制：Arc<AtomicBool> 停停/暂停标志，WGC 回调中检查
 //!
-//! 数据流：WGC on_frame_arrived → 直接 write_all 到 ffmpeg stdin → ffmpeg 编码 → MP4 文件
-//! 不经过 channel 中转，零拷贝（WGC 帧缓冲直接写管道），性能最佳。
+//! 数据流：WGC on_frame_arrived → 非阻塞写入「最新帧槽」（保留最新/丢弃最旧）→ 独立 pacer
+//! 线程按「呈现时间」降采样写 ffmpeg stdin → ffmpeg 编码 → MP4 文件。回调绝不阻塞，捕获线程与
+//! 编码线程解耦；pacer 以每帧真实呈现时间戳驱动写帧，杜绝补帧堆积与时间压缩。
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
@@ -83,14 +84,28 @@ pub struct RecordingStatus {
 /// WGC 帧池耗尽、DWM 合成停摆 → 整个应用（含主窗、控制台）卡死。回调只做一次 Arc 覆盖写入
 /// 共享槽，永不阻塞。
 ///
-/// **关键设计二（根治「画面卡卡的不够丝滑」）**：旧方案用「有界通道 + 满则丢帧」，一旦丢帧
-/// 或脏区域跳帧，ffmpeg 恒定 `-r fps` 会把「实际到达的少量帧」按 n/fps 均匀打时间戳 →
-/// 播放时被**时间压缩**（该慢处快、该停处跳）= 卡顿感。改为「最新帧槽 + 节拍器补帧」：
-/// 节拍器每 1/fps 取当前最新帧写一份（无新帧则复用上一帧），ffmpeg 恒定收到 fps 帧/秒、
-/// 时间戳与真实墙钟对齐 → 严格 CFR、零时间压缩 = 极致丝滑。
+/// **关键设计二（根治「画面卡卡 / 加速回放 / 不丝滑」）**：pacer 按「呈现时间」驱动写帧——
+/// 每帧在 WGC 回调瞬间记录真实呈现时间戳（≈ SystemRelativeTime），pacer 仅当距上一写出帧
+/// ≥ 1/fps（呈现时间）才写出、并降采样高刷源（165Hz→60fps），**绝不复用旧帧补帧**。配合输入
+/// `-use_wallclock_as_timestamps`，ffmpeg 以写出时刻墙钟为 PTS = 真实呈现节奏 → 时长严格等于
+/// 真实录制墙钟、零时间压缩；捕获/编码偶发阻塞表现为局部冻结（停顿=真实时长）而非「快进」。
+/// 单槽「保留最新、丢弃最旧」即退化 SPSC：捕获回调非阻塞、捕获线程永不被阻塞，高刷多帧仅留最新。
+/// 一帧捕获数据 + 其呈现时间代理。
+///
+/// `ts` 在 WGC 回调拷贝帧的瞬间记录（`std::time::Instant`，与 WGC `SystemRelativeTime` 同为
+/// QPC 时钟、仅晚数微秒），作为该帧的「真实呈现时刻」。pacer 据此按呈现节奏降采样（高刷
+/// 165Hz→目标 60fps）并打点，杜绝「补帧堆积冻结 / 时间压缩」，是极致丝滑的关键。
+#[derive(Clone)]
+struct CapturedFrame {
+    data: Arc<Vec<u8>>,
+    ts: std::time::Instant,
+}
+
 struct WgcRecorder {
-    /// 最新帧共享槽（Arc 便于节拍器零拷贝取用；None = 尚无帧）
-    latest: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
+    /// 最新帧共享槽（Arc 便于节拍器零拷贝取用；None = 尚无帧）。
+    /// 单槽即「保留最新、丢弃最旧」的退化 SPSC：捕获回调非阻塞覆盖写入，捕获线程永不被阻塞；
+    /// 高刷源多帧涌来时仅保留最新，pacer 按呈现时间降采样到目标 fps。
+    latest: Arc<Mutex<Option<CapturedFrame>>>,
     /// 停止标志：设为 true 后下一帧回调中 stop() 捕获
     stop_flag: Arc<AtomicBool>,
     /// 暂停标志：暂停时不写入帧槽
@@ -106,7 +121,7 @@ struct WgcRecorder {
 
 impl GraphicsCaptureApiHandler for WgcRecorder {
     type Flags = (
-        Arc<Mutex<Option<Arc<Vec<u8>>>>>,
+        Arc<Mutex<Option<CapturedFrame>>>,
         Arc<AtomicBool>,
         Arc<AtomicBool>,
         Option<(u32, u32, u32, u32)>,
@@ -189,15 +204,21 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         }
 
         // 非阻塞写入最新帧槽（Arc 覆盖，瞬时返回；绝不阻塞回调 → 不耗尽帧池、不拖垮 DWM 合成）。
-        // 节拍器线程按恒定 fps 从此槽取帧写 ffmpeg，实现严格 CFR 补帧。
+        // 记录呈现时间 ts（≈ WGC SystemRelativeTime），供 pacer 按真实呈现节奏降采样/打点。
         // 旧帧缓冲（若节拍器已不再持有）回收进对象池循环复用 → 录制全程零额外分配。
         if let Ok(mut slot) = self.latest.lock() {
-            let old = std::mem::replace(&mut *slot, Some(payload));
+            let old = std::mem::replace(
+                &mut *slot,
+                Some(CapturedFrame {
+                    data: payload,
+                    ts: std::time::Instant::now(),
+                }),
+            );
             drop(slot);
             if let Some(o) = old {
                 if let Ok(mut fl) = self.free.lock() {
                     if fl.len() < 4 {
-                        fl.push(o);
+                        fl.push(o.data);
                     }
                 }
             }
@@ -270,6 +291,99 @@ pub fn probe_hw_encoder(ffmpeg: &str) -> Option<&'static str> {
     None
 }
 
+/// 进程内缓存硬件编码器探测结果：硬件编码器不会热插拔，进程生命周期内稳定。
+/// 每次录制若都跑 3×0.2s 编码探测（≈0.6s）会拖慢「点开始→真正出帧」的响应，
+/// 且游戏刚启动时抢占 GPU/CPU 队列；缓存后仅首次录制探测一次。直接助力 <200ms 启动目标。
+static HW_ENCODER: OnceLock<Option<&'static str>> = OnceLock::new();
+fn cached_hw_encoder(ffmpeg: &str) -> Option<&'static str> {
+    *HW_ENCODER.get_or_init(|| probe_hw_encoder(ffmpeg))
+}
+
+/// nvenc 是否支持「GPU 色彩转换」（hwupload_cuda + scale_cuda），从而把 RGBA→NV12 从 CPU(sws_scale)
+/// 卸载到 GPU。这正是高负载卡顿的根因：即便走 nvenc 硬件编码，RGBA→YUV 仍在 CPU 完成，
+/// 游戏/大型软件高负载下 CPU 吃紧 → ffmpeg 跟不上 → 管道反压 writer 线程 → 补帧机制把延迟转成画面冻结。
+/// 上传到 CUDA 后由 scale_cuda 在 GPU 做色彩转换，CPU 近乎零开销。结果缓存；探测失败自动回退 CPU 路径。
+static NVENC_GPU_SCALE: OnceLock<bool> = OnceLock::new();
+fn nvenc_gpu_scale_ok(ffmpeg: &str) -> bool {
+    *NVENC_GPU_SCALE.get_or_init(|| {
+        let mut cmd = std::process::Command::new(ffmpeg);
+        cmd.args([
+            "-hide_banner",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "nullsrc=s=128x128",
+            "-t",
+            "0.2",
+            "-pix_fmt",
+            "rgba",
+            "-vf",
+            "hwupload_cuda,scale_cuda=format=nv12",
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p1",
+            "-rc",
+            "constqp",
+            "-qp",
+            "23",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        match cmd.status() {
+            Ok(s) => s.success(),
+            Err(_) => false,
+        }
+    })
+}
+
+/// qsv 是否支持「GPU 色彩转换」（hwupload + vpp_qsv），把 RGBA→NV12 从 CPU(sws_scale)
+/// 卸载到 Intel 核显 / QSV。与 nvenc 同理，这是核显机（如 12900HX）高负载卡顿的根因：
+/// 即便 h264_qsv 硬件编码，RGBA→YUV 仍在 CPU 完成 → 游戏/大型软件高负载 CPU 吃紧 →
+/// ffmpeg 跟不上 → 管道反压 writer → 补帧转成冻结。上传 qsv 后由 vpp_qsv 在 GPU 做色彩转换，
+/// CPU 近乎零开销。结果缓存；探测失败自动回退 CPU 路径（等价原逻辑），质量不降级。
+static QSV_GPU_SCALE: OnceLock<bool> = OnceLock::new();
+fn qsv_gpu_scale_ok(ffmpeg: &str) -> bool {
+    *QSV_GPU_SCALE.get_or_init(|| {
+        let mut cmd = std::process::Command::new(ffmpeg);
+        cmd.args([
+            "-hide_banner",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "nullsrc=s=128x128",
+            "-t",
+            "0.2",
+            "-pix_fmt",
+            "rgba",
+            "-vf",
+            "hwupload=extra_hw_frames=64,vpp_qsv=format=nv12",
+            "-c:v",
+            "h264_qsv",
+            "-preset",
+            "veryfast",
+            "-global_quality",
+            "25",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        match cmd.status() {
+            Ok(s) => s.success(),
+            Err(_) => false,
+        }
+    })
+}
+
 /// 编码器是否在 ffmpeg 的 `-encoders` 列表中出现。
 fn encoder_listed(ffmpeg: &str, enc: &str) -> bool {
     let mut cmd = std::process::Command::new(ffmpeg);
@@ -316,6 +430,111 @@ fn encoder_runtime_ok(ffmpeg: &str, enc: &str) -> bool {
 /// 但 Tauri v2 IPC 把 JS 数组反序列化成 `Vec<i32>` 会在某些场景下**静默回退为 None**
 /// （与 tuple 同样的坑），导致区域录制退化成全屏录制——这正是「选了区域却录全屏」的根因。
 /// 改用 4 个独立的 `Option<i32>` 参数，i32 是 Tauri 序列化最稳妥的类型，彻底消除该风险。
+/// 取系统默认播放设备（扬声器/耳机）的端点 id，用于 WASAPI 回环采集「正在播放的声音」。
+/// 失败返回 None（此时录屏不带声音，视频照常）。best-effort，绝不阻断录制。
+#[cfg(windows)]
+fn default_render_endpoint_id() -> Option<String> {
+    use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+    unsafe {
+        // spawn_blocking 工作线程通常未初始化 COM；MTA 模型下 MMDeviceEnumerator 可用。
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[录屏] 创建 IMMDeviceEnumerator 失败，跳过声音: {e:?}");
+                return None;
+            }
+        };
+        let device = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[录屏] 取默认播放端点失败，跳过声音: {e:?}");
+                return None;
+            }
+        };
+        let id = match device.GetId() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("[录屏] 取端点 id 失败，跳过声音: {e:?}");
+                return None;
+            }
+        };
+        // id 形如 "{0.0.0.00000000}.{...}"，手动转 UTF-16 字符串（泄露小幅内存，可接受）。
+        let mut s = String::new();
+        let mut p = id.0;
+        while *p != 0 {
+            s.push(char::from_u32_unchecked(*p as u32));
+            p = p.add(1);
+        }
+        if s.is_empty() {
+            None
+        } else {
+            eprintln!("[录屏] 系统声音设备 id: {s}");
+            Some(s)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn default_render_endpoint_id() -> Option<String> {
+    None
+}
+
+/// ffmpeg 是否支持 wasapi 输入设备。很多精简打包版 ffmpeg 不含 wasapi demuxer，
+/// 若直接加 `-f wasapi` 会让 ffmpeg 报 “Unknown input format 'wasapi'” 并异常退出，
+/// 导致整段录制失败。结果缓存，避免每次录制都跑一次 `ffmpeg -devices`。
+static FFMPEG_WASAPI: OnceLock<bool> = OnceLock::new();
+fn ffmpeg_supports_wasapi(ffmpeg_path: &str) -> bool {
+    *FFMPEG_WASAPI.get_or_init(|| {
+        let out = std::process::Command::new(ffmpeg_path)
+            .args(["-hide_banner", "-devices"])
+            .output();
+        match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).contains("wasapi"),
+            Err(_) => false,
+        }
+    })
+}
+
+/// 解析可用的系统声音输入串（如 `audio=@{endpoint-id}`），best-effort 且全程缓存。
+/// 返回 None 表示不加音频（仅录视频）。判定链：
+///   1) ffmpeg 支持 wasapi demuxer；
+///   2) 能取到默认播放设备端点 id（WASAPI）；
+///   3) ffmpeg 能真正打开该设备（`-t 0.2 -f null` 实测），避免「列表有 wasapi 但本机打开失败」
+///      仍导致整段录制失败。任一环节失败都退回 None，绝不阻断录制。
+static AUDIO_INPUT: OnceLock<Option<String>> = OnceLock::new();
+fn resolve_audio_input(ffmpeg_path: &str) -> Option<String> {
+    AUDIO_INPUT
+        .get_or_init(|| {
+            if !ffmpeg_supports_wasapi(ffmpeg_path) {
+                return None;
+            }
+            let id = default_render_endpoint_id()?;
+            let probe = std::process::Command::new(ffmpeg_path)
+                .args([
+                    "-hide_banner",
+                    "-f",
+                    "wasapi",
+                    "-i",
+                    &format!("audio=@{}", id),
+                    "-t",
+                    "0.2",
+                    "-f",
+                    "null",
+                    "-",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match probe {
+                Ok(s) if s.success() => Some(format!("audio=@{}", id)),
+                _ => None,
+            }
+        })
+        .clone()
+}
+
 #[tauri::command]
 pub async fn start_recording(
     app: AppHandle,
@@ -339,7 +558,7 @@ pub async fn start_recording(
         // 默认 60fps：高刷屏（144Hz 游戏等）下降采样到 60 仍均匀平滑，且 60fps 比 30fps
         // 在时间分辨率上更接近高刷源，肉眼更难察觉顿挫。无硬件编码器（纯 libx264）时
         // 60fps 软编码更吃 CPU，但属可接受代价；硬件编码器（nvenc/qsv/amf）下毫无压力。
-        let fps = fps.unwrap_or(60);
+        let mut fps = fps.unwrap_or(60);
 
         // 确保输出目录存在：videoDir 可能被重定向或不存在，若不先建目录，
         // ffmpeg 打开输出文件失败 → 编码 0 字节 / 进程异常退出 → stop_recording 走 Err 分支
@@ -442,50 +661,118 @@ pub async fn start_recording(
 
         // 选择编码器：优先硬件加速（nvenc/qsv/amf），避免 4K 软编码打满 CPU 导致整机卡顿；
         // 无硬件编码器时回退 libx264（ultrafast）。
-        let hw = probe_hw_encoder(&ffmpeg_path);
-        let mut ffmpeg_args: Vec<String> = vec![
-            "-y".into(),
+        let hw = cached_hw_encoder(&ffmpeg_path);
+        // 无硬件编码器时软编码 60fps 必卡 → 自动降到 30fps（用户要求最低 30）；
+        // 有硬件编码器（nvenc/qsv/amf，游戏/独显机均具备）→ 保持 60fps 目标帧率。
+        // 前台全屏游戏走 GPU → 必有硬件编码器 → 自动锁定 60fps。
+        if hw.is_none() {
+            fps = fps.min(30);
+        }
+        // 系统声音（best-effort）：仅在 ffmpeg 支持 wasapi 且默认播放设备可被成功打开时才加入。
+        // 关键：打包的 ffmpeg 默认不含 wasapi demuxer，若无条件加 `-f wasapi` 会让 ffmpeg 直接报
+        // “Unknown input format 'wasapi'” 并异常退出（即用户遇到的「ffmpeg 编码失败（进程异常退出）」）。
+        // 故先探测能力，不支持则静默仅录视频、绝不阻断录制。
+        let audio_input = resolve_audio_input(&ffmpeg_path);
+        let mut ffmpeg_args: Vec<String> = vec!["-y".into()];
+        if let Some(ref ain) = audio_input {
+            ffmpeg_args.extend([
+                "-f".into(),
+                "wasapi".into(),
+                "-i".into(),
+                ain.clone(),
+            ]);
+            eprintln!("[录屏] 已加入系统声音（WASAPI 回环，默认播放设备）");
+        } else {
+            eprintln!("[录屏] 当前 ffmpeg 不支持 wasapi 或设备不可用，仅录视频（无声音）");
+        }
+        ffmpeg_args.extend([
             "-f".into(),
             "rawvideo".into(),
             "-pix_fmt".into(),
             "rgba".into(),
             "-s".into(),
             format!("{}x{}", enc_w, enc_h),
-            // 恒定输入帧率：ffmpeg 据此为每帧生成绝对均匀的 PTS（n × 1/fps），
-            // 不受管道读取抖动 / 系统调度 / WGC 突发投帧影响 → 高刷屏下也看不出卡顿。
+            // 真实时间戳（修复「加速回放 / 时长缩短」）：
+            // 输入 -r 会让 ffmpeg 按「帧计数」生成 PTS（n × 1/fps）；一旦写线程阻塞（GPU 色彩转换
+            // 预热、编码器排队、游戏抢 GPU 队列）——即便偶发——单位真实时间写出的帧数就少于 1/fps，
+            // 而 ffmpeg 仍按 n/fps 打点 → 视频时长被压缩成「快进」。改用 wallclock 后，ffmpeg 以
+            // 「管道读取（写出）时刻」为 PTS；配合 pacer 现按每帧真实呈现时间（≈ WGC SystemRelativeTime）
+            // 驱动写帧、绝不复用旧帧补帧 → PTS 严格等于真实呈现节奏：停顿期间无帧写出 → PTS 不前进 →
+            // 输出时长=真实墙钟，停顿表现为局部冻结（符合「真实时长、不被时间压缩」目标），高负载/
+            // 首帧预热均不再快进；稳态下 PTS≈k/fps，平滑丝滑。-r 仅作 rawvideo 帧率提示保留。
+            "-use_wallclock_as_timestamps".into(),
+            "1".into(),
             "-r".into(),
             fps.to_string(),
             "-i".into(),
-            "-".into(),
-        ];
+            "-".into(), // 视频来自 stdin 管道（RGBA 帧）
+        ]);
         match hw {
             Some("h264_nvenc") => {
-                ffmpeg_args.extend([
-                    "-c:v".into(),
-                    "h264_nvenc".into(),
-                    "-preset".into(),
-                    "p1".into(),
-                    "-rc".into(),
-                    "constqp".into(),
-                    "-qp".into(),
-                    "23".into(),
-                    "-pix_fmt".into(),
-                    "yuv420p".into(),
-                ]);
-                eprintln!("[录屏] 使用硬件编码器 h264_nvenc（GPU 编码，CPU 占用低）");
+                // 优先 GPU 色彩转换（RGBA→NV12 走 CUDA），彻底绕开 CPU 端 sws_scale 瓶颈：
+                // 高负载下 CPU 不再被色彩转换占满，ffmpeg 恒定跟上管道 → 无冻结/卡顿。
+                // 探测或驱动不支持时（如老卡 / 驱动限制）自动回退 CPU 软转换（等价原逻辑），质量不降级。
+                if nvenc_gpu_scale_ok(&ffmpeg_path) {
+                    ffmpeg_args.extend([
+                        "-vf".into(),
+                        "hwupload_cuda,scale_cuda=format=nv12".into(),
+                        "-c:v".into(),
+                        "h264_nvenc".into(),
+                        "-preset".into(),
+                        "p1".into(),
+                        "-rc".into(),
+                        "constqp".into(),
+                        "-qp".into(),
+                        "23".into(),
+                    ]);
+                    eprintln!("[录屏] 使用 h264_nvenc + GPU 色彩转换（RGBA→NV12 走 CUDA，CPU 近乎零开销）");
+                } else {
+                    ffmpeg_args.extend([
+                        "-c:v".into(),
+                        "h264_nvenc".into(),
+                        "-preset".into(),
+                        "p1".into(),
+                        "-rc".into(),
+                        "constqp".into(),
+                        "-qp".into(),
+                        "23".into(),
+                        "-pix_fmt".into(),
+                        "yuv420p".into(),
+                    ]);
+                    eprintln!("[录屏] 使用硬件编码器 h264_nvenc（CPU 软转换 RGBA→YUV，GPU 色彩转换不可用）");
+                }
             }
             Some("h264_qsv") => {
-                ffmpeg_args.extend([
-                    "-c:v".into(),
-                    "h264_qsv".into(),
-                    "-preset".into(),
-                    "veryfast".into(),
-                    "-global_quality".into(),
-                    "23".into(),
-                    "-pix_fmt".into(),
-                    "yuv420p".into(),
-                ]);
-                eprintln!("[录屏] 使用硬件编码器 h264_qsv（GPU 编码，CPU 占用低）");
+                // 优先 GPU 色彩转换（RGBA→NV12 走 Intel 核显 / QSV），彻底绕开 CPU 端 sws_scale 瓶颈：
+                // 核显机（如 12900HX）即便 h264_qsv 硬件编码，RGBA→YUV 仍在 CPU 完成 → 游戏/大型软件
+                // 高负载 CPU 吃紧 → ffmpeg 跟不上 → 管道反压 writer → 补帧转成冻结。上传 qsv 后由
+                // vpp_qsv 在 GPU 做色彩转换，CPU 近乎零开销。探测或驱动不支持时自动回退 CPU 软转换
+                // （等价原逻辑），质量不降级。
+                if qsv_gpu_scale_ok(&ffmpeg_path) {
+                    ffmpeg_args.extend([
+                        "-vf".into(),
+                        "hwupload=extra_hw_frames=64,vpp_qsv=format=nv12".into(),
+                        "-c:v".into(),
+                        "h264_qsv".into(),
+                        "-preset".into(),
+                        "veryfast".into(),
+                        "-global_quality".into(),
+                        "25".into(),
+                    ]);
+                    eprintln!("[录屏] 使用 h264_qsv + GPU 色彩转换（RGBA→NV12 走 Intel 核显，CPU 近乎零开销）");
+                } else {
+                    ffmpeg_args.extend([
+                        "-c:v".into(),
+                        "h264_qsv".into(),
+                        "-preset".into(),
+                        "veryfast".into(),
+                        "-global_quality".into(),
+                        "23".into(),
+                        "-pix_fmt".into(),
+                        "yuv420p".into(),
+                    ]);
+                    eprintln!("[录屏] 使用硬件编码器 h264_qsv（CPU 软转换 RGBA→YUV，GPU 色彩转换不可用）");
+                }
             }
             Some("h264_amf") => {
                 ffmpeg_args.extend([
@@ -526,6 +813,27 @@ pub async fn start_recording(
                 }
             }
         }
+        // 音视频映射：视频取自管道输入，音频取自 WASAPI 回环（若有）。
+        if audio_input.is_some() {
+            // 视频为第 1 路输入（-i -）、音频为第 0 路输入（wasapi）；
+            // -shortest 保证视频管道 EOF 后 ffmpeg 即退出，不被实时音频输入挂起。
+            ffmpeg_args.extend([
+                "-map".into(),
+                "1:v:0".into(),
+                "-map".into(),
+                "0:a:0".into(),
+                "-c:a".into(),
+                "aac".into(),
+                "-b:a".into(),
+                "192k".into(),
+                "-shortest".into(),
+            ]);
+        } else {
+            ffmpeg_args.extend(["-map".into(), "0:v:0".into()]);
+        }
+        // 透传时间戳（passthrough）：配合 -use_wallclock_as_timestamps，输出 PTS 直接采用
+        // 管道读取时刻，ffmpeg 不做任何帧率重采样 → 时长严格等于真实录制墙钟，杜绝快进/压缩。
+        ffmpeg_args.extend(["-fps_mode".into(), "passthrough".into()]);
         ffmpeg_args.extend(["-movflags".into(), "+faststart".into(), output_path.clone()]);
 
         // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）
@@ -548,64 +856,78 @@ pub async fn start_recording(
         let stop_flag = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
 
-        // 共享「最新帧槽」：WGC 回调覆盖写入（非阻塞），节拍器线程按恒定 fps 取用。
-        let latest: Arc<Mutex<Option<Arc<Vec<u8>>>>> = Arc::new(Mutex::new(None));
+        // 共享「最新帧槽」：WGC 回调非阻塞覆盖写入（保留最新、丢弃最旧），pacer 按呈现时间取用。
+        let latest: Arc<Mutex<Option<CapturedFrame>>> = Arc::new(Mutex::new(None));
         // 帧缓冲对象池：WGC 回调复用已分配的 Vec，避免 4K 每帧 ~33MB 分配触发分配器周期性停顿（卡顿主因）。
         let free: Arc<Mutex<Vec<Arc<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // 节拍器（pacer）线程：唯一持有 ffmpeg stdin。等首帧到达后，按精确 1/fps 墙钟节拍写帧；
-        // 无新帧时复用上一帧（补帧）→ ffmpeg 恒定收到 fps 帧/秒、时间戳与真实时间对齐 = 严格 CFR、
-        // 零时间压缩，彻底消除「丢帧/脏区域跳帧 → 播放被时间压缩」的卡顿感（极致丝滑）。暂停时不写
-        // （暂停段不计入录像）且同步推进节拍基准，避免恢复瞬间补帧爆发。
+        // 节拍器（pacer）线程：唯一持有 ffmpeg stdin。等首帧到达后，按「呈现时间」驱动写帧：
+        // 每帧携带 WGC 回调瞬间的真实呈现时间戳，仅当距上一写出帧 ≥ 1/fps（呈现时间）才写出并
+        // 降采样高刷源（165Hz→60fps），绝不复用旧帧补帧。配合输入 -use_wallclock_as_timestamps，
+        // ffmpeg 以「写出时刻墙钟」为 PTS = 真实呈现节奏 → 时长严格等于真实录制墙钟、零时间压缩；
+        // 捕获/编码偶发阻塞时表现为局部冻结（停顿=真实时长）而非「快进」。彻底消除「补帧堆积冻结 /
+        // 时间压缩」的卡顿感。暂停时不写（暂停段不计入录像）并重新锚定时间基准，避免恢复瞬间补帧爆发。
         let pacer_latest = latest.clone();
         let pacer_stop = stop_flag.clone();
         let pacer_paused = paused.clone();
+        // 目标帧间隔（墙钟）。pacer 以「呈现时间」驱动写帧：每帧携带 WGC 回调瞬间的
+        // 时间戳（≈ 真实呈现时刻 QPC）；仅当距上一写出帧 ≥ 1/fps（呈现时间）才写出并降采样
+        // 高刷源（165Hz→60fps），绝不复用旧帧补帧。配合输入 -use_wallclock_as_timestamps，
+        // ffmpeg 以「写出时刻墙钟」为 PTS = 真实呈现节奏 → 时长严格等于真实录制墙钟、零时间压缩；
+        // 捕获/编码偶发阻塞时表现为局部冻结（停顿=真实时长）而非快进。彻底消除「补帧堆积冻结 /
+        // 时间压缩」的卡顿感。高刷降采样 + 帧间隔双重门控，保证输出恒定目标 fps。
         let frame_dur = std::time::Duration::from_nanos(1_000_000_000u64 / (fps.max(1) as u64));
         let writer_thread = std::thread::spawn(move || {
-            // 等待首帧（期间若已 stop 则直接退出）
-            loop {
+            // 等待首帧（期间若已 stop 则直接退出），并以首帧呈现时间锚定时间基准
+            let first_qpc = loop {
                 if pacer_stop.load(Ordering::SeqCst) {
                     return;
                 }
-                if pacer_latest.lock().map(|s| s.is_some()).unwrap_or(false) {
-                    break;
+                if let Some(f) = pacer_latest.lock().ok().and_then(|s| s.clone()) {
+                    break f.ts;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            let mut last: Option<Arc<Vec<u8>>> = None;
-            let mut next = std::time::Instant::now();
+            };
+            let mut last_written_qpc = first_qpc;
+            let mut have_written = false;
+            let mut next_emit_wall = std::time::Instant::now();
             loop {
                 if pacer_stop.load(Ordering::SeqCst) {
                     break;
                 }
                 if pacer_paused.load(Ordering::SeqCst) {
-                    // 暂停：不写帧，保持节拍基准贴近当前，恢复后不做补偿爆发。
+                    // 暂停：不写帧；恢复后重新锚定时间基准，避免补帧爆发。
+                    if let Some(f) = pacer_latest.lock().ok().and_then(|s| s.clone()) {
+                        last_written_qpc = f.ts;
+                        have_written = true;
+                        next_emit_wall = std::time::Instant::now();
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(5));
-                    next = std::time::Instant::now();
                     continue;
                 }
-                // 取当前最新帧（Arc 克隆，零数据拷贝）；无新帧则复用上一帧补帧。
-                let frame = {
-                    let cur = pacer_latest.lock().ok().and_then(|s| s.clone());
-                    if cur.is_some() {
-                        last = cur.clone();
-                        cur
+                // 取当前最新帧（Arc 克隆，零数据拷贝）。无新帧则跳过（不补帧 → 局部冻结，真实时长）。
+                let frame = pacer_latest.lock().ok().and_then(|s| s.clone());
+                if let Some(fr) = frame {
+                    let qpc = fr.ts;
+                    // 双重门控：① 距上一写出帧的呈现时间 ≥ 1/fps（降采样高刷、恒定目标 fps）；
+                    // ② 墙钟也已越过下一允许写出时刻（防瞬时突发）。两者皆满足才写出。
+                    let present_ok =
+                        !have_written || qpc.saturating_duration_since(last_written_qpc) >= frame_dur;
+                    let wall_ok = std::time::Instant::now() >= next_emit_wall;
+                    if present_ok && wall_ok {
+                        if stdin.write_all(&fr.data).is_err() {
+                            break; // ffmpeg 已退出/管道断开
+                        }
+                        last_written_qpc = qpc;
+                        have_written = true;
+                        next_emit_wall = std::time::Instant::now() + frame_dur;
                     } else {
-                        last.clone()
+                        // 帧过早（高刷超额帧）→ 丢弃，绝不复用旧帧补帧；短暂让出避免空转。
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
-                };
-                if let Some(f) = frame {
-                    if stdin.write_all(&f).is_err() {
-                        break; // ffmpeg 已退出/管道断开
-                    }
-                }
-                // 精确节拍：累加 deadline 避免漂移；若已落后（编码/写入慢）则不补偿爆发，重置基准。
-                next += frame_dur;
-                let now = std::time::Instant::now();
-                if next > now {
-                    std::thread::sleep(next - now);
                 } else {
-                    next = now;
+                    // 无新帧：不写、不补帧（冻结而非快进）；短暂让出，捕获恢复后立即续写。
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
             }
             // 循环结束：stdin 于此作用域 drop，关闭管道触发 ffmpeg EOF
@@ -1201,23 +1523,9 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     // 直接使用 virtual_desktop_rect 作为坐标原点——不读 outer_position()。
     let scale = win.scale_factor().unwrap_or(1.0);
 
-    // 在 win.show() 之前获取窗口列表。此时覆盖窗尚未可见，IsWindowVisible 会跳过它。
-    // 但控制台（recorder-widget）若上次录屏后未隐藏可能仍可见，需过滤。
-    // 同时过滤 screenshot-overlay / floating-clipboard 等 fullscreen / always-on-top 窗口，
-    // 避免它们挡住其他窗口的命中测试。
-    let windows = crate::screenshot::list_windows(app.clone()).unwrap_or_default();
-    let windows = filter_self_overlay_windows(&app, windows);
-    eprintln!(
-        "[录屏区域] show_recorder_select: ox={}, oy={}, scale={}, 窗口数={}",
-        vx, vy, scale, windows.len()
-    );
-
-    let _ = win.emit("recorder-select-ready", serde_json::json!({
-        "ox": vx,
-        "oy": vy,
-        "scale": scale,
-        "windows": windows,
-    }));
+    // 先显示窗口：十字光标立即生效，无需等待窗口枚举。原实现把 list_windows（EnumWindows +
+    // zorder_ranks，主线程同步跑整条窗口树）放在 show() 之前，主线程被阻塞期间覆盖窗无法显示、
+    // 光标不切换为十字、UI 整体卡死——正是「频繁启动卡 / 光标不变」的根因。
     let _ = win.show();
     let _ = win.set_focus();
 
@@ -1225,23 +1533,39 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     // 命中测试列表，替代已删除的 hover 轮询。空闲零开销。
     crate::screenshot::ensure_window_watch(&app);
 
-    // 首开兜底：首个覆盖窗 WebView2 冷启动 + 事件竞态常导致「首次打开窗口识别失效 /
-    // 鼠标移动无反应」，延时 150ms 重推一次窗口列表，确保前端拿到完整列表（第二次已预热）。
-    if let Some(rec) = app.get_webview_window(RECORDER_SELECT_LABEL) {
-        // 复用首开已算好的窗口列表，避免 150ms 兜底重推时再跑一次主线程枚举（省一次 EnumWindows + zorder_ranks）。
-        // 窗口在 150ms 内几乎不会变化，兜底重推用同一份即可；若首次事件竞态丢失，这份同样完整。
-        let rec_h = rec.clone();
-        let windows2 = windows.clone();
+    // 耗时的窗口枚举移到后台线程，彻底避免阻塞 Tauri 主线程。枚举完成后推送列表；
+    // 即便枚举进行中，前端 hover 仍走 window_at_point（OS 权威）兜底，命中测试不受影响。
+    let app_b = app.clone();
+    let win_b = win.clone();
+    tauri::async_runtime::spawn(async move {
+        let windows = tauri::async_runtime::spawn_blocking({
+            let app_c = app_b.clone();
+            move || {
+                let ws = crate::screenshot::list_windows(app_c.clone()).unwrap_or_default();
+                filter_self_overlay_windows(&app_c, ws)
+            }
+        })
+        .await
+        .unwrap_or_default();
+        eprintln!(
+            "[录屏区域] show_recorder_select: ox={}, oy={}, scale={}, 窗口数={}",
+            vx, vy, scale, windows.len()
+        );
+        let _ = win_b.emit(
+            "recorder-select-ready",
+            serde_json::json!({ "ox": vx, "oy": vy, "scale": scale, "windows": windows }),
+        );
+        // 首开兜底：首个覆盖窗 WebView2 冷启动 + 事件竞态常导致首次列表丢失，150ms 重推同一份列表。
+        let win_f = win_b.clone();
+        let windows_f = windows.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(150));
-            let (vx, vy, _, _) = virtual_desktop_rect();
-            let scale = rec_h.scale_factor().unwrap_or(1.0);
-            let _ = rec_h.emit(
+            let _ = win_f.emit(
                 "recorder-select-ready",
-                serde_json::json!({ "ox": vx, "oy": vy, "scale": scale, "windows": windows2 }),
+                serde_json::json!({ "ox": vx, "oy": vy, "scale": scale, "windows": windows_f }),
             );
         });
-    }
+    });
 
     Ok(())
 }

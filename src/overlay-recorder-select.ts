@@ -259,12 +259,14 @@ function requestHover(cx: number, cy: number) {
       hoverPending = null;
       if (!pt) return;
       const now = performance.now();
-      // 主命中：同步 hitWindow（零 IPC、实时跟手、不卡）。列表经 3.1 修复后完整，正常悬停始终命中。
+      // 即时命中：同步 hitWindow（零 IPC、实时跟手、不卡），用于平滑过渡。
       const hit = hitWindow(pt.x, pt.y);
       updateWinHighlight(hit);
-      // 缓存未命中（列表短暂陈旧）时，才以 OS 权威兜底：40ms 节流 + seq 防乱序，
-      // 仅在 miss 时触发 → 正常悬停零 IPC、零卡顿，边缘场景仍精准。
-      if (!hit && now - lastOsFallback >= 40) {
+      // 每 60ms 用 OS 权威接口（WindowFromPoint）校正一次：列表 z 序在置顶窗口 / 重叠场景下
+      // 不可靠（GetTopWindow+GW_HWNDNEXT 只遍历普通 z 序链、漏掉 topmost 窗口），会导致
+      // 「只能识别一个窗口 / 鼠标移动没用」。window_at_point 走真实 Z 序、跳过本应用覆盖窗，
+      // 始终返回光标下真正的顶层窗口；60ms 节流下开销极低、不卡。
+      if (now - lastOsFallback >= 60) {
         lastOsFallback = now;
         const seq = ++hoverSeq;
         hitAt(pt.x, pt.y)
@@ -604,11 +606,10 @@ async function beginRecording(x: number, y: number, w: number, h: number) {
     //    `Option<Vec<i32>>`，Tauri v2 反序列化数组为 Vec 会静默回退为 None → 退化全屏。
     //    现改为 4 个独立数字参数（regionX/Y/W/H），i32 序列化最稳妥，彻底修复「选区域却录全屏」。
     console.log("[录屏区域] 传递 region(物理像素):", { x, y, w, h, regionX: x, regionY: y, regionW: w, regionH: h });
-    // 按显示器刷新率自动选帧率：高刷屏（≥120Hz）录 60fps 足够丝滑且更轻；
-    // 50Hz 以下（如 30Hz 内容）降到 30fps；其余（含 60Hz）保持 60fps。
-    // 高刷玩家不会明显感到掉帧，同时避免 144Hz 全量录制带来的额外开销。
-    const rr = (window.screen as any).refreshRate as number | undefined;
-    const fps = rr && rr >= 50 ? 60 : rr && rr < 50 ? 30 : 60;
+    // 目标 60fps（用户要求：目标 60、最低 30、游戏锁定 60）。能否稳住 60 取决于编码器：
+    // 有硬件编码器（nvenc/qsv/amf，游戏/独显机均具备）→ 60fps 流畅；无硬件编码器时
+    // Rust 侧自动降到 30fps（软编码 60fps 必卡）。前台全屏游戏走 GPU → 必有硬件编码器 → 自动锁 60。
+    const fps = 60;
     await invoke("start_recording", {
       outputPath,
       fps,
