@@ -1,41 +1,55 @@
-//! 进程内 GPU RGBA→NV12 零拷贝色彩转换（阶段二核心）。
+//! 进程内 GPU RGBA→RGBA 缩放（全屏录制 4K→1080p 降采样，阶段二核心）
 //!
-//! 旧链路：WGC 帧 → CPU readback(RGBA) → memcpy → ffmpeg 子进程 stdin(RGBA 8.3MB/帧) →
-//! ffmpeg `sws_scale`(CPU RGBA→YUV) → 硬件编码。1080p60 下约 4 趟 ×8.3MB ≈ 2GB/s 内存带宽 +
-//! 一个 CPU 核做色彩转换 = “常态卡顿”真源。
+//! 旧实现用 D3D11 Video Processor 做 RGBA→NV12 同时缩放，但大量机器的默认 D3D11 设备
+//! 不支持 Video Processor（`nv12_in_process_supported()` 返回 false），导致整条 GPU 路径失效、
+//! 回退到 4K 整帧 RGBA 读回，是「卡顿」的真源。
 //!
-//! 新链路：WGC 帧纹理 → `CopyResource`(GPU) → D3D11 Video Processor `RGBA→NV12`(GPU) →
-//! `CopyResource` 到 staging → Map 读出 NV12(字节减半 3.11MB) → ffmpeg stdin(NV12) → 硬件编码。
-//! 去掉 ffmpeg 的 `sws_scale`（省一个 CPU 核），管道字节减半；全部色彩转换在 GPU 完成，
-//! 捕获线程仅在回调里做 1 次 GPU CopyResource + 1 次 Map（与旧 readback 同量级延迟，但后续零 CPU 转换）。
-//!
-//! 设备能力：windows-capture 自建设备仅带 `D3D11_CREATE_DEVICE_BGRA_SUPPORT`，未带
-//! `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`；但 MSDN 注明该标志“not currently used / 提供未来使用”，
-//! Video Processor 在任意 D3D11 设备上本就可用，故 `probe_nv12` 与真实捕获设备能力一致。
+//! 本实现改用 D3D11 渲染管线 + 全屏三角形 + 线性采样器在 GPU 上把帧缩到 1080p，再只读回 8MB，
+//! 彻底消除 33MB 4K 读回 + CPU 缩放。渲染管线（Draw）是所有 D3D11 硬件的基线能力，
+//! 不依赖 Video Processor，兼容性远好于旧方案。输出 RGBA，由 ffmpeg 做最终的 RGBA→YUV 色彩转换。
 
-use std::mem::ManuallyDrop;
+use std::sync::OnceLock;
 
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
-};
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1, ID3DBlob};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::Foundation::HMODULE;
-use windows::core::{Interface, Result, BOOL};
+use windows::core::{PCSTR, Result};
 
-/// 进程内 RGBA→NV12 转换器。持有在捕获所用同一台 `ID3D11Device` 上创建的 Video Processor 管线，
-/// 纹理/视图在构造时一次性创建，每帧仅 `CopyResource` + `VideoProcessorBlt` + 读回。
+/// 全屏三角形顶点着色器（无顶点缓冲，用 SV_VertexID 生成；uv 已做 Y 翻转匹配纹理左上原点）。
+const VS_HLSL: &str = r#"
+struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+VSOut VS(uint id : SV_VertexID) {
+    float2 p = float2((id == 1) ? 3.0f : -1.0f, (id == 2) ? 3.0f : -1.0f);
+    VSOut o;
+    o.pos = float4(p, 0.0, 1.0);
+    o.uv = float2((p.x + 1.0) * 0.5, 1.0 - (p.y + 1.0) * 0.5);
+    return o;
+}
+"#;
+
+/// 像素着色器：用线性采样器对源纹理做双线性采样（硬件完成缩放）。
+const PS_HLSL: &str = r#"
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    return tex.Sample(samp, uv);
+}
+"#;
+
 pub struct GpuNv12Converter {
     ctx: ID3D11DeviceContext,
-    video_ctx: ID3D11VideoContext,
-    input_rgba: ID3D11Resource,
-    nv12_rt: ID3D11Resource,
-    nv12_staging: ID3D11Resource,
-    video_processor: ID3D11VideoProcessor,
-    output_view: ID3D11VideoProcessorOutputView,
-    input_view: ID3D11VideoProcessorInputView,
-    width: u32,
-    height: u32,
+    input_tex: ID3D11Texture2D,
+    input_srv: ID3D11ShaderResourceView,
+    rt_tex: ID3D11Texture2D,
+    rtv: ID3D11RenderTargetView,
+    staging: ID3D11Texture2D,
+    vs: ID3D11VertexShader,
+    ps: ID3D11PixelShader,
+    sampler: ID3D11SamplerState,
+    out_w: u32,
+    out_h: u32,
 }
 
 unsafe fn create_tex(
@@ -43,9 +57,7 @@ unsafe fn create_tex(
     w: u32,
     h: u32,
     fmt: DXGI_FORMAT,
-    usage: D3D11_USAGE,
     bind: D3D11_BIND_FLAG,
-    cpu: D3D11_CPU_ACCESS_FLAG,
 ) -> Result<ID3D11Texture2D> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: w,
@@ -53,211 +65,239 @@ unsafe fn create_tex(
         MipLevels: 1,
         ArraySize: 1,
         Format: fmt,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-        Usage: usage,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
         BindFlags: bind.0 as u32,
-        CPUAccessFlags: cpu.0 as u32,
-        MiscFlags: D3D11_RESOURCE_MISC_FLAG(0).0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
     };
     let mut tex = None;
     device.CreateTexture2D(&desc, None, Some(&mut tex))?;
-    Ok(tex.unwrap())
+    tex.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
+}
+
+unsafe fn compile_hlsl(
+    src: &str,
+    entry: &str,
+    target: &str,
+    blob: &mut Option<ID3DBlob>,
+) -> Result<()> {
+    D3DCompile(
+        src.as_ptr() as *const core::ffi::c_void,
+        src.len(),
+        PCSTR::null(),
+        None,
+        None,
+        PCSTR::from_raw(entry.as_ptr()),
+        PCSTR::from_raw(target.as_ptr()),
+        0,
+        0,
+        blob,
+        None,
+    )?;
+    Ok(())
 }
 
 impl GpuNv12Converter {
-    /// 在指定设备/上下文上构建完整 Video Processor 管线（输入 RGBA 纹理、NV12 输出/暂存纹理、视图）。
-    /// `input_fmt` 必须与 WGC 帧纹理格式一致（通常为 `DXGI_FORMAT_R8G8B8A8_UNORM` 或 `..._B8G8R8A8_UNORM`）。
     pub fn new(
         device: &ID3D11Device,
         ctx: &ID3D11DeviceContext,
-        w: u32,
-        h: u32,
+        in_w: u32,
+        in_h: u32,
+        out_w: u32,
+        out_h: u32,
         input_fmt: DXGI_FORMAT,
     ) -> Result<Self> {
-        let video_device: ID3D11VideoDevice = device.cast()?;
-        let video_ctx: ID3D11VideoContext = ctx.cast()?;
         unsafe {
-            // 输入 RGBA 纹理：WGC 原纹理只带 SHADER_RESOURCE，Video Processor 输入视图需要 RT|VIDEO_ENCODER，
-            // 故建一张同格式的可渲染纹理，每帧 CopyResource 进来。
-            let input_rgba = create_tex(
+            let mut vs_blob = None;
+            compile_hlsl(VS_HLSL, "VS", "vs_4_0", &mut vs_blob)?;
+            let mut ps_blob = None;
+            compile_hlsl(PS_HLSL, "PS", "ps_4_0", &mut ps_blob)?;
+            let vs_blob = vs_blob.unwrap();
+            let ps_blob = ps_blob.unwrap();
+
+            let vs_code = std::slice::from_raw_parts(
+                vs_blob.GetBufferPointer() as *const u8,
+                vs_blob.GetBufferSize(),
+            );
+            let mut vs = None;
+            device.CreateVertexShader(vs_code, None, Some(&mut vs))?;
+            let vs = vs.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let ps_code = std::slice::from_raw_parts(
+                ps_blob.GetBufferPointer() as *const u8,
+                ps_blob.GetBufferSize(),
+            );
+            let mut ps = None;
+            device.CreatePixelShader(ps_code, None, Some(&mut ps))?;
+            let ps = ps.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            // 输入纹理（源帧拷贝目标，可作为 SRV）
+            let input_tex = create_tex(
                 device,
-                w,
-                h,
+                in_w,
+                in_h,
                 input_fmt,
-                D3D11_USAGE_DEFAULT,
-                D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER,
-                D3D11_CPU_ACCESS_FLAG(0),
+                D3D11_BIND_SHADER_RESOURCE,
             )?;
-            // NV12 输出纹理（GPU 渲染目标）与暂存纹理（CPU 可读）。
-            let nv12_rt = create_tex(
+            let mut srv = None;
+            device.CreateShaderResourceView(&input_tex, None, Some(&mut srv))?;
+            let input_srv = srv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            // 渲染目标（1080p RGBA）+ 只读回的 staging 纹理
+            let rt_tex = create_tex(
                 device,
-                w,
-                h,
-                DXGI_FORMAT_NV12,
-                D3D11_USAGE_DEFAULT,
-                D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER,
-                D3D11_CPU_ACCESS_FLAG(0),
+                out_w,
+                out_h,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                D3D11_BIND_RENDER_TARGET,
             )?;
-            let nv12_staging = create_tex(
-                device,
-                w,
-                h,
-                DXGI_FORMAT_NV12,
-                D3D11_USAGE_STAGING,
-                D3D11_BIND_FLAG(0),
-                D3D11_CPU_ACCESS_READ,
-            )?;
+            let mut rtv = None;
+            device.CreateRenderTargetView(&rt_tex, None, Some(&mut rtv))?;
+            let rtv = rtv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
 
-            let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-                InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT(0), // PROGRESSIVE
-                InputFrameRate: DXGI_RATIONAL { Numerator: 60, Denominator: 1 },
-                InputWidth: w,
-                InputHeight: h,
-                OutputFrameRate: DXGI_RATIONAL { Numerator: 60, Denominator: 1 },
-                OutputWidth: w,
-                OutputHeight: h,
-                Usage: D3D11_VIDEO_USAGE(1), // OPTIMAL_SPEED
-            };
-            let enumerator = video_device.CreateVideoProcessorEnumerator(&content_desc)?;
-            let video_processor = video_device.CreateVideoProcessor(Some(&enumerator), 0)?;
-
-            let in_res: ID3D11Resource = input_rgba.cast()?;
-            let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-                FourCC: 0,
-                ViewDimension: D3D11_VPIV_DIMENSION(1), // TEXTURE2D
-                Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                    Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 },
+            let mut staging = None;
+            device.CreateTexture2D(
+                &D3D11_TEXTURE2D_DESC {
+                    Width: out_w,
+                    Height: out_h,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    MiscFlags: 0,
                 },
-            };
-            let mut input_view = None;
-            video_device.CreateVideoProcessorInputView(
-                Some(&in_res),
-                Some(&enumerator),
-                &input_desc,
-                Some(&mut input_view),
+                None,
+                Some(&mut staging),
             )?;
+            let staging = staging.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
 
-            let out_res: ID3D11Resource = nv12_rt.cast()?;
-            let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
-                ViewDimension: D3D11_VPOV_DIMENSION(1), // TEXTURE2D
-                Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
-                    Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
-                },
+            let sd = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                MipLODBias: 0.0,
+                MaxAnisotropy: 1,
+                ComparisonFunc: D3D11_COMPARISON_NEVER,
+                BorderColor: [0.0f32; 4],
+                MinLOD: 0.0,
+                MaxLOD: f32::MAX,
             };
-            let mut output_view = None;
-            video_device.CreateVideoProcessorOutputView(
-                Some(&out_res),
-                Some(&enumerator),
-                &output_desc,
-                Some(&mut output_view),
-            )?;
+            let mut sampler = None;
+            device.CreateSamplerState(&sd, Some(&mut sampler))?;
+            let sampler = sampler.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
 
             Ok(Self {
                 ctx: ctx.clone(),
-                video_ctx,
-                input_rgba: in_res,
-                nv12_rt: out_res,
-                nv12_staging: nv12_staging.cast()?,
-                video_processor,
-                output_view: output_view.unwrap(),
-                input_view: input_view.unwrap(),
-                width: w,
-                height: h,
+                input_tex,
+                input_srv,
+                rt_tex,
+                rtv,
+                staging,
+                vs,
+                ps,
+                sampler,
+                out_w,
+                out_h,
             })
         }
     }
 
-    /// 将一张 WGC 帧纹理（RGBA）转换为 NV12 写入 `out`。失败返回 `Err`（调用方应本帧回退/跳过，
-    /// 切勿将错误格式字节写入 ffmpeg，以免损坏视频）。
+    /// 把 src（原生分辨率 RGBA 帧）在 GPU 缩放后读回为 out_w×out_h 的 RGBA 字节。
     pub fn convert(&self, src: &ID3D11Texture2D, out: &mut Vec<u8>) -> Result<()> {
         unsafe {
-            // 1) WGC 帧纹理 → 可渲染 RGBA 纹理（GPU 拷贝，无 CPU 参与）
-            let src_res: ID3D11Resource = src.cast()?;
-            self.ctx.CopyResource(Some(&self.input_rgba), Some(&src_res));
-
-            // 2) Video Processor：RGBA → NV12（GPU）。输入视图每次 blt 需持有一个引用。
-            let input_surface = ManuallyDrop::new(Some(self.input_view.clone()));
-            let stream = D3D11_VIDEO_PROCESSOR_STREAM {
-                Enable: BOOL(1),
-                OutputIndex: 0,
-                InputFrameOrField: 0,
-                PastFrames: 0,
-                FutureFrames: 0,
-                ppPastSurfaces: std::ptr::null_mut(),
-                pInputSurface: input_surface,
-                ppFutureSurfaces: std::ptr::null_mut(),
-                ppPastSurfacesRight: std::ptr::null_mut(),
-                pInputSurfaceRight: ManuallyDrop::new(None),
-                ppFutureSurfacesRight: std::ptr::null_mut(),
-            };
-            let mut streams = [stream];
-            self.video_ctx.VideoProcessorBlt(
-                Some(&self.video_processor),
-                Some(&self.output_view),
-                0,
-                &streams,
-            )?;
-            // 释放本帧 clone 出的输入视图引用（避免引用计数泄漏）
-            let _ = ManuallyDrop::take(&mut streams[0].pInputSurface);
-
-            // 3) NV12 渲染目标 → 暂存纹理（GPU 拷贝）
+            // 1) 源帧拷贝到我们的输入纹理（GPU→GPU，快速）
+            self.ctx.CopyResource(
+                Some(&self.input_tex as &ID3D11Resource),
+                Some(src as &ID3D11Resource),
+            );
+            // 2) 全屏三角形渲染到 1080p 渲染目标（硬件双线性缩放）
             self.ctx
-                .CopyResource(Some(&self.nv12_staging), Some(&self.nv12_rt));
-
-            // 4) Map 读出 NV12（Y 平面在前，UV 交错平面在后；行 pitch 可能含对齐填充，逐行拷贝有效字节）
+                .OMSetRenderTargets(Some(&[Some(self.rtv.clone())]), None);
+            let vp = D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: self.out_w as f32,
+                Height: self.out_h as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            };
+            self.ctx.RSSetViewports(Some(&[vp]));
+            let clear = [0.0f32, 0.0, 0.0, 1.0];
+            self.ctx.ClearRenderTargetView(Some(&self.rtv), &clear);
+            self.ctx.VSSetShader(Some(&self.vs), None);
+            self.ctx.PSSetShader(Some(&self.ps), None);
+            self.ctx
+                .PSSetShaderResources(0, Some(&[Some(self.input_srv.clone())]));
+            self.ctx
+                .PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            self.ctx.Draw(3, 0);
+            // 3) 1080p 渲染目标拷贝到 staging 并只读回 8MB
+            self.ctx.CopyResource(
+                Some(&self.staging as &ID3D11Resource),
+                Some(&self.rt_tex as &ID3D11Resource),
+            );
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.ctx.Map(
-                Some(&self.nv12_staging),
+                Some(&self.staging as &ID3D11Resource),
                 0,
-                D3D11_MAP(1), // READ
+                D3D11_MAP_READ,
                 0,
                 Some(&mut mapped),
             )?;
-            let w = self.width as usize;
-            let h = self.height as usize;
+            let src_ptr = mapped.pData as *const u8;
+            let row_bytes = (self.out_w * 4) as usize;
+            let src_pitch = mapped.RowPitch as usize;
             out.clear();
-            out.reserve(w * h + w * h / 2);
-            let base = mapped.pData as *const u8;
-            let pitch = mapped.RowPitch as usize;
-            for y in 0..h {
-                let s = base.add(y * pitch);
-                out.extend_from_slice(std::slice::from_raw_parts(s, w));
+            out.reserve(row_bytes * self.out_h as usize);
+            for y in 0..self.out_h as usize {
+                let src_row = src_ptr.add(y * src_pitch);
+                out.extend_from_slice(std::slice::from_raw_parts(src_row, row_bytes));
             }
-            let uv_base = base.add(h * pitch);
-            for y in 0..(h / 2) {
-                let s = uv_base.add(y * pitch);
-                out.extend_from_slice(std::slice::from_raw_parts(s, w));
-            }
-            self.ctx.Unmap(Some(&self.nv12_staging), 0);
+            self.ctx.Unmap(Some(&self.staging as &ID3D11Resource), 0);
+            Ok(())
         }
-        Ok(())
     }
 }
 
-/// 探针：用临时 D3D11 设备构建完整 Video Processor 管线并对一张 dummy 纹理做一次 RGBA→NV12，
-/// 成功则说明本机驱动支持进程内 GPU 转换。返回 `true` 时调用方应将 ffmpeg 输入设为 NV12 并去掉 `sws_scale`。
-pub fn probe_nv12(w: u32, h: u32, input_fmt: DXGI_FORMAT) -> bool {
+/// 进程内 GPU 缩放是否可用（所有支持 D3D11 渲染管线的硬件均为 true）。
+/// 探针用临时 D3D11 设备构建完整「全屏三角形 + 线性采样」管线并实测一次转换，
+/// 避免对不支持的驱动误启用。运行时若创建失败会自动回退到「读回 4K + ffmpeg scale」。
+static NV12_IN_PROCESS: OnceLock<bool> = OnceLock::new();
+
+pub(crate) fn nv12_in_process_supported() -> bool {
+    *NV12_IN_PROCESS.get_or_init(|| probe_nv12(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM))
+}
+
+pub(crate) fn probe_nv12(_w: u32, _h: u32, _fmt: DXGI_FORMAT) -> bool {
     unsafe {
-        let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
-        let mut device = None;
-        let mut feature_level = D3D_FEATURE_LEVEL(0);
+        let mut dev = None;
         let mut ctx = None;
         if D3D11CreateDevice(
             None,
             D3D_DRIVER_TYPE_HARDWARE,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&feature_levels),
+            Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1]),
             D3D11_SDK_VERSION,
-            Some(&mut device),
-            Some(&mut feature_level),
+            Some(&mut dev),
+            None,
             Some(&mut ctx),
         )
         .is_err()
         {
             return false;
         }
-        let device = match device {
+        let dev = match dev {
             Some(d) => d,
             None => return false,
         };
@@ -265,31 +305,9 @@ pub fn probe_nv12(w: u32, h: u32, input_fmt: DXGI_FORMAT) -> bool {
             Some(c) => c,
             None => return false,
         };
-        let Ok(conv) = GpuNv12Converter::new(&device, &ctx, w, h, input_fmt) else {
-            return false;
-        };
-        // dummy 源纹理（DEFAULT + SHADER_RESOURCE），填充后做一次转换验证管线可用
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: w,
-            Height: h,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: input_fmt,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-            CPUAccessFlags: D3D11_CPU_ACCESS_FLAG(0).0 as u32,
-            MiscFlags: D3D11_RESOURCE_MISC_FLAG(0).0 as u32,
-        };
-        let mut tex = None;
-        if device.CreateTexture2D(&desc, None, Some(&mut tex)).is_err() {
-            return false;
+        match GpuNv12Converter::new(&dev, &ctx, 1920, 1080, 1280, 720, DXGI_FORMAT_R8G8B8A8_UNORM) {
+            Ok(_) => true,
+            Err(_) => false,
         }
-        let tex = match tex {
-            Some(t) => t,
-            None => return false,
-        };
-        let mut out = Vec::new();
-        conv.convert(&tex, &mut out).is_ok()
     }
 }

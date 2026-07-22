@@ -35,6 +35,14 @@ use windows_capture::settings::{
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 
+// 复用真实录制的 GPU RGBA→RGBA 缩放转换器，使自测与真实录制走完全一致的处理路径
+// （含 4K→1080p 降采样；GPU 不可用时有 4K 读回兜底）。
+use crate::services::recording_service::gpu_nv12::GpuNv12Converter;
+use crate::services::recording_service::nv12_in_process_supported;
+// 复用真实录制的音频采集：优先 ffmpeg 原生 WASAPI，否则 Rust WASAPI 回环采集（命名管道）。
+use crate::services::recording_service::audio_capture::{start_audio_capture, AudioCapture, AudioFormat};
+use crate::services::recording_service::resolve_audio_input;
+
 /// 简短时间戳（HH:MM:SS，基于 UTC epoch，仅用于日志可读性）
 fn now_ts() -> String {
     let secs = SystemTime::now()
@@ -61,22 +69,45 @@ pub fn diag_log(app: &AppHandle, tag: &str, msg: &str) {
 }
 
 /// 测试用 WGC 捕获 handler：统计实际交付帧数，全帧 RGBA 投递给编码线程。
+/// 与真实录制保持一致：全屏 + 驱动支持时走进程内 GPU RGBA→NV12（并按 out_w×out_h 缩放，
+/// 4K 全屏即降到 1080p），否则回落 4K RGBA。这样自测就是真实录制的忠实代理，
+/// 不会因“4K 全帧 RGBA 每帧 ~33MB CPU 拷贝”而比真实录制更卡，从而能正确反映“是否还卡”。
 struct TestCapture {
     sender: SyncSender<Vec<u8>>,
     stop_flag: Arc<AtomicBool>,
     counter: Arc<AtomicUsize>,
+    gpu_nv12: bool,
+    /// 是否需要降采样（超 1080p 时恒为 true；GPU 不可用时走 CPU 双线性兜底）
+    downscale_4k: bool,
+    out_w: u32,
+    out_h: u32,
+    gpu: Option<GpuNv12Converter>,
+    gpu_failed: bool,
+}
+
+/// RGBA 全帧回退：把 WGC 帧按原尺寸读到内存（非降采样路径 / GPU 转换失败时的兜底）。
+fn rgba_payload(frame: &mut Frame) -> Result<Vec<u8>, String> {
+    let buffer = frame.buffer().map_err(|e| e.to_string())?;
+    let mut scratch = Vec::new();
+    Ok(buffer.as_nopadding_buffer(&mut scratch).to_vec())
 }
 
 impl GraphicsCaptureApiHandler for TestCapture {
-    type Flags = (SyncSender<Vec<u8>>, Arc<AtomicBool>, Arc<AtomicUsize>);
+    type Flags = (SyncSender<Vec<u8>>, Arc<AtomicBool>, Arc<AtomicUsize>, bool, bool, u32, u32);
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (sender, stop_flag, counter) = ctx.flags;
+        let (sender, stop_flag, counter, gpu_nv12, downscale_4k, out_w, out_h) = ctx.flags;
         Ok(Self {
             sender,
             stop_flag,
             counter,
+            gpu_nv12,
+            downscale_4k,
+            out_w,
+            out_h,
+            gpu: None,
+            gpu_failed: false,
         })
     }
 
@@ -89,12 +120,43 @@ impl GraphicsCaptureApiHandler for TestCapture {
             capture_control.stop();
             return Ok(());
         }
-        let _fw = frame.width();
-        let _fh = frame.height();
-        let buffer = frame.buffer().map_err(|e| e.to_string())?;
-        let mut scratch = Vec::new();
-        let src = buffer.as_nopadding_buffer(&mut scratch);
-        let payload: Vec<u8> = src.to_vec();
+        let fw = frame.width();
+        let fh = frame.height();
+        // 与真实录制同构：全程 GPU 内 RGBA→NV12 + 缩放，回读字节降至目标的 1/4（4K→1080p）。
+        let payload: Vec<u8> = if self.gpu_nv12 && !self.gpu_failed {
+            if self.gpu.is_none() {
+                match GpuNv12Converter::new(
+                    frame.device(),
+                    frame.device_context(),
+                    fw,
+                    fh,
+                    self.out_w,
+                    self.out_h,
+                    frame.desc().Format,
+                ) {
+                    Ok(c) => self.gpu = Some(c),
+                    Err(_) => self.gpu_failed = true,
+                }
+            }
+            match self.gpu.as_mut() {
+                Some(conv) => {
+                    let mut bytes = Vec::new();
+                    match conv.convert(frame.as_raw_texture(), &mut bytes) {
+                        Ok(()) => bytes,
+                        Err(_) => {
+                            // 单帧 GPU 转换失败：标记失效并回退 RGBA，避免写入错误格式字节损坏视频。
+                            self.gpu_failed = true;
+                            self.gpu = None;
+                            rgba_payload(frame)?
+                        }
+                    }
+                }
+                None => rgba_payload(frame)?,
+            }
+        } else {
+            // GPU 缩放不可用时的兜底：直接读回原生 RGBA（4K 全帧回读，较慢），由 ffmpeg scale 兜底。
+            rgba_payload(frame)?
+        };
         self.counter.fetch_add(1, Ordering::SeqCst);
         match self.sender.try_send(payload) {
             Ok(()) => {}
@@ -177,19 +239,67 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     }
     let fps = 30u32;
 
+    // 与真实录制一致的 4K 全屏降采样决策：超 1080p 即降采样。GPU 可用时走 GPU RGBA→NV12 缩放，
+    // 否则走 CPU 双线性降采样，使自测不再因 4K 整帧 RGBA 的 ~33MB/帧 回读而比真实录制更卡。
+    let gpu_nv12 = nv12_in_process_supported();
+    let downscale_4k = (enc_w as u64) * (enc_h as u64) > 1920u64 * 1080u64;
+    let (out_w, out_h) = if downscale_4k {
+        let mut ow = 1920u32;
+        let mut oh = (((1920.0 * enc_h as f64 / enc_w as f64) / 2.0).round() as u32) * 2;
+        ow &= !1;
+        oh &= !1;
+        (ow, oh)
+    } else {
+        (enc_w, enc_h)
+    };
+    // 进程内 GPU 缩放产出 RGBA（8MB），故像素格式恒为 rgba；ffmpeg 负责 RGBA→YUV。
+    let pix_fmt = "rgba";
+
+    // 系统声音（best-effort）：优先 ffmpeg 原生 WASAPI 回环采集（需全量 ffmpeg 含 wasapi demuxer），
+    // 否则回退 Rust WASAPI 采集命名管道。
+    let audio_wasapi: Option<String> = resolve_audio_input(&ffmpeg_path);
+    let audio_pipe: Option<(AudioCapture, String, AudioFormat)> = if audio_wasapi.is_none() {
+        match start_audio_capture() {
+            Ok(triple) => Some(triple),
+            Err(e) => {
+                eprintln!("[诊断自测] 系统声音采集不可用，仅测视频: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let had_audio = audio_wasapi.is_some() || audio_pipe.is_some();
+    let audio_fmt_str = audio_pipe.as_ref().map(|(_, _, f)| format!("{} {}ch {}Hz", f.sample_fmt, f.channels, f.rate));
+
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-f".into(),
         "rawvideo".into(),
         "-pix_fmt".into(),
-        "rgba".into(),
+        pix_fmt.into(),
         "-s".into(),
-        format!("{}x{}", enc_w, enc_h),
+        format!("{}x{}", out_w, out_h),
         "-r".into(),
         fps.to_string(),
         "-i".into(),
-        "-".into(),
+        "-".into(), // 视频来自 stdin 管道（RGBA 帧）
     ];
+    // 音频输入：优先 ffmpeg 原生 WASAPI（视频第 0 路、音频第 1 路），否则 Rust 命名管道。
+    if let Some(ref dev) = audio_wasapi {
+        args.extend(["-f".into(), "wasapi".into(), "-i".into(), dev.clone()]);
+    } else if let Some((_cap, apath, afmt)) = &audio_pipe {
+        args.extend([
+            "-f".into(),
+            afmt.sample_fmt.into(),
+            "-ar".into(),
+            afmt.rate.to_string(),
+            "-ac".into(),
+            afmt.channels.to_string(),
+            "-i".into(),
+            apath.clone(),
+        ]);
+    }
     match encoder {
         Some("h264_nvenc") => args.extend([
             "-c:v".into(), "h264_nvenc".into(), "-preset".into(), "p1".into(),
@@ -208,6 +318,20 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
             "-c:v".into(), "libx264".into(), "-preset".into(), "ultrafast".into(),
             "-crf".into(), "23".into(), "-pix_fmt".into(), "yuv420p".into(),
         ]),
+    }
+    // 音视频映射：视频第 0 路、音频第 1 路（若有）；-shortest 保证视频 EOF 后 ffmpeg 退出。
+    // 采用恒定帧率（pacer 已按 1/fps 恒定写出 + 帧保持），不使用 wallclock，确保视频时长精确为 dur 秒。
+    args.extend(["-fps_mode".into(), "passthrough".into()]);
+    if audio_wasapi.is_some() || audio_pipe.is_some() {
+        args.extend([
+            "-map".into(), "0:v:0".into(),
+            "-map".into(), "1:a:0".into(),
+            "-c:a".into(), "aac".into(),
+            "-b:a".into(), "192k".into(),
+            "-shortest".into(),
+        ]);
+    } else {
+        args.extend(["-map".into(), "0:v:0".into()]);
     }
     args.extend(["-movflags".into(), "+faststart".into(), out_path.to_string_lossy().to_string()]);
 
@@ -240,9 +364,38 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     let counter = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let _writer = thread::spawn(move || {
-        while let Ok(b) = rx.recv() {
-            if stdin.write_all(&b).is_err() {
+        // 恒定节奏写出 + 帧保持：保证自测视频时长精确为 dur 秒（不加速）；
+        // 若采集跟不上则在相应位置重复上一帧，可直观反映掉帧/卡顿。
+        let frame_dur = Duration::from_secs_f64(1.0 / fps as f64);
+        let total = (dur as usize) * (fps as usize);
+        let mut last: Option<Vec<u8>> = None;
+        let start = std::time::Instant::now();
+        for i in 0..total {
+            let frame = match rx.recv_timeout(frame_dur) {
+                Ok(b) => {
+                    last = Some(b.clone());
+                    b
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => match &last {
+                    Some(b) => b.clone(),
+                    None => {
+                        let target = start + frame_dur * ((i as u32) + 1);
+                        let now = std::time::Instant::now();
+                        if target > now {
+                            thread::sleep(target - now);
+                        }
+                        continue;
+                    }
+                },
+                Err(_) => break,
+            };
+            if stdin.write_all(&frame).is_err() {
                 break;
+            }
+            let target = start + frame_dur * ((i as u32) + 1);
+            let now = std::time::Instant::now();
+            if target > now {
+                thread::sleep(target - now);
             }
         }
     });
@@ -255,7 +408,7 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     // 会吃满整机 CPU（真实录屏卡顿、区域选择覆盖窗饿死的根因）。40ms 对一次 3s 自测足够轻量。
     // 平台不支持 Custom 时退回 Default。monitor 为 Copy，可复用。
     let capture = thread::spawn(move || {
-        let flags = (tx_c, stop_c, counter_c);
+        let flags = (tx_c, stop_c, counter_c, gpu_nv12, downscale_4k, out_w, out_h);
         let settings = Settings::new(
             monitor,
             CursorCaptureSettings::Default,
@@ -319,6 +472,11 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     let out_bytes = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
     let frames = counter.load(Ordering::SeqCst);
 
+    // ffmpeg 已退出（或超时）：关闭系统声音采集管道与线程，释放 COM/句柄。
+    if let Some((mut a, _, _)) = audio_pipe {
+        a.stop();
+    }
+
     let report = json!({
         "ok": out_bytes > 1024,
         "ffmpegPath": ffmpeg_path,
@@ -326,6 +484,12 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
         "encoder": encoder,
         "captureW": enc_w,
         "captureH": enc_h,
+        "gpuNv12": gpu_nv12,
+        "downscale4k": downscale_4k,
+        "outW": out_w,
+        "outH": out_h,
+        "audio": had_audio,
+        "audioFmt": audio_fmt_str,
         "durationSecs": dur,
         "framesCaptured": frames,
         "outputBytes": out_bytes,

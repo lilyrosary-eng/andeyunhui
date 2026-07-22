@@ -92,8 +92,14 @@ windows = { version = "0.62", features = [
   "Win32_System_WinRT",
   "Win32_UI_WindowsAndMessaging",
   "Win32_Media_Audio",
-  # 阶段二（进程内 GPU RGBA→NV12）：D3D11 Video Processor 需要 Direct3D11 设备/纹理/视图 API
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_Security",
+  # 阶段二（进程内 GPU RGBA→RGBA 缩放）：D3D11 渲染管线 + 运行时 D3DCompile 需要这些 API
+  "Win32_Graphics_Direct3D",
   "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Direct3D_Fxc",
   "Win32_Graphics_Dxgi",
   "Media",
   "Media_Playback",
