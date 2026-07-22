@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -116,12 +118,15 @@ pub async fn lsp_diagnostics(path: String, project_root: Option<String>) -> Resu
         }
         "py" => {
             // 优先 pyright（更全面），未装则降级 py_compile（仅语法检查）
-            let has_pyright = Command::new("pyright")
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok();
+            let has_pyright = {
+                let mut cmd = Command::new("pyright");
+                cmd.arg("--version")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                #[cfg(windows)]
+                cmd.creation_flags(0x08000000);
+                cmd.status().is_ok()
+            };
             if has_pyright {
                 ("pyright", vec!["--outputjson".to_string()], "pyright".to_string())
             } else {
@@ -251,13 +256,15 @@ fn run_with_timeout(
     cwd: &Path,
     timeout_secs: u64,
 ) -> Result<std::process::Output, String> {
-    let mut child = Command::new(cmd)
-        .args(args)
+    let mut child = Command::new(cmd);
+    child.args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    child.creation_flags(0x08000000);
+    let mut child = child.spawn()
         .map_err(|e| format!("spawn {} 失败: {}", cmd, e))?;
 
     let start = Instant::now();

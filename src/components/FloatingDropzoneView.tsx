@@ -3,8 +3,26 @@ import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
 import { openPath } from '@tauri-apps/plugin-opener';
 import { X, Inbox, ScanText, Languages, Loader2 } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferStationPanel';
 import { api, type ImportedFile } from '@/lib/api';
+
+// 本地 PaddleOCR 引擎懒加载（与 TransferStationPanel 共享模式）
+let _paddleOcrLoading: Promise<any> | null = null;
+async function loadPaddleOcr(): Promise<any> {
+  const w = window as any;
+  if (w.__EXT_PADDLEOCR__?._v === 2) return w.__EXT_PADDLEOCR__;
+  delete w.__EXT_PADDLEOCR__;
+  _paddleOcrLoading = null;
+  _paddleOcrLoading = (async () => {
+    const code = await invoke<string>('read_external_dep_file', { relativePath: '全局/paddleocr/index.js' });
+    if (!code) throw new Error('本地 OCR 引擎未找到（external-deps/全局/paddleocr/index.js 不存在）');
+    new Function(code)();
+    if (!w.__EXT_PADDLEOCR__) throw new Error('OCR 引擎已读取但挂载失败（window.__EXT_PADDLEOCR__ 未定义）');
+    return w.__EXT_PADDLEOCR__;
+  })();
+  return _paddleOcrLoading;
+}
 
 const win = getCurrentWindow();
 
@@ -304,9 +322,9 @@ function OcrBox() {
     } catch (e) {
       const msg = typeof e === 'string' ? e : (e as any)?.message || 'OCR 失败，请检查 AI 配置';
       // 与中转站主站一致：云端未配置 API Key 时自动降级到本地 PaddleOCR 引擎
-      const local = (window as any).__PLUGIN_REGISTRY__?.__ocrLocal;
-      if ((msg.includes('未配置') || msg.includes('API Key')) && local && typeof local.recognize === 'function') {
+      if (msg.includes('未配置') || msg.includes('API Key')) {
         try {
+          const local = await loadPaddleOcr();
           const text = await local.recognize(dataUrl);
           setText(text || '');
           setError(null);

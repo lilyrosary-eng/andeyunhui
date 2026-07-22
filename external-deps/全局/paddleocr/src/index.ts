@@ -18,8 +18,11 @@
 // 若识别质量不满足，可在 OcrWorkspace 触发处让其自动降级回云端 ai_vision_ocr。
 // ============================================================================
 
-import * as ort from 'onnxruntime-web';
-
+// 直连 WebGL 后端（默认 onnxruntime-web 入口）。
+// WASM 后端（ort.wasm.min.js）仅在 WebGL 不可用时作为运行时降级加载，
+// 通过 read_external_dep_file + new Function 执行 IIFE 拿到含注册好 WASM 后端的 ort 命名空间。
+// 不用 onnxruntime-web 包（esbuild 坚持 tree-shake 掉 WASM 后端注册代码），
+// 运行时通过 INVOKE 读取 wasm 后端 IIFE 文件直接执行，拿其返回值作为 ort 命名空间。
 const INVOKE = (window as any).__HOST_API__?.invoke as
   | ((cmd: string, args: Record<string, unknown>) => Promise<unknown>)
   | undefined;
@@ -33,6 +36,10 @@ const STD = [0.229, 0.224, 0.225];
 const DET_PATH = `${REL}/models/ch_PP-OCRv6_det_infer.onnx`;
 const REC_PATH = `${REL}/models/ch_PP-OCRv6_rec_infer.onnx`;
 const DICT_PATH = `${REL}/models/ppocrv6_dict.txt`;
+
+// WASM 后端 JS 代码与 wasm 二进制的运行时加载路径
+const WASM_JS_PATH = `${REL}/wasm/ort-wasm.min.js`;
+const WASM_BIN_PATH = `${REL}/wasm/ort-wasm-simd.wasm`;
 
 let detSession: ort.InferenceSession | null = null;
 let recSession: ort.InferenceSession | null = null;
@@ -57,23 +64,49 @@ async function readText(relPath: string): Promise<string> {
   return new TextDecoder('utf-8').decode(u);
 }
 
+async function readCode(relPath: string): Promise<string> {
+  if (!INVOKE) throw new Error('OCR 引擎未注入 invoke（插件未正确加载）');
+  return (await INVOKE('read_external_dep_file', { relativePath: relPath })) as string;
+}
+
+let _ort: any = null; // 运行时加载的 wasm ort 命名空间
+let _ortReady: Promise<void> | null = null;
+async function initOrt(): Promise<any> {
+  if (_ort) return _ort;
+  if (_ortReady) { await _ortReady; return _ort; }
+  _ortReady = (async () => {
+    const [code, wasmBuf] = await Promise.all([
+      readCode(WASM_JS_PATH),
+      readBytes(WASM_BIN_PATH),
+    ]);
+    _ort = new Function(code)();
+    // 预加载 wasm 二进制（默认 fetch 在 new Function 上下文中不可用）
+    const ab = wasmBuf.buffer.slice(wasmBuf.byteOffset, wasmBuf.byteOffset + wasmBuf.byteLength);
+    _ort.env.wasm.wasmBinary = ab;
+    _ort.env.wasm.numThreads = 1;
+    _ort.env.wasm.simd = true;
+  })();
+  await _ortReady;
+  return _ort!;
+}
+
 async function ensureInit(): Promise<void> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
-    ort.env.wasm.numThreads = 1;
-    ort.env.wasm.simd = true;
     const [det, rec, dictText] = await Promise.all([
       readBytes(DET_PATH),
       readBytes(REC_PATH),
       readText(DICT_PATH),
     ]);
-    detSession = await ort.InferenceSession.create(det, { executionProviders: ['webgl'] });
-    recSession = await ort.InferenceSession.create(rec, { executionProviders: ['webgl'] });
     dict = dictText
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
     if (dict.length === 0) throw new Error('OCR 字符表为空');
+
+    const ort = await initOrt();
+    detSession = await ort.InferenceSession.create(det, { executionProviders: ['wasm'] });
+    recSession = await ort.InferenceSession.create(rec, { executionProviders: ['wasm'] });
   })();
   return initPromise;
 }
@@ -259,7 +292,7 @@ async function recognize(dataUrl: string): Promise<string> {
     }
   }
   const detCHW = toCHW(canvasImg).data;
-  const detInput = new ort.Tensor('float32', detCHW, [1, 3, DET_CANVAS, DET_CANVAS]);
+  const detInput = new (_ort!.Tensor)('float32', detCHW, [1, 3, DET_CANVAS, DET_CANVAS]);
   const detOut = await detSession.run({ [detSession.inputNames[0]]: detInput });
   const detData = detOut[detSession.outputNames[0]].data as Float32Array;
   // 输出 [1,1,H,W] 概率图（det onnx 内含 sigmoid），取最后一维展开
@@ -293,7 +326,7 @@ async function recognize(dataUrl: string): Promise<string> {
     const ch = cropCanvas.height;
     const recW = Math.max(48, Math.min(320, Math.round((48 * cw) / ch)));
     const recCHW = resizeCHW(toCHW(cropImg, 'm1'), recW, 48);
-    const recInput = new ort.Tensor('float32', recCHW, [1, 3, 48, recW]);
+    const recInput = new (_ort!.Tensor)('float32', recCHW, [1, 3, 48, recW]);
     const recOut = await recSession.run({ [recSession.inputNames[0]]: recInput });
     const recData = recOut[recSession.outputNames[0]].data as Float32Array;
     const text = ctcDecode(recData, recOut[recSession.outputNames[0]].dims, dict.length);
@@ -305,4 +338,6 @@ async function recognize(dataUrl: string): Promise<string> {
 (window as any).__EXT_PADDLEOCR__ = {
   recognize,
   ready: () => !!detSession && !!recSession,
+  // 版本标记，用于 loadPaddleOcr() 判断缓存是否仍为当前构建（HMR 可能残留旧 IIFE）
+  _v: 2,
 };

@@ -13,6 +13,8 @@
 //   映射退化为恒等，彻底消除偏移；且「捕获区域 == 覆盖窗显示区域」，边缘必然完整覆盖，无白边、无截不到。
 
 use base64::Engine;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::ImageEncoder;
 use image::{DynamicImage, ExtendedColorType, ImageFormat, RgbaImage};
@@ -1955,13 +1957,15 @@ pub fn clipboard_write_image_from_path(_app: tauri::AppHandle, path: String) -> 
 /// 「写入后被本进程 / WebView2 清空」；若跨进程尺寸与 expect 一致 → 真实截图已成功存活。
 /// 跨进程读取剪贴板图片（模拟微信 Ctrl+V）：powershell Get-Clipboard -Format Image
 fn cross_process_image() -> String {
-    match std::process::Command::new("powershell")
-        .args([
+    let mut ps_cmd = std::process::Command::new("powershell");
+    ps_cmd.args([
             "-NoProfile",
             "-Command",
             "(Get-Clipboard -Format Image | ForEach-Object { \"$($_.Width)x$($_.Height)\" })",
-        ])
-        .output()
+        ]);
+    #[cfg(windows)]
+    ps_cmd.creation_flags(0x08000000);
+    match ps_cmd.output()
     {
         Ok(o) => {
             let out = String::from_utf8_lossy(&o.stdout).trim().to_string();

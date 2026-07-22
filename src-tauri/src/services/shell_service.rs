@@ -21,9 +21,11 @@ pub fn run_shell_command(command: String) -> Result<String, String> {
     #[cfg(not(target_os = "windows"))]
     let (shell, flag) = ("sh", "-c");
 
-    let output = Command::new(shell)
-        .args([flag, &command])
-        .output()
+    let mut c = Command::new(shell);
+    c.args([flag, &command]);
+    #[cfg(windows)]
+    c.creation_flags(0x08000000);
+    let output = c.output()
         .map_err(|e| format!("命令执行失败: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

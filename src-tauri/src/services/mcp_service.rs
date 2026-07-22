@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -145,6 +147,8 @@ impl McpStdioSession {
         for (k, v) in &cfg.env {
             cmd.env(k, v);
         }
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
         let child = cmd
             .spawn()
             .map_err(|e| format!("spawn MCP 服务器 '{}' 失败: {}", cfg.command, e))?;

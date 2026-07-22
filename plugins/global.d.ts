@@ -33,8 +33,56 @@ declare global {
         parent?: string;
         category?: string;
         desc?: string;
+        codename?: string;
         destroy?: () => void;
       }) => void;
+      get: (id: string) => {
+        id: string;
+        name: string;
+        iconName: string;
+        kind: 'module' | 'service';
+        visible: boolean;
+        component: React.ComponentType;
+        sidebar?: React.ComponentType;
+        settings?: React.ComponentType;
+        parent?: string;
+        category?: string;
+        desc?: string;
+        codename?: string;
+        destroy?: () => void;
+      } | undefined;
+      getAll: () => {
+        id: string;
+        name: string;
+        iconName: string;
+        kind: 'module' | 'service';
+        visible: boolean;
+        component: React.ComponentType;
+        sidebar?: React.ComponentType;
+        settings?: React.ComponentType;
+        parent?: string;
+        category?: string;
+        desc?: string;
+        codename?: string;
+        destroy?: () => void;
+      }[];
+      getChildren: (parentId: string) => {
+        id: string;
+        name: string;
+        iconName: string;
+        kind: 'module' | 'service';
+        visible: boolean;
+        component: React.ComponentType;
+        sidebar?: React.ComponentType;
+        settings?: React.ComponentType;
+        parent?: string;
+        category?: string;
+        desc?: string;
+        codename?: string;
+        destroy?: () => void;
+      }[];
+      unregister: (id: string) => void;
+      setVisible: (id: string, visible: boolean) => boolean;
     };
     __HOST_UI__: Record<string, React.ComponentType<Record<string, unknown>>>;
     __MUSIC_PLAYER__?: {

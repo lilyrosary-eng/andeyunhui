@@ -15,6 +15,8 @@
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::Arc;
@@ -116,20 +118,27 @@ pub async fn recording_self_test(app: AppHandle, duration_secs: Option<u32>) -> 
 
 fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     let ffmpeg_path = crate::services::recording_service::get_ffmpeg_path(app);
-    let ffmpeg_present = Command::new(&ffmpeg_path)
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok();
+    let ffmpeg_present = {
+        let mut cmd = Command::new(&ffmpeg_path);
+        cmd.arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        cmd.status().is_ok()
+    };
     if !ffmpeg_present {
         let r = json!({ "ok": false, "ffmpegPath": ffmpeg_path, "error": "ffmpeg 不可用（未找到或无法执行）" });
         diag_log(app, "REC", &format!("selftest ffmpeg 不可用: {}", ffmpeg_path));
         return r;
     }
-    let ffmpeg_version = Command::new(&ffmpeg_path)
-        .arg("-version")
-        .output()
+    let ffmpeg_version = {
+        let mut cmd = Command::new(&ffmpeg_path);
+        cmd.arg("-version");
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        cmd.output()
+    }
         .ok()
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)
@@ -204,15 +213,17 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
 
     // ffmpeg stderr 重定向到文件（最可靠，避免管道读取遗漏导致"stderr 为空"无法定位失败原因）
     let stderr_path = out_dir.join("ffmpeg_selftest_stderr.txt");
-    let mut child = match Command::new(&ffmpeg_path)
-        .args(&args)
+    let mut child_cmd = Command::new(&ffmpeg_path);
+    child_cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(match std::fs::File::create(&stderr_path) {
             Ok(f) => Stdio::from(f),
             Err(_) => Stdio::null(),
-        })
-        .spawn()
+        });
+    #[cfg(windows)]
+    child_cmd.creation_flags(0x08000000);
+    let mut child = match child_cmd.spawn()
     {
         Ok(c) => c,
         Err(e) => return json!({ "ok": false, "error": format!("启动 ffmpeg 失败: {}", e) }),
