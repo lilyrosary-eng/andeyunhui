@@ -36,8 +36,8 @@ pub(crate) mod gpu_nv12;
 /// WASAPI 回环音频采集（命名管道喂给 ffmpeg，见 audio_capture.rs）
 pub(crate) mod audio_capture;
 use audio_capture::{start_audio_capture, AudioCapture, AudioFormat};
-use gpu_nv12::{GpuNv12Converter, probe_nv12};
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
+use gpu_nv12::GpuNv12Converter;
+
 
 /// 录屏控制台窗口标签
 pub const RECORDER_WINDOW_LABEL: &str = "recorder-widget";
@@ -185,8 +185,8 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         let fw = frame.width();
         let fh = frame.height();
 
-        // 进程内 GPU RGBA→NV12（仅全帧 + 已探测驱动支持）：在捕获同 GPU 上直接完成色彩转换，
-        // 跳过 CPU readback 后的逐行拷贝 + ffmpeg 的 sws_scale，是消除「常态卡顿」的 CPU 瓶颈关键。
+        // 进程内 GPU RGBA→RGBA 缩放（仅全帧 + 已探测驱动支持）：在捕获同 GPU 上把帧缩到 1080p，
+        // 只读回 8MB，跳过 33MB 4K 读回 + CPU 缩放，是消除「卡顿/加速」的关键。
         // 失败（极少见，驱动不支持时探针已预先排除）则本帧不写，避免 RGBA 错格式损坏视频。
         let payload: Option<Arc<Vec<u8>>> = if self.gpu_nv12 {
             if self.gpu.is_none() && !self.gpu_failed {
@@ -202,7 +202,7 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                     Ok(g) => self.gpu = Some(g),
                     Err(e) => {
                         self.gpu_failed = true;
-                        eprintln!("[录屏] GPU NV12 转换器初始化失败，停止 GPU 路径: {e}");
+                        eprintln!("[录屏] GPU 缩放转换器初始化失败，停止 GPU 路径: {e}");
                     }
                 }
             }
@@ -228,7 +228,7 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                 if ok {
                     Some(buf)
                 } else {
-                    eprintln!("[录屏] GPU NV12 转换失败，本帧跳过");
+                    eprintln!("[录屏] GPU 缩放转换失败，本帧跳过");
                     None
                 }
             } else {
@@ -471,13 +471,12 @@ fn qsv_gpu_scale_ok(ffmpeg: &str) -> bool {
     })
 }
 
-/// 进程内 GPU RGBA→NV12（D3D11 Video Processor）能力探针，结果进程级缓存。
-/// 仅全帧录制且驱动支持时在 start_capture 启用；启用后捕获阶段直接在 GPU 完成色彩转换，
-/// 以 NV12 喂 ffmpeg，彻底去掉 CPU 端 sws_scale 与一半管道带宽（常态卡顿真源）。
-/// 探针用临时 D3D11 设备构建完整 Video Processor 管线并实测一次转换，避免对不支持的驱动误启用。
-static NV12_IN_PROCESS: OnceLock<bool> = OnceLock::new();
+/// 进程内 GPU RGBA→RGBA 缩放（D3D11 渲染管线）能力探针，结果进程级缓存。
+/// 委托给 gpu_nv12 模块的新探针（所有支持 D3D11 渲染管线的硬件均为 true，不依赖 Video Processor）。
+/// 启用后捕获阶段直接在 GPU 把帧缩到 1080p、只读回 8MB，彻底去掉 33MB 4K 读回与 CPU 缩放
+/// （「卡顿/加速」的真源）。
 pub(crate) fn nv12_in_process_supported() -> bool {
-    *NV12_IN_PROCESS.get_or_init(|| probe_nv12(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM))
+    gpu_nv12::nv12_in_process_supported()
 }
 
 /// 编码器是否在 ffmpeg 的 `-encoders` 列表中出现。
@@ -816,16 +815,12 @@ pub async fn start_recording(
             "rgba".into(),
             "-s".into(),
             format!("{}x{}", enc_w, enc_h),
-            // 真实时间戳（修复「加速回放 / 时长缩短」）：
-            // 输入 -r 会让 ffmpeg 按「帧计数」生成 PTS（n × 1/fps）；一旦写线程阻塞（GPU 色彩转换
-            // 预热、编码器排队、游戏抢 GPU 队列）——即便偶发——单位真实时间写出的帧数就少于 1/fps，
-            // 而 ffmpeg 仍按 n/fps 打点 → 视频时长被压缩成「快进」。改用 wallclock 后，ffmpeg 以
-            // 「管道读取（写出）时刻」为 PTS；配合 pacer 现按每帧真实呈现时间（≈ WGC SystemRelativeTime）
-            // 驱动写帧、绝不复用旧帧补帧 → PTS 严格等于真实呈现节奏：停顿期间无帧写出 → PTS 不前进 →
-            // 输出时长=真实墙钟，停顿表现为局部冻结（符合「真实时长、不被时间压缩」目标），高负载/
-            // 首帧预热均不再快进；稳态下 PTS≈k/fps，平滑丝滑。-r 仅作 rawvideo 帧率提示保留。
-            "-use_wallclock_as_timestamps".into(),
-            "1".into(),
+            // 恒定帧率（CFR）+ 真实墙钟节拍（与自测完全一致）：输入 -r 让 ffmpeg 按帧计数生成
+            // PTS（n × 1/fps）；由 pacer 以「真实墙钟」恒定 1/fps 节奏写出、采集跟不上时重复上一帧
+            // （保持时长精确、绝不快进），采集过快时 latest 槽只留最新自然丢帧 → 输出严格 CFR、
+            // 时长 = 真实录制墙钟。
+            // 注意：绝不使用 -use_wallclock_as_timestamps——它在带滤镜（如 vpp_qsv）的硬件编码管线下
+            // 不稳定，会把视频按「帧计数 + 节奏错位」打点，时长被压缩成「快进」（即本次自测仍加速的根因）。
             "-r".into(),
             fps.to_string(),
             "-i".into(),
@@ -1002,74 +997,72 @@ pub async fn start_recording(
         // 帧缓冲对象池：WGC 回调复用已分配的 Vec，避免 4K 每帧 ~33MB 分配触发分配器周期性停顿（卡顿主因）。
         let free: Arc<Mutex<Vec<Arc<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // 节拍器（pacer）线程：唯一持有 ffmpeg stdin。等首帧到达后，按「呈现时间」驱动写帧：
-        // 每帧携带 WGC 回调瞬间的真实呈现时间戳，仅当距上一写出帧 ≥ 1/fps（呈现时间）才写出并
-        // 降采样高刷源（165Hz→60fps），绝不复用旧帧补帧。配合输入 -use_wallclock_as_timestamps，
-        // ffmpeg 以「写出时刻墙钟」为 PTS = 真实呈现节奏 → 时长严格等于真实录制墙钟、零时间压缩；
-        // 捕获/编码偶发阻塞时表现为局部冻结（停顿=真实时长）而非「快进」。彻底消除「补帧堆积冻结 /
-        // 时间压缩」的卡顿感。暂停时不写（暂停段不计入录像）并重新锚定时间基准，避免恢复瞬间补帧爆发。
+        // 节拍器（pacer）线程：唯一持有 ffmpeg stdin。按「真实墙钟」恒定 1/fps 节奏写出，
+        // 与自测完全一致：采集跟不上时在相应位置重复上一帧（保持时长精确、绝不快进），
+        // 采集过快时 latest 槽只留最新自然丢帧；输出严格 CFR、时长 = 真实录制墙钟。
+        // 不使用 -use_wallclock_as_timestamps（在带滤镜的硬件编码管线下不稳定，会把视频
+        // 时间压缩成快进）。暂停段从时间基准扣除，恢复后节奏连续、无补帧爆发。
         let pacer_latest = latest.clone();
         let pacer_stop = stop_flag.clone();
         let pacer_paused = paused.clone();
-        // 目标帧间隔（墙钟）。pacer 以「呈现时间」驱动写帧：每帧携带 WGC 回调瞬间的
-        // 时间戳（≈ 真实呈现时刻 QPC）；仅当距上一写出帧 ≥ 1/fps（呈现时间）才写出并降采样
-        // 高刷源（165Hz→60fps），绝不复用旧帧补帧。配合输入 -use_wallclock_as_timestamps，
-        // ffmpeg 以「写出时刻墙钟」为 PTS = 真实呈现节奏 → 时长严格等于真实录制墙钟、零时间压缩；
-        // 捕获/编码偶发阻塞时表现为局部冻结（停顿=真实时长）而非快进。彻底消除「补帧堆积冻结 /
-        // 时间压缩」的卡顿感。高刷降采样 + 帧间隔双重门控，保证输出恒定目标 fps。
-        let frame_dur = std::time::Duration::from_nanos(1_000_000_000u64 / (fps.max(1) as u64));
+        let frame_dur = std::time::Duration::from_secs_f64(1.0 / (fps.max(1) as f64));
         let writer_thread = std::thread::spawn(move || {
-            // 等待首帧（期间若已 stop 则直接退出），并以首帧呈现时间锚定时间基准
-            let first_qpc = loop {
-                if pacer_stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                if let Some(f) = pacer_latest.lock().ok().and_then(|s| s.clone()) {
-                    break f.ts;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            };
-            let mut last_written_qpc = first_qpc;
-            let mut have_written = false;
-            let mut next_emit_wall = std::time::Instant::now();
+            let mut start: Option<std::time::Instant> = None; // 首帧到达才锚定，避免开场空闲计入时长
+            let mut last: Option<Arc<Vec<u8>>> = None; // 最近写出帧（采集跟不上时用于补帧）
+            let mut pause_begin: Option<std::time::Instant> = None;
+            let mut i: u64 = 0;
             loop {
                 if pacer_stop.load(Ordering::SeqCst) {
                     break;
                 }
                 if pacer_paused.load(Ordering::SeqCst) {
-                    // 暂停：不写帧；恢复后重新锚定时间基准，避免补帧爆发。
-                    if let Some(f) = pacer_latest.lock().ok().and_then(|s| s.clone()) {
-                        last_written_qpc = f.ts;
-                        have_written = true;
-                        next_emit_wall = std::time::Instant::now();
+                    // 暂停：不写帧；记录暂停起点，恢复时把暂停时长从时间基准扣除。
+                    if pause_begin.is_none() {
+                        pause_begin = Some(std::time::Instant::now());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(5));
                     continue;
-                }
-                // 取当前最新帧（Arc 克隆，零数据拷贝）。无新帧则跳过（不补帧 → 局部冻结，真实时长）。
-                let frame = pacer_latest.lock().ok().and_then(|s| s.clone());
-                if let Some(fr) = frame {
-                    let qpc = fr.ts;
-                    // 双重门控：① 距上一写出帧的呈现时间 ≥ 1/fps（降采样高刷、恒定目标 fps）；
-                    // ② 墙钟也已越过下一允许写出时刻（防瞬时突发）。两者皆满足才写出。
-                    let present_ok =
-                        !have_written || qpc.saturating_duration_since(last_written_qpc) >= frame_dur;
-                    let wall_ok = std::time::Instant::now() >= next_emit_wall;
-                    if present_ok && wall_ok {
-                        if stdin.write_all(&fr.data).is_err() {
-                            break; // ffmpeg 已退出/管道断开
-                        }
-                        last_written_qpc = qpc;
-                        have_written = true;
-                        next_emit_wall = std::time::Instant::now() + frame_dur;
-                    } else {
-                        // 帧过早（高刷超额帧）→ 丢弃，绝不复用旧帧补帧；短暂让出避免空转。
-                        std::thread::sleep(std::time::Duration::from_millis(1));
+                } else if let Some(pb) = pause_begin.take() {
+                    // 恢复：时间基准顺延暂停时长，并重置 last 为最新帧，避免恢复瞬间补帧爆发。
+                    if let Some(s) = pacer_latest.lock().ok().and_then(|s| s.clone()) {
+                        last = Some(s.data);
                     }
-                } else {
-                    // 无新帧：不写、不补帧（冻结而非快进）；短暂让出，捕获恢复后立即续写。
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    if let Some(st) = start {
+                        start = Some(st + pb.elapsed());
+                    }
                 }
+                // 取最新帧（Arc 克隆零拷贝）；尚无则沿用上一帧（保持）；都无则空等首帧。
+                let frame = pacer_latest.lock().ok().and_then(|s| s.clone()).map(|cf| cf.data);
+                let to_write = frame.or_else(|| last.clone());
+                if to_write.is_none() {
+                    // 首帧未到：睡到本拍目标时刻再试，不推进 i（避免首帧前的空闲被计入时长）。
+                    if let Some(st) = start {
+                        let target = st + frame_dur * (i as u32 + 1);
+                        let now = std::time::Instant::now();
+                        if target > now {
+                            std::thread::sleep(target - now);
+                        }
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    continue;
+                }
+                let data = to_write.unwrap();
+                if stdin.write_all(&data).is_err() {
+                    break; // ffmpeg 已退出/管道断开
+                }
+                last = Some(data); // 保持用于后续补帧
+                if start.is_none() {
+                    start = Some(std::time::Instant::now()); // 首帧锚定时间基准
+                }
+                // 真实墙钟节拍：睡到本帧应写出时刻，保证输出时长 = 真实录制墙钟，零时间压缩。
+                let st = start.unwrap();
+                let target = st + frame_dur * (i as u32 + 1);
+                let now = std::time::Instant::now();
+                if target > now {
+                    std::thread::sleep(target - now);
+                }
+                i += 1;
             }
             // 循环结束：stdin 于此作用域 drop，关闭管道触发 ffmpeg EOF
         });
