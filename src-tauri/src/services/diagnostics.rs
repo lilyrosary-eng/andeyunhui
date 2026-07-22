@@ -258,11 +258,13 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     // 系统声音（best-effort）：优先 ffmpeg 原生 WASAPI 回环采集（需全量 ffmpeg 含 wasapi demuxer），
     // 否则回退 Rust WASAPI 采集命名管道。
     let audio_wasapi: Option<String> = resolve_audio_input(&ffmpeg_path);
+    let mut audio_err: Option<String> = None;
     let audio_pipe: Option<(AudioCapture, String, AudioFormat)> = if audio_wasapi.is_none() {
         match start_audio_capture() {
             Ok(triple) => Some(triple),
             Err(e) => {
                 eprintln!("[诊断自测] 系统声音采集不可用，仅测视频: {e}");
+                audio_err = Some(e);
                 None
             }
         }
@@ -363,33 +365,28 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     let (tx, rx) = sync_channel::<Vec<u8>>(4);
     let counter = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
-    let _writer = thread::spawn(move || {
-        // 恒定节奏写出 + 帧保持：保证自测视频时长精确为 dur 秒（不加速）；
-        // 若采集跟不上则在相应位置重复上一帧，可直观反映掉帧/卡顿。
+    // 每帧字节数（RGBA 8MB@1080p）：用于构造首帧到达前的占位黑帧，保证写满 total 帧（不丢拍、
+    // 不压缩时长）。这是根治此前「自测视频被压成快进」的关键——原逻辑首帧前 continue 跳过写帧，
+    // 主线程又固定 sleep(dur) 后强行 drop(tx)，导致只挤进了少量帧 → 时长被压缩。
+    let bytes_per_frame = (out_w as usize) * (out_h as usize) * 4;
+    let writer = thread::spawn(move || {
+        // 恒定节奏写出 + 帧保持：保证自测视频时长精确为 dur 秒（不加速）。
+        // 采集跟不上则重复上一帧；首帧到达前用黑帧占位，确保写满 total 帧。
         let frame_dur = Duration::from_secs_f64(1.0 / fps as f64);
         let total = (dur as usize) * (fps as usize);
+        let black = vec![0u8; bytes_per_frame];
         let mut last: Option<Vec<u8>> = None;
         let start = std::time::Instant::now();
         for i in 0..total {
-            let frame = match rx.recv_timeout(frame_dur) {
+            let frame: &[u8] = match rx.recv_timeout(frame_dur) {
                 Ok(b) => {
-                    last = Some(b.clone());
-                    b
+                    last = Some(b);
+                    last.as_deref().unwrap()
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => match &last {
-                    Some(b) => b.clone(),
-                    None => {
-                        let target = start + frame_dur * ((i as u32) + 1);
-                        let now = std::time::Instant::now();
-                        if target > now {
-                            thread::sleep(target - now);
-                        }
-                        continue;
-                    }
-                },
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => last.as_deref().unwrap_or(&black),
                 Err(_) => break,
             };
-            if stdin.write_all(&frame).is_err() {
+            if stdin.write_all(frame).is_err() {
                 break;
             }
             let target = start + frame_dur * ((i as u32) + 1);
@@ -398,6 +395,7 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
                 thread::sleep(target - now);
             }
         }
+        // for 结束：stdin 于此作用域 drop，关闭管道触发 ffmpeg EOF
     });
     let tx_c = tx.clone();
     let stop_c = stop.clone();
@@ -440,10 +438,12 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
         }
     });
 
-    // 真正录 duration 秒
-    thread::sleep(Duration::from_secs(dur));
+    // 等 writer 写满 total 帧（节奏恒定、时长精确为 dur 秒），再收尾 ffmpeg。
+    // 不再用固定 sleep(dur) 后强行 drop(tx)——那样若首帧延迟到达会压缩写帧窗口，
+    // 导致只写了部分帧 → 视频时长被压成「快进」（即此前自测加速的根因）。
+    let _ = writer.join();
     stop.store(true, Ordering::SeqCst);
-    drop(tx);
+    drop(tx); // 关闭命名管道（音频采集线程随之结束）
     let _ = capture.join();
 
     // 等待 ffmpeg 退出（最多 6s）
@@ -490,6 +490,7 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
         "outH": out_h,
         "audio": had_audio,
         "audioFmt": audio_fmt_str,
+        "audioError": audio_err,
         "durationSecs": dur,
         "framesCaptured": frames,
         "outputBytes": out_bytes,
