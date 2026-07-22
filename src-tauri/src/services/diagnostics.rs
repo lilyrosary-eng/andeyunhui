@@ -18,8 +18,8 @@ use std::process::{Command, Stdio};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{sync_channel, SyncSender};
-use std::sync::Arc;
+use std::sync::mpsc::sync_channel;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -73,7 +73,7 @@ pub fn diag_log(app: &AppHandle, tag: &str, msg: &str) {
 /// 4K 全屏即降到 1080p），否则回落 4K RGBA。这样自测就是真实录制的忠实代理，
 /// 不会因“4K 全帧 RGBA 每帧 ~33MB CPU 拷贝”而比真实录制更卡，从而能正确反映“是否还卡”。
 struct TestCapture {
-    sender: SyncSender<Vec<u8>>,
+    cap_latest: Arc<Mutex<Option<Vec<u8>>>>,
     stop_flag: Arc<AtomicBool>,
     counter: Arc<AtomicUsize>,
     gpu_nv12: bool,
@@ -93,13 +93,13 @@ fn rgba_payload(frame: &mut Frame) -> Result<Vec<u8>, String> {
 }
 
 impl GraphicsCaptureApiHandler for TestCapture {
-    type Flags = (SyncSender<Vec<u8>>, Arc<AtomicBool>, Arc<AtomicUsize>, bool, bool, u32, u32);
+    type Flags = (Arc<Mutex<Option<Vec<u8>>>>, Arc<AtomicBool>, Arc<AtomicUsize>, bool, bool, u32, u32);
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (sender, stop_flag, counter, gpu_nv12, downscale_4k, out_w, out_h) = ctx.flags;
+        let (cap_latest, stop_flag, counter, gpu_nv12, downscale_4k, out_w, out_h) = ctx.flags;
         Ok(Self {
-            sender,
+            cap_latest,
             stop_flag,
             counter,
             gpu_nv12,
@@ -158,16 +158,42 @@ impl GraphicsCaptureApiHandler for TestCapture {
             rgba_payload(frame)?
         };
         self.counter.fetch_add(1, Ordering::SeqCst);
-        match self.sender.try_send(payload) {
-            Ok(()) => {}
-            Err(std::sync::mpsc::TrySendError::Full(_)) => { /* 背压丢帧 */ }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => capture_control.stop(),
+        // 写入共享最新帧槽（模拟真实录制捕获线程）；投帧节拍器线程从此槽取最新帧并按真实墙钟投出。
+        if let Ok(mut g) = self.cap_latest.lock() {
+            *g = Some(payload);
         }
         Ok(())
     }
 }
 
 /// 录屏自测：真正捕获 `duration_secs` 秒，统计帧数与输出，并捕获 ffmpeg stderr。
+// 解析 ffmpeg stderr 中最后一个 time=HH:MM:SS.ss（进度行），作为「输出视频时长」估计，
+// 用于自测探针计算加速比 / 音画差。stderr_tail 为完整日志，末行即最终时长。
+fn parse_ffmpeg_output_duration(stderr: &str) -> Option<f64> {
+    let mut last: Option<f64> = None;
+    for line in stderr.lines() {
+        if let Some(pos) = line.find("time=") {
+            let rest = line[pos + 5..].trim();
+            let mut secs = 0.0;
+            let mut ok = true;
+            for p in rest.split(':') {
+                let v: f64 = match p.parse() {
+                    Ok(x) => x,
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                };
+                secs = secs * 60.0 + v;
+            }
+            if ok {
+                last = Some(secs);
+            }
+        }
+    }
+    last
+}
+
 #[tauri::command]
 pub async fn recording_self_test(app: AppHandle, duration_secs: Option<u32>) -> Value {
     tauri::async_runtime::spawn_blocking(move || -> Value {
@@ -282,6 +308,9 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
         pix_fmt.into(),
         "-s".into(),
         format!("{}x{}", out_w, out_h),
+        // 与真实录制一致：用 -fps_mode cfr 恒定帧率打点，从根本杜绝加速/快进（plain 编码器下）
+        // —— 此前 passthrough 按写出计数打点、编码器慢→帧数不足→时长被压成快进；wallclock 按
+        // 管道读取墙钟打点、编码背压突发读取→卡顿/音画差。cfr 二者皆避。
         "-r".into(),
         fps.to_string(),
         "-i".into(),
@@ -302,15 +331,23 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
             apath.clone(),
         ]);
     }
+    // 自测与真实录制走完全一致的 ffmpeg 管线（无滤镜，plain 硬件编码器），作为忠实诊断代理。
+    // 2026-07-22 受控实验确认：本机 h264_qsv/nvenc plain（喂系统内存帧、无 hwupload/vpp_qsv 滤镜）
+    // 完全能出片；此前自测/录制 0KB 的真因是音频命名管道静音断流导致的双输入死锁，已在
+    // audio_capture.rs 用「静音补帧」根治，与编码器/滤镜/fps_mode 无关。
     match encoder {
-        Some("h264_nvenc") => args.extend([
-            "-c:v".into(), "h264_nvenc".into(), "-preset".into(), "p1".into(),
-            "-rc".into(), "constqp".into(), "-qp".into(), "23".into(), "-pix_fmt".into(), "yuv420p".into(),
-        ]),
-        Some("h264_qsv") => args.extend([
-            "-c:v".into(), "h264_qsv".into(), "-preset".into(), "veryfast".into(),
-            "-global_quality".into(), "23".into(), "-pix_fmt".into(), "yuv420p".into(),
-        ]),
+        Some("h264_nvenc") => {
+            args.extend([
+                "-c:v".into(), "h264_nvenc".into(), "-preset".into(), "p1".into(),
+                "-rc".into(), "constqp".into(), "-qp".into(), "23".into(), "-pix_fmt".into(), "yuv420p".into(),
+            ]);
+        }
+        Some("h264_qsv") => {
+            args.extend([
+                "-c:v".into(), "h264_qsv".into(), "-preset".into(), "veryfast".into(),
+                "-global_quality".into(), "23".into(), "-pix_fmt".into(), "yuv420p".into(),
+            ]);
+        }
         Some("h264_amf") => args.extend([
             "-c:v".into(), "h264_amf".into(), "-quality".into(), "speed".into(),
             "-rc".into(), "cqp".into(), "-qp_p".into(), "23".into(), "-qp_b".into(), "23".into(),
@@ -322,8 +359,9 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
         ]),
     }
     // 音视频映射：视频第 0 路、音频第 1 路（若有）；-shortest 保证视频 EOF 后 ffmpeg 退出。
-    // 采用恒定帧率（pacer 已按 1/fps 恒定写出 + 帧保持），不使用 wallclock，确保视频时长精确为 dur 秒。
-    args.extend(["-fps_mode".into(), "passthrough".into()]);
+    // 用 cfr（与真实录制一致）：ffmpeg 按 -r fps 均匀打点并自动复制/丢帧对齐真实时长，自测
+    // 写固定帧数 total=dur*fps，输出时长精确 = dur 秒，且对编码器背压稳健（不快进、不卡顿）。
+    args.extend(["-fps_mode".into(), "cfr".into()]);
     if audio_wasapi.is_some() || audio_pipe.is_some() {
         args.extend([
             "-map".into(), "0:v:0".into(),
@@ -362,42 +400,57 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
             return json!({ "ok": false, "error": "无法获取 ffmpeg stdin" });
         }
     };
-    let (tx, rx) = sync_channel::<Vec<u8>>(4);
     let counter = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
-    // 每帧字节数（RGBA 8MB@1080p）：用于构造首帧到达前的占位黑帧，保证写满 total 帧（不丢拍、
-    // 不压缩时长）。这是根治此前「自测视频被压成快进」的关键——原逻辑首帧前 continue 跳过写帧，
-    // 主线程又固定 sleep(dur) 后强行 drop(tx)，导致只挤进了少量帧 → 时长被压缩。
+    // 共享最新帧槽：捕获线程(TestCapture)写入，投帧节拍器(producer)读取最新帧并按真实墙钟投出。
+    // 这把「采集」与「投帧节奏」解耦，真实模拟真实录制管线；cfr + 真实墙钟投帧 → 输出时长严格
+    // = 真实录制墙钟、绝不快进。同时暴露编码器吞吐（consumer 写 stdin 被编码器门控的耗时）。
+    let cap_latest: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
     let bytes_per_frame = (out_w as usize) * (out_h as usize) * 4;
-    let writer = thread::spawn(move || {
-        // 恒定节奏写出 + 帧保持：保证自测视频时长精确为 dur 秒（不加速）。
-        // 采集跟不上则重复上一帧；首帧到达前用黑帧占位，确保写满 total 帧。
+    let total = (dur as usize) * (fps as usize);
+    // —— producer（投帧节拍器）：真实墙钟恒定 1/fps 投帧，永不碰 stdin、永不被编码器门控 ——
+    let prod_latest = cap_latest.clone();
+    let prod_start = std::time::Instant::now();
+    // 通道容量=帧数上限（短自测全缓冲，producer 恒定投帧不被编码器门控）；仅超长自测才可能丢瞬时帧。
+    let (ftx, frx) = sync_channel::<Vec<u8>>((total).min(480).max(8));
+    let producer = thread::spawn(move || {
         let frame_dur = Duration::from_secs_f64(1.0 / fps as f64);
-        let total = (dur as usize) * (fps as usize);
         let black = vec![0u8; bytes_per_frame];
         let mut last: Option<Vec<u8>> = None;
         let start = std::time::Instant::now();
         for i in 0..total {
-            let frame: &[u8] = match rx.recv_timeout(frame_dur) {
-                Ok(b) => {
-                    last = Some(b);
-                    last.as_deref().unwrap()
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => last.as_deref().unwrap_or(&black),
-                Err(_) => break,
+            // 取最新采集帧（无则黑帧占位），保证投满 total 帧、不压缩时长
+            let frame: Vec<u8> = {
+                let g = prod_latest.lock().unwrap();
+                g.clone().or_else(|| last.clone()).unwrap_or_else(|| black.clone())
             };
-            if stdin.write_all(frame).is_err() {
-                break;
-            }
+            last = Some(frame.clone());
+            // 非阻塞投帧：通道满（仅超长自测）丢瞬时帧；producer 恒定真实墙钟节奏，永不被编码器门控，
+            // 从而输出时长严格=真实墙钟、暴露真实编码器吞吐（writer 排空耗时）。
+            let _ = ftx.try_send(frame);
             let target = start + frame_dur * ((i as u32) + 1);
             let now = std::time::Instant::now();
             if target > now {
                 thread::sleep(target - now);
+            } else {
+                // 编码背压导致落后：睡一个 frame_dur 恢复稳定节奏（配合 -fps_mode cfr，
+                // ffmpeg 据真实到达自动复制/丢帧对齐时长，视频时长恒等于真实墙钟、不快进）。
+                thread::sleep(frame_dur);
             }
         }
-        // for 结束：stdin 于此作用域 drop，关闭管道触发 ffmpeg EOF
+        // for 结束 → ftx drop → consumer 收完剩余帧后 EOF
     });
-    let tx_c = tx.clone();
+    // —— consumer（写入线程）：唯一持有 ffmpeg stdin，按编码器吞吐写出（被编码器门控，正常）——
+    let writer_start = std::time::Instant::now();
+    let writer = thread::spawn(move || {
+        while let Ok(frame) = frx.recv() {
+            if stdin.write_all(&frame).is_err() {
+                break;
+            }
+        }
+        // 循环退出 → stdin 于此作用域末尾 drop，关闭管道触发 ffmpeg EOF
+    });
+    let cap_latest_c = cap_latest.clone();
     let stop_c = stop.clone();
     let counter_c = counter.clone();
     // 自测用适度连续投帧：最小更新间隔 40ms（≈25fps）。
@@ -406,7 +459,7 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     // 会吃满整机 CPU（真实录屏卡顿、区域选择覆盖窗饿死的根因）。40ms 对一次 3s 自测足够轻量。
     // 平台不支持 Custom 时退回 Default。monitor 为 Copy，可复用。
     let capture = thread::spawn(move || {
-        let flags = (tx_c, stop_c, counter_c, gpu_nv12, downscale_4k, out_w, out_h);
+        let flags = (cap_latest_c, stop_c, counter_c, gpu_nv12, downscale_4k, out_w, out_h);
         let settings = Settings::new(
             monitor,
             CursorCaptureSettings::Default,
@@ -438,12 +491,12 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
         }
     });
 
-    // 等 writer 写满 total 帧（节奏恒定、时长精确为 dur 秒），再收尾 ffmpeg。
-    // 不再用固定 sleep(dur) 后强行 drop(tx)——那样若首帧延迟到达会压缩写帧窗口，
-    // 导致只写了部分帧 → 视频时长被压成「快进」（即此前自测加速的根因）。
+    // 先等投帧节拍器投满 total 帧（真实墙钟节奏，耗时≈真实录制时长），再等写入线程排空通道
+    // （此耗时=编码器实际吞吐，直接暴露编码器是否跟不上目标 fps）。两端都结束后收尾 ffmpeg。
+    let _ = producer.join();
     let _ = writer.join();
     stop.store(true, Ordering::SeqCst);
-    drop(tx); // 关闭命名管道（音频采集线程随之结束）
+    // 注：自测不再依赖命名管道关闭来结束音频采集（音频走 WASAPI 命名管道时，capture 线程结束即可）。
     let _ = capture.join();
 
     // 等待 ffmpeg 退出（最多 6s）
@@ -472,6 +525,63 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     let out_bytes = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
     let frames = counter.load(Ordering::SeqCst);
 
+    // —— 三项探针指标（加速 / 音画差 / 编码器吞吐），用于直接打报告判断录制质量 ——
+    // 真实录制墙钟时长 = 投帧节拍器按真实 1/fps 投满 total 帧的耗时（= 视频在「无加速」下应有的
+    // 时长，也是音频按墙钟实时对应的时长）。这是加速比的正确基准——此前误用「预期 dur」导致快进被掩盖。
+    let producer_wall_secs = prod_start.elapsed().as_secs_f64();
+    // 写入线程排空通道的耗时 = 编码器实际吞吐时间（被编码器门控），直接暴露编码器能否跟上目标 fps。
+    let writer_wall_secs = writer_start.elapsed().as_secs_f64();
+    // ffmpeg 输出视频时长（解析 stderr 末行 time=）。
+    let out_dur = parse_ffmpeg_output_duration(&stderr_tail);
+    // 加速比 = 输出时长 / 真实录制墙钟。≈1 正常；<0.95 = 被压成快进（加速）；>1.05 = 偏慢。
+    let acceleration_ratio = out_dur.map(|o| o / producer_wall_secs.max(1e-6));
+    // 编码器实际吞吐（fps）= 帧数 / 写入线程耗时。偏低即编码器带不动目标 fps → 卡顿/快进根因。
+    let encoder_speed = if writer_wall_secs > 0.0 {
+        total as f64 / writer_wall_secs
+    } else {
+        0.0
+    };
+    // 投帧节拍器侧采集帧率（≈目标 fps，因 producer 恒定投帧）。用于交叉验证管线是否正常投满。
+    let captured_fps = if producer_wall_secs > 0.0 {
+        total as f64 / producer_wall_secs
+    } else {
+        0.0
+    };
+    // 音画差：音频按墙钟实时（≈ producer_wall_secs），视频按输出时长；差值即不同步秒数。
+    let av_sync_delta = match out_dur {
+        Some(o) => Some((o - producer_wall_secs).abs()),
+        None => None,
+    };
+    // 卡顿/快进代理：目标 fps 与编码器实际吞吐的缺口（缺口大 = 编码器带不动、回放会顿或快进）。
+    let fps_gap = (fps as f64) - encoder_speed;
+    let verdict = {
+        let mut v = Vec::new();
+        if let Some(r) = acceleration_ratio {
+            if r < 0.95 {
+                v.push(format!("视频加速 {:.1}%", (1.0 - r) * 100.0));
+            } else if r > 1.05 {
+                v.push(format!("视频偏慢 {:.1}%", (r - 1.0) * 100.0));
+            } else {
+                v.push("时长正确(无加速)".to_string());
+            }
+        } else {
+            v.push("时长未知".to_string());
+        }
+        if let Some(d) = av_sync_delta {
+            if d < 0.15 {
+                v.push("音画同步".to_string());
+            } else {
+                v.push(format!("音画差 {:.2}s", d));
+            }
+        }
+        if fps_gap > fps as f64 * 0.1 {
+            v.push(format!("编码器吞吐不足({:.0}/{:.0}fps,会卡顿/快进风险)", encoder_speed, fps));
+        } else {
+            v.push("编码器吞吐达标".to_string());
+        }
+        v.join("；")
+    };
+
     // ffmpeg 已退出（或超时）：关闭系统声音采集管道与线程，释放 COM/句柄。
     if let Some((mut a, _, _)) = audio_pipe {
         a.stop();
@@ -493,6 +603,16 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
         "audioError": audio_err,
         "durationSecs": dur,
         "framesCaptured": frames,
+        "capturedFps": format!("{:.1}", captured_fps),
+        "targetFps": fps,
+        "encoderSpeedFps": format!("{:.1}", encoder_speed),
+        "captureWallSecs": format!("{:.3}", producer_wall_secs),
+        "outputDurationSecs": out_dur.map(|o| format!("{:.3}", o)).unwrap_or_default(),
+        "accelerationRatio": acceleration_ratio.map(|r| format!("{:.3}", r)).unwrap_or_default(),
+        "avSyncDeltaSecs": av_sync_delta.map(|d| format!("{:.3}", d)).unwrap_or_default(),
+        "fpsGap": format!("{:.1}", fps_gap),
+        "nvencReason": crate::services::recording_service::nvenc_skip_reason().unwrap_or_default(),
+        "verdict": verdict,
         "outputBytes": out_bytes,
         "ffmpegExitedOk": exited_ok,
         "ffmpegExitCode": exit_code,
