@@ -974,17 +974,15 @@ pub async fn start_screenshot(
         Err(_) => return Err("无法获取缩放比".into()),
     };
 
-    // 先枚举窗口（轻量、~几 ms），让窗口识别在选区阶段立即可用；重捕获放后台。
-    // 注意：list_windows 必须早于 overlay 显示，否则「透明待加载态」期间 windows 为空，
-    // 导致鼠标悬停无法高亮窗口（只能框选全屏）。
-    let windows_now = list_windows(app.clone()).unwrap_or_default();
-
-    // 先推送 meta 并立即可见（前端进入透明待加载态，选区交互 + 窗口识别立即可用）。
+    // 先推送 meta（窗口列表留空）并立即可见：让覆盖窗与十字光标「秒显」，选区交互立即可用；
+    // 窗口枚举较重（EnumWindows 走整窗树，首次调用常因 COM/Win32 冷启动耗时数秒），
+    // 若同步阻塞在 show 之前，会直接拖住十字光标出现 → 即用户反馈的「截图启动卡顿、光标丢失」。
+    // 故先显示、再后台枚举，枚举完成后由独立事件 screenshot-windows 补种子（前端合并到 data.windows）。
     let init_payload = json!({
         "ox": ox,
         "oy": oy,
         "scale": scale,
-        "windows": windows_now,
+        "windows": [],
         "noteId": "",
     });
     let _ = overlay.emit("screenshot-start", &init_payload);
@@ -998,11 +996,16 @@ pub async fn start_screenshot(
         s.showing = true;
     }
 
-    // 重捕获放后台线程执行；窗口枚举已完成（windows_now），完成后推送 screenshot-ready 注入冻结图。
-    // 期间选区交互 + 窗口识别已在透明覆盖窗上进行，用户无需等待捕获完成即可框选/识别窗口。
+    // 重捕获 + 窗口枚举放后台线程执行：先枚举（补种子窗口列表），再捕获全屏注入冻结图。
+    // 期间覆盖窗已可见、十字光标与框选立即可用；窗口高亮在 screenshot-windows 到达后即生效。
     let app2 = app.clone();
-    let windows_for_ready = windows_now.clone();
     std::thread::spawn(move || {
+        // 后台枚举窗口（替代原 show 前同步阻塞），完成后单独推送，绝不拖住覆盖窗显示。
+        let windows_for_ready = list_windows(app2.clone()).unwrap_or_default();
+        if let Some(w) = app2.get_webview_window("screenshot-overlay") {
+            let _ = w.emit("screenshot-windows", json!({ "windows": windows_for_ready }));
+        }
+
         let full_result = std::thread::scope(|s| {
             let capture_handle = s.spawn(|| capture_full(ox, oy, ow, oh));
             capture_handle.join().unwrap_or(Err("捕获线程 panic".into()))
