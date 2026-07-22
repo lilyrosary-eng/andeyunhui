@@ -64,6 +64,7 @@ target/
 fe_build*.txt
 cargo_check.txt
 _diff_light.txt
+build_err.txt
 
 #记录 / 研究计划 / 路线图（本地设计笔记，不随仓库发布）
 ROADMAP.md
