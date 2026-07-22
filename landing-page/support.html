@@ -234,46 +234,105 @@
             margin: 1.5rem 0 1rem;
             text-align: center;
         }
+
         .qr-section h3 {
             font-size: 1.1rem;
             font-weight: 600;
             margin-bottom: 0.3rem;
         }
+
         .qr-section .sub {
             font-size: 0.85rem;
             color: var(--text-secondary);
             margin-bottom: 1.2rem;
         }
+
         .qr-grid {
             display: flex;
             justify-content: center;
             gap: 2rem;
             flex-wrap: wrap;
         }
+
         .qr-item {
-            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            flex-shrink: 0;
         }
-        .qr-item .qr-placeholder {
-            width: 140px;
-            height: 140px;
-            background: var(--bg);
+
+        /* ===== 二维码卡片（支持悬停放大 + 遮挡） ===== */
+        .qr-wrapper {
+            position: relative;
+            width: 160px;
+            height: 160px;
             border-radius: var(--radius);
-            border: 2px dashed var(--border);
+            overflow: visible;
+            cursor: pointer;
+            border: 2px solid var(--border);
+            background: var(--surface);
+            transition:
+                transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
+                box-shadow 0.35s ease,
+                border-color 0.35s ease;
+            will-change: transform;
+            z-index: 1;
+        }
+
+        /* ===== 悬停放大 ===== */
+        .qr-wrapper:hover {
+            transform: scale(1.6) rotate(1deg);
+            border-color: var(--accent);
+            box-shadow: 0 20px 48px rgba(184, 169, 201, 0.30);
+            z-index: 10;
+        }
+
+        .qr-wrapper img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+            background: #fff;
+            border-radius: calc(var(--radius) - 4px);
+        }
+
+        .qr-wrapper .qr-placeholder {
+            width: 100%;
+            height: 100%;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
+            background: var(--surface-hover);
             color: var(--text-muted);
             font-size: 0.8rem;
-            gap: 6px;
-            margin-bottom: 0.5rem;
+            gap: 8px;
+            border-radius: calc(var(--radius) - 4px);
         }
-        .qr-item .qr-placeholder i {
-            font-size: 2rem;
+
+        .qr-wrapper .qr-placeholder i {
+            font-size: 2.4rem;
+            color: var(--accent);
         }
-        .qr-item .label {
+
+        /* ===== 卡片下方小标签 ===== */
+        .qr-label {
+            margin-top: 0.5rem;
             font-size: 0.85rem;
             font-weight: 500;
+            color: var(--text-secondary);
+            letter-spacing: 0.5px;
+        }
+
+        /* ===== 响应式：小屏缩小卡片 ===== */
+        @media (max-width: 640px) {
+            .qr-wrapper {
+                width: 120px;
+                height: 120px;
+            }
+            .qr-grid {
+                gap: 1rem;
+            }
         }
 
         /* ===== 感谢语 ===== */
@@ -423,18 +482,24 @@
         <!-- ===== 微信/支付宝扫码 ===== -->
         <div class="qr-section">
             <h3> 微信 / 支付宝</h3>
-            <p class="sub">扫码即可赞助，金额随喜</p>
+            <p class="sub">悬停二维码可放大预览，扫码即可赞助，金额随喜</p>
             <div class="qr-grid">
+                <!-- 微信 -->
                 <div class="qr-item">
-                    <img src="wxsupport.png" alt="微信收款码" style="width:140px;height:140px;border-radius:12px;object-fit:contain;" />
-                    <div class="label">微信</div>
-                </div>
-                <div class="qr-item">
-                    <div class="qr-placeholder">
-                        <i class="lucide lucide-qr-code"></i>
-                        <span>支付宝收款码</span>
+                    <div class="qr-wrapper">
+                        <img src="wxsupport.png" alt="微信收款码" />
+                        <div class="qr-label">微信</div>
                     </div>
-                    <div class="label">支付宝</div>
+                </div>
+                <!-- 支付宝 -->
+                <div class="qr-item">
+                    <div class="qr-wrapper">
+                        <div class="qr-placeholder">
+                            <i class="lucide lucide-qr-code"></i>
+                            <span>支付宝收款码</span>
+                        </div>
+                        <div class="qr-label">支付宝</div>
+                    </div>
                 </div>
             </div>
             <p style="font-size:0.8rem;color:var(--text-muted);margin-top:0.8rem;">
