@@ -6,6 +6,27 @@ import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 import { api, type ImportedFile } from '@/lib/api';
 
+// 本地 PaddleOCR 引擎懒加载（与 CodeMirror/TipTap 同模式：read_external_dep_file + new Function，
+// 在真实 window 全局作用域执行，挂载到 window.__EXT_PADDLEOCR__）。
+let _paddleOcrLoading: Promise<any> | null = null;
+async function loadPaddleOcr(): Promise<any> {
+  const w = window as any;
+  // 版本标记 _v 防御 Vite HMR 残留的旧 IIFE（新版是运行时加载 WASM vs 旧版内联 WebGL）
+  if (w.__EXT_PADDLEOCR__?._v === 2) return w.__EXT_PADDLEOCR__;
+  // 清除可能的旧版缓存
+  delete w.__EXT_PADDLEOCR__;
+  _paddleOcrLoading = null;
+
+  _paddleOcrLoading = (async () => {
+    const code = await invoke<string>('read_external_dep_file', { relativePath: '全局/paddleocr/index.js' });
+    if (!code) throw new Error('本地 OCR 引擎未找到（external-deps/全局/paddleocr/index.js 不存在）');
+    new Function(code)();
+    if (!w.__EXT_PADDLEOCR__) throw new Error('OCR 引擎已读取但挂载失败（window.__EXT_PADDLEOCR__ 未定义）');
+    return w.__EXT_PADDLEOCR__;
+  })();
+  return _paddleOcrLoading;
+}
+
 // 刷新订阅：App.tsx 在窗口拖入文件后调用 emitDropzoneChange() 触发本面板重新拉取后端列表
 // （解析抽取的图片不会写 localStorage，必须回到文件系统真实扫描，因此面板直接读后端）。
 const listeners = new Set<() => void>();
@@ -172,6 +193,20 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     } catch (err) {
       console.error('[OCR] 云端识别失败:', err);
       const msg = String(err);
+      // 未配置 API Key 时降级到本地 PaddleOCR 引擎
+      if (msg.includes('未配置') || msg.includes('API Key')) {
+        try {
+          const local = await loadPaddleOcr();
+          const du = imgUrls[file.storedPath] || await api.readDropzoneBase64(file.storedPath);
+          const t = await local.recognize(du);
+          if (t && t.trim()) {
+            setAiResults(prev => ({ ...prev, [file.storedPath]: { kind: 'ocr', text: t } }));
+            return;
+          }
+        } catch (e2) {
+          console.warn('[OCR] 本地识别失败:', e2);
+        }
+      }
       const hint = /不支持|support|image|vision|400|模型/i.test(msg)
         ? ' — 可在「全局设置 → 模型」确认已为 OCR 单独指定「视觉模型」（对话模型往往不支持图片）'
         : '';
@@ -563,9 +598,9 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
       const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
       if (!m) throw new Error('图片数据格式错误');
       // API 优先：优先调用云端 AI 视觉 OCR（质量更高、无需本机推理）。
-      // 仅当「未配置 API Key」（即无可用 API）时，才降级到本地 PaddleOCR 依赖包
-      // （纯前端 WebGL 推理，离线可用）。本地识别仍失败则抛错，不再回云端。
-      // 本地提供方由 ocr 插件在共享 registry 上登记（window.__PLUGIN_REGISTRY__.__ocrLocal）。
+      // 仅当「未配置 API Key」（即无可用 API）时，才降级到本地 PaddleOCR 引擎
+      // （纯前端 WebGL 推理，离线可用）。本地引擎通过 loadPaddleOcr() 惰性加载
+      // （read_external_dep_file + new Function，挂载到 window.__EXT_PADDLEOCR__）。
       try {
         const res = await api.aiVisionOcr(m[2], m[1]);
         setText(res || '');
@@ -574,17 +609,15 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
         const msg = String(apiErr ?? '');
         const noApi = msg.includes('未配置') || msg.includes('API Key');
         if (!noApi) throw apiErr; // 其余错误（网络/鉴权/超时等）不降级，直接抛出
-        const local = (window as any).__PLUGIN_REGISTRY__?.__ocrLocal;
-        if (local?.recognize) {
-          try {
-            const text = await local.recognize(url);
-            if (text && text.trim()) {
-              setText(text);
-              return;
-            }
-          } catch (e) {
-            console.warn('[OCR] 本地识别失败：', e);
+        try {
+          const local = await loadPaddleOcr();
+          const t = await local.recognize(url);
+          if (t && t.trim()) {
+            setText(t);
+            return;
           }
+        } catch (e) {
+          console.warn('[OCR] 本地识别失败：', e);
         }
         throw apiErr; // 无 API 且本地也不可用，抛出原始「未配置」提示
       }

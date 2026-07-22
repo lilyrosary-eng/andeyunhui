@@ -5,6 +5,7 @@ import { pluginDiagnostics, type DiagnosticEntry } from '@/core/pluginDiagnostic
 import { PluginIcon } from '@/components/PluginIcon';
 import { api, type PluginManifest } from '@/lib/api';
 import { logger } from '@/lib/logger';
+import type { PluginRegistry } from '@/core/pluginRegistry';
 import { createSandboxGlobals, executeInSandbox } from '@/core/pluginSandbox';
 
 export function ExtensionManagerPanel() {
@@ -14,7 +15,7 @@ export function ExtensionManagerPanel() {
     pluginDiagnostics.getSnapshot.bind(pluginDiagnostics)
   );
 
-  const registry = window.__PLUGIN_REGISTRY__;
+  const registry = window.__PLUGIN_REGISTRY__ as PluginRegistry;
   const pluginHot = (window as unknown as { __pluginHot__?: { load: (m: PluginManifest) => Promise<void>; unload: (id: string) => void; reload: (id: string) => Promise<void> } }).__pluginHot__;
 
   // tick：订阅插件注册表事件，重载/卸载后强制重算列表
@@ -160,7 +161,7 @@ export function ExtensionManagerPanel() {
       setInstalledPlugins(result.valid);
       for (const m of result.valid) {
         // 只加载 visible=true 且未在 registry 中的插件
-        if (!registry?.get(m.id) && m.visible !== false) {
+        if (!registry.get(m.id) && m.visible !== false) {
           try {
             const scriptText = await api.readPluginFile(m.id, m.entry);
             const sandbox = createSandboxGlobals(m.id, registry, m.deps);

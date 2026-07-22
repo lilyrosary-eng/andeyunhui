@@ -5,6 +5,8 @@
 // 进程枚举、剪贴板读写、图片格式转换、文档(MD<->HTML)转换、
 // 以及调用系统 ffmpeg 进行音视频转码。
 use serde::Serialize;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 // ============ t15 环境变量 ============
 #[tauri::command]
@@ -319,11 +321,13 @@ fn get_ffmpeg_path(app: &tauri::AppHandle) -> String {
 #[tauri::command]
 pub fn check_ffmpeg(app: tauri::AppHandle) -> bool {
     let path = get_ffmpeg_path(&app);
-    std::process::Command::new(&path)
-        .arg("-version")
+    let mut cmd = std::process::Command::new(&path);
+    cmd.arg("-version")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    cmd.status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -336,13 +340,17 @@ pub fn transcode_media(
 ) -> Result<String, String> {
     let ffmpeg_path = get_ffmpeg_path(&app);
     // 检查 ffmpeg 是否可用（用解析出的路径，不回退系统 PATH）
-    let ok = std::process::Command::new(&ffmpeg_path)
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let ok = {
+        let mut cmd = std::process::Command::new(&ffmpeg_path);
+        cmd.arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        cmd.status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
     if !ok {
         return Err(
             "未检测到 ffmpeg，无法转码。请确保 external-deps/全局/ffmpeg/ffmpeg.exe 存在。"
@@ -356,14 +364,16 @@ pub fn transcode_media(
     let ext = output_format.to_lowercase();
     let out_path = path.with_extension(&ext);
     let out_str = out_path.to_string_lossy().to_string();
-    let status = std::process::Command::new(&ffmpeg_path)
-        .arg("-y")
+    let mut ff_cmd = std::process::Command::new(&ffmpeg_path);
+    ff_cmd.arg("-y")
         .arg("-i")
         .arg(&input_path)
         .arg(&out_str)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    ff_cmd.creation_flags(0x08000000);
+    let status = ff_cmd.status()
         .map_err(|e| format!("启动 ffmpeg 失败: {}", e))?;
     if !status.success() {
         return Err("ffmpeg 转码失败，请检查输入文件格式或安装完整的 ffmpeg。".to_string());
@@ -379,15 +389,19 @@ pub fn transcode_media(
 pub async fn audio_to_midi(app: tauri::AppHandle, input_path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let ffmpeg_path = get_ffmpeg_path(&app);
-        if !std::process::Command::new(&ffmpeg_path)
-            .arg("-version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
         {
-            return Err("未检测到 ffmpeg，无法预处理音频。".to_string());
+            let mut ff_cmd = std::process::Command::new(&ffmpeg_path);
+            ff_cmd.arg("-version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            ff_cmd.creation_flags(0x08000000);
+            if !ff_cmd.status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                return Err("未检测到 ffmpeg，无法预处理音频。".to_string());
+            }
         }
         let input = std::path::Path::new(&input_path);
         if !input.exists() {
@@ -396,25 +410,32 @@ pub async fn audio_to_midi(app: tauri::AppHandle, input_path: String) -> Result<
         // 归一化到单声道 44.1k wav（basic-pitch 推荐输入）
         let wav = input.with_extension("midi_tmp.wav");
         let wav_str = wav.to_string_lossy().to_string();
-        let st = std::process::Command::new(&ffmpeg_path)
-            .args(["-y", "-i", &input_path, "-ar", "44100", "-ac", "1", &wav_str])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| format!("ffmpeg 预处理失败: {}", e))?;
-        if !st.success() {
-            let _ = std::fs::remove_file(&wav);
-            return Err("ffmpeg 预处理音频失败，请检查输入格式。".to_string());
+        {
+            let mut ff_cmd = std::process::Command::new(&ffmpeg_path);
+            ff_cmd.args(["-y", "-i", &input_path, "-ar", "44100", "-ac", "1", &wav_str])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            ff_cmd.creation_flags(0x08000000);
+            let st = ff_cmd.status()
+                .map_err(|e| format!("ffmpeg 预处理失败: {}", e))?;
+            if !st.success() {
+                let _ = std::fs::remove_file(&wav);
+                return Err("ffmpeg 预处理音频失败，请检查输入格式。".to_string());
+            }
         }
         // 查找 python 可执行文件（优先 python3）
-        let py = if std::process::Command::new("python3")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
+        let py = if {
+            let mut py_cmd = std::process::Command::new("python3");
+            py_cmd.arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            py_cmd.creation_flags(0x08000000);
+            py_cmd.status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } {
             "python3"
         } else {
             "python"
@@ -452,20 +473,24 @@ pub async fn audio_to_midi(app: tauri::AppHandle, input_path: String) -> Result<
         };
         let out = input.with_extension("mid");
         let out_str = out.to_string_lossy().to_string();
-        let res = std::process::Command::new(py)
-            .arg(&script)
-            .arg(&wav_str)
-            .arg(&out_str)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&wav);
-                format!(
-                    "启动 Python 失败：{}（请确认已安装 Python 3.10+ 与 basic-pitch）",
-                    e
-                )
-            })?;
+        let res = {
+            let mut py_cmd = std::process::Command::new(py);
+            py_cmd.arg(&script)
+                .arg(&wav_str)
+                .arg(&out_str)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped());
+            #[cfg(windows)]
+            py_cmd.creation_flags(0x08000000);
+            py_cmd.output()
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&wav);
+                    format!(
+                        "启动 Python 失败：{}（请确认已安装 Python 3.10+ 与 basic-pitch）",
+                        e
+                    )
+                })?
+        };
         let _ = std::fs::remove_file(&wav);
         if !res.status.success() {
             let msg = String::from_utf8_lossy(&res.stderr);

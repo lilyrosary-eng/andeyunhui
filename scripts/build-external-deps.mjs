@@ -62,8 +62,8 @@ const TARGETS = [
   { outDir: '茑萝/ide/codemirror', entry: 'codemirror-entry.js', global: '__CM_BUNDLE__' },
   { outDir: '茑萝/ide/minisearch', entry: 'minisearch-entry.js', global: '__MINISEARCH_BUNDLE__' },
   { outDir: '茑萝/wps/tiptap', entry: 'tiptap-entry.js', global: '__TIPTAP_BUNDLE__' },
-  // 本地 OCR 引擎（PaddleOCR PP-OCRv4，onnxruntime-web webgl EP）——不进本体安装包，
-  // 经 .mujin 依赖包按需分发，首次识别时由 ocr 插件懒加载。
+  // 本地 OCR 引擎（PaddleOCR PP-OCRv4，onnxruntime-web webgl EP，失败时运行时加载 wasm 后端）
+  // WASM 后端（ort-wasm.min.js）作为独立运行时资源，不随 esbuild 打包，避免 tree-shake 丢 registerBackend。
   { outDir: '全局/paddleocr', entry: 'paddleocr-entry.js', global: '__PADDLEOCR_BUNDLE__' },
 ];
 
