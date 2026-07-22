@@ -226,7 +226,7 @@ fn capture_loop(
     let bytes_per_sec = fmt.rate as u64 * block_align as u64;
     // 先把格式回传给调用方（调用方据此拼 ffmpeg 音频输入参数），再进入采集循环。
     if fmt_tx.send(Ok(fmt)).is_err() {
-        let _ = unsafe { client.Stop() };
+        let _ = client.Stop();
         return;
     }
     let mut real_bytes: u64 = 0;

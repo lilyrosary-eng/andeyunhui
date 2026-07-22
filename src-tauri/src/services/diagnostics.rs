@@ -78,6 +78,7 @@ struct TestCapture {
     counter: Arc<AtomicUsize>,
     gpu_nv12: bool,
     /// 是否需要降采样（超 1080p 时恒为 true；GPU 不可用时走 CPU 双线性兜底）
+    #[allow(dead_code)]
     downscale_4k: bool,
     out_w: u32,
     out_h: u32,

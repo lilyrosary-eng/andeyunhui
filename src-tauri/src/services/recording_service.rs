@@ -107,6 +107,8 @@ pub struct RecordingStatus {
 #[derive(Clone)]
 struct CapturedFrame {
     data: Arc<Vec<u8>>,
+    // 预留给后续高刷降采样打点（当前 pacer 以恒定墙钟投帧、未逐帧读 ts），故允许 dead_code。
+    #[allow(dead_code)]
     ts: std::time::Instant,
 }
 
