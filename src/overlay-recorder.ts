@@ -422,6 +422,9 @@ async function runSelfTest() {
     resultStatus.textContent = "正在捕获 3 秒，请稍候…";
     resultStatus.style.whiteSpace = "pre-wrap";
     resultStatus.style.fontSize = "10px";
+    resultStatus.style.overflowY = "auto";
+    resultStatus.style.maxHeight = "262px";
+    resultStatus.style.display = "block";
     saveMp4Btn.style.display = "none";
     saveGifBtn.style.display = "none";
     cancelBtn.textContent = "关闭";
@@ -429,7 +432,7 @@ async function runSelfTest() {
     resultPanel.style.display = "flex";
     void getCurrentWindow().show();
     void getCurrentWindow().setFocus();
-    void setWidgetSize(320, 168);
+    void setWidgetSize(384, 340);
     const r = await invoke<any>("recording_self_test", { durationSecs: 3 });
     const kb = (r.outputBytes || 0) / 1024;
     const capLine = r.downscale4k
@@ -442,7 +445,7 @@ async function runSelfTest() {
       : `处理路径: CPU RGBA 全帧`;
     const audioLine = r.audio
       ? `音频: 系统声音 WASAPI 回环（${r.audioFmt ?? "已采集"}）`
-      : `音频: 无（采集不可用，仅视频）`;
+      : `音频: 无（采集不可用，仅视频${r.audioError ? `：${r.audioError}` : ""}）`;
     const summary =
       `ffmpeg: ${r.ffmpegPath}\n` +
       `编码器: ${r.encoder ?? "libx264(软编码)"}\n` +

@@ -85,19 +85,36 @@ unsafe fn compile_hlsl(
     target: &str,
     blob: &mut Option<ID3DBlob>,
 ) -> Result<()> {
+    // D3DCompile 要求入口名/目标名是 null 结尾的 ANSI 串；&str 不带 null 结尾，
+    // 必须用 CString 包一层，否则读到越界字节、找不到入口点 → 编译失败 → GPU 缩放失效。
+    let entry_c = std::ffi::CString::new(entry)
+        .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG))?;
+    let target_c = std::ffi::CString::new(target)
+        .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG))?;
+    let mut err_blob: Option<ID3DBlob> = None;
     D3DCompile(
         src.as_ptr() as *const core::ffi::c_void,
         src.len(),
         PCSTR::null(),
         None,
         None,
-        PCSTR::from_raw(entry.as_ptr()),
-        PCSTR::from_raw(target.as_ptr()),
+        PCSTR::from_raw(entry_c.as_ptr() as *const u8),
+        PCSTR::from_raw(target_c.as_ptr() as *const u8),
         0,
         0,
         blob,
-        None,
-    )?;
+        Some(&mut err_blob),
+    )
+    .map_err(|e| {
+        if let Some(err) = err_blob {
+            let msg = String::from_utf8_lossy(std::slice::from_raw_parts(
+                err.GetBufferPointer() as *const u8,
+                err.GetBufferSize(),
+            ));
+            eprintln!("[GPU缩放] HLSL 编译失败: {msg}");
+        }
+        e
+    })?;
     Ok(())
 }
 
@@ -306,8 +323,14 @@ pub(crate) fn probe_nv12(_w: u32, _h: u32, _fmt: DXGI_FORMAT) -> bool {
             None => return false,
         };
         match GpuNv12Converter::new(&dev, &ctx, 1920, 1080, 1280, 720, DXGI_FORMAT_R8G8B8A8_UNORM) {
-            Ok(_) => true,
-            Err(_) => false,
+            Ok(_) => {
+                eprintln!("[GPU缩放] 探针成功：GPU 渲染管线缩放可用（将只读回 1080p/8MB）");
+                true
+            }
+            Err(e) => {
+                eprintln!("[GPU缩放] 探针失败（回退 4K 读回，较慢）: {e}");
+                false
+            }
         }
     }
 }

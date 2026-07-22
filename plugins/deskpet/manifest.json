@@ -1,0 +1,14 @@
+{
+  "id": "deskpet",
+  "name": "桌宠",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "Sparkles",
+  "hostApiVersion": 1,
+  "category": "趣味",
+  "desc": "常驻桌面的桌面宠物：独立透明浮窗渲染，可在「全局设置·常规」与「茑萝」中开关，设置面板可切换风格。",
+  "deps": [],
+  "requiredAssets": []
+}

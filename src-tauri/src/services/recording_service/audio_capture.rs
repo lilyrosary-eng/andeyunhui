@@ -132,12 +132,10 @@ pub fn start_audio_capture() -> Result<(AudioCapture, String, AudioFormat), Stri
     }
 }
 
-fn capture_entry(
-    handle_raw: usize,
-    stop: Arc<AtomicBool>,
-    tx: mpsc::Sender<Result<AudioFormat, String>>,
-) -> Result<AudioFormat, String> {
-    let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
+/// 阶段一：初始化 WASAPI 回环采集，返回 (音频客户端, 捕获客户端, 格式)。
+/// 任一 COM 步骤失败都返回具体错误串（不再被 `?` 提前 drop `tx` 而吞掉），
+/// 由 capture_entry 经 tx 回传，调用方即可看到真实失败原因，而非笼统的「音频采集线程意外退出」。
+fn init_audio() -> Result<(IAudioClient, IAudioCaptureClient, AudioFormat), String> {
     unsafe {
         // 采集线程独立初始化 COM（MTA）。已初始化时返回的错误可忽略。
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -168,18 +166,35 @@ fn capture_entry(
         let capture: IAudioCaptureClient = client.GetService().map_err(|e| e.to_string())?;
         client.Start().map_err(|e| e.to_string())?;
 
-        // 先把格式回传给调用方（调用方据此拼 ffmpeg 音频输入参数），再阻塞等待 ffmpeg 连接管道。
-        if tx.send(Ok(fmt)).is_err() {
-            let _ = client.Stop();
-            return Err("音频格式回传失败".into());
-        }
+        Ok((client, capture, fmt))
+    }
+}
 
+fn capture_entry(
+    handle_raw: usize,
+    stop: Arc<AtomicBool>,
+    tx: mpsc::Sender<Result<AudioFormat, String>>,
+) -> Result<AudioFormat, String> {
+    let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
+    // 阶段一：初始化失败 → 把真实错误经 tx 回传（不再让 tx 随 `?` 提前 drop 而丢失原因）。
+    let (client, capture, fmt) = match init_audio() {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = tx.send(Err(e));
+            return Err("音频初始化失败".into());
+        }
+    };
+    // 先把格式回传给调用方（调用方据此拼 ffmpeg 音频输入参数），再阻塞等待 ffmpeg 连接管道。
+    if tx.send(Ok(fmt)).is_err() {
+        let _ = unsafe { client.Stop() };
+        return Err("音频格式回传失败".into());
+    }
+    let block_align = fmt.block_align as usize;
+    unsafe {
         if ConnectNamedPipe(handle, None).is_err() {
             let _ = client.Stop();
             return Err("ConnectNamedPipe 失败（ffmpeg 未连接音频管道）".into());
         }
-
-        let block_align = fmt.block_align as usize;
         while !stop.load(Ordering::SeqCst) {
             let mut data: *mut u8 = std::ptr::null_mut();
             let mut frames: u32 = 0;
@@ -200,10 +215,9 @@ fn capture_entry(
             }
             thread::sleep(Duration::from_millis(8));
         }
-
         let _ = client.Stop();
-        Ok(fmt)
     }
+    Ok(fmt)
 }
 
 /// 解析 WAVEFORMATEX（含 WAVEFORMATEXTENSIBLE）为 ffmpeg 可用的 PCM 格式描述。
@@ -235,7 +249,14 @@ fn parse_format(pformat: *mut windows::Win32::Media::Audio::WAVEFORMATEX) -> Res
                     _ => return Err(format!("不支持的 EXTENSIBLE PCM 位深 {}", bits)),
                 }
             } else {
-                return Err("不支持的 WAVEFORMATEXTENSIBLE SubFormat".into());
+                // 未知 SubFormat：WASAPI 回环共享模式下音频引擎内部几乎总是 32-bit IEEE float。
+                // 为兼容非常规 subtype（本机返回了非标准 GUID），回退 f32le 并打警告让采集能工作；
+                // 绝大多数情况下与真实 float32 数据一致（若真实为 PCM 16/24 位深可能杂音，但极罕见）。
+                eprintln!(
+                    "[音频] 未知 WAVEFORMATEXTENSIBLE SubFormat {:?}（bits={}），回退 f32le",
+                    sub, bits
+                );
+                ("f32le", 4)
             }
         } else {
             return Err(format!("不支持的 wave 格式标签 {}", tag));
