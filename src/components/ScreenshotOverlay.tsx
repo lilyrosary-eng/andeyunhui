@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { X, Save, Undo2, Eraser, Pen, Square, ArrowUpRight, Type, Trash2, StretchVertical } from "lucide-react";
@@ -97,7 +97,6 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   // 静态完整列表 + 缓存 miss 时 window_at_point 兜底即可，零后台枚举、零卡顿。
   const [liveWindows] = useState<Win[]>(windows ?? []);
   const liveWindowsRef = useRef<Win[]>(windows ?? []);
-  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
   // 窗口标题懒加载缓存：枚举时不再读标题（避免跨线程阻塞导致截图卡 4-5s），悬停时按需拉取单个窗口标题
   const [titleMap, setTitleMap] = useState<Record<number, string>>({});
 
@@ -191,8 +190,21 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     async (cx: number, cy: number): Promise<Win | null> => {
       const p = toPhys(cx, cy);
       try {
-        return await invoke<Win | null>("window_at_point", { x: p.x, y: p.y });
-      } catch {
+        const raw = await invoke<string>("window_at_point", { x: p.x, y: p.y });
+        // [DIAG] 一次性定性：区分是 resolve 成字面量 "null" 还是正常对象
+        console.error("[hitAt DIAG] raw=", JSON.stringify(raw));
+        // 把原始结果也写进探针 HUD：覆盖窗 console 不一定转发到 Rust 日志，
+        // 这样不开 DevTools 也能在覆盖窗上直接看到 Rust 返回的是对象还是 "null"。
+        if (probeElRef.current) {
+          probeElRef.current.textContent = "RAW w=" + (raw === "null" ? "NULL" : "OBJ") + " raw=" + raw.slice(0, 90);
+        }
+        return raw === "null" ? null : JSON.parse(raw) as Win;
+      } catch (e) {
+        console.error("[hitAt DIAG] CATCH", e);
+        // IPC reject（旧 webview 通道断开等）→ 把错误直接显示到探针，免 console 也能看
+        if (probeElRef.current) {
+          probeElRef.current.textContent = "RAW w=ERR " + String(e).slice(0, 120);
+        }
         return null;
       }
     },
@@ -225,16 +237,19 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     [toPhys],
   );
 
-  // rAF 节流的悬停高亮：合并同一帧多次 pointermove，每帧最多一次同步命中测试（零 IPC，平滑跟手）。
-  // 命中走纯前端 hitWindow（基于 list_windows 缓存列表，经 3.1 修复后完整且权威），不每帧发重型 IPC；
-  // 仅在「缓存未命中」（新开/移动窗口尚未进缓存的 ≤100ms 窗口期）才以 OS window_at_point 兜底。
-  // 这样正常悬停零 IPC、零卡顿、实时跟手；边缘场景仍由 OS 权威修正。单击/长截图仍走 OS 单次权威。
+  // rAF 节流悬停：合并同帧多次 pointermove，每帧最多一次同步命中测试（零 IPC，平滑跟手）。
+  // 主路径 = 静态列表 hitWindow（即时、跟手、始终作为常驻兜底）；权威校正值 = OS window_at_point
+  // （每帧、worker 线程、零 UI 阻塞，非 null 时覆盖静态结果，修正 z 序不可靠/漏 topmost 窗口）。
+  // OS 返回 null（桌面/合成层）或失败时回退静态命中 → 悬停永不整体崩溃。单击/长截图仍走 OS 单次权威。
   // applyHover 内部按命中 hwnd 去重，命中窗口不变时不重渲染，进一步消除卡顿。
   const hoverRafRef = useRef<number | null>(null);
   const hoverPendingRef = useRef<{ x: number; y: number } | null>(null);
   const lastHoverHwndRef = useRef<number | null>(null);
-  const lastOsFallbackRef = useRef(0); // 缓存 miss 时 OS 兜底（window_at_point）节流时间戳
-  const hoverSeqRef = useRef(0);       // 异步 OS 兜底结果乱序防护
+  const hoverSeqRef = useRef(0);            // 异步 OS 结果乱序防护
+  const osInFlightRef = useRef(false); // OS 调用在途保护（单并发，天然匹配 worker 吞吐，零堆积）
+  const osLastDispatchRef = useRef(0); // OS 调用节流时间戳（>=80ms 才再派发，降低 worker 线程压力）
+  const OS_THROTTLE_MS = 80;
+  const lastHitRef = useRef<Win | null>(null); // 每帧静态命中快照：OS 返回 null/失败时回退，悬停永不整体崩溃
   // 命中窗口未变时不重渲染（仅在 hwnd 变化时 setHoverWin），消除每帧 React 重渲染卡顿。
   const applyHover = useCallback((w: Win | null) => {
     const hw = w?.hwnd ?? null;
@@ -242,9 +257,55 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     lastHoverHwndRef.current = hw;
     setHoverWin(w);
   }, []);
-  const requestHover = useCallback(
+  // ===== 悬停探针（始终显示，小绿字在左上角）；URL 加 ?probe=0 可隐藏 =====
+  const probeElRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const enabled = new URLSearchParams(location.search).get("probe") !== "0";
+    if (!enabled) return;
+    const el = document.createElement("div");
+    el.style.cssText =
+      "position:fixed;left:8px;top:8px;z-index:99999;background:rgba(0,0,0,0.78);color:#7CFC00;font:11px/1.4 monospace;padding:6px 8px;border-radius:6px;pointer-events:none;white-space:pre;max-width:62vw;";
+    document.body.appendChild(el);
+    probeElRef.current = el;
+    (window as unknown as { __mountHoverProbe?: () => void }).__mountHoverProbe = () => {
+      if (!probeElRef.current) {
+        document.body.appendChild(el);
+        probeElRef.current = el;
+      }
+    };
+    return () => {
+      el.remove();
+      probeElRef.current = null;
+    };
+  }, []);
+  const updateProbe = useCallback(
+    (d: {
+      css?: { x: number; y: number };
+      staticHit?: Win | null;
+      osHwnd?: number | null;
+      osTitle?: string;
+      osError?: boolean;
+      latency?: number;
+    }) => {
+      const el = probeElRef.current;
+      if (!el) return;
+      const lines: string[] = [];
+      if (d.css) lines.push(`css=(${d.css.x | 0},${d.css.y | 0})`);
+      if (d.staticHit !== undefined)
+        lines.push(
+          `static=${d.staticHit ? "0x" + (d.staticHit.hwnd >>> 0).toString(16) + " " + (d.staticHit.title || "").slice(0, 12) : "∅"}`,
+        );
+      if (d.osHwnd !== undefined)
+        lines.push(
+          `os=${d.osHwnd ? "0x" + (d.osHwnd >>> 0).toString(16) + " " + (d.osTitle || "").slice(0, 12) : d.osError ? "ERR" : "∅"}${d.latency != null ? " " + d.latency.toFixed(1) + "ms" : ""}`,
+        );
+      lines.push(`shown=${lastHoverHwndRef.current ? "0x" + (lastHoverHwndRef.current >>> 0).toString(16) : "∅"}`);
+      el.textContent = "PROBE " + lines.join("  |  ");
+    },
+    [],
+  );
+    const requestHover = useCallback(
     (x: number, y: number) => {
-      lastPointerRef.current = { x, y };
       hoverPendingRef.current = { x, y };
       if (hoverRafRef.current == null) {
         hoverRafRef.current = requestAnimationFrame(() => {
@@ -252,28 +313,41 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
           const pt = hoverPendingRef.current;
           hoverPendingRef.current = null;
           if (!pt) return;
-          const now = performance.now();
-          // 主命中：同步 hitWindow（零 IPC、实时跟手、不卡）。列表经 3.1 修复后完整，正常悬停始终命中。
+          // 即时命中：静态列表零 IPC、平滑跟手，且始终作为常驻兜底（绝不因 OS 结果被永久关闭）。
           const hit = hitWindow(pt.x, pt.y);
-          applyHover(hit);
-          // 缓存未命中（列表短暂陈旧）时，才以 OS 权威兜底：40ms 节流 + seq 防乱序，
-          // 仅在 miss 时触发 → 正常悬停零 IPC、零卡顿，边缘场景仍精准。
-          if (!hit && now - lastOsFallbackRef.current >= 40) {
-            lastOsFallbackRef.current = now;
+          lastHitRef.current = hit;
+          if (hit) applyHover(hit); // 静态为 null（后开的窗不在种子列表）时不隐藏，留给 OS 校正，避免闪烁
+          // 权威校正：OS window_at_point（每帧、worker 线程、零 UI 阻塞）。
+          // 非 null 时覆盖静态结果，修正「静态列表 z 序不可靠/漏 topmost 窗口 → 卡在一个窗」；
+          // 为 null（桌面/合成层）或失败时回退最新静态命中 → 悬停永不整体崩溃。
+          const now = performance.now();
+          const needOs = !osInFlightRef.current && (now - osLastDispatchRef.current >= OS_THROTTLE_MS || !hit);
+          if (needOs) {
+            osInFlightRef.current = true;
+            osLastDispatchRef.current = now;
             const seq = ++hoverSeqRef.current;
+            const t0 = now;
             hitAt(pt.x, pt.y)
               .then((w) => {
-                if (seq !== hoverSeqRef.current) return; // 丢弃过期结果，防快移跳回旧窗
-                applyHover(w ?? null);
+                osInFlightRef.current = false;
+                // RAW DUMP: 直接写 DOM 绕过 updateProbe，确认 w 到底是什么
+                if (probeElRef.current) {
+                  probeElRef.current.textContent = "RAW w=" + (w ? "OBJ" : "NULL") + " hwnd=" + (w?.hwnd ?? "??") + " keys=" + (w ? Object.keys(w).join(",") : "null");
+                }
+                applyHover(w ?? lastHitRef.current);
               })
-              .catch(() => {});
+              .catch((e) => {
+                osInFlightRef.current = false;
+                if (probeElRef.current) {
+                  probeElRef.current.textContent = "CATCH " + String(e);
+                }
+                if (lastHitRef.current) applyHover(lastHitRef.current);
+              });
           }
-          // 注：hover 期**不再**轮询 list_windows（同步命令阻塞主线程跑整窗树枚举 = 卡顿真凶）。
-          // 列表在开启时由 screenshot-start / screenshot-ready 事件一次性种子（完整），静态即可；新窗由上方兜底覆盖。
         });
       }
     },
-    [hitWindow, applyHover],
+    [hitWindow, applyHover, hitAt, updateProbe],
   );
 
   // 悬停窗口时按需拉取标题（单次、Rust 侧 30ms 超时、绝不阻塞截图路径）
@@ -293,38 +367,40 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     };
   }, [hoverWin, titleMap]);
 
-  // 窗口列表缓存**完全不轮询**：hover 期间任何 list_windows 调用都会在 Tauri 主线程跑整条窗口树枚举
-  // （EnumWindows + zorder_ranks），正是「频繁更卡 / 开启卡」根因。初始化列表来自 props.windows /
-  // show 事件种子（Rust 已预取完整列表，见 start_screenshot / show_recorder_select）；hover 命中走
-  // 静态 hitWindow，缓存 miss 时由 window_at_point 兜底。零后台枚举、零卡顿。
-  //
-  // 窗口变化事件驱动更新（B.2）：Rust 侧 WinEventHook 在窗口 创建/销毁/移动/前台变化 时防抖推送
-  // 最新列表，替代 hover 期轮询。仅更新命中测试用的 liveWindowsRef 并重算当前高亮（任务栏
-  // clipToWorkArea 用开启时种子的 liveWindows 即可，任务栏不移动）。静止桌面零事件、零开销。
+  // 窗口列表缓存不轮询、不事件刷新：开启时由 props.windows（Rust 预取完整列表）一次性种子。
+  // 悬停命中统一走 OS window_at_point（每帧、worker 线程、零 UI 阻塞），结果永远与系统一致、
+  // 无 stale 列表问题；静态列表仅保留供 clipToWorkArea 找任务栏（任务栏不移动）。
+  // 替代已移除的 window-list-changed 监听，这里仅把 props.windows 同步进 ref 供任务栏识别。
   useEffect(() => {
-    const un = listen<{ windows?: Win[] }>("window-list-changed", (event) => {
-      const ws = event.payload?.windows;
-      if (!ws || ws.length === 0) return;
-      liveWindowsRef.current = ws;
-      const lp = lastPointerRef.current;
-      if (lp) applyHover(hitWindow(lp.x, lp.y));
-    });
-    return () => {
-      void un.then((f) => f());
-    };
-  }, [applyHover, hitWindow]);
+    if (windows && windows.length) liveWindowsRef.current = windows;
+  }, [windows]);
 
-  // 选区外暗化遮罩：随 selRect 更新 4 矩形（纯 GPU 合成，零全屏重绘）。
-  useEffect(() => {
+  // 微信式暗化遮罩：随「当前选择区域」更新 4 矩形（纯 GPU 合成，零全屏重绘）。
+  // 选择区域 = 拖拽中的 selRect，或悬停高亮的窗口(hoverWin)；拖拽态优先。
+  // 非选择区域被 0.5 暗色遮罩，选择/悬停窗口保持原样亮（与 overlay-recorder-select.ts 一致）。
+  // 用 useLayoutEffect（绘制前同步）而非 useEffect（绘制后），使暗化矩形与高亮边框同帧更新，
+  // 杜绝跨窗口快速移动时「旧 dimmer 残留 + 新边框」造成的「双重遮罩」闪烁。
+  useLayoutEffect(() => {
     const dimmer = dimmerRef.current;
     if (!dimmer) return;
-    if (!selRect) {
+    // 计算「保持明亮的区域」：算术坐标→覆盖窗 CSS 像素。
+    const clearRect =
+      selRect ??
+      (hoverWin
+        ? {
+            x: (hoverWin.x - ox) / scale,
+            y: (hoverWin.y - oy) / scale,
+            w: hoverWin.width / scale,
+            h: hoverWin.height / scale,
+          }
+        : null);
+    if (!clearRect) {
       dimmer.style.display = "none";
       return;
     }
     const VW = window.innerWidth;
     const VH = window.innerHeight;
-    const { x, y, w, h } = selRect;
+    const { x, y, w, h } = clearRect;
     const place = (el: HTMLDivElement | null, left: number, top: number, width: number, height: number) => {
       if (!el) return;
       el.style.left = left + "px";
@@ -337,7 +413,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     place(dLeftRef.current, 0, y, x, h);
     place(dRightRef.current, x + w, y, VW - (x + w), h);
     dimmer.style.display = "block";
-  }, [selRect]);
+  }, [selRect, hoverWin, ox, oy, scale]);
 
   // Esc 取消 / Enter 确认 / 方向键微调选区
   useEffect(() => {
@@ -945,51 +1021,46 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
           <div ref={dRightRef} style={{ position: "absolute", background: "rgba(0,0,0,0.5)" }} />
         </div>
 
-        {/* 窗口绿色轮廓（悬停高亮当前窗口） */}
+        {/* 微信式高亮：非选择区域被暗色遮罩（见 dimmer 4 矩形），选择/悬停窗口保持原样亮。
+            描边仅描边、不填充（选择区域即原屏幕内容，不再染绿）。拖拽态显示尺寸，悬停态显示窗口标题。 */}
         {(() => {
-          const activeWin = hoverWin;
-          if (!activeWin) return null;
-          const w = activeWin;
-          const wtitle = titleMap[w.hwnd] ?? w.title;
+          const cr = selRect
+            ? selRect
+            : hoverWin
+              ? {
+                  x: (hoverWin.x - ox) / scale,
+                  y: (hoverWin.y - oy) / scale,
+                  w: hoverWin.width / scale,
+                  h: hoverWin.height / scale,
+                }
+              : null;
+          if (!cr) return null;
+          const isDrag = !!selRect;
+          const wtitle = hoverWin ? titleMap[hoverWin.hwnd] ?? hoverWin.title : "";
           return (
             <div
-              className="absolute pointer-events-none border-2 transition-colors"
+              className="absolute pointer-events-none border-2"
               style={{
-                left: (w.x - ox) / scale,
-                top: (w.y - oy) / scale,
-                width: w.width / scale,
-                height: w.height / scale,
+                left: cr.x,
+                top: cr.y,
+                width: cr.w,
+                height: cr.h,
                 borderColor: GREEN,
-                backgroundColor: "rgba(74,222,128,0.10)",
-                zIndex: 2,
+                zIndex: 3,
               }}
             >
-              {wtitle && (
+              {isDrag ? (
+                <span className="absolute -top-6 left-0 px-1.5 py-0.5 rounded bg-black/70 text-white text-[11px] tabular-nums">
+                  {Math.round(cr.w * scale)} × {Math.round(cr.h * scale)}
+                </span>
+              ) : wtitle ? (
                 <span className="absolute -top-5 left-0 px-1.5 py-0.5 text-[11px] text-white bg-emerald-500 rounded truncate max-w-[280px]">
                   {wtitle}
                 </span>
-              )}
+              ) : null}
             </div>
           );
         })()}
-
-        {/* 自由选区：向外阴影只压暗选区外，选区本身清晰（微信式） */}
-        {selRect && (
-          <div
-            className="absolute border-2 border-emerald-400 bg-transparent pointer-events-none"
-            style={{
-              left: selRect.x,
-              top: selRect.y,
-              width: selRect.w,
-              height: selRect.h,
-              zIndex: 3,
-            }}
-          >
-            <span className="absolute -top-6 left-0 px-1.5 py-0.5 rounded bg-black/70 text-white text-[11px] tabular-nums">
-              {Math.round(selRect.w * scale)} × {Math.round(selRect.h * scale)}
-            </span>
-          </div>
-        )}
 
         {/* 放大镜（像素级对齐辅助） */}
         {mag.show && offRef.current && !selRect && (

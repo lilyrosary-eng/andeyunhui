@@ -7,7 +7,6 @@ import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { ModelSettings } from '@/core/settings/ModelSettings'
 import { DevConsole } from '@/core/settings/DevConsole'
 import { invoke } from '@tauri-apps/api/core';
-import { emit } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { logger } from '@/lib/logger';
 import { api, type ArchiveEntry, type PluginManifest } from '@/lib/api';
@@ -290,14 +289,6 @@ export function GlobalSettingsPanel() {
     }
   }, [deskpetManifest, deskpetHot]);
 
-  // ---- 桌宠风格：经 Tauri 事件下发到浮窗（DeskpetPet 监听 deskpet:set-style）----
-  type DeskpetStyle = 'bounce' | 'float' | 'idle';
-  const [deskpetStyle, setDeskpetStyleState] = useState<DeskpetStyle>('bounce');
-  const setDeskpetStyle = useCallback((s: DeskpetStyle) => {
-    setDeskpetStyleState(s);
-    emit('deskpet:set-style', s).catch(() => {});
-  }, []);
-
   const tabs = [
     { id: 'general' as const, label: t('settings.tab.general'), icon: Settings },
     { id: 'themes' as const, label: t('settings.tab.themes'), icon: Palette },
@@ -493,25 +484,6 @@ export function GlobalSettingsPanel() {
                     className="data-[state=checked]:bg-[var(--element-color-raw)]"
                   />
                 </div>
-                {deskpetVisible && (
-                  <div className="mt-3 flex items-center gap-2 flex-wrap">
-                    <span className="text-xs text-neutral-500 dark:text-stone-400">风格</span>
-                    {(['bounce', 'float', 'idle'] as DeskpetStyle[]).map((s) => (
-                      <button
-                        key={s}
-                        onClick={() => setDeskpetStyle(s)}
-                        className={
-                          'px-3 py-1 rounded-lg text-xs border transition-colors ' +
-                          (deskpetStyle === s
-                            ? 'border-[var(--element-bg)] bg-[var(--element-bg)]/10 text-[var(--element-bg)]'
-                            : 'border-neutral-200 dark:border-stone-700 hover:bg-neutral-50 dark:hover:bg-stone-800')
-                        }
-                      >
-                        {s}
-                      </button>
-                    ))}
-                  </div>
-                )}
               </section>
             </div>
           )}

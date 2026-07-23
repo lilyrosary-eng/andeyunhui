@@ -52,9 +52,19 @@ function App() {
     // 统一走 window_manager 引擎：主线程安全创建 + 重试 + 坏窗自愈，
     // 不再各自 new WebviewWindow（避免坏窗残留 / 错误抓不到）。离屏坐标创建后由 start_screenshot 定位显示。
     try {
+      // dev 下截图覆盖窗会被销毁重建，必须用真实「逻辑全屏」尺寸创建，否则新 webview
+      // 停在旧 profile 的错误逻辑尺寸（1280x720），表现为「可选区域变小、和窗口一样大」。
+      // 逻辑全屏 = 虚拟桌面物理尺寸 / 系统 DPI，与录屏 create_recorder_select_window 一致。
+      let size: { width: number; height: number } = { width: 1280, height: 720 };
+      try {
+        const r = await invoke<{ width: number; height: number; scale: number }>('get_screenshot_desktop_rect');
+        size = { width: Math.ceil(r.width / r.scale), height: Math.ceil(r.height / r.scale) };
+      } catch {
+        // 兜底保留 1280x720，start_screenshot 仍会纠正为全屏
+      }
       return await ensureOverlayWindow('screenshot-overlay', 'screenshot-overlay.html', {
-        width: 1280,
-        height: 720,
+        width: size.width,
+        height: size.height,
         x: -4000,
         y: -4000,
         decorations: false,

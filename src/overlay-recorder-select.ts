@@ -245,10 +245,41 @@ async function hitAt(cx: number, cy: number): Promise<Win | null> {
 // 每 100ms 一次正是「频繁更卡 / 开启卡」真凶——故 hover 期彻底不调用它；新开窗口落到光标下时，
 // hitWindow 返回 null，由下方 window_at_point 兜底（**异步**命令，不阻塞主线程）。单击仍用 OS 单次权威。
 // updateWinHighlight 内部按命中 hwnd 去重，命中窗口不变时不重绘，进一步消除卡顿。
+// ===== 悬停探针（调试用：URL 带 ?probe=1 或 window.__hoverProbe=true 时显示 HUD）=====
+let probeEl: HTMLDivElement | null = null;
+function ensureProbe() {
+  if (probeEl) return;
+  const enabled =
+    new URLSearchParams(location.search).get("probe") === "1" ||
+    (window as unknown as { __hoverProbe?: boolean }).__hoverProbe === true;
+  if (!enabled) return;
+  const el = document.createElement("div");
+  el.style.cssText =
+    "position:fixed;left:8px;top:8px;z-index:99999;background:rgba(0,0,0,0.78);color:#7CFC00;font:11px/1.4 monospace;padding:6px 8px;border-radius:6px;pointer-events:none;white-space:pre;";
+  document.body.appendChild(el);
+  probeEl = el;
+  (window as unknown as { __mountHoverProbe?: () => void }).__mountHoverProbe = () => ensureProbe();
+}
+function probeUpdate(d: { css?: { x: number; y: number }; staticHit?: Win | null; osHwnd?: number | null; osTitle?: string; osError?: boolean; latency?: number }) {
+  if (!probeEl) return;
+  const L: string[] = [];
+  if (d.css) L.push(`css=(${d.css.x | 0},${d.css.y | 0})`);
+  if (d.staticHit !== undefined)
+    L.push(`static=${d.staticHit ? "0x" + (d.staticHit.hwnd >>> 0).toString(16) + " " + (d.staticHit.title || "").slice(0, 12) : "∅"}`);
+  if (d.osHwnd !== undefined)
+    L.push(`os=${d.osHwnd ? "0x" + (d.osHwnd >>> 0).toString(16) + " " + (d.osTitle || "").slice(0, 12) : d.osError ? "ERR" : "∅"}${d.latency != null ? " " + d.latency.toFixed(1) + "ms" : ""}`);
+  L.push(`shown=${lastHoverHwnd != null ? "0x" + (lastHoverHwnd >>> 0).toString(16) : "∅"}`);
+  probeEl.textContent = "PROBE " + L.join("  |  ");
+}
+ensureProbe();
+
 let hoverRaf: number | null = null;
 let hoverPending: { x: number; y: number } | null = null;
-let lastOsFallback = 0; // 缓存 miss 时 OS 兜底（window_at_point）节流时间戳
-let hoverSeq = 0;       // 异步 OS 兜底结果乱序防护
+let hoverSeq = 0;            // 异步 OS 结果乱序防护
+let osInFlight = false;      // OS 调用在途保护（单并发）
+let osLastDispatch = 0;      // OS 调用节流时间戳（>=80ms 才再派发，降低 worker 压力）
+const OS_THROTTLE_MS = 80;
+let lastHit: Win | null = null; // 每帧静态命中快照：OS 返回 null/失败时回退
 function requestHover(cx: number, cy: number) {
   hoverLast = { x: cx, y: cy };
   hoverPending = { x: cx, y: cy };
@@ -258,26 +289,34 @@ function requestHover(cx: number, cy: number) {
       const pt = hoverPending;
       hoverPending = null;
       if (!pt) return;
-      const now = performance.now();
-      // 即时命中：同步 hitWindow（零 IPC、实时跟手、不卡），用于平滑过渡。
+      // 即时命中：静态列表零 IPC、平滑跟手，且始终作为常驻兜底（绝不因 OS 结果被永久关闭）。
       const hit = hitWindow(pt.x, pt.y);
-      updateWinHighlight(hit);
-      // 每 60ms 用 OS 权威接口（WindowFromPoint）校正一次：列表 z 序在置顶窗口 / 重叠场景下
-      // 不可靠（GetTopWindow+GW_HWNDNEXT 只遍历普通 z 序链、漏掉 topmost 窗口），会导致
-      // 「只能识别一个窗口 / 鼠标移动没用」。window_at_point 走真实 Z 序、跳过本应用覆盖窗，
-      // 始终返回光标下真正的顶层窗口；60ms 节流下开销极低、不卡。
-      if (now - lastOsFallback >= 60) {
-        lastOsFallback = now;
+      lastHit = hit;
+      if (hit) updateWinHighlight(hit); // 静态为 null（后开的窗不在种子列表）时不隐藏，留给 OS 校正，避免闪烁
+      // 权威校正：OS window_at_point（每帧、worker 线程、零 UI 阻塞）。非 null 时覆盖静态结果，
+      // 修正「静态列表 z 序不可靠/漏 topmost 窗口 → 卡在一个窗」；null（桌面/合成层）或失败时
+      // 回退最新静态命中 → 悬停永不整体崩溃。
+      const now = performance.now();
+      const needOs = !osInFlight && (now - osLastDispatch >= OS_THROTTLE_MS || !hit);
+      if (needOs) {
+        osInFlight = true;
+        osLastDispatch = now;
         const seq = ++hoverSeq;
+        const t0 = now;
         hitAt(pt.x, pt.y)
           .then((w) => {
-            if (seq !== hoverSeq) return; // 丢弃过期结果，防快移跳回旧窗
-            updateWinHighlight(w ?? null);
+            osInFlight = false;
+            if (seq !== hoverSeq) return;
+            // OS 权威：非 null 直接采用；为 null（桌面/合成层）回退静态命中（静态也 null → 隐藏）。
+            updateWinHighlight(w ?? lastHit);
+            probeUpdate({ osHwnd: w?.hwnd ?? null, osTitle: w?.title, latency: performance.now() - t0 });
           })
-          .catch(() => {});
+          .catch(() => {
+            osInFlight = false;
+            if (lastHit) updateWinHighlight(lastHit); // OS 失败：保留已显示窗口，不隐藏
+            probeUpdate({ osHwnd: null, osError: true });
+          });
       }
-      // 注：hover 期**不再**轮询 list_windows（同步命令阻塞主线程跑整窗树枚举 = 卡顿真凶）。
-      // 列表在开启时由 recorder-select-ready 事件一次性种子（完整），静态即可；新窗由上方兜底覆盖。
     });
   }
 }
@@ -384,7 +423,7 @@ overlay.addEventListener("pointerdown", (e) => {
 });
 
 overlay.addEventListener("pointermove", (e) => {
-  // 倒计时期间不再冻结：保持悬停高亮实时更新，界面“活”着不卡死
+  // 倒计时期间不再冻结：保持悬停高亮实时更新，界面"活"着不卡死
   if (dragging) {
     // 拖拽中：用 rAF 批量更新选区
     const x = Math.min(startX, e.clientX);
@@ -677,17 +716,10 @@ listen<{ ox: number; oy: number; scale: number; windows?: Win[] }>("recorder-sel
   void initFromEvent(event.payload);
 });
 
-// 窗口变化事件驱动更新（B.2）：Rust 侧 WinEventHook 在窗口 创建/销毁/移动/前台变化 时防抖
-// 推送最新列表，替代 hover 期轮询。静止桌面零事件；动态场景（新开/移动/切换窗口）高亮始终准确。
-listen<{ windows?: Win[] }>("window-list-changed", (event) => {
-  const ws = event.payload?.windows;
-  if (!ws || ws.length === 0) return;
-  windows = ws;
-  // 用新列表重算当前悬停高亮（非拖拽 / 非倒计时时）。
-  if (!pointerDown && !dragging && hoverLast && !countingDown) {
-    updateWinHighlight(hitWindow(hoverLast.x, hoverLast.y));
-  }
-});
+// 悬停命中统一走 OS window_at_point（每帧、worker 线程、零 UI 阻塞），结果永远与系统一致、
+// 无 stale 列表问题；静态列表（recorder-select-ready 一次性种子的完整列表）仅用于 clipToWorkArea
+// 找任务栏。已移除 Rust 侧 WinEventHook 看门狗与 window-list-changed 事件——它会在覆盖窗可见期间
+// 持续跑 EnumWindows 风暴、且在 z 序不可靠时反而误导命中；现由 OS 实时命中彻底替代，开销更低、更正确。
 
 // 持续轮询兜底（参考截图覆盖窗的 peek_screenshot 机制）：
 // 1. 首次加载时如果事件丢失，轮询能初始化

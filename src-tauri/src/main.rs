@@ -268,10 +268,16 @@ fn main() {
                             let mut buf = [0u8; 16];
                             loop {
                                 if socket.recv_from(&mut buf).is_ok() {
-                                    if let Some(w) = app_handle.get_webview_window("main") {
-                                        let _ = w.show();
-                                        let _ = w.set_focus();
-                                    }
+                                    let mgr = app_handle.clone();
+                                    let _ = mgr.run_on_main_thread({
+                                        let mgr2 = mgr.clone();
+                                        move || {
+                                            if let Some(w) = mgr2.get_webview_window("main") {
+                                                let _ = w.show();
+                                                let _ = w.set_focus();
+                                            }
+                                        }
+                                    });
                                 }
                             }
                         });
@@ -932,6 +938,7 @@ fn main() {
             store_screenshot_note_id,
             get_screenshot_note_id,
             hide_overlay_window,
+            get_screenshot_desktop_rect,
             // 浮窗统一创建引擎（window_manager 引擎）
             window_manager::overlay_window_get_or_create,
             window_manager::overlay_window_destroy,

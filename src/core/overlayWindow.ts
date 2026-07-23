@@ -40,10 +40,21 @@ export async function ensureOverlayWindow(
   url: string,
   profile: OverlayProfile = {},
 ): Promise<WebviewWindow | null> {
-  // 1. 复用已有健康窗（与 Rust 侧复用逻辑一致，避免重复建窗）
-  const existing = await WebviewWindow.getByLabel(label);
-  if (existing) {
-    return existing;
+  // 复用优先：已存在的健康窗直接返回，绝不销毁重建。
+  // 重建整个 WebView2（CoreWebView2Controller）是冷启动、耗时数秒——这正是
+  // 「每次启动截图都要好长时间」的根因（dev 下旧逻辑每次都 destroy 再 create）。
+  // dev 下也纯复用、不再 reload：reload 会让独立 webview 卸载重挂载，概率卡死甚至拖垮
+  // 整个 WebView2 进程。覆盖窗常驻、监听器持久，事件永不因 reload 丢失；首次新建由 poll
+  // 兜底自愈。代价是 dev 改独立浮窗/截图窗代码需重启 dev 生效（换取绝对稳定）。
+  {
+    const existing = await WebviewWindow.getByLabel(label);
+    if (existing) {
+      // dev 下也纯复用，不再 reload：隐藏态/触发时 reload 会让覆盖窗（及独立浮窗 webview）
+      // 卸载重挂载，期间事件丢失 + poll 自愈被吞，概率卡死甚至拖垮整个 WebView2 进程。
+      // 纯复用下覆盖窗常驻、监听器持久，事件永不因 reload 丢失；首次新建由 poll 兜底自愈。
+      // 代价：dev 改独立浮窗/截图窗代码需重启 dev 生效（换取绝对稳定）。
+      return existing;
+    }
   }
   // 2. 通过统一 IPC 在主线程（Rust）安全创建，带重试 + 坏窗自愈
   await invoke('overlay_window_get_or_create', { label, url, profile });

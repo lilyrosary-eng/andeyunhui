@@ -14,9 +14,7 @@ const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback } = React;
 const hostApi = window.__HOST_API__ as any;
 
-// 与 src/components/DeskpetPet.tsx 对齐
-type StyleKey = 'bounce' | 'float' | 'idle';
-const STYLES: StyleKey[] = ['bounce', 'float', 'idle'];
+// 桌宠浮窗尺寸/素材由浮窗内 DeskpetPet 控制；本插件只负责建窗、推素材、热插拔。
 
 const DESKPET_LABEL = 'deskpet';
 const DESKPET_URL = 'deskpet.html';
@@ -80,13 +78,13 @@ function DeskpetPlaceholder() {
   return (
     <div className="flex-1 flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">
       <span className="text-sm">桌宠正在你的桌面上散步 🐾</span>
-      <span className="text-xs">在「全局设置 · 常规」或「茑萝」中可开关桌宠；常规页可切换风格。</span>
+      <span className="text-xs">在「全局设置 · 常规」或「茑萝」中可开关桌宠。</span>
     </div>
   );
 }
 
 // ========== 注册 ==========
-// 注意：风格切换 UI 已移至「全局设置·常规」（避免本插件在导航栏出现图标），故此处不挂 settings。
+// 注意：本插件不挂 settings（避免本插件在导航栏出现图标）；常规页仅保留「桌宠显示」开关。
 window.__PLUGIN_REGISTRY__.register({
   id: DESKPET_LABEL,
   name: '桌宠',

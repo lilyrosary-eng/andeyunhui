@@ -1649,11 +1649,10 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     let _ = win.show();
     let _ = win.set_focus();
 
-    // 启动窗口变化事件监听（B.2）：选区可见期间，窗口 创建/移动/前台变化 时事件驱动刷新
-    // 命中测试列表，替代已删除的 hover 轮询。空闲零开销。
-    crate::screenshot::ensure_window_watch(&app);
-
-    // 耗时的窗口枚举移到后台线程，彻底避免阻塞 Tauri 主线程。枚举完成后推送列表；
+    // 悬停命中统一走 OS window_at_point（每帧、worker 线程、零 UI 阻塞），结果永远与系统一致、
+    // 无 stale 列表问题；已移除 WinEventHook 看门狗与 window-list-changed（覆盖窗可见期间持续
+    // EnumWindows 风暴、且 z 序不可靠反而误导命中）。
+// 耗时的窗口枚举移到后台线程，彻底避免阻塞 Tauri 主线程。枚举完成后推送列表；
     // 即便枚举进行中，前端 hover 仍走 window_at_point（OS 权威）兜底，命中测试不受影响。
     let app_b = app.clone();
     let win_b = win.clone();
