@@ -934,11 +934,13 @@ fn main() {
             capture_screen,
             start_screenshot,
             read_screenshot,
+            read_recorder_snapshot,
             peek_screenshot,
             store_screenshot_note_id,
             get_screenshot_note_id,
             hide_overlay_window,
             reveal_screenshot_overlay,
+            set_overlay_transparent,
             get_screenshot_desktop_rect,
             // 浮窗统一创建引擎（window_manager 引擎）
             window_manager::overlay_window_get_or_create,

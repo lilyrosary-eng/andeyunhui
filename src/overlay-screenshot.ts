@@ -10,6 +10,10 @@ import "./index.css";
 // body 设置的不透明背景（var(--main-panel-bg) ≈ 85% 白），消除触发瞬间「全屏变白」。
 import "./overlay-transparent.css";
 
+// 透明分层窗首帧黑闪根治：把本覆盖窗 WebView2 默认背景设为透明
+// （否则长时隐藏后 show() 首帧露出 WebView2 默认黑底 → 闪黑）。页面挂载即调用一次。
+invoke("set_overlay_transparent").catch(() => {});
+
 interface OverlayData {
   image: ImageBitmap | null;
   ox: number;
