@@ -938,6 +938,7 @@ fn main() {
             store_screenshot_note_id,
             get_screenshot_note_id,
             hide_overlay_window,
+            reveal_screenshot_overlay,
             get_screenshot_desktop_rect,
             // 浮窗统一创建引擎（window_manager 引擎）
             window_manager::overlay_window_get_or_create,

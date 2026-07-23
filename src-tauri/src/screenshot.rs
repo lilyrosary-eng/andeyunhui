@@ -142,6 +142,25 @@ pub fn hide_overlay_window(app: tauri::AppHandle) {
     }
 }
 
+/// 显示截图覆盖窗（仅显示，复用不销毁）。冻结图就绪后由前端在 loadShot 成功回调里调用，
+/// 确保覆盖窗「先有冻结图、再显示」——彻底消除「冻结图注入间隙全屏黑」，
+/// 同时避开 transparent 分层窗在透明间隙点击穿透（黑底兜底仅在离屏/瞬时可见）。
+/// show + 置顶 + 聚焦 整体包进 run_on_main_thread（set_focus 内部直接 SetForegroundWindow，
+/// 不经过 thread_executor，若从 async/命令线程直接调会触发 tao flush_paint_messages panic）。
+#[tauri::command]
+pub fn reveal_screenshot_overlay(app: tauri::AppHandle) {
+    let _ = app.run_on_main_thread({
+        let app = app.clone();
+        move || {
+            if let Some(w) = app.get_webview_window("screenshot-overlay") {
+                let _ = w.show();
+                let _ = w.set_always_on_top(true);
+                let _ = w.set_focus();
+            }
+        }
+    });
+}
+
 /// 返回虚拟桌面矩形（物理像素）与系统 DPI 缩放比，供前端在创建截图覆盖窗时
 /// 计算「逻辑全屏」尺寸（inner_size 接受逻辑像素 = 物理 / scale），与录屏
 /// `create_recorder_select_window` 的 `lw = vw / scale` 完全一致。
@@ -935,10 +954,11 @@ pub async fn start_screenshot(
         Err(_) => return Err("无法获取缩放比".into()),
     };
 
-    // 先推送 meta（窗口列表留空）并立即可见：让覆盖窗与十字光标「秒显」，选区交互立即可用；
-    // 窗口枚举较重（EnumWindows 走整窗树，首次调用常因 COM/Win32 冷启动耗时数秒），
-    // 若同步阻塞在 show 之前，会直接拖住十字光标出现 → 即用户反馈的「截图启动卡顿、光标丢失」。
-    // 故先显示、再后台枚举，枚举完成后由独立事件 screenshot-windows 补种子（前端合并到 data.windows）。
+    // 先推送 meta（窗口列表留空），覆盖窗保持隐藏：冻结图由后台线程捕获，
+    // 待 screenshot-ready → 前端 read_screenshot 编码成功、data.image 注入后，
+    // 前端再 invoke reveal_screenshot_overlay 显示覆盖窗。
+    // 这样「先有冻结图、再显示」，彻底消除「冻结图注入间隙全屏黑」的观感，
+    // 也避免 transparent 分层窗在透明间隙点击穿透（黑底兜底仅在离屏/瞬时可见）。
     let init_payload = json!({
         "ox": ox,
         "oy": oy,
@@ -947,35 +967,6 @@ pub async fn start_screenshot(
         "noteId": "",
     });
     let _ = overlay.emit("screenshot-start", &init_payload);
-    // 显示 + 置顶 + 聚焦 在主线程执行（set_focus 内部直接 SetForegroundWindow，
-    // 不经过 thread_executor，故整体包进 run_on_main_thread）。
-    // 关键修复（根治概率性「默认光标 + 无法选窗」）：必须 **先 show()**，等 WebView2 完成
-    // 初始化、窗口 EXSTYLE 稳定后，再 set_ignore_cursor_events(false) / set_always_on_top(true)。
-    // 旧逻辑在 show() 之前就调用这两项，会与 WebView2 在 show 阶段重设的窗口样式race，
-    // 导致覆盖窗偶发「点击穿透 / 丢失 topmost」——鼠标落到下层窗口（显示下层默认箭头、
-    // hover 完全不更新）。这与录屏选区窗 show_recorder_select（先 show 再 set_focus、100% 跟手）
-    // 的成功路径对齐。最后二次兜底 set_always_on_top + set_ignore_cursor_events，对抗偶发 race。
-    {
-        let focus_app = app.clone();
-        let focus_label = overlay.label().to_string();
-        let _ = focus_app.run_on_main_thread({
-            let fa = focus_app.clone();
-            move || {
-                if let Some(w) = fa.get_webview_window(&focus_label) {
-                    // 1) 先显示，让 WebView2 初始化、EXSTYLE 稳定
-                    let _ = w.show();
-                    // 2) 显示后强制不穿透（确保覆盖窗真正接收鼠标）+ 置顶
-                    let _ = w.set_ignore_cursor_events(false);
-                    let _ = w.set_always_on_top(true);
-                    // 3) 抢前台焦点（全局热键触发时 Windows 输入例外允许 SetForegroundWindow）
-                    let _ = w.set_focus();
-                    // 4) 二次兜底，对抗任何 show/重绘 race
-                    let _ = w.set_always_on_top(true);
-                    let _ = w.set_ignore_cursor_events(false);
-                }
-            }
-        });
-    }
     // 悬停命中统一走 OS window_at_point（每帧、worker 线程、零 UI 阻塞），结果永远与系统一致；
     // 无 stale 列表问题；已移除 WinEventHook 看门狗与 window-list-changed（覆盖窗可见期间持续
     // EnumWindows 风暴、且 z 序不可靠反而误导命中）。

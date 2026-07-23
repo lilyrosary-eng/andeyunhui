@@ -30,6 +30,8 @@ interface ScreenshotOverlayProps {
   noteId?: string;
   /** 关闭（丢弃截图） */
   onClose: () => void;
+  /** 冻结图真正解码完成（ready）后回调，用于通知外层此时再显示覆盖窗，避免「图未注入即显示→黑底抢先」的黑屏 */
+  onImageReady?: () => void;
 }
 
 type Tool = "pen" | "eraser" | "rect" | "arrow" | "text";
@@ -86,7 +88,7 @@ async function copyScreenshotToClipboard(
   }
 }
 
-export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClose }: ScreenshotOverlayProps) {
+export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClose, onImageReady }: ScreenshotOverlayProps) {
   const [ready, setReady] = useState(false);
   const [mode, setMode] = useState<"select" | "edit">("select");
   const [longMode, setLongMode] = useState(false); // 长截图：窗口挑选态
@@ -166,6 +168,10 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       if (octx) octx.drawImage(img, 0, 0);
       offRef.current = off;
       setReady(true);
+      // 冻结图已真正解码并绘制就绪：通知外层显示覆盖窗。
+      // 必须在 onload 之后才 reveal —— 若提前（setData 后立即）show，窗口会先渲染
+      // 旧的空 image 状态、露出 #000 不透明底层（防穿透用），造成黑屏。
+      onImageReady?.();
     };
     // 预览解码失败：直接关闭覆盖窗，避免永久停留在白色 loading 态（假死）
     img.onerror = () => {
@@ -173,7 +179,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       onClose();
     };
     img.src = image;
-  }, [image, onClose]);
+  }, [image, onClose, onImageReady]);
 
   // CSS 坐标 → 物理坐标
   const toPhys = useCallback(
@@ -995,7 +1001,9 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   }, [mode, ready]);
 
   if (!ready) {
-    return <div className="fixed inset-0 z-[9999] bg-transparent" />;
+    // 不透明黑底：transparent:true 窗是 WS_EX_LAYERED 分层窗，逐像素命中——
+    // 透明像素鼠标直接穿透落下层窗（默认光标+无法选窗）。冻结图加载间隙必须不透明，恒可点。
+    return <div className="fixed inset-0 z-[9999]" style={{ background: "#000" }} />;
   }
 
   // ====== 选择态 ======
@@ -1003,6 +1011,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     return (
       <div
         className="fixed inset-0 z-[9999] select-none"
+        style={{ background: "#000" }}
         onContextMenu={(e) => {
           e.preventDefault();
           onClose();
