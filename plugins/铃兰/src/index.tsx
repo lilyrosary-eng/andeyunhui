@@ -1,4 +1,5 @@
 /// <reference path="../../global.d.ts" />
+import React from "react";
 // 音乐插件入口
 import { MusicSidebar } from './MusicSidebar';
 import { TrackList } from './TrackList';
@@ -8,7 +9,6 @@ import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
-const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
 
@@ -274,7 +274,7 @@ function groupTracksIntoPlaylists(tracks: Track[], rootPath: string): Playlist[]
 
 function MusicModule() {
   // 共享运行时：根目录管理（localStorage 持久化）
-  const { rootPaths, setRootPaths, addRoot, addRootPath, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, setRootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   // 共享运行时：黑名单管理（Rust 集中管理，必须在 filteredPlaylists useMemo 之前声明）
   const { hidden: hiddenPlaylists, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('music');
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -535,7 +535,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
   const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
     try {
       const { dir, paths } = await importToOpenWithDir('music', items);
-      addRootPath(dir);
+      addRootPathEphemeral(dir);
       if (paths[0]) {
         const name = paths[0].split(/[\\/]/).pop() || paths[0];
         const track: Track = {
@@ -552,7 +552,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     } catch (err) {
       console.error('[Music] 以安得云荟打开失败:', err);
     }
-  }, [addRootPath]);
+  }, [addRootPathEphemeral]);
 
   useEffect(() => {
     const unsub = registerOpenWithListener((m, files) => {

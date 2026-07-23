@@ -6,6 +6,14 @@ import { X, Inbox, ScanText, Languages, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferStationPanel';
 import { api, type ImportedFile } from '@/lib/api';
+import {
+  SOURCE_LANGS,
+  TARGET_LANGS,
+  loadSourceLang,
+  loadTargetLang,
+  saveSourceLang,
+  saveTargetLang,
+} from '@/lib/translateLanguages';
 
 // 本地 PaddleOCR 引擎懒加载（与 TransferStationPanel 共享模式）
 let _paddleOcrLoading: Promise<any> | null = null;
@@ -257,7 +265,17 @@ export function FloatingDropzoneView() {
         </button>
         <button
           onClick={() => switchMode(mode === 'ocr' ? 'list' : 'ocr')}
-          title="拓展为 OCR 工作区：拖入 / 选择图片即识别文字"
+          onDragEnter={(e) => {
+            e.preventDefault();
+            if (mode !== 'ocr') switchMode('ocr');
+          }}
+          onDragOver={(e) => {
+            e.preventDefault();
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+          }}
+          title="拓展为 OCR 工作区：拖入 / 选择图片即识别文字（拖拽文件悬停此处自动进入）"
           style={{ ...hdrBtn, background: mode === 'ocr' ? 'rgba(110,175,135,0.4)' : hdrBtn.background }}
         >
           <ScanText size={13} /> OCR
@@ -430,13 +448,15 @@ function TranslateBox() {
   const [output, setOutput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sourceLang, setSourceLang] = useState<string>(() => loadSourceLang());
+  const [targetLang, setTargetLang] = useState<string>(() => loadTargetLang());
 
   const run = async () => {
     if (!input.trim()) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await api.translateText(input);
+      const res = await api.translateText(input, targetLang, sourceLang);
       setOutput(res || '');
     } catch (e) {
       setError(typeof e === 'string' ? e : '翻译失败，请检查 AI 配置');
@@ -445,8 +465,39 @@ function TranslateBox() {
     }
   };
 
+  const langLabelStyle: CSSProperties = { fontSize: 12, opacity: 0.7, flexShrink: 0 };
+  const langSelStyle: CSSProperties = {
+    fontSize: 12,
+    padding: '3px 8px',
+    borderRadius: 8,
+    border: '1px solid rgba(110,175,135,0.5)',
+    background: 'rgba(255,255,255,0.7)',
+    color: '#23402f',
+    outline: 'none',
+    flex: 1,
+    minWidth: 0,
+  };
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, padding: 10, minHeight: 0 }}>
+      {/* 当前语言：放在上方输入框（原文）上面，含「自动识别」 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <span style={langLabelStyle}>当前语言</span>
+        <select
+          value={sourceLang}
+          onChange={(e) => {
+            setSourceLang(e.target.value);
+            saveSourceLang(e.target.value);
+          }}
+          style={langSelStyle}
+        >
+          {SOURCE_LANGS.map((l) => (
+            <option key={l.code} value={l.code}>
+              {l.label}
+            </option>
+          ))}
+        </select>
+      </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
         <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.7 }}>原文</span>
         <div style={{ flex: 1 }} />
@@ -461,6 +512,24 @@ function TranslateBox() {
         style={taStyle}
       />
       {error && <div style={{ color: '#b45309', fontSize: 12, flexShrink: 0 }}>{error}</div>}
+      {/* 目标语言：放在下方输入框（译文）上面，无「自动识别」 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <span style={langLabelStyle}>目标语言</span>
+        <select
+          value={targetLang}
+          onChange={(e) => {
+            setTargetLang(e.target.value);
+            saveTargetLang(e.target.value);
+          }}
+          style={langSelStyle}
+        >
+          {TARGET_LANGS.map((l) => (
+            <option key={l.code} value={l.code}>
+              {l.label}
+            </option>
+          ))}
+        </select>
+      </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
         <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.7 }}>译文</span>
         <div style={{ flex: 1 }} />

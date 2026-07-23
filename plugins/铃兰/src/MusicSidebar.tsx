@@ -1,6 +1,6 @@
 /// <reference path="../../global.d.ts" />
+import React from "react";
 // 音乐侧边栏 — 一级导航：歌单列表
-const React = window.__HOST_REACT__;
 const { useState, useCallback } = React;
 const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
 

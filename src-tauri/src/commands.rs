@@ -2259,11 +2259,7 @@ pub fn import_to_openwith_dir(
     if module.is_empty() {
         return Err("module 不能为空".to_string());
     }
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("获取 app_data 失败: {}", e))?;
-    let dir = app_data.join("openwith").join(&module);
+    let dir = openwith_module_dir(&app, &module)?;
     fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {}", e))?;
 
     let mut final_paths: Vec<String> = Vec::new();
@@ -2292,6 +2288,30 @@ pub fn import_to_openwith_dir(
         dir: dir.to_string_lossy().to_string(),
         paths: final_paths,
     })
+}
+
+/// 「以安得云荟打开」临时目录根：`<app_data>/openwith`
+fn openwith_base_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|p| p.join("openwith"))
+        .map_err(|e| format!("获取 app_data 失败: {}", e))
+}
+
+/// 指定模块的临时目录：`<app_data>/openwith/<module>`
+fn openwith_module_dir(app: &tauri::AppHandle, module: &str) -> Result<PathBuf, String> {
+    Ok(openwith_base_dir(app)?.join(module))
+}
+
+/// 清空「以安得云荟打开」临时目录（关软件即销毁，每次打开全新）。
+/// 在应用启动与退出时调用；亦作为命令暴露以便按需清理。
+#[tauri::command]
+pub fn clear_openwith_dir(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = openwith_base_dir(&app)?;
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("清空临时目录失败: {}", e))?;
+    }
+    Ok(())
 }
 
 /// 读取中转站中的文本文件内容

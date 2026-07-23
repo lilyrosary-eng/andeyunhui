@@ -545,13 +545,14 @@ pub async fn ai_vision_ocr(
     Ok(content)
 }
 
-/// 翻译：传入文本 + 目标语言代码（如 "en"/"zh"/"ja"），返回译文
+/// 翻译：传入文本 + 目标语言 + 可选源语言（"auto" 或留空表示自动识别），返回译文
 /// 走非流式 AI 对话；若未配置 AI 则返回错误供前端降级提示
 #[tauri::command]
 pub async fn translate_text(
     app: AppHandle,
     text: String,
     target_lang: Option<String>,
+    source_lang: Option<String>,
     profile_id: Option<String>,
 ) -> Result<String, String> {
     let profiles = load_profiles(&app);
@@ -561,10 +562,19 @@ pub async fn translate_text(
     }
 
     let lang = target_lang.unwrap_or_else(|| "中文".to_string());
-    let system = format!(
-        "你是专业翻译助手。将用户输入的文本翻译为{}，仅输出译文，不加注释、不加引号、不保留原文。如果原文已是目标语言则原样返回。",
-        lang
-    );
+    // 源语言：仅当明确给出且非 "auto" 时才写入提示词；其余（auto / 空）视为自动识别
+    let source = source_lang
+        .filter(|s| !s.is_empty() && s != "auto");
+    let system = match source {
+        Some(src) => format!(
+            "你是专业翻译助手。将用户输入的{}文本翻译为{}，仅输出译文，不加注释、不加引号、不保留原文。如果原文已是目标语言则原样返回。",
+            src, lang
+        ),
+        None => format!(
+            "你是专业翻译助手。将用户输入的文本翻译为{}，仅输出译文，不加注释、不加引号、不保留原文。如果原文已是目标语言则原样返回。",
+            lang
+        ),
+    };
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let body = serde_json::json!({
