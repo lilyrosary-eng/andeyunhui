@@ -107,6 +107,16 @@ windows = { version = "0.62", features = [
   "Storage_Streams",
 ] }
 
+# 透明分层窗首帧黑闪根治：把 WebView2 控制器 DefaultBackgroundColor 设为透明，
+# 否则长时隐藏（截图/录屏覆盖窗跨会话复用、隐藏等待触发）后 show() 首帧会露出
+# WebView2 默认的不透明黑底 → 闪黑。webview2-com-sys 必须与 wry 0.55.1 内部同版本
+# （0.38，否则 controller() 返回类型不匹配）；它实现的是 windows-core 0.61.2 的
+# Interface trait（本 crate 的 windows 0.62 用 windows-core 0.62.2，trait 版本不同、
+# cast 编译失败），故按最小面额外引入 windows-core 0.61（wry 传递依赖里本就存在，
+# 零新增编译单元）。**无法统一到 0.62**：需等 tauri/wry 升级 windows 0.62 后一并移除。
+webview2-com-sys = "0.38"
+windows-core-061 = { package = "windows-core", version = "0.61" }
+
 [features]
 # 攻防模块：启用爬虫框架（reqwest 代理池 + 双令牌桶 + EWMA + CDP 隐身 JS）
 # 默认不启用，主二进制零污染；构建时 --features gongfang 开启

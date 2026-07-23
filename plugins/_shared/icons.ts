@@ -1,4 +1,7 @@
 /// <reference path="../global.d.ts" />
+
+import React from "react";
+
 // =============================================
 // 插件共享图标 — 统一使用 React.createElement('svg', ...)
 // 所有插件从此文件导入图标，避免重复定义

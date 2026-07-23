@@ -135,7 +135,7 @@ function eventSummary(ev: KernelEvent): string {
     case 'strategy_committed':
       return `gen=${ev.generation} ${deltaSummary(ev.delta)}`;
     case 'reward_recorded':
-      return `${ev.event_kind} → 奖励 ${ev.total_reward} 错误率 ${(ev.error_rate * 100).toFixed(1)}%`;
+      return `${ev.event_kind} → 奖励 ${ev.total_reward} 错误率 ${((ev.error_rate ?? 0) * 100).toFixed(1)}%`;
     case 'ai_reasoning':
       return `${ev.level} ${ev.latency_ms}ms ${ev.success ? '✓' : '✗'} ${ev.response_summary?.slice(0, 60) ?? ''}`;
     case 'user_command_injected':
@@ -479,9 +479,9 @@ export function MetricsChart({ height = 220 }: { height?: number }) {
       const stealthData = data.map((m) => ({ time: Math.floor(m.ts / 1000) as never, value: m.stealth_level }));
 
       series.reward.setData?.(rewardData);
-      series.err.setData?.(errData);
-      series.qps.setData?.(qpsData);
-      series.stealth.setData?.(stealthData);
+      series.err?.setData?.(errData);
+      series.qps?.setData?.(qpsData);
+      series.stealth?.setData?.(stealthData);
       setLastUpdate(Date.now());
     } catch {
       /* 内核未启动 */

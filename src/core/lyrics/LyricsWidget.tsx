@@ -276,8 +276,6 @@ export function LyricsWidget() {
       className="w-full h-full flex flex-col items-center justify-center select-none relative"
       style={{
         background: 'transparent',
-        // 锁定态：歌词区鼠标穿透到背后窗口（点击穿透），仅解锁按钮保持可交互
-        pointerEvents: locked ? 'none' : 'auto',
       }}
       onMouseDown={handleMouseDown}
       onMouseEnter={handleMouseEnter}
@@ -294,7 +292,8 @@ export function LyricsWidget() {
             color: '#ffffff',
             textShadow: '0 0 8px rgba(0,0,0,0.8), 0 0 16px rgba(0,0,0,0.6), 0 2px 4px rgba(0,0,0,0.5)',
             WebkitTextStroke: '1px rgba(0,0,0,0.3)',
-            opacity: currentLine ? 1 : 0,
+            // 锁定态：歌词内容透明（alpha=0）→ OS 级点击穿透；仅解锁按钮保持可交互
+            opacity: locked ? 0 : (currentLine ? 1 : 0),
           }}
         >
           {currentLine || '\u00A0'}
@@ -310,7 +309,7 @@ export function LyricsWidget() {
               color: '#ffffff',
               textShadow: '0 0 6px rgba(0,0,0,0.7), 0 0 12px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4)',
             WebkitTextStroke: '0.5px rgba(0,0,0,0.2)',
-            opacity: DEFAULT_NEXT_LINE_OPACITY,
+            opacity: locked ? 0 : DEFAULT_NEXT_LINE_OPACITY,
           }}
         >
             {nextLine}
@@ -322,7 +321,8 @@ export function LyricsWidget() {
       <div
         className="absolute top-2 right-2 transition-opacity duration-200"
         style={{
-          opacity: locked ? 0.85 : (showLockIcon ? 0.7 : 0),
+          // 锁定态常驻显示并可点击解锁（穿透下仍保持可交互，实现自切换关闭）
+          opacity: locked ? 1 : (showLockIcon ? 0.7 : 0),
           pointerEvents: (locked || showLockIcon) ? 'auto' : 'none',
           cursor: 'pointer',
         }}

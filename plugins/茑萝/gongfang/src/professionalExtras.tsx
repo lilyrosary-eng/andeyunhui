@@ -375,7 +375,12 @@ export function ScriptEditor({
           { javascript: (cfg?: unknown) => unknown },
           { json: () => unknown },
           { oneDark: unknown },
-          { EditorView: new (cfg: unknown) => { destroy: () => void; dispatch: (t: unknown) => void; state: { doc: { toString: () => string } } } },
+          {
+            EditorView: {
+              new (cfg: unknown): { destroy: () => void; dispatch: (t: unknown) => void; state: { doc: { toString: () => string } } };
+              theme: (spec: unknown) => unknown;
+            },
+          },
           { EditorState: { create: (cfg: unknown) => unknown } },
         ];
 

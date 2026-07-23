@@ -1,8 +1,8 @@
 /// <reference path="../../../global.d.ts" />
+import React from "react";
 // 攻防模块 · 四大框架面板
 // 爬虫框架：内核已就绪，接入实际 Tauri 命令（启动/停止/状态/指令注入）。
 // 逆向/渗透/自动化：后端内核已就绪，前端展示技术选型（暂未接入 Tauri 命令）。
-const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback } = React;
 
 import type { AuditInput } from './audit';
@@ -1281,7 +1281,7 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         </CollapsibleSection>
 
         {/* P1：资产树 + Payload 库（按主机聚合扫描结果 + 预设注入模板） */}
-        <PentestAssetTree scanResults={scanHistory} />
+        <PentestAssetTree scanResults={scanHistory.map((r) => ({ host: r.host, ip: r.host, open_ports: r.open_ports, duration_ms: r.duration_ms }))} />
       </div>
     </div>
   );

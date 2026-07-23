@@ -10,8 +10,8 @@ const hostApi = window.__HOST_API__;
 
 // 攻防命令直接走 __TAURI_INTERNALS__.invoke（未加入插件沙箱白名单）
 const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
-  const w = window as any & {
-    __TAURI_INTERNALS__?: { invoke: <U = T>(c: string, a?: Record<string, unknown>) => Promise<U> };
+  const w = window as unknown as {
+    __TAURI_INTERNALS__?: { invoke: <U = unknown>(c: string, a?: Record<string, unknown>) => Promise<U> };
   };
   if (!w.__TAURI_INTERNALS__?.invoke) {
     return Promise.reject(new Error('Tauri invoke 不可用'));
@@ -425,7 +425,7 @@ function buildSystemPrompt(): string {
 // ============ 快捷指令（纯人工，无需 AI） ============
 interface QuickAction {
   label: string;
-  cmd: () => Promise<string>;
+  fn: () => Promise<string>;
 }
 
 // ============ 主组件 ============

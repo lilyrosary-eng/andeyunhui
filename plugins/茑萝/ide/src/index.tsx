@@ -4,7 +4,14 @@
 // 功能：多标签页、查找/替换、状态栏、最近文件、主题/自动换行切换。
 // 不提供降级编辑器：若内核加载失败，给出明确错误与构建提示。
 const React = window.__HOST_REACT__;
-const hostApi = window.__HOST_API__;
+const hostApi = window.__HOST_API__ as unknown as {
+  invoke: <T = unknown>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+  convertFileSrc: (filePath: string) => string;
+  listen: <T = unknown>(event: string, handler: (event: { payload: T }) => void) => Promise<() => void>;
+  emit: (event: string, payload?: unknown) => Promise<void>;
+  createFrameBuffer: <T>(onFlush: (items: T[]) => void) => any;
+  createFloatingWindow: (label: string, url: string, options: Record<string, unknown>) => Promise<void>;
+};
 const registry = (window as any).__PLUGIN_REGISTRY__;
 const { useState, useRef, useCallback, useEffect, useMemo } = React;
 
@@ -2111,7 +2118,7 @@ function frameData(body: string): string {
 async function trialTypeCheck(
   projectRoot: string,
   edits: AgentEdit[],
-  hostApi: any,
+  hostApi: { invoke: <T = unknown>(cmd: string, args?: Record<string, unknown>) => Promise<T> },
 ): Promise<string | null> {
   if (!projectRoot || edits.length === 0) return null;
   const hasTs = !!(await readFileSafe(resolvePath('tsconfig.json', projectRoot))) ||
@@ -2532,6 +2539,11 @@ let addFileTab: ((path: string, content: string) => void) | null = null;
 // ============ 跨组件共享：当前打开的项目根目录（供 AI 编程关联，#12） ============
 let projectRoot: string | null = null;
 
+// IdeEditor 与 IdeAgent 为相互独立的组件：IdeEditor 的写盘守卫需把「括号不平衡」警告推给 IdeAgent 的会话，用模块级桥接函数打通
+let _agentWarnHandler: ((msg: string) => void) | null = null;
+function setAgentWarnHandler(fn: ((msg: string) => void) | null) { _agentWarnHandler = fn; }
+function agentWarn(msg: string) { _agentWarnHandler?.(msg); }
+
 // ============ 主组件 ============
 type Engine = 'loading' | 'cm' | 'error';
 
@@ -2699,7 +2711,7 @@ function IdeEditor() {
       // Lint Fix 轻量守卫：若原文件括号平衡而保存后不平衡，提示用户检查（避免错位导致的语法破坏）
       const before = orig[path] ?? '';
       if (bracketsBalanced(before) && !bracketsBalanced(c)) {
-        setConv((prev) => [...prev, { id: 'w_' + Date.now().toString(36), role: 'assistant', content: `⚠ 文件 ${path} 保存后括号/花括号可能不匹配（原文件平衡、现文件不平衡），请检查是否因定位错位导致，必要时在编辑器中修复。` }]);
+        agentWarn(`⚠ 文件 ${path} 保存后括号/花括号可能不匹配（原文件平衡、现文件不平衡），请检查是否因定位错位导致，必要时在编辑器中修复。`);
       }
     }
   }, [applyTabByPath]);
@@ -3809,6 +3821,10 @@ function IdeAgent({
   onChanges: (changes: AgentEdit[], verdict?: string | null) => void;
 }) {
   const [conv, setConv] = useState<AgentMsg[]>([]);
+  useEffect(() => {
+    setAgentWarnHandler((msg) => setConv((prev) => [...prev, { id: 'w_' + Date.now().toString(36), role: 'assistant', content: msg }]));
+    return () => setAgentWarnHandler(null);
+  }, []);
   // convRef / statsRef: 镜像 conv / agentStats 的最新值，供 useCallback 内读取（避免依赖频繁变化）
   const convRef = useRef<AgentMsg[]>([]);
   useEffect(() => { convRef.current = conv; }, [conv]);

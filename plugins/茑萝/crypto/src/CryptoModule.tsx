@@ -1,8 +1,8 @@
 /// <reference path="../../../global.d.ts" />
+import React from "react";
 // 茑萝 · 加密解密主容器
 // 职责：四个 Tab（RSA / PGP / 审计 / 字典）切换 + 通用工具栏
 // 风格对齐 GongjuxiangModule / GongfangModule
-const React = window.__HOST_REACT__;
 const { useState } = React;
 
 import { RsaTool } from './RsaTool';

@@ -5,6 +5,14 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 import { api, type ImportedFile } from '@/lib/api';
+import {
+  SOURCE_LANGS,
+  TARGET_LANGS,
+  loadSourceLang,
+  loadTargetLang,
+  saveSourceLang,
+  saveTargetLang,
+} from '@/lib/translateLanguages';
 
 // 本地 PaddleOCR 引擎懒加载（与 CodeMirror/TipTap 同模式：read_external_dep_file + new Function，
 // 在真实 window 全局作用域执行，挂载到 window.__EXT_PADDLEOCR__）。
@@ -762,20 +770,25 @@ function TranslateWorkspace({ onClose }: { onClose: () => void }) {
   const [output, setOutput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sourceLang, setSourceLang] = useState<string>(() => loadSourceLang());
+  const [targetLang, setTargetLang] = useState<string>(() => loadTargetLang());
 
   const run = useCallback(async () => {
     if (!input.trim()) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await api.translateText(input, '中文');
+      const res = await api.translateText(input, targetLang, sourceLang);
       setOutput(res || '');
     } catch (e) {
       setError('⚠ 翻译失败：' + String(e).slice(0, 200));
     } finally {
       setLoading(false);
     }
-  }, [input]);
+  }, [input, targetLang, sourceLang]);
+
+  const selCls =
+    'text-xs rounded-lg border border-[var(--element-border)] bg-white/60 dark:bg-stone-800/60 px-2 py-1 text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-bg)]';
 
   return (
     <div className="w-full h-full flex flex-col glass-panel rounded-xl overflow-hidden">
@@ -792,6 +805,24 @@ function TranslateWorkspace({ onClose }: { onClose: () => void }) {
         </button>
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-3">
+        {/* 当前语言：放在上方输入框（原文）上面，含「自动识别」 */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="text-xs text-neutral-500 dark:text-stone-400">当前语言</span>
+          <select
+            value={sourceLang}
+            onChange={(e) => {
+              setSourceLang(e.target.value);
+              saveSourceLang(e.target.value);
+            }}
+            className={selCls}
+          >
+            {SOURCE_LANGS.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="flex items-center justify-between flex-shrink-0">
           <span className="text-xs font-medium text-neutral-600 dark:text-stone-300">原文</span>
           <button
@@ -811,6 +842,24 @@ function TranslateWorkspace({ onClose }: { onClose: () => void }) {
         {error && (
           <div className="text-xs text-amber-600 dark:text-amber-400 flex-shrink-0">{error}</div>
         )}
+        {/* 目标语言：放在下方输入框（译文）上面，无「自动识别」 */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="text-xs text-neutral-500 dark:text-stone-400">目标语言</span>
+          <select
+            value={targetLang}
+            onChange={(e) => {
+              setTargetLang(e.target.value);
+              saveTargetLang(e.target.value);
+            }}
+            className={selCls}
+          >
+            {TARGET_LANGS.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="flex items-center justify-between flex-shrink-0">
           <span className="text-xs font-medium text-neutral-600 dark:text-stone-300">译文</span>
           <button

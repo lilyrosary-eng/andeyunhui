@@ -1,6 +1,6 @@
 /// <reference path="../../global.d.ts" />
+import React from "react";
 // 歌曲列表 — 二级导航：详细歌曲列表
-const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef } = React;
 const hostApi = window.__HOST_API__;
 import { musicPlayer } from './musicPlayer';
@@ -353,7 +353,7 @@ export function TrackList({
                     className: 'relative flex-shrink-0',
                   },
                     React.createElement('button', {
-                      ref: (el: HTMLButtonElement | null) => { moreBtnRefs.current.set(index, el); },
+                      ref: (el: HTMLButtonElement | null): void => { moreBtnRefs.current.set(index, el); },
                       onClick: (e: React.MouseEvent) => handleMoreClick(index, e),
                       className: `btn-press p-1 rounded transition-colors ${
                         isMenuOpen

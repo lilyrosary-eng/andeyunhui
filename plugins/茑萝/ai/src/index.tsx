@@ -1,4 +1,5 @@
 /// <reference path="../../../global.d.ts" />
+import React from "react";
 // 茑萝 · IDE · AI 编程 子插件（Cursor / Claude Code 风格）
 //
 // 多级嵌套：niaoluo（茑萝）→ ide（IDE）→ ai（AI 编程）。本插件是 IDE 的子插件，
@@ -9,7 +10,6 @@
 //
 // 模型配置统一在「全局设置 → 模型」完成（可配置多份档案）；本面板不再内置设置，
 // 仅在输入框旁提供一个下拉框，直接选用已配置的模型档案。
-const React = window.__HOST_REACT__;
 const hostApi = window.__HOST_API__;
 const { useState, useRef, useEffect, useCallback } = React;
 

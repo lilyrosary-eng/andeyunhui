@@ -122,8 +122,8 @@ function App() {
   useEffect(() => {
     ensureScreenshotOverlay()
       .then(() => {
-        import('@tauri-apps/api/webviewWindow').then(({ WebviewWindow }) => {
-          WebviewWindow.getByLabel('screenshot-overlay')?.hide();
+        import('@tauri-apps/api/webviewWindow').then(async ({ WebviewWindow }) => {
+          (await WebviewWindow.getByLabel('screenshot-overlay'))?.hide();
         });
       })
       .catch(() => {})

@@ -55,7 +55,7 @@ function normalizeData(raw: unknown): string[][] {
 class SheetErrorBoundary extends Component<{ children: React.ReactNode }, { error: Error | null; resetKey: number }> {
   state: { error: Error | null; resetKey: number } = { error: null, resetKey: 0 };
   static getDerivedStateFromError(error: Error) { return { error }; }
-  componentDidCatch(error: Error) { hostApi.console?.error?.('[SheetEditor] 崩溃:', error); }
+  componentDidCatch(error: Error) { console.error('[SheetEditor] 崩溃:', error); }
   retry = () => this.setState((s) => ({ error: null, resetKey: s.resetKey + 1 }));
   render() {
     if (this.state.error) {

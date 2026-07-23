@@ -155,10 +155,10 @@ export const api = {
   aiVisionOcr: (imageBase64: string, imageMime: string, prompt?: string, profileId?: string) =>
     invoke<string>('ai_vision_ocr', { imageBase64, imageMime, prompt, profileId }),
 
-  // AI 翻译：传入文本 + 目标语言（如 "en"/"zh"/"ja"），返回译文
+  // AI 翻译：传入文本 + 目标语言 + 可选源语言（"auto" 表示自动识别），返回译文
   // 未配置 AI 时抛错，调用方需展示降级提示（与 ai 编程模块一致）
-  translateText: (text: string, targetLang?: string, profileId?: string) =>
-    invoke<string>('translate_text', { text, targetLang, profileId }),
+  translateText: (text: string, targetLang?: string, sourceLang?: string, profileId?: string) =>
+    invoke<string>('translate_text', { text, targetLang, sourceLang, profileId }),
 
   // 列出中转站文件
   listTransferStationFiles: () => invoke<TransferStationFile[]>('list_transfer_station_files'),

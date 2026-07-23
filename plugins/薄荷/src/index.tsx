@@ -1,7 +1,7 @@
 /// <reference path="../../global.d.ts" />
+import React from "react";
 // 专业模块入口（薄荷）
 import * as XLSX from 'xlsx';
-const React = window.__HOST_REACT__;
 const { useState, useMemo, useCallback, useRef, useEffect } = React;
 const { ModuleSidebarShell, SecondaryNavShell, Icon: HostIcon } = window.__HOST_UI__ || {};
 const _HOST_UI = window.__HOST_UI__ || {};

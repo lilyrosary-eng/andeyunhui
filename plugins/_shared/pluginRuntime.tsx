@@ -1,4 +1,5 @@
 /// <reference path="../global.d.ts" />
+import React from "react";
 // =============================================
 // 插件共享运行时 — 消除跨插件的基础设施重复代码
 // =============================================
@@ -11,7 +12,6 @@
 //   import { useRootPaths, useBlacklist, EmptyState } from '../../_shared/pluginRuntime';
 // =============================================
 
-const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef } = React;
 const hostApi = window.__HOST_API__;
 
@@ -57,7 +57,7 @@ export function useRootPaths(storageKey: string) {
     });
   }, [storageKey]);
 
-  /** 静默加入根目录（不弹选择器，持久化）。用于「以安得云荟打开 / 拖入主窗口」的临时目录注册。 */
+  /** 静默加入根目录（不弹选择器，持久化）。用于用户手动添加的常驻库。 */
   const addRootPath = useCallback((pathToAdd: string) => {
     setRootPaths(prev => {
       if (prev.includes(pathToAdd)) return prev;
@@ -67,7 +67,17 @@ export function useRootPaths(storageKey: string) {
     });
   }, [storageKey]);
 
-  return { rootPaths, setRootPaths, addRoot, addRootPath, removeRoot };
+  /** 静默加入根目录（仅内存，不持久化）。用于「以安得云荟打开 / 拖入主窗口」的临时目录，
+   *  关软件即随内存释放而销毁；配合 Rust clear_openwith_dir 在启动/退出时清空磁盘目录，
+   *  保证每次打开都是全新的。 */
+  const addRootPathEphemeral = useCallback((pathToAdd: string) => {
+    setRootPaths(prev => {
+      if (prev.includes(pathToAdd)) return prev;
+      return [...prev, pathToAdd];
+    });
+  }, []);
+
+  return { rootPaths, setRootPaths, addRoot, addRootPath, addRootPathEphemeral, removeRoot };
 }
 
 /**

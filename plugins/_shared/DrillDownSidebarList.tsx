@@ -3,7 +3,7 @@
 // 适用于视频模块（文件夹→视频）、音乐模块（歌单→歌曲）等钻取导航场景
 // 消除 VideoSidebar / MusicSidebar 之间的列表渲染重复代码
 
-const React = window.__HOST_REACT__;
+import React from 'react';
 const { useMemo } = React;
 const { SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent } = window.__HOST_UI__ || {};
 

@@ -1,7 +1,7 @@
 /* eslint-disable */
 /// <reference path="../../global.d.ts" />
+import React from "react";
 // 图片查看器 — 四种查看模式
-const React = window.__HOST_REACT__;
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
 

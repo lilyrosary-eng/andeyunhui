@@ -168,15 +168,25 @@ export function FloatingNoteView() {
   }
 
   return (
-    <div className={`flex flex-col h-screen rounded-2xl border border-white/25 dark:border-stone-700/40 bg-white/[0.18] dark:bg-stone-800/[0.18] text-neutral-800 dark:text-stone-200 overflow-hidden ${isFixed ? 'pointer-events-none' : ''}`}>
+    <div
+      className={`flex flex-col h-screen rounded-2xl border border-white/25 dark:border-stone-700/40 bg-white/[0.18] dark:bg-stone-800/[0.18] text-neutral-800 dark:text-stone-200 overflow-hidden`}
+      // 固定态：卡片整体背景透明（alpha=0）→ OS 级点击穿透；仅“固定”按钮保持不透明且可交互
+      style={{
+        backgroundColor: isFixed ? 'transparent' : undefined,
+        borderColor: isFixed ? 'transparent' : undefined,
+      }}
+    >
       {/* ====== 自定义标题栏（拖拽区；固定时移除拖拽属性，不可拖动）====== */}
       <div
         data-tauri-drag-region={isFixed ? undefined : ''}
-        style={isFixed ? undefined : DRAG_STYLE}
+        style={isFixed ? { backgroundColor: 'transparent', borderColor: 'transparent' } : DRAG_STYLE}
         className="flex items-center justify-between gap-2 px-3 py-2.5 bg-white/[0.18] dark:bg-stone-800/[0.18] border-b border-neutral-200/30 dark:border-stone-700/30 select-none"
       >
         {/* 标题（浮窗只读） */}
-        <span className="flex-1 min-w-0 text-sm font-medium truncate ml-1 select-none">
+        <span
+          className="flex-1 min-w-0 text-sm font-medium truncate ml-1 select-none"
+          style={{ opacity: isFixed ? 0 : 1 }}
+        >
           {title || '浮窗笔记'}
         </span>
         {/* 按钮组（不可拖拽） */}
@@ -189,6 +199,7 @@ export function FloatingNoteView() {
                 ? 'text-yellow-500 bg-yellow-50 dark:bg-yellow-900/20'
                 : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 hover:bg-black/5 dark:hover:bg-white/5'
             }`}
+            style={{ opacity: isFixed ? 0 : 1, pointerEvents: isFixed ? 'none' : 'auto' }}
             title={isPinned ? '取消置顶' : '置顶'}
           >
             <Pin size={14} fill={isPinned ? 'currentColor' : 'none'} />
@@ -202,6 +213,7 @@ export function FloatingNoteView() {
                 ? 'opacity-50 cursor-not-allowed'
                 : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 hover:bg-black/5 dark:hover:bg-white/5'
             }`}
+            style={{ opacity: isFixed ? 0 : 1, pointerEvents: isFixed ? 'none' : 'auto' }}
             title="复制为新笔记"
           >
             <Copy size={14} />
@@ -214,6 +226,7 @@ export function FloatingNoteView() {
                 ? 'text-blue-500 bg-blue-50 dark:bg-blue-900/20'
                 : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 hover:bg-black/5 dark:hover:bg-white/5'
             }`}
+            style={{ opacity: 1, pointerEvents: 'auto' }}
             title={isFixed ? '取消固定' : '固定（置顶+穿透）'}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill={isFixed ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2">
@@ -227,6 +240,7 @@ export function FloatingNoteView() {
           <button
             onClick={handleClose}
             className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+            style={{ opacity: isFixed ? 0 : 1, pointerEvents: isFixed ? 'none' : 'auto' }}
             title="关闭浮窗"
           >
             <X size={14} />
@@ -235,7 +249,7 @@ export function FloatingNoteView() {
       </div>
 
       {/* ====== 内容编辑区 ====== */}
-      <div className="flex-1 min-h-0">
+      <div className="flex-1 min-h-0" style={{ opacity: isFixed ? 0 : 1 }}>
         {loading ? (
           <div className="flex items-center justify-center h-full text-neutral-400 dark:text-stone-500 text-sm">
             加载中...

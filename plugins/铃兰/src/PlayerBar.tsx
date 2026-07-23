@@ -1,4 +1,5 @@
 /// <reference path="../../global.d.ts" />
+import React from "react";
 // 音乐播放控制条 — 固定于音乐模块内容区底部，不覆盖导航栏
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { lyricsSync } from './lyricsSync';
@@ -8,7 +9,6 @@ import {
   ListIcon, SingleIcon, ShuffleIcon, MusicIcon, LyricsIcon, LockIcon, UnlockIcon,
 } from '../../_shared/icons';
 
-const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef } = React;
 const hostApi = window.__HOST_API__;
 const { IconButton: SharedIconButton } = window.__HOST_UI__ || {};

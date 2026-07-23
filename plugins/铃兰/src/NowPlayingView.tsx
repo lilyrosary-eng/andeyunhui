@@ -1,4 +1,5 @@
 /// <reference path="../../global.d.ts" />
+import React from "react";
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { VolumePopup } from './PlayerBar';
 // 沉浸播放页 — 覆盖音乐模块内容区，不覆盖一级导航栏
@@ -6,7 +7,6 @@ import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, MusicIcon,
   RepeatIcon, Repeat1Icon, ShuffleIcon, ArrowLeftIcon,
 } from '../../_shared/icons';
-const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
 const { IconButton } = window.__HOST_UI__ || {};

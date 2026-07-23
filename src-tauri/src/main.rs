@@ -237,6 +237,8 @@ fn main() {
         })
         .setup(|app| {
             app.manage(PendingOpenFiles(Default::default()));
+            // 「以安得云荟打开」临时目录：启动即清空，确保每次打开都是全新的（关软件即销毁）
+            let _ = clear_openwith_dir(app.handle().clone());
             // 文件关联：以安得云荟打开（Windows 上通过启动参数传入文件路径）。
             // 存入一次性列表（关闭软件即销毁），并广播给前端路由到对应模块。
             {
@@ -802,6 +804,7 @@ fn main() {
             clear_transfer_station,
             import_to_dropzone,
             import_to_openwith_dir,
+            clear_openwith_dir,
             read_dropzone_file,
             read_dropzone_base64,
             prepare_drop_export,
@@ -1015,6 +1018,11 @@ fn main() {
             dev_console_http,
             take_pending_open_files,
         ])
-        .run(tauri::generate_context!())
+        .run(tauri::generate_context!(), |_app, event| {
+            // 关闭软件即清空「以安得云荟打开」临时目录（每次打开全新）
+            if let tauri::RunEvent::Exit = event {
+                let _ = clear_openwith_dir(_app.clone());
+            }
+        })
         .expect("error while running tauri application");
 }
