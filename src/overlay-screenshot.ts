@@ -34,7 +34,7 @@ function OverlayApp() {
     setData((prev) => {
       if (prev && prev.image) {
         if (typeof prev.image === "string") {
-          if (prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+          if ((prev.image as string).startsWith("blob:")) URL.revokeObjectURL(prev.image as string);
         } else if (typeof (prev.image as ImageBitmap).close === "function") {
           (prev.image as ImageBitmap).close();
         }
@@ -123,7 +123,7 @@ function OverlayApp() {
               setData((prev) => {
                 if (prev && prev.image) {
                   if (typeof prev.image === "string") {
-                    if (prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+                    if ((prev.image as string).startsWith("blob:")) URL.revokeObjectURL(prev.image as string);
                   } else if (typeof (prev.image as ImageBitmap).close === "function") {
                     (prev.image as ImageBitmap).close();
                   }
@@ -157,7 +157,7 @@ function OverlayApp() {
       setData((prev) => {
         if (prev && prev.image) {
           if (typeof prev.image === "string") {
-            if (prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+            if ((prev.image as string).startsWith("blob:")) URL.revokeObjectURL(prev.image as string);
           } else if (typeof (prev.image as ImageBitmap).close === "function") {
             (prev.image as ImageBitmap).close();
           }

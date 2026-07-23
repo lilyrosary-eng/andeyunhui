@@ -7,6 +7,7 @@ import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { ModelSettings } from '@/core/settings/ModelSettings'
 import { DevConsole } from '@/core/settings/DevConsole'
 import { invoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { logger } from '@/lib/logger';
 import { api, type ArchiveEntry, type PluginManifest } from '@/lib/api';
@@ -289,6 +290,46 @@ export function GlobalSettingsPanel() {
     }
   }, [deskpetManifest, deskpetHot]);
 
+  // ---- 桌宠 Phase A 基础设置（缩放 / 透明度 / 点击穿透）----
+  // 与插件 / 浮窗共享 localStorage['deskpet:settings']：面板写入并全局 emit，
+  // 浮窗直接收到应用；插件监听更新缓存并持久化，并在浮窗请求时回复。
+  const DESKPET_SETTINGS_KEY = 'deskpet:settings';
+  const [deskpetScale, setDeskpetScale] = useState(1);
+  const [deskpetOpacity, setDeskpetOpacity] = useState(1);
+  const [deskpetClickThrough, setDeskpetClickThrough] = useState(false);
+
+  // 启动时从 localStorage 恢复缓存值（与插件 / 浮窗对齐）
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DESKPET_SETTINGS_KEY);
+      if (raw) {
+        const p = JSON.parse(raw) as {
+          scale?: number;
+          opacity?: number;
+          clickThrough?: boolean;
+        };
+        if (typeof p.scale === 'number') setDeskpetScale(p.scale);
+        if (typeof p.opacity === 'number') setDeskpetOpacity(p.opacity);
+        if (typeof p.clickThrough === 'boolean') setDeskpetClickThrough(p.clickThrough);
+      }
+    } catch {
+      /* 忽略解析失败 */
+    }
+  }, []);
+
+  // 持久化并下发（浮窗经全局 emit 直接收到；插件监听并更新缓存）
+  const pushDeskpetSettings = useCallback(
+    (next: { scale: number; opacity: number; clickThrough: boolean }) => {
+      try {
+        localStorage.setItem(DESKPET_SETTINGS_KEY, JSON.stringify(next));
+      } catch {
+        /* 忽略持久化失败 */
+      }
+      emit('deskpet:settings', next).catch(() => {});
+    },
+    [],
+  );
+
   const tabs = [
     { id: 'general' as const, label: t('settings.tab.general'), icon: Settings },
     { id: 'themes' as const, label: t('settings.tab.themes'), icon: Palette },
@@ -466,23 +507,79 @@ export function GlobalSettingsPanel() {
                 </div>
               </section>
 
-              {/* 桌宠显隐：与「管理拓展」共享单一可见性状态（单一事实源） */}
+              {/* 桌宠：显隐 + Phase A 基础设置（缩放 / 透明度 / 点击穿透） */}
               <section>
                 <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
                   <Sparkles size={14} />
                   桌宠
                 </h2>
-                <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 p-4 flex justify-between items-center gap-4">
-                  <div>
-                    <span className="text-sm font-medium block">桌宠显示</span>
-                    <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">启用后桌宠常驻桌面漫步；关闭即卸载插件。</p>
+                <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
+                  {/* 显隐：与「管理拓展」共享单一可见性状态（单一事实源） */}
+                  <div className="flex justify-between items-center p-4">
+                    <div>
+                      <span className="text-sm font-medium block">桌宠显示</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">启用后桌宠常驻桌面漫步；关闭即卸载插件。</p>
+                    </div>
+                    <Switch
+                      checked={deskpetVisible ?? false}
+                      disabled={deskpetManifest === null}
+                      onCheckedChange={(val: boolean) => { void toggleDeskpet(val); }}
+                      className="data-[state=checked]:bg-[var(--element-color-raw)]"
+                    />
                   </div>
-                  <Switch
-                    checked={deskpetVisible ?? false}
-                    disabled={deskpetManifest === null}
-                    onCheckedChange={(val: boolean) => { void toggleDeskpet(val); }}
-                    className="data-[state=checked]:bg-[var(--element-color-raw)]"
-                  />
+                  {/* 缩放 */}
+                  <div className="p-4">
+                    <div className="flex justify-between items-center mb-3">
+                      <span className="text-sm text-neutral-600 dark:text-stone-300">缩放</span>
+                      <span className="text-xs text-neutral-500 dark:text-stone-400">{Math.round(deskpetScale * 100)}%</span>
+                    </div>
+                    <Slider
+                      value={[deskpetScale]}
+                      onValueChange={([v]: number[]) => {
+                        const s = v;
+                        setDeskpetScale(s);
+                        pushDeskpetSettings({ scale: s, opacity: deskpetOpacity, clickThrough: deskpetClickThrough });
+                      }}
+                      min={0.5}
+                      max={1.5}
+                      step={0.05}
+                      className="slider-themed"
+                    />
+                  </div>
+                  {/* 透明度 */}
+                  <div className="p-4">
+                    <div className="flex justify-between items-center mb-3">
+                      <span className="text-sm text-neutral-600 dark:text-stone-300">透明度</span>
+                      <span className="text-xs text-neutral-500 dark:text-stone-400">{Math.round(deskpetOpacity * 100)}%</span>
+                    </div>
+                    <Slider
+                      value={[deskpetOpacity]}
+                      onValueChange={([v]: number[]) => {
+                        const o = v;
+                        setDeskpetOpacity(o);
+                        pushDeskpetSettings({ scale: deskpetScale, opacity: o, clickThrough: deskpetClickThrough });
+                      }}
+                      min={0.2}
+                      max={1}
+                      step={0.05}
+                      className="slider-themed"
+                    />
+                  </div>
+                  {/* 点击穿透 */}
+                  <div className="flex justify-between items-center p-4">
+                    <div>
+                      <span className="text-sm font-medium block">点击穿透</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">开启后鼠标可穿透桌宠（不拦截点击），便于截图选区。</p>
+                    </div>
+                    <Switch
+                      checked={deskpetClickThrough}
+                      onCheckedChange={(val: boolean) => {
+                        setDeskpetClickThrough(val);
+                        pushDeskpetSettings({ scale: deskpetScale, opacity: deskpetOpacity, clickThrough: val });
+                      }}
+                      className="data-[state=checked]:bg-[var(--element-color-raw)]"
+                    />
+                  </div>
                 </div>
               </section>
             </div>
@@ -775,7 +872,7 @@ export function GlobalSettingsPanel() {
                 </div>
                 <div className="space-y-2 text-sm">
                   <p className="text-neutral-600 dark:text-stone-300">安得云荟</p>
-                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.version', { v: '2.0' })}</p>
+                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.version', { v: '2.2.0' })}</p>
                   <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.author')}</p>
                 </div>
               </section>

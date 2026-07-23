@@ -106,7 +106,7 @@ function SettingsContent({
 
 // ========== 主组件 ==========
 function ReadingModule() {
-  const { rootPaths, addRoot, addRootPath, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   const [books, setBooks] = useState<BookSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -243,7 +243,7 @@ function ReadingModule() {
   const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
     try {
       const { dir, paths } = await importToOpenWithDir('reading', items);
-      addRootPath(dir);
+      addRootPathEphemeral(dir);
       if (paths[0]) {
         await openBook('open_book', { filePath: paths[0] }).catch((e) =>
           console.error('[Reading] 以安得云荟打开失败:', e),
@@ -252,7 +252,7 @@ function ReadingModule() {
     } catch (err) {
       console.error('[Reading] 以安得云荟打开失败:', err);
     }
-  }, [addRootPath, openBook]);
+  }, [addRootPathEphemeral, openBook]);
 
   useEffect(() => {
     const unsub = registerOpenWithListener((m, files) => {

@@ -76,6 +76,9 @@ const ALLOWED_COMMANDS = new Set([
   'cancel_open_book',
   // 通用
   'check_file_exists',
+  // 「以安得云荟打开」/ 拖入主窗口：复制进固定临时目录 <app_data>/openwith/<module>/
+  // 四个媒体模块（图片/音乐/视频/阅读）的 processOpenWith 都会调用此命令，漏加会被白名单拦截
+  'import_to_openwith_dir',
   // 办公（wps）插件：文档导入（docx→markdown）、演示导入（pptx→json）
   'convert_to_markdown',
   'wps_import_pptx',

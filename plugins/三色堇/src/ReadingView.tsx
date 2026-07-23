@@ -64,6 +64,9 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   const [windowCenter, setWindowCenter] = useState(0);
   // 竖版当前阅读章节（独立于 windowCenter，随滚动位置实时更新，不影响窗口渲染）
   const [displayedChapter, setDisplayedChapter] = useState(0);
+  // 竖版目录跳转触发 token：即使目标章已落在同一渲染窗口内（combinedHtml 未变），
+  // 也能让消费 verticalJumpRef 的 layout effect 执行，从而滚动到目标章顶部
+  const [vJumpToken, setVJumpToken] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -79,6 +82,8 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   // 能读取最新值而不需要将其放入依赖数组（避免内部 chapterIndex 变化触发该 effect）
   const chapterIndexRef = useRef(0);
   const windowCenterRef = useRef(0);
+  // 记录上一次测量到的页面宽度，用于在"宽度变化"时临时关闭过渡动画
+  const lastPwRef = useRef(0);
   useEffect(() => { chapterIndexRef.current = chapterIndex; }, [chapterIndex]);
   useEffect(() => { windowCenterRef.current = windowCenter; }, [windowCenter]);
   const displayedChapterRef = useRef(0);
@@ -121,6 +126,8 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     const colCount = isBookMode ? 2 : 1;
     const colGap = isBookMode ? BOOK_GUTTER : GAP;
     const pw = Math.floor(Math.max(200, (vw - 2 * PAD - (colCount - 1) * colGap) / colCount));
+    const pwChanged = pw !== lastPwRef.current;
+    if (pwChanged) lastPwRef.current = pw;
     setPageWidth(pw);
 
     const step = (pw + colGap) * pagesPerStep;
@@ -182,12 +189,19 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
         const page = pageInChapter === -1 ? b.endPage : Math.min(b.startPage + pageInChapter, b.endPage);
         setAbsolutePage(page);
         setChapterIndex(targetIdx);
-    AppData/    requestAnimationFrame(() => setNoTransition(false));
+        requestAnimationFrame(() => setNoTransition(false));
         return;
       }
     }
 
     setAbsolutePage((p) => Math.min(p, pages - 1));
+
+    // 页面宽度变化（布局切换 / 窗口尺寸变化）时临时关闭 transform 过渡，
+    // 避免 contentRef 因 pageWidth 改变重算 translate 而产生滑动动画（视觉"闪"）
+    if (pwChanged) {
+      setNoTransition(true);
+      requestAnimationFrame(() => setNoTransition(false));
+    }
   }, [isBookMode, pagesPerStep]);
 
   // ============ 同步测量：在 useLayoutEffect 中直接调用（消除弹簧动画）============
@@ -201,6 +215,8 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
 
   // 布局模式切换 — 用 useLayoutEffect 在绘制前同步状态，避免切换闪烁
   useLayoutEffect(() => {
+    // 切换瞬间关闭过渡，避免 measure 重算 pageWidth / 竖版重置窗口导致 transform 滑动动画（"闪"）
+    setNoTransition(true);
     if (isPaginatedMode) {
       measure();
     } else {
@@ -209,6 +225,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       setWindowCenter(chapterIndexRef.current);
       setDisplayedChapter(chapterIndexRef.current);
     }
+    requestAnimationFrame(() => setNoTransition(false));
   }, [layoutMode, measure, isPaginatedMode]);
 
   // 尺寸变化
@@ -271,6 +288,9 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
         verticalJumpRef.current = { chapterIndex: externalChapterIndex, position: 'top' };
         setWindowCenter(externalChapterIndex);
         setDisplayedChapter(externalChapterIndex);
+        // 触发竖版跳转消费：即使目标章已落在同一渲染窗口内、combinedHtml 未变化，
+        // 也能让消费 verticalJumpRef 的 layout effect 执行并滚动到目标章顶部
+        setVJumpToken((t) => t + 1);
       }
     }
   }, [externalChapterIndex, isPaginatedMode, book.chapters.length]);
@@ -440,7 +460,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
         setDisplayedChapter(chapterIndex);
       }
     }
-  }, [combinedHtml, isPaginatedMode]);
+  }, [combinedHtml, vJumpToken, isPaginatedMode]);
 
   // ============ 竖版滚动 ============
   // 通过 chapter-marker 的 offsetTop 检测当前阅读章节，计算章节内进度（非整个窗口的进度）

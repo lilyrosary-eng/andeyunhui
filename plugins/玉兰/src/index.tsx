@@ -208,7 +208,7 @@ function SettingsContent({
 // ========== 主组件 ==========
 function VideoModule() {
   // 共享运行时：根目录管理（localStorage 持久化）
-  const { rootPaths, addRoot, addRootPath, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   // 共享运行时：黑名单管理（Rust 集中管理）
   const { hidden: hiddenFolders, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('video');
   const [folders, setFolders] = useState<VideoFolder[]>([]);
@@ -322,7 +322,7 @@ function VideoModule() {
   const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
     try {
       const { dir, paths } = await importToOpenWithDir('video', items);
-      addRootPath(dir);
+      addRootPathEphemeral(dir);
       setRescanCounter((c) => c + 1);
       if (paths[0]) {
         setPlayingFile({
@@ -334,7 +334,7 @@ function VideoModule() {
     } catch (err) {
       console.error('[Video] 以安得云荟打开失败:', err);
     }
-  }, [addRootPath]);
+  }, [addRootPathEphemeral]);
 
   useEffect(() => {
     const unsub = registerOpenWithListener((m, files) => {

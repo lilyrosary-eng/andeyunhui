@@ -1,5 +1,5 @@
 /// <reference path="../../global.d.ts" />
-const React = window.__HOST_REACT__;
+import React from "react";
 const { useState } = React;
 const hostApi = window.__HOST_API__;
 const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};

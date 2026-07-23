@@ -33,7 +33,7 @@ interface CustomAlbum {
 
 function ImageModule() {
   // 共享运行时：根目录管理（localStorage 持久化）
-  const { rootPaths, setRootPaths, addRoot, addRootPath, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, setRootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   const [folders, setFolders] = useState<ImageFolder[]>([]);
   const [loading, setLoading] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
@@ -122,16 +122,16 @@ function ImageModule() {
   const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
     try {
       const { dir, paths } = await importToOpenWithDir('image', items);
-      addRootPath(dir);
+      addRootPathEphemeral(dir);
       if (paths[0]) {
         setOpenWithInitialPath(paths[0]);
         setOpenWithNonce((n) => n + 1);
-        setSelectedFolder({ folderPath: dir, folderName: '以安得云荟打开' });
+        setSelectedFolder({ folderPath: dir, folderName: '以安得云荟打开', coverImage: paths[0] ?? '', imageCount: paths.length });
       }
     } catch (err) {
       console.error('[Image] 以安得云荟打开失败:', err);
     }
-  }, [addRootPath]);
+  }, [addRootPathEphemeral]);
 
   useEffect(() => {
     const unsub = registerOpenWithListener((m, files) => {
