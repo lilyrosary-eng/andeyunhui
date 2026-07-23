@@ -115,6 +115,19 @@ function App() {
     return () => { void un.then((fn) => fn()); };
   }, [startScreenshot]);
 
+  // 预创建（温热）截图覆盖窗：避免首次触发时的 WebView2 冷启动卡顿，使截图秒开，与录屏一致。
+  // 创建后立即 hide()（离屏窗再加一道保险）：某些多屏布局下 (-4000,-4000) 可能落在可见区，
+  // 若保持 visible 会「启动即十字光标」；触发时 Rust start_screenshot 会 w.show() 重新显示。
+  useEffect(() => {
+    ensureScreenshotOverlay()
+      .then(() => {
+        import('@tauri-apps/api/webviewWindow').then(({ WebviewWindow }) => {
+          WebviewWindow.getByLabel('screenshot-overlay')?.hide();
+        });
+      })
+      .catch(() => {});
+  }, [ensureScreenshotOverlay]);
+
   // 唤出剪贴板浮窗（全局热键，复用 Rust 已注册的 floating-clipboard 窗口）
   const openClipboardFloating = useCallback(async () => {
     // 统一走 window_manager 引擎；复用（已存在则直接 show）由 ensureOverlayWindow 内部处理
