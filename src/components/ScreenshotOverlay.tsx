@@ -337,16 +337,8 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     const dimmer = dimmerRef.current;
     if (!dimmer) return;
     // 计算「保持明亮的区域」：算术坐标→覆盖窗 CSS 像素。
-    const clearRect =
-      selRect ??
-      (hoverWin
-        ? {
-            x: (hoverWin.x - ox) / scale,
-            y: (hoverWin.y - oy) / scale,
-            w: hoverWin.width / scale,
-            h: hoverWin.height / scale,
-          }
-        : null);
+    // 任务栏分离：悬停普通窗口时明亮区裁掉任务栏那条带（hoverRectCss），与最终截取一致。
+    const clearRect = selRect ?? (hoverWin ? hoverRectCss(hoverWin) : null);
     if (!clearRect) {
       dimmer.style.display = "none";
       return;
@@ -628,6 +620,13 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     return { x: nx, y: ny, w: nx2 - nx, h: ny2 - ny };
   };
 
+  // 任务栏分离：悬停窗口 → 覆盖窗 CSS 矩形。普通窗口裁剪掉任务栏那条带（与最终
+  // commitCrop 的 clipToWorkArea 一致，高亮所见即所截）；任务栏本身只取其条带。
+  const hoverRectCss = (w: Win) => {
+    const r = { x: (w.x - ox) / scale, y: (w.y - oy) / scale, w: w.width / scale, h: w.height / scale };
+    return w.isTaskbar ? r : clipToWorkArea(r);
+  };
+
   const onPointerUp = async () => {
     if (mode !== "select") return;
     const p = pendingRef.current;
@@ -641,8 +640,13 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       const w = (await hitAt(p.x0, p.y0)) ?? hitWindow(p.x0, p.y0);
       if (w) {
         if (w.isTaskbar) {
-          // 点任务栏本身 = 整屏捕获（含任务栏）
-          commitCrop({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+          // 任务栏分离：点任务栏 = 只截任务栏那条带（不再整屏），与主区选取彻底分开
+          commitCrop({
+            x: (w.x - ox) / scale,
+            y: (w.y - oy) / scale,
+            w: w.width / scale,
+            h: w.height / scale,
+          });
           return;
         }
         // 普通窗口：矩形是物理像素，需换算成覆盖窗 CSS 像素（÷scale）再截取，
@@ -976,7 +980,9 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     return (
       <div
         className="fixed inset-0 z-[9999] select-none"
-        style={{ background: image ? "transparent" : "#000" }}
+        // 与录屏 overlay-recorder-select.ts 对齐：root 始终 #000 兜底，冻结图 fullCanvas 不透明铺在其上。
+        // 任意时刻整窗 alpha>0（命中稳），即便 fullCanvas 偶发未绘制也绝不透明穿透（黑闪/识别卡死同源问题）。
+        style={{ background: "#000" }}
         onContextMenu={(e) => {
           e.preventDefault();
           onClose();
@@ -998,16 +1004,8 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
         {/* 微信式高亮：非选择区域被暗色遮罩（见 dimmer 4 矩形），选择/悬停窗口保持原样亮。
             描边仅描边、不填充（选择区域即原屏幕内容，不再染绿）。拖拽态显示尺寸，悬停态显示窗口标题。 */}
         {(() => {
-          const cr = selRect
-            ? selRect
-            : hoverWin
-              ? {
-                  x: (hoverWin.x - ox) / scale,
-                  y: (hoverWin.y - oy) / scale,
-                  w: hoverWin.width / scale,
-                  h: hoverWin.height / scale,
-                }
-              : null;
+          // 任务栏分离：悬停描边与暗化同源（hoverRectCss），普通窗口不含任务栏条带
+          const cr = selRect ? selRect : hoverWin ? hoverRectCss(hoverWin) : null;
           if (!cr) return null;
           const isDrag = !!selRect;
           const wtitle = hoverWin ? titleMap[hoverWin.hwnd] ?? hoverWin.title : "";
