@@ -1646,6 +1646,12 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     // 先显示窗口：十字光标立即生效，无需等待窗口枚举。原实现把 list_windows（EnumWindows +
     // zorder_ranks，主线程同步跑整条窗口树）放在 show() 之前，主线程被阻塞期间覆盖窗无法显示、
     // 光标不切换为十字、UI 整体卡死——正是「频繁启动卡 / 光标不变」的根因。
+
+    // 先截桌面快照（窗口此刻仍隐藏 → 截到干净桌面，不含自身透明层），供前端注入 freeze
+    // canvas 做不透明底 → 分层窗整窗命中稳，根治「低 alpha 兜底在 4K 合成下被舍入为 0
+    // → 鼠标穿透到下层、默认光标、窗口识别卡死」。与截图热键「先截后显」同源。
+    crate::screenshot::capture_recorder_snapshot();
+
     let _ = win.show();
     let _ = win.set_focus();
 

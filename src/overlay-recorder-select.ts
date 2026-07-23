@@ -20,6 +20,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
+// 透明分层窗首帧黑闪根治：把本覆盖窗 WebView2 默认背景设为透明
+// （否则长时隐藏后 show() 首帧露出 WebView2 默认黑底 → 闪黑）。页面挂载即调用一次。
+invoke("set_overlay_transparent").catch(() => {});
 import { videoDir } from "@tauri-apps/api/path";
 
 interface Win {
@@ -44,9 +48,13 @@ let ready = false;
 // ========== DOM 构建 ==========
 const root = document.getElementById("root")!;
 
-// 全屏遮罩层（捕获层）
-// 背景保持透明：暗化效果由 winHighlight / selection 的 box-shadow 负责扩散
-// （与截图覆盖窗一致），否则 30% 暗色 overlay 会盖住高亮的 10% 蓝色填充，几乎不可见。
+// 全屏遮罩层（捕获层 / 交互层）
+// 命中机制（与截图窗一致）：本窗是 WS_EX_LAYERED 分层窗，逐像素命中，整窗 alpha 必须 > 0
+// 才能稳定接收鼠标（否则 alpha=0 处鼠标穿透到下层窗口 → 默认光标、pointermove 丢失、识别卡死）。
+// 截图窗靠「#000 兜底 + 不透明桌面冻结图」让整窗 alpha=255；本窗照搬：先截一张桌面快照画进
+// freeze canvas（不透明 → 整窗命中稳），root 同时以 #000 兜底（快照注入前/失败时亦命中）。
+// 故 overlay 自身可透明（alpha=0），事件由整窗命中后派发给最上层 z 元素 overlay。
+// 注：低 alpha（如 0.02）兜底在 4K/DPI 合成下会被舍入为 0 → 仍穿透，故弃用，改用不透明快照底。
 const overlay = document.createElement("div");
 overlay.style.cssText = `
   position: fixed; inset: 0;
@@ -56,6 +64,53 @@ overlay.style.cssText = `
   z-index: 1;
   touch-action: none;
 `;
+
+// 桌面快照底（不透明 → 分层窗整窗命中；显示在透明 overlay 之下，用户看到的是真实桌面快照）。
+// 由 loadSnapshot() 在每次 show_recorder_select 时从 Rust 拉取（窗口隐藏态截的干净桌面）。
+const freeze = document.createElement("canvas");
+freeze.style.cssText = `
+  position: fixed; inset: 0;
+  width: 100%; height: 100%;
+  z-index: 0; pointer-events: none;
+`;
+root.appendChild(freeze);
+
+// 兜底命中层：#000 不透明。快照注入前/失败时整窗仍 alpha=255，杜绝鼠标穿透。
+root.style.background = "#000";
+
+let snapshotBitmap: ImageBitmap | null = null;
+let loadingSnapshot = false;
+// 拉取桌面快照注入 freeze canvas：整窗不透明 → 命中稳，且用户看到桌面（与截图体验一致）。
+// 选择阶段桌面静止（快照）可接受，且所见即所录（录制从倒计时结束才真正开始）。
+async function loadSnapshot() {
+  if (loadingSnapshot) return;
+  loadingSnapshot = true;
+  try {
+    const buf = await invoke<ArrayBuffer>("read_recorder_snapshot");
+    const dv = new DataView(buf);
+    const w = dv.getUint32(0, true);
+    const h = dv.getUint32(4, true);
+    if (w === 0 || h === 0) return;
+    const rgba = new Uint8ClampedArray(buf, 8);
+    const imageData = new ImageData(rgba, w, h);
+    const bmp = await createImageBitmap(imageData);
+    if (snapshotBitmap) {
+      try { snapshotBitmap.close(); } catch { /* ignore */ }
+    }
+    snapshotBitmap = bmp;
+    freeze.width = w;
+    freeze.height = h;
+    const ctx = freeze.getContext("2d");
+    if (ctx) ctx.drawImage(bmp, 0, 0);
+    // 快照就绪：显示并恢复 #000 兜底
+    freeze.style.display = "block";
+    root.style.background = "#000";
+  } catch (e) {
+    console.error("[录屏区域] 桌面快照加载失败（继续用 #000 兜底命中）:", e);
+  } finally {
+    loadingSnapshot = false;
+  }
+}
 
 // 提示文字
 const hint = document.createElement("div");
@@ -326,10 +381,15 @@ function updateWinHighlight(win: Win | null) {
     if (!countingDown) hideDimmer();  // 倒计时期间保留已选区域的暗化，不随悬停闪烁
     return;
   }
-  const cssX = (win.x - ox) / scale;
-  const cssY = (win.y - oy) / scale;
-  const cssW = win.width / scale;
-  const cssH = win.height / scale;
+  // 任务栏分离：悬停普通窗口时，高亮/暗化裁剪掉任务栏那条带（物理域裁剪后转 CSS），
+  // 与最终录制区域（clipToWorkArea）一致；悬停任务栏本身则只高亮任务栏那条带。
+  const phys = win.isTaskbar
+    ? { x: win.x, y: win.y, w: win.width, h: win.height }
+    : clipToWorkArea({ x: win.x, y: win.y, w: win.width, h: win.height });
+  const cssX = (phys.x - ox) / scale;
+  const cssY = (phys.y - oy) / scale;
+  const cssW = phys.w / scale;
+  const cssH = phys.h / scale;
   winHighlight.style.left = `${cssX}px`;
   winHighlight.style.top = `${cssY}px`;
   winHighlight.style.width = `${cssW}px`;
@@ -472,10 +532,8 @@ overlay.addEventListener("pointerup", async (e) => {
     const downWin = w ?? hitWindow(downX, downY);
     if (downWin) {
       if (downWin.isTaskbar) {
-        // 点任务栏本身 = 整屏录制（含任务栏）
-        const vw = Math.round(window.innerWidth * scale);
-        const vh = Math.round(window.innerHeight * scale);
-        void startCountdown(ox, oy, vw, vh);
+        // 任务栏分离：点任务栏 = 只录任务栏那条带（不再整屏），与主区选取彻底分开
+        void startCountdown(downWin.x, downWin.y, downWin.width, downWin.height);
       } else {
         // 干净单击窗口：使用窗口矩形（物理像素），并剔除任务栏那条带
         const clipped = clipToWorkArea({ x: downWin.x, y: downWin.y, w: downWin.width, h: downWin.height });
@@ -526,6 +584,9 @@ function abortCountdown() {
   countdownEl.style.display = 'none';
   countdownEl.style.pointerEvents = 'none';
   overlay.style.pointerEvents = '';  // 恢复指针事件捕获
+  // 恢复命中层：重新显示桌面快照 + #000 兜底
+  freeze.style.display = "block";
+  root.style.background = "#000";
   window.removeEventListener('contextmenu', onCtxDuringCountdown);
   countdownEl.removeEventListener('pointerdown', abortCountdownViaDisplay);
   hint.style.display = 'block';      // 恢复提示，允许重新选择
@@ -567,6 +628,10 @@ function startCountdown(x: number, y: number, w: number, h: number) {
   hint.style.display = "none";
   // 保留当前已选中的选区/窗口高亮（selection 或 winHighlight），让用户看清将录制的范围。
   // 倒计时期间 overlay 变为 click-through，允许用户操作底层应用（打字、换模块、开浏览器等）
+  // 倒计时：隐藏桌面快照 + root 透明 → 整窗中间区域穿透，用户可操作底层真实应用
+  // （暗化遮罩/选区高亮保留做视觉提示；overlay 已 click-through）
+  freeze.style.display = "none";
+  root.style.background = "transparent";
   overlay.style.pointerEvents = "none";
   // countdownEl 保持可交互：点击数字即可中止倒计时，重新选择区域
   countdownEl.style.pointerEvents = "auto";
@@ -646,6 +711,10 @@ async function beginRecording(x: number, y: number, w: number, h: number) {
 // 包含在 recorder-select-ready 事件中。此时覆盖窗尚未可见，不在列表中。
 // 前端无需单独调用 list_windows（避免覆盖窗显示后调用导致 is_self 过滤问题）。
 async function initFromEvent(data: { ox: number; oy: number; scale: number; windows?: Win[] }) {
+  // 每次 show 刷新桌面快照（窗口隐藏态截的干净桌面），并复位命中层
+  freeze.style.display = "block";
+  root.style.background = "#000";
+  void loadSnapshot();
   ox = data.ox;
   oy = data.oy;
   // 必须使用 Rust 端 recorder-select-ready 事件下发的同一 `scale`（= 覆盖窗 win.scale_factor()）。

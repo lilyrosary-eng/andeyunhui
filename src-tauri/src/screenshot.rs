@@ -161,6 +161,47 @@ pub fn reveal_screenshot_overlay(app: tauri::AppHandle) {
     });
 }
 
+/// 透明分层窗首帧黑闪根治：WebView2 控制器默认背景为不透明黑，长时隐藏
+/// （截图/录屏覆盖窗跨会话复用、隐藏等待触发）后 `show()` 首帧会露出该黑底 → 闪黑。
+/// 把 `DefaultBackgroundColor` 设为透明，使首帧露出的是桌面（透明）而非黑，
+/// 冻结图/实时内容随后立即补上，黑闪消除。
+///
+/// 由覆盖窗前端在页面挂载时 `invoke("set_overlay_transparent")` 触发——此时
+/// WebView2 控制器已就绪；`with_webview` 必须在主线程调用，故包进 `run_on_main_thread`。
+#[cfg(windows)]
+#[tauri::command]
+pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
+    use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
+    };
+    // Interface trait 必须来自 windows-core 0.61（webview2-com-sys 0.38 的 COM 类型
+    // 实现的是该版本 trait；本 crate 的 windows 0.62 对应 windows-core 0.62，不兼容）。
+    use windows_core_061::Interface;
+    let wv = webview.clone();
+    let _ = app.run_on_main_thread(move || {
+        // Tauri v2 的 with_webview 传入 PlatformWebview，其 controller() 返回底层
+        // webview2-com-sys 的 ICoreWebView2Controller（与 wry 内部同版本 0.38）。
+        let _ = wv.with_webview(|raw| {
+            // SetDefaultBackgroundColor 定义在 ICoreWebView2Controller2；cast 到 2（而非 3）
+            // 以兼容仅支持到 Controller2 的旧 WebView2 运行时，确保透明背景一定生效。
+            if let Ok(c2) = raw.controller().cast::<ICoreWebView2Controller2>() {
+                let _ = unsafe {
+                    c2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                        A: 0,
+                        R: 0,
+                        G: 0,
+                        B: 0,
+                    })
+                };
+            }
+        });
+    });
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn set_overlay_transparent(_webview: tauri::Webview, _app: tauri::AppHandle) {}
+
 /// 返回虚拟桌面矩形（物理像素）与系统 DPI 缩放比，供前端在创建截图覆盖窗时
 /// 计算「逻辑全屏」尺寸（inner_size 接受逻辑像素 = 物理 / scale），与录屏
 /// `create_recorder_select_window` 的 `lw = vw / scale` 完全一致。
@@ -1060,6 +1101,53 @@ pub fn peek_screenshot(
 /// 大幅减少 IPC 传输与前端建图开销（这是截图「2-3×微信」耗时的主要来源之一）；
 /// 裁剪/保存仍走 SHOT 原生字节（save_cropped / crop_native_rgba），不损失最终清晰度。
 // async：最近邻降采样整屏图在主线程外执行，覆盖窗预览「秒开」且不卡 UI。
+/// 录屏区域选择窗的桌面快照（窗口隐藏态截的全屏 RGBA），供前端注入 freeze canvas 做底，
+/// 使分层窗整窗 alpha=255 → 命中稳。根治「低 alpha 兜底在 4K/DPI 合成下被舍入为 0
+/// → 鼠标穿透到下层窗口、默认光标、窗口识别卡死」。与截图热键「先截后显」同源。
+static RECORDER_SNAP: std::sync::Mutex<Option<Shot>> = std::sync::Mutex::new(None);
+
+/// 截一张全屏桌面快照存入 RECORDER_SNAP（供录屏区域选择窗做不透明底）。
+/// 必须在 show_recorder_select 的 win.show() 之前调用——此时选择窗仍隐藏，
+/// 截到的是干净桌面（不含自身透明层），与截图热键「先截后显」一致。
+pub fn capture_recorder_snapshot() {
+    let (ox, oy, ow, oh) = virtual_desktop_rect();
+    if ow <= 0 || oh <= 0 {
+        eprintln!("[录屏] 快照区域无效，跳过桌面快照");
+        return;
+    }
+    match capture_full(ox, oy, ow, oh) {
+        Ok(img) => {
+            let raw = img.as_raw().to_vec();
+            if let Ok(mut s) = RECORDER_SNAP.lock() {
+                *s = Some(Shot {
+                    raw,
+                    native_w: ow as u32,
+                    native_h: oh as u32,
+                    native_ox: ox,
+                    native_oy: oy,
+                });
+            }
+        }
+        Err(e) => eprintln!("[录屏] 桌面快照捕获失败: {}", e),
+    }
+}
+
+/// 读取录屏区域选择窗的桌面快照（8 字节头 + 原生 RGBA），与 read_screenshot 同款契约，
+/// 前端零编码直接 new ImageData → createImageBitmap → 注入 freeze canvas（不透明底）。
+#[tauri::command]
+pub async fn read_recorder_snapshot() -> Result<tauri::ipc::Response, String> {
+    let slot = RECORDER_SNAP.lock().map_err(|e| format!("锁失败: {}", e))?;
+    let shot = slot.as_ref().ok_or_else(|| "尚未捕获录屏桌面快照".to_string())?;
+    let fw = shot.native_w;
+    let fh = shot.native_h;
+    let raw = shot.raw.clone();
+    let mut out: Vec<u8> = Vec::with_capacity(8 + raw.len());
+    out.extend_from_slice(&(fw as u32).to_le_bytes());
+    out.extend_from_slice(&(fh as u32).to_le_bytes());
+    out.extend_from_slice(&raw);
+    Ok(tauri::ipc::Response::new(out))
+}
+
 #[tauri::command]
 pub async fn read_screenshot(scale: f64) -> Result<tauri::ipc::Response, String> {
     // `scale`（覆盖窗 devicePixelRatio）保留为契约参数：预览已改为「原图交前端按 CSS 尺寸
