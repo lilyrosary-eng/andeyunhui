@@ -21,11 +21,10 @@ use image::{DynamicImage, ExtendedColorType, ImageFormat, RgbaImage};
 use serde::Serialize;
 use serde_json::json;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
@@ -143,6 +142,30 @@ pub fn hide_overlay_window(app: tauri::AppHandle) {
     }
 }
 
+/// 返回虚拟桌面矩形（物理像素）与系统 DPI 缩放比，供前端在创建截图覆盖窗时
+/// 计算「逻辑全屏」尺寸（inner_size 接受逻辑像素 = 物理 / scale），与录屏
+/// `create_recorder_select_window` 的 `lw = vw / scale` 完全一致。
+/// 截图覆盖窗在 dev 下会被销毁重建，若不按真实全屏尺寸创建，新 webview 会停在
+/// 旧 profile 的错误逻辑尺寸（如 1280x720），导致「可选区域变小、和窗口一样大」。
+#[tauri::command]
+pub fn get_screenshot_desktop_rect() -> Result<serde_json::Value, String> {
+    let (x, y, w, h) = virtual_desktop_rect();
+    if w <= 0 || h <= 0 {
+        return Err("无法获取虚拟桌面尺寸".into());
+    }
+    let scale = unsafe {
+        let dpi = winapi::um::winuser::GetDpiForSystem();
+        if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
+    };
+    Ok(serde_json::json!({
+        "x": x,
+        "y": y,
+        "width": w,
+        "height": h,
+        "scale": scale,
+    }))
+}
+
 /// 枚举「其他进程」的可见窗口，返回**物理像素**矩形，供前端绘制绿色轮廓与窗口识别。
 #[tauri::command]
 pub fn list_windows(app: tauri::AppHandle) -> Result<Vec<WindowInfo>, String> {
@@ -171,114 +194,14 @@ pub fn list_windows(app: tauri::AppHandle) -> Result<Vec<WindowInfo>, String> {
     Ok(windows)
 }
 
-// ================= 窗口变化事件驱动监听（B.2 WinEventHook，终局方案）=================
-// hover 期**彻底不轮询** list_windows（同步命令阻塞 Tauri 主线程跑整条窗口树枚举 = 卡顿真凶）。
-// 改为 SetWinEventHook 事件驱动：仅当窗口 创建/销毁/显示/隐藏/移动/前台/最小化 发生变化、
-// 且某覆盖窗（截图/录屏选区）可见时，才在**独立线程**（非主线程）防抖后重新枚举并 emit
-// `window-list-changed`。鼠标移动、静止桌面 → 零事件、零枚举、零主线程开销；拖动窗口 →
-// 至多 ~8 次/秒增量刷新。前端据此更新命中测试列表，高亮始终动态准确，且不再有轮询卡顿。
-static WINDOW_WATCH_STARTED: AtomicBool = AtomicBool::new(false);
-static WINDOW_WATCH_DIRTY: AtomicBool = AtomicBool::new(false);
-
-// WinEvent 回调：仅关心「顶层窗口自身」事件（idObject==OBJID_WINDOW(0) 且 idChild==CHILDID_SELF(0)）。
-// 必须忽略光标(OBJID_CURSOR=-9)——否则每次鼠标移动都触发 EVENT_OBJECT_LOCATIONCHANGE →
-// 重新引入枚举风暴。回调极轻（仅置一个原子标志），重活留给 watcher 线程防抖后做。
-unsafe extern "system" fn win_event_proc(
-    _hook: winapi::shared::windef::HWINEVENTHOOK,
-    _event: winapi::shared::minwindef::DWORD,
-    hwnd: winapi::shared::windef::HWND,
-    id_object: winapi::shared::ntdef::LONG,
-    id_child: winapi::shared::ntdef::LONG,
-    _thread: winapi::shared::minwindef::DWORD,
-    _time: winapi::shared::minwindef::DWORD,
-) {
-    if hwnd.is_null() || id_object != 0 || id_child != 0 {
-        return;
-    }
-    WINDOW_WATCH_DIRTY.store(true, Ordering::Relaxed);
-}
-
-// 是否有覆盖窗（截图/录屏选区）当前可见——仅在此期间才需要动态刷新窗口列表。
-fn overlay_selecting(app: &tauri::AppHandle) -> bool {
-    for &label in &["recorder-select", "screenshot-overlay"] {
-        if let Some(w) = app.get_webview_window(label) {
-            if w.is_visible().unwrap_or(false) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// 启动窗口变化监听线程（进程内仅一次，永驻但空闲零开销）。每次进入新选区调用即可：
-/// 首次真正启动 hook + 消息循环；后续调用仅标脏，触发一次即时刷新覆盖静态种子的潜在陈旧。
-pub fn ensure_window_watch(app: &tauri::AppHandle) {
-    if WINDOW_WATCH_STARTED.swap(true, Ordering::SeqCst) {
-        WINDOW_WATCH_DIRTY.store(true, Ordering::Relaxed);
-        return;
-    }
-    let app = app.clone();
-    thread::spawn(move || unsafe {
-        use winapi::um::winuser::{
-            DispatchMessageW, GetMessageW, SetTimer, SetWinEventHook, TranslateMessage,
-            UnhookWinEvent, EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE,
-            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, MSG, WINEVENT_OUTOFCONTEXT,
-            WINEVENT_SKIPOWNPROCESS, WM_TIMER,
-        };
-        // 两段 hook 覆盖：系统事件（前台/最小化）+ 对象事件（创建/销毁/显示/隐藏/重排/移动）。
-        // SKIPOWNPROCESS 排除本进程窗口事件（拖动我们自己的覆盖窗不触发）。
-        let h1 = SetWinEventHook(
-            EVENT_SYSTEM_FOREGROUND,
-            EVENT_SYSTEM_MINIMIZEEND,
-            std::ptr::null_mut(),
-            Some(win_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        );
-        let h2 = SetWinEventHook(
-            EVENT_OBJECT_CREATE,
-            EVENT_OBJECT_LOCATIONCHANGE,
-            std::ptr::null_mut(),
-            Some(win_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        );
-        // 40ms 定时器唤醒消息循环做防抖检查（OUTOFCONTEXT 事件经本线程消息队列投递）。
-        // 由 80ms 收紧到 40ms，使窗口拖拽时高亮跟随更跟手（见下方 60ms 发射间隔）。
-        SetTimer(std::ptr::null_mut(), 1, 40, None);
-        let mut last_emit = Instant::now() - Duration::from_secs(1);
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            if msg.message == WM_TIMER {
-                // 仅当覆盖窗可见时才处理脏标志 → 平时（无选区）零枚举、零开销。
-                if overlay_selecting(&app) && WINDOW_WATCH_DIRTY.swap(false, Ordering::Relaxed) {
-                    // 发射间隔由 120ms 收紧到 60ms：窗口拖拽时列表刷新 ~16Hz（原 ~8Hz），
-                    // 悬停高亮追窗明显更跟手，且单次 EnumWindows 远低于 60ms 预算，无卡顿风险。
-                    if last_emit.elapsed() >= Duration::from_millis(60) {
-                        last_emit = Instant::now();
-                        if let Ok(list) = list_windows(app.clone()) {
-                            // 覆盖窗此刻可见，其顶层祖先会混入 EnumWindows，需含 GA_ROOT 的过滤。
-                            let list =
-                                crate::services::recording_service::filter_self_overlay_windows(
-                                    &app, list,
-                                );
-                            let _ = app.emit("window-list-changed", json!({ "windows": list }));
-                        }
-                    } else {
-                        // 防抖间隔未到：保留脏标志，下个 tick 再处理。
-                        WINDOW_WATCH_DIRTY.store(true, Ordering::Relaxed);
-                    }
-                }
-            }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        UnhookWinEvent(h1);
-        UnhookWinEvent(h2);
-    });
-}
+// 悬停 / 单击 / 拖拽的窗口识别统一走 `window_at_point`（OS 权威命中测试：WindowFromPoint +
+// 沿真实 z 序遍历到首个真实可见窗口），结果始终与系统一致，永不「漏窗 / 卡在一个窗口 / 鼠标移动无效」。
+// 不轮询、不缓存窗口列表：每次调用即一次 OS 命中；前端在每一帧（rAF）调用，Rust 侧经 spawn_blocking
+// 在 worker 线程执行，零 UI 阻塞。相较「WinEventHook 事件驱动刷新静态列表」的旧方案，本方案无 EnumWindows
+// 风暴、无事件抖动、开销更低、正确性更高；静态列表仅保留「启动一次性种子」供 clipToWorkArea 找任务栏。
+// 旧 ensure_window_watch（WinEventHook 看门狗 + window-list-changed 事件）已移除：覆盖窗可见期间持续
+// 跑整窗树枚举、且静态列表 z 序在置顶/重叠场景下不可靠（GetTopWindow+GW_HWNDNEXT 漏掉 topmost 窗口），
+// 正是「只能识别一个窗口 / 鼠标移动没用 / 频繁启动更卡」的根因。
 
 unsafe extern "system" fn enum_callback(
     hwnd: winapi::shared::windef::HWND,
@@ -472,8 +395,11 @@ fn build_window_info(hwnd: winapi::shared::windef::HWND) -> Option<WindowInfo> {
 /// 实现：从 `WindowFromPoint(pt)` 得到的真实顶层窗口出发，沿全局 Z 序（`GetWindow(GW_HWNDNEXT)`）
 /// 向下遍历，跳过「自身覆盖窗集合」与不可见窗口，返回第一个矩形包含该点的真实窗口。
 /// 桌面合成层（Progman / WorkerW 等）返回 None，避免悬停桌面时高亮整屏。
+// ---- DIAG: 前 8 次调用打印完整遍历日志，定位 os 始终为 null 的根因 ----
+static WAP_DIAG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 #[tauri::command]
-pub async fn window_at_point(app: tauri::AppHandle, x: i32, y: i32) -> Option<WindowInfo> {
+pub async fn window_at_point(app: tauri::AppHandle, x: i32, y: i32) -> Result<String, String> {
     // 放工作线程执行：WindowFromPoint / GetWindowRect / DwmGetWindowAttribute 等 OS 调用
     // 若在主线程同步跑，悬停/单击期间会阻塞 Tauri UI 线程导致卡顿。单击仅调用一次，开销可忽略。
     let result = tauri::async_runtime::spawn_blocking(move || unsafe {
@@ -493,9 +419,35 @@ pub async fn window_at_point(app: tauri::AppHandle, x: i32, y: i32) -> Option<Wi
                 }
             }
         }
-        let mut hwnd = winapi::um::winuser::WindowFromPoint(pt);
+        let start = winapi::um::winuser::WindowFromPoint(pt);
+        // 关键：从顶层窗口（GA_ROOT）开始遍历，而非从 WindowFromPoint 返回的子控件开始。
+        // 否则 GW_HWNDNEXT 对子窗口只遍历同级兄弟（Chrome_RenderWidgetHostHWND
+        // -> Intermediate D3D Window -> NULL），极短链就耗尽，永远到不了真实应用窗口。
+        // 全程按顶层窗口级步进，GW_HWNDNEXT 对顶层窗口遍历整个系统 Z 序。
+        let mut hwnd = if !start.is_null() {
+            let root = winapi::um::winuser::GetAncestor(start, winapi::um::winuser::GA_ROOT);
+            if !root.is_null() { root } else { start }
+        } else {
+            std::ptr::null_mut()
+        };
+        let diag = WAP_DIAG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if diag < 8 {
+            eprintln!("[WAP DIAG #{diag}] pt=({x},{y})  WindowFromPoint={start:?} start_root={hwnd:?} excluded_count={}", excluded.len());
+        }
         let mut guard: u32 = 0;
         while !hwnd.is_null() && guard < 256 {
+            // ---- 诊断：打印每一步 - 类名 / 排除 / 可见 / 矩形 / 含点 ----
+            if diag < 8 {
+                let mut s_cls: [u16; 128] = [0; 128];
+                let s_cl = winapi::um::winuser::GetClassNameW(hwnd, s_cls.as_mut_ptr(), 128);
+                let s_cname = if s_cl > 0 { String::from_utf16_lossy(&s_cls[..s_cl as usize]) } else { "?".into() };
+                let ex = excluded.contains(&hwnd);
+                let vis = winapi::um::winuser::IsWindowVisible(hwnd) != 0;
+                let mut sr = std::mem::zeroed();
+                let _ = winapi::um::winuser::GetWindowRect(hwnd, &mut sr);
+                let in_rect = pt.x >= sr.left && pt.x <= sr.right && pt.y >= sr.top && pt.y <= sr.bottom;
+                eprintln!("[WAP #{diag} g={guard}] hwnd={hwnd:?} cls={s_cname} excl={ex} vis={vis} rect=({},{})-({},{}) in={in_rect}", sr.left, sr.top, sr.right, sr.bottom);
+            }
             if !excluded.contains(&hwnd) && winapi::um::winuser::IsWindowVisible(hwnd) != 0 {
                 let mut r = std::mem::zeroed();
                 if winapi::um::winuser::GetWindowRect(hwnd, &mut r) != 0
@@ -504,11 +456,16 @@ pub async fn window_at_point(app: tauri::AppHandle, x: i32, y: i32) -> Option<Wi
                     && pt.y >= r.top
                     && pt.y <= r.bottom
                 {
-                    if let Some(info) = build_window_info(hwnd) {
-                        // 不再跳过 is_self：本应用自身的窗口（主窗 / 浮窗）同样是用户可能
-                        // 想截图/录制的可见窗口。截图/录屏覆盖窗已通过上方 `excluded` 集合按标签排除，
-                        // 不会在这里被误返回。
-                        // 桌面合成层不高亮（返回 None），避免悬停桌面时高亮整屏。
+                    // hwnd 本身已是 GA_ROOT（顶层窗口），不再需要 GetAncestor 升级。
+                    if excluded.contains(&hwnd) {
+                        if diag < 8 { eprintln!("[WAP #{diag} g={guard}] SELF_OVERLAY -> skip"); }
+                    } else if let Some(mut info) = build_window_info(hwnd) {
+                        // is_self 仅标记「本应用自身的覆盖遮罩窗」（截图/录屏选区窗等），这些窗已在
+                        // excluded 集合中被遍历层剔除，不会到达此处。此前用 PID 判断会把主窗/浮窗等
+                        // 本进程窗口也标成 self，导致悬停主窗时前端（按 is_self 跳过）返回空 -> RAW w=NULL。
+                        // 改为以 excluded 集合为准，使主窗/浮窗成为可正常高亮的捕获目标。
+                        info.is_self = excluded.contains(&hwnd);
+                        if diag < 8 { eprintln!("[WAP #{diag} g={guard}] build_window_info OK is_self={}", info.is_self); }
                         let mut cls_buf: [u16; 256] = [0; 256];
                         let cls_len =
                             winapi::um::winuser::GetClassNameW(hwnd, cls_buf.as_mut_ptr(), 256);
@@ -517,11 +474,12 @@ pub async fn window_at_point(app: tauri::AppHandle, x: i32, y: i32) -> Option<Wi
                         } else {
                             String::new()
                         };
+                        if diag < 8 { eprintln!("[WAP #{diag} g={guard}] class={class} -> {}", if matches!(class.as_str(), "Progman"|"WorkerW"|"Windows.UI.Composition.DesktopWindowManager"|"ApplicationFrameInputSinkWindow"|"MsgBox") { "FILTERED(desktop)" } else { "RETURNED" }); }
                         match class.as_str() {
                             "Progman" | "WorkerW"
                             | "Windows.UI.Composition.DesktopWindowManager"
-                            | "ApplicationFrameInputSinkWindow" | "MsgBox" => return None,
-                            _ => return Some(info),
+                            | "ApplicationFrameInputSinkWindow" | "MsgBox" => { if diag < 8 { eprintln!("[WAP #{diag} g={guard}] RETURNING None (desktop: {class})"); } return Ok("null".to_string()); }
+                            _ => { eprintln!("[WAP RETURN] hwnd=0x{:x} is_self={} title={}", info.hwnd, info.is_self, info.title); return serde_json::to_string(&info).map_err(|e| e.to_string()); },
                         }
                     }
                 }
@@ -529,9 +487,10 @@ pub async fn window_at_point(app: tauri::AppHandle, x: i32, y: i32) -> Option<Wi
             hwnd = winapi::um::winuser::GetWindow(hwnd, winapi::um::winuser::GW_HWNDNEXT);
             guard += 1;
         }
-        None
+        if diag < 8 { eprintln!("[WAP DIAG #{diag}] EXHAUSTED -> None (guard={guard})"); }
+        Ok("null".to_string())
     });
-    result.await.unwrap_or(None)
+    result.await.unwrap_or(Ok("null".to_string()))
 }
 
 /// 将 (x, y, w, h) 区域从整屏捕获为 RgbaImage（物理像素，RGBA）。
@@ -933,6 +892,16 @@ pub async fn start_screenshot(
         .get_webview_window("screenshot-overlay")
         .ok_or_else(|| "覆盖窗缺失，请重启应用".to_string())?;
 
+    // 双重遮罩根治：覆盖窗现在「先显示、后 WGC 捕获冻结图」，期间用户悬停画出的暗化
+    // 矩形会被 WGC 一并拍进冻结图，前端再叠一层遮罩即成双重遮罩。与录屏控制台/边框窗
+    // 同款方案：SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE = 0x11)，WGC/DXGI 捕获
+    // 自动跳过本窗 → 冻结图恒为纯桌面内容。屏幕上仍正常可见可交互（仅影响捕获）。
+    if let Ok(h) = overlay.hwnd() {
+        unsafe {
+            winapi::um::winuser::SetWindowDisplayAffinity(h.0 as *mut _, 0x11);
+        }
+    }
+
     // 防重入：正在捕获（CAPTURING 原子）或覆盖窗正在显示（state.showing）则忽略。
     // 注意：不再用 overlay.is_visible() —— 窗口 hide 后状态上报有 1 帧延迟，会误判为「仍在显示」
     // 从而静默 return Ok(())，表现为「按截图键毫无反应」（用户 Issue 5）。
@@ -949,20 +918,12 @@ pub async fn start_screenshot(
     // 不参与桌面合成像素、不会被截入画面；WGC 兜底路径同样只截到「透明→桌面」，安全。
     let (rx, ry, rw, rh) = virtual_desktop_rect();
 
-    // 缓存上次的虚拟桌面矩形：若未变化（显示器配置未改），跳过 set_position/set_size，
-    // 省 ~16ms DWM 重排时间。只有首次或分辨率变更时才重新贴位。
+    // 每次都按虚拟桌面物理矩形重新贴位全屏覆盖窗。dev 下截图覆盖窗会被销毁重建，
+    // 新 webview 若沿用旧 profile 的逻辑尺寸会停在错误尺寸，导致「可选区域变小、和窗口一样大」。
+    // 覆盖窗低频创建，每次重贴位代价可忽略，故不再做矩形缓存跳过——确保任何重建 / DPI 变更下永远全屏铺满。
     // shadow(false) + decorations(false) 确保窗口尺寸 == 客户区尺寸，无隐藏边框偏移。
-    static LAST_VD_RECT: std::sync::OnceLock<std::sync::Mutex<(i32, i32, i32, i32)>> = std::sync::OnceLock::new();
-    let cache = LAST_VD_RECT.get_or_init(|| std::sync::Mutex::new((0, 0, 0, 0)));
-    let need_reposition = {
-        let last = cache.lock().unwrap();
-        *last != (rx, ry, rw, rh)
-    };
-    if need_reposition {
-        let _ = overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: rx, y: ry }));
-        let _ = overlay.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: rw as u32, height: rh as u32 }));
-        *cache.lock().unwrap() = (rx, ry, rw, rh);
-    }
+    let _ = overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: rx, y: ry }));
+    let _ = overlay.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: rw as u32, height: rh as u32 }));
 
     let ox = rx;
     let oy = ry;
@@ -986,12 +947,39 @@ pub async fn start_screenshot(
         "noteId": "",
     });
     let _ = overlay.emit("screenshot-start", &init_payload);
-    let _ = overlay.show();
-    let _ = overlay.set_focus();
-    // 启动窗口变化事件监听（B.2）：覆盖窗可见期间，窗口 创建/移动/前台变化 时事件驱动刷新
-    // 命中测试列表，替代已删除的 hover 轮询。空闲零开销。
-    ensure_window_watch(&app);
-    // 标记覆盖窗正在显示：用于防重入（用户再次按下热键时忽略，直到关闭）。
+    // 显示 + 置顶 + 聚焦 在主线程执行（set_focus 内部直接 SetForegroundWindow，
+    // 不经过 thread_executor，故整体包进 run_on_main_thread）。
+    // 关键修复（根治概率性「默认光标 + 无法选窗」）：必须 **先 show()**，等 WebView2 完成
+    // 初始化、窗口 EXSTYLE 稳定后，再 set_ignore_cursor_events(false) / set_always_on_top(true)。
+    // 旧逻辑在 show() 之前就调用这两项，会与 WebView2 在 show 阶段重设的窗口样式race，
+    // 导致覆盖窗偶发「点击穿透 / 丢失 topmost」——鼠标落到下层窗口（显示下层默认箭头、
+    // hover 完全不更新）。这与录屏选区窗 show_recorder_select（先 show 再 set_focus、100% 跟手）
+    // 的成功路径对齐。最后二次兜底 set_always_on_top + set_ignore_cursor_events，对抗偶发 race。
+    {
+        let focus_app = app.clone();
+        let focus_label = overlay.label().to_string();
+        let _ = focus_app.run_on_main_thread({
+            let fa = focus_app.clone();
+            move || {
+                if let Some(w) = fa.get_webview_window(&focus_label) {
+                    // 1) 先显示，让 WebView2 初始化、EXSTYLE 稳定
+                    let _ = w.show();
+                    // 2) 显示后强制不穿透（确保覆盖窗真正接收鼠标）+ 置顶
+                    let _ = w.set_ignore_cursor_events(false);
+                    let _ = w.set_always_on_top(true);
+                    // 3) 抢前台焦点（全局热键触发时 Windows 输入例外允许 SetForegroundWindow）
+                    let _ = w.set_focus();
+                    // 4) 二次兜底，对抗任何 show/重绘 race
+                    let _ = w.set_always_on_top(true);
+                    let _ = w.set_ignore_cursor_events(false);
+                }
+            }
+        });
+    }
+    // 悬停命中统一走 OS window_at_point（每帧、worker 线程、零 UI 阻塞），结果永远与系统一致；
+    // 无 stale 列表问题；已移除 WinEventHook 看门狗与 window-list-changed（覆盖窗可见期间持续
+    // EnumWindows 风暴、且 z 序不可靠反而误导命中）。
+// 标记覆盖窗正在显示：用于防重入（用户再次按下热键时忽略，直到关闭）。
     if let Ok(mut s) = app.state::<std::sync::Mutex<ScreenshotData>>().lock() {
         s.showing = true;
     }
@@ -1006,6 +994,11 @@ pub async fn start_screenshot(
             let _ = w.emit("screenshot-windows", json!({ "windows": windows_for_ready }));
         }
 
+        // 首启优化：先预热 DWM/COM（首次 window_at_point 的冷启动最重，会让首帧悬停卡顿），
+        // 再让出一小段时间给覆盖窗完成首帧 WebView2 绘制，避免 WGC 全屏捕获在首启时
+        // 与覆盖窗首帧抢 GPU/DXGI，导致「截图首启明显比录屏慢、且不跟手」。
+        let _ = tauri::async_runtime::block_on(window_at_point(app2.clone(), ox + ow / 2, oy + oh / 2));
+        std::thread::sleep(std::time::Duration::from_millis(160));
         let full_result = std::thread::scope(|s| {
             let capture_handle = s.spawn(|| capture_full(ox, oy, ow, oh));
             capture_handle.join().unwrap_or(Err("捕获线程 panic".into()))

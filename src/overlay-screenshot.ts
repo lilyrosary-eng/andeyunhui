@@ -32,12 +32,39 @@ function OverlayApp() {
       return null;
     });
     invoke("hide_overlay_window").catch(() => {});
+    // 注意：dev 下**不再**在关闭后自我 reload（旧方案）。隐藏态 reload 会让覆盖窗卸载重挂载，
+    // 期间 poll 的 initialized 首次 peek 把 handledSession 吸成最新 session，而 screenshot-start
+    // 事件在 reload 期间已丢失、sessionActive 永远 false → poll 自愈分支永不触发，永久卡在
+    // data=null（默认光标、无法选择）；反复 reload 隐藏 WebView2 还会概率拖垮整个 WebView2 进程
+    // （整软件卡死）。现改为纯复用（与生产一致）：覆盖窗常驻、监听器持久，事件永不因 reload 丢失，
+    // 首次新建时由 poll 兜底自愈。dev 下改截图覆盖窗代码需重启 dev 生效（换取绝对稳定）。
   }, []);
 
   React.useEffect(() => {
     let cancelled = false;
     let loaded = false;
+    // 本次「有效截图会话」是否已开始：仅由 screenshot-start 事件或 poll 检测到 session 增大触发。
+    // 用于门控安全时限与轮询重试——避免 dev 下「覆盖窗关闭后自我 reload 的空闲页面」误触发
+    // 4s 安全关窗（进而 reload 死循环），或误加载上一次会话的冻结图。
+    let sessionActive = false;
     let safetyTimer: number | null = null;
+    // 安全时限：会话开始后若 4s 内仍未注入冻结图（捕获异常等）则关窗避免永久卡死。
+    // 只在会话开始时武装、冻结图加载成功即解除——绝不在 mount 时无条件武装。
+    const armSafety = () => {
+      if (safetyTimer !== null) window.clearTimeout(safetyTimer);
+      safetyTimer = window.setTimeout(() => {
+        if (!loaded && !cancelled) {
+          console.error("[截图] 4s 内未获取到冻结图，关闭覆盖窗");
+          handleClose();
+        }
+      }, 4000);
+    };
+    const clearSafety = () => {
+      if (safetyTimer !== null) {
+        window.clearTimeout(safetyTimer);
+        safetyTimer = null;
+      }
+    };
 
     const buildMeta = (payload: any) => ({
       ox: payload?.ox || 0,
@@ -78,6 +105,7 @@ function OverlayApp() {
               if (!blob || cancelled) return;
               const url = URL.createObjectURL(blob);
               loaded = true;
+              clearSafety();
               setData((prev) => {
                 if (prev && prev.image && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
                 return { image: url, ...meta };
@@ -98,8 +126,12 @@ function OverlayApp() {
         });
     };
 
-    // 快路径①：截图启动（仅推送 meta，进入透明待加载态，选区交互立即可用）
+    // 快路径①：截图启动（仅推送 meta，进入透明待加载态，选区交互立即可用）。
+    // dev 下覆盖窗在上次关闭后已自我 reload → 监听器就绪，本事件可稳定命中，十字选区秒显、无竞态。
     const p1 = listen("screenshot-start", (event: any) => {
+      sessionActive = true;
+      loaded = false;
+      armSafety();
       const meta = buildMeta(event.payload);
       setData((prev) => {
         if (prev && prev.image && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
@@ -132,37 +164,28 @@ function OverlayApp() {
             handledSession.current = session;
             return;
           }
-        if (session > handledSession.current) {
-          // 检测到新一次截图：复位就绪标记并立即尝试加载。
-          // 不保留上次截图的 loaded=true，否则后续截图会被轮询兜底漏掉。
-          handledSession.current = session;
-          loaded = false;
-          if (!loaded) loadShot(buildMeta(snap));
-          return;
-        }
-        // 关键修复：start_screenshot 在进入捕获线程前就同步把 session 自增，
-        // 而冻结图要等捕获线程写完 SHOT 才就绪。若本轮轮询抢在捕获完成前检测到
-        // session 变化并调用一次 read_screenshot，会拿到「尚无截屏数据」。
-        // 此处持续重试直到真正注入冻结图，避免「screenshot-ready 事件丢失时
-        // 只失败一次就 4s 超时关窗」的问题。
-        if (session === handledSession.current && session > 0 && !loaded && !loadingRef.current) {
-          loadShot(buildMeta(snap));
-        }
+          if (session > handledSession.current) {
+            // 检测到新一次截图：标记会话开始、武装安全时限并立即尝试加载。
+            handledSession.current = session;
+            sessionActive = true;
+            loaded = false;
+            armSafety();
+            loadShot(buildMeta(snap));
+            return;
+          }
+          // 仅在会话已开始且冻结图尚未加载时重试（start_screenshot 先自增 session、
+          // 冻结图要等捕获线程写完 SHOT 才就绪，故持续重试直到注入成功）。
+          // 门控 sessionActive：dev 空闲已 reload 的页面不会误加载上一次会话的冻结图。
+          if (sessionActive && session === handledSession.current && session > 0 && !loaded && !loadingRef.current) {
+            loadShot(buildMeta(snap));
+          }
         })
         .catch(() => {});
     }, 120);
 
-    // 安全时限：若 4s 内仍未注入冻结图（捕获异常等），关闭覆盖窗避免永久卡死。
-    safetyTimer = window.setTimeout(() => {
-      if (!loaded && !cancelled) {
-        console.error("[截图] 4s 内未获取到冻结图，关闭覆盖窗");
-        handleClose();
-      }
-    }, 4000);
-
     return () => {
       cancelled = true;
-      if (safetyTimer !== null) window.clearTimeout(safetyTimer);
+      clearSafety();
       window.clearInterval(poll);
       p1.then((un) => un());
       p2.then((un) => un());
@@ -195,6 +218,8 @@ function OverlayApp() {
         inset: 0,
         background: "transparent",
         zIndex: 9999,
+        // 兜底：即便瞬时 data=null，也保持十字光标，杜绝「概率出现默认光标」的观感。
+        cursor: "crosshair",
       },
     });
   }
