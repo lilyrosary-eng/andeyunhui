@@ -1651,9 +1651,8 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
 
     // 悬停命中统一走 OS window_at_point（每帧、worker 线程、零 UI 阻塞），结果永远与系统一致、
     // 无 stale 列表问题；已移除 WinEventHook 看门狗与 window-list-changed（覆盖窗可见期间持续
-    // EnumWindows 风暴、且 z 序不可靠反而误导命中）。
-// 耗时的窗口枚举移到后台线程，彻底避免阻塞 Tauri 主线程。枚举完成后推送列表；
-    // 即便枚举进行中，前端 hover 仍走 window_at_point（OS 权威）兜底，命中测试不受影响。
+    // EnumWindows 风暴、且 z 序不可靠反而误导命中）。耗时的窗口枚举仍移到后台线程，避免阻塞主线程。
+    // 枚举完成后推送列表（供 clipToWorkArea 找任务栏），命中测试不受影响。
     let app_b = app.clone();
     let win_b = win.clone();
     tauri::async_runtime::spawn(async move {
