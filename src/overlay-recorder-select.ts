@@ -245,33 +245,6 @@ async function hitAt(cx: number, cy: number): Promise<Win | null> {
 // 每 100ms 一次正是「频繁更卡 / 开启卡」真凶——故 hover 期彻底不调用它；新开窗口落到光标下时，
 // hitWindow 返回 null，由下方 window_at_point 兜底（**异步**命令，不阻塞主线程）。单击仍用 OS 单次权威。
 // updateWinHighlight 内部按命中 hwnd 去重，命中窗口不变时不重绘，进一步消除卡顿。
-// ===== 悬停探针（调试用：URL 带 ?probe=1 或 window.__hoverProbe=true 时显示 HUD）=====
-let probeEl: HTMLDivElement | null = null;
-function ensureProbe() {
-  if (probeEl) return;
-  const enabled =
-    new URLSearchParams(location.search).get("probe") === "1" ||
-    (window as unknown as { __hoverProbe?: boolean }).__hoverProbe === true;
-  if (!enabled) return;
-  const el = document.createElement("div");
-  el.style.cssText =
-    "position:fixed;left:8px;top:8px;z-index:99999;background:rgba(0,0,0,0.78);color:#7CFC00;font:11px/1.4 monospace;padding:6px 8px;border-radius:6px;pointer-events:none;white-space:pre;";
-  document.body.appendChild(el);
-  probeEl = el;
-  (window as unknown as { __mountHoverProbe?: () => void }).__mountHoverProbe = () => ensureProbe();
-}
-function probeUpdate(d: { css?: { x: number; y: number }; staticHit?: Win | null; osHwnd?: number | null; osTitle?: string; osError?: boolean; latency?: number }) {
-  if (!probeEl) return;
-  const L: string[] = [];
-  if (d.css) L.push(`css=(${d.css.x | 0},${d.css.y | 0})`);
-  if (d.staticHit !== undefined)
-    L.push(`static=${d.staticHit ? "0x" + (d.staticHit.hwnd >>> 0).toString(16) + " " + (d.staticHit.title || "").slice(0, 12) : "∅"}`);
-  if (d.osHwnd !== undefined)
-    L.push(`os=${d.osHwnd ? "0x" + (d.osHwnd >>> 0).toString(16) + " " + (d.osTitle || "").slice(0, 12) : d.osError ? "ERR" : "∅"}${d.latency != null ? " " + d.latency.toFixed(1) + "ms" : ""}`);
-  L.push(`shown=${lastHoverHwnd != null ? "0x" + (lastHoverHwnd >>> 0).toString(16) : "∅"}`);
-  probeEl.textContent = "PROBE " + L.join("  |  ");
-}
-ensureProbe();
 
 let hoverRaf: number | null = null;
 let hoverPending: { x: number; y: number } | null = null;
@@ -302,19 +275,16 @@ function requestHover(cx: number, cy: number) {
         osInFlight = true;
         osLastDispatch = now;
         const seq = ++hoverSeq;
-        const t0 = now;
         hitAt(pt.x, pt.y)
           .then((w) => {
             osInFlight = false;
             if (seq !== hoverSeq) return;
             // OS 权威：非 null 直接采用；为 null（桌面/合成层）回退静态命中（静态也 null → 隐藏）。
             updateWinHighlight(w ?? lastHit);
-            probeUpdate({ osHwnd: w?.hwnd ?? null, osTitle: w?.title, latency: performance.now() - t0 });
           })
           .catch(() => {
             osInFlight = false;
             if (lastHit) updateWinHighlight(lastHit); // OS 失败：保留已显示窗口，不隐藏
-            probeUpdate({ osHwnd: null, osError: true });
           });
       }
     });

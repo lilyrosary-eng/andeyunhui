@@ -985,11 +985,10 @@ pub async fn start_screenshot(
             let _ = w.emit("screenshot-windows", json!({ "windows": windows_for_ready }));
         }
 
-        // 首启优化：先预热 DWM/COM（首次 window_at_point 的冷启动最重，会让首帧悬停卡顿），
-        // 再让出一小段时间给覆盖窗完成首帧 WebView2 绘制，避免 WGC 全屏捕获在首启时
-        // 与覆盖窗首帧抢 GPU/DXGI，导致「截图首启明显比录屏慢、且不跟手」。
+        // 预热 DWM/COM（首次 window_at_point 冷启动最重，预热可避免首帧悬停卡顿）；
+        // 不再 sleep 让位——覆盖窗在捕获期间保持隐藏、且早已挂载完成，无需等待其首帧绘制，
+        // 去掉原 160ms 阻塞使截图启动进入毫秒级。
         let _ = tauri::async_runtime::block_on(window_at_point(app2.clone(), ox + ow / 2, oy + oh / 2));
-        std::thread::sleep(std::time::Duration::from_millis(160));
         let full_result = std::thread::scope(|s| {
             let capture_handle = s.spawn(|| capture_full(ox, oy, ow, oh));
             capture_handle.join().unwrap_or(Err("捕获线程 panic".into()))
@@ -1072,32 +1071,14 @@ pub async fn read_screenshot(scale: f64) -> Result<tauri::ipc::Response, String>
         .ok_or_else(|| "尚无截屏数据，请先触发截图".to_string())?;
     let fw = shot.native_w as u32;
     let fh = shot.native_h as u32;
-    // 预览分辨率：默认「原生物理分辨率」直接交给前端，由浏览器按窗口 CSS 尺寸（= 物理 ÷ scale）
-    // GPU 降采样显示——此时图像像素 ≥ 显示像素，1:1 对齐且天然清晰；同时前端以 object-fit:fill
-    // 铺满覆盖窗时，预览像素与屏幕物理像素严格一一对应，选区映射零偏移（旧方案在 >2800px 时做
-    // Triangle 降采样，预览被拉伸 → 边缘偏移、左边几 px 截不到、画面发糊，即用户 Issue 6）。
-    // 仅当单边超过 CAP（≈4K+ 超大屏）才做一次轻微平滑降采样，约束 IPC 体积、避免极端卡顿。
-    const CAP: u32 = 4500;
-    let max_dim = fw.max(fh);
-    let factor = if max_dim > CAP {
-        CAP as f64 / max_dim as f64
-    } else {
-        1.0
-    };
-    let pw = ((fw as f64 * factor).round().max(1.0)) as u32;
-    let ph = ((fh as f64 * factor).round().max(1.0)) as u32;
-    let src_img = image::RgbaImage::from_raw(fw, fh, shot.raw.clone())
-        .ok_or_else(|| "截屏数据构造失败".to_string())?;
-    // factor == 1.0 时直接透传原图（零重采样、绝对清晰）；仅超限时平滑降采样（Triangle）。
-    let resized = if factor < 1.0 {
-        image::imageops::resize(&src_img, pw, ph, image::imageops::FilterType::Triangle)
-    } else {
-        src_img
-    };
-    let raw = resized.into_raw();
+    // 原生物理分辨率直传前端，由浏览器按窗口 CSS 尺寸（= 物理 ÷ scale）GPU 降采样显示；
+    // 1:1 对齐且天然清晰，前端 object-fit:fill 铺满覆盖窗时预览像素与屏幕物理像素一一对应、选区映射零偏移（Issue 6）。
+    // 不在 Rust 侧降采样——Triangle 重采样 33MB 级图像 CPU 开销反而拖慢 4K 启动；
+    // 保存/复制仍走 crop_native(_rgba) 原生字节，最终清晰度一致。
+    let raw = shot.raw.clone();
     let mut out: Vec<u8> = Vec::with_capacity(8 + raw.len());
-    out.extend_from_slice(&(pw as u32).to_le_bytes());
-    out.extend_from_slice(&(ph as u32).to_le_bytes());
+    out.extend_from_slice(&(fw as u32).to_le_bytes());
+    out.extend_from_slice(&(fh as u32).to_le_bytes());
     out.extend_from_slice(&raw);
     Ok(tauri::ipc::Response::new(out))
 }
