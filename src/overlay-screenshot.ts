@@ -40,6 +40,12 @@ function OverlayApp() {
     // 首次新建时由 poll 兜底自愈。dev 下改截图覆盖窗代码需重启 dev 生效（换取绝对稳定）。
   }, []);
 
+  // 显示覆盖窗（仅显示，复用不销毁）。由 ScreenshotOverlay 在冻结图真正 onLoad 就绪后调用，
+  // 确保「先有冻结图、再显示」——根治「图未注入即显示→黑底抢先」的全屏黑屏。
+  const reveal = React.useCallback(() => {
+    invoke("reveal_screenshot_overlay").catch(() => {});
+  }, []);
+
   React.useEffect(() => {
     let cancelled = false;
     let loaded = false;
@@ -110,6 +116,8 @@ function OverlayApp() {
                 if (prev && prev.image && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
                 return { image: url, ...meta };
               });
+              // 覆盖窗显示推迟到 ScreenshotOverlay 内冻结图真正 onLoad 之后（见 onImageReady），
+              // 避免「setData 后立即 reveal → 窗口先渲染空 image 态、露出 #000 黑底」的黑屏。
             },
             "image/jpeg",
             0.96,
@@ -190,6 +198,9 @@ function OverlayApp() {
       p1.then((un) => un());
       p2.then((un) => un());
       p3.then((un) => un());
+      // 卸载 / 热启动（HMR）时若截图窗仍开着则自动取消，避免旧 webview 残留黑屏。
+      // 正常关闭走 handleClose 已 hide，此处为幂等兜底。
+      invoke("hide_overlay_window").catch(() => {});
     };
   }, [handleClose]);
 
@@ -216,7 +227,8 @@ function OverlayApp() {
       style: {
         position: "fixed",
         inset: 0,
-        background: "transparent",
+        // 不透明黑底：分层窗逐像素命中，透明态会穿透；该态仅在启动离屏出现（data 在 show 前已由 screenshot-start 置好），置黑无可见影响且防竞态穿透。
+        background: "#000",
         zIndex: 9999,
         // 兜底：即便瞬时 data=null，也保持十字光标，杜绝「概率出现默认光标」的观感。
         cursor: "crosshair",
@@ -232,6 +244,7 @@ function OverlayApp() {
     windows: data.windows,
     noteId: data.noteId,
     onClose: handleClose,
+    onImageReady: reveal,
   });
 }
 
@@ -240,4 +253,12 @@ if (root) {
   ReactDOM.createRoot(root).render(
     React.createElement(React.StrictMode, null, React.createElement(OverlayApp)),
   );
+}
+
+// dev 热启动（Vite HMR）：模块被替换前先取消截图窗，避免旧 webview 残留、黑屏不消。
+// 注意：独立 webview 在 dev 下默认不随 HMR 重建（坑11），故必须显式 hide 兜底。
+if ((import.meta as any).hot) {
+  (import.meta as any).hot.dispose(() => {
+    invoke("hide_overlay_window").catch(() => {});
+  });
 }
