@@ -11,7 +11,7 @@ import "./index.css";
 import "./overlay-transparent.css";
 
 interface OverlayData {
-  image: string;
+  image: ImageBitmap | null;
   ox: number;
   oy: number;
   scale: number;
@@ -28,7 +28,13 @@ function OverlayApp() {
 
   const handleClose = React.useCallback(() => {
     setData((prev) => {
-      if (prev && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+      if (prev && prev.image) {
+        if (typeof prev.image === "string") {
+          if (prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+        } else if (typeof (prev.image as ImageBitmap).close === "function") {
+          (prev.image as ImageBitmap).close();
+        }
+      }
       return null;
     });
     invoke("hide_overlay_window").catch(() => {});
@@ -99,29 +105,32 @@ function OverlayApp() {
           const w = dv.getUint32(0, true);
           const h = dv.getUint32(4, true);
           const rgba = new Uint8ClampedArray(buf, 8);
-          const src = document.createElement("canvas");
-          src.width = w;
-          src.height = h;
-          const sctx = src.getContext("2d");
-          if (!sctx) return;
-          sctx.putImageData(new ImageData(rgba, w, h), 0, 0);
-          // 浏览器原生编码（release 级性能，不受 Tauri dev 放大），取代 Rust 侧 CatmullRom+JPEG
-          src.toBlob(
-            (blob) => {
-              if (!blob || cancelled) return;
-              const url = URL.createObjectURL(blob);
+          const imageData = new ImageData(rgba, w, h);
+          // 零编码：直接把 RGBA 构造成 ImageBitmap（GPU 加速，毫秒级），取代 toBlob JPEG 重编码
+          // + objectURL + <img> 解码这一圈最贵的 CPU 开销，截图启动进入毫秒级。
+          createImageBitmap(imageData)
+            .then((bitmap) => {
+              if (cancelled) {
+                bitmap.close();
+                return;
+              }
               loaded = true;
               clearSafety();
               setData((prev) => {
-                if (prev && prev.image && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
-                return { image: url, ...meta };
+                if (prev && prev.image) {
+                  if (typeof prev.image === "string") {
+                    if (prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+                  } else if (typeof (prev.image as ImageBitmap).close === "function") {
+                    (prev.image as ImageBitmap).close();
+                  }
+                }
+                return { image: bitmap, ...meta };
               });
-              // 覆盖窗显示推迟到 ScreenshotOverlay 内冻结图真正 onLoad 之后（见 onImageReady），
-              // 避免「setData 后立即 reveal → 窗口先渲染空 image 态、露出 #000 黑底」的黑屏。
-            },
-            "image/jpeg",
-            0.96,
-          );
+              // 覆盖窗显示推迟到 ScreenshotOverlay 内冻结图真正绘制就绪之后（见 onImageReady）。
+            })
+            .catch((err) => {
+              console.error("[截图] 预览位图构建失败:", err);
+            });
         })
         .catch((err) => {
           loadingRef.current = false;
@@ -142,8 +151,14 @@ function OverlayApp() {
       armSafety();
       const meta = buildMeta(event.payload);
       setData((prev) => {
-        if (prev && prev.image && prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
-        return { image: "", ...meta };
+        if (prev && prev.image) {
+          if (typeof prev.image === "string") {
+            if (prev.image.startsWith("blob:")) URL.revokeObjectURL(prev.image);
+          } else if (typeof (prev.image as ImageBitmap).close === "function") {
+            (prev.image as ImageBitmap).close();
+          }
+        }
+        return { image: null, ...meta };
       });
     });
 

@@ -33,6 +33,7 @@ function App() {
   const openExternalContent = useNotesStore(s => s.openExternalContent);
   const initNotes = useNotesStore(s => s.init);
   const notes = useNotesStore(s => s.notes);
+  const [screenshotReady, setScreenshotReady] = useState(false);
 
   // 文件关联：以安得云荟打开（图片/视频/音乐/文档 → 对应模块）
   useEffect(() => {
@@ -125,7 +126,8 @@ function App() {
           WebviewWindow.getByLabel('screenshot-overlay')?.hide();
         });
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setScreenshotReady(true));
   }, [ensureScreenshotOverlay]);
 
   // 唤出剪贴板浮窗（全局热键，复用 Rust 已注册的 floating-clipboard 窗口）
@@ -306,8 +308,8 @@ function App() {
     boot.__bootDone?.({ text: "准备就绪", phase: "PHASE 05 / 05" });
   }, []);
   useEffect(() => {
-    if (notes.length > 0) finishBoot();
-  }, [notes, finishBoot]);
+    if (notes.length > 0 && screenshotReady) finishBoot();
+  }, [notes, screenshotReady, finishBoot]);
   useEffect(() => {
     const t = window.setTimeout(finishBoot, 4000);
     return () => window.clearTimeout(t);

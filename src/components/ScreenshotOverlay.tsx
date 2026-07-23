@@ -17,8 +17,8 @@ interface Win {
 }
 
 interface ScreenshotOverlayProps {
-  /** 预览图（降采样 JPEG，分辨率 == 窗口 CSS 像素，故「图像像素 ≡ CSS 像素」）；空串表示冻结图尚未注入（透明待加载态） */
-  image?: string;
+  /** 预览图（前端 read_screenshot 后零编码构造的 ImageBitmap，原生物理分辨率，1:1 清晰）；null 表示冻结图尚未注入（透明待加载态） */
+  image?: ImageBitmap | null;
   /** 覆盖窗真实原点（物理像素），用于把 CSS 坐标换算回物理/原生坐标 */
   ox: number;
   oy: number;
@@ -102,7 +102,9 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   // 窗口标题懒加载缓存：枚举时不再读标题（避免跨线程阻塞导致截图卡 4-5s），悬停时按需拉取单个窗口标题
   const [titleMap, setTitleMap] = useState<Record<number, string>>({});
 
-  const fullImgRef = useRef<HTMLImageElement | null>(null);
+  const fullImgRef = useRef<HTMLImageElement | HTMLCanvasElement | null>(null);
+  const fullCanvasRef = useRef<HTMLCanvasElement | null>(null); // 整屏预览绘制画布
+  const editBaseRef = useRef<HTMLCanvasElement | null>(null); // 编辑态整屏底图画布
   const offRef = useRef<HTMLCanvasElement | null>(null); // 放大镜源（预览原图）
   const captureRef = useRef<HTMLDivElement | null>(null);
 
@@ -150,36 +152,49 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   // 长截图原始 PNG 字节（capture_window_full 返回），无标注时直接用它保存，省去画布重编码
   const longBytesRef = useRef<Uint8Array | null>(null);
 
-  // 载入整屏预览图，并构建放大镜源画布
-  useEffect(() => {
-    // 截图会话已建立但冻结图尚未注入（image 为空）：立即渲染透明选区 UI，
+  // 载入整屏预览图（ImageBitmap，零编码），绘制到 canvas 并构建放大镜源。
+  // useLayoutEffect：绘制在浏览器首次 paint 前完成，配合 reveal 时序确保「先有冻结图、再显示」，杜绝黑闪。
+  useLayoutEffect(() => {
+    // 截图会话已建立但冻结图尚未注入（image 为 null）：立即渲染透明选区 UI，
     // 让框选交互秒开（与录屏选区窗一致），无需等待冻结图加载完成。
     if (!image) {
       setReady(true);
       return;
     }
-    const img = new Image();
-    img.onload = () => {
-      fullImgRef.current = img;
-      const off = document.createElement("canvas");
-      off.width = img.naturalWidth;
-      off.height = img.naturalHeight;
-      const octx = off.getContext("2d");
-      if (octx) octx.drawImage(img, 0, 0);
-      offRef.current = off;
+    const canvas = fullCanvasRef.current;
+    if (!canvas) {
       setReady(true);
-      // 冻结图已真正解码并绘制就绪：通知外层显示覆盖窗。
-      // 必须在 onload 之后才 reveal —— 若提前（setData 后立即）show，窗口会先渲染
-      // 旧的空 image 状态、露出 #000 不透明底层（防穿透用），造成黑屏。
       onImageReady?.();
-    };
-    // 预览解码失败：直接关闭覆盖窗，避免永久停留在白色 loading 态（假死）
-    img.onerror = () => {
-      console.error("[截图] 预览图解码失败，关闭覆盖窗");
-      onClose();
-    };
-    img.src = image;
+      return;
+    }
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.drawImage(image, 0, 0);
+    // 放大镜源（预览原图）
+    const off = document.createElement("canvas");
+    off.width = image.width;
+    off.height = image.height;
+    const octx = off.getContext("2d");
+    if (octx) octx.drawImage(image, 0, 0);
+    offRef.current = off;
+    fullImgRef.current = canvas;
+    setReady(true);
+    // 冻结图已在上方（useLayoutEffect，浏览器首次 paint 前）同步绘制到 fullCanvasRef；
+    // reveal 由 Rust run_on_main_thread 异步 show，落到下一帧合成时 canvas 已就位，
+    // 首帧即冻结图、无黑闪。无需 rAF/timeout 延迟（隐藏窗的 rAF 会被节流，反而 ~150ms 卡顿）。
+    onImageReady?.();
   }, [image, onClose, onImageReady]);
+
+  // 编辑态整屏底图：进入 edit 模式时画布挂载，立即把 ImageBitmap 绘制上去（零解码）。
+  useLayoutEffect(() => {
+    const canvas = editBaseRef.current;
+    if (!canvas || !image) return;
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.drawImage(image, 0, 0);
+  }, [image, mode]);
 
   // CSS 坐标 → 物理坐标
   const toPhys = useCallback(
@@ -197,20 +212,9 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       const p = toPhys(cx, cy);
       try {
         const raw = await invoke<string>("window_at_point", { x: p.x, y: p.y });
-        // [DIAG] 一次性定性：区分是 resolve 成字面量 "null" 还是正常对象
-        console.error("[hitAt DIAG] raw=", JSON.stringify(raw));
-        // 把原始结果也写进探针 HUD：覆盖窗 console 不一定转发到 Rust 日志，
-        // 这样不开 DevTools 也能在覆盖窗上直接看到 Rust 返回的是对象还是 "null"。
-        if (probeElRef.current) {
-          probeElRef.current.textContent = "RAW w=" + (raw === "null" ? "NULL" : "OBJ") + " raw=" + raw.slice(0, 90);
-        }
         return raw === "null" ? null : JSON.parse(raw) as Win;
       } catch (e) {
-        console.error("[hitAt DIAG] CATCH", e);
-        // IPC reject（旧 webview 通道断开等）→ 把错误直接显示到探针，免 console 也能看
-        if (probeElRef.current) {
-          probeElRef.current.textContent = "RAW w=ERR " + String(e).slice(0, 120);
-        }
+        console.error("[hitAt] window_at_point 失败:", e);
         return null;
       }
     },
@@ -251,7 +255,6 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   const hoverRafRef = useRef<number | null>(null);
   const hoverPendingRef = useRef<{ x: number; y: number } | null>(null);
   const lastHoverHwndRef = useRef<number | null>(null);
-  const hoverSeqRef = useRef(0);            // 异步 OS 结果乱序防护
   const osInFlightRef = useRef(false); // OS 调用在途保护（单并发，天然匹配 worker 吞吐，零堆积）
   const osLastDispatchRef = useRef(0); // OS 调用节流时间戳（>=80ms 才再派发，降低 worker 线程压力）
   const OS_THROTTLE_MS = 80;
@@ -263,53 +266,6 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     lastHoverHwndRef.current = hw;
     setHoverWin(w);
   }, []);
-  // ===== 悬停探针（始终显示，小绿字在左上角）；URL 加 ?probe=0 可隐藏 =====
-  const probeElRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const enabled = new URLSearchParams(location.search).get("probe") !== "0";
-    if (!enabled) return;
-    const el = document.createElement("div");
-    el.style.cssText =
-      "position:fixed;left:8px;top:8px;z-index:99999;background:rgba(0,0,0,0.78);color:#7CFC00;font:11px/1.4 monospace;padding:6px 8px;border-radius:6px;pointer-events:none;white-space:pre;max-width:62vw;";
-    document.body.appendChild(el);
-    probeElRef.current = el;
-    (window as unknown as { __mountHoverProbe?: () => void }).__mountHoverProbe = () => {
-      if (!probeElRef.current) {
-        document.body.appendChild(el);
-        probeElRef.current = el;
-      }
-    };
-    return () => {
-      el.remove();
-      probeElRef.current = null;
-    };
-  }, []);
-  const updateProbe = useCallback(
-    (d: {
-      css?: { x: number; y: number };
-      staticHit?: Win | null;
-      osHwnd?: number | null;
-      osTitle?: string;
-      osError?: boolean;
-      latency?: number;
-    }) => {
-      const el = probeElRef.current;
-      if (!el) return;
-      const lines: string[] = [];
-      if (d.css) lines.push(`css=(${d.css.x | 0},${d.css.y | 0})`);
-      if (d.staticHit !== undefined)
-        lines.push(
-          `static=${d.staticHit ? "0x" + (d.staticHit.hwnd >>> 0).toString(16) + " " + (d.staticHit.title || "").slice(0, 12) : "∅"}`,
-        );
-      if (d.osHwnd !== undefined)
-        lines.push(
-          `os=${d.osHwnd ? "0x" + (d.osHwnd >>> 0).toString(16) + " " + (d.osTitle || "").slice(0, 12) : d.osError ? "ERR" : "∅"}${d.latency != null ? " " + d.latency.toFixed(1) + "ms" : ""}`,
-        );
-      lines.push(`shown=${lastHoverHwndRef.current ? "0x" + (lastHoverHwndRef.current >>> 0).toString(16) : "∅"}`);
-      el.textContent = "PROBE " + lines.join("  |  ");
-    },
-    [],
-  );
     const requestHover = useCallback(
     (x: number, y: number) => {
       hoverPendingRef.current = { x, y };
@@ -331,29 +287,20 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
           if (needOs) {
             osInFlightRef.current = true;
             osLastDispatchRef.current = now;
-            const seq = ++hoverSeqRef.current;
-            const t0 = now;
             hitAt(pt.x, pt.y)
               .then((w) => {
                 osInFlightRef.current = false;
-                // RAW DUMP: 直接写 DOM 绕过 updateProbe，确认 w 到底是什么
-                if (probeElRef.current) {
-                  probeElRef.current.textContent = "RAW w=" + (w ? "OBJ" : "NULL") + " hwnd=" + (w?.hwnd ?? "??") + " keys=" + (w ? Object.keys(w).join(",") : "null");
-                }
                 applyHover(w ?? lastHitRef.current);
               })
-              .catch((e) => {
+              .catch(() => {
                 osInFlightRef.current = false;
-                if (probeElRef.current) {
-                  probeElRef.current.textContent = "CATCH " + String(e);
-                }
                 if (lastHitRef.current) applyHover(lastHitRef.current);
               });
           }
         });
       }
     },
-    [hitWindow, applyHover, hitAt, updateProbe],
+    [hitWindow, applyHover, hitAt],
   );
 
   // 悬停窗口时按需拉取标题（单次、Rust 侧 30ms 超时、绝不阻塞截图路径）
@@ -467,8 +414,9 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       // 关键：read_screenshot 自 Issue6 起返回原生物理分辨率（不再降采样到 CSS），
       // 故「图像像素 ≠ CSS 像素」。必须用 ps 把 CSS 选区坐标换算到预览图像坐标，
       // 否则在 scale>1 的高 DPI 屏上会采样到错误的（更小）区域，导致选区被放大 / 左移显示。
-      const cssW = window.innerWidth || img.naturalWidth;
-      const ps = img.naturalWidth / cssW;
+      const iw = (img as HTMLCanvasElement).width || (img as HTMLImageElement).naturalWidth || 1;
+      const cssW = window.innerWidth || iw;
+      const ps = iw / cssW;
       const cw = Math.max(1, Math.round(rect.w * ps));
       const ch = Math.max(1, Math.round(rect.h * ps));
       const c = document.createElement("canvas");
@@ -499,14 +447,28 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       // 最兼容「粘到微信/QQ/浏览器」等场景，且不受本进程其它 WebView2 窗口焦点变化影响）；
       // 若 JS 不可用则回退 Rust Win32 双格式写入。
       try {
-        const cc = baseRef.current;
-        if (cc && cc.width > 0 && cc.height > 0) {
-          const dataUrl = cc.toDataURL("image/png");
-          copyScreenshotToClipboard(dataUrl, setCopyTip);
-          // 复制结果提示自动消失（不再阻塞后端命令线程）
+        const n = selNativeRef.current;
+        if (n && n.w > 0 && n.h > 0) {
+          // 直接取原生分辨率裁剪（crop_native_rgba）写入剪贴板，保证清晰度不受预览降采样影响。
+          invoke<ArrayBuffer>("crop_native_rgba", { x: n.x, y: n.y, w: n.w, h: n.h })
+            .then((buf) => {
+              const rgba = new Uint8Array(buf);
+              const c = document.createElement("canvas");
+              c.width = n.w;
+              c.height = n.h;
+              const ctx = c.getContext("2d");
+              if (ctx) {
+                ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer), n.w, n.h), 0, 0);
+                copyScreenshotToClipboard(c.toDataURL("image/png"), setCopyTip);
+              }
+            })
+            .catch(() => {
+              const cc = baseRef.current;
+              if (cc && cc.width > 0) copyScreenshotToClipboard(cc.toDataURL("image/png"), setCopyTip);
+            });
           window.setTimeout(() => setCopyTip(null), 2600);
         } else {
-          console.warn("[截图] 自动复制跳过：底图为空，未写入剪贴板");
+          console.warn("[截图] 自动复制跳过：选区为空，未写入剪贴板");
         }
       } catch (e) {
         console.error("[截图] 自动复制异常:", e);
@@ -1000,9 +962,12 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     }
   }, [mode, ready]);
 
-  if (!ready) {
+  if (!ready && !image) {
     // 不透明黑底：transparent:true 窗是 WS_EX_LAYERED 分层窗，逐像素命中——
-    // 透明像素鼠标直接穿透落下层窗（默认光标+无法选窗）。冻结图加载间隙必须不透明，恒可点。
+    // 透明像素鼠标直接穿透落下层窗（默认光标+无法选窗）。冻结图尚未注入（image 为 null）时必须不透明，恒可点。
+    // 关键：一旦 image 已注入（预览帧就绪），即便 ready 尚未翻转也要渲染选区 UI 并挂载 fullCanvasRef，
+    // 以便下方 useLayoutEffect 同步 drawImage 之后再 reveal——否则 canvas 未挂载会落到 `if(!canvas)` 分支、
+    // reveal 在绘帧前触发、露出下方 #000 形成黑闪。
     return <div className="fixed inset-0 z-[9999]" style={{ background: "#000" }} />;
   }
 
@@ -1011,7 +976,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     return (
       <div
         className="fixed inset-0 z-[9999] select-none"
-        style={{ background: "#000" }}
+        style={{ background: image ? "transparent" : "#000" }}
         onContextMenu={(e) => {
           e.preventDefault();
           onClose();
@@ -1019,7 +984,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       >
         {/* 整屏预览（object-fill 铺满，分辨率==CSS 像素 → 1:1，无缩放无偏移）；冻结图未注入前不渲染，保留透明底 */}
         {image && (
-          <img src={image} alt="" className="absolute inset-0 w-full h-full object-fill pointer-events-none" draggable={false} />
+          <canvas ref={fullCanvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
         )}
 
         {/* 选区外暗化遮罩：4 矩形（纯 GPU 合成，替代 box-shadow 9999px 全屏重绘）。zIndex 低于高亮框，高于冻结图。 */}
@@ -1207,8 +1172,10 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
             {copyTip}
           </div>
         )}
-        {/* 整屏底图（暗化） */}
-        <img src={image} alt="" className="absolute inset-0 w-full h-full object-fill pointer-events-none opacity-100" draggable={false} />
+        {/* 整屏底图（暗化）：编辑态同样直接绘制 ImageBitmap，避免 <img src=URL> 解码开销 */}
+        {image && (
+          <canvas ref={editBaseRef} className="absolute inset-0 w-full h-full object-fill pointer-events-none opacity-100" />
+        )}
         <div className="absolute inset-0 bg-black/45 pointer-events-none" />
         {/* 选区明亮浮起 */}
         <div className="absolute" style={{ left: selRect.x, top: selRect.y, width: selRect.w, height: selRect.h }}>
