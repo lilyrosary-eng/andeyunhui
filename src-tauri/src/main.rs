@@ -135,7 +135,7 @@ fn main() {
     // 日志系统在 setup 阶段初始化（需要 app_data 路径），此处仅用 eprintln 兜底早期日志。
     // setup 之前的少量 eprintln 输出到 stderr，setup 之后所有 log:: 宏自动写入会话日志文件。
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(Mutex::new(TrayModeState { enabled: false }))
         // 注册 plugin:// 自定义协议，用于前端动态加载插件
         .register_uri_scheme_protocol("plugin", |ctx, request| {
@@ -1018,11 +1018,13 @@ fn main() {
             dev_console_http,
             take_pending_open_files,
         ])
-        .run(tauri::generate_context!(), |_app, event| {
-            // 关闭软件即清空「以安得云荟打开」临时目录（每次打开全新）
-            if let tauri::RunEvent::Exit = event {
-                let _ = clear_openwith_dir(_app.clone());
-            }
-        })
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // 关闭软件即清空「以安得云荟打开」临时目录（每次打开全新）
+    app.run(|_app, event| {
+        if let tauri::RunEvent::Exit = event {
+            let _ = clear_openwith_dir(_app.clone());
+        }
+    });
 }
