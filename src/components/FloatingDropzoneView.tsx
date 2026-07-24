@@ -19,7 +19,7 @@ import {
 let _paddleOcrLoading: Promise<any> | null = null;
 async function loadPaddleOcr(): Promise<any> {
   const w = window as any;
-  if (w.__EXT_PADDLEOCR__?._v === 2) return w.__EXT_PADDLEOCR__;
+  if (w.__EXT_PADDLEOCR__?._v === 7) return w.__EXT_PADDLEOCR__;
   delete w.__EXT_PADDLEOCR__;
   _paddleOcrLoading = null;
   _paddleOcrLoading = (async () => {

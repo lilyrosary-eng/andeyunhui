@@ -62,9 +62,11 @@ const TARGETS = [
   { outDir: '茑萝/ide/codemirror', entry: 'codemirror-entry.js', global: '__CM_BUNDLE__' },
   { outDir: '茑萝/ide/minisearch', entry: 'minisearch-entry.js', global: '__MINISEARCH_BUNDLE__' },
   { outDir: '茑萝/wps/tiptap', entry: 'tiptap-entry.js', global: '__TIPTAP_BUNDLE__' },
-  // 本地 OCR 引擎（PaddleOCR PP-OCRv4，onnxruntime-web webgl EP，失败时运行时加载 wasm 后端）
-  // WASM 后端（ort-wasm.min.js）作为独立运行时资源，不随 esbuild 打包，避免 tree-shake 丢 registerBackend。
+  // 本地 OCR 引擎（PaddleOCR PP-OCRv6，onnxruntime-web wasm 后端；推理在 Web Worker 内执行）
+  // WASM 后端（ort.wasm.min.js）作为独立运行时资源，不随 esbuild 打包，避免 tree-shake 丢 registerBackend。
   { outDir: '全局/paddleocr', entry: 'paddleocr-entry.js', global: '__PADDLEOCR_BUNDLE__' },
+  // 本地 OCR Web Worker（独立线程跑推理，主线程不卡死）。输出到 public/ocr-worker.js（dev/prod 均经 /ocr-worker.js 加载）
+  { outDir: '../public', entry: 'paddleocr-worker-entry.js', global: '__OCR_WORKER__', outFile: 'ocr-worker.js' },
 ];
 
 for (const t of TARGETS) {
@@ -80,7 +82,7 @@ for (const t of TARGETS) {
     bundle: true,
     format: 'iife',
     globalName: t.global,
-    outfile: join(outDir, 'index.js'),
+    outfile: join(outDir, t.outFile || 'index.js'),
     minify: true,
     legalComments: 'none',
     plugins: [rediResolvePlugin, hostExternalsPlugin],
@@ -88,7 +90,7 @@ for (const t of TARGETS) {
     define: { 'process.env.NODE_ENV': '"production"' },
     logLevel: 'info',
   });
-  console.log(`[Build] external-deps/${t.outDir}/index.js 已生成`);
+  console.log(`[Build] ${t.outFile ? '' : 'external-deps/'}${t.outDir}/${t.outFile || 'index.js'} 已生成`);
 }
 
 console.log('[Build] external-deps 构建完成');
