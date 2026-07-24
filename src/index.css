@@ -464,8 +464,9 @@ input[type="range"]:active::-moz-range-thumb {
   font-weight: 600;
   font-style: normal;
 }
-/* 章节拼接：不强制 break-before: column（避免短章节产生大面积空白页）。
-   章节边界由 JS measure() 通过 offsetTop 检测标题是否在页面第一行来判定。*/
+/* 章节拼接：由 ReadingView 在生成 combinedHtml 时为每个标记加 break-before: column
+   （首章除外），强制"xx章"标题恒在栏顶、上一章内容不出现在本页上方；
+   上一章尾栏允许留白但不能全白。章节边界由 JS measure() 按标记 offsetLeft 判定。*/
 /* 章节标题：加大加粗，便于区分前后章节 */
 .reader-columns .chapter-title-display {
   font-size: 1.6em;
@@ -512,7 +513,7 @@ input[type="range"]:active::-moz-range-thumb {
   font-weight: 600;
   font-style: normal;
 }
-/* 章节拼接：不强制 break-before: column（同 .reader-columns，避免空白页）*/
+/* 章节拼接：同 .reader-columns，标记带 break-before: column（见 ReadingView）*/
 /* 章节标题：加大加粗，便于区分前后章节 */
 .reader-columns-book .chapter-title-display {
   font-size: 1.6em;
