@@ -29,6 +29,8 @@ export interface OverlayProfile {
   alwaysOnTop?: boolean;
   resizable?: boolean;
   dragDropEnabled?: boolean;
+  /** 预热场景：为 true 时 Rust 在 build 后立刻隐藏窗口（绘制前不可见），用于加载页期间静默预热。 */
+  hidden?: boolean;
 }
 
 /**
