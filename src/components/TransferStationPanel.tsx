@@ -19,8 +19,8 @@ import {
 let _paddleOcrLoading: Promise<any> | null = null;
 async function loadPaddleOcr(): Promise<any> {
   const w = window as any;
-  // 版本标记 _v 防御 Vite HMR 残留的旧 IIFE（新版是运行时加载 WASM vs 旧版内联 WebGL）
-  if (w.__EXT_PADDLEOCR__?._v === 2) return w.__EXT_PADDLEOCR__;
+  // 版本标记 _v 防御 Vite HMR 残留的旧 IIFE（每次引擎实现变更都要递增 _v 才能强制重载）
+  if (w.__EXT_PADDLEOCR__?._v === 7) return w.__EXT_PADDLEOCR__;
   // 清除可能的旧版缓存
   delete w.__EXT_PADDLEOCR__;
   _paddleOcrLoading = null;

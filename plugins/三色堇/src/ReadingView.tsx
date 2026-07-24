@@ -73,26 +73,53 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   const verticalRef = useRef<HTMLDivElement | null>(null);
   const dragState = useRef({ startX: 0, active: false, offset: 0 });
   const wheelLock = useRef(0);
-  const boundariesRef = useRef<ChapterBoundary[]>([]);
-  // pendingJumpRef: 窗口滑动后恢复阅读位置。pageInChapter=-1 表示跳到该章最后一页
-  const pendingJumpRef = useRef<{ chapterIndex: number; pageInChapter: number } | null>(null);
-  // 竖版滑动窗口后调整 scrollTop：保持视觉连续性
-  const verticalJumpRef = useRef<{ chapterIndex: number; position: 'top' | 'bottom' } | null>(null);
-  // chapterIndexRef / windowCenterRef: 让 externalChapterIndex effect
-  // 能读取最新值而不需要将其放入依赖数组（避免内部 chapterIndex 变化触发该 effect）
-  const chapterIndexRef = useRef(0);
-  const windowCenterRef = useRef(0);
-  // 记录上一次测量到的页面宽度，用于在"宽度变化"时临时关闭过渡动画
-  const lastPwRef = useRef(0);
-  useEffect(() => { chapterIndexRef.current = chapterIndex; }, [chapterIndex]);
-  useEffect(() => { windowCenterRef.current = windowCenter; }, [windowCenter]);
-  const displayedChapterRef = useRef(0);
-  useEffect(() => { displayedChapterRef.current = displayedChapter; }, [displayedChapter]);
+const boundariesRef = useRef<ChapterBoundary[]>([]);
+// pendingJumpRef: 窗口滑动/模式切换后恢复阅读位置。
+// pageInChapter=-1 表示跳到该章最后一页；useProgress=true 时按竖版进度估算章节内页码
+const pendingJumpRef = useRef<{ chapterIndex: number; pageInChapter: number; useProgress?: boolean } | null>(null);
+// 竖版滑动窗口后调整 scrollTop：保持视觉连续性
+const verticalJumpRef = useRef<{ chapterIndex: number; position: 'top' | 'bottom' } | null>(null);
+// chapterIndexRef / windowCenterRef: 让 externalChapterIndex effect
+// 能读取最新值而不需要将其放入依赖数组（避免内部 chapterIndex 变化触发该 effect）
+const chapterIndexRef = useRef(0);
+const windowCenterRef = useRef(0);
+// 记录上一次测量到的页面宽度，用于在"宽度变化"时临时关闭过渡动画
+const lastPwRef = useRef(0);
+// 记录上一次是否分页模式，用于判断模式切换方向（横版↔双栏 vs 竖版↔分页），
+// 以便按正确的章节来源（chapterIndex / displayedChapter）重新定位
+const prevPaginatedRef = useRef(true);
+// absolutePageRef / verticalScrollProgressRef: 让模式切换 effect 在 measure 前读取最新值
+const absolutePageRef = useRef(0);
+const verticalScrollProgressRef = useRef(0);
+// 过渡锁定时器：模式切换/窗口滑动期间保持 noTransition，避免重算 transform 产生"闪"
+const transitionTimerRef = useRef<number | null>(null);
+useEffect(() => { chapterIndexRef.current = chapterIndex; }, [chapterIndex]);
+useEffect(() => { windowCenterRef.current = windowCenter; }, [windowCenter]);
+const displayedChapterRef = useRef(0);
+useEffect(() => { displayedChapterRef.current = displayedChapter; }, [displayedChapter]);
+useEffect(() => { absolutePageRef.current = absolutePage; }, [absolutePage]);
+useEffect(() => { verticalScrollProgressRef.current = verticalScrollProgress; }, [verticalScrollProgress]);
+// 锁定过渡动画一段时间（默认 320ms，略大于翻页动画 280ms），
+// 覆盖"模式切换可能跨多次提交"的场景，避免中间帧闪屏
+const lockTransition = useCallback(() => {
+  setNoTransition(true);
+  if (transitionTimerRef.current !== null) window.clearTimeout(transitionTimerRef.current);
+  transitionTimerRef.current = window.setTimeout(() => setNoTransition(false), 320);
+}, []);
 
   const isBookMode = layoutMode === 'book';
   // 双栏模式改为"连续对页翻页"：始终展示两栏，但每次仅前进一栏
   //（原右栏滑到左栏位置、右栏显示新的一页），因此翻页步长恒为 1 栏。
   const pagesPerStep = 1;
+
+  // 布局切换：竖版→分页时先预滑窗口到当前阅读章，使首帧即渲染正确章节内容，
+  // 避免 mode-switch effect 提交后才滑窗导致的单帧旧内容闪烁
+  const handleSetLayoutMode = useCallback((mode: LayoutMode) => {
+    if (layoutMode === 'vertical' && mode !== 'vertical') {
+      setWindowCenter(displayedChapterRef.current);
+    }
+    setLayoutMode(mode);
+  }, [layoutMode]);
   const isPaginatedMode = layoutMode !== 'vertical';
 
   // ============ 滑动窗口动态缓存 ============
@@ -108,16 +135,19 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       const actualIdx = windowStart + i;
       const title = (ch.title || `第 ${actualIdx + 1} 章`)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<div class="chapter-marker" data-chapter-index="${actualIdx}"><h2 class="chapter-title-display">${title}</h2>${ch.content || ''}</div>`;
+      // 首个窗口章不加 break-before（避免开头出现空白栏）；
+      // 其余章节强制从新栏顶开始，保证"xx章"标题恒在栏顶、上一章内容不出现在本页上方，
+      // 且上一章尾栏允许留白但不能全白（其内容已占据该栏）。
+      const breakBefore = i === 0 ? '' : 'break-before: column;';
+      return `<div class="chapter-marker" data-chapter-index="${actualIdx}" style="${breakBefore}"><h2 class="chapter-title-display">${title}</h2>${ch.content || ''}</div>`;
     }).join('');
   }, [book.chapters, windowStart, windowEnd]);
 
   const currentChapter = book.chapters[chapterIndex] || book.chapters[0] || { title: '—', content: '' };
 
   // ============ 测量页数和章节边界 ============
-  // 核心规则：当章节标题出现在页面第一行（栏顶部）时，该页定为新章节起始页。
-  // 标题不在第一行 → 该页属于上一章，新章节从下一页开始。
-  // 不使用 break-before: column（避免短章节产生空白页），内容自然流动。
+  // 章节标记已强制 break-before: column（首章除外），故"xx章"标题恒在栏顶，
+  // 标记 offsetLeft 所在栏即为该章第一页，无需再做 titleAtTop 二次修正。
   const measure = useCallback(() => {
     const vp = viewportRef.current;
     const c = contentRef.current;
@@ -134,39 +164,17 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     const scrollW = Math.max(0, c.scrollWidth - 2 * PAD);
     const TOLERANCE = Math.max(2, step * 0.05);
     let pages = Math.max(1, Math.ceil((scrollW - TOLERANCE) / step));
-    setPageCount(pages);
 
-    // ===== 章节边界检测：两遍扫描 =====
+    // ===== 章节边界检测：标记已顶格，offsetLeft 所在栏即章首页 =====
     const markers = c.querySelectorAll('.chapter-marker');
-
-    // 第一遍：计算每个章节的原始起始页
     const rawStartPages: number[] = [];
     for (let i = 0; i < markers.length; i++) {
       const m = markers[i] as HTMLElement;
       const startOffset = m.offsetLeft - PAD;
       const rawPage = Math.max(0, Math.floor((startOffset + TOLERANCE) / step));
-
-      // 检测标题是否在页面第一行（栏顶部）——只能用「垂直位置」判断。
-      // multicol 中栏水平铺开、共用同一垂直坐标：栏顶元素 offsetTop ≈
-      // 容器 padding-top(24) + 标题 margin-top(约 30)，栏中标题则远大于此。
-      // 【关键修复】不可用 offsetWithinPage（水平方向）判断：block 章节标记
-      // 的 offsetLeft 恒为其所在栏的左边缘，offsetWithinPage 恒 ≈0，会让
-      // titleAtTop 恒真、退化为"标记在哪栏即算该章首页"，忽略标题在栏内的
-      // 垂直位置，导致横板页码/章节边界识别错乱。
-      const title = m.querySelector('.chapter-title-display') as HTMLElement | null;
-      const titleAtTop = title
-        ? title.offsetTop <= 64
-        : true;
-
-      if (titleAtTop || rawPage === 0) {
-        rawStartPages.push(rawPage);
-      } else {
-        // 标题不在第一行 → 该页属于上一章，新章节从下一页开始
-        rawStartPages.push(Math.min(rawPage + 1, pages - 1));
-      }
+      rawStartPages.push(rawPage);
     }
 
-    // 第二遍：计算最终边界（endPage = 下一章 startPage - 1）
     const boundaries: ChapterBoundary[] = [];
     for (let i = 0; i < markers.length; i++) {
       const m = markers[i] as HTMLElement;
@@ -177,19 +185,38 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
         : pages - 1;
       boundaries.push({ index: idx, startPage, endPage });
     }
+    // 末尾空白页裁剪：scrollWidth 可能因 sub-pixel/列尾余量略大，
+    // 用末章内容右边缘反推真实末页，裁掉其后纯白页
+    const lastMarker = markers[markers.length - 1] as HTMLElement | null;
+    if (lastMarker) {
+      const lastContentRight = lastMarker.offsetLeft + lastMarker.offsetWidth;
+      const lastContentPage = Math.max(0, Math.floor((lastContentRight - PAD + TOLERANCE) / step));
+      if (pages - 1 > lastContentPage) {
+        pages = lastContentPage + 1;
+      }
+    }
+    setPageCount(pages);
     boundariesRef.current = boundaries;
 
-    // 处理待跳转（3章窗口滑动后恢复阅读位置）
+    // 处理待跳转（窗口滑动 / 模式切换后恢复阅读位置）
     if (pendingJumpRef.current !== null) {
-      const { chapterIndex: targetIdx, pageInChapter } = pendingJumpRef.current;
+      const { chapterIndex: targetIdx, pageInChapter, useProgress } = pendingJumpRef.current;
       pendingJumpRef.current = null;
       const b = boundaries.find(x => x.index === targetIdx);
       if (b) {
-        setNoTransition(true);
-        const page = pageInChapter === -1 ? b.endPage : Math.min(b.startPage + pageInChapter, b.endPage);
+        let page: number;
+        if (pageInChapter === -1) {
+          page = b.endPage;
+        } else if (useProgress && verticalScrollProgressRef.current > 0) {
+          // 竖版→分页：用竖版章节内进度近似映射到新布局的章节内页码
+          const chapPages = Math.max(1, b.endPage - b.startPage + 1);
+          page = Math.min(b.endPage, b.startPage + Math.round((verticalScrollProgressRef.current / 100) * (chapPages - 1)));
+        } else {
+          page = Math.min(b.startPage + pageInChapter, b.endPage);
+        }
         setAbsolutePage(page);
         setChapterIndex(targetIdx);
-        requestAnimationFrame(() => setNoTransition(false));
+        lockTransition();
         return;
       }
     }
@@ -199,10 +226,9 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     // 页面宽度变化（布局切换 / 窗口尺寸变化）时临时关闭 transform 过渡，
     // 避免 contentRef 因 pageWidth 改变重算 translate 而产生滑动动画（视觉"闪"）
     if (pwChanged) {
-      setNoTransition(true);
-      requestAnimationFrame(() => setNoTransition(false));
+      lockTransition();
     }
-  }, [isBookMode, pagesPerStep]);
+  }, [isBookMode, pagesPerStep, lockTransition]);
 
   // ============ 同步测量：在 useLayoutEffect 中直接调用（消除弹簧动画）============
   // useLayoutEffect 在 DOM 变更后、浏览器绘制前同步执行
@@ -215,9 +241,31 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
 
   // 布局模式切换 — 用 useLayoutEffect 在绘制前同步状态，避免切换闪烁
   useLayoutEffect(() => {
-    // 切换瞬间关闭过渡，避免 measure 重算 pageWidth / 竖版重置窗口导致 transform 滑动动画（"闪"）
-    setNoTransition(true);
+    // 锁定过渡（覆盖可能跨多次提交的场景：如竖版→分页需先滑窗口再 measure）
+    lockTransition();
+    const wasPaginated = prevPaginatedRef.current;
     if (isPaginatedMode) {
+      // 切到分页模式：pageWidth / 栏数变化导致同一 absolutePage 对应不同章节，
+      // 必须按当前阅读章节重新定位，否则章节会跳到错误位置
+      const targetChapter = wasPaginated ? chapterIndexRef.current : displayedChapterRef.current;
+      // 分页↔分页：保留章节内相对位置（按当前页推算 pageInChapter）
+      // 竖版→分页：用竖版进度估算（useProgress）
+      let pageInChapter = 0;
+      let useProgress = false;
+      if (wasPaginated) {
+        const cur = boundariesRef.current.find(b => b.index === chapterIndexRef.current);
+        if (cur) {
+          pageInChapter = Math.min(
+            Math.max(0, absolutePageRef.current - cur.startPage),
+            cur.endPage - cur.startPage,
+          );
+        }
+      } else {
+        useProgress = true;
+      }
+      pendingJumpRef.current = { chapterIndex: targetChapter, pageInChapter, useProgress };
+      // 窗口已由点击处理器预滑到目标章（竖版→分页），或本就不变（分页↔分页），
+      // 此处直接 measure 即可用正确窗口的 boundaries 准确定位
       measure();
     } else {
       // 切换到竖版时同步 windowCenter 和 displayedChapter 到当前 chapterIndex，
@@ -225,8 +273,8 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       setWindowCenter(chapterIndexRef.current);
       setDisplayedChapter(chapterIndexRef.current);
     }
-    requestAnimationFrame(() => setNoTransition(false));
-  }, [layoutMode, measure, isPaginatedMode]);
+    prevPaginatedRef.current = isPaginatedMode;
+  }, [layoutMode, measure, isPaginatedMode, lockTransition]);
 
   // 尺寸变化
   useEffect(() => {
@@ -269,18 +317,17 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
           // 在窗口内 → 直接跳到该章首页
           const b = boundariesRef.current.find(x => x.index === externalChapterIndex);
           if (b) {
-            setNoTransition(true);
             setAbsolutePage(b.startPage);
             // 同步更新 chapterIndex，避免渲染时用旧值导致页码错误
             setChapterIndex(externalChapterIndex);
-            requestAnimationFrame(() => setNoTransition(false));
+            lockTransition();
             return;
           }
         }
         // 不在窗口内 → 滑动窗口
         pendingJumpRef.current = { chapterIndex: externalChapterIndex, pageInChapter: 0 };
-        setNoTransition(true);
         setWindowCenter(externalChapterIndex);
+        lockTransition();
       }
     } else {
       // 竖版：滑动窗口到目标章节，跳到该章顶部
@@ -293,7 +340,7 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
         setVJumpToken((t) => t + 1);
       }
     }
-  }, [externalChapterIndex, isPaginatedMode, book.chapters.length]);
+  }, [externalChapterIndex, isPaginatedMode, book.chapters.length, lockTransition]);
 
   // 书籍切换重置
   useEffect(() => {
@@ -317,10 +364,10 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     } else if (chapterIndex < book.chapters.length - 1) {
       // 已到窗口最后一页 → 滑动窗口到下一章
       pendingJumpRef.current = { chapterIndex: chapterIndex + 1, pageInChapter: 0 };
-      setNoTransition(true);
       setWindowCenter(chapterIndex + 1);
+      lockTransition();
     }
-  }, [absolutePage, pageCount, chapterIndex, book.chapters.length]);
+  }, [absolutePage, pageCount, chapterIndex, book.chapters.length, lockTransition]);
 
   const prevPage = useCallback(() => {
     if (absolutePage > 0) {
@@ -328,10 +375,10 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
     } else if (windowStart > 0) {
       // 已到窗口第一页 → 滑动窗口到上一章，跳到该章最后一页
       pendingJumpRef.current = { chapterIndex: windowStart - 1, pageInChapter: -1 };
-      setNoTransition(true);
       setWindowCenter(windowStart - 1);
+      lockTransition();
     }
-  }, [absolutePage, windowStart]);
+  }, [absolutePage, windowStart, lockTransition]);
 
   const goPrevChapter = useCallback(() => {
     if (!isPaginatedMode) {
@@ -358,17 +405,16 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       // 上一章在窗口内 → 直接跳到该章最后一页
       const b = boundariesRef.current.find(x => x.index === prevIdx);
       if (b) {
-        setNoTransition(true);
         setAbsolutePage(b.endPage);
-        requestAnimationFrame(() => setNoTransition(false));
+        lockTransition();
         return;
       }
     }
     // 上一章不在窗口内 → 滑动窗口，跳到该章最后一页
     pendingJumpRef.current = { chapterIndex: prevIdx, pageInChapter: -1 };
-    setNoTransition(true);
     setWindowCenter(prevIdx);
-  }, [isPaginatedMode, chapterIndex, displayedChapter, windowStart]);
+    lockTransition();
+  }, [isPaginatedMode, chapterIndex, displayedChapter, windowStart, lockTransition]);
 
   const goNextChapter = useCallback(() => {
     if (!isPaginatedMode) {
@@ -395,17 +441,16 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
       // 下一章在窗口内 → 直接跳到该章首页
       const b = boundariesRef.current.find(x => x.index === nextIdx);
       if (b) {
-        setNoTransition(true);
         setAbsolutePage(b.startPage);
-        requestAnimationFrame(() => setNoTransition(false));
+        lockTransition();
         return;
       }
     }
     // 下一章不在窗口内 → 滑动窗口
     pendingJumpRef.current = { chapterIndex: nextIdx, pageInChapter: 0 };
-    setNoTransition(true);
     setWindowCenter(nextIdx);
-  }, [isPaginatedMode, chapterIndex, displayedChapter, book.chapters.length, windowEnd]);
+    lockTransition();
+  }, [isPaginatedMode, chapterIndex, displayedChapter, book.chapters.length, windowEnd, lockTransition]);
 
   // ============ 键盘 ============
   useEffect(() => {
@@ -591,13 +636,13 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
         </div>
         {/* 布局切换 */}
         <div className="flex items-center gap-0.5 rounded-lg bg-black/5 dark:bg-white/10 p-0.5 flex-shrink-0">
-          <button onClick={() => setLayoutMode('horizontal')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'horizontal' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title="横板：单页左右翻">
+          <button onClick={() => handleSetLayoutMode('horizontal')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'horizontal' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title="横板：单页左右翻">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="18" rx="1"/><rect x="14" y="3" width="7" height="18" rx="1"/></svg>
           </button>
-          <button onClick={() => setLayoutMode('vertical')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'vertical' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title="竖版：连贯滚轮上下翻">
+          <button onClick={() => handleSetLayoutMode('vertical')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'vertical' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title="竖版：连贯滚轮上下翻">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 2v20"/><path d="M16 2v20"/><line x1="2" y1="6" x2="22" y2="6"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="18" x2="22" y2="18"/></svg>
           </button>
-          <button onClick={() => setLayoutMode('book')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'book' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title="双栏：仿真书左右对页">
+          <button onClick={() => handleSetLayoutMode('book')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'book' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title="双栏：仿真书左右对页">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           </button>
         </div>
