@@ -1636,24 +1636,27 @@ pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
         return Err("无法获取虚拟桌面尺寸".into());
     }
 
-    // 用物理像素精确设置位置和大小（与截图覆盖窗一致，消除 DPI 换算误差）
-    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: vx, y: vy }));
-    let _ = win.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: vw as u32, height: vh as u32 }));
-
     // 直接使用 virtual_desktop_rect 作为坐标原点——不读 outer_position()。
     let scale = win.scale_factor().unwrap_or(1.0);
-
-    // 先显示窗口：十字光标立即生效，无需等待窗口枚举。原实现把 list_windows（EnumWindows +
-    // zorder_ranks，主线程同步跑整条窗口树）放在 show() 之前，主线程被阻塞期间覆盖窗无法显示、
-    // 光标不切换为十字、UI 整体卡死——正是「频繁启动卡 / 光标不变」的根因。
 
     // 先截桌面快照（窗口此刻仍隐藏 → 截到干净桌面，不含自身透明层），供前端注入 freeze
     // canvas 做不透明底 → 分层窗整窗命中稳，根治「低 alpha 兜底在 4K 合成下被舍入为 0
     // → 鼠标穿透到下层、默认光标、窗口识别卡死」。与截图热键「先截后显」同源。
     crate::screenshot::capture_recorder_snapshot();
 
-    let _ = win.show();
-    let _ = win.set_focus();
+    // show + 置顶 + 聚焦 整体包进 run_on_main_thread（set_focus 内部直接 SetForegroundWindow，
+    // 不经过 thread_executor；若从 async/命令线程直接调会触发 tao flush_paint_messages panic，
+    // 表现为窗口「已显示但未真正激活」：十字光标偶发退回默认箭头、悬停命中测试卡顿，
+    // 按任意键触发消息泵/激活后才恢复 —— 即本次「偶尔卡顿」根因。与截图覆盖窗
+    // reveal_screenshot_overlay 完全一致，故录屏选窗也须如此）。
+    let win_for_show = win.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = win_for_show.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: vx, y: vy }));
+        let _ = win_for_show.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: vw as u32, height: vh as u32 }));
+        let _ = win_for_show.set_always_on_top(true);
+        let _ = win_for_show.show();
+        let _ = win_for_show.set_focus();
+    });
 
     // 悬停命中统一走 OS window_at_point（每帧、worker 线程、零 UI 阻塞），结果永远与系统一致、
     // 无 stale 列表问题；已移除 WinEventHook 看门狗与 window-list-changed（覆盖窗可见期间持续
