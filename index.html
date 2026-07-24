@@ -84,6 +84,10 @@
         // 哥特加载页最短展示时长：即便应用「秒开」，也保证用户真正看到加载界面，
         // 避免加载层一闪即逝、看起来像「哥特页没生效」。计时从 boot 层创建（本 IIFE）起算。
         var BOOT_START = Date.now();
+        window.__bootT0 = BOOT_START;
+        // 排查用：统一带「自启动起经过毫秒数」的日志前缀，devtools 控制台可观察预热时序
+        function blog(tag) { console.log('[boot] +' + (Date.now() - BOOT_START) + 'ms ' + tag); }
+        blog('加载层已创建（哥特页开始）');
         var MIN_BOOT_MS = 1500;
         var _finishScheduled = false;
 
@@ -116,9 +120,9 @@
           // 若加载层已被移除，立即停止进度循环，避免空转 rAF
           if (!document.getElementById('boot')) { return; }
           if (state.done) {
-            // 最短展示时长内先停在 ~92%，避免「秒到 100% 后干等」显假；
-            // 时长到达后再推进到 100% 并触发淡出，视觉上更连贯。
-            var goal = (Date.now() - BOOT_START < MIN_BOOT_MS) ? 92 : 100;
+            // 真正完成（两门控通过）即满：此时 __bootProgress(100) 已由门控进度函数下发，
+            // 进度条与真实就绪同步，不再有「假满后干等」。最短展示时长由 finish() 的 MIN_BOOT_MS 兜底。
+            var goal = 100;
             if (state.current < goal) {
               state.current += Math.max(0.6, (goal - state.current) * 0.12);
               if (state.current > goal) state.current = goal;
@@ -143,6 +147,7 @@
         };
         window.__bootDone = function (opts) {
           if (state.done) return;
+          blog('__bootDone 触发 → 进入淡出');
           state.done = true;
           if (opts && opts.text) state.text = opts.text;
           if (opts && opts.phase) state.phase = opts.phase;
@@ -150,13 +155,38 @@
           ensureRaf();
         };
 
-        // 兜底（双保险）：窗口 load 即收尾；若 8s 内仍未主动完成（如启动异常），强制结束，绝不卡在加载层
+        // 主窗口门控：load 事件仅标记「底层已加载」，真正收尾由主窗口 finishBoot 置 gate 后触发；8s 硬超时仍是最后兜底
+        window.__bootGate = window.__bootGate || { notes: false, overlays: false, appLoaded: false };
+        // 进度条实时跟随真实里程碑：基础进度由 __bootProgress 真实上报（最高 90%），
+        // 最后 10% 严格绑定「门控」——笔记就绪 + 浮窗预热完成，二者皆满足才补满到 100%，
+        // 杜绝「进度到 100 却还在等预热」的假满。仅当某一门控先完成时给到 92/95 过渡值。
+        window.__bootGateProgress = function () {
+          var g = window.__bootGate;
+          if (g.notes && g.overlays) window.__bootProgress(100, { text: '准备就绪', phase: 'PHASE 05 / 05' });
+          else if (g.overlays) window.__bootProgress(95, { text: '预热浮窗', phase: 'PHASE 05 / 05' });
+          else if (g.notes) window.__bootProgress(92, { text: '预热浮窗', phase: 'PHASE 05 / 05' });
+        };
+        window.__tryBootFinish = function () {
+          blog('tryBootFinish gates: notes=' + window.__bootGate.notes + ' overlays=' + window.__bootGate.overlays);
+          window.__bootGateProgress();
+          if (window.__bootGate.notes && window.__bootGate.overlays) window.__bootDone();
+          else blog('tryBootFinish 未满足门控，加载层继续等待');
+        };
         window.addEventListener('load', function () {
-          if (!state.done) window.__bootDone({ text: '准备就绪', phase: 'PHASE 05 / 05' });
+          window.__bootGate.appLoaded = true;
+          window.__tryBootFinish();
         });
+        // 最后兜底：绝不绕过门控直接收尾（否则预热未完成就淡出 → 笔记页出现后仍在建窗、闪现实体浮窗）。
+        // 这里强制补全门控（notes+overlays）再尝试收尾；正常情况预热早于此已置 gate，本分支仅作极端兜底。
+        // 排查期临时拉到 25s（原 12s），给预热更充裕时间定位实际耗时，确保「浮窗预热」尽量在加载页内一次性跑完（单一阶段）。
         setTimeout(function () {
-          if (!state.done) window.__bootDone({ text: '准备就绪', phase: 'PHASE 05 / 05' });
-        }, 8000);
+          blog('硬超时(25s)触发：强制补全门控兜底收尾');
+          if (!state.done) {
+            window.__bootGate.notes = true;
+            window.__bootGate.overlays = true;
+            window.__tryBootFinish();
+          }
+        }, 25000);
 
         // ===== 全量哥特加载页（iframe 隔离，Vite 构建时注入 base64，零外部依赖）=====
         (function installBootHtml() {

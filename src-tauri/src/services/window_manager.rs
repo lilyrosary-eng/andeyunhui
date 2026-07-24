@@ -439,6 +439,9 @@ pub struct OverlayProfile {
     pub always_on_top: Option<bool>,
     pub resizable: Option<bool>,
     pub drag_drop_enabled: Option<bool>,
+    /// 预热场景：为 true 时窗口 build 后立即隐藏（绘制前不可见），不再依赖离屏坐标；
+    /// 仍用 visible:true 创建以规避 WebView2 0x8007139F。
+    pub hidden: Option<bool>,
 }
 
 /// 前端统一建窗命令：所有动态浮窗（截图/托盘/剪贴板/中转站/浮窗笔记/插件沙箱）都改走它，
@@ -488,6 +491,7 @@ pub async fn overlay_window_get_or_create(
     let always_on_top = p.always_on_top.unwrap_or(true);
     let resizable = p.resizable.unwrap_or(false);
     let drag_drop = p.drag_drop_enabled.unwrap_or(true);
+    let hidden = p.hidden.unwrap_or(false);
     let x = p.x.unwrap_or(-4000.0);
     let y = p.y.unwrap_or(-4000.0);
     let inner_w = p.width.unwrap_or(480.0);
@@ -540,7 +544,19 @@ pub async fn overlay_window_get_or_create(
             if !drag_drop {
                 b = b.disable_drag_drop_handler();
             }
-            b.build().map(|_| ()).map_err(|e| e.to_string())
+            match b.build() {
+                Ok(w) => {
+                    // 预热场景：build 成功后立即隐藏，确保窗口在任何绘制前不可见。
+                    // 仍用 visible:true 创建以规避 WebView2 0x8007139F；隐藏在 build 同闭包内完成，
+                    // 不依赖离屏坐标（多屏下 -4000 也可能落入可见区）。WebView2 已在 build 时初始化，
+                    // 隐藏不影响后续「即点即用」冷启动收益。
+                    if hidden {
+                        let _ = w.hide();
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
         })?;
 
         match built {
