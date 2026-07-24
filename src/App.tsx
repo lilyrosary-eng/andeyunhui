@@ -33,7 +33,7 @@ function App() {
   const openExternalContent = useNotesStore(s => s.openExternalContent);
   const initNotes = useNotesStore(s => s.init);
   const notes = useNotesStore(s => s.notes);
-  const [screenshotReady, setScreenshotReady] = useState(false);
+  const [, setOverlaysReady] = useState(false);
 
   // 文件关联：以安得云荟打开（图片/视频/音乐/文档 → 对应模块）
   useEffect(() => {
@@ -73,6 +73,8 @@ function App() {
         alwaysOnTop: true,
         resizable: false,
         shadow: false,
+        skipTaskbar: true,
+        hidden: true,
       });
     } catch (err) {
       console.error('[截图] 创建覆盖窗失败:', err);
@@ -116,18 +118,65 @@ function App() {
     return () => { void un.then((fn) => fn()); };
   }, [startScreenshot]);
 
-  // 预创建（温热）截图覆盖窗：避免首次触发时的 WebView2 冷启动卡顿，使截图秒开，与录屏一致。
-  // 创建后立即 hide()（离屏窗再加一道保险）：某些多屏布局下 (-4000,-4000) 可能落在可见区，
-  // 若保持 visible 会「启动即十字光标」；触发时 Rust start_screenshot 会 w.show() 重新显示。
+  // 统一预热所有常驻浮窗（截图覆盖窗 / 剪贴板 / 中转站 / 托盘菜单）：在哥特加载页期间即完成
+  // WebView2 冷启动，做到「即点即用」。关键：profile 传 hidden:true → Rust 在 build 成功后
+  // 【同闭包内立即 hide】，窗口在任何绘制前即不可见（主因）；(-4000,-4000) 离屏 + 下方 w.hide()
+  // 为双保险，防止多屏下 -4000 落入可见区。绝不可去掉 hidden:true，否则预热会闪出现实体浮窗。
+  // 录屏三窗 + 歌词窗已在 Rust setup 启动期预创建，这里补齐其余常驻浮窗。
+  // 全部就绪后 overlaysReady=true → 置门控 overlays → 与 notes 门控汇合后加载页才淡出，预热被完整盖住。
   useEffect(() => {
-    ensureScreenshotOverlay()
-      .then(() => {
-        import('@tauri-apps/api/webviewWindow').then(async ({ WebviewWindow }) => {
-          (await WebviewWindow.getByLabel('screenshot-overlay'))?.hide();
-        });
-      })
-      .catch(() => {})
-      .finally(() => setScreenshotReady(true));
+    let cancelled = false;
+    (async () => {
+      const t0 = performance.now();
+      console.log('[preheat] 预热开始（哥特加载页期间）');
+      // 1) 截图覆盖窗：需先取桌面逻辑尺寸离屏创建（ensureScreenshotOverlay 内部已用 -4000,-4000）
+      await ensureScreenshotOverlay().catch(() => {});
+      console.log('[preheat] screenshot-overlay 就绪 +' + Math.round(performance.now() - t0) + 'ms');
+      // 2) 其余常驻浮窗：复用 ensureOverlayWindow 创建后隐藏；首次使用时直接复用已预热实例
+      const others: Array<{ label: string; url: string; profile: Parameters<typeof ensureOverlayWindow>[2] }> = [
+        {
+          label: 'floating-clipboard',
+          url: 'index.html?floating=clipboard',
+          profile: { width: 360, height: 480, minWidth: 280, minHeight: 320, decorations: false, transparent: true, alwaysOnTop: true, resizable: false, skipTaskbar: true, hidden: true },
+        },
+        {
+          label: 'floating-dropzone',
+          url: 'index.html?floating=dropzone',
+          profile: { width: 420, height: 520, minWidth: 320, minHeight: 360, decorations: false, transparent: true, alwaysOnTop: true, resizable: false, dragDropEnabled: false, skipTaskbar: true, hidden: true },
+        },
+        {
+          label: 'tray-menu',
+          url: 'index.html?overlay=tray-menu',
+          profile: { width: 220, height: 156, decorations: false, transparent: true, alwaysOnTop: true, resizable: false, shadow: false, skipTaskbar: true, hidden: true },
+        },
+      ];
+      await Promise.allSettled(
+        others.map(async (o) => {
+          const w = await ensureOverlayWindow(o.label, o.url, o.profile).catch(() => null);
+          if (w) await w.hide().catch(() => {});
+          console.log('[preheat] ' + o.label + ' 就绪 +' + Math.round(performance.now() - t0) + 'ms');
+        }),
+      );
+      // 截图覆盖窗同样确保隐藏（多屏下 -4000,-4000 可能落入可见区）
+      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      (await WebviewWindow.getByLabel('screenshot-overlay'))?.hide().catch(() => {});
+      if (!cancelled) {
+        setOverlaysReady(true);
+        console.log('[preheat] 全部常驻浮窗预热完成 +' + Math.round(performance.now() - t0) + 'ms → 置 gate.overlays=true');
+        // 浮窗预热真正完成 → 置门控 overlays 并尝试收尾（与 notes 门控汇合后才淡出加载层）
+        const g = window as unknown as {
+          __bootGate?: { notes: boolean; overlays: boolean };
+          __tryBootFinish?: () => void;
+          __bootGateProgress?: () => void;
+        };
+        if (g.__bootGate) {
+          g.__bootGate.overlays = true;
+          g.__bootGateProgress?.();
+          g.__tryBootFinish?.();
+        }
+      }
+    })();
+    return () => { cancelled = true; };
   }, [ensureScreenshotOverlay]);
 
   // 唤出剪贴板浮窗（全局热键，复用 Rust 已注册的 floating-clipboard 窗口）
@@ -299,17 +348,43 @@ function App() {
   // 笔记在加载页盖住期间已在后台加载；加载页最短展示时长（index.html MIN_BOOT_MS=2600ms）
   // 仍保证用户能看到哥特动画。最多等 4s，避免极端情况下加载页卡住。
   const bootDoneRef = useRef(false);
+  // 仅「尝试」收尾，绝不在此强制置门控：是否真正淡出由 index.html 的 __tryBootFinish
+  // 内部门控（notes && overlays 同时满足）决定。门控置位分散在两处真正就绪的时机——
+  // ① 笔记加载完（下方 notes effect 置 __bootGate.notes）；② 浮窗预热完（预热 effect 末尾
+  // 置 __bootGate.overlays）。任一处触发收尾尝试时，若另一条件也已满足即淡出。
+  // 关键：4s 超时兜底调本函数时若预热未完成，__tryBootFinish 不会收尾（gate.overlays 未置），
+  // 从而杜绝「加载页在浮窗冷启动未完成时就收尾 → 笔记页出现后才预热（窗口堆叠闪现）」。
   const finishBoot = useCallback(() => {
-    if (bootDoneRef.current) return;
-    bootDoneRef.current = true;
-    const boot = window as unknown as {
+    const g = window as unknown as {
+      __bootGate?: { notes: boolean; overlays: boolean; appLoaded: boolean };
+      __tryBootFinish?: () => void;
       __bootDone?: (opts?: { text?: string; phase?: string }) => void;
     };
-    boot.__bootDone?.({ text: "准备就绪", phase: "PHASE 05 / 05" });
+    if (g.__bootGate && g.__tryBootFinish) {
+      g.__tryBootFinish();
+    } else {
+      if (bootDoneRef.current) return;
+      bootDoneRef.current = true;
+      g.__bootDone?.({ text: "准备就绪", phase: "PHASE 05 / 05" });
+    }
   }, []);
+  // 笔记列表加载完 → 置门控 notes 并尝试收尾（不依赖 overlaysReady，避免预热慢时反而拖延笔记页）
   useEffect(() => {
-    if (notes.length > 0 && screenshotReady) finishBoot();
-  }, [notes, screenshotReady, finishBoot]);
+    if (notes.length > 0) {
+      const g = window as unknown as {
+        __bootGate?: { notes: boolean; overlays: boolean };
+        __tryBootFinish?: () => void;
+        __bootGateProgress?: () => void;
+      };
+      if (g.__bootGate) {
+        g.__bootGate.notes = true;
+        g.__bootGateProgress?.();
+        g.__tryBootFinish?.();
+      } else {
+        finishBoot();
+      }
+    }
+  }, [notes, finishBoot]);
   useEffect(() => {
     const t = window.setTimeout(finishBoot, 4000);
     return () => window.clearTimeout(t);
@@ -484,7 +559,9 @@ function App() {
       const boot = window as unknown as {
         __bootProgress?: (pct: number, opts?: { text?: string; phase?: string }) => void;
       };
-      boot.__bootProgress?.(100, { text: "准备就绪", phase: "PHASE 05 / 05" });
+      // 笔记 + 插件均就绪：进度到 90%，预留最后 10% 给浮窗预热（由门控进度函数补满，
+      // 二者皆就绪才到 100%，确保进度条实时跟随真实进度、不提前假满）。
+      boot.__bootProgress?.(90, { text: "准备就绪", phase: "PHASE 05 / 05" });
     }}>
       <div className="flex flex-col h-screen w-screen main-panel-bg text-foreground antialiased overflow-hidden">
         <Titlebar />

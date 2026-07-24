@@ -86,6 +86,10 @@ const taStyle: CSSProperties = {
  * 浮窗自身也支持拖入 / 粘贴文件（走与主窗口一致的 addBytesToDropzone），并暴露文本文件的「打开」按钮。
  */
 export function FloatingDropzoneView() {
+  // 是否正在从外部拖入文件（OS 拖放进行中）。用 ref 而非 state，避免触发重渲染。
+  // 关键：拖放进行中调用 win.setSize 会让 Windows 取消本次拖放，故切换模式时需跳过 resize。
+  const draggingRef = useRef(false);
+
   // 浮窗透明效果
   useEffect(() => {
     document.body.style.backgroundColor = 'transparent';
@@ -104,10 +108,19 @@ export function FloatingDropzoneView() {
 
   // 浮窗内拖入 / 粘贴文件 → 导入中转站（与主窗口拖放一致）
   useEffect(() => {
+    const onDragEnter = (e: DragEvent) => {
+      if (e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')) {
+        draggingRef.current = true;
+      }
+    };
     const onDragOver = (e: DragEvent) => {
       if (e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')) {
+        draggingRef.current = true;
         e.preventDefault();
       }
+    };
+    const endDrag = () => {
+      draggingRef.current = false;
     };
     const onDrop = async (e: DragEvent) => {
       // 拖到 OCR 工作区时由工作区自行处理（OCR），不要在这里导入中转站
@@ -167,12 +180,20 @@ export function FloatingDropzoneView() {
         }
       }
     };
+    window.addEventListener('dragenter', onDragEnter);
     window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', endDrag);
     window.addEventListener('drop', onDrop);
+    window.addEventListener('drop', endDrag);
+    window.addEventListener('dragend', endDrag);
     window.addEventListener('paste', onPaste);
     return () => {
+      window.removeEventListener('dragenter', onDragEnter);
       window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', endDrag);
       window.removeEventListener('drop', onDrop);
+      window.removeEventListener('drop', endDrag);
+      window.removeEventListener('dragend', endDrag);
       window.removeEventListener('paste', onPaste);
     };
   }, []);
@@ -208,7 +229,10 @@ export function FloatingDropzoneView() {
   const [mode, setMode] = useState<'list' | 'ocr' | 'translate'>('list');
   const switchMode = async (m: 'list' | 'ocr' | 'translate') => {
     setMode(m);
-    // 切换 OCR / 翻译 工作区时保持浮窗原尺寸，不再扩展为大窗
+    // 切换 OCR / 翻译 工作区时保持浮窗原尺寸，不再扩展为大窗。
+    // 注意：拖放进行中（draggingRef）严禁调用 setSize —— Windows 会在窗口尺寸变化时
+    // 取消正在进行的 OS 拖放，导致文件无法落入 OCR 工作区。拖放结束后由 drop 处理再决定尺寸。
+    if (draggingRef.current) return;
     const w = 420;
     const h = 520;
     try {
@@ -267,13 +291,17 @@ export function FloatingDropzoneView() {
           onClick={() => switchMode(mode === 'ocr' ? 'list' : 'ocr')}
           onDragEnter={(e) => {
             e.preventDefault();
-            if (mode !== 'ocr') switchMode('ocr');
+            if (mode !== 'ocr') void switchMode('ocr');
           }}
           onDragOver={(e) => {
             e.preventDefault();
+            // 拖拽文件悬停时持续触发，作为 onDragEnter 的可靠补充，确保自动进入 OCR 页
+            if (mode !== 'ocr') void switchMode('ocr');
           }}
           onDrop={(e) => {
+            // 直接丢在按钮上时不导入中转站，交由已切换的 OCR 工作区处理（阻止冒泡到 window 导入逻辑）
             e.preventDefault();
+            e.stopPropagation();
           }}
           title="拓展为 OCR 工作区：拖入 / 选择图片即识别文字（拖拽文件悬停此处自动进入）"
           style={{ ...hdrBtn, background: mode === 'ocr' ? 'rgba(110,175,135,0.4)' : hdrBtn.background }}
