@@ -246,17 +246,18 @@ export function FloatingClipboardView() {
         height: '100vh',
         display: 'flex',
         flexDirection: 'column',
-        // 固定态：容器背景完全透明（alpha=0）→ OS 级点击穿透；仅“固定”按钮保持不透明且可交互
-        backgroundColor: isFixed ? 'transparent' : 'rgba(28, 28, 33, 0.6)',
-        backdropFilter: isFixed ? 'none' : 'blur(16px)',
-        WebkitBackdropFilter: isFixed ? 'none' : 'blur(16px)',
+        backgroundColor: 'rgba(28, 28, 33, 0.6)',
+        backdropFilter: 'blur(16px)',
+        WebkitBackdropFilter: 'blur(16px)',
         borderRadius: '12px',
-        border: isFixed ? '1px solid transparent' : '1px solid rgba(255, 255, 255, 0.1)',
-        boxShadow: isFixed ? 'none' : '0 8px 32px rgba(0, 0, 0, 0.4)',
+        border: '1px solid rgba(255, 255, 255, 0.1)',
+        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
         overflow: 'hidden',
         color: '#e5e5e5',
         fontFamily: '-apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
         fontSize: '13px',
+        // 不再使用 pointerEvents: 'none' 穿透 — 之前固定后内容区无法交互导致"失控"
+        // 固定语义简化为：仅置顶，不穿透
         animation: 'clipFadeIn 0.18s ease-out',
       }}
     >
@@ -268,13 +269,13 @@ export function FloatingClipboardView() {
           alignItems: 'center',
           gap: '8px',
           padding: '8px 12px',
-          borderBottom: isFixed ? '1px solid transparent' : '1px solid rgba(255, 255, 255, 0.08)',
+          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
           cursor: isFixed ? 'default' : 'move',
           userSelect: 'none',
         }}
       >
-        <Clipboard size={14} style={{ opacity: isFixed ? 0 : 0.7, flexShrink: 0 }} />
-        <span style={{ flex: 1, fontWeight: 600, fontSize: '12px', letterSpacing: '0.5px', opacity: isFixed ? 0 : 1 }}>
+        <Clipboard size={14} style={{ opacity: 0.7, flexShrink: 0 }} />
+        <span style={{ flex: 1, fontWeight: 600, fontSize: '12px', letterSpacing: '0.5px' }}>
           剪贴板历史
         </span>
         {/* 按钮组 */}
@@ -292,8 +293,6 @@ export function FloatingClipboardView() {
               borderRadius: '4px',
               display: 'flex',
               alignItems: 'center',
-              opacity: isFixed ? 0 : 1,
-              pointerEvents: isFixed ? 'none' : 'auto',
             }}
           >
             <Pin size={13} fill={isPinned ? 'currentColor' : 'none'} />
@@ -311,8 +310,6 @@ export function FloatingClipboardView() {
               borderRadius: '4px',
               display: 'flex',
               alignItems: 'center',
-              opacity: 1,
-              pointerEvents: 'auto',
             }}
           >
             <Lock size={13} fill={isFixed ? 'currentColor' : 'none'} />
@@ -330,8 +327,6 @@ export function FloatingClipboardView() {
               borderRadius: '4px',
               display: 'flex',
               alignItems: 'center',
-              opacity: isFixed ? 0 : 1,
-              pointerEvents: isFixed ? 'none' : 'auto',
             }}
           >
             <X size={14} />
@@ -340,7 +335,7 @@ export function FloatingClipboardView() {
       </div>
 
       {/* 搜索栏 */}
-      <div data-no-drag style={{ padding: '6px 10px', opacity: isFixed ? 0 : 1 }}>
+      <div data-no-drag style={{ padding: '6px 10px' }}>
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -368,7 +363,7 @@ export function FloatingClipboardView() {
       </div>
 
       {/* 分类标签：全部 / 文本 / 图片 */}
-      <div data-no-drag style={{ display: 'flex', gap: '4px', padding: '0 10px 6px', opacity: isFixed ? 0 : 1 }}>
+      <div data-no-drag style={{ display: 'flex', gap: '4px', padding: '0 10px 6px' }}>
         {([['all', '全部'], ['text', '文本'], ['image', '图片']] as const).map(([k, label]) => (
           <button
             key={k}
@@ -403,7 +398,6 @@ export function FloatingClipboardView() {
           padding: '4px 6px',
           scrollbarWidth: 'thin',
           scrollbarColor: 'rgba(255,255,255,0.28) transparent',
-          opacity: isFixed ? 0 : 1,
         }}
       >
         {filtered.length === 0 ? (
@@ -515,7 +509,6 @@ export function FloatingClipboardView() {
         color: 'rgba(255,255,255,0.3)',
         display: 'flex',
         justifyContent: 'space-between',
-        opacity: isFixed ? 0 : 1,
       }}>
         <span>{filtered.length} 条</span>
         <span>点击复制 · 右键删除</span>
@@ -537,7 +530,6 @@ export function FloatingClipboardView() {
             padding: '4px',
             zIndex: 9999,
             minWidth: '120px',
-            opacity: isFixed ? 0 : 1,
           }}
           onClick={e => e.stopPropagation()}
         >
