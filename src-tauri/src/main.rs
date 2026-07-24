@@ -267,16 +267,36 @@ fn main() {
                     Ok(socket) => {
                         std::thread::spawn(move || {
                             let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
-                            let mut buf = [0u8; 16];
+                            let mut buf = [0u8; 8192];
                             loop {
-                                if socket.recv_from(&mut buf).is_ok() {
+                                if let Ok((n, _)) = socket.recv_from(&mut buf) {
+                                    let payload = String::from_utf8_lossy(&buf[..n]).to_string();
                                     let mgr = app_handle.clone();
                                     let _ = mgr.run_on_main_thread({
                                         let mgr2 = mgr.clone();
+                                        let payload2 = payload.clone();
                                         move || {
+                                            // 收到重复实例信号：始终聚焦主窗口
                                             if let Some(w) = mgr2.get_webview_window("main") {
                                                 let _ = w.show();
                                                 let _ = w.set_focus();
+                                            }
+                                            // 若携带「以安得云荟打开」的文件路径，转发给前端
+                                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload2) {
+                                                if let Some(paths) = v.get("paths").and_then(|p| p.as_array()) {
+                                                    let files: Vec<String> = paths
+                                                        .iter()
+                                                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                                        .collect();
+                                                    if !files.is_empty() {
+                                                        if let Some(state) =
+                                                            mgr2.try_state::<PendingOpenFiles>()
+                                                        {
+                                                            state.0.lock().unwrap().extend(files.clone());
+                                                        }
+                                                        let _ = mgr2.emit("open-with-files", files);
+                                                    }
+                                                }
                                             }
                                         }
                                     });
@@ -286,10 +306,20 @@ fn main() {
                         eprintln!("[Instance] 主实例已启动，监听聚焦端口 {}", INSTANCE_PORT);
                     }
                     Err(_) => {
+                        // 重复实例：把待打开的文件路径连同聚焦信号一起发给主实例，
+                        // 主实例监听端会经 open-with-files 事件转发给前端路由到对应模块。
+                        let paths: Vec<String> = std::env::args()
+                            .skip(1)
+                            .filter_map(|a| is_supported_file_assoc(&a))
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect();
                         if let Ok(s) = UdpSocket::bind(("127.0.0.1", 0)) {
-                            let _ = s.send_to(b"focus", ("127.0.0.1", INSTANCE_PORT));
+                            let msg = serde_json::json!({ "focus": true, "paths": paths });
+                            if let Ok(bytes) = serde_json::to_vec(&msg) {
+                                let _ = s.send_to(&bytes, ("127.0.0.1", INSTANCE_PORT));
+                            }
                         }
-                        eprintln!("[Instance] 检测到已有实例在运行，退出重复启动");
+                        eprintln!("[Instance] 检测到已有实例在运行，转发文件并退出");
                         std::process::exit(0);
                     }
                 }
