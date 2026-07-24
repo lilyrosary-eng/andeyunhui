@@ -693,6 +693,24 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     });
   }, []);
 
+  // 复制到其他歌单：仅把歌曲加入目标歌单（去重），源歌单保持不变
+  const handleCopyTrack = useCallback((track: Track, targetPlaylistId: string) => {
+    setPlaylists(prev => {
+      const updated = prev.map(p => {
+        if (p.id === targetPlaylistId) {
+          // 避免重复：若目标歌单已有该曲目则跳过
+          if (p.tracks.some(t => t.id === track.id)) return p;
+          return { ...p, tracks: [...p.tracks, track] };
+        }
+        return p;
+      });
+      // 仅自定义歌单需要持久化
+      const customPlaylists = updated.filter(p => p.type === 'custom');
+      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      return updated;
+    });
+  }, []);
+
   // 移除歌曲：从当前歌单中删除
   // - 自定义歌单：内存删除 + 持久化
   // - 目录歌单：仅内存删除（下次扫描会重新出现，因为源文件仍在）
@@ -930,6 +948,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             onSelectTrack={handleSelectTrack}
             onAddSong={handleAddSong}
             onMoveTrack={handleMoveTrack}
+            onCopyTrack={handleCopyTrack}
             onRemoveTrack={handleRemoveTrack}
             otherPlaylists={otherPlaylistsForMenu}
             showAlbum={showAlbum}

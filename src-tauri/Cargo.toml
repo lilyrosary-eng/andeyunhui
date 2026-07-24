@@ -34,6 +34,8 @@ walkdir = "2"
 rayon = "1"
 reqwest = { version = "0.12", features = ["json"] }
 regex = "1"
+# .mufurong 内容哈希：判断安装包插件副本是否变化，替代不可靠的「字节大小/mtime」比对
+sha2 = "0.10"
 # tokio 显式依赖：mcp_service 用 tokio::task::spawn_blocking 在独立线程跑 stdio JSON-RPC
 # （tauri 2 内部用 tokio，但应用代码需显式声明才能 use tokio::）
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
