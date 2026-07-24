@@ -424,7 +424,10 @@ pub fn overlay_clear_gpu_cache() -> Result<String, String> {
 
 /// 前端动态浮窗的统一创建 profile（反序列化自 `invoke('overlay_window_get_or_create')` 的 profile 参数）。
 /// 所有字段可选，未传则套用透明的「安全默认档」——与已验证可抗 0x8007139F 的写法一致。
+/// `rename_all = "camelCase"`：JS 侧以 camelCase（如 dragDropEnabled）传入，Rust 侧字段为 snake_case，
+/// 显式声明以保证嵌套结构字段也能正确反序列化（否则多词字段会被忽略、落到默认值）。
 #[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct OverlayProfile {
     pub width: Option<f64>,
     pub height: Option<f64>,
@@ -490,7 +493,15 @@ pub async fn overlay_window_get_or_create(
     let skip_taskbar = p.skip_taskbar.unwrap_or(false);
     let always_on_top = p.always_on_top.unwrap_or(true);
     let resizable = p.resizable.unwrap_or(false);
-    let drag_drop = p.drag_drop_enabled.unwrap_or(true);
+    // 中转站浮窗 / 剪贴板浮窗必须关闭原生拖放，改由前端 HTML5 dragover/drop 处理：
+    // 否则原生拖放 handler 会拦截 DOM 拖放事件，导致文件拖入浮窗无法导入/同步主站，
+    // 且“拖拽悬停 OCR 按钮自动进入 OCR 页”也不会触发（DOM 收不到 dragenter/dragover）。
+    // profile.drag_drop_enabled 默认 true，但对这两个 label 强制关闭，避免任何调用方漏传该字段。
+    let drag_drop = if label == "floating-dropzone" || label == "floating-clipboard" {
+        false
+    } else {
+        p.drag_drop_enabled.unwrap_or(true)
+    };
     let hidden = p.hidden.unwrap_or(false);
     let x = p.x.unwrap_or(-4000.0);
     let y = p.y.unwrap_or(-4000.0);

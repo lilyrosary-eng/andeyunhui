@@ -52,10 +52,11 @@ function packToMufurong(srcDir, destFile) {
 // ========== 主流程 ==========
 
 // 1. 先确保 bundled-plugins/ 已构建（运行 deploy-plugins.mjs）
-if (!existsSync(bundledDir) || readdirSync(bundledDir).length === 0) {
-  console.log('[Pack] bundled-plugins/ 不存在或为空，先运行 deploy-plugins.mjs...');
-  execSync('node scripts/deploy-plugins.mjs', { cwd: rootDir, stdio: 'inherit' });
-}
+// 始终用最新源码重建 bundled-plugins，避免陈旧 .mufurong 进安装包
+// （典型坑：先 build 再改源码跑 dev，dev 刷新项目根 bundled-plugins，
+//  但安装包 .mufurong 仍是旧构建 → 安装后读旧代码并污染共享 user_plugins）
+console.log('[Pack] 强制用最新源码重建 bundled-plugins...');
+execSync('node scripts/deploy-plugins.mjs', { cwd: rootDir, stdio: 'inherit' });
 
 // 2. 扫描所有插件
 const plugins = [];

@@ -28,6 +28,7 @@ interface TrackListProps {
   onSelectTrack: (track: Track, index: number) => void;
   onAddSong: () => void;
   onMoveTrack?: (track: Track, targetPlaylistId: string) => void;
+  onCopyTrack?: (track: Track, targetPlaylistId: string) => void;
   onRemoveTrack?: (track: Track) => void;
   otherPlaylists?: OtherPlaylist[];
   showAlbum?: boolean;
@@ -39,6 +40,7 @@ export function TrackList({
   onSelectTrack,
   onAddSong,
   onMoveTrack,
+  onCopyTrack,
   onRemoveTrack,
   otherPlaylists = [],
   showAlbum = true,
@@ -48,8 +50,10 @@ export function TrackList({
   const [selectionMode, setSelectionMode] = useState(false);
   // 哪一行的「...」菜单处于打开状态（按行索引）
   const [openMenuIndex, setOpenMenuIndex] = useState<number | null>(null);
-  // 「移动到其他歌单」子菜单是否展开
-  const [openSubmenu, setOpenSubmenu] = useState(false);
+  // 「移动到 / 复制到 其他歌单」子菜单当前展开项（move=移动，copy=复制，null=未展开）
+  const [activeSubmenu, setActiveSubmenu] = useState<'move' | 'copy' | null>(null);
+  // 选择模式下的「批量移动 / 批量复制」目标歌单选择浮层（move=批量移动，copy=批量复制，null=未展开）
+  const [batchMenu, setBatchMenu] = useState<'move' | 'copy' | null>(null);
   // 菜单位置（position: fixed 定位，直接渲染在 overflow-y-auto 容器外部）
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   // 保存每个「...」按钮的 ref，用于定位
@@ -63,7 +67,8 @@ export function TrackList({
     setSelectionMode(false);
     setSelectedIndices(new Set());
     setOpenMenuIndex(null);
-    setOpenSubmenu(false);
+    setActiveSubmenu(null);
+      setBatchMenu(null);
     setMenuPos(null);
   }, [playlistName]);
 
@@ -74,7 +79,8 @@ export function TrackList({
       const target = e.target as Node;
       if (menuRef.current && !menuRef.current.contains(target)) {
         setOpenMenuIndex(null);
-        setOpenSubmenu(false);
+        setActiveSubmenu(null);
+      setBatchMenu(null);
         setMenuPos(null);
       }
     };
@@ -87,7 +93,8 @@ export function TrackList({
     if (openMenuIndex === null) return;
     const close = () => {
       setOpenMenuIndex(null);
-      setOpenSubmenu(false);
+      setActiveSubmenu(null);
+      setBatchMenu(null);
       setMenuPos(null);
     };
     window.addEventListener('scroll', close, true);
@@ -132,7 +139,8 @@ export function TrackList({
     e.stopPropagation();
     if (openMenuIndex === index) {
       setOpenMenuIndex(null);
-      setOpenSubmenu(false);
+      setActiveSubmenu(null);
+      setBatchMenu(null);
       setMenuPos(null);
       return;
     }
@@ -142,20 +150,64 @@ export function TrackList({
       setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
     }
     setOpenMenuIndex(index);
-    setOpenSubmenu(false);
+    setActiveSubmenu(null);
+      setBatchMenu(null);
   }, [openMenuIndex]);
 
   const handleMove = useCallback((track: Track, targetId: string) => {
     onMoveTrack?.(track, targetId);
     setOpenMenuIndex(null);
-    setOpenSubmenu(false);
+    setActiveSubmenu(null);
+      setBatchMenu(null);
     setMenuPos(null);
   }, [onMoveTrack]);
+
+  const handleCopy = useCallback((track: Track, targetId: string) => {
+    onCopyTrack?.(track, targetId);
+    setOpenMenuIndex(null);
+    setActiveSubmenu(null);
+      setBatchMenu(null);
+    setMenuPos(null);
+  }, [onCopyTrack]);
+
+  // ===== 选择模式批量操作 =====
+  // 全选 / 取消全选：已全选则清空，否则选中全部
+  const allSelected = tracks.length > 0 && selectedIndices.size === tracks.length;
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIndices(prev =>
+      prev.size === tracks.length ? new Set<number>() : new Set(tracks.map((_, i) => i))
+    );
+  }, [tracks]);
+
+  // 取出当前选中的 Track 列表（供批量操作遍历）
+  const getSelectedTracks = () => tracks.filter((_, i) => selectedIndices.has(i));
+
+  // 批量移除：对每首选中曲调用单条移除，再清空选中
+  const handleBatchRemove = useCallback(() => {
+    getSelectedTracks().forEach(t => onRemoveTrack?.(t));
+    setSelectedIndices(new Set());
+    setBatchMenu(null);
+  }, [onRemoveTrack, selectedIndices, tracks]);
+
+  // 批量移动：逐首调用单条移动（源歌单移除 + 目标歌单加入）
+  const handleBatchMove = useCallback((targetId: string) => {
+    getSelectedTracks().forEach(t => onMoveTrack?.(t, targetId));
+    setSelectedIndices(new Set());
+    setBatchMenu(null);
+  }, [onMoveTrack, selectedIndices, tracks]);
+
+  // 批量复制：逐首调用单条复制（仅加入目标歌单，源歌单保留）
+  const handleBatchCopy = useCallback((targetId: string) => {
+    getSelectedTracks().forEach(t => onCopyTrack?.(t, targetId));
+    setSelectedIndices(new Set());
+    setBatchMenu(null);
+  }, [onCopyTrack, selectedIndices, tracks]);
 
   const handleRemove = useCallback((track: Track) => {
     onRemoveTrack?.(track);
     setOpenMenuIndex(null);
-    setOpenSubmenu(false);
+    setActiveSubmenu(null);
+      setBatchMenu(null);
     setMenuPos(null);
   }, [onRemoveTrack]);
 
@@ -180,21 +232,31 @@ export function TrackList({
       },
       className: 'glass-panel rounded-lg overflow-visible min-w-[180px] py-1 shadow-lg',
       children: [
-        otherPlaylists.length > 0
-          ? React.createElement('div', {
-              key: 'move',
+        // 子菜单渲染辅助：kind='move' 触发移动，kind='copy' 触发复制（两者互不删除源歌曲的语义不同）
+        (() => {
+          const renderSubmenuTarget = (kind: 'move' | 'copy') => {
+            const label = kind === 'move' ? '移动到其他歌单' : '复制到其他歌单';
+            if (otherPlaylists.length === 0) {
+              return React.createElement('div', {
+                key: `${kind}-disabled`,
+                className: 'px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500 cursor-not-allowed',
+                children: `${label}（无其他歌单）`,
+              });
+            }
+            return React.createElement('div', {
+              key: kind,
               className: 'relative',
-              onMouseEnter: () => setOpenSubmenu(true),
+              onMouseEnter: () => setActiveSubmenu(kind),
               children: [
                 React.createElement('button', {
-                  onClick: () => setOpenSubmenu(prev => !prev),
+                  onClick: () => setActiveSubmenu(prev => prev === kind ? null : kind),
                   className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors flex items-center justify-between',
                   children: [
-                    React.createElement('span', { key: 'label' }, '移动到其他歌单'),
+                    React.createElement('span', { key: 'label' }, label),
                     React.createElement('span', { key: 'arrow', className: 'text-neutral-400 dark:text-stone-500 ml-2 text-sm leading-none' }, '›'),
                   ],
                 }),
-                openSubmenu ? React.createElement('div', {
+                activeSubmenu === kind ? React.createElement('div', {
                   key: 'submenu',
                   // 向左展开（right-full + mr-1）：主菜单贴窗口右缘定位，子菜单再向右会超出窗口被截断，
                   // 故改为在主菜单左侧弹出，落在窗口内不被裁剪。
@@ -203,19 +265,20 @@ export function TrackList({
                   children: otherPlaylists.map(p =>
                     React.createElement('button', {
                       key: p.id,
-                      onClick: () => handleMove(track, p.id),
+                      onClick: () => (kind === 'move' ? handleMove(track, p.id) : handleCopy(track, p.id)),
                       className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors truncate block',
                       title: p.name,
                     }, p.name)
                   ),
                 }) : null,
               ],
-            })
-          : React.createElement('div', {
-              key: 'move-disabled',
-              className: 'px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500 cursor-not-allowed',
-              children: '移动到其他歌单（无其他歌单）',
-            }),
+            });
+          };
+          return [
+            renderSubmenuTarget('move'),
+            renderSubmenuTarget('copy'),
+          ];
+        })(),
         React.createElement('div', {
           key: 'divider',
           className: 'my-1 border-t border-neutral-200/40 dark:border-stone-700/40',
@@ -262,6 +325,84 @@ export function TrackList({
           </button>
         </div>
       </div>
+
+      {/* 选择模式工具条：全选 + 批量操作按钮，常态（非选择模式）下整条隐藏 */}
+      {selectionMode && (
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-[var(--element-muted)]/50">
+          <button
+            onClick={toggleSelectAll}
+            className="btn-press text-xs px-2.5 py-1 rounded-lg text-neutral-600 dark:text-stone-300 hover:bg-[var(--element-muted)] transition-colors"
+          >
+            {allSelected ? '取消全选' : '全选'}
+          </button>
+          <div className="relative">
+            <button
+              onClick={() => setBatchMenu(prev => prev === 'move' ? null : 'move')}
+              className={`btn-press text-xs px-2.5 py-1 rounded-lg transition-colors ${
+                batchMenu === 'move'
+                  ? 'text-[var(--element-bg)] bg-[var(--element-muted)]'
+                  : 'text-neutral-600 dark:text-stone-300 hover:bg-[var(--element-muted)]'
+              }`}
+            >
+              批量移动 ▾
+            </button>
+            {batchMenu === 'move' && (
+              <div className="absolute left-0 top-full mt-1 z-50 glass-panel rounded-lg overflow-y-auto min-w-[160px] max-w-[220px] max-h-[240px] py-1 shadow-lg">
+                {otherPlaylists.length === 0 ? (
+                  <div className="px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500 cursor-not-allowed">无其他歌单</div>
+                ) : (
+                  otherPlaylists.map(p => (
+                    <button
+                      key={p.id}
+                      onClick={() => handleBatchMove(p.id)}
+                      className="w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors truncate block"
+                      title={p.name}
+                    >
+                      {p.name}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+          <div className="relative">
+            <button
+              onClick={() => setBatchMenu(prev => prev === 'copy' ? null : 'copy')}
+              className={`btn-press text-xs px-2.5 py-1 rounded-lg transition-colors ${
+                batchMenu === 'copy'
+                  ? 'text-[var(--element-bg)] bg-[var(--element-muted)]'
+                  : 'text-neutral-600 dark:text-stone-300 hover:bg-[var(--element-muted)]'
+              }`}
+            >
+              批量复制 ▾
+            </button>
+            {batchMenu === 'copy' && (
+              <div className="absolute left-0 top-full mt-1 z-50 glass-panel rounded-lg overflow-y-auto min-w-[160px] max-w-[220px] max-h-[240px] py-1 shadow-lg">
+                {otherPlaylists.length === 0 ? (
+                  <div className="px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500 cursor-not-allowed">无其他歌单</div>
+                ) : (
+                  otherPlaylists.map(p => (
+                    <button
+                      key={p.id}
+                      onClick={() => handleBatchCopy(p.id)}
+                      className="w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors truncate block"
+                      title={p.name}
+                    >
+                      {p.name}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={handleBatchRemove}
+            className="btn-press text-xs px-2.5 py-1 rounded-lg text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+          >
+            批量移除
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto">
         {tracks.length === 0 ? (
