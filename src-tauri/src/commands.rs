@@ -169,13 +169,8 @@ fn walk_and_extract_mufurong(dir: &std::path::Path) {
 /// 3. marker 存在 + mtime 不匹配 + 目标目录含 .mufurong 之外的用户文件 → 跳过避免覆盖
 /// 仅当 marker 存在 + mtime 不匹配 + 无用户自定义文件时才执行 clean upgrade（DELETE + 重新解压）
 fn extract_one_mufurong(mufurong_path: &std::path::Path) -> Result<(), String> {
-    // 读取 .mufurong 源文件的 mtime（UNIX 秒数）
-    let src_mtime = std::fs::metadata(mufurong_path)
-        .and_then(|m| m.modified())
-        .map_err(|e| format!("读取 mtime 失败: {}", e))?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    // 读取 .mufurong 源文件的 sha256（内容哈希），用于比对是否已解压最新版本
+    let src_hash = sha256_file(mufurong_path).unwrap_or_default();
 
     // 解压目标目录：去掉 .mufurong 后缀
     let target_dir = mufurong_path.with_extension("");
@@ -184,13 +179,11 @@ fn extract_one_mufurong(mufurong_path: &std::path::Path) -> Result<(), String> {
     if marker_path.exists() {
         // marker 存在 → 之前我们解压过，比较 mtime 决定是否重新解压
         if let Ok(content) = std::fs::read_to_string(&marker_path) {
-            if let Ok(existing_mtime) = content.trim().parse::<u64>() {
-                if existing_mtime == src_mtime {
-                    return Ok(()); // mtime 匹配，跳过
-                }
+                        if content.trim() == src_hash {
+                return Ok(()); // 内容哈希匹配，跳过
             }
         }
-        // marker 存在但 mtime 不匹配 → .mufurong 已更新，需要重新解压
+        // marker 存在但内容哈希不匹配 → .mufurong 已更新，需要重新解压
         // 但先打开 .mufurong 检查目标目录是否有用户自定义文件
         let file = std::fs::File::open(mufurong_path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -247,8 +240,8 @@ fn extract_one_mufurong(mufurong_path: &std::path::Path) -> Result<(), String> {
             }
         }
 
-        // 写入 marker 文件，记录源文件 mtime，供下次扫描比对
-        std::fs::write(&marker_path, src_mtime.to_string())
+        // 写入 marker 文件，记录源文件 sha256，供下次扫描比对（内容变化即重解压）
+        std::fs::write(&marker_path, &src_hash)
             .map_err(|e| format!("写入 marker 失败: {}", e))?;
 
         eprintln!(
@@ -296,8 +289,8 @@ fn extract_one_mufurong(mufurong_path: &std::path::Path) -> Result<(), String> {
         }
     }
 
-    // 写入 marker 文件，记录源文件 mtime，供下次扫描比对
-    std::fs::write(&marker_path, src_mtime.to_string())
+    // 写入 marker 文件，记录源文件 sha256，供下次扫描比对（内容变化即重解压）
+    std::fs::write(&marker_path, &src_hash)
         .map_err(|e| format!("写入 marker 失败: {}", e))?;
 
     eprintln!(
@@ -628,7 +621,25 @@ fn walk_copy_dlc(src: &std::path::Path, dst: &std::path::Path, ext: &str) {
 }
 
 /// 复制单个 .mufurong/.mujin 到 dst 下保持相对路径。
-/// 已存在且 size 相同则跳过；否则覆盖（用户可手动删除 user 端文件后重启恢复）。
+//// 计算文件 sha256 十六进制串（用于判断 .mufurong 内容是否变化）
+fn sha256_file(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => return None,
+        };
+        hasher.update(&buf[..n]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+// 已存在且内容哈希相同则跳过；否则覆盖（用户可手动删除 user 端文件后重启恢复）。
 fn copy_dlc_file(
     src_file: &std::path::Path,
     src_root: &std::path::Path,
@@ -639,11 +650,10 @@ fn copy_dlc_file(
     if let Some(parent) = dst_file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
     }
-    if let (Ok(src_meta), Ok(dst_meta)) = (
-        std::fs::metadata(src_file),
-        std::fs::metadata(&dst_file),
-    ) {
-        if src_meta.len() == dst_meta.len() {
+    // 内容哈希一致则视为相同，跳过复制（比「大小一致」更可靠：
+    // 大小相同但内容不同也能识别，避免陈旧 .mufurong 残留在 user_plugins）
+    if let (Some(src_hash), Some(dst_hash)) = (sha256_file(src_file), sha256_file(&dst_file)) {
+        if src_hash == dst_hash {
             return Ok(());
         }
     }
@@ -1015,7 +1025,8 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
     }
 
     // 早期返回：bundled-plugins 与 user_plugins 两个根目录都不存在才认为无插件
-    // 顺序：user_plugins（用户态）优先于 bundled-plugins（打包），用户插件可覆盖打包插件
+    // 顺序：bundled-plugins（内置，权威）优先于 user_plugins（第三方/用户态），
+    // 避免安装版解压出的共享副本污染 dev / release 实例（详见 find_plugin_root 注释）
     let ext = get_bundled_plugins_dir(&app);
     let usr = get_user_plugins_dir(&app);
     if ext.is_none() && usr.is_none() {
@@ -1065,9 +1076,9 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
             }
         }
     }
-    // user_plugins 优先（用户覆盖打包）；再扫 bundled-plugins
-    if let Some(ref usr) = usr { walk(usr, usr, &mut manifest_files); }
+    // bundled-plugins 优先（内置权威，且不会被安装版污染）；再扫 user_plugins（第三方/用户态插件）
     if let Some(ref ext) = ext { walk(ext, ext, &mut manifest_files); }
+    if let Some(ref usr) = usr { walk(usr, usr, &mut manifest_files); }
 
     for (manifest_path, rel_path) in manifest_files {
         let folder_name = manifest_path
@@ -1175,10 +1186,13 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
 /// 根据插件 id 在 bundled-plugins/ 与 user_plugins/ 下递归查找其所在目录。
 /// 前端只需传入 manifest 中的干净 id，Rust 端自动定位真实路径。
 fn find_plugin_root(app: &tauri::AppHandle, plugin_id: &str) -> Result<std::path::PathBuf, String> {
-    // 搜索顺序：user_plugins（第三方）优先，bundled-plugins（内置）兜底
+    // 搜索顺序：bundled-plugins（内置，权威且版本匹配）优先，user_plugins（第三方/用户态）兜底。
+    // 关键：user_plugins 位于 AppData，被 dev / release / 安装版 多实例共享；若让 user_plugins 优先，
+    // 安装版解压出的副本会污染同机的 release 实例（共用同一 AppData 标识），导致
+    // "打开安装版后 release 也读旧插件"。故内置 bundled-plugins 必须优先（与 get_bundled_plugins_dir 注释一致）。
     let roots: Vec<PathBuf> = [
-        get_user_plugins_dir(app),
         get_bundled_plugins_dir(app),
+        get_user_plugins_dir(app),
     ].into_iter().flatten().collect();
     fn walk(dir: &std::path::Path, plugin_id: &str, out: &mut Option<std::path::PathBuf>) {
         if out.is_some() {

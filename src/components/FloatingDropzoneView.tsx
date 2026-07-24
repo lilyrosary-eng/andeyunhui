@@ -89,6 +89,9 @@ export function FloatingDropzoneView() {
   // 是否正在从外部拖入文件（OS 拖放进行中）。用 ref 而非 state，避免触发重渲染。
   // 关键：拖放进行中调用 win.setSize 会让 Windows 取消本次拖放，故切换模式时需跳过 resize。
   const draggingRef = useRef(false);
+  // 窗口级兜底用：实时反映当前模式与切换函数，供 window 级 dragover 监听读取（不依赖闭包陈旧值）
+  const modeRef = useRef<'list' | 'ocr' | 'translate'>('list');
+  const switchModeRef = useRef<(m: 'list' | 'ocr' | 'translate') => void>(() => {});
 
   // 浮窗透明效果
   useEffect(() => {
@@ -117,6 +120,12 @@ export function FloatingDropzoneView() {
       if (e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')) {
         draggingRef.current = true;
         e.preventDefault();
+        // 窗口级兜底：拖拽文件悬停在 OCR 触发按钮上时，即使按钮级 React 事件未触发，
+        // 也自动进入 OCR 页（部分打包环境下按钮级合成事件可能不触发 dragover）。
+        const t = e.target as HTMLElement | null;
+        if (modeRef.current !== 'ocr' && t && t.closest && t.closest('[data-ocr-trigger]')) {
+          switchModeRef.current('ocr');
+        }
       }
     };
     const endDrag = () => {
@@ -229,6 +238,7 @@ export function FloatingDropzoneView() {
   const [mode, setMode] = useState<'list' | 'ocr' | 'translate'>('list');
   const switchMode = async (m: 'list' | 'ocr' | 'translate') => {
     setMode(m);
+    modeRef.current = m;
     // 切换 OCR / 翻译 工作区时保持浮窗原尺寸，不再扩展为大窗。
     // 注意：拖放进行中（draggingRef）严禁调用 setSize —— Windows 会在窗口尺寸变化时
     // 取消正在进行的 OS 拖放，导致文件无法落入 OCR 工作区。拖放结束后由 drop 处理再决定尺寸。
@@ -241,6 +251,9 @@ export function FloatingDropzoneView() {
       /* 非致命：窗口尺寸调整失败时忽略，内容仍可滚动 */
     }
   };
+  // 每次渲染同步给 window 级 dragover 兜底监听使用（避免闭包拿到陈旧值）
+  modeRef.current = mode;
+  switchModeRef.current = switchMode;
 
   return (
     <div
@@ -288,6 +301,7 @@ export function FloatingDropzoneView() {
           <Inbox size={13} /> 中转站
         </button>
         <button
+          data-ocr-trigger
           onClick={() => switchMode(mode === 'ocr' ? 'list' : 'ocr')}
           onDragEnter={(e) => {
             e.preventDefault();

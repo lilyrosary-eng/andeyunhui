@@ -254,7 +254,10 @@ function VideoModule() {
     setFolders([]);
     setSelectedFolder(null);
     setVideos([]);
-    setPlayingFile(null);
+    // 注意：不要在此清空 playingFile —— 以安得云荟打开会在扫描启动时通过
+    // processOpenWith 设置 playingFile，而本副作用在「该次 render 之后」运行，
+    // 会把它清空导致「打开但不自动播放」。播放目标由 handleRescan / handleBackFromPlayer
+    // 等显式重置，无需在扫描启动时清。
     setLoading(true);
     setScanProgress(null);
     scanStart();
