@@ -421,7 +421,7 @@ export function TrackList({
               return React.createElement('div', {
                 key: track.id,
                 onClick: (e: React.MouseEvent) => handleTrackClick(track, index, e),
-                className: `flex items-center gap-3 px-3 py-2 cursor-pointer transition-colors relative ${
+                className: `flex items-center gap-3 px-3 py-2 mx-1 cursor-pointer transition-colors rounded-lg relative ${
                   isCurrent
                     ? 'bg-[var(--element-muted)]'
                     : isSelected

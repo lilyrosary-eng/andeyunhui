@@ -221,7 +221,13 @@ const lockTransition = useCallback(() => {
       }
     }
 
-    setAbsolutePage((p) => Math.min(p, pages - 1));
+    // 没有待跳转时：复测可能让总页数收缩（字体/图片加载完重排）。
+    // 把阅读位置钳制在「当前章节」范围内，避免落到其他章或全局末页导致跳动。
+    setAbsolutePage((p) => {
+      const cur = boundaries.find(b => b.index === chapterIndexRef.current);
+      if (cur) return Math.min(Math.max(p, cur.startPage), cur.endPage);
+      return Math.min(p, pages - 1);
+    });
 
     // 页面宽度变化（布局切换 / 窗口尺寸变化）时临时关闭 transform 过渡，
     // 避免 contentRef 因 pageWidth 改变重算 translate 而产生滑动动画（视觉"闪"）
@@ -237,6 +243,49 @@ const lockTransition = useCallback(() => {
   useLayoutEffect(() => {
     if (!isPaginatedMode) return;
     measure();
+  }, [combinedHtml, isPaginatedMode, measure]);
+
+  // 异步布局稳定后重新测量：网页字体（阅读字体）与章节内图片是异步加载的，
+  // 首测横/双栏时它们可能尚未就绪，内容用回退字体/无图排版导致 scrollWidth 偏大 → 页码偏多。
+  // 加载完成的重排不会改变视口尺寸，ResizeObserver 不会触发，故需在此显式复测，
+  // 否则要等到用户切模式才纠正（表现为「切一下模式就正常」）。
+  useEffect(() => {
+    if (!isPaginatedMode) return;
+    const c = contentRef.current;
+    if (!c) return;
+    let cancelled = false;
+    const remeasure = () => { if (!cancelled) measure(); };
+    const cleanups: Array<() => void> = [];
+
+    // 1) 字体全部就绪后复测
+    const fontsApi = (document as any).fonts;
+    if (fontsApi && typeof fontsApi.ready?.then === 'function') {
+      fontsApi.ready.then(remeasure);
+    }
+    // 2) 内容图片加载完后复测（视口尺寸不变，ResizeObserver 不触发）
+    const imgs = Array.from(c.querySelectorAll('img')) as HTMLImageElement[];
+    imgs.forEach((img) => {
+      if (!img.complete) {
+        const onLoad = () => remeasure();
+        img.addEventListener('load', onLoad);
+        img.addEventListener('error', onLoad);
+        cleanups.push(() => {
+          img.removeEventListener('load', onLoad);
+          img.removeEventListener('error', onLoad);
+        });
+      }
+    });
+    // 3) 双 rAF 兜底：捕捉首帧绘制后才稳定的重排
+    const raf1 = requestAnimationFrame(() => {
+      const raf2 = requestAnimationFrame(remeasure);
+      cleanups.push(() => cancelAnimationFrame(raf2));
+    });
+    cleanups.push(() => cancelAnimationFrame(raf1));
+
+    return () => {
+      cancelled = true;
+      cleanups.forEach((fn) => fn());
+    };
   }, [combinedHtml, isPaginatedMode, measure]);
 
   // 布局模式切换 — 用 useLayoutEffect 在绘制前同步状态，避免切换闪烁

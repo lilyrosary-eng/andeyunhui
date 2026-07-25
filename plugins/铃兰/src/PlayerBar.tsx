@@ -2,6 +2,7 @@
 import React from "react";
 // 音乐播放控制条 — 固定于音乐模块内容区底部，不覆盖导航栏
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
+import type { Playlist } from './index';
 import { lyricsSync } from './lyricsSync';
 import { formatTime } from '../../_shared/utils';
 import {
@@ -50,6 +51,10 @@ interface PlayerBarProps {
   playMode: PlayMode;
   onPlayModeChange: (mode: PlayMode) => void;
   onCoverClick: () => void;
+  // 播放列表面板所需：歌单列表、当前播放歌单、选曲回调（带歌单 id）
+  playlists: Playlist[];
+  currentPlaylistId: string | null;
+  onSelectTrack: (playlistId: string, track: Track, index: number) => void;
 }
 
 const ModeLabels: Record<PlayMode, string> = {
@@ -178,8 +183,103 @@ function VolumePopup({
 
 export { VolumePopup };
 
+// ========== 播放列表弹窗（与音量弹窗同款：小型弹出式菜单）==========
+// 点开可看到「当前播放的歌单是哪个、有哪些歌曲」，并可点选歌曲立即播放。
+export function PlaylistPopup({
+  playlists,
+  currentPlaylistId,
+  currentTrack,
+  onSelectTrack,
+}: {
+  playlists: Playlist[];
+  currentPlaylistId: string | null;
+  currentTrack: Track | null;
+  // 选曲回调：带上「该曲所属歌单 id」，由调用方用对应歌单的 tracks 播放（不依赖侧栏选中态）
+  onSelectTrack: (playlistId: string, track: Track, index: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  // 弹窗内当前展示的歌单：默认跟随实际播放歌单，用户也可在 <select> 中临时浏览其它歌单
+  const [displayPlaylistId, setDisplayPlaylistId] = useState<string | null>(currentPlaylistId);
+
+  // 实际播放歌单变化时，弹窗内展示同步回退到当前播放歌单
+  useEffect(() => {
+    setDisplayPlaylistId(currentPlaylistId);
+  }, [currentPlaylistId]);
+
+  // 点击外部 / 选曲 关闭。注意：不监听 scroll 关闭——
+  // ① 弹窗内部歌曲列表自身滚轮浏览不应关闭；
+  // ② 沉浸式页歌词随播放自动滚动会冒泡为「外部 scroll」误关弹窗。
+  // 与 VolumePopup 一致，仅由点击外部或选曲来收起。
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+    };
+  }, [open]);
+
+  const currentPlaylist = playlists.find(p => p.id === displayPlaylistId) || null;
+  const displayTracks = currentPlaylist?.tracks ?? [];
+
+  return React.createElement('div', { className: 'relative', ref },
+    React.createElement(IconButton, {
+      onClick: () => setOpen(prev => !prev),
+      title: '播放列表',
+      active: open,
+      children: React.createElement(ListIcon, { size: 18 }),
+    }),
+    open && React.createElement('div', {
+      className: 'absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50 glass-panel rounded-xl shadow-2xl overflow-hidden flex flex-col',
+      style: { width: 'min(320px, 82vw)', maxHeight: 'min(60vh, 440px)' },
+    },
+      // 头部：当前歌单选择（可切到其它歌单浏览其歌曲）
+      React.createElement('div', {
+        className: 'px-3 pt-3 pb-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0',
+      },
+        React.createElement('div', { className: 'text-xs text-neutral-400 dark:text-stone-500 mb-1' }, '当前播放歌单'),
+        React.createElement('select', {
+          value: displayPlaylistId ?? '',
+          onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDisplayPlaylistId(e.target.value),
+          className: 'w-full bg-[var(--element-muted)] text-neutral-700 dark:text-stone-100 text-xs rounded-lg px-2 py-1.5 outline-none cursor-pointer',
+        },
+          playlists.map(p => React.createElement('option', { key: p.id, value: p.id }, p.name)),
+        ),
+      ),
+      // 歌曲列表
+      React.createElement('div', { className: 'flex-1 overflow-y-auto px-1 py-1' },
+        displayTracks.length === 0
+          ? React.createElement('div', {
+              className: 'px-3 py-4 text-xs text-neutral-400 dark:text-stone-500 text-center',
+            }, '该歌单暂无歌曲')
+          : displayTracks.map((t, i) => {
+              const isCurrent = currentTrack?.id === t.id;
+              return React.createElement('button', {
+                key: t.id,
+                onClick: () => { onSelectTrack(displayPlaylistId as string, t, i); setOpen(false); },
+                className: `w-full text-left px-3 py-2 text-xs flex items-center gap-2 rounded-[10px] transition-colors ${
+                  isCurrent
+                    ? 'text-[var(--element-bg)] bg-[var(--element-muted)] font-medium'
+                    : 'text-neutral-600 dark:text-stone-300 hover:bg-[var(--element-muted)]'
+                }`,
+                title: t.title,
+              },
+                React.createElement('span', { className: 'truncate flex-1' }, t.title),
+                t.artist && React.createElement('span', {
+                  className: 'text-neutral-400 dark:text-stone-500 truncate max-w-[40%]',
+                }, t.artist),
+              );
+            }),
+      ),
+    ),
+  );
+}
+
 // ========== 播放栏主组件 ==========
-export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volume, onVolumeChange, playMode, onPlayModeChange, onCoverClick }: PlayerBarProps) {
+export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volume, onVolumeChange, playMode, onPlayModeChange, onCoverClick, playlists, currentPlaylistId, onSelectTrack }: PlayerBarProps) {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   // 歌词可见态初始值取自单例，保证切回音乐模块/重载后仍与浮动窗口一致
@@ -395,6 +495,7 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
             children: lyricsLocked ? React.createElement(LockIcon) : React.createElement(UnlockIcon),
           })}
 
+          {React.createElement(PlaylistPopup, { playlists, currentPlaylistId, currentTrack: track, onSelectTrack })}
           {React.createElement(VolumePopup, { volume, onVolumeChange })}
           </div>
         </div>
