@@ -11,8 +11,12 @@
   "desc": "常驻桌面的桌面宠物：独立透明浮窗渲染，可在「全局设置·常规」与「茑萝」中开关。基础设置（缩放/透明度/点击穿透）在「全局设置·常规」中调整；素材来自依赖包 deskpet-assets（external-deps/deskpet-assets/pet/），含空闲静态图与动作视频。",
   "deps": [],
   "requiredAssets": [
-    "deskpet-assets/pet/idle1.png",
-    "deskpet-assets/pet/idle2.png",
+    "deskpet-assets/pet/idleface.png",
+    "deskpet-assets/pet/idleleft.png",
+    "deskpet-assets/pet/idleleftup.png",
+    "deskpet-assets/pet/idlerightup.png",
+    "deskpet-assets/pet/idlerightdown.png",
+    "deskpet-assets/pet/idleleftdown.png",
     "deskpet-assets/pet/work1.mp4",
     "deskpet-assets/pet/work2.mp4",
     "deskpet-assets/pet/work3.mp4"

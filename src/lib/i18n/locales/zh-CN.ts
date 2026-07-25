@@ -93,6 +93,17 @@ export const zhCN: Record<string, string> = {
   'settings.themes.detectingFonts': '正在检测系统字体...',
   'settings.themes.noFont': '无匹配字体',
   'settings.themes.panelOpacity': '面板透明度',
+  'settings.themes.customBgBlur': '背景模糊度',
+  'settings.themes.customBgRemove': '移除背景',
+  'settings.themes.changeImage': '更换图片',
+  'settings.themes.bgEditorTitle': '调整背景图',
+  'settings.themes.bgEditorRotate': '向右旋转',
+  'settings.themes.bgEditorRotateLeft': '向左旋转',
+  'settings.themes.bgEditorFlip': '水平翻转',
+  'settings.themes.bgEditorUndo': '撤销',
+  'settings.themes.bgEditorAngle': '旋转角度',
+  'settings.themes.bgEditorDone': '完成',
+  'settings.themes.bgEditorCancel': '取消',
 
   // 配色名
   'color.default': '默认',
