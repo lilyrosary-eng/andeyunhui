@@ -12,7 +12,7 @@ import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
 
-interface Playlist {
+export interface Playlist {
   id: string;
   name: string;
   tracks: Track[];
@@ -509,14 +509,20 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
 
   const handleSelectPlaylist = useCallback((playlist: Playlist) => {
     setSelectedPlaylist(playlist);
-    musicPlayer.currentPlaylistId = playlist.id;
-    // 状态保持：切换歌单不重置播放器，当前音乐继续播放。
-    // 用户点击新歌单中的歌曲时，handleSelectTrack 会调用 setTracks 刷新。
+    // 注意：浏览歌单不再改写 musicPlayer.currentPlaylistId。
+    // 该字段现仅代表「当前实际播放的音乐所归属的歌单」，且只在真正加载曲目时写入
+    // （见 handleSelectTrack / handlePopupSelectTrack / processOpenWith）。
+    // 这样播放栏与沉浸页的「播放列表」按钮才能正确显示实际在播放的歌单，
+    // 而不是侧栏点开的那一个；浏览/切换歌单只是改变显示，不会中断或改变播放归属。
   }, []);
 
   const handleSelectTrack = useCallback((track: Track, index: number) => {
     // 如果启用了搜索过滤，index 是过滤后数组中的位置，需要还原为原数组索引
     const tracks = selectedPlaylist?.tracks || [];
+    // 真正加载该歌单曲目时才更新「实际播放歌单」归属，供播放列表面板正确显示
+    if (tracks.length > 0) {
+      musicPlayer.currentPlaylistId = selectedPlaylist?.id ?? null;
+    }
     if (searchQuery.trim()) {
       const originalIndex = tracks.findIndex(t => t.id === track.id);
       if (originalIndex !== -1) {
@@ -530,6 +536,18 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     musicPlayer.setTracks(tracks, index);
     musicPlayer.play();
   }, [selectedPlaylist?.tracks, searchQuery]);
+
+  // 播放列表面板选曲：直接用「该曲所属歌单」的 tracks 播放，
+  // 不依赖侧栏选中态，避免从其它歌单点歌时索引错位。
+  const handlePopupSelectTrack = useCallback((playlistId: string, track: Track, index: number) => {
+    const pl = playlists.find(p => p.id === playlistId);
+    const list = pl?.tracks ?? [];
+    if (list.length === 0) return;
+    // 从播放列表面板点选其它歌单的歌曲时，归属随之更新（否则按钮仍显示旧歌单）
+    musicPlayer.currentPlaylistId = playlistId;
+    musicPlayer.setTracks(list, index);
+    musicPlayer.play();
+  }, [playlists]);
 
   // 以安得云荟打开 / 拖入主窗口：复制进固定临时目录 → 注册为常驻库文件夹 → 播放目标
   const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
@@ -546,6 +564,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           album: '',
           durationSecs: 0,
         };
+        // 以「安得云荟」打开/拖入的临时曲目不属于任何歌单，归属置空
+        musicPlayer.currentPlaylistId = null;
         musicPlayer.setTracks([track], 0);
         musicPlayer.play();
       }
@@ -973,6 +993,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             playMode={playMode}
             onPlayModeChange={handlePlayModeChange}
             onCoverClick={handleCoverClick}
+            playlists={playlists}
+            currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
+            onSelectTrack={handlePopupSelectTrack}
           />
         )}
       </div>
@@ -989,6 +1012,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onPlayModeChange={handlePlayModeChange}
           onClose={handleCloseNowPlaying}
           lyricsAlign={lyricsAlign}
+          playlists={playlists}
+          currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
+          onSelectTrack={handlePopupSelectTrack}
         />
       )}
     </div>

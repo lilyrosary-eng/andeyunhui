@@ -16,6 +16,8 @@ use crate::services::video_service;
 use crate::services::cache_service;
 use crate::services::document_parser;
 use crate::services::reading_service;
+// RAG 共享后台服务命令子模块（rag_query / rag_ingest / rag_embed_api 等）
+pub mod rag_commands;
 
 // ========== 插件扫描缓存（避免每次启动/刷新都重扫文件系统） ==========
 static PLUGIN_SCAN_CACHE: once_cell::sync::Lazy<Mutex<Option<(PluginScanResult, SystemTime)>>> =

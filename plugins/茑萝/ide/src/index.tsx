@@ -58,34 +58,6 @@ function loadCM(): Promise<CM> {
   return cmPromise;
 }
 
-// ============ MiniSearch 懒加载（项目语义检索 RAG 主题 9） ============
-// MiniSearch（MIT，纯 JS 倒排索引）用于跨文件全文检索，减少 agent <read> 次数。
-// 与 CodeMirror 同模式：read_external_dep_file + new Function 加载 IIFE 包。
-interface MiniSearchInstance {
-  addAll(docs: any[]): void;
-  add(doc: any): void;
-  search(query: string, opts?: any): any[];
-  toJSON(): any;
-}
-interface MiniSearchCtor {
-  new (opts: any): MiniSearchInstance;
-  loadJSON(json: string, opts: any): MiniSearchInstance;
-}
-let msPromise: Promise<MiniSearchCtor> | null = null;
-function loadMiniSearch(): Promise<MiniSearchCtor> {
-  if (msPromise) return msPromise;
-  msPromise = (async () => {
-    const w = window as any;
-    if (w.__EXT_MINISEARCH__) return w.__EXT_MINISEARCH__.MiniSearch as MiniSearchCtor;
-    const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: '茑萝/ide/minisearch/index.js' });
-    if (!code) throw new Error('未找到 MiniSearch 依赖文件（external-deps/茑萝/ide/minisearch/index.js）');
-    const fn = new Function(code);
-    fn();
-    if (!w.__EXT_MINISEARCH__) throw new Error('MiniSearch 依赖已读取但挂载失败（window.__EXT_MINISEARCH__ 未定义）');
-    return w.__EXT_MINISEARCH__.MiniSearch as MiniSearchCtor;
-  })();
-  return msPromise;
-}
 
 // ============ Tab 补全（#13）：AI 补全 + 本地降级 ============
 // 说明：CodeMirror 外部依赖未打包 @codemirror/autocomplete，故自行实现（取巧、轻量）。
@@ -947,236 +919,6 @@ function resetRecoveryRecipes(): void {
   recoveryUsedCounts.clear();
 }
 
-// ============ 项目语义检索 RAG（借鉴 claw-rag-service/src/chunk.rs + search.rs） ============
-// 用 MiniSearch（MIT，纯 JS 倒排索引）对项目文本文件建全文索引，<search query="..."/> 指令跨文件检索。
-// 借鉴 chunk.rs 的字符级滑窗分块 + search.rs 的线性索引思路，但用 MiniSearch 替代手搓倒排索引。
-// 首次搜索时懒构建索引，序列化到 IndexedDB 跨会话复用；文件 > 4KB 按 4000 字符滑窗分块。
-const BINARY_EXTS = new Set([
-  'png','jpg','jpeg','gif','bmp','ico','webp','tiff','tif','heic','avif','pdf','exe','dll','so','dylib',
-  'class','jar','war','ear','zip','gz','tar','tgz','bz2','xz','7z','rar','deb','rpm','dmg','iso','img',
-  'mp3','mp4','avi','mov','wmv','flv','ogg','wav','flac','aac','m4a','opus','webm','mkv','ogv',
-  'woff','woff2','ttf','otf','eot','bin','dat','db','sqlite','sqlite3','mdb','pdb','apk','aab','ipa',
-  'wasm','node','pyc','pyo','o','a','lib','obj','ilk','exp','pch','idb','nib','zst','br','lz','lzma',
-]);
-const MAX_FILE_SIZE = 256 * 1024;       // 单文件 > 256KB 跳过（避免索引膨胀）
-const MAX_TOTAL_FILES = 5000;            // 项目文件数上限
-const MAX_WALK_DEPTH = 20;              // 递归深度上限
-const CHUNK_CHARS = 4000;               // 滑窗 chunk 大小（对齐 chunk.rs::max_chars）
-const CHUNK_OVERLAP = 200;              // chunk 重叠（对齐 chunk.rs::overlap）
-const MAX_SEARCH_RESULTS = 15;          // 单次搜索返回上限
-
-// 字符级滑窗 chunk（借鉴 claw-rag-service/src/chunk.rs::chunk_text）
-function chunkText(text: string, maxChars = CHUNK_CHARS, overlap = CHUNK_OVERLAP): { id: string; content: string }[] {
-  if (text.length <= maxChars) return [{ id: '#0', content: text }];
-  const chunks: { id: string; content: string }[] = [];
-  let i = 0;
-  let idx = 0;
-  while (i < text.length) {
-    const end = Math.min(i + maxChars, text.length);
-    chunks.push({ id: '#' + idx, content: text.slice(i, end) });
-    if (end >= text.length) break;
-    i = end - overlap;
-    idx++;
-  }
-  return chunks;
-}
-
-// ===== IndexedDB 最小 KV（原生 API，无依赖，用于缓存序列化索引） =====
-const IDB_NAME = 'ide_search_cache';
-const IDB_STORE = 'kv';
-function idbOpen(): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-async function idbGet(key: string): Promise<any> {
-  try {
-    const db = await idbOpen();
-    return await new Promise((resolve) => {
-      const tx = db.transaction(IDB_STORE, 'readonly');
-      const r = tx.objectStore(IDB_STORE).get(key);
-      r.onsuccess = () => resolve(r.result);
-      r.onerror = () => resolve(null);
-    });
-  } catch { return null; }
-}
-async function idbSet(key: string, val: any): Promise<void> {
-  try {
-    const db = await idbOpen();
-    await new Promise<void>((resolve) => {
-      const tx = db.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).put(val, key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-    });
-  } catch { /* 缓存写入失败静默忽略 */ }
-}
-
-// 递归遍历项目目录，收集可索引的文本文件路径（过滤受保护/被忽略/二进制文件）
-async function collectIndexableFiles(
-  root: string,
-  ignorePatterns: { neg: boolean; re: RegExp }[],
-  exemptDirs: string[],
-): Promise<string[]> {
-  const result: string[] = [];
-  const queue: { dir: string; depth: number }[] = [{ dir: root, depth: 0 }];
-  const seen = new Set<string>();
-  while (queue.length && result.length < MAX_TOTAL_FILES) {
-    const { dir, depth } = queue.shift()!;
-    if (depth > MAX_WALK_DEPTH) continue;
-    const normDir = dir.replace(/\\/g, '/');
-    if (seen.has(normDir)) continue;
-    seen.add(normDir);
-    let entries: any[] = [];
-    try {
-      entries = await hostApi.invoke<any[]>('list_directory', { path: dir });
-    } catch { continue; }
-    for (const en of entries) {
-      if (result.length >= MAX_TOTAL_FILES) break;
-      const childAbs = resolvePath(en.name, dir);
-      if (isProtectedPath(childAbs)) continue;
-      if (isIgnoredPath(childAbs, root, ignorePatterns, exemptDirs)) continue;
-      if (en.is_dir) {
-        queue.push({ dir: childAbs, depth: depth + 1 });
-      } else {
-        const ext = en.name.split('.').pop()?.toLowerCase() || '';
-        if (BINARY_EXTS.has(ext)) continue;
-        result.push(childAbs);
-      }
-    }
-  }
-  return result;
-}
-
-// 构建项目索引：遍历文件 → 分块 → 加入 MiniSearch
-async function buildProjectIndex(
-  root: string,
-  ignorePatterns: { neg: boolean; re: RegExp }[],
-  exemptDirs: string[],
-  onProgress?: (done: number, total: number) => void,
-): Promise<MiniSearchInstance> {
-  const MiniSearch = await loadMiniSearch();
-  const ms = new MiniSearch({
-    fields: ['path', 'content'],
-    storeFields: ['path', 'snippet', 'chunkId'],
-    searchOptions: { prefix: true, fuzzy: 0.2, boost: { path: 2 } },
-  });
-  const files = await collectIndexableFiles(root, ignorePatterns, exemptDirs);
-  let done = 0;
-  // 并发读取（8 路，避免单线程 I/O 瓶颈）
-  const CONCURRENCY = 8;
-  for (let i = 0; i < files.length; i += CONCURRENCY) {
-    const batch = files.slice(i, i + CONCURRENCY);
-    const contents = await Promise.all(batch.map(async (abs) => {
-      try {
-        const content = await hostApi.invoke<string>('read_text_file', { path: abs });
-        return { abs, content };
-      } catch { return { abs, content: '' }; }
-    }));
-    for (const { abs, content } of contents) {
-      if (!content || content.length === 0) { done++; continue; }
-      const relPath = abs.replace(/\\/g, '/').replace(root.replace(/\\/g, '/').replace(/\/+$/, '') + '/', '');
-      const truncated = content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) : content;
-      const chunks = chunkText(truncated);
-      for (const ch of chunks) {
-        ms.add({
-          id: relPath + ch.id,
-          path: relPath,
-          content: ch.content,
-          snippet: ch.content.slice(0, 300).replace(/\n+/g, ' '),
-          chunkId: ch.id,
-        });
-      }
-      done++;
-    }
-    if (onProgress) onProgress(done, files.length);
-  }
-  return ms;
-}
-
-// 索引缓存：内存 Map（同会话）+ IndexedDB（跨会话）
-interface IndexCacheEntry { instance: MiniSearchInstance; ts: number; fileCount: number }
-const indexCache = new Map<string, IndexCacheEntry>();
-const INDEX_TTL_MS = 30 * 60 * 1000; // 30 分钟内复用缓存（文件变更后需手动重建）
-
-// 获取或构建索引（带缓存）
-async function getOrBuildIndex(
-  root: string,
-  ignorePatterns: { neg: boolean; re: RegExp }[],
-  exemptDirs: string[],
-  onProgress?: (done: number, total: number) => void,
-): Promise<{ ms: MiniSearchInstance; built: boolean; fileCount: number } | null> {
-  const cacheKey = root.replace(/\\/g, '/');
-  // 1) 内存缓存（同会话，TTL 内直接复用）
-  const mem = indexCache.get(cacheKey);
-  if (mem && Date.now() - mem.ts < INDEX_TTL_MS) {
-    return { ms: mem.instance, built: false, fileCount: mem.fileCount };
-  }
-  // 2) IndexedDB 缓存（跨会话，TTL 内复用序列化索引）
-  const cached = await idbGet('idx_' + cacheKey);
-  if (cached && cached.ts && Date.now() - cached.ts < INDEX_TTL_MS) {
-    try {
-      const MiniSearch = await loadMiniSearch();
-      const ms = MiniSearch.loadJSON(cached.json, {
-        fields: ['path', 'content'],
-        storeFields: ['path', 'snippet', 'chunkId'],
-        searchOptions: { prefix: true, fuzzy: 0.2, boost: { path: 2 } },
-      });
-      indexCache.set(cacheKey, { instance: ms, ts: cached.ts, fileCount: cached.fileCount });
-      return { ms, built: false, fileCount: cached.fileCount };
-    } catch { /* 反序列化失败，重建 */ }
-  }
-  // 3) 构建（首次或缓存过期）
-  const ms = await buildProjectIndex(root, ignorePatterns, exemptDirs, onProgress);
-  const fileCount = (ms as any)._documentCount || 0;
-  indexCache.set(cacheKey, { instance: ms, ts: Date.now(), fileCount });
-  // 异步写入 IndexedDB（不阻塞）
-  try {
-    const json = ms.toJSON();
-    await idbSet('idx_' + cacheKey, { json, ts: Date.now(), fileCount });
-  } catch { /* 序列化失败静默忽略 */ }
-  return { ms, built: true, fileCount };
-}
-
-// 执行搜索：返回格式化的结果文本
-async function searchProject(
-  query: string,
-  root: string,
-  ignorePatterns: { neg: boolean; re: RegExp }[],
-  exemptDirs: string[],
-  onProgress?: (done: number, total: number) => void,
-): Promise<string> {
-  if (!query.trim()) return '搜索查询为空，请提供关键词。';
-  const idxResult = await getOrBuildIndex(root, ignorePatterns, exemptDirs, onProgress);
-  if (!idxResult) return '项目索引构建失败，无法搜索。';
-  const results = idxResult.ms.search(query, { prefix: true, fuzzy: 0.2, combineWith: 'AND' });
-  if (results.length === 0) {
-    // AND 搜索无结果时退化为 OR（宽松匹配）
-    const orResults = idxResult.ms.search(query, { prefix: true, fuzzy: 0.2, combineWith: 'OR' });
-    if (orResults.length === 0) return `未找到匹配「${query}」的文件。索引含 ${idxResult.fileCount} 个文档。`;
-    const top = orResults.slice(0, MAX_SEARCH_RESULTS);
-    const lines = top.map((r: any, i: number) => {
-      const terms = r.match ? Object.keys(r.match).join(', ') : '';
-      return `${i + 1}. ${r.path}${r.chunkId ? ' ' + r.chunkId : ''}（score: ${r.score.toFixed(2)}${terms ? '，匹配: ' + terms : ''}）\n   片段：${(r.snippet || '').slice(0, 200)}`;
-    });
-    return `找到 ${orResults.length} 个匹配（OR 宽松匹配，显示前 ${top.length} 个，索引含 ${idxResult.fileCount} 文档）：\n${lines.join('\n\n')}`;
-  }
-  const top = results.slice(0, MAX_SEARCH_RESULTS);
-  const lines = top.map((r: any, i: number) => {
-    const terms = r.match ? Object.keys(r.match).join(', ') : '';
-    return `${i + 1}. ${r.path}${r.chunkId ? ' ' + r.chunkId : ''}（score: ${r.score.toFixed(2)}${terms ? '，匹配: ' + terms : ''}）\n   片段：${(r.snippet || '').slice(0, 200)}`;
-  });
-  return `找到 ${results.length} 个匹配（按相关性排序，显示前 ${top.length} 个，索引含 ${idxResult.fileCount} 文档${idxResult.built ? '，本次为首次构建' : ''}）：\n${lines.join('\n\n')}`;
-}
-
-// 手动失效索引缓存（文件结构变更后调用）
-function invalidateProjectIndex(root: string): void {
-  const cacheKey = root.replace(/\\/g, '/');
-  indexCache.delete(cacheKey);
-}
 
 // ============ 插件 Hook 生命周期（借鉴 hooks.rs::HookEvent + plugin_lifecycle.rs） ============
 // 暴露 window.__IDE_AGENT_HOOKS__ 注册点，允许其他子插件扩展 agent 行为。
@@ -2112,6 +1854,43 @@ function frameData(body: string): string {
   return DATA_FRAME_PREFIX + body;
 }
 
+// RAG 语义检索（IDE 复用共享后台服务 rag_* 命令）：
+// 对 query 做 API 嵌入（默认 Ollama nomic-embed-text）→ rag_query 暴力余弦 top-k → 格式化命中片段。
+// 知识库为空或嵌入服务不可用时优雅降级，返回可读说明（不抛异常、不陷入死循环）。
+async function runRagSearch(
+  query: string,
+  pushTool?: (content: string) => void,
+): Promise<string> {
+  const MAX = 6000; // 注入 LLM 上下文的检索结果长度上限
+  try {
+    const emb = await hostApi.invoke<{ embeddings: number[][]; dim: number }>('rag_embed_api', {
+      texts: [query],
+    });
+    const qv = emb.embeddings && emb.embeddings[0];
+    if (!qv || qv.length === 0) {
+      return '（RAG 语义检索无结果：嵌入服务未返回向量，请确认 Ollama 已启动且模型 nomic-embed-text 可用）';
+    }
+    const res = await hostApi.invoke<{
+      results: Array<{ source_title: string; text: string; score: number }>;
+      total: number;
+    }>('rag_query', { query_vec: qv, top_k: 6 });
+    if (!res.results || res.results.length === 0) {
+      return '（RAG 语义检索无命中：知识库为空或未摄取相关文档，请用 RAG 设置页摄取）';
+    }
+    const lines: string[] = [];
+    for (const h of res.results) {
+      lines.push(`[来源：${h.source_title} | 相似度：${h.score.toFixed(3)}]\n${h.text}`);
+    }
+    let out = lines.join('\n\n---\n\n');
+    if (out.length > MAX) out = out.slice(0, MAX) + '\n…（结果过长已截断）';
+    return out;
+  } catch (e) {
+    const msg = String(e);
+    if (pushTool) pushTool(`⚠ RAG 检索失败：${msg.slice(0, 120)}`);
+    return `（RAG 语义检索失败：${msg}。请确认 Ollama 嵌入服务可用，或改用 <read>/<shell> 探索项目）`;
+  }
+}
+
 // 契约测试（类型检查 Hook）：将待审阅改动「试写」到磁盘，跑 tsc --noEmit / cargo check，
 // 跑完立刻回滚（恢复原文件），把结果反馈给用户。这是成本最低、收益最高的保命符：
 // 在用户点「保留」落盘之前就发现类型错误，避免错误「传染」到后续代码。best-effort，任何失败都不阻断审阅。
@@ -2174,6 +1953,7 @@ function extractDirectives(raw: string): {
   asts: string[];
   mcps: { tool: string; args: any; approval: string | null }[];
   searches: string[];
+  rags: string[];
   done: boolean;
   cleaned: string;
 } {
@@ -2184,8 +1964,10 @@ function extractDirectives(raw: string): {
   // 仅当标签没有 command 属性时才匹配标签体形式，避免与属性形式重复执行
   const shellRe2 = /<shell\b(?![^>]*\bcommand=)[^>]*>([\s\S]*?)<\/shell>/g;
   const astRe = /<ast\b[^>]*\bpath=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g;
-  // <search query="..."/> 跨文件语义检索（RAG 主题 9），agent 用它定位「在哪个文件」而非盲目 <read>
+  // <search query="..."/> 与 <rag query="..."/>：对本地知识库做 RAG 语义检索（真实向量检索，替代原 MiniSearch 关键词检索）
   const searchRe = /<search\b[^>]*\bquery=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g;
+  // <rag query="..."/>：显式知识库语义检索别名，与 <search> 共用同一 RAG 检索管线
+  const ragRe = /<rag\b[^>]*\bquery=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g;
   // <mcp> 标签体形式优先（args JSON 直接放标签体内，避免属性引号冲突）
   const mcpBodyRe = /<mcp\b[^>]*\btool=(?:"([^"]*)"|'([^']*)')[^>]*>([\s\S]*?)<\/mcp>/g;
   // <mcp .../> 自闭合形式：args='{...}' 属性（单引号包裹 JSON）
@@ -2217,11 +1999,17 @@ function extractDirectives(raw: string): {
     const p = decodeXmlEntities(m[1] || m[2] || '').trim();
     if (p) asts.push(p);
   }
-  // <search query="..."/> 跨文件全文检索
+  // <search query="..."/> 知识库语义检索（RAG）
   const searches: string[] = [];
   while ((m = searchRe.exec(raw)) !== null) {
     const q = decodeXmlEntities(m[1] || m[2] || '').trim();
     if (q) searches.push(q);
+  }
+  // <rag query="..."/> 知识库语义检索（RAG，显式别名）
+  const rags: string[] = [];
+  while ((m = ragRe.exec(raw)) !== null) {
+    const q = decodeXmlEntities(m[1] || m[2] || '').trim();
+    if (q) rags.push(q);
   }
   // MCP 工具调用解析：tool = "server_id:tool_name"，args 为 JSON 对象
   const mcps: { tool: string; args: any; approval: string | null }[] = [];
@@ -2269,12 +2057,13 @@ function extractDirectives(raw: string): {
     .replace(/<shell\b(?![^>]*\bcommand=)[^>]*>([\s\S]*?)<\/shell>/g, (_mm, c) => '⚡ 执行 ' + stripWriteFence(c).trim())
     .replace(/<ast\b[^>]*\bpath=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g, (_mm, a, b) => '📑 结构 ' + decodeXmlEntities(a || b || ''))
     .replace(/<search\b[^>]*\bquery=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g, (_mm, a, b) => '🔎 搜索 ' + decodeXmlEntities(a || b || ''))
+    .replace(/<rag\b[^>]*\bquery=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g, (_mm, a, b) => '📚 知识库 ' + decodeXmlEntities(a || b || ''))
     .replace(/<mcp\b[^>]*\btool=(?:"([^"]*)"|'([^']*)')[^>]*>[\s\S]*?<\/mcp>/g, (_mm, a, b) => '🔌 MCP ' + decodeXmlEntities(a || b || ''))
     .replace(/<mcp\b[^>]*\btool=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g, (_mm, a, b) => '🔌 MCP ' + decodeXmlEntities(a || b || ''))
     .replace(/<done\s*\/?>/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  return { reads, writes, edits, shells, asts, mcps, searches, done, cleaned };
+  return { reads, writes, edits, shells, asts, mcps, searches, rags, done, cleaned };
 }
 
 // 去掉模型在 <write>/<old>/<new> 内容外层误套的 ```lang ... ``` 代码围栏，并裁掉模型常包进去的整行空白，避免污染/错位
@@ -4086,7 +3875,7 @@ function IdeAgent({
       '4) 运行受限 shell 命令（构建 / 测试 / lint / 格式化 / git 只读 / 文件列表等安全操作）：<shell command="npm run build" /> 或 <shell command="pytest -q">pytest -q</shell>。命令在项目根目录执行，超时 120 秒自动终止。仅放行构建、测试、lint、格式化、版本控制只读、文件列表等安全命令；rm 只允许相对路径（如 rm -rf ./build），禁止指向 / 或 ~ 根家目录；命中危险模式（rm 根目录、chmod 777、写入 /dev/sda 等设备、git 强制推送 / 硬重置 / 强制清理、下载即执行管道 curl|sh、关机重启等）会被服务端直接驳回，不要尝试。',
       '5) 完成：做完所有改动后输出 <done/> 并附上简短中文总结（改了哪些文件、为什么）。',
       '6) 获取文件结构大纲（无需读取整文件即可定位函数/类/导出及其行号，用于构造精确的 <edit> 锚点）：<ast path="相对或绝对路径" />。',
-      '7) 跨文件全文检索（定位「在哪个文件」而非盲目 <read>，减少探索轮次）：<search query="关键词 或 短语" />。返回按相关性排序的匹配文件列表（含路径、score、匹配词、片段）。首次搜索时自动构建项目索引（可能耗时数秒），后续从缓存复用。索引覆盖项目内所有文本文件（过滤二进制/.gitignore/受保护路径），大文件按 4000 字符滑窗分块。适合：找某个函数/类/常量定义在哪个文件、找某错误消息来源、找某 API 调用位置。不适合：精确读取文件内容（用 <read>）、获取文件结构（用 <ast>）。',
+      '7) 本地知识库语义检索（RAG，真正的向量检索，替代原 MiniSearch 关键词检索）：<search query="关键词 或 短语" /> 或 <rag query="..." /> 对本地知识库做语义检索，返回最相关的文档片段（含来源标题、相似度、片段文本）。检索链路：rag_embed_api（Ollama nomic-embed-text 默认）→ rag_query（暴力余弦 top-k）。适合：查某概念/功能/需求的定义与背景、从产品文档/规范/FAQ 中获取知识。不适合：定位项目源码文件（请用 <ast>/<read> 或 <shell command="grep -rn 关键词 ./src"/> 探索）。知识库为空或 Ollama 未启动时会明确提示，不会陷入死循环。',
     ];
     // 8) MCP 工具（动态注入）：仅在已配置且启用 MCP 服务器且成功列出工具时插入
     // 对齐 mcp_client.rs：tool="server_id:tool_name" 形式，args 为 JSON 对象
@@ -4146,7 +3935,7 @@ function IdeAgent({
       '- 【关键】任何对文件的真实修改都必须通过 <edit> 或 <write> 完成，绝不要在对话里只贴代码——对话中给出的代码块不会被写入文件。',
       '- 【关键】修改已有代码务必用 <edit>，且 <old> 必须是文件里【逐字一致、真实存在】的片段：先 <read> 原文件，把要改的那几行原样复制进 <old>，在 <new> 里写改后的样子。不要用 diff 补丁、也不要用 ``` 包裹，否则前端无法定位、会保存失败。',
       '- 一处改动一条 <edit>；若有多处修改，输出多条 <edit>（每条只包一小段）。',
-      '- 【探索项目】若不确定要改哪个文件，优先用 <search query="关键词"/> 跨文件全文检索定位（如函数名、类名、错误消息、API 调用），再 <read> 精确读取。若需了解目录结构，<read> 目录路径获取清单。不要凭空假设存在 package.json / src/ 等具体文件——先用 <search> 或列目录确认。',
+      '- 【探索项目】定位项目源码文件优先用 <ast path="..."/> 看结构、<read path="..."/> 读内容，或用 <shell command="grep -rn 关键词 ./src"/> 做关键词查找（均不依赖知识库）。若需从产品文档/规范等知识库获取背景知识，用 <search query="..."/> 或 <rag query="..."/> 做语义检索。不要凭空假设存在 package.json / src/ 等具体文件——先 <read> 目录或用 grep 确认。',
       '- 若 <read> 一个目录，返回的是该目录的清单，不是文件内容；根据清单再读取真正需要修改的文件。',
       '- 【记忆与原则】项目内有两个由你维护的知识文件夹（首次运行已自动创建于项目根下）：',
       '  · 记忆/ ：按天存放，文件名形如 记忆/YYYY-MM-DD.md。每次完成任务后，把本次做的事、关键决策、踩过的坑、用户反馈，写入「当天」的记忆文件（若当天文件不存在，先 <read> 看是否已有内容，再用 <write> 输出完整内容；系统会自动落盘，不进入审阅面板）。',
@@ -4487,7 +4276,7 @@ function IdeAgent({
       if (cancelRef.current) { setBusy(false); return; }
       if (errRef.current) { setBusy(false); return; }
       const raw = bufRef.current;
-      const { reads, writes, edits, shells, asts, mcps, searches, done, cleaned } = extractDirectives(raw);
+      const { reads, writes, edits, shells, asts, mcps, searches, rags, done, cleaned } = extractDirectives(raw);
       // 累计本轮工具调用次数（状态栏显示用）
       readCount += reads.length + asts.length;
       editCount += edits.length + writes.length;
@@ -4500,6 +4289,7 @@ function IdeAgent({
         e: edits.map((x) => x.path + '|' + x.old.length + '|' + x.new.length),
         s: shells.map((x) => x.command),
         m: mcps.map((x) => x.tool + '|' + JSON.stringify(x.args)),
+        g: searches, rag: rags,
       });
       recentSigs.push(sig);
       if (recentSigs.length >= 5 && recentSigs.slice(-5).every((x) => x === recentSigs[recentSigs.length - 5])) {
@@ -4508,38 +4298,37 @@ function IdeAgent({
         loopGuard = true;
         break;
       }
-      // 跨文件全文检索（RAG 主题 9）：agent 用 <search query="..."/> 定位「在哪个文件」，
-      // 避免盲目 <read> 探索。首次搜索时懒构建 MiniSearch 索引（遍历项目 + 分块 + 倒排索引），
-      // 序列化到 IndexedDB 跨会话复用。搜索结果按相关性排序，含路径+score+匹配词+片段。
-      const SEARCH_CEIL = 10; // 单轮搜索上限，防 agent 滥用
+      // RAG 语义检索（真实向量检索，替代原 MiniSearch 关键词检索）：
+      // agent 用 <search query="..."/> 或 <rag query="..."/> 对本地知识库做语义检索，
+      // 取回最相关的文档片段（含来源标题、相似度、片段文本），用于获取产品文档/规范/FAQ 等知识。
+      // 检索链路：rag_embed_api（Ollama nomic-embed-text 默认）→ rag_query（暴力余弦 top-k）。
+      const SEARCH_CEIL = 10; // 单轮检索上限，防 agent 滥用
       let searchCountThisRound = 0;
       for (const sq of searches) {
         if (searchCountThisRound >= SEARCH_CEIL) {
-          historyRef.current.push({ role: 'user', content: `⚠ 单轮搜索次数已达上限（${SEARCH_CEIL}），剩余 <search> 已跳过。请基于已有结果用 <read> 深入。` });
+          historyRef.current.push({ role: 'user', content: `⚠ 单轮检索次数已达上限（${SEARCH_CEIL}），剩余 <search> 已跳过。请基于已有结果继续。` });
+          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ 检索上限：剩余 <search> 已跳过' }]);
           break;
         }
-        if (!projectRoot) {
-          historyRef.current.push({ role: 'user', content: '工具搜索结果：未打开项目，无法构建索引。请先用 <read> 列目录探索。' });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ 搜索失败：无项目根' }]);
-          continue;
-        }
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔎 搜索中：' + sq.slice(0, 60) }]);
-        try {
-          const result = await searchProject(sq, projectRoot, ignorePatterns, exemptDirs, (done, total) => {
-            // 首次构建索引时显示进度（通过 setConv 追加状态消息，不污染 historyRef）
-            if (done % 50 === 0 || done === total) {
-              setConv((prev) => [...prev, { id: 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: `📊 索引构建进度：${done}/${total} 文件` }]);
-            }
-          });
-          const MAX_SEARCH_INJECT = 6000;
-          const injected = result.length > MAX_SEARCH_INJECT ? result.slice(0, MAX_SEARCH_INJECT) + '\n…（结果过长已截断）' : result;
-          historyRef.current.push({ role: 'user', content: frameData(`工具搜索结果（query: "${sq}"）：\n${injected}`) });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔎 搜索完成：' + sq.slice(0, 60) }]);
-        } catch (e) {
-          historyRef.current.push({ role: 'user', content: `工具搜索结果：搜索失败 - ${String(e)}。请改用 <read> 列目录探索。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ 搜索失败：' + String(e).slice(0, 80) }]);
-        }
+        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔎 RAG 检索中：' + sq.slice(0, 60) }]);
+        const injected = await runRagSearch(sq, (c) => setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: c }]));
+        historyRef.current.push({ role: 'user', content: frameData(`RAG 语义检索结果（query: "${sq}"）：\n${injected}`) });
+        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔎 RAG 检索完成：' + sq.slice(0, 60) }]);
         searchCountThisRound++;
+      }
+      // <rag> 显式知识库语义检索（与 <search> 共用同一 RAG 检索管线，frameData 注入复用）
+      let ragCountThisRound = 0;
+      for (const rq of rags) {
+        if (ragCountThisRound >= SEARCH_CEIL) {
+          historyRef.current.push({ role: 'user', content: `⚠ 单轮检索次数已达上限（${SEARCH_CEIL}），剩余 <rag> 已跳过。请基于已有结果继续。` });
+          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ 检索上限：剩余 <rag> 已跳过' }]);
+          break;
+        }
+        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '📚 知识库检索中：' + rq.slice(0, 60) }]);
+        const injected = await runRagSearch(rq, (c) => setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: c }]));
+        historyRef.current.push({ role: 'user', content: frameData(`知识库检索结果（query: "${rq}"）：\n${injected}`) });
+        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '📚 知识库检索完成：' + rq.slice(0, 60) }]);
+        ragCountThisRound++;
       }
       // 并行读取：多个 <read> 之间无依赖，用 Promise.all 并发 I/O 缩短总耗时
       await Promise.all(reads.map(async (p) => {
@@ -4935,7 +4724,7 @@ function IdeAgent({
       }
       // 递增压缩冷却计数器（每轮迭代后 +1，达到 COOLDOWN_TURNS 后允许再次压缩）
       tickCompactionCooldown();
-      if (done || (reads.length === 0 && writes.length === 0 && edits.length === 0 && shells.length === 0 && asts.length === 0 && mcps.length === 0 && searches.length === 0)) break;
+      if (done || (reads.length === 0 && writes.length === 0 && edits.length === 0 && shells.length === 0 && asts.length === 0 && mcps.length === 0 && searches.length === 0 && rags.length === 0)) break;
       // 极端路径拦截：单会话改动数超上限，疑似陷入循环/幻觉，提前终止并保留全部改动待审阅
       if (pendingEdits.length > EDIT_CEIL) { loopGuard = true; break; }
     }
