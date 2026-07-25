@@ -15,6 +15,7 @@ pub mod window_manager;
 pub mod diagnostics;
 pub mod log_service;
 pub mod ai_service;
+pub mod rag_service;
 pub mod shell_service;
 pub mod lsp_service;
 pub mod mcp_service;

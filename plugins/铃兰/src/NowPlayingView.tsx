@@ -1,7 +1,8 @@
 /// <reference path="../../global.d.ts" />
 import React from "react";
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
-import { VolumePopup } from './PlayerBar';
+import type { Playlist } from './index';
+import { VolumePopup, PlaylistPopup } from './PlayerBar';
 // 沉浸播放页 — 覆盖音乐模块内容区，不覆盖一级导航栏
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, MusicIcon,
@@ -75,6 +76,10 @@ interface NowPlayingViewProps {
   onPlayModeChange: (mode: PlayMode) => void;
   onClose: () => void;
   lyricsAlign?: LyricsAlign;
+  // 播放列表面板所需：歌单列表、当前播放歌单、选曲回调（带歌单 id）
+  playlists: Playlist[];
+  currentPlaylistId: string | null;
+  onSelectTrack: (playlistId: string, track: Track, index: number) => void;
 }
 
 // 歌词模糊离散档位：当前行 0，相邻行 1px，更远 1.5/2px。
@@ -200,6 +205,9 @@ export function NowPlayingView({
   onPlayModeChange,
   onClose,
   lyricsAlign = 'center',
+  playlists,
+  currentPlaylistId,
+  onSelectTrack,
 }: NowPlayingViewProps) {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -469,6 +477,7 @@ export function NowPlayingView({
             title: '下一首',
             children: React.createElement(SkipForwardIcon, { size: 18 }),
           }),
+          React.createElement(PlaylistPopup, { playlists, currentPlaylistId, currentTrack: track, onSelectTrack }),
           React.createElement(VolumePopup, { volume, onVolumeChange }),
         ),
       ),
