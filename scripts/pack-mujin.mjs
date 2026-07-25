@@ -4,7 +4,7 @@
 // 用户把 .mujin 放到 user_external_deps/ 目录，应用自动解压（Rust 端 zip crate）。
 //
 // 大型模块（茑萝/全局/阅读）保留母文件夹结构：
-//   茑萝/ide/codemirror.mujin, 茑萝/ide/minisearch.mujin, 茑萝/wps/tiptap.mujin, ...
+//   茑萝/ide/codemirror.mujin, 茑萝/wps/tiptap.mujin, ...
 //   全局/ffmpeg.mujin, 全局/basic-pitch.mujin
 //
 // 不可再分的依赖（tiptap 等即使内部有子文件夹）整体打包成单个 .mujin。
@@ -32,13 +32,13 @@ const outputDir = join(rootDir, 'dist-dlc', 'external-deps');
 const TARGETS = [
   // 茑萝子模块（茑萝/ide/、茑萝/wps/ 母文件夹结构）
   { src: '茑萝/ide/codemirror', out: '茑萝/ide/codemirror.mujin' },
-  { src: '茑萝/ide/minisearch', out: '茑萝/ide/minisearch.mujin' },
   { src: '茑萝/wps/tiptap',     out: '茑萝/wps/tiptap.mujin' },
   // 全局模块（全局/ 母文件夹结构）
   { src: '全局/ffmpeg',            out: '全局/ffmpeg.mujin' },
   { src: '全局/basic-pitch',       out: '全局/basic-pitch.mujin' },
   // 本地 OCR 依赖包（引擎 + ONNX 模型 + 字符表，用户自行下载放入「依赖」目录）
   { src: '全局/paddleocr',         out: '全局/paddleocr.mujin' },
+  { src: 'deskpet-assets',         out: 'deskpet-assets.mujin' },
 ];
 
 // 用 PowerShell .NET API 打包目录为 .mujin（ZIP 格式，不自动添加 .zip 后缀）

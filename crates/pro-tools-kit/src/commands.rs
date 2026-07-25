@@ -507,3 +507,35 @@ pub async fn audio_to_midi(app: tauri::AppHandle, input_path: String) -> Result<
     .await
     .map_err(|e| format!("MIDI 转写任务失败: {}", e))?
 }
+
+// ============ 共享模板：系统内存占用查询（薄荷 / 桌宠 共用）============
+// 薄荷进程管理页用它显示「系统总内存 / 已用 / 占用率」；
+// 桌宠用它判断「内存占用 > 60%」时启动工作动画序列（work1→work2→work3）。
+// 单例 System 复用，避免每次轮询重复采集全盘信息（sysinfo 0.30）。
+use std::sync::Mutex;
+static SYS_MEM: once_cell::sync::Lazy<Mutex<Option<sysinfo::System>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+
+#[derive(serde::Serialize, Clone)]
+pub struct SystemMemoryInfo {
+    pub total_kb: u64,
+    pub used_kb: u64,
+    pub free_kb: u64,
+    pub used_percent: f32, // 0..100
+}
+
+#[tauri::command]
+pub fn get_system_memory() -> SystemMemoryInfo {
+    let mut guard = SYS_MEM.lock().unwrap();
+    let sys = guard.get_or_insert_with(sysinfo::System::new_all);
+    sys.refresh_memory();
+    let total_kb = sys.total_memory();
+    let used_kb = sys.used_memory();
+    let free_kb = total_kb.saturating_sub(used_kb);
+    let used_percent = if total_kb > 0 {
+        (used_kb as f32 / total_kb as f32) * 100.0
+    } else {
+        0.0
+    };
+    SystemMemoryInfo { total_kb, used_kb, free_kb, used_percent }
+}

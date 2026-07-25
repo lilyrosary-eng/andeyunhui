@@ -230,6 +230,44 @@
   .main-panel-bg {
     background-color: var(--main-panel-bg);
   }
+  /* 启用自定义背景图时，主面板背景透明，露出底部的模糊背景层 */
+  html.has-custom-bg .main-panel-bg {
+    background-color: transparent !important;
+  }
+  /* 启用自定义背景图时，插件模块统一的“纸面”底色（bg-[#f5f5f0] / dark:bg-[#1c1917]）
+     改为半透明磨砂，让背景图也能透进莲花/三色堇/玉兰/薄荷/铃兰/茑萝等插件主面板，
+     同时保留一层浅色衬底保证文字可读性。IDE（bg-white/bg-stone-900）刻意不透，保证代码可读。 */
+  html.has-custom-bg .bg-\[\#f5f5f0\] {
+    background-color: rgba(245, 245, 240, 0.3) !important;
+  }
+  html.has-custom-bg.dark .dark\:bg-\[\#1c1917\] {
+    background-color: rgba(28, 25, 23, 0.3) !important;
+  }
+  /* 启用自定义背景图时，图标栏（nav-primary-bg）与侧边栏（nav-secondary-bg）
+     也降为半透明磨砂。二者本就带 backdrop-blur-md，底色变透后背景图透入即呈磨砂质感；
+     保留约 0.2 衬底保证图标/文字可读。未选背景图时（无 has-custom-bg）不生效，外观零变化。 */
+  html.has-custom-bg .nav-primary-bg {
+    background-color: rgba(255, 255, 255, 0.2) !important;
+  }
+  html.has-custom-bg .nav-secondary-bg {
+    background-color: rgba(255, 255, 255, 0) !important;
+  }
+  html.has-custom-bg.dark .nav-primary-bg {
+    background-color: rgba(28, 25, 23, 0.2) !important;
+  }
+  html.has-custom-bg.dark .nav-secondary-bg {
+    background-color: rgba(28, 25, 23, 0) !important;
+  }
+  /* 全局设置面板：浅色模式卡片原用纯白 bg-white（不透），与其深色模式
+     bg-stone-800/70（70% 透）的磨砂观感不对齐。仅在该面板（.settings-surface）下、
+     且仅浅色模式（:not(.dark)）自定义背景图时把 bg-white 降为 0.6 半透明白，与深色对齐。
+     注意：不可去掉 :not(.dark) —— 否则本规则（含 !important 且特异性更高）会盖掉
+     深色模式的 dark:bg-stone-800/70，使深色卡片变成半透明白而发空（只剩边框）。
+     深色模式继续走原 bg-stone-800/70。卡片本就带 backdrop-blur，底数变透即呈磨砂。
+     未选背景图时不生效。 */
+  html.has-custom-bg:not(.dark) .settings-surface .bg-white {
+    background-color: rgba(255, 255, 255, 0.6) !important;
+  }
   /* ========== 中转站浮窗：低饱和度浅绿整体配色（仅作用于浮窗，不影响主窗图标栏的中转站）========== */
   .floating-dropzone-root .main-panel-bg {
     background-color: rgba(224, 240, 228, 0.42) !important;

@@ -10,14 +10,14 @@ import React from "react";
 //     插件包只放核心组件（本文件 + 浮窗组件），符合「素材在依赖包、插件只放核心」的约定。
 //   - 加载即建浮窗；禁用时脚本不执行，destroy 钩子销毁浮窗（热插拔）。
 //
-// 素材与设置数据走向（双路加载，本次修复）：
-//   主路：浮窗（src/components/DeskpetPet.tsx）直接 invoke('read_external_dep_bytes') 读取依赖包素材
-//   → Blob → objectURL 渲染。这是首选路径（最快、无中继）。
-//   兜底：浮窗独立 webview 调用该自定义命令的权限不确定时，浮窗 emit 'deskpet:request-asset'
-//   事件，由本插件（在主窗，invoke 权限确定）经 hostApi.invoke 读取同一字节，再全局 emit
-//   'deskpet:asset' 事件（{key,mime,data:b64}）下发；浮窗 listen 后同理解码渲染。
-//   事件广播不需要权限，故兜底通道在「浮窗直读无权限」时仍能打通。
-//   两层都成功也无害（浮窗 applyAsset 有 !assetsRef.current[key] 去重）。
+// 素材与设置数据走向（双路加载）：
+//   主路：浮窗（src/components/DeskpetPet.tsx）直接 invoke('read_external_dep_path') 取绝对路径
+//   → convertFileSrc 映射为 asset:// URL 渲染（首选，无中继、无载荷上限）。
+//   兜底：浮窗独立 webview 调用该命令失败/无权限时，浮窗 emit 'deskpet:request-asset'
+//   事件，由本插件（在主窗，invoke 权限确定）经 hostApi.invoke 取同一绝对路径，
+//   再用 hostApi.convertFileSrc 映射为 asset:// URL，全局 emit 'deskpet:asset' 事件（{key,url}）下发；
+//   浮窗 listen 后直接作为 src 渲染。事件广播不需要权限，故兜底通道在「浮窗直读失败」时仍能打通。
+//   两层都成功也无害（浮窗 applyAssetUrl 有 !assetsRef.current[key] 去重）。
 //
 //   设置：GlobalSettingsPanel 写 localStorage['deskpet:settings'] 并全局 emit
 //   'deskpet:settings'（浮窗直接收到）；插件监听同一事件更新缓存并持久化，
@@ -78,41 +78,78 @@ async function ensurePet(): Promise<void> {
   await hostApi.createFloatingWindow(DESKPET_LABEL, DESKPET_URL, PROFILE);
 }
 
-// 素材清单（key/rel/mime）与浮窗一致：idle1/idle2=image/png，work1-3=video/mp4。
-// 浮窗直读为主；此处作为兜底通道，按 key 经 hostApi.invoke 读取字节后全局 emit 'deskpet:asset'。
-const ASSETS: Record<string, { rel: string; mime: string }> = {
-  idle1: { rel: 'deskpet-assets/pet/idle1.png', mime: 'image/png' },
-  idle2: { rel: 'deskpet-assets/pet/idle2.png', mime: 'image/png' },
-  work1: { rel: 'deskpet-assets/pet/work1.mp4', mime: 'video/mp4' },
-  work2: { rel: 'deskpet-assets/pet/work2.mp4', mime: 'video/mp4' },
-  work3: { rel: 'deskpet-assets/pet/work3.mp4', mime: 'video/mp4' },
-};
-
-// 素材兜底中转：经 hostApi.invoke('read_external_dep_bytes') 读字节（主窗权限确定），
-// 对每个 key 全局 emit 'deskpet:asset' 事件 {key, mime, data:b64}（事件广播不需要权限）。
-// keys 为空（undefined）时全量推送，确保浮窗挂载即可拿到；浮窗可按需请求单个 key。
-async function pushAsset(keys?: string[]): Promise<void> {
-  const targets = keys && keys.length ? keys : Object.keys(ASSETS);
-  for (const key of targets) {
-    const info = ASSETS[key];
-    if (!info) continue;
-    try {
-      const b64 = await hostApi.invoke('read_external_dep_bytes', { relativePath: info.rel });
-      if (b64) {
-        hostApi.emit('deskpet:asset', { key, mime: info.mime, data: b64 }).catch(() => {});
-      } else {
-        console.warn('[桌宠] 中转素材为空:', key);
-      }
-    } catch (e) {
-      console.warn('[桌宠] 中转素材失败:', key, e);
+// 素材兜底中转：浮窗直读失败/无权限时 emit 'deskpet:request-asset'，
+// 携带 items:[{key, rel, mime}]，本插件（主窗权限确定）按 rel 经 hostApi.invoke 取绝对路径，
+// 再用 hostApi.convertFileSrc 映射为 asset:// URL，全局 emit 'deskpet:asset' 事件 {key, url}
+// （事件广播不需要权限）。asset 协议对大文件无载荷限制，避免 base64 超 IPC 上限导致破图。
+hostApi
+  .listen('deskpet:request-asset', (e: { payload?: { items?: Array<{ key: string; rel: string; mime: string }> } }) => {
+    const items = e?.payload?.items || [];
+    for (const it of items) {
+      if (!it?.rel) continue;
+      hostApi
+        .invoke('read-external-dep-path', { relativePath: it.rel })
+        .then((absPath: string) => {
+          if (absPath) {
+            const url = hostApi.convertFileSrc(absPath);
+            hostApi.emit('deskpet:asset', { key: it.key, url }).catch(() => {});
+          }
+        })
+        .catch((err: unknown) => console.warn('[桌宠] 中转素材失败:', it.rel, err));
     }
-  }
-}
+  })
+  .catch(() => {});
 
-// 加载即建浮窗；建好后全量推送一次素材（兜底通道，确保浮窗挂载即拿到，即便直读无权限）。
-ensurePet()
-  .then(() => pushAsset().catch(() => {}))
-  .catch((e) => console.error('[桌宠] 创建浮窗失败', e));
+// 素材清单 manifest：浮窗启动时 emit 'deskpet:request-manifest' 来取最新清单，
+// 本插件从 localStorage（主窗 webview，与设置面板同源）回复；面板更新时同步缓存。
+const MANIFEST_KEY = 'deskpet:manifest';
+hostApi
+  .listen('deskpet:request-manifest', () => {
+    try {
+      const raw = localStorage.getItem(MANIFEST_KEY);
+      const m = raw ? JSON.parse(raw) : null;
+      // 陈旧清单（引用已更名的 idle1/idle2、中文 常态* 或文件名与当前缺省不符）回发 null，
+      // 并清除主窗 stale 缓存，让浮窗保留本地缺省清单，避免覆盖为失效素材。
+      const isLegacy =
+        m && Array.isArray(m.states) &&
+        m.states.some((s: any) =>
+          (s.assets || []).some((a: any) =>
+            ['idle1.png', 'idle2.png', 'idle1', 'idle2', '常态'].some((tok: string) =>
+              (a.rel || a.file || '').toLowerCase().includes(tok),
+            ),
+          ),
+        );
+      if (isLegacy) {
+        try {
+          localStorage.removeItem(MANIFEST_KEY);
+        } catch {
+          /* 忽略 */
+        }
+        hostApi.emit('deskpet:manifest', null).catch(() => {});
+        return;
+      }
+      hostApi.emit('deskpet:manifest', m && Array.isArray(m.states) && m.states.length ? m : null).catch(() => {});
+    } catch {
+      hostApi.emit('deskpet:manifest', null).catch(() => {});
+    }
+  })
+  .catch(() => {});
+
+hostApi
+  .listen('deskpet:manifest', (e: { payload?: any }) => {
+    const m = e?.payload;
+    if (m && Array.isArray(m.states)) {
+      try {
+        localStorage.setItem(MANIFEST_KEY, JSON.stringify(m));
+      } catch {
+        /* 忽略持久化失败 */
+      }
+    }
+  })
+  .catch(() => {});
+
+// 加载即建浮窗（素材由浮窗直读，仅在直读失败时才走上面的兜底中继）
+ensurePet().catch((e) => console.error('[桌宠] 创建浮窗失败', e));
 
 // 基础设置：面板变更后全局 emit 同名字件，浮窗直接收到并应用；
 // 此处仅更新进程内缓存并持久化（不再二次 emit 同名事件，避免 Tauri 全局 emit 回环）。
@@ -142,14 +179,6 @@ hostApi
   })
   .catch(() => {});
 
-// 兜底素材请求：浮窗直读失败/无权限时 emit 'deskpet:request-asset'，插件读字节后中继。
-hostApi
-  .listen('deskpet:request-asset', (e: { payload?: { keys?: string[] } }) => {
-    const keys = e?.payload?.keys;
-    pushAsset(keys && keys.length ? keys : undefined).catch(() => {});
-  })
-  .catch(() => {});
-
 // 监听可见性热插拔：运行时从「关→开」补充创建，从「开→关」销毁（与 ExtensionManagerPanel 派发的事件对齐）
 let unlisten: (() => void) | null = null;
 hostApi
@@ -157,10 +186,8 @@ hostApi
     const { id, visible } = e.payload || {};
     if (id !== DESKPET_LABEL) return;
     if (visible) {
-      // 确保浮窗存在后全量推送素材（兜底通道），再建窗也能即时拿到
-      ensurePet()
-        .then(() => pushAsset().catch(() => {}))
-        .catch(() => {});
+      // 确保浮窗存在（素材由浮窗直读，仅在直读失败时才走兜底中继）
+      ensurePet().catch(() => {});
     } else {
       hostApi.invoke('overlay_window_destroy', { label: DESKPET_LABEL }).catch(() => {});
     }

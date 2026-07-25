@@ -1318,6 +1318,118 @@ pub fn read_external_dep_bytes(app: tauri::AppHandle, relative_path: String) -> 
     Err(format!("外部依赖未找到：{}", relative_path))
 }
 
+/// 返回外部依赖文件的绝对路径（正斜杠），供前端用 `convertFileSrc` 走 asset 协议加载。
+/// 与 `read_external_dep_bytes` 适用同一套候选根目录与越界防护，但只返回路径，
+/// 不读取字节——避免大图（数 MB）经 base64 走 IPC/事件时超过载荷上限导致加载失败。
+#[tauri::command(rename = "read-external-dep-path")]
+pub fn read_external_dep_path(app: tauri::AppHandle, relative_path: String) -> Result<String, String> {
+    let user_external_deps = get_user_external_deps_dir(&app);
+    let external_deps = get_external_deps_dir(&app);
+    let candidates = [user_external_deps, external_deps];
+
+    for root in candidates.iter() {
+        if root.is_none() {
+            continue;
+        }
+        let root = root.as_ref().unwrap();
+        let full = root.join(&relative_path);
+
+        let canon_root = root
+            .canonicalize()
+            .map_err(|e| format!("解析根目录失败：{}", e))?;
+        let canon_full = match full.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue, // 文件不存在，尝试下一个候选根
+        };
+        if !canon_full.starts_with(&canon_root) {
+            continue; // 越界防护：禁止跳出依赖根目录
+        }
+
+        return Ok(canon_full.to_string_lossy().replace('\\', "/"));
+    }
+
+    Err(format!("外部依赖未找到：{}", relative_path))
+}
+
+/// 导入用户本地图片/视频作为桌宠素材。
+/// 把 `source_path` 复制到 user_external_deps/deskpet-assets/pet/<filename>，
+/// 使其可通过 `read_external_dep_bytes({relativePath:"deskpet-assets/pet/<filename>"})` 读取。
+/// 返回相对路径（rel）供前端 manifest 记录；文件名非法字符会被替换为下划线，
+/// 与已有文件冲突时自动追加序号后缀。
+#[tauri::command]
+pub fn import_deskpet_asset(
+    app: tauri::AppHandle,
+    source_path: String,
+    filename: Option<String>,
+) -> Result<String, String> {
+    let user_dir = get_user_external_deps_dir(&app)
+        .ok_or_else(|| "无法获取 user_external_deps 目录".to_string())?;
+    let pet_dir = user_dir.join("deskpet-assets").join("pet");
+    std::fs::create_dir_all(&pet_dir).map_err(|e| format!("创建桌宠素材目录失败：{}", e))?;
+
+    let src = std::path::Path::new(&source_path);
+    if !src.is_file() {
+        return Err(format!("源文件不存在或不是普通文件：{}", source_path));
+    }
+
+    let raw_name = match filename {
+        Some(f) if !f.trim().is_empty() => f.trim().to_string(),
+        _ => src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("asset")
+            .to_string(),
+    };
+    let base = sanitize_deskpet_filename(&raw_name);
+    let final_name = unique_deskpet_name(&pet_dir, &base);
+
+    let dest = pet_dir.join(&final_name);
+    std::fs::copy(src, &dest).map_err(|e| format!("复制桌宠素材失败：{}", e))?;
+
+    Ok(format!("deskpet-assets/pet/{}", final_name))
+}
+
+/// 仅保留文件系统中安全的字符，其余替换为下划线。
+fn sanitize_deskpet_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("asset");
+    }
+    out
+}
+
+/// 若 pet_dir 下已存在同名文件，则在扩展名前追加 _1/_2 序号直到不冲突。
+fn unique_deskpet_name(pet_dir: &std::path::Path, base: &str) -> String {
+    if !pet_dir.join(base).exists() {
+        return base.to_string();
+    }
+    let stem = std::path::Path::new(base)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("asset")
+        .to_string();
+    let ext = std::path::Path::new(base)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e))
+        .unwrap_or_default();
+    let mut i = 1;
+    loop {
+        let name = format!("{}_{}{}", stem, i, ext);
+        if !pet_dir.join(&name).exists() {
+            return name;
+        }
+        i += 1;
+    }
+}
+
 // ================= 中转站自动保存命令 =================
 
 /// 配置自动保存（启用/禁用 + 间隔秒数）
