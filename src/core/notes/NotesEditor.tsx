@@ -1,6 +1,7 @@
 import { useRef, useCallback, useState, useEffect, lazy, Suspense, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText } from 'lucide-react';
+import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText, Sparkles, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { api } from '@/lib/api';
 import { useNotesStore } from '@/stores/notesStore';
 import { useAppStore } from '@/stores/appStore';
@@ -204,6 +205,94 @@ export function NotesEditor() {
     }
   }, [content, onContentChange]);
 
+  // ---- AI 润色：选中文字后调用全局 AI 进行润色，风格/篇幅取自「笔记模块专属设置」 ----
+  const [polishing, setPolishing] = useState(false);
+
+  const handleAiPolish = useCallback(async () => {
+    const editor = getEditor();
+    if (!editor || polishing) return;
+    const { from, to, empty } = editor.state.selection;
+    const selectedText = empty ? '' : editor.state.doc.textBetween(from, to, '\n');
+    if (!selectedText.trim()) {
+      alert('请先选中要润色的文字，再点击「AI 润色」');
+      return;
+    }
+
+    // 读取笔记模块专属设置中的润色风格 / 篇幅（与 NoteSettingsPanel 的 localStorage key 对齐）
+    const style = localStorage.getItem('ai_polish_style') || 'keep';
+    const length = localStorage.getItem('ai_polish_length') || 'keep';
+    const styleMap: Record<string, string> = {
+      keep: '保持原有风格',
+      concise: '更简洁凝练',
+      formal: '更正式、严谨',
+      vivid: '更生动、形象',
+      casual: '更口语化、亲切自然',
+      professional: '更专业、书面化',
+    };
+    const lengthMap: Record<string, string> = {
+      shorter: '在保留核心信息的前提下适当精简篇幅',
+      keep: '篇幅与原文大致相当',
+      longer: '适当扩写、补充细节，使内容更充实',
+    };
+    const styleReq = styleMap[style] || styleMap.keep;
+    const lengthReq = lengthMap[length] || lengthMap.keep;
+
+    const prompt = [
+      '你是一名中文写作润色助手。请对下面这段文字进行润色，使其表达更流畅、通顺、准确。',
+      `润色风格要求：${styleReq}。`,
+      `篇幅要求：${lengthReq}。`,
+      '注意：只输出润色后的正文本身，不要添加任何解释、前后缀、引号或 Markdown 代码围栏；保持与原文一致的语言。',
+      '',
+      '原文：',
+      selectedText,
+    ].join('\n');
+
+    setPolishing(true);
+    const reqId = 'polish_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    let acc = '';
+    let done = false;
+    let errMsg: string | null = null;
+    const unlistenDelta = await listen<{ requestId: string; delta: string }>('ai-delta', (e) => {
+      if (e.payload.requestId === reqId) acc += e.payload.delta;
+    });
+    const unlistenDone = await listen<{ requestId: string }>('ai-done', (e) => {
+      if (e.payload.requestId === reqId) done = true;
+    });
+    const unlistenError = await listen<{ requestId: string; error: string }>('ai-error', (e) => {
+      if (e.payload.requestId === reqId) { errMsg = e.payload.error; done = true; }
+    });
+    try {
+      await invoke('ai_chat', {
+        requestId: reqId,
+        messages: [{ role: 'user', content: prompt }],
+      });
+      // 等待流式事件收尾（ai_chat 通常在 ai-done 后返回，此处兜底等待增量刷新完）
+      await new Promise<void>((resolve) => {
+        const timer = setInterval(() => { if (done) { clearInterval(timer); resolve(); } }, 60);
+        setTimeout(() => { clearInterval(timer); resolve(); }, 60000);
+      });
+    } catch (e) {
+      errMsg = errMsg || String(e);
+    } finally {
+      unlistenDelta(); unlistenDone(); unlistenError();
+      setPolishing(false);
+    }
+
+    if (errMsg) {
+      alert('AI 润色失败：' + errMsg);
+      return;
+    }
+    let result = acc.trim();
+    if (!result) {
+      alert('AI 润色未返回内容，请检查全局设置中的模型配置后重试');
+      return;
+    }
+    // 剥离可能残留的 markdown 代码围栏
+    result = result.replace(/^\s*```[^\n]*\n/, '').replace(/\n```\s*$/, '').trim();
+    // 用润色结果替换原选区
+    editor.chain().focus().insertContentAt({ from, to }, result).run();
+  }, [polishing]);
+
   const toolbarBtnClass = 'btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200 hover:bg-black/5 dark:hover:bg-white/5 transition-colors';
 
   return (
@@ -283,6 +372,9 @@ export function NotesEditor() {
           <List size={16} />
         </button>
         <div className="w-px h-4 bg-neutral-200/50 dark:bg-stone-600/50 mx-0.5" />
+        <button onClick={handleAiPolish} disabled={polishing} className={toolbarBtnClass} title="AI 润色（选中文字后点击，风格/篇幅可在笔记设置中调节）">
+          {polishing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+        </button>
         <button onClick={handleImportDocument} className={toolbarBtnClass} title="导入文档 (PDF/Word/PPT/Excel...)">
           <FileText size={16} />
         </button>
