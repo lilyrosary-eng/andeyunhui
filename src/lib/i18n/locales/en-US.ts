@@ -93,6 +93,17 @@ export const enUS: Record<string, string> = {
   'settings.themes.detectingFonts': 'Detecting system fonts...',
   'settings.themes.noFont': 'No matching font',
   'settings.themes.panelOpacity': 'Panel opacity',
+  'settings.themes.customBgBlur': 'Background blur',
+  'settings.themes.customBgRemove': 'Remove background',
+  'settings.themes.changeImage': 'Change image',
+  'settings.themes.bgEditorTitle': 'Adjust background image',
+  'settings.themes.bgEditorRotate': 'Rotate right',
+  'settings.themes.bgEditorRotateLeft': 'Rotate left',
+  'settings.themes.bgEditorFlip': 'Flip horizontally',
+  'settings.themes.bgEditorUndo': 'Undo',
+  'settings.themes.bgEditorAngle': 'Rotation',
+  'settings.themes.bgEditorDone': 'Done',
+  'settings.themes.bgEditorCancel': 'Cancel',
 
   // Color names
   'color.default': 'Default',

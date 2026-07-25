@@ -60,7 +60,6 @@ const hostExternalsPlugin = {
 // loader: 可选，为该目标指定 esbuild loader（如 Univer 的 CSS 用 text 内联到 JS）
 const TARGETS = [
   { outDir: '茑萝/ide/codemirror', entry: 'codemirror-entry.js', global: '__CM_BUNDLE__' },
-  { outDir: '茑萝/ide/minisearch', entry: 'minisearch-entry.js', global: '__MINISEARCH_BUNDLE__' },
   { outDir: '茑萝/wps/tiptap', entry: 'tiptap-entry.js', global: '__TIPTAP_BUNDLE__' },
   // 本地 OCR 引擎（PaddleOCR PP-OCRv6，onnxruntime-web wasm 后端；推理在 Web Worker 内执行）
   // WASM 后端（ort.wasm.min.js）作为独立运行时资源，不随 esbuild 打包，避免 tree-shake 丢 registerBackend。

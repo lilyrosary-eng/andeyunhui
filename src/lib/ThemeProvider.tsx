@@ -18,6 +18,14 @@ interface ThemeContextType {
   setPanelOpacity: (val: number) => void;
   fontFamily: string;
   setFontFamily: (val: string) => void;
+  bgImage: string | null;
+  setBgImage: (val: string | null) => void;
+  bgBlur: number;
+  setBgBlur: (val: number) => void;
+  bgAngle: number;
+  setBgAngle: (val: number) => void;
+  bgFlip: boolean;
+  setBgFlip: (val: boolean) => void;
 }
 
 const ThemeContext = createContext<ThemeContextType>({
@@ -36,6 +44,14 @@ const ThemeContext = createContext<ThemeContextType>({
   setPanelOpacity: () => {},
   fontFamily: '系统默认',
   setFontFamily: () => {},
+  bgImage: null,
+  setBgImage: () => {},
+  bgBlur: 0,
+  setBgBlur: () => {},
+  bgAngle: 0,
+  setBgAngle: () => {},
+  bgFlip: false,
+  setBgFlip: () => {},
 });
 
 export function useTheme() {
@@ -113,6 +129,18 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [fontFamily, setFontFamilyState] = useState<string>(() => {
     return localStorage.getItem('fontFamily') || '系统默认';
   });
+  const [bgImage, setBgImageState] = useState<string | null>(() => {
+    try { return localStorage.getItem('appBgImage') || null; } catch { return null; }
+  });
+  const [bgBlur, setBgBlurState] = useState<number>(() => {
+    try { return Number(localStorage.getItem('appBgBlur')) || 0; } catch { return 0; }
+  });
+  const [bgAngle, setBgAngleState] = useState<number>(() => {
+    try { return Number(localStorage.getItem('appBgAngle')) || 0; } catch { return 0; }
+  });
+  const [bgFlip, setBgFlipState] = useState<boolean>(() => {
+    try { return localStorage.getItem('appBgFlip') === '1'; } catch { return false; }
+  });
 
   // resolved 的 ref，供 useCallback 内读取最新值而不触发依赖变化
   const resolvedRef = useRef(resolved);
@@ -168,6 +196,34 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const setBgImage = useCallback((val: string | null) => {
+    setBgImageState(val);
+    try {
+      if (val) localStorage.setItem('appBgImage', val);
+      else localStorage.removeItem('appBgImage');
+    } catch { /* 忽略持久化失败 */ }
+  }, []);
+
+  const setBgBlur = useCallback((val: number) => {
+    setBgBlurState(val);
+    try { localStorage.setItem('appBgBlur', String(val)); } catch { /* 忽略持久化失败 */ }
+  }, []);
+
+  const setBgAngle = useCallback((val: number) => {
+    setBgAngleState(val);
+    try { localStorage.setItem('appBgAngle', String(val)); } catch { /* 忽略持久化失败 */ }
+  }, []);
+
+  const setBgFlip = useCallback((val: boolean) => {
+    setBgFlipState(val);
+    try { localStorage.setItem('appBgFlip', val ? '1' : '0'); } catch { /* 忽略持久化失败 */ }
+  }, []);
+
+  // 切换自定义背景时，标记 <html> 以便 CSS 让主面板背景透明，露出背景层
+  useEffect(() => {
+    document.documentElement.classList.toggle('has-custom-bg', !!bgImage);
+  }, [bgImage]);
+
   // 应用主题类 + 反转配色 + 重新应用配色（"默认"会随 resolved 动态切换）
   useEffect(() => {
     applyThemeClass(resolved);
@@ -198,9 +254,34 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return () => mq.removeEventListener('change', handler);
   }, [theme]);
 
+  // 旋转/翻转通过 CSS transform 应用在背景层上，避免导出后四角透出底色；
+  // 同时按角度自适应放大，保证 cover 时仍铺满窗口。
+  const angleRad = (Math.abs(bgAngle) * Math.PI) / 180;
+  const coverScale = 1 / Math.max(Math.cos(angleRad), Math.SQRT1_2);
+  const layerScale = Math.max(1.08, coverScale);
+  const layerTransform = `rotate(${bgAngle}deg) scaleX(${bgFlip ? -1 : 1}) scale(${layerScale})`;
+
   return (
-    <ThemeContext.Provider value={{ theme, resolved, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily }}>
-      <div ref={zoomRef} style={{ zoom: `${zoom}%` }}>
+    <ThemeContext.Provider value={{ theme, resolved, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgBlur, setBgBlur, bgAngle, setBgAngle, bgFlip, setBgFlip }}>
+      {bgImage && (
+        <div
+          aria-hidden
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 0,
+            backgroundImage: `url("${bgImage}")`,
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+            backgroundRepeat: 'no-repeat',
+            filter: `blur(${bgBlur}px)`,
+            transform: layerTransform,
+            transformOrigin: 'center center',
+            pointerEvents: 'none',
+          }}
+        />
+      )}
+      <div ref={zoomRef} style={{ zoom: `${zoom}%`, position: 'relative', zIndex: 1 }}>
         {children}
       </div>
     </ThemeContext.Provider>
