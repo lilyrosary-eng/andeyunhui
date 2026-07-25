@@ -113,7 +113,7 @@ export function IngestDialog({ onIngested }: IngestDialogProps) {
 
       <input
         value={title}
-        onChange={(e) => setTitle(e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTitle(e.target.value)}
         placeholder="来源标题（可选，默认用文件名）"
         className="rounded-lg border border-neutral-200/60 dark:border-stone-600/60 bg-white/70 dark:bg-stone-800/70 px-3 py-2 text-sm text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-bg)]"
       />
@@ -136,7 +136,7 @@ export function IngestDialog({ onIngested }: IngestDialogProps) {
       ) : (
         <textarea
           value={pasted}
-          onChange={(e) => setPasted(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setPasted(e.target.value)}
           placeholder="粘贴要摄取的纯文本 / Markdown…"
           rows={5}
           className="rounded-lg border border-neutral-200/60 dark:border-stone-600/60 bg-white/70 dark:bg-stone-800/70 px-3 py-2 text-sm text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-bg)] resize-none"

@@ -356,13 +356,25 @@ function PortScanner() {
 }
 
 // ========== t14 进程管理 ==========
+// 系统内存占用（与桌宠共用 pro-tools-kit 的 get_system_memory 模板）
+type SysMem = { total_kb: number; used_kb: number; used_percent: number };
+const fmtGb = (kb: number) => `${(kb / 1024 / 1024).toFixed(1)} GB`;
+
 function ProcessManager() {
   const [list, setList] = useState<{ pid: number; name: string; cpu: number; mem_kb: number }[]>([]);
+  const [sysMem, setSysMem] = useState<SysMem | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const refresh = async () => {
     setBusy(true); setError('');
-    try { setList(await hostInvoke('list_processes')); }
+    try {
+      const [pl, sm] = await Promise.all([
+        hostInvoke('list_processes') as Promise<typeof list>,
+        hostInvoke('get_system_memory') as Promise<SysMem>,
+      ]);
+      setList(pl);
+      setSysMem(sm);
+    }
     catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   };
@@ -370,6 +382,13 @@ function ProcessManager() {
 
   return (
     <div className="space-y-3">
+      {sysMem && (
+        <div className="flex items-center gap-4 flex-wrap text-xs text-neutral-500 dark:text-stone-400 bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 rounded-xl px-3 py-2">
+          <span>系统内存：{fmtGb(sysMem.total_kb)}</span>
+          <span>已用：{fmtGb(sysMem.used_kb)}</span>
+          <span>占用率：<b className={sysMem.used_percent > 60 ? 'text-orange-500' : 'text-emerald-500'}>{sysMem.used_percent.toFixed(1)}%</b></span>
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <button onClick={refresh} disabled={busy} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors disabled:opacity-50">
           {busy ? '刷新中…' : '刷新'}

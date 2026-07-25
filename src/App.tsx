@@ -514,7 +514,7 @@ function App() {
   // ====== 模块路由 ======
   const renderModule = () => {
     if (activeModule === 'settings') {
-      return <div className="flex-1 h-full overflow-hidden main-panel-bg p-6 fade-in"><GlobalSettingsPanel /></div>;
+      return <div className="flex-1 h-full overflow-hidden main-panel-bg settings-surface p-6 fade-in"><GlobalSettingsPanel /></div>;
     }
     if (activeModule === 'transfer') {
       return <TransferStationPanel onOpenReadableFile={handleOpenReadableFile} />;

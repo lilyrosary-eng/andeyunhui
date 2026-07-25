@@ -69,8 +69,8 @@ export function CitedChat() {
       <div className="flex gap-2">
         <textarea
           value={question}
-          onChange={(e) => setQuestion(e.target.value)}
-          onKeyDown={(e) => {
+          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setQuestion(e.target.value)}
+          onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask();
           }}
           placeholder="向知识库提问…（Ctrl/⌘+Enter 发送）"
