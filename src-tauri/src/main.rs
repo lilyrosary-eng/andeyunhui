@@ -23,6 +23,8 @@ use tauri_plugin_global_shortcut::ShortcutState;
 /// 否则用户开着打包版（托盘常驻占用 45991）时，`pnpm tauri dev` 会被误判为重复实例而直接退出。
 const INSTANCE_PORT: u16 = if cfg!(debug_assertions) { 45992 } else { 45991 };
 use andeyunhui_lib::commands::*;
+// RAG 共享后台服务命令（rag_query / rag_ingest / rag_embed_api 等）：IDE(<search>/<rag>)、gongfang 等均可复用
+use andeyunhui_lib::commands::rag_commands;
 // 专业模块「薄荷」工具：从内部依赖包 pro-tools-kit 引入（不再集成于主 crate 源码树）
 // Tauri 2 限制：命令不能放在 crate 根（lib.rs），故置于 commands 子模块
 use pro_tools_kit::commands::*;
@@ -1044,6 +1046,15 @@ fn main() {
             mcp_service::mcp_list_tools,
             mcp_service::mcp_list_all_tools,
             mcp_service::mcp_call_tool,
+            // ========== RAG 共享后台服务（知识库检索增强）==========
+            // IDE（<search>/<rag> 语义检索）与 gongfang 等任意插件均可复用 rag_query；
+            // rag_embed_api 代理 Ollama / OpenAI 兼容嵌入端点（沙箱屏蔽 fetch，必须走 Rust）。
+            rag_commands::rag_init_db,
+            rag_commands::rag_ingest,
+            rag_commands::rag_query,
+            rag_commands::rag_list_sources,
+            rag_commands::rag_delete_source,
+            rag_commands::rag_embed_api,
             // ========== 全局：开发者控制台（关于页面 · 联网/依赖安装）==========
             dev_console_http,
             take_pending_open_files,
