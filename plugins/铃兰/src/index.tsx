@@ -29,6 +29,16 @@ const STORAGE_KEY_ROOT = 'music_plugin_root_paths';
 const STORAGE_KEY_PLAYLISTS = 'music_playlists';
 const STORAGE_KEY_HIDDEN = 'music_plugin_hidden_playlists'; // 兼容旧版
 
+// 从 localStorage 读取已持久化的自定义歌单（与保存逻辑共用同一 key）
+function getCustomPlaylistsFromStorage(): Playlist[] {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY_PLAYLISTS);
+    return saved ? (JSON.parse(saved) as Playlist[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 // ========== 音乐模块设置面板（JSX 实现，取代原 React.createElement 嵌套）==========
 interface MusicSettingsPanelProps {
   onClose: () => void;
@@ -324,6 +334,14 @@ function MusicModule() {
     selectedPlaylistIdRef.current = selectedPlaylist?.id ?? null;
   }, [selectedPlaylist?.id]);
 
+  // 自定义歌单独立恢复：即使未配置任何音乐文件夹，重载后也应立即恢复，
+  // 避免「仅自建歌单（手动添加音频）」场景下列表在重载后消失。
+  useEffect(() => {
+    const customs = getCustomPlaylistsFromStorage();
+    if (customs.length === 0) return;
+    setPlaylists(prev => [...prev.filter(p => p.type !== 'custom'), ...customs]);
+  }, []);
+
   // F.11 模块本地设置
   const [onlineLyricsEnabled, setOnlineLyricsEnabled] = useState(() => {
     return localStorage.getItem('music_online_lyrics') !== 'false';
@@ -344,7 +362,11 @@ function MusicModule() {
 
   // 流式扫描音乐（支持多根目录）
   useEffect(() => {
-    if (rootPaths.length === 0) return;
+    if (rootPaths.length === 0) {
+      // 无音乐文件夹时仍需恢复自定义歌单（由挂载期恢复 effect 负责），此处直接结束扫描
+      setLoading(false);
+      return;
+    }
 
     unlistenRef.current.forEach(fn => fn());
     unlistenRef.current = [];
@@ -386,13 +408,13 @@ function MusicModule() {
 
       // 2. 如果全都有缓存，直接显示
       if (pathsToScan.length === 0) {
-        const savedPlaylists = localStorage.getItem(STORAGE_KEY_PLAYLISTS);
-        const customPlaylists: Playlist[] = savedPlaylists ? JSON.parse(savedPlaylists) : [];
-        setPlaylists([...allDirectoryPlaylists, ...customPlaylists]);
-        // 恢复上次播放的歌单（模块切换/重载后保持选中状态）
+        setPlaylists(prev => [...allDirectoryPlaylists, ...prev.filter(p => p.type !== 'custom')]);
+        // 恢复上次播放的歌单（模块切换/重载后保持选中状态，目录与自定义均匹配）
         const savedId = musicPlayer.currentPlaylistId;
-        const restored = savedId ? allDirectoryPlaylists.find(p => p.id === savedId) : null;
-        setSelectedPlaylist(restored || (allDirectoryPlaylists.length > 0 ? allDirectoryPlaylists[0] : null));
+        const restored = savedId
+          ? [...allDirectoryPlaylists, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)
+          : null;
+        setSelectedPlaylist(restored || allDirectoryPlaylists[0] || getCustomPlaylistsFromStorage()[0] || null);
         setLoading(false);
         return;
       }
@@ -434,12 +456,14 @@ function MusicModule() {
 
       if (cancelled) return;
       setLoading(false);
-      const savedPlaylists = localStorage.getItem(STORAGE_KEY_PLAYLISTS);
-      const customPlaylists: Playlist[] = savedPlaylists ? JSON.parse(savedPlaylists) : [];
-      setPlaylists([...allDirectoryPlaylists, ...customPlaylists]);
+      // 从当前 state 合并自定义歌单（避免覆盖扫描期间用户新建的歌单），
+      // 同时支持恢复上次选中的自定义歌单
+      setPlaylists(prev => [...allDirectoryPlaylists, ...prev.filter(p => p.type !== 'custom')]);
       const savedId = musicPlayer.currentPlaylistId;
-      const restored = savedId ? allDirectoryPlaylists.find(p => p.id === savedId) : null;
-      setSelectedPlaylist(restored || (allDirectoryPlaylists.length > 0 ? allDirectoryPlaylists[0] : null));
+      const restored = savedId
+        ? [...allDirectoryPlaylists, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)
+        : null;
+      setSelectedPlaylist(restored || allDirectoryPlaylists[0] || getCustomPlaylistsFromStorage()[0] || null);
     })();
 
     return () => {
