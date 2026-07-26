@@ -12,13 +12,18 @@
   "deps": [],
   "requiredAssets": [
     "deskpet-assets/pet/idleface.png",
+    "deskpet-assets/pet/idleup.png",
+    "deskpet-assets/pet/idledown.png",
     "deskpet-assets/pet/idleleft.png",
+    "deskpet-assets/pet/idleright.png",
     "deskpet-assets/pet/idleleftup.png",
     "deskpet-assets/pet/idlerightup.png",
-    "deskpet-assets/pet/idlerightdown.png",
     "deskpet-assets/pet/idleleftdown.png",
-    "deskpet-assets/pet/work1.mp4",
-    "deskpet-assets/pet/work2.mp4",
-    "deskpet-assets/pet/work3.mp4"
+    "deskpet-assets/pet/idlerightdown.png",
+    "deskpet-assets/pet/work1.webm",
+    "deskpet-assets/pet/work2.webm",
+    "deskpet-assets/pet/work3.webm",
+    "deskpet-assets/pet/walk.webm",
+    "deskpet-assets/pet/sleep.webm"
   ]
 }

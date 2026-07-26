@@ -77,6 +77,8 @@ pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::E
         .transparent(true)
         .shadow(false)
         .data_directory(per_window_data_dir(app, LYRICS_WINDOW_LABEL))
+        // 独立环境不继承主窗 flag：禁用遮挡检测/后台化，保证失焦时歌词持续滚动重绘
+        .additional_browser_args(crate::services::window_manager::OVERLAY_BROWSER_ARGS)
         .build()?;
 
     // 离屏创建后先隐藏（此时 WebView2 已在离屏态完成初始化，hide 不会触发 0x8007139F），

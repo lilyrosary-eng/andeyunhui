@@ -32,6 +32,7 @@ use pro_tools_kit::commands::*;
 use gongfang_kit::commands::*;
 use andeyunhui_lib::screenshot::{self, *};
 use andeyunhui_lib::TrayModeState;
+use andeyunhui_lib::device;
 
 // 文件关联：以安得云荟打开（一次性列表，进程退出即销毁）
 struct PendingOpenFiles(pub std::sync::Mutex<Vec<String>>);
@@ -986,6 +987,8 @@ fn main() {
             window_manager::overlay_window_health,
             window_manager::overlay_window_diag,
             window_manager::overlay_clear_gpu_cache,
+            // ========== 桌宠：全局设备监听（鼠标/键盘）==========
+            device::start_device_listening,
             list_windows,
             get_window_title,
             crate::screenshot::window_at_point,

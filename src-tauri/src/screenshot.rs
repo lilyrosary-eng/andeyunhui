@@ -172,16 +172,27 @@ pub fn reveal_screenshot_overlay(app: tauri::AppHandle) {
 #[tauri::command]
 pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
     use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
+        ICoreWebView2Controller, ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
     };
     // Interface trait 必须来自 windows-core 0.61（webview2-com-sys 0.38 的 COM 类型
     // 实现的是该版本 trait；本 crate 的 windows 0.62 对应 windows-core 0.62，不兼容）。
     use windows_core_061::Interface;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    // 透明浮窗失焦时 WebView2 会暂停渲染，导致桌宠朝向/按键提示冻住（聚焦或开 devtools 才恢复）。
+    // 周期性 NotifyParentWindowPositionChanged 强制 WebView2 重新呈现当前内容，根治失焦冻结。
+    // 仅桌宠窗口启动此常驻定时器（截图/录屏覆盖窗是触发式、无需常驻渲染）。
+    static REPRAINT_STARTED: AtomicBool = AtomicBool::new(false);
+
     let wv = webview.clone();
-    let _ = app.run_on_main_thread(move || {
+    let is_deskpet = webview.label() == "deskpet";
+    // 克隆 app 给 run_on_main_thread 闭包（闭包内还要把 app 传给 with_webview 闭包，
+    // 直接移动会与 run_on_main_thread 的自引用调用冲突）。
+    let _ = app.clone().run_on_main_thread(move || {
         // Tauri v2 的 with_webview 传入 PlatformWebview，其 controller() 返回底层
         // webview2-com-sys 的 ICoreWebView2Controller（与 wry 内部同版本 0.38）。
-        let _ = wv.with_webview(|raw| {
+        let _ = wv.with_webview(move |raw| {
             // SetDefaultBackgroundColor 定义在 ICoreWebView2Controller2；cast 到 2（而非 3）
             // 以兼容仅支持到 Controller2 的旧 WebView2 运行时，确保透明背景一定生效。
             if let Ok(c2) = raw.controller().cast::<ICoreWebView2Controller2>() {
@@ -193,6 +204,49 @@ pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
                         B: 0,
                     })
                 };
+            }
+            // 仅桌宠窗口：启动失焦强制重绘定时器（COM 控制器不可跨线程，故每次在
+            // run_on_main_thread 里调用；用 unsafe Send 包装把指针搬进工作线程调度；
+            // 控制器所有权通过「递归调度」在主线程闭包链里传递，避免 Clone 且保证只在主线程调用）。
+            if is_deskpet && !REPRAINT_STARTED.swap(true, Ordering::SeqCst) {
+                if let Ok(ctrl) = raw.controller().cast::<ICoreWebView2Controller>() {
+                    struct SendCtrl(ICoreWebView2Controller);
+                    // WebView2 COM 控制器在单线程单元内使用，这里保证只在主线程调用其方法，
+                    // 故可安全标记为 Send 以便在工作线程里调度 run_on_main_thread 闭包。
+                    unsafe impl Send for SendCtrl {}
+                    // 后台线程睡眠后，回到主线程先 put_IsVisible(TRUE) 再 NotifyParentWindowPositionChanged，
+                    // 再递归排下一次；控制器所有权随闭包链移动，全程不跨线程访问 COM。
+                    //
+                    // 两道闸门必须同时打开，缺一不可：
+                    // 1) put_IsVisible(TRUE)：透明分层窗(WS_EX_LAYERED)失焦时 WebView2 会把控制器 IsVisible
+                    //    置 FALSE → 页 visibilityState=hidden → rAF 停摆、renderer 不再产出新帧（普通不透明窗
+                    //    失焦仍渲染，正因它页保持 visible）。周期强制 TRUE 覆盖该状态，让 renderer 持续产帧。
+                    //    （这就是「开 devtools 才恢复」的根因：devtools 把该页当「被检查页」豁免隐藏/节流。）
+                    // 2) NotifyParentWindowPositionChanged：强制 WebView2 把已产出的帧提交/呈现到屏幕。
+                    // 上一轮只做了 2) 没做 1)，所以唤不醒被判隐藏的 renderer，无效。
+                    fn schedule(app: tauri::AppHandle, sc: SendCtrl) {
+                        // 把 app 克隆给闭包（闭包内调 spawn_timer 需要所有权），
+                        // 外层 app 仅用于 run_on_main_thread 的自引用调用。
+                        let _ = app.run_on_main_thread({
+                            let app = app.clone();
+                            move || {
+                                // 1) 强制保持可见，防止失焦被判隐藏而停 rAF/产帧
+                                let _ = unsafe { sc.0.SetIsVisible(true) };
+                                // 2) 强制把当前（最新）帧提交到屏幕
+                                let _ = unsafe { sc.0.NotifyParentWindowPositionChanged() };
+                                spawn_timer(app, sc);
+                            }
+                        });
+                    }
+                    fn spawn_timer(app: tauri::AppHandle, sc: SendCtrl) {
+                        std::thread::spawn(move || {
+                            // 100ms ≈ 10fps：足够实时键显/朝向切换，CPU 开销可忽略。
+                            std::thread::sleep(Duration::from_millis(100));
+                            schedule(app, sc);
+                        });
+                    }
+                    spawn_timer(app.clone(), SendCtrl(ctrl));
+                }
             }
         });
     });
