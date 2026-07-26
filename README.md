@@ -151,3 +151,7 @@ pnpm lint:fix     # ESLint 自动修复
 ## 致谢
 
 基于 [Tauri](https://tauri.app/) 生态构建，感谢所有相关开源项目的作者与维护者。
+
+本项目的开发还引用了更多优秀的开源项目、第三方工具与 AI 模型。我们已整理出**完整的公开致谢清单**，涵盖核心框架、前端 / Rust 依赖、嵌入式工具（FFmpeg、PaddleOCR/PP-OCRv4、ONNX Runtime Web、Spotify Basic Pitch）、参考开源项目（BongoCat、Claw Code 等）及其各自的许可证与用途，详见 [`致谢.md`](./致谢.md)。
+
+特别说明：本项目随应用分发并调用 **FFmpeg**（LGPL-2.1+，部分组件为 GPL）进行音视频处理，遵循其许可证；其余引用项目多为 MIT / Apache-2.0 等宽松许可证。
