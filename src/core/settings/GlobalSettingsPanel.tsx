@@ -17,7 +17,7 @@ import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
 import { SlidingTabs } from '@/components/motion/SlidingTabs';
 import { useI18n, LANGUAGES, type Language } from '@/lib/i18n';
-import { DeskpetManifest, loadDeskpetManifest, saveDeskpetManifest, inferDeskpetAsset, DeskpetPreset, loadDeskpetPresets, saveDeskpetPresets, loadActivePresetId, saveActivePresetId } from '@/deskpetManifest';
+import { DeskpetManifest, loadDeskpetManifest, saveDeskpetManifest, inferDeskpetAsset, DeskpetPreset, loadDeskpetPresets, saveDeskpetPresets, loadActivePresetId, saveActivePresetId, cloneOfficialManifest, normalizeManifestSources } from '@/deskpetManifest';
 import { useAppStore } from '@/stores/appStore';
 
 type TabId = 'general' | 'themes' | 'extensions' | 'transfer' | 'model' | 'blacklist' | 'about';
@@ -395,30 +395,48 @@ export function GlobalSettingsPanel() {
   const [activePresetId, setActivePresetId] = useState<string | null>(() => loadActivePresetId());
   const [newPresetName, setNewPresetName] = useState('');
 
+  // 官方基线设置（缩放/透明度/穿透），用于「官方默认」与「新建预设」清空当前
+  const OFFICIAL_SETTINGS = { scale: 1, opacity: 1, clickThrough: false };
+
   const applyPreset = useCallback((p: DeskpetPreset) => {
-    pushPetManifest(p.manifest);
+    const manifest = normalizeManifestSources(p.manifest);
+    pushPetManifest(manifest);
     pushDeskpetSettings(p.settings);
     setDeskpetScale(p.settings.scale);
     setDeskpetOpacity(p.settings.opacity);
     setDeskpetClickThrough(p.settings.clickThrough);
   }, [pushPetManifest, pushDeskpetSettings]);
 
+  // 选中预设：'' 表示「官方默认」基线，始终从官方清单干净还原（不携带任何自定义素材）
   const handleSelectPreset = useCallback((id: string) => {
+    if (id === '') {
+      const manifest = cloneOfficialManifest();
+      setActivePresetId(null);
+      saveActivePresetId(null);
+      pushPetManifest(manifest);
+      pushDeskpetSettings(OFFICIAL_SETTINGS);
+      setDeskpetScale(OFFICIAL_SETTINGS.scale);
+      setDeskpetOpacity(OFFICIAL_SETTINGS.opacity);
+      setDeskpetClickThrough(OFFICIAL_SETTINGS.clickThrough);
+      return;
+    }
     const p = presets.find((x) => x.id === id);
     if (!p) return;
     setActivePresetId(id);
     saveActivePresetId(id);
     applyPreset(p);
-  }, [presets, applyPreset]);
+  }, [presets, applyPreset, pushPetManifest, pushDeskpetSettings]);
 
-  const handleSavePreset = useCallback(() => {
-    const name = newPresetName.trim() || `方案 ${presets.length + 1}`;
+  // 新建预设：从官方基线开始（清空当前的素材/设置），每套预设独立、互不串味。
+  // 关键：不克隆正在编辑的 live manifest，避免把上一个方案的自定义素材带过来。
+  const handleNewPreset = useCallback(() => {
     const id = `preset-${Date.now()}`;
+    const name = newPresetName.trim() || `方案 ${presets.length + 1}`;
     const preset: DeskpetPreset = {
       id,
       name,
-      manifest: petManifest,
-      settings: { scale: deskpetScale, opacity: deskpetOpacity, clickThrough: deskpetClickThrough },
+      manifest: cloneOfficialManifest(),
+      settings: { ...OFFICIAL_SETTINGS },
     };
     const next = [...presets, preset];
     setPresets(next);
@@ -426,7 +444,37 @@ export function GlobalSettingsPanel() {
     setActivePresetId(id);
     saveActivePresetId(id);
     setNewPresetName('');
-  }, [presets, petManifest, deskpetScale, deskpetOpacity, deskpetClickThrough]);
+    applyPreset(preset); // 立即切到干净官方基线，等于「清空当前」
+  }, [presets, newPresetName, applyPreset]);
+
+  // 保存当前预设：当前是「官方默认」时另存为新自定义预设（保护官方基线不被覆盖）；
+  // 否则原地更新当前激活的自定义预设。
+  const handleSavePreset = useCallback(() => {
+    const settings = { scale: deskpetScale, opacity: deskpetOpacity, clickThrough: deskpetClickThrough };
+    if (activePresetId === null) {
+      const id = `preset-${Date.now()}`;
+      const name = newPresetName.trim() || `我的方案 ${presets.length + 1}`;
+      const preset: DeskpetPreset = {
+        id,
+        name,
+        manifest: normalizeManifestSources(petManifest),
+        settings,
+      };
+      const next = [...presets, preset];
+      setPresets(next);
+      saveDeskpetPresets(next);
+      setActivePresetId(id);
+      saveActivePresetId(id);
+      setNewPresetName('');
+      return;
+    }
+    const next = presets.map((p) =>
+      p.id === activePresetId ? { ...p, manifest: normalizeManifestSources(petManifest), settings } : p,
+    );
+    setPresets(next);
+    saveDeskpetPresets(next);
+    setNewPresetName('');
+  }, [presets, activePresetId, petManifest, deskpetScale, deskpetOpacity, deskpetClickThrough]);
 
   const handleDeletePreset = useCallback((id: string) => {
     const next = presets.filter((p) => p.id !== id);
@@ -469,11 +517,11 @@ export function GlobalSettingsPanel() {
       const { kind, mime } = inferDeskpetAsset(fname);
       const next: DeskpetManifest = {
         states: petManifest.states.map((s) =>
-          s.id === targetId ? { ...s, assets: [...s.assets, { file: fname, rel, kind, mime }] } : s,
+          s.id === targetId ? { ...s, assets: [...s.assets, { file: fname, rel, kind, mime, source: 'user' }] } : s,
         ),
       };
       if (!next.states.some((s) => s.id === targetId)) {
-        next.states.push({ id: targetId, label: targetId, assets: [{ file: fname, rel, kind, mime }] });
+        next.states.push({ id: targetId, label: targetId, assets: [{ file: fname, rel, kind, mime, source: 'user' }] });
       }
       setPetNewState('');
       pushPetManifest(next);
@@ -678,6 +726,19 @@ export function GlobalSettingsPanel() {
                   桌宠
                 </h2>
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
+                  {/* 使用引导：官方素材 / 自定义素材 / 预设隔离 一句话讲清 */}
+                  <div className="p-4 bg-amber-50/60 dark:bg-amber-900/10">
+                    <div className="flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-400 mb-1.5">
+                      <Sparkles size={13} />
+                      使用引导
+                    </div>
+                    <ul className="text-xs text-neutral-600 dark:text-stone-300 space-y-1 leading-relaxed list-disc pl-4">
+                      <li><span className="font-medium text-amber-700 dark:text-amber-400">官方素材</span>：内置桌宠，安装即带、标记「官方」，可复用不可误删基线。</li>
+                      <li><span className="font-medium text-sky-600 dark:text-sky-400">自定义素材</span>：点「导入图片/视频」选本地文件按状态绑定；文件存于用户目录，可随时移除。</li>
+                      <li><span className="font-medium text-emerald-600 dark:text-emerald-400">预设方案</span>：每套预设（素材+缩放+透明度）独立保存、互不干扰；点「新建预设」从官方基线开始（清空当前），避免不同方案素材串味。</li>
+                      <li>支持格式：图片 PNG/JPG/GIF/WebP；视频建议 ≤1.5MB 透明抠像 MP4（或带 Alpha 的 WebM）。</li>
+                    </ul>
+                  </div>
                   {/* 显隐：与「管理拓展」共享单一可见性状态（单一事实源） */}
                   <div className="flex justify-between items-center p-4">
                     <div>
@@ -797,7 +858,10 @@ export function GlobalSettingsPanel() {
                                   >
                                     ×
                                   </button>
-                                  <div className="text-[10px] text-neutral-400 dark:text-stone-500 mt-0.5 max-w-[48px] truncate">{a.file}</div>
+                                  <div className="flex items-center gap-1 mt-0.5">
+                                    <span className={`text-[10px] px-1 rounded shrink-0 ${a.source === 'official' ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400' : 'bg-sky-100 text-sky-600 dark:bg-sky-900/30 dark:text-sky-400'}`}>{a.source === 'official' ? '官方' : '自定义'}</span>
+                                    <span className="text-[10px] text-neutral-400 dark:text-stone-500 truncate max-w-[40px]">{a.file}</span>
+                                  </div>
                                 </div>
                               ))}
                             </div>
@@ -806,11 +870,11 @@ export function GlobalSettingsPanel() {
                       ))}
                     </div>
                   </div>
-                  {/* 预设方案：每个方案（manifest+设置）独立保存，可切换/重命名/删除 */}
+                  {/* 预设方案：每套方案（manifest+设置）独立保存、切换；新建从官方基线清空当前，防止串味 */}
                   <div className="p-4 space-y-3 border-t border-neutral-200/50 dark:border-stone-700/50">
                     <div>
                       <span className="text-sm font-medium block">预设方案</span>
-                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">把当前素材与缩放/透明度存成一套方案，切换时浮窗自动更新；多个方案共享同一批素材。</p>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">每套方案（素材+缩放+透明度）独立保存、互不干扰。「官方默认」为内置基线；「新建预设」从官方基线开始（清空当前），避免不同方案素材串味。</p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <select
@@ -818,7 +882,7 @@ export function GlobalSettingsPanel() {
                         onChange={(e) => handleSelectPreset(e.target.value)}
                         className="px-2 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 outline-none focus:ring-2 focus:ring-[var(--element-border)]"
                       >
-                        <option value="">（默认）</option>
+                        <option value="">官方默认</option>
                         {presets.map((p) => (
                           <option key={p.id} value={p.id}>{p.name}</option>
                         ))}
@@ -830,10 +894,16 @@ export function GlobalSettingsPanel() {
                         className="px-2 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 outline-none focus:ring-2 focus:ring-[var(--element-border)] w-28"
                       />
                       <button
+                        onClick={() => handleNewPreset()}
+                        className="btn-press px-3 py-1.5 rounded-lg bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-200 text-sm font-medium border border-neutral-200/50 dark:border-stone-600/50 hover:bg-neutral-50 dark:hover:bg-stone-600"
+                      >
+                        新建预设（清空当前）
+                      </button>
+                      <button
                         onClick={() => handleSavePreset()}
                         className="btn-press px-3 py-1.5 rounded-lg bg-[var(--element-color-raw)] text-white text-sm font-medium hover:opacity-90"
                       >
-                        保存当前为新预设
+                        保存当前预设
                       </button>
                     </div>
                     {presets.length > 0 && (
