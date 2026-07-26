@@ -8,6 +8,9 @@ export type DeskpetAsset = {
   rel: string; // 相对路径，如 "deskpet-assets/pet/idle1.png"
   kind: "image" | "video";
   mime: string;
+  // 素材来源：官方 = 内置分发、不可被自定义覆盖基线；user = 用户自导入。
+  // 用于设置面板区分标记，并支撑「官方默认」基线在预设切换时始终干净还原。
+  source?: "official" | "user";
 };
 
 export type DeskpetStateDef = {
@@ -127,6 +130,40 @@ export const DESKPET_DEFAULT_MANIFEST: DeskpetManifest = {
   ],
 };
 
+// 当前内置素材全部标记为「官方」：安装即带、作为不可被自定义覆盖的基线。
+// 之后任何对默认清单的克隆都继承 source:'official'。
+(DESKPET_DEFAULT_MANIFEST.states as DeskpetStateDef[]).forEach((s) =>
+  s.assets.forEach((a) => {
+    a.source = "official";
+  }),
+);
+
+// 官方素材相对路径集合：用于把缺 source 的旧缓存清单资产归类为官方或自定义。
+export const OFFICIAL_ASSET_RELS = new Set<string>(
+  DESKPET_DEFAULT_MANIFEST.states.flatMap((s) => s.assets.map((a) => a.rel)),
+);
+
+// 深拷贝一份干净的官方基线清单（每次「新建预设」「切回官方默认」都从它开始，
+// 不带任何用户自定义素材 —— 这是防止不同预设之间素材串味的核心）。
+export function cloneOfficialManifest(): DeskpetManifest {
+  return JSON.parse(JSON.stringify(DESKPET_DEFAULT_MANIFEST)) as DeskpetManifest;
+}
+
+// 归一化清单资产来源：给缺 source 的旧清单资产补齐标记。
+// 缺省按 rel 是否在官方集合内判定官方/自定义，保证升级前后显示一致。
+export function normalizeManifestSources(m: DeskpetManifest): DeskpetManifest {
+  return {
+    schemaVersion: m.schemaVersion,
+    states: m.states.map((s) => ({
+      ...s,
+      assets: s.assets.map((a) => ({
+        ...a,
+        source: a.source ?? (OFFICIAL_ASSET_RELS.has(a.rel) ? "official" : "user"),
+      })),
+    })),
+  };
+}
+
 const IMAGE_EXT: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -227,15 +264,15 @@ export function loadDeskpetManifest(): DeskpetManifest {
           } catch {
             /* 忽略 */
           }
-          return DESKPET_DEFAULT_MANIFEST;
+          return normalizeManifestSources(DESKPET_DEFAULT_MANIFEST);
         }
-        return parsed;
+        return normalizeManifestSources(parsed);
       }
     }
   } catch {
     /* 解析失败使用默认值 */
   }
-  return DESKPET_DEFAULT_MANIFEST;
+  return normalizeManifestSources(DESKPET_DEFAULT_MANIFEST);
 }
 
 export function saveDeskpetManifest(m: DeskpetManifest): void {
