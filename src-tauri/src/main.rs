@@ -33,6 +33,8 @@ use gongfang_kit::commands::*;
 use andeyunhui_lib::screenshot::{self, *};
 use andeyunhui_lib::TrayModeState;
 use andeyunhui_lib::device;
+mod filesearch;
+use filesearch::*;
 
 // 文件关联：以安得云荟打开（一次性列表，进程退出即销毁）
 struct PendingOpenFiles(pub std::sync::Mutex<Vec<String>>);
@@ -111,6 +113,22 @@ fn tray_summon_main(app: tauri::AppHandle) {
 #[tauri::command]
 fn tray_quit(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+// 黄金棋盘天气定位：在后端用 reqwest 取 IP 地理坐标，规避浮窗 WebView2 直接请求 ipapi.co 时
+// 因免费额度 429 不带 CORS 头而被浏览器拦截（控制台报 CORS 错误、且永远回落上海坐标）。
+// 后端请求不受同源策略限制，失败时返回 null，前端再回落默认坐标。
+#[tauri::command]
+async fn capsule_ip_location() -> Option<serde_json::Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .ok()?;
+    let resp = client.get("https://ipapi.co/json/").send().await;
+    match resp {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+        _ => None,
+    }
 }
 
 fn main() {
@@ -493,6 +511,9 @@ fn main() {
                 }
             }
 
+            // 启动内置 Everything 风格文件搜索：后台建索引 + 变更防抖重建（复用 rusqlite/walkdir/notify）
+            filesearch::start_indexing(app.handle());
+
             // 注册录屏热键（从持久化配置读取，默认 Ctrl+Alt+R；设置面板可改写并即时生效）
             {
                 let sc = recording_service::read_recorder_shortcut(app.handle());
@@ -868,6 +889,7 @@ fn main() {
             get_blacklist_paths,
             tray_summon_main,
             tray_quit,
+            capsule_ip_location,
             // ========== 核心：通用工具（文件对话框 / 取消扫描）==========
             pick_directory,
             pick_file,
@@ -893,10 +915,17 @@ fn main() {
             read_track_metadata,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
+            smtc_control,
+            smtc_list_sessions,
             set_active_module,
             set_window_hidden,
             smtc_status,
             debug_log,
+            // ========== 模块：内置 Everything 风格文件搜索 ==========
+            fs_search,
+            fs_index_status,
+            fs_index_build,
+            fs_open_path,
             // ========== 模块：视频 / 玉兰 ==========
             scan_video_root,
             load_video_cache,
@@ -987,6 +1016,9 @@ fn main() {
             window_manager::overlay_window_health,
             window_manager::overlay_window_diag,
             window_manager::overlay_clear_gpu_cache,
+            // ========== 灵动岛胶囊（顶部常驻 + 光标靠近展开 + 点击穿透）==========
+            window_manager::capsule_start_monitor,
+            window_manager::capsule_set_rect,
             // ========== 桌宠：全局设备监听（鼠标/键盘）==========
             device::start_device_listening,
             list_windows,

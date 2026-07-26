@@ -154,4 +154,4 @@ pnpm lint:fix     # ESLint 自动修复
 
 本项目的开发还引用了更多优秀的开源项目、第三方工具与 AI 模型。我们已整理出**完整的公开致谢清单**，涵盖核心框架、前端 / Rust 依赖、嵌入式工具（FFmpeg、PaddleOCR/PP-OCRv4、ONNX Runtime Web、Spotify Basic Pitch）、参考开源项目（BongoCat、Claw Code 等）及其各自的许可证与用途，详见 [`致谢.md`](./致谢.md)。
 
-特别说明：本项目随应用分发并调用 **FFmpeg**（LGPL-2.1+，部分组件为 GPL）进行音视频处理，遵循其许可证；其余引用项目多为 MIT / Apache-2.0 等宽松许可证。
+特别说明：本项目随应用分发并调用 **FFmpeg** 进行音视频处理，实际分发的构建为 GPL-3.0（含 libx264 / libx265 等 GPL 组件，以独立外部进程运行，本应用主程序仍按 MIT 发布），详细许可证与对应源代码获取方式见 [`致谢.md`](./致谢.md)；其余引用项目多为 MIT / Apache-2.0 等宽松许可证。
