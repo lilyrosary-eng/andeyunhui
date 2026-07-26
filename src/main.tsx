@@ -28,7 +28,7 @@ boot.__bootProgress?.(10, { text: "初始化内核", phase: "PHASE 01 / 05" });
 // 窗口分流：检测当前窗口标签，分别走轻量组件，避免主 App 初始化开销
 // 关键：使用动态 import，子窗口（浮窗/歌词）不会加载主 App 的 JS bundle
 async function bootstrap() {
-  let windowKind: "lyrics" | "floating-note" | "floating-clipboard" | "floating-dropzone" | "main" = "main";
+  let windowKind: "lyrics" | "floating-note" | "floating-clipboard" | "floating-dropzone" | "capsule" | "main" = "main";
   try {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const label = getCurrentWindow().label;
@@ -42,6 +42,8 @@ async function bootstrap() {
       windowKind = "floating-clipboard";
     } else if (floating === "dropzone") {
       windowKind = "floating-dropzone";
+    } else if (floating === "capsule") {
+      windowKind = "capsule";
     }
   } catch {
     // 非 Tauri 环境（浏览器开发），检查 URL 参数
@@ -51,6 +53,7 @@ async function bootstrap() {
       if (floating === "true") windowKind = "floating-note";
       else if (floating === "clipboard") windowKind = "floating-clipboard";
       else if (floating === "dropzone") windowKind = "floating-dropzone";
+      else if (floating === "capsule") windowKind = "capsule";
     }
   }
 
@@ -117,6 +120,16 @@ async function bootstrap() {
     ReactDOM.createRoot(root).render(
       <React.StrictMode>
         <FloatingDropzoneView />
+      </React.StrictMode>,
+    );
+  } else if (windowKind === "capsule") {
+    // 灵动岛胶囊：透明背景，独立渲染，不初始化主 App
+    document.documentElement.style.background = 'transparent';
+    document.body.style.background = 'transparent';
+    const Capsule = (await import('./Capsule')).default;
+    ReactDOM.createRoot(root).render(
+      <React.StrictMode>
+        <Capsule />
       </React.StrictMode>,
     );
   } else {

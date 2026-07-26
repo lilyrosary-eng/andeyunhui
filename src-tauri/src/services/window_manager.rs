@@ -12,7 +12,14 @@
 //!   2. `create_transparent_with_retry(...)`：透明窗创建的统一重试引擎——识别 0x8007139F 瞬态
 //!      故障、退避重试、每次失败先销毁可能残留的坏窗，杜绝坏窗残留。
 
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+#[cfg(windows)]
+use windows::Win32::Foundation::POINT;
+
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// WebView2 运行时在 EdgeUpdate 注册表下的固定客户端 GUID。
 const WEBVIEW2_CLIENT_GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
@@ -445,7 +452,7 @@ pub fn overlay_clear_gpu_cache() -> Result<String, String> {
 ///   DOM 更新照常合成呈现。
 pub const OVERLAY_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaSession,HardwareMediaKeyHandling,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling";
 
-#[derive(serde::Deserialize, Default)]
+#[derive(Clone, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayProfile {
     pub width: Option<f64>,
@@ -497,9 +504,15 @@ pub async fn overlay_window_get_or_create(
 ) -> Result<String, String> {
     let p = profile.unwrap_or_default();
 
+    // 记录胶囊重建参数（供渲染崩溃后自动重建）。
+    if label == "capsule" {
+        *CAPSULE_RESTART_INFO.lock().unwrap() = Some((url.clone(), Some(p.clone())));
+    }
+
     // 复用已有健康窗：能取缩放比即健康，直接返回
     if let Some(w) = app.get_webview_window(&label) {
         if w.scale_factor().is_ok() {
+            capsule_mark_alive(&label);
             return Ok(label);
         }
         // 半注册坏窗：先清掉，避免占用 label 阻挡重建
@@ -609,6 +622,7 @@ pub async fn overlay_window_get_or_create(
                 })?;
 
                 if healthy {
+                    capsule_mark_alive(&label);
                     return Ok(label);
                 }
 
@@ -669,6 +683,11 @@ pub async fn overlay_window_get_or_create(
 /// 销毁指定浮窗（前端统一入口的关闭通道，与 `overlay_window_get_or_create` 配对）。
 #[tauri::command]
 pub fn overlay_window_destroy(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    // 胶囊正常关闭：标记失效并重置连续崩溃计数（区别于渲染崩溃——崩溃路径不重置计数）。
+    if label == "capsule" {
+        capsule_mark_dead();
+        CAPSULE_RESTARTS.store(0, Ordering::SeqCst);
+    }
     if let Some(w) = app.get_webview_window(&label) {
         w.destroy().map_err(|e| e.to_string())?;
     }
@@ -781,4 +800,167 @@ pub async fn overlay_window_diag(app: tauri::AppHandle) -> serde_json::Value {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     serde_json::json!({ "results": results })
+}
+
+// ==================== 灵动岛胶囊（Dynamic Island）====================
+// 胶囊是屏幕顶部居中常驻的透明小窗：收起态显示时间与播放状态且点击穿透桌面，
+// 鼠标靠近顶部中央时由 Rust 侧光标监视线程自动展开、露出快捷操作，离开则自动收起。
+// 复用 window_manager 的浮窗基础设施（ensureOverlayWindow / 独立 data_directory / 透明）。
+
+/// 胶囊当前屏幕矩形（物理像素：x, y, w, h）与展开状态，由前端实时上报。
+static CAPSULE_RECT: std::sync::Mutex<Option<(i32, i32, i32, i32)>> = std::sync::Mutex::new(None);
+static CAPSULE_EXPANDED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+static CAPSULE_MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// 胶囊渲染进程是否健康。渲染进程崩溃后立即置 false，作为核心隔离开关：
+/// 任何 Rust 侧（光标监视线程、SMTC 推送、置焦/穿透控制）都不再向已失效的 WebView2
+/// controller 发 COM 调用——这正是「黄金棋盘崩溃拖垮整个软件」的根因（失效 controller 的
+/// COM 调用触发访问违规，使宿主进程以 0xcfffffff 退出）。
+static CAPSULE_ALIVE: AtomicBool = AtomicBool::new(false);
+/// 通知胶囊光标监视线程退出（胶囊销毁/崩溃时置 true）。
+static CAPSULE_MONITOR_CANCEL: AtomicBool = AtomicBool::new(false);
+/// 连续渲染崩溃次数（每次成功创建归零），超过上限停止自动重启，避免崩溃循环耗尽资源。
+static CAPSULE_RESTARTS: AtomicU8 = AtomicU8::new(0);
+/// 胶囊重建所需参数（url + profile），由 `overlay_window_get_or_create` 在创建时记录，
+/// 供渲染崩溃后自动重建使用。
+static CAPSULE_RESTART_INFO: std::sync::Mutex<Option<(String, Option<OverlayProfile>)>> =
+    std::sync::Mutex::new(None);
+
+/// 前端在窗口移动/缩放后上报胶囊物理矩形，供光标监视线程做热区与命中判定。
+#[tauri::command]
+pub fn capsule_set_rect(_app: tauri::AppHandle, x: i32, y: i32, w: i32, h: i32) {
+    *CAPSULE_RECT.lock().unwrap() = Some((x, y, w, h));
+}
+
+/// 启动光标靠近监视线程：每 16ms 轮询光标位置，进入顶部中央热区即展开胶囊并接收点击，
+/// 离开胶囊本体则收起并恢复穿透。仅需在胶囊窗挂载时调用一次。
+#[tauri::command]
+pub fn capsule_start_monitor(app: tauri::AppHandle) {
+    if CAPSULE_MONITOR_STARTED.load(Ordering::SeqCst) {
+        return;
+    }
+    CAPSULE_MONITOR_STARTED.store(true, Ordering::SeqCst);
+    let _ = std::thread::spawn(move || {
+        // 每秒用 scale_factor() 做一次健康探测：返回 Err 即渲染进程已崩溃，立即隔离并安排重建。
+        let mut ticks: u32 = 0;
+        loop {
+            if CAPSULE_MONITOR_CANCEL.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            ticks = ticks.wrapping_add(1);
+            if ticks % 62 == 0 && CAPSULE_ALIVE.load(Ordering::SeqCst) {
+                let app_clone = app.clone();
+                let healthy = run_on_main_thread_result(&app, move || {
+                    app_clone
+                        .get_webview_window("capsule")
+                        .map(|w| w.scale_factor().is_ok())
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+                if !healthy {
+                    // 渲染进程已死：隔离 + 自动重建；重建后前端重新挂载会再起新监视线程。
+                    capsule_handle_renderer_crash(app.clone());
+                    CAPSULE_MONITOR_STARTED.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+            #[cfg(windows)]
+            {
+                let mut pt = POINT { x: 0, y: 0 };
+                if unsafe { GetCursorPos(&mut pt) }.is_ok() {
+                    let rect = *CAPSULE_RECT.lock().unwrap();
+                    let expanded = *CAPSULE_EXPANDED.lock().unwrap();
+                    if let Some((rx, ry, rw, rh)) = rect {
+                        let cx = pt.x;
+                        let cy = pt.y;
+                        // 顶部中央热区：x 落在胶囊左右各 40px、y 在 [0, 胶囊底+70] 内即视为靠近。
+                        // 仅在「进入热区→展开」「离开热区→收起」两种状态切换时改变，避免热区内
+                        // 但窗体外的位置反复横跳导致展开/收起闪烁。
+                        let near = cx >= rx - 40 && cx <= rx + rw + 40 && cy >= 0 && cy <= ry + rh + 70;
+                        if near {
+                            if !expanded {
+                                set_capsule_expanded(&app, true);
+                            }
+                        } else if expanded {
+                            set_capsule_expanded(&app, false);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = &app;
+        }
+    });
+}
+
+/// 设置胶囊展开态：展开时接收点击，收起时穿透桌面，并向前端广播展开事件。
+fn set_capsule_expanded(app: &tauri::AppHandle, expanded: bool) {
+    *CAPSULE_EXPANDED.lock().unwrap() = expanded;
+    // 渲染进程已失效：绝不再向失效 controller 发 COM 调用（避免宿主进程崩溃）。
+    if !CAPSULE_ALIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Some(w) = app.get_webview_window("capsule") {
+        // 二次保险：即便 CAPSULE_ALIVE 尚未更新，也通过 scale_factor 确认渲染进程存活，
+        // 绝不向已崩溃的 controller 发穿透/置焦调用，避免宿主进程被拖垮。
+        if w.scale_factor().is_ok() {
+            // 展开态接收点击（ignore_cursor=false）；收起态穿透桌面（ignore_cursor=true）
+            #[cfg(windows)]
+            let _ = w.set_ignore_cursor_events(!expanded);
+            let _ = w.emit("capsule:expand", expanded);
+        }
+    }
+}
+
+/// 标记胶囊渲染健康（在 `overlay_window_get_or_create` 健康检查通过时调用）。
+fn capsule_mark_alive(label: &str) {
+    if label == "capsule" {
+        CAPSULE_ALIVE.store(true, Ordering::SeqCst);
+        CAPSULE_MONITOR_CANCEL.store(false, Ordering::SeqCst);
+        CAPSULE_RESTARTS.store(0, Ordering::SeqCst);
+    }
+}
+
+/// 标记胶囊已失效（销毁或渲染崩溃），停止一切后续 COM 调用与监视。
+fn capsule_mark_dead() {
+    CAPSULE_ALIVE.store(false, Ordering::SeqCst);
+    CAPSULE_MONITOR_CANCEL.store(true, Ordering::SeqCst);
+    CAPSULE_MONITOR_STARTED.store(false, Ordering::SeqCst);
+}
+
+/// 胶囊渲染进程崩溃的统一处理入口（由 ProcessFailed 处理器或监视线程健康探测调用）。
+///
+/// 核心隔离逻辑：立即标记失效并销毁坏窗，阻止任何后续 Rust 侧向失效 controller 发 COM
+/// 调用；随后在 1.2s 后自动重建（带独立 WebView2 环境，绕开坏窗）。连续崩溃超过 5 次则
+/// 停止自动重启，避免崩溃循环耗尽资源。
+pub fn capsule_handle_renderer_crash(app: tauri::AppHandle) {
+    if !CAPSULE_ALIVE.load(Ordering::SeqCst) {
+        return; // 已处理过，避免重复销毁/重启
+    }
+    capsule_mark_dead();
+    // 在主线程安全销毁坏窗（wry 要求窗操作在主线程）。
+    let destroy_app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = destroy_app.get_webview_window("capsule") {
+            let _ = w.destroy();
+        }
+    });
+    // 限制连续重启次数，避免崩溃循环。
+    let attempts = CAPSULE_RESTARTS.fetch_add(1, Ordering::SeqCst) + 1;
+    if attempts > 5 {
+        eprintln!(
+            "[Capsule] 胶囊渲染进程连续崩溃 {} 次，停止自动重启（请检查 WebView2 运行时）",
+            attempts
+        );
+        return;
+    }
+    // 1.2s 后自动重建（带独立 WebView2 环境，绕开坏窗）。
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let info = CAPSULE_RESTART_INFO.lock().unwrap().clone();
+        if let Some((url, profile)) = info {
+            let _ = overlay_window_get_or_create(app, "capsule".into(), url, profile).await;
+        }
+    });
 }
