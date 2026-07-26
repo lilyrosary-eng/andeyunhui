@@ -1,0 +1,14 @@
+{
+  "id": "capsule",
+  "name": "黄金棋盘",
+  "version": "1.0.0",
+  "hostApiVersion": 1,
+  "entry": "index.js",
+  "kind": "module",
+  "iconName": "LayoutGrid",
+  "visible": false,
+  "parent": "niaoluo",
+  "codename": "茑萝",
+  "desc": "屏幕顶部居中常驻的黄金棋盘，后续功能待扩展。",
+  "deps": []
+}

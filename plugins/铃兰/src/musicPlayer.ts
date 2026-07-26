@@ -191,11 +191,12 @@ class MusicPlayer {
       .then((s: Record<string, unknown>) => console.log('[SMTC诊断]', s))
       .catch(() => {});
     api
-      .listen<{ action?: string; target?: string } | string>('smtc-control', (e) => {
-        // 兼容新旧载荷：新版为 {action,target}，旧版为纯字符串。
-        const raw = e.payload as { action?: string; target?: string } | string;
+      .listen<{ action?: string; target?: string; value?: number } | string>('smtc-control', (e) => {
+        // 兼容新旧载荷：新版为 {action,target,value}，旧版为纯字符串。
+        const raw = e.payload as { action?: string; target?: string; value?: number } | string;
         const action = typeof raw === 'string' ? raw : raw?.action;
         const target = typeof raw === 'string' ? '' : raw?.target;
+        const value = typeof raw === 'object' ? raw?.value : undefined;
         // 关键：仅当任务栏当前胜出来源是音乐时才响应；target 为空则兼容旧行为（都响应）。
         if (target && target !== 'music') {
           debugLog(`music BTN ignored action=${action} target=${target}`);
@@ -219,6 +220,9 @@ class MusicPlayer {
             this.pause();
             this.audio.currentTime = 0;
             this.updateMediaSessionPosition();
+            break;
+          case 'volume':
+            if (typeof value === 'number' && isFinite(value)) this.setVolume(value);
             break;
           case 'seekforward':
             this.seek(this.audio.currentTime + 10);
