@@ -1,7 +1,7 @@
 import {
   Music2, Image, Video, BookOpen, Briefcase, FileText, Toolbox,
   Images, FileType, Film, AudioLines, Regex, Diff, Braces, Binary, Link, Table, Hash, KeyRound, Network, Cpu, Variable, Clipboard,
-  Repeat, Type, ChartColumn, SlidersHorizontal, Paintbrush, Code, FolderOpen, Bot, Sparkles,
+  Repeat, Type, ChartColumn, SlidersHorizontal, Paintbrush, Code, FolderOpen, Bot, Sparkles, LayoutGrid,
   // 播放器图标
   Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, List, ListMusic, Shuffle, Repeat1, Music, Mic2, Lock, Unlock,
   Maximize, Minimize, ArrowLeft, ChevronLeft, ChevronRight, Search, Plus, Check, MoreHorizontal, File, RefreshCw,
@@ -46,6 +46,7 @@ const iconMap: Record<string, LucideIcon> = {
   FolderOpen,
   Bot,
   Sparkles,
+  LayoutGrid,
   // 播放器通用图标
   Play,
   Pause,

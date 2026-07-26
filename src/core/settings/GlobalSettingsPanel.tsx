@@ -10,6 +10,7 @@ import { DevConsole } from '@/core/settings/DevConsole'
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
+
 import { logger } from '@/lib/logger';
 import { api, type ArchiveEntry, type PluginManifest } from '@/lib/api';
 import { useTheme } from '@/lib/ThemeProvider';
@@ -298,6 +299,44 @@ export function GlobalSettingsPanel() {
     window.dispatchEvent(new CustomEvent('niaoluo-rag-visibility'));
     if (!val && activeModule === 'rag') setActiveModule('extensions');
   };
+
+  // ---- 黄金棋盘（原灵动岛）：与「管理拓展」共享单一可见性状态（单一事实源，避免两处开关脱节）----
+  // 完全复用桌宠的插件热插拔机制：开关 → setPluginVisibility + pluginHot.load/unload + 派发
+  // plugin-visibility-changed；真正建/销窗在插件自身（加载即建窗、监听可见性事件热插拔）。
+  const [capsuleVisible, setCapsuleVisible] = useState<boolean | null>(null);
+  const [capsuleManifest, setCapsuleManifest] = useState<PluginManifest | null>(null);
+  const capsuleHot = (window as unknown as { __pluginHot__?: { load: (m: PluginManifest) => Promise<void>; unload: (id: string) => void } }).__pluginHot__;
+
+  useEffect(() => {
+    let active = true;
+    api.getInstalledPlugins()
+      .then((res) => {
+        const d = (res.valid ?? []).find((p) => p.id === 'capsule');
+        if (d && active) { setCapsuleManifest(d); setCapsuleVisible(d.visible !== false); }
+      })
+      .catch(() => {});
+    const onVis = (e: Event) => {
+      const ce = e as CustomEvent<{ id: string; visible: boolean }>;
+      if (ce.detail?.id !== 'capsule') return;
+      setCapsuleVisible(ce.detail.visible);
+    };
+    window.addEventListener('plugin-visibility-changed', onVis);
+    return () => { active = false; window.removeEventListener('plugin-visibility-changed', onVis); };
+  }, []);
+
+  const toggleCapsule = useCallback(async (val: boolean) => {
+    if (!capsuleManifest) return;
+    setCapsuleVisible(val);
+    try {
+      await api.setPluginVisibility('capsule', val);
+      if (val) await capsuleHot?.load(capsuleManifest);
+      else capsuleHot?.unload('capsule');
+      window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id: 'capsule', visible: val } }));
+      if (!val && activeModule === 'capsule') setActiveModule('extensions');
+    } catch {
+      setCapsuleVisible(!val);
+    }
+  }, [capsuleManifest, capsuleHot, activeModule, setActiveModule]);
 
   useEffect(() => {
     let alive = true;
@@ -944,6 +983,17 @@ export function GlobalSettingsPanel() {
                     <Switch
                       checked={ragVisible}
                       onCheckedChange={(val: boolean) => toggleRagModule(val)}
+                      className="data-[state=checked]:bg-[var(--element-color-raw)]"
+                    />
+                  </div>
+                  <div className="flex justify-between items-center p-4">
+                    <div>
+                      <span className="text-sm font-medium block">显示黄金棋盘</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">顶部居中悬浮的黄金棋盘，关闭后从屏幕顶部移除。</p>
+                    </div>
+                    <Switch
+                      checked={capsuleVisible ?? false}
+                      onCheckedChange={(val: boolean) => { void toggleCapsule(val); }}
                       className="data-[state=checked]:bg-[var(--element-color-raw)]"
                     />
                   </div>

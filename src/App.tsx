@@ -133,6 +133,7 @@ function App() {
       await ensureScreenshotOverlay().catch(() => {});
       console.log('[preheat] screenshot-overlay 就绪 +' + Math.round(performance.now() - t0) + 'ms');
       // 2) 其余常驻浮窗：复用 ensureOverlayWindow 创建后隐藏；首次使用时直接复用已预热实例
+      // 注：黄金棋盘（胶囊）不再随 App 预热自启；它由「茑萝」子模块设置开关，经主程序安得云荟显式拉起。
       const others: Array<{ label: string; url: string; profile: Parameters<typeof ensureOverlayWindow>[2] }> = [
         {
           label: 'floating-clipboard',
@@ -301,7 +302,7 @@ function App() {
   const mainPluginIds = useMemo(() => {
     if (!pluginRegistry) return [] as string[];
     return pluginRegistry.getAll()
-      .filter((p: { kind: string; visible?: boolean; id: string }) => p.kind === 'module' && p.visible !== false)
+      .filter((p: { kind: string; visible?: boolean; parent?: string; id: string }) => p.kind === 'module' && p.visible !== false && !p.parent)
       .map((p: { id: string }) => p.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- visibilityTick 是计数器，用于强制重算（插件可见性变化时递增）
   }, [pluginRegistry, visibilityTick]);
