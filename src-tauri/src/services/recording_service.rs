@@ -1389,6 +1389,8 @@ pub fn create_recorder_widget_window(app: &AppHandle) -> Result<(), String> {
     .shadow(false)
     .visible(true) // 透明(layered)子窗绝不能用 visible:false 创建，否则 WebView2 报 0x8007139F 坏窗
     .data_directory(per_window_data_dir(app, RECORDER_WINDOW_LABEL))
+    // 独立环境不继承主窗 flag：禁用遮挡检测/后台化，保证失焦时录制计时等 UI 持续重绘
+    .additional_browser_args(crate::services::window_manager::OVERLAY_BROWSER_ARGS)
     .build()
     .map_err(|e| format!("创建录屏控制台失败: {}", e))?;
 
@@ -1432,6 +1434,8 @@ pub fn create_recording_border_window(app: &AppHandle) -> Result<(), String> {
     .shadow(false)
     .visible(true) // 透明(layered)子窗绝不能用 visible:false 创建，否则 WebView2 报 0x8007139F 坏窗
     .data_directory(per_window_data_dir(app, RECORDING_BORDER_LABEL))
+    // 独立环境不继承主窗 flag：禁用遮挡检测/后台化，保证录制中边框持续呈现
+    .additional_browser_args(crate::services::window_manager::OVERLAY_BROWSER_ARGS)
     .build()
     .map_err(|e| format!("创建录屏边框窗失败: {}", e))?;
 
@@ -1569,6 +1573,8 @@ pub fn create_recorder_select_window(app: &AppHandle) -> Result<(), String> {
     .visible(true) // 透明(layered)子窗绝不能用 visible:false 创建，否则 WebView2 报 0x8007139F 坏窗
     .shadow(false) // 去除 Windows 11 不可见调整边框，与截图覆盖窗一致
     .data_directory(per_window_data_dir(app, RECORDER_SELECT_LABEL))
+    // 独立环境不继承主窗 flag：与其他浮窗保持一致的浏览器参数（禁用遮挡检测/后台化）
+    .additional_browser_args(crate::services::window_manager::OVERLAY_BROWSER_ARGS)
     .build()
     .map_err(|e| format!("创建录屏区域选择窗口失败: {}", e))?;
 

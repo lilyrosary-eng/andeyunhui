@@ -18,6 +18,7 @@ import { previewBootScreen } from '@/lib/bootPreview';
 import { SlidingTabs } from '@/components/motion/SlidingTabs';
 import { useI18n, LANGUAGES, type Language } from '@/lib/i18n';
 import { DeskpetManifest, loadDeskpetManifest, saveDeskpetManifest, inferDeskpetAsset, DeskpetPreset, loadDeskpetPresets, saveDeskpetPresets, loadActivePresetId, saveActivePresetId } from '@/deskpetManifest';
+import { useAppStore } from '@/stores/appStore';
 
 type TabId = 'general' | 'themes' | 'extensions' | 'transfer' | 'model' | 'blacklist' | 'about';
 
@@ -284,6 +285,19 @@ export function GlobalSettingsPanel() {
   const [deskpetVisible, setDeskpetVisible] = useState<boolean | null>(null);
   const [deskpetManifest, setDeskpetManifest] = useState<PluginManifest | null>(null);
   const deskpetHot = (window as unknown as { __pluginHot__?: { load: (m: PluginManifest) => Promise<void>; unload: (id: string) => void } }).__pluginHot__;
+
+  // ---- 茑萝 RAG 模块：默认不在侧栏展示（manifest.visible=false，作为内置功能），由本开关控制显隐 ----
+  const setActiveModule = useAppStore((s) => s.setActiveModule);
+  const activeModule = useAppStore((s) => s.activeModule);
+  const [ragVisible, setRagVisible] = useState<boolean>(() => {
+    try { return localStorage.getItem('niaoluo:rag-visible') === '1'; } catch { return false; }
+  });
+  const toggleRagModule = (val: boolean) => {
+    setRagVisible(val);
+    try { localStorage.setItem('niaoluo:rag-visible', val ? '1' : '0'); } catch { /* ignore */ }
+    window.dispatchEvent(new CustomEvent('niaoluo-rag-visibility'));
+    if (!val && activeModule === 'rag') setActiveModule('extensions');
+  };
 
   useEffect(() => {
     let alive = true;
@@ -842,6 +856,26 @@ export function GlobalSettingsPanel() {
                         ))}
                       </div>
                     )}
+                  </div>
+                </div>
+              </section>
+              {/* 茑萝：RAG 知识库模块在侧边栏的显隐（功能仍保留，仅控制是否在「茑萝」列表展示） */}
+              <section>
+                <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
+                  <Puzzle size={14} />
+                  茑萝
+                </h2>
+                <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
+                  <div className="flex justify-between items-center p-4">
+                    <div>
+                      <span className="text-sm font-medium block">显示 RAG 知识库模块</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">RAG 为内置功能，关闭后从「茑萝」侧边栏列表隐藏，需要时再开启。</p>
+                    </div>
+                    <Switch
+                      checked={ragVisible}
+                      onCheckedChange={(val: boolean) => toggleRagModule(val)}
+                      className="data-[state=checked]:bg-[var(--element-color-raw)]"
+                    />
                   </div>
                 </div>
               </section>

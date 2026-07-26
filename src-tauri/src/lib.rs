@@ -2,6 +2,7 @@ pub mod commands;
 pub mod smtc;
 pub mod screenshot;
 pub mod services;
+pub mod device;
 // 专业模块「薄荷」工具以内部依赖包形式存在（crates/pro-tools-kit）
 // 主 crate 通过 `use pro_tools_kit::*;` 直接引入命令（见 main.rs）
 

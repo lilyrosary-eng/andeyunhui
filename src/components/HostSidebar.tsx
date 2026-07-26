@@ -33,15 +33,31 @@ export function HostSidebar() {
     };
   }, []);
 
+  // 茑萝子模块「rag」默认不在侧栏展示（其 manifest.visible=false，作为内置功能），
+  // 由「全局设置 → 茑萝 → 显示 RAG 知识库模块」开关控制。
+  const [ragVisible, setRagVisible] = useState<boolean>(() => {
+    try { return localStorage.getItem('niaoluo:rag-visible') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    const onRagVis = () => setRagVisible(localStorage.getItem('niaoluo:rag-visible') === '1');
+    window.addEventListener('niaoluo-rag-visibility', onRagVis);
+    return () => window.removeEventListener('niaoluo-rag-visibility', onRagVis);
+  }, []);
+
   // 子插件列表（归属 niaoluo 的模块类插件）
   const children = useMemo(
     () =>
       pluginRegistry
         ? pluginRegistry
             .getAll()
-            .filter((p) => p.kind === 'module' && p.parent === 'niaoluo')
+            .filter(
+              (p) =>
+                p.kind === 'module' &&
+                p.parent === 'niaoluo' &&
+                (p.id !== 'rag' || ragVisible),
+            )
         : [],
-    [pluginRegistry, tick],
+    [pluginRegistry, tick, ragVisible],
   );
 
   const filtered = useMemo(() => {

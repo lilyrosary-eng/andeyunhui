@@ -110,15 +110,22 @@ hostApi
       const m = raw ? JSON.parse(raw) : null;
       // 陈旧清单（引用已更名的 idle1/idle2、中文 常态* 或文件名与当前缺省不符）回发 null，
       // 并清除主窗 stale 缓存，让浮窗保留本地缺省清单，避免覆盖为失效素材。
-      const isLegacy =
+      // 旧文件名（idle1/idle2、中文 常态*）或内置默认清单结构版本过低（无 user_external_deps 自定义素材、
+      // 且缺省 idle 帧集合已变更如新增 idleup/idledown/idleright）→ 视为陈旧回退缺省。
+      const hasUser =
         m && Array.isArray(m.states) &&
-        m.states.some((s: any) =>
-          (s.assets || []).some((a: any) =>
-            ['idle1.png', 'idle2.png', 'idle1', 'idle2', '常态'].some((tok: string) =>
-              (a.rel || a.file || '').toLowerCase().includes(tok),
+        m.states.some((s: any) => (s.assets || []).some((a: any) => (a.rel || '').includes('user_external_deps')));
+      const schemaStale = !hasUser && !(m && (m as any).schemaVersion >= 2);
+      const isLegacy =
+        schemaStale ||
+        (m && Array.isArray(m.states) &&
+          m.states.some((s: any) =>
+            (s.assets || []).some((a: any) =>
+              ['idle1.png', 'idle2.png', 'idle1', 'idle2', '常态'].some((tok: string) =>
+                (a.rel || a.file || '').toLowerCase().includes(tok),
+              ),
             ),
-          ),
-        );
+          ));
       if (isLegacy) {
         try {
           localStorage.removeItem(MANIFEST_KEY);

@@ -426,6 +426,25 @@ pub fn overlay_clear_gpu_cache() -> Result<String, String> {
 /// 所有字段可选，未传则套用透明的「安全默认档」——与已验证可抗 0x8007139F 的写法一致。
 /// `rename_all = "camelCase"`：JS 侧以 camelCase（如 dragDropEnabled）传入，Rust 侧字段为 snake_case，
 /// 显式声明以保证嵌套结构字段也能正确反序列化（否则多词字段会被忽略、落到默认值）。
+/// 独立 data_directory 浮窗的 WebView2 浏览器参数。
+///
+/// 关键背景：主窗 `tauri.conf.json` 的 `additionalBrowserArgs` 只作用于主窗自己的
+/// WebView2 环境；每个浮窗因 0x8007139F 修复走独立 `data_directory` → 独立浏览器进程，
+/// **不会继承主窗的任何 flag**。而 Chromium 的原生窗口遮挡检测
+/// (CalculateNativeWinOcclusion) 会把透明分层窗(WS_EX_LAYERED)误判为「被完全遮挡」，
+/// 直接停掉渲染进程的合成呈现 —— 现象即「桌宠失焦后按键/朝向不再重绘，开 devtools
+/// （renderer 被豁免后台化）才恢复」。`NotifyParentWindowPositionChanged` 唤不醒被判
+/// 遮挡的 renderer，故必须从源头禁用遮挡检测与后台化节流。
+///
+/// 各 flag 作用：
+/// - msWebOOUI/msPdfOOUI/msSmartScreenProtection：wry 默认禁用项，覆盖时必须带上；
+/// - MediaSession/HardwareMediaKeyHandling：与主窗一致，避免浮窗播视频时注册重复 SMTC 卡片；
+/// - CalculateNativeWinOcclusion：禁用原生窗口遮挡检测（透明浮窗失焦冻结的根因）；
+/// - --disable-backgrounding-occluded-windows / --disable-renderer-backgrounding /
+///   --disable-background-timer-throttling：禁止 renderer 后台化与定时器节流，保证失焦时
+///   DOM 更新照常合成呈现。
+pub const OVERLAY_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaSession,HardwareMediaKeyHandling,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling";
+
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayProfile {
@@ -547,7 +566,9 @@ pub async fn overlay_window_get_or_create(
             .position(x, y)
             .inner_size(inner_w, inner_h)
             .visible(true) // 透明(layered)窗绝不用 visible:false，否则 WebView2 报 0x8007139F 坏窗
-            .data_directory(per_win_dd);
+            .data_directory(per_win_dd)
+            // 独立环境不继承主窗 flag：必须显式禁用遮挡检测/后台化，否则透明浮窗失焦即停渲染
+            .additional_browser_args(OVERLAY_BROWSER_ARGS);
             if let Some(mw) = min_w {
                 b = b.min_inner_size(mw, min_h.unwrap_or(200.0));
             }
@@ -716,6 +737,7 @@ pub async fn overlay_window_diag(app: tauri::AppHandle) -> serde_json::Value {
                     .inner_size(400.0, 300.0)
                     .visible(true)
                     .data_directory(per_win_dd)
+                    .additional_browser_args(OVERLAY_BROWSER_ARGS)
                     .build()
                     .map(|_| ())
                     .map_err(|e| e.to_string())
