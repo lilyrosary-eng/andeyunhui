@@ -503,7 +503,7 @@ function VideoCanvas({
       .then((m) => (m.getCurrentWebview() as any).openDevtools?.())
       .catch(() => {});
   if (new URLSearchParams(location.search).has("devtools")) tryOpenDevtools();
-  listen("deskpet:open-devtools").then(() => tryOpenDevtools());
+  void listen("deskpet:open-devtools", () => tryOpenDevtools());
 })();
 
 export function DeskpetPet() {
