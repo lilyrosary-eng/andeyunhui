@@ -103,7 +103,14 @@ export default defineConfig(() => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      ignored: [
+        "**/src-tauri/**",
+        // external-deps 内的素材（桌宠 png、ffmpeg、paddleocr 等）由运行的 app 经
+        // asset:// 或 read_external_dep_file 持续占用，Windows 上被锁文件会让 Vite 的
+        // fs watcher 抛 EBUSY 直接崩溃（见 idleface.png EBUSY 报错）。这些文件不属 Vite
+        // 模块图、无需 HMR，整体跳过监视即可。
+        "**/external-deps/**",
+      ],
     },
   },
 }));

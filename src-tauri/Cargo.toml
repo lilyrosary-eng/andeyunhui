@@ -58,6 +58,9 @@ gongfang-kit = { path = "../crates/gongfang-kit", default-features = false }
 image = "0.25"
 base64 = "0.22"
 arboard = "3"
+# 桌宠全局设备监听（鼠标/键盘）：被动全局钩子，emit 原始输入事件给 deskpet 浮窗
+# 0.5.x 的 listen 接受捕获式 FnMut 闭包（可直接 move AppHandle），更简洁
+rdev = "0.5"
 # 微信式截图：可见窗口枚举（EnumWindows）+ 长截图 PrintWindow（仍走 GDI）
 winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase", "objbase", "combaseapi", "jobapi2", "objidl", "unknwnbase", "winerror", "ole2", "wtypes", "minwindef", "windef", "guiddef"] }
 # WGC 屏幕捕获后端（替换 GDI BitBlt）：基于 Windows.Graphics.Capture，硬件加速、可截独占全屏游戏；
