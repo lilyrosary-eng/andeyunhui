@@ -1,11 +1,12 @@
-/// <reference path="../../global.d.ts" />
+/// <reference path="../../../global.d.ts" />
 import React from "react";
 // 桌宠插件入口 — 常驻透明浮窗 + 多素材下发（keyed）+ Phase A 基础设置桥接
 //
 // 架构约定（务必遵循，否则 dev 不生效）：
 //   - 插件源码必须放在 plugins/<id>/，predev 的 deploy-plugins.mjs 会把它 vite build
 //     成 dist/ 并复制到 bundled-plugins/<id>/。直接改 bundled-plugins/ 会被 cleanStalePlugins 清掉。
-//   - 本插件 kind=service：不进入左侧导航栏图标栏，但 visible:true 仍会被 PluginHost 加载并建浮窗。
+//   - 本插件 kind=module + parent:'niaoluo'：作为「茑萝」下的内置子插件（全局依赖）随安得云荟常驻加载并建浮窗，
+//     不进入左侧主导航栏，但会出现在「茑萝」侧边栏（与黄金棋盘同列）；visible:true 使其全局常驻可用。
 //   - 宠物「素材」放在依赖包 external-deps/deskpet-assets/pet/（.mujin 分发），
 //     插件包只放核心组件（本文件 + 浮窗组件），符合「素材在依赖包、插件只放核心」的约定。
 //   - 加载即建浮窗；禁用时脚本不执行，destroy 钩子销毁浮窗（热插拔）。
@@ -216,18 +217,21 @@ function DeskpetPlaceholder() {
     React.createElement(
       'span',
       { className: 'text-xs' },
-      '在「全局设置 · 常规」或「茑萝」中可开关桌宠。',
+      '在「全局设置 · 常规」的「茑萝」分区可开关桌宠。',
     ),
   );
 }
 
 // ========== 注册 ==========
-// 注意：本插件不挂 settings（避免本插件在导航栏出现图标）；常规页仅保留「桌宠显示」开关与基础设置。
+// 作为「茑萝」下的内置子插件（parent:'niaoluo'）：不进主导航栏，出现在「茑萝」侧边栏；
+// kind:'module' 使其可被侧栏列出；visible:true 作为全局依赖常驻加载建浮窗。
 window.__PLUGIN_REGISTRY__.register({
   id: DESKPET_LABEL,
   name: '桌宠',
   iconName: 'Sparkles',
-  kind: 'service',
+  kind: 'module',
+  parent: 'niaoluo',
+  codename: '茑萝',
   visible: true,
   component: DeskpetPlaceholder,
   // 卸载/禁用时清理监听并销毁浮窗（热插拔，避免孤儿窗）

@@ -32,7 +32,9 @@ chrono = "0.4"
 lofty = "0.24.0"
 walkdir = "2"
 rayon = "1"
-reqwest = { version = "0.12", features = ["json"] }
+# 局域网传输客户端禁止走系统代理：default-features 含 proxy/system-proxy，会把 LAN 请求路由到
+# （可能失效的）系统代理导致「接收可/发送不可」。这里关掉默认特性，仅保留 json + rustls-tls。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # RAG 向量存储后端：bundled 模式从源码编译 SQLite，零外部依赖、跨平台（Windows 构建友好）
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
@@ -40,7 +42,12 @@ regex = "1"
 sha2 = "0.10"
 # tokio 显式依赖：mcp_service 用 tokio::task::spawn_blocking 在独立线程跑 stdio JSON-RPC
 # （tauri 2 内部用 tokio，但应用代码需显式声明才能 use tokio::）
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+# 传输模块需 net/io-util/macros：UDP 组播发现 + axum HTTP 服务端
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+# 局域网传输（LocalSend v2 兼容）：axum 提供 HTTP 文件传输服务端，futures-util 流式读写大文件
+axum = "0.7"
+futures-util = "0.3"
+tempfile = "3"
 mimalloc = "0.1"
 epub-parser = "=0.3.4"
 ammonia = "4"
@@ -73,7 +80,8 @@ quick-xml = "0.39"
 # 原生 PDF 解析（文字 + 图片提取），替代 markitdown
 pdf-extract = "0.12"
 # pdf-extract 内部使用 lopdf 抽取图片，但对其为私有依赖，这里显式声明以便直接使用
-lopdf = "0.42"
+# embed_image 特性提供 xobject::image_from，用于把 OCR 源图写入 PDF
+lopdf = { version = "0.42", features = ["embed_image"] }
 # 一次性预编译正则（html_to_md 等热路径）
 once_cell = "1"
 # 统一日志门面：release 默认 warn 级别，dev 开 debug；替代散落的 eprintln!
@@ -107,7 +115,9 @@ windows = { version = "0.62", features = [
   "Win32_Graphics_Direct3D",
   "Win32_Graphics_Direct3D11",
   "Win32_Graphics_Direct3D_Fxc",
+  "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dxgi",
+  "Win32_Foundation",
   "Media",
   "Media_Playback",
   "Media_Control",

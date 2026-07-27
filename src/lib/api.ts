@@ -160,6 +160,13 @@ export const api = {
   translateText: (text: string, targetLang?: string, sourceLang?: string, profileId?: string) =>
     invoke<string>('translate_text', { text, targetLang, sourceLang, profileId }),
 
+  // OCR 文本校对 / 整理：将 OCR 原文交给文本模型纠错整理（用于 DeepSeek 等不支持识图的模型）
+  aiOcrEnhance: (text: string, profileId?: string) =>
+    invoke<string>('ai_ocr_enhance', { text, profileId }),
+  // 将 OCR 源图导出为保留原始版面的 PDF（图像保真，布局 100% 不变）
+  ocrExportPdf: (path: string, imageBase64: string, mime: string) =>
+    invoke<void>('ocr_export_pdf', { path, imageBase64, mime }),
+
   // 列出中转站文件
   listTransferStationFiles: () => invoke<TransferStationFile[]>('list_transfer_station_files'),
 

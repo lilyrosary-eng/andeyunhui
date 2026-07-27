@@ -2263,6 +2263,9 @@ pub fn import_to_dropzone(
     app: tauri::AppHandle,
     source_path: String,
     placeholder_label: Option<String>,
+    // 移动语义：true 时把源文件 rename 进 dropzone（同卷零拷贝；跨卷回退 copy+删源），
+    // 并删除空的源会话文件夹，避免「保存目录 + 中转站」双重落盘。默认 false（复制，兼容录屏等调用方）。
+    move_source: Option<bool>,
 ) -> Result<ImportedFile, String> {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2325,12 +2328,36 @@ pub fn import_to_dropzone(
     let file_name_t = file_name;
     let temp_id_t = file_id;
     std::thread::spawn(move || {
-        if std::fs::copy(&source_path_t, &dest_path_t).is_err() {
-            let _ = app_thread.emit(
-                "dropzone-saving-done",
-                serde_json::json!({ "tempId": temp_id_t }),
-            );
-            return;
+        let move_src = move_source.unwrap_or(false);
+        // 移动语义：优先 rename（同卷原子、零拷贝、磁盘不翻倍）；跨卷 rename 失败回退 copy+删源。
+        // 移动/复制成功后尝试删除空的源会话文件夹（save_dir/<session_id>），避免残留空壳目录。
+        let need_copy = if move_src {
+            match std::fs::rename(&source_path_t, &dest_path_t) {
+                Ok(_) => {
+                    let _ = std::fs::remove_dir(
+                        Path::new(&source_path_t).parent().unwrap_or_else(|| Path::new("")),
+                    );
+                    false
+                }
+                Err(_) => true,
+            }
+        } else {
+            true
+        };
+        if need_copy {
+            if std::fs::copy(&source_path_t, &dest_path_t).is_err() {
+                let _ = app_thread.emit(
+                    "dropzone-saving-done",
+                    serde_json::json!({ "tempId": temp_id_t }),
+                );
+                return;
+            }
+            if move_src {
+                let _ = std::fs::remove_file(&source_path_t);
+                let _ = std::fs::remove_dir(
+                    Path::new(&source_path_t).parent().unwrap_or_else(|| Path::new("")),
+                );
+            }
         }
         // 同时生成「存档」快照（设置「中转站 / 存档」：文件一拖入即快照，可恢复/删除）。
         // 超大文件（>100MB）跳过快照，避免整文件读入内存导致 OOM。

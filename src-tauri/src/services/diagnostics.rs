@@ -143,7 +143,13 @@ impl GraphicsCaptureApiHandler for TestCapture {
                 Some(conv) => {
                     let mut bytes = Vec::new();
                     match conv.convert(frame.as_raw_texture(), &mut bytes) {
-                        Ok(()) => bytes,
+                        // 非阻塞读回：Ok(true)=本帧产出；Ok(false)=GPU 未就绪，本帧无产出
+                        // （latest 槽保留上一帧，节拍器继续投旧帧，与真实录制一致）
+                        Ok(true) => bytes,
+                        Ok(false) => {
+                            self.counter.fetch_add(1, Ordering::SeqCst);
+                            return Ok(());
+                        }
                         Err(_) => {
                             // 单帧 GPU 转换失败：标记失效并回退 RGBA，避免写入错误格式字节损坏视频。
                             self.gpu_failed = true;

@@ -138,4 +138,13 @@ export const zhTW: Record<string, string> = {
   'settings.about.errorLog': '錯誤紀錄',
   'settings.about.errorLogDesc': '開啟紀錄資料夾，可直接提交 log 檔案給開發者排查問題',
   'settings.about.openFolder': '開啟資料夾',
+
+  // 茑蘿 - 檔案搜尋
+  'niaoluo.search.title': '檔案搜尋',
+  'niaoluo.search.placeholder': '搜尋檔案 / 資料夾…',
+  'niaoluo.search.indexing': '正在索引檔案…',
+  'niaoluo.search.indexed': '已索引 {count} 項',
+  'niaoluo.search.noResults': '無匹配結果',
+  'niaoluo.search.prompt': '輸入關鍵字即時搜尋（名稱 / 路徑）',
+  'niaoluo.search.waitIndex': '首次索引中，請稍候…',
 };

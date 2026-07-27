@@ -149,4 +149,13 @@ export const zhCN: Record<string, string> = {
   'settings.about.errorLog': '报错日志',
   'settings.about.errorLogDesc': '打开日志文件夹，可直接提交 log 文件给开发者排查问题',
   'settings.about.openFolder': '打开文件夹',
+
+  // 茑萝 - 文件搜索
+  'niaoluo.search.title': '文件搜索',
+  'niaoluo.search.placeholder': '搜索文件 / 文件夹…',
+  'niaoluo.search.indexing': '正在索引文件…',
+  'niaoluo.search.indexed': '已索引 {count} 项',
+  'niaoluo.search.noResults': '无匹配结果',
+  'niaoluo.search.prompt': '输入关键字即时搜索（名称 / 路径）',
+  'niaoluo.search.waitIndex': '首次索引中，请稍候…',
 };

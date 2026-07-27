@@ -33,6 +33,8 @@ use gongfang_kit::commands::*;
 use andeyunhui_lib::screenshot::{self, *};
 use andeyunhui_lib::TrayModeState;
 use andeyunhui_lib::device;
+use andeyunhui_lib::transfer;
+use andeyunhui_lib::services::window_manager::overlay_window_destroy;
 mod filesearch;
 use filesearch::*;
 
@@ -278,6 +280,20 @@ fn main() {
             // ============ Windows 原生 SMTC（任务栏「正在播放」）============
             // 注册本进程媒体会话，显示「安得云荟」+ 元信息，并接管系统媒体键。
             init_smtc(app.handle().clone());
+
+            // ============ 局域网传输（LocalSend v2 兼容，黄金棋盘·传输）============
+            // 初始化管理器，并在开屏即自动开启传输服务：保证两端服务常驻，
+            // 接收/发送不再需要先手动打开传输面板；同时 transfer_status 一开始就为 running，
+            // 消除主窗/浮岛打开传输时先显示「未开启」再跳正常的 1 秒闪烁。
+            transfer::init(app.handle().clone());
+            // 开屏即自动开启传输服务：保证两端服务常驻，接收/发送不再需要先手动打开传输面板；
+            // 同时 transfer_status 一开始就为 running，消除主窗/浮岛打开传输时先显示「未开启」再跳正常的 1 秒闪烁。
+            tauri::async_runtime::spawn(async move {
+                transfer::mgr().start().await;
+                // 开屏即主动公告若干次，让对端在网络就绪后尽快发现本机，
+                // 无需先打开传输面板再手动 announce（否则两端都未公告则互不发现，发送目标为空）。
+                transfer::mgr().announce_now().await;
+            });
 
             // ============ 单实例守卫 ============
             // 主实例：绑定 UDP 端口并后台监听聚焦请求；
@@ -677,6 +693,12 @@ fn main() {
         })
         // 拦截窗口关闭事件：托盘模式启用时隐藏而不是关闭
         .on_window_event(|window, event| {
+            // 浮窗销毁第二重保险：用 &Window 借用（不克隆 WebviewWindow）匹配 Destroyed，
+            // 规避命令/后台线程克隆 WebviewWindow 导致的 Rc UAF 中止。
+            if let tauri::WindowEvent::Destroyed = event {
+                andeyunhui_lib::screenshot::mark_overlay_destroyed(window.label());
+            }
+
             // 主窗口最小化/移动时，据 is_minimized 上报显隐，用于任务栏媒体会话优先级
             // （最小化→强制音乐优先）。恢复时 is_minimized 为 false，自动切回按激活模块裁决。
             if window.label() == "main" {
@@ -741,6 +763,14 @@ fn main() {
                             let _ = w.destroy();
                         }
                     }
+                    // 桌宠浮窗（label = "deskpet"）：无自动重建机制，直接销毁
+                    if let Some(pw) = app.get_webview_window("deskpet") {
+                        let _ = pw.destroy();
+                    }
+                    // 黄金棋盘（胶囊）浮岛（label = "capsule"）：必须走 overlay_window_destroy，
+                    // 它会同步置 CAPSULE_AUTOREBUILD=false 并取消重建监控，否则销毁后约 1.2s
+                    // 会被「渲染崩溃自动重建」定时器复活，表现为「关了主程序浮岛又弹出来」。
+                    let _ = overlay_window_destroy(app.clone(), "capsule".into());
                 }
             }
         })
@@ -1009,6 +1039,8 @@ fn main() {
             hide_overlay_window,
             reveal_screenshot_overlay,
             set_overlay_transparent,
+            set_overlay_repaint_rate,
+            present_overlay_now,
             get_screenshot_desktop_rect,
             // 浮窗统一创建引擎（window_manager 引擎）
             window_manager::overlay_window_get_or_create,
@@ -1065,10 +1097,13 @@ fn main() {
             // ========== 全局：AI 能力（茑萝 · AI 编程 子插件调用）==========
             ai_service::ai_get_profiles,
             ai_service::ai_set_profiles,
+            ai_service::ai_set_profile_thinking,
             ai_service::ai_chat,
             ai_service::ai_test_connection,
             ai_service::ai_vision_ocr,
             ai_service::translate_text,
+            ai_service::ai_ocr_enhance,
+            ai_service::ocr_export_pdf,
             ai_service::ai_get_conversations,
             ai_service::ai_save_conversations,
             // ========== 全局：IDE 终端（本地 shell 命令执行）==========
@@ -1095,6 +1130,23 @@ fn main() {
             rag_commands::rag_embed_api,
             // ========== 全局：开发者控制台（关于页面 · 联网/依赖安装）==========
             dev_console_http,
+            // ========== 模块：局域网传输（黄金棋盘·传输，LocalSend v2 兼容）==========
+            transfer::transfer_start,
+            transfer::transfer_stop,
+            transfer::transfer_announce,
+            transfer::transfer_status,
+            transfer::transfer_set_alias,
+            transfer::transfer_list_peers,
+            transfer::transfer_send,
+            // 新增：保存目录 / 暂存文件 / 自动接收 / 接收确认（与 transfer.rs 同步）
+            transfer::transfer_get_save_dir,
+            transfer::transfer_set_save_dir,
+            transfer::transfer_get_staged,
+            transfer::transfer_set_staged,
+            transfer::transfer_get_auto_accept,
+            transfer::transfer_set_auto_accept,
+            transfer::transfer_receive_accept,
+            transfer::transfer_receive_decline,
             take_pending_open_files,
         ])
         .build(tauri::generate_context!())

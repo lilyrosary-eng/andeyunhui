@@ -210,7 +210,7 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                     }
                 }
             }
-            if let Some(gpu) = &self.gpu {
+            if let Some(gpu) = self.gpu.as_mut() {
                 let mut buf = self
                     .free
                     .lock()
@@ -224,15 +224,28 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                         }
                     })
                     .unwrap_or_else(|| Arc::new(Vec::new()));
-                let ok = {
+                // convert 现为非阻塞读回：Ok(true)=本帧产出；Ok(false)=GPU 未就绪、无产出
+                // （读回延迟约 1 帧，节拍器继续复用上一帧 latest，无感知差异）
+                let produced = {
                     let p = Arc::get_mut(&mut buf).expect("刚取得的缓冲必为独占引用");
                     p.clear();
-                    gpu.convert(frame.as_raw_texture(), p).is_ok()
+                    match gpu.convert(frame.as_raw_texture(), p) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("[录屏] GPU 缩放转换失败，本帧跳过: {e}");
+                            false
+                        }
+                    }
                 };
-                if ok {
+                if produced {
                     Some(buf)
                 } else {
-                    eprintln!("[录屏] GPU 缩放转换失败，本帧跳过");
+                    // 本帧无产出：缓冲归还对象池，避免池被抽干后反复重新分配
+                    if let Ok(mut fl) = self.free.lock() {
+                        if fl.len() < 4 {
+                            fl.push(buf);
+                        }
+                    }
                     None
                 }
             } else {
