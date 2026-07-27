@@ -111,10 +111,10 @@ mod imp {
             MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls,
             SystemMediaTransportControlsButton, SystemMediaTransportControlsButtonPressedEventArgs,
         },
-        Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, RPC_E_CHANGED_MODE},
+        Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM},
         Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID,
         Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0_0},
-        Win32::System::Com::CoTaskMemFree,
+        Win32::System::Com::{CoTaskMemAlloc, CoTaskMemFree},
         Win32::System::Registry::*,
         Win32::System::Variant::VT_LPWSTR,
         Win32::System::WinRT::{
@@ -123,7 +123,7 @@ mod imp {
         },
         Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
         Win32::UI::Shell::{GetCurrentProcessExplicitAppUserModelID, SetCurrentProcessExplicitAppUserModelID},
-        Win32::UI::WindowsAndMessaging::{EnumChildWindows, GA_ROOT, GetAncestor},
+        Win32::UI::WindowsAndMessaging::{EnumChildWindows, GA_ROOT, GetAncestor, IsWindow},
         Storage::Streams::{
             Buffer, DataReader, DataWriter, InMemoryRandomAccessStream, InputStreamOptions,
             IRandomAccessStreamReference, RandomAccessStreamReference,
@@ -170,6 +170,7 @@ mod imp {
     /// 主窗口是否隐藏（最小化/托盘）。隐藏时强制音乐优先。
     static WINDOW_HIDDEN: OnceLock<Mutex<bool>> = OnceLock::new();
     use std::cell::RefCell;
+    use std::future::Future;
 
     // 按钮事件处理器需要在线程内保活，否则 WinRT 回调会失效。用 thread_local 存放
     // 非 Sync 的 TypedEventHandler，避免静态需要 Sync 的约束。
@@ -201,19 +202,18 @@ mod imp {
     /// 缓存上一次已发出的整机媒体信息，避免每 1.5s 轮询重复 emit 造成胶囊闪烁。
     static LAST_GLOBAL: Mutex<Option<SmtcUpdate>> = Mutex::new(None);
 
-    /// 确保当前线程已初始化 Windows Runtime，并正确处理公寓模型冲突。
-    /// 关键陷阱：tauri/winit 在主线程经 OleInitialize 把线程置于 STA。若此后再调用
-    /// RoInitialize(RO_INIT_MULTITHREADED) 会返回 RPC_E_CHANGED_MODE，且【不会】初始化
-    /// WinRT——于是 RoGetActivationFactory / GetForWindow 全部失败，媒体会话建不出来，
-    /// 任务栏只剩 WebView2 的「未知应用」卡片。故先尝试 STA（与已在 STA 的主线程兼容，
-    /// 返回 S_FALSE 视为成功），仅当因模式冲突时才退回 MTA。
+    /// 确保当前线程已初始化 Windows Runtime。
+    /// 关键陷阱：tauri/winit 在主线程经 OleInitialize 把线程置于 STA。windows-rs 0.62 只暴露
+    /// RO_INIT_SINGLETHREADED；本模块的 WinRT 调用统一跑在「专用工作线程 / 独立线程」这一固定
+    /// 线程上（单线程 + current-thread 运行时保证公寓亲和），故一律用 STA 即可。若线程已被初始化
+    /// 为 MTA（RPC_E_CHANGED_MODE），WinRT 敏捷对象在 MTA 下同样可用，忽略即可。
     fn ensure_winrt() {
         unsafe {
-            if let Err(e) = RoInitialize(RO_INIT_SINGLETHREADED) {
-                if e.code() == RPC_E_CHANGED_MODE {
-                    ensure_winrt();
-                }
-            }
+            // STA 即可：本模块所有 WinRT 调用都跑在「专用工作线程 / 独立线程」这一固定线程上，
+            // 公寓亲和由单线程 + current-thread 运行时保证，无需 MTA。若线程已被初始化为 MTA
+            // （RPC_E_CHANGED_MODE），WinRT 敏捷对象在 MTA 下同样可用，忽略即可。旧实现在此递归
+            // 调用自身（试图退回 MTA）会无限循环直至栈溢出，现已去除。
+            let _ = RoInitialize(RO_INIT_SINGLETHREADED);
         }
     }
 
@@ -424,17 +424,67 @@ mod imp {
         emit_diag(app);
     }
 
-    /// 本进程内复用的 tokio 运行时，用于在同步上下文里 block_on / spawn WinRT 异步调用
-    /// （GlobalSystemMediaTransportControlsSessionManager::RequestAsync 返回 IAsyncOperation，
-    /// windows-rs 0.62 下只能 .await，没有同步 get()）。
-    static SUPPRESS_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    /// 专用 SMTC 工作线程：常驻 RoInit(MTA)，承载一个 std::sync::mpsc 作业队列。
+    /// 每个作业是一个同步闭包，闭包内部用 `run_winrt_block` 在「当前线程、单线程 tokio 运行时」
+    /// 上 block_on 自己的 async 逻辑。因为所有 WinRT 调用都跑在这同一个 MTA 线程上（公寓亲和），
+    /// 跨线程续体调 COM 触发 STATUS_ACCESS_VIOLATION（0xc0000005）的问题被彻底消除；同时
+    /// block_on 不要求 Future: Send，避开了 windows-rs 集合/接口类型 `!Send` 的编译障碍。
+    /// 旧实现用 new_multi_thread 运行时：WinRT async 的 .await 续体会跳到另一个 worker 线程
+    /// （该线程未 RoInitialize），在其上访问 COM 代理即触发 AV。
+    static SMTC_WORKER_TX:
+        std::sync::OnceLock<std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>> = std::sync::OnceLock::new();
 
-    fn suppress_rt() -> &'static tokio::runtime::Runtime {
-        SUPPRESS_RT.get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("[SMTC] 创建压制用 tokio 运行时失败")
+    fn ensure_smtc_worker() {
+        SMTC_WORKER_TX.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+            std::thread::spawn(move || {
+                unsafe {
+                    let _ = RoInitialize(RO_INIT_SINGLETHREADED);
+                }
+                // 纯同步循环（不在任何 tokio 运行时内），逐个执行作业；每个作业自行 block_on。
+                while let Ok(job) = rx.recv() {
+                    job();
+                }
+            });
+            tx
+        });
+    }
+
+    /// 把一次性作业（同步闭包）提交到专用 SMTC 工作线程执行。
+    /// 闭包内部通常调用 `run_winrt_block(async { ... })` 跑 WinRT 逻辑。
+    fn smtc_run<F: FnOnce() + Send + 'static>(f: F) {
+        ensure_smtc_worker();
+        if let Some(tx) = SMTC_WORKER_TX.get() {
+            let _ = tx.send(Box::new(f));
+        }
+    }
+
+    thread_local! {
+        /// 每个调用 run_winrt_block 的线程复用同一个 current-thread 运行时（创建开销仅一次）。
+        static SMTC_RT: std::cell::RefCell<Option<tokio::runtime::Runtime>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// 在当前线程跑一个 async 块：先确保本线程 RoInit(MTA)，再用单线程运行时 block_on。
+    /// 整个 async 块只在该线程执行 → 公寓亲和；block_on 不要求 Future: Send（适配 windows-rs
+    /// 的 `!Send` 集合/接口类型）。用于一次性场景（媒体控制 / 缩略图 / 诊断 / 会话枚举）。
+    fn run_winrt_block<F>(f: F) -> F::Output
+    where
+        F: Future,
+    {
+        unsafe {
+            let _ = RoInitialize(RO_INIT_SINGLETHREADED);
+        }
+        SMTC_RT.with(|cell| {
+            let mut g = cell.borrow_mut();
+            if g.is_none() {
+                *g = Some(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("[SMTC] 创建 SMTC 单线程运行时失败"),
+                );
+            }
+            g.as_ref().unwrap().block_on(f)
         })
     }
 
@@ -459,56 +509,65 @@ mod imp {
     /// msedgewebview2.exe 的音频会话（它无 AUMID → 任务栏显「未知应用」）。每次系统会话
     /// 集合变化（WebView2 开始/停止播放会新建或回收会话）也会重新打印，方便观察。
     fn diag_and_suppress_other_sessions(hwnd: isize) {
-        std::thread::spawn(move || {
-            suppress_rt().block_on(async {
+        // 一次性作业：在当前(已 RoInit MTA)工作线程上 block_on 整段 async → 公寓亲和。
+        smtc_run(move || {
+            run_winrt_block(async move {
                 ensure_winrt();
                 match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
                     Ok(op) => match op.await {
                         Ok(mgr) => {
-                        let handler = TypedEventHandler::<
-                            GlobalSystemMediaTransportControlsSessionManager,
-                            SessionsChangedEventArgs,
-                        >::new(move |_s, _a| {
-                            suppress_rt().spawn(async move {
-                                ensure_winrt();
-                                set_webview_aumid_recursive(hwnd);
-                                let _ = dump_sessions().await;
+                            let handler = TypedEventHandler::<
+                                GlobalSystemMediaTransportControlsSessionManager,
+                                SessionsChangedEventArgs,
+                            >::new(move |_s, _a| {
+                                // 仅把任务投递到专用工作线程，绝不在 Windows 回调线程上直接调 COM。
+                                let hw = hwnd;
+                                smtc_run(move || {
+                                    run_winrt_block(async move {
+                                        ensure_winrt();
+                                        set_webview_aumid_recursive(hw);
+                                        let _ = dump_sessions().await;
+                                    });
+                                });
+                                Ok(())
                             });
-                            Ok(())
-                        });
-                        // SessionsChanged 处理器需常驻保活，故泄漏（进程级单例，可接受）。
-                        let leaked: &'static TypedEventHandler<
-                            GlobalSystemMediaTransportControlsSessionManager,
-                            SessionsChangedEventArgs,
-                        > = Box::leak(Box::new(handler));
-                        if let Err(e) = mgr.SessionsChanged(leaked) {
-                            eprintln!("[SMTC-DIAG] 注册 SessionsChanged 失败: {e:?}");
-                        }
-                        if let Err(e) = dump_sessions().await {
-                            eprintln!("[SMTC-DIAG] 初次枚举失败: {e:?}");
-                        }
-                        // 常驻线程：每 3s 把 WebView2 窗口的 AUMID 写成我们的，作为「flag 万一未
-                        // 生效」的兜底——即使 WebView2 仍注册 OS 媒体会话，也会归入「安得云荟」
-                        // 而非「未知应用」。WebView2 通常在应用启动后、用户点播放前很久才创建其
-                        // 浏览器窗口，此时属性已被写入，后续新建的会话即采用我们的 AUMID；即使
-                        // WebView2 中途重建窗口，下一次周期也会补设。进程级常驻，开销极小。
-                        suppress_rt().spawn(async move {
-                            ensure_winrt();
-                            let mut tick = 0u32;
-                            loop {
-                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                set_webview_aumid_recursive(hwnd);
-                                tick += 1;
-                                if tick % 10 == 0 {
-                                    let _ = dump_sessions().await;
-                                }
+                            // SessionsChanged 处理器需常驻保活，故泄漏（进程级单例，可接受）。
+                            let leaked: &'static TypedEventHandler<
+                                GlobalSystemMediaTransportControlsSessionManager,
+                                SessionsChangedEventArgs,
+                            > = Box::leak(Box::new(handler));
+                            if let Err(e) = mgr.SessionsChanged(leaked) {
+                                eprintln!("[SMTC-DIAG] 注册 SessionsChanged 失败: {e:?}");
                             }
-                        });
-                    }
+                            if let Err(e) = dump_sessions().await {
+                                eprintln!("[SMTC-DIAG] 初次枚举失败: {e:?}");
+                            }
+                            // 常驻循环：每 3s 把 WebView2 窗口的 AUMID 写成我们的，作为「flag 万一未
+                            // 生效」的兜底——即使 WebView2 仍注册 OS 媒体会话，也会归入「安得云荟」
+                            // 而非「未知应用」。WebView2 通常在应用启动后、用户点播放前很久才创建其
+                            // 浏览器窗口，此时属性已被写入，后续新建的会话即采用我们的 AUMID；即使
+                            // WebView2 中途重建窗口，下一次周期也会补设。进程级常驻，开销极小。
+                            // 死循环放到独立线程，避免占用作业队列（作业队列需响应会话变化/诊断）。
+                            std::thread::spawn(move || {
+                                run_winrt_block(async move {
+                                    ensure_winrt();
+                                    let mut tick = 0u32;
+                                    loop {
+                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                        set_webview_aumid_recursive(hwnd);
+                                        tick += 1;
+                                        if tick % 10 == 0 {
+                                            let _ = dump_sessions().await;
+                                        }
+                                    }
+                                });
+                            });
+                        }
                         Err(e) => eprintln!("[SMTC-DIAG] 会话管理器 RequestAsync.await 失败: {e:?}"),
-                    }
+                    },
                     Err(e) => eprintln!("[SMTC-DIAG] 会话管理器 RequestAsync 失败: {e:?}"),
-                }});
+                }
+            });
         });
     }
 
@@ -532,15 +591,13 @@ mod imp {
     /// 排除本进程 AUMID，避免与本应用自身播放（smtc_update → 胶囊 appNow）重复。
     pub fn start_global_media_watcher(app: &AppHandle) {
         let app = app.clone();
+        // 整机会话轮询常驻独立线程（已 RoInit MTA + current-thread 运行时）→ 公寓亲和。
+        // 每轮轮询加 5s 超时熔断：即使某次轮询因 COM 异常挂死，也只丢一轮更新，
+        // 不会让整机媒体监视线程永久卡死、胶囊停止刷新。
         std::thread::spawn(move || {
-            ensure_winrt();
-            let rt = suppress_rt();
-            // 每轮轮询加 5s 超时熔断：即使某次轮询因 COM 异常挂死，也只丢一轮更新，
-            // 不会让整机媒体监视线程永久卡死、胶囊停止刷新。
-            rt.block_on(async move {
+            run_winrt_block(async move {
+                ensure_winrt();
                 loop {
-                    // 每轮轮询加 5s 超时熔断：即使某次轮询因 COM 异常挂死，也只丢一轮更新，
-                    // 不会让整机媒体监视线程永久卡死、胶囊停止刷新。
                     let _ = tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         poll_global_session(&app),
@@ -614,13 +671,16 @@ mod imp {
                 let changed = {
                     let g = LAST_GLOBAL.lock().unwrap();
                     match &*g {
-                        Some(p) => {
-                            p.title != info.title
-                                || p.artist != info.artist
-                                || p.album != info.album
-                                || p.is_playing != info.is_playing
-                                || p.cover_path != info.cover_path
-                        }
+                Some(p) => {
+                    // 注意：故意不比较 cover_path。封面路径恒为同一临时文件 capsule_thumb.*，
+                    // 比较它永远相等、无法检测真实换封面；且缩略图读取偶发失败时会在 None↔Some
+                    // 间跳动，误判为变化而每轮重发 now-playing（外部媒体稳定播放时反而触发周期性
+                    // 重渲染→卡顿）。真实换歌通常伴随标题变化，仍会正常触发。
+                    p.title != info.title
+                        || p.artist != info.artist
+                        || p.album != info.album
+                        || p.is_playing != info.is_playing
+                }
                         None => true,
                     }
                 };
@@ -700,7 +760,7 @@ mod imp {
                     let cover = match p.Thumbnail().ok() {
                         Some(t) => {
                             // 封面读取可能挂死（COM 公寓模型异常），3s 超时熔断以免拖垮整机媒体监视。
-                            tokio::time::timeout(std::time::Duration::from_secs(3), read_thumbnail(&t))
+                            tokio::time::timeout(std::time::Duration::from_secs(3), read_thumbnail(t))
                                 .await
                                 .ok()
                                 .flatten()
@@ -732,7 +792,7 @@ mod imp {
 
     /// 读取系统会话封面的缩略图字节，写入临时文件并返回路径（供前端 convertFileSrc 显示）。
     /// 任意环节失败均返回 None（胶囊显示音符占位图），不影响标题/艺人展示。
-    async fn read_thumbnail(thumb: &IRandomAccessStreamReference) -> Option<String> {
+    async fn read_thumbnail(thumb: IRandomAccessStreamReference) -> Option<String> {
         let stream = thumb.OpenReadAsync().ok()?.await.ok()?;
         let size = stream.Size().ok()? as u32;
         if size == 0 {
@@ -790,8 +850,7 @@ mod imp {
         // 在独立线程跑 WinRT 控制并加 3s 超时：防止 COM 公寓模型异常导致调用永久挂起、
         // 耗尽 Tauri 命令线程、让整个软件（含主窗与所有浮窗）卡死。
         let handled = run_winrt_timeout(move || {
-            let rt = suppress_rt();
-            rt.block_on(async move {
+            run_winrt_block(async move {
                 let mgr = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
                     Ok(op) => match op.await {
                         Ok(m) => m,
@@ -859,6 +918,8 @@ mod imp {
     /// 探针：读回指定窗口的 PKEY_AppUserModel_ID 属性（任务栏据此解析显示名）。
     fn read_window_aumid(hwnd: HWND) -> Option<String> {
         unsafe {
+            // SHGetPropertyStoreForWindow 是 COM 调用，需本线程已 RoInitialize。
+            ensure_winrt();
             let store: IPropertyStore = SHGetPropertyStoreForWindow(hwnd).ok()?;
             let mut pv: PROPVARIANT = store.GetValue(&PKEY_AppUserModel_ID).ok()?;
             let inner = &mut pv as *mut PROPVARIANT as *mut PROPVARIANT_0_0;
@@ -973,8 +1034,12 @@ mod imp {
     /// 存活，故放在函数作用域内、在 unsafe 块外用其生命周期兜底。
     fn set_window_aumid(hwnd: HWND) {
         // 宽字符串 AUMID，结尾补一个 \0。必须在 SetValue/Commit 期间存活。
-        let wide: Vec<u16> = AUMID.encode_utf16().chain(std::iter::once(0)).collect();
+        // 守卫：窗口句柄失效（尚未创建 / 已销毁）时直接跳过，避免悬空 store 触发堆损坏。
+        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return;
+        }
         unsafe {
+            ensure_winrt();
             let store: IPropertyStore = match SHGetPropertyStoreForWindow(hwnd) {
                 Ok(s) => s,
                 Err(e) => {
@@ -982,13 +1047,20 @@ mod imp {
                     return;
                 }
             };
+            // 用 CoTaskMem 分配 AUMID 宽字符串：PROPVARIANT 的 Drop 会调 PropVariantClear →
+            // CoTaskMemFree 释放，分配器匹配，不会跨分配器堆损坏。pv 在 store 之后声明，
+            // store 先释放（此时 COM 内存仍存活），pv 再释放，绝不悬空。
+            let aumid_w: Vec<u16> = AUMID.encode_utf16().chain(std::iter::once(0)).collect();
+            let co_len = aumid_w.len() * std::mem::size_of::<u16>();
+            let co_ptr = CoTaskMemAlloc(co_len) as *mut u16;
+            if co_ptr.is_null() {
+                return;
+            }
+            std::ptr::copy_nonoverlapping(aumid_w.as_ptr(), co_ptr, aumid_w.len());
             let mut pv = PROPVARIANT::default();
-            // PROPVARIANT 与 PROPVARIANT_0_0 在偏移 0 处内存布局一致（中间的 ManuallyDrop 是透明包装），
-            // 故把 &mut PROPVARIANT 重新解释为 *mut PROPVARIANT_0_0 直接写字段，
-            // 避开 ManuallyDrop 不允许自动 DerefMut 的限制。
             let inner = &mut pv as *mut PROPVARIANT as *mut PROPVARIANT_0_0;
             (*inner).vt = VT_LPWSTR;
-            (*inner).Anonymous.pwszVal = PWSTR(wide.as_ptr() as *mut u16);
+            (*inner).Anonymous.pwszVal = PWSTR(co_ptr);
             if let Err(e) = store.SetValue(&PKEY_AppUserModel_ID, &pv) {
                 log::warn!("[SMTC] 设置窗口 AUMID 失败: {e:?}");
                 let _ = WINDOW_AUMID_SET.set(false);
@@ -1008,9 +1080,7 @@ mod imp {
             // CoTaskMemFree(pwszVal)。但我们的 pwszVal 指向 Rust 的 Vec<u16>（wide），
             // 不是 COM 分配的，若让其正常 drop 会用错误分配器释放，导致 STATUS_HEAP_CORRUPTION。
             // 故此处 mem::forget 阻止 Drop；wide 由 Rust 正常释放（独立所有权，无双重释放）。
-            std::mem::forget(pv);
         }
-        // wide 在此函数结束才释放（Rust 正常 drop），晚于 Commit，安全。
     }
 
     /// 把一次推送按来源写入对应缓存（标题/艺术家/专辑为空时复用本来源上次有效值），
@@ -1111,8 +1181,11 @@ mod imp {
     /// WebView2 是否仍会冒出「未知应用」卡（多出的非 ours 条目即证据）。
     fn emit_diag(app: &AppHandle) {
         let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let session_created = SMTC.get().is_some();
+        // 经专用工作线程执行（已 RoInit MTA + 公寓亲和），避免 Tauri 多线程运行时上跨线程续体调 COM。
+        smtc_run(move || {
+            run_winrt_block(async move {
+                ensure_winrt();
+                let session_created = SMTC.get().is_some();
             let process_aumid = read_process_aumid();
             let mut window_aumid = String::new();
             if let Some(raw) = app
@@ -1156,6 +1229,7 @@ mod imp {
                 system_sessions,
             };
             let _ = app.emit("smtc-diag", diag);
+            });
         });
     }
 
@@ -1268,7 +1342,7 @@ mod imp {
                 Some(b) if !b.is_empty() => b,
                 _ => generate_gradient_cover(&eff.title, &eff.artist),
             };
-            match suppress_rt().block_on(async {
+            match run_winrt_block(async {
                 build_thumbnail_stream(&bytes)
                     .await
                     .and_then(|stream| updater.SetThumbnail(&stream))
@@ -1284,7 +1358,7 @@ mod imp {
     }
 
     /// 把图片字节写入一个 RandomAccessStreamReference，供 DisplayUpdater.SetThumbnail 使用。
-    /// windows-rs 0.62 下流写入是异步的，故本函数为 async（调用处用 suppress_rt().block_on 驱动）。
+    /// windows-rs 0.62 下流写入是异步的，故本函数为 async（调用处用 run_winrt_block 驱动）。
     async fn build_thumbnail_stream(bytes: &[u8]) -> windows::core::Result<RandomAccessStreamReference> {
         let stream = InMemoryRandomAccessStream::new()?;
         {

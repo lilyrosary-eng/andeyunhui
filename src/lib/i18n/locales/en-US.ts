@@ -149,4 +149,13 @@ export const enUS: Record<string, string> = {
   'settings.about.errorLog': 'Error log',
   'settings.about.errorLogDesc': 'Open the log folder; you can submit log files to the developer for troubleshooting',
   'settings.about.openFolder': 'Open folder',
+
+  // Niaoluo - File Search
+  'niaoluo.search.title': 'File Search',
+  'niaoluo.search.placeholder': 'Search files / folders...',
+  'niaoluo.search.indexing': 'Indexing files...',
+  'niaoluo.search.indexed': '{count} items indexed',
+  'niaoluo.search.noResults': 'No matching results',
+  'niaoluo.search.prompt': 'Type to search (name / path)',
+  'niaoluo.search.waitIndex': 'First-time indexing, please wait...',
 };

@@ -3622,7 +3622,7 @@ function IdeAgent({
   const [busy, setBusy] = useState(false);
   const [planChips, setPlanChips] = useState<string[]>([]);
   // 模型选择（与普通对话面板一致，复用全局模型档案）
-  const [profiles, setProfiles] = useState<{ id: string; name?: string; model?: string; base_url?: string; api_key?: string }[]>([]);
+  const [profiles, setProfiles] = useState<{ id: string; name?: string; model?: string; base_url?: string; api_key?: string; thinking?: boolean | null }[]>([]);
   const [modelOpen, setModelOpen] = useState(false);
 
   const historyRef = useRef<{ role: string; content: string }[]>([]);
@@ -4018,6 +4018,30 @@ function IdeAgent({
   }, []);
   const configuredProfiles = profiles.filter((p) => p.api_key && p.api_key.trim());
   const activeProfile = configuredProfiles.find((p) => p.id === activeProfileId) || null;
+  // 思考模式内联开关：直接写入后端 profile.thinking（与胶囊 / 茑萝AI / 攻防共享同一档案字段）
+  const toggleThinking = useCallback(async () => {
+    if (!activeProfileId) return;
+    const next = !activeProfile?.thinking;
+    setProfiles((prev) => prev.map((p) => (p.id === activeProfileId ? { ...p, thinking: next } : p)));
+    try {
+      await hostApi.invoke('ai_set_profile_thinking', { profileId: activeProfileId, thinking: next });
+    } catch (e) {
+      console.warn('[IDE] 设置思考模式失败:', e);
+      setProfiles((prev) => prev.map((p) => (p.id === activeProfileId ? { ...p, thinking: !next } : p)));
+    }
+  }, [activeProfileId, activeProfile?.thinking]);
+
+  // 接收其它聊天界面切换「思考模式」的事件，保持胶囊 / 茑萝AI / 攻防 三处开关实时同步
+  React.useEffect(() => {
+    let un: any = null;
+    hostApi.listen('ai-thinking-changed', (e: any) => {
+      const pid = e?.payload?.profile_id;
+      const th = e?.payload?.thinking;
+      if (!pid) return;
+      setProfiles((ps: any[]) => ps.map((p) => (p.id === pid ? { ...p, thinking: th } : p)));
+    }).then((u: any) => { un = u; }).catch(() => {});
+    return () => { if (un) un(); };
+  }, []);
 
   const callChat = useCallback((messages: { role: string; content: string }[], opts?: { cacheable?: boolean }) => {
     const cacheable = !!opts?.cacheable;
@@ -5017,7 +5041,7 @@ function IdeAgent({
         })}
       </div>
       <div className="px-3 py-2 border-t border-neutral-200/60 dark:border-stone-700/60 shrink-0 relative">
-        <div className="flex items-end gap-2">
+        <div className="rounded-xl border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 shadow-sm px-3 py-2 flex flex-col gap-2">
           <textarea
             ref={inputRef}
             value={input}
@@ -5025,12 +5049,33 @@ function IdeAgent({
             onKeyDown={onKeyDown}
             rows={1}
             placeholder="例如：把 src/utils.ts 里的 debounce 改成支持 leading 选项…"
-            className="flex-1 resize-none px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-800 border border-neutral-200 dark:border-stone-700 text-neutral-800 dark:text-stone-100 outline-none focus:ring-2 focus:ring-[var(--element-border)] leading-relaxed"
+            className="w-full resize-none bg-transparent outline-none text-sm text-neutral-800 dark:text-stone-100 placeholder:text-neutral-400 leading-relaxed"
+            style={{ maxHeight: 140 }}
           />
-          <button onClick={busy ? cancelAgent : runAgent} disabled={busy ? false : !input.trim()}
-            className={`btn-press shrink-0 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${busy ? 'bg-red-500/90 text-white hover:bg-red-500' : 'element-primary hover:bg-[var(--element-hover)]'}`}>
-            {busy ? '⛔ 取消' : '运行'}
-          </button>
+          <div className="flex items-center justify-between gap-2">
+            <button onClick={toggleThinking} title={activeProfile?.thinking ? '思考模式：开（先输出思维链再回答）' : '思考模式：关（点击开启）'}
+              className={`btn-press shrink-0 px-2.5 py-1.5 rounded-lg text-xs border transition-colors ${
+                activeProfile?.thinking
+                  ? 'border-[var(--element-border)] bg-[rgba(230,195,92,0.14)] text-neutral-800 dark:text-stone-100 font-medium'
+                  : 'border-neutral-200 dark:border-stone-700 text-neutral-600 dark:text-stone-300'
+              }`}>
+              {activeProfile?.thinking ? (
+                    <>
+                      <span className="inline-block w-[7px] h-[7px] rounded-full mr-1 align-middle" style={{ background: '#22c55e' }} />
+                      思考·开
+                    </>
+                  ) : (
+                    <>
+                      <span className="inline-block w-[7px] h-[7px] rounded-full mr-1 align-middle" style={{ background: 'rgba(120,120,120,0.45)' }} />
+                      思考·关
+                    </>
+                  )}
+            </button>
+            <button onClick={busy ? cancelAgent : runAgent} disabled={busy ? false : !input.trim()}
+              className={`btn-press shrink-0 px-4 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${busy ? 'bg-red-500/90 text-white hover:bg-red-500' : 'element-primary hover:bg-[var(--element-hover)]'}`}>
+              {busy ? '⛔ 取消' : '运行'}
+            </button>
+          </div>
         </div>
       </div>
       {/* 信任解析器弹窗（借鉴 trust_resolver.rs 的 RequireApproval → AutoTrust 流转） */}
