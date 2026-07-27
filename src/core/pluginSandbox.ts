@@ -124,6 +124,8 @@ const ALLOWED_COMMANDS = new Set([
   'ensure_directory',
   // IDE 子插件：保存 / 另存为（Rust 端已实现并注册，此前漏加白名单导致被沙箱拦截）
   'write_text_file',
+  // IDE 子插件：删除文件（重命名 / 删除 diff 用到，与 write_text_file 同一文件操作族）
+  'delete_file',
   // 通用：插件导出二进制文件（XLSX / 图片等），base64 解码后原子写盘
   'write_file_bytes',
   'pick_save_file',
@@ -133,6 +135,12 @@ const ALLOWED_COMMANDS = new Set([
   'ai_get_profiles',
   'ai_set_profiles',
   'ai_chat',
+  // 思考模式开关：ide / gongfang 子插件内联 toggle 调用此命令写回 profile.thinking
+  // （此前漏加白名单，导致沙箱拦截 ai_set_profile_thinking，思考按钮「点了没反应」）
+  'ai_set_profile_thinking',
+  // 对话持久化：ai 子插件读取/保存多会话（ai_conversations.json），漏加会被沙箱拦截导致「已降级为新对话」
+  'ai_get_conversations',
+  'ai_save_conversations',
   // IDE 终端：本地 shell 命令执行（沙箱屏蔽了 child_process，需走 Rust）
   'run_shell_command',
   // AI agent 受限 shell：白名单 + Dry-Run 黑名单 + 超时（仅 agent 自主编辑模式使用）

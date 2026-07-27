@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import { Puzzle } from 'lucide-react';
+import { Puzzle, Search, ArrowLeftRight } from 'lucide-react';
 import type { PluginRegistry, PluginDef } from '@/core/pluginRegistry';
 import { PluginIcon } from '@/components/PluginIcon';
 import { ModuleSidebarShell } from '@/components/ModuleSidebarShell';
@@ -7,6 +7,7 @@ import { SecondaryNavShell } from '@/components/SecondaryNavShell';
 import { PluginErrorBoundary } from '@/core/PluginHost';
 import { useAppStore } from '@/stores/appStore';
 import { useI18n } from '@/lib/i18n';
+import { api } from '@/lib/api';
 
 /** 统一侧边栏 — 始终复用同一个 ModuleSidebarShell，仅中间的 children 内容根据 activeModule 切换。 */
 export function HostSidebar() {
@@ -78,13 +79,18 @@ export function HostSidebar() {
     return Array.from(map.entries());
   }, [filtered]);
 
-  // 只在茑萝模式或子插件模式下显示侧边栏
+  // 只在茑萝模式、子插件模式，或黄金棋盘·模块设置页显示侧栏
+  // （capsule-settings 既不是 extensions 也无 parent，需显式纳入，否则进入设置时侧栏整体消失）
   const showSidebar =
     activeModule === 'extensions' ||
+    activeModule === 'capsule-settings' ||
     !!(pluginRegistry?.get(activeModule)?.parent);
 
   // 子插件模式（如绘画/IDE）：在「茑萝」标题下提供返回按钮（不改动图标栏逻辑）
-  const isChild = activeModule !== 'extensions' && !!pluginRegistry?.get(activeModule)?.parent;
+  // 黄金棋盘·模块设置页同样视为茑萝子模块（返回 茑萝 列表，维持层级归属，不脱离母模块）
+  const isChild =
+    (activeModule !== 'extensions' && !!pluginRegistry?.get(activeModule)?.parent) ||
+    activeModule === 'capsule-settings';
 
   // 侧边栏齿轮：茑萝母目录打开「管理拓展设置」；子插件（如 IDE）复用同一齿轮，
   // 派发 module-settings-toggle 事件由对应子插件自行打开其独立模块设置页（而非另设按钮）。
@@ -92,10 +98,13 @@ export function HostSidebar() {
   const onOpenModuleSettings = useCallback(() => {
     if (activeModule === 'extensions') {
       toggleExtensionSettings();
+    } else if (activeModule === 'capsule-settings') {
+      // 设置页再点齿轮 → 返回黄金棋盘主面板
+      setActiveModule('capsule');
     } else if (isChild) {
       window.dispatchEvent(new CustomEvent('module-settings-toggle', { detail: { moduleId: activeModule } }));
     }
-  }, [activeModule, isChild, toggleExtensionSettings]);
+  }, [activeModule, isChild, toggleExtensionSettings, setActiveModule]);
 
   if (!showSidebar || !pluginRegistry) return null;
 
@@ -109,11 +118,35 @@ export function HostSidebar() {
   let content: React.ReactNode = null;
 
   if (activeModule === 'extensions') {
+    // 黄金棋盘：先确保插件已加载（manifest.visible=false 默认不加载），再切换到主窗口搜索面板。
+    // 浮岛胶囊仍由光标靠近顶部监视（capsule_start_monitor）自动弹出，不受此影响。
+    const handlePluginClick = async (plugin: PluginDef) => {
+      if (plugin.id !== 'capsule') {
+        setActiveModule(plugin.id);
+        return;
+      }
+      try {
+        const reg = (window as unknown as { __PLUGIN_REGISTRY__?: { get: (id: string) => unknown } }).__PLUGIN_REGISTRY__;
+        const hot = (window as unknown as { __pluginHot__?: { load: (d: unknown) => Promise<void> } }).__pluginHot__;
+        if (reg && !reg.get('capsule')) {
+          const installed = await api.getInstalledPlugins();
+          const def = (installed.valid ?? []).find((p) => p.id === 'capsule');
+          if (def) {
+            await api.setPluginVisibility('capsule', true);
+            await hot?.load(def);
+          }
+        }
+        setActiveModule('capsule');
+      } catch (e) {
+        console.error('[HostSidebar] 打开黄金棋盘失败', e);
+      }
+    };
+
     // 茑萝：子插件列表（母目录）
     const renderBtn = (plugin: PluginDef) => (
       <button
         key={plugin.id}
-        onClick={() => setActiveModule(plugin.id)}
+        onClick={() => handlePluginClick(plugin)}
         className={`w-full text-left px-3 py-2.5 rounded-xl transition-colors flex items-center gap-2.5 ${
           activeModule === plugin.id
             ? 'bg-[var(--element-bg)]/10 text-[var(--element-bg)]'
@@ -154,6 +187,47 @@ export function HostSidebar() {
         </SecondaryNavShell>
       );
     }
+  } else if (activeModule === 'capsule' || activeModule === 'capsule-settings') {
+    // 黄金棋盘 / 黄金棋盘·设置：侧栏显示搜索 / 传输双 Tab（复用茑萝侧栏，不另建）
+    const capsuleTab = (() => { try { return localStorage.getItem('niaoluo:capsule-tab') || 'search'; } catch { return 'search'; } })();
+    const setCapsuleTab = (tab: string) => {
+      try { localStorage.setItem('niaoluo:capsule-tab', tab); } catch {}
+      window.dispatchEvent(new CustomEvent('capsule-tab-changed'));
+      if (activeModule === 'capsule-settings') {
+        // 设置页内点击 Tab → 切回主面板并带上目标 Tab
+        setActiveModule('capsule');
+      } else {
+        setTick((t) => t + 1); // 强制自身重渲染
+      }
+    };
+    content = (
+      <SecondaryNavShell>
+        <div className="mb-1">
+          <button
+            onClick={() => setCapsuleTab('search')}
+            className={`w-full text-left px-3 py-2.5 rounded-xl transition-colors flex items-center gap-2.5 ${
+              capsuleTab === 'search'
+                ? 'bg-[var(--element-bg)]/10 text-[var(--element-color-raw)]'
+                : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
+            }`}
+          >
+            <Search size={18} />
+            <span className="text-sm font-medium">文件搜索</span>
+          </button>
+          <button
+            onClick={() => setCapsuleTab('transfer')}
+            className={`w-full text-left px-3 py-2.5 rounded-xl transition-colors flex items-center gap-2.5 ${
+              capsuleTab === 'transfer'
+                ? 'bg-[var(--element-bg)]/10 text-[var(--element-color-raw)]'
+                : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
+            }`}
+          >
+            <ArrowLeftRight size={18} />
+            <span className="text-sm font-medium">传输</span>
+          </button>
+        </div>
+      </SecondaryNavShell>
+    );
   } else {
     // 子插件（如绘画）：渲染插件声明的 sidebar 组件内容
     const def = pluginRegistry.get(activeModule);

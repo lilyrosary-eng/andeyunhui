@@ -138,4 +138,13 @@ export const koKR: Record<string, string> = {
   'settings.about.errorLog': '오류 로그',
   'settings.about.errorLogDesc': '로그 폴더를 열고 로그 파일을 개발자에게 제출하여 문제를 해결할 수 있습니다',
   'settings.about.openFolder': '폴더 열기',
+
+  // 茑萝 - 파일 검색
+  'niaoluo.search.title': '파일 검색',
+  'niaoluo.search.placeholder': '파일 / 폴더 검색...',
+  'niaoluo.search.indexing': '파일 인덱싱 중...',
+  'niaoluo.search.indexed': '{count}개 항목 인덱싱됨',
+  'niaoluo.search.noResults': '일치하는 결과 없음',
+  'niaoluo.search.prompt': '키워드를 입력하여 검색 (이름 / 경로)',
+  'niaoluo.search.waitIndex': '최초 인덱싱 중입니다, 잠시만 기다려주세요...',
 };

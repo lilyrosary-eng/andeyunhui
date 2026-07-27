@@ -22,7 +22,9 @@ use serde::Serialize;
 use serde_json::json;
 use std::io::Cursor;
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 use tauri::Emitter;
@@ -38,6 +40,30 @@ use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
+
+// 已启动常驻重绘的窗口 label → 重绘间隔（按窗隔离，避免桌宠/胶囊互相影响）。
+// 0 表示「暂停呈现」：不再持续 NotifyParentWindowPositionChanged（屏幕停在最后一帧），
+// 仅维持 SetIsVisible(TRUE) 暖机（rAF 不冻结）；静态/收起态用 0 避免与外部媒体抢 DWM
+// 重定向呈现导致卡顿，内容实际变化由前端 present_overlay_now 按需上屏一帧。
+// 非空值：默认 100ms（≈10fps），流畅动画时由前端提到 ~33ms（30fps）。
+// 模块级静态（LazyLock 因 HashMap::new 非 const，无法用于普通 static）。
+static REPAINT_INTERVALS: LazyLock<Mutex<HashMap<String, Duration>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+// 失焦重绘停止标志：浮窗销毁（WindowEvent::Destroyed）时置位，循环下一拍检测到即退出，
+// 避免对已销毁 webview 持续调用 SetIsVisible/Notify 触发宿主进程崩溃。
+static REPAINT_STOP: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// 浮窗销毁（WindowEvent::Destroyed）时的第二重保险：置重绘停止标志并清理 DComp。
+/// 必须在 setup 阶段的 app.on_window_event 内调用（回调拿到的 &Window 是借用，不克隆 WebviewWindow）；
+/// 绝不可在命令/后台线程里用 app.get_webview_window 克隆 WebviewWindow 后再调，否则销毁竞态下
+/// 克隆到已损坏的 Rc 强计数会触发 rc.rs 的 assert_unchecked 直接中止（STATUS_STACK_BUFFER_OVERRUN）。
+pub fn mark_overlay_destroyed(label: &str) {
+    if label == "capsule" || label == "deskpet" {
+        REPAINT_STOP.lock().unwrap().insert(label.to_string());
+        crate::dcomp_overlay::on_destroy(label);
+    }
+}
 
 
 #[derive(Serialize, Clone)]
@@ -178,11 +204,7 @@ pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
     // Interface trait 必须来自 windows-core 0.61（webview2-com-sys 0.38 的 COM 类型
     // 实现的是该版本 trait；本 crate 的 windows 0.62 对应 windows-core 0.62，不兼容）。
     use windows_core_061::Interface;
-    use std::sync::Mutex;
     use std::time::Duration;
-
-    // 已启动常驻重绘的窗口 label 集合（按窗隔离，避免桌宠/胶囊互相阻塞对方的定时器）。
-    static REPRAINT_LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     let wv = webview.clone();
     let label = webview.label().to_string();
@@ -195,7 +217,18 @@ pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
     let _ = app.clone().run_on_main_thread(move || {
         // Tauri v2 的 with_webview 传入 PlatformWebview，其 controller() 返回底层
         // webview2-com-sys 的 ICoreWebView2Controller（与 wry 内部同版本 0.38）。
+        let repaint_webview = wv.clone();
+        // 取本窗 HWND（裸指针 isize，规避调用方与本 crate 的 windows 版本差异），供 DComp 绑定。
+        let hwnd = app
+            .get_webview_window(&label)
+            .and_then(|w| w.hwnd().ok())
+            .map(|h| h.0 as isize);
         let _ = wv.with_webview(move |raw| {
+            // DComp 根治：把胶囊/歌词从 WS_EX_LAYERED 重定向改为 DirectComposition swapchain，
+            // 走 DWM 常规合成、不被外部媒体 overlay 抢占（详见 dcomp_overlay.rs）。仅 ANDY_DCOMP=1 生效。
+            if let Ok(ctrl) = raw.controller().cast::<ICoreWebView2Controller>() {
+                crate::dcomp_overlay::try_enable(ctrl, &label, hwnd);
+            }
             // SetDefaultBackgroundColor 定义在 ICoreWebView2Controller2；cast 到 2（而非 3）
             // 以兼容仅支持到 Controller2 的旧 WebView2 运行时，确保透明背景一定生效。
             if let Ok(c2) = raw.controller().cast::<ICoreWebView2Controller2>() {
@@ -210,62 +243,215 @@ pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
             }
             // 透明覆盖窗（桌宠/胶囊）：启动失焦强制重绘定时器，根治透明浮窗失焦冻结。
             if need_repaint {
-                let mut v = REPRAINT_LABELS.lock().unwrap();
-                if !v.contains(&label) {
-                    v.push(label.clone());
-                    drop(v);
-                    if let Ok(ctrl) = raw.controller().cast::<ICoreWebView2Controller>() {
-                        struct RepaintState {
-                            ctrl: ICoreWebView2Controller,
-                            label: String,
+                REPAINT_INTERVALS
+                    .lock()
+                    .unwrap()
+                    .entry(label.clone())
+                    .or_insert(Duration::from_millis(100));
+                // —— 失焦强制重绘定时器（安全版）——
+                // 旧实现把裸 COM `ICoreWebView2Controller` 存进 RepaintState 并标 unsafe Send 跨线程持有，
+                // 且每帧用 app.get_webview_window(label) 克隆全局窗表里的 WebviewWindow 判活：窗口销毁
+                // 瞬间克隆会读到已损坏的 Arc 强计数，触发 rc.rs 的 assert_unchecked 直接 abort
+                // （STATUS_STACK_BUFFER_OVERRUN）。新实现只持有一个在 webview 存活时安全克隆的
+                // tauri::Webview（Arc 包裹、天然 Send+Sync），每帧经它重新取控制器；判活改用
+                // with_webview 返回 Err（第一重保险）或监听 WindowEvent::Destroyed（REPAINT_STOP，第二重
+                // 保险），全程不再触碰全局窗表、不再跨线程持有裸 COM 指针。
+                struct RepaintState {
+                    webview: tauri::Webview,
+                    label: String,
+                    last_notify: std::time::Instant,
+                }
+                // tauri::Webview 内部为 Arc 包裹，天然 Send + Sync，无需（也不该）手动标 unsafe Send。
+                // 第二重保险：窗销毁即置停止标志（REPAINT_STOP）。
+                // 销毁检测统一在 main.rs 的 app.on_window_event（setup 阶段，回调拿 &Window 借用，
+                // 不克隆 WebviewWindow）中处理，调用 screenshot::mark_overlay_destroyed(label)。
+                // 此处不再触碰全局窗表、不再克隆 WebviewWindow，杜绝销毁竞态下的 Rc UAF 中止。
+                // ---- [DEV 探针] 失焦浮窗重绘诊断 ----
+                // 启动 dev 前设环境变量 ANDY_PROBE=1 即可开启；输出到 stderr（tauri dev 控制台可见）。
+                // 作用：报告每个浮窗实际读到的重绘 interval、是否走动画分支、SetIsVisible 返回值、
+                // 闭包耗时；并在 interval 变化（前端切换 16ms/100ms）时立即打点，定位卡顿根因。
+                static PROBE_ENABLED: AtomicBool = AtomicBool::new(false);
+                static PROBE_COUNT: AtomicU64 = AtomicU64::new(0);
+                static PROBE_INIT: std::sync::Once = std::sync::Once::new();
+                static LAST_PROBE_RATE: LazyLock<Mutex<HashMap<String, u64>>> =
+                    LazyLock::new(|| Mutex::new(HashMap::new()));
+                fn probe_enabled() -> bool {
+                    PROBE_INIT.call_once(|| {
+                        if std::env::var("ANDY_PROBE").is_ok() {
+                            PROBE_ENABLED.store(true, Ordering::Relaxed);
+                            eprintln!("[RUST-PROBE] enabled (ANDY_PROBE set)");
                         }
-                        // WebView2 COM 控制器只在主线程调用其方法，故可安全标记 Send 以便
-                        // 在工作线程里调度 run_on_main_thread 闭包，所有权随闭包链递归传递。
-                        unsafe impl Send for RepaintState {}
-                        // 后台线程睡眠后，回到主线程先 put_IsVisible(TRUE) 再
-                        // NotifyParentWindowPositionChanged，再递归排下一次。
-                        //
-                        // 两道闸门必须同时打开，缺一不可：
-                        // 1) put_IsVisible(TRUE)：透明分层窗(WS_EX_LAYERED)失焦时 WebView2 会把控制器
-                        //    IsVisible 置 FALSE → 页 visibilityState=hidden → rAF 停摆、renderer 不再产帧。
-                        //    周期强制 TRUE 覆盖该状态，让 renderer 持续产帧。
-                        // 2) NotifyParentWindowPositionChanged：强制 WebView2 把已产出的帧提交/呈现到屏幕。
-                        fn schedule(app: tauri::AppHandle, st: RepaintState) {
-                            let _ = app.run_on_main_thread({
-                                let app = app.clone();
-                                move || {
-                                    // 关键隔离：窗体已销毁【或渲染进程已崩溃】时立即停止常驻重绘，
-                                    // 避免对失效 controller 持续调用 SetIsVisible 触发宿主进程崩溃。
-                                    // 主线程查询 scale_factor 可安全返回 Err 表示 webview 已崩溃。
-                                    let alive = app
-                                        .get_webview_window(&st.label)
-                                        .map(|w| w.scale_factor().is_ok())
-                                        .unwrap_or(false);
-                                    if !alive {
-                                        let mut v = REPRAINT_LABELS.lock().unwrap();
-                                        v.retain(|l| l != &st.label);
-                                        return;
+                    });
+                    PROBE_ENABLED.load(Ordering::Relaxed)
+                }
+                // 后台线程按当前间隔睡眠后，回到主线程先 SetIsVisible(TRUE) 再
+                // NotifyParentWindowPositionChanged，再递归排下一次。两道闸对动画模式都必不可少：
+                //
+                // 1) SetIsVisible(TRUE)：透明分层窗(WS_EX_LAYERED)失焦时 WebView2 会把控制器
+                //    IsVisible 置 FALSE → 页 visibilityState=hidden → rAF 停摆、renderer 不再产帧。
+                //    周期强制 TRUE 覆盖该状态后合成器持续产帧（前端探针实测失焦时 rAF 仍可 144fps）。
+                // 2) NotifyParentWindowPositionChanged：layered 窗的「屏幕呈现」由 DWM 负责，而 DWM
+                //    只在收到该通知时才把 WebView2 已产出的帧 blit 到屏幕。跳过它 → 内部 144fps 产帧
+                //    正常但屏幕停在旧帧 → 视觉一卡一卡（探针实测已证实）。故动画高频档也必须调它。
+                //    其开销在 16ms(60次/秒)下本身不直接致卡，但 60次/秒 的 Notify 会令 DWM 对分层窗
+                //    持续全量重呈现，瞬时干扰该窗的指针命中区重算/输入分发（表现为外部媒体下按钮概率卡顿）；
+                //    故动画档将 Notify 节流到 ~30fps（脉冲为 1.4s 慢动画，视觉无差），静态档(100ms)照常每次调。
+                // 间隔由 REPAINT_INTERVALS 按窗动态读取；轻量 CSS 动画（金点脉冲）在失焦窗口下
+                // 须把定时器提到 ~16ms（60fps）才能丝滑。
+                fn schedule(app: tauri::AppHandle, mut st: RepaintState) {
+                    let _ = app.run_on_main_thread({
+                        let app = app.clone();
+                        move || {
+                            // 第二重保险：销毁标志
+                            if REPAINT_STOP.lock().unwrap().remove(&st.label) {
+                                REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
+                                return;
+                            }
+                            let t0 = std::time::Instant::now();
+                            let interval = REPAINT_INTERVALS
+                                .lock()
+                                .unwrap()
+                                .get(&st.label)
+                                .cloned()
+                                .unwrap_or(Duration::from_millis(100));
+                            // 暂停模式（interval==0）：收起态已静态化，不再持续 Notify，仅维持 rAF 暖机，
+                            // 屏幕停在最后一帧；内容变化由前端 present_overlay_now 按需上屏，避免与外部媒体
+                            // 抢 DWM 重定向呈现导致卡顿。非空值：动画档（≤30ms）节流 Notify 到 ~30fps。
+                            let paused = interval.is_zero();
+                            // DComp 窗走 DWM 常规合成、自动上屏，无需（且不应）再 Notify 分层窗。
+                            let dcomp = crate::dcomp_overlay::is_active(&st.label);
+                            let notify_due = !paused
+                                && !dcomp
+                                && (interval > Duration::from_millis(30)
+                                    || st.last_notify.elapsed() >= Duration::from_millis(33));
+                            // 第一重保险：with_webview 在 webview 已销毁时安全返回 Err，立即停止。
+                            // 控制器每帧重新取（不再跨线程持有裸 COM 指针），闭包仅捕获 Copy 的 notify_due，
+                            // 且闭包必须返回 ()（tauri::Webview::with_webview 的签名约束）。
+                            let repaint_res = st.webview.with_webview(move |raw| {
+                                if let Ok(ctrl) = raw.controller().cast::<ICoreWebView2Controller>() {
+                                    let _ = unsafe { ctrl.SetIsVisible(true) };
+                                    if notify_due {
+                                        unsafe {
+                                            let _ = ctrl.NotifyParentWindowPositionChanged();
+                                        }
                                     }
-                                    let _ = unsafe { st.ctrl.SetIsVisible(true) };
-                                    let _ = unsafe { st.ctrl.NotifyParentWindowPositionChanged() };
-                                    spawn_timer(app, st);
                                 }
                             });
+                            match repaint_res {
+                                Ok(()) => {
+                                    if probe_enabled() {
+                                        let ms = interval.as_millis() as u64;
+                                        let mut last = LAST_PROBE_RATE.lock().unwrap();
+                                        if last.get(&st.label).copied() != Some(ms) {
+                                            last.insert(st.label.clone(), ms);
+                                            eprintln!(
+                                                "[RUST-RATE] label={} interval_ms={} branch={}",
+                                                st.label,
+                                                ms,
+                                                if interval > Duration::from_millis(30) { "static" } else { "anim" }
+                                            );
+                                        }
+                                        let c = PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+                                        if c % 200 == 0 {
+                                            eprintln!(
+                                                "[RUST-PROBE] label={} interval_ms={} branch={} visible=ok cb_us={}",
+                                                st.label,
+                                                ms,
+                                                if interval > Duration::from_millis(30) { "static" } else { "anim" },
+                                                t0.elapsed().as_micros()
+                                            );
+                                        }
+                                    }
+                                    if notify_due {
+                                        st.last_notify = std::time::Instant::now();
+                                    }
+                                    spawn_timer(app, st);
+                                }
+                                Err(_) => {
+                                    // webview 已销毁/不可达：停止常驻重绘，避免对已失效控制器持续调用。
+                                    REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
+                                    REPAINT_STOP.lock().unwrap().remove(&st.label);
+                                }
+                            }
                         }
-                        fn spawn_timer(app: tauri::AppHandle, st: RepaintState) {
-                            std::thread::spawn(move || {
-                                // 100ms ≈ 10fps：足够实时键显/朝向切换，CPU 开销可忽略。
-                                std::thread::sleep(Duration::from_millis(100));
-                                schedule(app, st);
-                            });
-                        }
-                        spawn_timer(app.clone(), RepaintState { ctrl, label });
-                    }
+                    });
                 }
+                fn spawn_timer(app: tauri::AppHandle, st: RepaintState) {
+                    std::thread::spawn(move || {
+                        let interval = REPAINT_INTERVALS
+                            .lock()
+                            .unwrap()
+                            .get(&st.label)
+                            .cloned()
+                            .unwrap_or(Duration::from_millis(100));
+                        // 暂停模式（interval==0）不以 0ms 自旋（会 100% 占 CPU），改为 250ms 低耗暖机。
+                        let sleep = if interval.is_zero() {
+                            Duration::from_millis(250)
+                        } else {
+                            interval
+                        };
+                        std::thread::sleep(sleep);
+                        schedule(app, st);
+                    });
+                }
+                spawn_timer(
+                    app.clone(),
+                    RepaintState {
+                        webview: repaint_webview,
+                        label,
+                        last_notify: std::time::Instant::now(),
+                    },
+                );
             }
         });
     });
 }
+
+/// 调整某透明浮窗的常驻重绘间隔（毫秒）。透明分层浮窗失焦时 WebView2 会冻结渲染，
+/// 由 set_overlay_transparent 启动的定时器按固定间隔「续命」。默认 100ms（10fps）足够静态显示，
+/// 但轻量 CSS 动画（如胶囊金点脉冲）在失焦窗口下会被 Chromium 后台节流压到定时器频率而卡顿，
+/// 故前端在需要流畅动画时调到 ~16ms（60fps）。interval_ms 夹在 [8, 1000]。
+#[cfg(windows)]
+#[tauri::command]
+pub fn set_overlay_repaint_rate(webview: tauri::Webview, interval_ms: u64) {
+    let label = webview.label().to_string();
+    // 0 = 暂停呈现（见模块注释）；非 0 夹到 [8,1000]。
+    let ms = if interval_ms == 0 { 0 } else { interval_ms.clamp(8, 1000) };
+    REPAINT_INTERVALS
+        .lock()
+        .unwrap()
+        .insert(label, Duration::from_millis(ms));
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn set_overlay_repaint_rate(_webview: tauri::Webview, _interval_ms: u64) {}
+
+/// 按需立即上屏一帧：SetIsVisible(TRUE) + NotifyParentWindowPositionChanged 各一次。
+/// 用于收起态（常驻定时器已置 0=暂停轮询）下内容实际变化（如正在播放的歌名、时钟跳动）
+/// 时只呈现一帧，避免持续轮询 Notify 与外部媒体抢 DWM 重定向呈现导致卡顿。
+#[cfg(windows)]
+#[tauri::command]
+pub fn present_overlay_now(webview: tauri::Webview) {
+    use webview2_com_sys::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
+    use windows_core_061::Interface;
+    // DComp 窗自动上屏，仅维持 SetIsVisible 暖机即可；layered 窗才需要 Notify 上屏一帧。
+    let dcomp = crate::dcomp_overlay::is_active(webview.label());
+    let _ = webview.with_webview(move |raw| {
+        if let Ok(ctrl) = raw.controller().cast::<ICoreWebView2Controller>() {
+            unsafe {
+                let _ = ctrl.SetIsVisible(true);
+                if !dcomp {
+                    let _ = ctrl.NotifyParentWindowPositionChanged();
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn present_overlay_now(_webview: tauri::Webview) {}
 
 #[cfg(not(windows))]
 #[tauri::command]

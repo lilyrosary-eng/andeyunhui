@@ -23,9 +23,16 @@
     resizable: false,
   };
 
-  // 加载即创建胶囊窗（镜像 桌宠 ensurePet 在插件入口调用）
+  // 每次打开都先销毁旧窗再重建，保证拿到的是全新可用窗体：
+  // 规避「渲染崩溃残留 / 卡死窗体被复用 / DComp 窗体销毁不彻底导致 getByLabel 命中僵尸窗」
+  // 这类“关闭后重开无效、必须重启软件”的问题。收起（collapse）只是隐藏，不影响此逻辑。
   function ensureCapsule() {
-    return hostApi.createFloatingWindow(CAPSULE_LABEL, CAPSULE_URL, PROFILE);
+    return hostApi
+      .invoke('overlay_window_destroy', { label: CAPSULE_LABEL })
+      .catch(function () { /* 旧窗不存在时忽略 */ })
+      .then(function () {
+        return hostApi.createFloatingWindow(CAPSULE_LABEL, CAPSULE_URL, PROFILE);
+      });
   }
   ensureCapsule().catch(function (e) {
     console.error('[黄金棋盘] 创建浮窗失败', e);
@@ -42,6 +49,14 @@
       hostApi.invoke('overlay_window_destroy', { label: CAPSULE_LABEL }).catch(function () {});
     }
   }).then(function (u) { unlisten = u; }).catch(function () {});
+
+  // 侧边栏「黄金棋盘」点击：HostSidebar 派发 capsule:show，确保浮窗被弹出（幂等，已存在则复用）。
+  // 这样点击侧栏项只弹浮窗、不切到空面板、不回退到笔记模块。
+  try {
+    window.addEventListener('capsule:show', function () {
+      ensureCapsule().catch(function (e) { console.error('[黄金棋盘] 弹出浮窗失败', e); });
+    });
+  } catch (_) { /* ignore */ }
 
   // 占位主组件：返回 null，主面板保持空白（仿 RAG 的 RagPlaceholder）
   function CapsulePlaceholder() {

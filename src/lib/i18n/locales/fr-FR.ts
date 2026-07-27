@@ -138,4 +138,13 @@ export const frFR: Record<string, string> = {
   'settings.about.errorLog': 'Journal d\'erreurs',
   'settings.about.errorLogDesc': 'Ouvre le dossier des journaux ; vous pouvez envoyer les fichiers de log au développeur pour le dépannage',
   'settings.about.openFolder': 'Ouvrir le dossier',
+
+  // 茑萝 - Recherche de fichiers
+  'niaoluo.search.title': 'Recherche de fichiers',
+  'niaoluo.search.placeholder': 'Rechercher des fichiers / dossiers...',
+  'niaoluo.search.indexing': 'Indexation des fichiers...',
+  'niaoluo.search.indexed': '{count} éléments indexés',
+  'niaoluo.search.noResults': 'Aucun résultat',
+  'niaoluo.search.prompt': 'Saisissez pour rechercher (nom / chemin)',
+  'niaoluo.search.waitIndex': 'Première indexation en cours, veuillez patienter...',
 };

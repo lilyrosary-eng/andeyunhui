@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import {
   Cpu, Server, KeyRound, Bot, SlidersHorizontal, TestTube2, Check, X, Plus,
-  ChevronDown, ChevronUp, RotateCcw, Eye, EyeOff, Trash2, Star,
+  ChevronDown, ChevronUp, RotateCcw, Eye, EyeOff, Trash2, Star, ExternalLink,
 } from 'lucide-react';
 
 // ============ 模型档案（前端编辑态） ============
@@ -17,17 +18,21 @@ interface ProfileUi {
   max_tokens: string;
   top_p: string;
   system_prompt: string;
+  thinking: boolean;
+  persona_call_me_as: string;
+  persona_preset: string;
+  persona_style: string;
 }
 
 // 主流 OpenAI 兼容供应商预设（一键填充端点与推荐模型）
 // visionModels：该供应商支持视觉（图片 OCR / 理解）的模型，留空表示无视觉模型。
 // 多数供应商的「对话模型」并不带视觉能力，OCR 需单独指定视觉模型，否则会报「模型不支持图片」。
 const PROVIDERS: { id: string; name: string; base_url: string; models: string[]; visionModels: string[] }[] = [
-  { id: 'deepseek', name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'], visionModels: [] },
-  { id: 'openai', name: 'OpenAI', base_url: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1-mini', 'o3-mini'], visionModels: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'] },
+  { id: 'deepseek', name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash', 'deepseek-v4-pro'], visionModels: ['deepseek-v4-flash', 'deepseek-v4-pro'] },
+  { id: 'openai', name: 'OpenAI', base_url: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1-mini', 'gpt-5.6'], visionModels: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-5.6'] },
   { id: 'custom', name: '自定义', base_url: '', models: [], visionModels: [] },
-  { id: 'qwen', name: '通义千问', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen2.5-coder-32b-instruct', 'qwen3-coder-plus'], visionModels: ['qwen-vl-max', 'qwen-vl-plus', 'qwen2.5-vl-72b-instruct', 'qwen2.5-vl-32b-instruct'] },
-  { id: 'zhipu', name: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-air', 'glm-4-flash', 'glm-4-long'], visionModels: ['glm-4v-plus', 'glm-4v', 'glm-4v-flash'] },
+  { id: 'qwen', name: '通义千问', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-3.5-plus', 'qwen2.5-coder-32b-instruct', 'qwen3-coder-plus'], visionModels: ['qwen-vl-max', 'qwen-vl-plus', 'qwen2.5-vl-72b-instruct', 'qwen2.5-vl-32b-instruct'] },
+  { id: 'zhipu', name: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-air', 'glm-5.1', 'glm-5.2'], visionModels: ['glm-4v-plus', 'glm-4v', 'glm-4v-flash'] },
   { id: 'ollama', name: 'Ollama (本地)', base_url: 'http://localhost:11434/v1', models: ['llama3', 'qwen2.5', 'codellama', 'deepseek-coder'], visionModels: ['llava', 'llama3.2-vision', 'qwen2.5vl:7b'] },
 ];
 
@@ -35,6 +40,18 @@ const PROVIDERS: { id: string; name: string; base_url: string; models: string[];
 const ALL_MODELS = Array.from(new Set(PROVIDERS.flatMap((p) => p.models)));
 // 所有视觉模型聚合，作为视觉模型输入的联想建议
 const ALL_VISION_MODELS = Array.from(new Set(PROVIDERS.flatMap((p) => p.visionModels)));
+
+// 人设风格预设：选中后作为 system 提示词基底（可在「自定义风格」中追加/覆盖）。key 与后端 compose_persona_system 对应。
+const PERSONA_PRESETS: { key: string; label: string; desc: string }[] = [
+  { key: 'sharp', label: '毒舌', desc: '毒舌直率、一针见血，不绕弯子，敢于直接指出问题，但始终基于事实、不人身攻击。' },
+  { key: 'gentle', label: '温柔细致', desc: '温柔细致、循循善诱，多用鼓励性语言，分步骤耐心解释，照顾对方情绪。' },
+  { key: 'rigorous', label: '严谨认真', desc: '严谨认真、逻辑缜密，注重证据与出处，措辞准确，不臆测。' },
+  { key: 'humorous', label: '幽默风趣', desc: '幽默风趣、妙语连珠，善用比喻与生活化例子让内容轻松易懂。' },
+  { key: 'pro', label: '专业顾问', desc: '专业顾问式，条理清晰，适度用行业术语并解释，给可执行建议与权衡分析。' },
+  { key: 'concise', label: '极简直接', desc: '极简直接，只给结论与要点，能用列表就不用段落，省略客套。' },
+  { key: 'mentor', label: '导师式', desc: '导师式，先引导思考再给答案，常用提问帮助对方建立方法论。' },
+  { key: 'custom', label: '自定义', desc: '完全由下方「自定义风格」描述决定。' },
+];
 
 function defaultProfile(name = 'DeepSeek'): ProfileUi {
   const p = PROVIDERS.find((x) => x.name === name) || PROVIDERS[0];
@@ -49,6 +66,10 @@ function defaultProfile(name = 'DeepSeek'): ProfileUi {
     max_tokens: '',
     top_p: '',
     system_prompt: '',
+    thinking: false,
+    persona_call_me_as: '',
+    persona_preset: '',
+    persona_style: '',
   };
 }
 
@@ -64,6 +85,10 @@ function fromPayload(p: any): ProfileUi {
     max_tokens: p.max_tokens != null ? String(p.max_tokens) : '',
     top_p: p.top_p != null ? String(p.top_p) : '',
     system_prompt: p.system_prompt || '',
+    thinking: p.thinking === true,
+    persona_call_me_as: p.persona_call_me_as || '',
+    persona_preset: p.persona_preset || '',
+    persona_style: p.persona_style || '',
   };
 }
 
@@ -79,6 +104,10 @@ function toPayload(p: ProfileUi) {
     max_tokens: p.max_tokens.trim() ? Math.max(1, parseInt(p.max_tokens, 10) || 0) : null,
     top_p: p.top_p.trim() ? Math.min(1, Math.max(0, parseFloat(p.top_p) || 0)) : null,
     system_prompt: p.system_prompt.trim() ? p.system_prompt.trim() : null,
+    thinking: p.thinking === true ? true : null,
+    persona_call_me_as: p.persona_call_me_as.trim() ? p.persona_call_me_as.trim() : null,
+    persona_preset: p.persona_preset.trim() ? p.persona_preset.trim() : null,
+    persona_style: p.persona_style.trim() ? p.persona_style.trim() : null,
   };
 }
 
@@ -221,6 +250,10 @@ export function ModelSettings() {
         max_tokens: '',
         top_p: '',
         system_prompt: '',
+        thinking: false,
+        persona_call_me_as: '',
+        persona_preset: '',
+        persona_style: '',
       };
       setProfiles((prev) => [...prev, np]);
       setEditId(np.id);
@@ -259,6 +292,10 @@ export function ModelSettings() {
       max_tokens: '',
       top_p: '',
       system_prompt: '',
+      thinking: false,
+      persona_call_me_as: '',
+      persona_preset: '',
+      persona_style: '',
     });
     setTestMsg(null);
   }, [editProfile, updateProfile]);
@@ -355,6 +392,19 @@ export function ModelSettings() {
                       {p.name}
                     </button>
                   ))}
+                </div>
+                {/* DeepSeek API 充值入口（充一次约用一个月，但仅中低强度使用可维持一个月；推荐 deepseek-v4-flash） */}
+                <div className="mt-3 flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => openUrl('https://platform.deepseek.com/top_up').catch(() => {})}
+                    className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium bg-[#4d6bfe]/10 text-[#4d6bfe] hover:bg-[#4d6bfe]/20 transition-colors flex items-center gap-1.5"
+                    title="在浏览器打开 DeepSeek 充值页"
+                  >
+                    <ExternalLink size={13} /> DeepSeek API 充值入口
+                  </button>
+                  <span className="text-[11px] text-neutral-400 dark:text-stone-500">
+                    充一次约用一个月；推荐 <b className="text-neutral-600 dark:text-stone-300">deepseek-v4-flash</b>（支持图片输入，可兼顾 OCR）。
+                  </span>
                 </div>
               </div>
 
@@ -454,6 +504,73 @@ export function ModelSettings() {
                 </div>
               </div>
 
+              {/* 人设（Persona）：从高级参数移出，作为独立醒目区块 */}
+              <section className="rounded-xl border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-900/40 p-4 space-y-4">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-sm font-medium text-neutral-700 dark:text-stone-200">人设（Persona）</span>
+                  <span className="text-[11px] text-neutral-400 dark:text-stone-500">决定 AI 对你的称呼与说话风格，全部留空则默认</span>
+                </div>
+
+                {/* 称呼 */}
+                <div>
+                  <label className={labelCls}>你希望 AI 称呼你什么</label>
+                  <input
+                    className={inputCls}
+                    value={editProfile.persona_call_me_as}
+                    placeholder="例如：老板 / 同学 / 老张（留空则默认不特别称呼）"
+                    onChange={(e) => updateProfile(editProfile.id, { persona_call_me_as: e.target.value })}
+                  />
+                </div>
+
+                {/* 风格预设 */}
+                <div>
+                  <label className={labelCls}>你希望 AI 是什么风格</label>
+                  <div className="flex flex-wrap gap-2">
+                    {PERSONA_PRESETS.map((p) => (
+                      <button
+                        key={p.key}
+                        type="button"
+                        onClick={() => updateProfile(editProfile.id, { persona_preset: p.key })}
+                        className={`px-3 py-1.5 rounded-full text-[12px] border transition-colors ${
+                          editProfile.persona_preset === p.key
+                            ? 'border-[var(--element-border)] bg-[rgba(230,195,92,0.14)] text-neutral-800 dark:text-stone-100 font-medium'
+                            : 'border-neutral-200 dark:border-stone-700 text-neutral-600 dark:text-stone-300 hover:border-neutral-300'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1.5">
+                    {PERSONA_PRESETS.find((p) => p.key === editProfile.persona_preset)?.desc ?? '未选择预设：由下方「自定义风格」决定'}
+                  </p>
+                </div>
+
+                {/* 自定义风格 */}
+                <div>
+                  <label className={labelCls}>自定义风格补充（可留空）</label>
+                  <textarea
+                    className={`${inputCls} resize-none`}
+                    rows={2}
+                    value={editProfile.persona_style}
+                    placeholder="例如：多用成语、结尾加一句鼓励的话、避免说教……（在预设基础上细化，或预设选「自定义」时完全由这里决定）"
+                    onChange={(e) => updateProfile(editProfile.id, { persona_style: e.target.value })}
+                  />
+                </div>
+
+                {/* 额外要求（原 system prompt，拼接在人设之后） */}
+                <div>
+                  <label className={labelCls}>额外要求 / 长期指令（可留空）</label>
+                  <textarea
+                    className={`${inputCls} resize-none`}
+                    rows={3}
+                    value={editProfile.system_prompt}
+                    placeholder="任何额外的 base 指令，如身份设定、输出格式约束等（会拼接在人设之后）"
+                    onChange={(e) => updateProfile(editProfile.id, { system_prompt: e.target.value })}
+                  />
+                </div>
+              </section>
+
               {/* 高级参数 */}
               <div>
                 <div
@@ -496,15 +613,23 @@ export function ModelSettings() {
                         />
                       </div>
                     </div>
-                    <div>
-                      <label className={labelCls}>系统提示词（system prompt）</label>
-                      <textarea
-                        className={`${inputCls} resize-none`}
-                        rows={3}
-                        value={editProfile.system_prompt}
-                        placeholder="留空使用内置助手人设；填写后作为对话 base 指令（AI 编程会在此基础上附加上下文文件）"
-                        onChange={(e) => updateProfile(editProfile.id, { system_prompt: e.target.value })}
-                      />
+                    {/* 思考模式开关（默认关；开启后模型先输出思维链再回答，支持 reasoning_content） */}
+                    <div className="flex items-center justify-between gap-3 rounded-lg bg-neutral-50 dark:bg-stone-800/50 border border-neutral-200 dark:border-stone-700 px-3 py-2.5">
+                      <div className="min-w-0">
+                        <div className="text-[13px] font-medium text-neutral-700 dark:text-stone-200">思考模式（Thinking）</div>
+                        <div className="text-[11px] text-neutral-500 dark:text-stone-400 mt-0.5 leading-snug">
+                          默认关。开启后模型先输出思维链（reasoning_content）再回答，提升复杂问题准确率；DeepSeek 等推理模型支持，不支持的模型开启可能报错。开启时自动省略 temperature / top_p。
+                        </div>
+                      </div>
+                      <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                        <input
+                          type="checkbox"
+                          className="sr-only peer"
+                          checked={editProfile.thinking === true}
+                          onChange={(e) => updateProfile(editProfile.id, { thinking: e.target.checked })}
+                        />
+                        <div className="w-10 h-5 bg-neutral-300 dark:bg-stone-600 peer-focus:ring-2 peer-focus:ring-[var(--element-border)] rounded-full peer peer-checked:after:translate-x-5 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--element-border)]"></div>
+                      </label>
                     </div>
                   </div>
                 )}

@@ -1,0 +1,29 @@
+安得云荟 · 第三方组件署名（Third-Party Notices）
+=================================================
+
+本目录下的内容改编自 LocalSend 项目，用于实现与 LocalSend 协议兼容的局域网文件传输功能。
+
+  LocalSend
+  Copyright 2022-2025 Tien Do Nam
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  源代码（参考用，未以二进制形式进入发行物，仅作协议实现参考）：
+    - got-it/localsend-main   (LocalSend 主仓库：Flutter 应用 + Rust core)
+    - got-it/web-main         (LocalSend Web 前端)
+    - got-it/protocol-main    (LocalSend 协议文档 v1/v2)
+
+  本应用中的实现说明：
+    - 我们未照搬其 Flutter/Dart 源码（技术栈不兼容），而是依据其 Apache-2.0 许可的
+      协议规范与 Rust core 逻辑，在我方 Tauri 2 + React + Rust 架构下**重新实现**了
+      LocalSend v2 兼容的传输协议（UDP 组播发现 + HTTP 文件传输）。
+    - 依 Apache-2.0 第 4 条要求：本目录保留其许可证全文（LICENSE），并标注本文件为改动说明。
+    - 我们**不使用「LocalSend」名称/商标**作为本应用的产品名；本功能在我方产品中称为
+      「黄金棋盘 · 传输」。
+
+  修改记录（显著改动声明，依 Apache-2.0 4(b)）：
+    - 2026-07-27  依据 LocalSend v2 协议重新实现局域网传输后端（发现 + 收发），
+                  集成至黄金棋盘胶囊浮窗，并兼容官方 LocalSend 与本应用互通。

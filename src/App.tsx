@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useCallback, useState } from 'react';
 import { PluginHost, PluginErrorBoundary } from '@/core/PluginHost';
 import { GlobalSettingsPanel } from '@/core/settings/GlobalSettingsPanel';
+import { DeskpetSettingsPanel } from '@/DeskpetSettingsPanel';
+import { CapsuleSettingsPanel } from '@/CapsuleSettingsPanel';
 import { ExtensionsHub } from '@/core/extensions/ExtensionsHub';
 import { NotesModule } from '@/core/notes/NotesModule';
 import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferStationPanel';
 import { Titlebar } from '@/components/Titlebar';
 import { AppNav } from '@/components/AppNav';
 import { HostSidebar } from '@/components/HostSidebar';
+import { GoldChessboardHub } from '@/components/GoldChessboardHub';
+import TransferReceiveModal from '@/components/TransferReceiveModal';
 import { logger } from '@/lib/logger';
 import { api } from '@/lib/api';
 import { invoke } from '@tauri-apps/api/core';
@@ -315,7 +319,7 @@ function App() {
   }, [pluginRegistry]);
 
   const validModuleIds = useMemo(() => {
-    const ids = new Set(['notes', 'extensions', 'settings', 'transfer']);
+    const ids = new Set(['notes', 'extensions', 'settings', 'transfer', 'capsule-settings']);
     mainPluginIds.forEach(id => ids.add(id));
     subPluginIds.forEach(id => ids.add(id));
     return ids;
@@ -429,6 +433,18 @@ function App() {
     }
   }, [pluginRegistry, validModuleIds, activeModule, setActiveModule]);
 
+  // 侧栏齿轮模块设置：黄金棋盘→capsule-settings，其他插件（如 IDE）自行接 module-settings-toggle。
+  // 注意：HostSidebar 派发的是 window.dispatchEvent 的 DOM CustomEvent，
+  // 必须用 window.addEventListener 接（Tauri listen 收不到 DOM 事件，之前因此点了无反应）。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ moduleId?: string }>).detail;
+      if (detail?.moduleId === 'capsule') setActiveModule('capsule-settings');
+    };
+    window.addEventListener('module-settings-toggle', handler);
+    return () => window.removeEventListener('module-settings-toggle', handler);
+  }, [setActiveModule]);
+
   // 文件拖入（HTML5 拖放）：dragDropEnabled 已关闭，由 webview 原生处理拖放事件，
   // 这样「拖出」也能通过 dataTransfer.items.add(File) 正常工作（否则会显示禁止符号）。
   // 非笔记模块：把文件导入图标栏中转站（并可打开可读文本）；
@@ -535,6 +551,18 @@ function App() {
     ) {
       return <ExtensionsHub registry={pluginRegistry} parentId="niaoluo" excludePluginIds={mainPluginIds} />;
     }
+    // 桌宠详细设置面板：从「茑萝」侧边栏「桌宠」项打开，复用全局设置抽出的同一套逻辑
+    if (activeModule === 'deskpet') {
+      return <DeskpetSettingsPanel />;
+    }
+    // 黄金棋盘·主窗口面板：从「茑萝」侧边栏「黄金棋盘」打开，搜索/传输双 Tab 侧栏
+    if (activeModule === 'capsule') {
+      return <PluginErrorBoundary pluginId="capsule"><GoldChessboardHub /></PluginErrorBoundary>;
+    }
+    // 黄金棋盘·专属模块设置：从侧栏齿轮触发
+    if (activeModule === 'capsule-settings') {
+      return <PluginErrorBoundary pluginId="capsule"><CapsuleSettingsPanel /></PluginErrorBoundary>;
+    }
     if (pluginRegistry && (mainPluginIds.includes(activeModule) || subPluginIds.includes(activeModule))) {
       logger.app.mainPluginRenderStart(activeModule, !!pluginRegistry);
       const def = pluginRegistry.get(activeModule);
@@ -574,6 +602,8 @@ function App() {
           </div>
         </div>
       </div>
+      {/* 全局局域网传输接收确认弹窗：独立于任何传输面板，确保任意界面下收到请求都弹确认框 */}
+      <TransferReceiveModal />
     </PluginHost>
   );
 }
