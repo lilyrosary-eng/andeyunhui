@@ -138,4 +138,13 @@ export const deDE: Record<string, string> = {
   'settings.about.errorLog': 'Fehlerprotokoll',
   'settings.about.errorLogDesc': 'Öffnet den Protokollordner; Sie können Protokolldateien zur Fehlerbehebung an den Entwickler senden',
   'settings.about.openFolder': 'Ordner öffnen',
+
+  // 茑萝 - Dateisuche
+  'niaoluo.search.title': 'Dateisuche',
+  'niaoluo.search.placeholder': 'Dateien / Ordner suchen...',
+  'niaoluo.search.indexing': 'Indiziere Dateien...',
+  'niaoluo.search.indexed': '{count} Einträge indiziert',
+  'niaoluo.search.noResults': 'Keine Ergebnisse',
+  'niaoluo.search.prompt': 'Zum Suchen tippen (Name / Pfad)',
+  'niaoluo.search.waitIndex': 'Erstindizierung läuft, bitte warten...',
 };

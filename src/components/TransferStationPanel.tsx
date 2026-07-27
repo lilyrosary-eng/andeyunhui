@@ -1,9 +1,10 @@
 import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save, ScanText, Languages, Loader2, X } from 'lucide-react';
+import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save, ScanText, Languages, Loader2, X, FileDown } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { save } from '@tauri-apps/plugin-dialog';
+import { save, open } from '@tauri-apps/plugin-dialog';
+import { join } from '@tauri-apps/api/path';
 import { api, type ImportedFile } from '@/lib/api';
 import {
   SOURCE_LANGS,
@@ -87,6 +88,9 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
   const [imgUrls, setImgUrls] = useState<Record<string, string>>({});
   // 选中态：点选文件行选中（中转站与浮窗共用）
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // 复选模式（参照音乐模块 TrackList）：开启后每行显示复选框，可批量保存 / 删除
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   // OCR / 翻译 结果 / 错误 / loading 状态按 storedPath 维度存储
   // 该状态仅用于「中转站浮窗」内联结果；主站改用下方自包含工作区（OcrWorkspace / TranslateWorkspace）
   const [aiResults, setAiResults] = useState<Record<string, { kind: 'ocr' | 'translate'; text: string } | { kind: 'error'; text: string } | { kind: 'loading'; kindLabel: string }>>({});
@@ -154,6 +158,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
   // 完全绕过 WebView2 对 JS dataTransfer 拖出的限制，是根治「文件拖不出」的方案。
   const startNativeDrag = useCallback((e: React.MouseEvent, file: ImportedFile) => {
     if (e.button !== 0) return; // 仅左键
+    if (selectionMode) return; // 多选模式下禁用拖拽，点击改为切换选中
     if (!file.absolutePath) return;
     const target = e.target as HTMLElement;
     if (target.closest('button')) return; // 让删除/保存等按钮正常工作
@@ -165,7 +170,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
       .finally(() => {
         (window as unknown as Record<string, unknown>).__andengDragging = false;
       });
-  }, []);
+  }, [selectionMode]);
 
   // 兜底：用系统「另存为」对话框把文件导出到任意位置（拖出在所有环境下不一定可用）
   const handleSave = useCallback(async (file: ImportedFile) => {
@@ -296,6 +301,53 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
     [load],
   );
 
+  // 复选模式切换：退出时清空已选
+  const toggleSelectMode = useCallback(() => {
+    setSelectionMode((prev) => {
+      if (prev) setSelectedIds(new Set());
+      return !prev;
+    });
+  }, []);
+  // 切换单个文件选中态
+  const toggleSelect = useCallback((path: string) => {
+    setSelectedIds((prev) => {
+      const n = new Set(prev);
+      if (n.has(path)) n.delete(path);
+      else n.add(path);
+      return n;
+    });
+  }, []);
+  const allSelected = files.length > 0 && selectedIds.size === files.length;
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIds((prev) =>
+      prev.size === files.length ? new Set<string>() : new Set(files.map((f) => f.storedPath)),
+    );
+  }, [files]);
+  // 批量保存：弹一次目录选择，把所有选中文件导出到该目录（解决逐个另存为的繁琐）
+  const batchSave = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    const dir = await open({ directory: true, title: '选择保存目录（批量）' }).catch(() => null);
+    if (!dir || typeof dir !== 'string') return;
+    for (const f of files) {
+      if (!selectedIds.has(f.storedPath)) continue;
+      const dest = await join(dir, f.originalName);
+      await api.exportDropzoneFile(f.storedPath, dest).catch(() => {});
+    }
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  }, [files, selectedIds]);
+  // 批量删除：删除所有选中文件（「存档」快照不受影响）
+  const batchDelete = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    for (const f of files) {
+      if (!selectedIds.has(f.storedPath)) continue;
+      await invoke('delete_dropzone_file', { storedPath: f.storedPath }).catch(() => {});
+    }
+    await load();
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  }, [files, selectedIds, load]);
+
   const handleClearAll = useCallback(async () => {
     if (!confirm('确定清空中转站所有暂存文件？此操作不可恢复（不影响「存档」快照）。')) return;
     try {
@@ -339,15 +391,51 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
             </span>
             <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">中转站</h2>
           </div>
-          {files.length > 0 && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={handleClearAll}
-              className="btn-press px-3 py-1.5 rounded-lg text-xs text-red-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+              onClick={toggleSelectMode}
+              className={`btn-press px-3 py-1.5 rounded-lg text-xs transition-colors ${selectionMode ? 'text-[var(--element-bg)] bg-[var(--element-muted)]' : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)]'}`}
+              title={selectionMode ? '退出多选' : '多选后可批量保存 / 删除'}
             >
-              清空全部
+              {selectionMode ? '退出多选' : '多选'}
             </button>
-          )}
+            {files.length > 0 && (
+              <button
+                onClick={handleClearAll}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs text-red-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+              >
+                清空全部
+              </button>
+            )}
+          </div>
         </div>
+
+        {/* 多选模式工具条：全选 / 批量保存 / 批量删除 */}
+        {selectionMode && (
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
+            <button
+              onClick={toggleSelectAll}
+              className="btn-press px-2.5 py-1.5 rounded-lg text-xs border border-[var(--element-border)] text-neutral-600 dark:text-stone-300 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors"
+            >
+              {allSelected ? '取消全选' : '全选'}
+            </button>
+            <button
+              onClick={batchSave}
+              disabled={selectedIds.size === 0}
+              className="btn-press px-2.5 py-1.5 rounded-lg text-xs text-[var(--element-bg)] bg-[var(--element-muted)] hover:opacity-90 disabled:opacity-40 transition-colors"
+            >
+              批量保存{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
+            </button>
+            <button
+              onClick={batchDelete}
+              disabled={selectedIds.size === 0}
+              className="btn-press px-2.5 py-1.5 rounded-lg text-xs text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-40 transition-colors"
+            >
+              批量删除
+            </button>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">已选 {selectedIds.size} / {files.length}</span>
+          </div>
+        )}
 
         {/* 使用提示 */}
         <div className="glass-panel p-3 mb-5">
@@ -420,6 +508,15 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
               const aiResult = variant === 'floating' ? aiResults[file.storedPath] : undefined;
               const rowContent = (
                 <>
+                  {selectionMode && (
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(file.storedPath)}
+                      onChange={() => toggleSelect(file.storedPath)}
+                      onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                      className="w-4 h-4 rounded border-neutral-300 dark:border-stone-600 bg-white dark:bg-stone-700 text-[var(--element-bg)] focus:ring-[var(--element-bg)] cursor-pointer flex-shrink-0"
+                    />
+                  )}
                   {/* 图标或图片缩略图 */}
                   {imgSrc ? (
                     <img
@@ -503,13 +600,13 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
                 return (
                   <div
                     key={file.storedPath}
-                    onClick={() => setSelectedPath(file.storedPath)}
-                    className={`glass-panel p-3 flex flex-col gap-2 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer ${file.storedPath === selectedPath ? 'ring-2 ring-[var(--element-bg)]' : ''}`}
+                    onClick={() => (selectionMode ? toggleSelect(file.storedPath) : setSelectedPath(file.storedPath))}
+                    className={`glass-panel p-3 flex flex-col gap-2 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer ${file.storedPath === selectedPath ? 'ring-2 ring-[var(--element-bg)]' : ''}${selectionMode && selectedIds.has(file.storedPath) ? ' outline outline-2 outline-[var(--element-bg)] bg-black/[0.04] dark:bg-white/[0.06]' : ''}`}
                   >
                     <div
                       onMouseEnter={() => prefetch(file)}
                       onMouseDown={(e) => startNativeDrag(e, file)}
-                      onClick={() => setSelectedPath(file.storedPath)}
+                      onClick={() => (selectionMode ? toggleSelect(file.storedPath) : setSelectedPath(file.storedPath))}
                       className="flex items-center gap-3 cursor-grab active:cursor-grabbing"
                       title="拖动此行到桌面或文件夹即可导出真实文件"
                     >
@@ -563,8 +660,8 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
                   key={file.storedPath}
                   onMouseEnter={() => prefetch(file)}
                   onMouseDown={(e) => startNativeDrag(e, file)}
-                  onClick={() => setSelectedPath(file.storedPath)}
-                  className={`glass-panel p-3 flex items-center gap-3 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-grab active:cursor-grabbing ${file.storedPath === selectedPath ? 'ring-2 ring-[var(--element-bg)]' : ''}`}
+                  onClick={() => (selectionMode ? toggleSelect(file.storedPath) : setSelectedPath(file.storedPath))}
+                  className={`glass-panel p-3 flex items-center gap-3 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-grab active:cursor-grabbing ${file.storedPath === selectedPath ? 'ring-2 ring-[var(--element-bg)]' : ''}${selectionMode && selectedIds.has(file.storedPath) ? ' outline outline-2 outline-[var(--element-bg)] bg-black/[0.04] dark:bg-white/[0.06]' : ''}`}
                   title="拖动此行到桌面或文件夹即可导出真实文件；也可点「保存到…」"
                 >
                   {rowContent}
@@ -598,39 +695,103 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // 识别引擎：auto=优先云端视觉 OCR（不支持图片的模型如 DeepSeek 自动降级本地 PaddleOCR）；local=仅本地 PaddleOCR
+  const [mode, setMode] = useState<'auto' | 'local'>('auto');
+  // AI 深度增强：把 OCR 原文交给文本模型校对 / 整理（用于不支持识图的模型）。
+  // 默认关，需用户主动开启（即同意），可随时关闭。
+  const [enhance, setEnhance] = useState(false);
+  const [enhanceLoading, setEnhanceLoading] = useState(false);
+  const [enhancedText, setEnhancedText] = useState('');
+  const [pdfLoading, setPdfLoading] = useState(false);
+
+  // 将 OCR 原文交给文本模型校对整理（本地 PaddleOCR 识别 + DeepSeek 之类文本模型分析纠错）
+  const applyEnhance = useCallback(async (src: string) => {
+    setEnhanceLoading(true);
+    try {
+      const r = await api.aiOcrEnhance(src);
+      setEnhancedText(r || '');
+    } catch (e) {
+      setEnhancedText('');
+      setError('⚠ 深度增强失败：' + String(e).slice(0, 200) + '（已保留原始 OCR 文本）');
+    } finally {
+      setEnhanceLoading(false);
+    }
+  }, []);
+
+  const toggleEnhance = () => {
+    const next = !enhance;
+    setEnhance(next);
+    if (next && text) void applyEnhance(text);
+    else if (!next) setEnhancedText('');
+  };
+
+  const exportPdf = async () => {
+    if (!dataUrl) return;
+    const p = await save({
+      defaultPath: `ocr_${Date.now()}.pdf`,
+      filters: [{ name: 'PDF 文件', extensions: ['pdf'] }],
+    });
+    if (!p) return;
+    setPdfLoading(true);
+    try {
+      const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
+      const mime = m ? m[1] : 'image/png';
+      const b64 = m ? m[2] : dataUrl.split(',')[1] || '';
+      await api.ocrExportPdf(p, b64, mime);
+      setError(null);
+    } catch (e) {
+      setError('⚠ 导出 PDF 失败：' + String(e).slice(0, 200));
+    } finally {
+      setPdfLoading(false);
+    }
+  };
+
+  const display = enhance && enhancedText ? enhancedText : text;
+
   const run = useCallback(async (url: string) => {
     setLoading(true);
     setError(null);
     setDataUrl(url);
+    setEnhancedText('');
     try {
-      const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
-      if (!m) throw new Error('图片数据格式错误');
-      // API 优先：优先调用云端 AI 视觉 OCR（质量更高、无需本机推理）。
-      // 仅当「未配置 API Key」（即无可用 API）时，才降级到本地 PaddleOCR 引擎
-      // （纯前端 WebGL 推理，离线可用）。本地引擎通过 loadPaddleOcr() 惰性加载
-      // （read_external_dep_file + new Function，挂载到 window.__EXT_PADDLEOCR__）。
-      try {
-        const res = await api.aiVisionOcr(m[2], m[1]);
-        setText(res || '');
-        return;
-      } catch (apiErr) {
-        const msg = String(apiErr ?? '');
-        const noApi = msg.includes('未配置') || msg.includes('API Key');
-        if (!noApi) throw apiErr; // 其余错误（网络/鉴权/超时等）不降级，直接抛出
+      let ocrText = '';
+      if (mode === 'local') {
+        // 本地优先：跳过云端，直接用 PaddleOCR（离线、零 API 成本）
+        const local = await loadPaddleOcr();
+        ocrText = (await local.recognize(url)) || '';
+      } else {
+        // 云端优先：AI 视觉 OCR（质量更高）
         try {
-          const local = await loadPaddleOcr();
-          const t = await local.recognize(url);
-          if (t && t.trim()) {
-            setText(t);
-            return;
+          const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
+          if (!m) throw new Error('图片数据格式错误');
+          ocrText = (await api.aiVisionOcr(m[2], m[1])) || '';
+        } catch (apiErr) {
+          const msg = String(apiErr ?? '');
+          const noApi = msg.includes('未配置') || msg.includes('API Key');
+          // 不支持图片识别的模型（如 DeepSeek：unknown variant image_url / 400）同样降级到本地 PaddleOCR
+          const visionUnsupported = /不支持|support|image|vision|400|variant|未知|image_url/i.test(msg);
+          if (!noApi && !visionUnsupported) throw apiErr; // 其它错误（网络/鉴权）不降级
+          try {
+            const local = await loadPaddleOcr();
+            const t = await local.recognize(url);
+            if (t && t.trim()) ocrText = t;
+            else throw apiErr;
+          } catch (localErr) {
+            if (noApi || visionUnsupported) {
+              throw new Error(
+                noApi
+                  ? '未配置 API Key，且本地 PaddleOCR 未返回结果'
+                  : '该模型不支持图片识别，且本地 PaddleOCR 未返回结果（可改用「本地 PaddleOCR」模式）',
+              );
+            }
+            throw apiErr;
           }
-        } catch (e) {
-          console.warn('[OCR] 本地识别失败：', e);
         }
-        throw apiErr; // 无 API 且本地也不可用，抛出原始「未配置」提示
       }
+      setText(ocrText || '');
+      if (enhance && ocrText) await applyEnhance(ocrText);
     } catch (e) {
-      console.error('[OCR] 云端识别失败:', e);
+      console.error('[OCR] 识别失败:', e);
       const msg = String(e);
       const hint = /不支持|support|image|vision|400|模型/i.test(msg)
         ? ' — 可在「全局设置 → 模型」确认已为 OCR 单独指定「视觉模型」（对话模型往往不支持图片）'
@@ -639,7 +800,7 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [mode, enhance, applyEnhance]);
 
   // 预填充：来自文件行 / 选中图片（prefill 变化时自动识别）
   useEffect(() => {
@@ -734,12 +895,42 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
         {error && (
           <div className="text-xs text-amber-600 dark:text-amber-400 flex-shrink-0">{error}</div>
         )}
+        <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
+          <div className="flex rounded-lg border border-[var(--element-border)] overflow-hidden text-[10px]">
+            <button
+              onClick={() => setMode('auto')}
+              className={`px-2 py-0.5 transition-colors ${mode === 'auto' ? 'bg-[var(--element-bg)] text-white' : 'text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/10'}`}
+            >
+              自动（云端优先）
+            </button>
+            <button
+              onClick={() => setMode('local')}
+              className={`px-2 py-0.5 transition-colors ${mode === 'local' ? 'bg-[var(--element-bg)] text-white' : 'text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/10'}`}
+            >
+              本地 PaddleOCR
+            </button>
+          </div>
+          <label
+            className="flex items-center gap-1 text-[10px] text-neutral-500 dark:text-stone-400 cursor-pointer select-none"
+            title="开启后把 OCR 文本交给文本模型（如 DeepSeek）校对 / 整理，会消耗 token；可随时关闭"
+          >
+            <input type="checkbox" checked={enhance} onChange={toggleEnhance} className="accent-[var(--element-bg)]" />
+            AI 深度增强（纠错 / 整理）
+          </label>
+        </div>
+        {enhanceLoading && (
+          <div className="text-[10px] text-[var(--element-bg)] flex items-center gap-1 flex-shrink-0">
+            <Loader2 size={11} className="animate-spin" /> 深度增强整理中…
+          </div>
+        )}
         <div className="flex items-center justify-between mb-1 flex-shrink-0">
-          <span className="font-medium text-xs text-neutral-600 dark:text-stone-300">识别结果</span>
+          <span className="font-medium text-xs text-neutral-600 dark:text-stone-300">
+            识别结果{enhance && enhancedText ? '（已增强）' : ''}
+          </span>
           <div className="flex gap-1">
             <button
-              onClick={() => text && navigator.clipboard?.writeText(text)}
-              disabled={!text}
+              onClick={() => display && navigator.clipboard?.writeText(display)}
+              disabled={!display}
               className="px-2 py-0.5 rounded text-[10px] bg-white/70 dark:bg-stone-700/70 hover:bg-white dark:hover:bg-stone-600 transition-colors disabled:opacity-40"
             >
               复制
@@ -751,10 +942,18 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
             >
               存入中转站
             </button>
+            <button
+              onClick={() => void exportPdf()}
+              disabled={!dataUrl || pdfLoading}
+              className="px-2 py-0.5 rounded text-[10px] bg-white/70 dark:bg-stone-700/70 hover:bg-white dark:hover:bg-stone-600 transition-colors disabled:opacity-40 flex items-center gap-1"
+              title="将原始图片导出为保留版面的 PDF"
+            >
+              {pdfLoading ? <Loader2 size={11} className="animate-spin" /> : <FileDown size={11} />} 保存为 PDF
+            </button>
           </div>
         </div>
         <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed flex-1 min-h-0 overflow-y-auto bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 rounded-lg px-3 py-2 text-neutral-700 dark:text-stone-200">
-          {text || 'OCR 文本将显示在这里…'}
+          {display || 'OCR 文本将显示在这里…'}
         </pre>
       </div>
     </div>

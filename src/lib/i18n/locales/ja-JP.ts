@@ -138,4 +138,13 @@ export const jaJP: Record<string, string> = {
   'settings.about.errorLog': 'エラーログ',
   'settings.about.errorLogDesc': 'ログフォルダを開きます。log ファイルを開発者に提出して問題を調査できます',
   'settings.about.openFolder': 'フォルダを開く',
+
+  // 茑萝 - ファイル検索
+  'niaoluo.search.title': 'ファイル検索',
+  'niaoluo.search.placeholder': 'ファイル / フォルダを検索…',
+  'niaoluo.search.indexing': 'ファイルをインデックス中…',
+  'niaoluo.search.indexed': '{count} 項目をインデックス済み',
+  'niaoluo.search.noResults': '一致する結果はありません',
+  'niaoluo.search.prompt': 'キーワードを入力して検索（名前 / パス）',
+  'niaoluo.search.waitIndex': '初回インデックス中、お待ちください…',
 };

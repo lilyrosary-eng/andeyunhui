@@ -20,6 +20,7 @@ interface AiProfile {
   base_url: string;
   api_key: string;
   system_prompt?: string | null;
+  thinking?: boolean | null;
 }
 
 interface Msg {
@@ -220,6 +221,31 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
   // 下拉框只列出「已填写 API Key」的档案；未配置时不展示任何可用模型。
   const configuredProfiles = profiles.filter((p) => p.api_key && p.api_key.trim());
   const activeProfile = configuredProfiles.find((p) => p.id === activeId) || null;
+  // 思考模式内联开关：直接写入后端 profile.thinking（与胶囊 / IDE / 攻防共享同一档案字段）
+  const toggleThinking = async () => {
+    if (!activeProfile) return;
+    const next = !activeProfile.thinking;
+    setProfiles((prev) => prev.map((p) => (p.id === activeId ? { ...p, thinking: next } : p)));
+    try {
+      await hostApi.invoke('ai_set_profile_thinking', { profileId: activeId, thinking: next });
+    } catch (e) {
+      console.warn('[AI] 设置思考模式失败:', e);
+      setProfiles((prev) => prev.map((p) => (p.id === activeId ? { ...p, thinking: !next } : p)));
+    }
+  };
+
+  // 接收其它聊天界面切换「思考模式」的事件，保持胶囊 / IDE / 攻防 三处开关实时同步
+  React.useEffect(() => {
+    let un: any = null;
+    hostApi.listen('ai-thinking-changed', (e: any) => {
+      const pid = e?.payload?.profile_id;
+      const th = e?.payload?.thinking;
+      if (!pid) return;
+      setProfiles((ps: any[]) => ps.map((p) => (p.id === pid ? { ...p, thinking: th } : p)));
+    }).then((u: any) => { un = u; }).catch(() => {});
+    return () => { if (un) un(); };
+  }, []);
+
   const activeConv = conversations.find((c) => c.id === activeConvId) || conversations[0];
   const messages = activeConv ? activeConv.messages : [];
 
@@ -439,9 +465,9 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
   }, []);
 
   const buildSystemPrompt = useCallback((): string => {
-    let sys = (activeProfile?.system_prompt && activeProfile.system_prompt.trim())
-      ? activeProfile.system_prompt.trim()
-      : '你是一名资深编程助手，风格类似 Cursor / Claude Code。请用简体中文回答；给出代码时放在 ``` 代码块中并标注语言，必要时简述改动理由与关键点。';
+    // 注意：用户「人设 / 额外要求(system_prompt)」由后端 ai_chat 统一组合并合并进首条 system 消息，
+    // 此处不再重复拼接 system_prompt，避免双重注入；只保留编程助手基底 + 项目文件上下文。
+    let sys = '你是一名资深编程助手，风格类似 Cursor / Claude Code。请用简体中文回答；给出代码时放在 ``` 代码块中并标注语言，必要时简述改动理由与关键点。';
     if (ctxFiles.length > 0) {
       sys += '\n\n以下是用户提供的项目文件作为上下文，请结合它们回答：\n';
       for (const f of ctxFiles) {
@@ -449,7 +475,7 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
       }
     }
     return sys;
-  }, [activeProfile, ctxFiles]);
+  }, [ctxFiles]);
 
   // 往当前对话追加一条提示（如未配置模型）
   const appendHint = useCallback((text: string) => {
@@ -672,6 +698,24 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
             </div>
             {/* 文件（右）+ 发送（右）：并列（#11） */}
             <div className="flex items-center gap-2">
+              <button onClick={toggleThinking} title={activeProfile?.thinking ? '思考模式：开（先输出思维链再回答）' : '思考模式：关（点击开启）'}
+                className={`btn-press shrink-0 px-2.5 py-2 rounded-lg text-xs border transition-colors ${
+                  activeProfile?.thinking
+                    ? 'border-[var(--element-border)] bg-[rgba(230,195,92,0.14)] text-[var(--element-bg)] font-medium'
+                    : 'border-neutral-200 dark:border-stone-700 text-neutral-600 dark:text-stone-300'
+                }`}>
+                {activeProfile?.thinking ? (
+                  <>
+                    <span className="inline-block w-[7px] h-[7px] rounded-full mr-1 align-middle" style={{ background: '#22c55e' }} />
+                    思考·开
+                  </>
+                ) : (
+                  <>
+                    <span className="inline-block w-[7px] h-[7px] rounded-full mr-1 align-middle" style={{ background: 'rgba(120,120,120,0.45)' }} />
+                    思考·关
+                  </>
+                )}
+              </button>
               <button onClick={addContextFile} title="添加文件作为上下文"
                 className="btn-press shrink-0 px-2.5 py-2 rounded-lg text-xs bg-neutral-200/70 dark:bg-stone-700 hover:bg-neutral-300 dark:hover:bg-stone-600 transition-colors">📎 文件</button>
               <button onClick={send} disabled={busy || !input.trim()}

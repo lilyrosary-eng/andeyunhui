@@ -2,8 +2,9 @@ import { useEffect, useState, useRef, type CSSProperties } from 'react';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
 import { openPath } from '@tauri-apps/plugin-opener';
-import { X, Inbox, ScanText, Languages, Loader2 } from 'lucide-react';
+import { X, Inbox, ScanText, Languages, Loader2, FileDown } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { save } from '@tauri-apps/plugin-dialog';
 import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferStationPanel';
 import { api, type ImportedFile } from '@/lib/api';
 import {
@@ -368,33 +369,96 @@ function OcrBox() {
   const [error, setError] = useState<string | null>(null);
   const [lastDataUrl, setLastDataUrl] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [mode, setMode] = useState<'auto' | 'local'>('auto');
+  const [enhance, setEnhance] = useState(false);
+  const [enhanceLoading, setEnhanceLoading] = useState(false);
+  const [enhancedText, setEnhancedText] = useState('');
+  const [pdfLoading, setPdfLoading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const applyEnhance = async (src: string) => {
+    setEnhanceLoading(true);
+    try {
+      const r = await api.aiOcrEnhance(src);
+      setEnhancedText(r || '');
+    } catch (e) {
+      setEnhancedText('');
+      setError('深度增强失败：' + String(e).slice(0, 200) + '（已保留原始 OCR 文本）');
+    } finally {
+      setEnhanceLoading(false);
+    }
+  };
+
+  const toggleEnhance = () => {
+    const next = !enhance;
+    setEnhance(next);
+    if (next && text) void applyEnhance(text);
+    else if (!next) setEnhancedText('');
+  };
+
+  const exportPdf = async () => {
+    if (!lastDataUrl) return;
+    const p = await save({
+      defaultPath: `ocr_${Date.now()}.pdf`,
+      filters: [{ name: 'PDF 文件', extensions: ['pdf'] }],
+    });
+    if (!p) return;
+    setPdfLoading(true);
+    try {
+      const m = /^data:([^;]+);base64,(.*)$/s.exec(lastDataUrl);
+      const mime = m ? m[1] : 'image/png';
+      const b64 = m ? m[2] : lastDataUrl.split(',')[1] || '';
+      await api.ocrExportPdf(p, b64, mime);
+      setError(null);
+    } catch (e) {
+      setError('导出 PDF 失败：' + String(e).slice(0, 200));
+    } finally {
+      setPdfLoading(false);
+    }
+  };
+
+  const display = enhance && enhancedText ? enhancedText : text;
 
   const run = async (dataUrl: string) => {
     setLoading(true);
     setError(null);
     setLastDataUrl(dataUrl);
+    setEnhancedText('');
     try {
-      const [meta, b64] = dataUrl.split(',');
-      const mime = (meta.match(/data:([^;]+)/)?.[1]) || 'image/png';
-      const res = await api.aiVisionOcr(b64, mime);
-      setText(res || '');
-    } catch (e) {
-      const msg = typeof e === 'string' ? e : (e as any)?.message || 'OCR 失败，请检查 AI 配置';
-      // 与中转站主站一致：云端未配置 API Key 时自动降级到本地 PaddleOCR 引擎
-      if (msg.includes('未配置') || msg.includes('API Key')) {
+      let ocrText = '';
+      if (mode === 'local') {
+        const local = await loadPaddleOcr();
+        ocrText = (await local.recognize(dataUrl)) || '';
+      } else {
         try {
-          const local = await loadPaddleOcr();
-          const text = await local.recognize(dataUrl);
-          setText(text || '');
-          setError(null);
-          return;
-        } catch (e2) {
-          setError('本地 OCR 引擎识别失败：' + (typeof e2 === 'string' ? e2 : (e2 as any)?.message || e2));
-          return;
+          const [meta, b64] = dataUrl.split(',');
+          const mime = (meta.match(/data:([^;]+)/)?.[1]) || 'image/png';
+          ocrText = (await api.aiVisionOcr(b64, mime)) || '';
+        } catch (e) {
+          const msg = typeof e === 'string' ? e : (e as any)?.message || 'OCR 失败，请检查 AI 配置';
+          const noApi = msg.includes('未配置') || msg.includes('API Key');
+          // 不支持图片识别的模型（如 DeepSeek：unknown variant image_url / 400）同样降级到本地 PaddleOCR
+          const visionUnsupported = /不支持|support|image|vision|400|variant|未知|image_url/i.test(msg);
+          if (!noApi && !visionUnsupported) {
+            setError(msg);
+            return;
+          }
+          try {
+            const local = await loadPaddleOcr();
+            const t = await local.recognize(dataUrl);
+            if (t && t.trim()) ocrText = t;
+            else {
+              setError(noApi ? '未配置 API Key，且本地 PaddleOCR 未返回结果' : '该模型不支持图片识别，且本地 PaddleOCR 未返回结果（可改用「本地 PaddleOCR」模式）');
+              return;
+            }
+          } catch (e2) {
+            setError('本地 OCR 引擎识别失败：' + (typeof e2 === 'string' ? e2 : (e2 as any)?.message || e2));
+            return;
+          }
         }
       }
-      setError(msg);
+      setText(ocrText || '');
+      if (enhance && ocrText) await applyEnhance(ocrText);
     } finally {
       setLoading(false);
     }
@@ -461,21 +525,38 @@ function OcrBox() {
         )}
         <input ref={fileRef} type="file" accept="image/*" hidden onChange={onFile} />
       </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, flexWrap: 'wrap' }}>
+        <div style={{ display: 'inline-flex', border: '1px solid rgba(110,175,135,0.5)', borderRadius: 8, overflow: 'hidden', fontSize: 11 }}>
+          <button onClick={() => setMode('auto')} style={{ ...miniBtn, border: 'none', background: mode === 'auto' ? '#6eaf87' : 'transparent', color: mode === 'auto' ? '#fff' : undefined }}>自动（云端优先）</button>
+          <button onClick={() => setMode('local')} style={{ ...miniBtn, border: 'none', background: mode === 'local' ? '#6eaf87' : 'transparent', color: mode === 'local' ? '#fff' : undefined }}>本地 PaddleOCR</button>
+        </div>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, opacity: 0.75, cursor: 'pointer' }} title="开启后把 OCR 文本交给文本模型（如 DeepSeek）校对 / 整理，会消耗 token；可随时关闭">
+          <input type="checkbox" checked={enhance} onChange={toggleEnhance} /> AI 深度增强
+        </label>
+      </div>
+      {enhanceLoading && (
+        <div style={{ color: '#23402f', fontSize: 11, flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <Loader2 size={11} className="animate-spin" /> 深度增强整理中…
+        </div>
+      )}
       {error && <div style={{ color: '#b45309', fontSize: 12, flexShrink: 0 }}>{error}</div>}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6, minHeight: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.7 }}>识别结果</span>
+          <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.7 }}>识别结果{enhance && enhancedText ? '（已增强）' : ''}</span>
           <div style={{ flex: 1 }} />
-          <button onClick={() => text && navigator.clipboard.writeText(text)} disabled={!text} style={miniBtn}>
+          <button onClick={() => display && navigator.clipboard.writeText(display)} disabled={!display} style={miniBtn}>
             复制
           </button>
           <button onClick={store} disabled={!lastDataUrl} style={miniBtn}>
             存入中转站
           </button>
+          <button onClick={() => void exportPdf()} disabled={!lastDataUrl || pdfLoading} style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            {pdfLoading ? <Loader2 size={11} className="animate-spin" /> : <FileDown size={11} />} 保存为 PDF
+          </button>
         </div>
         <textarea
           readOnly
-          value={text}
+          value={display}
           placeholder="OCR 文本将显示在这里…"
           style={taStyle}
         />

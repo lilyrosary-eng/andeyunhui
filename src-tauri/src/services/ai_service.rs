@@ -13,6 +13,8 @@
 
 use std::fs;
 use std::path::PathBuf;
+use base64::Engine;
+use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -51,6 +53,19 @@ pub struct AiProfile {
     /// 全局系统提示词（作为对话 base 指令，可留空使用内置默认）
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// 思考模式（Thinking）：开启后模型先输出思维链再回答。默认关。
+    /// DeepSeek 等推理模型支持（reasoning_effort + thinking 参数）；不支持的模型可能报错。
+    #[serde(default)]
+    pub thinking: Option<bool>,
+    /// 人设：希望 AI 如何称呼你（可留空）
+    #[serde(default)]
+    pub persona_call_me_as: Option<String>,
+    /// 人设：风格预设 key（sharp/gentle/rigorous/humorous/pro/concise/mentor/custom），可留空
+    #[serde(default)]
+    pub persona_preset: Option<String>,
+    /// 人设：自定义风格描述（当 preset=custom 或需追加说明时使用，可留空）
+    #[serde(default)]
+    pub persona_style: Option<String>,
 }
 
 impl AiProfile {
@@ -88,6 +103,10 @@ fn default_profile() -> AiProfile {
         max_tokens: None,
         top_p: None,
         system_prompt: None,
+        thinking: None,
+        persona_call_me_as: None,
+        persona_preset: None,
+        persona_style: None,
     }
 }
 
@@ -174,6 +193,75 @@ pub fn ai_set_profiles(app: AppHandle, payload: AiProfiles) -> Result<(), String
     Ok(())
 }
 
+/// 仅更新单个档案的「思考模式」开关，供聊天界面内联切换（跨胶囊/IDE/攻防共享同一档案字段）。
+#[tauri::command]
+pub fn ai_set_profile_thinking(app: AppHandle, profile_id: String, thinking: bool) -> Result<(), String> {
+    let mut profiles = load_profiles(&app);
+    let mut found = false;
+    for p in profiles.profiles.iter_mut() {
+        if p.id == profile_id {
+            p.thinking = Some(thinking);
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Err(format!("未找到模型档案: {}", profile_id));
+    }
+    let path = config_path(&app)?;
+    let json = serde_json::to_string_pretty(&profiles).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| format!("写入配置失败: {}", e))?;
+    // 广播「思考模式」变化，使胶囊 / IDE / 攻防 各聊天界面实时同步同一档案字段
+    let _ = app.emit(
+        "ai-thinking-changed",
+        serde_json::json!({ "profile_id": profile_id, "thinking": thinking }),
+    );
+    Ok(())
+}
+
+/// 组合人设 system 提示词：风格预设 + 自定义风格 + 称呼 + 额外要求（legacy system_prompt）。
+/// 全部留空时返回空串，调用方据此决定是否注入（不破坏既有对话行为）。
+fn compose_persona_system(cfg: &AiProfile) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(preset) = &cfg.persona_preset {
+        let p = preset.trim();
+        if !p.is_empty() {
+            let desc = match p {
+                "sharp" => "你的沟通风格是毒舌直率、一针见血，不绕弯子，敢于直接指出问题，但始终基于事实、不人身攻击、不阴阳怪气。",
+                "gentle" => "你的沟通风格是温柔细致、循循善诱，多用鼓励性语言，分步骤耐心解释，照顾对方的情绪与接受度。",
+                "rigorous" => "你的沟通风格是严谨认真、逻辑缜密，注重证据与出处，措辞准确，不臆测、不下无根据的结论。",
+                "humorous" => "你的沟通风格是幽默风趣、妙语连珠，善用比喻与生活化例子让内容轻松易懂，但不喧宾夺主。",
+                "pro" => "你的沟通风格是专业顾问式，条理清晰，适度使用行业术语并解释，给出可执行建议与权衡分析。",
+                "concise" => "你的沟通风格是极简直接，只给结论与要点，能用列表就不用段落，省略客套与寒暄。",
+                "mentor" => "你的沟通风格是导师式，先引导思考再给答案，常用提问帮助对方建立方法论。",
+                _ => "", // custom 或未识别：交给 persona_style 描述
+            };
+            if !desc.is_empty() {
+                parts.push(desc.to_string());
+            }
+        }
+    }
+    if let Some(style) = &cfg.persona_style {
+        let s = style.trim();
+        if !s.is_empty() {
+            parts.push(format!("你应遵守以下风格要求：{}", s));
+        }
+    }
+    if let Some(name) = &cfg.persona_call_me_as {
+        let n = name.trim();
+        if !n.is_empty() {
+            parts.push(format!("你可以称呼我为{}。", n));
+        }
+    }
+    if let Some(sp) = &cfg.system_prompt {
+        let s = sp.trim();
+        if !s.is_empty() {
+            parts.push(s.to_string());
+        }
+    }
+    parts.join("\n\n")
+}
+
 /// 单条对话消息（OpenAI 格式）
 #[derive(Debug, Deserialize)]
 pub struct ChatMessage {
@@ -194,6 +282,11 @@ fn is_anthropic_provider(cfg: &AiProfile) -> bool {
     model.starts_with("claude")
         || base.contains("anthropic.com")
         || base.contains("claude.ai")
+}
+
+/// DeepSeek 提供商判定：base_url 含 deepseek（api.deepseek.com 等）。
+fn is_deepseek_provider(cfg: &AiProfile) -> bool {
+    cfg.base_url.to_lowercase().contains("deepseek")
 }
 
 /// 为 Anthropic 提供商构建带 cache_control 的 messages 数组。
@@ -265,20 +358,51 @@ pub async fn ai_chat(
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
             .collect::<Vec<_>>()
     };
+    let thinking = cfg.thinking.unwrap_or(false);
+    // 人设 system：组合后合并进首条 system 消息（不破坏插件自带的项目上下文 / SOP / 状态注入）。
+    let persona = compose_persona_system(&cfg);
+    let mut messages_json = messages_json;
+    if !persona.is_empty() {
+        if let Some(first) = messages_json.first_mut() {
+            if first.get("role").and_then(|r| r.as_str()) == Some("system") {
+                let existing = first.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                first["content"] = serde_json::json!(format!("{}\n\n{}", existing, persona));
+            } else {
+                messages_json.insert(0, serde_json::json!({ "role": "system", "content": persona }));
+            }
+        } else {
+            messages_json.insert(0, serde_json::json!({ "role": "system", "content": persona }));
+        }
+    }
     let mut body = serde_json::json!({
         "model": cfg.model,
         "messages": messages_json,
-        "temperature": cfg.temperature,
         "stream": true,
         // stream_options.include_usage：让 OpenAI 兼容端点在最终 chunk 返回 usage 字段
         // （OpenAI / DeepSeek / Anthropic OpenAI-compat 均支持）
         "stream_options": { "include_usage": true },
     });
-    if let Some(mt) = cfg.max_tokens {
-        body["max_tokens"] = serde_json::json!(mt);
-    }
-    if let Some(tp) = cfg.top_p {
-        body["top_p"] = serde_json::json!(tp);
+    if thinking {
+        // 思考模式：思维链通过 reasoning_content 返回（与 content 同级）。
+        // 思考模式不支持 temperature / top_p（OpenAI o-series 直接报错，DeepSeek 忽略），故省略。
+        body["reasoning_effort"] = serde_json::json!("high");
+        // DeepSeek 需显式 thinking 开关；OpenAI o-series 仅靠 reasoning_effort，多余字段会 400，
+        // 故 thinking 块仅对 DeepSeek 附加。
+        if is_deepseek_provider(&cfg) {
+            body["thinking"] = serde_json::json!({ "type": "enabled" });
+        }
+    } else {
+        body["temperature"] = serde_json::json!(cfg.temperature);
+        if let Some(mt) = cfg.max_tokens {
+            body["max_tokens"] = serde_json::json!(mt);
+        }
+        if let Some(tp) = cfg.top_p {
+            body["top_p"] = serde_json::json!(tp);
+        }
+        // 关闭时主动禁用思考，真正省 token（仅 DeepSeek 支持该开关；o-series 无法关闭，仅显示层忽略）。
+        if is_deepseek_provider(&cfg) {
+            body["thinking"] = serde_json::json!({ "type": "disabled" });
+        }
     }
 
     let client = reqwest::Client::new();
@@ -350,6 +474,18 @@ pub async fn ai_chat(
                                     "ai-delta",
                                     serde_json::json!({ "requestId": request_id, "delta": delta }),
                                 );
+                            }
+                        }
+                        // 思考过程（reasoning_content）：与 content 同级，流式逐块返回。
+                        // 严格隔离：仅当思考模式开启才转发，关闭时即使模型返回也丢弃（不烧 token、不显示）。
+                        if thinking {
+                            if let Some(rc) = v["choices"][0]["delta"]["reasoning_content"].as_str() {
+                                if !rc.is_empty() {
+                                    let _ = app.emit(
+                                        "ai-reasoning-delta",
+                                        serde_json::json!({ "requestId": request_id, "delta": rc }),
+                                    );
+                                }
                             }
                         }
                     }
@@ -621,6 +757,133 @@ pub async fn translate_text(
         .ok_or_else(|| "响应中未找到 content 字段".to_string())?
         .to_string();
     Ok(content)
+}
+
+/// OCR 文本校对 / 整理：将本地或云端 OCR 得到的原文发送给文本模型，
+/// 修正错别字、补全省略号与标点、按语义整理段落，返回校对后的纯文本。
+/// 主要用于「DeepSeek 等不支持图像识别的模型」场景：先用 PaddleOCR 本地识别，
+/// 再交给文本模型做分析 / 纠错。会消耗 token，由前端以显式开关控制（用户同意、可随时关闭）。
+#[tauri::command]
+pub async fn ai_ocr_enhance(
+    app: AppHandle,
+    text: String,
+    profile_id: Option<String>,
+) -> Result<String, String> {
+    let profiles = load_profiles(&app);
+    let cfg = resolve_profile(&profiles, profile_id);
+    if cfg.api_key.trim().is_empty() {
+        return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
+    }
+    let system = "你是一个 OCR 校对与整理助手。下面是一段由光学字符识别（OCR）从图片中提取的文本内容，可能含有错别字、断行错误、漏识别或符号混淆。请在不改变原意与原文语言的前提下：1）修正明显的错别字与识别错误；2）按合理语义补齐全角 / 半角标点与段落；3）保留原有的排版意图（如标题、列表、代码块、表格）。仅输出校对整理后的纯文本，不要添加任何解释、前言或 Markdown 代码围栏。若原文已无误则原样返回。";
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": text }
+        ],
+        "temperature": 0.1,
+        "max_tokens": cfg.max_tokens.unwrap_or(4096),
+        "stream": false,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let t = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "HTTP {}: {}",
+            status,
+            t.chars().take(300).collect::<String>()
+        ));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+    let content = v["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "响应中未找到 content 字段".to_string())?
+        .to_string();
+    Ok(content)
+}
+
+/// 将 OCR 源图导出为保留原始版面的 PDF：以原图作为整页背景（图像保真，版面 / 特点 100% 不变），
+/// 等比适配 A4。用于「保存为 PDF」功能，使 OCR 结果可像成熟 OCR 产品一样以 PDF 形态交付。
+#[tauri::command]
+pub fn ocr_export_pdf(path: String, image_base64: String, mime: String) -> Result<(), String> {
+    let _ = mime; // 接受但按像素解码，具体格式由图片解码器自动识别
+    let b64 = image_base64.split(',').last().unwrap_or(&image_base64);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("图片 base64 解码失败: {}", e))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析失败: {}", e))?;
+    let (w, h) = img.dimensions();
+    // 用 lopdf 内建 embed_image 能力把源图编码为图片 XObject（自动处理色彩空间与压缩）
+    let img_stream = lopdf::xobject::image_from(bytes).map_err(|e| format!("图像编码失败: {}", e))?;
+    let mut doc = lopdf::Document::new();
+    let img_id = doc.add_object(img_stream);
+
+    // 等比适配 A4（595×842pt），保留原始版面比例
+    let page_w = 595.0_f64;
+    let page_h = 842.0_f64;
+    let scale = (page_w / w as f64).min(page_h / h as f64);
+    let pw = w as f64 * scale;
+    let ph = h as f64 * scale;
+    let content = format!("q\n{:.4} 0 0 {:.4} 0 0 cm\n/Im0 Do\nQ\n", scale, scale);
+    let content_id = doc.add_object(lopdf::Object::Stream(lopdf::Stream::new(
+        lopdf::Dictionary::new(),
+        content.into_bytes(),
+    )));
+
+    let pages_id = doc.new_object_id();
+    let page_id = doc.new_object_id();
+    let mut page_dict = lopdf::Dictionary::new();
+    page_dict.set("Type", "Page");
+    page_dict.set(
+        "MediaBox",
+        lopdf::Object::Array(vec![
+            lopdf::Object::Integer(0),
+            lopdf::Object::Integer(0),
+            lopdf::Object::Real(pw as f32),
+            lopdf::Object::Real(ph as f32),
+        ]),
+    );
+    page_dict.set("Parent", lopdf::Object::Reference(pages_id));
+    page_dict.set("Contents", lopdf::Object::Reference(content_id));
+    doc.objects.insert(page_id, lopdf::Object::Dictionary(page_dict));
+    let _ = doc.add_xobject(page_id, b"Im0", img_id);
+
+    let mut pages_dict = lopdf::Dictionary::new();
+    pages_dict.set("Type", "Pages");
+    pages_dict.set(
+        "Kids",
+        lopdf::Object::Array(vec![lopdf::Object::Reference(page_id)]),
+    );
+    pages_dict.set("Count", lopdf::Object::Integer(1));
+    doc.objects.insert(pages_id, lopdf::Object::Dictionary(pages_dict));
+
+    let catalog_id = doc.add_object(lopdf::Object::Dictionary({
+        let mut c = lopdf::Dictionary::new();
+        c.set("Type", "Catalog");
+        c.set("Pages", lopdf::Object::Reference(pages_id));
+        c
+    }));
+    doc.trailer.set("Root", lopdf::Object::Reference(catalog_id));
+
+    doc.save(&path)
+        .map_err(|e| format!("保存 PDF 失败: {}", e))?;
+    Ok(())
 }
 
 // ========== 对话持久化 ==========
