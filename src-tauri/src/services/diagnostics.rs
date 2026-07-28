@@ -128,7 +128,7 @@ impl GraphicsCaptureApiHandler for TestCapture {
             if self.gpu.is_none() {
                 match GpuNv12Converter::new(
                     frame.device(),
-                    frame.device_context(),
+                    frame.desc().MiscFlags,
                     fw,
                     fh,
                     self.out_w,
@@ -294,7 +294,7 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     let audio_wasapi: Option<String> = resolve_audio_input(&ffmpeg_path);
     let mut audio_err: Option<String> = None;
     let audio_pipe: Option<(AudioCapture, String, AudioFormat)> = if audio_wasapi.is_none() {
-        match start_audio_capture() {
+        match start_audio_capture(Arc::new(AtomicBool::new(true))) {
             Ok(triple) => Some(triple),
             Err(e) => {
                 eprintln!("[诊断自测] 系统声音采集不可用，仅测视频: {e}");
@@ -507,7 +507,8 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
     // 注：自测不再依赖命名管道关闭来结束音频采集（音频走 WASAPI 命名管道时，capture 线程结束即可）。
     let _ = capture.join();
 
-    // 等待 ffmpeg 退出（最多 6s）
+    // 等待 ffmpeg 退出（最多 45s）：4K 大文件 + faststart 重写 moov 需要时间，超时太短会
+    // 误杀 ffmpeg → 产出无 moov 的坏文件（播放器显示「1 秒/无画面」）。仅当真超时才 kill。
     let mut waited = 0;
     let mut exited_ok = false;
     let mut exit_code: i64 = -1;
@@ -519,7 +520,7 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
                 break;
             }
             Ok(None) => {
-                if waited >= 6000 {
+                if waited >= 45000 {
                     let _ = child.kill();
                     break;
                 }
