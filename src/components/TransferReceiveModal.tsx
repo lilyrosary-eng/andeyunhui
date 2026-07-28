@@ -139,7 +139,7 @@ export default function TransferReceiveModal() {
   if (!current) return null;
 
   const alias = current.alias || current.sender_alias || '对方';
-  const files = current.files?.length
+  const files: ReceiveFile[] = current.files?.length
     ? current.files
     : (current.file_names || []).map((name) => ({ file_name: name }));
 
@@ -188,7 +188,7 @@ export default function TransferReceiveModal() {
           <div style={{ fontSize: 11, color: 'rgba(244,244,246,0.45)', marginTop: 4 }}>
             {files.slice(0, 3).map((f, i) => (
               <div key={i}>
-                {f.file_name} · {fmtSize(f.size)}
+                {(f as ReceiveFile).file_name} · {fmtSize((f as ReceiveFile).size)}
               </div>
             ))}
           </div>
