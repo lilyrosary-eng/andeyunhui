@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode, type RefObject } from 'react';
-import { loadBgVideoBlob } from '@/lib/bgVideoStore';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 type Theme = 'system' | 'light' | 'dark';
 
@@ -255,26 +255,30 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // 保留开关：仅持久化开关本身；真正的数据存取由调用方在选定/移除时负责
+  // 保留开关：持久化开关本身；关闭时一并清除已保存的视频路径
   const setBgVideoPersist = useCallback((val: boolean) => {
     setBgVideoPersistState(val);
-    try { localStorage.setItem('appBgVideoPersist', val ? '1' : '0'); } catch { /* 忽略持久化失败 */ }
+    try {
+      if (val) {
+        localStorage.setItem('appBgVideoPersist', '1');
+      } else {
+        localStorage.setItem('appBgVideoPersist', '0');
+        localStorage.removeItem('appBgVideoPath');
+      }
+    } catch { /* 忽略持久化失败 */ }
   }, []);
 
-  // 启动时若开启了“保留”，从 IndexedDB 取回视频 Blob 并重建 object URL 设为背景；
-  // 仅执行一次（会话刚开始 bgVideo 必为空，不会覆盖本次会话内已选的视频）。
+  // 启动时若开启了“保留”，读取上次选择的视频文件路径，经 asset 协议重建为可用 URL。
+  // 走文件路径（而非 IndexedDB 存 Blob）：dev/生产表现一致、无体积上限、恢复更稳。
   const restoredRef = useRef(false);
   useEffect(() => {
     if (restoredRef.current) return;
     restoredRef.current = true;
     if (!bgVideoPersist) return;
-    loadBgVideoBlob()
-      .then((blob) => {
-        if (!blob) return;
-        const url = URL.createObjectURL(blob);
-        setBgVideo(url);
-      })
-      .catch(() => { /* 读取失败则静默不恢复，后果由用户承担 */ });
+    try {
+      const p = localStorage.getItem('appBgVideoPath');
+      if (p) setBgVideo(convertFileSrc(p));
+    } catch { /* 读取失败则静默不恢复，后果由用户承担 */ }
   }, [bgVideoPersist, setBgVideo]);
 
   // 切换自定义背景时，标记 <html> 以便 CSS 让主面板背景透明，露出背景层

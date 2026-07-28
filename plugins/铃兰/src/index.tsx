@@ -282,6 +282,37 @@ function groupTracksIntoPlaylists(tracks: Track[], rootPath: string): Playlist[]
   }));
 }
 
+// 跨根目录去重：父根递归扫描与子根单独扫描可能命中同一音轨，
+// 或各自生成相同 id 的歌单，导致重复/冲突（母/子文件夹识别冲突）。
+// 先合并相同 id 的歌单，再按绝对路径去重，更深的目录根优先保留音轨。
+function dedupDirectoryPlaylists(playlists: Playlist[]): Playlist[] {
+  const dirPlaylists = playlists.filter(p => p.type !== 'custom');
+  const byId = new Map<string, Playlist>();
+  for (const pl of dirPlaylists) {
+    const existing = byId.get(pl.id);
+    if (!existing) {
+      byId.set(pl.id, { ...pl, tracks: [...pl.tracks] });
+    } else {
+      existing.tracks.push(...pl.tracks);
+    }
+  }
+  const ordered = Array.from(byId.values()).sort((a, b) => b.id.length - a.id.length);
+  const seen = new Set<string>();
+  const deduped: Playlist[] = [];
+  for (const pl of ordered) {
+    const tracks = pl.tracks.filter(t => {
+      const key = t.filePath.replace(/\\/g, '/');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    deduped.push({ ...pl, tracks });
+  }
+  const uniqueOrder = Array.from(new Set(dirPlaylists.map(p => p.id)));
+  const map = new Map(deduped.map(r => [r.id, r]));
+  return uniqueOrder.map(id => map.get(id)!).filter(Boolean);
+}
+
 function MusicModule() {
   // 共享运行时：根目录管理（localStorage 持久化）
   const { rootPaths, setRootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
@@ -408,13 +439,14 @@ function MusicModule() {
 
       // 2. 如果全都有缓存，直接显示
       if (pathsToScan.length === 0) {
-        setPlaylists(prev => [...allDirectoryPlaylists, ...prev.filter(p => p.type !== 'custom')]);
+        const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
+        setPlaylists(prev => [...dedupedDir, ...prev.filter(p => p.type !== 'custom')]);
         // 恢复上次播放的歌单（模块切换/重载后保持选中状态，目录与自定义均匹配）
         const savedId = musicPlayer.currentPlaylistId;
         const restored = savedId
-          ? [...allDirectoryPlaylists, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)
+          ? [...dedupedDir, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)
           : null;
-        setSelectedPlaylist(restored || allDirectoryPlaylists[0] || getCustomPlaylistsFromStorage()[0] || null);
+        setSelectedPlaylist(restored || dedupedDir[0] || getCustomPlaylistsFromStorage()[0] || null);
         setLoading(false);
         return;
       }
@@ -458,12 +490,13 @@ function MusicModule() {
       setLoading(false);
       // 从当前 state 合并自定义歌单（避免覆盖扫描期间用户新建的歌单），
       // 同时支持恢复上次选中的自定义歌单
-      setPlaylists(prev => [...allDirectoryPlaylists, ...prev.filter(p => p.type !== 'custom')]);
+      const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
+      setPlaylists(prev => [...dedupedDir, ...prev.filter(p => p.type !== 'custom')]);
       const savedId = musicPlayer.currentPlaylistId;
       const restored = savedId
-        ? [...allDirectoryPlaylists, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)
+        ? [...dedupedDir, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)
         : null;
-      setSelectedPlaylist(restored || allDirectoryPlaylists[0] || getCustomPlaylistsFromStorage()[0] || null);
+      setSelectedPlaylist(restored || dedupedDir[0] || getCustomPlaylistsFromStorage()[0] || null);
     })();
 
     return () => {
