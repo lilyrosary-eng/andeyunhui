@@ -4,7 +4,7 @@
 //! 不对原始文件进行任何修改、删除或移动操作。
 //! 所有"删除""重命名"操作仅影响前端内部列表，不触及磁盘文件。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use walkdir::WalkDir;
@@ -59,7 +59,6 @@ pub fn scan_image_root_streaming(
 
     // 阶段 1：walkdir 迭代收集图片文件，按父目录分组 (O(n))
     let mut dir_images: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    let mut has_subdir: HashSet<PathBuf> = HashSet::new();
     let mut file_count = 0usize;
     let mut skipped = 0usize;
 
@@ -90,14 +89,6 @@ pub fn scan_image_root_streaming(
                 }
                 if let Some(parent) = e.path().parent() {
                     dir_images.entry(parent.to_path_buf()).or_default().push(name.to_string());
-                    // 标记祖先目录：这些目录有子目录包含图片
-                    let mut ancestor = parent.parent();
-                    while let Some(a) = ancestor {
-                        if a.starts_with(root) {
-                            has_subdir.insert(a.to_path_buf());
-                        }
-                        ancestor = a.parent();
-                    }
                 }
             }
             Err(e) => {
@@ -113,15 +104,14 @@ pub fn scan_image_root_streaming(
         eprintln!("[image_service] ... 共跳过 {} 个无权限目录", skipped);
     }
 
-    // 阶段 2：过滤最内层文件夹（目录不在 has_subdir 中 = 叶子节点）
+    // 阶段 2：保留所有“直接含图片”的目录（含同时含子目录的母文件夹）。
+    // dir_images 按文件“直接父目录”分组，每个目录的列表天然只含自身直接文件，
+    // 不会混入其他子目录内容——母文件夹与子文件夹各自独立成项并列展示。
     let total = dir_images.len().min(MAX_RESULT_FOLDERS);
     let mut found = 0usize;
 
-    // 收集叶子目录，排序后分批推送
-    let mut leaf_dirs: Vec<(PathBuf, Vec<String>)> = dir_images
-        .into_iter()
-        .filter(|(dir, _)| !has_subdir.contains(dir))
-        .collect();
+    // 收集所有匹配目录，排序后分批推送
+    let mut leaf_dirs: Vec<(PathBuf, Vec<String>)> = dir_images.into_iter().collect();
 
     leaf_dirs.sort_by(|a, b| {
         let na = a.0.file_name().and_then(|n| n.to_str()).unwrap_or("");

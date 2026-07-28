@@ -1,5 +1,6 @@
 import { type ReactNode, useMemo, Fragment } from 'react';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent } from '@/components/ui/context-menu';
+import { useI18n } from '@/lib/i18n';
 
 // ========== 类型 ==========
 
@@ -123,11 +124,12 @@ function ItemList({
   emptyText?: string;
   onItemClick?: (item: NavLayerItem) => void;
 }) {
+  const { t } = useI18n();
   const content = useMemo(() => {
     if (items.length === 0) {
       return (
         <div className="flex-1 flex items-center justify-center text-xs text-neutral-400 dark:text-stone-500 py-8">
-          {emptyText || '暂无数据'}
+          {emptyText || t('common.noData')}
         </div>
       );
     }
@@ -173,7 +175,7 @@ function ItemList({
         })}
       </div>
     );
-  }, [items, emptyText, onItemClick]);
+  }, [items, emptyText, onItemClick, t]);
 
   return content;
 }

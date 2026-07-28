@@ -5,9 +5,11 @@ import { NotesList } from "@/core/notes/NotesList"
 import { logger } from "@/lib/logger"
 import { useNotesStore } from '@/stores/notesStore';
 import { useAppStore } from '@/stores/appStore';
+import { useI18n } from '@/lib/i18n';
 
 /** 笔记侧边栏 — 从 store 订阅，无 props */
 export function NotesSidebar() {
+  const { t } = useI18n();
   const searchQuery = useNotesStore(s => s.searchQuery);
   const onSearchChange = useNotesStore(s => s.setSearchQuery);
   const onCreateNote = useNotesStore(s => s.createNote);
@@ -17,15 +19,15 @@ export function NotesSidebar() {
     <ModuleSidebarShell
       moduleId="notes"
       icon={<PenTool size={22} />}
-      title="鸢尾花"
+      title={t('notes.moduleTitle')}
       onOpenModuleSettings={onModuleSetting}
-      primaryAction={{ label: '+ 新建笔记', onClick: onCreateNote }}
+      primaryAction={{ label: t('notes.newNote'), onClick: onCreateNote }}
       searchQuery={searchQuery}
       onSearchChange={(val) => {
         logger.sidebar.search(val);
         onSearchChange(val);
       }}
-      searchPlaceholder="搜索笔记..."
+      searchPlaceholder={t('notes.searchPlaceholder')}
     >
       <SecondaryNavShell>
         <NotesList />

@@ -5,6 +5,7 @@ import { api, NoteInfo } from "@/lib/api"
 import { logger } from "@/lib/logger"
 import { useNotesStore } from '@/stores/notesStore';
 import { useFloatingNoteStore } from '@/stores/floatingNoteStore';
+import { t, getLanguage, useI18n } from '@/lib/i18n';
 
 /** 高亮搜索匹配文字 */
 function highlightText(text: string, query: string) {
@@ -27,31 +28,32 @@ function highlightText(text: string, query: string) {
 function getTimeGroup(note: NoteInfo): string {
   const now = new Date();
   const d = new Date(note.date);
-  if (isNaN(d.getTime())) return '更早';
+  if (isNaN(d.getTime())) return t('notes.timeGroup.earlier');
   const diffMs = now.getTime() - d.getTime();
   const diffH = diffMs / 3600000;
   const diffD = diffH / 24;
-  if (diffH < 0) return '刚刚'; // 时间在未来（时钟误差）归为刚刚
+  if (diffH < 0) return t('notes.timeGroup.justNow'); // 时间在未来（时钟误差）归为刚刚
   if (diffD < 1) {
     // 一天内：半小时区分
     const bucket = Math.floor(diffH * 2);
-    if (bucket <= 0) return '刚刚';
+    if (bucket <= 0) return t('notes.timeGroup.justNow');
     const minutes = bucket * 30;
-    if (minutes < 60) return `${minutes} 分钟前`;
+    if (minutes < 60) return t('notes.timeGroup.minutesAgo', { n: minutes });
     const hours = minutes / 60;
-    return hours % 1 === 0 ? `${hours} 小时前` : `${hours.toFixed(1)} 小时前`;
+    return t('notes.timeGroup.hoursAgo', { n: hours % 1 === 0 ? hours : hours.toFixed(1) });
   }
   if (diffD < 3) {
     // 三天内：两小时区分
     const bucket = Math.floor(diffH / 2);
     const hours = bucket * 2;
-    return `${hours} 小时前`;
+    return t('notes.timeGroup.hoursAgo', { n: hours });
   }
-  // 三天后：天区分
-  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+  // 三天后：天区分（跟随当前界面语言的日期格式）
+  return d.toLocaleDateString(getLanguage(), { month: 'short', day: 'numeric' });
 }
 
 export function NotesList() {
+  const { t: tt, lang } = useI18n();
   // ====== store 订阅（同名变量，保持 JSX 不变） ======
   const rawNotes = useNotesStore(s => s.notes);
   const currentNoteId = useNotesStore(s => s.currentNoteId);
@@ -143,7 +145,7 @@ export function NotesList() {
         logger.notes.floatingDragged(pending.noteId);
         const note = rawNotes.find(n => n.id === pending.noteId);
         if (!note) { pendingDragRef.current = null; return; }
-        const dragTitle = note.title || '浮窗笔记';
+        const dragTitle = note.title || t('notes.floatingTitle');
         api.createFloatingNoteWindow(pending.noteId, dragTitle, e.clientX - 40, e.clientY - 20)
           .catch(err => logger.notes.loadError('创建浮窗窗口', err));
         logger.notes.floatingCreated(pending.noteId);
@@ -173,7 +175,9 @@ export function NotesList() {
     });
 
     return { pinnedNotes: pinned, dailyGrouped: groups };
-  }, [notes]);
+    // lang：语言切换时重新生成分组标签
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notes, lang]);
 
   return (
     <div className="flex-1 overflow-y-auto pr-1 space-y-3 scrollbar-hide">
@@ -182,7 +186,7 @@ export function NotesList() {
         <div>
           <div className="text-xs font-medium text-yellow-500 dark:text-yellow-400 px-1 mb-1 tracking-wider flex items-center gap-1">
             <Pin size={12} fill="currentColor" />
-            置顶笔记
+            {tt('notes.pinnedSection')}
             {pinnedNotes.length > 4 && <span className="text-yellow-400">({pinnedNotes.length})</span>}
           </div>
           {/* 容器限制高度：一次最多容纳 4 条，超过 4 条靠滚轮查看其余置顶 */}
@@ -223,13 +227,13 @@ export function NotesList() {
                       api.getAllNotes().then(onRefreshNotes);
                     });
                   }}>
-                    <Copy size={14} />复制笔记
+                    <Copy size={14} />{tt('notes.menu.duplicate')}
                   </ContextMenuItem>
                   <ContextMenuItem key="pin" onClick={() => {
                     logger.sidebar.togglePin(note.id);
                     api.togglePinNote(note.id).then(() => api.getAllNotes().then(onRefreshNotes));
                   }}>
-                    <Pin size={14} />{note.pinned ? '取消置顶' : '置顶笔记'}
+                    <Pin size={14} />{note.pinned ? tt('notes.menu.unpin') : tt('notes.menu.pin')}
                   </ContextMenuItem>
                   <ContextMenuItem key="float" onClick={() => {
                     // 为了简化，使用默认坐标
@@ -240,12 +244,12 @@ export function NotesList() {
                       <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
                       <line x1="9" y1="3" x2="9" y2="21"/>
                     </svg>
-                    分离浮窗
+                    {tt('notes.menu.detach')}
                   </ContextMenuItem>
                   <ContextMenuSeparator key="sep" />
                   <ContextMenuItem key="delete" variant="destructive" onClick={() => {
                     logger.sidebar.deleteConfirm(note.id);
-                    if (window.confirm('确定要把这篇笔记移到回收站吗？')) {
+                    if (window.confirm(tt('notes.confirmDelete'))) {
                       logger.sidebar.deleteConfirmed(note.id);
                       api.deleteNote(note.id).then(() => {
                         if (currentNoteId === note.id) {
@@ -256,7 +260,7 @@ export function NotesList() {
                       });
                     }
                   }}>
-                    <Trash2 size={14} />删除笔记
+                    <Trash2 size={14} />{tt('notes.menu.delete')}
                   </ContextMenuItem>
                 </ContextMenuContent>
               </ContextMenu>
@@ -328,13 +332,13 @@ export function NotesList() {
                       api.getAllNotes().then(onRefreshNotes);
                     });
                   }}>
-                    <Copy size={14} />复制笔记
+                    <Copy size={14} />{tt('notes.menu.duplicate')}
                   </ContextMenuItem>
                   <ContextMenuItem onClick={() => {
                     logger.sidebar.togglePin(note.id);
                     api.togglePinNote(note.id).then(() => api.getAllNotes().then(onRefreshNotes));
                   }}>
-                    <Pin size={14} />{note.pinned ? '取消置顶' : '置顶笔记'}
+                    <Pin size={14} />{note.pinned ? tt('notes.menu.unpin') : tt('notes.menu.pin')}
                   </ContextMenuItem>
                   <ContextMenuItem onClick={() => {
                     api.createFloatingNoteWindow(note.id, note.title, 100, 100)
@@ -344,12 +348,12 @@ export function NotesList() {
                       <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
                       <line x1="9" y1="3" x2="9" y2="21"/>
                     </svg>
-                    分离浮窗
+                    {tt('notes.menu.detach')}
                   </ContextMenuItem>
                   <ContextMenuSeparator />
                   <ContextMenuItem variant="destructive" onClick={() => {
                     logger.sidebar.deleteConfirm(note.id);
-                    if (window.confirm('确定要把这篇笔记移到回收站吗？')) {
+                    if (window.confirm(tt('notes.confirmDelete'))) {
                       logger.sidebar.deleteConfirmed(note.id);
                       api.deleteNote(note.id).then(() => {
                         if (currentNoteId === note.id) {
@@ -360,7 +364,7 @@ export function NotesList() {
                       });
                     }
                   }}>
-                    <Trash2 size={14} />删除笔记
+                    <Trash2 size={14} />{tt('notes.menu.delete')}
                   </ContextMenuItem>
                 </ContextMenuContent>
               </ContextMenu>

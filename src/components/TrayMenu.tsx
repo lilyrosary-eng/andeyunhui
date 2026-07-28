@@ -4,8 +4,10 @@ import { useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { Home, Power } from 'lucide-react';
+import { useI18n } from '@/lib/i18n';
 
 export function TrayMenu() {
+  const { t } = useI18n();
   const closeSelf = () => {
     getCurrentWebviewWindow().hide().catch(() => {});
   };
@@ -44,21 +46,21 @@ export function TrayMenu() {
       }}
     >
       <div className="px-4 pt-3 pb-2 text-[11px] tracking-[0.18em] text-white/40 select-none">
-        安得云荟
+        {t('common.appName')}
       </div>
       <button
         onClick={summon}
         className="flex items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-white/10 active:bg-white/15 transition-colors"
       >
         <Home size={16} className="text-emerald-400" />
-        回到主界面
+        {t('tray.backToMain')}
       </button>
       <button
         onClick={quit}
         className="flex items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-red-500/20 active:bg-red-500/30 transition-colors"
       >
         <Power size={16} className="text-red-400" />
-        关闭软件
+        {t('tray.quit')}
       </button>
     </div>
   );

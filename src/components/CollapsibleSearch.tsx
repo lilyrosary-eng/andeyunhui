@@ -1,5 +1,6 @@
 import { Search } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
+import { useI18n } from '@/lib/i18n';
 
 interface CollapsibleSearchProps {
   value: string;
@@ -8,7 +9,9 @@ interface CollapsibleSearchProps {
 }
 
 /** 可收起/展开的搜索框 — 默认只显示图标，点击展开输入框带动画 */
-export function CollapsibleSearch({ value, onChange, placeholder = '搜索...' }: CollapsibleSearchProps) {
+export function CollapsibleSearch({ value, onChange, placeholder }: CollapsibleSearchProps) {
+  const { t } = useI18n();
+  const ph = placeholder || t('common.searchPlaceholder');
   const [open, setOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -42,7 +45,7 @@ export function CollapsibleSearch({ value, onChange, placeholder = '搜索...' }
             ? 'text-[var(--element-color-raw)]'
             : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'
         }`}
-        title={placeholder}
+        title={ph}
       >
         <Search size={18} />
       </button>
@@ -54,7 +57,7 @@ export function CollapsibleSearch({ value, onChange, placeholder = '搜索...' }
             ? 'w-full opacity-100 ml-2'
             : 'w-0 opacity-0 ml-0 p-0 border-0 overflow-hidden'
         }`}
-        placeholder={placeholder}
+        placeholder={ph}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onBlur={handleBlur}

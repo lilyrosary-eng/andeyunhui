@@ -2,6 +2,7 @@ import { type ReactNode, useState, useEffect, useCallback, useRef } from 'react'
 import { Settings, PanelLeftClose, PanelLeftOpen, Home } from 'lucide-react';
 import { CollapsibleSearch } from '@/components/CollapsibleSearch';
 import { Ripple } from '@/components/motion/Ripple';
+import { useI18n } from '@/lib/i18n';
 
 const SIDEBAR_COLLAPSE_KEY = 'module_sidebar_collapsed';
 const SIDEBAR_EXPANDED_WIDTH = 260;
@@ -32,7 +33,7 @@ export function ModuleSidebarShell({
   icon,
   title,
   onOpenModuleSettings,
-  moduleSettingsLabel = '模块设置',
+  moduleSettingsLabel,
   footerExtra,
   primaryAction,
   secondaryActions,
@@ -42,6 +43,7 @@ export function ModuleSidebarShell({
   backAction,
   children,
 }: ModuleSidebarShellProps) {
+  const { t } = useI18n();
   const storageKey = `${SIDEBAR_COLLAPSE_KEY}_${moduleId}`;
 
   // 持久化状态
@@ -100,7 +102,7 @@ export function ModuleSidebarShell({
           <Ripple
             as="button"
             onClick={toggleCollapse}
-            title="展开侧边栏"
+            title={t('sidebar.expand')}
             className="btn-press w-9 h-9 flex items-center justify-center rounded-xl text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors"
           >
             <PanelLeftOpen size={18} />
@@ -126,7 +128,7 @@ export function ModuleSidebarShell({
             <div className="shrink-0 px-3 pb-2">
               <button
                 onClick={backAction.onClick}
-                title="返回茑萝"
+                title={t('sidebar.backToNiaoluo')}
                 className="btn-press flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
               >
                 <Home size={15} />
@@ -141,7 +143,7 @@ export function ModuleSidebarShell({
               <CollapsibleSearch
                 value={searchQuery}
                 onChange={onSearchChange}
-                placeholder={searchPlaceholder || `搜索${title}...`}
+                placeholder={searchPlaceholder || t('sidebar.searchIn', { title })}
               />
             </div>
           )}
@@ -184,7 +186,7 @@ export function ModuleSidebarShell({
             <Ripple
               as="button"
               onClick={toggleCollapse}
-              title="收起侧边栏"
+              title={t('sidebar.collapse')}
               className="btn-press w-9 h-9 flex items-center justify-center rounded-xl text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors"
             >
               <PanelLeftClose size={18} />
@@ -193,7 +195,7 @@ export function ModuleSidebarShell({
               <Ripple
                 as="button"
                 onClick={onOpenModuleSettings}
-                title={moduleSettingsLabel}
+                title={moduleSettingsLabel || t('sidebar.moduleSettings')}
                 className="btn-press w-9 h-9 flex items-center justify-center rounded-xl text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors"
               >
                 <Settings size={18} />
