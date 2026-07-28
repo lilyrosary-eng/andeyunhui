@@ -7,13 +7,13 @@ import { BackgroundImageEditor } from '@/core/settings/BackgroundImageEditor'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
 import { ModelSettings } from '@/core/settings/ModelSettings'
 import { DevConsole } from '@/core/settings/DevConsole'
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 import { logger } from '@/lib/logger';
 import { api, type ArchiveEntry, type PluginManifest } from '@/lib/api';
 import { useTheme } from '@/lib/ThemeProvider';
-import { saveBgVideoBlob, clearBgVideoBlob } from '@/lib/bgVideoStore';
 import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
 
@@ -723,7 +723,7 @@ export function GlobalSettingsPanel() {
                           onClick={() => {
                             setBgImage(null);
                             setBgVideo(null);
-                            clearBgVideoBlob().catch(() => {});
+                            try { localStorage.removeItem('appBgVideoPath'); } catch {}
                           }}
                           className="btn-press px-3 py-1.5 rounded-lg border border-red-200/50 dark:border-red-500/30 text-sm text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
                         >
@@ -734,12 +734,30 @@ export function GlobalSettingsPanel() {
                         onClick={() => fileInputRef.current?.click()}
                         className="btn-press px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm text-neutral-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors"
                       >
-                        {bgImage || bgVideo ? t('settings.themes.changeImage') : t('settings.themes.selectImage')}
+                        {bgImage ? t('settings.themes.changeImage') : t('settings.themes.selectImage')}
+                      </button>
+                      <button
+                        onClick={() => {
+                          openDialog({
+                            multiple: false,
+                            filters: [{ name: '视频', extensions: ['mp4', 'mkv', 'mov', 'avi', 'webm', 'flv', 'wmv', 'm4v'] }],
+                          })
+                            .then((selected) => {
+                              if (typeof selected !== 'string') return;
+                              setBgVideo(convertFileSrc(selected));
+                              setBgImage(null);
+                              try { localStorage.setItem('appBgVideoPath', selected); } catch {}
+                            })
+                            .catch(() => {});
+                        }}
+                        className="btn-press px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm text-neutral-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors"
+                      >
+                        {bgVideo ? '更换视频' : '选择视频'}
                       </button>
                       <input
                         ref={fileInputRef}
                         type="file"
-                        accept="image/*,video/*"
+                        accept="image/*"
                         className="hidden"
                         onChange={(e) => {
                           const f = e.target.files?.[0];
@@ -768,18 +786,6 @@ export function GlobalSettingsPanel() {
                               checked={bgVideoPersist}
                               onCheckedChange={(val) => {
                                 setBgVideoPersist(val);
-                                if (!val) {
-                                  clearBgVideoBlob().catch(() => {});
-                                  return;
-                                }
-                                // 开启时，把当前已选定的视频（blob: 对象 URL）写入 IndexedDB，
-                                // 以便下次启动自动载入；取不到则后果由用户承担。
-                                if (bgVideo && bgVideo.startsWith('blob:')) {
-                                  fetch(bgVideo)
-                                    .then((r) => r.blob())
-                                    .then((b) => saveBgVideoBlob(b))
-                                    .catch(() => {});
-                                }
                               }}
                               className="data-[state=checked]:bg-[var(--element-color-raw)] shrink-0"
                             />
@@ -821,20 +827,10 @@ export function GlobalSettingsPanel() {
                     setBgEditorFile(null);
                   }}
                   onDone={(dataUrl, angle, flip) => {
-                    const isVideo = !!bgEditorFile && bgEditorFile.type.startsWith('video/');
-                    if (isVideo) {
-                      // 视频：dataUrl 即对象 URL，必须保留（不可 revoke），否则 <video> 失效
-                      setBgVideo(dataUrl);
-                      setBgImage(null);
-                      // 若已开启“保留”，把原始文件存入 IndexedDB，供下次启动恢复
-                      if (bgVideoPersist && bgEditorFile) {
-                        saveBgVideoBlob(bgEditorFile).catch(() => {});
-                      }
-                    } else {
-                      setBgImage(dataUrl);
-                      setBgVideo(null);
-                      if (bgEditorSrc) URL.revokeObjectURL(bgEditorSrc);
-                    }
+                    // 图片：直接设置；视频改为走独立对话框（见“选择视频”按钮），不再经此编辑器
+                    setBgImage(dataUrl);
+                    setBgVideo(null);
+                    if (bgEditorSrc) URL.revokeObjectURL(bgEditorSrc);
                     setBgAngle(angle);
                     setBgFlip(flip);
                     setBgEditorSrc(null);

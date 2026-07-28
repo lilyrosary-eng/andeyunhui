@@ -5,6 +5,7 @@ import React from 'react';
 import ReactDOM from 'react-dom';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
+import { BarChart3 } from 'lucide-react';
 import { PluginRegistry, HOST_API_VERSION } from '@/core/pluginRegistry';
 import { api, type PluginManifest } from '@/lib/api';
 import { pluginDiagnostics } from '@/core/pluginDiagnostics';
@@ -100,7 +101,7 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
 
     // 挂载宿主 React 和 API 到全局（仅首次设置，后续不可覆盖）
     const hostApi = { invoke, convertFileSrc, listen, emit, createFrameBuffer };
-    const hostUi = { ModuleSidebarShell, SecondaryNavShell, NestedNavList, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, Ripple, SlidingTabs, ScrollReveal, PushView };
+    const hostUi = { ModuleSidebarShell, SecondaryNavShell, NestedNavList, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, Ripple, SlidingTabs, ScrollReveal, PushView, BarChart3 };
     const defNonWritable = (key: string, value: unknown) => {
       Object.defineProperty(window, key, { value, writable: false, configurable: false });
     };

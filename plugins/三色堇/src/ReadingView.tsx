@@ -23,6 +23,7 @@ interface ReadingViewProps {
   onBack: () => void;
   externalChapterIndex?: number;
   onChapterChange?: (index: number) => void;
+  onScrollProgress?: (percent: number) => void;
 }
 
 // ============ 布局常量 ============
@@ -44,7 +45,7 @@ interface ChapterBoundary {
   endPage: number;
 }
 
-export function ReadingView({ book, onBack, externalChapterIndex, onChapterChange }: ReadingViewProps) {
+export function ReadingView({ book, onBack, externalChapterIndex, onChapterChange, onScrollProgress }: ReadingViewProps) {
   // 分页状态（横板/双栏模式）
   const [absolutePage, setAbsolutePage] = useState(0);
   const [pageCount, setPageCount] = useState(1);
@@ -591,6 +592,7 @@ const lockTransition = useCallback(() => {
 
     setDisplayedChapter(currentIdx);
     setVerticalScrollProgress(progress);
+    onScrollProgress?.(progress);
 
     // 滑动窗口（仅在顶/底边界时触发，不干扰中间阅读）
     const scrollable = el.scrollHeight - el.clientHeight;

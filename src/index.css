@@ -268,6 +268,22 @@
   html.has-custom-bg:not(.dark) .settings-surface .bg-white {
     background-color: rgba(255, 255, 255, 0.6) !important;
   }
+  /* 铃兰（音乐）/ 三色堇（阅读）等模块内部卡片、播放栏本身偏不透明，会遮挡自定义背景；
+     开启自定义背景时一并弱化，让背景透出（与玉兰/莲花等模块一致）。 */
+  html.has-custom-bg .bg-white\/60 { background-color: rgba(255, 255, 255, 0.12) !important; }
+  html.has-custom-bg .dark\:bg-stone-800\/60 { background-color: rgba(28, 25, 23, 0.16) !important; }
+  html.has-custom-bg .bg-white\/70 { background-color: rgba(255, 255, 255, 0.16) !important; }
+  html.has-custom-bg .dark\:bg-stone-800\/70 { background-color: rgba(28, 25, 23, 0.22) !important; }
+  /* 进一步弱化音乐/阅读模块在列表/目录视图中的更浅半透明卡片（搜索框、侧栏、浅色卡片等），
+     使其与玉兰/莲花一致地透出背景。 */
+  html.has-custom-bg .bg-white\/50 { background-color: rgba(255, 255, 255, 0.1) !important; }
+  html.has-custom-bg .dark\:bg-stone-700\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
+  html.has-custom-bg .bg-white\/40 { background-color: rgba(255, 255, 255, 0.08) !important; }
+  html.has-custom-bg .dark\:bg-stone-700\/60 { background-color: rgba(28, 25, 23, 0.14) !important; }
+  html.has-custom-bg .bg-white\/30 { background-color: rgba(255, 255, 255, 0.06) !important; }
+  html.has-custom-bg .dark\:bg-stone-800\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
+  html.has-custom-bg .bg-stone-700\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
+  html.has-custom-bg .bg-stone-800\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
   /* ========== 中转站浮窗：低饱和度浅绿整体配色（仅作用于浮窗，不影响主窗图标栏的中转站）========== */
   .floating-dropzone-root .main-panel-bg {
     background-color: rgba(224, 240, 228, 0.42) !important;

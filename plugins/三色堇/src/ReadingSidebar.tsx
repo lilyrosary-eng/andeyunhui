@@ -4,7 +4,7 @@
 // 第二层：选中书后切换为章节目录（点击章节在主区域跳转）
 const React = window.__HOST_REACT__;
 const { useMemo, useState } = React;
-const { ModuleSidebarShell, NestedNavList } = window.__HOST_UI__ || {};
+const { ModuleSidebarShell, NestedNavList, BarChart3 } = window.__HOST_UI__ || {};
 
 interface BookSummary {
   filePath: string;
@@ -47,6 +47,7 @@ interface ReadingSidebarProps {
   currentChapterIndex: number;
   onChapterClick: (index: number) => void;
   onBackToBooks: () => void;
+  onOpenStats: () => void;
 }
 
 // ========== 图标 ==========
@@ -269,7 +270,16 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
     searchQuery, onSearchChange,
     onBookClick, onOpenSettings, onChangeRoot,
     currentBook, currentChapterIndex, onChapterClick, onBackToBooks,
+    onOpenStats,
   } = props;
+
+  // 侧边栏第三个按钮：阅读统计（列出全部书籍，无需先打开某本书）
+  const statsButton = React.createElement('button', {
+    onClick: () => onOpenStats(),
+    title: '统计',
+    'aria-label': '统计',
+    className: 'p-2 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
+  }, BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊');
 
   // ====== 第二层：章节目录（选中书后显示）======
   // 使用 NestedNavList 模板：返回按钮在内容区顶部（不占用 primaryAction 导入按钮），
@@ -336,6 +346,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
           icon: React.createElement(BookIcon),
           title: currentBook.title,
           onOpenModuleSettings: onOpenSettings,
+          footerExtra: statsButton,
           searchQuery: '',
           onSearchChange: () => {},
           searchPlaceholder: `${currentBook.chapters.length} 章`,
@@ -420,6 +431,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
         icon: React.createElement(BookIcon),
         title: '三色堇',
         onOpenModuleSettings: onOpenSettings,
+        footerExtra: statsButton,
         searchQuery,
         onSearchChange,
         searchPlaceholder: `搜索 ${totalBooks} 本书...`,
