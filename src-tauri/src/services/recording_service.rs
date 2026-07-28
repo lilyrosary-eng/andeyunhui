@@ -192,7 +192,7 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         // 进程内 GPU RGBA→RGBA 缩放（仅全帧 + 已探测驱动支持）：在捕获同 GPU 上把帧缩到 1080p，
         // 只读回 8MB，跳过 33MB 4K 读回 + CPU 缩放，是消除「卡顿/加速」的关键。
         // 失败（极少见，驱动不支持时探针已预先排除）则本帧不写，避免 RGBA 错格式损坏视频。
-        let payload: Option<Arc<Vec<u8>>> = if self.gpu_nv12 {
+        let payload: Option<Arc<Vec<u8>>> = if self.gpu_nv12 && !self.gpu_failed {
             if self.gpu.is_none() && !self.gpu_failed {
                 match GpuNv12Converter::new(
                     frame.device(),
@@ -202,6 +202,7 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                     self.out_w,
                     self.out_h,
                     frame.desc().Format,
+                    self.crop,
                 ) {
                     Ok(g) => self.gpu = Some(g),
                     Err(e) => {
@@ -232,7 +233,11 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                     match gpu.convert(frame.as_raw_texture(), p) {
                         Ok(v) => v,
                         Err(e) => {
-                            eprintln!("[录屏] GPU 缩放转换失败，本帧跳过: {e}");
+                            // GPU 路径彻底失效（自检/运行时全零）→ 标记并不再重试，
+                            // 本帧起回退到 RGBA 读回路径，保证至少能产出真实画面（绝不再绿屏）。
+                            eprintln!("[录屏] GPU 缩放转换失败，永久回退 RGBA 读回: {e}");
+                            self.gpu_failed = true;
+                            self.gpu = None;
                             false
                         }
                     }
@@ -767,13 +772,16 @@ pub async fn start_recording(
         } else if let Some((_c, _p, f)) = &audio_pipe {
             eprintln!("[录屏] 已加入系统声音（Rust WASAPI 回环，命名管道；{} {}ch {}Hz）", f.sample_fmt, f.channels, f.rate);
         }
-        // 进程内 GPU RGBA→RGBA 缩放是否可用（所有支持 D3D11 渲染管线的硬件均为 true）。
-        // 若可用，捕获阶段直接在 GPU 把帧缩到 1080p 再只读回 8MB，彻底去掉 33MB 4K 读回与 CPU 缩放
-        // = 消除「常态卡顿」的关键。区域录制仍走 RGBA（裁剪在 CPU 完成）。
+        // 进程内 GPU RGBA→NV12 转码是否可用（所有支持 D3D11 渲染管线的硬件均为 true）。
+        // 若可用，捕获阶段直接在 GPU 把帧转成 NV12（含 4K→1080p 缩放、区域裁剪）再只读回 ~3.1MB
+        // NV12，彻底去掉 33MB 4K 整帧读回 + CPU 缩放/裁剪 + ffmpeg 端 RGBA→YUV 软/硬转换
+        // = 消除「常态卡顿 / 鼠标拖影」的关键。区域录制也走 GPU（裁剪在着色器内完成，不再整帧读回）。
         let native_w = enc_w;
         let native_h = enc_h;
         let downscale_4k = crop.is_none() && ((native_w as u64) * (native_h as u64) > 1920u64 * 1080u64);
-        let gpu_nv12 = crop.is_none() && downscale_4k && nv12_in_process_supported();
+        // 进程内 GPU RGBA→NV12 转码（含区域裁剪）对本机所有支持 D3D11 渲染管线的硬件均为 true。
+        // 区域录制也走 GPU：着色器只采样子矩形、直接输出裁剪后 NV12，绕开「整帧 33MB 读回 + CPU 裁剪」。
+        let gpu_nv12 = nv12_in_process_supported();
         // 喂给 ffmpeg 的帧尺寸：GPU 缩放成功 → 1080p；否则喂原生 4K，由 ffmpeg 的 scale 滤镜
         // 在编码阶段缩到 1080p（兼容兜展，较慢）。enc_w/enc_h 现表示喂给尺寸 = 最终分辨率。
         let (feed_w, feed_h) = if downscale_4k && gpu_nv12 {
@@ -795,7 +803,7 @@ pub async fn start_recording(
             "-f".into(),
             "rawvideo".into(),
             "-pix_fmt".into(),
-            "rgba".into(),
+            (if gpu_nv12 { "nv12" } else { "rgba" }).into(),
             "-s".into(),
             format!("{}x{}", enc_w, enc_h),
             // 时间戳策略（2026-07-22 终修正）：用 -fps_mode cfr（恒定帧率）取代 passthrough 与
@@ -835,9 +843,9 @@ pub async fn start_recording(
         }
         match enc_hw {
             Some("h264_nvenc") => {
-                // 进程内已在 GPU 把帧缩到 1080p（RGBA）。RGBA→NV12 交给 ffmpeg/nvenc 自动完成。
-                // 不加 hwupload_cuda/scale_cuda 滤镜（2026-07-22 受控实验确认：该滤镜路径在本机不可用，
-                // 且并非出片必要条件；plain nvenc 直接喂系统内存帧即可正常出片）。
+                // 进程内已在 GPU 把帧转成 NV12（含缩放/裁剪）。NV12 直接喂 nvenc（原生消费 nv12），
+                // 无 RGBA→NV12 软/硬转换、无 cuda 滤镜。不加 hwupload_cuda/scale_cuda 滤镜
+                // （2026-07-22 受控实验确认该滤镜路径在本机不可用，且非出片必要条件）。
                 ffmpeg_args.extend([
                     "-c:v".into(),
                     "h264_nvenc".into(),
@@ -850,15 +858,13 @@ pub async fn start_recording(
                     "-pix_fmt".into(),
                     "yuv420p".into(),
                 ]);
-                eprintln!("[录屏] 使用硬件编码器 h264_nvenc（RGBA→NV12 由 ffmpeg 自动完成，无滤镜）");
+                eprintln!("[录屏] 使用硬件编码器 h264_nvenc（NV12 由 GPU 转码直接产出，无滤镜、无 CPU 色彩转换）");
             }
             Some("h264_qsv") => {
-                // 进程内已在 GPU 把帧缩到 1080p（RGBA）。RGBA→NV12 交给 ffmpeg/QSV 自动完成
-                // （h264_qsv 遇 yuv420p 会自动选 nv12 并内部上传核显，见 stderr "auto-selecting format 'nv12'"）。
-                // 不加 vpp_qsv/hwupload 滤镜（2026-07-22 受控实验闭环确认：该滤镜命令在本机 ffmpeg 8.1.2 下
-                // 直接失败——缺 -init_hw_device 报「hardware device reference required」、加了也 enc -22；而
-                // plain h264_qsv 无滤镜直接喂系统内存帧完全能出片。此前「无 hwupload 会挂死」是误判，真正的
-                // 挂死根因是音频命名管道静音断流导致的双输入死锁，已在 audio_capture.rs 用静音补帧根治）。
+                // 进程内已在 GPU 把帧转成 NV12（含缩放/裁剪）。NV12 直接喂 h264_qsv（原生消费 nv12，
+                // 见 stderr "auto-selecting format 'nv12'"），无 RGBA→NV12 软/硬转换、无 vpp_qsv/hwupload 滤镜
+                // （2026-07-22 受控实验闭环确认该滤镜命令在本机 ffmpeg 8.1.2 下直接失败，plain qsv 无滤镜
+                // 直接喂 NV12 完全能出片）。
                 ffmpeg_args.extend([
                     "-c:v".into(),
                     "h264_qsv".into(),
@@ -869,7 +875,7 @@ pub async fn start_recording(
                     "-pix_fmt".into(),
                     "yuv420p".into(),
                 ]);
-                eprintln!("[录屏] 使用硬件编码器 h264_qsv（RGBA→NV12 由 ffmpeg 自动完成，无滤镜）");
+                eprintln!("[录屏] 使用硬件编码器 h264_qsv（NV12 由 GPU 转码直接产出，无滤镜、无 CPU 色彩转换）");
             }
             Some("h264_amf") => {
                 ffmpeg_args.extend([
