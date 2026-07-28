@@ -1,48 +1,48 @@
-//! 进程内 GPU RGBA→NV12 转码（全屏/区域录制的缩放与裁剪，阶段二核心）
+//! 进程内 GPU RGBA 缩放/裁剪（阶段二核心）
 //!
-//! 旧实现用 D3D11 Video Processor 做 RGBA→NV12 同时缩放，但大量机器的默认 D3D11 设备
-//! 不支持 Video Processor（`nv12_in_process_supported()` 返回 false），导致整条 GPU 路径失效、
-//! 回退到 4K 整帧 RGBA 读回，是「卡顿」的真源。
+//! ## 架构与限制（2026-07-28，第 27–28 轮）
+//! 早期「在 WGC 设备上下文渲染」「跨设备共享 WGC 帧纹理」两种方案在用户机器上均失败：
+//! - 在 WGC（windows-capture 内部）设备上下文渲染 → 自检全零（命令被 DWM 丢弃）；
+//! - `OpenSharedResource` 跨设备映射 WGC 帧 → `0x80070057`，因为 **WGC 帧纹理未带
+//!   `D3D11_RESOURCE_MISC_SHARED*` 标志，不可共享**（`windows-capture` 用自有 D3D 设备
+//!   创建帧池，纹理默认不共享）。
 //!
-//! 本实现改用 D3D11 渲染管线 + 全屏三角形 + 线性采样器在 GPU 上把帧转成 NV12。
+//! 故本机实际走 CPU 兜底：读取 WGC 帧 RGBA（33MB@4K 读回不可避免）→ 在捕获侧把帧缩到
+//! (out_w,out_h)（GPU 不可用时用 `rgba_resize_crop_nearest` 最近邻缩放）→ 喂 ffmpeg。
+//! `MiscFlags` 预筛在帧纹理不可共享时立即回退，避免无意义地建设备 / 自检后运行时失败。
 //!
-//! ## 极致优化（2026-07-28）：分离设备 + 独立工作线程，捕获线程零 GPU 同步
-//! 游戏里「微卡/粘滞/不跟手」的真源是：WGC 捕获回调线程内同步跑完了 Draw + 拷回 + `Map`
-//! 读回，一旦被拖住就周期性冻住同机 DWM 合成 → 系统级输入延迟。帧纹理由 OS 在 WGC 所用
-//! 设备上产出、不可跨设备直接共享，因此本实现让转换器跑在**自建的独立 D3D11 设备**（同显卡
-//! 适配器）上，并用「自建可共享 + 键控互斥体的桥接纹理」接收帧：
-//! - 捕获线程：仅 `AcquireSync(0,0)`（非阻塞，抢不到即丢帧）+ 一次 GPU→GPU 拷贝 src→bridge
-//!   + `ReleaseSync(1)`，**不做任何 Draw / 读回 / 阻塞**，WGC 回调瞬时返回。
-//! - 独立工作线程（自有设备/上下文）：`AcquireSync(1)` 后做两遍 Draw + 拷回 + **阻塞** Map
-//!   读回，产出 NV12 推入输出队列。阻塞发生在工作线程，绝不占用捕获线程。
-//! 这正是 OBS 在 N 卡上的做法（编码器与捕获同卡，无跨卡搬运），与之前失败的 MF 跨卡方案两码事。
-//! 多层回退：桥接初始化失败 → 回退 RGBA；运行期产出全零 → 自检标记失效，调用方回退 RGBA，
-//! 从根本杜绝绿屏。
+//! 本模块仍保留跨设备共享实现：在「WGC 帧纹理可共享」的机器上（部分驱动 / 配置），它能把
+//! 4K→1080p 缩放搬到显卡、只读回 8MB，是更优路径；不可共享时干净降级，无副作用。
+//! - `Map(DO_NOT_WAIT)`：GPU 未就绪立即返回、复用上一帧，捕获回调线程零 GPU 同步 → 不拖垮 DWM；
+//! - 映射/渲染失败时返回 Err，调用方永久回退 RGBA CPU 读回，杜绝绿屏。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::sync::OnceLock;
 
-use windows::core::{Interface, PCSTR, Result};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{
-    D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
-    D3D_FEATURE_LEVEL_11_1, ID3DBlob,
+    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
+    D3D_FEATURE_LEVEL_11_1, ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
 };
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIKeyedMutex, IDXGIResource};
+use windows::Win32::Graphics::Dxgi::{
+    IDXGIAdapter, IDXGIDevice, IDXGIKeyedMutex, IDXGIResource, DXGI_ERROR_WAS_STILL_DRAWING,
+};
+use windows::core::{Interface, PCSTR, Result};
 
-/// 工作线程输出队列容量：最多缓存 3 帧已转换结果，超出丢最旧（录屏内容无感知）。
-const MAX_OUTPUT: usize = 3;
-/// 工作线程等待信号的轮询超时（ms）：兼顾 60fps 唤醒粒度与低占用。
-const WORK_POLL_MS: u64 = 20;
-/// 工作线程 AcquireSync(1) 等待捕获侧 ReleaseSync(1) 的超时（ms）：超时即跳过本帧，不死锁。
-const WORK_TIMEOUT_MS: u32 = 1000;
+/// staging 环形池槽数：3 槽（三缓冲）配合非阻塞读回，读回延迟约 1 帧。
+const STAGING_COUNT: usize = 3;
+
+/// 跨设备共享的 WGC 帧纹理（本设备上的一份映射）及其 keyed mutex。
+struct SharedFrame {
+    /// 来源帧的 COM 指针标识（转为 usize，使类型满足 Send），用于判断是否需要重新映射（每帧可能换新纹理）。
+    src_ptr: usize,
+    tex: ID3D11Texture2D,
+    /// 跨设备 keyed mutex（WGC 帧为共享关键互斥纹理时有；用于 Acquire/Release 同步写入权）。
+    km: Option<IDXGIKeyedMutex>,
+}
 
 /// 全屏三角形顶点着色器（无顶点缓冲，用 SV_VertexID 生成；uv 已做 Y 翻转匹配纹理左上原点）。
 const VS_HLSL: &str = r#"
@@ -56,9 +56,11 @@ VSOut VS(uint id : SV_VertexID) {
 }
 "#;
 
-/// 像素着色器（亮度 Y）：按裁剪常量只采样子矩形并缩放到输出尺寸，输出 BT.709 限幅 Y。
-fn build_ps_y(crop: Option<(f32, f32, f32, f32)>) -> String {
+/// 像素着色器：按裁剪常量只采样子矩形并缩放到输出尺寸，输出 RGBA。
+/// bgra=true 时 `c.bgr` 把 WGC 的 BGRA 还原为标准 RGBA；否则 `c.rgb`。
+fn build_ps_rgba(crop: Option<(f32, f32, f32, f32)>, bgra: bool) -> String {
     let (ox, oy, sw, sh) = crop.unwrap_or((0.0, 0.0, 1.0, 1.0));
+    let pick = if bgra { "c.bgr" } else { "c.rgb" };
     format!(
         r#"
 Texture2D tex : register(t0);
@@ -67,71 +69,34 @@ static const float2 ORIGIN = float2({ox}, {oy});
 static const float2 SCALE = float2({sw}, {sh});
 float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {{
     float2 suv = ORIGIN + uv * SCALE;
-    float3 c = tex.Sample(samp, suv).rgb;
-    float y = 0.2126*c.r + 0.7152*c.g + 0.0722*c.b;
-    return float4(16.0/255.0 + (219.0/255.0)*y, 0.0, 0.0, 1.0);
-}}
-"#
-    )
-}
-
-/// 像素着色器（色度 UV）：同裁剪采样，输出 BT.709 限幅 U/V（R8G8 平面）。
-fn build_ps_uv(crop: Option<(f32, f32, f32, f32)>) -> String {
-    let (ox, oy, sw, sh) = crop.unwrap_or((0.0, 0.0, 1.0, 1.0));
-    format!(
-        r#"
-Texture2D tex : register(t0);
-SamplerState samp : register(s0);
-static const float2 ORIGIN = float2({ox}, {oy});
-static const float2 SCALE = float2({sw}, {sh});
-float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {{
-    float2 suv = ORIGIN + uv * SCALE;
-    float3 c = tex.Sample(samp, suv).rgb;
-    float y = 0.2126*c.r + 0.7152*c.g + 0.0722*c.b;
-    float pb = -0.1146*c.r - 0.3855*c.g + 0.5003*c.b;
-    float pr = 0.5001*c.r - 0.4542*c.g - 0.0459*c.b;
-    return float4(0.5020 + 0.8784*pb, 0.5020 + 0.8784*pr, 0.0, 1.0);
+    float4 c = tex.Sample(samp, suv);
+    return float4({pick}, 1.0);
 }}
 "#
     )
 }
 
 pub struct GpuNv12Converter {
-    /// 捕获侧（WGC 设备/上下文）：仅做一帧极快的 GPU 拷贝 src→bridge，不阻塞、不同步
-    capture_ctx: ID3D11DeviceContext,
-    /// 桥接纹理（建在捕获设备，可共享 + 键控互斥）：捕获线程写入、工作线程读取
-    capture_bridge: ID3D11Texture2D,
-    bridge_mutex: IDXGIKeyedMutex,
-    /// 工作侧（自建独立 D3D11 设备，跑在独立线程）：Draw + 读回全部在此，绝不占捕获线程
-    work_ctx: ID3D11DeviceContext,
-    /// 桥接纹理在工作设备上的共享视图（着色器采样源）
+    /// 我们自建的 D3D11 设备（与 WGC 同 GPU 适配器），所有渲染/读回都在它上面执行。
+    device: ID3D11Device,
+    ctx: ID3D11DeviceContext,
     input_tex: ID3D11Texture2D,
     input_srv: ID3D11ShaderResourceView,
-    /// Y 渲染目标（R8，out_w×out_h）+ 视图：着色器第一遍把亮度写入。
-    rt_y: ID3D11Texture2D,
-    rtv_y: ID3D11RenderTargetView,
-    /// UV 渲染目标（R8G8，out_w/2×out_h/2）+ 视图：着色器第二遍把色度写入。
-    rt_uv: ID3D11Texture2D,
-    rtv_uv: ID3D11RenderTargetView,
-    /// 工作线程独占的单槽 staging（无环形池；阻塞读回发生在工作线程）
-    staging_y: ID3D11Texture2D,
-    staging_uv: ID3D11Texture2D,
+    rt: ID3D11Texture2D,
+    rtv: ID3D11RenderTargetView,
+    staging: Vec<ID3D11Texture2D>,
     vs: ID3D11VertexShader,
-    ps_y: ID3D11PixelShader,
-    ps_uv: ID3D11PixelShader,
+    ps: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
     out_w: u32,
     out_h: u32,
     in_w: u32,
     in_h: u32,
-    /// 渲染管线自检 / 运行时发现产出全零 → 标记失效，调用方回退 RGBA，从根本杜绝绿屏
-    broken: Arc<AtomicBool>,
-    /// 捕获线程 → 工作线程的帧到达信号（unbounded，发送绝不阻塞）
-    tx: Sender<()>,
-    /// 工作线程 → 捕获线程（convert 取帧）的已转换结果队列
-    output: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    broken: bool,
+    free_slots: Vec<usize>,
+    pending: VecDeque<usize>,
+    /// 跨设备共享的 WGC 帧纹理（按需映射，按来源指针缓存）。
+    shared: Option<SharedFrame>,
 }
 
 unsafe fn create_tex(
@@ -140,6 +105,8 @@ unsafe fn create_tex(
     h: u32,
     fmt: DXGI_FORMAT,
     bind: D3D11_BIND_FLAG,
+    usage: D3D11_USAGE,
+    cpu_access: u32,
 ) -> Result<ID3D11Texture2D> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: w,
@@ -151,9 +118,9 @@ unsafe fn create_tex(
             Count: 1,
             Quality: 0,
         },
-        Usage: D3D11_USAGE_DEFAULT,
+        Usage: usage,
         BindFlags: bind.0 as u32,
-        CPUAccessFlags: 0,
+        CPUAccessFlags: cpu_access,
         MiscFlags: 0,
     };
     let mut tex = None;
@@ -161,38 +128,7 @@ unsafe fn create_tex(
     tex.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
 }
 
-unsafe fn create_staging(
-    device: &ID3D11Device,
-    w: u32,
-    h: u32,
-    fmt: DXGI_FORMAT,
-) -> Result<ID3D11Texture2D> {
-    let desc = D3D11_TEXTURE2D_DESC {
-        Width: w,
-        Height: h,
-        MipLevels: 1,
-        ArraySize: 1,
-        Format: fmt,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Usage: D3D11_USAGE_STAGING,
-        BindFlags: 0,
-        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-        MiscFlags: 0,
-    };
-    let mut tex = None;
-    device.CreateTexture2D(&desc, None, Some(&mut tex))?;
-    tex.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
-}
-
-unsafe fn compile_hlsl(
-    src: &str,
-    entry: &str,
-    target: &str,
-    blob: &mut Option<ID3DBlob>,
-) -> Result<()> {
+unsafe fn compile_hlsl(src: &str, entry: &str, target: &str, blob: &mut Option<ID3DBlob>) -> Result<()> {
     let entry_c = std::ffi::CString::new(entry)
         .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG))?;
     let target_c = std::ffi::CString::new(target)
@@ -224,122 +160,12 @@ unsafe fn compile_hlsl(
     Ok(())
 }
 
-/// 在工作设备的上下文上做两遍 Draw + 拷回 + **阻塞**读回，拼成连续 NV12 字节流。
-/// 仅在独立工作线程调用，阻塞不占用捕获线程。失败返回 None。
-#[allow(clippy::too_many_arguments)]
-unsafe fn render_frame(
-    work_ctx: &ID3D11DeviceContext,
-    input_srv: &ID3D11ShaderResourceView,
-    vs: &ID3D11VertexShader,
-    ps_y: &ID3D11PixelShader,
-    ps_uv: &ID3D11PixelShader,
-    rtv_y: &ID3D11RenderTargetView,
-    rtv_uv: &ID3D11RenderTargetView,
-    rt_y: &ID3D11Texture2D,
-    rt_uv: &ID3D11Texture2D,
-    staging_y: &ID3D11Texture2D,
-    staging_uv: &ID3D11Texture2D,
-    sampler: &ID3D11SamplerState,
-    out_w: u32,
-    out_h: u32,
-) -> Option<Vec<u8>> {
-    work_ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    work_ctx.IASetInputLayout(None);
-    work_ctx.GSSetShader(None, None);
-    work_ctx.RSSetState(None);
-    work_ctx.OMSetBlendState(None, None, u32::MAX);
-    work_ctx.OMSetDepthStencilState(None, 0);
-    // Y 遍
-    work_ctx
-        .OMSetRenderTargets(Some(&[Some(rtv_y.clone())]), None);
-    let vp = D3D11_VIEWPORT {
-        TopLeftX: 0.0,
-        TopLeftY: 0.0,
-        Width: out_w as f32,
-        Height: out_h as f32,
-        MinDepth: 0.0,
-        MaxDepth: 1.0,
-    };
-    work_ctx.RSSetViewports(Some(&[vp]));
-    let clear = [0.0f32; 4];
-    work_ctx.ClearRenderTargetView(Some(rtv_y), &clear);
-    work_ctx.VSSetShader(Some(vs), None);
-    work_ctx.PSSetShader(Some(ps_y), None);
-    work_ctx
-        .PSSetShaderResources(0, Some(&[Some(input_srv.clone())]));
-    work_ctx.PSSetSamplers(0, Some(&[Some(sampler.clone())]));
-    work_ctx.Draw(3, 0);
-    // UV 遍
-    work_ctx
-        .OMSetRenderTargets(Some(&[Some(rtv_uv.clone())]), None);
-    let vp_uv = D3D11_VIEWPORT {
-        TopLeftX: 0.0,
-        TopLeftY: 0.0,
-        Width: (out_w / 2).max(1) as f32,
-        Height: (out_h / 2).max(1) as f32,
-        MinDepth: 0.0,
-        MaxDepth: 1.0,
-    };
-    work_ctx.RSSetViewports(Some(&[vp_uv]));
-    work_ctx.ClearRenderTargetView(Some(rtv_uv), &clear);
-    work_ctx.PSSetShader(Some(ps_uv), None);
-    work_ctx.Draw(3, 0);
-    // 两平面各拷入 staging（工作线程独占，单槽即可）
-    work_ctx.CopyResource(
-        Some(staging_y as &ID3D11Resource),
-        Some(rt_y as &ID3D11Resource),
-    );
-    work_ctx.CopyResource(
-        Some(staging_uv as &ID3D11Resource),
-        Some(rt_uv as &ID3D11Resource),
-    );
-    work_ctx.Flush();
-    // 阻塞读回 Y 平面
-    let mut m = D3D11_MAPPED_SUBRESOURCE::default();
-    if work_ctx
-        .Map(Some(staging_y as &ID3D11Resource), 0, D3D11_MAP_READ, 0, Some(&mut m))
-        .is_err()
-    {
-        return None;
-    }
-    let mut mu = D3D11_MAPPED_SUBRESOURCE::default();
-    if work_ctx
-        .Map(
-            Some(staging_uv as &ID3D11Resource),
-            0,
-            D3D11_MAP_READ,
-            0,
-            Some(&mut mu),
-        )
-        .is_err()
-    {
-        work_ctx.Unmap(Some(staging_y as &ID3D11Resource), 0);
-        return None;
-    }
-    let w = out_w as usize;
-    let h = out_h as usize;
-    let total = w * h + w * h / 2;
-    let mut out = Vec::with_capacity(total);
-    let ys = m.pData as *const u8;
-    let yp = m.RowPitch as usize;
-    for y in 0..h {
-        out.extend_from_slice(std::slice::from_raw_parts(ys.add(y * yp), w));
-    }
-    work_ctx.Unmap(Some(staging_y as &ID3D11Resource), 0);
-    let us = mu.pData as *const u8;
-    let up = mu.RowPitch as usize;
-    let uvh = h / 2;
-    for y in 0..uvh {
-        out.extend_from_slice(std::slice::from_raw_parts(us.add(y * up), w));
-    }
-    work_ctx.Unmap(Some(staging_uv as &ID3D11Resource), 0);
-    Some(out)
-}
-
 impl GpuNv12Converter {
+    /// `device` 仅用于取其与 WGC 同 GPU 的适配器；`src_misc_flags` 是 WGC 帧纹理的
+    /// `D3D11_TEXTURE2D_DESC.MiscFlags`，用于预筛「帧纹理是否可跨设备共享」。
     pub fn new(
         device: &ID3D11Device,
-        ctx: &ID3D11DeviceContext,
+        src_misc_flags: u32,
         in_w: u32,
         in_h: u32,
         out_w: u32,
@@ -348,32 +174,78 @@ impl GpuNv12Converter {
         crop: Option<(u32, u32, u32, u32)>,
     ) -> Result<Self> {
         unsafe {
-            // ---- 工作设备：与捕获设备同适配器（同 GPU），独立上下文、独立线程 ----
-            let adapter = device.cast::<IDXGIDevice>()?.GetAdapter()?;
-            let mut work_dev = None;
-            let mut work_ctx = None;
-            if D3D11CreateDevice(
-                Some(&adapter),
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut work_dev),
-                None,
-                Some(&mut work_ctx),
-            )
-            .is_err()
-            {
-                // 独立设备创建失败 → 回退 RGBA（安全，无绿屏）
-                return Err(windows::core::Error::from(
-                    windows::Win32::Foundation::E_FAIL,
-                ));
+            // 跨设备共享预筛：WGC 帧纹理须带 D3D11_RESOURCE_MISC_SHARED* 标志才能 OpenSharedResource
+            // 映射进本设备。本机（windows-capture 用内部 D3D 设备创建帧池、未带共享标志）的帧纹理不可
+            // 共享，OpenSharedResource 必失败（0x80070057）。这里先预筛，避免无意义地建设备 / 自检后
+            // 又运行时回退，日志更直接、不误导。
+            const SHARED: u32 = D3D11_RESOURCE_MISC_SHARED.0 as u32;
+            const SHARED_KM: u32 = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0 as u32;
+            const SHARED_NT: u32 = D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0 as u32;
+            if src_misc_flags & (SHARED | SHARED_KM | SHARED_NT) == 0 {
+                eprintln!(
+                    "[GPU缩放] WGC 帧纹理非共享（MiscFlags=0x{:X}），跨设备 GPU 缩放不可用，回退 CPU 读回",
+                    src_misc_flags
+                );
+                return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
             }
-            let work_dev = work_dev.unwrap();
-            let work_ctx = work_ctx.unwrap();
+            // 取 WGC 设备所在适配器，自建同 GPU 设备——跨设备共享（OpenSharedResource）要求同源适配器。
+            let adapter: Option<IDXGIAdapter> = match device.cast::<IDXGIDevice>() {
+                Ok(d) => match d.GetAdapter() {
+                    Ok(a) => Some(a),
+                    Err(e) => {
+                        eprintln!("[GPU缩放] 取 WGC 适配器失败，改默认适配器: {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[GPU缩放] 设备转 IDXGIDevice 失败，改默认适配器: {e}");
+                    None
+                }
+            };
+            let mut dev = None;
+            let mut ctx = None;
+            let feature_levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1];
+            // 多线程序列化是 D3D11 默认行为（仅 SINGLETHREADED 才关闭），故此处不必显式加标志。
+            let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+            let hr = match &adapter {
+                Some(a) => D3D11CreateDevice(
+                    Some(a),
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    flags,
+                    Some(&feature_levels),
+                    D3D11_SDK_VERSION,
+                    Some(&mut dev),
+                    None,
+                    Some(&mut ctx),
+                ),
+                None => D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    HMODULE::default(),
+                    flags,
+                    Some(&feature_levels),
+                    D3D11_SDK_VERSION,
+                    Some(&mut dev),
+                    None,
+                    Some(&mut ctx),
+                ),
+            };
+            hr.map_err(|e| {
+                eprintln!("[GPU缩放] 自建 D3D11 设备失败（回退 CPU 读回）: {e}");
+                e
+            })?;
+            let device = dev.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let ctx = ctx.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
 
-            // ---- 编译着色器（在工作设备）----
+            // 输入纹理格式若为 BGRA，着色器内做 bgr 还原；其余（含 RGBA）按 rgb。
+            let bgra = matches!(
+                input_fmt,
+                DXGI_FORMAT_B8G8R8A8_UNORM
+                    | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+                    | DXGI_FORMAT_B8G8R8X8_UNORM
+            );
+
             let mut vs_blob = None;
             compile_hlsl(VS_HLSL, "VS", "vs_4_0", &mut vs_blob)?;
             let crop_norm = crop.map(|(cx, cy, cw, ch)| {
@@ -383,94 +255,66 @@ impl GpuNv12Converter {
                 let sh = (ch as f32).max(1.0) / in_h as f32;
                 (ox, oy, sw, sh)
             });
-            let mut ps_y_blob = None;
-            compile_hlsl(&build_ps_y(crop_norm), "PS", "ps_4_0", &mut ps_y_blob)?;
-            let mut ps_uv_blob = None;
-            compile_hlsl(&build_ps_uv(crop_norm), "PS", "ps_4_0", &mut ps_uv_blob)?;
+            let mut ps_blob = None;
+            compile_hlsl(&build_ps_rgba(crop_norm, bgra), "PS", "ps_4_0", &mut ps_blob)?;
             let vs_blob = vs_blob.unwrap();
-            let ps_y_blob = ps_y_blob.unwrap();
-            let ps_uv_blob = ps_uv_blob.unwrap();
-
             let vs_code = std::slice::from_raw_parts(
                 vs_blob.GetBufferPointer() as *const u8,
                 vs_blob.GetBufferSize(),
             );
             let mut vs = None;
-            work_dev.CreateVertexShader(vs_code, None, Some(&mut vs))?;
+            device.CreateVertexShader(vs_code, None, Some(&mut vs))?;
             let vs = vs.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
-            let ps_y_code = std::slice::from_raw_parts(
-                ps_y_blob.GetBufferPointer() as *const u8,
-                ps_y_blob.GetBufferSize(),
+            let ps_blob = ps_blob.unwrap();
+            let ps_code = std::slice::from_raw_parts(
+                ps_blob.GetBufferPointer() as *const u8,
+                ps_blob.GetBufferSize(),
             );
-            let mut ps_y = None;
-            work_dev.CreatePixelShader(ps_y_code, None, Some(&mut ps_y))?;
-            let ps_y = ps_y.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
-            let ps_uv_code = std::slice::from_raw_parts(
-                ps_uv_blob.GetBufferPointer() as *const u8,
-                ps_uv_blob.GetBufferSize(),
-            );
-            let mut ps_uv = None;
-            work_dev.CreatePixelShader(ps_uv_code, None, Some(&mut ps_uv))?;
-            let ps_uv = ps_uv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let mut ps = None;
+            device.CreatePixelShader(ps_code, None, Some(&mut ps))?;
+            let ps = ps.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
 
-            // ---- 桥接纹理：建在捕获设备，可共享 + 键控互斥；工作设备经共享句柄打开同一资源 ----
-            let bridge_desc = D3D11_TEXTURE2D_DESC {
-                Width: in_w,
-                Height: in_h,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: input_fmt,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX).0
-                    as u32,
-            };
-            let mut capture_bridge = None;
-            device.CreateTexture2D(&bridge_desc, None, Some(&mut capture_bridge))?;
-            let capture_bridge = capture_bridge.unwrap();
-            let bridge_mutex = capture_bridge.cast::<IDXGIKeyedMutex>()?;
-            let handle = capture_bridge.cast::<IDXGIResource>()?.GetSharedHandle()?;
-            // 在工作设备打开同一共享纹理作为采样源
-            let mut input_tex = None;
-            work_dev.OpenSharedResource::<ID3D11Texture2D>(handle, &mut input_tex)?;
-            let input_tex = input_tex
-                .ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let input_tex = create_tex(
+                &device,
+                in_w,
+                in_h,
+                input_fmt,
+                D3D11_BIND_SHADER_RESOURCE,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )?;
             let mut srv = None;
-            work_dev.CreateShaderResourceView(&input_tex, None, Some(&mut srv))?;
-            let input_srv =
-                srv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
-            let work_mutex = input_tex.cast::<IDXGIKeyedMutex>()?;
+            device.CreateShaderResourceView(&input_tex, None, Some(&mut srv))?;
+            let input_srv = srv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
 
-            // ---- 渲染目标与 staging（工作设备）----
-            let rt_y = create_tex(
-                &work_dev,
+            let rt = create_tex(
+                &device,
                 out_w,
                 out_h,
-                DXGI_FORMAT_R8_UNORM,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
                 D3D11_BIND_RENDER_TARGET,
+                D3D11_USAGE_DEFAULT,
+                0,
             )?;
-            let mut rtv_y = None;
-            work_dev.CreateRenderTargetView(&rt_y, None, Some(&mut rtv_y))?;
-            let rtv_y = rtv_y.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
-            let uvw = (out_w / 2).max(1);
-            let uvh = (out_h / 2).max(1);
-            let rt_uv = create_tex(
-                &work_dev,
-                uvw,
-                uvh,
-                DXGI_FORMAT_R8G8_UNORM,
-                D3D11_BIND_RENDER_TARGET,
-            )?;
-            let mut rtv_uv = None;
-            work_dev.CreateRenderTargetView(&rt_uv, None, Some(&mut rtv_uv))?;
-            let rtv_uv = rtv_uv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
-            let staging_y = create_staging(&work_dev, out_w, out_h, DXGI_FORMAT_R8_UNORM)?;
-            let staging_uv = create_staging(&work_dev, uvw, uvh, DXGI_FORMAT_R8G8_UNORM)?;
+            let mut rtv = None;
+            device.CreateRenderTargetView(&rt, None, Some(&mut rtv))?;
+            let rtv = rtv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            let mut staging = Vec::with_capacity(STAGING_COUNT);
+            let mut free_slots = Vec::with_capacity(STAGING_COUNT);
+            for i in 0..STAGING_COUNT {
+                let t = create_tex(
+                    &device,
+                    out_w,
+                    out_h,
+                    DXGI_FORMAT_R8G8B8A8_UNORM,
+                    D3D11_BIND_FLAG(0),
+                    D3D11_USAGE_STAGING,
+                    D3D11_CPU_ACCESS_READ.0 as u32,
+                )?;
+                staging.push(t);
+                free_slots.push(i);
+            }
 
             let sd = D3D11_SAMPLER_DESC {
                 Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
@@ -485,163 +329,46 @@ impl GpuNv12Converter {
                 MaxLOD: f32::MAX,
             };
             let mut sampler = None;
-            work_dev.CreateSamplerState(&sd, Some(&mut sampler))?;
+            device.CreateSamplerState(&sd, Some(&mut sampler))?;
             let sampler = sampler.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
 
-            // ---- 线程通信原语 ----
-            let (tx, rx) = mpsc::channel::<()>();
-            let output: Arc<Mutex<VecDeque<Vec<u8>>>> =
-                Arc::new(Mutex::new(VecDeque::with_capacity(MAX_OUTPUT)));
-            let stop = Arc::new(AtomicBool::new(false));
-            let broken = Arc::new(AtomicBool::new(false));
-
-            // ---- 自检：在工作设备渲染一帧白屏 + 阻塞读回，验证 Draw 真能产出非全零 NV12 ----
-            let probe = Self {
-                capture_ctx: ctx.clone(),
-                capture_bridge: capture_bridge.clone(),
-                bridge_mutex: bridge_mutex.clone(),
-                work_ctx: work_ctx.clone(),
-                input_tex: input_tex.clone(),
-                input_srv: input_srv.clone(),
-                rt_y: rt_y.clone(),
-                rtv_y: rtv_y.clone(),
-                rt_uv: rt_uv.clone(),
-                rtv_uv: rtv_uv.clone(),
-                staging_y: staging_y.clone(),
-                staging_uv: staging_uv.clone(),
-                vs: vs.clone(),
-                ps_y: ps_y.clone(),
-                ps_uv: ps_uv.clone(),
-                sampler: sampler.clone(),
-                out_w,
-                out_h,
-                in_w,
-                in_h,
-                broken: broken.clone(),
-                tx: tx.clone(),
-                output: output.clone(),
-                stop: stop.clone(),
-                thread: None,
-            };
-            if !probe.verify() {
-                eprintln!("[GPU缩放] 自检失败：分离设备渲染管线产出全零，回退 RGBA 读回");
-                return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
-            }
-
-            // ---- 启动独立工作线程：读共享纹理 → Draw → 阻塞读回 → 推输出队列 ----
-            let out_w_c = out_w;
-            let out_h_c = out_h;
-            let handle_join = {
-                // 资源克隆给工作线程；原值仍留给 Self 与 probe，避免 moved 冲突
-                let work_ctx = work_ctx.clone();
-                let input_srv = input_srv.clone();
-                let rt_y = rt_y.clone();
-                let rtv_y = rtv_y.clone();
-                let rt_uv = rt_uv.clone();
-                let rtv_uv = rtv_uv.clone();
-                let staging_y = staging_y.clone();
-                let staging_uv = staging_uv.clone();
-                let vs = vs.clone();
-                let ps_y = ps_y.clone();
-                let ps_uv = ps_uv.clone();
-                let sampler = sampler.clone();
-                let work_mutex = work_mutex.clone();
-                let output = output.clone();
-                let stop = stop.clone();
-                let broken = broken.clone();
-                thread::spawn(move || {
-                    loop {
-                        if stop.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        match rx.recv_timeout(Duration::from_millis(WORK_POLL_MS)) {
-                            Ok(()) => {}
-                            Err(RecvTimeoutError::Timeout) => continue,
-                            Err(_) => break,
-                        }
-                        if stop.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        // 只渲染最新一帧：排空积压信号，避免落后时重复渲染同内容
-                        while rx.try_recv().is_ok() {}
-                        // 等待捕获侧写入完成（GPU 级同步，最多等 1s，超时跳过本帧不死锁）
-                        if work_mutex.AcquireSync(1, WORK_TIMEOUT_MS).is_err() {
-                            continue;
-                        }
-                        let bytes = render_frame(
-                            &work_ctx,
-                            &input_srv,
-                            &vs,
-                            &ps_y,
-                            &ps_uv,
-                            &rtv_y,
-                            &rtv_uv,
-                            &rt_y,
-                            &rt_uv,
-                            &staging_y,
-                            &staging_uv,
-                            &sampler,
-                            out_w_c,
-                            out_h_c,
-                        );
-                        let _ = work_mutex.ReleaseSync(0);
-                        match bytes {
-                            Some(b) => {
-                                // 运行时兜底：全零帧 = 共享纹理未真正写入 → 标记失效，回退 RGBA
-                                if b.iter().all(|&x| x == 0) {
-                                    broken.store(true, Ordering::Relaxed);
-                                    break;
-                                }
-                                let mut q = output.lock().unwrap();
-                                while q.len() >= MAX_OUTPUT {
-                                    q.pop_front();
-                                }
-                                q.push_back(b);
-                            }
-                            None => { /* 读回失败，下一帧重试 */ }
-                        }
-                    }
-                })
-            };
-
-            eprintln!("[GPU缩放] 分离设备零拷贝路径启用（GPU 转换在独立线程，捕获线程零阻塞）");
-            Ok(Self {
-                capture_ctx: ctx.clone(),
-                capture_bridge,
-                bridge_mutex,
-                work_ctx,
+            let me = Self {
+                device,
+                ctx,
                 input_tex,
                 input_srv,
-                rt_y,
-                rtv_y,
-                rt_uv,
-                rtv_uv,
-                staging_y,
-                staging_uv,
+                rt,
+                rtv,
+                staging,
                 vs,
-                ps_y,
-                ps_uv,
+                ps,
                 sampler,
                 out_w,
                 out_h,
                 in_w,
                 in_h,
-                broken,
-                tx,
-                output,
-                stop,
-                thread: Some(handle_join),
-            })
+                broken: false,
+                free_slots,
+                pending: VecDeque::with_capacity(STAGING_COUNT),
+                shared: None,
+            };
+            // 自检：用**本（自建）设备**渲染一帧白屏、阻塞读回，验证 Draw 真能向渲染目标写出非全零。
+            // 关键修正：渲染在自建设备上执行（WGC 设备上下文在本机被 DWM 丢弃命令、自检必全零），
+            // 故本自检在绝大多数机器上应通过，从而真正启用 GPU 缩放路径。
+            if !me.verify() {
+                eprintln!("[GPU缩放] 自检失败：自建设备渲染管线产出全零，回退 RGBA 读回（不启用 GPU 路径）");
+                return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+            }
+            eprintln!("[GPU缩放] 自检通过：自建设备 D3D11 缩放渲染管线可用，启用 GPU 路径（跨设备共享 WGC 帧 + DO_NOT_WAIT）");
+            Ok(me)
         }
     }
 
-    /// 自检：用白屏填充输入纹理，走与 `render_frame` 完全一致的两遍渲染 + **阻塞**读回，
-    /// 验证 Draw 真能向 R8/R8G8 渲染目标写出非全零数据。返回 true=该 D3D11 管线在本机可用。
     fn verify(&self) -> bool {
         unsafe {
             let n = (self.in_w as usize) * (self.in_h as usize) * 4;
             let white = vec![0xFFu8; n];
-            self.work_ctx.UpdateSubresource(
+            self.ctx.UpdateSubresource(
                 &self.input_tex,
                 0,
                 None,
@@ -649,86 +376,521 @@ impl GpuNv12Converter {
                 self.in_w * 4,
                 0,
             );
-            match render_frame(
-                &self.work_ctx,
-                &self.input_srv,
-                &self.vs,
-                &self.ps_y,
-                &self.ps_uv,
-                &self.rtv_y,
-                &self.rtv_uv,
-                &self.rt_y,
-                &self.rt_uv,
-                &self.staging_y,
-                &self.staging_uv,
-                &self.sampler,
-                self.out_w,
-                self.out_h,
-            ) {
-                Some(b) => b.iter().any(|&x| x != 0),
-                None => false,
+            self.set_state();
+            self.ctx
+                .OMSetRenderTargets(Some(&[Some(self.rtv.clone())]), None);
+            let vp = D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: self.out_w as f32,
+                Height: self.out_h as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            };
+            self.ctx.RSSetViewports(Some(&[vp]));
+            let clear = [1.0f32, 1.0, 1.0, 1.0];
+            self.ctx.ClearRenderTargetView(Some(&self.rtv), &clear);
+            self.ctx.VSSetShader(Some(&self.vs), None);
+            self.ctx.PSSetShader(Some(&self.ps), None);
+            self.ctx
+                .PSSetShaderResources(0, Some(&[Some(self.input_srv.clone())]));
+            self.ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            self.ctx.Draw(3, 0);
+            if let Some(slot) = self.free_slots.first() {
+                self.ctx.CopyResource(
+                    Some(&self.staging[*slot] as &ID3D11Resource),
+                    Some(&self.rt as &ID3D11Resource),
+                );
             }
+            self.ctx.Flush();
+            let slot = *self.free_slots.first().unwrap();
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            if self
+                .ctx
+                .Map(
+                    Some(&self.staging[slot] as &ID3D11Resource),
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut mapped),
+                )
+                .is_err()
+            {
+                return false;
+            }
+            let slice = std::slice::from_raw_parts(
+                mapped.pData as *const u8,
+                (self.out_w as usize) * (self.out_h as usize) * 4,
+            );
+            let nonzero = slice.iter().any(|&b| b != 0);
+            self.ctx.Unmap(Some(&self.staging[slot] as &ID3D11Resource), 0);
+            nonzero
         }
     }
 
-    /// 捕获线程调用：极快地把本帧拷入桥接纹理并唤醒工作线程，随后非阻塞取一帧已转换结果。
-    /// 返回 `Ok(true)`=out 已写入一帧（可送 latest）；`Ok(false)`=GPU 未就绪/工作线程未产出，
-    /// 本帧无数据（调用方应复用上一帧 latest）。`Err`=管线失效，调用方回退 RGBA。
+    #[inline]
+    unsafe fn set_state(&self) {
+        self.ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        self.ctx.IASetInputLayout(None);
+        self.ctx.GSSetShader(None, None);
+        self.ctx.RSSetState(None);
+        self.ctx.OMSetBlendState(None, None, u32::MAX);
+        self.ctx.OMSetDepthStencilState(None, 0);
+    }
+
+    /// 把 WGC 帧纹理 `src`（在 WGC 设备）跨设备映射到本设备并缩放/裁剪到 RGBA。
+    /// 返回 `Ok(true)`=out 已写入一帧；`Ok(false)`=GPU 未就绪、本帧无产出（调用方复用上一帧）；
+    /// `Err`=映射/渲染失败（调用方永久回退 CPU 读回）。
     pub fn convert(&mut self, src: &ID3D11Texture2D, out: &mut Vec<u8>) -> Result<bool> {
-        if self.broken.load(Ordering::Relaxed) {
-            return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
-        }
         unsafe {
-            // 非阻塞抢占键控互斥（timeout=0）：抢不到说明工作线程还在读上一帧 → 直接丢本帧，
-            // 绝不阻塞捕获线程（这是消除游戏粘滞的关键）。
-            if self.bridge_mutex.AcquireSync(0, 0).is_err() {
-                // 仍唤醒一次工作线程（万一它卡在等待），但不阻塞
-                let _ = self.tx.send(());
-                return Ok(false);
+            if self.broken {
+                return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
             }
-            // 极快 GPU→GPU 拷贝（仅一次提交，无 Map、无 Flush 阻塞）
-            self.capture_ctx.CopyResource(
-                Some(&self.capture_bridge as &ID3D11Resource),
+            // 跨设备映射 WGC 帧纹理（按来源指针缓存；每帧可能换新纹理则需重映射）。
+            let src_ptr = src.as_raw() as usize;
+            let need_remap = self.shared.as_ref().map_or(true, |s| s.src_ptr != src_ptr);
+            if need_remap {
+                let res: IDXGIResource = match src.cast() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[GPU缩放] 帧纹理无法转为 IDXGIResource（跨设备共享不可用），回退 CPU: {e}");
+                        self.broken = true;
+                        return Err(e);
+                    }
+                };
+                let h = match res.GetSharedHandle() {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!("[GPU缩放] 取共享句柄失败（帧纹理非共享），回退 CPU: {e}");
+                        self.broken = true;
+                        return Err(e);
+                    }
+                };
+                let mut shared: Option<ID3D11Texture2D> = None;
+                if let Err(e) = self.device.OpenSharedResource(h, &mut shared) {
+                    eprintln!("[GPU缩放] OpenSharedResource 失败，回退 CPU: {e}");
+                    self.broken = true;
+                    return Err(e);
+                }
+                let shared = shared
+                    .ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+                let km = shared.cast::<IDXGIKeyedMutex>().ok();
+                self.shared = Some(SharedFrame {
+                    src_ptr,
+                    tex: shared,
+                    km,
+                });
+                eprintln!(
+                    "[GPU缩放] WGC 帧跨设备映射成功（keyed-mutex={}）",
+                    self.shared.as_ref().unwrap().km.is_some()
+                );
+            }
+            let shared = &self.shared.as_ref().unwrap().tex;
+            let km = self.shared.as_ref().unwrap().km.clone();
+
+            // 跨设备同步：短暂等待 WGC 释放本帧写入权（keyed mutex），拷贝入本设备输入纹理；
+            // 超时仅放宽为偶发撕裂风险，绝不长时间阻塞捕获线程 / DWM 合成。
+            if let Some(km) = &km {
+                let _ = km.AcquireSync(0, 16);
+            }
+            self.ctx.CopyResource(
+                Some(&self.input_tex as &ID3D11Resource),
+                Some(shared as &ID3D11Resource),
+            );
+            if let Some(km) = &km {
+                let _ = km.ReleaseSync(0);
+            }
+            self.ctx.Flush();
+
+            // 渲染：单遍全屏三角形把输入缩放/裁剪到 RGBA 渲染目标。
+            self.set_state();
+            self.ctx
+                .OMSetRenderTargets(Some(&[Some(self.rtv.clone())]), None);
+            let vp = D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: self.out_w as f32,
+                Height: self.out_h as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            };
+            self.ctx.RSSetViewports(Some(&[vp]));
+            self.ctx
+                .ClearRenderTargetView(Some(&self.rtv), &[0.0f32, 0.0, 0.0, 1.0]);
+            self.ctx.VSSetShader(Some(&self.vs), None);
+            self.ctx.PSSetShader(Some(&self.ps), None);
+            self.ctx
+                .PSSetShaderResources(0, Some(&[Some(self.input_srv.clone())]));
+            self.ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            self.ctx.Draw(3, 0);
+
+            // 拷入空闲 staging 槽并入队（无空闲槽则本帧不入队，但仍尝试读回最早槽排空流水线）。
+            if let Some(slot) = self.free_slots.pop() {
+                self.ctx.CopyResource(
+                    Some(&self.staging[slot] as &ID3D11Resource),
+                    Some(&self.rt as &ID3D11Resource),
+                );
+                self.pending.push_back(slot);
+            }
+            self.ctx.Flush();
+
+            // 非阻塞读回最早入队的槽：Map(DO_NOT_WAIT) 在 GPU 未就绪时立即返回，绝不等待。
+            // 关键：WAS_STILL_DRAWING 时槽必须**留在 pending 队列**等下一帧回调再收——
+            // 旧实现把槽弹出丢弃，等于每帧都在「刚下完拷贝命令就立刻 Map」→ 必然还在画 →
+            // 永远 Ok(false) → 永远零产出（原生 WGC「2.5s 零帧看门狗」即由此触发）。
+            let Some(&slot) = self.pending.front() else {
+                return Ok(false);
+            };
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            match self.ctx.Map(
+                Some(&self.staging[slot] as &ID3D11Resource),
+                0,
+                D3D11_MAP_READ,
+                D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32,
+                Some(&mut mapped),
+            ) {
+                Ok(()) => {}
+                Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => {
+                    // GPU 还在写该槽：保留在 pending，本帧无产出（pacer 复用上一帧）。
+                    return Ok(false);
+                }
+                Err(e) => {
+                    self.pending.pop_front();
+                    self.free_slots.push(slot);
+                    return Err(e);
+                }
+            }
+            let w = self.out_w as usize;
+            let h = self.out_h as usize;
+            let total = w * h * 4;
+            out.clear();
+            out.reserve(total);
+            let src_ptr = mapped.pData as *const u8;
+            let pitch = mapped.RowPitch as usize;
+            for y in 0..h {
+                out.extend_from_slice(std::slice::from_raw_parts(src_ptr.add(y * pitch), w * 4));
+            }
+            self.ctx.Unmap(Some(&self.staging[slot] as &ID3D11Resource), 0);
+            self.pending.pop_front();
+            self.free_slots.push(slot);
+
+            if out.iter().all(|&b| b == 0) {
+                eprintln!("[GPU缩放] 运行时检测到全零帧，GPU 渲染管线静默失败，回退 RGBA 读回");
+                self.broken = true;
+                return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// 方案 A（原生 WGC）的同设备缩放器：帧池建在「本设备」上，WGC 帧纹理与渲染管线同设备，
+/// 无需任何跨设备共享/keyed-mutex——直接 `CopyResource` + 单遍全屏三角形缩放/裁剪 +
+/// `Map(DO_NOT_WAIT)` 非阻塞读回小尺寸 RGBA（4K→1080p 时读回从 33MB 降到 8MB）。
+/// 与 `GpuNv12Converter` 的区别：设备/上下文由调用方（wgc_native）提供且与帧同源，
+/// 故没有「共享失败」这一失败模式；全零检测仅在前几帧做（防止真实黑屏误杀）。
+pub struct GpuSameDeviceScaler {
+    ctx: ID3D11DeviceContext,
+    input_tex: ID3D11Texture2D,
+    input_srv: ID3D11ShaderResourceView,
+    rt: ID3D11Texture2D,
+    rtv: ID3D11RenderTargetView,
+    staging: Vec<ID3D11Texture2D>,
+    vs: ID3D11VertexShader,
+    ps: ID3D11PixelShader,
+    sampler: ID3D11SamplerState,
+    out_w: u32,
+    out_h: u32,
+    in_w: u32,
+    in_h: u32,
+    broken: bool,
+    free_slots: Vec<usize>,
+    pending: VecDeque<usize>,
+    /// 已成功产出的帧数：仅前几帧做全零检测（黑屏内容不该永久禁用 GPU 路）。
+    ok_frames: u32,
+}
+
+impl GpuSameDeviceScaler {
+    pub fn new(
+        device: &ID3D11Device,
+        ctx: &ID3D11DeviceContext,
+        in_w: u32,
+        in_h: u32,
+        out_w: u32,
+        out_h: u32,
+        input_fmt: DXGI_FORMAT,
+        crop: Option<(u32, u32, u32, u32)>,
+    ) -> Result<Self> {
+        unsafe {
+            let bgra = matches!(
+                input_fmt,
+                DXGI_FORMAT_B8G8R8A8_UNORM
+                    | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+                    | DXGI_FORMAT_B8G8R8X8_UNORM
+            );
+            let mut vs_blob = None;
+            compile_hlsl(VS_HLSL, "VS", "vs_4_0", &mut vs_blob)?;
+            let crop_norm = crop.map(|(cx, cy, cw, ch)| {
+                (
+                    cx as f32 / in_w as f32,
+                    cy as f32 / in_h as f32,
+                    (cw as f32).max(1.0) / in_w as f32,
+                    (ch as f32).max(1.0) / in_h as f32,
+                )
+            });
+            let mut ps_blob = None;
+            compile_hlsl(&build_ps_rgba(crop_norm, bgra), "PS", "ps_4_0", &mut ps_blob)?;
+            let vs_blob = vs_blob.unwrap();
+            let vs_code = std::slice::from_raw_parts(
+                vs_blob.GetBufferPointer() as *const u8,
+                vs_blob.GetBufferSize(),
+            );
+            let mut vs = None;
+            device.CreateVertexShader(vs_code, None, Some(&mut vs))?;
+            let vs = vs.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let ps_blob = ps_blob.unwrap();
+            let ps_code = std::slice::from_raw_parts(
+                ps_blob.GetBufferPointer() as *const u8,
+                ps_blob.GetBufferSize(),
+            );
+            let mut ps = None;
+            device.CreatePixelShader(ps_code, None, Some(&mut ps))?;
+            let ps = ps.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            let input_tex = create_tex(
+                device,
+                in_w,
+                in_h,
+                input_fmt,
+                D3D11_BIND_SHADER_RESOURCE,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )?;
+            let mut srv = None;
+            device.CreateShaderResourceView(&input_tex, None, Some(&mut srv))?;
+            let input_srv =
+                srv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            let rt = create_tex(
+                device,
+                out_w,
+                out_h,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                D3D11_BIND_RENDER_TARGET,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )?;
+            let mut rtv = None;
+            device.CreateRenderTargetView(&rt, None, Some(&mut rtv))?;
+            let rtv = rtv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            let mut staging = Vec::with_capacity(STAGING_COUNT);
+            let mut free_slots = Vec::with_capacity(STAGING_COUNT);
+            for i in 0..STAGING_COUNT {
+                staging.push(create_tex(
+                    device,
+                    out_w,
+                    out_h,
+                    DXGI_FORMAT_R8G8B8A8_UNORM,
+                    D3D11_BIND_FLAG(0),
+                    D3D11_USAGE_STAGING,
+                    D3D11_CPU_ACCESS_READ.0 as u32,
+                )?);
+                free_slots.push(i);
+            }
+
+            let sd = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                MipLODBias: 0.0,
+                MaxAnisotropy: 1,
+                ComparisonFunc: D3D11_COMPARISON_NEVER,
+                BorderColor: [0.0f32; 4],
+                MinLOD: 0.0,
+                MaxLOD: f32::MAX,
+            };
+            let mut sampler = None;
+            device.CreateSamplerState(&sd, Some(&mut sampler))?;
+            let sampler =
+                sampler.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            Ok(Self {
+                ctx: ctx.clone(),
+                input_tex,
+                input_srv,
+                rt,
+                rtv,
+                staging,
+                vs,
+                ps,
+                sampler,
+                out_w,
+                out_h,
+                in_w,
+                in_h,
+                broken: false,
+                free_slots,
+                pending: VecDeque::with_capacity(STAGING_COUNT),
+                ok_frames: 0,
+            })
+        }
+    }
+
+    #[inline]
+    unsafe fn set_state(&self) {
+        self.ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        self.ctx.IASetInputLayout(None);
+        self.ctx.GSSetShader(None, None);
+        self.ctx.RSSetState(None);
+        self.ctx.OMSetBlendState(None, None, u32::MAX);
+        self.ctx.OMSetDepthStencilState(None, 0);
+    }
+
+    pub fn input_size(&self) -> (u32, u32) {
+        (self.in_w, self.in_h)
+    }
+
+    /// 同设备缩放：`src` 是本设备上的 WGC 帧纹理（帧池建在本设备）。
+    /// `Ok(true)`=out 写入一帧；`Ok(false)`=GPU 未就绪（复用上一帧）；`Err`=渲染失败（调用方回退 CPU）。
+    pub fn scale(&mut self, src: &ID3D11Texture2D, out: &mut Vec<u8>) -> Result<bool> {
+        unsafe {
+            if self.broken {
+                return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+            }
+            // 同设备直拷（帧纹理与 input_tex 同尺寸同格式；帧池尺寸 = item 尺寸）。
+            self.ctx.CopyResource(
+                Some(&self.input_tex as &ID3D11Resource),
                 Some(src as &ID3D11Resource),
             );
-            let _ = self.bridge_mutex.ReleaseSync(1);
-            self.capture_ctx.Flush();
-            // 唤醒工作线程做 Draw + 读回（在独立设备/线程，绝不占用捕获线程）
-            let _ = self.tx.send(());
-            // 非阻塞取一帧已转换结果（取最新）
-            let mut q = self.output.lock().unwrap();
-            if let Some(f) = q.pop_back() {
-                *out = f;
-                Ok(true)
-            } else {
-                Ok(false)
+
+            self.set_state();
+            self.ctx
+                .OMSetRenderTargets(Some(&[Some(self.rtv.clone())]), None);
+            let vp = D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: self.out_w as f32,
+                Height: self.out_h as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            };
+            self.ctx.RSSetViewports(Some(&[vp]));
+            self.ctx
+                .ClearRenderTargetView(Some(&self.rtv), &[0.0f32, 0.0, 0.0, 1.0]);
+            self.ctx.VSSetShader(Some(&self.vs), None);
+            self.ctx.PSSetShader(Some(&self.ps), None);
+            self.ctx
+                .PSSetShaderResources(0, Some(&[Some(self.input_srv.clone())]));
+            self.ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            self.ctx.Draw(3, 0);
+
+            if let Some(slot) = self.free_slots.pop() {
+                self.ctx.CopyResource(
+                    Some(&self.staging[slot] as &ID3D11Resource),
+                    Some(&self.rt as &ID3D11Resource),
+                );
+                self.pending.push_back(slot);
+            }
+            self.ctx.Flush();
+
+            // 阻塞读回「本帧」所在槽（队尾 = 当前帧）：Map 阻塞会强制 GPU 把整条命令流
+            // （CopyResource(WGC帧→input_tex) → Draw → CopyResource(rt→staging)）全部执行完，
+            // 确保在 process 返回、调用方 Close 该 WGC 帧之前，帧纹理已被安全拷出。否则 Close 后
+            // WGC 回收该纹理，异步命令读到回收后的脏数据 → 全黑/噪点（本次 40s/90MB 黑屏根因）。
+            let Some(&slot) = self.pending.back() else {
+                return Ok(false);
+            };
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.ctx
+                .Map(
+                    Some(&self.staging[slot] as &ID3D11Resource),
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut mapped),
+                )
+                .map_err(|e| {
+                    self.pending.pop_back();
+                    self.free_slots.push(slot);
+                    e
+                })?;
+            let w = self.out_w as usize;
+            let h = self.out_h as usize;
+            let total = w * h * 4;
+            out.clear();
+            out.reserve(total);
+            let src_ptr = mapped.pData as *const u8;
+            let pitch = mapped.RowPitch as usize;
+            for y in 0..h {
+                out.extend_from_slice(std::slice::from_raw_parts(src_ptr.add(y * pitch), w * 4));
+            }
+            self.ctx.Unmap(Some(&self.staging[slot] as &ID3D11Resource), 0);
+            self.pending.pop_back();
+            self.free_slots.push(slot);
+
+            // 仅前 3 帧做全零检测（验证管线真的在写出）；此后黑屏内容属正常画面，不误杀。
+            if self.ok_frames < 3 && out.iter().all(|&b| b == 0) {
+                eprintln!("[GPU缩放] 同设备渲染前几帧全零，管线静默失败，回退 CPU 读回");
+                self.broken = true;
+                return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+            }
+            self.ok_frames = self.ok_frames.saturating_add(1);
+            Ok(true)
+        }
+    }
+}
+
+/// 进程内 GPU 转 RGBA 是否可用。探针用临时 D3D11 设备构建完整渲染管线并实测一次，
+/// 避免对不支持的驱动误启用。运行时若创建/映射失败会自动回退到「读回整帧 + ffmpeg scale」。
+static NV12_IN_PROCESS: OnceLock<bool> = OnceLock::new();
+
+pub(crate) fn nv12_in_process_supported() -> bool {
+    *NV12_IN_PROCESS.get_or_init(|| probe_nv12(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM))
+}
+
+pub(crate) fn probe_nv12(_w: u32, _h: u32, _fmt: DXGI_FORMAT) -> bool {
+    unsafe {
+        let mut dev = None;
+        let mut ctx = None;
+        if D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1]),
+            D3D11_SDK_VERSION,
+            Some(&mut dev),
+            None,
+            Some(&mut ctx),
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let dev = match dev {
+            Some(d) => d,
+            None => return false,
+        };
+        match GpuNv12Converter::new(
+            &dev,
+            D3D11_RESOURCE_MISC_SHARED.0 as u32, // 模拟「帧纹理可共享」，仅用于验证本机 D3D11 渲染管线
+            1920,
+            1080,
+            1280,
+            720,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            None,
+        ) {
+            Ok(_) => {
+                eprintln!("[GPU缩放] 探针成功：GPU 渲染管线可用（将只读回 RGBA）");
+                true
+            }
+            Err(e) => {
+                eprintln!("[GPU缩放] 探针失败（回退 RGBA 读回，较慢）: {e}");
+                false
             }
         }
     }
-}
-
-impl Drop for GpuNv12Converter {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        // 唤醒工作线程使其退出 recv 等待
-        let _ = self.tx.send(());
-        if let Some(h) = self.thread.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-/// 进程内 GPU 转 NV12 是否可用。
-///
-/// **不再用临时 D3D11 设备做探针**——旧实现用 `D3D11CreateDevice(None, D3D_DRIVER_TYPE_UNKNOWN)`
-/// 建临时设备，在不少机器上会落到 **WARP 软件设备 / 错误适配器**；从它取 adapter 再建的工作设备
-/// 与 WGC 真实帧纹理所在的 GPU **跨适配器**，于是 `OpenSharedResource` 失败 → 探针返回 `false` →
-/// `gpu_nv12=false` → 整条 GPU 路径被假阴性关闭 → 回退到「捕获线程同步读回整帧 RGBA」，正是游戏
-/// 粘滞的真源（且全程无任何 `[GPU缩放]` 日志，难以诊断）。
-///
-/// 正确做法：真实能力由运行时 `GpuNv12Converter::new` 决定——它用的是 WGC 实际捕获设备
-/// `frame.device()`，与帧纹理**同适配器**，`OpenSharedResource` 必然可用；再叠加运行期「全零帧检测」
-/// 兜底（“绿屏”不可能出现）。因此这里直接返回 true，让每次录制首次帧用真实设备创建、自愈/失败回退。
-pub(crate) fn nv12_in_process_supported() -> bool {
-    true
 }

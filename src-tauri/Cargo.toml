@@ -118,6 +118,16 @@ windows = { version = "0.62", features = [
   "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dxgi",
   "Win32_Foundation",
+  # 方案 A（原生 WGC 捕获，wgc_native.rs）：帧池建在自建 D3D11 设备上，同设备 GPU 缩放后只读回
+  # 小尺寸 RGBA。需要 WinRT Graphics.Capture + DirectX interop + HMONITOR。
+  "Foundation",
+  "Graphics",
+  "Graphics_Capture",
+  "Graphics_DirectX",
+  "Graphics_DirectX_Direct3D11",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
+  "Win32_Graphics_Gdi",
   "Media",
   "Media_Playback",
   "Media_Control",

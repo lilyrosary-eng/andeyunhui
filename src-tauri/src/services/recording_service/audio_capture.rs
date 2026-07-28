@@ -74,7 +74,9 @@ impl AudioCapture {
 
 /// 启动系统声音回环采集。成功时返回 (句柄, 管道路径, 格式)，调用方应在拿到格式、
 /// 拼好 ffmpeg 参数后再 spawn ffmpeg（ffmpeg 打开管道时本线程才 ConnectNamedPipe）。
-pub fn start_audio_capture() -> Result<(AudioCapture, String, AudioFormat), String> {
+pub fn start_audio_capture(
+    video_started: Arc<AtomicBool>,
+) -> Result<(AudioCapture, String, AudioFormat), String> {
     let pid = unsafe { GetCurrentProcessId() };
     let salt = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -133,7 +135,7 @@ pub fn start_audio_capture() -> Result<(AudioCapture, String, AudioFormat), Stri
     // 采集线程：初始化 WASAPI 回环并把音频推入通道；格式经 fmt_tx 回传调用方。
     let c_stop = stop.clone();
     let capture_thread = thread::spawn(move || {
-        capture_loop(c_stop, data_tx, fmt_tx);
+        capture_loop(c_stop, data_tx, fmt_tx, video_started.clone());
     });
 
     match fmt_rx.recv() {
@@ -212,6 +214,7 @@ fn capture_loop(
     stop: Arc<AtomicBool>,
     data_tx: mpsc::Sender<Vec<u8>>,
     fmt_tx: mpsc::Sender<Result<AudioFormat, String>>,
+    video_started: Arc<AtomicBool>,
 ) {
     unsafe {
     // 阶段一：初始化失败 → 把真实错误经 fmt_tx 回传（不再让 tx 随 `?` 提前 drop 而丢失原因）。
@@ -228,6 +231,17 @@ fn capture_loop(
     if fmt_tx.send(Ok(fmt)).is_err() {
         let _ = client.Stop();
         return;
+    }
+    // 等视频 producer 锚定首帧：让音频时间轴与视频 pacer 共用同一原点，消除音画不同步。
+    // 视频 producer 在首帧到达时才置位；此前静默等待（最多 2s 兜底，避免极端情况下死等）。
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !video_started.load(Ordering::SeqCst) {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
     let mut real_bytes: u64 = 0;
     let start = std::time::Instant::now();
