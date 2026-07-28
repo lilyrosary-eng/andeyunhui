@@ -13,6 +13,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { logger } from '@/lib/logger';
 import { api, type ArchiveEntry, type PluginManifest } from '@/lib/api';
 import { useTheme } from '@/lib/ThemeProvider';
+import { saveBgVideoBlob, clearBgVideoBlob } from '@/lib/bgVideoStore';
 import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
 
@@ -100,9 +101,10 @@ function formatArchiveTime(modified: string): string {
 export function GlobalSettingsPanel() {
   const [activeTab, setActiveTab] = useState<TabId>('general');
   const { t, lang, setLang } = useI18n();
-  const { theme, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgBlur, setBgBlur, setBgAngle, setBgFlip } = useTheme();
+  const { theme, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgVideo, setBgVideo, bgVideoPersist, setBgVideoPersist, bgBlur, setBgBlur, setBgAngle, setBgFlip, bgScrub, setBgScrub } = useTheme();
   const [autoSave, setAutoSave] = useState(true);
   const [bgEditorSrc, setBgEditorSrc] = useState<string | null>(null);
+  const [bgEditorFile, setBgEditorFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [autoSaveInterval, setAutoSaveInterval] = useState([30]);
   const [trayMode, setTrayMode] = useState(false);
@@ -716,9 +718,13 @@ export function GlobalSettingsPanel() {
                   <div className="flex justify-between items-center p-4">
                     <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.customBg')}</span>
                     <div className="flex items-center gap-2">
-                      {bgImage && (
+                      {(bgImage || bgVideo) && (
                         <button
-                          onClick={() => setBgImage(null)}
+                          onClick={() => {
+                            setBgImage(null);
+                            setBgVideo(null);
+                            clearBgVideoBlob().catch(() => {});
+                          }}
                           className="btn-press px-3 py-1.5 rounded-lg border border-red-200/50 dark:border-red-500/30 text-sm text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
                         >
                           {t('settings.themes.customBgRemove')}
@@ -728,35 +734,79 @@ export function GlobalSettingsPanel() {
                         onClick={() => fileInputRef.current?.click()}
                         className="btn-press px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm text-neutral-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors"
                       >
-                        {bgImage ? t('settings.themes.changeImage') : t('settings.themes.selectImage')}
+                        {bgImage || bgVideo ? t('settings.themes.changeImage') : t('settings.themes.selectImage')}
                       </button>
                       <input
                         ref={fileInputRef}
                         type="file"
-                        accept="image/*"
+                        accept="image/*,video/*"
                         className="hidden"
                         onChange={(e) => {
                           const f = e.target.files?.[0];
-                          if (f) setBgEditorSrc(URL.createObjectURL(f));
+                          if (f) {
+                            setBgEditorFile(f);
+                            setBgEditorSrc(URL.createObjectURL(f));
+                          }
                           e.target.value = '';
                         }}
                       />
                     </div>
                   </div>
-                  {bgImage && (
-                    <div className="px-4 py-3">
-                      <div className="flex justify-between items-center mb-3">
-                        <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.customBgBlur')}</span>
-                        <span className="text-xs text-neutral-500 dark:text-stone-400">{bgBlur}px</span>
+                  {(bgImage || bgVideo) && (
+                    <>
+                      {bgVideo && (
+                        <>
+                          <div className="px-4 py-2.5 text-xs text-amber-600 dark:text-amber-400 leading-relaxed border-t border-neutral-200/50 dark:border-stone-700/50">
+                            {t('settings.themes.customBgVideoWarn')}
+                          </div>
+                          <div className="flex justify-between items-center px-4 py-3 border-t border-neutral-200/50 dark:border-stone-700/50">
+                            <div>
+                              <div className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.customBgVideoPersist')}</div>
+                              <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5 leading-relaxed">{t('settings.themes.customBgVideoPersistDesc')}</div>
+                            </div>
+                            <Switch
+                              checked={bgVideoPersist}
+                              onCheckedChange={(val) => {
+                                setBgVideoPersist(val);
+                                if (!val) {
+                                  clearBgVideoBlob().catch(() => {});
+                                  return;
+                                }
+                                // 开启时，把当前已选定的视频（blob: 对象 URL）写入 IndexedDB，
+                                // 以便下次启动自动载入；取不到则后果由用户承担。
+                                if (bgVideo && bgVideo.startsWith('blob:')) {
+                                  fetch(bgVideo)
+                                    .then((r) => r.blob())
+                                    .then((b) => saveBgVideoBlob(b))
+                                    .catch(() => {});
+                                }
+                              }}
+                              className="data-[state=checked]:bg-[var(--element-color-raw)] shrink-0"
+                            />
+                          </div>
+                        </>
+                      )}
+                      <div className="px-4 py-3">
+                        <div className="flex justify-between items-center mb-3">
+                          <span className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.customBgBlur')}</span>
+                          <span className="text-xs text-neutral-500 dark:text-stone-400">{bgBlur}px</span>
+                        </div>
+                        <Slider
+                          value={[bgBlur]}
+                          onValueChange={([v]: number[]) => setBgBlur(v)}
+                          min={0}
+                          max={40}
+                          step={1}
+                        />
                       </div>
-                      <Slider
-                        value={[bgBlur]}
-                        onValueChange={([v]: number[]) => setBgBlur(v)}
-                        min={0}
-                        max={40}
-                        step={1}
-                      />
-                    </div>
+                      <div className="flex justify-between items-center px-4 py-3 border-t border-neutral-200/50 dark:border-stone-700/50">
+                        <div>
+                          <div className="text-sm text-neutral-600 dark:text-stone-300">{t('settings.themes.customBgScrub')}</div>
+                          <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('settings.themes.customBgScrubDesc')}</div>
+                        </div>
+                        <Switch checked={bgScrub} onCheckedChange={setBgScrub} />
+                      </div>
+                    </>
                   )}
                 </div>
               </section>
@@ -764,16 +814,31 @@ export function GlobalSettingsPanel() {
               {bgEditorSrc && (
                 <BackgroundImageEditor
                   src={bgEditorSrc}
+                  file={bgEditorFile}
                   onCancel={() => {
-                    URL.revokeObjectURL(bgEditorSrc);
+                    if (bgEditorSrc) URL.revokeObjectURL(bgEditorSrc);
                     setBgEditorSrc(null);
+                    setBgEditorFile(null);
                   }}
                   onDone={(dataUrl, angle, flip) => {
-                    setBgImage(dataUrl);
+                    const isVideo = !!bgEditorFile && bgEditorFile.type.startsWith('video/');
+                    if (isVideo) {
+                      // 视频：dataUrl 即对象 URL，必须保留（不可 revoke），否则 <video> 失效
+                      setBgVideo(dataUrl);
+                      setBgImage(null);
+                      // 若已开启“保留”，把原始文件存入 IndexedDB，供下次启动恢复
+                      if (bgVideoPersist && bgEditorFile) {
+                        saveBgVideoBlob(bgEditorFile).catch(() => {});
+                      }
+                    } else {
+                      setBgImage(dataUrl);
+                      setBgVideo(null);
+                      if (bgEditorSrc) URL.revokeObjectURL(bgEditorSrc);
+                    }
                     setBgAngle(angle);
                     setBgFlip(flip);
-                    URL.revokeObjectURL(bgEditorSrc);
                     setBgEditorSrc(null);
+                    setBgEditorFile(null);
                   }}
                 />
               )}
