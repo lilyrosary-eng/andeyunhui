@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode, type RefObject } from 'react';
+import { loadBgVideoBlob } from '@/lib/bgVideoStore';
 
 type Theme = 'system' | 'light' | 'dark';
 
@@ -20,12 +21,18 @@ interface ThemeContextType {
   setFontFamily: (val: string) => void;
   bgImage: string | null;
   setBgImage: (val: string | null) => void;
+  bgVideo: string | null;
+  setBgVideo: (val: string | null) => void;
+  bgVideoPersist: boolean;
+  setBgVideoPersist: (val: boolean) => void;
   bgBlur: number;
   setBgBlur: (val: number) => void;
   bgAngle: number;
   setBgAngle: (val: number) => void;
   bgFlip: boolean;
   setBgFlip: (val: boolean) => void;
+  bgScrub: boolean;
+  setBgScrub: (val: boolean) => void;
 }
 
 const ThemeContext = createContext<ThemeContextType>({
@@ -46,12 +53,18 @@ const ThemeContext = createContext<ThemeContextType>({
   setFontFamily: () => {},
   bgImage: null,
   setBgImage: () => {},
+  bgVideo: null,
+  setBgVideo: () => {},
+  bgVideoPersist: false,
+  setBgVideoPersist: () => {},
   bgBlur: 0,
   setBgBlur: () => {},
   bgAngle: 0,
   setBgAngle: () => {},
   bgFlip: false,
   setBgFlip: () => {},
+  bgScrub: false,
+  setBgScrub: () => {},
 });
 
 export function useTheme() {
@@ -141,6 +154,15 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [bgFlip, setBgFlipState] = useState<boolean>(() => {
     try { return localStorage.getItem('appBgFlip') === '1'; } catch { return false; }
   });
+  const [bgScrub, setBgScrubState] = useState<boolean>(() => {
+    try { return localStorage.getItem('appBgScrub') === '1'; } catch { return false; }
+  });
+  // 视频背景：用 object URL，刷新后失效（不持久化）；与 bgImage 互斥，由调用方在切换时清理另一类型
+  const [bgVideo, setBgVideoState] = useState<string | null>(null);
+  // 视频背景是否跨重启保留（存 IndexedDB）：默认关，用户自行决定
+  const [bgVideoPersist, setBgVideoPersistState] = useState<boolean>(() => {
+    try { return localStorage.getItem('appBgVideoPersist') === '1'; } catch { return false; }
+  });
 
   // resolved 的 ref，供 useCallback 内读取最新值而不触发依赖变化
   const resolvedRef = useRef(resolved);
@@ -219,10 +241,116 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     try { localStorage.setItem('appBgFlip', val ? '1' : '0'); } catch { /* 忽略持久化失败 */ }
   }, []);
 
+  const setBgScrub = useCallback((val: boolean) => {
+    setBgScrubState(val);
+    try { localStorage.setItem('appBgScrub', val ? '1' : '0'); } catch { /* 忽略持久化失败 */ }
+  }, []);
+
+  // 视频背景不持久化（object URL 刷新即失效）；仅维护状态，互斥清理由调用方负责。
+  // 切换时若旧值是之前创建的 object URL（blob:）则回收，避免内存泄漏。
+  const setBgVideo = useCallback((val: string | null) => {
+    setBgVideoState((prev) => {
+      if (prev && prev.startsWith('blob:') && prev !== val) URL.revokeObjectURL(prev);
+      return val;
+    });
+  }, []);
+
+  // 保留开关：仅持久化开关本身；真正的数据存取由调用方在选定/移除时负责
+  const setBgVideoPersist = useCallback((val: boolean) => {
+    setBgVideoPersistState(val);
+    try { localStorage.setItem('appBgVideoPersist', val ? '1' : '0'); } catch { /* 忽略持久化失败 */ }
+  }, []);
+
+  // 启动时若开启了“保留”，从 IndexedDB 取回视频 Blob 并重建 object URL 设为背景；
+  // 仅执行一次（会话刚开始 bgVideo 必为空，不会覆盖本次会话内已选的视频）。
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    if (!bgVideoPersist) return;
+    loadBgVideoBlob()
+      .then((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        setBgVideo(url);
+      })
+      .catch(() => { /* 读取失败则静默不恢复，后果由用户承担 */ });
+  }, [bgVideoPersist, setBgVideo]);
+
   // 切换自定义背景时，标记 <html> 以便 CSS 让主面板背景透明，露出背景层
   useEffect(() => {
-    document.documentElement.classList.toggle('has-custom-bg', !!bgImage);
-  }, [bgImage]);
+    document.documentElement.classList.toggle('has-custom-bg', !!(bgImage || bgVideo));
+  }, [bgImage, bgVideo]);
+
+  // 背景层 DOM 引用 + 是否“超高图”（高度比大于视口，cover 下纵向溢出被截断）
+  const bgLayerRef = useRef<HTMLElement | null>(null);
+  const [isTallBg, setIsTallBg] = useState(false);
+  useEffect(() => {
+    if (bgVideo) {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.onloadedmetadata = () => {
+        if (!v.videoWidth || !v.videoHeight) return;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        setIsTallBg(v.videoHeight / v.videoWidth > vh / vw);
+      };
+      v.src = bgVideo;
+      return () => { v.onloadedmetadata = null; };
+    }
+    if (bgImage) {
+      const img = new Image();
+      img.onload = () => {
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        setIsTallBg(img.naturalHeight / img.naturalWidth > vh / vw);
+      };
+      img.src = bgImage;
+      return;
+    }
+    setIsTallBg(false);
+  }, [bgImage, bgVideo]);
+
+  // 光标纵向平移（壁纸式）：仅当开启且为超高图时，按光标 Y 映射到纵向位置，
+  // 用 rAF 限频直接写 DOM，避免触发整棵应用重渲染。背景层 pointerEvents:none，故监听挂在 window。
+  // 图片用 background-position，视频用 object-position。
+  useEffect(() => {
+    const layer = bgLayerRef.current;
+    const isVideo = !!bgVideo;
+    if (!bgScrub || !isTallBg) {
+      if (layer) {
+        if (isVideo) layer.style.objectPosition = 'center';
+        else layer.style.backgroundPosition = 'center';
+      }
+      return;
+    }
+    let raf = 0;
+    const onMove = (e: MouseEvent) => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const y = Math.min(1, Math.max(0, e.clientY / window.innerHeight));
+        const el = bgLayerRef.current;
+        if (el) {
+          if (isVideo) el.style.objectPosition = `50% ${y * 100}%`;
+          else {
+            el.style.backgroundPositionX = '50%';
+            el.style.backgroundPositionY = `${y * 100}%`;
+          }
+        }
+      });
+    };
+    window.addEventListener('mousemove', onMove);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      if (raf) cancelAnimationFrame(raf);
+      const el = bgLayerRef.current;
+      if (el) {
+        if (isVideo) el.style.objectPosition = 'center';
+        else el.style.backgroundPosition = 'center';
+      }
+    };
+  }, [bgScrub, isTallBg, bgVideo]);
 
   // 应用主题类 + 反转配色 + 重新应用配色（"默认"会随 resolved 动态切换）
   useEffect(() => {
@@ -262,9 +390,34 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const layerTransform = `rotate(${bgAngle}deg) scaleX(${bgFlip ? -1 : 1}) scale(${layerScale})`;
 
   return (
-    <ThemeContext.Provider value={{ theme, resolved, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgBlur, setBgBlur, bgAngle, setBgAngle, bgFlip, setBgFlip }}>
-      {bgImage && (
+    <ThemeContext.Provider value={{ theme, resolved, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgVideo, setBgVideo, bgVideoPersist, setBgVideoPersist, bgBlur, setBgBlur, bgAngle, setBgAngle, bgFlip, setBgFlip, bgScrub, setBgScrub }}>
+      {bgVideo ? (
+        <video
+          ref={bgLayerRef as RefObject<HTMLVideoElement>}
+          aria-hidden
+          src={bgVideo}
+          autoPlay
+          muted
+          loop
+          playsInline
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 0,
+            width: '100%',
+            height: '100%',
+            display: 'block',
+            objectFit: 'cover',
+            objectPosition: 'center',
+            filter: `blur(${bgBlur}px)`,
+            transform: layerTransform,
+            transformOrigin: 'center center',
+            pointerEvents: 'none',
+          }}
+        />
+      ) : bgImage && (
         <div
+          ref={bgLayerRef as RefObject<HTMLDivElement>}
           aria-hidden
           style={{
             position: 'fixed',

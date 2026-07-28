@@ -6,6 +6,8 @@ import { Slider } from '@/components/ui/slider';
 interface Props {
   /** 选中图片的对象 URL 或 data URL */
   src: string;
+  /** 选中的原始文件（用于 GIF 透传，保留动图） */
+  file?: File | null;
   onCancel: () => void;
   onDone: (dataUrl: string, angle: number, flipH: boolean) => void;
 }
@@ -52,18 +54,27 @@ function normalizeAngle(deg: number): number {
   return ((((deg + 180) % 360) + 360) % 360) - 180;
 }
 
-export function BackgroundImageEditor({ src, onCancel, onDone }: Props) {
+export function BackgroundImageEditor({ src, file, onCancel, onDone }: Props) {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
+
+  const isVideo = !!file && file.type.startsWith('video/');
 
   const [ready, setReady] = useState(false);
   const [angle, setAngle] = useState(0);
   const [flipH, setFlipH] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
 
-  // 加载图片
+  // 加载资源：视频直接就绪（用 <video> 预览），图片走 Image 取尺寸
   useEffect(() => {
+    if (isVideo) {
+      setAngle(0);
+      setFlipH(false);
+      setHistory([]);
+      setReady(true);
+      return;
+    }
     const img = new Image();
     img.onload = () => {
       imgRef.current = img;
@@ -74,7 +85,7 @@ export function BackgroundImageEditor({ src, onCancel, onDone }: Props) {
     };
     img.src = src;
     return () => { img.onload = null; };
-  }, [src]);
+  }, [src, isVideo]);
 
   // 重绘预览（整图按当前角度/翻转居中显示，自适应缩放）
   useEffect(() => {
@@ -113,8 +124,24 @@ export function BackgroundImageEditor({ src, onCancel, onDone }: Props) {
   }, [history]);
 
   const handleDone = useCallback(() => {
+    // 视频：直接透传对象 URL，不重编码（canvas 无法导出动视频）。
+    // 旋转/翻转仍由背景层以 CSS transform 套用。
+    if (isVideo) {
+      onDone(src, angle, flipH);
+      return;
+    }
     const img = imgRef.current;
     if (!img) return;
+    // GIF / 动态 WebP 且未旋转/翻转：直接透传原图 dataURL，保留动图。
+    // 若用户旋转/翻转了动图，则必须走下方静态导出（动图无法靠 CSS transform 逐帧旋转）。
+    if (file && (file.type === 'image/gif' || file.type === 'image/webp') && angle === 0 && !flipH) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') onDone(reader.result, 0, false);
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
     // 导出原图（最长边限制），旋转/翻转交由背景层以 CSS transform 应用，
     // 避免裁掉内容或导出后四角透出底色。
     let ow = img.width;
@@ -132,7 +159,7 @@ export function BackgroundImageEditor({ src, onCancel, onDone }: Props) {
     if (!ctx) return;
     ctx.drawImage(img, 0, 0, ow, oh);
     onDone(canvas.toDataURL('image/jpeg', 0.85), angle, flipH);
-  }, [angle, flipH, onDone]);
+  }, [angle, flipH, onDone, file, isVideo, src]);
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
@@ -149,8 +176,22 @@ export function BackgroundImageEditor({ src, onCancel, onDone }: Props) {
             className="rounded-lg overflow-hidden bg-neutral-100 dark:bg-stone-900 flex items-center justify-center"
             style={{ width: BOX_W, height: BOX_H }}
           >
-            <canvas ref={canvasRef} style={{ width: BOX_W, height: BOX_H, display: 'block' }} />
+            {isVideo ? (
+              <video
+                src={src}
+                autoPlay
+                muted
+                loop
+                playsInline
+                style={{ width: BOX_W, height: BOX_H, objectFit: 'contain', transform: `rotate(${angle}deg) scaleX(${flipH ? -1 : 1})` }}
+              />
+            ) : (
+              <canvas ref={canvasRef} style={{ width: BOX_W, height: BOX_H, display: 'block' }} />
+            )}
           </div>
+          {isVideo && (
+            <p className="text-xs text-amber-600 dark:text-amber-400 leading-relaxed">{t('settings.themes.bgEditorVideoWarn')}</p>
+          )}
 
           <div className="w-full">
             <div className="flex justify-between items-center mb-2">
