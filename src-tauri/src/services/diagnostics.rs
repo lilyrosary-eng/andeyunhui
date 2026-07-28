@@ -134,6 +134,7 @@ impl GraphicsCaptureApiHandler for TestCapture {
                     self.out_w,
                     self.out_h,
                     frame.desc().Format,
+                    None,
                 ) {
                     Ok(c) => self.gpu = Some(c),
                     Err(_) => self.gpu_failed = true,
@@ -286,7 +287,7 @@ fn run_capture_test(app: &AppHandle, dur: u64) -> Value {
         (enc_w, enc_h)
     };
     // 进程内 GPU 缩放产出 RGBA（8MB），故像素格式恒为 rgba；ffmpeg 负责 RGBA→YUV。
-    let pix_fmt = "rgba";
+    let pix_fmt = if gpu_nv12 { "nv12" } else { "rgba" };
 
     // 系统声音（best-effort）：优先 ffmpeg 原生 WASAPI 回环采集（需全量 ffmpeg 含 wasapi demuxer），
     // 否则回退 Rust WASAPI 采集命名管道。
