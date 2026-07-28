@@ -979,7 +979,7 @@ export function GlobalSettingsPanel() {
                 </div>
                 <div className="space-y-2 text-sm">
                   <p className="text-neutral-600 dark:text-stone-300">安得云荟</p>
-                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.version', { v: '2.2.0' })}</p>
+                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.version', { v: '2.3.0' })}</p>
                   <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.author')}</p>
                 </div>
               </section>
