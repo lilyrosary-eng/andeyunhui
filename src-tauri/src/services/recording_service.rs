@@ -787,19 +787,21 @@ pub async fn start_recording(
             eprintln!("[录屏] 独显 nvenc 不可用（{}）；已回退到 {}", reason, hw.unwrap_or("libx264"));
         }
         // 帧率安全上限：编码器跟不上目标帧率时，pacer 会被编码器背压门控→实际投帧速率<
-        // 目标 fps→cfr 按帧数打点→视频被压成快进。故按所选编码器给定「可持续帧率」封顶。
-        // 注意：下方 0.43x 自测是「CPU 喂 4K RGBA + swscale 4K→1080p」旧管线的数字；现在缩放已
-        // 在捕获侧（GPU 或 CPU）完成，喂给编码器的是 1080p，qsv 吞 1080p H.264 远快于 13fps，
-        // 故 qsv 从 12 提到 30（流畅且不爆内存）；nvenc 保留 60；AMF/软件→30。
+        // 目标 fps→有界通道耗尽后 tx.send 阻塞→cfr 复制最近帧补齐→观感一顿一顿（见 2026-07-28
+        // 录屏 ffmpeg.log：h264_qsv 1080p 实测 speed 仅 0.87x）。故按所选编码器给定「可持续帧率」
+        // 封顶，留出余量使编码永远跟得上投帧、背压不发生。
+        // 实测：本机 h264_qsv 1080p 约 0.87x 实时（含 RGBA→NV12 CPU 转换 + 31MB/帧读回争用），
+        // 0.87×30≈26fps < 30 → 必背压；封顶 24 则 0.87×30≈26 > 24 → 无背压、输出真 24fps 流畅。
+        // nvenc 独显能力强保留 60；AMF/软件→30。
         let safe_fps: u32 = match hw {
             Some("h264_nvenc") => 60,
-            Some("h264_qsv") => 30,
+            Some("h264_qsv") => 24,
             Some("h264_amf") => 30,
             _ => 30,
         };
         fps = fps.min(safe_fps);
         // 无硬件编码器时软编码 60fps 必卡 → 自动降到 30fps（用户要求最低 30）；
-        // 有硬件编码器时由上方 safe_fps 封顶（nvenc 保留 60，qsv 提到 30）。
+        // 有硬件编码器时由上方 safe_fps 封顶（nvenc 保留 60，qsv 封顶 24）。
         if hw.is_none() {
             fps = fps.min(30);
         }
@@ -931,8 +933,9 @@ pub async fn start_recording(
         let target_mbps: u32 = if enc_pixels >= 5_000_000 {
             // 4K 区域录制（全屏 4K 已由 downscale_4k 降到 1080p，不会命中此档）：封顶 16Mbps。
             if fps >= 40 { 32 } else { 16 }
-        } else if enc_pixels >= 2_000_000 {
-            // 1080p：屏幕录制 5Mbps 画质足够、体积可控（用户要求更小文件）。
+        } else if enc_w >= 1920 || enc_h >= 1080 {
+            // 1080p（含 1920x1020 等非标准 1080p 尺寸，按长边判定避免跌破像素阈值误入 4Mbps 档）：
+            // 屏幕录制 5Mbps 画质足够、体积可控（用户要求更小文件）。
             if fps >= 40 { 8 } else { 5 }
         } else if enc_pixels >= 900_000 {
             4
