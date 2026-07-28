@@ -4,6 +4,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { api } from '@/lib/api';
 import { Pin, Copy, X } from 'lucide-react';
 import { logger } from '@/lib/logger';
+import { t } from '@/lib/i18n';
 
 const appWindow = getCurrentWebviewWindow();
 const AUTO_SAVE_MS = 1000;
@@ -23,7 +24,7 @@ export function FloatingNoteView() {
   const [noteId] = useState(() => {
     return new URLSearchParams(window.location.search).get('noteId') || '';
   });
-  const [title, setTitle] = useState('加载中...');
+  const [title, setTitle] = useState(() => t('common.loading'));
   const [content, setContent] = useState('');
   const [isPinned, setIsPinned] = useState(false);
   const [isFixed, setIsFixed] = useState(false);
@@ -53,7 +54,7 @@ export function FloatingNoteView() {
       return;
     }
     api.getNoteContent(noteId).then((data) => {
-      setTitle(data.title || '无标题笔记');
+      setTitle(data.title || t('floatingNote.untitled'));
       // 去除内容首行 # 大标题（标题栏已显示，无需重复）。
       // 必须 trimStart()：磁盘格式为「# 标题\n\n正文」，去掉标题后会残留前导空行，
       // 若不清理，保存时后端又补「\n\n」，每次开浮窗往返都会在正文上方累加一行空白。
@@ -63,7 +64,7 @@ export function FloatingNoteView() {
       loadedRef.current = true;
     }).catch((err) => {
       console.error('[FloatingNoteView] 笔记内容加载失败:', err);
-      setTitle('加载失败');
+      setTitle(t('floatingNote.loadFailed'));
       setLoading(false);
     });
   }, [noteId]);
@@ -142,7 +143,7 @@ export function FloatingNoteView() {
     try {
       const newId = await api.duplicateNote(noteId);
       const pos = await appWindow.outerPosition();
-      api.createFloatingNoteWindow(newId, `${title} (副本)`, pos.x + 30, pos.y + 30);
+      api.createFloatingNoteWindow(newId, t('floatingNote.copyName', { title }), pos.x + 30, pos.y + 30);
     } catch (err) { logger.warn('[FloatingNoteView] 复制笔记失败:', err); }
     finally { setIsCopying(false); }
   }, [noteId, title, isCopying]);
@@ -162,7 +163,7 @@ export function FloatingNoteView() {
   if (!noteId) {
     return (
       <div className="flex items-center justify-center h-screen text-neutral-400 dark:text-stone-500 text-sm bg-white dark:bg-stone-900">
-        无效的笔记
+        {t('floatingNote.invalid')}
       </div>
     );
   }
@@ -177,7 +178,7 @@ export function FloatingNoteView() {
       >
         {/* 标题（浮窗只读） */}
         <span className="flex-1 min-w-0 text-sm font-medium truncate ml-1 select-none">
-          {title || '浮窗笔记'}
+          {title || t('notes.floatingTitle')}
         </span>
         {/* 按钮组（不可拖拽） */}
         <div style={NO_DRAG_STYLE} className="flex items-center gap-0.5 flex-shrink-0">
@@ -189,7 +190,7 @@ export function FloatingNoteView() {
                 ? 'text-yellow-500 bg-yellow-50 dark:bg-yellow-900/20'
                 : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 hover:bg-black/5 dark:hover:bg-white/5'
             }`}
-            title={isPinned ? '取消置顶' : '置顶'}
+            title={isPinned ? t('common.unpin') : t('common.pin')}
           >
             <Pin size={14} fill={isPinned ? 'currentColor' : 'none'} />
           </button>
@@ -202,7 +203,7 @@ export function FloatingNoteView() {
                 ? 'opacity-50 cursor-not-allowed'
                 : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 hover:bg-black/5 dark:hover:bg-white/5'
             }`}
-            title="复制为新笔记"
+            title={t('floatingNote.copyAsNew')}
           >
             <Copy size={14} />
           </button>
@@ -214,7 +215,7 @@ export function FloatingNoteView() {
                 ? 'text-blue-500 bg-blue-50 dark:bg-blue-900/20'
                 : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 hover:bg-black/5 dark:hover:bg-white/5'
             }`}
-            title={isFixed ? '取消固定' : '固定（置顶+穿透）'}
+            title={isFixed ? t('floatingNote.unfix') : t('floatingNote.fix')}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill={isFixed ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2">
               <path d="M18 8L22 4L20 2L6 16L10 20L22 8Z" />
@@ -227,7 +228,7 @@ export function FloatingNoteView() {
           <button
             onClick={handleClose}
             className="btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-            title="关闭浮窗"
+            title={t('floatingNote.close')}
           >
             <X size={14} />
           </button>
@@ -238,14 +239,14 @@ export function FloatingNoteView() {
       <div className="flex-1 min-h-0">
         {loading ? (
           <div className="flex items-center justify-center h-full text-neutral-400 dark:text-stone-500 text-sm">
-            加载中...
+            {t('common.loading')}
           </div>
         ) : (
           <textarea
             value={content}
             onChange={(e) => setContent(e.target.value)}
             className="w-full h-full resize-none p-5 bg-transparent font-mono text-sm leading-7 text-neutral-700 dark:text-stone-300 outline-none border-none placeholder:text-neutral-300 dark:placeholder:text-stone-600"
-            placeholder="在此输入 Markdown..."
+            placeholder={t('floatingNote.mdPlaceholder')}
             spellCheck={false}
           />
         )}

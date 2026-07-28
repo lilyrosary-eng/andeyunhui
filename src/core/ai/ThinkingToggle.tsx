@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { useI18n } from '@/lib/i18n';
 
 interface ThinkingToggleProps {
   profileId: string | null;
@@ -14,6 +15,7 @@ interface ThinkingToggleProps {
  * 状态直接写入后端 profile.thinking（ai_set_profile_thinking），故在任意聊天界面切换都会持久化并相互影响。
  */
 export function ThinkingToggle({ profileId, disabled, compact }: ThinkingToggleProps) {
+  const { t } = useI18n();
   const [thinking, setThinking] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -73,7 +75,7 @@ export function ThinkingToggle({ profileId, disabled, compact }: ThinkingToggleP
 
   return (
     <button
-      title={on ? '思考模式：开（先输出思维链再回答）' : '思考模式：关（点击开启）'}
+      title={on ? t('thinking.tooltipOn') : t('thinking.tooltipOff')}
       onClick={toggle}
       disabled={disabled || loading}
       style={{
@@ -93,8 +95,8 @@ export function ThinkingToggle({ profileId, disabled, compact }: ThinkingToggleP
       }}
     >
       <span style={dot} />
-      {!compact && <span>{on ? '思考模式' : '思考'}</span>}
-      {compact && <span style={{ fontSize: 10.5 }}>{on ? '思考·开' : '思考·关'}</span>}
+      {!compact && <span>{on ? t('thinking.labelOn') : t('thinking.labelOff')}</span>}
+      {compact && <span style={{ fontSize: 10.5 }}>{on ? t('thinking.compactOn') : t('thinking.compactOff')}</span>}
     </button>
   );
 }

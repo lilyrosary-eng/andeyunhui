@@ -6,23 +6,25 @@ import { invoke } from '@tauri-apps/api/core';
 import { logger } from '@/lib/logger';
 import { useAppStore } from '@/stores/appStore';
 import { ModuleSettingsPanel } from '@/components/ModuleSettingsPanel';
+import { useI18n } from '@/lib/i18n';
 
-// AI 润色选项（key 与 NotesEditor 的 localStorage / prompt 映射保持一致）
-const POLISH_STYLE_OPTIONS: { value: string; label: string }[] = [
-  { value: 'keep', label: '保持原风格' },
-  { value: 'concise', label: '简洁' },
-  { value: 'formal', label: '正式' },
-  { value: 'vivid', label: '生动' },
-  { value: 'casual', label: '口语化' },
-  { value: 'professional', label: '专业' },
+// AI 润色选项（key 与 NotesEditor 的 localStorage / prompt 映射保持一致，labelKey 走 i18n）
+const POLISH_STYLE_OPTIONS: { value: string; labelKey: string }[] = [
+  { value: 'keep', labelKey: 'noteSettings.polishStyle.keep' },
+  { value: 'concise', labelKey: 'noteSettings.polishStyle.concise' },
+  { value: 'formal', labelKey: 'noteSettings.polishStyle.formal' },
+  { value: 'vivid', labelKey: 'noteSettings.polishStyle.vivid' },
+  { value: 'casual', labelKey: 'noteSettings.polishStyle.casual' },
+  { value: 'professional', labelKey: 'noteSettings.polishStyle.professional' },
 ];
-const POLISH_LENGTH_OPTIONS: { value: string; label: string }[] = [
-  { value: 'shorter', label: '更精简' },
-  { value: 'keep', label: '保持篇幅' },
-  { value: 'longer', label: '更详细' },
+const POLISH_LENGTH_OPTIONS: { value: string; labelKey: string }[] = [
+  { value: 'shorter', labelKey: 'noteSettings.polishLength.shorter' },
+  { value: 'keep', labelKey: 'noteSettings.polishLength.keep' },
+  { value: 'longer', labelKey: 'noteSettings.polishLength.longer' },
 ];
 
 export function NoteSettingsPanel() {
+  const { t } = useI18n();
   const wordWrap = useAppStore(s => s.wordWrap);
   const onWordWrapChange = useAppStore(s => s.setWordWrap);
   const vimMode = useAppStore(s => s.vimMode);
@@ -65,7 +67,7 @@ export function NoteSettingsPanel() {
 
   return (
     <ModuleSettingsPanel
-      title="鸢尾花"
+      title={t('notes.moduleTitle')}
       icon={<StickyNote size={20} />}
       onClose={toggleNoteSettings}
     >
@@ -73,8 +75,8 @@ export function NoteSettingsPanel() {
       <div className="glass-panel p-4 flex flex-col gap-3">
         <div className="flex justify-between items-center">
           <div>
-            <span className="text-sm font-medium block">自动保存</span>
-            <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">停止输入 1 秒后自动保存</p>
+            <span className="text-sm font-medium block">{t('noteSettings.autoSave')}</span>
+            <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">{t('noteSettings.autoSaveDesc')}</p>
           </div>
           <Switch checked={autoSave} onCheckedChange={(val: boolean) => {
             setAutoSave(val);
@@ -84,7 +86,7 @@ export function NoteSettingsPanel() {
         {autoSave && (
           <div>
             <div className="flex justify-between items-center mb-2">
-              <span className="text-sm text-neutral-600 dark:text-stone-300">保存间隔（秒）</span>
+              <span className="text-sm text-neutral-600 dark:text-stone-300">{t('noteSettings.saveInterval')}</span>
               <span className="text-xs text-neutral-500 dark:text-stone-400">{autoSaveInterval[0]}s</span>
             </div>
             <Slider
@@ -107,13 +109,13 @@ export function NoteSettingsPanel() {
         <div className="flex items-center gap-2">
           <Sparkles size={15} className="text-[var(--element-color-raw)]" />
           <div>
-            <span className="text-sm font-medium block">AI 润色</span>
-            <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">工具栏「AI 润色」按钮会按下方偏好，调用全局 AI 润色选中文字</p>
+            <span className="text-sm font-medium block">{t('noteSettings.aiPolish')}</span>
+            <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">{t('noteSettings.aiPolishDesc')}</p>
           </div>
         </div>
         {/* 润色风格 */}
         <div>
-          <span className="text-sm text-neutral-600 dark:text-stone-300 block mb-2">润色风格</span>
+          <span className="text-sm text-neutral-600 dark:text-stone-300 block mb-2">{t('noteSettings.polishStyleLabel')}</span>
           <div className="flex flex-wrap gap-1.5">
             {POLISH_STYLE_OPTIONS.map(opt => (
               <button
@@ -125,14 +127,14 @@ export function NoteSettingsPanel() {
                     : 'bg-black/5 dark:bg-white/5 text-neutral-600 dark:text-stone-300 hover:bg-black/10 dark:hover:bg-white/10'
                 }`}
               >
-                {opt.label}
+                {t(opt.labelKey)}
               </button>
             ))}
           </div>
         </div>
         {/* 篇幅长短 */}
         <div>
-          <span className="text-sm text-neutral-600 dark:text-stone-300 block mb-2">篇幅长短</span>
+          <span className="text-sm text-neutral-600 dark:text-stone-300 block mb-2">{t('noteSettings.polishLengthLabel')}</span>
           <div className="flex flex-wrap gap-1.5">
             {POLISH_LENGTH_OPTIONS.map(opt => (
               <button
@@ -144,7 +146,7 @@ export function NoteSettingsPanel() {
                     : 'bg-black/5 dark:bg-white/5 text-neutral-600 dark:text-stone-300 hover:bg-black/10 dark:hover:bg-white/10'
                 }`}
               >
-                {opt.label}
+                {t(opt.labelKey)}
               </button>
             ))}
           </div>
@@ -154,8 +156,8 @@ export function NoteSettingsPanel() {
       {/* Vim 模式 */}
       <div className="glass-panel p-4 flex justify-between items-center">
         <div>
-          <span className="text-sm font-medium block">Vim 模式</span>
-          <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">在代码编辑器中启用 Vim 键盘绑定</p>
+          <span className="text-sm font-medium block">{t('noteSettings.vimMode')}</span>
+          <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">{t('noteSettings.vimModeDesc')}</p>
         </div>
         <Switch checked={vimMode} onCheckedChange={(v) => onVimModeChange(v)} className="data-[state=checked]:bg-[var(--element-color-raw)]" />
       </div>
@@ -163,8 +165,8 @@ export function NoteSettingsPanel() {
       {/* 自动换行 */}
       <div className="glass-panel p-4 flex justify-between items-center">
         <div>
-          <span className="text-sm font-medium block">自动换行</span>
-          <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">长行自动换行，无需横向滚动</p>
+          <span className="text-sm font-medium block">{t('noteSettings.wordWrap')}</span>
+          <p className="text-xs text-neutral-500 dark:text-stone-500 mt-0.5">{t('noteSettings.wordWrapDesc')}</p>
         </div>
         <Switch checked={wordWrap} onCheckedChange={onWordWrapChange} className="data-[state=checked]:bg-[var(--element-color-raw)]" />
       </div>

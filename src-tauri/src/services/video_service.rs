@@ -4,7 +4,7 @@
 //! 不对原始文件进行任何修改、删除或移动操作。
 //! 不做缩略图/封面提取，不引入 ffmpeg 或任何视频解码依赖。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use walkdir::WalkDir;
@@ -66,7 +66,6 @@ pub fn scan_video_root_streaming(
 
     // 阶段 1：walkdir 迭代收集视频文件，按父目录分组
     let mut dir_videos: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    let mut has_subdir: HashSet<PathBuf> = HashSet::new();
     let mut file_count = 0usize;
     let mut skipped = 0usize;
 
@@ -96,14 +95,6 @@ pub fn scan_video_root_streaming(
                 }
                 if let Some(parent) = e.path().parent() {
                     dir_videos.entry(parent.to_path_buf()).or_default().push(name.to_string());
-                    // 标记祖先目录：这些目录有子目录包含视频
-                    let mut ancestor = parent.parent();
-                    while let Some(a) = ancestor {
-                        if a.starts_with(root) {
-                            has_subdir.insert(a.to_path_buf());
-                        }
-                        ancestor = a.parent();
-                    }
                 }
             }
             Err(e) => {
@@ -119,14 +110,14 @@ pub fn scan_video_root_streaming(
         eprintln!("[video_service] ... 共跳过 {} 个无权限目录", skipped);
     }
 
-    // 阶段 2：过滤最内层文件夹（目录不在 has_subdir 中 = 叶子节点）
+    // 阶段 2：保留所有“直接含视频”的目录（含同时含子目录的母文件夹）。
+    // dir_videos 按文件“直接父目录”分组，每个目录的列表天然只含自身直接文件，
+    // 不会混入其他子目录内容——母文件夹与子文件夹各自独立成项并列展示。
     let total = dir_videos.len().min(MAX_RESULT_FOLDERS);
     let mut found = 0usize;
 
-    let mut leaf_dirs: Vec<(PathBuf, Vec<String>)> = dir_videos
-        .into_iter()
-        .filter(|(dir, _)| !has_subdir.contains(dir))
-        .collect();
+    // 收集所有匹配目录，排序后分批推送
+    let mut leaf_dirs: Vec<(PathBuf, Vec<String>)> = dir_videos.into_iter().collect();
 
     leaf_dirs.sort_by(|a, b| {
         let na = a.0.file_name().and_then(|n| n.to_str()).unwrap_or("");
