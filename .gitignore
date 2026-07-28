@@ -102,3 +102,5 @@ checklog2.txt
 build_err.txt
 *.txt
 *.pptx
+sign.ps1
+andeyunhui-signing.pfx
