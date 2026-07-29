@@ -615,7 +615,10 @@ pub async fn overlay_window_get_or_create(
                     if hidden {
                         let _ = w.hide();
                     }
-                    // 胶囊窗：设置捕获排除（主线程、build 同闭包内，w 为本闭包局部窗体，无跨线程克隆）
+                    // 胶囊窗：设置捕获排除（主线程、build 同闭闭包内，w 为本闭包局部窗体，无跨线程克隆）
+                    // 注意：WDA_EXCLUDEFROMCAPTURE 是 Win32 专属能力，`hwnd()` 亦为 Windows 平台方法，
+                    // 故整段以 `#[cfg(windows)]` 隔离，保证非 Windows 目标可编译（T2 平台隔离）。
+                    #[cfg(windows)]
                     if exclude_capture {
                         if let Ok(hwnd) = w.hwnd() {
                             unsafe {
