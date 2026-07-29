@@ -586,6 +586,13 @@ try { console.error('[music-diag] index.tsx 模块开始求值; __HOST_API__=' +
 try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).catch(()=>{}); } catch {}
 
   const handleRemoveRoot = useCallback((pathToRemove: string) => {
+    // 删除该目录的扫描缓存：否则移除后再重新选择同一文件夹会因缓存命中而复用旧数据
+    // （尤其是内嵌封面——封面按文件路径哈希命名、已存在则跳过，导致改封面后封面图不变）。
+    try {
+      hostApi.invoke('delete_music_cache', { rootPath: pathToRemove });
+    } catch {
+      /* 忽略：缓存不存在时删除失败属正常 */
+    }
     removeRoot(pathToRemove);
     const rootF = normalizePath(pathToRemove);
     // 同时移除该根目录下所有（按子文件夹分组的）目录歌单数据

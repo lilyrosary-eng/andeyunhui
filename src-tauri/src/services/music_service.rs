@@ -215,10 +215,16 @@ pub fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Tra
                             Some("image/png") => "png",
                             _ => "jpg",
                         };
-                        let mut hasher = DefaultHasher::new();
-                        file_path.hash(&mut hasher);
-                        let hash = format!("{:x}", hasher.finish());
-                        let cover_file = dir.join(format!("{}.{}", hash, ext));
+                        let mut path_hasher = DefaultHasher::new();
+                        file_path.hash(&mut path_hasher);
+                        let path_hash = format!("{:x}", path_hasher.finish());
+                        // 用内嵌封面「内容」哈希参与文件名：替换/更新封面后文件名随之变化，
+                        // 从而重新提取并写入新封面，避免一直复用首次扫描写入的缓存图
+                        // （原逻辑仅按文件路径哈希命名、且已存在则跳过，导致改封面后封面图不变）。
+                        let mut pic_hasher = DefaultHasher::new();
+                        pic.data().hash(&mut pic_hasher);
+                        let pic_hash = format!("{:x}", pic_hasher.finish());
+                        let cover_file = dir.join(format!("{}_{}.{}", path_hash, pic_hash, ext));
                         if !cover_file.exists() {
                             if let Err(e) = std::fs::write(&cover_file, pic.data()) {
                                 eprintln!("[music_service] 封面写入失败: {} ({})", cover_file.display(), e);
