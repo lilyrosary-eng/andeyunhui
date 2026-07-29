@@ -7,6 +7,9 @@
 export interface ReadingProgress {
   chapterIndex: number;
   scrollPercent: number;
+  // 分页/双栏模式下章内页码偏移（absolutePage - 章节 startPage），
+  // 用于跨模块切换/重启后恢复章内精确位置（竖版模式用 scrollPercent）。
+  pageInChapter?: number;
   totalChapters: number;
   secondsRead: number;
   lastRead: number;
@@ -34,6 +37,8 @@ export function saveReadingProgress(filePath: string, data: ReadingProgress): vo
     const all = readAll();
     all[filePath] = data;
     localStorage.setItem(KEY, JSON.stringify(all));
+    // [DIAG] 阅读进度落盘诊断
+    console.log('[reading-diag] save', filePath, { ch: data.chapterIndex, sp: data.scrollPercent, pic: data.pageInChapter, tc: data.totalChapters });
   } catch {
     // 存储不可用或被占满时静默忽略，相关后果由用户自行承担
   }

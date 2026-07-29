@@ -2070,12 +2070,28 @@ pub async fn scan_music_root(app: tauri::AppHandle, root_path: String) -> Result
     result.map_err(|e| format!("扫描任务执行失败: {}", e))?
 }
 
-/// 加载音乐扫描缓存（如果存在），返回 None 表示需要重新扫描
+/// 加载音乐扫描缓存（如果存在），返回 None 表示需要重新扫描。
+/// 载荷含源根目录 mtime，由前端比对目录是否变更来决定是否复用缓存。
 #[tauri::command]
-pub fn load_music_cache(app: tauri::AppHandle, root_path: String) -> Result<Option<Vec<music_service::Track>>, String> {
+pub fn load_music_cache(app: tauri::AppHandle, root_path: String) -> Result<Option<music_service::MusicCachePayload>, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    Ok(cache_service::load_cache::<Vec<music_service::Track>>(&app_data, "music_scan", &root_path)
+    Ok(cache_service::load_cache::<music_service::MusicCachePayload>(&app_data, "music_scan", &root_path)
         .map(|(data, _mtime)| data))
+}
+
+/// 取目录最后修改时间（毫秒），用于判断音乐缓存是否需要失效重扫。
+#[tauri::command]
+pub fn get_dir_mtime(path: String) -> u64 {
+    let p = std::path::Path::new(&path);
+    if !p.is_dir() {
+        return 0;
+    }
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 删除音乐扫描缓存（重新扫描前调用）

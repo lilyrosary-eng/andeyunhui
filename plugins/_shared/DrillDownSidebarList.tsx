@@ -104,7 +104,7 @@ export function DrillDownSidebarList({
     ? React.createElement(React.Fragment, null,
         React.createElement('button', {
           onClick: onBack,
-          className: 'w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-stone-400 mb-1',
+          className: 'sticky top-0 z-20 -mr-1 pr-1 main-panel-bg w-full text-left px-3 py-2 transition-colors flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-stone-400 mb-1',
         },
           React.createElement('span', { className: 'flex-shrink-0' }, React.createElement(BackArrowIcon)),
           React.createElement('span', { className: 'text-sm font-medium truncate' }, drillTitle),

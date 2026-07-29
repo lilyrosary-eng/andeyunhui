@@ -95,9 +95,21 @@ pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::E
 #[tauri::command]
 pub fn show_lyrics_widget(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
+        // 重新定位到配置坐标：创建时窗口先置于离屏 (-4000,-4000)，若 WebView 初始化把
+        // set_position 覆盖/未生效，窗口会永久停在离屏坐标，导致「歌词有数据但看不到」。
+        // 这里在显示时再次按持久化配置落位，并做合法性兜底（负坐标或异常大值回退到主屏 (100,100)）。
+        let config = load_lyrics_config(&app);
+        let (tx, ty) = if config.x >= 0.0 && config.y >= 0.0
+            && config.x < 100000.0 && config.y < 100000.0
+        {
+            (config.x, config.y)
+        } else {
+            (100.0, 100.0)
+        };
+        let _ = window.set_position(tauri::PhysicalPosition::new(tx as i32, ty as i32));
         // 仅 show，不重复设置 always_on_top（创建时已设置，重复调用会触发 DWM 重组合）
         window.show().map_err(|e| format!("显示歌词窗口失败: {}", e))?;
-        eprintln!("[Lyrics] 歌词窗口已显示");
+        eprintln!("[Lyrics] 歌词窗口已显示，定位到 ({}, {})", tx, ty);
     } else {
         eprintln!("[Lyrics] 歌词窗口不存在，尝试重新创建");
         create_lyrics_widget(&app).map_err(|e| format!("创建歌词窗口失败: {}", e))?;
@@ -391,6 +403,7 @@ async fn fetch_lyrics_online(
     let client = reqwest::Client::builder()
         .user_agent("安得云荟/1.0")
         .timeout(std::time::Duration::from_secs(5))
+        .no_proxy()
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 

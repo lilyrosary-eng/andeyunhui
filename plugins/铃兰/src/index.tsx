@@ -252,23 +252,36 @@ function normalizePath(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/$/, '');
 }
 
-function groupTracksIntoPlaylists(tracks: Track[], rootPath: string): Playlist[] {
-  const root = normalizePath(rootPath);
+// 母/子文件夹识别：每首歌归属其「最长（最深）祖先根」，再在该根下按一级子文件夹建歌单。
+// 这样当 D:/ 与 D:/Music 同时作为根时，D:/Music/BIXUS/song.mp3 只会归入 D:/Music/BIXUS 歌单，
+// 而不会既出现在 D:/Music 聚合歌单、又出现在 D:/Music/BIXUS 子歌单（避免跨歌单重复与重复 key）。
+function groupTracksIntoPlaylists(tracks: Track[], allRootPaths: string[]): Playlist[] {
+  const roots = allRootPaths
+    .map(normalizePath)
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length); // 最长优先 → 第一个命中的即最深根
   const groups = new Map<string, { name: string; tracks: Track[] }>();
   for (const t of tracks) {
     const fp = normalizePath(t.filePath);
     const parent = fp.includes('/') ? fp.slice(0, fp.lastIndexOf('/')) : fp;
-    const rel = parent.startsWith(root + '/')
-      ? parent.slice(root.length + 1)
-      : parent === root ? '' : parent;
+    // 找到最深（最长）的祖先根
+    let bestRoot: string | null = null;
+    for (const r of roots) {
+      if (parent === r || parent.startsWith(r + '/')) {
+        bestRoot = r;
+        break;
+      }
+    }
+    if (!bestRoot) continue; // 不在任何根目录下，跳过
+    const rel = parent === bestRoot ? '' : parent.slice(bestRoot.length + 1);
     let key: string;
     let name: string;
     if (rel === '') {
-      key = root;
-      name = root.split('/').pop() || '音乐';
+      key = bestRoot;
+      name = bestRoot.split('/').pop() || '音乐';
     } else {
       const first = rel.split('/')[0];
-      key = root + '/' + first;
+      key = bestRoot + '/' + first;
       name = first;
     }
     if (!groups.has(key)) groups.set(key, { name, tracks: [] });
@@ -310,7 +323,22 @@ function dedupDirectoryPlaylists(playlists: Playlist[]): Playlist[] {
   }
   const uniqueOrder = Array.from(new Set(dirPlaylists.map(p => p.id)));
   const map = new Map(deduped.map(r => [r.id, r]));
-  return uniqueOrder.map(id => map.get(id)!).filter(Boolean);
+  // 过滤空壳歌单：父/子根递归扫描可能对同一音轨产生不同 id 的歌单，
+  // 去重后其中一个会退化为空列表，留下无意义的 phantom 歌单（母/子文件夹冲突的边缘表现）。
+  return uniqueOrder.map(id => map.get(id)!).filter(Boolean).filter(p => p.tracks.length > 0);
+}
+
+// 最终兜底去重：保证写入 state 的 playlists 绝不含重复 id（彻底消除 React 重复 key 告警）。
+// 同名 id 保留音轨数更多的那份（被丢弃的那份往往才是真正带子文件夹音轨的，避免「只识别到母文件夹」）。
+function dedupePlaylistsById(playlists: Playlist[]): Playlist[] {
+  const byId = new Map<string, Playlist>();
+  for (const p of playlists) {
+    const existing = byId.get(p.id);
+    if (!existing || p.tracks.length > existing.tracks.length) {
+      byId.set(p.id, p);
+    }
+  }
+  return Array.from(byId.values());
 }
 
 function MusicModule() {
@@ -421,14 +449,22 @@ function MusicModule() {
       const pathsToScan: string[] = [];
       for (const rp of rootPaths) {
         try {
-          const cached = await hostApi.invoke('load_music_cache', { rootPath: rp }) as Track[] | null;
-          if (cached && cached.length > 0) {
-            if (cancelled) return;
-            console.log('[Music] 缓存命中:', cached.length, '首 (路径:', rp, ')');
-            allDirectoryPlaylists.push(...groupTracksIntoPlaylists(cached, rp));
-            continue;
+          const cached = await hostApi.invoke('load_music_cache', { rootPath: rp }) as
+            | { tracks: Track[]; dirMtimeMs: number }
+            | null;
+          if (cached && cached.tracks.length > 0) {
+            // 比对源目录 mtime：若目录已变更（如新增了含音乐的子文件夹），丢弃旧缓存重扫
+            const dirMtime = (await hostApi.invoke('get_dir_mtime', { path: rp })) as number;
+            if (cached.dirMtimeMs >= dirMtime) {
+              if (cancelled) return;
+              console.log('[Music] 缓存命中:', cached.tracks.length, '首 (路径:', rp, ')');
+              allDirectoryPlaylists.push(...groupTracksIntoPlaylists(cached.tracks, rootPaths));
+              continue;
+            }
+            console.log('[Music] 目录已变更，缓存失效需重扫:', rp);
+          } else {
+            console.log('[Music] 缓存未命中，需要扫描:', rp);
           }
-          console.log('[Music] 缓存未命中，需要扫描:', rp);
         } catch (e) {
           console.log('[Music] 缓存加载异常，需要扫描:', rp, e);
         }
@@ -440,7 +476,7 @@ function MusicModule() {
       // 2. 如果全都有缓存，直接显示
       if (pathsToScan.length === 0) {
         const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
-        setPlaylists(prev => [...dedupedDir, ...prev.filter(p => p.type !== 'custom')]);
+        setPlaylists(prev => dedupePlaylistsById([...dedupedDir, ...prev.filter(p => p.type === 'custom')]));
         // 恢复上次播放的歌单（模块切换/重载后保持选中状态，目录与自定义均匹配）
         const savedId = musicPlayer.currentPlaylistId;
         const restored = savedId
@@ -483,7 +519,7 @@ function MusicModule() {
         }
 
         if (cancelled) return;
-        allDirectoryPlaylists.push(...groupTracksIntoPlaylists([...currentScanTracks], rp));
+        allDirectoryPlaylists.push(...groupTracksIntoPlaylists([...currentScanTracks], rootPaths));
       }
 
       if (cancelled) return;
@@ -491,7 +527,7 @@ function MusicModule() {
       // 从当前 state 合并自定义歌单（避免覆盖扫描期间用户新建的歌单），
       // 同时支持恢复上次选中的自定义歌单
       const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
-      setPlaylists(prev => [...dedupedDir, ...prev.filter(p => p.type !== 'custom')]);
+      setPlaylists(prev => [...dedupedDir, ...prev.filter(p => p.type === 'custom')]);
       const savedId = musicPlayer.currentPlaylistId;
       const restored = savedId
         ? [...dedupedDir, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)

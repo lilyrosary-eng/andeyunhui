@@ -43,18 +43,33 @@ interface OpenBookMeta {
   cached: boolean;
 }
 
-// 跨根目录去重：同一文件可能被「父根递归扫描」与「自身作为根扫描」各命中一次，
-// 导致重复且 parentDir 不一致（母/子文件夹识别冲突）。按绝对路径去重，保留 parentDir 更短者（更深的根）。
-function dedupBooks(books: BookSummary[]): BookSummary[] {
-  const map = new Map<string, BookSummary>();
-  for (const b of books) {
-    const key = b.filePath.replace(/\\/g, '/');
-    const existing = map.get(key);
-    if (!existing) {
-      map.set(key, b);
-    } else if ((b.parentDir || '').length < (existing.parentDir || '').length) {
-      map.set(key, b);
+// 母/子文件夹识别：先把每本书的 parentDir 归一化到「最深（最长）祖先根」之下，
+// 再按绝对路径去重。这样当 D:/ 与 D:/Music 同时作为根时，D:/Music/BIXUS/book.txt
+// 始终以 parentDir="BIXUS" 归入同一树节点，而不会被拆成 "Music/BIXUS" 与 "BIXUS" 两个节点。
+function dedupBooks(books: BookSummary[], rootPaths: string[] = []): BookSummary[] {
+  const roots = rootPaths
+    .map((p) => p.replace(/\\/g, '/').replace(/\/+$/, ''))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length); // 最长优先 → 第一个命中的即最深根
+  // 1) 归一化 parentDir 到最深根之下
+  const normalized = books.map((b) => {
+    const fp = b.filePath.replace(/\\/g, '/');
+    const parent = fp.includes('/') ? fp.slice(0, fp.lastIndexOf('/')) : fp;
+    let best = '';
+    for (const r of roots) {
+      if (parent === r || parent.startsWith(r + '/')) {
+        best = r;
+        break;
+      }
     }
+    const parentDir = best && parent !== best ? parent.slice(best.length + 1) : '';
+    return { ...b, parentDir };
+  });
+  // 2) 按绝对路径去重（同一文件可能被父根递归扫描与自身作为根扫描各命中一次）
+  const map = new Map<string, BookSummary>();
+  for (const b of normalized) {
+    const key = b.filePath.replace(/\\/g, '/').toLowerCase();
+    if (!map.has(key)) map.set(key, b);
   }
   return Array.from(map.values());
 }
@@ -133,6 +148,9 @@ function ReadingModule() {
   const [openingFilePath, setOpeningFilePath] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [selectedChapterIndex, setSelectedChapterIndex] = useState(0);
+  // 恢复用一次性标记：章内滚动百分比（竖版）/ 章内页码偏移（分页），由 ReadingView apply 后清空
+  const [restoreScrollPercent, setRestoreScrollPercent] = useState<number | null>(null);
+  const [restorePageInChapter, setRestorePageInChapter] = useState<number | null>(null);
   const [scanComplete, setScanComplete] = useState(false);
 
   // 阅读进度统计面板 + 持久化（内嵌常驻，无需开关）
@@ -173,7 +191,7 @@ function ReadingModule() {
       // 2) 缓存命中：先展示，后台异步扫描（可选）
       if (!cancelled && all.length > 0) {
         all.sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN'));
-        setBooks(dedupBooks([...all]));
+        setBooks(dedupBooks([...all], rootPaths));
         setLoading(false);
       }
       // 3) 全量扫描（并行所有根）
@@ -192,7 +210,7 @@ function ReadingModule() {
       }
       if (cancelled) return;
       freshAll.sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN'));
-      setBooks(dedupBooks(freshAll));
+      setBooks(dedupBooks(freshAll, rootPaths));
       setLoading(false);
       setScanComplete(true);
     })();
@@ -262,6 +280,10 @@ function ReadingModule() {
 
   const handleBookClick = useCallback(async (book: BookSummary) => {
     console.log('[Reading] 点击书籍:', book.title, 'filePath:', book.filePath, 'openingFilePath:', openingFilePath);
+    // 重置「已加载路径」标记，确保每次点击都重新触发进度恢复（restore 守卫依赖它判断是否为新书）。
+    // 否则回目录 / 切模块后再次打开同一本书时 loadedPathRef 仍等于该书路径，整个 restore 块被跳过，
+    // selectedChapterIndex 停在 onMeta 设的 0 → 永远停在第 1 章（进度归零）。
+    loadedPathRef.current = null;
     if (openingFilePath) {
       console.log('[Reading] 跳过：openingFilePath 非空（有书正在打开中）');
       return;
@@ -311,23 +333,49 @@ function ReadingModule() {
     if (loadedPathRef.current !== currentBook.filePath) {
       loadedPathRef.current = currentBook.filePath;
       const saved = getReadingProgress(currentBook.filePath);
+      // [DIAG] 阅读进度恢复诊断
+      console.log('[reading-diag] restore', currentBook.filePath, 'saved=', saved ? { ch: saved.chapterIndex, sp: saved.scrollPercent, pic: saved.pageInChapter, tc: saved.totalChapters } : null);
       if (saved) {
         progressRef.current = { ...saved, totalChapters: total };
         setSelectedChapterIndex(saved.chapterIndex);
+        // 恢复标记保持到章节流式加载完成（由下方独立 effect 延迟清除）。
+        // 此前用 requestAnimationFrame 一帧后清除是致命 bug：章节流式到达前
+        // 目标章节 DOM 尚不存在，ReadingView 无法应用跳转/滚动，恢复必然落空。
+        setRestoreScrollPercent(saved.scrollPercent ?? 0);
+        setRestorePageInChapter(saved.pageInChapter ?? 0);
       } else {
         progressRef.current = { chapterIndex: 0, scrollPercent: 0, totalChapters: total, secondsRead: 0, lastRead: Date.now() };
         setSelectedChapterIndex(0);
+        setRestoreScrollPercent(null);
+        setRestorePageInChapter(null);
       }
+      dirtyRef.current = false;
     } else if (progressRef.current && total > 0) {
       progressRef.current.totalChapters = total;
-      const clamped = Math.min(progressRef.current.chapterIndex, total - 1);
-      if (clamped !== progressRef.current.chapterIndex) {
-        progressRef.current.chapterIndex = clamped;
-        setSelectedChapterIndex(clamped);
+      // 关键：仅在章节全部加载完成后才夹紧索引。流式加载期间 total 偏小，
+      // 夹紧会把已保存的章节进度永久改小并写回（「进度归零」的元凶之一）。
+      if (openingFilePath === null) {
+        const clamped = Math.min(progressRef.current.chapterIndex, total - 1);
+        if (clamped !== progressRef.current.chapterIndex) {
+          progressRef.current.chapterIndex = clamped;
+          setSelectedChapterIndex(clamped);
+        }
       }
     }
-    dirtyRef.current = false;
-  }, [currentBook]);
+  }, [currentBook, openingFilePath]);
+
+  // 章节全部到达（openingFilePath 归 null）后，给 ReadingView 一小段时间应用
+  // 最终跳转（每批章节到达都会重放恢复跳转），随后清除一次性恢复标记，
+  // 避免后续用户点击章节/翻页被误用旧的滚动位置。
+  useEffect(() => {
+    if (!currentBook || openingFilePath !== null) return;
+    if (restoreScrollPercent == null && restorePageInChapter == null) return;
+    const t = setTimeout(() => {
+      setRestoreScrollPercent(null);
+      setRestorePageInChapter(null);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [currentBook, openingFilePath, restoreScrollPercent, restorePageInChapter]);
 
   // 章节切换 → 记录并标记脏
   useEffect(() => {
@@ -340,6 +388,8 @@ function ReadingModule() {
   // 阅读时长累计 + 节流持久化；卸载/切书时落盘
   useEffect(() => {
     if (!currentBook) return;
+    // 在闭包中捕获本书路径，避免返回列表时 currentBookRef 被提前置空导致卸载落盘被跳过（进度丢失）
+    const path = currentBook.filePath;
     const tick = setInterval(() => {
       if (progressRef.current) {
         progressRef.current.secondsRead += 1;
@@ -348,16 +398,16 @@ function ReadingModule() {
       }
     }, 1000);
     const flush = setInterval(() => {
-      if (dirtyRef.current && currentBookRef.current && progressRef.current) {
-        saveReadingProgress(currentBookRef.current.filePath, progressRef.current);
+      if (dirtyRef.current && progressRef.current) {
+        saveReadingProgress(path, progressRef.current);
         dirtyRef.current = false;
       }
     }, 4000);
     return () => {
       clearInterval(tick);
       clearInterval(flush);
-      if (currentBookRef.current && progressRef.current) {
-        saveReadingProgress(currentBookRef.current.filePath, progressRef.current);
+      if (progressRef.current) {
+        saveReadingProgress(path, progressRef.current);
       }
     };
   }, [currentBook]);
@@ -366,6 +416,13 @@ function ReadingModule() {
   const handleScrollProgress = useCallback((p: number) => {
     if (progressRef.current) {
       progressRef.current.scrollPercent = p;
+      dirtyRef.current = true;
+    }
+  }, []);
+  // 分页/双栏模式章内页码上报
+  const handlePageProgress = useCallback((p: number) => {
+    if (progressRef.current) {
+      progressRef.current.pageInChapter = p;
       dirtyRef.current = true;
     }
   }, []);
@@ -379,7 +436,9 @@ function ReadingModule() {
     if (books.length === 0) return;
     const saved = getCurrentBookPath();
     if (!saved) return;
-    const b = books.find(x => x.filePath === saved);
+    const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+    const savedNorm = norm(saved);
+    const b = books.find(x => norm(x.filePath) === savedNorm);
     if (b) {
       restoreStartedRef.current = true;
       handleBookClick(b);
@@ -461,25 +520,9 @@ function ReadingModule() {
         onBackToBooks={handleBackToList}
         onOpenStats={() => setShowStats((v) => !v)}
       />
-      <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]">
-        {showStats ? (
-          <ReadingStatsPage
-            books={books}
-            onOpenBook={(b) => {
-              setShowStats(false);
-              handleBookClick(b as BookSummary);
-            }}
-            onClose={() => setShowStats(false)}
-          />
-        ) : showSettings ? (
-          <SettingsContent
-            rootPaths={rootPaths}
-            onRemoveRoot={handleRemoveRoot}
-            onClose={() => setShowSettings(false)}
-            bookCount={books.length}
-          />
-        ) : currentBook ? (
-          <ReadingView book={currentBook} onBack={handleBackToList} externalChapterIndex={selectedChapterIndex} onChapterChange={setSelectedChapterIndex} onScrollProgress={handleScrollProgress} />
+      <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] relative">
+        {currentBook ? (
+          <ReadingView book={currentBook} onBack={handleBackToList} externalChapterIndex={selectedChapterIndex} onChapterChange={setSelectedChapterIndex} onScrollProgress={handleScrollProgress} externalScrollPercent={restoreScrollPercent} externalPageInChapter={restorePageInChapter} onPageProgress={handlePageProgress} />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">
             <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="opacity-40">
@@ -487,6 +530,38 @@ function ReadingModule() {
               <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
             </svg>
             <p className="text-sm">从左侧选择一本书开始阅读</p>
+          </div>
+        )}
+        {showStats && (
+          <div className="absolute inset-0 z-20 bg-[#f5f5f0] dark:bg-[#1c1917]">
+            <ReadingStatsPage
+              books={books}
+              onOpenBook={(b) => {
+                if (b.filePath !== currentBook?.filePath) {
+                  handleBookClick(b as BookSummary);
+                } else {
+                  // 已在阅读该书：直接跳回已保存进度（即便停留在别处也能「回到当前进度」）
+                  const p = getReadingProgress(b.filePath);
+                  if (p) {
+                    setSelectedChapterIndex(p.chapterIndex);
+                    setRestorePageInChapter(p.pageInChapter ?? 0);
+                    setRestoreScrollPercent(p.scrollPercent ?? 0);
+                  }
+                }
+                setShowStats(false);
+              }}
+              onClose={() => setShowStats(false)}
+            />
+          </div>
+        )}
+        {showSettings && (
+          <div className="absolute inset-0 z-20 bg-[#f5f5f0] dark:bg-[#1c1917]">
+            <SettingsContent
+              rootPaths={rootPaths}
+              onRemoveRoot={handleRemoveRoot}
+              onClose={() => setShowSettings(false)}
+              bookCount={books.length}
+            />
           </div>
         )}
       </div>
