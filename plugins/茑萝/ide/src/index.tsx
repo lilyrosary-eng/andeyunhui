@@ -42,18 +42,72 @@ interface CM {
   openReplacePanel: (v: any) => boolean;
   closeSearchPanel: (v: any) => void;
 }
+// CodeMirror 通过动态 import 加载（与 茑萝/gongfang 的 professionalExtras 完全一致）。
+// 关键：由 Vite 模块图把 IDE 与 gongfang 的 @codemirror/state 收敛为「同一份实例」，
+// 避免「multiple instances of @codemirror/state are loaded」崩溃
+// （此前 IDE 走 external-deps 独立 bundle，与主包里 gongfang 动态 import 的那份
+//  @codemirror/state 并存于同一 realm，导致 EditorView 扩展 instanceof 校验失败）。
+// 注意：沙箱遮蔽了 fetch，但原生 import() 由 WebView 运行时处理，不受影响（gongfang 已验证）。
 let cmPromise: Promise<CM> | null = null;
 function loadCM(): Promise<CM> {
   if (cmPromise) return cmPromise;
   cmPromise = (async () => {
-    const w = window as any;
-    if (w.__EXT_CM__) return w.__EXT_CM__ as CM;
-    const code = await hostApi.invoke<string>('read_external_dep_file', { relativePath: '茑萝/ide/codemirror/index.js' });
-    if (!code) throw new Error('未找到 CodeMirror 依赖文件（external-deps/茑萝/ide/codemirror/index.js）');
-    const fn = new Function(code);
-    fn();
-    if (!w.__EXT_CM__) throw new Error('CodeMirror 依赖已读取但挂载失败（window.__EXT_CM__ 未定义）');
-    return w.__EXT_CM__ as CM;
+    const cmMod: any = await import('codemirror');
+    const viewMod: any = await import('@codemirror/view');
+    const stateMod: any = await import('@codemirror/state');
+    const cmdMod: any = await import('@codemirror/commands');
+    const langMod: any = await import('@codemirror/language');
+    const searchMod: any = await import('@codemirror/search');
+    const langJs: any = await import('@codemirror/lang-javascript');
+    const langPy: any = await import('@codemirror/lang-python');
+    const langHtml: any = await import('@codemirror/lang-html');
+    const langCss: any = await import('@codemirror/lang-css');
+    const langJson: any = await import('@codemirror/lang-json');
+    const themeOneDark: any = await import('@codemirror/theme-one-dark');
+
+    // 浅色主题（与旧 external-deps bundle 同形状）
+    const lightTheme = viewMod.EditorView.theme(
+      {
+        '&': { color: '#24292e', backgroundColor: '#ffffff' },
+        '.cm-content': { caretColor: '#24292e' },
+        '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#24292e' },
+        '.cm-gutters': { backgroundColor: '#f6f8fa', color: '#959da5', border: 'none' },
+        '.cm-activeLine': { backgroundColor: '#f0f3f6' },
+        '.cm-activeLineGutter': { backgroundColor: '#f0f3f6' },
+        '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection': {
+          backgroundColor: '#c8e1ff !important',
+        },
+        '.cm-tooltip': { border: '1px solid #c8c8c8', backgroundColor: '#f6f8fa' },
+      },
+      { dark: false },
+    );
+
+    return {
+      EditorView: viewMod.EditorView,
+      basicSetup: cmMod.basicSetup,
+      EditorState: stateMod.EditorState,
+      Compartment: stateMod.Compartment,
+      keymap: viewMod.keymap,
+      defaultKeymap: cmdMod.defaultKeymap,
+      history: cmdMod.history,
+      historyKeymap: cmdMod.historyKeymap,
+      indentWithTab: cmdMod.indentWithTab,
+      syntaxHighlighting: langMod.syntaxHighlighting,
+      defaultHighlightStyle: langMod.defaultHighlightStyle,
+      lightTheme,
+      lightHighlight: langMod.defaultHighlightStyle,
+      javascript: langJs.javascript,
+      python: langPy.python,
+      html: langHtml.html,
+      css: langCss.css,
+      json: langJson.json,
+      oneDark: themeOneDark.oneDark,
+      search: searchMod.search,
+      searchKeymap: searchMod.searchKeymap,
+      openSearchPanel: searchMod.openSearchPanel,
+      openReplacePanel: searchMod.openReplacePanel,
+      closeSearchPanel: searchMod.closeSearchPanel,
+    } as CM;
   })();
   return cmPromise;
 }
@@ -2515,10 +2569,16 @@ function IdeEditor() {
     }
     agentOriginalsRef.current = orig;
     setAgentOriginals(orig);
-    agentReviewRef.current = edits;
-    setAgentReview(edits);
+    // 改动直接保留并即时落盘（用户要求：agent 改动应自动保存，而非弹窗待审阅后再手动「保留」）。
+    // 被策略/信任/保护拦截（status: blocked）或定位失败（failed）的保留原状态，不误写。
+    const applied = edits.map((e) =>
+      e.status === 'blocked' || e.status === 'failed' ? e : { ...e, status: 'kept' as const },
+    );
+    agentReviewRef.current = applied;
+    setAgentReview(applied);
     setAgentVerdict(verdict || null);
-  }, []);
+    await commitEdits(applied);
+  }, [commitEdits]);
 
   // 保留=应用该处改动（删除红区）；撤销=放弃该处改动（保留原红区）。每次切换都即时重算写盘，支持来回切换
   const agentKeep = useCallback((e: AgentEdit) => {
@@ -2918,7 +2978,7 @@ function IdeEditor() {
         <div className="px-4 py-3 border-b border-neutral-200 dark:border-stone-700 text-sm font-medium">IDE · 编辑器内核加载失败</div>
         <div className="flex-1 flex flex-col items-center justify-center gap-3 px-8 text-center">
           <div className="text-amber-500 text-sm">{errorMsg}</div>
-          <pre className="text-left text-xs text-neutral-600 dark:text-stone-300 bg-neutral-100 dark:bg-stone-800 rounded-lg p-3 max-w-md overflow-auto">node scripts/build-external-deps.mjs</pre>
+          <pre className="text-left text-xs text-neutral-600 dark:text-stone-300 bg-neutral-100 dark:bg-stone-800 rounded-lg p-3 max-w-md overflow-auto">请完全重启应用（pnpm tauri dev）后重试</pre>
           <button onClick={() => { setEngine('loading'); cmPromise = null; loadCM().then((api) => { setCm(api); setEngine('cm'); }).catch((e: Error) => { setErrorMsg(e.message); setEngine('error'); }); }} className="btn-press px-4 py-1.5 rounded-lg text-white text-sm element-primary hover:bg-[var(--element-hover)] transition-colors">重试</button>
         </div>
       </div>
@@ -3217,12 +3277,16 @@ function IdeSidebar() {
   };
 
   const openFile = async (p: string) => {
-    if (!addFileTab) return;
+    if (!addFileTab) {
+      setFolderError('编辑器尚未就绪，请稍候再试');
+      return;
+    }
     try {
       const content = await hostApi.invoke<string>('read_text_file', { path: p });
       addFileTab(p, content);
     } catch (e) {
       console.error('[IDE] 打开文件失败:', p, e);
+      setFolderError('打开文件失败：' + (e as Error).message);
     }
   };
 
@@ -5113,7 +5177,8 @@ function IdeAgent({
   );
 }
 
-// 审阅面板：列出本次 AI 的局部增删改动，红底=将删除，绿底=将新增；可逐处保留/撤销或一键全部
+// 改动摘要面板：非阻塞、默认折叠在编辑器底部。改动已由 onAgentChanges 自动保留并落盘，
+// 这里仅作「已保存」的折叠摘要，供用户随时展开查看 diff / 撤销 / 回滚，不阻断后续操作。
 function AgentReviewOverlay({
   changes, originals, verdict, onKeep, onUndo, onKeepAll, onUndoAll, onFinish, onRollback,
 }: {
@@ -5127,41 +5192,53 @@ function AgentReviewOverlay({
   onFinish: () => void;
   onRollback: () => void;
 }) {
+  const [panelOpen, setPanelOpen] = useState(false); // 默认折叠（不立刻占用注意力）
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const kept = changes.filter((c) => c.status === 'kept').length;
   const undone = changes.filter((c) => c.status === 'undone').length;
+  const blocked = changes.filter((c) => c.status === 'blocked' || c.status === 'failed').length;
   return (
-    <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/40 backdrop-blur-sm p-6" onClick={onFinish}>
-      <div className="w-full max-w-3xl max-h-full flex flex-col rounded-2xl bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-neutral-200 dark:border-stone-700 shrink-0">
-          <span className="text-sm font-semibold text-neutral-800 dark:text-stone-100">待审阅的修改（{changes.length} 处）</span>
-          <span className="flex-1" />
-          <button onClick={onKeepAll} className="btn-press px-2.5 py-1 rounded-lg text-xs bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20">全部保留</button>
-          <button onClick={onUndoAll} className="btn-press px-2.5 py-1 rounded-lg text-xs bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20">全部撤销</button>
-          <button onClick={onRollback} className="btn-press px-2.5 py-1 rounded-lg text-xs bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20">回滚本次</button>
-          <button onClick={onFinish} className="btn-press px-3 py-1 rounded-lg text-xs text-white element-primary hover:bg-[var(--element-hover)]">完成</button>
-        </div>
-        {verdict && (
-          <div className={`px-4 py-1.5 text-[11px] border-b border-neutral-200/60 dark:border-stone-700/60 shrink-0 whitespace-pre-wrap ${verdict.startsWith('✅') ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'}`}>
-            {verdict}
-          </div>
+    <div className="shrink-0 border-t border-neutral-200/70 dark:border-stone-700/70 bg-neutral-100/50 dark:bg-stone-800/40">
+      <div className="flex items-center gap-2 px-3 py-1.5">
+        <button
+          type="button"
+          onClick={() => setPanelOpen((v) => !v)}
+          className="btn-press flex items-center gap-1 text-xs font-medium text-neutral-700 dark:text-stone-200"
+          title="展开 / 折叠本次改动"
+        >
+          <span className={`inline-block transition-transform ${panelOpen ? 'rotate-90' : ''}`}>▶</span>
+          本次改动（{changes.length} 处{blocked ? `，其中 ${blocked} 处未应用` : ''}）
+        </button>
+        <span className="text-[11px] text-neutral-400 dark:text-stone-500">{kept > 0 ? `已自动保存 ${kept} 处` : '无改动'}</span>
+        <span className="flex-1" />
+        {undone > 0 && (
+          <button onClick={onKeepAll} className="btn-press px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20">全部保留</button>
         )}
-        <div className="px-4 py-1.5 text-[11px] text-neutral-500 dark:text-stone-400 border-b border-neutral-200/60 dark:border-stone-700/60 shrink-0">
-          绿底=将新增，红底=将删除。点「保留」应用该处（删除红区），点「撤销」放弃该处（保留原红区）。当前 保留 {kept} / 撤销 {undone}。
-        </div>
-        <div className="flex-1 overflow-auto min-h-0 divide-y divide-neutral-200/60 dark:divide-stone-700/60">
+        {kept > 0 && (
+          <button onClick={onUndoAll} className="btn-press px-2 py-0.5 rounded-md text-[11px] bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20">全部撤销</button>
+        )}
+        <button onClick={onRollback} className="btn-press px-2 py-0.5 rounded-md text-[11px] bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20">回滚本次</button>
+        <button onClick={onFinish} className="btn-press px-2 py-0.5 rounded-md text-[11px] text-neutral-400 dark:text-stone-500 hover:bg-black/5 dark:hover:bg-white/5" title="收起摘要">×</button>
+      </div>
+      {panelOpen && (
+        <div className="max-h-56 overflow-auto divide-y divide-neutral-200/60 dark:divide-stone-700/60 border-t border-neutral-200/50 dark:border-stone-700/50">
+          {verdict && (
+            <div className={`px-3 py-1.5 text-[11px] whitespace-pre-wrap ${verdict.startsWith('✅') ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'}`}>
+              {verdict}
+            </div>
+          )}
           {changes.map((c) => (
-            <div key={c.id} className="p-3">
+            <div key={c.id} className="p-2">
               <div className="flex items-center gap-2">
                 <span className="text-sm truncate flex-1 text-neutral-700 dark:text-stone-200" title={c.path}>{c.isNew ? '🆕 ' : ''}{baseName(c.path)}</span>
                 <span className={`text-[11px] px-1.5 py-0.5 rounded ${c.status === 'kept' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : c.status === 'undone' ? 'bg-red-500/15 text-red-600 dark:text-red-400' : (c.status === 'failed' || c.status === 'blocked') ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-neutral-200/70 dark:bg-stone-700 text-neutral-500 dark:text-stone-400'}`}>
-                  {c.status === 'kept' ? '已保留' : c.status === 'undone' ? '已撤销' : c.status === 'failed' ? '定位失败' : c.status === 'blocked' ? '已拦截' : '待决定'}
+                  {c.status === 'kept' ? '已保存' : c.status === 'undone' ? '已撤销' : c.status === 'failed' ? '定位失败' : c.status === 'blocked' ? '已拦截' : '待决定'}
                 </span>
                 <button onClick={() => setOpen((o) => ({ ...o, [c.id]: !o[c.id] }))} className="btn-press text-[11px] text-neutral-400 hover:text-neutral-700 dark:hover:text-stone-200">{open[c.id] ? '隐藏' : '查看'}</button>
                 {c.status !== 'kept' && c.status !== 'failed' && c.status !== 'blocked' && (
                   <button onClick={() => onKeep(c)} className="btn-press px-2 py-0.5 rounded text-[11px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20">保留</button>
                 )}
-                {c.status !== 'undone' && (
+                {c.status !== 'undone' && c.status !== 'blocked' && (
                   <button onClick={() => onUndo(c)} className="btn-press px-2 py-0.5 rounded text-[11px] bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20">撤销</button>
                 )}
               </div>
@@ -5171,7 +5248,7 @@ function AgentReviewOverlay({
             </div>
           ))}
         </div>
-      </div>
+      )}
     </div>
   );
 }

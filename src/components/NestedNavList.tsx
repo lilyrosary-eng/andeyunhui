@@ -85,7 +85,7 @@ export function NestedNavList({ layers, onBack, onItemClick }: NestedNavListProp
   const backButton = hasParent ? (
     <button
       onClick={onBack}
-      className="w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-stone-400 mb-1"
+      className="sticky top-0 z-20 -mx-4 px-4 main-panel-bg w-full text-left py-2 transition-colors flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-stone-400 mb-1"
     >
       <span className="flex-shrink-0">
         <BackArrowIcon />

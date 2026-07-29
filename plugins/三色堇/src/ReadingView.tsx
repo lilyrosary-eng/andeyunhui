@@ -24,6 +24,10 @@ interface ReadingViewProps {
   externalChapterIndex?: number;
   onChapterChange?: (index: number) => void;
   onScrollProgress?: (percent: number) => void;
+  // 恢复用：竖版章内滚动百分比 / 分页章内页码偏移（由父组件在恢复时一次性下发，apply 后清空）
+  externalScrollPercent?: number | null;
+  externalPageInChapter?: number | null;
+  onPageProgress?: (pageInChapter: number) => void;
 }
 
 // ============ 布局常量 ============
@@ -45,7 +49,7 @@ interface ChapterBoundary {
   endPage: number;
 }
 
-export function ReadingView({ book, onBack, externalChapterIndex, onChapterChange, onScrollProgress }: ReadingViewProps) {
+export function ReadingView({ book, onBack, externalChapterIndex, onChapterChange, onScrollProgress, externalScrollPercent, externalPageInChapter, onPageProgress }: ReadingViewProps) {
   // 分页状态（横板/双栏模式）
   const [absolutePage, setAbsolutePage] = useState(0);
   const [pageCount, setPageCount] = useState(1);
@@ -63,6 +67,9 @@ export function ReadingView({ book, onBack, externalChapterIndex, onChapterChang
   const [verticalScrollProgress, setVerticalScrollProgress] = useState(0);
   // 3章滑动窗口中心章节索引（仅渲染 windowCenter±1 三章，避免大书全拼接卡死）
   const [windowCenter, setWindowCenter] = useState(0);
+  // 强制重测量 token：外部跳转（恢复进度）时即使窗口未变化也触发 measure，
+  // 让 measure() 在边界就绪后消费 pendingJumpRef 完成跳转（修复「进度归零」）
+  const [forceMeasureToken, setForceMeasureToken] = useState(0);
   // 竖版当前阅读章节（独立于 windowCenter，随滚动位置实时更新，不影响窗口渲染）
   const [displayedChapter, setDisplayedChapter] = useState(0);
   // 竖版目录跳转触发 token：即使目标章已落在同一渲染窗口内（combinedHtml 未变），
@@ -79,7 +86,7 @@ const boundariesRef = useRef<ChapterBoundary[]>([]);
 // pageInChapter=-1 表示跳到该章最后一页；useProgress=true 时按竖版进度估算章节内页码
 const pendingJumpRef = useRef<{ chapterIndex: number; pageInChapter: number; useProgress?: boolean } | null>(null);
 // 竖版滑动窗口后调整 scrollTop：保持视觉连续性
-const verticalJumpRef = useRef<{ chapterIndex: number; position: 'top' | 'bottom' } | null>(null);
+const verticalJumpRef = useRef<{ chapterIndex: number; position: 'top' | 'bottom'; scrollPercent?: number } | null>(null);
 // chapterIndexRef / windowCenterRef: 让 externalChapterIndex effect
 // 能读取最新值而不需要将其放入依赖数组（避免内部 chapterIndex 变化触发该 effect）
 const chapterIndexRef = useRef(0);
@@ -199,12 +206,16 @@ const lockTransition = useCallback(() => {
     setPageCount(pages);
     boundariesRef.current = boundaries;
 
-    // 处理待跳转（窗口滑动 / 模式切换后恢复阅读位置）
+    // 处理待跳转（窗口滑动 / 模式切换 / 恢复进度后定位）
+    // 关键：只有「目标章边界确实就绪」才清空并应用；否则保留 pendingJumpRef，
+    // 跳过下方钳制，等下一次 measure()（章节流式到达 / 窗口滑动后）再消费。
+    // 否则在章节还在流式加载、目标章尚未进入渲染窗口时就提前清空 pendingJump，
+    // 跳转会被永久丢弃（表现为「恢复进度永远停在第1章 / 进度归零」）。
     if (pendingJumpRef.current !== null) {
       const { chapterIndex: targetIdx, pageInChapter, useProgress } = pendingJumpRef.current;
-      pendingJumpRef.current = null;
       const b = boundaries.find(x => x.index === targetIdx);
       if (b) {
+        pendingJumpRef.current = null;
         let page: number;
         if (pageInChapter === -1) {
           page = b.endPage;
@@ -220,6 +231,9 @@ const lockTransition = useCallback(() => {
         lockTransition();
         return;
       }
+      // 目标章边界尚未就绪：保留 pendingJumpRef，本次不做钳制（避免错钳到旧章节），
+      // 待章节到达 / 窗口滑入目标章后由后续 measure() 完成跳转。
+      return;
     }
 
     // 没有待跳转时：复测可能让总页数收缩（字体/图片加载完重排）。
@@ -244,7 +258,7 @@ const lockTransition = useCallback(() => {
   useLayoutEffect(() => {
     if (!isPaginatedMode) return;
     measure();
-  }, [combinedHtml, isPaginatedMode, measure]);
+  }, [combinedHtml, isPaginatedMode, measure, forceMeasureToken]);
 
   // 异步布局稳定后重新测量：网页字体（阅读字体）与章节内图片是异步加载的，
   // 首测横/双栏时它们可能尚未就绪，内容用回退字体/无图排版导致 scrollWidth 偏大 → 页码偏多。
@@ -346,9 +360,19 @@ const lockTransition = useCallback(() => {
     }
   }, [absolutePage, isPaginatedMode, chapterIndex]);
 
-  // 通知父组件章节变化
+  // 跳过上报标记：仅在「书籍切换重置」时置位（详见下方重置 effect）。
+  // 这是修复「恢复进度永远停在第 1 章」的关键：挂载重置会把内部 chapterIndex 设为 0，
+  // 若把 0 上报给父组件 setSelectedChapterIndex，会覆盖掉 restore 设回的章节，
+  // 形成「restore 设 3 → 重置上报 0 → 覆盖回 0 → jump-effect 永远看到 extCh:0」的振荡归零。
+  // 外部跳转（jump-effect）上报的值与父组件 restore 设的值相同，无害，无需抑制。
+  const skipReportRef = useRef(false);
+  // 通知父组件章节变化（仅用户真实翻章时上报，供持久化）
   const reportedChapter = isPaginatedMode ? chapterIndex : displayedChapter;
   useEffect(() => {
+    if (skipReportRef.current) {
+      skipReportRef.current = false;
+      return;
+    }
     onChapterChange?.(reportedChapter);
   }, [reportedChapter, onChapterChange]);
 
@@ -357,32 +381,37 @@ const lockTransition = useCallback(() => {
   // 否则内部 chapterIndex 变化时会重新触发此 effect，导致"跳到新章 → 弹回旧章 → 再跳新章"的弹簧动画
   useEffect(() => {
     if (externalChapterIndex === undefined) return;
+    // [DIAG] 阅读跳转诊断
+    console.log('[reading-diag] jump-effect', { mode: isPaginatedMode ? 'page' : 'v', extCh: externalChapterIndex, scrollPct: externalScrollPercent, pageInCh: externalPageInChapter, winCenter: windowCenterRef.current });
     if (isPaginatedMode) {
       // 用 ref 读取最新 chapterIndex，避免将其放入依赖数组
-      if (externalChapterIndex !== chapterIndexRef.current) {
-        // 检查目标章是否在当前窗口内
+      // 恢复期间（携带 pageInChapter）即使章节等于当前章节也强制应用，确保章内页码被恢复
+      if (externalChapterIndex !== chapterIndexRef.current || externalPageInChapter != null) {
+        const b = boundariesRef.current?.find((x) => x.index === externalChapterIndex);
         const ws = Math.max(0, windowCenterRef.current - WINDOW_RADIUS);
         const we = Math.min(book.chapters.length, ws + WINDOW_SIZE);
-        if (externalChapterIndex >= ws && externalChapterIndex < we) {
-          // 在窗口内 → 直接跳到该章首页
-          const b = boundariesRef.current.find(x => x.index === externalChapterIndex);
-          if (b) {
-            setAbsolutePage(b.startPage);
-            // 同步更新 chapterIndex，避免渲染时用旧值导致页码错误
-            setChapterIndex(externalChapterIndex);
-            lockTransition();
-            return;
-          }
+        const inWindow = externalChapterIndex >= ws && externalChapterIndex < we;
+        if (inWindow && b) {
+          // 目标章已在渲染窗口内且边界已知 → 直接跳（恢复时携带章内页码）
+          setAbsolutePage(Math.min(b.startPage + (externalPageInChapter ?? 0), b.endPage));
+          setChapterIndex(externalChapterIndex);
+          lockTransition();
+        } else {
+          // 否则登记待跳转并滑动窗口到目标章：章节进入渲染窗口后 measure() 会消费
+          // pendingJumpRef 完成跳转。即使此刻边界尚未算出（章节流式到达前），measure
+          // 完成后也会补跳；forceMeasureToken 兜底，确保窗口未变化时也能重测消费。
+          // 这是修复「进度归零」的核心：原实现在边界查不到时直接放弃且无重试。
+          pendingJumpRef.current = { chapterIndex: externalChapterIndex, pageInChapter: externalPageInChapter ?? 0 };
+          setWindowCenter(externalChapterIndex);
+          setForceMeasureToken((t) => t + 1);
+          lockTransition();
         }
-        // 不在窗口内 → 滑动窗口
-        pendingJumpRef.current = { chapterIndex: externalChapterIndex, pageInChapter: 0 };
-        setWindowCenter(externalChapterIndex);
-        lockTransition();
       }
     } else {
       // 竖版：滑动窗口到目标章节，跳到该章顶部
-      if (externalChapterIndex !== displayedChapterRef.current) {
-        verticalJumpRef.current = { chapterIndex: externalChapterIndex, position: 'top' };
+      // 恢复期间（携带 scrollPercent）即使章节恰好等于当前章节也强制跳转，确保章内滚动位置被应用
+      if (externalChapterIndex !== displayedChapterRef.current || externalScrollPercent != null) {
+        verticalJumpRef.current = { chapterIndex: externalChapterIndex, position: 'top', scrollPercent: externalScrollPercent ?? undefined };
         setWindowCenter(externalChapterIndex);
         setDisplayedChapter(externalChapterIndex);
         // 触发竖版跳转消费：即使目标章已落在同一渲染窗口内、combinedHtml 未变化，
@@ -392,6 +421,17 @@ const lockTransition = useCallback(() => {
     }
   }, [externalChapterIndex, isPaginatedMode, book.chapters.length, lockTransition]);
 
+  // 分页/双栏模式：随页面变化上报「章内页码偏移」，供父组件持久化（恢复时回放）
+  useEffect(() => {
+    if (!isPaginatedMode || !onPageProgress) return;
+    const b = boundariesRef.current.find(x => x.index === chapterIndex);
+    if (b) {
+      const chapterPages = Math.max(1, b.endPage - b.startPage);
+      const pageInChapter = Math.min(chapterPages - 1, Math.max(0, absolutePage - b.startPage));
+      onPageProgress(pageInChapter);
+    }
+  }, [absolutePage, chapterIndex, isPaginatedMode, onPageProgress]);
+
   // 书籍切换重置
   useEffect(() => {
     setAbsolutePage(0);
@@ -399,6 +439,8 @@ const lockTransition = useCallback(() => {
     setVerticalScrollProgress(0);
     setWindowCenter(0);
     setDisplayedChapter(0);
+    // 标记本次重置引发的章节变化无需上报，避免把 0 回写父组件覆盖 restore 的章节
+    skipReportRef.current = true;
     pendingJumpRef.current = null;
     verticalJumpRef.current = null;
     if (verticalRef.current) verticalRef.current.scrollTop = 0;
@@ -541,15 +583,21 @@ const lockTransition = useCallback(() => {
     if (!verticalRef.current) return;
 
     if (verticalJumpRef.current) {
-      const { chapterIndex, position } = verticalJumpRef.current;
+      const { chapterIndex, position, scrollPercent } = verticalJumpRef.current;
       verticalJumpRef.current = null;
       // 找到目标章节的 chapter-marker，调整 scrollTop 保持视觉位置
       const marker = verticalRef.current.querySelector(`[data-chapter-index="${chapterIndex}"]`) as HTMLElement | null;
       if (marker) {
+        const el = verticalRef.current;
         if (position === 'top') {
-          verticalRef.current.scrollTop = marker.offsetTop;
+          // 恢复时携带章内滚动百分比，则滚动到该章内对应位置；否则回到章首
+          if (scrollPercent != null && marker.offsetHeight > el.clientHeight) {
+            el.scrollTop = marker.offsetTop + (scrollPercent / 100) * (marker.offsetHeight - el.clientHeight);
+          } else {
+            el.scrollTop = marker.offsetTop;
+          }
         } else {
-          verticalRef.current.scrollTop = marker.offsetTop + marker.offsetHeight - verticalRef.current.clientHeight;
+          el.scrollTop = marker.offsetTop + marker.offsetHeight - el.clientHeight;
         }
         // 同步 displayedChapter（窗口滑动后立即更新，不等 scroll 事件）
         setDisplayedChapter(chapterIndex);

@@ -942,6 +942,7 @@ fn main() {
             scan_music_root,
             load_music_cache,
             delete_music_cache,
+            get_dir_mtime,
             read_track_metadata,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,

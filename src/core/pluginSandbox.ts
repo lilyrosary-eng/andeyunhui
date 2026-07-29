@@ -47,6 +47,7 @@ const ALLOWED_COMMANDS = new Set([
   'get_folder_images',
   // 音乐模块
   'load_music_cache',
+  'get_dir_mtime',
   'scan_music_root',
   'delete_music_cache',
   'read_track_metadata',
@@ -145,6 +146,12 @@ const ALLOWED_COMMANDS = new Set([
   'run_shell_command',
   // AI agent 受限 shell：白名单 + Dry-Run 黑名单 + 超时（仅 agent 自主编辑模式使用）
   'run_agent_shell',
+  // IDE · AI 编程（agent 自主编辑）：MCP 工具发现与 LSP 诊断（此前被沙箱拦截，
+  // 导致 agent 看不到可用工具/报错，改动无法落地）
+  'mcp_list_servers',
+  'mcp_list_tools',
+  'mcp_list_all_tools',
+  'lsp_diagnostics',
   // 薄荷·网络测速：用系统默认浏览器打开外链（test.ustc.edu.cn）
   'plugin:opener|open_url',
   // 桌宠引擎：销毁其常驻浮窗（与 overlay_window_get_or_create 配对）

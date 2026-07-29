@@ -11,6 +11,28 @@ import react from '@vitejs/plugin-react';
 export function createPluginConfig(pluginName: string) {
   return defineConfig({
     plugins: [react()],
+    resolve: {
+      // 关键：pnpm 符号链接下，每个 @codemirror/lang-* 的嵌套 node_modules
+      // 会让 vite 把同一份 @codemirror/state 解析成多条路径并内联多份实例
+      //（实测 ide 插件 bundle 内被打进 11 份 state），导致运行时
+      // "multiple instances of @codemirror/state are loaded" instanceof 校验崩溃。
+      // dedupe 强制这些包统一从项目根解析为唯一实例。对未用到 codemirror 的插件无副作用。
+      dedupe: [
+        '@codemirror/state',
+        '@codemirror/view',
+        '@codemirror/language',
+        '@codemirror/commands',
+        '@codemirror/search',
+        '@codemirror/autocomplete',
+        '@codemirror/lint',
+        '@lezer/common',
+        '@lezer/highlight',
+        '@lezer/lr',
+        'style-mod',
+        'w3c-keyname',
+        'crelt',
+      ],
+    },
     define: {
       'process.env.NODE_ENV': JSON.stringify('production'),
     },

@@ -45,6 +45,26 @@ pub struct MusicScanProgress {
     pub done: bool,
 }
 
+/// 音乐扫描缓存载荷：在原始音轨列表之外附带「源根目录的修改时间」。
+/// 前端加载缓存时比对当前根目录 mtime，若目录已变更（如新增了含音乐的子文件夹）
+/// 则丢弃旧缓存、重新扫描，避免「子文件夹新增音乐后只识别到母文件夹」的缓存失效问题。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicCachePayload {
+    pub tracks: Vec<Track>,
+    pub dir_mtime_ms: u64,
+}
+
+/// 取目录最后修改时间（毫秒）。出错返回 0。
+pub fn dir_mtime_ms(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn is_audio(name: &str) -> bool {
     if let Some(i) = name.rfind('.') {
         AUDIO_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(&name[i + 1..]))
@@ -136,10 +156,14 @@ pub fn scan_music_root_streaming(
 
     app.emit("music-scan-progress", MusicScanProgress { found, total, done: true }).ok();
 
-    // 保存缓存
+    // 保存缓存（附带根目录 mtime，供前端判断目录是否变更）
     match app.path().app_data_dir() {
         Ok(app_data) => {
-            if let Err(e) = crate::services::cache_service::save_cache(&app_data, "music_scan", root_path, &all_tracks) {
+            let payload = MusicCachePayload {
+                tracks: all_tracks,
+                dir_mtime_ms: dir_mtime_ms(root),
+            };
+            if let Err(e) = crate::services::cache_service::save_cache(&app_data, "music_scan", root_path, &payload) {
                 eprintln!("[music_service] 缓存保存失败: {}", e);
             }
         }

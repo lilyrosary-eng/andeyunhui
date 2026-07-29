@@ -56,6 +56,59 @@ const hostExternalsPlugin = {
   },
 };
 
+// ===== CodeMirror 依赖收敛插件 =====
+// pnpm 用符号链接组织 node_modules：@codemirror/state 既可能经 node_modules/@codemirror/state
+// （顶层符号链接）被解析，也可能经 node_modules/.pnpm/@codemirror+state@x/... 被解析。esbuild 把
+// 这两条路径当成两个不同模块，导致 @codemirror/state 被打进包体两次。运行时 EditorView 与
+// basicSetup 各自持有一份 state 实例，互相 instanceof 失败，报
+// "multiple instances of @codemirror/state are loaded"，整个 IDE 编辑器崩溃。
+// 本插件用 require.resolve 取得每个包的唯一物理入口，强制所有导入收敛到同一文件（与 rediResolvePlugin 同理）。
+const CM_DEDUPE_PACKAGES = [
+  'codemirror',
+  '@codemirror/state',
+  '@codemirror/view',
+  '@codemirror/commands',
+  '@codemirror/language',
+  '@codemirror/search',
+  '@codemirror/autocomplete',
+  '@codemirror/lint',
+  '@codemirror/tooltip',
+  '@codemirror/theme-one-dark',
+  '@codemirror/lang-javascript',
+  '@codemirror/lang-python',
+  '@codemirror/lang-html',
+  '@codemirror/lang-css',
+  '@codemirror/lang-json',
+  'style-mod',
+  'w3c-keyname',
+  'crelt',
+  '@lezer/common',
+  '@lezer/highlight',
+  '@lezer/lr',
+  '@lezer/javascript',
+  '@lezer/python',
+  '@lezer/css',
+  '@lezer/html',
+  '@lezer/json',
+];
+const cmDedupePlugin = {
+  name: 'cm-dedupe',
+  setup(b) {
+    const resolved = new Map();
+    for (const pkg of CM_DEDUPE_PACKAGES) {
+      try {
+        resolved.set(pkg, require.resolve(pkg));
+      } catch {
+        // 该包未安装则跳过
+      }
+    }
+    for (const [pkg, realPath] of resolved) {
+      const re = new RegExp('^' + pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+      b.onResolve({ filter: re }, () => ({ path: realPath }));
+    }
+  },
+};
+
 // 各外部依赖：outDir 输出目录（分类到对应插件子目录），entry 为 _build 下入口，global 为 IIFE 内部全局名（仅打包用）
 // loader: 可选，为该目标指定 esbuild loader（如 Univer 的 CSS 用 text 内联到 JS）
 const TARGETS = [
@@ -84,7 +137,7 @@ for (const t of TARGETS) {
     outfile: join(outDir, t.outFile || 'index.js'),
     minify: true,
     legalComments: 'none',
-    plugins: [rediResolvePlugin, hostExternalsPlugin],
+    plugins: [rediResolvePlugin, hostExternalsPlugin, cmDedupePlugin],
     loader: t.loader, // undefined 时 esbuild 使用默认 loader
     define: { 'process.env.NODE_ENV': '"production"' },
     logLevel: 'info',
