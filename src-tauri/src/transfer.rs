@@ -35,6 +35,9 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use serde_json;
+// `import_to_dropzone` 来自桌面命令模块（中转站 / 拖出等桌面专属能力），非移动目标不存在该符号，
+// 故仅桌面引入；移动端在 `mark_done` 中跳过该调用（见下方 cfg 门控）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::commands::import_to_dropzone;
 
 // ===================== 协议常量与数据类型（LocalSend v2） =====================
@@ -677,6 +680,8 @@ impl TransferManager {
                     // 用 move_source=false（复制语义）：保留 save_dir/<session_id>/ 下的「本地保存路径」存档，
                     // dropzone 仅作中转站副本——这样用户在「接收文件保存目录」设置里能直接找到文件（本地保存），
                     // 同时中转站仍可拖出 / OCR / 批量导出。删除中转站文件不影响本地存档。
+                    // 仅桌面执行：移动端无中转站概念，跳过该调用（T2 平台隔离）。
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     let _ = import_to_dropzone(
                         self.app.clone(),
                         f.path.clone().to_string_lossy().to_string(),

@@ -1,21 +1,34 @@
-//! Android 平台入口骨架（T0：Android v1 基建）
+//! Android 平台入口（T2：PAL 隔离 + Tauri-Android 骨架；T4 将充实为「一张网宿主」）。
 //!
-//! 仅搭建最小可用骨架，不实现任何 PAL 能力或业务模块（那是 T2 / T4 / T5 的工作）。
-//! 当前为占位入口，后续 T4 将在此填充 Tauri-Android 的 `run()`（创建 `Builder`、
-//! 注册本地-only 模块命令与 PAL 抽象、调用 `generate_context!().run()`）。
+//! 本模块仅在 `target_os = "android"` 下编译（见 lib.rs 的 `#[cfg(target_os = "android")]`）。
+//! 不引入任何 Windows 专属逻辑；仅搭建最小可用 Tauri-Android 入口：
+//! - 创建 `tauri::Builder`；
+//! - 在 `setup` 中挂接云就绪句柄（T3 的 local-only 默认实现）与 PAL 占位；
+//! - 暂不注册任何 Windows 专属命令（截图/SMTC/录屏/DComp 等），留待 T4。
 //!
-//! 全部 Android 专属代码均通过 `#[cfg(target_os = "android")]` 隔离，Windows 构建不受影响。
+//! 全部 Android 专属代码通过 `#[cfg(target_os = "android")]` 隔离，Windows 构建不受影响。
 
-/// Tauri-Android 应用入口占位。
+/// Tauri-Android 应用入口。
 ///
-/// 后续 T4 将在此调用 `tauri::Builder::default()` 并 `.run(tauri::generate_context!())`，
-/// 注册本地-only 模块（笔记 / 音乐 / 视频 / 图片 / 传输）的命令与 PAL 抽象（T2 落地）。
-///
-/// 当前阶段不调用、不链接任何 Android 专属逻辑，仅作为骨架占位，确保：
-/// 1. `cargo build --target aarch64-linux-android` 在补齐 NDK 且完成 T2 模块门控后可解析到入口；
-/// 2. Windows 构建完全不受影响（本模块在 Windows 目标下不编译）。
-#[allow(dead_code)]
+/// 通过 `#[tauri::mobile_entry_point]` 在 Android 上生成 JNI/C FFI 入口，由 Java 侧调用。
+/// 当前阶段（T2）仅搭建骨架：Builder + 云就绪占位；具体命令与 PAL 业务能力在 T4 充实。
+#[tauri::mobile_entry_point]
 pub fn run() {
-    // TODO(T4): 实现 Tauri-Android 入口：Builder + 插件/命令注册 + generate_context!().run()
-    // 本期（T0+T1）仅占位，不引入任何运行时行为。
+    // 云就绪句柄（T3 local-only 默认实现）：当前仅占位，T4 将作为 `app.manage(...)` 状态注入。
+    let _cloud = crate::cloud::local::LocalCloudContext::default();
+
+    let builder = tauri::Builder::default();
+
+    builder
+        .setup(|app| {
+            // PAL / 云就绪句柄占位：T4 将在此注册 Android 平台抽象与本地-only 业务命令，
+            // 例如：
+            //   app.manage(crate::cloud::local::LocalCloudContext::new(
+            //       app.path().app_data_dir().unwrap_or_default(),
+            //   ));
+            let _ = app;
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running 安得云荟 on Android");
 }

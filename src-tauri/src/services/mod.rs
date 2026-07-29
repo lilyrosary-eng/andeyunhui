@@ -10,8 +10,13 @@ pub mod pptx_wps;
 pub mod pptx_import;
 pub mod lyrics_service;
 pub mod reading_service;
+// 录屏捕获（WGC / D3D11 / AudioCapture）为 Windows 专属后端：非 Windows 目标不编译该模块，
+// 避免裸引 windows / windows_capture / winapi 等仅 Windows 可用的 crate。
+#[cfg(windows)]
 pub mod recording_service;
 pub mod window_manager;
+// 诊断模块依赖 Windows 捕获后端（windows_capture），仅 Windows 编译。
+#[cfg(windows)]
 pub mod diagnostics;
 pub mod log_service;
 pub mod ai_service;
