@@ -71,9 +71,12 @@ export function CitedChat() {
           value={question}
           onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setQuestion(e.target.value)}
           onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask();
+            if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+              e.preventDefault();
+              ask();
+            }
           }}
-          placeholder="向知识库提问…（Ctrl/⌘+Enter 发送）"
+          placeholder="向知识库提问…（Enter 发送，Ctrl/⌘+Enter 换行）"
           rows={2}
           className="flex-1 resize-none rounded-lg border border-neutral-200/60 dark:border-stone-600/60 bg-white/70 dark:bg-stone-800/70 px-3 py-2 text-sm text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-bg)]"
         />

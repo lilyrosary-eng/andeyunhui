@@ -5,7 +5,7 @@
 // 直接复用全局 AI 能力（ai_chat 命令 + ai-delta/done/error 事件，与 ai 模块同源）。
 // 作为 茑萝 的子插件（plugins/茑萝/capsule）承载，窗口内容随主包由 main.tsx 分流渲染。
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
 // [修复] 用 getCurrentWebviewWindow 取「当前 webview 所属窗」(胶囊窗,label='capsule')。
 // 不能用 getCurrentWindow()(Tauri v2 下 metadata.currentWindow 误指向主窗→返回主窗)
@@ -17,6 +17,7 @@ import { listen, emit } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { ensureOverlayWindow, type OverlayProfile } from '@/core/overlayWindow';
 import { FileSearchPanel } from '@/components/FileSearchPanel';
+import { KeepButton } from '@/components/KeepButton';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 
 // 收起态窗口尺寸（逻辑像素）：高 50%、长 75%（相对上一版 320×72）
@@ -239,8 +240,15 @@ const IconWeather = ({ code }: { code: number | null }) => {
   );
 };
 
+const IconCode = () => (
+  <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="m16 18 6-6-6-6" />
+    <path d="m8 6-6 6 6 6" />
+  </svg>
+);
 const ACTIONS = [
   { kind: 'ai', label: 'AI', Icon: IconBot },
+  { kind: 'aide', label: 'AI编程', Icon: IconCode },
   { kind: 'search', label: '搜索', Icon: IconSearchGlass },
   { kind: 'screenshot', label: '截图', Icon: IconScreenshot },
   { kind: 'record', label: '录屏', Icon: IconRecord },
@@ -248,6 +256,10 @@ const ACTIONS = [
   { kind: 'clipboard', label: '剪贴板', Icon: IconClipboard },
   { kind: 'transfer', label: '传输', Icon: IconTransfer },
 ] as const;
+
+// 动作分两层：第一排=高频（用户指定）；第二排=其余，后续排满再加「更多」二级入口
+const ACTION_LAYER1 = ['ai', 'screenshot', 'record', 'transfer', 'dropzone', 'clipboard'] as const;
+const ACTION_LAYER2 = ['aide', 'search'] as const;
 
 // 黑白棋盘底纹（深色半透明底叠半透明白格），放大 3 倍、整体倾斜 30°，呼应「黄金棋盘」主题；
 // 放大覆盖 (-80%) 确保宽扁的胶囊在 30° 旋转后仍被完整覆盖；整体保持半透明，桌面可透出。
@@ -367,11 +379,15 @@ function TransferPanel({
   receiveRequest,
   onAcceptReceive,
   onDeclineReceive,
+  keepOpen,
+  onKeepToggle,
 }: {
   onClose: () => void;
   receiveRequest: ReceiveRequest | null;
   onAcceptReceive: () => void;
   onDeclineReceive: () => void;
+  keepOpen?: boolean;
+  onKeepToggle?: () => void;
 }) {
   const [peers, setPeers] = useState<TransferPeer[]>([]);
   const [progress, setProgress] = useState<TransferProgressItem[]>([]);
@@ -521,6 +537,9 @@ function TransferPanel({
             {running ? '已开启 · 可被同网设备发现' : '未开启'} · 兼容 LocalSend
           </div>
         </div>
+        {onKeepToggle && (
+          <KeepButton pinned={!!keepOpen} onToggle={onKeepToggle} size={28} />
+        )}
         <button onClick={onClose} title="返回播放器" style={{ ...btnBase, width: 28, height: 28 }}>
           <IconClose />
         </button>
@@ -698,6 +717,10 @@ export default function Capsule() {
   const sessionListRef = useRef<PlayInfo[]>([]);
   const selectedKeyRef = useRef<string | null>(null);
   const expandedRef = useRef(false); // 收起态下屏蔽与展示无关的 state churn，避免后台播放时重渲染
+  const hoverLockRef = useRef(false); // 收起后锁定悬停自动展开，需点击胶囊才恢复
+  const keepOpenRef = useRef(false); // 保持态：鼠标离开不自动收起
+  const [keepOpen, setKeepOpen] = useState(false);
+  useEffect(() => { keepOpenRef.current = keepOpen; }, [keepOpen]);
   const playKeyRef = useRef(''); // 内容比对，避免 applyDisplay 每次都 setPlay
 
   // —— 接收请求：浮岛（黄金棋盘）作为主接收方 ——
@@ -797,6 +820,8 @@ export default function Capsule() {
 
   // 收起即「回到主页」：关闭所有子面板（搜索/对话/传输），避免再次展开时卡在搜索页。
   const collapse = () => {
+    hoverLockRef.current = true; // 收起后：悬停不再自动展开，需用户点击胶囊恢复（见 body onClick）
+    keepOpenRef.current = false; setKeepOpen(false); // 保持态随显式收起一并清除
     setExpanded(false);
     setSearchOpen(false);
     setChatOpen(false);
@@ -829,6 +854,7 @@ export default function Capsule() {
 
   // AI 对话状态（多会话：下拉选择 / 新建）
   const CHAT_STORE_KEY = 'andeyunhui.capsule.conversations';
+  const AIDE_STORE_KEY = 'andeyunhui.capsule.aide.conversations.v2'; // 升版本清空历史浮岛 AI 编程对话（与 IDE 对齐）
   const CONV_TITLE_MAX = 20;
   const loadConvs = (): Conversation[] => {
     try {
@@ -881,10 +907,72 @@ export default function Capsule() {
   const [chatBusy, setChatBusy] = useState(false);
   const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>({}); // 思考过程折叠状态
   const [aiProfileId, setAiProfileId] = useState<string | null>(null);
+  const [aiProfiles, setAiProfiles] = useState<Array<{ id: string; name?: string; model?: string; base_url?: string; api_key?: string }>>([]);
   const [aiHint, setAiHint] = useState<string | null>(null);
   const activeReqRef = useRef<string | null>(null);
   const asstIdRef = useRef<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+
+  // 浮岛「AI 编程」多对话（本地持有，接管 IDE 对话执行，事件桥接）
+  const [aideOpen, setAideOpen] = useState(false);
+  const [aideInput, setAideInput] = useState('');
+  const [aideBusy, setAideBusy] = useState(false);
+  const [aideReasoningOpen, setAideReasoningOpen] = useState<Record<string, boolean>>({});
+  const aideReqRef = useRef<string | null>(null);
+  const aideAsstRef = useRef<string | null>(null);
+  const aideScrollRef = useRef<HTMLDivElement | null>(null);
+  const [aideProfileId, setAideProfileId] = useState<string | null>(null);
+  const [aideMode, setAideMode] = useState<'chat' | 'agent'>('chat'); // AI 编程：对话 / 代理（agent）
+  const configuredAideProfiles = aiProfiles.filter((p) => p.api_key && p.api_key.trim());
+  // 多对话（本地，参考 AI 对话）
+  const initialAideConvs = useMemo(() => {
+    try {
+      const raw = localStorage.getItem(AIDE_STORE_KEY);
+      if (raw) {
+        const cs = JSON.parse(raw) as Conversation[];
+        if (Array.isArray(cs) && cs.length) return cs;
+      }
+    } catch { /* 忽略 */ }
+    return [{ id: 'ac' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
+  }, []);
+  const [aideConversations, setAideConversations] = useState<Conversation[]>(initialAideConvs);
+  const [aideActiveConvId, setAideActiveConvId] = useState<string>(initialAideConvs[0].id);
+  const aideActiveConvIdRef = useRef<string>(aideActiveConvId);
+  useEffect(() => { aideActiveConvIdRef.current = aideActiveConvId; }, [aideActiveConvId]);
+  useEffect(() => { try { localStorage.setItem(AIDE_STORE_KEY, JSON.stringify(aideConversations)); } catch { /* 忽略 */ } }, [aideConversations]);
+  const aideStreamConvIdRef = useRef<string>(aideActiveConvId);
+  const updateAideStreamMessages = useCallback((convId: string, updater: (prev: ChatMsg[]) => ChatMsg[]) => {
+    setAideConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, messages: updater(c.messages), updatedAt: Date.now() } : c)));
+  }, []);
+  const aideActiveConv = aideConversations.find((c) => c.id === aideActiveConvId);
+  const aideMessages = aideActiveConv?.messages ?? [];
+  // 清空全部对话（浮岛 AI 编程 + 通知 IDE 一并清空 chat/agent），一键回到干净起点
+  const clearAideConversations = useCallback(() => {
+    const fresh: Conversation[] = [{ id: 'ac' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
+    setAideConversations(fresh);
+    setAideActiveConvId(fresh[0].id);
+    aideActiveConvIdRef.current = fresh[0].id;
+    aideStreamConvIdRef.current = fresh[0].id;
+    try { localStorage.removeItem(AIDE_STORE_KEY); } catch { /* 忽略 */ }
+    emit('capsule-ide-clear-conversations').catch(() => {});
+  }, []);
+  const newAideConversation = useCallback(() => {
+    const id = 'ac' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    setAideConversations((prev) => [{ id, title: '新对话', messages: [], updatedAt: Date.now() }, ...prev]);
+    setAideActiveConvId(id);
+    setAideInput('');
+    setAideBusy(false);
+    aideReqRef.current = null;
+    aideAsstRef.current = null;
+    aideStreamConvIdRef.current = id;
+  }, []);
+  const selectAideConversation = useCallback((id: string) => {
+    setAideActiveConvId(id);
+    setAideInput('');
+    setAideBusy(false);
+    aideReqRef.current = null;
+    aideAsstRef.current = null;
+  }, []);
 
   const coverUrl = useMemo(
     () => (play?.cover_path ? convertFileSrc(play.cover_path) : null),
@@ -951,17 +1039,45 @@ export default function Capsule() {
 
   // 进入对话模式时加载全局模型档案，取已配置的活动档案 id
   useEffect(() => {
-    if (!chatOpen) return;
+    if (!chatOpen && !aideOpen) return;
     setAiHint(null);
-    invoke<{ profiles: Array<{ id: string; api_key?: string }>; active: string | null }>('ai_get_profiles')
+    invoke<{ profiles: Array<{ id: string; name?: string; model?: string; base_url?: string; api_key?: string }>; active: string | null }>('ai_get_profiles')
       .then((d) => {
+        setAiProfiles(d.profiles || []);
         const usable = (d.profiles || []).filter((p) => p.api_key && p.api_key.trim());
         const act = d.active && usable.some((p) => p.id === d.active) ? d.active : usable[0]?.id ?? null;
         setAiProfileId(act);
+        setAideProfileId((prev) => (prev && usable.some((p) => p.id === prev)) ? prev : act);
         if (!act) setAiHint('未配置模型：请到「全局设置 → 模型」添加并填写 API Key');
       })
       .catch(() => setAiHint('读取模型配置失败'));
-  }, [chatOpen]);
+  }, [chatOpen, aideOpen]);
+
+  // 反向同步：浮岛打开「AI 编程」时，拉取 IDE 当前对话（IDE 端已镜像浮岛消息），
+  // 使两端可见同一历史；IDE 是持久化真相源，浮岛每次打开都刷新为最新。
+  useEffect(() => {
+    if (!aideOpen) return;
+    invoke<{ conversations?: Array<any>; active_id?: string | null }>('ai_get_conversations')
+      .then((d) => {
+        const list = (d?.conversations || []).filter((c) => c && Array.isArray(c.messages));
+        if (!list.length) return;
+        setAideConversations(list as typeof aideConversations);
+        const aid = (d.active_id && list.some((c: any) => c.id === d.active_id)) ? d.active_id! : list[0].id;
+        setAideActiveConvId(aid);
+        aideActiveConvIdRef.current = aid;
+      })
+      .catch(() => {});
+  }, [aideOpen]);
+
+  // 跟随 IDE 当前激活模型：IDE 切换模型时广播，浮岛 AI 编程用同一模型（避免浮岛默认/误选到与 IDE 不同的模型导致退化循环）
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    listen<{ id: string }>('ai-active-profile-changed', (e) => {
+      const id = e?.payload?.id;
+      if (id) setAideProfileId(id);
+    }).then((u) => { unsub = u; });
+    return () => unsub?.();
+  }, []);
 
   // 全局流式事件监听（ai-delta / ai-done / ai-error），按 requestId 过滤本次请求
   useEffect(() => {
@@ -1017,11 +1133,116 @@ export default function Capsule() {
     };
   }, []);
 
-  // 自动滚动对话到底部
+  // 浮岛「AI 编程」流式事件监听（capsule-ide-chat-*），按 requestId 过滤本次请求；消息写入当前激活对话
   useEffect(() => {
-    const el = chatScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [chat]);
+    let cancelled = false;
+    const un: Array<() => void> = [];
+    (async () => {
+      const u1 = await listen<{ requestId: string; delta: string }>('capsule-ide-chat-delta', (e) => {
+        if (e.payload.requestId === aideReqRef.current) {
+          const id = aideAsstRef.current;
+          const cid = aideStreamConvIdRef.current;
+          if (id) updateAideStreamMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, content: m.content + e.payload.delta } : m)));
+        }
+      });
+      const finish = (err?: string) => {
+        setAideBusy(false);
+        const aid = aideAsstRef.current;
+        const cid = aideStreamConvIdRef.current;
+        aideReqRef.current = null;
+        if (aid) {
+          updateAideStreamMessages(cid, (prev) => prev.map((m) => {
+            if (m.id !== aid) return m;
+            if (err) return { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ ' + err };
+            return { ...m, content: m.content || '（无内容）' };
+          }));
+        }
+        aideAsstRef.current = null;
+      };
+      const u2 = await listen<{ requestId: string }>('capsule-ide-chat-done', (e) => {
+        if (e.payload.requestId === aideReqRef.current) finish();
+      });
+      const u3 = await listen<{ requestId: string; error: string }>('capsule-ide-chat-error', (e) => {
+        if (e.payload.requestId === aideReqRef.current) finish(e.payload.error);
+      });
+      const u4 = await listen<{ requestId: string; delta: string }>('capsule-ide-chat-reasoning-delta', (e) => {
+        if (e.payload.requestId === aideReqRef.current) {
+          const id = aideAsstRef.current;
+          const cid = aideStreamConvIdRef.current;
+          if (id) updateAideStreamMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, reasoning: (m.reasoning || '') + e.payload.delta } : m)));
+        }
+      });
+      if (cancelled) {
+        u1(); u2(); u3(); u4();
+        return;
+      }
+      un.push(u1, u2, u3, u4);
+    })();
+    return () => {
+      cancelled = true;
+      un.forEach((f) => f());
+    };
+  }, [updateAideStreamMessages]);
+
+  // 浮岛「AI 编程·代理」流式事件监听（capsule-ide-agent-*），按 requestId 过滤；agent 回传的是整段已清洗文本（替换式）
+  useEffect(() => {
+    let cancelled = false;
+    const un: Array<() => void> = [];
+    (async () => {
+      const u1 = await listen<{ requestId: string; text: string }>('capsule-ide-agent-delta', (e) => {
+        if (e.payload.requestId === aideReqRef.current) {
+          const id = aideAsstRef.current;
+          const cid = aideStreamConvIdRef.current;
+          if (id) updateAideStreamMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, content: e.payload.text } : m)));
+        }
+      });
+      const finish = (err?: string) => {
+        setAideBusy(false);
+        const aid = aideAsstRef.current;
+        const cid = aideStreamConvIdRef.current;
+        aideReqRef.current = null;
+        if (aid) {
+          updateAideStreamMessages(cid, (prev) => prev.map((m) => {
+            if (m.id !== aid) return m;
+            if (err) return { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ ' + err };
+            return { ...m, content: m.content || '（无内容）' };
+          }));
+        }
+        aideAsstRef.current = null;
+      };
+      const u2 = await listen<{ requestId: string }>('capsule-ide-agent-done', (e) => {
+        if (e.payload.requestId === aideReqRef.current) finish();
+      });
+      const u3 = await listen<{ requestId: string; error: string }>('capsule-ide-agent-error', (e) => {
+        if (e.payload.requestId === aideReqRef.current) finish(e.payload.error);
+      });
+      if (cancelled) {
+        u1(); u2(); u3();
+        return;
+      }
+      un.push(u1, u2, u3);
+    })();
+    return () => {
+      cancelled = true;
+      un.forEach((f) => f());
+    };
+  }, [updateAideStreamMessages]);
+
+  // 自动滚动对话到底部（打开面板 / 切换对话 / 流式增量时均滚到底，避免长对话需手动翻找）
+  const scrollChatToBottom = () => { const el = chatScrollRef.current; if (el) el.scrollTop = el.scrollHeight; };
+  useLayoutEffect(() => {
+    scrollChatToBottom();
+    const id = requestAnimationFrame(scrollChatToBottom); // 兜底：窗口 36→470 过渡重排后再滚一次
+    return () => cancelAnimationFrame(id);
+  }, [chat, chatOpen, panelReady]);
+
+  // 浮岛「AI 编程」自动滚动到底部
+  const scrollAideToBottom = () => { const el = aideScrollRef.current; if (el) el.scrollTop = el.scrollHeight; };
+  useLayoutEffect(() => {
+    scrollAideToBottom();
+    const id = requestAnimationFrame(scrollAideToBottom);
+    return () => cancelAnimationFrame(id);
+  }, [aideMessages, aideOpen, aideActiveConvId, panelReady]);
 
   // 上报窗口物理矩形，供 Rust 光标监视线程做热区判定（随展开/收起改变尺寸与居中）
   async function reportRect(w: number, h: number) {
@@ -1079,8 +1300,11 @@ export default function Capsule() {
     // 首帧渲染就不包含子面板——规避 36→470 过渡期旧窗高裁剪标题栏的问题。
     // 用 expandedRef（expand effect 同步维护）判断是否从收起态展开，避免闭包陈旧值。
     listen<boolean>('capsule:expand', (e) => {
-      if (e.payload && !expandedRef.current) {
-        setPanelReady(false);
+      if (e.payload) {
+        if (hoverLockRef.current) return; // 收起锁定：悬停不自动展开，直到用户点击胶囊
+        if (!expandedRef.current) setPanelReady(false);
+      } else {
+        if (keepOpenRef.current) return; // 保持态：鼠标离开不自动收起
       }
       setExpanded(!!e.payload);
     }).then((f) => unsubs.push(f));
@@ -1118,7 +1342,7 @@ export default function Capsule() {
   useEffect(() => {
     expandedRef.current = expanded; // 供 now-playing 监听器判断是否需要同步列表 state
     const w = EXPANDED_W;
-    const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : EXPANDED_H;
+    const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : EXPANDED_H;
     // [修复] 用 getCurrentWebviewWindow 取胶囊窗自身（见挂载 effect 注释）：
     // getCurrentWindow() 会误返回主窗；WebviewWindow.getByLabel 是 async 且胶囊内注册表无自身。
     const win = getCurrentWebviewWindow();
@@ -1146,7 +1370,8 @@ export default function Capsule() {
     // 穿透/点击切换：收起态 ignore=true（点击穿透桌面），展开态 ignore=false（接收点击）。
     // 原由 Rust 侧 set_ignore_cursor_events 负责，但 Rust 用 get_webview_window 克隆全局窗表里的
     // WebviewWindow 会在窗销毁竞态下克隆已损坏的 Arc 触发 assert_unchecked 中止；改由胶囊对自身窗调用。
-    win.setIgnoreCursorEvents(!expanded).catch(() => {});
+    // 收起态不再设为鼠标穿透：改为可点击，用户点击胶囊即可展开（悬停自动展开仍由 hoverLockRef 阻止）
+    win.setIgnoreCursorEvents(false).catch(() => {});
     win
       .setSize(new LogicalSize(w, h))
       .then(() => {
@@ -1175,7 +1400,7 @@ export default function Capsule() {
         window.setTimeout(presentOverlayNow, 160);
       })
       .catch(() => {});
-  }, [expanded, chatOpen, searchOpen]);
+  }, [expanded, chatOpen, aideOpen, searchOpen, transferOpen]);
 
   // 媒体控制：经 Rust 命令转发。target=选中会话的 key（AUMID / "app"），未选中则交给活跃会话/本应用
   const ctrl = useCallback((action: string, value?: number) => {
@@ -1186,9 +1411,17 @@ export default function Capsule() {
   async function onAction(kind: string) {
     try {
       if (kind === 'ai') {
-        // 切换内置 AI 对话模式（复用全局 ai_chat 能力）；与搜索互斥
+        // 切换内置 AI 对话模式（复用全局 ai_chat 能力）；与搜索/浮岛 AI 编程互斥
         setSearchOpen(false);
+        setAideOpen(false);
         setChatOpen((v) => !v);
+      } else if (kind === 'aide') {
+        // 浮岛「AI 编程」：接管 IDE 对话，由 IDE 模块处理；与内置 AI/搜索/传输互斥
+        setExpanded(true);
+        setChatOpen(false);
+        setSearchOpen(false);
+        setTransferOpen(false);
+        setAideOpen((v) => !v);
       } else if (kind === 'search') {
         // 切换内置 Everything 风格搜索模式；与对话互斥
         setChatOpen(false);
@@ -1356,7 +1589,129 @@ export default function Capsule() {
     }
   }, [chatInput, chatBusy, aiProfileId, chat]);
 
-  const pillH = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : EXPANDED_H;
+  // 清洗发给 IDE 的历史：丢弃空助手占位 / 连续重复消息 / 超长截断，阻断退化乱码被反复回灌形成循环
+  const cleanAideHistory = (msgs: Array<{ role?: string; content?: any }>) => {
+    const out: Array<{ role: string; content: string }> = [];
+    for (const m of msgs) {
+      if (!m || !m.role || m.content == null) continue;
+      const c = String(m.content);
+      if (m.role === 'assistant' && c.trim() === '') continue; // 跳过空助手（残留占位）
+      const prev = out[out.length - 1];
+      if (prev && prev.role === m.role && prev.content === c) continue; // 去重连续相同
+      out.push({ role: m.role as string, content: c });
+    }
+    return out.slice(-24);
+  };
+
+  // 浮岛「AI 编程」发送：不调 ai_chat，通知 IDE 接管对话（chat 模式，事件桥接，携带 profile + 历史）
+  const sendAide = useCallback(async () => {
+    const text = aideInput.trim();
+    if (!text || aideBusy) return;
+    // agent（自主编辑）模式：转发给 IDE 的 agent 面板执行，使用 IDE 当前激活档案（无需浮岛侧 profile）
+    if (aideMode === 'agent') {
+      if (aideReqRef.current) return; // 同步防重入：已有请求在飞时忽略，避免双击/重复 emit 触发 IDE busy 守卫误报"正在处理其他请求"
+      const uid = 'u' + Date.now().toString(36);
+      const aid = 'a' + Date.now().toString(36);
+      const convId = aideActiveConvId;
+      aideStreamConvIdRef.current = convId;
+      const history = cleanAideHistory(aideMessages.filter((m) => !m.error));
+      const reqId = 'cage_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      updateAideStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '' }]);
+      setAideConversations((prev) => prev.map((c) => (c.id === convId && (c.title === '新对话' || !c.title.trim())) ? { ...c, title: text.slice(0, CONV_TITLE_MAX) } : c));
+      setAideInput('');
+      setAideBusy(true);
+      aideReqRef.current = reqId;
+      aideAsstRef.current = aid;
+      const timer = setTimeout(() => {
+        if (aideReqRef.current === reqId) {
+          aideReqRef.current = null;
+          aideAsstRef.current = null;
+          updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ IDE 未响应：请确认 IDE 模块已加载且处于「自主编辑（agent）模式」并已打开 AI 面板。' } : m)));
+          setAideBusy(false);
+        }
+      }, 20000);
+      try {
+        await emit('capsule-ide-agent-request', { requestId: reqId, text, profileId: aideProfileId ?? undefined, history });
+      } catch (e) {
+        clearTimeout(timer);
+        aideReqRef.current = null;
+        aideAsstRef.current = null;
+        updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: '⚠ 发送失败：' + String(e) } : m)));
+        setAideBusy(false);
+      }
+      return;
+    }
+    if (!aideProfileId) {
+      setAiHint('未配置模型：请到「全局设置 → 模型」添加并填写 API Key');
+      return;
+    }
+    const uid = 'u' + Date.now().toString(36);
+    const aid = 'a' + Date.now().toString(36);
+    const convId = aideActiveConvId;
+      aideStreamConvIdRef.current = convId;
+      const history = cleanAideHistory(aideMessages.filter((m) => !m.error));
+      const reqId = 'cide_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    updateAideStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '' }]);
+    setAideConversations((prev) => prev.map((c) => (c.id === convId && (c.title === '新对话' || !c.title.trim())) ? { ...c, title: text.slice(0, CONV_TITLE_MAX) } : c));
+    setAideInput('');
+    setAideBusy(true);
+    aideReqRef.current = reqId;
+    aideAsstRef.current = aid;
+    // 兜底：若 IDE 未响应（如处于 agent 模式 / AI 面板未挂载），避免一直「思考中…」
+    const timer = setTimeout(() => {
+      if (aideReqRef.current === reqId) {
+        aideReqRef.current = null;
+        aideAsstRef.current = null;
+        updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ IDE 未响应：请确认 IDE 模块已加载且处于「对话模式」（非 agent 模式）。' } : m)));
+        setAideBusy(false);
+      }
+    }, 20000);
+    try {
+      await emit('capsule-ide-chat-request', { requestId: reqId, text, profileId: aideProfileId, history });
+    } catch (e) {
+      clearTimeout(timer);
+      aideReqRef.current = null;
+      aideAsstRef.current = null;
+      updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: '⚠ 发送失败：' + String(e) } : m)));
+      setAideBusy(false);
+    }
+  }, [aideInput, aideBusy, aideProfileId, aideMessages, aideMode]);
+
+  const pillH = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : EXPANDED_H;
+
+  // 浮岛动作按钮分两排渲染（第一排高频，第二排其余），按钮 JSX 仅在内部出现一次
+  const renderActionRow = (kinds: readonly string[]) => (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-around' }}>
+      {kinds.map((k) => {
+        const a = ACTIONS.find((x) => x.kind === k)!;
+        return (
+          <button
+            key={a.kind}
+            onClick={(e) => { e.stopPropagation(); onAction(a.kind); }}
+            title={a.label}
+            style={{
+              ...btnBase,
+              flexDirection: 'column',
+              gap: 3,
+              width: 72,
+              height: 50,
+              fontSize: 11,
+              color: '#f2f2f4',
+              background:
+                (a.kind === 'ai' && chatOpen) || (a.kind === 'aide' && aideOpen) || (a.kind === 'search' && searchOpen) || (a.kind === 'transfer' && transferOpen)
+                  ? 'rgba(230,195,92,0.18)'
+                  : 'rgba(255,255,255,0.06)',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.14)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+          >
+            <a.Icon />
+            <span>{a.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
 
   return (
     <div
@@ -1401,7 +1756,7 @@ export default function Capsule() {
         onClick={() => {
           if (!chatOpen) {
             if (expanded) collapse();
-            else setExpanded(true);
+            else { hoverLockRef.current = false; setExpanded(true); }
           }
         }}
         style={{
@@ -1455,7 +1810,7 @@ export default function Capsule() {
           )}
 
           {/* 展开态 · 播放器模式（多会话可堆叠 / 下拉切换） */}
-          {expanded && !chatOpen && !searchOpen && !transferOpen && (
+          {expanded && !chatOpen && !searchOpen && !transferOpen && !aideOpen && (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 14px 12px', minHeight: 0 }}>
               {/* 媒体源选择：多会话时下拉命中指定卡片 */}
               {allSessions.length > 1 && (
@@ -1537,6 +1892,7 @@ export default function Capsule() {
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
                     <Clock />
+                    <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen((v) => !v)} size={26} />
                     <button onClick={(e) => { e.stopPropagation(); collapse(); }} title="收起" style={{ ...btnBase, width: 26, height: 26 }}>
                       <IconChevron />
                     </button>
@@ -1577,33 +1933,11 @@ export default function Capsule() {
                 </div>
               </div>
 
-              {/* 快捷操作行：截图 / 录屏 / 中转站 / 剪贴板 / AI（可继续扩展） */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-around', marginTop: 'auto', paddingTop: 8 }}>
-                {ACTIONS.map(({ kind, label, Icon }) => (
-                  <button
-                    key={kind}
-                    onClick={(e) => { e.stopPropagation(); onAction(kind); }}
-                    title={label}
-                    style={{
-                      ...btnBase,
-                      flexDirection: 'column',
-                      gap: 3,
-                      width: 72,
-                      height: 50,
-                      fontSize: 11,
-                      color: '#f2f2f4',
-                      background:
-                        (kind === 'ai' && chatOpen) || (kind === 'search' && searchOpen) || (kind === 'transfer' && transferOpen)
-                          ? 'rgba(230,195,92,0.18)'
-                          : 'rgba(255,255,255,0.06)',
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.14)')}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
-                  >
-                    <Icon />
-                    <span>{label}</span>
-                  </button>
-                ))}
+              {/* 快捷操作：分两排。第一排=高频(用户指定)，第二排=其余(后续排满再加「更多」二级入口) */}
+              <div style={{ display: 'flex', flexDirection: 'column', marginTop: 'auto', paddingTop: 8, gap: 8 }}>
+                {renderActionRow(ACTION_LAYER1)}
+                <div style={{ height: 1, background: 'rgba(255,255,255,0.08)', margin: '0 6px' }} />
+                {renderActionRow(ACTION_LAYER2)}
               </div>
             </div>
           )}
@@ -1661,6 +1995,7 @@ export default function Capsule() {
                     {conversations.length} 个对话 · 全局 AI · 复用模型配置
                   </div>
                 </div>
+                <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen((v) => !v)} size={28} />
                 <button onClick={() => setChatOpen(false)} title="返回播放器" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
                   <IconClose />
                 </button>
@@ -1725,7 +2060,7 @@ export default function Capsule() {
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
+                    if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
                       e.preventDefault();
                       void sendChat();
                     }
@@ -1765,9 +2100,140 @@ export default function Capsule() {
             </div>
           )}
 
+          {/* 展开态 · 浮岛「AI 编程」多对话（本地持有，接管 IDE 执行，事件桥接） */}
+          {expanded && aideOpen && panelReady && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px' }} onClick={(e) => e.stopPropagation()}>
+              {/* 顶部细条：返回 + 标题 + 对话切换 + 新建 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#f2f2f4' }}>AI 编程</span>
+                {/* 对话切换：下拉选择 / 新建 */}
+                <select
+                  value={aideActiveConvId}
+                  onChange={(e) => selectAideConversation(e.target.value)}
+                  title="选择对话（下拉切换）"
+                  style={{ flex: 1, minWidth: 0, fontSize: 12, color: '#f6f6f8', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: '4px 6px', outline: 'none' }}
+                >
+                  {aideConversations.map((c) => (
+                    <option key={c.id} value={c.id} style={{ background: '#1c1c1e', color: '#f6f6f8' }}>
+                      {(c.title || '新对话').slice(0, CONV_TITLE_MAX)}
+                    </option>
+                  ))}
+                </select>
+                <button onClick={newAideConversation} title="新建对话" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: GOLD, background: 'rgba(230,195,92,0.14)', fontSize: 16, lineHeight: 1 }}>
+                  +
+                </button>
+                <button onClick={() => clearAideConversations()} title="清空全部对话（浮岛 + IDE）" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: 'rgba(244,244,246,0.8)', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', fontSize: 11 }}>
+                  清空
+                </button>
+                <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen((v) => !v)} size={28} />
+                <button onClick={() => setAideOpen(false)} title="返回播放器" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
+                  <IconClose />
+                </button>
+              </div>
+              {/* 第二行：模式切换（对话 / 代理）+ 模型下拉 + 思考开关 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                {/* 模式切换：对话 = chat 桥；代理 = agent 桥（走 IDE 自主编辑面板） */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 2, background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: 2, flex: '0 0 auto' }}>
+                  <button onClick={() => setAideMode('chat')} title="对话模式（chat 桥）" style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideMode === 'chat' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideMode === 'chat' ? GOLD : 'transparent' }}>对话</button>
+                  <button onClick={() => setAideMode('agent')} title="代理模式（agent 桥，交给 IDE 自主编辑）" style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideMode === 'agent' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideMode === 'agent' ? GOLD : 'transparent' }}>代理</button>
+                </div>
+                <select
+                  value={aideProfileId ?? ''}
+                  onChange={(e) => setAideProfileId(e.target.value || null)}
+                  title={aideMode === 'agent' ? '代理模式使用 IDE 当前激活模型' : '选择模型'}
+                  disabled={aideMode === 'agent'}
+                  style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: '#f6f6f8', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: '4px 6px', outline: 'none', opacity: aideMode === 'agent' ? 0.5 : 1 }}
+                >
+                  {configuredAideProfiles.length === 0 && <option value="" style={{ background: '#1c1c1e', color: '#f6f6f8' }}>未配置模型</option>}
+                  {configuredAideProfiles.map((p) => (
+                    <option key={p.id} value={p.id} style={{ background: '#1c1c1e', color: '#f6f6f8' }}>
+                      {p.name || p.model || '未命名'}
+                    </option>
+                  ))}
+                </select>
+                {/* 代理模式请求本就带 aideProfileId 转发给 IDE 执行，故思考开关直接控制 aideProfileId（chat/agent 一致），不再置灰 */}
+                <ThinkingToggle
+                  profileId={aideProfileId}
+                  compact
+                  disabled={!aideProfileId || aideBusy}
+                />
+                {aideBusy && <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.6)' }}>{aideMode === 'agent' ? '执行中…' : '思考中…'}</span>}
+              </div>
+
+              {/* 消息列表 */}
+              <div ref={aideScrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8, paddingRight: 2 }}>
+                {aideMessages.length === 0 && (
+                  <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.55)', textAlign: 'center', marginTop: 12 }}>与 AI 结对编程：对话模式回车发送；代理模式把任务交给 IDE 自主编辑（需 IDE 处于「自主编辑」模式）。</div>
+                )}
+                {aideMessages.map((m) => (
+                  <div
+                    key={m.id}
+                    style={{
+                      alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                      maxWidth: '85%',
+                      background: m.role === 'user' ? 'rgba(230,195,92,0.18)' : 'rgba(255,255,255,0.08)',
+                      color: m.error ? '#ff9a9a' : '#f2f2f4',
+                      borderRadius: 12,
+                      padding: '8px 10px',
+                      fontSize: 12.5,
+                      lineHeight: 1.5,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    {m.role === 'assistant' && m.reasoning ? (
+                      <div style={{ marginBottom: 6 }}>
+                        <button
+                          onClick={() => setAideReasoningOpen((o) => ({ ...o, [m.id]: !o[m.id] }))}
+                          style={{ ...btnBase, padding: '1px 7px', fontSize: 10.5, borderRadius: 6, background: 'rgba(255,255,255,0.07)', color: 'rgba(244,244,246,0.62)', marginBottom: 4 }}
+                        >
+                          {aideReasoningOpen[m.id] ? '▾' : '▸'} 思考过程{aideReasoningOpen[m.id] ? '' : `（${m.reasoning.length} 字 · 点击展开）`}
+                        </button>
+                        {aideReasoningOpen[m.id] && (
+                          <div style={{ fontSize: 10.5, lineHeight: 1.55, fontStyle: 'italic', color: 'rgba(244,244,246,0.5)', background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '6px 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', filter: 'blur(0.3px)' }}>
+                            {m.reasoning}
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                    {m.content || (m.role === 'assistant' && aideBusy ? '思考中…' : '')}
+                  </div>
+                ))}
+              </div>
+
+              {/* 输入区 */}
+              <div style={{ marginTop: 8, borderRadius: 12, border: '1px solid rgba(255,255,255,0.16)', background: 'rgba(0,0,0,0.22)', padding: 8 }}>
+                <textarea
+                  value={aideInput}
+                  onChange={(e) => setAideInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+                      e.preventDefault();
+                      void sendAide();
+                    }
+                  }}
+                  rows={1}
+                  placeholder={aideMode === 'agent' ? '输入任务，交给 IDE 自主编辑（Enter 发送）' : (aideProfileId ? '输入消息…' : '未配置模型')}
+                  disabled={aideMode === 'chat' && !aideProfileId}
+                  style={{ width: '100%', display: 'block', resize: 'none', maxHeight: 90, minHeight: 34, height: 34, border: 'none', background: 'transparent', color: '#f4f4f6', padding: '4px 4px', fontSize: 12.5, lineHeight: 1.4, outline: 'none', fontFamily: 'inherit' }}
+                />
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginTop: 4 }}>
+                  <button
+                    onClick={() => void sendAide()}
+                    disabled={aideBusy || !aideInput.trim() || (aideMode === 'chat' && !aideProfileId)}
+                    title="发送"
+                    style={{ ...btnBase, width: 34, height: 34, background: 'rgba(230,195,92,0.18)', opacity: aideBusy || !aideInput.trim() || (aideMode === 'chat' && !aideProfileId) ? 0.45 : 1 }}
+                  >
+                    <IconSend />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* 展开态 · 文件搜索（复用 FileSearchPanel，与主窗口黄金棋盘共享） */}
           {expanded && searchOpen && panelReady && (
-            <FileSearchPanel variant="overlay" onClose={() => setSearchOpen(false)} />
+            <FileSearchPanel variant="overlay" onClose={() => setSearchOpen(false)} keepOpen={keepOpen} onKeepToggle={() => setKeepOpen((v) => !v)} />
           )}
 
           {/* 展开态 · 局域网传输（LocalSend v2 兼容） */}
@@ -1777,6 +2243,8 @@ export default function Capsule() {
               receiveRequest={receiveReq}
               onAcceptReceive={acceptReceive}
               onDeclineReceive={declineReceive}
+              keepOpen={keepOpen}
+              onKeepToggle={() => setKeepOpen((v) => !v)}
             />
           )}
         </div>

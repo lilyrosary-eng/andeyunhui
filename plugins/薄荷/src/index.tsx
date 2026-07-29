@@ -2262,10 +2262,10 @@ function ProfessionalModule() {
             {ToolView ? <ToolView /> : <ComingSoon tool={selectedTool} />}
           </ToolShell>
         ) : (
-          <>
+          <div className="h-full overflow-y-auto">
             {toolGrid}
             {emptyHint}
-          </>
+          </div>
         )}
       </PushViewBox>
     </div>
