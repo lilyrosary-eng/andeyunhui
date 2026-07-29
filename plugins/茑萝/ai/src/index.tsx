@@ -191,6 +191,14 @@ function CodeBlock({ lang, value }: { lang: string; value: string }) {
   );
 }
 
+// 跨组件任意次挂载 / 任意泄漏监听器的全局护栏：保证同一 requestId 在整窗内只处理一次、只调一次 ai_chat。
+// 否则出现多份桥接监听（旧版泄漏残留、StrictMode、宿主重复渲染等）时，每个都会调一次 ai_chat，
+// 同一 delta 被转发 N 次 → 浮岛 N 连字；且本面板自身 ai-delta 监听（按 activeReq 回写）也让 IDE 跟着 N 连字；
+// 第一份抢到 busy 后其余报「正在处理其他请求」。
+const AIDE_REQ_GUARD = new Set<string>();
+let AIDE_INFLIGHT: string | null = null;
+let AIDE_WATCHDOG: ReturnType<typeof setTimeout> | null = null;
+
 function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?: () => void; projectRoot?: string | null }) {
   const [profiles, setProfiles] = useState<AiProfile[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -217,10 +225,21 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const activeConvIdRef = useRef(activeConvId);
   activeConvIdRef.current = activeConvId;
+  // 桥接监听须只注册一次（空依赖），处理器内经 ref 读最新值——
+  // 若把 conversations/busy 等放进依赖，流式期间每个 delta 都会重挂 effect，
+  // 而 hostApi.listen 异步注册 + cleanup 竞态会泄漏监听器，导致浮岛每个 delta 被转发 N 次（字符 N 连重复）。
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  const profilesRef = useRef(profiles);
+  profilesRef.current = profiles;
 
   // 下拉框只列出「已填写 API Key」的档案；未配置时不展示任何可用模型。
   const configuredProfiles = profiles.filter((p) => p.api_key && p.api_key.trim());
   const activeProfile = configuredProfiles.find((p) => p.id === activeId) || null;
+  const activeProfileRef = useRef(activeProfile);
+  activeProfileRef.current = activeProfile;
   // 思考模式内联开关：直接写入后端 profile.thinking（与胶囊 / IDE / 攻防共享同一档案字段）
   const toggleThinking = async () => {
     if (!activeProfile) return;
@@ -377,10 +396,128 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
     };
   }, []);
 
-  // 自动滚动到底部
+  // 桥接：黄金棋盘浮岛「AI 编程」按钮接管本面板对话（chat 模式）
+  // 浮岛 emit('capsule-ide-chat-request', {requestId, text, profileId?, history?}) → 本面板执行并转发回流式事件。
+  // 若浮岛传入 history，则由浮岛自持消息（不写入 IDE 自身对话），IDE 仅执行并转发。
+  useEffect(() => {
+    let cancelled = false;
+    let unsub: (() => void) | null = null;
+    const p = hostApi.listen('capsule-ide-chat-request', async (e: any) => {
+      if (cancelled) return;
+      const payload = e?.payload || {};
+      const requestId: string = payload.requestId;
+      const text: string = (payload.text || '').trim();
+      if (!requestId || !text) return;
+      // 全局去重护栏：同一 requestId 整窗只处理一次（防多监听器 / 多挂载导致 N 倍 ai_chat 与 N 倍转发）
+      if (AIDE_REQ_GUARD.has(requestId)) return;
+      AIDE_REQ_GUARD.add(requestId);
+      if (AIDE_REQ_GUARD.size > 256) AIDE_REQ_GUARD.clear();
+      if (busyRef.current) {
+        await hostApi.emit('capsule-ide-chat-error', { requestId, error: 'IDE 正在处理其他请求，请稍后再试' });
+        return;
+      }
+      // 优先使用浮岛传入的档案；否则回落当前激活档案
+      const activeProf = activeProfileRef.current;
+      let profId: string | undefined = payload.profileId || activeProf?.id;
+      let prof = profilesRef.current.find((x) => x.id === profId) || activeProf;
+      if (!prof || !prof.api_key || !prof.api_key.trim()) {
+        // 回落：直接读后端最新档案，修复浮岛转发时本面板 profiles 尚未就绪（时序/竞态）导致的「未配置模型」
+        try {
+          const fresh = (await hostApi.invoke('ai_get_profiles')) as any;
+          const list: any[] = Array.isArray(fresh?.profiles) ? fresh.profiles : [];
+          const usable = list.filter((p: any) => p.api_key && p.api_key.trim());
+          const act = fresh?.active && usable.some((p: any) => p.id === fresh.active) ? fresh.active : (usable[0]?.id ?? null);
+          profId = payload.profileId || act;
+          prof = list.find((x: any) => x.id === profId) || usable.find((x: any) => x.id === act) || null;
+        } catch { /* 忽略，走下方统一报错 */ }
+      }
+      if (!prof || !prof.api_key || !prof.api_key.trim()) {
+        await hostApi.emit('capsule-ide-chat-error', { requestId, error: '⚠ 尚未配置可用模型：请到「全局设置 → 模型」添加并填写 API Key' });
+        return;
+      }
+      // 浮岛传入历史则由浮岛持有消息；否则回落 IDE 当前激活对话历史
+      const capsuleManaged = Array.isArray(payload.history);
+      const histSrc = capsuleManaged
+        ? (payload.history as Array<{ role: string; content: string }>).filter((m: any) => m && m.role && m.content != null).map((m: any) => ({ role: m.role, content: String(m.content) }))
+        : (conversationsRef.current.find((c) => c.id === activeConvIdRef.current)?.messages || [])
+            .filter((m: any) => !m.error)
+            .map((m: any) => ({ role: m.role, content: m.content }));
+      const msgPayload = [
+        { role: 'system', content: buildSystemPrompt() },
+        ...histSrc,
+        { role: 'user', content: text },
+      ];
+      // 浮岛 AI 编程：IDE 负责执行并流式回传；同时把同一轮镜像进 IDE 自身对话，
+      // 使「浮岛 ↔ IDE」两端可见同一会话（同步）。本面板自身的 ai-delta 监听会按
+      // activeReq.current/assistantId.current 把流式内容写回这条对话，done 时复位 busy。
+      const uid = 'u_' + Date.now().toString(36);
+      const aid = 'a_' + Date.now().toString(36);
+      setConversations((prev) => prev.map((c) => (c.id === activeConvIdRef.current ? {
+        ...c,
+        title: c.title === '新对话' ? (text.slice(0, 12) || c.title) : c.title,
+        messages: [...c.messages, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '', streaming: true }],
+      } : c)));
+      setBusy(true);
+      activeReq.current = requestId; // 让本面板自身 ai-delta 监听回写这条对话（接管）
+      assistantId.current = aid;
+      // 转发流式事件给浮岛（按 requestId 过滤），done/error 后反注册转发监听
+      const fwd = (name: string, pl: any) => { void hostApi.emit('capsule-ide-chat-' + name, pl); };
+      let done = false;
+      const teardown = () => {
+        if (done) return;
+        done = true;
+        u1(); u2(); u3(); u4();
+        if (AIDE_WATCHDOG !== null) { clearTimeout(AIDE_WATCHDOG); AIDE_WATCHDOG = null; }
+        AIDE_INFLIGHT = null;
+      };
+      const u1 = await hostApi.listen('ai-delta', (ev: any) => { if (ev?.payload?.requestId === requestId) fwd('delta', ev.payload); });
+      const u2 = await hostApi.listen('ai-reasoning-delta', (ev: any) => { if (ev?.payload?.requestId === requestId) fwd('reasoning-delta', ev.payload); });
+      const u3 = await hostApi.listen('ai-done', (ev: any) => { if (ev?.payload?.requestId === requestId) { fwd('done', ev.payload); teardown(); } });
+      const u4 = await hostApi.listen('ai-error', (ev: any) => { if (ev?.payload?.requestId === requestId) { fwd('error', ev.payload); teardown(); } });
+      // 看门狗：若 180s 内未收到 done/error（后端异常静默），强制复位 busy 与在途标记，避免永久卡「正在处理其他请求」
+      AIDE_INFLIGHT = requestId;
+      AIDE_WATCHDOG = setTimeout(() => {
+        if (AIDE_INFLIGHT === requestId) { AIDE_INFLIGHT = null; setBusy(false); activeReq.current = null; assistantId.current = null; }
+        teardown();
+      }, 180000);
+
+      try {
+        await hostApi.invoke('ai_chat', { requestId, messages: msgPayload, profileId: prof.id });
+      } catch (err) {
+        fwd('error', { requestId, error: String(err) });
+        teardown();
+        if (activeReq.current === requestId) {
+          setBusy(false);
+          activeReq.current = null;
+          assistantId.current = null;
+        }
+      }
+    });
+    p.then((u) => { if (cancelled) { u(); return; } unsub = u; }).catch(() => {});
+    return () => { cancelled = true; if (unsub) unsub(); };
+  }, []);
+
+  // 浮岛「清空对话」：重置 IDE 普通对话（chat 模式）并存盘
+  useEffect(() => {
+    let unsub: (() => void) | null = null;
+    hostApi.listen<{}>('capsule-ide-clear-conversations', () => {
+      const fresh: Conversation[] = [{ id: 'c_' + Date.now().toString(36), title: '新对话', messages: [] }];
+      setConversations(fresh);
+      setActiveConvId(fresh[0].id);
+      activeConvIdRef.current = fresh[0].id;
+      hostApi.invoke('ai_save_conversations', { payload: { conversations: fresh, active_id: fresh[0].id } })
+        .catch(() => {});
+    }).then((u) => { unsub = u; });
+    return () => unsub?.();
+  }, []);
+
+  // 自动滚动到底部（流式渲染含代码高亮时高度会后置，rAF 兜底再滚一次，避免长对话需手动翻找）
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    const id = requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+    return () => cancelAnimationFrame(id);
   }, [messages]);
 
   // 输入框自适应高度：单行起，随行数扩展，最高 4 行后内部滚动（#8）
@@ -683,7 +820,7 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
               ) : modelOpen ? (
                 <div className="absolute bottom-full right-0 mb-1 z-30 w-60 rounded-lg border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 shadow-lg max-h-48 overflow-auto py-1">
                   {configuredProfiles.map((p) => (
-                    <button key={p.id} onClick={() => { setActiveId(p.id); setModelOpen(false); }}
+                    <button key={p.id} onClick={() => { setActiveId(p.id); setModelOpen(false); hostApi.emit('ai-active-profile-changed', { id: p.id }).catch(() => {}); }}
                       className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-black/5 dark:hover:bg-white/5 ${p.id === activeId ? 'text-[var(--element-bg)] font-medium' : ''}`}>
                       {p.name || p.model || '未命名'} · {p.model || p.base_url}
                     </button>

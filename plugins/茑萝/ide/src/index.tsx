@@ -2960,7 +2960,7 @@ function IdeEditor() {
   // IDE 模块设置页（#13）：独立设置，区别于全局「茑萝」设置
   if (showIdeSettings) {
     return (
-      <div className="flex-1 flex flex-col h-full w-full min-w-0 overflow-hidden bg-white dark:bg-stone-900 text-neutral-800 dark:text-stone-100">
+      <div className="flex-1 flex flex-col h-full w-full min-w-0 relative overflow-hidden bg-white dark:bg-stone-900 text-neutral-800 dark:text-stone-100">
         {toolbar}
         <IdeSettings
           settings={ideSettings}
@@ -3046,9 +3046,10 @@ function IdeEditor() {
             <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500 text-sm">打开文件或新建文档开始编辑</div>
           )}
         </div>
-        {hasAi && (
+        {/* agent 模式：保持侧边 docked 列（需贴着编辑器上下文） */}
+        {hasAi && aiOpen && ideSettings.mode === 'agent' && (
           <div
-            className={`relative shrink-0 h-full flex flex-col border-l border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-900 ${aiOpen ? '' : 'hidden'}`}
+            className="relative shrink-0 h-full flex flex-col border-l border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-900"
             style={{ width: aiWidth, minWidth: 320 }}
           >
             {/* 拖拽调宽手柄 */}
@@ -3059,15 +3060,25 @@ function IdeEditor() {
             />
             <div className="flex-1 min-h-0 overflow-hidden">
               {AiComp ? (
-                ideSettings.mode === 'agent' ? (
-                  <IdeAgent projectRoot={projRoot} activeProfileId={aiActiveId} onProfileChange={setAiActiveId} onChanges={onAgentChanges} />
-                ) : (
-                  <AiComp docked onClose={() => setAiOpen(false)} projectRoot={projRoot} />
-                )
+                <IdeAgent projectRoot={projRoot} activeProfileId={aiActiveId} onProfileChange={setAiActiveId} onChanges={onAgentChanges} />
               ) : (
                 <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500 text-sm">AI 编程模块未加载</div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* chat 模式（normal）：非覆盖式弹窗，从 IDE 窗口右下角浮出，不遮挡编辑器 */}
+        {hasAi && aiOpen && ideSettings.mode !== 'agent' && (
+          <div
+            className="absolute bottom-4 right-4 z-30 flex flex-col bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 rounded-2xl shadow-2xl overflow-hidden"
+            style={{ width: 420, height: 460, maxHeight: 'calc(100% - 32px)' }}
+          >
+            {AiComp ? (
+              <AiComp docked onClose={() => setAiOpen(false)} projectRoot={projRoot} />
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500 text-sm">AI 编程模块未加载</div>
+            )}
           </div>
         )}
       </div>
@@ -3664,6 +3675,8 @@ function IdeSettings({
 //   AI 回复中包含 <read>/<write> 指令时，前端读取/记录文件，并把结果回填后继续追问，
 //   直到 AI 输出 <done/> 或不再产生指令。结束后把记录到的写入汇总成「待审阅改动」交给 IDE 主组件。
 type AgentMsg = { id: string; role: 'user' | 'assistant' | 'tool'; content: string; streaming?: boolean; error?: boolean };
+// 浮岛转发来的对话消息（与浮岛 aideMessages 对齐：仅 user/assistant，无 system/tool）
+type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
 function IdeAgent({
   projectRoot, activeProfileId, onProfileChange, onChanges,
@@ -3694,6 +3707,9 @@ function IdeAgent({
   const assistantIdRef = useRef<string | null>(null);
   const reqRef = useRef<string | null>(null);
   const handlersRef = useRef<{ onDelta: () => void; onDone: (err?: string, usage?: any) => void } | null>(null);
+  // 浮岛「AI 编程」agent 桥：当前请求 requestId + 多轮累积的已清洗文本（回传浮岛用）
+  const capsuleAgentReqRef = useRef<string | null>(null);
+  const agentRunCleanedRef = useRef<string>('');
   const cancelRef = useRef(false);
   const resolveRef = useRef<(() => void) | null>(null);
   const errRef = useRef<string | null>(null);
@@ -3706,6 +3722,8 @@ function IdeAgent({
   const currentSessionIdRef = useRef<string | null>(null);
   const pendingEditsRef = useRef<AgentEdit[]>([]);
   const [sessions, setSessions] = useState<SessionIndexEntry[]>([]);
+  // 当前激活会话 id（响应式，供页头下拉框高亮当前会话）
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   // 刷新会话列表（每次 projectRoot 变化或保存/删除后调用）
   const refreshSessions = useCallback(() => {
@@ -3746,6 +3764,8 @@ function IdeAgent({
     // 用最新 agentStats 填充（通过 ref 拿到最新值）
     statsRef.current && Object.assign(sess.stats, statsRef.current);
     savePersistedSession(sess);
+    currentSessionIdRef.current = sess.id;
+    setCurrentSessionId(sess.id);
     refreshSessions();
   }, [projectRoot, refreshSessions]);
   // 恢复会话：载入 historyRef + conv + pendingEdits + stats
@@ -3756,6 +3776,7 @@ function IdeAgent({
     convRef.current = sess.conv.slice();
     pendingEditsRef.current = sess.edits.slice();
     currentSessionIdRef.current = sess.id;
+    setCurrentSessionId(sess.id);
     // 恢复 conv 显示（用 ref 中的副本，避免 setConv 异步导致显示滞后）
     setConv(sess.conv.slice());
     setPlanChips(sess.edits.map((e) => e.path));
@@ -3788,6 +3809,7 @@ function IdeAgent({
     // 生成新 sessionId（分叉点）
     const newSid = 's_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     currentSessionIdRef.current = newSid;
+    setCurrentSessionId(newSid);
     const branchName = `fork-${new Date().toLocaleString()}`;
     setConv(sess.conv.slice());
     setPlanChips(sess.edits.map((e) => e.path));
@@ -3813,6 +3835,7 @@ function IdeAgent({
     convRef.current = [];
     pendingEditsRef.current = [];
     currentSessionIdRef.current = null;
+    setCurrentSessionId(null);
     setConv([]);
     setPlanChips([]);
     setAgentStats((s) => ({
@@ -4033,17 +4056,47 @@ function IdeAgent({
       }
     };
     (async () => {
-      const u1 = await hostApi.listen<{ requestId: string; delta: string }>('ai-delta', (e) => { if (e.payload.requestId === reqRef.current) { bufRef.current += e.payload.delta; append(); } });
+      const u1 = await hostApi.listen<{ requestId: string; delta: string }>('ai-delta', (e) => {
+        if (e.payload.requestId === reqRef.current) {
+          bufRef.current += e.payload.delta;
+          append();
+          // 浮岛「AI 编程」agent 桥：把当前轮已清洗文本回传浮岛（多轮累积到 agentRunCleanedRef）
+          if (capsuleAgentReqRef.current) {
+            const cleaned = extractDirectives(bufRef.current).cleaned;
+            hostApi.emit('capsule-ide-agent-delta', {
+              requestId: capsuleAgentReqRef.current,
+              text: (agentRunCleanedRef.current ? agentRunCleanedRef.current + '\n—\n' : '') + cleaned,
+            });
+          }
+        }
+      });
       // ai-done 事件现在携带 usage 字段（prompt_cache.rs 的 cache_read_input_tokens / cache_creation_input_tokens）
-      const u2 = await hostApi.listen<{ requestId: string; usage?: any }>('ai-done', (e) => { if (e.payload.requestId === reqRef.current) finish(undefined, e.payload.usage); });
-      const u3 = await hostApi.listen<{ requestId: string; error: string }>('ai-error', (e) => { if (e.payload.requestId === reqRef.current) finish(e.payload.error); });
+      const u2 = await hostApi.listen<{ requestId: string; usage?: any }>('ai-done', (e) => {
+        if (e.payload.requestId === reqRef.current) {
+          // 浮岛 agent 桥：提交本轮 cleaned 到 run 级缓冲（done 不在此发，由 runAgent 末尾统一发）
+          if (capsuleAgentReqRef.current) {
+            agentRunCleanedRef.current = (agentRunCleanedRef.current ? agentRunCleanedRef.current + '\n—\n' : '') + extractDirectives(bufRef.current).cleaned;
+          }
+          finish(undefined, e.payload.usage);
+        }
+      });
+      const u3 = await hostApi.listen<{ requestId: string; error: string }>('ai-error', (e) => {
+        if (e.payload.requestId === reqRef.current) {
+          // 浮岛 agent 桥：本轮出错直接报错回传（runAgent 末尾的 emitAgentEnd 会因 req 已清空而不重复发）
+          if (capsuleAgentReqRef.current) {
+            hostApi.emit('capsule-ide-agent-error', { requestId: capsuleAgentReqRef.current, error: e.payload.error });
+            capsuleAgentReqRef.current = null;
+          }
+          finish(e.payload.error);
+        }
+      });
       if (cancelled) { u1(); u2(); u3(); return; }
       unlistens.push(u1, u2, u3);
     })();
     return () => { cancelled = true; unlistens.forEach((u) => u()); };
   }, []);
 
-  useEffect(() => { const el = scrollRef.current; if (el) el.scrollTop = el.scrollHeight; }, [conv]);
+  useEffect(() => { const el = scrollRef.current; if (!el) return; el.scrollTop = el.scrollHeight; const id = requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; }); return () => cancelAnimationFrame(id); }, [conv]);
 
   const autoResize = useCallback(() => {
     const el = inputRef.current;
@@ -4187,8 +4240,19 @@ function IdeAgent({
     setConv((prev) => [...prev, { id: 'c_' + Date.now().toString(36), role: 'assistant', content: '⛔ 已取消运行' }]);
   }, []);
 
-  const runAgent = useCallback(async () => {
-    const text = input.trim();
+  // 浮岛「AI 编程」agent 桥：本轮/本任务结束时统一回传 done（错误则传 error），emit 后清空 requestId 防止重复
+  const emitAgentEnd = useCallback((err?: string) => {
+    if (capsuleAgentReqRef.current) {
+      hostApi.emit(err ? 'capsule-ide-agent-error' : 'capsule-ide-agent-done', {
+        requestId: capsuleAgentReqRef.current,
+        ...(err ? { error: err } : {}),
+      });
+      capsuleAgentReqRef.current = null;
+    }
+  }, []);
+
+  const runAgent = useCallback(async (overrideText?: string, seed?: ChatMessage[]) => {
+    const text = (overrideText ?? input).trim();
     if (!text || busy) return;
     if (!activeProfileId) {
       setConv((prev) => [...prev, { id: 'h_' + Date.now().toString(36), role: 'assistant', content: '⚠ 尚未配置可用模型：请到「全局设置 → 模型」添加并填写 API Key。', error: true }]);
@@ -4197,6 +4261,12 @@ function IdeAgent({
     cancelRef.current = false;
     setBusy(true);
     setInput('');
+    // 浮岛代理请求：以浮岛共享对话历史（chat/agent 共用的 aideMessages）作为本轮上下文，
+    // 使 agent 模式与浮岛（及 chat 模式）共享同一对话，而非每次从空白开始。
+    if (seed && seed.length) {
+      historyRef.current = [...seed];
+      setConv(seed.map((m, i) => ({ id: 'seed_' + i, role: m.role, content: m.content })));
+    }
     // 重置恢复配方计数（每轮 agent 任务独立计数，避免长期会话累积上限）
     resetRecoveryRecipes();
     setHookCount(hookRegistry.count()); // 刷新状态栏 Hook 计数
@@ -4361,8 +4431,8 @@ function IdeAgent({
         setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36), role: 'tool', content: `🔥 Token 预警（${Math.round(usedTokens / 1000)}k/${TOKEN_CAP / 1000}k）` }]);
       }
       await callChat(buildMessages());
-      if (cancelRef.current) { setBusy(false); return; }
-      if (errRef.current) { setBusy(false); return; }
+      if (cancelRef.current) { setBusy(false); emitAgentEnd(); return; }
+      if (errRef.current) { setBusy(false); emitAgentEnd(errRef.current); return; }
       const raw = bufRef.current;
       const { reads, writes, edits, shells, asts, mcps, searches, rags, done, cleaned } = extractDirectives(raw);
       // 累计本轮工具调用次数（状态栏显示用）
@@ -4817,7 +4887,7 @@ function IdeAgent({
       if (pendingEdits.length > EDIT_CEIL) { loopGuard = true; break; }
     }
 
-    if (cancelRef.current) { setBusy(false); return; }
+    if (cancelRef.current) { setBusy(false); emitAgentEnd(); return; }
     if (loopGuard) {
       setConv((prev) => [...prev, { id: 'g_' + Date.now().toString(36), role: 'assistant', content: `⚠ 本次会话改动数量超过上限（${EDIT_CEIL}），疑似陷入循环或幻觉，已提前终止。全部改动已保留在下方审阅面板，请你人工确认后再「完成」。` }]);
     }
@@ -4860,7 +4930,9 @@ function IdeAgent({
     // 会话持久化：runAgent 结束自动保存（对齐 session.rs::flush）
     // 等待 setConv 异步完成后再保存（用 setTimeout 0 让 convRef 更新到最新值）
     setTimeout(() => saveCurrentSession(), 0);
-  }, [input, busy, activeProfileId, projectRoot, planChips, SYSTEM_PROMPT, onChanges, profiles, isTrusted, mcpTools, refreshMcpTools, permissionMode, approvalToken, consumeToken, saveCurrentSession]);
+    // 浮岛「AI 编程」agent 桥：本任务正常结束，回传 done（runAgent 唯一一处发 done 的出口）
+    emitAgentEnd();
+  }, [input, busy, activeProfileId, projectRoot, planChips, SYSTEM_PROMPT, onChanges, profiles, isTrusted, mcpTools, refreshMcpTools, permissionMode, approvalToken, consumeToken, saveCurrentSession, emitAgentEnd]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
@@ -4868,6 +4940,58 @@ function IdeAgent({
       runAgent();
     }
   };
+
+  // 浮岛「AI 编程」agent 桥：接收浮岛转发来的请求，直接驱动本 AgentPane 执行（仅 agent 模式挂载时生效）
+  useEffect(() => {
+    let cancelled = false;
+    let unsub: (() => void) | undefined;
+    hostApi.listen<{ requestId: string; text: string; profileId?: string; history?: ChatMessage[] }>('capsule-ide-agent-request', async (e) => {
+      const payload = (e?.payload || {}) as any;
+      const requestId = payload.requestId;
+      const text = (payload.text || '').trim();
+      if (!requestId || !text) return;
+      // 去重护栏：同一 requestId 已在处理则静默忽略（防泄漏的重复监听器二次触发并误报「正在处理其他请求」）
+      if (capsuleAgentReqRef.current === requestId) return;
+      if (busy || capsuleAgentReqRef.current) {
+        await hostApi.emit('capsule-ide-agent-error', { requestId, error: 'IDE 正在处理其他请求，请稍后再试' });
+        return;
+      }
+      capsuleAgentReqRef.current = requestId;
+      agentRunCleanedRef.current = '';
+      // 可选：浮岛若指定模型，切换到该档案（ID 不匹配则忽略，沿用当前激活档案）
+      if (payload.profileId && payload.profileId !== activeProfileId && onProfileChange && configuredProfiles.some((p: any) => p.id === payload.profileId)) {
+        onProfileChange(payload.profileId);
+      }
+      // runAgent 用闭包内 activeProfileId：若上面切了档，先下一帧再跑，确保用上新档案
+      if (payload.profileId && payload.profileId !== activeProfileId) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      // 以浮岛共享对话历史作为种子，使 agent 模式与 chat 模式/浮岛共享同一对话上下文
+      await runAgent(text, payload.history);
+    }).then((u) => { if (cancelled) { u(); return; } unsub = u; });
+    // 依赖含 runAgent（其 useCallback 依赖 input 等，每次输入都变）→ effect 高频重挂；
+    // hostApi.listen 异步注册，cancelled 守卫确保「清理先于注册完成」时也能反注册，杜绝监听器泄漏累积。
+    return () => { cancelled = true; unsub?.(); };
+  }, [busy, runAgent, activeProfileId, onProfileChange, configuredProfiles]);
+
+  // 浮岛「清空对话」：清除 IDE 代理历史会话（localStorage）并存盘重置
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    hostApi.listen<{}>('capsule-ide-clear-conversations', () => {
+      try {
+        const keys: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && (k === SESSION_INDEX_KEY || k.startsWith('ide_session_'))) keys.push(k);
+        }
+        keys.forEach((k) => localStorage.removeItem(k));
+      } catch { /* 忽略 */ }
+      setSessions([]);
+      setCurrentSessionId(null);
+      if (typeof newSession === 'function') newSession();
+    }).then((u) => { unsub = u; });
+    return () => unsub?.();
+  }, [newSession]);
 
   return (
     <div className="flex flex-col h-full bg-neutral-50 dark:bg-stone-900 text-neutral-800 dark:text-stone-100">
@@ -4880,7 +5004,7 @@ function IdeAgent({
           {configuredProfiles.length === 0 ? (
             <span className="px-2 py-1 rounded text-[11px] bg-amber-500/10 text-amber-600 dark:text-amber-400 max-w-[180px] truncate" title="尚未配置可用模型">未配置模型</span>
           ) : modelOpen ? (
-            <div className="absolute bottom-full right-0 mb-1 z-30 w-60 rounded-lg border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 shadow-lg max-h-48 overflow-auto py-1">
+            <div className="absolute top-full right-0 mt-1 z-30 w-60 rounded-lg border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 shadow-lg max-h-48 overflow-auto py-1">
               {configuredProfiles.map((p) => (
                 <button key={p.id} onClick={() => { onProfileChange?.(p.id); setModelOpen(false); }}
                   className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-black/5 dark:hover:bg-white/5 ${p.id === activeProfileId ? 'text-[var(--element-bg)] font-medium' : ''}`}>
@@ -4898,7 +5022,7 @@ function IdeAgent({
         {!projectRoot && <span className="text-[11px] text-neutral-400 dark:text-stone-500" title="建议先在左侧打开项目文件夹">未打开项目</span>}
       </div>
       {/* 会话统计状态栏（借鉴 TUI-ENHANCEMENT-PLAN.md：model/token/cost/duration/shells/edits） */}
-      <div className="flex items-center gap-2 px-3 py-1 text-[10px] border-b border-neutral-200/40 dark:border-stone-700/40 bg-neutral-50/50 dark:bg-stone-800/30 shrink-0 overflow-x-auto whitespace-nowrap">
+      <div className="flex items-center gap-2 px-3 py-1 text-[10px] border-b border-neutral-200/40 dark:border-stone-700/40 bg-neutral-50/50 dark:bg-stone-800/30 shrink-0 whitespace-nowrap overflow-x-auto">
         {/* 当前模型名（对齐 TUI-ENHANCEMENT-PLAN.md 状态栏 model 指示） */}
         {activeProfile && (
           <span className="text-indigo-600 dark:text-indigo-400 font-mono" title={`模型：${activeProfile.model || '未知'}\n档案：${activeProfile.name || activeProfile.id}${activeProfile.base_url ? '\n端点：' + activeProfile.base_url : ''}`}>
@@ -4966,7 +5090,21 @@ function IdeAgent({
         )}
         <span className="flex-1" />
         {/* 会话历史（对齐 session.rs::Session 持久化 + task_registry.rs::Task 列表） */}
-        <div className="relative">
+        <div className="relative shrink-0">
+          {/* 对话选择下拉框（与 chat 模式一致：切换已保存的多轮会话） */}
+          {sessions.length > 0 && (
+            <select
+              value={currentSessionId ?? ''}
+              onChange={(e) => { const v = e.target.value; if (v) restoreSession(v); }}
+              title="切换会话"
+              className="max-w-[160px] text-xs rounded-md border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 text-neutral-800 dark:text-stone-100 px-2 py-1 outline-none"
+            >
+              <option value="">当前会话</option>
+              {sessions.map((s) => (
+                <option key={s.id} value={s.id}>{(s.firstPrompt || '(空会话)').slice(0, 22)}</option>
+              ))}
+            </select>
+          )}
           <button
             onClick={() => setHistoryOpen((v) => !v)}
             className={`btn-press font-mono px-1.5 py-0.5 rounded ${sessions.length > 0 ? 'text-purple-600 dark:text-purple-400 bg-purple-500/10' : 'text-neutral-400 dark:text-stone-500 bg-neutral-500/5'}`}
@@ -4975,7 +5113,7 @@ function IdeAgent({
             📚 {sessions.length}
           </button>
           {historyOpen && (
-            <div className="absolute bottom-full right-0 mb-1 z-30 w-80 rounded-lg border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 shadow-lg">
+            <div className="absolute top-full right-0 mt-1 z-30 w-80 rounded-lg border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 shadow-lg">
               <div className="flex items-center gap-1 px-3 py-1.5 border-b border-neutral-200 dark:border-stone-700 text-[11px] text-neutral-500 dark:text-stone-400">
                 <span className="font-semibold">📚 会话历史</span>
                 <span className="flex-1" />
@@ -5012,7 +5150,7 @@ function IdeAgent({
           )}
         </div>
         {/* 策略引擎：PermissionMode 切换器（对齐 policy_engine.rs::PolicyRule + permission_enforcer.rs） */}
-        <div className="relative">
+        <div className="relative shrink-0">
           <button
             onClick={() => setModeMenuOpen((v) => !v)}
             className={`btn-press font-mono px-1.5 py-0.5 rounded ${PERMISSION_MODE_META[permissionMode].cls}`}
@@ -5021,7 +5159,7 @@ function IdeAgent({
             {PERMISSION_MODE_META[permissionMode].chip} {PERMISSION_MODE_META[permissionMode].label}
           </button>
           {modeMenuOpen && (
-            <div className="absolute bottom-full right-0 mb-1 z-30 w-64 rounded-lg border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 shadow-lg py-1">
+            <div className="absolute top-full right-0 mt-1 z-30 w-64 rounded-lg border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 shadow-lg py-1">
               {PERMISSION_MODES.map((m) => (
                 <button
                   key={m}
@@ -5135,7 +5273,7 @@ function IdeAgent({
                     </>
                   )}
             </button>
-            <button onClick={busy ? cancelAgent : runAgent} disabled={busy ? false : !input.trim()}
+            <button onClick={busy ? cancelAgent : () => runAgent()} disabled={busy ? false : !input.trim()}
               className={`btn-press shrink-0 px-4 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${busy ? 'bg-red-500/90 text-white hover:bg-red-500' : 'element-primary hover:bg-[var(--element-hover)]'}`}>
               {busy ? '⛔ 取消' : '运行'}
             </button>

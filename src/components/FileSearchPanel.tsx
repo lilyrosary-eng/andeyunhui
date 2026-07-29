@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useI18n } from '@/lib/i18n';
+import { KeepButton } from '@/components/KeepButton';
 
 interface SearchResult {
   path: string;
@@ -34,9 +35,11 @@ const IconClose = () => (
 interface FileSearchPanelProps {
   variant: 'panel' | 'overlay';
   onClose?: () => void;
+  keepOpen?: boolean;
+  onKeepToggle?: () => void;
 }
 
-export function FileSearchPanel({ variant, onClose }: FileSearchPanelProps) {
+export function FileSearchPanel({ variant, onClose, keepOpen, onKeepToggle }: FileSearchPanelProps) {
   const { t } = useI18n();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -94,6 +97,9 @@ export function FileSearchPanel({ variant, onClose }: FileSearchPanelProps) {
               {status?.last_indexed ? ` · ${status.last_indexed}` : ''}
             </div>
           </div>
+          {variant === 'overlay' && onKeepToggle && (
+            <KeepButton pinned={!!keepOpen} onToggle={onKeepToggle} size={28} />
+          )}
           {onClose && (
             <button onClick={onClose} title={t('common.close')} style={{ appearance: 'none', border: 'none', background: 'transparent', color: GOLD, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', borderRadius: 10, width: 28, height: 28 }}>
               <IconClose />

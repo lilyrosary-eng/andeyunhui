@@ -930,7 +930,7 @@ fn conversations_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
     fs::create_dir_all(&dir).map_err(|e| format!("创建应用数据目录失败: {}", e))?;
-    Ok(dir.join("ai_conversations.json"))
+    Ok(dir.join("ai_conversations_v2.json"))
 }
 
 /// 读取全部持久化的对话；文件不存在或解析失败时返回空集合（不抛错，避免阻塞 UI）。
