@@ -14,8 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
-# 原生文件拖出：基于 Windows DoDragDrop，根治 WebView2 不支持 JS dataTransfer 拖出的问题
-drag = "2.1.1"
+# 原生文件拖出 drag 依赖（Windows DoDragDrop）已迁移至 [target.'cfg(windows)'.dependencies]，仅 Windows 编译
 tauri-plugin-opener = "=2.5.3"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
@@ -68,11 +67,7 @@ arboard = "3"
 # 桌宠全局设备监听（鼠标/键盘）：被动全局钩子，emit 原始输入事件给 deskpet 浮窗
 # 0.5.x 的 listen 接受捕获式 FnMut 闭包（可直接 move AppHandle），更简洁
 rdev = "0.5"
-# 微信式截图：可见窗口枚举（EnumWindows）+ 长截图 PrintWindow（仍走 GDI）
-winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase", "objbase", "combaseapi", "jobapi2", "objidl", "unknwnbase", "winerror", "ole2", "wtypes", "minwindef", "windef", "guiddef"] }
-# WGC 屏幕捕获后端（替换 GDI BitBlt）：基于 Windows.Graphics.Capture，硬件加速、可截独占全屏游戏；
-# windows-capture 2.0 支持更高版本的 windows crate，推荐搭配 windows 0.62 使用
-windows-capture = "2.0"
+# Windows 截图/捕获后端 winapi、windows-capture 已迁移至 [target.'cfg(windows)'.dependencies]，仅 Windows 编译
 uuid = { version = "1", features = ["v4"] }
 # 原生 Office 文档解析（OOXML = zip + XML），毫秒级、不依赖 Python
 zip = "3"
@@ -133,16 +128,21 @@ windows = { version = "0.62", features = [
   "Media_Control",
   "Storage_Streams",
 ] }
-
-# 透明分层窗首帧黑闪根治：把 WebView2 控制器 DefaultBackgroundColor 设为透明，
-# 否则长时隐藏（截图/录屏覆盖窗跨会话复用、隐藏等待触发）后 show() 首帧会露出
-# WebView2 默认的不透明黑底 → 闪黑。webview2-com-sys 必须与 wry 0.55.1 内部同版本
-# （0.38，否则 controller() 返回类型不匹配）；它实现的是 windows-core 0.61.2 的
-# Interface trait（本 crate 的 windows 0.62 用 windows-core 0.62.2，trait 版本不同、
-# cast 编译失败），故按最小面额外引入 windows-core 0.61（wry 传递依赖里本就存在，
-# 零新增编译单元）。**无法统一到 0.62**：需等 tauri/wry 升级 windows 0.62 后一并移除。
+# === 以下为 Windows 专属依赖：经 T0 依赖审计后由 [dependencies] 迁入 [target.'cfg(windows)'.dependencies] ===
+# 目的：支撑 Android v1 交叉编译（aarch64-linux-android）—— 这些 crate 仅 Windows 有实现，
+# 在 Android/Linux/macOS 目标下若仍无条件声明会导致编译失败。迁入后 Windows 构建行为完全不变。
+# 桌面端 Windows 独占功能：截图(EnumWindows/PrintWindow/GDI)、WGC 捕获、DoDragDrop 原生拖出、WebView2 COM 透明窗。
+drag = "2.1.1"
+winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi", "shellscalingapi", "dwmapi", "winbase", "objbase", "combaseapi", "jobapi2", "objidl", "unknwnbase", "winerror", "ole2", "wtypes", "minwindef", "windef", "guiddef"] }
+windows-capture = "2.0"
+# WebView2 COM 透明窗：必须与 wry 内部 webview2-com 同版本（0.38），且实现 windows-core 0.61 的 Interface trait
 webview2-com-sys = "0.38"
 windows-core-061 = { package = "windows-core", version = "0.61" }
+
+# WebView2 COM 透明窗相关依赖（webview2-com-sys、windows-core 0.61）已迁移至
+# [target.'cfg(windows)'.dependencies]，仅 Windows 编译。说明同上：必须与 wry 内部
+# webview2-com 同版本（0.38）且实现 windows-core 0.61 的 Interface trait；待 tauri/wry
+# 升级 windows 0.62 后一并移除。**无法统一到 0.62**。
 
 [features]
 # 攻防模块：启用爬虫框架（reqwest 代理池 + 双令牌桶 + EWMA + CDP 隐身 JS）
