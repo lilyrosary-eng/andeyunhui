@@ -60,13 +60,13 @@ pro-tools-kit = { path = "../crates/pro-tools-kit" }
 # 启用 `gongfang` feature 时拉入 crawler 等重型依赖
 # 一次注入后续无忧：`pnpm tauri dev -- --features gongfang,gongfang-reverse,gongfang-pentest,gongfang-automation,gongfang-gateway` 编译后功能永久可用
 gongfang-kit = { path = "../crates/gongfang-kit", default-features = false }
-# image / base64 / arboard 同时被截图模块（screenshot.rs）使用，保留在主 crate
+# image / base64 跨平台通用，保留在主 crate
 image = "0.25"
 base64 = "0.22"
-arboard = "3"
-# 桌宠全局设备监听（鼠标/键盘）：被动全局钩子，emit 原始输入事件给 deskpet 浮窗
-# 0.5.x 的 listen 接受捕获式 FnMut 闭包（可直接 move AppHandle），更简洁
-rdev = "0.5"
+# 以下两依赖仅桌面（非 Android/iOS）需要，已迁移至下方
+# [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]：
+#   - arboard：仅被 Windows 版截图模块（screenshot.rs）使用，Android/iOS 走 pal/screenshot.rs 桩，无需编译
+#   - rdev：仅被 Windows 版设备监听（device.rs）使用，Android/iOS 走 pal/device.rs 桩，无需编译
 # Windows 截图/捕获后端 winapi、windows-capture 已迁移至 [target.'cfg(windows)'.dependencies]，仅 Windows 编译
 uuid = { version = "1", features = ["v4"] }
 # 原生 Office 文档解析（OOXML = zip + XML），毫秒级、不依赖 Python
@@ -143,6 +143,17 @@ windows-core-061 = { package = "windows-core", version = "0.61" }
 # [target.'cfg(windows)'.dependencies]，仅 Windows 编译。说明同上：必须与 wry 内部
 # webview2-com 同版本（0.38）且实现 windows-core 0.61 的 Interface trait；待 tauri/wry
 # 升级 windows 0.62 后一并移除。**无法统一到 0.62**。
+
+# === 以下为「桌面（非 Android/iOS）」专属依赖：经 T2 依赖审计后由 [dependencies] 迁入 ===
+# 目的：支撑 Android v1 交叉编译（aarch64-linux-android）—— arboard / rdev 仅依赖 X11/Wayland/Windows
+# 系统 API，在 Android 目标下无实现会导致编译失败。二者仅被 Windows 版 screenshot.rs / device.rs 使用，
+# 移动端走 pal/ 同名桩，故在 Android/iOS 下不编译、零功能影响。Windows/桌面 Linux/macOS 构建行为不变。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+# 跨桌面剪贴板（截图写入兜底），仅 Windows 版 screenshot.rs 使用
+arboard = "3"
+# 桌宠全局设备监听（鼠标/键盘）：被动全局钩子，仅 Windows 版 device.rs 使用
+# 0.5.x 的 listen 接受捕获式 FnMut 闭包（可直接 move AppHandle），更简洁
+rdev = "0.5"
 
 [features]
 # 攻防模块：启用爬虫框架（reqwest 代理池 + 双令牌桶 + EWMA + CDP 隐身 JS）
