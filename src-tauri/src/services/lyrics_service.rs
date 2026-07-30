@@ -61,6 +61,12 @@ fn save_lyrics_config(app: &AppHandle, config: &LyricsWidgetConfig) {
 }
 
 /// 在 setup() 阶段创建悬浮歌词窗口（初始隐藏）
+///
+/// 桌面专属：使用 `WebviewWindowBuilder` 的桌面专属方法（title/decorations/always_on_top/
+/// transparent/shadow/visible/position/resizable 等），这些方法仅在桌面平台(windows/macos/linux)
+/// 存在；Android/iOS 上窗口由 Tauri 移动端 Activity 创建，不应手动建桌面窗。故整函数仅在桌面编译
+/// （T2 平台隔离收尾）。移动端补同名同签名桩返回 Err 让调用方在移动端不会编译失败（#android-v1）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_lyrics_config(app);
 
@@ -89,6 +95,14 @@ pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::E
     eprintln!("[Lyrics] 悬浮歌词窗口已创建（初始隐藏）位置: ({}, {})", config.x, config.y);
 
     Ok(())
+}
+
+/// 移动端(iOS/Android)桩：与桌面版同名同签名。
+/// 移动端窗口由系统接管创建，本手动建歌词浮窗命令在移动端不可用，
+/// 返回 Err 让调用方（main.rs setup 的 boot 预创建、show_lyrics_widget 内的重建调用）安全降级。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn create_lyrics_widget(_app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    Err("窗口管理在移动端由系统接管".into())
 }
 
 /// 显示歌词窗口

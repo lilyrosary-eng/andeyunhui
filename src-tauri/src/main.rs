@@ -8,7 +8,12 @@ static GLOBAL: MiMalloc = MiMalloc;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::http::{Response, StatusCode};
+// 系统托盘仅桌面概念：TrayIconBuilder / MouseButton / MouseButtonState 在 Android/iOS 不存在。
+// main.rs 是桌面二进制（lib.rs:8-9），本文件整体仅在桌面编译；移动端走 lib crate 的 android 模块。
+// 此处按 T2 平台隔离收尾，把托盘专属 API 限定到桌面（#android-v1）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::tray::TrayIconBuilder;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::tray::{MouseButton, MouseButtonState};
 use std::net::UdpSocket;
 use std::time::Duration;
@@ -75,8 +80,12 @@ fn is_supported_file_assoc(arg: &str) -> Option<std::path::PathBuf> {
 }
 use andeyunhui_lib::TrayHolder;
 use andeyunhui_lib::services::lyrics_service;
+// recording_service / diagnostics 在 services/mod.rs 中已是 `#[cfg(windows)]` 模块（仅 Windows 编译），
+// 移动端不引入该模块；此处用同样 cfg 限定其引用，保证移动端编译不依赖这两个 Windows 专属模块（#android-v1）。
+#[cfg(windows)]
 use andeyunhui_lib::services::recording_service;
 use andeyunhui_lib::services::window_manager;
+#[cfg(windows)]
 use andeyunhui_lib::services::diagnostics;
 use andeyunhui_lib::services::log_service;
 use andeyunhui_lib::services::ai_service;
@@ -260,6 +269,8 @@ fn main() {
         })
         .setup(|app| {
             app.manage(PendingOpenFiles(Default::default()));
+            // 数据根（可配置存放位置）：必须在任意 app_data 子路径被使用前维护 junction / 执行 pending 迁移
+            andeyunhui_lib::data_location::prepare_data_root(&app.handle().clone());
             // 「以安得云荟打开」临时目录：启动即清空，确保每次打开都是全新的（关软件即销毁）
             let _ = clear_openwith_dir(app.handle().clone());
             // 文件关联：以安得云荟打开（Windows 上通过启动参数传入文件路径）。
@@ -300,8 +311,27 @@ fn main() {
             // 重复实例：发送聚焦信号后直接退出，避免生成多个托盘图标。
             {
                 let app_handle = app.handle().clone();
-                match UdpSocket::bind(("127.0.0.1", INSTANCE_PORT)) {
-                    Ok(socket) => {
+                // 绑定重试：重启场景下旧实例的 UDP 端口可能尚未释放，重试若干次以让新实例
+                // 抢到端口成为主实例，避免"重启后新进程误判为重复实例而直接退出"。
+                let bind_result = {
+                    let mut sock: Option<UdpSocket> = None;
+                    for attempt in 0..20 {
+                        match UdpSocket::bind(("127.0.0.1", INSTANCE_PORT)) {
+                            Ok(s) => {
+                                sock = Some(s);
+                                break;
+                            }
+                            Err(_) => {
+                                if attempt < 19 {
+                                    std::thread::sleep(Duration::from_millis(50));
+                                }
+                            }
+                        }
+                    }
+                    sock
+                };
+                match bind_result {
+                    Some(socket) => {
                         std::thread::spawn(move || {
                             let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
                             let mut buf = [0u8; 8192];
@@ -342,7 +372,7 @@ fn main() {
                         });
                         eprintln!("[Instance] 主实例已启动，监听聚焦端口 {}", INSTANCE_PORT);
                     }
-                    Err(_) => {
+                    None => {
                         // 重复实例：把待打开的文件路径连同聚焦信号一起发给主实例，
                         // 主实例监听端会经 open-with-files 事件转发给前端路由到对应模块。
                         let paths: Vec<String> = std::env::args()
@@ -467,6 +497,10 @@ fn main() {
             // 导致主窗加载页迟迟不出现）。统一在下方经 run_on_main_thread 延后到主线程创建，
             // setup 立即返回，主窗加载页可立即显示。详见下方 diag/boot 分支。
 
+            // 系统托盘仅桌面概念（Android/iOS 无 TrayIcon）：整段用 cfg 门控，
+            // 移动端不编译此块（#android-v1）。桌面（含 Linux/macOS）行为不变。
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            {
             // 托盘图标：优先使用默认窗口图标；若极端情况下为 None，则从资源目录
             // 回退到实际图标文件，避免回退成全透明不可见图标导致"无法交互"
             let tray_icon = app.default_window_icon().cloned().unwrap_or_else(|| {
@@ -514,6 +548,7 @@ fn main() {
                 })
                 .build(app)?;
             app.manage(TrayHolder(tray));
+            }
             app.manage(std::sync::Mutex::new(andeyunhui_lib::screenshot::ScreenshotData::default()));
 
             // 注册系统级截图热键（从持久化配置读取，默认 Ctrl+Shift+S；设置面板可改写并即时生效）
@@ -1149,6 +1184,13 @@ fn main() {
             transfer::transfer_receive_accept,
             transfer::transfer_receive_decline,
             take_pending_open_files,
+            // ========== 数据根（可配置存放位置）==========
+            andeyunhui_lib::data_location::get_data_root,
+            andeyunhui_lib::data_location::set_data_root,
+            andeyunhui_lib::data_location::restart_app,
+            andeyunhui_lib::data_location::needs_data_root_setup,
+            andeyunhui_lib::data_location::mark_data_root_guided,
+            andeyunhui_lib::data_location::is_migration_pending,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
