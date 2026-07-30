@@ -495,6 +495,11 @@ pub struct OverlayProfile {
 ///   `maybe_clear_gpu_cache_on_runtime_change_early()` 会清 GPU 缓存自救。原实现不调用 mark_boot_failure，
 ///   导致运行时浮窗失败时下次启动也不清缓存，自愈循环断链。
 /// - **绝不用 `visible:false`** 创建透明(layered)窗（否则 WebView2 初始化失败 → 0x8007139F 坏窗）。
+// 桌面专属：Tauri v2 的 `WebviewWindowBuilder::decorations()`/`.transparent()`/`.shadow()`/
+// `.skip_taskbar()`/`.always_on_top()`/`.resizable()` 等建窗方法仅在桌面平台(windows/macos/linux)
+// 存在；Android/iOS 上窗口由 Tauri 移动端 Activity 创建，不应手动建桌面窗。故整函数仅在桌面编译
+// （T2 平台隔离收尾）。移动端补同名同签名桩，返回 Err 让调用方在移动端不会编译失败（#android-v1）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub async fn overlay_window_get_or_create(
     app: tauri::AppHandle,
@@ -713,6 +718,20 @@ pub async fn overlay_window_get_or_create(
     ))
 }
 
+/// 移动端(iOS/Android)桩：与桌面版同名同签名。
+/// 移动端窗口由 Tauri 移动端 Activity 接管创建，本统一建窗命令在移动端不可用，
+/// 直接返回 Err 让调用方（含 `capsule_handle_renderer_crash` 内的重建调用）安全降级。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub async fn overlay_window_get_or_create(
+    _app: tauri::AppHandle,
+    _label: String,
+    _url: String,
+    _profile: Option<OverlayProfile>,
+) -> Result<String, String> {
+    Err("窗口管理在移动端由系统接管".into())
+}
+
 /// 销毁指定浮窗（前端统一入口的关闭通道，与 `overlay_window_get_or_create` 配对）。
 #[tauri::command]
 pub fn overlay_window_destroy(app: tauri::AppHandle, label: String) -> Result<(), String> {
@@ -748,6 +767,10 @@ pub fn overlay_window_destroy(app: tauri::AppHandle, label: String) -> Result<()
 /// 探活拆分 exists_500ms（窗口对象是否还在 Tauri 窗口管理器）与 scale_ok_500ms（能取缩放比=webview 活着），
 /// 二者组合即可区分：exists=false => 窗被销毁（我方代码/前端/wry 主动关）；exists=true&scale=false => 窗在但 webview 崩溃。
 /// 触发：正常启动下启动窗失败会自动跑；或设 ANDY_DIAG=1 启动跳过正常浮窗只跑本实验。
+// 桌面专属：本诊断实验直接构造 `WebviewWindowBuilder` 并调用桌面专属建窗方法
+// （decorations/transparent/shadow/always_on_top/resizable 等），仅在桌面平台存在。
+// 整函数仅在桌面编译（T2 平台隔离收尾），移动端补同名同签名桩返回错误 JSON（#android-v1）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub async fn overlay_window_diag(app: tauri::AppHandle) -> serde_json::Value {
     let cases: Vec<(&str, bool, f64, f64, &str, u64)> = vec![
@@ -840,6 +863,18 @@ pub async fn overlay_window_diag(app: tauri::AppHandle) -> serde_json::Value {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     serde_json::json!({ "results": results })
+}
+
+/// 移动端(iOS/Android)桩：与桌面版同名同签名。
+/// 建窗诊断实验依赖桌面专属 `WebviewWindowBuilder` 方法，移动端窗口由系统接管，
+/// 返回错误 JSON 而非崩溃（main.rs 的诊断调用与 `generate_handler!` 注册在移动端均会解析到本桩）。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub async fn overlay_window_diag(_app: tauri::AppHandle) -> serde_json::Value {
+    serde_json::json!({
+        "error": "窗口诊断实验在移动端由系统接管",
+        "results": []
+    })
 }
 
 // ==================== 灵动岛胶囊（Dynamic Island）====================
