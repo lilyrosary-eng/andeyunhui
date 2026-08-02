@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { useI18n } from '@/lib/i18n';
 
 // 全局接收确认弹窗：独立于任何传输面板挂载于主窗根，确保无论当前打开的是主窗传输标签页还是浮岛，
 // 收到传输请求都会弹出确认框。否则接收端未打开传输面板时确认框不出现，发送端会 30s 超时失败
@@ -40,6 +41,7 @@ const btn: React.CSSProperties = {
 };
 
 export default function TransferReceiveModal() {
+  const { t } = useI18n();
   const [queue, setQueue] = useState<ReceiveRequest[]>([]);
   const [saveDirError, setSaveDirError] = useState<{ path: string; reason: string } | null>(null);
 
@@ -112,23 +114,23 @@ export default function TransferReceiveModal() {
             boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
           }}
         >
-          <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f6f6f8' }}>无法保存到默认目录</div>
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f6f6f8' }}>{t('transferReceive.cannotSave')}</div>
           <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.62)', marginTop: 6, wordBreak: 'break-all' }}>
             {saveDirError.path}
           </div>
           <div style={{ fontSize: 11, color: 'rgba(244,244,246,0.45)', marginTop: 4 }}>{saveDirError.reason}</div>
           <div style={{ fontSize: 11, color: 'rgba(244,244,246,0.45)', marginTop: 6 }}>
-            请选择一个有写入权限的目录（如「下载\andeyunhui」），之后接收的文件会保存到这里。
+            {t('transferReceive.chooseWritableDir')}
           </div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
             <button onClick={() => setSaveDirError(null)} style={btn}>
-              稍后
+              {t('transferReceive.later')}
             </button>
             <button
               onClick={pickSaveDir}
               style={{ ...btn, color: '#1c1c1e', background: GOLD, fontWeight: 600 }}
             >
-              选择目录
+              {t('transferReceive.chooseDir')}
             </button>
           </div>
         </div>
@@ -138,7 +140,7 @@ export default function TransferReceiveModal() {
 
   if (!current) return null;
 
-  const alias = current.alias || current.sender_alias || '对方';
+  const alias = current.alias || current.sender_alias || t('transferReceive.peer');
   const files: ReceiveFile[] = current.files?.length
     ? current.files
     : (current.file_names || []).map((name) => ({ file_name: name }));
@@ -174,14 +176,14 @@ export default function TransferReceiveModal() {
         }}
       >
         <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f6f6f8' }}>
-          「{alias}」要发送文件给你
+          {t('transferReceive.sendPrompt', { alias })}
         </div>
         <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.62)', marginTop: 6 }}>
-          共 {files.length} 个文件（
+          {t('transferReceive.fileCount', { n: files.length })}（
           {files
             .slice(0, 3)
             .map((f) => f.file_name || '')
-            .join('、')}
+            .join(t('transferReceive.listSep'))}
           {files.length > 3 ? '…' : ''}）
         </div>
         {files.length > 0 && (
@@ -194,14 +196,14 @@ export default function TransferReceiveModal() {
           </div>
         )}
         <div style={{ fontSize: 11, color: 'rgba(244,244,246,0.45)', marginTop: 4 }}>
-          将保存到设置的接收目录。30 秒未响应自动拒绝。
+          {t('transferReceive.saveDirNote')}
         </div>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
           <button onClick={decline} style={btn}>
-            拒绝
+            {t('transferReceive.decline')}
           </button>
           <button onClick={accept} style={{ ...btn, color: '#1c1c1e', background: GOLD, fontWeight: 600 }}>
-            接收
+            {t('transferReceive.accept')}
           </button>
         </div>
       </div>

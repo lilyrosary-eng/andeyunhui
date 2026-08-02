@@ -1,11 +1,16 @@
-// 黄金棋盘（原灵动岛，Dynamic Island）—— 屏幕顶部居中常驻的透明小窗。
+// 黄金棋盘（原灵动岛，Dynamic Island）—— 屏幕顶部居中常驻的透明小窗。壳。
 // 收起态（240×36）：常驻时间 + 天气，紧凑不抢眼；
 // 鼠标靠近顶部中央时由 Rust 侧光标监视线程（capsule_start_monitor）自动展开，也可点胶囊切换；
 // 展开后向左右 + 向下延展，默认露出专辑大图、播放控制、音量与快捷操作；点「AI」切换为内置对话模式，
 // 直接复用全局 AI 能力（ai_chat 命令 + ai-delta/done/error 事件，与 ai 模块同源）。
 // 作为 茑萝 的子插件（plugins/茑萝/capsule）承载，窗口内容随主包由 main.tsx 分流渲染。
+//
+// 本文件为壳：窗口生命周期 / 播放器 / 收起态 / Esc / DEV 探针 / TransferPanel / FileSearchPanel。
+// AI 对话 → CapsuleChat；AI 编程 → CapsuleAide（各自自持 state + 流式监听）。
+// 壳级共享状态（tab / 接收请求 / AI profiles）经 capsuleStore（zustand）订阅，
+// 事件闭包用 useCapsuleStore.getState() 读最新值，从而消除 expandedRef / keepOpenRef 等 ref 镜像。
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
 // [修复] 用 getCurrentWebviewWindow 取「当前 webview 所属窗」(胶囊窗,label='capsule')。
 // 不能用 getCurrentWindow()(Tauri v2 下 metadata.currentWindow 误指向主窗→返回主窗)
@@ -14,366 +19,37 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
 import { ensureOverlayWindow, type OverlayProfile } from '@/core/overlayWindow';
 import { FileSearchPanel } from '@/components/FileSearchPanel';
 import { KeepButton } from '@/components/KeepButton';
-import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
+import { useI18n } from '@/lib/i18n';
+import { useTransfer } from '@/core/transfer/useTransfer';
+import { useCapsuleStore } from '@/stores/capsuleStore';
+import CapsuleChat from '@/components/capsule/CapsuleChat';
+import CapsuleAide from '@/components/capsule/CapsuleAide';
+import {
+  CAPSULE_W, CAPSULE_H, EXPANDED_W, EXPANDED_H, CHAT_H, SEARCH_H, TRANSFER_H, TOP_Y, GOLD,
+  btnBase, DECO_LAYERS,
+} from '@/components/capsule/constants';
+import {
+  IconPlay, IconPause, IconPrev, IconNext, IconVolume, IconVolumeMute, IconChevron,
+  IconNote, IconWeather, IconTransfer, IconDevice, IconSend, IconClose,
+  ACTIONS, ACTION_LAYER1, ACTION_LAYER2, Clock,
+} from '@/components/capsule/icons';
+import { toPlayInfo, weatherLabel, fetchJson } from '@/components/capsule/helpers';
+import type { PlayInfo, ReceiveRequest } from '@/components/capsule/types';
 
-// 收起态窗口尺寸（逻辑像素）：高 50%、长 75%（相对上一版 320×72）
-export const CAPSULE_W = 240;
-export const CAPSULE_H = 36;
-// 展开态尺寸：比收起态更宽，向左右延展；高度按模式区分
-const EXPANDED_W = 460;
-const EXPANDED_H = 340; // 播放器模式
-const CHAT_H = 460; // 对话模式（更高，容纳消息列表）
-const SEARCH_H = 470;
-const TRANSFER_H = 470; // 搜索模式（容纳结果列表）
-const TOP_Y = 6;
+// 生产构建里所有 [CAPSULE-PROBE] 诊断（fps RAF / longtask / console.log / outerSize 探针）会被
+// Vite 静态替换 + tree-shake 掉，透明浮窗不再背运行时诊断开销。DEV 模式下仍可在胶囊 DevTools 查看。
+const __DEV = import.meta.env.DEV;
 
-interface PlayInfo {
-  title: string;
-  artist: string;
-  album: string;
-  is_playing: boolean;
-  media_type: string;
-  cover_path: string | null;
-  can_prev: boolean;
-  can_next: boolean;
-  /** 来源：'system' = 整机媒体监视读取的任意 App；缺省/其他 = 本应用经 smtc_update 推送 */
-  source?: string;
-  /** 会话稳定标识：系统会话=AUMID，本应用="app"。多个媒体间去重/切换用 */
-  key?: string;
-}
-interface ChatMsg {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  reasoning?: string; // 思考模式下的思维链（reasoning_content），可折叠遮罩展示
-  error?: boolean;
-}
-// 多会话：下拉选择 / 新建对话
-interface Conversation {
-  id: string;
-  title: string;
-  messages: ChatMsg[];
-  updatedAt: number;
-}
-
-// 接收请求载荷（与 Rust transfer.rs 的 transfer-receive-request 事件一致）
-interface ReceiveRequest {
-  session_id: string;
-  sender_alias: string;
-  file_count: number;
-  file_names: string[];
-  auto_accept: boolean;
-}
-
-function fmtTime(d = new Date()): string {
-  const h = d.getHours().toString().padStart(2, '0');
-  const m = d.getMinutes().toString().padStart(2, '0');
-  return `${h}:${m}`;
-}
-
-function toPlayInfo(p: Record<string, unknown> | null | undefined): PlayInfo {
-  const o = (p ?? {}) as Record<string, unknown>;
-  return {
-    title: typeof o.title === 'string' ? o.title : '',
-    artist: typeof o.artist === 'string' ? o.artist : '',
-    album: typeof o.album === 'string' ? o.album : '',
-    is_playing: !!o.is_playing,
-    media_type: typeof o.media_type === 'string' ? o.media_type : '',
-    cover_path: typeof o.cover_path === 'string' && o.cover_path ? o.cover_path : null,
-    can_prev: !!o.can_prev,
-    can_next: !!o.can_next,
-    source: typeof o.source === 'string' ? o.source : undefined,
-    key: typeof o.key === 'string' ? o.key : undefined,
-  };
-}
-
-// —— 内联 SVG 图标（避免额外依赖）——
-const svgProps = {
-  width: 20,
-  height: 20,
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 2,
-  strokeLinecap: 'round' as const,
-  strokeLinejoin: 'round' as const,
-};
-const GOLD = '#e6c35c';
-const IconScreenshot = () => (
-  <svg {...svgProps}>
-    <path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-    <circle cx="12" cy="12.5" r="3.2" />
-  </svg>
-);
-const IconRecord = () => (
-  <svg {...svgProps}>
-    <circle cx="12" cy="12" r="8" />
-    <circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" />
-  </svg>
-);
-const IconDropzone = () => (
-  <svg {...svgProps}>
-    <path d="M4 13l3-7h10l3 7" />
-    <path d="M4 13h4l1.5 3h5L16 13h4v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
-  </svg>
-);
-const IconClipboard = () => (
-  <svg {...svgProps}>
-    <rect x="6" y="4" width="12" height="17" rx="2" />
-    <path d="M9 4a3 3 0 0 1 6 0" />
-    <path d="M9 11h6M9 15h6" />
-  </svg>
-);
-const IconPlay = () => (
-  <svg {...svgProps}>
-    <path d="M8 5l11 7-11 7z" fill="currentColor" stroke="none" />
-  </svg>
-);
-const IconPause = () => (
-  <svg {...svgProps}>
-    <rect x="7" y="5" width="3.5" height="14" rx="1" fill="currentColor" stroke="none" />
-    <rect x="13.5" y="5" width="3.5" height="14" rx="1" fill="currentColor" stroke="none" />
-  </svg>
-);
-const IconPrev = () => (
-  <svg {...svgProps}>
-    <path d="M7 5v14" />
-    <path d="M19 5L9 12l10 7z" fill="currentColor" stroke="none" />
-  </svg>
-);
-const IconNext = () => (
-  <svg {...svgProps}>
-    <path d="M17 5v14" />
-    <path d="M5 5l10 7-10 7z" fill="currentColor" stroke="none" />
-  </svg>
-);
-const IconVolume = () => (
-  <svg {...svgProps}>
-    <path d="M4 9v6h4l5 4V5L8 9z" fill="currentColor" stroke="none" />
-    <path d="M16 9a4 4 0 0 1 0 6" />
-  </svg>
-);
-const IconVolumeMute = () => (
-  <svg {...svgProps}>
-    <path d="M4 9v6h4l5 4V5L8 9z" fill="currentColor" stroke="none" />
-    <path d="M16 9l5 6M21 9l-5 6" />
-  </svg>
-);
-const IconChevron = () => (
-  <svg {...svgProps} width={16} height={16}>
-    <path d="M6 9l6 6 6-6" />
-  </svg>
-);
-const IconClose = () => (
-  <svg {...svgProps} width={16} height={16}>
-    <path d="M6 6l12 12M18 6L6 18" />
-  </svg>
-);
-const IconSearchGlass = () => (
-  <svg {...svgProps} width={18} height={18}>
-    <circle cx="11" cy="11" r="6" />
-    <path d="M20 20l-4.5-4.5" />
-  </svg>
-);
-const IconFolder = () => (
-  <svg {...svgProps} width={16} height={16}>
-    <path d="M3 6h5l2 2h9a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1z" />
-  </svg>
-);
-const IconFileDoc = () => (
-  <svg {...svgProps} width={16} height={16}>
-    <path d="M6 3h8l4 4v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
-    <path d="M14 3v4h4" />
-  </svg>
-);
-const IconNote = () => (
-  <svg {...svgProps} width={18} height={18}>
-    <path d="M9 18V5l10-2v13" />
-    <circle cx="6" cy="18" r="3" fill="currentColor" stroke="none" />
-    <circle cx="16" cy="16" r="3" fill="currentColor" stroke="none" />
-  </svg>
-);
-const IconBot = () => (
-  <svg {...svgProps}>
-    <rect x="4" y="8" width="16" height="11" rx="3" />
-    <path d="M12 8V4M9 4h6" />
-    <circle cx="9" cy="13" r="1.3" fill="currentColor" stroke="none" />
-    <circle cx="15" cy="13" r="1.3" fill="currentColor" stroke="none" />
-  </svg>
-);
-const IconSend = () => (
-  <svg {...svgProps} width={18} height={18}>
-    <path d="M4 12l16-8-6 16-3-7z" fill="currentColor" stroke="none" />
-  </svg>
-);
-const IconTransfer = () => (
-  <svg {...svgProps} width={18} height={18}>
-    <path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 12a9 9 0 0 1-15 6.7L3 16" />
-    <path d="M21 4v4h-4M3 20v-4h4" />
-  </svg>
-);
-const IconDevice = () => (
-  <svg {...svgProps} width={16} height={16}>
-    <rect x="3" y="5" width="18" height="11" rx="2" />
-    <path d="M8 20h8M12 16v4" />
-  </svg>
-);
-// 天气图标：晴/少云用太阳，其余用云
-const IconWeather = ({ code }: { code: number | null }) => {
-  const clear = code === 0 || code === 1;
-  if (clear) {
-    return (
-      <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="4.5" fill="currentColor" stroke="none" />
-        <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
-      </svg>
-    );
-  }
-  return (
-    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M7 18a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.5A3.5 3.5 0 0 1 17 18z" />
-    </svg>
-  );
-};
-
-const IconCode = () => (
-  <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-    <path d="m16 18 6-6-6-6" />
-    <path d="m8 6-6 6 6 6" />
-  </svg>
-);
-const ACTIONS = [
-  { kind: 'ai', label: 'AI', Icon: IconBot },
-  { kind: 'aide', label: 'AI编程', Icon: IconCode },
-  { kind: 'search', label: '搜索', Icon: IconSearchGlass },
-  { kind: 'screenshot', label: '截图', Icon: IconScreenshot },
-  { kind: 'record', label: '录屏', Icon: IconRecord },
-  { kind: 'dropzone', label: '中转站', Icon: IconDropzone },
-  { kind: 'clipboard', label: '剪贴板', Icon: IconClipboard },
-  { kind: 'transfer', label: '传输', Icon: IconTransfer },
-] as const;
-
-// 动作分两层：第一排=高频（用户指定）；第二排=其余，后续排满再加「更多」二级入口
-const ACTION_LAYER1 = ['ai', 'screenshot', 'record', 'transfer', 'dropzone', 'clipboard'] as const;
-const ACTION_LAYER2 = ['aide', 'search'] as const;
-
-// 黑白棋盘底纹（深色半透明底叠半透明白格），放大 3 倍、整体倾斜 30°，呼应「黄金棋盘」主题；
-// 放大覆盖 (-80%) 确保宽扁的胶囊在 30° 旋转后仍被完整覆盖；整体保持半透明，桌面可透出。
-const checkerLayerStyle: React.CSSProperties = {
-  position: 'absolute',
-  inset: '-80%',
-  transform: 'rotate(30deg) translateZ(0)',
-  backgroundColor: 'rgba(18,18,20,0.45)',
-  backgroundImage: `
-    linear-gradient(45deg, rgba(245,245,245,0.16) 25%, transparent 25%),
-    linear-gradient(-45deg, rgba(245,245,245,0.16) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgba(245,245,245,0.16) 75%),
-    linear-gradient(-45deg, transparent 75%, rgba(245,245,245,0.16) 75%)
-  `,
-  backgroundSize: '66px 66px',
-  backgroundPosition: '0 0, 0 33px, 33px -33px, -33px 0',
-  // 提升为独立合成层，避免父级每次重渲染都重新合成这块大渐变（透明浮窗关键性能点）
-  willChange: 'transform',
-  backfaceVisibility: 'hidden',
-};
-
-// 轻暗叠层（与棋盘底纹同为静态装饰，整段抽到模块级常量，渲染时复用同一元素引用，
-// React 直接跳过其协调，进一步降低透明浮窗重渲染开销）
-const darkOverlayStyle: React.CSSProperties = {
-  position: 'absolute',
-  inset: 0,
-  background: 'linear-gradient(160deg, rgba(8,8,8,0.16), rgba(8,8,8,0.26))',
-  borderRadius: 'inherit',
-  pointerEvents: 'none',
-};
-const DECO_LAYERS = (
-  <>
-    <div style={checkerLayerStyle} />
-    <div style={darkOverlayStyle} />
-  </>
-);
-
-// 时钟：自带 1s 定时器与自身 state，更新仅限本组件，父级（整棵 Capsule）不再每秒重渲染。
-// 这是外部媒体后台播放时浮窗"不丝滑"的核心修复点——此前时钟 setClock 每秒触发整树重渲染。
-const Clock = memo(function Clock() {
-  const [t, setT] = useState(fmtTime());
-  useEffect(() => {
-    const id = setInterval(() => setT(fmtTime()), 1000);
-    return () => clearInterval(id);
-  }, []);
-  return (
-    <span style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: GOLD }}>
-      {t}
-    </span>
-  );
-});
-
-function weatherLabel(code: number | null): string {
-  if (code == null) return '—';
-  if (code === 0) return '晴';
-  if (code <= 3) return '多云';
-  if (code <= 48) return '雾';
-  if (code <= 67) return '雨';
-  if (code <= 77) return '雪';
-  if (code <= 82) return '阵雨';
-  if (code <= 86) return '阵雪';
-  if (code >= 95) return '雷暴';
-  return '—';
-}
-
-// 带手动超时的 fetch（不依赖 AbortSignal.timeout，兼容老版 WebView2）
-async function fetchJson(url: string, ms: number): Promise<unknown | null> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-const btnBase: React.CSSProperties = {
-  appearance: 'none',
-  border: 'none',
-  background: 'transparent',
-  color: GOLD,
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  cursor: 'pointer',
-  borderRadius: 10,
-  transition: 'background 140ms ease, transform 140ms ease',
-};
+// 收起态选择器返回的稳定空数组：避免后台播放期间 sessionList 变化触发壳重渲染
+// （展开瞬间选择器切换为真实值，Zustand 自动重渲染拿到最新会话快照）
+const EMPTY_SESSIONS: PlayInfo[] = [];
 
 // ============ 局域网传输面板（黄金棋盘·传输，LocalSend v2 兼容）============
-interface TransferPeer {
-  fingerprint: string;
-  alias: string;
-  device_type?: string | null;
-  device_model?: string | null;
-  ip: string;
-  port: number;
-  protocol: string;
-}
-interface TransferProgressItem {
-  direction: 'send' | 'receive';
-  session_id: string;
-  file_id: string;
-  file_name: string;
-  received: number;
-  total: number;
-  done: boolean;
-  peer_alias: string;
-}
-
+// TransferPeer / TransferProgressItem 类型与传输逻辑统一抽到 @/core/transfer/useTransfer，
+// 与主窗 GoldChessboardHub.TransferTab 共用，消除重复维护。
 function TransferPanel({
   onClose,
   receiveRequest,
@@ -389,14 +65,13 @@ function TransferPanel({
   keepOpen?: boolean;
   onKeepToggle?: () => void;
 }) {
-  const [peers, setPeers] = useState<TransferPeer[]>([]);
-  const [progress, setProgress] = useState<TransferProgressItem[]>([]);
-  const [running, setRunning] = useState(false);
-  const [alias, setAlias] = useState('安得云荟');
-  const [staged, setStagedState] = useState<string[]>([]);
-  const [confirmPeer, setConfirmPeer] = useState<TransferPeer | null>(null);
-  const [sendErr, setSendErr] = useState<string | null>(null);
-  const [stagedOpen, setStagedOpen] = useState(false); // 暂存文件下拉总览
+  const { t } = useI18n();
+  const {
+    peers, progress, running, alias, staged, confirmPeer, sendErr, stagedOpen,
+    setAlias, setStaged, setStagedOpen, setConfirmPeer, setSendErr,
+    applyAlias, sendTo, confirmSend, addFiles,
+  } = useTransfer();
+
   // 首次使用引导：提示自定义本机名称 + 接收文件保存路径（localStorage 持久引导标记）
   const [onboarded, setOnboarded] = useState<boolean>(() => {
     try { return localStorage.getItem('andeyunhui.transfer.onboarded') === '1'; } catch { return false; }
@@ -414,95 +89,24 @@ function TransferPanel({
     }
   }, []);
 
-  // 暂存文件走 Rust 端持久化（<appdata>/transfer/config.json），跨 webview 共用
-  const setStaged = (updater: string[] | ((prev: string[]) => string[])) => {
-    setStagedState((prev) => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      invoke('transfer_set_staged', { paths: next }).catch(() => {});
-      return next;
-    });
-  };
-
+  // 浮岛专属：接收文件保存路径获取 + 原生拖放（webview onDragDropEvent）。
+  // 传输服务交互（peers/progress/staged/确认）由 useTransfer 负责，此处不重复监听。
   useEffect(() => {
-    const offs: Array<() => void> = [];
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
     (async () => {
-      await invoke('transfer_start').catch(() => {});
-      const st = (await invoke('transfer_status').catch(() => ({}))) as { running?: boolean; alias?: string };
-      // 服务已在 transfer_start 后运行，立即置为已开启，避免先显示「未开启」再跳正常的 1 秒闪烁
-      setRunning(!!st?.running);
-      setAlias(st?.alias || '安得云荟');
       setSaveDir((await invoke('transfer_get_save_dir').catch(() => '')) as string);
-      await invoke('transfer_announce').catch(() => {});
-      const list = (await invoke('transfer_list_peers').catch(() => [])) as TransferPeer[];
-      setPeers(list);
-      const s = (await invoke('transfer_get_staged').catch(() => [])) as string[];
-      setStagedState(s);
-    })();
-    listen('transfer-peer-found', (e: { payload: TransferPeer }) => {
-      const p = e.payload;
-      setPeers((prev) => (prev.some((x) => x.fingerprint === p.fingerprint) ? prev : [...prev, p]));
-    }).then((u) => offs.push(u));
-    listen('transfer-progress', (e: { payload: TransferProgressItem }) => {
-      const p = e.payload;
-      setProgress((prev) => {
-        const next = prev.filter((x) => !(x.session_id === p.session_id && x.file_id === p.file_id));
-        return [...next, p];
+      const u = await getCurrentWebview().onDragDropEvent(({ payload }) => {
+        if (payload.type === 'drop') {
+          const paths = (payload.paths || []).filter((p) => !!p);
+          if (paths.length) setStaged((prev) => Array.from(new Set([...prev, ...paths])));
+        }
       });
-    }).then((u) => offs.push(u));
-    // 接收确认弹窗已统一交由 App 根挂载的全局 TransferReceiveModal 处理，
-    // 不在此重复监听，避免两端同时弹窗/重复确认。
-    // 原生拖放：胶囊窗开启 dragDropEnabled，拖入文件经此事件拿到真实路径
-    const unlistenDrag = getCurrentWebview().onDragDropEvent(({ payload }) => {
-      if (payload.type === 'drop') {
-        const paths = (payload.paths || []).filter((p) => !!p);
-        if (paths.length) setStaged((prev) => Array.from(new Set([...prev, ...paths])));
-      }
-    });
-    unlistenDrag.then((u) => offs.push(u)).catch(() => {});
-    return () => offs.forEach((u) => u());
-  }, []);
-
-  const applyAlias = async (v: string) => {
-    const val = v.trim() || '安得云荟';
-    setAlias(val);
-    await invoke('transfer_set_alias', { alias: val }).catch(() => {});
-  };
-
-  // 发送出错必须在 UI 可见（浮窗用户看不到控制台，.catch 吞掉就是「点了没反应」）
-  const doSend = async (fingerprint: string, paths: string[]) => {
-    setSendErr(null);
-    try {
-      await invoke('transfer_send', { fingerprint, paths });
-    } catch (e) {
-      setSendErr(String(e));
-    }
-  };
-
-  // 点击对端：有暂存文件 → 先确认；无暂存 → 退回系统文件选择框
-  const sendTo = async (peer: TransferPeer) => {
-    if (staged.length > 0) {
-      setConfirmPeer(peer);
-      return;
-    }
-    const picked = (await open({ multiple: true, title: '选择要发送的文件' })) as string[] | null;
-    if (!picked || picked.length === 0) return;
-    await doSend(peer.fingerprint, picked);
-  };
-
-  const confirmSend = async () => {
-    if (!confirmPeer) return;
-    const paths = staged;
-    const fp = confirmPeer.fingerprint;
-    setConfirmPeer(null);
-    setStaged([]);
-    setStagedOpen(false);
-    await doSend(fp, paths);
-  };
-
-  const addFiles = async () => {
-    const picked = (await open({ multiple: true, title: '选择要发送的文件' })) as string[] | null;
-    if (picked && picked.length) setStaged((prev) => Array.from(new Set([...prev, ...picked])));
-  };
+      if (cancelled) { u(); return; } // effect 已卸载，立即注销避免泄漏
+      unlisten = u;
+    })();
+    return () => { cancelled = true; unlisten?.(); };
+  }, [setStaged]);
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px', position: 'relative' }} onClick={(e) => e.stopPropagation()}>
@@ -511,8 +115,8 @@ function TransferPanel({
       {receiveRequest && !receiveRequest.auto_accept && (
         <div style={{ position: 'absolute', inset: 0, zIndex: 30, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 12 }} onClick={(e) => e.stopPropagation()}>
           <div style={{ width: '88%', maxWidth: 300, background: '#232326', borderRadius: 12, border: '1px solid rgba(255,255,255,0.12)', padding: 16, boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#f6f6f8', marginBottom: 8 }}>收到文件请求</div>
-            <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.8)', marginBottom: 6 }}>来自：{receiveRequest.sender_alias}</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#f6f6f8', marginBottom: 8 }}>{t('capsule.receiveRequest')}</div>
+            <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.8)', marginBottom: 6 }}>{t('capsule.from')}：{receiveRequest.sender_alias}</div>
             <div style={{ fontSize: 11.5, color: 'rgba(244,244,246,0.6)', marginBottom: 14, maxHeight: 130, overflowY: 'auto', lineHeight: 1.5 }}>
               共 {receiveRequest.file_count} 个文件：{receiveRequest.file_names.join('、')}
             </div>
@@ -532,15 +136,15 @@ function TransferPanel({
           <IconTransfer />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#f6f6f8' }}>局域网传输</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#f6f6f8' }}>{t('capsule.lanTransfer')}</div>
           <div style={{ fontSize: 11, color: 'rgba(244,244,246,0.62)' }}>
-            {running ? '已开启 · 可被同网设备发现' : '未开启'} · 兼容 LocalSend
+            {running ? t('capsule.lanOn') : t('capsule.lanOff')} · {t('capsule.localsendCompatible')}
           </div>
         </div>
         {onKeepToggle && (
           <KeepButton pinned={!!keepOpen} onToggle={onKeepToggle} size={28} />
         )}
-        <button onClick={onClose} title="返回播放器" style={{ ...btnBase, width: 28, height: 28 }}>
+        <button onClick={onClose} title={t('capsule.backToPlayer')} style={{ ...btnBase, width: 28, height: 28 }}>
           <IconClose />
         </button>
       </div>
@@ -552,14 +156,14 @@ function TransferPanel({
             <div style={{ flex: 1, fontSize: 11.5, color: 'rgba(244,244,246,0.85)', lineHeight: 1.5 }}>
               首次使用传输，建议：① 自定义<b style={{ color: GOLD }}>本机名称</b>（方便对方一眼认出你）；② 设置<b style={{ color: GOLD }}>接收文件保存路径</b>（默认在程序目录下，建议改到常用文件夹）。下方「保存路径」可直接选择。
             </div>
-            <button onClick={dismissOnboard} title="知道了" style={{ ...btnBase, flex: '0 0 auto', width: 18, height: 18, fontSize: 12, color: 'rgba(244,244,246,0.7)' }}>×</button>
+            <button onClick={dismissOnboard} title={t('capsule.gotIt')} style={{ ...btnBase, flex: '0 0 auto', width: 18, height: 18, fontSize: 12, color: 'rgba(244,244,246,0.7)' }}>×</button>
           </div>
         </div>
       )}
 
       {/* 本机名称（设备名，默认安得云荟，可改） */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-        <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.55)', flex: '0 0 auto' }}>本机名称</span>
+        <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.55)', flex: '0 0 auto' }}>{t('capsule.deviceName')}</span>
         <input
           value={alias}
           onChange={(e) => setAlias(e.target.value)}
@@ -571,15 +175,15 @@ function TransferPanel({
 
       {/* 接收文件保存路径（首用引导项，可直接在此设置；默认值见 CapsuleSettingsPanel） */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-        <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.55)', flex: '0 0 auto' }}>保存路径</span>
+        <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.55)', flex: '0 0 auto' }}>{t('capsule.savePath')}</span>
         <input
           value={saveDir}
           readOnly
-          placeholder="默认：程序目录下的 send 文件夹"
+          placeholder={t('capsule.savePathPlaceholder')}
           title={saveDir}
           style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '5px 8px', color: 'rgba(244,244,246,0.8)', fontSize: 11, outline: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
         />
-        <button onClick={pickSaveDir} title="选择保存目录" style={{ ...btnBase, flex: '0 0 auto', padding: '5px 8px', fontSize: 11, borderRadius: 8, background: 'rgba(255,255,255,0.1)', color: '#f6f6f8' }}>
+        <button onClick={pickSaveDir} title={t('capsule.chooseSaveDir')} style={{ ...btnBase, flex: '0 0 auto', padding: '5px 8px', fontSize: 11, borderRadius: 8, background: 'rgba(255,255,255,0.1)', color: '#f6f6f8' }}>
           选择
         </button>
       </div>
@@ -588,14 +192,14 @@ function TransferPanel({
       <div style={{ position: 'relative', marginTop: 8 }}>
         <div
           style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 38, padding: '4px 8px', borderRadius: 9, background: 'rgba(255,255,255,0.05)', border: '1px dashed rgba(255,255,255,0.18)' }}
-          onClick={(e) => { e.stopPropagation(); if (staged.length === 0) addFiles(); }}
+          onClick={(e) => { e.stopPropagation(); if (staged.length === 0) addFiles(t('capsule.pickFiles')); }}
         >
           {staged.length === 0 ? (
-            <span style={{ flex: 1, fontSize: 11.5, color: 'rgba(244,244,246,0.5)' }}>把文件拖到这里，或点此选择</span>
+            <span style={{ flex: 1, fontSize: 11.5, color: 'rgba(244,244,246,0.5)' }}>{t('capsule.dragHere')}</span>
           ) : (
             <button
               onClick={(e) => { e.stopPropagation(); setStagedOpen((v) => !v); }}
-              title={stagedOpen ? '收起文件列表' : '查看全部待发送文件'}
+              title={stagedOpen ? t('capsule.collapseFiles') : t('capsule.viewAllFiles')}
               style={{ ...btnBase, flex: 1, minWidth: 0, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, padding: '0 8px', background: 'rgba(255,255,255,0.08)', borderRadius: 7 }}
             >
               <span style={{ fontSize: 11.5, color: 'rgba(244,244,246,0.9)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -604,7 +208,7 @@ function TransferPanel({
               <span style={{ fontSize: 10, color: GOLD, flex: '0 0 auto', transform: stagedOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
             </button>
           )}
-          <button onClick={(e) => { e.stopPropagation(); addFiles(); }} title="添加文件" style={{ ...btnBase, width: 26, height: 26, flex: '0 0 auto', color: GOLD }}>＋</button>
+          <button onClick={(e) => { e.stopPropagation(); addFiles(t('capsule.pickFiles')); }} title={t('capsule.addFile')} style={{ ...btnBase, width: 26, height: 26, flex: '0 0 auto', color: GOLD }}>＋</button>
         </div>
 
         {/* 下拉总览：列出全部待发送文件，可逐个移除或清空 */}
@@ -618,12 +222,12 @@ function TransferPanel({
               return (
                 <div key={p} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 6px', borderRadius: 6 }} title={p}>
                   <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: 'rgba(244,244,246,0.9)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
-                  <button onClick={() => setStaged((prev) => { const next = prev.filter((x) => x !== p); if (next.length === 0) setStagedOpen(false); return next; })} title="移除" style={{ ...btnBase, width: 18, height: 18, fontSize: 12, lineHeight: '16px', color: 'rgba(244,244,246,0.7)', flex: '0 0 auto' }}>×</button>
+                  <button onClick={() => setStaged((prev) => { const next = prev.filter((x) => x !== p); if (next.length === 0) setStagedOpen(false); return next; })} title={t('capsule.remove')} style={{ ...btnBase, width: 18, height: 18, fontSize: 12, lineHeight: '16px', color: 'rgba(244,244,246,0.7)', flex: '0 0 auto' }}>×</button>
                 </div>
               );
             })}
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4, paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-              <button onClick={() => { setStaged([]); setStagedOpen(false); }} style={{ ...btnBase, padding: '3px 8px', fontSize: 11, color: 'rgba(244,244,246,0.6)' }}>清空全部</button>
+              <button onClick={() => { setStaged([]); setStagedOpen(false); }} style={{ ...btnBase, padding: '3px 8px', fontSize: 11, color: 'rgba(244,244,246,0.6)' }}>{t('capsule.clearAll')}</button>
             </div>
           </div>
         )}
@@ -632,7 +236,7 @@ function TransferPanel({
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
         {peers.length === 0 && (
           <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.55)', textAlign: 'center', marginTop: 12 }}>
-            正在发现同网设备…（开启官方 LocalSend 或本应用即可互传）
+            {t('capsule.discovering')}
           </div>
         )}
         {peers.map((p) => (
@@ -642,7 +246,7 @@ function TransferPanel({
               <div style={{ fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.alias}</div>
               <div style={{ fontSize: 10.5, color: 'rgba(244,244,246,0.5)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.ip}:{p.port}</div>
             </div>
-            <button onClick={() => sendTo(p)} title="发送文件" style={{ ...btnBase, width: 34, height: 30, color: GOLD }}>
+            <button onClick={() => sendTo(p, t('capsule.pickFiles'))} title={t('capsule.sendFile')} style={{ ...btnBase, width: 34, height: 30, color: GOLD }}>
               <IconSend />
             </button>
           </div>
@@ -661,7 +265,7 @@ function TransferPanel({
           {progress.map((p) => (
             <div key={p.session_id + p.file_id} style={{ fontSize: 11, color: 'rgba(244,244,246,0.78)' }}>
               {p.done ? '✓ ' : '↻ '}
-              {p.direction === 'send' ? '发→' : '收←'} {p.peer_alias}：{p.file_name}
+              {p.direction === 'send' ? t('capsule.dirSend') : t('capsule.dirRecv')} {p.peer_alias}：{p.file_name}
               {!p.done && p.total > 0 ? ` ${Math.round((p.received / p.total) * 100)}%` : ''}
             </div>
           ))}
@@ -672,13 +276,13 @@ function TransferPanel({
       {confirmPeer && (
         <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 20 }} onClick={(e) => { e.stopPropagation(); setConfirmPeer(null); }}>
           <div style={{ background: '#1c1c1e', borderRadius: 12, padding: 16, width: 260, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f6f8' }}>发送给「{confirmPeer.alias}」？</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f6f8' }}>{t('capsule.sendToConfirm', { alias: confirmPeer.alias })}</div>
             <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.6)', marginTop: 6 }}>
               共 {staged.length} 个文件（{staged.map((p) => p.split(/[/]/).pop()).join('、')}）
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
-              <button onClick={() => setConfirmPeer(null)} style={{ ...btnBase, padding: '5px 12px', fontSize: 12 }}>取消</button>
-              <button onClick={confirmSend} style={{ ...btnBase, padding: '5px 12px', fontSize: 12, color: '#1c1c1e', background: GOLD, fontWeight: 600 }}>确认发送</button>
+              <button onClick={() => setConfirmPeer(null)} style={{ ...btnBase, padding: '5px 12px', fontSize: 12 }}>{t('capsule.cancel')}</button>
+              <button onClick={confirmSend} style={{ ...btnBase, padding: '5px 12px', fontSize: 12, color: '#1c1c1e', background: GOLD, fontWeight: 600 }}>{t('capsule.confirmSend')}</button>
             </div>
           </div>
         </div>
@@ -688,291 +292,74 @@ function TransferPanel({
 }
 
 export default function Capsule() {
-  const [expanded, setExpanded] = useState(false);
-  const [chatOpen, setChatOpen] = useState(false);
-  // 子面板渲染门控：从收起态展开且子面板打开时，先等 setSize 完成再渲染子面板，
-  // 防止 36→470 高度过渡期间面板内容被旧窗高裁剪（标题栏+关闭按钮不可见）。
-  const [panelReady, setPanelReady] = useState(true);
-  const prevExpandedRef = useRef(false);
-  const [play, setPlay] = useState<PlayInfo | null>(null);
-  // 双源分离：system=整机媒体监视读取的任意 App；app=本应用经 smtc_update 推送。展示优先级 system > app。
-  const appPlayRef = useRef<PlayInfo | null>(null);
-  const sysPlayRef = useRef<PlayInfo | null>(null);
-  // 多会话切换（堆叠 + 下拉）：sessionList=外部会话快照；appPlay=本应用会话镜像；selectedKey=用户选中（null=跟随实时）
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [transferOpen, setTransferOpen] = useState(false);
-  // 浮岛（黄金棋盘）作为主接收方：收到的待确认接收请求
-  const [receiveReq, setReceiveReq] = useState<ReceiveRequest | null>(null);
-  // 轻量 toast：接收请求 / 接收中 / 接收完成 等提示（浮岛不弹主窗模态时，用户仍需明确反馈）
-  const [toast, setToast] = useState<{ msg: string } | null>(null);
-  const toastTimer = useRef<number | null>(null);
-  const showToast = useCallback((msg: string) => {
-    setToast({ msg });
-    if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), 3200);
-  }, []);
-  const [sessionList, setSessionList] = useState<PlayInfo[]>([]);
-  const [appPlay, setAppPlay] = useState<PlayInfo | null>(null);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const sessionListRef = useRef<PlayInfo[]>([]);
-  const selectedKeyRef = useRef<string | null>(null);
-  const expandedRef = useRef(false); // 收起态下屏蔽与展示无关的 state churn，避免后台播放时重渲染
-  const hoverLockRef = useRef(false); // 收起后锁定悬停自动展开，需点击胶囊才恢复
-  const keepOpenRef = useRef(false); // 保持态：鼠标离开不自动收起
-  const [keepOpen, setKeepOpen] = useState(false);
-  useEffect(() => { keepOpenRef.current = keepOpen; }, [keepOpen]);
-  const playKeyRef = useRef(''); // 内容比对，避免 applyDisplay 每次都 setPlay
+  const { t } = useI18n();
+  // —— tab 状态（从 capsuleStore 订阅）——
+  const expanded = useCapsuleStore((s) => s.expanded);
+  const chatOpen = useCapsuleStore((s) => s.chatOpen);
+  const aideOpen = useCapsuleStore((s) => s.aideOpen);
+  const searchOpen = useCapsuleStore((s) => s.searchOpen);
+  const transferOpen = useCapsuleStore((s) => s.transferOpen);
+  const panelReady = useCapsuleStore((s) => s.panelReady);
+  const keepOpen = useCapsuleStore((s) => s.keepOpen);
+  const setExpanded = useCapsuleStore((s) => s.setExpanded);
+  const setChatOpen = useCapsuleStore((s) => s.setChatOpen);
+  const setAideOpen = useCapsuleStore((s) => s.setAideOpen);
+  const setSearchOpen = useCapsuleStore((s) => s.setSearchOpen);
+  const setTransferOpen = useCapsuleStore((s) => s.setTransferOpen);
+  const setKeepOpen = useCapsuleStore((s) => s.setKeepOpen);
+  // —— 接收请求 / toast（从 capsuleStore 订阅）——
+  const receiveReq = useCapsuleStore((s) => s.receiveReq);
+  const toast = useCapsuleStore((s) => s.toast);
+  const acceptReceive = useCapsuleStore((s) => s.acceptReceive);
+  const declineReceive = useCapsuleStore((s) => s.declineReceive);
 
-  // —— 接收请求：浮岛（黄金棋盘）作为主接收方 ——
-  // 收到 transfer-receive-request 时自动展开浮岛并跳到传输页，弹出「是否接收」询问。
-  const acceptReceive = useCallback(async () => {
-    if (!receiveReq) return;
-    const n = receiveReq.file_count;
-    await invoke('transfer_receive_accept', { sessionId: receiveReq.session_id }).catch(() => {});
-    setReceiveReq(null);
-    showToast(`已开始接收 ${n} 个文件`);
-  }, [receiveReq, showToast]);
-  const declineReceive = useCallback(async () => {
-    if (!receiveReq) return;
-    const name = receiveReq.sender_alias;
-    await invoke('transfer_receive_decline', { sessionId: receiveReq.session_id }).catch(() => {});
-    setReceiveReq(null);
-    showToast(`已拒绝 ${name} 的文件`);
-  }, [receiveReq, showToast]);
-  useEffect(() => {
-    const offs: Array<() => void> = [];
-    listen('transfer-receive-request', (e: { payload: ReceiveRequest }) => {
-      const p = e.payload;
-      if (!p?.session_id) return;
-      // 自动展开浮岛并跳转到传输页
-      setExpanded(true);
-      setTransferOpen(true);
-      if (!p.auto_accept) setReceiveReq(p);
-      // 确保浮岛窗口可见并置于前台（自动弹出）
-      const w = getCurrentWebviewWindow();
-      try {
-        w.show().catch(() => {});
-        w.setFocus().catch(() => {});
-      } catch { /* 窗口已可见则忽略 */ }
-      // 通知主窗：接收由浮岛处理，主窗不再弹确认框
-      emit('transfer-receive-capsule-took', { session_id: p.session_id }).catch(() => {});
-      // 顶部提示：自动接收时给「正在接收」反馈（否则浮岛静默，用户以为没反应）；
-      // 需确认时也给一句引导，与确认框互补。
-      showToast(
-        p.auto_accept
-          ? `正在接收 ${p.file_count} 个文件（来自 ${p.sender_alias}）`
-          : `收到 ${p.sender_alias} 的 ${p.file_count} 个文件请求`,
-      );
-    }).then((u) => offs.push(u));
-    // 接收请求在别处被确认/拒绝时，同步清除本地弹窗
-    const clearIf = (sid: string) =>
-      setReceiveReq((cur) => (cur && cur.session_id === sid ? null : cur));
-    listen('transfer-receive-confirmed', (e: { payload: { session_id: string } }) => {
-      if (e.payload?.session_id) clearIf(e.payload.session_id);
-    }).then((u) => offs.push(u));
-    listen('transfer-receive-declined', (e: { payload: { session_id: string } }) => {
-      if (e.payload?.session_id) clearIf(e.payload.session_id);
-    }).then((u) => offs.push(u));
-    // 接收完成（每个文件 mark_done 触发一次）：提示已存入中转站
-    listen('transfer-received', (e: { payload: { file_name: string; peer_alias: string } }) => {
-      const p = e.payload;
-      if (p?.file_name) showToast(`接收完成：${p.file_name} 已存入中转站`);
-    }).then((u) => offs.push(u));
-    return () => offs.forEach((u) => u());
-  }, [showToast]);
-
-  // 计算应展示的媒体卡片：选中具体会话则固定它，否则跟随实时（system > app）
-  const computePlay = (): PlayInfo | null => {
-    if (selectedKeyRef.current) {
-      const all = [...sessionListRef.current];
-      if (appPlayRef.current) all.push(appPlayRef.current);
-      return (
-        all.find((s) => s.key === selectedKeyRef.current) ??
-        sysPlayRef.current ??
-        appPlayRef.current ??
-        null
-      );
-    }
-    return sysPlayRef.current ?? appPlayRef.current ?? null;
-  };
-  // 仅在内容真正变化时更新，避免后台播放期间冗余 setState 拖累透明浮窗合成
-  const applyDisplay = () => {
-    const next = computePlay();
-    const key = next
-      ? `${next.key}|${next.title}|${next.artist}|${next.album}|${next.cover_path}|${next.is_playing}|${next.can_prev}|${next.can_next}`
-      : '';
-    if (key !== playKeyRef.current) {
-      playKeyRef.current = key;
-      setPlay(next);
-    }
-  };
-  const refreshList = useCallback(async () => {
-    try {
-      const list = (await invoke('smtc_list_sessions')) as PlayInfo[];
-      sessionListRef.current = list;
-      setSessionList(list);
-      applyDisplay();
-    } catch {
-      /* 忽略查询失败 */
-    }
-  }, []);
-  // 搜索状态及 UI 已提取到 FileSearchPanel（与主窗口黄金棋盘面板共享复用）
-
-  // 收起即「回到主页」：关闭所有子面板（搜索/对话/传输），避免再次展开时卡在搜索页。
-  const collapse = () => {
-    hoverLockRef.current = true; // 收起后：悬停不再自动展开，需用户点击胶囊恢复（见 body onClick）
-    keepOpenRef.current = false; setKeepOpen(false); // 保持态随显式收起一并清除
-    setExpanded(false);
-    setSearchOpen(false);
-    setChatOpen(false);
-    setTransferOpen(false);
-  };
-
-  // Esc 兜底逃生：搜索/对话/传输子面板或展开态下按 Esc 一律回到主页，杜绝"卡在搜索页无法返回"。
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      if (searchOpen) setSearchOpen(false);
-      else if (chatOpen) setChatOpen(false);
-      else if (transferOpen) setTransferOpen(false);
-      else if (expanded) collapse();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [searchOpen, chatOpen, transferOpen, expanded, collapse]);
-
-  // 展开时拉取整机会话快照，并每 2s 刷新（供堆叠 / 下拉切换）
-  useEffect(() => {
-    if (expanded) {
-      void refreshList();
-      const id = setInterval(() => void refreshList(), 2000);
-      return () => clearInterval(id);
-    }
-  }, [expanded, refreshList]);
+  // —— 播放器状态（从 capsuleStore 订阅；ref/state 双写已消除）——
+  // play 驱动收起态指示点 + 展开态播放器，全时段订阅（store 内指纹去重，仅内容变化才重渲染）。
+  const play = useCapsuleStore((s) => s.play);
+  const selectedKey = useCapsuleStore((s) => s.selectedKey);
+  // sessionList/appPlay 仅展开态订阅：收起态选择器返回稳定空值，后台播放不触发壳重渲染；
+  // 展开瞬间切换为真实值，Zustand 自动重渲染拿到最新会话快照。
+  const sessionList = useCapsuleStore((s) => (s.expanded ? s.sessionList : EMPTY_SESSIONS));
+  const appPlay = useCapsuleStore((s) => (s.expanded ? s.appPlay : null));
+  const selectSession = useCapsuleStore((s) => s.selectSession);
+  const smtcControl = useCapsuleStore((s) => s.smtcControl);
+  const refreshSessionList = useCapsuleStore((s) => s.refreshSessionList);
+  const hoverLockRef = useRef(false); // 收起后锁定悬停自动展开，需点击胶囊才恢复（不触发渲染，保留为 ref）
+  const prevExpandedRef = useRef(false); // 尺寸 effect：检测「从收起态展开」过渡
   const [volume, setVolume] = useState(0.7);
   const [weather, setWeather] = useState<{ temp: number | null; code: number | null; city: string | null }>({ temp: null, code: null, city: null });
 
-  // AI 对话状态（多会话：下拉选择 / 新建）
-  const CHAT_STORE_KEY = 'andeyunhui.capsule.conversations';
-  const AIDE_STORE_KEY = 'andeyunhui.capsule.aide.conversations.v2'; // 升版本清空历史浮岛 AI 编程对话（与 IDE 对齐）
-  const CONV_TITLE_MAX = 20;
-  const loadConvs = (): Conversation[] => {
-    try {
-      const raw = localStorage.getItem(CHAT_STORE_KEY);
-      if (raw) {
-        const arr = JSON.parse(raw) as Conversation[];
-        if (Array.isArray(arr) && arr.length) return arr;
-      }
-    } catch { /* 解析失败忽略 */ }
-    return [];
-  };
-  const initialConvs = useMemo<Conversation[]>(() => {
-    const cs = loadConvs();
-    return cs.length ? cs : [{ id: 'c' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
+  // 收起即「回到主页」：关闭所有子面板（搜索/对话/传输），避免再次展开时卡在搜索页。
+  // hoverLockRef 保留为组件内 ref（不触发渲染，不入 store）；状态重置交由 store.collapse()。
+  const collapse = useCallback(() => {
+    hoverLockRef.current = true; // 收起后：悬停不再自动展开，需用户点击胶囊恢复（见 body onClick）
+    useCapsuleStore.getState().collapse();
   }, []);
-  const [conversations, setConversations] = useState<Conversation[]>(initialConvs);
-  const [activeConvId, setActiveConvId] = useState<string>(() => initialConvs[0].id);
-  const activeConvIdRef = useRef<string>(activeConvId);
-  useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
-  // 持久化会话（localStorage，随胶囊 webview 持久，重启不丢）
-  useEffect(() => {
-    try { localStorage.setItem(CHAT_STORE_KEY, JSON.stringify(conversations)); } catch { /* 忽略 */ }
-  }, [conversations]);
-  // 流式写入目标会话（发送时锁定，避免切会话后回写错位）
-  const streamConvIdRef = useRef<string>(activeConvId);
-  const updateStreamMessages = useCallback((convId: string, updater: (prev: ChatMsg[]) => ChatMsg[]) => {
-    setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, messages: updater(c.messages), updatedAt: Date.now() } : c)));
-  }, []);
-  // 当前会话消息（派生）
-  const activeConv = conversations.find((c) => c.id === activeConvId);
-  const chat = activeConv?.messages ?? [];
-  const newConversation = useCallback(() => {
-    const id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-    setConversations((prev) => [{ id, title: '新对话', messages: [], updatedAt: Date.now() }, ...prev]);
-    setActiveConvId(id);
-    setChatInput('');
-    setChatBusy(false);
-    activeReqRef.current = null;
-    asstIdRef.current = null;
-    streamConvIdRef.current = id;
-  }, []);
-  const selectConversation = useCallback((id: string) => {
-    setActiveConvId(id);
-    setChatInput('');
-    setChatBusy(false);
-    activeReqRef.current = null;
-    asstIdRef.current = null;
-  }, []);
-  const [chatInput, setChatInput] = useState('');
-  const [chatBusy, setChatBusy] = useState(false);
-  const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>({}); // 思考过程折叠状态
-  const [aiProfileId, setAiProfileId] = useState<string | null>(null);
-  const [aiProfiles, setAiProfiles] = useState<Array<{ id: string; name?: string; model?: string; base_url?: string; api_key?: string }>>([]);
-  const [aiHint, setAiHint] = useState<string | null>(null);
-  const activeReqRef = useRef<string | null>(null);
-  const asstIdRef = useRef<string | null>(null);
-  const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
-  // 浮岛「AI 编程」多对话（本地持有，接管 IDE 对话执行，事件桥接）
-  const [aideOpen, setAideOpen] = useState(false);
-  const [aideInput, setAideInput] = useState('');
-  const [aideBusy, setAideBusy] = useState(false);
-  const [aideReasoningOpen, setAideReasoningOpen] = useState<Record<string, boolean>>({});
-  const aideReqRef = useRef<string | null>(null);
-  const aideAsstRef = useRef<string | null>(null);
-  const aideScrollRef = useRef<HTMLDivElement | null>(null);
-  const [aideProfileId, setAideProfileId] = useState<string | null>(null);
-  const [aideMode, setAideMode] = useState<'chat' | 'agent'>('chat'); // AI 编程：对话 / 代理（agent）
-  const configuredAideProfiles = aiProfiles.filter((p) => p.api_key && p.api_key.trim());
-  // 多对话（本地，参考 AI 对话）
-  const initialAideConvs = useMemo(() => {
-    try {
-      const raw = localStorage.getItem(AIDE_STORE_KEY);
-      if (raw) {
-        const cs = JSON.parse(raw) as Conversation[];
-        if (Array.isArray(cs) && cs.length) return cs;
-      }
-    } catch { /* 忽略 */ }
-    return [{ id: 'ac' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
-  }, []);
-  const [aideConversations, setAideConversations] = useState<Conversation[]>(initialAideConvs);
-  const [aideActiveConvId, setAideActiveConvId] = useState<string>(initialAideConvs[0].id);
-  const aideActiveConvIdRef = useRef<string>(aideActiveConvId);
-  useEffect(() => { aideActiveConvIdRef.current = aideActiveConvId; }, [aideActiveConvId]);
-  useEffect(() => { try { localStorage.setItem(AIDE_STORE_KEY, JSON.stringify(aideConversations)); } catch { /* 忽略 */ } }, [aideConversations]);
-  const aideStreamConvIdRef = useRef<string>(aideActiveConvId);
-  const updateAideStreamMessages = useCallback((convId: string, updater: (prev: ChatMsg[]) => ChatMsg[]) => {
-    setAideConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, messages: updater(c.messages), updatedAt: Date.now() } : c)));
-  }, []);
-  const aideActiveConv = aideConversations.find((c) => c.id === aideActiveConvId);
-  const aideMessages = aideActiveConv?.messages ?? [];
-  // 清空全部对话（浮岛 AI 编程 + 通知 IDE 一并清空 chat/agent），一键回到干净起点
-  const clearAideConversations = useCallback(() => {
-    const fresh: Conversation[] = [{ id: 'ac' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
-    setAideConversations(fresh);
-    setAideActiveConvId(fresh[0].id);
-    aideActiveConvIdRef.current = fresh[0].id;
-    aideStreamConvIdRef.current = fresh[0].id;
-    try { localStorage.removeItem(AIDE_STORE_KEY); } catch { /* 忽略 */ }
-    emit('capsule-ide-clear-conversations').catch(() => {});
-  }, []);
-  const newAideConversation = useCallback(() => {
-    const id = 'ac' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-    setAideConversations((prev) => [{ id, title: '新对话', messages: [], updatedAt: Date.now() }, ...prev]);
-    setAideActiveConvId(id);
-    setAideInput('');
-    setAideBusy(false);
-    aideReqRef.current = null;
-    aideAsstRef.current = null;
-    aideStreamConvIdRef.current = id;
-  }, []);
-  const selectAideConversation = useCallback((id: string) => {
-    setAideActiveConvId(id);
-    setAideInput('');
-    setAideBusy(false);
-    aideReqRef.current = null;
-    aideAsstRef.current = null;
-  }, []);
+  // Esc 兜底逃生：搜索/对话/传输子面板或展开态下按 Esc 一律回到主页，杜绝"卡在搜索页无法返回"。
+  // 闭包内用 getState() 读最新值，避免每次 tab 切换都重注册监听。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const s = useCapsuleStore.getState();
+      if (s.searchOpen) s.setSearchOpen(false);
+      else if (s.chatOpen) s.setChatOpen(false);
+      else if (s.transferOpen) s.setTransferOpen(false);
+      else if (s.expanded) collapse();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [collapse]);
+
+  // 展开时拉取整机会话快照，并每 2s 刷新（供堆叠 / 下拉切换）
+  // 会话列表与上屏卡片派生统一由 capsuleStore 维护，壳仅触发刷新。
+  useEffect(() => {
+    if (expanded) {
+      void refreshSessionList();
+      const id = setInterval(() => void refreshSessionList(), 2000);
+      return () => clearInterval(id);
+    }
+  }, [expanded, refreshSessionList]);
 
   const coverUrl = useMemo(
     () => (play?.cover_path ? convertFileSrc(play.cover_path) : null),
@@ -988,14 +375,6 @@ export default function Capsule() {
     () => allSessions.filter((s) => s.key !== play?.key).slice(0, 2),
     [allSessions, play?.key],
   );
-  // 选中会话切换
-  const selectSession = (k: string) => {
-    const key = k || null;
-    selectedKeyRef.current = key;
-    setSelectedKey(key);
-    applyDisplay();
-  };
-
   // 天气：免 key 的 Open-Meteo（实时温度 + 天气代码）+ ipapi.co 自动定位 + BigDataCloud 反向地理编码取城市；
   // 不依赖 AbortSignal.timeout（部分 WebView2 运行时无此方法，会直接抛错导致永远显示「—」），改用手动超时。
   useEffect(() => {
@@ -1037,213 +416,6 @@ export default function Capsule() {
     };
   }, []);
 
-  // 进入对话模式时加载全局模型档案，取已配置的活动档案 id
-  useEffect(() => {
-    if (!chatOpen && !aideOpen) return;
-    setAiHint(null);
-    invoke<{ profiles: Array<{ id: string; name?: string; model?: string; base_url?: string; api_key?: string }>; active: string | null }>('ai_get_profiles')
-      .then((d) => {
-        setAiProfiles(d.profiles || []);
-        const usable = (d.profiles || []).filter((p) => p.api_key && p.api_key.trim());
-        const act = d.active && usable.some((p) => p.id === d.active) ? d.active : usable[0]?.id ?? null;
-        setAiProfileId(act);
-        setAideProfileId((prev) => (prev && usable.some((p) => p.id === prev)) ? prev : act);
-        if (!act) setAiHint('未配置模型：请到「全局设置 → 模型」添加并填写 API Key');
-      })
-      .catch(() => setAiHint('读取模型配置失败'));
-  }, [chatOpen, aideOpen]);
-
-  // 反向同步：浮岛打开「AI 编程」时，拉取 IDE 当前对话（IDE 端已镜像浮岛消息），
-  // 使两端可见同一历史；IDE 是持久化真相源，浮岛每次打开都刷新为最新。
-  useEffect(() => {
-    if (!aideOpen) return;
-    invoke<{ conversations?: Array<any>; active_id?: string | null }>('ai_get_conversations')
-      .then((d) => {
-        const list = (d?.conversations || []).filter((c) => c && Array.isArray(c.messages));
-        if (!list.length) return;
-        setAideConversations(list as typeof aideConversations);
-        const aid = (d.active_id && list.some((c: any) => c.id === d.active_id)) ? d.active_id! : list[0].id;
-        setAideActiveConvId(aid);
-        aideActiveConvIdRef.current = aid;
-      })
-      .catch(() => {});
-  }, [aideOpen]);
-
-  // 跟随 IDE 当前激活模型：IDE 切换模型时广播，浮岛 AI 编程用同一模型（避免浮岛默认/误选到与 IDE 不同的模型导致退化循环）
-  useEffect(() => {
-    let unsub: (() => void) | undefined;
-    listen<{ id: string }>('ai-active-profile-changed', (e) => {
-      const id = e?.payload?.id;
-      if (id) setAideProfileId(id);
-    }).then((u) => { unsub = u; });
-    return () => unsub?.();
-  }, []);
-
-  // 全局流式事件监听（ai-delta / ai-done / ai-error），按 requestId 过滤本次请求
-  useEffect(() => {
-    let cancelled = false;
-    const un: Array<() => void> = [];
-    (async () => {
-      const u1 = await listen<{ requestId: string; delta: string }>('ai-delta', (e) => {
-        if (e.payload.requestId === activeReqRef.current && asstIdRef.current) {
-          const id = asstIdRef.current;
-          updateStreamMessages(streamConvIdRef.current, (prev) => prev.map((m) => (m.id === id ? { ...m, content: m.content + e.payload.delta } : m)));
-        }
-      });
-      const finish = (err?: string) => {
-        setChatBusy(false);
-        const aid = asstIdRef.current;
-        activeReqRef.current = null;
-        if (aid) {
-          updateStreamMessages(streamConvIdRef.current, (prev) =>
-            prev.map((m) => {
-              if (m.id !== aid) return m;
-              if (err) return { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ ' + err };
-              return { ...m, content: m.content || '（无内容）' };
-            }),
-          );
-        }
-        asstIdRef.current = null;
-      };
-      const u2 = await listen<{ requestId: string }>('ai-done', (e) => {
-        if (e.payload.requestId === activeReqRef.current) finish();
-      });
-      const u3 = await listen<{ requestId: string; error: string }>('ai-error', (e) => {
-        if (e.payload.requestId === activeReqRef.current) finish(e.payload.error);
-      });
-      // 思考过程增量（reasoning_content）：流式追加到当前助手消息的 reasoning 字段
-      const u4 = await listen<{ requestId: string; delta: string }>('ai-reasoning-delta', (e) => {
-        if (e.payload.requestId === activeReqRef.current && asstIdRef.current) {
-          const id = asstIdRef.current;
-          updateStreamMessages(streamConvIdRef.current, (prev) => prev.map((m) => (m.id === id ? { ...m, reasoning: (m.reasoning || '') + e.payload.delta } : m)));
-        }
-      });
-      if (cancelled) {
-        u1();
-        u2();
-        u3();
-        u4();
-        return;
-      }
-      un.push(u1, u2, u3, u4);
-    })();
-    return () => {
-      cancelled = true;
-      un.forEach((f) => f());
-    };
-  }, []);
-
-  // 浮岛「AI 编程」流式事件监听（capsule-ide-chat-*），按 requestId 过滤本次请求；消息写入当前激活对话
-  useEffect(() => {
-    let cancelled = false;
-    const un: Array<() => void> = [];
-    (async () => {
-      const u1 = await listen<{ requestId: string; delta: string }>('capsule-ide-chat-delta', (e) => {
-        if (e.payload.requestId === aideReqRef.current) {
-          const id = aideAsstRef.current;
-          const cid = aideStreamConvIdRef.current;
-          if (id) updateAideStreamMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, content: m.content + e.payload.delta } : m)));
-        }
-      });
-      const finish = (err?: string) => {
-        setAideBusy(false);
-        const aid = aideAsstRef.current;
-        const cid = aideStreamConvIdRef.current;
-        aideReqRef.current = null;
-        if (aid) {
-          updateAideStreamMessages(cid, (prev) => prev.map((m) => {
-            if (m.id !== aid) return m;
-            if (err) return { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ ' + err };
-            return { ...m, content: m.content || '（无内容）' };
-          }));
-        }
-        aideAsstRef.current = null;
-      };
-      const u2 = await listen<{ requestId: string }>('capsule-ide-chat-done', (e) => {
-        if (e.payload.requestId === aideReqRef.current) finish();
-      });
-      const u3 = await listen<{ requestId: string; error: string }>('capsule-ide-chat-error', (e) => {
-        if (e.payload.requestId === aideReqRef.current) finish(e.payload.error);
-      });
-      const u4 = await listen<{ requestId: string; delta: string }>('capsule-ide-chat-reasoning-delta', (e) => {
-        if (e.payload.requestId === aideReqRef.current) {
-          const id = aideAsstRef.current;
-          const cid = aideStreamConvIdRef.current;
-          if (id) updateAideStreamMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, reasoning: (m.reasoning || '') + e.payload.delta } : m)));
-        }
-      });
-      if (cancelled) {
-        u1(); u2(); u3(); u4();
-        return;
-      }
-      un.push(u1, u2, u3, u4);
-    })();
-    return () => {
-      cancelled = true;
-      un.forEach((f) => f());
-    };
-  }, [updateAideStreamMessages]);
-
-  // 浮岛「AI 编程·代理」流式事件监听（capsule-ide-agent-*），按 requestId 过滤；agent 回传的是整段已清洗文本（替换式）
-  useEffect(() => {
-    let cancelled = false;
-    const un: Array<() => void> = [];
-    (async () => {
-      const u1 = await listen<{ requestId: string; text: string }>('capsule-ide-agent-delta', (e) => {
-        if (e.payload.requestId === aideReqRef.current) {
-          const id = aideAsstRef.current;
-          const cid = aideStreamConvIdRef.current;
-          if (id) updateAideStreamMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, content: e.payload.text } : m)));
-        }
-      });
-      const finish = (err?: string) => {
-        setAideBusy(false);
-        const aid = aideAsstRef.current;
-        const cid = aideStreamConvIdRef.current;
-        aideReqRef.current = null;
-        if (aid) {
-          updateAideStreamMessages(cid, (prev) => prev.map((m) => {
-            if (m.id !== aid) return m;
-            if (err) return { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ ' + err };
-            return { ...m, content: m.content || '（无内容）' };
-          }));
-        }
-        aideAsstRef.current = null;
-      };
-      const u2 = await listen<{ requestId: string }>('capsule-ide-agent-done', (e) => {
-        if (e.payload.requestId === aideReqRef.current) finish();
-      });
-      const u3 = await listen<{ requestId: string; error: string }>('capsule-ide-agent-error', (e) => {
-        if (e.payload.requestId === aideReqRef.current) finish(e.payload.error);
-      });
-      if (cancelled) {
-        u1(); u2(); u3();
-        return;
-      }
-      un.push(u1, u2, u3);
-    })();
-    return () => {
-      cancelled = true;
-      un.forEach((f) => f());
-    };
-  }, [updateAideStreamMessages]);
-
-  // 自动滚动对话到底部（打开面板 / 切换对话 / 流式增量时均滚到底，避免长对话需手动翻找）
-  const scrollChatToBottom = () => { const el = chatScrollRef.current; if (el) el.scrollTop = el.scrollHeight; };
-  useLayoutEffect(() => {
-    scrollChatToBottom();
-    const id = requestAnimationFrame(scrollChatToBottom); // 兜底：窗口 36→470 过渡重排后再滚一次
-    return () => cancelAnimationFrame(id);
-  }, [chat, chatOpen, panelReady]);
-
-  // 浮岛「AI 编程」自动滚动到底部
-  const scrollAideToBottom = () => { const el = aideScrollRef.current; if (el) el.scrollTop = el.scrollHeight; };
-  useLayoutEffect(() => {
-    scrollAideToBottom();
-    const id = requestAnimationFrame(scrollAideToBottom);
-    return () => cancelAnimationFrame(id);
-  }, [aideMessages, aideOpen, aideActiveConvId, panelReady]);
-
   // 上报窗口物理矩形，供 Rust 光标监视线程做热区判定（随展开/收起改变尺寸与居中）
   async function reportRect(w: number, h: number) {
     try {
@@ -1261,7 +433,7 @@ export default function Capsule() {
     }
   }
 
-  // 挂载：透明化、定位顶部居中、显示、启动光标监视、上报物理矩形、订阅事件
+  // 挂载：透明化、定位顶部居中、显示、启动光标监视、上报物理矩形、订阅事件、注册接收请求监听
   useEffect(() => {
     const unsubs: Array<() => void> = [];
     (async () => {
@@ -1269,11 +441,21 @@ export default function Capsule() {
       // getCurrentWindow() 在胶囊里会误返回主窗（Tauri v2 metadata.currentWindow 误指向主窗）；
       // WebviewWindow.getByLabel 是 async 且胶囊内 JS 注册表未含自身，返回 null。
       const win = getCurrentWebviewWindow();
-      // eslint-disable-next-line no-console
-      console.log('[CAPSULE-PROBE] winLabel=', win?.label);
+      if (__DEV) console.log('[CAPSULE-PROBE] winLabel=', win?.label);
       if (!win) return;
       try {
         await invoke('set_overlay_transparent');
+        // [DEV 探针] 确认 DComp 是否真正激活（打破静默回落盲调）。
+        // true=走 DComp swapchain（外部媒体下不卡）；false=回落 layered 重定向（外部媒体下会卡）。
+        if (__DEV) {
+          try {
+            const active = await invoke<boolean>('dcomp_is_active', { label: win.label });
+            // eslint-disable-next-line no-console
+            console.log('[CAPSULE-PROBE] dcomp_is_active=' + active + ' label=' + win.label);
+          } catch {
+            /* 命令未注册（旧版）忽略 */
+          }
+        }
       } catch {
         /* 非 Windows 或不支持时忽略 */
       }
@@ -1298,37 +480,28 @@ export default function Capsule() {
 
     // 展开前置门控：在 setExpanded(true) 之前置 panelReady=false，确保展开后
     // 首帧渲染就不包含子面板——规避 36→470 过渡期旧窗高裁剪标题栏的问题。
-    // 用 expandedRef（expand effect 同步维护）判断是否从收起态展开，避免闭包陈旧值。
+    // 闭包内用 getState() 读最新值（替代原 expandedRef/keepOpenRef 双写镜像）。
     listen<boolean>('capsule:expand', (e) => {
+      const s = useCapsuleStore.getState();
       if (e.payload) {
         if (hoverLockRef.current) return; // 收起锁定：悬停不自动展开，直到用户点击胶囊
-        if (!expandedRef.current) setPanelReady(false);
+        if (!s.expanded) s.setPanelReady(false);
       } else {
-        if (keepOpenRef.current) return; // 保持态：鼠标离开不自动收起
+        if (s.keepOpen) return; // 保持态：鼠标离开不自动收起
       }
-      setExpanded(!!e.payload);
+      s.setExpanded(!!e.payload);
     }).then((f) => unsubs.push(f));
     listen<Record<string, unknown>>('now-playing', (e) => {
-      const t0 = performance.now();
-      const d = toPlayInfo(e.payload);
-      if (d.source === 'system') {
-        sysPlayRef.current = d.title ? d : null;
-        // 同步进外部会话列表（按 key 去重），供堆叠/下拉切换。收起态下不触发 setSessionList，
-        // 避免后台播放时整树重渲染（展开时再由 refreshList 用 ref 重建列表）
-        if (d.title && d.key) {
-          const next = sessionListRef.current.filter((s) => s.key !== d.key);
-          next.unshift(d);
-          sessionListRef.current = next;
-          if (expandedRef.current) setSessionList(next);
-        }
-      } else {
-        appPlayRef.current = d.title ? d : null;
-        if (expandedRef.current) setAppPlay(d.title ? d : null);
+      const t0 = __DEV ? performance.now() : 0;
+      // 双源合并 / 会话列表 / 上屏卡片派生统一由 store 处理；壳仅保留 DEV 探针计时。
+      useCapsuleStore.getState().onNowPlaying(e.payload);
+      if (__DEV) {
+        const d = toPlayInfo(e.payload);
+        console.log('[CAPSULE-PROBE] now-playing handler_us=' + Math.round(performance.now() - t0) + ' source=' + (d.source ?? '?'));
       }
-      applyDisplay();
-      // eslint-disable-next-line no-console
-      console.log('[CAPSULE-PROBE] now-playing handler_us=' + Math.round(performance.now() - t0) + ' source=' + (d.source ?? '?'));
     }).then((f) => unsubs.push(f));
+    // 接收请求监听（由 capsuleStore 统一管理：自动展开 / 弹确认 / toast / 完成）
+    unsubs.push(useCapsuleStore.getState().initReceiveListeners());
     return () => unsubs.forEach((f) => f());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1340,7 +513,6 @@ export default function Capsule() {
 
   // 展开/收起/对话模式/搜索模式：重新定位（居中）+ 改尺寸 + 上报热区（窗口向左右与向下延展）
   useEffect(() => {
-    expandedRef.current = expanded; // 供 now-playing 监听器判断是否需要同步列表 state
     const w = EXPANDED_W;
     const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : EXPANDED_H;
     // [修复] 用 getCurrentWebviewWindow 取胶囊窗自身（见挂载 effect 注释）：
@@ -1349,23 +521,24 @@ export default function Capsule() {
     if (!win) return;
     const sx = window.screen.availWidth;
     const x = Math.round((sx - w) / 2);
-    const t0 = Date.now();
+    const t0 = __DEV ? Date.now() : 0;
     // 窗口高度同步门控：从收起态展开且子面板打开时，暂不渲染子面板，等 setSize 完成后
     // 再放开渲染。否则 36→470 高度过渡期间，React 已渲染的子面板内容被旧窗高裁剪。
     const expanding = expanded && !prevExpandedRef.current;
     const subPanelOpen = chatOpen || searchOpen || transferOpen;
     prevExpandedRef.current = expanded;
     if (expanding && subPanelOpen) {
-      setPanelReady(false);
+      useCapsuleStore.getState().setPanelReady(false);
     }
     // [DEV 探针] 尺寸变化前的真实 bounds
-    win
-      .outerSize()
-      .then((os: { width: number; height: number }) =>
-        // eslint-disable-next-line no-console
-        console.log('[CAPSULE-PROBE] expand-before', { w: os.width, h: os.height }, { expanded, chatOpen, searchOpen })
-      )
-      .catch(() => {});
+    if (__DEV) {
+      win
+        .outerSize()
+        .then((os: { width: number; height: number }) =>
+          console.log('[CAPSULE-PROBE] expand-before', { w: os.width, h: os.height }, { expanded, chatOpen, searchOpen })
+        )
+        .catch(() => {});
+    }
     win.setPosition(new LogicalPosition(x, TOP_Y)).catch(() => {});
     // 穿透/点击切换：收起态 ignore=true（点击穿透桌面），展开态 ignore=false（接收点击）。
     // 原由 Rust 侧 set_ignore_cursor_events 负责，但 Rust 用 get_webview_window 克隆全局窗表里的
@@ -1380,17 +553,18 @@ export default function Capsule() {
         // 其余情况直接复位——因为 listener 在展开时无条件置 panelReady=false，但子面板可能
         // 尚未打开（首次悬停），需要在此清门控，否则后续点开搜索/AI/传输全显示空白。
         if (expanding && subPanelOpen) {
-          setTimeout(() => setPanelReady(true), 0);
+          setTimeout(() => useCapsuleStore.getState().setPanelReady(true), 0);
         } else {
-          setPanelReady(true);
+          useCapsuleStore.getState().setPanelReady(true);
         }
-        win
-          .outerSize()
-          .then((os: { width: number; height: number }) =>
-            // eslint-disable-next-line no-console
-            console.log('[CAPSULE-PROBE] expand-after', { w: os.width, h: os.height }, 'setSize_cost_ms=' + (Date.now() - t0))
-          )
-          .catch(() => {});
+        if (__DEV) {
+          win
+            .outerSize()
+            .then((os: { width: number; height: number }) =>
+              console.log('[CAPSULE-PROBE] expand-after', { w: os.width, h: os.height }, 'setSize_cost_ms=' + (Date.now() - t0))
+            )
+            .catch(() => {});
+        }
         // 过渡后立即上屏新尺寸：轻量 3 次 present_overlay_now（替代原来的 8ms×600ms =
         // 125 次/秒 Notify 风暴——该风暴会严重干扰外部媒体播放时的 DWM 呈现，导致卡顿/卡死，
         // 日志里 setSize_cost_ms=2108 即此所致）。稳态重绘频率由上方 request_repaint_rate
@@ -1400,38 +574,34 @@ export default function Capsule() {
         window.setTimeout(presentOverlayNow, 160);
       })
       .catch(() => {});
-  }, [expanded, chatOpen, aideOpen, searchOpen, transferOpen]);
-
-  // 媒体控制：经 Rust 命令转发。target=选中会话的 key（AUMID / "app"），未选中则交给活跃会话/本应用
-  const ctrl = useCallback((action: string, value?: number) => {
-    const target = selectedKeyRef.current || undefined;
-    invoke('smtc_control', { action, value, target }).catch(() => {});
-  }, []);
+  }, [expanded, chatOpen, aideOpen, searchOpen, transferOpen, presentOverlayNow]);
 
   async function onAction(kind: string) {
+    // 闭包内读 store 最新值做互斥切换（click 同步执行，无竞态）
+    const s = useCapsuleStore.getState();
     try {
       if (kind === 'ai') {
         // 切换内置 AI 对话模式（复用全局 ai_chat 能力）；与搜索/浮岛 AI 编程互斥
-        setSearchOpen(false);
-        setAideOpen(false);
-        setChatOpen((v) => !v);
+        s.setSearchOpen(false);
+        s.setAideOpen(false);
+        s.setChatOpen(!s.chatOpen);
       } else if (kind === 'aide') {
         // 浮岛「AI 编程」：接管 IDE 对话，由 IDE 模块处理；与内置 AI/搜索/传输互斥
-        setExpanded(true);
-        setChatOpen(false);
-        setSearchOpen(false);
-        setTransferOpen(false);
-        setAideOpen((v) => !v);
+        s.setExpanded(true);
+        s.setChatOpen(false);
+        s.setSearchOpen(false);
+        s.setTransferOpen(false);
+        s.setAideOpen(!s.aideOpen);
       } else if (kind === 'search') {
         // 切换内置 Everything 风格搜索模式；与对话互斥
-        setChatOpen(false);
-        setSearchOpen((v) => !v);
+        s.setChatOpen(false);
+        s.setSearchOpen(!s.searchOpen);
       } else if (kind === 'transfer') {
         // 切换局域网传输模式；与对话/搜索互斥；强制展开（不被收起态折叠）
-        setExpanded(true);
-        setChatOpen(false);
-        setSearchOpen(false);
-        setTransferOpen((v) => !v);
+        s.setExpanded(true);
+        s.setChatOpen(false);
+        s.setSearchOpen(false);
+        s.setTransferOpen(!s.transferOpen);
       } else if (kind === 'screenshot') {
         await emit('open-screenshot');
       } else if (kind === 'record') {
@@ -1464,6 +634,7 @@ export default function Capsule() {
   // 每 1 秒打一行；若 fps 低（≈10）说明续命没让合成器持续产帧，若 visibility=hidden 说明
   // SetIsVisible(TRUE) 没生效。打开胶囊 webview 的 DevTools Console 可见。
   useEffect(() => {
+    if (!__DEV) return; // 生产构建不跑 fps / visibility 探针（Vite tree-shake 掉整块）
     let raf = 0;
     let frames = 0;
     let last = performance.now();
@@ -1496,6 +667,7 @@ export default function Capsule() {
   // （典型：now-playing 重渲染 / 图片解码），会直接导致按钮点击卡顿。无长任务却仍卡 → 属分层窗
   // 输入/合成器问题（与 Notify 风暴相关）。看胶囊 DevTools Console。
   useEffect(() => {
+    if (!__DEV) return; // 生产构建不跑 longtask 探针
     if (typeof PerformanceObserver === 'undefined') return;
     try {
       const obs = new PerformanceObserver((list) => {
@@ -1521,8 +693,7 @@ export default function Capsule() {
     // （会与 DWM 合成时序冲突致布局偏移/空白）。DComp 开启时 Notify 被跳过，此处仅影响 layered 兜底。
     const animating = expanded;
     const ms = animating ? 16 : 0;
-    // eslint-disable-next-line no-console
-    console.log('[CAPSULE-PROBE] request_repaint_rate', ms, { expanded });
+    if (__DEV) console.log('[CAPSULE-PROBE] request_repaint_rate', ms, { expanded });
     invoke('set_overlay_repaint_rate', { intervalMs: ms }).catch(() => {});
   }, [expanded]);
 
@@ -1543,139 +714,13 @@ export default function Capsule() {
     });
     obs.observe(root, { childList: true, subtree: true, characterData: true, attributes: true });
     return () => obs.disconnect();
-  }, [expanded]);
+  }, [expanded, presentOverlayNow]);
 
-  const togglePlay = () => ctrl(isPlaying ? 'pause' : 'play');
+  const togglePlay = () => smtcControl(isPlaying ? 'pause' : 'play');
   const onVolume = (v: number) => {
     setVolume(v);
-    ctrl('volume', v);
+    smtcControl('volume', v);
   };
-
-  // 发送 AI 消息（复用全局 ai_chat，流式回传经全局事件）
-  const sendChat = useCallback(async () => {
-    const text = chatInput.trim();
-    if (!text || chatBusy) return;
-    if (!aiProfileId) {
-      setAiHint('未配置模型：请到「全局设置 → 模型」添加并填写 API Key');
-      return;
-    }
-    const uid = 'u' + Date.now().toString(36);
-    const aid = 'a' + Date.now().toString(36);
-    const convId = activeConvId; // 发送时锁定目标会话
-    streamConvIdRef.current = convId;
-    const history = chat.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content }));
-    const payload = [
-      { role: 'system', content: '你是一个 helpful 的 AI 助手，请用简体中文回答；必要时用 ``` 代码块给出示例并简述要点。' },
-      ...history,
-      { role: 'user', content: text },
-    ];
-    // 首条消息用内容自动命名会话（标题为空 / 默认「新对话」时）
-    updateStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '' }]);
-    setConversations((prev) => prev.map((c) => (c.id === convId && (c.title === '新对话' || !c.title.trim())) ? { ...c, title: text.slice(0, CONV_TITLE_MAX) } : c));
-    setChatInput('');
-    setChatBusy(true);
-    const reqId = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    activeReqRef.current = reqId;
-    asstIdRef.current = aid;
-    try {
-      await invoke('ai_chat', { requestId: reqId, messages: payload, profileId: aiProfileId });
-    } catch (e) {
-      if (activeReqRef.current === reqId) {
-        setChatBusy(false);
-        activeReqRef.current = null;
-        updateStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: '⚠ ' + String(e) } : m)));
-        asstIdRef.current = null;
-      }
-    }
-  }, [chatInput, chatBusy, aiProfileId, chat]);
-
-  // 清洗发给 IDE 的历史：丢弃空助手占位 / 连续重复消息 / 超长截断，阻断退化乱码被反复回灌形成循环
-  const cleanAideHistory = (msgs: Array<{ role?: string; content?: any }>) => {
-    const out: Array<{ role: string; content: string }> = [];
-    for (const m of msgs) {
-      if (!m || !m.role || m.content == null) continue;
-      const c = String(m.content);
-      if (m.role === 'assistant' && c.trim() === '') continue; // 跳过空助手（残留占位）
-      const prev = out[out.length - 1];
-      if (prev && prev.role === m.role && prev.content === c) continue; // 去重连续相同
-      out.push({ role: m.role as string, content: c });
-    }
-    return out.slice(-24);
-  };
-
-  // 浮岛「AI 编程」发送：不调 ai_chat，通知 IDE 接管对话（chat 模式，事件桥接，携带 profile + 历史）
-  const sendAide = useCallback(async () => {
-    const text = aideInput.trim();
-    if (!text || aideBusy) return;
-    // agent（自主编辑）模式：转发给 IDE 的 agent 面板执行，使用 IDE 当前激活档案（无需浮岛侧 profile）
-    if (aideMode === 'agent') {
-      if (aideReqRef.current) return; // 同步防重入：已有请求在飞时忽略，避免双击/重复 emit 触发 IDE busy 守卫误报"正在处理其他请求"
-      const uid = 'u' + Date.now().toString(36);
-      const aid = 'a' + Date.now().toString(36);
-      const convId = aideActiveConvId;
-      aideStreamConvIdRef.current = convId;
-      const history = cleanAideHistory(aideMessages.filter((m) => !m.error));
-      const reqId = 'cage_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      updateAideStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '' }]);
-      setAideConversations((prev) => prev.map((c) => (c.id === convId && (c.title === '新对话' || !c.title.trim())) ? { ...c, title: text.slice(0, CONV_TITLE_MAX) } : c));
-      setAideInput('');
-      setAideBusy(true);
-      aideReqRef.current = reqId;
-      aideAsstRef.current = aid;
-      const timer = setTimeout(() => {
-        if (aideReqRef.current === reqId) {
-          aideReqRef.current = null;
-          aideAsstRef.current = null;
-          updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ IDE 未响应：请确认 IDE 模块已加载且处于「自主编辑（agent）模式」并已打开 AI 面板。' } : m)));
-          setAideBusy(false);
-        }
-      }, 20000);
-      try {
-        await emit('capsule-ide-agent-request', { requestId: reqId, text, profileId: aideProfileId ?? undefined, history });
-      } catch (e) {
-        clearTimeout(timer);
-        aideReqRef.current = null;
-        aideAsstRef.current = null;
-        updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: '⚠ 发送失败：' + String(e) } : m)));
-        setAideBusy(false);
-      }
-      return;
-    }
-    if (!aideProfileId) {
-      setAiHint('未配置模型：请到「全局设置 → 模型」添加并填写 API Key');
-      return;
-    }
-    const uid = 'u' + Date.now().toString(36);
-    const aid = 'a' + Date.now().toString(36);
-    const convId = aideActiveConvId;
-      aideStreamConvIdRef.current = convId;
-      const history = cleanAideHistory(aideMessages.filter((m) => !m.error));
-      const reqId = 'cide_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    updateAideStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '' }]);
-    setAideConversations((prev) => prev.map((c) => (c.id === convId && (c.title === '新对话' || !c.title.trim())) ? { ...c, title: text.slice(0, CONV_TITLE_MAX) } : c));
-    setAideInput('');
-    setAideBusy(true);
-    aideReqRef.current = reqId;
-    aideAsstRef.current = aid;
-    // 兜底：若 IDE 未响应（如处于 agent 模式 / AI 面板未挂载），避免一直「思考中…」
-    const timer = setTimeout(() => {
-      if (aideReqRef.current === reqId) {
-        aideReqRef.current = null;
-        aideAsstRef.current = null;
-        updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ IDE 未响应：请确认 IDE 模块已加载且处于「对话模式」（非 agent 模式）。' } : m)));
-        setAideBusy(false);
-      }
-    }, 20000);
-    try {
-      await emit('capsule-ide-chat-request', { requestId: reqId, text, profileId: aideProfileId, history });
-    } catch (e) {
-      clearTimeout(timer);
-      aideReqRef.current = null;
-      aideAsstRef.current = null;
-      updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: '⚠ 发送失败：' + String(e) } : m)));
-      setAideBusy(false);
-    }
-  }, [aideInput, aideBusy, aideProfileId, aideMessages, aideMode]);
 
   const pillH = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : EXPANDED_H;
 
@@ -1688,7 +733,7 @@ export default function Capsule() {
           <button
             key={a.kind}
             onClick={(e) => { e.stopPropagation(); onAction(a.kind); }}
-            title={a.label}
+            title={t(a.labelKey)}
             style={{
               ...btnBase,
               flexDirection: 'column',
@@ -1706,7 +751,7 @@ export default function Capsule() {
             onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
           >
             <a.Icon />
-            <span>{a.label}</span>
+            <span>{t(a.labelKey)}</span>
           </button>
         );
       })}
@@ -1815,17 +860,17 @@ export default function Capsule() {
               {/* 媒体源选择：多会话时下拉命中指定卡片 */}
               {allSessions.length > 1 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.6)', flex: '0 0 auto' }}>媒体源</span>
+                  <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.6)', flex: '0 0 auto' }}>{t('capsule.mediaSource')}</span>
                   <select
                     value={selectedKey ?? ''}
                     onChange={(e) => selectSession(e.target.value)}
                     onClick={(e) => e.stopPropagation()}
                     style={{ flex: 1, minWidth: 0, fontSize: 12, color: '#f4f4f6', background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: '4px 8px', outline: 'none', fontFamily: 'inherit' }}
                   >
-                    <option value="">自动（当前播放）</option>
+                    <option value="">{t('capsule.mediaAuto')}</option>
                     {allSessions.map((s) => (
                       <option key={s.key} value={s.key}>
-                        {(s.title || (s.key === 'app' ? '本应用' : s.key)) + (s.artist ? ` · ${s.artist}` : '')}
+                        {(s.title || (s.key === 'app' ? t('capsule.mediaApp') : s.key)) + (s.artist ? ` · ${s.artist}` : '')}
                       </option>
                     ))}
                   </select>
@@ -1881,19 +926,19 @@ export default function Capsule() {
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 15, fontWeight: 700, color: '#f6f6f8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {play?.title || '未播放'}
+                      {play?.title || t('capsule.mediaNone')}
                     </div>
                     <div style={{ fontSize: 12.5, color: 'rgba(244,244,246,0.72)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 2 }}>
                       {play?.artist || '—'}
                     </div>
                     <div style={{ fontSize: 11.5, color: 'rgba(230,195,92,0.85)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 2 }}>
-                      {play?.album || '未知专辑'}
+                      {play?.album || t('capsule.unknownAlbum')}
                     </div>
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
                     <Clock />
-                    <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen((v) => !v)} size={26} />
-                    <button onClick={(e) => { e.stopPropagation(); collapse(); }} title="收起" style={{ ...btnBase, width: 26, height: 26 }}>
+                    <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen(!keepOpen)} size={26} />
+                    <button onClick={(e) => { e.stopPropagation(); collapse(); }} title={t('capsule.collapse')} style={{ ...btnBase, width: 26, height: 26 }}>
                       <IconChevron />
                     </button>
                   </div>
@@ -1903,18 +948,18 @@ export default function Capsule() {
               {/* 播放控制区（压缩：更紧的间距、更小的按钮；专辑图保持 72px） */}
               <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 5 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14 }}>
-                  <button onClick={(e) => { e.stopPropagation(); ctrl('previous'); }} disabled={!play?.can_prev} title="上一首" style={{ ...btnBase, width: 34, height: 34, opacity: play?.can_prev ? 1 : 0.4 }}>
+                  <button onClick={(e) => { e.stopPropagation(); smtcControl('previous'); }} disabled={!play?.can_prev} title={t('capsule.prev')} style={{ ...btnBase, width: 34, height: 34, opacity: play?.can_prev ? 1 : 0.4 }}>
                     <IconPrev />
                   </button>
-                  <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} title={isPlaying ? '暂停' : '播放'} style={{ ...btnBase, width: 40, height: 40, background: 'rgba(230,195,92,0.16)' }}>
+                  <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} title={isPlaying ? t('capsule.pause') : t('capsule.play')} style={{ ...btnBase, width: 40, height: 40, background: 'rgba(230,195,92,0.16)' }}>
                     {isPlaying ? <IconPause /> : <IconPlay />}
                   </button>
-                  <button onClick={(e) => { e.stopPropagation(); ctrl('next'); }} disabled={!play?.can_next} title="下一首" style={{ ...btnBase, width: 34, height: 34, opacity: play?.can_next ? 1 : 0.4 }}>
+                  <button onClick={(e) => { e.stopPropagation(); smtcControl('next'); }} disabled={!play?.can_next} title={t('capsule.next')} style={{ ...btnBase, width: 34, height: 34, opacity: play?.can_next ? 1 : 0.4 }}>
                     <IconNext />
                   </button>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 3, padding: '0 6px' }}>
-                  <button onClick={(e) => { e.stopPropagation(); onVolume(volume > 0 ? 0 : 0.7); }} title={volume > 0 ? '静音' : '取消静音'} style={{ ...btnBase, width: 28, height: 28 }}>
+                  <button onClick={(e) => { e.stopPropagation(); onVolume(volume > 0 ? 0 : 0.7); }} title={volume > 0 ? t('capsule.mute') : t('capsule.unmute')} style={{ ...btnBase, width: 28, height: 28 }}>
                     {volume > 0 ? <IconVolume /> : <IconVolumeMute />}
                   </button>
                   <input
@@ -1942,298 +987,15 @@ export default function Capsule() {
             </div>
           )}
 
-          {/* 展开态 · AI 对话模式（内置对话框，复用全局 AI） */}
-          {expanded && chatOpen && panelReady && (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px' }} onClick={(e) => e.stopPropagation()}>
-              {/* 顶部细条：小封面 + 标题 + 播放切换 + 关闭对话 */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <div
-                  style={{
-                    width: 40,
-                    height: 40,
-                    borderRadius: 9,
-                    flex: '0 0 40px',
-                    background: 'rgba(255,255,255,0.06)',
-                    backgroundImage: coverUrl ? `url(${coverUrl})` : undefined,
-                    backgroundSize: 'cover',
-                    backgroundPosition: 'center',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: GOLD,
-                    overflow: 'hidden',
-                  }}
-                >
-                  {!coverUrl && <IconNote />}
-                </div>
-                <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <select
-                      value={activeConvId}
-                      onChange={(e) => selectConversation(e.target.value)}
-                      title="选择对话（下拉切换）"
-                      style={{
-                        flex: 1, minWidth: 0,
-                        fontSize: 12.5, color: '#f6f6f8',
-                        background: 'rgba(0,0,0,0.28)',
-                        border: '1px solid rgba(255,255,255,0.16)',
-                        borderRadius: 8, padding: '5px 6px',
-                        outline: 'none',
-                      }}
-                    >
-                      {conversations.map((c) => (
-                        <option key={c.id} value={c.id} style={{ background: '#1c1c1e', color: '#f6f6f8' }}>
-                          {(c.title || '新对话').slice(0, CONV_TITLE_MAX)}
-                        </option>
-                      ))}
-                    </select>
-                    <button onClick={newConversation} title="新建对话" style={{ ...btnBase, width: 30, height: 30, flex: '0 0 auto', color: GOLD, background: 'rgba(230,195,92,0.14)', fontSize: 18, lineHeight: 1 }}>
-                      +
-                    </button>
-                  </div>
-                  <div style={{ fontSize: 10.5, color: 'rgba(244,244,246,0.5)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {conversations.length} 个对话 · 全局 AI · 复用模型配置
-                  </div>
-                </div>
-                <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen((v) => !v)} size={28} />
-                <button onClick={() => setChatOpen(false)} title="返回播放器" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
-                  <IconClose />
-                </button>
-              </div>
+          {/* 展开态 · AI 对话模式（内置对话框，复用全局 AI） —— 已拆为 CapsuleChat 子组件 */}
+          {expanded && chatOpen && panelReady && <CapsuleChat coverUrl={coverUrl} />}
 
-              {/* 消息列表 */}
-              <div ref={chatScrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8, paddingRight: 2 }}>
-                {aiHint && (
-                  <div style={{ fontSize: 12, color: 'rgba(230,195,92,0.9)', background: 'rgba(230,195,92,0.1)', borderRadius: 8, padding: '8px 10px' }}>{aiHint}</div>
-                )}
-                {!aiHint && chat.length === 0 && (
-                  <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.55)', textAlign: 'center', marginTop: 12 }}>向 AI 提问，回车发送（Shift+Enter 换行）</div>
-                )}
-                {chat.map((m) => (
-                  <div
-                    key={m.id}
-                    style={{
-                      alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                      maxWidth: '85%',
-                      background: m.role === 'user' ? 'rgba(230,195,92,0.18)' : 'rgba(255,255,255,0.08)',
-                      color: m.error ? '#ff9a9a' : '#f2f2f4',
-                      borderRadius: 12,
-                      padding: '8px 10px',
-                      fontSize: 12.5,
-                      lineHeight: 1.5,
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                    }}
-                  >
-                    {/* 思考过程：可折叠、遮罩小字（仅助手消息有 reasoning 时显示） */}
-                    {m.role === 'assistant' && m.reasoning ? (
-                      <div style={{ marginBottom: 6 }}>
-                        <button
-                          onClick={() => setReasoningOpen((o) => ({ ...o, [m.id]: !o[m.id] }))}
-                          style={{
-                            ...btnBase, padding: '1px 7px', fontSize: 10.5, borderRadius: 6,
-                            background: 'rgba(255,255,255,0.07)', color: 'rgba(244,244,246,0.62)', marginBottom: 4,
-                          }}
-                        >
-                          {reasoningOpen[m.id] ? '▾' : '▸'} 思考过程{reasoningOpen[m.id] ? '' : `（${m.reasoning.length} 字 · 点击展开）`}
-                        </button>
-                        {reasoningOpen[m.id] && (
-                          <div style={{
-                            fontSize: 10.5, lineHeight: 1.55, fontStyle: 'italic',
-                            color: 'rgba(244,244,246,0.5)', background: 'rgba(0,0,0,0.2)',
-                            borderRadius: 8, padding: '6px 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                            filter: 'blur(0.3px)',
-                          }}>
-                            {m.reasoning}
-                          </div>
-                        )}
-                      </div>
-                    ) : null}
-                    {m.content || (m.role === 'assistant' && chatBusy ? '思考中…' : '')}
-                  </div>
-                ))}
-              </div>
-
-              {/* 输入区：统一舒展输入框，思考开关与发送按钮被囊括在同一容器内 */}
-              <div style={{ marginTop: 8, borderRadius: 12, border: '1px solid rgba(255,255,255,0.16)', background: 'rgba(0,0,0,0.22)', padding: 8 }}>
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
-                      e.preventDefault();
-                      void sendChat();
-                    }
-                  }}
-                  rows={1}
-                  placeholder={aiProfileId ? '输入消息…' : '未配置模型'}
-                  disabled={!aiProfileId}
-                  style={{
-                    width: '100%',
-                    display: 'block',
-                    resize: 'none',
-                    maxHeight: 90,
-                    minHeight: 34,
-                    height: 34,
-                    border: 'none',
-                    background: 'transparent',
-                    color: '#f4f4f6',
-                    padding: '4px 4px',
-                    fontSize: 12.5,
-                    lineHeight: 1.4,
-                    outline: 'none',
-                    fontFamily: 'inherit',
-                  }}
-                />
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
-                  <ThinkingToggle profileId={aiProfileId} compact disabled={!aiProfileId} />
-                  <button
-                    onClick={() => void sendChat()}
-                    disabled={chatBusy || !aiProfileId || !chatInput.trim()}
-                    title="发送"
-                    style={{ ...btnBase, width: 34, height: 34, background: 'rgba(230,195,92,0.18)', opacity: chatBusy || !aiProfileId || !chatInput.trim() ? 0.45 : 1 }}
-                  >
-                    <IconSend />
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* 展开态 · 浮岛「AI 编程」多对话（本地持有，接管 IDE 执行，事件桥接） */}
-          {expanded && aideOpen && panelReady && (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px' }} onClick={(e) => e.stopPropagation()}>
-              {/* 顶部细条：返回 + 标题 + 对话切换 + 新建 */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: '#f2f2f4' }}>AI 编程</span>
-                {/* 对话切换：下拉选择 / 新建 */}
-                <select
-                  value={aideActiveConvId}
-                  onChange={(e) => selectAideConversation(e.target.value)}
-                  title="选择对话（下拉切换）"
-                  style={{ flex: 1, minWidth: 0, fontSize: 12, color: '#f6f6f8', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: '4px 6px', outline: 'none' }}
-                >
-                  {aideConversations.map((c) => (
-                    <option key={c.id} value={c.id} style={{ background: '#1c1c1e', color: '#f6f6f8' }}>
-                      {(c.title || '新对话').slice(0, CONV_TITLE_MAX)}
-                    </option>
-                  ))}
-                </select>
-                <button onClick={newAideConversation} title="新建对话" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: GOLD, background: 'rgba(230,195,92,0.14)', fontSize: 16, lineHeight: 1 }}>
-                  +
-                </button>
-                <button onClick={() => clearAideConversations()} title="清空全部对话（浮岛 + IDE）" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: 'rgba(244,244,246,0.8)', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', fontSize: 11 }}>
-                  清空
-                </button>
-                <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen((v) => !v)} size={28} />
-                <button onClick={() => setAideOpen(false)} title="返回播放器" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
-                  <IconClose />
-                </button>
-              </div>
-              {/* 第二行：模式切换（对话 / 代理）+ 模型下拉 + 思考开关 */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
-                {/* 模式切换：对话 = chat 桥；代理 = agent 桥（走 IDE 自主编辑面板） */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 2, background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: 2, flex: '0 0 auto' }}>
-                  <button onClick={() => setAideMode('chat')} title="对话模式（chat 桥）" style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideMode === 'chat' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideMode === 'chat' ? GOLD : 'transparent' }}>对话</button>
-                  <button onClick={() => setAideMode('agent')} title="代理模式（agent 桥，交给 IDE 自主编辑）" style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideMode === 'agent' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideMode === 'agent' ? GOLD : 'transparent' }}>代理</button>
-                </div>
-                <select
-                  value={aideProfileId ?? ''}
-                  onChange={(e) => setAideProfileId(e.target.value || null)}
-                  title={aideMode === 'agent' ? '代理模式使用 IDE 当前激活模型' : '选择模型'}
-                  disabled={aideMode === 'agent'}
-                  style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: '#f6f6f8', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: '4px 6px', outline: 'none', opacity: aideMode === 'agent' ? 0.5 : 1 }}
-                >
-                  {configuredAideProfiles.length === 0 && <option value="" style={{ background: '#1c1c1e', color: '#f6f6f8' }}>未配置模型</option>}
-                  {configuredAideProfiles.map((p) => (
-                    <option key={p.id} value={p.id} style={{ background: '#1c1c1e', color: '#f6f6f8' }}>
-                      {p.name || p.model || '未命名'}
-                    </option>
-                  ))}
-                </select>
-                {/* 代理模式请求本就带 aideProfileId 转发给 IDE 执行，故思考开关直接控制 aideProfileId（chat/agent 一致），不再置灰 */}
-                <ThinkingToggle
-                  profileId={aideProfileId}
-                  compact
-                  disabled={!aideProfileId || aideBusy}
-                />
-                {aideBusy && <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.6)' }}>{aideMode === 'agent' ? '执行中…' : '思考中…'}</span>}
-              </div>
-
-              {/* 消息列表 */}
-              <div ref={aideScrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8, paddingRight: 2 }}>
-                {aideMessages.length === 0 && (
-                  <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.55)', textAlign: 'center', marginTop: 12 }}>与 AI 结对编程：对话模式回车发送；代理模式把任务交给 IDE 自主编辑（需 IDE 处于「自主编辑」模式）。</div>
-                )}
-                {aideMessages.map((m) => (
-                  <div
-                    key={m.id}
-                    style={{
-                      alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                      maxWidth: '85%',
-                      background: m.role === 'user' ? 'rgba(230,195,92,0.18)' : 'rgba(255,255,255,0.08)',
-                      color: m.error ? '#ff9a9a' : '#f2f2f4',
-                      borderRadius: 12,
-                      padding: '8px 10px',
-                      fontSize: 12.5,
-                      lineHeight: 1.5,
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                    }}
-                  >
-                    {m.role === 'assistant' && m.reasoning ? (
-                      <div style={{ marginBottom: 6 }}>
-                        <button
-                          onClick={() => setAideReasoningOpen((o) => ({ ...o, [m.id]: !o[m.id] }))}
-                          style={{ ...btnBase, padding: '1px 7px', fontSize: 10.5, borderRadius: 6, background: 'rgba(255,255,255,0.07)', color: 'rgba(244,244,246,0.62)', marginBottom: 4 }}
-                        >
-                          {aideReasoningOpen[m.id] ? '▾' : '▸'} 思考过程{aideReasoningOpen[m.id] ? '' : `（${m.reasoning.length} 字 · 点击展开）`}
-                        </button>
-                        {aideReasoningOpen[m.id] && (
-                          <div style={{ fontSize: 10.5, lineHeight: 1.55, fontStyle: 'italic', color: 'rgba(244,244,246,0.5)', background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '6px 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', filter: 'blur(0.3px)' }}>
-                            {m.reasoning}
-                          </div>
-                        )}
-                      </div>
-                    ) : null}
-                    {m.content || (m.role === 'assistant' && aideBusy ? '思考中…' : '')}
-                  </div>
-                ))}
-              </div>
-
-              {/* 输入区 */}
-              <div style={{ marginTop: 8, borderRadius: 12, border: '1px solid rgba(255,255,255,0.16)', background: 'rgba(0,0,0,0.22)', padding: 8 }}>
-                <textarea
-                  value={aideInput}
-                  onChange={(e) => setAideInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
-                      e.preventDefault();
-                      void sendAide();
-                    }
-                  }}
-                  rows={1}
-                  placeholder={aideMode === 'agent' ? '输入任务，交给 IDE 自主编辑（Enter 发送）' : (aideProfileId ? '输入消息…' : '未配置模型')}
-                  disabled={aideMode === 'chat' && !aideProfileId}
-                  style={{ width: '100%', display: 'block', resize: 'none', maxHeight: 90, minHeight: 34, height: 34, border: 'none', background: 'transparent', color: '#f4f4f6', padding: '4px 4px', fontSize: 12.5, lineHeight: 1.4, outline: 'none', fontFamily: 'inherit' }}
-                />
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginTop: 4 }}>
-                  <button
-                    onClick={() => void sendAide()}
-                    disabled={aideBusy || !aideInput.trim() || (aideMode === 'chat' && !aideProfileId)}
-                    title="发送"
-                    style={{ ...btnBase, width: 34, height: 34, background: 'rgba(230,195,92,0.18)', opacity: aideBusy || !aideInput.trim() || (aideMode === 'chat' && !aideProfileId) ? 0.45 : 1 }}
-                  >
-                    <IconSend />
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          {/* 展开态 · 浮岛「AI 编程」多对话 —— 已拆为 CapsuleAide 子组件 */}
+          {expanded && aideOpen && panelReady && <CapsuleAide />}
 
           {/* 展开态 · 文件搜索（复用 FileSearchPanel，与主窗口黄金棋盘共享） */}
           {expanded && searchOpen && panelReady && (
-            <FileSearchPanel variant="overlay" onClose={() => setSearchOpen(false)} keepOpen={keepOpen} onKeepToggle={() => setKeepOpen((v) => !v)} />
+            <FileSearchPanel variant="overlay" onClose={() => setSearchOpen(false)} keepOpen={keepOpen} onKeepToggle={() => setKeepOpen(!keepOpen)} />
           )}
 
           {/* 展开态 · 局域网传输（LocalSend v2 兼容） */}
@@ -2244,7 +1006,7 @@ export default function Capsule() {
               onAcceptReceive={acceptReceive}
               onDeclineReceive={declineReceive}
               keepOpen={keepOpen}
-              onKeepToggle={() => setKeepOpen((v) => !v)}
+              onKeepToggle={() => setKeepOpen(!keepOpen)}
             />
           )}
         </div>

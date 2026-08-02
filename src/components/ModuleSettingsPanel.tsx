@@ -1,5 +1,6 @@
 import { type ReactNode } from 'react';
 import { X } from 'lucide-react';
+import { useI18n } from '@/lib/i18n';
 
 export interface ModuleSettingsPanelProps {
   title: string;
@@ -10,6 +11,7 @@ export interface ModuleSettingsPanelProps {
 
 /** 通用模块设置面板 — 覆盖在主内容区上方 */
 export function ModuleSettingsPanel({ title, icon, onClose, children }: ModuleSettingsPanelProps) {
+  const { t } = useI18n();
   return (
     <div className="flex-1 h-full overflow-y-auto main-panel-bg p-6 fade-in">
       <div className="max-w-lg mx-auto">
@@ -17,7 +19,7 @@ export function ModuleSettingsPanel({ title, icon, onClose, children }: ModuleSe
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-2">
             <span className="text-[var(--element-bg)]">{icon}</span>
-            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{title} 设置</h2>
+            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{title} {t('common.settings')}</h2>
           </div>
           <button
             onClick={onClose}

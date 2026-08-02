@@ -1,121 +1,18 @@
 import { useEffect, useState, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
 import { FileSearchPanel } from '@/components/FileSearchPanel';
 import { useI18n } from '@/lib/i18n';
-
-interface TransferPeer {
-  fingerprint: string;
-  alias: string;
-  device_type?: string;
-  device_model?: string;
-  ip: string;
-  port: number;
-  protocol: string;
-}
-
-interface TransferProgressItem {
-  direction: string;
-  session_id: string;
-  file_id: string;
-  file_name: string;
-  received: number;
-  total: number;
-  done: boolean;
-  peer_alias: string;
-}
+import { useTransfer } from '@/core/transfer/useTransfer';
 
 // ======== 传输面板（主窗口风格，CSS 变量自适应主题）========
+// 逻辑层（peers/progress/staged/确认/拖放）抽到 useTransfer，与浮岛 Capsule.TransferPanel 共用。
+// 本组件只保留主窗口风格的 UI + window 级原生拖放（浮岛用 webview onDragDropEvent）。
 function TransferTab() {
   const { t } = useI18n();
-  const [peers, setPeers] = useState<TransferPeer[]>([]);
-  const [progress, setProgress] = useState<TransferProgressItem[]>([]);
-  const [running, setRunning] = useState(false);
-  const [alias, setAlias] = useState('安得云荟');
-  const [staged, setStagedState] = useState<string[]>([]);
-  const [confirmPeer, setConfirmPeer] = useState<TransferPeer | null>(null);
-  const [sendErr, setSendErr] = useState<string | null>(null);
-  const [stagedOpen, setStagedOpen] = useState(false); // 暂存文件下拉总览
-
-  // 暂存文件走 Rust 端持久化（<appdata>/transfer/config.json），跨 webview 共用
-  const setStaged = (updater: string[] | ((prev: string[]) => string[])) => {
-    setStagedState((prev) => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      invoke('transfer_set_staged', { paths: next }).catch(() => {});
-      return next;
-    });
-  };
-
-  useEffect(() => {
-    const offs: Array<() => void> = [];
-    (async () => {
-      await invoke('transfer_start').catch(() => {});
-      const st = (await invoke('transfer_status').catch(() => ({}))) as { running?: boolean; alias?: string };
-      // 服务已在 transfer_start 后运行，立即置为已开启，避免先显示「未开启」再跳正常的 1 秒闪烁
-      setRunning(!!st?.running);
-      setAlias(st?.alias || '安得云荟');
-      await invoke('transfer_announce').catch(() => {});
-      const list = (await invoke('transfer_list_peers').catch(() => [])) as TransferPeer[];
-      setPeers(list);
-      const s = (await invoke('transfer_get_staged').catch(() => [])) as string[];
-      setStagedState(s);
-    })();
-    listen('transfer-peer-found', (e: { payload: TransferPeer }) => {
-      const p = e.payload;
-      setPeers((prev) => (prev.some((x) => x.fingerprint === p.fingerprint) ? prev : [...prev, p]));
-    }).then((u) => offs.push(u));
-    listen('transfer-progress', (e: { payload: TransferProgressItem }) => {
-      const p = e.payload;
-      setProgress((prev) => {
-        const next = prev.filter((x) => !(x.session_id === p.session_id && x.file_id === p.file_id));
-        return [...next, p];
-      });
-    }).then((u) => offs.push(u));
-    // 接收确认弹窗已统一交由 App 根挂载的全局 TransferReceiveModal 处理，
-    // 此处不再重复监听，避免与主窗/浮岛同时弹出重复确认框。
-    return () => offs.forEach((u) => u());
-  }, []);
-
-  const applyAlias = async (v: string) => {
-    const val = v.trim() || '安得云荟';
-    setAlias(val);
-    await invoke('transfer_set_alias', { alias: val }).catch(() => {});
-  };
-
-  // 发送出错必须在 UI 可见（.catch 只打 console 用户看不到，表现为「点了没反应」）
-  const doSend = async (fingerprint: string, paths: string[]) => {
-    setSendErr(null);
-    try {
-      await invoke('transfer_send', { fingerprint, paths });
-    } catch (e) {
-      setSendErr(String(e));
-    }
-  };
-
-  const sendTo = async (peer: TransferPeer) => {
-    if (staged.length > 0) {
-      setConfirmPeer(peer);
-      return;
-    }
-    const picked = (await open({ multiple: true, title: '选择要发送的文件' })) as string[] | null;
-    if (!picked || picked.length === 0) return;
-    await doSend(peer.fingerprint, picked);
-  };
-
-  const confirmSend = async () => {
-    if (!confirmPeer) return;
-    const paths = staged;
-    const fp = confirmPeer.fingerprint;
-    setConfirmPeer(null);
-    setStaged([]);
-    await doSend(fp, paths);
-  };
-
-  const addFiles = async () => {
-    const picked = (await open({ multiple: true, title: '选择要发送的文件' })) as string[] | null;
-    if (picked && picked.length) setStaged((prev) => Array.from(new Set([...prev, ...picked])));
-  };
+  const {
+    peers, progress, running, alias, staged, confirmPeer, sendErr, stagedOpen,
+    setAlias, setStaged, setStagedOpen, setConfirmPeer, setSendErr,
+    applyAlias, sendTo, confirmSend, addFiles,
+  } = useTransfer();
 
   const handleDrop = useCallback((e: DragEvent) => {
     e.preventDefault();
@@ -128,7 +25,7 @@ function TransferTab() {
       }
       if (paths.length) setStaged((prev) => Array.from(new Set([...prev, ...paths])));
     }
-  }, []);
+  }, [setStaged]);
 
   const handleDragOver = useCallback((e: DragEvent) => {
     e.preventDefault();

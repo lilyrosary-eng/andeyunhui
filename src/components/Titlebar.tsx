@@ -43,7 +43,7 @@ export function Titlebar() {
             <circle cx="0" cy="-2" r="2.5" fill="currentColor" opacity=".35"/>
           </g>
         </svg>
-        <span className="text-xs text-neutral-400 dark:text-stone-500 font-medium tracking-wide">安得云荟</span>
+        <span className="text-xs text-neutral-400 dark:text-stone-500 font-medium tracking-wide">{t('common.appName')}</span>
       </div>
 
       {/* 右侧：窗口控制按钮 */}

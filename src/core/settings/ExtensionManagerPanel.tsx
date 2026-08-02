@@ -7,8 +7,10 @@ import { api, type PluginManifest } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import type { PluginRegistry } from '@/core/pluginRegistry';
 import { createSandboxGlobals, executeInSandbox } from '@/core/pluginSandbox';
+import { useI18n } from '@/lib/i18n';
 
 export function ExtensionManagerPanel() {
+  const { t } = useI18n();
   // 订阅诊断数据变更
   const diagnostics = useSyncExternalStore(
     pluginDiagnostics.subscribe.bind(pluginDiagnostics),
@@ -79,10 +81,10 @@ export function ExtensionManagerPanel() {
     try {
       const name = await invoke<string>('install_bundled_plugin', { pluginId: plugin.id });
       await invoke('refresh_plugins');
-      setRefreshMsg(`${name} 安装完成。`);
+      setRefreshMsg(t('ext.installedDone', { name }));
       await refreshInstalledList();
     } catch (e: any) {
-      setRefreshMsg(`安装失败: ${e}`);
+      setRefreshMsg(t('ext.installFailed', { err: e }));
     }
     setInstalling((s) => { const n = new Set(s); n.delete(plugin.id); return n; });
   };
@@ -116,13 +118,7 @@ export function ExtensionManagerPanel() {
     const name = plugin.name || pluginId;
     // 浏览器原生 confirm 在 Tauri WebView 中可用，避免引入额外 Dialog 组件
     const ok = window.confirm(
-      `确定要彻底删除模块「${name}」吗？\n\n` +
-      `此操作会：\n` +
-      `• 删除插件目录（${pluginId}）\n` +
-      `• 删除对应的 .mufurong 源包（若存在，避免下次启动重新解压）\n` +
-      `• 清除启用/禁用配置\n` +
-      `• 从内存中卸载\n\n` +
-      `此操作不可撤销。`
+      t('ext.deleteConfirm', { name, pluginId })
     );
     if (!ok) return;
     try {
@@ -134,10 +130,10 @@ export function ExtensionManagerPanel() {
       // 从本地列表移除
       setInstalledPlugins(prev => prev.filter(p => p.id !== pluginId));
       window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id: pluginId, visible: false } }));
-      setRefreshMsg(`已彻底删除「${name}」`);
+      setRefreshMsg(t('ext.deletedDone', { name }));
       logger.log(`[ExtManager] 彻底删除 ${pluginId}`);
     } catch (err) {
-      setRefreshMsg(`删除失败: ${err}`);
+      setRefreshMsg(t('ext.deleteFailed', { err: String(err) }));
       logger.log(`[ExtManager] 彻底删除失败 ${pluginId}:`, err);
     }
   }, [pluginHot]);
@@ -147,7 +143,7 @@ export function ExtensionManagerPanel() {
     try {
       await api.openPluginFolder(pluginId);
     } catch (err) {
-      setRefreshMsg(`打开文件夹失败: ${err}`);
+      setRefreshMsg(t('ext.openFolderFailed', { err: String(err) }));
       logger.log(`[ExtManager] 打开文件夹失败 ${pluginId}:`, err);
     }
   }, []);
@@ -172,9 +168,9 @@ export function ExtensionManagerPanel() {
           }
         }
       }
-      setRefreshMsg('检测完成。');
+      setRefreshMsg(t('ext.scanDone'));
     } catch (_err) {
-      setRefreshMsg('检测失败，请查看控制台。');
+      setRefreshMsg(t('ext.scanFailed'));
     }
     setRefreshing(false);
   };
@@ -185,7 +181,7 @@ export function ExtensionManagerPanel() {
   return (
     <div className="max-w-4xl mx-auto w-full h-full flex flex-col gap-6 pt-8 px-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold tracking-tight text-neutral-800 dark:text-stone-100">管理拓展</h1>
+        <h1 className="text-2xl font-bold tracking-tight text-neutral-800 dark:text-stone-100">{t('ext.title')}</h1>
         <div className="flex items-center gap-2">
           {refreshMsg && (
             <span className="text-xs text-neutral-400 dark:text-stone-500">{refreshMsg}</span>
@@ -196,7 +192,7 @@ export function ExtensionManagerPanel() {
             className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/70 dark:bg-stone-800/70 border border-white/80 text-sm text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors disabled:opacity-50"
           >
             <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
-            检测新插件
+            {t('ext.scanNew')}
           </button>
         </div>
       </div>
@@ -204,13 +200,13 @@ export function ExtensionManagerPanel() {
       {/* 已安装插件（包括已启用和已禁用） */}
       <section>
         <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">
-          已安装插件 ({plugins.length})
+          {t('ext.installed', { n: plugins.length })}
         </h2>
         <div className="bg-white/70 dark:bg-stone-800/70 backdrop-blur rounded-2xl border border-white/80 divide-y divide-neutral-200/50 overflow-hidden">
           {plugins.length === 0 ? (
             <div className="p-6 text-center text-sm text-neutral-400 dark:text-stone-500 space-y-4">
               <Package size={24} className="mx-auto text-neutral-300 dark:text-neutral-600" />
-              <p>暂无已安装的插件</p>
+              <p>{t('ext.noInstalled')}</p>
               {installablePlugins.length > 0 && (
                 <button
                   onClick={async () => {
@@ -221,13 +217,13 @@ export function ExtensionManagerPanel() {
                     }
                     await invoke('refresh_plugins');
                     setInstalling(new Set());
-                    setRefreshMsg('所有推荐模块已安装。');
+                    setRefreshMsg(t('ext.allRecommendedInstalled'));
                     await refreshInstalledList();
                   }}
                   className="btn-press inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[var(--element-bg)] text-white text-sm hover:opacity-90 transition-opacity"
                 >
                   <Download size={14} />
-                  一键安装推荐模块
+                  {t('ext.installRecommended')}
                 </button>
               )}
             </div>
@@ -249,25 +245,25 @@ export function ExtensionManagerPanel() {
                   <div className="flex items-center gap-2">
                     <span className={`flex items-center gap-1 text-xs ${isLoaded ? 'text-emerald-600' : 'text-neutral-400 dark:text-stone-500'}`}>
                       <span className={`w-1.5 h-1.5 rounded-full ${isLoaded ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-stone-600'}`} />
-                      {isLoaded ? '运行中' : '已禁用'}
+                      {isLoaded ? t('ext.running') : t('ext.disabled')}
                     </span>
                     <Switch
                       checked={isVisible}
                       onCheckedChange={(val: boolean) => handleTogglePlugin(p, val)}
                       className="data-[state=checked]:bg-[var(--element-color-raw)]"
-                      title="启用/禁用（立即生效）"
+                      title={t('ext.toggleTitle')}
                     />
                     <button
                       onClick={() => handleOpenFolder(p.id)}
                       className="btn-press p-1.5 rounded-lg hover:bg-black/5 text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 transition-colors"
-                      title="打开插件文件夹"
+                      title={t('ext.openFolderTitle')}
                     >
                       <FolderOpen size={16} />
                     </button>
                     <button
                       onClick={() => handleDeletePlugin(p)}
                       className="btn-press p-1.5 rounded-lg hover:bg-black/5 text-neutral-400 dark:text-stone-500 hover:text-red-500 transition-colors"
-                      title="彻底删除（连同文件，不可撤销）"
+                      title={t('ext.deleteTitle')}
                     >
                       <Trash2 size={16} />
                     </button>
@@ -283,7 +279,7 @@ export function ExtensionManagerPanel() {
       {installablePlugins.length > 0 && (
         <section>
           <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">
-            可安装模块 ({installablePlugins.length})
+            {t('ext.installable', { n: installablePlugins.length })}
           </h2>
           <div className="bg-white/70 dark:bg-stone-800/70 backdrop-blur rounded-2xl border border-white/80 divide-y divide-neutral-200/50 overflow-hidden">
             {installablePlugins.map((p: any) => {
@@ -307,7 +303,7 @@ export function ExtensionManagerPanel() {
                     className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--element-bg)]/10 text-[var(--element-bg)] hover:bg-[var(--element-bg)]/20 transition-colors disabled:opacity-50 text-sm"
                   >
                     {busy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                    {busy ? '安装中' : '安装'}
+                    {busy ? t('ext.installing') : t('ext.install')}
                   </button>
                 </div>
               );
@@ -321,7 +317,7 @@ export function ExtensionManagerPanel() {
         <section>
           <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
             <AlertTriangle size={14} className="text-amber-500" />
-            未成功加载 ({rejectedGroups.length})
+            {t('ext.failedLoad', { n: rejectedGroups.length })}
           </h2>
           <div className="bg-white/70 dark:bg-stone-800/70 backdrop-blur rounded-2xl border border-white/80 divide-y divide-neutral-200/50 overflow-hidden">
             {rejectedGroups.map(({ pluginId, entries }) => (
@@ -336,14 +332,15 @@ export function ExtensionManagerPanel() {
 
 /** 单条诊断信息行 */
 function DiagnosticRow({ pluginId, entries }: { pluginId: string; entries: DiagnosticEntry[] }) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const latest = entries[entries.length - 1];
   const stageLabel: Record<string, string> = {
-    scan: '扫描',
-    version: '版本',
-    load: '加载',
-    register: '注册',
-    conflict: '冲突',
+    scan: t('ext.stage.scan'),
+    version: t('ext.stage.version'),
+    load: t('ext.stage.load'),
+    register: t('ext.stage.register'),
+    conflict: t('ext.stage.conflict'),
   };
 
   return (
@@ -365,7 +362,7 @@ function DiagnosticRow({ pluginId, entries }: { pluginId: string; entries: Diagn
             onClick={() => setExpanded(!expanded)}
             className="text-xs text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 transition-colors"
           >
-            {expanded ? '收起' : `${entries.length} 条记录`}
+            {expanded ? t('ext.collapse') : t('ext.records', { n: entries.length })}
           </button>
         )}
       </div>
