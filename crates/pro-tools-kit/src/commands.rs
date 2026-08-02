@@ -92,13 +92,21 @@ pub fn list_processes() -> Result<Vec<ProcessInfo>, String> {
 // 文本读写：arboard 在 MTA 线程下 OleInitialize 可能静默失败，但纯文本路径会
 // 回退到 Win32 OpenClipboard + GetClipboardData(CF_UNICODETEXT)，不依赖 OLE，可靠。
 // 图片写入在主 crate screenshot.rs 的 clipboard_write_image 中用 Win32 API 实现。
+//
+// 平台隔离（T2 收尾补漏）：arboard 仅依赖 X11/Wayland/Windows 系统 API，无 Android/iOS
+// 后端，故下列 4 个命令仅在「非 Android/iOS」下编译真实实现；移动端编译同名 PAL 桩
+// （返回 Unsupported），保证 pro-tools-kit 在 aarch64-linux-android 下可编译且零行为变化。
+// 注：pro-tools-kit 是独立 lib crate，其 commands.rs 默认总编译（与主 crate 已整体
+// #[cfg(not(any(android,ios)))] 的 commands 模块不同），故逐函数门控。
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn clipboard_read() -> Result<String, String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法访问剪贴板: {}", e))?;
     cb.get_text().map_err(|e| format!("读取剪贴板失败: {}", e))
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn clipboard_write(text: String) -> Result<(), String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法访问剪贴板: {}", e))?;
@@ -106,6 +114,7 @@ pub fn clipboard_write(text: String) -> Result<(), String> {
         .map_err(|e| format!("写入剪贴板失败: {}", e))
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// 读取剪贴板图片，返回 base64 data URL（PNG）。无图片时返回 None。
 /// arboard 的 get_image 使用 GetClipboardData(CF_DIB)，不依赖 OLE，读取可靠。
 #[tauri::command]
@@ -128,11 +137,40 @@ pub fn clipboard_read_image() -> Result<Option<String>, String> {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// 清空系统剪贴板
 #[tauri::command]
 pub fn clipboard_clear() -> Result<(), String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法访问剪贴板: {}", e))?;
     cb.clear().map_err(|e| format!("清空剪贴板失败: {}", e))
+}
+
+// ============ t16 剪贴板 · 移动端 PAL 桩（Android / iOS 同名同签名）============
+// 与上文真实实现保持完全相同的签名，避免主 crate `use pro_tools_kit::commands::*;`
+// 与 generate_handler! 在移动端编译失败。返回 Unsupport 信息，运行时前端提示「暂不支持」。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn clipboard_read() -> Result<String, String> {
+    Err("剪贴板功能在移动端暂不支持".into())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn clipboard_write(_text: String) -> Result<(), String> {
+    Err("剪贴板功能在移动端暂不支持".into())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn clipboard_read_image() -> Result<Option<String>, String> {
+    Err("剪贴板功能在移动端暂不支持".into())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+/// 清空系统剪贴板（移动端桩）
+#[tauri::command]
+pub fn clipboard_clear() -> Result<(), String> {
+    Err("剪贴板功能在移动端暂不支持".into())
 }
 
 // ============ 剪贴板图片高效轮询 ============

@@ -47,6 +47,9 @@ pub mod device;
 // 传输模块：已为跨平台（LocalSend v2 兼容），无需隔离。
 pub mod transfer;
 
+// 数据根（可配置存放位置）：junction 重定向 + 启动早期 pending 迁移。
+pub mod data_location;
+
 // 业务服务：跨平台，内部 Windows 专属子模块在 services/mod.rs 隔离。
 pub mod services;
 

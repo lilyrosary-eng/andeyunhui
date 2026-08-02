@@ -100,13 +100,32 @@ pub fn on_destroy(label: &str) {
 /// 调用方的 windows crate 版本与本 crate（windows 0.62）。
 #[cfg(windows)]
 pub fn try_enable(ctrl: ICoreWebView2Controller, label: &str, hwnd: Option<isize>) -> bool {
+    // 白名单外的窗（screenshot-overlay / recorder-select / deskpet 等）不走 DComp，静默跳过：
+    // 它们本就设计为 layered（截图/录屏覆盖窗），调用方不应对其打"激活失败"WARN 造成误报。
     if label != "capsule" && label != "floating-lyrics" {
+        return false;
+    }
+    // W2V 探针：若 ANDY_W2V 已设，检测运行时是否真把控制器切到 composition 模式。
+    // Window-to-Visual 生效后，HWND 模式创建的控制器会实现 ICoreWebView2CompositionController
+    // （即 cast 成功）；若仍失败（E_NOINTERFACE），说明 W2V 未生效，需另寻原因。
+    // 仅日志探测，不接管渲染（避免与 W2V 自管的 DComp visual 冲突）。
+    if std::env::var("ANDY_W2V")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+    {
+        match ctrl.cast::<ICoreWebView2CompositionController>() {
+            Ok(_) => log::info!("[W2V-PROBE] {label} 控制器已实现 CompositionController → Window-to-Visual 已生效"),
+            Err(e) => log::warn!("[W2V-PROBE] {label} cast CompositionController 失败 ({e:?}) → W2V 未生效，仍为 HWND 模式"),
+        }
         return false;
     }
     // 默认开启（ANDY_DCOMP 仅用于关闭：=0 / false 时退回 layered）。
     // 开启后浮窗经 DComp 交换链走 DWM 正常合成管线，去除 Notify 轮询，丝滑度显著提升。
     match std::env::var("ANDY_DCOMP") {
-        Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => return false,
+        Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => {
+            log::info!("[dcomp] {label} 被 ANDY_DCOMP=0 显式关闭，保持 layered");
+            return false;
+        }
         _ => {}
     }
     if DCOMP_ACTIVE.lock().unwrap().contains_key(label) {
@@ -114,12 +133,20 @@ pub fn try_enable(ctrl: ICoreWebView2Controller, label: &str, hwnd: Option<isize
     }
     let hwnd = match hwnd {
         Some(h) => HWND(h as *mut std::ffi::c_void),
-        None => return false,
+        None => {
+            log::warn!("[dcomp] {label} 失败于: 无法获取窗口 HWND");
+            return false;
+        }
     };
 
+    // 取 ICoreWebView2CompositionController：WebView2 必须支持合成接口才能 SetRootVisualTarget。
+    // 若 cast 失败，说明控制器未实现合成接口（运行时过旧或 wry 以非 composition 模式创建控制器）。
     let comp: ICoreWebView2CompositionController = match ctrl.cast() {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(e) => {
+            log::warn!("[dcomp] {label} 失败于: cast CompositionController ({e:?}) —— WebView2 可能未以 composition 模式创建");
+            return false;
+        }
     };
 
     // 1) D3D11 设备（BGRA 支持，供 DComp swapchain 使用）
@@ -146,17 +173,24 @@ pub fn try_enable(ctrl: ICoreWebView2Controller, label: &str, hwnd: Option<isize
     }
     .is_err()
     {
+        log::warn!("[dcomp] {label} 失败于: D3D11CreateDevice");
         return false;
     }
     let device = match device {
         Some(d) => d,
-        None => return false,
+        None => {
+            log::warn!("[dcomp] {label} 失败于: D3D11 设备为 None");
+            return false;
+        }
     };
 
     // 2) DXGI 工厂
     let factory: IDXGIFactory2 = match unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) } {
         Ok(f) => f,
-        Err(_) => return false,
+        Err(e) => {
+            log::warn!("[dcomp] {label} 失败于: CreateDXGIFactory2 ({e:?})");
+            return false;
+        }
     };
 
     // 3) 合成用 swapchain（alpha 预乘 → 透明）
@@ -186,30 +220,45 @@ pub fn try_enable(ctrl: ICoreWebView2Controller, label: &str, hwnd: Option<isize
     };
     let swap: IDXGISwapChain1 = match unsafe { factory.CreateSwapChainForComposition(&device, &desc, None) } {
         Ok(s) => s,
-        Err(_) => return false,
+        Err(e) => {
+            log::warn!("[dcomp] {label} 失败于: CreateSwapChainForComposition ({e:?})");
+            return false;
+        }
     };
 
     // 4) DComp 设备 / 目标 / 视觉（渲染设备传 None，DComp 自建）
     let dcomp: IDCompositionDevice = match unsafe { DCompositionCreateDevice::<Option<&IDXGIDevice>, IDCompositionDevice>(None) } {
         Ok(d) => d,
-        Err(_) => return false,
+        Err(e) => {
+            log::warn!("[dcomp] {label} 失败于: DCompositionCreateDevice ({e:?})");
+            return false;
+        }
     };
     let target: IDCompositionTarget = match unsafe { dcomp.CreateTargetForHwnd(hwnd, true) } {
         Ok(t) => t,
-        Err(_) => return false,
+        Err(e) => {
+            log::warn!("[dcomp] {label} 失败于: CreateTargetForHwnd ({e:?})");
+            return false;
+        }
     };
     let visual: IDCompositionVisual = match unsafe { dcomp.CreateVisual() } {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(e) => {
+            log::warn!("[dcomp] {label} 失败于: CreateVisual ({e:?})");
+            return false;
+        }
     };
     // 视觉内容 = swapchain（SetContent 接收 Param<IUnknown>，传 &swap）
     if unsafe { visual.SetContent(&swap) }.is_err() {
+        log::warn!("[dcomp] {label} 失败于: visual.SetContent");
         return false;
     }
     if unsafe { target.SetRoot(&visual) }.is_err() {
+        log::warn!("[dcomp] {label} 失败于: target.SetRoot");
         return false;
     }
     if unsafe { dcomp.Commit() }.is_err() {
+        log::warn!("[dcomp] {label} 失败于: dcomp.Commit");
         return false;
     }
 
@@ -218,12 +267,19 @@ pub fn try_enable(ctrl: ICoreWebView2Controller, label: &str, hwnd: Option<isize
     // 由 from_raw 把所有权转给 windows-core 0.61 的 IUnknown（WebView2 侧泛型约束 0.61 Interface）。
     let visual_unknown: IUnknown = match visual.cast() {
         Ok(u) => u,
-        Err(_) => return false,
+        Err(e) => {
+            log::warn!("[dcomp] {label} 失败于: visual.cast::<IUnknown> ({e:?})");
+            return false;
+        }
     };
     let raw_visual: *mut std::ffi::c_void = visual_unknown.as_raw();
     std::mem::forget(visual_unknown);
     let visual_for_wv2: IUnknown061 = unsafe { IUnknown061::from_raw(raw_visual) };
     if unsafe { comp.SetRootVisualTarget(&visual_for_wv2) }.is_err() {
+        // 这是最可能的失败点：WebView2 控制器若以 HWND 模式（CreateCoreWebView2Controller）创建，
+        // 而非 composition 模式（CreateCoreWebView2CompositionController），SetRootVisualTarget 会失败。
+        // Tauri/wry 默认用 HWND 模式 → DComp 路径走不通，需改用 composition 模式创建控制器。
+        log::warn!("[dcomp] {label} 失败于: SetRootVisualTarget —— WebView2 控制器可能以 HWND 模式创建（非 composition），DComp 不可用");
         return false;
     }
 

@@ -197,6 +197,22 @@ mod imp {
     pub fn all_sessions<'a>() -> &'a Mutex<std::collections::HashMap<String, SmtcUpdate>> {
         ALL_SESSIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
     }
+    /// 缩略图缓存：(aumid) -> (元数据指纹, cover_path)。指纹未变则复用旧封面，跳过跨进程缩略图
+    /// 流读取 + 临时文件写入——这是稳定播放时每 1.5s 轮询的最大开销（外部媒体卡顿主因之一）。
+    /// 仅当曲目切换（title/artist/album 变化）时才重读缩略图并更新缓存。
+    static THUMB_CACHE: std::sync::OnceLock<Mutex<std::collections::HashMap<String, (String, Option<String>)>>> =
+        std::sync::OnceLock::new();
+    fn thumb_cache() -> &'static Mutex<std::collections::HashMap<String, (String, Option<String>)>> {
+        THUMB_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+    }
+    /// 时间线缓存：(aumid) -> (duration_ms, position_ms)。用于廉价换歌检测：时长变化或进度大幅
+    /// 回跳 → 疑似换歌 → 触发全量元数据读取（TryGetMediaPropertiesAsync）。无需每轮跨进程读元数据，
+    /// 即可近实时（≤1.5s）发现曲目切换；seek 误触发无害（标题未变 → 指纹不变 → 不 emit）。
+    static TIMELINE_CACHE: std::sync::OnceLock<Mutex<std::collections::HashMap<String, (i64, i64)>>> =
+        std::sync::OnceLock::new();
+    fn timeline_cache() -> &'static Mutex<std::collections::HashMap<String, (i64, i64)>> {
+        TIMELINE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+    }
     /// 当前「活跃」外部会话的 AUMID（作为控制默认目标 + now-playing 的 system 源）。无外部媒体时为 None。
     static ACTIVE_EXTERNAL: Mutex<Option<String>> = Mutex::new(None);
     /// 缓存上一次已发出的整机媒体信息，避免每 1.5s 轮询重复 emit 造成胶囊闪烁。
@@ -420,7 +436,17 @@ mod imp {
         // 枚举并压制 WebView2 等"非本进程"媒体会话，避免任务栏出现「未知应用」卡片。
         diag_and_suppress_other_sessions(hwnd.0 as isize);
         // 启动整机媒体监视（胶囊可展示/控制任意 App 的播放）。只读，不影响任务栏卡片。
-        start_global_media_watcher(app);
+        // 诊断开关 ANDY_NO_GLOBAL_WATCHER=1：临时关闭 1.5s 全局轮询，用于二分「外部媒体卡顿」
+        // 根因——若关闭后卡顿消失，则根因在轮询（跨进程元数据/缩略图读取或其触发的重渲染）；
+        // 若仍卡，则根因在合成/DWM 层（与 W2V 相关）。定位后移除此开关。
+        if !std::env::var("ANDY_NO_GLOBAL_WATCHER")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+        {
+            start_global_media_watcher(app);
+        } else {
+            eprintln!("[SMTC] 全局媒体监视已由 ANDY_NO_GLOBAL_WATCHER 关闭（诊断模式）");
+        }
         emit_diag(app);
     }
 
@@ -597,6 +623,7 @@ mod imp {
         std::thread::spawn(move || {
             run_winrt_block(async move {
                 ensure_winrt();
+                eprintln!("[SMTC-GLOBAL] 整机媒体监视已启动（每 1.5s 廉价状态轮询 + ~6s 元数据刷新）");
                 loop {
                     let _ = tokio::time::timeout(
                         std::time::Duration::from_secs(5),
@@ -610,7 +637,11 @@ mod imp {
     }
 
     /// 一次轮询：重建全部非本进程会话快照 → 选活跃外部会话 → 必要时 emit `now-playing`。
+    /// 状态（播放/按钮）每轮廉价读取；元数据（标题/艺人/封面）每 4 轮（~6s）或状态变化时才
+    /// 跨进程读取，避免每 1.5s 对每个外部会话调 TryGetMediaPropertiesAsync 拖累（外部媒体卡顿主因）。
     async fn poll_global_session(app: &AppHandle) {
+        static META_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let need_meta = META_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4 == 0;
         let mgr = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
             Ok(op) => match op.await {
                 Ok(m) => m,
@@ -629,27 +660,60 @@ mod imp {
                 return;
             }
         };
-        // 重建全部「非本进程」会话快照，供胶囊下拉/堆叠切换（key=AUMID）
-        {
-            let mut map = all_sessions().lock().unwrap();
-            map.clear();
-            if let Ok(sessions) = mgr.GetSessions() {
-                let n = sessions.Size().unwrap_or(0);
-                for i in 0..n {
-                    if let Ok(s) = sessions.GetAt(i) {
-                        if let Ok(id) = s.SourceAppUserModelId() {
-                            if id == HSTRING::from(AUMID) {
-                                continue;
-                            }
-                            let aumid = id.to_string();
-                            if let Some(info) = read_session_update(&s, &aumid).await {
-                                map.insert(aumid, info);
-                            }
+        // 先收集会话列表（不持锁），再按需读取，避免持锁跨 await 阻塞其他读取者
+        let mut collected: Vec<(String, GlobalSystemMediaTransportControlsSession)> = Vec::new();
+        if let Ok(sessions) = mgr.GetSessions() {
+            let n = sessions.Size().unwrap_or(0);
+            for i in 0..n {
+                if let Ok(s) = sessions.GetAt(i) {
+                    if let Ok(id) = s.SourceAppUserModelId() {
+                        if id == HSTRING::from(AUMID) {
+                            continue;
                         }
+                        collected.push((id.to_string(), s));
                     }
                 }
             }
         }
+        // 增量更新快照：状态每轮廉价读（GetPlaybackInfo）；元数据每 4 轮（~6s）或状态变化时
+        // 才全量读（TryGetMediaPropertiesAsync + 缩略图指纹缓存）。稳定播放时跳过跨进程元数据 RPC。
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (aumid, s) in &collected {
+            seen.insert(aumid.clone());
+            let (is_playing, can_prev, can_next, dur_ms, pos_ms) = read_status_only(s);
+            let prev = all_sessions().lock().unwrap().get(aumid).cloned();
+            let status_changed = prev.as_ref().map(|p| p.is_playing != is_playing).unwrap_or(true);
+            let no_prev = prev.is_none();
+            // 廉价换歌检测：时长变化或进度大幅回跳（新曲目从 ~0 开始）→ 疑似换歌 → 触发全量读。
+            // seek 误触发无害：全量读后标题未变 → 指纹不变 → 不 emit、不重读缩略图。
+            let track_changed = timeline_cache()
+                .lock()
+                .unwrap()
+                .get(aumid)
+                .map(|&(d, p)| (dur_ms > 0 && d > 0 && dur_ms != d) || (p > pos_ms + 2000))
+                .unwrap_or(false);
+            if need_meta || status_changed || no_prev || track_changed {
+                // 全量读元数据 + 缩略图（指纹缓存）；失败则保留旧条目并仅刷新状态
+                if let Some(info) = read_session_update(s, aumid).await {
+                    all_sessions().lock().unwrap().insert(aumid.clone(), info);
+                } else if let Some(mut p) = prev {
+                    p.is_playing = is_playing;
+                    p.can_prev = can_prev;
+                    p.can_next = can_next;
+                    all_sessions().lock().unwrap().insert(aumid.clone(), p);
+                }
+            } else if let Some(mut p) = prev {
+                // 廉价路径：仅刷新状态字段，不调 TryGetMediaPropertiesAsync
+                p.is_playing = is_playing;
+                p.can_prev = can_prev;
+                p.can_next = can_next;
+                all_sessions().lock().unwrap().insert(aumid.clone(), p);
+            }
+            // 更新时间线缓存（无论廉价/全量路径，供下一轮换歌检测）
+            timeline_cache().lock().unwrap().insert(aumid.clone(), (dur_ms, pos_ms));
+        }
+        // 清理已消失的会话
+        all_sessions().lock().unwrap().retain(|k, _| seen.contains(k));
         match select_global_session(&mgr).await {
             Some(s) => {
                 let aumid = s.SourceAppUserModelId().ok().map(|h| h.to_string());
@@ -711,18 +775,37 @@ mod imp {
         }
     }
 
-    /// 选择应展示的系统会话：优先 GetCurrentSession 且排除本进程 AUMID；
-    /// 否则在会话列表中找第一个「正在播放」的非本进程会话。
+    /// 会话是否处于 Playing 态（轻量判定，仅读 PlaybackStatus，不读元数据）。
+    fn session_is_playing(s: &GlobalSystemMediaTransportControlsSession) -> bool {
+        s.GetPlaybackInfo()
+            .ok()
+            .and_then(|i| i.PlaybackStatus().ok())
+            .map(|st| st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+            .unwrap_or(false)
+    }
+
+    /// 选择应展示的系统会话：优先「正在播放」的非本进程会话（含 GetCurrentSession 若它在播）；
+    /// 都不在播时回退到 GetCurrentSession（暂停态仍跟踪/可控，避免一暂停就清卡片）；否则 None。
+    /// 修复：旧实现 GetCurrentSession 只要非本进程就返回（不看在播），导致暂停的外部会话
+    /// 遮蔽正在播放的另一会话 → 胶囊显示错源、控制错源。
     async fn select_global_session(
         mgr: &GlobalSystemMediaTransportControlsSessionManager,
     ) -> Option<GlobalSystemMediaTransportControlsSession> {
-        if let Ok(cur) = mgr.GetCurrentSession() {
-            if let Ok(id) = cur.SourceAppUserModelId() {
-                if id != HSTRING::from(AUMID) {
-                    return Some(cur);
+        let cur = mgr.GetCurrentSession().ok();
+        let cur_is_external = cur
+            .as_ref()
+            .and_then(|s| s.SourceAppUserModelId().ok())
+            .map(|id| id != HSTRING::from(AUMID))
+            .unwrap_or(false);
+        // 1) 当前会话非本进程且正在播放 → 直接用它
+        if cur_is_external {
+            if let Some(ref c) = cur {
+                if session_is_playing(c) {
+                    return cur;
                 }
             }
         }
+        // 2) 当前会话不在播 → 扫描第一个「正在播放」的非本进程会话
         if let Ok(sessions) = mgr.GetSessions() {
             let n = sessions.Size().unwrap_or(0);
             for i in 0..n {
@@ -731,17 +814,38 @@ mod imp {
                         if id == HSTRING::from(AUMID) {
                             continue;
                         }
-                        if let Ok(info) = s.GetPlaybackInfo() {
-                            if info.PlaybackStatus() == Ok(GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
-                            {
-                                return Some(s);
-                            }
+                        if session_is_playing(&s) {
+                            return Some(s);
                         }
                     }
                 }
             }
         }
+        // 3) 没有任何在播外部会话 → 回退到当前会话（暂停态仍跟踪/可控）
+        if cur_is_external {
+            return cur;
+        }
         None
+    }
+
+    /// 廉价状态读取：仅 `GetPlaybackInfo` + `GetTimelineProperties`（不调 `TryGetMediaPropertiesAsync`
+    /// 跨进程 RPC），用于高频轮询（每 1.5s）。返回 (is_playing, can_prev, can_next, dur_ms, pos_ms)。
+    /// timeline 用于换歌检测；元数据（标题/艺人/封面）仅在状态变化/换歌/周期刷新时才全量读。
+    fn read_status_only(s: &GlobalSystemMediaTransportControlsSession) -> (bool, bool, bool, i64, i64) {
+        let info = s.GetPlaybackInfo().ok();
+        let is_playing = info
+            .as_ref()
+            .and_then(|i| i.PlaybackStatus().ok())
+            .map(|st| st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+            .unwrap_or(false);
+        let ctrl = info.as_ref().and_then(|i| i.Controls().ok());
+        let can_prev = ctrl.as_ref().and_then(|c| c.IsPreviousEnabled().ok()).unwrap_or(false);
+        let can_next = ctrl.as_ref().and_then(|c| c.IsNextEnabled().ok()).unwrap_or(false);
+        // 时间线（廉价，不调跨进程元数据）：TimeSpan.Duration 单位 100ns → ms。
+        let timeline = s.GetTimelineProperties().ok();
+        let dur_ms = timeline.as_ref().and_then(|t| t.EndTime().ok()).map(|ts| ts.Duration / 10000).unwrap_or(0);
+        let pos_ms = timeline.as_ref().and_then(|t| t.Position().ok()).map(|ts| ts.Duration / 10000).unwrap_or(0);
+        (is_playing, can_prev, can_next, dur_ms, pos_ms)
     }
 
     /// 读取一个系统会话的播放信息（标题/艺人/专辑/封面/播放态/可用按钮）。`aumid` 作为稳定 key。
@@ -749,23 +853,46 @@ mod imp {
         s: &GlobalSystemMediaTransportControlsSession,
         aumid: &str,
     ) -> Option<SmtcUpdate> {
-        let status = s.GetPlaybackInfo().ok()?.PlaybackStatus().ok()?;
-        let is_playing = matches!(status, GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
+        // 播放态读取失败不丢弃整个会话——回落为「非播放」，避免瞬态 COM 读取失败导致外部会话
+        // 从快照/上屏中消失（「有时识别不到外部媒体」真因之一：GetPlaybackInfo 偶发失败时
+        // 旧实现用 ? 直接返回 None，该会话整轮被跳过、胶囊卡片瞬时空白）。
+        let is_playing = s
+            .GetPlaybackInfo()
+            .ok()
+            .and_then(|i| i.PlaybackStatus().ok())
+            .map(|st| st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+            .unwrap_or(false);
         let (title, artist, album, cover_path) = match s.TryGetMediaPropertiesAsync() {
             Ok(op) => match op.await.ok() {
                 Some(p) => {
                     let title = p.Title().ok().map(|h| h.to_string()).unwrap_or_default();
                     let artist = p.Artist().ok().map(|h| h.to_string()).unwrap_or_default();
                     let album = p.AlbumTitle().ok().map(|h| h.to_string()).unwrap_or_default();
-                    let cover = match p.Thumbnail().ok() {
-                        Some(t) => {
-                            // 封面读取可能挂死（COM 公寓模型异常），3s 超时熔断以免拖垮整机媒体监视。
-                            tokio::time::timeout(std::time::Duration::from_secs(3), read_thumbnail(t))
-                                .await
-                                .ok()
-                                .flatten()
+                    // 缩略图按元数据指纹缓存：指纹未变则复用旧 cover_path，跳过跨进程缩略图流读取
+                    // + 临时文件写入（稳定播放时每 1.5s 轮询的最大开销，外部媒体卡顿主因）。
+                    // 仅当曲目切换（title/artist/album 变化）或首次时才重读缩略图。
+                    let fp = format!("{}\u{1}{}\u{1}{}", title, artist, album);
+                    let reuse = thumb_cache().lock().ok().and_then(|m| {
+                        m.get(aumid).and_then(|(c_fp, c_cover)| (c_fp == &fp).then(|| c_cover.clone()))
+                    });
+                    let cover = match reuse {
+                        Some(c) => c, // 指纹未变 → 复用，不重读缩略图
+                        None => {
+                            // 指纹变了或首次 → 读缩略图（3s 超时熔断）并更新缓存
+                            let c = match p.Thumbnail().ok() {
+                                Some(t) => {
+                                    tokio::time::timeout(std::time::Duration::from_secs(3), read_thumbnail(t))
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                }
+                                None => None,
+                            };
+                            if let Ok(mut m) = thumb_cache().lock() {
+                                m.insert(aumid.to_string(), (fp, c.clone()));
+                            }
+                            c
                         }
-                        None => None,
                     };
                     (title, artist, album, cover)
                 }
@@ -826,27 +953,48 @@ mod imp {
         }
     }
 
+    /// 外部会话控制结果。
+    pub enum RouteResult {
+        /// 已由外部会话处理（含超时熔断：不再下发 app，避免误控应用音乐）
+        Handled,
+        /// 交给本应用音乐插件（target=app / 无活跃外部 / target 解析为空）
+        DeferApp,
+        /// 外部目标但不支持该动作（如 volume：WinRT 无 per-session 音量 API），静默丢弃
+        NoOp,
+    }
+
     /// 整机媒体控制路由：按 `target`（AUMID）驱动指定外部会话；target 为 None 时驱动「活跃」外部会话，
-    /// target 为 "app" 时返回 false 交由本应用音乐插件。返回 true 表示已处理（不必再广播 smtc-control）。
-    /// 不缓存会话句柄——每次按 AUMID 重新枚举，避免跨线程复用 COM 句柄导致的公寓模型问题。
-    pub fn route_global_control(action: &str, target: Option<&str>) -> bool {
-        // 解析目标 AUMID：显式 "app" → 交给本应用；显式 aumid → 用之；None → 用活跃外部
+    /// target 为 "app" 时返回 DeferApp 交由本应用音乐插件。不缓存会话句柄——每次按 AUMID 重新枚举，
+    /// 避免跨线程复用 COM 句柄导致的公寓模型问题。
+    pub fn route_global_control(action: &str, target: Option<&str>) -> RouteResult {
+        // 解析目标 AUMID：显式 "app" → 交给本应用；显式 aumid → 用之；None → 用活跃外部。
+        // explicit 标记 target 是否为用户显式选定（非 "app" 的 Some）：显式会话已关闭时静默丢弃，
+        // 不回退 app（避免用户选中的外部源消失后按键误控应用音乐）；隐式（跟随实时）活跃外部消失
+        // 则回退 app（用户意图是"控制当前活跃的"，活跃外部没了自然交给 app）。
+        let explicit: bool;
         let aumid: String = match target {
-            Some("app") => return false,
-            Some(t) => t.to_string(),
+            Some("app") => return RouteResult::DeferApp,
+            Some(t) => { explicit = true; t.to_string() }
             None => match ACTIVE_EXTERNAL.lock() {
                 Ok(g) => match &*g {
-                    Some(a) => a.clone(),
-                    None => return false,
+                    Some(a) => { explicit = false; a.clone() }
+                    None => return RouteResult::DeferApp,
                 },
-                Err(_) => return false,
+                Err(_) => return RouteResult::DeferApp,
             },
         };
         if aumid.is_empty() {
-            return false;
+            return RouteResult::DeferApp;
+        }
+        // WinRT GlobalSystemMediaTransportControlsSession 仅支持 play/pause/prev/next；
+        // 无 per-session 音量 API，volume 等动作对外部会话不可用，静默丢弃（不下发 app 避免误控应用音量）。
+        if !matches!(action, "play" | "pause" | "prev" | "next") {
+            return RouteResult::NoOp;
         }
         ensure_winrt();
         let act = action.to_string();
+        // aumid 会被 move 进下面的控制闭包；克隆一份供 match 分支日志使用。
+        let aumid_for_log = aumid.clone();
         // 在独立线程跑 WinRT 控制并加 3s 超时：防止 COM 公寓模型异常导致调用永久挂起、
         // 耗尽 Tauri 命令线程、让整个软件（含主窗与所有浮窗）卡死。
         let handled = run_winrt_timeout(move || {
@@ -896,11 +1044,23 @@ mod imp {
                 false
             })
         });
+        // handled: Some(true)=找到会话并已控制, Some(false)=未找到该 AUMID 的会话, None=超时熔断
         match handled {
-            Some(_) => true,
+            Some(true) => RouteResult::Handled,
+            Some(false) if !explicit => {
+                // 隐式（跟随实时）活跃外部已消失 → 回退 app：用户意图是控制当前活跃源，
+                // 活跃外部没了（1.5s 轮询窗口内关闭）自然交给 app 音乐插件，避免按键无反应
+                log::info!("[SMTC-GLOBAL] 隐式活跃外部会话已消失，控制 {action} 回退 app");
+                RouteResult::DeferApp
+            }
+            Some(false) => {
+                // 显式选中的外部会话已关闭 → 静默丢弃，不回退 app（避免误控应用音乐）
+                log::info!("[SMTC-GLOBAL] 显式选中的外部会话 {aumid_for_log} 已关闭，控制 {action} 静默丢弃");
+                RouteResult::Handled
+            }
             None => {
-                log::warn!("[SMTC-GLOBAL] 控制 {action} 超时（WinRT 调用挂死，已熔断，保护主程序不被拖垮）");
-                false
+                log::warn!("[SMTC-GLOBAL] 控制 {action} 超时（WinRT 调用挂死，已熔断；不再下发 app 避免误控）");
+                RouteResult::Handled
             }
         }
     }
@@ -1180,6 +1340,17 @@ mod imp {
     /// 改为异步：额外枚举系统里所有媒体会话 AUMID（system_sessions），用于确认播放时
     /// WebView2 是否仍会冒出「未知应用」卡（多出的非 ours 条目即证据）。
     fn emit_diag(app: &AppHandle) {
+        // 节流：5s 内不重复 emit。music 插件每次按键推多条 smtc_update，各触发一次 emit_diag
+        // → 6× 跨进程 GetSessions 枚举 + 前端日志刷屏。诊断信息秒级时效，5s 足够。
+        static LAST_DIAG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let prev = LAST_DIAG.swap(now, std::sync::atomic::Ordering::Relaxed);
+        if now - prev < 5 {
+            return;
+        }
         let app = app.clone();
         // 经专用工作线程执行（已 RoInit MTA + 公寓亲和），避免 Tauri 多线程运行时上跨线程续体调 COM。
         smtc_run(move || {
@@ -1621,11 +1792,17 @@ pub fn smtc_control(
     value: Option<f64>,
     target: Option<String>,
 ) {
-    // Windows：若指定了外部系统会话（target=AUMID）或当前有活跃外部会话，直接驱动它。
+    // Windows：外部系统会话控制路由。route_global_control 返回 RouteResult：
+    //   Handled  = 外部会话已处理（含超时熔断）→ 不下发 app，避免误控应用音乐
+    //   NoOp     = 外部目标但不支持该动作（如 volume：WinRT 无 per-session 音量 API）→ 静默丢弃，
+    //              绝不下发 app（否则会误改应用音量——此前 if-bool 把 NoOp 当 false fall through 的根因）
+    //   DeferApp = 交给本应用音乐插件（target=app / 无活跃外部 / 隐式活跃外部已消失）
     #[cfg(windows)]
     {
-        if imp::route_global_control(&action, target.as_deref()) {
-            return;
+        match imp::route_global_control(&action, target.as_deref()) {
+            imp::RouteResult::Handled => return,
+            imp::RouteResult::NoOp => return,
+            imp::RouteResult::DeferApp => { /* 继续下发 app 音乐插件 */ }
         }
     }
     #[derive(serde::Serialize)]
