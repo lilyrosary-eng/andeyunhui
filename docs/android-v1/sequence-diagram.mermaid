@@ -1,0 +1,99 @@
+%% ===== 4.1 系统分享冷启动 =====
+sequenceDiagram
+    participant U as 用户(其他App)
+    participant SYS as Android 系统
+    participant ACT as MainActivity(Kotlin)
+    participant RS as Rust(share.rs)
+    participant TS as TransferStore
+    participant UI as ShareTargetSheet
+
+    U->>SYS: 在其他 App 点「分享」选安得云荟
+    SYS->>ACT: 冷启动 ACTION_SEND / SEND_MULTIPLE(intent)
+    ACT->>ACT: 解析 intent → content:// URI 列表
+    ACT->>RS: share_enqueue(uris)
+    RS->>TS: emit 'share-queued' (count)
+    TS->>UI: 渲染分享目标层(待发文件)
+    UI->>U: 展示「发给哪台设备」+ 设备列表
+    U->>UI: 选设备 → 确认发送
+    UI->>RS: transfer_send_android(uris, peerId)
+    RS->>RS: fs_bridge.open_readable(uri) 读取
+    RS->>SYS: HTTP POST /api/localsend/v2/prepare-upload
+    RS->>TS: emit 'transfer-progress'
+
+%% ===== 4.2 设备配对 =====
+sequenceDiagram
+    participant U as 用户
+    participant UI as PairingWizard
+    participant RS as Rust(pairing.rs)
+    participant PC as 已配对 PC(桌面端)
+    participant OL as Ollama(:11434)
+
+    U->>UI: 进入配对向导(可跳过, US-13)
+    UI->>RS: pairing_discover()
+    RS->>PC: UDP 组播 224.0.0.167:53317
+    alt 扫到设备
+        RS-->>UI: 返回候选(别名+fingerprint)
+        UI->>U: 展示 fingerprint 后6位 待双端确认
+        U->>UI: 两端核对一致 → 确认
+        UI->>RS: pairing_confirm(fingerprint)
+    else 扫不到(失败驱动)
+        UI->>U: 展示分诊清单(PC端清单+手动填IP兜底)
+        U->>UI: 手动输入 IP
+        UI->>RS: pairing_discover(ip)
+    end
+    RS->>OL: probe_ollama(ip) → GET /api/tags
+    alt 有 Ollama
+        RS->>RS: write_ollama_url(ip) 自动写 base_url
+        RS-->>UI: 配对成功 + 能力清单(hasOllama)
+    else 无 Ollama
+        RS-->>UI: 配对成功但提示「PC 未开 Ollama / OLLAMA_HOST」
+    end
+    UI->>U: 「书房台式机 · 在线」设备状态行常驻
+
+%% ===== 4.3 AI 对话流式 =====
+sequenceDiagram
+    participant U as 用户
+    participant UI as ChatScreen
+    participant HS as useAiStream(Hook)
+    participant RS as Rust(ai_service.rs)
+    participant PC as 已配对 PC Ollama
+    participant EV as Tauri 事件
+
+    U->>UI: 输入消息 + 算力来源条显示「LOCAL_PC」
+    UI->>HS: 发起请求(convId, messages, profileId)
+    HS->>RS: ai_chat(request_id, messages, profileId)
+    RS->>RS: rewrite_base_url(已配对PC IP)
+    RS->>PC: POST {base_url}/chat/completions (SSE)
+    loop 每个 SSE chunk
+        PC-->>RS: delta / reasoning delta
+        RS->>EV: emit 'ai-delta' / 'ai-reasoning-delta'
+        EV->>HS: 监听并更新 messages(行内流式, 零JS动画)
+    end
+    RS->>EV: emit 'ai-done'
+    HS->>UI: 消息定稿 + source='LOCAL_PC' 溯源标记
+    Note over UI: 若 PC 掉线 → 行内降级卡片, 一键切 CLOUD
+
+%% ===== 4.4 文件传输 =====
+sequenceDiagram
+    participant U as 用户
+    participant UI as TransferScreen
+    participant TS as useTransfer(Hook)
+    participant RS as Rust(transfer_android.rs)
+    participant FS as fs_bridge(ContentUri)
+    participant FG as ForegroundService
+    participant PEER as 对端(PC/LocalSend)
+
+    U->>UI: 选文件(ContentUri) → 发给设备
+    UI->>TS: send(uris, peerId)
+    TS->>RS: transfer_send_android(uris, peerId)
+    RS->>FG: start("正在发送…", total)
+    loop 每个文件
+        RS->>FS: open_readable(uri)
+        RS->>PEER: POST /api/localsend/v2/prepare-upload + upload
+        RS->>FG: update(transferred)
+        RS->>TS: emit 'transfer-progress'
+    end
+    RS->>FG: stop()
+    RS->>TS: emit 'transfer-peer-done'
+    FG->>U: 通知栏完成提示 + 「用其他应用打开」(N2)
+    Note over RS: 接收侧: SAF 持久化目录落盘 + 前台服务接收通知(X1/X2 规避)

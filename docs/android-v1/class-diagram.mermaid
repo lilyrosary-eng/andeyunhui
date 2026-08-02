@@ -1,0 +1,161 @@
+classDiagram
+    %% ===== 前端状态层 (zustand) =====
+    class AppStore {
+        +activeTabs: Record~TabId, NavStack~
+        +currentTab: TabId
+        +setCurrentTab(t: TabId): void
+        +pushScreen(tab: TabId, s: ScreenId): void
+        +popScreen(tab: TabId): void
+        +resetStack(tab: TabId, s: ScreenId): void
+    }
+    class NavStack {
+        +stack: ScreenId[]
+        +index: number
+    }
+    class DeviceStore {
+        +devices: PairedDevice[]
+        +status: DeviceStatus
+        +fingerprint6: string
+        +setDevices(d: PairedDevice[]): void
+        +updateStatus(s: DeviceStatus): void
+    }
+    class DeviceStatus {
+        <<enumeration>>
+        ONLINE
+        OFFLINE
+        VISIBLE_UNPAIRED
+        REMEMBERED_UNREACHABLE
+    }
+    class TransferStore {
+        +peers: Peer[]
+        +progress: TransferProgress
+        +staged: StagedFile[]
+        +autoAccept: boolean
+        +setPeers(p: Peer[]): void
+        +updateProgress(pr: TransferProgress): void
+    }
+    class AiStore {
+        +conversations: Conversation[]
+        +computeSource: ComputeSource
+        +busy: boolean
+        +setComputeSource(s: ComputeSource): void
+    }
+    class ComputeSource {
+        <<enumeration>>
+        LOCAL_PC
+        CLOUD
+        OFFLINE
+    }
+
+    %% ===== 数据模型 (TS) =====
+    class PairedDevice {
+        +id: string
+        +name: string
+        +ip: string
+        +fingerprint: string
+        +hasOllama: boolean
+        +status: DeviceStatus
+    }
+    class Peer {
+        +id: string
+        +alias: string
+        +ip: string
+        +port: number
+    }
+    class TransferProgress {
+        +sessionId: string
+        +total: number
+        +transferred: number
+        +state: string
+    }
+    class StagedFile {
+        +uri: string
+        +name: string
+        +size: number
+    }
+    class Conversation {
+        +id: string
+        +messages: ChatMessage[]
+        +model: string
+        +source: ComputeSource
+    }
+    class ChatMessage {
+        +role: 'user'|'assistant'|'system'
+        +content: string
+        +reasoning: string
+        +source: ComputeSource
+        +ts: number
+    }
+
+    %% ===== Rust 侧 =====
+    class TransferManager {
+        -alias: String
+        -peers: HashMap~String, RustPeer~
+        -sessions: HashMap~String, Session~
+        -save_dir: ContentUri
+        -staged: Vec~StagedFileR~
+        -auto_accept: bool
+        +start(): void
+        +announce(): void
+        +list_peers() Vec~RustPeer~
+        +send(files: Vec~ContentUri~): void
+        +receive_accept(id: String): void
+    }
+    class RustPeer {
+        +id: String
+        +alias: String
+        +ip: String
+        +port: u16
+    }
+    class StagedFileR {
+        +uri: ContentUri
+        +name: String
+        +size: u64
+    }
+    class ContentUri {
+        +uri: String
+        +take_persistable_permission(): void
+        +open_readable() File
+    }
+    class PairingManager {
+        -devices: Vec~PairedDeviceR~
+        -multicast_lock: MulticastLock
+        +discover(): void
+        +confirm(fingerprint: String): bool
+        +probe_ollama(ip: String) bool
+        +write_ollama_url(ip: String): void
+    }
+    class PairedDeviceR {
+        +id: String
+        +name: String
+        +ip: String
+        +fingerprint: String
+        +has_ollama: bool
+    }
+    class ForegroundService {
+        +start(title: String, total: u64): void
+        +update(progress: u64): void
+        +stop(): void
+    }
+    class AiService {
+        +ai_chat(request_id: String, messages: Vec~Msg~, profile_id: String): void
+        -rewrite_base_url(device_ip: Option~String~): String
+    }
+
+    %% ===== 关系 =====
+    AppStore "1" *-- "4" NavStack : 按 Tab 维护
+    DeviceStore "1" *-- "0..*" PairedDevice
+    TransferStore "1" *-- "0..*" Peer
+    AiStore "1" *-- "0..*" Conversation
+    Conversation "1" *-- "0..*" ChatMessage
+    PairedDevice "1" --> "1" DeviceStatus
+    Conversation "1" --> "1" ComputeSource
+    ChatMessage "1" --> "1" ComputeSource
+
+    TransferManager "1" *-- "0..*" StagedFileR
+    TransferManager "1" --> "1" ContentUri : save_dir
+    StagedFileR "1" --> "1" ContentUri
+    PairingManager "1" --> "1" MulticastLock
+    PairingManager "1" *-- "0..*" PairedDeviceR
+    AiService ..> PairingManager : 读取已配对 PC IP
+    ForegroundService ..> TransferManager : 进度回调
