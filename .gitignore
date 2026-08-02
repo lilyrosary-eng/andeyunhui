@@ -41,6 +41,7 @@ research_report_*.md
 
 # 其他 AI 工具本地缓存
 .codebuddy/
+.trae/
 
 # 增量编译缓存
 *.tsbuildinfo
@@ -104,3 +105,18 @@ build_err.txt
 *.pptx
 sign.ps1
 andeyunhui-signing.pfx
+
+# Tauri Android 工程构建产物（src-tauri/gen/android，由 tauri android init/build 再生）
+# T01 将在 gen/android/ 内建立完整 .gitignore；此处先收口明显构建输出，避免污染工作区
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/build/
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/app/proguard-tauri.pro
+src-tauri/gen/android/app/src/main/assets/
+src-tauri/gen/android/app/src/main/java/com/rosary/andengyuanhua/generated/
+src-tauri/gen/android/app/src/main/jniLibs/
+src-tauri/gen/android/app/tauri.build.gradle.kts
+src-tauri/gen/android/app/tauri.properties
+src-tauri/gen/android/buildSrc/
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/tauri.settings.gradle
