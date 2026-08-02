@@ -59,9 +59,12 @@ impl AudioCapture {
         // 关闭管道句柄会令仍在阻塞 ConnectNamedPipe / WriteFile 的写入线程立即出错返回，从而退出；
         // 采集线程在下一轮检测到 stop_flag 后退出并 drop 通道发送端 → 写入线程排空后退出。
         unsafe {
-            let h = HANDLE(self.handle as *mut std::ffi::c_void);
-            let _ = DisconnectNamedPipe(h);
-            let _ = windows::Win32::Foundation::CloseHandle(h);
+            // 仅命名管道模式句柄有效；进程内通道模式的 handle 为 0，跳过以免对伪句柄做无效 IO。
+            if self.handle != 0 {
+                let h = HANDLE(self.handle as *mut std::ffi::c_void);
+                let _ = DisconnectNamedPipe(h);
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+            }
         }
         if let Some(t) = self.capture_thread.take() {
             let _ = t.join();
@@ -163,6 +166,42 @@ pub fn start_audio_capture(
             unsafe {
                 let _ = windows::Win32::Foundation::CloseHandle(HANDLE(handle_raw as *mut std::ffi::c_void));
             }
+            Err("音频采集线程意外退出".into())
+        }
+    }
+}
+
+/// 进程内编码器专用：直接把 WASAPI 回环 PCM 经 mpsc 通道回传（不走命名管道、不依赖 ffmpeg 子进程）。
+/// 返回 (采集句柄, 格式, PCM 接收端)。调用方应把接收端接给 `AvEncoder::feed_audio`。
+pub fn start_audio_capture_channel(
+    video_started: Arc<AtomicBool>,
+) -> Result<(AudioCapture, AudioFormat, mpsc::Receiver<Vec<u8>>), String> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>();
+    let (fmt_tx, fmt_rx) = mpsc::channel::<Result<AudioFormat, String>>();
+
+    let c_stop = stop.clone();
+    let capture_thread = thread::spawn(move || {
+        capture_loop(c_stop, data_tx, fmt_tx, video_started.clone());
+    });
+
+    match fmt_rx.recv() {
+        Ok(Ok(fmt)) => Ok((
+            AudioCapture {
+                stop,
+                handle: 0, // 无管道
+                capture_thread: Some(capture_thread),
+                writer: None,
+            },
+            fmt,
+            data_rx,
+        )),
+        Ok(Err(e)) => {
+            let _ = capture_thread.join();
+            Err(e)
+        }
+        Err(_) => {
+            let _ = capture_thread.join();
             Err("音频采集线程意外退出".into())
         }
     }
@@ -330,8 +369,10 @@ fn parse_format(pformat: *mut windows::Win32::Media::Audio::WAVEFORMATEX) -> Res
                 _ => return Err(format!("不支持的 PCM 位深 {}", bits)),
             }
         } else if tag == 0xFFFE {
-            // WAVE_FORMAT_EXTENSIBLE：SubFormat 位于 WAVEFORMATEX(18) + Samples(2) = 偏移 20 字节处。
-            let sub_ptr = (pformat as *const u8).add(20) as *const GUID;
+            // WAVE_FORMAT_EXTENSIBLE：SubFormat GUID 位于
+            // WAVEFORMATEX(18) + Samples(2) + dwChannelMask(4) = 偏移 24 字节处。
+            // ⚠️ 旧代码误用 20 → 实际读到 dwChannelMask，GUID 永远错位、识别不出 PCM/FLOAT。
+            let sub_ptr = (pformat as *const u8).add(24) as *const GUID;
             let sub = *sub_ptr;
             if sub == SUBTYPE_FLOAT {
                 ("f32le", 4)
@@ -356,6 +397,10 @@ fn parse_format(pformat: *mut windows::Win32::Media::Audio::WAVEFORMATEX) -> Res
         };
         let channels = f.nChannels;
         let rate = f.nSamplesPerSec;
+        eprintln!(
+            "[音频] 解析 mix 格式: tag=0x{:X} channels={} bits={} rate={} (rate=0 说明设备 mix format 异常，编码器将回退 48000)",
+            tag, channels, bits, rate
+        );
         let block_align = (channels as u32 * bytes_per_sample as u32) as u16;
         Ok(AudioFormat {
             rate,
