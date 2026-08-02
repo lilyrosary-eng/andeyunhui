@@ -152,6 +152,24 @@ const ALLOWED_COMMANDS = new Set([
   'mcp_list_tools',
   'mcp_list_all_tools',
   'lsp_diagnostics',
+  // IDE 内容搜索（命令面板 `#` 模式 / agent grep 工具）：gitignore 感知并行遍历
+  'search_content',
+  // IDE 源码管理（git CLI 封装）：status/diff/stage/unstage/commit/branch/log
+  // sourceControl / gitHistory 前端调用，此前漏加会被沙箱拦截
+  'git_status',
+  'git_diff',
+  'git_stage',
+  'git_unstage',
+  'git_commit',
+  'git_current_branch',
+  'git_branch_list',
+  'git_log',
+  // IDE 真 PTY 终端（portable-pty）：create/write/resize/kill
+  // 输出走 Tauri 事件 pty-output:<id>（沙箱允许 listen），前端 xterm.js 监听写入
+  'pty_create',
+  'pty_write',
+  'pty_resize',
+  'pty_kill',
   // 薄荷·网络测速：用系统默认浏览器打开外链（test.ustc.edu.cn）
   'plugin:opener|open_url',
   // 桌宠引擎：销毁其常驻浮窗（与 overlay_window_get_or_create 配对）
@@ -243,6 +261,7 @@ interface SafeWindow extends Record<string, unknown> {
   __HOST_API__?: unknown;
   __PLUGIN_REGISTRY__?: unknown;
   __HOST_UI__?: unknown;
+  __HOST_I18N__?: unknown;
 }
 
 export interface SandboxGlobals {
@@ -295,6 +314,7 @@ export interface SandboxGlobals {
   __HOST_API__: ReturnType<typeof createSafeApi>;
   __PLUGIN_REGISTRY__: PluginRegistry;
   __HOST_UI__: Record<string, unknown>;
+  __HOST_I18N__: Record<string, unknown>;
 }
 
 /**
@@ -351,6 +371,7 @@ export function createSandboxGlobals(
         __HOST_API__: createSafeApi(pluginId),
         __PLUGIN_REGISTRY__: registry,
         __HOST_UI__: window.__HOST_UI__ || {},
+        __HOST_I18N__: window.__HOST_I18N__ || {},
       },
       {
         get(target, prop) {
@@ -396,6 +417,7 @@ export function createSandboxGlobals(
     __HOST_API__: createSafeApi(pluginId),
     __PLUGIN_REGISTRY__: registry,
     __HOST_UI__: window.__HOST_UI__ || {},
+    __HOST_I18N__: window.__HOST_I18N__ || {},
   };
 }
 

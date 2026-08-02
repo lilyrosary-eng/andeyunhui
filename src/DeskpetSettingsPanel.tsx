@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useI18n } from '@/lib/i18n';
 import { Switch } from "@/components/ui/switch"
 import { Slider } from "@/components/ui/slider"
 import { Sparkles } from 'lucide-react'
@@ -45,6 +46,7 @@ function PetAssetThumb({ rel, mime }: { rel: string; mime: string }) {
  * 经 localStorage + 全局事件与浮窗 / 插件同步）。全局设置里仅保留一个「显示桌宠」总开关。
  */
 export function DeskpetSettingsPanel() {
+  const { t } = useI18n();
   // ---- 桌宠 Phase A 基础设置（缩放 / 透明度 / 点击穿透）----
   // 与插件 / 浮窗共享 localStorage['deskpet:settings']：面板写入并全局 emit，
   // 浮窗直接收到应用；插件监听更新缓存并持久化，并在浮窗请求时回复。
@@ -265,26 +267,26 @@ export function DeskpetSettingsPanel() {
         <section>
           <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
             <Sparkles size={14} />
-            桌宠
+            {t('deskpet.title')}
           </h2>
           <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
             {/* 使用引导：官方素材 / 自定义素材 / 预设隔离 一句话讲清 */}
             <div className="p-4 bg-amber-50/60 dark:bg-amber-900/10">
               <div className="flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-400 mb-1.5">
                 <Sparkles size={13} />
-                使用引导
+                {t('deskpet.guide')}
               </div>
               <ul className="text-xs text-neutral-600 dark:text-stone-300 space-y-1 leading-relaxed list-disc pl-4">
-                <li><span className="font-medium text-amber-700 dark:text-amber-400">官方素材</span>：内置桌宠，安装即带、标记「官方」，可复用不可误删基线。</li>
-                <li><span className="font-medium text-sky-600 dark:text-sky-400">自定义素材</span>：点「导入图片/视频」选本地文件按状态绑定；文件存于用户目录，可随时移除。</li>
-                <li><span className="font-medium text-emerald-600 dark:text-emerald-400">预设方案</span>：每套预设（素材+缩放+透明度）独立保存、互不干扰；点「新建预设」从官方基线开始（清空当前），避免不同方案素材串味。</li>
-                <li>支持格式：图片 PNG/JPG/GIF/WebP；视频建议 ≤1.5MB 透明抠像 MP4（或带 Alpha 的 WebM）。</li>
+                <li><span className="font-medium text-amber-700 dark:text-amber-400">{t('deskpet.officialAssets')}</span>：{t('deskpet.officialAssetsDesc')}</li>
+                <li><span className="font-medium text-sky-600 dark:text-sky-400">{t('deskpet.customAssets')}</span>：{t('deskpet.customAssetsDesc')}</li>
+                <li><span className="font-medium text-emerald-600 dark:text-emerald-400">{t('deskpet.presets')}</span>：{t('deskpet.presetsDesc')}</li>
+                <li>{t('deskpet.formatSupport')}</li>
               </ul>
             </div>
             {/* 缩放 */}
             <div className="p-4">
               <div className="flex justify-between items-center mb-3">
-                <span className="text-sm text-neutral-600 dark:text-stone-300">缩放</span>
+                <span className="text-sm text-neutral-600 dark:text-stone-300">{t('deskpet.scale')}</span>
                 <span className="text-xs text-neutral-500 dark:text-stone-400">{Math.round(deskpetScale * 100)}%</span>
               </div>
               <Slider
@@ -303,7 +305,7 @@ export function DeskpetSettingsPanel() {
             {/* 透明度 */}
             <div className="p-4">
               <div className="flex justify-between items-center mb-3">
-                <span className="text-sm text-neutral-600 dark:text-stone-300">透明度</span>
+                <span className="text-sm text-neutral-600 dark:text-stone-300">{t('deskpet.opacity')}</span>
                 <span className="text-xs text-neutral-500 dark:text-stone-400">{Math.round(deskpetOpacity * 100)}%</span>
               </div>
               <Slider
@@ -322,8 +324,8 @@ export function DeskpetSettingsPanel() {
             {/* 点击穿透 */}
             <div className="flex justify-between items-center p-4">
               <div>
-                <span className="text-sm font-medium block">点击穿透</span>
-                <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">开启后鼠标可穿透桌宠（不拦截点击），便于截图选区。</p>
+                <span className="text-sm font-medium block">{t('deskpet.clickThrough')}</span>
+                <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('deskpet.clickThroughDesc')}</p>
               </div>
               <Switch
                 checked={deskpetClickThrough}
@@ -337,8 +339,8 @@ export function DeskpetSettingsPanel() {
             {/* 自定义素材：导入自己的图片 / 视频，按状态绑定 */}
             <div className="p-4 space-y-3">
               <div>
-                <span className="text-sm font-medium block">自定义素材</span>
-                <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">导入你自己的图片或视频作为桌宠；按状态（待机 / 工作 / 自定义）绑定，右键桌宠可切换。</p>
+                <span className="text-sm font-medium block">{t('deskpet.customMaterial')}</span>
+                <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('deskpet.customMaterialDesc')}</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <select
@@ -349,13 +351,13 @@ export function DeskpetSettingsPanel() {
                   {petManifest.states.map((s) => (
                     <option key={s.id} value={s.id}>{s.label || s.id}</option>
                   ))}
-                  <option value="__new__">+ 新建状态…</option>
+                  <option value="__new__">+ {t('deskpet.newState')}</option>
                 </select>
                 {petTargetState === '__new__' && (
                   <input
                     value={petNewState}
                     onChange={(e) => setPetNewState(e.target.value)}
-                    placeholder="新状态名称"
+                    placeholder={t('deskpet.newStateName')}
                     className="px-2 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 outline-none focus:ring-2 focus:ring-[var(--element-border)] w-28"
                   />
                 )}
@@ -363,18 +365,18 @@ export function DeskpetSettingsPanel() {
                   onClick={() => void handleImportPetAsset()}
                   className="btn-press px-3 py-1.5 rounded-lg bg-[var(--element-color-raw)] text-white text-sm font-medium hover:opacity-90 transition-opacity"
                 >
-                  导入图片/视频
+                  {t('deskpet.importBtn')}
                 </button>
               </div>
               {petImportError && (
-                <p className="text-xs text-red-500">导入失败：{petImportError}</p>
+                <p className="text-xs text-red-500">{t('deskpet.importFailed', { err: petImportError })}</p>
               )}
               <div className="space-y-2">
                 {petManifest.states.map((s) => (
                   <div key={s.id}>
                     <div className="text-xs text-neutral-500 dark:text-stone-400 mb-1">{s.label || s.id}</div>
                     {s.assets.length === 0 ? (
-                      <div className="text-xs text-neutral-400 dark:text-stone-500">暂无素材</div>
+                      <div className="text-xs text-neutral-400 dark:text-stone-500">{t('deskpet.noAssets')}</div>
                     ) : (
                       <div className="flex flex-wrap gap-2">
                         {s.assets.map((a) => (
@@ -383,12 +385,12 @@ export function DeskpetSettingsPanel() {
                             <button
                               onClick={() => removePetAsset(s.id, a.rel)}
                               className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-red-500 text-white text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity"
-                              title="移除"
+                              title={t('deskpet.remove')}
                             >
                               ×
                             </button>
                             <div className="flex items-center gap-1 mt-0.5">
-                              <span className={`text-[10px] px-1 rounded shrink-0 ${a.source === 'official' ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400' : 'bg-sky-100 text-sky-600 dark:bg-sky-900/30 dark:text-sky-400'}`}>{a.source === 'official' ? '官方' : '自定义'}</span>
+                              <span className={`text-[10px] px-1 rounded shrink-0 ${a.source === 'official' ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400' : 'bg-sky-100 text-sky-600 dark:bg-sky-900/30 dark:text-sky-400'}`}>{a.source === 'official' ? t('deskpet.official') : t('deskpet.custom')}</span>
                               <span className="text-[10px] text-neutral-400 dark:text-stone-500 truncate max-w-[40px]">{a.file}</span>
                             </div>
                           </div>
@@ -402,8 +404,8 @@ export function DeskpetSettingsPanel() {
             {/* 预设方案：每套方案（manifest+设置）独立保存、切换；新建从官方基线清空当前，防止串味 */}
             <div className="p-4 space-y-3 border-t border-neutral-200/50 dark:border-stone-700/50">
               <div>
-                <span className="text-sm font-medium block">预设方案</span>
-                <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">每套方案（素材+缩放+透明度）独立保存、互不干扰。「官方默认」为内置基线；「新建预设」从官方基线开始（清空当前），避免不同方案素材串味。</p>
+                <span className="text-sm font-medium block">{t('deskpet.presets')}</span>
+                <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('deskpet.presetsDesc')}</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <select
@@ -411,7 +413,7 @@ export function DeskpetSettingsPanel() {
                   onChange={(e) => handleSelectPreset(e.target.value)}
                   className="px-2 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 outline-none focus:ring-2 focus:ring-[var(--element-border)]"
                 >
-                  <option value="">官方默认</option>
+                  <option value="">{t('deskpet.officialDefault')}</option>
                   {presets.map((p) => (
                     <option key={p.id} value={p.id}>{p.name}</option>
                   ))}
@@ -419,20 +421,20 @@ export function DeskpetSettingsPanel() {
                 <input
                   value={newPresetName}
                   onChange={(e) => setNewPresetName(e.target.value)}
-                  placeholder="方案名"
+                  placeholder={t('deskpet.presetName')}
                   className="px-2 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-300 outline-none focus:ring-2 focus:ring-[var(--element-border)] w-28"
                 />
                 <button
                   onClick={() => handleNewPreset()}
                   className="btn-press px-3 py-1.5 rounded-lg bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-200 text-sm font-medium border border-neutral-200/50 dark:border-stone-600/50 hover:bg-neutral-50 dark:hover:bg-stone-600"
                 >
-                  新建预设（清空当前）
+                  {t('deskpet.newPreset')}
                 </button>
                 <button
                   onClick={() => handleSavePreset()}
                   className="btn-press px-3 py-1.5 rounded-lg bg-[var(--element-color-raw)] text-white text-sm font-medium hover:opacity-90"
                 >
-                  保存当前预设
+                  {t('deskpet.savePreset')}
                 </button>
               </div>
               {presets.length > 0 && (
@@ -440,17 +442,17 @@ export function DeskpetSettingsPanel() {
                   {presets.map((p) => (
                     <div key={p.id} className="flex items-center gap-1 bg-neutral-100 dark:bg-stone-700 rounded-lg px-2 py-1">
                       <span className="text-xs text-neutral-700 dark:text-stone-200">{p.name}</span>
-                      {activePresetId === p.id && <span className="text-[10px] text-emerald-500">当前</span>}
+                      {activePresetId === p.id && <span className="text-[10px] text-emerald-500">{t('deskpet.current')}</span>}
                       <button
-                        onClick={() => { const n = window.prompt('重命名方案', p.name); if (n) handleRenamePreset(p.id, n.trim()); }}
+                        onClick={() => { const n = window.prompt(t('deskpet.renamePrompt'), p.name); if (n) handleRenamePreset(p.id, n.trim()); }}
                         className="text-xs text-neutral-400 hover:text-amber-500"
-                        title="重命名"
-                      >改</button>
+                        title={t('deskpet.rename')}
+                      >{t('deskpet.renameShort')}</button>
                       <button
                         onClick={() => handleDeletePreset(p.id)}
                         className="text-xs text-neutral-400 hover:text-red-500"
-                        title="删除"
-                      >删</button>
+                        title={t('deskpet.delete')}
+                      >{t('deskpet.deleteShort')}</button>
                     </div>
                   ))}
                 </div>

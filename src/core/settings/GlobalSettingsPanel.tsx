@@ -109,6 +109,10 @@ export function GlobalSettingsPanel() {
   const [autoSaveInterval, setAutoSaveInterval] = useState([30]);
   const [trayMode, setTrayMode] = useState(false);
 
+  // 数据根（可配置存放位置）
+  const [dataRoot, setDataRoot] = useState('');
+  const [dataRootMsg, setDataRootMsg] = useState('');
+
   // 系统字体
   const { fonts, loading: fontsLoading } = useSystemFonts();
   const [fontSearch, setFontSearch] = useState('');
@@ -143,6 +147,11 @@ export function GlobalSettingsPanel() {
     invoke<boolean>('get_tray_mode')
       .then(setTrayMode)
       .catch(() => {});
+  }, []);
+
+  // 启动时读取当前数据存放位置
+  useEffect(() => {
+    invoke<string>('get_data_root').then(setDataRoot).catch(() => {});
   }, []);
 
   // 启动时从 Rust 读取实际生效的截图/录屏热键，与设置面板展示同步（设置改键会真正注册）
@@ -369,10 +378,10 @@ export function GlobalSettingsPanel() {
     const mod = NIAOLUO_MODULES.find((m) => m.id === delTarget);
     const name = mod?.name || delTarget;
     const ok = window.confirm(
-      `确定要彻底删除模块「${name}」吗？\n\n此操作会删除插件目录、.mufurong 源包与可见性记录，且不可撤销。`
+      t('settings.niaoluo.confirmDelete', { name })
     );
     if (!ok) return;
-    setDelMsg(`正在删除「${name}」…`);
+    setDelMsg(t('settings.niaoluo.deleting', { name }));
     try {
       // 先卸载运行中的实例，再彻底删除文件
       const hot = (window as unknown as { __pluginHot__?: { unload?: (id: string) => void } }).__pluginHot__;
@@ -381,10 +390,10 @@ export function GlobalSettingsPanel() {
       window.dispatchEvent(
         new CustomEvent('plugin-visibility-changed', { detail: { id: delTarget, visible: false } })
       );
-      setDelMsg(`已彻底删除「${name}」。`);
+      setDelMsg(t('settings.niaoluo.deleted', { name }));
     } catch (err) {
       logger.log('[GlobalSettings] 彻底删除模块失败:', err);
-      setDelMsg(`删除失败：${err instanceof Error ? err.message : String(err)}`);
+      setDelMsg(t('settings.niaoluo.deleteFailed', { err: err instanceof Error ? err.message : String(err) }));
     }
   }, [delTarget]);
 
@@ -570,13 +579,13 @@ export function GlobalSettingsPanel() {
               <section>
                 <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
                   <Puzzle size={14} />
-                  茑萝
+                  {t('niaoluo.moduleTitle')}
                 </h2>
                 <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
                   <div className="flex justify-between items-center p-4">
                     <div>
-                      <span className="text-sm font-medium block">显示 RAG 知识库模块</span>
-                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">RAG 为内置功能，关闭后从「茑萝」侧边栏列表隐藏，需要时再开启。</p>
+                      <span className="text-sm font-medium block">{t('settings.niaoluo.showRag')}</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('settings.niaoluo.showRagDesc')}</p>
                     </div>
                     <Switch
                       checked={ragVisible}
@@ -586,8 +595,8 @@ export function GlobalSettingsPanel() {
                   </div>
                   <div className="flex justify-between items-center p-4">
                     <div>
-                      <span className="text-sm font-medium block">显示黄金棋盘</span>
-                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">顶部居中悬浮的黄金棋盘，关闭后从屏幕顶部移除。</p>
+                      <span className="text-sm font-medium block">{t('settings.niaoluo.showCapsule')}</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('settings.niaoluo.showCapsuleDesc')}</p>
                     </div>
                     <Switch
                       checked={capsuleVisible ?? false}
@@ -597,8 +606,8 @@ export function GlobalSettingsPanel() {
                   </div>
                   <div className="flex justify-between items-center p-4">
                     <div>
-                      <span className="text-sm font-medium block">显示桌宠</span>
-                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">常驻桌面漫步的桌宠，关闭即卸载插件；缩放、透明度、点击穿透、素材与预设等详细设置在「茑萝」侧边栏的桌宠面板中调整。</p>
+                      <span className="text-sm font-medium block">{t('settings.niaoluo.showDeskpet')}</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('settings.niaoluo.showDeskpetDesc')}</p>
                     </div>
                     <Switch
                       checked={deskpetVisible ?? false}
@@ -609,8 +618,8 @@ export function GlobalSettingsPanel() {
                   </div>
                   <div className="flex justify-between items-center p-4 gap-3">
                     <div>
-                      <span className="text-sm font-medium block">彻底删除模块（连同文件）</span>
-                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">选择要彻底删除的茑萝子模块，将删除其目录、.mufurong 源包与可见性记录，不可撤销。</p>
+                      <span className="text-sm font-medium block">{t('settings.niaoluo.destroyModule')}</span>
+                      <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{t('settings.niaoluo.destroyModuleDesc')}</p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <select
@@ -626,7 +635,7 @@ export function GlobalSettingsPanel() {
                         onClick={() => void handleNiaoluoDelete()}
                         className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/90 text-white hover:bg-red-500 transition-colors"
                       >
-                        删除
+                        {t('settings.niaoluo.delete')}
                       </button>
                     </div>
                   </div>
@@ -752,7 +761,7 @@ export function GlobalSettingsPanel() {
                         }}
                         className="btn-press px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm text-neutral-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors"
                       >
-                        {bgVideo ? '更换视频' : '选择视频'}
+                        {bgVideo ? t('settings.bg.changeVideo') : t('settings.bg.chooseVideo')}
                       </button>
                       <input
                         ref={fileInputRef}
@@ -1141,6 +1150,40 @@ export function GlobalSettingsPanel() {
                     {t('settings.about.openFolder')}
                   </button>
                 </div>
+              </section>
+
+              <section className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
+                <div className="flex justify-between items-center p-4 gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FolderOpen size={16} className="text-neutral-400 dark:text-stone-500 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="text-sm text-neutral-600 dark:text-stone-300 block">数据存放位置</span>
+                      <p className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5 break-all">{dataRoot || '（加载中…）'}</p>
+                    </div>
+                  </div>
+                  <button
+                    className="px-3 py-1.5 rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-600 dark:text-stone-300 text-sm hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors shrink-0"
+                    onClick={async () => {
+                      try {
+                        const selected = await openDialog({ directory: true, multiple: false, title: '选择数据存放目录' });
+                        if (typeof selected !== 'string' || !selected) return;
+                        await invoke('set_data_root', { path: selected });
+                        setDataRoot(selected);
+                        setDataRootMsg('已设置，重启后将自动迁移数据到新位置。');
+                        if (window.confirm('已更新数据存放位置，重启应用后生效（将自动迁移现有数据）。是否立即重启？')) {
+                          invoke('restart_app').catch(() => {});
+                        }
+                      } catch (e) {
+                        setDataRootMsg('设置失败：' + (e instanceof Error ? e.message : String(e)));
+                      }
+                    }}
+                  >
+                    更改
+                  </button>
+                </div>
+                {dataRootMsg && (
+                  <div className="px-4 pb-3 text-xs text-amber-600 dark:text-amber-400">{dataRootMsg}</div>
+                )}
               </section>
 
               {/* 开发者控制台：命令行 REPL，热指令+危险过滤+联网 */}

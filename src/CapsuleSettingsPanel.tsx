@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useI18n } from '@/lib/i18n';
 
 export function CapsuleSettingsPanel() {
+  const { t } = useI18n();
   const [alias, setAlias] = useState('');
   const [saveDir, setSaveDir] = useState('');
   const [autoAccept, setAutoAccept] = useState(false);
@@ -29,13 +31,13 @@ export function CapsuleSettingsPanel() {
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg">
       <div className="px-8 pt-6 pb-2 shrink-0">
-        <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">黄金棋盘 · 模块设置</h2>
-        <p className="text-xs text-neutral-400 dark:text-stone-500 mt-1">局域网传输（兼容 LocalSend）</p>
+        <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{t('capsule.settings.title')}</h2>
+        <p className="text-xs text-neutral-400 dark:text-stone-500 mt-1">{t('capsule.settings.subtitle')}</p>
       </div>
       <div className="flex-1 overflow-y-auto px-8 pb-8 max-w-2xl">
         <section className="mb-6">
-          <label className="block text-sm font-medium text-neutral-700 dark:text-stone-300 mb-1">本机名称</label>
-          <p className="text-xs text-neutral-400 dark:text-stone-500 mb-2">同网其他设备看到的名称（持久化到配置）</p>
+          <label className="block text-sm font-medium text-neutral-700 dark:text-stone-300 mb-1">{t('capsule.settings.deviceName')}</label>
+          <p className="text-xs text-neutral-400 dark:text-stone-500 mb-2">{t('capsule.settings.deviceNameDesc')}</p>
           <input
             value={alias}
             onChange={(e) => setAlias(e.target.value)}
@@ -44,13 +46,13 @@ export function CapsuleSettingsPanel() {
         </section>
 
         <section className="mb-6">
-          <label className="block text-sm font-medium text-neutral-700 dark:text-stone-300 mb-1">接收文件保存目录</label>
-          <p className="text-xs text-neutral-400 dark:text-stone-500 mb-2">收到的文件会保存到这里，点右侧按钮从 Windows 对话框选择</p>
+          <label className="block text-sm font-medium text-neutral-700 dark:text-stone-300 mb-1">{t('capsule.settings.saveDir')}</label>
+          <p className="text-xs text-neutral-400 dark:text-stone-500 mb-2">{t('capsule.settings.saveDirDesc')}</p>
           <div className="flex items-center gap-2">
             <input
               value={saveDir}
               readOnly
-              placeholder="默认：程序安装目录下的 send 文件夹"
+              placeholder={t('capsule.settings.saveDirPlaceholder')}
               className="flex-1 rounded-lg border border-white/50 dark:border-stone-600/40 bg-white/40 dark:bg-stone-700/30 px-3 py-2 text-sm text-neutral-700 dark:text-stone-200 placeholder:text-neutral-400 dark:placeholder:text-stone-500 focus:outline-none focus:ring-1 focus:ring-[var(--element-border)] focus:border-transparent transition-all"
             />
             <button
@@ -61,7 +63,7 @@ export function CapsuleSettingsPanel() {
               }}
               className="shrink-0 px-3 py-2 rounded-lg border border-[var(--element-border)]/40 text-sm text-neutral-700 dark:text-stone-200 hover:bg-white/60 dark:hover:bg-stone-700/40 transition-colors"
             >
-              选择目录
+              {t('capsule.settings.chooseDir')}
             </button>
           </div>
         </section>
@@ -75,8 +77,8 @@ export function CapsuleSettingsPanel() {
               className="mt-0.5"
             />
             <div>
-              <div className="text-sm font-medium text-neutral-700 dark:text-stone-300">自动接收（不弹确认）</div>
-              <div className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">关闭时有人发文件会弹确认窗口，30 秒未响应自动拒绝</div>
+              <div className="text-sm font-medium text-neutral-700 dark:text-stone-300">{t('capsule.settings.autoAccept')}</div>
+              <div className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">{t('capsule.settings.autoAcceptDesc')}</div>
             </div>
           </label>
         </section>
@@ -86,9 +88,9 @@ export function CapsuleSettingsPanel() {
             onClick={save}
             className="px-5 py-2 rounded-lg bg-[var(--element-bg)] text-white text-sm font-medium hover:opacity-90 transition-opacity"
           >
-            保存
+            {t('capsule.settings.save')}
           </button>
-          {saved && <span className="text-xs text-green-600 dark:text-green-400">已保存</span>}
+          {saved && <span className="text-xs text-green-600 dark:text-green-400">{t('capsule.settings.saved')}</span>}
         </div>
       </div>
     </div>

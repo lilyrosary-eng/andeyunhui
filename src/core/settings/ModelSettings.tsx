@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { useI18n } from '@/lib/i18n';
 import {
   Cpu, Server, KeyRound, Bot, SlidersHorizontal, TestTube2, Check, X, Plus,
   ChevronDown, ChevronUp, RotateCcw, Eye, EyeOff, Trash2, Star, ExternalLink,
@@ -30,10 +31,10 @@ interface ProfileUi {
 const PROVIDERS: { id: string; name: string; base_url: string; models: string[]; visionModels: string[] }[] = [
   { id: 'deepseek', name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash', 'deepseek-v4-pro'], visionModels: ['deepseek-v4-flash', 'deepseek-v4-pro'] },
   { id: 'openai', name: 'OpenAI', base_url: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1-mini', 'gpt-5.6'], visionModels: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-5.6'] },
-  { id: 'custom', name: '自定义', base_url: '', models: [], visionModels: [] },
+  { id: 'custom', name: 'Custom', base_url: '', models: [], visionModels: [] },
   { id: 'qwen', name: '通义千问', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-3.5-plus', 'qwen2.5-coder-32b-instruct', 'qwen3-coder-plus'], visionModels: ['qwen-vl-max', 'qwen-vl-plus', 'qwen2.5-vl-72b-instruct', 'qwen2.5-vl-32b-instruct'] },
   { id: 'zhipu', name: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-air', 'glm-5.1', 'glm-5.2'], visionModels: ['glm-4v-plus', 'glm-4v', 'glm-4v-flash'] },
-  { id: 'ollama', name: 'Ollama (本地)', base_url: 'http://localhost:11434/v1', models: ['llama3', 'qwen2.5', 'codellama', 'deepseek-coder'], visionModels: ['llava', 'llama3.2-vision', 'qwen2.5vl:7b'] },
+  { id: 'ollama', name: 'Ollama (local)', base_url: 'http://localhost:11434/v1', models: ['llama3', 'qwen2.5', 'codellama', 'deepseek-coder'], visionModels: ['llava', 'llama3.2-vision', 'qwen2.5vl:7b'] },
 ];
 
 // 所有供应商模型聚合，作为模型名输入的联想建议
@@ -42,15 +43,15 @@ const ALL_MODELS = Array.from(new Set(PROVIDERS.flatMap((p) => p.models)));
 const ALL_VISION_MODELS = Array.from(new Set(PROVIDERS.flatMap((p) => p.visionModels)));
 
 // 人设风格预设：选中后作为 system 提示词基底（可在「自定义风格」中追加/覆盖）。key 与后端 compose_persona_system 对应。
-const PERSONA_PRESETS: { key: string; label: string; desc: string }[] = [
-  { key: 'sharp', label: '毒舌', desc: '毒舌直率、一针见血，不绕弯子，敢于直接指出问题，但始终基于事实、不人身攻击。' },
-  { key: 'gentle', label: '温柔细致', desc: '温柔细致、循循善诱，多用鼓励性语言，分步骤耐心解释，照顾对方情绪。' },
-  { key: 'rigorous', label: '严谨认真', desc: '严谨认真、逻辑缜密，注重证据与出处，措辞准确，不臆测。' },
-  { key: 'humorous', label: '幽默风趣', desc: '幽默风趣、妙语连珠，善用比喻与生活化例子让内容轻松易懂。' },
-  { key: 'pro', label: '专业顾问', desc: '专业顾问式，条理清晰，适度用行业术语并解释，给可执行建议与权衡分析。' },
-  { key: 'concise', label: '极简直接', desc: '极简直接，只给结论与要点，能用列表就不用段落，省略客套。' },
-  { key: 'mentor', label: '导师式', desc: '导师式，先引导思考再给答案，常用提问帮助对方建立方法论。' },
-  { key: 'custom', label: '自定义', desc: '完全由下方「自定义风格」描述决定。' },
+const PERSONA_PRESETS: { key: string; labelKey: string; descKey: string }[] = [
+  { key: 'sharp', labelKey: 'persona.sharp', descKey: 'persona.sharp.desc' },
+  { key: 'gentle', labelKey: 'persona.gentle', descKey: 'persona.gentle.desc' },
+  { key: 'rigorous', labelKey: 'persona.rigorous', descKey: 'persona.rigorous.desc' },
+  { key: 'humorous', labelKey: 'persona.humorous', descKey: 'persona.humorous.desc' },
+  { key: 'pro', labelKey: 'persona.pro', descKey: 'persona.pro.desc' },
+  { key: 'concise', labelKey: 'persona.concise', descKey: 'persona.concise.desc' },
+  { key: 'mentor', labelKey: 'persona.mentor', descKey: 'persona.mentor.desc' },
+  { key: 'custom', labelKey: 'persona.custom', descKey: 'persona.custom.desc' },
 ];
 
 function defaultProfile(name = 'DeepSeek'): ProfileUi {
@@ -117,6 +118,7 @@ const inputCls =
 const labelCls = 'block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium';
 
 export function ModelSettings() {
+  const { t } = useI18n();
   const [profiles, setProfiles] = useState<ProfileUi[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
@@ -165,12 +167,12 @@ export function ModelSettings() {
       return;
     }
     if (profiles.length === 0) return;
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       invoke('ai_set_profiles', {
         payload: { profiles: profiles.map(toPayload), active: activeId },
       }).catch((e) => console.warn('[模型] 自动保存失败:', e));
     }, 800);
-    return () => clearTimeout(t);
+    return () => clearTimeout(timer);
   }, [profiles, activeId]);
 
   const updateProfile = useCallback((id: string, patch: Partial<ProfileUi>) => {
@@ -191,7 +193,7 @@ export function ModelSettings() {
       triggerSaved();
       setTestMsg(null);
     } catch (e) {
-      setTestMsg({ ok: false, text: '保存失败：' + String(e) });
+      setTestMsg({ ok: false, text: t('settings.saveFailed', { err: String(e) }) });
     } finally {
       setSaving(false);
     }
@@ -200,11 +202,11 @@ export function ModelSettings() {
   const handleTest = useCallback(async () => {
     if (!editProfile) return;
     if (!editProfile.api_key.trim()) {
-      setTestMsg({ ok: false, text: '请先填写 API Key' });
+      setTestMsg({ ok: false, text: t('modelSettings.needApiKey') });
       return;
     }
     if (!/^https?:\/\//.test(editProfile.base_url.trim())) {
-      setTestMsg({ ok: false, text: 'API 端点应以 http:// 或 https:// 开头' });
+      setTestMsg({ ok: false, text: t('modelSettings.badEndpoint') });
       return;
     }
     setTesting(true);
@@ -213,7 +215,7 @@ export function ModelSettings() {
       const res = await invoke<string>('ai_test_connection', { config: toPayload(editProfile) });
       setTestMsg({ ok: true, text: res });
     } catch (e) {
-      setTestMsg({ ok: false, text: '连接失败：' + String(e) });
+      setTestMsg({ ok: false, text: t('modelSettings.connFailed', { err: String(e) }) });
     } finally {
       setTesting(false);
     }
@@ -305,17 +307,16 @@ export function ModelSettings() {
       <section>
         <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3 flex items-center gap-1.5">
           <Cpu size={14} />
-          AI 模型配置（全局能力 · 供 AI 编程调用）
+          {t('modelSettings.heading')}
         </h2>
         <p className="text-xs text-neutral-400 dark:text-stone-500 mb-3">
-          可配置多份模型档案（DeepSeek / OpenAI / 通义 / 智谱 / 本地 Ollama 或自定义），
-          「已配置模型」下会按你实际配置的数量显示（配置几个显示几个）。IDE 等任意模块都能在对话旁的下拉框中直接选用。
+          {t('modelSettings.intro')}
         </p>
 
         <div className="bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden">
           {/* 已配置模型（预设列表：配置几个显示几个） */}
           <div className="p-4">
-            <label className={labelCls}>已配置模型（{profiles.length}）</label>
+            <label className={labelCls}>{t('modelSettings.configured', { n: profiles.length })}</label>
             <div className="space-y-2">
               {profiles.map((p) => (
                 <div
@@ -329,15 +330,15 @@ export function ModelSettings() {
                 >
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate flex items-center gap-1.5">
-                      {p.name || p.model || '未命名模型'}
+                      {p.name || p.model || t('modelSettings.unnamed')}
                       {activeId === p.id && (
                         <span className="inline-flex items-center gap-0.5 text-[10px] text-amber-500">
-                          <Star size={11} className="fill-amber-500" />默认
+                          <Star size={11} className="fill-amber-500" />{t('modelSettings.default')}
                         </span>
                       )}
                     </div>
                     <div className="text-[11px] text-neutral-400 dark:text-stone-500 truncate">
-                      {p.model || p.base_url || '未填写端点'}
+                      {p.model || p.base_url || t('modelSettings.noEndpoint')}
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -345,15 +346,15 @@ export function ModelSettings() {
                       <button
                         onClick={() => setActiveId(p.id)}
                         className="btn-press px-2 py-1 rounded-md text-[11px] bg-neutral-100 dark:bg-stone-700 text-neutral-600 dark:text-stone-300 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
-                        title="设为默认"
+                        title={t('modelSettings.setDefault')}
                       >
-                        设为默认
+                        {t('modelSettings.setDefault')}
                       </button>
                     )}
                     <button
                       onClick={() => deleteProfile(p.id)}
                       className="btn-press p-1.5 rounded-md text-neutral-400 hover:text-red-500 hover:bg-red-500/10 transition-colors"
-                      title="删除"
+                      title={t('modelSettings.delete')}
                     >
                       <Trash2 size={14} />
                     </button>
@@ -362,13 +363,13 @@ export function ModelSettings() {
               ))}
             </div>
             {profiles.length === 0 && (
-              <div className="text-xs text-neutral-400 dark:text-stone-500 py-1">尚未配置任何模型，点击下方「添加模型档案」开始。</div>
+              <div className="text-xs text-neutral-400 dark:text-stone-500 py-1">{t('modelSettings.noModels')}</div>
             )}
             <button
               onClick={addProfile}
               className="btn-press mt-2 w-full py-2 rounded-lg border border-dashed border-neutral-300 dark:border-stone-600 text-xs text-neutral-500 dark:text-stone-400 hover:bg-neutral-50 dark:hover:bg-stone-700/50 transition-colors flex items-center justify-center gap-1.5"
             >
-              <Plus size={14} />添加模型档案
+              <Plus size={14} />{t('modelSettings.addProfile')}
             </button>
           </div>
 
@@ -377,7 +378,7 @@ export function ModelSettings() {
             <>
               {/* 供应商预设 */}
               <div className="p-4">
-                <label className={labelCls}>供应商预设（添加新档案 / 填充空白档案，绝不覆盖已配好的）</label>
+                <label className={labelCls}>{t('modelSettings.providerPreset')}</label>
                 <div className="grid grid-cols-3 gap-2">
                   {PROVIDERS.map((p) => (
                     <button
@@ -398,19 +399,19 @@ export function ModelSettings() {
                   <button
                     onClick={() => openUrl('https://platform.deepseek.com/top_up').catch(() => {})}
                     className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium bg-[#4d6bfe]/10 text-[#4d6bfe] hover:bg-[#4d6bfe]/20 transition-colors flex items-center gap-1.5"
-                    title="在浏览器打开 DeepSeek 充值页"
+                    title={t('modelSettings.deepseekTopupTitle')}
                   >
-                    <ExternalLink size={13} /> DeepSeek API 充值入口
+                    <ExternalLink size={13} /> {t('modelSettings.deepseekTopup')}
                   </button>
                   <span className="text-[11px] text-neutral-400 dark:text-stone-500">
-                    充一次约用一个月；推荐 <b className="text-neutral-600 dark:text-stone-300">deepseek-v4-flash</b>（支持图片输入，可兼顾 OCR）。
+                    {t('modelSettings.deepseekHint')}
                   </span>
                 </div>
               </div>
 
               {/* 显示名 */}
               <div className="p-4">
-                <label className={labelCls}>模型显示名（下拉框展示，如「我的 DeepSeek」）</label>
+                <label className={labelCls}>{t('modelSettings.displayName')}</label>
                 <input
                   className={inputCls}
                   value={editProfile.name}
@@ -421,7 +422,7 @@ export function ModelSettings() {
 
               {/* API 端点 */}
               <div className="p-4">
-                <label className={labelCls}><Server size={12} className="inline mr-1" />API 端点（OpenAI 兼容，含 /v1）</label>
+                <label className={labelCls}><Server size={12} className="inline mr-1" />{t('modelSettings.baseUrl')}</label>
                 <input
                   className={inputCls}
                   value={editProfile.base_url}
@@ -432,7 +433,7 @@ export function ModelSettings() {
 
               {/* API Key */}
               <div className="p-4">
-                <label className={labelCls}><KeyRound size={12} className="inline mr-1" />API Key（仅保存在本机）</label>
+                <label className={labelCls}><KeyRound size={12} className="inline mr-1" />{t('modelSettings.apiKey')}</label>
                 <div className="relative">
                   <input
                     className={`${inputCls} pr-10`}
@@ -445,7 +446,7 @@ export function ModelSettings() {
                   <button
                     onClick={() => setShowKey((s) => !s)}
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200 transition-colors"
-                    title={showKey ? '隐藏' : '显示'}
+                    title={showKey ? t('modelSettings.hide') : t('modelSettings.show')}
                   >
                     {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
@@ -455,7 +456,7 @@ export function ModelSettings() {
               {/* 模型 + 温度 */}
               <div className="p-4 space-y-4">
                 <div>
-                  <label className={labelCls}><Bot size={12} className="inline mr-1" />模型名称</label>
+                  <label className={labelCls}><Bot size={12} className="inline mr-1" />{t('modelSettings.modelName')}</label>
                   <input
                     className={inputCls}
                     list="ai-model-suggestions"
@@ -467,28 +468,28 @@ export function ModelSettings() {
                     {ALL_MODELS.map((m) => <option key={m} value={m} />)}
                   </datalist>
                   <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1">
-                    用于对话 / 编程的模型。若该模型不带视觉能力，OCR 会失败——请在下方的「视觉模型」单独指定。
+                    {t('modelSettings.modelNameHint')}
                   </p>
                 </div>
                 <div>
-                  <label className={labelCls}><Bot size={12} className="inline mr-1" />视觉模型（OCR / 图片理解用，可选）</label>
+                  <label className={labelCls}><Bot size={12} className="inline mr-1" />{t('modelSettings.visionModel')}</label>
                   <input
                     className={inputCls}
                     list="ai-vision-model-suggestions"
                     value={editProfile.vision_model}
-                    placeholder="留空则复用上方模型"
+                    placeholder={t('modelSettings.visionModelPlaceholder')}
                     onChange={(e) => updateProfile(editProfile.id, { vision_model: e.target.value })}
                   />
                   <datalist id="ai-vision-model-suggestions">
                     {ALL_VISION_MODELS.map((m) => <option key={m} value={m} />)}
                   </datalist>
                   <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1">
-                    多数供应商的对话模型（如 deepseek-chat、qwen-plus、glm-4-plus）无视觉能力。OCR 会优先使用此处的视觉模型（如 gpt-4o、qwen-vl-max、glm-4v），留空则回落到上方模型。
+                    {t('modelSettings.visionModelHint')}
                   </p>
                 </div>
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
-                    <label className={labelCls}>采样温度（Temperature）</label>
+                    <label className={labelCls}>{t('modelSettings.temperature')}</label>
                     <span className="text-xs text-neutral-500 dark:text-stone-400">{editProfile.temperature.toFixed(1)}</span>
                   </div>
                   <input
@@ -500,31 +501,31 @@ export function ModelSettings() {
                     onChange={(e) => updateProfile(editProfile.id, { temperature: parseFloat(e.target.value) })}
                     className="w-full accent-[var(--element-color-raw)]"
                   />
-                  <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1">越低越稳定精准（编程建议 0~0.5），越高越发散有创意。</p>
+                  <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1">{t('modelSettings.temperatureHint')}</p>
                 </div>
               </div>
 
               {/* 人设（Persona）：从高级参数移出，作为独立醒目区块 */}
               <section className="rounded-xl border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-900/40 p-4 space-y-4">
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="text-sm font-medium text-neutral-700 dark:text-stone-200">人设（Persona）</span>
-                  <span className="text-[11px] text-neutral-400 dark:text-stone-500">决定 AI 对你的称呼与说话风格，全部留空则默认</span>
+                  <span className="text-sm font-medium text-neutral-700 dark:text-stone-200">{t('modelSettings.persona')}</span>
+                  <span className="text-[11px] text-neutral-400 dark:text-stone-500">{t('modelSettings.personaDesc')}</span>
                 </div>
 
                 {/* 称呼 */}
                 <div>
-                  <label className={labelCls}>你希望 AI 称呼你什么</label>
+                  <label className={labelCls}>{t('modelSettings.callMeAs')}</label>
                   <input
                     className={inputCls}
                     value={editProfile.persona_call_me_as}
-                    placeholder="例如：老板 / 同学 / 老张（留空则默认不特别称呼）"
+                    placeholder={t('modelSettings.callMeAsPlaceholder')}
                     onChange={(e) => updateProfile(editProfile.id, { persona_call_me_as: e.target.value })}
                   />
                 </div>
 
                 {/* 风格预设 */}
                 <div>
-                  <label className={labelCls}>你希望 AI 是什么风格</label>
+                  <label className={labelCls}>{t('modelSettings.personaStyle')}</label>
                   <div className="flex flex-wrap gap-2">
                     {PERSONA_PRESETS.map((p) => (
                       <button
@@ -537,35 +538,35 @@ export function ModelSettings() {
                             : 'border-neutral-200 dark:border-stone-700 text-neutral-600 dark:text-stone-300 hover:border-neutral-300'
                         }`}
                       >
-                        {p.label}
+                        {t(p.labelKey)}
                       </button>
                     ))}
                   </div>
                   <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1.5">
-                    {PERSONA_PRESETS.find((p) => p.key === editProfile.persona_preset)?.desc ?? '未选择预设：由下方「自定义风格」决定'}
+                    {PERSONA_PRESETS.find((p) => p.key === editProfile.persona_preset)?.descKey ? t(PERSONA_PRESETS.find((p) => p.key === editProfile.persona_preset)!.descKey) : t('persona.noPreset')}
                   </p>
                 </div>
 
                 {/* 自定义风格 */}
                 <div>
-                  <label className={labelCls}>自定义风格补充（可留空）</label>
+                  <label className={labelCls}>{t('modelSettings.customStyle')}</label>
                   <textarea
                     className={`${inputCls} resize-none`}
                     rows={2}
                     value={editProfile.persona_style}
-                    placeholder="例如：多用成语、结尾加一句鼓励的话、避免说教……（在预设基础上细化，或预设选「自定义」时完全由这里决定）"
+                    placeholder={t('modelSettings.customStylePlaceholder')}
                     onChange={(e) => updateProfile(editProfile.id, { persona_style: e.target.value })}
                   />
                 </div>
 
                 {/* 额外要求（原 system prompt，拼接在人设之后） */}
                 <div>
-                  <label className={labelCls}>额外要求 / 长期指令（可留空）</label>
+                  <label className={labelCls}>{t('modelSettings.extraPrompt')}</label>
                   <textarea
                     className={`${inputCls} resize-none`}
                     rows={3}
                     value={editProfile.system_prompt}
-                    placeholder="任何额外的 base 指令，如身份设定、输出格式约束等（会拼接在人设之后）"
+                    placeholder={t('modelSettings.extraPromptPlaceholder')}
                     onChange={(e) => updateProfile(editProfile.id, { system_prompt: e.target.value })}
                   />
                 </div>
@@ -581,7 +582,7 @@ export function ModelSettings() {
                   onKeyDown={(e) => { if (e.key === 'Enter') setAdvancedOpen((o) => !o); }}
                 >
                   <span className="text-sm font-medium text-neutral-700 dark:text-stone-200 flex items-center gap-1.5">
-                    <SlidersHorizontal size={14} />高级参数
+                    <SlidersHorizontal size={14} />{t('modelSettings.advanced')}
                   </span>
                   {advancedOpen ? <ChevronUp size={16} className="text-neutral-400 dark:text-stone-500" /> : <ChevronDown size={16} className="text-neutral-400 dark:text-stone-500" />}
                 </div>
@@ -589,18 +590,18 @@ export function ModelSettings() {
                   <div className="px-4 pb-4 space-y-4">
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className={labelCls}>最大 Token（max_tokens）</label>
+                        <label className={labelCls}>{t('modelSettings.maxTokens')}</label>
                         <input
                           className={inputCls}
                           type="number"
                           min={1}
                           value={editProfile.max_tokens}
-                          placeholder="留空=模型默认"
+                          placeholder={t('modelSettings.optionalDefault')}
                           onChange={(e) => updateProfile(editProfile.id, { max_tokens: e.target.value })}
                         />
                       </div>
                       <div>
-                        <label className={labelCls}>核采样（top_p，0~1）</label>
+                        <label className={labelCls}>{t('modelSettings.topP')}</label>
                         <input
                           className={inputCls}
                           type="number"
@@ -608,7 +609,7 @@ export function ModelSettings() {
                           max={1}
                           step={0.05}
                           value={editProfile.top_p}
-                          placeholder="留空=模型默认"
+                          placeholder={t('modelSettings.optionalDefault')}
                           onChange={(e) => updateProfile(editProfile.id, { top_p: e.target.value })}
                         />
                       </div>
@@ -616,9 +617,9 @@ export function ModelSettings() {
                     {/* 思考模式开关（默认关；开启后模型先输出思维链再回答，支持 reasoning_content） */}
                     <div className="flex items-center justify-between gap-3 rounded-lg bg-neutral-50 dark:bg-stone-800/50 border border-neutral-200 dark:border-stone-700 px-3 py-2.5">
                       <div className="min-w-0">
-                        <div className="text-[13px] font-medium text-neutral-700 dark:text-stone-200">思考模式（Thinking）</div>
+                        <div className="text-[13px] font-medium text-neutral-700 dark:text-stone-200">{t('modelSettings.thinking')}</div>
                         <div className="text-[11px] text-neutral-500 dark:text-stone-400 mt-0.5 leading-snug">
-                          默认关。开启后模型先输出思维链（reasoning_content）再回答，提升复杂问题准确率；DeepSeek 等推理模型支持，不支持的模型开启可能报错。开启时自动省略 temperature / top_p。
+                          {t('modelSettings.thinkingDesc')}
                         </div>
                       </div>
                       <label className="relative inline-flex items-center cursor-pointer shrink-0">
@@ -644,28 +645,28 @@ export function ModelSettings() {
               disabled={testing}
               className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
             >
-              <TestTube2 size={14} />{testing ? '测试中…' : '测试连接'}
+              <TestTube2 size={14} />{testing ? t('modelSettings.testing') : t('modelSettings.testConn')}
             </button>
             <button
               onClick={handleSave}
               disabled={saving}
               className="btn-press px-4 py-1.5 rounded-lg text-xs font-medium element-primary hover:bg-[var(--element-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {saving ? '保存中…' : '保存全部'}
+              {saving ? t('modelSettings.saving') : t('modelSettings.saveAll')}
             </button>
             <button
               onClick={() => {
-                if (window.confirm('确定恢复当前档案为默认？这将清空该档案已填写的端点 / Key / 模型等。')) {
+                if (window.confirm(t('modelSettings.resetConfirm'))) {
                   resetDefaults();
                 }
               }}
               className="btn-press px-3 py-1.5 rounded-lg text-xs bg-neutral-100 dark:bg-stone-700 text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200 transition-colors flex items-center gap-1.5"
-              title="恢复当前档案默认"
+              title={t('modelSettings.resetTitle')}
             >
-              <RotateCcw size={14} />重置
+              <RotateCcw size={14} />{t('modelSettings.reset')}
             </button>
             {savedAt && (
-              <span className="text-xs text-emerald-500 flex items-center gap-1"><Check size={13} />已保存</span>
+              <span className="text-xs text-emerald-500 flex items-center gap-1"><Check size={13} />{t('modelSettings.saved')}</span>
             )}
             {testMsg && (
               <span className={`text-xs flex items-center gap-1 ${testMsg.ok ? 'text-emerald-500' : 'text-red-500'}`}>

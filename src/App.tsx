@@ -14,6 +14,7 @@ import TransferReceiveModal from '@/components/TransferReceiveModal';
 import { logger } from '@/lib/logger';
 import { api } from '@/lib/api';
 import { invoke } from '@tauri-apps/api/core';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { ensureOverlayWindow } from '@/core/overlayWindow';
 import { listen } from '@tauri-apps/api/event';
@@ -332,19 +333,86 @@ function App() {
   // 挂载即清理可能残留的预览覆盖层（旧版本返回按钮失灵时卡住的全屏层会挡住所有点击）
   useEffect(() => { clearStaleBootPreview(); }, []);
 
+  // 首次运行引导：从未配置过数据存放位置时，引导用户选择（等价于安装时指定位置）
+  useEffect(() => {
+    if (localStorage.getItem('dataRootGuided')) return;
+    const t = window.setTimeout(() => {
+      invoke<boolean>('needs_data_root_setup')
+        .then(async (need) => {
+          if (!need) return;
+          // 已确认需要引导：立即打标记（localStorage + Rust guided 文件），确保询问过一次后不再重复弹窗
+          localStorage.setItem('dataRootGuided', '1');
+          invoke('mark_data_root_guided').catch(() => {});
+          if (window.confirm('欢迎使用安得云荟！建议将数据（笔记/插件/缓存等）存放到非系统盘，避免占用 C 盘。是否现在选择数据存放位置？')) {
+            try {
+              const sel = await openDialog({ directory: true, multiple: false, title: '选择数据存放目录' });
+              if (typeof sel === 'string' && sel) {
+                await invoke('set_data_root', { path: sel });
+                await invoke('restart_app');
+              }
+            } catch {
+              /* 忽略，用户可在设置中调整 */
+            }
+          }
+        })
+        .catch(() => {})
+        .finally(() => localStorage.setItem('dataRootGuided', '1'));
+    }, 1500);
+    return () => window.clearTimeout(t);
+  }, []);
+
   // ====== 全局 effect ======
   // 初始化（「加载页优先」：推后到哥特加载动画稳态之后）
   // 不立即同步跑笔记初始化 + 浮窗监听——否则会与 React 挂载、插件加载在启动头几秒抢占主线程，
   // 导致哥特加载页动画掉帧（用户 Issue 4）。延迟 ~200ms 后执行，此时加载页已流畅播放、且仍盖在上方。
+  // 若发生数据迁移，则延后到 migration-done 再初始化，避免读取半拷贝数据。
   const initCleanupRef = useRef<() => void>(() => {});
+  const initDoneRef = useRef(false);
+  // 迁移进度（null=无迁移/已完成；0~100=进行中，用于加载页上的遮罩）
+  const [migrationPct, setMigrationPct] = useState<number | null>(null);
   useEffect(() => {
-    const t = window.setTimeout(() => {
+    let initTimer: number | undefined;
+    let safetyTimer: number | undefined;
+    const runInit = () => {
+      if (initDoneRef.current) return;
+      initDoneRef.current = true;
+      window.clearTimeout(initTimer);
+      window.clearTimeout(safetyTimer);
       initNotes();
       initCleanupRef.current = initFloatingListeners() || (() => {});
-    }, 200);
+    };
+    const offStart = listen<null>('migration-started', () => {
+      window.clearTimeout(initTimer);
+      setMigrationPct(0);
+      safetyTimer = window.setTimeout(runInit, 5 * 60 * 1000); // 兜底，避免迁移异常导致初始化卡死
+    });
+    const offDone = listen<null>('migration-done', () => {
+      window.clearTimeout(safetyTimer);
+      setMigrationPct(null);
+      runInit();
+    });
+    const offProg = listen<{ percent: number }>('migration-progress', (e) => {
+      setMigrationPct(e.payload.percent);
+    });
+    // 挂载即查询是否正在/即将迁移：若 true 则延后初始化（避免错过 migration-started 事件而提前读半拷贝数据）
+    invoke<boolean>('is_migration_pending')
+      .then((p) => {
+        if (p) {
+          setMigrationPct(0);
+          safetyTimer = window.setTimeout(runInit, 5 * 60 * 1000);
+        } else {
+          initTimer = window.setTimeout(runInit, 200);
+        }
+      })
+      .catch(() => {
+        initTimer = window.setTimeout(runInit, 200);
+      });
     return () => {
-      window.clearTimeout(t);
-      initCleanupRef.current();
+      window.clearTimeout(initTimer);
+      window.clearTimeout(safetyTimer);
+      offStart.then((u) => u());
+      offDone.then((u) => u());
+      offProg.then((u) => u());
     };
   }, [initNotes, initFloatingListeners]);
 
@@ -604,6 +672,21 @@ function App() {
       </div>
       {/* 全局局域网传输接收确认弹窗：独立于任何传输面板，确保任意界面下收到请求都弹确认框 */}
       <TransferReceiveModal />
+      {/* 数据迁移进度遮罩：迁移进行中叠加在加载页之上，避免用户以为卡死 */}
+      {migrationPct !== null && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white dark:bg-stone-800 rounded-2xl px-8 py-6 w-80 shadow-2xl text-center">
+            <div className="text-sm text-neutral-600 dark:text-stone-300 mb-3">正在迁移数据，请稍候…</div>
+            <div className="h-2 rounded-full bg-neutral-200 dark:bg-stone-700 overflow-hidden">
+              <div
+                className="h-full bg-neutral-500 dark:bg-stone-400 transition-all duration-200"
+                style={{ width: `${migrationPct}%` }}
+              />
+            </div>
+            <div className="mt-2 text-xs text-neutral-400 dark:text-stone-500">{migrationPct}%</div>
+          </div>
+        </div>
+      )}
     </PluginHost>
   );
 }

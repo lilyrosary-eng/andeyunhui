@@ -181,6 +181,7 @@ function backToRecording() {
   // 复位结果面板按钮（异常态可能隐藏了保存按钮）
   saveMp4Btn.style.display = "";
   saveGifBtn.style.display = "";
+  cancelBtn.style.display = "";
   cancelBtn.textContent = "取消";
   void setWidgetSize(320, 52);
 }
@@ -194,6 +195,7 @@ function showResult(outputPath: string) {
   resultStatus.textContent = "选择保存格式，或取消丢弃";
   saveMp4Btn.style.display = "";
   saveGifBtn.style.display = "";
+  cancelBtn.style.display = "";
   cancelBtn.textContent = "取消";
   // 录屏结束后控制台可能已被自动隐藏，弹面板时强制唤出并聚焦，确保用户一定看到保存选项
   void getCurrentWindow().show();
@@ -281,10 +283,9 @@ async function saveAsMp4() {
     return;
   }
   try {
-    // 保存期间禁用按钮，避免重复点击；Rust 会立即在中转站显示「保存中」占位
+    // 保存期间仅禁用保存按钮避免重复点击；取消按钮常驻，用户随时可丢弃。
     saveMp4Btn.style.display = "none";
     saveGifBtn.style.display = "none";
-    cancelBtn.style.display = "none";
     resultStatus.textContent = "已存入中转站（保存中…）";
     await invoke("import_to_dropzone", {
       sourcePath: resultPath,

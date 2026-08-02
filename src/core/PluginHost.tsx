@@ -16,6 +16,7 @@ import {
   executeInSandbox,
 } from '@/core/pluginSandbox';
 import { pluginPerformanceMonitor } from '@/core/pluginPerformanceMonitor';
+import { t, translate, getLanguage, LANGUAGES } from '@/lib/i18n';
 import { ModuleSidebarShell } from '@/components/ModuleSidebarShell';
 import { SecondaryNavShell } from '@/components/SecondaryNavShell';
 import { NestedNavList } from '@/components/NestedNavList';
@@ -102,6 +103,9 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
     // 挂载宿主 React 和 API 到全局（仅首次设置，后续不可覆盖）
     const hostApi = { invoke, convertFileSrc, listen, emit, createFrameBuffer };
     const hostUi = { ModuleSidebarShell, SecondaryNavShell, NestedNavList, ModuleSettingsPanel, CollapsibleSearch, IconButton, Icon: PluginIcon, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, Ripple, SlidingTabs, ScrollReveal, PushView, BarChart3 };
+    // i18n：把翻译函数与语言状态注入沙箱，插件通过 window.__HOST_I18N__ 使用
+    // （t/translate 读取宿主侧 currentLang，语言切换由主应用 setLanguage 广播 app-language-change 事件）
+    const hostI18n = { t, translate, getLanguage, LANGUAGES };
     const defNonWritable = (key: string, value: unknown) => {
       Object.defineProperty(window, key, { value, writable: false, configurable: false });
     };
@@ -110,6 +114,7 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
     defNonWritable('__HOST_API__', hostApi);
     defNonWritable('__PLUGIN_REGISTRY__', registry);
     defNonWritable('__HOST_UI__', hostUi);
+    defNonWritable('__HOST_I18N__', hostI18n);
 
     // 先设置 ready，让主界面立即渲染（不依赖插件加载）
     setReady(true);
