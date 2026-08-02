@@ -15,6 +15,27 @@ import React from "react";
 const { useState, useEffect, useCallback, useRef } = React;
 const hostApi = window.__HOST_API__;
 
+// ============ i18n（宿主注入，插件共享）============
+// 宿主在 PluginHost 挂载 window.__HOST_I18N__（t/translate/getLanguage/LANGUAGES）。
+// 语言切换由主应用 setLanguage 广播 app-language-change 事件，useLang 监听后强制重渲染。
+const _I18N = window.__HOST_I18N__ || {};
+
+/** 全局翻译函数（读取宿主当前语言，支持 {var} 插值） */
+export function T(key: string, vars?: Record<string, string | number>): string {
+  try { return _I18N.t ? _I18N.t(key, vars) : key; } catch { return key; }
+}
+
+/** 语言变化时强制重渲染的 hook；返回版本号供 useMemo 依赖重算派生数据 */
+export function useLang(): number {
+  const [v, force] = useState(0);
+  useEffect(() => {
+    const h = () => force(x => x + 1);
+    window.addEventListener('app-language-change', h);
+    return () => window.removeEventListener('app-language-change', h);
+  }, []);
+  return v;
+}
+
 // ============ Hooks ============
 
 /**
@@ -403,7 +424,7 @@ export function EmptyState({ icon, title, description, buttonText, onSelect }: E
           <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
           <path d="M7 11V7a5 5 0 0 1 10 0v4" />
         </svg>
-        仅扫描索引，不会修改原始文件
+        {T('shared.scanIndexOnly')}
       </p>
       <button
         onClick={onSelect}
@@ -426,12 +447,12 @@ export function LoadingState({ progressText, onCancel }: LoadingStateProps) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center h-full gap-3">
       <div className="w-6 h-6 border-2 border-[var(--element-bg)] border-t-transparent rounded-full animate-spin" />
-      <p className="text-sm text-neutral-400 dark:text-stone-500">{progressText || '正在扫描...'}</p>
+      <p className="text-sm text-neutral-400 dark:text-stone-500">{progressText || T('shared.scanning')}</p>
       <button
         onClick={onCancel}
         className="btn-press text-xs text-neutral-400 dark:text-stone-500 hover:text-red-400"
       >
-        取消扫描
+        {T('shared.cancelScan')}
       </button>
     </div>
   );
@@ -447,12 +468,12 @@ interface NoResultsStateProps {
 export function NoResultsState({ text, buttonText, onSelect }: NoResultsStateProps) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center h-full gap-4">
-      <p className="text-sm text-neutral-400 dark:text-stone-500">{text || '未找到内容'}</p>
+      <p className="text-sm text-neutral-400 dark:text-stone-500">{text || T('shared.noContent')}</p>
       <button
         onClick={onSelect}
         className="btn-press text-xs text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200"
       >
-        {buttonText || '更换目录'}
+        {buttonText || T('shared.changeDir')}
       </button>
     </div>
   );

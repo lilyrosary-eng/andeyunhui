@@ -6,6 +6,7 @@ const hostApi = window.__HOST_API__;
 import { musicPlayer } from './musicPlayer';
 import { formatTime } from '../../_shared/utils';
 import { PlusIcon, CheckIcon, MoreIcon, MusicIcon } from '../../_shared/icons';
+import { T, useLang } from '../../_shared/pluginRuntime';
 
 interface Track {
   id: string;
@@ -45,6 +46,7 @@ export function TrackList({
   otherPlaylists = [],
   showAlbum = true,
 }: TrackListProps) {
+  useLang();
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
   // 选择模式：开启后每行显示复选框，行点击切换选中而非播放
   const [selectionMode, setSelectionMode] = useState(false);
@@ -235,12 +237,12 @@ export function TrackList({
         // 子菜单渲染辅助：kind='move' 触发移动，kind='copy' 触发复制（两者互不删除源歌曲的语义不同）
         (() => {
           const renderSubmenuTarget = (kind: 'move' | 'copy') => {
-            const label = kind === 'move' ? '移动到其他歌单' : '复制到其他歌单';
+            const label = kind === 'move' ? T('music.track.moveTo') : T('music.track.copyTo');
             if (otherPlaylists.length === 0) {
               return React.createElement('div', {
                 key: `${kind}-disabled`,
                 className: 'px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500 cursor-not-allowed',
-                children: `${label}（无其他歌单）`,
+                children: `${label}${T('music.track.noOthers')}`,
               });
             }
             return React.createElement('div', {
@@ -287,7 +289,7 @@ export function TrackList({
           key: 'remove',
           onClick: () => handleRemove(track),
           className: 'w-full px-3 py-1.5 text-xs text-left text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors',
-          children: '移除歌曲',
+          children: T('music.track.removeSong'),
         }),
       ],
     });
@@ -303,14 +305,14 @@ export function TrackList({
           <h2 className="text-sm font-medium text-neutral-700 dark:text-stone-200">{playlistName}</h2>
           <span className="text-xs text-neutral-400 dark:text-stone-500">
             {selectionMode && selectedIndices.size > 0
-              ? `已选 ${selectedIndices.size} / ${tracks.length} 首`
-              : `${tracks.length} 首`}
+              ? T('music.track.selected', { sel: selectedIndices.size, total: tracks.length })
+              : T('music.track.count', { n: tracks.length })}
           </span>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={onAddSong} className="btn-press text-xs text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200 px-2 py-1 rounded-lg transition-colors flex items-center gap-1">
             <PlusIcon />
-            添加歌曲
+            {T('music.track.addSong')}
           </button>
           <button
             onClick={toggleSelectionMode}
@@ -319,7 +321,7 @@ export function TrackList({
                 ? 'text-[var(--element-bg)] bg-[var(--element-muted)]'
                 : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200'
             }`}
-            title={selectionMode ? '退出选择模式' : '进入选择模式'}
+            title={selectionMode ? T('music.track.exitSelect') : T('music.track.enterSelect')}
           >
             <CheckIcon />
           </button>
@@ -333,7 +335,7 @@ export function TrackList({
             onClick={toggleSelectAll}
             className="btn-press text-xs px-2.5 py-1 rounded-lg text-neutral-600 dark:text-stone-300 hover:bg-[var(--element-muted)] transition-colors"
           >
-            {allSelected ? '取消全选' : '全选'}
+            {allSelected ? T('music.track.unselectAll') : T('music.track.selectAll')}
           </button>
           <div className="relative">
             <button
@@ -344,12 +346,12 @@ export function TrackList({
                   : 'text-neutral-600 dark:text-stone-300 hover:bg-[var(--element-muted)]'
               }`}
             >
-              批量移动 ▾
+              {T('music.track.batchMove')} ▾
             </button>
             {batchMenu === 'move' && (
               <div className="absolute left-0 top-full mt-1 z-50 glass-panel rounded-lg overflow-y-auto min-w-[160px] max-w-[220px] max-h-[240px] py-1 shadow-lg">
                 {otherPlaylists.length === 0 ? (
-                  <div className="px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500 cursor-not-allowed">无其他歌单</div>
+                  <div className="px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500 cursor-not-allowed">{T('music.track.noOthers')}</div>
                 ) : (
                   otherPlaylists.map(p => (
                     <button
@@ -374,12 +376,12 @@ export function TrackList({
                   : 'text-neutral-600 dark:text-stone-300 hover:bg-[var(--element-muted)]'
               }`}
             >
-              批量复制 ▾
+              {T('music.track.batchCopy')} ▾
             </button>
             {batchMenu === 'copy' && (
               <div className="absolute left-0 top-full mt-1 z-50 glass-panel rounded-lg overflow-y-auto min-w-[160px] max-w-[220px] max-h-[240px] py-1 shadow-lg">
                 {otherPlaylists.length === 0 ? (
-                  <div className="px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500 cursor-not-allowed">无其他歌单</div>
+                  <div className="px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500 cursor-not-allowed">{T('music.track.noOthers')}</div>
                 ) : (
                   otherPlaylists.map(p => (
                     <button
@@ -399,7 +401,7 @@ export function TrackList({
             onClick={handleBatchRemove}
             className="btn-press text-xs px-2.5 py-1 rounded-lg text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
           >
-            批量移除
+            {T('music.track.batchRemove')}
           </button>
         </div>
       )}
@@ -408,7 +410,7 @@ export function TrackList({
         {tracks.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">
             <MusicIcon />
-            <p className="text-sm">该歌单暂无歌曲</p>
+            <p className="text-sm">{T('music.track.empty')}</p>
           </div>
         ) : (
           <div className="divide-y divide-neutral-200/20 dark:divide-stone-700/20">
@@ -474,7 +476,7 @@ export function TrackList({
                     React.createElement('div', {
                       key: 'artist',
                       className: 'text-xs text-neutral-400 dark:text-stone-500 truncate',
-                    }, track.artist || '未知歌手'),
+                    }, track.artist || T('music.unknownArtist')),
                   ),
                   // 专辑列：放宽到 100~180px，未超出时完整显示，超出时省略
                   showAlbum ? React.createElement('div', {
@@ -501,7 +503,7 @@ export function TrackList({
                           ? 'text-neutral-700 dark:text-stone-200 bg-[var(--element-muted)]'
                           : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200'
                       }`,
-                      title: '更多操作',
+                      title: T('music.track.more'),
                     }, React.createElement(MoreIcon)),
                   ),
                 ],

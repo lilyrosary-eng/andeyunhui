@@ -5,6 +5,7 @@ import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
 import { lyricsSync } from './lyricsSync';
 import { formatTime } from '../../_shared/utils';
+import { T, useLang } from '../../_shared/pluginRuntime';
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, VolumeIcon, VolumeMuteIcon,
   ListIcon, SingleIcon, ShuffleIcon, MusicIcon, LyricsIcon, LockIcon, UnlockIcon,
@@ -58,9 +59,9 @@ interface PlayerBarProps {
 }
 
 const ModeLabels: Record<PlayMode, string> = {
-  list: '列表循环',
-  single: '单曲循环',
-  random: '随机播放',
+  list: 'music.player.modeList',
+  single: 'music.player.modeSingle',
+  random: 'music.player.modeRandom',
 };
 
 // ========== 音量悬浮弹出组件 ==========
@@ -131,8 +132,8 @@ function VolumePopup({
     React.createElement(IconButton, {
       onClick: toggleMute,
       title: isMuted
-        ? `已静音（点击恢复 ${Math.round((lastVolumeRef.current || 0.7) * 100)}%）`
-        : `音量 ${Math.round(volume * 100)}%（点击静音）`,
+        ? T('music.player.muted', { pct: Math.round((lastVolumeRef.current || 0.7) * 100) })
+        : T('music.player.volume', { pct: Math.round(volume * 100) }),
       active: showPopup,
       children: React.createElement(isMuted ? VolumeMuteIcon : VolumeIcon),
     }),
@@ -228,7 +229,7 @@ export function PlaylistPopup({
   return React.createElement('div', { className: 'relative', ref },
     React.createElement(IconButton, {
       onClick: () => setOpen(prev => !prev),
-      title: '播放列表',
+      title: T('music.player.playlist'),
       active: open,
       children: React.createElement(ListIcon, { size: 18 }),
     }),
@@ -240,7 +241,7 @@ export function PlaylistPopup({
       React.createElement('div', {
         className: 'px-3 pt-3 pb-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0',
       },
-        React.createElement('div', { className: 'text-xs text-neutral-400 dark:text-stone-500 mb-1' }, '当前播放歌单'),
+        React.createElement('div', { className: 'text-xs text-neutral-400 dark:text-stone-500 mb-1' }, T('music.player.currentPlaylist')),
         React.createElement('select', {
           value: displayPlaylistId ?? '',
           onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDisplayPlaylistId(e.target.value),
@@ -254,7 +255,7 @@ export function PlaylistPopup({
         displayTracks.length === 0
           ? React.createElement('div', {
               className: 'px-3 py-4 text-xs text-neutral-400 dark:text-stone-500 text-center',
-            }, '该歌单暂无歌曲')
+            }, T('music.player.emptyPlaylist'))
           : displayTracks.map((t, i) => {
               const isCurrent = currentTrack?.id === t.id;
               return React.createElement('button', {
@@ -280,6 +281,7 @@ export function PlaylistPopup({
 
 // ========== 播放栏主组件 ==========
 export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volume, onVolumeChange, playMode, onPlayModeChange, onCoverClick, playlists, currentPlaylistId, onSelectTrack }: PlayerBarProps) {
+  useLang();
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   // 歌词可见态初始值取自单例，保证切回音乐模块/重载后仍与浮动窗口一致
@@ -313,7 +315,7 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
     }).then((result) => {
       lyricsSync.setLines(result.lines);
       if (result.lines.length === 0 && lyricsVisible) {
-        hostApi.emit('lyrics-update', { currentLine: '暂无歌词', nextLine: '' }).catch(() => {});
+        hostApi.emit('lyrics-update', { currentLine: T('music.nowPlaying.noLyrics'), nextLine: '' }).catch(() => {});
       }
     }).catch(() => {});
   }, [track.filePath, lyricsVisible]);
@@ -359,7 +361,7 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
       }).then((result) => {
         lyricsSync.setLines(result.lines);
         if (result.lines.length === 0 && newVisible) {
-          hostApi.emit('lyrics-update', { currentLine: '暂无歌词', nextLine: '' }).catch(() => {});
+          hostApi.emit('lyrics-update', { currentLine: T('music.nowPlaying.noLyrics'), nextLine: '' }).catch(() => {});
         }
       }).catch(() => {});
     } else {
@@ -399,7 +401,7 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
         onClick={onCoverClick}
         className="w-14 h-14 rounded-xl overflow-hidden flex-shrink-0 shadow-sm ring-1 ring-black/5 dark:ring-white/5 cursor-pointer hover:ring-2 hover:ring-[var(--element-bg)] transition-all"
         style={{ width: '56px', height: '56px' }}
-        title="查看沉浸播放页"
+        title={T('music.player.immersive')}
       >
         {coverUrl ? (
           React.createElement('img', {
@@ -458,39 +460,39 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
           <div className="flex items-center justify-center gap-5">
           {React.createElement(IconButton, {
             onClick: handlePlayMode,
-            title: ModeLabels[playMode],
+            title: T(ModeLabels[playMode]),
             active: playMode !== 'list',
             children: playMode === 'single' ? React.createElement(SingleIcon) : playMode === 'random' ? React.createElement(ShuffleIcon) : React.createElement(ListIcon),
           })}
 
           {React.createElement(IconButton, {
             onClick: onPrev,
-            title: '上一首',
+            title: T('music.player.prev'),
             children: React.createElement(SkipBackIcon),
           })}
 
           {React.createElement(IconButton, {
             onClick: onTogglePlay,
-            title: isPlaying ? '暂停' : '播放',
+            title: isPlaying ? T('music.player.pause') : T('music.player.play'),
             children: isPlaying ? React.createElement(PauseIcon) : React.createElement(PlayIcon),
           })}
 
           {React.createElement(IconButton, {
             onClick: onNext,
-            title: '下一首',
+            title: T('music.player.next'),
             children: React.createElement(SkipForwardIcon),
           })}
 
           {React.createElement(IconButton, {
             onClick: handleToggleLyrics,
-            title: lyricsVisible ? '关闭歌词' : '打开歌词',
+            title: lyricsVisible ? T('music.player.closeLyrics') : T('music.player.openLyrics'),
             active: lyricsVisible,
             children: React.createElement(LyricsIcon),
           })}
 
           {lyricsVisible && React.createElement(IconButton, {
             onClick: handleToggleLock,
-            title: lyricsLocked ? '解锁歌词' : '锁定歌词',
+            title: lyricsLocked ? T('music.player.unlockLyrics') : T('music.player.lockLyrics'),
             active: lyricsLocked,
             children: lyricsLocked ? React.createElement(LockIcon) : React.createElement(UnlockIcon),
           })}

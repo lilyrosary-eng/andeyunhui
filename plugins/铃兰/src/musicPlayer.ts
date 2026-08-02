@@ -1,4 +1,5 @@
 // 音乐播放器单例 — 在插件 IIFE 作用域内，不依赖宿主
+import { T } from '../../_shared/pluginRuntime';
 // debugLog 现在双写：①直接 console.log（在 WebView DevTools 控制台可见，不经 Rust 桥、
 // 永不被沙箱/ACL 吞掉，是最可靠的排查手段）；②再经 debug_log 命令转发到 Rust 终端。
 const debugLog = (m: string) => {
@@ -142,7 +143,7 @@ class MusicPlayer {
     // 优先用文件名（去路径），再退到「未知曲目」。
     const fallbackTitle = track?.title?.trim()
       ? track.title
-      : (track?.filePath ? track.filePath.split(/[\\/]/).pop()! : '未知曲目');
+      : (track?.filePath ? track.filePath.split(/[\\/]/).pop()! : T('music.unknownTrack'));
     const api = window.__HOST_API__;
     debugLog(`music push title=${fallbackTitle} playing=${this.isPlaying} can_prev=${has} can_next=${has} tracks=${this.tracks.length}`);
     if (!api?.invoke) {

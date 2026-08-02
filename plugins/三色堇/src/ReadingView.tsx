@@ -4,6 +4,7 @@
 // 竖版：单章节滚动，到底部自动下一章
 
 const React = window.__HOST_REACT__;
+import { T, useLang } from '../../_shared/pluginRuntime';
 const { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } = React;
 
 interface ReadingChapter {
@@ -50,6 +51,7 @@ interface ChapterBoundary {
 }
 
 export function ReadingView({ book, onBack, externalChapterIndex, onChapterChange, onScrollProgress, externalScrollPercent, externalPageInChapter, onPageProgress }: ReadingViewProps) {
+  useLang();
   // 分页状态（横板/双栏模式）
   const [absolutePage, setAbsolutePage] = useState(0);
   const [pageCount, setPageCount] = useState(1);
@@ -141,7 +143,7 @@ const lockTransition = useCallback(() => {
     const slice = book.chapters.slice(windowStart, windowEnd);
     return slice.map((ch, i) => {
       const actualIdx = windowStart + i;
-      const title = (ch.title || `第 ${actualIdx + 1} 章`)
+      const title = (ch.title || T('reading.chapterN', { n: actualIdx + 1 }))
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       // 首个窗口章不加 break-before（避免开头出现空白栏）；
       // 其余章节强制从新栏顶开始，保证"xx章"标题恒在栏顶、上一章内容不出现在本页上方，
@@ -708,7 +710,7 @@ const lockTransition = useCallback(() => {
       <div className="h-full flex items-center justify-center bg-[#f5f5f0] dark:bg-[#1c1917]">
         <div className="text-center text-neutral-400 dark:text-stone-500">
           <div className="w-6 h-6 border-2 border-current border-t-transparent rounded-full animate-spin mx-auto mb-2" />
-          <p className="text-sm">正在加载章节...</p>
+          <p className="text-sm">{T('reading.loadingChapters')}</p>
         </div>
       </div>
     );
@@ -720,7 +722,7 @@ const lockTransition = useCallback(() => {
       <div className="shrink-0 px-6 py-3 border-b border-neutral-200/60 dark:border-stone-700/50 flex items-center gap-3">
         <button onClick={onBack}
           className="btn-press w-9 h-9 flex items-center justify-center rounded-xl text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors flex-shrink-0"
-          title="返回书列表">
+          title={T('reading.backToList')}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="15 18 9 12 15 6" />
           </svg>
@@ -730,18 +732,18 @@ const lockTransition = useCallback(() => {
           <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
             {currentChapter?.title || '—'}
             {book.author ? ` · ${book.author}` : ''}
-            {book.chapters.length > 0 ? ` · ${book.chapters.length} 章` : ''}
+            {book.chapters.length > 0 ? T('reading.chapterCountSuffix', { n: book.chapters.length }) : ''}
           </p>
         </div>
         {/* 布局切换 */}
         <div className="flex items-center gap-0.5 rounded-lg bg-black/5 dark:bg-white/10 p-0.5 flex-shrink-0">
-          <button onClick={() => handleSetLayoutMode('horizontal')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'horizontal' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title="横板：单页左右翻">
+          <button onClick={() => handleSetLayoutMode('horizontal')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'horizontal' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title={T('reading.layoutHorizontal')}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="18" rx="1"/><rect x="14" y="3" width="7" height="18" rx="1"/></svg>
           </button>
-          <button onClick={() => handleSetLayoutMode('vertical')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'vertical' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title="竖版：连贯滚轮上下翻">
+          <button onClick={() => handleSetLayoutMode('vertical')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'vertical' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title={T('reading.layoutVertical')}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 2v20"/><path d="M16 2v20"/><line x1="2" y1="6" x2="22" y2="6"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="18" x2="22" y2="18"/></svg>
           </button>
-          <button onClick={() => handleSetLayoutMode('book')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'book' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title="双栏：仿真书左右对页">
+          <button onClick={() => handleSetLayoutMode('book')} className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${layoutMode === 'book' ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`} title={T('reading.layoutBook')}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           </button>
         </div>
@@ -763,8 +765,8 @@ const lockTransition = useCallback(() => {
             {/* 翻页热区 */}
             {!dragging && (
               <>
-                {canPrev && <button aria-label="上一页" onClick={prevPage} className="absolute left-0 top-0 bottom-0 w-[10%] z-10 cursor-w-resize bg-transparent" />}
-                {canNext && <button aria-label="下一页" onClick={nextPage} className="absolute right-0 top-0 bottom-0 w-[10%] z-10 cursor-e-resize bg-transparent" />}
+                {canPrev && <button aria-label={T('reading.prevPage')} onClick={prevPage} className="absolute left-0 top-0 bottom-0 w-[10%] z-10 cursor-w-resize bg-transparent" />}
+                {canNext && <button aria-label={T('reading.nextPage')} onClick={nextPage} className="absolute right-0 top-0 bottom-0 w-[10%] z-10 cursor-e-resize bg-transparent" />}
               </>
             )}
             {/* 双栏模式：所有章节拼接渲染 */}
@@ -839,15 +841,15 @@ const lockTransition = useCallback(() => {
         <div className="shrink-0 px-6 py-2.5 border-t border-neutral-200/60 dark:border-stone-700/50 flex items-center justify-between gap-4">
           <button onClick={goPrevChapter} disabled={renderChapterIndex === 0} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
-            上一章
+            {T('reading.prevChapter')}
           </button>
           <div className="flex items-center gap-2 text-xs text-neutral-400 dark:text-stone-500 min-w-0">
             <span className="tabular-nums">{pageInChapterDisplay} / {chapterPageCount}</span>
             <span className="text-neutral-300 dark:text-stone-600">·</span>
-            <span className="truncate">{renderChapterIndex + 1} / {book.chapters.length} 章</span>
+            <span className="truncate">{T('reading.chapterPos', { c: renderChapterIndex + 1, total: book.chapters.length })}</span>
           </div>
           <button onClick={goNextChapter} disabled={renderChapterIndex === book.chapters.length - 1} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
-            下一章
+            {T('reading.nextChapter')}
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
           </button>
         </div>
@@ -858,15 +860,15 @@ const lockTransition = useCallback(() => {
         <div className="shrink-0 px-6 py-2.5 border-t border-neutral-200/60 dark:border-stone-700/50 flex items-center justify-between gap-4">
           <button onClick={goPrevChapter} disabled={displayedChapter === 0} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
-            上一章
+            {T('reading.prevChapter')}
           </button>
           <div className="flex items-center gap-2 text-xs text-neutral-400 dark:text-stone-500 min-w-0">
             <span className="tabular-nums">{verticalScrollProgress}%</span>
             <span className="text-neutral-300 dark:text-stone-600">·</span>
-            <span className="tabular-nums flex-shrink-0">{displayedChapter + 1} / {book.chapters.length} 章</span>
+            <span className="tabular-nums flex-shrink-0">{T('reading.chapterPos', { c: displayedChapter + 1, total: book.chapters.length })}</span>
           </div>
           <button onClick={goNextChapter} disabled={displayedChapter >= book.chapters.length - 1} className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
-            下一章
+            {T('reading.nextChapter')}
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
           </button>
         </div>

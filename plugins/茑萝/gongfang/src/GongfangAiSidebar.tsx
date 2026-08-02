@@ -1,4 +1,5 @@
 /// <reference path="../../../global.d.ts" />
+import { marked } from 'marked';
 // 茑萝 · 攻防 AI 指挥官（侧边栏）
 // 职责：AI 对话控制枢纽，可调度五大框架，也支持纯人工快速指令
 // 设计：复用全局 ai_chat 流式接口 + <cmd> 标签自动执行（ReAct 式 agent 循环）
@@ -28,6 +29,58 @@ interface ChatMsg {
   content: string;
   streaming?: boolean;
   error?: boolean;
+}
+
+// Markdown 渲染：AI 与用户消息中的 # 标题、**加粗**、*斜体*、`代码`、列表、引用、链接等字符
+// 激活对应效果（gfm + 单行换行转 <br>，贴合聊天换行习惯）。样式只注入一次。
+const MD_CSS = `
+.niaoluo-md { font-size: inherit; line-height: 1.6; word-break: break-word; }
+.niaoluo-md > :first-child { margin-top: 0; }
+.niaoluo-md > :last-child { margin-bottom: 0; }
+.niaoluo-md p { margin: 0 0 0.5em; }
+.niaoluo-md h1, .niaoluo-md h2, .niaoluo-md h3, .niaoluo-md h4 { margin: 0.6em 0 0.3em; font-weight: 600; line-height: 1.3; }
+.niaoluo-md h1 { font-size: 1.35em; } .niaoluo-md h2 { font-size: 1.2em; } .niaoluo-md h3 { font-size: 1.08em; } .niaoluo-md h4 { font-size: 1em; }
+.niaoluo-md ul, .niaoluo-md ol { margin: 0.3em 0 0.6em; padding-left: 1.4em; }
+.niaoluo-md ul { list-style: disc; } .niaoluo-md ol { list-style: decimal; }
+.niaoluo-md li { margin: 0.15em 0; }
+.niaoluo-md li > ul, .niaoluo-md li > ol { margin: 0.15em 0; }
+.niaoluo-md a { color: var(--element-bg); text-decoration: underline; }
+.niaoluo-md code { background: rgba(127,127,127,0.18); padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.9em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.niaoluo-md pre { background: rgba(127,127,127,0.12); padding: 0.6em 0.8em; border-radius: 8px; overflow-x: auto; margin: 0.4em 0; }
+.niaoluo-md pre code { background: none; padding: 0; }
+.niaoluo-md blockquote { border-left: 3px solid rgba(127,127,127,0.4); margin: 0.4em 0; padding: 0.1em 0.8em; opacity: 0.85; }
+.niaoluo-md hr { border: none; border-top: 1px solid rgba(127,127,127,0.3); margin: 0.6em 0; }
+.niaoluo-md table { border-collapse: collapse; margin: 0.4em 0; font-size: 0.92em; }
+.niaoluo-md th, .niaoluo-md td { border: 1px solid rgba(127,127,127,0.3); padding: 0.25em 0.5em; }
+`;
+let mdStyleInjected = false;
+function ensureMdStyle() {
+  if (mdStyleInjected) return;
+  if (typeof document !== 'undefined' && !document.getElementById('niaoluo-md-style')) {
+    const s = document.createElement('style');
+    s.id = 'niaoluo-md-style';
+    s.textContent = MD_CSS;
+    document.head.appendChild(s);
+  }
+  mdStyleInjected = true;
+}
+function mdHtml(t: string): string {
+  try {
+    return marked.parse(t, { gfm: true, breaks: true, async: false }) as string;
+  } catch {
+    return t;
+  }
+}
+function Markdown({ text, className }: { text: string; className?: string }) {
+  useEffect(() => {
+    ensureMdStyle();
+  }, []);
+  return (
+    <div
+      className={'niaoluo-md ' + (className || '')}
+      dangerouslySetInnerHTML={{ __html: mdHtml(text) }}
+    />
+  );
 }
 
 interface AiProfile {
@@ -863,7 +916,9 @@ export function GongfangAiSidebar() {
                 : 'bg-white dark:bg-stone-800 border border-black/5 dark:border-stone-700/50 text-[var(--element-bg)]'
             }`}>
               {m.streaming && <span className="inline-block w-1 h-3 ml-0.5 align-middle bg-[var(--element-bg)] animate-pulse" />}
-              <span className="whitespace-pre-wrap break-words">{m.content}</span>
+              {m.role === 'tool'
+                ? <span className="whitespace-pre-wrap break-words">{m.content}</span>
+                : <Markdown text={m.content} className="whitespace-pre-wrap break-words" />}
             </div>
           </div>
         ))}

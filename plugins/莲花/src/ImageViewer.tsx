@@ -1,6 +1,7 @@
 /* eslint-disable */
 /// <reference path="../../global.d.ts" />
 import React from "react";
+import { T, useLang } from '../../_shared/pluginRuntime';
 // 图片查看器 — 四种查看模式
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
@@ -20,16 +21,17 @@ interface ImageViewerProps {
 }
 
 const ModeLabels: Record<ViewMode, string> = {
-  'full': '完整',
-  'vertical': '竖版',
-  'horizontal-forward': '横版正',
-  'horizontal-reverse': '横版反',
+  'full': 'image.viewer.full',
+  'vertical': 'image.viewer.vertical',
+  'horizontal-forward': 'image.viewer.hForward',
+  'horizontal-reverse': 'image.viewer.hReverse',
 };
 
 const MODES: ViewMode[] = ['full', 'vertical', 'horizontal-forward', 'horizontal-reverse'];
 
 // ========== 主组件 ==========
 export function ImageViewer({ folderPath, folderName, onBack, initialPath }: ImageViewerProps) {
+  useLang();
   const [images, setImages] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('full');
@@ -142,7 +144,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <p className="text-sm text-neutral-400 dark:text-stone-500">加载中...</p>
+        <p className="text-sm text-neutral-400 dark:text-stone-500">{T('image.viewer.loading')}</p>
       </div>
     );
   }
@@ -150,9 +152,9 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   if (images.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-4">
-        <p className="text-sm text-neutral-400 dark:text-stone-500">该文件夹没有图片</p>
+        <p className="text-sm text-neutral-400 dark:text-stone-500">{T('image.viewer.noImages')}</p>
         <button onClick={onBack} className="btn-press text-xs text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200">
-          ← 返回
+          {T('image.back')}
         </button>
       </div>
     );
@@ -185,7 +187,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
                   ? 'bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-200 shadow-sm'
                   : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'
               }`}
-              title={ModeLabels[mode]}
+              title={T(ModeLabels[mode])}
             >
               <ModeIcon mode={mode} />
             </button>
@@ -335,7 +337,7 @@ function FullView({
       )}
 
       {imgError ? (
-        <div className="text-neutral-300 dark:text-stone-600 text-sm">图片加载失败</div>
+        <div className="text-neutral-300 dark:text-stone-600 text-sm">{T('image.viewer.loadFailed')}</div>
       ) : (
         <img
           src={isCurrentGif ? (gifDataUrl || currentUrl) : currentUrl}
@@ -360,7 +362,7 @@ function VerticalView({ imgUrls, scrollRef }: { imgUrls: string[]; scrollRef: Re
         {imgUrls.map((url, i) => (
           <div key={i} className="w-full flex justify-center" style={isGif(url) ? undefined : { contentVisibility: 'auto', containIntrinsicSize: 'auto 300px' }}>
             {imgErrors[i] ? (
-              <div className="w-full h-48 flex items-center justify-center text-neutral-300 dark:text-stone-600 text-sm">图片加载失败</div>
+              <div className="w-full h-48 flex items-center justify-center text-neutral-300 dark:text-stone-600 text-sm">{T('image.viewer.loadFailed')}</div>
             ) : (
               <img
                 src={url}
@@ -398,7 +400,7 @@ function HorizontalView({
         {imgUrls.map((url, i) => (
           <div key={i} className="h-full flex items-center justify-center flex-shrink-0" style={isGif(url) ? { minWidth: '60vw' } : { minWidth: '60vw', contentVisibility: 'auto', containIntrinsicSize: 'auto 60vw 90vh' }}>
             {imgErrors[i] ? (
-              <div className="w-60 h-full flex items-center justify-center text-neutral-300 dark:text-stone-600 text-sm">图片加载失败</div>
+              <div className="w-60 h-full flex items-center justify-center text-neutral-300 dark:text-stone-600 text-sm">{T('image.viewer.loadFailed')}</div>
             ) : (
               <img
                 src={url}

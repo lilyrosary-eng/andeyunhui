@@ -3,6 +3,7 @@
 // 第一层：嵌套目录树（母目录 + 子目录 + 书籍）
 // 第二层：选中书后切换为章节目录（点击章节在主区域跳转）
 const React = window.__HOST_REACT__;
+import { T, useLang } from '../../_shared/pluginRuntime';
 const { useMemo, useState } = React;
 const { ModuleSidebarShell, NestedNavList, BarChart3 } = window.__HOST_UI__ || {};
 
@@ -265,6 +266,7 @@ function ChapterIcon() {
 
 // ========== 侧边栏主组件 ==========
 export function ReadingSidebar(props: ReadingSidebarProps) {
+  useLang();
   const {
     books, currentFilePath, openingFilePath,
     searchQuery, onSearchChange,
@@ -276,10 +278,20 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
   // 侧边栏第三个按钮：阅读统计（列出全部书籍，无需先打开某本书）
   const statsButton = React.createElement('button', {
     onClick: () => onOpenStats(),
-    title: '统计',
-    'aria-label': '统计',
+    title: T('reading.sidebar.stats'),
+    'aria-label': T('reading.sidebar.stats'),
     className: 'p-2 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
   }, BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊');
+
+  // Hooks 必须全部位于任何条件 return 之前（React 规则），
+  // 否则点击书籍（currentBook 从 null 变有值）会提前 return 导致 "Rendered fewer hooks than expected"
+  const { rootBooks, rootDirs } = useMemo(() => buildTree(books), [books]);
+  const hasDirs = rootDirs.length > 0;
+  const filteredRootBooks = useMemo(() => {
+    if (!searchQuery.trim()) return rootBooks;
+    const q = searchQuery.trim().toLowerCase();
+    return rootBooks.filter(b => b.title.toLowerCase().includes(q));
+  }, [rootBooks, searchQuery]);
 
   // ====== 第二层：章节目录（选中书后显示）======
   // 使用 NestedNavList 模板：返回按钮在内容区顶部（不占用 primaryAction 导入按钮），
@@ -287,24 +299,24 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
   if (currentBook) {
     const chapterLayers = currentBook.chapters.length === 0
       ? [
-          { title: '书列表' },
+          { title: T('reading.sidebar.bookList') },
           { title: currentBook.title, children: React.createElement('div', {
               className: 'flex items-center justify-center py-12 text-xs text-neutral-400 dark:text-stone-500',
             },
               React.createElement('div', {
                 className: 'w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin mr-2',
               }),
-              '正在加载章节...',
+              T('reading.loadingChapters'),
             ) },
         ]
       : [
-          { title: '书列表' },
+          { title: T('reading.sidebar.bookList') },
           {
             title: currentBook.title,
             items: currentBook.chapters.map((ch, i) => ({
               id: String(i),
               icon: React.createElement(ChapterIcon),
-              title: `${i + 1}. ${ch.title || '第 ' + (i + 1) + ' 章'}`,
+              title: `${i + 1}. ${ch.title || T('reading.chapterN', { n: i + 1 })}`,
               active: i === currentChapterIndex,
             })),
           },
@@ -320,7 +332,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
           React.createElement('button', {
             onClick: onBackToBooks,
             className: 'w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-stone-400 mb-1',
-          }, '← 返回书列表'),
+          }, T('reading.backToList')),
           React.createElement('div', { className: 'space-y-0.5' },
             ...currentBook.chapters.map((ch, i) => React.createElement('button', {
               key: ch.id || i,
@@ -334,7 +346,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
               React.createElement('span', { className: 'flex-shrink-0 opacity-60' }, React.createElement(ChapterIcon)),
               React.createElement('span', { className: 'flex-1 truncate' },
                 React.createElement('span', { className: 'text-[10px] text-neutral-400 dark:text-stone-500 mr-1.5' }, `${i + 1}.`),
-                ch.title || `第 ${i + 1} 章`,
+                ch.title || T('reading.chapterN', { n: i + 1 }),
               ),
             )),
           ),
@@ -349,7 +361,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
           footerExtra: statsButton,
           searchQuery: '',
           onSearchChange: () => {},
-          searchPlaceholder: `${currentBook.chapters.length} 章`,
+          searchPlaceholder: T('reading.chapterCount', { n: currentBook.chapters.length }),
           // 不使用 primaryAction —— 返回按钮由 NestedNavList 内容区提供（与视频模块一致）
           children: nestedContent,
         })
@@ -357,15 +369,6 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
   }
 
   // ====== 第一层：书籍列表（默认）======
-  const { rootBooks, rootDirs } = useMemo(() => buildTree(books), [books]);
-  const hasDirs = rootDirs.length > 0;
-
-  const filteredRootBooks = useMemo(() => {
-    if (!searchQuery.trim()) return rootBooks;
-    const q = searchQuery.trim().toLowerCase();
-    return rootBooks.filter(b => b.title.toLowerCase().includes(q));
-  }, [rootBooks, searchQuery]);
-
   const isSearching = searchQuery.trim().length > 0;
   const totalBooks = books.length;
 
@@ -376,7 +379,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
       childrenParts.push(React.createElement('div', {
         key: 'root-header',
         className: 'px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400 dark:text-stone-500',
-      }, `📚 根目录 · ${filteredRootBooks.length} 本`));
+      }, T('reading.sidebar.root', { n: filteredRootBooks.length })));
     }
     for (const book of filteredRootBooks) {
       const isCurrent = currentFilePath === book.filePath;
@@ -415,7 +418,7 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
   if (totalBooks === 0) {
     childrenParts.push(React.createElement('div', {
       className: 'flex-1 flex items-center justify-center text-xs text-neutral-400 dark:text-stone-500 py-8',
-    }, '暂无书籍'));
+    }, T('reading.sidebar.noBooks')));
   }
 
   const treeContent = React.createElement('div', { className: 'space-y-0.5' },
@@ -429,13 +432,13 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
     ? React.createElement(ModuleSidebarShell, {
         moduleId: 'reading',
         icon: React.createElement(BookIcon),
-        title: '三色堇',
+        title: T('reading.title'),
         onOpenModuleSettings: onOpenSettings,
         footerExtra: statsButton,
         searchQuery,
         onSearchChange,
-        searchPlaceholder: `搜索 ${totalBooks} 本书...`,
-        primaryAction: { label: '+ 选择根目录', onClick: onChangeRoot },
+    searchPlaceholder: T('reading.sidebar.search', { n: totalBooks }),
+    primaryAction: { label: T('reading.sidebar.chooseRoot'), onClick: onChangeRoot },
         children: wrappedList,
       })
     : null;

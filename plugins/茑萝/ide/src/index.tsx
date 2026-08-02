@@ -1,5 +1,21 @@
 /// <reference path="../../../global.d.ts" />
+import { marked } from 'marked';
 // 茑萝 · IDE 子插件（专业代码编辑器）
+// 模块化拆分（边做功能边拆分）：explorer/commandPalette 抽到 modules/，通过 ideShared 通信
+import { ideShared } from './modules/shared';
+import { IdeSidebar } from './modules/ideSidebar';
+import { CommandPalette, type PaletteCommand } from './modules/commandPalette';
+// Agent 工具系统增强（阶段二）：权限引擎 + 工具注册表 + 计划模式 + 子代理
+// 工具元数据与系统提示词（generateToolSystemPrompt/BUILTIN_TOOLS）暂用本地 SYSTEM_PROMPT，仅引入子代理运行器
+import { runSubAgent } from './modules/agent/tools';
+import { getRolesIndex } from './modules/agent/subagentRoles';
+import { parsePlanXml, PlanModePanel, EMPTY_PLAN, type PlanState, type PlanStep } from './modules/agent/planMode';
+// 权限引擎：逐工具规则（alwaysAllow/alwaysAsk/alwaysDeny）覆盖 PermissionMode 默认行为
+import { loadPermissionOverrides } from './modules/agent/permissions';
+// 技能系统（阶段五）：SKILL.md 渐进式披露——索引注入 system prompt + <skill> 工具按需加载全文
+import { SkillRegistry, loadBuiltinSkills, discoverProjectSkills, mergeSkills } from './modules/agent/skills';
+// 真 PTY 终端（阶段四）：portable-pty 后端 + xterm.js 前端，替换原一次性命令终端 IdeTerminal
+import { IdePtyTerminal } from './modules/terminal';
 // 内核：CodeMirror 6（按需从 external-deps/茑萝/ide/codemirror 加载，不进插件包，保持本体轻量）。
 // 功能：多标签页、查找/替换、状态栏、最近文件、主题/自动换行切换。
 // 不提供降级编辑器：若内核加载失败，给出明确错误与构建提示。
@@ -14,6 +30,58 @@ const hostApi = window.__HOST_API__ as unknown as {
 };
 const registry = (window as any).__PLUGIN_REGISTRY__;
 const { useState, useRef, useCallback, useEffect, useMemo } = React;
+
+// Markdown 渲染：AI 与用户消息中的 # 标题、**加粗**、*斜体*、`代码`、列表、引用、链接等字符
+// 激活对应效果（gfm + 单行换行转 <br>，贴合聊天换行习惯）。样式只注入一次。
+const MD_CSS = `
+.niaoluo-md { font-size: inherit; line-height: 1.6; word-break: break-word; }
+.niaoluo-md > :first-child { margin-top: 0; }
+.niaoluo-md > :last-child { margin-bottom: 0; }
+.niaoluo-md p { margin: 0 0 0.5em; }
+.niaoluo-md h1, .niaoluo-md h2, .niaoluo-md h3, .niaoluo-md h4 { margin: 0.6em 0 0.3em; font-weight: 600; line-height: 1.3; }
+.niaoluo-md h1 { font-size: 1.35em; } .niaoluo-md h2 { font-size: 1.2em; } .niaoluo-md h3 { font-size: 1.08em; } .niaoluo-md h4 { font-size: 1em; }
+.niaoluo-md ul, .niaoluo-md ol { margin: 0.3em 0 0.6em; padding-left: 1.4em; }
+.niaoluo-md ul { list-style: disc; } .niaoluo-md ol { list-style: decimal; }
+.niaoluo-md li { margin: 0.15em 0; }
+.niaoluo-md li > ul, .niaoluo-md li > ol { margin: 0.15em 0; }
+.niaoluo-md a { color: var(--element-bg); text-decoration: underline; }
+.niaoluo-md code { background: rgba(127,127,127,0.18); padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.9em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.niaoluo-md pre { background: rgba(127,127,127,0.12); padding: 0.6em 0.8em; border-radius: 8px; overflow-x: auto; margin: 0.4em 0; }
+.niaoluo-md pre code { background: none; padding: 0; }
+.niaoluo-md blockquote { border-left: 3px solid rgba(127,127,127,0.4); margin: 0.4em 0; padding: 0.1em 0.8em; opacity: 0.85; }
+.niaoluo-md hr { border: none; border-top: 1px solid rgba(127,127,127,0.3); margin: 0.6em 0; }
+.niaoluo-md table { border-collapse: collapse; margin: 0.4em 0; font-size: 0.92em; }
+.niaoluo-md th, .niaoluo-md td { border: 1px solid rgba(127,127,127,0.3); padding: 0.25em 0.5em; }
+`;
+let mdStyleInjected = false;
+function ensureMdStyle() {
+  if (mdStyleInjected) return;
+  if (typeof document !== 'undefined' && !document.getElementById('niaoluo-md-style')) {
+    const s = document.createElement('style');
+    s.id = 'niaoluo-md-style';
+    s.textContent = MD_CSS;
+    document.head.appendChild(s);
+  }
+  mdStyleInjected = true;
+}
+function mdHtml(t: string): string {
+  try {
+    return marked.parse(t, { gfm: true, breaks: true, async: false }) as string;
+  } catch {
+    return t;
+  }
+}
+function Markdown({ text, className }: { text: string; className?: string }) {
+  useEffect(() => {
+    ensureMdStyle();
+  }, []);
+  return (
+    <div
+      className={'niaoluo-md ' + (className || '')}
+      dangerouslySetInnerHTML={{ __html: mdHtml(text) }}
+    />
+  );
+}
 
 // ============ CodeMirror 懒加载（与插件沙箱同源：read_external_dep_file + new Function） ============
 interface CM {
@@ -986,7 +1054,10 @@ type HookName =
   | 'beforeWrite' | 'afterWrite'
   | 'beforeEdit' | 'afterEdit'
   | 'beforeRead' | 'afterRead'
-  | 'beforeCommit';
+  | 'beforeCommit'
+  | 'beforeMcp' | 'afterMcp'        // MCP 外部工具调用（A2）
+  | 'beforeSubagent' | 'afterSubagent' // 子代理启动（A2）
+  | 'onToolError';                   // 工具执行失败（A1，对齐 hooks.rs::PostToolUseFailure）
 
 interface HookResult {
   cancel?: boolean;       // 拦截该操作
@@ -2008,6 +2079,9 @@ function extractDirectives(raw: string): {
   mcps: { tool: string; args: any; approval: string | null }[];
   searches: string[];
   rags: string[];
+  plans: PlanStep[];
+  subagents: { task: string; role: string | null; approval: string | null }[];
+  skills: string[];
   done: boolean;
   cleaned: string;
 } {
@@ -2102,6 +2176,26 @@ function extractDirectives(raw: string): {
     mcpSeen.add(key);
     mcps.push({ tool, args, approval: extractApprovalAttr(m[0]) });
   }
+  // <plan><step>…</step></plan>：解析为结构化计划步骤（planMode.tsx）
+  const plans: PlanStep[] = parsePlanXml(raw) || [];
+  // <subagent task="..." role="..."/>：子代理任务（可选 role 加载预设角色）
+  const subagentRe = /<subagent\b[^>]*\btask=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g;
+  const subagents: { task: string; role: string | null; approval: string | null }[] = [];
+  while ((m = subagentRe.exec(raw)) !== null) {
+    const t = decodeXmlEntities(m[1] || m[2] || '').trim();
+    if (t) {
+      const roleMatch = m[0].match(/\brole=(?:"([^"]*)"|'([^']*)')/);
+      const role = roleMatch ? decodeXmlEntities(roleMatch[1] || roleMatch[2] || '').trim() : null;
+      subagents.push({ task: t, role, approval: extractApprovalAttr(m[0]) });
+    }
+  }
+  // <skill name="..."/>：加载技能完整指南到上下文（渐进式披露，对齐 agent-skills-main）
+  const skillRe = /<skill\b[^>]*\bname=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g;
+  const skills: string[] = [];
+  while ((m = skillRe.exec(raw)) !== null) {
+    const n = decodeXmlEntities(m[1] || m[2] || '').trim();
+    if (n) skills.push(n);
+  }
   const done = /<done\s*\/?>/.test(raw);
   const cleaned = raw
     .replace(/<read\b[^>]*\bpath=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g, (_mm, a, b) => '🔍 读取 ' + decodeXmlEntities(a || b || ''))
@@ -2114,10 +2208,13 @@ function extractDirectives(raw: string): {
     .replace(/<rag\b[^>]*\bquery=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g, (_mm, a, b) => '📚 知识库 ' + decodeXmlEntities(a || b || ''))
     .replace(/<mcp\b[^>]*\btool=(?:"([^"]*)"|'([^']*)')[^>]*>[\s\S]*?<\/mcp>/g, (_mm, a, b) => '🔌 MCP ' + decodeXmlEntities(a || b || ''))
     .replace(/<mcp\b[^>]*\btool=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g, (_mm, a, b) => '🔌 MCP ' + decodeXmlEntities(a || b || ''))
+    .replace(/<plan\b[^>]*>[\s\S]*?<\/plan>/g, (_mm) => '📋 计划已制定')
+    .replace(/<subagent\b[^>]*\btask=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g, (_mm, a, b) => '🤖 子代理 ' + decodeXmlEntities(a || b || ''))
+    .replace(/<skill\b[^>]*\bname=(?:"([^"]*)"|'([^']*)')[^>]*\/?>/g, (_mm, a, b) => '🎯 技能 ' + decodeXmlEntities(a || b || ''))
     .replace(/<done\s*\/?>/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  return { reads, writes, edits, shells, asts, mcps, searches, rags, done, cleaned };
+  return { reads, writes, edits, shells, asts, mcps, searches, rags, plans, subagents, skills, done, cleaned };
 }
 
 // 去掉模型在 <write>/<old>/<new> 内容外层误套的 ```lang ... ``` 代码围栏，并裁掉模型常包进去的整行空白，避免污染/错位
@@ -2377,10 +2474,11 @@ function CmEditor({
 }
 
 // ============ 跨组件共享：侧边栏 → 编辑器打开文件 ============
-let addFileTab: ((path: string, content: string) => void) | null = null;
+// 已迁移至 modules/shared.ts 的 ideShared 对象（FileExplorer 与 IdeEditor 独立渲染，靠它通信）
+// 下方代码通过 ideShared.addFileTab / ideShared.projectRoot 访问。
 
 // ============ 跨组件共享：当前打开的项目根目录（供 AI 编程关联，#12） ============
-let projectRoot: string | null = null;
+// 已迁移至 ideShared.projectRoot（由 FileExplorer 设置，此处通过 ideShared 读取）
 
 // IdeEditor 与 IdeAgent 为相互独立的组件：IdeEditor 的写盘守卫需把「括号不平衡」警告推给 IdeAgent 的会话，用模块级桥接函数打通
 let _agentWarnHandler: ((msg: string) => void) | null = null;
@@ -2412,7 +2510,7 @@ function IdeEditor() {
   const [hasAi, setHasAi] = useState(false);
 
   // 当前打开的项目根（供 AI 编程关联，#12）
-  const [projRoot, setProjRoot] = useState<string | null>(projectRoot);
+  const [projRoot, setProjRoot] = useState<string | null>(ideShared.projectRoot);
 
   // 每个子模块自己的设置（#13）：IDE 模块设置，localStorage 持久化
   const [ideSettings, setIdeSettings] = useState<IdeSettingsData>(loadIdeSettings);
@@ -2441,7 +2539,14 @@ function IdeEditor() {
   const suppressDirty = useRef<boolean>(false);
   const tabsRef = useRef<Tab[]>([]);
   tabsRef.current = tabs;
+  // recentRef 同步 recent 状态，供 ideShared.recentFiles（命令面板 MRU 排序）读取最新值
+  const recentRef = useRef<string[]>([]);
+  recentRef.current = recent;
   const activeTab = tabs.find((t) => t.id === activeId) || null;
+
+  // 命令面板（Ctrl+P 文件快速打开 / Ctrl+Shift+P 命令模式）
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteMode, setPaletteMode] = useState<'files' | 'commands'>('files');
 
   // 挂载时尝试加载 CodeMirror
   useEffect(() => {
@@ -2662,16 +2767,18 @@ function IdeEditor() {
     setSavedFlash(false);
   }, [activeId]);
 
-  // 注册侧边栏打开文件回调
+  // 注册侧边栏打开文件回调（迁移至 ideShared，供 FileExplorer/CommandPalette 调用）
   useEffect(() => {
-    addFileTab = (p, content) => {
+    ideShared.addFileTab = (p, content) => {
       const id = 'f_' + Date.now().toString(36);
       setTabs((prev) => [...prev, { id, path: p, name: baseName(p), doc: content, lang: 'auto', dirty: false }]);
       setRecent((prev) => [p, ...prev.filter((x) => x !== p)].slice(0, 12));
       activateTab(id);
       setStatus('已打开：' + baseName(p));
     };
-    return () => { addFileTab = null; };
+    // 暴露最近文件列表给命令面板 MRU 排序
+    ideShared.recentFiles = () => recentRef.current;
+    return () => { ideShared.addFileTab = null; ideShared.recentFiles = null; };
   }, []);
 
   const activateTab = useCallback((id: string) => {
@@ -2820,14 +2927,22 @@ function IdeEditor() {
     return () => el.removeEventListener('wheel', onWheel);
   }, [tabs.length]);
 
-  // 全局快捷键：Ctrl/Cmd+F 查找、Ctrl/Cmd+H 替换、Ctrl/Cmd+S 保存、Ctrl/Cmd+Shift+S 另存为
+  // 全局快捷键：Ctrl/Cmd+P 命令面板、Ctrl/Cmd+Shift+P 命令模式、
+  // Ctrl/Cmd+F 查找、Ctrl/Cmd+H 替换、Ctrl/Cmd+S 保存、Ctrl/Cmd+Shift+S 另存为
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
+      const k = e.key.toLowerCase();
+      // Ctrl+P / Ctrl+Shift+P：命令面板（无需编辑器就绪，打开即可）
+      if (k === 'p') {
+        e.preventDefault();
+        setPaletteMode(e.shiftKey ? 'commands' : 'files');
+        setPaletteOpen(true);
+        return;
+      }
       const v = viewRef.current;
       if (!v || !cm) return;
-      const k = e.key.toLowerCase();
       if (k === 'f') { e.preventDefault(); cm.openSearchPanel(v); }
       else if (k === 'h') { e.preventDefault(); cm.openReplacePanel(v); }
       else if (k === 's') { e.preventDefault(); if (e.shiftKey) saveAs(); else save(); }
@@ -2875,7 +2990,7 @@ function IdeEditor() {
       try {
         const res: any = await hostApi.invoke<any>('lsp_diagnostics', {
           path: activeTab.path,
-          projectRoot: projectRoot || undefined,
+          projectRoot: ideShared.projectRoot || undefined,
         });
         if (cancelled) return;
         const diags: Problem[] = (res?.diagnostics || []).map((d: any) => ({
@@ -2900,7 +3015,7 @@ function IdeEditor() {
       }
     }, 1000); // 1s 防抖：避免快速切换 tab 时频繁触发
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [activeTab?.path, projectRoot]);
+  }, [activeTab?.path, ideShared.projectRoot]);
 
   // 点击问题条目：将编辑器滚动并定位到对应行（仅滚动，不强行改写选区，稳定优先）
   const gotoProblem = useCallback((p: Problem) => {
@@ -2914,6 +3029,36 @@ function IdeEditor() {
     view.focus();
   }, [cm]);
 
+
+  // 命令面板：从路径打开文件（读内容 → ideShared.addFileTab 添加标签页）
+  const openFileFromPalette = useCallback(async (p: string) => {
+    try {
+      const content = await hostApi.invoke<string>('read_text_file', { path: p });
+      ideShared.addFileTab?.(p, content);
+    } catch (e) {
+      setStatus('打开失败：' + (e as Error).message);
+    }
+  }, []);
+
+  // 命令面板命令列表（Ctrl+Shift+P 模式）
+  const paletteCommands = useMemo<PaletteCommand[]>(() => [
+    { id: 'new', label: '新建文件', run: newDoc },
+    { id: 'open', label: '打开文件…', run: openFile },
+    { id: 'save', label: '保存', shortcut: 'Ctrl+S', run: save },
+    { id: 'saveAs', label: '另存为…', shortcut: 'Ctrl+Shift+S', run: saveAs },
+    { id: 'recent', label: '最近打开的文件', run: () => setRecentOpen((o) => !o) },
+    { id: 'theme-auto', label: '主题：自动', run: () => setTheme('auto') },
+    { id: 'theme-light', label: '主题：浅色', run: () => setTheme('light') },
+    { id: 'theme-dark', label: '主题：深色', run: () => setTheme('dark') },
+    { id: 'wrap', label: '切换自动换行', run: () => setWrap((w) => !w) },
+    { id: 'ai', label: '切换 AI 编程面板', run: () => setAiOpen((o) => !o) },
+    { id: 'panel-problems', label: '面板：问题', run: () => setBottomView('problems') },
+    { id: 'panel-output', label: '面板：输出', run: () => setBottomView('output') },
+    { id: 'panel-debug', label: '面板：调试控制台', run: () => setBottomView('debug') },
+    { id: 'panel-terminal', label: '面板：终端', run: () => setBottomView('terminal') },
+    { id: 'panel-close', label: '关闭底部面板', run: () => setBottomView(null) },
+    { id: 'settings', label: 'IDE 模块设置', run: () => setShowIdeSettings((o) => !o) },
+  ], [newDoc, openFile, save, saveAs]);
 
   const toolbar = (
     <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-200 dark:border-stone-700 bg-neutral-100 dark:bg-stone-800 text-sm flex-wrap">
@@ -3139,7 +3284,7 @@ function IdeEditor() {
             )}
             {bottomView === 'output' && <div className="text-neutral-500 dark:text-stone-400">（暂无输出）</div>}
             {bottomView === 'debug' && <div className="text-neutral-500 dark:text-stone-400">（调试控制台：未启动调试会话）</div>}
-            {bottomView === 'terminal' && <IdeTerminal />}
+            {bottomView === 'terminal' && <IdePtyTerminal />}
           </div>
         </div>
       )}
@@ -3181,175 +3326,15 @@ function IdeEditor() {
           onRollback={agentRollbackAll}
         />
       )}
-    </div>
-  );
-}
-
-// ============ 终端（底部面板，调用后端 run_shell_command 执行命令） ============
-function IdeTerminal() {
-  const [lines, setLines] = useState<string[]>([]);
-  const [cmd, setCmd] = useState('');
-  const [busy, setBusy] = useState(false);
-  const run = async () => {
-    const c = cmd.trim();
-    if (!c || busy) return;
-    setBusy(true);
-    setLines((p) => [...p, '$ ' + c]);
-    setCmd('');
-    try {
-      const out = await hostApi.invoke<string>('run_shell_command', { command: c });
-      const text = (out || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-      setLines((p) => [...p, text || '(无输出)']);
-    } catch (e) {
-      setLines((p) => [...p, '⚠ ' + String(e)]);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="flex flex-col h-full gap-1">
-      <div className="flex-1 overflow-auto whitespace-pre-wrap text-neutral-700 dark:text-stone-300">
-        {lines.length === 0 ? '（终端已就绪，输入命令后回车执行；Ctrl+C 暂未支持）' : lines.join('\n')}
-      </div>
-      <div className="flex items-center gap-2 border-t border-neutral-200 dark:border-stone-700 pt-1.5">
-        <span className="text-emerald-500 shrink-0">$</span>
-        <input
-          value={cmd}
-          onChange={(e) => setCmd(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); run(); } }}
-          className="flex-1 bg-transparent outline-none text-xs text-neutral-800 dark:text-stone-100"
-          placeholder="输入命令（如 npm run dev / ls）…"
-        />
-      </div>
-    </div>
-  );
-}
-
-// ============ 项目目录侧边栏（文件树） ============
-type DirEntry = { name: string; path: string; is_dir: boolean };
-
-// 目录优先、同类按名称排序（不改后端顺序，仅前端展示）
-function sortEntries(list: DirEntry[]): DirEntry[] {
-  return [...list].sort((a, b) => {
-    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-    return a.name.localeCompare(b.name, 'zh-Hans-CN');
-  });
-}
-
-function IdeSidebar() {
-  const [root, setRoot] = useState<string | null>(null);
-  // 根级条目
-  const [rootEntries, setRootEntries] = useState<DirEntry[]>([]);
-  // 每个已展开目录的子项（按目录 path 索引），实现真正的层级嵌套而非「堆在下面」
-  const [childrenMap, setChildrenMap] = useState<Record<string, DirEntry[]>>({});
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState<Set<string>>(new Set());
-  const [folderError, setFolderError] = useState<string | null>(null);
-
-  const pickFolder = async () => {
-    try {
-      const picked = await hostApi.invoke<string | null>('pick_directory', {});
-      const dir = picked ? picked.trim() : '';
-      if (!dir) return;
-      setRoot(dir);
-      projectRoot = dir;
-      window.dispatchEvent(new CustomEvent('ide-project-changed', { detail: dir }));
-      setFolderError(null);
-      const list = await hostApi.invoke<DirEntry[]>('list_directory', { path: dir });
-      setRootEntries(sortEntries(list));
-      setChildrenMap({});
-      setExpanded(new Set());
-    } catch (e) {
-      console.error('[IDE] 打开文件夹失败:', e);
-      // 路径不存在（os error 3 等）时显式提示用户，而非仅留控制台报错
-      setFolderError('打开文件夹失败：' + (e as Error).message);
-    }
-  };
-
-  const toggleDir = async (dirPath: string) => {
-    if (expanded.has(dirPath)) {
-      setExpanded((prev) => { const n = new Set(prev); n.delete(dirPath); return n; });
-      return;
-    }
-    // 展开：已缓存则直接展开，否则先加载子项
-    if (!childrenMap[dirPath]) {
-      setLoading((prev) => new Set([...prev, dirPath]));
-      try {
-        const list = await hostApi.invoke<DirEntry[]>('list_directory', { path: dirPath });
-        setChildrenMap((prev) => ({ ...prev, [dirPath]: sortEntries(list) }));
-      } catch (e) {
-        setFolderError('展开目录失败：' + (e as Error).message);
-        setLoading((prev) => { const n = new Set(prev); n.delete(dirPath); return n; });
-        return;
-      }
-      setLoading((prev) => { const n = new Set(prev); n.delete(dirPath); return n; });
-    }
-    setExpanded((prev) => new Set([...prev, dirPath]));
-  };
-
-  const openFile = async (p: string) => {
-    if (!addFileTab) {
-      setFolderError('编辑器尚未就绪，请稍候再试');
-      return;
-    }
-    try {
-      const content = await hostApi.invoke<string>('read_text_file', { path: p });
-      addFileTab(p, content);
-    } catch (e) {
-      console.error('[IDE] 打开文件失败:', p, e);
-      setFolderError('打开文件失败：' + (e as Error).message);
-    }
-  };
-
-  // 递归渲染：目录展开时其子项作为「子集」缩进显示在该目录正下方
-  const renderLevel = (entries: DirEntry[], depth: number): React.ReactNode =>
-    entries.map((e) => (
-      <React.Fragment key={e.path}>
-        <div
-          onClick={() => (e.is_dir ? toggleDir(e.path) : openFile(e.path))}
-          style={{ paddingLeft: 8 + depth * 12 }}
-          className={`flex items-center gap-1.5 pr-3 py-1 cursor-pointer text-xs transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${
-            e.is_dir ? 'text-neutral-600 dark:text-stone-300' : 'text-neutral-500 dark:text-stone-400'
-          }`}
-        >
-          <span className="w-3 text-center text-[11px] shrink-0">
-            {e.is_dir ? (loading.has(e.path) ? '…' : expanded.has(e.path) ? '▾' : '▸') : ''}
-          </span>
-          <span className="shrink-0">{e.is_dir ? '📁' : '📄'}</span>
-          <span className="flex-1 truncate">{e.name}</span>
-        </div>
-        {e.is_dir && expanded.has(e.path) && childrenMap[e.path] && (
-          childrenMap[e.path].length === 0 ? (
-            <div style={{ paddingLeft: 8 + (depth + 1) * 12 }} className="pr-3 py-1 text-[11px] text-neutral-300 dark:text-stone-600">（空）</div>
-          ) : (
-            renderLevel(childrenMap[e.path], depth + 1)
-          )
-        )}
-      </React.Fragment>
-    ));
-
-  return (
-    <div className="flex flex-col h-full">
-      <div className="px-2 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 shrink-0">
-        <button onClick={pickFolder}
-          className="w-full py-1.5 rounded-lg text-xs font-medium bg-[var(--element-bg)]/10 text-[var(--element-bg)] hover:bg-[var(--element-bg)]/20 transition-colors">
-          {root ? baseName(root) : '打开文件夹'}
-        </button>
-        {folderError && (
-          <div className="mt-1 px-2 py-1 text-[11px] text-red-500 dark:text-red-400 bg-red-500/10 rounded">
-            {folderError}
-          </div>
-        )}
-      </div>
-      <div className="flex-1 overflow-auto min-h-0">
-        {!root ? (
-          <div className="px-2 py-4 text-xs text-neutral-400 dark:text-stone-500 text-center">选择项目目录开始浏览</div>
-        ) : rootEntries.length === 0 ? (
-          <div className="px-2 py-4 text-xs text-neutral-400 dark:text-stone-500 text-center">目录为空</div>
-        ) : (
-          <div className="py-1">{renderLevel(rootEntries, 0)}</div>
-        )}
-      </div>
+      {/* 命令面板 overlay：Ctrl+P 文件快速打开 / Ctrl+Shift+P 命令模式 / # 内容搜索 */}
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        root={projRoot}
+        onOpenFile={openFileFromPalette}
+        commands={paletteCommands}
+        initialMode={paletteMode}
+      />
     </div>
   );
 }
@@ -3698,6 +3683,8 @@ function IdeAgent({
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [planChips, setPlanChips] = useState<string[]>([]);
+  // 结构化计划模式（阶段二增强）：从 planMode.tsx 导入，支持 <plan><step> 解析 + 用户确认流程
+  const [planState, setPlanState] = useState<PlanState>(EMPTY_PLAN);
   // 模型选择（与普通对话面板一致，复用全局模型档案）
   const [profiles, setProfiles] = useState<{ id: string; name?: string; model?: string; base_url?: string; api_key?: string; thinking?: boolean | null }[]>([]);
   const [modelOpen, setModelOpen] = useState(false);
@@ -3940,6 +3927,25 @@ function IdeAgent({
   }, []);
   useEffect(() => { refreshMcpTools(); }, [refreshMcpTools]);
 
+  // 技能系统（阶段五·渐进式披露）：内置技能 + 项目级 .IDE/skills/*/SKILL.md
+  // 模块级注册表（ref，避免重渲染），skillsIndex 为注入 system prompt 的紧凑索引（state，触发 prompt 重建）
+  const skillRegistryRef = useRef(new SkillRegistry());
+  const [skillsIndex, setSkillsIndex] = useState('');
+  const refreshSkills = useCallback(async (): Promise<void> => {
+    try {
+      const builtin = loadBuiltinSkills();
+      const project = await discoverProjectSkills(projectRoot);
+      // 项目同名覆盖内置（mergeSkills 先放内置后放项目，SkillRegistry.setAll 后插入者覆盖）
+      skillRegistryRef.current.setAll(mergeSkills(builtin, project));
+      setSkillsIndex(skillRegistryRef.current.getIndex());
+    } catch {
+      // 失败时至少保留内置技能
+      skillRegistryRef.current.setAll(loadBuiltinSkills());
+      setSkillsIndex(skillRegistryRef.current.getIndex());
+    }
+  }, [projectRoot]);
+  useEffect(() => { refreshSkills(); }, [refreshSkills]);
+
   const SYSTEM_PROMPT = useMemo(() => {
     const root = projectRoot
       ? `项目根目录：${projectRoot}`
@@ -3997,6 +4003,32 @@ function IdeAgent({
       toolLines.push('   注意：MCP 工具调用开销较大（每次 spawn + initialize ~500ms），不要频繁调用相同工具；优先用 <read>/<shell> 完成任务，仅在需要外部能力（如查 GitHub issue、读 sqlite 数据库、操作外部文件系统）时使用 <mcp>。');
       base.push(...toolLines);
     }
+    // 9) 计划模式 + 10) 子代理（阶段二新增）
+    base.push(
+      '',
+      '9) 制定执行计划（复杂任务推荐先规划再执行）：',
+      '   <plan><step>步骤1描述</step><step>步骤2描述</step>…</plan>',
+      '   用户可在计划面板确认或拒绝。确认后逐步执行，每完成一步面板自动更新进度。',
+      '   适合：重构、迁移、多文件联动修改等需要明确步骤的任务。',
+      '',
+      '10) 启动子代理（为子任务起独立上下文，仅只读工具，完成后返回摘要）：',
+      '   <subagent task="子任务描述" />  或  <subagent task="..." role="角色名"/>',
+      '   子代理拥有独立对话上下文，只能使用 <read> 和 <search>（只读），最多 5 轮交互。',
+      '   适合：分析模块依赖关系、搜索特定模式、收集信息等可并行的只读子任务。',
+      '   注意：子代理结果以摘要形式返回，不会直接修改文件。',
+      '   预设角色（role 属性可选）：加载后子代理按角色方法论与输出格式工作。',
+      getRolesIndex(),
+      '   用法：<subagent task="审查 src/index.tsx 最近改动" role="code-reviewer"/>',
+    );
+    // 11) 技能系统（阶段五·渐进式披露，对齐 agent-skills-main 的 SKILL.md）
+    base.push(
+      '',
+      '11) 技能系统（渐进式披露）：以下为可用技能索引。需要某技能时用 <skill name="技能名"/> 加载完整指南到上下文，再按指南执行。',
+      '   可用技能索引：',
+      skillsIndex || '（暂无可用技能）',
+      '   用法：<skill name="code-simplification"/>',
+      '   原则：仅在任务匹配某技能时加载；加载后据指南执行；不要在未加载全文时臆测技能内容。',
+    );
     base.push(
       '',
       '【测试驱动修复工作流】当任务涉及修复 bug、让测试/构建/lint 通过时，请严格按以下顺序迭代：',
@@ -4030,7 +4062,7 @@ function IdeAgent({
       '- 系统已在每次运行开始时自动读取「当天记忆（若不存在则读取最近一份记忆）」与「原则文件」并注入上下文；若需要参考更早的某天记忆，可自行 <read 记忆/YYYY-MM-DD.md>。',
     );
     return base.join('\n');
-  }, [projectRoot, mcpTools]);
+  }, [projectRoot, mcpTools, skillsIndex]);
 
   // 流式事件监听（按 requestId 路由）
   useEffect(() => {
@@ -4252,7 +4284,19 @@ function IdeAgent({
   }, []);
 
   const runAgent = useCallback(async (overrideText?: string, seed?: ChatMessage[]) => {
-    const text = (overrideText ?? input).trim();
+    let text = (overrideText ?? input).trim();
+    // 斜杠命令展开：/skill-name [可选任务] → 注入技能全文并启动 agent（渐进式披露的快捷入口）
+    // 仅对用户直接输入生效（overrideText 来自浮岛桥接，不展开）
+    if (!overrideText) {
+      const slashMatch = text.match(/^\/([a-z0-9-]+)(?:\s+([\s\S]+))?$/i);
+      if (slashMatch && skillRegistryRef.current.has(slashMatch[1])) {
+        const skill = skillRegistryRef.current.getSkill(slashMatch[1])!;
+        const taskPart = slashMatch[2]?.trim();
+        text = taskPart
+          ? `请按以下「${skill.name}」技能指南执行任务：${taskPart}\n\n--- 技能指南 ---\n${skill.body}`
+          : `请按以下「${skill.name}」技能指南执行（结合当前上下文）：\n\n--- 技能指南 ---\n${skill.body}`;
+      }
+    }
     if (!text || busy) return;
     if (!activeProfileId) {
       setConv((prev) => [...prev, { id: 'h_' + Date.now().toString(36), role: 'assistant', content: '⚠ 尚未配置可用模型：请到「全局设置 → 模型」添加并填写 API Key。', error: true }]);
@@ -4359,6 +4403,21 @@ function IdeAgent({
     // opKind: 'write' | 'edit' | 'shell-destructive' | 'shell-readonly' | 'mcp'
     // approval: 指令上的 approval 属性值（null=未提供）
     const checkPermission = (opKind: 'write' | 'edit' | 'shell-destructive' | 'shell-readonly' | 'mcp', approval: string | null): { allowed: boolean; reason?: string } => {
+      // 逐工具规则优先（alwaysAllow/alwaysAsk/alwaysDeny）——覆盖 PermissionMode 默认行为
+      // opKind → 工具名映射（对齐 tools.ts BUILTIN_TOOLS 注册表）
+      const toolNameForOp: Record<string, string> = {
+        write: 'file_write', edit: 'file_edit',
+        'shell-destructive': 'shell', 'shell-readonly': 'shell', mcp: 'mcp',
+      };
+      const toolName = toolNameForOp[opKind];
+      const overrides = loadPermissionOverrides();
+      if (toolName && overrides[toolName]) {
+        const rule = overrides[toolName];
+        if (rule === 'alwaysDeny') return { allowed: false, reason: `🚫 工具「${toolName}」已被设为始终禁止` };
+        // alwaysAsk：落到 normal/dangerous 的破坏性分支由后续逻辑处理；这里仅对非破坏性操作强制拦截待确认
+        // alwaysAllow：跳过 PermissionMode 检查直接放行（危险操作仍受 isTrusted/受保护路径/白名单约束）
+        if (rule === 'alwaysAllow' && opKind !== 'shell-destructive' && opKind !== 'mcp') return { allowed: true };
+      }
       // read-only：仅放行 shell-readonly（构建/测试/lint 等只读类），其余全 block
       if (permissionMode === 'read-only') {
         if (opKind === 'shell-readonly') return { allowed: true };
@@ -4434,7 +4493,8 @@ function IdeAgent({
       if (cancelRef.current) { setBusy(false); emitAgentEnd(); return; }
       if (errRef.current) { setBusy(false); emitAgentEnd(errRef.current); return; }
       const raw = bufRef.current;
-      const { reads, writes, edits, shells, asts, mcps, searches, rags, done, cleaned } = extractDirectives(raw);
+      const { reads, writes, edits, shells, asts, mcps, searches, rags, plans, subagents, skills, done, cleaned } =
+          extractDirectives(raw);
       // 累计本轮工具调用次数（状态栏显示用）
       readCount += reads.length + asts.length;
       editCount += edits.length + writes.length;
@@ -4455,6 +4515,73 @@ function IdeAgent({
         setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36), role: 'tool', content: '🔁 循环检测：重复操作警告' }]);
         loopGuard = true;
         break;
+      }
+      // ===== 计划模式：<plan><step>…</step></plan> → 更新结构化计划状态 =====
+      if (plans.length > 0) {
+        setPlanState({ steps: plans, confirmed: false, visible: true });
+        setConv((prev) => [...prev, { id: 'pl_' + Date.now().toString(36), role: 'tool', content: '📋 已制定 ' + plans.length + ' 步计划，等待确认后执行。' }]);
+        // plan 模式下不自动执行写入操作，等用户确认
+        if (permissionMode === 'plan') {
+          historyRef.current.push({ role: 'user', content: '计划已制定，等待用户确认。请勿继续执行写入操作，直到用户确认计划。' });
+        }
+      }
+      // ===== 子代理：<subagent task="..."/> → 启动独立子代理执行子任务 =====
+      for (const sa of subagents) {
+        // 子代理仅使用只读工具（read/search），在所有模式下放行；dangerous 模式需 approval token
+        const saAllowed = permissionMode !== 'dangerous' || (sa.approval && sa.approval === activeToken);
+        if (!saAllowed) {
+          setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: '🚫 高危模式：子代理需 approval="' + (activeToken || '') + '" 属性' }]);
+          historyRef.current.push({ role: 'user', content: '子代理被权限策略拦截：高危模式需 approval 属性' });
+          continue;
+        }
+        setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: '🤖 启动子代理：' + sa.task.slice(0, 60) + '…' }]);
+        // beforeSubagent 钩子（A2）：允许拦截/改写子代理任务
+        const saHook = await runHook('beforeSubagent', { task: sa.task, projectRoot });
+        if (saHook.cancel) {
+          setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: '🪝 Hook 拦截子代理' + (saHook.reason ? '（' + saHook.reason + '）' : '') }]);
+          historyRef.current.push({ role: 'user', content: `子代理被插件 Hook 拦截${saHook.reason ? '（' + saHook.reason + '）' : ''}（任务：${sa.task}）` });
+          continue;
+        }
+        const saTask = typeof saHook.modify === 'string' ? saHook.modify : sa.task;
+        try {
+          const result = await runSubAgent({
+            task: saTask,
+            projectRoot,
+            profileId: activeProfileId,
+            maxRounds: 5,
+            parentContext: historyRef.current.slice(-6).map((m) => m.content).join('\n---\n').slice(-2000),
+            role: sa.role,
+          });
+          const summary = result.summary.slice(0, 3000);
+          const tag = result.truncated ? '⚠ 子代理达到轮次上限，结果可能不完整' : '✅ 子代理完成';
+          setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: tag + '（' + result.rounds + ' 轮）：\n' + summary.slice(0, 200) + '…' }]);
+          historyRef.current.push({ role: 'user', content: frameData(`子代理结果（任务：${sa.task}）：\n${summary}`) });
+          // afterSubagent 钩子（A2）：通知外部插件子代理完成（不可改写）
+          await runHook('afterSubagent', { task: sa.task, result });
+        } catch (e) {
+          const err = '子代理执行失败：' + String(e);
+          setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: '❌ ' + err }]);
+          historyRef.current.push({ role: 'user', content: err });
+          // onToolError 钩子（A1，对齐 hooks.rs::PostToolUseFailure）：通知外部插件子代理失败
+          await runHook('onToolError', { tool: 'subagent', error: String(e), input: sa.task });
+        }
+      }
+      // ===== 技能加载：<skill name="..."/> → 从注册表取全文注入上下文（渐进式披露） =====
+      // 只读工具，所有模式放行；命中则回填完整技能正文，未命中回填可用索引
+      for (const skillName of skills) {
+        const skill = skillRegistryRef.current.getSkill(skillName);
+        if (skill) {
+          setConv((prev) => [...prev, { id: 'sk_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🎯 加载技能：' + skillName }]);
+          // 限长注入，避免过长技能正文撑爆上下文
+          const MAX_SKILL = 12000;
+          const body = skill.body.length > MAX_SKILL
+            ? skill.body.slice(0, MAX_SKILL) + '\n…（技能正文过长已截断至 ' + MAX_SKILL + ' 字符）'
+            : skill.body;
+          historyRef.current.push({ role: 'user', content: frameData(`技能「${skill.name}」完整指南（来源：${skill.source}）：\n\n${body}`) });
+        } else {
+          setConv((prev) => [...prev, { id: 'sk_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ 技能未找到：' + skillName }]);
+          historyRef.current.push({ role: 'user', content: `技能「${skillName}」未找到。可用技能索引：\n${skillRegistryRef.current.getIndex()}` });
+        }
       }
       // RAG 语义检索（真实向量检索，替代原 MiniSearch 关键词检索）：
       // agent 用 <search query="..."/> 或 <rag query="..."/> 对本地知识库做语义检索，
@@ -4528,6 +4655,8 @@ function IdeAgent({
             content = (visible.length ? visible : entries).map((en) => `${en.is_dir ? '📁' : '📄'} ${en.name}`).join('\n');
           } catch {
             content = '⚠ 读取失败：' + String(e);
+            // onToolError 钩子（A1，对齐 hooks.rs::PostToolUseFailure）：通知外部插件读取失败
+            await runHook('onToolError', { tool: 'read', error: String(e), input: abs });
           }
         }
         // afterRead hook（对齐 hooks.rs::PostToolUse）：允许其他插件增强读取内容（如注入额外上下文）
@@ -4739,6 +4868,8 @@ function IdeAgent({
         } catch (e) {
           historyRef.current.push({ role: 'user', content: `工具命令执行结果：调用受限 shell 失败 - ${String(e)}` });
           setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚡ 执行 ' + risk.chip + risk.label + (risk.reason ? ' ⚠ ' + risk.reason : '') + ' ⚠ 调用失败\n> ' + finalCmd }]);
+          // onToolError 钩子（A1，对齐 hooks.rs::PostToolUseFailure）：通知外部插件 shell 执行失败
+          await runHook('onToolError', { tool: 'shell', error: String(e), input: finalCmd });
           continue;
         }
         // afterShell hook（对齐 hooks.rs::PostToolUse）：通知其他插件命令执行结果（不可改写）
@@ -4830,15 +4961,26 @@ function IdeAgent({
           continue;
         }
         let result: any = null;
+        // beforeMcp 钩子（A2）：允许拦截/改写 MCP 调用（外部服务器风险高，应可被拦截）
+        const mcpArgs = mc.args || {};
+        const mcpHook = await runHook('beforeMcp', { serverId, toolName, args: mcpArgs });
+        if (mcpHook.cancel) {
+          historyRef.current.push({ role: 'user', content: `工具 MCP 调用结果：被插件 Hook 拦截${mcpHook.reason ? '（' + mcpHook.reason + '）' : ''}（工具 ${mc.tool}）` });
+          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🪝 Hook 拦截 MCP ' + mc.tool }]);
+          continue;
+        }
+        const finalArgs = (mcpHook.modify && typeof mcpHook.modify === 'object') ? mcpHook.modify : mcpArgs;
         try {
           result = await hostApi.invoke<any>('mcp_call_tool', {
             serverId,
             toolName,
-            arguments: mc.args || {},
+            arguments: finalArgs,
           });
         } catch (e) {
           historyRef.current.push({ role: 'user', content: `工具 MCP 调用结果：调用 "${mc.tool}" 失败 - ${String(e)}` });
           setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔌 MCP 失败 ' + mc.tool + ' ⚠ ' + String(e) }]);
+          // onToolError 钩子（A1，对齐 hooks.rs::PostToolUseFailure）：通知外部插件 MCP 调用失败
+          await runHook('onToolError', { tool: 'mcp', error: String(e), input: { serverId, toolName, args: finalArgs } });
           continue;
         }
         // 后端返回 McpToolCallResult { ok, content: Vec<Value>, error, is_tool_error }
@@ -4878,6 +5020,8 @@ function IdeAgent({
           role: 'tool',
           content: '🔌 MCP ' + mc.tool + (ok ? (isToolError ? ' ⚠' : ' ✓') : ' 🚫') + '\n> 参数：' + JSON.stringify(mc.args || {}),
         }]);
+        // afterMcp 钩子（A2）：通知外部插件 MCP 调用结果（不可改写）
+        await runHook('afterMcp', { serverId, toolName, args: finalArgs, result });
         mcpCountThisRound++;
       }
       // 递增压缩冷却计数器（每轮迭代后 +1，达到 COOLDOWN_TURNS 后允许再次压缩）
@@ -5199,6 +5343,23 @@ function IdeAgent({
         )}
       </div>
       <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0 px-3 py-3 space-y-3">
+        {/* 计划模式面板（阶段二）：agent 输出 <plan><step>…</step></plan> 后展示，用户确认/拒绝/编辑步骤 */}
+        {planState.visible && planState.steps.length > 0 && (
+          <PlanModePanel
+            plan={planState}
+            onUpdate={setPlanState}
+            onConfirm={() => {
+              setPlanState((p) => ({ ...p, confirmed: true }));
+              historyRef.current.push({ role: 'user', content: '✅ 用户已确认计划，请按步骤逐步执行。每完成一步可不必等待确认，继续下一步，全部完成后输出 <done/> 并总结。' });
+              setConv((prev) => [...prev, { id: 'pc_' + Date.now().toString(36), role: 'tool', content: '✅ 计划已确认，agent 开始执行' }]);
+            }}
+            onReject={() => {
+              setPlanState({ steps: [], confirmed: false, visible: false });
+              historyRef.current.push({ role: 'user', content: '❌ 用户拒绝了该计划，请重新规划或调整方案后再执行。' });
+              setConv((prev) => [...prev, { id: 'pc_' + Date.now().toString(36), role: 'tool', content: '❌ 计划已拒绝，等待重新规划' }]);
+            }}
+          />
+        )}
         {conv.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center text-neutral-400 dark:text-stone-500 gap-2 text-sm">
             <div>用自然语言让 AI 自主修改项目</div>
@@ -5235,7 +5396,9 @@ function IdeAgent({
                   <span className="whitespace-pre-wrap break-words block mt-1">{m.content}</span>
                 </details>
               ) : (
-                <span className="whitespace-pre-wrap break-words">{visible}</span>
+                m.role === 'tool'
+                  ? <span className="whitespace-pre-wrap break-words">{visible}</span>
+                  : <Markdown text={visible} className="whitespace-pre-wrap break-words" />
               )}
             </div>
           </div>
@@ -5437,7 +5600,7 @@ window.__PLUGIN_REGISTRY__.register({
   visible: false,
   parent: 'niaoluo',
   category: '开发',
-  desc: '轻量代码编辑器：CodeMirror 6 多语言高亮，多标签/查找替换/最近文件',
+  desc: '轻量代码编辑器：CodeMirror 6 多语言高亮，多标签/查找替换/命令面板/文件树',
   component: IdeEditor,
   sidebar: IdeSidebar,
 });

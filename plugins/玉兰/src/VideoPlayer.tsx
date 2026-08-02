@@ -1,6 +1,7 @@
 /// <reference path="../../global.d.ts" />
 // 视频播放器 — 自定义控制条 + 上一集/下一集 + 双击全屏
 import { formatTime } from '../../_shared/utils';
+import { T, useLang } from '../../_shared/pluginRuntime';
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon,
   VolumeIcon, VolumeMuteIcon, FullscreenIcon, MinimizeIcon, ArrowLeftIcon,
@@ -98,13 +99,13 @@ function VolumePopup({ volume, onVolumeChange }: { volume: number; onVolumeChang
   const btn = IconButton
     ? React.createElement(IconButton, {
         onClick: () => onVolumeChange(isMuted ? restoreVolume : 0),
-        title: isMuted ? `已静音（点击恢复 ${Math.round(restoreVolume * 100)}%）` : `音量 ${Math.round(volume * 100)}%（点击静音）`,
+        title: isMuted ? T('video.player.muted', { pct: Math.round(restoreVolume * 100) }) : T('video.player.volume', { pct: Math.round(volume * 100) }),
         active: showPopup,
         children: React.createElement(isMuted ? VolumeMuteIcon : VolumeIcon),
       })
     : React.createElement('button', {
         onClick: () => onVolumeChange(isMuted ? restoreVolume : 0),
-        title: isMuted ? `已静音（点击恢复 ${Math.round(restoreVolume * 100)}%）` : `音量 ${Math.round(volume * 100)}%（点击静音）`,
+        title: isMuted ? T('video.player.muted', { pct: Math.round(restoreVolume * 100) }) : T('video.player.volume', { pct: Math.round(volume * 100) }),
         className: 'btn-press p-1.5 rounded-full transition-all duration-150 text-white/70 hover:text-white',
         children: React.createElement(isMuted ? VolumeMuteIcon : VolumeIcon),
       });
@@ -146,6 +147,7 @@ function VolumePopup({ volume, onVolumeChange }: { volume: number; onVolumeChang
 
 // ========== 主组件 ==========
 export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, onSettingsChange }: VideoPlayerProps) {
+  useLang();
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -187,7 +189,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       console.error('[video-smtc][DIAG] pushSmtcNow: NO API');
       return;
     }
-    const title = file?.fileName || '视频';
+    const title = file?.fileName || T('video.player.title');
     const nav = navRef.current;
     console.error('[video-smtc][DIAG] pushSmtcNow playing=', playing, 'title=', title);
     api.invoke('debug_log', { msg: `VIDEO_PUSH_NOW playing=${playing} title=${title}` }).catch(() => {});
@@ -343,7 +345,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       api.invoke('debug_log', { msg: 'VIDEO_PUSH_EFFECT skip: file 为空' }).catch(() => {});
       return;
     }
-    const title = file.fileName || '视频';
+    const title = file.fileName || T('video.player.title');
     // debug_log 会以 [FE] 前缀必定出现在 Rust 终端，作为"推送是否真发出"的不可抵赖证据。
     api.invoke('debug_log', { msg: `VIDEO_PUSH_EFFECT fileName=${title} playing=${isPlaying} isFirst=${isFirst} isLast=${isLast}` }).catch(() => {});
     api.invoke('smtc_update', {
@@ -568,7 +570,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       }`,
     },
       IconButton
-        ? React.createElement(IconButton, { onClick: onBack, title: '返回', children: React.createElement(ArrowLeftIcon) })
+        ? React.createElement(IconButton, { onClick: onBack, title: T('video.back'), children: React.createElement(ArrowLeftIcon) })
         : React.createElement('button', { onClick: onBack, className: 'btn-press p-1.5 rounded-full transition-all duration-150 text-white/70 hover:text-white', children: React.createElement(ArrowLeftIcon) }),
       React.createElement('span', { className: 'text-sm text-white/80 truncate flex-1' }, file.fileName),
     ),
@@ -615,7 +617,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
             IconButton
               ? React.createElement(IconButton, {
                   onClick: handlePrev,
-                  title: '上一集',
+                  title: T('video.player.prevEpisode'),
                   children: React.createElement('span', { style: { opacity: isFirst ? 0.3 : 1 } },
                     React.createElement(SkipBackIcon),
                   ),
@@ -624,7 +626,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
               : React.createElement('button', {
                   onClick: handlePrev,
                   disabled: isFirst,
-                  title: '上一集',
+                  title: T('video.player.prevEpisode'),
                   style: { opacity: isFirst ? 0.3 : 1, cursor: isFirst ? 'default' : 'pointer' },
                   className: 'btn-press p-1.5 rounded-full transition-all duration-150 text-white/70 hover:text-white',
                   children: React.createElement(SkipBackIcon),
@@ -634,7 +636,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
             IconButton
               ? React.createElement(IconButton, {
                   onClick: togglePlay,
-                  title: isPlaying ? '暂停' : '播放',
+                  title: isPlaying ? T('video.player.pause') : T('video.player.play'),
                   children: React.createElement(isPlaying ? PauseIcon : PlayIcon),
                 })
               : React.createElement('button', {
@@ -647,7 +649,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
             IconButton
               ? React.createElement(IconButton, {
                   onClick: handleNext,
-                  title: '下一集',
+                  title: T('video.player.nextEpisode'),
                   children: React.createElement('span', { style: { opacity: isLast ? 0.3 : 1 } },
                     React.createElement(SkipForwardIcon),
                   ),
@@ -656,7 +658,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
               : React.createElement('button', {
                   onClick: handleNext,
                   disabled: isLast,
-                  title: '下一集',
+                  title: T('video.player.nextEpisode'),
                   style: { opacity: isLast ? 0.3 : 1, cursor: isLast ? 'default' : 'pointer' },
                   className: 'btn-press p-1.5 rounded-full transition-all duration-150 text-white/70 hover:text-white',
                   children: React.createElement(SkipForwardIcon),
@@ -670,13 +672,13 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
               IconButton
                 ? React.createElement(IconButton, {
                     onClick: toggleSpeedMenu,
-                    title: `播放速度 ${speedLabel}`,
+                    title: T('video.player.speed', { v: speedLabel }),
                     active: showSpeedMenu,
                     children: React.createElement('span', { className: 'text-xs font-medium text-white/80' }, speedLabel),
                   })
                 : React.createElement('button', {
                     onClick: toggleSpeedMenu,
-                    title: `播放速度 ${speedLabel}`,
+                    title: T('video.player.speed', { v: speedLabel }),
                     className: 'btn-press p-1.5 rounded-full transition-all duration-150 text-white/70 hover:text-white',
                     children: React.createElement('span', { className: 'text-xs font-medium' }, speedLabel),
                   }),
@@ -706,7 +708,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
             IconButton
               ? React.createElement(IconButton, {
                   onClick: handleFullscreen,
-                  title: isFullscreen ? '退出全屏' : '全屏',
+                  title: isFullscreen ? T('video.player.exitFullscreen') : T('video.player.fullscreen'),
                   children: React.createElement(isFullscreen ? MinimizeIcon : FullscreenIcon),
                 })
               : React.createElement('button', {
