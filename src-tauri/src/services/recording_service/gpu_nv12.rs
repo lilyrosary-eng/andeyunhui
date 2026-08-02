@@ -76,6 +76,58 @@ float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {{
     )
 }
 
+/// Y 通道像素着色器：输出 BT.709 全范围→受限范围亮度到 R8_UNORM
+fn build_ps_y(crop: Option<(f32, f32, f32, f32)>, bgra: bool) -> String {
+    let (ox, oy, sw, sh) = crop.unwrap_or((0.0, 0.0, 1.0, 1.0));
+    let pick = if bgra { "bgr" } else { "rgb" };
+    format!(
+        r#"
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+static const float2 ORIGIN = float2({ox}, {oy});
+static const float2 SCALE = float2({sw}, {sh});
+float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {{
+    float2 suv = ORIGIN + uv * SCALE;
+    float4 c = tex.Sample(samp, suv);
+    float y = dot(float3(0.2126, 0.7152, 0.0722), c.{pick});
+    y = y * (219.0/255.0) + (16.0/255.0);
+    return float4(y, 0, 0, 1);
+}}
+"#
+    )
+}
+
+/// UV 通道像素着色器（half-res）：输出受限范围 U/V 到 R8G8_UNORM
+fn build_ps_uv(crop: Option<(f32, f32, f32, f32)>, bgra: bool, tw: u32, th: u32) -> String {
+    let (ox, oy, sw, sh) = crop.unwrap_or((0.0, 0.0, 1.0, 1.0));
+    let pick = if bgra { "bgr" } else { "rgb" };
+    let tx = 1.0_f64 / tw as f64;
+    let ty = 1.0_f64 / th as f64;
+    format!(
+        r#"
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+static const float2 ORIGIN = float2({ox}, {oy});
+static const float2 SCALE = float2({sw}, {sh});
+static const float2 TEXEL = float2({tx}, {ty});
+float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {{
+    float2 suv = ORIGIN + uv * SCALE;
+    float3 c00 = tex.Sample(samp, suv).{pick};
+    float3 c01 = tex.Sample(samp, suv + float2(TEXEL.x, 0)).{pick};
+    float3 c10 = tex.Sample(samp, suv + float2(0, TEXEL.y)).{pick};
+    float3 c11 = tex.Sample(samp, suv + float2(TEXEL.x, TEXEL.y)).{pick};
+    float3 avg = (c00 + c01 + c10 + c11) * 0.25;
+    float y = dot(float3(0.2126, 0.7152, 0.0722), avg);
+    float u = 0.5 + 0.5 * (avg.b - y) / (1.0 - 0.0722);
+    float v = 0.5 + 0.5 * (avg.r - y) / (1.0 - 0.2126);
+    u = u * (224.0/255.0) + (16.0/255.0);
+    v = v * (224.0/255.0) + (16.0/255.0);
+    return float4(u, v, 0, 1);
+}}
+"#
+    )
+}
+
 pub struct GpuNv12Converter {
     /// 我们自建的 D3D11 设备（与 WGC 同 GPU 适配器），所有渲染/读回都在它上面执行。
     device: ID3D11Device,
@@ -97,6 +149,16 @@ pub struct GpuNv12Converter {
     pending: VecDeque<usize>,
     /// 跨设备共享的 WGC 帧纹理（按需映射，按来源指针缓存）。
     shared: Option<SharedFrame>,
+    // ── NV12 直接输出（R8 Y + R8G8 UV，替代 RGBA 渲染）──
+    ps_y: ID3D11PixelShader,
+    ps_uv: ID3D11PixelShader,
+    rt_y: ID3D11Texture2D,
+    rtv_y: ID3D11RenderTargetView,
+    staging_y: Vec<ID3D11Texture2D>,
+    rt_uv: ID3D11Texture2D,
+    rtv_uv: ID3D11RenderTargetView,
+    staging_uv: Vec<ID3D11Texture2D>,
+    pub nv12_buf: Vec<u8>,
 }
 
 unsafe fn create_tex(
@@ -332,6 +394,47 @@ impl GpuNv12Converter {
             device.CreateSamplerState(&sd, Some(&mut sampler))?;
             let sampler = sampler.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
 
+            // NV12 像素着色器和渲染目标（Y: R8, UV: R8G8 half-res）
+            let mut ps_y_blob = None;
+            compile_hlsl(&build_ps_y(crop_norm, bgra), "PS", "ps_4_0", &mut ps_y_blob)?;
+            let ps_y_blob = ps_y_blob.unwrap();
+            let ps_y_code = std::slice::from_raw_parts(ps_y_blob.GetBufferPointer() as *const u8, ps_y_blob.GetBufferSize());
+            let mut ps_y = None;
+            device.CreatePixelShader(ps_y_code, None, Some(&mut ps_y))?;
+            let ps_y = ps_y.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            let mut ps_uv_blob = None;
+            compile_hlsl(&build_ps_uv(crop_norm, bgra, in_w, in_h), "PS", "ps_4_0", &mut ps_uv_blob)?;
+            let ps_uv_blob = ps_uv_blob.unwrap();
+            let ps_uv_code = std::slice::from_raw_parts(ps_uv_blob.GetBufferPointer() as *const u8, ps_uv_blob.GetBufferSize());
+            let mut ps_uv = None;
+            device.CreatePixelShader(ps_uv_code, None, Some(&mut ps_uv))?;
+            let ps_uv = ps_uv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            // Y 渲染目标 R8_UNORM
+            let rt_y = create_tex(&device, out_w, out_h, DXGI_FORMAT_R8_UNORM, D3D11_BIND_RENDER_TARGET, D3D11_USAGE_DEFAULT, 0)?;
+            let mut rtv_y = None;
+            device.CreateRenderTargetView(Some(&rt_y as &ID3D11Resource), None, Some(&mut rtv_y))?;
+            let rtv_y = rtv_y.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            // UV 渲染目标 R8G8_UNORM（half-res）
+            let uv_w = (out_w + 1) / 2;
+            let uv_h = (out_h + 1) / 2;
+            let rt_uv = create_tex(&device, uv_w, uv_h, DXGI_FORMAT_R8G8_UNORM, D3D11_BIND_RENDER_TARGET, D3D11_USAGE_DEFAULT, 0)?;
+            let mut rtv_uv = None;
+            device.CreateRenderTargetView(Some(&rt_uv as &ID3D11Resource), None, Some(&mut rtv_uv))?;
+            let rtv_uv = rtv_uv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            // Staging ring buffers（GPU→CPU 读回）
+            let mut staging_y = Vec::with_capacity(STAGING_COUNT);
+            let mut staging_uv = Vec::with_capacity(STAGING_COUNT);
+            for _ in 0..STAGING_COUNT {
+                staging_y.push(create_tex(&device, out_w, out_h, DXGI_FORMAT_R8_UNORM, D3D11_BIND_FLAG(0), D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ.0 as u32)?);
+                staging_uv.push(create_tex(&device, uv_w, uv_h, DXGI_FORMAT_R8G8_UNORM, D3D11_BIND_FLAG(0), D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ.0 as u32)?);
+            }
+
+            let nv12_buf = vec![0u8; (out_w * out_h + out_w * out_h / 2) as usize];
+
             let me = Self {
                 device,
                 ctx,
@@ -351,6 +454,15 @@ impl GpuNv12Converter {
                 free_slots,
                 pending: VecDeque::with_capacity(STAGING_COUNT),
                 shared: None,
+                ps_y,
+                ps_uv,
+                rt_y,
+                rtv_y,
+                staging_y,
+                rt_uv,
+                rtv_uv,
+                staging_uv,
+                nv12_buf,
             };
             // 自检：用**本（自建）设备**渲染一帧白屏、阻塞读回，验证 Draw 真能向渲染目标写出非全零。
             // 关键修正：渲染在自建设备上执行（WGC 设备上下文在本机被 DWM 丢弃命令、自检必全零），
@@ -581,6 +693,103 @@ impl GpuNv12Converter {
             }
             Ok(true)
         }
+    }
+
+    /// 把 WGC 帧渲染为 NV12（Y R8 + UV R8G8 half-res），GPU 转换，读回 ~3MB（含 RGB→YUV）。
+    /// 返回 `Ok(true)`=nv12 已写入 out_buf；`Ok(false)`=GPU 未就绪。与 `convert` 互斥单帧调用。
+    pub fn convert_to_nv12(&mut self, src: &ID3D11Texture2D) -> Result<bool> {
+        if self.broken {
+            return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+        }
+        // 复用 cross-device shared texture mapping（与 convert() 相同逻辑）
+        unsafe {
+            let src_ptr = src.as_raw() as usize;
+            let need_remap = self.shared.as_ref().map_or(true, |s| s.src_ptr != src_ptr);
+            if need_remap {
+                let res: IDXGIResource = src.cast().map_err(|e| { self.broken = true; e })?;
+                let h = res.GetSharedHandle().map_err(|e| { self.broken = true; e })?;
+                let mut shared: Option<ID3D11Texture2D> = None;
+                self.device.OpenSharedResource(h, &mut shared).map_err(|e| { self.broken = true; e })?;
+                let shared = shared.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+                let km = shared.cast::<IDXGIKeyedMutex>().ok();
+                self.shared = Some(SharedFrame { src_ptr, tex: shared, km });
+            }
+            let shared = &self.shared.as_ref().unwrap().tex;
+            let km = self.shared.as_ref().unwrap().km.clone();
+            if let Some(km) = &km { let _ = km.AcquireSync(0, 16); }
+            self.ctx.CopyResource(Some(&self.input_tex as &ID3D11Resource), Some(shared as &ID3D11Resource));
+            if let Some(km) = &km { let _ = km.ReleaseSync(0); }
+            self.ctx.Flush();
+        }
+
+        // Pass 1: Y (full-res, R8_UNORM)
+        unsafe {
+            self.set_state();
+            self.ctx.OMSetRenderTargets(Some(&[Some(self.rtv_y.clone())]), None);
+            self.ctx.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.0, TopLeftY: 0.0, Width: self.out_w as f32, Height: self.out_h as f32,
+                MinDepth: 0.0, MaxDepth: 1.0,
+            }]));
+            self.ctx.VSSetShader(Some(&self.vs), None);
+            self.ctx.PSSetShader(Some(&self.ps_y), None);
+            self.ctx.PSSetShaderResources(0, Some(&[Some(self.input_srv.clone())]));
+            self.ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            self.ctx.Draw(3, 0);
+            self.ctx.CopyResource(Some(&self.staging_y[0] as &ID3D11Resource), Some(&self.rt_y as &ID3D11Resource));
+        }
+
+        // Pass 2: UV (half-res, R8G8_UNORM)
+        let uv_w = (self.out_w + 1) / 2;
+        let uv_h = (self.out_h + 1) / 2;
+        unsafe {
+            self.ctx.OMSetRenderTargets(Some(&[Some(self.rtv_uv.clone())]), None);
+            self.ctx.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.0, TopLeftY: 0.0, Width: uv_w as f32, Height: uv_h as f32,
+                MinDepth: 0.0, MaxDepth: 1.0,
+            }]));
+            self.ctx.VSSetShader(Some(&self.vs), None);
+            self.ctx.PSSetShader(Some(&self.ps_uv), None);
+            self.ctx.PSSetShaderResources(0, Some(&[Some(self.input_srv.clone())]));
+            self.ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            self.ctx.Draw(3, 0);
+            self.ctx.CopyResource(Some(&self.staging_uv[0] as &ID3D11Resource), Some(&self.rt_uv as &ID3D11Resource));
+            self.ctx.Flush();
+        }
+
+        // Map readback Y + UV (non-blocking), assemble NV12
+        let y_size = (self.out_w * self.out_h) as usize;
+        let uv_size = y_size / 2;
+        unsafe {
+            // Read Y
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            match self.ctx.Map(Some(&self.staging_y[0] as &ID3D11Resource), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32, Some(&mut m)) {
+                Ok(()) => {}
+                Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => return Ok(false),
+                Err(e) => return Err(e),
+            }
+            let p = m.pData as *const u8;
+            let pitch = m.RowPitch as usize;
+            self.nv12_buf.clear();
+            self.nv12_buf.reserve(y_size + uv_size);
+            for row in 0..self.out_h as usize {
+                self.nv12_buf.extend_from_slice(std::slice::from_raw_parts(p.add(row * pitch), self.out_w as usize));
+            }
+            self.ctx.Unmap(Some(&self.staging_y[0] as &ID3D11Resource), 0);
+
+            // Read UV
+            match self.ctx.Map(Some(&self.staging_uv[0] as &ID3D11Resource), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32, Some(&mut m)) {
+                Ok(()) => {}
+                Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => return Ok(false),
+                Err(e) => return Err(e),
+            }
+            let p = m.pData as *const u8;
+            let pitch = m.RowPitch as usize;
+            for row in 0..uv_h as usize {
+                self.nv12_buf.extend_from_slice(std::slice::from_raw_parts(p.add(row * pitch), (uv_w * 2) as usize));
+            }
+            self.ctx.Unmap(Some(&self.staging_uv[0] as &ID3D11Resource), 0);
+        }
+        Ok(true)
     }
 }
 

@@ -33,14 +33,23 @@ use windows_capture::settings::{
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 /// 进程内 GPU RGBA→RGBA 缩放（阶段二核心，见 gpu_nv12.rs）
+/// 完整 L0 后改为同设备 GPU 缩放，产出 NV12 纹理留 GPU（不再 Map 读回）
 pub(crate) mod gpu_nv12;
 /// WASAPI 回环音频采集（命名管道喂给 ffmpeg，见 audio_capture.rs）
+/// 完整 L0 后改为 mpsc 通道直接喂进程内 AAC 编码器
 pub(crate) mod audio_capture;
 /// 方案 A：原生 WGC 捕获——帧池建在自建 D3D11 设备上，同设备 GPU 缩放只读回小尺寸 RGBA
 /// （绕过 windows-capture「帧池设备不能渲染 + 帧纹理不可共享」的双重死路，见 wgc_native.rs）
 pub(crate) mod wgc_native;
-use audio_capture::{start_audio_capture, AudioCapture, AudioFormat};
-use gpu_nv12::GpuNv12Converter;
+/// FFmpeg libavcodec/libavformat 动态加载（libloading，完整 L0 用）
+mod ffi;
+/// 进程内编码器：d3d11va→nvenc 零拷贝 + AAC 音频 + MP4 封装（完整 L0）
+pub(crate) mod encoder_av;
+use audio_capture::{start_audio_capture, start_audio_capture_channel, AudioCapture, AudioFormat};
+use gpu_nv12::{GpuNv12Converter, GpuSameDeviceScaler};
+use windows::core::Interface;
+use windows::Win32::Graphics::Direct3D11::ID3D11Multithread;
+use encoder_av::{AvEncoder, AudioSource, EncoderConfig};
 
 
 /// 录屏控制台窗口标签
@@ -136,10 +145,32 @@ struct WgcRecorder {
     out_h: u32,
     /// 是否启用进程内 GPU RGBA 缩放/裁剪（探针通过且运行时帧纹理可共享才真正生效；否则 CPU 兜底）
     gpu_nv12: bool,
-    /// 进程内 GPU 转换器（懒初始化；None = 未初始化/不可用）
+    /// 进程内 GPU 转换器（懒初始化；None = 未初始化/不可用）——旧 ffmpeg 子进程路径用
     gpu: Option<GpuNv12Converter>,
+    /// 进程内同设备 GPU 缩放器（L0 路径用，不需要共享句柄，故本机可用）：
+    /// GPU 内 4K→1080p，只读回 8MB RGBA（替代需要共享句柄、本机必失败的 GpuNv12Converter）
+    gpu_scaler: Option<GpuSameDeviceScaler>,
+    /// 同设备 GPU 缩放输出缓冲（复用，避免每帧分配 8MB）
+    gpu_rgba: Vec<u8>,
+    /// 诊断：同设备 GPU 缩放「产出帧 / 未就绪跳过帧」计数（定位空视频用）
+    gpu_stat_ok: u64,
+    gpu_stat_skip: u64,
     /// GPU 转换器初始化是否曾失败（失败则不再重试，整段回退 RGBA）
     gpu_failed: bool,
+    // ── 完整 L0：进程内 avcodec (d3d11va→nvenc) 字段 ──
+    /// 进程内编码器（懒初始化：首个 WGC 帧到达时用 frame.device() 创建）。
+    /// None = 未初始化或回退到旧 ffmpeg 子进程路径。
+    encoder: Option<Arc<AvEncoder>>,
+    /// 编码器初始化是否已失败（失败则不再重试）
+    encoder_init_failed: bool,
+    /// 录制开始时刻（用于计算 PTS）
+    start_instant: Option<std::time::Instant>,
+    /// 编码器配置（在 start_recording 中准备好，首帧到达时用于初始化）
+    enc_cfg: Option<EncoderConfig>,
+    /// 编码器句柄（与 RecordingHandle 共享，初始化完成后写入此句柄供停止时调用 stop()）
+    encoder_handle: Arc<Mutex<Option<Arc<AvEncoder>>>>,
+    /// 视频时间原点已定（首帧馈入编码器时置位），音频采集线程据此对齐时间轴、消除音画不同步
+    video_started: Arc<AtomicBool>,
 }
 
 impl GraphicsCaptureApiHandler for WgcRecorder {
@@ -152,11 +183,14 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         bool, // gpu_nv12: 是否启用进程内 GPU RGBA→NV12
         bool, // downscale_4k: 是否需要降采样（超 1080p 时）
         (u32, u32), // 编码输出尺寸（4K 全屏降采样目标；否则等于捕获尺寸）
+        Option<EncoderConfig>, // 完整 L0 编码器配置（None = 走旧 ffmpeg 路径）
+        Arc<Mutex<Option<Arc<AvEncoder>>>>, // 编码器共享句柄（RecordingHandle 也持有一份）
+        Arc<AtomicBool>, // video_started：首帧馈入编码器时置位，供音频对齐时间轴
     );
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (latest, stop_flag, paused, crop, free, gpu_nv12, _downscale_4k, (out_w, out_h)) = ctx.flags;
+        let (latest, stop_flag, paused, crop, free, gpu_nv12, _downscale_4k, (out_w, out_h), enc_cfg, encoder_handle, video_started) = ctx.flags;
         Ok(Self {
             latest,
             stop_flag,
@@ -168,7 +202,17 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
             scratch: Vec::new(),
             gpu_nv12,
             gpu: None,
+            gpu_scaler: None,
+            gpu_rgba: Vec::new(),
+            gpu_stat_ok: 0,
+            gpu_stat_skip: 0,
             gpu_failed: false,
+            encoder: None,
+            encoder_init_failed: false,
+            start_instant: None,
+            enc_cfg,
+            encoder_handle,
+            video_started,
         })
     }
 
@@ -189,11 +233,57 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
         let fw = frame.width();
         let fh = frame.height();
 
+        // ── 完整 L0 路径：进程内 libavcodec + libavformat（去掉 ffmpeg 子进程 / stdin 字节管道）──
+        // GPU 上完成 BGRA→NV12，再把 NV12 喂给进程内 h264_nvenc，nvenc 在 dGPU 自建 CUDA 上下文上传。
+        // 与旧 GpuNv12Converter→Map 读回→stdin 管道 互斥：编码器就绪后跳过 latest 槽 / 生产者消费者线程。
+        if self.enc_cfg.is_some() {
+            if self.encoder.is_none() {
+                // 优先从共享句柄取（start_recording 已提前建好进程内编码器）
+                if let Ok(g) = self.encoder_handle.lock() {
+                    if let Some(e) = g.clone() {
+                        self.encoder = Some(e);
+                    }
+                }
+                // 兜底惰性创建（理论上不会触发）：无音频
+                // 注：此处 init_ffmpeg(None) 自动探测在 release 下漏掉 user_external_deps，
+                // 但主路径（start_recording 的 get_ffmpeg_dir）已覆盖，encoder_handle 此时应已有值，
+                // 本兜底仅 dev 兜底生效。
+                if self.encoder.is_none() && !self.encoder_init_failed {
+                    match ffi::init_ffmpeg(None) {
+                        Ok(()) => match AvEncoder::new(self.enc_cfg.clone().unwrap(), None) {
+                            Ok(enc) => {
+                                if let Ok(mut handle) = self.encoder_handle.lock() {
+                                    *handle = Some(enc.clone());
+                                }
+                                self.encoder = Some(enc);
+                                eprintln!("[录屏] ✅ 进程内 libavcodec 编码器惰性初始化成功");
+                            }
+                            Err(e) => {
+                                self.encoder_init_failed = true;
+                                eprintln!("[录屏] 进程内编码器初始化失败: {e}");
+                            }
+                        },
+                        Err(e) => {
+                            self.encoder_init_failed = true;
+                            eprintln!("[录屏] FFmpeg DLL 加载失败: {e}");
+                        }
+                    }
+                }
+            }
+        }
+        // 初始化 start_instant（首帧锚定时间基准）
+        if self.start_instant.is_none() {
+            self.start_instant = Some(std::time::Instant::now());
+        }
+
         // 进程内 GPU 缩放/裁剪：在「自建设备」上把 WGC 帧（经共享句柄跨设备映射，仅当帧纹理可共享时）
         // 缩到 out_w×out_h 产 RGBA，仅 DO_NOT_WAIT 读回 ~8MB（4K 场景跳过 33MB 整帧读回 + CPU 缩放）。
         // 仅当本机 WGC 帧纹理可共享时生效；否则 new() 预筛直接回退，由 CPU 兜底产出 RGBA 并永久禁用
         // GPU 路（gpu_failed）。失败则本帧不写（latest 保留上一帧）。
-        let payload: Option<Arc<Vec<u8>>> = if self.gpu_nv12 && !self.gpu_failed {
+        let payload: Option<Arc<Vec<u8>>> = if self.encoder.is_some() {
+            // 进程内编码器路径：GPU NV12 转换在下方 convert_to_nv12 单独完成，避免双重 GPU 转换
+            None
+        } else if self.gpu_nv12 && !self.gpu_failed {
             if self.gpu.is_none() && !self.gpu_failed {
                 match GpuNv12Converter::new(
                     frame.device(),
@@ -294,9 +384,144 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
             Some(payload)
         };
 
-        // 非阻塞写入最新帧槽（Arc 覆盖，瞬时返回；绝不阻塞回调 → 不耗尽帧池、不拖垮 DWM 合成）。
-        // 记录呈现时间 ts（≈ WGC SystemRelativeTime），供 pacer 按真实呈现节奏降采样/打点。
-        // 旧帧缓冲（若节拍器已不再持有）回收进对象池循环复用 → 录制全程零额外分配。
+        // 完整 L0 路径：同设备 GPU 缩放（不需要共享句柄，故本机可用）→ 只读回 8MB RGBA → 进程内编码器
+        // 把 BGRA 转 NV12。WGC 帧纹理不可共享，故用同设备 CopyResource（GpuSameDeviceScaler），而非需要
+        // 共享句柄、本机必失败的 GpuNv12Converter（每帧 0x80070057 → 31MB CPU 读回 + CPU 缩放 → 卡顿/粘滞）。
+        // 同设备 GPU 缩放失败时回退 WGC 原生 RGBA 读回 + CPU 缩放。
+        if self.encoder.is_some() {
+            let fmt = frame.desc().Format;
+            let mut gpu_produced = false;
+            // 首帧懒创建同设备 GPU 缩放器（仅当尚未失败）
+            if self.gpu_scaler.is_none() && !self.gpu_failed {
+                let device = frame.device();
+                // ⚠️ 这里拿到的是「WGC 捕获设备的唯一即时上下文」，windows-capture 内部（frame.buffer()
+                // 等）也在用它，而 ID3D11DeviceContext 默认非线程安全。必须开启多线程保护，否则我们的
+                // Draw/Map 与库内部命令并发会互相破坏状态（表现为画面错乱或静默不出帧）。
+                if let Ok(mt) = device.cast::<ID3D11Multithread>() {
+                    let _ = unsafe { mt.SetMultithreadProtected(true) };
+                }
+                match unsafe { device.GetImmediateContext() } {
+                    Ok(ctx) => match GpuSameDeviceScaler::new(
+                        &device,
+                        &ctx,
+                        fw,
+                        fh,
+                        self.out_w,
+                        self.out_h,
+                        fmt,
+                        self.crop,
+                    ) {
+                        Ok(s) => {
+                            self.gpu_scaler = Some(s);
+                            eprintln!(
+                                "[录屏] GPU 同设备缩放已启用：{}x{} → {}x{}，每帧只读回 ~{:.1}MB（无跨设备共享）",
+                                fw, fh, self.out_w, self.out_h,
+                                (self.out_w as f64 * self.out_h as f64 * 4.0) / 1048576.0
+                            );
+                        }
+                        Err(e) => {
+                            self.gpu_failed = true;
+                            eprintln!("[录屏] GPU 同设备缩放器初始化失败，回退 RGBA 读回: {e}");
+                        }
+                    },
+                    Err(e) => {
+                        self.gpu_failed = true;
+                        eprintln!("[录屏] 取同设备即时上下文失败，回退 RGBA 读回: {e}");
+                    }
+                }
+            }
+            // 同设备 GPU 缩放（GPU 内 4K→1080p，只读回 8MB RGBA；Map 阻塞强制 GPU 完成，安全拷出帧纹理）
+            if !self.gpu_failed {
+                if let Some(scaler) = self.gpu_scaler.as_mut() {
+                    let need = (self.out_w as usize) * (self.out_h as usize) * 4;
+                    if self.gpu_rgba.capacity() < need {
+                        self.gpu_rgba.reserve(need);
+                    }
+                    match scaler.scale(frame.as_raw_texture(), &mut self.gpu_rgba) {
+                        Ok(true) => {
+                            gpu_produced = true;
+                            self.gpu_stat_ok += 1;
+                        }
+                        Ok(false) => {
+                            // GPU 未就绪，本帧跳过（不回退）。持续跳过 = 空视频，必须能看见。
+                            self.gpu_stat_skip += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("[录屏] GPU 同设备缩放失败，回退 RGBA 读回: {e}");
+                            self.gpu_failed = true;
+                        }
+                    }
+                    // 每 120 帧打一次进出统计，用于定位「录出来是空视频」到底断在哪一环
+                    let total = self.gpu_stat_ok + self.gpu_stat_skip;
+                    if total > 0 && total % 120 == 0 {
+                        eprintln!(
+                            "[录屏] GPU 缩放统计: 产出={} 跳过={}",
+                            self.gpu_stat_ok, self.gpu_stat_skip
+                        );
+                    }
+                }
+            }
+            if gpu_produced {
+                self.video_started.store(true, Ordering::SeqCst); // 音频时间轴对齐
+                let pts = self.start_instant.map(|s| s.elapsed().as_micros() as i64).unwrap_or(0);
+                if let Some(ref encoder) = self.encoder {
+                    // ⚠️ 色序：GPU 渲染目标恒为 R8G8B8A8_UNORM（28），且像素着色器已把 BGRA 源
+                    // swizzle 成 RGBA，所以这里必须传 28，不能透传原始帧格式（BGRA=87），否则红蓝互换。
+                    encoder.feed_rgba(&self.gpu_rgba, self.out_w, self.out_h, pts, 28);
+                }
+                return Ok(());
+            }
+            // ── CPU 兜底：WGC 原生 RGBA 读回 + CPU 缩放/转 NV12（同设备 GPU 缩放失败时）──
+            if self.gpu_failed {
+                let pts = self.start_instant.map(|s| s.elapsed().as_micros() as i64).unwrap_or(0);
+                let mut rgba = self
+                    .free
+                    .lock()
+                    .ok()
+                    .and_then(|mut fl| fl.pop())
+                    .map(|mut a| {
+                        if Arc::get_mut(&mut a).is_some() {
+                            a
+                        } else {
+                            Arc::new(Vec::new())
+                        }
+                    })
+                    .unwrap_or_else(|| Arc::new(Vec::new()));
+                {
+                    let p = Arc::get_mut(&mut rgba).expect("刚取得的缓冲必为独占引用");
+                    p.clear();
+                    let buffer = match frame.buffer() {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("[录屏] RGBA 读回失败，本帧丢弃: {e}");
+                            return Ok(());
+                        }
+                    };
+                    let src = buffer.as_nopadding_buffer(&mut self.scratch);
+                    let ow = self.out_w as usize;
+                    let oh = self.out_h as usize;
+                    // 与旧路径一致：尺寸一致且无裁剪则直接 memcpy，否则最近邻重采样
+                    if self.crop.is_none() && fw as usize == ow && fh as usize == oh {
+                        p.extend_from_slice(src);
+                    } else {
+                        rgba_resize_crop_nearest(src, fw as usize, fh as usize, self.crop, ow, oh, p);
+                    }
+                }
+                if let Some(ref encoder) = self.encoder {
+                    self.video_started.store(true, Ordering::SeqCst); // 音频时间轴对齐
+                    encoder.feed_rgba(&rgba, self.out_w, self.out_h, pts, fmt.0 as u32);
+                }
+                if let Ok(mut fl) = self.free.lock() {
+                    if fl.len() < 4 {
+                        fl.push(rgba);
+                    }
+                }
+                return Ok(());
+            }
+            return Ok(());
+        }
+
+        // 旧管线：非阻塞写入最新帧槽（Arc 覆盖，瞬时返回；绝不阻塞回调）
         if let Some(payload) = payload {
             if let Ok(mut slot) = self.latest.lock() {
                 let old = std::mem::replace(
@@ -320,7 +545,7 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
     }
 }
 
-/// 全局录屏句柄（管理 ffmpeg 进程 + 捕获线程 + 节拍器写入线程）
+/// 全局录屏句柄（管理 ffmpeg 进程 / 进程内编码器 + 捕获线程 + 节拍器写入线程）
 struct RecordingHandle {
     ffmpeg_child: Option<Child>,
     capture_thread: Option<std::thread::JoinHandle<()>>,
@@ -334,17 +559,26 @@ struct RecordingHandle {
     paused: Arc<AtomicBool>,
     start_time: SystemTime,
     output_path: String,
+    /// 完整 L0：进程内编码器（懒初始化完成后由 WGC 回调写入此句柄）
+    encoder: Arc<Mutex<Option<Arc<AvEncoder>>>>,
 }
 
 /// 全局录屏状态
 static RECORDING: Mutex<Option<RecordingHandle>> = Mutex::new(None);
 
+/// 取全局录屏锁。用 `unwrap_or_else(into_inner)` 容忍中毒：命令处理函数持锁期间若 panic 会毒化
+/// Mutex，普通 `.unwrap()` 会让此后所有录屏命令永久崩（须重启才恢复）；容毒可保证录屏功能不被
+/// 单次 panic 拖垮。中毒仅意味着「曾有线程持锁时 panic」，状态可能不一致，但优于整体不可用。
+fn recording_lock() -> std::sync::MutexGuard<'static, Option<RecordingHandle>> {
+    RECORDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 解析 ffmpeg 可执行文件路径：
 /// 1. 优先使用 external-deps/全局/ffmpeg/ffmpeg.exe（随应用打包，无需用户安装）
 /// 2. 回退到系统 PATH 中的 ffmpeg（用户自行安装）
 pub fn get_ffmpeg_path(app: &AppHandle) -> String {
-    if let Some(deps_dir) = crate::commands::get_external_deps_dir(app) {
-        let ffmpeg = deps_dir.join("全局").join("ffmpeg").join("ffmpeg.exe");
+    if let Some(dir) = crate::commands::get_ffmpeg_dir(app) {
+        let ffmpeg = dir.join("ffmpeg.exe");
         if ffmpeg.exists() {
             return ffmpeg.to_string_lossy().to_string();
         }
@@ -483,7 +717,7 @@ pub fn nvenc_skip_reason() -> Option<String> {
 fn encoder_runtime_ok(ffmpeg: &str, enc: &str) -> Result<(), String> {
     let mut cmd = std::process::Command::new(ffmpeg);
     cmd.args([
-            "-hide_banner", "-y", "-f", "lavfi", "-i", "nullsrc=s=128x128",
+            "-hide_banner", "-y", "-f", "lavfi", "-i", "nullsrc=s=640x480",
             "-t", "0.2", "-c:v", enc, "-f", "null", "-",
         ])
         .stderr(Stdio::piped());
@@ -678,7 +912,7 @@ pub async fn start_recording(
 
         // 检查是否已在录制
         {
-            let recording = RECORDING.lock().unwrap();
+            let recording = recording_lock();
             if recording.is_some() {
                 return Err("已在录制中，请先停止当前录制".into());
             }
@@ -812,19 +1046,42 @@ pub async fn start_recording(
         // 音视频同步信号：视频 producer 锚定首帧时置位，音频采集线程等待它再启动时间轴，
         // 使音/视频共用同一时间原点，消除「音画不同步」。producer 见下方捕获段、音频见 audio_capture.rs。
         let video_started = Arc::new(AtomicBool::new(false));
-        let audio_wasapi: Option<String> = resolve_audio_input(&ffmpeg_path);
-        let audio_pipe: Option<(AudioCapture, String, AudioFormat)> = if audio_wasapi.is_none() {
-            match start_audio_capture(video_started.clone()) {
-                Ok(triple) => Some(triple),
-                Err(e) => {
-                    eprintln!("[录屏] 系统声音采集不可用，仅录视频（无声音）: {e}");
-                    None
+
+        // 进程内 libavcodec 编码器是否可用（FFmpeg 共享 DLL 已就位即走「完整 L0」）
+        // 用统一 ffmpeg 目录解析（dev=external-deps/全局/ffmpeg；release=user_external_deps/全局/ffmpeg，.mujin 解压后）。
+        let ffmpeg_dep_dir = crate::commands::get_ffmpeg_dir(&app);
+        let inprocess_available = ffmpeg_dep_dir
+            .as_ref()
+            .and_then(|p| p.to_str())
+            .map(|s| ffi::init_ffmpeg(Some(s)).is_ok())
+            .unwrap_or(false);
+        if !inprocess_available {
+            eprintln!(
+                "[录屏] FFmpeg 共享 DLL 未加载（目录 {:?}），回退旧 ffmpeg 子进程路径",
+                ffmpeg_dep_dir
+            );
+        }
+
+        // 音频输入（best-effort）：
+        // - 进程内路径：音频经 mpsc 通道直接喂进程内 AAC，绝不启动命名管道（没有 ffmpeg 子进程可读管道）。
+        // - 旧路径：优先 ffmpeg 原生 wasapi 回环；否则 Rust 侧 WASAPI 回环写命名管道。
+        let (audio_wasapi, audio_pipe): (Option<String>, Option<(AudioCapture, String, AudioFormat)>) =
+            if inprocess_available {
+                (None, None)
+            } else if let Some(dev) = resolve_audio_input(&ffmpeg_path) {
+                (Some(dev), None)
+            } else {
+                match start_audio_capture(video_started.clone()) {
+                    Ok(triple) => (None, Some(triple)),
+                    Err(e) => {
+                        eprintln!("[录屏] 系统声音采集不可用，仅录视频（无声音）: {e}");
+                        (None, None)
+                    }
                 }
-            }
-        } else {
-            None
-        };
-        if audio_wasapi.is_some() {
+            };
+        if inprocess_available {
+            eprintln!("[录屏] 走进程内 libavcodec 编码器（完整 L0，无 ffmpeg 子进程）");
+        } else if audio_wasapi.is_some() {
             eprintln!("[录屏] 已加入系统声音（ffmpeg 原生 WASAPI 回环）");
         } else if let Some((_c, _p, f)) = &audio_pipe {
             eprintln!("[录屏] 已加入系统声音（Rust WASAPI 回环，命名管道；{} {}ch {}Hz）", f.sample_fmt, f.channels, f.rate);
@@ -843,7 +1100,9 @@ pub async fn start_recording(
         let downscale_4k = (native_w as u64) * (native_h as u64) > 1920u64 * 1080u64;
         // 进程内 GPU RGBA→NV12 转码（含区域裁剪）对本机所有支持 D3D11 渲染管线的硬件均为 true。
         // 区域录制也走 GPU：着色器只采样子矩形、直接输出裁剪后 NV12，绕开「整帧 33MB 读回 + CPU 裁剪」。
-        let gpu_nv12 = nv12_in_process_supported();
+        // 进程内编码器需要 NV12 输入：只要走完整 L0（FFmpeg 共享 DLL 已就位）就启用 GPU BGRA→NV12
+        // （不可共享时由 CPU 兜底），否则按 D3D11 能力探针决定。
+        let gpu_nv12 = inprocess_available || nv12_in_process_supported();
         // 喂给 ffmpeg 的尺寸：4K 全屏一律先降到 1080p（无论 GPU 还是 CPU 兜底路径，产出都 = out_w×out_h
         // = 1080p），故 ffmpeg 永远以 1080p 编码——既避免「GPU 不可用时误编码 4K」导致占用高 / 文件大，
         // 也保证两条路径字节尺寸一致。GPU 路把「4K→1080p 缩放」搬到显卡；GPU 不可用时由 CPU 兜底
@@ -959,6 +1218,8 @@ pub async fn start_recording(
                     "h264_nvenc".into(),
                     "-preset".into(),
                     "p1".into(),
+                    "-tune".into(),
+                    "ll".into(),
                     "-rc".into(),
                     "vbr".into(),
                     "-cq".into(),
@@ -1064,26 +1325,103 @@ pub async fn start_recording(
         ffmpeg_args.extend(["-fps_mode".into(), "cfr".into()]);
         ffmpeg_args.extend(["-movflags".into(), "+faststart".into(), output_path.clone()]);
 
-        // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）
-        let mut cmd = Command::new(&ffmpeg_path);
-        cmd.args(&ffmpeg_args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            // stderr 重定向到输出文件同名的 .ffmpeg.log（普通文件，非管道，不会因缓冲区满
-            // 阻塞 ffmpeg）。区域录屏（奇数尺寸每帧一条警告等）需要保留 stderr 以便排查
-            // 「产出文件异常/无画面」类问题；文件写入无管道背压，不会死锁。
-            .stderr(match std::fs::File::create(format!("{}.ffmpeg.log", output_path)) {
-                Ok(f) => Stdio::from(f),
-                Err(_) => Stdio::null(),
-            });
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
-        let mut child = cmd.spawn()
-            .map_err(|e| format!("启动 ffmpeg 失败: {}（请确认 ffmpeg 已安装）", e))?;
+        // ── 完整 L0 预检：ffmpeg 共享 DLL 可用 → 进程内编码器，否则回退子进程 ──
+        // 复用上方 ffmpeg_dep_dir（统一解析 dev/ release），避免 init_ffmpeg(None) 自动探测漏掉 user_external_deps。
+        let enc_cfg: Option<EncoderConfig> = match ffi::init_ffmpeg(ffmpeg_dep_dir.as_ref().and_then(|p| p.to_str())) {
+            Ok(()) => {
+                let mbps_bps = (target_mbps as u32) * 1_000_000;
+                eprintln!("[录屏] ffmpeg 共享 DLL 已加载，尝试完整 L0 进程内编码器 ({}x{} {}fps {}Mbps)", enc_w, enc_h, fps, target_mbps);
+                Some(EncoderConfig {
+                    output_path: output_path.clone(),
+                    width: enc_w,
+                    height: enc_h,
+                    fps,
+                    bitrate: mbps_bps,
+                    gop: fps * 2,
+                    audio_enabled: audio_wasapi.is_some() || audio_pipe.is_some(),
+                    audio_sample_rate: 48000,
+                    audio_channels: 2,
+                })
+            }
+            Err(e) => {
+                eprintln!("[录屏] ffmpeg 共享 DLL 未找到（{}），回退旧 ffmpeg 子进程路径", e);
+                None
+            }
+        };
+        let encoder_handle: Arc<Mutex<Option<Arc<AvEncoder>>>> = Arc::new(Mutex::new(None));
+        let enc_handle_for_flags = encoder_handle.clone();
 
-        let mut stdin = child.stdin.take().ok_or("无法获取 ffmpeg stdin")?;
+        let use_av_encoder = enc_cfg.is_some();
+
+        // 进程内「完整 L0」编码器：提前建好并放入共享句柄；音频经 mpsc 通道桥接喂入（无 ffmpeg 子进程）。
+        let mut inprocess_audio_cap: Option<AudioCapture> = None;
+        if let Some(cfg) = enc_cfg.clone() {
+            match start_audio_capture_channel(video_started.clone()) {
+                Ok((cap, fmt, audio_rx)) => {
+                    inprocess_audio_cap = Some(cap);
+                    let mut cfg2 = cfg;
+                    cfg2.audio_enabled = true;
+                    cfg2.audio_sample_rate = fmt.rate;
+                    cfg2.audio_channels = fmt.channels;
+                    match AvEncoder::new(cfg2, Some(AudioSource { fmt })) {
+                        Ok(enc) => {
+                            if let Ok(mut g) = encoder_handle.lock() {
+                                *g = Some(enc.clone());
+                            }
+                            // 桥接线程：音频 PCM 通道 → 进程内编码器（非阻塞，编码线程停则退出）
+                            let enc_bridge = enc.clone();
+                            let _ = std::thread::Builder::new()
+                                .name("av-audio-bridge".into())
+                                .spawn(move || {
+                                    while let Ok(bytes) = audio_rx.recv() {
+                                        if !enc_bridge.feed_audio(bytes) {
+                                            break;
+                                        }
+                                    }
+                                });
+                        }
+                        Err(e) => {
+                            eprintln!("[录屏] 进程内编码器(带音频)创建失败，回退仅视频: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[录屏] 进程内音频通道不可用，仅录视频: {e}");
+                    match AvEncoder::new(cfg, None) {
+                        Ok(enc) => {
+                            if let Ok(mut g) = encoder_handle.lock() {
+                                *g = Some(enc);
+                            }
+                        }
+                        Err(e) => eprintln!("[录屏] 进程内编码器(无音频)创建失败: {e}"),
+                    }
+                }
+            }
+        }
+
+        // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）—— 完整 L0 时跳过
+        let mut child: Option<Child> = None;
+        let mut stdin_opt: Option<std::process::ChildStdin> = None;
+
         let stop_flag = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
+
+        if !use_av_encoder {
+            let mut cmd = Command::new(&ffmpeg_path);
+            cmd.args(&ffmpeg_args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(match std::fs::File::create(format!("{}.ffmpeg.log", output_path)) {
+                    Ok(f) => Stdio::from(f),
+                    Err(_) => Stdio::null(),
+                });
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000);
+            let mut c = cmd.spawn()
+                .map_err(|e| format!("启动 ffmpeg 失败: {}（请确认 ffmpeg 已安装）", e))?;
+            stdin_opt = c.stdin.take();
+            child = Some(c);
+        }
 
         // 共享「最新帧槽」：WGC 回调非阻塞覆盖写入（保留最新、丢弃最旧），pacer 按呈现时间取用。
         let latest: Arc<Mutex<Option<CapturedFrame>>> = Arc::new(Mutex::new(None));
@@ -1097,14 +1435,16 @@ pub async fn start_recording(
         // 墙钟、绝不快进；音频(WASAPI 墙钟)同为真实墙钟 → 音画同步。这是根治此前「pacer 用
         // write_all 直写 stdin 被编码器背压门控→实际投帧速率 < 目标 fps→cfr 按帧数打点→视频被
         // 压成快进（顽固的加速现象）」的关键。暂停段从时间基准扣除，恢复后节奏连续、无补帧爆发。
-        let pacer_latest = latest.clone();
-        let pacer_stop = stop_flag.clone();
-        let pacer_paused = paused.clone();
-        let pacer_video_started = video_started.clone();
-        let frame_dur = std::time::Duration::from_secs_f64(1.0 / (fps.max(1) as f64));
-        // 有界通道：容量=数秒缓冲，足以吸收瞬时编码抖动；稳态近空，内存占用极低。
-        let chan_cap = ((fps as usize) * 2).clamp(30, 120);
-        let (tx, rx) = mpsc::sync_channel::<Arc<Vec<u8>>>(chan_cap);
+        let mut writer_thread: Option<std::thread::JoinHandle<()>> = None;
+        if !use_av_encoder {
+            let pacer_latest = latest.clone();
+            let pacer_stop = stop_flag.clone();
+            let pacer_paused = paused.clone();
+            let pacer_video_started = video_started.clone();
+            let frame_dur = std::time::Duration::from_secs_f64(1.0 / (fps.max(1) as f64));
+            // 有界通道：容量=数秒缓冲，足以吸收瞬时编码抖动；稳态近空，内存占用极低。
+            let chan_cap = ((fps as usize) * 2).clamp(30, 120);
+            let (tx, rx) = mpsc::sync_channel::<Arc<Vec<u8>>>(chan_cap);
         // —— producer（投帧节拍器）：恒定墙钟节奏，不碰 stdin、永不被编码器门控 ——
         let producer_thread = std::thread::spawn(move || {
             let mut start: Option<std::time::Instant> = None; // 首帧到达才锚定，避免开场空闲计入时长
@@ -1171,14 +1511,16 @@ pub async fn start_recording(
             // producer 退出 → tx drop → consumer 收完通道剩余帧后收到 EOF
         });
         // —— consumer（写入线程）：唯一持有 ffmpeg stdin，按编码器吞吐取帧写出 ——
-        let writer_thread = std::thread::spawn(move || {
+        writer_thread = Some(std::thread::spawn(move || {
             loop {
                 match rx.recv() {
                     Ok(data) => {
-                        if stdin.write_all(&data).is_err() {
-                            // ffmpeg 已退出/管道断开：停止写帧。配合 {output}.ffmpeg.log 可定位
-                            // 其退出原因（如输入尺寸/格式不匹配、编码器初始化失败）。
-                            eprintln!("[录屏] 写 ffmpeg stdin 失败（ffmpeg 已退出或管道断开），停止投帧");
+                        if let Some(ref mut s) = stdin_opt {
+                            if s.write_all(&data).is_err() {
+                                eprintln!("[录屏] 写 ffmpeg stdin 失败（ffmpeg 已退出或管道断开），停止投帧");
+                                break;
+                            }
+                        } else {
                             break;
                         }
                     }
@@ -1186,9 +1528,10 @@ pub async fn start_recording(
                 }
             }
             // 循环结束：stdin 于此作用域 drop，关闭管道触发 ffmpeg EOF
-        });
+        }));
         // producer 不参与停止时的 join（detach）：stop_flag 触发后自行退出、tx drop，consumer 自然收尾。
         drop(producer_thread);
+        } // end if !use_av_encoder
 
         // 启动 WGC 捕获线程
         let latest_for_capture = latest.clone();
@@ -1241,9 +1584,10 @@ pub async fn start_recording(
                 MinimumUpdateIntervalSettings::Custom(cap_interval),
                 DirtyRegionSettings::Default,
                 ColorFormat::Rgba8,
-                // 稳定路径强制纯 RGBA 读回（gpu_nv12=false）：跳过脆弱的 GPU 转换器，
-                // 杜绝任何黑屏风险；4K 降采样交由下方 rgba_resize_crop_nearest 在 CPU 完成。
-                (latest_for_capture, stop_for_capture, paused_for_capture, crop, free.clone(), false, downscale_4k, (enc_w, enc_h)),
+                // 完整 L0：走进程内 libavcodec 时启用 GPU BGRA→NV12（含 4K 内降采样），
+                // 帧直接喂进程内 nvenc，去掉 ffmpeg 子进程与 stdin 字节管道。
+                // gpu_nv12 在 enc_cfg.is_some() 时恒为 true；仅当 D3D11 转换探针失败才回退 CPU。
+                (latest_for_capture, stop_for_capture, paused_for_capture, crop, free.clone(), gpu_nv12, downscale_4k, (enc_w, enc_h), enc_cfg.clone(), enc_handle_for_flags, video_started.clone()),
             );
             if let Err(e) = WgcRecorder::start(settings) {
                 eprintln!("[录屏] WGC 捕获异常: {}", e);
@@ -1253,17 +1597,19 @@ pub async fn start_recording(
 
         // 取出 Rust 音频采集句柄（仅命名管道路径有；ffmpeg 原生 WASAPI 无需此句柄），
         // 移入全局录屏句柄，停止录制时一并关闭管道/线程。
-        let audio_cap = audio_pipe.map(|(cap, _p, _f)| cap);
+        // 进程内路径：音频采集句柄（mpsc 通道）也需随 RecordingHandle 释放；旧路径用命名管道句柄
+        let audio_cap = inprocess_audio_cap.take().or_else(|| audio_pipe.map(|(cap, _p, _f)| cap));
         // 保存录屏句柄
-        *RECORDING.lock().unwrap() = Some(RecordingHandle {
-            ffmpeg_child: Some(child),
+        *recording_lock() = Some(RecordingHandle {
+            ffmpeg_child: child,
             capture_thread: Some(capture_thread),
-            writer_thread: Some(writer_thread),
+            writer_thread,
             audio: audio_cap,
             stop_flag,
             paused,
             start_time: SystemTime::now(),
             output_path: output_path.clone(),
+            encoder: encoder_handle,
         });
 
         // 通知前端开始录制
@@ -1316,7 +1662,7 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
         // 后台监视线程，结束后再广播「最终」事件；同时立即广播 `recording-saving` 占位，
         // 让前端显示「录屏文件保存中」，绝不静默。
         let mut handle = {
-            let mut handle_opt = RECORDING.lock().unwrap();
+            let mut handle_opt = recording_lock();
             handle_opt
                 .take()
                 .ok_or_else(|| "未在录制中".to_string())?
@@ -1337,87 +1683,92 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
         drop(handle.writer_thread.take());
 
         let output_path = handle.output_path.clone();
-        let mut child = handle.ffmpeg_child.take().ok_or("ffmpeg 进程丢失")?;
-        // 取出音频采集句柄：录制结束（ffmpeg 退出）后再关闭管道/线程，
-        // 不可提前关闭——否则 -shortest 会以「音频 EOF」为最短输入截断视频。
         let audio_cap = handle.audio.take();
 
-        // 4. 立即广播「保存中」占位（前端显示「录屏文件保存中」，不静默等待）。
-        //    用 &output_path 借用，避免把 output_path 移入 json! 宏（后续还需返回）。
+        // 尝试取出进程内编码器（完整 L0 路径）
+        let av_encoder = handle.encoder.lock().ok().and_then(|mut g| g.take());
+
+        // 立即广播「保存中」占位
         let _ = app.emit(
             "recording-saving",
             serde_json::json!({ "path": &output_path, "status": "saving" }),
         );
 
-        // 5. 后台监视线程：等 ffmpeg 真正退出（封装/快启完成）后再广播最终事件。
-        //    超时放宽到 120s（远超原 5s），巨大录屏也能安全封装完成、不再被误杀。
         let app2 = app.clone();
         let out_path = output_path.clone();
-        std::thread::spawn(move || {
-            // 读取 ffmpeg stderr 日志尾部（若有），失败时一并回传给前端，省去手动翻文件。
-            let ffmpeg_log_tail = std::fs::read_to_string(format!("{}.ffmpeg.log", out_path))
-                .map(|s| {
-                    let t = s.trim();
-                    if t.len() > 1500 {
-                        format!("…{}", &t[t.len() - 1500..])
-                    } else {
-                        t.to_string()
-                    }
-                })
-                .unwrap_or_default();
-            match child.wait_timeout(std::time::Duration::from_secs(120)) {
-                Ok(Some(status)) => {
-                    if !status.success() {
-                        // 编码失败也要广播：否则前端保存面板永远不弹（表现为「录屏没效果」）
+
+        if let Some(encoder) = av_encoder {
+            // ── 完整 L0 路径：进程内编码器停止（stop 支持 &self）──
+            std::thread::spawn(move || {
+                encoder.stop();
+                if let Ok(meta) = std::fs::metadata(&out_path) {
+                    if meta.len() <= 1024 {
                         let _ = app2.emit("recording-stopped", "");
-                        let _ = app2.emit(
-                            "recording-error",
-                            format!(
-                                "ffmpeg 编码失败（进程异常退出），未生成录屏文件。ffmpeg 日志：\n{}",
-                                ffmpeg_log_tail
-                            ),
-                        );
-                        return;
+                        let _ = app2.emit("recording-error", "录制文件异常（体积过小）");
+                    } else {
+                        let _ = app2.emit("recording-stopped", &out_path);
                     }
-                    // 体积校验：ffmpeg 偶发「静默成功」产出 0/极小文件（如未捕获到任何画面、
-                    // 或捕获会话异常）。若文件过小，说明录制实际无效，必须报错而非假装成功，
-                    // 否则用户看到「保存 MP4」却得到打不开的空文件 → 以为「录屏还是不行」。
-                    if let Ok(meta) = std::fs::metadata(&out_path) {
-                        if meta.len() <= 1024 {
+                } else {
+                    let _ = app2.emit("recording-stopped", &out_path);
+                }
+                if let Some(mut a) = audio_cap {
+                    a.stop();
+                }
+            });
+        } else if let Some(mut child) = handle.ffmpeg_child.take() {
+            // ── 旧 ffmpeg 子进程路径 ──
+            std::thread::spawn(move || {
+                let ffmpeg_log_tail = std::fs::read_to_string(format!("{}.ffmpeg.log", out_path))
+                    .map(|s| {
+                        let t = s.trim();
+                        if t.len() > 1500 {
+                            format!("…{}", &t[t.len() - 1500..])
+                        } else {
+                            t.to_string()
+                        }
+                    })
+                    .unwrap_or_default();
+                match child.wait_timeout(std::time::Duration::from_secs(120)) {
+                    Ok(Some(status)) => {
+                        if !status.success() {
                             let _ = app2.emit("recording-stopped", "");
                             let _ = app2.emit(
                                 "recording-error",
-                                format!(
-                                    "录制文件异常（体积过小，未捕获到画面）。ffmpeg 日志：\n{}",
-                                    ffmpeg_log_tail
-                                ),
+                                format!("ffmpeg 编码失败（进程异常退出）。ffmpeg 日志：\n{}", ffmpeg_log_tail),
                             );
                             return;
                         }
+                        if let Ok(meta) = std::fs::metadata(&out_path) {
+                            if meta.len() <= 1024 {
+                                let _ = app2.emit("recording-stopped", "");
+                                let _ = app2.emit(
+                                    "recording-error",
+                                    format!("录制文件异常（体积过小）。ffmpeg 日志：\n{}", ffmpeg_log_tail),
+                                );
+                                return;
+                            }
+                        }
+                        let _ = app2.emit("recording-stopped", &out_path);
                     }
-                    let _ = app2.emit("recording-stopped", &out_path);
+                    Ok(None) => {
+                        eprintln!("[录屏] ffmpeg 120s 内未退出，强制终止");
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = app2.emit("recording-stopped", "");
+                        let _ = app2.emit("recording-error", "ffmpeg 编码超时，已强制终止");
+                    }
+                    Err(e) => {
+                        let _ = app2.emit("recording-stopped", "");
+                        let _ = app2.emit("recording-error", format!("等待 ffmpeg 结束失败: {}", e));
+                    }
                 }
-                Ok(None) => {
-                    // 超时：ffmpeg 未退出，强制 kill（输出文件可能不完整，但避免无限等待）
-                    eprintln!("[录屏] ffmpeg 120s 内未退出，强制终止");
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = app2.emit("recording-stopped", "");
-                    let _ = app2.emit(
-                        "recording-error",
-                        "ffmpeg 编码超时，已强制终止（未生成录屏文件）",
-                    );
+                if let Some(mut a) = audio_cap {
+                    a.stop();
                 }
-                Err(e) => {
-                    let _ = app2.emit("recording-stopped", "");
-                    let _ = app2.emit("recording-error", format!("等待 ffmpeg 结束失败: {}", e));
-                }
-            }
-            // 录制结束（ffmpeg 已退出或超时）：关闭系统声音采集管道与线程，释放 COM/句柄。
-            if let Some(mut a) = audio_cap {
-                a.stop();
-            }
-        });
+            });
+        } else {
+            return Err("录制会话异常（无编码器、无 ffmpeg 进程）".into());
+        }
 
         // 命令立即返回（不再阻塞）：前台「停止」即刻完成，文件在后台封装。
         Ok(output_path)
@@ -1429,7 +1780,7 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
 /// 暂停录制
 #[tauri::command]
 pub fn pause_recording() -> Result<(), String> {
-    let recording = RECORDING.lock().unwrap();
+    let recording = recording_lock();
     let handle = recording.as_ref().ok_or("未在录制中")?;
     handle.paused.store(true, Ordering::SeqCst);
     Ok(())
@@ -1438,7 +1789,7 @@ pub fn pause_recording() -> Result<(), String> {
 /// 恢复录制
 #[tauri::command]
 pub fn resume_recording() -> Result<(), String> {
-    let recording = RECORDING.lock().unwrap();
+    let recording = recording_lock();
     let handle = recording.as_ref().ok_or("未在录制中")?;
     handle.paused.store(false, Ordering::SeqCst);
     Ok(())
@@ -1447,7 +1798,7 @@ pub fn resume_recording() -> Result<(), String> {
 /// 获取录屏状态
 #[tauri::command]
 pub fn get_recording_status() -> RecordingStatus {
-    let recording = RECORDING.lock().unwrap();
+    let recording = recording_lock();
     match recording.as_ref() {
         Some(handle) => {
             let elapsed = handle
@@ -1557,12 +1908,7 @@ pub fn create_recorder_widget_window(app: &AppHandle) -> Result<(), String> {
         return Ok(()); // 已存在则复用
     }
 
-    // 控制台显示在屏幕正上方居中（需将物理像素转换为逻辑像素以正确居中）
-    let (_screen_w, _screen_h) = screen_size();
-    let _scale = unsafe {
-        let dpi = winapi::um::winuser::GetDpiForSystem();
-        if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
-    };
+    // 离屏创建（-4000,-4000），实际居中定位由 show_recorder_widget 完成（那里用 win.scale_factor() 算逻辑坐标）。
     let widget_w = 320.0_f64;
     let widget_h = 52.0_f64;
 
