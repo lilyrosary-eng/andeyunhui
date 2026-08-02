@@ -37,7 +37,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "rt", "macros", "time", "process", "fs"] }
 log = "0.4"
-reqwest = { version = "0.12", features = ["json"] }
+# TLS 后端统一为 rustls（纯 Rust，跨平台、无原生 OpenSSL 依赖）：
+# 与 app 的 reqwest 配置保持一致。原默认特性含 native-tls，在 Android/Linux 目标下
+# 会拉入 openssl-sys 并要求原生 OpenSSL 库，导致交叉编译失败；Windows 上 native-tls
+# 走 schannel 不需要 OpenSSL，故此前 cargo check 能过。改为 rustls-tls 后 Android 交叉
+# 编译可行，且 Windows 行为不变（app 侧本就用 rustls）。属 T2「非 Android 依赖门控」修复。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # 无锁策略热交换（ArcSwap）：双轨制核心，亚毫秒级策略切换
 arc-swap = "1"
 # 无锁 MPMC 队列：用户提示词 @focus/@bypass 抢占式优先级队列

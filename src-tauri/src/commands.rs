@@ -115,6 +115,29 @@ pub fn get_user_external_deps_dir(app: &AppHandle) -> Option<PathBuf> {
     Some(app_data.join("user_external_deps"))
 }
 
+/// 解析 ffmpeg 共享目录（含 ffmpeg.exe + avcodec/avformat/avutil 等 DLL）。
+/// dev：external-deps/全局/ffmpeg（项目源码目录）；
+/// release：user_external_deps/全局/ffmpeg（bundled-dlc 的 ffmpeg.mujin 经 extract_mujin_deps 解压后落地处）。
+/// 统一供 get_ffmpeg_path 与 init_ffmpeg 使用，修复「打包后 .mujin 解压到 user_external_deps
+/// 但旧查找只查 external-deps/，导致录屏找不到 ffmpeg/DLL」的链路断裂。
+pub fn get_ffmpeg_dir(app: &AppHandle) -> Option<PathBuf> {
+    // 1. dev / 打包资源：external-deps/全局/ffmpeg
+    if let Some(deps_dir) = get_external_deps_dir(app) {
+        let ffmpeg = deps_dir.join("全局").join("ffmpeg");
+        if ffmpeg.exists() {
+            return Some(ffmpeg);
+        }
+    }
+    // 2. release 兜底：.mujin 解压到 user_external_deps/全局/ffmpeg
+    if let Some(user_deps) = get_user_external_deps_dir(app) {
+        let ffmpeg = user_deps.join("全局").join("ffmpeg");
+        if ffmpeg.exists() {
+            return Some(ffmpeg);
+        }
+    }
+    None
+}
+
 // ========== .mufurong 专属格式自动解压 ==========
 // .mufurong = ZIP 改后缀。用户把 .mufurong 文件放到 user_plugins/（或子目录）下，
 // 应用启动或刷新插件列表时自动扫描并解压到同名目录。

@@ -227,7 +227,13 @@ pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
             // DComp 根治：把胶囊/歌词从 WS_EX_LAYERED 重定向改为 DirectComposition swapchain，
             // 走 DWM 常规合成、不被外部媒体 overlay 抢占（详见 dcomp_overlay.rs）。仅 ANDY_DCOMP=1 生效。
             if let Ok(ctrl) = raw.controller().cast::<ICoreWebView2Controller>() {
-                crate::dcomp_overlay::try_enable(ctrl, &label, hwnd);
+                let ok = crate::dcomp_overlay::try_enable(ctrl, &label, hwnd);
+                if ok {
+                    log::info!("[overlay] dcomp 已激活 label={}（走 DComp swapchain，外部媒体下不卡）", label);
+                }
+                // 失败时由 try_enable 内部按失败步骤打 [dcomp] WARN（仅 capsule/floating-lyrics）；
+                // 白名单外的窗（screenshot-overlay / recorder-select / deskpet）静默——它们本就走
+                // layered，旧实现对所有 label 打 WARN 造成"screenshot-overlay 激活失败"误报噪音。
             }
             // SetDefaultBackgroundColor 定义在 ICoreWebView2Controller2；cast 到 2（而非 3）
             // 以兼容仅支持到 Controller2 的旧 WebView2 运行时，确保透明背景一定生效。
@@ -456,6 +462,14 @@ pub fn present_overlay_now(_webview: tauri::Webview) {}
 #[cfg(not(windows))]
 #[tauri::command]
 pub fn set_overlay_transparent(_webview: tauri::Webview, _app: tauri::AppHandle) {}
+
+/// 诊断：返回指定覆盖窗是否已成功切到 DirectComposition swapchain。
+/// true=已激活（外部媒体下不卡）；false=回落 layered 重定向（外部媒体下可能卡）。
+/// 供胶囊 DEV 探针调用，打破 DComp 静默回落导致的「不知是否生效」盲调。
+#[tauri::command]
+pub fn dcomp_is_active(label: String) -> bool {
+    crate::dcomp_overlay::is_active(&label)
+}
 
 /// 返回虚拟桌面矩形（物理像素）与系统 DPI 缩放比，供前端在创建截图覆盖窗时
 /// 计算「逻辑全屏」尺寸（inner_size 接受逻辑像素 = 物理 / scale），与录屏

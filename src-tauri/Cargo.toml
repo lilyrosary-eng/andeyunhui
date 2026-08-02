@@ -79,9 +79,17 @@ pdf-extract = "0.12"
 lopdf = { version = "0.42", features = ["embed_image"] }
 # 一次性预编译正则（html_to_md 等热路径）
 once_cell = "1"
+# IDE 内容搜索（命令面板 `#` 模式 / agent grep 工具）：gitignore 感知的并行目录遍历。
+# ignore 是 ripgrep 的目录遍历核心（MIT），自动尊重 .gitignore/.ignore/全局 gitignore。
+ignore = "0.4"
+# IDE 真 PTY 终端 portable-pty 已迁移至 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]，
+# 仅桌面编译（原因见该段注释）。
 # 统一日志门面：release 默认 warn 级别，dev 开 debug；替代散落的 eprintln!
 log = "0.4"
 env_logger = "0.11"
+# 进程内 ffmpeg 编码器（完整 L0：d3d11va→nvenc 零拷贝）
+# libloading 运行时加载 avcodec-*.dll / avformat-*.dll / avutil-*.dll
+libloading = "0.8"
 
 # Windows 任务栏「正在播放」显示名修正：设置本进程 AUMID + 注册表显示名「安得云荟」，
 # 使 WebView2/Chromium 注册的媒体会话显示为「安得云荟」而非「未知应用」。
@@ -104,6 +112,7 @@ windows = { version = "0.62", features = [
   "Win32_Media_Audio",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
+  "Win32_System_Ioctl",
   "Win32_System_Pipes",
   "Win32_Security",
   # 阶段二（进程内 GPU RGBA→RGBA 缩放）：D3D11 渲染管线 + 运行时 D3DCompile 需要这些 API
@@ -154,6 +163,15 @@ arboard = "3"
 # 桌宠全局设备监听（鼠标/键盘）：被动全局钩子，仅 Windows 版 device.rs 使用
 # 0.5.x 的 listen 接受捕获式 FnMut 闭包（可直接 move AppHandle），更简洁
 rdev = "0.5"
+# IDE 真 PTY 终端：portable-pty（MIT）跨平台 PTY，Windows 走 ConPTY（Win10 1809+ 内置）。
+# 读线程通过 app.emit 推流 pty-output:<id> 事件，前端 xterm.js 监听写入（沙箱屏蔽 WebSocket，故走事件桥接）。
+# 迁入原因：portable-pty 0.8 的 Unix 后端经 serial → serial-unix → termios 引入，而 termios 0.2
+# 仅实现 linux/macos/freebsd/openbsd，无 android 分支，在 aarch64-linux-android 下必然编译失败
+# （E0432/E0433，28 errors）。PTY 终端属 IDE 插件（茑萝/ide）本地终端功能，Android v1 五模块
+# （笔记/音乐/视频/图片/传输）不涉及；唯一使用者 services/pty_service.rs 已同步加 cfg 门控，
+# 其 4 个 #[tauri::command] 仅在桌面二进制 main.rs 注册，移动端不经过该路径。
+# Windows/桌面 Linux/macOS 构建行为完全不变。
+portable-pty = "0.8"
 
 [features]
 # 攻防模块：启用爬虫框架（reqwest 代理池 + 双令牌桶 + EWMA + CDP 隐身 JS）

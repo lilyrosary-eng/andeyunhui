@@ -24,6 +24,18 @@ pub mod rag_service;
 pub mod shell_service;
 pub mod lsp_service;
 pub mod mcp_service;
+// IDE 内容搜索（gitignore 感知并行遍历 + 字面量匹配）：命令面板 `#` 模式 / agent grep 工具
+pub mod search_service;
+// IDE 源码管理（git CLI 封装）：status/diff/stage/commit/log/branch，供 sourceControl/gitHistory 前端调用
+// 不引入 git2 原生依赖，借用系统 git（兼容至上、轻量高效）
+pub mod git_service;
+// IDE 真 PTY 终端（portable-pty）：spawn/读写/resize/kill + 事件推流，供 xterm.js 前端桥接。
+// portable-pty 的 Unix 后端依赖 termios（无 android 分支），故 Android/iOS 不编译该模块，
+// 依赖侧已同步迁至 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]。
+// 无需移动端桩：pty_create/pty_write/pty_resize/pty_kill 四个命令仅由桌面二进制 main.rs 注册，
+// lib 侧（Android 入口 android/mod.rs）无任何引用。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod pty_service;
 
 use std::path::{Path, PathBuf};
 

@@ -92,6 +92,9 @@ use andeyunhui_lib::services::ai_service;
 use andeyunhui_lib::services::shell_service;
 use andeyunhui_lib::services::lsp_service;
 use andeyunhui_lib::services::mcp_service;
+use andeyunhui_lib::services::search_service;
+use andeyunhui_lib::services::git_service;
+use andeyunhui_lib::services::pty_service;
 use andeyunhui_lib::smtc::*;
 use std::sync::Mutex;
 
@@ -143,6 +146,30 @@ async fn capsule_ip_location() -> Option<serde_json::Value> {
 }
 
 fn main() {
+    // === WebView2「Window to Visual」托管模式（根治外部媒体下胶囊浮岛卡顿）===
+    // 必须在【任何 WebView2 环境创建之前】（即 tauri::Builder 之前）设置，迟于此时点无效。
+    //
+    // 背景：wry 0.55.1 只走 CreateCoreWebView2Controller（HWND 模式），WebView2 内容直绘 HWND。
+    // 胶囊是 WS_EX_LAYERED 透明窗，其像素经 DWM「重定向(redirect)路径」上屏；当外部媒体
+    // （Spotify/视频等）走硬件 overlay / independent-flip 时会抢占该路径，导致浮岛渲染器虽
+    // 144fps 但屏幕停在旧帧（卡顿）。手写的 dcomp_overlay.rs 因 wry 控制器非 composition 模式
+    // （cast CompositionController 必返 E_NOINTERFACE 0x80004002）从未生效。
+    //
+    // 正解：微软官方第三种托管模式「Window to Visual hosting」——运行时内部把内容绘到 DComp
+    // Visual（走 DWM 常规合成管道，不被 overlay 抢占），输入仍由 OS 处理（无需 SendMouseInput），
+    // 且【不需要】CreateCoreWebView2CompositionController，wry 现有 HWND 控制器路径原样可用。
+    // 详见 https://learn.microsoft.com/en-us/microsoft-edge/WebView2/concepts/windowed-vs-visual-hosting
+    // Wails v3 的 UseVisualHosting 选项即设此 env var。
+    //
+    // 进程级生效（wry 共享单一 environment，无法仅对胶囊生效），故门控：默认关闭，
+    // ANDY_W2V=1 显式开启。验证项：(1) 外部媒体下胶囊不再卡；(2) 主窗/IDE Tab 焦点正常
+    // （已知该模式可能破坏页内 Tab 处理，见 datadiode/webview2#1）；(3) 胶囊圆角/透明/点击穿透正常。
+    // 验证通过后再改为默认开启，并清理 dcomp_overlay.rs。
+    if std::env::var("ANDY_W2V").map(|v| v != "0" && !v.eq_ignore_ascii_case("false")).unwrap_or(false) {
+        std::env::set_var("COREWEBVIEW2_FORCED_HOSTING_MODE", "COREWEBVIEW2_HOSTING_MODE_WINDOW_TO_VISUAL");
+        eprintln!("[W2V] 已启用 Window-to-Visual 托管模式（COREWEBVIEW2_FORCED_HOSTING_MODE）");
+    }
+
     // 尽早设置本进程 AUMID + 注册表显示名「安得云荟」，使随后创建的主窗口继承该 AUMID，
     // 任务栏媒体浮窗据此显示「安得云荟」而非「未知应用」。（早于窗口创建，故窗口可继承）
     andeyunhui_lib::smtc::ensure_app_identity();
@@ -1077,6 +1104,7 @@ fn main() {
             set_overlay_transparent,
             set_overlay_repaint_rate,
             present_overlay_now,
+            dcomp_is_active,
             get_screenshot_desktop_rect,
             // 浮窗统一创建引擎（window_manager 引擎）
             window_manager::overlay_window_get_or_create,
@@ -1146,6 +1174,25 @@ fn main() {
             shell_service::run_shell_command,
             // ========== 全局：AI agent 受限 shell（白名单 + Dry-Run 黑名单 + 超时）==========
             shell_service::run_agent_shell,
+            // ========== 全局：IDE 内容搜索（命令面板 `#` 模式 / agent grep 工具）==========
+            // gitignore 感知并行遍历 + 字面量匹配，参考 ripgrep 的 ignore crate
+            search_service::search_content,
+            // ========== 全局：IDE 源码管理（git CLI 封装，零原生依赖）==========
+            // sourceControl / gitHistory 前端调用；借用系统 git，不引入 git2
+            git_service::git_status,
+            git_service::git_diff,
+            git_service::git_stage,
+            git_service::git_unstage,
+            git_service::git_commit,
+            git_service::git_current_branch,
+            git_service::git_branch_list,
+            git_service::git_log,
+            // ========== 全局：IDE 真 PTY 终端（portable-pty，事件桥接 xterm.js）==========
+            // 沙箱屏蔽 WebSocket，故输出走 Tauri 事件 pty-output:<id>
+            pty_service::pty_create,
+            pty_service::pty_write,
+            pty_service::pty_resize,
+            pty_service::pty_kill,
             // ========== 全局：IDE LSP 诊断（伪 LSP：tsc/cargo check/pyright 一次性命令）==========
             lsp_service::lsp_diagnostics,
             // ========== 全局：IDE MCP 客户端（stdio JSON-RPC，扩展 agent 工具能力）==========
