@@ -1,5 +1,6 @@
 /// <reference path="../../../global.d.ts" />
 import React from "react";
+import { marked } from "marked";
 // 茑萝 · IDE · AI 编程 子插件（Cursor / Claude Code 风格）
 //
 // 多级嵌套：niaoluo（茑萝）→ ide（IDE）→ ai（AI 编程）。本插件是 IDE 的子插件，
@@ -188,6 +189,59 @@ function CodeBlock({ lang, value }: { lang: string; value: string }) {
       </div>
       <pre className="px-3 py-2 text-xs text-neutral-100 dark:text-stone-100 overflow-x-auto whitespace-pre"><code>{value}</code></pre>
     </div>
+  );
+}
+
+// Markdown 渲染：AI 与用户消息中的 # 标题、**加粗**、*斜体*、`代码`、列表、引用、链接等字符
+// 激活对应效果。gfm 开启表格/删除线等；breaks 让单行换行转 <br>，贴合聊天原有的换行习惯。
+// 注意：代码块已由 parseContent 抽离给 CodeBlock，这里只渲染正文片段，不会重复包代码。
+const MD_CSS = `
+.niaoluo-md { font-size: inherit; line-height: 1.6; word-break: break-word; }
+.niaoluo-md > :first-child { margin-top: 0; }
+.niaoluo-md > :last-child { margin-bottom: 0; }
+.niaoluo-md p { margin: 0 0 0.5em; }
+.niaoluo-md h1, .niaoluo-md h2, .niaoluo-md h3, .niaoluo-md h4 { margin: 0.6em 0 0.3em; font-weight: 600; line-height: 1.3; }
+.niaoluo-md h1 { font-size: 1.35em; } .niaoluo-md h2 { font-size: 1.2em; } .niaoluo-md h3 { font-size: 1.08em; } .niaoluo-md h4 { font-size: 1em; }
+.niaoluo-md ul, .niaoluo-md ol { margin: 0.3em 0 0.6em; padding-left: 1.4em; }
+.niaoluo-md ul { list-style: disc; } .niaoluo-md ol { list-style: decimal; }
+.niaoluo-md li { margin: 0.15em 0; }
+.niaoluo-md li > ul, .niaoluo-md li > ol { margin: 0.15em 0; }
+.niaoluo-md a { color: var(--element-bg); text-decoration: underline; }
+.niaoluo-md code { background: rgba(127,127,127,0.18); padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.9em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.niaoluo-md pre { background: rgba(127,127,127,0.12); padding: 0.6em 0.8em; border-radius: 8px; overflow-x: auto; margin: 0.4em 0; }
+.niaoluo-md pre code { background: none; padding: 0; }
+.niaoluo-md blockquote { border-left: 3px solid rgba(127,127,127,0.4); margin: 0.4em 0; padding: 0.1em 0.8em; opacity: 0.85; }
+.niaoluo-md hr { border: none; border-top: 1px solid rgba(127,127,127,0.3); margin: 0.6em 0; }
+.niaoluo-md table { border-collapse: collapse; margin: 0.4em 0; font-size: 0.92em; }
+.niaoluo-md th, .niaoluo-md td { border: 1px solid rgba(127,127,127,0.3); padding: 0.25em 0.5em; }
+`;
+let mdStyleInjected = false;
+function ensureMdStyle() {
+  if (mdStyleInjected) return;
+  if (typeof document !== 'undefined' && !document.getElementById('niaoluo-md-style')) {
+    const s = document.createElement('style');
+    s.id = 'niaoluo-md-style';
+    s.textContent = MD_CSS;
+    document.head.appendChild(s);
+  }
+  mdStyleInjected = true;
+}
+function mdHtml(t: string): string {
+  try {
+    return marked.parse(t, { gfm: true, breaks: true, async: false }) as string;
+  } catch {
+    return t;
+  }
+}
+function Markdown({ text, className }: { text: string; className?: string }) {
+  useEffect(() => {
+    ensureMdStyle();
+  }, []);
+  return (
+    <div
+      className={'niaoluo-md ' + (className || '')}
+      dangerouslySetInnerHTML={{ __html: mdHtml(text) }}
+    />
   );
 }
 
@@ -754,12 +808,12 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
                     {parseContent(m.content).map((part, i) =>
                       part.type === 'code'
                         ? <CodeBlock key={i} lang={part.lang} value={part.value} />
-                        : <span key={i} className="whitespace-pre-wrap break-words">{part.value}</span>,
+                        : <Markdown key={i} text={part.value} className="whitespace-pre-wrap break-words" />,
                     )}
                     {m.streaming && <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-[var(--element-bg)] animate-pulse" />}
                   </div>
                 ) : (
-                  <span className="whitespace-pre-wrap break-words">{m.content}</span>
+                  <Markdown text={m.content} className="whitespace-pre-wrap break-words" />
                 )}
               </div>
             </div>

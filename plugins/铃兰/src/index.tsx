@@ -6,7 +6,7 @@ import { TrackList } from './TrackList';
 import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
-import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState } from '../../_shared/pluginRuntime';
+import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
@@ -66,6 +66,7 @@ interface MusicSettingsPanelProps {
 }
 
 function MusicSettingsPanel(p: MusicSettingsPanelProps) {
+  useLang();
   const ModuleSettingsPanel = (window.__HOST_UI__ as Record<string, unknown>)?.ModuleSettingsPanel as
     | React.ComponentType<{ title: string; icon: React.ReactNode; onClose: () => void; children: React.ReactNode }>
     | undefined;
@@ -73,7 +74,7 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
 
   return (
     <ModuleSettingsPanel
-      title="铃兰"
+      title={T('music.title')}
       icon={
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
           <path d="M9 18V5l12-2v13" />
@@ -85,9 +86,9 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
     >
       {/* 歌词设置 */}
       <div className="glass-panel p-4">
-        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">歌词设置</h3>
+        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">{T('music.settings.lyrics')}</h3>
         <div className="flex items-center justify-between mb-3">
-          <span className="text-xs text-neutral-600 dark:text-stone-300">联网获取歌词</span>
+          <span className="text-xs text-neutral-600 dark:text-stone-300">{T('music.settings.onlineLyrics')}</span>
           <button
             onClick={() => p.onOnlineLyricsToggle(!p.onlineLyricsEnabled)}
             className="w-9 h-5 rounded-full transition-colors"
@@ -100,7 +101,7 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
           </button>
         </div>
         <div className="flex items-center justify-between">
-          <span className="text-xs text-neutral-600 dark:text-stone-300">本地 LRC 优先于内嵌歌词</span>
+          <span className="text-xs text-neutral-600 dark:text-stone-300">{T('music.settings.localLrcFirst')}</span>
           <button
             onClick={() => p.onLocalLrcFirstToggle(!p.localLrcFirst)}
             className="w-9 h-5 rounded-full transition-colors"
@@ -113,7 +114,7 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
           </button>
         </div>
         <div className="flex items-center justify-between mt-3">
-          <span className="text-xs text-neutral-600 dark:text-stone-300">歌词对齐方式</span>
+          <span className="text-xs text-neutral-600 dark:text-stone-300">{T('music.settings.lyricsAlign')}</span>
           <div className="flex gap-1 rounded-lg p-0.5 bg-[var(--element-muted)]">
             {(['center', 'left', 'right'] as const).map((opt) => (
               <button
@@ -122,7 +123,7 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
                 className="px-2 py-1 rounded-md text-xs transition-colors"
                 style={p.lyricsAlign === opt ? { background: 'var(--element-bg)', color: '#fff' } : { color: 'var(--text-secondary, #78716c)' }}
               >
-                {opt === 'center' ? '居中' : opt === 'left' ? '左对齐' : '右对齐'}
+                {opt === 'center' ? T('music.settings.alignCenter') : opt === 'left' ? T('music.settings.alignLeft') : T('music.settings.alignRight')}
               </button>
             ))}
           </div>
@@ -131,9 +132,9 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
 
       {/* 桌面歌词 */}
       <div className="glass-panel p-4">
-        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">桌面歌词</h3>
+        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">{T('music.settings.desktopLyrics')}</h3>
         <div className="mb-3">
-          <label className="block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2">{`字体大小: ${p.lyricsFontSize}px`}</label>
+          <label className="block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2">{T('music.settings.fontSize', { px: p.lyricsFontSize })}</label>
           <input
             type="range"
             min={16}
@@ -144,7 +145,7 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
           />
         </div>
         <div className="flex items-center justify-between">
-          <span className="text-xs text-neutral-500 dark:text-stone-400">显示下一行预览</span>
+          <span className="text-xs text-neutral-500 dark:text-stone-400">{T('music.settings.nextLinePreview')}</span>
           <button
             onClick={() => p.onLyricsShowNextLine(!p.lyricsShowNextLine)}
             className="w-9 h-5 rounded-full transition-colors"
@@ -160,9 +161,9 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
 
       {/* 显示设置 */}
       <div className="glass-panel p-4">
-        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">显示设置</h3>
+        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">{T('music.settings.display')}</h3>
         <div className="mb-3">
-          <label className="block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2">{`默认音量: ${Math.round(p.volume * 100)}%`}</label>
+          <label className="block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2">{T('music.settings.defaultVolume', { pct: Math.round(p.volume * 100) })}</label>
           <input
             type="range"
             min={0}
@@ -173,7 +174,7 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
           />
         </div>
         <div className="flex items-center justify-between">
-          <span className="text-xs text-neutral-600 dark:text-stone-300">列表始终显示专辑名称</span>
+          <span className="text-xs text-neutral-600 dark:text-stone-300">{T('music.settings.alwaysShowAlbum')}</span>
           <button
             onClick={() => p.onShowAlbumToggle(!p.showAlbum)}
             className="w-9 h-5 rounded-full transition-colors"
@@ -189,28 +190,28 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
 
       {/* 维护 */}
       <div className="glass-panel p-4">
-        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">维护</h3>
+        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">{T('music.settings.maintenance')}</h3>
         <div className="flex flex-col gap-2">
           <button
             onClick={p.onCleanInvalidFiles}
             className="btn-press px-3 py-2 rounded-lg text-xs bg-[var(--element-muted)] text-neutral-600 dark:text-stone-300 hover:opacity-80 transition-opacity text-left"
           >
-            清理无效文件
+            {T('music.settings.cleanInvalid')}
           </button>
           <button
             onClick={p.onRefreshAllFolders}
             className="btn-press px-3 py-2 rounded-lg text-xs bg-[var(--element-muted)] text-neutral-600 dark:text-stone-300 hover:opacity-80 transition-opacity text-left"
           >
-            刷新所有文件夹歌单
+            {T('music.settings.refreshPlaylists')}
           </button>
         </div>
       </div>
 
       {/* 音乐目录 */}
       <div className="glass-panel p-4">
-        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">音乐目录</h3>
+        <h3 className="text-xs font-semibold text-neutral-500 dark:text-stone-400 mb-3">{T('music.settings.musicDirs')}</h3>
         {p.rootPaths.length === 0 ? (
-          <p className="text-xs text-neutral-400 dark:text-stone-500 mb-2">尚未添加任何目录</p>
+          <p className="text-xs text-neutral-400 dark:text-stone-500 mb-2">{T('music.settings.noDirs')}</p>
         ) : (
           <div className="space-y-1.5 mb-2">
             {p.rootPaths.map((path) => (
@@ -219,9 +220,9 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
                 <button
                   onClick={() => p.onRemoveRoot(path)}
                   className="btn-press px-2 py-0.5 rounded-lg text-xs text-red-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors flex-shrink-0"
-                  title="移除此目录"
+                  title={T('music.settings.removeDir')}
                 >
-                  移除
+                  {T('music.remove')}
                 </button>
               </div>
             ))}
@@ -231,14 +232,14 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
           onClick={p.onAddRoot}
           className="btn-press px-3 py-1.5 rounded-lg text-xs bg-[var(--element-muted)] text-[var(--element-bg)] hover:opacity-80 transition-opacity"
         >
-          + 添加文件夹
+          + {T('music.settings.addFolder')}
         </button>
       </div>
 
       {/* 统计 */}
       <div className="glass-panel p-4">
         <p className="text-xs text-neutral-400 dark:text-stone-500">
-          {`已扫描 ${p.totalTracks} 首歌曲，${p.playlistCount} 个歌单`}
+          {T('music.settings.scanned', { tracks: p.totalTracks, playlists: p.playlistCount })}
         </p>
       </div>
     </ModuleSettingsPanel>
@@ -278,7 +279,7 @@ function groupTracksIntoPlaylists(tracks: Track[], allRootPaths: string[]): Play
     let name: string;
     if (rel === '') {
       key = bestRoot;
-      name = bestRoot.split('/').pop() || '音乐';
+      name = bestRoot.split('/').pop() || T('music.title');
     } else {
       const first = rel.split('/')[0];
       key = bestRoot + '/' + first;
@@ -342,6 +343,7 @@ function dedupePlaylistsById(playlists: Playlist[]): Playlist[] {
 }
 
 function MusicModule() {
+  useLang();
   // 共享运行时：根目录管理（localStorage 持久化）
   const { rootPaths, setRootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   // 共享运行时：黑名单管理（Rust 集中管理，必须在 filteredPlaylists useMemo 之前声明）
@@ -718,8 +720,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     // 识别标题/艺术家/专辑/时长/内嵌封面；解析失败时回退为「文件名当标题」。
     const newTracks: Track[] = await Promise.all(
       files.map(async (f) => {
-        const base = f.split(/[\\/]/).pop() || '未知曲目';
-        const fallbackTitle = base.replace(/\.[^.]+$/, '') || '未知曲目';
+    const base = f.split(/[\\/]/).pop() || T('music.unknownTrack');
+    const fallbackTitle = base.replace(/\.[^.]+$/, '') || T('music.unknownTrack');
         try {
           const t = await hostApi.invoke<Track>('read_track_metadata', { filePath: f });
           return {
@@ -767,8 +769,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
 
   const handleDeletePlaylist = useCallback((playlist: Playlist) => {
     const msg = playlist.type === 'directory'
-      ? `确定要从列表中移除 "${playlist.name}" 吗？（不会删除原始文件）`
-      : `确定要删除自定义歌单 "${playlist.name}" 吗？此操作不可撤销。`;
+      ? T('music.confirmRemovePlaylist', { name: playlist.name })
+      : T('music.confirmDeletePlaylist', { name: playlist.name });
     if (!window.confirm(msg)) return;
     if (playlist.type === 'directory') {
       addToBlacklist(playlist.id, playlist.name);
@@ -994,9 +996,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             <circle cx="18" cy="16" r="3" />
           </svg>
         }
-        title="音乐模块"
-        description="选择一个包含音乐文件的文件夹，将自动扫描并播放"
-        buttonText="选择音乐文件夹"
+        title={T('music.emptyTitle')}
+        description={T('music.emptyDesc')}
+        buttonText={T('music.emptyButton')}
         onSelect={handleAddRoot}
       />
     );
@@ -1005,7 +1007,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
   if (loading && playlists.length === 0) {
     return (
       <LoadingState
-        progressText={scanProgress ? `已扫描 ${scanProgress.found} / ${scanProgress.total} 首...` : '正在扫描音乐...'}
+        progressText={scanProgress ? T('music.scanProgress', { found: scanProgress.found, total: scanProgress.total }) : T('music.scanning')}
         onCancel={() => hostApi.invoke('cancel_scan').catch(() => {})}
       />
     );
@@ -1014,8 +1016,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
   if (!loading && playlists.length === 0) {
     return (
       <NoResultsState
-        text="未找到音乐文件"
-        buttonText="添加文件夹"
+        text={T('music.noFiles')}
+        buttonText={T('music.addFolder')}
         onSelect={handleAddRoot}
       />
     );
@@ -1075,7 +1077,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           />
         ) : (
           <div className="flex-1 flex items-center justify-center">
-            <p className="text-sm text-neutral-400 dark:text-stone-500">选择一个歌单开始播放</p>
+            <p className="text-sm text-neutral-400 dark:text-stone-500">{T('music.selectPlaylistHint')}</p>
           </div>
         )}
         {/* PlayerBar 独立持久渲染：切换歌单时不卸载，保持播放状态连续。
@@ -1124,7 +1126,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
 // 注册模块到插件系统
 window.__PLUGIN_REGISTRY__.register({
   id: 'music',
-  name: '铃兰',
+  name: T('music.title'),
   iconName: 'Music2',
   kind: 'module',
   visible: true,

@@ -5,7 +5,7 @@ import { ReadingView } from './ReadingView';
 import { ReadingStatsPage } from './ReadingStatsPage';
 import { getReadingProgress, saveReadingProgress, type ReadingProgress } from './readingProgress';
 import { setCurrentBookPath, getCurrentBookPath } from './readingStore';
-import { useRootPaths, EmptyState, NoResultsState, useStreamingOpen } from '../../_shared/pluginRuntime';
+import { useRootPaths, EmptyState, NoResultsState, useStreamingOpen, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
 const React = window.__HOST_REACT__;
@@ -102,16 +102,17 @@ function SettingsContent({
 
   if (!ModuleSettingsPanel) return null;
 
+  useLang();
   return React.createElement(ModuleSettingsPanel, {
-    title: '三色堇',
+    title: T('reading.title'),
     icon: React.createElement(BookIcon),
     onClose,
     children: React.createElement('div', { className: 'space-y-4' },
       // 阅读目录
       React.createElement('div', { className: 'glass-panel p-4' },
-        React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, '阅读目录'),
+        React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, T('reading.settings.dirs')),
         rootPaths.length === 0
-          ? React.createElement('p', { className: 'text-sm text-neutral-400 dark:text-stone-500' }, '尚未添加任何文件夹')
+          ? React.createElement('p', { className: 'text-sm text-neutral-400 dark:text-stone-500' }, T('reading.settings.noDirs'))
           : React.createElement('div', { className: 'space-y-2' },
               ...rootPaths.map((path) =>
                 React.createElement('div', { key: path, className: 'flex items-center gap-2 group' },
@@ -119,20 +120,20 @@ function SettingsContent({
                   React.createElement('button', {
                     onClick: () => onRemoveRoot(path),
                     className: 'btn-press px-2 py-1 rounded text-xs text-neutral-400 dark:text-stone-500 hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100',
-                    title: '移除',
-                  }, '移除'),
+                    title: T('reading.remove'),
+                  }, T('reading.remove')),
                 )
               ),
             ),
       ),
       // 支持格式
       React.createElement('div', { className: 'glass-panel p-4' },
-        React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, '支持格式'),
+        React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, T('reading.settings.formats')),
         React.createElement('p', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, 'TXT、EPUB、PDF、DOCX'),
       ),
       // 统计
       React.createElement('div', { className: 'glass-panel p-4' },
-        React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500' }, `已扫描 ${bookCount} 本书`),
+        React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500' }, T('reading.settings.scanned', { n: bookCount })),
       ),
     ),
   });
@@ -140,6 +141,7 @@ function SettingsContent({
 
 // ========== 主组件 ==========
 function ReadingModule() {
+  useLang();
   const { rootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   const [books, setBooks] = useState<BookSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -474,9 +476,9 @@ function ReadingModule() {
             <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
           </svg>
         }
-        title="阅读模块"
-        description="选择一个包含电子书的文件夹，支持 TXT / EPUB / PDF / DOCX 格式"
-        buttonText="选择阅读目录"
+        title={T('reading.emptyTitle')}
+        description={T('reading.emptyDesc')}
+        buttonText={T('reading.emptyButton')}
         onSelect={handleSelectRoot}
       />
     );
@@ -487,7 +489,7 @@ function ReadingModule() {
     return (
       <div className="flex-1 flex flex-col items-center justify-center h-full gap-3">
         <div className="w-6 h-6 border-2 border-[var(--element-bg)] border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-neutral-400 dark:text-stone-500">正在扫描电子书...</p>
+        <p className="text-sm text-neutral-400 dark:text-stone-500">{T('reading.scanning')}</p>
       </div>
     );
   }
@@ -496,8 +498,8 @@ function ReadingModule() {
   if (!loading && books.length === 0) {
     return (
       <NoResultsState
-        text="未找到电子书文件"
-        buttonText="更换目录"
+        text={T('reading.noFiles')}
+        buttonText={T('shared.changeDir')}
         onSelect={handleSelectRoot}
       />
     );
@@ -529,7 +531,7 @@ function ReadingModule() {
               <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
               <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
             </svg>
-            <p className="text-sm">从左侧选择一本书开始阅读</p>
+            <p className="text-sm">{T('reading.selectBookHint')}</p>
           </div>
         )}
         {showStats && (
@@ -569,9 +571,9 @@ function ReadingModule() {
   );
 }
 
-window.__PLUGIN_REGISTRY__.register({
-  id: 'reading',
-  name: '三色堇',
+  window.__PLUGIN_REGISTRY__.register({
+    id: 'reading',
+    name: T('reading.title'),
   iconName: 'BookOpen',
   kind: 'module',
   visible: true,

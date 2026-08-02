@@ -1,6 +1,7 @@
 /// <reference path="../../global.d.ts" />
 import { useState, useMemo } from 'react';
 import { getReadingProgress } from './readingProgress';
+import { T, useLang } from '../../_shared/pluginRuntime';
 
 interface StatsBook {
   filePath: string;
@@ -12,9 +13,9 @@ function formatDuration(totalSeconds: number): string {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
-  if (h > 0) return `${h} 小时 ${m} 分`;
-  if (m > 0) return `${m} 分 ${sec} 秒`;
-  return `${sec} 秒`;
+  if (h > 0) return T('reading.stats.hm', { h, m });
+  if (m > 0) return T('reading.stats.ms', { m, s: sec });
+  return T('reading.stats.s', { s: sec });
 }
 
 function formatDate(ts: number): string {
@@ -28,6 +29,7 @@ function formatDate(ts: number): string {
 }
 
 function BookStatRow({ book, onOpenBook }: { book: StatsBook; onOpenBook: (b: StatsBook) => void }) {
+  useLang();
   const [expanded, setExpanded] = useState(false);
   const progress = getReadingProgress(book.filePath);
   const total = progress?.totalChapters || 0;
@@ -44,11 +46,11 @@ function BookStatRow({ book, onOpenBook }: { book: StatsBook; onOpenBook: (b: St
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">{book.title}</div>
           <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">
-            {started ? `第 ${chapterIdx + 1} / ${total} 章 · 总进度 ${overall}%` : '尚未开始阅读'}
+            {started ? T('reading.stats.chapterProgress', { c: chapterIdx + 1, total, pct: overall }) : T('reading.stats.notStarted')}
           </div>
         </div>
         <span className="ml-3 text-xs text-neutral-400 dark:text-stone-500 shrink-0">
-          {expanded ? '收起' : '展开'}
+          {expanded ? T('reading.stats.collapse') : T('reading.stats.expand')}
         </span>
       </button>
       {expanded && (
@@ -61,15 +63,15 @@ function BookStatRow({ book, onOpenBook }: { book: StatsBook; onOpenBook: (b: St
           </div>
           <div className="space-y-1.5 text-xs text-neutral-600 dark:text-stone-300">
             <div className="flex justify-between">
-              <span className="text-neutral-500 dark:text-stone-400">当前章节</span>
+              <span className="text-neutral-500 dark:text-stone-400">{T('reading.stats.currentChapter')}</span>
               <span>{started ? `${chapterIdx + 1} / ${total}` : '—'}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-neutral-500 dark:text-stone-400">累计阅读时长</span>
-              <span>{progress ? formatDuration(progress.secondsRead) : '0 秒'}</span>
+              <span className="text-neutral-500 dark:text-stone-400">{T('reading.stats.totalTime')}</span>
+              <span>{progress ? formatDuration(progress.secondsRead) : T('reading.stats.zeroSec')}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-neutral-500 dark:text-stone-400">上次阅读</span>
+              <span className="text-neutral-500 dark:text-stone-400">{T('reading.stats.lastRead')}</span>
               <span>{progress ? formatDate(progress.lastRead) : '—'}</span>
             </div>
           </div>
@@ -77,7 +79,7 @@ function BookStatRow({ book, onOpenBook }: { book: StatsBook; onOpenBook: (b: St
             onClick={() => onOpenBook(book)}
             className="mt-3 w-full btn-press px-3 py-2 rounded-lg bg-[var(--element-color-raw)]/10 text-[var(--element-color-raw)] hover:bg-[var(--element-color-raw)]/20 transition-colors text-sm font-medium"
           >
-            回到当前阅读进度
+            {T('reading.stats.resume')}
           </button>
         </div>
       )}
@@ -94,6 +96,7 @@ export function ReadingStatsPage({
   onOpenBook: (b: StatsBook) => void;
   onClose: () => void;
 }) {
+  useLang();
   // 汇总：总数、已开始数、累计阅读总时长
   const summary = useMemo(() => {
     let started = 0;
@@ -113,36 +116,36 @@ export function ReadingStatsPage({
       <div className="max-w-3xl mx-auto px-6 py-6">
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">阅读统计</h2>
+            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{T('reading.stats.title')}</h2>
             <p className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">
-              共 {books.length} 本书 · 点击任意书籍可回到其阅读进度
+              {T('reading.stats.summary', { n: books.length })}
             </p>
           </div>
           <button
             onClick={onClose}
             className="btn-press px-3 py-1.5 rounded-lg border border-neutral-200/50 dark:border-stone-600/50 text-sm text-neutral-600 dark:text-stone-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors"
           >
-            返回
+            {T('reading.back')}
           </button>
         </div>
         {books.length > 0 && (
           <div className="grid grid-cols-3 gap-3 mb-5">
             <div className="rounded-xl border border-black/5 dark:border-white/10 bg-white/40 dark:bg-white/5 px-4 py-3">
               <div className="text-2xl font-semibold text-neutral-800 dark:text-stone-100">{summary.total}</div>
-              <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">总书籍</div>
+              <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{T('reading.stats.totalBooks')}</div>
             </div>
             <div className="rounded-xl border border-black/5 dark:border-white/10 bg-white/40 dark:bg-white/5 px-4 py-3">
               <div className="text-2xl font-semibold text-neutral-800 dark:text-stone-100">{summary.started}</div>
-              <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">已开始阅读</div>
+              <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{T('reading.stats.started')}</div>
             </div>
             <div className="rounded-xl border border-black/5 dark:border-white/10 bg-white/40 dark:bg-white/5 px-4 py-3">
               <div className="text-2xl font-semibold text-neutral-800 dark:text-stone-100">{formatDuration(summary.totalSeconds)}</div>
-              <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">累计阅读时长</div>
+              <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5">{T('reading.stats.totalTime')}</div>
             </div>
           </div>
         )}
         {books.length === 0 ? (
-          <div className="text-sm text-neutral-400 dark:text-stone-500 py-10 text-center">尚未添加任何书籍目录</div>
+          <div className="text-sm text-neutral-400 dark:text-stone-500 py-10 text-center">{T('reading.stats.noBooks')}</div>
         ) : (
           <div className="space-y-3">
             {books.map((b) => (

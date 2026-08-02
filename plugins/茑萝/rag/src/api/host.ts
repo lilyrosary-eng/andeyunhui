@@ -90,7 +90,7 @@ export function ragIngest(
 }
 
 export function ragQuery(queryVec: number[], topK = 6): Promise<RagQueryResponse> {
-  return hostApi.invoke<RagQueryResponse>('rag_query', { query_vec: queryVec, top_k: topK });
+  return hostApi.invoke<RagQueryResponse>('rag_query', { queryVec, topK });
 }
 
 export function ragListSources(): Promise<RagSourceInfo[]> {
@@ -98,14 +98,14 @@ export function ragListSources(): Promise<RagSourceInfo[]> {
 }
 
 export function ragDeleteSource(sourceId: string): Promise<void> {
-  return hostApi.invoke<void>('rag_delete_source', { source_id: sourceId });
+  return hostApi.invoke<void>('rag_delete_source', { sourceId });
 }
 
 export function ragEmbedApi(texts: string[], opts: EmbedOptions = {}): Promise<RagEmbedResponse> {
   return hostApi.invoke<RagEmbedResponse>('rag_embed_api', {
     texts,
     endpoint: opts.endpoint,
-    api_key: opts.apiKey,
+    apiKey: opts.apiKey,
     model: opts.model,
   });
 }
@@ -113,7 +113,7 @@ export function ragEmbedApi(texts: string[], opts: EmbedOptions = {}): Promise<R
 // ============ 文档 → Markdown（摄取首步） ============
 
 export function convertToMarkdown(filePath: string): Promise<string> {
-  return hostApi.invoke<string>('convert_to_markdown', { file_path: filePath });
+  return hostApi.invoke<string>('convert_to_markdown', { filePath });
 }
 
 export function convertBytesToMarkdown(
@@ -124,15 +124,21 @@ export function convertBytesToMarkdown(
   return hostApi.invoke<string>('convert_bytes_to_markdown', {
     base64,
     extension,
-    original_name: originalName,
+    originalName,
   });
 }
 
-/** 读取外部依赖文件的原始字节（如 onnx 模型权重），沙箱内需经 Rust 代理。 */
-export function readExternalDepBytes(relativePath: string): Promise<number[]> {
-  return hostApi.invoke<number[]>('read_external_dep_bytes', {
+/** 读取外部依赖文件的原始字节（如 onnx 模型权重），沙箱内需经 Rust 代理。
+ * 后端返回 base64 编码字符串（紧凑传输），此处解码为 number[] 供调用方 toArrayBuffer。 */
+export async function readExternalDepBytes(relativePath: string): Promise<number[]> {
+  const base64 = await hostApi.invoke<string>('read_external_dep_bytes', {
     relativePath,
   });
+  if (!base64) return [];
+  const binary = atob(base64);
+  const bytes = new Array<number>(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 // ============ AI 对话（生成答案，流式） ============

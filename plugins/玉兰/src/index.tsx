@@ -2,7 +2,7 @@
 // 视频插件入口
 import { VideoPlayer } from './VideoPlayer';
 import { VideoSidebar } from './VideoSidebar';
-import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState } from '../../_shared/pluginRuntime';
+import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
 const React = window.__HOST_REACT__;
@@ -93,15 +93,15 @@ function SettingsContent({
 
   const panel = ModuleSettingsPanel
     ? React.createElement(ModuleSettingsPanel, {
-        title: '玉兰',
+        title: T('video.title'),
         icon: React.createElement(VideoIcon),
         onClose,
         children: React.createElement('div', { className: 'space-y-4' },
           // 目录
           React.createElement('div', { className: 'glass-panel p-4' },
-            React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, '视频目录'),
-            rootPaths.length === 0
-              ? React.createElement('p', { className: 'text-sm text-neutral-400 dark:text-stone-500' }, '尚未添加任何文件夹')
+React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, T('video.settings.dirs')),
+          rootPaths.length === 0
+            ? React.createElement('p', { className: 'text-sm text-neutral-400 dark:text-stone-500' }, T('video.settings.noDirs'))
               : React.createElement('div', { className: 'space-y-2' },
                   ...rootPaths.map((path) =>
                     React.createElement('div', { key: path, className: 'flex items-center gap-2 group' },
@@ -109,18 +109,18 @@ function SettingsContent({
                       React.createElement('button', {
                         onClick: () => onRemoveRoot(path),
                         className: 'btn-press px-2 py-1 rounded text-xs text-neutral-400 dark:text-stone-500 hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100',
-                        title: '移除',
-                      }, '移除'),
+                    title: T('video.remove'),
+                  }, T('video.remove')),
                     )
                   ),
                 ),
           ),
           // 播放设置
           React.createElement('div', { className: 'glass-panel p-4 space-y-3' },
-            React.createElement('h3', { className: 'text-sm font-medium text-neutral-700 dark:text-stone-200' }, '播放'),
+            React.createElement('h3', { className: 'text-sm font-medium text-neutral-700 dark:text-stone-200' }, T('video.settings.playback')),
             // 记住播放进度
             React.createElement('label', { className: 'flex items-center justify-between cursor-pointer' },
-              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, '记住播放进度'),
+              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, T('video.settings.rememberProgress')),
               React.createElement('div', {
                 onClick: () => onSettingsChange({ rememberProgress: !settings.rememberProgress }),
                 className: `w-9 h-5 rounded-full relative transition-colors cursor-pointer ${settings.rememberProgress ? 'bg-[var(--element-bg)]' : 'bg-neutral-300 dark:bg-stone-600'}`,
@@ -132,7 +132,7 @@ function SettingsContent({
             ),
             // 记住音量
             React.createElement('label', { className: 'flex items-center justify-between cursor-pointer' },
-              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, '记住音量'),
+              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, T('video.settings.rememberVolume')),
               React.createElement('div', {
                 onClick: () => onSettingsChange({ rememberVolume: !settings.rememberVolume }),
                 className: `w-9 h-5 rounded-full relative transition-colors cursor-pointer ${settings.rememberVolume ? 'bg-[var(--element-bg)]' : 'bg-neutral-300 dark:bg-stone-600'}`,
@@ -144,7 +144,7 @@ function SettingsContent({
             ),
             // 鼠标静止后自动隐藏
             React.createElement('label', { className: 'flex items-center justify-between cursor-pointer' },
-              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, '鼠标静止后自动隐藏'),
+              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, T('video.settings.autoHide')),
               React.createElement('div', {
                 onClick: () => onSettingsChange({ autoHideControls: !settings.autoHideControls }),
                 className: `w-9 h-5 rounded-full relative transition-colors cursor-pointer ${settings.autoHideControls ? 'bg-[var(--element-bg)]' : 'bg-neutral-300 dark:bg-stone-600'}`,
@@ -156,7 +156,7 @@ function SettingsContent({
             ),
             // 自动播放下一集
             React.createElement('label', { className: 'flex items-center justify-between cursor-pointer' },
-              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, '自动播放下一集'),
+              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, T('video.settings.autoNext')),
               React.createElement('div', {
                 onClick: () => onSettingsChange({ autoPlayNext: !settings.autoPlayNext }),
                 className: `w-9 h-5 rounded-full relative transition-colors cursor-pointer ${settings.autoPlayNext ? 'bg-[var(--element-bg)]' : 'bg-neutral-300 dark:bg-stone-600'}`,
@@ -168,7 +168,7 @@ function SettingsContent({
             ),
             // 默认播放速度
             React.createElement('div', { className: 'flex items-center justify-between' },
-              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, '默认播放速度'),
+              React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, T('video.settings.defaultSpeed')),
               React.createElement('select', {
                 value: settings.playbackSpeed,
                 onChange: (e: React.ChangeEvent<HTMLSelectElement>) => onSettingsChange({ playbackSpeed: parseFloat(e.target.value) }),
@@ -186,16 +186,16 @@ function SettingsContent({
           React.createElement('div', { className: 'glass-panel p-4' },
             React.createElement('div', { className: 'flex items-center justify-between' },
               React.createElement('div', { className: 'flex items-center gap-2' },
-                React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, '播放时防止系统休眠'),
-                React.createElement('span', { className: 'text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400' }, '待确认'),
+                React.createElement('span', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, T('video.settings.preventSleep')),
+                React.createElement('span', { className: 'text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400' }, T('video.settings.pending')),
               ),
-              React.createElement('span', { className: 'text-xs text-neutral-400 dark:text-stone-500' }, '需安装插件'),
+              React.createElement('span', { className: 'text-xs text-neutral-400 dark:text-stone-500' }, T('video.settings.pluginRequired')),
             ),
           ),
           // 统计
           React.createElement('div', { className: 'glass-panel p-4' },
             React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500' },
-              `已扫描 ${folders.length} 个文件夹`
+              T('video.settings.scanned', { n: folders.length })
             ),
           ),
         ),
@@ -207,6 +207,7 @@ function SettingsContent({
 
 // ========== 主组件 ==========
 function VideoModule() {
+  useLang();
   // 共享运行时：根目录管理（localStorage 持久化）
   const { rootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   // 共享运行时：黑名单管理（Rust 集中管理）
@@ -391,9 +392,9 @@ function VideoModule() {
             <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
           </svg>
         }
-        title="视频模块"
-        description="选择一个包含视频文件的文件夹，将自动按子文件夹分组展示"
-        buttonText="选择视频文件夹"
+        title={T('video.emptyTitle')}
+        description={T('video.emptyDesc')}
+        buttonText={T('video.emptyButton')}
         onSelect={handleSelectRoot}
       />
     );
@@ -403,7 +404,7 @@ function VideoModule() {
   if (loading && folders.length === 0) {
     return (
       <LoadingState
-        progressText={scanProgress ? `已发现 ${scanProgress.found} 个文件夹...` : '正在扫描视频...'}
+        progressText={scanProgress ? T('video.scanProgress', { n: scanProgress.found }) : T('video.scanning')}
         onCancel={() => hostApi.invoke('cancel_scan').catch(() => {})}
       />
     );
@@ -413,8 +414,8 @@ function VideoModule() {
   if (!loading && folders.length === 0) {
     return (
       <NoResultsState
-        text="未找到包含视频的文件夹"
-        buttonText="更换目录"
+        text={T('video.noFolders')}
+        buttonText={T('shared.changeDir')}
         onSelect={handleSelectRoot}
       />
     );
@@ -450,7 +451,7 @@ function VideoModule() {
     if (selectedFolder && videosLoading) {
       return (
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-sm text-neutral-400 dark:text-stone-500">加载中...</p>
+          <p className="text-sm text-neutral-400 dark:text-stone-500">{T('video.loading')}</p>
         </div>
       );
     }
@@ -459,7 +460,7 @@ function VideoModule() {
     if (selectedFolder && videos.length === 0) {
       return (
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-sm text-neutral-400 dark:text-stone-500">该文件夹没有视频文件</p>
+          <p className="text-sm text-neutral-400 dark:text-stone-500">{T('video.noVideos')}</p>
         </div>
       );
     }
@@ -471,7 +472,7 @@ function VideoModule() {
           <polygon points="23 7 16 12 23 17 23 7" />
           <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
         </svg>
-        <p className="text-sm">从左侧选择一个文件夹开始浏览</p>
+        <p className="text-sm">{T('video.selectFolderHint')}</p>
       </div>
     );
   };
@@ -503,7 +504,7 @@ function VideoModule() {
 // 注册模块
 window.__PLUGIN_REGISTRY__.register({
   id: 'video',
-  name: '玉兰',
+  name: T('video.title'),
   iconName: 'Video',
   kind: 'module',
   visible: true,

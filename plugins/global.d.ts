@@ -85,6 +85,16 @@ declare global {
       setVisible: (id: string, visible: boolean) => boolean;
     };
     __HOST_UI__: Record<string, React.ComponentType<Record<string, unknown>>>;
+    __HOST_I18N__: {
+      /** 全局翻译函数（读取宿主当前语言，支持 {var} 插值） */
+      t: (key: string, vars?: Record<string, string | number>) => string;
+      /** 指定语言翻译 */
+      translate: (lang: string, key: string, vars?: Record<string, string | number>) => string;
+      /** 当前语言 */
+      getLanguage: () => string;
+      /** 语言选项 */
+      LANGUAGES: { code: string; label: string }[];
+    };
     __MUSIC_PLAYER__?: {
       getCurrentTrack: () => { filePath: string } | null;
     };

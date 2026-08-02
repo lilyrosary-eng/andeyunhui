@@ -5,6 +5,22 @@ import * as XLSX from 'xlsx';
 const { useState, useMemo, useCallback, useRef, useEffect } = React;
 const { ModuleSidebarShell, SecondaryNavShell, Icon: HostIcon } = window.__HOST_UI__ || {};
 const _HOST_UI = window.__HOST_UI__ || {};
+// i18n：宿主注入的翻译函数（语言切换由主应用广播，此处读取当前语言）
+const _I18N = window.__HOST_I18N__ || {};
+const T = (key: string, vars?: Record<string, string | number>) => {
+  try { return _I18N.t ? _I18N.t(key, vars) : key; } catch { return key; }
+};
+// 语言变化时触发重渲染的 hook（插件的 t 读取宿主 currentLang，需监听事件强制刷新）
+// 返回语言版本号，供 useMemo 依赖以重算搜索等派生数据
+function useLang(): number {
+  const [v, force] = useState(0);
+  useEffect(() => {
+    const h = () => force(x => x + 1);
+    window.addEventListener('app-language-change', h);
+    return () => window.removeEventListener('app-language-change', h);
+  }, []);
+  return v;
+}
 // 统一动效原语（宿主提供，失败回退到原生标签，保证旧宿主也能跑）
 const Ripple = _HOST_UI.Ripple;
 const ScrollReveal = _HOST_UI.ScrollReveal;
@@ -33,45 +49,46 @@ interface Category {
   icon: string;
 }
 
+// 分类/工具数据：name/desc 存 key，渲染时经 T() 取翻译
 const CATEGORIES: Category[] = [
-  { id: 'convert', name: '格式转换', count: 4, icon: 'Repeat' },
-  { id: 'text', name: '文本处理', count: 5, icon: 'Type' },
-  { id: 'crypto', name: '加密解密', count: 4, icon: 'KeyRound' },
-  { id: 'data', name: '数据分析', count: 3, icon: 'ChartColumn' },
-  { id: 'system', name: '系统工具', count: 5, icon: 'SlidersHorizontal' },
+  { id: 'convert', name: 'mint.cat.convert', count: 4, icon: 'Repeat' },
+  { id: 'text', name: 'mint.cat.text', count: 5, icon: 'Type' },
+  { id: 'crypto', name: 'mint.cat.crypto', count: 4, icon: 'KeyRound' },
+  { id: 'data', name: 'mint.cat.data', count: 3, icon: 'ChartColumn' },
+  { id: 'system', name: 'mint.cat.system', count: 5, icon: 'SlidersHorizontal' },
 ];
 
 const TOOLS: Record<string, ToolMeta[]> = {
   convert: [
-    { id: 't1', name: '图片格式转换', desc: 'PNG/JPEG/BMP/GIF/TIFF 互转', icon: 'Images', category: 'convert' },
-    { id: 't2', name: '文档格式转换', desc: 'Markdown / HTML 互转', icon: 'FileType', category: 'convert' },
-    { id: 't3', name: '视频转码', desc: '调用 ffmpeg 转码视频（内置 ffmpeg）', icon: 'Film', category: 'convert' },
-    { id: 't4', name: '音频转码', desc: '调用 ffmpeg 转码音频（内置 ffmpeg）', icon: 'AudioLines', category: 'convert' },
+    { id: 't1', name: 'mint.tool.t1', desc: 'mint.tool.t1.desc', icon: 'Images', category: 'convert' },
+    { id: 't2', name: 'mint.tool.t2', desc: 'mint.tool.t2.desc', icon: 'FileType', category: 'convert' },
+    { id: 't3', name: 'mint.tool.t3', desc: 'mint.tool.t3.desc', icon: 'Film', category: 'convert' },
+    { id: 't4', name: 'mint.tool.t4', desc: 'mint.tool.t4.desc', icon: 'AudioLines', category: 'convert' },
   ],
   text: [
-    { id: 't5', name: '正则表达式测试', desc: '实时正则匹配和替换', icon: 'Regex', category: 'text' },
-    { id: 't6', name: '文本差异对比', desc: 'Diff 对比工具', icon: 'Diff', category: 'text' },
-    { id: 't7', name: 'JSON 格式化', desc: 'JSON 美化与校验', icon: 'Braces', category: 'text' },
-    { id: 't8', name: 'Base64 编解码', desc: 'Base64 编码与解码', icon: 'Binary', category: 'text' },
-    { id: 't9', name: 'URL 编解码', desc: 'URL 编码与解码', icon: 'Link', category: 'text' },
+    { id: 't5', name: 'mint.tool.t5', desc: 'mint.tool.t5.desc', icon: 'Regex', category: 'text' },
+    { id: 't6', name: 'mint.tool.t6', desc: 'mint.tool.t6.desc', icon: 'Diff', category: 'text' },
+    { id: 't7', name: 'mint.tool.t7', desc: 'mint.tool.t7.desc', icon: 'Braces', category: 'text' },
+    { id: 't8', name: 'mint.tool.t8', desc: 'mint.tool.t8.desc', icon: 'Binary', category: 'text' },
+    { id: 't9', name: 'mint.tool.t9', desc: 'mint.tool.t9.desc', icon: 'Link', category: 'text' },
   ],
   crypto: [
-    { id: 't18', name: 'AES 加解密', desc: 'AES-GCM 256，Web Crypto 原生实现', icon: 'Lock', category: 'crypto' },
-    { id: 't19', name: 'Base32 编解码', desc: 'RFC 4648 Base32', icon: 'Binary', category: 'crypto' },
-    { id: 't20', name: 'Hex 编解码', desc: '十六进制字符串互转', icon: 'Binary', category: 'crypto' },
-    { id: 't21', name: '摩斯密码', desc: 'ITM-R M.1677 标准', icon: 'Radio', category: 'crypto' },
+    { id: 't18', name: 'mint.tool.t18', desc: 'mint.tool.t18.desc', icon: 'Lock', category: 'crypto' },
+    { id: 't19', name: 'mint.tool.t19', desc: 'mint.tool.t19.desc', icon: 'Binary', category: 'crypto' },
+    { id: 't20', name: 'mint.tool.t20', desc: 'mint.tool.t20.desc', icon: 'Binary', category: 'crypto' },
+    { id: 't21', name: 'mint.tool.t21', desc: 'mint.tool.t21.desc', icon: 'Radio', category: 'crypto' },
   ],
   data: [
-    { id: 't10', name: 'CSV 查看器', desc: 'CSV 数据浏览与导出', icon: 'Table', category: 'data' },
-    { id: 't11', name: '哈希计算', desc: 'MD5/SHA1/SHA256/SHA512', icon: 'Hash', category: 'data' },
-    { id: 't12', name: 'UUID 生成器', desc: '批量生成 UUID', icon: 'KeyRound', category: 'data' },
+    { id: 't10', name: 'mint.tool.t10', desc: 'mint.tool.t10.desc', icon: 'Table', category: 'data' },
+    { id: 't11', name: 'mint.tool.t11', desc: 'mint.tool.t11.desc', icon: 'Hash', category: 'data' },
+    { id: 't12', name: 'mint.tool.t12', desc: 'mint.tool.t12.desc', icon: 'KeyRound', category: 'data' },
   ],
   system: [
-    { id: 't13', name: '端口扫描', desc: '检测本地端口占用', icon: 'Network', category: 'system' },
-    { id: 't14', name: '进程管理', desc: '查看系统进程', icon: 'Cpu', category: 'system' },
-    { id: 't15', name: '环境变量', desc: '查看和编辑环境变量', icon: 'Variable', category: 'system' },
-    { id: 't16', name: '剪贴板历史', desc: '剪贴板读写与历史', icon: 'Clipboard', category: 'system' },
-    { id: 't17', name: '网络测速', desc: '基于 LibreSpeed 的网速测试', icon: 'Gauge', category: 'system' },
+    { id: 't13', name: 'mint.tool.t13', desc: 'mint.tool.t13.desc', icon: 'Network', category: 'system' },
+    { id: 't14', name: 'mint.tool.t14', desc: 'mint.tool.t14.desc', icon: 'Cpu', category: 'system' },
+    { id: 't15', name: 'mint.tool.t15', desc: 'mint.tool.t15.desc', icon: 'Variable', category: 'system' },
+    { id: 't16', name: 'mint.tool.t16', desc: 'mint.tool.t16.desc', icon: 'Clipboard', category: 'system' },
+    { id: 't17', name: 'mint.tool.t17', desc: 'mint.tool.t17.desc', icon: 'Gauge', category: 'system' },
   ],
 };
 
@@ -96,7 +113,7 @@ function copyText(text: string): Promise<void> {
   return Promise.resolve();
 }
 
-function CopyButton({ text, label = '复制' }: { text: string; label?: string }) {
+function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   const onClick = () => {
     copyText(text).then(() => {
@@ -109,7 +126,7 @@ function CopyButton({ text, label = '复制' }: { text: string; label?: string }
       onClick={onClick}
       className="btn-press px-3 py-1.5 rounded-lg text-xs bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors"
     >
-      {copied ? '已复制' : label}
+      {copied ? T('mint.copied') : (label || T('mint.copy'))}
     </button>
   );
 }
@@ -122,7 +139,7 @@ function ToolShell({ tool, onBack, children }: { tool: LiteTool; onBack: () => v
           as="button"
           onClick={onBack}
           className="btn-press w-8 h-8 flex items-center justify-center rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-          title="返回"
+          title={T('mint.back')}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
@@ -130,8 +147,8 @@ function ToolShell({ tool, onBack, children }: { tool: LiteTool; onBack: () => v
         </RippleBtn>
         <ToolGlyph name={tool.icon} size={22} className="text-neutral-600 dark:text-stone-300" />
         <div>
-          <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">{tool.name}</div>
-          <div className="text-xs text-neutral-400 dark:text-stone-500">{tool.desc}</div>
+          <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">{T(tool.name)}</div>
+          <div className="text-xs text-neutral-400 dark:text-stone-500">{T(tool.desc)}</div>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto p-6">{children}</div>
@@ -143,10 +160,9 @@ function ComingSoon({ tool }: { tool: LiteTool }) {
   return (
     <div className="h-full flex flex-col items-center justify-center gap-3 text-neutral-400 dark:text-stone-500">
       <ToolGlyph name={tool.icon} size={36} className="text-neutral-400 dark:text-stone-500" />
-      <p className="text-sm font-medium text-neutral-600 dark:text-stone-300">{tool.name}</p>
+      <p className="text-sm font-medium text-neutral-600 dark:text-stone-300">{T(tool.name)}</p>
       <p className="text-xs text-center max-w-sm px-6 leading-relaxed">
-        该工具需要调用系统后端能力（如文件转码、端口 / 进程 / 环境变量查询、剪贴板监听等），
-        当前版本尚未实装。后续接入 Tauri 后端命令后即可使用。
+        {T('mint.comingSoon')}
       </p>
     </div>
   );
@@ -165,7 +181,7 @@ function fileToBase64(file: File): Promise<string> {
       const comma = res.indexOf(',');
       resolve(comma >= 0 ? res.slice(comma + 1) : res);
     };
-    r.onerror = () => reject(new Error('读取文件失败'));
+    r.onerror = () => reject(new Error(T('mint.readFileFailed')));
     r.readAsDataURL(file);
   });
 }
@@ -207,7 +223,7 @@ function ImageConverter() {
   };
 
   const convert = async () => {
-    if (!base64) { setError('请先选择图片'); return; }
+    if (!base64) { setError(T('mint.img.selectFirst')); return; }
     setBusy(true); setError(''); setResult(null);
     try {
       const r: string = await hostInvoke('convert_image', { dataBase64: base64, fromExt, toExt, quality });
@@ -221,37 +237,37 @@ function ImageConverter() {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <button onClick={() => fileRef.current?.click()} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">选择图片</button>
-        <span className="text-xs text-neutral-400 dark:text-stone-500">{base64 ? '已载入图片' : '未选择'}</span>
+        <button onClick={() => fileRef.current?.click()} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.img.choose')}</button>
+        <span className="text-xs text-neutral-400 dark:text-stone-500">{base64 ? T('mint.img.loaded') : T('mint.notSelected')}</span>
         <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onFile} />
       </div>
       <div className="flex items-center gap-3 flex-wrap text-sm text-neutral-600 dark:text-stone-300">
-        <label className="flex items-center gap-1.5">源格式
+        <label className="flex items-center gap-1.5">{T('mint.img.srcFormat')}
           <select value={fromExt} onChange={e => setFromExt(e.target.value)} className={selCls}>
             {fmtList.map(f => <option key={f} value={f}>{f}</option>)}
           </select>
         </label>
         <span>→</span>
-        <label className="flex items-center gap-1.5">目标格式
+        <label className="flex items-center gap-1.5">{T('mint.img.dstFormat')}
           <select value={toExt} onChange={e => setToExt(e.target.value)} className={selCls}>
             {fmtList.map(f => <option key={f} value={f}>{f}</option>)}
           </select>
         </label>
         {toExt === 'jpeg' && (
-          <label className="flex items-center gap-2">质量 {quality}
+          <label className="flex items-center gap-2">{T('mint.img.quality')} {quality}
             <input type="range" min={1} max={100} value={quality} onChange={e => setQuality(parseInt(e.target.value, 10))} className="accent-[var(--element-bg)]" />
           </label>
         )}
         <button onClick={convert} disabled={busy} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto disabled:opacity-50">
-          {busy ? '转换中…' : '转换'}
+          {busy ? T('mint.converting') : T('mint.convert')}
         </button>
       </div>
       {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{error}</div>}
       {result && (
         <div className="flex items-center gap-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 px-3 py-2">
-          <span className="text-xs text-neutral-500 dark:text-stone-400">转换完成</span>
-          <button onClick={() => downloadBase64(`converted.${result.ext}`, result.b64, IMG_MIME[result.ext] || 'application/octet-stream')} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">下载</button>
-          <CopyButton text={result.b64} label="复制 Base64" />
+          <span className="text-xs text-neutral-500 dark:text-stone-400">{T('mint.converted')}</span>
+          <button onClick={() => downloadBase64(`converted.${result.ext}`, result.b64, IMG_MIME[result.ext] || 'application/octet-stream')} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.download')}</button>
+          <CopyButton text={result.b64} label={T('mint.copyBase64')} />
         </div>
       )}
     </div>
@@ -260,6 +276,7 @@ function ImageConverter() {
 
 // ========== t2 文档格式转换 ==========
 function DocConverter() {
+  useLang();
   const [text, setText] = useState('# 标题\n\n这是一段 **Markdown** 示例文本。');
   const [from, setFrom] = useState('md');
   const [to, setTo] = useState('html');
@@ -276,27 +293,27 @@ function DocConverter() {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-3 flex-wrap text-sm text-neutral-600 dark:text-stone-300">
-        <label className="flex items-center gap-1.5">从
+        <label className="flex items-center gap-1.5">{T('mint.doc.from')}
           <select value={from} onChange={e => setFrom(e.target.value)} className={selCls}>
             <option value="md">Markdown</option><option value="html">HTML</option>
           </select>
         </label>
         <span>→</span>
-        <label className="flex items-center gap-1.5">到
+        <label className="flex items-center gap-1.5">{T('mint.doc.to')}
           <select value={to} onChange={e => setTo(e.target.value)} className={selCls}>
             <option value="html">HTML</option><option value="md">Markdown</option>
           </select>
         </label>
-        <button onClick={convert} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">转换</button>
+        <button onClick={convert} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{T('mint.convert')}</button>
       </div>
       <textarea value={text} onChange={e => setText(e.target.value)} spellCheck={false}
-        placeholder="粘贴待转换文本…"
+        placeholder={T('mint.doc.pasteHint')}
         className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
       {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{error}</div>}
       {out && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.result')}</span>
             <CopyButton text={out} />
           </div>
           <textarea readOnly value={out} spellCheck={false}
@@ -309,6 +326,7 @@ function DocConverter() {
 
 // ========== t13 端口扫描 ==========
 function PortScanner() {
+  useLang();
   const [host, setHost] = useState('127.0.0.1');
   const [start, setStart] = useState(1);
   const [end, setEnd] = useState(1024);
@@ -327,22 +345,22 @@ function PortScanner() {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap text-sm text-neutral-600 dark:text-stone-300">
-        <label className="flex items-center gap-1.5">主机
+        <label className="flex items-center gap-1.5">{T('mint.port.host')}
           <input value={host} onChange={e => setHost(e.target.value)} className="w-32 px-2 py-1.5 rounded-lg bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm outline-none focus:border-[var(--element-border)]" />
         </label>
-        <label className="flex items-center gap-1.5">起始
+        <label className="flex items-center gap-1.5">{T('mint.port.start')}
           <input type="number" value={start} onChange={e => setStart(parseInt(e.target.value, 10) || 0)} className={numCls} />
         </label>
-        <label className="flex items-center gap-1.5">结束
+        <label className="flex items-center gap-1.5">{T('mint.port.end')}
           <input type="number" value={end} onChange={e => setEnd(parseInt(e.target.value, 10) || 0)} className={numCls} />
         </label>
         <button onClick={run} disabled={busy} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto disabled:opacity-50">
-          {busy ? '扫描中…' : '开始扫描'}
+          {busy ? T('mint.port.scanning') : T('mint.port.startScan')}
         </button>
       </div>
       {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{error}</div>}
       <div className="text-xs text-neutral-400 dark:text-stone-500">
-        {busy ? '正在探测端口连通性…' : ports.length > 0 ? `发现 ${ports.length} 个开放端口` : '未发现开放端口'}
+        {busy ? T('mint.port.probing') : ports.length > 0 ? T('mint.port.found', { n: ports.length }) : T('mint.port.none')}
       </div>
       {ports.length > 0 && (
         <div className="flex flex-wrap gap-2">
@@ -361,6 +379,7 @@ type SysMem = { total_kb: number; used_kb: number; used_percent: number };
 const fmtGb = (kb: number) => `${(kb / 1024 / 1024).toFixed(1)} GB`;
 
 function ProcessManager() {
+  useLang();
   const [list, setList] = useState<{ pid: number; name: string; cpu: number; mem_kb: number }[]>([]);
   const [sysMem, setSysMem] = useState<SysMem | null>(null);
   const [busy, setBusy] = useState(false);
@@ -384,16 +403,16 @@ function ProcessManager() {
     <div className="space-y-3">
       {sysMem && (
         <div className="flex items-center gap-4 flex-wrap text-xs text-neutral-500 dark:text-stone-400 bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 rounded-xl px-3 py-2">
-          <span>系统内存：{fmtGb(sysMem.total_kb)}</span>
-          <span>已用：{fmtGb(sysMem.used_kb)}</span>
-          <span>占用率：<b className={sysMem.used_percent > 60 ? 'text-orange-500' : 'text-emerald-500'}>{sysMem.used_percent.toFixed(1)}%</b></span>
+          <span>{T('mint.proc.sysMem')}{fmtGb(sysMem.total_kb)}</span>
+          <span>{T('mint.proc.used')}{fmtGb(sysMem.used_kb)}</span>
+          <span>{T('mint.proc.percent')}<b className={sysMem.used_percent > 60 ? 'text-orange-500' : 'text-emerald-500'}>{sysMem.used_percent.toFixed(1)}%</b></span>
         </div>
       )}
       <div className="flex items-center gap-2">
         <button onClick={refresh} disabled={busy} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors disabled:opacity-50">
-          {busy ? '刷新中…' : '刷新'}
+          {busy ? T('mint.refreshing') : T('mint.refresh')}
         </button>
-        <span className="text-xs text-neutral-400 dark:text-stone-500">共 {list.length} 个进程（按内存排序，CPU 为采样值）</span>
+        <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.proc.count', { n: list.length })}</span>
       </div>
       {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{error}</div>}
       <div className="rounded-xl bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 overflow-auto max-h-[55vh]">
@@ -401,9 +420,9 @@ function ProcessManager() {
           <thead>
             <tr className="bg-white/60 dark:bg-stone-800/60 sticky top-0 text-left">
               <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">PID</th>
-              <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">名称</th>
+              <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">{T('mint.proc.name')}</th>
               <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">CPU%</th>
-              <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">内存(MB)</th>
+              <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">{T('mint.proc.mem')}</th>
             </tr>
           </thead>
           <tbody>
@@ -424,6 +443,7 @@ function ProcessManager() {
 
 // ========== t15 环境变量 ==========
 function EnvVars() {
+  useLang();
   const [filter, setFilter] = useState('');
   const [vars, setVars] = useState<[string, string][]>([]);
   const [error, setError] = useState('');
@@ -440,27 +460,27 @@ function EnvVars() {
 
   const setVar = async () => {
     setSetMsg('');
-    if (!name) { setSetMsg('请填写变量名'); return; }
+    if (!name) { setSetMsg(T('mint.env.nameRequired')); return; }
     try {
       await hostInvoke('set_env_var', { name, value });
-      setSetMsg('已设置（仅当前进程生效，不持久化）');
+      setSetMsg(T('mint.env.setDone'));
       load();
-    } catch (e) { setSetMsg('失败：' + (e as Error).message); }
+    } catch (e) { setSetMsg(T('mint.failed') + (e as Error).message); }
   };
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="过滤变量名…"
+        <input value={filter} onChange={e => setFilter(e.target.value)} placeholder={T('mint.env.filter')}
           className="flex-1 px-3 py-1.5 rounded-lg bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm outline-none focus:border-[var(--element-border)]" />
-        <span className="text-xs text-neutral-400 dark:text-stone-500">{vars.length} 项</span>
+        <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.env.items', { n: vars.length })}</span>
       </div>
       <div className="flex items-center gap-2 flex-wrap">
-        <input value={name} onChange={e => setName(e.target.value)} placeholder="变量名"
+        <input value={name} onChange={e => setName(e.target.value)} placeholder={T('mint.env.name')}
           className="w-40 px-2 py-1.5 rounded-lg bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm outline-none focus:border-[var(--element-border)]" />
-        <input value={value} onChange={e => setValue(e.target.value)} placeholder="变量值"
+        <input value={value} onChange={e => setValue(e.target.value)} placeholder={T('mint.env.value')}
           className="flex-1 px-2 py-1.5 rounded-lg bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm outline-none focus:border-[var(--element-border)]" />
-        <button onClick={setVar} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">设置（当前进程）</button>
+        <button onClick={setVar} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.env.setBtn')}</button>
       </div>
       {setMsg && <div className="text-xs text-neutral-500 dark:text-stone-400">{setMsg}</div>}
       {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{error}</div>}
@@ -509,6 +529,7 @@ function formatSize(bytes: number): string {
 }
 
 function ClipboardHistory() {
+  useLang();
   const [items, setItems] = useState<ClipItem[]>([]);
   const [current, setCurrent] = useState('');
   const [search, setSearch] = useState('');
@@ -560,7 +581,7 @@ function ClipboardHistory() {
             id: Date.now() + '_img',
             type: 'image',
             content: imgInfo.tempPath,  // 仅存路径，不存 base64
-            preview: '图片',
+            preview: T('mint.clip.image'),
             timestamp: Date.now(),
             pinned: false,
             thumbnail: imgInfo.thumbnail, // 后端生成的缩略图
@@ -692,7 +713,7 @@ function ClipboardHistory() {
       .filter(i => i.type === 'text')
       .map(i => `[${new Date(i.timestamp).toLocaleString()}]\n${i.content}`)
       .join('\n\n---\n\n');
-    const blob = new Blob([text || '（无历史记录）'], { type: 'text/plain;charset=utf-8' });
+    const blob = new Blob([text || T('mint.clip.noHistory')], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -705,7 +726,7 @@ function ClipboardHistory() {
   const openFloating = async () => {
     try {
       await window.__HOST_API__.createFloatingWindow('floating-clipboard', 'index.html?floating=clipboard', {
-        title: '剪贴板浮窗',
+        title: T('mint.clip.floating'),
         width: 360,
         height: 480,
         minWidth: 280,
@@ -718,10 +739,10 @@ function ClipboardHistory() {
   };
 
   const filterTabs: Array<{ id: 'all' | 'text' | 'image' | 'pinned'; label: string; count: number }> = [
-    { id: 'all', label: '全部', count: stats.total },
-    { id: 'text', label: '文本', count: stats.text },
-    { id: 'image', label: '图片', count: stats.image },
-    { id: 'pinned', label: '固定', count: stats.pinned },
+    { id: 'all', label: T('mint.clip.tabAll'), count: stats.total },
+    { id: 'text', label: T('mint.clip.tabText'), count: stats.text },
+    { id: 'image', label: T('mint.clip.tabImage'), count: stats.image },
+    { id: 'pinned', label: T('mint.clip.tabPinned'), count: stats.pinned },
   ];
 
   return (
@@ -729,33 +750,33 @@ function ClipboardHistory() {
       {/* 顶部操作栏 */}
       <div className="flex items-center gap-2 flex-wrap">
         <textarea value={current} onChange={e => setCurrent(e.target.value)} spellCheck={false}
-          placeholder="当前剪贴板内容（可编辑后写入）…"
+          placeholder={T('mint.clip.current')}
           className="w-full h-20 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
       </div>
       <div className="flex items-center gap-2 flex-wrap">
-        <button onClick={writeCurrent} className="btn-press px-3 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors text-sm">写入</button>
-        <button onClick={refreshNow} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">刷新</button>
-        <button onClick={clearSystemClipboard} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">清空剪贴板</button>
+        <button onClick={writeCurrent} className="btn-press px-3 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors text-sm">{T('mint.clip.write')}</button>
+        <button onClick={refreshNow} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.refresh')}</button>
+        <button onClick={clearSystemClipboard} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.clip.clearSys')}</button>
         <label className="flex items-center gap-1 text-xs text-neutral-600 dark:text-stone-300 cursor-pointer select-none">
-          <input type="checkbox" checked={polling} onChange={e => setPolling(e.target.checked)} className="accent-[var(--element-bg)]" /> 自动记录
+          <input type="checkbox" checked={polling} onChange={e => setPolling(e.target.checked)} className="accent-[var(--element-bg)]" /> {T('mint.clip.autoRecord')}
         </label>
         <div className="flex-1" />
-        <button onClick={openFloating} className="btn-press px-3 py-1.5 rounded-lg bg-blue-500/90 text-white hover:bg-blue-500 transition-colors text-sm flex items-center gap-1" title="以透明浮窗形式打开">
+        <button onClick={openFloating} className="btn-press px-3 py-1.5 rounded-lg bg-blue-500/90 text-white hover:bg-blue-500 transition-colors text-sm flex items-center gap-1" title={T('mint.clip.floatingTitle')}>
           {HostIcon ? React.createElement(HostIcon, { name: 'PanelTopOpen', className: 'w-3.5 h-3.5' }) : null}
-          浮窗
+          {T('mint.clip.floating')}
         </button>
-        <button onClick={exportHistory} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">导出</button>
-        <button onClick={clearAll} className="btn-press px-3 py-1.5 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200/50 dark:border-red-700/30 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors text-sm">清空</button>
+        <button onClick={exportHistory} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.clip.export')}</button>
+        <button onClick={clearAll} className="btn-press px-3 py-1.5 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200/50 dark:border-red-700/30 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors text-sm">{T('mint.clear')}</button>
       </div>
 
       {/* 统计信息 */}
       <div className="flex items-center gap-3 text-xs text-neutral-400 dark:text-stone-500 px-1">
-        <span>共 {stats.total} 条</span>
+        <span>{T('mint.clip.total', { n: stats.total })}</span>
         <span>·</span>
-        <span>文本 {stats.text}</span>
+        <span>{T('mint.clip.tabText')} {stats.text}</span>
         <span>·</span>
-        <span>图片 {stats.image}</span>
-        {stats.pinned > 0 && <><span>·</span><span>固定 {stats.pinned}</span></>}
+        <span>{T('mint.clip.tabImage')} {stats.image}</span>
+        {stats.pinned > 0 && <><span>·</span><span>{T('mint.clip.tabPinned')} {stats.pinned}</span></>}
       </div>
 
       {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3 flex items-center justify-between">
@@ -765,7 +786,7 @@ function ClipboardHistory() {
 
       {/* 搜索 + 分类 */}
       <div className="flex items-center gap-2 flex-wrap">
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索文本历史…"
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder={T('mint.clip.search')}
           className="flex-1 min-w-[120px] px-3 py-1.5 rounded-lg bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)]" />
         <div className="flex items-center gap-1 rounded-lg bg-white/40 dark:bg-stone-800/40 p-0.5">
           {filterTabs.map(tab => (
@@ -783,7 +804,7 @@ function ClipboardHistory() {
       <div className="rounded-xl bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 max-h-[45vh] overflow-y-auto">
         {filtered.length === 0 ? (
           <div className="p-8 text-center text-sm text-neutral-400 dark:text-stone-500">
-            {search ? '未找到匹配的记录' : '暂无历史，复制内容后将自动记录'}
+            {search ? T('mint.clip.noMatch') : T('mint.clip.empty')}
           </div>
         ) : filtered.map((item) => (
           <div key={item.id} className="px-3 py-2 border-b border-white/40 dark:border-stone-700/30 last:border-0 flex items-start gap-2 group hover:bg-white/30 dark:hover:bg-stone-700/20 transition-colors">
@@ -795,19 +816,19 @@ function ClipboardHistory() {
                   {item.thumbnail ? (
                     <img 
                       src={item.thumbnail} 
-                      alt="缩略图" 
+                      alt={T('mint.clip.thumbnail')} 
                       loading="lazy"
                       decoding="async"
                       className="w-20 h-14 object-cover rounded-lg border border-white/40 dark:border-stone-700/40 flex-shrink-0" 
                     />
                   ) : (
                     <div className="w-20 h-14 rounded-lg bg-neutral-100 dark:bg-stone-700 flex items-center justify-center flex-shrink-0">
-                      <span className="text-xs text-neutral-400">图片</span>
+                      <span className="text-xs text-neutral-400">{T('mint.clip.tabImage')}</span>
                     </div>
                   )}
                   <div className="flex-1 min-w-0">
                     <div className="text-xs text-neutral-400 dark:text-stone-500">
-                      {formatTime(item.timestamp)} · 图片
+                      {formatTime(item.timestamp)} · {T('mint.clip.tabImage')}
                     </div>
                   </div>
                 </div>
@@ -816,7 +837,7 @@ function ClipboardHistory() {
                   <div className="text-sm text-neutral-700 dark:text-stone-200 break-all whitespace-pre-wrap line-clamp-3">{item.preview}</div>
                   <div className="text-xs text-neutral-400 dark:text-stone-500 flex items-center gap-2">
                     <span>{formatTime(item.timestamp)}</span>
-                    {item.charCount && <span>{item.charCount} 字符</span>}
+                    {item.charCount && <span>{T('mint.clip.chars', { n: item.charCount })}</span>}
                   </div>
                 </div>
               )}
@@ -825,17 +846,17 @@ function ClipboardHistory() {
             <div className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
               <button onClick={() => writeToClipboard(item)}
                 className={`btn-press text-xs px-2 py-1 rounded transition-colors ${copiedId === item.id ? 'text-green-500' : 'text-neutral-500 dark:text-stone-400 hover:text-[var(--element-color-raw)]'}`}
-                title="复制到剪贴板">
-                {copiedId === item.id ? '✓' : '复制'}
+                title={T('mint.clip.copyTo')}>
+                {copiedId === item.id ? '✓' : T('mint.copy')}
               </button>
               <button onClick={() => togglePin(item.id)}
                 className={`btn-press text-xs px-2 py-1 rounded transition-colors ${item.pinned ? 'text-amber-500' : 'text-neutral-500 dark:text-stone-400 hover:text-amber-500'}`}
-                title={item.pinned ? '取消固定' : '固定'}>
+                title={item.pinned ? T('mint.clip.unpin') : T('mint.clip.pin')}>
                 {item.pinned ? '★' : '☆'}
               </button>
               <button onClick={() => deleteItem(item.id)}
                 className="btn-press text-xs px-2 py-1 rounded text-neutral-500 dark:text-stone-400 hover:text-red-500 transition-colors"
-                title="删除">✕</button>
+                title={T('mint.delete')}>✕</button>
             </div>
             {item.pinned && <span className="text-amber-500 text-xs flex-shrink-0">★</span>}
           </div>
@@ -847,6 +868,7 @@ function ClipboardHistory() {
 
 // ========== t3 / t4 音视频转码（ffmpeg） ==========
 function MediaTranscoder({ kind }: { kind: 'video' | 'audio' }) {
+  useLang();
   const [available, setAvailable] = useState<boolean | null>(null);
   const [input, setInput] = useState('');
   const [fmt, setFmt] = useState(kind === 'video' ? 'mp4' : 'mp3');
@@ -862,8 +884,8 @@ function MediaTranscoder({ kind }: { kind: 'video' | 'audio' }) {
     setError('');
     try {
       const filters = kind === 'video'
-        ? [{ name: '视频', extensions: ['mp4', 'mkv', 'webm', 'mov', 'avi', 'flv', 'm4v'] }]
-        : [{ name: '音频', extensions: ['mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac'] }];
+        ? [{ name: T('mint.media.video'), extensions: ['mp4', 'mkv', 'webm', 'mov', 'avi', 'flv', 'm4v'] }]
+        : [{ name: T('mint.media.audio'), extensions: ['mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac'] }];
       const res: string[] = await hostInvoke('pick_file', { filters });
       if (res && res.length) { setInput(res[0]); setOutput(''); }
       else setInput('');
@@ -871,7 +893,7 @@ function MediaTranscoder({ kind }: { kind: 'video' | 'audio' }) {
   };
 
   const run = async () => {
-    if (!input) { setError('请先选择文件'); return; }
+    if (!input) { setError(T('mint.media.selectFirst')); return; }
     setBusy(true); setError(''); setOutput('');
     try {
       // MIDI 转写走独立命令（basic-pitch，MIT）；其余格式走 ffmpeg 封装互转
@@ -892,33 +914,33 @@ function MediaTranscoder({ kind }: { kind: 'video' | 'audio' }) {
     <div className="space-y-3">
       {available === false && (
         <div className="text-sm text-amber-600 bg-amber-50 dark:bg-amber-900/20 rounded-xl p-3">
-          未检测到 ffmpeg。请确保 external-deps/全局/ffmpeg/ffmpeg.exe 存在。
+          {T('mint.media.noFfmpeg')}
         </div>
       )}
-      {available === null && <div className="text-xs text-neutral-400 dark:text-stone-500">正在检测 ffmpeg…</div>}
+      {available === null && <div className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.media.checkingFfmpeg')}</div>}
       <div className="flex items-center gap-2 flex-wrap">
-        <button onClick={pick} disabled={available === false} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm disabled:opacity-50">选择文件</button>
-        <span className="text-xs text-neutral-400 dark:text-stone-500 truncate max-w-[280px]">{input || '未选择'}</span>
+        <button onClick={pick} disabled={available === false} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm disabled:opacity-50">{T('mint.media.chooseFile')}</button>
+        <span className="text-xs text-neutral-400 dark:text-stone-500 truncate max-w-[280px]">{input || T('mint.notSelected')}</span>
       </div>
       <div className="flex items-center gap-3 flex-wrap text-sm text-neutral-600 dark:text-stone-300">
-        <label className="flex items-center gap-1.5">输出格式
+        <label className="flex items-center gap-1.5">{T('mint.media.outFormat')}
           <select value={fmt} onChange={e => setFmt(e.target.value)} className={selCls}>
             {fmts.map(f => <option key={f} value={f}>{f}</option>)}
           </select>
         </label>
         {kind === 'audio' && fmt === 'midi' && (
-          <span className="text-xs text-amber-600 dark:text-amber-400">MIDI 转写需 Python 3.10+ 与 basic-pitch（MIT）</span>
+          <span className="text-xs text-amber-600 dark:text-amber-400">{T('mint.media.midiHint')}</span>
         )}
         <button onClick={run} disabled={busy || available === false || !input} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto disabled:opacity-50">
-          {busy ? '转码中…' : '开始转码'}
+          {busy ? T('mint.media.transcoding') : T('mint.media.startTranscode')}
         </button>
       </div>
       {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{error}</div>}
       {output && (
         <div className="flex items-center gap-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 px-3 py-2">
-          <span className="text-xs text-neutral-500 dark:text-stone-400">输出</span>
+          <span className="text-xs text-neutral-500 dark:text-stone-400">{T('mint.output')}</span>
           <code className="flex-1 text-sm font-mono text-neutral-700 dark:text-stone-200 break-all">{output}</code>
-          <CopyButton text={output} label="复制路径" />
+          <CopyButton text={output} label={T('mint.media.copyPath')} />
         </div>
       )}
     </div>
@@ -950,14 +972,14 @@ function loadSpeedtestScript(): Promise<void> {
     const existing = document.querySelector('script[data-librespeed]');
     if (existing) {
       existing.addEventListener('load', () => resolve());
-      existing.addEventListener('error', () => reject(new Error('LibreSpeed 脚本加载失败')));
+      existing.addEventListener('error', () => reject(new Error(T('mint.speed.loadFail'))));
       return;
     }
     const sc = document.createElement('script');
     sc.src = '/speedtest.js';
     sc.setAttribute('data-librespeed', '1');
     sc.onload = () => resolve();
-    sc.onerror = () => reject(new Error('LibreSpeed 脚本加载失败'));
+    sc.onerror = () => reject(new Error(T('mint.speed.loadFail')));
     document.head.appendChild(sc);
   });
 }
@@ -966,6 +988,7 @@ const LS_BACKEND_KEY = 'librespeed_backend';
 const LS_HISTORY_KEY = 'librespeed_history';
 
 function SpeedTest() {
+  useLang();
   const [backend, setBackend] = useState(() => {
     try { return localStorage.getItem(LS_BACKEND_KEY) || ''; } catch { return ''; }
   });
@@ -988,19 +1011,19 @@ function SpeedTest() {
   const start = async () => {
     setErrMsg('');
     const url = backend.trim();
-    if (!url) { setErrMsg('请先填写测速服务器地址（你自托管的 LibreSpeed 后端）'); return; }
+    if (!url) { setErrMsg(T('mint.speed.urlRequired')); return; }
     setStatus('running');
     setPing(null); setJitter(null); setDl(null); setUl(null);
     setProg({ dl: 0, ul: 0, ping: 0 });
-    setStage('初始化…');
+    setStage(T('mint.speed.init'));
     try { await loadSpeedtestScript(); }
-    catch (e: any) { setStatus('error'); setErrMsg(e?.message || 'LibreSpeed 脚本加载失败'); return; }
+    catch (e: any) { setStatus('error'); setErrMsg(e?.message || T('mint.speed.loadFail')); return; }
     const Speedtest = (window as any).Speedtest;
-    if (!Speedtest) { setStatus('error'); setErrMsg('LibreSpeed 未就绪'); return; }
+    if (!Speedtest) { setStatus('error'); setErrMsg(T('mint.speed.notReady')); return; }
     const base = url.replace(/\/+$/, '') + '/';
     try { localStorage.setItem(LS_BACKEND_KEY, url); } catch { /* ignore */ }
     const server = {
-      name: '自定义服务器',
+      name: T('mint.speed.customServer'),
       server: base,
       dlURL: 'garbage.php',
       ulURL: 'backend.php',
@@ -1025,11 +1048,11 @@ function SpeedTest() {
       setUl(latest.current.ul);
       setProg({ dl: d.dlProgress || 0, ul: d.ulProgress || 0, ping: d.pingProgress || 0 });
       const st = d.testState;
-      setStage(st === 0 ? '准备中…' : st === 1 ? '下载测速中…' : st === 2 ? '延迟 / 抖动测速中…' : st === 3 ? '上传测速中…' : st === 4 ? '完成' : '');
+      setStage(st === 0 ? T('mint.speed.prepare') : st === 1 ? T('mint.speed.dl') : st === 2 ? T('mint.speed.ping') : st === 3 ? T('mint.speed.ul') : st === 4 ? T('mint.speed.done') : '');
     };
     s.onend = (aborted: boolean) => {
       setStatus(aborted ? 'idle' : 'done');
-      setStage(aborted ? '已停止' : '测试完成');
+      setStage(aborted ? T('mint.speed.stopped') : T('mint.speed.testDone'));
       if (!aborted) {
         const rec = { t: Date.now(), ...latest.current };
         const next = [rec, ...hist].slice(0, 10);
@@ -1039,7 +1062,7 @@ function SpeedTest() {
     };
     testRef.current = s;
     try { s.start(); }
-    catch (e: any) { setStatus('error'); setErrMsg(e?.message || '启动失败'); }
+    catch (e: any) { setStatus('error'); setErrMsg(e?.message || T('mint.speed.startFail')); }
   };
 
   const running = status === 'running';
@@ -1049,7 +1072,7 @@ function SpeedTest() {
     <div className="h-full flex flex-col gap-4 fade-in">
       {/* 服务器设置 */}
       <div className="flex-shrink-0 rounded-xl p-4 bg-white/50 dark:bg-stone-800/50 border border-white/80 dark:border-stone-700/50">
-        <label className="text-xs text-neutral-500 dark:text-stone-400">测速服务器地址（自托管 LibreSpeed 后端）</label>
+        <label className="text-xs text-neutral-500 dark:text-stone-400">{T('mint.speed.serverLabel')}</label>
         <div className="mt-1.5 flex items-center gap-2">
           <input
             value={backend}
@@ -1060,35 +1083,35 @@ function SpeedTest() {
           />
           <RippleBtn as="button" onClick={running ? stop : start}
             className={`btn-press px-4 py-2 rounded-lg text-sm font-medium transition-colors ${running ? 'bg-red-500/90 text-white hover:bg-red-500' : 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 hover:brightness-105'}`}>
-            {running ? '停止' : '开始测速'}
+            {running ? T('mint.speed.stop') : T('mint.speed.start')}
           </RippleBtn>
         </div>
         <p className="mt-1.5 text-[11px] text-neutral-400 dark:text-stone-500 leading-relaxed">
-          需标准 LibreSpeed 后端（garbage.php / backend.php / empty.php / getIP.php）。后端请开启 CORS 允许本应用域（tauri://localhost）。
+          {T('mint.speed.backendHint')}
         </p>
         {errMsg && <p className="mt-1.5 text-[11px] text-red-500">{errMsg}</p>}
       </div>
 
       {/* 指标 */}
       <div className="flex items-stretch gap-3 flex-shrink-0">
-        <MetricCard label="下载" value={fNum(dl)} unit="Mbps" p={prog.dl} active={running && stage.indexOf('下载') >= 0} />
-        <MetricCard label="上传" value={fNum(ul)} unit="Mbps" p={prog.ul} active={running && stage.indexOf('上传') >= 0} />
-        <MetricCard label="延迟" value={fNum(ping)} unit="ms" p={prog.ping} active={running && stage.indexOf('延迟') >= 0} />
+        <MetricCard label={T('mint.speed.dl')} value={fNum(dl)} unit="Mbps" p={prog.dl} active={running && stage.indexOf(T('mint.speed.dl')) >= 0} />
+        <MetricCard label={T('mint.speed.ul')} value={fNum(ul)} unit="Mbps" p={prog.ul} active={running && stage.indexOf(T('mint.speed.ul')) >= 0} />
+        <MetricCard label={T('mint.speed.ping')} value={fNum(ping)} unit="ms" p={prog.ping} active={running && stage.indexOf(T('mint.speed.ping')) >= 0} />
       </div>
 
       {/* 状态 */}
       <div className="text-center text-sm text-neutral-500 dark:text-stone-400 flex-shrink-0">
         {status === 'running' && <span className="inline-flex items-center gap-2"><span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--element-border)] border-t-transparent animate-spin" />{stage}</span>}
-        {status === 'done' && <span className="text-[var(--element-color-raw)]">测试完成 · 抖动 {fNum(jitter)} ms</span>}
-        {status === 'idle' && <span>填写服务器地址后开始测速</span>}
-        {status === 'error' && <span className="text-red-500">出错了，请检查服务器地址与 CORS 配置</span>}
+        {status === 'done' && <span className="text-[var(--element-color-raw)]">{T('mint.speed.testDone')} · {T('mint.speed.jitter')} {fNum(jitter)} ms</span>}
+        {status === 'idle' && <span>{T('mint.speed.idleHint')}</span>}
+        {status === 'error' && <span className="text-red-500">{T('mint.speed.error')}</span>}
       </div>
 
       {/* 历史 */}
       <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide">
         {hist.length > 0 && (
           <div className="space-y-1.5">
-            <div className="text-xs text-neutral-400 dark:text-stone-500 px-1">历史记录</div>
+            <div className="text-xs text-neutral-400 dark:text-stone-500 px-1">{T('mint.speed.history')}</div>
             {hist.map((h, i) => (
               <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg bg-white/40 dark:bg-stone-800/40 text-sm">
                 <span className="text-neutral-400 dark:text-stone-500 text-xs">{new Date(h.t).toLocaleString()}</span>
@@ -1114,6 +1137,7 @@ function BriefcaseIcon() {
 
 // ========== t5 正则表达式测试 ==========
 function RegexTester() {
+  useLang();
   const [text, setText] = useState('Hello world\nfoo_bar 2026\nthe quick Brown fox\nemail: a.b@example.com');
   const [pattern, setPattern] = useState('\\b\\w+\\b');
   const [flags, setFlags] = useState({ g: true, i: false, m: true, s: false });
@@ -1178,7 +1202,7 @@ function RegexTester() {
         <input
           value={pattern}
           onChange={e => setPattern(e.target.value)}
-          placeholder="正则表达式，例如 \\d+"
+          placeholder={T('mint.regex.placeholder')}
           className="flex-1 px-3 py-2 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)]"
           spellCheck={false}
         />
@@ -1190,18 +1214,18 @@ function RegexTester() {
       <textarea
         value={text}
         onChange={e => setText(e.target.value)}
-        placeholder="在此输入待匹配的文本…"
+        placeholder={T('mint.regex.inputHint')}
         spellCheck={false}
         className="w-full h-44 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y"
       />
 
       {result.error ? (
-        <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">正则错误：{result.error}</div>
+        <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{T('mint.regex.error')} {result.error}</div>
       ) : (
         <>
           <div className="flex items-center justify-between text-xs text-neutral-400 dark:text-stone-500">
-            <span>共匹配 {result.matches.length} 处</span>
-            <CopyButton text={result.matches.map(m => m.match).join('\n')} label="复制全部匹配" />
+            <span>{T('mint.regex.matches', { n: result.matches.length })}</span>
+            <CopyButton text={result.matches.map(m => m.match).join('\n')} label={T('mint.regex.copyAll')} />
           </div>
           {segments ? (
             <pre className="whitespace-pre-wrap break-words p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 leading-relaxed">
@@ -1210,11 +1234,11 @@ function RegexTester() {
                 : <span key={i}>{s.t}</span>)}
             </pre>
           ) : (
-            <div className="text-sm text-neutral-400 dark:text-stone-500">没有匹配结果。</div>
+            <div className="text-sm text-neutral-400 dark:text-stone-500">{T('mint.regex.noMatch')}</div>
           )}
           {result.matches.length > 0 && (
             <div className="space-y-1">
-              <div className="text-xs font-medium text-neutral-500 dark:text-stone-400">匹配明细</div>
+              <div className="text-xs font-medium text-neutral-500 dark:text-stone-400">{T('mint.regex.detail')}</div>
               <div className="max-h-48 overflow-y-auto rounded-xl bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 divide-y divide-white/60 dark:divide-stone-700/40">
                 {result.matches.map((m, i) => (
                   <div key={i} className="px-3 py-1.5 text-xs font-mono flex gap-2">
@@ -1260,6 +1284,7 @@ function diffLines(a: string, b: string): { type: 'eq' | 'del' | 'add'; a?: stri
 }
 
 function TextDiff() {
+  useLang();
   const [left, setLeft] = useState('苹果\n香蕉\n橙子\n葡萄');
   const [right, setRight] = useState('苹果\n香蕉\n西瓜\n葡萄\n芒果');
   const diff = useMemo(() => diffLines(left, right), [left, right]);
@@ -1281,11 +1306,11 @@ function TextDiff() {
     <div className="space-y-3">
       <div className="flex items-center gap-2 rounded-xl bg-[var(--element-muted)]/60 border border-white/70 dark:border-stone-700/40 px-3 py-2 text-xs text-neutral-600 dark:text-stone-300">
         <span>💡</span>
-        <span>更多专业功能（端口扫描、进程管理、环境变量、剪贴板、图片 / 文档 / 音视频转码）请前往「茑萝」模块查看。</span>
+        <span>{T('mint.diff.tip')}</span>
       </div>
       <div className="flex items-center gap-2 text-xs text-neutral-400 dark:text-stone-500">
-        <span>新增 {stats.add} 行</span><span>删除 {stats.del} 行</span>
-        <button onClick={swap} className="btn-press ml-auto px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors">交换左右</button>
+        <span>{T('mint.diff.add', { n: stats.add })}</span><span>{T('mint.diff.del', { n: stats.del })}</span>
+        <button onClick={swap} className="btn-press ml-auto px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors">{T('mint.diff.swap')}</button>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <textarea value={left} onChange={e => setLeft(e.target.value)} spellCheck={false}
@@ -1302,6 +1327,7 @@ function TextDiff() {
 
 // ========== t7 JSON 格式化 ==========
 function JsonFormatter() {
+  useLang();
   const [text, setText] = useState('{"name":"薄荷","tools":["正则","JSON"],"year":2026}');
   const [output, setOutput] = useState('');
   const [error, setError] = useState('');
@@ -1321,16 +1347,16 @@ function JsonFormatter() {
   return (
     <div className="space-y-3">
       <textarea value={text} onChange={e => setText(e.target.value)} spellCheck={false}
-        placeholder="粘贴 JSON…"
+        placeholder={T('mint.json.paste')}
         className="w-full h-44 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
       <div className="flex items-center gap-2 flex-wrap">
-        <button onClick={() => format(2)} className="btn-press px-3 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors">格式化 (2 空格)</button>
-        <button onClick={() => format(4)} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors">格式化 (4 空格)</button>
-        <button onClick={minify} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors">压缩</button>
-        <button onClick={() => { setText(''); setOutput(''); setError(''); }} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors">清空</button>
+        <button onClick={() => format(2)} className="btn-press px-3 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors">{T('mint.json.format2')}</button>
+        <button onClick={() => format(4)} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors">{T('mint.json.format4')}</button>
+        <button onClick={minify} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors">{T('mint.json.minify')}</button>
+        <button onClick={() => { setText(''); setOutput(''); setError(''); }} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors">{T('mint.clear')}</button>
         {output && <CopyButton text={output} />}
       </div>
-      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">JSON 错误：{error}</div>}
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{T('mint.json.error')} {error}</div>}
       {output && (
         <textarea readOnly value={output} spellCheck={false}
           className="w-full h-44 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none resize-y" />
@@ -1341,6 +1367,7 @@ function JsonFormatter() {
 
 // ========== t8 Base64 编解码 ==========
 function Base64Tool() {
+  useLang();
   const [mode, setMode] = useState<'encode' | 'decode'>('encode');
   const [input, setInput] = useState('薄荷 professional 工具箱 🔧');
   const [output, setOutput] = useState('');
@@ -1368,19 +1395,19 @@ function Base64Tool() {
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
-          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>编码</button>
-          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解码</button>
+          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.encode')}</button>
+          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.decode')}</button>
         </div>
-        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? '编码' : '解码'}</button>
+        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? T('mint.encode') : T('mint.decode')}</button>
       </div>
       <textarea value={input} onChange={e => setInput(e.target.value)} spellCheck={false}
-        placeholder={mode === 'encode' ? '输入原始文本…' : '输入 Base64…'}
+        placeholder={mode === 'encode' ? T('mint.b64.inputText') : T('mint.b64.inputB64')}
         className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
-      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{T('mint.error')} {error}</div>}
       {output && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.result')}</span>
             <CopyButton text={output} />
           </div>
           <textarea readOnly value={output} spellCheck={false}
@@ -1393,6 +1420,7 @@ function Base64Tool() {
 
 // ========== t9 URL 编解码 ==========
 function UrlTool() {
+  useLang();
   const [mode, setMode] = useState<'encode' | 'decode'>('encode');
   const [input, setInput] = useState('https://example.com/搜索?q=薄荷 tool&x=1');
   const [output, setOutput] = useState('');
@@ -1410,19 +1438,19 @@ function UrlTool() {
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
-          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>编码</button>
-          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解码</button>
+          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.encode')}</button>
+          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.decode')}</button>
         </div>
-        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? '编码' : '解码'}</button>
+        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? T('mint.encode') : T('mint.decode')}</button>
       </div>
       <textarea value={input} onChange={e => setInput(e.target.value)} spellCheck={false}
-        placeholder={mode === 'encode' ? '输入原始 URL / 文本…' : '输入编码后的文本…'}
+        placeholder={mode === 'encode' ? T('mint.url.inputText') : T('mint.url.inputEncoded')}
         className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
-      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{T('mint.error')} {error}</div>}
       {output && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.result')}</span>
             <CopyButton text={output} />
           </div>
           <textarea readOnly value={output} spellCheck={false}
@@ -1461,6 +1489,7 @@ function parseCsv(text: string): string[][] {
 }
 
 function CsvViewer() {
+  useLang();
   const [text, setText] = useState('name,age,city\nAlice,30,Beijing\nBob,25,Shanghai\nCharlie,35,Guangzhou');
   const [fileError, setFileError] = useState('');
   const [exporting, setExporting] = useState(false);
@@ -1475,7 +1504,7 @@ function CsvViewer() {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
     setFileError('');
-    f.text().then((t: string) => setText(t)).catch((err: unknown) => setFileError('读取文件失败：' + (err as Error).message));
+    f.text().then((t: string) => setText(t)).catch((err: unknown) => setFileError(T('mint.readFileFailed') + ' ' + (err as Error).message));
   };
 
   const exportCsv = () => { copyText(text); };
@@ -1494,7 +1523,7 @@ function CsvViewer() {
       await hostInvoke('write_file_bytes', { path, contentBase64: b64 });
       setFileError('');
     } catch (e) {
-      setFileError('导出 XLSX 失败：' + ((e as Error)?.message || String(e)));
+      setFileError(T('mint.csv.exportXlsxFail') + ' ' + ((e as Error)?.message || String(e)));
     } finally {
       setExporting(false);
     }
@@ -1503,19 +1532,19 @@ function CsvViewer() {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <button onClick={() => fileRef.current?.click()} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">选择 CSV 文件</button>
-        <button onClick={exportCsv} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">复制全部</button>
-        <button onClick={exportXlsx} disabled={exporting} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm disabled:opacity-50">{exporting ? '导出中…' : '导出 XLSX'}</button>
-        <span className="text-xs text-neutral-400 dark:text-stone-500 ml-auto">{rows.length} 行 × {rows[0]?.length || 0} 列</span>
+        <button onClick={() => fileRef.current?.click()} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.csv.chooseFile')}</button>
+        <button onClick={exportCsv} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.copyAll')}</button>
+        <button onClick={exportXlsx} disabled={exporting} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm disabled:opacity-50">{exporting ? T('mint.csv.exporting') : T('mint.csv.exportXlsx')}</button>
+        <span className="text-xs text-neutral-400 dark:text-stone-500 ml-auto">{T('mint.csv.dims', { rows: rows.length, cols: rows[0]?.length || 0 })}</span>
         <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} />
       </div>
       {fileError && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{fileError}</div>}
       <textarea value={text} onChange={e => setText(e.target.value)} spellCheck={false}
-        placeholder="粘贴 CSV 文本，或选择文件…"
+        placeholder={T('mint.csv.pasteHint')}
         className="w-full h-28 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
       <div className="rounded-xl bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 overflow-auto max-h-[50vh]">
         {rows.length === 0 ? (
-          <div className="p-6 text-center text-sm text-neutral-400 dark:text-stone-500">暂无数据</div>
+          <div className="p-6 text-center text-sm text-neutral-400 dark:text-stone-500">{T('mint.csv.noData')}</div>
         ) : (
           <table className="w-full text-sm border-collapse">
             <thead>
@@ -1613,7 +1642,7 @@ function md5(rawStr: string): string {
 
 async function shaDigest(alg: string, data: Uint8Array): Promise<string> {
   const subtle = (window.crypto && (window.crypto as Crypto).subtle) || undefined;
-  if (!subtle) throw new Error('当前环境不支持 Web Crypto（SHA 系列），仅 MD5 可用');
+  if (!subtle) throw new Error(T('mint.hash.noCrypto'));
   const buf = await subtle.digest(alg, data as BufferSource);
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -1623,6 +1652,7 @@ function toBytes(str: string): Uint8Array {
 }
 
 function HashTool() {
+  useLang();
   const [text, setText] = useState('薄荷 professional');
   const [enabled, setEnabled] = useState({ md5: true, sha1: true, sha256: true, sha512: false });
   const [results, setResults] = useState<{ alg: string; value: string }[]>([]);
@@ -1648,7 +1678,7 @@ function HashTool() {
     f.arrayBuffer().then((buf: ArrayBuffer) => {
       const dec = new TextDecoder().decode(buf);
       setText(dec.length > 5000 ? dec.slice(0, 5000) : dec);
-    }).catch((err: unknown) => setError('读取文件失败：' + (err as Error).message));
+    }).catch((err: unknown) => setError(T('mint.readFileFailed') + ' ' + (err as Error).message));
   };
 
   const box = (key: keyof typeof enabled, label: string) => (
@@ -1664,12 +1694,12 @@ function HashTool() {
         <div className="flex items-center gap-3 px-3 py-2 rounded-xl bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40">
           {box('md5', 'MD5')}{box('sha1', 'SHA-1')}{box('sha256', 'SHA-256')}{box('sha512', 'SHA-512')}
         </div>
-        <button onClick={() => fileRef.current?.click()} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">选择文件</button>
-        <button onClick={compute} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">计算</button>
+        <button onClick={() => fileRef.current?.click()} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.media.chooseFile')}</button>
+        <button onClick={compute} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{T('mint.hash.compute')}</button>
         <input ref={fileRef} type="file" className="hidden" onChange={onFile} />
       </div>
       <textarea value={text} onChange={e => setText(e.target.value)} spellCheck={false}
-        placeholder="输入文本，或选择文件计算哈希…"
+        placeholder={T('mint.hash.placeholder')}
         className="w-full h-32 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
       {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{error}</div>}
       {results.length > 0 && (
@@ -1699,6 +1729,7 @@ function uuidv4(): string {
 }
 
 function UuidTool() {
+  useLang();
   const [count, setCount] = useState(5);
   const [upper, setUpper] = useState(false);
   const [braces, setBraces] = useState(false);
@@ -1720,31 +1751,31 @@ function UuidTool() {
     <div className="space-y-3">
       <div className="flex items-center gap-3 flex-wrap">
         <label className="flex items-center gap-2 text-sm text-neutral-600 dark:text-stone-300">
-          数量
+          {T('mint.uuid.count')}
           <input type="number" min={1} max={1000} value={count}
             onChange={e => setCount(parseInt(e.target.value, 10))}
             className="w-20 px-2 py-1 rounded-lg bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm outline-none focus:border-[var(--element-border)]" />
         </label>
         <label className="flex items-center gap-1 text-xs text-neutral-600 dark:text-stone-300 cursor-pointer select-none">
-          <input type="checkbox" checked={upper} onChange={e => setUpper(e.target.checked)} className="accent-[var(--element-bg)]" /> 大写
+          <input type="checkbox" checked={upper} onChange={e => setUpper(e.target.checked)} className="accent-[var(--element-bg)]" /> {T('mint.uuid.upper')}
         </label>
         <label className="flex items-center gap-1 text-xs text-neutral-600 dark:text-stone-300 cursor-pointer select-none">
-          <input type="checkbox" checked={braces} onChange={e => setBraces(e.target.checked)} className="accent-[var(--element-bg)]" /> 花括号
+          <input type="checkbox" checked={braces} onChange={e => setBraces(e.target.checked)} className="accent-[var(--element-bg)]" /> {T('mint.uuid.braces')}
         </label>
-        <button onClick={gen} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">生成</button>
+        <button onClick={gen} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{T('mint.uuid.gen')}</button>
       </div>
       {list.length > 0 && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 dark:text-stone-500">已生成 {list.length} 个</span>
-            <CopyButton text={list.join('\n')} label="复制全部" />
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.uuid.generated', { n: list.length })}</span>
+            <CopyButton text={list.join('\n')} label={T('mint.copyAll')} />
           </div>
           <div className="rounded-xl bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 divide-y divide-white/60 dark:divide-stone-700/40 max-h-[50vh] overflow-y-auto">
             {list.map((u, i) => (
               <div key={i} className="px-3 py-1.5 text-sm font-mono text-neutral-700 dark:text-stone-200 flex items-center gap-2">
                 <span className="text-neutral-400 dark:text-stone-500 w-8 flex-shrink-0">{i + 1}.</span>
                 <span className="flex-1 truncate">{u}</span>
-                <CopyButton text={u} label="复制" />
+                <CopyButton text={u} />
               </div>
             ))}
           </div>
@@ -1782,6 +1813,7 @@ async function deriveAesKey(passphrase: string, salt: Uint8Array): Promise<Crypt
   );
 }
 function AesTool() {
+  useLang();
   const [mode, setMode] = useState<'encrypt' | 'decrypt'>('encrypt');
   const [text, setText] = useState('');
   const [pass, setPass] = useState('');
@@ -1792,10 +1824,10 @@ function AesTool() {
   const run = async () => {
     setError(''); setOutput(''); setBusy(true);
     try {
-      if (!pass) throw new Error('请输入密钥口令');
-      if (!text) throw new Error('请输入文本');
+      if (!pass) throw new Error(T('mint.aes.passRequired'));
+      if (!text) throw new Error(T('mint.aes.textRequired'));
       const subtle = (window.crypto as Crypto).subtle;
-      if (!subtle) throw new Error('当前环境不支持 Web Crypto');
+      if (!subtle) throw new Error(T('mint.aes.noCrypto'));
       if (mode === 'encrypt') {
         const salt = (window.crypto as Crypto).getRandomValues(new Uint8Array(16));
         const iv = (window.crypto as Crypto).getRandomValues(new Uint8Array(12));
@@ -1806,7 +1838,7 @@ function AesTool() {
         setOutput(`${aesBytesToB64(iv)}:${aesBytesToB64(cipher)}:${aesBytesToB64(salt)}`);
       } else {
         const parts = text.trim().split(':');
-        if (parts.length !== 3) throw new Error('密文格式应为 iv:cipher:salt');
+        if (parts.length !== 3) throw new Error(T('mint.aes.badFormat'));
         const iv = aesB64ToBytes(parts[0]);
         const cipher = aesB64ToBytes(parts[1]);
         const salt = aesB64ToBytes(parts[2]);
@@ -1827,27 +1859,27 @@ function AesTool() {
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
         <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
-          <button onClick={() => setMode('encrypt')} className={`px-4 py-1.5 text-sm ${mode === 'encrypt' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>加密</button>
-          <button onClick={() => setMode('decrypt')} className={`px-4 py-1.5 text-sm ${mode === 'decrypt' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解密</button>
+          <button onClick={() => setMode('encrypt')} className={`px-4 py-1.5 text-sm ${mode === 'encrypt' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.aes.encrypt')}</button>
+          <button onClick={() => setMode('decrypt')} className={`px-4 py-1.5 text-sm ${mode === 'decrypt' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.aes.decrypt')}</button>
         </div>
         <button onClick={run} disabled={busy} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto disabled:opacity-60">
-          {busy ? '处理中…' : (mode === 'encrypt' ? '加密' : '解密')}
+          {busy ? T('mint.processing') : (mode === 'encrypt' ? T('mint.aes.encrypt') : T('mint.aes.decrypt'))}
         </button>
       </div>
       <input type="password" value={pass} onChange={e => setPass(e.target.value)}
-        placeholder="密钥口令（PBKDF2 100k 轮派生 AES-256 密钥）"
+        placeholder={T('mint.aes.passPlaceholder')}
         className="w-full px-3 py-2 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm outline-none focus:border-[var(--element-border)]" />
       <textarea value={text} onChange={e => setText(e.target.value)} spellCheck={false}
-        placeholder={mode === 'encrypt' ? '输入明文…' : '输入密文（iv:cipher:salt）…'}
+        placeholder={mode === 'encrypt' ? T('mint.aes.plainHint') : T('mint.aes.cipherHint')}
         className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
       <div className="text-xs text-neutral-400 dark:text-stone-500">
-        算法：AES-GCM-256 · 派生：PBKDF2-SHA-256 / 100k 轮 · 输出：base64(iv):base64(cipher):base64(salt)
+        {T('mint.aes.algo')}
       </div>
-      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{T('mint.error')} {error}</div>}
       {output && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.result')}</span>
             <CopyButton text={output} />
           </div>
           <textarea readOnly value={output} spellCheck={false}
@@ -1892,6 +1924,7 @@ function base32Decode(str: string): Uint8Array {
   return new Uint8Array(out);
 }
 function Base32Tool() {
+  useLang();
   const [mode, setMode] = useState<'encode' | 'decode'>('encode');
   const [input, setInput] = useState('薄荷 Base32');
   const [output, setOutput] = useState('');
@@ -1909,19 +1942,19 @@ function Base32Tool() {
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
-          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>编码</button>
-          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解码</button>
+          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.encode')}</button>
+          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.decode')}</button>
         </div>
-        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? '编码' : '解码'}</button>
+        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? T('mint.encode') : T('mint.decode')}</button>
       </div>
       <textarea value={input} onChange={e => setInput(e.target.value)} spellCheck={false}
-        placeholder={mode === 'encode' ? '输入原始文本…' : '输入 Base32（A-Z2-7, =）…'}
+        placeholder={mode === 'encode' ? T('mint.b32.inputText') : T('mint.b32.inputB32')}
         className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
-      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{T('mint.error')} {error}</div>}
       {output && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.result')}</span>
             <CopyButton text={output} />
           </div>
           <textarea readOnly value={output} spellCheck={false}
@@ -1941,13 +1974,14 @@ function hexEncode(bytes: Uint8Array): string {
 function hexDecode(str: string): Uint8Array {
   const cleaned = str.trim().replace(/\s+/g, '').replace(/0x/gi, '');
   if (cleaned.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(cleaned)) {
-    throw new Error('无效的十六进制字符串');
+    throw new Error(T('mint.hex.invalid'));
   }
   const out = new Uint8Array(cleaned.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(cleaned.substr(i * 2, 2), 16);
   return out;
 }
 function HexTool() {
+  useLang();
   const [mode, setMode] = useState<'encode' | 'decode'>('encode');
   const [input, setInput] = useState('薄荷 Hex');
   const [output, setOutput] = useState('');
@@ -1966,24 +2000,24 @@ function HexTool() {
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
         <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
-          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>编码</button>
-          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解码</button>
+          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.encode')}</button>
+          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.decode')}</button>
         </div>
         {mode === 'encode' && (
           <label className="flex items-center gap-1 text-xs text-neutral-600 dark:text-stone-300 cursor-pointer select-none">
-            <input type="checkbox" checked={upper} onChange={e => setUpper(e.target.checked)} className="accent-[var(--element-bg)]" /> 大写
+            <input type="checkbox" checked={upper} onChange={e => setUpper(e.target.checked)} className="accent-[var(--element-bg)]" /> {T('mint.upper')}
           </label>
         )}
-        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? '编码' : '解码'}</button>
+        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? T('mint.encode') : T('mint.decode')}</button>
       </div>
       <textarea value={input} onChange={e => setInput(e.target.value)} spellCheck={false}
-        placeholder={mode === 'encode' ? '输入原始文本…' : '输入十六进制字符串…'}
+        placeholder={mode === 'encode' ? T('mint.hex.inputText') : T('mint.hex.inputHex')}
         className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
-      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{T('mint.error')} {error}</div>}
       {output && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.result')}</span>
             <CopyButton text={output} />
           </div>
           <textarea readOnly value={output} spellCheck={false}
@@ -2021,6 +2055,7 @@ function morseDecode(text: string): string {
   ).join('\n');
 }
 function MorseTool() {
+  useLang();
   const [mode, setMode] = useState<'encode' | 'decode'>('encode');
   const [input, setInput] = useState('HELLO MORSE 薄荷');
   const [output, setOutput] = useState('');
@@ -2030,7 +2065,7 @@ function MorseTool() {
     try {
       if (mode === 'encode') {
         const result = morseEncode(input);
-        if (!result.trim()) throw new Error('输入不包含可编码字符（仅支持字母 / 数字 / 标点）');
+        if (!result.trim()) throw new Error(T('mint.morse.noEncodable'));
         setOutput(result);
       } else {
         setOutput(morseDecode(input));
@@ -2043,19 +2078,19 @@ function MorseTool() {
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <div className="flex rounded-xl overflow-hidden border border-white/80 dark:border-stone-700/50">
-          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>编码</button>
-          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>解码</button>
+          <button onClick={() => setMode('encode')} className={`px-4 py-1.5 text-sm ${mode === 'encode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.encode')}</button>
+          <button onClick={() => setMode('decode')} className={`px-4 py-1.5 text-sm ${mode === 'decode' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'bg-white/40 dark:bg-stone-800/40 text-neutral-500'}`}>{T('mint.decode')}</button>
         </div>
-        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? '编码' : '解码'}</button>
+        <button onClick={run} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors ml-auto">{mode === 'encode' ? T('mint.encode') : T('mint.decode')}</button>
       </div>
       <textarea value={input} onChange={e => setInput(e.target.value)} spellCheck={false}
-        placeholder={mode === 'encode' ? '输入文本（字母 / 数字 / 标点，非 ASCII 字符将被忽略）…' : '输入摩斯码（. 和 -，空格分字符，/ 分词）…'}
+        placeholder={mode === 'encode' ? T('mint.morse.inputText') : T('mint.morse.inputMorse')}
         className="w-full h-40 p-3 rounded-xl bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm font-mono text-neutral-700 dark:text-stone-200 outline-none focus:border-[var(--element-border)] resize-y" />
-      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">错误：{error}</div>}
+      {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{T('mint.error')} {error}</div>}
       {output && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 dark:text-stone-500">结果</span>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.result')}</span>
             <CopyButton text={output} />
           </div>
           <textarea readOnly value={output} spellCheck={false}
@@ -2092,6 +2127,7 @@ const TOOL_VIEWS: Record<string, () => JSX.Element> = {
 
 // ========== 主组件 ==========
 function ProfessionalModule() {
+  useLang(); // 语言切换时强制重渲染（T() 读取宿主当前语言）
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -2108,12 +2144,12 @@ function ProfessionalModule() {
 
   const selectedCat = CATEGORIES.find(c => c.id === selectedCategory);
 
-  // 过滤后的工具（搜索作用于工具名/描述）
+  // 过滤后的工具（搜索作用于翻译后的工具名/描述）
   const filteredTools = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const base = selectedCategory ? (TOOLS[selectedCategory] || []) : ALL_TOOLS;
     if (!q) return base;
-    return base.filter(t => t.name.toLowerCase().includes(q) || t.desc.toLowerCase().includes(q));
+    return base.filter(t => T(t.name).toLowerCase().includes(q) || T(t.desc).toLowerCase().includes(q));
   }, [selectedCategory, searchQuery]);
 
   // 二级导航：分类列表
@@ -2132,9 +2168,9 @@ function ProfessionalModule() {
           >
             <div className="font-medium truncate flex items-center gap-2">
               <ToolGlyph name={cat.icon} size={18} className="text-neutral-500 dark:text-stone-400" />
-              {cat.name}
+              {T(cat.name)}
             </div>
-            <div className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">{cat.count} 个工具</div>
+            <div className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">{T('mint.toolsCount', { n: cat.count })}</div>
           </RippleBtn>
         </ScrollRevealBox>
       ))}
@@ -2145,7 +2181,7 @@ function ProfessionalModule() {
   const toolGrid = filteredTools.length > 0 ? (
     <div className="p-6 fade-in">
       <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100 mb-4 slide-in-up">
-        {selectedCat?.name || '全部工具'}
+        {selectedCat ? T(selectedCat.name) : T('mint.allTools')}
       </h2>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
         {filteredTools.map((tool, idx) => (
@@ -2159,10 +2195,10 @@ function ProfessionalModule() {
             <div className="w-10 h-10 rounded-xl bg-[var(--element-muted)] flex items-center justify-center mb-3 text-lg text-neutral-600 dark:text-stone-300">
               <ToolGlyph name={tool.icon} size={20} />
             </div>
-            <h3 className="text-sm font-medium text-neutral-700 dark:text-stone-200">{tool.name}</h3>
-            <p className="text-xs text-neutral-400 dark:text-stone-500 mt-1 line-clamp-2">{tool.desc}</p>
+            <h3 className="text-sm font-medium text-neutral-700 dark:text-stone-200">{T(tool.name)}</h3>
+            <p className="text-xs text-neutral-400 dark:text-stone-500 mt-1 line-clamp-2">{T(tool.desc)}</p>
             {tool.needBackend && (
-              <span className="inline-block mt-2 text-[10px] text-amber-500 bg-amber-50 dark:bg-amber-900/20 px-1.5 py-0.5 rounded">待后端</span>
+              <span className="inline-block mt-2 text-[10px] text-amber-500 bg-amber-50 dark:bg-amber-900/20 px-1.5 py-0.5 rounded">{T('mint.pendingBackend')}</span>
             )}
           </RippleBtn>
         ))}
@@ -2173,12 +2209,12 @@ function ProfessionalModule() {
   const emptyHint = !selectedCategory ? (
     <div className="flex-1 flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">
       <BriefcaseIcon />
-      <p className="text-sm">从左侧选择一个分类开始使用工具</p>
-      <p className="text-xs text-neutral-400/60 dark:text-stone-600">全部 {ALL_TOOLS.length} 个工具已实装（音视频转码使用内置 ffmpeg）</p>
+      <p className="text-sm">{T('mint.chooseCatHint')}</p>
+      <p className="text-xs text-neutral-400/60 dark:text-stone-600">{T('mint.allInstalled', { n: ALL_TOOLS.length })}</p>
     </div>
   ) : (
     <div className="flex-1 flex flex-col items-center justify-center h-full gap-2 text-neutral-400 dark:text-stone-500">
-      <p className="text-sm">未找到匹配的工具</p>
+      <p className="text-sm">{T('mint.noMatch')}</p>
     </div>
   );
 
@@ -2190,11 +2226,11 @@ function ProfessionalModule() {
     <ModuleSidebarShell
       moduleId="professional"
       icon={<BriefcaseIcon />}
-      title="薄荷"
+      title={T('mint.title')}
       onOpenModuleSettings={handleOpenModuleSettings}
       searchQuery={searchQuery}
       onSearchChange={setSearchQuery}
-      searchPlaceholder="搜索工具..."
+      searchPlaceholder={T('mint.searchPlaceholder')}
       children={
         SecondaryNavShell
           ? <SecondaryNavShell>{categoryList}</SecondaryNavShell>
@@ -2205,7 +2241,7 @@ function ProfessionalModule() {
     <div className="w-[260px] h-full flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 p-4 overflow-y-auto">
       <div className="flex items-center gap-2 mb-4 px-1">
         <BriefcaseIcon />
-        <span className="font-bold text-lg text-neutral-800 dark:text-stone-100">薄荷</span>
+        <span className="font-bold text-lg text-neutral-800 dark:text-stone-100">{T('mint.title')}</span>
       </div>
       {categoryList}
     </div>
@@ -2215,7 +2251,7 @@ function ProfessionalModule() {
   const settingsPanel = React.createElement(
     window.__HOST_UI__?.ModuleSettingsPanel || 'div',
     {
-      title: '薄荷',
+      title: T('mint.title'),
       icon: React.createElement('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', children: [
         React.createElement('rect', { key: '1', x: '2', y: '7', width: '20', height: '14', rx: '2', ry: '2' }),
         React.createElement('path', { key: '2', d: 'M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16' }),
@@ -2223,25 +2259,25 @@ function ProfessionalModule() {
       onClose: () => setShowSettings(false),
       children: React.createElement(React.Fragment, null,
         React.createElement('div', { className: 'glass-panel p-4' },
-          React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, '工具统计'),
+          React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, T('mint.statTools')),
           React.createElement('div', { className: 'space-y-2' },
             React.createElement('div', { className: 'flex justify-between text-sm' },
-              React.createElement('span', { className: 'text-neutral-500 dark:text-stone-400' }, '工具分类'),
-              React.createElement('span', { className: 'text-neutral-700 dark:text-stone-200' }, `${CATEGORIES.length} 个`),
+              React.createElement('span', { className: 'text-neutral-500 dark:text-stone-400' }, T('mint.statCats')),
+              React.createElement('span', { className: 'text-neutral-700 dark:text-stone-200' }, T('mint.countN', { n: CATEGORIES.length })),
             ),
             React.createElement('div', { className: 'flex justify-between text-sm' },
-              React.createElement('span', { className: 'text-neutral-500 dark:text-stone-400' }, '工具总数'),
-              React.createElement('span', { className: 'text-neutral-700 dark:text-stone-200' }, `${ALL_TOOLS.length} 个`),
+              React.createElement('span', { className: 'text-neutral-500 dark:text-stone-400' }, T('mint.statTotal')),
+              React.createElement('span', { className: 'text-neutral-700 dark:text-stone-200' }, T('mint.countN', { n: ALL_TOOLS.length })),
             ),
             React.createElement('div', { className: 'flex justify-between text-sm' },
-              React.createElement('span', { className: 'text-neutral-500 dark:text-stone-400' }, '已实装'),
-              React.createElement('span', { className: 'text-neutral-700 dark:text-stone-200' }, `${Object.keys(TOOL_VIEWS).length} 个（全部）`),
+              React.createElement('span', { className: 'text-neutral-500 dark:text-stone-400' }, T('mint.statInstalled')),
+              React.createElement('span', { className: 'text-neutral-700 dark:text-stone-200' }, T('mint.allInstalledShort', { n: Object.keys(TOOL_VIEWS).length })),
             ),
           ),
         ),
         React.createElement('div', { className: 'glass-panel p-4' },
           React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500' },
-            '图片 / 文档 / 端口 / 进程 / 环境变量 / 剪贴板 工具均依赖 Tauri 后端命令，已实装。音视频转码使用内置 ffmpeg（external-deps/全局/ffmpeg）。'
+            T('mint.settingsDesc')
           ),
         ),
       ),
@@ -2274,7 +2310,7 @@ function ProfessionalModule() {
 
 window.__PLUGIN_REGISTRY__.register({
   id: 'professional',
-  name: '薄荷',
+  name: T('mint.title'),
   iconName: 'Toolbox',
   kind: 'module',
   visible: true,
@@ -2289,8 +2325,8 @@ const REG = window.__PLUGIN_REGISTRY__;
 for (const t of ALL_TOOLS) {
   REG.register({
     id: 'pro.' + t.id,
-    name: t.name,
-    desc: t.desc,
+    name: T(t.name),
+    desc: T(t.desc),
     iconName: t.icon,
     kind: 'module',
     visible: false,

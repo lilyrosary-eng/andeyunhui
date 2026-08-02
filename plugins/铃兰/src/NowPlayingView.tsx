@@ -3,6 +3,7 @@ import React from "react";
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
 import { VolumePopup, PlaylistPopup } from './PlayerBar';
+import { T, useLang } from '../../_shared/pluginRuntime';
 // 沉浸播放页 — 覆盖音乐模块内容区，不覆盖一级导航栏
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, MusicIcon,
@@ -36,7 +37,7 @@ function ProgressSeekBar({ currentTime, duration, onSeek }: { currentTime: numbe
     React.createElement('div', {
       ref: barRef,
       onClick: handleClick,
-      title: '点击跳转播放位置',
+      title: T('music.nowPlaying.seekTip'),
       className: 'relative w-full cursor-pointer group flex items-center',
       style: { height: 'clamp(16px, 2.4vh, 24px)' },
     },
@@ -170,7 +171,7 @@ const LyricsList = React.memo(({
     return React.createElement('div', {
       className: 'flex items-center justify-center h-full text-neutral-400 dark:text-stone-500',
       style: { fontSize: 'clamp(13px, 1.5vw, 16px)' },
-    }, '暂无歌词');
+    }, T('music.nowPlaying.noLyrics'));
   }
 
   return lyricsLines.map((line, i) => {
@@ -186,7 +187,7 @@ const LyricsList = React.memo(({
         transition: 'color 0.4s ease, opacity 0.4s ease, font-size 0.4s ease, filter 0.4s ease',
       },
       onClick: () => onLyricClick(line),
-      title: '点击跳转到此处',
+      title: T('music.nowPlaying.jumpHere'),
       onMouseEnter: () => triggerHover(i),
       onMouseLeave: clearHover,
     }, line.text || '\u00A0');
@@ -209,6 +210,7 @@ export function NowPlayingView({
   currentPlaylistId,
   onSelectTrack,
 }: NowPlayingViewProps) {
+  useLang();
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [lyricsLines, setLyricsLines] = useState<LyricLine[]>([]);
@@ -394,7 +396,7 @@ export function NowPlayingView({
     },
       React.createElement(IconButton, {
         onClick: onClose,
-        title: '返回',
+        title: T('music.nowPlaying.back'),
         children: React.createElement(ArrowLeftIcon, { size: 20 }),
       }),
     ),
@@ -454,7 +456,7 @@ export function NowPlayingView({
         },
           React.createElement(IconButton, {
             onClick: handlePlayMode,
-            title: playMode === 'list' ? '列表循环' : playMode === 'single' ? '单曲循环' : '随机播放',
+            title: playMode === 'list' ? T('music.player.modeList') : playMode === 'single' ? T('music.player.modeSingle') : T('music.player.modeRandom'),
             active: playMode !== 'list',
             children: playMode === 'single'
               ? React.createElement(Repeat1Icon, { size: 18 })
@@ -464,17 +466,17 @@ export function NowPlayingView({
           }),
           React.createElement(IconButton, {
             onClick: onPrev,
-            title: '上一首',
+            title: T('music.player.prev'),
             children: React.createElement(SkipBackIcon, { size: 18 }),
           }),
           React.createElement(IconButton, {
             onClick: onTogglePlay,
-            title: isPlaying ? '暂停' : '播放',
+            title: isPlaying ? T('music.player.pause') : T('music.player.play'),
             children: isPlaying ? React.createElement(PauseIcon, { size: 22 }) : React.createElement(PlayIcon, { size: 22 }),
           }),
           React.createElement(IconButton, {
             onClick: onNext,
-            title: '下一首',
+            title: T('music.player.next'),
             children: React.createElement(SkipForwardIcon, { size: 18 }),
           }),
           React.createElement(PlaylistPopup, { playlists, currentPlaylistId, currentTrack: track, onSelectTrack }),

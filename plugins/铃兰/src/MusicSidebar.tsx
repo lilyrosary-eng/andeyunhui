@@ -1,6 +1,7 @@
 /// <reference path="../../global.d.ts" />
 import React from "react";
 // 音乐侧边栏 — 一级导航：歌单列表
+import { T, useLang } from '../../_shared/pluginRuntime';
 const { useState, useCallback } = React;
 const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
 
@@ -70,6 +71,7 @@ function PlusIcon() {
 }
 
 export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, onSelectFolder, onCreatePlaylist, onRenamePlaylist, onDeletePlaylist, onOpenModuleSettings, searchQuery, onSearchChange }: MusicSidebarProps) {
+  useLang();
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -123,7 +125,7 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
           }`,
           children: [
             React.createElement('div', { key: `name-${playlist.id}`, className: 'font-medium truncate' }, playlist.name),
-            React.createElement('div', { key: `count-${playlist.id}`, className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${count} 首`),
+            React.createElement('div', { key: `count-${playlist.id}`, className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, T('music.sidebar.count', { n: count })),
           ],
         });
 
@@ -136,14 +138,14 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
         buttonContent
       ),
       React.createElement(ContextMenuContent, { key: 'content' },
-        React.createElement(ContextMenuItem, { key: 'play', onClick: () => onSelectPlaylist(playlist) }, '播放歌单'),
+        React.createElement(ContextMenuItem, { key: 'play', onClick: () => onSelectPlaylist(playlist) }, T('music.sidebar.play')),
         React.createElement(ContextMenuSeparator, { key: 'sep1' }),
-        React.createElement(ContextMenuItem, { key: 'rename', onClick: () => startRename(playlist) }, '重命名'),
+        React.createElement(ContextMenuItem, { key: 'rename', onClick: () => startRename(playlist) }, T('music.sidebar.rename')),
         playlist.type === 'custom' ? React.createElement(ContextMenuItem, {
           key: 'delete',
           onClick: () => onDeletePlaylist?.(playlist),
           variant: 'destructive',
-        }, '删除歌单') : null,
+        }, T('music.sidebar.deletePlaylist')) : null,
       )
     );
   };
@@ -160,7 +162,7 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
         className: 'w-full text-left px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 text-sm flex items-center gap-2',
         children: [
           React.createElement(PlusIcon),
-          React.createElement('span', null, '+ 添加歌单'),
+          React.createElement('span', null, T('music.sidebar.addPlaylist')),
         ],
       }),
     )
@@ -171,7 +173,7 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
       <div className="w-[260px] h-full flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 p-4 overflow-y-auto">
         <div className="flex items-center gap-2 mb-4 px-1">
           <Music2Icon />
-          <span className="font-bold text-lg text-neutral-800 dark:text-stone-100">音乐</span>
+          <span className="font-bold text-lg text-neutral-800 dark:text-stone-100">{T('music.title')}</span>
         </div>
         <div className="space-y-0.5">
           {playlistItems}
@@ -184,18 +186,18 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
   return React.createElement(ModuleSidebarShell, {
     moduleId: 'music',
     icon: React.createElement(Music2Icon),
-    title: '铃兰',
+    title: T('music.title'),
     onOpenModuleSettings,
     searchQuery,
     onSearchChange,
-    searchPlaceholder: '搜索歌单...',
-    primaryAction: { label: '+ 添加文件夹', onClick: onSelectFolder },
+    searchPlaceholder: T('music.sidebar.search'),
+    primaryAction: { label: T('music.sidebar.addFolder'), onClick: onSelectFolder },
     children: React.createElement(React.Fragment, null,
       showNewInput && React.createElement('div', { key: 'new-input', className: 'mb-4' },
         React.createElement('input', {
           type: 'text',
           className: 'w-full px-3 py-2 bg-white/50 dark:bg-stone-700/50 border border-white/80 dark:border-stone-600/50 rounded-xl text-sm text-neutral-700 dark:text-stone-200 focus:outline-none focus:ring-1 focus:ring-[var(--element-border)]',
-          placeholder: '歌单名称',
+          placeholder: T('music.sidebar.playlistName'),
           value: newPlaylistName,
           onChange: (e: React.ChangeEvent<HTMLInputElement>) => setNewPlaylistName(e.target.value),
           onKeyDown: (e: React.KeyboardEvent) => {

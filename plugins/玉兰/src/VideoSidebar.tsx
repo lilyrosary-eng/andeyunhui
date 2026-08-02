@@ -2,6 +2,7 @@
 // 视频模块侧边栏 — 使用共享 DrillDownSidebarList 组件
 // 状态 A：文件夹列表；状态 B：选中文件夹下的视频文件列表（集数列表）
 const React = window.__HOST_REACT__;
+import { T, useLang } from '../../_shared/pluginRuntime';
 const { useMemo, useCallback } = React;
 const { ModuleSidebarShell, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
 import { DrillDownSidebarList, type DrillDownItem } from '../../_shared/DrillDownSidebarList';
@@ -75,6 +76,7 @@ function formatSize(bytes: number): string {
 // ========== 侧边栏主组件 ==========
 
 export function VideoSidebar(props: VideoSidebarProps) {
+  useLang();
   const {
     folders, videos, playingFile, selectedFolder,
     searchQuery, onSearchChange,
@@ -100,7 +102,7 @@ export function VideoSidebar(props: VideoSidebarProps) {
       badge: folder.videoCount,
       active: selectedFolder?.folderPath === folder.folderPath,
       contextMenu: ContextMenuItem ? React.createElement(React.Fragment, null,
-        React.createElement(ContextMenuItem, { key: 'open', onClick: () => onFolderClick(folder) }, '打开'),
+        React.createElement(ContextMenuItem, { key: 'open', onClick: () => onFolderClick(folder) }, T('video.sidebar.open')),
         React.createElement(ContextMenuSeparator, { key: 'sep' }),
         React.createElement(ContextMenuItem, { key: 'copy', onClick: () => { try { navigator.clipboard?.writeText(folder.folderName); } catch {} } }, '复制名称'),
       ) : undefined,
@@ -134,20 +136,20 @@ export function VideoSidebar(props: VideoSidebarProps) {
     drillTitle: isStateB ? selectedFolder!.folderName : null,
     onBack: onBackToFolders,
     onItemClick: handleItemClick,
-    primaryEmptyText: searchQuery ? '未找到匹配的文件夹' : '暂无文件夹',
-    secondaryEmptyText: '暂无视频',
+      primaryEmptyText: searchQuery ? T('video.sidebar.noMatch') : T('video.sidebar.noFolders'),
+      secondaryEmptyText: T('video.sidebar.noVideos'),
   });
 
   return ModuleSidebarShell
     ? React.createElement(ModuleSidebarShell, {
         moduleId: 'video',
         icon: React.createElement(VideoIcon),
-        title: '玉兰',
+        title: T('video.title'),
         onOpenModuleSettings: onOpenSettings,
         searchQuery,
         onSearchChange,
-        searchPlaceholder: isStateB ? '搜索视频...' : '搜索文件夹...',
-        primaryAction: { label: '+ 选择文件夹', onClick: onChangeRoot },
+        searchPlaceholder: isStateB ? T('video.sidebar.searchVideos') : T('video.sidebar.searchFolders'),
+        primaryAction: { label: T('video.sidebar.chooseFolder'), onClick: onChangeRoot },
         secondaryActions: [
           {
             icon: React.createElement('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', children: [
@@ -155,16 +157,8 @@ export function VideoSidebar(props: VideoSidebarProps) {
               React.createElement('polyline', { key: '2', points: '1 20 1 14 7 14' }),
               React.createElement('path', { key: '3', d: 'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15' }),
             ]}),
-            label: '重新扫描',
+            label: T('video.sidebar.rescan'),
             onClick: onRescan,
-          },
-          {
-            icon: React.createElement('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', children: [
-              React.createElement('circle', { key: '1', cx: '12', cy: '12', r: '3' }),
-              React.createElement('path', { key: '2', d: 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z' }),
-            ]}),
-            label: '管理文件夹',
-            onClick: onOpenSettings,
           },
         ],
         children: listContent,

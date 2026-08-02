@@ -1,7 +1,7 @@
 /// <reference path="../../global.d.ts" />
 import { ImageViewer } from './ImageViewer';
 import { ImageSidebar } from './ImageSidebar';
-import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState } from '../../_shared/pluginRuntime';
+import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 const React = window.__HOST_REACT__;
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
@@ -32,6 +32,7 @@ interface CustomAlbum {
 }
 
 function ImageModule() {
+  useLang();
   // 共享运行时：根目录管理（localStorage 持久化）
   const { rootPaths, setRootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   const [folders, setFolders] = useState<ImageFolder[]>([]);
@@ -126,7 +127,7 @@ function ImageModule() {
       if (paths[0]) {
         setOpenWithInitialPath(paths[0]);
         setOpenWithNonce((n) => n + 1);
-        setSelectedFolder({ folderPath: dir, folderName: '以安得云荟打开', coverImage: paths[0] ?? '', imageCount: paths.length });
+        setSelectedFolder({ folderPath: dir, folderName: T('image.openWith'), coverImage: paths[0] ?? '', imageCount: paths.length });
       }
     } catch (err) {
       console.error('[Image] 以安得云荟打开失败:', err);
@@ -232,9 +233,9 @@ function ImageModule() {
             <polyline points="21 15 16 10 5 21" />
           </svg>
         }
-        title="图片模块"
-        description="选择一个包含图片的文件夹作为根目录，将自动按子文件夹分组展示"
-        buttonText="添加文件夹"
+        title={T('image.emptyTitle')}
+        description={T('image.emptyDesc')}
+        buttonText={T('image.addFolder')}
         onSelect={handleAddRoot}
       />
     );
@@ -243,7 +244,7 @@ function ImageModule() {
   if (loading && folders.length === 0) {
     return (
       <LoadingState
-        progressText={scanProgress ? `已发现 ${scanProgress.found} 个文件夹...` : '正在扫描图片...'}
+        progressText={scanProgress ? T('image.scanProgress', { n: scanProgress.found }) : T('image.scanning')}
         onCancel={() => hostApi.invoke('cancel_scan').catch(() => {})}
       />
     );
@@ -252,8 +253,8 @@ function ImageModule() {
   if (!loading && folders.length === 0) {
     return (
       <NoResultsState
-        text="未找到包含图片的文件夹"
-        buttonText="更换目录"
+                    text={T('image.noFolders')}
+                    buttonText={T('shared.changeDir')}
         onSelect={handleAddRoot}
       />
     );
@@ -280,7 +281,7 @@ function ImageModule() {
       <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]">
         {showSettings ? (
           React.createElement(window.__HOST_UI__?.ModuleSettingsPanel || 'div', {
-            title: '莲花',
+            title: T('image.title'),
             icon: React.createElement('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', children: [
               React.createElement('rect', { key: '1', x: '3', y: '3', width: '18', height: '18', rx: '2', ry: '2' }),
               React.createElement('circle', { key: '2', cx: '8.5', cy: '8.5', r: '1.5' }),
@@ -289,9 +290,9 @@ function ImageModule() {
             onClose: () => setShowSettings(false),
             children: React.createElement(React.Fragment, null,
               React.createElement('div', { className: 'glass-panel p-4' },
-                React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, '图片根目录'),
+                React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, T('image.settings.dirs')),
                 rootPaths.length === 0
-                  ? React.createElement('p', { className: 'text-sm text-neutral-400 dark:text-stone-500' }, '尚未添加任何文件夹')
+                  ? React.createElement('p', { className: 'text-sm text-neutral-400 dark:text-stone-500' }, T('image.settings.noDirs'))
                   : React.createElement('div', { className: 'space-y-2' },
                       rootPaths.map((path) =>
                         React.createElement('div', { key: path, className: 'flex items-center gap-2 group' },
@@ -299,7 +300,7 @@ function ImageModule() {
                           React.createElement('button', {
                             onClick: () => handleRemoveRoot(path),
                             className: 'btn-press px-2 py-1 rounded-lg text-xs text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100',
-                          }, '移除'),
+                          }, T('image.remove')),
                         )
                       ),
                     ),
@@ -307,12 +308,12 @@ function ImageModule() {
                   React.createElement('button', {
                     onClick: handleAddRoot,
                     className: 'btn-press px-3 py-1.5 rounded-lg text-xs bg-[var(--element-bg)] text-white hover:opacity-90 transition-opacity',
-                  }, '添加文件夹'),
+                  }, T('image.addFolder')),
                 ),
               ),
               React.createElement('div', { className: 'glass-panel p-4' },
                 React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500' },
-                  `已扫描 ${folders.length} 个文件夹，${customAlbums.length} 个自定义相册`
+                  T('image.settings.scanned', { folders: folders.length, albums: customAlbums.length })
                 ),
               ),
             ),
@@ -332,7 +333,7 @@ function ImageModule() {
               <circle cx="8.5" cy="8.5" r="1.5" />
               <polyline points="21 15 16 10 5 21" />
             </svg>
-            <p className="text-sm">从左侧选择一个文件夹开始浏览</p>
+            <p className="text-sm">{T('image.selectFolderHint')}</p>
           </div>
         )}
       </div>
@@ -340,9 +341,9 @@ function ImageModule() {
   );
 }
 
-window.__PLUGIN_REGISTRY__.register({
-  id: 'image',
-  name: '莲花',
+  window.__PLUGIN_REGISTRY__.register({
+    id: 'image',
+    name: T('image.title'),
   iconName: 'Image',
   kind: 'module',
   visible: true,
