@@ -23,15 +23,20 @@ REM ============================================================
 cd /d "%~dp0"
 
 REM ---- 0. Parse args ----
+REM Gradle 直接构建（绕过 Tauri CLI 的 android-studio-script 固定 5 flavor 全编译）：
+REM   Tauri 的 android build 会对 aarch64/armv7/i686/x86_64/universal 各跑一次
+REM   cargo（targetList 只影响 gradle 内部 task，管不住 Tauri 的脚本调用），
+REM   所以改用 gradlew 的 assemble<Flavor><Mode>，配合 gradle.properties 的
+REM   targetList=aarch64 只编译 arm64 一个 ABI（Rust 从 ~15min 降到 ~2.5min）。
 set BUILD_MODE=release
 set ABI_MODE=arm64
-set TAURI_ARGS=
+set GRADLE_TASK=assembleArm64Release
 if /i "%~1"=="debug" set BUILD_MODE=debug
 if /i "%~1"=="debug" set ABI_MODE=arm64
-if /i "%~1"=="debug" set TAURI_ARGS=--debug
+if /i "%~1"=="debug" set GRADLE_TASK=assembleArm64Debug
 if /i "%~1"=="all" set ABI_MODE=all
 if /i "%~1"=="all" set BUILD_MODE=release
-if /i "%~1"=="all" set TAURI_ARGS=
+if /i "%~1"=="all" set GRADLE_TASK=assembleUniversalRelease
 
 echo [ANDROID] ========================================
 echo [ANDROID] Android APK build script
@@ -172,15 +177,27 @@ echo [ANDROID] ABI filter: all ABIs (universal)
 :abi_done
 
 REM ---- 3. Run Tauri Android build ----
-echo [ANDROID] [1/2] Running pnpm tauri android build %TAURI_ARGS% ...
-echo [ANDROID]     log is written to build_android.log
+echo [ANDROID] [1/2] beforeBuildCommand（前端复用检查）...
+node scripts/before-build.mjs
+if errorlevel 1 goto before_fail
 
-call pnpm tauri android build %TAURI_ARGS% > "%CD%\build_android.log" 2>&1
+echo [ANDROID] [2/2] Running gradlew %GRADLE_TASK% ...
+cd /d "%~dp0src-tauri\gen\android"
+call gradlew.bat %GRADLE_TASK% > "%~dp0build_android.log" 2>&1
 set BUILD_EXIT=%ERRORLEVEL%
-echo BUILD_EXIT=%BUILD_EXIT% >> "%CD%\build_android.log"
+echo BUILD_EXIT=%BUILD_EXIT% >> "%~dp0build_android.log"
+cd /d "%~dp0"
 
 REM ---- 4. Restore gradle.properties ----
 move /y "%GRADLE_PROPS_BAK%" "%GRADLE_PROPS%" >nul
+
+:before_fail
+if exist "%GRADLE_PROPS_BAK%" move /y "%GRADLE_PROPS_BAK%" "%GRADLE_PROPS%" >nul
+echo.
+echo [ANDROID] [X] beforeBuildCommand failed（前端构建/占位脚本出错）
+if exist "%LOCK_FILE%" del "%LOCK_FILE%" >nul 2>&1
+pause
+exit /b 1
 
 if %BUILD_EXIT% EQU 0 goto report
 echo.
