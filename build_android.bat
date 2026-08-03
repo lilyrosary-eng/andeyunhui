@@ -25,9 +25,13 @@ cd /d "%~dp0"
 REM ---- 0. Parse args ----
 set BUILD_MODE=release
 set ABI_MODE=arm64
+set TAURI_ARGS=
 if /i "%~1"=="debug" set BUILD_MODE=debug
+if /i "%~1"=="debug" set ABI_MODE=arm64
+if /i "%~1"=="debug" set TAURI_ARGS=--debug
 if /i "%~1"=="all" set ABI_MODE=all
 if /i "%~1"=="all" set BUILD_MODE=release
+if /i "%~1"=="all" set TAURI_ARGS=
 
 echo [ANDROID] ========================================
 echo [ANDROID] Android APK build script
@@ -148,10 +152,10 @@ echo [ANDROID] ABI filter: all ABIs (universal)
 :abi_done
 
 REM ---- 3. Run Tauri Android build ----
-echo [ANDROID] [1/2] Running pnpm tauri android build ...
+echo [ANDROID] [1/2] Running pnpm tauri android build %TAURI_ARGS% ...
 echo [ANDROID]     log is written to build_android.log
 
-call pnpm tauri android build > "%CD%\build_android.log" 2>&1
+call pnpm tauri android build %TAURI_ARGS% > "%CD%\build_android.log" 2>&1
 set BUILD_EXIT=%ERRORLEVEL%
 echo BUILD_EXIT=%BUILD_EXIT% >> "%CD%\build_android.log"
 
@@ -171,7 +175,7 @@ echo.
 echo [ANDROID] ========================================
 echo [ANDROID] [OK] Android APK build complete!
 echo [ANDROID] Artifacts:
-echo [ANDROID]   src-tauri\gen\android\app\build\outputs\apk\%BUILD_MODE%\
+dir /s /b "%CD%\src-tauri\gen\android\app\build\outputs\apk\*.apk" 2>nul
 echo [ANDROID] Log: %CD%\build_android.log
 echo [ANDROID] ========================================
 echo.
