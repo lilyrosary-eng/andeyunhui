@@ -363,8 +363,13 @@ fn main() {
                             let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
                             let mut buf = [0u8; 8192];
                             loop {
-                                if let Ok((n, _)) = socket.recv_from(&mut buf) {
+                                if let Ok((n, src)) = socket.recv_from(&mut buf) {
                                     let payload = String::from_utf8_lossy(&buf[..n]).to_string();
+                                    // 探活回执：仅用于让新实例确认主实例存在，不触发聚焦/文件转发
+                                    if payload.contains("\"probe\"") {
+                                        let _ = socket.send_to(b"{\"ack\":true}", src);
+                                        continue;
+                                    }
                                     let mgr = app_handle.clone();
                                     let _ = mgr.run_on_main_thread({
                                         let mgr2 = mgr.clone();
@@ -400,21 +405,45 @@ fn main() {
                         eprintln!("[Instance] 主实例已启动，监听聚焦端口 {}", INSTANCE_PORT);
                     }
                     None => {
-                        // 重复实例：把待打开的文件路径连同聚焦信号一起发给主实例，
-                        // 主实例监听端会经 open-with-files 事件转发给前端路由到对应模块。
+                        // 绑定失败：端口被占用。但占用者未必是"本应用的另一个实例"——
+                        // 可能是无关进程恰好占了该端口。先发探活消息等主实例回执，
+                        // 确认是本应用主实例才走"重复实例"路径退出；否则继续启动。
                         let paths: Vec<String> = std::env::args()
                             .skip(1)
                             .filter_map(|a| is_supported_file_assoc(&a))
                             .map(|p| p.to_string_lossy().to_string())
                             .collect();
-                        if let Ok(s) = UdpSocket::bind(("127.0.0.1", 0)) {
-                            let msg = serde_json::json!({ "focus": true, "paths": paths });
-                            if let Ok(bytes) = serde_json::to_vec(&msg) {
-                                let _ = s.send_to(&bytes, ("127.0.0.1", INSTANCE_PORT));
+                        let is_real_duplicate = {
+                            let probe_sock = UdpSocket::bind(("127.0.0.1", 0))
+                                .expect("单实例探活 socket 绑定失败");
+                            probe_sock
+                                .set_read_timeout(Some(Duration::from_millis(300)))
+                                .ok();
+                            let _ = probe_sock.send_to(
+                                br#"{"probe":true}"#,
+                                ("127.0.0.1", INSTANCE_PORT),
+                            );
+                            let mut ack = [0u8; 128];
+                            probe_sock.recv_from(&mut ack).is_ok()
+                        };
+                        if is_real_duplicate {
+                            // 重复实例：把待打开的文件路径连同聚焦信号一起发给主实例，
+                            // 主实例监听端会经 open-with-files 事件转发给前端路由到对应模块。
+                            if let Ok(s) = UdpSocket::bind(("127.0.0.1", 0)) {
+                                let msg = serde_json::json!({ "focus": true, "paths": paths });
+                                if let Ok(bytes) = serde_json::to_vec(&msg) {
+                                    let _ = s.send_to(&bytes, ("127.0.0.1", INSTANCE_PORT));
+                                }
                             }
+                            eprintln!("[Instance] 检测到已有实例在运行，转发文件并退出");
+                            std::process::exit(0);
                         }
-                        eprintln!("[Instance] 检测到已有实例在运行，转发文件并退出");
-                        std::process::exit(0);
+                        // 端口被无关进程占用：不是本应用重复实例，忽略占用继续正常启动
+                        // （本进程将不再监听聚焦端口，功能不受影响）。
+                        eprintln!(
+                            "[Instance] 端口 {} 被无关进程占用（非本应用实例），忽略占用继续启动",
+                            INSTANCE_PORT
+                        );
                     }
                 }
             }
