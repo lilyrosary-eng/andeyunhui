@@ -113,6 +113,10 @@ docs/
 # Android 工程迁移前的备份目录（内部快照，不入库）
 src-tauri/gen/android.backup-t01/
 src-tauri/gen/android/.gradle/
+# Android release 签名密钥（含密码，严禁提交）
+src-tauri/gen/android/keystore.properties
+*.jks
+*.keystore
 src-tauri/gen/android/build/
 src-tauri/gen/android/app/build/
 src-tauri/gen/android/app/proguard-tauri.pro

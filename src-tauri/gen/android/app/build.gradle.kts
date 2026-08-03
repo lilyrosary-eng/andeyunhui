@@ -35,6 +35,24 @@ android {
     //   - 临时只产 arm64-v8a：gradle.properties 设 `abiList=arm64-v8a`（限制 universal flavor）；
     //   - 或构建指定 flavor：`gradlew assembleArm64Debug`（单 arm64-v8a APK）。
     // T01 骨架阶段先用默认全 flavor 确保可构建，体积优化留 T+ 按 §9.7.3 落地。
+    signingConfigs {
+        create("release") {
+            // release 签名：读取根目录 keystore.properties（含路径/密码/alias）。
+            // 文件缺失或字段为空时回退空值，Gradle 会跳过签名产出 unsigned 包。
+            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            val keystoreProperties = Properties()
+            if (keystorePropertiesFile.exists()) {
+                keystoreProperties.load(keystorePropertiesFile.inputStream())
+            }
+            val ksFile = keystoreProperties.getProperty("storeFile", "")
+            if (ksFile.isNotEmpty()) {
+                storeFile = rootProject.file(ksFile)
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
     buildTypes {
         getByName("debug") {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
@@ -48,6 +66,8 @@ android {
             }
         }
         getByName("release") {
+            // 应用 release 签名（keystore.properties 缺失时自动跳过，产出 unsigned）
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
