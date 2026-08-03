@@ -236,13 +236,25 @@ impl TransferManager {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        // 默认接收保存目录：安装目录根目录（exe 所在目录）下的 send 文件夹。
+        // 默认接收保存目录：
+        //   - 桌面：安装目录根目录（exe 所在目录）下的 send 文件夹（用户可见、便于查找）。
+        //   - Android：app_data_dir 下的 send 文件夹（current_exe 在 Android 指向 /data/app/.../lib/，
+        //     不可写也不适合存用户文件；app_data_dir 是应用私有可写目录，接收后再由 SAF 分享出去）。
         // 安装时若未创建，下方 create_dir_all 与首次接收时的 create_dir_all 都会兜底创建。
-        let install_root = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let default_save = install_root.join("send");
+        #[cfg(not(target_os = "android"))]
+        let default_save = {
+            let install_root = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| PathBuf::from("."));
+            install_root.join("send")
+        };
+        #[cfg(target_os = "android")]
+        let default_save = app
+            .path()
+            .app_data_dir()
+            .map(|p| p.join("send"))
+            .unwrap_or_else(|_| PathBuf::from("send"));
 
         let save_dir = if cfg.save_dir.is_empty() {
             default_save

@@ -173,6 +173,12 @@ rdev = "0.5"
 # Windows/桌面 Linux/macOS 构建行为完全不变。
 portable-pty = "0.8"
 
+# === Android v1 目标专属依赖（§9.7.2）===
+# 仅在 target_os = "android" 下编译；Windows / 桌面 Linux / macOS 构建零影响。
+# T01 阶段为空占位——tauri-plugin-android-fs / sharetarget / JNI 桥接相关依赖
+# 将在 T03（SAF / fs_bridge）与 T02（组播锁 JNI）按需引入，届时填入此段。
+[target.'cfg(target_os = "android")'.dependencies]
+
 [features]
 # 攻防模块：启用爬虫框架（reqwest 代理池 + 双令牌桶 + EWMA + CDP 隐身 JS）
 # 默认不启用，主二进制零污染；构建时 --features gongfang 开启
@@ -201,3 +207,12 @@ opt-level = 3
 # 开启后 dev 与 release 行为一致，避免出现 "dev 正常、release 算出诡异数字" 的难定位 bug；
 # 代价是热点数值循环性能下降约 5-10%，但本应用非数值密集型，可接受。
 overflow-checks = true
+# Android v1 · T01：release 产物 strip 符号（§9.7.2 / F8）。
+# 🔴 本段唯一允许的新增项；既有 lto / codegen-units / opt-level / panic / overflow-checks 逐字不动。
+strip = true
+
+# Android v1 · X02：cfg 拼写守卫（§9.7.2 / §14.2）。
+# 让拼错的 cfg（如缺 target_os= 前缀的 cfg(android) → 恒为真 → 隔离被绕过）
+# 在编译期 warn 而非静默通过。check-cfg 列出项目实际使用的自定义 cfg 标识。
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mobile)', 'cfg(desktop)'] }
