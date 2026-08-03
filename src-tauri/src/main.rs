@@ -1259,6 +1259,7 @@ fn main() {
             transfer::transfer_set_auto_accept,
             transfer::transfer_receive_accept,
             transfer::transfer_receive_decline,
+            transfer::transfer_add_peer,
             take_pending_open_files,
             // ========== 数据根（可配置存放位置）==========
             andeyunhui_lib::data_location::get_data_root,

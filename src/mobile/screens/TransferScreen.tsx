@@ -65,6 +65,11 @@ export function TransferScreen() {
   const bottomSheetOpen = useNavStore((s) => s.bottomSheetOpen);
   const setBottomSheetOpen = useNavStore((s) => s.setBottomSheetOpen);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 手动添加对端（组播/广播失效时的兜底）
+  const [addPeerOpen, setAddPeerOpen] = useState(false);
+  const [addPeerIp, setAddPeerIp] = useState('');
+  const [addPeerErr, setAddPeerErr] = useState('');
+  const [addingPeer, setAddingPeer] = useState(false);
 
   // 任意 BottomSheet 打开 → 同步到 navStore，供 Android 返回键拦截
   const anySheetOpen = settingsOpen || !!t.confirmPeer || t.receiveRequests.length > 0;
@@ -223,12 +228,22 @@ export function TransferScreen() {
 
       {/* ===== 对端列表 ===== */}
       <section className="px-4 pt-3">
-        <h3
-          className="font-medium text-[var(--muted-foreground)] mb-2 px-1"
-          style={{ fontSize: 'var(--m-text-caption)' }}
-        >
-          附近设备
-        </h3>
+        <div className="flex items-center justify-between mb-2 px-1">
+          <h3
+            className="font-medium text-[var(--muted-foreground)]"
+            style={{ fontSize: 'var(--m-text-caption)' }}
+          >
+            附近设备
+          </h3>
+          <button
+            type="button"
+            onClick={() => setAddPeerOpen(true)}
+            className="flex items-center gap-1 text-[var(--element-bg)] active:opacity-70"
+            style={{ fontSize: 'var(--m-text-caption)' }}
+          >
+            <Plus size={14} /> 手动添加
+          </button>
+        </div>
         {t.peers.length === 0 ? (
           <div
             className="flex flex-col items-center justify-center text-center py-10 rounded-2xl border border-dashed border-[var(--border)]"
@@ -473,6 +488,56 @@ export function TransferScreen() {
               {t.saveDir || '应用私有目录'}
             </div>
           </div>
+        </div>
+      </BottomSheet>
+
+      {/* ===== 手动添加对端 BottomSheet ===== */}
+      <BottomSheet open={addPeerOpen} onClose={() => !addingPeer && setAddPeerOpen(false)} title="手动添加设备">
+        <div className="px-4 pb-4">
+          <label
+            className="block text-[var(--muted-foreground)] mb-1.5"
+            style={{ fontSize: 'var(--m-text-caption)' }}
+          >
+            设备 IP
+          </label>
+          <input
+            type="text"
+            value={addPeerIp}
+            onChange={(e) => setAddPeerIp(e.target.value)}
+            placeholder="如 192.168.1.5"
+            className="w-full rounded-lg px-3 py-2 bg-[var(--input)] text-[var(--foreground)] outline-none border border-[var(--border)] focus:border-[var(--ring)]"
+            style={{ fontSize: 'var(--m-text-body)' }}
+          />
+          {addPeerErr && (
+            <p className="mt-2 text-red-500" style={{ fontSize: 'var(--m-text-caption)' }}>
+              {addPeerErr}
+            </p>
+          )}
+          <button
+            type="button"
+            disabled={addingPeer || !addPeerIp.trim()}
+            onClick={async () => {
+              setAddingPeer(true);
+              setAddPeerErr('');
+              try {
+                await t.addPeer(addPeerIp.trim());
+                setAddPeerOpen(false);
+                setAddPeerIp('');
+              } catch (e) {
+                setAddPeerErr(String(e));
+              } finally {
+                setAddingPeer(false);
+              }
+            }}
+            className="mt-3 w-full rounded-xl py-2.5 font-medium active:scale-[0.98] transition-transform disabled:opacity-50"
+            style={{
+              fontSize: 'var(--m-text-label)',
+              background: 'var(--element-bg)',
+              color: 'var(--element-fg)',
+            }}
+          >
+            {addingPeer ? '添加中…' : '添加'}
+          </button>
         </div>
       </BottomSheet>
     </div>

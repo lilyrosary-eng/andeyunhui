@@ -38,6 +38,7 @@ pub fn run() {
             crate::transfer::transfer_set_auto_accept,
             crate::transfer::transfer_receive_accept,
             crate::transfer::transfer_receive_decline,
+            crate::transfer::transfer_add_peer,
             // ========== AI 能力（茑萝 · 让 T07 对话 Tab 在真机可用）==========
             // ai_service 是 services 子模块（见 lib.rs:54 `pub mod services`），路径为 crate::services::ai_service
             crate::services::ai_service::ai_get_profiles,
