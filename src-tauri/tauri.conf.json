@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node scripts/gen-waiting-pages.mjs && node scripts/build-external-deps.mjs && node scripts/deploy-plugins.mjs && node scripts/copy-waiting.mjs && pnpm run build && node scripts/prepare-bundled-dlc.mjs",
+    "beforeBuildCommand": "node scripts/before-build.mjs",
     "frontendDist": "../dist"
   },
   "app": {
