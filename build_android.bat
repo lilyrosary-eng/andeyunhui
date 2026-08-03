@@ -186,6 +186,9 @@ echo BUILD_EXIT=%BUILD_EXIT% >> "%~dp0build_android.log"
 REM ---- 4. Restore gradle.properties ----
 move /y "%GRADLE_PROPS_BAK%" "%GRADLE_PROPS%" >nul
 
+REM 正常路径直接跳到构建结果检查（跳过 before_fail 处理段）
+goto build_check
+
 :before_fail
 if exist "%GRADLE_PROPS_BAK%" move /y "%GRADLE_PROPS_BAK%" "%GRADLE_PROPS%" >nul
 echo.
@@ -194,6 +197,7 @@ if exist "%LOCK_FILE%" del "%LOCK_FILE%" >nul 2>&1
 pause
 exit /b 1
 
+:build_check
 if %BUILD_EXIT% EQU 0 goto report
 echo.
 echo [ANDROID] [X] Android build failed, exit %BUILD_EXIT%
