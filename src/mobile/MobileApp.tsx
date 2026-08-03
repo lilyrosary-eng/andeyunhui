@@ -36,7 +36,8 @@ import { DiscoverHome } from './screens/DiscoverHome';
 import { ProfileHome } from './screens/ProfileHome';
 import { useChatStore } from './stores/chatStore';
 import { useDrawerSwipe } from './hooks/useDrawerSwipe';
-import { Plus, MoreVertical } from 'lucide-react';
+import { Plus, MoreVertical, Send, Inbox, Sparkles, Book, Puzzle, Settings2, MessageSquarePlus, type LucideIcon } from 'lucide-react';
+import { NiaoluoScreen } from './screens/NiaoluoScreen';
 
 export default function MobileApp() {
   // 一次性初始化各 Tab 根 Screen。
@@ -159,18 +160,72 @@ export default function MobileApp() {
   );
 }
 
-/** 抽屉占位内容。T05 阶段仅展示品牌 + 导航入口占位。 */
+/**
+ * 抽屉内容：根据当前激活 Tab 渲染「主导航 + 该 Tab 的模块入口」。
+ * - transfer/discover Tab：列出该 Tab 下的功能模块（点击跳转/触发）
+ * - chat Tab：新建对话 + 打开溢出菜单（chatStore 桥接）
+ * - profile Tab：设置入口
+ */
+interface DrawerModule {
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  onActivate: () => void;
+}
+
 function DrawerContent() {
   const switchTab = useNavStore((s) => s.switchTab);
+  const push = useNavStore((s) => s.push);
   const setDrawerOpen = useNavStore((s) => s.setDrawerOpen);
   const activeTab = useNavStore((s) => s.activeTab);
+  const newConversation = useChatStore((s) => s.newConversation);
+  const openOverflow = useChatStore((s) => s.openOverflow);
 
-  const items: { tab: typeof activeTab; label: string }[] = [
+  // 跳转到「传输」模块：切到发现 Tab 并 push 茑萝入口屏（茑萝内可继续进传输）
+  const openNiaoluo = () => {
+    switchTab('discover');
+    push('discover', {
+      id: 'niaoluo-home',
+      title: '茑萝',
+      render: () => <NiaoluoScreen />,
+    });
+  };
+
+  const TAB_ITEMS: { tab: typeof activeTab; label: string }[] = [
     { tab: 'transfer', label: '中转站' },
     { tab: 'chat', label: 'AI 对话' },
     { tab: 'discover', label: '发现' },
     { tab: 'profile', label: '我的' },
   ];
+
+  const modules: DrawerModule[] = (() => {
+    switch (activeTab) {
+      case 'transfer':
+        return [
+          { id: 'transfer', label: '传输', icon: Send, onActivate: openNiaoluo },
+        ];
+      case 'discover':
+        return [
+          { id: 'transfer', label: '传输', icon: Send, onActivate: openNiaoluo },
+          { id: 'ai', label: 'AI 模板', icon: Sparkles, onActivate: () => { /* TODO: AI 模板模块 */ } },
+          { id: 'reading', label: '阅读资源', icon: Book, onActivate: () => { /* TODO */ } },
+          { id: 'plugins', label: '插件市场', icon: Puzzle, onActivate: () => { /* TODO */ } },
+        ];
+      case 'chat':
+        return [
+          { id: 'new', label: '新建对话', icon: MessageSquarePlus, onActivate: () => newConversation?.() },
+          { id: 'more', label: '更多设置', icon: Settings2, onActivate: () => openOverflow?.() },
+        ];
+      case 'profile':
+        return [
+          { id: 'settings', label: '设置', icon: Settings2, onActivate: () => { /* TODO */ } },
+        ];
+      default:
+        return [];
+    }
+  })();
+
+  const currentLabel = TAB_ITEMS.find((i) => i.tab === activeTab)?.label ?? '';
 
   return (
     <div className="flex flex-col h-full">
@@ -190,9 +245,9 @@ function DrawerContent() {
         </p>
       </div>
 
-      {/* 导航列表 */}
-      <nav className="flex-1 overflow-y-auto py-2">
-        {items.map((item) => {
+      {/* 主导航（4 Tab） */}
+      <nav className="py-2 border-b border-[var(--border)]">
+        {TAB_ITEMS.map((item) => {
           const active = activeTab === item.tab;
           return (
             <button
@@ -211,6 +266,34 @@ function DrawerContent() {
               }}
             >
               {item.label}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* 当前 Tab 的模块入口 */}
+      <nav className="flex-1 overflow-y-auto py-2">
+        <div
+          className="px-4 pb-1 text-[var(--muted-foreground)]"
+          style={{ fontSize: 'var(--m-text-caption)' }}
+        >
+          {currentLabel} · 模块
+        </div>
+        {modules.map((m) => {
+          const Icon = m.icon;
+          return (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => {
+                m.onActivate();
+                setDrawerOpen(false);
+              }}
+              className="flex w-full items-center gap-3 px-4 text-left text-[var(--foreground)] active:bg-[var(--muted)]/60 transition-colors"
+              style={{ height: '48px', fontSize: 'var(--m-text-label)' }}
+            >
+              <Icon size={20} className="text-[var(--muted-foreground)]" />
+              {m.label}
             </button>
           );
         })}

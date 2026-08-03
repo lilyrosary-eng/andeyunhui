@@ -49,15 +49,15 @@ export function TabBar() {
             aria-label={tab.label}
             aria-current={active ? 'page' : undefined}
           >
-            {/* 激活指示条 · 3dp 圆角条，layoutId 让其在 Tab 间平滑滑动 */}
-            {active && (
-              <motion.span
-                layoutId="tab-indicator"
-                className="absolute top-0 left-1/2 -translate-x-1/2 rounded-full bg-[var(--element-bg)]"
-                style={{ width: '32px', height: '3px' }}
-                transition={{ type: 'spring', damping: 28, stiffness: 380 }}
-              />
-            )}
+            {/* 激活指示条 · 3dp 圆角条。
+                所有 4 个 Tab 都渲染指示条（opacity 0/1 切换可见），共享 layoutId 让 framer-motion
+                在 Tab 切换时做位置过渡动画；条件渲染会导致 layoutId 失效（需同时挂载）。 */}
+            <motion.span
+              layoutId="tab-indicator"
+              className="absolute top-0 left-1/2 -translate-x-1/2 rounded-full bg-[var(--element-bg)]"
+              style={{ width: '32px', height: '3px', opacity: active ? 1 : 0 }}
+              transition={{ type: 'spring', damping: 28, stiffness: 380 }}
+            />
             <Icon
               size={24}
               strokeWidth={active ? 2.4 : 2}

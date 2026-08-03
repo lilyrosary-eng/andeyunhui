@@ -48,6 +48,22 @@ const MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
 const MULTICAST_PORT: u16 = 53317;
 const ANNOUNCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// 发送设备发现公告：Android 同时发组播 + 定向广播，桌面仅组播。
+/// Android 模拟器（QEMU NAT）的 UDP 组播不通，定向广播 255.255.255.255 是兜底；
+/// 桌面不开广播避免子网扫描/防火墙干扰。监听端 bind 0.0.0.0 同时接收组播和广播。
+#[cfg(target_os = "android")]
+async fn send_announce_to(socket: &UdpSocket, buf: &[u8]) {
+    let group = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, MULTICAST_PORT));
+    let _ = socket.send_to(buf, group).await;
+    let broadcast = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, MULTICAST_PORT));
+    let _ = socket.send_to(buf, broadcast).await;
+}
+#[cfg(not(target_os = "android"))]
+async fn send_announce_to(socket: &UdpSocket, buf: &[u8]) {
+    let group = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, MULTICAST_PORT));
+    let _ = socket.send_to(buf, group).await;
+}
+
 /// 组播发现报文（v2）：发送公告与应答共用，靠 announce 区分。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -494,13 +510,16 @@ impl TransferManager {
                 return;
             }
         };
+        // Android 需要 SO_BROADCAST 才能发送 255.255.255.555→255.255.255.255。
+        // 模拟器（QEMU NAT）组播不通，广播是兜底；桌面默认不开广播。
+        #[cfg(target_os = "android")]
+        let _ = send_socket.set_broadcast(true);
         let announce = self.self_multicast();
         let send_buf = match serde_json::to_vec(&announce) {
             Ok(b) => b,
             Err(_) => return,
         };
-        let target = SocketAddr::V4(SocketAddrV4::new(group, MULTICAST_PORT));
-        let _ = send_socket.send_to(&send_buf, target).await;
+        send_announce_to(&send_socket, &send_buf).await;
 
         let mgr: &'static TransferManager = mgr();
         let recv_task = tokio::spawn(async move {
@@ -530,7 +549,7 @@ impl TransferManager {
                     _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {
                         let announce = mgr_static.self_multicast();
                         if let Ok(buf) = serde_json::to_vec(&announce) {
-                            let _ = send_socket2.send_to(&buf, target).await;
+                            send_announce_to(&send_socket2, &buf).await;
                         }
                     }
                     _ = shutdown2.notified() => break,
@@ -546,11 +565,12 @@ impl TransferManager {
             Ok(s) => s,
             Err(_) => return,
         };
-        let target = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, MULTICAST_PORT));
+        #[cfg(target_os = "android")]
+        let _ = send_socket.set_broadcast(true);
         for i in 0..3 {
             let announce = self.self_multicast();
             if let Ok(buf) = serde_json::to_vec(&announce) {
-                let _ = send_socket.send_to(&buf, target).await;
+                send_announce_to(&send_socket, &buf).await;
             }
             if i < 2 {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
