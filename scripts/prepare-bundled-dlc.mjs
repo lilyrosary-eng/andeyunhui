@@ -24,6 +24,9 @@ const bundledDlcDir = join(rootDir, 'bundled-dlc');
 const distDlcDir = join(rootDir, 'dist-dlc');
 
 const BUILD_CLEAN = process.env.BUILD_CLEAN === '1';
+// Android 构建：移动端不加载插件/依赖，跳过 DLC 打包。pack-mufurong 内部会
+// 强制重建全部 16 个插件（第二遍 vite 构建），跳过可省下大量时间与 APK 体积。
+const IS_ANDROID = process.env.TAURI_ENV_PLATFORM === 'android';
 
 // 1. 清理旧 bundled-dlc/（避免遗留过期 .mufurong/.mujin）
 if (existsSync(bundledDlcDir)) {
@@ -31,10 +34,10 @@ if (existsSync(bundledDlcDir)) {
 }
 mkdirSync(bundledDlcDir, { recursive: true });
 
-if (BUILD_CLEAN) {
-  // 精简模式：只放 .gitkeep 占位，让 tauri bundle 能找到非空目录
+if (BUILD_CLEAN || IS_ANDROID) {
+  // 精简/Android 模式：只放 .gitkeep 占位，让 tauri bundle 能找到非空目录
   writeFileSync(join(bundledDlcDir, '.gitkeep'), '');
-  console.log('[PrepareDLC] BUILD_CLEAN=1：已创建空 bundled-dlc/ 占位');
+  console.log(`[PrepareDLC] ${IS_ANDROID ? 'Android 构建：跳过 DLC 打包（移动端不加载插件/依赖）' : 'BUILD_CLEAN=1'}：已创建空 bundled-dlc/ 占位`);
   process.exit(0);
 }
 
