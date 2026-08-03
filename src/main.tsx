@@ -22,6 +22,21 @@ const boot = (window as unknown as {
   __bootDone?: (opts?: { text?: string; phase?: string }) => void;
 });
 
+/**
+ * 浏览器移动端预览：URL 带 ?mobile=1 或 localStorage 设 mobile-preview=1 时，
+ * 在浏览器（vite dev / 静态预览）也走 MobileApp，无需打包即可调 UI。
+ * Tauri 环境（Android 真机/模拟器）仍由 isAndroid() 判定。
+ */
+function isMobilePreview(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    if (new URLSearchParams(window.location.search).get("mobile") === "1") return true;
+    return localStorage.getItem("mobile-preview") === "1";
+  } catch {
+    return false;
+  }
+}
+
 // JS 包已就绪（HTML 解析 + 主模块执行完成）
 boot.__bootProgress?.(10, { text: "初始化内核", phase: "PHASE 01 / 05" });
 
@@ -142,7 +157,7 @@ async function bootstrap() {
       import('./lib/i18n'),
       import('./platform/isMobile'),
     ]);
-    if (isAndroid()) {
+    if (isAndroid() || isMobilePreview()) {
       const { default: MobileApp } = await import('./mobile/MobileApp');
       ReactDOM.createRoot(root).render(
         <React.StrictMode>

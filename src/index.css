@@ -124,7 +124,7 @@
     --tabbar-total: calc(var(--tabbar-h) + var(--safe-bottom));
     --appbar-h: 56px;
     --rail-w: 80px;
-    --drawer-w: min(84vw, 320px);
+    --drawer-w: min(42vw, 160px);
     --touch-min: 48px;
 
     /* 算力来源状态色（§7.2.3 · 唯一新增品牌语义色，深浅主题共用） */

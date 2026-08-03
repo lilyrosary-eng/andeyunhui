@@ -20,13 +20,13 @@ import { useEffect, type RefObject } from 'react';
 import { useNavStore } from '../stores/navStore';
 
 /** 方向锁定判定阈值（px）：超过它才决定这次手势是横滑还是纵滚 */
-const SLOP = 10;
-/** 无视速度的绝对打开位移（px） */
-const OPEN_DX = 90;
+const SLOP = 8;
+/** 无视速度的绝对打开位移（px）——调小提高灵敏度 */
+const OPEN_DX = 50;
 /** 配合速度判定的最小位移（px） */
-const MIN_DX = 36;
-/** 快速轻扫速度阈值（px/s） */
-const OPEN_V = 520;
+const MIN_DX = 24;
+/** 快速轻扫速度阈值（px/s）——调低更易触发 */
+const OPEN_V = 400;
 
 /** 元素或其祖先是否存在可横向滚动区域（命中则让位，不接管手势） */
 function hasHorizontallyScrollableAncestor(start: EventTarget | null, stop: HTMLElement): boolean {

@@ -2,7 +2,7 @@
  * GlobalDrawer — 左侧全局抽屉（§7.4.2 / §7.7）。
  *
  * 规格：
- *   宽 min(84vw, 320px)，从左缘滑出
+ *   宽 min(42vw, 160px)（真机测试反馈原 320px 太宽，收窄到一半），从左缘滑出
  *   framer-motion drag + dragConstraints 实现跟手 + 惯性吸附
  *   双触发：左缘手势拖出（🔒 L4，后续实现）+ AppBar ☰ 按钮（本组件只负责打开后渲染）
  *   遮罩层点击关闭
