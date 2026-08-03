@@ -274,6 +274,16 @@ export function useTransfer() {
     setPeers(list);
   }, []);
 
+  /** 手动添加对端（组播/广播失效时的兜底）：传 IP，后端 HTTP 探测 info 并加入 peers */
+  const addPeer = useCallback(
+    async (ip: string) => {
+      const raw = await invoke('transfer_add_peer', { ip });
+      await refresh();
+      return raw as TransferPeer;
+    },
+    [refresh],
+  );
+
   return {
     peers,
     progress,
@@ -299,5 +309,6 @@ export function useTransfer() {
     declineReceive,
     toggleAutoAccept,
     refresh,
+    addPeer,
   };
 }

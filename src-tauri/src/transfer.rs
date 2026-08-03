@@ -510,8 +510,12 @@ impl TransferManager {
             Ok(b) => b,
             Err(_) => return,
         };
-        let target = SocketAddr::V4(SocketAddrV4::new(group, MULTICAST_PORT));
-        let _ = send_socket.send_to(&send_buf, target).await;
+        // 组播 + 定向广播双发（WARP/VPN、部分路由器屏蔽组播时广播兜底）
+        let _ = send_socket.set_broadcast(true);
+        let group = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, MULTICAST_PORT));
+        let _ = send_socket.send_to(&send_buf, group).await;
+        let broadcast = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, MULTICAST_PORT));
+        let _ = send_socket.send_to(&send_buf, broadcast).await;
 
         let mgr: &'static TransferManager = mgr();
         let recv_task = tokio::spawn(async move {
@@ -541,7 +545,10 @@ impl TransferManager {
                     _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {
                         let announce = mgr_static.self_multicast();
                         if let Ok(buf) = serde_json::to_vec(&announce) {
-                            let _ = send_socket2.send_to(&buf, target).await;
+                            let _ = send_socket2.send_to(&buf, group).await;
+                            let broadcast =
+                                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, MULTICAST_PORT));
+                            let _ = send_socket2.send_to(&buf, broadcast).await;
                         }
                     }
                     _ = shutdown2.notified() => break,
@@ -557,11 +564,15 @@ impl TransferManager {
             Ok(s) => s,
             Err(_) => return,
         };
-        let target = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, MULTICAST_PORT));
+        // 组播 + 定向广播双发：WARP/VPN、部分路由器屏蔽组播时广播可兜底
+        let _ = send_socket.set_broadcast(true);
         for i in 0..3 {
             let announce = self.self_multicast();
             if let Ok(buf) = serde_json::to_vec(&announce) {
-                let _ = send_socket.send_to(&buf, target).await;
+                let group = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, MULTICAST_PORT));
+                let _ = send_socket.send_to(&buf, group).await;
+                let broadcast = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, MULTICAST_PORT));
+                let _ = send_socket.send_to(&buf, broadcast).await;
             }
             if i < 2 {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -604,6 +615,55 @@ impl TransferManager {
         if msg.announce || msg.announcement {
             self.reply_register(&peer_event).await;
         }
+    }
+
+    /// 手动添加对端：HTTP GET {ip}:53317/api/localsend/v2/info。
+    /// 组播/广播失效（WARP/VPN、路由器隔离）时的兜底——用户知道对端 IP 即可连上。
+    pub async fn add_peer_by_ip(&self, ip: &str) -> Result<Peer, String> {
+        for scheme in ["http", "https"] {
+            let url = format!("{scheme}://{ip}:{DEFAULT_PORT}/api/localsend/v2/info");
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            if let Ok(resp) = client
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(info) = resp.json::<serde_json::Value>().await {
+                        let fingerprint = info["fingerprint"].as_str().unwrap_or(ip).to_string();
+                        let alias = info["alias"].as_str().unwrap_or(ip).to_string();
+                        let port = info["port"].as_u64().unwrap_or(DEFAULT_PORT as u64) as u16;
+                        let protocol = info["protocol"].as_str().unwrap_or("http").to_string();
+                        let peer = Peer {
+                            fingerprint: fingerprint.clone(),
+                            alias,
+                            device_type: Some(info["deviceType"].as_str().unwrap_or("unknown").to_string()),
+                            device_model: info["deviceModel"].as_str().map(|s| s.to_string()),
+                            ip: ip.to_string(),
+                            port,
+                            protocol,
+                        };
+                        let is_new = {
+                            let mut peers = self.peers.lock().unwrap();
+                            let existed = peers.contains_key(&fingerprint);
+                            peers.insert(fingerprint.clone(), peer.clone());
+                            !existed
+                        };
+                        if is_new {
+                            self.emit("transfer-peer-found", &peer);
+                        }
+                        return Ok(peer);
+                    }
+                }
+            }
+        }
+        Err(format!("无法连接 {ip}:53317 或不是 LocalSend 兼容设备"))
     }
 
     async fn reply_register(&self, peer: &Peer) {
@@ -1201,6 +1261,11 @@ pub fn transfer_set_alias(alias: String) -> Result<(), String> {
 #[tauri::command]
 pub fn transfer_list_peers() -> Vec<Peer> {
     mgr().list_peers()
+}
+
+#[tauri::command]
+pub async fn transfer_add_peer(ip: String) -> Result<Peer, String> {
+    mgr().add_peer_by_ip(&ip).await
 }
 
 #[tauri::command]
