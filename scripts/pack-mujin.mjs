@@ -29,17 +29,31 @@ const outputDir = join(rootDir, 'dist-dlc', 'external-deps');
 //   - 不可再分的依赖（tiptap 等即使内部有 packages/、tests/ 等子文件夹）
 //     也整体打包成单个 .mujin（CreateFromDirectory 会递归整个目录树）
 //   - 新增依赖只需在此数组追加一条声明
+//
+// heavy: true —— 重型依赖（ffmpeg/OCR/桌面宠物资源等）。
+//   BUILD_LITE=1 时跳过这些依赖，用于 Android 等轻量构建（手机系统自带媒体播放/截图，
+//   无需 ffmpeg；OCR/桌面宠物非移动端核心功能）。桌面构建不设 BUILD_LITE，全量打包。
+//   未来移动端需要某依赖时，从该条移除 heavy 标记即可。
 const TARGETS = [
   // 茑萝子模块（茑萝/ide/、茑萝/wps/ 母文件夹结构）
   { src: '茑萝/ide/codemirror', out: '茑萝/ide/codemirror.mujin' },
   { src: '茑萝/wps/tiptap',     out: '茑萝/wps/tiptap.mujin' },
   // 全局模块（全局/ 母文件夹结构）
-  { src: '全局/ffmpeg',            out: '全局/ffmpeg.mujin' },
-  { src: '全局/basic-pitch',       out: '全局/basic-pitch.mujin' },
+  { src: '全局/ffmpeg',            out: '全局/ffmpeg.mujin', heavy: true },
+  { src: '全局/basic-pitch',       out: '全局/basic-pitch.mujin', heavy: true },
   // 本地 OCR 依赖包（引擎 + ONNX 模型 + 字符表，用户自行下载放入「依赖」目录）
-  { src: '全局/paddleocr',         out: '全局/paddleocr.mujin' },
-  { src: 'deskpet-assets',         out: 'deskpet-assets.mujin' },
+  { src: '全局/paddleocr',         out: '全局/paddleocr.mujin', heavy: true },
+  { src: 'deskpet-assets',         out: 'deskpet-assets.mujin', heavy: true },
 ];
+
+// 轻量构建模式：跳过 heavy 依赖。
+//   - Android 构建自动启用（TAURI_ENV_PLATFORM=android）：手机系统自带媒体播放/截图能力，
+//     无需 ffmpeg/OCR/桌面宠物等重型依赖；移动端只保留核心功能依赖，APK 从 ~184MB 降到 ~15MB。
+//     Tauri v2 在 beforeBuildCommand 期间注入 TAURI_ENV_PLATFORM（见官方环境变量文档）。
+//   - 桌面构建默认全量打包；如需在桌面测试轻量包，显式设置 BUILD_LITE=1。
+//   - 显式 BUILD_LITE=1 始终生效（覆盖自动判定），便于调试。
+const IS_ANDROID = process.env.TAURI_ENV_PLATFORM === 'android';
+const BUILD_LITE = process.env.BUILD_LITE === '1' || IS_ANDROID;
 
 // 用 PowerShell .NET API 打包目录为 .mujin（ZIP 格式，不自动添加 .zip 后缀）
 function packToMujin(srcDir, destFile) {
@@ -62,7 +76,8 @@ if (!existsSync(externalDir)) {
   process.exit(1);
 }
 
-console.log(`[PackMujin] 发现 ${TARGETS.length} 个依赖待打包`);
+const liteReason = process.env.BUILD_LITE === '1' ? 'BUILD_LITE=1' : (IS_ANDROID ? 'TAURI_ENV_PLATFORM=android' : '');
+console.log(`[PackMujin] 发现 ${TARGETS.length} 个依赖待打包${BUILD_LITE ? `（轻量模式 · ${liteReason}，跳过 heavy）` : '（全量模式）'}`);
 
 // 清理输出目录
 if (existsSync(outputDir)) rmSync(outputDir, { recursive: true });
@@ -71,7 +86,13 @@ mkdirSync(outputDir, { recursive: true });
 // 逐个打包
 let packed = 0;
 const packedList = [];
-for (const { src, out } of TARGETS) {
+for (const target of TARGETS) {
+  const { src, out } = target;
+  // 轻量模式跳过重型依赖
+  if (BUILD_LITE && target.heavy) {
+    console.log(`[PackMujin] ⊘ 跳过重型依赖（BUILD_LITE=1）: ${src}`);
+    continue;
+  }
   const srcDir = join(externalDir, src);
   const destFile = join(outputDir, out);
   if (!existsSync(srcDir)) {
