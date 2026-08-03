@@ -46,14 +46,24 @@ echo [ANDROID] ========================================
 
 REM ---- 0b. Re-entry guard（防止同时开两个打包窗口互相抢 cargo 文件锁）----
 set LOCK_FILE=%CD%\build_android.lock
-if exist "%LOCK_FILE%" (
-  echo [ANDROID] [X] 检测到已有安卓打包进程在运行（build_android.lock 存在）
-  if exist "%LOCK_FILE%" type "%LOCK_FILE%"
-  echo [ANDROID]     若确认没有其他打包窗口，请删除 build_android.lock 后重试。
-  echo [ANDROID]     （Ctrl+C 中断导致残留锁文件时，同样删除该文件即可。）
-  pause
-  exit /b 1
-)
+if not exist "%LOCK_FILE%" goto lock_ok
+REM 锁存在：检查是否有 gradle/java 构建进程。
+REM 无 java 进程 -> 视为上次 Ctrl+C 残留的锁，自动清除后继续；
+REM 有 java 进程 -> 可能确实有别的打包窗口在跑，提示用户处理。
+tasklist /FI "IMAGENAME eq java.exe" /FO CSV /NH 2>nul | find /i "java.exe" >nul
+if errorlevel 1 goto lock_stale
+echo [ANDROID] [X] 检测到 java/gradle 进程在运行，可能已有其他打包窗口。
+type "%LOCK_FILE%"
+echo [ANDROID]     若确认没有其他打包窗口，请删除 build_android.lock 后重试。
+echo [ANDROID]     （Ctrl+C 中断导致残留锁时，删除该文件即可。）
+pause
+exit /b 1
+
+:lock_stale
+echo [ANDROID] 检测到残留锁文件（无构建进程在运行），已自动清除。
+del "%LOCK_FILE%" >nul 2>&1
+
+:lock_ok
 echo 开始于 %date% %time% >> "%LOCK_FILE%"
 
 REM ---- 1. Detect Android SDK ----
@@ -149,32 +159,18 @@ exit /b 1
 set TAURI_ENV_PLATFORM=android
 set TARGET=aarch64-linux-android
 
-REM ---- 2. Configure ABI filter via gradle.properties ----
+REM ---- 2. Ensure clean ABI settings in gradle.properties ----
+REM ABI 由 GRADLE_TASK（assembleArm64Release / assembleUniversalRelease）精确控制：
+REM   assemble<Flavor> 只依赖该 flavor 的 Rust 编译任务，天然只编 1 个 ABI。
+REM 实测 targetList/archList 注入会破坏 gradle 任务图（报 Task 'mergeArm64
+REM DebugJniLibFolders' not found），故此处只清除历史残留注入，不再追加。
 set GRADLE_PROPS=%CD%\src-tauri\gen\android\gradle.properties
 set GRADLE_PROPS_BAK=%GRADLE_PROPS%.bak
 
 if exist "%GRADLE_PROPS_BAK%" del "%GRADLE_PROPS_BAK%"
 copy "%GRADLE_PROPS%" "%GRADLE_PROPS_BAK%" >nul
-
-if /i "%ABI_MODE%"=="arm64" goto abi_arm64
-goto abi_all
-
-:abi_arm64
-REM targetList/archList 控制 RustPlugin 实际编译的 target（buildSrc/RustPlugin.kt）：
-REM   abiList 只影响 APK 打包过滤；targetList 才决定 cargo 编几个 ABI。
-REM 单编 arm64：Rust 从 4 遍(约10min)降到 1 遍(约2.5min)。
 findstr /v /c:"abiList=" /v /c:"targetList=" /v /c:"archList=" "%GRADLE_PROPS_BAK%" > "%GRADLE_PROPS%"
-echo abiList=arm64-v8a >> "%GRADLE_PROPS%"
-echo targetList=aarch64 >> "%GRADLE_PROPS%"
-echo archList=arm64 >> "%GRADLE_PROPS%"
-echo [ANDROID] ABI filter: arm64-v8a only (single-target compile)
-goto abi_done
-
-:abi_all
-findstr /v /c:"abiList=" /v /c:"targetList=" /v /c:"archList=" "%GRADLE_PROPS_BAK%" > "%GRADLE_PROPS%"
-echo [ANDROID] ABI filter: all ABIs (universal)
-
-:abi_done
+echo [ANDROID] ABI 由 gradle task (%GRADLE_TASK%) 控制，已清除残留 ABI 属性
 
 REM ---- 3. Run Tauri Android build ----
 echo [ANDROID] [1/2] beforeBuildCommand（前端复用检查）...
