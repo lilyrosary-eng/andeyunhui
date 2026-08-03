@@ -4,7 +4,7 @@
   "version": "2.3.0",
   "identifier": "com.rosary.andengyuanhua",
   "build": {
-    "beforeDevCommand": "pnpm run dev",
+    "beforeDevCommand": "node scripts/before-dev.mjs",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "node scripts/before-build.mjs",
     "frontendDist": "../dist"
