@@ -38,9 +38,14 @@ const viteBin = join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js');
 const bundledDir = join(rootDir, 'bundled-plugins');
 
 // BUILD_CLEAN=1 时跳过插件构建，只保留空目录占位
+// Android 构建（TAURI_ENV_PLATFORM=android）：移动端不加载任何桌面插件（浮窗/IDE/WPS/桌宠等），
+// 跳过全部插件构建 —— 16 个插件 × 独立 vite 是 Android 打包最大的时间黑洞，跳过可省一大半构建时间。
 const BUILD_CLEAN = process.env.BUILD_CLEAN === '1';
+const IS_ANDROID = process.env.TAURI_ENV_PLATFORM === 'android';
 if (BUILD_CLEAN) {
   console.log('[Deploy] BUILD_CLEAN=1：跳过所有插件构建，只保留空模块文件夹');
+} else if (IS_ANDROID) {
+  console.log('[Deploy] Android 构建：跳过插件构建（移动端不加载桌面插件），只保留空模块文件夹');
 }
 
 // 递归自动发现插件：扫描 plugins/ 下所有含 manifest.json 的目录（排除 _shared/_template），
@@ -132,9 +137,9 @@ for (const { relPath, id, manifest } of plugins) {
   const pluginDir = join(pluginsDir, relPath);
   if (!existsSync(pluginDir)) continue;
 
-  // BUILD_CLEAN=1：跳过插件构建和部署，只保留空模块文件夹
-  if (BUILD_CLEAN) {
-    console.log(`[Deploy] BUILD_CLEAN=1，跳过插件: ${id}`);
+  // BUILD_CLEAN=1 / Android：跳过插件构建和部署，只保留空模块文件夹
+  if (BUILD_CLEAN || IS_ANDROID) {
+    console.log(`[Deploy] ${BUILD_CLEAN ? 'BUILD_CLEAN=1' : 'Android'}，跳过插件: ${id}`);
     continue;
   }
 
