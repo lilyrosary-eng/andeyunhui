@@ -54,6 +54,8 @@ export interface UseAiStreamResult {
   clear: () => void;
   /** 刷新 profile 列表 */
   refreshProfiles: () => Promise<void>;
+  /** 保存（新增/替换）模型档案列表并刷新 */
+  saveProfiles: (profiles: AiProfile[]) => Promise<void>;
 }
 
 export function useAiStream(): UseAiStreamResult {
@@ -77,10 +79,13 @@ export function useAiStream(): UseAiStreamResult {
     setCurrentSource(src);
   }, []);
 
-  /** 加载 profile 列表，并默认选中第一个（优先 local） */
+  /** 加载 profile 列表，并默认选中第一个（优先 local）。
+   *  注意：后端 ai_get_profiles 返回 AiProfiles 对象 { profiles, active }，
+   *  前端需取 raw.profiles，不能当数组直接用。 */
   const refreshProfiles = useCallback(async () => {
     try {
-      const list = await invoke<AiProfile[]>('ai_get_profiles');
+      const raw = await invoke<{ profiles?: AiProfile[] }>('ai_get_profiles');
+      const list = raw?.profiles ?? [];
       const valid = (list || []).filter((p) => p && p.id && p.base_url);
       setProfiles(valid);
       if (valid.length > 0 && !sourceRef.current) {
@@ -99,6 +104,17 @@ export function useAiStream(): UseAiStreamResult {
       setProfilesLoaded(true);
     }
   }, [applySource]);
+
+  /** 保存模型档案列表（手机端添加/编辑 API 来源用），保存后自动刷新 */
+  const saveProfiles = useCallback(
+    async (next: AiProfile[]) => {
+      await invoke('ai_set_profiles', {
+        payload: { profiles: next, active: next[0]?.id ?? null },
+      });
+      await refreshProfiles();
+    },
+    [refreshProfiles],
+  );
 
   // 首次挂载：加载 profiles + 注册事件监听（一次性，按 requestId 过滤）
   useEffect(() => {
@@ -340,5 +356,6 @@ export function useAiStream(): UseAiStreamResult {
     switchToCloud,
     clear,
     refreshProfiles,
+    saveProfiles,
   };
 }
