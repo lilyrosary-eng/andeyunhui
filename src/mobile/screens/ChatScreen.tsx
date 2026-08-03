@@ -19,7 +19,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Plus, MoreVertical, Trash2, Cpu, Cloud, MonitorSmartphone } from 'lucide-react';
 
 import { useAiStream } from '../hooks/useAiStream';
-import { classifyProfile, type ComputeSource } from '../types/chat';
+import { classifyProfile, type ComputeSource, type AiProfile } from '../types/chat';
 import { ComputeChip, type ComputeKind } from '../components/ComputeChip';
 import { BottomSheet } from '../components/BottomSheet';
 import { MessageList } from '../components/chat/MessageList';
@@ -38,6 +38,33 @@ export function ChatScreen() {
   const ai = useAiStream();
   const [sourceSheetOpen, setSourceSheetOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
+  // 手机端「添加 API 算力来源」表单
+  const [addApiOpen, setAddApiOpen] = useState(false);
+  const [apiForm, setApiForm] = useState({ name: '', baseUrl: '', apiKey: '', model: '' });
+  const [saving, setSaving] = useState(false);
+
+  /** 保存新增的 API 算力来源（追加到现有 profiles 并刷新列表） */
+  const saveApi = useCallback(async () => {
+    const baseUrl = apiForm.baseUrl.trim();
+    const apiKey = apiForm.apiKey.trim();
+    const model = apiForm.model.trim();
+    if (!baseUrl || !apiKey || !model) return;
+    setSaving(true);
+    try {
+      const next: AiProfile = {
+        id: `p_${Date.now().toString(36)}`,
+        name: apiForm.name.trim() || model,
+        base_url: baseUrl,
+        api_key: apiKey,
+        model,
+      };
+      await ai.saveProfiles([...ai.profiles, next]);
+      setAddApiOpen(false);
+      setApiForm({ name: '', baseUrl: '', apiKey: '', model: '' });
+    } finally {
+      setSaving(false);
+    }
+  }, [ai, apiForm]);
 
   const cloudAvailable = ai.profiles.some((p) => classifyProfile(p) === 'cloud');
 
@@ -144,19 +171,20 @@ export function ChatScreen() {
       {/* 输入区 */}
       <ChatInput busy={ai.busy} onSend={handleSend} />
 
-      {/* 算力来源选择 */}
+      {/* 算力来源选择（含手机端「添加 API 来源」入口） */}
       <BottomSheet
         open={sourceSheetOpen}
         onClose={() => setSourceSheetOpen(false)}
         title="选择算力来源"
         items={
-          ai.profiles.length === 0
-            ? [{
-                label: '尚未配置模型档案',
-                description: '请在桌面端「设置 → 模型」中添加 OpenAI 兼容端点',
-                icon: <Cpu size={18} />,
-              }]
-            : sourceItems
+          (ai.profiles.length === 0 ? [] : sourceItems).concat([
+            {
+              label: ai.profiles.length === 0 ? '添加 API 算力来源' : '添加 API 来源',
+              description: '配置 OpenAI 兼容端点（Base URL / Key / 模型）',
+              icon: <Plus size={18} />,
+              onClick: () => setAddApiOpen(true),
+            },
+          ])
         }
       />
 
@@ -167,6 +195,95 @@ export function ChatScreen() {
         title="对话操作"
         items={overflowItems}
       />
+
+      {/* 添加 API 算力来源表单 */}
+      <BottomSheet
+        open={addApiOpen}
+        onClose={() => !saving && setAddApiOpen(false)}
+        title="添加 API 算力来源"
+      >
+        <div className="px-4 pb-4 flex flex-col gap-3">
+          <ApiField
+            label="名称（可选）"
+            value={apiForm.name}
+            onChange={(v) => setApiForm((f) => ({ ...f, name: v }))}
+            placeholder="如：DeepSeek"
+          />
+          <ApiField
+            label="Base URL"
+            value={apiForm.baseUrl}
+            onChange={(v) => setApiForm((f) => ({ ...f, baseUrl: v }))}
+            placeholder="https://api.deepseek.com/v1"
+          />
+          <ApiField
+            label="API Key"
+            value={apiForm.apiKey}
+            onChange={(v) => setApiForm((f) => ({ ...f, apiKey: v }))}
+            placeholder="sk-…"
+          />
+          <ApiField
+            label="模型"
+            value={apiForm.model}
+            onChange={(v) => setApiForm((f) => ({ ...f, model: v }))}
+            placeholder="deepseek-chat"
+          />
+          <div className="flex gap-2 pt-2">
+            <button
+              type="button"
+              onClick={() => setAddApiOpen(false)}
+              className="flex-1 rounded-xl py-2.5 font-medium border border-[var(--border)] text-[var(--foreground)] active:scale-[0.98] transition-transform"
+              style={{ fontSize: 'var(--m-text-label)' }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={saveApi}
+              disabled={saving || !apiForm.baseUrl.trim() || !apiForm.apiKey.trim() || !apiForm.model.trim()}
+              className="flex-1 rounded-xl py-2.5 font-medium active:scale-[0.98] transition-transform disabled:opacity-50"
+              style={{
+                fontSize: 'var(--m-text-label)',
+                background: 'var(--element-bg)',
+                color: 'var(--element-fg)',
+              }}
+            >
+              {saving ? '保存中…' : '保存'}
+            </button>
+          </div>
+        </div>
+      </BottomSheet>
     </div>
+  );
+}
+
+/** 表单字段（单行输入 + 标签） */
+function ApiField({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block">
+      <span
+        className="block text-[var(--muted-foreground)] mb-1.5"
+        style={{ fontSize: 'var(--m-text-caption)' }}
+      >
+        {label}
+      </span>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-lg px-3 py-2 bg-[var(--input)] text-[var(--foreground)] outline-none border border-[var(--border)] focus:border-[var(--ring)]"
+        style={{ fontSize: 'var(--m-text-body)' }}
+      />
+    </label>
   );
 }
