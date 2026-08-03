@@ -39,10 +39,23 @@ echo [ANDROID] mode=%BUILD_MODE%  abi=%ABI_MODE%
 echo [ANDROID] Working dir: %CD%
 echo [ANDROID] ========================================
 
+REM ---- 0b. Re-entry guard（防止同时开两个打包窗口互相抢 cargo 文件锁）----
+set LOCK_FILE=%CD%\build_android.lock
+if exist "%LOCK_FILE%" (
+  echo [ANDROID] [X] 检测到已有安卓打包进程在运行（build_android.lock 存在）
+  if exist "%LOCK_FILE%" type "%LOCK_FILE%"
+  echo [ANDROID]     若确认没有其他打包窗口，请删除 build_android.lock 后重试。
+  echo [ANDROID]     （Ctrl+C 中断导致残留锁文件时，同样删除该文件即可。）
+  pause
+  exit /b 1
+)
+echo 开始于 %date% %time% >> "%LOCK_FILE%"
+
 REM ---- 1. Detect Android SDK ----
 if not "%ANDROID_HOME%"=="" goto sdk_ok
 if exist "%LOCALAPPDATA%\Android\Sdk" goto sdk_default
 echo [ANDROID] [X] Android SDK not found. Set ANDROID_HOME or install to default path.
+if exist "%LOCK_FILE%" del "%LOCK_FILE%" >nul 2>&1
 pause
 exit /b 1
 
@@ -91,6 +104,7 @@ echo [ANDROID] [X] No NDK available. Manual options:
 echo [ANDROID]       1. Android Studio -^> SDK Manager -^> SDK Tools -^> install an NDK
 echo [ANDROID]       2. Run:  %SDKMAN% "ndk;21.4.7075529"
 echo [ANDROID]       3. Or set NDK_HOME manually to an installed NDK path.
+if exist "%LOCK_FILE%" del "%LOCK_FILE%" >nul 2>&1
 pause
 exit /b 1
 
@@ -122,6 +136,7 @@ REM ---- 1c. Hard guard: lock to Android build ----
 if exist "%CD%\src-tauri\gen\android" goto guard_ok
 echo [ANDROID] [X] Android project not found: src-tauri\gen\android
 echo [ANDROID]     Run 'pnpm tauri android init' first.
+if exist "%LOCK_FILE%" del "%LOCK_FILE%" >nul 2>&1
 pause
 exit /b 1
 
@@ -172,10 +187,12 @@ echo.
 echo [ANDROID] [X] Android build failed, exit %BUILD_EXIT%
 echo [ANDROID] Full log: %CD%\build_android.log
 echo.
+if exist "%LOCK_FILE%" del "%LOCK_FILE%" >nul 2>&1
 pause
 exit /b 1
 
 :report
+if exist "%LOCK_FILE%" del "%LOCK_FILE%" >nul 2>&1
 echo.
 echo [ANDROID] ========================================
 echo [ANDROID] [OK] Android APK build complete!
