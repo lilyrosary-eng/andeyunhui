@@ -33,9 +33,9 @@ export function GlobalDrawer({ children }: GlobalDrawerProps) {
     <AnimatePresence>
       {open && (
         <div className="fixed inset-0 z-40" aria-modal="true" role="dialog">
-          {/* 遮罩层 */}
+          {/* 遮罩层 · 加深至 70%，防止抽屉外文字透过干扰抽屉内可读性 */}
           <motion.div
-            className="absolute inset-0 bg-black/40"
+            className="absolute inset-0 bg-black/70"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
