@@ -164,7 +164,7 @@ export function RichTextEditor({
     ],
     editorProps: {
       attributes: {
-        class: `prose prose-sm max-w-none outline-none min-h-full p-5 text-sm leading-7 text-neutral-700 dark:text-stone-300 ${wordWrap ? '' : 'whitespace-pre'}`,
+        class: `prose prose-sm max-w-none outline-none min-h-full p-5 text-sm leading-7 text-neutral-700 dark:text-stone-300 [&_img]:max-w-full [&_img]:h-auto [&_pre]:overflow-x-auto [&_table]:max-w-full [&_td]:break-words ${wordWrap ? '' : 'whitespace-pre'}`,
       },
       handleKeyDown: (_view: unknown, event: KeyboardEvent) => {
         // 透传给父组件的 onKeyDown（用于 Backspace 图片整删等逻辑）

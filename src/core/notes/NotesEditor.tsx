@@ -388,8 +388,8 @@ export function NotesEditor() {
         onDrop={handleDrop}
         onDragOver={handleDragOver}
       >
-        {/* 左侧：富文本编辑区 */}
-        <div className={`flex-1 flex flex-col min-h-0 ${editorMode === 'split' ? 'border-r border-neutral-200/30 dark:border-stone-700/30' : ''}`}>
+        {/* 左侧：富文本编辑区（min-w-0：允许收缩，宽内容在栏内滚动而非把两栏撑开挤压） */}
+        <div className={`flex-1 flex flex-col min-h-0 min-w-0 ${editorMode === 'split' ? 'border-r border-neutral-200/30 dark:border-stone-700/30' : ''}`}>
           <div className="px-4 py-3 border-b border-neutral-200/30 flex-shrink-0 dark:border-stone-700/30">
             <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">{tr('notesEditor.editLabel')}</span>
           </div>
@@ -405,14 +405,14 @@ export function NotesEditor() {
           </Suspense>
         </div>
 
-        {/* 右侧：实时预览区（仅双栏模式） */}
+        {/* 右侧：实时预览区（仅双栏模式，min-w-0 + 横向溢出受控，宽内容不挤压编辑区） */}
         {editorMode === 'split' && (
-          <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 flex flex-col min-h-0 min-w-0">
             <div className="px-4 py-3 border-b border-neutral-200/30 flex-shrink-0 dark:border-stone-700/30">
               <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">{tr('notesEditor.previewLabel')}</span>
             </div>
             <div
-              className="flex-1 w-full h-full p-5 overflow-y-auto prose prose-sm max-w-none text-neutral-700 leading-7 dark:text-stone-300 [&_p]:my-0 [&_p]:leading-7"
+              className="flex-1 w-full h-full p-5 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-neutral-700 leading-7 dark:text-stone-300 [&_p]:my-0 [&_p]:leading-7 [&_img]:max-w-full [&_img]:h-auto [&_pre]:overflow-x-auto [&_table]:max-w-full [&_td]:break-words"
               dangerouslySetInnerHTML={{ __html: htmlContent }}
             />
           </div>
