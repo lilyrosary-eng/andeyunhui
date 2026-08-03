@@ -109,6 +109,48 @@
     --dur-fast: 100ms;
     --dur-base: 200ms;
     --dur-slow: 300ms;
+
+    /* ========== Android v1 移动端令牌（§7.2.3 / §7.2.5 / §7.2.7）========== */
+    /* 🔴 只追加，不修改任何既有令牌值。桌面端不消费这些令牌，零影响。 */
+
+    /* 安全区（env() 依赖 viewport-fit=cover，已在 index.html 设置） */
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+
+    /* 导航壳尺寸 */
+    --tabbar-h: 56px;
+    --tabbar-total: calc(var(--tabbar-h) + var(--safe-bottom));
+    --appbar-h: 56px;
+    --rail-w: 80px;
+    --drawer-w: min(84vw, 320px);
+    --touch-min: 48px;
+
+    /* 算力来源状态色（§7.2.3 · 唯一新增品牌语义色，深浅主题共用） */
+    --compute-local: oklch(0.62 0.13 155);   /* 我的电脑 · 绿 · 未出网 */
+    --compute-cloud: oklch(0.72 0.14 70);    /* 云端 · 琥珀 · 数据出网 */
+    --compute-device: oklch(0.62 0.12 250);  /* 本机 · 蓝 · 完全离线 */
+    --compute-down: oklch(0.65 0.02 60);     /* 不可达 · 中性灰 */
+
+    /* 字阶（移动端重排，§7.2.5）— 全部 rem 响应系统字体缩放 */
+    --m-text-display: 1.75rem;    /* 28px · 空态主标题 */
+    --m-text-title: 1.375rem;     /* 22px · 页面标题 */
+    --m-text-headline: 1.125rem;  /* 18px · 区块标题 */
+    --m-text-body-lg: 1.0625rem;  /* 17px · AI 对话消息正文 */
+    --m-text-body: 0.9375rem;     /* 15px · 通用正文 */
+    --m-text-label: 0.875rem;     /* 14px · 按钮、列表主文案 */
+    --m-text-caption: 0.8125rem;  /* 13px · 辅助说明 */
+    --m-text-overline: 0.6875rem; /* 11px · Tab 标签、角标 */
+
+    /* Bottom Sheet 专属圆角（§7.2.7 · 上两角 20dp 强惯例） */
+    --m-radius-sheet: 20px;
+  }
+
+  /* AI 对话流式光标/思考点闪烁（T07 · MessageList 用） */
+  @keyframes ai-blink {
+    0%, 100% { opacity: 0.25; }
+    50% { opacity: 1; }
   }
   .dark {
     --background: oklch(0.18 0.005 60);

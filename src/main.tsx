@@ -135,20 +135,42 @@ async function bootstrap() {
   } else {
     // 主界面即将构建（React 将挂载 App）
     boot.__bootProgress?.(28, { text: "构建界面", phase: "PHASE 02 / 05" });
-    const [{ default: App }, { ThemeProvider }, { I18nProvider }] = await Promise.all([
-      import('./App'),
+    // 平台分流（§5.4.2）：Android 走 MobileApp，桌面走 App。
+    // 🔴 桌面分支渲染的组件树与改动前完全相同 —— isAndroid() 在桌面恒返回 false。
+    const [{ ThemeProvider }, { I18nProvider }, { isAndroid }] = await Promise.all([
       import('./lib/ThemeProvider'),
       import('./lib/i18n'),
+      import('./platform/isMobile'),
     ]);
-    ReactDOM.createRoot(root).render(
-      <React.StrictMode>
-        <I18nProvider>
-          <ThemeProvider>
-            <App />
-          </ThemeProvider>
-        </I18nProvider>
-      </React.StrictMode>,
-    );
+    if (isAndroid()) {
+      const { default: MobileApp } = await import('./mobile/MobileApp');
+      ReactDOM.createRoot(root).render(
+        <React.StrictMode>
+          <I18nProvider>
+            <ThemeProvider>
+              <MobileApp />
+            </ThemeProvider>
+          </I18nProvider>
+        </React.StrictMode>,
+      );
+      // 🔴 Android 快速开屏：移动端不存在桌面那套 notes/overlays 启动门（__bootGate 永远不会被置位），
+      // 若不主动收尾，加载层要一直等到 index.html 的 25s 硬超时才淡出。
+      // 移动端内容轻量，React 挂载完即可直接结束开屏（下一帧确保首屏已上屏，避免闪白）。
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => boot.__bootDone?.({ text: "就绪", phase: "" }));
+      });
+    } else {
+      const { default: App } = await import('./App');
+      ReactDOM.createRoot(root).render(
+        <React.StrictMode>
+          <I18nProvider>
+            <ThemeProvider>
+              <App />
+            </ThemeProvider>
+          </I18nProvider>
+        </React.StrictMode>,
+      );
+    }
   }
 }
 

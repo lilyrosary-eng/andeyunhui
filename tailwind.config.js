@@ -8,6 +8,14 @@ export default {
   ],
   theme: {
     extend: {
+      // Android v1 移动端断点（§7.3 / §9.4.2）。
+      // 🔴 必须用 md-win / lg-win 语义键，绝不复用 md / lg ——
+      // 后者会覆盖 Tailwind 默认断点（md=768 / lg=1024），破坏桌面端既有响应式样式（L0-8 回归）。
+      // 语义：compact <600 / medium 600–839 / expanded ≥840（dp）
+      screens: {
+        'md-win': '600px',
+        'lg-win': '840px',
+      },
       colors: {
         border: "var(--border)",
         input: "var(--input)",
