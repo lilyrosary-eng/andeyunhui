@@ -23,11 +23,10 @@ REM ============================================================
 cd /d "%~dp0"
 
 REM ---- 0. Parse args ----
-REM Gradle 直接构建（绕过 Tauri CLI 的 android-studio-script 固定 5 flavor 全编译）：
-REM   Tauri 的 android build 会对 aarch64/armv7/i686/x86_64/universal 各跑一次
-REM   cargo（targetList 只影响 gradle 内部 task，管不住 Tauri 的脚本调用），
-REM   所以改用 gradlew 的 assemble<Flavor><Mode>，配合 gradle.properties 的
-REM   targetList=aarch64 只编译 arm64 一个 ABI（Rust 从 ~15min 降到 ~2.5min）。
+REM 用 gradle 直接构建，绕过 Tauri CLI 的 android-studio-script（它固定对
+REM aarch64/armv7/i686/x86_64/universal 各跑一次 cargo，约 15 分钟）。
+REM gradlew 的 assembleArm64Release 等 task 只编译对应 ABI（约 2.5 分钟）。
+REM 注意：REM 注释里严禁出现尖括号，会被 cmd 当作重定向符导致闪退。
 set BUILD_MODE=release
 set ABI_MODE=arm64
 set GRADLE_TASK=assembleArm64Release
@@ -48,8 +47,8 @@ REM ---- 0b. Re-entry guard（防止同时开两个打包窗口互相抢 cargo �
 set LOCK_FILE=%CD%\build_android.lock
 if not exist "%LOCK_FILE%" goto lock_ok
 REM 锁存在：检查是否有 gradle/java 构建进程。
-REM 无 java 进程 -> 视为上次 Ctrl+C 残留的锁，自动清除后继续；
-REM 有 java 进程 -> 可能确实有别的打包窗口在跑，提示用户处理。
+REM 无 java 进程（视为上次 Ctrl+C 残留的锁）：自动清除后继续；
+REM 有 java 进程（可能确实有别的打包窗口在跑）：提示用户处理。
 tasklist /FI "IMAGENAME eq java.exe" /FO CSV /NH 2>nul | find /i "java.exe" >nul
 if errorlevel 1 goto lock_stale
 echo [ANDROID] [X] 检测到 java/gradle 进程在运行，可能已有其他打包窗口。
@@ -161,9 +160,9 @@ set TARGET=aarch64-linux-android
 
 REM ---- 2. Ensure clean ABI settings in gradle.properties ----
 REM ABI 由 GRADLE_TASK（assembleArm64Release / assembleUniversalRelease）精确控制：
-REM   assemble<Flavor> 只依赖该 flavor 的 Rust 编译任务，天然只编 1 个 ABI。
-REM 实测 targetList/archList 注入会破坏 gradle 任务图（报 Task 'mergeArm64
-REM DebugJniLibFolders' not found），故此处只清除历史残留注入，不再追加。
+REM   assemble 任务只依赖对应 flavor 的 Rust 编译任务，天然只编 1 个 ABI。
+REM 实测 targetList/archList 注入会破坏 gradle 任务图（报 merge task not found），
+REM 故此处只清除历史残留注入，不再追加。
 set GRADLE_PROPS=%CD%\src-tauri\gen\android\gradle.properties
 set GRADLE_PROPS_BAK=%GRADLE_PROPS%.bak
 
