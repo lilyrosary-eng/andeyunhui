@@ -140,13 +140,18 @@ if /i "%ABI_MODE%"=="arm64" goto abi_arm64
 goto abi_all
 
 :abi_arm64
-findstr /v /c:"abiList=" "%GRADLE_PROPS_BAK%" > "%GRADLE_PROPS%"
+REM targetList/archList 控制 RustPlugin 实际编译的 target（buildSrc/RustPlugin.kt）：
+REM   abiList 只影响 APK 打包过滤；targetList 才决定 cargo 编几个 ABI。
+REM 单编 arm64：Rust 从 4 遍(约10min)降到 1 遍(约2.5min)。
+findstr /v /c:"abiList=" /v /c:"targetList=" /v /c:"archList=" "%GRADLE_PROPS_BAK%" > "%GRADLE_PROPS%"
 echo abiList=arm64-v8a >> "%GRADLE_PROPS%"
-echo [ANDROID] ABI filter: arm64-v8a only
+echo targetList=aarch64 >> "%GRADLE_PROPS%"
+echo archList=arm64 >> "%GRADLE_PROPS%"
+echo [ANDROID] ABI filter: arm64-v8a only (single-target compile)
 goto abi_done
 
 :abi_all
-findstr /v /c:"abiList=" "%GRADLE_PROPS_BAK%" > "%GRADLE_PROPS%"
+findstr /v /c:"abiList=" /v /c:"targetList=" /v /c:"archList=" "%GRADLE_PROPS_BAK%" > "%GRADLE_PROPS%"
 echo [ANDROID] ABI filter: all ABIs (universal)
 
 :abi_done
