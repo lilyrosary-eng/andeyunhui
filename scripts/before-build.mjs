@@ -4,18 +4,18 @@
 // 每次 `pnpm run build` 重新生成 dist，资源指纹变化 → 整个 lib crate 全量重编，
 // 即使 Rust 代码没改（这就是 Android 打包"每次都慢"的根因）。
 //
-// Android 构建策略：
-//   - dist/ 已存在（前端产物可用）→ 跳过 pnpm run build 等前端重建，只跑
-//     deploy-plugins / prepare-bundled-dlc（两者在 Android 下已内部跳过、建占位）。
-//     这样 dist 不变 → Rust 增量编译（秒级）。
-//   - dist/ 不存在（首次/前端资源缺失）→ 走完整全量构建链。
+// Android 构建策略（自动判断，无需手动删 dist/）：
+//   - 前端源码（src/、index.html、public/、tailwind.config.js、vite.config.*、
+//     postcss.config.js 等）比 dist/ 产物更新 → 前端有改动 → 执行完整构建链，
+//     重新 pnpm run build，新 dist 打进包。
+//   - dist/ 已存在且不比源码旧 → 前端无改动 → 跳过前端重建，只跑
+//     deploy-plugins / prepare-bundled-dlc（Android 下内部已跳过构建、建占位）。
+//     dist 不变 → Rust 增量编译（秒级）。
+//   - dist/ 不存在（首次）→ 完整构建链。
 //
 // 桌面构建（无 TAURI_ENV_PLATFORM）：始终走完整构建链，行为与旧命令完全一致。
-//
-// 注意：Android 下如果改了前端代码，需删除 dist/（或手动跑一次 pnpm run build）
-// 才会重新打包前端。
 import { execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,7 +23,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
 const isAndroid = process.env.TAURI_ENV_PLATFORM === 'android';
-const distReady = existsSync(join(root, 'dist', 'index.html'));
 
 const FULL_CHAIN =
   'node scripts/gen-waiting-pages.mjs && ' +
@@ -33,12 +32,50 @@ const FULL_CHAIN =
   'pnpm run build && ' +
   'node scripts/prepare-bundled-dlc.mjs';
 
-if (isAndroid && distReady) {
-  console.log('[before-build] Android + dist 已存在：跳过前端重建（复用产物，避免触发 Rust 全量重编）');
-  // Android 下这两个脚本内部已跳过插件构建 / DLC 打包，只确保占位目录存在
-  execSync('node scripts/deploy-plugins.mjs', { cwd: root, stdio: 'inherit' });
-  execSync('node scripts/prepare-bundled-dlc.mjs', { cwd: root, stdio: 'inherit' });
+// 递归取目录内最新 mtime（毫秒）
+function latestMtime(dir) {
+  if (!existsSync(dir)) return 0;
+  let latest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      latest = Math.max(latest, latestMtime(full));
+    } else {
+      try {
+        latest = Math.max(latest, statSync(full).mtimeMs);
+      } catch {
+        /* 个别文件被占用/删除时忽略 */
+      }
+    }
+  }
+  return latest;
+}
+
+// 前端源码是否比 dist/ 产物更新（决定是否需要重建前端）
+function frontendStale() {
+  const distIndex = join(root, 'dist', 'index.html');
+  if (!existsSync(distIndex)) return true; // dist 不存在，必须重建
+  const srcLatest = Math.max(
+    latestMtime(join(root, 'src')),
+    latestMtime(join(root, 'public')),
+    ...['index.html', 'tailwind.config.js', 'postcss.config.js', 'components.json', 'vite.config.ts', 'vite.config.js']
+      .map((f) => join(root, f))
+      .map((p) => (existsSync(p) ? statSync(p).mtimeMs : 0)),
+  );
+  const distLatest = latestMtime(join(root, 'dist'));
+  return srcLatest > distLatest;
+}
+
+if (isAndroid) {
+  if (frontendStale()) {
+    console.log('[before-build] Android：检测到前端源码有更新，执行完整构建链');
+    execSync(FULL_CHAIN, { cwd: root, stdio: 'inherit', shell: true });
+  } else {
+    console.log('[before-build] Android：前端无改动，复用 dist/ 产物（Rust 走增量编译）');
+    execSync('node scripts/deploy-plugins.mjs', { cwd: root, stdio: 'inherit' });
+    execSync('node scripts/prepare-bundled-dlc.mjs', { cwd: root, stdio: 'inherit' });
+  }
 } else {
-  console.log(`[before-build] ${isAndroid ? 'Android + dist 缺失' : '桌面'}：执行完整构建链`);
+  console.log('[before-build] 桌面：执行完整构建链');
   execSync(FULL_CHAIN, { cwd: root, stdio: 'inherit', shell: true });
 }
