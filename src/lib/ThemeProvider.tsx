@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode, type RefObject } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { isAndroid } from '../platform/isMobile';
 
 type Theme = 'system' | 'light' | 'dark';
 
@@ -438,7 +439,17 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
           }}
         />
       )}
-      <div ref={zoomRef} style={{ zoom: `${zoom}%`, position: 'relative', zIndex: 1 }}>
+      {/* 平台隔离（Android v1）：移动端禁用 zoom 包裹层。
+          CSS zoom 在 Android WebView 中会破坏 vh/vw 与媒体查询断点的对应关系（§5.4.3 D7）。
+          桌面端行为逐字节不变——isAndroid() 在桌面恒为 false，走原 style 对象。 */}
+      <div
+        ref={zoomRef}
+        style={
+          isAndroid()
+            ? { position: 'relative', zIndex: 1 }
+            : { zoom: `${zoom}%`, position: 'relative', zIndex: 1 }
+        }
+      >
         {children}
       </div>
     </ThemeContext.Provider>

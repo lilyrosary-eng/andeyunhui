@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/src-tauri/icons/32x32.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>安得云荟</title>
     <style>
       /* 防白屏：脚本执行前先给页面一个底色（浅色默认，深色由预加载脚本切换） */
@@ -88,7 +88,10 @@
         // 排查用：统一带「自启动起经过毫秒数」的日志前缀，devtools 控制台可观察预热时序
         function blog(tag) { console.log('[boot] +' + (Date.now() - BOOT_START) + 'ms ' + tag); }
         blog('加载层已创建（哥特页开始）');
-        var MIN_BOOT_MS = 1500;
+        // 🔴 Android 快速开屏：移动端内容轻量、无浮窗/笔记预热，最短展示时长压到 400ms；
+        // 桌面维持 1500ms 不变（哥特加载页需真实可见，且要等 notes/overlays 双门控）。
+        var _isAndroidBoot = /Android/i.test(navigator.userAgent || '');
+        var MIN_BOOT_MS = _isAndroidBoot ? 400 : 1500;
         var _finishScheduled = false;
 
         function dismissBoot() {
@@ -179,14 +182,16 @@
         // 最后兜底：绝不绕过门控直接收尾（否则预热未完成就淡出 → 笔记页出现后仍在建窗、闪现实体浮窗）。
         // 这里强制补全门控（notes+overlays）再尝试收尾；正常情况预热早于此已置 gate，本分支仅作极端兜底。
         // 排查期临时拉到 25s（原 12s），给预热更充裕时间定位实际耗时，确保「浮窗预热」尽量在加载页内一次性跑完（单一阶段）。
+        // 🔴 Android 无浮窗/笔记预热，正常路径由 main.tsx 渲染完直接 __bootDone()；
+        // 这里兜底也压到 3s，避免极端情况（JS 分包加载失败）下白等 25s。
         setTimeout(function () {
-          blog('硬超时(25s)触发：强制补全门控兜底收尾');
+          blog('硬超时(' + (_isAndroidBoot ? '3s' : '25s') + ')触发：强制补全门控兜底收尾');
           if (!state.done) {
             window.__bootGate.notes = true;
             window.__bootGate.overlays = true;
             window.__tryBootFinish();
           }
-        }, 25000);
+        }, _isAndroidBoot ? 3000 : 25000);
 
         // ===== 全量哥特加载页（iframe 隔离，Vite 构建时注入 base64，零外部依赖）=====
         (function installBootHtml() {
