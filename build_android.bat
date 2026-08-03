@@ -23,19 +23,21 @@ REM ============================================================
 cd /d "%~dp0"
 
 REM ---- 0. Parse args ----
-REM 用 gradle 直接构建，绕过 Tauri CLI 的 android-studio-script（它固定对
-REM aarch64/armv7/i686/x86_64/universal 各跑一次 cargo，约 15 分钟）。
-REM gradlew 的 assembleArm64Release 等 task 只编译对应 ABI（约 2.5 分钟）。
+REM 用 pnpm tauri android build 驱动（必须）：RustPlugin 的 rustBuild task 内部调
+REM tauri android android-studio-script，需连回 Tauri CLI 主进程的 WebSocket 拿配置，
+REM 直接跑 gradlew 会 ConnectionRefused（实测）。Tauri CLI 固定编译 4 个 ABI，但配合
+REM before-build.mjs 的前端复用（dist 不变 -> Rust 增量），第二次起 4 ABI 增量编译
+REM 仅秒级，总耗时约等于 Gradle 打包（1-2 分钟）。
 REM 注意：REM 注释里严禁出现尖括号，会被 cmd 当作重定向符导致闪退。
 set BUILD_MODE=release
 set ABI_MODE=arm64
-set GRADLE_TASK=assembleArm64Release
+set TAURI_ARGS=
 if /i "%~1"=="debug" set BUILD_MODE=debug
 if /i "%~1"=="debug" set ABI_MODE=arm64
-if /i "%~1"=="debug" set GRADLE_TASK=assembleArm64Debug
+if /i "%~1"=="debug" set TAURI_ARGS=--debug
 if /i "%~1"=="all" set ABI_MODE=all
 if /i "%~1"=="all" set BUILD_MODE=release
-if /i "%~1"=="all" set GRADLE_TASK=assembleUniversalRelease
+if /i "%~1"=="all" set TAURI_ARGS=
 
 echo [ANDROID] ========================================
 echo [ANDROID] Android APK build script
@@ -169,19 +171,17 @@ set GRADLE_PROPS_BAK=%GRADLE_PROPS%.bak
 if exist "%GRADLE_PROPS_BAK%" del "%GRADLE_PROPS_BAK%"
 copy "%GRADLE_PROPS%" "%GRADLE_PROPS_BAK%" >nul
 findstr /v /c:"abiList=" /v /c:"targetList=" /v /c:"archList=" "%GRADLE_PROPS_BAK%" > "%GRADLE_PROPS%"
-echo [ANDROID] ABI 由 gradle task (%GRADLE_TASK%) 控制，已清除残留 ABI 属性
+echo [ANDROID] 已清除 gradle.properties 残留 ABI 属性（Tauri 驱动，4 ABI 增量编译）
 
 REM ---- 3. Run Tauri Android build ----
 echo [ANDROID] [1/2] beforeBuildCommand（前端复用检查）...
 node scripts/before-build.mjs
 if errorlevel 1 goto before_fail
 
-echo [ANDROID] [2/2] Running gradlew %GRADLE_TASK% ...
-cd /d "%~dp0src-tauri\gen\android"
-call gradlew.bat %GRADLE_TASK% > "%~dp0build_android.log" 2>&1
+echo [ANDROID] [2/2] Running pnpm tauri android build %TAURI_ARGS% ...
+call pnpm tauri android build %TAURI_ARGS% > "%~dp0build_android.log" 2>&1
 set BUILD_EXIT=%ERRORLEVEL%
 echo BUILD_EXIT=%BUILD_EXIT% >> "%~dp0build_android.log"
-cd /d "%~dp0"
 
 REM ---- 4. Restore gradle.properties ----
 move /y "%GRADLE_PROPS_BAK%" "%GRADLE_PROPS%" >nul
