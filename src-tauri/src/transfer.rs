@@ -12,7 +12,7 @@
 // 本文件为对 LocalSend 协议的独立重新实现（非直接复制其 Flutter/Dart 或 Rust 源码），
 // 依 Apache-2.0 第 4(b) 条在此标注：2026-07-27 重新实现局域网传输后端并集成至胶囊浮窗。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
@@ -130,6 +130,21 @@ pub struct PrepareUploadFileV2 {
 pub struct PrepareUploadRequestV2 {
     pub info: ClientInfoV2,
     pub files: HashMap<String, PrepareUploadFileV2>,
+    /// LocalSend 发送方在 transfer 阶段使用的 sessionId；prepare 复用同一 id
+    /// 以便免二次确认。本应用发送方可能不携带，此时后端自行生成。
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// LocalSend v2 `POST /api/localsend/v2/transfer` 请求体。
+/// 发送方在传输开始前用它通知接收方「有文件要发」，接收方弹确认后返回
+/// 200（接受）或 403（拒绝）。此路由缺失会导致官方 LocalSend 显示「拒绝」。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferRequestV2 {
+    session_id: String,
+    info: ClientInfoV2,
+    files: HashMap<String, PrepareUploadFileV2>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -210,6 +225,8 @@ pub struct TransferManager {
     discovery_handle: Mutex<Option<JoinHandle<()>>>,
     /// 待确认接收的 session_id → 确认通道
     pending_accepts: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    /// 已在 transfer 阶段确认过的 session_id（prepare 阶段免二次确认）
+    confirmed_sessions: Mutex<HashSet<String>>,
     shutdown: Arc<Notify>,
 }
 
@@ -292,6 +309,7 @@ impl TransferManager {
             auto_accept: Mutex::new(cfg.auto_accept),
             config_path,
             pending_accepts: Mutex::new(HashMap::new()),
+            confirmed_sessions: Mutex::new(HashSet::new()),
             port: DEFAULT_PORT,
             fingerprint: Uuid::new_v4().to_string(),
             peers: Mutex::new(HashMap::new()),
@@ -467,6 +485,7 @@ impl TransferManager {
         let state = ServerState { mgr };
         let app = Router::new()
             .route("/api/localsend/v2/info", get(info_handler))
+            .route("/api/localsend/v2/transfer", post(transfer_handler))
             .route("/api/localsend/v2/register", post(register_handler))
             .route("/api/localsend/v2/prepare-upload", post(prepare_handler))
             .route("/api/localsend/v2/upload", post(upload_handler))
@@ -811,17 +830,78 @@ async fn register_handler(
     axum::http::StatusCode::OK
 }
 
+/// LocalSend v2 `POST /api/localsend/v2/transfer`：
+/// 发送方先通知接收方「有文件要发」，接收方弹确认。接受返回 200（发送方继续
+/// register/prepare/upload），拒绝或超时返回 403。
+/// 修复：此前此路由缺失，官方 LocalSend 收到 404 会显示「对方拒绝」，手机端无提醒。
+async fn transfer_handler(
+    State(state): State<ServerState>,
+    Json(req): Json<TransferRequestV2>,
+) -> Response {
+    let auto_accept = state.mgr.auto_accept();
+    let session_id = req.session_id.clone();
+    let sender_alias = req.info.alias.clone();
+    let file_names: Vec<String> = req.files.values().map(|f| f.file_name.clone()).collect();
+
+    if auto_accept {
+        // 自动接受：直接标记确认，LocalSend 继续后续流程
+        state.mgr.confirmed_sessions.lock().unwrap().insert(session_id.clone());
+        state.mgr.emit("transfer-receive-request", &serde_json::json!({
+            "session_id": session_id,
+            "sender_alias": sender_alias,
+            "file_count": file_names.len(),
+            "file_names": file_names,
+            "auto_accept": true,
+        }));
+        return axum::http::StatusCode::OK.into_response();
+    }
+
+    // 弹确认：等待前端 transfer_receive_accept/decline（30s）
+    let (tx, rx) = oneshot::channel::<bool>();
+    state.mgr.pending_accepts.lock().unwrap().insert(session_id.clone(), tx);
+    state.mgr.emit("transfer-receive-request", &serde_json::json!({
+        "session_id": session_id,
+        "sender_alias": sender_alias,
+        "file_count": file_names.len(),
+        "file_names": file_names,
+        "auto_accept": false,
+    }));
+
+    match tokio::time::timeout(Duration::from_secs(30), rx).await {
+        Ok(Ok(true)) => {
+            // 用户在 transfer 阶段已接受：标记确认，prepare 阶段免二次确认
+            state.mgr.confirmed_sessions.lock().unwrap().insert(session_id);
+            axum::http::StatusCode::OK.into_response()
+        }
+        _ => {
+            state.mgr.pending_accepts.lock().unwrap().remove(&session_id);
+            (axum::http::StatusCode::FORBIDDEN, "用户拒绝或超时未确认").into_response()
+        }
+    }
+}
+
 async fn prepare_handler(
     State(state): State<ServerState>,
     Json(req): Json<PrepareUploadRequestV2>,
 ) -> Response {
     let auto_accept = state.mgr.auto_accept();
-    let session_id = new_session_id();
     let sender_alias = req.info.alias.clone();
     let file_names: Vec<String> = req.files.values().map(|f| f.file_name.clone()).collect();
 
-    if auto_accept {
-        // 自动接受：直接创建 session + 通知前端（用作 UI 提示）
+    // LocalSend 发送方在 transfer 阶段已确认过 → 复用其 sessionId 且免二次确认。
+    // 本应用发送方未走 transfer → 自行生成 sessionId，且（非自动接受时）在此弹确认。
+    let pre_confirmed = req
+        .session_id
+        .as_deref()
+        .is_some_and(|sid| state.mgr.confirmed_sessions.lock().unwrap().contains(sid));
+    let session_id = req
+        .session_id
+        .clone()
+        .filter(|_| pre_confirmed)
+        .unwrap_or_else(new_session_id);
+
+    if auto_accept || pre_confirmed {
+        // 自动接受 / transfer 已确认：直接创建 session + 通知前端（用作 UI 提示）
         state.mgr.emit("transfer-receive-request", &serde_json::json!({
             "session_id": session_id,
             "sender_alias": sender_alias,
@@ -963,6 +1043,8 @@ pub async fn send_files(mgr: &TransferManager, fingerprint: &str, paths: Vec<Str
             version: PROTOCOL_VERSION.to_string(),
         },
         files,
+        // 本应用发送方未走 transfer 阶段，由接收方 prepare 自行弹确认
+        session_id: None,
     };
     // LocalSend v2 公告的 protocol 字段标明对端服务用 http 还是 https。
     // 尊重该字段；若首选方案在「传输层」失败（连接被拒 / TLS 不匹配），自动回退另一种方案，
