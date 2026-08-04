@@ -40,7 +40,13 @@ export function NavStack({ containerRef }: NavStackProps = {}) {
   }
 
   return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto overscroll-contain">
+    <div
+      ref={scrollRef}
+      className="flex-1 overflow-y-auto overscroll-contain"
+      // touch-action: pan-y：纵向滚动交给浏览器；横向手势留给 useDrawerSwipe（开抽屉）。
+      // 缺省 touch-action:auto 时浏览器可能吞掉 pointermove，导致真机左滑不生效。
+      style={{ touchAction: 'pan-y' }}
+    >
       <AnimatePresence mode="wait" initial={false}>
         <motion.div
           key={current.id}

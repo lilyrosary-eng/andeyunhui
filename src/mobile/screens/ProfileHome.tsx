@@ -1,15 +1,28 @@
 /**
- * ProfileHome — 我的 Tab 根屏占位。
+ * ProfileHome — 我的 Tab 根屏。
  *
- * T05 阶段为设置入口列表占位；T08+ 接入账号 / 同步 / 偏好等真实功能。
+ * 设置入口列表，点击 push 到「通用设置 / 主题与外观 / 数据与存储 / 关于」二级页。
+ * 页面实现见 SettingsScreens.tsx（通用设置 / 主题与外观 / 关于实装；数据与存储占位）。
  */
 
 import { User, Settings, Palette, Database, Info, ChevronRight } from 'lucide-react';
+import { useNavStore } from '../stores/navStore';
+import {
+  GeneralSettingsScreen,
+  AppearanceSettingsScreen,
+  AboutScreen,
+} from './SettingsScreens';
 
 export function ProfileHome() {
+  const push = useNavStore((s) => s.push);
+
+  const open = (id: string, title: string, render: () => React.ReactNode) => {
+    push('profile', { id, title, render });
+  };
+
   return (
     <div className="px-4 py-6 flex flex-col gap-4">
-      {/* 用户卡片占位 */}
+      {/* 用户卡片 */}
       <section
         className="rounded-2xl p-5 bg-[var(--card)] border border-[var(--border)] flex items-center gap-3"
         style={{ boxShadow: 'var(--shadow-sm)' }}
@@ -41,17 +54,30 @@ export function ProfileHome() {
         className="rounded-2xl bg-[var(--card)] border border-[var(--border)] overflow-hidden"
         style={{ boxShadow: 'var(--shadow-sm)' }}
       >
-        <Row icon={<Settings size={20} />} label="通用设置" />
-        <Row icon={<Palette size={20} />} label="主题与外观" />
+        <Row
+          icon={<Settings size={20} />}
+          label="通用设置"
+          onClick={() => open('general-settings', '通用设置', () => <GeneralSettingsScreen />)}
+        />
+        <Row
+          icon={<Palette size={20} />}
+          label="主题与外观"
+          onClick={() => open('appearance-settings', '主题与外观', () => <AppearanceSettingsScreen />)}
+        />
         <Row icon={<Database size={20} />} label="数据与存储" />
-        <Row icon={<Info size={20} />} label="关于" last />
+        <Row
+          icon={<Info size={20} />}
+          label="关于"
+          last
+          onClick={() => open('about', '关于', () => <AboutScreen />)}
+        />
       </section>
 
       <p
-        className="text-center text-[var(--muted-foreground)] mt-2"
+        className="text-center text-[var(--muted-foreground)]"
         style={{ fontSize: 'var(--m-text-overline)' }}
       >
-        T08+ 阶段接入账号 / 同步 / 偏好
+        安得云荟 · 数据仅存储于本机
       </p>
     </div>
   );
@@ -60,15 +86,18 @@ export function ProfileHome() {
 function Row({
   icon,
   label,
+  onClick,
   last,
 }: {
   icon: React.ReactNode;
   label: string;
+  onClick?: () => void;
   last?: boolean;
 }) {
   return (
     <button
       type="button"
+      onClick={onClick}
       className="flex w-full items-center gap-3 px-4 text-left active:bg-[var(--muted)]/60 transition-colors"
       style={{
         height: '56px',

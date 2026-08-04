@@ -36,8 +36,9 @@ import { DiscoverHome } from './screens/DiscoverHome';
 import { ProfileHome } from './screens/ProfileHome';
 import { useChatStore } from './stores/chatStore';
 import { useDrawerSwipe } from './hooks/useDrawerSwipe';
-import { Plus, MoreVertical, Send, Inbox, Sparkles, Book, Puzzle, Settings2, MessageSquarePlus, type LucideIcon } from 'lucide-react';
+import { Plus, MoreVertical, Send, Inbox, Sparkles, Book, Puzzle, Settings2, MessageSquarePlus, MessageSquare, Trash2, type LucideIcon } from 'lucide-react';
 import { NiaoluoScreen } from './screens/NiaoluoScreen';
+import { TransferScreen } from './screens/TransferScreen';
 
 export default function MobileApp() {
   // 一次性初始化各 Tab 根 Screen。
@@ -135,6 +136,46 @@ export default function MobileApp() {
     return () => window.removeEventListener('android-back-pressed', handler);
   }, []);
 
+  // 系统分享 → 自动进入传输发送流程：切到中转站 + 打开传输页，用户直接选目标即可发。
+  // 全局挂 __shareFilesPicked（MainActivity 冷启动/热启动都可能触发，此时 useTransfer 未必挂载，
+  // 所以用 localStorage 中转，useTransfer 挂载时读取；同时派发 share-ready 引导导航）。
+  useEffect(() => {
+    const w = window as unknown as {
+      __shareFilesPicked?: (paths: string[]) => void;
+    };
+    if (!w.__shareFilesPicked) {
+      w.__shareFilesPicked = (paths) => {
+        if (!paths?.length) return;
+        try {
+          const prev = JSON.parse(localStorage.getItem('andeyunhui.mobile.share') || '[]') as string[];
+          localStorage.setItem('andeyunhui.mobile.share', JSON.stringify(Array.from(new Set([...prev, ...paths]))));
+        } catch { /* 忽略 */ }
+        // 派发事件：若传输页已挂载（useTransfer 监听），立即加入暂存并切页
+        window.dispatchEvent(new CustomEvent('share-ready', { detail: { count: paths.length } }));
+      };
+    }
+    return () => { /* 全局单例，不清理 */ };
+  }, []);
+
+  // share-ready：切到中转站 + 打开传输页（用户选目标即可发送）
+  useEffect(() => {
+    const onShare = () => {
+      const n = useNavStore.getState();
+      if (n.activeTab !== 'transfer') n.switchTab('transfer');
+      // 已在传输页则不重复 push（防分享事件多次触发导致栈异常/白屏）
+      const stack = n.tabs['transfer'];
+      const top = stack[stack.length - 1];
+      if (top?.id === 'transfer-screen') return;
+      n.push('transfer', {
+        id: 'transfer-screen',
+        title: '传输',
+        render: () => <TransferScreen />,
+      });
+    };
+    window.addEventListener('share-ready', onShare);
+    return () => window.removeEventListener('share-ready', onShare);
+  }, []);
+
   return (
     <div
       className="flex flex-col h-[100dvh] bg-[var(--main-panel-bg)] overflow-hidden"
@@ -161,10 +202,13 @@ export default function MobileApp() {
 }
 
 /**
- * 抽屉内容：根据当前激活 Tab 渲染「主导航 + 该 Tab 的模块入口」。
- * - transfer/discover Tab：列出该 Tab 下的功能模块（点击跳转/触发）
- * - chat Tab：新建对话 + 打开溢出菜单（chatStore 桥接）
- * - profile Tab：设置入口
+ * 抽屉内容：按当前 Tab 展示相关内容，不重复底部 TabBar 的主导航。
+ * - transfer 中转站抽屉：快捷入口「中转站 / AI对话 / 传输」——传输直接进传输页
+ *   （不再绕茑萝），中转站/AI对话 切换底部 Tab。
+ * - chat AI对话抽屉：会话历史列表（多会话，chatStore），点击切换会话；底部附
+ *   「新建对话」按钮。
+ * - discover 发现抽屉：模块入口（传输/AI模板/阅读资源/插件市场）。
+ * - profile 我的抽屉：设置入口。
  */
 interface DrawerModule {
   id: string;
@@ -178,10 +222,23 @@ function DrawerContent() {
   const push = useNavStore((s) => s.push);
   const setDrawerOpen = useNavStore((s) => s.setDrawerOpen);
   const activeTab = useNavStore((s) => s.activeTab);
-  const newConversation = useChatStore((s) => s.newConversation);
   const openOverflow = useChatStore((s) => s.openOverflow);
+  const conversations = useChatStore((s) => s.conversations);
+  const activeConvId = useChatStore((s) => s.activeConvId);
+  const selectConversation = useChatStore((s) => s.selectConversation);
+  const deleteConversation = useChatStore((s) => s.deleteConversation);
+  const createConversation = useChatStore((s) => s.createConversation);
 
-  // 跳转到「传输」模块：切到发现 Tab 并 push 茑萝入口屏（茑萝内可继续进传输）
+  // 直接进「传输」页：push 到当前（transfer/discover）Tab 栈
+  const openTransferDirect = () => {
+    push(activeTab, {
+      id: 'transfer-screen',
+      title: '传输',
+      render: () => <TransferScreen />,
+    });
+  };
+
+  // 跳转到「传输」模块（发现 Tab）：切到发现 Tab 并 push 茑萝入口屏（茑萝内可继续进传输）
   const openNiaoluo = () => {
     switchTab('discover');
     push('discover', {
@@ -191,18 +248,25 @@ function DrawerContent() {
     });
   };
 
-  const TAB_ITEMS: { tab: typeof activeTab; label: string }[] = [
-    { tab: 'transfer', label: '中转站' },
-    { tab: 'chat', label: 'AI 对话' },
-    { tab: 'discover', label: '发现' },
-    { tab: 'profile', label: '我的' },
+  const TAB_LABELS: Record<typeof activeTab, string> = {
+    transfer: '中转站',
+    chat: 'AI 对话',
+    discover: '发现',
+    profile: '我的',
+  };
+  const currentLabel = TAB_LABELS[activeTab] ?? '';
+
+  /** 快速 Tab 切换（transfer 抽屉的「中转站/AI对话」） */
+  const quickTabs: { id: typeof activeTab; label: string; icon: LucideIcon }[] = [
+    { id: 'transfer', label: '中转站', icon: Send },
+    { id: 'chat', label: 'AI对话', icon: MessageSquare },
   ];
 
   const modules: DrawerModule[] = (() => {
     switch (activeTab) {
       case 'transfer':
         return [
-          { id: 'transfer', label: '传输', icon: Send, onActivate: openNiaoluo },
+          { id: 'transfer', label: '传输', icon: Send, onActivate: openTransferDirect },
         ];
       case 'discover':
         return [
@@ -212,10 +276,8 @@ function DrawerContent() {
           { id: 'plugins', label: '插件市场', icon: Puzzle, onActivate: () => { /* TODO */ } },
         ];
       case 'chat':
-        return [
-          { id: 'new', label: '新建对话', icon: MessageSquarePlus, onActivate: () => newConversation?.() },
-          { id: 'more', label: '更多设置', icon: Settings2, onActivate: () => openOverflow?.() },
-        ];
+        // 会话历史列表由下方 chat 分支渲染，此处无需 modules
+        return [];
       case 'profile':
         return [
           { id: 'settings', label: '设置', icon: Settings2, onActivate: () => { /* TODO */ } },
@@ -225,8 +287,6 @@ function DrawerContent() {
     }
   })();
 
-  const currentLabel = TAB_ITEMS.find((i) => i.tab === activeTab)?.label ?? '';
-
   return (
     <div className="flex flex-col h-full">
       {/* 品牌头 */}
@@ -235,7 +295,7 @@ function DrawerContent() {
           className="font-semibold text-[var(--foreground)]"
           style={{ fontSize: 'var(--m-text-title)' }}
         >
-          安灯花园
+          安得云荟
         </h2>
         <p
           className="text-[var(--muted-foreground)]"
@@ -245,58 +305,154 @@ function DrawerContent() {
         </p>
       </div>
 
-      {/* 主导航（4 Tab） */}
-      <nav className="py-2 border-b border-[var(--border)]">
-        {TAB_ITEMS.map((item) => {
-          const active = activeTab === item.tab;
-          return (
-            <button
-              key={item.tab}
-              type="button"
-              onClick={() => {
-                switchTab(item.tab);
-                setDrawerOpen(false);
-              }}
-              className="flex w-full items-center px-4 text-left active:bg-[var(--muted)]/60 transition-colors"
-              style={{
-                height: '48px',
-                backgroundColor: active ? 'var(--element-muted)' : undefined,
-                color: active ? 'var(--element-bg)' : 'var(--foreground)',
-                fontSize: 'var(--m-text-label)',
-              }}
-            >
-              {item.label}
-            </button>
-          );
-        })}
-      </nav>
-
-      {/* 当前 Tab 的模块入口 */}
       <nav className="flex-1 overflow-y-auto py-2">
-        <div
-          className="px-4 pb-1 text-[var(--muted-foreground)]"
-          style={{ fontSize: 'var(--m-text-caption)' }}
-        >
-          {currentLabel} · 模块
-        </div>
-        {modules.map((m) => {
-          const Icon = m.icon;
-          return (
+        {/* 中转站抽屉：快捷入口（中转站 / AI对话 / 传输） */}
+        {activeTab === 'transfer' && (
+          <div className="mb-1">
+            <div
+              className="px-4 pb-1 text-[var(--muted-foreground)]"
+              style={{ fontSize: 'var(--m-text-caption)' }}
+            >
+              快捷入口
+            </div>
+            {quickTabs.map((t) => {
+              const Icon = t.icon;
+              const isCurrent = activeTab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => {
+                    if (!isCurrent) switchTab(t.id);
+                    setDrawerOpen(false);
+                  }}
+                  className="flex w-full items-center gap-3 px-4 text-left active:bg-[var(--muted)]/60 transition-colors"
+                  style={{
+                    height: '48px',
+                    fontSize: 'var(--m-text-label)',
+                    color: isCurrent ? 'var(--element-bg)' : 'var(--foreground)',
+                  }}
+                >
+                  <Icon size={20} className="text-[var(--muted-foreground)]" />
+                  {t.label}
+                  {isCurrent && <span className="ml-auto text-[var(--muted-foreground)]" style={{ fontSize: 'var(--m-text-caption)' }}>当前</span>}
+                </button>
+              );
+            })}
+            {modules.map((m) => {
+              const Icon = m.icon;
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => {
+                    m.onActivate();
+                    setDrawerOpen(false);
+                  }}
+                  className="flex w-full items-center gap-3 px-4 text-left text-[var(--foreground)] active:bg-[var(--muted)]/60 transition-colors"
+                  style={{ height: '48px', fontSize: 'var(--m-text-label)' }}
+                >
+                  <Icon size={20} className="text-[var(--muted-foreground)]" />
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* chat 抽屉：会话历史列表（多会话） */}
+        {activeTab === 'chat' && (
+          <div>
+            <div
+              className="px-4 pb-1 text-[var(--muted-foreground)]"
+              style={{ fontSize: 'var(--m-text-caption)' }}
+            >
+              {currentLabel} · 对话记录（{conversations.length}）
+            </div>
+            {conversations.map((c) => {
+              const active = c.id === activeConvId;
+              // 标题为空时用首条消息内容兜底
+              const title = c.title || '新对话';
+              const preview =
+                c.timeline.find((it) => it.type === 'message')?.msg.content || '（空对话）';
+              return (
+                <div key={c.id} className="flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      selectConversation(c.id);
+                      setDrawerOpen(false);
+                    }}
+                    className="flex-1 min-w-0 px-4 py-2.5 text-left active:bg-[var(--muted)]/60 transition-colors"
+                  >
+                    <div
+                      className="truncate font-medium"
+                      style={{
+                        fontSize: 'var(--m-text-label)',
+                        color: active ? 'var(--element-bg)' : 'var(--foreground)',
+                      }}
+                    >
+                      {title}
+                    </div>
+                    <div className="truncate text-[var(--muted-foreground)]" style={{ fontSize: 'var(--m-text-caption)' }}>
+                      {preview}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteConversation(c.id)}
+                    className="shrink-0 p-3 text-[var(--muted-foreground)] active:scale-90 transition-transform"
+                    aria-label="删除对话"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              );
+            })}
             <button
-              key={m.id}
               type="button"
               onClick={() => {
-                m.onActivate();
+                createConversation();
                 setDrawerOpen(false);
               }}
-              className="flex w-full items-center gap-3 px-4 text-left text-[var(--foreground)] active:bg-[var(--muted)]/60 transition-colors"
+              className="flex w-full items-center gap-3 px-4 text-left text-[var(--element-bg)] active:bg-[var(--muted)]/60 transition-colors"
               style={{ height: '48px', fontSize: 'var(--m-text-label)' }}
             >
-              <Icon size={20} className="text-[var(--muted-foreground)]" />
-              {m.label}
+              <Plus size={20} />
+              新建对话
             </button>
-          );
-        })}
+          </div>
+        )}
+
+        {/* 其他 Tab（discover/profile）的模块入口 */}
+        {activeTab !== 'transfer' && activeTab !== 'chat' && (
+          <>
+            <div
+              className="px-4 pb-1 text-[var(--muted-foreground)]"
+              style={{ fontSize: 'var(--m-text-caption)' }}
+            >
+              {currentLabel} · 模块
+            </div>
+            {modules.map((m) => {
+              const Icon = m.icon;
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => {
+                    m.onActivate();
+                    setDrawerOpen(false);
+                  }}
+                  className="flex w-full items-center gap-3 px-4 text-left text-[var(--foreground)] active:bg-[var(--muted)]/60 transition-colors"
+                  style={{ height: '48px', fontSize: 'var(--m-text-label)' }}
+                >
+                  <Icon size={20} className="text-[var(--muted-foreground)]" />
+                  {m.label}
+                </button>
+              );
+            })}
+          </>
+        )}
       </nav>
     </div>
   );

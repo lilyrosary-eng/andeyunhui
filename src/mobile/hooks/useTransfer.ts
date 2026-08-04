@@ -107,13 +107,29 @@ export function useTransfer() {
   const [peers, setPeers] = useState<TransferPeer[]>([]);
   const [progress, setProgress] = useState<TransferProgressItem[]>([]);
   const [running, setRunning] = useState(false);
+  const [startError, setStartError] = useState('');
   const [alias, setAlias] = useState('安得云荟');
   const [staged, setStagedState] = useState<string[]>([]);
+  // ref 镜像：避免闭包捕获陈旧 staged（真机上 confirmSend 时序竞争导致「选文件后发送无效」）
+  const stagedRef = useRef<string[]>([]);
+  stagedRef.current = staged;
   const [autoAccept, setAutoAcceptState] = useState(false);
   const [saveDir, setSaveDir] = useState('');
   const [receiveRequests, setReceiveRequests] = useState<ReceiveRequest[]>([]);
   const [sendErr, setSendErr] = useState<string | null>(null);
   const [confirmPeer, setConfirmPeer] = useState<TransferPeer | null>(null);
+
+  // 暂存文件走 Rust 端持久化（<appdata>/transfer/config.json）。
+  // 关键：必须同步更新 stagedRef.current（addFiles 后立即点对端时，
+  // React 异步重渲染还没发生，sendTo 读 ref 会拿到旧值——这是「选文件后点目标发送无效」的根因）。
+  // 注意：必须定义在下方 useEffect 之前（依赖数组 [setStaged] 在函数体同步求值，
+  // 若 setStaged 定义在后面会触发 TDZ「Cannot access 'setStaged' before initialization」→ 白屏）。
+  const setStaged = useCallback((updater: string[] | ((prev: string[]) => string[])) => {
+    const next = typeof updater === 'function' ? updater(stagedRef.current) : updater;
+    stagedRef.current = next;
+    setStagedState(next);
+    invoke('transfer_set_staged', { paths: next }).catch(() => {});
+  }, []);
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -123,25 +139,56 @@ export function useTransfer() {
     };
   }, []);
 
-  // 暂存文件走 Rust 端持久化（<appdata>/transfer/config.json）
-  const setStaged = useCallback((updater: string[] | ((prev: string[]) => string[])) => {
-    setStagedState((prev) => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      invoke('transfer_set_staged', { paths: next }).catch(() => {});
-      return next;
-    });
-  }, []);
+  // 系统分享 → 暂存区：Android 分享文件到本应用时，Kotlin 复制到 cacheDir 后回调
+  // window.__shareFilesPicked(paths)（全局单例在 MobileApp 定义，写 localStorage 中转）。
+  // 本 effect 只负责「挂载时读取 localStorage 分享缓存 + 订阅 share-ready」。
+  useEffect(() => {
+    // 读取此前未消费的分享缓存（MobileApp 挂载早于本组件，缓存已写入）
+    try {
+      const raw = localStorage.getItem('andeyunhui.mobile.share');
+      if (raw) {
+        const paths = JSON.parse(raw) as string[];
+        if (paths.length) {
+          setStaged((prev) => Array.from(new Set([...prev, ...paths])));
+        }
+        localStorage.removeItem('andeyunhui.mobile.share');
+      }
+    } catch { /* 忽略 */ }
+    // share-ready：MobileApp 切页后本组件挂载，把新分享路径并入暂存
+    const onShareReady = () => {
+      try {
+        const raw = localStorage.getItem('andeyunhui.mobile.share');
+        if (raw) {
+          const paths = JSON.parse(raw) as string[];
+          if (paths.length) {
+            setStaged((prev) => Array.from(new Set([...prev, ...paths])));
+          }
+          localStorage.removeItem('andeyunhui.mobile.share');
+        }
+      } catch { /* 忽略 */ }
+    };
+    window.addEventListener('share-ready', onShareReady);
+    return () => window.removeEventListener('share-ready', onShareReady);
+  }, [setStaged]);
 
   useEffect(() => {
     const offs: Array<() => void> = [];
     (async () => {
       await invoke('transfer_start').catch(() => {});
-      const st = (await invoke('transfer_status').catch(() => ({}))) as {
-        running?: boolean;
-        alias?: string;
-      };
+      // 服务启动是异步的（setup 已自动 start，这里确保 running）；失败自动重试 3 次
+      let st: { running?: boolean; alias?: string; error?: string | null } = {};
+      for (let i = 0; i < 4; i++) {
+        st = (await invoke('transfer_status').catch(() => ({}))) as {
+          running?: boolean;
+          alias?: string;
+          error?: string | null;
+        };
+        if (st?.running) break;
+        if (i < 3) await new Promise((r) => setTimeout(r, 800));
+      }
       if (!mountedRef.current) return;
       setRunning(!!st?.running);
+      setStartError(st?.error || '');
       setAlias(st?.alias || '安得云荟');
       await invoke('transfer_announce').catch(() => {});
       const list = (await invoke('transfer_list_peers').catch(() => [])) as TransferPeer[];
@@ -203,20 +250,23 @@ export function useTransfer() {
     await invoke('transfer_set_alias', { alias: val }).catch(() => {});
   }, []);
 
-  const doSend = useCallback(async (fingerprint: string, paths: string[]) => {
+  const doSend = useCallback(async (fingerprint: string, paths: string[]): Promise<boolean> => {
     setSendErr(null);
-    if (paths.length === 0) return;
+    if (paths.length === 0) return false;
     try {
       await invoke('transfer_send', { fingerprint, paths });
+      return true;
     } catch (e) {
       setSendErr(String(e));
+      return false;
     }
   }, []);
 
   // 点对端：有暂存 → 确认发送；无暂存 → 系统文件选择器
+  // 用 stagedRef 实时读（闭包 staged 会陈旧：真机「选文件后点目标发送无效」根因之一）
   const sendTo = useCallback(
     async (peer: TransferPeer) => {
-      if (staged.length > 0) {
+      if (stagedRef.current.length > 0) {
         setConfirmPeer(peer);
         return;
       }
@@ -224,17 +274,23 @@ export function useTransfer() {
       if (!picked || picked.length === 0) return;
       await doSend(peer.fingerprint, picked);
     },
-    [staged.length, doSend],
+    [doSend],
   );
 
   const confirmSend = useCallback(async () => {
     if (!confirmPeer) return;
-    const paths = staged;
+    // 直接用前端 stagedRef（用户看到的暂存列表就是它，避免后端异步未同步）
+    const paths = stagedRef.current.slice();
     const fp = confirmPeer.fingerprint;
     setConfirmPeer(null);
-    setStaged([]);
-    await doSend(fp, paths);
-  }, [confirmPeer, staged, doSend, setStaged]);
+    if (paths.length === 0) {
+      setSendErr('暂存列表为空，请先选择文件');
+      return;
+    }
+    // 发完再清空（先发后清，避免清空后端暂存与发送竞态）
+    const ok = await doSend(fp, paths);
+    if (ok) setStaged([]);
+  }, [confirmPeer, doSend, setSendErr, setStaged]);
 
   const addFiles = useCallback(async () => {
     const picked = await pickFiles();
@@ -270,6 +326,12 @@ export function useTransfer() {
 
   const refresh = useCallback(async () => {
     await invoke('transfer_announce').catch(() => {});
+    const st = (await invoke('transfer_status').catch(() => ({}))) as {
+      running?: boolean;
+      error?: string | null;
+    };
+    setRunning(!!st?.running);
+    setStartError(st?.error || '');
     const list = (await invoke('transfer_list_peers').catch(() => [])) as TransferPeer[];
     setPeers(list);
   }, []);
@@ -289,6 +351,7 @@ export function useTransfer() {
     progress,
     running,
     alias,
+    startError,
     staged,
     autoAccept,
     saveDir,

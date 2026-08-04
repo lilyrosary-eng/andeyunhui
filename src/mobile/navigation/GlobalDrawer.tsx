@@ -23,8 +23,8 @@ export function GlobalDrawer({ children }: GlobalDrawerProps) {
   const setOpen = useNavStore((s) => s.setDrawerOpen);
 
   const handleDragEnd = (_: unknown, info: PanInfo) => {
-    // 左滑超过 100px 或速度足够 → 关闭
-    if (info.offset.x < -100 || info.velocity.x < -600) {
+    // 左滑跟手：位移超 -80px 或左滑速度足够 → 关闭
+    if (info.offset.x < -80 || info.velocity.x < -500) {
       setOpen(false);
     }
   };
@@ -45,9 +45,10 @@ export function GlobalDrawer({ children }: GlobalDrawerProps) {
 
           {/* 抽屉主体 */}
           <motion.aside
-            className="absolute top-0 bottom-0 left-0 bg-[var(--background)] shadow-float flex flex-col overflow-hidden"
+            className="absolute top-0 bottom-0 left-0 shadow-float flex flex-col overflow-hidden backdrop-blur-xl"
             style={{
               width: 'var(--drawer-w)',
+              backgroundColor: 'color-mix(in oklab, var(--background) 82%, transparent)',
               paddingLeft: 'var(--safe-left)',
               paddingRight: 'var(--safe-right)',
               paddingTop: 'var(--safe-top)',
@@ -58,8 +59,12 @@ export function GlobalDrawer({ children }: GlobalDrawerProps) {
             exit={{ x: '-100%' }}
             transition={{ type: 'spring', damping: 30, stiffness: 320 }}
             drag="x"
-            dragConstraints={{ left: 0, right: 0 }}
-            dragElastic={{ left: 0.4, right: 0 }}
+            // 用 dragSnapToOrigin：拖拽时 x 完全跟随手指（跟手），松手后回弹到 x:0。
+            // 不要用 dragConstraints(左) —— 它与 animate x:0 冲突导致「拖不动」；
+            // dragElastic 提供轻微越界弹性，dragMomentum 关闭惯性避免甩动。
+            dragSnapToOrigin
+            dragElastic={0.05}
+            dragMomentum={false}
             onDragEnd={handleDragEnd}
           >
             {children}

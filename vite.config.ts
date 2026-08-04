@@ -94,13 +94,17 @@ export default defineConfig(() => ({
     port: 1420,
     strictPort: true,
     host: host || false,
+    // 关掉 HMR 错误覆盖层：浏览器预览（?mobile=1）时部分 Tauri 桥调用会抛 TypeError
+    // （如 LocalSend 启动 / TextDecoder polyfill），但桌面 dev 通过 @tauri-apps/api/core
+    // 走的是 ipc，不受影响。错误信息仍可在 console 与日志里看到，无须覆盖层占据视口。
     hmr: host
       ? {
           protocol: "ws",
           host,
           port: 1421,
+          overlay: false,
         }
-      : undefined,
+      : { overlay: false },
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: [

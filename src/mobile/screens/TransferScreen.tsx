@@ -142,7 +142,7 @@ export function TransferScreen() {
                   background: t.running ? 'var(--compute-local)' : 'var(--compute-down)',
                 }}
               />
-              {t.running ? `服务运行中 · 发现 ${t.peers.length} 台设备` : '服务未开启'}
+              {t.running ? `服务运行中 · 发现 ${t.peers.length} 台设备` : (t.startError ? `启动失败：${t.startError}` : '服务未开启')}
             </div>
           </div>
           <button
@@ -447,7 +447,11 @@ export function TransferScreen() {
             <input
               type="text"
               value={t.alias}
-              onChange={(e) => t.setAlias(e.target.value)}
+              onChange={(e) => {
+                // 实时保存（带节流），避免真机 onBlur 不触发导致改名无效
+                t.setAlias(e.target.value);
+                t.applyAlias(e.target.value);
+              }}
               onBlur={(e) => t.applyAlias(e.target.value)}
               className="w-full rounded-lg px-3 py-2 bg-[var(--input)] text-[var(--foreground)] outline-none border border-[var(--border)] focus:border-[var(--ring)]"
               style={{ fontSize: 'var(--m-text-body)' }}

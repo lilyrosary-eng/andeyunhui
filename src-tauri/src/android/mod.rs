@@ -46,6 +46,34 @@ pub fn run() {
             crate::services::ai_service::ai_set_profile_thinking,
             crate::services::ai_service::ai_chat,
             crate::services::ai_service::ai_test_connection,
+            // ========== 伴侣（人机恋记忆点，阶段 1 + 1.5 多伴侣，Android 优先）==========
+            crate::services::companion_service::companion_list,
+            crate::services::companion_service::companion_get,
+            crate::services::companion_service::companion_create,
+            crate::services::companion_service::companion_update,
+            crate::services::companion_service::companion_select,
+            crate::services::companion_service::companion_delete,
+            crate::services::companion_service::companion_add_memory,
+            crate::services::companion_service::companion_apply_relationship,
+            crate::services::companion_service::companion_proactive_message,
+            crate::services::companion_service::ai_summarize_memory,
+            // ========== RAG 语义记忆（阶段 4 · L3，复用桌面 rag_service）==========
+            // 注意：commands 模块是桌面专属（lib.rs cfg 隔离），Android 用本地包装调用 rag_service。
+            // 命令名与桌面 commands 层一致（rag_init_db 等），前端无需区分平台。
+            rag_init_db,
+            rag_ingest,
+            rag_query,
+            rag_list_sources,
+            rag_delete_source,
+            rag_embed_api,
+            // ========== 多模态（阶段 5 · AI 发图 + 语音）==========
+            crate::services::multimodal_service::ai_generate_image,
+            crate::services::multimodal_service::ai_tts,
+            // ========== Agent 工具（默认关闭，设置里开启）==========
+            crate::services::agent_service::agent_tools_get,
+            crate::services::agent_service::agent_tool_create,
+            crate::services::agent_service::agent_tool_delete,
+            crate::services::agent_service::agent_tool_list,
             // ========== 中转站（Dropzone）==========
             // 与桌面同一存储布局 <app_data>/transfer_station/dropzone/，
             // 桌面命令在 commands.rs（Windows 专属模块）内，故此处提供跨平台最小子集。
@@ -70,4 +98,55 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running 安得云荟 on Android");
+}
+
+// ========== RAG 语义记忆（阶段 4 · L3）Android 本地包装 ==========
+// commands 模块在 Android 不编译（lib.rs cfg 隔离），这里用 AppHandle 值参数包装
+// rag_service 的同名函数（rag_service 用 &AppHandle，Tauri command 需值参数）。
+
+use crate::services::rag_service::{
+    RagChunkInput, RagEmbedRequest, RagEmbedResponse, RagIngestResult, RagQueryResult,
+    RagSourceInput, RagSourceInfo,
+};
+
+/// Android 端命令名与桌面 commands 层一致（`rag_init_db` 等），
+/// 前端无需区分平台。桌面走 commands::rag_commands，Android 走本地包装。
+#[tauri::command(rename_all = "camelCase")]
+pub fn rag_init_db(app: tauri::AppHandle) -> Result<(), String> {
+    crate::services::rag_service::rag_init_db(&app)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn rag_ingest(
+    app: tauri::AppHandle,
+    source: RagSourceInput,
+    chunks: Vec<RagChunkInput>,
+) -> Result<RagIngestResult, String> {
+    crate::services::rag_service::rag_ingest(&app, source, chunks)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn rag_query(
+    app: tauri::AppHandle,
+    query_vec: Vec<f32>,
+    top_k: Option<usize>,
+) -> Result<RagQueryResult, String> {
+    crate::services::rag_service::rag_query(&app, query_vec, top_k)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn rag_list_sources(app: tauri::AppHandle) -> Result<Vec<RagSourceInfo>, String> {
+    crate::services::rag_service::rag_list_sources(&app)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn rag_delete_source(app: tauri::AppHandle, source_id: String) -> Result<(), String> {
+    crate::services::rag_service::rag_delete_source(&app, source_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rag_embed_api(
+    req: RagEmbedRequest,
+) -> Result<RagEmbedResponse, String> {
+    crate::services::rag_service::rag_embed_api(req).await
 }

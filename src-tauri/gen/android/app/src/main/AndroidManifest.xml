@@ -23,6 +23,12 @@
     <!-- 前台服务（传输期间保活，息屏不中断） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Agent 系统能力（阶段 6）：精确闹铃（Android 12+ 需要，无权限自动退化为普通闹铃） -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- Agent 系统能力：写入系统日历（日历事件/待办/提醒，需运行时授权） -->
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="@string/app_name"
@@ -34,11 +40,22 @@
         android:theme="@style/Theme.andengyuanhua"
         tools:targetApi="33">
 
+        <!-- Agent 闹铃到点广播（静默发通知，不打扰流程） -->
+        <receiver
+            android:name=".AlarmReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="ANDY_AGENT_ALARM" />
+            </intent-filter>
+        </receiver>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.rosary.andengyuanhua.main"
+            android:excludeFromRecents="false"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize"
@@ -46,6 +63,29 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- ===== 分享接收（Android 分享到安得云荟）：纯 mimeType，无 pathPattern。
+                 tauri 自动生成的 filter 带 pathPattern 只匹配 file://；系统分享用 content://，
+                 pathPattern 不匹配导致分享列表不显示。这里补一组通用 mimeType filter。===== -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
             </intent-filter>
             <!-- tauri-file-associations. AUTO-GENERATED. DO NOT REMOVE. -->
             <intent-filter>
@@ -69,37 +109,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="image/jpeg" />
-                <data android:pathPattern=".*\\.png" />
-                <data android:pathPattern=".*\\.jpg" />
-                <data android:pathPattern=".*\\.jpeg" />
-                <data android:pathPattern=".*\\.gif" />
-                <data android:pathPattern=".*\\.webp" />
-                <data android:pathPattern=".*\\.bmp" />
-                <data android:pathPattern=".*\\.tiff" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="image/gif" />
-                <data android:pathPattern=".*\\.png" />
-                <data android:pathPattern=".*\\.jpg" />
-                <data android:pathPattern=".*\\.jpeg" />
-                <data android:pathPattern=".*\\.gif" />
-                <data android:pathPattern=".*\\.webp" />
-                <data android:pathPattern=".*\\.bmp" />
-                <data android:pathPattern=".*\\.tiff" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="image/png" />
                 <data android:pathPattern=".*\\.png" />
                 <data android:pathPattern=".*\\.jpg" />
                 <data android:pathPattern=".*\\.jpeg" />
@@ -144,7 +154,37 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="video/quicktime" />
+                <data android:mimeType="image/jpeg" />
+                <data android:pathPattern=".*\\.png" />
+                <data android:pathPattern=".*\\.jpg" />
+                <data android:pathPattern=".*\\.jpeg" />
+                <data android:pathPattern=".*\\.gif" />
+                <data android:pathPattern=".*\\.webp" />
+                <data android:pathPattern=".*\\.bmp" />
+                <data android:pathPattern=".*\\.tiff" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="image/png" />
+                <data android:pathPattern=".*\\.png" />
+                <data android:pathPattern=".*\\.jpg" />
+                <data android:pathPattern=".*\\.jpeg" />
+                <data android:pathPattern=".*\\.gif" />
+                <data android:pathPattern=".*\\.webp" />
+                <data android:pathPattern=".*\\.bmp" />
+                <data android:pathPattern=".*\\.tiff" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="video/x-msvideo" />
                 <data android:pathPattern=".*\\.mp4" />
                 <data android:pathPattern=".*\\.mkv" />
                 <data android:pathPattern=".*\\.mov" />
@@ -172,6 +212,20 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="video/quicktime" />
+                <data android:pathPattern=".*\\.mp4" />
+                <data android:pathPattern=".*\\.mkv" />
+                <data android:pathPattern=".*\\.mov" />
+                <data android:pathPattern=".*\\.avi" />
+                <data android:pathPattern=".*\\.webm" />
+                <data android:pathPattern=".*\\.flv" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="video/mp4" />
                 <data android:pathPattern=".*\\.mp4" />
                 <data android:pathPattern=".*\\.mkv" />
@@ -179,34 +233,6 @@
                 <data android:pathPattern=".*\\.avi" />
                 <data android:pathPattern=".*\\.webm" />
                 <data android:pathPattern=".*\\.flv" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="video/x-msvideo" />
-                <data android:pathPattern=".*\\.mp4" />
-                <data android:pathPattern=".*\\.mkv" />
-                <data android:pathPattern=".*\\.mov" />
-                <data android:pathPattern=".*\\.avi" />
-                <data android:pathPattern=".*\\.webm" />
-                <data android:pathPattern=".*\\.flv" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="audio/wav" />
-                <data android:pathPattern=".*\\.mp3" />
-                <data android:pathPattern=".*\\.flac" />
-                <data android:pathPattern=".*\\.wav" />
-                <data android:pathPattern=".*\\.ogg" />
-                <data android:pathPattern=".*\\.m4a" />
-                <data android:pathPattern=".*\\.aac" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -243,6 +269,20 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="audio/mpeg" />
+                <data android:pathPattern=".*\\.mp3" />
+                <data android:pathPattern=".*\\.flac" />
+                <data android:pathPattern=".*\\.wav" />
+                <data android:pathPattern=".*\\.ogg" />
+                <data android:pathPattern=".*\\.m4a" />
+                <data android:pathPattern=".*\\.aac" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="audio/wav" />
                 <data android:pathPattern=".*\\.mp3" />
                 <data android:pathPattern=".*\\.flac" />
                 <data android:pathPattern=".*\\.wav" />

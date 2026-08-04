@@ -17,16 +17,20 @@ export interface ComputeSource {
   profileId?: string;
 }
 
-/** 对话消息（扩展自桌面 ChatMsg，增加来源溯源） */
+/** 对话消息（扩展自桌面 ChatMsg，增加来源溯源 + 多模态） */
 export interface ChatMsg {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   /** 思考模式下的思维链（可折叠遮罩展示） */
   reasoning?: string;
   error?: boolean;
   /** assistant 消息的算力来源（§6.3.2 每条回复溯源） */
   source?: ComputeSource;
+  /** 用户消息携带的图片（data URL 数组，阶段 5 多模态） */
+  images?: string[];
+  /** assistant 消息的语音（data URL，阶段 5 TTS） */
+  audioUrl?: string;
 }
 
 /**
@@ -53,6 +57,16 @@ export interface AiProfile {
   top_p?: number | null;
   system_prompt?: string | null;
   thinking?: boolean | null;
+  /** 人设：怎么称呼你 */
+  persona_call_me_as?: string | null;
+  /** 人设：风格预设 key（sharp/gentle/rigorous/humorous/pro/concise/mentor/custom） */
+  persona_preset?: string | null;
+  /** 人设：自定义风格描述 */
+  persona_style?: string | null;
+  /** 图片生成模型（多模态·阶段 5，可选） */
+  image_model?: string | null;
+  /** 语音合成模型（多模态·阶段 5，可选） */
+  tts_model?: string | null;
 }
 
 /** 依据 base_url 判定算力来源类型（local = 本机/局域网；cloud = 公网） */
