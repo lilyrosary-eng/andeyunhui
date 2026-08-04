@@ -12,10 +12,12 @@ import { ContextChips, type ContextChipItem } from './ContextChips';
 
 const MAX_LINES = 5;
 const LINE_HEIGHT = 22; // px，约对应 --m-text-body-lg * 1.5
+/** 图片大小上限（3MB，防止 data URL 撑爆 JSON 与 IPC） */
+const MAX_IMG_BYTES = 3 * 1024 * 1024;
 
 interface ChatInputProps {
   busy: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, images?: string[]) => void;
   /** 流式中点击「停止」——当前后端无 abort 命令，这里禁用按钮以如实表达 */
   onStop?: () => void;
 }
@@ -37,33 +39,63 @@ export function ChatInput({ busy, onSend }: ChatInputProps) {
 
   const handleSend = useCallback(() => {
     const t = text.trim();
-    if (!t || busy) return;
-    onSend(t);
+    const imgs = chips
+      .filter((c) => c.preview)
+      .map((c) => c.preview as string);
+    if ((!t && imgs.length === 0) || busy) return;
+    onSend(t, imgs);
     setText('');
+    setChips([]);
     // 清空后重置高度
     requestAnimationFrame(() => {
       if (taRef.current) taRef.current.style.height = 'auto';
     });
-  }, [text, busy, onSend]);
+  }, [text, busy, onSend, chips]);
 
-  const handleFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+  /** 读图片文件为 data URL（限 3MB） */
+  const readImage = useCallback((f: File): Promise<string | null> => {
+    return new Promise((resolve) => {
+      if (f.size > MAX_IMG_BYTES) { resolve(null); return; }
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(f);
+    });
+  }, []);
+
+  const handleFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-    const newChips: ContextChipItem[] = Array.from(files).map((f) => ({
-      id: 'chip_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      label: f.name,
-      source: 'local-file' as const,
-    }));
-    setChips((prev) => [...prev, ...newChips]);
+    const chips: ContextChipItem[] = [];
+    for (const f of Array.from(files)) {
+      const isImg = f.type.startsWith('image/');
+      if (isImg) {
+        const dataUrl = await readImage(f);
+        if (!dataUrl) continue; // 超限跳过
+        chips.push({
+          id: 'chip_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+          label: f.name,
+          source: 'local-file' as const,
+          preview: dataUrl,
+        });
+      } else {
+        chips.push({
+          id: 'chip_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+          label: f.name,
+          source: 'local-file' as const,
+        });
+      }
+    }
+    setChips((prev) => [...prev, ...chips]);
     // 重置 value 允许重复选同一文件
     e.target.value = '';
-  }, []);
+  }, [readImage]);
 
   const removeChip = useCallback((id: string) => {
     setChips((prev) => prev.filter((c) => c.id !== id));
   }, []);
 
-  const canSend = text.trim().length > 0 && !busy;
+  const canSend = (text.trim().length > 0 || chips.some((c) => c.preview)) && !busy;
 
   return (
     <div
@@ -75,7 +107,15 @@ export function ChatInput({ busy, onSend }: ChatInputProps) {
     >
       <ContextChips items={chips} onRemove={removeChip} />
 
-      <div className="flex items-end gap-2 px-3 py-2.5">
+      <div
+        className="flex items-end gap-2 mx-3 my-2 rounded-2xl"
+        style={{
+          padding: '6px 8px',
+          // 主题色底（半透明融入主面板），去掉突兀的白底方框
+          background: 'color-mix(in oklab, var(--card) 85%, transparent)',
+          border: '1px solid var(--border)',
+        }}
+      >
         {/* 附件按钮 */}
         <button
           type="button"

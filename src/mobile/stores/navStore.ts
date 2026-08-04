@@ -67,9 +67,12 @@ export const useNavStore = create<NavState>()((set) => ({
   bottomSheetOpen: false,
 
   push: (tabId, screen) =>
-    set((s) => ({
-      tabs: { ...s.tabs, [tabId]: [...s.tabs[tabId], screen] },
-    })),
+    set((s) => {
+      const stack = s.tabs[tabId];
+      // 防重复：同 id 已在栈顶（或栈中）时不重复入栈，避免分享事件多次触发导致栈异常
+      if (stack.some((x) => x.id === screen.id)) return s;
+      return { tabs: { ...s.tabs, [tabId]: [...stack, screen] } };
+    }),
 
   pop: (tabId) =>
     set((s) => {
@@ -83,13 +86,23 @@ export const useNavStore = create<NavState>()((set) => ({
   setBottomSheetOpen: (open) => set({ bottomSheetOpen: open }),
 
   initRoots: (roots) =>
-    set({
-      tabs: {
-        transfer: [roots.transfer],
-        chat: [roots.chat],
-        discover: [roots.discover],
-        profile: [roots.profile],
-      },
+    set((s) => {
+      // 合并而非覆盖：根屏只在栈为空/缺失时填充；已 push 的子屏（如分享直达传输页）保留，
+      // 避免 initRoots 在 share-ready 之后执行时把已 push 的屏冲掉。
+      const ensure = (tabId: TabId, root: Screen): NavStack => {
+        const stack = s.tabs[tabId];
+        if (stack.length === 0) return [root];
+        if (stack[0].id !== root.id) return [root, ...stack];
+        return stack;
+      };
+      return {
+        tabs: {
+          transfer: ensure('transfer', roots.transfer),
+          chat: ensure('chat', roots.chat),
+          discover: ensure('discover', roots.discover),
+          profile: ensure('profile', roots.profile),
+        },
+      };
     }),
 }));
 

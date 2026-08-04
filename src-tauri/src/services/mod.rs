@@ -19,7 +19,10 @@ pub mod window_manager;
 #[cfg(windows)]
 pub mod diagnostics;
 pub mod log_service;
+pub mod agent_service;
 pub mod ai_service;
+pub mod companion_service;
+pub mod multimodal_service;
 pub mod rag_service;
 pub mod shell_service;
 pub mod lsp_service;

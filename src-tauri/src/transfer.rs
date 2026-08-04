@@ -202,6 +202,8 @@ pub struct TransferManager {
     app: AppHandle,
     server_handle: Mutex<Option<JoinHandle<()>>>,
     discovery_handle: Mutex<Option<JoinHandle<()>>>,
+    /// 最近一次启动失败原因（HTTP 绑定失败 / 组播绑定失败等），transfer_status 返回给前端展示
+    start_error: Mutex<Option<String>>,
     /// 待确认接收的 session_id → 确认通道
     pending_accepts: Mutex<HashMap<String, oneshot::Sender<bool>>>,
     shutdown: Arc<Notify>,
@@ -293,6 +295,7 @@ impl TransferManager {
             app,
             server_handle: Mutex::new(None),
             discovery_handle: Mutex::new(None),
+            start_error: Mutex::new(None),
             shutdown: Arc::new(Notify::new()),
         }
     }
@@ -352,16 +355,25 @@ impl TransferManager {
         self.save_config();
     }
 
-    /// 用户在 UI 上接受后调用：唤醒 prepare_handler 阻塞
+    /// 用户在 UI 上接受后调用：session 已在 prepare 时创建（无需额外动作），仅清理确认通道
     pub fn accept_receive(&self, session_id: String) {
-        if let Some(tx) = self.pending_accepts.lock().unwrap().remove(&session_id) {
-            let _ = tx.send(true);
-        }
+        self.pending_accepts.lock().unwrap().remove(&session_id);
     }
 
+    /// 用户拒绝：删除 session 及其已接收的文件（不再落盘保存）。
     pub fn decline_receive(&self, session_id: String) {
-        if let Some(tx) = self.pending_accepts.lock().unwrap().remove(&session_id) {
-            let _ = tx.send(false);
+        self.pending_accepts.lock().unwrap().remove(&session_id);
+        let files = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let s = sessions.remove(&session_id);
+            s.map(|s| s.files.into_values().map(|f| f.path).collect::<Vec<_>>())
+        };
+        if let Some(paths) = files {
+            for p in paths {
+                let _ = std::fs::remove_file(&p);
+            }
+            let dir = self.save_dir().join(&session_id);
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
@@ -454,10 +466,13 @@ impl TransferManager {
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
-                log::warn!("[transfer] HTTP 服务端绑定 {addr} 失败: {e}");
+                let msg = format!("HTTP 服务绑定 {addr} 失败: {e}");
+                log::warn!("[transfer] {msg}");
+                *self.start_error.lock().unwrap() = Some(msg);
                 return;
             }
         };
+        *self.start_error.lock().unwrap() = None;
         let state = ServerState { mgr };
         let app = Router::new()
             .route("/api/localsend/v2/info", get(info_handler))
@@ -489,13 +504,17 @@ impl TransferManager {
         let socket = match UdpSocket::bind(bind_addr).await {
             Ok(s) => s,
             Err(e) => {
-                log::warn!("[transfer] UDP 组播监听绑定 {bind_addr} 失败: {e}");
+                let msg = format!("UDP 组播监听绑定 {bind_addr} 失败: {e}");
+                log::warn!("[transfer] {msg}");
+                *self.start_error.lock().unwrap() = Some(msg);
                 return;
             }
         };
         let local = local_ip();
         if let Err(e) = socket.join_multicast_v4(group, local) {
-            log::warn!("[transfer] 加入组播组失败 {group}/{local}: {e}");
+            let msg = format!("加入组播组失败 {group}/{local}: {e}（Android 需 MulticastLock）");
+            log::warn!("[transfer] {msg}");
+            *self.start_error.lock().unwrap() = Some(msg);
         }
 
         let send_socket = match UdpSocket::bind("0.0.0.0:0").await {
@@ -892,37 +911,23 @@ async fn prepare_handler(
     let sender_alias = req.info.alias.clone();
     let file_names: Vec<String> = req.files.values().map(|f| f.file_name.clone()).collect();
 
-    if auto_accept {
-        // 自动接受：直接创建 session + 通知前端（用作 UI 提示）
-        state.mgr.emit("transfer-receive-request", &serde_json::json!({
-            "session_id": session_id,
-            "sender_alias": sender_alias,
-            "file_count": file_names.len(),
-            "file_names": file_names,
-            "auto_accept": true,
-        }));
-        return Json(state.mgr.create_session(session_id, req)).into_response();
-    }
-
-    // 需要用户确认：oneshot 等待 30s 内前端 transfer_receive_accept/decline
-    let (tx, rx) = oneshot::channel::<bool>();
-    state.mgr.pending_accepts.lock().unwrap().insert(session_id.clone(), tx);
+    // 关键修复：无论是否 auto_accept，都【立即创建 session 并返回 token】，
+    // 绝不阻塞等用户确认。原因：
+    //   官方 LocalSend 流程是 prepare → register（发送方等接收方确认）→ upload。
+    //   而本端 try_send 是 prepare → upload（跳过 register）。若 prepare 阻塞 30s 等确认，
+    //   发送方在这 30s 内 upload 时 session 尚未创建 → target_path 找不到 → 404 → 发送失败。
+    // 立即返回后：
+    //   - 发送方 upload 立刻可用（session 已建）
+    //   - 前端弹确认框：接受 = no-op（session 已建）；拒绝 = decline_receive 删 session（文件不落盘）
+    // 拒绝超时兜底：前端未响应时 session 保留但文件在缓存目录，后端定时清理由接收端自管。
     state.mgr.emit("transfer-receive-request", &serde_json::json!({
         "session_id": session_id,
         "sender_alias": sender_alias,
         "file_count": file_names.len(),
         "file_names": file_names,
-        "auto_accept": false,
+        "auto_accept": auto_accept,
     }));
-
-    match tokio::time::timeout(Duration::from_secs(30), rx).await {
-        Ok(Ok(true)) => Json(state.mgr.create_session(session_id, req)).into_response(),
-        _ => {
-            // 拒绝或超时：清理 pending 并返回 403
-            state.mgr.pending_accepts.lock().unwrap().remove(&session_id);
-            (axum::http::StatusCode::FORBIDDEN, "用户拒绝或超时未确认").into_response()
-        }
-    }
+    Json(state.mgr.create_session(session_id, req)).into_response()
 }
 
 async fn upload_handler(
@@ -1249,6 +1254,7 @@ pub fn transfer_status() -> serde_json::Value {
         "port": mgr().port(),
         "alias": mgr().alias(),
         "fingerprint": mgr().fingerprint(),
+        "error": mgr().start_error.lock().unwrap().clone(),
     })
 }
 

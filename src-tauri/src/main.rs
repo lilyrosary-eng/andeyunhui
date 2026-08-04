@@ -88,7 +88,10 @@ use andeyunhui_lib::services::window_manager;
 #[cfg(windows)]
 use andeyunhui_lib::services::diagnostics;
 use andeyunhui_lib::services::log_service;
+use andeyunhui_lib::services::agent_service;
 use andeyunhui_lib::services::ai_service;
+use andeyunhui_lib::services::companion_service;
+use andeyunhui_lib::services::multimodal_service;
 use andeyunhui_lib::services::shell_service;
 use andeyunhui_lib::services::lsp_service;
 use andeyunhui_lib::services::mcp_service;
@@ -1199,6 +1202,25 @@ fn main() {
             ai_service::ocr_export_pdf,
             ai_service::ai_get_conversations,
             ai_service::ai_save_conversations,
+            // ========== 全局：伴侣（人机恋记忆点，阶段 1 + 1.5 多伴侣）==========
+            companion_service::companion_list,
+            companion_service::companion_get,
+            companion_service::companion_create,
+            companion_service::companion_update,
+            companion_service::companion_select,
+            companion_service::companion_delete,
+            companion_service::companion_add_memory,
+            companion_service::companion_apply_relationship,
+            companion_service::companion_proactive_message,
+            companion_service::ai_summarize_memory,
+            // ========== 全局：Agent 工具（默认关闭，设置里开启）==========
+            agent_service::agent_tools_get,
+            agent_service::agent_tool_create,
+            agent_service::agent_tool_delete,
+            agent_service::agent_tool_list,
+            // ========== 全局：多模态（阶段 5 · AI 发图 + 语音）==========
+            multimodal_service::ai_generate_image,
+            multimodal_service::ai_tts,
             // ========== 全局：IDE 终端（本地 shell 命令执行）==========
             shell_service::run_shell_command,
             // ========== 全局：AI agent 受限 shell（白名单 + Dry-Run 黑名单 + 超时）==========

@@ -6,7 +6,7 @@
 // L6 预留：组件接口已抽象为 { items, onRemove }，未来接入跨模块上下文注入时，
 // 只需让上游往 items 里追加来源不同的芯片，本组件无需改动。
 
-import { X, FileText } from 'lucide-react';
+import { X, FileText, Image as ImageIcon } from 'lucide-react';
 
 export interface ContextChipItem {
   id: string;
@@ -14,6 +14,8 @@ export interface ContextChipItem {
   label: string;
   /** 来源类型（L6 预留：local-file / module-data / tool-output 等） */
   source?: 'local-file' | 'module' | 'tool';
+  /** 图片预览（data URL，多模态阶段 5） */
+  preview?: string;
 }
 
 interface ContextChipsProps {
@@ -37,11 +39,20 @@ export function ContextChips({ items, onRemove }: ContextChipsProps) {
             backgroundColor: 'var(--element-bg)',
             color: 'var(--element-fg)',
             fontSize: 'var(--m-text-overline)',
-            padding: '4px 8px 4px 10px',
+            padding: '4px 8px 4px 4px',
             maxWidth: '60vw',
           }}
         >
-          <FileText size={12} className="shrink-0 opacity-70" />
+          {chip.preview ? (
+            <img
+              src={chip.preview}
+              alt=""
+              className="rounded-full shrink-0 object-cover"
+              style={{ width: '20px', height: '20px' }}
+            />
+          ) : (
+            <FileText size={12} className="shrink-0 opacity-70" />
+          )}
           <span className="truncate">{chip.label}</span>
           <button
             type="button"

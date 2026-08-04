@@ -21,19 +21,19 @@ import { useNavStore } from '../stores/navStore';
 
 /** 方向锁定判定阈值（px）：超过它才决定这次手势是横滑还是纵滚 */
 const SLOP = 8;
-/** 无视速度的绝对打开位移（px）——调小提高灵敏度 */
-const OPEN_DX = 50;
+/** 无视速度的绝对打开位移（px）——调小提高灵敏度（真机反馈偏难触发） */
+const OPEN_DX = 35;
 /** 配合速度判定的最小位移（px） */
-const MIN_DX = 24;
+const MIN_DX = 18;
 /** 快速轻扫速度阈值（px/s）——调低更易触发 */
-const OPEN_V = 400;
+const OPEN_V = 300;
 
 /** 元素或其祖先是否存在可横向滚动区域（命中则让位，不接管手势） */
 function hasHorizontallyScrollableAncestor(start: EventTarget | null, stop: HTMLElement): boolean {
   let el = start instanceof HTMLElement ? start : null;
   while (el && el !== stop) {
-    // 可横向滚动：内容宽度溢出 + overflow-x 允许滚动
-    if (el.scrollWidth > el.clientWidth + 1) {
+    // 可横向滚动：内容宽度明显溢出（>16px 才算，避免气泡/文本微溢出误判）+ overflow-x 允许滚动
+    if (el.scrollWidth > el.clientWidth + 16) {
       const ox = getComputedStyle(el).overflowX;
       if (ox === 'auto' || ox === 'scroll') return true;
     }

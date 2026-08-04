@@ -66,6 +66,12 @@ pub struct AiProfile {
     /// 人设：自定义风格描述（当 preset=custom 或需追加说明时使用，可留空）
     #[serde(default)]
     pub persona_style: Option<String>,
+    /// 图片生成模型（多模态·阶段 5，可选）：留空则 AI 发图工具不可用
+    #[serde(default)]
+    pub image_model: Option<String>,
+    /// 语音合成模型（多模态·阶段 5，可选）：留空则语音工具不可用
+    #[serde(default)]
+    pub tts_model: Option<String>,
 }
 
 impl AiProfile {
@@ -107,6 +113,8 @@ fn default_profile() -> AiProfile {
         persona_call_me_as: None,
         persona_preset: None,
         persona_style: None,
+        image_model: None,
+        tts_model: None,
     }
 }
 
@@ -120,7 +128,7 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// 读取全部模型档案；兼容旧版「单份 AiConfig」格式（无 id/name 字段）自动升级为单档案。
-fn load_profiles(app: &AppHandle) -> AiProfiles {
+pub fn load_profiles(app: &AppHandle) -> AiProfiles {
     let path = match config_path(app) {
         Ok(p) => p,
         Err(_) => return AiProfiles::default(),
@@ -161,7 +169,7 @@ fn load_profiles(app: &AppHandle) -> AiProfiles {
 }
 
 /// 按 profile_id 解析实际使用的档案：指定 > 激活项 > 首个 > 默认
-fn resolve_profile(profiles: &AiProfiles, profile_id: Option<String>) -> AiProfile {
+pub fn resolve_profile(profiles: &AiProfiles, profile_id: Option<String>) -> AiProfile {
     if let Some(pid) = profile_id {
         if let Some(p) = profiles.profiles.iter().find(|p| p.id == pid) {
             return p.clone();
@@ -437,18 +445,23 @@ pub async fn ai_chat(
     }
 
     // 逐块读取 SSE。reqwest::Response::chunk() 无需 stream 特性 / futures-util。
+    //
+    // 重要：必须按「原始字节」累积，只在遇到完整 \n 时才解码该行。
+    // 若用 String::from_utf8_lossy 逐 chunk 转 String，多字节 UTF-8 字符（emoji/中文）
+    // 被 chunk 边界切成两半时会产生 U+FFFD（�）乱码——正是真机上看到「���」的根因。
     let mut resp = resp;
-    let mut buf = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     // 累积 usage 字段（OpenAI 在最终 chunk 返回 usage；DeepSeek 返回 prompt_cache_hit_tokens；
     // Anthropic OpenAI-compat 返回 cache_read_input_tokens / cache_creation_input_tokens）
     let mut last_usage: Option<serde_json::Value> = None;
     loop {
         match resp.chunk().await {
             Ok(Some(bytes)) => {
-                buf.push_str(&String::from_utf8_lossy(&bytes));
-                // 逐行处理已完整接收的行
-                while let Some(pos) = buf.find('\n') {
-                    let line: String = buf.drain(..=pos).collect();
+                buf.extend_from_slice(&bytes);
+                // 逐行处理已完整接收的行（行级解码：保证 UTF-8 完整，不截断）
+                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+                    let line = String::from_utf8_lossy(&line_bytes);
                     let line = line.trim();
                     let data = match line.strip_prefix("data:") {
                         Some(d) => d.trim(),

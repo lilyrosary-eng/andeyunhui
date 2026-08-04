@@ -16,15 +16,19 @@
 // overflow-y-auto 外壳与本屏内部滚动冲突（MessageList 自管滚动）。
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Plus, MoreVertical, Trash2, Cpu, Cloud, MonitorSmartphone } from 'lucide-react';
+import { Plus, MoreVertical, Trash2, Cpu, Cloud, MonitorSmartphone, Settings2, History, Heart } from 'lucide-react';
 
 import { useAiStream } from '../hooks/useAiStream';
+import { useProactiveMessage } from '../hooks/useProactiveMessage';
 import { classifyProfile, type ComputeSource, type AiProfile } from '../types/chat';
 import { ComputeChip, type ComputeKind } from '../components/ComputeChip';
 import { BottomSheet } from '../components/BottomSheet';
 import { MessageList } from '../components/chat/MessageList';
 import { ChatInput } from '../components/chat/ChatInput';
+import { ModelSettingsSheet } from '../components/chat/ModelSettingsSheet';
+import { CompanionCard, CompanionEditSheet } from '../components/chat/CompanionCard';
 import { useChatStore } from '../stores/chatStore';
+import { useCompanionStore } from '../stores/companionStore';
 
 const KIND_ICON: Record<ComputeKind, ReactNode> = {
   local: <Cpu size={16} />,
@@ -36,42 +40,30 @@ const KIND_ICON: Record<ComputeKind, ReactNode> = {
 
 export function ChatScreen() {
   const ai = useAiStream();
+  // 主动消息心跳（存在感，设置里开启后才生效）
+  useProactiveMessage();
+  const conversations = useChatStore((s) => s.conversations);
   const [sourceSheetOpen, setSourceSheetOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
-  // 手机端「添加 API 算力来源」表单
-  const [addApiOpen, setAddApiOpen] = useState(false);
-  const [apiForm, setApiForm] = useState({ name: '', baseUrl: '', apiKey: '', model: '' });
-  const [saving, setSaving] = useState(false);
-
-  /** 保存新增的 API 算力来源（追加到现有 profiles 并刷新列表） */
-  const saveApi = useCallback(async () => {
-    const baseUrl = apiForm.baseUrl.trim();
-    const apiKey = apiForm.apiKey.trim();
-    const model = apiForm.model.trim();
-    if (!baseUrl || !apiKey || !model) return;
-    setSaving(true);
-    try {
-      const next: AiProfile = {
-        id: `p_${Date.now().toString(36)}`,
-        name: apiForm.name.trim() || model,
-        base_url: baseUrl,
-        api_key: apiKey,
-        model,
-      };
-      await ai.saveProfiles([...ai.profiles, next]);
-      setAddApiOpen(false);
-      setApiForm({ name: '', baseUrl: '', apiKey: '', model: '' });
-    } finally {
-      setSaving(false);
-    }
-  }, [ai, apiForm]);
+  // 手机端「模型设置」面板（照抄 Windows 版 ModelSettings 的核心项）
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  // 伴侣编辑面板
+  const [companionEditOpen, setCompanionEditOpen] = useState(false);
+  const companionUpdate = useCompanionStore((s) => s.update);
+  const loadCompanion = useCompanionStore((s) => s.load);
 
   const cloudAvailable = ai.profiles.some((p) => classifyProfile(p) === 'cloud');
+
+  // 挂载时读取伴侣档案（浏览器预览降级为默认）
+  useEffect(() => {
+    void loadCompanion();
+  }, [loadCompanion]);
 
   // 把动作句柄注册进 chatStore，供全局 AppBar 调用；卸载时清空避免悬空调用
   useEffect(() => {
     const cs = useChatStore.getState();
-    cs.setNewConversation(() => ai.clear());
+    // 新建会话 = chatStore.createConversation（多会话）
+    cs.setNewConversation(() => useChatStore.getState().createConversation());
     cs.setOpenOverflow(() => setOverflowOpen(true));
     cs.setOpenSourcePicker(() => setSourceSheetOpen(true));
     return () => {
@@ -79,7 +71,7 @@ export function ChatScreen() {
       cs.setOpenOverflow(null);
       cs.setOpenSourcePicker(null);
     };
-  }, [ai]);
+  }, []);
 
   // 同步当前算力来源标签到 chatStore（AppBar 副标题可选消费）
   useEffect(() => {
@@ -114,12 +106,30 @@ export function ChatScreen() {
 
   const overflowItems = [
     {
-      label: '新建会话',
-      icon: <Plus size={18} />,
-      onClick: () => { ai.clear(); setOverflowOpen(false); },
+      label: '伴侣',
+      description: '人格设定 / 亲密度 / 长期记忆',
+      icon: <Heart size={18} />,
+      onClick: () => { setOverflowOpen(false); setCompanionEditOpen(true); },
     },
     {
-      label: '清空对话',
+      label: '模型设置',
+      description: '供应商 / 模型 / 高级参数（同 Windows 版）',
+      icon: <Settings2 size={18} />,
+      onClick: () => { setOverflowOpen(false); setModelSettingsOpen(true); },
+    },
+    {
+      label: '对话记录',
+      description: `共 ${conversations.length} 个会话，可在侧边栏切换`,
+      icon: <History size={18} />,
+      onClick: () => { setOverflowOpen(false); setModelSettingsOpen(false); },
+    },
+    {
+      label: '新建会话',
+      icon: <Plus size={18} />,
+      onClick: () => { useChatStore.getState().createConversation(); setOverflowOpen(false); },
+    },
+    {
+      label: '清空当前对话',
       description: '删除当前会话所有消息',
       icon: <Trash2 size={18} />,
       onClick: () => { ai.clear(); setOverflowOpen(false); },
@@ -159,6 +169,9 @@ export function ChatScreen() {
         )}
       </div>
 
+      {/* 伴侣卡（人机恋记忆点：名字 / 亲密度 / 记忆数） */}
+      <CompanionCard onPress={() => setCompanionEditOpen(true)} />
+
       {/* 消息列表（虚拟滚动，自管滚动） */}
       <MessageList
         timeline={ai.timeline}
@@ -182,7 +195,7 @@ export function ChatScreen() {
               label: ai.profiles.length === 0 ? '添加 API 算力来源' : '添加 API 来源',
               description: '配置 OpenAI 兼容端点（Base URL / Key / 模型）',
               icon: <Plus size={18} />,
-              onClick: () => setAddApiOpen(true),
+              onClick: () => { setSourceSheetOpen(false); setModelSettingsOpen(true); },
             },
           ])
         }
@@ -196,94 +209,27 @@ export function ChatScreen() {
         items={overflowItems}
       />
 
-      {/* 添加 API 算力来源表单 */}
-      <BottomSheet
-        open={addApiOpen}
-        onClose={() => !saving && setAddApiOpen(false)}
-        title="添加 API 算力来源"
-      >
-        <div className="px-4 pb-4 flex flex-col gap-3">
-          <ApiField
-            label="名称（可选）"
-            value={apiForm.name}
-            onChange={(v) => setApiForm((f) => ({ ...f, name: v }))}
-            placeholder="如：DeepSeek"
-          />
-          <ApiField
-            label="Base URL"
-            value={apiForm.baseUrl}
-            onChange={(v) => setApiForm((f) => ({ ...f, baseUrl: v }))}
-            placeholder="https://api.deepseek.com/v1"
-          />
-          <ApiField
-            label="API Key"
-            value={apiForm.apiKey}
-            onChange={(v) => setApiForm((f) => ({ ...f, apiKey: v }))}
-            placeholder="sk-…"
-          />
-          <ApiField
-            label="模型"
-            value={apiForm.model}
-            onChange={(v) => setApiForm((f) => ({ ...f, model: v }))}
-            placeholder="deepseek-chat"
-          />
-          <div className="flex gap-2 pt-2">
-            <button
-              type="button"
-              onClick={() => setAddApiOpen(false)}
-              className="flex-1 rounded-xl py-2.5 font-medium border border-[var(--border)] text-[var(--foreground)] active:scale-[0.98] transition-transform"
-              style={{ fontSize: 'var(--m-text-label)' }}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              onClick={saveApi}
-              disabled={saving || !apiForm.baseUrl.trim() || !apiForm.apiKey.trim() || !apiForm.model.trim()}
-              className="flex-1 rounded-xl py-2.5 font-medium active:scale-[0.98] transition-transform disabled:opacity-50"
-              style={{
-                fontSize: 'var(--m-text-label)',
-                background: 'var(--element-bg)',
-                color: 'var(--element-fg)',
-              }}
-            >
-              {saving ? '保存中…' : '保存'}
-            </button>
-          </div>
-        </div>
-      </BottomSheet>
-    </div>
-  );
-}
-
-/** 表单字段（单行输入 + 标签） */
-function ApiField({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <label className="block">
-      <span
-        className="block text-[var(--muted-foreground)] mb-1.5"
-        style={{ fontSize: 'var(--m-text-caption)' }}
-      >
-        {label}
-      </span>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full rounded-lg px-3 py-2 bg-[var(--input)] text-[var(--foreground)] outline-none border border-[var(--border)] focus:border-[var(--ring)]"
-        style={{ fontSize: 'var(--m-text-body)' }}
+      {/* 模型设置面板（照抄 Windows 版 ModelSettings 核心项） */}
+      <ModelSettingsSheet
+        open={modelSettingsOpen}
+        onClose={() => setModelSettingsOpen(false)}
+        profiles={ai.profiles}
+        currentProfileId={ai.currentSource?.profileId ?? null}
+        onProfilesChange={(next) => void ai.saveProfiles(next)}
+        onSelect={(p) => handleSelectSource({
+          kind: classifyProfile(p),
+          label: p.name || p.model || '算力来源',
+          description: p.model,
+          profileId: p.id,
+        })}
       />
-    </label>
+
+      {/* 伴侣编辑面板 */}
+      <CompanionEditSheet
+        open={companionEditOpen}
+        onClose={() => setCompanionEditOpen(false)}
+        onSave={(c) => companionUpdate(c)}
+      />
+    </div>
   );
 }
