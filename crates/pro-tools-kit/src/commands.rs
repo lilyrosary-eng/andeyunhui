@@ -577,3 +577,239 @@ pub fn get_system_memory() -> SystemMemoryInfo {
     };
     SystemMemoryInfo { total_kb, used_kb, free_kb, used_percent }
 }
+
+// ================= 零测试治理：现状固化单元测试 =================
+// 纪律：期望值一律取函数当前真实输出，缺陷行为照实固化（只记录，不修生产代码）。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- html_to_md ----------
+    #[test]
+    fn html_to_md_plain_text_passthrough() {
+        assert_eq!(html_to_md("hello world"), "hello world");
+        assert_eq!(html_to_md(""), "");
+        assert_eq!(html_to_md("line1\nline2"), "line1\nline2");
+    }
+
+    #[test]
+    fn html_to_md_headings() {
+        assert_eq!(html_to_md("<h1>Title</h1>"), "# Title");
+        assert_eq!(html_to_md("<h2 class=\"section\">Sub</h2>"), "## Sub");
+        assert_eq!(html_to_md("<h3>Deep</h3>"), "### Deep");
+        assert_eq!(html_to_md("<H1>UPPER</H1>"), "# UPPER");
+        assert_eq!(html_to_md("<h4></h4>"), "####");
+    }
+
+    #[test]
+    fn html_to_md_strong_and_em() {
+        assert_eq!(html_to_md("<strong>bold</strong>"), "**bold**");
+        assert_eq!(html_to_md("<b>bold b</b>"), "**bold b**");
+        assert_eq!(html_to_md("<em>italic</em>"), "*italic*");
+        assert_eq!(html_to_md("<i>italic i</i>"), "*italic i*");
+        assert_eq!(html_to_md("<STRONG>UP</STRONG>"), "**UP**");
+    }
+
+    #[test]
+    fn html_to_md_list() {
+        assert_eq!(html_to_md("<ul><li>a</li><li>b</li></ul>"), "- a\n- b");
+        assert_eq!(html_to_md("<ol><li>first</li></ol>"), "- first");
+    }
+
+    #[test]
+    fn html_to_md_link() {
+        assert_eq!(
+            html_to_md("<a href=\"https://example.com\">Example</a>"),
+            "[Example](https://example.com)"
+        );
+        assert_eq!(
+            html_to_md("<a href=\"https://x.com\" target=\"_blank\">open</a>"),
+            "[open](https://x.com)"
+        );
+    }
+
+    #[test]
+    fn html_to_md_code() {
+        assert_eq!(html_to_md("<code>let x = 1;</code>"), "`let x = 1;`");
+    }
+
+    #[test]
+    fn html_to_md_paragraph_and_br() {
+        assert_eq!(html_to_md("<p>para</p>"), "para");
+        assert_eq!(html_to_md("<p>a<br>b</p>"), "a\nb");
+        assert_eq!(html_to_md("a<br/>b"), "a\nb");
+    }
+
+    #[test]
+    fn html_to_md_nested() {
+        assert_eq!(html_to_md("<p><strong><em>x</em></strong></p>"), "***x***");
+        assert_eq!(
+            html_to_md("<p>Hello <strong>world</strong>!</p>"),
+            "Hello **world**!"
+        );
+    }
+
+    #[test]
+    fn html_to_md_entities() {
+        assert_eq!(
+            html_to_md("<p>a &amp; b &lt; c &gt; d &quot; q</p>"),
+            "a & b < c > d \" q"
+        );
+        // 现状固化：&nbsp; 被替换为空格后，trim 会把它剥掉
+        assert_eq!(html_to_md("&nbsp;"), "");
+        assert_eq!(html_to_md("a&nbsp;b"), "a b");
+    }
+
+    #[test]
+    fn html_to_md_regex_special_chars_in_text() {
+        // 无 HTML 标签时，正则元字符原样保留
+        assert_eq!(html_to_md("a * b + c ? d (e) [f] {g}"), "a * b + c ? d (e) [f] {g}");
+    }
+
+    #[test]
+    fn html_to_md_frozen_lt_gt_stripping() {
+        // 现状固化：RE_TAG 会把 "1 < 2 > 0" 中的 `< 2 >` 当作标签删除（缺陷，仅记录不修）
+        assert_eq!(html_to_md("1 < 2 > 0"), "1  0");
+    }
+
+    // ========== convert_document ==========
+    #[test]
+    fn convert_document_from_eq_to_short_circuit() {
+        assert_eq!(convert_document("abc".into(), "md".into(), "md".into()).unwrap(), "abc");
+        assert_eq!(convert_document("abc".into(), "html".into(), "html".into()).unwrap(), "abc");
+        // 大小写不敏感同样短路
+        assert_eq!(convert_document("abc".into(), "MD".into(), "md".into()).unwrap(), "abc");
+    }
+
+    #[test]
+    fn convert_document_md_to_html() {
+        assert_eq!(
+            convert_document("# Title".into(), "md".into(), "html".into()).unwrap(),
+            "<h1>Title</h1>\n"
+        );
+        let out = convert_document("**bold** and *em*".into(), "md".into(), "html".into()).unwrap();
+        assert_eq!(out, "<p><strong>bold</strong> and <em>em</em></p>\n");
+    }
+
+    #[test]
+    fn convert_document_html_to_md() {
+        assert_eq!(
+            convert_document("<h1>X</h1>".into(), "html".into(), "md".into()).unwrap(),
+            "# X"
+        );
+        assert_eq!(
+            convert_document("<p>a<br>b</p>".into(), "html".into(), "md".into()).unwrap(),
+            "a\nb"
+        );
+    }
+
+    #[test]
+    fn convert_document_unsupported_combo_errors() {
+        assert!(convert_document("x".into(), "txt".into(), "md".into())
+            .unwrap_err()
+            .contains("不支持的转换: txt -> md"));
+        assert!(convert_document("x".into(), "md".into(), "txt".into())
+            .unwrap_err()
+            .contains("不支持的转换: md -> txt"));
+        assert!(convert_document("x".into(), "html".into(), "txt".into())
+            .unwrap_err()
+            .contains("不支持的转换: html -> txt"));
+    }
+
+    // ========== convert_image ==========
+    fn png_b64(w: u32, h: u32) -> String {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([0, 120, 200]));
+        let mut buf: Vec<u8> = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        B64.encode(&buf)
+    }
+
+    #[test]
+    fn convert_image_png_to_jpeg() {
+        let out = convert_image(png_b64(4, 4), "png".into(), "jpg".into(), None).unwrap();
+        let bytes = B64.decode(&out).unwrap();
+        assert_eq!(bytes[0], 0xFF);
+        assert_eq!(bytes[1], 0xD8); // JPEG SOI
+        assert_eq!(image::guess_format(&bytes).unwrap(), image::ImageFormat::Jpeg);
+        let img = image::load_from_memory(&bytes).unwrap();
+        assert_eq!(img.dimensions(), (4, 4));
+    }
+
+    #[test]
+    fn convert_image_png_to_png_roundtrip() {
+        let out = convert_image(png_b64(4, 4), "png".into(), "png".into(), None).unwrap();
+        let bytes = B64.decode(&out).unwrap();
+        assert_eq!(image::guess_format(&bytes).unwrap(), image::ImageFormat::Png);
+        let img = image::load_from_memory(&bytes).unwrap();
+        assert_eq!(img.dimensions(), (4, 4));
+    }
+
+    #[test]
+    fn convert_image_quality_clamp() {
+        let src = png_b64(16, 16);
+        // 越界值 clamp 到 1..=100，不报错
+        assert!(convert_image(src.clone(), "png".into(), "jpg".into(), Some(0)).is_ok());
+        assert!(convert_image(src.clone(), "png".into(), "jpg".into(), Some(255)).is_ok());
+        assert!(convert_image(src.clone(), "png".into(), "jpg".into(), Some(100)).is_ok());
+        assert!(convert_image(src.clone(), "png".into(), "jpg".into(), None).is_ok());
+        // 低质量 JPEG 体积明显小于高质量
+        let low = B64
+            .decode(convert_image(src.clone(), "png".into(), "jpg".into(), Some(1)).unwrap())
+            .unwrap()
+            .len();
+        let high = B64
+            .decode(convert_image(src.clone(), "png".into(), "jpg".into(), Some(100)).unwrap())
+            .unwrap()
+            .len();
+        assert!(low < high, "quality=1 ({}) 应小于 quality=100 ({})", low, high);
+    }
+
+    #[test]
+    fn convert_image_invalid_base64_error() {
+        let err = convert_image("!!!not base64!!!".into(), "png".into(), "jpg".into(), None)
+            .unwrap_err();
+        assert!(err.contains("Base64 解码失败"), "实际: {}", err);
+    }
+
+    #[test]
+    fn convert_image_valid_base64_garbage_image_error() {
+        let err = convert_image(
+            B64.encode(b"not an image at all").into(),
+            "png".into(),
+            "jpg".into(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("图片解码失败"), "实际: {}", err);
+    }
+
+    #[test]
+    fn convert_image_unknown_extension_error() {
+        let src = png_b64(2, 2);
+        let err = convert_image(src.clone(), "webp".into(), "jpg".into(), None).unwrap_err();
+        assert!(err.contains("不支持的源格式: webp"), "实际: {}", err);
+        let err = convert_image(src.clone(), "png".into(), "webp".into(), None).unwrap_err();
+        assert!(err.contains("不支持的目标格式: webp"), "实际: {}", err);
+    }
+
+    // ========== img_format_from_ext ==========
+    #[test]
+    fn img_format_from_ext_map() {
+        assert_eq!(img_format_from_ext("png"), Some(ImageFormat::Png));
+        assert_eq!(img_format_from_ext("PNG"), Some(ImageFormat::Png)); // 大小写不敏感
+        assert_eq!(img_format_from_ext("jpg"), Some(ImageFormat::Jpeg));
+        assert_eq!(img_format_from_ext("jpeg"), Some(ImageFormat::Jpeg));
+        assert_eq!(img_format_from_ext("bmp"), Some(ImageFormat::Bmp));
+        assert_eq!(img_format_from_ext("gif"), Some(ImageFormat::Gif));
+        assert_eq!(img_format_from_ext("tiff"), Some(ImageFormat::Tiff));
+        assert_eq!(img_format_from_ext("tif"), Some(ImageFormat::Tiff));
+    }
+
+    #[test]
+    fn img_format_from_ext_unknown() {
+        assert_eq!(img_format_from_ext("webp"), None);
+        assert_eq!(img_format_from_ext("exe"), None);
+        assert_eq!(img_format_from_ext(""), None);
+    }
+}

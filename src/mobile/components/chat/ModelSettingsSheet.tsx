@@ -15,6 +15,7 @@ import { Plus, Pencil, Trash2, Check, ChevronDown, SlidersHorizontal, PlugZap, L
 import { invoke } from '@tauri-apps/api/core';
 import { BottomSheet } from '../BottomSheet';
 import type { AiProfile } from '../../types/chat';
+import { uid } from '../../../lib/uid';
 
 
 
@@ -26,10 +27,6 @@ const PROVIDERS: { id: string; name: string; base_url: string; models: string[];
   { id: 'zhipu', name: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-air', 'glm-5.1', 'glm-5.2'], visionModels: ['glm-4v-plus', 'glm-4v', 'glm-4v-flash'] },
   { id: 'ollama', name: 'Ollama (local)', base_url: 'http://localhost:11434/v1', models: ['llama3', 'qwen2.5', 'codellama', 'deepseek-coder'], visionModels: ['llava', 'llama3.2-vision', 'qwen2.5vl:7b'] },
 ];
-
-function uid(prefix: string): string {
-  return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-}
 
 interface Props {
   open: boolean;

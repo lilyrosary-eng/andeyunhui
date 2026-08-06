@@ -3021,3 +3021,159 @@ pub fn set_dropzone_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造 w×h RGBA 图像，像素值由 (x, y) 决定。
+    fn img(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 4]) -> RgbaImage {
+        let mut buf = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                buf.extend_from_slice(&px(x, y));
+            }
+        }
+        RgbaImage::from_raw(w, h, buf).unwrap()
+    }
+
+    // ---------- is_all_black ----------
+    #[test]
+    fn black_image_detected() {
+        let black = img(4, 3, |_, _| [0, 0, 0, 255]);
+        assert!(is_all_black(&black));
+        // alpha 通道不参与判断
+        let zero_alpha = img(2, 2, |_, _| [0, 0, 0, 0]);
+        assert!(is_all_black(&zero_alpha));
+        // 0×0 空图视为全黑
+        let empty = RgbaImage::from_raw(0, 0, vec![]).unwrap();
+        assert!(is_all_black(&empty));
+    }
+
+    #[test]
+    fn non_black_image_detected() {
+        let red = img(4, 3, |x, _| if x == 1 { [255, 0, 0, 255] } else { [0, 0, 0, 255] });
+        assert!(!is_all_black(&red));
+        // 单像素非零即可判定
+        let one = img(1, 1, |_, _| [0, 1, 0, 255]);
+        assert!(!is_all_black(&one));
+    }
+
+    // ---------- rows_match / find_overlap / append_rows ----------
+    #[test]
+    fn rows_match_identical_rows() {
+        let prev = vec![10u8; 8 * 3];
+        let cur = vec![10u8; 8 * 3];
+        assert!(rows_match(&prev, &cur, 2, 3));
+        assert!(rows_match(&prev, &cur, 2, 0)); // o=0 恒真
+    }
+
+    #[test]
+    fn rows_match_different_rows_rejected() {
+        let prev = vec![10u8; 8 * 2];
+        let mut cur = vec![10u8; 8 * 2];
+        cur[0] = 99; // 顶行改一个字节，diff=89 > budget(2)
+        assert!(!rows_match(&prev, &cur, 2, 2));
+    }
+
+    #[test]
+    fn rows_match_tolerates_small_diff() {
+        let prev = vec![10u8; 8 * 2];
+        let mut cur = prev.clone();
+        cur[0] = 11; // diff=1 ≤ budget(2)
+        assert!(rows_match(&prev, &cur, 2, 2));
+    }
+
+    #[test]
+    fn find_overlap_detects_shared_rows() {
+        // prev 10 行，cur 前 5 行 == prev 后 5 行，后 5 行为新内容
+        let prev = img(2, 10, |_, y| [(y * 37) as u8, 0, 0, 255]);
+        let cur = img(2, 10, |_, y| {
+            if y < 5 {
+                [((y + 5) * 37) as u8, 0, 0, 255]
+            } else {
+                [200 + y as u8, 0, 0, 255]
+            }
+        });
+        assert_eq!(find_overlap(&prev, &cur), 5);
+    }
+
+    #[test]
+    fn find_overlap_different_height_returns_zero() {
+        let prev = img(2, 10, |_, y| [(y * 37) as u8, 0, 0, 255]);
+        let cur = img(2, 8, |_, y| [(y * 37) as u8, 0, 0, 255]);
+        assert_eq!(find_overlap(&prev, &cur), 0);
+    }
+
+    #[test]
+    fn append_rows_stacks_remaining_rows() {
+        let full = img(2, 10, |_, y| [(y * 37) as u8, 0, 0, 255]);
+        let cur = img(2, 8, |_, y| {
+            if y < 5 {
+                [(y * 37) as u8, 0, 0, 255]
+            } else {
+                [200 + y as u8, 0, 0, 255]
+            }
+        });
+        let joined = append_rows(&full, &cur, 5);
+        assert_eq!(joined.width(), 2);
+        assert_eq!(joined.height(), 13); // 10 + 8 - 5
+        let raw = joined.as_raw();
+        assert_eq!(&raw[0..10 * 8], full.as_raw());
+        assert_eq!(&raw[10 * 8..], &cur.as_raw()[5 * 8..]);
+    }
+
+    // ---------- parse_shortcut / parse_code ----------
+    #[test]
+    fn parse_code_letters_digits_fkeys() {
+        assert_eq!(parse_code("A"), Ok(Code::KeyA));
+        assert_eq!(parse_code("z"), Ok(Code::KeyZ)); // 小写转大写
+        assert_eq!(parse_code("5"), Ok(Code::Digit5));
+        assert_eq!(parse_code("0"), Ok(Code::Digit0));
+        assert_eq!(parse_code("F1"), Ok(Code::F1));
+        assert_eq!(parse_code("F12"), Ok(Code::F12));
+    }
+
+    #[test]
+    fn parse_code_rejects_unsupported() {
+        assert!(parse_code("F13").is_err());
+        assert!(parse_code("Esc").is_err());
+        assert!(parse_code("AA").is_err());
+        assert!(parse_code("").is_err());
+        assert!(parse_code("Enter").is_err());
+        assert!(parse_code("!").is_err());
+    }
+
+    #[test]
+    fn parse_shortcut_with_modifiers() {
+        assert_eq!(
+            parse_shortcut("Ctrl+Shift+A").unwrap(),
+            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyA)
+        );
+        // 空格容错
+        assert_eq!(
+            parse_shortcut("Ctrl + Shift + A").unwrap(),
+            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyA)
+        );
+        assert_eq!(
+            parse_shortcut("Alt+F4").unwrap(),
+            Shortcut::new(Some(Modifiers::ALT), Code::F4)
+        );
+        assert_eq!(
+            parse_shortcut("WIN+D").unwrap(),
+            Shortcut::new(Some(Modifiers::SUPER), Code::KeyD)
+        );
+        assert_eq!(
+            parse_shortcut("A").unwrap(),
+            Shortcut::new(Some(Modifiers::empty()), Code::KeyA)
+        );
+    }
+
+    #[test]
+    fn parse_shortcut_errors() {
+        assert_eq!(parse_shortcut(""), Err("空快捷键".to_string()));
+        assert!(parse_shortcut("Foo+A").unwrap_err().contains("不支持的修饰键: Foo"));
+        assert!(parse_shortcut("Ctrl+F13").unwrap_err().contains("不支持的 F 键: F13"));
+        assert!(parse_shortcut("Ctrl+Esc").unwrap_err().contains("不支持的按键: Esc"));
+    }
+}

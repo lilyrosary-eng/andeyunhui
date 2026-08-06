@@ -37,15 +37,7 @@ import {
 import { useTransfer, type TransferPeer, type TransferProgressItem, type ReceiveRequest } from '../hooks/useTransfer';
 import { BottomSheet } from '../components/BottomSheet';
 import { useNavStore } from '../stores/navStore';
-
-/** 字节可读化。 */
-function fmtSize(n: number): string {
-  if (!n) return '0 B';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
+import { fmtSize } from '../../lib/formatSize';
 
 /** 进度百分比。 */
 function pct(p: TransferProgressItem): number {

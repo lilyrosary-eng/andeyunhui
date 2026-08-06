@@ -116,3 +116,113 @@ impl RewardSignal {
         self.error_rate() > 0.5
     }
 }
+
+// ================= 零测试治理：现状固化单元测试 =================
+// 纪律：期望值一律取当前真实行为；窗口边界含 128 连续错误滑出验证。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_event_kind_reward_weights() {
+        assert_eq!(EventKind::Credential.reward(), 10);
+        assert_eq!(EventKind::Success.reward(), 1);
+        assert_eq!(EventKind::Rejected.reward(), -5);
+        assert_eq!(EventKind::WafAlert.reward(), -20);
+        assert_eq!(EventKind::Timeout.reward(), -3);
+        assert_eq!(EventKind::ValidationError.reward(), -2);
+    }
+
+    #[test]
+    fn test_event_kind_is_error() {
+        assert!(EventKind::Rejected.is_error());
+        assert!(EventKind::WafAlert.is_error());
+        assert!(EventKind::Timeout.is_error());
+        assert!(EventKind::ValidationError.is_error());
+        assert!(!EventKind::Credential.is_error());
+        assert!(!EventKind::Success.is_error());
+    }
+
+    #[test]
+    fn test_reward_signal_empty() {
+        let s = RewardSignal::new();
+        assert_eq!(s.error_rate(), 0.0);
+        assert_eq!(s.total_reward(), 0);
+        assert!(!s.should_rollback());
+    }
+
+    #[test]
+    fn test_reward_signal_basic() {
+        let s = RewardSignal::new();
+        s.record(EventKind::Credential);
+        assert_eq!(s.total_reward(), 10);
+        assert_eq!(s.error_rate(), 0.0);
+        s.record(EventKind::Rejected);
+        assert_eq!(s.total_reward(), 5);
+        assert_eq!(s.error_rate(), 0.5);
+        // 恰好 0.5 不触发回滚（阈值是 >0.5）
+        assert!(!s.should_rollback());
+    }
+
+    #[test]
+    fn test_should_rollback_above_half() {
+        let s = RewardSignal::new();
+        s.record(EventKind::Success);
+        s.record(EventKind::Rejected);
+        s.record(EventKind::WafAlert);
+        assert_eq!(s.error_rate(), 2.0 / 3.0);
+        assert!(s.should_rollback());
+    }
+
+    #[test]
+    fn test_mixed_window_exactly_half() {
+        let s = RewardSignal::new();
+        for _ in 0..64 {
+            s.record(EventKind::Rejected);
+        }
+        for _ in 0..64 {
+            s.record(EventKind::Success);
+        }
+        assert_eq!(s.error_rate(), 0.5);
+        assert!(!s.should_rollback());
+    }
+
+    #[test]
+    fn test_window_boundary_128_errors_slide_out() {
+        let s = RewardSignal::new();
+        for _ in 0..128 {
+            s.record(EventKind::Rejected);
+        }
+        assert_eq!(s.error_rate(), 1.0);
+        assert!(s.should_rollback());
+        assert_eq!(s.total_reward(), -640); // 128 * -5
+
+        // 第 129 条开始：最老的错误被挤出窗口
+        for _ in 0..128 {
+            s.record(EventKind::Success);
+        }
+        assert_eq!(s.error_rate(), 0.0, "128 个错误全部滑出窗口");
+        assert!(!s.should_rollback());
+        // 128 次 Success 全部挤入：每个挤出 -5 错误(+5) 且自身 +1，净 +6*128=+768，-640+768=128
+        assert_eq!(s.total_reward(), 128);
+
+        // 窗口长度始终不超过 128
+        s.record(EventKind::WafAlert);
+        assert_eq!(s.error_rate(), 1.0 / 128.0);
+        assert!(!s.should_rollback());
+    }
+
+    #[test]
+    fn test_window_partial_slide() {
+        let s = RewardSignal::new();
+        for _ in 0..128 {
+            s.record(EventKind::Rejected);
+        }
+        s.record(EventKind::Success);
+        assert_eq!(s.error_rate(), 127.0 / 128.0);
+        assert!(s.should_rollback());
+        s.record(EventKind::Success);
+        assert_eq!(s.error_rate(), 126.0 / 128.0);
+        assert!(s.should_rollback());
+    }
+}

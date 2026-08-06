@@ -1140,3 +1140,242 @@ pub fn fs_open_path(path: String) {
         let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- rd_u32 / rd_u64 / rd_u16 / rd_i64：LE 读取 ----------
+    #[test]
+    fn rd_le_normal_values() {
+        let b = [0x78, 0x56, 0x34, 0x12, 0xef, 0xcd, 0xab, 0x90, 0x01, 0x00];
+        assert_eq!(rd_u32(&b, 0), 0x1234_5678);
+        assert_eq!(rd_u32(&b, 4), 0x90ab_cdef);
+        assert_eq!(rd_u64(&b, 0), 0x90ab_cdef_1234_5678);
+        assert_eq!(rd_u16(&b, 0), 0x5678);
+        assert_eq!(rd_u16(&b, 8), 0x0001);
+        assert_eq!(rd_i64(&b, 0), 0x90ab_cdef_1234_5678u64 as i64);
+    }
+
+    // 现状固化：越界读取会 panic（索引越界 / try_into().unwrap()），不返回 0
+    #[test]
+    #[should_panic]
+    fn rd_u32_out_of_bounds_panics() {
+        rd_u32(&[1, 2, 3], 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn rd_u64_out_of_bounds_panics() {
+        rd_u64(&[1, 2, 3, 4, 5, 6, 7], 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn rd_u16_out_of_bounds_panics() {
+        rd_u16(&[1], 0);
+    }
+
+    // ---------- read_usn_name：UTF-16 LE 解码，NUL 停止 ----------
+    fn utf16le(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn read_usn_name_ascii() {
+        let b = utf16le("report.txt");
+        assert_eq!(read_usn_name(&b, 0, b.len()), "report.txt");
+    }
+
+    #[test]
+    fn read_usn_name_chinese() {
+        let b = utf16le("文件.txt");
+        assert_eq!(read_usn_name(&b, 0, b.len()), "文件.txt");
+    }
+
+    #[test]
+    fn read_usn_name_stops_at_nul() {
+        let b = utf16le("ab\0cd");
+        assert_eq!(read_usn_name(&b, 0, b.len()), "ab");
+    }
+
+    #[test]
+    fn read_usn_name_truncated_buffer_is_safe() {
+        // name_len 超出可用字节：截断返回已解出部分，不 panic
+        let b = utf16le("ab");
+        assert_eq!(read_usn_name(&b, 0, 100), "ab");
+    }
+
+    #[test]
+    fn read_usn_name_empty() {
+        assert_eq!(read_usn_name(&[0, 0], 0, 0), "");
+        assert_eq!(read_usn_name(&[], 0, 10), "");
+    }
+
+    // ---------- parse_usn：USN 记录 V2 解析 ----------
+    /// 按 USN_RECORD_V2 布局构造一条合法记录（major=2，FileNameOffset=60）。
+    fn usn_v2(frn: u64, parent: u64, usn: i64, reason: u32, name: &str) -> Vec<u8> {
+        let name_bytes = utf16le(name);
+        let mut rec = vec![0u8; 60];
+        let rec_len = (60 + name_bytes.len()) as u32;
+        rec[0..4].copy_from_slice(&rec_len.to_le_bytes());
+        rec[4..6].copy_from_slice(&2u16.to_le_bytes()); // MajorVersion = 2
+        rec[8..16].copy_from_slice(&frn.to_le_bytes());
+        rec[16..24].copy_from_slice(&parent.to_le_bytes());
+        rec[24..32].copy_from_slice(&usn.to_le_bytes());
+        rec[40..44].copy_from_slice(&reason.to_le_bytes());
+        rec[56..58].copy_from_slice(&(name_bytes.len() as u16).to_le_bytes()); // FileNameLength
+        rec[58..60].copy_from_slice(&60u16.to_le_bytes()); // FileNameOffset
+        rec.extend_from_slice(&name_bytes);
+        rec
+    }
+
+    #[test]
+    fn parse_usn_single_v2_record() {
+        let mut buf: Vec<u8> = vec![0; 8]; // 前 8 字节为「下次起始 Usn」
+        buf.extend(usn_v2(100, 200, 7, 0x0100, "a.txt"));
+        let out = parse_usn(&buf);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], (200, 100, "a.txt".to_string(), 0x0100));
+    }
+
+    #[test]
+    fn parse_usn_chinese_name_and_multiple_records() {
+        let mut buf: Vec<u8> = vec![0; 8];
+        buf.extend(usn_v2(1, 2, 1, 0, "文件.txt"));
+        buf.extend(usn_v2(3, 4, 2, 0, "b.png"));
+        let out = parse_usn(&buf);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (2, 1, "文件.txt".to_string(), 0));
+        assert_eq!(out[1], (4, 3, "b.png".to_string(), 0));
+    }
+
+    #[test]
+    fn parse_usn_stops_at_eof_record() {
+        // usn = -1 为 USN_EOF：其后的记录不再解析
+        let mut buf: Vec<u8> = vec![0; 8];
+        buf.extend(usn_v2(1, 2, 1, 0, "keep.txt"));
+        buf.extend(usn_v2(3, 4, -1, 0, "eof.txt"));
+        buf.extend(usn_v2(5, 6, 3, 0, "after.txt"));
+        let out = parse_usn(&buf);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].2, "keep.txt");
+    }
+
+    #[test]
+    fn parse_usn_skips_v3_and_v4_records() {
+        // 非 V2（major != 2）记录按 rec_len 跳过，其后的 V2 记录仍被解析
+        let mut v3 = vec![0u8; 60];
+        v3[0..4].copy_from_slice(&60u32.to_le_bytes());
+        v3[4..6].copy_from_slice(&3u16.to_le_bytes()); // major = 3
+        let mut buf: Vec<u8> = vec![0; 8];
+        buf.extend(v3);
+        buf.extend(usn_v2(11, 22, 5, 0, "ok.txt"));
+        let out = parse_usn(&buf);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], (22, 11, "ok.txt".to_string(), 0));
+    }
+
+    #[test]
+    fn parse_usn_short_buffer_returns_empty_without_panic() {
+        assert!(parse_usn(&[]).is_empty());
+        assert!(parse_usn(&[1, 2, 3, 4, 5, 6, 7]).is_empty());
+        assert!(parse_usn(&[0; 8]).is_empty());
+    }
+
+    #[test]
+    fn parse_usn_short_record_length_breaks() {
+        // rec_len < 60 → break，不 panic
+        let mut bad = vec![0u8; 8 + 64];
+        bad[8..12].copy_from_slice(&59u32.to_le_bytes());
+        assert!(parse_usn(&bad).is_empty());
+    }
+
+    #[test]
+    fn parse_usn_rec_len_beyond_buffer_no_panic() {
+        // 记录声称 rec_len 远超缓冲区 → 跳过，不 panic
+        let mut buf: Vec<u8> = vec![0; 8 + 60];
+        buf[8..12].copy_from_slice(&100_000u32.to_le_bytes());
+        buf[12..14].copy_from_slice(&2u16.to_le_bytes());
+        let out = parse_usn(&buf);
+        assert_eq!(out.len(), 1); // 越界记录本身仍被解析出（字段全 0，名为空）
+        assert_eq!(out[0].2, "");
+    }
+
+    #[test]
+    fn parse_usn_name_out_of_range_is_empty_no_panic() {
+        // name_off/name_len 指向缓冲区外 → 文件名解出为空，不 panic
+        let mut buf: Vec<u8> = vec![0; 8];
+        buf.extend(usn_v2(1, 2, 1, 0, ""));
+        let p = 8;
+        buf[p + 56..p + 58].copy_from_slice(&100u16.to_le_bytes());
+        buf[p + 58..p + 60].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        let out = parse_usn(&buf);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].2, "");
+    }
+
+    // ---------- should_skip_dir ----------
+    #[test]
+    fn skip_dot_prefixed_and_blacklisted_dirs() {
+        assert!(should_skip_dir(".git"));
+        assert!(should_skip_dir(".hidden"));
+        assert!(should_skip_dir("node_modules"));
+        assert!(should_skip_dir("target"));
+        assert!(should_skip_dir("vendor"));
+        assert!(should_skip_dir(".cache"));
+        assert!(should_skip_dir(".npm"));
+        assert!(should_skip_dir(".cargo"));
+        assert!(should_skip_dir("AppData"));
+        assert!(should_skip_dir("Windows"));
+        assert!(should_skip_dir("Program Files"));
+        assert!(should_skip_dir("Program Files (x86)"));
+        assert!(should_skip_dir("ProgramData"));
+        assert!(should_skip_dir("OneDrive"));
+        assert!(should_skip_dir("$RECYCLE.BIN"));
+        assert!(should_skip_dir("System Volume Information"));
+    }
+
+    #[test]
+    fn keep_normal_dirs() {
+        assert!(!should_skip_dir("Documents"));
+        assert!(!should_skip_dir("projects"));
+        assert!(!should_skip_dir("src"));
+        assert!(!should_skip_dir("Desktop"));
+        assert!(!should_skip_dir(""));
+    }
+
+    #[test]
+    fn blacklist_is_case_sensitive() {
+        assert!(!should_skip_dir("Node_Modules"));
+        assert!(!should_skip_dir("WINDOWS"));
+        assert!(!should_skip_dir("node_modules2"));
+    }
+
+    // ---------- char_trigrams ----------
+    #[test]
+    fn trigrams_short_strings() {
+        assert_eq!(char_trigrams(""), Vec::<String>::new());
+        assert_eq!(char_trigrams("ab"), vec!["ab".to_string()]);
+        assert_eq!(char_trigrams("abc"), vec!["abc".to_string()]);
+    }
+
+    #[test]
+    fn trigrams_long_strings() {
+        let expect = vec!["abc", "bcd", "cde", "def"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(char_trigrams("abcdef"), expect);
+    }
+
+    #[test]
+    fn trigrams_chinese() {
+        assert_eq!(char_trigrams("中文"), vec!["中文".to_string()]);
+        let expect = vec!["中文字", "文字符", "字符串"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(char_trigrams("中文字符串"), expect);
+    }
+}

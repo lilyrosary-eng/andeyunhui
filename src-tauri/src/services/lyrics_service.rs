@@ -520,3 +520,93 @@ fn urlencoding(s: &str) -> String {
     }
     encoded
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lrc_standard_mmss_xx() {
+        let lines = parse_lrc_timestamp("[00:10.00]第一句\n[00:20.50]第二句");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].time_ms, 10_000);
+        assert_eq!(lines[0].text, "第一句");
+        assert_eq!(lines[1].time_ms, 20_500);
+        assert_eq!(lines[1].text, "第二句");
+    }
+
+    #[test]
+    fn lrc_millis_variants() {
+        assert_eq!(parse_lrc_timestamp("[00:10.123]x")[0].time_ms, 10_123);
+        // 两位毫秒 → ×10
+        assert_eq!(parse_lrc_timestamp("[00:10.12]x")[0].time_ms, 10_120);
+        // 一位毫秒 → 0（现状行为）
+        assert_eq!(parse_lrc_timestamp("[00:10.1]x")[0].time_ms, 10_000);
+        // 无毫秒
+        assert_eq!(parse_lrc_timestamp("[00:10]x")[0].time_ms, 10_000);
+    }
+
+    #[test]
+    fn lrc_hour_minute_second() {
+        let lines = parse_lrc_timestamp("[1:02:03.456]x");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].time_ms, 3_723_456);
+    }
+
+    #[test]
+    fn lrc_multiple_timestamps_one_line() {
+        let lines = parse_lrc_timestamp("[00:10.00][00:40.00]副歌");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].time_ms, 10_000);
+        assert_eq!(lines[1].time_ms, 40_000);
+        assert_eq!(lines[0].text, "副歌");
+        assert_eq!(lines[1].text, "副歌");
+    }
+
+    #[test]
+    fn lrc_lines_without_timestamp_skipped() {
+        let lines = parse_lrc_timestamp("纯文本行\n[00:10.00]ok\n\n");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "ok");
+    }
+
+    #[test]
+    fn lrc_metadata_tags_skipped() {
+        // [ti:...]/[ar:...] 等元数据行无数字时间戳 → 跳过
+        let lines = parse_lrc_timestamp("[ti:歌名]\n[ar:歌手]\n[00:10.00]start");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "start");
+    }
+
+    #[test]
+    fn lrc_timestamp_without_text_skipped() {
+        assert!(parse_lrc_timestamp("[00:10.00]").is_empty());
+    }
+
+    #[test]
+    fn lrc_output_sorted_by_time() {
+        let lines = parse_lrc_timestamp("[00:30.00]later\n[00:10.00]earlier");
+        assert_eq!(lines[0].time_ms, 10_000);
+        assert_eq!(lines[1].time_ms, 30_000);
+    }
+
+    #[test]
+    fn lrc_trailing_bracket_quirk() {
+        // 现状行为：text 取最后一个 ']' 之后 → "[00:10.00]a]b" 的 text 是 "b"
+        let lines = parse_lrc_timestamp("[00:10.00]a]b");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "b");
+        // 以 ']' 结尾导致 text 为空 → 整行被丢弃
+        assert!(parse_lrc_timestamp("[00:10.00]some [text]").is_empty());
+    }
+
+    #[test]
+    fn lrc_garbage_input_no_panic() {
+        assert!(parse_lrc_timestamp("").is_empty());
+        assert!(parse_lrc_timestamp("]").is_empty());
+        // "[bad]" 不是时间戳，不影响 "[00:10.00]" 的解析，text = 最后一个 ']' 之后
+        let lines = parse_lrc_timestamp("[00:10.00][bad]x");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "x");
+    }
+}

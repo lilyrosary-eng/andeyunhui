@@ -3458,3 +3458,42 @@ pub async fn dev_console_http(
     let text = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
     Ok(format!("HTTP {} {}\n\n{}", status.as_u16(), status.canonical_reason().unwrap_or_default(), text))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_lt_normal_numeric_compare() {
+        assert!(version_lt("1.2.3", "1.2.4"));
+        assert!(!version_lt("1.2.4", "1.2.3"));
+        assert!(!version_lt("1.2.3", "1.2.3"));
+        // 逐段数值比较：1.10 > 1.9
+        assert!(!version_lt("1.10", "1.9"));
+        assert!(version_lt("1.9", "1.10"));
+        assert!(version_lt("2", "10"));
+    }
+
+    #[test]
+    fn version_lt_missing_segments_treated_as_zero() {
+        assert!(!version_lt("1.0", "1.0.0"));
+        assert!(!version_lt("1.0.1", "1.0")); // 1.0.1 > 1.0，不是小于
+        assert!(!version_lt("1.2.3", "1.2"));
+    }
+
+    #[test]
+    fn version_lt_non_numeric_segments_dropped() {
+        // 非数字段被 filter_map 丢弃
+        assert!(version_lt("1.2.a", "1.2.3"));
+        assert!(!version_lt("1.2.3", "1.2.a"));
+        // "v1" 全段非数字 → 视为 [0] 与 [1] 比较
+        assert!(version_lt("v1", "1"));
+    }
+
+    #[test]
+    fn version_lt_empty_strings() {
+        assert!(!version_lt("", ""));
+        assert!(version_lt("", "1"));
+        assert!(!version_lt("1", ""));
+    }
+}

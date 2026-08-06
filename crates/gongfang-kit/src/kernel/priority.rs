@@ -118,3 +118,104 @@ impl Default for PriorityCommandQueue {
         Self::new()
     }
 }
+
+// ================= 零测试治理：现状固化单元测试 =================
+// 纪律：期望值一律取当前真实行为，缺陷只固化记录，不修生产代码。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_priority_classification() {
+        assert_eq!(UserCommand::Pause.priority(), Priority::P0);
+        assert_eq!(UserCommand::Resume.priority(), Priority::P0);
+        assert_eq!(
+            UserCommand::Focus { url: "u".into() }.priority(),
+            Priority::P0
+        );
+        assert_eq!(
+            UserCommand::Bypass { challenge: "waf".into() }.priority(),
+            Priority::P1
+        );
+        assert_eq!(
+            UserCommand::Hook { func_name: "f".into() }.priority(),
+            Priority::P1
+        );
+        assert_eq!(
+            UserCommand::Inject { payload_type: "p".into() }.priority(),
+            Priority::P1
+        );
+        assert_eq!(
+            UserCommand::Solve { captcha_type: "c".into() }.priority(),
+            Priority::P1
+        );
+        assert_eq!(UserCommand::Raw { text: "t".into() }.priority(), Priority::P2);
+    }
+
+    #[test]
+    fn test_is_barrier() {
+        assert!(UserCommand::Pause.is_barrier());
+        assert!(UserCommand::Focus { url: "u".into() }.is_barrier());
+        assert!(!UserCommand::Resume.is_barrier());
+        assert!(!UserCommand::Bypass { challenge: "w".into() }.is_barrier());
+        assert!(!UserCommand::Hook { func_name: "f".into() }.is_barrier());
+        assert!(!UserCommand::Inject { payload_type: "p".into() }.is_barrier());
+        assert!(!UserCommand::Solve { captcha_type: "c".into() }.is_barrier());
+        assert!(!UserCommand::Raw { text: "t".into() }.is_barrier());
+    }
+
+    #[test]
+    fn test_empty_pop() {
+        let q = PriorityCommandQueue::new();
+        assert!(q.pop().is_none());
+        assert!(!q.has_pending());
+        assert!(!q.has_immediate());
+    }
+
+    #[test]
+    fn test_preemption_order_p0_p1_p2() {
+        let q = PriorityCommandQueue::new();
+        q.push(UserCommand::Raw { text: "low".into() }); // P2
+        q.push(UserCommand::Inject { payload_type: "x".into() }); // P1
+        q.push(UserCommand::Pause); // P0
+        assert!(q.has_pending());
+        assert!(q.has_immediate());
+        assert!(matches!(q.pop(), Some(UserCommand::Pause)));
+        assert!(!q.has_immediate());
+        assert!(q.has_pending());
+        assert!(matches!(q.pop(), Some(UserCommand::Inject { .. })));
+        assert!(matches!(q.pop(), Some(UserCommand::Raw { .. })));
+        assert!(q.pop().is_none());
+        assert!(!q.has_pending());
+    }
+
+    #[test]
+    fn test_late_p0_preempts_waiting_p2() {
+        let q = PriorityCommandQueue::new();
+        q.push(UserCommand::Raw { text: "queued".into() });
+        // 后推入的 P0 依然先弹出（抢占）
+        q.push(UserCommand::Resume);
+        assert!(matches!(q.pop(), Some(UserCommand::Resume)));
+        assert!(matches!(q.pop(), Some(UserCommand::Raw { .. })));
+        assert!(q.pop().is_none());
+    }
+
+    #[test]
+    fn test_fifo_within_same_priority() {
+        let q = PriorityCommandQueue::new();
+        q.push(UserCommand::Raw { text: "a".into() });
+        q.push(UserCommand::Raw { text: "b".into() });
+        assert!(matches!(q.pop(), Some(UserCommand::Raw { text }) if text == "a"));
+        assert!(matches!(q.pop(), Some(UserCommand::Raw { text }) if text == "b"));
+        assert!(q.pop().is_none());
+    }
+
+    #[test]
+    fn test_has_immediate_only_for_p0() {
+        let q = PriorityCommandQueue::new();
+        q.push(UserCommand::Raw { text: "x".into() });
+        assert!(!q.has_immediate());
+        q.push(UserCommand::Pause);
+        assert!(q.has_immediate());
+    }
+}

@@ -12,6 +12,7 @@
 
 import { create } from 'zustand';
 import type { TimelineItem } from '../types/chat';
+import { uid } from '../../lib/uid';
 
 /** 一个会话。timeline 是移动端扁平时间线（消息/分隔/降级）。 */
 export interface Conversation {
@@ -37,10 +38,6 @@ function loadConvs(): Conversation[] {
 
 function persist(convs: Conversation[]) {
   try { localStorage.setItem(CHAT_KEY, JSON.stringify(convs)); } catch { /* 忽略 */ }
-}
-
-function uid(prefix: string): string {
-  return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
 /** 从首条用户消息生成会话标题 */
