@@ -37,7 +37,7 @@ export interface ToolCall {
 }
 
 /** 把 "YYYY-MM-DD HH:mm" 解析为本地时间戳（毫秒）；失败返回 null */
-function parseTimeToMs(time: string): number | null {
+export function parseTimeToMs(time: string): number | null {
   const m = time.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
   if (!m) return null;
   const [_, y, mo, d, h, mi] = m;
