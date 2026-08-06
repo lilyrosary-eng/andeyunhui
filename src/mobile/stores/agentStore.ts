@@ -61,16 +61,44 @@ export interface ToolResult {
   imageUrl?: string;
 }
 
+/**
+ * 从 startIdx 处的 { 开始，扫描括号配对的完整 JSON 对象字符串（支持嵌套与字符串内括号）。
+ * 找不到平衡闭合返回 null。
+ */
+function findBalancedJson(text: string, startIdx: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = startIdx; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) { escaped = false; continue; }
+      if (ch === '\\') { escaped = true; continue; }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{') { depth++; continue; }
+    if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(startIdx, i + 1);
+    }
+  }
+  return null;
+}
+
 /** 从 AI 输出文本中提取工具调用 JSON 块（支持 ```json 围栏 或 裸 JSON 结尾） */
 export function extractToolCall(text: string): ToolCall | null {
   if (!text) return null;
-  // 优先 ```json ... ```
-  const fence = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+  // 优先 ```json ... ``` 围栏（取第一个围栏内容，防后续文本干扰）
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   const raw = fence ? fence[1] : text;
-  const m = raw.match(/\{(?:[^{}]|\{[^{}]*\})*"tool"\s*:\s*"[^"]+"[\s\S]*?\}/);
-  if (!m) return null;
+  const braceIdx = raw.indexOf('{');
+  if (braceIdx < 0) return null;
+  const jsonStr = findBalancedJson(raw, braceIdx);
+  if (!jsonStr) return null;
   try {
-    const obj = JSON.parse(m[0]);
+    const obj = JSON.parse(jsonStr);
     if (obj && typeof obj.tool === 'string' && obj.args && typeof obj.args === 'object') {
       return obj as ToolCall;
     }
