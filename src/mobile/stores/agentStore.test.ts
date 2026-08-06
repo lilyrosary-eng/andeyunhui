@@ -14,15 +14,38 @@ describe('extractToolCall', () => {
     expect(extractToolCall(null as unknown as string)).toBeNull();
   });
 
-  it('缺陷固化：args 为对象时恒返回 null（正则截断，parse 失败）', () => {
-    expect(extractToolCall('```json\n{"tool":"create_calendar","args":{"title":"x"}}\n```')).toBeNull();
-    expect(extractToolCall('好的 {"tool":"create_todo","args":{"title":"买菜"}}')).toBeNull();
-    expect(extractToolCall('{"tool":"create_todo","args":{}}')).toBeNull();
-    expect(extractToolCall('{"tool":"create_todo","args":"x"}')).toBeNull();
+  it('```json 围栏内完整解析 args 对象', () => {
+    const text = '好的，已为你创建。\n```json\n{"tool":"create_calendar","args":{"title":"开会","time":"2026-08-06 20:00"}}\n```';
+    const call = extractToolCall(text);
+    expect(call).not.toBeNull();
+    expect(call!.tool).toBe('create_calendar');
+    expect(call!.args.title).toBe('开会');
+    expect(call!.args.time).toBe('2026-08-06 20:00');
+  });
+
+  it('裸 JSON 结尾解析成功', () => {
+    const call = extractToolCall('好的 {"tool":"create_todo","args":{"title":"买菜"}}');
+    expect(call).not.toBeNull();
+    expect(call!.tool).toBe('create_todo');
+    expect(call!.args.title).toBe('买菜');
+  });
+
+  it('args 含嵌套对象也完整解析', () => {
+    const call = extractToolCall('{"tool":"create_todo","args":{"data":{"k":"v"}}}');
+    expect(call).not.toBeNull();
+    expect(call!.tool).toBe('create_todo');
   });
 
   it('无 tool 字段的 JSON 返回 null', () => {
     expect(extractToolCall('```json\n{"hello":"world"}\n```')).toBeNull();
+  });
+
+  it('tool 不是字符串返回 null', () => {
+    expect(extractToolCall('```json\n{"tool":123,"args":{}}\n```')).toBeNull();
+  });
+
+  it('缺 args 返回 null', () => {
+    expect(extractToolCall('```json\n{"tool":"create_todo"}\n```')).toBeNull();
   });
 
   it('普通文本返回 null', () => {
