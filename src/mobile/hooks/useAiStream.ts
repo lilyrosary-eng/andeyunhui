@@ -29,6 +29,7 @@ import { useChatStore } from '../stores/chatStore';
 import { useCompanionStore, buildCompanionContext, summarizeMemory } from '../stores/companionStore';
 import { useAgentStore, buildAgentInstructions, extractToolCall } from '../stores/agentStore';
 import { guessReason } from './aiErrorReason';
+import { uid } from '../../lib/uid';
 import { buildSemanticContext, ingestMemory } from '../stores/semanticMemory';
 
 const SYSTEM_PROMPT =
@@ -36,10 +37,6 @@ const SYSTEM_PROMPT =
 
 const DEV = import.meta.env?.DEV ?? false;
 function log(...args: unknown[]) { if (DEV) console.log('[useAiStream]', ...args); }
-
-function uid(prefix: string): string {
-  return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-}
 
 export interface UseAiStreamResult {
   /** 当前活跃会话的时间线（消息 + 分隔 + 降级，扁平数组，供虚拟列表渲染） */

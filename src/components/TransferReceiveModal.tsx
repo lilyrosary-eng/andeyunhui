@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { useI18n } from '@/lib/i18n';
+import { fmtSize } from '../lib/formatSize';
 
 // 全局接收确认弹窗：独立于任何传输面板挂载于主窗根，确保无论当前打开的是主窗传输标签页还是浮岛，
 // 收到传输请求都会弹出确认框。否则接收端未打开传输面板时确认框不出现，发送端会 30s 超时失败
@@ -18,14 +19,6 @@ interface ReceiveRequest {
   sender_alias?: string;
   files?: ReceiveFile[];
   file_names?: string[];
-}
-
-function fmtSize(n?: number): string {
-  if (!n) return '0 B';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 const GOLD = '#e6c35c';
@@ -190,7 +183,7 @@ export default function TransferReceiveModal() {
           <div style={{ fontSize: 11, color: 'rgba(244,244,246,0.45)', marginTop: 4 }}>
             {files.slice(0, 3).map((f, i) => (
               <div key={i}>
-                {(f as ReceiveFile).file_name} · {fmtSize((f as ReceiveFile).size)}
+                {(f as ReceiveFile).file_name} · {fmtSize((f as ReceiveFile).size ?? 0)}
               </div>
             ))}
           </div>

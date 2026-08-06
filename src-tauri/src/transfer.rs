@@ -1318,3 +1318,150 @@ pub fn transfer_receive_decline(session_id: String) {
 pub async fn transfer_send(fingerprint: String, paths: Vec<String>) -> Result<String, String> {
     send_files(mgr(), &fingerprint, paths).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- sanitize_filename ----------
+    #[test]
+    fn sanitize_replaces_windows_invalid_chars() {
+        assert_eq!(
+            sanitize_filename(r#"a/b\c:d*e?f"g<h>i|j"#),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_normal_and_chinese_names() {
+        assert_eq!(sanitize_filename("正常文件.txt"), "正常文件.txt");
+        assert_eq!(sanitize_filename(""), "");
+        assert_eq!(sanitize_filename("report(1).md"), "report(1).md");
+    }
+
+    // ---------- guess_file_type ----------
+    #[test]
+    fn guess_file_type_by_extension() {
+        assert_eq!(guess_file_type(&PathBuf::from("a.png")), "image");
+        assert_eq!(guess_file_type(&PathBuf::from("a.JPG")), "image"); // 大小写不敏感
+        assert_eq!(guess_file_type(&PathBuf::from("a.gif")), "image");
+        assert_eq!(guess_file_type(&PathBuf::from("a.mp4")), "video");
+        assert_eq!(guess_file_type(&PathBuf::from("a.pdf")), "pdf");
+        assert_eq!(guess_file_type(&PathBuf::from("a.md")), "text");
+        assert_eq!(guess_file_type(&PathBuf::from("a.rs")), "text");
+        assert_eq!(guess_file_type(&PathBuf::from("a.xyz")), "other");
+        assert_eq!(guess_file_type(&PathBuf::from("noext")), "other");
+        assert_eq!(guess_file_type(&PathBuf::from("dir/sub")), "other");
+    }
+
+    // ---------- 协议 DTO serde roundtrip（camelCase） ----------
+    #[test]
+    fn multicast_message_v2_camelcase_roundtrip() {
+        let m = MulticastMessageV2 {
+            alias: "我的电脑".into(),
+            version: "2.1".into(),
+            device_model: Some("PC".into()),
+            device_type: Some("desktop".into()),
+            fingerprint: "fp123".into(),
+            port: 53317,
+            protocol: "localsend".into(),
+            download: true,
+            announce: true,
+            announcement: true,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"alias\":\"我的电脑\""));
+        assert!(json.contains("\"deviceModel\":\"PC\""));
+        assert!(json.contains("\"deviceType\":\"desktop\""));
+        assert!(json.contains("\"port\":53317"));
+        assert!(json.contains("\"announcement\":true"));
+        assert!(!json.contains("device_model"));
+        let back: MulticastMessageV2 = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.alias, m.alias);
+        assert_eq!(back.device_model, m.device_model);
+        assert_eq!(back.port, m.port);
+        assert_eq!(back.announcement, true);
+        assert_eq!(back.download, true);
+    }
+
+    #[test]
+    fn multicast_message_v2_missing_optional_fields_default() {
+        let json = r#"{"alias":"a","version":"2.1","fingerprint":"f","port":1,"protocol":"p"}"#;
+        let m: MulticastMessageV2 = serde_json::from_str(json).unwrap();
+        assert_eq!(m.device_model, None);
+        assert_eq!(m.device_type, None);
+        assert_eq!(m.download, false);
+        assert_eq!(m.announce, false);
+        assert_eq!(m.announcement, false);
+    }
+
+    #[test]
+    fn info_response_v2_roundtrip() {
+        let dto = InfoResponseDtoV2 {
+            alias: "phone".into(),
+            version: "2.0".into(),
+            device_model: None,
+            device_type: Some("phone".into()),
+            fingerprint: "fp".into(),
+            download: true,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"deviceType\":\"phone\""));
+        assert!(!json.contains("device_type"));
+        let back: InfoResponseDtoV2 = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.alias, "phone");
+        assert_eq!(back.download, true);
+        assert_eq!(back.device_model, None);
+    }
+
+    #[test]
+    fn prepare_upload_request_v2_roundtrip() {
+        let req = PrepareUploadRequestV2 {
+            info: ClientInfoV2 {
+                alias: "pc".into(),
+                device_model: None,
+                device_type: None,
+                fingerprint: "f".into(),
+                version: "2.1".into(),
+            },
+            files: HashMap::from([(
+                "f1".to_string(),
+                PrepareUploadFileV2 {
+                    id: "id1".into(),
+                    file_name: "报告.pdf".into(),
+                    size: 12345,
+                    file_type: "pdf".into(),
+                    preview: None,
+                    checksum: Some("abc".into()),
+                },
+            )]),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"fileName\":\"报告.pdf\""));
+        assert!(json.contains("\"fileType\":\"pdf\""));
+        assert!(json.contains("\"checksum\":\"abc\""));
+        assert!(!json.contains("file_name"));
+        let back: PrepareUploadRequestV2 = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.info.alias, "pc");
+        assert_eq!(back.files.len(), 1);
+        let f = &back.files["f1"];
+        assert_eq!(f.file_name, "报告.pdf");
+        assert_eq!(f.size, 12345);
+        assert_eq!(f.preview, None);
+        assert_eq!(f.checksum.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn client_info_v2_camelcase_keys() {
+        let c = ClientInfoV2 {
+            alias: "a".into(),
+            device_model: None,
+            device_type: None,
+            fingerprint: "f".into(),
+            version: "2".into(),
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"deviceModel\":null"));
+        assert!(!json.contains("device_model"));
+    }
+}

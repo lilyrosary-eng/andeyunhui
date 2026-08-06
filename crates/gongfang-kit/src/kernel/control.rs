@@ -510,3 +510,53 @@ fn extract_json(text: &str) -> &str {
     }
     trimmed
 }
+
+// ================= 零测试治理：现状固化单元测试 =================
+// 纪律：期望值一律取当前真实行为；extract_json 为私有函数，测试同模块直访。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_json_markdown_fence() {
+        let text = "```json\n{\"phase\": \"Recon\", \"qps\": 5}\n```";
+        assert_eq!(extract_json(text), "{\"phase\": \"Recon\", \"qps\": 5}");
+    }
+
+    #[test]
+    fn test_extract_json_with_surrounding_prose() {
+        let text = "策略如下：\n{\"phase\": \"Idle\"}\n以上。";
+        assert_eq!(extract_json(text), "{\"phase\": \"Idle\"}");
+    }
+
+    #[test]
+    fn test_extract_json_nested_braces() {
+        let text = "{\"a\": {\"b\": [1, 2]}, \"c\": \"x\"} 结尾";
+        assert_eq!(extract_json(text), "{\"a\": {\"b\": [1, 2]}, \"c\": \"x\"}");
+    }
+
+    #[test]
+    fn test_extract_json_trims_whitespace() {
+        let text = "  \n {\"qps\": 3}  \t\n";
+        assert_eq!(extract_json(text), "{\"qps\": 3}");
+    }
+
+    #[test]
+    fn test_extract_json_no_braces_returns_trimmed() {
+        let text = "  纯文本没有 JSON  \n";
+        assert_eq!(extract_json(text), "纯文本没有 JSON");
+    }
+
+    #[test]
+    fn test_extract_json_unbalanced_brace_returns_whole() {
+        let text = "{\"unclosed\": 1";
+        assert_eq!(extract_json(text), "{\"unclosed\": 1");
+    }
+
+    #[test]
+    fn test_extract_json_multiple_objects_takes_first_to_last_brace() {
+        // 现状固化：取第一个 { 到最后一个 }（跨多个对象），后续 serde 解析会失败——缺陷仅记录不修
+        let text = "{\"a\": 1} 和 {\"b\": 2}";
+        assert_eq!(extract_json(text), "{\"a\": 1} 和 {\"b\": 2}");
+    }
+}

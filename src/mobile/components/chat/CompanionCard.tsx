@@ -8,6 +8,7 @@ import { useRef, useState } from 'react';
 import { Heart, Brain, Sparkles, Check, X, ImagePlus } from 'lucide-react';
 import { BottomSheet } from '../BottomSheet';
 import { useCompanionStore, type Companion } from '../../stores/companionStore';
+import { affinityOf } from '../../../lib/affinity';
 
 /** 把选中的图片文件读成 data URL（限制 3MB，避免 JSON 膨胀） */
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -35,15 +36,6 @@ function Avatar({ value, size }: { value: string; size: number }) {
     );
   }
   return <span style={{ fontSize: size * 0.72, lineHeight: 1 }}>{value || '💡'}</span>;
-}
-
-/**
- * 综合亲密度（对外唯一展示口径，不暴露六维细节）。
- * 加权：亲密 40% + 温暖 30% + 信任 20% + 好奇/耐心 10%。（张力不纳入正向）
- */
-function overallAffinity(r: { warmth: number; trust: number; intimacy: number; intrigue: number; patience: number; tension?: number }): number {
-  const w = (r.warmth ?? 0) * 0.3 + (r.trust ?? 0) * 0.2 + (r.intimacy ?? 0) * 0.4 + (r.intrigue ?? 0) * 0.05 + (r.patience ?? 0) * 0.05;
-  return Math.round(Math.min(100, Math.max(0, w)));
 }
 
 /** 顶部伴侣卡（常驻在算力来源条下方） */
@@ -74,11 +66,11 @@ export function CompanionCard({ onPress }: { onPress: () => void }) {
           <div className="h-1.5 flex-1 rounded-full bg-[var(--muted)]/50 overflow-hidden">
             <div
               className="h-full rounded-full transition-all duration-500"
-              style={{ width: `${overallAffinity(r)}%`, background: 'var(--element-bg)' }}
+              style={{ width: `${affinityOf(r)}%`, background: 'var(--element-bg)' }}
             />
           </div>
           <span className="text-[var(--muted-foreground)] shrink-0" style={{ fontSize: 'var(--m-text-overline)' }}>
-            亲密度 {overallAffinity(r)}%
+            亲密度 {affinityOf(r)}%
           </span>
         </div>
       </div>
@@ -198,11 +190,11 @@ export function CompanionEditSheet({
             <div className="h-2 flex-1 rounded-full bg-[var(--muted)]/50 overflow-hidden">
               <div
                 className="h-full rounded-full transition-all duration-500"
-                style={{ width: `${overallAffinity(r)}%`, background: 'var(--element-bg)' }}
+                style={{ width: `${affinityOf(r)}%`, background: 'var(--element-bg)' }}
               />
             </div>
             <span className="w-10 shrink-0 text-right font-medium text-[var(--foreground)]" style={{ fontSize: 'var(--m-text-label)' }}>
-              {overallAffinity(r)}%
+              {affinityOf(r)}%
             </span>
           </div>
           <p className="text-[var(--muted-foreground)]" style={{ fontSize: 'var(--m-text-overline)' }}>

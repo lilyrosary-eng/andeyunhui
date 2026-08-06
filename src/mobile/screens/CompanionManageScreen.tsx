@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import { Plus, Check, Trash2, Heart } from 'lucide-react';
 import { useCompanionStore, type Companion } from '../stores/companionStore';
+import { affinityOf } from '../../lib/affinity';
 
 function Avatar({ value, size }: { value: string; size: number }) {
   if (value.startsWith('data:image/')) {
@@ -18,15 +19,6 @@ function Avatar({ value, size }: { value: string; size: number }) {
     );
   }
   return <span style={{ fontSize: size * 0.72, lineHeight: 1 }}>{value || '💡'}</span>;
-}
-
-/** 综合亲密度（对外唯一口径；六维为内部机制不展示） */
-function affinityOf(c: Companion): number {
-  const r = c.relationship;
-  const w =
-    (r.warmth ?? 0) * 0.3 + (r.trust ?? 0) * 0.2 + (r.intimacy ?? 0) * 0.4 +
-    (r.intrigue ?? 0) * 0.05 + (r.patience ?? 0) * 0.05;
-  return Math.round(Math.min(100, Math.max(0, w)));
 }
 
 export function CompanionManageScreen() {
@@ -126,7 +118,7 @@ export function CompanionManageScreen() {
                 </div>
                 <div className="flex items-center gap-1.5 text-[var(--muted-foreground)]" style={{ fontSize: 'var(--m-text-caption)' }}>
                   <Heart size={12} />
-                  亲密度 {affinityOf(c)}% · 认识 {days(c)} 天 · {c.memories.length} 段记忆
+                  亲密度 {affinityOf(c.relationship)}% · 认识 {days(c)} 天 · {c.memories.length} 段记忆
                 </div>
               </button>
               <button

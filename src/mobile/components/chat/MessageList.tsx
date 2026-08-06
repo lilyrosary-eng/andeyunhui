@@ -31,7 +31,7 @@ marked.setOptions({
  *  代码块（pre）后处理：包一层带「复制」按钮的容器（像 DeepSeek 那样独立成块）。
  *  按钮点击时读取 pre 内文本并复制，复制成功换勾选态。
  */
-function renderMd(content: string): string {
+export function renderMd(content: string): string {
   try {
     const html = marked.parse(content, { async: false }) as string;
     // 给每个 <pre> 追加复制按钮（pre 内部第一个子节点是 code，取其文本）
@@ -55,7 +55,7 @@ function renderMd(content: string): string {
   }
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 

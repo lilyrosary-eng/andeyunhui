@@ -987,3 +987,139 @@ pub fn ai_save_conversations(app: AppHandle, payload: AiConversations) -> Result
     fs::rename(&tmp, &path).map_err(|e| format!("重命名失败: {}", e))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    // ---------- build_anthropic_messages ----------
+    #[test]
+    fn anthropic_messages_system_gets_cache_block() {
+        let msgs = vec![msg("system", "你是助手"), msg("user", "hi")];
+        let out = build_anthropic_messages(&msgs);
+        assert_eq!(out.len(), 2);
+        // system → block 数组 + cache_control
+        assert_eq!(out[0]["role"], "system");
+        assert_eq!(out[0]["content"][0]["type"], "text");
+        assert_eq!(out[0]["content"][0]["text"], "你是助手");
+        assert_eq!(out[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        // 非 system → 字符串 content，无 cache_control
+        assert_eq!(out[1]["role"], "user");
+        assert_eq!(out[1]["content"], "hi");
+    }
+
+    #[test]
+    fn anthropic_messages_empty_system_content_no_cache() {
+        let out = build_anthropic_messages(&[msg("system", "")]);
+        assert_eq!(out[0]["content"], "");
+        assert!(out[0]["content"].is_string());
+    }
+
+    #[test]
+    fn anthropic_messages_stable_segment_breakpoint() {
+        // n=6 → stable_end=3 → 倒数第 3 条（index 2）加 cache breakpoint
+        let msgs = vec![
+            msg("system", "sys"),
+            msg("user", "u1"),
+            msg("assistant", "a1"),
+            msg("user", "u2"),
+            msg("assistant", "a2"),
+            msg("user", "u3"),
+        ];
+        let out = build_anthropic_messages(&msgs);
+        assert_eq!(out.len(), 6);
+        assert_eq!(out[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(out[2]["content"][0]["text"], "a1");
+        assert_eq!(out[2]["content"][0]["cache_control"]["type"], "ephemeral");
+        // 其余保持字符串 content
+        assert_eq!(out[1]["content"], "u1");
+        assert_eq!(out[3]["content"], "u2");
+        assert_eq!(out[4]["content"], "a2");
+        assert_eq!(out[5]["content"], "u3");
+    }
+
+    #[test]
+    fn anthropic_messages_small_history_no_stable_breakpoint() {
+        // n=4 → stable_end=0 → 只有 system 带 cache
+        let msgs = vec![
+            msg("system", "s"),
+            msg("user", "u1"),
+            msg("assistant", "a1"),
+            msg("user", "u2"),
+        ];
+        let out = build_anthropic_messages(&msgs);
+        assert_eq!(out[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(out[1]["content"], "u1");
+        assert_eq!(out[2]["content"], "a1");
+        assert_eq!(out[3]["content"], "u2");
+    }
+
+    #[test]
+    fn anthropic_messages_empty_input() {
+        assert!(build_anthropic_messages(&[]).is_empty());
+    }
+
+    // ---------- 提供商判定 ----------
+    #[test]
+    fn anthropic_provider_detection() {
+        let mut cfg = AiProfile::default();
+        cfg.model = "claude-sonnet-4".into();
+        cfg.base_url = "https://api.anthropic.com".into();
+        assert!(is_anthropic_provider(&cfg));
+        // base_url 命中，模型名不命中
+        cfg.model = "deepseek-chat".into();
+        assert!(is_anthropic_provider(&cfg));
+        // 都不命中
+        cfg.base_url = "https://api.deepseek.com/v1".into();
+        assert!(!is_anthropic_provider(&cfg));
+        assert!(is_deepseek_provider(&cfg));
+        cfg.base_url = "https://api.anthropic.com".into();
+        assert!(!is_deepseek_provider(&cfg));
+    }
+
+    // ---------- compose_persona_system ----------
+    #[test]
+    fn persona_all_empty_returns_empty() {
+        assert_eq!(compose_persona_system(&AiProfile::default()), "");
+    }
+
+    #[test]
+    fn persona_preset_maps_to_description() {
+        let mut cfg = AiProfile::default();
+        cfg.persona_preset = Some("sharp".into());
+        let s = compose_persona_system(&cfg);
+        assert!(s.contains("毒舌直率"));
+        assert!(s.contains("一针见血"));
+    }
+
+    #[test]
+    fn persona_unknown_preset_falls_back_to_style() {
+        let mut cfg = AiProfile::default();
+        cfg.persona_preset = Some("custom".into());
+        cfg.persona_style = Some("简洁".into());
+        let s = compose_persona_system(&cfg);
+        assert!(s.contains("你应遵守以下风格要求：简洁"));
+        assert!(!s.contains("毒舌"));
+    }
+
+    #[test]
+    fn persona_combines_all_parts() {
+        let mut cfg = AiProfile::default();
+        cfg.persona_preset = Some("gentle".into());
+        cfg.persona_style = Some("多举例".into());
+        cfg.persona_call_me_as = Some("小安".into());
+        cfg.system_prompt = Some("你是助手。".into());
+        let s = compose_persona_system(&cfg);
+        assert!(s.contains("温柔细致"));
+        assert!(s.contains("你应遵守以下风格要求：多举例"));
+        assert!(s.contains("你可以称呼我为小安。"));
+        assert!(s.contains("你是助手。"));
+    }
+}
