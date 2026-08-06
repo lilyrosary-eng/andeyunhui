@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tsconfigPaths from "vite-tsconfig-paths"
 import { readFileSync, writeFileSync } from "node:fs";
@@ -52,6 +52,16 @@ export default defineConfig(() => ({
   // === 预构建时明确包含它们，防止遗漏 ===
   optimizeDeps: {
     include: ["react", "react-dom"],
+  },
+
+  // === 单元测试（vitest）===
+  // 当前被测对象为纯函数（markdown 转换等），node 环境足够，不引入 jsdom。
+  // 将来出现组件测试时，在对应测试文件顶部加 `// @vitest-environment jsdom` 并按需安装 jsdom。
+  // include 限定 src/：仓库内 got-it/ 等子项目是独立工程，不得被本仓库测试扫描。
+  test: {
+    globals: false,
+    environment: "node",
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 
   // === 多页入口：截图覆盖窗使用独立轻量 HTML（不加载主应用），实现「秒开」 ===
