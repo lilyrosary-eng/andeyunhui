@@ -25,12 +25,12 @@ export const KEYS = {
     themeColor:        { key: 'themeColor', kind: 'string', scope: 'shared', default: '默认' },
     elementColor:      { key: 'elementColor', kind: 'string', scope: 'shared', default: '默认' },
     reverseColor:      { key: 'reverseColor', kind: 'flag', scope: 'shared', default: 'false' },
-    zoom:              { key: 'zoom', kind: 'flag', scope: 'shared', default: '100' },
-    panelOpacity:      { key: 'panelOpacity', kind: 'flag', scope: 'shared', default: '80' },
+    zoom:              { key: 'zoom', kind: 'string', scope: 'shared', default: '100' },
+    panelOpacity:      { key: 'panelOpacity', kind: 'string', scope: 'shared', default: '80' },
     fontFamily:        { key: 'fontFamily', kind: 'string', scope: 'shared', default: '系统默认' },
     appBgImage:        { key: 'appBgImage', kind: 'string', scope: 'shared' },
-    appBgBlur:         { key: 'appBgBlur', kind: 'flag', scope: 'shared', default: '0' },
-    appBgAngle:        { key: 'appBgAngle', kind: 'flag', scope: 'shared', default: '0' },
+    appBgBlur:         { key: 'appBgBlur', kind: 'string', scope: 'shared', default: '0' },
+    appBgAngle:        { key: 'appBgAngle', kind: 'string', scope: 'shared', default: '0' },
     appBgFlip:         { key: 'appBgFlip', kind: 'flag', scope: 'shared', default: 'false' },
     appBgScrub:        { key: 'appBgScrub', kind: 'flag', scope: 'shared', default: 'false' },
     appBgVideoPersist: { key: 'appBgVideoPersist', kind: 'flag', scope: 'shared', default: 'false' },
@@ -44,11 +44,17 @@ export const KEYS = {
     lyricsShowNext:    { key: 'music_lyrics_show_next_line', kind: 'flag', scope: 'desktop' },
     chroma:            { key: 'deskpet:chroma', kind: 'json', scope: 'desktop', note: '{color,tolerance}' },
     chromaDisabled:    { key: 'deskpet:chroma-disable', kind: 'flag', scope: 'desktop', default: 'false' },
+    deskpetSettings:   { key: 'deskpet:settings', kind: 'json', scope: 'desktop', note: 'DeskpetSettingsPanel.tsx 读写（本批改造）' },
+  },
+  i18n: {
+    language:          { key: 'language', kind: 'string', scope: 'shared', default: 'zh-CN', note: 'i18n 语言选择' },
   },
   mobile: {
     preview:           { key: 'mobile-preview', kind: 'flag', scope: 'mobile', default: '0', note: 'main.tsx 预览开关' },
     proactiveOn:       { key: 'andeyunhui.mobile.proactive.enabled', kind: 'flag', scope: 'mobile', default: '0', note: '见 useProactiveMessage PROACTIVE_KEY' },
     proactiveInterval: { key: 'andeyunhui.mobile.proactive.intervalMin', kind: 'string', scope: 'mobile', default: '60', note: '见 useProactiveMessage INTERVAL_KEY' },
+    agentEnabled:      { key: 'andeyunhui.mobile.agent.enabled', kind: 'flag', scope: 'mobile', default: '0' },
+    agentSilent:       { key: 'andeyunhui.mobile.agent.silent', kind: 'flag', scope: 'mobile', default: '0' },
   },
   devtools: {
     logLevel:          { key: 'log_level', kind: 'string', scope: 'dev', note: '生产排障口头开关' },
@@ -65,7 +71,6 @@ export const KEYS = {
     deskpetManifest:   { key: 'deskpet:manifest', kind: 'json', scope: 'desktop', note: 'deskpetManifest.ts DESKPET_MANIFEST_KEY，已封装模块，内部逻辑不动' },
     deskpetPresets:    { key: 'deskpet:presets', kind: 'json', scope: 'desktop', note: 'deskpetManifest.ts DESKPET_PRESETS_KEY，已封装模块，内部逻辑不动' },
     deskpetActive:     { key: 'deskpet:active', kind: 'string', scope: 'desktop', note: 'deskpetManifest.ts DESKPET_ACTIVE_PRESET_KEY，已封装模块，内部逻辑不动' },
-    deskpetSettings:   { key: 'deskpet:settings', kind: 'json', scope: 'desktop', note: 'DeskpetSettingsPanel.tsx DESKPET_SETTINGS_KEY，已封装模块，内部逻辑不动' },
   },
 } as const;
 

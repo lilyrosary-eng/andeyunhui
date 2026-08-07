@@ -8,6 +8,8 @@
 
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { storage } from '../../core/storage';
+import { KEYS } from '../../core/storage/keys';
 
 export interface AgentRecord {
   id: string;
@@ -22,8 +24,6 @@ export interface AgentData {
   todos: AgentRecord[];
   reminders: AgentRecord[];
 }
-
-const AGENT_KEY = 'andeyunhui.mobile.agent.enabled';
 
 export interface ToolCall {
   tool: 'create_calendar' | 'create_todo' | 'create_reminder' | 'set_alarm' | 'generate_image' | string;
@@ -46,12 +46,11 @@ export function parseTimeToMs(time: string): number | null {
 }
 
 /** 静默模式：开启后系统级操作（闹铃/日历）不再弹确认，直接执行 */
-const SILENT_KEY = 'andeyunhui.mobile.agent.silent';
 export function getAgentSilent(): boolean {
-  try { return localStorage.getItem(SILENT_KEY) === '1'; } catch { return false; }
+  return storage.getString(KEYS.mobile.agentSilent.key, '0') === '1';
 }
 export function setAgentSilent(v: boolean) {
-  try { localStorage.setItem(SILENT_KEY, v ? '1' : '0'); } catch { /* 忽略 */ }
+  storage.setString(KEYS.mobile.agentSilent.key, v ? '1' : '0');
 }
 
 /** 工具执行结果 */
@@ -141,13 +140,13 @@ interface AgentStore {
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
   enabled: (() => {
-    try { return localStorage.getItem(AGENT_KEY) === '1'; } catch { return false; }
+    return storage.getString(KEYS.mobile.agentEnabled.key, '0') === '1';
   })(),
   data: { calendar: [], todos: [], reminders: [] },
   loaded: false,
 
   setEnabled: (v) => {
-    try { localStorage.setItem(AGENT_KEY, v ? '1' : '0'); } catch { /* 忽略 */ }
+    storage.setString(KEYS.mobile.agentEnabled.key, v ? '1' : '0');
     set({ enabled: v });
   },
 

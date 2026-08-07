@@ -5,6 +5,8 @@ import { Slider } from "@/components/ui/slider"
 import { Sparkles } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 import {
   DeskpetManifest,
   loadDeskpetManifest,
@@ -50,7 +52,6 @@ export function DeskpetSettingsPanel() {
   // ---- 桌宠 Phase A 基础设置（缩放 / 透明度 / 点击穿透）----
   // 与插件 / 浮窗共享 localStorage['deskpet:settings']：面板写入并全局 emit，
   // 浮窗直接收到应用；插件监听更新缓存并持久化，并在浮窗请求时回复。
-  const DESKPET_SETTINGS_KEY = 'deskpet:settings';
   const [deskpetScale, setDeskpetScale] = useState(1);
   const [deskpetOpacity, setDeskpetOpacity] = useState(1);
   const [deskpetClickThrough, setDeskpetClickThrough] = useState(false);
@@ -58,7 +59,7 @@ export function DeskpetSettingsPanel() {
   // 启动时从 localStorage 恢复缓存值（与插件 / 浮窗对齐）
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(DESKPET_SETTINGS_KEY);
+      const raw = storage.getString(KEYS.desktop.deskpetSettings.key, '');
       if (raw) {
         const p = JSON.parse(raw) as {
           scale?: number;
@@ -77,11 +78,7 @@ export function DeskpetSettingsPanel() {
   // 持久化并下发（浮窗经全局 emit 直接收到；插件监听并更新缓存）
   const pushDeskpetSettings = useCallback(
     (next: { scale: number; opacity: number; clickThrough: boolean }) => {
-      try {
-        localStorage.setItem(DESKPET_SETTINGS_KEY, JSON.stringify(next));
-      } catch {
-        /* 忽略持久化失败 */
-      }
+      storage.setString(KEYS.desktop.deskpetSettings.key, JSON.stringify(next));
       emit('deskpet:settings', next).catch(() => {});
     },
     [],

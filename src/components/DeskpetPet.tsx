@@ -6,6 +6,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { storage } from "../core/storage";
+import { KEYS } from "../core/storage/keys";
 
 // 浮窗基础尺寸（scale=1 时）：恰好包住桌宠的小方框，绝不做全屏透明页（否则干扰截图选区）
 const WIN_W = 150;
@@ -191,7 +193,7 @@ function detectBgColor(video: HTMLVideoElement): {
 
 function loadChromaOverride(): { r: number; g: number; b: number; tolerance: number } | null {
   try {
-    const raw = localStorage.getItem("deskpet:chroma");
+    const raw = storage.getString(KEYS.desktop.chroma.key, '');
     if (!raw) return null;
     const o = JSON.parse(raw);
     if (typeof o.color === "string") {
@@ -215,11 +217,7 @@ function loadChromaOverride(): { r: number; g: number; b: number; tolerance: num
 // 调试开关：localStorage 设 deskpet:chroma-disable = "1" 可关闭运行时抠像，
 // 直接显示原始视频（含背景方块），用于区分「素材加载失败」与「背景未扣掉」。
 function isChromaDisabled(): boolean {
-  try {
-    return localStorage.getItem("deskpet:chroma-disable") === "1";
-  } catch {
-    return false;
-  }
+  return storage.getString(KEYS.desktop.chromaDisabled.key, '') === '1';
 }
 
 function VideoCanvas({
