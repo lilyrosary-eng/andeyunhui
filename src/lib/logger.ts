@@ -1,6 +1,9 @@
 // 开发环境日志工具：生产环境打包时自动被 tree-shaking 移除
 // 运行时覆盖：生产环境排障时在 DevTools 执行 localStorage.setItem('log_level', 'debug') 即可开启调试日志
-const isDev = import.meta.env.DEV || (typeof localStorage !== 'undefined' && localStorage.getItem('log_level') === 'debug');
+import { storage } from '../core/storage';
+import { KEYS } from '../core/storage/keys';
+
+const isDev = import.meta.env.DEV || storage.getString(KEYS.devtools.logLevel.key, '') === 'debug';
 
 export const logger = {
   log: (...args: unknown[]) => {
