@@ -20,6 +20,7 @@ import {
   cloneOfficialManifest,
   normalizeManifestSources,
 } from '@/deskpetManifest';
+import { EVENTS } from '@/core/events/schema';
 
 // 桌宠素材缩略图：从外部依赖包直接读取字节并预览（图片/视频）
 function PetAssetThumb({ rel, mime }: { rel: string; mime: string }) {
@@ -79,7 +80,7 @@ export function DeskpetSettingsPanel() {
   const pushDeskpetSettings = useCallback(
     (next: { scale: number; opacity: number; clickThrough: boolean }) => {
       storage.setString(KEYS.desktop.deskpetSettings.key, JSON.stringify(next));
-      emit('deskpet:settings', next).catch(() => {});
+      emit(EVENTS.deskpet.settings, next).catch(() => {});
     },
     [],
   );
@@ -100,7 +101,7 @@ export function DeskpetSettingsPanel() {
       } catch {
         /* 忽略持久化失败 */
       }
-      emit('deskpet:manifest', next).catch(() => {});
+      emit(EVENTS.deskpet.manifest, next).catch(() => {});
     },
     [],
   );

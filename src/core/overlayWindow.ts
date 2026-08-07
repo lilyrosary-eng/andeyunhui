@@ -13,6 +13,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { EVENTS } from '@/core/events/schema';
 
 /** 浮窗创建 profile，字段名与 Rust 端 `OverlayProfile`（snake_case）经 Tauri 自动 camelCase 映射对应。 */
 export interface OverlayProfile {
@@ -66,7 +67,7 @@ export async function ensureOverlayWindow(
     throw new Error(`浮窗创建后无法取得句柄: ${label}`);
   }
   // 坏窗兜底：监听 tauri://error 便于排查（Rust 侧已有 scale_factor 探测兜底）
-  win.listen('tauri://error', (e) => {
+  win.listen(EVENTS.tauri.error, (e) => {
     console.error(`[overlay] ${label} 窗错误:`, e);
   });
   return win;

@@ -9,6 +9,7 @@ import { useI18n } from '@/lib/i18n';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import type { RichTextEditorHandle } from './RichTextEditor';
+import { EVENTS } from '@/core/events/schema';
 
 // 富文本编辑器（TipTap + prosemirror + 转换逻辑，约 300KB+）改为懒加载：
 // 首屏只加载主程序，打开笔记时才按需拉取该 chunk，明显加快启动速度。
@@ -256,13 +257,13 @@ export function NotesEditor() {
     let acc = '';
     let done = false;
     let errMsg: string | null = null;
-    const unlistenDelta = await listen<{ requestId: string; delta: string }>('ai-delta', (e) => {
+    const unlistenDelta = await listen<{ requestId: string; delta: string }>(EVENTS.ai.delta, (e) => {
       if (e.payload.requestId === reqId) acc += e.payload.delta;
     });
-    const unlistenDone = await listen<{ requestId: string }>('ai-done', (e) => {
+    const unlistenDone = await listen<{ requestId: string }>(EVENTS.ai.done, (e) => {
       if (e.payload.requestId === reqId) done = true;
     });
-    const unlistenError = await listen<{ requestId: string; error: string }>('ai-error', (e) => {
+    const unlistenError = await listen<{ requestId: string; error: string }>(EVENTS.ai.error, (e) => {
       if (e.payload.requestId === reqId) { errMsg = e.payload.error; done = true; }
     });
     try {

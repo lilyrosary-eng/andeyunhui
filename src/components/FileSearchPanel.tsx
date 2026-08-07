@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useI18n } from '@/lib/i18n';
 import { KeepButton } from '@/components/KeepButton';
+import { EVENTS } from '@/core/events/schema';
 
 interface SearchResult {
   path: string;
@@ -77,7 +78,7 @@ export function FileSearchPanel({ variant, onClose, keepOpen, onKeepToggle }: Fi
   // 即时接收后台索引进度事件，让顶部「已扫描 X 项」无需等待 1.5s 轮询即刷新（扫描多少展示多少）
   useEffect(() => {
     let un: (() => void) | undefined;
-    listen<{ count: number; done: boolean }>('fs-index-progress', (e) => {
+    listen<{ count: number; done: boolean }>(EVENTS.fileSearch.indexProgress, (e) => {
       setStatus((s) => (s ? { ...s, count: e.payload.count } : s));
     }).then((u) => { un = u; });
     return () => { un?.(); };

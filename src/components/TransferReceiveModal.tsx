@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { useI18n } from '@/lib/i18n';
 import { fmtSize } from '../lib/formatSize';
+import { EVENTS } from '@/core/events/schema';
 
 // 全局接收确认弹窗：独立于任何传输面板挂载于主窗根，确保无论当前打开的是主窗传输标签页还是浮岛，
 // 收到传输请求都会弹出确认框。否则接收端未打开传输面板时确认框不出现，发送端会 30s 超时失败
@@ -40,7 +41,7 @@ export default function TransferReceiveModal() {
 
   useEffect(() => {
     const offs: Array<() => void> = [];
-    listen<ReceiveRequest>('transfer-receive-request', (e) => {
+    listen<ReceiveRequest>(EVENTS.transfer.request, (e) => {
       const p = e.payload;
       if (!p?.session_id) return;
       setQueue((q) => (q.some((x) => x.session_id === p.session_id) ? q : [...q, p]));
@@ -48,7 +49,7 @@ export default function TransferReceiveModal() {
       .then((u) => offs.push(u))
       .catch(() => {});
     // 浮岛（黄金棋盘）作为主接收方：若它已接管该请求，主窗不再弹确认框
-    listen<{ session_id?: string }>('transfer-receive-capsule-took', (e) => {
+    listen<{ session_id?: string }>(EVENTS.transfer.capsuleTook, (e) => {
       const sid = e?.payload?.session_id;
       if (sid) setQueue((q) => q.filter((x) => x.session_id !== sid));
     })
@@ -59,14 +60,14 @@ export default function TransferReceiveModal() {
         setQueue((q) => q.filter((x) => x.session_id !== ev.payload.session_id));
       }
     };
-    listen<{ session_id?: string }>('transfer-receive-confirmed', drop)
+    listen<{ session_id?: string }>(EVENTS.transfer.confirmed, drop)
       .then((u) => offs.push(u))
       .catch(() => {});
-    listen<{ session_id?: string }>('transfer-receive-declined', drop)
+    listen<{ session_id?: string }>(EVENTS.transfer.declined, drop)
       .then((u) => offs.push(u))
       .catch(() => {});
     // 首次保存失败兜底：后端写不进默认目录（如 C:\Program Files\send 无权限）时弹出目录选择框
-    listen<{ path: string; reason: string }>('transfer:save-dir-invalid', (e) => {
+    listen<{ path: string; reason: string }>(EVENTS.transfer.saveDirInvalid, (e) => {
       if (e?.payload?.path) setSaveDirError(e.payload);
     })
       .then((u) => offs.push(u))

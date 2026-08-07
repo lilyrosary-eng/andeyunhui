@@ -11,6 +11,7 @@ import { useAiStream } from './useAiStream';
 import { btnBase } from './constants';
 import { IconNote, IconClose, IconSend } from './icons';
 import type { Conversation, ChatMsg } from './types';
+import { EVENTS } from '@/core/events/schema';
 
 const CHAT_STORE_KEY = 'andeyunhui.capsule.conversations';
 const CONV_TITLE_MAX = 20;
@@ -88,7 +89,7 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
 
   // 全局流式事件监听（ai-delta / ai-done / ai-error / ai-reasoning-delta），统一抽到 useAiStream
   useAiStream(
-    { prefix: 'ai', deltaMode: 'append', hasReasoning: true },
+    { prefix: EVENTS.chatStream.prefix, deltaMode: 'append', hasReasoning: true },
     { reqRef: activeReqRef, asstRef: asstIdRef, streamConvIdRef, updateMessages: updateStreamMessages, setBusy: setChatBusy },
   );
 

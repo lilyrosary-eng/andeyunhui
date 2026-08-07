@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import { EVENTS } from '@/core/events/schema';
 
 export interface TransferPeer {
   fingerprint: string;
@@ -72,11 +73,11 @@ export function useTransfer() {
       const s = (await invoke('transfer_get_staged').catch(() => [])) as string[];
       setStagedState(s);
     })();
-    listen('transfer-peer-found', (e: { payload: TransferPeer }) => {
+    listen(EVENTS.transfer.peerFound, (e: { payload: TransferPeer }) => {
       const p = e.payload;
       setPeers((prev) => (prev.some((x) => x.fingerprint === p.fingerprint) ? prev : [...prev, p]));
     }).then((u) => offs.push(u));
-    listen('transfer-progress', (e: { payload: TransferProgressItem }) => {
+    listen(EVENTS.transfer.progress, (e: { payload: TransferProgressItem }) => {
       const p = e.payload;
       setProgress((prev) => {
         const next = prev.filter((x) => !(x.session_id === p.session_id && x.file_id === p.file_id));

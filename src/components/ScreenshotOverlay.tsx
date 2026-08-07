@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { X, Save, Undo2, Eraser, Pen, Square, ArrowUpRight, Type, Trash2, StretchVertical } from "lucide-react";
 import { emitDropzoneChange } from "@/components/TransferStationPanel";
+import { EVENTS } from "@/core/events/schema";
 
 interface Win {
   hwnd: number;
@@ -891,7 +892,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
         emitDropzoneChange();
         if (noteIdLocal) {
           import("@tauri-apps/api/event").then(({ emit }) =>
-            emit("screenshot-note-import", { ref, name, noteId: noteIdLocal }),
+            emit(EVENTS.screenshot.noteImport, { ref, name, noteId: noteIdLocal }),
           );
         }
       }

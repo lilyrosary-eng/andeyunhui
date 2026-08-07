@@ -3,6 +3,7 @@ import { listen, type Event } from '@tauri-apps/api/event';
 import { message } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '@/stores/appStore';
 import { dispatchOpenWith } from '../../plugins/_shared/openWithFiles';
+import { EVENTS } from '@/core/events/schema';
 
 // 扩展名 → 模块 id（与 appStore.activeModule 一致）
 const MODULE_BY_EXT: Record<string, string> = {
@@ -53,7 +54,7 @@ export function initOpenWith(): () => void {
     })
     .catch(() => {});
   // 运行时双击文件：监听事件
-  const p = listen('open-with-files', (e: Event<string[]>) => {
+  const p = listen(EVENTS.openWith.files, (e: Event<string[]>) => {
     if (e.payload && e.payload.length) route(e.payload);
   });
   return () => {

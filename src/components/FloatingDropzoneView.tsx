@@ -15,6 +15,7 @@ import {
   saveSourceLang,
   saveTargetLang,
 } from '@/lib/translateLanguages';
+import { EVENTS } from '@/core/events/schema';
 
 // 本地 PaddleOCR 引擎懒加载（与 TransferStationPanel 共享模式）
 let _paddleOcrLoading: Promise<any> | null = null;
@@ -102,7 +103,7 @@ export function FloatingDropzoneView() {
 
   // 后端写入中转站后会 emit `dropzone-changed`，触发面板重新拉取（与图标栏同步）
   useEffect(() => {
-    const un = listen<null>('dropzone-changed', () => {
+    const un = listen<null>(EVENTS.transfer.dropzoneChanged, () => {
       emitDropzoneChange();
     });
     return () => {

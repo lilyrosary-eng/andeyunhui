@@ -26,6 +26,7 @@ import { dispatchOpenWith } from '../plugins/_shared/openWithFiles';
 import { PhysicalPosition } from '@tauri-apps/api/dpi';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
+import { EVENTS } from '@/core/events/schema';
 
 function App() {
   // ====== store 订阅 ======
@@ -121,7 +122,7 @@ function App() {
   // 系统级热键 Ctrl+Shift+S（Rust globalShortcut，应用失焦也能触发）
   // Rust 侧派发 `open-screenshot` 事件到当前窗口
   useEffect(() => {
-    const un = listen<null>('open-screenshot', () => { void startScreenshot(); });
+    const un = listen<null>(EVENTS.screenshot.open, () => { void startScreenshot(); });
     return () => { void un.then((fn) => fn()); };
   }, [startScreenshot]);
 
@@ -268,18 +269,18 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const un = listen<null>('open-clipboard-floating', () => { void openClipboardFloating(); });
+    const un = listen<null>(EVENTS.window.clipboardFloating, () => { void openClipboardFloating(); });
     return () => { void un.then((fn) => fn()); };
   }, [openClipboardFloating]);
 
   useEffect(() => {
-    const un = listen<null>('open-dropzone-floating', () => { void openDropzoneFloating(); });
+    const un = listen<null>(EVENTS.window.dropzoneFloating, () => { void openDropzoneFloating(); });
     return () => { void un.then((fn) => fn()); };
   }, [openDropzoneFloating]);
 
   // Rust 托盘右键 → emit 光标位置，前端建窗并定位显示
   useEffect(() => {
-    const un = listen<{ x: number; y: number }>('open-tray-menu', (e) => {
+    const un = listen<{ x: number; y: number }>(EVENTS.window.trayMenu, (e) => {
       void openTrayMenu(e.payload.x, e.payload.y);
     });
     return () => { void un.then((fn) => fn()); };
@@ -287,7 +288,7 @@ function App() {
 
   // 截图保存后：若触发时正处于某篇笔记页，由覆盖窗口转发事件，在此追加图片到该笔记
   useEffect(() => {
-    const un = listen<{ ref: string; name: string; noteId: string }>('screenshot-note-import', (e) => {
+    const un = listen<{ ref: string; name: string; noteId: string }>(EVENTS.screenshot.noteImport, (e) => {
       const { ref, name, noteId } = e.payload;
       const st = useNotesStore.getState();
       if (st.currentNoteId && st.currentNoteId === noteId && st.setContent) {
@@ -301,7 +302,7 @@ function App() {
   // （ScreenshotOverlay 的 finish 回调也会调 emitDropzoneChange，但 Tauri 事件更可靠：
   // 即便覆盖窗已关闭、finish 未执行也能触发刷新）
   useEffect(() => {
-    const un = listen('dropzone-changed', () => emitDropzoneChange());
+    const un = listen(EVENTS.transfer.dropzoneChanged, () => emitDropzoneChange());
     return () => { void un.then((fn) => fn()); };
   }, []);
 
@@ -383,17 +384,17 @@ function App() {
       initNotes();
       initCleanupRef.current = initFloatingListeners() || (() => {});
     };
-    const offStart = listen<null>('migration-started', () => {
+    const offStart = listen<null>(EVENTS.migration.started, () => {
       window.clearTimeout(initTimer);
       setMigrationPct(0);
       safetyTimer = window.setTimeout(runInit, 5 * 60 * 1000); // 兜底，避免迁移异常导致初始化卡死
     });
-    const offDone = listen<null>('migration-done', () => {
+    const offDone = listen<null>(EVENTS.migration.done, () => {
       window.clearTimeout(safetyTimer);
       setMigrationPct(null);
       runInit();
     });
-    const offProg = listen<{ percent: number }>('migration-progress', (e) => {
+    const offProg = listen<{ percent: number }>(EVENTS.migration.progress, (e) => {
       setMigrationPct(e.payload.percent);
     });
     // 挂载即查询是否正在/即将迁移：若 true 则延后初始化（避免错过 migration-started 事件而提前读半拷贝数据）

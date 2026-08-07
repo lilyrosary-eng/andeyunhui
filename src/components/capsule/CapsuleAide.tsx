@@ -13,6 +13,7 @@ import { useAiStream } from './useAiStream';
 import { btnBase, GOLD } from './constants';
 import { IconClose, IconSend } from './icons';
 import type { Conversation, ChatMsg } from './types';
+import { EVENTS } from '@/core/events/schema';
 
 const AIDE_STORE_KEY = 'andeyunhui.capsule.aide.conversations.v2'; // 升版本清空历史浮岛 AI 编程对话（与 IDE 对齐）
 const CONV_TITLE_MAX = 20;
@@ -85,7 +86,7 @@ function CapsuleAide() {
     aideActiveConvIdRef.current = fresh[0].id;
     aideStreamConvIdRef.current = fresh[0].id;
     try { localStorage.removeItem(AIDE_STORE_KEY); } catch { /* 忽略 */ }
-    emit('capsule-ide-clear-conversations').catch(() => {});
+    emit(EVENTS.chatStream.clearConversations).catch(() => {});
   }, []);
   const newAideConversation = useCallback(() => {
     const id = 'ac' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
@@ -123,7 +124,7 @@ function CapsuleAide() {
   // 跟随 IDE 当前激活模型：IDE 切换模型时广播，浮岛 AI 编程用同一模型
   useEffect(() => {
     let unsub: (() => void) | undefined;
-    listen<{ id: string }>('ai-active-profile-changed', (e) => {
+    listen<{ id: string }>(EVENTS.ai.activeProfileChanged, (e) => {
       const id = e?.payload?.id;
       if (id) setAideProfileId(id);
     }).then((u) => { unsub = u; });
@@ -133,11 +134,11 @@ function CapsuleAide() {
   // 浮岛「AI 编程」流式事件监听（chat / agent 双模式），统一抽到 useAiStream
   // chat 模式：delta 追加 + reasoning；agent 模式：text 整段替换、无 reasoning
   useAiStream(
-    { prefix: 'capsule-ide-chat', deltaMode: 'append', hasReasoning: true },
+    { prefix: EVENTS.chatStream.ideChatPrefix, deltaMode: 'append', hasReasoning: true },
     { reqRef: aideReqRef, asstRef: aideAsstRef, streamConvIdRef: aideStreamConvIdRef, updateMessages: updateAideStreamMessages, setBusy: setAideBusy },
   );
   useAiStream(
-    { prefix: 'capsule-ide-agent', deltaMode: 'replace', hasReasoning: false },
+    { prefix: EVENTS.chatStream.ideAgentPrefix, deltaMode: 'replace', hasReasoning: false },
     { reqRef: aideReqRef, asstRef: aideAsstRef, streamConvIdRef: aideStreamConvIdRef, updateMessages: updateAideStreamMessages, setBusy: setAideBusy },
   );
 
@@ -177,7 +178,7 @@ function CapsuleAide() {
         }
       }, 20000);
       try {
-        await emit('capsule-ide-agent-request', { requestId: reqId, text, profileId: aideProfileId ?? undefined, history });
+        await emit(EVENTS.chatStream.agentRequest, { requestId: reqId, text, profileId: aideProfileId ?? undefined, history });
       } catch (e) {
         clearTimeout(timer);
         aideReqRef.current = null;
@@ -213,7 +214,7 @@ function CapsuleAide() {
       }
     }, 20000);
     try {
-      await emit('capsule-ide-chat-request', { requestId: reqId, text, profileId: aideProfileId, history });
+      await emit(EVENTS.chatStream.chatRequest, { requestId: reqId, text, profileId: aideProfileId, history });
     } catch (e) {
       clearTimeout(timer);
       aideReqRef.current = null;

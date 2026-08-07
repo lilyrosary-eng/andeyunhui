@@ -9,6 +9,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { t } from '@/lib/i18n';
 import { toPlayInfo } from '@/components/capsule/helpers';
 import type { ReceiveRequest, AiProfile, PlayInfo } from '@/components/capsule/types';
+import { EVENTS } from '@/core/events/schema';
 
 /**
  * 浮岛共享状态。子面板通过 `useCapsuleStore` 订阅所需切片，
@@ -190,7 +191,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
   initReceiveListeners: () => {
     const offs: Array<() => void> = [];
     // 收到 transfer-receive-request：自动展开浮岛并跳到传输页，弹出「是否接收」询问
-    listen('transfer-receive-request', (e: { payload: ReceiveRequest }) => {
+    listen(EVENTS.transfer.request, (e: { payload: ReceiveRequest }) => {
       const p = e.payload;
       if (!p?.session_id) return;
       set({ expanded: true, transferOpen: true, receiveReq: p.auto_accept ? get().receiveReq : p });
@@ -201,7 +202,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
         w.setFocus().catch(() => {});
       } catch { /* 窗口已可见则忽略 */ }
       // 通知主窗：接收由浮岛处理，主窗不再弹确认框
-      emit('transfer-receive-capsule-took', { session_id: p.session_id }).catch(() => {});
+      emit(EVENTS.transfer.capsuleTook, { session_id: p.session_id }).catch(() => {});
       get().showToast(
         p.auto_accept
           ? `正在接收 ${p.file_count} 个文件（来自 ${p.sender_alias}）`
@@ -209,14 +210,14 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
       );
     }).then((u) => offs.push(u));
     // 接收请求在别处被确认/拒绝时，同步清除本地弹窗
-    listen('transfer-receive-confirmed', (e: { payload: { session_id: string } }) => {
+    listen(EVENTS.transfer.confirmed, (e: { payload: { session_id: string } }) => {
       const sid = e.payload?.session_id;
       if (sid) {
         const cur = get().receiveReq;
         if (cur && cur.session_id === sid) set({ receiveReq: null });
       }
     }).then((u) => offs.push(u));
-    listen('transfer-receive-declined', (e: { payload: { session_id: string } }) => {
+    listen(EVENTS.transfer.declined, (e: { payload: { session_id: string } }) => {
       const sid = e.payload?.session_id;
       if (sid) {
         const cur = get().receiveReq;
@@ -224,7 +225,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
       }
     }).then((u) => offs.push(u));
     // 接收完成（每个文件 mark_done 触发一次）：提示已存入中转站
-    listen('transfer-received', (e: { payload: { file_name: string; peer_alias: string } }) => {
+    listen(EVENTS.transfer.received, (e: { payload: { file_name: string; peer_alias: string } }) => {
       const p = e.payload;
       if (p?.file_name) get().showToast(`接收完成：${p.file_name} 已存入中转站`);
     }).then((u) => offs.push(u));
