@@ -9,6 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { EVENTS } from "./core/events/schema";
 
 // ========== DOM 构建 ==========
 const root = document.getElementById("root")!;
@@ -501,7 +502,7 @@ bar.addEventListener("mouseleave", () => scheduleAutoHide(800));
 //   未录制 → 显示区域选择覆盖窗（recorder-select）→ 选择后启动录制 → 显示控制台
 //   录制中 → 向控制台发 recorder-toggle 事件 → 停止录制 → 展示结果面板
 // 控制台不自动开始录制，仅显示状态和控制
-listen<null>("recorder-toggle", async () => {
+listen<null>(EVENTS.recorder.toggle, async () => {
   if (isRecording) {
     await stopRecording();
   } else {
@@ -518,7 +519,7 @@ getCurrentWindow().onCloseRequested(() => {
 });
 
 // 监听录屏启动事件：立即刷新状态并复位到「录制中」视图（轮询已在页面加载时启动，此处仅加速首次更新）
-listen<string>("recording-started", async () => {
+listen<string>(EVENTS.recorder.started, async () => {
   backToRecording();
   await refreshStatus(); // 必须先拿到 isRecording=true，否则 scheduleAutoHide 会直接 return
   scheduleAutoHide(3000); // 录制开始后短暂显示，随后自动隐藏
@@ -527,7 +528,7 @@ listen<string>("recording-started", async () => {
 // 录制真正停止后（Rust 在 stop_recording 末尾 emit），直接弹出结果面板。
 // 这是最可靠的触发：无论用户是用控制台「停止」按钮、还是再次按热键停止，
 // 只要录制结束就会带 output_path 触发。失败分支会 emit 空路径 → 弹错误面板。
-listen<string>("recording-stopped", async (e) => {
+listen<string>(EVENTS.recorder.stopped, async (e) => {
   const p = e.payload;
   if (p) {
     // 校验文件确实存在，避免 ffmpeg 静默产出 0 字节时仍显示保存选项
@@ -548,7 +549,7 @@ listen<string>("recording-stopped", async (e) => {
 
 // 停止已生效、ffmpeg 正在后台封装文件：立即显示「录屏文件保存中」占位面板，
 // 绝不静默等待（巨大录屏封装也看得见进度）。
-listen("recording-saving", () => {
+listen(EVENTS.recorder.saving, () => {
   resultTitle.textContent = "正在结束录制…";
   resultStatus.textContent = "录屏文件保存中…";
   resultPanel.style.display = "flex";
@@ -562,12 +563,12 @@ listen("recording-saving", () => {
 });
 
 // 录制过程出错（Rust 在 stop 失败分支 emit），直接弹错误面板
-listen<string>("recording-error", (e) => {
+listen<string>(EVENTS.recorder.error, (e) => {
   showErrorPanel("录屏出错：" + (e.payload || "未知错误"));
 });
 
 // 监听「唤出控制台」事件（热键在控制台已隐藏时触发）：重新显示并安排自动隐藏
-listen("recorder-reveal", () => {
+listen(EVENTS.recorder.reveal, () => {
   scheduleAutoHide(3000);
 });
 

@@ -5,6 +5,7 @@ import ReactDOM from "react-dom/client";
 import { ScreenshotOverlay } from "./components/ScreenshotOverlay";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { EVENTS } from "./core/events/schema";
 import "./index.css";
 // 必须在 index.css 之后导入：用 !important 覆盖其 @layer base 里
 // body 设置的不透明背景（var(--main-panel-bg) ≈ 85% 白），消除触发瞬间「全屏变白」。
@@ -149,7 +150,7 @@ function OverlayApp() {
 
     // 快路径①：截图启动（仅推送 meta，进入透明待加载态，选区交互立即可用）。
     // dev 下覆盖窗在上次关闭后已自我 reload → 监听器就绪，本事件可稳定命中，十字选区秒显、无竞态。
-    const p1 = listen("screenshot-start", (event: any) => {
+    const p1 = listen(EVENTS.screenshot.start, (event: any) => {
       sessionActive = true;
       loaded = false;
       armSafety();
@@ -167,13 +168,13 @@ function OverlayApp() {
     });
 
     // 快路径②：冻结图就绪（后台捕获线程完成）→ 注入截图
-    const p2 = listen("screenshot-ready", (event: any) => {
+    const p2 = listen(EVENTS.screenshot.ready, (event: any) => {
       loadShot(buildMeta(event.payload));
     });
 
     // 快路径③：后台枚举完成的窗口列表 → 仅补充 data.windows（不影响已注入的冻结图 / 选区交互），
     // 使鼠标悬停窗口高亮立即可用，同时避免 list_windows 同步阻塞覆盖窗显示（截图启动卡顿根因）。
-    const p3 = listen("screenshot-windows", (event: any) => {
+    const p3 = listen(EVENTS.screenshot.windows, (event: any) => {
       const wins = event.payload?.windows || [];
       setData((prev) => (prev ? { ...prev, windows: wins } : prev));
     });

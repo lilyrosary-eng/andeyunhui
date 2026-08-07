@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { ensureOverlayWindow } from '@/core/overlayWindow';
+import { EVENTS } from '@/core/events/schema';
 
 // 定义笔记的数据类型（与 Rust 端保持一致）
 export interface NoteInfo {
@@ -119,7 +120,7 @@ export const api = {
     if (win) {
       await win.show().catch(() => {});
       await win.setFocus().catch(() => {});
-      emit('floating-note-opened', noteId).catch(() => {});
+      emit(EVENTS.notes.opened, noteId).catch(() => {});
     }
   },
 

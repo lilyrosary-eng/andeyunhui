@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useI18n } from '@/lib/i18n';
+import { EVENTS } from '@/core/events/schema';
 
 interface ThinkingToggleProps {
   profileId: string | null;
@@ -37,7 +38,7 @@ export function ThinkingToggle({ profileId, disabled, compact }: ThinkingToggleP
   // 接收其它聊天界面切换「思考模式」的事件，保持胶囊 / IDE / 攻防 三处开关实时同步
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen<{ profile_id: string; thinking: boolean }>('ai-thinking-changed', (e) => {
+    listen<{ profile_id: string; thinking: boolean }>(EVENTS.ai.thinkingChanged, (e) => {
       if (e.payload.profile_id === profileId) setThinking(e.payload.thinking);
     })
       .then((u) => {

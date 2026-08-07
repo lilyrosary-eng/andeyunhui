@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import { Pin, Copy, X } from 'lucide-react';
 import { logger } from '@/lib/logger';
 import { t } from '@/lib/i18n';
+import { EVENTS } from '@/core/events/schema';
 
 const appWindow = getCurrentWebviewWindow();
 const AUTO_SAVE_MS = 1000;
@@ -97,7 +98,7 @@ export function FloatingNoteView() {
       if (noteId && titleRef.current) {
         await api.saveNote(noteId, titleRef.current, contentRef.current).catch(() => {});
       }
-      await emit('floating-note-closed', { noteId }).catch(() => {});
+      await emit(EVENTS.notes.closed, { noteId }).catch(() => {});
     })();
     await Promise.race([work, guard]);
   }, [noteId]);

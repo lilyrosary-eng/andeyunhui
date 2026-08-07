@@ -35,6 +35,7 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
 } from '@/components/ui/context-menu';
+import { EVENTS } from '@/core/events/schema';
 
 // ========== 插件错误边界 ==========
 // 防止单个插件崩溃导致整个应用白屏
@@ -126,13 +127,13 @@ export function PluginHost({ onPluginsLoaded, children }: PluginHostProps) {
     boot.__bootProgress?.(40, { text: "准备插件环境", phase: "PHASE 03 / 05" });
 
     // 热插拔：监听 Rust 派发的事件，应用内重载 / 卸载插件（无需重启）
-    listen('plugin-reload', ((e: { payload: string }) =>
+    listen(EVENTS.plugin.reload, ((e: { payload: string }) =>
       void reloadSinglePlugin(e.payload, registry)) as never);
-    listen('plugin-unload', ((e: { payload: string }) =>
+    listen(EVENTS.plugin.unload, ((e: { payload: string }) =>
       unloadSinglePlugin(e.payload, registry)) as never);
     // 文件系统热插拔：Rust notify watcher 检测到 bundled-plugins/ 或 user_plugins/ 变化时
     // 自动重新扫描并加载新增/卸载移除的插件（真正的免重启热插拔）
-    listen('plugin-fs-change', ((e: { payload?: { kind?: string; paths?: string[] } }) => {
+    listen(EVENTS.plugin.fsChange, ((e: { payload?: { kind?: string; paths?: string[] } }) => {
       void (async () => {
         try {
           // 200ms 防抖已在 Rust 侧完成，这里直接触发重扫

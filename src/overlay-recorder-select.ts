@@ -20,6 +20,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { EVENTS } from "./core/events/schema";
 
 // 透明分层窗首帧黑闪根治：把本覆盖窗 WebView2 默认背景设为透明
 // （否则长时隐藏后 show() 首帧露出 WebView2 默认黑底 → 闪黑）。页面挂载即调用一次。
@@ -751,7 +752,7 @@ async function initFromEvent(data: { ox: number; oy: number; scale: number; wind
 }
 
 // 保留事件监听（快速路径：如果事件能到达，立即初始化）
-listen<{ ox: number; oy: number; scale: number; windows?: Win[] }>("recorder-select-ready", (event) => {
+listen<{ ox: number; oy: number; scale: number; windows?: Win[] }>(EVENTS.recorder.selectReady, (event) => {
   void initFromEvent(event.payload);
 });
 
@@ -787,6 +788,6 @@ async function pollInit() {
 void pollInit();
 
 // 接收取消事件（Ctrl+Alt+R 再次按下时触发）
-listen<null>("recorder-select-cancel", () => {
+listen<null>(EVENTS.recorder.selectCancel, () => {
   cancel();
 });

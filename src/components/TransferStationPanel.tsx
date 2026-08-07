@@ -15,6 +15,7 @@ import {
   saveSourceLang,
   saveTargetLang,
 } from '@/lib/translateLanguages';
+import { EVENTS } from '@/core/events/schema';
 
 // 本地 PaddleOCR 引擎懒加载（与 CodeMirror/TipTap 同模式：read_external_dep_file + new Function，
 // 在真实 window 全局作用域执行，挂载到 window.__EXT_PADDLEOCR__）。
@@ -107,7 +108,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
   const [savingItems, setSavingItems] = useState<{ tempId: string; name: string; label: string }[]>([]);
   useEffect(() => {
     const unSaving = listen<{ tempId: string; name: string; label: string }>(
-      'dropzone-saving',
+      EVENTS.transfer.dropzoneSaving,
       (e) => {
         const p = e.payload;
         setSavingItems((prev) =>
@@ -115,7 +116,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
         );
       },
     );
-    const unDone = listen<{ tempId: string }>('dropzone-saving-done', (e) => {
+    const unDone = listen<{ tempId: string }>(EVENTS.transfer.dropzoneSavingDone, (e) => {
       const t = e.payload.tempId;
       setSavingItems((prev) => prev.filter((x) => x.tempId !== t));
     });

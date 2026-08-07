@@ -31,6 +31,7 @@ import { useAgentStore, buildAgentInstructions, extractToolCall } from '../store
 import { guessReason } from './aiErrorReason';
 import { uid } from '../../lib/uid';
 import { buildSemanticContext, ingestMemory } from '../stores/semanticMemory';
+import { EVENTS } from '@/core/events/schema';
 
 const SYSTEM_PROMPT =
   '你是一个 helpful 的 AI 助手，请用简体中文回答；必要时用 ``` 代码块给出示例并简述要点。';
@@ -137,7 +138,7 @@ export function useAiStream(): UseAiStreamResult {
     const unAll: UnlistenFn[] = [];
 
     (async () => {
-      const u1 = await listen<{ requestId: string; delta?: string }>('ai-delta', (e) => {
+      const u1 = await listen<{ requestId: string; delta?: string }>(EVENTS.ai.delta, (e) => {
         if (e.payload.requestId !== reqRef.current) return;
         const id = asstRef.current;
         if (!id) return;
@@ -151,7 +152,7 @@ export function useAiStream(): UseAiStreamResult {
         );
       });
 
-      const u2 = await listen<{ requestId: string; delta: string }>('ai-reasoning-delta', (e) => {
+      const u2 = await listen<{ requestId: string; delta: string }>(EVENTS.ai.reasoning, (e) => {
         if (e.payload.requestId !== reqRef.current || !asstRef.current) return;
         const id = asstRef.current;
         const convId = streamConvRef.current;
@@ -163,12 +164,12 @@ export function useAiStream(): UseAiStreamResult {
         );
       });
 
-      const u3 = await listen<{ requestId: string }>('ai-done', (e) => {
+      const u3 = await listen<{ requestId: string }>(EVENTS.ai.done, (e) => {
         if (e.payload.requestId !== reqRef.current) return;
         finish();
       });
 
-      const u4 = await listen<{ requestId: string; error: string }>('ai-error', (e) => {
+      const u4 = await listen<{ requestId: string; error: string }>(EVENTS.ai.error, (e) => {
         if (e.payload.requestId !== reqRef.current) return;
         finish(e.payload.error);
       });

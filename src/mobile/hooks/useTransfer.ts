@@ -15,6 +15,7 @@ import { listen } from '@tauri-apps/api/event';
 import { isAndroid } from '@/platform/isMobile';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
+import { EVENTS } from '@/core/events/schema';
 
 export interface TransferPeer {
   fingerprint: string;
@@ -204,14 +205,14 @@ export function useTransfer() {
       setSaveDir(sd);
     })();
 
-    listen('transfer-peer-found', (e: { payload: TransferPeer }) => {
+    listen(EVENTS.transfer.peerFound, (e: { payload: TransferPeer }) => {
       const p = e.payload;
       setPeers((prev) =>
         prev.some((x) => x.fingerprint === p.fingerprint) ? prev : [...prev, p],
       );
     }).then((u) => offs.push(u));
 
-    listen('transfer-progress', (e: { payload: TransferProgressItem }) => {
+    listen(EVENTS.transfer.progress, (e: { payload: TransferProgressItem }) => {
       const p = e.payload;
       setProgress((prev) => {
         const next = prev.filter(
@@ -235,7 +236,7 @@ export function useTransfer() {
     }).then((u) => offs.push(u));
 
     // 接收请求：入队待用户确认（auto_accept=true 时也入队作 UI 提示，后端已自动建会话）
-    listen('transfer-receive-request', (e: { payload: ReceiveRequest }) => {
+    listen(EVENTS.transfer.request, (e: { payload: ReceiveRequest }) => {
       const p = e.payload;
       if (!p?.session_id) return;
       setReceiveRequests((q) =>

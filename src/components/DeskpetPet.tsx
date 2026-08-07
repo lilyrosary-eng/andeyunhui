@@ -8,6 +8,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { storage } from "../core/storage";
 import { KEYS } from "../core/storage/keys";
+import { EVENTS } from "../core/events/schema";
 
 // 浮窗基础尺寸（scale=1 时）：恰好包住桌宠的小方框，绝不做全屏透明页（否则干扰截图选区）
 const WIN_W = 150;
@@ -444,7 +445,7 @@ function VideoCanvas({
       .then((m) => (m.getCurrentWebview() as any).openDevtools?.())
       .catch(() => {});
   if (new URLSearchParams(location.search).has("devtools")) tryOpenDevtools();
-  void listen("deskpet:open-devtools", () => tryOpenDevtools());
+  void listen(EVENTS.deskpet.openDevtools, () => tryOpenDevtools());
 })();
 
 export function DeskpetPet() {
@@ -544,7 +545,7 @@ export function DeskpetPet() {
         console.warn("[桌宠] 直读路径失败，回退事件通道:", e);
       }
       // 兜底：请插件经事件中继（插件在主窗，invoke 权限确定；事件广播不需要权限）
-      emit("deskpet:request-asset", { items: [{ key, rel: asset.rel, mime: asset.mime }] }).catch(() => {});
+      emit(EVENTS.deskpet.requestAsset, { items: [{ key, rel: asset.rel, mime: asset.mime }] }).catch(() => {});
       setTimeout(() => {
         if (!assetsRef.current[key]) {
           setStatus("素材加载失败（请查看控制台 [桌宠] 日志）");
@@ -579,8 +580,8 @@ export function DeskpetPet() {
     // 同步记录初始窗口逻辑坐标，使首条鼠标事件即可算出正确朝向（避免开局因 winPosRef 仍为 {0,0} 而转向错误）
     winPosRef.current = { x: Math.max(0, sw - WIN_W - 40), y: Math.max(0, sh - WIN_H - 60) };
     // 向插件请求最新 manifest（插件从 localStorage 回复）；当前状态素材由下方 [manifest,stateIndex] 效应加载
-    emit("deskpet:request-manifest").catch(() => {});
-    emit("deskpet:request-settings").catch(() => {});
+    emit(EVENTS.deskpet.requestManifest).catch(() => {});
+    emit(EVENTS.deskpet.requestSettings).catch(() => {});
     // 预加载 walk/sleep 视频，保证单击 / 夜间播放即时（未加载时会短暂显示兜底小球）
     void loadAsset("walk");
     void loadAsset("sleep");
@@ -590,7 +591,7 @@ export function DeskpetPet() {
 
   // 接收设置（来自面板经全局 emit，或插件回复 request-settings）
   useEffect(() => {
-    const un = listen<DeskpetSettings>("deskpet:settings", (e) => {
+    const un = listen<DeskpetSettings>(EVENTS.deskpet.settings, (e) => {
       const p = e.payload;
       if (!p) return;
       const next: DeskpetSettings = {
@@ -611,7 +612,7 @@ export function DeskpetPet() {
 
   // 接收 manifest（设置面板下发 / 插件回复请求）
   useEffect(() => {
-    const un = listen<DeskpetManifest>("deskpet:manifest", (e) => {
+    const un = listen<DeskpetManifest>(EVENTS.deskpet.manifest, (e) => {
       const m = e.payload;
       // 忽略插件回发的陈旧清单（引用已更名的 idle1/idle2），保留浮窗本地已修正的缺省清单
       if (m && Array.isArray(m.states) && m.states.length > 0 && !isLegacyDeskpetManifest(m)) {
@@ -631,7 +632,7 @@ export function DeskpetPet() {
 
   // 兜底素材通道：插件在主窗经事件中继推送 asset:// URL（主路直读失败时启用，事件广播不需权限）
   useEffect(() => {
-    const un = listen<{ key: string; url: string }>("deskpet:asset", (e) => {
+    const un = listen<{ key: string; url: string }>(EVENTS.deskpet.asset, (e) => {
       const { key, url } = e.payload;
       if (key && url && !assetsRef.current[key]) {
         applyAssetUrl(key, url);
@@ -873,7 +874,7 @@ export function DeskpetPet() {
 
     let logged = false;
     const unDevice = listen<{ t: string; x?: number; y?: number; key?: string }>(
-      "device-changed",
+      EVENTS.deskpet.deviceChanged,
       (e) => {
         if (!logged) {
           logged = true;

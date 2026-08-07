@@ -7,8 +7,9 @@ import { LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { invoke } from '@tauri-apps/api/core';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
+import { EVENTS } from '@/core/events/schema';
 
-const LYRICS_EVENT = 'lyrics-update';
+const LYRICS_EVENT = EVENTS.lyrics.update;
 const LOCK_ICON_SIZE = 18;
 
 /** 歌词字体大小默认值，可通过事件同步更新 */
@@ -46,7 +47,7 @@ export function LyricsWidget() {
   // 监听样式配置更新事件
   useEffect(() => {
     const unlisten = listen<{ fontSize?: number; showNextLine?: boolean }>(
-      'lyrics-style-update',
+      EVENTS.lyrics.styleUpdate,
       (event) => {
         if (event.payload.fontSize !== undefined) setFontSize(event.payload.fontSize);
         if (event.payload.showNextLine !== undefined) setShowNextLine(event.payload.showNextLine);
@@ -62,7 +63,7 @@ export function LyricsWidget() {
 
   // 监听锁定状态变更（由主面板或本窗口的锁定按钮触发，保证两端按钮同步）
   useEffect(() => {
-    const unlisten = listen<{ locked: boolean }>('lyrics-lock-changed', (event) => {
+    const unlisten = listen<{ locked: boolean }>(EVENTS.lyrics.lockChanged, (event) => {
       setLocked(event.payload.locked);
     });
     return () => { unlisten.then((fn) => fn()); };

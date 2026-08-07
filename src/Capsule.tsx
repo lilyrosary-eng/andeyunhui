@@ -38,6 +38,7 @@ import {
 } from '@/components/capsule/icons';
 import { toPlayInfo, weatherLabel, fetchJson } from '@/components/capsule/helpers';
 import type { PlayInfo, ReceiveRequest } from '@/components/capsule/types';
+import { EVENTS } from '@/core/events/schema';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 
@@ -483,7 +484,7 @@ export default function Capsule() {
     // 展开前置门控：在 setExpanded(true) 之前置 panelReady=false，确保展开后
     // 首帧渲染就不包含子面板——规避 36→470 过渡期旧窗高裁剪标题栏的问题。
     // 闭包内用 getState() 读最新值（替代原 expandedRef/keepOpenRef 双写镜像）。
-    listen<boolean>('capsule:expand', (e) => {
+    listen<boolean>(EVENTS.deskpet.expand, (e) => {
       const s = useCapsuleStore.getState();
       if (e.payload) {
         if (hoverLockRef.current) return; // 收起锁定：悬停不自动展开，直到用户点击胶囊
@@ -493,7 +494,7 @@ export default function Capsule() {
       }
       s.setExpanded(!!e.payload);
     }).then((f) => unsubs.push(f));
-    listen<Record<string, unknown>>('now-playing', (e) => {
+    listen<Record<string, unknown>>(EVENTS.deskpet.nowPlaying, (e) => {
       const t0 = __DEV ? performance.now() : 0;
       // 双源合并 / 会话列表 / 上屏卡片派生统一由 store 处理；壳仅保留 DEV 探针计时。
       useCapsuleStore.getState().onNowPlaying(e.payload);
@@ -605,7 +606,7 @@ export default function Capsule() {
         s.setSearchOpen(false);
         s.setTransferOpen(!s.transferOpen);
       } else if (kind === 'screenshot') {
-        await emit('open-screenshot');
+        await emit(EVENTS.screenshot.open);
       } else if (kind === 'record') {
         await invoke('show_recorder_select');
       } else if (kind === 'dropzone' || kind === 'clipboard') {

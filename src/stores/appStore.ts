@@ -5,6 +5,7 @@ import { logger } from '@/lib/logger';
 import type { PluginRegistry } from '@/core/pluginRegistry';
 import { useNotesStore } from './notesStore';
 import { useFloatingNoteStore } from './floatingNoteStore';
+import { EVENTS } from '@/core/events/schema';
 
 /**
  * 应用域状态：模块导航、插件 registry、编辑器设置。
@@ -80,7 +81,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   initFloatingNoteListeners: () => {
     // 浮窗打开 → 加入集合，若当前编辑的是该笔记则清空编辑器
-    const unlistenOpen = listen<string>('floating-note-opened', (event) => {
+    const unlistenOpen = listen<string>(EVENTS.notes.opened, (event) => {
       const id = event.payload;
       useFloatingNoteStore.getState().addFloating(id);
       const { currentNoteId } = useNotesStore.getState();
@@ -90,7 +91,7 @@ export const useAppStore = create<AppState>((set) => ({
     });
 
     // 浮窗关闭 → 从集合移除 + 刷新笔记列表
-    const unlistenClose = listen<{ noteId: string }>('floating-note-closed', (event) => {
+    const unlistenClose = listen<{ noteId: string }>(EVENTS.notes.closed, (event) => {
       const { noteId } = event.payload;
       useFloatingNoteStore.getState().removeFloating(noteId);
       api.getAllNotes().then(data => {
