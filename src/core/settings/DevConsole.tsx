@@ -8,6 +8,8 @@ import {
   ChevronUp,
   ChevronDown,
 } from 'lucide-react';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 // ========== 类型 ==========
 type OutputKind = 'in' | 'out' | 'err' | 'sys';
@@ -60,12 +62,7 @@ const HELP_TEXT = `开发者控制台 · 热指令列表
 export function DevConsole() {
   const [input, setInput] = useState('');
   const [history, setHistory] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem('dev_console_history');
-      return raw ? JSON.parse(raw) : [];
-    } catch {
-      return [];
-    }
+    return storage.getJSON<string[]>(KEYS.desktop.devConsoleHistory.key, []);
   });
   const [historyIdx, setHistoryIdx] = useState(-1);
   const [outputs, setOutputs] = useState<OutputLine[]>([
@@ -81,7 +78,7 @@ export function DevConsole() {
 
   // 持久化历史
   useEffect(() => {
-    localStorage.setItem('dev_console_history', JSON.stringify(history.slice(-50)));
+    storage.setJSON(KEYS.desktop.devConsoleHistory.key, history.slice(-50));
   }, [history]);
 
   // 自动滚动到底部
@@ -352,7 +349,7 @@ export function DevConsole() {
   const clearHistory = () => {
     setHistory([]);
     setHistoryIdx(-1);
-    localStorage.removeItem('dev_console_history');
+    storage.remove(KEYS.desktop.devConsoleHistory.key);
     pushOutput('sys', '已清空命令历史');
   };
 

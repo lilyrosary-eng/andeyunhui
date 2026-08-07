@@ -6,6 +6,8 @@ import { api } from '@/lib/api';
 import { useNotesStore } from '@/stores/notesStore';
 import { useAppStore } from '@/stores/appStore';
 import { useI18n } from '@/lib/i18n';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 import type { RichTextEditorHandle } from './RichTextEditor';
 
 // 富文本编辑器（TipTap + prosemirror + 转换逻辑，约 300KB+）改为懒加载：
@@ -221,8 +223,8 @@ export function NotesEditor() {
     }
 
     // 读取笔记模块专属设置中的润色风格 / 篇幅（与 NoteSettingsPanel 的 localStorage key 对齐）
-    const style = localStorage.getItem('ai_polish_style') || 'keep';
-    const length = localStorage.getItem('ai_polish_length') || 'keep';
+    const style = storage.getString(KEYS.aiPolish.style.key, 'keep');
+    const length = storage.getString(KEYS.aiPolish.length.key, 'keep');
     const styleMap: Record<string, string> = {
       keep: '保持原有风格',
       concise: '更简洁凝练',

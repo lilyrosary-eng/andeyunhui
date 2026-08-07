@@ -13,6 +13,8 @@ import { jaJP } from './locales/ja-JP';
 import { koKR } from './locales/ko-KR';
 import { deDE } from './locales/de-DE';
 import { frFR } from './locales/fr-FR';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 export type Language = 'zh-CN' | 'zh-TW' | 'en-US' | 'ja-JP' | 'ko-KR' | 'de-DE' | 'fr-FR';
 
@@ -39,17 +41,14 @@ const DICTS: Record<Language, Dict> = {
   'fr-FR': frFR,
 };
 
-const STORAGE_KEY = 'language';
 /** 语言切换事件：同一窗口内跨 Provider 实例同步 */
 const LANG_EVENT = 'app-language-change';
 const FALLBACK: Language = 'zh-CN';
 
 /** 依据 localStorage / 浏览器语言推断默认语言 */
 function detectDefault(): Language {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY) as Language | null;
-    if (saved && DICTS[saved]) return saved;
-  } catch { /* localStorage 不可用则回退检测 */ }
+  const saved = storage.getString(KEYS.i18n.language.key, '') as Language;
+  if (saved && DICTS[saved]) return saved;
   const nav = (typeof navigator !== 'undefined' ? navigator.language : '') || '';
   const low = nav.toLowerCase();
   if (low.startsWith('zh')) {
@@ -72,9 +71,7 @@ export function getLanguage(): Language {
 export function setLanguage(lang: Language) {
   if (!DICTS[lang] || lang === currentLang) return;
   currentLang = lang;
-  try {
-    localStorage.setItem(STORAGE_KEY, lang);
-  } catch { /* 忽略持久化失败 */ }
+  storage.setString(KEYS.i18n.language.key, lang);
   if (typeof document !== 'undefined') {
     document.documentElement.setAttribute('lang', lang);
   }

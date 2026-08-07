@@ -2,10 +2,11 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Pin, X, Clipboard, Search, Lock, ImageIcon } from 'lucide-react';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 const win = getCurrentWindow();
 
-const CLIP_STORAGE_KEY = 'clipboard_history_v1';
 const MAX_IMAGE_HISTORY = 5;
 
 interface ClipItem {
@@ -70,7 +71,7 @@ export function FloatingClipboardView() {
   // 从 localStorage 加载文本历史
   const loadFromStorage = useCallback(() => {
     try {
-      const saved = localStorage.getItem(CLIP_STORAGE_KEY);
+      const saved = storage.getString(KEYS.desktop.clipStorage.key, '');
       if (saved) {
         const parsed: ClipItem[] = JSON.parse(saved);
         setItems(prev => {
@@ -88,7 +89,7 @@ export function FloatingClipboardView() {
   useEffect(() => {
     loadFromStorage();
     const onStorage = (e: StorageEvent) => {
-      if (e.key === CLIP_STORAGE_KEY) loadFromStorage();
+      if (e.key === KEYS.desktop.clipStorage.key) loadFromStorage();
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -222,11 +223,11 @@ export function FloatingClipboardView() {
     setItems(prev => prev.filter(i => i.id !== itemId));
     setContextMenu(null);
     try {
-      const saved = localStorage.getItem(CLIP_STORAGE_KEY);
+      const saved = storage.getString(KEYS.desktop.clipStorage.key, '');
       if (saved) {
         const parsed: ClipItem[] = JSON.parse(saved);
         const updated = parsed.filter(i => i.id !== itemId);
-        localStorage.setItem(CLIP_STORAGE_KEY, JSON.stringify(updated));
+        storage.setJSON(KEYS.desktop.clipStorage.key, updated);
       }
     } catch { /* ignore */ }
   }, []);

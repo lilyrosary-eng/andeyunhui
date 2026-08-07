@@ -5,6 +5,8 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { invoke } from '@tauri-apps/api/core';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 const LYRICS_EVENT = 'lyrics-update';
 const LOCK_ICON_SIZE = 18;
@@ -19,12 +21,11 @@ export function LyricsWidget() {
   const [locked, setLocked] = useState(false);
   const [showLockIcon, setShowLockIcon] = useState(false);
   const [fontSize, setFontSize] = useState(() => {
-    const saved = localStorage.getItem('music_lyrics_font_size');
+    const saved = storage.getString(KEYS.desktop.lyricsFontSize.key, '');
     return saved ? parseInt(saved, 10) : DEFAULT_FONT_SIZE;
   });
   const [showNextLine, setShowNextLine] = useState(() => {
-    const saved = localStorage.getItem('music_lyrics_show_next_line');
-    return saved !== null ? saved === 'true' : true;
+    return storage.getString(KEYS.desktop.lyricsShowNext.key, 'true') === 'true';
   });
   const lockTimerRef = useRef<ReturnType<typeof setTimeout>>(0);
   // 记录上一次已保存的位置，避免位置未变化时每 2 秒无谓写盘并打印日志

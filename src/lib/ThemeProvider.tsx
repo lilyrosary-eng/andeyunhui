@@ -1,6 +1,8 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode, type RefObject } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { isAndroid } from '../platform/isMobile';
+import { storage } from '../core/storage';
+import { KEYS } from '../core/storage/keys';
 
 type Theme = 'system' | 'light' | 'dark';
 
@@ -122,47 +124,47 @@ function applyThemePanelColor(colorName: string, resolved: 'light' | 'dark') {
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => {
-    return (localStorage.getItem('theme') as Theme) || 'system';
+    return (storage.getString(KEYS.theme.theme.key, '') as Theme) || 'system';
   });
   const [resolved, setResolved] = useState<'light' | 'dark'>(() => resolveTheme(theme));
   const [themeColor, setThemeColorState] = useState<string>(() => {
-    return localStorage.getItem('themeColor') || '默认';
+    return storage.getString(KEYS.theme.themeColor.key, '') || '默认';
   });
   const [elementColor, setElementColorState] = useState<string>(() => {
-    return localStorage.getItem('elementColor') || '默认';
+    return storage.getString(KEYS.theme.elementColor.key, '') || '默认';
   });
   const [reverseColor, setReverseColorState] = useState<boolean>(() => {
-    return localStorage.getItem('reverseColor') === 'true';
+    return storage.getString(KEYS.theme.reverseColor.key, '') === 'true';
   });
   const [zoom, setZoomState] = useState<number>(() => {
-    return Number(localStorage.getItem('zoom')) || 100;
+    return Number(storage.getString(KEYS.theme.zoom.key, '')) || 100;
   });
   const [panelOpacity, setPanelOpacityState] = useState<number>(() => {
-    return Number(localStorage.getItem('panelOpacity')) || 80;
+    return Number(storage.getString(KEYS.theme.panelOpacity.key, '')) || 80;
   });
   const [fontFamily, setFontFamilyState] = useState<string>(() => {
-    return localStorage.getItem('fontFamily') || '系统默认';
+    return storage.getString(KEYS.theme.fontFamily.key, '') || '系统默认';
   });
   const [bgImage, setBgImageState] = useState<string | null>(() => {
-    try { return localStorage.getItem('appBgImage') || null; } catch { return null; }
+    return storage.getString(KEYS.theme.appBgImage.key, '') || null;
   });
   const [bgBlur, setBgBlurState] = useState<number>(() => {
-    try { return Number(localStorage.getItem('appBgBlur')) || 0; } catch { return 0; }
+    return Number(storage.getString(KEYS.theme.appBgBlur.key, '')) || 0;
   });
   const [bgAngle, setBgAngleState] = useState<number>(() => {
-    try { return Number(localStorage.getItem('appBgAngle')) || 0; } catch { return 0; }
+    return Number(storage.getString(KEYS.theme.appBgAngle.key, '')) || 0;
   });
   const [bgFlip, setBgFlipState] = useState<boolean>(() => {
-    try { return localStorage.getItem('appBgFlip') === '1'; } catch { return false; }
+    return storage.getString(KEYS.theme.appBgFlip.key, '') === '1';
   });
   const [bgScrub, setBgScrubState] = useState<boolean>(() => {
-    try { return localStorage.getItem('appBgScrub') === '1'; } catch { return false; }
+    return storage.getString(KEYS.theme.appBgScrub.key, '') === '1';
   });
   // 视频背景：用 object URL，刷新后失效（不持久化）；与 bgImage 互斥，由调用方在切换时清理另一类型
   const [bgVideo, setBgVideoState] = useState<string | null>(null);
   // 视频背景是否跨重启保留（存 IndexedDB）：默认关，用户自行决定
   const [bgVideoPersist, setBgVideoPersistState] = useState<boolean>(() => {
-    try { return localStorage.getItem('appBgVideoPersist') === '1'; } catch { return false; }
+    return storage.getString(KEYS.theme.appBgVideoPersist.key, '') === '1';
   });
 
   // resolved 的 ref，供 useCallback 内读取最新值而不触发依赖变化
@@ -175,7 +177,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const setTheme = useCallback((t: Theme) => {
     setThemeState(t);
-    localStorage.setItem('theme', t);
+    storage.setString(KEYS.theme.theme.key, t);
     const r = resolveTheme(t);
     setResolved(r);
     applyThemeClass(r);
@@ -183,35 +185,35 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const setThemeColor = useCallback((color: string) => {
     setThemeColorState(color);
-    localStorage.setItem('themeColor', color);
+    storage.setString(KEYS.theme.themeColor.key, color);
     applyThemePanelColor(color, resolvedRef.current);
   }, []);
 
   const setElementColor = useCallback((color: string) => {
     setElementColorState(color);
-    localStorage.setItem('elementColor', color);
+    storage.setString(KEYS.theme.elementColor.key, color);
     applyElementColor(color, resolvedRef.current);
   }, []);
 
   const setReverseColor = useCallback((val: boolean) => {
     setReverseColorState(val);
-    localStorage.setItem('reverseColor', String(val));
+    storage.setString(KEYS.theme.reverseColor.key, String(val));
   }, []);
 
   const setZoom = useCallback((val: number) => {
     setZoomState(val);
-    localStorage.setItem('zoom', String(val));
+    storage.setString(KEYS.theme.zoom.key, String(val));
   }, []);
 
   const setPanelOpacity = useCallback((val: number) => {
     setPanelOpacityState(val);
-    localStorage.setItem('panelOpacity', String(val));
+    storage.setString(KEYS.theme.panelOpacity.key, String(val));
     document.documentElement.style.setProperty('--panel-opacity', String(val / 100));
   }, []);
 
   const setFontFamily = useCallback((val: string) => {
     setFontFamilyState(val);
-    localStorage.setItem('fontFamily', val);
+    storage.setString(KEYS.theme.fontFamily.key, val);
     if (val === '系统默认') {
       document.body.style.fontFamily = '';
     } else {
@@ -221,30 +223,28 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const setBgImage = useCallback((val: string | null) => {
     setBgImageState(val);
-    try {
-      if (val) localStorage.setItem('appBgImage', val);
-      else localStorage.removeItem('appBgImage');
-    } catch { /* 忽略持久化失败 */ }
+    if (val) storage.setString(KEYS.theme.appBgImage.key, val);
+    else storage.remove(KEYS.theme.appBgImage.key);
   }, []);
 
   const setBgBlur = useCallback((val: number) => {
     setBgBlurState(val);
-    try { localStorage.setItem('appBgBlur', String(val)); } catch { /* 忽略持久化失败 */ }
+    storage.setString(KEYS.theme.appBgBlur.key, String(val));
   }, []);
 
   const setBgAngle = useCallback((val: number) => {
     setBgAngleState(val);
-    try { localStorage.setItem('appBgAngle', String(val)); } catch { /* 忽略持久化失败 */ }
+    storage.setString(KEYS.theme.appBgAngle.key, String(val));
   }, []);
 
   const setBgFlip = useCallback((val: boolean) => {
     setBgFlipState(val);
-    try { localStorage.setItem('appBgFlip', val ? '1' : '0'); } catch { /* 忽略持久化失败 */ }
+    storage.setString(KEYS.theme.appBgFlip.key, val ? '1' : '0');
   }, []);
 
   const setBgScrub = useCallback((val: boolean) => {
     setBgScrubState(val);
-    try { localStorage.setItem('appBgScrub', val ? '1' : '0'); } catch { /* 忽略持久化失败 */ }
+    storage.setString(KEYS.theme.appBgScrub.key, val ? '1' : '0');
   }, []);
 
   // 视频背景不持久化（object URL 刷新即失效）；仅维护状态，互斥清理由调用方负责。
@@ -259,14 +259,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // 保留开关：持久化开关本身；关闭时一并清除已保存的视频路径
   const setBgVideoPersist = useCallback((val: boolean) => {
     setBgVideoPersistState(val);
-    try {
-      if (val) {
-        localStorage.setItem('appBgVideoPersist', '1');
-      } else {
-        localStorage.setItem('appBgVideoPersist', '0');
-        localStorage.removeItem('appBgVideoPath');
-      }
-    } catch { /* 忽略持久化失败 */ }
+    if (val) {
+      storage.setString(KEYS.theme.appBgVideoPersist.key, '1');
+    } else {
+      storage.setString(KEYS.theme.appBgVideoPersist.key, '0');
+      storage.remove(KEYS.theme.appBgVideoPath.key);
+    }
   }, []);
 
   // 启动时若开启了“保留”，读取上次选择的视频文件路径，经 asset 协议重建为可用 URL。
@@ -276,10 +274,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (restoredRef.current) return;
     restoredRef.current = true;
     if (!bgVideoPersist) return;
-    try {
-      const p = localStorage.getItem('appBgVideoPath');
-      if (p) setBgVideo(convertFileSrc(p));
-    } catch { /* 读取失败则静默不恢复，后果由用户承担 */ }
+    const p = storage.getString(KEYS.theme.appBgVideoPath.key, '');
+    if (p) setBgVideo(convertFileSrc(p));
   }, [bgVideoPersist, setBgVideo]);
 
   // 切换自定义背景时，标记 <html> 以便 CSS 让主面板背景透明，露出背景层

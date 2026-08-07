@@ -7,6 +7,8 @@ import { logger } from '@/lib/logger';
 import { useAppStore } from '@/stores/appStore';
 import { ModuleSettingsPanel } from '@/components/ModuleSettingsPanel';
 import { useI18n } from '@/lib/i18n';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 // AI 润色选项（key 与 NotesEditor 的 localStorage / prompt 映射保持一致，labelKey 走 i18n）
 const POLISH_STYLE_OPTIONS: { value: string; labelKey: string }[] = [
@@ -34,16 +36,16 @@ export function NoteSettingsPanel() {
   const [autoSaveInterval, setAutoSaveInterval] = useState([30]);
 
   // AI 润色偏好（持久化到 localStorage，NotesEditor 点击润色时读取）
-  const [polishStyle, setPolishStyle] = useState(() => localStorage.getItem('ai_polish_style') || 'keep');
-  const [polishLength, setPolishLength] = useState(() => localStorage.getItem('ai_polish_length') || 'keep');
+  const [polishStyle, setPolishStyle] = useState(() => storage.getString(KEYS.aiPolish.style.key, 'keep'));
+  const [polishLength, setPolishLength] = useState(() => storage.getString(KEYS.aiPolish.length.key, 'keep'));
 
   const handlePolishStyle = (v: string) => {
     setPolishStyle(v);
-    localStorage.setItem('ai_polish_style', v);
+    storage.setString(KEYS.aiPolish.style.key, v);
   };
   const handlePolishLength = (v: string) => {
     setPolishLength(v);
-    localStorage.setItem('ai_polish_length', v);
+    storage.setString(KEYS.aiPolish.length.key, v);
   };
 
   // 加载自动保存配置
