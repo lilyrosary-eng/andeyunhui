@@ -16,6 +16,8 @@ import { api, type ArchiveEntry, type PluginManifest } from '@/lib/api';
 import { useTheme } from '@/lib/ThemeProvider';
 import { useSystemFonts } from '@/lib/useSystemFonts';
 import { previewBootScreen } from '@/lib/bootPreview';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 // 茑萝子模块列表：供「彻底删除模块（连同文件）」按钮选择目标（id 与插件 manifest 一致）
 const NIAOLUO_MODULES: Array<{ id: string; name: string }> = [
@@ -53,21 +55,16 @@ const DEFAULT_SHORTCUTS: ShortcutDef[] = [
 ];
 
 function loadShortcuts(): ShortcutDef[] {
-  try {
-    const raw = localStorage.getItem('shortcuts');
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        logger.shortcuts.configLoaded(parsed.length);
-        return parsed;
-      }
-    }
-  } catch { /* 解析失败使用默认值 */ }
+  const parsed = storage.getJSON<ShortcutDef[]>(KEYS.desktop.shortcuts.key, DEFAULT_SHORTCUTS);
+  if (Array.isArray(parsed) && parsed.length > 0) {
+    logger.shortcuts.configLoaded(parsed.length);
+    return parsed;
+  }
   return DEFAULT_SHORTCUTS;
 }
 
 function saveShortcuts(shortcuts: ShortcutDef[]) {
-  localStorage.setItem('shortcuts', JSON.stringify(shortcuts));
+  storage.setJSON(KEYS.desktop.shortcuts.key, shortcuts);
 }
 
 
@@ -294,11 +291,11 @@ export function GlobalSettingsPanel() {
   const setActiveModule = useAppStore((s) => s.setActiveModule);
   const activeModule = useAppStore((s) => s.activeModule);
   const [ragVisible, setRagVisible] = useState<boolean>(() => {
-    try { return localStorage.getItem('niaoluo:rag-visible') === '1'; } catch { return false; }
+    return storage.getString(KEYS.niaoluo.ragVisible.key, '0') === '1';
   });
   const toggleRagModule = (val: boolean) => {
     setRagVisible(val);
-    try { localStorage.setItem('niaoluo:rag-visible', val ? '1' : '0'); } catch { /* ignore */ }
+    storage.setString(KEYS.niaoluo.ragVisible.key, val ? '1' : '0');
     window.dispatchEvent(new CustomEvent('niaoluo-rag-visibility'));
     if (!val && activeModule === 'rag') setActiveModule('extensions');
   };
@@ -732,7 +729,7 @@ export function GlobalSettingsPanel() {
                           onClick={() => {
                             setBgImage(null);
                             setBgVideo(null);
-                            try { localStorage.removeItem('appBgVideoPath'); } catch {}
+                            storage.remove(KEYS.theme.appBgVideoPath.key);
                           }}
                           className="btn-press px-3 py-1.5 rounded-lg border border-red-200/50 dark:border-red-500/30 text-sm text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
                         >
@@ -755,7 +752,7 @@ export function GlobalSettingsPanel() {
                               if (typeof selected !== 'string') return;
                               setBgVideo(convertFileSrc(selected));
                               setBgImage(null);
-                              try { localStorage.setItem('appBgVideoPath', selected); } catch {}
+                              storage.setString(KEYS.theme.appBgVideoPath.key, selected);
                             })
                             .catch(() => {});
                         }}

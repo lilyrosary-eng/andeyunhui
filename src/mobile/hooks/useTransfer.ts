@@ -13,6 +13,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isAndroid } from '@/platform/isMobile';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 export interface TransferPeer {
   fingerprint: string;
@@ -145,25 +147,25 @@ export function useTransfer() {
   useEffect(() => {
     // 读取此前未消费的分享缓存（MobileApp 挂载早于本组件，缓存已写入）
     try {
-      const raw = localStorage.getItem('andeyunhui.mobile.share');
+      const raw = storage.getString(KEYS.transfer.mobileShare.key, '');
       if (raw) {
         const paths = JSON.parse(raw) as string[];
         if (paths.length) {
           setStaged((prev) => Array.from(new Set([...prev, ...paths])));
         }
-        localStorage.removeItem('andeyunhui.mobile.share');
+        storage.remove(KEYS.transfer.mobileShare.key);
       }
     } catch { /* 忽略 */ }
     // share-ready：MobileApp 切页后本组件挂载，把新分享路径并入暂存
     const onShareReady = () => {
       try {
-        const raw = localStorage.getItem('andeyunhui.mobile.share');
+        const raw = storage.getString(KEYS.transfer.mobileShare.key, '');
         if (raw) {
           const paths = JSON.parse(raw) as string[];
           if (paths.length) {
             setStaged((prev) => Array.from(new Set([...prev, ...paths])));
           }
-          localStorage.removeItem('andeyunhui.mobile.share');
+          storage.remove(KEYS.transfer.mobileShare.key);
         }
       } catch { /* 忽略 */ }
     };

@@ -39,6 +39,8 @@ import { useDrawerSwipe } from './hooks/useDrawerSwipe';
 import { Plus, MoreVertical, Send, Inbox, Sparkles, Book, Puzzle, Settings2, MessageSquarePlus, MessageSquare, Trash2, type LucideIcon } from 'lucide-react';
 import { NiaoluoScreen } from './screens/NiaoluoScreen';
 import { TransferScreen } from './screens/TransferScreen';
+import { storage } from '../core/storage';
+import { KEYS } from '../core/storage/keys';
 
 export default function MobileApp() {
   // 一次性初始化各 Tab 根 Screen。
@@ -147,8 +149,8 @@ export default function MobileApp() {
       w.__shareFilesPicked = (paths) => {
         if (!paths?.length) return;
         try {
-          const prev = JSON.parse(localStorage.getItem('andeyunhui.mobile.share') || '[]') as string[];
-          localStorage.setItem('andeyunhui.mobile.share', JSON.stringify(Array.from(new Set([...prev, ...paths]))));
+          const prev = JSON.parse(storage.getString(KEYS.transfer.mobileShare.key, '[]')) as string[];
+          storage.setJSON(KEYS.transfer.mobileShare.key, Array.from(new Set([...prev, ...paths])));
         } catch { /* 忽略 */ }
         // 派发事件：若传输页已挂载（useTransfer 监听），立即加入暂存并切页
         window.dispatchEvent(new CustomEvent('share-ready', { detail: { count: paths.length } }));
