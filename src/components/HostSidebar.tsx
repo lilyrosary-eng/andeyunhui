@@ -8,6 +8,8 @@ import { PluginErrorBoundary } from '@/core/PluginHost';
 import { useAppStore } from '@/stores/appStore';
 import { useI18n } from '@/lib/i18n';
 import { api } from '@/lib/api';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 /** 统一侧边栏 — 始终复用同一个 ModuleSidebarShell，仅中间的 children 内容根据 activeModule 切换。 */
 export function HostSidebar() {
@@ -37,10 +39,10 @@ export function HostSidebar() {
   // 茑萝子模块「rag」默认不在侧栏展示（其 manifest.visible=false，作为内置功能），
   // 由「全局设置 → 茑萝 → 显示 RAG 知识库模块」开关控制。
   const [ragVisible, setRagVisible] = useState<boolean>(() => {
-    try { return localStorage.getItem('niaoluo:rag-visible') === '1'; } catch { return false; }
+    return storage.getString(KEYS.niaoluo.ragVisible.key, '0') === '1';
   });
   useEffect(() => {
-    const onRagVis = () => setRagVisible(localStorage.getItem('niaoluo:rag-visible') === '1');
+    const onRagVis = () => setRagVisible(storage.getString(KEYS.niaoluo.ragVisible.key, '0') === '1');
     window.addEventListener('niaoluo-rag-visibility', onRagVis);
     return () => window.removeEventListener('niaoluo-rag-visibility', onRagVis);
   }, []);
@@ -189,9 +191,9 @@ export function HostSidebar() {
     }
   } else if (activeModule === 'capsule' || activeModule === 'capsule-settings') {
     // 黄金棋盘 / 黄金棋盘·设置：侧栏显示搜索 / 传输双 Tab（复用茑萝侧栏，不另建）
-    const capsuleTab = (() => { try { return localStorage.getItem('niaoluo:capsule-tab') || 'search'; } catch { return 'search'; } })();
+    const capsuleTab = storage.getString(KEYS.niaoluo.capsuleTab.key, 'search');
     const setCapsuleTab = (tab: string) => {
-      try { localStorage.setItem('niaoluo:capsule-tab', tab); } catch {}
+      storage.setString(KEYS.niaoluo.capsuleTab.key, tab);
       window.dispatchEvent(new CustomEvent('capsule-tab-changed'));
       if (activeModule === 'capsule-settings') {
         // 设置页内点击 Tab → 切回主面板并带上目标 Tab

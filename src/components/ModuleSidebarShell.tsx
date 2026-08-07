@@ -3,8 +3,9 @@ import { Settings, PanelLeftClose, PanelLeftOpen, Home } from 'lucide-react';
 import { CollapsibleSearch } from '@/components/CollapsibleSearch';
 import { Ripple } from '@/components/motion/Ripple';
 import { useI18n } from '@/lib/i18n';
+import { storage } from '@/core/storage';
+import { KEYS, moduleToggleKey } from '@/core/storage/keys';
 
-const SIDEBAR_COLLAPSE_KEY = 'module_sidebar_collapsed';
 const SIDEBAR_EXPANDED_WIDTH = 260;
 const SIDEBAR_COLLAPSED_WIDTH = 48;
 const COLLAPSE_FADE_MS = 150;
@@ -44,14 +45,14 @@ export function ModuleSidebarShell({
   children,
 }: ModuleSidebarShellProps) {
   const { t } = useI18n();
-  const storageKey = `${SIDEBAR_COLLAPSE_KEY}_${moduleId}`;
+  const storageKey = moduleToggleKey(moduleId);
 
   // 持久化状态
   const [collapsed, setCollapsed] = useState(() => {
-    return localStorage.getItem(storageKey) === 'true';
+    return storage.getString(storageKey, 'false') === 'true';
   });
   const [contentVisible, setContentVisible] = useState(() => {
-    return localStorage.getItem(storageKey) !== 'true';
+    return storage.getString(storageKey, 'false') !== 'true';
   });
 
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -69,7 +70,7 @@ export function ModuleSidebarShell({
     if (collapsed) {
       // 展开：宽度先展开，内容再出现（"壳打开→内容出来"）
       setCollapsed(false);
-      localStorage.setItem(storageKey, 'false');
+      storage.setString(storageKey, 'false');
       timerRef.current = setTimeout(() => {
         setContentVisible(true);
       }, COLLAPSE_WIDTH_MS);
@@ -78,7 +79,7 @@ export function ModuleSidebarShell({
       setContentVisible(false);
       timerRef.current = setTimeout(() => {
         setCollapsed(true);
-        localStorage.setItem(storageKey, 'true');
+        storage.setString(storageKey, 'true');
       }, COLLAPSE_FADE_MS);
     }
   }, [collapsed, storageKey]);

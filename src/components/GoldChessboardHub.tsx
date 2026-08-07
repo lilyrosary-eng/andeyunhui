@@ -2,6 +2,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { FileSearchPanel } from '@/components/FileSearchPanel';
 import { useI18n } from '@/lib/i18n';
 import { useTransfer } from '@/core/transfer/useTransfer';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 // ======== 传输面板（主窗口风格，CSS 变量自适应主题）========
 // 逻辑层（peers/progress/staged/确认/拖放）抽到 useTransfer，与浮岛 Capsule.TransferPanel 共用。
@@ -181,18 +183,18 @@ function TransferTab() {
 // ======== 黄金棋盘主窗口 Hub（侧栏 Tab 由 HostSidebar 控制） ========
 export function GoldChessboardHub() {
   const [tab, setTab] = useState<'search' | 'transfer'>(() => {
-    try { return localStorage.getItem('niaoluo:capsule-tab') === 'transfer' ? 'transfer' : 'search'; } catch { return 'search'; }
+    return storage.getString(KEYS.niaoluo.capsuleTab.key, 'search') === 'transfer' ? 'transfer' : 'search';
   });
 
   // 响应 HostSidebar 的 tab 切换事件
   useEffect(() => {
     const onTab = () => {
-      try { setTab(localStorage.getItem('niaoluo:capsule-tab') === 'transfer' ? 'transfer' : 'search'); } catch {}
+      setTab(storage.getString(KEYS.niaoluo.capsuleTab.key, 'search') === 'transfer' ? 'transfer' : 'search');
     };
     window.addEventListener('capsule-tab-changed', onTab);
     // 也监听 storage 事件（跨 webview 同步，仅主窗口内有效）
     window.addEventListener('storage', (e) => {
-      if (e.key === 'niaoluo:capsule-tab') onTab();
+      if (e.key === KEYS.niaoluo.capsuleTab.key) onTab();
     });
     return () => {
       window.removeEventListener('capsule-tab-changed', onTab);
