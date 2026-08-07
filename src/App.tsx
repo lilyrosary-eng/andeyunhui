@@ -24,6 +24,8 @@ import { clearStaleBootPreview } from '@/lib/bootPreview';
 import { initOpenWith, MEDIA_MODULES, detectModule } from '@/lib/openWith';
 import { dispatchOpenWith } from '../plugins/_shared/openWithFiles';
 import { PhysicalPosition } from '@tauri-apps/api/dpi';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 function App() {
   // ====== store 订阅 ======
@@ -335,13 +337,13 @@ function App() {
 
   // 首次运行引导：从未配置过数据存放位置时，引导用户选择（等价于安装时指定位置）
   useEffect(() => {
-    if (localStorage.getItem('dataRootGuided')) return;
+    if (storage.getString(KEYS.app.dataRootGuided.key, '0')) return;
     const t = window.setTimeout(() => {
       invoke<boolean>('needs_data_root_setup')
         .then(async (need) => {
           if (!need) return;
           // 已确认需要引导：立即打标记（localStorage + Rust guided 文件），确保询问过一次后不再重复弹窗
-          localStorage.setItem('dataRootGuided', '1');
+          storage.setString(KEYS.app.dataRootGuided.key, '1');
           invoke('mark_data_root_guided').catch(() => {});
           if (window.confirm('欢迎使用安得云荟！建议将数据（笔记/插件/缓存等）存放到非系统盘，避免占用 C 盘。是否现在选择数据存放位置？')) {
             try {
@@ -356,7 +358,7 @@ function App() {
           }
         })
         .catch(() => {})
-        .finally(() => localStorage.setItem('dataRootGuided', '1'));
+        .finally(() => storage.setString(KEYS.app.dataRootGuided.key, '1'));
     }, 1500);
     return () => window.clearTimeout(t);
   }, []);

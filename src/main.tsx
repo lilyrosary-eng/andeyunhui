@@ -4,6 +4,8 @@ import { initFileLogger } from "./lib/file-logger"
 import { installLocalImageSanitizer } from "./lib/localImage"
 import { listen } from "@tauri-apps/api/event"
 import "./index.css"
+import { storage } from "./core/storage"
+import { KEYS } from "./core/storage/keys"
 
 // 尽早初始化前端全局错误捕获：把 window.onerror / unhandledrejection / console.error 写入会话日志文件
 initFileLogger();
@@ -31,7 +33,7 @@ function isMobilePreview(): boolean {
   if (typeof window === "undefined") return false;
   try {
     if (new URLSearchParams(window.location.search).get("mobile") === "1") return true;
-    return localStorage.getItem("mobile-preview") === "1";
+    return storage.getString(KEYS.mobile.preview.key, "0") === "1";
   } catch {
     return false;
   }

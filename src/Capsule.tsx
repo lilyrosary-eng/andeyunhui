@@ -38,6 +38,8 @@ import {
 } from '@/components/capsule/icons';
 import { toPlayInfo, weatherLabel, fetchJson } from '@/components/capsule/helpers';
 import type { PlayInfo, ReceiveRequest } from '@/components/capsule/types';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 // 生产构建里所有 [CAPSULE-PROBE] 诊断（fps RAF / longtask / console.log / outerSize 探针）会被
 // Vite 静态替换 + tree-shake 掉，透明浮窗不再背运行时诊断开销。DEV 模式下仍可在胶囊 DevTools 查看。
@@ -74,11 +76,11 @@ function TransferPanel({
 
   // 首次使用引导：提示自定义本机名称 + 接收文件保存路径（localStorage 持久引导标记）
   const [onboarded, setOnboarded] = useState<boolean>(() => {
-    try { return localStorage.getItem('andeyunhui.transfer.onboarded') === '1'; } catch { return false; }
+    return storage.getString(KEYS.transfer.onboarded.key, '0') === '1';
   });
   const [saveDir, setSaveDir] = useState('');
   const dismissOnboard = useCallback(() => {
-    try { localStorage.setItem('andeyunhui.transfer.onboarded', '1'); } catch { /* 忽略 */ }
+    storage.setString(KEYS.transfer.onboarded.key, '1');
     setOnboarded(true);
   }, []);
   const pickSaveDir = useCallback(async () => {
