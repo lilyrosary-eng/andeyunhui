@@ -41,12 +41,13 @@ React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌�
 - 办公 · 茑萝：文档（docx）、演示（pptx）、表格（xlsx / csv）的导入、编辑与导出；文档用 TipTap 编辑、演示用原生幻灯片编辑器、表格用自研轻量表格引擎（SheetJS 读写 xlsx）；含 CodeMirror IDE、绘画子模块与 RAG 知识库（ONNX 本地向量嵌入）。
 - 专业 · 薄荷：环境变量管理、端口扫描、进程列表、剪贴板读写、图片/文档格式转换、ffmpeg 媒体转码等工具集合。
 - 浮岛 AI 编程 · Capsule：内置多会话 AI 编程助手与 IDE 服务，支持 AI 对话、代码生成、保持态（keep-state）与跨胶囊协作；可挂为浮窗独立使用。
+- 黄金棋盘 · GoldChessboardHub：仿桌宠热插拔的桌面浮岛中枢，集成文件搜索面板（FileSearchPanel）、跨设备传输面板（TransferPanel，与主窗口共用 `useTransfer` 逻辑层）、AI 多会话管理；支持原生拖放接收文件、设备发现与配对、传输进度追踪；可独立挂为浮窗运行，与 Capsule 浮岛共享茑萝侧栏入口。
 - 攻防内核 · gongfang-kit：独立 Rust crate 提供安全/攻防相关能力框架。
 - 格式转换 · markitdown：多格式转 Markdown 服务。
 - 全局截图：默认 `Ctrl+Shift+S`，多显示器捕获、拖拽框选、悬停点窗、窗口长截图、画笔/矩形/箭头/文字标注，毫秒级保存（原生 RGBA 直通），可复制、存中转站或导入当前笔记。基于 WGC（Windows.Graphics.Capture）硬件加速捕获。
 - 屏幕录制 · 全局：默认 `Ctrl+Alt+R`，区域选择、暂停/继续、ffmpeg 编码，支持 DirectComposition 硬件合成覆盖窗。
 - 浮窗 / 覆盖窗系统：透明分层窗（逐像素命中、alpha 穿透）、截图/录屏覆盖窗、悬浮歌词窗、浮岛 AI 窗，均走独立 `data_directory` 与共享 WebContext 隔离，避免多 webview 冲突。
-- 桌面宠物（桌宠）：仿桌宠热插拔的可爱桌宠，支持拖拽、点击互动、系统资源监控联动（>60% 占用播「工作」动画），视频逐帧抠图透明渲染。
+- 桌面宠物（桌宠）· 自定义桌宠系统：透明浮窗常驻桌面最顶层，支持拖拽移动、单击行走/双击切主窗/右键弹跳互动；多状态素材体系（idle / work / 自定义），每状态可绑多张图片或视频帧；用户可在设置面板导入自己的图片/视频作为自定义素材（官方基线与用户导入分离标记）；预设系统支持保存/切换完整方案快照（manifest + 缩放/透明度/点击穿透等设置）；系统资源监控联动（>60% CPU/内存占用自动切换「工作」动画）；视频逐帧抠图透明渲染（`<video>` 逐帧提取，IPC <1.5MB 时 `asset://` 兜底）。
 - 跨设备传输 / 中转站：跨模块「中转站」暂存区、原生文件拖出（Windows DoDragDrop）、设备间文件/会话传输（接收落盘到指定保存目录并导入）。
 - 系统集成：单实例守卫、系统托盘（自定义 UI 菜单）、会话日志系统、Windows 任务栏媒体集成（SMTC）、数据根可配置（junction 迁移，支持把全部用户数据迁到非系统盘）。
 - 扩展中心：内置扩展管理界面，浏览与管理已安装插件与 AI 模型配置。
@@ -84,8 +85,8 @@ React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌�
 ```
 andeyunhui/
 ├─ src/                     # 前端（React），桌面与移动端共享
-│  ├─ components/           # 通用 UI、标题栏、侧栏、截图覆盖层、中转站面板、Capsule 浮岛等
-│  ├─ core/                 # 插件宿主 PluginHost、注册表、沙箱、设置、笔记、歌词、桌宠、传输
+│  ├─ components/           # 通用 UI、标题栏、侧栏、截图覆盖层、中转站面板、Capsule 浮岛、GoldChessboardHub 黄金棋盘等
+│  ├─ core/                 # 插件宿主 PluginHost、注册表、沙箱、设置、笔记、歌词、桌宠（DeskpetPet）、传输（useTransfer）
 │  ├─ mobile/               # 移动端专属屏幕/Store/Hook（Android 复用同一 React 代码）
 │  ├─ lib/                  # 工具库（含等待页生成产物、i18n 多语言）
 │  ├─ overlay-*.ts          # 截图/录屏/桌宠独立轻量覆盖窗入口
@@ -100,7 +101,7 @@ andeyunhui/
 │  │  ├─ dcomp_overlay.rs   # DirectComposition 硬件合成覆盖窗
 │  │  └─ data_location.rs   # 数据根可配置（junction + 迁移）
 │  └─ gen/android/          # Tauri Android 生成工程（tauri android init/build 再生）
-├─ plugins/                 # 插件源码（茑萝 宿主：办公/AI/桌宠/绘画/RAG/攻防；莲花/铃兰/玉兰/三色堇/薄荷/鸢尾花…）
+├─ plugins/                 # 插件源码（茑萝 宿主：办公/AI/桌宠(deskpet)/绘画/RAG/攻防；莲花/铃兰/玉兰/三色堇/薄荷/鸢尾花…）
 ├─ external-deps/           # 重依赖预打包（esbuild IIFE，运行时按需注入；含 ffmpeg、PaddleOCR 等）
 ├─ crates/                  # Rust 子 crate（pro-tools-kit 专业工具、gongfang-kit 攻防内核）
 ├─ scripts/                 # 构建脚本（external-deps、等待页、部署插件、打包等）
