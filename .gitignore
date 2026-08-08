@@ -112,8 +112,14 @@ docs/
 
 
 # ffmpeg 共享库（单文件超 GitHub 100MB 限制，不入库；本地 external-deps 下保留供打包使用）
-external-deps/全局/ffmpeg/
+external-deps/**/ffmpeg/
 external-deps/ffmpeg/
+
+# PaddleOCR 本地 OCR 模型权重（.onnx 二进制，不入库；源码 external-deps/全局/paddleocr/src 与 index.js 保留）
+external-deps/**/paddleocr/models/
+
+# 桌宠二进制素材（png/webm 资源，不入库）
+external-deps/deskpet-assets/
 
 # Tauri Android 工程构建产物（src-tauri/gen/android，由 tauri android init/build 再生）
 # T01 将在 gen/android/ 内建立完整 .gitignore；此处先收口明显构建输出，避免污染工作区
