@@ -118,8 +118,8 @@ external-deps/ffmpeg/
 # PaddleOCR 本地 OCR 模型权重（.onnx 二进制，不入库；源码 external-deps/全局/paddleocr/src 与 index.js 保留）
 external-deps/**/paddleocr/models/
 
-# 桌宠二进制素材（png/webm 资源，不入库）
-external-deps/deskpet-assets/
+# 桌宠二进制素材（png/webm 资源，保留在 VCS 中作为备份）
+# external-deps/deskpet-assets/  已移除忽略，重新纳入版本控制
 
 # Univer 办公套件打包产物（esbuild 生成的大 JS，不入库；由插件构建链再生）
 external-deps/**/univer/
