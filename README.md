@@ -3,7 +3,7 @@
 # 安得云荟 · andeyunhui
 
 一个本地优先的轻量保险库，把你的阅读、图片、视频、音乐、笔记与 AI 能力收纳进同一个私密空间——数据自主、离线可用、插件可热插拔、桌面与移动端同源。
-React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌面端与 Android 移动端。
+React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌面端。
 
 [![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
