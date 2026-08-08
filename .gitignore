@@ -121,6 +121,16 @@ external-deps/**/paddleocr/models/
 # 桌宠二进制素材（png/webm 资源，不入库）
 external-deps/deskpet-assets/
 
+# Univer 办公套件打包产物（esbuild 生成的大 JS，不入库；由插件构建链再生）
+external-deps/**/univer/
+
+# 第三方依赖包副本（markitdown 等，含测试 PDF/大资源，不入库）
+external-deps/**/markitdown/
+
+# 所有 ML/AI 模型权重与测试数据（.onnx/.pdf 等二进制，不入库）
+external-deps/**/*.onnx
+external-deps/**/*.pdf
+
 # Tauri Android 工程构建产物（src-tauri/gen/android，由 tauri android init/build 再生）
 # T01 将在 gen/android/ 内建立完整 .gitignore；此处先收口明显构建输出，避免污染工作区
 # Android 工程迁移前的备份目录（内部快照，不入库）
