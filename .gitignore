@@ -151,4 +151,4 @@ src-tauri/gen/android/app/tauri.properties
 src-tauri/gen/android/buildSrc/
 src-tauri/gen/android/local.properties
 src-tauri/gen/android/tauri.settings.gradle
-.mjs
+*.mjs
