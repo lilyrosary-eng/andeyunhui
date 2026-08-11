@@ -2136,6 +2136,71 @@ pub fn read_track_metadata(app: tauri::AppHandle, file_path: String) -> music_se
     music_service::extract_track_metadata(std::path::Path::new(&file_path), cover_dir.as_deref())
 }
 
+// ================= 音乐：歌单 / 收藏 / 播放状态持久化（SQLite，借鉴 MusicStorm MIT） =================
+use crate::services::music_db;
+// 薄封装：命令统一在 commands 模块导出（bin 的 generate_handler 引用 andeyunhui_lib::commands::*），
+// 实际落库逻辑在 services::music_db。
+
+#[tauri::command]
+pub fn music_create_playlist(app: tauri::AppHandle, title: String) -> Result<music_db::PlaylistSummary, String> {
+    music_db::music_create_playlist(app, title)
+}
+
+#[tauri::command]
+pub fn music_rename_playlist(app: tauri::AppHandle, playlist_id: String, title: String) -> Result<(), String> {
+    music_db::music_rename_playlist(app, playlist_id, title)
+}
+
+#[tauri::command]
+pub fn music_delete_playlist(app: tauri::AppHandle, playlist_id: String) -> Result<(), String> {
+    music_db::music_delete_playlist(app, playlist_id)
+}
+
+#[tauri::command]
+pub fn music_list_playlists(app: tauri::AppHandle) -> Result<Vec<music_db::PlaylistSummary>, String> {
+    music_db::music_list_playlists(app)
+}
+
+#[tauri::command]
+pub fn music_list_playlist_tracks(app: tauri::AppHandle, playlist_id: String) -> Result<Vec<music_db::PlaylistTrack>, String> {
+    music_db::music_list_playlist_tracks(app, playlist_id)
+}
+
+#[tauri::command]
+pub fn music_add_track_to_playlist(app: tauri::AppHandle, playlist_id: String, track: music_db::PlaylistTrack) -> Result<(), String> {
+    music_db::music_add_track_to_playlist(app, playlist_id, track)
+}
+
+#[tauri::command]
+pub fn music_remove_track_from_playlist(app: tauri::AppHandle, playlist_id: String, track_id: String) -> Result<(), String> {
+    music_db::music_remove_track_from_playlist(app, playlist_id, track_id)
+}
+
+#[tauri::command]
+pub fn music_reorder_playlist_track(app: tauri::AppHandle, playlist_id: String, track_id: String, new_position: i64) -> Result<(), String> {
+    music_db::music_reorder_playlist_track(app, playlist_id, track_id, new_position)
+}
+
+#[tauri::command]
+pub fn music_set_favorite(app: tauri::AppHandle, track: music_db::FavoriteTrack, favorite: bool) -> Result<(), String> {
+    music_db::music_set_favorite(app, track, favorite)
+}
+
+#[tauri::command]
+pub fn music_list_favorites(app: tauri::AppHandle) -> Result<Vec<music_db::FavoriteTrack>, String> {
+    music_db::music_list_favorites(app)
+}
+
+#[tauri::command]
+pub fn music_save_player_state(app: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
+    music_db::music_save_player_state(app, key, value)
+}
+
+#[tauri::command]
+pub fn music_get_player_state(app: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
+    music_db::music_get_player_state(app, key)
+}
+
 // ================= 视频模块命令 =================
 
 /// 扫描视频根目录，流式推送结果（适合大目录）
