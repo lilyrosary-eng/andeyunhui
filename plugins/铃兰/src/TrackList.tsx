@@ -5,7 +5,7 @@ const { useState, useEffect, useCallback, useRef } = React;
 const hostApi = window.__HOST_API__;
 import { musicPlayer } from './musicPlayer';
 import { formatTime } from '../../_shared/utils';
-import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon } from '../../_shared/icons';
+import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon, CloudIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 
 interface Track {
@@ -28,6 +28,7 @@ interface TrackListProps {
   playlistName: string;
   onSelectTrack: (track: Track, index: number) => void;
   onAddSong: () => void;
+  onOpenDrawer?: () => void;
   onMoveTrack?: (track: Track, targetPlaylistId: string) => void;
   onCopyTrack?: (track: Track, targetPlaylistId: string) => void;
   onRemoveTrack?: (track: Track) => void;
@@ -48,6 +49,7 @@ export function TrackList({
   playlistName,
   onSelectTrack,
   onAddSong,
+  onOpenDrawer,
   onMoveTrack,
   onCopyTrack,
   onRemoveTrack,
@@ -448,6 +450,15 @@ export function TrackList({
           >
             <CheckIcon />
           </button>
+          {onOpenDrawer && (
+            <button
+              onClick={onOpenDrawer}
+              className="btn-press p-1.5 rounded-lg transition-colors text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200"
+              title={T('music.moduleDrawer.title')}
+            >
+              <CloudIcon />
+            </button>
+          )}
         </div>
       </div>
 

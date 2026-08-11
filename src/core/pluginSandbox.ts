@@ -82,6 +82,9 @@ const ALLOWED_COMMANDS = new Set([
   'music_add_track_to_playlist',
   'music_remove_track_from_playlist',
   'music_reorder_playlist_track',
+  // 网易云 WebAPI 代理（Phase 3）：TS 加密 + Rust 无 CORS 转发
+  'netease_http_post',
+  'netease_register_guest',
   // SMTC（任务栏「正在播放」）：前端推送播放状态 + 上报激活模块 + 诊断日志。
   // 注意：这些命令此前漏加白名单，导致沙箱内 music/video 插件的 invoke 被静默拦截
   // （插件侧 .catch 吞错），元信息永远到不了 Rust，任务栏卡片不显示。

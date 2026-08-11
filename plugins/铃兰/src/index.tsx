@@ -3,6 +3,7 @@ import React from "react";
 // 音乐插件入口
 import { MusicSidebar } from './MusicSidebar';
 import { TrackList } from './TrackList';
+import { ModuleDrawer } from './ModuleDrawer';
 import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
@@ -139,14 +140,6 @@ function savePositionToDb() {
   } catch (e) {
     console.warn('[Music] 播放位置保存异常:', e);
   }
-}
-
-// 把「我的收藏」虚拟歌单置顶注入到 playlists（排在所有歌单最前面）。
-// 收藏歌单由 favorites 集合驱动，不独立落库；allTracks 为当前全部曲目用于解析收藏项。
-function injectFavoritePlaylist(playlists: Playlist[], favIds: Set<string>, allTracks: Track[]): Playlist[] {
-  const fav = buildFavoritePlaylist(favIds, allTracks);
-  const base = playlists.filter((p) => p.id !== '__favorite__');
-  return fav ? [fav, ...base] : base;
 }
 
 // 收集当前所有可见曲目（目录 + 自定义），供收藏歌单解析
@@ -976,6 +969,9 @@ function MusicModule() {
     return saved !== null ? saved === 'true' : true;
   });
   const [showNowPlaying, setShowNowPlaying] = useState(false);
+  const [showModuleDrawer, setShowModuleDrawer] = useState(false);
+  // 网易云抽屉已移除，仅保留本地音乐
+
   const [currentTrack, setCurrentTrack] = useState<Track | null>(() => musicPlayer.getCurrentTrack());
   const unlistenRef = useRef<(() => void)[]>([]);
   // 当前选中歌单 ID 的 ref：供 handleMoveTrack / handleRemoveTrack 等闭包使用，
@@ -1176,10 +1172,22 @@ function MusicModule() {
     };
   }, [rootPaths, rescanFlag]);
 
-  // 收藏集合变化 → 重建「我的收藏」歌单并注入 playlists（基于当前 playlists 解析已收藏曲目）
+  // 收藏集合变化 或 曲目列表变化 → 重建「我的收藏」歌单并注入 playlists（置顶）。
+  // 依赖 playlists 以在目录扫描完成后用最新曲目填充收藏歌单的 tracks；
+  // 内容等价时返回同一引用，避免 setPlaylists 触发 playlists 变化 → effect 再跑的无限循环。
   useEffect(() => {
-    setPlaylists(prev => injectFavoritePlaylist(prev, favorites, collectAllTracks(prev)));
-  }, [favorites]);
+    setPlaylists(prev => {
+      const fav = buildFavoritePlaylist(favorites, collectAllTracks(prev));
+      const base = prev.filter(p => p.id !== '__favorite__');
+      const next = fav ? [fav, ...base] : base;
+      const prevFav = prev.find(p => p.id === '__favorite__');
+      // 已等价（收藏曲目数一致 + 列表长度一致）则保持原引用，终止循环
+      if (prevFav && fav && prevFav.tracks.length === fav.tracks.length && prev.length === next.length) {
+        return prev;
+      }
+      return next;
+    });
+  }, [favorites, playlists]);
 
   // 订阅播放器状态
   useEffect(() => {
@@ -1907,6 +1915,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               playlistName={selectedPlaylist.name}
               onSelectTrack={handleSelectTrack}
               onAddSong={handleAddSong}
+              onOpenDrawer={() => setShowModuleDrawer(true)}
               onMoveTrack={handleMoveTrack}
               onCopyTrack={handleCopyTrack}
               onRemoveTrack={handleRemoveTrack}
@@ -1949,6 +1958,10 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           />
         )}
       </div>
+      <ModuleDrawer
+        open={showModuleDrawer}
+        onClose={() => setShowModuleDrawer(false)}
+      />
       {showNowPlaying && currentTrack && (
         <NowPlayingView
           track={currentTrack}

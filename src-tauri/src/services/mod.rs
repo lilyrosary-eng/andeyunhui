@@ -20,6 +20,8 @@ pub mod window_manager;
 #[cfg(windows)]
 pub mod diagnostics;
 pub mod log_service;
+// 网易云音乐 WebAPI 代理（Phase 3）：TS 端加密 + Rust 无 CORS 转发，四件套白名单校验
+pub mod netease_proxy;
 pub mod agent_service;
 pub mod ai_service;
 pub mod companion_service;

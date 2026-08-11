@@ -128,6 +128,12 @@ export function MusicIcon(p: { size?: number }) {
   ] });
 }
 
+export function CloudIcon(p: { size?: number }) {
+  return SvgEl({ size: p?.size || 18, strokeWidth: 1.5, children: [
+    React.createElement('path', { key: 'a', d: 'M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6-1.6A4 4 0 0 0 6.5 19' }),
+  ] });
+}
+
 export function LyricsIcon(p: { size?: number }) {
   return SvgEl({ size: p?.size || 18, children: [
     React.createElement('path', { key: 'a', d: 'M4 17h4' }),
@@ -235,5 +241,12 @@ export function HeartOffIcon(p: { size?: number; fill?: string }) {
 export function FolderIcon(p: { size?: number }) {
   return SvgEl({ size: p?.size || 16, strokeWidth: 1.5, children: [
     React.createElement('path', { key: 'a', d: 'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z' }),
+  ] });
+}
+
+export function CloseIcon(p: { size?: number }) {
+  return SvgEl({ size: p?.size || 16, children: [
+    React.createElement('line', { key: 'a', x1: '18', y1: '6', x2: '6', y2: '18' }),
+    React.createElement('line', { key: 'b', x1: '6', y1: '6', x2: '18', y2: '18' }),
   ] });
 }

@@ -1038,6 +1038,9 @@ fn main() {
             music_get_all_cover_overrides,
             music_delete_cover_override,
             music_clean_cover_cache,
+            // ========== 网易云 WebAPI 代理（Phase 3）：TS 加密 + Rust 无 CORS 转发 ==========
+            andeyunhui_lib::services::netease_proxy::netease_http_post,
+            andeyunhui_lib::services::netease_proxy::netease_register_guest,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
             smtc_control,
