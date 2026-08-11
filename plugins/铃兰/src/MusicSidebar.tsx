@@ -3,7 +3,7 @@ import React from "react";
 // 音乐侧边栏 — 一级导航：歌单列表
 import { T, useLang } from '../../_shared/pluginRuntime';
 const { useState, useCallback } = React;
-const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
+const { ModuleSidebarShell, SecondaryNavShell, BarChart3, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
 
 interface Track {
   id: string;
@@ -31,6 +31,7 @@ interface MusicSidebarProps {
   onRenamePlaylist?: (playlist: Playlist, newName: string) => void;
   onDeletePlaylist?: (playlist: Playlist) => void;
   onOpenModuleSettings?: () => void;
+  onOpenStats?: () => void;
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
 }
@@ -70,7 +71,7 @@ function PlusIcon() {
   });
 }
 
-export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, onSelectFolder, onCreatePlaylist, onRenamePlaylist, onDeletePlaylist, onOpenModuleSettings, searchQuery, onSearchChange }: MusicSidebarProps) {
+export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, onSelectFolder, onCreatePlaylist, onRenamePlaylist, onDeletePlaylist, onOpenModuleSettings, onOpenStats, searchQuery, onSearchChange }: MusicSidebarProps) {
   useLang();
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
@@ -154,6 +155,18 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
     playlists.map(renderPlaylistItem)
   );
 
+  // 侧栏底部统计按钮（与阅读模块一致：放在 footer 区域，和设置齿轮同行，icon-only）
+  const statsButton = onOpenStats
+    ? React.createElement('button', {
+        key: 'open-stats',
+        onClick: () => onOpenStats(),
+        title: T('music.sidebar.stats'),
+        'aria-label': T('music.sidebar.stats'),
+        className: 'p-2 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
+        children: BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊',
+      })
+    : null;
+
   const actionItems = React.createElement(React.Fragment, null,
     React.createElement('div', { className: 'border-t border-neutral-200/30 dark:border-stone-700/30 mt-3 pt-3 space-y-1' },
       React.createElement('button', {
@@ -188,6 +201,7 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
     icon: React.createElement(Music2Icon),
     title: T('music.title'),
     onOpenModuleSettings,
+    footerExtra: statsButton,
     searchQuery,
     onSearchChange,
     searchPlaceholder: T('music.sidebar.search'),
@@ -208,11 +222,11 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
         })
       ),
       SecondaryNavShell
-        ? React.createElement(SecondaryNavShell, null,
+        ? React.createElement(SecondaryNavShell, { key: 'nav' },
             React.createElement(React.Fragment, { key: 'playlists' }, playlistItems),
             React.createElement(React.Fragment, { key: 'actions' }, actionItems)
           )
-        : React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1 space-y-3' },
+        : React.createElement('div', { key: 'nav', className: 'flex-1 overflow-y-auto pr-1 space-y-3' },
             React.createElement(React.Fragment, { key: 'playlists' }, playlistItems),
             React.createElement(React.Fragment, { key: 'actions' }, actionItems)
           )

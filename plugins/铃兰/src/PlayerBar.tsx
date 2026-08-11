@@ -9,6 +9,7 @@ import { T, useLang } from '../../_shared/pluginRuntime';
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, VolumeIcon, VolumeMuteIcon,
   ListIcon, SingleIcon, ShuffleIcon, MusicIcon, LyricsIcon, LockIcon, UnlockIcon,
+  HeartIcon,
 } from '../../_shared/icons';
 
 const { useState, useEffect, useCallback, useRef } = React;
@@ -479,19 +480,19 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
             children: isPlaying ? React.createElement(PauseIcon) : React.createElement(PlayIcon),
           })}
 
-          {onToggleFavorite ? React.createElement(IconButton, {
-            onClick: () => onToggleFavorite(track),
-            title: T('music.favoriteToggle'),
-            active: isFavorite,
-            className: isFavorite ? 'text-rose-500' : undefined,
-            children: isFavorite ? '♥' : '♡',
-          }) : null}
-
           {React.createElement(IconButton, {
             onClick: onNext,
             title: T('music.player.next'),
             children: React.createElement(SkipForwardIcon),
           })}
+
+          {onToggleFavorite ? React.createElement(IconButton, {
+            onClick: () => onToggleFavorite(track),
+            title: T('music.favoriteToggle'),
+            active: isFavorite,
+            className: isFavorite ? 'text-rose-500' : undefined,
+            children: React.createElement(HeartIcon, { fill: isFavorite ? 'currentColor' : 'none' }),
+          }) : null}
 
           {React.createElement(IconButton, {
             onClick: handleToggleLyrics,

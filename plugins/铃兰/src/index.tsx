@@ -84,6 +84,7 @@ function toFavoriteTrack(t: Track) {
     filePath: t.filePath || '',
     coverPath: t.coverPath || '',
     durationMs: Math.round((t.durationSecs || 0) * 1000),
+    addedAt: Date.now(),
   };
 }
 
@@ -130,12 +131,22 @@ function savePlayerStateToDb(key: string, value: string) {
   }
 }
 
-// 把「我的收藏」虚拟歌单注入到 playlists（排在自定义歌单之前、目录歌单之后）。
+// 精确进度续播：保存当前播放位置（秒，取整）到 player_state 的 'position' key
+function savePositionToDb() {
+  try {
+    const pos = Math.round(musicPlayer.getCurrentTime());
+    if (pos > 0) savePlayerStateToDb('position', String(pos));
+  } catch (e) {
+    console.warn('[Music] 播放位置保存异常:', e);
+  }
+}
+
+// 把「我的收藏」虚拟歌单置顶注入到 playlists（排在所有歌单最前面）。
 // 收藏歌单由 favorites 集合驱动，不独立落库；allTracks 为当前全部曲目用于解析收藏项。
 function injectFavoritePlaylist(playlists: Playlist[], favIds: Set<string>, allTracks: Track[]): Playlist[] {
   const fav = buildFavoritePlaylist(favIds, allTracks);
   const base = playlists.filter((p) => p.id !== '__favorite__');
-  return fav ? [...base, fav] : base;
+  return fav ? [fav, ...base] : base;
 }
 
 // 收集当前所有可见曲目（目录 + 自定义），供收藏歌单解析
@@ -156,6 +167,7 @@ async function loadCoverOverridesFromDb(): Promise<Map<string, string>> {
     const rows = await hostApi.invoke<{ filePath: string; coverPath: string }[]>('music_get_all_cover_overrides');
     const m = new Map<string, string>();
     for (const r of rows) m.set(r.filePath, r.coverPath);
+    console.log('[Music][探针] loadCoverOverridesFromDb 加载条数:', m.size);
     return m;
   } catch (e) {
     console.warn('[Music] 加载封面覆盖失败:', e);
@@ -166,14 +178,25 @@ async function loadCoverOverridesFromDb(): Promise<Map<string, string>> {
 // 把封面覆盖应用到内存 playlists（所有同 file_path 的 track 同步封面）
 function applyCoverOverrides(playlists: Playlist[], overrides: Map<string, string>): Playlist[] {
   if (overrides.size === 0) return playlists;
-  return playlists.map((p) => ({
+  let matched = 0;
+  let changed = 0;
+  const result = playlists.map((p) => ({
     ...p,
     tracks: p.tracks.map((t) => {
       const fp = t.filePath || t.id;
-      const cov = fp && overrides.has(fp) ? overrides.get(fp) : t.coverPath;
-      return cov === t.coverPath ? t : { ...t, coverPath: cov };
+      if (fp && overrides.has(fp)) {
+        matched++;
+        const cov = overrides.get(fp);
+        if (cov !== t.coverPath) {
+          changed++;
+          return { ...t, coverPath: cov };
+        }
+      }
+      return t;
     }),
   }));
+  console.log('[Music][探针] applyCoverOverrides: 歌单数=', playlists.length, '覆盖数=', overrides.size, '匹配曲目=', matched, '实际变更=', changed);
+  return result;
 }
 
 // 文件读为 base64（用于手动设封面）
@@ -198,10 +221,17 @@ async function setCoverForTrack(track: Track, overrides: Map<string, string>): P
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = 'image/*';
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  input.style.pointerEvents = 'none';
+  input.style.zIndex = '-1';
+  document.body.appendChild(input);
   const picked = await new Promise<File | null>((resolve) => {
     input.onchange = () => resolve(input.files && input.files[0] ? input.files[0] : null);
+    input.oncancel = () => resolve(null);
     input.click();
   });
+  input.remove();
   if (!picked) return overrides;
   const b64 = await fileToBase64(picked);
   const mime = picked.type || 'image/jpeg';
@@ -223,6 +253,28 @@ async function rescanTrackMetadata(track: Track): Promise<Track | null> {
   }
 }
 
+// 精确进度续播：恢复上次播放的曲目与位置（不自动播放，定位后由用户点播放继续）。
+// 仅当 selected 含 last_track_id 且 position 足够大（>5s，避免开头无意义 seek）时生效。
+async function resumeLastPosition(selected: Playlist | null) {
+  if (!selected || selected.tracks.length === 0) return;
+  try {
+    const lastTrackId = (await hostApi.invoke<string | null>('music_get_player_state', { key: 'last_track_id' })) || '';
+    const lastId = lastTrackId;
+    if (!lastId) return;
+    const idx = selected.tracks.findIndex((t) => trackIdOf(t) === lastId);
+    if (idx < 0) return;
+    const posStr = (await hostApi.invoke<string | null>('music_get_player_state', { key: 'position' })) || '0';
+    const pos = parseInt(posStr, 10);
+    if (!isFinite(pos) || pos <= 5) return;
+    // 加载到该曲目（setTracks 不自动播放），再定位进度
+    musicPlayer.setTracks(selected.tracks, idx);
+    musicPlayer.seek(pos);
+    console.log('[Music] 续播定位:', lastId, '位置=', pos, '秒');
+  } catch (e) {
+    console.warn('[Music] 续播定位失败:', e);
+  }
+}
+
 // 编辑曲目标签信息并写回文件
 async function editTrackTags(
   track: Track,
@@ -240,6 +292,34 @@ async function editTrackTags(
     });
   } catch (e) {
     console.warn('[Music] 标签写回失败:', fp, e);
+    throw e;
+  }
+}
+
+// 读取曲目原始歌词文本（优先 .lrc 文件，其次内嵌标签）。
+async function loadLyricsText(track: Track): Promise<{ text: string; source: string }> {
+  const fp = track.filePath || track.id;
+  if (!fp) return { text: '', source: 'none' };
+  try {
+    return await hostApi.invoke<{ text: string; source: string }>('get_lyrics_text', { trackPath: fp });
+  } catch (e) {
+    console.error('[Music] 读取歌词文本失败:', e);
+    return { text: '', source: 'none' };
+  }
+}
+
+// 保存歌词：写回内嵌标签，并可选择同时生成/覆盖 .lrc 文件。
+async function saveTrackLyrics(track: Track, lyrics: string, saveToLrc: boolean): Promise<void> {
+  const fp = track.filePath || track.id;
+  if (!fp) return;
+  try {
+    await hostApi.invoke('save_track_lyrics', {
+      trackPath: fp,
+      lyrics,
+      saveToLrc,
+    });
+  } catch (e) {
+    console.error('[Music] 保存歌词失败:', e);
     throw e;
   }
 }
@@ -301,12 +381,251 @@ interface MusicSettingsPanelProps {
   onLocalLrcFirstToggle: (v: boolean) => void;
   showAlbum: boolean;
   onShowAlbumToggle: (v: boolean) => void;
+  playMode: 'list' | 'single' | 'random';
+  onPlayModeChange: (v: 'list' | 'single' | 'random') => void;
   lyricsAlign: 'center' | 'left' | 'right';
   onLyricsAlignChange: (v: 'center' | 'left' | 'right') => void;
   onCleanInvalidFiles: () => void;
   onRefreshAllFolders: () => void;
   totalTracks: number;
   playlistCount: number;
+}
+
+// 听歌统计页（按钮位置参考阅读模块侧栏底部统计入口；数据来自后端 music_get_listen_stats / music_get_listen_ranking）
+type ListenStatRow = {
+  day: string;
+  playCount: number;
+  trackCount: number;
+  totalMs: number;
+};
+
+type RankingTrack = {
+  trackId: string;
+  title: string;
+  artist: string;
+  playCount: number;
+};
+
+type RankingArtist = {
+  artist: string;
+  playCount: number;
+};
+
+type ListenRanking = {
+  totalPlays: number;
+  totalMs: number;
+  prevTotalPlays: number;
+  prevTotalMs: number;
+  topTracks: RankingTrack[];
+  topArtists: RankingArtist[];
+};
+
+function MusicStatsView({ onClose, favoriteCount = 0 }: { onClose: () => void; favoriteCount?: number }) {
+  useLang();
+  const T = (window as any).__HOST_I18N__?.t || ((k: string) => k);
+  const [rows, setRows] = useState<ListenStatRow[] | null>(null);
+  const [ranking, setRanking] = useState<ListenRanking | null>(null);
+  const [range, setRange] = useState<7 | 30>(7);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const [statData, rankData] = await Promise.all([
+          hostApi.invoke('music_get_listen_stats', { days: range }) as Promise<ListenStatRow[]>,
+          hostApi.invoke('music_get_listen_ranking', { days: range }) as Promise<ListenRanking>,
+        ]);
+        if (!cancelled) {
+          setRows(statData || []);
+          setRanking(rankData);
+        }
+      } catch (e: any) {
+        if (!cancelled) setError(String(e?.message || e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [range]);
+
+  const statRows = rows || [];
+  const daily = statRows.map((r) => [r.day, r.playCount] as [string, number]);
+  const maxPlays = daily.reduce((m, [, p]) => Math.max(m, p), 0);
+  const totalDuration = statRows.reduce((s, r) => s + r.totalMs, 0) / 1000;
+  const totalPlays = statRows.reduce((s, r) => s + r.playCount, 0);
+  const hours = Math.floor(totalDuration / 3600);
+  const minutes = Math.floor((totalDuration % 3600) / 60);
+  const activeDays = daily.filter(([, p]) => p > 0).length;
+
+  // 环比：与上一个等长区间对比
+  const prev = ranking?.prevTotalPlays || 0;
+  const delta = totalPlays - prev;
+  const deltaPct = prev > 0 ? Math.round((delta / prev) * 100) : (totalPlays > 0 ? 100 : 0);
+  const rangeLabel = range === 7 ? T('music.stats.last7') : T('music.stats.last30');
+  const prevLabel = range === 7 ? T('music.stats.prev7') : T('music.stats.prev30');
+
+  const isEmpty = !loading && !error && totalPlays === 0 && daily.length === 0;
+
+  return (
+    <div className="flex flex-col h-full bg-[#f5f5f0] dark:bg-[#1c1917]">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-neutral-200/50 dark:border-stone-700/50">
+        <button
+          onClick={onClose}
+          className="px-2 py-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-stone-400 text-base"
+          aria-label={T('music.stats.back')}
+        >
+          ←
+        </button>
+        <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{T('music.stats.title')}</h2>
+        <div className="ml-auto flex gap-1 text-sm">
+          {([7, 30] as const).map((r) => (
+            <button
+              key={r}
+              onClick={() => setRange(r)}
+              className={
+                'px-3 py-1 rounded-lg transition-colors ' +
+                (range === r
+                  ? 'bg-[var(--element-color-raw)] text-white'
+                  : 'text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5')
+              }
+            >
+              {r === 7 ? T('music.stats.last7') : T('music.stats.last30')}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-5 py-5">
+        {loading ? (
+          <div className="text-neutral-400 dark:text-stone-500 text-sm py-10 text-center">{T('music.stats.loading')}</div>
+        ) : error ? (
+          <div className="text-red-500 text-sm py-10 text-center">{T('music.stats.error')}: {error}</div>
+        ) : isEmpty ? (
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <div className="text-4xl mb-3">🎵</div>
+            <div className="text-neutral-500 dark:text-stone-400 text-sm">{T('music.stats.emptyHint')}</div>
+            <button
+              onClick={onClose}
+              className="mt-4 px-4 py-2 rounded-xl bg-[var(--element-color-raw)] text-white text-sm hover:opacity-90 transition-opacity"
+            >
+              {T('music.stats.goListen')}
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-6 max-w-3xl">
+            <div className="grid grid-cols-3 gap-3">
+              <div className="rounded-2xl bg-black/5 dark:bg-white/5 px-4 py-4">
+                <div className="text-2xl font-semibold text-neutral-800 dark:text-stone-100">{totalPlays}</div>
+                <div className="text-xs text-neutral-500 dark:text-stone-400 mt-1">{T('music.stats.playCount')}</div>
+              </div>
+              <div className="rounded-2xl bg-black/5 dark:bg-white/5 px-4 py-4">
+                <div className="text-2xl font-semibold text-neutral-800 dark:text-stone-100">
+                  {hours}<span className="text-base font-normal text-neutral-500 dark:text-stone-400">{T('music.stats.hour')}</span>
+                  {minutes}<span className="text-base font-normal text-neutral-500 dark:text-stone-400">{T('music.stats.minute')}</span>
+                </div>
+                <div className="text-xs text-neutral-500 dark:text-stone-400 mt-1">{T('music.stats.listenTime')}</div>
+              </div>
+              <div className="rounded-2xl bg-black/5 dark:bg-white/5 px-4 py-4">
+                <div className="text-2xl font-semibold text-neutral-800 dark:text-stone-100">{activeDays}</div>
+                <div className="text-xs text-neutral-500 dark:text-stone-400 mt-1">{T('music.stats.activeDays')}</div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl bg-black/5 dark:bg-white/5 px-4 py-3 flex items-center gap-3">
+              <span className="text-lg">❤️</span>
+              <div>
+                <div className="text-2xl font-semibold text-neutral-800 dark:text-stone-100 leading-none">{favoriteCount}</div>
+                <div className="text-xs text-neutral-500 dark:text-stone-400 mt-1">{T('music.stats.favoriteCount')}</div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl bg-black/5 dark:bg-white/5 px-4 py-3 text-sm flex items-center gap-2">
+              <span className="text-neutral-500 dark:text-stone-400">
+                {rangeLabel} {T('music.stats.vs')} {prevLabel}
+              </span>
+              <span className={'ml-auto font-medium ' + (delta > 0 ? 'text-emerald-500' : delta < 0 ? 'text-rose-500' : 'text-neutral-400 dark:text-stone-500')}>
+                {delta > 0 ? '▲ +' : delta < 0 ? '▼ ' : ''}{deltaPct}%
+              </span>
+              <span className="text-neutral-400 dark:text-stone-500 text-xs">
+                ({delta >= 0 ? '+' : ''}{delta} {T('music.stats.playCountUnit')})
+              </span>
+            </div>
+
+            <div>
+              <div className="text-sm text-neutral-500 dark:text-stone-400 mb-3">{T('music.stats.dailyTrend')}</div>
+              <div className="space-y-1.5">
+                {daily.length === 0 ? (
+                  <div className="text-neutral-400 dark:text-stone-500 text-sm py-6 text-center">{T('music.stats.noData')}</div>
+                ) : (
+                  daily.map(([date, plays]) => (
+                    <div key={date} className="flex items-center gap-3">
+                      <div className="w-20 shrink-0 text-xs text-neutral-500 dark:text-stone-400 tabular-nums">{date.slice(5)}</div>
+                      <div className="flex-1 h-5 rounded-md bg-black/5 dark:bg-white/5 overflow-hidden">
+                        <div
+                          className="h-full rounded-md bg-[var(--element-color-raw)]/80"
+                          style={{ width: maxPlays > 0 ? `${Math.max((plays / maxPlays) * 100, plays > 0 ? 4 : 0)}%` : '0%' }}
+                        />
+                      </div>
+                      <div className="w-10 shrink-0 text-xs text-neutral-500 dark:text-stone-400 text-right tabular-nums">{plays}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <div className="text-sm font-medium text-neutral-700 dark:text-stone-200 mb-3">{T('music.stats.topTracks')}</div>
+                {(ranking?.topTracks?.length ?? 0) === 0 ? (
+                  <div className="text-neutral-400 dark:text-stone-500 text-sm py-6 text-center">{T('music.stats.noData')}</div>
+                ) : (
+                  <div className="space-y-1">
+                    {ranking!.topTracks.map((t, i) => (
+                      <div key={t.trackId} className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5">
+                        <div className="w-5 text-right text-xs text-neutral-400 dark:text-stone-500 tabular-nums">{i + 1}</div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-neutral-800 dark:text-stone-100 truncate">{t.title || T('music.stats.unknownTrack')}</div>
+                          <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">{t.artist}</div>
+                        </div>
+                        <div className="shrink-0 text-xs text-neutral-500 dark:text-stone-400 tabular-nums">
+                          {t.playCount} {T('music.stats.repeatUnit')}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <div className="text-sm font-medium text-neutral-700 dark:text-stone-200 mb-3">{T('music.stats.topArtists')}</div>
+                {(ranking?.topArtists?.length ?? 0) === 0 ? (
+                  <div className="text-neutral-400 dark:text-stone-500 text-sm py-6 text-center">{T('music.stats.noData')}</div>
+                ) : (
+                  <div className="space-y-1">
+                    {ranking!.topArtists.map((a, i) => (
+                      <div key={a.artist} className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5">
+                        <div className="w-5 text-right text-xs text-neutral-400 dark:text-stone-500 tabular-nums">{i + 1}</div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-neutral-800 dark:text-stone-100 truncate">{a.artist}</div>
+                        </div>
+                        <div className="shrink-0 text-xs text-neutral-500 dark:text-stone-400 tabular-nums">
+                          {a.playCount} {T('music.stats.playCountUnit')}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function MusicSettingsPanel(p: MusicSettingsPanelProps) {
@@ -429,6 +748,21 @@ function MusicSettingsPanel(p: MusicSettingsPanelProps) {
               style={{ position: 'absolute', top: '2px', left: p.showAlbum ? '18px' : '2px', transition: 'left 0.2s' }}
             />
           </button>
+        </div>
+        <div className="flex items-center justify-between mt-3">
+          <span className="text-xs text-neutral-600 dark:text-stone-300">{T('music.settings.playMode')}</span>
+          <div className="flex gap-1 rounded-lg p-0.5 bg-[var(--element-muted)]">
+            {(['list', 'single', 'random'] as const).map((opt) => (
+              <button
+                key={opt}
+                onClick={() => p.onPlayModeChange(opt)}
+                className="px-2 py-1 rounded-md text-xs transition-colors"
+                style={p.playMode === opt ? { background: 'var(--element-bg)', color: '#fff' } : { color: 'var(--text-secondary, #78716c)' }}
+              >
+                {opt === 'list' ? T('music.player.modeList') : opt === 'single' ? T('music.player.modeSingle') : T('music.player.modeRandom')}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -632,6 +966,7 @@ function MusicModule() {
     );
   }, [selectedPlaylist, searchQuery]);
   const [showSettings, setShowSettings] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   const [lyricsFontSize, setLyricsFontSize] = useState(() => {
     const saved = localStorage.getItem('music_lyrics_font_size');
     return saved ? parseInt(saved, 10) : 28;
@@ -662,6 +997,7 @@ function MusicModule() {
       hostApi.invoke<string | null>('music_get_player_state', { key: 'play_mode' }).catch(() => null),
     ]).then(([customs, favs, overrides, volState, modeState]) => {
       if (cancelled) return;
+      console.log('[Music][探针] 挂载恢复: 自定义歌单=', customs.length, '收藏=', favs.size, '封面覆盖=', overrides.size);
       if (favs.size > 0) setFavorites(favs);
       if (overrides.size > 0) setCoverOverrides(overrides);
       if (customs.length > 0) {
@@ -717,6 +1053,9 @@ function MusicModule() {
 
     let cancelled = false;
     const allDirectoryPlaylists: Playlist[] = [];
+    // 修复：扫描/缓存恢复前先确保封面覆盖已从 SQLite 就绪，使用本次加载的
+    // 局部 overrides 而非 state 闭包（后者可能仍是初始空 Map，导致覆盖晚到/漏叠）。
+    let overrides: Map<string, string> = new Map();
 
     // 帧缓冲：将高频 scan-progress 批量合并到单帧消费
     const progressBuffer = hostApi.createFrameBuffer<MusicScanProgress>((items) => {
@@ -725,6 +1064,10 @@ function MusicModule() {
     });
 
     (async () => {
+      // 修复：在扫描/缓存恢复前 await 加载封面覆盖，保证后续 applyCoverOverrides 用已就绪值
+      overrides = await loadCoverOverridesFromDb();
+      if (!cancelled && overrides.size > 0) setCoverOverrides(overrides);
+
       // 1. 先尝试为每个路径加载缓存
       const pathsToScan: string[] = [];
       for (const rp of rootPaths) {
@@ -756,13 +1099,17 @@ function MusicModule() {
       // 2. 如果全都有缓存，直接显示
       if (pathsToScan.length === 0) {
         const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
-        setPlaylists(prev => dedupePlaylistsById(applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], coverOverrides)));
+        setPlaylists(prev => dedupePlaylistsById(applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], overrides)));
         // 恢复上次播放的歌单（模块切换/重载后保持选中状态，目录与自定义均匹配）
         const savedId = musicPlayer.currentPlaylistId;
-        const restored = savedId
-          ? [...dedupedDir, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)
-          : null;
-        setSelectedPlaylist(restored || dedupedDir[0] || getCustomPlaylistsFromStorage()[0] || null);
+        const candidates = [...dedupedDir, ...getCustomPlaylistsFromStorage()];
+        const restored = savedId ? candidates.find(p => p.id === savedId) : null;
+        const selected = restored || dedupedDir[0] || getCustomPlaylistsFromStorage()[0] || null;
+        const applied = selected ? applyCoverOverrides([selected], overrides)[0] : null;
+        console.log('[Music][探针] 缓存恢复 selectedPlaylist:', applied?.id, '曲目数=', applied?.tracks.length ?? 0, '有封面数=', applied?.tracks.filter((t: Track) => t.coverPath).length ?? 0, 'coverOverrides.size=', coverOverrides.size);
+        setSelectedPlaylist(applied);
+        // 精确进度续播：恢复上次曲目位置（不自动播放，用户点播放继续）
+        resumeLastPosition(applied);
         setLoading(false);
         return;
       }
@@ -807,12 +1154,16 @@ function MusicModule() {
       // 从当前 state 合并自定义歌单（避免覆盖扫描期间用户新建的歌单），
       // 同时支持恢复上次选中的自定义歌单
       const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
-      setPlaylists(prev => applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], coverOverrides));
+      setPlaylists(prev => applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], overrides));
       const savedId = musicPlayer.currentPlaylistId;
-      const restored = savedId
-        ? [...dedupedDir, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)
-        : null;
-      setSelectedPlaylist(restored || dedupedDir[0] || getCustomPlaylistsFromStorage()[0] || null);
+      const candidates = [...dedupedDir, ...getCustomPlaylistsFromStorage()];
+      const restored = savedId ? candidates.find(p => p.id === savedId) : null;
+      const selected = restored || dedupedDir[0] || getCustomPlaylistsFromStorage()[0] || null;
+      const applied = selected ? applyCoverOverrides([selected], overrides)[0] : null;
+      console.log('[Music][探针] 扫描完成恢复 selectedPlaylist:', applied?.id, '曲目数=', applied?.tracks.length ?? 0, '有封面数=', applied?.tracks.filter((t: Track) => t.coverPath).length ?? 0, 'coverOverrides.size=', coverOverrides.size);
+      setSelectedPlaylist(applied);
+      // 精确进度续播：恢复上次曲目位置（不自动播放，用户点播放继续）
+      resumeLastPosition(applied);
     })();
 
     return () => {
@@ -833,9 +1184,20 @@ function MusicModule() {
   // 订阅播放器状态
   useEffect(() => {
     const unsubPlay = musicPlayer.on('play', () => setIsPlaying(true));
-    const unsubPause = musicPlayer.on('pause', () => setIsPlaying(false));
+    const unsubPause = musicPlayer.on('pause', () => { setIsPlaying(false); savePositionToDb(); });
+    // 精确进度续播：逐秒回传的 progress 事件节流每 5s 落库一次位置
+    let lastSaveTs = 0;
+    const unsubProgress = musicPlayer.on('progress', () => {
+      const now = Date.now();
+      if (now - lastSaveTs >= 5000) {
+        lastSaveTs = now;
+        savePositionToDb();
+      }
+    });
     const unsubTrackChange = musicPlayer.on('trackChange', (track) => {
       setCurrentTrack(track as Track | null);
+      // 切歌时先把上一首的位置落库（若还在播），再记录新曲
+      savePositionToDb();
       // 持久化播放状态：上次播放的 track_id / 所属歌单
       const t = track as Track | null;
       if (t) {
@@ -851,7 +1213,7 @@ function MusicModule() {
               artist: t.artist || '',
               album: t.album || '',
               durationMs: Math.round((t.durationSecs || 0) * 1000),
-              playedMs: Math.round((t.durationSecs || 0) * 1000),
+              playedMs: Math.round(musicPlayer.getCurrentTime() * 1000),
             })
             .catch((e) => console.warn('[Music] 听歌统计记录失败:', tid, e));
         } catch (e) {
@@ -862,7 +1224,7 @@ function MusicModule() {
     setIsPlaying(musicPlayer.getIsPlaying());
     setVolume(musicPlayer.getVolume());
     setPlayMode(musicPlayer.getPlayMode());
-    return () => { unsubPlay(); unsubPause(); unsubTrackChange(); };
+    return () => { unsubPlay(); unsubPause(); unsubProgress(); unsubTrackChange(); };
   }, []);
 
   const handleAddRoot = useCallback(async () => {
@@ -930,6 +1292,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
 
   const handleSelectPlaylist = useCallback((playlist: Playlist) => {
     setSelectedPlaylist(playlist);
+    // 从设置/统计页切回歌单列表
+    setShowSettings(false);
+    setShowStats(false);
     // 注意：浏览歌单不再改写 musicPlayer.currentPlaylistId。
     // 该字段现仅代表「当前实际播放的音乐所归属的歌单」，且只在真正加载曲目时写入
     // （见 handleSelectTrack / handlePopupSelectTrack / processOpenWith）。
@@ -1043,11 +1408,49 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     });
   }, []);
 
+  // 封面覆盖映射加载/变更后，确保已加载的歌单曲目也应用覆盖。
+  // 修复：启动时扫描 effect 可能在 overrides 尚未加载完成时就已经 setPlaylists，
+  // 导致重启后封面不显示；监听 coverOverrides 可兜底重新叠加。
+  useEffect(() => {
+    console.log('[Music][探针] coverOverrides effect 触发, size=', coverOverrides.size);
+    if (coverOverrides.size === 0) return;
+    setPlaylists(prev => {
+      console.log('[Music][探针] coverOverrides effect -> setPlaylists, prev 长度=', prev.length);
+      return applyCoverOverrides(prev, coverOverrides);
+    });
+    setSelectedPlaylist(prev => {
+      if (!prev) return prev;
+      const applied = applyCoverOverrides([prev], coverOverrides)[0];
+      console.log('[Music][探针] coverOverrides effect -> setSelectedPlaylist, 曲目数=', applied.tracks.length, '有封面数=', applied.tracks.filter((t: Track) => t.coverPath).length);
+      return applied;
+    });
+  }, [coverOverrides]);
+
   // 手动设封面：更新 override map + 内存所有同 file_path 曲目封面
   const handleSetCover = useCallback(async (track: Track) => {
     const next = await setCoverForTrack(track, coverOverrides);
     setCoverOverrides(next);
     setPlaylists(prev => applyCoverOverrides(prev, next));
+    // 同步当前选中歌单（UI 直接渲染 selectedPlaylist.tracks，若不更新则封面不刷新）
+    setSelectedPlaylist(prev => (prev ? applyCoverOverrides([prev], next)[0] : prev));
+  }, [coverOverrides]);
+
+  // 重置封面：删除手动覆盖，回退到音频内嵌封面
+  const handleResetCover = useCallback(async (track: Track) => {
+    const fp = track.filePath || track.id;
+    if (!fp) return;
+    try {
+      await hostApi.invoke('music_delete_cover_override', { filePath: fp });
+      const next = new Map(coverOverrides);
+      next.delete(fp);
+      setCoverOverrides(next);
+      setPlaylists(prev => applyCoverOverrides(prev, next));
+      // 同步当前选中歌单（UI 直接渲染 selectedPlaylist.tracks，若不更新则封面不刷新）
+      setSelectedPlaylist(prev => (prev ? applyCoverOverrides([prev], next)[0] : prev));
+      console.log('[Music] 重置封面:', fp);
+    } catch (e) {
+      console.warn('[Music] 重置封面失败:', fp, e);
+    }
   }, [coverOverrides]);
 
   // 重扫该曲元数据（忽略手动封面），更新内存对应曲目（封面保留手动 override）
@@ -1072,21 +1475,21 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
   const handleEditTrack = useCallback(async (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => {
     await editTrackTags(track, fields);
     const fp = track.filePath || track.id;
+    const updateTracks = (tracks: Track[]) => tracks.map(t => {
+      const tFp = t.filePath || t.id;
+      if (tFp !== fp) return t;
+      return {
+        ...t,
+        title: fields.title ?? t.title,
+        artist: fields.artist ?? t.artist,
+        album: fields.album ?? t.album,
+      };
+    });
     setPlaylists(prev =>
-      prev.map(p => ({
-        ...p,
-        tracks: p.tracks.map(t => {
-          const tFp = t.filePath || t.id;
-          if (tFp !== fp) return t;
-          return {
-            ...t,
-            title: fields.title ?? t.title,
-            artist: fields.artist ?? t.artist,
-            album: fields.album ?? t.album,
-          };
-        }),
-      }))
+      prev.map(p => ({ ...p, tracks: updateTracks(p.tracks) }))
     );
+    // 同步当前选中歌单（UI 直接渲染 selectedPlaylist.tracks）
+    setSelectedPlaylist(prev => (prev ? { ...prev, tracks: updateTracks(prev.tracks) } : prev));
   }, []);
 
   // #4 添加歌曲：选择音频文件后真正加入当前歌单（自定义歌单持久化，目录歌单仅内存）
@@ -1292,6 +1695,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
 
   // 模块设置（当前为占位，后续扩展）
   const handleOpenModuleSettings = useCallback(() => {
+    setShowStats(false);
     setShowSettings(prev => !prev);
   }, []);
 
@@ -1460,60 +1864,71 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
         onRenamePlaylist={handleRenamePlaylist}
         onDeletePlaylist={handleDeletePlaylist}
         onOpenModuleSettings={handleOpenModuleSettings}
+        onOpenStats={() => setShowStats(true)}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
       />
-      <div className="flex-1 flex flex-col min-h-0 bg-[#f5f5f0] dark:bg-[#1c1917] relative">
-        {showSettings ? (
-          <MusicSettingsPanel
-            onClose={() => setShowSettings(false)}
-            rootPaths={rootPaths}
-            onRemoveRoot={handleRemoveRoot}
-            onAddRoot={handleAddRoot}
-            volume={volume}
-            onVolumeChange={handleVolume}
-            lyricsFontSize={lyricsFontSize}
-            onLyricsFontSize={handleLyricsFontSize}
-            lyricsShowNextLine={lyricsShowNextLine}
-            onLyricsShowNextLine={handleLyricsShowNextLine}
-            onlineLyricsEnabled={onlineLyricsEnabled}
-            onOnlineLyricsToggle={handleOnlineLyricsToggle}
-            localLrcFirst={localLrcFirst}
-            onLocalLrcFirstToggle={handleLocalLrcFirstToggle}
-            showAlbum={showAlbum}
-            onShowAlbumToggle={handleShowAlbumToggle}
-            lyricsAlign={lyricsAlign}
-            onLyricsAlignChange={handleLyricsAlignChange}
-            onCleanInvalidFiles={handleCleanInvalidFiles}
-            onRefreshAllFolders={handleRefreshAllFolders}
-            totalTracks={playlists.reduce((sum, p) => sum + p.tracks.length, 0)}
-            playlistCount={playlists.length}
-          />
-        ) : selectedPlaylist ? (
-          <TrackList
-            tracks={filteredTracks}
-            playlistName={selectedPlaylist.name}
-            onSelectTrack={handleSelectTrack}
-            onAddSong={handleAddSong}
-            onMoveTrack={handleMoveTrack}
-            onCopyTrack={handleCopyTrack}
-            onRemoveTrack={handleRemoveTrack}
-            otherPlaylists={otherPlaylistsForMenu}
-            showAlbum={showAlbum}
-            favoriteIds={favorites}
-            onToggleFavorite={toggleFavorite}
-            onSetCover={handleSetCover}
-            onRescanTrack={handleRescanTrack}
-            onEditTrack={handleEditTrack}
-          />
-        ) : (
-          <div className="flex-1 flex items-center justify-center">
-            <p className="text-sm text-neutral-400 dark:text-stone-500">{T('music.selectPlaylistHint')}</p>
-          </div>
-        )}
-        {/* PlayerBar 独立持久渲染：切换歌单时不卸载，保持播放状态连续。
-            仅在非设置面板且有当前曲目时显示。 */}
-        {!showSettings && currentTrack && (
+      <div className="flex-1 flex flex-col min-h-0 bg-[#f5f5f0] dark:bg-[#1c1917]">
+        <div className="flex-1 min-h-0 overflow-hidden relative">
+          {showStats ? (
+            <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />
+          ) : showSettings ? (
+            <div className="h-full overflow-y-auto">
+              <MusicSettingsPanel
+                onClose={() => setShowSettings(false)}
+                rootPaths={rootPaths}
+                onRemoveRoot={handleRemoveRoot}
+                onAddRoot={handleAddRoot}
+                volume={volume}
+                onVolumeChange={handleVolume}
+                lyricsFontSize={lyricsFontSize}
+                onLyricsFontSize={handleLyricsFontSize}
+                lyricsShowNextLine={lyricsShowNextLine}
+                onLyricsShowNextLine={handleLyricsShowNextLine}
+                onlineLyricsEnabled={onlineLyricsEnabled}
+                onOnlineLyricsToggle={handleOnlineLyricsToggle}
+                localLrcFirst={localLrcFirst}
+                onLocalLrcFirstToggle={handleLocalLrcFirstToggle}
+                showAlbum={showAlbum}
+                onShowAlbumToggle={handleShowAlbumToggle}
+                playMode={playMode}
+                onPlayModeChange={handlePlayModeChange}
+                lyricsAlign={lyricsAlign}
+                onLyricsAlignChange={handleLyricsAlignChange}
+                onCleanInvalidFiles={handleCleanInvalidFiles}
+                onRefreshAllFolders={handleRefreshAllFolders}
+                totalTracks={playlists.reduce((sum, p) => sum + p.tracks.length, 0)}
+                playlistCount={playlists.length}
+              />
+            </div>
+          ) : selectedPlaylist ? (
+            <TrackList
+              tracks={filteredTracks}
+              playlistName={selectedPlaylist.name}
+              onSelectTrack={handleSelectTrack}
+              onAddSong={handleAddSong}
+              onMoveTrack={handleMoveTrack}
+              onCopyTrack={handleCopyTrack}
+              onRemoveTrack={handleRemoveTrack}
+              otherPlaylists={otherPlaylistsForMenu}
+              showAlbum={showAlbum}
+              favoriteIds={favorites}
+              onToggleFavorite={toggleFavorite}
+              onSetCover={handleSetCover}
+              onResetCover={handleResetCover}
+              onRescanTrack={handleRescanTrack}
+              onEditTrack={handleEditTrack}
+              loadLyricsText={loadLyricsText}
+              saveTrackLyrics={saveTrackLyrics}
+            />
+          ) : (
+            <div className="flex-1 flex items-center justify-center">
+              <p className="text-sm text-neutral-400 dark:text-stone-500">{T('music.selectPlaylistHint')}</p>
+            </div>
+          )}
+        </div>
+        {/* PlayerBar 固定在内容区下方；设置/统计页也保持显示，不被覆盖。 */}
+        {currentTrack && (
           <PlayerBar
             key={currentTrack.filePath}
             track={currentTrack}

@@ -531,6 +531,98 @@ fn urlencoding(s: &str) -> String {
     encoded
 }
 
+/// 歌词文本结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsTextResult {
+    pub text: String,
+    pub source: String,
+}
+
+/// 获取曲目原始歌词文本（优先同目录同名 .lrc 文件，其次内嵌歌词）。
+#[tauri::command]
+pub async fn get_lyrics_text(track_path: String) -> Result<LyricsTextResult, String> {
+    let path = PathBuf::from(&track_path);
+
+    // 1. 优先读取 .lrc
+    if let Some(parent) = path.parent() {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let lrc_path = parent.join(format!("{}.lrc", stem));
+            if lrc_path.exists() {
+                let text = fs::read_to_string(&lrc_path)
+                    .map_err(|e| format!("读取 LRC 文件失败: {}", e))?;
+                return Ok(LyricsTextResult {
+                    text,
+                    source: "lrc".into(),
+                });
+            }
+        }
+    }
+
+    // 2. 回退内嵌歌词原始文本
+    let tagged_file = read_from_path(&path)
+        .map_err(|e| format!("读取音频文件失败: {}", e))?;
+    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+    if let Some(tag) = tag {
+        for key in [ItemKey::UnsyncLyrics, ItemKey::Lyrics] {
+            if let Some(text) = tag.get_string(key) {
+                if !text.trim().is_empty() {
+                    return Ok(LyricsTextResult {
+                        text: text.to_string(),
+                        source: "embedded".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(LyricsTextResult {
+        text: String::new(),
+        source: "none".into(),
+    })
+}
+
+/// 保存歌词：写入内嵌标签，并可选择同时写入同目录同名 .lrc 文件。
+#[tauri::command]
+pub async fn save_track_lyrics(
+    track_path: String,
+    lyrics: String,
+    save_to_lrc: bool,
+) -> Result<(), String> {
+    let path = PathBuf::from(&track_path);
+
+    // 写入 .lrc 文件
+    if save_to_lrc {
+        let parent = path.parent().ok_or("无法获取音频文件目录")?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or("无法获取文件名")?;
+        let lrc_path = parent.join(format!("{}.lrc", stem));
+        fs::write(&lrc_path, &lyrics)
+            .map_err(|e| format!("写入 LRC 文件失败: {}", e))?;
+    }
+
+    // 写入内嵌标签
+    let mut tagged_file = read_from_path(&path)
+        .map_err(|e| format!("读取音频文件失败: {}", e))?;
+    {
+        let tag = if let Some(t) = tagged_file.primary_tag_mut() {
+            t
+        } else {
+            tagged_file
+                .first_tag_mut()
+                .ok_or("音频文件没有可写入的标签")?
+        };
+        tag.insert_text(ItemKey::UnsyncLyrics, lyrics);
+    }
+    tagged_file
+        .save_to_path(&path, lofty::config::WriteOptions::default())
+        .map_err(|e| format!("保存音频标签失败: {}", e))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

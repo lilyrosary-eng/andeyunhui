@@ -289,6 +289,7 @@ function VideoModule() {
   const handleFolderClick = useCallback(async (folder: VideoFolder) => {
     setSelectedFolder(folder);
     setPlayingFile(null);
+    setShowSettings(false);
     setVideosLoading(true);
     try {
       const files = await hostApi.invoke<VideoFile[]>('get_folder_videos', { folderPath: folder.folderPath });

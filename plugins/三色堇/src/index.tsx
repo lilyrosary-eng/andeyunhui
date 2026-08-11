@@ -463,6 +463,7 @@ function ReadingModule() {
   }, []);
 
   const handleOpenSettings = useCallback(() => {
+    setShowStats(false);
     setShowSettings(prev => !prev);
   }, []);
 
@@ -520,7 +521,7 @@ function ReadingModule() {
         currentChapterIndex={selectedChapterIndex}
         onChapterClick={handleChapterClick}
         onBackToBooks={handleBackToList}
-        onOpenStats={() => setShowStats((v) => !v)}
+        onOpenStats={() => { setShowSettings(false); setShowStats((v) => !v); }}
       />
       <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] relative">
         {currentBook ? (

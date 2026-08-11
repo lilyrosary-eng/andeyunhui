@@ -1031,10 +1031,12 @@ fn main() {
             music_get_player_state,
             music_record_play_session,
             music_get_listen_stats,
+            music_get_listen_ranking,
             music_set_cover,
             music_rescan_metadata,
             music_edit_track,
             music_get_all_cover_overrides,
+            music_delete_cover_override,
             music_clean_cover_cache,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
@@ -1068,6 +1070,8 @@ fn main() {
             lyrics_service::save_lyrics_widget_position,
             lyrics_service::get_lyrics_widget_position,
             lyrics_service::get_lyrics,
+            lyrics_service::get_lyrics_text,
+            lyrics_service::save_track_lyrics,
             // ========== 模块：WPS 办公（docx / pptx 导入导出）==========
             convert_to_markdown,
             convert_bytes_to_markdown,

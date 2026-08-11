@@ -2225,6 +2225,11 @@ pub fn music_get_listen_stats(app: tauri::AppHandle, days: i64) -> Result<Vec<mu
 }
 
 #[tauri::command]
+pub fn music_get_listen_ranking(app: tauri::AppHandle, days: i64) -> Result<music_db::ListenRanking, String> {
+    music_db::music_get_listen_ranking(app, days)
+}
+
+#[tauri::command]
 pub fn music_set_cover(
     app: tauri::AppHandle,
     file_path: String,
@@ -2254,6 +2259,11 @@ pub fn music_edit_track(
 #[tauri::command]
 pub fn music_get_all_cover_overrides(app: tauri::AppHandle) -> Result<Vec<music_db::CoverOverrideRow>, String> {
     music_db::music_get_all_cover_overrides(app)
+}
+
+#[tauri::command]
+pub fn music_delete_cover_override(app: tauri::AppHandle, file_path: String) -> Result<(), String> {
+    music_db::music_delete_cover_override(app, file_path)
 }
 
 #[tauri::command]

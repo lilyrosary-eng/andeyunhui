@@ -88,11 +88,17 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             day          TEXT PRIMARY KEY,
             play_count   INTEGER NOT NULL DEFAULT 0,
             unique_tracks INTEGER NOT NULL DEFAULT 0,
+            track_count  INTEGER NOT NULL DEFAULT 0,
             total_ms     INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS listen_day_track (
-            day       TEXT NOT NULL,
-            track_id  TEXT NOT NULL,
+            day         TEXT NOT NULL,
+            track_id    TEXT NOT NULL,
+            title       TEXT NOT NULL DEFAULT '',
+            artist      TEXT NOT NULL DEFAULT '',
+            album       TEXT NOT NULL DEFAULT '',
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            play_count  INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (day, track_id)
         );
         CREATE TABLE IF NOT EXISTS track_cover_override (
@@ -100,7 +106,53 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             cover_path TEXT NOT NULL
         );",
     )
-    .map_err(|e| format!("初始化音乐表结构失败: {}", e))
+    .map_err(|e| format!("初始化音乐表结构失败: {}", e))?;
+
+    // 兼容老库：CREATE TABLE IF NOT EXISTS 对已存在的表无效，
+    // 若早期版本建表缺列（listen_daily.track_count / listen_day_track 的明细列），
+    // 需在此 ALTER 补齐，否则 music_record_play_session 会因缺列报错。
+    migrate_schema(conn)?;
+    Ok(())
+}
+
+/// 给已存在的老库补列（幂等：先查 pragma table_info 判断列是否存在）。
+fn migrate_schema(conn: &Connection) -> Result<(), String> {
+    // listen_daily 补 track_count
+    let has_track_count: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('listen_daily') WHERE name = 'track_count'",
+            [],
+            |r| r.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !has_track_count {
+        conn.execute("ALTER TABLE listen_daily ADD COLUMN track_count INTEGER NOT NULL DEFAULT 0", [])
+            .map_err(|e| format!("迁移 listen_daily 失败: {}", e))?;
+    }
+    // listen_day_track 补明细列
+    for col in [
+        ("title", "TEXT NOT NULL DEFAULT ''"),
+        ("artist", "TEXT NOT NULL DEFAULT ''"),
+        ("album", "TEXT NOT NULL DEFAULT ''"),
+        ("duration_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("play_count", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('listen_day_track') WHERE name = ?1",
+                [col.0],
+                |r| r.get::<_, i64>(0).map(|c| c > 0),
+            )
+            .unwrap_or(false);
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE listen_day_track ADD COLUMN {} {}", col.0, col.1),
+                [],
+            )
+            .map_err(|e| format!("迁移 listen_day_track.{} 失败: {}", col.0, e))?;
+        }
+    }
+    Ok(())
 }
 
 // ============ 数据结构 ============
@@ -531,6 +583,28 @@ pub fn music_set_cover_override(app: AppHandle, file_path: String, cover_path: S
     Ok(())
 }
 
+/// 删除封面覆盖（重置封面）：移除 file_path 的手动封面记录，并清空
+/// playlist_track / favorite 中该 file_path 的 cover_path，使其回退到音频内嵌封面。
+pub fn music_delete_cover_override(app: AppHandle, file_path: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute(
+        "DELETE FROM track_cover_override WHERE file_path = ?1",
+        params![file_path],
+    )
+    .map_err(|e| format!("删除封面覆盖失败: {}", e))?;
+    conn.execute(
+        "UPDATE playlist_track SET cover_path = NULL WHERE file_path = ?1",
+        params![file_path],
+    )
+    .map_err(|e| format!("重置歌单封面失败: {}", e))?;
+    conn.execute(
+        "UPDATE favorite SET cover_path = NULL WHERE file_path = ?1",
+        params![file_path],
+    )
+    .map_err(|e| format!("重置收藏封面失败: {}", e))?;
+    Ok(())
+}
+
 /// 读取全部封面覆盖映射（前端挂载/扫描后加载，应用到内存 track）。
 pub fn music_get_all_cover_overrides(app: AppHandle) -> Result<Vec<CoverOverrideRow>, String> {
     let conn = open_db(&app)?;
@@ -649,4 +723,127 @@ pub fn music_get_listen_stats(app: AppHandle, days: i64) -> Result<Vec<ListenSta
         out.push(row.map_err(|e| format!("统计行解析失败: {}", e))?);
     }
     Ok(out)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankingTrack {
+    pub track_id: String,
+    pub title: String,
+    pub artist: String,
+    pub play_count: i64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankingArtist {
+    pub artist: String,
+    pub play_count: i64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListenRanking {
+    pub total_plays: i64,
+    pub total_ms: i64,
+    pub prev_total_plays: i64,
+    pub prev_total_ms: i64,
+    pub top_tracks: Vec<RankingTrack>,
+    pub top_artists: Vec<RankingArtist>,
+}
+
+/// 返回最近 N 天的排行与环比：Top 歌曲、Top 歌手，以及与前 N 天的对比。
+pub fn music_get_listen_ranking(app: AppHandle, days: i64) -> Result<ListenRanking, String> {
+    let days = days.max(1);
+    let conn = open_db(&app)?;
+
+    // 当前区间：最近 days 天（含今天）
+    let cur_cond = format!("day >= date('now', '-{} days')", days - 1);
+
+    // 前序区间：再往前 days 天
+    let prev_cond = format!(
+        "day >= date('now', '-{} days') AND day < date('now', '-{} days')",
+        days * 2 - 1,
+        days - 1
+    );
+
+    let sum_field = |cond: &str, field: &str| -> Result<i64, String> {
+        let sql = format!(
+            "SELECT COALESCE(SUM({}), 0) FROM listen_daily WHERE {}",
+            field, cond
+        );
+        let v: i64 = conn
+            .query_row(&sql, [], |r| r.get(0))
+            .map_err(|e| format!("统计汇总失败: {}", e))?;
+        Ok(v)
+    };
+
+    let total_plays = sum_field(&cur_cond, "play_count")?;
+    let total_ms = sum_field(&cur_cond, "total_ms")?;
+    let prev_total_plays = sum_field(&prev_cond, "play_count")?;
+    let prev_total_ms = sum_field(&prev_cond, "total_ms")?;
+
+    // Top 歌曲：按 track_id 汇总 play_count，取前 10
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT track_id, title, artist, SUM(play_count) AS pc FROM listen_day_track
+             WHERE day >= date('now', '-{} days') GROUP BY track_id ORDER BY pc DESC LIMIT 10",
+            days - 1
+        ))
+        .map_err(|e| format!("查询 Top 歌曲失败: {}", e))?;
+    let top_tracks = stmt
+        .query_map([], |r| {
+            Ok(RankingTrack {
+                track_id: r.get(0)?,
+                title: r.get(1)?,
+                artist: r.get(2)?,
+                play_count: r.get(3)?,
+            })
+        })
+        .map_err(|e| format!("读取 Top 歌曲失败: {}", e))?;
+    let mut top_tracks = top_tracks
+        .map(|x| x.map_err(|e| format!("Top 歌曲行解析失败: {}", e)))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Top 歌手：按 artist 汇总 play_count，取前 10
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT artist, SUM(play_count) AS pc FROM listen_day_track
+             WHERE day >= date('now', '-{} days') AND artist IS NOT NULL AND artist != ''
+             GROUP BY artist ORDER BY pc DESC LIMIT 10",
+            days - 1
+        ))
+        .map_err(|e| format!("查询 Top 歌手失败: {}", e))?;
+    let top_artists = stmt
+        .query_map([], |r| {
+            Ok(RankingArtist {
+                artist: r.get(0)?,
+                play_count: r.get(1)?,
+            })
+        })
+        .map_err(|e| format!("读取 Top 歌手失败: {}", e))?;
+    let mut top_artists = top_artists
+        .map(|x| x.map_err(|e| format!("Top 歌手行解析失败: {}", e)))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // 空 artist 兜底为「未知」
+    for t in top_tracks.iter_mut() {
+        if t.artist.trim().is_empty() {
+            t.artist = "未知".to_string();
+        }
+    }
+    for a in top_artists.iter_mut() {
+        if a.artist.trim().is_empty() {
+            a.artist = "未知".to_string();
+        }
+    }
+
+    Ok(ListenRanking {
+        total_plays,
+        total_ms,
+        prev_total_plays,
+        prev_total_ms,
+        top_tracks,
+        top_artists,
+    })
 }

@@ -113,6 +113,7 @@ function ImageModule() {
 
   const handleFolderClick = useCallback((folder: ImageFolder) => {
     setSelectedFolder(folder);
+    setShowSettings(false);
   }, []);
 
   const handleBack = useCallback(() => {

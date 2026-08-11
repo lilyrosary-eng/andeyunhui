@@ -2136,6 +2136,7 @@ function ProfessionalModule() {
   const handleSelectCategory = useCallback((catId: string) => {
     setSelectedCategory(catId);
     setSelectedToolId(null);
+    setShowSettings(false);
   }, []);
 
   const handleOpenModuleSettings = useCallback(() => {

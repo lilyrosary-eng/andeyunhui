@@ -56,6 +56,32 @@ const ALLOWED_COMMANDS = new Set([
   'hide_lyrics_widget',
   'set_lyrics_widget_locked',
   'get_lyrics_widget_locked',
+  // 音乐模块 —— 铃兰（收藏 / 播放状态 / 听歌统计 / 封面覆盖 / 标签写回 / 歌单管理）
+  // 注意：Phase 1~2 移植新增的 music_* 命令此前漏加白名单，导致沙箱内 invoke 被拦截
+  // （"未授权命令"被插件侧 .catch 静默吞掉），表现为收藏/封面/播放状态/听歌统计/重扫全部失败。
+  'music_replace_playlist_tracks',
+  'music_set_favorite',
+  'music_list_favorites',
+  'music_save_player_state',
+  'music_get_player_state',
+  'music_record_play_session',
+  'music_get_listen_stats',
+  'music_get_listen_ranking',
+  'music_set_cover',
+  'music_rescan_metadata',
+  'music_edit_track',
+  'music_get_all_cover_overrides',
+  'music_delete_cover_override',
+  'music_clean_cover_cache',
+  'get_lyrics_text',
+  'save_track_lyrics',
+  'music_rename_playlist',
+  'music_delete_playlist',
+  'music_list_playlists',
+  'music_list_playlist_tracks',
+  'music_add_track_to_playlist',
+  'music_remove_track_from_playlist',
+  'music_reorder_playlist_track',
   // SMTC（任务栏「正在播放」）：前端推送播放状态 + 上报激活模块 + 诊断日志。
   // 注意：这些命令此前漏加白名单，导致沙箱内 music/video 插件的 invoke 被静默拦截
   // （插件侧 .catch 吞错），元信息永远到不了 Rust，任务栏卡片不显示。

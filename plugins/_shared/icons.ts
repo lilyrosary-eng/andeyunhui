@@ -203,6 +203,35 @@ export function MoreIcon(p: { size?: number }) {
   ] });
 }
 
+export function HeartIcon(p: { size?: number; fill?: string }) {
+  return SvgEl({
+    size: p?.size || 18,
+    fill: p?.fill || 'currentColor',
+    strokeWidth: 1.5,
+    children: [
+      React.createElement('path', {
+        key: 'a',
+        d: 'M19.5 13.572L12 21l-7.5-7.428A5 5 0 1 1 12 7.006a5 5 0 1 1 7.5 6.572z',
+      }),
+    ],
+  });
+}
+
+export function HeartOffIcon(p: { size?: number; fill?: string }) {
+  return SvgEl({
+    size: p?.size || 18,
+    fill: 'none',
+    strokeWidth: 1.5,
+    children: [
+      React.createElement('path', {
+        key: 'a',
+        d: 'M19.5 13.572L12 21l-7.5-7.428A5 5 0 1 1 12 7.006a5 5 0 1 1 7.5 6.572z',
+      }),
+      React.createElement('line', { key: 'b', x1: '4', y1: '4', x2: '20', y2: '20' }),
+    ],
+  });
+}
+
 export function FolderIcon(p: { size?: number }) {
   return SvgEl({ size: p?.size || 16, strokeWidth: 1.5, children: [
     React.createElement('path', { key: 'a', d: 'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z' }),

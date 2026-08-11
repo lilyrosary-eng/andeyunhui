@@ -5,7 +5,7 @@ const { useState, useEffect, useCallback, useRef } = React;
 const hostApi = window.__HOST_API__;
 import { musicPlayer } from './musicPlayer';
 import { formatTime } from '../../_shared/utils';
-import { PlusIcon, CheckIcon, MoreIcon, MusicIcon } from '../../_shared/icons';
+import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 
 interface Track {
@@ -36,8 +36,11 @@ interface TrackListProps {
   favoriteIds?: Set<string>;
   onToggleFavorite?: (track: Track) => void;
   onSetCover?: (track: Track) => void;
+  onResetCover?: (track: Track) => void;
   onRescanTrack?: (track: Track) => void;
   onEditTrack?: (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => void;
+  loadLyricsText?: (track: Track) => Promise<{ text: string; source: string }>;
+  saveTrackLyrics?: (track: Track, lyrics: string, saveToLrc: boolean) => Promise<void>;
 }
 
 export function TrackList({
@@ -53,8 +56,11 @@ export function TrackList({
   favoriteIds,
   onToggleFavorite,
   onSetCover,
+  onResetCover,
   onRescanTrack,
   onEditTrack,
+  loadLyricsText,
+  saveTrackLyrics,
 }: TrackListProps) {
   useLang();
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
@@ -71,6 +77,19 @@ export function TrackList({
   // 保存每个「...」按钮的 ref，用于定位
   const moreBtnRefs = useRef<Map<number, HTMLButtonElement | null>>(new Map());
   const menuRef = useRef<HTMLDivElement | null>(null);
+
+  // 自定义「编辑曲目信息」弹窗状态
+  const [editingTrack, setEditingTrack] = useState<Track | null>(null);
+  const [editDraft, setEditDraft] = useState<{ title: string; artist: string; album: string; trackNumber: string }>({
+    title: '', artist: '', album: '', trackNumber: '',
+  });
+
+  // 歌词编辑器弹窗状态
+  const [lyricsTrack, setLyricsTrack] = useState<Track | null>(null);
+  const [lyricsDraft, setLyricsDraft] = useState('');
+  const [lyricsSource, setLyricsSource] = useState('none');
+  const [lyricsLoading, setLyricsLoading] = useState(false);
+  const [lyricsError, setLyricsError] = useState<string | null>(null);
 
   const currentTrack = musicPlayer.getCurrentTrack();
 
@@ -231,23 +250,75 @@ export function TrackList({
     });
   }, []);
 
-  // 编辑信息：用 prompt 逐字段收集（轻量），再写回标签
+  // 打开自定义「编辑曲目信息」弹窗
   const onEditInfo = (t: Track) => {
-    const title = window.prompt(T('music.track.editTitle'), t.title || '');
-    if (title === null) return;
-    const artist = window.prompt(T('music.track.editArtist'), t.artist || '');
-    if (artist === null) return;
-    const album = window.prompt(T('music.track.editAlbum'), t.album || '');
-    if (album === null) return;
-    const tn = window.prompt(T('music.track.editTrackNo'), '');
-    const trackNumber = tn && tn.trim() ? Number(tn) : undefined;
-    onEditTrack?.(t, {
-      title: title || undefined,
-      artist: artist || undefined,
-      album: album || undefined,
-      trackNumber: Number.isNaN(trackNumber as number) ? undefined : trackNumber,
+    setEditingTrack(t);
+    setEditDraft({
+      title: t.title || '',
+      artist: t.artist || '',
+      album: t.album || '',
+      trackNumber: '',
     });
   };
+
+  const submitEdit = () => {
+    if (!editingTrack) return;
+    const tn = editDraft.trackNumber.trim() ? Number(editDraft.trackNumber) : NaN;
+    onEditTrack?.(editingTrack, {
+      title: editDraft.title.trim() || undefined,
+      artist: editDraft.artist.trim() || undefined,
+      album: editDraft.album.trim() || undefined,
+      trackNumber: Number.isNaN(tn) ? undefined : tn,
+    });
+    setEditingTrack(null);
+  };
+
+  // 打开歌词编辑器：从后端加载原始歌词文本
+  const openLyricsEditor = async (t: Track) => {
+    if (!loadLyricsText) return;
+    setLyricsTrack(t);
+    setLyricsDraft('');
+    setLyricsSource('none');
+    setLyricsError(null);
+    setLyricsLoading(true);
+    try {
+      const res = await loadLyricsText(t);
+      setLyricsDraft(res?.text ?? '');
+      setLyricsSource(res?.source ?? 'none');
+    } catch (e) {
+      setLyricsError(String(e));
+    } finally {
+      setLyricsLoading(false);
+    }
+  };
+
+  const closeLyricsEditor = () => {
+    setLyricsTrack(null);
+    setLyricsDraft('');
+    setLyricsError(null);
+  };
+
+  const submitLyrics = async (saveToLrc: boolean) => {
+    if (!lyricsTrack || !saveTrackLyrics) return;
+    setLyricsError(null);
+    try {
+      await saveTrackLyrics(lyricsTrack, lyricsDraft, saveToLrc);
+      closeLyricsEditor();
+    } catch (e) {
+      setLyricsError(String(e));
+    }
+  };
+
+  // ESC 关闭编辑弹窗
+  useEffect(() => {
+    if (!editingTrack) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setEditingTrack(null);
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submitEdit();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [editingTrack, editDraft]);
 
   // ========== 渲染：下拉菜单（position: fixed 直接渲染在 overflow-y-auto 外部）==========
   const renderMenuContent = (track: Track) => {
@@ -314,6 +385,12 @@ export function TrackList({
           onClick: () => { onSetCover(track); setOpenMenuIndex(null); },
           className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
           children: T('music.track.setCover'),
+        }) : null,
+        onResetCover ? React.createElement('button', {
+          key: 'resetCover',
+          onClick: () => { onResetCover(track); setOpenMenuIndex(null); },
+          className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
+          children: T('music.track.resetCover'),
         }) : null,
         onRescanTrack ? React.createElement('button', {
           key: 'rescan',
@@ -550,7 +627,10 @@ export function TrackList({
                             : 'text-neutral-400 dark:text-stone-500 hover:text-rose-400'
                         }`,
                         title: T('music.favoriteToggle'),
-                      }, favoriteIds?.has(track.id || track.filePath) ? '♥' : '♡')
+                      }, React.createElement(HeartIcon, {
+                        size: 16,
+                        fill: favoriteIds?.has(track.id || track.filePath) ? 'currentColor' : 'none',
+                      }))
                     : null,
                   // 「...」按钮
                   React.createElement('div', {
@@ -576,6 +656,172 @@ export function TrackList({
       </div>
       {/* 下拉菜单：放在 overflow-y-auto 外部，用 position:fixed 避免被裁剪 */}
       {openTrack && menuPos ? renderMenuContent(openTrack) : null}
+
+      {/* 自定义元信息编辑弹窗（替代 window.prompt） */}
+      {editingTrack && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 dark:bg-black/50 backdrop-blur-sm p-4"
+          onClick={() => setEditingTrack(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl bg-white dark:bg-stone-800 shadow-2xl p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold text-neutral-800 dark:text-stone-100 mb-5">
+              {T('music.track.editInfo')}
+            </h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs text-neutral-500 dark:text-stone-400 mb-1.5">{T('music.track.editTitle')}</label>
+                <input
+                  type="text"
+                  value={editDraft.title}
+                  onChange={(e) => setEditDraft((d) => ({ ...d, title: e.target.value }))}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-neutral-200 dark:border-stone-600 bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-[var(--element-muted)]"
+                  placeholder={T('music.track.editTitle')}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-neutral-500 dark:text-stone-400 mb-1.5">{T('music.track.editArtist')}</label>
+                <input
+                  type="text"
+                  value={editDraft.artist}
+                  onChange={(e) => setEditDraft((d) => ({ ...d, artist: e.target.value }))}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-neutral-200 dark:border-stone-600 bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-[var(--element-muted)]"
+                  placeholder={T('music.track.editArtist')}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-neutral-500 dark:text-stone-400 mb-1.5">{T('music.track.editAlbum')}</label>
+                <input
+                  type="text"
+                  value={editDraft.album}
+                  onChange={(e) => setEditDraft((d) => ({ ...d, album: e.target.value }))}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-neutral-200 dark:border-stone-600 bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-[var(--element-muted)]"
+                  placeholder={T('music.track.editAlbum')}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-neutral-500 dark:text-stone-400 mb-1.5">{T('music.track.editTrackNo')}</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={editDraft.trackNumber}
+                  onChange={(e) => setEditDraft((d) => ({ ...d, trackNumber: e.target.value.replace(/[^0-9]/g, '') }))}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-neutral-200 dark:border-stone-600 bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-[var(--element-muted)]"
+                  placeholder={T('music.track.editTrackNo')}
+                />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs text-neutral-500 dark:text-stone-400">{T('music.track.editLyrics')}</label>
+                  <button
+                    onClick={() => editingTrack && openLyricsEditor(editingTrack)}
+                    className="text-xs px-2 py-1 rounded-md bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-300 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
+                  >
+                    {T('music.track.editLyricsBtn')}
+                  </button>
+                </div>
+                <div className="w-full px-3 py-2 text-sm rounded-lg border border-neutral-200 dark:border-stone-600 bg-neutral-50 dark:bg-stone-800 text-neutral-500 dark:text-stone-400 truncate">
+                  {T('music.track.editLyricsHint')}
+                </div>
+              </div>
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                onClick={() => setEditingTrack(null)}
+                className="px-4 py-2 text-sm rounded-lg text-neutral-600 dark:text-stone-300 hover:bg-neutral-100 dark:hover:bg-stone-700 transition-colors"
+              >
+                {T('common.cancel')}
+              </button>
+              <button
+                onClick={submitEdit}
+                className="px-4 py-2 text-sm rounded-lg bg-[var(--element-muted)] text-[var(--element-bg)] hover:opacity-90 transition-colors"
+              >
+                {T('common.confirm')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 歌词编辑器弹窗 */}
+      {lyricsTrack && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 dark:bg-black/60 backdrop-blur-sm p-4"
+          onClick={closeLyricsEditor}
+        >
+          <div
+            className="w-full max-w-3xl h-[80vh] flex flex-col rounded-xl bg-white dark:bg-stone-800 shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-neutral-200 dark:border-stone-700 flex items-center justify-between">
+              <h3 className="text-base font-semibold text-neutral-800 dark:text-stone-100">
+                {T('music.track.lyricsEditorTitle')} — {lyricsTrack.title}
+              </h3>
+              <button
+                onClick={closeLyricsEditor}
+                className="text-xl leading-none text-neutral-400 hover:text-neutral-600 dark:text-stone-500 dark:hover:text-stone-300"
+                aria-label={T('common.close')}
+              >
+                ×
+              </button>
+            </div>
+            <div className="px-5 pb-2 text-xs text-neutral-400 dark:text-stone-500">
+              {lyricsSource === 'lrc'
+                ? T('music.track.lyricsSourceLrc')
+                : lyricsSource === 'embedded'
+                  ? T('music.track.lyricsSourceEmbedded')
+                  : T('music.track.lyricsSourceNone')}
+            </div>
+
+            <div className="flex-1 p-4 overflow-hidden">
+              {lyricsLoading ? (
+                <div className="h-full flex items-center justify-center text-sm text-neutral-500 dark:text-stone-400">
+                  {T('music.track.lyricsLoading')}
+                </div>
+              ) : (
+                <textarea
+                  value={lyricsDraft}
+                  onChange={(e) => setLyricsDraft(e.target.value)}
+                  className="w-full h-full resize-none p-4 text-sm leading-relaxed rounded-lg border border-neutral-200 dark:border-stone-600 bg-white dark:bg-stone-900 text-neutral-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-[var(--element-muted)] font-mono"
+                  placeholder={T('music.track.lyricsPlaceholder')}
+                  spellCheck={false}
+                />
+              )}
+            </div>
+
+            {lyricsError && (
+              <div className="px-5 py-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20">
+                {lyricsError}
+              </div>
+            )}
+
+            <div className="px-5 py-4 border-t border-neutral-200 dark:border-stone-700 flex justify-end gap-2">
+              <button
+                onClick={closeLyricsEditor}
+                className="px-4 py-2 text-sm rounded-lg text-neutral-600 dark:text-stone-300 hover:bg-neutral-100 dark:hover:bg-stone-700 transition-colors"
+              >
+                {T('common.cancel')}
+              </button>
+              <button
+                onClick={() => submitLyrics(false)}
+                disabled={lyricsLoading}
+                className="px-4 py-2 text-sm rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-50"
+              >
+                {T('music.track.lyricsSaveEmbedded')}
+              </button>
+              <button
+                onClick={() => submitLyrics(true)}
+                disabled={lyricsLoading}
+                className="px-4 py-2 text-sm rounded-lg bg-[var(--element-muted)] text-[var(--element-bg)] hover:opacity-90 transition-colors disabled:opacity-50"
+              >
+                {T('music.track.lyricsSaveToLrc')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
