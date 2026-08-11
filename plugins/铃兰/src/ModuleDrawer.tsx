@@ -2,7 +2,7 @@
 import React from "react";
 const { useState, useEffect } = React;
 import { X } from 'lucide-react';
-import { CloudIcon, CheckIcon, MusicIcon } from '../../_shared/icons';
+import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 
 interface ModuleDrawerProps {
@@ -10,10 +10,40 @@ interface ModuleDrawerProps {
   onClose: () => void;
 }
 
+// 折叠菜单子项（网易云注入功能下的各个部分，对应截图中圈出的内容）
+const neteaseItems = [
+  {
+    label: T('music.moduleDrawer.netease.listenNow'),
+    desc: T('music.moduleDrawer.netease.listenNowDesc'),
+    icon: React.createElement(MusicIcon, { size: 16 }),
+  },
+  {
+    label: T('music.moduleDrawer.netease.library'),
+    desc: T('music.moduleDrawer.netease.libraryDesc'),
+    icon: React.createElement(MusicIcon, { size: 16 }),
+  },
+  {
+    label: T('music.moduleDrawer.netease.radio'),
+    desc: T('music.moduleDrawer.netease.radioDesc'),
+    icon: React.createElement(MusicIcon, { size: 16 }),
+  },
+  {
+    label: T('music.moduleDrawer.netease.search'),
+    desc: T('music.moduleDrawer.netease.searchDesc'),
+    icon: React.createElement(MusicIcon, { size: 16 }),
+  },
+  {
+    label: T('music.moduleDrawer.netease.login'),
+    desc: T('music.moduleDrawer.netease.loginDesc'),
+    icon: React.createElement(MusicIcon, { size: 16 }),
+  },
+];
+
 export function ModuleDrawer({ open, onClose }: ModuleDrawerProps) {
   useLang();
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
+  const [neteaseOpen, setNeteaseOpen] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -79,6 +109,54 @@ export function ModuleDrawer({ open, onClose }: ModuleDrawerProps) {
               <CheckIcon size={12} />
             </div>
           </button>
+
+          <div className="mt-3">
+            <button
+              onClick={() => setNeteaseOpen((v) => !v)}
+              className="w-full flex items-center gap-3 rounded-xl border border-[#ff8a80]/60 dark:border-[#ff8a80]/40 bg-[#ffebee]/60 dark:bg-[#3e2723]/40 px-4 py-3 text-left transition-colors hover:bg-[#ffcdd2]/70 dark:hover:bg-[#4e342e]/50"
+            >
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#f44336]/10 text-[#f44336] dark:text-[#ff8a80] shrink-0">
+                <MusicIcon size={18} />
+              </div>
+              <span className="flex-1 text-sm font-medium text-[#f44336] dark:text-[#ff8a80] truncate">
+                {T('music.moduleDrawer.placeholder')}
+              </span>
+              <div className="text-[#f44336] dark:text-[#ff8a80] shrink-0 transition-transform duration-200">
+                {neteaseOpen
+                  ? React.createElement(ChevronDownIcon, { size: 18 })
+                  : React.createElement(ChevronRightIcon, { size: 18 })}
+              </div>
+            </button>
+
+            <div
+              className={`overflow-hidden transition-all duration-300 ease-out ${
+                neteaseOpen ? 'max-h-96 opacity-100 mt-2' : 'max-h-0 opacity-0'
+              }`}
+            >
+              <div className="space-y-1 pl-2">
+                {neteaseItems.map((item, idx) => (
+                  <button
+                    key={idx}
+                    className="w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-100/70 dark:hover:bg-stone-700/50"
+                  >
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300 shrink-0">
+                      {item.icon}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">
+                        {item.label}
+                      </p>
+                      {item.desc && (
+                        <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
+                          {item.desc}
+                        </p>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -250,3 +250,15 @@ export function CloseIcon(p: { size?: number }) {
     React.createElement('line', { key: 'b', x1: '6', y1: '6', x2: '18', y2: '18' }),
   ] });
 }
+
+export function ChevronDownIcon(p: { size?: number }) {
+  return SvgEl({ size: p?.size || 18, children: [
+    React.createElement('polyline', { key: 'a', points: '6 9 12 15 18 9' }),
+  ] });
+}
+
+export function ChevronRightIcon(p: { size?: number }) {
+  return SvgEl({ size: p?.size || 18, children: [
+    React.createElement('polyline', { key: 'a', points: '9 6 15 12 9 18' }),
+  ] });
+}
