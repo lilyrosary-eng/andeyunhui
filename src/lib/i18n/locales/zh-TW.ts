@@ -880,6 +880,8 @@ export const zhTW: Record<string, string> = {
   'music.remove': '移除',
   'music.unknownTrack': '未知曲目',
   'music.unknownArtist': '未知歌手',
+  'music.favoritePlaylist': '我的收藏',
+  'music.favoriteToggle': '收藏 / 取消收藏',
   'music.scanning': '正在掃描音樂...',
   'music.scanProgress': '已掃描 {found} / {total} 首...',
   'music.emptyTitle': '音樂模組',

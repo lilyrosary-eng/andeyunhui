@@ -880,6 +880,8 @@ export const deDE: Record<string, string> = {
   'music.remove': 'Entfernen',
   'music.unknownTrack': 'Unbekannter Titel',
   'music.unknownArtist': 'Unbekannter Künstler',
+  'music.favoritePlaylist': 'Favoriten',
+  'music.favoriteToggle': 'Favorisieren / Entfavorisieren',
   'music.scanning': 'Musik wird gescannt...',
   'music.scanProgress': '{found} / {total} gescannt...',
   'music.emptyTitle': 'Musikmodul',

@@ -2206,6 +2206,24 @@ pub fn music_get_player_state(app: tauri::AppHandle, key: String) -> Result<Opti
     music_db::music_get_player_state(app, key)
 }
 
+#[tauri::command]
+pub fn music_record_play_session(
+    app: tauri::AppHandle,
+    track_id: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration_ms: i64,
+    played_ms: i64,
+) -> Result<(), String> {
+    music_db::music_record_play_session(app, track_id, title, artist, album, duration_ms, played_ms)
+}
+
+#[tauri::command]
+pub fn music_get_listen_stats(app: tauri::AppHandle, days: i64) -> Result<Vec<music_db::ListenStatRow>, String> {
+    music_db::music_get_listen_stats(app, days)
+}
+
 // ================= 视频模块命令 =================
 
 /// 扫描视频根目录，流式推送结果（适合大目录）

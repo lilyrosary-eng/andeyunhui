@@ -69,6 +69,87 @@ function syncCustomPlaylistToDb(playlist: Playlist) {
   }
 }
 
+// track_id 统一用 file_path（保证同文件唯一），与 toPlaylistTrack 保持一致
+function trackIdOf(t: Track): string {
+  return t.id || t.filePath || '';
+}
+
+// 前端 Track → SQLite favorite 记录
+function toFavoriteTrack(t: Track) {
+  return {
+    trackId: trackIdOf(t),
+    title: t.title || '',
+    artist: t.artist || '',
+    album: t.album || '',
+    filePath: t.filePath || '',
+    coverPath: t.coverPath || '',
+    durationMs: Math.round((t.durationSecs || 0) * 1000),
+  };
+}
+
+// 收藏状态落 SQLite（fire-and-forget）
+function syncFavoriteToDb(t: Track, favorite: boolean) {
+  try {
+    hostApi
+      .invoke('music_set_favorite', { track: toFavoriteTrack(t), favorite })
+      .catch((e) => console.warn('[Music] 收藏状态同步失败:', trackIdOf(t), e));
+  } catch (e) {
+    console.warn('[Music] 收藏状态同步异常:', trackIdOf(t), e);
+  }
+}
+
+// 从 SQLite 加载收藏集合（track_id set），作为重载后的真源
+async function loadFavoritesFromDb(): Promise<Set<string>> {
+  try {
+    const rows = await hostApi.invoke<{ trackId: string }[]>('music_list_favorites');
+    return new Set(rows.map((r) => r.trackId));
+  } catch (e) {
+    console.warn('[Music] 加载收藏失败，回退 localStorage:', e);
+    try {
+      const saved = localStorage.getItem('music_favorites');
+      return new Set(saved ? (JSON.parse(saved) as string[]) : []);
+    } catch {
+      return new Set();
+    }
+  }
+}
+
+// 由收藏集合生成「我的收藏」虚拟歌单（type: 'favorite'，不独立落库，由 favorites 表驱动）
+function buildFavoritePlaylist(favIds: Set<string>, allTracks: Track[]): Playlist | null {
+  if (favIds.size === 0) return null;
+  const tracks = allTracks.filter((t) => favIds.has(trackIdOf(t)));
+  return { id: '__favorite__', name: T('music.favoritePlaylist'), tracks, type: 'custom' };
+}
+
+// 播放状态持久化：把上次播放的 track_id / position / volume / 模式写入 SQLite
+function savePlayerStateToDb(key: string, value: string) {
+  try {
+    hostApi.invoke('music_save_player_state', { key, value }).catch((e) => console.warn('[Music] 播放状态保存失败:', key, e));
+  } catch (e) {
+    console.warn('[Music] 播放状态保存异常:', key, e);
+  }
+}
+
+// 把「我的收藏」虚拟歌单注入到 playlists（排在自定义歌单之前、目录歌单之后）。
+// 收藏歌单由 favorites 集合驱动，不独立落库；allTracks 为当前全部曲目用于解析收藏项。
+function injectFavoritePlaylist(playlists: Playlist[], favIds: Set<string>, allTracks: Track[]): Playlist[] {
+  const fav = buildFavoritePlaylist(favIds, allTracks);
+  const base = playlists.filter((p) => p.id !== '__favorite__');
+  return fav ? [...base, fav] : base;
+}
+
+// 收集当前所有可见曲目（目录 + 自定义），供收藏歌单解析
+function collectAllTracks(playlists: Playlist[]): Track[] {
+  const map = new Map<string, Track>();
+  for (const p of playlists) {
+    for (const t of p.tracks) {
+      const id = trackIdOf(t);
+      if (id && !map.has(id)) map.set(id, t);
+    }
+  }
+  return [...map.values()];
+}
+
 // 从 SQLite 加载自建歌单（替代仅读 localStorage 的恢复逻辑），作为重载后的真源。
 async function loadCustomPlaylistsFromDb(): Promise<Playlist[]> {
   try {
@@ -419,6 +500,15 @@ function MusicModule() {
   const { hidden: hiddenPlaylists, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('music');
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
+  // 收藏集合（track_id set），真源为 SQLite favorite 表；localStorage 作兜底镜像
+  const [favorites, setFavorites] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('music_favorites');
+      return new Set(saved ? (JSON.parse(saved) as string[]) : []);
+    } catch {
+      return new Set();
+    }
+  });
   const [loading, setLoading] = useState(rootPaths.length > 0);
   const [scanProgress, setScanProgress] = useState<MusicScanProgress | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -464,13 +554,30 @@ function MusicModule() {
     selectedPlaylistIdRef.current = selectedPlaylist?.id ?? null;
   }, [selectedPlaylist?.id]);
 
-  // 自定义歌单独立恢复：即使未配置任何音乐文件夹，重载后也应立即从 SQLite 恢复，
+  // 自定义歌单 + 收藏独立恢复：即使未配置任何音乐文件夹，重载后也应立即从 SQLite 恢复，
   // 避免「仅自建歌单（手动添加音频）」场景下列表在重载后消失。
   useEffect(() => {
     let cancelled = false;
-    loadCustomPlaylistsFromDb().then((customs) => {
-      if (cancelled || customs.length === 0) return;
-      setPlaylists(prev => [...prev.filter(p => p.type !== 'custom'), ...customs]);
+    Promise.all([
+      loadCustomPlaylistsFromDb(),
+      loadFavoritesFromDb(),
+      hostApi.invoke<string | null>('music_get_player_state', { key: 'volume' }).catch(() => null),
+      hostApi.invoke<string | null>('music_get_player_state', { key: 'play_mode' }).catch(() => null),
+    ]).then(([customs, favs, volState, modeState]) => {
+      if (cancelled) return;
+      if (favs.size > 0) setFavorites(favs);
+      if (customs.length > 0) {
+        setPlaylists(prev => [...prev.filter(p => p.type !== 'custom' && p.id !== '__favorite__'), ...customs]);
+      }
+      // 恢复上次音量 / 播放模式（SQLite 优先，回退音乐播放器默认）
+      if (volState) {
+        const v = parseFloat(volState);
+        if (!Number.isNaN(v)) { musicPlayer.setVolume(v); setVolume(v); }
+      }
+      if (modeState === 'list' || modeState === 'single' || modeState === 'random') {
+        musicPlayer.setPlayMode(modeState);
+        setPlayMode(modeState);
+      }
     });
     return () => { cancelled = true; };
   }, []);
@@ -619,12 +726,39 @@ function MusicModule() {
     };
   }, [rootPaths, rescanFlag]);
 
+  // 收藏集合变化 → 重建「我的收藏」歌单并注入 playlists（基于当前 playlists 解析已收藏曲目）
+  useEffect(() => {
+    setPlaylists(prev => injectFavoritePlaylist(prev, favorites, collectAllTracks(prev)));
+  }, [favorites]);
+
   // 订阅播放器状态
   useEffect(() => {
     const unsubPlay = musicPlayer.on('play', () => setIsPlaying(true));
     const unsubPause = musicPlayer.on('pause', () => setIsPlaying(false));
     const unsubTrackChange = musicPlayer.on('trackChange', (track) => {
       setCurrentTrack(track as Track | null);
+      // 持久化播放状态：上次播放的 track_id / 所属歌单
+      const t = track as Track | null;
+      if (t) {
+        const tid = trackIdOf(t);
+        savePlayerStateToDb('last_track_id', tid);
+        savePlayerStateToDb('last_playlist_id', musicPlayer.currentPlaylistId || '');
+        // 听歌统计：记录本次播放（fire-and-forget）
+        try {
+          hostApi
+            .invoke('music_record_play_session', {
+              trackId: tid,
+              title: t.title || '',
+              artist: t.artist || '',
+              album: t.album || '',
+              durationMs: Math.round((t.durationSecs || 0) * 1000),
+              playedMs: Math.round((t.durationSecs || 0) * 1000),
+            })
+            .catch((e) => console.warn('[Music] 听歌统计记录失败:', tid, e));
+        } catch (e) {
+          console.warn('[Music] 听歌统计记录异常:', e);
+        }
+      }
     });
     setIsPlaying(musicPlayer.getIsPlaying());
     setVolume(musicPlayer.getVolume());
@@ -781,12 +915,33 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
   const handleVolume = useCallback((vol: number) => {
     musicPlayer.setVolume(vol);
     localStorage.setItem('music_plugin_volume', String(vol));
+    savePlayerStateToDb('volume', String(vol));
     setVolume(vol);
   }, []);
 
   const handlePlayModeChange = useCallback((mode: PlayMode) => {
     musicPlayer.setPlayMode(mode);
+    savePlayerStateToDb('play_mode', mode);
     setPlayMode(mode);
+  }, []);
+
+  // 收藏/取消收藏：更新内存集合 + localStorage 镜像 + SQLite 真源（fire-and-forget）
+  const toggleFavorite = useCallback((track: Track) => {
+    const id = trackIdOf(track);
+    if (!id) return;
+    setFavorites(prev => {
+      const next = new Set(prev);
+      const nowFav = !next.has(id);
+      if (nowFav) next.add(id);
+      else next.delete(id);
+      // 镜像到 localStorage（兜底）
+      try {
+        localStorage.setItem('music_favorites', JSON.stringify([...next]));
+      } catch { /* 忽略配额错误 */ }
+      // 落 SQLite（真源）
+      syncFavoriteToDb(track, nowFav);
+      return next;
+    });
   }, []);
 
   // #4 添加歌曲：选择音频文件后真正加入当前歌单（自定义歌单持久化，目录歌单仅内存）
@@ -1200,6 +1355,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             onRemoveTrack={handleRemoveTrack}
             otherPlaylists={otherPlaylistsForMenu}
             showAlbum={showAlbum}
+            favoriteIds={favorites}
+            onToggleFavorite={toggleFavorite}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center">
@@ -1213,6 +1370,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             key={currentTrack.filePath}
             track={currentTrack}
             isPlaying={isPlaying}
+            isFavorite={favorites.has(trackIdOf(currentTrack))}
+            onToggleFavorite={toggleFavorite}
             onTogglePlay={togglePlay}
             onPrev={prevTrack}
             onNext={nextTrack}

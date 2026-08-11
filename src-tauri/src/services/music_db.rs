@@ -494,3 +494,70 @@ pub fn music_get_player_state(app: AppHandle, key: String) -> Result<Option<Stri
         Err(e) => Err(format!("读取播放状态失败: {}", e)),
     }
 }
+
+// ============ 听歌统计 ============
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListenStatRow {
+    pub day: String,
+    pub play_count: i64,
+    pub track_count: i64,
+    pub total_ms: i64,
+}
+
+/// 记录一次播放（每次切歌/开始播放调用）。同时维护 listen_daily 与 listen_day_track 聚合。
+pub fn music_record_play_session(
+    app: AppHandle,
+    track_id: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration_ms: i64,
+    played_ms: i64,
+) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    conn.execute(
+        "INSERT INTO listen_daily (day, play_count, track_count, total_ms) VALUES (?1, 1, 1, ?2)
+         ON CONFLICT(day) DO UPDATE SET
+            play_count = play_count + 1,
+            track_count = track_count + (CASE WHEN ?3 NOT IN (SELECT track_id FROM listen_day_track WHERE day = ?1) THEN 1 ELSE 0 END),
+            total_ms = total_ms + ?2",
+        params![date, played_ms, track_id],
+    )
+    .map_err(|e| format!("写入每日统计失败: {}", e))?;
+    conn.execute(
+        "INSERT INTO listen_day_track (day, track_id, title, artist, album, duration_ms, play_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+         ON CONFLICT(day, track_id) DO UPDATE SET play_count = play_count + 1",
+        params![date, track_id, title, artist, album, duration_ms],
+    )
+    .map_err(|e| format!("写入每日曲目统计失败: {}", e))?;
+    Ok(())
+}
+
+/// 返回最近 N 天的每日汇总（按 day 升序）。
+pub fn music_get_listen_stats(app: AppHandle, days: i64) -> Result<Vec<ListenStatRow>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT day, play_count, track_count, total_ms FROM listen_daily
+             WHERE day >= date('now', ?1) ORDER BY day ASC",
+        )
+        .map_err(|e| format!("查询统计失败: {}", e))?;
+    let rows = stmt
+        .query_map(params![format!("-{} days", days.max(1) - 1)], |r| {
+            Ok(ListenStatRow {
+                day: r.get(0)?,
+                play_count: r.get(1)?,
+                track_count: r.get(2)?,
+                total_ms: r.get(3)?,
+            })
+        })
+        .map_err(|e| format!("读取统计失败: {}", e))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("统计行解析失败: {}", e))?);
+    }
+    Ok(out)
+}

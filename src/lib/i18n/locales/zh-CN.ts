@@ -878,6 +878,8 @@ export const zhCN: Record<string, string> = {
   'music.remove': '移除',
   'music.unknownTrack': '未知曲目',
   'music.unknownArtist': '未知歌手',
+  'music.favoritePlaylist': '我的收藏',
+  'music.favoriteToggle': '收藏 / 取消收藏',
   'music.scanning': '正在扫描音乐...',
   'music.scanProgress': '已扫描 {found} / {total} 首...',
   'music.emptyTitle': '音乐模块',

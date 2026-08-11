@@ -879,6 +879,8 @@ export const frFR: Record<string, string> = {
   'music.remove': 'Retirer',
   'music.unknownTrack': 'Piste inconnue',
   'music.unknownArtist': 'Artiste inconnu',
+  'music.favoritePlaylist': 'Mes favoris',
+  'music.favoriteToggle': 'Ajouter / retirer des favoris',
   'music.scanning': 'Analyse de la musique...',
   'music.scanProgress': '{found} / {total} analysé(s)...',
   'music.emptyTitle': 'Module Musique',

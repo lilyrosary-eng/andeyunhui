@@ -880,6 +880,8 @@ export const jaJP: Record<string, string> = {
   'music.remove': '削除',
   'music.unknownTrack': '不明な曲',
   'music.unknownArtist': '不明なアーティスト',
+  'music.favoritePlaylist': 'お気に入り',
+  'music.favoriteToggle': 'お気に入り登録 / 解除',
   'music.scanning': '音楽をスキャン中...',
   'music.scanProgress': '{found} / {total} 曲をスキャン...',
   'music.emptyTitle': '音楽モジュール',

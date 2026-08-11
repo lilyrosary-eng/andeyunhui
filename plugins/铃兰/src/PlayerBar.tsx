@@ -56,6 +56,8 @@ interface PlayerBarProps {
   playlists: Playlist[];
   currentPlaylistId: string | null;
   onSelectTrack: (playlistId: string, track: Track, index: number) => void;
+  isFavorite?: boolean;
+  onToggleFavorite?: (track: Track) => void;
 }
 
 const ModeLabels: Record<PlayMode, string> = {
@@ -280,7 +282,7 @@ export function PlaylistPopup({
 }
 
 // ========== 播放栏主组件 ==========
-export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volume, onVolumeChange, playMode, onPlayModeChange, onCoverClick, playlists, currentPlaylistId, onSelectTrack }: PlayerBarProps) {
+export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volume, onVolumeChange, playMode, onPlayModeChange, onCoverClick, playlists, currentPlaylistId, onSelectTrack, isFavorite, onToggleFavorite }: PlayerBarProps) {
   useLang();
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -476,6 +478,14 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
             title: isPlaying ? T('music.player.pause') : T('music.player.play'),
             children: isPlaying ? React.createElement(PauseIcon) : React.createElement(PlayIcon),
           })}
+
+          {onToggleFavorite ? React.createElement(IconButton, {
+            onClick: () => onToggleFavorite(track),
+            title: T('music.favoriteToggle'),
+            active: isFavorite,
+            className: isFavorite ? 'text-rose-500' : undefined,
+            children: isFavorite ? '♥' : '♡',
+          }) : null}
 
           {React.createElement(IconButton, {
             onClick: onNext,

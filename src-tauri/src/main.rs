@@ -1029,6 +1029,8 @@ fn main() {
             music_list_favorites,
             music_save_player_state,
             music_get_player_state,
+            music_record_play_session,
+            music_get_listen_stats,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
             smtc_control,

@@ -46,9 +46,13 @@
 - 原生音频引擎替换 HTML5 audio（rodio/cpal/symphonia）、淡入淡出、ncm 解密、跨曲交叉淡入、macOS CoreAudio。用户已明确延后。
 
 ## 执行进度
-- ✅ Phase 1.1（2026-08-11）：`src-tauri/src/services/music_db.rs` 创建，SQLite schema（playlist/playlist_track/favorite/player_state/play_session/listen_daily/listen_day_track）+ 歌单 CRUD/收藏/播放状态命令；经 `commands.rs` 薄封装注册并 `cargo check` 通过。前端尚未调用，旧 localStorage 路径保留，无回退。
-- ⏳ Phase 1.2~1.5：前端铃兰 `index.tsx` 歌单状态层（79+ 引用）从 localStorage 迁到新命令；需把内联 `Playlist.tracks` 模型映射到 playlist_track 行。下一切入点。
-- ⏳ Phase 2~5：待 Phase 1 前端闭环后推进。
+- ✅ Phase 1.1（2026-08-11）：`src-tauri/src/services/music_db.rs` 创建，SQLite schema + 歌单 CRUD/收藏/播放状态命令；经 `commands.rs` 薄封装注册，cargo check 通过。
+- ✅ Phase 1.2（2026-08-11）：前端铃兰自建歌单生命周期对接 SQLite（创建/删除/重命名/增删曲目/移动/复制），新增 `music_replace_playlist_tracks` 命令；挂载期从 SQLite 加载歌单；localStorage 保留为兜底镜像。cargo check 通过，铃兰插件独立构建+部署成功。
+- ✅ Phase 1.3（2026-08-11）：前端新增收藏功能。TrackList 每行、PlayerBar 加红心按钮；`favorites` 集合内存态 + localStorage 兜底镜像 + SQLite `music_set_favorite`/`music_list_favorites` 真源；自动生成「我的收藏」虚拟歌单（`__favorite__`，由 favorites 表驱动，不独立落库）；挂载期从 SQLite 恢复收藏。7 语言 i18n 补 `music.favoritePlaylist`/`music.favoriteToggle`。
+- ✅ Phase 1.4（2026-08-11）：播放状态持久化接入。`music_save_player_state`/`music_get_player_state` 在切歌、音量、模式变化时落 SQLite；挂载期恢复 volume + play_mode（SQLite 优先于 localStorage）。注：精确播放进度（position）续播留待引入 timeUpdate 周期保存，本次仅存 track_id/playlist_id/volume/play_mode。
+- ✅ Phase 1.5（2026-08-11）：听歌统计落库。新增 `music_record_play_session`/`music_get_listen_stats` 命令（listen_daily 每日聚合 + listen_day_track 去重曲目计数）；切歌时 fire-and-forget 记录（PlayMode 为 list 的「上一首/下一首」切歌均触发 trackChange，统计自然按实际播放计数）。
+- ✅ 全 Phase 1（2026-08-11）：数据层持久化闭环。cargo check 通过；tsc --noEmit 无错误。需完全重启 `pnpm tauri dev` 验证。
+- ⏳ Phase 2~5：待 Phase 1 重启验证后推进。
 
 ## 执行顺序与节奏
 Phase 1 → 2 → 3 → 4 → 5，每 Phase 内自底向上（Rust 数据/命令先就位，再改前端）。每个 Phase 完成后完全重启验证再进下一 Phase。本次先推进 Phase 1（1.1~1.5）。

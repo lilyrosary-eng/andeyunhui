@@ -33,6 +33,8 @@ interface TrackListProps {
   onRemoveTrack?: (track: Track) => void;
   otherPlaylists?: OtherPlaylist[];
   showAlbum?: boolean;
+  favoriteIds?: Set<string>;
+  onToggleFavorite?: (track: Track) => void;
 }
 
 export function TrackList({
@@ -45,6 +47,8 @@ export function TrackList({
   onRemoveTrack,
   otherPlaylists = [],
   showAlbum = true,
+  favoriteIds,
+  onToggleFavorite,
 }: TrackListProps) {
   useLang();
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
@@ -490,6 +494,22 @@ export function TrackList({
                     className: 'text-xs text-neutral-400 dark:text-stone-500 tabular-nums w-12 text-right flex-shrink-0',
                     children: formatTime(track.durationSecs),
                   }),
+                  // 收藏红心按钮
+                  onToggleFavorite
+                    ? React.createElement('button', {
+                        key: 'fav',
+                        onClick: (e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          onToggleFavorite(track);
+                        },
+                        className: `btn-press p-1 rounded transition-colors flex-shrink-0 ${
+                          favoriteIds?.has(track.id || track.filePath)
+                            ? 'text-rose-500'
+                            : 'text-neutral-400 dark:text-stone-500 hover:text-rose-400'
+                        }`,
+                        title: T('music.favoriteToggle'),
+                      }, favoriteIds?.has(track.id || track.filePath) ? '♥' : '♡')
+                    : null,
                   // 「...」按钮
                   React.createElement('div', {
                     key: 'more',

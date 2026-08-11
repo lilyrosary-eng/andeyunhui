@@ -880,6 +880,8 @@ export const koKR: Record<string, string> = {
   'music.remove': '제거',
   'music.unknownTrack': '알 수 없는 곡',
   'music.unknownArtist': '알 수 없는 가수',
+  'music.favoritePlaylist': '내 즐겨찾기',
+  'music.favoriteToggle': '즐겨찾기 추가 / 해제',
   'music.scanning': '음악 스캔 중...',
   'music.scanProgress': '{found} / {total}곡 스캔...',
   'music.emptyTitle': '음악 모듈',
