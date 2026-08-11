@@ -150,6 +150,100 @@ function collectAllTracks(playlists: Playlist[]): Track[] {
   return [...map.values()];
 }
 
+// 从 SQLite 加载封面覆盖映射（手动设封面的持久化真源）
+async function loadCoverOverridesFromDb(): Promise<Map<string, string>> {
+  try {
+    const rows = await hostApi.invoke<{ filePath: string; coverPath: string }[]>('music_get_all_cover_overrides');
+    const m = new Map<string, string>();
+    for (const r of rows) m.set(r.filePath, r.coverPath);
+    return m;
+  } catch (e) {
+    console.warn('[Music] 加载封面覆盖失败:', e);
+    return new Map();
+  }
+}
+
+// 把封面覆盖应用到内存 playlists（所有同 file_path 的 track 同步封面）
+function applyCoverOverrides(playlists: Playlist[], overrides: Map<string, string>): Playlist[] {
+  if (overrides.size === 0) return playlists;
+  return playlists.map((p) => ({
+    ...p,
+    tracks: p.tracks.map((t) => {
+      const fp = t.filePath || t.id;
+      const cov = fp && overrides.has(fp) ? overrides.get(fp) : t.coverPath;
+      return cov === t.coverPath ? t : { ...t, coverPath: cov };
+    }),
+  }));
+}
+
+// 文件读为 base64（用于手动设封面）
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // result 形如 "data:image/png;base64,xxxx"，取逗号后部分
+      const idx = result.indexOf(',');
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.onerror = () => reject(new Error('文件读取失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// 手动设封面：选图片文件 → base64 → music_set_cover，更新内存 + override map
+async function setCoverForTrack(track: Track, overrides: Map<string, string>): Promise<Map<string, string>> {
+  const fp = track.filePath || track.id;
+  if (!fp) return overrides;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  const picked = await new Promise<File | null>((resolve) => {
+    input.onchange = () => resolve(input.files && input.files[0] ? input.files[0] : null);
+    input.click();
+  });
+  if (!picked) return overrides;
+  const b64 = await fileToBase64(picked);
+  const mime = picked.type || 'image/jpeg';
+  const coverPath = await hostApi.invoke<string>('music_set_cover', { filePath: fp, dataBase64: b64, mime });
+  const next = new Map(overrides);
+  next.set(fp, coverPath);
+  return next;
+}
+
+// 重扫单文件元数据（忽略手动封面），返回重抽后的 track（封面不含 override）
+async function rescanTrackMetadata(track: Track): Promise<Track | null> {
+  const fp = track.filePath || track.id;
+  if (!fp) return null;
+  try {
+    return await hostApi.invoke<Track>('music_rescan_metadata', { filePath: fp });
+  } catch (e) {
+    console.warn('[Music] 重扫元数据失败:', fp, e);
+    return null;
+  }
+}
+
+// 编辑曲目标签信息并写回文件
+async function editTrackTags(
+  track: Track,
+  fields: { title?: string; artist?: string; album?: string; trackNumber?: number },
+): Promise<void> {
+  const fp = track.filePath || track.id;
+  if (!fp) return;
+  try {
+    await hostApi.invoke('music_edit_track', {
+      filePath: fp,
+      title: fields.title ?? null,
+      artist: fields.artist ?? null,
+      album: fields.album ?? null,
+      trackNumber: fields.trackNumber ?? null,
+    });
+  } catch (e) {
+    console.warn('[Music] 标签写回失败:', fp, e);
+    throw e;
+  }
+}
+
 // 从 SQLite 加载自建歌单（替代仅读 localStorage 的恢复逻辑），作为重载后的真源。
 async function loadCustomPlaylistsFromDb(): Promise<Playlist[]> {
   try {
@@ -509,6 +603,8 @@ function MusicModule() {
       return new Set();
     }
   });
+  // 封面覆盖映射（file_path -> cover_path）：手动设封面的持久化真源；扫描后叠加到内存 track
+  const [coverOverrides, setCoverOverrides] = useState<Map<string, string>>(new Map());
   const [loading, setLoading] = useState(rootPaths.length > 0);
   const [scanProgress, setScanProgress] = useState<MusicScanProgress | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -561,13 +657,16 @@ function MusicModule() {
     Promise.all([
       loadCustomPlaylistsFromDb(),
       loadFavoritesFromDb(),
+      loadCoverOverridesFromDb(),
       hostApi.invoke<string | null>('music_get_player_state', { key: 'volume' }).catch(() => null),
       hostApi.invoke<string | null>('music_get_player_state', { key: 'play_mode' }).catch(() => null),
-    ]).then(([customs, favs, volState, modeState]) => {
+    ]).then(([customs, favs, overrides, volState, modeState]) => {
       if (cancelled) return;
       if (favs.size > 0) setFavorites(favs);
+      if (overrides.size > 0) setCoverOverrides(overrides);
       if (customs.length > 0) {
-        setPlaylists(prev => [...prev.filter(p => p.type !== 'custom' && p.id !== '__favorite__'), ...customs]);
+        const applied = applyCoverOverrides(customs, overrides);
+        setPlaylists(prev => [...prev.filter(p => p.type !== 'custom' && p.id !== '__favorite__'), ...applied]);
       }
       // 恢复上次音量 / 播放模式（SQLite 优先，回退音乐播放器默认）
       if (volState) {
@@ -657,7 +756,7 @@ function MusicModule() {
       // 2. 如果全都有缓存，直接显示
       if (pathsToScan.length === 0) {
         const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
-        setPlaylists(prev => dedupePlaylistsById([...dedupedDir, ...prev.filter(p => p.type === 'custom')]));
+        setPlaylists(prev => dedupePlaylistsById(applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], coverOverrides)));
         // 恢复上次播放的歌单（模块切换/重载后保持选中状态，目录与自定义均匹配）
         const savedId = musicPlayer.currentPlaylistId;
         const restored = savedId
@@ -708,7 +807,7 @@ function MusicModule() {
       // 从当前 state 合并自定义歌单（避免覆盖扫描期间用户新建的歌单），
       // 同时支持恢复上次选中的自定义歌单
       const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
-      setPlaylists(prev => [...dedupedDir, ...prev.filter(p => p.type === 'custom')]);
+      setPlaylists(prev => applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], coverOverrides));
       const savedId = musicPlayer.currentPlaylistId;
       const restored = savedId
         ? [...dedupedDir, ...getCustomPlaylistsFromStorage()].find(p => p.id === savedId)
@@ -942,6 +1041,52 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       syncFavoriteToDb(track, nowFav);
       return next;
     });
+  }, []);
+
+  // 手动设封面：更新 override map + 内存所有同 file_path 曲目封面
+  const handleSetCover = useCallback(async (track: Track) => {
+    const next = await setCoverForTrack(track, coverOverrides);
+    setCoverOverrides(next);
+    setPlaylists(prev => applyCoverOverrides(prev, next));
+  }, [coverOverrides]);
+
+  // 重扫该曲元数据（忽略手动封面），更新内存对应曲目（封面保留手动 override）
+  const handleRescanTrack = useCallback(async (track: Track) => {
+    const rescanned = await rescanTrackMetadata(track);
+    if (!rescanned) return;
+    const fp = rescanned.filePath || rescanned.id;
+    setPlaylists(prev =>
+      prev.map(p => ({
+        ...p,
+        tracks: p.tracks.map(t => {
+          const tFp = t.filePath || t.id;
+          if (tFp !== fp) return t;
+          const cov = coverOverrides.get(fp) ?? rescanned.coverPath;
+          return { ...t, title: rescanned.title, artist: rescanned.artist, album: rescanned.album, durationSecs: rescanned.durationSecs, coverPath: cov };
+        }),
+      }))
+    );
+  }, [coverOverrides]);
+
+  // 编辑曲目标签信息并写回文件 + 更新内存
+  const handleEditTrack = useCallback(async (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => {
+    await editTrackTags(track, fields);
+    const fp = track.filePath || track.id;
+    setPlaylists(prev =>
+      prev.map(p => ({
+        ...p,
+        tracks: p.tracks.map(t => {
+          const tFp = t.filePath || t.id;
+          if (tFp !== fp) return t;
+          return {
+            ...t,
+            title: fields.title ?? t.title,
+            artist: fields.artist ?? t.artist,
+            album: fields.album ?? t.album,
+          };
+        }),
+      }))
+    );
   }, []);
 
   // #4 添加歌曲：选择音频文件后真正加入当前歌单（自定义歌单持久化，目录歌单仅内存）
@@ -1357,6 +1502,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             showAlbum={showAlbum}
             favoriteIds={favorites}
             onToggleFavorite={toggleFavorite}
+            onSetCover={handleSetCover}
+            onRescanTrack={handleRescanTrack}
+            onEditTrack={handleEditTrack}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center">

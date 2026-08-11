@@ -1031,6 +1031,11 @@ fn main() {
             music_get_player_state,
             music_record_play_session,
             music_get_listen_stats,
+            music_set_cover,
+            music_rescan_metadata,
+            music_edit_track,
+            music_get_all_cover_overrides,
+            music_clean_cover_cache,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
             smtc_control,

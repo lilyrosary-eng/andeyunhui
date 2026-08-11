@@ -2224,6 +2224,43 @@ pub fn music_get_listen_stats(app: tauri::AppHandle, days: i64) -> Result<Vec<mu
     music_db::music_get_listen_stats(app, days)
 }
 
+#[tauri::command]
+pub fn music_set_cover(
+    app: tauri::AppHandle,
+    file_path: String,
+    data_base64: String,
+    mime: Option<String>,
+) -> Result<String, String> {
+    music_service::set_cover_from_base64(&app, file_path, data_base64, mime)
+}
+
+#[tauri::command]
+pub fn music_rescan_metadata(app: tauri::AppHandle, file_path: String) -> Result<music_service::Track, String> {
+    music_service::rescan_track_metadata(&app, file_path)
+}
+
+#[tauri::command]
+pub fn music_edit_track(
+    app: tauri::AppHandle,
+    file_path: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    track_number: Option<u32>,
+) -> Result<(), String> {
+    music_service::edit_track_tags(&app, file_path, title, artist, album, track_number)
+}
+
+#[tauri::command]
+pub fn music_get_all_cover_overrides(app: tauri::AppHandle) -> Result<Vec<music_db::CoverOverrideRow>, String> {
+    music_db::music_get_all_cover_overrides(app)
+}
+
+#[tauri::command]
+pub fn music_clean_cover_cache(app: tauri::AppHandle, keep: Vec<String>) -> Result<usize, String> {
+    music_db::music_clean_cover_cache(app, keep)
+}
+
 // ================= 视频模块命令 =================
 
 /// 扫描视频根目录，流式推送结果（适合大目录）

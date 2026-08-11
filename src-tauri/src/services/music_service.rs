@@ -10,6 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use walkdir::WalkDir;
 use rayon::prelude::*;
+use rusqlite::params;
 use lofty::read_from_path;
 use lofty::file::TaggedFileExt;
 use lofty::file::AudioFile;
@@ -259,4 +260,146 @@ pub fn extract_track_metadata(file_path: &Path, cover_dir: Option<&Path>) -> Tra
             }
         }
     }
+}
+
+// 计算文件路径哈希（与 extract_track_metadata 中保持一致，用于封面文件名前缀）
+fn path_hash_of(path: &Path) -> String {
+    let mut h = DefaultHasher::new();
+    path.hash(&mut h);
+    format!("{:x}", h.finish())
+}
+
+fn cover_dir_of(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| {
+            let dir = d.join("music_covers");
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        })
+}
+
+/// 手动设封面：解码 base64 图片，写入 music_covers 目录（文件名含内容哈希，天然去重），
+/// 并把该 file_path 的封面固定为覆盖值（持久化到 track_cover_override + playlist_track/favorite）。
+/// 返回新封面文件的绝对路径。
+pub fn set_cover_from_base64(
+    app: &tauri::AppHandle,
+    file_path: String,
+    data_base64: String,
+    mime: Option<String>,
+) -> Result<String, String> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.trim())
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    let ext = match mime.as_deref() {
+        Some("image/png") => "png",
+        Some("image/webp") => "webp",
+        _ => "jpg",
+    };
+    let dir = cover_dir_of(app).ok_or_else(|| "无法获取封面目录".to_string())?;
+    let path = Path::new(&file_path);
+    let mut hasher = DefaultHasher::new();
+    raw.hash(&mut hasher);
+    let content_hash = format!("{:x}", hasher.finish());
+    let cover_file = dir.join(format!("{}_manual_{}.{}", path_hash_of(path), content_hash, ext));
+    std::fs::write(&cover_file, &raw).map_err(|e| format!("封面写入失败: {}", e))?;
+    let cover_path = cover_file.to_string_lossy().to_string();
+    crate::services::music_db::music_set_cover_override(app.clone(), file_path, cover_path.clone())?;
+    Ok(cover_path)
+}
+
+/// 重扫单文件元数据（忽略手动封面覆盖，按内嵌封面重新提取）。
+/// 更新 playlist_track/favorite 的 title/artist/album/cover_path（若 override 存在，调用方负责保留）。
+/// 返回重抽后的 Track（cover_path 为内嵌封面，不含 override）。
+pub fn rescan_track_metadata(app: &tauri::AppHandle, file_path: String) -> Result<Track, String> {
+    let track = extract_track_metadata(Path::new(&file_path), cover_dir_of(app).as_deref());
+    let conn = crate::services::music_db::open_db(app).map_err(|e| e)?;
+    // 仅更新自建歌单与收藏中的该曲目（file_path 维度）
+    conn.execute(
+        "UPDATE playlist_track SET title=?2, artist=?3, album=?4, duration_ms=?5, cover_path=?6 WHERE file_path=?1",
+        params![
+            file_path,
+            track.title,
+            track.artist,
+            track.album,
+            track.duration_secs as i64 * 1000,
+            track.cover_path.clone().unwrap_or_default()
+        ],
+    )
+    .map_err(|e| format!("更新歌单元数据失败: {}", e))?;
+    conn.execute(
+        "UPDATE favorite SET title=?2, artist=?3, album=?4, duration_ms=?5, cover_path=?6 WHERE file_path=?1",
+        params![
+            file_path,
+            track.title,
+            track.artist,
+            track.album,
+            track.duration_secs as i64 * 1000,
+            track.cover_path.clone().unwrap_or_default()
+        ],
+    )
+    .map_err(|e| format!("更新收藏元数据失败: {}", e))?;
+    Ok(track)
+}
+
+/// 写回标签：用 lofty 修改文件的 title/artist/album/track_number 并落盘，
+/// 同步更新 playlist_track/favorite 中的对应字段。
+pub fn edit_track_tags(
+    app: &tauri::AppHandle,
+    file_path: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    track_number: Option<u32>,
+) -> Result<(), String> {
+    let path = Path::new(&file_path);
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut tagged_file = read_from_path(&resolved).map_err(|e| format!("读取音频失败: {}", e))?;
+    {
+        let tag = if let Some(t) = tagged_file.primary_tag_mut() {
+            t
+        } else {
+            tagged_file
+                .first_tag_mut()
+                .ok_or_else(|| "文件不含可写标签".to_string())?
+        };
+        if let Some(v) = &title {
+            tag.set_title(v.clone());
+        }
+        if let Some(v) = &artist {
+            tag.set_artist(v.clone());
+        }
+        if let Some(v) = &album {
+            tag.set_album(v.clone());
+        }
+        if let Some(n) = track_number {
+            tag.set_track(n);
+        }
+    }
+    tagged_file
+        .save_to_path(&resolved, lofty::config::WriteOptions::default())
+        .map_err(|e| format!("标签写回失败: {}", e))?;
+    // 同步内存库字段
+    let conn = crate::services::music_db::open_db(app).map_err(|e| e)?;
+    if let Some(v) = &title {
+        conn.execute("UPDATE playlist_track SET title=?2 WHERE file_path=?1", params![file_path, v])
+            .map_err(|e| format!("更新歌单标题失败: {}", e))?;
+        conn.execute("UPDATE favorite SET title=?2 WHERE file_path=?1", params![file_path, v])
+            .map_err(|e| format!("更新收藏标题失败: {}", e))?;
+    }
+    if let Some(v) = &artist {
+        conn.execute("UPDATE playlist_track SET artist=?2 WHERE file_path=?1", params![file_path, v])
+            .map_err(|e| format!("更新歌单歌手失败: {}", e))?;
+        conn.execute("UPDATE favorite SET artist=?2 WHERE file_path=?1", params![file_path, v])
+            .map_err(|e| format!("更新收藏歌手失败: {}", e))?;
+    }
+    if let Some(v) = &album {
+        conn.execute("UPDATE playlist_track SET album=?2 WHERE file_path=?1", params![file_path, v])
+            .map_err(|e| format!("更新歌单专辑失败: {}", e))?;
+        conn.execute("UPDATE favorite SET album=?2 WHERE file_path=?1", params![file_path, v])
+            .map_err(|e| format!("更新收藏专辑失败: {}", e))?;
+    }
+    Ok(())
 }

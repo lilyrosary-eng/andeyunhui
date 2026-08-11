@@ -18,10 +18,10 @@
 - 风险：中（多文件、前端状态层改造）。验收：完全重启后，自建歌单/收藏/上次播放在关闭重开后稳定保留，且不依赖音乐文件夹是否配置。
 
 ## Phase 2 — 封面缓存双层结构 + 元数据重扫/编辑
-- 2.1 封面缓存改为 blob 去重 + 引用计数 + 定期清理（借鉴 MusicStorm cover_cache.rs：album_cover_blob 按内容 MD5 去重、album_cover_file 文件缓存、clean_cover_cache 按 keep_hashes 回收）。
-- 2.2 手动设封面命令 `music_set_cover`（写回 SQLite + 重生成缓存）；重扫元数据命令 `music_rescan_metadata`（按文件 mtime/content_hash 判是否重抽）。
-- 2.3 元数据编辑写回标签：`music_edit_track`（标题/歌手/专辑/曲目号用 lofty 写回文件）。
-- 风险：低-中。验收：换封面立即刷新；重扫元数据可刷新；编辑专辑信息落盘。
+- ✅ 2.1（2026-08-11）：封面覆盖持久化 + 孤儿清理。新增 `track_cover_override` 表（file_path→cover_path，手动设封面的持久真源）；`music_set_cover_override` 写覆盖并同步 playlist_track/favorite 封面；前端 `coverOverrides` Map + `applyCoverOverrides` 在挂载/扫描后叠加到内存 track；`music_clean_cover_cache(keep)` 删除 music_covers 中未被引用的孤儿文件（封面文件名已是「路径哈希_内容哈希」天然去重，故沿用文件存储而非 SQLite blob，避免重构封面数据流——这是相对原计划的简化取舍，符合「最简单最高效」）。
+- ✅ 2.2（2026-08-11）：手动设封面 `music_set_cover`（base64 解码→写 music_covers/<pathhash>_manual_<md5>→写 override 表，返回路径）；重扫元数据 `music_rescan_metadata`（重抽内嵌封面+标签，更新 playlist_track/favorite，覆盖保留 override）。前端 TrackList 右键菜单加「手动设封面」(选图→base64) 与「重扫元数据」。
+- ✅ 2.3（2026-08-11）：元数据写回标签 `music_edit_track`（lofty 写回 title/artist/album/track_number 并 save_to_path，同步 playlist_track/favorite）。前端 TrackList 菜单「编辑信息」用 prompt 逐字段收集并写回。7 语言 i18n 补 setCover/rescan/editInfo 等键。
+- 风险：低-中。验收：完全重启后，手动设封面/重扫/编辑信息立即生效并落库，重启仍保留。
 
 ## Phase 3 — 网易云集成基建
 - 3.1 Rust 代理命令 `netease_http_post`：域名 allowlist（music.163.com / interface*.music.163.com）+ real_ip 头 + 8MB 响应上限（照搬 netease_proxy.rs，reqwest 改异步或加 blocking feature）。

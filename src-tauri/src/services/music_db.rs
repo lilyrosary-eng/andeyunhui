@@ -23,7 +23,7 @@ fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// 打开连接并初始化表结构（幂等）。
-fn open_db(app: &AppHandle) -> Result<Connection, String> {
+pub fn open_db(app: &AppHandle) -> Result<Connection, String> {
     let path = db_path(app)?;
     let conn = Connection::open(&path).map_err(|e| format!("打开音乐数据库失败: {}", e))?;
     // busy_timeout 避免并发写偶发 SQLITE_BUSY（拖拽重排等高频写场景）
@@ -94,6 +94,10 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             day       TEXT NOT NULL,
             track_id  TEXT NOT NULL,
             PRIMARY KEY (day, track_id)
+        );
+        CREATE TABLE IF NOT EXISTS track_cover_override (
+            file_path  TEXT PRIMARY KEY,
+            cover_path TEXT NOT NULL
         );",
     )
     .map_err(|e| format!("初始化音乐表结构失败: {}", e))
@@ -493,6 +497,91 @@ pub fn music_get_player_state(app: AppHandle, key: String) -> Result<Option<Stri
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(format!("读取播放状态失败: {}", e)),
     }
+}
+
+// ============ 封面覆盖（手动设封面）============
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverOverrideRow {
+    pub file_path: String,
+    pub cover_path: String,
+}
+
+/// 写入封面覆盖：把 file_path 的封面固定为 cover_path（手动设封面持久化真源）。
+/// 同时更新 playlist_track / favorite 中该 file_path 的 cover_path，使所有歌单即时生效。
+pub fn music_set_cover_override(app: AppHandle, file_path: String, cover_path: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute(
+        "INSERT INTO track_cover_override (file_path, cover_path) VALUES (?1, ?2)
+         ON CONFLICT(file_path) DO UPDATE SET cover_path = ?2",
+        params![file_path, cover_path],
+    )
+    .map_err(|e| format!("写入封面覆盖失败: {}", e))?;
+    conn.execute(
+        "UPDATE playlist_track SET cover_path = ?2 WHERE file_path = ?1",
+        params![file_path, cover_path],
+    )
+    .map_err(|e| format!("更新歌单封面失败: {}", e))?;
+    conn.execute(
+        "UPDATE favorite SET cover_path = ?2 WHERE file_path = ?1",
+        params![file_path, cover_path],
+    )
+    .map_err(|e| format!("更新收藏封面失败: {}", e))?;
+    Ok(())
+}
+
+/// 读取全部封面覆盖映射（前端挂载/扫描后加载，应用到内存 track）。
+pub fn music_get_all_cover_overrides(app: AppHandle) -> Result<Vec<CoverOverrideRow>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn
+        .prepare("SELECT file_path, cover_path FROM track_cover_override")
+        .map_err(|e| format!("查询封面覆盖失败: {}", e))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(CoverOverrideRow {
+                file_path: r.get(0)?,
+                cover_path: r.get(1)?,
+            })
+        })
+        .map_err(|e| format!("读取封面覆盖失败: {}", e))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("封面覆盖行解析失败: {}", e))?);
+    }
+    Ok(out)
+}
+
+/// 清理孤儿封面文件：删除 music_covers 目录下未被任何 track 引用的封面文件。
+/// keep 为当前所有 cover_path 集合（绝对路径）。
+pub fn music_clean_cover_cache(app: AppHandle, keep: Vec<String>) -> Result<usize, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取 app_data 失败: {}", e))?;
+    let cover_dir = dir.join("music_covers");
+    if !cover_dir.is_dir() {
+        return Ok(0);
+    }
+    let keep_set: std::collections::HashSet<String> = keep.into_iter().collect();
+    let mut removed = 0usize;
+    let entries = std::fs::read_dir(&cover_dir).map_err(|e| format!("读取封面目录失败: {}", e))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let p = path.to_string_lossy().to_string();
+        if !keep_set.contains(&p) {
+            let _ = std::fs::remove_file(&path);
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 // ============ 听歌统计 ============

@@ -35,6 +35,9 @@ interface TrackListProps {
   showAlbum?: boolean;
   favoriteIds?: Set<string>;
   onToggleFavorite?: (track: Track) => void;
+  onSetCover?: (track: Track) => void;
+  onRescanTrack?: (track: Track) => void;
+  onEditTrack?: (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => void;
 }
 
 export function TrackList({
@@ -49,6 +52,9 @@ export function TrackList({
   showAlbum = true,
   favoriteIds,
   onToggleFavorite,
+  onSetCover,
+  onRescanTrack,
+  onEditTrack,
 }: TrackListProps) {
   useLang();
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
@@ -225,6 +231,24 @@ export function TrackList({
     });
   }, []);
 
+  // 编辑信息：用 prompt 逐字段收集（轻量），再写回标签
+  const onEditInfo = (t: Track) => {
+    const title = window.prompt(T('music.track.editTitle'), t.title || '');
+    if (title === null) return;
+    const artist = window.prompt(T('music.track.editArtist'), t.artist || '');
+    if (artist === null) return;
+    const album = window.prompt(T('music.track.editAlbum'), t.album || '');
+    if (album === null) return;
+    const tn = window.prompt(T('music.track.editTrackNo'), '');
+    const trackNumber = tn && tn.trim() ? Number(tn) : undefined;
+    onEditTrack?.(t, {
+      title: title || undefined,
+      artist: artist || undefined,
+      album: album || undefined,
+      trackNumber: Number.isNaN(trackNumber as number) ? undefined : trackNumber,
+    });
+  };
+
   // ========== 渲染：下拉菜单（position: fixed 直接渲染在 overflow-y-auto 外部）==========
   const renderMenuContent = (track: Track) => {
     return React.createElement('div', {
@@ -285,6 +309,24 @@ export function TrackList({
             renderSubmenuTarget('copy'),
           ];
         })(),
+        onSetCover ? React.createElement('button', {
+          key: 'setCover',
+          onClick: () => { onSetCover(track); setOpenMenuIndex(null); },
+          className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
+          children: T('music.track.setCover'),
+        }) : null,
+        onRescanTrack ? React.createElement('button', {
+          key: 'rescan',
+          onClick: () => { onRescanTrack(track); setOpenMenuIndex(null); },
+          className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
+          children: T('music.track.rescan'),
+        }) : null,
+        onEditTrack ? React.createElement('button', {
+          key: 'edit',
+          onClick: () => { onEditInfo(track); setOpenMenuIndex(null); },
+          className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
+          children: T('music.track.editInfo'),
+        }) : null,
         React.createElement('div', {
           key: 'divider',
           className: 'my-1 border-t border-neutral-200/40 dark:border-stone-700/40',
