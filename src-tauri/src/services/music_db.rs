@@ -7,7 +7,7 @@
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 const DB_FILENAME: &str = "music.sqlite";
@@ -26,8 +26,9 @@ fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
 fn open_db(app: &AppHandle) -> Result<Connection, String> {
     let path = db_path(app)?;
     let conn = Connection::open(&path).map_err(|e| format!("打开音乐数据库失败: {}", e))?;
-    conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|e| format!("设置外键失败: {}", e))?;
+    // busy_timeout 避免并发写偶发 SQLITE_BUSY（拖拽重排等高频写场景）
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;")
+        .map_err(|e| format!("设置 PRAGMA 失败: {}", e))?;
     init_schema(&conn)?;
     Ok(conn)
 }
@@ -252,9 +253,10 @@ pub fn music_add_track_to_playlist(
         )
         .map_err(|e| format!("计算曲目位置失败: {}", e))?;
     conn.execute(
-        "INSERT OR REPLACE INTO playlist_track
+        "INSERT INTO playlist_track
          (playlist_id, track_id, position, title, artist, album, file_path, cover_path, duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(playlist_id, track_id) DO NOTHING",
         params![
             playlist_id,
             track.track_id,
@@ -304,22 +306,66 @@ pub fn music_reorder_playlist_track(
     new_position: i64,
 ) -> Result<(), String> {
     let conn = open_db(&app)?;
-    conn.execute(
+    // 先把目标曲目移到末尾，再按 (原 position 排序, 排除目标) 重新连续编号，
+    // 最后把目标插到 new_position。避免相关子查询的 AND/OR 优先级与跨歌单污染问题。
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM playlist_track WHERE playlist_id = ?1",
+            params![playlist_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("查询曲目数失败: {}", e))?;
+    if count == 0 {
+        return Ok(());
+    }
+    let clamped = new_position.clamp(0, count - 1);
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("开启事务失败: {}", e))?;
+    // 1) 目标曲目临时置为最大 position（排到末尾）
+    tx.execute(
         "UPDATE playlist_track SET position = ?1 WHERE playlist_id = ?2 AND track_id = ?3",
-        params![new_position, playlist_id, track_id],
+        params![count, playlist_id, track_id],
     )
-    .map_err(|e| format!("调整曲目顺序失败: {}", e))?;
-    // 归一化，消除重复 position
-    conn.execute(
-        "UPDATE playlist_track SET position = (
-            SELECT COUNT(*) FROM playlist_track p2
-            WHERE p2.playlist_id = playlist_track.playlist_id
-              AND p2.position < playlist_track.position
-              OR (p2.position = playlist_track.position AND p2.track_id <= playlist_track.track_id)
-        ) - 1 WHERE playlist_id = ?1",
-        params![playlist_id],
+    .map_err(|e| format!("暂存目标曲目失败: {}", e))?;
+    // 2) 其余曲目按原 position 升序重新连续编号 0..count-2
+    let mut ids: Vec<String> = Vec::new();
+    {
+        let mut stmt = tx
+            .prepare(
+                "SELECT track_id FROM playlist_track
+                 WHERE playlist_id = ?1 AND track_id <> ?2
+                 ORDER BY position ASC",
+            )
+            .map_err(|e| format!("查询重排序列失败: {}", e))?;
+        let mut rows = stmt
+            .query(params![playlist_id, track_id])
+            .map_err(|e| format!("读取重排序列失败: {}", e))?;
+        while let Some(row) = rows.next().map_err(|e| format!("重排序列行迭代失败: {}", e))? {
+            let id: String = row.get(0).map_err(|e| format!("重排序列行解析失败: {}", e))?;
+            ids.push(id);
+        }
+    }
+    for (i, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE playlist_track SET position = ?1 WHERE playlist_id = ?2 AND track_id = ?3",
+            params![i as i64, playlist_id, id],
+        )
+        .map_err(|e| format!("重排曲目失败: {}", e))?;
+    }
+    // 3) 目标曲目放到 clamped 位置（把 >=clamped 的都后移一位）
+    tx.execute(
+        "UPDATE playlist_track SET position = position + 1
+         WHERE playlist_id = ?1 AND track_id <> ?2 AND position >= ?3",
+        params![playlist_id, track_id, clamped],
     )
-    .map_err(|e| format!("归一化顺序失败: {}", e))?;
+    .map_err(|e| format!("后移曲目失败: {}", e))?;
+    tx.execute(
+        "UPDATE playlist_track SET position = ?1 WHERE playlist_id = ?2 AND track_id = ?3",
+        params![clamped, playlist_id, track_id],
+    )
+    .map_err(|e| format!("放置目标曲目失败: {}", e))?;
+    tx.commit().map_err(|e| format!("提交事务失败: {}", e))?;
     Ok(())
 }
 
@@ -409,7 +455,3 @@ pub fn music_get_player_state(app: AppHandle, key: String) -> Result<Option<Stri
         Err(e) => Err(format!("读取播放状态失败: {}", e)),
     }
 }
-
-// 占位：避免未使用导入告警（Path 在后续 Phase 2 封面缓存会用到）
-#[allow(dead_code)]
-fn _unused(_: &Path) {}
