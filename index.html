@@ -89,9 +89,9 @@
         function blog(tag) { console.log('[boot] +' + (Date.now() - BOOT_START) + 'ms ' + tag); }
         blog('加载层已创建（哥特页开始）');
         // 🔴 Android 快速开屏：移动端内容轻量、无浮窗/笔记预热，最短展示时长压到 400ms；
-        // 桌面维持 1500ms 不变（哥特加载页需真实可见，且要等 notes/overlays 双门控）。
+        // 桌面 P0-3 后无浮窗预热，最短展示 1000ms（仍保证哥特页真实可见与进度条完整性，不至一闪即没）。
         var _isAndroidBoot = /Android/i.test(navigator.userAgent || '');
-        var MIN_BOOT_MS = _isAndroidBoot ? 400 : 1500;
+        var MIN_BOOT_MS = _isAndroidBoot ? 400 : 1000;
         var _finishScheduled = false;
 
         function dismissBoot() {
@@ -166,8 +166,8 @@
         window.__bootGateProgress = function () {
           var g = window.__bootGate;
           if (g.notes && g.overlays) window.__bootProgress(100, { text: '准备就绪', phase: 'PHASE 05 / 05' });
-          else if (g.overlays) window.__bootProgress(95, { text: '预热浮窗', phase: 'PHASE 05 / 05' });
-          else if (g.notes) window.__bootProgress(92, { text: '预热浮窗', phase: 'PHASE 05 / 05' });
+          else if (g.overlays) window.__bootProgress(95, { text: '加载资源', phase: 'PHASE 05 / 05' });
+          else if (g.notes) window.__bootProgress(92, { text: '加载资源', phase: 'PHASE 05 / 05' });
         };
         window.__tryBootFinish = function () {
           blog('tryBootFinish gates: notes=' + window.__bootGate.notes + ' overlays=' + window.__bootGate.overlays);
@@ -179,19 +179,16 @@
           window.__bootGate.appLoaded = true;
           window.__tryBootFinish();
         });
-        // 最后兜底：绝不绕过门控直接收尾（否则预热未完成就淡出 → 笔记页出现后仍在建窗、闪现实体浮窗）。
-        // 这里强制补全门控（notes+overlays）再尝试收尾；正常情况预热早于此已置 gate，本分支仅作极端兜底。
-        // 排查期临时拉到 25s（原 12s），给预热更充裕时间定位实际耗时，确保「浮窗预热」尽量在加载页内一次性跑完（单一阶段）。
-        // 🔴 Android 无浮窗/笔记预热，正常路径由 main.tsx 渲染完直接 __bootDone()；
-        // 这里兜底也压到 3s，避免极端情况（JS 分包加载失败）下白等 25s。
+        // 最后兜底：绝不绕过门控直接收尾。P0-3 起无浮窗预热，门控只等 notes/overlays（挂载即置位），
+        // 兜底 8s 远超实际就绪时间（Android 无门控等待，3s 兜底防 JS 分包加载失败白等）。
         setTimeout(function () {
-          blog('硬超时(' + (_isAndroidBoot ? '3s' : '25s') + ')触发：强制补全门控兜底收尾');
+          blog('硬超时(' + (_isAndroidBoot ? '3s' : '8s') + ')触发：强制补全门控兜底收尾');
           if (!state.done) {
             window.__bootGate.notes = true;
             window.__bootGate.overlays = true;
             window.__tryBootFinish();
           }
-        }, _isAndroidBoot ? 3000 : 25000);
+        }, _isAndroidBoot ? 3000 : 8000);
 
         // ===== 全量哥特加载页（iframe 隔离，Vite 构建时注入 base64，零外部依赖）=====
         (function installBootHtml() {

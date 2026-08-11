@@ -714,6 +714,8 @@ mod imp {
         }
         // 清理已消失的会话
         all_sessions().lock().unwrap().retain(|k, _| seen.contains(k));
+        // 时间线缓存随会话一起清理，避免 AUMID 只增不清
+        timeline_cache().lock().unwrap().retain(|k, _| seen.contains(k));
         match select_global_session(&mgr).await {
             Some(s) => {
                 let aumid = s.SourceAppUserModelId().ok().map(|h| h.to_string());

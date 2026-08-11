@@ -4,23 +4,58 @@ import { invoke } from '@tauri-apps/api/core';
  * localimg://<percent-encoded-path> → data URL 缓存，避免重复读盘。
  * 笔记中的图片以 localimg:// 占位引用，渲染时再解析为 data URL，
  * 既让图片自包含（不内联进笔记文本），又不撑大笔记体积。
+ *
+ * 有界 LRU（P1 内存优化）：base64 data URL 平均膨胀 ~1.33 倍，数张
+ * 4K 截图即可累积数百 MB 且永不释放。上限 100 条 / 64MB 字符（≈48MB
+ * 实际文件），超过时按最久未用 evict；命中刷新顺序，失败标记条目
+ * <1KB 不占配额。
  */
 const localImageCache = new Map<string, string>();
+
+const MAX_LOCAL_IMAGE_CACHE_ENTRIES = 100;
+const MAX_LOCAL_IMAGE_CACHE_CHARS = 64 * 1024 * 1024; // 64M chars ≈ 48MB 文件
+let localImageCacheChars = 0;
+
+/** 命中/写入后刷新 LRU 顺序：先删再插，Map 迭代序 = 最近使用序（尾部最新）。 */
+function lruTouch(enc: string, url: string): void {
+  localImageCache.delete(enc);
+  localImageCache.set(enc, url);
+}
+
+/** 从最久未用（头部）开始逐出，直到条目数与总字符数双双回落到上限内。 */
+function lruEvict(): void {
+  while (
+    localImageCache.size > MAX_LOCAL_IMAGE_CACHE_ENTRIES ||
+    localImageCacheChars > MAX_LOCAL_IMAGE_CACHE_CHARS
+  ) {
+    const oldest = localImageCache.keys().next().value as string | undefined;
+    if (oldest === undefined) return;
+    const url = localImageCache.get(oldest)!;
+    localImageCacheChars -= url.length;
+    localImageCache.delete(oldest);
+  }
+}
 
 /**
  * 把 localimg:// 占位引用（percent-encoded 路径）解析为 data URL。
  * 解析失败返回空字符串（调用方据此降级，例如隐藏破图）。
  */
 export async function resolveLocalImage(enc: string): Promise<string> {
-  if (localImageCache.has(enc)) return localImageCache.get(enc)!;
+  const hit = localImageCache.get(enc);
+  if (hit !== undefined) {
+    lruTouch(enc, hit); // 刷新顺序
+    return hit;
+  }
   try {
     const filePath = decodeURIComponent(enc);
     const dataUrl = await invoke<string>('read_file_base64', { filePath });
-    localImageCache.set(enc, dataUrl);
+    localImageCacheChars += dataUrl.length;
+    lruTouch(enc, dataUrl);
+    lruEvict();
     return dataUrl;
   } catch (err) {
     console.error('[Notes] 解析本地图片失败:', enc, err);
-    localImageCache.set(enc, ''); // 标记失败，避免反复重试
+localImageCache.set(enc, ''); // 标记失败，避免反复重试
     return '';
   }
 }

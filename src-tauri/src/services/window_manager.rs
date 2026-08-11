@@ -45,6 +45,10 @@ const GPU_CACHE_SUBDIRS: [&str; 6] = [
 /// 共享环境下创建「第二个及以后的 CoreWebView2Controller」会返回 0x8007139F 失败，而主窗
 /// （首个控制器）正常。给每个浮窗独立的 data_directory → 各自独立的 WebContext / 浏览器进程
 /// → 绕开该共享环境第二控制器失败。已用最小化 wry 双窗口程序验证：独立环境时第二窗成功。
+///
+/// 注：p0-1 实验（p0-1-shared-udf 分支）实测「浮窗共享 data dir」可行（探针两窗创建无
+/// 0x8007，browser 进程 3→2），但 WebView2 总内存不降反升（renderer 每窗独立，为内存大头），
+/// 故不生产化；保留 per-window 现状。
 pub fn per_window_data_dir(app: &tauri::AppHandle, label: &str) -> std::path::PathBuf {
     app
         .path()
@@ -351,6 +355,36 @@ pub fn create_transparent_with_retry<E: std::fmt::Display>(
     false
 }
 
+/// P0-3 懒建辅助：窗口不存在（或坏）时，marshal 到主线程走统一重试引擎创建。
+///
+/// 启动预创建移除后（P0-3），浮窗一律「首次使用才建」。各 show 命令（async）在需要窗口
+/// 时调用本函数：与启动期 `run_on_main_thread` 预创建完全同构——build + 健康检查 + 退避
+/// 重试全部在主线程完成，规避命令线程直接 build 撞 0x8007139F / 重入死锁。
+pub(crate) fn ensure_transparent_window_on_main<E: std::fmt::Display + Send + 'static>(
+    app: &tauri::AppHandle,
+    label: &str,
+    create: impl FnMut() -> Result<(), E> + Send + 'static,
+) -> Result<(), String> {
+    let healthy = app
+        .get_webview_window(label)
+        .map(|w| w.scale_factor().is_ok())
+        .unwrap_or(false);
+    if healthy {
+        return Ok(());
+    }
+    let app2 = app.clone();
+    let label2 = label.to_string();
+    run_on_main_thread_result(app, move || {
+        let ok = create_transparent_with_retry(&app2, &label2, create);
+        if ok {
+            Ok(())
+        } else {
+            Err(format!("浮窗 {} 懒建失败（5 次重试后仍失败）", label2))
+        }
+    })
+    .and_then(|r| r)
+}
+
 /// 诊断命令：返回各浮窗的存在性与健康度（能否取到缩放比——坏窗最可靠的信号），
 /// 以及当前 WebView2 运行时版本。用于排查 0x8007139F 时一眼看清哪个窗坏了。
 #[tauri::command]
@@ -391,7 +425,7 @@ pub fn overlay_window_health(app: tauri::AppHandle) -> serde_json::Value {
 /// 永远拿到 `None`（报「未返回构建结果」），真正的错误是主线程稍后异步执行时才打的，重试完全失效。
 /// 这里用 `(Mutex, Condvar)` 等闭包跑完，并用 `catch_unwind` 兜住闭包内 panic（避免 panic 被吞、
 /// 结果永远为空导致误判失败）。
-fn run_on_main_thread_result<F, R>(app: &tauri::AppHandle, f: F) -> Result<R, String>
+pub(crate) fn run_on_main_thread_result<F, R>(app: &tauri::AppHandle, f: F) -> Result<R, String>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,

@@ -63,6 +63,16 @@ pub fn mark_overlay_destroyed(label: &str) {
         REPAINT_STOP.lock().unwrap().insert(label.to_string());
         crate::dcomp_overlay::on_destroy(label);
     }
+    // P1 内存：截图覆盖窗销毁 = 截图流程结束，释放整屏 RGBA 快照（4K ≈ 33MB）
+    // 否则驻留到下一次截图才被覆盖；窗已销毁则无人再读，安全清空。
+    if label == "screenshot-overlay" {
+        SHOT.lock().unwrap().take();
+    }
+}
+
+/// 释放录屏区域选择窗的桌面快照（隐藏/销毁后无人再读；下次打开会重新捕获）。
+pub fn clear_recorder_snapshot() {
+    RECORDER_SNAP.lock().unwrap().take();
 }
 
 

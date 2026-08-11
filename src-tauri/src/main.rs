@@ -666,39 +666,12 @@ fn main() {
                     let r = window_manager::overlay_window_diag(h).await;
                     eprintln!("[DIAG-RESULT] {}", r);
                 });
-            } else {
-            // 四个启动透明窗改为【异步预创建】：经 run_on_main_thread 派发到主线程，
-            // setup 立即返回 → 主窗加载页可立即显示（不再被 300ms×4 健康探针 + 可能的退避重试阻塞）。
-            // 窗口创建在加载页盖屏期间于主线程完成，不影响主窗首次渲染与前端笔记加载派发。
-            // 窗均隐藏且仅首次使用时才需要，正常启动后数秒内用户不会立即录屏/看歌词，届时早已建好。
-            // 任一窗创建失败 → 标记 failed，下一启动自愈清缓存；同时跑隔离诊断输出真因。
-            let h = app.handle().clone();
-            let _ = app.run_on_main_thread(move || {
-                let mut boot_windows_ok = true;
-                boot_windows_ok &= window_manager::create_transparent_with_retry(&h, "recorder-select", || {
-                    recording_service::create_recorder_select_window(&h)
-                });
-                boot_windows_ok &= window_manager::create_transparent_with_retry(&h, "recorder-widget", || {
-                    recording_service::create_recorder_widget_window(&h)
-                });
-                boot_windows_ok &= window_manager::create_transparent_with_retry(&h, "recording-border", || {
-                    recording_service::create_recording_border_window(&h)
-                });
-                boot_windows_ok &= window_manager::create_transparent_with_retry(&h, "lyrics-widget", || {
-                    lyrics_service::create_lyrics_widget(&h)
-                });
-                if boot_windows_ok {
-                    window_manager::mark_boot_success();
-                } else {
-                    window_manager::mark_boot_failure();
-                    let h2 = h.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let r = window_manager::overlay_window_diag(h2).await;
-                        eprintln!("[DIAG-RESULT] {}", r);
-                    });
-                }
-            });
             }
+            // P0-3：不再预创建任何浮窗（原 4 窗启动预创建已移除）。
+            // 每窗一个独立 WebView2 进程树（空闲 3.9GB 的主因，见 research_report_memory_idle_audit.md）。
+            // 全部浮窗改为「首次使用才建」：show_* 命令内部经 window_manager::ensure_transparent_window_on_main
+            // marshal 主线程走统一重试引擎（与旧预创建同构，规避 0x8007139F/重入死锁）。
+            // 自愈链保持：懒建失败路径仍会 mark_boot_failure → 下次启动 maybe_clear_gpu_cache 自救。
 
             // ============ 文件系统热插拔监听 ============
             // 监听 bundled-plugins/ 和 user_plugins/ 目录变化，检测到新增/删除/修改时
@@ -783,6 +756,7 @@ fn main() {
             //         window.open_devtools();
             //     }
             // }
+
             Ok(())
         })
         // 拦截窗口关闭事件：托盘模式启用时隐藏而不是关闭
@@ -910,8 +884,11 @@ fn main() {
                                     let _ = w.emit("recorder-select-cancel", ());
                                 }
                             } else {
-                                // 未录制 → 显示区域选择覆盖窗
-                                let _ = recording_service::show_recorder_select(app.clone());
+                                // 未录制 → 显示区域选择覆盖窗（懒建，async 命令）
+                                let a = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = recording_service::show_recorder_select(a).await;
+                                });
                             }
                         } else {
                             // 剪贴板浮窗热键

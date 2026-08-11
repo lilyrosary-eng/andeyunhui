@@ -1617,6 +1617,18 @@ pub async fn start_recording(
 
         // 显示并精确定位录屏区域边框窗（透明、点击穿透、排除捕获，仅作屏幕可视化提示）。
         // 边框紧贴实际录制区域，替代 WGC 默认（总是画整屏边缘、误导性的）黄框。
+        // P0-3 懒建：窗口不存在（首次录制或被销毁后）先主线程统一重试引擎创建；失败仅影响
+        // 可视化边框提示，不阻断录屏本体。
+        if app.get_webview_window(RECORDING_BORDER_LABEL).is_none() {
+            let a = app.clone();
+            if let Err(e) = crate::services::window_manager::ensure_transparent_window_on_main(
+                &app,
+                RECORDING_BORDER_LABEL,
+                move || create_recording_border_window(&a),
+            ) {
+                eprintln!("[录屏] 边框窗懒建失败（录屏继续）: {}", e);
+            }
+        }
         if let Some(bw) = app.get_webview_window(RECORDING_BORDER_LABEL) {
             let _ = bw.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
                 x: border_x,
@@ -1871,18 +1883,25 @@ pub fn monitor_rect_phys(monitor: &Monitor) -> (i32, i32, i32, i32) {
 
 /// 显示录屏控制台窗口
 ///
-/// **重要**：本函数为 sync `#[tauri::command]`，在主线程执行。
-/// 严禁在此调用 `WebviewWindowBuilder::build()` —— 会触发 WebView2 主线程
-/// 「重入死锁」（build 等待的创建完成回调需要被同一消息循环派发，而该命令
-/// 闭包正占用着消息循环），导致整个应用卡死（右上角按钮、托盘菜单全部失效）。
-///
-/// 窗口由 `create_recorder_widget_window` 在 setup 阶段预创建，本函数仅做
-/// show + set_focus + 重新定位（避免多显示器切换后位置不正确）。
+/// **重要**：本函数为 async `#[tauri::command]`（原 sync 命令直接在主线程执行，严禁在其中
+/// `build()`，会触发 WebView2「重入死锁」）。P0-3 起窗口不再启动预创建，首次使用经
+/// `ensure_transparent_window_on_main` marshal 主线程走统一重试引擎创建；窗口已存在时
+/// 路径与旧实现一致（show + set_focus + 重新定位）。
 #[tauri::command]
-pub fn show_recorder_widget(app: AppHandle) -> Result<(), String> {
+pub async fn show_recorder_widget(app: AppHandle) -> Result<(), String> {
+    // 窗口不存在（或坏）→ 主线程统一重试引擎创建（与启动预创建同构，规避 0x8007139F/重入死锁）
+    crate::services::window_manager::ensure_transparent_window_on_main(
+        &app,
+        RECORDER_WINDOW_LABEL,
+        {
+            let a = app.clone();
+            move || create_recorder_widget_window(&a)
+        },
+    )?;
+
     let win = app
         .get_webview_window(RECORDER_WINDOW_LABEL)
-        .ok_or_else(|| "录屏控制台窗口未预创建，请重启应用".to_string())?;
+        .ok_or_else(|| "录屏控制台窗口创建失败".to_string())?;
 
     // 重新居中（多显示器切换或分辨率变化后保持正确位置）
     let (screen_w, _screen_h) = screen_size();
@@ -2151,11 +2170,18 @@ pub(crate) fn filter_self_overlay_windows(app: &AppHandle, mut windows: Vec<crat
 }
 
 /// 显示录屏区域选择覆盖窗（全屏透明，用户拖拽选择录制区域）
-/// 复用预创建的窗口（setup 阶段已创建），避免每次创建 WebView2 的卡顿
+/// 窗口不存在时懒建（P0-3 起不再启动预创建），存在则直接复用
 #[tauri::command]
-pub fn show_recorder_select(app: AppHandle) -> Result<(), String> {
-    // 确保窗口已创建（首次或被销毁后）
-    create_recorder_select_window(&app)?;
+pub async fn show_recorder_select(app: AppHandle) -> Result<(), String> {
+    // 确保窗口已创建（首次或被销毁后）：marshal 主线程走统一重试引擎
+    crate::services::window_manager::ensure_transparent_window_on_main(
+        &app,
+        RECORDER_SELECT_LABEL,
+        {
+            let a = app.clone();
+            move || create_recorder_select_window(&a)
+        },
+    )?;
 
     let win = app
         .get_webview_window(RECORDER_SELECT_LABEL)
@@ -2247,6 +2273,9 @@ pub fn hide_recorder_select(app: AppHandle) {
     if let Some(w) = app.get_webview_window(RECORDER_SELECT_LABEL) {
         let _ = w.hide();
     }
+    // P1 内存：选择完成（hide）后释放整屏桌面快照（4K ≈ 33MB），
+    // 否则驻留到下次录屏选择才被重新捕获覆盖；此后再无人读它。
+    crate::screenshot::clear_recorder_snapshot();
 }
 
 /// 获取录屏区域选择覆盖窗的坐标信息（前端主动拉取，解决 push 事件竞态）

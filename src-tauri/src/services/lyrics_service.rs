@@ -107,7 +107,17 @@ pub fn create_lyrics_widget(_app: &AppHandle) -> Result<(), Box<dyn std::error::
 
 /// 显示歌词窗口
 #[tauri::command]
-pub fn show_lyrics_widget(app: AppHandle) -> Result<(), String> {
+pub async fn show_lyrics_widget(app: AppHandle) -> Result<(), String> {
+    // P0-3 懒建：窗口不存在（或被销毁）时 marshal 主线程走统一重试引擎创建；
+    // 已存在则直接复用（与旧逻辑一致，仅 show + 重新落位）
+    crate::services::window_manager::ensure_transparent_window_on_main(
+        &app,
+        LYRICS_WINDOW_LABEL,
+        {
+            let a = app.clone();
+            move || create_lyrics_widget(&a).map_err(|e| e.to_string())
+        },
+    )?;
     if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
         // 重新定位到配置坐标：创建时窗口先置于离屏 (-4000,-4000)，若 WebView 初始化把
         // set_position 覆盖/未生效，窗口会永久停在离屏坐标，导致「歌词有数据但看不到」。
@@ -124,22 +134,22 @@ pub fn show_lyrics_widget(app: AppHandle) -> Result<(), String> {
         // 仅 show，不重复设置 always_on_top（创建时已设置，重复调用会触发 DWM 重组合）
         window.show().map_err(|e| format!("显示歌词窗口失败: {}", e))?;
         eprintln!("[Lyrics] 歌词窗口已显示，定位到 ({}, {})", tx, ty);
-    } else {
-        eprintln!("[Lyrics] 歌词窗口不存在，尝试重新创建");
-        create_lyrics_widget(&app).map_err(|e| format!("创建歌词窗口失败: {}", e))?;
-        if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
-            window.show().map_err(|e| format!("显示歌词窗口失败: {}", e))?;
-        }
     }
     Ok(())
 }
 
-/// 隐藏歌词窗口
+/// 关闭歌词窗口（P0-3+ 生命周期优化：低频浮窗「关闭=销毁」，释放整棵 WebView2 进程树）
+///
+/// 命令名维持 `hide_lyrics_widget`（插件调用点无感），语义改为销毁：位置/锁定/字体等
+/// 配置已全部持久化（load/save_lyrics_config），重开走 `show_lyrics_widget` 懒建自动恢复。
+/// 对比旧 hide 语义：高频开关场景需要重建冷启动（数秒），但低频场景换回 ~420MB/树/次。
 #[tauri::command]
 pub fn hide_lyrics_widget(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
-        window.hide().map_err(|e| format!("隐藏歌词窗口失败: {}", e))?;
-        eprintln!("[Lyrics] 歌词窗口已隐藏");
+        // 窗口销毁必须走 WebviewWindow::destroy（内部主线程安全）；Tauri 的 destroy 不触发
+        // CloseRequested，插件侧无残留监听。配置已持久化，无状态丢失。
+        window.destroy().map_err(|e| format!("销毁歌词窗口失败: {}", e))?;
+        eprintln!("[Lyrics] 歌词窗口已销毁（释放进程树，重开将懒建）");
     }
     Ok(())
 }
