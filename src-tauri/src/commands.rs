@@ -2172,6 +2172,11 @@ pub fn music_add_track_to_playlist(app: tauri::AppHandle, playlist_id: String, t
 }
 
 #[tauri::command]
+pub fn music_replace_playlist_tracks(app: tauri::AppHandle, playlist_id: String, tracks: Vec<music_db::PlaylistTrack>) -> Result<(), String> {
+    music_db::music_replace_playlist_tracks(app, playlist_id, tracks)
+}
+
+#[tauri::command]
 pub fn music_remove_track_from_playlist(app: tauri::AppHandle, playlist_id: String, track_id: String) -> Result<(), String> {
     music_db::music_remove_track_from_playlist(app, playlist_id, track_id)
 }

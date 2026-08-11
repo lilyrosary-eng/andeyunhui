@@ -274,6 +274,45 @@ pub fn music_add_track_to_playlist(
 }
 
 
+// 整歌单曲目同步（前端每次变更后调用）：删除旧曲目并批量插入新曲目，保持 position 连续。
+// 用于前端自建歌单与 SQLite 对齐，避免逐曲 diff 的脆弱性。
+pub fn music_replace_playlist_tracks(
+    app: AppHandle,
+    playlist_id: String,
+    tracks: Vec<PlaylistTrack>,
+) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("开启事务失败: {}", e))?;
+    tx.execute(
+        "DELETE FROM playlist_track WHERE playlist_id = ?1",
+        params![playlist_id],
+    )
+    .map_err(|e| format!("清空歌单曲目失败: {}", e))?;
+    for (i, t) in tracks.iter().enumerate() {
+        tx.execute(
+            "INSERT OR REPLACE INTO playlist_track
+             (playlist_id, track_id, position, title, artist, album, file_path, cover_path, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                playlist_id,
+                t.track_id,
+                i as i64,
+                t.title,
+                t.artist,
+                t.album,
+                t.file_path,
+                t.cover_path,
+                t.duration_ms
+            ],
+        )
+        .map_err(|e| format!("写入歌单曲目失败: {}", e))?;
+    }
+    tx.commit().map_err(|e| format!("提交事务失败: {}", e))?;
+    Ok(())
+}
+
 pub fn music_remove_track_from_playlist(
     app: AppHandle,
     playlist_id: String,

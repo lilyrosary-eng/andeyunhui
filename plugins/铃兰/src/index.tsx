@@ -39,6 +39,75 @@ function getCustomPlaylistsFromStorage(): Playlist[] {
   }
 }
 
+// 将前端 Track 映射为 SQLite 歌单曲目（track_id 用 file_path，保证同文件唯一）
+function toPlaylistTrack(t: Track) {
+  return {
+    trackId: t.id || t.filePath,
+    position: 0,
+    title: t.title || '',
+    artist: t.artist || '',
+    album: t.album || '',
+    filePath: t.filePath || '',
+    coverPath: t.coverPath || '',
+    durationMs: Math.round((t.durationSecs || 0) * 1000),
+  };
+}
+
+// 自建歌单同步到 SQLite：把整张歌单的曲目以 replace 方式落库，作为持久化真源。
+// 调用为 fire-and-forget，失败仅告警不影响内存状态（localStorage 仍作兜底镜像）。
+function syncCustomPlaylistToDb(playlist: Playlist) {
+  if (playlist.type !== 'custom') return;
+  try {
+    hostApi
+      .invoke('music_replace_playlist_tracks', {
+        playlistId: playlist.id,
+        tracks: playlist.tracks.map(toPlaylistTrack),
+      })
+      .catch((e) => console.warn('[Music] 同步歌单到 SQLite 失败:', playlist.id, e));
+  } catch (e) {
+    console.warn('[Music] 同步歌单到 SQLite 异常:', playlist.id, e);
+  }
+}
+
+// 从 SQLite 加载自建歌单（替代仅读 localStorage 的恢复逻辑），作为重载后的真源。
+async function loadCustomPlaylistsFromDb(): Promise<Playlist[]> {
+  try {
+    const summaries = await hostApi.invoke<{ id: string; title: string; coverPath?: string }[]>(
+      'music_list_playlists',
+    );
+    const customs: Playlist[] = [];
+    for (const s of summaries) {
+      const tracksRaw = await hostApi.invoke<{
+        trackId: string;
+        title: string;
+        artist: string;
+        album: string;
+        filePath?: string;
+        coverPath?: string;
+        durationMs: number;
+      }[]>('music_list_playlist_tracks', { playlistId: s.id });
+      customs.push({
+        id: s.id,
+        name: s.title,
+        type: 'custom',
+        tracks: tracksRaw.map((t) => ({
+          id: t.trackId,
+          filePath: t.filePath || t.trackId,
+          title: t.title,
+          artist: t.artist,
+          album: t.album,
+          durationSecs: (t.durationMs || 0) / 1000,
+          coverPath: t.coverPath,
+        })),
+      });
+    }
+    return customs;
+  } catch (e) {
+    console.warn('[Music] 从 SQLite 加载歌单失败，回退 localStorage:', e);
+    return getCustomPlaylistsFromStorage();
+  }
+}
+
 // ========== 音乐模块设置面板（JSX 实现，取代原 React.createElement 嵌套）==========
 interface MusicSettingsPanelProps {
   onClose: () => void;
@@ -395,12 +464,15 @@ function MusicModule() {
     selectedPlaylistIdRef.current = selectedPlaylist?.id ?? null;
   }, [selectedPlaylist?.id]);
 
-  // 自定义歌单独立恢复：即使未配置任何音乐文件夹，重载后也应立即恢复，
+  // 自定义歌单独立恢复：即使未配置任何音乐文件夹，重载后也应立即从 SQLite 恢复，
   // 避免「仅自建歌单（手动添加音频）」场景下列表在重载后消失。
   useEffect(() => {
-    const customs = getCustomPlaylistsFromStorage();
-    if (customs.length === 0) return;
-    setPlaylists(prev => [...prev.filter(p => p.type !== 'custom'), ...customs]);
+    let cancelled = false;
+    loadCustomPlaylistsFromDb().then((customs) => {
+      if (cancelled || customs.length === 0) return;
+      setPlaylists(prev => [...prev.filter(p => p.type !== 'custom'), ...customs]);
+    });
+    return () => { cancelled = true; };
   }, []);
 
   // F.11 模块本地设置
@@ -567,19 +639,33 @@ function MusicModule() {
 
   // #3 创建自定义歌单：写入状态 + 持久化 + 立即选中（侧边栏即时刷新）
   const handleCreatePlaylist = useCallback((name: string) => {
+    const tempId = 'pl_' + Date.now().toString();
     const newPlaylist: Playlist = {
-      id: Date.now().toString(),
+      id: tempId,
       name,
       tracks: [],
       type: 'custom',
     };
-    setPlaylists(prev => {
-      const updated = [...prev, newPlaylist];
-      const customPlaylists = updated.filter(p => p.type === 'custom');
-      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
-      return updated;
-    });
+    setPlaylists(prev => [...prev, newPlaylist]);
     setSelectedPlaylist(newPlaylist);
+    // 落库 SQLite（真源），成功后回填真实 id
+    hostApi
+      .invoke<{ id: string; title: string }>('music_create_playlist', { title: name })
+      .then((res) => {
+        setPlaylists(prev =>
+          prev.map(p => (p.id === tempId ? { ...p, id: res.id } : p)),
+        );
+        setSelectedPlaylist(prev => (prev && prev.id === tempId ? { ...prev, id: res.id } : prev));
+      })
+      .catch((e) => {
+        console.warn('[Music] 创建歌单落库失败，仅内存态:', e);
+        // 失败兜底：仍写 localStorage 镜像
+        try {
+          const mirror = JSON.parse(localStorage.getItem(STORAGE_KEY_PLAYLISTS) || '[]');
+          mirror.push(newPlaylist);
+          localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(mirror));
+        } catch { /* ignore */ }
+      });
   }, []);
 
 // 模块加载探针（console.error 必然可见，用于确认 music 插件脚本是否真正执行）
@@ -747,21 +833,37 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       const updated = prev.map((p) =>
         p.id === selectedPlaylist.id ? { ...p, tracks: [...p.tracks, ...newTracks] } : p,
       );
-      const customPlaylists = updated.filter((p) => p.type === 'custom');
-      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      // 兜底镜像
+      try {
+        const mirror = updated.filter((p) => p.type === 'custom');
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(mirror));
+      } catch { /* ignore */ }
       return updated;
     });
-    setSelectedPlaylist((prev) => (prev ? { ...prev, tracks: [...prev.tracks, ...newTracks] } : prev));
+    setSelectedPlaylist((prev) => {
+      if (!prev) return prev;
+      const synced = { ...prev, tracks: [...prev.tracks, ...newTracks] };
+      syncCustomPlaylistToDb(synced);
+      return synced;
+    });
   }, [selectedPlaylist]);
 
   const handleRenamePlaylist = useCallback((playlist: Playlist, newName: string) => {
     setPlaylists(prev => {
       const updated = prev.map(p => p.id === playlist.id ? { ...p, name: newName } : p);
-      // 同步更新 localStorage 中的自定义歌单
-      const customPlaylists = updated.filter(p => p.type === 'custom');
-      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      // 兜底镜像
+      try {
+        const mirror = updated.filter(p => p.type === 'custom');
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(mirror));
+      } catch { /* ignore */ }
+      const renamed = updated.find(p => p.id === playlist.id);
+      if (renamed) syncCustomPlaylistToDb(renamed);
       return updated;
     });
+    // 歌单名变更也要落库 playlist 表（标题）
+    hostApi
+      .invoke('music_rename_playlist', { playlistId: playlist.id, title: newName })
+      .catch((e) => console.warn('[Music] 重命名歌单失败:', playlist.id, e));
     if (selectedPlaylist?.id === playlist.id) {
       setSelectedPlaylist(prev => prev ? { ...prev, name: newName } : null);
     }
@@ -777,17 +879,25 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     } else {
       setPlaylists(prev => {
         const updated = prev.filter(p => p.id !== playlist.id);
-        const customPlaylists = updated.filter(p => p.type === 'custom');
-        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
         return updated;
       });
+      // 从 SQLite 删除（真源）
+      hostApi
+        .invoke('music_delete_playlist', { playlistId: playlist.id })
+        .catch((e) => console.warn('[Music] 删除歌单失败:', playlist.id, e));
+      // 兜底镜像
+      try {
+        const mirror = (JSON.parse(localStorage.getItem(STORAGE_KEY_PLAYLISTS) || '[]') as Playlist[])
+          .filter(p => p.id !== playlist.id);
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(mirror));
+      } catch { /* ignore */ }
     }
     if (selectedPlaylist?.id === playlist.id) {
       setSelectedPlaylist(null);
     }
   }, [selectedPlaylist, addToBlacklist]);
 
-  // 移动歌曲到其他歌单：源/目标都更新；自定义歌单持久化到 localStorage
+  // 移动歌曲到其他歌单：源/目标都更新；受影响自定义歌单同步到 SQLite
   const handleMoveTrack = useCallback((track: Track, targetPlaylistId: string) => {
     const currentId = selectedPlaylistIdRef.current;
     if (!currentId || currentId === targetPlaylistId) return;
@@ -803,9 +913,14 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
         }
         return p;
       });
-      // 仅自定义歌单需要持久化
-      const customPlaylists = updated.filter(p => p.type === 'custom');
-      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      // 兜底镜像 + 同步 SQLite
+      try {
+        const mirror = updated.filter(p => p.type === 'custom');
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(mirror));
+      } catch { /* ignore */ }
+      updated
+        .filter(p => (p.id === currentId || p.id === targetPlaylistId) && p.type === 'custom')
+        .forEach(syncCustomPlaylistToDb);
       return updated;
     });
     // 同步更新当前歌单的 selectedPlaylist
@@ -826,15 +941,20 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
         }
         return p;
       });
-      // 仅自定义歌单需要持久化
-      const customPlaylists = updated.filter(p => p.type === 'custom');
-      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      // 兜底镜像 + 同步 SQLite
+      try {
+        const mirror = updated.filter(p => p.type === 'custom');
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(mirror));
+      } catch { /* ignore */ }
+      updated
+        .filter(p => p.id === targetPlaylistId && p.type === 'custom')
+        .forEach(syncCustomPlaylistToDb);
       return updated;
     });
   }, []);
 
   // 移除歌曲：从当前歌单中删除
-  // - 自定义歌单：内存删除 + 持久化
+  // - 自定义歌单：内存删除 + 同步 SQLite
   // - 目录歌单：仅内存删除（下次扫描会重新出现，因为源文件仍在）
   const handleRemoveTrack = useCallback((track: Track) => {
     const currentId = selectedPlaylistIdRef.current;
@@ -846,8 +966,14 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
         }
         return p;
       });
-      const customPlaylists = updated.filter(p => p.type === 'custom');
-      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(customPlaylists));
+      // 兜底镜像 + 同步 SQLite
+      try {
+        const mirror = updated.filter(p => p.type === 'custom');
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(mirror));
+      } catch { /* ignore */ }
+      updated
+        .filter(p => p.id === currentId && p.type === 'custom')
+        .forEach(syncCustomPlaylistToDb);
       return updated;
     });
     setSelectedPlaylist(prev => {

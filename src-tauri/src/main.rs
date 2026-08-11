@@ -1022,6 +1022,7 @@ fn main() {
             music_list_playlists,
             music_list_playlist_tracks,
             music_add_track_to_playlist,
+            music_replace_playlist_tracks,
             music_remove_track_from_playlist,
             music_reorder_playlist_track,
             music_set_favorite,
