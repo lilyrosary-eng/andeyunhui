@@ -19,7 +19,7 @@ interface Playlist {
   id: string;
   name: string;
   tracks: Track[];
-  type: 'directory' | 'custom';
+  type: 'directory' | 'custom' | 'netease-temp';
 }
 
 interface MusicSidebarProps {

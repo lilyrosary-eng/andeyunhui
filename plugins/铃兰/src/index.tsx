@@ -6,7 +6,7 @@ import { TrackList } from './TrackList';
 import { ModuleDrawer } from './ModuleDrawer';
 import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
-import { NeteaseView, type PlayableTrack } from './NeteaseView';
+import { NeteaseView, type PlayableTrack, type TempPlaylist } from './NeteaseView';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
@@ -18,7 +18,7 @@ export interface Playlist {
   id: string;
   name: string;
   tracks: Track[];
-  type: 'directory' | 'custom';
+  type: 'directory' | 'custom' | 'netease-temp';
 }
 
 interface MusicScanProgress {
@@ -921,6 +921,8 @@ function MusicModule() {
   // 共享运行时：黑名单管理（Rust 集中管理，必须在 filteredPlaylists useMemo 之前声明）
   const { hidden: hiddenPlaylists, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('music');
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  // 网易云在线播放生成的临时歌单（挂「我的收藏」下方）
+  const [neteaseTemp, setNeteaseTemp] = useState<TempPlaylist | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   // 收藏集合（track_id set），真源为 SQLite favorite 表；localStorage 作兜底镜像
   const [favorites, setFavorites] = useState<Set<string>>(() => {
@@ -1181,8 +1183,12 @@ function MusicModule() {
   useEffect(() => {
     setPlaylists(prev => {
       const fav = buildFavoritePlaylist(favorites, collectAllTracks(prev));
-      const base = prev.filter(p => p.id !== '__favorite__');
-      const next = fav ? [fav, ...base] : base;
+      const base = prev.filter(p => p.id !== '__favorite__' && p.id !== 'netease-temp');
+      // 临时歌单（网易云在线播放生成）：挂「我的收藏」之下、目录/自定义歌单之上
+      const temp: Playlist | null = neteaseTemp
+        ? { id: 'netease-temp', name: neteaseTemp.name, tracks: neteaseTemp.tracks as unknown as Track[], type: 'netease-temp' }
+        : null;
+      const next = [fav, ...(temp ? [temp] : []), ...base].filter(Boolean) as Playlist[];
       const prevFav = prev.find(p => p.id === '__favorite__');
       // 已等价（收藏曲目数一致 + 列表长度一致）则保持原引用，终止循环
       if (prevFav && fav && prevFav.tracks.length === fav.tracks.length && prev.length === next.length) {
@@ -1190,7 +1196,7 @@ function MusicModule() {
       }
       return next;
     });
-  }, [favorites, playlists]);
+  }, [favorites, playlists, neteaseTemp]);
 
   // 订阅播放器状态
   useEffect(() => {
@@ -1889,6 +1895,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
               }}
+              onTempPlaylist={(temp: TempPlaylist) => setNeteaseTemp(temp)}
             />
           ) : showStats ? (
             <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />

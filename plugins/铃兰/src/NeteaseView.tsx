@@ -38,6 +38,16 @@ interface NeteaseViewProps {
   initialTab: NeteaseTab;
   onBack: () => void;
   onPlay: (tracks: PlayableTrack[], startIndex: number) => void;
+  // 在线播放时把当前来源歌单作为「临时歌单」回传给侧栏，挂到「我的收藏」下方
+  onTempPlaylist?: (temp: TempPlaylist) => void;
+}
+
+// 在线播放生成的临时歌单（挂在侧栏「我的收藏」之下）
+export interface TempPlaylist {
+  id: string;
+  name: string;
+  coverPath?: string;
+  tracks: PlayableTrack[];
 }
 
 function trackToPlayable(t: NeteaseTrack, url: string, quality = ''): PlayableTrack {
@@ -60,7 +70,7 @@ function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
+export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: NeteaseViewProps) {
   const [tab, setTab] = useState<NeteaseTab>(initialTab);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -75,6 +85,8 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
   const [hasMore, setHasMore] = useState(false);
   const [reachedLimit, setReachedLimit] = useState(false); // 已达本地预览上限
   const PAGE = 30; // 每页拉取条数
+  // 「现在就听」精选歌单（模块化网格）：并行拉取几个官方榜单的封面与曲目数
+  const [featured, setFeatured] = useState<{ id: number; name: string; cover: string; trackCount: number }[]>([]);
   // 本地预览上限：避免一次性下拉拉取成千上万首导致 DOM 爆炸、主线程卡死、
   // 顶部云按钮（tab 切换）失去响应。到达上限后停止续拉并提示。
   const MAX_ITEMS = 300;
@@ -157,6 +169,7 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
   useEffect(() => {
     if (tab !== 'listen') return;
     setPlaylistId(null); // 离开歌单分页模式
+    sourceNameRef.current = T('music.moduleDrawer.netease.listenNow');
     const req = ++reqRef.current;
     setLoading(true);
     setError('');
@@ -171,6 +184,22 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
         }
       })
       .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
+    // 并行拉取「精选歌单」网格（官方榜单封面 + 曲目数），模块化呈现、和网易云首页对齐
+    const FEATURED: { id: number; name: string }[] = [
+      { id: 19723756, name: '飙升榜' },
+      { id: 3779629, name: '新歌榜' },
+      { id: 3778678, name: '热歌榜' },
+      { id: 2884035, name: '原创榜' },
+    ];
+    Promise.all(FEATURED.map(async (f) => {
+      try {
+        const r = await getTopList(f.id, 1, 0);
+        const cover = r.tracks[0]?.cover || '';
+        return { ...f, cover, trackCount: r.total };
+      } catch {
+        return { ...f, cover: '', trackCount: 0 };
+      }
+    })).then((arr) => { if (req === reqRef.current) setFeatured(arr); });
   }, [tab]);
 
   // 搜索（防抖）：每次关键词变化时重置分页，从头加载
@@ -235,11 +264,14 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
   }, [tab, loggedIn, profile?.userId]);
 
   const [playlistId, setPlaylistId] = useState<number | null>(null);
+  // 当前面板来源名（用于临时歌单命名）：歌单/榜单进入时记录，tab 切换时更新
+  const sourceNameRef = useRef<string>('');
 
-  const openPlaylist = useCallback(async (id: number) => {
+  const openPlaylist = useCallback(async (id: number, name?: string) => {
     const req = ++reqRef.current;
     try {
       setPlaylistId(id);
+      if (name) sourceNameRef.current = name;
       setLoading(true);
       setError('');
       setOffset(0);
@@ -292,14 +324,24 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
     return () => io.disconnect();
   }, [tab, playlistId, loadMoreSearch, loadMorePlaylist]);
 
+  const buildTempName = useCallback((): string => {
+    const src = sourceNameRef.current;
+    if (src) return src;
+    if (tab === 'search') return `搜索：${keyword.trim()}`;
+    return T('music.moduleDrawer.netease.listenNow');
+  }, [tab, keyword]);
+
   const handlePlayAll = useCallback(async () => {
     const playlist: PlayableTrack[] = [];
     for (const t of tracks) {
       const res = await getSongUrl(t.id);
       if (res.url) playlist.push(trackToPlayable(t, res.url, qualityLabelFromBr(res.br)));
     }
-    if (playlist.length) onPlay(playlist, 0);
-  }, [tracks, onPlay]);
+    if (playlist.length) {
+      onPlay(playlist, 0);
+      onTempPlaylist?.({ id: 'netease-temp', name: buildTempName(), coverPath: playlist[0]?.coverPath, tracks: playlist });
+    }
+  }, [tracks, onPlay, onTempPlaylist, buildTempName]);
 
   const handlePlayTrack = useCallback(async (t: NeteaseTrack) => {
     setPlayingId(t.id);
@@ -316,6 +358,7 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
         return p;
       });
       onPlay(playlist, startIndex >= 0 ? startIndex : 0);
+      onTempPlaylist?.({ id: 'netease-temp', name: buildTempName(), coverPath: playlist[startIndex >= 0 ? startIndex : 0]?.coverPath, tracks: playlist });
 
       // 后台补全其余曲的播放地址（不阻塞播放）；补到当前播放的等待曲时播放器会自动 reload
       const player = (window as unknown as { __MUSIC_PLAYER__?: { updateTrackUrl?: (i: number, u: string) => void } }).__MUSIC_PLAYER__;
@@ -350,14 +393,50 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
           <section>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{T('music.moduleDrawer.netease.listenNow')}</h2>
-              {tracks.length > 0 && (
+              {tracks.length > 0 && !playlistId && (
                 <button onClick={handlePlayAll} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/15 text-blue-600 dark:text-blue-400 text-sm hover:bg-blue-500/25 transition-colors">
                   <PlayIcon size={14} />
                   {T('music.track.playAll') || '播放全部'}
                 </button>
               )}
             </div>
-            {renderBody()}
+            {!playlistId ? (
+              // 「现在就听」模块化：精选歌单网格（和网易云首页推荐对齐），点击进入歌单详情
+              <div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 mb-5">
+                  {featured.map((f) => (
+                    <button
+                      key={f.id}
+                      onClick={() => openPlaylist(f.id, f.name)}
+                      className="btn-press group flex flex-col text-left"
+                    >
+                      <div className="relative aspect-square rounded-xl overflow-hidden bg-neutral-200/60 dark:bg-stone-800/60 mb-2">
+                        {f.cover ? (
+                          <img src={f.cover} alt={f.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-2xl font-bold text-white/80 bg-gradient-to-br from-blue-500/70 to-fuchsia-500/70">
+                            {f.name.slice(0, 1)}
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-sm font-medium text-neutral-800 dark:text-stone-100 truncate">{f.name}</div>
+                      <div className="text-xs text-neutral-500 dark:text-stone-400">
+                        {f.trackCount > 0 ? `共 ${f.trackCount} 首` : '榜单'}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                {/* 推荐单曲流：沿用原有推荐列表，作为「为你推荐」继续呈现 */}
+                {tracks.length > 0 && (
+                  <>
+                    <h3 className="text-base font-semibold text-neutral-800 dark:text-stone-100 mb-2">{T('music.moduleDrawer.netease.library') || '推荐单曲'}</h3>
+                    {renderBodyInner()}
+                  </>
+                )}
+              </div>
+            ) : (
+              renderBody()
+            )}
           </section>
         )}
 
@@ -457,6 +536,11 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
       if (tab === 'search') return <div className="text-sm text-neutral-400 dark:text-stone-500 py-8 text-center">输入关键词以搜索歌曲</div>;
       return <div className="text-sm text-neutral-400 dark:text-stone-500 py-8 text-center">暂无内容</div>;
     }
+    return renderBodyInner();
+  }
+
+  // 单曲列表（推荐流 / 歌单详情共用），不含加载态与空态
+  function renderBodyInner() {
     return (
       <div className="flex flex-col gap-1">
         {tracks.map((t) => (
