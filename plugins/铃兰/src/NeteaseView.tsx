@@ -203,20 +203,26 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
     setPlayingId(t.id);
     const url = await getSongUrl(t.id);
     if (url) {
+      // 只同步取点击单曲的地址，立即播放，避免整张列表串行取地址导致数秒延迟。
+      // 其余曲以空 filePath 占位进入队列，后台异步补全地址（见下方 fire-and-forget）。
       const playable = trackToPlayable(t, url);
-      const queue = tracks.map((x) => ({ t: x, url: null as string | null }));
-      // 简单策略：以整张列表为队列，先取所有 url
-      queue[queue.findIndex((q) => q.t.id === t.id)].url = url;
-      const playlist: PlayableTrack[] = [];
-      let startIndex = 0;
-      for (let i = 0; i < tracks.length; i++) {
-        const u = i === queue.findIndex((q) => q.t.id === t.id) ? url : await getSongUrl(tracks[i].id).catch(() => null);
-        if (u) {
-          if (tracks[i].id === t.id) startIndex = playlist.length;
-          playlist.push(trackToPlayable(tracks[i], u));
+      const startIndex = tracks.findIndex((x) => x.id === t.id);
+      const playlist: PlayableTrack[] = tracks.map((x) => {
+        if (x.id === t.id) return playable;
+        const p = trackToPlayable(x, '');
+        return p;
+      });
+      onPlay(playlist, startIndex >= 0 ? startIndex : 0);
+
+      // 后台补全其余曲的播放地址（不阻塞播放）；补到当前播放的等待曲时播放器会自动 reload
+      const player = (window as unknown as { __MUSIC_PLAYER__?: { updateTrackUrl?: (i: number, u: string) => void } }).__MUSIC_PLAYER__;
+      if (player?.updateTrackUrl) {
+        for (let i = 0; i < tracks.length; i++) {
+          if (i === startIndex) continue;
+          const u = await getSongUrl(tracks[i].id).catch(() => null);
+          if (u) player.updateTrackUrl(i, u);
         }
       }
-      if (playlist.length) onPlay(playlist, startIndex);
     }
     setPlayingId(null);
   }, [tracks, onPlay]);

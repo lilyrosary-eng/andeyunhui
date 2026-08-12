@@ -77,3 +77,39 @@ export const lyricsSync = {
     return emitting;
   },
 };
+
+// ===== 网易云远程歌词辅助（PlayerBar 浮窗歌词 / NowPlayingView 沉浸页共用）=====
+
+// 标准 LRC（[mm:ss.xx]文本）解析为 LyricLine[]（time_ms 毫秒）
+export function parseLrc(lrc: string): LyricLine[] {
+  const out: LyricLine[] = [];
+  const re = /\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
+  for (const raw of lrc.split('\n')) {
+    re.lastIndex = 0;
+    let m = re.exec(raw);
+    if (!m) continue;
+    const times: number[] = [];
+    let last = m.index;
+    while (m) {
+      const min = parseInt(m[1], 10);
+      const sec = parseInt(m[2], 10);
+      const frac = m[3] ? parseInt(m[3].padEnd(3, '0').slice(0, 3), 10) : 0;
+      times.push((min * 60 + sec + frac / 1000) * 1000);
+      last = re.lastIndex;
+      m = re.exec(raw);
+    }
+    const text = raw.slice(last).trim();
+    if (text) times.forEach((t) => out.push({ time_ms: t, text }));
+  }
+  out.sort((a, b) => a.time_ms - b.time_ms);
+  return out;
+}
+
+// 是否为网易云远程曲：filePath 为 http(s) 直链，id 形如 netease-<songId>
+export function isNeteaseRemote(track: { id?: string; filePath?: string }): boolean {
+  return !!track.filePath && /^https?:\/\//i.test(track.filePath) && /^netease-\d+$/.test(track.id || '');
+}
+export function neteaseSongId(track: { id?: string }): number | null {
+  const m = (track.id || '').match(/^netease-(\d+)$/);
+  return m ? parseInt(m[1], 10) : null;
+}

@@ -267,14 +267,36 @@ class MusicPlayer {
     try { api?.invoke('debug_log', { msg: `MUSIC_LOAD_TRACK idx=${index} file=${track.filePath}` }).catch(()=>{}); } catch {}
     // 远程 URL（http/https，如网易云直链）直接原样赋值，
     // 不要走 convertFileSrc（它只用于本地文件路径，会把远程 URL 编码成 asset:// 导致 500）。
-    const isRemote = /^https?:\/\//i.test(track.filePath);
-    const src = isRemote ? track.filePath : (api?.convertFileSrc(track.filePath) || track.filePath);
+    const isRemote = !!track.filePath && /^https?:\/\//i.test(track.filePath);
+    const src = !track.filePath ? '' : (isRemote ? track.filePath : (api?.convertFileSrc(track.filePath) || track.filePath));
     if (src) {
       this.audio.src = src;
       this.currentIndex = index;
       this.emit('trackChange', track);
       this.updateMediaSessionMeta(track);
       this.pushSmtc();
+    } else {
+      // filePath 为空（网易云延迟取地址占位）：标记等待，待 updateTrackUrl 补完后 reload
+      this.currentIndex = index;
+      this.emit('trackChange', track);
+    }
+  }
+
+  // 网易云等远程曲：点击后先以空 filePath 占位进入队列，后台异步补全地址时调用本方法。
+  // 若补的是当前正在播放/等待的曲，则自动 reload 该曲（保留播放进度）。
+  updateTrackUrl(index: number, url: string): void {
+    if (index < 0 || index >= this.tracks.length || !url) return;
+    const track = this.tracks[index];
+    if (!track) return;
+    const wasWaiting = !track.filePath;
+    track.filePath = url;
+    if (index === this.currentIndex && wasWaiting) {
+      const pos = this.audio.currentTime || 0;
+      const api = window.__HOST_API__;
+      const isRemote = /^https?:\/\//i.test(url);
+      this.audio.src = isRemote ? url : (api?.convertFileSrc(url) || url);
+      try { this.audio.currentTime = pos; } catch { /* ignore */ }
+      if (this.isPlaying) this.audio.play().catch(() => {});
     }
   }
 

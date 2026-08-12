@@ -3,8 +3,38 @@ import React from "react";
 // 音乐播放控制条 — 固定于音乐模块内容区底部，不覆盖导航栏
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
-import { lyricsSync } from './lyricsSync';
+import { lyricsSync, parseLrc, isNeteaseRemote, neteaseSongId } from './lyricsSync';
+import { neteaseGetLyric } from './neteaseApi';
 import { formatTime } from '../../_shared/utils';
+
+// 网易云歌词加载分支：远程曲跳过本地 get_lyrics，改走 neteaseGetLyric
+async function loadNeteaseLyric(t: Track): Promise<void> {
+  const sid = neteaseSongId(t);
+  if (sid == null) return;
+  const lrc = await neteaseGetLyric(sid);
+  const parsed = lrc ? parseLrc(lrc) : [];
+  lyricsSync.setLines(parsed);
+  if (parsed.length === 0) {
+    hostApi.emit('lyrics-update', { currentLine: T('music.nowPlaying.noLyrics'), nextLine: '' }).catch(() => {});
+  }
+}
+
+// 统一歌词加载（本地 + 网易云）
+function loadLyricsFor(t: Track, skipOnline: boolean, localFirst: boolean): Promise<void> {
+  if (isNeteaseRemote(t)) return loadNeteaseLyric(t);
+  return hostApi.invoke<LyricsResult>('get_lyrics', {
+    trackPath: t.filePath,
+    title: t.title,
+    artist: t.artist,
+    skipOnline,
+    localFirst,
+  }).then((result) => {
+    lyricsSync.setLines(result.lines);
+    if (result.lines.length === 0) {
+      hostApi.emit('lyrics-update', { currentLine: T('music.nowPlaying.noLyrics'), nextLine: '' }).catch(() => {});
+    }
+  }).catch(() => {});
+}
 import { T, useLang } from '../../_shared/pluginRuntime';
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, VolumeIcon, VolumeMuteIcon,
@@ -309,18 +339,7 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
     hostApi.emit('lyrics-update', { currentLine: '', nextLine: '' }).catch(() => {});
     const skipOnline = localStorage.getItem('music_online_lyrics') === 'false';
     const localFirst = localStorage.getItem('music_local_lrc_first') === 'true';
-    hostApi.invoke<LyricsResult>('get_lyrics', {
-      trackPath: track.filePath,
-      title: track.title,
-      artist: track.artist,
-      skipOnline,
-      localFirst,
-    }).then((result) => {
-      lyricsSync.setLines(result.lines);
-      if (result.lines.length === 0 && lyricsVisible) {
-        hostApi.emit('lyrics-update', { currentLine: T('music.nowPlaying.noLyrics'), nextLine: '' }).catch(() => {});
-      }
-    }).catch(() => {});
+    loadLyricsFor(track, skipOnline, localFirst);
   }, [track.filePath, lyricsVisible]);
 
   const handleSeek = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -355,18 +374,7 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
       hostApi.emit('lyrics-update', { currentLine: '', nextLine: '' }).catch(() => {});
       const skipOnline = localStorage.getItem('music_online_lyrics') === 'false';
       const localFirst = localStorage.getItem('music_local_lrc_first') === 'true';
-      hostApi.invoke<LyricsResult>('get_lyrics', {
-        trackPath: track.filePath,
-        title: track.title,
-        artist: track.artist,
-        skipOnline,
-        localFirst,
-      }).then((result) => {
-        lyricsSync.setLines(result.lines);
-        if (result.lines.length === 0 && newVisible) {
-          hostApi.emit('lyrics-update', { currentLine: T('music.nowPlaying.noLyrics'), nextLine: '' }).catch(() => {});
-        }
-      }).catch(() => {});
+      loadLyricsFor(track, skipOnline, localFirst);
     } else {
       lyricsSync.setVisible(false);
       lyricsSync.clear();

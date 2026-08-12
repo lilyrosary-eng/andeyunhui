@@ -4,6 +4,8 @@ import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
 import { VolumePopup, PlaylistPopup } from './PlayerBar';
 import { T, useLang } from '../../_shared/pluginRuntime';
+import { parseLrc, isNeteaseRemote, neteaseSongId } from './lyricsSync';
+import { neteaseGetLyric } from './neteaseApi';
 // 沉浸播放页 — 覆盖音乐模块内容区，不覆盖一级导航栏
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, MusicIcon,
@@ -295,15 +297,26 @@ export function NowPlayingView({
     focusLyricIdxRef.current = 0;
     const skipOnline = localStorage.getItem('music_online_lyrics') === 'false';
     const localFirst = localStorage.getItem('music_local_lrc_first') === 'true';
-    hostApi.invoke<LyricsResult>('get_lyrics', {
-      trackPath: track.filePath,
-      title: track.title,
-      artist: track.artist,
-      skipOnline,
-      localFirst,
-    }).then((result) => {
-      setLyricsLines(result.lines);
-    }).catch(() => {});
+    if (isNeteaseRemote(track)) {
+      const sid = neteaseSongId(track);
+      if (sid != null) {
+        neteaseGetLyric(sid).then((lrc) => {
+          setLyricsLines(lrc ? parseLrc(lrc) : []);
+        }).catch(() => setLyricsLines([]));
+      } else {
+        setLyricsLines([]);
+      }
+    } else {
+      hostApi.invoke<LyricsResult>('get_lyrics', {
+        trackPath: track.filePath,
+        title: track.title,
+        artist: track.artist,
+        skipOnline,
+        localFirst,
+      }).then((result) => {
+        setLyricsLines(result.lines);
+      }).catch(() => {});
+    }
   }, [track.filePath]);
 
   // 自动滚动歌词：节流至 300ms 间隔，避免高频 smooth scroll 造成卡顿

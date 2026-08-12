@@ -54,6 +54,8 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/eapi/v6/playlist/detail",
     "/eapi/v3/playlist/detail",
     "/eapi/song/enhance/player/url",
+    // 歌词接口（eapi 通道，登录态可见逐字歌词）
+    "/eapi/song/lyric",
     // 榜单
     "/weapi/playlist/video/related/rank",
     "/weapi/toplist/artist",

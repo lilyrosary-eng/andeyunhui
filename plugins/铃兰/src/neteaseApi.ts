@@ -278,6 +278,12 @@ async function eapiPost(path: string, data: Record<string, any>, deviceId?: stri
   if (parsed.cookies && parsed.cookies.length) {
     absorbCookies(parsed.cookies);
     absorbBodyCookie(parsed.body);
+    // 登录态 cookie（MUSIC_U）只在 Set-Cookie 里返回，body 不含；自动持久化登录态
+    const musicU = parsed.cookies.find((c: string) => c.startsWith('MUSIC_U='));
+    if (musicU) {
+      const csrf = parsed.cookies.find((c: string) => c.startsWith('__csrf='));
+      setLoginCookieFromApi([musicU, csrf].filter(Boolean).join('; '));
+    }
   }
   if (typeof parsed.body === 'string') {
     try { return JSON.parse(parsed.body); } catch { return { raw: parsed.body }; }
@@ -393,10 +399,23 @@ export async function neteaseQrCreate(key: string): Promise<QrSession> {
 export async function neteaseQrCheck(key: string): Promise<number> {
   const r = await eapiPost('/api/login/qrcode/client/login', { key, type: 3 });
   const code = r?.code ?? 0;
-  if (code === 803 && r?.cookie) {
-    setLoginCookieFromApi(r.cookie);
+  if (code === 803) {
+    const cookieStr = r?.cookie as string | undefined;
+    if (cookieStr && cookieStr.includes('MUSIC_U=')) setLoginCookieFromApi(cookieStr);
   }
   return code;
+}
+
+// 歌词接口（eapi /api/song/lyric，需登录态）：返回 LRC 文本或 null
+export async function neteaseGetLyric(songId: number): Promise<string | null> {
+  try {
+    const r = await eapiPost('/api/song/lyric', { id: songId, cp: false, tv: 0, lv: 0, rv: 0, kv: 0, yv: 0, _nmclfl: 1 });
+    const lrc = r?.lrc?.lyric as string | undefined;
+    return lrc || null;
+  } catch (e) {
+    console.warn('[netease] 歌词获取失败', songId, e);
+    return null;
+  }
 }
 
 async function post(endpoint: string, data: Record<string, any>): Promise<any> {
@@ -426,6 +445,11 @@ async function post(endpoint: string, data: Record<string, any>): Promise<any> {
   if (parsed.cookies && parsed.cookies.length) {
     absorbCookies(parsed.cookies);
     absorbBodyCookie(parsed.body);
+    const musicU = parsed.cookies.find((c: string) => c.startsWith('MUSIC_U='));
+    if (musicU) {
+      const csrf = parsed.cookies.find((c: string) => c.startsWith('__csrf='));
+      setLoginCookieFromApi([musicU, csrf].filter(Boolean).join('; '));
+    }
   }
   if (typeof parsed.body === 'string') {
     try { return JSON.parse(parsed.body); } catch { return { raw: parsed.body }; }
