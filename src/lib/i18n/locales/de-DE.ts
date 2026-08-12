@@ -993,6 +993,8 @@ export const deDE: Record<string, string> = {
   'music.track.batchRemove': 'Stapelentfernen',
   'music.track.noOthers': ' (keine anderen Wiedergabelisten)',
   'music.track.empty': 'Diese Wiedergabeliste enthält keine Titel',
+  'music.track.playAll': 'Alle abspielen',
+  'music.loading': 'Wird geladen…',
   'music.track.moveTo': 'In andere Wiedergabeliste verschieben',
   'music.track.copyTo': 'In andere Wiedergabeliste kopieren',
   'music.track.removeSong': 'Titel entfernen',

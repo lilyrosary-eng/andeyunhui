@@ -6,6 +6,7 @@ import { TrackList } from './TrackList';
 import { ModuleDrawer } from './ModuleDrawer';
 import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
+import { NeteaseView, type PlayableTrack } from './NeteaseView';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
@@ -970,7 +971,9 @@ function MusicModule() {
   });
   const [showNowPlaying, setShowNowPlaying] = useState(false);
   const [showModuleDrawer, setShowModuleDrawer] = useState(false);
-  // 网易云抽屉已移除，仅保留本地音乐
+  // 网易云视图：currentView==='netease' 时主区显示网易云，初始二级 tab 由抽屉子项点击决定
+  const [neteaseOpen, setNeteaseOpen] = useState(false);
+  const [neteaseTab, setNeteaseTab] = useState<'listen' | 'library' | 'radio' | 'search' | 'login'>('listen');
 
   const [currentTrack, setCurrentTrack] = useState<Track | null>(() => musicPlayer.getCurrentTrack());
   const unlistenRef = useRef<(() => void)[]>([]);
@@ -1878,7 +1881,16 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       />
       <div className="flex-1 flex flex-col min-h-0 bg-[#f5f5f0] dark:bg-[#1c1917]">
         <div className="flex-1 min-h-0 overflow-hidden relative">
-          {showStats ? (
+          {neteaseOpen ? (
+            <NeteaseView
+              initialTab={neteaseTab}
+              onBack={() => setNeteaseOpen(false)}
+              onPlay={(tracks: PlayableTrack[], startIndex: number) => {
+                musicPlayer.setTracks(tracks, startIndex);
+                musicPlayer.play();
+              }}
+            />
+          ) : showStats ? (
             <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />
           ) : showSettings ? (
             <div className="h-full overflow-y-auto">
@@ -1961,6 +1973,10 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       <ModuleDrawer
         open={showModuleDrawer}
         onClose={() => setShowModuleDrawer(false)}
+        onSelectNetease={(key) => {
+          setNeteaseTab(key);
+          setNeteaseOpen(true);
+        }}
       />
       {showNowPlaying && currentTrack && (
         <NowPlayingView

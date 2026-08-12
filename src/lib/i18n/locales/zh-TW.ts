@@ -993,6 +993,8 @@ export const zhTW: Record<string, string> = {
   'music.track.batchRemove': '批次移除',
   'music.track.noOthers': '（無其他歌單）',
   'music.track.empty': '該歌單暫無歌曲',
+  'music.track.playAll': '播放全部',
+  'music.loading': '載入中…',
   'music.track.moveTo': '移動到其他歌單',
   'music.track.copyTo': '複製到其他歌單',
   'music.track.removeSong': '移除歌曲',

@@ -2,48 +2,30 @@
 import React from "react";
 const { useState, useEffect } = React;
 import { X } from 'lucide-react';
-import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon } from '../../_shared/icons';
+import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon, ListenNowIcon, LibraryIcon, RadioIcon, SearchIcon, UserIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 
 interface ModuleDrawerProps {
   open: boolean;
   onClose: () => void;
+  // 点击网易云折叠菜单子项时回调：key 为 listen/library/radio/search/login
+  onSelectNetease?: (key: 'listen' | 'library' | 'radio' | 'search' | 'login') => void;
 }
 
 // 折叠菜单子项（网易云注入功能下的各个部分，对应截图中圈出的内容）
-const neteaseItems = [
-  {
-    label: T('music.moduleDrawer.netease.listenNow'),
-    desc: T('music.moduleDrawer.netease.listenNowDesc'),
-    icon: React.createElement(MusicIcon, { size: 16 }),
-  },
-  {
-    label: T('music.moduleDrawer.netease.library'),
-    desc: T('music.moduleDrawer.netease.libraryDesc'),
-    icon: React.createElement(MusicIcon, { size: 16 }),
-  },
-  {
-    label: T('music.moduleDrawer.netease.radio'),
-    desc: T('music.moduleDrawer.netease.radioDesc'),
-    icon: React.createElement(MusicIcon, { size: 16 }),
-  },
-  {
-    label: T('music.moduleDrawer.netease.search'),
-    desc: T('music.moduleDrawer.netease.searchDesc'),
-    icon: React.createElement(MusicIcon, { size: 16 }),
-  },
-  {
-    label: T('music.moduleDrawer.netease.login'),
-    desc: T('music.moduleDrawer.netease.loginDesc'),
-    icon: React.createElement(MusicIcon, { size: 16 }),
-  },
+const neteaseItems: { key: 'listen' | 'library' | 'radio' | 'search' | 'login'; icon: React.ReactElement }[] = [
+  { key: 'listen', icon: React.createElement(ListenNowIcon, { size: 16 }) },
+  { key: 'library', icon: React.createElement(LibraryIcon, { size: 16 }) },
+  { key: 'radio', icon: React.createElement(RadioIcon, { size: 16 }) },
+  { key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
+  { key: 'login', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 
-export function ModuleDrawer({ open, onClose }: ModuleDrawerProps) {
+export function ModuleDrawer({ open, onClose, onSelectNetease }: ModuleDrawerProps) {
   useLang();
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
-  const [neteaseOpen, setNeteaseOpen] = useState(false);
+  const [neteaseOpen, setNeteaseOpen] = useState(true); // 默认展开
 
   useEffect(() => {
     if (open) {
@@ -134,9 +116,13 @@ export function ModuleDrawer({ open, onClose }: ModuleDrawerProps) {
               }`}
             >
               <div className="space-y-1 pl-2">
-                {neteaseItems.map((item, idx) => (
+                {neteaseItems.map((item) => (
                   <button
-                    key={idx}
+                    key={item.key}
+                    onClick={() => {
+                      if (onSelectNetease) onSelectNetease(item.key);
+                      onClose();
+                    }}
                     className="w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-100/70 dark:hover:bg-stone-700/50"
                   >
                     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300 shrink-0">
@@ -144,13 +130,11 @@ export function ModuleDrawer({ open, onClose }: ModuleDrawerProps) {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">
-                        {item.label}
+                        {T(`music.moduleDrawer.netease.${item.key}`)}
                       </p>
-                      {item.desc && (
-                        <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
-                          {item.desc}
-                        </p>
-                      )}
+                      <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
+                        {T(`music.moduleDrawer.netease.${item.key}Desc`)}
+                      </p>
                     </div>
                   </button>
                 ))}

@@ -993,6 +993,8 @@ export const koKR: Record<string, string> = {
   'music.track.batchRemove': '일괄 제거',
   'music.track.noOthers': ' (다른 플레이리스트 없음)',
   'music.track.empty': '이 플레이리스트에 곡이 없습니다',
+  'music.track.playAll': '전체 재생',
+  'music.loading': '로드 중…',
   'music.track.moveTo': '다른 플레이리스트로 이동',
   'music.track.copyTo': '다른 플레이리스트로 복사',
   'music.track.removeSong': '곡 제거',

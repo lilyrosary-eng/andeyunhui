@@ -1,0 +1,248 @@
+/// <reference path="../global.d.ts" />
+import React from 'react';
+import {
+  ListenNowIcon, LibraryIcon, RadioIcon, SearchIcon, UserIcon, MusicIcon, ArrowLeftIcon, PlayIcon,
+} from '../../_shared/icons';
+import { T } from '../../_shared/pluginRuntime';
+import {
+  searchSongs, getListenNow, getSongUrl, type NeteaseTrack,
+} from './neteaseApi';
+
+const { useState, useEffect, useRef, useCallback } = React;
+
+export type NeteaseTab = 'listen' | 'library' | 'radio' | 'search' | 'login';
+
+const TABS: { key: NeteaseTab; labelKey: string; descKey: string; icon: React.ReactElement }[] = [
+  { key: 'listen', labelKey: 'music.moduleDrawer.netease.listenNow', descKey: 'music.moduleDrawer.netease.listenNowDesc', icon: React.createElement(ListenNowIcon, { size: 16 }) },
+  { key: 'library', labelKey: 'music.moduleDrawer.netease.library', descKey: 'music.moduleDrawer.netease.libraryDesc', icon: React.createElement(LibraryIcon, { size: 16 }) },
+  { key: 'radio', labelKey: 'music.moduleDrawer.netease.radio', descKey: 'music.moduleDrawer.netease.radioDesc', icon: React.createElement(RadioIcon, { size: 16 }) },
+  { key: 'search', labelKey: 'music.moduleDrawer.netease.search', descKey: 'music.moduleDrawer.netease.searchDesc', icon: React.createElement(SearchIcon, { size: 16 }) },
+  { key: 'login', labelKey: 'music.moduleDrawer.netease.login', descKey: 'music.moduleDrawer.netease.loginDesc', icon: React.createElement(UserIcon, { size: 16 }) },
+];
+
+export interface PlayableTrack {
+  id: string;
+  filePath: string;
+  title: string;
+  artist: string;
+  album: string;
+  durationSecs: number;
+  coverPath?: string;
+}
+
+interface NeteaseViewProps {
+  initialTab: NeteaseTab;
+  onBack: () => void;
+  onPlay: (tracks: PlayableTrack[], startIndex: number) => void;
+}
+
+function trackToPlayable(t: NeteaseTrack, url: string): PlayableTrack {
+  return {
+    id: `netease-${t.id}`,
+    filePath: url,
+    title: t.name,
+    artist: t.artist,
+    album: t.album,
+    durationSecs: Math.round((t.duration || 0) / 1000),
+    coverPath: t.cover,
+  };
+}
+
+function formatDuration(ms: number): string {
+  const total = Math.round(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
+  const [tab, setTab] = useState<NeteaseTab>(initialTab);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [tracks, setTracks] = useState<NeteaseTrack[]>([]);
+  const [keyword, setKeyword] = useState('');
+  const [playingId, setPlayingId] = useState<number | null>(null);
+  const reqRef = useRef(0);
+
+  // 「现在就听」自动拉取
+  useEffect(() => {
+    if (tab !== 'listen') return;
+    const req = ++reqRef.current;
+    setLoading(true);
+    setError('');
+    getListenNow(20)
+      .then((list) => { if (req === reqRef.current) { setTracks(list); setLoading(false); } })
+      .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
+  }, [tab]);
+
+  // 搜索（防抖）
+  useEffect(() => {
+    if (tab !== 'search') return;
+    const kw = keyword.trim();
+    if (!kw) { setTracks([]); setLoading(false); return; }
+    const req = ++reqRef.current;
+    setLoading(true);
+    setError('');
+    const timer = setTimeout(() => {
+      searchSongs(kw, 30)
+        .then((list) => { if (req === reqRef.current) { setTracks(list); setLoading(false); } })
+        .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [tab, keyword]);
+
+  const handlePlayAll = useCallback(async () => {
+    const playlist: PlayableTrack[] = [];
+    for (const t of tracks) {
+      const url = await getSongUrl(t.id);
+      if (url) playlist.push(trackToPlayable(t, url));
+    }
+    if (playlist.length) onPlay(playlist, 0);
+  }, [tracks, onPlay]);
+
+  const handlePlayTrack = useCallback(async (t: NeteaseTrack) => {
+    setPlayingId(t.id);
+    const url = await getSongUrl(t.id);
+    if (url) {
+      const playable = trackToPlayable(t, url);
+      const queue = tracks.map((x) => ({ t: x, url: null as string | null }));
+      // 简单策略：以整张列表为队列，先取所有 url
+      queue[queue.findIndex((q) => q.t.id === t.id)].url = url;
+      const playlist: PlayableTrack[] = [];
+      let startIndex = 0;
+      for (let i = 0; i < tracks.length; i++) {
+        const u = i === queue.findIndex((q) => q.t.id === t.id) ? url : await getSongUrl(tracks[i].id).catch(() => null);
+        if (u) {
+          if (tracks[i].id === t.id) startIndex = playlist.length;
+          playlist.push(trackToPlayable(tracks[i], u));
+        }
+      }
+      if (playlist.length) onPlay(playlist, startIndex);
+    }
+    setPlayingId(null);
+  }, [tracks, onPlay]);
+
+  return (
+    <div className="flex-1 flex h-full overflow-hidden relative">
+      {/* 二级侧栏导航 */}
+      <div className="w-44 shrink-0 h-full border-r border-neutral-200/60 dark:border-stone-700/60 bg-neutral-50/40 dark:bg-stone-900/40 p-2 flex flex-col">
+        <button
+          onClick={onBack}
+          className="btn-press mb-2 flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors text-sm"
+        >
+          <ArrowLeftIcon size={16} />
+          <span>{T('music.moduleDrawer.placeholder')}</span>
+        </button>
+        {TABS.map((t) => {
+          const active = tab === t.key;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`btn-press group flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-colors text-left ${
+                active
+                  ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400'
+                  : 'text-neutral-600 dark:text-stone-300 hover:bg-neutral-200/50 dark:hover:bg-stone-800/50'
+              }`}
+            >
+              <span className="shrink-0">{t.icon}</span>
+              <span className="min-w-0">
+                <span className="block text-sm font-medium truncate">{T(t.labelKey)}</span>
+                <span className="block text-[11px] text-neutral-400 dark:text-stone-500 truncate">{T(t.descKey)}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 主内容区 */}
+      <div className="flex-1 h-full overflow-y-auto p-4">
+        {tab === 'listen' && (
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{T('music.moduleDrawer.netease.listenNow')}</h2>
+              {tracks.length > 0 && (
+                <button onClick={handlePlayAll} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/15 text-blue-600 dark:text-blue-400 text-sm hover:bg-blue-500/25 transition-colors">
+                  <PlayIcon size={14} />
+                  {T('music.track.playAll') || '播放全部'}
+                </button>
+              )}
+            </div>
+            {renderBody()}
+          </section>
+        )}
+
+        {tab === 'search' && (
+          <section>
+            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100 mb-3">{T('music.moduleDrawer.netease.search')}</h2>
+            <div className="flex items-center gap-2 mb-4 px-3 py-2 rounded-xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+              <SearchIcon size={16} />
+              <input
+                autoFocus
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                placeholder={T('music.moduleDrawer.netease.searchDesc')}
+                className="flex-1 bg-transparent outline-none text-sm text-neutral-800 dark:text-stone-100 placeholder:text-neutral-400 dark:placeholder:text-stone-500"
+              />
+            </div>
+            {renderBody()}
+          </section>
+        )}
+
+        {tab === 'library' && <PlaceholderTab title={T('music.moduleDrawer.netease.library')} desc={T('music.moduleDrawer.netease.libraryDesc')} />}
+        {tab === 'radio' && <PlaceholderTab title={T('music.moduleDrawer.netease.radio')} desc={T('music.moduleDrawer.netease.radioDesc')} />}
+        {tab === 'login' && <PlaceholderTab title={T('music.moduleDrawer.netease.login')} desc={T('music.moduleDrawer.netease.loginDesc')} />}
+      </div>
+    </div>
+  );
+
+  function renderBody() {
+    if (loading) {
+      return <div className="text-sm text-neutral-400 dark:text-stone-500 py-8 text-center">{T('music.loading') || '加载中…'}</div>;
+    }
+    if (error) {
+      return <div className="text-sm text-red-500/80 dark:text-red-400/80 py-8 text-center">{error}</div>;
+    }
+    if (!tracks.length) {
+      if (tab === 'search') return <div className="text-sm text-neutral-400 dark:text-stone-500 py-8 text-center">输入关键词以搜索歌曲</div>;
+      return <div className="text-sm text-neutral-400 dark:text-stone-500 py-8 text-center">暂无内容</div>;
+    }
+    return (
+      <div className="flex flex-col gap-1">
+        {tracks.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => handlePlayTrack(t)}
+            className="btn-press group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 transition-colors text-left"
+          >
+            {t.cover ? (
+              <img src={t.cover} alt="" className="w-10 h-10 rounded-md object-cover shrink-0" />
+            ) : (
+              <span className="w-10 h-10 rounded-md bg-neutral-200/60 dark:bg-stone-800/60 flex items-center justify-center shrink-0 text-neutral-400 dark:text-stone-500">
+                <MusicIcon size={16} />
+              </span>
+            )}
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
+              <span className="block text-xs text-neutral-400 dark:text-stone-500 truncate">{t.artist} · {t.album}</span>
+            </span>
+            <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
+            {playingId === t.id && <PlayIcon size={14} />}
+          </button>
+        ))}
+      </div>
+    );
+  }
+}
+
+function PlaceholderTab({ title, desc }: { title: string; desc: string }) {
+  return (
+    <div className="h-full flex flex-col items-center justify-center text-center py-16">
+      <div className="w-14 h-14 rounded-2xl bg-neutral-200/60 dark:bg-stone-800/60 flex items-center justify-center text-neutral-400 dark:text-stone-500 mb-3">
+        <MusicIcon size={24} />
+      </div>
+      <div className="text-base font-medium text-neutral-700 dark:text-stone-200">{title}</div>
+      <div className="text-sm text-neutral-400 dark:text-stone-500 mt-1 max-w-xs">{desc}（敬请期待）</div>
+    </div>
+  );
+}

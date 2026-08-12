@@ -991,6 +991,8 @@ export const enUS: Record<string, string> = {
   'music.moduleDrawer.netease.login': 'Not logged in',
   'music.moduleDrawer.netease.loginDesc': 'Log in / Register',
   'music.track.empty': 'This playlist has no songs',
+  'music.track.playAll': 'Play All',
+  'music.loading': 'Loading…',
   'music.track.moveTo': 'Move to another playlist',
   'music.track.copyTo': 'Copy to another playlist',
   'music.track.removeSong': 'Remove song',

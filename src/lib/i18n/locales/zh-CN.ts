@@ -1031,6 +1031,8 @@ export const zhCN: Record<string, string> = {
   'music.moduleDrawer.netease.login': '未登录',
   'music.moduleDrawer.netease.loginDesc': '登录 / 注册',
   'music.track.empty': '该歌单暂无歌曲',
+  'music.track.playAll': '播放全部',
+  'music.loading': '加载中…',
   'music.track.moveTo': '移动到其他歌单',
   'music.track.copyTo': '复制到其他歌单',
   'music.track.removeSong': '移除歌曲',

@@ -993,6 +993,8 @@ export const jaJP: Record<string, string> = {
   'music.track.batchRemove': '一括削除',
   'music.track.noOthers': '（他のプレイリストなし）',
   'music.track.empty': 'このプレイリストには曲がありません',
+  'music.track.playAll': 'すべて再生',
+  'music.loading': '読み込み中…',
   'music.track.moveTo': '他のプレイリストに移動',
   'music.track.copyTo': '他のプレイリストにコピー',
   'music.track.removeSong': '曲を削除',

@@ -262,3 +262,33 @@ export function ChevronRightIcon(p: { size?: number }) {
     React.createElement('polyline', { key: 'a', points: '9 6 15 12 9 18' }),
   ] });
 }
+
+// ========== 网易云子项区分图标 ==========
+
+export function ListenNowIcon(p: { size?: number }) {
+  return SvgEl({ size: p?.size || 16, strokeWidth: 1.5, children: [
+    React.createElement('path', { key: 'a', d: 'M12 2l2.4 5.4L20 8l-4 3.8L17 18l-5-3-5 3 1-6.2L4 8l5.6-.6z' }),
+  ] });
+}
+
+export function LibraryIcon(p: { size?: number }) {
+  return SvgEl({ size: p?.size || 16, strokeWidth: 1.5, children: [
+    React.createElement('path', { key: 'a', d: 'M4 19V5a2 2 0 0 1 2-2h1v16H6a2 2 0 0 1-2 2z' }),
+    React.createElement('path', { key: 'b', d: 'M9 21V3h1v18H9a2 2 0 0 1-2 0z' }),
+    React.createElement('path', { key: 'c', d: 'M13 19V5h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2z' }),
+  ] });
+}
+
+export function RadioIcon(p: { size?: number }) {
+  return SvgEl({ size: p?.size || 16, strokeWidth: 1.5, children: [
+    React.createElement('circle', { key: 'a', cx: '12', cy: '12', r: '2' }),
+    React.createElement('path', { key: 'b', d: 'M4.93 19.07a10 10 0 0 1 0-14.14M19.07 4.93a10 10 0 0 1 0 14.14M7.76 16.24a6 6 0 0 1 0-8.48M16.24 7.76a6 6 0 0 1 0 8.48' }),
+  ] });
+}
+
+export function UserIcon(p: { size?: number }) {
+  return SvgEl({ size: p?.size || 16, strokeWidth: 1.5, children: [
+    React.createElement('path', { key: 'a', d: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2' }),
+    React.createElement('circle', { key: 'b', cx: '12', cy: '7', r: '4' }),
+  ] });
+}

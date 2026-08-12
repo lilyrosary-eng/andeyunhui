@@ -992,6 +992,8 @@ export const frFR: Record<string, string> = {
   'music.track.batchRemove': 'Retirer en masse',
   'music.track.noOthers': ' (aucune autre liste de lecture)',
   'music.track.empty': 'Cette liste de lecture ne contient aucune piste',
+  'music.track.playAll': 'Tout lire',
+  'music.loading': 'Chargement…',
   'music.track.moveTo': 'Déplacer vers une autre liste de lecture',
   'music.track.copyTo': 'Copier vers une autre liste de lecture',
   'music.track.removeSong': 'Retirer la piste',
