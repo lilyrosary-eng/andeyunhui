@@ -126,18 +126,16 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden relative bg-white dark:bg-[#1e1e1e]">
-      {/* 顶部返回栏（替代左侧二级侧栏） */}
-      <div className="shrink-0 flex items-center gap-2 px-4 pt-4 pb-2">
+      {/* 顶部栏：左侧当前标题，右侧云按钮（点击从右滑出模块抽屉） */}
+      <div className="shrink-0 flex items-center justify-between px-4 pt-4 pb-2">
+        <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">{T(TAB_TITLE_KEYS[tab])}</h2>
         <button
           onClick={onBack}
-          className="btn-press flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
-          title={T('music.moduleDrawer.localMusicDesc')}
+          className="btn-press flex items-center justify-center p-2 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
+          title={T('music.moduleDrawer.title')}
         >
-          <CloudIcon size={16} />
-          <span>{T('music.moduleDrawer.localMusicDesc')}</span>
+          <CloudIcon size={18} />
         </button>
-        <span className="text-neutral-300 dark:text-stone-600">/</span>
-        <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">{T(TAB_TITLE_KEYS[tab])}</h2>
       </div>
 
       {/* 主内容区 */}

@@ -1884,7 +1884,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           {neteaseOpen ? (
             <NeteaseView
               initialTab={neteaseTab}
-              onBack={() => setNeteaseOpen(false)}
+              onBack={() => setShowModuleDrawer(true)}
               onPlay={(tracks: PlayableTrack[], startIndex: number) => {
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
