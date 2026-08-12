@@ -73,7 +73,11 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
   const [offset, setOffset] = useState(0);
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+  const [reachedLimit, setReachedLimit] = useState(false); // 已达本地预览上限
   const PAGE = 30; // 每页拉取条数
+  // 本地预览上限：避免一次性下拉拉取成千上万首导致 DOM 爆炸、主线程卡死、
+  // 顶部云按钮（tab 切换）失去响应。到达上限后停止续拉并提示。
+  const MAX_ITEMS = 300;
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const loadingMoreRef = useRef(false);
@@ -186,7 +190,8 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
           setTracks(res.tracks);
           setTotal(res.total);
           setOffset(res.tracks.length);
-          setHasMore(res.tracks.length < res.total);
+          setReachedLimit(res.tracks.length >= MAX_ITEMS);
+          setHasMore(res.tracks.length < res.total && res.tracks.length < MAX_ITEMS);
           setLoading(false);
         })
         .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
@@ -205,8 +210,11 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
       const res = await searchSongs(kw, PAGE, offset);
       if (req !== reqRef.current) return;
       setTracks((prev) => [...prev, ...res.tracks]);
-      setOffset((o) => o + res.tracks.length);
-      setHasMore(offset + res.tracks.length < res.total);
+      const next = offset + res.tracks.length;
+      setOffset(next);
+      const limit = next >= MAX_ITEMS;
+      setReachedLimit(limit);
+      setHasMore(!limit && next < res.total);
     } catch (e) {
       console.warn('[netease] 加载搜索下一页失败', e);
     } finally {
@@ -240,7 +248,8 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
       setTracks(res.tracks);
       setTotal(res.total);
       setOffset(res.tracks.length);
-      setHasMore(res.tracks.length < res.total);
+      setReachedLimit(res.tracks.length >= MAX_ITEMS);
+      setHasMore(res.tracks.length < res.total && res.tracks.length < MAX_ITEMS);
       setLoading(false);
     } catch (e) {
       if (req === reqRef.current) { setError(String((e as any)?.message || e)); setLoading(false); }
@@ -257,8 +266,11 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
       const res = await getTopList(playlistId, PAGE, offset);
       if (req !== reqRef.current) return;
       setTracks((prev) => [...prev, ...res.tracks]);
-      setOffset((o) => o + res.tracks.length);
-      setHasMore(offset + res.tracks.length < res.total);
+      const next = offset + res.tracks.length;
+      setOffset(next);
+      const limit = next >= MAX_ITEMS;
+      setReachedLimit(limit);
+      setHasMore(!limit && next < res.total);
     } catch (e) {
       console.warn('[netease] 加载歌单下一页失败', e);
     } finally {
@@ -489,7 +501,13 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
         {/* 无限下拉：仅在支持分页的 tab（搜索 / 歌单）显示加载状态与触底哨兵 */}
         {(tab === 'search' || (tab === 'listen' && playlistId != null)) && (
           <div ref={sentinelRef} className="py-3 text-center text-xs text-neutral-400 dark:text-stone-500">
-            {loadingMore ? '加载中…' : hasMore ? '下拉加载更多' : (tracks.length ? '已经到底啦' : '')}
+            {loadingMore
+              ? '加载中…'
+              : reachedLimit
+                ? `已加载 ${offset} 首（本地预览上限 ${MAX_ITEMS} 首，可在搜索中缩小范围）`
+                : hasMore
+                  ? '下拉加载更多'
+                  : (tracks.length ? `已显示全部 ${offset} 首` : '')}
           </div>
         )}
       </div>

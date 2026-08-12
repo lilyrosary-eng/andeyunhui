@@ -274,7 +274,10 @@ async function eapiPost(path: string, data: Record<string, any>, deviceId?: stri
     },
   });
   const parsed = JSON.parse(raw || '{}');
-  console.log('[netease] eapi', path, 'status', parsed.status, 'cookies', parsed.cookies, 'body', String(parsed.body || '').slice(0, 400));
+  // 正常响应保持静默，仅在异常状态码时输出，避免下拉翻页时日志刷屏
+  if (parsed.status && parsed.status !== 200) {
+    console.warn('[netease] eapi', path, 'status', parsed.status, 'body', String(parsed.body || '').slice(0, 200));
+  }
   if (parsed.cookies && parsed.cookies.length) {
     absorbCookies(parsed.cookies);
     absorbBodyCookie(parsed.body);
@@ -362,7 +365,9 @@ async function eapiRequest(uri: string, data: Record<string, any>): Promise<any>
     headers: { ...header, 'Request-Id': header.requestId, __csrf: '' },
   });
   const parsed = JSON.parse(raw || '{}');
-  console.log('[netease] eapi', uri, 'status', parsed.status, 'cookies', parsed.cookies, 'body', String(parsed.body || '').slice(0, 400));
+  if (parsed.status && parsed.status !== 200) {
+    console.warn('[netease] eapi', uri, 'status', parsed.status, 'body', String(parsed.body || '').slice(0, 200));
+  }
   if (parsed.cookies && parsed.cookies.length) {
     absorbCookies(parsed.cookies);
     absorbBodyCookie(parsed.body);
@@ -444,7 +449,9 @@ async function post(endpoint: string, data: Record<string, any>): Promise<any> {
   };
   const raw: string = await hostApi.invoke<string>('netease_http_post', payload);
   const parsed = JSON.parse(raw || '{}');
-  console.log('[netease] post', endpoint, 'status', parsed.status, 'cookies', parsed.cookies, 'body', String(parsed.body || '').slice(0, 600));
+  if (parsed.status && parsed.status !== 200) {
+    console.warn('[netease] post', endpoint, 'status', parsed.status, 'body', String(parsed.body || '').slice(0, 300));
+  }
   // 回写响应里的 cookie（MUSIC_A / __csrf 等），形成 csrf 闭环
   if (parsed.cookies && parsed.cookies.length) {
     absorbCookies(parsed.cookies);
