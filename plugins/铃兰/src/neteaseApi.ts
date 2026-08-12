@@ -323,7 +323,11 @@ function resolveModule(path: string, params: Record<string, any>): { uri: string
     case PATHS.userPlaylist:
       return { uri: '/api/user/playlist', data: { uid: params.uid, limit: params.limit ?? 30, offset: params.offset ?? 0, includeVideo: true }, crypto: 'weapi' };
     case PATHS.toplist:
-      return { uri: '/api/v3/playlist/detail', data: { id: params.id, n: params.limit ?? 20, s: 8 }, crypto: 'eapi' };
+      // 分页：offset>0 时按 [offset, offset+limit) 切片取后续曲目；
+      // offset=0 时用 n 一次性拉取（兼容歌单首屏/播放全部场景）。
+      return params.offset
+        ? { uri: '/api/v3/playlist/detail', data: { id: params.id, offset: params.offset, limit: params.limit ?? 30, s: 8 }, crypto: 'eapi' }
+        : { uri: '/api/v3/playlist/detail', data: { id: params.id, n: params.limit ?? 20, s: 8 }, crypto: 'eapi' };
     default:
       throw new Error(`未实现的网易云接口: ${path}`);
   }
@@ -508,10 +512,20 @@ export function qualityLabelFromBr(br: number): string {
 }
 
 // 搜索歌曲（type=1 单曲）。对齐 MusicStorm：eapi /api/cloudsearch/pc
-export async function searchSongs(keyword: string, limit = 30): Promise<NeteaseTrack[]> {
-  const r = await neteaseRequest(PATHS.search, { keywords: keyword, type: 1, limit });
+// 支持 offset 分页以实现无限下拉；返回结构含总数 total，便于判断是否到底。
+export interface SearchSongsResult {
+  tracks: NeteaseTrack[];
+  total: number;
+}
+export async function searchSongs(
+  keyword: string,
+  limit = 30,
+  offset = 0,
+): Promise<SearchSongsResult> {
+  const r = await neteaseRequest(PATHS.search, { keywords: keyword, type: 1, limit, offset });
   const list = r?.result?.songs || [];
-  return list.map(mapTrack);
+  const total = typeof r?.result?.songCount === 'number' ? r.result.songCount : 0;
+  return { tracks: list.map(mapTrack), total };
 }
 
 // 「现在就听」：优先每日推荐（weapi，需登录态），失败回落到飙升榜
@@ -525,16 +539,26 @@ export async function getListenNow(limit = 20): Promise<NeteaseTrack[]> {
       console.warn('[netease] 每日推荐失败，回落榜单', e);
     }
   }
-  return getTopList(19723756); // 飙升榜
+  return (await getTopList(19723756, limit)).tracks; // 飙升榜回落
 }
 
 // 歌单/榜单详情：eapi /api/v6/playlist/detail（或 /api/v3/playlist/detail）
-export async function getTopList(id: number, limit = 20): Promise<NeteaseTrack[]> {
-  const r = await neteaseRequest(PATHS.toplist, { id, limit });
+// 支持 offset 分页以实现无限下拉；返回结构含总数 total，便于判断是否到底。
+export interface TopListResult {
+  tracks: NeteaseTrack[];
+  total: number;
+}
+export async function getTopList(
+  id: number,
+  limit = 20,
+  offset = 0,
+): Promise<TopListResult> {
+  const r = await neteaseRequest(PATHS.toplist, { id, limit, offset });
   const list = r?.playlist?.tracks || [];
+  const total = typeof r?.playlist?.trackCount === 'number' ? r.playlist.trackCount : list.length;
   // privileges 数组与 tracks 按 index 对应，含 fee / maxbr 等音质与版权信息
   const privs = r?.playlist?.privileges || [];
-  return list.slice(0, limit).map((s: any, i: number) => mapTrack(s, privs[i]));
+  return { tracks: list.slice(0, limit).map((s: any, i: number) => mapTrack(s, privs[i])), total };
 }
 
 // 获取播放地址：eapi /api/song/enhance/player/url

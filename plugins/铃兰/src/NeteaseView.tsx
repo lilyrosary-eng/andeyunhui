@@ -63,11 +63,20 @@ function formatDuration(ms: number): string {
 export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
   const [tab, setTab] = useState<NeteaseTab>(initialTab);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
   const [tracks, setTracks] = useState<NeteaseTrack[]>([]);
   const [keyword, setKeyword] = useState('');
   const [playingId, setPlayingId] = useState<number | null>(null);
   const reqRef = useRef(0);
+  // 无限下拉分页状态：offset/total 跟踪已加载与总量，hasMore 判断是否还能继续拉
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const PAGE = 30; // 每页拉取条数
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const loadingMoreRef = useRef(false);
 
   // 登录态
   const [loggedIn, setLoggedIn] = useState(isLoggedIn());
@@ -140,32 +149,70 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
     if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
   }, []);
 
-  // 「现在就听」自动拉取
+  // 「现在就听」自动拉取（推荐一次性返回，不做分页）
   useEffect(() => {
     if (tab !== 'listen') return;
+    setPlaylistId(null); // 离开歌单分页模式
     const req = ++reqRef.current;
     setLoading(true);
     setError('');
-    getListenNow(20)
-      .then((list) => { if (req === reqRef.current) { setTracks(list); setLoading(false); } })
+    setOffset(0);
+    getListenNow(50)
+      .then((list) => {
+        if (req === reqRef.current) {
+          setTracks(list);
+          setTotal(list.length);
+          setHasMore(false);
+          setLoading(false);
+        }
+      })
       .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
   }, [tab]);
 
-  // 搜索（防抖）
+  // 搜索（防抖）：每次关键词变化时重置分页，从头加载
   useEffect(() => {
     if (tab !== 'search') return;
+    setPlaylistId(null); // 离开歌单分页模式
     const kw = keyword.trim();
-    if (!kw) { setTracks([]); setLoading(false); return; }
+    if (!kw) { setTracks([]); setLoading(false); setHasMore(false); return; }
     const req = ++reqRef.current;
     setLoading(true);
     setError('');
+    setOffset(0);
     const timer = setTimeout(() => {
-      searchSongs(kw, 30)
-        .then((list) => { if (req === reqRef.current) { setTracks(list); setLoading(false); } })
+      searchSongs(kw, PAGE, 0)
+        .then((res) => {
+          if (req !== reqRef.current) return;
+          setTracks(res.tracks);
+          setTotal(res.total);
+          setOffset(res.tracks.length);
+          setHasMore(res.tracks.length < res.total);
+          setLoading(false);
+        })
         .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
     }, 400);
     return () => clearTimeout(timer);
   }, [tab, keyword]);
+
+  // 加载搜索下一页（无限下拉）：追加结果并更新 offset/hasMore
+  const loadMoreSearch = useCallback(async () => {
+    const kw = keyword.trim();
+    if (!kw || loadingMoreRef.current || !hasMore) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    const req = reqRef.current;
+    try {
+      const res = await searchSongs(kw, PAGE, offset);
+      if (req !== reqRef.current) return;
+      setTracks((prev) => [...prev, ...res.tracks]);
+      setOffset((o) => o + res.tracks.length);
+      setHasMore(offset + res.tracks.length < res.total);
+    } catch (e) {
+      console.warn('[netease] 加载搜索下一页失败', e);
+    } finally {
+      if (req === reqRef.current) { setLoadingMore(false); loadingMoreRef.current = false; }
+    }
+  }, [keyword, offset, hasMore]);
 
   // 「我的歌单」自动拉取（登录态）
   useEffect(() => {
@@ -179,18 +226,59 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
       .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
   }, [tab, loggedIn, profile?.userId]);
 
+  const [playlistId, setPlaylistId] = useState<number | null>(null);
+
   const openPlaylist = useCallback(async (id: number) => {
+    const req = ++reqRef.current;
     try {
+      setPlaylistId(id);
       setLoading(true);
       setError('');
-      const list = await getTopList(id, 100);
-      setTracks(list);
+      setOffset(0);
+      const res = await getTopList(id, PAGE, 0);
+      if (req !== reqRef.current) return;
+      setTracks(res.tracks);
+      setTotal(res.total);
+      setOffset(res.tracks.length);
+      setHasMore(res.tracks.length < res.total);
       setLoading(false);
     } catch (e) {
-      setError(String((e as any)?.message || e));
-      setLoading(false);
+      if (req === reqRef.current) { setError(String((e as any)?.message || e)); setLoading(false); }
     }
-  }, [getTopList]);
+  }, []);
+
+  // 加载歌单/榜单下一页（无限下拉）
+  const loadMorePlaylist = useCallback(async () => {
+    if (playlistId == null || loadingMoreRef.current || !hasMore) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    const req = reqRef.current;
+    try {
+      const res = await getTopList(playlistId, PAGE, offset);
+      if (req !== reqRef.current) return;
+      setTracks((prev) => [...prev, ...res.tracks]);
+      setOffset((o) => o + res.tracks.length);
+      setHasMore(offset + res.tracks.length < res.total);
+    } catch (e) {
+      console.warn('[netease] 加载歌单下一页失败', e);
+    } finally {
+      if (req === reqRef.current) { setLoadingMore(false); loadingMoreRef.current = false; }
+    }
+  }, [playlistId, offset, hasMore]);
+
+  // 触底哨兵：用 IntersectionObserver 监听底部元素，滚动到附近时按需加载下一页
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      const entry = entries[0];
+      if (!entry?.isIntersecting) return;
+      if (tab === 'search') loadMoreSearch();
+      else if (tab === 'listen' && playlistId != null) loadMorePlaylist();
+    }, { root: scrollRef.current, rootMargin: '200px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [tab, playlistId, loadMoreSearch, loadMorePlaylist]);
 
   const handlePlayAll = useCallback(async () => {
     const playlist: PlayableTrack[] = [];
@@ -245,7 +333,7 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
       </div>
 
       {/* 主内容区 */}
-      <div className="flex-1 h-full overflow-y-auto px-4 pb-4">
+      <div ref={scrollRef} className="flex-1 h-full overflow-y-auto px-4 pb-4">
         {tab === 'listen' && (
           <section>
             <div className="flex items-center justify-between mb-3">
@@ -398,6 +486,12 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
             {playingId === t.id && <PlayIcon size={14} />}
           </button>
         ))}
+        {/* 无限下拉：仅在支持分页的 tab（搜索 / 歌单）显示加载状态与触底哨兵 */}
+        {(tab === 'search' || (tab === 'listen' && playlistId != null)) && (
+          <div ref={sentinelRef} className="py-3 text-center text-xs text-neutral-400 dark:text-stone-500">
+            {loadingMore ? '加载中…' : hasMore ? '下拉加载更多' : (tracks.length ? '已经到底啦' : '')}
+          </div>
+        )}
       </div>
     );
   }
