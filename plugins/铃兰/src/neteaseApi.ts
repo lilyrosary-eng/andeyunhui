@@ -308,6 +308,9 @@ const PATHS = {
   userAccount: '/user/account',
   userPlaylist: '/user/playlist',
   toplist: '/toplist',
+  likeSong: '/song/like',
+  subscribePlaylist: '/playlist/subscribe',
+  manipulatePlaylistTracks: '/playlist/manipulate/tracks',
 };
 
 function resolveModule(path: string, params: Record<string, any>): { uri: string; data: Record<string, any>; crypto: CryptoKind } {
@@ -331,6 +334,12 @@ function resolveModule(path: string, params: Record<string, any>): { uri: string
       return params.offset
         ? { uri: '/api/v3/playlist/detail', data: { id: params.id, offset: params.offset, limit: params.limit ?? 30, s: 8 }, crypto: 'eapi' }
         : { uri: '/api/v3/playlist/detail', data: { id: params.id, n: params.limit ?? 20, s: 8 }, crypto: 'eapi' };
+    case PATHS.likeSong:
+      return { uri: '/api/song/like', data: { id: params.id, like: params.like, alg: params.alg ?? 'itembased', time: params.time ?? '3' }, crypto: 'weapi' };
+    case PATHS.subscribePlaylist:
+      return { uri: '/api/playlist/subscribe', data: { id: params.id, t: params.t }, crypto: 'weapi' };
+    case PATHS.manipulatePlaylistTracks:
+      return { uri: '/api/playlist/manipulate/tracks', data: { pid: params.pid, tracks: params.tracks, op: params.op }, crypto: 'weapi' };
     default:
       throw new Error(`未实现的网易云接口: ${path}`);
   }
@@ -623,4 +632,35 @@ export async function getUserPlaylists(uid: number, limit = 30): Promise<Netease
     playCount: p.playCount || 0,
     creator: p.creator?.nickname || '',
   }));
+}
+
+/** 喜欢/取消喜欢一首歌（写入网易云「我喜欢的音乐」） */
+export async function likeNeteaseSong(songId: number, like: boolean): Promise<void> {
+  await neteaseRequest(PATHS.likeSong, {
+    id: songId,
+    like,
+    alg: 'itembased',
+    time: '3',
+  });
+}
+
+/** 收藏/取消收藏网易云歌单 */
+export async function subscribeNeteasePlaylist(playlistId: number, subscribe: boolean): Promise<void> {
+  await neteaseRequest(PATHS.subscribePlaylist, {
+    id: playlistId,
+    t: subscribe ? 1 : 2,
+  });
+}
+
+/** 向网易云歌单添加/删除歌曲 */
+export async function manipulateNeteasePlaylistTracks(
+  playlistId: number,
+  songIds: number[],
+  op: 'add' | 'del'
+): Promise<void> {
+  await neteaseRequest(PATHS.manipulatePlaylistTracks, {
+    pid: playlistId,
+    tracks: songIds.join(','),
+    op,
+  });
 }

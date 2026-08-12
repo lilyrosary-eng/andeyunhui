@@ -130,7 +130,7 @@ export function ModuleDrawer({ open, onClose, onSelectNetease }: ModuleDrawerPro
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">
-                        {T(`music.moduleDrawer.netease.${item.key}`)}
+                        {item.key === 'library' ? '猜你喜欢' : T(`music.moduleDrawer.netease.${item.key}`)}
                       </p>
                       <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
                         {T(`music.moduleDrawer.netease.${item.key}Desc`)}

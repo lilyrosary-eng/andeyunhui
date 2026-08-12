@@ -1,13 +1,13 @@
 /// <reference path="../global.d.ts" />
 import React from 'react';
 import {
-  CloudIcon, MusicIcon, PlayIcon, SearchIcon,
+  CloudIcon, HeartIcon, MusicIcon, PlayIcon, SearchIcon,
 } from '../../_shared/icons';
 import { T } from '../../_shared/pluginRuntime';
 import {
   searchSongs, getListenNow, getTopList, getSongUrl, isLoggedIn, logoutNetease,
   neteaseQrKey, neteaseQrCreate, neteaseQrCheck,
-  getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr,
+  getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr, likeNeteaseSong,
   type NeteaseTrack, type NeteaseProfile, type NeteasePlaylistItem,
 } from './neteaseApi';
 
@@ -78,6 +78,7 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
   const [tracks, setTracks] = useState<NeteaseTrack[]>([]);
   const [keyword, setKeyword] = useState('');
   const [playingId, setPlayingId] = useState<number | null>(null);
+  const [likedSongs, setLikedSongs] = useState<Set<number>>(new Set()); // 已写入网易云「我喜欢的音乐」的歌曲
   const reqRef = useRef(0);
   // 无限下拉分页状态：offset/total 跟踪已加载与总量，hasMore 判断是否还能继续拉
   const [offset, setOffset] = useState(0);
@@ -165,25 +166,18 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
     if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
   }, []);
 
-  // 「现在就听」自动拉取（推荐一次性返回，不做分页）
+  // 「现在就听」自动拉取：不再直接加载单曲推荐流，改为精选歌单网格；推荐流移到「猜你喜欢」tab
   useEffect(() => {
     if (tab !== 'listen') return;
     setPlaylistId(null); // 离开歌单分页模式
     sourceNameRef.current = T('music.moduleDrawer.netease.listenNow');
     const req = ++reqRef.current;
-    setLoading(true);
+    setLoading(false);
     setError('');
     setOffset(0);
-    getListenNow(50)
-      .then((list) => {
-        if (req === reqRef.current) {
-          setTracks(list);
-          setTotal(list.length);
-          setHasMore(false);
-          setLoading(false);
-        }
-      })
-      .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
+    setTracks([]);
+    setTotal(0);
+    setHasMore(false);
     // 并行拉取「精选歌单」网格（官方榜单封面 + 曲目数），模块化呈现、和网易云首页对齐
     const FEATURED: { id: number; name: string }[] = [
       { id: 19723756, name: '飙升榜' },
@@ -251,17 +245,26 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
     }
   }, [keyword, offset, hasMore]);
 
-  // 「我的歌单」自动拉取（登录态）
+  // 「猜你喜欢」自动拉取：把原「现在就听」下方的推荐单曲流移到这里
   useEffect(() => {
-    if (tab !== 'library' || !loggedIn) return;
+    if (tab !== 'library') return;
+    setPlaylistId(null); // 离开歌单分页模式
+    sourceNameRef.current = '猜你喜欢';
     const req = ++reqRef.current;
     setLoading(true);
     setError('');
-    const uid = profile?.userId || 0;
-    getUserPlaylists(uid)
-      .then((list) => { if (req === reqRef.current) { setPlaylists(list); setLoading(false); } })
+    setOffset(0);
+    getListenNow(50)
+      .then((list) => {
+        if (req === reqRef.current) {
+          setTracks(list);
+          setTotal(list.length);
+          setHasMore(false);
+          setLoading(false);
+        }
+      })
       .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
-  }, [tab, loggedIn, profile?.userId]);
+  }, [tab]);
 
   const [playlistId, setPlaylistId] = useState<number | null>(null);
   // 当前面板来源名（用于临时歌单命名）：歌单/榜单进入时记录，tab 切换时更新
@@ -343,6 +346,20 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
     }
   }, [tracks, onPlay, onTempPlaylist, buildTempName]);
 
+  const handleLike = useCallback(async (e: React.MouseEvent, t: NeteaseTrack) => {
+    e.stopPropagation();
+    if (!isLoggedIn()) {
+      setError('请先登录网易云，再收藏到「我喜欢的音乐」');
+      return;
+    }
+    try {
+      await likeNeteaseSong(t.id, true);
+      setLikedSongs((prev) => new Set(prev).add(t.id));
+    } catch (err: any) {
+      setError(`收藏失败：${err?.message || String(err)}`);
+    }
+  }, []);
+
   const handlePlayTrack = useCallback(async (t: NeteaseTrack) => {
     setPlayingId(t.id);
     const res = await getSongUrl(t.id);
@@ -377,14 +394,41 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
     <div className="flex-1 flex flex-col h-full overflow-hidden relative bg-white dark:bg-[#1e1e1e]">
       {/* 顶部栏：左侧当前标题，右侧云按钮（点击从右滑出模块抽屉） */}
       <div className="shrink-0 flex items-center justify-between px-4 pt-4 pb-2">
-        <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">{T(TAB_TITLE_KEYS[tab])}</h2>
-        <button
-          onClick={onBack}
-          className="btn-press flex items-center justify-center p-2 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
-          title={T('music.moduleDrawer.title')}
-        >
-          <CloudIcon size={18} />
-        </button>
+        <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">
+          {tab === 'library' ? '猜你喜欢' : T(TAB_TITLE_KEYS[tab])}
+        </h2>
+        <div className="flex items-center gap-2">
+          {loggedIn && profile ? (
+            <button
+              onClick={() => setTab('login')}
+              className="btn-press flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
+              title={`网易云：${profile.nickname}`}
+            >
+              {profile.avatarUrl ? (
+                <img src={profile.avatarUrl} alt="" className="w-6 h-6 rounded-full object-cover" />
+              ) : (
+                <span className="w-6 h-6 rounded-full bg-blue-500/15 text-blue-600 dark:text-blue-400 flex items-center justify-center text-xs font-bold">
+                  {profile.nickname.slice(0, 1)}
+                </span>
+              )}
+              <span className="text-xs text-neutral-700 dark:text-stone-200 max-w-[80px] truncate">{profile.nickname}</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => setTab('login')}
+              className="btn-press text-xs text-neutral-500 dark:text-stone-400 hover:text-blue-600 dark:hover:text-blue-400 px-2 py-1 rounded-lg hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
+            >
+              登录
+            </button>
+          )}
+          <button
+            onClick={onBack}
+            className="btn-press flex items-center justify-center p-2 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
+            title={T('music.moduleDrawer.title')}
+          >
+            <CloudIcon size={18} />
+          </button>
+        </div>
       </div>
 
       {/* 主内容区 */}
@@ -426,13 +470,6 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
                     </button>
                   ))}
                 </div>
-                {/* 推荐单曲流：沿用原有推荐列表，作为「为你推荐」继续呈现 */}
-                {tracks.length > 0 && (
-                  <>
-                    <h3 className="text-base font-semibold text-neutral-800 dark:text-stone-100 mb-2">{T('music.moduleDrawer.netease.library') || '推荐单曲'}</h3>
-                    {renderBodyInner()}
-                  </>
-                )}
               </div>
             ) : (
               renderBody()
@@ -459,31 +496,16 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
 
         {tab === 'library' && (
           <section>
-            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100 mb-3">{T('music.moduleDrawer.netease.library')}</h2>
-            {!loggedIn ? (
-              <div className="flex flex-col items-center gap-3 py-10 text-sm text-neutral-500 dark:text-stone-400">
-                <span>登录后查看「我的歌单」</span>
-                <button onClick={() => setTab('login')} className="btn-press px-4 py-2 rounded-xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 transition-colors">
-                  {T('music.moduleDrawer.netease.login')}
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">猜你喜欢</h2>
+              {tracks.length > 0 && (
+                <button onClick={handlePlayAll} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/15 text-blue-600 dark:text-blue-400 text-sm hover:bg-blue-500/25 transition-colors">
+                  <PlayIcon size={14} />
+                  {T('music.track.playAll') || '播放全部'}
                 </button>
-              </div>
-            ) : playlists.length === 0 && !loading ? (
-              <div className="text-sm text-neutral-500 dark:text-stone-400 py-10">暂无歌单</div>
-            ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                {playlists.map((p) => (
-                  <button
-                    key={p.id}
-                    onClick={() => openPlaylist(p.id)}
-                    className="btn-press flex flex-col gap-2 p-2 rounded-xl bg-neutral-100/60 dark:bg-stone-800/50 hover:bg-neutral-200/60 dark:hover:bg-stone-700/60 transition-colors text-left"
-                  >
-                    <img src={p.coverImgUrl} alt={p.name} className="w-full aspect-square object-cover rounded-lg bg-neutral-200 dark:bg-stone-700" />
-                    <div className="text-xs text-neutral-700 dark:text-stone-200 line-clamp-2 h-8 overflow-hidden">{p.name}</div>
-                    <div className="text-[10px] text-neutral-400 dark:text-stone-500">{p.trackCount} 首 · {p.creator}</div>
-                  </button>
-                ))}
-              </div>
-            )}
+              )}
+            </div>
+            {renderBody()}
           </section>
         )}
         {tab === 'radio' && <PlaceholderTab title={T('music.moduleDrawer.netease.radio')} desc={T('music.moduleDrawer.netease.radioDesc')} />}
@@ -544,10 +566,13 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
     return (
       <div className="flex flex-col gap-1">
         {tracks.map((t) => (
-          <button
+          <div
             key={t.id}
+            role="button"
+            tabIndex={0}
             onClick={() => handlePlayTrack(t)}
-            className="btn-press group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 transition-colors text-left"
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handlePlayTrack(t); } }}
+            className="btn-press group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 transition-colors text-left cursor-pointer"
           >
             {t.cover ? (
               <img src={t.cover} alt="" className="w-10 h-10 rounded-md object-cover shrink-0" />
@@ -580,7 +605,14 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
             </span>
             <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
             {playingId === t.id && <PlayIcon size={14} />}
-          </button>
+            <button
+              onClick={(e) => handleLike(e, t)}
+              className="btn-press p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-rose-500 dark:hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+              title="收藏到网易云「我喜欢的音乐」"
+            >
+              <HeartIcon size={15} fill={likedSongs.has(t.id) ? 'currentColor' : 'none'} />
+            </button>
+          </div>
         ))}
         {/* 无限下拉：仅在支持分页的 tab（搜索 / 歌单）显示加载状态与触底哨兵 */}
         {(tab === 'search' || (tab === 'listen' && playlistId != null)) && (
