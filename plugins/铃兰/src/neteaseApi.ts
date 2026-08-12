@@ -465,11 +465,14 @@ export interface NeteaseTrack {
   duration: number;
   cover?: string;
   url?: string;
+  fee?: number;       // 0 免费 / 1 VIP / 4 专辑付费 / 8 试听
+  maxbr?: number;     // 最高可用码率 bps（privilege.maxbr），用于判断无损/Hi-Res
 }
 
-function mapTrack(s: any): NeteaseTrack {
+function mapTrack(s: any, priv?: any): NeteaseTrack {
   const artists = s.artists || s.ar || [];
   const album = s.album || s.al || {};
+  const p = priv || s.privilege || {};
   return {
     id: s.id,
     name: s.name,
@@ -477,7 +480,31 @@ function mapTrack(s: any): NeteaseTrack {
     album: album.name || '',
     duration: s.duration || s.dt || 0,
     cover: album.picUrl || album.cover || '',
+    fee: s.fee ?? p.fee ?? 0,
+    maxbr: p.maxbr || 0,
   };
+}
+
+// 列表静态标签：VIP（收费）/ 无损(SQ) / Hi-Res(HR)，由 fee + 最高码率推断，无需额外请求。
+export interface TrackBadge { label: string; kind: 'vip' | 'lossless' | 'hires'; }
+export function neteaseTrackBadges(t: NeteaseTrack): TrackBadge[] {
+  const out: TrackBadge[] = [];
+  const fee = t.fee ?? 0;
+  if (fee === 1) out.push({ label: 'VIP', kind: 'vip' });
+  else if (fee === 4) out.push({ label: '专辑', kind: 'vip' });
+  const maxbr = t.maxbr ?? 0;
+  if (maxbr >= 2000000) out.push({ label: 'Hi-Res', kind: 'hires' });
+  else if (maxbr >= 999000) out.push({ label: 'SQ', kind: 'lossless' });
+  return out;
+}
+
+// 由播放地址接口返回的实际码率推断标签（实际播放音质）。
+export function qualityLabelFromBr(br: number): string {
+  if (br >= 2000000) return 'Hi-Res';
+  if (br >= 999000) return '无损';
+  if (br >= 320000) return '高品质';
+  if (br > 0) return '标准';
+  return '';
 }
 
 // 搜索歌曲（type=1 单曲）。对齐 MusicStorm：eapi /api/cloudsearch/pc
@@ -505,17 +532,21 @@ export async function getListenNow(limit = 20): Promise<NeteaseTrack[]> {
 export async function getTopList(id: number, limit = 20): Promise<NeteaseTrack[]> {
   const r = await neteaseRequest(PATHS.toplist, { id, limit });
   const list = r?.playlist?.tracks || [];
-  return list.slice(0, limit).map(mapTrack);
+  // privileges 数组与 tracks 按 index 对应，含 fee / maxbr 等音质与版权信息
+  const privs = r?.playlist?.privileges || [];
+  return list.slice(0, limit).map((s: any, i: number) => mapTrack(s, privs[i]));
 }
 
 // 获取播放地址：eapi /api/song/enhance/player/url
-export async function getSongUrl(id: number): Promise<string | null> {
+// 返回实际播放 url 及码率（用于播放器展示真实音质标签）。
+export interface SongUrlResult { url: string | null; br: number; type: string; }
+export async function getSongUrl(id: number): Promise<SongUrlResult> {
   try {
     const r = await neteaseRequest(PATHS.songUrl, { ids: [id], br: 999000 });
-    const list = r?.data || [];
-    return list[0]?.url || null;
+    const item = (r?.data || [])[0] || {};
+    return { url: item.url || null, br: item.br || 0, type: item.type || '' };
   } catch {
-    return null;
+    return { url: null, br: 0, type: '' };
   }
 }
 

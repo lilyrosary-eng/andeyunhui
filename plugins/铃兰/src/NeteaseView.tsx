@@ -7,7 +7,7 @@ import { T } from '../../_shared/pluginRuntime';
 import {
   searchSongs, getListenNow, getTopList, getSongUrl, isLoggedIn, logoutNetease,
   neteaseQrKey, neteaseQrCreate, neteaseQrCheck,
-  getUserAccount, getUserPlaylists,
+  getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr,
   type NeteaseTrack, type NeteaseProfile, type NeteasePlaylistItem,
 } from './neteaseApi';
 
@@ -31,6 +31,7 @@ export interface PlayableTrack {
   album: string;
   durationSecs: number;
   coverPath?: string;
+  quality?: string; // 实际播放音质标签（Hi-Res/无损/高品质/标准），异步取地址后填充
 }
 
 interface NeteaseViewProps {
@@ -39,7 +40,7 @@ interface NeteaseViewProps {
   onPlay: (tracks: PlayableTrack[], startIndex: number) => void;
 }
 
-function trackToPlayable(t: NeteaseTrack, url: string): PlayableTrack {
+function trackToPlayable(t: NeteaseTrack, url: string, quality = ''): PlayableTrack {
   return {
     id: `netease-${t.id}`,
     filePath: url,
@@ -48,6 +49,7 @@ function trackToPlayable(t: NeteaseTrack, url: string): PlayableTrack {
     album: t.album,
     durationSecs: Math.round((t.duration || 0) / 1000),
     coverPath: t.cover,
+    quality,
   };
 }
 
@@ -193,19 +195,20 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
   const handlePlayAll = useCallback(async () => {
     const playlist: PlayableTrack[] = [];
     for (const t of tracks) {
-      const url = await getSongUrl(t.id);
-      if (url) playlist.push(trackToPlayable(t, url));
+      const res = await getSongUrl(t.id);
+      if (res.url) playlist.push(trackToPlayable(t, res.url, qualityLabelFromBr(res.br)));
     }
     if (playlist.length) onPlay(playlist, 0);
   }, [tracks, onPlay]);
 
   const handlePlayTrack = useCallback(async (t: NeteaseTrack) => {
     setPlayingId(t.id);
-    const url = await getSongUrl(t.id);
-    if (url) {
+    const res = await getSongUrl(t.id);
+    if (res.url) {
       // 只同步取点击单曲的地址，立即播放，避免整张列表串行取地址导致数秒延迟。
       // 其余曲以空 filePath 占位进入队列，后台异步补全地址（见下方 fire-and-forget）。
-      const playable = trackToPlayable(t, url);
+      const quality = qualityLabelFromBr(res.br);
+      const playable = trackToPlayable(t, res.url, quality);
       const startIndex = tracks.findIndex((x) => x.id === t.id);
       const playlist: PlayableTrack[] = tracks.map((x) => {
         if (x.id === t.id) return playable;
@@ -220,7 +223,7 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
         for (let i = 0; i < tracks.length; i++) {
           if (i === startIndex) continue;
           const u = await getSongUrl(tracks[i].id).catch(() => null);
-          if (u) player.updateTrackUrl(i, u);
+          if (u?.url) player.updateTrackUrl(i, u.url);
         }
       }
     }
@@ -370,7 +373,25 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
               </span>
             )}
             <span className="min-w-0 flex-1">
-              <span className="block text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
+              <span className="flex items-center gap-1.5">
+                <span className="block text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
+                {neteaseTrackBadges(t).map((b) => (
+                  <span
+                    key={b.label}
+                    className={
+                      'shrink-0 text-[9px] font-semibold leading-none px-1 py-0.5 rounded ' +
+                      (b.kind === 'vip'
+                        ? 'text-amber-600 dark:text-amber-400 bg-amber-500/15'
+                        : b.kind === 'hires'
+                          ? 'text-fuchsia-600 dark:text-fuchsia-400 bg-fuchsia-500/15'
+                          : 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/15')
+                    }
+                    title={b.label}
+                  >
+                    {b.label}
+                  </span>
+                ))}
+              </span>
               <span className="block text-xs text-neutral-400 dark:text-stone-500 truncate">{t.artist} · {t.album}</span>
             </span>
             <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>

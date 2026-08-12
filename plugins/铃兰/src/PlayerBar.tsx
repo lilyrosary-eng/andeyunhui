@@ -433,7 +433,14 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
         )}
       </div>
       <div className="min-w-0">
-        <div className="text-base font-medium text-neutral-700 dark:text-stone-200 truncate leading-tight">{track.title}</div>
+        <div className="flex items-center gap-2">
+          <div className="text-base font-medium text-neutral-700 dark:text-stone-200 truncate leading-tight">{track.title}</div>
+          {track.quality && (
+            <span className="shrink-0 text-[10px] font-semibold leading-none px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" title={track.quality}>
+              {track.quality}
+            </span>
+          )}
+        </div>
         {track.artist && (
           <div className="text-sm text-neutral-400 dark:text-stone-500 truncate leading-tight mt-0.5">{track.artist}</div>
         )}
