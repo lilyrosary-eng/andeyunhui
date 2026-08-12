@@ -265,7 +265,10 @@ class MusicPlayer {
     const track = this.tracks[index];
     const api = window.__HOST_API__;
     try { api?.invoke('debug_log', { msg: `MUSIC_LOAD_TRACK idx=${index} file=${track.filePath}` }).catch(()=>{}); } catch {}
-    const src = api?.convertFileSrc(track.filePath);
+    // 远程 URL（http/https，如网易云直链）直接原样赋值，
+    // 不要走 convertFileSrc（它只用于本地文件路径，会把远程 URL 编码成 asset:// 导致 500）。
+    const isRemote = /^https?:\/\//i.test(track.filePath);
+    const src = isRemote ? track.filePath : (api?.convertFileSrc(track.filePath) || track.filePath);
     if (src) {
       this.audio.src = src;
       this.currentIndex = index;

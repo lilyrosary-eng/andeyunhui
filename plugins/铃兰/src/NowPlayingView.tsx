@@ -227,7 +227,12 @@ export function NowPlayingView({
   const [focusLyricIdx, setFocusLyricIdx] = useState(0);
   const focusLyricIdxRef = useRef(0);
 
-  const coverUrl: string | null = track.coverPath ? hostApi.convertFileSrc(track.coverPath) : null;
+  // 远程封面（http/https，如网易云直链）直接原样使用，不走 convertFileSrc
+  // （convertFileSrc 会把远程 URL 编码成 asset://localhost/http%3A... 导致 500）。
+  const coverIsRemote = !!track.coverPath && /^https?:\/\//i.test(track.coverPath);
+  const coverUrl: string | null = track.coverPath
+    ? (coverIsRemote ? track.coverPath : hostApi.convertFileSrc(track.coverPath))
+    : null;
 
   // 背景：切歌时平滑过渡（旧封面渐隐，新封面渐显）— 仅在曲目变化时计算
   useEffect(() => {

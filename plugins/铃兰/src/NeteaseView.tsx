@@ -5,7 +5,10 @@ import {
 } from '../../_shared/icons';
 import { T } from '../../_shared/pluginRuntime';
 import {
-  searchSongs, getListenNow, getSongUrl, type NeteaseTrack,
+  searchSongs, getListenNow, getTopList, getSongUrl, isLoggedIn, logoutNetease,
+  neteaseQrKey, neteaseQrCreate, neteaseQrCheck,
+  getUserAccount, getUserPlaylists,
+  type NeteaseTrack, type NeteaseProfile, type NeteasePlaylistItem,
 } from './neteaseApi';
 
 const { useState, useEffect, useRef, useCallback } = React;
@@ -64,7 +67,76 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
   const [playingId, setPlayingId] = useState<number | null>(null);
   const reqRef = useRef(0);
 
+  // 登录态
+  const [loggedIn, setLoggedIn] = useState(isLoggedIn());
+  const [profile, setProfile] = useState<NeteaseProfile | null>(null);
+  const [playlists, setPlaylists] = useState<NeteasePlaylistItem[]>([]);
+  const [qrImg, setQrImg] = useState('');
+  const [qrStatus, setQrStatus] = useState(''); // 文案提示
+  const [qrLoading, setQrLoading] = useState(false);
+  const pollRef = useRef<number | null>(null);
+
   useEffect(() => { setTab(initialTab); }, [initialTab]);
+
+  // 离开 login tab 或卸载时停止轮询
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+    };
+  }, []);
+
+  const startQrLogin = useCallback(async () => {
+    setQrLoading(true);
+    setQrImg('');
+    setQrStatus('正在生成二维码…');
+    try {
+      const key = await neteaseQrKey();
+      const session = await neteaseQrCreate(key);
+      setQrImg(session.qrimg || '');
+      setQrStatus('请用手机网易云 App 扫码登录');
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      pollRef.current = window.setInterval(async () => {
+        try {
+          const code = await neteaseQrCheck(key);
+          if (code === 800) {
+            if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+            setQrStatus('二维码已过期，请重新点击登录');
+            setQrImg('');
+          } else if (code === 802) {
+            setQrStatus('已扫描，请在手机上确认登录');
+          } else if (code === 803) {
+            if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+            setLoggedIn(true);
+            setQrImg('');
+            setLoggedIn(true);
+            setQrStatus('登录成功！');
+            // 登录成功后刷新当前列表
+            try { setProfile(await getUserAccount()); } catch {}
+            const req = ++reqRef.current;
+            setLoading(true);
+            getListenNow(20)
+              .then((list) => { if (req === reqRef.current) { setTracks(list); setLoading(false); } })
+              .catch(() => { if (req === reqRef.current) setLoading(false); });
+          }
+        } catch (e) {
+          if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+          setQrStatus('轮询失败：' + String(e?.message || e));
+        }
+      }, 2000);
+    } catch (e) {
+      setQrStatus('生成失败：' + String(e?.message || e));
+    } finally {
+      setQrLoading(false);
+    }
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    logoutNetease();
+    setLoggedIn(false);
+    setQrImg('');
+    setQrStatus('');
+    if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+  }, []);
 
   // 「现在就听」自动拉取
   useEffect(() => {
@@ -92,6 +164,31 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
     }, 400);
     return () => clearTimeout(timer);
   }, [tab, keyword]);
+
+  // 「我的歌单」自动拉取（登录态）
+  useEffect(() => {
+    if (tab !== 'library' || !loggedIn) return;
+    const req = ++reqRef.current;
+    setLoading(true);
+    setError('');
+    const uid = profile?.userId || 0;
+    getUserPlaylists(uid)
+      .then((list) => { if (req === reqRef.current) { setPlaylists(list); setLoading(false); } })
+      .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
+  }, [tab, loggedIn, profile?.userId]);
+
+  const openPlaylist = useCallback(async (id: number) => {
+    try {
+      setLoading(true);
+      setError('');
+      const list = await getTopList(id, 100);
+      setTracks(list);
+      setLoading(false);
+    } catch (e) {
+      setError(String((e as any)?.message || e));
+      setLoading(false);
+    }
+  }, [getTopList]);
 
   const handlePlayAll = useCallback(async () => {
     const playlist: PlayableTrack[] = [];
@@ -172,9 +269,70 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
           </section>
         )}
 
-        {tab === 'library' && <PlaceholderTab title={T('music.moduleDrawer.netease.library')} desc={T('music.moduleDrawer.netease.libraryDesc')} />}
+        {tab === 'library' && (
+          <section>
+            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100 mb-3">{T('music.moduleDrawer.netease.library')}</h2>
+            {!loggedIn ? (
+              <div className="flex flex-col items-center gap-3 py-10 text-sm text-neutral-500 dark:text-stone-400">
+                <span>登录后查看「我的歌单」</span>
+                <button onClick={() => setTab('login')} className="btn-press px-4 py-2 rounded-xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 transition-colors">
+                  {T('music.moduleDrawer.netease.login')}
+                </button>
+              </div>
+            ) : playlists.length === 0 && !loading ? (
+              <div className="text-sm text-neutral-500 dark:text-stone-400 py-10">暂无歌单</div>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {playlists.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => openPlaylist(p.id)}
+                    className="btn-press flex flex-col gap-2 p-2 rounded-xl bg-neutral-100/60 dark:bg-stone-800/50 hover:bg-neutral-200/60 dark:hover:bg-stone-700/60 transition-colors text-left"
+                  >
+                    <img src={p.coverImgUrl} alt={p.name} className="w-full aspect-square object-cover rounded-lg bg-neutral-200 dark:bg-stone-700" />
+                    <div className="text-xs text-neutral-700 dark:text-stone-200 line-clamp-2 h-8 overflow-hidden">{p.name}</div>
+                    <div className="text-[10px] text-neutral-400 dark:text-stone-500">{p.trackCount} 首 · {p.creator}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
         {tab === 'radio' && <PlaceholderTab title={T('music.moduleDrawer.netease.radio')} desc={T('music.moduleDrawer.netease.radioDesc')} />}
-        {tab === 'login' && <PlaceholderTab title={T('music.moduleDrawer.netease.login')} desc={T('music.moduleDrawer.netease.loginDesc')} />}
+        {tab === 'login' && (
+          <section className="flex flex-col items-center justify-center py-10 gap-4">
+            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{T('music.moduleDrawer.netease.login')}</h2>
+            {loggedIn ? (
+              <div className="flex flex-col items-center gap-3">
+                <div className="px-3 py-1.5 rounded-lg bg-green-500/15 text-green-600 dark:text-green-400 text-sm">已登录网易云</div>
+                <button onClick={handleLogout} className="btn-press px-4 py-2 rounded-lg bg-neutral-200/60 dark:bg-stone-800/60 text-sm text-neutral-700 dark:text-stone-200 hover:bg-neutral-300/60 dark:hover:bg-stone-700/60 transition-colors">
+                  退出登录
+                </button>
+              </div>
+            ) : qrImg ? (
+              <div className="flex flex-col items-center gap-3">
+                <img src={qrImg} alt="登录二维码" className="w-48 h-48 rounded-lg bg-white p-2" />
+                <div className="text-sm text-neutral-500 dark:text-stone-400 text-center max-w-xs">{qrStatus}</div>
+                <button onClick={startQrLogin} className="btn-press px-4 py-1.5 rounded-lg bg-neutral-200/60 dark:bg-stone-800/60 text-sm text-neutral-700 dark:text-stone-200 hover:bg-neutral-300/60 dark:hover:bg-stone-700/60 transition-colors">
+                  刷新二维码
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center gap-3">
+                <button
+                  onClick={startQrLogin}
+                  disabled={qrLoading}
+                  className="btn-press px-5 py-2.5 rounded-xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 transition-colors disabled:opacity-50"
+                >
+                  {qrLoading ? '生成中…' : '登录网易云（扫码）'}
+                </button>
+                <div className="text-sm text-neutral-500 dark:text-stone-400 text-center max-w-xs">
+                  {qrStatus || '使用手机网易云 App 扫码登录，登录后可正常使用推荐 / 歌单 / 搜索'}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
       </div>
     </div>
   );

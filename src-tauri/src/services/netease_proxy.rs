@@ -17,6 +17,7 @@ const ALLOWED_NETEASE_HOSTS: &[&str] = &[
     "music.163.com",
     "interface.music.163.com",
     "interface3.music.163.com",
+    "interfacepc.music.163.com",
     "cat.music.163.com",
     "weapi.music.163.com",
     "apm.music.163.com",
@@ -35,10 +36,24 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/weapi/artist/v3/list/event",
     "/weapi/artist/albums",
     "/weapi/artist/top/song",
+    // 登录态个人资料/我的歌单（weapi）
+    "/weapi/nuser/account/get",
+    "/weapi/user/playlist",
     // 游客态注册（MUSIC_A），eapi
     "/api/gaia/v1/register/client",
-    // 游客态匿名注册（硬编码用户名，weapi）
-    "/api/register/anonimous",
+    // 游客态匿名注册（deviceId 派生 username，weapi）
+    "/weapi/register/anonimous",
+    // 游客态匿名注册 eapi 回落通道（interfacepc.music.163.com）
+    "/eapi/register/anonimous",
+    // 二维码登录（eapi 通道，interfacepc 域名，扫码登录态不受游客态收紧影响）
+    "/eapi/login/qrcode/unikey",
+    "/eapi/login/qrcode/create",
+    "/eapi/login/qrcode/client/login",
+    // 业务接口 eapi 通道（interfacepc 域名）
+    "/eapi/cloudsearch/pc",
+    "/eapi/v6/playlist/detail",
+    "/eapi/v3/playlist/detail",
+    "/eapi/song/enhance/player/url",
     // 榜单
     "/weapi/playlist/video/related/rank",
     "/weapi/toplist/artist",
@@ -92,24 +107,61 @@ fn validate_request(method: &str, url: &str) -> Result<String, String> {
     Ok(path)
 }
 
-/// 构建通用 header（参考 MusicStorm，去掉 UA 中的具体 OS/版本泄露，使用中性 UA）
-fn build_headers(cookie: Option<&str>, extra: &HashMap<String, String>) -> reqwest::header::HeaderMap {
+/// 构建通用 header（参考 MusicStorm，UA 由调用方按接口传入以贴合官方请求结构，绕过风控）。
+/// referer/origin/real_ip 由调用方传入（TS 端按接口需求填）。
+/// user_agent 由调用方传入（weapi 用 Mac Edge UA、eapi 用 iPhone UA），为空则回落中性 UA。
+fn build_headers(
+    cookie: Option<&str>,
+    extra: &HashMap<String, String>,
+    referer: Option<&str>,
+    origin: Option<&str>,
+    real_ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
-    // 中性 User-Agent，避免过于具体的客户端指纹
-    if let Ok(v) = reqwest::header::HeaderValue::from_str(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    ) {
+    // User-Agent：优先调用方传入（贴合官方请求），为空则中性回落
+    let ua = user_agent
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36");
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(ua) {
         headers.insert(reqwest::header::USER_AGENT, v);
     }
     {
         let v = reqwest::header::HeaderValue::from_static("application/x-www-form-urlencoded");
         headers.insert(reqwest::header::CONTENT_TYPE, v);
     }
-    // 反爬常用 header（参考 MusicStorm），但不注入真实 IP，仅做占位以贴近官方请求结构
     {
-        let v = reqwest::header::HeaderValue::from_static("0.0.0.0");
-        headers.insert(reqwest::header::HeaderName::from_static("x-real-ip"), v.clone());
-        headers.insert(reqwest::header::HeaderName::from_static("x-forwarded-for"), v.clone());
+        // 声明接受任意响应类型，避免服务端因 Accept 不匹配返回异常
+        let v = reqwest::header::HeaderValue::from_static("*/*");
+        headers.insert(reqwest::header::ACCEPT, v);
+    }
+    {
+        // 显式声明支持 gzip/deflate（配合 reqwest gzip feature 自动解压）
+        let v = reqwest::header::HeaderValue::from_static("gzip, deflate");
+        headers.insert(reqwest::header::ACCEPT_ENCODING, v);
+    }
+    // 反爬常用 header（参考 MusicStorm）：伪造国内出口 IP，避免非 CN 出口被拦
+    if let Some(ip) = real_ip {
+        if !ip.is_empty() {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(ip) {
+                headers.insert(reqwest::header::HeaderName::from_static("x-real-ip"), v.clone());
+                headers.insert(reqwest::header::HeaderName::from_static("x-forwarded-for"), v.clone());
+            }
+        }
+    }
+    if let Some(r) = referer {
+        if !r.is_empty() {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(r) {
+                headers.insert(reqwest::header::REFERER, v);
+            }
+        }
+    }
+    if let Some(o) = origin {
+        if !o.is_empty() {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(o) {
+                headers.insert(reqwest::header::HeaderName::from_static("origin"), v);
+            }
+        }
     }
     if let Some(c) = cookie {
         if !c.is_empty() {
@@ -130,31 +182,74 @@ fn build_headers(cookie: Option<&str>, extra: &HashMap<String, String>) -> reqwe
 }
 
 /// 游客态注册（MUSIC_A）。
-/// 该接口走 eapi/weapi，加密已在 TS 端完成，这里仅做 HTTP 转发并返回 Set-Cookie 字符串。
-#[tauri::command]
-pub async fn netease_register_guest(url: String, body: String) -> Result<String, String> {
-    let resp = proxy_post_internal("POST", &url, &body, None, &HashMap::new()).await?;
-    if resp.cookies.is_empty() {
-        return Err("no set-cookie in guest register response".into());
-    }
-    Ok(resp.cookies.join("; "))
+/// 该接口走 weapi，加密已在 TS 端完成，这里仅做 HTTP 转发并返回结构化 JSON 字符串。
+#[tauri::command(rename_all = "snake_case")]
+pub async fn netease_register_guest(
+    url: String,
+    body: String,
+    cookie: Option<String>,
+    referer: Option<String>,
+    origin: Option<String>,
+    real_ip: Option<String>,
+    user_agent: Option<String>,
+) -> Result<String, String> {
+    let mut extra = HashMap::new();
+    extra.insert("__noop".to_string(), "1".to_string());
+    let resp = proxy_post_internal(
+        "POST",
+        &url,
+        &body,
+        cookie.as_deref(),
+        &extra,
+        referer.as_deref(),
+        origin.as_deref(),
+        real_ip.as_deref(),
+        user_agent.as_deref(),
+    )
+    .await?;
+    let out = serde_json::json!({
+        "status": resp.status,
+        "cookies": resp.cookies,
+        "body": resp.body,
+    });
+    Ok(serde_json::to_string(&out).unwrap_or_default())
 }
 
-/// 通用网易云 POST 代理（四件套校验 + 转发 + 回传响应体文本）
+/// 通用网易云 POST 代理（四件套校验 + 转发 + 回传结构化 JSON 字符串）
 /// - url: 完整 https URL（如 https://music.163.com/weapi/cloudsearch/get）
 /// - body: 已加密的 form body（application/x-www-form-urlencoded 文本）
 /// - cookie: 可选会话 Cookie（游客态可空）
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn netease_http_post(
     method: String,
     url: String,
     body: String,
     cookie: Option<String>,
     headers: Option<HashMap<String, String>>,
+    referer: Option<String>,
+    origin: Option<String>,
+    real_ip: Option<String>,
+    user_agent: Option<String>,
 ) -> Result<String, String> {
     let extra = headers.unwrap_or_default();
-    let resp = proxy_post_internal(&method, &url, &body, cookie.as_deref(), &extra).await?;
-    Ok(resp.body)
+    let resp = proxy_post_internal(
+        &method,
+        &url,
+        &body,
+        cookie.as_deref(),
+        &extra,
+        referer.as_deref(),
+        origin.as_deref(),
+        real_ip.as_deref(),
+        user_agent.as_deref(),
+    )
+    .await?;
+    let out = serde_json::json!({
+        "status": resp.status,
+        "cookies": resp.cookies,
+        "body": resp.body,
+    });
+    Ok(serde_json::to_string(&out).unwrap_or_default())
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -170,6 +265,10 @@ async fn proxy_post_internal(
     body: &str,
     cookie: Option<&str>,
     extra: &HashMap<String, String>,
+    referer: Option<&str>,
+    origin: Option<&str>,
+    real_ip: Option<&str>,
+    user_agent: Option<&str>,
 ) -> Result<NeteaseProxyResponse, String> {
     // 四件套校验
     let _path = validate_request(method, url)?;
@@ -178,7 +277,7 @@ async fn proxy_post_internal(
         return Err(format!("Body too large: {} bytes", body.len()));
     }
 
-    let headers = build_headers(cookie, extra);
+    let headers = build_headers(cookie, extra, referer, origin, real_ip, user_agent);
 
     // 本项目 reqwest 客户端：rustls-tls + no_proxy，禁用系统代理避免被拦截
     let client = reqwest::Client::builder()
@@ -189,10 +288,6 @@ async fn proxy_post_internal(
     let resp = client
         .post(url)
         .headers(headers)
-        .header(
-            reqwest::header::REFERER,
-            "https://music.163.com/",
-        )
         .body(body.to_string())
         .send()
         .await

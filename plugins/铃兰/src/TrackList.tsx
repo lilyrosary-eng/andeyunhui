@@ -551,7 +551,10 @@ export function TrackList({
             {tracks.map((track, index) => {
               const isSelected = selectedIndices.has(index);
               const isCurrent = currentTrack?.filePath === track.filePath;
-              const coverUrl = track.coverPath ? hostApi.convertFileSrc(track.coverPath) : null;
+              const coverIsRemote = !!track.coverPath && /^https?:\/\//i.test(track.coverPath);
+              const coverUrl = track.coverPath
+                ? (coverIsRemote ? track.coverPath : hostApi.convertFileSrc(track.coverPath))
+                : null;
               const isMenuOpen = openMenuIndex === index;
 
               return React.createElement('div', {

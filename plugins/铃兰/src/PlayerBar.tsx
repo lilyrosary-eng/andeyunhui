@@ -394,7 +394,12 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
     return () => { unlisten.then((fn) => fn()).catch(() => {}); };
   }, []);
 
-  const coverUrl = track.coverPath ? hostApi.convertFileSrc(track.coverPath) : null;
+  // 远程封面（http/https，如网易云直链）直接原样使用，不走 convertFileSrc
+  // （convertFileSrc 会把远程 URL 编码成 asset://localhost/http%3A... 导致 500）。
+  const coverIsRemote = !!track.coverPath && /^https?:\/\//i.test(track.coverPath);
+  const coverUrl = track.coverPath
+    ? (coverIsRemote ? track.coverPath : hostApi.convertFileSrc(track.coverPath))
+    : null;
   const progressPct = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   // 封面 + 歌曲信息（上排左，放大以更醒目）
