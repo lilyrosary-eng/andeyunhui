@@ -113,6 +113,29 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
     };
   }, []);
 
+  // 组件挂载时：若本地已有登录 cookie，验证并拉取用户资料/歌单，避免"已登录但显示未登录"
+  useEffect(() => {
+    if (!isLoggedIn()) return;
+    setLoggedIn(true);
+    getUserAccount()
+      .then((p) => {
+        if (p) {
+          setProfile(p);
+          getUserPlaylists(p.userId).then(setPlaylists).catch(() => {});
+        } else {
+          // cookie 失效：服务端已不认，清掉本地状态避免假登录
+          logoutNetease();
+          setLoggedIn(false);
+          setError('登录已过期，请重新登录');
+        }
+      })
+      .catch((e) => {
+        console.warn('[netease] 获取用户信息失败', e);
+        logoutNetease();
+        setLoggedIn(false);
+      });
+  }, []);
+
   const startQrLogin = useCallback(async () => {
     setQrLoading(true);
     setQrImg('');
@@ -136,15 +159,15 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
             if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
             setLoggedIn(true);
             setQrImg('');
-            setLoggedIn(true);
             setQrStatus('登录成功！');
-            // 登录成功后刷新当前列表
-            try { setProfile(await getUserAccount()); } catch {}
-            const req = ++reqRef.current;
-            setLoading(true);
-            getListenNow(20)
-              .then((list) => { if (req === reqRef.current) { setTracks(list); setLoading(false); } })
-              .catch(() => { if (req === reqRef.current) setLoading(false); });
+            // 登录成功后立即拉取用户资料和歌单
+            try {
+              const p = await getUserAccount();
+              if (p) {
+                setProfile(p);
+                getUserPlaylists(p.userId).then(setPlaylists).catch(() => {});
+              }
+            } catch {}
           }
         } catch (e) {
           if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
@@ -395,23 +418,29 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
       {/* 顶部栏：左侧当前标题，右侧云按钮（点击从右滑出模块抽屉） */}
       <div className="shrink-0 flex items-center justify-between px-4 pt-4 pb-2">
         <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">
-          {tab === 'library' ? '猜你喜欢' : T(TAB_TITLE_KEYS[tab])}
+          {tab === 'library'
+            ? '猜你喜欢'
+            : tab === 'login' && loggedIn
+              ? '我的账号'
+              : T(TAB_TITLE_KEYS[tab])}
         </h2>
         <div className="flex items-center gap-2">
-          {loggedIn && profile ? (
+          {loggedIn ? (
             <button
               onClick={() => setTab('login')}
               className="btn-press flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
-              title={`网易云：${profile.nickname}`}
+              title={profile ? `网易云：${profile.nickname}` : '已登录网易云'}
             >
-              {profile.avatarUrl ? (
+              {profile?.avatarUrl ? (
                 <img src={profile.avatarUrl} alt="" className="w-6 h-6 rounded-full object-cover" />
               ) : (
                 <span className="w-6 h-6 rounded-full bg-blue-500/15 text-blue-600 dark:text-blue-400 flex items-center justify-center text-xs font-bold">
-                  {profile.nickname.slice(0, 1)}
+                  {profile ? profile.nickname.slice(0, 1) : '云'}
                 </span>
               )}
-              <span className="text-xs text-neutral-700 dark:text-stone-200 max-w-[80px] truncate">{profile.nickname}</span>
+              <span className="text-xs text-neutral-700 dark:text-stone-200 max-w-[80px] truncate">
+                {profile ? profile.nickname : '已登录'}
+              </span>
             </button>
           ) : (
             <button
@@ -510,35 +539,100 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
         )}
         {tab === 'radio' && <PlaceholderTab title={T('music.moduleDrawer.netease.radio')} desc={T('music.moduleDrawer.netease.radioDesc')} />}
         {tab === 'login' && (
-          <section className="flex flex-col items-center justify-center py-10 gap-4">
-            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{T('music.moduleDrawer.netease.login')}</h2>
+          <section className="py-6">
             {loggedIn ? (
-              <div className="flex flex-col items-center gap-3">
-                <div className="px-3 py-1.5 rounded-lg bg-green-500/15 text-green-600 dark:text-green-400 text-sm">已登录网易云</div>
-                <button onClick={handleLogout} className="btn-press px-4 py-2 rounded-lg bg-neutral-200/60 dark:bg-stone-800/60 text-sm text-neutral-700 dark:text-stone-200 hover:bg-neutral-300/60 dark:hover:bg-stone-700/60 transition-colors">
-                  退出登录
-                </button>
+              <div className="max-w-md mx-auto flex flex-col gap-5">
+                {profile ? (
+                  <div className="flex flex-col items-center gap-3 p-5 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                    <img src={profile.avatarUrl} alt="" className="w-20 h-20 rounded-full object-cover border-2 border-white dark:border-stone-700 shadow-sm" />
+                    <div className="text-center">
+                      <div className="flex items-center justify-center gap-2">
+                        <span className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{profile.nickname}</span>
+                        {profile.vipType > 0 && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/20">VIP</span>
+                        )}
+                      </div>
+                      {profile.signature ? (
+                        <div className="mt-1 text-xs text-neutral-500 dark:text-stone-400 max-w-[260px] truncate">{profile.signature}</div>
+                      ) : null}
+                      <div className="mt-2 text-[10px] text-neutral-400 dark:text-stone-500">ID: {profile.userId}</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-2 p-5 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                    <div className="w-20 h-20 rounded-full bg-blue-500/15 flex items-center justify-center text-blue-600 dark:text-blue-400 text-2xl font-bold">云</div>
+                    <div className="text-sm text-neutral-500 dark:text-stone-400">正在获取用户信息…</div>
+                  </div>
+                )}
+
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">我的歌单</h3>
+                    <span className="text-xs text-neutral-400 dark:text-stone-500">{playlists.length} 个</span>
+                  </div>
+                  {playlists.length > 0 ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      {playlists.map((pl) => (
+                        <button
+                          key={pl.id}
+                          onClick={() => { setTab('listen'); openPlaylist(pl.id, pl.name); }}
+                          className="btn-press text-left group"
+                          title={pl.name}
+                        >
+                          <div className="relative aspect-square rounded-xl overflow-hidden mb-2 bg-neutral-200 dark:bg-stone-700">
+                            <img src={pl.coverImgUrl} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
+                            <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded-md bg-black/40 text-white text-[10px] flex items-center gap-0.5">
+                              <PlayIcon size={10} />
+                              {pl.trackCount}
+                            </div>
+                          </div>
+                          <div className="text-xs text-neutral-800 dark:text-stone-100 line-clamp-2 leading-tight min-h-[2em]">{pl.name}</div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-sm text-neutral-400 dark:text-stone-500 text-center py-8 rounded-2xl bg-neutral-100/50 dark:bg-stone-800/40 border border-dashed border-neutral-200 dark:border-stone-700">
+                      暂无歌单或正在加载
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-center gap-3">
+                  <button
+                    onClick={handleLogout}
+                    className="btn-press px-4 py-2 rounded-xl bg-red-500/10 text-red-600 dark:text-red-400 text-sm hover:bg-red-500/20 transition-colors"
+                  >
+                    退出登录
+                  </button>
+                </div>
               </div>
             ) : qrImg ? (
-              <div className="flex flex-col items-center gap-3">
-                <img src={qrImg} alt="登录二维码" className="w-48 h-48 rounded-lg bg-white p-2" />
-                <div className="text-sm text-neutral-500 dark:text-stone-400 text-center max-w-xs">{qrStatus}</div>
+              <div className="max-w-sm mx-auto flex flex-col items-center gap-4 p-6 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100">扫码登录网易云</h2>
+                <img src={qrImg} alt="登录二维码" className="w-48 h-48 rounded-xl bg-white p-2" />
+                <div className="text-sm text-neutral-500 dark:text-stone-400 text-center min-h-[1.5em]">{qrStatus}</div>
                 <button onClick={startQrLogin} className="btn-press px-4 py-1.5 rounded-lg bg-neutral-200/60 dark:bg-stone-800/60 text-sm text-neutral-700 dark:text-stone-200 hover:bg-neutral-300/60 dark:hover:bg-stone-700/60 transition-colors">
                   刷新二维码
                 </button>
               </div>
             ) : (
-              <div className="flex flex-col items-center gap-3">
+              <div className="max-w-sm mx-auto flex flex-col items-center gap-4 p-8 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-red-500 to-rose-600 flex items-center justify-center text-white shadow-lg">
+                  <CloudIcon size={32} />
+                </div>
+                <div className="text-center">
+                  <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100 mb-1">登录网易云音乐</h2>
+                  <p className="text-xs text-neutral-500 dark:text-stone-400">扫码登录后即可使用推荐、歌单、搜索与收藏同步</p>
+                </div>
                 <button
                   onClick={startQrLogin}
                   disabled={qrLoading}
-                  className="btn-press px-5 py-2.5 rounded-xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 transition-colors disabled:opacity-50"
+                  className="btn-press w-full px-5 py-2.5 rounded-xl bg-red-600 text-white text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-50"
                 >
-                  {qrLoading ? '生成中…' : '登录网易云（扫码）'}
+                  {qrLoading ? '生成中…' : '立即扫码登录'}
                 </button>
-                <div className="text-sm text-neutral-500 dark:text-stone-400 text-center max-w-xs">
-                  {qrStatus || '使用手机网易云 App 扫码登录，登录后可正常使用推荐 / 歌单 / 搜索'}
-                </div>
+                <div className="text-xs text-neutral-400 dark:text-stone-500 text-center min-h-[1.2em]">{qrStatus}</div>
               </div>
             )}
           </section>
