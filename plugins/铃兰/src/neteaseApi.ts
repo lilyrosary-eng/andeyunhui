@@ -6,12 +6,17 @@ const hostApi: any = (window as any).__HOST_API__ || { invoke: async () => ({}) 
 
 let guestCookie: string | null = null;
 
+// 匿名注册用户名（来自 NeteaseCloudMusicApi 4.8.0 的硬编码游客账号）
+const ANONYMOUS_USERNAME = 'MzEwMjcwYmY0Y2Y0ODcwMzU0ZDFkZmIxMmMzMGYyMTkgVlBaanMwNmtrb1BYMGxOVzVUMUJ3Zz09';
+
 export async function ensureGuest(): Promise<void> {
   if (guestCookie) return;
   try {
-    const res: any = await hostApi.invoke('netease_register_guest');
-    if (res && res.cookie) guestCookie = res.cookie;
-    else if (res && res.session && res.session.cookie) guestCookie = res.session.cookie;
+    const { params, encSecKey } = await weapi({ username: ANONYMOUS_USERNAME });
+    const url = 'https://music.163.com/api/register/anonimous';
+    const body = `params=${encodeURIComponent(params)}&encSecKey=${encodeURIComponent(encSecKey)}`;
+    const cookie: string = await hostApi.invoke('netease_register_guest', { url, body });
+    if (cookie) guestCookie = cookie;
   } catch (e) {
     console.warn('[netease] 游客注册失败', e);
   }
@@ -20,11 +25,11 @@ export async function ensureGuest(): Promise<void> {
 async function post(endpoint: string, data: Record<string, any>): Promise<any> {
   await ensureGuest();
   const { params, encSecKey } = await weapi(data);
-  const res: any = await hostApi.invoke('netease_http_post', {
-    endpoint,
-    params,
-    enc_sec_key: encSecKey,
-    cookie: guestCookie || undefined,
+  const res = await hostApi.invoke<string>('netease_http_post', {
+    method: 'POST',
+    url: `https://music.163.com${endpoint}`,
+    body: `params=${encodeURIComponent(params)}&encSecKey=${encodeURIComponent(encSecKey)}`,
+    cookie: guestCookie || '',
   });
   if (typeof res === 'string') {
     try { return JSON.parse(res); } catch { return { raw: res }; }
@@ -57,7 +62,7 @@ function mapTrack(s: any): NeteaseTrack {
 
 // 搜索歌曲（type=1 单曲）
 export async function searchSongs(keyword: string, limit = 30): Promise<NeteaseTrack[]> {
-  const r = await post('/weapi/cloudsearch/get', { s: keyword, type: 1, limit, offset: 0 });
+  const r = await post('/weapi/cloudsearch/get/web', { s: keyword, type: 1, limit, offset: 0 });
   const list = r?.result?.songs || [];
   return list.map(mapTrack);
 }
@@ -65,7 +70,7 @@ export async function searchSongs(keyword: string, limit = 30): Promise<NeteaseT
 // 「现在就听」：优先每日推荐，失败回落到飙升榜
 export async function getListenNow(limit = 20): Promise<NeteaseTrack[]> {
   try {
-    const r = await post('/weapi/discovery/recommend/songs', { limit });
+    const r = await post('/weapi/v1/discovery/recommend/songs', { limit });
     const list = r?.data?.dailySongs || [];
     if (list.length) return list.map(mapTrack);
   } catch (e) {

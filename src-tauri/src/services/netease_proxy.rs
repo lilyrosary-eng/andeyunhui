@@ -37,6 +37,8 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/weapi/artist/top/song",
     // 游客态注册（MUSIC_A），eapi
     "/api/gaia/v1/register/client",
+    // 游客态匿名注册（硬编码用户名，weapi）
+    "/api/register/anonimous",
     // 榜单
     "/weapi/playlist/video/related/rank",
     "/weapi/toplist/artist",
@@ -127,15 +129,18 @@ fn build_headers(cookie: Option<&str>, extra: &HashMap<String, String>) -> reqwe
     headers
 }
 
-/// 游客态注册（MUSIC_A）。返回 NeteaseProxyResponse{status, body}
-/// 该接口走 eapi，路径 /api/gaia/v1/register/client?_pkg=...
-/// 加密已在 TS 端完成，这里仅做 HTTP 转发。
+/// 游客态注册（MUSIC_A）。
+/// 该接口走 eapi/weapi，加密已在 TS 端完成，这里仅做 HTTP 转发并返回 Set-Cookie 字符串。
 #[tauri::command]
-pub async fn netease_register_guest(url: String, body: String) -> Result<NeteaseProxyResponse, String> {
-    proxy_post_internal("POST", &url, &body, None, &HashMap::new()).await
+pub async fn netease_register_guest(url: String, body: String) -> Result<String, String> {
+    let resp = proxy_post_internal("POST", &url, &body, None, &HashMap::new()).await?;
+    if resp.cookies.is_empty() {
+        return Err("no set-cookie in guest register response".into());
+    }
+    Ok(resp.cookies.join("; "))
 }
 
-/// 通用网易云 POST 代理（四件套校验 + 转发 + 回传文本）
+/// 通用网易云 POST 代理（四件套校验 + 转发 + 回传响应体文本）
 /// - url: 完整 https URL（如 https://music.163.com/weapi/cloudsearch/get）
 /// - body: 已加密的 form body（application/x-www-form-urlencoded 文本）
 /// - cookie: 可选会话 Cookie（游客态可空）
@@ -146,15 +151,17 @@ pub async fn netease_http_post(
     body: String,
     cookie: Option<String>,
     headers: Option<HashMap<String, String>>,
-) -> Result<NeteaseProxyResponse, String> {
+) -> Result<String, String> {
     let extra = headers.unwrap_or_default();
-    proxy_post_internal(&method, &url, &body, cookie.as_deref(), &extra).await
+    let resp = proxy_post_internal(&method, &url, &body, cookie.as_deref(), &extra).await?;
+    Ok(resp.body)
 }
 
 #[derive(serde::Serialize, Clone)]
 pub struct NeteaseProxyResponse {
     pub status: u16,
     pub body: String,
+    pub cookies: Vec<String>,
 }
 
 async fn proxy_post_internal(
@@ -192,10 +199,19 @@ async fn proxy_post_internal(
         .map_err(|e| format!("request failed: {e}"))?;
 
     let status = resp.status().as_u16();
+
+    // 先取 Set-Cookie，再消费响应体
+    let cookies: Vec<String> = resp
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+        .collect();
+
     let text = resp
         .text()
         .await
         .map_err(|e| format!("read body: {e}"))?;
 
-    Ok(NeteaseProxyResponse { status, body: text })
+    Ok(NeteaseProxyResponse { status, body: text, cookies })
 }

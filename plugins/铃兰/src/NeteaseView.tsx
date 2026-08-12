@@ -1,7 +1,7 @@
 /// <reference path="../global.d.ts" />
 import React from 'react';
 import {
-  ListenNowIcon, LibraryIcon, RadioIcon, SearchIcon, UserIcon, MusicIcon, ArrowLeftIcon, PlayIcon,
+  CloudIcon, MusicIcon, PlayIcon, SearchIcon,
 } from '../../_shared/icons';
 import { T } from '../../_shared/pluginRuntime';
 import {
@@ -12,13 +12,13 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 export type NeteaseTab = 'listen' | 'library' | 'radio' | 'search' | 'login';
 
-const TABS: { key: NeteaseTab; labelKey: string; descKey: string; icon: React.ReactElement }[] = [
-  { key: 'listen', labelKey: 'music.moduleDrawer.netease.listenNow', descKey: 'music.moduleDrawer.netease.listenNowDesc', icon: React.createElement(ListenNowIcon, { size: 16 }) },
-  { key: 'library', labelKey: 'music.moduleDrawer.netease.library', descKey: 'music.moduleDrawer.netease.libraryDesc', icon: React.createElement(LibraryIcon, { size: 16 }) },
-  { key: 'radio', labelKey: 'music.moduleDrawer.netease.radio', descKey: 'music.moduleDrawer.netease.radioDesc', icon: React.createElement(RadioIcon, { size: 16 }) },
-  { key: 'search', labelKey: 'music.moduleDrawer.netease.search', descKey: 'music.moduleDrawer.netease.searchDesc', icon: React.createElement(SearchIcon, { size: 16 }) },
-  { key: 'login', labelKey: 'music.moduleDrawer.netease.login', descKey: 'music.moduleDrawer.netease.loginDesc', icon: React.createElement(UserIcon, { size: 16 }) },
-];
+const TAB_TITLE_KEYS: Record<NeteaseTab, string> = {
+  listen: 'music.moduleDrawer.netease.listenNow',
+  library: 'music.moduleDrawer.netease.library',
+  radio: 'music.moduleDrawer.netease.radio',
+  search: 'music.moduleDrawer.netease.search',
+  login: 'music.moduleDrawer.netease.login',
+};
 
 export interface PlayableTrack {
   id: string;
@@ -63,6 +63,8 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
   const [keyword, setKeyword] = useState('');
   const [playingId, setPlayingId] = useState<number | null>(null);
   const reqRef = useRef(0);
+
+  useEffect(() => { setTab(initialTab); }, [initialTab]);
 
   // 「现在就听」自动拉取
   useEffect(() => {
@@ -123,40 +125,23 @@ export function NeteaseView({ initialTab, onBack, onPlay }: NeteaseViewProps) {
   }, [tracks, onPlay]);
 
   return (
-    <div className="flex-1 flex h-full overflow-hidden relative">
-      {/* 二级侧栏导航 */}
-      <div className="w-44 shrink-0 h-full border-r border-neutral-200/60 dark:border-stone-700/60 bg-neutral-50/40 dark:bg-stone-900/40 p-2 flex flex-col">
+    <div className="flex-1 flex flex-col h-full overflow-hidden relative bg-white dark:bg-[#1e1e1e]">
+      {/* 顶部返回栏（替代左侧二级侧栏） */}
+      <div className="shrink-0 flex items-center gap-2 px-4 pt-4 pb-2">
         <button
           onClick={onBack}
-          className="btn-press mb-2 flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors text-sm"
+          className="btn-press flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
+          title={T('music.moduleDrawer.localMusicDesc')}
         >
-          <ArrowLeftIcon size={16} />
-          <span>{T('music.moduleDrawer.placeholder')}</span>
+          <CloudIcon size={16} />
+          <span>{T('music.moduleDrawer.localMusicDesc')}</span>
         </button>
-        {TABS.map((t) => {
-          const active = tab === t.key;
-          return (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              className={`btn-press group flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-colors text-left ${
-                active
-                  ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400'
-                  : 'text-neutral-600 dark:text-stone-300 hover:bg-neutral-200/50 dark:hover:bg-stone-800/50'
-              }`}
-            >
-              <span className="shrink-0">{t.icon}</span>
-              <span className="min-w-0">
-                <span className="block text-sm font-medium truncate">{T(t.labelKey)}</span>
-                <span className="block text-[11px] text-neutral-400 dark:text-stone-500 truncate">{T(t.descKey)}</span>
-              </span>
-            </button>
-          );
-        })}
+        <span className="text-neutral-300 dark:text-stone-600">/</span>
+        <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">{T(TAB_TITLE_KEYS[tab])}</h2>
       </div>
 
       {/* 主内容区 */}
-      <div className="flex-1 h-full overflow-y-auto p-4">
+      <div className="flex-1 h-full overflow-y-auto px-4 pb-4">
         {tab === 'listen' && (
           <section>
             <div className="flex items-center justify-between mb-3">
