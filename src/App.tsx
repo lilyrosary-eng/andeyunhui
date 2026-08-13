@@ -617,10 +617,10 @@ function App() {
     }}>
       <div className="flex flex-col h-screen w-screen main-panel-bg text-foreground antialiased overflow-hidden">
         <Titlebar />
-        <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-1 min-w-0 overflow-hidden">
           <AppNav mainPluginIds={mainPluginIds} />
           <HostSidebar />
-          <div className="flex flex-1 h-full overflow-hidden">
+          <div className="flex flex-1 min-w-0 h-full overflow-hidden">
             {renderModule()}
           </div>
         </div>

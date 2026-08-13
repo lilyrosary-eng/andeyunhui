@@ -1,11 +1,12 @@
 /// <reference path="../global.d.ts" />
 import React from 'react';
+import { ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import {
   CloudIcon, HeartIcon, MusicIcon, PlayIcon, SearchIcon,
 } from '../../_shared/icons';
 import { T } from '../../_shared/pluginRuntime';
 import {
-  searchSongs, getListenNow, getTopList, getSongUrl, isLoggedIn, logoutNetease,
+  searchSongs, getListenNow, getTopList, getPersonalizedPlaylists, getSongUrl, isLoggedIn, logoutNetease,
   neteaseQrKey, neteaseQrCreate, neteaseQrCheck,
   getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr, likeNeteaseSong,
   type NeteaseTrack, type NeteaseProfile, type NeteasePlaylistItem,
@@ -103,6 +104,11 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const [playingId, setPlayingId] = useState<number | null>(null);
   const [likedSongs, setLikedSongs] = useState<Set<number>>(new Set()); // 已写入网易云「我喜欢的音乐」的歌曲
   const reqRef = useRef(0);
+  // 顶部个人资料按钮用作「进入账号 / 返回」切换，记录进入前的 tab
+  const previousTabRef = useRef<NeteaseTab>('listen');
+  // 歌单/榜单全量曲目缓存：getTopList 已一次性返回完整列表（playlist/detail 不支持 offset 切片），
+  // 下拉分页改为从这份缓存纯前端切片续显，避免重复请求导致的无限重复。
+  const allTracksRef = useRef<NeteaseTrack[]>([]);
   // 无限下拉分页状态：offset/total 跟踪已加载与总量，hasMore 判断是否还能继续拉
   const [offset, setOffset] = useState(0);
   const [total, setTotal] = useState(0);
@@ -111,6 +117,12 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const PAGE = 30; // 每页拉取条数
   // 「现在就听」精选歌单（模块化网格）：并行拉取几个官方榜单的封面与曲目数
   const [featured, setFeatured] = useState<{ id: number; name: string; cover: string; trackCount: number }[]>([]);
+  // 「为你推荐」个性化歌单流：登录态个性化 / 游客态热门（对齐 MusicStorm /personalized/playlist）
+  const [personalized, setPersonalized] = useState<{ id: number; name: string; coverUrl: string; trackCount?: number; copywriter?: string }[]>([]);
+  const [personalizedLoaded, setPersonalizedLoaded] = useState(false);
+  const [personalizedError, setPersonalizedError] = useState('');
+  const recommendScrollRef = useRef<HTMLDivElement>(null);
+  const hotScrollRef = useRef<HTMLDivElement>(null);
   // 本地预览上限：避免一次性下拉拉取成千上万首导致 DOM 爆炸、主线程卡死、
   // 顶部云按钮（tab 切换）失去响应。到达上限后停止续拉并提示。
   const MAX_ITEMS = 300;
@@ -267,7 +279,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     if (tab !== 'listen') return;
     if (playlistId != null) return; // 正在查看某歌单详情，不要重置回网格
     setPlaylistId(null); // 离开歌单分页模式
-    sourceNameRef.current = T('music.moduleDrawer.netease.listenNow');
+    sourceNameRef.current = T('music.moduleDrawer.netease.listenNow') || '热榜';
     const req = ++reqRef.current;
     setLoading(false);
     setError('');
@@ -291,6 +303,23 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
         return { ...f, cover: '', trackCount: 0 };
       }
     })).then((arr) => { if (req === reqRef.current) setFeatured(arr); });
+    // 并行拉取「为你推荐」个性化歌单（休闲态个性化 / 游客态热门），对齐 MusicStorm
+    setPersonalizedError('');
+    getPersonalizedPlaylists(24)
+      .then((arr) => {
+        if (req !== reqRef.current) return;
+        console.log('[netease] personalized/playlist ok, count=', arr.length);
+        setPersonalized(arr);
+        setPersonalizedLoaded(true);
+      })
+      .catch((err) => {
+        if (req !== reqRef.current) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn('[netease] personalized/playlist failed:', msg);
+        setPersonalized([]);
+        setPersonalizedError(msg || '推荐加载失败');
+        setPersonalizedLoaded(true);
+      });
   }, [tab]);
 
   // 搜索（防抖）：每次关键词变化时重置分页，从头加载
@@ -376,13 +405,16 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
       setLoading(true);
       setError('');
       setOffset(0);
-      const res = await getTopList(id, PAGE, 0);
+      const res = await getTopList(id, 100000, 0);
       if (req !== reqRef.current) return;
-      setTracks(res.tracks);
-      setTotal(res.total);
-      setOffset(res.tracks.length);
-      setReachedLimit(res.tracks.length >= MAX_ITEMS);
-      setHasMore(res.tracks.length < res.total && res.tracks.length < MAX_ITEMS);
+      // 全量缓存：playlist/detail 一次性返回完整列表，下拉分页从缓存纯前端切片
+      allTracksRef.current = res.tracks;
+      const shown = res.tracks.slice(0, MAX_ITEMS);
+      setTracks(shown);
+      setTotal(res.total || res.tracks.length);
+      setOffset(shown.length);
+      setReachedLimit(shown.length >= MAX_ITEMS);
+      setHasMore(shown.length < (res.total || res.tracks.length) && shown.length < MAX_ITEMS);
       setLoading(false);
     } catch (e) {
       if (req === reqRef.current) { setError(String((e as any)?.message || e)); setLoading(false); }
@@ -398,20 +430,22 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     setLoadingMore(true);
     const req = reqRef.current;
     try {
-      const res = await getTopList(playlistId, PAGE, offset);
-      if (req !== reqRef.current) return;
-      setTracks((prev) => [...prev, ...res.tracks]);
-      const next = offset + res.tracks.length;
+      // 纯前端切片：从 allTracksRef 全量缓存中按当前已显示数续取，不再请求接口
+      const all = allTracksRef.current;
+      const nextSlice = all.slice(offset, Math.min(offset + PAGE, MAX_ITEMS));
+      if (!nextSlice.length) { setHasMore(false); return; }
+      setTracks((prev) => [...prev, ...nextSlice]);
+      const next = offset + nextSlice.length;
       setOffset(next);
       const limit = next >= MAX_ITEMS;
       setReachedLimit(limit);
-      setHasMore(!limit && next < res.total);
+      setHasMore(!limit && next < (total || all.length));
     } catch (e) {
       console.warn('[netease] 加载歌单下一页失败', e);
     } finally {
       if (req === reqRef.current) { setLoadingMore(false); loadingMoreRef.current = false; }
     }
-  }, [playlistId, offset, hasMore]);
+  }, [playlistId, offset, hasMore, total]);
 
   // 触底哨兵：用 IntersectionObserver 监听底部元素，滚动到附近时按需加载下一页
   useEffect(() => {
@@ -431,8 +465,21 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     const src = sourceNameRef.current;
     if (src) return src;
     if (tab === 'search') return `搜索：${keyword.trim()}`;
-    return T('music.moduleDrawer.netease.listenNow');
+    return T('music.moduleDrawer.netease.listenNow') || '热榜';
   }, [tab, keyword]);
+
+  const scrollRecommend = (dir: 'left' | 'right') => {
+    const el = recommendScrollRef.current;
+    if (!el) return;
+    const step = Math.max(el.clientWidth * 0.75, 200);
+    el.scrollBy({ left: dir === 'left' ? -step : step, behavior: 'smooth' });
+  };
+  const scrollHot = (dir: 'left' | 'right') => {
+    const el = hotScrollRef.current;
+    if (!el) return;
+    const step = Math.max(el.clientWidth * 0.75, 200);
+    el.scrollBy({ left: dir === 'left' ? -step : step, behavior: 'smooth' });
+  };
 
   const handlePlayAll = useCallback(async () => {
     const playlist: PlayableTrack[] = [];
@@ -519,20 +566,42 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   }, [tracks, onPlay]);
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden relative bg-white dark:bg-[#1e1e1e]">
+    <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden overflow-x-hidden relative bg-white dark:bg-[#1e1e1e]">
       {/* 顶部栏：左侧当前标题，右侧云按钮（点击从右滑出模块抽屉） */}
-      <div className="shrink-0 flex items-center justify-between px-4 pt-4 pb-2">
-        <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">
-          {tab === 'library'
-            ? '猜你喜欢'
-            : tab === 'login' && loggedIn
-              ? '我的账号'
-              : T(TAB_TITLE_KEYS[tab])}
-        </h2>
+      <div className="shrink-0 flex items-center justify-between min-w-0 px-4 pt-4 pb-2">
+        {playlistId != null ? (
+          <div className="flex items-center gap-1 min-w-0">
+            <button
+              onClick={() => setPlaylistId(null)}
+              className="btn-press flex items-center justify-center p-1.5 -ml-1 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
+              title={T(TAB_TITLE_KEYS.listen) || '现在就听'}
+            >
+              <ChevronLeft size={20} />
+            </button>
+            <span className="text-sm font-semibold text-neutral-800 dark:text-stone-100 truncate">
+              {sourceNameRef.current || (T(TAB_TITLE_KEYS.listen) || '热榜')}
+            </span>
+          </div>
+        ) : (
+          <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 truncate min-w-0">
+            {tab === 'library'
+              ? '猜你喜欢'
+              : tab === 'login' && loggedIn
+                ? '我的账号'
+                : T(TAB_TITLE_KEYS[tab])}
+          </h2>
+        )}
         <div className="flex items-center gap-2">
           {loggedIn ? (
             <button
-              onClick={() => setTab('login')}
+              onClick={() => {
+                if (tab === 'login') {
+                  setTab(previousTabRef.current);
+                } else {
+                  previousTabRef.current = tab;
+                  setTab('login');
+                }
+              }}
               className="btn-press flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
               title={profile ? `网易云：${profile.nickname}` : '已登录网易云'}
             >
@@ -566,11 +635,11 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
       </div>
 
       {/* 主内容区 */}
-      <div ref={scrollRef} className="flex-1 h-full overflow-y-auto px-4 pb-4">
+      <div ref={scrollRef} className="flex-1 h-full min-w-0 overflow-y-auto overflow-x-hidden px-4 pb-4">
         {tab === 'listen' && (
-          <section>
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{T('music.moduleDrawer.netease.listenNow')}</h2>
+          <section className="min-w-0">
+            <div className="flex items-center justify-between min-w-0 mb-3">
+              <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100 truncate min-w-0">{T('music.moduleDrawer.netease.listenNow')}</h2>
               {tracks.length > 0 && !playlistId && (
                 <button onClick={handlePlayAll} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/15 text-blue-600 dark:text-blue-400 text-sm hover:bg-blue-500/25 transition-colors">
                   <PlayIcon size={14} />
@@ -579,32 +648,176 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
               )}
             </div>
             {!playlistId ? (
-              // 「现在就听」模块化：精选歌单网格（和网易云首页推荐对齐），点击进入歌单详情
-              <div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 mb-5">
-                  {featured.map((f) => (
-                    <button
-                      key={f.id}
-                      onClick={() => openPlaylist(f.id, f.name)}
-                      className="btn-press group flex flex-col text-left"
-                    >
-                      <div className="relative aspect-square rounded-xl overflow-hidden bg-neutral-200/60 dark:bg-stone-800/60 mb-2">
-                        {f.cover ? (
-                          <img src={f.cover} alt={f.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+              // 首页推荐流：先「为你推荐」（Hero 置顶 + 横向滑动小卡片），后「热榜」官方榜单
+              <React.Fragment>
+                {/* 「为你推荐」个性化歌单流：登录态个性化 / 游客态热门，对齐 MusicStorm 首页 */}
+                <div className="mb-5">
+                  <div className="flex items-center gap-1.5 min-w-0 mb-3">
+                    <Sparkles size={16} className="text-fuchsia-500 dark:text-fuchsia-400 flex-shrink-0" />
+                    <h3 className="text-base font-semibold text-neutral-800 dark:text-stone-100 truncate min-w-0">
+                      {loggedIn ? '为你推荐' : '热门歌单'}
+                    </h3>
+                    {loggedIn && (
+                      <span className="text-[10px] text-fuchsia-500/80 dark:text-fuchsia-400/80 truncate min-w-0">
+                        根据你的口味推荐
+                      </span>
+                    )}
+                  </div>
+                  {!personalizedLoaded ? (
+                    <div className="text-xs text-neutral-500 dark:text-stone-400">加载推荐中…</div>
+                  ) : personalizedError ? (
+                    <div className="flex flex-col gap-2 text-xs text-red-500 dark:text-red-400">
+                      <div>推荐加载失败：{personalizedError}</div>
+                      <button
+                        onClick={() => {
+                          setPersonalizedLoaded(false);
+                          setPersonalizedError('');
+                          getPersonalizedPlaylists(24)
+                            .then((arr) => { setPersonalized(arr); setPersonalizedLoaded(true); })
+                            .catch((err) => { setPersonalized([]); setPersonalizedError(err instanceof Error ? err.message : String(err)); setPersonalizedLoaded(true); });
+                        }}
+                        className="self-start px-3 py-1.5 rounded-lg bg-neutral-100 dark:bg-stone-800 hover:bg-neutral-200 dark:hover:bg-stone-700 text-neutral-700 dark:text-stone-200 transition-colors"
+                      >
+                        重试
+                      </button>
+                    </div>
+                  ) : personalized.length === 0 ? (
+                    <div className="text-xs text-neutral-500 dark:text-stone-400">暂无推荐歌单</div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* 关联度最高的推荐歌单：圆角正方形 Hero 置顶 */}
+                      <button
+                        onClick={() => openPlaylist(personalized[0].id, personalized[0].name)}
+                        className="btn-press group relative w-full max-w-full h-44 sm:h-52 rounded-2xl overflow-hidden text-left"
+                        title={personalized[0].copywriter || personalized[0].name}
+                      >
+                        {personalized[0].coverUrl ? (
+                          <img src={personalized[0].coverUrl} alt={personalized[0].name} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center text-2xl font-bold text-white/80 bg-gradient-to-br from-blue-500/70 to-fuchsia-500/70">
-                            {f.name.slice(0, 1)}
+                          <div className="absolute inset-0 flex items-center justify-center text-4xl font-bold text-white/80 bg-gradient-to-br from-fuchsia-500/70 to-blue-500/70">
+                            {personalized[0].name.slice(0, 1)}
                           </div>
                         )}
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+                        <div className="absolute bottom-0 left-0 right-0 p-4">
+                          <div className="text-xs text-fuchsia-300 font-medium mb-1">
+                            {loggedIn ? '为你精选' : '热门推荐'}
+                          </div>
+                          <div className="text-lg font-bold text-white truncate">{personalized[0].name}</div>
+                          <div className="text-xs text-white/70">
+                            {personalized[0].trackCount ? `${personalized[0].trackCount} 首 · ` : ''}{personalized[0].copywriter || '今日推荐'}
+                          </div>
+                        </div>
+                      </button>
+
+                      {/* 其余推荐：横向滑动小卡片，左右翻页 */}
+                      <div className="relative w-full min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => scrollRecommend('left')}
+                          className="absolute left-0 top-[calc(50%-12px)] z-10 flex h-7 w-7 -ml-1 items-center justify-center rounded-full bg-background/90 text-foreground shadow hover:bg-background border border-border/40 opacity-80 hover:opacity-100 transition-opacity"
+                          aria-label="向左翻页"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => scrollRecommend('right')}
+                          className="absolute right-0 top-[calc(50%-12px)] z-10 flex h-7 w-7 -mr-1 items-center justify-center rounded-full bg-background/90 text-foreground shadow hover:bg-background border border-border/40 opacity-80 hover:opacity-100 transition-opacity"
+                          aria-label="向右翻页"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                        <div
+                          ref={recommendScrollRef}
+                          className="flex gap-3 overflow-x-auto min-w-0 pb-2 scrollbar-thin scroll-smooth"
+                        >
+                          {personalized.slice(1, 13).map((p) => (
+                            <button
+                              key={p.id}
+                              onClick={() => openPlaylist(p.id, p.name)}
+                              className="btn-press group flex-shrink-0 flex flex-col text-left w-28 sm:w-32"
+                              title={p.copywriter || p.name}
+                            >
+                              <div className="relative aspect-square rounded-xl overflow-hidden bg-neutral-200/60 dark:bg-stone-800/60 mb-2">
+                                {p.coverUrl ? (
+                                  <img src={p.coverUrl} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center text-xl font-bold text-white/80 bg-gradient-to-br from-fuchsia-500/70 to-blue-500/70">
+                                    {p.name.slice(0, 1)}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="text-xs font-medium text-neutral-800 dark:text-stone-100 line-clamp-2">{p.name}</div>
+                              <div className="text-[10px] text-neutral-500 dark:text-stone-400 truncate">
+                                {p.trackCount ? `${p.trackCount} 首` : '歌单'}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                      <div className="text-sm font-medium text-neutral-800 dark:text-stone-100 truncate">{f.name}</div>
-                      <div className="text-xs text-neutral-500 dark:text-stone-400">
-                        {f.trackCount > 0 ? `共 ${f.trackCount} 首` : '榜单'}
-                      </div>
-                    </button>
-                  ))}
+                    </div>
+                  )}
                 </div>
-              </div>
+
+                {/* 「热榜」官方榜单横向小卡片 */}
+                <div className="mb-2">
+                  <div className="flex items-center justify-between min-w-0 mb-3">
+                    <h3 className="text-base font-semibold text-neutral-800 dark:text-stone-100 truncate min-w-0">热榜</h3>
+                    {tracks.length > 0 && (
+                      <button onClick={handlePlayAll} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/15 text-blue-600 dark:text-blue-400 text-sm hover:bg-blue-500/25 transition-colors">
+                        <PlayIcon size={14} />
+                        {T('music.track.playAll') || '播放全部'}
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative w-full min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => scrollHot('left')}
+                      className="absolute left-0 top-[calc(50%-12px)] z-10 flex h-7 w-7 -ml-1 items-center justify-center rounded-full bg-background/90 text-foreground shadow hover:bg-background border border-border/40 opacity-80 hover:opacity-100 transition-opacity"
+                      aria-label="向左翻页"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => scrollHot('right')}
+                      className="absolute right-0 top-[calc(50%-12px)] z-10 flex h-7 w-7 -mr-1 items-center justify-center rounded-full bg-background/90 text-foreground shadow hover:bg-background border border-border/40 opacity-80 hover:opacity-100 transition-opacity"
+                      aria-label="向右翻页"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                    <div
+                      ref={hotScrollRef}
+                      className="flex gap-3 overflow-x-auto min-w-0 pb-2 scrollbar-thin scroll-smooth"
+                    >
+                      {featured.map((f) => (
+                        <button
+                          key={f.id}
+                          onClick={() => openPlaylist(f.id, f.name)}
+                          className="btn-press group flex-shrink-0 flex flex-col text-left w-28 sm:w-32"
+                          title={f.name}
+                        >
+                          <div className="relative aspect-square rounded-xl overflow-hidden bg-neutral-200/60 dark:bg-stone-800/60 mb-2">
+                            {f.cover ? (
+                              <img src={f.cover} alt={f.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center text-xl font-bold text-white/80 bg-gradient-to-br from-blue-500/70 to-fuchsia-500/70">
+                                {f.name.slice(0, 1)}
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-xs font-medium text-neutral-800 dark:text-stone-100 line-clamp-2">{f.name}</div>
+                          <div className="text-[10px] text-neutral-500 dark:text-stone-400">
+                            {f.trackCount > 0 ? `共 ${f.trackCount} 首` : '榜单'}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </React.Fragment>
             ) : (
               renderBody()
             )}

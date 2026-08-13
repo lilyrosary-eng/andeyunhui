@@ -370,6 +370,7 @@ const PATHS = {
   userAccount: '/user/account',
   userPlaylist: '/user/playlist',
   toplist: '/toplist',
+  personalized: '/personalized',
   likeSong: '/song/like',
   subscribePlaylist: '/playlist/subscribe',
   manipulatePlaylistTracks: '/playlist/manipulate/tracks',
@@ -393,11 +394,15 @@ function resolveModule(path: string, params: Record<string, any>): { uri: string
       // 我的歌单同样走 eapi，避免登录态 cookie 在 weapi 下校验失败
       return { uri: '/api/user/playlist', data: { uid: params.uid, limit: params.limit ?? 30, offset: params.offset ?? 0, includeVideo: true }, crypto: 'eapi' };
     case PATHS.toplist:
-      // 分页：offset>0 时按 [offset, offset+limit) 切片取后续曲目；
-      // offset=0 时用 n 一次性拉取（兼容歌单首屏/播放全部场景）。
-      return params.offset
-        ? { uri: '/api/v3/playlist/detail', data: { id: params.id, offset: params.offset, limit: params.limit ?? 30, s: 8 }, crypto: 'eapi' }
-        : { uri: '/api/v3/playlist/detail', data: { id: params.id, n: params.limit ?? 20, s: 8 }, crypto: 'eapi' };
+      // 对齐 MusicStorm fetchPlaylistDetail：playlist/detail 不支持真正的 offset 切片，
+      // tracks 始终返回完整列表，offset/limit 会被忽略。故一次性 n=100000 全量拉取，
+      // 不走分页，避免 hasMore 永真导致的下拉无限重复。
+      return { uri: '/api/v6/playlist/detail', data: { id: params.id, n: 100000, s: params.s ?? 8 }, crypto: 'eapi' };
+    case PATHS.personalized:
+      // 为你推荐歌单：个性化（登录态）或热门（游客态）。
+      // 注意：weapi 通道实测返回空 body（网易云对游客 weapi 收紧），改走 eapi（interfacepc 域），
+      // 与 playlist/detail、userAccount 等已验证可用的通道一致，可稳定返回热门/个性化歌单。
+      return { uri: '/api/personalized/playlist', data: { limit: params.limit ?? 24, total: true, n: 1000 }, crypto: 'eapi' };
     case PATHS.likeSong:
       return { uri: '/api/song/like', data: { id: params.id, like: params.like, alg: params.alg ?? 'itembased', time: params.time ?? '3' }, crypto: 'weapi' };
     case PATHS.subscribePlaylist:
@@ -628,15 +633,15 @@ export async function getListenNow(limit = 20): Promise<NeteaseTrack[]> {
   return (await getTopList(19723756, limit)).tracks; // 飙升榜回落
 }
 
-// 歌单/榜单详情：eapi /api/v6/playlist/detail（或 /api/v3/playlist/detail）
-// 支持 offset 分页以实现无限下拉；返回结构含总数 total，便于判断是否到底。
+// 歌单/榜单详情：eapi /api/v6/playlist/detail，一次性返回完整 tracks（不支持 offset 切片）。
+// 返回结构含总数 total，便于前端判断是否到底（已全量则无需分页）。
 export interface TopListResult {
   tracks: NeteaseTrack[];
   total: number;
 }
 export async function getTopList(
   id: number,
-  limit = 20,
+  limit = 100000,
   offset = 0,
 ): Promise<TopListResult> {
   const r = await neteaseRequest(PATHS.toplist, { id, limit, offset });
@@ -644,7 +649,35 @@ export async function getTopList(
   const total = typeof r?.playlist?.trackCount === 'number' ? r.playlist.trackCount : list.length;
   // privileges 数组与 tracks 按 index 对应，含 fee / maxbr 等音质与版权信息
   const privs = r?.playlist?.privileges || [];
-  return { tracks: list.slice(0, limit).map((s: any, i: number) => mapTrack(s, privs[i])), total };
+  return { tracks: list.map((s: any, i: number) => mapTrack(s, privs[i])), total };
+}
+
+// 为你推荐歌单：weapi /api/personalized/playlist（登录态个性化，游客态返回热门歌单）。
+// 对齐 MusicStorm fetchRecommendPlaylists，用于「现在就听」的个性化歌单流。
+export interface NeteasePlaylistCard {
+  id: number;
+  name: string;
+  coverUrl: string;
+  trackCount?: number;
+  copywriter?: string;
+}
+export async function getPersonalizedPlaylists(limit = 24): Promise<NeteasePlaylistCard[]> {
+  const r = await neteaseRequest(PATHS.personalized, { limit });
+  console.log('[netease] personalized/playlist raw=', JSON.stringify(r).slice(0, 500));
+  // 兼容多种返回结构：result / recommend / 嵌套 data.result
+  const arr: any[] =
+    (Array.isArray(r?.result) ? r.result : null) ||
+    (Array.isArray(r?.recommend) ? r.recommend : null) ||
+    (Array.isArray(r?.data?.result) ? r.data.result : null) ||
+    (Array.isArray(r?.data?.recommend) ? r.data.recommend : null) ||
+    [];
+  return arr.map((it: any) => ({
+    id: Number(it.id),
+    name: it.name,
+    coverUrl: it.picUrl || it.coverImgUrl || it.coverUrl || it.imageUrl || '',
+    trackCount: typeof it.trackCount === 'number' ? it.trackCount : undefined,
+    copywriter: it.copywriter || undefined,
+  }));
 }
 
 // 获取播放地址：eapi /api/song/enhance/player/url

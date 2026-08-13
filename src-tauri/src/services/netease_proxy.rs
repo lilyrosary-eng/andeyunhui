@@ -41,6 +41,7 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/weapi/user/playlist",
     "/eapi/nuser/account/get",
     "/eapi/user/playlist",
+    "/eapi/v6/playlist/detail",
     // 游客态注册（MUSIC_A），eapi
     "/api/gaia/v1/register/client",
     // 游客态匿名注册（deviceId 派生 username，weapi）
@@ -62,6 +63,11 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/weapi/playlist/video/related/rank",
     "/weapi/toplist/artist",
     "/weapi/toplist/detail",
+    // 个性化推荐（登录态个性化 / 游客态热门）
+    "/weapi/personalized/playlist",
+    "/eapi/personalized/playlist",
+    "/weapi/recommend/songs",
+    "/weapi/v3/discovery/recommend/songs",
 ];
 
 // 3) 允许的 HTTP 方法（仅 POST，无 GET/PUT/DELETE）

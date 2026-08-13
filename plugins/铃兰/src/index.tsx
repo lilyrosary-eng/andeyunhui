@@ -1938,8 +1938,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onSearchChange={setSearchQuery}
         />
       )}
-      <div className="flex-1 flex flex-col min-h-0 bg-[#f5f5f0] dark:bg-[#1c1917]">
-        <div className="flex-1 min-h-0 overflow-hidden relative">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 bg-[#f5f5f0] dark:bg-[#1c1917]">
+        <div className="flex-1 min-w-0 min-h-0 overflow-hidden relative">
           {neteaseOpen ? (
             <NeteaseView
               ref={neteaseViewRef}
@@ -1983,7 +1983,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           ) : showStats ? (
             <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />
           ) : showSettings ? (
-            <div className="h-full overflow-y-auto">
+            <div className="h-full min-w-0 overflow-y-auto">
               <MusicSettingsPanel
                 onClose={() => setShowSettings(false)}
                 rootPaths={rootPaths}
