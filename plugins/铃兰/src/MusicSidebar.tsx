@@ -32,6 +32,7 @@ interface MusicSidebarProps {
   onDeletePlaylist?: (playlist: Playlist) => void;
   onOpenModuleSettings?: () => void;
   onOpenStats?: () => void;
+  statsActive?: boolean;
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
 }
@@ -71,7 +72,7 @@ function PlusIcon() {
   });
 }
 
-export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, onSelectFolder, onCreatePlaylist, onRenamePlaylist, onDeletePlaylist, onOpenModuleSettings, onOpenStats, searchQuery, onSearchChange }: MusicSidebarProps) {
+export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, onSelectFolder, onCreatePlaylist, onRenamePlaylist, onDeletePlaylist, onOpenModuleSettings, onOpenStats, statsActive, searchQuery, onSearchChange }: MusicSidebarProps) {
   useLang();
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [showNewInput, setShowNewInput] = useState(false);
@@ -160,9 +161,13 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
     ? React.createElement('button', {
         key: 'open-stats',
         onClick: () => onOpenStats(),
-        title: T('music.sidebar.stats'),
-        'aria-label': T('music.sidebar.stats'),
-        className: 'p-2 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
+        title: statsActive ? T('music.sidebar.close_stats') || '关闭统计' : T('music.sidebar.stats'),
+        'aria-label': statsActive ? T('music.sidebar.close_stats') || '关闭统计' : T('music.sidebar.stats'),
+        className: `p-2 rounded-lg transition-colors ${
+          statsActive
+            ? 'text-[var(--element-color-raw)] bg-black/5 dark:bg-white/5'
+            : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5'
+        }`,
         children: BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊',
       })
     : null;

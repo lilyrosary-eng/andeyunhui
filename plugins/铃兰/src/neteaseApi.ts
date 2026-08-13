@@ -1045,11 +1045,12 @@ export async function getUserAccount(): Promise<NeteaseProfile | null> {
   if (!acc) return null;
   const p = r?.profile || r?.account;
   return {
-    userId: acc.id ?? p?.userId ?? 0,
+    // 优先使用 profile.userId；account.id 在某些登录态下可能是 accountId 而非用户 uid，会报"歌单不存在"
+    userId: p?.userId ?? acc?.id ?? 0,
     nickname: p?.nickname ?? acc.nickname ?? '网易云用户',
     avatarUrl: p?.avatarUrl ?? '',
     signature: p?.signature,
-    vipType: acc.vipType ?? p?.vipType ?? 0,
+    vipType: p?.vipType ?? acc?.vipType ?? 0,
   };
 }
 

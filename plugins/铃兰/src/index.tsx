@@ -8,6 +8,8 @@ import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
 import { NeteaseView, type PlayableTrack, type TempPlaylist, type NeteaseViewHandle } from './NeteaseView';
 import NeteaseSidebar, { type NeteaseTempItem } from './NeteaseSidebar';
+import NeteaseStatsView from './NeteaseStatsView';
+import NeteaseSettingsPanel from './NeteaseSettingsPanel';
 import { isLikedPlaylist, likeNeteaseSong, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
@@ -1930,7 +1932,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           }}
           onCloseNetease={() => setNeteaseOpen(false)}
           onOpenModuleSettings={handleOpenModuleSettings}
-          onOpenStats={() => setShowStats(true)}
+          onOpenStats={() => setShowStats(v => !v)}
+          statsActive={showStats}
           onSelectFolder={handleAddRoot}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
@@ -1945,14 +1948,54 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onRenamePlaylist={handleRenamePlaylist}
           onDeletePlaylist={handleDeletePlaylist}
           onOpenModuleSettings={handleOpenModuleSettings}
-          onOpenStats={() => setShowStats(true)}
+          onOpenStats={() => setShowStats(v => !v)}
+          statsActive={showStats}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
         />
       )}
       <div className="flex-1 flex flex-col min-w-0 min-h-0 bg-[#f5f5f0] dark:bg-[#1c1917]">
         <div className="flex-1 min-w-0 min-h-0 overflow-hidden relative">
-          {neteaseOpen ? (
+          {showStats ? (
+            neteaseOpen ? (
+              <NeteaseStatsView onClose={() => setShowStats(false)} />
+            ) : (
+              <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />
+            )
+          ) : showSettings ? (
+            neteaseOpen ? (
+              <NeteaseSettingsPanel onClose={() => setShowSettings(false)} />
+            ) : (
+              <div className="h-full min-w-0 overflow-y-auto">
+                <MusicSettingsPanel
+                  onClose={() => setShowSettings(false)}
+                  rootPaths={rootPaths}
+                  onRemoveRoot={handleRemoveRoot}
+                  onAddRoot={handleAddRoot}
+                  volume={volume}
+                  onVolumeChange={handleVolume}
+                  lyricsFontSize={lyricsFontSize}
+                  onLyricsFontSize={handleLyricsFontSize}
+                  lyricsShowNextLine={lyricsShowNextLine}
+                  onLyricsShowNextLine={handleLyricsShowNextLine}
+                  onlineLyricsEnabled={onlineLyricsEnabled}
+                  onOnlineLyricsToggle={handleOnlineLyricsToggle}
+                  localLrcFirst={localLrcFirst}
+                  onLocalLrcFirstToggle={handleLocalLrcFirstToggle}
+                  showAlbum={showAlbum}
+                  onShowAlbumToggle={handleShowAlbumToggle}
+                  playMode={playMode}
+                  onPlayModeChange={handlePlayModeChange}
+                  lyricsAlign={lyricsAlign}
+                  onLyricsAlignChange={handleLyricsAlignChange}
+                  onCleanInvalidFiles={handleCleanInvalidFiles}
+                  onRefreshAllFolders={handleRefreshAllFolders}
+                  totalTracks={playlists.reduce((sum, p) => sum + p.tracks.length, 0)}
+                  playlistCount={playlists.length}
+                />
+              </div>
+            )
+          ) : neteaseOpen ? (
             <NeteaseView
               ref={neteaseViewRef}
               initialTab={neteaseTab}
@@ -2007,37 +2050,6 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               }}
               onOpenImmersive={handleCoverClick}
             />
-          ) : showStats ? (
-            <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />
-          ) : showSettings ? (
-            <div className="h-full min-w-0 overflow-y-auto">
-              <MusicSettingsPanel
-                onClose={() => setShowSettings(false)}
-                rootPaths={rootPaths}
-                onRemoveRoot={handleRemoveRoot}
-                onAddRoot={handleAddRoot}
-                volume={volume}
-                onVolumeChange={handleVolume}
-                lyricsFontSize={lyricsFontSize}
-                onLyricsFontSize={handleLyricsFontSize}
-                lyricsShowNextLine={lyricsShowNextLine}
-                onLyricsShowNextLine={handleLyricsShowNextLine}
-                onlineLyricsEnabled={onlineLyricsEnabled}
-                onOnlineLyricsToggle={handleOnlineLyricsToggle}
-                localLrcFirst={localLrcFirst}
-                onLocalLrcFirstToggle={handleLocalLrcFirstToggle}
-                showAlbum={showAlbum}
-                onShowAlbumToggle={handleShowAlbumToggle}
-                playMode={playMode}
-                onPlayModeChange={handlePlayModeChange}
-                lyricsAlign={lyricsAlign}
-                onLyricsAlignChange={handleLyricsAlignChange}
-                onCleanInvalidFiles={handleCleanInvalidFiles}
-                onRefreshAllFolders={handleRefreshAllFolders}
-                totalTracks={playlists.reduce((sum, p) => sum + p.tracks.length, 0)}
-                playlistCount={playlists.length}
-              />
-            </div>
           ) : selectedPlaylist ? (
             <TrackList
               tracks={filteredTracks}

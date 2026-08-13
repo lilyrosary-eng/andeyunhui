@@ -63,6 +63,7 @@ export interface NeteaseSidebarProps {
   onCloseNetease: () => void;
   onOpenModuleSettings?: () => void;
   onOpenStats?: () => void;
+  statsActive?: boolean;
   onSelectFolder?: () => void;
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
@@ -81,6 +82,7 @@ export default function NeteaseSidebar({
   onCloseNetease,
   onOpenModuleSettings,
   onOpenStats,
+  statsActive,
   onSelectFolder,
   searchQuery,
   onSearchChange,
@@ -184,9 +186,13 @@ export default function NeteaseSidebar({
     ? React.createElement('button', {
         key: 'open-stats',
         onClick: () => onOpenStats(),
-        title: '统计',
-        'aria-label': '统计',
-        className: 'p-2 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
+        title: statsActive ? '关闭统计' : '统计',
+        'aria-label': statsActive ? '关闭统计' : '统计',
+        className: `p-2 rounded-lg transition-colors ${
+          statsActive
+            ? 'text-[var(--element-color-raw)] bg-black/5 dark:bg-white/5'
+            : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5'
+        }`,
         children: BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊',
       })
     : null;
