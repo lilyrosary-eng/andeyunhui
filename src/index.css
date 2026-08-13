@@ -326,6 +326,15 @@
   html.has-custom-bg .dark\:bg-stone-800\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
   html.has-custom-bg .bg-stone-700\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
   html.has-custom-bg .bg-stone-800\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
+  /* 铃兰（网易云）漫游页 / 抽屉根节点写死 bg-white / dark:bg-[#1e1e1e] / dark:bg-[#232323]，
+     未沿用插件统一纸面色，导致自定义背景透不进来。此处统一降为半透明磨砂（与玉兰/莲花一致），
+     保留浅色衬底保证文字可读。注意 .settings-surface .bg-white 特异性更高，仍走 0.6 白不被覆盖。 */
+  html.has-custom-bg .bg-white { background-color: rgba(255, 255, 255, 0.3) !important; }
+  html.has-custom-bg.dark .dark\:bg-\[\#1e1e1e\] { background-color: rgba(30, 30, 30, 0.3) !important; }
+  html.has-custom-bg.dark .dark\:bg-\[\#232323\] { background-color: rgba(35, 35, 35, 0.3) !important; }
+  /* 抽屉顶栏 bg-white/90、dark:bg-[#232323]/90 等带透明度变体，同样弱化以透出背景 */
+  html.has-custom-bg .bg-white\/90 { background-color: rgba(255, 255, 255, 0.2) !important; }
+  html.has-custom-bg.dark .dark\:bg-\[\#232323\]\/90 { background-color: rgba(35, 35, 35, 0.24) !important; }
   /* ========== 中转站浮窗：低饱和度浅绿整体配色（仅作用于浮窗，不影响主窗图标栏的中转站）========== */
   .floating-dropzone-root .main-panel-bg {
     background-color: rgba(224, 240, 228, 0.42) !important;
