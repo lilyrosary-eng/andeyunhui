@@ -11,14 +11,16 @@ const React = window.__HOST_REACT__;
 // ========== SVG 基础工厂 ==========
 
 function SvgEl({
-  size = 20, fill = 'none', strokeWidth = 2, children,
+  size = 20, fill = 'none', strokeWidth = 2, children, className, onClick,
 }: {
   size?: number; fill?: string; strokeWidth?: number; children: React.ReactNode;
+  className?: string; onClick?: (e: React.MouseEvent) => void;
 }) {
   return React.createElement('svg', {
     width: size, height: size, viewBox: '0 0 24 24',
     fill, stroke: 'currentColor', strokeWidth,
     strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
+    className, onClick,
   }, children as any);
 }
 
@@ -134,6 +136,19 @@ export function CloudIcon(p: { size?: number }) {
   ] });
 }
 
+export function VideoIcon(p: {
+  size?: number; fill?: string; className?: string; onClick?: (e: React.MouseEvent) => void;
+}) {
+  return SvgEl({
+    size: p?.size || 15, strokeWidth: 1.5,
+    className: p?.className, onClick: p?.onClick,
+    children: [
+      React.createElement('rect', { key: 'a', x: '2', y: '5', width: '13', height: '14', rx: '2', ry: '2', fill: p?.fill || 'none' }),
+      React.createElement('polygon', { key: 'b', points: '22 8 16 12 22 16 22 8', fill: p?.fill || 'currentColor' }),
+    ],
+  });
+}
+
 export function LyricsIcon(p: { size?: number }) {
   return SvgEl({ size: p?.size || 18, children: [
     React.createElement('path', { key: 'a', d: 'M4 17h4' }),
@@ -209,11 +224,12 @@ export function MoreIcon(p: { size?: number }) {
   ] });
 }
 
-export function HeartIcon(p: { size?: number; fill?: string }) {
+export function HeartIcon(p: { size?: number; fill?: string; className?: string }) {
   return SvgEl({
     size: p?.size || 18,
     fill: p?.fill || 'currentColor',
     strokeWidth: 1.5,
+    className: p?.className,
     children: [
       React.createElement('path', {
         key: 'a',

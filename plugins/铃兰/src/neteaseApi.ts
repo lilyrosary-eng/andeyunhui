@@ -6,21 +6,47 @@ import { weapi, eapi } from './neteaseCrypto';
 
 const hostApi: any = (window as any).__HOST_API__ || { invoke: async () => ({}) };
 
-// 参考 MusicStorm：伪造国内出口 IP 绕过非 CN 出口拦截
-const REAL_IP = '113.66.253.18';
+// 参考 MusicStorm：伪造国内出口 IP 绕过非 CN 出口拦截。
+// 会话级随机国内 IP（对齐 MusicStorm resolveRealIp）：会话内固定、随机国内段。
+// 之前硬编码 113.66.253.18，反复调试后被网易云风控标记，触发 -460「网络环境存在风险」。
+const REAL_IP: string = (() => {
+  const prefixes = [
+    '113.66', '116.25', '120.192', '183.0', '223.64', '112.64',
+    '119.96', '36.248', '39.128', '42.80', '110.80', '171.104',
+    '180.96', '182.96', '218.64', '61.128',
+  ];
+  const p = prefixes[Math.floor(Math.random() * prefixes.length)];
+  const a = Math.floor(Math.random() * 254) + 1;
+  const b = Math.floor(Math.random() * 254) + 1;
+  return `${p}.${a}.${b}`;
+})();
 const REFERER = 'https://music.163.com';
 const ORIGIN = 'https://music.163.com';
-// weapi / eapi 分别使用贴合官方的 UA（参考 MusicStorm，避免中性 UA 触发风控）
+// weapi / eapi 分别使用贴合官方的 UA（参考 MusicStorm，避免中性 UA 触发风控）。
+// weapi 用 Mac Edge 形态（网易云桌面端官方 UA，风控验证过）；之前用 Windows Chrome 116 被风控。
 const UA_WEAPI =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36';
-const UA_EAPI =
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 15_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 CloudMusic/8.7.50';
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0';
+// eapi 登录/写请求强制走 iPhone CloudMusic/9.0.90 形态（对齐 MusicStorm UA_EAPI_IPHONE），
+// 这是网易云 eapi 风控验证过的 UA；非登录态用 PC 桌面端形态。
+const UA_EAPI_IPHONE = 'NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)';
+const UA_EAPI_PC =
+  'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.29.205117';
+// 遗留别名，仅 eapi 匿名注册回落处使用（等价 iPhone 形态）
+const UA_EAPI = UA_EAPI_IPHONE;
 
 let guestCookie: string | null = null;
 let guestCsrf = '';
 // 登录态 cookie（MUSIC_U; __csrf; ...），优先于游客态；持久化到 localStorage 实现免登录
 let loginCookie: string | null = null;
 const LOGIN_COOKIE_KEY = 'netease-login-cookie';
+
+// 取 eapi 写操作所需的真实 __csrf：优先登录态 cookie 里的 __csrf，回落游客态 guestCsrf。
+// 之前 eapi header 里 __csrf 写死为空 ''，导致收藏等写操作被服务端判定为异常请求而风控拦截。
+function loginCsrfEapi(): string {
+  if (!loginCookie) return guestCsrf;
+  const m = loginCookie.match(/__csrf=([^;]+)/);
+  return m ? m[1] : guestCsrf;
+}
 
 function loadLoginCookie(): void {
   try {
@@ -33,17 +59,45 @@ function saveLoginCookie(): void {
 }
 // 从登录态 cookie 字符串（data.cookie 形如 "MUSIC_U=..; __csrf=..;"）提取并写入 loginCookie
 export function setLoginCookieFromApi(cookieStr: string): void {
-  if (!cookieStr || !cookieStr.includes('MUSIC_U=')) return;
-  // 兼容网易云有时返回 "MUSIC_U=xxx; __csrf=yyy;"，有时只有 "MUSIC_U=xxx"（无分号）
+  if (!cookieStr) return;
   const parts = cookieStr.split(';').map((s) => s.trim()).filter(Boolean);
-  const wanted = parts.filter((p) => p.startsWith('MUSIC_U=') || p.startsWith('__csrf='));
+  const hasMusicU = parts.some((p) => p.startsWith('MUSIC_U='));
+  const csrfPart = parts.find((p) => p.startsWith('__csrf='));
+  const musicAPart = parts.find((p) => p.startsWith('MUSIC_A='));
+  // 情况二：已登录，但只回吐了 __csrf（如登录后 weapi 请求的 Set-Cookie），需把配对的 __csrf 合并进 loginCookie。
+  // 关键：weapi 写操作要求 csrf_token 与 cookie 里的 MUSIC_U 同源，否则服务端静默返回空 body 不落库（红心假成功根因）。
+  if (!hasMusicU && loginCookie && loginCookie.includes('MUSIC_U=') && csrfPart) {
+    if (!loginCookie.includes('__csrf=')) {
+      loginCookie = `${loginCookie}; ${csrfPart}`;
+      saveLoginCookie();
+      console.log('[netease] 已把配对 __csrf 合并进登录 cookie');
+    }
+    guestCsrf = csrfPart.replace('__csrf=', '');
+    return;
+  }
+  if (!hasMusicU) return;
+  // 情况一：首次拿到 MUSIC_U（扫码 803）。保留 MUSIC_U/__csrf/MUSIC_A。
+  const wanted = parts.filter((p) => p.startsWith('MUSIC_U=') || p.startsWith('__csrf=') || p.startsWith('MUSIC_A='));
   if (!wanted.length) return;
   loginCookie = wanted.join('; ');
   saveLoginCookie();
   // 同步刷新 guestCsrf（后续 weapi 加密的 csrf_token 用 __csrf 值）
-  const csrf = wanted.find((p) => p.startsWith('__csrf='));
-  guestCsrf = csrf ? csrf.replace('__csrf=', '') : '';
+  guestCsrf = csrfPart ? csrfPart.replace('__csrf=', '') : guestCsrf;
   console.log('[netease] 登录 cookie 已保存，长度', loginCookie.length);
+}
+
+// 登录成功后，用当前 MUSIC_U 发一次 weapi 请求，触发服务端回吐与 MUSIC_U 配对的 __csrf。
+// 二维码登录的 803 通常只给 MUSIC_U、不给 __csrf；而 weapi 写操作（红心/每日推荐）要求 csrf 与 MUSIC_U 同源，
+// 否则静默空 body（假成功）。该函数把配对 __csrf 合并进 loginCookie（经 setLoginCookieFromApi 情况二）。
+export async function refreshLoginCsrf(): Promise<void> {
+  if (!loginCookie || !loginCookie.includes('MUSIC_U=')) return;
+  try {
+    // 用 weapi 每日推荐接口（登录态）触发回吐配对 __csrf；失败不影响主流程（红心仍可能空 body，但至少不崩）。
+    await post(PATHS.recommendSongs, { limit: 1 });
+    console.log('[netease] refreshLoginCsrf 完成，loginCookie 含 __csrf?', loginCookie.includes('__csrf='));
+  } catch (e) {
+    console.warn('[netease] refreshLoginCsrf 调用失败（可忽略）', e);
+  }
 }
 
 // 有时网易云 803 把 MUSIC_U 放在 HTTP 响应头 Set-Cookie 列表里，而不是 body.cookie。
@@ -118,10 +172,12 @@ function genRequestId(): string {
   return out + Date.now();
 }
 function buildEapiHeader(deviceId: string): Record<string, any> {
-  return {
+  // 对齐 MusicStorm/CloudMusicAPI：eapi 的 MUSIC_U / MUSIC_A / __csrf 必须以明文
+  // 作为 header 字段参与 MD5 签名，服务端才认这条写操作（否则静默拒写）。
+  const header: Record<string, any> = {
     osver: 'Microsoft-Windows-10-Pro-Edition-build-19041-64bit',
     deviceId,
-    appver: '3.0.18',
+    appver: '3.1.17.204416',
     versioncode: '140',
     mobilename: 'Windows',
     buildver: '19041',
@@ -130,6 +186,21 @@ function buildEapiHeader(deviceId: string): Record<string, any> {
     channel: 'netease',
     requestId: genRequestId(),
   };
+  const csrf = loginCsrfEapi();
+  if (loginCookie) {
+    const mu = loginCookie.match(/MUSIC_U=([^;]+)/);
+    if (mu) header.MUSIC_U = mu[1];
+    // 登录态下 Set-Cookie 经常不返 MUSIC_A，而设备 cookie（guestCookie）里有；
+    // MusicStorm 会一并注入，服务端 eapi 写请求 header 签名需要它，否则风控/静默拒写。
+    const ma = loginCookie.match(/MUSIC_A=([^;]+)/) || guestCookie?.match(/MUSIC_A=([^;]+)/);
+    if (ma) header.MUSIC_A = ma[1];
+    if (csrf) header.__csrf = csrf;
+  } else if (guestCookie) {
+    const ma = guestCookie.match(/MUSIC_A=([^;]+)/);
+    if (ma) header.MUSIC_A = ma[1];
+    if (csrf) header.__csrf = csrf;
+  }
+  return header;
 }
 
 // 从响应 Set-Cookie 列表里挑出需要的字段，合并回 guestCookie / guestCsrf
@@ -187,7 +258,7 @@ function buildDeviceCookieJar(deviceId: string): string {
     `__remember_me=true`,
     `ntes_kaola_ad=${wnmcid}`,
     `os=pc`,
-    `appver=3.0.18`,
+    `appver=3.1.17.204416`,
     `osver=Microsoft-Windows-10-Pro-Edition-build-19041-64bit`,
     `resolution=1920x1080`,
     `channel=netease`,
@@ -211,7 +282,9 @@ async function tryRegister(
 }
 
 export async function ensureGuest(): Promise<void> {
-  if (loginCookie && loginCookie.includes('MUSIC_U=')) return; // 已登录，跳过游客态
+  // 注意：已登录态仍需游客 MUSIC_A 设备 token（与 MUSIC_U 不同源，但 weapi 写操作需要它）。
+  // 之前因「已登录就跳过游客态」导致 post() 的 weapi cookie 缺 MUSIC_A，红心等写操作被服务端静默空 body。
+  // 仅当已持有 MUSIC_A 才跳过；登录态若没有 MUSIC_A，仍走匿名注册只取设备 token。
   if (guestCookie && guestCookie.includes('MUSIC_A=')) return;
   try {
     const deviceId = getOrCreateDeviceId();
@@ -269,27 +342,28 @@ const EAPI_BASE = 'https://interfacepc.music.163.com';
 async function eapiPost(path: string, data: Record<string, any>, deviceId?: string): Promise<any> {
   const did = deviceId || getOrCreateDeviceId();
   const header = buildEapiHeader(did);
-  const { params } = await eapi(path, data, header, '');
+  const { params } = await eapi(path, data, header);
   const endpoint = path.replace(/^\/api/, '');
   const url = `${EAPI_BASE}/eapi${endpoint}`;
   const cookie = buildDeviceCookieJar(did);
+  // 对齐 MusicStorm：登录态（有 MUSIC_U）eapi 请求 referer/origin 置 null、UA 用 iPhone 9.0.90；
+  // 非登录态才带 music.163.com referer。去掉顶层重复的 __csrf（已在 header 签名体内）。
+  const isLogin = !!loginCookie;
   const raw: string = await hostApi.invoke<string>('netease_http_post', {
     method: 'POST',
     url,
     body: `params=${encodeURIComponent(params)}`,
     cookie: loginCookie || cookie,
-    referer: REFERER,
-    origin: ORIGIN,
+    referer: isLogin ? null : REFERER,
+    origin: isLogin ? null : ORIGIN,
     real_ip: REAL_IP,
-    user_agent: UA_EAPI,
+    user_agent: isLogin ? UA_EAPI_IPHONE : UA_EAPI_PC,
     headers: {
       ...header,
       'Request-Id': header.requestId,
-      '__csrf': '',
     },
   });
   const parsed = JSON.parse(raw || '{}');
-  // 正常响应保持静默，仅在异常状态码时输出，避免下拉翻页时日志刷屏
   if (parsed.status && parsed.status !== 200) {
     console.warn('[netease] eapi', path, 'status', parsed.status, 'body', String(parsed.body || '').slice(0, 200));
   }
@@ -317,23 +391,24 @@ async function eapiPostWithCookies(
 ): Promise<{ code: number; raw: any }> {
   const did = deviceId || getOrCreateDeviceId();
   const header = buildEapiHeader(did);
-  const { params } = await eapi(path, data, header, '');
+  const { params } = await eapi(path, data, header);
   const endpoint = path.replace(/^\/api/, '');
   const url = `${EAPI_BASE}/eapi${endpoint}`;
   const cookie = buildDeviceCookieJar(did);
+  // 对齐 MusicStorm：登录态 eapi 请求 referer/origin 置 null、UA 用 iPhone 9.0.90；去重 __csrf。
+  const isLogin = !!loginCookie;
   const rawResp: string = await hostApi.invoke<string>('netease_http_post', {
     method: 'POST',
     url,
     body: `params=${encodeURIComponent(params)}`,
     cookie: loginCookie || cookie,
-    referer: REFERER,
-    origin: ORIGIN,
+    referer: isLogin ? null : REFERER,
+    origin: isLogin ? null : ORIGIN,
     real_ip: REAL_IP,
-    user_agent: UA_EAPI,
+    user_agent: isLogin ? UA_EAPI_IPHONE : UA_EAPI_PC,
     headers: {
       ...header,
       'Request-Id': header.requestId,
-      '__csrf': '',
     },
   });
   const parsed = JSON.parse(rawResp || '{}');
@@ -366,14 +441,24 @@ const PATHS = {
   search: '/cloudsearch',
   playlistDetail: '/playlist/detail',
   recommendSongs: '/recommend/songs',
+  personalFm: '/personal_fm',
   songUrl: '/song/url',
   userAccount: '/user/account',
   userPlaylist: '/user/playlist',
   toplist: '/toplist',
   personalized: '/personalized',
-  likeSong: '/song/like',
+  likeSong: '/api/radio/like',
   subscribePlaylist: '/playlist/subscribe',
   manipulatePlaylistTracks: '/playlist/manipulate/tracks',
+  // 歌手/专辑详情（铃兰顶部抽屉）
+  artistDetail: '/artists',
+  artistAlbums: '/artist/album',
+  artistAllSongs: '/artist/all/songs',
+  artistMvs: '/artist/mv',
+  artistDesc: '/artist/desc',
+  simiArtist: '/simi/artist',
+  albumDetail: '/album',
+  albumSub: '/album/sub',
 };
 
 function resolveModule(path: string, params: Record<string, any>): { uri: string; data: Record<string, any>; crypto: CryptoKind } {
@@ -385,6 +470,10 @@ function resolveModule(path: string, params: Record<string, any>): { uri: string
     case PATHS.recommendSongs:
       // 每日推荐为 weapi（需登录态 + csrf 闭环）
       return { uri: '/api/v3/discovery/recommend/songs', data: { limit: params.limit ?? 20, afresh: params.afresh }, crypto: 'weapi' };
+    case PATHS.personalFm:
+      // 私人 FM（漫游）：返回一组根据用户口味推荐的歌曲，每次 3-5 首，可重复拉取。
+      // 该接口需登录态；未登录时由业务层 fallback 到每日推荐 / 飙升榜。
+      return { uri: '/api/v1/radio/get', data: { limit: params.limit ?? 5, offset: params.offset ?? 0 }, crypto: 'weapi' };
     case PATHS.songUrl:
       return { uri: '/api/song/enhance/player/url', data: { ids: JSON.stringify(params.ids || []), br: params.br ?? 999000 }, crypto: 'eapi' };
     case PATHS.userAccount:
@@ -404,23 +493,82 @@ function resolveModule(path: string, params: Record<string, any>): { uri: string
       // 与 playlist/detail、userAccount 等已验证可用的通道一致，可稳定返回热门/个性化歌单。
       return { uri: '/api/personalized/playlist', data: { limit: params.limit ?? 24, total: true, n: 1000 }, crypto: 'eapi' };
     case PATHS.likeSong:
-      return { uri: '/api/song/like', data: { id: params.id, like: params.like, alg: params.alg ?? 'itembased', time: params.time ?? '3' }, crypto: 'weapi' };
+      // 单曲红心：对齐 MusicStorm 已验证可用的写法，走 weapi /api/radio/like。
+      // 关键修正（之前反复失败的根因）：
+      //  - 之前误用 /api/song/like（weapi 静默空 body 假成功；eapi 版本又报"参数错误"，本登录态不可用）；
+      //  - CloudMusicAPI / MusicStorm 的红心标准端点就是 /api/radio/like（注意：它虽叫 radio/like，
+      //    实为「喜欢音乐」官方写接口，trackId 即歌曲 id，并非电台专用）。
+      //  - 参数必须与 MusicStorm 完全一致：trackId（非 id）、alg、like、time:'3'，且调用方带 timestamp。
+      return {
+        uri: '/api/radio/like',
+        data: {
+          alg: params.alg ?? 'itembased',
+          trackId: params.id,
+          like: params.like,
+          time: params.time ?? '3',
+        },
+        crypto: 'weapi',
+      };
     case PATHS.subscribePlaylist:
-      return { uri: '/api/playlist/subscribe', data: { id: params.id, t: params.t }, crypto: 'weapi' };
+      // 歌单收藏/取消：对齐 MusicStorm，收藏与取消分别是两个 endpoint，
+      // 统一走 eapi（interfacepc 域 + 设备 cookie）。
+      // 之前把 t=2 硬塞 /api/playlist/subscribe 导致服务端返回 502。
+      const sub = params.t === 1 || params.t === true ? 'subscribe' : 'unsubscribe';
+      return { uri: `/api/playlist/${sub}`, data: { id: params.id }, crypto: 'eapi' };
     case PATHS.manipulatePlaylistTracks:
       return { uri: '/api/playlist/manipulate/tracks', data: { pid: params.pid, tracks: params.tracks, op: params.op }, crypto: 'weapi' };
+    // 歌手/专辑详情（铃兰顶部抽屉，weapi 通道，对齐 MusicStorm modules.ts）
+    case PATHS.artistDetail:
+      return { uri: `/api/v1/artist/${params.id}`, data: {}, crypto: 'weapi' };
+    case PATHS.artistAlbums:
+      return { uri: `/api/artist/albums/${params.id}`, data: { limit: params.limit ?? 50, offset: params.offset ?? 0, total: true }, crypto: 'weapi' };
+    case PATHS.artistAllSongs:
+      return {
+        uri: '/api/v1/artist/songs',
+        data: {
+          id: params.id,
+          order: params.order ?? 'hot',
+          offset: params.offset ?? 0,
+          limit: params.limit ?? 100,
+          total: true,
+        },
+        crypto: 'weapi',
+      };
+    case PATHS.artistMvs:
+      return { uri: '/api/artist/mvs', data: { artistId: params.id, limit: params.limit ?? 40, offset: params.offset ?? 0, total: true }, crypto: 'weapi' };
+    case PATHS.artistDesc:
+      return { uri: '/api/artist/introduction', data: { id: params.id }, crypto: 'weapi' };
+    case PATHS.simiArtist:
+      return { uri: '/api/discovery/simiArtist', data: { artistid: params.id }, crypto: 'weapi' };
+    case PATHS.albumDetail:
+      return { uri: `/api/v1/album/${params.id}`, data: {}, crypto: 'weapi' };
+    case PATHS.albumSub:
+      return { uri: params.t === 1 ? '/api/album/sub' : '/api/album/unsub', data: { id: params.id }, crypto: 'weapi' };
     default:
       throw new Error(`未实现的网易云接口: ${path}`);
+  }
+}
+
+// 网易云返回的通用错误码参考：200 成功，-462 需要验证码，400 参数/业务失败，401/302 未登录，-1 操作失败等。
+function assertNeteaseOk(body: any, path: string): void {
+  if (body && typeof body === 'object') {
+    const code = body.code;
+    if (code !== undefined && code !== 200) {
+      const msg = body.message || body.msg || `网易云接口返回 code ${code}`;
+      const err = new Error(msg);
+      (err as any).code = code;
+      (err as any).neteasePath = path;
+      throw err;
+    }
   }
 }
 
 // 统一入口：业务代码只传 path + params，通道由 resolveModule 决定
 async function neteaseRequest(path: string, params: Record<string, any> = {}): Promise<any> {
   const mod = resolveModule(path, params);
-  if (mod.crypto === 'eapi') {
-    return eapiRequest(mod.uri, mod.data);
-  }
-  return post(mod.uri, mod.data);
+  const body = mod.crypto === 'eapi' ? await eapiRequest(mod.uri, mod.data) : await post(mod.uri, mod.data);
+  assertNeteaseOk(body, path);
+  return body;
 }
 
 // eapi 业务请求（不复用 eapiPost，因为它带登录专属 header 写法；这里与 eapiPost 同构）
@@ -428,19 +576,21 @@ async function eapiRequest(uri: string, data: Record<string, any>): Promise<any>
   await ensureGuest();
   const did = getOrCreateDeviceId();
   const header = buildEapiHeader(did);
-  const { params: encParams } = await eapi(uri, data, header, '');
+  const { params: encParams } = await eapi(uri, data, header);
   const url = `${EAPI_BASE}/eapi${uri.replace(/^\/api/, '')}`;
   const cookie = [loginCookie, buildDeviceCookieJar(did)].filter(Boolean).join('; ') || buildDeviceCookieJar(did);
+  // 对齐 MusicStorm 登录态 eapi：referer/origin 置 null（非 music.163.com），避免触发风控；
+  // MUSIC_U/__csrf 已在 header 签名体内，不再于顶层 headers 重复塞 __csrf。
   const raw: string = await hostApi.invoke<string>('netease_http_post', {
     method: 'POST',
     url,
     body: `params=${encodeURIComponent(encParams)}`,
     cookie,
-    referer: REFERER,
-    origin: ORIGIN,
+    referer: null,
+    origin: null,
     real_ip: REAL_IP,
     user_agent: UA_EAPI,
-    headers: { ...header, 'Request-Id': header.requestId, __csrf: '' },
+    headers: { ...header, 'Request-Id': header.requestId },
   });
   const parsed = JSON.parse(raw || '{}');
   if (parsed.status && parsed.status !== 200) {
@@ -485,15 +635,18 @@ export async function neteaseQrCreate(key: string): Promise<QrSession> {
 // 803 时 cookie 字段含 MUSIC_U，自动写入 loginCookie 并持久化
 export async function neteaseQrCheck(key: string): Promise<{ code: number; cookieSaved: boolean }> {
   const { code, raw } = await eapiPostWithCookies('/api/login/qrcode/client/login', { key, type: 3 });
-  let cookieSaved = false;
-  if (code === 803) {
-    // 网易云 803 响应的 MUSIC_U 通常在 HTTP Set-Cookie 头里，body 里的 cookie 字段可能为空。
-    // eapiPostWithCookies 已自动把 Set-Cookie 中的 MUSIC_U/__csrf 保存到 loginCookie。
-    cookieSaved = isLoggedIn();
-    if (!cookieSaved) {
-      console.warn('[netease] 803 后端已返回 Set-Cookie，但本地未持久化到 MUSIC_U。body 键:', Object.keys(raw || {}));
-    } else {
-      console.log('[netease] 803 登录态 cookie 已从 Set-Cookie 保存');
+  let cookieSaved = isLoggedIn();
+  // 网易云 eapi 登录态：MUSIC_U 写入 HTTP Set-Cookie，eapiPostWithCookies 已自动保存到 loginCookie。
+  // 不依赖 body.code 的精确值（eapi 803 body.code 可能非 803），只要本地已落地 MUSIC_U 即视为登录成功。
+  if (cookieSaved) {
+    console.log('[netease] 二维码登录态已建立（MUSIC_U 已持久化），code:', code, 'body 键:', Object.keys(raw?.body || {}));
+    // 二维码登录通常只给 MUSIC_U、不给 __csrf；而 weapi 写操作（红心）要求 csrf 与 MUSIC_U 同源，
+    // 否则静默空 body 假成功。这里主动触发一次 weapi 请求回吐配对 __csrf，建立 csrf 闭环。
+    await refreshLoginCsrf();
+  } else {
+    // 未落地 MUSIC_U 时，仅当 body.code === 803 也提示，便于排查（不作为触发条件）。
+    if (code === 803) {
+      console.warn('[netease] 803 后端已返回但本地未持久化到 MUSIC_U。body 键:', Object.keys(raw?.body || {}), 'raw 键:', Object.keys(raw || {}));
     }
   }
   return { code, cookieSaved };
@@ -513,12 +666,23 @@ export async function neteaseGetLyric(songId: number): Promise<string | null> {
 
 async function post(endpoint: string, data: Record<string, any>): Promise<any> {
   await ensureGuest();
-  // 登录态优先用登录 cookie 里的 __csrf（与 MUSIC_U 配对），否则回落游客态 __csrf，形成 weapi csrf 闭环
+  // 登录态优先用登录 cookie 里的 __csrf（与 MUSIC_U 配对），否则回落游客态 __csrf，形成 weapi csrf 闭环。
+  // 自愈：若登录态 cookie 缺 __csrf（旧 localStorage 缓存或扫码后未回吐），先发一次 weapi 请求触发配对回吐，
+  // 再读 loginCookie。否则 csrf_token 会与 MUSIC_U 不同源，服务端静默空 body（红心假成功根因）。
+  if (loginCookie && loginCookie.includes('MUSIC_U=') && !loginCookie.includes('__csrf=')) {
+    await refreshLoginCsrf();
+  }
   const loginCsrf = loginCookie ? (loginCookie.match(/__csrf=([^;]+)/) || [])[1] : '';
   const csrf = loginCsrf || guestCsrf || '';
+  if (loginCookie && loginCookie.includes('MUSIC_U=') && !csrf) {
+    console.warn('[netease] 登录态但 csrf 仍为空（配对回吐失败），红心可能空 body 假成功');
+  }
   const { params, encSecKey } = await weapi(data, csrf);
-  // 对齐 MusicStorm：weapi cookie 需同时带登录态 MUSIC_U 与设备态 MUSIC_A
-  const cookie = [loginCookie, guestCookie].filter(Boolean).join('; ') || '';
+  // 对齐 MusicStorm ensureDeviceCookies + cookieHeader：weapi cookie 需同时带
+  // 登录态 MUSIC_U / __csrf、设备态 MUSIC_A，以及 deviceId/os/appver/osver/resolution/channel 等设备字段。
+  // 缺设备字段会触发风控（-460），之前只拼 loginCookie+guestCookie 不够。
+  const deviceJar = buildDeviceCookieJar(getOrCreateDeviceId());
+  const cookie = [loginCookie, guestCookie, deviceJar].filter(Boolean).join('; ') || '';
   // 对齐 MusicStorm：weapi 请求 URL 为 /weapi/<uri 去掉 /api 前缀>
   const weapiPath = `/weapi/${endpoint.replace(/^\/api\//, '')}`;
   const payload = {
@@ -533,6 +697,7 @@ async function post(endpoint: string, data: Record<string, any>): Promise<any> {
   };
   const raw: string = await hostApi.invoke<string>('netease_http_post', payload);
   const parsed = JSON.parse(raw || '{}');
+  console.log('[netease] weapi', weapiPath, 'csrf?', !!csrf, 'MUSIC_U?', !!loginCookie, 'status', parsed.status, 'body', String(parsed.body || '').slice(0, 300));
   if (parsed.status && parsed.status !== 200) {
     console.warn('[netease] post', endpoint, 'status', parsed.status, 'body', String(parsed.body || '').slice(0, 300));
   }
@@ -541,9 +706,12 @@ async function post(endpoint: string, data: Record<string, any>): Promise<any> {
     absorbCookies(parsed.cookies);
     absorbBodyCookie(parsed.body);
     const musicU = parsed.cookies.find((c: string) => c.startsWith('MUSIC_U='));
+    const csrf = parsed.cookies.find((c: string) => c.startsWith('__csrf='));
     if (musicU) {
-      const csrf = parsed.cookies.find((c: string) => c.startsWith('__csrf='));
       setLoginCookieFromApi([musicU, csrf].filter(Boolean).join('; '));
+    } else if (csrf && loginCookie && loginCookie.includes('MUSIC_U=')) {
+      // 登录态 weapi 请求只回 __csrf（无 MUSIC_U）：合并配对 csrf 进 loginCookie，修复红心空 body 假成功。
+      setLoginCookieFromApi(csrf);
     }
   }
   if (typeof parsed.body === 'string') {
@@ -562,12 +730,17 @@ export interface NeteaseTrack {
   url?: string;
   fee?: number;       // 0 免费 / 1 VIP / 4 专辑付费 / 8 试听
   maxbr?: number;     // 最高可用码率 bps（privilege.maxbr），用于判断无损/Hi-Res
+  mvId?: number;      // MV id（>0 表示有官方 MV），用于「点击播放 MV」入口
+  artistId?: number;  // 主歌手 id（详情页入口）
+  albumId?: number;   // 专辑 id（详情页入口）
 }
 
 function mapTrack(s: any, priv?: any): NeteaseTrack {
   const artists = s.artists || s.ar || [];
   const album = s.album || s.al || {};
   const p = priv || s.privilege || {};
+  // 搜索/歌单返回的 mv 字段：0 表示无 MV，>0 为 MV id。部分接口藏在 privilege 或 mvid。
+  const mv = s.mv ?? s.mvid ?? p.mv ?? 0;
   return {
     id: s.id,
     name: s.name,
@@ -577,6 +750,64 @@ function mapTrack(s: any, priv?: any): NeteaseTrack {
     cover: album.picUrl || album.cover || '',
     fee: s.fee ?? p.fee ?? 0,
     maxbr: p.maxbr || 0,
+    mvId: mv > 0 ? mv : undefined,
+    artistId: (artists[0] && artists[0].id) || s.artistId || undefined,
+    albumId: album.id ?? s.albumId ?? undefined,
+  };
+}
+
+// ============ MV 播放信息（对齐 MusicStorm native/modules.ts） ============
+// MV detail：weapi /api/v1/mv/detail，参数 id（或 mvid）。
+// MV url：weapi /api/song/enhance/play/mv/url，参数 id + 可选分辨率 r。
+export interface NeteaseMv {
+  id: number;
+  name: string;
+  artist: string;
+  cover: string;
+  durationMs: number;
+  url: string;        // 最终选中的播放地址（从高到低分辨率回退）
+  br: number;         // 实际分辨率 bps
+}
+const MV_RESOLUTIONS = [1080, 720, 480, 240]; // 从高到低回退
+
+export async function getMvDetail(mvId: number): Promise<{ name: string; artist: string; cover: string; durationMs: number } | null> {
+  try {
+    const r: any = await post('/api/v1/mv/detail', { id: mvId, mvId });
+    const data = r?.data ?? r ?? {};
+    const artists = data.artistName || (data.artists || []).map((a: any) => a.name).join('/') || '';
+    return {
+      name: data.name || '',
+      artist: artists || data.artistName || '',
+      cover: data.cover || data.picUrl || data.coverUrl || '',
+      durationMs: data.duration || 0,
+    };
+  } catch (e) {
+    console.warn('[netease] getMvDetail 失败', mvId, e);
+    return null;
+  }
+}
+
+export async function getMvPlayable(mvId: number): Promise<NeteaseMv | null> {
+  const detail = await getMvDetail(mvId);
+  let url = '';
+  let br = 0;
+  for (const r of MV_RESOLUTIONS) {
+    try {
+      const res: any = await post('/api/song/enhance/play/mv/url', { id: mvId, r });
+      const d = res?.data ?? res ?? {};
+      const u = d.url || '';
+      if (u) { url = u; br = d.r || r * 1000; break; }
+    } catch { /* 该分辨率失败，尝试更低 */ }
+  }
+  if (!url) return null;
+  return {
+    id: mvId,
+    name: detail?.name || '',
+    artist: detail?.artist || '',
+    cover: detail?.cover || '',
+    durationMs: detail?.durationMs || 0,
+    url,
+    br,
   };
 }
 
@@ -633,11 +864,29 @@ export async function getListenNow(limit = 20): Promise<NeteaseTrack[]> {
   return (await getTopList(19723756, limit)).tracks; // 飙升榜回落
 }
 
+// 「私人 FM / 漫游」：返回一组根据用户口味推荐的歌曲（每次 3-5 首），可重复拉取刷新。
+// 需登录态；未登录时返回 []，由业务层 fallback 到 getListenNow。
+export async function getPersonalFm(limit = 5, offset = 0): Promise<NeteaseTrack[]> {
+  if (!isLoggedIn()) return [];
+  try {
+    const r: any = await neteaseRequest(PATHS.personalFm, { limit, offset });
+    const list = r?.data || r?.songs || [];
+    if (!Array.isArray(list) || !list.length) return [];
+    return list.map(mapTrack);
+  } catch (e) {
+    console.warn('[netease] 私人 FM 失败', e);
+    return [];
+  }
+}
+
 // 歌单/榜单详情：eapi /api/v6/playlist/detail，一次性返回完整 tracks（不支持 offset 切片）。
 // 返回结构含总数 total，便于前端判断是否到底（已全量则无需分页）。
 export interface TopListResult {
   tracks: NeteaseTrack[];
   total: number;
+  coverUrl?: string;
+  description?: string;
+  playCount?: number;
 }
 export async function getTopList(
   id: number,
@@ -649,7 +898,13 @@ export async function getTopList(
   const total = typeof r?.playlist?.trackCount === 'number' ? r.playlist.trackCount : list.length;
   // privileges 数组与 tracks 按 index 对应，含 fee / maxbr 等音质与版权信息
   const privs = r?.playlist?.privileges || [];
-  return { tracks: list.map((s: any, i: number) => mapTrack(s, privs[i])), total };
+  return {
+    tracks: list.map((s: any, i: number) => mapTrack(s, privs[i])),
+    total,
+    coverUrl: r?.playlist?.coverImgUrl || '',
+    description: r?.playlist?.description || '',
+    playCount: r?.playlist?.playCount || 0,
+  };
 }
 
 // 为你推荐歌单：weapi /api/personalized/playlist（登录态个性化，游客态返回热门歌单）。
@@ -752,20 +1007,32 @@ export async function getUserPlaylists(uid: number, limit = 30): Promise<Netease
 
 /** 喜欢/取消喜欢一首歌（写入网易云「我喜欢的音乐」） */
 export async function likeNeteaseSong(songId: number, like: boolean): Promise<void> {
-  await neteaseRequest(PATHS.likeSong, {
+  console.log('[netease] 调用红心接口', { songId, like });
+  const r = await neteaseRequest(PATHS.likeSong, {
     id: songId,
     like,
-    alg: 'itembased',
-    time: '3',
+    timestamp: Date.now(),
   });
+  console.log('[netease] 红心接口返回', r);
+  // weapi /api/radio/like 成功返回 {code:200}（或偶尔空 body）。若返回空对象或 raw 为空串，
+  // 说明服务端未确认写入（静默丢弃），这里显式拦截，避免 PC 显示成功但手机看不到（之前的假成功根因）。
+  if (r == null || (typeof r === 'object' && !Array.isArray(r) && Object.keys(r).length === 0) || (r as any).raw === '') {
+    throw new Error('红心接口未返回有效结果（服务端可能未写入，请重试）');
+  }
+  const code = r?.code;
+  if (code !== undefined && code !== 200) {
+    throw new Error(`红心接口返回 code ${code}${r?.message ? '：' + r.message : ''}`);
+  }
 }
 
 /** 收藏/取消收藏网易云歌单 */
-export async function subscribeNeteasePlaylist(playlistId: number, subscribe: boolean): Promise<void> {
-  await neteaseRequest(PATHS.subscribePlaylist, {
+export async function subscribeNeteasePlaylist(playlistId: number, subscribe: boolean): Promise<any> {
+  const body = await neteaseRequest(PATHS.subscribePlaylist, {
     id: playlistId,
     t: subscribe ? 1 : 2,
   });
+  console.log('[netease] subscribePlaylist id=', playlistId, 't=', subscribe ? 1 : 2, 'resp=', JSON.stringify(body).slice(0, 400));
+  return body;
 }
 
 /** 向网易云歌单添加/删除歌曲 */
@@ -779,4 +1046,223 @@ export async function manipulateNeteasePlaylistTracks(
     tracks: songIds.join(','),
     op,
   });
+}
+
+// ============ 歌手 / 专辑详情（顶部抽屉，对齐 MusicStorm artist/album 页） ============
+
+export interface NeteaseArtist {
+  id: number;
+  name: string;
+  cover?: string;          // 艺人封面（artist.img1v1Url）
+  avatarLarge?: string;    // 高清头像（artist.picUrl / cover）
+  alias?: string[];        // 别名（artist.alias）
+  briefDesc?: string;      // 简介（歌手详情页头部）
+  musicSize?: number;      // 单曲数
+  albumSize?: number;      // 专辑数
+  mvSize?: number;         // MV 数
+}
+
+export interface NeteaseArtistAlbum {
+  id: number;
+  name: string;
+  cover: string;
+  publishTime?: number;    // 时间戳
+  size?: number;           // 专辑歌曲数
+}
+
+export interface NeteaseMvItem {
+  id: number;
+  name: string;
+  cover: string;
+  artistName?: string;
+  playCount?: number;
+  durationMs?: number;
+}
+
+export interface NeteaseSimilarArtist {
+  id: number;
+  name: string;
+  cover: string;
+}
+
+// 歌手详情三件套：热门歌 + 基本信息（含简介/统计）
+export async function getArtistDetail(artistId: number): Promise<{ artist: NeteaseArtist; hotSongs: NeteaseTrack[] } | null> {
+  try {
+    const r: any = await neteaseRequest(PATHS.artistDetail, { id: artistId });
+    const a = r?.artist || {};
+    const artist: NeteaseArtist = {
+      id: a.id ?? artistId,
+      name: a.name || '未知歌手',
+      cover: a.img1v1Url || a.picUrl || '',
+      avatarLarge: a.picUrl || a.cover || a.img1v1Url || '',
+      alias: a.alias || [],
+      briefDesc: a.briefDesc || '',
+      musicSize: a.musicSize ?? 0,
+      albumSize: a.albumSize ?? 0,
+      mvSize: a.mvSize ?? 0,
+    };
+    const hotSongs: NeteaseTrack[] = (r?.hotSongs || []).map((s: any) => mapTrack(s));
+    return { artist, hotSongs };
+  } catch (e) {
+    console.warn('[netease] getArtistDetail 失败', artistId, e);
+    return null;
+  }
+}
+
+// 歌手全部专辑（含分页）
+export interface ArtistAlbumsResult {
+  albums: NeteaseArtistAlbum[];
+  total: number;
+  more: boolean;
+}
+export async function getArtistAlbums(artistId: number, offset = 0, limit = 30): Promise<ArtistAlbumsResult> {
+  const r: any = await neteaseRequest(PATHS.artistAlbums, { id: artistId, offset, limit });
+  const albums: NeteaseArtistAlbum[] = (r?.hotAlbums || r?.albums || []).map((al: any) => ({
+    id: al.id,
+    name: al.name || '未命名专辑',
+    cover: al.picUrl || al.cover || '',
+    publishTime: al.publishTime || undefined,
+    size: al.size || undefined,
+  }));
+  const more = typeof r?.more === 'boolean' ? r.more : (r?.albumSize ?? 0) > offset + albums.length;
+  return { albums, total: r?.albumSize ?? albums.length, more };
+}
+
+// 歌手全部 MV
+export async function getArtistMvs(artistId: number, offset = 0, limit = 30): Promise<{ mvs: NeteaseMvItem[]; more: boolean; total: number }> {
+  try {
+    const r: any = await neteaseRequest(PATHS.artistMvs, { id: artistId, offset, limit });
+    const mvs: NeteaseMvItem[] = (r?.mvs || []).map((m: any) => ({
+      id: m.id,
+      name: m.name || '',
+      cover: m.imgurl16v9 || m.cover || m.imgurl || '',
+      artistName: m.artistName || '',
+      playCount: m.playCount || 0,
+      durationMs: m.duration || 0,
+    }));
+    return { mvs, more: !!r?.hasMore, total: r?.total ?? mvs.length };
+  } catch (e) {
+    console.warn('[netease] getArtistMvs 失败', artistId, e);
+    return { mvs: [], more: false, total: 0 };
+  }
+}
+
+// 歌手简介（长文，含 basic/profile/topic）
+export async function getArtistDesc(artistId: number): Promise<string> {
+  try {
+    const r: any = await neteaseRequest(PATHS.artistDesc, { id: artistId });
+    const intro = r?.introduction || [];
+    const parts: string[] = [];
+    for (const sec of intro) {
+      const txt = (sec.txt || []).join('\n');
+      if (txt) parts.push(`${sec.ti ? sec.ti + '\n' : ''}${txt}`);
+    }
+    return parts.join('\n\n');
+  } catch (e) {
+    console.warn('[netease] getArtistDesc 失败', artistId, e);
+    return '';
+  }
+}
+
+// 相似艺人
+export async function getSimilarArtists(artistId: number): Promise<NeteaseSimilarArtist[]> {
+  try {
+    const r: any = await neteaseRequest(PATHS.simiArtist, { id: artistId });
+    return (r?.artists || []).map((a: any) => ({
+      id: a.id,
+      name: a.name || '',
+      cover: a.picUrl || a.img1v1Url || '',
+    }));
+  } catch (e) {
+    console.warn('[netease] getSimilarArtists 失败', artistId, e);
+    return [];
+  }
+}
+
+// 歌手全部歌曲（分页；order='hot' 热门 / 'time' 时间）。返回曲目列表 + 是否还有更多。
+export interface ArtistSongsResult {
+  tracks: NeteaseTrack[];
+  more: boolean;
+  total: number;
+}
+export async function getArtistAllSongs(
+  artistId: number,
+  offset = 0,
+  limit = 100,
+  order: 'hot' | 'time' = 'hot',
+): Promise<ArtistSongsResult> {
+  try {
+    const r: any = await neteaseRequest(PATHS.artistAllSongs, { id: artistId, offset, limit, order });
+    const songs = r?.songs || [];
+    const privs = r?.privileges || [];
+    const tracks: NeteaseTrack[] = songs.map((s: any, i: number) => mapTrack(s, privs[i]));
+    return {
+      tracks,
+      more: !!r?.more,
+      total: r?.total ?? tracks.length,
+    };
+  } catch (e) {
+    console.warn('[netease] getArtistAllSongs 失败', artistId, e);
+    return { tracks: [], more: false, total: 0 };
+  }
+}
+
+export interface NeteaseAlbum {
+  id: number;
+  name: string;
+  cover: string;
+  artistId: number;
+  artistName: string;
+  publishTime?: string;    // 已格式化的日期
+  company?: string;        // 发行公司
+  description?: string;    // 专辑简介
+  size: number;            // 曲目数
+  subed?: boolean;         // 是否已收藏
+}
+
+export interface AlbumDetailResult {
+  album: NeteaseAlbum;
+  tracks: NeteaseTrack[];
+}
+
+// 专辑详情：基本信息 + 曲目列表（含 privileges 音质信息）
+export async function getAlbumDetail(albumId: number): Promise<AlbumDetailResult | null> {
+  try {
+    const r: any = await neteaseRequest(PATHS.albumDetail, { id: albumId });
+    const al = r?.album || r?.resource || {};
+    const album: NeteaseAlbum = {
+      id: al.id ?? albumId,
+      name: al.name || '未命名专辑',
+      cover: al.picUrl || al.cover || '',
+      artistId: al.artist?.id ?? (al.artists && al.artists[0] && al.artists[0].id) ?? 0,
+      artistName: al.artist?.name || (al.artists && al.artists[0] && al.artists[0].name) || '未知歌手',
+      publishTime: al.publishTime ? formatAlbumDate(al.publishTime) : undefined,
+      company: al.company || undefined,
+      description: al.description || undefined,
+      size: al.size ?? (r?.songs?.length || 0),
+      subed: !!al.info?.liked,
+    };
+    const songs = r?.songs || [];
+    const privs = r?.privileges || [];
+    return { album, tracks: songs.map((s: any, i: number) => mapTrack(s, privs[i])) };
+  } catch (e) {
+    console.warn('[netease] getAlbumDetail 失败', albumId, e);
+    return null;
+  }
+}
+
+// 收藏/取消收藏专辑（t=1 收藏，t=2 取消）
+export async function subscribeAlbum(albumId: number, subscribe: boolean): Promise<void> {
+  await neteaseRequest(PATHS.albumSub, { id: albumId, t: subscribe ? 1 : 2 });
+}
+
+// 网易云专辑 publishTime 是时间戳（毫秒）。转 yyyy-MM-dd。
+function formatAlbumDate(ts: number): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }

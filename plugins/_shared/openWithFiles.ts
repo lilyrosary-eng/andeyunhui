@@ -10,7 +10,9 @@
 
 export type OpenWithItem =
   | { path: string; name?: string }
-  | { name: string; bytes: number[] };
+  | { name: string; bytes: number[] }
+  // 网络流（如网易云 MV）：纯内存临时列表，不落地、关闭软件即销毁。
+  | { url: string; name: string; artist?: string; cover?: string };
 
 const hostApi = window.__HOST_API__ as {
   invoke: <T = unknown>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -57,24 +59,28 @@ export function getPendingOpenWith(module: string): OpenWithItem[] | null {
 
 /**
  * 派发「以安得云荟打开」请求。
- * - 若已有对应模块挂载（监听器已就绪），立即投递；
- * - 否则暂存为 pending，待该模块挂载后由 getPendingOpenWith 取走。
+ * - 始终暂存一份 pending：供【当前尚未挂载】的模块（如跨模块跳转时目标模块还未渲染）
+ *   在其挂载后由 getPendingOpenWith 取走，避免漏消费。
+ * - 同时立即通知当前已挂载的监听器（如主应用切模块）。
+ * 两者互补：已挂载模块即时收到，未挂载模块挂载后兜底取走。
  */
 export function dispatchOpenWith(module: string, files: OpenWithItem[]): void {
   if (!files || files.length === 0) return;
-  if (listeners.size > 0) {
-    listeners.forEach((l) => l(module, files));
-  } else {
-    pendingByModule[module] = files;
-  }
+  pendingByModule[module] = files;
+  listeners.forEach((l) => l(module, files));
 }
 
-/** 将文件导入固定临时目录，返回目录路径与最终落地文件绝对路径列表。 */
+/** 将【本地】文件导入固定临时目录，返回目录路径与最终落地文件绝对路径列表。
+ *  网络流（url 项）不参与落地，由消费方单独处理（纯内存临时列表）。 */
 export async function importToOpenWithDir(
   module: string,
   files: OpenWithItem[],
 ): Promise<{ dir: string; paths: string[] }> {
-  const payload = files.map((f) =>
+  const local = files.filter(
+    (f): f is { path: string; name?: string } | { name: string; bytes: number[] } =>
+      !('url' in f),
+  );
+  const payload = local.map((f) =>
     'path' in f
       ? { kind: 'path', path: f.path, name: f.name ?? null }
       : { kind: 'bytes', name: f.name, bytes: f.bytes },

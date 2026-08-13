@@ -33,9 +33,22 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/weapi/album/v3/detail",
     "/weapi/song/enhance/player/url",
     "/weapi/song/enhance/player/url/v1",
+    // MV 详情与播放地址（铃兰 → 玉兰 MV 跳转）
+    "/weapi/v1/mv/detail",
+    "/weapi/song/enhance/play/mv/url",
     "/weapi/artist/v3/list/event",
     "/weapi/artist/albums",
+    "/weapi/artist/album",
     "/weapi/artist/top/song",
+    // 歌手/专辑详情（铃兰 → 顶部抽屉详情页，weapi 通道，对齐 MusicStorm modules.ts）
+    "/weapi/v1/artist/",
+    "/weapi/artist/albums/",
+    "/weapi/artist/mvs",
+    "/weapi/artist/introduction",
+    "/weapi/discovery/simiArtist",
+    "/weapi/v1/album/",
+    "/weapi/album/sub",
+    "/weapi/album/unsub",
     // 登录态个人资料/我的歌单（weapi + eapi 双通道，前端登录态走 eapi）
     "/weapi/nuser/account/get",
     "/weapi/user/playlist",
@@ -59,6 +72,14 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/eapi/song/enhance/player/url",
     // 歌词接口（eapi 通道，登录态可见逐字歌词）
     "/eapi/song/lyric",
+    // 歌单收藏/取消收藏（eapi，登录态；subscribe 收藏、unsubscribe 取消，两个独立 endpoint）
+    "/eapi/playlist/subscribe",
+    "/eapi/playlist/unsubscribe",
+    // 歌单添加/删除歌曲（eapi，登录态）
+    "/eapi/playlist/manipulate/tracks",
+    // 单曲红心（weapi，对齐 MusicStorm 已验证写法，走 /api/radio/like；
+    // 这是 CloudMusicAPI 标准「喜欢音乐」写接口，trackId 即歌曲 id）
+    "/weapi/radio/like",
     // 榜单
     "/weapi/playlist/video/related/rank",
     "/weapi/toplist/artist",
@@ -68,6 +89,8 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/eapi/personalized/playlist",
     "/weapi/recommend/songs",
     "/weapi/v3/discovery/recommend/songs",
+    // 私人 FM（漫游）
+    "/weapi/v1/radio/get",
 ];
 
 // 3) 允许的 HTTP 方法（仅 POST，无 GET/PUT/DELETE）

@@ -352,6 +352,14 @@
   .btn-press {
     @apply active:scale-95 transition-transform duration-100;
   }
+  /* 果冻回弹按下效果（子按钮与父容器隔离用） */
+  .btn-jelly {
+    @apply transition-transform duration-150;
+    transition-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .btn-jelly:active {
+    transform: scale(0.92);
+  }
   /* 面板淡入 */
   .fade-in {
     animation: fadeIn 0.2s ease-out;

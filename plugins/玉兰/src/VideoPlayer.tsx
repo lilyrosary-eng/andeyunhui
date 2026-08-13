@@ -25,6 +25,8 @@ interface VideoFile {
   filePath: string;
   fileName: string;
   sizeBytes: number;
+  url?: string;       // 网络流（如网易云 MV）：存在时直接用 url 播放
+  cover?: string;
 }
 
 interface VideoSettings {
@@ -165,12 +167,13 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const hideTimerRef = useRef<number>(0);
-  const videoUrl = hostApi.convertFileSrc(file.filePath);
+  // 网络流（如网易云 MV）直接用 url；本地文件经 convertFileSrc 转成可访问地址。
+  const videoUrl = file.url ?? hostApi.convertFileSrc(file.filePath);
 
-  // 当前视频在列表中的位置
+  // 当前视频在列表中的位置（本地文件用 filePath，网络流 MV 用 url 作为定位 key）
   const currentIndex = useMemo(() =>
-    videoList.findIndex(v => v.filePath === file.filePath),
-    [file.filePath, videoList]
+    videoList.findIndex(v => (v.filePath || v.url) === (file.filePath || file.url)),
+    [file.filePath, file.url, videoList]
   );
   const isFirst = currentIndex <= 0;
   const isLast = currentIndex >= videoList.length - 1;

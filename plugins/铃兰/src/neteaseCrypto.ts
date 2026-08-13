@@ -3,12 +3,9 @@
 import CryptoJS from 'crypto-js';
 
 // 网易云 weapi/eapi 加密层（纯前端实现）
-// weapi：两次 AES-128-CBC + 一次 RSA(手写 BigInt) 生成 encSecKey
-// eapi：MD5 签名 + AES-128-ECB(PKCS7) 生成 params（对齐 CloudMusicAPI / MusicStorm）
-// 依赖浏览器 Web Crypto（Tauri WebView 自带）
-
-const subtle: SubtleCrypto | undefined =
-  (typeof crypto !== 'undefined' && crypto.subtle) ? crypto.subtle : undefined;
+// weapi：两次 AES-128-CBC(base64 输出) + 一次 RSA(手写 BigInt) 生成 encSecKey
+// eapi：MD5 签名 + AES-128-ECB(PKCS7, hex 大写) 生成 params（对齐 CloudMusicAPI / MusicStorm）
+// 全部经 crypto-js 实现（插件沙箱已加载），不依赖 Web Crypto
 
 const IV = '0102030405060708';
 const SECOND_KEY = '0CoJUm6Qyw8W8jud';
@@ -18,37 +15,23 @@ const RSA_N =
   '00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7';
 const RSA_E = '010001';
 
+// 对齐 MusicStorm：secretKey 用 16 位 base62 字符（AES-128 密钥，熵更足）
+const BASE62 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 function randomKey(len = 16): string {
-  const chars = '0123456789abcdef';
   let s = '';
-  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * 16)];
+  for (let i = 0; i < len; i++) s += BASE62.charAt(Math.floor(Math.random() * 62));
   return s;
 }
 
-function padPkcs7(data: Uint8Array): Uint8Array {
-  const len = data.length;
-  const pad = 16 - (len % 16);
-  const out = new Uint8Array(len + pad);
-  out.set(data, 0);
-  for (let i = 0; i < pad; i++) out[len + i] = pad;
-  return out;
-}
-
-function bytesToHex(b: Uint8Array): string {
-  let h = '';
-  for (let i = 0; i < b.length; i++) h += b[i].toString(16).padStart(2, '0');
-  return h;
-}
-
+// 网易云 weapi 的 AES-CBC 密文必须 base64 输出（对齐 CloudMusicAPI / MusicStorm crypto.ts）。
+// 之前误用 Web Crypto 输出 hex：服务端按 base64 解码失败 → 所有 weapi 写接口（红心/每日推荐/用户资料）
+// 静默返回空 body 假成功。这是红心反复失败的真正根因，与 csrf / cookie 无关。
 async function aesCbc(text: string, key: string): Promise<string> {
-  if (!subtle) throw new Error('Web Crypto 不可用');
-  const enc = new TextEncoder();
-  const keyBytes = enc.encode(key);
-  const ivBytes = enc.encode(IV);
-  const cryptoKey = await subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']);
-  const padded = padPkcs7(enc.encode(text));
-  const ct = await subtle.encrypt({ name: 'AES-CBC', iv: ivBytes }, cryptoKey, padded);
-  return bytesToHex(new Uint8Array(ct));
+  return CryptoJS.AES.encrypt(
+    CryptoJS.enc.Utf8.parse(text),
+    CryptoJS.enc.Utf8.parse(key),
+    { iv: CryptoJS.enc.Utf8.parse(IV), mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 },
+  ).toString();
 }
 
 // text 反转后按字节转 hex，pow(mod, e, n) -> 256 hex 字符
@@ -75,15 +58,18 @@ function rsaEncrypt(text: string): string {
 }
 
 // 生成 weapi 请求体 { params, encSecKey }
-// 标准流程：先以固定密钥 SECOND_KEY 加密明文得到 first，
-// 再用随机密钥 b 加密包裹对象 {params:first, encSecKey}，encSecKey 为 b 的 RSA 密文。
+// 标准流程（对齐 CloudMusicAPI / MusicStorm crypto.ts）：
+//   1) 固定密钥 SECOND_KEY 加密明文 JSON → 内层密文 first（base64）
+//   2) 随机密钥 b 直接加密 first（注意：外层加密的是内层密文本身，不是 JSON 包裹对象）
+//   3) encSecKey = RSA(b 反转)
+// 之前外层误加密 JSON.stringify({params,encSecKey})，服务端解密后拿到的不是合法内层密文 → 静默空 body。
 export async function weapi(obj: Record<string, any>, csrfToken = ''): Promise<{ params: string; encSecKey: string }> {
   // csrf_token 字段必须存在（值等于 cookie 里的 __csrf，游客态为空字符串）
   const text = JSON.stringify({ ...obj, csrf_token: csrfToken });
   const b = randomKey(16);
   const first = await aesCbc(text, SECOND_KEY);
   const encSecKey = rsaEncrypt(b);
-  const params = await aesCbc(JSON.stringify({ params: first, encSecKey }), b);
+  const params = await aesCbc(first, b);
   return { params, encSecKey };
 }
 
@@ -105,9 +91,10 @@ export async function eapi(
   url: string,
   obj: Record<string, any>,
   header?: Record<string, string>,
-  csrfToken = '',
 ): Promise<{ params: string }> {
-  const text = JSON.stringify({ ...obj, header, csrf_token: csrfToken });
+  // 对齐 MusicStorm/CloudMusicAPI：eapi 不单独塞 csrf_token 字段；
+  // __csrf / MUSIC_U / MUSIC_A 以明文作为 header 字段参与 MD5 签名（见 buildEapiHeader）。
+  const text = JSON.stringify({ ...obj, header });
   const message = `nobody${url}use${text}md5forencrypt`;
   const digest = CryptoJS.MD5(message).toString();
   const data = `${url}-36cd479b6b5-${text}-36cd479b6b5-${digest}`;

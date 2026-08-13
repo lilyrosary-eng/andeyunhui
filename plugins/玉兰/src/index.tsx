@@ -23,6 +23,9 @@ interface VideoFile {
   filePath: string;
   fileName: string;
   sizeBytes: number;
+  // 网络流（如网易云 MV）：存在时直接用 url 播放，不走本地 convertFileSrc。
+  url?: string;
+  cover?: string;     // 网络流封面（MV 用）
 }
 
 interface ScanProgress {
@@ -222,6 +225,8 @@ function VideoModule() {
   const [showSettings, setShowSettings] = useState(false);
   const [rescanCounter, setRescanCounter] = useState(0);
   const [playingFile, setPlayingFile] = useState<VideoFile | null>(null);
+  // 铃兰传来的临时 MV 列表（纯内存，不持久化、关闭软件即销毁）。
+  const [mvTemp, setMvTemp] = useState<VideoFile[]>([]);
   const [settings, setSettings] = useState<VideoSettings>(loadSettings);
 
   // 保存设置
@@ -323,21 +328,47 @@ function VideoModule() {
     setPlayingFile(file);
   }, []);
 
-  // 以安得云荟打开 / 拖入主窗口：复制进固定临时目录 → 注册为常驻库文件夹 → 播放目标
+  // 以安得云荟打开 / 拖入主窗口 / 铃兰播放 MV，统一入口：
+  //  - 本地项：复制进固定临时目录 → 注册为常驻库文件夹 → 播放目标
+  //  - 网络流项（url，如网易云 MV）：纯内存临时列表（mvTemp），不落地、关闭软件即销毁
   const processOpenWith = useCallback(async (items: OpenWithItem[]) => {
-    try {
-      const { dir, paths } = await importToOpenWithDir('video', items);
-      addRootPathEphemeral(dir);
-      setRescanCounter((c) => c + 1);
-      if (paths[0]) {
-        setPlayingFile({
-          filePath: paths[0],
-          fileName: paths[0].split(/[\\/]/).pop() || paths[0],
-          sizeBytes: 0,
-        });
+    // 拆分本地项与网络流项
+    const localItems = items.filter(
+      (i): i is { path: string; name?: string } | { name: string; bytes: number[] } => !('url' in i),
+    );
+    const urlItems = items.filter(
+      (i): i is { url: string; name: string; artist?: string; cover?: string } => 'url' in i,
+    );
+
+    // 网络流：内存临时列表（不入库）
+    for (const it of urlItems) {
+      const file: VideoFile = {
+        filePath: '',
+        fileName: it.name,
+        sizeBytes: 0,
+        url: it.url,
+        cover: it.cover,
+      };
+      setMvTemp((prev) => (prev.some((f) => f.url === it.url) ? prev : [...prev, file]));
+      setPlayingFile(file);
+    }
+
+    // 本地文件：复制到临时目录 → 注册库根 → 播放（无网络流时才以首个本地文件为目标）
+    if (localItems.length > 0) {
+      try {
+        const { dir, paths } = await importToOpenWithDir('video', localItems);
+        addRootPathEphemeral(dir);
+        setRescanCounter((c) => c + 1);
+        if (paths[0] && urlItems.length === 0) {
+          setPlayingFile({
+            filePath: paths[0],
+            fileName: paths[0].split(/[\\/]/).pop() || paths[0],
+            sizeBytes: 0,
+          });
+        }
+      } catch (err) {
+        console.error('[Video] 以安得云荟打开失败:', err);
       }
-    } catch (err) {
-      console.error('[Video] 以安得云荟打开失败:', err);
     }
   }, [addRootPathEphemeral]);
 
@@ -383,8 +414,8 @@ function VideoModule() {
     [folders, hiddenFolders]
   );
 
-  // 空状态
-  if (rootPaths.length === 0) {
+  // 空状态（注意：若正在播放铃兰传来的临时 MV 网络流，即使无本地库也要优先进入播放视图）
+  if (rootPaths.length === 0 && !playingFile) {
     return (
       <EmptyState
         icon={
@@ -438,9 +469,11 @@ function VideoModule() {
 
     // 播放视图
     if (playingFile) {
+      // 网络流（铃兰 MV）用临时列表 mvTemp；本地文件用当前文件夹 videos
+      const list = playingFile.url ? mvTemp : videos;
       return React.createElement(VideoPlayer, {
         file: playingFile,
-        videoList: videos,
+        videoList: list,
         onFileChange: handleFileChange,
         onBack: handleBackFromPlayer,
         settings,

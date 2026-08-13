@@ -22,7 +22,7 @@ import { useAppStore } from '@/stores/appStore';
 import { useNotesStore } from '@/stores/notesStore';
 import { clearStaleBootPreview } from '@/lib/bootPreview';
 import { initOpenWith, MEDIA_MODULES, detectModule } from '@/lib/openWith';
-import { dispatchOpenWith } from '../plugins/_shared/openWithFiles';
+import { dispatchOpenWith, registerOpenWithListener } from '../plugins/_shared/openWithFiles';
 import { PhysicalPosition } from '@tauri-apps/api/dpi';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
@@ -466,6 +466,15 @@ function App() {
     };
     window.addEventListener('module-settings-toggle', handler);
     return () => window.removeEventListener('module-settings-toggle', handler);
+  }, [setActiveModule]);
+
+  // 铃兰点击「播放 MV」：经 openWith 中枢派发到 video 模块，这里负责切到「玉兰」视频模块。
+  // 临时列表由玉兰消费（processOpenWith）在内存创建、播放，不持久化，关闭软件即销毁。
+  useEffect(() => {
+    const unsub = registerOpenWithListener((m) => {
+      if (m === 'video') setActiveModule('video');
+    });
+    return unsub;
   }, [setActiveModule]);
 
   // 文件拖入（HTML5 拖放）：dragDropEnabled 已关闭，由 webview 原生处理拖放事件，

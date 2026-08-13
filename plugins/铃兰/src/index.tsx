@@ -8,10 +8,10 @@ import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
 import { NeteaseView, type PlayableTrack, type TempPlaylist, type NeteaseViewHandle } from './NeteaseView';
 import NeteaseSidebar, { type NeteaseTempItem } from './NeteaseSidebar';
-import { isLikedPlaylist, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
+import { isLikedPlaylist, likeNeteaseSong, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
-import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
+import { dispatchOpenWith, registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
@@ -989,6 +989,8 @@ function MusicModule() {
   const [neteaseOpen, setNeteaseOpen] = useState(false);
   const [neteaseTab, setNeteaseTab] = useState<'listen' | 'library' | 'radio' | 'search' | 'login'>('listen');
   const [neteaseProfile, setNeteaseProfile] = useState<NeteaseProfile | null>(null);
+  // 网易云红心状态（受控源）：列表与底部播放栏共用，确保两侧同步
+  const [neteaseLiked, setNeteaseLiked] = useState<Set<number>>(new Set());
   // 网易云视图 ref：供侧栏调用 openPlaylist / restoreTemp
   const neteaseViewRef = useRef<NeteaseViewHandle | null>(null);
 
@@ -1440,6 +1442,16 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       syncFavoriteToDb(track, nowFav);
       return next;
     });
+  }, []);
+
+  // 网易云红心：写网易云 + 更新受控状态 + 同步本地收藏，供列表与底部播放栏共用
+  const toggleNeteaseLike = useCallback((songId: number, like: boolean) => {
+    setNeteaseLiked((prev) => {
+      const next = new Set(prev);
+      if (like) next.add(songId); else next.delete(songId);
+      return next;
+    });
+    likeNeteaseSong(songId, like).catch((e) => console.warn('[netease] 红心写入失败', songId, e));
   }, []);
 
   // 封面覆盖映射加载/变更后，确保已加载的歌单曲目也应用覆盖。
@@ -1979,6 +1991,20 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                 setActiveTempId(null);
               }}
               onProfileChange={setNeteaseProfile}
+              likedSongs={neteaseLiked}
+              onLikedSongsChange={setNeteaseLiked}
+              onToggleFavorite={toggleFavorite}
+              onPlayMv={(mv) => {
+                // 跨模块播放 MV：复用「以安得云荟打开」全局中枢（dispatchOpenWith），
+                // 由 App 切到「玉兰」模块，玉兰消费后在内存创建临时列表播放。
+                // 临时列表不落地、不持久化（关闭软件即销毁）。
+                dispatchOpenWith('video', [{
+                  url: mv.url,
+                  name: [mv.name, mv.artist].filter(Boolean).join(' - '),
+                  artist: mv.artist,
+                  cover: mv.cover,
+                }]);
+              }}
             />
           ) : showStats ? (
             <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />
@@ -2039,13 +2065,18 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           )}
         </div>
         {/* PlayerBar 固定在内容区下方；设置/统计页也保持显示，不被覆盖。 */}
-        {currentTrack && (
+        {currentTrack && (() => {
+          // 网易云歌曲：红心读/写走统一的网易云状态（neteaseLiked + toggleNeteaseLike）
+          const neteaseMatch = /^netease-(\d+)$/.exec(currentTrack.id);
+          const isNetease = !!neteaseMatch;
+          const neteaseId = neteaseMatch ? Number(neteaseMatch[1]) : 0;
+          return (
           <PlayerBar
             key={currentTrack.filePath}
             track={currentTrack}
             isPlaying={isPlaying}
-            isFavorite={favorites.has(trackIdOf(currentTrack))}
-            onToggleFavorite={toggleFavorite}
+            isFavorite={isNetease ? neteaseLiked.has(neteaseId) : favorites.has(trackIdOf(currentTrack))}
+            onToggleFavorite={isNetease ? (() => toggleNeteaseLike(neteaseId, !neteaseLiked.has(neteaseId))) : toggleFavorite}
             onTogglePlay={togglePlay}
             onPrev={prevTrack}
             onNext={nextTrack}
@@ -2058,7 +2089,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
             onSelectTrack={handlePopupSelectTrack}
           />
-        )}
+          );
+        })()}
       </div>
       <ModuleDrawer
         open={showModuleDrawer}

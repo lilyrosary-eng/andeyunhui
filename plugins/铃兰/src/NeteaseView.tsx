@@ -2,17 +2,22 @@
 import React from 'react';
 import { ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import {
-  CloudIcon, HeartIcon, MusicIcon, PlayIcon, SearchIcon,
+  CloudIcon, HeartIcon, MusicIcon, PlayIcon, SearchIcon, VideoIcon,
 } from '../../_shared/icons';
 import { T } from '../../_shared/pluginRuntime';
 import {
-  searchSongs, getListenNow, getTopList, getPersonalizedPlaylists, getSongUrl, isLoggedIn, logoutNetease,
+  searchSongs, getListenNow, getPersonalFm, getTopList, getPersonalizedPlaylists, getSongUrl, isLoggedIn, logoutNetease,
   neteaseQrKey, neteaseQrCreate, neteaseQrCheck,
-  getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr, likeNeteaseSong,
+  getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr, likeNeteaseSong, subscribeNeteasePlaylist, isLikedPlaylist,
+  getMvPlayable,
+  getArtistDetail, getArtistAlbums, getArtistAllSongs, getArtistMvs, getArtistDesc, getSimilarArtists,
+  getAlbumDetail, subscribeAlbum,
   type NeteaseTrack, type NeteaseProfile, type NeteasePlaylistItem,
+  type NeteaseArtist, type NeteaseArtistAlbum, type NeteaseMvItem, type NeteaseSimilarArtist,
+  type NeteaseAlbum, type AlbumDetailResult,
 } from './neteaseApi';
 
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 export type NeteaseTab = 'listen' | 'library' | 'radio' | 'search' | 'login';
 
@@ -47,6 +52,15 @@ interface NeteaseViewProps {
   onActivePlaylist?: (id: number) => void;
   // 用户资料变化时回传（用于模块抽屉显示登录态）
   onProfileChange?: (profile: NeteaseProfile | null) => void;
+  // 网易云红心状态（受控）：由父组件统一持有，确保列表与底部播放栏共用同一状态源
+  likedSongs?: Set<number>;
+  // 列表红心写操作后上报，由父组件统一调网易云 + 本地收藏
+  onLikedSongsChange?: (ids: Set<number>) => void;
+  // 单曲红心变化时同步到本地收藏（让底部播放栏红心保持一致）
+  onToggleFavorite?: (track: PlayableTrack) => void;
+  // 点击 MV 图标：取 MV 播放信息后，请求跳转到「玉兰」模块播放。
+  // 参数为已解析好的 MV 播放信息（含网络 URL），由父组件负责跨模块切换 + 玉兰接收。
+  onPlayMv?: (mv: { id: number; name: string; artist: string; cover: string; url: string }) => void;
 }
 
 // 在线播放生成的临时歌单（挂在侧栏「我的收藏」之下）
@@ -92,7 +106,7 @@ function formatDuration(ms: number): string {
 }
 
 export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>(function NeteaseView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist, onProfileChange },
+  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist, onProfileChange, likedSongs: likedSongsProp, onLikedSongsChange, onToggleFavorite, onPlayMv },
   ref,
 ) {
   const [tab, setTab] = useState<NeteaseTab>(initialTab);
@@ -102,7 +116,8 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const [tracks, setTracks] = useState<NeteaseTrack[]>([]);
   const [keyword, setKeyword] = useState('');
   const [playingId, setPlayingId] = useState<number | null>(null);
-  const [likedSongs, setLikedSongs] = useState<Set<number>>(new Set()); // 已写入网易云「我喜欢的音乐」的歌曲
+  // 受控：父组件持有网易云红心状态，这里仅做兜底默认值
+  const likedSongs = likedSongsProp ?? new Set<number>();
   const reqRef = useRef(0);
   // 顶部个人资料按钮用作「进入账号 / 返回」切换，记录进入前的 tab
   const previousTabRef = useRef<NeteaseTab>('listen');
@@ -192,6 +207,18 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
           setPlaylists(list);
           // 上抛用户全部歌单给侧栏（铺开为「用户自己的收藏歌单」），并解析「我喜欢的音乐」
           onUserPlaylists?.(list);
+          // 拉取「我喜欢的音乐」歌单的歌曲 id，初始化红心状态（读线）
+          const liked = list.find((pl) => isLikedPlaylist(pl));
+          if (liked) {
+            getTopList(liked.id, 100000)
+              .then((res) => {
+                if (!res) return;
+                const ids = new Set(res.tracks.map((t) => t.id));
+                onLikedSongsChange?.(ids);
+                console.log('[netease] 初始化我喜欢的音乐，共', ids.size, '首');
+              })
+              .catch((e) => console.warn('[netease] 拉取我喜欢的音乐失败', e));
+          }
         } catch (e) {
           console.warn('[netease] 获取用户歌单失败', e);
           setPlaylists([]);
@@ -279,6 +306,8 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     if (tab !== 'listen') return;
     if (playlistId != null) return; // 正在查看某歌单详情，不要重置回网格
     setPlaylistId(null); // 离开歌单分页模式
+    setPlaylistInfo(null);
+    setNotice(null);
     sourceNameRef.current = T('music.moduleDrawer.netease.listenNow') || '热榜';
     const req = ++reqRef.current;
     setLoading(false);
@@ -326,6 +355,8 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   useEffect(() => {
     if (tab !== 'search') return;
     setPlaylistId(null); // 离开歌单分页模式
+    setPlaylistInfo(null);
+    setNotice(null);
     const kw = keyword.trim();
     if (!kw) { setTracks([]); setLoading(false); setHasMore(false); return; }
     const req = ++reqRef.current;
@@ -371,30 +402,70 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     }
   }, [keyword, offset, hasMore]);
 
-  // 「猜你喜欢」自动拉取：把原「现在就听」下方的推荐单曲流移到这里
+  // 「漫游」自动拉取：优先私人 FM（登录态个性化推荐），未登录 / FM 为空则回落每日推荐 / 飙升榜
+  const [roamOffset, setRoamOffset] = useState(0);
   useEffect(() => {
     if (tab !== 'library') return;
     setPlaylistId(null); // 离开歌单分页模式
-    sourceNameRef.current = '猜你喜欢';
+    setPlaylistInfo(null);
+    setNotice(null);
+    sourceNameRef.current = '漫游';
     const req = ++reqRef.current;
     setLoading(true);
     setError('');
     setOffset(0);
-    getListenNow(50)
-      .then((list) => {
+    (async () => {
+      try {
+        let list: NeteaseTrack[] = [];
+        if (isLoggedIn()) {
+          list = await getPersonalFm(8, roamOffset);
+        }
+        if (!list.length) {
+          list = await getListenNow(50);
+        }
         if (req === reqRef.current) {
           setTracks(list);
           setTotal(list.length);
           setHasMore(false);
           setLoading(false);
         }
-      })
-      .catch((e) => { if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); } });
-  }, [tab]);
+      } catch (e: any) {
+        if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); }
+      }
+    })();
+  }, [tab, roamOffset]);
+  const refreshRoam = useCallback(() => setRoamOffset((o) => o + 8), []);
 
   const [playlistId, setPlaylistId] = useState<number | null>(null);
+  const [playlistInfo, setPlaylistInfo] = useState<{ name: string; coverUrl?: string; description?: string; trackCount: number; playCount?: number } | null>(null);
+  const [subscribedPlaylist, setSubscribedPlaylist] = useState(false);
+  const [notice, setNotice] = useState<{ text: string; type?: 'success' | 'error' } | null>(null);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 2200);
+    return () => clearTimeout(t);
+  }, [notice]);
   // 当前面板来源名（用于临时歌单命名）：歌单/榜单进入时记录，tab 切换时更新
   const sourceNameRef = useRef<string>('');
+
+  // ===== 顶部抽屉详情（歌手 / 专辑，对齐 MusicStorm） =====
+  // 抽屉从顶部弹出，覆盖下方 80% 区域，可滚动，点击遮罩 / 返回按钮关闭。
+  type DrawerState =
+    | { type: 'none' }
+    | { type: 'artist'; id: number }
+    | { type: 'album'; id: number };
+  const [drawer, setDrawer] = useState<DrawerState>({ type: 'none' });
+
+  // 从单曲列表点击歌手名 / 专辑名进入详情（需 track 携带 artistId / albumId）
+  const openArtistDrawer = useCallback((artistId?: number) => {
+    if (!artistId) return;
+    setDrawer({ type: 'artist', id: artistId });
+  }, []);
+  const openAlbumDrawer = useCallback((albumId?: number) => {
+    if (!albumId) return;
+    setDrawer({ type: 'album', id: albumId });
+  }, []);
+  const closeDrawer = useCallback(() => setDrawer({ type: 'none' }), []);
 
   const openPlaylist = useCallback(async (id: number, name?: string) => {
     const req = ++reqRef.current;
@@ -415,6 +486,24 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
       setOffset(shown.length);
       setReachedLimit(shown.length >= MAX_ITEMS);
       setHasMore(shown.length < (res.total || res.tracks.length) && shown.length < MAX_ITEMS);
+      setPlaylistInfo({
+        name: name || res.description || '歌单详情',
+        coverUrl: res.coverUrl,
+        description: res.description,
+        trackCount: res.total || res.tracks.length,
+        playCount: res.playCount,
+      });
+      // 查询当前歌单是否已收藏（仅登录态）
+      if (profile?.userId) {
+        getUserPlaylists(profile.userId, 1000)
+          .then((list) => {
+            if (req !== reqRef.current) return;
+            setSubscribedPlaylist(list.some((p) => p.id === id));
+          })
+          .catch(() => {});
+      } else {
+        setSubscribedPlaylist(false);
+      }
       setLoading(false);
     } catch (e) {
       if (req === reqRef.current) { setError(String((e as any)?.message || e)); setLoading(false); }
@@ -482,46 +571,145 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   };
 
   const handlePlayAll = useCallback(async () => {
-    const playlist: PlayableTrack[] = [];
-    for (const t of tracks) {
-      const res = await getSongUrl(t.id);
-      if (res.url) playlist.push(trackToPlayable(t, res.url, qualityLabelFromBr(res.br)));
-    }
-    if (playlist.length) {
-      const tempName = buildTempName();
-      onPlay(playlist, 0, tempName);
-      const tempId = playlistId != null ? `playlist-${playlistId}` : tab === 'search' ? `search-${keyword.trim()}` : 'recommend';
-      onTempPlaylist?.({
-        id: tempId,
+    if (tracks.length === 0) return;
+    // 只同步取第一首地址立即播放，避免整张列表串行取地址导致数秒延迟。
+    // 其余曲以空 filePath 占位进队列，后台并发补全地址。
+    const firstRes = await getSongUrl(tracks[0].id);
+    const playlist: PlayableTrack[] = tracks.map((t, i) =>
+      i === 0 && firstRes.url
+        ? trackToPlayable(t, firstRes.url, qualityLabelFromBr(firstRes.br))
+        : trackToPlayable(t, '')
+    );
+    const tempName = buildTempName();
+    onPlay(playlist, 0, tempName);
+    const tempId = playlistId != null ? `playlist-${playlistId}` : tab === 'search' ? `search-${keyword.trim()}` : 'recommend';
+    onTempPlaylist?.({
+      id: tempId,
+      name: tempName,
+      coverPath: playlist[0]?.coverPath,
+      tracks: playlist,
+      payload: {
+        kind: playlistId != null ? 'playlist' : tab === 'search' ? 'search' : 'recommend',
+        id: playlistId ?? undefined,
         name: tempName,
-        coverPath: playlist[0]?.coverPath,
+        keyword: tab === 'search' ? keyword.trim() : undefined,
         tracks: playlist,
-        payload: {
-          kind: playlistId != null ? 'playlist' : tab === 'search' ? 'search' : 'recommend',
-          id: playlistId ?? undefined,
-          name: tempName,
-          keyword: tab === 'search' ? keyword.trim() : undefined,
-          tracks: playlist,
-        },
-      });
+      },
+    });
+
+    // 后台并发补全其余曲的播放地址（不阻塞播放）
+    const player = (window as unknown as { __MUSIC_PLAYER__?: { updateTrackUrl?: (i: number, u: string) => void } }).__MUSIC_PLAYER__;
+    if (player?.updateTrackUrl) {
+      for (let i = 1; i < tracks.length; i++) {
+        const u = await getSongUrl(tracks[i].id).catch(() => null);
+        if (u?.url) player.updateTrackUrl(i, u.url);
+      }
     }
   }, [tracks, onPlay, onTempPlaylist, buildTempName]);
 
-  const handleLike = useCallback(async (e: React.MouseEvent, t: NeteaseTrack) => {
-    e.stopPropagation();
+  const handleLike = useCallback(async (e: React.MouseEvent | undefined, t: NeteaseTrack) => {
+    e?.stopPropagation?.();
     if (!isLoggedIn()) {
       setError('请先登录网易云，再收藏到「我喜欢的音乐」');
       return;
     }
+    // 单曲红心与歌单收藏对齐标准：按当前状态 toggle（已喜欢则取消）
+    const currentlyLiked = likedSongs?.has(t.id) ?? false;
+    const next = !currentlyLiked;
     try {
-      await likeNeteaseSong(t.id, true);
-      setLikedSongs((prev) => new Set(prev).add(t.id));
+      await likeNeteaseSong(t.id, next);
+      // 写成功后上报父组件，统一更新网易云红心状态（仅管线上的 likedSongs，不碰本地收藏）
+      const nextSet = new Set(likedSongs ?? []);
+      if (next) nextSet.add(t.id);
+      else nextSet.delete(t.id);
+      onLikedSongsChange?.(nextSet);
+      console.log('[netease] like song 已同步红心状态', { neteaseId: t.id, liked: next });
     } catch (err: any) {
-      setError(`收藏失败：${err?.message || String(err)}`);
+      setError(`${next ? '收藏' : '取消收藏'}失败：${err?.message || String(err)}`);
     }
-  }, []);
+  }, [likedSongs, onLikedSongsChange]);
 
-  const handlePlayTrack = useCallback(async (t: NeteaseTrack) => {
+  // 点击 MV 图标：取 MV 播放地址 → 通知父组件跳转到玉兰模块播放（创建临时列表，关闭即销毁）
+  const handlePlayMv = useCallback(async (e: React.MouseEvent | undefined, t: NeteaseTrack) => {
+    e?.stopPropagation?.();
+    if (!t || !t.mvId) {
+      console.warn('[netease][mv] 无效的 track（t 缺失或缺少 mvId）', t);
+      return;
+    }
+    try {
+      const mv = await getMvPlayable(t.mvId);
+      if (!mv || !mv.url) {
+        setError('该歌曲的 MV 暂不可用或获取失败');
+        return;
+      }
+      onPlayMv?.({
+        id: mv.id,
+        name: mv.name || t.name,
+        artist: mv.artist || t.artist,
+        cover: mv.cover || t.cover || '',
+        url: mv.url,
+      });
+    } catch (err: any) {
+      setError(`MV 播放失败：${err?.message || String(err)}`);
+    }
+  }, [onPlayMv]);
+
+  const handleSubscribePlaylist = useCallback(async () => {
+    if (!isLoggedIn() || playlistId == null) {
+      if (playlistId != null) setNotice({ text: '请先登录网易云，再收藏歌单', type: 'error' });
+      return;
+    }
+    const next = !subscribedPlaylist;
+    try {
+      const resp = await subscribeNeteasePlaylist(playlistId, next);
+      // 服务端可能返回 code:200 但 message 含失败描述（如"不能收藏此歌单"），必须二次校验
+      const code = resp?.code;
+      const msg = resp?.message || resp?.msg;
+      const realOk = code === 200 || code === undefined;
+      if (realOk && !(msg && /不能|失败|无法|无权|error/i.test(String(msg)))) {
+        // 收藏/取消成功后，以服务端真实歌单列表刷新侧栏，避免"已收藏但侧栏不刷新"或"取消后仍显示"
+        try {
+          if (profile) {
+            const list = await getUserPlaylists(profile.userId, 1000);
+            setPlaylists(list);
+            onUserPlaylists?.(list);
+            const actual = list.some((p) => p.id === playlistId);
+            setSubscribedPlaylist(actual);
+            setNotice({ text: actual ? '已收藏歌单' : '已取消收藏歌单', type: 'success' });
+            return;
+          }
+        } catch (syncErr) {
+          console.warn('[netease] 收藏歌单后刷新侧栏失败', syncErr);
+        }
+        setSubscribedPlaylist(next);
+        setNotice({ text: next ? '已收藏歌单' : '已取消收藏歌单', type: 'success' });
+      } else {
+        setNotice({ text: `收藏未生效：${msg || ('code ' + code)}`, type: 'error' });
+      }
+    } catch (err: any) {
+      setNotice({ text: `收藏歌单失败：${err?.message || String(err)}`, type: 'error' });
+    }
+  }, [playlistId, subscribedPlaylist, profile, onUserPlaylists]);
+
+  // 收藏 / 取消收藏专辑（顶部详情抽屉使用）
+  const handleSubscribeAlbum = useCallback(async (albumId: number, subscribe: boolean) => {
+    if (!loggedIn) {
+      setNotice({ type: 'error', text: '请先登录网易云' });
+      return;
+    }
+    try {
+      await subscribeAlbum(albumId, subscribe);
+      setNotice({ type: 'success', text: subscribe ? '已收藏专辑' : '已取消收藏' });
+    } catch (e) {
+      console.warn('[netease] 收藏专辑失败', e);
+      setNotice({ type: 'error', text: subscribe ? '收藏专辑失败' : '取消收藏失败' });
+    }
+  }, [loggedIn]);
+
+  // 播放任意曲目列表（单曲点击 / 列表播放全部通用）。startIndex 指定从哪首起播；name 用于临时歌单命名（不传则用默认）。
+  const playTrackList = useCallback(async (list: NeteaseTrack[], startIndex: number, name?: string) => {
+    if (list.length === 0) return;
+    const t = list[startIndex] ?? list[0];
     setPlayingId(t.id);
     const res = await getSongUrl(t.id);
     if (res.url) {
@@ -529,22 +717,20 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
       // 其余曲以空 filePath 占位进入队列，后台异步补全地址（见下方 fire-and-forget）。
       const quality = qualityLabelFromBr(res.br);
       const playable = trackToPlayable(t, res.url, quality);
-      const startIndex = tracks.findIndex((x) => x.id === t.id);
-      const playlist: PlayableTrack[] = tracks.map((x) => {
+      const playlist: PlayableTrack[] = list.map((x) => {
         if (x.id === t.id) return playable;
-        const p = trackToPlayable(x, '');
-        return p;
+        return trackToPlayable(x, '');
       });
-      const tempName = buildTempName();
-      onPlay(playlist, startIndex >= 0 ? startIndex : 0, tempName);
-      const tempId = playlistId != null ? `playlist-${playlistId}` : tab === 'search' ? `search-${keyword.trim()}` : 'recommend';
+      const tempName = name || buildTempName();
+      onPlay(playlist, startIndex, tempName);
+      const tempId = name ? `detail-${encodeURIComponent(name).slice(0, 24)}-${Date.now()}` : (playlistId != null ? `playlist-${playlistId}` : tab === 'search' ? `search-${keyword.trim()}` : 'recommend');
       onTempPlaylist?.({
         id: tempId,
         name: tempName,
-        coverPath: playlist[startIndex >= 0 ? startIndex : 0]?.coverPath,
+        coverPath: playlist[startIndex]?.coverPath,
         tracks: playlist,
         payload: {
-          kind: playlistId != null ? 'playlist' : tab === 'search' ? 'search' : 'recommend',
+          kind: name ? 'recommend' : (playlistId != null ? 'playlist' : tab === 'search' ? 'search' : 'recommend'),
           id: playlistId ?? undefined,
           name: tempName,
           keyword: tab === 'search' ? keyword.trim() : undefined,
@@ -552,18 +738,24 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
         },
       });
 
-      // 后台补全其余曲的播放地址（不阻塞播放）；补到当前播放的等待曲时播放器会自动 reload
+      // 后台补全其余曲的播放地址（不阻塞播放）；跳过已立即取地址的点击曲，避免重复请求。
+      // 补到当前播放的等待曲时播放器会自动 reload。
       const player = (window as unknown as { __MUSIC_PLAYER__?: { updateTrackUrl?: (i: number, u: string) => void } }).__MUSIC_PLAYER__;
       if (player?.updateTrackUrl) {
-        for (let i = 0; i < tracks.length; i++) {
+        for (let i = 0; i < list.length; i++) {
           if (i === startIndex) continue;
-          const u = await getSongUrl(tracks[i].id).catch(() => null);
+          const u = await getSongUrl(list[i].id).catch(() => null);
           if (u?.url) player.updateTrackUrl(i, u.url);
         }
       }
     }
     setPlayingId(null);
-  }, [tracks, onPlay]);
+  }, [playlistId, keyword, onPlay, onTempPlaylist]);
+
+  const handlePlayTrack = useCallback(async (t: NeteaseTrack) => {
+    const idx = tracks.findIndex((x) => x.id === t.id);
+    await playTrackList(tracks, idx >= 0 ? idx : 0);
+  }, [tracks, playTrackList]);
 
   return (
     <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden overflow-x-hidden relative bg-white dark:bg-[#1e1e1e]">
@@ -585,7 +777,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
         ) : (
           <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 truncate min-w-0">
             {tab === 'library'
-              ? '猜你喜欢'
+              ? '漫游'
               : tab === 'login' && loggedIn
                 ? '我的账号'
                 : T(TAB_TITLE_KEYS[tab])}
@@ -819,7 +1011,63 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                 </div>
               </React.Fragment>
             ) : (
-              renderBody()
+              <div className="flex flex-col min-w-0">
+                {/* 临时浮动提示：收藏/取消收藏反馈 */}
+                <div className="h-6 mb-2 flex items-center justify-center">
+                  {notice && (
+                    <span
+                      className={`px-3 py-0.5 rounded-full text-xs font-medium transition-opacity duration-300 ${
+                        notice.type === 'error'
+                          ? 'bg-red-50 text-red-600 dark:bg-red-950/40 dark:text-red-400'
+                          : 'bg-green-50 text-green-600 dark:bg-green-950/40 dark:text-green-400'
+                      }`}
+                    >
+                      {notice.text}
+                    </span>
+                  )}
+                </div>
+                {/* 歌单详情页头部 */}
+                {playlistInfo && (
+                  <div className="flex gap-5 mb-5 min-w-0">
+                    <div className="shrink-0 w-32 h-32 sm:w-40 sm:h-40 rounded-2xl overflow-hidden bg-neutral-200 dark:bg-stone-800 shadow-sm">
+                      {playlistInfo.coverUrl ? (
+                        <img src={playlistInfo.coverUrl} alt={playlistInfo.name} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-3xl font-bold text-neutral-400 dark:text-stone-500">
+                          {playlistInfo.name.slice(0, 1)}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0 flex flex-col justify-center gap-2">
+                      <div className="flex items-center gap-2 text-xs text-neutral-500 dark:text-stone-400">
+                        <span className="px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 dark:text-red-400">网易云</span>
+                        <span>{playlistInfo.trackCount} 首</span>
+                        {playlistInfo.playCount ? <span>· {(playlistInfo.playCount / 10000).toFixed(1)} 万次播放</span> : null}
+                      </div>
+                      <h2 className="text-xl sm:text-2xl font-bold text-neutral-800 dark:text-stone-100 truncate">{playlistInfo.name}</h2>
+                      {playlistInfo.description ? (
+                        <p className="text-xs text-neutral-500 dark:text-stone-400 line-clamp-2">{playlistInfo.description}</p>
+                      ) : null}
+                      <div className="flex items-center gap-2 mt-1">
+                        <button onClick={handlePlayAll} className="btn-press flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-neutral-800 dark:bg-stone-100 text-white dark:text-stone-900 text-sm font-medium hover:bg-neutral-700 dark:hover:bg-stone-200 transition-colors">
+                          <PlayIcon size={14} />
+                          播放全部
+                        </button>
+                        <button
+                          onClick={handleSubscribePlaylist}
+                          disabled={!loggedIn}
+                          className="btn-press flex items-center gap-1.5 px-4 py-1.5 rounded-full border border-neutral-300 dark:border-stone-700 text-neutral-700 dark:text-stone-200 text-sm hover:bg-neutral-100 dark:hover:bg-stone-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          title={loggedIn ? (subscribedPlaylist ? '取消收藏歌单' : '收藏歌单') : '请先登录网易云'}
+                        >
+                          <HeartIcon size={14} fill={subscribedPlaylist ? 'currentColor' : 'none'} />
+                          {subscribedPlaylist ? '已收藏' : '收藏歌单'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {renderBody()}
+              </div>
             )}
           </section>
         )}
@@ -843,14 +1091,31 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
 
         {tab === 'library' && (
           <section>
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">猜你喜欢</h2>
-              {tracks.length > 0 && (
-                <button onClick={handlePlayAll} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/15 text-blue-600 dark:text-blue-400 text-sm hover:bg-blue-500/25 transition-colors">
-                  <PlayIcon size={14} />
-                  {T('music.track.playAll') || '播放全部'}
-                </button>
-              )}
+            <div className="mb-3">
+              <div className="flex items-center justify-between mb-1">
+                <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">漫游</h2>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={refreshRoam}
+                    className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-100 dark:bg-stone-800 text-neutral-600 dark:text-stone-300 text-sm hover:bg-stone-200 dark:hover:bg-stone-700 transition-colors"
+                    title="换一批推荐"
+                  >
+                    <Sparkles size={14} />
+                    换一批
+                  </button>
+                  {tracks.length > 0 && (
+                    <button onClick={handlePlayAll} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/15 text-blue-600 dark:text-blue-400 text-sm hover:bg-blue-500/25 transition-colors">
+                      <PlayIcon size={14} />
+                      {T('music.track.playAll') || '播放全部'}
+                    </button>
+                  )}
+                </div>
+              </div>
+              <p className="text-xs text-neutral-500 dark:text-stone-400">
+                {isLoggedIn()
+                  ? '根据你的听歌口味，为你私人漫游推荐更多好音乐'
+                  : '未登录，展示热门推荐；登录后可开启个性化私人漫游'}
+              </p>
             </div>
             {renderBody()}
           </section>
@@ -968,6 +1233,22 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
             )}
           </section>
         )}
+
+        {/* 歌手 / 专辑详情顶部抽屉（覆盖下方 80%，点击遮罩或返回关闭） */}
+        {drawer.type !== 'none' && (
+          <DetailDrawer
+            drawer={drawer}
+            onClose={closeDrawer}
+            onPlayTracks={playTrackList}
+            onPlayMv={handlePlayMv}
+            onOpenArtist={openArtistDrawer}
+            onOpenAlbum={openAlbumDrawer}
+            onSubscribeAlbum={handleSubscribeAlbum}
+            onLikeTrack={handleLike}
+            likedSongs={likedSongs}
+            loggedIn={loggedIn}
+          />
+        )}
       </div>
     </div>
   );
@@ -995,9 +1276,12 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
             key={t.id}
             role="button"
             tabIndex={0}
-            onClick={() => handlePlayTrack(t)}
+            onClick={(e) => {
+              if ((e.target as HTMLElement).closest('[data-action]')) return;
+              handlePlayTrack(t);
+            }}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handlePlayTrack(t); } }}
-            className="btn-press group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 transition-colors text-left cursor-pointer"
+            className="group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 active:bg-neutral-300/50 dark:active:bg-stone-700/50 transition-colors text-left cursor-pointer"
           >
             {t.cover ? (
               <img src={t.cover} alt="" className="w-10 h-10 rounded-md object-cover shrink-0" />
@@ -1026,13 +1310,38 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                   </span>
                 ))}
               </span>
-              <span className="block text-xs text-neutral-400 dark:text-stone-500 truncate">{t.artist} · {t.album}</span>
+              <span className="block text-xs text-neutral-400 dark:text-stone-500 truncate">
+                <button
+                  type="button"
+                  className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                  onClick={(e) => { e.stopPropagation(); openArtistDrawer(t.artistId); }}
+                  disabled={!t.artistId}
+                >{t.artist}</button>
+                <span className="opacity-50 mx-1">·</span>
+                <button
+                  type="button"
+                  className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                  onClick={(e) => { e.stopPropagation(); openAlbumDrawer(t.albumId); }}
+                  disabled={!t.albumId}
+                >{t.album}</button>
+              </span>
             </span>
             <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
             {playingId === t.id && <PlayIcon size={14} />}
+            {t.mvId ? (
+              <button
+                data-action="mv"
+                onClick={(e) => handlePlayMv(e, t)}
+                className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-sky-500 dark:hover:text-sky-400 hover:bg-sky-500/10 transition-colors"
+                title="播放 MV（跳转到玉兰）"
+              >
+                <VideoIcon size={15} />
+              </button>
+            ) : null}
             <button
+              data-action="like"
               onClick={(e) => handleLike(e, t)}
-              className="btn-press p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-rose-500 dark:hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+              className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-rose-500 dark:hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
               title="收藏到网易云「我喜欢的音乐」"
             >
               <HeartIcon size={15} fill={likedSongs.has(t.id) ? 'currentColor' : 'none'} />
@@ -1064,6 +1373,609 @@ function PlaceholderTab({ title, desc }: { title: string; desc: string }) {
       </div>
       <div className="text-base font-medium text-neutral-700 dark:text-stone-200">{title}</div>
       <div className="text-sm text-neutral-400 dark:text-stone-500 mt-1 max-w-xs">{desc}（敬请期待）</div>
+    </div>
+  );
+}
+
+// ====================================================================
+// 歌手 / 专辑详情顶部抽屉（覆盖下方 80%，可滚动，点击遮罩 / 返回关闭）
+// 对齐 MusicStorm 的 artist.tsx / album.tsx：歌手含热门歌 + 专辑 + MV + 简介 + 相似艺人；
+// 专辑含曲目 + 播放全部 + 收藏 + 排序 + 视图切换。
+// ====================================================================
+
+type DetailDrawerProps = {
+  drawer: { type: 'none' } | { type: 'artist'; id: number } | { type: 'album'; id: number };
+  onClose: () => void;
+  onPlayTracks: (list: NeteaseTrack[], startIndex: number, name?: string) => void;
+  onPlayMv: (e: React.MouseEvent, t: NeteaseTrack) => void;
+  onOpenArtist: (id?: number) => void;
+  onOpenAlbum: (id?: number) => void;
+  onSubscribeAlbum: (id: number, subscribe: boolean) => void;
+  onLikeTrack: (e: React.MouseEvent | undefined, t: NeteaseTrack) => void;
+  likedSongs?: Set<number> | null;
+  loggedIn: boolean;
+};
+
+function DetailDrawer(props: DetailDrawerProps) {
+  const { drawer, onClose, onPlayTracks, onPlayMv, onOpenArtist, onOpenAlbum, onSubscribeAlbum, onLikeTrack, likedSongs, loggedIn } = props;
+
+  // ===== 抽屉开合动画 =====
+  // mounted 控制真实挂载/卸载；visible 控制入场/退场 transition。
+  const [mounted, setMounted] = useState(false);
+  const [visible, setVisible] = useState(false);
+  const closeTimer = useRef<number | null>(null);
+  const open = drawer.type !== 'none';
+
+  useEffect(() => {
+    if (open) {
+      if (closeTimer.current) { window.clearTimeout(closeTimer.current); closeTimer.current = null; }
+      setMounted(true);
+      const id = window.requestAnimationFrame(() => setVisible(true));
+      return () => window.cancelAnimationFrame(id);
+    } else if (mounted) {
+      setVisible(false);
+      closeTimer.current = window.setTimeout(() => setMounted(false), 280);
+    }
+    return undefined;
+  }, [open, mounted]);
+
+  const handleClose = useCallback(() => {
+    setVisible(false);
+    if (closeTimer.current) window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => { setMounted(false); onClose(); }, 280);
+  }, [onClose]);
+
+  // 抽屉内点击 MV：先解析播放地址，再用 props.onPlayMv 把已解析对象交给父组件（跨模块跳转玉兰）。
+  // 注意：props.onPlayMv 的语义是「接收已解析 mv 对象」，而非 (e, t)，故不可在图标上直接 onPlayMv(e, t)。
+  const [mvNotice, setMvNotice] = useState<string | null>(null);
+
+  // 抽屉内 MV 按钮专用：从 DOM 的 data-mvid 读取 id，不依赖事件闭包（沙箱重渲染下闭包 t 偶发丢失，导致 t 为 undefined）。
+  const playMvById = useCallback(async (e: React.MouseEvent | undefined, mvId: number) => {
+    e?.stopPropagation?.();
+    if (!mvId) {
+      console.warn('[netease][mv] 缺失 mvId', mvId);
+      return;
+    }
+    try {
+      const mv = await getMvPlayable(mvId);
+      if (!mv || !mv.url) {
+        setMvNotice('该歌曲的 MV 暂不可用或获取失败');
+        return;
+      }
+      onPlayMv?.({ id: mv.id, name: mv.name || '', artist: mv.artist || '', cover: mv.cover || '', url: mv.url });
+    } catch (err: any) {
+      setMvNotice(`MV 播放失败：${err?.message || String(err)}`);
+    }
+  }, [onPlayMv]);
+
+  // ===== 歌手详情数据 =====
+  const [artist, setArtist] = useState<NeteaseArtist | null>(null);
+  const [hotSongs, setHotSongs] = useState<NeteaseTrack[]>([]);
+  const [artistAlbums, setArtistAlbums] = useState<NeteaseArtistAlbum[]>([]);
+  const [artistMvs, setArtistMvs] = useState<NeteaseMvItem[]>([]);
+  const [artistDesc, setArtistDesc] = useState('');
+  const [simiArtists, setSimiArtists] = useState<NeteaseSimilarArtist[]>([]);
+  const [artistLoading, setArtistLoading] = useState(true);
+
+  // 歌手全部歌曲（折叠展开 / 分页加载）
+  const [allSongsOpen, setAllSongsOpen] = useState(false);
+  const [allSongs, setAllSongs] = useState<NeteaseTrack[]>([]);
+  const [allSongsLoading, setAllSongsLoading] = useState(false);
+  const [allSongsOffset, setAllSongsOffset] = useState(0);
+  const [allSongsMore, setAllSongsMore] = useState(false);
+  const [allSongsDone, setAllSongsDone] = useState(false);
+
+  // ===== 专辑详情数据 =====
+  const [album, setAlbum] = useState<NeteaseAlbum | null>(null);
+  const [albumTracks, setAlbumTracks] = useState<NeteaseTrack[]>([]);
+  const [albumLoading, setAlbumLoading] = useState(true);
+  const [albumSubed, setAlbumSubed] = useState(false);
+
+  // ===== 专辑视图/排序状态 =====
+  const [albumSort, setAlbumSort] = useState<'index' | 'duration' | 'title'>('index');
+  const [albumView, setAlbumView] = useState<'list' | 'grid'>('list');
+
+  const isArtist = drawer.type === 'artist';
+  const targetId = drawer.type !== 'none' ? drawer.id : 0;
+
+  // 进入 / 切换 target 时重置并拉取数据
+  useEffect(() => {
+    let cancelled = false;
+    if (drawer.type === 'artist') {
+      setArtistLoading(true);
+      setArtist(null); setHotSongs([]); setArtistAlbums([]); setArtistMvs([]); setArtistDesc(''); setSimiArtists([]);
+      setAllSongsOpen(false); setAllSongs([]); setAllSongsLoading(false); setAllSongsOffset(0); setAllSongsMore(false); setAllSongsDone(false);
+      setMvNotice(null);
+      Promise.all([
+        getArtistDetail(drawer.id),
+        getArtistAlbums(drawer.id, 0, 50),
+        getArtistMvs(drawer.id, 0, 30),
+        getArtistDesc(drawer.id),
+        getSimilarArtists(drawer.id),
+      ]).then(([d, al, mvs, desc, simi]) => {
+        if (cancelled) return;
+        if (d) { setArtist(d.artist); setHotSongs(d.hotSongs); }
+        setArtistAlbums(al.albums);
+        setArtistMvs(mvs.mvs);
+        setArtistDesc(desc);
+        setSimiArtists(simi);
+        setArtistLoading(false);
+      }).catch(() => { if (!cancelled) setArtistLoading(false); });
+    } else if (drawer.type === 'album') {
+      setAlbumLoading(true);
+      setAlbum(null); setAlbumTracks([]); setAlbumSubed(false); setAlbumSort('index'); setAlbumView('list');
+      getAlbumDetail(drawer.id).then((r) => {
+        if (cancelled || !r) { if (!cancelled) setAlbumLoading(false); return; }
+        setAlbum(r.album); setAlbumTracks(r.tracks); setAlbumSubed(!!r.album.subed);
+        setAlbumLoading(false);
+      }).catch(() => { if (!cancelled) setAlbumLoading(false); });
+    }
+    return () => { cancelled = true; };
+  }, [drawer.type, targetId]);
+
+  // 专辑曲目排序后的展示列表
+  const sortedAlbumTracks = useMemo(() => {
+    const arr = [...albumTracks];
+    if (albumSort === 'duration') arr.sort((a, b) => a.duration - b.duration);
+    else if (albumSort === 'title') arr.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+    return arr;
+  }, [albumTracks, albumSort]);
+
+  const fmtCount = (n: number) => (n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : String(n));
+
+  // 加载歌手全部歌曲：首次展开拉第一页，之后分页追加；全部加载完标记 allSongsDone。
+  const loadAllSongs = useCallback(async (reset: boolean) => {
+    if (!artist || allSongsLoading || (allSongsDone && !reset)) return;
+    const offset = reset ? 0 : allSongsOffset;
+    setAllSongsLoading(true);
+    const r = await getArtistAllSongs(artist.id, offset, 100, 'hot');
+    setAllSongs((prev) => (reset ? r.tracks : [...prev, ...r.tracks]));
+    setAllSongsOffset(offset + r.tracks.length);
+    setAllSongsMore(r.more);
+    if (!r.more) setAllSongsDone(true);
+    setAllSongsLoading(false);
+  }, [artist, allSongsLoading, allSongsOffset, allSongsDone]);
+
+  const toggleAllSongs = useCallback(() => {
+    setAllSongsOpen((prev) => {
+      const next = !prev;
+      if (next && allSongs.length === 0 && !allSongsDone) loadAllSongs(true);
+      return next;
+    });
+  }, [allSongs.length, allSongsDone, loadAllSongs]);
+
+  if (!mounted) return null;
+
+  return (
+    <div className="absolute inset-0 z-40">
+      {/* 遮罩：点击关闭（带渐隐动画） */}
+      <button
+        aria-label="关闭详情"
+        onClick={handleClose}
+        className={`absolute inset-0 bg-black/40 backdrop-blur-[1px] transition-opacity duration-300 ease-out ${visible ? 'opacity-100' : 'opacity-0'}`}
+      />
+      {/* 顶部抽屉面板：覆盖下方 80%，可滚动（带下滑入场 / 上滑退场动画） */}
+      <div
+        className={`absolute left-0 right-0 top-0 h-[80%] rounded-b-3xl bg-white dark:bg-[#232323] shadow-2xl overflow-y-auto overscroll-contain transition-transform duration-300 ease-out will-change-transform ${visible ? 'translate-y-0' : '-translate-y-full'}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* 顶部操作条：返回 + 标题 */}
+        <div className="sticky top-0 z-10 flex items-center gap-2 px-4 py-3 bg-white/90 dark:bg-[#232323]/90 backdrop-blur border-b border-neutral-200/60 dark:border-stone-700/60">
+          <button
+            onClick={handleClose}
+            className="btn-press flex items-center justify-center p-1.5 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
+            title="返回"
+          >
+            <ChevronLeft size={20} />
+          </button>
+          <span className="text-sm font-semibold text-neutral-800 dark:text-stone-100 truncate">
+            {isArtist ? (artist?.name || '歌手详情') : (album?.name || '专辑详情')}
+          </span>
+        </div>
+
+        {isArtist ? (
+          // ================= 歌手详情 =================
+          <div className="p-4 space-y-6">
+            {artistLoading ? (
+              <div className="text-sm text-neutral-400 dark:text-stone-500 py-10 text-center">加载中…</div>
+            ) : !artist ? (
+              <div className="text-sm text-red-500/80 dark:text-red-400/80 py-10 text-center">歌手信息加载失败</div>
+            ) : (
+              <>
+                {/* 头部 */}
+                <div className="flex gap-4 items-center">
+                  {artist.cover ? (
+                    <img src={artist.cover} alt={artist.name} className="w-24 h-24 rounded-2xl object-cover shadow-sm shrink-0" />
+                  ) : (
+                    <div className="w-24 h-24 rounded-2xl bg-neutral-200 dark:bg-stone-800 flex items-center justify-center text-3xl font-bold text-neutral-400 dark:text-stone-500 shrink-0">
+                      {artist.name.slice(0, 1)}
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100 truncate">{artist.name}</h2>
+                    {artist.alias && artist.alias.length > 0 && (
+                      <div className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5 truncate">{artist.alias.join(' / ')}</div>
+                    )}
+                    <div className="flex flex-wrap gap-3 mt-2 text-xs text-neutral-500 dark:text-stone-400">
+                      <span>单曲 {fmtCount(artist.musicSize || 0)}</span>
+                      <span>专辑 {fmtCount(artist.albumSize || 0)}</span>
+                      <span>MV {fmtCount(artist.mvSize || 0)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 热门歌曲 */}
+                <section>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-sm font-semibold text-neutral-700 dark:text-stone-200">热门歌曲</h3>
+                    {hotSongs.length > 0 && (
+                      <button
+                        onClick={() => onPlayTracks(hotSongs, 0, `${artist.name} 热门`)}
+                        className="btn-press flex items-center gap-1 px-3 py-1 rounded-full bg-neutral-800 dark:bg-stone-100 text-white dark:text-stone-900 text-xs font-medium hover:bg-neutral-700 dark:hover:bg-stone-200 transition-colors"
+                      >
+                        <PlayIcon size={12} /> 播放全部
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-col gap-0.5">
+                    {hotSongs.slice(0, 20).map((t, i) => (
+                      <button
+                        key={t.id}
+                        onClick={() => onPlayTracks(hotSongs, i, `${artist.name} 热门`)}
+                        className="group flex items-center gap-3 px-2 py-1.5 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 transition-colors text-left"
+                      >
+                        <span className="w-5 text-xs text-neutral-400 dark:text-stone-500 text-right shrink-0">{i + 1}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
+                          <span className="block text-xs text-neutral-400 dark:text-stone-500 truncate">
+                            <span
+                              className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                              onClick={(e) => { e.stopPropagation(); onOpenArtist(t.artistId); }}
+                            >{t.artist}</span>
+                            <span className="opacity-40 mx-1">·</span>
+                            <span
+                              className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                              onClick={(e) => { e.stopPropagation(); onOpenAlbum(t.albumId); }}
+                            >{t.album}</span>
+                          </span>
+                        </span>
+                        <button
+                          data-action="like"
+                          onClick={(e) => onLikeTrack(e, t)}
+                          className="btn-jelly p-1.5 rounded-full transition-colors shrink-0"
+                          title={likedSongs?.has(t.id) ? '取消收藏' : '收藏到网易云「我喜欢的音乐」'}
+                        >
+                          <HeartIcon
+                            size={14}
+                            fill={likedSongs?.has(t.id) ? 'currentColor' : 'none'}
+                            className={likedSongs?.has(t.id)
+                              ? 'text-rose-500 dark:text-rose-400'
+                              : 'text-neutral-400 dark:text-stone-500 hover:text-rose-500 dark:hover:text-rose-400'}
+                          />
+                        </button>
+                        {t.mvId && (
+                          <button
+                            data-action="mv"
+                            data-mvid={t.mvId}
+                            onClick={(e) => playMvById(e, Number((e.currentTarget as HTMLElement).dataset.mvid))}
+                            className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-sky-500 dark:hover:text-sky-400 hover:bg-sky-500/10 transition-colors shrink-0"
+                            title="播放 MV（跳转到玉兰）"
+                          >
+                            <VideoIcon size={14} />
+                          </button>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                {/* 全部歌曲：折叠入口，展开后分页加载 */}
+                <section>
+                  <button
+                    onClick={toggleAllSongs}
+                    className="group flex w-full items-center justify-between mb-2 px-2 py-1.5 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 transition-colors"
+                  >
+                    <span className="text-sm font-semibold text-neutral-700 dark:text-stone-200">
+                      全部歌曲{artist.musicSize ? `（${fmtCount(artist.musicSize)}）` : ''}
+                    </span>
+                    <ChevronRight
+                      size={16}
+                      className={`text-neutral-400 dark:text-stone-500 transition-transform duration-200 ${allSongsOpen ? 'rotate-90' : ''}`}
+                    />
+                  </button>
+                  {allSongsOpen && (
+                    <div className="flex flex-col gap-0.5">
+                      {allSongs.length === 0 && allSongsLoading && (
+                        <div className="text-xs text-neutral-400 dark:text-stone-500 py-4 text-center">加载中…</div>
+                      )}
+                      {allSongs.map((t, i) => (
+                        <button
+                          key={t.id}
+                          onClick={() => onPlayTracks(allSongs, i, `${artist.name} 全部`)}
+                          className="group flex items-center gap-3 px-2 py-1.5 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 transition-colors text-left"
+                        >
+                          <span className="w-5 text-xs text-neutral-400 dark:text-stone-500 text-right shrink-0">{i + 1}</span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
+                            <span className="block text-xs text-neutral-400 dark:text-stone-500 truncate">
+                              <span
+                                className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                                onClick={(e) => { e.stopPropagation(); onOpenArtist(t.artistId); }}
+                              >{t.artist}</span>
+                              <span className="opacity-40 mx-1">·</span>
+                              <span
+                                className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                                onClick={(e) => { e.stopPropagation(); onOpenAlbum(t.albumId); }}
+                              >{t.album}</span>
+                            </span>
+                          </span>
+                          <button
+                            data-action="like"
+                            onClick={(e) => onLikeTrack(e, t)}
+                            className="btn-jelly p-1.5 rounded-full transition-colors shrink-0"
+                            title={likedSongs?.has(t.id) ? '取消收藏' : '收藏到网易云「我喜欢的音乐」'}
+                          >
+                            <HeartIcon
+                              size={14}
+                              fill={likedSongs?.has(t.id) ? 'currentColor' : 'none'}
+                              className={likedSongs?.has(t.id)
+                                ? 'text-rose-500 dark:text-rose-400'
+                                : 'text-neutral-400 dark:text-stone-500 hover:text-rose-500 dark:hover:text-rose-400'}
+                            />
+                          </button>
+                          {t.mvId && (
+                            <button
+                              data-action="mv"
+                              data-mvid={t.mvId}
+                              onClick={(e) => playMvById(e, Number((e.currentTarget as HTMLElement).dataset.mvid))}
+                              className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-sky-500 dark:hover:text-sky-400 hover:bg-sky-500/10 transition-colors shrink-0"
+                              title="播放 MV（跳转到玉兰）"
+                            >
+                              <VideoIcon size={14} />
+                            </button>
+                          )}
+                        </button>
+                      ))}
+                      {allSongsMore && !allSongsLoading && (
+                        <button
+                          onClick={() => loadAllSongs(false)}
+                          className="btn-press mx-auto mt-2 px-4 py-1.5 rounded-full bg-neutral-200/70 dark:bg-stone-800/70 text-xs text-neutral-600 dark:text-stone-300 hover:bg-neutral-300/70 dark:hover:bg-stone-700/70 transition-colors"
+                        >
+                          加载更多
+                        </button>
+                      )}
+                      {allSongsLoading && allSongs.length > 0 && (
+                        <div className="text-xs text-neutral-400 dark:text-stone-500 py-3 text-center">加载中…</div>
+                      )}
+                    </div>
+                  )}
+                </section>
+
+                {/* 专辑 */}
+                {artistAlbums.length > 0 && (
+                  <section>
+                    <h3 className="text-sm font-semibold text-neutral-700 dark:text-stone-200 mb-2">专辑</h3>
+                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                      {artistAlbums.map((al) => (
+                        <button key={al.id} onClick={() => onOpenAlbum(al.id)} className="text-left group" title={al.name}>
+                          <div className="relative aspect-square rounded-xl overflow-hidden bg-neutral-200 dark:bg-stone-800 mb-1.5">
+                            <img src={al.cover} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                          </div>
+                          <div className="text-xs text-neutral-800 dark:text-stone-100 line-clamp-2 leading-tight min-h-[2em]">{al.name}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {/* MV */}
+                {artistMvs.length > 0 && (
+                  <section>
+                    <h3 className="text-sm font-semibold text-neutral-700 dark:text-stone-200 mb-2">MV</h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      {artistMvs.map((m) => (
+                        <div key={m.id} className="group cursor-pointer" onClick={(e) => playMvById(e, m.id)}>
+                          <div className="relative aspect-video rounded-xl overflow-hidden bg-neutral-200 dark:bg-stone-800 mb-1.5">
+                            <img src={m.cover} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                            <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                              <PlayIcon size={22} className="text-white" />
+                            </div>
+                            {m.playCount > 0 && (
+                              <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/50 text-white text-[10px]">
+                                {fmtCount(m.playCount)}
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-xs text-neutral-800 dark:text-stone-100 line-clamp-2 leading-tight min-h-[2em]">{m.name}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {/* 简介 */}
+                {artistDesc && (
+                  <section>
+                    <h3 className="text-sm font-semibold text-neutral-700 dark:text-stone-200 mb-2">歌手简介</h3>
+                    <p className="text-xs text-neutral-500 dark:text-stone-400 whitespace-pre-wrap leading-relaxed">{artistDesc}</p>
+                  </section>
+                )}
+
+                {/* 相似艺人 */}
+                {simiArtists.length > 0 && (
+                  <section>
+                    <h3 className="text-sm font-semibold text-neutral-700 dark:text-stone-200 mb-2">相似艺人</h3>
+                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                      {simiArtists.map((a) => (
+                        <button key={a.id} onClick={() => onOpenArtist(a.id)} className="text-left group" title={a.name}>
+                          <div className="relative aspect-square rounded-full overflow-hidden bg-neutral-200 dark:bg-stone-800 mb-1.5">
+                            <img src={a.cover} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                          </div>
+                          <div className="text-xs text-neutral-800 dark:text-stone-100 text-center line-clamp-1">{a.name}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
+                {mvNotice && (
+                  <div className="px-3 py-2 rounded-lg bg-red-500/10 text-red-600 dark:text-red-400 text-xs">{mvNotice}</div>
+                )}
+              </>
+            )}
+          </div>
+        ) : (
+          // ================= 专辑详情 =================
+          <div className="p-4 space-y-5">
+            {albumLoading ? (
+              <div className="text-sm text-neutral-400 dark:text-stone-500 py-10 text-center">加载中…</div>
+            ) : !album ? (
+              <div className="text-sm text-red-500/80 dark:text-red-400/80 py-10 text-center">专辑信息加载失败</div>
+            ) : (
+              <>
+                {/* 头部 */}
+                <div className="flex gap-4 items-center">
+                  {album.cover ? (
+                    <img src={album.cover} alt={album.name} className="w-24 h-24 rounded-2xl object-cover shadow-sm shrink-0" />
+                  ) : (
+                    <div className="w-24 h-24 rounded-2xl bg-neutral-200 dark:bg-stone-800 flex items-center justify-center text-3xl font-bold text-neutral-400 dark:text-stone-500 shrink-0">
+                      {album.name.slice(0, 1)}
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <h2 className="text-xl font-bold text-neutral-800 dark:text-stone-100 truncate">{album.name}</h2>
+                    <button
+                      onClick={() => onOpenArtist(album.artistId)}
+                      className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5 hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                    >{album.artistName}</button>
+                    <div className="text-xs text-neutral-500 dark:text-stone-400 mt-1 truncate">
+                      {album.publishTime ? `${album.publishTime}` : ''}
+                      {album.company ? ` · ${album.company}` : ''}
+                      {album.size ? ` · ${album.size} 首` : ''}
+                    </div>
+                    {album.description && (
+                      <p className="text-xs text-neutral-400 dark:text-stone-500 mt-1 line-clamp-2">{album.description}</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* 操作栏：播放全部 + 收藏 + 排序 + 视图切换 */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => onPlayTracks(albumTracks, 0, album.name)}
+                    className="btn-press flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-neutral-800 dark:bg-stone-100 text-white dark:text-stone-900 text-sm font-medium hover:bg-neutral-700 dark:hover:bg-stone-200 transition-colors"
+                  >
+                    <PlayIcon size={14} /> 播放全部
+                  </button>
+                  <button
+                    onClick={() => { onSubscribeAlbum(album.id, !albumSubed); setAlbumSubed((v) => !v); }}
+                    disabled={!loggedIn}
+                    className="btn-press flex items-center gap-1.5 px-4 py-1.5 rounded-full border border-neutral-300 dark:border-stone-700 text-neutral-700 dark:text-stone-200 text-sm hover:bg-neutral-100 dark:hover:bg-stone-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={loggedIn ? (albumSubed ? '取消收藏专辑' : '收藏专辑') : '请先登录'}
+                  >
+                    <HeartIcon size={14} fill={albumSubed ? 'currentColor' : 'none'} />
+                    {albumSubed ? '已收藏' : '收藏'}
+                  </button>
+
+                  <div className="flex items-center gap-1 ml-auto">
+                    {/* 排序 */}
+                    <div className="flex items-center rounded-full bg-neutral-100 dark:bg-stone-800 p-0.5 text-xs">
+                      {(['index', 'duration', 'title'] as const).map((s) => (
+                        <button
+                          key={s}
+                          onClick={() => setAlbumSort(s)}
+                          className={`px-2.5 py-1 rounded-full transition-colors ${albumSort === s ? 'bg-white dark:bg-stone-600 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-500 dark:text-stone-400'}`}
+                        >{s === 'index' ? '默认' : s === 'duration' ? '时长' : '名称'}</button>
+                      ))}
+                    </div>
+                    {/* 视图切换 */}
+                    <div className="flex items-center rounded-full bg-neutral-100 dark:bg-stone-800 p-0.5 text-xs">
+                      {(['list', 'grid'] as const).map((v) => (
+                        <button
+                          key={v}
+                          onClick={() => setAlbumView(v)}
+                          className={`px-2.5 py-1 rounded-full transition-colors ${albumView === v ? 'bg-white dark:bg-stone-600 text-neutral-800 dark:text-stone-100 shadow-sm' : 'text-neutral-500 dark:text-stone-400'}`}
+                        >{v === 'list' ? '列表' : '网格'}</button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 曲目列表 / 网格 */}
+                {albumView === 'list' ? (
+                  <div className="flex flex-col gap-0.5">
+                    {sortedAlbumTracks.map((t, i) => (
+                      <div
+                        key={t.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => onPlayTracks(albumTracks, albumTracks.indexOf(t), album.name)}
+                        className="group flex items-center gap-3 px-2 py-1.5 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 transition-colors text-left cursor-pointer"
+                      >
+                        <span className="w-5 text-xs text-neutral-400 dark:text-stone-500 text-right shrink-0">
+                          {albumSort === 'index' ? i + 1 : albumTracks.indexOf(t) + 1}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-1.5">
+                            <span className="block text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
+                            {neteaseTrackBadges(t).map((b) => (
+                              <span key={b.label} className={
+                                'shrink-0 text-[9px] font-semibold leading-none px-1 py-0.5 rounded ' +
+                                (b.kind === 'vip' ? 'text-amber-600 dark:text-amber-400 bg-amber-500/15'
+                                  : b.kind === 'hires' ? 'text-fuchsia-600 dark:text-fuchsia-400 bg-fuchsia-500/15'
+                                  : 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/15')
+                              } title={b.label}>{b.label}</span>
+                            ))}
+                          </span>
+                        </span>
+                        <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
+                        <button
+                          data-action="like"
+                          onClick={(e) => onLikeTrack(e, t)}
+                          className="btn-jelly p-1.5 rounded-full transition-colors shrink-0"
+                          title={likedSongs?.has(t.id) ? '取消收藏' : '收藏到网易云「我喜欢的音乐」'}
+                        >
+                          <HeartIcon
+                            size={14}
+                            fill={likedSongs?.has(t.id) ? 'currentColor' : 'none'}
+                            className={likedSongs?.has(t.id)
+                              ? 'text-rose-500 dark:text-rose-400'
+                              : 'text-neutral-400 dark:text-stone-500 hover:text-rose-500 dark:hover:text-rose-400'}
+                          />
+                        </button>
+                        {t.mvId && (
+                          <button
+                            data-action="mv"
+                            data-mvid={t.mvId}
+                            onClick={(e) => playMvById(e, Number((e.currentTarget as HTMLElement).dataset.mvid))}
+                            className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-sky-500 dark:hover:text-sky-400 hover:bg-sky-500/10 transition-colors shrink-0"
+                            title="播放 MV（跳转到玉兰）"
+                          >
+                            <VideoIcon size={14} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                    {sortedAlbumTracks.map((t) => (
+                      <button key={t.id} onClick={() => onPlayTracks(albumTracks, albumTracks.indexOf(t), album.name)} className="text-left group" title={t.name}>
+                        <div className="relative aspect-square rounded-xl overflow-hidden bg-neutral-200 dark:bg-stone-800 mb-1.5">
+                          <img src={t.cover || album.cover} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                          <div className="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <PlayIcon size={20} className="text-white" />
+                          </div>
+                        </div>
+                        <div className="text-xs text-neutral-800 dark:text-stone-100 line-clamp-2 leading-tight min-h-[2em]">{t.name}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

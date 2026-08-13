@@ -161,11 +161,11 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
                   const isLogin = item.key === 'login';
                   const isLoggedIn = isLogin && !!neteaseProfile;
                   const title = isLogin
-                    ? (isLoggedIn ? neteaseProfile!.nickname : '未登录')
-                    : (item.key === 'library' ? '猜你喜欢' : T(`music.moduleDrawer.netease.${item.key}`));
+                    ? (isLoggedIn ? neteaseProfile!.nickname : (T('music.moduleDrawer.netease.login') || '未登录'))
+                    : (T(`music.moduleDrawer.netease.${item.key}`) || (item.key === 'library' ? '漫游' : item.key));
                   const desc = isLogin
-                    ? (isLoggedIn ? '查看我的账号' : '登录 / 注册')
-                    : T(`music.moduleDrawer.netease.${item.key}Desc`);
+                    ? (isLoggedIn ? (T('music.moduleDrawer.netease.loginDesc') || '查看我的账号') : (T('music.moduleDrawer.netease.loginDesc') || '登录 / 注册'))
+                    : (T(`music.moduleDrawer.netease.${item.key}Desc`) || '');
                   const icon = isLogin && neteaseProfile?.avatarUrl
                     ? React.createElement('img', { src: neteaseProfile.avatarUrl, alt: '', className: 'w-full h-full rounded-full object-cover' })
                     : item.icon;
