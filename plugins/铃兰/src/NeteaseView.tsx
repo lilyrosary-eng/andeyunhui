@@ -215,6 +215,7 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
   // 「现在就听」自动拉取：不再直接加载单曲推荐流，改为精选歌单网格；推荐流移到「猜你喜欢」tab
   useEffect(() => {
     if (tab !== 'listen') return;
+    if (playlistId != null) return; // 正在查看某歌单详情，不要重置回网格
     setPlaylistId(null); // 离开歌单分页模式
     sourceNameRef.current = T('music.moduleDrawer.netease.listenNow');
     const req = ++reqRef.current;
@@ -611,7 +612,7 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
                       {playlists.map((pl) => (
                         <button
                           key={pl.id}
-                          onClick={() => { setTab('listen'); openPlaylist(pl.id, pl.name); }}
+                          onClick={() => { openPlaylist(pl.id, pl.name); setTab('listen'); }}
                           className="btn-press text-left group"
                           title={pl.name}
                         >
