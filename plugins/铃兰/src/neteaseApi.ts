@@ -459,6 +459,8 @@ const PATHS = {
   simiArtist: '/simi/artist',
   albumDetail: '/album',
   albumSub: '/album/sub',
+  // 歌曲百科（手机版网易云「歌曲百科」）：eapi /api/song/wiki/summary，参数为歌曲 id
+  songWiki: '/song/wiki',
 };
 
 function resolveModule(path: string, params: Record<string, any>): { uri: string; data: Record<string, any>; crypto: CryptoKind } {
@@ -544,6 +546,8 @@ function resolveModule(path: string, params: Record<string, any>): { uri: string
       return { uri: `/api/v1/album/${params.id}`, data: {}, crypto: 'weapi' };
     case PATHS.albumSub:
       return { uri: params.t === 1 ? '/api/album/sub' : '/api/album/unsub', data: { id: params.id }, crypto: 'weapi' };
+    case PATHS.songWiki:
+      return { uri: '/api/song/wiki/summary', data: { id: params.id, e_r: true, c_version: 'u17' }, crypto: 'eapi' };
     default:
       throw new Error(`未实现的网易云接口: ${path}`);
   }
@@ -945,6 +949,84 @@ export async function getSongUrl(id: number): Promise<SongUrlResult> {
     return { url: item.url || null, br: item.br || 0, type: item.type || '' };
   } catch {
     return { url: null, br: 0, type: '' };
+  }
+}
+
+// 歌曲百科（手机版网易云「歌曲百科」）：eapi /api/song/wiki/summary
+// 服务端返回 modules 数组，每项含 style、title、content（富文本/链接/文本段落）。
+// 我们挑选对漫游页有价值、且官方稳定提供的几个维度：发行时间、语种、BPM、乐器、曲风。
+export interface SongWiki {
+  publishTime?: string; // 发行时间（已格式化）
+  language?: string;    // 语种
+  bpm?: number;         // BPM
+  instruments?: string[]; // 乐器
+  genres?: string[];    // 曲风
+  hasSheet?: boolean;   // 是否有官方乐谱（吉他谱/简谱等）
+  sheetUrl?: string;    // 乐谱链接（若有）
+}
+// 网易云 wiki modules 的 style 标识（见官方返回），用于定点抽取
+const WIKI_STYLE_PUBLISH = '出版时间';
+const WIKI_STYLE_LANGUAGE = '语言';
+const WIKI_STYLE_BPM = '节拍';
+const WIKI_STYLE_INSTRUMENT = '乐器';
+const WIKI_STYLE_GENRE = '曲风';
+const WIKI_STYLE_SHEET = '曲谱';
+
+// 从富文本 content 中抠出纯文本（content 可能是 [{ txt, t }] 片段数组或字符串）
+function wikiText(content: any): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content.replace(/<[^>]+>/g, '').trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((seg: any) => (typeof seg === 'string' ? seg : seg?.txt || ''))
+      .join('')
+      .replace(/<[^>]+>/g, '')
+      .trim();
+  }
+  if (typeof content === 'object') {
+    return String(content.txt || content.text || '').replace(/<[^>]+>/g, '').trim();
+  }
+  return '';
+}
+
+export async function getSongWiki(id: number): Promise<SongWiki | null> {
+  try {
+    const r: any = await neteaseRequest(PATHS.songWiki, { id });
+    const modules: any[] = r?.data?.modules || r?.modules || [];
+    if (!Array.isArray(modules) || !modules.length) return null;
+    const wiki: SongWiki = {};
+    for (const m of modules) {
+      const style: string = m?.style || '';
+      const content = m?.content ?? m?.data?.content;
+      if (style.includes(WIKI_STYLE_PUBLISH)) {
+        const t = wikiText(content);
+        if (t) wiki.publishTime = t;
+      } else if (style.includes(WIKI_STYLE_LANGUAGE)) {
+        const t = wikiText(content);
+        if (t) wiki.language = t;
+      } else if (style.includes(WIKI_STYLE_BPM)) {
+        const t = wikiText(content).replace(/[^0-9.]/g, '');
+        if (t) wiki.bpm = Number(t);
+      } else if (style.includes(WIKI_STYLE_INSTRUMENT)) {
+        const t = wikiText(content);
+        if (t) wiki.instruments = t.split(/[、,，/\s]+/).filter(Boolean);
+      } else if (style.includes(WIKI_STYLE_GENRE)) {
+        const t = wikiText(content);
+        if (t) wiki.genres = t.split(/[、,，/\s]+/).filter(Boolean);
+      } else if (style.includes(WIKI_STYLE_SHEET)) {
+        const link = m?.content?.[0]?.url || m?.data?.jumpUrl || m?.jumpUrl || '';
+        if (link) { wiki.hasSheet = true; wiki.sheetUrl = link; }
+        else if (wikiText(content)) wiki.hasSheet = true;
+      }
+    }
+    // 无有效字段视为无百科
+    if (!wiki.publishTime && !wiki.language && !wiki.bpm && !wiki.instruments?.length && !wiki.genres?.length && !wiki.hasSheet) {
+      return null;
+    }
+    return wiki;
+  } catch (e) {
+    console.warn('[netease] getSongWiki 失败', id, e);
+    return null;
   }
 }
 
