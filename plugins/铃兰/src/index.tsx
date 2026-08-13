@@ -933,6 +933,8 @@ function MusicModule() {
   // 当前网易云侧栏高亮：歌单 id / 临时列表 id
   const [activeNeteasePlaylistId, setActiveNeteasePlaylistId] = useState<number | null>(null);
   const [activeTempId, setActiveTempId] = useState<string | null>(null);
+  // 网易云当前实际播放的临时歌单（注入播放列表浮窗，避免显示本地旧歌单）
+  const [neteaseActivePlaylist, setNeteaseActivePlaylist] = useState<Playlist | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   // 收藏集合（track_id set），真源为 SQLite favorite 表；localStorage 作兜底镜像
   const [favorites, setFavorites] = useState<Set<string>>(() => {
@@ -1329,6 +1331,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
   }, []);
 
   const handleSelectTrack = useCallback((track: Track, index: number) => {
+    // 切到本地播放时，清掉网易云临时歌单，避免播放列表浮窗仍显示网易云
+    setNeteaseActivePlaylist(null);
     // 如果启用了搜索过滤，index 是过滤后数组中的位置，需要还原为原数组索引
     const tracks = selectedPlaylist?.tracks || [];
     // 真正加载该歌单曲目时才更新「实际播放歌单」归属，供播放列表面板正确显示
@@ -1356,6 +1360,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     const list = pl?.tracks ?? [];
     if (list.length === 0) return;
     // 从播放列表面板点选其它歌单的歌曲时，归属随之更新（否则按钮仍显示旧歌单）
+    if (playlistId !== 'netease-active') {
+      setNeteaseActivePlaylist(null);
+    }
     musicPlayer.currentPlaylistId = playlistId;
     musicPlayer.setTracks(list, index);
     musicPlayer.play();
@@ -1936,9 +1943,17 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               ref={neteaseViewRef}
               initialTab={neteaseTab}
               onBack={() => setShowModuleDrawer(true)}
-              onPlay={(tracks: PlayableTrack[], startIndex: number) => {
+              onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
+                // 把网易云当前播放注册为临时歌单，让播放列表浮窗同步显示网易云来源
+                musicPlayer.currentPlaylistId = 'netease-active';
+                setNeteaseActivePlaylist({
+                  id: 'netease-active',
+                  name: sourceName,
+                  type: 'netease-temp',
+                  tracks,
+                });
               }}
               onTempPlaylist={(temp: TempPlaylist) => {
                 // 临时播放列表：最多 3 个，滚动淘汰，重复来源不重复占位
@@ -2036,7 +2051,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             playMode={playMode}
             onPlayModeChange={handlePlayModeChange}
             onCoverClick={handleCoverClick}
-            playlists={playlists}
+            playlists={neteaseActivePlaylist ? [...playlists, neteaseActivePlaylist] : playlists}
             currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
             onSelectTrack={handlePopupSelectTrack}
           />
@@ -2063,7 +2078,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onPlayModeChange={handlePlayModeChange}
           onClose={handleCloseNowPlaying}
           lyricsAlign={lyricsAlign}
-          playlists={playlists}
+          playlists={neteaseActivePlaylist ? [...playlists, neteaseActivePlaylist] : playlists}
           currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
           onSelectTrack={handlePopupSelectTrack}
         />

@@ -37,7 +37,7 @@ export interface PlayableTrack {
 interface NeteaseViewProps {
   initialTab: NeteaseTab;
   onBack: () => void;
-  onPlay: (tracks: PlayableTrack[], startIndex: number) => void;
+  onPlay: (tracks: PlayableTrack[], startIndex: number, sourceName: string) => void;
   // 在线播放时把当前来源歌单作为「临时歌单」回传给侧栏，挂到「我的收藏」下方
   onTempPlaylist?: (temp: TempPlaylist) => void;
   // 登录成功后把用户全部歌单回传（侧栏「用户自己的收藏歌单」铺开）
@@ -433,17 +433,18 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
       if (res.url) playlist.push(trackToPlayable(t, res.url, qualityLabelFromBr(res.br)));
     }
     if (playlist.length) {
-      onPlay(playlist, 0);
+      const tempName = buildTempName();
+      onPlay(playlist, 0, tempName);
       const tempId = playlistId != null ? `playlist-${playlistId}` : tab === 'search' ? `search-${keyword.trim()}` : 'recommend';
       onTempPlaylist?.({
         id: tempId,
-        name: buildTempName(),
+        name: tempName,
         coverPath: playlist[0]?.coverPath,
         tracks: playlist,
         payload: {
           kind: playlistId != null ? 'playlist' : tab === 'search' ? 'search' : 'recommend',
           id: playlistId ?? undefined,
-          name: buildTempName(),
+          name: tempName,
           keyword: tab === 'search' ? keyword.trim() : undefined,
           tracks: playlist,
         },
@@ -479,17 +480,18 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
         const p = trackToPlayable(x, '');
         return p;
       });
-      onPlay(playlist, startIndex >= 0 ? startIndex : 0);
+      const tempName = buildTempName();
+      onPlay(playlist, startIndex >= 0 ? startIndex : 0, tempName);
       const tempId = playlistId != null ? `playlist-${playlistId}` : tab === 'search' ? `search-${keyword.trim()}` : 'recommend';
       onTempPlaylist?.({
         id: tempId,
-        name: buildTempName(),
+        name: tempName,
         coverPath: playlist[startIndex >= 0 ? startIndex : 0]?.coverPath,
         tracks: playlist,
         payload: {
           kind: playlistId != null ? 'playlist' : tab === 'search' ? 'search' : 'recommend',
           id: playlistId ?? undefined,
-          name: buildTempName(),
+          name: tempName,
           keyword: tab === 'search' ? keyword.trim() : undefined,
           tracks: playlist,
         },
