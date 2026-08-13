@@ -44,6 +44,8 @@ interface NeteaseViewProps {
   onUserPlaylists?: (items: NeteasePlaylistItem[]) => void;
   // 当前正在查看的歌单 id（侧栏高亮）
   onActivePlaylist?: (id: number) => void;
+  // 用户资料变化时回传（用于模块抽屉显示登录态）
+  onProfileChange?: (profile: NeteaseProfile | null) => void;
 }
 
 // 在线播放生成的临时歌单（挂在侧栏「我的收藏」之下）
@@ -89,7 +91,7 @@ function formatDuration(ms: number): string {
 }
 
 export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>(function NeteaseView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist },
+  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist, onProfileChange },
   ref,
 ) {
   const [tab, setTab] = useState<NeteaseTab>(initialTab);
@@ -128,6 +130,11 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => { setTab(initialTab); }, [initialTab]);
+
+  // profile 变化时回传父组件，用于模块抽屉同步登录态
+  useEffect(() => {
+    onProfileChange?.(profile);
+  }, [profile, onProfileChange]);
 
   // 最新 openPlaylist 镜像，供 useImperativeHandle 在空依赖下安全调用（避免 render 期 TDZ）
   const openPlaylistRef = useRef<(id: number, name?: string) => void>(() => {});
@@ -249,6 +256,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const handleLogout = useCallback(() => {
     logoutNetease();
     setLoggedIn(false);
+    setProfile(null);
     setQrImg('');
     setQrStatus('');
     if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }

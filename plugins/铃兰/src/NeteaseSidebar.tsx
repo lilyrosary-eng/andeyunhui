@@ -12,6 +12,7 @@ const { useState } = React;
 const {
   ModuleSidebarShell,
   SecondaryNavShell,
+  BarChart3,
   ContextMenu,
   ContextMenuTrigger,
   ContextMenuContent,
@@ -51,6 +52,7 @@ function Music2Icon() {
 
 export interface NeteaseSidebarProps {
   likedPlaylistId?: number | null;
+  likedPlaylistCount?: number | null;
   tempPlaylists: NeteaseTempItem[];
   userPlaylists: NeteasePlaylistItem[];
   activePlaylistId?: number | null;
@@ -68,6 +70,7 @@ export interface NeteaseSidebarProps {
 
 export default function NeteaseSidebar({
   likedPlaylistId,
+  likedPlaylistCount,
   tempPlaylists,
   userPlaylists,
   activePlaylistId,
@@ -90,14 +93,14 @@ export default function NeteaseSidebar({
     return React.createElement('button', {
       key: 'liked',
       onClick: onSelectLiked,
-      className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm flex items-center gap-2 ${
+      className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm ${
         isActive
           ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
           : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
       }`,
     }, [
-      React.createElement('span', { key: 'icon', className: 'text-rose-500' }, React.createElement(HeartIcon)),
-      React.createElement('span', { key: 'label', className: 'font-medium truncate' }, '我喜欢的音乐'),
+      React.createElement('div', { key: 'name', className: 'font-medium truncate' }, '我喜欢的音乐'),
+      likedPlaylistCount != null ? React.createElement('div', { key: 'count', className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${likedPlaylistCount} 首`) : null,
     ]);
   };
 
@@ -114,17 +117,18 @@ export default function NeteaseSidebar({
       ]),
       tempExpanded && tempPlaylists.map((temp, idx) => {
         const isActive = activeTempId === temp.id;
+        const count = temp.payload.tracks?.length ?? 0;
         return React.createElement('button', {
           key: temp.id,
           onClick: () => onSelectTemp(temp),
-          className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm flex items-center gap-2 ${
+          className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm ${
             isActive
               ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
               : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
           }`,
         }, [
-          React.createElement('span', { key: 'icon' }, React.createElement(ListIcon)),
-          React.createElement('span', { key: 'label', className: 'truncate' }, `临时${idx + 1}：${temp.name}`),
+          React.createElement('div', { key: 'label', className: 'truncate' }, `临时${idx + 1}：${temp.name}`),
+          React.createElement('div', { key: 'count', className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${count} 首`),
         ]);
       })
     );
@@ -153,7 +157,10 @@ export default function NeteaseSidebar({
                     ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
                     : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
                 }`,
-              }, React.createElement('div', { className: 'font-medium truncate' }, playlist.name));
+              }, [
+                React.createElement('div', { key: `name-${playlist.id}`, className: 'font-medium truncate' }, playlist.name),
+                React.createElement('div', { key: `count-${playlist.id}`, className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${playlist.trackCount ?? 0} 首`),
+              ]);
               if (!ContextMenu || !ContextMenuTrigger || !ContextMenuContent || !ContextMenuItem) return item;
               return React.createElement(ContextMenu, { key: playlist.id },
                 React.createElement(ContextMenuTrigger, { className: 'w-full' }, item),
@@ -180,7 +187,7 @@ export default function NeteaseSidebar({
         title: '统计',
         'aria-label': '统计',
         className: 'p-2 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
-        children: '📊',
+        children: BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊',
       })
     : null;
 

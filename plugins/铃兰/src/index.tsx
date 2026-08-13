@@ -8,7 +8,7 @@ import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
 import { NeteaseView, type PlayableTrack, type TempPlaylist, type NeteaseViewHandle } from './NeteaseView';
 import NeteaseSidebar, { type NeteaseTempItem } from './NeteaseSidebar';
-import { isLikedPlaylist, type NeteasePlaylistItem } from './neteaseApi';
+import { isLikedPlaylist, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
@@ -988,6 +988,7 @@ function MusicModule() {
   // 网易云视图：currentView==='netease' 时主区显示网易云，初始二级 tab 由抽屉子项点击决定
   const [neteaseOpen, setNeteaseOpen] = useState(false);
   const [neteaseTab, setNeteaseTab] = useState<'listen' | 'library' | 'radio' | 'search' | 'login'>('listen');
+  const [neteaseProfile, setNeteaseProfile] = useState<NeteaseProfile | null>(null);
   // 网易云视图 ref：供侧栏调用 openPlaylist / restoreTemp
   const neteaseViewRef = useRef<NeteaseViewHandle | null>(null);
 
@@ -1891,6 +1892,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       {neteaseOpen ? (
         <NeteaseSidebar
           likedPlaylistId={likedPlaylistId}
+          likedPlaylistCount={userPlaylists.find(p => isLikedPlaylist(p))?.trackCount ?? 0}
           tempPlaylists={neteaseTemps}
           userPlaylists={userPlaylists}
           activePlaylistId={activeNeteasePlaylistId}
@@ -1976,6 +1978,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                 setActiveNeteasePlaylistId(id);
                 setActiveTempId(null);
               }}
+              onProfileChange={setNeteaseProfile}
             />
           ) : showStats ? (
             <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />
@@ -2060,10 +2063,16 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       <ModuleDrawer
         open={showModuleDrawer}
         onClose={() => setShowModuleDrawer(false)}
-        onSelectNetease={(key) => {
+        isNeteaseOpen={neteaseOpen}
+        onSelectLocalMusic={() => {
+          setNeteaseOpen(false);
+          setShowModuleDrawer(false);
+        }}
+        onSelectNetease={(key: 'listen' | 'library' | 'radio' | 'search' | 'login') => {
           setNeteaseTab(key);
           setNeteaseOpen(true);
         }}
+        neteaseProfile={neteaseProfile}
       />
       {showNowPlaying && currentTrack && (
         <NowPlayingView
