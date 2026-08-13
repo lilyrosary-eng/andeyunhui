@@ -691,6 +691,16 @@ export interface NeteasePlaylistItem {
   trackCount: number;
   playCount: number;
   creator?: string;
+  /** 网易云 specialType：5 表示「我喜欢的音乐」(liked) */
+  specialType?: number;
+  /** 是否为他人歌单（true=收藏的，false=自己创建的） */
+  subscribed?: boolean;
+}
+/** 判断某歌单是否为「我喜欢的音乐」 */
+export function isLikedPlaylist(p: NeteasePlaylistItem): boolean {
+  if (p.specialType === 5) return true;
+  if (p.subscribed === false && p.specialType === 5) return true;
+  return false;
 }
 export async function getUserPlaylists(uid: number, limit = 30): Promise<NeteasePlaylistItem[]> {
   const r = await neteaseRequest(PATHS.userPlaylist, { uid, limit });
@@ -702,6 +712,8 @@ export async function getUserPlaylists(uid: number, limit = 30): Promise<Netease
     trackCount: p.trackCount || p.trackCount || 0,
     playCount: p.playCount || 0,
     creator: p.creator?.nickname || '',
+    specialType: p.specialType,
+    subscribed: p.subscribed,
   }));
 }
 

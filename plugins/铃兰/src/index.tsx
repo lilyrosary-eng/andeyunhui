@@ -6,7 +6,9 @@ import { TrackList } from './TrackList';
 import { ModuleDrawer } from './ModuleDrawer';
 import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
-import { NeteaseView, type PlayableTrack, type TempPlaylist } from './NeteaseView';
+import { NeteaseView, type PlayableTrack, type TempPlaylist, type NeteaseViewHandle } from './NeteaseView';
+import NeteaseSidebar, { type NeteaseTempItem } from './NeteaseSidebar';
+import { isLikedPlaylist } from './neteaseApi';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
@@ -921,8 +923,16 @@ function MusicModule() {
   // 共享运行时：黑名单管理（Rust 集中管理，必须在 filteredPlaylists useMemo 之前声明）
   const { hidden: hiddenPlaylists, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('music');
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
-  // 网易云在线播放生成的临时歌单（挂「我的收藏」下方）
-  const [neteaseTemp, setNeteaseTemp] = useState<TempPlaylist | null>(null);
+  // 网易云模块侧栏状态（与本地模块完全分离）
+  // 临时播放列表：最多驻留 3 个，滚动淘汰，重复来源不重复占位
+  const [neteaseTemps, setNeteaseTemps] = useState<NeteaseTempItem[]>([]);
+  // 用户「我喜欢的音乐」歌单 id（侧栏「我的收藏」）
+  const [likedPlaylistId, setLikedPlaylistId] = useState<number | null>(null);
+  // 用户自己的全部歌单（侧栏「用户自己的收藏歌单」铺开）
+  const [userPlaylists, setUserPlaylists] = useState<{ id: number; name: string; coverImgUrl: string; trackCount: number }[]>([]);
+  // 当前网易云侧栏高亮：歌单 id / 临时列表 id
+  const [activeNeteasePlaylistId, setActiveNeteasePlaylistId] = useState<number | null>(null);
+  const [activeTempId, setActiveTempId] = useState<string | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   // 收藏集合（track_id set），真源为 SQLite favorite 表；localStorage 作兜底镜像
   const [favorites, setFavorites] = useState<Set<string>>(() => {
@@ -976,6 +986,8 @@ function MusicModule() {
   // 网易云视图：currentView==='netease' 时主区显示网易云，初始二级 tab 由抽屉子项点击决定
   const [neteaseOpen, setNeteaseOpen] = useState(false);
   const [neteaseTab, setNeteaseTab] = useState<'listen' | 'library' | 'radio' | 'search' | 'login'>('listen');
+  // 网易云视图 ref：供侧栏调用 openPlaylist / restoreTemp
+  const neteaseViewRef = useRef<NeteaseViewHandle | null>(null);
 
   const [currentTrack, setCurrentTrack] = useState<Track | null>(() => musicPlayer.getCurrentTrack());
   const unlistenRef = useRef<(() => void)[]>([]);
@@ -1184,11 +1196,8 @@ function MusicModule() {
     setPlaylists(prev => {
       const fav = buildFavoritePlaylist(favorites, collectAllTracks(prev));
       const base = prev.filter(p => p.id !== '__favorite__' && p.id !== 'netease-temp');
-      // 临时歌单（网易云在线播放生成）：挂「我的收藏」之下、目录/自定义歌单之上
-      const temp: Playlist | null = neteaseTemp
-        ? { id: 'netease-temp', name: neteaseTemp.name, tracks: neteaseTemp.tracks as unknown as Track[], type: 'netease-temp' }
-        : null;
-      const next = [fav, ...(temp ? [temp] : []), ...base].filter(Boolean) as Playlist[];
+      // 注：网易云临时歌单已迁移到独立网易云侧栏（NeteaseSidebar），不再混入本地 playlists
+      const next = [fav, ...base].filter(Boolean) as Playlist[];
       const prevFav = prev.find(p => p.id === '__favorite__');
       // 已等价（收藏曲目数一致 + 列表长度一致）则保持原引用，终止循环
       if (prevFav && fav && prevFav.tracks.length === fav.tracks.length && prev.length === next.length) {
@@ -1196,7 +1205,7 @@ function MusicModule() {
       }
       return next;
     });
-  }, [favorites, playlists, neteaseTemp]);
+  }, [favorites, playlists]);
 
   // 订阅播放器状态
   useEffect(() => {
@@ -1872,30 +1881,80 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
 
   return (
     <div className="flex-1 flex h-full overflow-hidden relative" tabIndex={0} onKeyDown={handleModuleKeyDown}>
-      <MusicSidebar
-        playlists={filteredPlaylists}
-        selectedPlaylistId={selectedPlaylist?.id || null}
-        onSelectPlaylist={handleSelectPlaylist}
-        onSelectFolder={handleAddRoot}
-        onCreatePlaylist={handleCreatePlaylist}
-        onRenamePlaylist={handleRenamePlaylist}
-        onDeletePlaylist={handleDeletePlaylist}
-        onOpenModuleSettings={handleOpenModuleSettings}
-        onOpenStats={() => setShowStats(true)}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-      />
+      {neteaseOpen ? (
+        <NeteaseSidebar
+          likedPlaylistId={likedPlaylistId}
+          tempPlaylists={neteaseTemps}
+          userPlaylists={userPlaylists}
+          activePlaylistId={activeNeteasePlaylistId}
+          activeTempId={activeTempId}
+          onSelectLiked={() => {
+            setActiveNeteasePlaylistId(likedPlaylistId);
+            setActiveTempId(null);
+            if (likedPlaylistId != null) {
+              setNeteaseTab('listen');
+              neteaseViewRef.current?.openPlaylist(likedPlaylistId, '我喜欢的音乐');
+            }
+          }}
+          onSelectTemp={(item) => {
+            setActiveTempId(item.id);
+            setActiveNeteasePlaylistId(null);
+            neteaseViewRef.current?.restoreTemp(item.payload);
+          }}
+          onSelectUserPlaylist={(id, name) => {
+            setActiveNeteasePlaylistId(id);
+            setActiveTempId(null);
+            setNeteaseTab('listen');
+            neteaseViewRef.current?.openPlaylist(id, name);
+          }}
+        />
+      ) : (
+        <MusicSidebar
+          playlists={filteredPlaylists}
+          selectedPlaylistId={selectedPlaylist?.id || null}
+          onSelectPlaylist={handleSelectPlaylist}
+          onSelectFolder={handleAddRoot}
+          onCreatePlaylist={handleCreatePlaylist}
+          onRenamePlaylist={handleRenamePlaylist}
+          onDeletePlaylist={handleDeletePlaylist}
+          onOpenModuleSettings={handleOpenModuleSettings}
+          onOpenStats={() => setShowStats(true)}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+        />
+      )}
       <div className="flex-1 flex flex-col min-h-0 bg-[#f5f5f0] dark:bg-[#1c1917]">
         <div className="flex-1 min-h-0 overflow-hidden relative">
           {neteaseOpen ? (
             <NeteaseView
+              ref={neteaseViewRef}
               initialTab={neteaseTab}
               onBack={() => setShowModuleDrawer(true)}
               onPlay={(tracks: PlayableTrack[], startIndex: number) => {
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
               }}
-              onTempPlaylist={(temp: TempPlaylist) => setNeteaseTemp(temp)}
+              onTempPlaylist={(temp: TempPlaylist) => {
+                // 临时播放列表：最多 3 个，滚动淘汰，重复来源不重复占位
+                const id = String(temp.id ?? temp.name);
+                setNeteaseTemps(prev => {
+                  const without = prev.filter(t => t.id !== id);
+                  const next = [{ id, name: temp.name, payload: temp }, ...without].slice(0, 3);
+                  return next;
+                });
+                setActiveTempId(id);
+                setActiveNeteasePlaylistId(null);
+              }}
+              onUserPlaylists={(items) => {
+                // 用户自己的全部歌单（铺开到侧栏「用户自己的收藏歌单」）
+                setUserPlaylists(items.map(p => ({ id: p.id, name: p.name, coverImgUrl: p.coverImgUrl, trackCount: p.trackCount })));
+                const liked = items.find(p => isLikedPlaylist(p));
+                if (liked) setLikedPlaylistId(liked.id);
+              }}
+              onActivePlaylist={(id) => {
+                setActiveNeteasePlaylistId(id);
+                setActiveTempId(null);
+              }}
             />
           ) : showStats ? (
             <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />

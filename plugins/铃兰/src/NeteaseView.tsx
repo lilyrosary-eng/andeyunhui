@@ -40,6 +40,10 @@ interface NeteaseViewProps {
   onPlay: (tracks: PlayableTrack[], startIndex: number) => void;
   // 在线播放时把当前来源歌单作为「临时歌单」回传给侧栏，挂到「我的收藏」下方
   onTempPlaylist?: (temp: TempPlaylist) => void;
+  // 登录成功后把用户全部歌单回传（侧栏「用户自己的收藏歌单」铺开）
+  onUserPlaylists?: (items: NeteasePlaylistItem[]) => void;
+  // 当前正在查看的歌单 id（侧栏高亮）
+  onActivePlaylist?: (id: number) => void;
 }
 
 // 在线播放生成的临时歌单（挂在侧栏「我的收藏」之下）
@@ -48,6 +52,20 @@ export interface TempPlaylist {
   name: string;
   coverPath?: string;
   tracks: PlayableTrack[];
+  // 来源描述，供侧栏点击「临时N」时恢复对应视图
+  payload: {
+    kind: 'playlist' | 'search' | 'recommend';
+    id?: number;
+    name?: string;
+    keyword?: string;
+    tracks: PlayableTrack[];
+  };
+}
+
+// 暴露给父组件（侧栏）调用的命令式方法
+export interface NeteaseViewHandle {
+  openPlaylist: (id: number, name: string) => void;
+  restoreTemp: (payload: any) => void;
 }
 
 function trackToPlayable(t: NeteaseTrack, url: string, quality = ''): PlayableTrack {
@@ -70,7 +88,10 @@ function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: NeteaseViewProps) {
+export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>(function NeteaseView(
+  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist },
+  ref,
+) {
   const [tab, setTab] = useState<NeteaseTab>(initialTab);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -108,6 +129,25 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
 
   useEffect(() => { setTab(initialTab); }, [initialTab]);
 
+  // 最新 openPlaylist 镜像，供 useImperativeHandle 在空依赖下安全调用（避免 render 期 TDZ）
+  const openPlaylistRef = useRef<(id: number, name?: string) => void>(() => {});
+  // 暴露命令式方法给父组件（侧栏）调用
+  React.useImperativeHandle(ref, () => ({
+    openPlaylist: (id: number, name: string) => { void openPlaylistRef.current(id, name); },
+    restoreTemp: (payload: any) => {
+      if (!payload) return;
+      const kind: string = payload.kind;
+      if (kind === 'playlist' && payload.id != null) {
+        void openPlaylistRef.current(payload.id, payload.name);
+      } else if (kind === 'search') {
+        setTab('search');
+        setKeyword(payload.keyword || '');
+      } else {
+        setTab('library');
+      }
+    },
+  }), []);
+
   // 离开 login tab 或卸载时停止轮询
   useEffect(() => {
     return () => {
@@ -131,6 +171,8 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
         try {
           const list = await getUserPlaylists(p.userId);
           setPlaylists(list);
+          // 上抛用户全部歌单给侧栏（铺开为「用户自己的收藏歌单」），并解析「我喜欢的音乐」
+          onUserPlaylists?.(list);
         } catch (e) {
           console.warn('[netease] 获取用户歌单失败', e);
           setPlaylists([]);
@@ -322,6 +364,7 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
     try {
       setPlaylistId(id);
       if (name) sourceNameRef.current = name;
+      onActivePlaylist?.(id);
       setLoading(true);
       setError('');
       setOffset(0);
@@ -336,7 +379,9 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
     } catch (e) {
       if (req === reqRef.current) { setError(String((e as any)?.message || e)); setLoading(false); }
     }
-  }, []);
+  }, [onActivePlaylist]);
+  // 保持命令式句柄始终调用最新 openPlaylist（useImperativeHandle 依赖为 []，避免 TDZ）
+  openPlaylistRef.current = openPlaylist;
 
   // 加载歌单/榜单下一页（无限下拉）
   const loadMorePlaylist = useCallback(async () => {
@@ -389,7 +434,20 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
     }
     if (playlist.length) {
       onPlay(playlist, 0);
-      onTempPlaylist?.({ id: 'netease-temp', name: buildTempName(), coverPath: playlist[0]?.coverPath, tracks: playlist });
+      const tempId = playlistId != null ? `playlist-${playlistId}` : tab === 'search' ? `search-${keyword.trim()}` : 'recommend';
+      onTempPlaylist?.({
+        id: tempId,
+        name: buildTempName(),
+        coverPath: playlist[0]?.coverPath,
+        tracks: playlist,
+        payload: {
+          kind: playlistId != null ? 'playlist' : tab === 'search' ? 'search' : 'recommend',
+          id: playlistId ?? undefined,
+          name: buildTempName(),
+          keyword: tab === 'search' ? keyword.trim() : undefined,
+          tracks: playlist,
+        },
+      });
     }
   }, [tracks, onPlay, onTempPlaylist, buildTempName]);
 
@@ -422,7 +480,20 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
         return p;
       });
       onPlay(playlist, startIndex >= 0 ? startIndex : 0);
-      onTempPlaylist?.({ id: 'netease-temp', name: buildTempName(), coverPath: playlist[startIndex >= 0 ? startIndex : 0]?.coverPath, tracks: playlist });
+      const tempId = playlistId != null ? `playlist-${playlistId}` : tab === 'search' ? `search-${keyword.trim()}` : 'recommend';
+      onTempPlaylist?.({
+        id: tempId,
+        name: buildTempName(),
+        coverPath: playlist[startIndex >= 0 ? startIndex : 0]?.coverPath,
+        tracks: playlist,
+        payload: {
+          kind: playlistId != null ? 'playlist' : tab === 'search' ? 'search' : 'recommend',
+          id: playlistId ?? undefined,
+          name: buildTempName(),
+          keyword: tab === 'search' ? keyword.trim() : undefined,
+          tracks: playlist,
+        },
+      });
 
       // 后台补全其余曲的播放地址（不阻塞播放）；补到当前播放的等待曲时播放器会自动 reload
       const player = (window as unknown as { __MUSIC_PLAYER__?: { updateTrackUrl?: (i: number, u: string) => void } }).__MUSIC_PLAYER__;
@@ -760,7 +831,7 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
       </div>
     );
   }
-}
+});
 
 function PlaceholderTab({ title, desc }: { title: string; desc: string }) {
   return (
