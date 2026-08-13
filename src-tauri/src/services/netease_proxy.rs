@@ -36,9 +36,11 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/weapi/artist/v3/list/event",
     "/weapi/artist/albums",
     "/weapi/artist/top/song",
-    // 登录态个人资料/我的歌单（weapi）
+    // 登录态个人资料/我的歌单（weapi + eapi 双通道，前端登录态走 eapi）
     "/weapi/nuser/account/get",
     "/weapi/user/playlist",
+    "/eapi/nuser/account/get",
+    "/eapi/user/playlist",
     // 游客态注册（MUSIC_A），eapi
     "/api/gaia/v1/register/client",
     // 游客态匿名注册（deviceId 派生 username，weapi）

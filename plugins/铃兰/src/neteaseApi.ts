@@ -34,6 +34,7 @@ function saveLoginCookie(): void {
 // 从登录态 cookie 字符串（data.cookie 形如 "MUSIC_U=..; __csrf=..;"）提取并写入 loginCookie
 export function setLoginCookieFromApi(cookieStr: string): void {
   if (!cookieStr || !cookieStr.includes('MUSIC_U=')) return;
+  // 兼容网易云有时返回 "MUSIC_U=xxx; __csrf=yyy;"，有时只有 "MUSIC_U=xxx"（无分号）
   const parts = cookieStr.split(';').map((s) => s.trim()).filter(Boolean);
   const wanted = parts.filter((p) => p.startsWith('MUSIC_U=') || p.startsWith('__csrf='));
   if (!wanted.length) return;
@@ -42,6 +43,20 @@ export function setLoginCookieFromApi(cookieStr: string): void {
   // 同步刷新 guestCsrf（后续 weapi 加密的 csrf_token 用 __csrf 值）
   const csrf = wanted.find((p) => p.startsWith('__csrf='));
   guestCsrf = csrf ? csrf.replace('__csrf=', '') : '';
+  console.log('[netease] 登录 cookie 已保存，长度', loginCookie.length);
+}
+
+// 有时网易云 803 把 MUSIC_U 放在 HTTP 响应头 Set-Cookie 列表里，而不是 body.cookie。
+// 这里直接从完整的 Set-Cookie 字符串数组中合并 MUSIC_U / __csrf。
+export function setLoginCookieFromSetCookie(setCookies: string[]): void {
+  if (!setCookies || !setCookies.length) return;
+  const pick = (prefix: string): string | undefined =>
+    setCookies.map((c) => c.split(';')[0]).find((c) => c.startsWith(prefix));
+  const musicU = pick('MUSIC_U=');
+  if (!musicU) return;
+  const csrf = pick('__csrf=');
+  const cookieStr = [musicU, csrf].filter(Boolean).join('; ');
+  setLoginCookieFromApi(cookieStr);
 }
 export function getLoginCookie(): string | null {
   return loginCookie;
@@ -281,7 +296,7 @@ async function eapiPost(path: string, data: Record<string, any>, deviceId?: stri
   if (parsed.cookies && parsed.cookies.length) {
     absorbCookies(parsed.cookies);
     absorbBodyCookie(parsed.body);
-    // 登录态 cookie（MUSIC_U）只在 Set-Cookie 里返回，body 不含；自动持久化登录态
+    // 登录态 cookie（MUSIC_U）常在 Set-Cookie 头里返回，body 不一定含；自动持久化登录态
     const musicU = parsed.cookies.find((c: string) => c.startsWith('MUSIC_U='));
     if (musicU) {
       const csrf = parsed.cookies.find((c: string) => c.startsWith('__csrf='));
@@ -292,6 +307,53 @@ async function eapiPost(path: string, data: Record<string, any>, deviceId?: stri
     try { return JSON.parse(parsed.body); } catch { return { raw: parsed.body }; }
   }
   return parsed.body || {};
+}
+
+// 同 eapiPost，但额外返回原始 parsed 对象（含 cookies / body），供二维码登录后读取 Set-Cookie
+async function eapiPostWithCookies(
+  path: string,
+  data: Record<string, any>,
+  deviceId?: string,
+): Promise<{ code: number; raw: any }> {
+  const did = deviceId || getOrCreateDeviceId();
+  const header = buildEapiHeader(did);
+  const { params } = await eapi(path, data, header, '');
+  const endpoint = path.replace(/^\/api/, '');
+  const url = `${EAPI_BASE}/eapi${endpoint}`;
+  const cookie = buildDeviceCookieJar(did);
+  const rawResp: string = await hostApi.invoke<string>('netease_http_post', {
+    method: 'POST',
+    url,
+    body: `params=${encodeURIComponent(params)}`,
+    cookie: loginCookie || cookie,
+    referer: REFERER,
+    origin: ORIGIN,
+    real_ip: REAL_IP,
+    user_agent: UA_EAPI,
+    headers: {
+      ...header,
+      'Request-Id': header.requestId,
+      '__csrf': '',
+    },
+  });
+  const parsed = JSON.parse(rawResp || '{}');
+  if (parsed.status && parsed.status !== 200) {
+    console.warn('[netease] eapi', path, 'status', parsed.status, 'body', String(parsed.body || '').slice(0, 200));
+  }
+  if (parsed.cookies && parsed.cookies.length) {
+    absorbCookies(parsed.cookies);
+    absorbBodyCookie(parsed.body);
+    const musicU = parsed.cookies.find((c: string) => c.startsWith('MUSIC_U='));
+    if (musicU) {
+      const csrf = parsed.cookies.find((c: string) => c.startsWith('__csrf='));
+      setLoginCookieFromApi([musicU, csrf].filter(Boolean).join('; '));
+    }
+  }
+  let body = parsed.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { /* keep string */ }
+  }
+  return { code: body?.code ?? 0, raw: parsed };
 }
 
 // ============ 统一请求层（对齐 MusicStorm resolveNativeModule + nativeNeteaseRequest） ============
@@ -325,9 +387,11 @@ function resolveModule(path: string, params: Record<string, any>): { uri: string
     case PATHS.songUrl:
       return { uri: '/api/song/enhance/player/url', data: { ids: JSON.stringify(params.ids || []), br: params.br ?? 999000 }, crypto: 'eapi' };
     case PATHS.userAccount:
-      return { uri: '/api/nuser/account/get', data: { timestamp: Date.now() }, crypto: 'weapi' };
+      // 登录后的个人资料走 eapi，与扫码登录通道保持一致，避免 weapi 缺少 __csrf 返回空体
+      return { uri: '/api/nuser/account/get', data: { timestamp: Date.now() }, crypto: 'eapi' };
     case PATHS.userPlaylist:
-      return { uri: '/api/user/playlist', data: { uid: params.uid, limit: params.limit ?? 30, offset: params.offset ?? 0, includeVideo: true }, crypto: 'weapi' };
+      // 我的歌单同样走 eapi，避免登录态 cookie 在 weapi 下校验失败
+      return { uri: '/api/user/playlist', data: { uid: params.uid, limit: params.limit ?? 30, offset: params.offset ?? 0, includeVideo: true }, crypto: 'eapi' };
     case PATHS.toplist:
       // 分页：offset>0 时按 [offset, offset+limit) 切片取后续曲目；
       // offset=0 时用 n 一次性拉取（兼容歌单首屏/播放全部场景）。
@@ -414,14 +478,20 @@ export async function neteaseQrCreate(key: string): Promise<QrSession> {
 // 3) 轮询登录状态：800 过期 / 801 待扫 / 802 已扫待确认 / 803 成功
 // MusicStorm 映射：/login/qr/check -> /api/login/qrcode/client/login，data { key, type: 3 }
 // 803 时 cookie 字段含 MUSIC_U，自动写入 loginCookie 并持久化
-export async function neteaseQrCheck(key: string): Promise<number> {
-  const r = await eapiPost('/api/login/qrcode/client/login', { key, type: 3 });
-  const code = r?.code ?? 0;
+export async function neteaseQrCheck(key: string): Promise<{ code: number; cookieSaved: boolean }> {
+  const { code, raw } = await eapiPostWithCookies('/api/login/qrcode/client/login', { key, type: 3 });
+  let cookieSaved = false;
   if (code === 803) {
-    const cookieStr = r?.cookie as string | undefined;
-    if (cookieStr && cookieStr.includes('MUSIC_U=')) setLoginCookieFromApi(cookieStr);
+    // 网易云 803 响应的 MUSIC_U 通常在 HTTP Set-Cookie 头里，body 里的 cookie 字段可能为空。
+    // eapiPostWithCookies 已自动把 Set-Cookie 中的 MUSIC_U/__csrf 保存到 loginCookie。
+    cookieSaved = isLoggedIn();
+    if (!cookieSaved) {
+      console.warn('[netease] 803 后端已返回 Set-Cookie，但本地未持久化到 MUSIC_U。body 键:', Object.keys(raw || {}));
+    } else {
+      console.log('[netease] 803 登录态 cookie 已从 Set-Cookie 保存');
+    }
   }
-  return code;
+  return { code, cookieSaved };
 }
 
 // 歌词接口（eapi /api/song/lyric，需登录态）：返回 LRC 文本或 null
@@ -600,6 +670,7 @@ export interface NeteaseProfile {
 }
 export async function getUserAccount(): Promise<NeteaseProfile | null> {
   const r = await neteaseRequest(PATHS.userAccount, {});
+  console.log('[netease] userAccount raw keys:', Object.keys(r || {}), 'account?', !!r?.account, 'profile?', !!r?.profile, 'code:', r?.code, 'msg:', r?.msg || r?.message || '');
   const acc = r?.account || r?.profile;
   if (!acc) return null;
   const p = r?.profile || r?.account;

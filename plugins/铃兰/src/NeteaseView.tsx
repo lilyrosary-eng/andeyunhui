@@ -99,6 +99,8 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
   const [loggedIn, setLoggedIn] = useState(isLoggedIn());
   const [profile, setProfile] = useState<NeteaseProfile | null>(null);
   const [playlists, setPlaylists] = useState<NeteasePlaylistItem[]>([]);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState('');
   const [qrImg, setQrImg] = useState('');
   const [qrStatus, setQrStatus] = useState(''); // 文案提示
   const [qrLoading, setQrLoading] = useState(false);
@@ -114,27 +116,50 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
   }, []);
 
   // 组件挂载时：若本地已有登录 cookie，验证并拉取用户资料/歌单，避免"已登录但显示未登录"
-  useEffect(() => {
+  const fetchProfile = useCallback(async (silent = false, allowLogout = true) => {
     if (!isLoggedIn()) return;
-    setLoggedIn(true);
-    getUserAccount()
-      .then((p) => {
-        if (p) {
-          setProfile(p);
-          getUserPlaylists(p.userId).then(setPlaylists).catch(() => {});
-        } else {
-          // cookie 失效：服务端已不认，清掉本地状态避免假登录
+    if (!silent) setProfileLoading(true);
+    setProfileError('');
+    try {
+      // 加 10 秒超时，避免服务端无响应时一直卡"正在获取"
+      const p = await Promise.race([
+        getUserAccount(),
+        new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('请求超时（10s）')), 10000)),
+      ]);
+      if (p) {
+        setProfile(p);
+        try {
+          const list = await getUserPlaylists(p.userId);
+          setPlaylists(list);
+        } catch (e) {
+          console.warn('[netease] 获取用户歌单失败', e);
+          setPlaylists([]);
+        }
+        setLoggedIn(true);
+      } else {
+        // 服务端返回空 profile：cookie 可能已过期或权限不足
+        if (allowLogout) {
           logoutNetease();
           setLoggedIn(false);
-          setError('登录已过期，请重新登录');
+          setProfile(null);
+          setPlaylists([]);
         }
-      })
-      .catch((e) => {
-        console.warn('[netease] 获取用户信息失败', e);
-        logoutNetease();
-        setLoggedIn(false);
-      });
+        setProfileError('登录已过期，请重新登录');
+      }
+    } catch (e) {
+      console.warn('[netease] 获取用户信息失败', e);
+      // 仅获取失败时不自动退出，保留"已登录"态并显示错误与重试按钮；
+      // 用户可点"重新获取"或"退出登录"，避免 cookie 其实有效只是网络抖动时被清掉。
+      setProfileError('获取用户信息失败：' + (e?.message || String(e)));
+    } finally {
+      setProfileLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    if (!isLoggedIn()) return;
+    fetchProfile(true);
+  }, [fetchProfile]);
 
   const startQrLogin = useCallback(async () => {
     setQrLoading(true);
@@ -148,7 +173,7 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
       if (pollRef.current) window.clearInterval(pollRef.current);
       pollRef.current = window.setInterval(async () => {
         try {
-          const code = await neteaseQrCheck(key);
+          const { code, cookieSaved } = await neteaseQrCheck(key);
           if (code === 800) {
             if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
             setQrStatus('二维码已过期，请重新点击登录');
@@ -157,17 +182,15 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
             setQrStatus('已扫描，请在手机上确认登录');
           } else if (code === 803) {
             if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
-            setLoggedIn(true);
             setQrImg('');
-            setQrStatus('登录成功！');
-            // 登录成功后立即拉取用户资料和歌单
-            try {
-              const p = await getUserAccount();
-              if (p) {
-                setProfile(p);
-                getUserPlaylists(p.userId).then(setPlaylists).catch(() => {});
-              }
-            } catch {}
+            if (!cookieSaved) {
+              setQrStatus('登录成功，但未能读取登录凭据，请退出后重新扫码');
+              return;
+            }
+            setLoggedIn(true);
+            setQrStatus('登录成功！正在获取资料…');
+            // 登录成功后立即拉取用户资料和歌单；登录态已确定，获取失败也不应直接退出
+            fetchProfile(false, false);
           }
         } catch (e) {
           if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
@@ -559,9 +582,22 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
                     </div>
                   </div>
                 ) : (
-                  <div className="flex flex-col items-center gap-2 p-5 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                  <div className="flex flex-col items-center gap-3 p-5 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
                     <div className="w-20 h-20 rounded-full bg-blue-500/15 flex items-center justify-center text-blue-600 dark:text-blue-400 text-2xl font-bold">云</div>
-                    <div className="text-sm text-neutral-500 dark:text-stone-400">正在获取用户信息…</div>
+                    {profileError ? (
+                      <div className="text-center">
+                        <div className="text-sm text-red-600 dark:text-red-400 max-w-[240px]">{profileError}</div>
+                        <button
+                          onClick={() => fetchProfile()}
+                          disabled={profileLoading}
+                          className="btn-press mt-2 px-3 py-1 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 text-xs hover:bg-blue-500/20 transition-colors disabled:opacity-50"
+                        >
+                          {profileLoading ? '获取中…' : '重新获取'}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-neutral-500 dark:text-stone-400">{profileLoading ? '正在获取用户信息…' : '未能读取用户信息'}</div>
+                    )}
                   </div>
                 )}
 
@@ -593,7 +629,7 @@ export function NeteaseView({ initialTab, onBack, onPlay, onTempPlaylist }: Nete
                     </div>
                   ) : (
                     <div className="text-sm text-neutral-400 dark:text-stone-500 text-center py-8 rounded-2xl bg-neutral-100/50 dark:bg-stone-800/40 border border-dashed border-neutral-200 dark:border-stone-700">
-                      暂无歌单或正在加载
+                      {profileLoading ? '正在加载歌单…' : profileError ? '获取用户信息失败，无法加载歌单' : '暂无歌单'}
                     </div>
                   )}
                 </div>
