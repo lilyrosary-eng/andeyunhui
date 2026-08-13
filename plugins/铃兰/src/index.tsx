@@ -8,7 +8,7 @@ import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
 import { NeteaseView, type PlayableTrack, type TempPlaylist, type NeteaseViewHandle } from './NeteaseView';
 import NeteaseSidebar, { type NeteaseTempItem } from './NeteaseSidebar';
-import { isLikedPlaylist } from './neteaseApi';
+import { isLikedPlaylist, type NeteasePlaylistItem } from './neteaseApi';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
@@ -929,7 +929,7 @@ function MusicModule() {
   // 用户「我喜欢的音乐」歌单 id（侧栏「我的收藏」）
   const [likedPlaylistId, setLikedPlaylistId] = useState<number | null>(null);
   // 用户自己的全部歌单（侧栏「用户自己的收藏歌单」铺开）
-  const [userPlaylists, setUserPlaylists] = useState<{ id: number; name: string; coverImgUrl: string; trackCount: number }[]>([]);
+  const [userPlaylists, setUserPlaylists] = useState<NeteasePlaylistItem[]>([]);
   // 当前网易云侧栏高亮：歌单 id / 临时列表 id
   const [activeNeteasePlaylistId, setActiveNeteasePlaylistId] = useState<number | null>(null);
   const [activeTempId, setActiveTempId] = useState<string | null>(null);
@@ -1901,12 +1901,18 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             setActiveNeteasePlaylistId(null);
             neteaseViewRef.current?.restoreTemp(item.payload);
           }}
-          onSelectUserPlaylist={(id, name) => {
-            setActiveNeteasePlaylistId(id);
+          onSelectUserPlaylist={(playlist) => {
+            setActiveNeteasePlaylistId(playlist.id);
             setActiveTempId(null);
             setNeteaseTab('listen');
-            neteaseViewRef.current?.openPlaylist(id, name);
+            neteaseViewRef.current?.openPlaylist(playlist.id, playlist.name);
           }}
+          onCloseNetease={() => setNeteaseOpen(false)}
+          onOpenModuleSettings={handleOpenModuleSettings}
+          onOpenStats={() => setShowStats(true)}
+          onSelectFolder={handleAddRoot}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
         />
       ) : (
         <MusicSidebar
@@ -1947,7 +1953,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               }}
               onUserPlaylists={(items) => {
                 // 用户自己的全部歌单（铺开到侧栏「用户自己的收藏歌单」）
-                setUserPlaylists(items.map(p => ({ id: p.id, name: p.name, coverImgUrl: p.coverImgUrl, trackCount: p.trackCount })));
+                setUserPlaylists(items);
                 const liked = items.find(p => isLikedPlaylist(p));
                 if (liked) setLikedPlaylistId(liked.id);
               }}
