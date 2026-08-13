@@ -943,6 +943,7 @@ export const zhTW: Record<string, string> = {
   'music.player.currentPlaylist': '目前播放歌單',
   'music.player.emptyPlaylist': '該歌單暫無歌曲',
   'music.player.immersive': '檢視沉浸播放頁',
+  'music.player.nowPlayingLabel': '正在播放',
   'music.player.openLyrics': '開啟歌詞',
   'music.player.closeLyrics': '關閉歌詞',
   'music.player.lockLyrics': '鎖定歌詞',

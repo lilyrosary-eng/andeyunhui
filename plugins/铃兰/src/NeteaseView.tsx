@@ -16,6 +16,7 @@ import {
   type NeteaseArtist, type NeteaseArtistAlbum, type NeteaseMvItem, type NeteaseSimilarArtist,
   type NeteaseAlbum, type AlbumDetailResult,
 } from './neteaseApi';
+import { musicPlayer, type Track } from './musicPlayer';
 
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
@@ -61,6 +62,8 @@ interface NeteaseViewProps {
   // 点击 MV 图标：取 MV 播放信息后，请求跳转到「玉兰」模块播放。
   // 参数为已解析好的 MV 播放信息（含网络 URL），由父组件负责跨模块切换 + 玉兰接收。
   onPlayMv?: (mv: { id: number; name: string; artist: string; cover: string; url: string }) => void;
+  // 点击漫游页「当前播放」封面 → 打开沉浸播放页（与底部播放栏一致）
+  onOpenImmersive?: () => void;
 }
 
 // 在线播放生成的临时歌单（挂在侧栏「我的收藏」之下）
@@ -106,7 +109,7 @@ function formatDuration(ms: number): string {
 }
 
 export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>(function NeteaseView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist, onProfileChange, likedSongs: likedSongsProp, onLikedSongsChange, onToggleFavorite, onPlayMv },
+  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist, onProfileChange, likedSongs: likedSongsProp, onLikedSongsChange, onToggleFavorite, onPlayMv, onOpenImmersive },
   ref,
 ) {
   const [tab, setTab] = useState<NeteaseTab>(initialTab);
@@ -116,6 +119,13 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const [tracks, setTracks] = useState<NeteaseTrack[]>([]);
   const [keyword, setKeyword] = useState('');
   const [playingId, setPlayingId] = useState<number | null>(null);
+  // 漫游页「当前播放」陈列：直接镜像 musicPlayer 单例，覆盖本地曲与网易云曲。
+  const [nowPlaying, setNowPlaying] = useState<{ track: Track | null; isPlaying: boolean }>({
+    track: musicPlayer.getCurrentTrack(),
+    isPlaying: musicPlayer.getIsPlaying(),
+  });
+  // 流式漫游队列（musicPlayer 当前队列的镜像，用于陈列），append 时同步刷新。
+  const [roamQueue, setRoamQueue] = useState<Track[]>(musicPlayer.getTracks());
   // 受控：父组件持有网易云红心状态，这里仅做兜底默认值
   const likedSongs = likedSongsProp ?? new Set<number>();
   const reqRef = useRef(0);
@@ -402,39 +412,129 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     }
   }, [keyword, offset, hasMore]);
 
-  // 「漫游」自动拉取：优先私人 FM（登录态个性化推荐），未登录 / FM 为空则回落每日推荐 / 飙升榜
+  // 「漫游」流式推送：进入漫游页时拉首批并（未播放则）自动播放；
+  // 播放接近队尾时再拉下一批 append 进 musicPlayer 队列，而非三首循环。
   const [roamOffset, setRoamOffset] = useState(0);
+  const [roamReloadKey, setRoamReloadKey] = useState(0); // 换一批：自增触发重新拉取
+  const roamReservoir = useRef<NeteaseTrack[]>([]); // 游客态一次性取回的推荐池，按需切片续推
+  const roamExtending = useRef(false);
+
+  // 拉下一批漫游曲目（登录态用私人 FM 真增量，游客态从一次性推荐池切片）
+  const fetchRoamBatch = useCallback(async (): Promise<NeteaseTrack[]> => {
+    if (isLoggedIn()) {
+      const list = await getPersonalFm(8, roamOffset);
+      if (list.length) { setRoamOffset((o) => o + 8); return list; }
+    }
+    // 游客态：首次灌满推荐池，之后从池里切片续推
+    if (roamReservoir.current.length === 0) {
+      roamReservoir.current = await getListenNow(50);
+    }
+    const slice = roamReservoir.current.splice(0, 8);
+    return slice;
+  }, [roamOffset]);
+
+  // 把一批曲目转为 PlayableTrack 并入 musicPlayer 队列（首播用 onPlay，续推用 appendTracks）
+  const pushRoamTracks = useCallback((batch: NeteaseTrack[], startIndex: number, first: boolean) => {
+    const playlist: PlayableTrack[] = batch.map((t) => trackToPlayable(t, ''));
+    if (first) {
+      onPlay(playlist, startIndex, '漫游电台');
+      const tempId = `roam-${Date.now()}`;
+      onTempPlaylist?.({
+        id: tempId,
+        name: '漫游电台',
+        coverPath: playlist[startIndex]?.coverPath,
+        tracks: playlist,
+        payload: { kind: 'recommend', name: '漫游电台', tracks: playlist },
+      });
+    } else {
+      musicPlayer.appendTracks(playlist);
+      // 续推批次同步进本地漫游列表（NeteaseTrack），保持展示与队列一致
+      setTracks((prev) => [...prev, ...batch]);
+    }
+    setRoamQueue(musicPlayer.getTracks());
+  }, [onPlay, onTempPlaylist]);
+
+  // 续推下一批（播放接近队尾时调用）
+  const extendRoam = useCallback(async () => {
+    if (roamExtending.current) return;
+    roamExtending.current = true;
+    try {
+      const batch = await fetchRoamBatch();
+      if (batch.length) pushRoamTracks(batch, 0, false);
+    } catch (e) {
+      console.warn('[netease] 漫游续推失败', e);
+    } finally {
+      roamExtending.current = false;
+    }
+  }, [fetchRoamBatch, pushRoamTracks]);
+
   useEffect(() => {
     if (tab !== 'library') return;
     setPlaylistId(null); // 离开歌单分页模式
     setPlaylistInfo(null);
     setNotice(null);
     sourceNameRef.current = '漫游';
+    roamReservoir.current = [];
     const req = ++reqRef.current;
     setLoading(true);
     setError('');
     setOffset(0);
     (async () => {
       try {
-        let list: NeteaseTrack[] = [];
-        if (isLoggedIn()) {
-          list = await getPersonalFm(8, roamOffset);
-        }
-        if (!list.length) {
-          list = await getListenNow(50);
-        }
-        if (req === reqRef.current) {
-          setTracks(list);
-          setTotal(list.length);
-          setHasMore(false);
-          setLoading(false);
+        const list = await fetchRoamBatch();
+        if (req !== reqRef.current) return;
+        const safeList = list.length ? list : await getListenNow(50);
+        const finalList = req === reqRef.current ? safeList : list;
+        setTracks(finalList);
+        setTotal(finalList.length);
+        setHasMore(false);
+        setLoading(false);
+        // 进入漫游页：仅当队列中【没有任何已加载曲目】（即从未播放过）时才自动起播漫游首批。
+        // 注意：暂停时 getIsPlaying() 也为 false，但此时当前曲目仍在队列中，不应被漫游列表整体替换并强制起播，
+        // 否则会出现「暂停即自动切换到漫游列表继续播放」的问题。
+        if (!musicPlayer.getCurrentTrack() && finalList.length) {
+          pushRoamTracks(finalList, 0, true);
         }
       } catch (e: any) {
         if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); }
       }
     })();
-  }, [tab, roamOffset]);
-  const refreshRoam = useCallback(() => setRoamOffset((o) => o + 8), []);
+  }, [tab, roamReloadKey, fetchRoamBatch, pushRoamTracks]);
+  const refreshRoam = useCallback(() => {
+    roamReservoir.current = [];
+    setRoamOffset(0);
+    setRoamReloadKey((k) => k + 1); // 触发上面 effect 重新拉取首批
+  }, []);
+
+  // 订阅音乐播放器事件：同步「当前播放」陈列与漫游队列镜像，
+  // 并在漫游队列接近队尾时（剩余不足 3 首）自动续推下一批，实现流式漫游。
+  useEffect(() => {
+    const syncNow = () => setNowPlaying({ track: musicPlayer.getCurrentTrack(), isPlaying: musicPlayer.getIsPlaying() });
+    const syncQueue = () => setRoamQueue(musicPlayer.getTracks());
+    const maybeExtend = () => {
+      const len = musicPlayer.getTracks().length;
+      const idx = musicPlayer.getCurrentIndex();
+      if (tab === 'library' && len - 1 - idx <= 2) extendRoam();
+      syncNow();
+      syncQueue();
+    };
+    syncNow();
+    syncQueue();
+    const unsubTrackChange = musicPlayer.on('trackChange', maybeExtend);
+    const unsubPlay = musicPlayer.on('play', syncNow);
+    const unsubPause = musicPlayer.on('pause', syncNow);
+    // 进入漫游页时若队列右侧缓冲不足，先补一批（保证「正在播放」与列表衔接）
+    if (tab === 'library') {
+      const len = musicPlayer.getTracks().length;
+      const idx = musicPlayer.getCurrentIndex();
+      if (len - 1 - idx <= 2) extendRoam();
+    }
+    return () => {
+      unsubTrackChange();
+      unsubPlay();
+      unsubPause();
+    };
+  }, [tab, extendRoam]);
 
   const [playlistId, setPlaylistId] = useState<number | null>(null);
   const [playlistInfo, setPlaylistInfo] = useState<{ name: string; coverUrl?: string; description?: string; trackCount: number; playCount?: number } | null>(null);
@@ -1091,33 +1191,18 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
 
         {tab === 'library' && (
           <section>
-            <div className="mb-3">
-              <div className="flex items-center justify-between mb-1">
-                <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">漫游</h2>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={refreshRoam}
-                    className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-100 dark:bg-stone-800 text-neutral-600 dark:text-stone-300 text-sm hover:bg-stone-200 dark:hover:bg-stone-700 transition-colors"
-                    title="换一批推荐"
-                  >
-                    <Sparkles size={14} />
-                    换一批
-                  </button>
-                  {tracks.length > 0 && (
-                    <button onClick={handlePlayAll} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/15 text-blue-600 dark:text-blue-400 text-sm hover:bg-blue-500/25 transition-colors">
-                      <PlayIcon size={14} />
-                      {T('music.track.playAll') || '播放全部'}
-                    </button>
-                  )}
-                </div>
-              </div>
-              <p className="text-xs text-neutral-500 dark:text-stone-400">
-                {isLoggedIn()
-                  ? '根据你的听歌口味，为你私人漫游推荐更多好音乐'
-                  : '未登录，展示热门推荐；登录后可开启个性化私人漫游'}
-              </p>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">漫游</h2>
+              <button
+                onClick={refreshRoam}
+                className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-100 dark:bg-stone-800 text-neutral-600 dark:text-stone-300 text-sm hover:bg-stone-200 dark:hover:bg-stone-700 transition-colors"
+                title="换一批漫游"
+              >
+                <Sparkles size={14} />
+                换一批
+              </button>
             </div>
-            {renderBody()}
+            {renderRoam()}
           </section>
         )}
         {tab === 'radio' && <PlaceholderTab title={T('music.moduleDrawer.netease.radio')} desc={T('music.moduleDrawer.netease.radioDesc')} />}
@@ -1252,6 +1337,142 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
       </div>
     </div>
   );
+
+  // 漫游页主体：当前播放陈列卡 + 漫游队列列表（取代原三首推荐，流式续推）
+  function renderRoam() {
+    const cur = nowPlaying.track;
+    const curId = cur?.id ?? null;
+    const coverOf = (path?: string) => {
+      if (!path) return null;
+      if (/^https?:\/\//i.test(path)) return path;
+      return window.__HOST_API__?.convertFileSrc(path) || path;
+    };
+    const curCover = coverOf(cur?.coverPath);
+
+    // 当前播放陈列卡
+    const nowCard = (
+      <div className="flex items-center gap-4 rounded-2xl p-3 bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+        <div
+          onClick={onOpenImmersive}
+          className="relative w-20 h-20 rounded-2xl overflow-hidden flex-shrink-0 shadow-md ring-1 ring-black/5 dark:ring-white/10 cursor-pointer transition-transform hover:scale-[1.03]"
+          style={{ width: '80px', height: '80px' }}
+          title={T('music.player.immersive')}
+        >
+          {curCover ? (
+            React.createElement('img', { src: curCover, alt: '', className: 'w-full h-full object-cover', style: { width: '100%', height: '100%', objectFit: 'cover' } })
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-[var(--element-muted)] text-[var(--element-bg)]">
+              <MusicIcon size={28} />
+            </div>
+          )}
+          {nowPlaying.isPlaying && (
+            <div className="absolute bottom-1 right-1 flex items-end gap-[2px] px-1 py-1 rounded-md bg-black/40 backdrop-blur-sm">
+              {[1, 2, 3].map((i) => (
+                <span key={i} className="w-[3px] bg-white rounded-full animate-[music-bar_0.8s_ease-in-out_infinite]" style={{ height: '6px', animationDelay: `${i * 0.12}s` }} />
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] font-medium text-[var(--element-bg)] uppercase tracking-wider mb-0.5">
+            {T('music.player.nowPlayingLabel')}
+          </div>
+          {cur ? (
+            <>
+              <div className="text-base font-semibold text-neutral-800 dark:text-stone-100 truncate leading-tight">{cur.title}</div>
+              <div className="mt-0.5 text-sm truncate leading-tight">
+                <button
+                  type="button"
+                  className="text-neutral-500 dark:text-stone-400 hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                  onClick={() => { const idx = tracks.findIndex((t) => `netease-${t.id}` === cur.id); if (idx >= 0) openArtistDrawer(tracks[idx].artistId); }}
+                  disabled={!tracks.some((t) => `netease-${t.id}` === cur.id && t.artistId)}
+                >{cur.artist || '—'}</button>
+                <span className="opacity-50 mx-1">·</span>
+                <button
+                  type="button"
+                  className="text-neutral-500 dark:text-stone-400 hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                  onClick={() => { const idx = tracks.findIndex((t) => `netease-${t.id}` === cur.id); if (idx >= 0) openAlbumDrawer(tracks[idx].albumId); }}
+                  disabled={!tracks.some((t) => `netease-${t.id}` === cur.id && t.albumId)}
+                >{cur.album || '—'}</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-base font-semibold text-neutral-500 dark:text-stone-400 truncate leading-tight">尚未开始漫游</div>
+              <div className="mt-0.5 text-sm text-neutral-400 dark:text-stone-500 truncate leading-tight">进入漫游页将自动为你播放推荐</div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+
+    // 漫游队列列表
+    const queueList = (
+      <div className="mt-4 flex flex-col gap-1">
+        <div className="text-xs text-neutral-500 dark:text-stone-400 px-1 mb-1">漫游队列</div>
+        {tracks.length === 0 ? (
+          <div className="text-sm text-neutral-400 dark:text-stone-500 py-6 text-center">暂无漫游曲目</div>
+        ) : (
+          tracks.map((t, i) => {
+            const active = curId === `netease-${t.id}`;
+            return (
+              <div
+                key={`${t.id}-${i}`}
+                role="button"
+                tabIndex={0}
+                onClick={(e) => {
+                  if ((e.target as HTMLElement).closest('[data-action]')) return;
+                  musicPlayer.playIndex(i);
+                }}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); musicPlayer.playIndex(i); } }}
+                className={'group flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-left cursor-pointer ' + (active ? 'bg-emerald-500/10' : 'hover:bg-neutral-200/50 dark:hover:bg-stone-800/50')}
+              >
+                {t.cover ? (
+                  <img src={t.cover} alt="" className="w-10 h-10 rounded-md object-cover shrink-0" />
+                ) : (
+                  <span className="w-10 h-10 rounded-md bg-neutral-200/60 dark:bg-stone-800/60 flex items-center justify-center shrink-0 text-neutral-400 dark:text-stone-500">
+                    <MusicIcon size={16} />
+                  </span>
+                )}
+                <span className="min-w-0 flex-1">
+                  <span className={'block text-sm truncate ' + (active ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-neutral-800 dark:text-stone-100')}>{t.name}</span>
+                  <span className="block text-xs text-neutral-400 dark:text-stone-500 truncate">
+                    <button
+                      type="button"
+                      className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                      onClick={(e) => { e.stopPropagation(); openArtistDrawer(t.artistId); }}
+                      disabled={!t.artistId}
+                    >{t.artist}</button>
+                    <span className="opacity-50 mx-1">·</span>
+                    <button
+                      type="button"
+                      className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                      onClick={(e) => { e.stopPropagation(); openAlbumDrawer(t.albumId); }}
+                      disabled={!t.albumId}
+                    >{t.album}</button>
+                  </span>
+                </span>
+                {active && musicPlayer.getIsPlaying() && <PlayIcon size={14} className="text-emerald-500 dark:text-emerald-400 shrink-0" />}
+              </div>
+            );
+          })
+        )}
+      </div>
+    );
+
+    if (loading) {
+      return <div className="text-sm text-neutral-400 dark:text-stone-500 py-8 text-center">{T('music.loading') || '加载中…'}</div>;
+    }
+    if (error) {
+      return <div className="text-sm text-red-500/80 dark:text-red-400/80 py-8 text-center">{error}</div>;
+    }
+    return (
+      <div>
+        {nowCard}
+        {queueList}
+      </div>
+    );
+  }
 
   function renderBody() {
     if (loading) {

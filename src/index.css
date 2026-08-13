@@ -484,6 +484,11 @@ input[type="range"]:active::-moz-range-thumb {
   100% { transform: scale(1); opacity: 0; }
 }
 
+@keyframes music-bar {
+  0%, 100% { transform: scaleY(0.4); }
+  50% { transform: scaleY(1); }
+}
+
 @keyframes slideInRight {
   from { opacity: 0; transform: translateX(28px); }
   to { opacity: 1; transform: translateX(0); }

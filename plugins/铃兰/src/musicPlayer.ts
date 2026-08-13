@@ -370,6 +370,12 @@ class MusicPlayer {
     const idx = this.getPrevIndex();
     if (idx >= 0) { this.loadTrack(idx); this.play(); }
   }
+  // 跳转到队列中指定索引播放（漫游队列点击切歌用）
+  playIndex(index: number): void {
+    if (index < 0 || index >= this.tracks.length) return;
+    this.loadTrack(index);
+    this.play();
+  }
 
   seek(time: number): void { this.audio.currentTime = time; }
   setVolume(vol: number): void { this.volume = Math.max(0, Math.min(1, vol)); this.audio.volume = this.volume; }
@@ -378,6 +384,17 @@ class MusicPlayer {
   getCurrentTrack(): Track | null { return this.tracks[this.currentIndex] || null; }
   getCurrentIndex(): number { return this.currentIndex; }
   getTracks(): Track[] { return this.tracks; }
+  // 流式追加：漫游等场景在播放接近队尾时，把下一批曲目接到队列末尾。
+  // 仅追加、不打断当前播放、不触发 trackChange（避免 UI 误以为切歌）。
+  appendTracks(tracks: Track[]): void {
+    if (!tracks.length) return;
+    this.tracks = [...this.tracks, ...tracks];
+    // 顺序播放模式下，随机序列需要补齐新长度，否则超出旧长度的曲不会被随机到。
+    if (this.playMode === 'random' && this.shuffleIndices.length) {
+      const start = this.tracks.length - tracks.length;
+      for (let i = start; i < this.tracks.length; i++) this.shuffleIndices.push(i);
+    }
+  }
   getVolume(): number { return this.volume; }
   getPlayMode(): PlayMode { return this.playMode; }
   getCurrentTime(): number { return this.audio.currentTime || 0; }

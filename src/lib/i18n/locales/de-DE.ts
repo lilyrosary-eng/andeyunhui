@@ -943,6 +943,7 @@ export const deDE: Record<string, string> = {
   'music.player.currentPlaylist': 'Aktuelle Wiedergabeliste',
   'music.player.emptyPlaylist': 'Diese Wiedergabeliste enthält keine Titel',
   'music.player.immersive': 'Immersiven Player öffnen',
+  'music.player.nowPlayingLabel': 'Aktuelle Wiedergabe',
   'music.player.openLyrics': 'Text öffnen',
   'music.player.closeLyrics': 'Text schließen',
   'music.player.lockLyrics': 'Text sperren',

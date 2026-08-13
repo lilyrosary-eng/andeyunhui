@@ -943,6 +943,7 @@ export const koKR: Record<string, string> = {
   'music.player.currentPlaylist': '현재 재생 목록',
   'music.player.emptyPlaylist': '이 플레이리스트에 곡이 없습니다',
   'music.player.immersive': '몰입형 플레이어 열기',
+  'music.player.nowPlayingLabel': '지금 재생 중',
   'music.player.openLyrics': '가사 열기',
   'music.player.closeLyrics': '가사 닫기',
   'music.player.lockLyrics': '가사 잠금',

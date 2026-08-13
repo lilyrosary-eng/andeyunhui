@@ -981,6 +981,7 @@ export const zhCN: Record<string, string> = {
   'music.player.currentPlaylist': '当前播放歌单',
   'music.player.emptyPlaylist': '该歌单暂无歌曲',
   'music.player.immersive': '查看沉浸播放页',
+  'music.player.nowPlayingLabel': '正在播放',
   'music.player.openLyrics': '打开歌词',
   'music.player.closeLyrics': '关闭歌词',
   'music.player.lockLyrics': '锁定歌词',

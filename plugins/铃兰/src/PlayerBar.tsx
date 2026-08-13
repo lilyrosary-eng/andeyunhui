@@ -410,14 +410,17 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
     : null;
   const progressPct = duration > 0 ? (currentTime / duration) * 100 : 0;
 
-  // 封面 + 歌曲信息（上排左，放大以更醒目）
+  // 封面 + 歌曲信息（上排左，做成醒目的「当前歌曲信息+图片」卡片）
   const coverInfoEl = (
-    <div className="flex items-center gap-4 min-w-0 flex-shrink-0" style={{ width: '240px' }}>
+    <div
+      className="flex items-center gap-3 min-w-0 flex-shrink-0 group cursor-pointer rounded-2xl p-1.5 -ml-1.5 transition-colors hover:bg-black/5 dark:hover:bg-white/5"
+      style={{ width: '280px' }}
+      onClick={onCoverClick}
+      title={T('music.player.immersive')}
+    >
       <div
-        onClick={onCoverClick}
-        className="w-14 h-14 rounded-xl overflow-hidden flex-shrink-0 shadow-sm ring-1 ring-black/5 dark:ring-white/5 cursor-pointer hover:ring-2 hover:ring-[var(--element-bg)] transition-all"
-        style={{ width: '56px', height: '56px' }}
-        title={T('music.player.immersive')}
+        className="relative w-16 h-16 rounded-2xl overflow-hidden flex-shrink-0 shadow-md ring-1 ring-black/5 dark:ring-white/10 transition-all group-hover:ring-2 group-hover:ring-[var(--element-bg)] group-hover:scale-[1.02]"
+        style={{ width: '64px', height: '64px' }}
       >
         {coverUrl ? (
           React.createElement('img', {
@@ -431,18 +434,31 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
             className: 'w-full h-full flex items-center justify-center bg-[var(--element-muted)] text-[var(--element-bg)]',
           }, React.createElement(MusicIcon))
         )}
+        {/* 播放中状态小徽章 */}
+        {isPlaying && React.createElement('div', {
+          className: 'absolute bottom-1 right-1 flex items-end gap-[2px] px-1 py-1 rounded-md bg-black/40 backdrop-blur-sm',
+        }, [1, 2, 3].map((i) => React.createElement('span', {
+          key: i,
+          className: 'w-[3px] bg-white rounded-full animate-[music-bar_0.8s_ease-in-out_infinite]',
+          style: { height: '6px', animationDelay: `${i * 0.12}s` },
+        })))}
       </div>
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
+        <div className="text-[10px] font-medium text-[var(--element-bg)] uppercase tracking-wider mb-0.5">
+          {T('music.player.nowPlayingLabel')}
+        </div>
         <div className="flex items-center gap-2">
-          <div className="text-base font-medium text-neutral-700 dark:text-stone-200 truncate leading-tight">{track.title}</div>
+          <div className="text-[15px] font-semibold text-neutral-800 dark:text-stone-100 truncate leading-tight">{track.title}</div>
           {track.quality && (
             <span className="shrink-0 text-[10px] font-semibold leading-none px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" title={track.quality}>
               {track.quality}
             </span>
           )}
         </div>
-        {track.artist && (
-          <div className="text-sm text-neutral-400 dark:text-stone-500 truncate leading-tight mt-0.5">{track.artist}</div>
+        {track.artist ? (
+          <div className="text-[13px] text-neutral-500 dark:text-stone-400 truncate leading-tight mt-0.5">{track.artist}</div>
+        ) : (
+          <div className="text-[13px] text-neutral-400 dark:text-stone-500 truncate leading-tight mt-0.5">—</div>
         )}
       </div>
     </div>

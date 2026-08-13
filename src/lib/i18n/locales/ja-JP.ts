@@ -943,6 +943,7 @@ export const jaJP: Record<string, string> = {
   'music.player.currentPlaylist': '現在のプレイリスト',
   'music.player.emptyPlaylist': 'このプレイリストには曲がありません',
   'music.player.immersive': '没入型プレイヤーを開く',
+  'music.player.nowPlayingLabel': '再生中',
   'music.player.openLyrics': '歌詞を開く',
   'music.player.closeLyrics': '歌詞を閉じる',
   'music.player.lockLyrics': '歌詞をロック',

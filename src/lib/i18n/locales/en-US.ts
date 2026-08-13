@@ -941,6 +941,7 @@ export const enUS: Record<string, string> = {
   'music.player.currentPlaylist': 'Current playlist',
   'music.player.emptyPlaylist': 'This playlist has no songs',
   'music.player.immersive': 'Open immersive player',
+  'music.player.nowPlayingLabel': 'Now Playing',
   'music.player.openLyrics': 'Open lyrics',
   'music.player.closeLyrics': 'Close lyrics',
   'music.player.lockLyrics': 'Lock lyrics',

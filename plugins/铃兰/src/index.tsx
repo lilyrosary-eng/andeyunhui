@@ -2005,6 +2005,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                   cover: mv.cover,
                 }]);
               }}
+              onOpenImmersive={handleCoverClick}
             />
           ) : showStats ? (
             <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />

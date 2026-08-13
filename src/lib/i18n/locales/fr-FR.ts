@@ -942,6 +942,7 @@ export const frFR: Record<string, string> = {
   'music.player.currentPlaylist': 'Liste de lecture actuelle',
   'music.player.emptyPlaylist': 'Cette liste de lecture ne contient aucune piste',
   'music.player.immersive': 'Ouvrir le lecteur immersif',
+  'music.player.nowPlayingLabel': 'Lecture en cours',
   'music.player.openLyrics': 'Ouvrir les paroles',
   'music.player.closeLyrics': 'Fermer les paroles',
   'music.player.lockLyrics': 'Verrouiller les paroles',
