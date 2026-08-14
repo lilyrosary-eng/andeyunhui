@@ -998,7 +998,7 @@ function MusicModule() {
   const neteaseViewRef = useRef<NeteaseViewHandle | null>(null);
   // 酷狗音乐视图：与网易云完全并列的第二在线平台
   const [kugouOpen, setKugouOpen] = useState(false);
-  const [kugouTab, setKugouTab] = useState<'search' | 'rank' | 'home'>('home');
+  const [kugouTab, setKugouTab] = useState<'search' | 'home'>('home');
   // 酷狗侧栏状态：榜单列表与当前选中榜单（与酷狗视图双向同步）
   const [kugouRankList, setKugouRankList] = useState<KugouPlaylistCard[]>([]);
   const [kugouActiveRankId, setKugouActiveRankId] = useState<number | null>(null);
@@ -1953,14 +1953,12 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onSelectRank={(id) => {
             setKugouActiveRankId(id);
             online.setActiveId(null);
-            setKugouTab('rank');
           }}
           tempPlaylists={online.temps}
           activeTempId={online.activeId}
           onSelectTemp={(item) => {
             online.setActiveId(item.id);
             setKugouActiveRankId(null);
-            setKugouTab('rank');
             (kugouViewRef.current as any)?.restoreTemp?.(item.payload);
           }}
           onCloseKugou={() => setKugouOpen(false)}
@@ -1969,11 +1967,6 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           statsActive={showStats}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
-          onGoHome={() => {
-            setKugouActiveRankId(null);
-            setKugouTab('home');
-          }}
-          homeActive={kugouTab === 'home'}
         />
       ) : (
         <MusicSidebar
@@ -2168,7 +2161,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           setNeteaseOpen(true);
           setKugouOpen(false);
         }}
-        onSelectKugou={(key: 'search' | 'rank' | 'home') => {
+        onSelectKugou={(key: 'home' | 'search') => {
           setKugouTab(key);
           setKugouOpen(true);
           setNeteaseOpen(false);

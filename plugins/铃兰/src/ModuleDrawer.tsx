@@ -19,8 +19,18 @@ interface ModuleDrawerProps {
   neteaseProfile?: NeteaseProfile | null;
   // 当前是否已切换到酷狗音乐模块
   isKugouOpen?: boolean;
-  // 点击酷狗折叠菜单子项时回调：key 为 search/rank
-  onSelectKugou?: (key: 'search' | 'rank') => void;
+  // 点击酷狗折叠菜单子项时回调：key 为 home/search
+  onSelectKugou?: (key: 'home' | 'search') => void;
+}
+
+// 通用首页图标（云按钮折叠菜单复用）
+function HomeIcon() {
+  return React.createElement('svg', {
+    width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
+  }, [
+    React.createElement('path', { key: '1', d: 'm3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' }),
+    React.createElement('polyline', { key: '2', points: '9 22 9 12 15 12 15 22' }),
+  ]);
 }
 
 // 折叠菜单子项（网易云注入功能下的各个部分）
@@ -170,6 +180,38 @@ function DrawerModuleItem({
   );
 }
 
+// 折叠子项（可复用模板）：网易云 / 酷狗 的子菜单项共用同一套布局
+interface DrawerSubItemProps {
+  icon: React.ReactNode;
+  title: string;
+  desc?: string;
+  onClick?: () => void;
+}
+
+function DrawerSubItem({ icon, title, desc, onClick }: DrawerSubItemProps) {
+  return (
+    <button
+      key={title}
+      onClick={onClick}
+      className="w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-100/70 dark:hover:bg-stone-700/50"
+    >
+      <div className="flex h-8 w-8 items-center justify-center rounded-lg shrink-0 bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300">
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">{title}</p>
+        {desc ? <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">{desc}</p> : null}
+      </div>
+    </button>
+  );
+}
+
+// 酷狗折叠菜单子项（热榜 / 搜索）：榜单已整合进「热榜」首页
+const kugouItems: { key: 'home' | 'search'; icon: React.ReactElement }[] = [
+  { key: 'home', icon: React.createElement(HomeIcon, { size: 16 }) },
+  { key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
+];
+
 export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou }: ModuleDrawerProps) {
   useLang();
   const [mounted, setMounted] = useState(open);
@@ -265,28 +307,16 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
                 ? React.createElement('img', { src: neteaseProfile.avatarUrl, alt: '', className: 'w-full h-full rounded-full object-cover' })
                 : item.icon;
               return (
-                <button
+                <DrawerSubItem
                   key={item.key}
+                  icon={icon}
+                  title={title}
+                  desc={desc}
                   onClick={() => {
                     if (onSelectNetease) onSelectNetease(item.key);
                     onClose();
                   }}
-                  className="w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-100/70 dark:hover:bg-stone-700/50"
-                >
-                  <div className={`flex h-8 w-8 items-center justify-center rounded-lg shrink-0 ${
-                    isLogin && neteaseProfile?.avatarUrl ? 'bg-transparent' : 'bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300'
-                  }`}>
-                    {icon}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">
-                      {title}
-                    </p>
-                    <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
-                      {desc}
-                    </p>
-                  </div>
-                </button>
+                />
               );
             })}
           </DrawerModuleItem>
@@ -295,38 +325,29 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
             active={!!isKugouOpen}
             expanded={kugouExpanded}
             onToggleExpand={() => setKugouExpanded((v) => !v)}
-            onSelect={() => { if (onSelectKugou) onSelectKugou('rank'); onClose(); }}
+            onSelect={() => { if (onSelectKugou) onSelectKugou('home'); onClose(); }}
             icon={React.createElement(MusicIcon, { size: 18 })}
             title={T('music.moduleDrawer.kugou.title') || '酷狗音乐'}
             accent={accents.kugou}
           >
-            {(['rank', 'search'] as ('rank' | 'search')[]).map((key) => {
-              const title = key === 'rank'
-                ? (T('music.moduleDrawer.kugou.rank') || '榜单')
+            {kugouItems.map((item) => {
+              const title = item.key === 'home'
+                ? (T('music.moduleDrawer.kugou.home') || '热榜')
                 : (T('music.moduleDrawer.kugou.search') || '搜索');
-              const desc = key === 'rank'
-                ? (T('music.moduleDrawer.kugou.rankDesc') || '飙升 / 热歌 / 新歌')
+              const desc = item.key === 'home'
+                ? (T('music.moduleDrawer.kugou.homeDesc') || '为你推荐 / 热歌榜单')
                 : (T('music.moduleDrawer.kugou.searchDesc') || '搜索歌曲 / 歌手');
-              const icon = key === 'rank'
-                ? React.createElement(RadioIcon, { size: 16 })
-                : React.createElement(SearchIcon, { size: 16 });
               return (
-                <button
-                  key={key}
+                <DrawerSubItem
+                  key={item.key}
+                  icon={item.icon}
+                  title={title}
+                  desc={desc}
                   onClick={() => {
-                    if (onSelectKugou) onSelectKugou(key);
+                    if (onSelectKugou) onSelectKugou(item.key);
                     onClose();
                   }}
-                  className="w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-100/70 dark:hover:bg-stone-700/50"
-                >
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg shrink-0 bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300">
-                    {icon}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">{title}</p>
-                    <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">{desc}</p>
-                  </div>
-                </button>
+                />
               );
             })}
           </DrawerModuleItem>

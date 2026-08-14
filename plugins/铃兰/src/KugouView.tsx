@@ -8,6 +8,7 @@
 import React from 'react';
 const { useState, useEffect, useRef } = React;
 import { MusicIcon, PlayIcon, SearchIcon, Sparkles } from 'lucide-react';
+import { ArrowLeftIcon } from '../../_shared/icons';
 import { musicPlayer, Track } from './musicPlayer';
 import {
   KugouTrack,
@@ -22,7 +23,7 @@ import {
 import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
 import { MusicHeader } from './MusicHeader';
 
-type KugouTab = 'search' | 'rank' | 'home';
+type KugouTab = 'search' | 'home';
 
 interface KugouViewProps {
   initialTab: KugouTab;
@@ -213,7 +214,6 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
 
   // 进入某个榜单详情
   function openRank(rankId: number) {
-    setTab('rank');
     loadRank(rankId);
   }
 
@@ -331,24 +331,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
         user={{ loggedIn: false }}
       />
 
-      {/* 子模块切换（热榜首页 / 榜单 / 搜索） */}
-      <div className="flex items-center gap-2 px-3 py-2 shrink-0">
-        <div className="flex items-center gap-1 p-1 rounded-lg bg-neutral-100/70 dark:bg-stone-800/60">
-          {(['home', 'rank', 'search'] as KugouTab[]).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`px-3 py-1 rounded-md text-sm transition-colors ${
-                tab === t
-                  ? 'bg-white dark:bg-stone-700 text-neutral-800 dark:text-stone-100 shadow-sm'
-                  : 'text-neutral-500 dark:text-stone-400'
-              }`}
-            >
-              {t === 'home' ? '热榜' : t === 'search' ? '搜索' : '榜单'}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* 顶部不再放子模块切换条；热榜 / 搜索切换改由云按钮（音乐模块）折叠菜单控制 */}
 
       {/* 搜索 / 榜单筛选条 */}
       {tab === 'search' && (
@@ -374,7 +357,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
           </button>
         </div>
       )}
-      {tab === 'rank' && (
+      {activeRankId !== null && (
         <div className="flex items-center gap-3 overflow-x-auto scrollbar-thin px-3 py-2 border-b border-neutral-200/70 dark:border-stone-700/60">
           {rankList.map((r) => {
             const active = activeRankId === r.id;
@@ -414,7 +397,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
           <span>{error}</span>
           <button
             className="btn-press px-2 py-1 rounded-md bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-700 dark:text-stone-200"
-            onClick={() => (tab === 'search' ? doSearch() : activeRankId ? loadRank(activeRankId) : reloadRankList())}
+            onClick={() => (activeRankId !== null ? loadRank(activeRankId) : tab === 'search' ? doSearch() : reloadRankList())}
           >
             重试
           </button>
@@ -422,7 +405,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       )}
 
       {/* 首页热榜 */}
-      {tab === 'home' && (
+      {tab === 'home' && activeRankId === null && (
         <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
           {/* 顶部标题 + 播放全部 */}
           <div className="flex items-center justify-between pt-4 pb-3">
@@ -504,8 +487,20 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       )}
 
       {/* 榜单/搜索 歌曲列表 */}
-      {tab !== 'home' && (
+      {(activeRankId !== null || tab === 'search') && (
         <div className="flex-1 overflow-y-auto min-h-0">
+          {activeRankId !== null && (
+            <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-200/70 dark:border-stone-700/60">
+              <button
+                onClick={() => setActiveRankId(null)}
+                className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium"
+                title="返回热榜"
+              >
+                <ArrowLeftIcon size={14} />
+                返回热榜
+              </button>
+            </div>
+          )}
           {tracks.map((t, i) => (
             <div
               key={t.id}

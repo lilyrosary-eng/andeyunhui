@@ -4,15 +4,6 @@ import { OnlineSidebarShell, SidebarTempSection, type TempPlaylistItem } from '.
 import type { KugouPlaylistCard } from './kugouApi';
 import type { OnlineTempItem } from './useOnlineSource';
 
-function HomeIcon() {
-  return React.createElement('svg', {
-    width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
-  }, [
-    React.createElement('path', { key: '1', d: 'm3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' }),
-    React.createElement('polyline', { key: '2', points: '9 22 9 12 15 12 15 22' }),
-  ]);
-}
-
 function toTempItem(temp: OnlineTempItem): TempPlaylistItem {
   return {
     id: temp.id,
@@ -47,8 +38,6 @@ export interface KugouSidebarProps {
   statsActive?: boolean;
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
-  onGoHome?: () => void;
-  homeActive?: boolean;
 }
 
 export default function KugouSidebar({
@@ -64,25 +53,8 @@ export default function KugouSidebar({
   statsActive,
   searchQuery,
   onSearchChange,
-  onGoHome,
-  homeActive,
 }: KugouSidebarProps) {
   const [rankExpanded, setRankExpanded] = useState(true);
-
-  const renderHomeItem = () => {
-    return React.createElement('button', {
-      key: 'home',
-      onClick: onGoHome,
-      className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm flex items-center gap-2 ${
-        homeActive
-          ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
-          : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
-      }`,
-    }, [
-      React.createElement(HomeIcon, { key: 'icon' }),
-      React.createElement('span', { key: 't', className: 'font-medium' }, '热榜'),
-    ]);
-  };
 
   const renderRankSection = () => {
     if (ranks.length === 0) return null;
@@ -134,7 +106,6 @@ export default function KugouSidebar({
     onSearchChange,
     searchPlaceholder: '搜索酷狗音乐',
     children: React.createElement('div', { className: 'space-y-4' },
-      renderHomeItem(),
       renderRankSection(),
       React.createElement(SidebarTempSection, {
         items: tempPlaylists.map(toTempItem),
