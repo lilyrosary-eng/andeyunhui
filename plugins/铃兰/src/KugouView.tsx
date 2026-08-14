@@ -7,7 +7,7 @@
 
 import React from 'react';
 const { useState, useEffect, useRef } = React;
-import { MusicIcon, PlayIcon, SearchIcon } from 'lucide-react';
+import { MusicIcon, PlayIcon, SearchIcon, Sparkles } from 'lucide-react';
 import { musicPlayer, Track } from './musicPlayer';
 import {
   KugouTrack,
@@ -22,7 +22,7 @@ import {
 import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
 import { MusicHeader } from './MusicHeader';
 
-type KugouTab = 'search' | 'rank';
+type KugouTab = 'search' | 'rank' | 'home';
 
 interface KugouViewProps {
   initialTab: KugouTab;
@@ -34,6 +34,95 @@ interface KugouViewProps {
   selectedRankId?: number | null;
   onRankListLoaded?: (ranks: KugouPlaylistCard[]) => void;
   onActiveRankChange?: (id: number | null) => void;
+}
+
+// 为你推荐 / 热榜卡片（正方形封面 + 标题 + 数量）
+function RankCard({
+  rank,
+  size = 'md',
+  onClick,
+}: {
+  rank: KugouPlaylistCard;
+  size?: 'md' | 'lg';
+  onClick: () => void;
+}) {
+  const isLg = size === 'lg';
+  return (
+    <button
+      onClick={onClick}
+      className={`btn-press flex flex-col gap-2 text-left group shrink-0 ${isLg ? 'w-44' : 'w-32'}`}
+    >
+      <div
+        className={`relative w-full overflow-hidden rounded-2xl bg-neutral-200/60 dark:bg-stone-700/60 ${
+          isLg ? 'aspect-[16/10]' : 'aspect-square'
+        }`}
+      >
+        {rank.cover ? (
+          <img
+            src={rank.cover}
+            alt=""
+            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <MusicIcon size={isLg ? 32 : 20} className="text-neutral-400 dark:text-stone-500" />
+          </div>
+        )}
+      </div>
+      <div className="min-w-0">
+        <div className={`font-medium truncate text-neutral-800 dark:text-stone-100 ${isLg ? 'text-sm' : 'text-xs'}`}>
+          {rank.name}
+        </div>
+        {rank.playCount != null ? (
+          <div className="text-[10px] text-neutral-400 dark:text-stone-500 truncate">
+            {rank.playCount} 播放
+          </div>
+        ) : null}
+      </div>
+    </button>
+  );
+}
+
+// Hero 大卡：带渐变遮罩的横幅推荐位
+function HeroCard({ rank, onClick, onPlayAll }: { rank: KugouPlaylistCard; onClick: () => void; onPlayAll: () => void }) {
+  return (
+    <div
+      onClick={onClick}
+      className="relative w-full h-48 rounded-3xl overflow-hidden cursor-pointer group btn-press"
+    >
+      {rank.cover ? (
+        <>
+          <img
+            src={rank.cover}
+            alt=""
+            className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
+        </>
+      ) : (
+        <div className="absolute inset-0 bg-gradient-to-br from-orange-400 to-pink-500" />
+      )}
+      <div className="absolute inset-x-0 bottom-0 p-5 flex items-end justify-between">
+        <div className="min-w-0">
+          <div className="text-xs text-white/80 mb-1">为你精选</div>
+          <div className="text-lg font-bold text-white truncate">{rank.name}</div>
+          <div className="text-xs text-white/70 truncate">
+            {rank.playCount != null ? `${rank.playCount} 播放 · ` : ''}今日推荐
+          </div>
+        </div>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onPlayAll();
+          }}
+          className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/20 hover:bg-white/30 text-white text-xs backdrop-blur-sm transition-colors shrink-0"
+        >
+          <PlayIcon size={14} />
+          播放全部
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // 把 KugouTrack 转成可直接播放的 PlayableTrack（url 需先经 getSongUrl 取）
@@ -71,6 +160,8 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   const allTracksRef = useRef<KugouTrack[]>([]);
   const [rankList, setRankList] = useState<KugouPlaylistCard[]>([]);
   const [activeRankId, setActiveRankId] = useState<number | null>(null);
+  const [homeHeroTracks, setHomeHeroTracks] = useState<KugouTrack[]>([]);
+  const [homeHeroLoading, setHomeHeroLoading] = useState(false);
 
   // 暴露命令式方法给侧栏（临时歌单恢复播放）
   React.useImperativeHandle(ref, () => ({
@@ -92,11 +183,9 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
         if (cancelled) return;
         setRankList(ranks);
         onRankListLoaded?.(ranks);
-        // 默认选中第一个榜单（飙升），除非外部已通过 selectedRankId 指定
-        if (ranks.length && selectedRankId == null && activeRankId === null) {
-          setActiveRankId(ranks[0].id);
-          onActiveRankChange?.(ranks[0].id);
-          loadRank(ranks[0].id);
+        // 首页默认预加载第一个榜单作为 Hero，供「播放全部」使用
+        if (ranks.length) {
+          loadHomeHero(ranks[0].id);
         }
       } catch (e: any) {
         if (!cancelled) setError('榜单加载失败：' + (e?.message || e));
@@ -105,6 +194,28 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 预加载首页 Hero 榜单曲目（不切换 tab，仅用于播放全部）
+  async function loadHomeHero(rankId: number) {
+    if (!rankId) return;
+    setHomeHeroLoading(true);
+    try {
+      const list = await getTopList(rankId, 1, 30);
+      setHomeHeroTracks(list);
+      setActiveRankId(rankId);
+      onActiveRankChange?.(rankId);
+    } catch (e: any) {
+      console.warn('[Kugou] 首页 Hero 榜单加载失败:', e);
+    } finally {
+      setHomeHeroLoading(false);
+    }
+  }
+
+  // 进入某个榜单详情
+  function openRank(rankId: number) {
+    setTab('rank');
+    loadRank(rankId);
+  }
 
   // 侧栏驱动榜单切换：selectedRankId 变化时自动加载对应榜单
   React.useEffect(() => {
@@ -169,19 +280,17 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     }
   }
 
-  async function doPlay(track: KugouTrack, index: number) {
+  async function playTrackList(sourceTracks: KugouTrack[], startIndex: number, playlistName: string) {
     try {
-      setPlayingId(track.id);
-      const { url, br } = await getSongUrl(track.hash || track.id, track.albumId);
+      setPlayingId(sourceTracks[startIndex]?.id ?? null);
+      const { url, br } = await getSongUrl(sourceTracks[startIndex]?.hash || sourceTracks[startIndex]?.id, sourceTracks[startIndex]?.albumId);
       if (!url) {
         setError('该歌曲暂无可播放地址（可能需会员或已下架）');
         return;
       }
-      const quality = qualityLabelFromBr(br);
-      void trackToPlayable(track, url, quality);
-      // 整页作为临时歌单交给播放器：批量取地址（带容错）
+      // 批量取地址（带容错）
       const playables: PlayableTrack[] = [];
-      for (const tk of allTracksRef.current) {
+      for (const tk of sourceTracks) {
         try {
           const r = await getSongUrl(tk.hash || tk.id, tk.albumId);
           playables.push(trackToPlayable(tk, r.url, qualityLabelFromBr(r.br)));
@@ -189,10 +298,10 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
           playables.push(trackToPlayable(tk, '', ''));
         }
       }
-      onPlay(playables, index, `酷狗 · ${track.name}`);
+      onPlay(playables, startIndex, `酷狗 · ${playlistName}`);
       onTempPlaylist?.({
         id: `kugou-temp-${Date.now()}`,
-        name: tab === 'search' ? `搜索：${keyword}` : '酷狗榜单',
+        name: playlistName,
         tracks: playables,
         payload: { kind: tab === 'search' ? 'search' : 'recommend', keyword, tracks: playables },
       });
@@ -201,6 +310,11 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     } finally {
       setPlayingId(null);
     }
+  }
+
+  async function doPlay(track: KugouTrack, index: number) {
+    const currentList = tab === 'home' ? homeHeroTracks : allTracksRef.current;
+    await playTrackList(currentList, index, track.name);
   }
 
   return (
@@ -217,10 +331,10 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
         user={{ loggedIn: false }}
       />
 
-      {/* 子模块切换（搜索 / 榜单）：保留在顶栏下方作为第二行 */}
+      {/* 子模块切换（热榜首页 / 榜单 / 搜索） */}
       <div className="flex items-center gap-2 px-3 py-2 shrink-0">
         <div className="flex items-center gap-1 p-1 rounded-lg bg-neutral-100/70 dark:bg-stone-800/60">
-          {(['search', 'rank'] as KugouTab[]).map((t) => (
+          {(['home', 'rank', 'search'] as KugouTab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -230,14 +344,14 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
                   : 'text-neutral-500 dark:text-stone-400'
               }`}
             >
-              {t === 'search' ? '搜索' : '榜单'}
+              {t === 'home' ? '热榜' : t === 'search' ? '搜索' : '榜单'}
             </button>
           ))}
         </div>
       </div>
 
-      {/* 搜索 / 榜单切换内容 */}
-      {tab === 'search' ? (
+      {/* 搜索 / 榜单筛选条 */}
+      {tab === 'search' && (
         <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-200/70 dark:border-stone-700/60">
           <div className="flex items-center gap-2 flex-1 px-3 py-1.5 rounded-xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/50">
             <SearchIcon size={16} className="text-neutral-400 dark:text-stone-500 shrink-0" />
@@ -259,7 +373,8 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
             搜索
           </button>
         </div>
-      ) : (
+      )}
+      {tab === 'rank' && (
         <div className="flex items-center gap-3 overflow-x-auto scrollbar-thin px-3 py-2 border-b border-neutral-200/70 dark:border-stone-700/60">
           {rankList.map((r) => {
             const active = activeRankId === r.id;
@@ -306,52 +421,136 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
         </div>
       )}
 
-      {/* 歌曲列表 */}
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {tracks.map((t, i) => (
-          <div
-            key={t.id}
-            className="flex items-center gap-3 px-3 py-2.5 border-b border-neutral-200/40 dark:border-stone-700/30 cursor-pointer hover:bg-neutral-100/50 dark:hover:bg-stone-800/40"
-            onDoubleClick={() => doPlay(t, i)}
-          >
-            <div
-              className="w-10 h-10 rounded-lg overflow-hidden bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center shrink-0"
-              onClick={() => doPlay(t, i)}
-            >
-              {t.cover ? (
-                <img src={t.cover} alt="" className="w-full h-full object-cover" />
-              ) : (
-                <MusicIcon size={16} className="text-neutral-400 dark:text-stone-500" />
-              )}
-            </div>
-            <div className="flex-1 min-w-0" onClick={() => doPlay(t, i)}>
-              <div className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</div>
-              <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">
-                {t.artist}{t.album ? ` · ${t.album}` : ''}
-              </div>
-            </div>
-            <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
+      {/* 首页热榜 */}
+      {tab === 'home' && (
+        <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
+          {/* 顶部标题 + 播放全部 */}
+          <div className="flex items-center justify-between pt-4 pb-3">
+            <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100">热榜</h2>
             <button
-              onClick={() => doPlay(t, i)}
-              disabled={playingId === t.id}
-              className="btn-press w-8 h-8 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 flex items-center justify-center disabled:opacity-40 shrink-0"
-              title="播放"
+              onClick={() => {
+                if (homeHeroTracks.length) {
+                  void playTrackList(homeHeroTracks, 0, '热榜');
+                }
+              }}
+              disabled={homeHeroLoading || homeHeroTracks.length === 0}
+              className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-500/90 hover:bg-blue-500 text-white text-sm font-medium disabled:opacity-50"
             >
-              {playingId === t.id ? (
-                <PlayIcon size={14} className="text-blue-500" />
-              ) : (
-                <PlayIcon size={14} />
-              )}
+              <PlayIcon size={14} />
+              播放全部
             </button>
           </div>
-        ))}
-        {!loading && !error && tracks.length === 0 && (
-          <div className="flex flex-col items-center justify-center gap-3 py-16 text-neutral-400 dark:text-stone-500">
-            <MusicIcon size={32} />
-            <span className="text-sm">暂无内容</span>
-          </div>
-        )}
-      </div>
+
+          {/* 为你推荐 */}
+          {rankList.length > 0 && (
+            <section className="mt-2 mb-8">
+              <div className="flex items-center gap-2 mb-4">
+                <Sparkles size={18} className="text-orange-500" />
+                <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">为你推荐</h3>
+                <span className="text-xs text-neutral-400 dark:text-stone-500">根据你的口味推荐</span>
+              </div>
+              <HeroCard
+                rank={rankList[0]}
+                onClick={() => openRank(rankList[0].id)}
+                onPlayAll={() => {
+                  if (homeHeroTracks.length) {
+                    void playTrackList(homeHeroTracks, 0, rankList[0].name);
+                  }
+                }}
+              />
+              {rankList.length > 1 && (
+                <div className="flex gap-3 overflow-x-auto scrollbar-thin py-3 mt-2">
+                  {rankList.slice(1, 11).map((r) => (
+                    <RankCard key={r.id} rank={r} onClick={() => openRank(r.id)} />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* 热榜 */}
+          {rankList.length > 0 && (
+            <section>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">热榜</h3>
+                <button
+                  onClick={() => {
+                    if (homeHeroTracks.length) {
+                      void playTrackList(homeHeroTracks, 0, '热榜');
+                    }
+                  }}
+                  disabled={homeHeroLoading || homeHeroTracks.length === 0}
+                  className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium disabled:opacity-50"
+                >
+                  <PlayIcon size={12} />
+                  播放全部
+                </button>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+                {rankList.map((r) => (
+                  <RankCard key={r.id} rank={r} size="lg" onClick={() => openRank(r.id)} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {!loading && !error && rankList.length === 0 && (
+            <div className="flex flex-col items-center justify-center gap-3 py-16 text-neutral-400 dark:text-stone-500">
+              <MusicIcon size={32} />
+              <span className="text-sm">暂无榜单数据</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 榜单/搜索 歌曲列表 */}
+      {tab !== 'home' && (
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {tracks.map((t, i) => (
+            <div
+              key={t.id}
+              className="flex items-center gap-3 px-3 py-2.5 border-b border-neutral-200/40 dark:border-stone-700/30 cursor-pointer hover:bg-neutral-100/50 dark:hover:bg-stone-800/40"
+              onDoubleClick={() => doPlay(t, i)}
+            >
+              <div
+                className="w-10 h-10 rounded-lg overflow-hidden bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center shrink-0"
+                onClick={() => doPlay(t, i)}
+              >
+                {t.cover ? (
+                  <img src={t.cover} alt="" className="w-full h-full object-cover" />
+                ) : (
+                  <MusicIcon size={16} className="text-neutral-400 dark:text-stone-500" />
+                )}
+              </div>
+              <div className="flex-1 min-w-0" onClick={() => doPlay(t, i)}>
+                <div className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</div>
+                <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">
+                  {t.artist}{t.album ? ` · ${t.album}` : ''}
+                </div>
+              </div>
+              <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
+              <button
+                onClick={() => doPlay(t, i)}
+                disabled={playingId === t.id}
+                className="btn-press w-8 h-8 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 flex items-center justify-center disabled:opacity-40 shrink-0"
+                title="播放"
+              >
+                {playingId === t.id ? (
+                  <PlayIcon size={14} className="text-blue-500" />
+                ) : (
+                  <PlayIcon size={14} />
+                )}
+              </button>
+            </div>
+          ))}
+          {!loading && !error && tracks.length === 0 && (
+            <div className="flex flex-col items-center justify-center gap-3 py-16 text-neutral-400 dark:text-stone-500">
+              <MusicIcon size={32} />
+              <span className="text-sm">暂无内容</span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 });
