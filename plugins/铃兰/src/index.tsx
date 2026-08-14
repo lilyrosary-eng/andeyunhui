@@ -1958,7 +1958,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
         <div className="flex-1 min-w-0 min-h-0 overflow-hidden relative">
           {showStats ? (
             neteaseOpen ? (
-              <NeteaseStatsView onClose={() => setShowStats(false)} />
+              <NeteaseStatsView onClose={() => setShowStats(false)} playlists={userPlaylists} likedCount={neteaseLiked.size} />
             ) : (
               <MusicStatsView onClose={() => setShowStats(false)} favoriteCount={favorites.size} />
             )

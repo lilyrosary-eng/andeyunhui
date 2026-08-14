@@ -1,7 +1,6 @@
 import React from "react";
 import {
   getUserAccount,
-  getUserPlaylists,
   getListenNow,
   getTopList,
   isLikedPlaylist,
@@ -10,10 +9,12 @@ import {
   type NeteaseTrack,
 } from "./neteaseApi";
 
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef } = React;
 
 interface NeteaseStatsViewProps {
   onClose: () => void;
+  playlists?: NeteasePlaylistItem[];
+  likedCount?: number;
 }
 
 interface ListenNowTrack {
@@ -22,7 +23,13 @@ interface ListenNowTrack {
   artists: { name: string }[];
 }
 
-export default function NeteaseStatsView({ onClose }: NeteaseStatsViewProps) {
+export default function NeteaseStatsView({ onClose, playlists: playlistsProp, likedCount: likedCountProp }: NeteaseStatsViewProps) {
+  // 用 ref 镜像最新 prop，避免 effect 闭包捕获到初次挂载时的空值
+  const playlistsRef = useRef<NeteasePlaylistItem[] | undefined>(playlistsProp);
+  const likedCountRef = useRef<number | undefined>(likedCountProp);
+  playlistsRef.current = playlistsProp;
+  likedCountRef.current = likedCountProp;
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [profile, setProfile] = useState<NeteaseProfile | null>(null);
@@ -39,27 +46,48 @@ export default function NeteaseStatsView({ onClose }: NeteaseStatsViewProps) {
       setLoading(true);
       setError(null);
       try {
-        const [acc, listenNow, topList] = await Promise.all([
-          getUserAccount(),
-          getListenNow(30),
-          getTopList(0, 30),
-        ]);
+        // 三个请求相互独立，分别 try，单点失败不应阻断整体统计展示。
+        let acc: NeteaseProfile | null = null;
+        let listenNow: NeteaseTrack[] = [];
+        let topList: { tracks: NeteaseTrack[] } | null = null;
+
+        try {
+          acc = await getUserAccount();
+        } catch (e) {
+          console.warn("[netease-stats] getUserAccount 失败", e);
+        }
+        try {
+          listenNow = await getListenNow(30);
+        } catch (e) {
+          console.warn("[netease-stats] getListenNow 失败", e);
+        }
+        try {
+          // 云音乐飙升榜真实 id（与 getListenNow 回落一致）。禁止传 id=0，
+          // /api/v6/playlist/detail 对无效歌单 id 会返回 "歌单不存在" 并抛错。
+          topList = await getTopList(19723756, 30);
+        } catch (e) {
+          console.warn("[netease-stats] getTopList 失败", e);
+        }
 
         if (cancelled) return;
 
         setProfile(acc);
 
-        // 歌单统计：用账户 uid 拉取「我自己的收藏歌单」
-        let pls: NeteasePlaylistItem[] = [];
-        try {
-          if (acc?.userId) pls = await getUserPlaylists(acc.userId, 100);
-        } catch {
-          pls = [];
+        // 歌单统计：本页面不主动调 /api/user/playlist（该接口在登录态下易被风控挡成"歌单不存在"）。
+        // 优先复用父组件（NeteaseView 已成功拉到的侧栏歌单）；若 prop 暂为空，等 800ms 再读一次
+        // （NeteaseView 通常在挂载后异步回填 userPlaylists），仍为空则降级为空统计、不报错。
+        let pls: NeteasePlaylistItem[] = playlistsRef.current || [];
+        if (pls.length === 0) {
+          await new Promise((r) => setTimeout(r, 800));
+          if (cancelled) return;
+          pls = playlistsRef.current || [];
         }
-        if (cancelled) return;
 
-        const liked = pls.find((p) => isLikedPlaylist(p));
-        setLikedCount(liked?.trackCount ?? null);
+        setLikedCount(
+          likedCountRef.current != null
+            ? likedCountRef.current
+            : (pls.find((p) => isLikedPlaylist(p))?.trackCount ?? null)
+        );
         setCreatedCount(pls.filter((p) => !p.subscribed && !isLikedPlaylist(p)).length);
         setSubscribedCount(pls.filter((p) => p.subscribed).length);
         setTotalPlayCount(pls.reduce((s, p) => s + (p.playCount || 0), 0));
@@ -70,14 +98,14 @@ export default function NeteaseStatsView({ onClose }: NeteaseStatsViewProps) {
             .map((t: NeteaseTrack) => ({
               id: t.id,
               name: t.name || "未知歌曲",
-              artists: t.artists || [],
+              artists: t.artist ? [{ name: t.artist }] : [],
             }))
         );
 
-        // 榜单 Top（默认云音乐飙升榜 id=0；取前若干作为"热门歌曲"展示）
+        // 榜单 Top（云音乐飙升榜），取前若干作为"热门歌曲"展示；失败则降级空。
         const songs = ((topList?.tracks) || []).slice(0, 20).map((t: NeteaseTrack) => ({
           name: t.name || "未知歌曲",
-          artist: (t.artists || []).map((a) => a.name).join("/") || "未知歌手",
+          artist: t.artist || "未知歌手",
         }));
         setTopSongs(songs);
       } catch (e: any) {
@@ -110,7 +138,7 @@ export default function NeteaseStatsView({ onClose }: NeteaseStatsViewProps) {
         {profile && (
           <span className="ml-auto text-sm text-neutral-500 dark:text-stone-400 truncate">
             {profile.nickname}
-            {profile.vipType > 0 ? " · VIP" : ""}
+            {profile.vipType ? " · VIP" : ""}
           </span>
         )}
       </div>
