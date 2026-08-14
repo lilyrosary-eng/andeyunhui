@@ -14,6 +14,8 @@ import { useOnlineSource } from './useOnlineSource';
 import type { KugouPlaylistCard } from './kugouApi';
 import NeteaseStatsView from './NeteaseStatsView';
 import NeteaseSettingsPanel from './NeteaseSettingsPanel';
+import KugouStatsView from './KugouStatsView';
+import KugouSettingsPanel from './KugouSettingsPanel';
 import { isLikedPlaylist, likeNeteaseSong, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
@@ -1002,6 +1004,8 @@ function MusicModule() {
   // 酷狗侧栏状态：榜单列表与当前选中榜单（与酷狗视图双向同步）
   const [kugouRankList, setKugouRankList] = useState<KugouPlaylistCard[]>([]);
   const [kugouActiveRankId, setKugouActiveRankId] = useState<number | null>(null);
+  const [kugouSettingsOpen, setKugouSettingsOpen] = useState(false);
+  const [kugouStatsOpen, setKugouStatsOpen] = useState(false);
   const kugouViewRef = useRef<NeteaseViewHandle | null>(null);
 
   const [currentTrack, setCurrentTrack] = useState<Track | null>(() => musicPlayer.getCurrentTrack());
@@ -1962,9 +1966,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             (kugouViewRef.current as any)?.restoreTemp?.(item.payload);
           }}
           onCloseKugou={() => setKugouOpen(false)}
-          onOpenModuleSettings={handleOpenModuleSettings}
-          onOpenStats={() => setShowStats(v => !v)}
-          statsActive={showStats}
+          onOpenModuleSettings={() => setKugouSettingsOpen(v => !v)}
+          onOpenStats={() => setKugouStatsOpen(v => !v)}
+          statsActive={kugouStatsOpen}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
         />
@@ -2092,7 +2096,14 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               onRankListLoaded={setKugouRankList}
               onActiveRankChange={setKugouActiveRankId}
             />
-          ) : selectedPlaylist ? (
+          ) : null}
+          {kugouOpen && kugouSettingsOpen ? (
+            <KugouSettingsPanel onBack={() => setKugouSettingsOpen(false)} />
+          ) : null}
+          {kugouOpen && kugouStatsOpen ? (
+            <KugouStatsView />
+          ) : null}
+          {selectedPlaylist ? (
             <TrackList
               tracks={filteredTracks}
               playlistName={selectedPlaylist.name}
