@@ -1971,6 +1971,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           statsActive={kugouStatsOpen}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
+          onOpenMine={() => setKugouTab('mine')}
         />
       ) : (
         <MusicSidebar
@@ -2095,6 +2096,11 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               selectedRankId={kugouActiveRankId}
               onRankListLoaded={setKugouRankList}
               onActiveRankChange={setKugouActiveRankId}
+              onAuthChange={(auth) => {
+                // 登录态变化：同步给侧栏（侧栏已监听 kugou-auth-changed 事件，
+                // 这里透传一份以便后续在外层做登录态驱动的 UI 切换）。
+                try { window.__HOST_API__?.invoke('debug_log', { msg: `KUGOU_AUTH_CHANGED userid=${auth?.userid ?? 'null'}` }).catch(()=>{}); } catch {}
+              }}
             />
           ) : null}
           {kugouOpen && kugouSettingsOpen ? (

@@ -9,6 +9,8 @@
 //! 调用方传入的 Cookie（用户后续若做扫码登录可带会员 Cookie）。
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 // ========== 白名单（防止插件把代理当任意 HTTP 客户端） ==========
 // 1) 仅允许这些酷狗域名
@@ -20,12 +22,18 @@ const ALLOWED_KUGOU_HOSTS: &[&str] = &[
     "wwwapi.kugou.com",
     "lyrics.kugou.com",
     "songsearch.kugou.com",
+    // 登录 / 账号相关
+    // 网页端扫码登录走 login-user.kugou.com/v2/*（非 /kmobile），明文返回 userid+token，免 AES/RSA 解密
+    "login-user.kugou.com",
+    "kugou.com",
+    "passport.kugou.com",
+    "usercenter.kugou.com",
     // 直连后端 CDN（绕过 gateway 的 x-router 路由层，免签名、稳定）
     "mobilecdnbj.kugou.com",
     "msearchcdnbj.kugou.com",
 ];
 
-// 2) 仅允许这些路径前缀（只读、低风险）
+// 2) 仅允许这些路径前缀（只读、低风险；登录类仅放通扫码登录相关路径）
 const ALLOWED_KUGOU_PATH_PREFIXES: &[&str] = &[
     "/api/v3/search",
     "/api/v3/url",
@@ -40,6 +48,16 @@ const ALLOWED_KUGOU_PATH_PREFIXES: &[&str] = &[
     "/music/social/api",
     // m.kugou.com 老式歌单详情
     "/plist/list",
+    // 扫码登录（网页端 login-user.kugou.com/v2/*，明文返回 userid+token，无需解密 secu_params）
+    "/v2/qrcode",
+    "/v2/get_userinfo_qrcode",
+    // 登录后用户信息/收藏/歌单（kugou.com/up/index.php）
+    "/up/index.php",
+    "/user_favorites/index.php",
+    "/user_favorites/playlist.php",
+    // Android 登录态私有接口：我的歌单 / 歌单详情
+    "/v7/get_all_list",
+    "/v3/get_list_info",
 ];
 
 // 3) 允许的 HTTP 方法（仅 POST/GET）
@@ -162,6 +180,20 @@ pub struct KugouProxyResponse {
     pub cookies: Vec<String>,
 }
 
+// 全局单例 reqwest Client：带超时 + 连接池复用，避免 IPv6 出口不通时无限卡死/连接风暴。
+fn global_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(6)
+            .build()
+            .expect("build kugou proxy client")
+    })
+}
+
 async fn proxy_internal(
     method: &str,
     url: &str,
@@ -181,10 +213,9 @@ async fn proxy_internal(
 
     let headers = build_headers(cookie, extra, referer, origin, real_ip, user_agent);
 
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .map_err(|e| format!("build client: {e}"))?;
+    // 复用全局单例 Client：每次请求 new Client 会导致连接池无法复用、idle 连接堆积，
+    // 在 gateway 解析到 IPv6 且本机无真 IPv6 出口时形成连接风暴。统一超时避免无限卡死。
+    let client = global_client();
 
     let req = if method.eq_ignore_ascii_case("GET") {
         client.get(url)

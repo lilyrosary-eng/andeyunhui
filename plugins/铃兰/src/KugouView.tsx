@@ -10,6 +10,22 @@ const { useState, useEffect, useRef } = React;
 import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon } from 'lucide-react';
 import { ArrowLeftIcon } from '../../_shared/icons';
 import { T } from '../../_shared/pluginRuntime';
+import {
+  type KugouAuth,
+  type KugouProfile,
+  type KugouTrack,
+  type KugouPlaylistCard,
+  getFavorites,
+  getUserPlaylists,
+  safeImg,
+} from './kugouApi';
+import {
+  kugouQrCreate,
+  kugouQrCheck,
+  readKugouAuth,
+  logoutKugou,
+  fetchKugouProfile,
+} from './kugouAuth';
 import { musicPlayer, Track } from './musicPlayer';
 import {
   KugouTrack,
@@ -36,6 +52,8 @@ interface KugouViewProps {
   selectedRankId?: number | null;
   onRankListLoaded?: (ranks: KugouPlaylistCard[]) => void;
   onActiveRankChange?: (id: number | null) => void;
+  // 登录态变化通知外层（用于侧栏切「我的」入口）
+  onAuthChange?: (auth: KugouAuth | null) => void;
 }
 
 // 为你推荐 / 热榜卡片（正方形封面 + 标题 + 数量）
@@ -128,13 +146,224 @@ function HeroCard({ rank, onClick, onPlayAll }: { rank: KugouPlaylistCard; onCli
 }
 
 // 我的：游客态提示页（对齐网易云"我的"登录态；登录后可看收藏 / 歌单）
-function MineGuestView({ onBack }: { onBack: () => void }) {
-  const items: { icon: React.ReactNode; title: string; desc: string }[] = [
-    { icon: React.createElement(LibraryIcon, { size: 18 }), title: T('music.moduleDrawer.kugou.roam') || '漫游', desc: '发现好歌无限流' },
-    { icon: React.createElement(MusicIcon, { size: 18 }), title: '收藏', desc: '我喜欢的音乐' },
-    { icon: React.createElement(MusicIcon, { size: 18 }), title: '歌单', desc: '我创建的歌单' },
-    { icon: React.createElement(MusicIcon, { size: 18 }), title: '播放记录', desc: '最近播放' },
-  ];
+// 我的：真实扫码登录 + 登录态（收藏 / 歌单 / 退出）
+function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?: (auth: KugouAuth | null) => void }) {
+  const [auth, setAuth] = useState<KugouAuth | null>(() => readKugouAuth());
+  const [profile, setProfile] = useState<KugouProfile | null>(null);
+  const [qrImg, setQrImg] = useState('');
+  const [qrStatus, setQrStatus] = useState('');
+  const [qrLoading, setQrLoading] = useState(false);
+  const [favs, setFavs] = useState<KugouTrack[]>([]);
+  const [playlists, setPlaylists] = useState<KugouPlaylistCard[]>([]);
+  const [dataLoading, setDataLoading] = useState(false);
+  const [dataError, setDataError] = useState('');
+  const pollRef = useRef<number | null>(null);
+  const reqRef = useRef(0);
+
+  // 已登录：拉取用户资料 + 收藏 + 歌单。
+  // 依赖用 auth?.userid（而非 auth 引用）：fetchKugouProfile 每次返回新对象，
+  // 若依赖 auth 引用会无限自循环重跑，导致每秒几百次 onAuthChange 回调把 Rust/代理打爆。
+  // 用 debug_log（Rust 转发，日志面板可靠可见）代替 console.log 做关键节点埋点。
+  const dlog = (msg: string) => {
+    try { window.__HOST_API__?.invoke('debug_log', { msg: `[music-mine] ${msg}` }).catch(() => {}); } catch {}
+  };
+  useEffect(() => {
+    const uid = auth?.userid;
+    dlog(`effect run, uid=${uid}`);
+    if (!uid) {
+      setDataLoading(false);
+      setDataError('');
+      setProfile(null);
+      setFavs([]);
+      setPlaylists([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setDataLoading(true);
+      setDataError('');
+      try {
+        // 前端 12s 兜底覆盖整段（含 fetchKugouProfile）：
+        // 之前只包 getFavorites/getUserPlaylists，若 fetchKugouProfile 在 Rust 代理层挂起，
+        // 会永远 loading（已复现：effect 跑后无 profile done 日志）。
+        const { profile: p, auth: a } = await Promise.race([
+          fetchKugouProfile(auth!),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('加载超时，请重试')), 12000),
+          ),
+        ]);
+        if (cancelled) return;
+        setProfile(p);
+        setAuth(a);
+        onAuthChange?.(a);
+        dlog('profile done, fetching favs+playlists');
+        // getFavorites 内部已拉取全量歌单并返回 { list, playlists }，避免双重请求。
+        const favs = await Promise.race([
+          getFavorites(a),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('加载超时，请重试')), 15000),
+          ),
+        ]);
+        if (cancelled) return;
+        setFavs(favs.list);
+        setPlaylists(favs.playlists);
+        dlog(`favs=${favs.list.length} playlists=${favs.playlists.length}`);
+      } catch (e: any) {
+        dlog('MineView catch: ' + (e?.message || e));
+        if (!cancelled) setDataError('加载失败：' + (e?.message || e));
+      } finally {
+        // 不用 loadedUserRef 永久守卫跳过收尾：StrictMode 下首个被取消的实例若跳过
+        // setDataLoading(false)，会导致「加载中」永久卡住（已复现）。这里仅由未被取消的
+        // 实例负责收尾即可。
+        if (!cancelled) setDataLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [auth?.userid]);
+
+  useEffect(() => () => {
+    if (pollRef.current) window.clearInterval(pollRef.current);
+  }, []);
+
+  async function startQrLogin() {
+    setQrLoading(true);
+    setQrImg('');
+    setQrStatus('正在生成二维码…');
+    try {
+      const session = await kugouQrCreate();
+      setQrImg(session.img || '');
+      setQrStatus('请用酷狗 App 扫码登录');
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      pollRef.current = window.setInterval(async () => {
+        try {
+          const r = await kugouQrCheck(session.qrcode);
+          if (r.status === 'ok' && r.auth) {
+            if (pollRef.current) window.clearInterval(pollRef.current);
+            setQrImg('');
+            setQrStatus('登录成功！');
+            setAuth(r.auth);
+            onAuthChange?.(r.auth);
+          } else if (r.status === 'expired') {
+            if (pollRef.current) window.clearInterval(pollRef.current);
+            setQrImg('');
+            setQrStatus('二维码已过期，请重新点击登录');
+          } else if (r.status === 'denied') {
+            if (pollRef.current) window.clearInterval(pollRef.current);
+            setQrImg('');
+            setQrStatus('已拒绝登录');
+          } else if (r.status === 'scanned') {
+            setQrStatus('已扫描，请在手机上确认');
+          }
+        } catch (e: any) {
+          if (pollRef.current) window.clearInterval(pollRef.current);
+          setQrStatus('轮询失败：' + String(e?.message || e));
+        }
+      }, 2000);
+    } catch (e: any) {
+      setQrStatus('生成失败：' + String(e?.message || e));
+    } finally {
+      setQrLoading(false);
+    }
+  }
+
+  function handleLogout() {
+    logoutKugou();
+    setAuth(null);
+    setProfile(null);
+    setFavs([]);
+    setPlaylists([]);
+    onAuthChange?.(null);
+  }
+
+  // ===== 已登录态 =====
+  if (auth) {
+    return (
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
+        <div className="flex items-center gap-2 pt-4 pb-4">
+          <button
+            onClick={onBack}
+            className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium"
+            title="返回热榜"
+          >
+            <ArrowLeftIcon size={14} />
+            热榜
+          </button>
+          <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.mineTitle') || '我的'}</h2>
+        </div>
+
+        {/* 用户信息卡 */}
+        <div className="flex items-center gap-4 rounded-2xl p-4 bg-neutral-100/60 dark:bg-stone-800/50">
+          {safeImg(profile?.avatar) ? (
+            <img src={safeImg(profile.avatar)} alt="" className="w-16 h-16 rounded-full object-cover border border-white dark:border-stone-700" />
+          ) : (
+            <div className="w-16 h-16 rounded-full flex items-center justify-center bg-orange-500/10 text-orange-500">
+              <UserIcon size={28} />
+            </div>
+          )}
+          <div className="flex-1 min-w-0">
+            <div className="text-lg font-semibold text-neutral-800 dark:text-stone-100 truncate">{profile?.nickname || auth.nickname || '酷狗用户'}</div>
+            {profile?.signature ? (
+              <div className="text-xs text-neutral-500 dark:text-stone-400 truncate mt-0.5">{profile.signature}</div>
+            ) : null}
+            <div className="text-[10px] text-neutral-400 dark:text-stone-500 mt-1">ID: {auth.userid}{auth.vipType ? ` · 会员` : ''}</div>
+          </div>
+        </div>
+
+        {/* 收藏 */}
+        <section className="mt-6">
+          <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100 mb-3">{T('music.kugou.mineFavs') || '我喜欢的音乐'}</h3>
+          {dataLoading ? (
+            <div className="text-sm text-neutral-400 dark:text-stone-500 py-6 text-center">加载中…</div>
+          ) : favs.length > 0 ? (
+            <div className="space-y-1">
+              {favs.slice(0, 20).map((t) => (
+                <div key={t.id} className="flex items-center gap-3 px-3 py-2 rounded-xl bg-neutral-100/40 dark:bg-stone-800/30 cursor-pointer hover:bg-neutral-200/50 dark:hover:bg-stone-700/40" onDoubleClick={() => playTrackList([t], 0, t.name)}>
+                  <div className="w-9 h-9 rounded-lg overflow-hidden bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center shrink-0">
+                    {t.cover ? <img src={safeImg(t.cover)} alt="" className="w-full h-full object-cover" /> : <MusicIcon size={14} className="text-neutral-400" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-neutral-800 dark:text-stone-100 truncate">{t.name}</div>
+                    <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">{t.artist}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-neutral-400 dark:text-stone-500 py-6 text-center rounded-2xl bg-neutral-100/40 dark:bg-stone-800/30">{dataError || (T('music.kugou.mineEmptyFavs') || '暂无收藏')}</div>
+          )}
+        </section>
+
+        {/* 歌单 */}
+        <section className="mt-6">
+          <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100 mb-3">{T('music.kugou.minePlaylists') || '我的歌单'}</h3>
+          {dataLoading ? (
+            <div className="text-sm text-neutral-400 dark:text-stone-500 py-6 text-center">加载中…</div>
+          ) : playlists.length > 0 ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {playlists.map((p) => (
+                <div key={p.id} className="rounded-xl overflow-hidden bg-neutral-100/50 dark:bg-stone-800/40">
+                  <div className="aspect-square bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center">
+                    {p.cover ? <img src={safeImg(p.cover)} alt="" className="w-full h-full object-cover" /> : <MusicIcon size={20} className="text-neutral-400" />}
+                  </div>
+                  <div className="p-2 text-xs font-medium text-neutral-700 dark:text-stone-200 truncate">{p.name}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-neutral-400 dark:text-stone-500 py-6 text-center rounded-2xl bg-neutral-100/40 dark:bg-stone-800/30">{dataError || (T('music.kugou.mineEmptyPlaylists') || '暂无歌单')}</div>
+          )}
+        </section>
+
+        <div className="flex items-center justify-center mt-8">
+          <button onClick={handleLogout} className="btn-press px-4 py-2 rounded-xl bg-red-500/10 text-red-600 dark:text-red-400 text-sm hover:bg-red-500/20 transition-colors">
+            {T('music.kugou.mineLogout') || '退出登录'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== 游客态：扫码登录 =====
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
       <div className="flex items-center gap-2 pt-4 pb-4">
@@ -149,31 +378,35 @@ function MineGuestView({ onBack }: { onBack: () => void }) {
         <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.mineTitle') || '我的'}</h2>
       </div>
 
-      <div className="flex flex-col items-center gap-3 py-10 text-center">
-        <div className="w-16 h-16 rounded-full flex items-center justify-center bg-orange-500/10 text-orange-500">
-          <UserIcon size={28} />
+      <div className="flex flex-col items-center gap-4 py-10 text-center">
+        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-orange-400 to-amber-500 flex items-center justify-center text-white shadow-lg">
+          <UserIcon size={30} />
         </div>
-        <div className="text-base font-semibold text-neutral-800 dark:text-stone-100">{T('music.kugou.mineGuestHint') || '登录后可查看收藏、歌单与播放记录'}</div>
-        <div className="text-xs text-neutral-400 dark:text-stone-500 max-w-xs">{T('music.kugou.mineLoginDesc') || '游客态暂不支持，登录网易云 / 酷狗账号后同步'}</div>
+        <div className="text-base font-semibold text-neutral-800 dark:text-stone-100">{T('music.kugou.mineLoginTitle') || '登录酷狗音乐'}</div>
+        <div className="text-xs text-neutral-400 dark:text-stone-500 max-w-xs">{T('music.kugou.mineLoginDesc') || '扫码登录后可同步收藏、歌单与播放记录'}</div>
       </div>
 
-      <div className="mt-4 space-y-1">
-        {items.map((it) => (
-          <div
-            key={it.title}
-            className="flex items-center gap-3 rounded-xl px-3 py-2.5 bg-neutral-100/50 dark:bg-stone-800/40"
+      {qrImg ? (
+        <div className="max-w-sm mx-auto flex flex-col items-center gap-4 p-6 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+          <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100">{T('music.kugou.mineScanTitle') || '扫码登录酷狗'}</h2>
+          <img src={qrImg} alt="登录二维码" className="w-48 h-48 rounded-xl bg-white p-2" />
+          <div className="text-sm text-neutral-500 dark:text-stone-400 text-center min-h-[1.5em]">{qrStatus}</div>
+          <button onClick={startQrLogin} className="btn-press px-4 py-1.5 rounded-lg bg-neutral-200/60 dark:bg-stone-800/60 text-sm text-neutral-700 dark:text-stone-200 hover:bg-neutral-300/60 dark:hover:bg-stone-700/60 transition-colors">
+            {T('music.kugou.mineRefreshQr') || '刷新二维码'}
+          </button>
+        </div>
+      ) : (
+        <div className="max-w-sm mx-auto flex flex-col items-center gap-4 p-8 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+          <button
+            onClick={startQrLogin}
+            disabled={qrLoading}
+            className="btn-press w-full px-5 py-2.5 rounded-xl bg-orange-500 text-white text-sm font-medium hover:bg-orange-600 transition-colors disabled:opacity-50"
           >
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300">
-              {it.icon}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">{it.title}</p>
-              <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">{it.desc}</p>
-            </div>
-            <span className="text-xs text-neutral-400 dark:text-stone-500">—</span>
-          </div>
-        ))}
-      </div>
+            {qrLoading ? (T('music.kugou.mineGenQr') || '生成中…') : (T('music.kugou.mineStartQr') || '立即扫码登录')}
+          </button>
+          <div className="text-xs text-neutral-400 dark:text-stone-500 text-center min-h-[1.2em]">{qrStatus}</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -200,7 +433,7 @@ function formatDuration(ms: number): string {
 }
 
 export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(function KugouView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange },
+  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange, onAuthChange },
   ref,
 ) {
   const [tab, setTab] = useState<KugouTab>(initialTab);
@@ -299,7 +532,13 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     onActivePlaylist?.(rankId);
     onActiveRankChange?.(rankId);
     try {
-      const list = await getTopList(rankId, 1, 30);
+      // 15s 防御超时：防止 Rust 代理在网络层挂起时整个内容区永久「加载中」遮罩。
+      const list = await Promise.race([
+        getTopList(rankId, 1, 30),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('榜单加载超时，请重试')), 15000),
+        ),
+      ]);
       if (req !== reqRef.current) return;
       allTracksRef.current = list;
       setTracks(list);
@@ -317,7 +556,13 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     setLoading(true);
     setError('');
     try {
-      const list = await searchSongs(kw, 30, 1);
+      // 15s 防御超时：防止 Rust 代理挂起时永久「加载中」遮罩。
+      const list = await Promise.race([
+        searchSongs(kw, 30, 1),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('搜索超时，请重试')), 15000),
+        ),
+      ]);
       if (req !== reqRef.current) return;
       allTracksRef.current = list;
       setTracks(list);
@@ -330,8 +575,11 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
 
   async function playTrackList(sourceTracks: KugouTrack[], startIndex: number, playlistName: string) {
     try {
+      // 取真实登录态：KugouView 作用域无 auth state，必须从 localStorage 读取，
+      // 否则 getSongUrl 永远走游客态，播放取链会返回 err_code 30020（版权限制）。
+      const auth = readKugouAuth();
       setPlayingId(sourceTracks[startIndex]?.id ?? null);
-      const { url, br } = await getSongUrl(sourceTracks[startIndex]?.hash || sourceTracks[startIndex]?.id, sourceTracks[startIndex]?.albumId);
+      const { url, br } = await getSongUrl(sourceTracks[startIndex]?.hash || sourceTracks[startIndex]?.id, sourceTracks[startIndex]?.albumId, auth);
       if (!url) {
         setError('该歌曲暂无可播放地址（可能需会员或已下架）');
         return;
@@ -340,7 +588,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       const playables: PlayableTrack[] = [];
       for (const tk of sourceTracks) {
         try {
-          const r = await getSongUrl(tk.hash || tk.id, tk.albumId);
+          const r = await getSongUrl(tk.hash || tk.id, tk.albumId, auth);
           playables.push(trackToPlayable(tk, r.url, qualityLabelFromBr(r.br)));
         } catch {
           playables.push(trackToPlayable(tk, '', ''));
@@ -371,12 +619,12 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       <MusicHeader
         title="酷狗音乐"
         onUserClick={() => {
-          // 酷狗游客态暂未实现登录页，点击给出轻提示，后续可在此打开用户页
-          setError('酷狗登录功能待接入');
+          setTab('mine');
+          setActiveRankId(null);
         }}
         onCloudClick={onBack}
         cloudTitle="音乐模块"
-        user={{ loggedIn: false }}
+        user={{ loggedIn: !!readKugouAuth() }}
       />
 
       {/* 顶部不再放子模块切换条；热榜 / 搜索切换改由云按钮（音乐模块）折叠菜单控制 */}
@@ -599,7 +847,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
 
       {/* 我的：游客态提示页 */}
       {tab === 'mine' && activeRankId === null && (
-        <MineGuestView onBack={() => setTab('home')} />
+        <MineView onBack={() => setTab('home')} onAuthChange={onAuthChange} />
       )}
 
       {/* 榜单/搜索 歌曲列表（漫游 / 我的 未打开榜单详情时由各自区块承载） */}
