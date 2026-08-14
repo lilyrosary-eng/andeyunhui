@@ -17,9 +17,13 @@ interface ModuleDrawerProps {
   onSelectNetease?: (key: 'listen' | 'library' | 'radio' | 'search' | 'login') => void;
   // 网易云当前登录资料，null 表示未登录
   neteaseProfile?: NeteaseProfile | null;
+  // 当前是否已切换到酷狗音乐模块
+  isKugouOpen?: boolean;
+  // 点击酷狗折叠菜单子项时回调：key 为 search/rank
+  onSelectKugou?: (key: 'search' | 'rank') => void;
 }
 
-// 折叠菜单子项（网易云注入功能下的各个部分，对应截图中圈出的内容）
+// 折叠菜单子项（网易云注入功能下的各个部分）
 const neteaseItems: { key: 'listen' | 'library' | 'radio' | 'search' | 'login'; icon: React.ReactElement }[] = [
   { key: 'listen', icon: React.createElement(ListenNowIcon, { size: 16 }) },
   { key: 'library', icon: React.createElement(LibraryIcon, { size: 16 }) },
@@ -28,11 +32,153 @@ const neteaseItems: { key: 'listen' | 'library' | 'radio' | 'search' | 'login'; 
   { key: 'login', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 
-export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile }: ModuleDrawerProps) {
+// 模块项配色主题
+interface AccentSet {
+  text: string;
+  textDark: string;
+  bgSoft: string;
+  bgSoftDark: string;
+  bgActive: string;
+  bgActiveDark: string;
+  borderActive: string;
+  borderActiveDark: string;
+  check: string;
+}
+
+const accents = {
+  local: {
+    text: 'text-[#4caf50]',
+    textDark: 'dark:text-[#81c784]',
+    bgSoft: 'bg-[#4caf50]/10',
+    bgSoftDark: 'dark:bg-[#4caf50]/10',
+    bgActive: 'bg-[#e8f5e9]',
+    bgActiveDark: 'dark:bg-[#2a3a2b]',
+    borderActive: 'border-[#c8e6c9]',
+    borderActiveDark: 'dark:border-[#3d4f3d]',
+    check: 'bg-[#4caf50]',
+  } satisfies AccentSet,
+  netease: {
+    text: 'text-[#f44336]',
+    textDark: 'dark:text-[#ff8a80]',
+    bgSoft: 'bg-[#f44336]/10',
+    bgSoftDark: 'dark:bg-[#f44336]/10',
+    bgActive: 'bg-[#ffebee]/60',
+    bgActiveDark: 'dark:bg-[#3e2723]/40',
+    borderActive: 'border-[#ff8a80]/60',
+    borderActiveDark: 'dark:border-[#ff8a80]/40',
+    check: 'bg-[#f44336]',
+  } satisfies AccentSet,
+  kugou: {
+    text: 'text-[#ff7700]',
+    textDark: 'dark:text-[#ffb74d]',
+    bgSoft: 'bg-[#ff7700]/10',
+    bgSoftDark: 'dark:bg-[#ff7700]/10',
+    bgActive: 'bg-[#fff3e0]/60',
+    bgActiveDark: 'dark:bg-[#3e2e1a]/40',
+    borderActive: 'border-[#ffb74d]/60',
+    borderActiveDark: 'dark:border-[#ffb74d]/40',
+    check: 'bg-[#ff7700]',
+  } satisfies AccentSet,
+};
+
+interface DrawerModuleItemProps {
+  active: boolean;
+  expanded?: boolean;
+  onToggleExpand?: () => void;
+  onSelect?: () => void;
+  icon: React.ReactNode;
+  title: string;
+  desc?: string;
+  accent: AccentSet;
+  children?: React.ReactNode;
+}
+
+// 通用模块切换项：本地音乐 / 网易云 / 酷狗 共用同一套布局与交互
+function DrawerModuleItem({
+  active,
+  expanded,
+  onToggleExpand,
+  onSelect,
+  icon,
+  title,
+  desc,
+  accent,
+  children,
+}: DrawerModuleItemProps) {
+  const hasChildren = React.Children.count(children) > 0;
+
+  const handleClick = () => {
+    if (hasChildren) {
+      if (active) {
+        onToggleExpand?.();
+      } else {
+        onSelect?.();
+      }
+    } else {
+      onSelect?.();
+    }
+  };
+
+  return (
+    <div className="mt-3">
+      <button
+        onClick={handleClick}
+        className={`w-full flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors ${
+          active
+            ? `${accent.borderActive} ${accent.borderActiveDark} ${accent.bgActive} ${accent.bgActiveDark} hover:brightness-[1.02]`
+            : 'border-neutral-200/60 dark:border-stone-700/60 hover:bg-neutral-100/70 dark:hover:bg-stone-700/50'
+        }`}
+      >
+        <div className={`flex h-9 w-9 items-center justify-center rounded-lg shrink-0 ${
+          active ? `${accent.bgSoft} ${accent.bgSoftDark} ${accent.text} ${accent.textDark}` : 'bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300'
+        }`}>
+          {icon}
+        </div>
+        <span className={`flex-1 text-sm font-medium truncate ${
+          active ? `${accent.text} ${accent.textDark}` : 'text-neutral-700 dark:text-stone-200'
+        }`}>
+          {title}
+        </span>
+        {active && (
+          <div className={`flex h-5 w-5 items-center justify-center rounded-full ${accent.check} text-white shrink-0`}>
+            <CheckIcon size={12} />
+          </div>
+        )}
+        {hasChildren && (
+          <div className={`shrink-0 transition-transform duration-200 ${
+            active ? `${accent.text} ${accent.textDark}` : 'text-neutral-400 dark:text-stone-500'
+          }`}>
+            {expanded
+              ? React.createElement(ChevronDownIcon, { size: 18 })
+              : React.createElement(ChevronRightIcon, { size: 18 })}
+          </div>
+        )}
+      </button>
+
+      {hasChildren && (
+        <div
+          className={`overflow-hidden transition-all duration-300 ease-out ${
+            expanded ? 'max-h-96 opacity-100 mt-2' : 'max-h-0 opacity-0'
+          }`}
+        >
+          <div className="space-y-1 pl-2">
+            {children}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou }: ModuleDrawerProps) {
   useLang();
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
-  const [neteaseExpanded, setNeteaseExpanded] = useState(isNeteaseOpen); // 默认展开
+  const [neteaseExpanded, setNeteaseExpanded] = useState(isNeteaseOpen);
+  const [kugouExpanded, setKugouExpanded] = useState(!!isKugouOpen);
+
+  // 修正：本地音乐只有在网易云和酷狗都未打开时才高亮
+  const isLocalActive = !isNeteaseOpen && !isKugouOpen;
 
   useEffect(() => {
     if (open) {
@@ -48,6 +194,10 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
   useEffect(() => {
     setNeteaseExpanded(isNeteaseOpen);
   }, [isNeteaseOpen]);
+
+  useEffect(() => {
+    setKugouExpanded(!!isKugouOpen);
+  }, [isKugouOpen]);
 
   if (!mounted) return null;
 
@@ -83,120 +233,103 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
           <p className="text-xs font-medium text-neutral-400 dark:text-stone-500 uppercase tracking-wider mb-3">
             {T('music.moduleDrawer.localMusicDesc')}
           </p>
-          <button
-            className={`w-full flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-transform active:scale-[0.99] ${
-              !isNeteaseOpen
-                ? 'bg-[#e8f5e9] dark:bg-[#2a3a2b] border border-[#c8e6c9] dark:border-[#3d4f3d]'
-                : 'bg-transparent border border-transparent hover:bg-neutral-100/70 dark:hover:bg-stone-700/50'
-            }`}
-            onClick={onSelectLocalMusic}
+
+          <DrawerModuleItem
+            active={isLocalActive}
+            onSelect={() => { onSelectLocalMusic(); onClose(); }}
+            icon={React.createElement(MusicIcon, { size: 20 })}
+            title={T('music.moduleDrawer.localMusic')}
+            desc={T('music.moduleDrawer.localMusicDesc')}
+            accent={accents.local}
+          />
+
+          <DrawerModuleItem
+            active={isNeteaseOpen}
+            expanded={neteaseExpanded}
+            onToggleExpand={() => setNeteaseExpanded((v) => !v)}
+            onSelect={() => { if (onSelectNetease) onSelectNetease('listen'); onClose(); }}
+            icon={React.createElement(MusicIcon, { size: 18 })}
+            title={T('music.moduleDrawer.placeholder')}
+            accent={accents.netease}
           >
-            <div className={`flex h-10 w-10 items-center justify-center rounded-xl shrink-0 ${
-              !isNeteaseOpen ? 'bg-[#4caf50]/10 text-[#4caf50]' : 'bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300'
-            }`}>
-              <MusicIcon size={20} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-neutral-800 dark:text-stone-100 truncate">
-                {T('music.moduleDrawer.localMusic')}
-              </p>
-              <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
-                {T('music.moduleDrawer.localMusicDesc')}
-              </p>
-            </div>
-            {!isNeteaseOpen && (
-              <div className="flex h-5 w-5 items-center justify-center rounded-full bg-[#4caf50] text-white shrink-0">
-                <CheckIcon size={12} />
-              </div>
-            )}
-          </button>
+            {neteaseItems.map((item) => {
+              const isLogin = item.key === 'login';
+              const isLoggedIn = isLogin && !!neteaseProfile;
+              const title = isLogin
+                ? (isLoggedIn ? neteaseProfile!.nickname : (T('music.moduleDrawer.netease.login') || '未登录'))
+                : (T(`music.moduleDrawer.netease.${item.key}`) || (item.key === 'library' ? '漫游' : item.key));
+              const desc = isLogin
+                ? (isLoggedIn ? (T('music.moduleDrawer.netease.loginDesc') || '查看我的账号') : (T('music.moduleDrawer.netease.loginDesc') || '登录 / 注册'))
+                : (T(`music.moduleDrawer.netease.${item.key}Desc`) || '');
+              const icon = isLogin && neteaseProfile?.avatarUrl
+                ? React.createElement('img', { src: neteaseProfile.avatarUrl, alt: '', className: 'w-full h-full rounded-full object-cover' })
+                : item.icon;
+              return (
+                <button
+                  key={item.key}
+                  onClick={() => {
+                    if (onSelectNetease) onSelectNetease(item.key);
+                    onClose();
+                  }}
+                  className="w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-100/70 dark:hover:bg-stone-700/50"
+                >
+                  <div className={`flex h-8 w-8 items-center justify-center rounded-lg shrink-0 ${
+                    isLogin && neteaseProfile?.avatarUrl ? 'bg-transparent' : 'bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300'
+                  }`}>
+                    {icon}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">
+                      {title}
+                    </p>
+                    <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
+                      {desc}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
+          </DrawerModuleItem>
 
-          <div className="mt-3">
-            <button
-              onClick={() => {
-                if (!isNeteaseOpen) {
-                  if (onSelectNetease) onSelectNetease('listen');
-                  onClose();
-                } else {
-                  setNeteaseExpanded((v) => !v);
-                }
-              }}
-              className={`w-full flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors ${
-                isNeteaseOpen
-                  ? 'border-[#ff8a80]/60 dark:border-[#ff8a80]/40 bg-[#ffebee]/60 dark:bg-[#3e2723]/40 hover:bg-[#ffcdd2]/70 dark:hover:bg-[#4e342e]/50'
-                  : 'border-neutral-200/60 dark:border-stone-700/60 hover:bg-neutral-100/70 dark:hover:bg-stone-700/50'
-              }`}
-            >
-              <div className={`flex h-9 w-9 items-center justify-center rounded-lg shrink-0 ${
-                isNeteaseOpen ? 'bg-[#f44336]/10 text-[#f44336] dark:text-[#ff8a80]' : 'bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300'
-              }`}>
-                <MusicIcon size={18} />
-              </div>
-              <span className={`flex-1 text-sm font-medium truncate ${
-                isNeteaseOpen ? 'text-[#f44336] dark:text-[#ff8a80]' : 'text-neutral-700 dark:text-stone-200'
-              }`}>
-                {T('music.moduleDrawer.placeholder')}
-              </span>
-              {isNeteaseOpen && (
-                <div className="flex h-5 w-5 items-center justify-center rounded-full bg-[#f44336] text-white shrink-0">
-                  <CheckIcon size={12} />
-                </div>
-              )}
-              <div className={`shrink-0 transition-transform duration-200 ${
-                isNeteaseOpen ? 'text-[#f44336] dark:text-[#ff8a80]' : 'text-neutral-400 dark:text-stone-500'
-              }`}>
-                {neteaseExpanded
-                  ? React.createElement(ChevronDownIcon, { size: 18 })
-                  : React.createElement(ChevronRightIcon, { size: 18 })}
-              </div>
-            </button>
-
-            <div
-              className={`overflow-hidden transition-all duration-300 ease-out ${
-                neteaseExpanded ? 'max-h-96 opacity-100 mt-2' : 'max-h-0 opacity-0'
-              }`}
-            >
-              <div className="space-y-1 pl-2">
-                {neteaseItems.map((item) => {
-                  const isLogin = item.key === 'login';
-                  const isLoggedIn = isLogin && !!neteaseProfile;
-                  const title = isLogin
-                    ? (isLoggedIn ? neteaseProfile!.nickname : (T('music.moduleDrawer.netease.login') || '未登录'))
-                    : (T(`music.moduleDrawer.netease.${item.key}`) || (item.key === 'library' ? '漫游' : item.key));
-                  const desc = isLogin
-                    ? (isLoggedIn ? (T('music.moduleDrawer.netease.loginDesc') || '查看我的账号') : (T('music.moduleDrawer.netease.loginDesc') || '登录 / 注册'))
-                    : (T(`music.moduleDrawer.netease.${item.key}Desc`) || '');
-                  const icon = isLogin && neteaseProfile?.avatarUrl
-                    ? React.createElement('img', { src: neteaseProfile.avatarUrl, alt: '', className: 'w-full h-full rounded-full object-cover' })
-                    : item.icon;
-                  return (
-                    <button
-                      key={item.key}
-                      onClick={() => {
-                        if (onSelectNetease) onSelectNetease(item.key);
-                        onClose();
-                      }}
-                      className="w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-100/70 dark:hover:bg-stone-700/50"
-                    >
-                      <div className={`flex h-8 w-8 items-center justify-center rounded-lg shrink-0 ${
-                        isLogin && neteaseProfile?.avatarUrl ? 'bg-transparent' : 'bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300'
-                      }`}>
-                        {icon}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">
-                          {title}
-                        </p>
-                        <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">
-                          {desc}
-                        </p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
+          <DrawerModuleItem
+            active={!!isKugouOpen}
+            expanded={kugouExpanded}
+            onToggleExpand={() => setKugouExpanded((v) => !v)}
+            onSelect={() => { if (onSelectKugou) onSelectKugou('rank'); onClose(); }}
+            icon={React.createElement(MusicIcon, { size: 18 })}
+            title={T('music.moduleDrawer.kugou.title') || '酷狗音乐'}
+            accent={accents.kugou}
+          >
+            {(['rank', 'search'] as ('rank' | 'search')[]).map((key) => {
+              const title = key === 'rank'
+                ? (T('music.moduleDrawer.kugou.rank') || '榜单')
+                : (T('music.moduleDrawer.kugou.search') || '搜索');
+              const desc = key === 'rank'
+                ? (T('music.moduleDrawer.kugou.rankDesc') || '飙升 / 热歌 / 新歌')
+                : (T('music.moduleDrawer.kugou.searchDesc') || '搜索歌曲 / 歌手');
+              const icon = key === 'rank'
+                ? React.createElement(RadioIcon, { size: 16 })
+                : React.createElement(SearchIcon, { size: 16 });
+              return (
+                <button
+                  key={key}
+                  onClick={() => {
+                    if (onSelectKugou) onSelectKugou(key);
+                    onClose();
+                  }}
+                  className="w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-100/70 dark:hover:bg-stone-700/50"
+                >
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg shrink-0 bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300">
+                    {icon}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">{title}</p>
+                    <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">{desc}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </DrawerModuleItem>
         </div>
       </div>
     </div>

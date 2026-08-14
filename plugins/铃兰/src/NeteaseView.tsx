@@ -17,6 +17,7 @@ import {
   type NeteaseAlbum, type AlbumDetailResult,
 } from './neteaseApi';
 import { musicPlayer, type Track } from './musicPlayer';
+import { MusicHeader } from './MusicHeader';
 
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
@@ -917,72 +918,40 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
 
   return (
     <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden overflow-x-hidden relative bg-white dark:bg-[#1e1e1e]">
-      {/* 顶部栏：左侧当前标题，右侧云按钮（点击从右滑出模块抽屉） */}
-      <div className="shrink-0 flex items-center justify-between min-w-0 px-4 pt-4 pb-2">
-        {playlistId != null ? (
-          <div className="flex items-center gap-1 min-w-0">
-            <button
-              onClick={() => setPlaylistId(null)}
-              className="btn-press flex items-center justify-center p-1.5 -ml-1 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
-              title={T(TAB_TITLE_KEYS.listen) || '现在就听'}
-            >
-              <ChevronLeft size={20} />
-            </button>
-            <span className="text-sm font-semibold text-neutral-800 dark:text-stone-100 truncate">
-              {sourceNameRef.current || (T(TAB_TITLE_KEYS.listen) || '热榜')}
-            </span>
-          </div>
-        ) : (
-          <h2 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 truncate min-w-0">
-            {tab === 'library'
-              ? '漫游'
-              : tab === 'login' && loggedIn
-                ? '我的账号'
-                : T(TAB_TITLE_KEYS[tab])}
-          </h2>
-        )}
-        <div className="flex items-center gap-2">
-          {loggedIn ? (
-            <button
-              onClick={() => {
-                if (tab === 'login') {
-                  setTab(previousTabRef.current);
-                } else {
-                  previousTabRef.current = tab;
-                  setTab('login');
-                }
-              }}
-              className="btn-press flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
-              title={profile ? `网易云：${profile.nickname}` : '已登录网易云'}
-            >
-              {profile?.avatarUrl ? (
-                <img src={profile.avatarUrl} alt="" className="w-6 h-6 rounded-full object-cover" />
-              ) : (
-                <span className="w-6 h-6 rounded-full bg-blue-500/15 text-blue-600 dark:text-blue-400 flex items-center justify-center text-xs font-bold">
-                  {profile ? profile.nickname.slice(0, 1) : '云'}
-                </span>
-              )}
-              <span className="text-xs text-neutral-700 dark:text-stone-200 max-w-[80px] truncate">
-                {profile ? profile.nickname : '已登录'}
-              </span>
-            </button>
-          ) : (
-            <button
-              onClick={() => setTab('login')}
-              className="btn-press text-xs text-neutral-500 dark:text-stone-400 hover:text-blue-600 dark:hover:text-blue-400 px-2 py-1 rounded-lg hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
-            >
-              登录
-            </button>
-          )}
-          <button
-            onClick={onBack}
-            className="btn-press flex items-center justify-center p-2 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-200/60 dark:hover:bg-stone-800/60 transition-colors"
-            title={T('music.moduleDrawer.title')}
-          >
-            <CloudIcon size={18} />
-          </button>
-        </div>
-      </div>
+      {/* 顶部栏：复用通用音乐模块模板（标题 + 登录按钮 + 云按钮） */}
+      <MusicHeader
+        title={
+          playlistId != null
+            ? (sourceNameRef.current || (T(TAB_TITLE_KEYS.listen) || '热榜'))
+            : (tab === 'library'
+                ? '漫游'
+                : tab === 'login' && loggedIn
+                  ? '我的账号'
+                  : T(TAB_TITLE_KEYS[tab]))
+        }
+        onBackToSub={playlistId != null ? () => setPlaylistId(null) : undefined}
+        onBackToSubTitle={T(TAB_TITLE_KEYS.listen) || '现在就听'}
+        onUserClick={() => {
+          if (loggedIn) {
+            if (tab === 'login') setTab(previousTabRef.current);
+            else { previousTabRef.current = tab; setTab('login'); }
+          } else {
+            setTab('login');
+          }
+        }}
+        onCloudClick={onBack}
+        cloudTitle={T('music.moduleDrawer.title')}
+        user={
+          loggedIn
+            ? {
+                loggedIn: true,
+                name: profile?.nickname,
+                avatarUrl: profile?.avatarUrl,
+                initial: profile?.nickname ? profile.nickname.slice(0, 1) : '云',
+              }
+            : { loggedIn: false }
+        }
+      />
 
       {/* 主内容区 */}
       <div ref={scrollRef} className="flex-1 h-full min-w-0 overflow-y-auto overflow-x-hidden px-4 pb-4">

@@ -1,4 +1,5 @@
 import React from "react";
+import { OnlineSidebarShell, SidebarTempSection, type TempPlaylistItem } from './OnlineSidebarShell';
 import type { NeteasePlaylistItem } from './neteaseApi';
 import type { TempPlaylist } from './NeteaseView';
 
@@ -8,11 +9,16 @@ export interface NeteaseTempItem {
   payload: TempPlaylist;
 }
 
+function toTempItem(temp: NeteaseTempItem): TempPlaylistItem {
+  return {
+    id: temp.id,
+    name: temp.name,
+    count: temp.payload.tracks?.length ?? 0,
+  };
+}
+
 const { useState } = React;
 const {
-  ModuleSidebarShell,
-  SecondaryNavShell,
-  BarChart3,
   ContextMenu,
   ContextMenuTrigger,
   ContextMenuContent,
@@ -87,7 +93,6 @@ export default function NeteaseSidebar({
   searchQuery,
   onSearchChange,
 }: NeteaseSidebarProps) {
-  const [tempExpanded, setTempExpanded] = useState(true);
   const [userExpanded, setUserExpanded] = useState(true);
 
   const renderLiked = () => {
@@ -104,36 +109,6 @@ export default function NeteaseSidebar({
       React.createElement('div', { key: 'name', className: 'font-medium truncate' }, '我喜欢的音乐'),
       likedPlaylistCount != null ? React.createElement('div', { key: 'count', className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${likedPlaylistCount} 首`) : null,
     ]);
-  };
-
-  const renderTempSection = () => {
-    if (tempPlaylists.length === 0) return null;
-    return React.createElement('div', { key: 'temp', className: 'space-y-1' },
-      React.createElement('button', {
-        key: 'header',
-        onClick: () => setTempExpanded(v => !v),
-        className: 'w-full flex items-center justify-between px-1 py-1 text-xs text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 transition-colors',
-      }, [
-        React.createElement('span', { key: 't' }, '临时播放列表'),
-        React.createElement('span', { key: 'c' }, tempExpanded ? '−' : '+'),
-      ]),
-      tempExpanded && tempPlaylists.map((temp, idx) => {
-        const isActive = activeTempId === temp.id;
-        const count = temp.payload.tracks?.length ?? 0;
-        return React.createElement('button', {
-          key: temp.id,
-          onClick: () => onSelectTemp(temp),
-          className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm ${
-            isActive
-              ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
-              : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
-          }`,
-        }, [
-          React.createElement('div', { key: 'label', className: 'truncate' }, `临时${idx + 1}：${temp.name}`),
-          React.createElement('div', { key: 'count', className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${count} 首`),
-        ]);
-      })
-    );
   };
 
   const renderUserSection = () => {
@@ -182,49 +157,30 @@ export default function NeteaseSidebar({
     title: '返回本地音乐',
   }, '铃兰');
 
-  const statsButton = onOpenStats
-    ? React.createElement('button', {
-        key: 'open-stats',
-        onClick: () => onOpenStats(),
-        title: statsActive ? '关闭统计' : '统计',
-        'aria-label': statsActive ? '关闭统计' : '统计',
-        className: `p-2 rounded-lg transition-colors ${
-          statsActive
-            ? 'text-[var(--element-color-raw)] bg-black/5 dark:bg-white/5'
-            : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5'
-        }`,
-        children: BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊',
-      })
-    : null;
-
   const content = React.createElement('div', { className: 'space-y-4' },
     renderLiked(),
-    renderTempSection(),
+    React.createElement(SidebarTempSection, {
+      items: tempPlaylists.map(toTempItem),
+      activeId: activeTempId,
+      onSelect: (item) => {
+        const src = tempPlaylists.find(t => t.id === item.id);
+        if (src) onSelectTemp(src);
+      },
+    }),
     renderUserSection()
   );
 
-  if (!ModuleSidebarShell) {
-    return React.createElement('div', { className: 'w-[260px] h-full flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 p-4 overflow-y-auto' },
-      React.createElement('div', { className: 'flex items-center gap-2 mb-4 px-1' },
-        React.createElement(Music2Icon),
-        titleEl
-      ),
-      content
-    );
-  }
-
-  return React.createElement(ModuleSidebarShell, {
-    moduleId: 'music',
+  return React.createElement(OnlineSidebarShell, {
     icon: React.createElement(Music2Icon),
     title: titleEl,
+    onClose: onCloseNetease,
     onOpenModuleSettings,
-    footerExtra: statsButton,
+    onOpenStats,
+    statsActive,
     searchQuery,
     onSearchChange,
     searchPlaceholder: '搜索本地音乐',
     primaryAction: onSelectFolder ? { label: '添加文件夹', onClick: onSelectFolder } : undefined,
-    children: SecondaryNavShell
-      ? React.createElement(SecondaryNavShell, null, content)
-      : React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1 space-y-3' }, content),
+    children: content,
   });
 }

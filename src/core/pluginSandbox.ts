@@ -85,6 +85,8 @@ const ALLOWED_COMMANDS = new Set([
   // 网易云 WebAPI 代理（Phase 3）：TS 加密 + Rust 无 CORS 转发
   'netease_http_post',
   'netease_register_guest',
+  // 酷狗 WebAPI 代理（音乐模块）：TS 端 MD5 盐签名 + Rust 无 CORS 转发
+  'kugou_http_post',
   // SMTC（任务栏「正在播放」）：前端推送播放状态 + 上报激活模块 + 诊断日志。
   // 注意：这些命令此前漏加白名单，导致沙箱内 music/video 插件的 invoke 被静默拦截
   // （插件侧 .catch 吞错），元信息永远到不了 Rust，任务栏卡片不显示。

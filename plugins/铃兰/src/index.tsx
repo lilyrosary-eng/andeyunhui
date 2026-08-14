@@ -7,7 +7,11 @@ import { ModuleDrawer } from './ModuleDrawer';
 import { PlayerBar } from './PlayerBar';
 import { NowPlayingView } from './NowPlayingView';
 import { NeteaseView, type PlayableTrack, type TempPlaylist, type NeteaseViewHandle } from './NeteaseView';
-import NeteaseSidebar, { type NeteaseTempItem } from './NeteaseSidebar';
+import { KugouView } from './KugouView';
+import KugouSidebar from './KugouSidebar';
+import NeteaseSidebar from './NeteaseSidebar';
+import { useOnlineSource } from './useOnlineSource';
+import type { KugouPlaylistCard } from './kugouApi';
 import NeteaseStatsView from './NeteaseStatsView';
 import NeteaseSettingsPanel from './NeteaseSettingsPanel';
 import { isLikedPlaylist, likeNeteaseSong, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
@@ -22,7 +26,7 @@ export interface Playlist {
   id: string;
   name: string;
   tracks: Track[];
-  type: 'directory' | 'custom' | 'netease-temp';
+  type: 'directory' | 'custom' | 'netease-temp' | 'kugou-temp';
 }
 
 interface MusicScanProgress {
@@ -925,18 +929,15 @@ function MusicModule() {
   // 共享运行时：黑名单管理（Rust 集中管理，必须在 filteredPlaylists useMemo 之前声明）
   const { hidden: hiddenPlaylists, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('music');
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  // 在线音乐源通用状态桥（网易云 / 酷狗 共用，与本地模块彻底隔离）
+  const online = useOnlineSource();
   // 网易云模块侧栏状态（与本地模块完全分离）
-  // 临时播放列表：最多驻留 3 个，滚动淘汰，重复来源不重复占位
-  const [neteaseTemps, setNeteaseTemps] = useState<NeteaseTempItem[]>([]);
   // 用户「我喜欢的音乐」歌单 id（侧栏「我的收藏」）
   const [likedPlaylistId, setLikedPlaylistId] = useState<number | null>(null);
   // 用户自己的全部歌单（侧栏「用户自己的收藏歌单」铺开）
   const [userPlaylists, setUserPlaylists] = useState<NeteasePlaylistItem[]>([]);
-  // 当前网易云侧栏高亮：歌单 id / 临时列表 id
+  // 当前网易云侧栏高亮：歌单 id（临时列表高亮走 online.activeId）
   const [activeNeteasePlaylistId, setActiveNeteasePlaylistId] = useState<number | null>(null);
-  const [activeTempId, setActiveTempId] = useState<string | null>(null);
-  // 网易云当前实际播放的临时歌单（注入播放列表浮窗，避免显示本地旧歌单）
-  const [neteaseActivePlaylist, setNeteaseActivePlaylist] = useState<Playlist | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   // 收藏集合（track_id set），真源为 SQLite favorite 表；localStorage 作兜底镜像
   const [favorites, setFavorites] = useState<Set<string>>(() => {
@@ -995,6 +996,13 @@ function MusicModule() {
   const [neteaseLiked, setNeteaseLiked] = useState<Set<number>>(new Set());
   // 网易云视图 ref：供侧栏调用 openPlaylist / restoreTemp
   const neteaseViewRef = useRef<NeteaseViewHandle | null>(null);
+  // 酷狗音乐视图：与网易云完全并列的第二在线平台
+  const [kugouOpen, setKugouOpen] = useState(false);
+  const [kugouTab, setKugouTab] = useState<'search' | 'rank'>('rank');
+  // 酷狗侧栏状态：榜单列表与当前选中榜单（与酷狗视图双向同步）
+  const [kugouRankList, setKugouRankList] = useState<KugouPlaylistCard[]>([]);
+  const [kugouActiveRankId, setKugouActiveRankId] = useState<number | null>(null);
+  const kugouViewRef = useRef<NeteaseViewHandle | null>(null);
 
   const [currentTrack, setCurrentTrack] = useState<Track | null>(() => musicPlayer.getCurrentTrack());
   const unlistenRef = useRef<(() => void)[]>([]);
@@ -1336,8 +1344,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
   }, []);
 
   const handleSelectTrack = useCallback((track: Track, index: number) => {
-    // 切到本地播放时，清掉网易云临时歌单，避免播放列表浮窗仍显示网易云
-    setNeteaseActivePlaylist(null);
+    // 切到本地播放时，清掉在线源临时歌单，避免播放列表浮窗仍显示在线来源
+    online.setActivePlaylist(null);
     // 如果启用了搜索过滤，index 是过滤后数组中的位置，需要还原为原数组索引
     const tracks = selectedPlaylist?.tracks || [];
     // 真正加载该歌单曲目时才更新「实际播放歌单」归属，供播放列表面板正确显示
@@ -1365,8 +1373,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     const list = pl?.tracks ?? [];
     if (list.length === 0) return;
     // 从播放列表面板点选其它歌单的歌曲时，归属随之更新（否则按钮仍显示旧歌单）
-    if (playlistId !== 'netease-active') {
-      setNeteaseActivePlaylist(null);
+    if (playlistId !== 'netease-active' && playlistId !== 'kugou-active') {
+      online.setActivePlaylist(null);
     }
     musicPlayer.currentPlaylistId = playlistId;
     musicPlayer.setTracks(list, index);
@@ -1907,26 +1915,26 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
         <NeteaseSidebar
           likedPlaylistId={likedPlaylistId}
           likedPlaylistCount={userPlaylists.find(p => isLikedPlaylist(p))?.trackCount ?? 0}
-          tempPlaylists={neteaseTemps}
+          tempPlaylists={online.temps}
           userPlaylists={userPlaylists}
           activePlaylistId={activeNeteasePlaylistId}
-          activeTempId={activeTempId}
+          activeTempId={online.activeId}
           onSelectLiked={() => {
             setActiveNeteasePlaylistId(likedPlaylistId);
-            setActiveTempId(null);
+            online.setActiveId(null);
             if (likedPlaylistId != null) {
               setNeteaseTab('listen');
               neteaseViewRef.current?.openPlaylist(likedPlaylistId, '我喜欢的音乐');
             }
           }}
           onSelectTemp={(item) => {
-            setActiveTempId(item.id);
+            online.setActiveId(item.id);
             setActiveNeteasePlaylistId(null);
             neteaseViewRef.current?.restoreTemp(item.payload);
           }}
           onSelectUserPlaylist={(playlist) => {
             setActiveNeteasePlaylistId(playlist.id);
-            setActiveTempId(null);
+            online.setActiveId(null);
             setNeteaseTab('listen');
             neteaseViewRef.current?.openPlaylist(playlist.id, playlist.name);
           }}
@@ -1935,6 +1943,30 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onOpenStats={() => setShowStats(v => !v)}
           statsActive={showStats}
           onSelectFolder={handleAddRoot}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+        />
+      ) : kugouOpen ? (
+        <KugouSidebar
+          ranks={kugouRankList}
+          activeRankId={kugouActiveRankId}
+          onSelectRank={(id) => {
+            setKugouActiveRankId(id);
+            online.setActiveId(null);
+            setKugouTab('rank');
+          }}
+          tempPlaylists={online.temps}
+          activeTempId={online.activeId}
+          onSelectTemp={(item) => {
+            online.setActiveId(item.id);
+            setKugouActiveRankId(null);
+            setKugouTab('rank');
+            (kugouViewRef.current as any)?.restoreTemp?.(item.payload);
+          }}
+          onCloseKugou={() => setKugouOpen(false)}
+          onOpenModuleSettings={handleOpenModuleSettings}
+          onOpenStats={() => setShowStats(v => !v)}
+          statsActive={showStats}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
         />
@@ -2005,22 +2037,10 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                 musicPlayer.play();
                 // 把网易云当前播放注册为临时歌单，让播放列表浮窗同步显示网易云来源
                 musicPlayer.currentPlaylistId = 'netease-active';
-                setNeteaseActivePlaylist({
-                  id: 'netease-active',
-                  name: sourceName,
-                  type: 'netease-temp',
-                  tracks,
-                });
+                online.registerPlay(tracks, startIndex, sourceName, 'netease-temp');
               }}
               onTempPlaylist={(temp: TempPlaylist) => {
-                // 临时播放列表：最多 3 个，滚动淘汰，重复来源不重复占位
-                const id = String(temp.id ?? temp.name);
-                setNeteaseTemps(prev => {
-                  const without = prev.filter(t => t.id !== id);
-                  const next = [{ id, name: temp.name, payload: temp }, ...without].slice(0, 3);
-                  return next;
-                });
-                setActiveTempId(id);
+                online.registerTemp(temp);
                 setActiveNeteasePlaylistId(null);
               }}
               onUserPlaylists={(items) => {
@@ -2031,7 +2051,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               }}
               onActivePlaylist={(id) => {
                 setActiveNeteasePlaylistId(id);
-                setActiveTempId(null);
+                online.setActiveId(null);
               }}
               onProfileChange={setNeteaseProfile}
               likedSongs={neteaseLiked}
@@ -2049,6 +2069,30 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                 }]);
               }}
               onOpenImmersive={handleCoverClick}
+            />
+          ) : kugouOpen ? (
+            <KugouView
+              ref={kugouViewRef}
+              initialTab={kugouTab}
+              onBack={() => setShowModuleDrawer(true)}
+              onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
+                musicPlayer.setTracks(tracks, startIndex);
+                musicPlayer.play();
+                musicPlayer.currentPlaylistId = 'kugou-active';
+                online.registerPlay(tracks, startIndex, sourceName, 'kugou-temp');
+              }}
+              onTempPlaylist={(temp: TempPlaylist) => {
+                online.registerTemp(temp);
+                online.setSourceActiveId(null);
+              }}
+              onActivePlaylist={(id) => {
+                // 酷狗榜单高亮走在线源独立的 sourceActiveId，不污染网易云侧栏状态
+                online.setSourceActiveId(id);
+                online.setActiveId(null);
+              }}
+              selectedRankId={kugouActiveRankId}
+              onRankListLoaded={setKugouRankList}
+              onActiveRankChange={setKugouActiveRankId}
             />
           ) : selectedPlaylist ? (
             <TrackList
@@ -2098,7 +2142,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             playMode={playMode}
             onPlayModeChange={handlePlayModeChange}
             onCoverClick={handleCoverClick}
-            playlists={neteaseActivePlaylist ? [...playlists, neteaseActivePlaylist] : playlists}
+            playlists={online.activePlaylist ? [...playlists, online.activePlaylist] : playlists}
             currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
             onSelectTrack={handlePopupSelectTrack}
           />
@@ -2111,12 +2155,20 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
         isNeteaseOpen={neteaseOpen}
         onSelectLocalMusic={() => {
           setNeteaseOpen(false);
+          setKugouOpen(false);
           setShowModuleDrawer(false);
         }}
         onSelectNetease={(key: 'listen' | 'library' | 'radio' | 'search' | 'login') => {
           setNeteaseTab(key);
           setNeteaseOpen(true);
+          setKugouOpen(false);
         }}
+        onSelectKugou={(key: 'search' | 'rank') => {
+          setKugouTab(key);
+          setKugouOpen(true);
+          setNeteaseOpen(false);
+        }}
+        isKugouOpen={kugouOpen}
         neteaseProfile={neteaseProfile}
       />
       {showNowPlaying && currentTrack && (
@@ -2132,7 +2184,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onPlayModeChange={handlePlayModeChange}
           onClose={handleCloseNowPlaying}
           lyricsAlign={lyricsAlign}
-          playlists={neteaseActivePlaylist ? [...playlists, neteaseActivePlaylist] : playlists}
+          playlists={online.activePlaylist ? [...playlists, online.activePlaylist] : playlists}
           currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
           onSelectTrack={handlePopupSelectTrack}
         />

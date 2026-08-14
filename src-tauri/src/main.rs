@@ -1041,6 +1041,8 @@ fn main() {
             // ========== 网易云 WebAPI 代理（Phase 3）：TS 加密 + Rust 无 CORS 转发 ==========
             andeyunhui_lib::services::netease_proxy::netease_http_post,
             andeyunhui_lib::services::netease_proxy::netease_register_guest,
+            // ========== 酷狗音乐 WebAPI 代理：TS 端 MD5 盐签名 + Rust 无 CORS 转发 ==========
+            andeyunhui_lib::services::kugou_proxy::kugou_http_post,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
             smtc_control,

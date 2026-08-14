@@ -22,6 +22,8 @@ pub mod diagnostics;
 pub mod log_service;
 // 网易云音乐 WebAPI 代理（Phase 3）：TS 端加密 + Rust 无 CORS 转发，四件套白名单校验
 pub mod netease_proxy;
+// 酷狗音乐 WebAPI 代理：与 netease_proxy 同构，签名在 TS 端完成（MD5 盐签名）
+pub mod kugou_proxy;
 pub mod agent_service;
 pub mod ai_service;
 pub mod companion_service;
