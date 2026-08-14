@@ -196,15 +196,13 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 预加载首页 Hero 榜单曲目（不切换 tab，仅用于播放全部）
+  // 预加载首页 Hero 榜单曲目（不切换 tab、不进入详情，仅用于「播放全部」）
   async function loadHomeHero(rankId: number) {
     if (!rankId) return;
     setHomeHeroLoading(true);
     try {
       const list = await getTopList(rankId, 1, 30);
       setHomeHeroTracks(list);
-      setActiveRankId(rankId);
-      onActiveRankChange?.(rankId);
     } catch (e: any) {
       console.warn('[Kugou] 首页 Hero 榜单加载失败:', e);
     } finally {
@@ -227,16 +225,14 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRankId]);
 
-  // 重新拉取榜单列表并默认选中第一个（错误重试兜底用）
+  // 重新拉取榜单列表并预加载 Hero 曲目（错误重试兜底用，不自动进入详情）
   async function reloadRankList() {
     try {
       const ranks = await getRankList();
       setRankList(ranks);
       onRankListLoaded?.(ranks);
       if (ranks.length) {
-        setActiveRankId(ranks[0].id);
-        onActiveRankChange?.(ranks[0].id);
-        loadRank(ranks[0].id);
+        loadHomeHero(ranks[0].id);
       }
     } catch (e: any) {
       setError('榜单加载失败：' + (e?.message || e));
@@ -313,7 +309,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   }
 
   async function doPlay(track: KugouTrack, index: number) {
-    const currentList = tab === 'home' ? homeHeroTracks : allTracksRef.current;
+    const currentList = tab === 'home' && activeRankId === null ? homeHeroTracks : allTracksRef.current;
     await playTrackList(currentList, index, track.name);
   }
 
