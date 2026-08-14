@@ -19,8 +19,8 @@ interface ModuleDrawerProps {
   neteaseProfile?: NeteaseProfile | null;
   // 当前是否已切换到酷狗音乐模块
   isKugouOpen?: boolean;
-  // 点击酷狗折叠菜单子项时回调：key 为 home/search
-  onSelectKugou?: (key: 'home' | 'search') => void;
+  // 点击酷狗折叠菜单子项时回调：key 为 home/roam/search/mine
+  onSelectKugou?: (key: 'home' | 'roam' | 'search' | 'mine') => void;
 }
 
 // 通用首页图标（云按钮折叠菜单复用）
@@ -206,10 +206,12 @@ function DrawerSubItem({ icon, title, desc, onClick }: DrawerSubItemProps) {
   );
 }
 
-// 酷狗折叠菜单子项（热榜 / 搜索）：榜单已整合进「热榜」首页
-const kugouItems: { key: 'home' | 'search'; icon: React.ReactElement }[] = [
+// 酷狗折叠菜单子项（热榜 / 漫游 / 搜索 / 我的）：游客态，漫游=发现流，我的=游客提示
+const kugouItems: { key: 'home' | 'roam' | 'search' | 'mine'; icon: React.ReactElement }[] = [
   { key: 'home', icon: React.createElement(HomeIcon, { size: 16 }) },
+  { key: 'roam', icon: React.createElement(LibraryIcon, { size: 16 }) },
   { key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
+  { key: 'mine', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 
 export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou }: ModuleDrawerProps) {
@@ -331,12 +333,24 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
             accent={accents.kugou}
           >
             {kugouItems.map((item) => {
-              const title = item.key === 'home'
-                ? (T('music.moduleDrawer.kugou.home') || '热榜')
-                : (T('music.moduleDrawer.kugou.search') || '搜索');
-              const desc = item.key === 'home'
-                ? (T('music.moduleDrawer.kugou.homeDesc') || '为你推荐 / 热歌榜单')
-                : (T('music.moduleDrawer.kugou.searchDesc') || '搜索歌曲 / 歌手');
+              const titleKey = item.key === 'home' ? 'music.moduleDrawer.kugou.home'
+                : item.key === 'roam' ? 'music.moduleDrawer.kugou.roam'
+                : item.key === 'search' ? 'music.moduleDrawer.kugou.search'
+                : 'music.moduleDrawer.kugou.mine';
+              const descKey = item.key === 'home' ? 'music.moduleDrawer.kugou.homeDesc'
+                : item.key === 'roam' ? 'music.moduleDrawer.kugou.roamDesc'
+                : item.key === 'search' ? 'music.moduleDrawer.kugou.searchDesc'
+                : 'music.moduleDrawer.kugou.mineDesc';
+              const titleDefault = item.key === 'home' ? '热榜'
+                : item.key === 'roam' ? '漫游'
+                : item.key === 'search' ? '搜索'
+                : '我的';
+              const descDefault = item.key === 'home' ? '官方榜单 / 为你推荐'
+                : item.key === 'roam' ? '发现好歌无限流'
+                : item.key === 'search' ? '找歌找专辑'
+                : '登录查看收藏 / 歌单';
+              const title = T(titleKey) || titleDefault;
+              const desc = T(descKey) || descDefault;
               return (
                 <DrawerSubItem
                   key={item.key}

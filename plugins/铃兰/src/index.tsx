@@ -1000,7 +1000,7 @@ function MusicModule() {
   const neteaseViewRef = useRef<NeteaseViewHandle | null>(null);
   // 酷狗音乐视图：与网易云完全并列的第二在线平台
   const [kugouOpen, setKugouOpen] = useState(false);
-  const [kugouTab, setKugouTab] = useState<'search' | 'home'>('home');
+  const [kugouTab, setKugouTab] = useState<'home' | 'roam' | 'search' | 'mine'>('home');
   // 酷狗侧栏状态：榜单列表与当前选中榜单（与酷狗视图双向同步）
   const [kugouRankList, setKugouRankList] = useState<KugouPlaylistCard[]>([]);
   const [kugouActiveRankId, setKugouActiveRankId] = useState<number | null>(null);
@@ -2172,13 +2172,13 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           setNeteaseOpen(true);
           setKugouOpen(false);
         }}
-        onSelectKugou={(key: 'home' | 'search') => {
+        onSelectKugou={(key: 'home' | 'roam' | 'search' | 'mine') => {
           setKugouTab(key);
           setKugouOpen(true);
           setNeteaseOpen(false);
-          if (key === 'home') {
-            setKugouActiveRankId(null);
-          }
+          // 切换折叠菜单子项时，清理榜单详情 / 收藏夹等内层级状态，避免覆盖漫游 / 我的
+          setKugouActiveRankId(null);
+          setSelectedPlaylist(null);
         }}
         isKugouOpen={kugouOpen}
         neteaseProfile={neteaseProfile}

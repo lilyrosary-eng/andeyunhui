@@ -7,8 +7,9 @@
 
 import React from 'react';
 const { useState, useEffect, useRef } = React;
-import { MusicIcon, PlayIcon, SearchIcon, Sparkles } from 'lucide-react';
+import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon } from 'lucide-react';
 import { ArrowLeftIcon } from '../../_shared/icons';
+import { T } from '../../_shared/pluginRuntime';
 import { musicPlayer, Track } from './musicPlayer';
 import {
   KugouTrack,
@@ -23,7 +24,7 @@ import {
 import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
 import { MusicHeader } from './MusicHeader';
 
-type KugouTab = 'search' | 'home';
+type KugouTab = 'home' | 'roam' | 'search' | 'mine';
 
 interface KugouViewProps {
   initialTab: KugouTab;
@@ -121,6 +122,57 @@ function HeroCard({ rank, onClick, onPlayAll }: { rank: KugouPlaylistCard; onCli
           <PlayIcon size={14} />
           播放全部
         </button>
+      </div>
+    </div>
+  );
+}
+
+// 我的：游客态提示页（对齐网易云"我的"登录态；登录后可看收藏 / 歌单）
+function MineGuestView({ onBack }: { onBack: () => void }) {
+  const items: { icon: React.ReactNode; title: string; desc: string }[] = [
+    { icon: React.createElement(LibraryIcon, { size: 18 }), title: T('music.moduleDrawer.kugou.roam') || '漫游', desc: '发现好歌无限流' },
+    { icon: React.createElement(MusicIcon, { size: 18 }), title: '收藏', desc: '我喜欢的音乐' },
+    { icon: React.createElement(MusicIcon, { size: 18 }), title: '歌单', desc: '我创建的歌单' },
+    { icon: React.createElement(MusicIcon, { size: 18 }), title: '播放记录', desc: '最近播放' },
+  ];
+  return (
+    <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
+      <div className="flex items-center gap-2 pt-4 pb-4">
+        <button
+          onClick={onBack}
+          className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium"
+          title="返回热榜"
+        >
+          <ArrowLeftIcon size={14} />
+          热榜
+        </button>
+        <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.mineTitle') || '我的'}</h2>
+      </div>
+
+      <div className="flex flex-col items-center gap-3 py-10 text-center">
+        <div className="w-16 h-16 rounded-full flex items-center justify-center bg-orange-500/10 text-orange-500">
+          <UserIcon size={28} />
+        </div>
+        <div className="text-base font-semibold text-neutral-800 dark:text-stone-100">{T('music.kugou.mineGuestHint') || '登录后可查看收藏、歌单与播放记录'}</div>
+        <div className="text-xs text-neutral-400 dark:text-stone-500 max-w-xs">{T('music.kugou.mineLoginDesc') || '游客态暂不支持，登录网易云 / 酷狗账号后同步'}</div>
+      </div>
+
+      <div className="mt-4 space-y-1">
+        {items.map((it) => (
+          <div
+            key={it.title}
+            className="flex items-center gap-3 rounded-xl px-3 py-2.5 bg-neutral-100/50 dark:bg-stone-800/40"
+          >
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-neutral-200/70 dark:bg-stone-600/50 text-neutral-500 dark:text-stone-300">
+              {it.icon}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">{it.title}</p>
+              <p className="text-xs text-neutral-400 dark:text-stone-500 truncate">{it.desc}</p>
+            </div>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">—</span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -482,7 +534,75 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
         </div>
       )}
 
-      {/* 榜单/搜索 歌曲列表 */}
+      {/* 漫游：发现流（对齐网易云"漫游"，游客态复用榜单 + 为你推荐） */}
+      {tab === 'roam' && activeRankId === null && (
+        <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
+          <div className="flex items-center gap-2 pt-4 pb-3">
+            <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.roamTitle') || '漫游'}</h2>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{T('music.kugou.roamForYouDesc') || '基于热榜精选，发现更多好歌'}</span>
+          </div>
+
+          {/* 为你推荐 */}
+          {rankList.length > 0 && (
+            <section className="mt-2 mb-8">
+              <div className="flex items-center gap-2 mb-4">
+                <Sparkles size={18} className="text-orange-500" />
+                <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.roamForYou') || '为你推荐'}</h3>
+              </div>
+              <HeroCard
+                rank={rankList[0]}
+                onClick={() => openRank(rankList[0].id)}
+                onPlayAll={() => {
+                  if (homeHeroTracks.length) {
+                    void playTrackList(homeHeroTracks, 0, rankList[0].name);
+                  }
+                }}
+              />
+              {rankList.length > 1 && (
+                <div className="flex gap-3 overflow-x-auto scrollbar-thin py-3 mt-2">
+                  {rankList.slice(1, 11).map((r) => (
+                    <RankCard key={r.id} rank={r} onClick={() => openRank(r.id)} />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* 热门榜单 */}
+          {rankList.length > 0 && (
+            <section>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.roamHotRanks') || '热门榜单'}</h3>
+                <button
+                  onClick={() => setTab('home')}
+                  className="btn-press px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium"
+                >
+                  完整榜单
+                </button>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+                {rankList.map((r) => (
+                  <RankCard key={r.id} rank={r} size="lg" onClick={() => openRank(r.id)} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {!loading && !error && rankList.length === 0 && (
+            <div className="flex flex-col items-center justify-center gap-3 py-16 text-neutral-400 dark:text-stone-500">
+              <LibraryIcon size={32} />
+              <span className="text-sm">暂无推荐内容</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 我的：游客态提示页 */}
+      {tab === 'mine' && activeRankId === null && (
+        <MineGuestView onBack={() => setTab('home')} />
+      )}
+
+      {/* 榜单/搜索 歌曲列表（漫游 / 我的 未打开榜单详情时由各自区块承载） */}
       {(activeRankId !== null || tab === 'search') && (
         <div className="flex-1 overflow-y-auto min-h-0">
           {activeRankId !== null && (

@@ -1,20 +1,19 @@
 import React from "react";
 const { useState, useEffect } = React;
-import { T, useLang } from '../../_shared/pluginRuntime';
+import { T } from '../../_shared/pluginRuntime';
 import { kugou, type KugouPlaylistCard } from './kugouApi';
 
-function fmtInt(n: number, lang: string): string {
-  if (lang.startsWith('zh') || lang.startsWith('ja') || lang.startsWith('ko')) {
-    return n.toLocaleString('zh-CN');
-  }
+// 数字千分位（与语言无关，固定格式即可）
+function fmtInt(n: number): string {
   return n.toLocaleString('en-US');
 }
 
-function fmtPlayCount(n: number, lang: string): string {
+// 播放量按中文习惯用亿/万单位
+function fmtPlayCount(n: number): string {
   if (!n) return '0';
   if (n >= 100000000) return `${(n / 100000000).toFixed(1)}亿`;
   if (n >= 10000) return `${(n / 10000).toFixed(1)}万`;
-  return fmtInt(n, lang);
+  return fmtInt(n);
 }
 
 function RefreshCwIcon() {
@@ -41,7 +40,6 @@ function ListMusicIcon() {
 }
 
 export default function KugouStatsView() {
-  const lang = useLang();
   const [ranks, setRanks] = useState<KugouPlaylistCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -88,11 +86,11 @@ export default function KugouStatsView() {
 
   const summary = React.createElement('div', { className: 'grid grid-cols-2 gap-3 mb-6' }, [
     React.createElement('div', { key: 'a', className: 'rounded-2xl bg-[var(--element-muted)]/60 p-4' }, [
-      React.createElement('div', { key: 'v', className: 'text-2xl font-semibold text-neutral-800 dark:text-stone-100' }, fmtInt(ranks.length, lang)),
+      React.createElement('div', { key: 'v', className: 'text-2xl font-semibold text-neutral-800 dark:text-stone-100' }, fmtInt(ranks.length)),
       React.createElement('div', { key: 'l', className: 'text-xs text-neutral-400 dark:text-stone-500 mt-1' }, T('music.stats.rankCount', '榜单数')),
     ]),
     React.createElement('div', { key: 'b', className: 'rounded-2xl bg-[var(--element-muted)]/60 p-4' }, [
-      React.createElement('div', { key: 'v', className: 'text-2xl font-semibold text-neutral-800 dark:text-stone-100' }, fmtPlayCount(totalPlay, lang)),
+      React.createElement('div', { key: 'v', className: 'text-2xl font-semibold text-neutral-800 dark:text-stone-100' }, fmtPlayCount(totalPlay)),
       React.createElement('div', { key: 'l', className: 'text-xs text-neutral-400 dark:text-stone-500 mt-1' }, T('music.stats.totalPlay', '总播放量')),
     ]),
   ]);
@@ -109,7 +107,7 @@ export default function KugouStatsView() {
       }, [
         React.createElement('span', { key: 'rank', className: 'text-sm font-semibold text-neutral-400 dark:text-stone-500 w-5 text-center' }, String(idx + 1)),
         React.createElement('div', { key: 'name', className: 'flex-1 min-w-0 truncate text-sm text-neutral-700 dark:text-stone-200' }, r.name),
-        React.createElement('span', { key: 'count', className: 'text-xs text-neutral-400 dark:text-stone-500 tabular-nums' }, `${fmtPlayCount(r.playCount || 0, lang)} 播放`),
+        React.createElement('span', { key: 'count', className: 'text-xs text-neutral-400 dark:text-stone-500 tabular-nums' }, `${fmtPlayCount(r.playCount || 0)} 播放`),
       ]),
     ),
   );
