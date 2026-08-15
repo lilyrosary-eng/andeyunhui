@@ -23,6 +23,6 @@
     "types": []
   },
   "include": ["src"],
-  "exclude": ["plugins", "node_modules", "bundled-plugins"],
+  "exclude": ["plugins", "node_modules", "bundled-plugins", "got-it"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

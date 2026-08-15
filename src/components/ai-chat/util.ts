@@ -37,13 +37,52 @@ export function makeConv(): Conversation {
   };
 }
 
+/**
+ * 群聊会话工厂：必须提供 ≥2 个参与者（companion.id）。
+ * 群聊不对胶囊开放，仅主窗口「AI 对话」模块使用。
+ * groupCost.calls 初始为 0，仅用于"本次群聊已调用 N 次 AI"的轻量成本提示（不暴露 severity 详情）。
+ */
+export function makeGroupConv(participantIds: string[], groupName?: string): Conversation {
+  const ids = participantIds.filter(Boolean);
+  if (ids.length < 2) throw new Error('群聊至少需要 2 个伴侣参与');
+  return {
+    id: uid(),
+    title: groupName?.trim() || `群聊（${ids.length}人）`,
+    messages: [],
+    updatedAt: Date.now(),
+    mode: 'group',
+    participants: ids,
+    groupName: groupName?.trim() || undefined,
+    groupCost: { calls: 0 },
+  };
+}
+
+// 单条消息 content 安全上限：超过则截断（防止某次流式重复 append 写入的脏数据
+// 被持久化后无限回灌，导致群聊把巨 message 带进 history 触发上游 1048576 token 超限）。
+// 该上限与后端 truncate_messages_for_safety 的 PER_MSG_TOKEN_CAP(30k) 对齐。
+const MSG_CONTENT_MAX = 30_000;
+
+function sanitizeConv(c: Conversation): Conversation {
+  if (!c || !Array.isArray(c.messages)) return { ...c, updatedAt: c?.updatedAt ?? Date.now(), messages: [] };
+  return {
+    ...c,
+    updatedAt: c.updatedAt ?? Date.now(),
+    messages: c.messages.map((m) => {
+      if (m && typeof m.content === 'string' && m.content.length > MSG_CONTENT_MAX) {
+        return { ...m, content: m.content.slice(0, MSG_CONTENT_MAX) + '…（内容过长已截断）' };
+      }
+      return m;
+    }),
+  };
+}
+
 export function loadConversations(key: string): Conversation[] {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return [];
     const arr = JSON.parse(raw);
     if (!Array.isArray(arr)) return [];
-    return arr.map((c: Conversation) => ({ ...c, updatedAt: c.updatedAt ?? Date.now() }));
+    return arr.map((c: Conversation) => sanitizeConv(c));
   } catch {
     return [];
   }
@@ -51,7 +90,8 @@ export function loadConversations(key: string): Conversation[] {
 
 export function persistConversations(key: string, list: Conversation[]): void {
   try {
-    localStorage.setItem(key, JSON.stringify(list.slice(0, 50)));
+    const safe = list.slice(0, 50).map(sanitizeConv);
+    localStorage.setItem(key, JSON.stringify(safe));
   } catch {
     /* 容量超限忽略 */
   }

@@ -407,6 +407,13 @@ export function createSandboxGlobals(
       {
         get(target, prop) {
           if (prop in target) return (target as Record<string, unknown>)[prop as string];
+          // 危险网络 API 强制遮蔽：即便插件改用 window.fetch / window.XMLHttpRequest /
+          // window.WebSocket 也拿不到真身，所有出站网络必须走 hostApi.invoke → Rust 命令，
+          // 统一受 truncate_messages_for_safety + HARD_CHAR_CAP 兜底（根治沙箱内直连 LLM 导致的
+          // 208 万 token HTTP 400 报错）。
+          if (prop === 'fetch' || prop === 'XMLHttpRequest' || prop === 'WebSocket') {
+            return undefined;
+          }
           // 未知属性透传真实 window（addEventListener、removeEventListener 等）
           const val = (window as unknown as Record<string, unknown>)[prop as string];
           // 绑定原生函数到真实 window，防止 "Illegal invocation" 错误
@@ -464,8 +471,11 @@ export function createSandboxGlobals(
 export function executeInSandbox(
   script: string,
   sandbox: SandboxGlobals,
-  _pluginId: string,
+  pluginId: string,
 ): void {
+  // 诊断：记录沙箱脚本归属（pluginId），便于复现时定位"在 ai_chat 之外直连上游 LLM"的插件。
+  // 例：208 万 token HTTP 400 报错栈落在 executeInSandbox 内时，可据此确认是哪条插件脚本。
+  console.info(`[sandbox] 执行插件脚本: pluginId=${pluginId}`);
   // 过滤掉 strict mode 禁用的参数名（eval 不能作为形参）
   const entries = Object.entries(sandbox).filter(([key]) => key !== 'eval');
   const paramNames = entries.map(([key]) => key);

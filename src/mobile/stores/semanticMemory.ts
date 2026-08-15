@@ -15,7 +15,7 @@
 // - 失败降级：任何 RAG 调用失败都静默降级为无语义记忆（不影响对话）。
 
 import { invoke } from '@tauri-apps/api/core';
-import { useCompanionStore, type Companion } from './companionStore';
+import { useCompanionStore, buildPersonaContext, type Companion, type MemoryEntry } from './companionStore';
 import { isBrowserPreview } from './companionStore';
 import type { AiProfile } from '../types/chat';
 
@@ -101,10 +101,10 @@ async function embed(texts: string[]): Promise<number[][] | null> {
   }
 }
 
-/** 摄取一条记忆（摘要 / 核心事实 / 情感快照） */
+/** 摄取一条记忆（摘要 / 核心事实 / 人设画像 / 情感快照） */
 export async function ingestMemory(
   companionId: string,
-  kind: 'summary' | 'core' | 'snapshot',
+  kind: 'summary' | 'core' | 'persona' | 'snapshot',
   text: string,
   meta: Record<string, unknown> = {},
 ): Promise<void> {
@@ -116,7 +116,8 @@ export async function ingestMemory(
     const now = Date.now();
     // 注入 kind 到文本首行：检索结果不含 meta（RagHit 无 meta 字段），
     // 用文本前缀区分类型，注入 system 时更可读。
-    const prefixed = kind === 'snapshot' ? `[关系脉络 ${new Date(now).toLocaleString('zh-CN')}] ${text}`
+    const prefixed = kind === 'persona' ? `[人设画像] ${text}`
+      : kind === 'snapshot' ? `[关系脉络 ${new Date(now).toLocaleString('zh-CN')}] ${text}`
       : kind === 'core' ? `[核心记忆] ${text}`
       : text;
     await invoke('rag_ingest', {
@@ -190,17 +191,51 @@ function keywordFallback(queryText: string, topK: number): { text: string; score
 /** 把伴侣的摘要记忆批量摄取（补全历史；新摘要由 summarizeMemory 链路增量摄取） */
 export async function syncCompanionToSemantic(c: Companion): Promise<void> {
   if (isBrowserPreview()) return;
+  // 人设画像摄取（方案 B：persona 语义独立，与 core 分离，永不随摘要漂移）
+  const persona = buildPersonaContext(c);
+  if (persona) {
+    await ingestMemory(c.id, 'persona', persona, { kind: 'persona' });
+  }
   // 核心档案摄取（重写式：每次全量覆盖，保证最新）
   if (c.core_memory?.length) {
     await ingestMemory(c.id, 'core', c.core_memory.join('\n'), { count: c.core_memory.length });
   }
   // 摘要摄取（增量：只摄取最近几条未摄取过的——简化：取最新 3 条）
+  // 方案 C·去重：跳过与更早 summary 近似重复的条目，避免同话题反复沉淀向量库。
   const recent = c.memories.slice(0, 3);
+  const older = c.memories.slice(3);
   for (const m of recent) {
-    if (m.kind === 'summary') {
-      await ingestMemory(c.id, 'summary', m.content, { created_at: m.created_at });
-    }
+    if (m.kind !== 'summary') continue;
+    if (isDupSummary(m.content, older)) continue;
+    await ingestMemory(c.id, 'summary', m.content, { created_at: m.created_at });
   }
+}
+
+/** 方案 C·沉淀去重：判断 summary 文本是否与已有 summary 近似（前缀相同 / 相互包含）。 */
+function isDupSummary(content: string, existing: MemoryEntry[]): boolean {
+  const a = content.trim().replace(/\s+/g, '');
+  if (!a) return true;
+  for (const m of existing) {
+    if (m.kind !== 'summary') continue;
+    const b = m.content.trim().replace(/\s+/g, '');
+    if (!b) continue;
+    if (a === b) return true;
+    if (a.length >= 40 && b.startsWith(a.slice(0, 40))) return true;
+    if (b.length >= 40 && a.startsWith(b.slice(0, 40))) return true;
+    if (a.length > 10 && b.length > 10 && (a.includes(b) || b.includes(a))) return true;
+  }
+  return false;
+}
+
+/**
+ * 取回人设画像（persona）文本 —— 方案 B：人设是最稳定、优先级最高的记忆，
+ * 永远注入 system 最前，不依赖向量检索命中（即使无嵌入端点也用 buildPersonaContext 兜底）。
+ * 返回 '' 表示无伴侣或未启用，调用方据此跳过。
+ */
+export async function retrievePersona(): Promise<string> {
+  const c = useCompanionStore.getState().companion;
+  if (!c) return '';
+  return buildPersonaContext(c);
 }
 
 /** 构建 L3 语义记忆上下文（供 system 注入） */
@@ -209,4 +244,67 @@ export async function buildSemanticContext(queryText: string): Promise<string> {
   if (!hits.length) return '';
   const lines = hits.map((h) => `- ${h.text}`);
   return '【语义记忆（检索到的过去对话）】\n' + lines.join('\n') + '\n（自然融入，不要逐条复述）';
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 通用 RAG 助手：供 ai-chat 主对话复用（伴侣与对话记忆都落在 'ai-chat' 命名空间，
+// 与 ai-ide / ai-gongfang 物理隔离，互不串味）。
+// ───────────────────────────────────────────────────────────────────────────
+
+/** 把一轮对话（用户 + 助手）摄取进向量库，形成「永久对话记忆」沉淀。 */
+export async function ingestChatTurn(
+  userText: string,
+  assistantText: string,
+  namespace = 'ai-chat',
+): Promise<void> {
+  if (isBrowserPreview()) return;
+  if (!userText.trim() && !assistantText.trim()) return;
+  if (!(await ensureInit())) return;
+  const combined = `用户：${userText.trim()}\n助手：${assistantText.trim()}`;
+  const vecs = await embed([combined]);
+  if (!vecs || !vecs[0]) return; // 无嵌入端点 → 静默跳过沉淀（不阻塞对话）
+  try {
+    const now = Date.now();
+    await invoke('rag_ingest', {
+      source: {
+        title: `对话记录·${new Date(now).toLocaleString('zh-CN')}`,
+        uri: `chat://${now}`,
+        type: 'chat',
+        namespace,
+      },
+      chunks: [{
+        idx: 0,
+        text: combined,
+        char_start: 0,
+        char_end: combined.length,
+        vec: vecs[0],
+        meta: { kind: 'chat', ts: now },
+      }],
+    });
+  } catch { /* 静默降级：沉淀失败不影响对话 */ }
+}
+
+/** 检索对话记忆，返回可直接注入 system 的上下文文本（命中为空时返回 ''）。 */
+export async function retrieveChatContext(
+  queryText: string,
+  namespace = 'ai-chat',
+  topK = 5,
+): Promise<string> {
+  if (isBrowserPreview()) return '';
+  if (!(await ensureInit())) return '';
+  const vec = await embed([queryText]);
+  if (!vec || !vec[0]) return ''; // 无嵌入端点 → 不注入（降级）
+  try {
+    const res = await invoke<{ results: { text: string; score: number }[] }>('rag_query', {
+      queryVec: vec[0],
+      topK,
+      namespace,
+    });
+    const hits = res?.results ?? [];
+    if (!hits.length) return '';
+    const lines = hits.map((h) => `- ${h.text}`);
+    return '【长期对话记忆（检索到的相关内容）】\n' + lines.join('\n') + '\n（自然融入回答，不要逐条复述或提及"根据记忆"。）';
+  } catch {
+    return '';
+  }
 }

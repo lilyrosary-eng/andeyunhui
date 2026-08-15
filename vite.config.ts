@@ -30,7 +30,9 @@ export default defineConfig(() => ({
   base: "./",
   plugins: [
     react(),
-    tsconfigPaths(),
+    // 仅扫描仓库根 tsconfig，避免 vite-tsconfig-paths 递归误扫 got-it/ 等
+    // 外部参考工程目录（其 tsconfig 损坏会导致 vite 原生崩溃 → tauri 杀进程闪退）
+    tsconfigPaths({ projects: [resolve(root, "tsconfig.json")] }),
     {
       name: "inject-waiting-pages",
       transformIndexHtml: {

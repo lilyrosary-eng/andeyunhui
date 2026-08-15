@@ -330,6 +330,68 @@ fn build_anthropic_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> 
         .collect()
 }
 
+/// 保险性 messages 截断：估算总 token 上界，超过阈值时按「保留首条 system + 最近 N 条」策略裁剪。
+///
+/// 背景：2026-08 用户截图复现群聊/插件沙箱内 `useAiChat` 上游调用把累计历史全量塞入单请求，
+/// 导致 208 万 token 触发上游 1048576 上限。后端统一兜底，所有调用方（主窗口/胶囊/插件沙箱）
+/// 自动受保护，避免任一调用方忘了截断就把上游打挂。
+///
+/// 估算策略（不引第三方 crate，保持零依赖）：
+/// - 中文等 CJK 字符：1 字符 ≈ 1 token；其余 ASCII：4 字符 ≈ 1 token。
+/// - 用 `字符数 + 字节数/4` 取较大值作保守上界（单条超阈值直接丢弃）。
+/// - 总 token 上限 = 200k，远低于模型 1048576 上限，与前端 safeMessages 对齐成双层防御。
+fn truncate_messages_for_safety(messages: Vec<ChatMessage>) -> (Vec<ChatMessage>, bool) {
+    const PER_MSG_TOKEN_CAP: usize = 6_000; // 单条 >6k token 视为异常（重复拼接/脏数据），整体丢弃
+    const TOTAL_TOKEN_CAP: usize = 200_000; // 距 1048576 上限留足余量，绝不允许接近上游硬限制
+
+    // 估算单条 token
+    let est = |s: &str| -> usize {
+        let chars = s.chars().count();
+        let bytes = s.len();
+        // 字节数/4 反映 ASCII 词数；字符数反映 CJK 词数；取较大者作保守上界
+        std::cmp::max(chars, bytes / 4)
+    };
+
+    // 第一遍：单条超 PER_MSG_TOKEN_CAP 的丢掉
+    let mut kept: Vec<ChatMessage> = messages
+        .into_iter()
+        .filter(|m| est(&m.content) <= PER_MSG_TOKEN_CAP)
+        .collect();
+
+    // 第二遍：累计 token 超 TOTAL_TOKEN_CAP 时尾部截断（保留首条 system + 最近 N 条）。
+    // 为避免依赖 ChatMessage: Clone（结构体未 derive），用索引搬运而非 clone。
+    let total: usize = kept.iter().map(|m| est(&m.content)).sum();
+    if total <= TOTAL_TOKEN_CAP {
+        return (kept, false);
+    }
+
+    // 先把首条 system 从 kept 中抽出（若有），其余消息按索引从尾部取能装下的。
+    let mut out: Vec<ChatMessage> = Vec::new();
+    let first_system_idx = kept.iter().position(|m| m.role == "system");
+    if let Some(i) = first_system_idx {
+        out.push(kept.remove(i)); // 抽走 system，后续 kept 不再含它
+    }
+    let mut acc: usize = out.iter().map(|m| est(&m.content)).sum();
+    // 从尾部倒序取，直到预算用尽
+    while let Some(m) = kept.pop() {
+        let t = est(&m.content);
+        if acc + t > TOTAL_TOKEN_CAP {
+            break;
+        }
+        out.push(m);
+        acc += t;
+    }
+    // 此时 out = [system?, ...尾部倒序]，恢复成 system 在最前、对话按原序
+    // 因尾部是用 pop 倒取，需再 reverse 对话部分（含 system 一起反也无妨，下面修正）
+    out.reverse();
+    // reverse 后 system 会跑到末尾，重新把它挪回首位
+    if let Some(pos) = out.iter().position(|m| m.role == "system") {
+        let sys = out.remove(pos);
+        out.insert(0, sys);
+    }
+    (out, true)
+}
+
 /// 流式对话：向 OpenAI 兼容端点发起 stream 请求，
 /// 逐块解析 SSE 并通过事件推给前端。
 /// 事件（payload 含 requestId 以便前端多请求区分）：
@@ -342,6 +404,8 @@ pub async fn ai_chat(
     request_id: String,
     messages: Vec<ChatMessage>,
     profile_id: Option<String>,
+    // 前端 per-call 注入的 system（如群聊中每位伴侣的独立人设）；传入时优先于全局 AiProfile.persona，合并为其前置段落。
+    system: Option<String>,
 ) -> Result<(), String> {
     let profiles = load_profiles(&app);
     let cfg = resolve_profile(&profiles, profile_id);
@@ -355,6 +419,47 @@ pub async fn ai_chat(
     }
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    // 诊断：截断前总字符数（终端可见）。配合前端 safeMessages 的 console.error 双线验证。
+    let pre_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+    eprintln!(
+        "[ai_chat] 收到 request_id={} msgs={} total_chars={}",
+        request_id, messages.len(), pre_chars
+    );
+    // 保险性截断：后端兜底，防止任一调用方（主窗口/胶囊/插件沙箱）传入爆炸的 messages。
+    // 估算 token 上界超 200k 时按「保留首条 system + 最近 N 条」裁剪，并 emit 一次警告事件。
+    let (messages, truncated) = truncate_messages_for_safety(messages);
+    // 终极兜底：即使截断函数被跳过或估算失真，单请求总字符 >2M 直接 fail-fast 拒绝发送
+    // （绝不允许 200 万 token 的请求到达上游）。这是字符级硬切，与 token 估算无关。
+    const HARD_CHAR_CAP: usize = 2_000_000; // 200 万字符 ≈ 上限 104 万 token，留 50% 余量
+    let post_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+    if post_chars > HARD_CHAR_CAP {
+        let msg = format!(
+            "messages 总字符 {} 仍超硬上限 {}，拒绝发送以保护上游",
+            post_chars, HARD_CHAR_CAP
+        );
+        eprintln!("[ai_chat] FATAL: request_id={} {}", request_id, msg);
+        let _ = app.emit(
+            "ai-error",
+            serde_json::json!({ "requestId": request_id, "error": msg }),
+        );
+        return Err(msg);
+    }
+    if truncated {
+        let kept = messages.len();
+        eprintln!(
+            "[ai_chat] WARN: messages 超出安全 token 预算，已尾部截断（保留首条 system + 最近 N 条） request_id={} kept={}",
+            request_id, kept
+        );
+        let _ = app.emit(
+            "ai-warn",
+            serde_json::json!({
+                "requestId": request_id,
+                "kind": "messages_truncated",
+                "kept": kept,
+                "hint": "历史过长已被自动截断，可考虑归档旧对话或调小单次请求历史窗口"
+            }),
+        );
+    }
     // Prompt Cache：Anthropic 提供商用 cache_control block 格式，其他提供商用标准字符串格式。
     // 对齐 claw-code-main/api/src/prompt_cache.rs 的设计：system + 稳定历史段标记 ephemeral。
     let use_anthropic_cache = is_anthropic_provider(&cfg);
@@ -369,17 +474,24 @@ pub async fn ai_chat(
     let thinking = cfg.thinking.unwrap_or(false);
     // 人设 system：组合后合并进首条 system 消息（不破坏插件自带的项目上下文 / SOP / 状态注入）。
     let persona = compose_persona_system(&cfg);
+    // 前端 per-call system（群聊各伴侣人设 / 单聊注入）前置，全局 persona 紧随其后。
+    let effective_system = match (&system, persona.is_empty()) {
+        (Some(s), true) => s.clone(),
+        (Some(s), false) => format!("{}\n\n{}", s, persona),
+        (None, false) => persona,
+        (None, true) => String::new(),
+    };
     let mut messages_json = messages_json;
-    if !persona.is_empty() {
+    if !effective_system.is_empty() {
         if let Some(first) = messages_json.first_mut() {
             if first.get("role").and_then(|r| r.as_str()) == Some("system") {
                 let existing = first.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                first["content"] = serde_json::json!(format!("{}\n\n{}", existing, persona));
+                first["content"] = serde_json::json!(format!("{}\n\n{}", existing, effective_system));
             } else {
-                messages_json.insert(0, serde_json::json!({ "role": "system", "content": persona }));
+                messages_json.insert(0, serde_json::json!({ "role": "system", "content": effective_system }));
             }
         } else {
-            messages_json.insert(0, serde_json::json!({ "role": "system", "content": persona }));
+            messages_json.insert(0, serde_json::json!({ "role": "system", "content": effective_system }));
         }
     }
     let mut body = serde_json::json!({

@@ -1,9 +1,10 @@
 // 黄金棋盘浮岛 · AI 对话子面板。
-// 复用通用模板 AiChatPanel（src/components/ai-chat/AiChatPanel），
-// 仅透传胶囊专属的封面 / 保持态 / 关闭回调，并沿用胶囊历史持久化 key。
+// 复用主窗口同一套主体 AiChatConversation（capsuleMode 形态），仅透传胶囊专属的封面 / 保持态 / 关闭回调，
+// 并沿用胶囊历史持久化 key。群聊不对胶囊开放（不传 onNewGroup）。
 import { memo } from 'react';
 import { useCapsuleStore } from '@/stores/capsuleStore';
-import { AiChatPanel } from '@/components/ai-chat/AiChatPanel';
+import { useAiChat } from '@/components/ai-chat/useAiChat';
+import { AiChatConversation } from '@/components/ai-chat/AiChatConversation';
 import { AI_CHAT_CONVERSATIONS_KEY } from '@/components/ai-chat/util';
 
 const CAPSULE_CONV_KEY = AI_CHAT_CONVERSATIONS_KEY;
@@ -13,9 +14,31 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
   const setChatOpen = useCapsuleStore((s) => s.setChatOpen);
   const setKeepOpen = useCapsuleStore((s) => s.setKeepOpen);
 
+  const {
+    conversations,
+    activeId,
+    activeConv,
+    busy,
+    profileId,
+    selectConv,
+    newConversation,
+    deleteConversation,
+    renameConversation,
+    send,
+  } = useAiChat({ persistKey: CAPSULE_CONV_KEY });
+
   return (
-    <AiChatPanel
-      persistKey={CAPSULE_CONV_KEY}
+    <AiChatConversation
+      capsuleMode
+      conversations={conversations}
+      activeConv={activeConv}
+      busy={busy}
+      profileId={profileId}
+      send={send}
+      onSelectConv={selectConv}
+      onNewConv={newConversation}
+      onDeleteConv={deleteConversation}
+      onRenameConv={renameConversation}
       coverUrl={coverUrl}
       showKeepButton
       keepPinned={keepOpen}

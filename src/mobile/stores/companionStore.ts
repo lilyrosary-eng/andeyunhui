@@ -95,16 +95,79 @@ const DEFAULT_COMPANION: Companion = {
 /** 注入 system 的记忆条数上限 */
 const MEMORY_INJECT_N = 12;
 
+// 方案 C：L1.5 元摘要压缩 + 沉淀去重，防止 memories 无限膨胀、口水回忆淹没人设。
+/** 当 summary 类记忆超过该阈值，触发一次向后压缩（合并最早的若干条为一条元摘要）。 */
+const MEMORY_COMPRESS_THRESHOLD = 24;
+/** 每次压缩合并多少条最早 summary。 */
+const MEMORY_COMPRESS_BATCH = 12;
+/** 去重判定：两条摘要前 N 字相同 / 完全包含，视为重复。 */
+const MEMORY_DEDUP_PREFIX = 40;
+
+/**
+ * 规则去重：判断 newContent 是否为已有 memories 中 summary/milestone 的近似重复。
+ * 纯字符串启发式（零算力依赖）：空白归一后，若与某条前 MEMORY_DEDUP_PREFIX 字相同，
+ * 或相互完全包含，则视为重复。core 事实类不在此去重（由 applyDeltas 单独去重）。
+ */
+function isDuplicateMemory(newContent: string, existing: MemoryEntry[]): boolean {
+  const a = newContent.trim().replace(/\s+/g, '');
+  if (!a) return true;
+  for (const m of existing) {
+    if (m.kind !== 'summary' && m.kind !== 'milestone') continue;
+    const b = m.content.trim().replace(/\s+/g, '');
+    if (!b) continue;
+    if (a === b) return true;
+    if (a.length >= MEMORY_DEDUP_PREFIX && b.startsWith(a.slice(0, MEMORY_DEDUP_PREFIX))) return true;
+    if (b.length >= MEMORY_DEDUP_PREFIX && a.startsWith(b.slice(0, MEMORY_DEDUP_PREFIX))) return true;
+    if (a.length > 10 && b.length > 10 && (a.includes(b) || b.includes(a))) return true;
+  }
+  return false;
+}
+
+/**
+ * 方案 C·L1.5 元摘要压缩（纯规则，零算力）：当 summary 类记忆超过阈值，
+ * 把最早的 MEMORY_COMPRESS_BATCH 条 summary 合并为一条「元摘要」条目（kind='summary'，
+ * 内容标注合并来源条数 + 要点拼接去重截断），其余保留原文。返回压缩后的副本，
+ * 未达阈值则原样返回。合并要点：取所有被压条目的句子，按出现顺序去重后截断到 ~300 字。
+ */
+function compressMemories(c: Companion): Companion {
+  const summaries = c.memories.filter((m) => m.kind === 'summary');
+  if (summaries.length <= MEMORY_COMPRESS_THRESHOLD) return c;
+  const toMerge = summaries.slice(-MEMORY_COMPRESS_BATCH); // 最早的 BATCH 条
+  const keep = c.memories.filter((m) => m.kind !== 'summary' || !toMerge.includes(m));
+  const points: string[] = [];
+  for (const m of toMerge) {
+    for (const sentence of m.content.split(/[。！？\n]/).map((s) => s.trim()).filter(Boolean)) {
+      if (!points.some((p) => p.includes(sentence) || sentence.includes(p))) points.push(sentence);
+    }
+  }
+  const merged = points.join('。').slice(0, 300);
+  const metaEntry: MemoryEntry = {
+    id: `m_${Date.now()}_meta`,
+    kind: 'summary',
+    content: `[早期回忆·合并${toMerge.length}条] ${merged}`,
+    created_at: toMerge[0]?.created_at ?? Math.floor(Date.now() / 1000),
+  };
+  const next: Companion = { ...c, memories: [...keep, metaEntry] };
+  return next;
+}
+
+
 function daysBetween(a: number | null, now: number): number {
   if (!a) return 0;
   return Math.max(0, Math.floor((now - a) / 86400));
 }
 
 /** 构造「伴侣上下文」文本（拼在系统提示词末尾） */
-export function buildCompanionContext(c: Companion, now = Date.now() / 1000): string {
+/**
+ * 人设画像（persona）语义块 —— 方案 B：把"人设"从 L2 核心档案中独立出来，
+ * 作为最稳定、优先级最高的记忆，永远排在 system 最前面。
+ * 包含：身份/性格/背景/口头禅/关系阶段。这些字段是伴侣的"人格内核"，
+ * 不随对话漂移，必须最先被模型读到以保证人设不串味。
+ */
+export function buildPersonaContext(c: Companion, now = Date.now() / 1000): string {
   const r = c.relationship;
   const lines: string[] = [];
-  lines.push(`【你的身份】你是「${c.name}」${c.avatar}`);
+  lines.push(`【人设画像·你的身份】你是「${c.name}」${c.avatar}`);
   if (c.personality.trim()) lines.push(`性格：${c.personality.trim()}`);
   if (c.background.trim()) lines.push(`背景：${c.background.trim()}`);
   // 口头禅：像真人一样有概率性，且位置随机（句首/句中/句尾都可能出现，不是固定句首）
@@ -123,9 +186,18 @@ export function buildCompanionContext(c: Companion, now = Date.now() / 1000): st
     : (r.intimacy ?? 0) >= 20 ? '开始熟络起来'
     : '还在彼此了解的阶段';
   lines.push(
-    `【你们的关系】认识 ${days} 天，你们${level}。` +
+    `【人设画像·你们的关系】认识 ${days} 天，你们${level}。` +
       '请用符合当前关系阶段的语气和称呼回应，越熟悉越亲近自然，但不要提及这些描述本身。',
   );
+  return lines.join('\n');
+}
+
+/**
+ * L2 核心档案（core）语义块 —— 用户核心事实 + L1 滚动摘要，作为第二优先级的长期记忆，
+ * 与"人设画像"在文本上严格分离，便于检索/沉淀时打不同 kind 标签、互不串味。
+ */
+export function buildCoreContext(c: Companion): string {
+  const lines: string[] = [];
   // L2 核心档案：用户核心事实，永不丢失，始终注入
   if (c.core_memory?.length) {
     lines.push('【关于 TA（务必记住）】' + c.core_memory.map((f) => `- ${f}`).join('\n'));
@@ -135,8 +207,18 @@ export function buildCompanionContext(c: Companion, now = Date.now() / 1000): st
   if (mems.length) {
     lines.push('【你记得的事】' + mems.map((m) => `- ${m.content}`).join('\n'));
   }
-  lines.push('（以上是长期记忆，请自然融入回答，不要逐条复述或提及"根据记忆"。）');
   return lines.join('\n');
+}
+
+/** 兼容旧调用方：persona + core 组合（人设在前，core 在后）。 */
+export function buildCompanionContext(c: Companion, now = Date.now() / 1000): string {
+  const blocks: string[] = [];
+  const persona = buildPersonaContext(c, now);
+  if (persona) blocks.push(persona);
+  const core = buildCoreContext(c);
+  if (core) blocks.push(core);
+  blocks.push('（以上是长期记忆，请自然融入回答，不要逐条复述或提及"根据记忆"。）');
+  return blocks.join('\n');
 }
 
 interface CompanionStore {
@@ -156,6 +238,8 @@ interface CompanionStore {
   update: (c: Companion) => Promise<void>;
   /** 给活跃伴侣追加记忆 */
   addMemory: (kind: string, content: string) => Promise<void>;
+  /** 方案 C：主动触发 L1.5 元摘要压缩（合并最老 summary），无操作若未达阈值 */
+  compressMemories: () => Promise<void>;
   /** 更新活跃伴侣人格字段 */
   updatePersona: (patch: Partial<Pick<Companion, 'name' | 'avatar' | 'personality' | 'background' | 'catchphrase'>>) => Promise<void>;
   /** 应用情感增量（后端 EMA + 衰减 + 里程碑 + 核心档案合并），返回可能的里程碑文本 */
@@ -278,10 +362,15 @@ export const useCompanionStore = create<CompanionStore>((set, get) => {
     },
 
     addMemory: async (kind, content) => {
+      // 方案 C·沉淀去重：summary/milestone 类防止近似重复堆积
+      const dupCheck = get().companion;
+      if ((kind === 'summary' || kind === 'milestone') && isDuplicateMemory(content, dupCheck.memories)) {
+        return;
+      }
       if (isBrowserPreview()) {
         const cur = get().companion;
         const now = Math.floor(Date.now() / 1000);
-        const next: Companion = {
+        const appended: Companion = {
           ...cur,
           relationship: {
             ...cur.relationship,
@@ -290,6 +379,7 @@ export const useCompanionStore = create<CompanionStore>((set, get) => {
           },
           memories: [{ id: `m_${now}`, kind, content, created_at: now }, ...cur.memories].slice(0, 200),
         };
+        const next = compressMemories(appended); // 方案 C·L1.5 压缩
         const col = {
           ...get().collection,
           companions: get().collection.companions.map((x) => (x.id === next.id ? next : x)),
@@ -300,15 +390,24 @@ export const useCompanionStore = create<CompanionStore>((set, get) => {
       }
       try {
         const c = await invoke<Companion>('companion_add_memory', { kind, content });
-        const col = { ...get().collection, active_id: c.id };
-        const companions = col.companions.map((x) => (x.id === c.id ? c : x));
-        const nextCol = { ...col, companions };
-        writeCache(nextCol);
-        set({ collection: nextCol, companion: c });
+        // 方案 C·L1.5 压缩（本地规则，零算力）：后端写回后本地合并最老 summary 再落库
+        const compressed = compressMemories(c);
+        if (compressed.memories.length !== c.memories.length) {
+          const saved = await invoke<Companion>('companion_update', { companion: compressed });
+          const col = { ...get().collection, active_id: saved.id, companions: get().collection.companions.map((x) => (x.id === saved.id ? saved : x)) };
+          writeCache(col);
+          set({ collection: col, companion: saved });
+        } else {
+          const col = { ...get().collection, active_id: c.id };
+          const companions = col.companions.map((x) => (x.id === c.id ? c : x));
+          const nextCol = { ...col, companions };
+          writeCache(nextCol);
+          set({ collection: nextCol, companion: c });
+        }
       } catch {
         const cur = get().companion;
         const now = Math.floor(Date.now() / 1000);
-        const next: Companion = {
+        const appended: Companion = {
           ...cur,
           relationship: {
             ...cur.relationship,
@@ -317,6 +416,7 @@ export const useCompanionStore = create<CompanionStore>((set, get) => {
           },
           memories: [{ id: `m_${now}`, kind, content, created_at: now }, ...cur.memories].slice(0, 200),
         };
+        const next = compressMemories(appended);
         const col = {
           ...get().collection,
           companions: get().collection.companions.map((x) => (x.id === next.id ? next : x)),
@@ -324,6 +424,24 @@ export const useCompanionStore = create<CompanionStore>((set, get) => {
         writeCache(col);
         set({ companion: next, collection: col });
       }
+    },
+
+    compressMemories: async () => {
+      const cur = get().companion;
+      const next = compressMemories(cur);
+      if (next.memories.length === cur.memories.length) return;
+      if (isBrowserPreview()) {
+        const col = { ...get().collection, companions: get().collection.companions.map((x) => (x.id === next.id ? next : x)) };
+        writeCache(col);
+        set({ companion: next, collection: col });
+        return;
+      }
+      try {
+        const saved = await invoke<Companion>('companion_update', { companion: next });
+        const col = { ...get().collection, companions: get().collection.companions.map((x) => (x.id === saved.id ? saved : x)) };
+        writeCache(col);
+        set({ collection: col, companion: saved });
+      } catch { /* 静默降级 */ }
     },
 
     updatePersona: async (patch) => {

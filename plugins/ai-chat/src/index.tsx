@@ -8,7 +8,7 @@ import { AiChatMemorySettings } from '@/components/ai-chat/AiChatMemorySettings'
 import { UserAvatarSettings } from '@/components/ai-chat/UserAvatarSettings';
 import { ModuleSettingsPanel } from '@/components/ModuleSettingsPanel';
 import { useAiChat, DEFAULT_PERSIST_KEY } from '@/components/ai-chat/useAiChat';
-import { useCompanionStore, buildCompanionContext } from '@/mobile/stores/companionStore';
+import { useCompanionStore, buildPersonaContext, buildCoreContext } from '@/mobile/stores/companionStore';
 
 const COMPANION_ENABLED_KEY = 'andeyunhui.aichat.companion.enabled';
 function readCompanionEnabled(): boolean {
@@ -21,7 +21,7 @@ const Root = memo(function Root() {
   // 逻辑单例：侧栏与主区共享同一份 useAiChat，避免状态分裂
   const {
     conversations, activeId, activeConv, busy, profileId,
-    selectConv, newConversation, deleteConversation, renameConversation, clearAll, send,
+    selectConv, newConversation, newGroup, deleteConversation, renameConversation, clearAll, send,
   } = useAiChat({ persistKey: DEFAULT_PERSIST_KEY });
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -43,11 +43,17 @@ const Root = memo(function Root() {
   const loadCompanions = useCompanionStore((s) => s.load);
   useEffect(() => { void loadCompanions(); }, [loadCompanions]);
 
-  // 启用伴侣时，发送消息注入伴侣人设上下文（仅影响 ai-chat 模块，不影响 ai编程/ai攻防）
+  // 启用伴侣时，发送消息注入伴侣上下文（仅影响 ai-chat 模块，不影响 ai编程/ai攻防）
+  // 方案 B：人设画像(persona) 作为最高优先级记忆置顶，L2 核心档案(core) 列于其后。
   const sendWithCompanion = useCallback(
     (text: string) => {
-      const systemPrompt = companionEnabled && companion ? buildCompanionContext(companion) : undefined;
-      return send(text, systemPrompt ? { systemPrompt } : undefined);
+      if (!(companionEnabled && companion)) return send(text);
+      const personaPrompt = buildPersonaContext(companion);
+      const corePrompt = buildCoreContext(companion);
+      return send(text, {
+        ...(personaPrompt ? { personaPrompt } : {}),
+        ...(corePrompt ? { systemPrompt: corePrompt } : {}),
+      });
     },
     [send, companionEnabled, companion],
   );
@@ -65,6 +71,7 @@ const Root = memo(function Root() {
         activeId={activeId}
         onSelect={selectConv}
         onNew={newConversation}
+        onNewGroup={newGroup}
         onDelete={deleteConversation}
         onRename={renameConversation}
         onOpenModuleSettings={() => {
