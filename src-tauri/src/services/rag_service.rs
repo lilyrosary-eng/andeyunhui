@@ -6,9 +6,22 @@
 //!   后端只负责「存储向量 + 暴力余弦 top-k 检索」，因此后端与具体嵌入模型解耦，
 //!   既支持全本地（onnx wasm）也支持全 API（Ollama / OpenAI 兼容端点）。
 //! - 表结构（与插件/IDE 共享约定一致）：
-//!   - sources(id, title, uri, type, created_at, chunk_count, status)
-//!   - chunks(id, source_id, idx, text, char_start, char_end, vec BLOB, meta JSON)
+//!   - sources(id, title, uri, type, created_at, chunk_count, status, namespace)
+//!   - chunks(id, source_id, idx, text, char_start, char_end, vec BLOB, meta JSON, namespace)
+//! - **命名空间隔离**：所有来源与分块都带 `namespace`，强制各 AI 子模块（ai-chat / ai-ide /
+//!   ai-gongfang）记忆物理隔离，检索/列表只返回同一 namespace 的内容，防止串味。
+//!   - 历史库（建表时无该列）通过 `rag_init_db` 的 ALTER 幂等补列，默认 'ai-chat'（向后兼容）。
 //! - 向量以 little-endian f32 字节存于 BLOB（RAG_VECTOR_DIM=768，nomic-embed-text）。
+
+/// 默认命名空间（历史数据 / 未指定时回落）。
+pub const RAG_NS_DEFAULT: &str = "ai-chat";
+/// 三个 AI 子模块的命名空间约定（供前端调用方显式声明，杜绝串味）。
+pub mod rag_namespace {
+    pub const AI_CHAT: &str = "ai-chat"; // ai对话 / 伴侣记忆
+    pub const AI_IDE: &str = "ai-ide"; // ai编程
+    pub const AI_GONGFANG: &str = "ai-gongfang"; // ai攻防
+    pub const GENERAL: &str = "general"; // 通用（手动导入的知识库）
+}
 
 use std::path::PathBuf;
 
@@ -56,7 +69,8 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             type        TEXT NOT NULL DEFAULT 'file',
             created_at  TEXT NOT NULL,
             chunk_count INTEGER NOT NULL DEFAULT 0,
-            status      TEXT NOT NULL DEFAULT 'ready'
+            status      TEXT NOT NULL DEFAULT 'ready',
+            namespace   TEXT NOT NULL DEFAULT 'ai-chat'
         );
         CREATE TABLE IF NOT EXISTS chunks (
             id          TEXT PRIMARY KEY,
@@ -67,12 +81,26 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             char_end    INTEGER NOT NULL DEFAULT 0,
             vec         BLOB NOT NULL,
             meta        TEXT NOT NULL DEFAULT '{}',
+            namespace   TEXT NOT NULL DEFAULT 'ai-chat',
             FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
-        CREATE INDEX IF NOT EXISTS idx_chunks_order  ON chunks(source_id, idx);",
+        CREATE INDEX IF NOT EXISTS idx_chunks_order  ON chunks(source_id, idx);
+        CREATE INDEX IF NOT EXISTS idx_chunks_ns     ON chunks(namespace);",
     )
-    .map_err(|e| format!("初始化 RAG 表结构失败: {}", e))
+    .map_err(|e| format!("初始化 RAG 表结构失败: {}", e))?;
+
+    // 向后兼容：历史库（旧表无 namespace 列）幂等补列，统一回落默认命名空间。
+    // 已存在的行 namespace 保持 DEFAULT 'ai-chat'，使旧伴侣记忆不丢失。
+    for tbl in ["sources", "chunks"] {
+        let _ = conn.execute(
+            &format!(
+                "ALTER TABLE {tbl} ADD COLUMN namespace TEXT NOT NULL DEFAULT 'ai-chat'"
+            ),
+            [],
+        );
+    }
+    Ok(())
 }
 
 // ============ 向量序列化 ============
@@ -123,6 +151,13 @@ pub struct RagSourceInput {
     pub uri: String,
     #[serde(default = "default_source_type")]
     pub r#type: String,
+    /// 命名空间（隔离各 AI 子模块记忆）。缺省回落 'ai-chat'。
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+fn default_namespace() -> String {
+    RAG_NS_DEFAULT.to_string()
 }
 
 fn default_source_type() -> String {
@@ -160,6 +195,7 @@ pub struct RagSourceInfo {
     pub created_at: String,
     pub chunk_count: i64,
     pub status: String,
+    pub namespace: String,
 }
 
 /// 单条检索命中。
@@ -219,21 +255,28 @@ pub fn rag_ingest(
     let source_id = uuid::Uuid::new_v4().to_string();
     let created_at = chrono::Local::now().to_rfc3339();
     let chunk_count = chunks.len();
+    // 命名空间：优先用调用方显式指定，否则回落默认（保证历史/未声明方不串味）
+    let namespace = if source.namespace.is_empty() {
+        RAG_NS_DEFAULT.to_string()
+    } else {
+        source.namespace.clone()
+    };
 
     let tx = conn
         .transaction()
         .map_err(|e| format!("开启事务失败: {}", e))?;
 
     tx.execute(
-        "INSERT INTO sources (id, title, uri, type, created_at, chunk_count, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready')",
+        "INSERT INTO sources (id, title, uri, type, created_at, chunk_count, status, namespace)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready', ?7)",
         params![
             source_id,
             source.title,
             source.uri,
             source.r#type,
             created_at,
-            chunk_count as i64
+            chunk_count as i64,
+            namespace
         ],
     )
     .map_err(|e| format!("写入来源失败: {}", e))?;
@@ -256,8 +299,8 @@ pub fn rag_ingest(
             .map(|m| m.to_string())
             .unwrap_or_else(|| "{}".to_string());
         tx.execute(
-            "INSERT INTO chunks (id, source_id, idx, text, char_start, char_end, vec, meta)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO chunks (id, source_id, idx, text, char_start, char_end, vec, meta, namespace)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 chunk_id,
                 source_id,
@@ -266,7 +309,8 @@ pub fn rag_ingest(
                 ch.char_start,
                 ch.char_end,
                 blob,
-                meta
+                meta,
+                namespace
             ],
         )
         .map_err(|e| format!("写入分块失败: {}", e))?;
@@ -280,28 +324,32 @@ pub fn rag_ingest(
 }
 
 /// 语义检索：对 query_vec 做暴力余弦 top-k，返回命中（含来源标题）。
+/// `namespace` 限定检索范围（杜绝跨模块串味）；缺省回落默认命名空间。
 pub fn rag_query(
     app: &AppHandle,
     query_vec: Vec<f32>,
     top_k: Option<usize>,
+    namespace: Option<String>,
 ) -> Result<RagQueryResult, String> {
     if query_vec.is_empty() {
         return Err("检索失败：查询向量为空".to_string());
     }
     let k = top_k.unwrap_or(6).max(1);
+    let ns = namespace.unwrap_or_else(|| RAG_NS_DEFAULT.to_string());
     let conn = open_db(app)?;
 
-    // 一次性取出所有分块向量 + 来源标题（JOIN sources 拿标题）
+    // 一次性取出同一命名空间下所有分块向量 + 来源标题（JOIN sources 拿标题 + 命名空间过滤）
     let mut stmt = conn
         .prepare(
             "SELECT c.text, c.char_start, c.char_end, c.vec, c.source_id, s.title
              FROM chunks c JOIN sources s ON s.id = c.source_id
+             WHERE c.namespace = ?1 AND s.namespace = ?1
              ORDER BY c.source_id, c.idx",
         )
         .map_err(|e| format!("准备检索语句失败: {}", e))?;
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map(params![ns], |row| {
             Ok((
                 row.get::<_, String>(0)?,      // text
                 row.get::<_, i64>(1)?,         // char_start
@@ -338,27 +386,36 @@ pub fn rag_query(
     Ok(RagQueryResult { results: hits, total })
 }
 
-/// 列出全部来源（按创建时间倒序）。
-pub fn rag_list_sources(app: &AppHandle) -> Result<Vec<RagSourceInfo>, String> {
+/// 从行构造 RagSourceInfo（含命名空间字段）。
+fn source_from_row(row: &rusqlite::Row) -> RagSourceInfo {
+    RagSourceInfo {
+        id: row.get(0).unwrap_or_default(),
+        title: row.get(1).unwrap_or_default(),
+        uri: row.get(2).unwrap_or_default(),
+        r#type: row.get(3).unwrap_or_default(),
+        created_at: row.get(4).unwrap_or_default(),
+        chunk_count: row.get(5).unwrap_or_default(),
+        status: row.get(6).unwrap_or_default(),
+        namespace: row.get(7).unwrap_or_else(|_| RAG_NS_DEFAULT.to_string()),
+    }
+}
+
+/// 列出来源（按创建时间倒序）。`namespace` 非空时只返回该命名空间来源，否则全部。
+pub fn rag_list_sources(
+    app: &AppHandle,
+    namespace: Option<String>,
+) -> Result<Vec<RagSourceInfo>, String> {
     let conn = open_db(app)?;
+    // 单条 SQL + 单闭包：namespace 为 NULL 时（?1 IS NULL）匹配全部，否则只返回该命名空间。
     let mut stmt = conn
         .prepare(
-            "SELECT id, title, uri, type, created_at, chunk_count, status
-             FROM sources ORDER BY created_at DESC",
+            "SELECT id, title, uri, type, created_at, chunk_count, status, namespace
+             FROM sources WHERE (?1 IS NULL OR namespace = ?1) ORDER BY created_at DESC",
         )
         .map_err(|e| format!("准备列表语句失败: {}", e))?;
+    let ns_param: Option<&str> = namespace.as_deref().filter(|s| !s.is_empty());
     let rows = stmt
-        .query_map([], |row| {
-            Ok(RagSourceInfo {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                uri: row.get(2)?,
-                r#type: row.get(3)?,
-                created_at: row.get(4)?,
-                chunk_count: row.get(5)?,
-                status: row.get(6)?,
-            })
-        })
+        .query_map(params![ns_param], |row| Ok(source_from_row(row)))
         .map_err(|e| format!("列出来源失败: {}", e))?;
     let mut out = Vec::new();
     for r in rows {

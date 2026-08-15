@@ -26,7 +26,7 @@ class RagStore {
   /** 从后端刷新来源列表。 */
   async refresh(): Promise<RagSourceInfo[]> {
     try {
-      this.sources = await ragListSources();
+      this.sources = await ragListSources('general');
     } catch (e) {
       // 数据库尚未初始化等情况：静默返回空，不阻塞 UI
       console.warn('[rag] 刷新来源失败：', e);

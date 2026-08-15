@@ -124,6 +124,7 @@ export async function ingestMemory(
         title: `伴侣记忆·${kind}·${new Date(now).toLocaleString('zh-CN')}`,
         uri: `companion://${companionId}/${kind}/${now}`,
         type: 'memory',
+        namespace: 'ai-chat',
       },
       chunks: [{
         idx: 0,
@@ -154,6 +155,7 @@ export async function queryMemory(
     const res = await invoke<{ results: { text: string; score: number }[] }>('rag_query', {
       queryVec: vec[0],
       topK,
+      namespace: 'ai-chat',
     });
     return (res?.results ?? []).map((r) => ({ text: r.text, score: r.score }));
   } catch {

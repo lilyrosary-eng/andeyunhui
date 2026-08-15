@@ -9,13 +9,19 @@ interface ThinkingToggleProps {
   disabled?: boolean;
   /** 紧凑模式：仅图标 + 开关点，适合聊天输入栏 */
   compact?: boolean;
+  /**
+   * 主题适配：
+   * - 'dark'（默认）：胶囊深底风格（米白字 + 琥珀 on）
+   * - 'light'：主体浅底风格（深色字 + 琥珀 on）
+   */
+  theme?: 'dark' | 'light';
 }
 
 /**
  * 思考模式（Thinking）内联开关 —— 跨胶囊 / IDE / 攻防共享同一档案字段。
  * 状态直接写入后端 profile.thinking（ai_set_profile_thinking），故在任意聊天界面切换都会持久化并相互影响。
  */
-export function ThinkingToggle({ profileId, disabled, compact }: ThinkingToggleProps) {
+export function ThinkingToggle({ profileId, disabled, compact, theme = 'dark' }: ThinkingToggleProps) {
   const { t } = useI18n();
   const [thinking, setThinking] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -65,11 +71,21 @@ export function ThinkingToggle({ profileId, disabled, compact }: ThinkingToggleP
   };
 
   const on = thinking;
+  const light = theme === 'light';
+  // 暗色系：胶囊深底；亮色系：主体浅底
+  const offBg = light ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)';
+  const onBg = 'rgba(230,195,92,0.16)';
+  const offBorder = light ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.14)';
+  const onBorder = 'rgba(230,195,92,0.55)';
+  const offColor = light ? 'rgba(38,38,38,0.72)' : 'rgba(244,244,246,0.62)';
+  const onColor = light ? '#8a6a18' : '#F3E3B0';
+  const dotOff = light ? 'rgba(38,38,38,0.32)' : 'rgba(244,244,246,0.35)';
+
   const dot: React.CSSProperties = {
     width: 8,
     height: 8,
     borderRadius: 999,
-    background: on ? '#E6C35C' : 'rgba(244,244,246,0.35)',
+    background: on ? '#E6C35C' : dotOff,
     boxShadow: on ? '0 0 6px rgba(230,195,92,0.8)' : 'none',
     transition: 'all .15s',
   };
@@ -85,9 +101,9 @@ export function ThinkingToggle({ profileId, disabled, compact }: ThinkingToggleP
         gap: 5,
         padding: compact ? '3px 8px' : '5px 10px',
         borderRadius: 8,
-        border: '1px solid ' + (on ? 'rgba(230,195,92,0.55)' : 'rgba(255,255,255,0.14)'),
-        background: on ? 'rgba(230,195,92,0.16)' : 'rgba(255,255,255,0.06)',
-        color: on ? '#F3E3B0' : 'rgba(244,244,246,0.62)',
+        border: '1px solid ' + (on ? onBorder : offBorder),
+        background: on ? onBg : offBg,
+        color: on ? onColor : offColor,
         fontSize: 11.5,
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.4 : 1,

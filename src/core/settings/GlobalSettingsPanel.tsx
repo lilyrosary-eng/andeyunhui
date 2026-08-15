@@ -19,9 +19,9 @@ import { previewBootScreen } from '@/lib/bootPreview';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 
-// 茑萝子模块列表：供「彻底删除模块（连同文件）」按钮选择目标（id 与插件 manifest 一致）
+// 茑萝子模块列表：供「彻底删除模块（连同文件）」按钮选择目标（id 与插件 manifest 一致）。
+// 注意：ai 是全局 AI 核心（parent: global），不属于茑萝，故不在此列；其能力经「全局设置 → 模型」管理。
 const NIAOLUO_MODULES: Array<{ id: string; name: string }> = [
-  { id: 'ai', name: 'AI 编程' },
   { id: 'capsule', name: '黄金棋盘' },
   { id: 'crypto', name: '加密' },
   { id: 'deskpet', name: '桌宠' },

@@ -82,6 +82,7 @@ export async function ingestDocument(
     title: input.title,
     uri: input.uri,
     type: input.type ?? 'file',
+    namespace: 'general', // 手动知识库与三 AI 子模块隔离
   };
   const payload: RagChunkInput[] = chunks.map((c, i) => ({
     idx: c.idx,

@@ -24,7 +24,7 @@ export async function retrieve(
   const embedder = opts.embedder ?? new ApiEmbedder(opts.embedderOptions ?? {});
   const [vec] = await embedder.embed([query]);
   if (!vec || vec.length === 0) return { results: [], total: 0 };
-  return ragQuery(vec, opts.topK ?? 6);
+  return ragQuery(vec, opts.topK ?? 6, 'general');
 }
 
 /**

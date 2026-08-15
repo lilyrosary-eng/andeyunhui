@@ -89,12 +89,16 @@ export function ragIngest(
   return hostApi.invoke<RagIngestResult>('rag_ingest', { source, chunks });
 }
 
-export function ragQuery(queryVec: number[], topK = 6): Promise<RagQueryResponse> {
-  return hostApi.invoke<RagQueryResponse>('rag_query', { queryVec, topK });
+export function ragQuery(
+  queryVec: number[],
+  topK = 6,
+  namespace?: string,
+): Promise<RagQueryResponse> {
+  return hostApi.invoke<RagQueryResponse>('rag_query', { queryVec, topK, namespace });
 }
 
-export function ragListSources(): Promise<RagSourceInfo[]> {
-  return hostApi.invoke<RagSourceInfo[]>('rag_list_sources');
+export function ragListSources(namespace?: string): Promise<RagSourceInfo[]> {
+  return hostApi.invoke<RagSourceInfo[]>('rag_list_sources', { namespace });
 }
 
 export function ragDeleteSource(sourceId: string): Promise<void> {

@@ -1,12 +1,11 @@
 {
-  "id": "ai",
-  "name": "AI 核心",
+  "id": "ai-chat",
+  "name": "AI 对话",
   "version": "1.0.0",
   "kind": "module",
-  "visible": false,
+  "visible": true,
   "entry": "index.js",
   "iconName": "Bot",
   "hostApiVersion": 1,
-  "parent": "global",
-  "codename": "global"
+  "codename": "ai-chat"
 }

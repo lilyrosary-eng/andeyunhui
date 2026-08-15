@@ -921,14 +921,16 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
   );
 }
 
+// 全局 AI 核心（统一接口 / 统一协议层）：被所有模块复用，不属于任何功能模块，
+// 故归属 global 且完全隐藏（visible:false），UI 不呈现；能力体现在「全局设置 → 模型」
+// 与「全局设置 → 茑萝」（及任意调用 ai_chat 的模块）中。
 window.__PLUGIN_REGISTRY__.register({
   id: 'ai',
-  name: 'AI 编程',
+  name: 'AI 核心',
   iconName: 'Bot',
   kind: 'module',
   visible: false,
-  parent: 'ide',
-  category: '开发',
-  desc: 'AI 结对编程：多轮流式对话、附加文件上下文、代码一键复制/保存（模型在全局设置配置，下拉框选用）',
+  parent: 'global',
+  desc: '全局 AI 统一接口：模型档案、流式对话、思考模式、RAG / Agent / 多模态后端能力，供所有模块复用',
   component: AiPanel,
 });

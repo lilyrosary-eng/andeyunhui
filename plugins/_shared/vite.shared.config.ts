@@ -1,5 +1,11 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// 主包源码根：vite.shared.config.ts 位于 plugins/_shared/，故上两级即仓库根 src。
+const SRC_DIR = join(__dirname, '..', '..', 'src');
 
 /**
  * 生成插件 vite 配置 — 所有插件共享相同的 IIFE + external react 构建 配置。
@@ -12,6 +18,12 @@ export function createPluginConfig(pluginName: string) {
   return defineConfig({
     plugins: [react()],
     resolve: {
+      // 允许插件以 @/ 别名引用主包组件（如 @/components/ai-chat/AiChatPanel、
+      // @/core/ai/ThinkingToggle），实现主包与插件共享同一份可复用 UI/逻辑，
+      // 避免两端各维护一份同构实现。被引用的主包模块会打进插件 bundle（IIFE）。
+      alias: {
+        '@': SRC_DIR,
+      },
       // 关键：pnpm 符号链接下，每个 @codemirror/lang-* 的嵌套 node_modules
       // 会让 vite 把同一份 @codemirror/state 解析成多条路径并内联多份实例
       //（实测 ide 插件 bundle 内被打进 11 份 state），导致运行时

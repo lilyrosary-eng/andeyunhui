@@ -27,20 +27,25 @@ pub fn rag_ingest(
     svc_rag_ingest(&app, source, chunks)
 }
 
-/// 语义检索：对查询向量做暴力余弦 top-k。
+/// 语义检索：对查询向量做暴力余弦 top-k。仅返回 `namespace` 命名空间下的记忆。
+/// `namespace` 为 Option，前端不传时回落服务层默认（'ai-chat'）。
 #[tauri::command]
 pub fn rag_query(
     app: AppHandle,
     query_vec: Vec<f32>,
     top_k: Option<usize>,
+    namespace: Option<String>,
 ) -> Result<RagQueryResult, String> {
-    svc_rag_query(&app, query_vec, top_k)
+    svc_rag_query(&app, query_vec, top_k, namespace)
 }
 
-/// 列出全部知识库来源。
+/// 列出知识库来源。`namespace` 非空时只返回该命名空间来源，否则全部（用于管理页总览）。
 #[tauri::command]
-pub fn rag_list_sources(app: AppHandle) -> Result<Vec<RagSourceInfo>, String> {
-    svc_rag_list_sources(&app)
+pub fn rag_list_sources(
+    app: AppHandle,
+    namespace: Option<String>,
+) -> Result<Vec<RagSourceInfo>, String> {
+    svc_rag_list_sources(&app, namespace)
 }
 
 /// 删除一条来源及其全部分块。
