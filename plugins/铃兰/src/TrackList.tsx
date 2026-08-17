@@ -40,6 +40,8 @@ interface TrackListProps {
   onResetCover?: (track: Track) => void;
   onRescanTrack?: (track: Track) => void;
   onEditTrack?: (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => void;
+  // 下载单曲（网易云源）：传入后右键菜单出现「下载」项；track.id 形如 netease-{数字}。
+  onDownloadTrack?: (track: Track) => void;
   loadLyricsText?: (track: Track) => Promise<{ text: string; source: string }>;
   saveTrackLyrics?: (track: Track, lyrics: string, saveToLrc: boolean) => Promise<void>;
 }
@@ -61,6 +63,7 @@ export function TrackList({
   onResetCover,
   onRescanTrack,
   onEditTrack,
+  onDownloadTrack,
   loadLyricsText,
   saveTrackLyrics,
 }: TrackListProps) {
@@ -405,6 +408,12 @@ export function TrackList({
           onClick: () => { onEditInfo(track); setOpenMenuIndex(null); },
           className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
           children: T('music.track.editInfo'),
+        }) : null,
+        onDownloadTrack ? React.createElement('button', {
+          key: 'download',
+          onClick: () => { onDownloadTrack(track); setOpenMenuIndex(null); },
+          className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
+          children: '下载',
         }) : null,
         React.createElement('div', {
           key: 'divider',

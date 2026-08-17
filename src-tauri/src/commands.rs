@@ -1659,6 +1659,49 @@ fn format_system_time(time: Option<std::time::SystemTime>) -> String {
     }).unwrap_or_else(|| "未知".to_string())
 }
 
+// ================= 音乐下载命令 =================
+/// 流式下载一个 URL 到本地文件（用于「下载歌曲」）。复用项目 reqwest 风格：
+/// rustls-tls + no_proxy（禁用系统代理避免被拦截），带浏览器 UA 与大小上限保护。
+/// save_path 由前端经 dialog 选好（含文件名与扩展名），Rust 仅负责落地。
+#[tauri::command]
+pub async fn download_file(url: String, save_path: String) -> Result<(), String> {
+    use std::io::Write;
+    // 安全上限：单曲一般不超 100MB，超限直接拒绝，避免异常大文件写爆磁盘。
+    const MAX_BYTES: u64 = 100 * 1024 * 1024;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+        .build()
+        .map_err(|e| format!("创建下载客户端失败: {}", e))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("请求下载地址失败: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("下载地址返回状态 {}", resp.status()));
+    }
+    let total = resp.content_length().unwrap_or(0);
+    if total > MAX_BYTES {
+        return Err(format!("文件过大（{}MB），已超过下载上限", total / 1024 / 1024));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取下载内容失败: {}", e))?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("文件过大，已超过下载上限".to_string());
+    }
+    let path = PathBuf::from(&save_path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut f = fs::File::create(&path).map_err(|e| format!("创建文件失败: {}", e))?;
+    f.write_all(&bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+    Ok(())
+}
+
 // ================= 托盘模式命令 =================
 
 /// 切换托盘模式（启用/禁用点击关闭按钮时隐藏到托盘）

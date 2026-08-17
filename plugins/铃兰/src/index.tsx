@@ -16,7 +16,7 @@ import NeteaseStatsView from './NeteaseStatsView';
 import NeteaseSettingsPanel from './NeteaseSettingsPanel';
 import KugouStatsView from './KugouStatsView';
 import KugouSettingsPanel from './KugouSettingsPanel';
-import { isLikedPlaylist, likeNeteaseSong, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
+import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { dispatchOpenWith, registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
@@ -1531,6 +1531,25 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     );
   }, [coverOverrides]);
 
+  // 下载单曲：仅网易云源（track.id 形如 netease-{数字}）。失败 toast 提示。
+  const handleDownloadTrack = useCallback(async (track: Track) => {
+    const m = /^netease-(\d+)$/.exec(track.id);
+    if (!m) {
+      window.__HOST_API__?.invoke('debug_log', { msg: '[music] 仅网易云源支持下载' }).catch(() => {});
+      alert('仅网易云曲目支持下载');
+      return;
+    }
+    const id = Number(m[1]);
+    const title = track.title || '';
+    const artist = Array.isArray(track.artist) ? track.artist.join('/') : track.artist || '';
+    try {
+      await downloadNeteaseTrack(id, title, artist);
+    } catch (e: any) {
+      console.warn('[music] 下载失败:', e);
+      alert('下载失败：' + (e?.message || e?.toString?.() || '未知错误'));
+    }
+  }, []);
+
   // 编辑曲目标签信息并写回文件 + 更新内存
   const handleEditTrack = useCallback(async (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => {
     await editTrackTags(track, fields);
@@ -2136,6 +2155,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               onResetCover={handleResetCover}
               onRescanTrack={handleRescanTrack}
               onEditTrack={handleEditTrack}
+              onDownloadTrack={handleDownloadTrack}
               loadLyricsText={loadLyricsText}
               saveTrackLyrics={saveTrackLyrics}
             />

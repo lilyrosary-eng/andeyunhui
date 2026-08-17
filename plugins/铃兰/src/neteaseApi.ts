@@ -952,13 +952,82 @@ export async function getPersonalizedPlaylists(limit = 24): Promise<NeteasePlayl
 // 获取播放地址：eapi /api/song/enhance/player/url
 // 返回实际播放 url 及码率（用于播放器展示真实音质标签）。
 export interface SongUrlResult { url: string | null; br: number; type: string; }
-export async function getSongUrl(id: number): Promise<SongUrlResult> {
+export async function getSongUrl(id: number, br?: number): Promise<SongUrlResult> {
   try {
-    const r = await neteaseRequest(PATHS.songUrl, { ids: [id], br: 999000 });
+    // br 未显式传入时，使用用户偏好音质（默认 320k）；无偏好回退 999000（无损优先）。
+    const requestBr = br ?? getNeteaseQualityBr();
+    const r = await neteaseRequest(PATHS.songUrl, { ids: [id], br: requestBr });
     const item = (r?.data || [])[0] || {};
     return { url: item.url || null, br: item.br || 0, type: item.type || '' };
   } catch {
     return { url: null, br: 0, type: '' };
+  }
+}
+
+// ================= 音质档位管理（多音质对齐网易云） =================
+// 档位码率与 MusicStorm QUAlITY_OPTIONS 对齐：标准 128k / 较高 192k / 高品质 320k / 无损 999k。
+export interface QualityOption { br: number; label: string; desc: string; }
+export const NETEASE_QUALITY_OPTIONS: QualityOption[] = [
+  { br: 128000, label: '标准', desc: '128kbps' },
+  { br: 192000, label: '较高', desc: '192kbps' },
+  { br: 320000, label: '高品质', desc: '320kbps' },
+  { br: 999000, label: '无损', desc: '无损 FLAC' },
+];
+const NETEASE_QUALITY_KEY = 'netease_quality_br';
+// 默认 320k：兼顾音质与带宽，避免默认无损导致所有请求都拉高码率。
+export function getNeteaseQualityBr(): number {
+  try {
+    const v = Number(localStorage.getItem(NETEASE_QUALITY_KEY));
+    if (v && NETEASE_QUALITY_OPTIONS.some((o) => o.br === v)) return v;
+  } catch {
+    /* ignore */
+  }
+  return 320000;
+}
+export function setNeteaseQualityBr(br: number): void {
+  try {
+    if (NETEASE_QUALITY_OPTIONS.some((o) => o.br === br)) {
+      localStorage.setItem(NETEASE_QUALITY_KEY, String(br));
+    }
+  } catch {
+    /* ignore */
+  }
+}
+export function getNeteaseQualityLabel(br = getNeteaseQualityBr()): string {
+  return NETEASE_QUALITY_OPTIONS.find((o) => o.br === br)?.label || qualityLabelFromBr(br);
+}
+
+// 下载单曲：取链（按指定 br 或当前偏好）→ 保存对话框选路径 → Rust 落地。
+// 失败向上抛，由调用方 toast 提示。文件名带音质标签便于区分多音质文件。
+export async function downloadNeteaseTrack(
+  id: number,
+  title: string,
+  artist: string,
+  br?: number,
+): Promise<void> {
+  const requestBr = br ?? getNeteaseQualityBr();
+  const res = await getSongUrl(id, requestBr);
+  if (!res.url) throw new Error('获取下载地址失败（可能无版权或登录态失效）');
+  const qLabel = qualityLabelFromBr(res.br || requestBr);
+  const safe = (s: string) => (s || '未知').replace(/[\\/:*?"<>|]/g, '_').slice(0, 80);
+  const ext = res.type?.includes('flac') ? 'flac' : res.type?.includes('mp3') ? 'mp3' : 'm4a';
+  const defaultName = `${safe(title)} - ${safe(artist)} [${qLabel}].${ext}`;
+  try {
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const picked = await save({
+      defaultPath: defaultName,
+      filters: [{ name: '音频', extensions: [ext] }],
+    });
+    if (!picked) return; // 用户取消
+    const host = (window as any).__HOST_API__;
+    if (host && typeof host.invoke === 'function') {
+      await host.invoke('download_file', { url: res.url, savePath: picked });
+    } else {
+      throw new Error('宿主不可用，无法下载');
+    }
+  } catch (e: any) {
+    if (e?.message?.includes('cancel') || e?.toString?.().includes('cancel')) return;
+    throw e;
   }
 }
 

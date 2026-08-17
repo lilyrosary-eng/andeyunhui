@@ -5,6 +5,7 @@ import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
 import { lyricsSync, parseLrc, isNeteaseRemote, neteaseSongId } from './lyricsSync';
 import { neteaseGetLyric } from './neteaseApi';
+import { getNeteaseQualityBr, setNeteaseQualityBr, getNeteaseQualityLabel, NETEASE_QUALITY_OPTIONS, getSongUrl } from './neteaseApi';
 import { formatTime } from '../../_shared/utils';
 
 // 网易云歌词加载分支：远程曲跳过本地 get_lyrics，改走 neteaseGetLyric
@@ -320,6 +321,9 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
   // 歌词可见态初始值取自单例，保证切回音乐模块/重载后仍与浮动窗口一致
   const [lyricsVisible, setLyricsVisible] = useState(() => lyricsSync.isVisible());
   const [lyricsLocked, setLyricsLocked] = useState(false);
+  // 音质切换菜单态
+  const [showQuality, setShowQuality] = useState(false);
+  const qualityRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const unsub = musicPlayer.on('progress', (data: unknown) => {
@@ -354,6 +358,26 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
     const nextMode = modes[(currentIdx + 1) % modes.length];
     onPlayModeChange(nextMode);
   }, [playMode, onPlayModeChange]);
+
+  // 音质切换：更新偏好 → 当前曲为网易云源时立即按新码率重新取链并 reload（保留进度）
+  const handleSelectQuality = useCallback((br: number) => {
+    setNeteaseQualityBr(br);
+    setShowQuality(false);
+    const cur = musicPlayer.getCurrentTrack();
+    const id = cur ? neteaseSongId(cur) : null;
+    if (id != null) {
+      getSongUrl(id, br)
+        .then((res) => { if (res.url) musicPlayer.updateTrackUrl(musicPlayer.getCurrentIndex(), res.url); })
+        .catch(() => {});
+    }
+  }, []);
+  // 点击外部关闭音质菜单
+  useEffect(() => {
+    if (!showQuality) return;
+    const onDoc = (e: MouseEvent) => { if (qualityRef.current && !qualityRef.current.contains(e.target as Node)) setShowQuality(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [showQuality]);
 
   // 歌词窗口开关
   const handleToggleLyrics = useCallback(async () => {
@@ -543,6 +567,29 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
             active: lyricsLocked,
             children: lyricsLocked ? React.createElement(LockIcon) : React.createElement(UnlockIcon),
           })}
+
+          {/* 音质切换：展示当前偏好档，点击弹档位菜单；网易云曲即时重取链 */}
+          <div className="relative" ref={qualityRef}>
+            {React.createElement(IconButton, {
+              onClick: () => setShowQuality((v) => !v),
+              title: '音质：' + getNeteaseQualityLabel(),
+              active: false,
+              children: React.createElement('span', { className: 'text-[10px] font-semibold leading-none' }, getNeteaseQualityLabel()),
+            })}
+            {showQuality && React.createElement('div', {
+              className: 'absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-28 rounded-xl bg-white dark:bg-stone-800 border border-neutral-200 dark:border-stone-700 shadow-lg py-1 z-50',
+            }, NETEASE_QUALITY_OPTIONS.map((o) =>
+              React.createElement('button', {
+                key: o.br,
+                onClick: () => handleSelectQuality(o.br),
+                className: 'w-full px-3 py-1.5 text-xs text-left ' +
+                  (o.br === getNeteaseQualityBr()
+                    ? 'text-amber-600 dark:text-amber-400 font-semibold bg-amber-500/10'
+                    : 'text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)]'),
+                children: `${o.label} · ${o.desc}`,
+              }),
+            ))}
+          </div>
 
           {React.createElement(PlaylistPopup, { playlists, currentPlaylistId, currentTrack: track, onSelectTrack })}
           {React.createElement(VolumePopup, { volume, onVolumeChange })}
