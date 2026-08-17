@@ -85,7 +85,9 @@ async function kugouRequest(
     plat: '0',
     area_code: '1',
     with_res_tag: '1',
-    clienttime: dev.clienttime,
+    // 酷狗要求 clienttime 是每次请求的毫秒时间戳；设备持久化里保存的 clienttime 会越用越旧，
+    // 导致网关按时间窗口拒绝请求（表现为榜单/搜索偶发空数据或 20006/20010）。
+    clienttime: Date.now(),
     mid: dev.mid,
     dfid: dev.dfid,
     uuid: dev.uuid,
@@ -237,7 +239,8 @@ async function kugouWebRequest(
     version: '9108',
     plat: '0',
     area_code: '1',
-    clienttime: dev.clienttime,
+    // 与 kugouRequest 同理：clienttime 必须用当前毫秒时间戳，不能复用设备持久化里的旧值。
+    clienttime: Date.now(),
     mid: dev.mid,
     dfid: dev.dfid,
     uuid: dev.uuid,
@@ -500,6 +503,8 @@ export async function getRankList(): Promise<KugouPlaylistCard[]> {
     name: r.rankname ?? r.name ?? r.rank_name,
     cover: kugouImg(r.bannerurl || r.imgurl || '', 240),
     creator: r.intro,
+    // 榜单接口不同时期返回字段不一致：total / play_count / count / playCount 都兼容一下。
+    playCount: Number(r.total || r.play_count || r.count || r.playCount || r.list_count || 0),
   }));
 }
 

@@ -39,7 +39,7 @@ function ListMusicIcon() {
   ]);
 }
 
-export default function KugouStatsView() {
+export default function KugouStatsView({ onClose }: { onClose?: () => void }) {
   const [ranks, setRanks] = useState<KugouPlaylistCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -63,13 +63,23 @@ export default function KugouStatsView() {
 
   const header = React.createElement('div', { className: 'flex items-center justify-between mb-4' },
     React.createElement('h2', { className: 'text-lg font-semibold text-neutral-800 dark:text-stone-100' }, T('music.stats.title', '统计')),
-    React.createElement('button', {
-      onClick: load,
-      className: 'flex items-center gap-1 text-xs text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] transition-colors',
-    }, [
-      React.createElement(RefreshCwIcon, { key: 'i' }),
-      React.createElement('span', { key: 't' }, T('music.netease.stats.refresh', '刷新')),
-    ]),
+    React.createElement('div', { className: 'flex items-center gap-2' },
+      onClose
+        ? React.createElement('button', {
+            key: 'back',
+            onClick: onClose,
+            className: 'flex items-center gap-1 text-xs text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] transition-colors',
+          }, T('music.settings.back', '返回'))
+        : null,
+      React.createElement('button', {
+        key: 'refresh',
+        onClick: load,
+        className: 'flex items-center gap-1 text-xs text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] transition-colors',
+      }, [
+        React.createElement(RefreshCwIcon, { key: 'i' }),
+        React.createElement('span', { key: 't' }, T('music.netease.stats.refresh', '刷新')),
+      ]),
+    ),
   );
 
   if (loading) {

@@ -54,6 +54,10 @@ interface KugouViewProps {
   onActiveRankChange?: (id: number | null) => void;
   // 登录态变化通知外层（用于侧栏切「我的」入口）
   onAuthChange?: (auth: KugouAuth | null) => void;
+  // 侧栏搜索框的关键词（与父级共享的 searchQuery）。KugouView 内部再配合 keyword 状态做搜索。
+  searchQuery?: string;
+  // 内部 tab 变化时同步给父组件，避免“返回热榜”后父组件仍停留在 mine/search 导致抽屉重复点击失效。
+  onTabChange?: (tab: KugouTab) => void;
 }
 
 // 为你推荐 / 热榜卡片（正方形封面 + 标题 + 数量）
@@ -433,7 +437,7 @@ function formatDuration(ms: number): string {
 }
 
 export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(function KugouView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange, onAuthChange },
+  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange, onAuthChange, searchQuery, onTabChange },
   ref,
 ) {
   const [tab, setTab] = useState<KugouTab>(initialTab);
@@ -449,6 +453,20 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   const [homeHeroTracks, setHomeHeroTracks] = useState<KugouTrack[]>([]);
   const [homeHeroLoading, setHomeHeroLoading] = useState(false);
 
+  // 统一切 tab：内部状态与父级 kugouTab 保持同步。
+  const changeTab = (next: KugouTab) => {
+    setTab(next);
+    onTabChange?.(next);
+  };
+
+  // 父组件（模块抽屉/侧栏「我的」）通过 initialTab 控制酷狗子页面。
+  // 之前只 useState(initialTab) 初始化，Kugou 已打开后再点抽屉里的「搜索/漫游/我的」不会切页，
+  // 必须像 NeteaseView 一样用 effect 同步 prop。
+  React.useEffect(() => {
+    changeTab(initialTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTab]);
+
   // 暴露命令式方法给侧栏（临时歌单恢复播放）
   React.useImperativeHandle(ref, () => ({
     openPlaylist: () => {},
@@ -457,6 +475,16 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       musicPlayer.setTracks(payload.tracks, 0);
       musicPlayer.play();
       musicPlayer.currentPlaylistId = payload.id ?? 'kugou-active';
+      // 同步主视图：搜索临时歌单切回搜索页并重新拉结果；推荐/榜单临时歌单切回热榜。
+      if (payload.kind === 'search') {
+        setKeyword(payload.keyword || '');
+        changeTab('search');
+        setActiveRankId(null);
+        if (payload.keyword) void doSearch(payload.keyword);
+      } else if (payload.kind === 'recommend') {
+        changeTab('home');
+        setActiveRankId(null);
+      }
     },
   }));
 
@@ -549,8 +577,8 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     }
   }
 
-  async function doSearch() {
-    const kw = keyword.trim();
+  async function doSearch(kwOverride?: string) {
+    const kw = (kwOverride ?? keyword).trim();
     if (!kw) return;
     const req = ++reqRef.current;
     setLoading(true);
@@ -572,6 +600,28 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       if (req === reqRef.current) setLoading(false);
     }
   }
+
+  // 侧栏搜索框输入时，父组件把全局 searchQuery 传下来并切到 search tab。
+  // 这里同步到内部 keyword，并做 400ms 防抖自动搜索（与本地侧栏搜索的“过滤”语义不同，
+  // 酷狗侧栏搜索需要真正调用 searchSongs）。
+  React.useEffect(() => {
+    if (searchQuery === undefined) return;
+    setKeyword(searchQuery);
+    if (!searchQuery.trim()) {
+      // 侧栏搜索框清空时，同步清掉旧搜索结果，避免空关键词下仍展示上一轮结果。
+      allTracksRef.current = [];
+      setTracks([]);
+      return;
+    }
+    changeTab('search');
+    setActiveRankId(null);
+    onActiveRankChange?.(null);
+    const timer = setTimeout(() => {
+      void doSearch(searchQuery);
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
 
   async function playTrackList(sourceTracks: KugouTrack[], startIndex: number, playlistName: string) {
     try {
@@ -619,7 +669,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       <MusicHeader
         title="酷狗音乐"
         onUserClick={() => {
-          setTab('mine');
+          changeTab('mine');
           setActiveRankId(null);
         }}
         onCloudClick={onBack}
@@ -822,7 +872,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.roamHotRanks') || '热门榜单'}</h3>
                 <button
-                  onClick={() => setTab('home')}
+                  onClick={() => changeTab('home')}
                   className="btn-press px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium"
                 >
                   完整榜单
@@ -847,7 +897,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
 
       {/* 我的：游客态提示页 */}
       {tab === 'mine' && activeRankId === null && (
-        <MineView onBack={() => setTab('home')} onAuthChange={onAuthChange} />
+        <MineView onBack={() => changeTab('home')} onAuthChange={onAuthChange} />
       )}
 
       {/* 榜单/搜索 歌曲列表（漫游 / 我的 未打开榜单详情时由各自区块承载） */}

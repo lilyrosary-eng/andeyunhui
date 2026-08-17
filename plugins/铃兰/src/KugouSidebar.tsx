@@ -161,7 +161,7 @@ export default function KugouSidebar({
     searchPlaceholder: '搜索酷狗音乐',
     children: React.createElement('div', { className: 'space-y-4' },
       renderMineSection(),
-      !auth ? renderRankSection() : null,
+      renderRankSection(),
       React.createElement(SidebarTempSection, {
         items: tempPlaylists.map(toTempItem),
         activeId: activeTempId,

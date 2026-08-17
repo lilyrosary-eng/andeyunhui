@@ -1970,8 +1970,17 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onOpenStats={() => setKugouStatsOpen(v => !v)}
           statsActive={kugouStatsOpen}
           searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-          onOpenMine={() => setKugouTab('mine')}
+          onSearchChange={(value) => {
+            // 酷狗侧栏搜索不是“过滤本地歌单”，而是切到搜索页并触发在线搜索。
+            setSearchQuery(value);
+            setKugouTab('search');
+            setKugouActiveRankId(null);
+          }}
+          onOpenMine={() => {
+            setKugouTab('mine');
+            setKugouActiveRankId(null);
+            online.setActiveId(null);
+          }}
         />
       ) : (
         <MusicSidebar
@@ -2073,6 +2082,10 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               }}
               onOpenImmersive={handleCoverClick}
             />
+          ) : kugouOpen && kugouStatsOpen ? (
+            <KugouStatsView onClose={() => setKugouStatsOpen(false)} />
+          ) : kugouOpen && kugouSettingsOpen ? (
+            <KugouSettingsPanel onBack={() => setKugouSettingsOpen(false)} />
           ) : kugouOpen ? (
             <KugouView
               ref={kugouViewRef}
@@ -2094,6 +2107,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                 online.setActiveId(null);
               }}
               selectedRankId={kugouActiveRankId}
+              searchQuery={searchQuery}
+              onTabChange={setKugouTab}
               onRankListLoaded={setKugouRankList}
               onActiveRankChange={setKugouActiveRankId}
               onAuthChange={(auth) => {
@@ -2102,12 +2117,6 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                 try { window.__HOST_API__?.invoke('debug_log', { msg: `KUGOU_AUTH_CHANGED userid=${auth?.userid ?? 'null'}` }).catch(()=>{}); } catch {}
               }}
             />
-          ) : null}
-          {kugouOpen && kugouSettingsOpen ? (
-            <KugouSettingsPanel onBack={() => setKugouSettingsOpen(false)} />
-          ) : null}
-          {kugouOpen && kugouStatsOpen ? (
-            <KugouStatsView />
           ) : null}
           {selectedPlaylist ? (
             <TrackList
@@ -2185,6 +2194,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           // 切换折叠菜单子项时，清理榜单详情 / 收藏夹等内层级状态，避免覆盖漫游 / 我的
           setKugouActiveRankId(null);
           setSelectedPlaylist(null);
+          // 酷狗侧栏搜索与本地歌单过滤共用全局 searchQuery；进入酷狗时清掉，
+          // 避免本地遗留关键词把刚打开的“热榜/漫游”自动拽到搜索页。
+          setSearchQuery('');
         }}
         isKugouOpen={kugouOpen}
         neteaseProfile={neteaseProfile}
