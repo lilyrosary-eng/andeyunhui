@@ -258,7 +258,12 @@ export function PlaylistPopup({
   }, [open]);
 
   const currentPlaylist = playlists.find(p => p.id === displayPlaylistId) || null;
-  const displayTracks = currentPlaylist?.tracks ?? [];
+  // 漫游（临时歌单 netease-active，不在持久歌单列表内）：没有真实 tracks，
+  // 改用播放器队列的「已播放 + 当前」片段，按播放顺序天然即为「已播在上、当前在底」，
+  // 每播一首新曲队列增长、currentIndex 前移，列表自动追加一条，无需额外状态。
+  const isRoam = displayPlaylistId === 'netease-active';
+  const roamTracks = isRoam ? musicPlayer.getTracks().slice(0, musicPlayer.getCurrentIndex() + 1) : [];
+  const displayTracks = isRoam ? roamTracks : (currentPlaylist?.tracks ?? []);
 
   return React.createElement('div', { className: 'relative', ref },
     React.createElement(IconButton, {
@@ -271,19 +276,28 @@ export function PlaylistPopup({
       className: 'absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50 glass-panel rounded-xl shadow-2xl overflow-hidden flex flex-col',
       style: { width: 'min(320px, 82vw)', maxHeight: 'min(60vh, 440px)' },
     },
-      // 头部：当前歌单选择（可切到其它歌单浏览其歌曲）
-      React.createElement('div', {
-        className: 'px-3 pt-3 pb-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0',
-      },
-        React.createElement('div', { className: 'text-xs text-neutral-400 dark:text-stone-500 mb-1' }, T('music.player.currentPlaylist')),
-        React.createElement('select', {
-          value: displayPlaylistId ?? '',
-          onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDisplayPlaylistId(e.target.value),
-          className: 'w-full bg-[var(--element-muted)] text-neutral-700 dark:text-stone-100 text-xs rounded-lg px-2 py-1.5 outline-none cursor-pointer',
-        },
-          playlists.map(p => React.createElement('option', { key: p.id, value: p.id }, p.name)),
-        ),
-      ),
+      // 头部：漫游（临时歌单）无持久歌单可切换，显示只读标题；否则为歌单选择下拉
+      isRoam
+        ? React.createElement('div', {
+            className: 'px-3 pt-3 pb-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0',
+          },
+            React.createElement('div', { className: 'text-xs text-neutral-400 dark:text-stone-500 mb-1' }, T('music.player.currentPlaylist')),
+            React.createElement('div', {
+              className: 'w-full text-neutral-700 dark:text-stone-100 text-xs rounded-lg px-2 py-1.5',
+            }, '漫游电台 · 已播放'),
+          )
+        : React.createElement('div', {
+            className: 'px-3 pt-3 pb-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0',
+          },
+            React.createElement('div', { className: 'text-xs text-neutral-400 dark:text-stone-500 mb-1' }, T('music.player.currentPlaylist')),
+            React.createElement('select', {
+              value: displayPlaylistId ?? '',
+              onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDisplayPlaylistId(e.target.value),
+              className: 'w-full bg-[var(--element-muted)] text-neutral-700 dark:text-stone-100 text-xs rounded-lg px-2 py-1.5 outline-none cursor-pointer',
+            },
+              playlists.map(p => React.createElement('option', { key: p.id, value: p.id }, p.name)),
+            ),
+          ),
       // 歌曲列表
       React.createElement('div', { className: 'flex-1 overflow-y-auto px-1 py-1' },
         displayTracks.length === 0
@@ -294,7 +308,11 @@ export function PlaylistPopup({
               const isCurrent = currentTrack?.id === t.id;
               return React.createElement('button', {
                 key: t.id,
-                onClick: () => { onSelectTrack(displayPlaylistId as string, t, i); setOpen(false); },
+                onClick: () => {
+                  if (isRoam) { musicPlayer.playIndex(i); } // 漫游：直接跳到队列该索引
+                  else { onSelectTrack(displayPlaylistId as string, t, i); }
+                  setOpen(false);
+                },
                 className: `w-full text-left px-3 py-2 text-xs flex items-center gap-2 rounded-[10px] transition-colors ${
                   isCurrent
                     ? 'text-[var(--element-bg)] bg-[var(--element-muted)] font-medium'

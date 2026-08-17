@@ -624,25 +624,55 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const roamTrackListRef = useRef<NeteaseTrack[]>([]); // 镜像漫游队列的 NeteaseTrack（含 artistId/albumId），供单曲展示查抽屉
   const [roamCurrentId, setRoamCurrentId] = useState<string | null>(null); // 当前展示的单曲 id（netease-${id}）
   const [roamWiki, setRoamWiki] = useState<import('./neteaseApi').SongWiki | null>(null); // 当前单曲的歌曲百科（懒加载）
-  const roamWikiMap = useRef<Record<number, import('./neteaseApi').SongWiki | null>>({}); // 按歌曲 id 缓存百科，避免重复请求
+  const   roamWikiMap = useRef<Record<number, import('./neteaseApi').SongWiki | null>>({}); // 按歌曲 id 缓存百科，避免重复请求
   const roamWikiLoading = useRef(false); // 防止并发重复拉取
   // 用 ref 承接父组件传入的回调，避免其 identity 变化导致漫游加载 effect 重跑（即「暂停/任意重渲染就刷新一次」）
   const onPlayRef = useRef(onPlay);
   const onTempPlaylistRef = useRef(onTempPlaylist);
   onPlayRef.current = onPlay;
   onTempPlaylistRef.current = onTempPlaylist;
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  // 标记首屏是否已成功起播：一旦首首就绪，任何意外的 effect 重跑都不得再 setLoading(true)，
+  // 彻底根治「弹出后闪一下又加载中」——该现象源于依赖漂移导致 effect 清理重跑后再次转圈。
+  const roamStartedRef = useRef(false);
+  const roamForceReloadRef = useRef(false);
 
-  // 拉下一批漫游曲目（登录态用私人 FM 真增量，游客态从一次性推荐池切片）
-  const fetchRoamBatch = useCallback(async (): Promise<NeteaseTrack[]> => {
+  // 漫游展示窗口：纯展示层"当前单曲 + 前后缓冲"（长度上限 3，形如 [prev, cur, next]）。
+  // 与 musicPlayer 的长队列解耦——播放器队列只 append（无 removeTrack），但 UI 只认窗口，
+  // 从而做到"列表 abc → 播放到 b 变 bcd，淘汰 a"的滑动语义，丝滑且低占用。
+  const roamWindowRef = useRef<NeteaseTrack[]>([]);
+  const ROAM_WINDOW_SIZE = 3;
+
+  // 把一首曲推进展示窗口：保持窗口以 currentId 为中心，自动淘汰最旧的（仅展示淘汰，不删播放器队列）。
+  const slideRoamWindow = useCallback((tracks: NeteaseTrack[], currentId: number | string) => {
+    const idx = tracks.findIndex((t) => `netease-${t.id}` === currentId || t.id === currentId);
+    if (idx < 0) return;
+    const start = Math.max(0, idx - 1);
+    const end = Math.min(tracks.length, start + ROAM_WINDOW_SIZE);
+    roamWindowRef.current = tracks.slice(start, end);
+  }, []);
+
+  // 拉下一批漫游曲目（登录态用私人 FM 真增量，游客态从一次性推荐池切片）。
+  // count 默认 8：续推/补池用；首屏传 1：只取第一首立即渲染+起播，毫秒级出画面，其余后台流式补。
+  const fetchRoamBatch = useCallback(async (count = 8): Promise<NeteaseTrack[]> => {
     if (isLoggedIn()) {
-      const list = await getPersonalFm(8, roamOffset);
-      if (list.length) { setRoamOffset((o) => o + 8); return list; }
+      const list = await getPersonalFm(count, roamOffset);
+      if (list.length) { setRoamOffset((o) => o + list.length); return list; }
     }
-    // 游客态：首次灌满推荐池，之后从池里切片续推
-    if (roamReservoir.current.length === 0) {
-      roamReservoir.current = await getListenNow(50);
+    // 游客态：reservoir 为空时先轻量取一次种子（首屏只取 1 首时 seed 也只取 1），
+    // 续推池（50）后台异步灌满，不阻塞首屏渲染。
+    if (roamReservoir.current.length < count) {
+      const need = Math.max(count, 8);
+      const seed = await getListenNow(need);
+      roamReservoir.current = [...roamReservoir.current, ...seed];
+      if (seed.length >= 8) {
+        getListenNow(50)
+          .then((more) => { roamReservoir.current = [...roamReservoir.current, ...more]; })
+          .catch(() => {});
+      }
     }
-    const slice = roamReservoir.current.splice(0, 8);
+    const slice = roamReservoir.current.splice(0, count);
     return slice;
   }, [roamOffset]);
 
@@ -672,32 +702,46 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
         payload: { kind: 'recommend', name: '漫游电台', tracks: playlist },
       });
       setRoamCurrentId(playlist[startIndex]?.id ?? null);
-      // 后台补全同批其余曲地址（不阻塞播放）
+      // 并发补全同批其余曲地址（不阻塞播放，比串行快数倍）
+      const tasks: Promise<void>[] = [];
       for (let i = 0; i < batch.length; i++) {
         if (i === startIndex && firstRes.url) continue;
-        const u = await getSongUrl(batch[i].id).catch(() => null);
-        if (u?.url) musicPlayer.updateTrackUrl(i, u.url);
+        tasks.push((async () => {
+          const u = await getSongUrl(batch[i].id).catch(() => null);
+          if (u?.url) musicPlayer.updateTrackUrl(i, u.url);
+        })());
       }
+      await Promise.all(tasks);
     } else {
       const playlist: PlayableTrack[] = batch.map((t) => trackToPlayable(t, ''));
       const baseIdx = musicPlayer.getTracks().length;
       musicPlayer.appendTracks(playlist);
-      // 后台补全新追加曲目地址
+      // 并发补全新追加曲目地址
+      const tasks: Promise<void>[] = [];
       for (let i = 0; i < batch.length; i++) {
-        const u = await getSongUrl(batch[i].id).catch(() => null);
-        if (u?.url) musicPlayer.updateTrackUrl(baseIdx + i, u.url);
+        tasks.push((async () => {
+          const u = await getSongUrl(batch[i].id).catch(() => null);
+          if (u?.url) musicPlayer.updateTrackUrl(baseIdx + i, u.url);
+        })());
       }
+      await Promise.all(tasks);
     }
     setRoamQueue(musicPlayer.getTracks());
   }, []);
 
-  // 续推下一批（播放接近队尾时调用）
+  // 续推下一批（窗口流动导致缺口时调用）：按用户设想"缺一首补一首"，只拉 1 首增量补给，
+  // 而非整批 8 首；续推池不足时 fetchRoamBatch 内部自动把池补满。网络压力被摊薄成涓流，体感无差异。
   const extendRoam = useCallback(async () => {
     if (roamExtending.current) return;
     roamExtending.current = true;
     try {
-      const batch = await fetchRoamBatch();
-      if (batch.length) await pushRoamTracks(batch, 0, false);
+      const batch = await fetchRoamBatch(1);
+      if (batch.length) {
+        roamTrackListRef.current = [...roamTrackListRef.current, ...batch];
+        await pushRoamTracks(batch, 0, false);
+        const curId = musicPlayer.getCurrentTrack()?.id;
+        if (curId) slideRoamWindow(roamTrackListRef.current, curId);
+      }
     } catch (e) {
       console.warn('[netease] 漫游续推失败', e);
     } finally {
@@ -706,7 +750,12 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   }, [fetchRoamBatch, pushRoamTracks]);
 
   useEffect(() => {
-    if (tab !== 'library') return;
+    // 依赖仅 roamReloadKey（换一批/首次进入自增）。tab/fetchRoamBatch/pushRoamTracks 走 ref/稳定回调，
+    // 避免父组件重渲染导致 effect 清理重跑而二次 setLoading(true)——这是「闪一下又加载中」的根因。
+    if (tabRef.current !== 'library') return;
+    // 已起播且非强制换一批：任何意外的重跑都直接保持已渲染状态，绝不再次转圈。
+    if (roamStartedRef.current && !roamForceReloadRef.current) { setLoading(false); return; }
+    roamForceReloadRef.current = false;
     setPlaylistId(null); // 离开歌单分页模式
     setPlaylistInfo(null);
     setNotice(null);
@@ -719,27 +768,66 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     setOffset(0);
     (async () => {
       try {
-        const list = await fetchRoamBatch();
+        // 首屏策略：只取【第一首】并同步拉取完整播放地址后立即渲染+起播（毫秒级出画面/出声），
+        // 不等整批 8 首、不等全部地址就绪；其余曲目与续推池在后台流式补全，体感上无任何阻塞。
+        const first = await fetchRoamBatch(1);
         if (req !== reqRef.current) return;
-        const safeList = list.length ? list : await getListenNow(50);
-        const finalList = req === reqRef.current ? safeList : list;
-        setTotal(finalList.length);
-        setHasMore(false);
-        setLoading(false);
-        // 进入漫游页：仅当队列中【没有任何已加载曲目】（即从未播放过）时才自动起播漫游首批。
-        // 注意：暂停时 getIsPlaying() 也为 false，但此时当前曲目仍在队列中，不应被漫游列表整体替换并强制起播，
-        // 否则会出现「暂停即自动切换到漫游列表继续播放」的问题。
-        if (!musicPlayer.getCurrentTrack() && finalList.length) {
-          await pushRoamTracks(finalList, 0, true);
+        if (!first.length) {
+          const fallback = await getListenNow(50);
+          if (req !== reqRef.current) return;
+          roamReservoir.current = fallback;
+          const f = fallback.slice(0, 1);
+          if (!f.length) { if (req === reqRef.current) setLoading(false); return; }
+          await startRoamWithFirst(f, req);
+        } else {
+          await startRoamWithFirst(first, req);
         }
       } catch (e: any) {
         if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); }
       }
     })();
-  }, [tab, roamReloadKey, fetchRoamBatch, pushRoamTracks]);
+  }, [tab, roamReloadKey]); // 保留 tab（切到漫游页才加载）；fetchRoamBatch/pushRoamTracks 稳定无需入依赖。
+  // 注意：起播后父组件 registerPlay 可能回写 initialTab 致 tab 抖动而重跑本 effect，
+  // 但 roamStartedRef 守卫会直接 return，绝不再次 setLoading(true)（根治闪一下又加载中）。
+
+  // 首屏首歌：用第一批（仅第一首）立即渲染并起播，随后后台把续推池补满并 append 剩余曲目。
+  const startRoamWithFirst = useCallback(async (first: NeteaseTrack[], req: number) => {
+    // 第一首完整地址（同步取，确保出声即完整，无 0:00 空转）
+    const firstRes = await getSongUrl(first[0].id).catch(() => null);
+    const firstQuality = qualityLabelFromBr(firstRes?.br ?? 0);
+    const playlist: PlayableTrack[] = [trackToPlayable(first[0], firstRes?.url ?? '')];
+    slideRoamWindow(first, first[0].id);
+    setTotal(first.length);
+    setHasMore(false);
+    setLoading(false); // 关键点：第一首就绪立刻解除转圈，UI 毫秒级呈现
+    roamStartedRef.current = true; // 标记已起播，后续任何意外重跑都不得再转圈（根治闪一下又加载中）
+    // 仅当队列为空（从未播放过）才自动起播；暂停态不强制切歌（避免「暂停即跳漫游」）
+    if (!musicPlayer.getCurrentTrack()) {
+      onPlayRef.current(playlist, 0, '漫游电台');
+      const tempId = `roam-${Date.now()}`;
+      onTempPlaylistRef.current?.({
+        id: tempId, name: '漫游电台', coverPath: playlist[0]?.coverPath,
+        tracks: playlist, payload: { kind: 'recommend', name: '漫游电台', tracks: playlist },
+      });
+      setRoamCurrentId(playlist[0]?.id ?? null);
+      roamTrackListRef.current = [...first];
+    } else {
+      // 已暂停在别处：把第一首追加进队列，展示窗口已就绪，不强制起播
+      musicPlayer.appendTracks(playlist);
+      roamTrackListRef.current = [...roamTrackListRef.current, ...first];
+    }
+    // 后台：把续推池补满（fetchRoamBatch 内部会自动 getListenNow(50)），并 append 剩余 7 首 + 并发补地址
+    fetchRoamBatch(7).then((rest) => {
+      if (req !== reqRef.current || !rest.length) return;
+      pushRoamTracks(rest, 0, false); // 续推：空 URL 占位 + 后台并发补地址
+      roamTrackListRef.current = [...roamTrackListRef.current, ...rest];
+    }).catch(() => {});
+  }, [fetchRoamBatch, pushRoamTracks]);
   const refreshRoam = useCallback(() => {
     roamReservoir.current = [];
     setRoamOffset(0);
+    roamStartedRef.current = false; // 允许换一批时重新起播
+    roamForceReloadRef.current = true; // 强制 effect 重跑（无视已起播守卫）
     setRoamReloadKey((k) => k + 1); // 触发上面 effect 重新拉取首批
   }, []);
 
@@ -769,14 +857,21 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
       syncNow();
     };
     const maybeExtend = () => {
-      const len = musicPlayer.getTracks().length;
-      const idx = musicPlayer.getCurrentIndex();
-      if (tab === 'library' && len - 1 - idx <= 2) extendRoam();
-      // 切歌时更新展示的单曲（暂停不会触发 trackChange，故不会刷新单曲）
-      const cur = roamTrackListRef.current.find((t) => `netease-${t.id}` === musicPlayer.getCurrentTrack()?.id) || null;
-      setRoamCurrentId(musicPlayer.getCurrentTrack()?.id ?? null);
+      const curId = musicPlayer.getCurrentTrack()?.id;
+      // 切歌：维护三首展示窗口（当前 + 前后缓冲），实现 abc→bcd 滑动、淘汰 a 的展示语义
+      if (curId) slideRoamWindow(roamTrackListRef.current, curId);
+      const cur = roamTrackListRef.current.find((t) => `netease-${t.id}` === curId) || null;
+      setRoamCurrentId(curId ?? null);
       loadWikiForCurrent(cur);
       syncNow();
+      // 续推判断：窗口"下首"尚未进入播放器队列，或兜底池（reservoir）不足，则单首增量补给。
+      // 不再用固定"队尾剩 2 首"——改为按展示窗口与续推池的实际缺口决定，网络压力被摊薄成涓流。
+      if (tab !== 'library') return;
+      const tracks = musicPlayer.getTracks();
+      const idx = musicPlayer.getCurrentIndex();
+      const nextInQueue = idx >= 0 && idx + 1 < tracks.length;
+      const bufferLow = !nextInQueue || roamReservoir.current.length <= 2;
+      if (bufferLow && !roamExtending.current) extendRoam();
     };
     syncNow();
     setRoamCurrentId(musicPlayer.getCurrentTrack()?.id ?? null);
@@ -786,9 +881,10 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     const unsubPause = musicPlayer.on('pause', syncNow); // 仅更新播放态，不切换/刷新单曲
     // 进入漫游页时若队列右侧缓冲不足，先补一批（保证播放衔接）
     if (tab === 'library') {
-      const len = musicPlayer.getTracks().length;
+      const tracks = musicPlayer.getTracks();
       const idx = musicPlayer.getCurrentIndex();
-      if (len - 1 - idx <= 2) extendRoam();
+      const nextInQueue = idx >= 0 && idx + 1 < tracks.length;
+      if ((!nextInQueue || roamReservoir.current.length <= 2) && !roamExtending.current) extendRoam();
     }
     return () => {
       unsubTrackChange();
