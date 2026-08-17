@@ -91,6 +91,10 @@ const ALLOWED_NETEASE_PATH_PREFIXES: &[&str] = &[
     "/weapi/v3/discovery/recommend/songs",
     // 私人 FM（漫游）
     "/weapi/v1/radio/get",
+    // 会员信息查询（黑胶VIP/红V等级、到期、自动续费）
+    "/weapi/music-vip-membership/",
+    // 「看广告免费听」活动查询与领券尝试（B3 手动触发，受冷却保护）
+    "/weapi/ad/",
 ];
 
 // 3) 允许的 HTTP 方法（仅 POST，无 GET/PUT/DELETE）

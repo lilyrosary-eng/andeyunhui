@@ -12,6 +12,8 @@ import {
   getMvPlayable,
   getArtistDetail, getArtistAlbums, getArtistAllSongs, getArtistMvs, getArtistDesc, getSimilarArtists,
   getAlbumDetail, subscribeAlbum,
+  getVipInfo, getAdFreeTab,
+  type NeteaseVipInfo, type NeteaseAdFreeTab,
   type NeteaseTrack, type NeteaseProfile, type NeteasePlaylistItem,
   type NeteaseArtist, type NeteaseArtistAlbum, type NeteaseMvItem, type NeteaseSimilarArtist,
   type NeteaseAlbum, type AlbumDetailResult,
@@ -167,6 +169,12 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const [qrLoading, setQrLoading] = useState(false);
   const pollRef = useRef<number | null>(null);
 
+  // 会员信息（A 任务）：黑胶VIP/红V等级、到期、自动续费
+  const [vipInfo, setVipInfo] = useState<NeteaseVipInfo | null>(null);
+  const [vipLoading, setVipLoading] = useState(false);
+  // 「看广告免费听」活动（B 任务 · B4：查询展示 + 官方跳转）
+  const [adTab, setAdTab] = useState<NeteaseAdFreeTab | null>(null);
+
   useEffect(() => { setTab(initialTab); }, [initialTab]);
 
   // profile 变化时回传父组件，用于模块抽屉同步登录态
@@ -255,10 +263,32 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     }
   }, []);
 
+  // 拉取会员信息 + 「看广告免费听」活动状态（A + B 查询层）
+  const fetchVipAndAd = useCallback(async () => {
+    if (!isLoggedIn()) return;
+    setVipLoading(true);
+    try {
+      const [vip, ad] = await Promise.allSettled([getVipInfo(), getAdFreeTab()]);
+      if (vip.status === 'fulfilled') setVipInfo(vip.value);
+      if (ad.status === 'fulfilled') setAdTab(ad.value);
+    } catch (e) {
+      console.warn('[netease] 会员/活动信息获取失败', e);
+    } finally {
+      setVipLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!isLoggedIn()) return;
     fetchProfile(true);
   }, [fetchProfile]);
+
+  // 进入「我的账号」tab 时刷新会员与活动信息（同时刷新冷却剩余）
+  useEffect(() => {
+    if (tab === 'login' && loggedIn) {
+      fetchVipAndAd();
+    }
+  }, [tab, loggedIn, fetchVipAndAd]);
 
   const startQrLogin = useCallback(async () => {
     setQrLoading(true);
@@ -290,6 +320,8 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
             setQrStatus('登录成功！正在获取资料…');
             // 登录成功后立即拉取用户资料和歌单；登录态已确定，获取失败也不应直接退出
             fetchProfile(false, false);
+            // 同步拉取会员信息 + 「看广告免费听」活动状态
+            fetchVipAndAd();
           }
         } catch (e) {
           if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
@@ -1272,6 +1304,84 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                     )}
                   </div>
                 )}
+
+                {/* 会员信息（A 任务）：黑胶VIP/红V等级、到期、自动续费 */}
+                <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                  <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 mb-2">会员状态</h3>
+                  {vipLoading && !vipInfo ? (
+                    <div className="text-xs text-neutral-400 dark:text-stone-500">查询中…</div>
+                  ) : vipInfo && vipInfo.isVip ? (
+                    <div className="flex flex-col gap-1.5 text-xs text-neutral-600 dark:text-stone-300">
+                      {vipInfo.vipLevel > 0 && (
+                        <div className="flex items-center justify-between">
+                          <span>黑胶VIP</span>
+                          <span className="font-medium text-amber-600 dark:text-amber-400">
+                            Lv.{vipInfo.vipLevel}
+                            {vipInfo.expireTime > 0 ? ` · 至 ${new Date(vipInfo.expireTime).toLocaleDateString()}` : ''}
+                          </span>
+                        </div>
+                      )}
+                      {vipInfo.redVipLevel > 0 && (
+                        <div className="flex items-center justify-between">
+                          <span>红V认证</span>
+                          <span className="font-medium text-red-500 dark:text-red-400">Lv.{vipInfo.redVipLevel}</span>
+                        </div>
+                      )}
+                      {vipInfo.musicPackage && (
+                        <div className="flex items-center justify-between">
+                          <span>音乐包</span>
+                          <span className="font-medium">Lv.{vipInfo.musicPackage.vipLevel}{vipInfo.musicPackage.expireTime > 0 ? ` · 至 ${new Date(vipInfo.musicPackage.expireTime).toLocaleDateString()}` : ''}</span>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between">
+                        <span>自动续费</span>
+                        <span className={vipInfo.autoRenew ? 'text-emerald-500' : 'text-neutral-400'}>{vipInfo.autoRenew ? '已开启' : '未开启'}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-neutral-400 dark:text-stone-500">当前账号无会员</div>
+                  )}
+                </div>
+
+                {/* 「看广告免费听」活动（B 任务 · B4：查询展示 + 官方跳转领取） */}
+                <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                  <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 mb-2">看广告免费听</h3>
+                  {adTab ? (
+                    <div className="text-xs text-neutral-600 dark:text-stone-300 mb-2">
+                      {adTab.available
+                        ? `${adTab.title || '看广告免费听'}：活动进行中，当前剩余免费听 ${Math.round(adTab.remainSeconds / 60)} 分钟`
+                        : '当前暂无活动'}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-neutral-400 dark:text-stone-500 mb-2">活动状态查询中…</div>
+                  )}
+                  <button
+                    onClick={() => {
+                      const u = adTab?.actionUrl;
+                      if (!u) return;
+                      // 官方 deeplink：跳转到网易云客户端看广告领取。领券需易盾反作弊 token + 真实广告 reqId，
+                      // 无法直接后端硬连（B3 已验证返回 400），故引导用户走官方路径。
+                      // 注意：sandbox webview 的 window.open 会被 Tauri 拦截，orpheus:// 等自定义协议也不被
+                      // webview 交给系统处理；必须经宿主 opener 命令（open_external_url）由系统拉起网易云客户端。
+                      const host = window.__HOST_API__;
+                      if (host && typeof host.invoke === 'function') {
+                        Promise.resolve(host.invoke('open_external_url', { url: u })).catch((err: unknown) => {
+                          console.warn('[music] 打开官方领券链接失败:', err);
+                          alert('未检测到网易云桌面客户端，无法打开 orpheus:// 链接。请安装官方客户端后重试：https://music.163.com/download');
+                        });
+                      } else if (location) {
+                        location.href = u;
+                      }
+                    }}
+                    disabled={!adTab?.actionUrl}
+                    className="btn-press w-full px-3 py-2 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 text-sm hover:bg-amber-500/25 transition-colors disabled:opacity-50"
+                  >
+                    {adTab?.actionTitle || '前往官方领取免费听'}
+                  </button>
+                  <div className="mt-1.5 text-[10px] text-neutral-400 dark:text-stone-500">
+                    需安装网易云桌面客户端；点击将尝试唤起客户端观看广告领取。若提示“无法打开 orpheus 链接”，说明未安装客户端或协议未注册，请前往 https://music.163.com/download 安装。
+                  </div>
+                </div>
 
                 <div>
                   <div className="flex items-center justify-between mb-3">

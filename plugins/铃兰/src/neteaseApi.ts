@@ -461,6 +461,10 @@ const PATHS = {
   albumSub: '/album/sub',
   // 歌曲百科（手机版网易云「歌曲百科」）：eapi /api/song/wiki/summary，参数为歌曲 id
   songWiki: '/song/wiki',
+  // 会员信息（黑胶VIP/红V等级、到期、自动续费）：weapi /api/music-vip-membership/front/vip/info
+  vipInfo: '/api/music-vip-membership/front/vip/info',
+  // 「看广告免费听」活动查询：weapi /api/ad/homepage/free/tab/extend/v2（B 查询层，B4 后备）
+  adFreeTab: '/api/ad/homepage/free/tab/extend/v2',
 };
 
 function resolveModule(path: string, params: Record<string, any>): { uri: string; data: Record<string, any>; crypto: CryptoKind } {
@@ -548,6 +552,12 @@ function resolveModule(path: string, params: Record<string, any>): { uri: string
       return { uri: params.t === 1 ? '/api/album/sub' : '/api/album/unsub', data: { id: params.id }, crypto: 'weapi' };
     case PATHS.songWiki:
       return { uri: '/api/song/wiki/summary', data: { id: params.id, e_r: true, c_version: 'u17' }, crypto: 'eapi' };
+    case PATHS.vipInfo:
+      // 会员信息：请求体为空，身份从登录态 cookie 解析。返回 associator/redVipLevel 等。
+      return { uri: '/api/music-vip-membership/front/vip/info', data: {}, crypto: 'weapi' };
+    case PATHS.adFreeTab:
+      // 「看广告免费听」活动查询：entrance 固定 FREE_LISTEN_RN，无广告凭证依赖。
+      return { uri: '/api/ad/homepage/free/tab/extend/v2', data: { entrance: 'FREE_LISTEN_RN' }, crypto: 'weapi' };
     default:
       throw new Error(`未实现的网易云接口: ${path}`);
   }
@@ -719,7 +729,7 @@ async function post(endpoint: string, data: Record<string, any>): Promise<any> {
     }
   }
   if (typeof parsed.body === 'string') {
-    try { return JSON.parse(parsed.body); } catch { return { raw: parsed.body }; }
+    try { return JSON.parse(parsed.body); } catch { return { raw: parsed.body, status: parsed.status }; }
   }
   return parsed.body || {};
 }
@@ -1053,6 +1063,132 @@ export async function getUserAccount(): Promise<NeteaseProfile | null> {
     vipType: p?.vipType ?? acc?.vipType ?? 0,
   };
 }
+
+// ============ 会员信息（A 任务） ============
+export interface NeteaseVipInfo {
+  /** 是否任意会员（黑胶/红V/音乐包任一有效） */
+  isVip: boolean;
+  /** 黑胶VIP等级（0=非黑胶） */
+  vipLevel: number;
+  /** 黑胶VIP到期时间戳（ms），0=无 */
+  expireTime: number;
+  /** 是否自动续费 */
+  autoRenew: boolean;
+  /** 红V等级（0=非红V） */
+  redVipLevel: number;
+  /** 音乐包信息（若有） */
+  musicPackage?: { vipLevel: number; expireTime: number };
+  /** 原始返回（供 UI 自由取用） */
+  raw: any;
+}
+
+/**
+ * 查询会员信息（黑胶VIP/红V/音乐包等级、到期、自动续费）。
+ * 走 weapi /api/music-vip-membership/front/vip/info，请求体空，身份从登录态解析。
+ */
+export async function getVipInfo(): Promise<NeteaseVipInfo | null> {
+  const r = await neteaseRequest(PATHS.vipInfo, {});
+  console.log('[netease] vipInfo raw keys:', Object.keys(r || {}), 'code:', r?.code, 'msg:', r?.msg || r?.message || '');
+  if (!r || (r.code !== undefined && r.code !== 200)) return null;
+  const assoc = r?.data?.associator || r?.associator || {};
+  const redplus = r?.data?.redplus || r?.redplus || {};
+  const musicPkg = r?.data?.musicPackage || r?.musicPackage || {};
+  const vipLevel = Number(assoc?.vipLevel ?? 0) || 0;
+  const redVipLevel = Number(redplus?.vipLevel ?? r?.redVipLevel ?? 0) || 0;
+  const expireTime = Number(assoc?.expireTime ?? 0) || 0;
+  const isVip = vipLevel > 0 || redVipLevel > 0 || !!musicPkg?.expireTime;
+  return {
+    isVip,
+    vipLevel,
+    expireTime,
+    autoRenew: !!assoc?.isSign || !!assoc?.isAutoRenew || !!assoc?.isSignDeductible,
+    redVipLevel,
+    musicPackage: musicPkg?.vipLevel ? { vipLevel: Number(musicPkg.vipLevel), expireTime: Number(musicPkg.expireTime) || 0 } : undefined,
+    raw: r,
+  };
+}
+
+// ============ 「看广告免费听」活动（B 任务，B4：查询展示 + 官方跳转） ============
+export interface NeteaseAdFreeTab {
+  /** 活动是否在线/可参与 */
+  available: boolean;
+  /** 当前剩余免费听时长（秒），活动返回里取 */
+  remainSeconds: number;
+  /** 官方冷却（秒），若有 */
+  officialCooldownSec: number;
+  /** 活动标题（如「看视频 免费听VIP歌曲」） */
+  title?: string;
+  /** 按钮文案（如「领30分钟」） */
+  actionTitle?: string;
+  /** 官方跳转/领券用的 deeplink，形如 orpheus://nm/motivationAd/show?adPosition=...&source=...&resourceId=... */
+  actionUrl?: string;
+  /** 从 actionUrl 解析出的领券必需字段 */
+  adPosition?: string;
+  adSource?: string;
+  resourceId?: string;
+  /** actionUrl 内的 ext JSON 串（含 preExtraInfo 等），领券时回传 */
+  ext?: string;
+  /** 原始返回 */
+  raw: any;
+}
+
+/**
+ * 查询「看广告免费听」活动状态（B 查询层，B4 后备）。
+ * 返回是否在线、剩余免费听时长，供 UI 展示 + 官方跳转入口。
+ */
+/** 从 orpheus://nm/motivationAd/show?adPosition=...&source=...&resourceId=...&ext=... 解析领券必需字段 */
+function parseAdActionUrl(url?: string): { adPosition?: string; adSource?: string; resourceId?: string; ext?: string } {
+  if (!url) return {};
+  try {
+    const q = url.includes('?') ? url.split('?', 2)[1] : url;
+    const params = new URLSearchParams(q);
+    const out: { adPosition?: string; adSource?: string; resourceId?: string; ext?: string } = {};
+    const adPosition = params.get('adPosition');
+    const source = params.get('source');
+    const resourceId = params.get('resourceId');
+    const ext = params.get('ext');
+    if (adPosition) out.adPosition = adPosition;
+    if (source) out.adSource = source;
+    if (resourceId) out.resourceId = resourceId;
+    if (ext) out.ext = ext;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export async function getAdFreeTab(): Promise<NeteaseAdFreeTab | null> {
+  const r = await neteaseRequest(PATHS.adFreeTab, {});
+  console.log('[netease] adFreeTab raw keys:', Object.keys(r || {}), 'code:', r?.code, 'msg:', r?.msg || r?.message || '');
+  if (!r || (r.code !== undefined && r.code !== 200)) return null;
+  // 剩余时长字段名可能多变，广撒网抓取
+  const remain = Number(
+    r?.data?.remainDuration ?? r?.data?.remainTime ?? r?.data?.freeListenRemain ?? r?.remainDuration ?? 0,
+  ) || 0;
+  const officialCooldown = Number(
+    r?.data?.cooldown ?? r?.data?.nextGainTime ?? r?.data?.interval ?? r?.cooldown ?? 0,
+  ) || 0;
+  const actionUrl: string | undefined =
+    r?.data?.actionUrl ?? r?.data?.actionInfo?.actionUrl ?? r?.actionUrl;
+  const parsed = parseAdActionUrl(actionUrl);
+  return {
+    available: !!(r?.data?.available ?? r?.data ?? remain > 0),
+    remainSeconds: remain,
+    officialCooldownSec: officialCooldown,
+    title: r?.data?.title ?? r?.title,
+    actionTitle: r?.data?.actionTitle ?? r?.actionTitle,
+    actionUrl,
+    adPosition: parsed.adPosition,
+    adSource: parsed.adSource,
+    resourceId: parsed.resourceId,
+    ext: parsed.ext,
+    raw: r,
+  };
+}
+
+// 「看广告免费听」领券（B3 硬连）：经实测 ad/listening/rights/gain 返回 HTTP 400，
+// 因官方领券需易盾反作弊 token 下发的真实广告 reqId，无法后端伪造。故已废弃 B3，
+// 改走 B4（查询展示 + 官方跳转领取，见 NeteaseView）。以下接口保留查询层，领券接口不再调用。
 
 // 我的歌单：weapi /api/user/playlist
 export interface NeteasePlaylistItem {
