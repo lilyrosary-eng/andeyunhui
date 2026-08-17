@@ -30,6 +30,7 @@ interface Track {
   durationSecs: number;
   coverPath?: string;
   quality?: string;       // 实际播放音质标签（Hi-Res/无损/高品质/标准）
+  mvPath?: string;        // 本地关联的 MV 视频文件路径（右键「插入 MV」绑定）
 }
 
 type PlayMode = 'list' | 'single' | 'random';

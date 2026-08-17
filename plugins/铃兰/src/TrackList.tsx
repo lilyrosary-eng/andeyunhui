@@ -5,7 +5,7 @@ const { useState, useEffect, useCallback, useRef } = React;
 const hostApi = window.__HOST_API__;
 import { musicPlayer } from './musicPlayer';
 import { formatTime } from '../../_shared/utils';
-import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon, CloudIcon } from '../../_shared/icons';
+import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon, CloudIcon, VideoIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 
 interface Track {
@@ -16,6 +16,7 @@ interface Track {
   album: string;
   durationSecs: number;
   coverPath?: string;
+  mvPath?: string;
 }
 
 interface OtherPlaylist {
@@ -40,8 +41,10 @@ interface TrackListProps {
   onResetCover?: (track: Track) => void;
   onRescanTrack?: (track: Track) => void;
   onEditTrack?: (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => void;
-  // 下载单曲（网易云源）：传入后右键菜单出现「下载」项；track.id 形如 netease-{数字}。
-  onDownloadTrack?: (track: Track) => void;
+  // 插入 MV：传入后右键菜单出现「插入 MV」项（用于本地歌曲）。
+  onAttachMv?: (track: Track) => void;
+  // 播放 MV：track.mvPath 存在时行内显示 MV 图标，点击调用。
+  onPlayMv?: (track: Track) => void;
   loadLyricsText?: (track: Track) => Promise<{ text: string; source: string }>;
   saveTrackLyrics?: (track: Track, lyrics: string, saveToLrc: boolean) => Promise<void>;
 }
@@ -63,7 +66,8 @@ export function TrackList({
   onResetCover,
   onRescanTrack,
   onEditTrack,
-  onDownloadTrack,
+  onAttachMv,
+  onPlayMv,
   loadLyricsText,
   saveTrackLyrics,
 }: TrackListProps) {
@@ -409,11 +413,11 @@ export function TrackList({
           className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
           children: T('music.track.editInfo'),
         }) : null,
-        onDownloadTrack ? React.createElement('button', {
-          key: 'download',
-          onClick: () => { onDownloadTrack(track); setOpenMenuIndex(null); },
+        onAttachMv ? React.createElement('button', {
+          key: 'attach-mv',
+          onClick: () => { onAttachMv(track); setOpenMenuIndex(null); },
           className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
-          children: '下载',
+          children: '插入 MV',
         }) : null,
         React.createElement('div', {
           key: 'divider',
@@ -655,6 +659,16 @@ export function TrackList({
                         fill: favoriteIds?.has(track.id || track.filePath) ? 'currentColor' : 'none',
                       }))
                     : null,
+                  // MV 播放按钮（本地歌曲已插入 MV）
+                  onPlayMv && track.mvPath ? React.createElement('button', {
+                    key: 'mv',
+                    onClick: (e: React.MouseEvent) => {
+                      e.stopPropagation();
+                      onPlayMv(track);
+                    },
+                    className: 'btn-jelly p-1.5 rounded-full flex-shrink-0 text-sky-500 hover:text-sky-600 hover:bg-sky-500/10 transition-colors',
+                    title: '播放 MV',
+                  }, React.createElement(VideoIcon, { size: 16 })) : null,
                   // 「...」按钮
                   React.createElement('div', {
                     key: 'more',

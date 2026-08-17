@@ -1825,7 +1825,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   // 单曲列表（推荐流 / 歌单详情共用），不含加载态与空态
   function renderBodyInner() {
     // 仅在歌单详情 / 搜索结果页提供「下载全部」一键入队（推荐流是无限流，不提供以免误下载整库）。
-    const showDownloadAll = viewState.kind === 'playlist' || tab === 'search';
+    const showDownloadAll = playlistId != null || tab === 'search';
     const handleDownloadAll = () => {
       const downloadDir = localStorage.getItem(NETEASE_DOWNLOAD_DIR_KEY) || '';
       if (!downloadDir) {

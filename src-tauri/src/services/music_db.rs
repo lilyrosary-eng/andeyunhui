@@ -104,6 +104,10 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS track_cover_override (
             file_path  TEXT PRIMARY KEY,
             cover_path TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS track_mv_path (
+            file_path TEXT PRIMARY KEY,
+            mv_path   TEXT NOT NULL
         );",
     )
     .map_err(|e| format!("初始化音乐表结构失败: {}", e))?;
@@ -558,6 +562,58 @@ pub fn music_get_player_state(app: AppHandle, key: String) -> Result<Option<Stri
 pub struct CoverOverrideRow {
     pub file_path: String,
     pub cover_path: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MvPathRow {
+    pub file_path: String,
+    pub mv_path: String,
+}
+
+/// 写入/更新本地 MV 绑定：把 file_path 关联的 MV 视频路径持久化到 SQLite，
+/// 使所有引用该 file_path 的歌单都能渲染「MV 播放」图标。
+pub fn music_set_mv_path(app: AppHandle, file_path: String, mv_path: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute(
+        "INSERT INTO track_mv_path (file_path, mv_path) VALUES (?1, ?2)
+         ON CONFLICT(file_path) DO UPDATE SET mv_path = ?2",
+        params![file_path, mv_path],
+    )
+    .map_err(|e| format!("写入 MV 绑定失败: {}", e))?;
+    Ok(())
+}
+
+/// 删除本地 MV 绑定（如用户取消 MV 关联）。
+pub fn music_delete_mv_path(app: AppHandle, file_path: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute(
+        "DELETE FROM track_mv_path WHERE file_path = ?1",
+        params![file_path],
+    )
+    .map_err(|e| format!("删除 MV 绑定失败: {}", e))?;
+    Ok(())
+}
+
+/// 读取全部本地 MV 绑定映射（前端挂载/扫描后加载，应用到内存 track）。
+pub fn music_get_all_mv_paths(app: AppHandle) -> Result<Vec<MvPathRow>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn
+        .prepare("SELECT file_path, mv_path FROM track_mv_path")
+        .map_err(|e| format!("查询 MV 绑定失败: {}", e))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(MvPathRow {
+                file_path: r.get(0)?,
+                mv_path: r.get(1)?,
+            })
+        })
+        .map_err(|e| format!("读取 MV 绑定失败: {}", e))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("MV 绑定行解析失败: {}", e))?);
+    }
+    Ok(out)
 }
 
 /// 写入封面覆盖：把 file_path 的封面固定为 cover_path（手动设封面持久化真源）。

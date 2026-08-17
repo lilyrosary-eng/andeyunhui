@@ -105,7 +105,12 @@ function fixSymlinksIn(root, skipSet) {
     if (entry.isSymbolicLink()) {
       counts.total++;
       let ok = false;
-      try { fs.statSync(full); ok = true; } catch (e) { ok = false; }
+      try {
+        // On Windows a broken reparse point (symlink whose target is gone)
+        // can still pass fs.statSync, so verify the resolved target exists.
+        fs.realpathSync(full);
+        ok = true;
+      } catch (e) { ok = false; }
       if (ok) { counts.working++; continue; }
       try {
         const target = fs.readlinkSync(full);
@@ -144,8 +149,29 @@ function materializeTopLevel() {
       const src = path.join(nm, e.name);
       const dest = path.join(NM, e.name);
       if (e.name.startsWith('@')) {
-        // scoped: always merge children so missing sub-packages get added
-        mergeDir(src, dest);
+        // scoped: merge children so missing sub-packages get added.
+        // BUT if the top-level dir already exists with a STALE version
+        // (e.g. an old @esbuild/win32-x64 left from a prior materialization
+        // while the real .pnpm copy was upgraded), mergeDir won't replace it
+        // and we get a host/binary version mismatch (esbuild crash). Detect a
+        // version drift and force a clean replacement instead of a merge.
+        let stale = false;
+        try {
+          const dPkg = path.join(dest, 'package.json');
+          const sPkg = path.join(resolvePath(src), 'package.json');
+          if (fs.existsSync(dPkg) && fs.existsSync(sPkg)) {
+            const dv = JSON.parse(fs.readFileSync(dPkg, 'utf8')).version;
+            const sv = JSON.parse(fs.readFileSync(sPkg, 'utf8')).version;
+            if (dv && sv && dv !== sv) {
+              console.log(`Version drift ${rel(dest)}: ${dv} -> ${sv}, replacing`);
+              removeLink(dest);
+              fs.rmSync(dest, { recursive: true, force: true });
+              stale = true;
+            }
+          }
+        } catch (e) {}
+        if (stale) copyDirRecursive(resolvePath(src), dest);
+        else mergeDir(src, dest);
       } else if (!fs.existsSync(dest)) {
         // unscoped: copy only if currently missing
         mergeDir(src, dest);

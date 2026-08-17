@@ -204,6 +204,59 @@ function applyCoverOverrides(playlists: Playlist[], overrides: Map<string, strin
   return result;
 }
 
+// 从 SQLite 加载本地 MV 绑定映射（右键「插入 MV」持久化真源）
+async function loadMvPathsFromDb(): Promise<Map<string, string>> {
+  try {
+    const rows = await hostApi.invoke<{ filePath: string; mvPath: string }[]>('music_get_all_mv_paths');
+    const m = new Map<string, string>();
+    for (const r of rows) {
+      const k = normPath(r.filePath);
+      if (k) m.set(k, r.mvPath);
+    }
+    return m;
+  } catch (e) {
+    console.warn('[Music] 加载 MV 绑定失败:', e);
+    return new Map();
+  }
+}
+
+// 把本地 MV 绑定应用到内存 playlists（所有同 file_path 的 track 同步 mvPath）
+// 规范化路径作为 MV 绑定 key：统一分隔符、去首尾空白、盘符小写，
+// 避免同一文件因 filePath 与 id 的斜杠方向/大小写差异导致跨会话匹配失败。
+function normPath(p?: string): string {
+  if (!p) return '';
+  return p
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '/')
+    .trim()
+    .replace(/^[a-z]:/i, (m) => m.toLowerCase());
+}
+
+function applyMvPaths(playlists: Playlist[], mvMap: Map<string, string>): Playlist[] {
+  if (mvMap.size === 0) return playlists;
+  let matched = 0;
+  let changed = 0;
+  const result = playlists.map((p) => ({
+    ...p,
+    tracks: p.tracks.map((t) => {
+      // 同时尝试 filePath 与 id（双向匹配），覆盖存的字段与取的字段不一致的场景
+      const keys = [normPath(t.filePath), normPath(t.id)].filter(Boolean);
+      let mv: string | undefined;
+      for (const k of keys) {
+        if (mvMap.has(k)) { mv = mvMap.get(k); break; }
+      }
+      if (mv && mv !== t.mvPath) {
+        matched++;
+        changed++;
+        return { ...t, mvPath: mv };
+      }
+      return t;
+    }),
+  }));
+  console.log('[Music][探针] applyMvPaths: 歌单数=', playlists.length, 'MV 绑定数=', mvMap.size, '匹配曲目=', matched, '实际变更=', changed);
+  return result;
+}
+
 // 文件读为 base64（用于手动设封面）
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -964,6 +1017,8 @@ function MusicModule() {
   });
   // 封面覆盖映射（file_path -> cover_path）：手动设封面的持久化真源；扫描后叠加到内存 track
   const [coverOverrides, setCoverOverrides] = useState<Map<string, string>>(new Map());
+  // 本地 MV 绑定映射（file_path -> mv_path）：右键「插入 MV」持久化真源；扫描后叠加到内存 track
+  const [mvPathMap, setMvPathMap] = useState<Map<string, string>>(new Map());
   const [loading, setLoading] = useState(rootPaths.length > 0);
   const [scanProgress, setScanProgress] = useState<MusicScanProgress | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -1037,15 +1092,18 @@ function MusicModule() {
       loadCustomPlaylistsFromDb(),
       loadFavoritesFromDb(),
       loadCoverOverridesFromDb(),
+      loadMvPathsFromDb(),
       hostApi.invoke<string | null>('music_get_player_state', { key: 'volume' }).catch(() => null),
       hostApi.invoke<string | null>('music_get_player_state', { key: 'play_mode' }).catch(() => null),
-    ]).then(([customs, favs, overrides, volState, modeState]) => {
+    ]).then(([customs, favs, overrides, mvMap, volState, modeState]) => {
       if (cancelled) return;
-      console.log('[Music][探针] 挂载恢复: 自定义歌单=', customs.length, '收藏=', favs.size, '封面覆盖=', overrides.size);
+      console.log('[Music][探针] 挂载恢复: 自定义歌单=', customs.length, '收藏=', favs.size, '封面覆盖=', overrides.size, 'MV 绑定=', mvMap.size);
       if (favs.size > 0) setFavorites(favs);
       if (overrides.size > 0) setCoverOverrides(overrides);
+      if (mvMap.size > 0) setMvPathMap(mvMap);
       if (customs.length > 0) {
-        const applied = applyCoverOverrides(customs, overrides);
+        let applied = applyCoverOverrides(customs, overrides);
+        applied = applyMvPaths(applied, mvMap);
         setPlaylists(prev => [...prev.filter(p => p.type !== 'custom' && p.id !== '__favorite__'), ...applied]);
       }
       // 恢复上次音量 / 播放模式（SQLite 优先，回退音乐播放器默认）
@@ -1143,13 +1201,13 @@ function MusicModule() {
       // 2. 如果全都有缓存，直接显示
       if (pathsToScan.length === 0) {
         const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
-        setPlaylists(prev => dedupePlaylistsById(applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], overrides)));
+        setPlaylists(prev => dedupePlaylistsById(applyMvPaths(applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], overrides), mvPathMap)));
         // 恢复上次播放的歌单（模块切换/重载后保持选中状态，目录与自定义均匹配）
         const savedId = musicPlayer.currentPlaylistId;
         const candidates = [...dedupedDir, ...getCustomPlaylistsFromStorage()];
         const restored = savedId ? candidates.find(p => p.id === savedId) : null;
         const selected = restored || dedupedDir[0] || getCustomPlaylistsFromStorage()[0] || null;
-        const applied = selected ? applyCoverOverrides([selected], overrides)[0] : null;
+        const applied = selected ? applyMvPaths(applyCoverOverrides([selected], overrides), mvPathMap)[0] : null;
         console.log('[Music][探针] 缓存恢复 selectedPlaylist:', applied?.id, '曲目数=', applied?.tracks.length ?? 0, '有封面数=', applied?.tracks.filter((t: Track) => t.coverPath).length ?? 0, 'coverOverrides.size=', coverOverrides.size);
         setSelectedPlaylist(applied);
         // 精确进度续播：恢复上次曲目位置（不自动播放，用户点播放继续）
@@ -1198,12 +1256,12 @@ function MusicModule() {
       // 从当前 state 合并自定义歌单（避免覆盖扫描期间用户新建的歌单），
       // 同时支持恢复上次选中的自定义歌单
       const dedupedDir = dedupDirectoryPlaylists(allDirectoryPlaylists);
-      setPlaylists(prev => applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], overrides));
+      setPlaylists(prev => applyMvPaths(applyCoverOverrides([...dedupedDir, ...prev.filter(p => p.type === 'custom')], overrides), mvPathMap));
       const savedId = musicPlayer.currentPlaylistId;
       const candidates = [...dedupedDir, ...getCustomPlaylistsFromStorage()];
       const restored = savedId ? candidates.find(p => p.id === savedId) : null;
       const selected = restored || dedupedDir[0] || getCustomPlaylistsFromStorage()[0] || null;
-      const applied = selected ? applyCoverOverrides([selected], overrides)[0] : null;
+      const applied = selected ? applyMvPaths(applyCoverOverrides([selected], overrides), mvPathMap)[0] : null;
       console.log('[Music][探针] 扫描完成恢复 selectedPlaylist:', applied?.id, '曲目数=', applied?.tracks.length ?? 0, '有封面数=', applied?.tracks.filter((t: Track) => t.coverPath).length ?? 0, 'coverOverrides.size=', coverOverrides.size);
       setSelectedPlaylist(applied);
       // 精确进度续播：恢复上次曲目位置（不自动播放，用户点播放继续）
@@ -1503,22 +1561,22 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
   }, []);
 
   // 封面覆盖映射加载/变更后，确保已加载的歌单曲目也应用覆盖。
-  // 修复：启动时扫描 effect 可能在 overrides 尚未加载完成时就已经 setPlaylists，
-  // 导致重启后封面不显示；监听 coverOverrides 可兜底重新叠加。
+  // 修复：启动时扫描 effect 可能在 overrides/mvMap 尚未加载完成时就已经 setPlaylists，
+  // 导致重启后封面 / MV 图标不显示；监听二者可兜底重新叠加。
   useEffect(() => {
-    console.log('[Music][探针] coverOverrides effect 触发, size=', coverOverrides.size);
-    if (coverOverrides.size === 0) return;
+    console.log('[Music][探针] overrides/mvMap effect 触发, coverOverrides.size=', coverOverrides.size, 'mvPathMap.size=', mvPathMap.size);
+    if (coverOverrides.size === 0 && mvPathMap.size === 0) return;
     setPlaylists(prev => {
-      console.log('[Music][探针] coverOverrides effect -> setPlaylists, prev 长度=', prev.length);
-      return applyCoverOverrides(prev, coverOverrides);
+      console.log('[Music][探针] overrides/mvMap effect -> setPlaylists, prev 长度=', prev.length);
+      return applyMvPaths(applyCoverOverrides(prev, coverOverrides), mvPathMap);
     });
     setSelectedPlaylist(prev => {
       if (!prev) return prev;
-      const applied = applyCoverOverrides([prev], coverOverrides)[0];
-      console.log('[Music][探针] coverOverrides effect -> setSelectedPlaylist, 曲目数=', applied.tracks.length, '有封面数=', applied.tracks.filter((t: Track) => t.coverPath).length);
+      const applied = applyMvPaths(applyCoverOverrides([prev], coverOverrides), mvPathMap)[0];
+      console.log('[Music][探针] overrides/mvMap effect -> setSelectedPlaylist, 曲目数=', applied.tracks.length, '有封面数=', applied.tracks.filter((t: Track) => t.coverPath).length, '有 MV 数=', applied.tracks.filter((t: Track) => t.mvPath).length);
       return applied;
     });
-  }, [coverOverrides]);
+  }, [coverOverrides, mvPathMap]);
 
   // 手动设封面：更新 override map + 内存所有同 file_path 曲目封面
   const handleSetCover = useCallback(async (track: Track) => {
@@ -1583,6 +1641,49 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       console.warn('[music] 下载失败:', e);
       alert('下载失败：' + (e?.message || e?.toString?.() || '未知错误'));
     }
+  }, []);
+
+  // 插入本地 MV：选择视频文件并持久化到 SQLite，与当前歌单类型无关。
+  const handleAttachMv = useCallback(async (track: Track) => {
+    const fp = normPath(track.filePath || track.id);
+    if (!fp) return;
+    let files: string[] = [];
+    try {
+      files = await hostApi.invoke<string[]>('pick_file', {
+        multiple: false,
+        filters: [{ name: 'Video', extensions: ['mp4', 'mkv', 'mov', 'avi', 'webm', 'flv'] }],
+      });
+    } catch (err) {
+      console.warn('[Music] 选择 MV 失败:', err);
+      return;
+    }
+    if (!files || files.length === 0) return;
+    const mvPath = files[0];
+    try {
+      await hostApi.invoke('music_set_mv_path', { filePath: fp, mvPath });
+      const next = new Map(mvPathMap);
+      next.set(fp, mvPath);
+      setMvPathMap(next);
+      // 同步所有引用该 file_path 的 track（所有歌单 + 当前选中歌单）
+      setPlaylists(prev => applyMvPaths(prev, next));
+      setSelectedPlaylist(prev => (prev ? applyMvPaths([prev], next)[0] : prev));
+      console.log('[Music] 插入 MV:', fp, '->', mvPath);
+    } catch (e) {
+      console.warn('[Music] 保存 MV 绑定失败:', fp, e);
+      alert('保存 MV 绑定失败：' + (e?.message || e?.toString?.() || '未知错误'));
+    }
+  }, [mvPathMap]);
+
+  // 播放本地 MV：跳转到「玉兰」视频模块，使用 asset URL 直接播放。
+  const handlePlayMv = useCallback(async (track: Track) => {
+    if (!track.mvPath) return;
+    const artistStr = Array.isArray(track.artist) ? track.artist.join('/') : track.artist || '';
+    dispatchOpenWith('video', [{
+      url: hostApi.convertFileSrc(track.mvPath),
+      name: [track.title, artistStr].filter(Boolean).join(' - '),
+      artist: artistStr,
+      cover: track.coverPath,
+    }]);
   }, []);
 
   // 编辑曲目标签信息并写回文件 + 更新内存
@@ -2191,6 +2292,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               onRescanTrack={handleRescanTrack}
               onEditTrack={handleEditTrack}
               onDownloadTrack={handleDownloadTrack}
+              onAttachMv={handleAttachMv}
+              onPlayMv={handlePlayMv}
               loadLyricsText={loadLyricsText}
               saveTrackLyrics={saveTrackLyrics}
             />

@@ -2232,8 +2232,8 @@ pub async fn show_recorder_select(app: AppHandle) -> Result<(), String> {
     // 无 stale 列表问题；已移除 WinEventHook 看门狗与 window-list-changed（覆盖窗可见期间持续
     // EnumWindows 风暴、且 z 序不可靠反而误导命中）。耗时的窗口枚举仍移到后台线程，避免阻塞主线程。
     // 枚举完成后推送列表（供 clipToWorkArea 找任务栏），命中测试不受影响。
+    // 关键：后台线程绝不可 clone WebviewWindow（Rc 非原子），统一用 app.emit_to 发事件。
     let app_b = app.clone();
-    let win_b = win.clone();
     tauri::async_runtime::spawn(async move {
         let windows = tauri::async_runtime::spawn_blocking({
             let app_c = app_b.clone();
@@ -2248,19 +2248,12 @@ pub async fn show_recorder_select(app: AppHandle) -> Result<(), String> {
             "[录屏区域] show_recorder_select: ox={}, oy={}, scale={}, 窗口数={}",
             vx, vy, scale, windows.len()
         );
-        let _ = win_b.emit(
-            "recorder-select-ready",
-            serde_json::json!({ "ox": vx, "oy": vy, "scale": scale, "windows": windows }),
-        );
+        let payload = serde_json::json!({ "ox": vx, "oy": vy, "scale": scale, "windows": windows });
+        let _ = app_b.emit_to(RECORDER_SELECT_LABEL, "recorder-select-ready", payload.clone());
         // 首开兜底：首个覆盖窗 WebView2 冷启动 + 事件竞态常导致首次列表丢失，150ms 重推同一份列表。
-        let win_f = win_b.clone();
-        let windows_f = windows.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(150));
-            let _ = win_f.emit(
-                "recorder-select-ready",
-                serde_json::json!({ "ox": vx, "oy": vy, "scale": scale, "windows": windows_f }),
-            );
+            let _ = app_b.emit_to(RECORDER_SELECT_LABEL, "recorder-select-ready", payload);
         });
     });
 

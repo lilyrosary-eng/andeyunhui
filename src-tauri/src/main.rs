@@ -452,8 +452,25 @@ fn main() {
             }
 
             // 加载托盘模式配置
-            let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-            std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
+            let app_data_raw = app.path().app_data_dir().map_err(|e| format!("[L455] app_data_dir 失败: {e}"))?;
+            // 注：app_data 在 prepare_data_root 中可能被重定向为跨卷 junction（重解析点），
+            // 指向用户所选数据根下的 <根>/data。Windows 对跨卷 junction 的 create_dir_all /
+            // 目录遍历会因安全限制报 os error 183(已存在) / 448(不受信任的装入点) 并 panic 整个 app。
+            // 因此这里把 junction 链接解析为真实目标路径，后续所有 fs 操作都基于真实路径，
+            // 绕开跨卷重解析点限制。解析失败（非 junction / 无权限）则回退原路径。
+            let app_data = std::fs::canonicalize(&app_data_raw)
+                .unwrap_or_else(|_| app_data_raw.clone());
+            if !app_data.exists() {
+                std::fs::create_dir_all(&app_data)
+                    .or_else(|e| {
+                        if e.kind() == std::io::ErrorKind::AlreadyExists {
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
+                    })
+                    .map_err(|e| format!("[L456] create_dir_all(app_data) 失败: {e}"))?;
+            }
 
             // 初始化会话日志系统（替换 env_logger）：每次启动创建新会话日志文件，保留最近 10 个
             if let Err(e) = log_service::init_logger(&app_data) {
@@ -462,7 +479,7 @@ fn main() {
 
             // 确保「中转站」暂存目录存在（打包后运行时自动创建，无需随包附带）
             let dropzone_dir = app_data.join("transfer_station").join("dropzone");
-            std::fs::create_dir_all(&dropzone_dir).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(&dropzone_dir).map_err(|e| format!("[L465] create_dir_all(dropzone) 失败: {e}"))?;
 
             // 插件与依赖直接从 bundled-plugins/ 与 external-deps/ 加载（开发时项目根，打包后 resource_dir）
             // 不再复制到 app_data/extensions/，确保开发与打包路径一致
@@ -581,7 +598,7 @@ fn main() {
                 }
                 tauri::image::Image::new(&[0u8; 32 * 32 * 4], 32, 32)
             });
-            let tray = TrayIconBuilder::new()
+            let tray = match TrayIconBuilder::new()
                 .icon(tray_icon)
                 .tooltip("安得云荟")
                 .on_tray_icon_event(|tray, event| {
@@ -605,7 +622,17 @@ fn main() {
                         }
                     }
                 })
-                .build(app)?;
+                .build(app)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    // 兜底：托盘创建失败（常见于上一次进程未干净退出残留窗口类/
+                    // 图标资源，报 os error 183/1412）不应让整个 app 起不来。
+                    // 仅打印 detail 继续启动，下次干净退出后自愈。
+                    eprintln!("[Tray] 托盘创建失败（已跳过，app 继续启动）: {e:?}");
+                    return Ok(());
+                }
+            };
             app.manage(TrayHolder(tray));
             }
             app.manage(std::sync::Mutex::new(andeyunhui_lib::screenshot::ScreenshotData::default()));
@@ -1038,6 +1065,9 @@ fn main() {
             music_get_all_cover_overrides,
             music_delete_cover_override,
             music_clean_cover_cache,
+            music_set_mv_path,
+            music_delete_mv_path,
+            music_get_all_mv_paths,
             // ========== 网易云 WebAPI 代理（Phase 3）：TS 加密 + Rust 无 CORS 转发 ==========
             andeyunhui_lib::services::netease_proxy::netease_http_post,
             andeyunhui_lib::services::netease_proxy::netease_register_guest,

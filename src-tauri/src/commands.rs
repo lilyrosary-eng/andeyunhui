@@ -2367,6 +2367,27 @@ pub fn music_clean_cover_cache(app: tauri::AppHandle, keep: Vec<String>) -> Resu
     music_db::music_clean_cover_cache(app, keep)
 }
 
+#[tauri::command]
+pub fn music_set_mv_path(
+    app: tauri::AppHandle,
+    file_path: String,
+    mv_path: String,
+) -> Result<(), String> {
+    music_db::music_set_mv_path(app, file_path, mv_path)
+}
+
+#[tauri::command]
+pub fn music_delete_mv_path(app: tauri::AppHandle, file_path: String) -> Result<(), String> {
+    music_db::music_delete_mv_path(app, file_path)
+}
+
+#[tauri::command]
+pub fn music_get_all_mv_paths(
+    app: tauri::AppHandle,
+) -> Result<Vec<music_db::MvPathRow>, String> {
+    music_db::music_get_all_mv_paths(app)
+}
+
 // ================= 视频模块命令 =================
 
 /// 扫描视频根目录，流式推送结果（适合大目录）
