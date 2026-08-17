@@ -16,20 +16,20 @@ import {
 } from './kugouApi';
 
 const BASE = 'https://login-user.kugou.com';
-const CLIENTVER = '8131';
+const CLIENTVER = '20489';
 const SRCAPPID = '2919';
 const PLAT = 4;
 
 // 走 Rust 代理发起 GET（自动算 signature），返回 parsed JSON body
 async function proxyGet(path: string, params: Record<string, any>): Promise<any> {
   const dev = getDevice();
-  // 设备相关公共参数（真实抓包：mid/uuid 同值，dfid 独立）
+  // 设备相关公共参数（当前客户端：uuid 固定 '-'，dfid/mid 独立）
   const full: Record<string, any> = {
-    appid: '1014',
+    appid: '1001',
     clientver: CLIENTVER,
-    clienttime: Date.now(),
+    clienttime: Math.floor(Date.now() / 1000),
     mid: dev.mid,
-    uuid: dev.mid,
+    uuid: dev.uuid,
     dfid: dev.dfid,
     plat: PLAT,
     srcappid: SRCAPPID,
@@ -77,7 +77,7 @@ export interface KugouQrState {
 export async function kugouQrCreate(): Promise<KugouQrState> {
   const body = await proxyGet('/v2/qrcode', {
     type: 1,
-    qrcode_txt: 'https://h5.kugou.com/apps/loginQRCode/html/index.html?appid=1014&',
+    qrcode_txt: 'https://h5.kugou.com/apps/loginQRCode/html/index.html?appid=1005&',
   });
   if (body?.error_code || body?.status === 0) {
     const ec = body?.error_code ?? body?.status;
@@ -93,7 +93,12 @@ export async function kugouQrCreate(): Promise<KugouQrState> {
 // 2) 轮询扫码状态（真实接口：login-user.kugou.com/v2/get_userinfo_qrcode?qrcode=key）
 // 顶层 status：0=过期 1=等待扫码 2=已扫描待确认 4=授权成功（无 3）
 export async function kugouQrCheck(qrcode: string): Promise<{ status: string; auth?: KugouAuth }> {
-  const body = await proxyGet('/v2/get_userinfo_qrcode', { qrcode });
+  const body = await proxyGet('/v2/get_userinfo_qrcode', {
+    qrcode,
+    appid: '1005',
+    plat: PLAT,
+    srcappid: SRCAPPID,
+  });
   // 注意：接口顶层 status 只是「接口成功标志」(恒为 1)，真正的扫码状态在 body.data.status
   // （0=过期 1=等待 2=已扫待确认 4=授权成功）。务必优先取 data.status，否则会永远读到顶层 1 卡在 wait。
   const code = Number(body?.data?.status ?? body?.status ?? -1);

@@ -31,6 +31,8 @@ const ALLOWED_KUGOU_HOSTS: &[&str] = &[
     // 直连后端 CDN（绕过 gateway 的 x-router 路由层，免签名、稳定）
     "mobilecdnbj.kugou.com",
     "msearchcdnbj.kugou.com",
+    // 实测可直连的旧移动端接口（搜索/榜单免签名可用）
+    "mobilecdn.kugou.com",
 ];
 
 // 2) 仅允许这些路径前缀（只读、低风险；登录类仅放通扫码登录相关路径）
@@ -58,6 +60,14 @@ const ALLOWED_KUGOU_PATH_PREFIXES: &[&str] = &[
     // Android 登录态私有接口：我的歌单 / 歌单详情
     "/v7/get_all_list",
     "/v3/get_list_info",
+    // 当前 Android API 体系（对齐社区 kugou_api）：
+    // 搜索 / 榜单 / 播放 / 歌单歌曲 / 歌词
+    "/v3/search",
+    "/ocean/v6/rank",
+    "/v5/url",
+    "/pubsongs/v2",
+    "/v1/search",
+    "/download",
 ];
 
 // 3) 允许的 HTTP 方法（仅 POST/GET）

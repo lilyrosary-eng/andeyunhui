@@ -623,13 +623,22 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery]);
 
+  function currentQuality(): 'standard' | 'high' | 'lossless' {
+    try {
+      const v = localStorage.getItem('kugou.playQuality');
+      if (v === 'high' || v === 'lossless') return v;
+    } catch { /* ignore */ }
+    return 'standard';
+  }
+
   async function playTrackList(sourceTracks: KugouTrack[], startIndex: number, playlistName: string) {
     try {
       // 取真实登录态：KugouView 作用域无 auth state，必须从 localStorage 读取，
-      // 否则 getSongUrl 永远走游客态，播放取链会返回 err_code 30020（版权限制）。
+      // 否则 getSongUrl 永远走游客态，播放取链会返回版权限制。
       const auth = readKugouAuth();
+      const quality = currentQuality();
       setPlayingId(sourceTracks[startIndex]?.id ?? null);
-      const { url, br } = await getSongUrl(sourceTracks[startIndex]?.hash || sourceTracks[startIndex]?.id, sourceTracks[startIndex]?.albumId, auth);
+      const { url, br } = await getSongUrl(sourceTracks[startIndex]?.hash || sourceTracks[startIndex]?.id, sourceTracks[startIndex]?.albumId, auth, quality);
       if (!url) {
         setError('该歌曲暂无可播放地址（可能需会员或已下架）');
         return;
@@ -638,7 +647,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       const playables: PlayableTrack[] = [];
       for (const tk of sourceTracks) {
         try {
-          const r = await getSongUrl(tk.hash || tk.id, tk.albumId, auth);
+          const r = await getSongUrl(tk.hash || tk.id, tk.albumId, auth, quality);
           playables.push(trackToPlayable(tk, r.url, qualityLabelFromBr(r.br)));
         } catch {
           playables.push(trackToPlayable(tk, '', ''));
