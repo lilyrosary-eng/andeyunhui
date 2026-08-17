@@ -1664,8 +1664,14 @@ fn format_system_time(time: Option<std::time::SystemTime>) -> String {
 /// rustls-tls + no_proxy（禁用系统代理避免被拦截），带浏览器 UA 与大小上限保护。
 /// save_path 由前端经 dialog 选好（含文件名与扩展名），Rust 仅负责落地。
 #[tauri::command]
-pub async fn download_file(url: String, save_path: String) -> Result<(), String> {
+pub async fn download_file(
+    app: tauri::AppHandle,
+    url: String,
+    save_path: String,
+    progress_event: Option<String>,
+) -> Result<(), String> {
     use std::io::Write;
+    use futures_util::StreamExt;
     // 安全上限：单曲一般不超 100MB，超限直接拒绝，避免异常大文件写爆磁盘。
     const MAX_BYTES: u64 = 100 * 1024 * 1024;
     let client = reqwest::Client::builder()
@@ -1686,19 +1692,66 @@ pub async fn download_file(url: String, save_path: String) -> Result<(), String>
     if total > MAX_BYTES {
         return Err(format!("文件过大（{}MB），已超过下载上限", total / 1024 / 1024));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("读取下载内容失败: {}", e))?;
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err("文件过大，已超过下载上限".to_string());
-    }
     let path = PathBuf::from(&save_path);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let mut f = fs::File::create(&path).map_err(|e| format!("创建文件失败: {}", e))?;
-    f.write_all(&bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+
+    // 流式下载：边读边写，并按固定间隔 emit 进度事件（downloaded/total/speed）。
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    let mut last_emit_bytes: u64 = 0;
+    if let Some(ref ev) = progress_event {
+        let _ = app.emit(ev, serde_json::json!({
+            "downloaded": 0,
+            "total": total,
+            "speed": 0,
+        }));
+    }
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("读取下载内容失败: {}", e))?;
+        let len = chunk.len() as u64;
+        if downloaded + len > MAX_BYTES {
+            let _ = fs::remove_file(&path);
+            return Err("文件过大，已超过下载上限".to_string());
+        }
+        f.write_all(&chunk).map_err(|e| format!("写入文件失败: {}", e))?;
+        downloaded += len;
+        // 每 ~200ms 上报一次，或收尾时上报，避免高频事件风暴。
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(last_emit).as_millis();
+        if progress_event.is_some() && (elapsed >= 200 || downloaded == total) {
+            let speed = if elapsed > 0 {
+                (downloaded - last_emit_bytes) as f64 / (elapsed as f64 / 1000.0)
+            } else {
+                0.0
+            };
+            if let Some(ref ev) = progress_event {
+                let _ = app.emit(ev, serde_json::json!({
+                    "downloaded": downloaded,
+                    "total": total,
+                    "speed": speed,
+                }));
+            }
+            last_emit = now;
+            last_emit_bytes = downloaded;
+        }
+    }
+    // 收尾上报 100%。
+    if let Some(ref ev) = progress_event {
+        let _ = app.emit(ev, serde_json::json!({
+            "downloaded": downloaded,
+            "total": total,
+            "speed": 0,
+        }));
+    }
+    if total > 0 && downloaded != total {
+        // 服务端提前断流，文件不完整，删除避免产生坏文件。
+        let _ = fs::remove_file(&path);
+        return Err("下载中断，文件不完整".to_string());
+    }
     Ok(())
 }
 

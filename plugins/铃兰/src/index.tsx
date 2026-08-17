@@ -17,6 +17,7 @@ import NeteaseSettingsPanel from './NeteaseSettingsPanel';
 import KugouStatsView from './KugouStatsView';
 import KugouSettingsPanel from './KugouSettingsPanel';
 import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
+import { NETEASE_DOWNLOAD_DIR_KEY } from './NeteaseDownloadManager';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { dispatchOpenWith, registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
@@ -870,12 +871,23 @@ function groupTracksIntoPlaylists(tracks: Track[], allRootPaths: string[]): Play
     if (!groups.has(key)) groups.set(key, { name, tracks: [] });
     groups.get(key)!.tracks.push(t);
   }
-  return Array.from(groups.entries()).map(([id, g]) => ({
+  const playlists = Array.from(groups.entries()).map(([id, g]) => ({
     id,
     name: g.name,
     tracks: g.tracks,
     type: 'directory' as const,
   }));
+  // 网易云下载的曲目统一归入「来自网易云」歌单（按路径含「来自网易云」目录段识别）。
+  const neteaseTracks = tracks.filter((t) => /\/来自网易云\/|\\来自网易云\\/.test(t.filePath.replace(/\\/g, '/')));
+  if (neteaseTracks.length > 0) {
+    playlists.unshift({
+      id: 'netease-imported',
+      name: '来自网易云',
+      tracks: neteaseTracks,
+      type: 'directory' as const,
+    });
+  }
+  return playlists;
 }
 
 // 跨根目录去重：父根递归扫描与子根单独扫描可能命中同一音轨，
@@ -992,7 +1004,7 @@ function MusicModule() {
   const [showModuleDrawer, setShowModuleDrawer] = useState(false);
   // 网易云视图：currentView==='netease' 时主区显示网易云，初始二级 tab 由抽屉子项点击决定
   const [neteaseOpen, setNeteaseOpen] = useState(false);
-  const [neteaseTab, setNeteaseTab] = useState<'listen' | 'library' | 'radio' | 'search' | 'login'>('listen');
+  const [neteaseTab, setNeteaseTab] = useState<'listen' | 'library' | 'radio' | 'search' | 'downloads' | 'login'>('listen');
   const [neteaseProfile, setNeteaseProfile] = useState<NeteaseProfile | null>(null);
   // 网易云红心状态（受控源）：列表与底部播放栏共用，确保两侧同步
   const [neteaseLiked, setNeteaseLiked] = useState<Set<number>>(new Set());
@@ -1207,6 +1219,28 @@ function MusicModule() {
       hostApi.invoke('cancel_scan').catch(() => {});
     };
   }, [rootPaths, rescanFlag]);
+
+  // 网易云下载完成 → 自动把「来自网易云」目录加入铃兰扫描根，触发增量入库。
+  // 依赖 rootPaths 变化（addRootPathEphemeral 会更新它）从而进入上面的扫描流程。
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let canceled = false;
+    (async () => {
+      if (!hostApi || typeof hostApi.listen !== 'function') return;
+      unlisten = await hostApi.listen('netease-download-done', (event: { payload: { savePath: string; libraryDir: string } }) => {
+        const libraryDir = event?.payload?.libraryDir;
+        if (!libraryDir) return;
+        // 仅当该目录尚未在扫描根时加入，避免重复触发整库重扫。
+        if (!rootPaths.some((p) => p.replace(/[\\/]+$/, '') === libraryDir.replace(/[\\/]+$/, ''))) {
+          addRootPathEphemeral(libraryDir);
+        }
+      });
+    })();
+    return () => {
+      canceled = true;
+      if (unlisten) unlisten();
+    };
+  }, [rootPaths, addRootPathEphemeral]);
 
   // 收藏集合变化 或 曲目列表变化 → 重建「我的收藏」歌单并注入 playlists（置顶）。
   // 依赖 playlists 以在目录扫描完成后用最新曲目填充收藏歌单的 tracks；
@@ -1542,8 +1576,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     const id = Number(m[1]);
     const title = track.title || '';
     const artist = Array.isArray(track.artist) ? track.artist.join('/') : track.artist || '';
+    const downloadDir = localStorage.getItem(NETEASE_DOWNLOAD_DIR_KEY) || '';
     try {
-      await downloadNeteaseTrack(id, title, artist);
+      await downloadNeteaseTrack(id, title, artist, undefined, { downloadDir });
     } catch (e: any) {
       console.warn('[music] 下载失败:', e);
       alert('下载失败：' + (e?.message || e?.toString?.() || '未知错误'));
@@ -2202,7 +2237,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           setKugouOpen(false);
           setShowModuleDrawer(false);
         }}
-        onSelectNetease={(key: 'listen' | 'library' | 'radio' | 'search' | 'login') => {
+        onSelectNetease={(key: 'listen' | 'library' | 'radio' | 'search' | 'downloads' | 'login') => {
           setNeteaseTab(key);
           setNeteaseOpen(true);
           setKugouOpen(false);

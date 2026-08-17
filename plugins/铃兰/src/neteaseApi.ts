@@ -997,13 +997,16 @@ export function getNeteaseQualityLabel(br = getNeteaseQualityBr()): string {
   return NETEASE_QUALITY_OPTIONS.find((o) => o.br === br)?.label || qualityLabelFromBr(br);
 }
 
-// 下载单曲：取链（按指定 br 或当前偏好）→ 保存对话框选路径 → Rust 落地。
-// 失败向上抛，由调用方 toast 提示。文件名带音质标签便于区分多音质文件。
+// 下载单曲：取链（按指定 br 或当前偏好）→ 落盘。
+// downloadDir 已设置时直接落到 `<downloadDir>/来自网易云/<文件名>`（不弹框）；
+// 否则回退保存对话框。onProgress 回调返回 {downloaded,total,speed}（字节），
+// 由前端驱动下载页进度/速度展示。文件名带音质标签保持诚信。
 export async function downloadNeteaseTrack(
   id: number,
   title: string,
   artist: string,
   br?: number,
+  opts?: { downloadDir?: string; onProgress?: (p: { downloaded: number; total: number; speed: number }) => void },
 ): Promise<void> {
   const requestBr = br ?? getNeteaseQualityBr();
   const res = await getSongUrl(id, requestBr);
@@ -1011,23 +1014,48 @@ export async function downloadNeteaseTrack(
   const qLabel = qualityLabelFromBr(res.br || requestBr);
   const safe = (s: string) => (s || '未知').replace(/[\\/:*?"<>|]/g, '_').slice(0, 80);
   const ext = res.type?.includes('flac') ? 'flac' : res.type?.includes('mp3') ? 'mp3' : 'm4a';
-  const defaultName = `${safe(title)} - ${safe(artist)} [${qLabel}].${ext}`;
-  try {
-    const { save } = await import('@tauri-apps/plugin-dialog');
-    const picked = await save({
-      defaultPath: defaultName,
-      filters: [{ name: '音频', extensions: [ext] }],
-    });
-    if (!picked) return; // 用户取消
-    const host = (window as any).__HOST_API__;
-    if (host && typeof host.invoke === 'function') {
-      await host.invoke('download_file', { url: res.url, savePath: picked });
-    } else {
-      throw new Error('宿主不可用，无法下载');
+  const fileName = `${safe(title)} - ${safe(artist)} [${qLabel}].${ext}`;
+
+  // 决定落盘路径：有下载目录则直接落到 <dir>/来自网易云/，否则弹框让用户选。
+  let savePath: string;
+  const downloadDir = opts?.downloadDir?.trim();
+  if (downloadDir) {
+    // 归一化：去掉尾部斜杠，拼上「来自网易云」子目录，避免每次下载都让用户选路径。
+    const base = downloadDir.replace(/[\\/]+$/, '');
+    savePath = `${base}/来自网易云/${fileName}`;
+  } else {
+    try {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const picked = await save({
+        defaultPath: fileName,
+        filters: [{ name: '音频', extensions: [ext] }],
+      });
+      if (!picked) return; // 用户取消
+      savePath = picked;
+    } catch (e: any) {
+      if (e?.message?.includes('cancel') || e?.toString?.().includes('cancel')) return;
+      throw e;
     }
-  } catch (e: any) {
-    if (e?.message?.includes('cancel') || e?.toString?.().includes('cancel')) return;
-    throw e;
+  }
+
+  const host = (window as any).__HOST_API__;
+  if (!host || typeof host.invoke !== 'function') {
+    throw new Error('宿主不可用，无法下载');
+  }
+  // 唯一进度事件名，配合 Rust download_file 的 progress_event 流式上报。
+  const taskId = `${id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const progressEvent = `netease-download-progress-${taskId}`;
+  let unlisten: (() => void) | null = null;
+  if (opts?.onProgress && host.listen) {
+    unlisten = await host.listen(progressEvent, (e: any) => {
+      const p = e?.payload || {};
+      opts!.onProgress!({ downloaded: p.downloaded || 0, total: p.total || 0, speed: p.speed || 0 });
+    });
+  }
+  try {
+    await host.invoke('download_file', { url: res.url, savePath, progressEvent });
+  } finally {
+    if (unlisten) unlisten();
   }
 }
 

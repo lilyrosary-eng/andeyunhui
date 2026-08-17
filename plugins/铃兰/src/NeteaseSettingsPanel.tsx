@@ -89,7 +89,11 @@ export default function NeteaseSettingsPanel({ onClose }: NeteaseSettingsPanelPr
   const pickDir = async () => {
     try {
       const res = await (window as any).__HOST_API__?.invoke?.("pick_directory");
-      if (res) update(KEYS.downloadDir, String(res), setDownloadDir);
+      if (res) {
+        update(KEYS.downloadDir, String(res), setDownloadDir);
+        // 通知下载页（同标签页内）实时刷新目录显示。
+        window.dispatchEvent(new Event('netease-download-dir-changed'));
+      }
     } catch {
       /* ignore */
     }

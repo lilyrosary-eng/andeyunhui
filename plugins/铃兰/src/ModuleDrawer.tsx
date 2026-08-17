@@ -2,7 +2,7 @@
 import React from "react";
 const { useState, useEffect } = React;
 import { X } from 'lucide-react';
-import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon, ListenNowIcon, LibraryIcon, RadioIcon, SearchIcon, UserIcon } from '../../_shared/icons';
+import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon, ListenNowIcon, LibraryIcon, RadioIcon, SearchIcon, UserIcon, DownloadIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import type { NeteaseProfile } from './neteaseApi';
 
@@ -13,8 +13,8 @@ interface ModuleDrawerProps {
   isNeteaseOpen: boolean;
   // 点击「本地音乐」时回调：应关闭网易云并关闭抽屉
   onSelectLocalMusic: () => void;
-  // 点击网易云折叠菜单子项时回调：key 为 listen/library/radio/search/login
-  onSelectNetease?: (key: 'listen' | 'library' | 'radio' | 'search' | 'login') => void;
+  // 点击网易云折叠菜单子项时回调：key 为 listen/library/radio/search/downloads/login
+  onSelectNetease?: (key: 'listen' | 'library' | 'radio' | 'search' | 'downloads' | 'login') => void;
   // 网易云当前登录资料，null 表示未登录
   neteaseProfile?: NeteaseProfile | null;
   // 当前是否已切换到酷狗音乐模块
@@ -34,11 +34,12 @@ function HomeIcon() {
 }
 
 // 折叠菜单子项（网易云注入功能下的各个部分）
-const neteaseItems: { key: 'listen' | 'library' | 'radio' | 'search' | 'login'; icon: React.ReactElement }[] = [
+const neteaseItems: { key: 'listen' | 'library' | 'radio' | 'search' | 'login' | 'downloads'; icon: React.ReactElement }[] = [
   { key: 'listen', icon: React.createElement(ListenNowIcon, { size: 16 }) },
   { key: 'library', icon: React.createElement(LibraryIcon, { size: 16 }) },
   { key: 'radio', icon: React.createElement(RadioIcon, { size: 16 }) },
   { key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
+  { key: 'downloads', icon: React.createElement(DownloadIcon, { size: 16 }) },
   { key: 'login', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 

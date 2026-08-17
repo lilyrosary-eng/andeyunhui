@@ -1029,6 +1029,8 @@ export const zhCN: Record<string, string> = {
   'music.moduleDrawer.netease.radioDesc': '订阅与发现',
   'music.moduleDrawer.netease.search': '搜索',
   'music.moduleDrawer.netease.searchDesc': '找歌找专辑',
+  'music.moduleDrawer.netease.downloads': '下载',
+  'music.moduleDrawer.netease.downloadsDesc': '下载队列与进度',
   'music.moduleDrawer.netease.login': '未登录',
   'music.moduleDrawer.netease.loginDesc': '登录 / 注册',
   // 酷狗折叠菜单（游客态四项：热榜 / 漫游 / 搜索 / 我的）

@@ -33,7 +33,7 @@ walkdir = "2"
 rayon = "1"
 # 局域网传输客户端禁止走系统代理：default-features 含 proxy/system-proxy，会把 LAN 请求路由到
 # （可能失效的）系统代理导致「接收可/发送不可」。这里关掉默认特性，仅保留 json + rustls-tls。
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "stream"] }
 # RAG 向量存储后端：bundled 模式从源码编译 SQLite，零外部依赖、跨平台（Windows 构建友好）
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"

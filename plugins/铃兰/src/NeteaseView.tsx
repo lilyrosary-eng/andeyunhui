@@ -1,6 +1,6 @@
 /// <reference path="../global.d.ts" />
 import React from 'react';
-import { ChevronLeft, ChevronRight, Sparkles, Download } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Sparkles, Download, X } from 'lucide-react';
 import {
   CloudIcon, HeartIcon, MusicIcon, PlayIcon, SearchIcon, VideoIcon,
 } from '../../_shared/icons';
@@ -8,7 +8,7 @@ import { T } from '../../_shared/pluginRuntime';
 import {
   searchSongs, getListenNow, getPersonalFm, getTopList, getPersonalizedPlaylists, getSongUrl, getSongWiki, isLoggedIn, logoutNetease,
   neteaseQrKey, neteaseQrCreate, neteaseQrCheck,
-  downloadNeteaseTrack, NETEASE_QUALITY_OPTIONS,
+  NETEASE_QUALITY_OPTIONS,
   getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr, likeNeteaseSong, subscribeNeteasePlaylist, isLikedPlaylist,
   getMvPlayable,
   getArtistDetail, getArtistAlbums, getArtistAllSongs, getArtistMvs, getArtistDesc, getSimilarArtists,
@@ -21,6 +21,11 @@ import {
 } from './neteaseApi';
 import { musicPlayer, type Track } from './musicPlayer';
 import { MusicHeader } from './MusicHeader';
+import {
+  neteaseDownloadManager,
+  NETEASE_DOWNLOAD_DIR_KEY,
+  type NeteaseDownloadItem,
+} from './NeteaseDownloadManager';
 
 const hostApi = window.__HOST_API__;
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
@@ -38,12 +43,13 @@ function NeteaseTrackDownload({ track }: { track: NeteaseTrack }) {
   }, [open]);
   const handlePick = async (br: number) => {
     setOpen(false);
-    try {
-      await downloadNeteaseTrack(track.id, track.name, track.artist, br);
-    } catch (err: any) {
-      if (err?.message?.includes('cancel') || String(err).includes('cancel')) return;
-      alert('下载失败：' + (err?.message || err?.toString?.() || '未知错误'));
+    const downloadDir = localStorage.getItem(NETEASE_DOWNLOAD_DIR_KEY) || '';
+    if (!downloadDir) {
+      alert('请先在「网易云设置」中选择下载目录，下载会自动落到「<目录>/来自网易云/」。');
+      return;
     }
+    // 入队：点击音质档位即把该曲加入下载队列（在下载页查看进度）。
+    neteaseDownloadManager.enqueue([{ id: track.id, name: track.name, artist: track.artist }], br);
   };
   return (
     <div className="relative" ref={ref}>
@@ -73,7 +79,121 @@ function NeteaseTrackDownload({ track }: { track: NeteaseTrack }) {
   );
 }
 
-export type NeteaseTab = 'listen' | 'library' | 'radio' | 'search' | 'login';
+export type NeteaseTab = 'listen' | 'library' | 'radio' | 'search' | 'login' | 'downloads';
+
+// 下载页：与「搜索 / 漫游」同级（ModuleDrawer 子项切入）。展示队列的进度 / 速度 / 存放路径，
+// 数据来自 neteaseDownloadManager 单例。未设置下载目录时引导去网易云设置。
+function DownloadsTab() {
+  const [queue, setQueue] = useState<NeteaseDownloadItem[]>([]);
+  const [downloadDir, setDownloadDir] = useState<string>('');
+
+  useEffect(() => {
+    setDownloadDir(localStorage.getItem(NETEASE_DOWNLOAD_DIR_KEY) || '');
+    const unsub = neteaseDownloadManager.subscribe(setQueue);
+    const onStorage = () => setDownloadDir(localStorage.getItem(NETEASE_DOWNLOAD_DIR_KEY) || '');
+    window.addEventListener('storage', onStorage);
+    // 同标签页内设置变更不会触发 storage 事件，额外监听自定义事件（设置面板 set 时广播）。
+    const onDirChange = () => setDownloadDir(localStorage.getItem(NETEASE_DOWNLOAD_DIR_KEY) || '');
+    window.addEventListener('netease-download-dir-changed', onDirChange as EventListener);
+    return () => {
+      unsub();
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('netease-download-dir-changed', onDirChange as EventListener);
+    };
+  }, []);
+
+  const fmtBytes = (n: number) => {
+    if (!n) return '0 B';
+    const u = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+    return `${(n / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+  };
+  const fmtSpeed = (n: number) => (n > 0 ? `${fmtBytes(n)}/s` : '—');
+
+  const active = queue.filter((q) => q.status === 'queued' || q.status === 'downloading').length;
+  const done = queue.filter((q) => q.status === 'done').length;
+  const failed = queue.filter((q) => q.status === 'error').length;
+
+  return (
+    <section className="py-4 px-1">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2 text-sm text-neutral-500 dark:text-stone-400">
+          <Download size={16} />
+          <span>下载队列</span>
+          {active > 0 && <span className="px-1.5 py-0.5 rounded-full bg-[#f44336]/10 text-[#f44336] dark:text-[#ff8a80] text-xs">{active} 进行中</span>}
+          {done > 0 && <span className="text-xs">已完成 {done}</span>}
+          {failed > 0 && <span className="text-xs text-red-500">{failed} 失败</span>}
+        </div>
+        {queue.length > 0 && (
+          <button
+            onClick={() => neteaseDownloadManager.clearFinished()}
+            className="btn-press text-xs px-2 py-1 rounded-lg text-neutral-500 dark:text-stone-400 hover:bg-neutral-100 dark:hover:bg-stone-700/60 transition-colors"
+          >
+            清除已完成
+          </button>
+        )}
+      </div>
+
+      {!downloadDir && (
+        <div className="mb-3 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 text-xs text-amber-700 dark:text-amber-300">
+          尚未设置网易云下载目录。请到「网易云设置」中选择下载目录，下载会自动落到「&lt;目录&gt;/来自网易云/」，无需每次选路径。
+        </div>
+      )}
+
+      {queue.length === 0 ? (
+        <PlaceholderTab title="下载队列为空" desc="在任意歌曲行的下载按钮选择音质即可入队；或在列表顶部「下载全部」一键入队。" />
+      ) : (
+        <div className="space-y-2">
+          {queue.map((q) => {
+            const pct = q.total > 0 ? Math.min(100, Math.round((q.downloaded / q.total) * 100)) : q.status === 'done' ? 100 : 0;
+            const statusText =
+              q.status === 'downloading' ? `${pct}% · ${fmtSpeed(q.speed)}`
+              : q.status === 'done' ? '已完成'
+              : q.status === 'error' ? `失败：${q.error || '未知'}`
+              : q.status === 'canceled' ? '已取消'
+              : '排队中';
+            return (
+              <div key={q.id} className="flex items-center gap-3 p-2.5 rounded-xl bg-neutral-100/60 dark:bg-stone-800/50">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-neutral-800 dark:text-stone-100 truncate">{q.title}</p>
+                    <span className="shrink-0 text-xs text-neutral-400 dark:text-stone-500">{q.artist}</span>
+                  </div>
+                  <div className="mt-1.5 h-1.5 rounded-full bg-neutral-200 dark:bg-stone-700 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all ${q.status === 'error' ? 'bg-red-500' : 'bg-[#f44336]'}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-xs text-neutral-400 dark:text-stone-500">
+                    <span>{statusText}</span>
+                    <span className="truncate max-w-[60%] text-right" title={q.savePath}>{q.savePath || '（未设目录，将弹框选择）'}</span>
+                  </div>
+                </div>
+                {(q.status === 'queued' || q.status === 'downloading' || q.status === 'error' || q.status === 'done') && (
+                  <button
+                    onClick={() => neteaseDownloadManager.remove(q.id)}
+                    className="btn-press shrink-0 p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:bg-neutral-200/60 dark:hover:bg-stone-700/60 transition-colors"
+                    title="移除"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {downloadDir && (
+        <p className="mt-3 text-xs text-neutral-400 dark:text-stone-500">
+          存放位置：{downloadDir.replace(/[\\/]+$/, '')}/来自网易云/
+        </p>
+      )}
+    </section>
+  );
+}
+
 
 const TAB_TITLE_KEYS: Record<NeteaseTab, string> = {
   listen: 'music.moduleDrawer.netease.listenNow',
@@ -1315,6 +1435,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
           </section>
         )}
         {tab === 'radio' && <PlaceholderTab title={T('music.moduleDrawer.netease.radio')} desc={T('music.moduleDrawer.netease.radioDesc')} />}
+        {tab === 'downloads' && <DownloadsTab />}
         {tab === 'login' && (
           <section className="py-6">
             {loggedIn ? (
@@ -1703,8 +1824,31 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
 
   // 单曲列表（推荐流 / 歌单详情共用），不含加载态与空态
   function renderBodyInner() {
+    // 仅在歌单详情 / 搜索结果页提供「下载全部」一键入队（推荐流是无限流，不提供以免误下载整库）。
+    const showDownloadAll = viewState.kind === 'playlist' || tab === 'search';
+    const handleDownloadAll = () => {
+      const downloadDir = localStorage.getItem(NETEASE_DOWNLOAD_DIR_KEY) || '';
+      if (!downloadDir) {
+        alert('请先在「网易云设置」中选择下载目录，下载会自动落到「<目录>/来自网易云/」。');
+        return;
+      }
+      const list = tracks.map((t) => ({ id: t.id, name: t.name, artist: t.artist }));
+      neteaseDownloadManager.enqueue(list);
+    };
     return (
       <div className="flex flex-col gap-1">
+        {showDownloadAll && (
+          <div className="flex items-center justify-between px-1 py-1.5 mb-1 border-b border-neutral-200/60 dark:border-stone-700/60">
+            <span className="text-xs text-neutral-400 dark:text-stone-500">共 {tracks.length} 首</span>
+            <button
+              onClick={handleDownloadAll}
+              className="btn-press flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg bg-[#f44336]/10 text-[#f44336] dark:text-[#ff8a80] hover:bg-[#f44336]/20 transition-colors"
+              title="将本列表全部加入下载队列"
+            >
+              <Download size={13} /> 下载全部
+            </button>
+          </div>
+        )}
         {tracks.map((t) => (
           <div
             key={t.id}
