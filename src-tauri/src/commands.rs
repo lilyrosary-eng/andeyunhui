@@ -1581,17 +1581,6 @@ pub fn open_plugin_folder(app: tauri::AppHandle, plugin_id: String) -> Result<()
         .map_err(|e| format!("打开文件夹失败: {}", e))
 }
 
-/// 用系统默认方式打开外部链接（http(s)、自定义协议如 orpheus:// 等）。
-/// 沙箱 webview 的 `window.open` 会被 Tauri 拦截，因此插件统一经本命令调用
-/// `tauri_plugin_opener` 的 `open_url`，由系统决定交给浏览器还是注册了该协议的应用。
-#[tauri::command]
-pub fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|e| format!("打开链接失败: {}", e))
-}
-
 // ================= 中转站管理命令 =================
 
 /// 中转站文件信息

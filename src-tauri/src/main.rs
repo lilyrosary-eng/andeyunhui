@@ -954,7 +954,6 @@ fn main() {
             unload_plugin,
             delete_plugin,
             open_plugin_folder,
-            open_external_url,
             // ========== 核心：中转站 / 原生拖拽 ==========
             list_transfer_station_files,
             restore_transfer_station_file,

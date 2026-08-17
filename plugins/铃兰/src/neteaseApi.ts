@@ -1161,9 +1161,15 @@ export async function getAdFreeTab(): Promise<NeteaseAdFreeTab | null> {
   const r = await neteaseRequest(PATHS.adFreeTab, {});
   console.log('[netease] adFreeTab raw keys:', Object.keys(r || {}), 'code:', r?.code, 'msg:', r?.msg || r?.message || '');
   if (!r || (r.code !== undefined && r.code !== 200)) return null;
-  // 剩余时长字段名可能多变，广撒网抓取
+  // 剩余时长字段名可能多变，广撒网抓取。实测接口返回字段为 rightsRemainingTime（秒），
+  // 必须优先取；其余为历史/备选字段。
   const remain = Number(
-    r?.data?.remainDuration ?? r?.data?.remainTime ?? r?.data?.freeListenRemain ?? r?.remainDuration ?? 0,
+    r?.data?.rightsRemainingTime ??
+      r?.data?.remainDuration ??
+      r?.data?.remainTime ??
+      r?.data?.freeListenRemain ??
+      r?.remainDuration ??
+      0,
   ) || 0;
   const officialCooldown = Number(
     r?.data?.cooldown ?? r?.data?.nextGainTime ?? r?.data?.interval ?? r?.cooldown ?? 0,

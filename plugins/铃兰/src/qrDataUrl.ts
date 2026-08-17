@@ -1,4 +1,4 @@
-// 从 MusicStorm 迁移的轻量 QR Code -> dataURL 生成器，用于网易云扫码登录二维码。
+// 轻量 QR Code -> dataURL 生成器，用于网易云扫码登录二维码。
 // https://github.com/chillerlan/php-qrcode / https://github.com/kazuhikoarase/qrcode-generator
 // 这是 TypeScript 移植版，无外部依赖，仅用于客户端生成登录二维码图片。
 

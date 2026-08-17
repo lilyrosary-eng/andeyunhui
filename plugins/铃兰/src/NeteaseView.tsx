@@ -1343,7 +1343,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                   )}
                 </div>
 
-                {/* 「看广告免费听」活动（B 任务 · B4：查询展示 + 官方跳转领取） */}
+                {/* 「看广告免费听」活动（B 任务 · B4：查询展示，领券需官方客户端） */}
                 <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
                   <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 mb-2">看广告免费听</h3>
                   {adTab ? (
@@ -1355,31 +1355,8 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                   ) : (
                     <div className="text-xs text-neutral-400 dark:text-stone-500 mb-2">活动状态查询中…</div>
                   )}
-                  <button
-                    onClick={() => {
-                      const u = adTab?.actionUrl;
-                      if (!u) return;
-                      // 官方 deeplink：跳转到网易云客户端看广告领取。领券需易盾反作弊 token + 真实广告 reqId，
-                      // 无法直接后端硬连（B3 已验证返回 400），故引导用户走官方路径。
-                      // 注意：sandbox webview 的 window.open 会被 Tauri 拦截，orpheus:// 等自定义协议也不被
-                      // webview 交给系统处理；必须经宿主 opener 命令（open_external_url）由系统拉起网易云客户端。
-                      const host = window.__HOST_API__;
-                      if (host && typeof host.invoke === 'function') {
-                        Promise.resolve(host.invoke('open_external_url', { url: u })).catch((err: unknown) => {
-                          console.warn('[music] 打开官方领券链接失败:', err);
-                          alert('未检测到网易云桌面客户端，无法打开 orpheus:// 链接。请安装官方客户端后重试：https://music.163.com/download');
-                        });
-                      } else if (location) {
-                        location.href = u;
-                      }
-                    }}
-                    disabled={!adTab?.actionUrl}
-                    className="btn-press w-full px-3 py-2 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 text-sm hover:bg-amber-500/25 transition-colors disabled:opacity-50"
-                  >
-                    {adTab?.actionTitle || '前往官方领取免费听'}
-                  </button>
                   <div className="mt-1.5 text-[10px] text-neutral-400 dark:text-stone-500">
-                    需安装网易云桌面客户端；点击将尝试唤起客户端观看广告领取。若提示“无法打开 orpheus 链接”，说明未安装客户端或协议未注册，请前往 https://music.163.com/download 安装。
+                    领券需在网易云官方客户端内观看广告完成。本应用仅同步展示活动状态与剩余免费听时长。
                   </div>
                 </div>
 

@@ -85,9 +85,6 @@ const ALLOWED_COMMANDS = new Set([
   // 网易云 WebAPI 代理（Phase 3）：TS 加密 + Rust 无 CORS 转发
   'netease_http_post',
   'netease_register_guest',
-  // 用系统默认方式打开外部链接（http(s)/自定义协议 orpheus:// 等）：sandbox webview 的
-  // window.open 会被 Tauri 拦截，故插件经本命令由宿主 opener 拉起系统注册的应用。
-  'open_external_url',
   // 酷狗 WebAPI 代理（音乐模块）：TS 端 MD5 盐签名 + Rust 无 CORS 转发
   'kugou_http_post',
   // SMTC（任务栏「正在播放」）：前端推送播放状态 + 上报激活模块 + 诊断日志。
