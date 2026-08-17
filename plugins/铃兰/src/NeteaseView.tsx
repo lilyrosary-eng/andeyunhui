@@ -1,6 +1,6 @@
 /// <reference path="../global.d.ts" />
 import React from 'react';
-import { ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Sparkles, Download } from 'lucide-react';
 import {
   CloudIcon, HeartIcon, MusicIcon, PlayIcon, SearchIcon, VideoIcon,
 } from '../../_shared/icons';
@@ -8,6 +8,7 @@ import { T } from '../../_shared/pluginRuntime';
 import {
   searchSongs, getListenNow, getPersonalFm, getTopList, getPersonalizedPlaylists, getSongUrl, getSongWiki, isLoggedIn, logoutNetease,
   neteaseQrKey, neteaseQrCreate, neteaseQrCheck,
+  downloadNeteaseTrack, NETEASE_QUALITY_OPTIONS,
   getUserAccount, getUserPlaylists, neteaseTrackBadges, qualityLabelFromBr, likeNeteaseSong, subscribeNeteasePlaylist, isLikedPlaylist,
   getMvPlayable,
   getArtistDetail, getArtistAlbums, getArtistAllSongs, getArtistMvs, getArtistDesc, getSimilarArtists,
@@ -21,7 +22,56 @@ import {
 import { musicPlayer, type Track } from './musicPlayer';
 import { MusicHeader } from './MusicHeader';
 
+const hostApi = window.__HOST_API__;
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// 网易云歌曲行内「下载」按钮：点击弹出音质档位（128k/192k/320k/无损），选中即按该音质下载。
+// 独立 state 管理菜单开合，避免污染主组件。下载失败以 toast 提示。
+function NeteaseTrackDownload({ track }: { track: NeteaseTrack }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const handlePick = async (br: number) => {
+    setOpen(false);
+    try {
+      await downloadNeteaseTrack(track.id, track.name, track.artist, br);
+    } catch (err: any) {
+      if (err?.message?.includes('cancel') || String(err).includes('cancel')) return;
+      alert('下载失败：' + (err?.message || err?.toString?.() || '未知错误'));
+    }
+  };
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        data-action="download"
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-emerald-500 dark:hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors shrink-0"
+        title="下载（选择音质）"
+      >
+        <Download size={14} />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 z-50 rounded-xl bg-white dark:bg-stone-800 border border-neutral-200 dark:border-stone-700 shadow-lg py-1 w-28">
+          {NETEASE_QUALITY_OPTIONS.map((o) => (
+            <button
+              key={o.br}
+              onClick={(e) => { e.stopPropagation(); handlePick(o.br); }}
+              className="w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-neutral-100 dark:hover:bg-stone-700 transition-colors"
+              title={o.hint}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export type NeteaseTab = 'listen' | 'library' | 'radio' | 'search' | 'login';
 
@@ -1349,7 +1399,9 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                   {adTab ? (
                     <div className="text-xs text-neutral-600 dark:text-stone-300 mb-2">
                       {adTab.available
-                        ? `${adTab.title || '看广告免费听'}：活动进行中，当前剩余免费听 ${Math.round(adTab.remainSeconds / 60)} 分钟`
+                        ? (adTab.remainSeconds > 0
+                            ? `${adTab.title || '看广告免费听'}：活动进行中，当前剩余免费听约 ${Math.round(adTab.remainSeconds / 60)} 分钟`
+                            : `${adTab.title || '看广告免费听'}：活动进行中（剩余免费听时长以网易云官方客户端为准）`)
                         : '当前暂无活动'}
                     </div>
                   ) : (
@@ -1720,6 +1772,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                 <VideoIcon size={15} />
               </button>
             ) : null}
+            <NeteaseTrackDownload track={t} />
             <button
               data-action="like"
               onClick={(e) => handleLike(e, t)}
@@ -2046,6 +2099,7 @@ function DetailDrawer(props: DetailDrawerProps) {
                             <VideoIcon size={14} />
                           </button>
                         )}
+                        <NeteaseTrackDownload track={t} />
                       </button>
                     ))}
                   </div>
@@ -2116,6 +2170,7 @@ function DetailDrawer(props: DetailDrawerProps) {
                               <VideoIcon size={14} />
                             </button>
                           )}
+                          <NeteaseTrackDownload track={t} />
                         </button>
                       ))}
                       {allSongsMore && !allSongsLoading && (
@@ -2333,9 +2388,10 @@ function DetailDrawer(props: DetailDrawerProps) {
                             title="播放 MV（跳转到玉兰）"
                           >
                             <VideoIcon size={14} />
-                          </button>
-                        )}
-                      </div>
+                            </button>
+                            )}
+                            <NeteaseTrackDownload track={t} />
+                            </div>
                     ))}
                   </div>
                 ) : (

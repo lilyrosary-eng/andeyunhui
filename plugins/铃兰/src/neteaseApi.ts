@@ -1232,20 +1232,39 @@ export async function getAdFreeTab(): Promise<NeteaseAdFreeTab | null> {
   if (!r || (r.code !== undefined && r.code !== 200)) return null;
   // 剩余时长字段名可能多变，广撒网抓取。实测接口返回字段为 rightsRemainingTime（秒），
   // 必须优先取；其余为历史/备选字段。
-  const remain = Number(
-    r?.data?.rightsRemainingTime ??
-      r?.data?.remainDuration ??
-      r?.data?.remainTime ??
-      r?.data?.freeListenRemain ??
-      r?.remainDuration ??
-      0,
-  ) || 0;
+  // 候选剩余时长字段（秒）。注意：rightsRemainingTime 是「免费听权益」的剩余有效时间元数据，
+  // 并非「剩余可免费听秒数」，且单位不确定，常返回一个远超真实免费听时长的极大值（如 177879），
+  // 直接当作分钟展示会离谱。因此优先读取真正的剩余时长字段，并对任何候选值做合理性上限校验。
+  const rightInfo = r?.data?.listeningRightInfo ?? r?.data?.generalRightsInfo ?? {};
+  const remainCandidates: number[] = [
+    r?.data?.remain,
+    r?.data?.remainDuration,
+    r?.data?.remainTime,
+    r?.data?.freeListenRemain,
+    r?.data?.freeTrialRemainingTime,
+    rightInfo?.remainDuration,
+    rightInfo?.remain,
+    rightInfo?.remainTime,
+    r?.remainDuration,
+    r?.remain,
+  ]
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  // 合理性上限：免费听活动单账号剩余时长极少超过 7 天（604800 秒）。超出者视为权益元数据/时间戳，丢弃。
+  const MAX_TRUSTED_REMAIN_SEC = 7 * 24 * 3600;
+  const remain = remainCandidates.find((v) => v <= MAX_TRUSTED_REMAIN_SEC) ?? 0;
   const officialCooldown = Number(
     r?.data?.cooldown ?? r?.data?.nextGainTime ?? r?.data?.interval ?? r?.cooldown ?? 0,
   ) || 0;
   const actionUrl: string | undefined =
     r?.data?.actionUrl ?? r?.data?.actionInfo?.actionUrl ?? r?.actionUrl;
   const parsed = parseAdActionUrl(actionUrl);
+  console.log(
+    '[netease] adFreeTab choices:',
+    'rightsRemainingTime=', r?.data?.rightsRemainingTime,
+    'remainCandidates=', remainCandidates,
+    'pickedRemainSec=', remain,
+  );
   return {
     available: !!(r?.data?.available ?? r?.data ?? remain > 0),
     remainSeconds: remain,
