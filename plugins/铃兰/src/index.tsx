@@ -2146,11 +2146,6 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             setKugouTab('search');
             setKugouActiveRankId(null);
           }}
-          onOpenMine={() => {
-            setKugouTab('mine');
-            setKugouActiveRankId(null);
-            online.setActiveId(null);
-          }}
           onSelectUserPlaylist={(pl) => {
             online.setActiveId(null);
             setKugouActiveRankId(null);
@@ -2160,7 +2155,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       ) : qishuiOpen ? (
         <QishuiSidebar
           tempPlaylists={online.temps}
-          tempActiveId={online.activeId}
+          activeTempId={online.activeId}
           onSelectTemp={(item) => {
             online.setActiveId(item.id);
             setQishuiActivePlaylistId(null);
@@ -2168,11 +2163,12 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           }}
           recommend={qishuiRecommend}
           activePlaylistId={qishuiActivePlaylistId}
-          onSelectPlaylist={(pl) => {
-            setQishuiActivePlaylistId(pl.id);
+          onSelectPlaylist={(id, name) => {
+            setQishuiActivePlaylistId(id);
             online.setActiveId(null);
-            (qishuiViewRef.current as any)?.openPlaylist?.(pl.id, pl.name);
+            (qishuiViewRef.current as any)?.openPlaylist?.(id, name);
           }}
+          onClose={() => setQishuiOpen(false)}
         />
       ) : (
         <MusicSidebar

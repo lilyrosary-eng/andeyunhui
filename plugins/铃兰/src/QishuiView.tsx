@@ -20,6 +20,14 @@ import {
 } from './qishuiApi';
 import { decryptQishuiAudio } from './qishuiDecrypt';
 import type { PlayableTrack } from './types';
+import {
+  PlaylistDetailHeader,
+  PlaylistGridRow,
+  SearchBar,
+  SectionTitle,
+} from './_shared/OnlineMusicTemplates';
+
+const ACCENT = '#00c2c7'; // 汽水青蓝，对齐品牌色
 
 type QishuiTab = 'recommend' | 'top' | 'search' | 'playlist';
 
@@ -193,116 +201,130 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
   const renderTrackRow = (tr: QishuiTrack, idx: number) => (
     <div
       key={tr.id + idx}
-      className="music-online-row"
+      className="group flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer text-sm"
       onDoubleClick={() => void doPlay(tracks, idx)}
     >
-      <div className="music-online-row-index">{playingId === tr.id ? <Play size={14} /> : idx + 1}</div>
-      <div className="music-online-row-cover" style={{ backgroundImage: tr.cover ? `url(${tr.cover})` : undefined }}>
-        {!tr.cover && <Music2 size={16} />}
+      <div className="w-6 text-center text-neutral-400 dark:text-stone-500 shrink-0">
+        {playingId === tr.id ? <Play size={14} className="text-[var(--element-color-raw)]" /> : idx + 1}
       </div>
-      <div className="music-online-row-main">
-        <div className="music-online-row-title">{tr.name}</div>
-        <div className="music-online-row-artist">{tr.artist}</div>
+      <div
+        className="relative w-10 h-10 rounded-md overflow-hidden bg-neutral-200/60 dark:bg-stone-800/60 shrink-0"
+        style={{ backgroundImage: tr.cover ? `url(${tr.cover})` : undefined, backgroundSize: 'cover' }}
+      >
+        {!tr.cover && <div className="w-full h-full flex items-center justify-center text-neutral-400"><Music2 size={16} /></div>}
       </div>
-      <div className="music-online-row-album">{tr.album}</div>
-      <div className="music-online-row-dur">{formatDuration(tr.duration)}</div>
+      <div className="min-w-0 flex-1">
+        <div className="font-medium text-neutral-800 dark:text-stone-100 truncate">{tr.name}</div>
+        <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">{tr.artist}</div>
+      </div>
+      <div className="hidden sm:block text-xs text-neutral-500 dark:text-stone-400 truncate max-w-[160px]">{tr.album}</div>
+      <div className="text-xs text-neutral-400 dark:text-stone-500 shrink-0 w-10 text-right">{formatDuration(tr.duration)}</div>
     </div>
   );
 
   return (
-    <div className="music-online-view">
-      <div className="music-online-topbar">
-        <button className="music-online-back" onClick={onBack}>‹</button>
-        <div className="music-online-tabs">
-          <button className={tab === 'recommend' ? 'active' : ''} onClick={() => setTab('recommend')}>
+    <div className="flex flex-col min-h-0 h-full">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-200/70 dark:border-stone-700/60">
+        <button className="btn-press text-neutral-500 dark:text-stone-400 hover:text-neutral-800 dark:hover:text-stone-100" onClick={onBack} title="返回">‹</button>
+        <div className="flex items-center gap-1">
+          <button className={`btn-press px-3 py-1.5 rounded-lg text-sm transition-colors ${tab === 'recommend' ? 'bg-neutral-200/70 dark:bg-stone-700 text-neutral-800 dark:text-stone-100' : 'text-neutral-500 dark:text-stone-400 hover:text-neutral-800 dark:hover:text-stone-100'}`} onClick={() => setTab('recommend')}>
             <Compass size={14} /> 推荐
           </button>
-          <button className={tab === 'top' ? 'active' : ''} onClick={() => setTab('top')}>
+          <button className={`btn-press px-3 py-1.5 rounded-lg text-sm transition-colors ${tab === 'top' ? 'bg-neutral-200/70 dark:bg-stone-700 text-neutral-800 dark:text-stone-100' : 'text-neutral-500 dark:text-stone-400 hover:text-neutral-800 dark:hover:text-stone-100'}`} onClick={() => setTab('top')}>
             <ListMusic size={14} /> 榜单
           </button>
-          <button className={tab === 'search' ? 'active' : ''} onClick={() => setTab('search')}>
+          <button className={`btn-press px-3 py-1.5 rounded-lg text-sm transition-colors ${tab === 'search' ? 'bg-neutral-200/70 dark:bg-stone-700 text-neutral-800 dark:text-stone-100' : 'text-neutral-500 dark:text-stone-400 hover:text-neutral-800 dark:hover:text-stone-100'}`} onClick={() => setTab('search')}>
             <Search size={14} /> 搜索
           </button>
         </div>
-        {tab === 'search' && (
-          <div className="music-online-search">
-            <input
-              value={keyword}
-              placeholder="搜索歌曲 / 歌手"
-              onChange={(e) => setKeyword(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') void doSearch(); }}
-            />
-            <button onClick={() => void doSearch()}><Search size={14} /></button>
-          </div>
-        )}
       </div>
 
-      <div className="music-online-body">
-        {error && <div className="music-online-error"><AlertCircle size={14} /> {error}</div>}
-        {loading && <div className="music-online-loading"><Loader2 size={16} className="spin" /> 加载中…</div>}
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
+        {error && (
+          <div className="flex items-center gap-2 my-3 px-3 py-2 rounded-xl bg-red-500/10 text-red-600 dark:text-red-400 text-sm">
+            <AlertCircle size={14} /> {error}
+          </div>
+        )}
+        {loading && (
+          <div className="flex items-center justify-center gap-2 py-8 text-neutral-400 dark:text-stone-500 text-sm">
+            <Loader2 size={16} className="spin" /> 加载中…
+          </div>
+        )}
 
         {!loading && tab === 'recommend' && (
-          <div className="music-online-grid-wrap">
-            <div className="music-online-section-title">推荐歌单</div>
-            <div className="music-online-grid">
-              {recommend.map((p) => (
-                <div key={p.id} className="music-online-card" onClick={() => void loadPlaylist(p.id, p.name)}>
-                  <div className="music-online-card-cover" style={{ backgroundImage: p.coverImgUrl ? `url(${p.coverImgUrl})` : undefined }}>
-                    {!p.coverImgUrl && <Music2 size={22} />}
-                    <span className="music-online-card-count">{p.trackCount} 首</span>
-                  </div>
-                  <div className="music-online-card-name">{p.name}</div>
-                </div>
-              ))}
-            </div>
-            <div className="music-online-section-title">热门榜单</div>
-            <div className="music-online-grid">
-              {tops.map((p) => (
-                <div key={p.id} className="music-online-card" onClick={() => void loadPlaylist(p.id, p.name)}>
-                  <div className="music-online-card-cover" style={{ backgroundImage: p.coverImgUrl ? `url(${p.coverImgUrl})` : undefined }}>
-                    {!p.coverImgUrl && <Music2 size={22} />}
-                    <span className="music-online-card-count">{p.trackCount} 首</span>
-                  </div>
-                  <div className="music-online-card-name">{p.name}</div>
-                </div>
-              ))}
-            </div>
+          <div className="space-y-5">
+            <section>
+              <SectionTitle title="推荐歌单" accent={ACCENT} />
+              <PlaylistGridRow
+                items={recommend.map((p) => ({ id: p.id, name: p.name, coverUrl: p.coverImgUrl, subtitle: `${p.trackCount} 首` }))}
+                onOpen={(id, name) => void loadPlaylist(String(id), name)}
+                accent={ACCENT}
+                emptyText="暂无推荐"
+              />
+            </section>
+            <section>
+              <SectionTitle title="热门榜单" accent={ACCENT} />
+              <PlaylistGridRow
+                items={tops.map((p) => ({ id: p.id, name: p.name, coverUrl: p.coverImgUrl, subtitle: `${p.trackCount} 首` }))}
+                onOpen={(id, name) => void loadPlaylist(String(id), name)}
+                accent={ACCENT}
+                emptyText="暂无榜单"
+              />
+            </section>
           </div>
         )}
 
         {!loading && tab === 'top' && (
-          <div className="music-online-list">
+          <div className="space-y-1">
+            <SectionTitle title="热门榜单" accent={ACCENT} />
             {tops.map((p, i) => (
-              <div key={p.id} className="music-online-rank-row" onClick={() => void loadPlaylist(p.id, p.name)}>
-                <span className="music-online-rank-no">{i + 1}</span>
-                <div className="music-online-card-cover sm" style={{ backgroundImage: p.coverImgUrl ? `url(${p.coverImgUrl})` : undefined }} />
-                <div className="music-online-row-main"><div className="music-online-row-title">{p.name}</div><div className="music-online-row-artist">{p.trackCount} 首</div></div>
-              </div>
+              <button key={p.id} onClick={() => void loadPlaylist(p.id, p.name)} className="btn-press w-full flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 text-left">
+                <span className="w-6 text-center text-sm font-semibold text-neutral-400 dark:text-stone-500">{i + 1}</span>
+                <div className="relative w-12 h-12 rounded-lg overflow-hidden bg-neutral-200/60 dark:bg-stone-800/60 shrink-0">
+                  {p.coverImgUrl ? (
+                    <img src={p.coverImgUrl} alt={p.name} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-neutral-400"><Music2 size={16} /></div>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-neutral-800 dark:text-stone-100 truncate">{p.name}</div>
+                  <div className="text-xs text-neutral-500 dark:text-stone-400">{p.trackCount} 首</div>
+                </div>
+              </button>
             ))}
           </div>
         )}
 
-        {!loading && tab === 'search' && tracks.length > 0 && (
-          <>
-            <div className="music-online-playall" onClick={playAll}><Play size={14} /> 播放全部</div>
-            <div className="music-online-rows">{tracks.map(renderTrackRow)}</div>
-          </>
+        {!loading && tab === 'search' && (
+          <div className="space-y-2">
+            <SearchBar value={keyword} onChange={(v) => setKeyword(v)} placeholder="搜索歌曲 / 歌手" />
+            {tracks.length > 0 && (
+              <>
+                <div className="flex items-center justify-between px-1 py-2">
+                  <span className="text-xs text-neutral-500 dark:text-stone-400">共 {tracks.length} 首</span>
+                  <button onClick={playAll} className="btn-press flex items-center gap-1.5 px-4 py-1.5 rounded-full text-white text-sm font-medium" style={{ background: ACCENT }}>
+                    <Play size={14} /> 播放全部
+                  </button>
+                </div>
+                <div className="space-y-0.5">{tracks.map(renderTrackRow)}</div>
+              </>
+            )}
+          </div>
         )}
 
         {!loading && tab === 'playlist' && activePlaylist && (
-          <>
-            <div className="music-online-playlist-head">
-              <div className="music-online-card-cover" style={{ backgroundImage: undefined }}>
-                <Music2 size={24} />
-              </div>
-              <div>
-                <div className="music-online-row-title">{activePlaylist.name}</div>
-                <div className="music-online-row-artist">{tracks.length} 首</div>
-              </div>
-              <button className="music-online-playall" onClick={playAll}><Play size={14} /> 播放全部</button>
-            </div>
-            <div className="music-online-rows">{tracks.map(renderTrackRow)}</div>
-          </>
+          <div className="space-y-4">
+            <PlaylistDetailHeader
+              coverUrl={undefined}
+              name={activePlaylist.name}
+              brandLabel="汽水音乐"
+              trackCount={tracks.length}
+              accent={ACCENT}
+              onPlayAll={playAll}
+            />
+            <div className="space-y-0.5">{tracks.map(renderTrackRow)}</div>
+          </div>
         )}
       </div>
     </div>

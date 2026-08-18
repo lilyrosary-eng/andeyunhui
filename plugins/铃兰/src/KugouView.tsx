@@ -44,6 +44,7 @@ import {
 } from './kugouApi';
 import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
 import { MusicHeader } from './MusicHeader';
+import { PlaylistDetailHeader } from './_shared/OnlineMusicTemplates';
 
 type KugouTab = 'home' | 'roam' | 'search' | 'mine';
 
@@ -1030,6 +1031,28 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       {/* 榜单/搜索 歌曲列表（漫游 / 我的 未打开榜单详情时由各自区块承载） */}
       {(activeRankId !== null || tab === 'search' || playlistMode != null) && (
         <div className="flex-1 overflow-y-auto min-h-0">
+          {/* 榜单 / 歌单详情大封面头部（对齐网易云 PlaylistDetailHeader） */}
+          {(activeRankId !== null || playlistMode != null) && (() => {
+            const rank = activeRankId != null ? rankList.find(r => r.id === activeRankId) : null;
+            const cover = playlistMode?.cover || rank?.cover;
+            const name = playlistMode?.name || rank?.name || '';
+            return (
+              <PlaylistDetailHeader
+                coverUrl={cover}
+                name={name}
+                brandLabel="酷狗音乐"
+                trackCount={tracks.length}
+                accent="#00aaff"
+                onPlayAll={() => {
+                  if (tracks.length) {
+                    void playTrackList(tracks, 0, playlistMode ? playlistMode.name : '酷狗榜单');
+                  }
+                }}
+                canSubscribe={false}
+                subscribeDisabledHint="登录后支持收藏歌单"
+              />
+            );
+          })()}
           {tracks.length > 0 && (
             <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-200/40 dark:border-stone-700/30">
               <span className="text-xs text-neutral-400 dark:text-stone-500">
