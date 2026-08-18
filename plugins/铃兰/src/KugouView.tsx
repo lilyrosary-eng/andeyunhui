@@ -7,7 +7,7 @@
 
 import React from 'react';
 const { useState, useEffect, useRef } = React;
-import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon } from 'lucide-react';
+import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon, HeartIcon } from 'lucide-react';
 import { ArrowLeftIcon } from '../../_shared/icons';
 import { T } from '../../_shared/pluginRuntime';
 import {
@@ -58,6 +58,9 @@ interface KugouViewProps {
   searchQuery?: string;
   // 内部 tab 变化时同步给父组件，避免“返回热榜”后父组件仍停留在 mine/search 导致抽屉重复点击失效。
   onTabChange?: (tab: KugouTab) => void;
+  // 本地收藏（与网易云红心并列的通用本地收藏）：行内红心按钮
+  favoriteIds?: Set<string>;
+  onToggleFavorite?: (track: PlayableTrack) => void;
 }
 
 // 为你推荐 / 热榜卡片（正方形封面 + 标题 + 数量）
@@ -437,7 +440,7 @@ function formatDuration(ms: number): string {
 }
 
 export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(function KugouView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange, onAuthChange, searchQuery, onTabChange },
+  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange, onAuthChange, searchQuery, onTabChange, favoriteIds, onToggleFavorite },
   ref,
 ) {
   const [tab, setTab] = useState<KugouTab>(initialTab);
@@ -629,6 +632,10 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       if (v === 'high' || v === 'lossless') return v;
     } catch { /* ignore */ }
     return 'standard';
+  }
+
+  function isFav(t: KugouTrack): boolean {
+    return !!favoriteIds?.has(`kugou-${t.id}`);
   }
 
   async function playTrackList(sourceTracks: KugouTrack[], startIndex: number, playlistName: string) {
@@ -924,6 +931,20 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
               </button>
             </div>
           )}
+          {tracks.length > 0 && (
+            <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-200/40 dark:border-stone-700/30">
+              <span className="text-xs text-neutral-400 dark:text-stone-500">
+                {activeRankId !== null ? '榜单歌曲' : '搜索结果'} · {tracks.length} 首
+              </span>
+              <button
+                onClick={() => void playTrackList(tracks, 0, activeRankId !== null ? '酷狗榜单' : `搜索：${keyword}`)}
+                className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-blue-500/90 hover:bg-blue-500 text-white text-xs font-medium"
+              >
+                <PlayIcon size={12} />
+                播放全部
+              </button>
+            </div>
+          )}
           {tracks.map((t, i) => (
             <div
               key={t.id}
@@ -947,6 +968,18 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
                 </div>
               </div>
               <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
+              {onToggleFavorite && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleFavorite(trackToPlayable(t, '', ''));
+                  }}
+                  className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-rose-500 dark:hover:text-rose-400 hover:bg-rose-500/10 transition-colors shrink-0"
+                  title={isFav(t) ? '取消收藏' : '收藏'}
+                >
+                  <HeartIcon size={15} fill={isFav(t) ? 'currentColor' : 'none'} />
+                </button>
+              )}
               <button
                 onClick={() => doPlay(t, i)}
                 disabled={playingId === t.id}
