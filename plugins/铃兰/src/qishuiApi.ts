@@ -202,20 +202,21 @@ export async function qishuiSearch(keyword: string, type = 1, page = 1, pageSize
       ab_param: JSON.stringify({ enable_search_user: true, enable_search_video: 1 }),
     },
   });
-  const list = r?.data?.result_groups
-    ? r.data.result_groups.flatMap((g: any) => g.data || [])
+  const groups = r?.result_groups || r?.data?.result_groups || [];
+  const list = Array.isArray(groups)
+    ? groups.flatMap((g: any) => g.data || [])
     : (r?.data?.songList || r?.data?.list || r?.list || []);
   return list.map(mapTrack);
 }
 
 // 解析 discover/mix 返回的 block，提取歌单卡片
 function extractPlaylistsFromDiscover(data: any): QishuiPlaylistCard[] {
-  const blocks = data?.inner_block || data?.blocks || data?.data || [];
+  const blocks = data?.inner_block || data?.blocks || data?.data || (Array.isArray(data) ? data : []);
   const out: QishuiPlaylistCard[] = [];
   for (const b of Array.isArray(blocks) ? blocks : []) {
-    const resources = b.resources || b.data || [];
+    const resources = b.resources || b.data || b.items || [];
     for (const res of Array.isArray(resources) ? resources : []) {
-      const p = res.entity?.playlist || res.playlist || res;
+      const p = res.entity?.playlist || res.entity?.playlist_wrapper?.playlist || res.playlist || res;
       if (!p) continue;
       out.push({
         id: String(p.id ?? p.playlist_id ?? p.pid ?? '') || `qishui-disc-${out.length}`,
@@ -243,7 +244,7 @@ export async function qishuiGetRecommendPlaylists(limit = 20): Promise<QishuiPla
       ab_param: '',
     },
   });
-  return extractPlaylistsFromDiscover(r?.data);
+  return extractPlaylistsFromDiscover(r);
 }
 
 // 榜单：discover/mix 中 block_type=chart 或 discover_feed_radio 里的榜单块
@@ -259,14 +260,14 @@ export async function qishuiGetTopLists(): Promise<QishuiPlaylistCard[]> {
       ab_param: '',
     },
   });
-  const list = extractPlaylistsFromDiscover(r?.data);
+  const list = extractPlaylistsFromDiscover(r);
   if (list.length) return list;
   // 兜底：尝试通用 discover
   const r2 = await qishuiRequest('/discover', {
     method: 'POST',
     body: { cursor: '', count: 30 },
   });
-  return extractPlaylistsFromDiscover(r2?.data);
+  return extractPlaylistsFromDiscover(r2);
 }
 
 // 歌单详情（歌曲列表）
@@ -315,10 +316,13 @@ export async function qishuiGetSongUrl(id: string, br = 320000): Promise<QishuiS
     },
   });
   const info = r?.data?.player_infos?.[0];
-  const d = info?.url_player_info || info?.video_model || r?.data || r;
+  const vmRaw = info?.video_model;
+  const vm = typeof vmRaw === 'string' ? JSON.parse(vmRaw) : vmRaw;
+  const v0 = vm?.video_list?.[0];
+  const encryptInfo = v0?.encrypt_info || {};
   return {
-    url: d?.url || d?.playUrl || d?.file_id || d?.uri,
-    spadeA: d?.spadeA || d?.key || info?.spade_a,
-    br: d?.br || br,
+    url: v0?.main_url || v0?.backup_url || (typeof info?.url_player_info === 'string' ? info.url_player_info : undefined),
+    spadeA: encryptInfo?.spade_a || info?.spade_a || info?.spadeA,
+    br: Number(v0?.video_meta?.bitrate || vm?.bitrate || br),
   };
 }
