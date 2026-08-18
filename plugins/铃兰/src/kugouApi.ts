@@ -373,43 +373,27 @@ export async function getSongUrl(
   auth?: KugouAuth | null,
   quality: 'standard' | 'high' | 'lossless' = 'standard',
 ): Promise<{ url: string; br: number }> {
-  const dev = getDevice();
-  const params: Record<string, any> = {
-    r: 'play/getdata',
+  const body = await kugouLegacyRequest('/app/i/getSongInfo.php', {
+    cmd: 'playInfo',
     hash,
-    album_id: albumId || 0,
-    platid: 4,
-    userid: auth?.userid ? String(auth.userid) : '0',
-  };
-  if (auth?.token) params.token = auth.token;
-  const cookie = auth?.userid
-    ? `KuGoo=KugooID=${auth.userid}&KugooPwd=${auth.token}&t=${auth.token}&a_id=1014; kg_mid=${dev.mid}; kg_dfid=${dev.dfid}; userid=${auth.userid}; token=${auth.token}`
-    : `kg_mid=${dev.mid}; kg_dfid=${dev.dfid}`;
+  }, { base: 'https://m.kugou.com' });
 
-  const body = await kugouLegacyRequest('/yy/index.php', params, {
-    base: WWWAPI,
-    salt: KUGOU_WEB_SALT,
-    cookie,
-    referer: REFERER,
-  });
-
-  const d = body?.data || {};
-  const url = d.play_url || d.play_backup_url || d.url || '';
-  const br = Number(d.bitrate || 0);
-  const errCode = d.err_code ?? body?.errcode ?? body?.status ?? 0;
+  const url = body?.url || (Array.isArray(body?.backup_url) ? body.backup_url[0] : body?.backup_url) || '';
+  const br = Number(body?.bitRate || body?.bitrate || 0);
+  const status = Number(body?.status ?? 0);
 
   try {
     const bodySample = JSON.stringify(body).slice(0, 800);
     (window as any).__HOST_API__?.invoke('debug_log', {
-      msg: `[music-play] play/getdata hash=${hash} albumId=${albumId} uid=${params.userid} errCode=${errCode} url=${url ? 'OK' : 'EMPTY'} cookie=${auth?.userid ? 'with_KuGoo' : 'none'} body=${bodySample}`,
+      msg: `[music-play] getSongInfo hash=${hash} albumId=${albumId} status=${status} url=${url ? 'OK' : 'EMPTY'} body=${bodySample}`,
     }).catch(() => {});
   } catch {}
 
   if (!url) {
-    if (errCode === 30020) {
-      throw new Error('该歌曲需登录或会员才能播放（酷狗版权限制 30020）');
+    if (status === 0) {
+      throw new Error('该歌曲暂无可播放地址（可能需会员或已下架）');
     }
-    throw new Error(`该歌曲暂无可播放地址（errCode=${errCode}，可能需会员或已下架）`);
+    throw new Error(`该歌曲暂无可播放地址（status=${status}）`);
   }
   return { url, br };
 }
