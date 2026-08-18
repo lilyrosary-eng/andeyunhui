@@ -1630,36 +1630,11 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center justify-between rounded-2xl bg-neutral-100/60 dark:bg-stone-800/40 px-4 py-3">
                     <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">我的歌单</h3>
-                    <span className="text-xs text-neutral-400 dark:text-stone-500">{playlists.length} 个</span>
+                    <span className="text-xs text-neutral-400 dark:text-stone-500">{profileLoading ? '…' : `${playlists.length} 个`}</span>
                   </div>
-                  {playlists.length > 0 ? (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                      {playlists.map((pl) => (
-                        <button
-                          key={pl.id}
-                          onClick={() => { openPlaylist(pl.id, pl.name); setTab('listen'); }}
-                          className="btn-press text-left group"
-                          title={pl.name}
-                        >
-                          <div className="relative aspect-square rounded-xl overflow-hidden mb-2 bg-neutral-200 dark:bg-stone-700">
-                            <img src={pl.coverImgUrl} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
-                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
-                            <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded-md bg-black/40 text-white text-[10px] flex items-center gap-0.5">
-                              <PlayIcon size={10} />
-                              {pl.trackCount}
-                            </div>
-                          </div>
-                          <div className="text-xs text-neutral-800 dark:text-stone-100 line-clamp-2 leading-tight min-h-[2em]">{pl.name}</div>
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-sm text-neutral-400 dark:text-stone-500 text-center py-8 rounded-2xl bg-neutral-100/50 dark:bg-stone-800/40 border border-dashed border-neutral-200 dark:border-stone-700">
-                      {profileLoading ? '正在加载歌单…' : profileError ? '获取用户信息失败，无法加载歌单' : '暂无歌单'}
-                    </div>
-                  )}
+                  <p className="text-[10px] text-neutral-400 dark:text-stone-500 mt-1.5">具体歌单请在左侧边栏查看</p>
                 </div>
 
                 <div className="flex items-center justify-center gap-3">

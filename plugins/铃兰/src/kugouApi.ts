@@ -317,6 +317,8 @@ export interface KugouTrack {
   hash320?: string;    // 320k 音质 hash
   sqHash?: string;     // 无损音质 hash
   mvHash?: string;     // MV hash（若搜索接口返回）
+  payType?: number;    // 0=免费 3=付费/VIP
+  privilege?: number;  // 版权/试听权限
   albumId?: number;
   albumAudioId?: number;
   singerId?: number;
@@ -388,6 +390,8 @@ function mapTrack(s: any): KugouTrack {
     hash320: s['320hash'] || s.hash_320 || undefined,
     sqHash: s.sqhash || s.hash_flac || undefined,
     mvHash: s.mvhash || s.mv_hash || undefined,
+    payType: s.pay_type !== undefined ? Number(s.pay_type) : undefined,
+    privilege: s.privilege !== undefined ? Number(s.privilege) : undefined,
     albumId: s.album_id ? Number(s.album_id) : undefined,
     albumAudioId: s.album_audio_id ? Number(s.album_audio_id) : undefined,
     singerId: s.singer_id ? Number(s.singer_id) : undefined,
@@ -540,6 +544,11 @@ async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize 
 // 对外歌单歌曲列表（兼容旧签名：specialId 作为 global_collection_id 传入）
 export async function getPlaylist(specialId: number, page = 1, pagesize = 30): Promise<KugouTrack[]> {
   return getPlaylistTracks(String(specialId), page, pagesize);
+}
+
+// 按 global_collection_id 拉取歌单歌曲（侧栏“我的歌单”用）
+export async function getPlaylistByGid(gid: string, page = 1, pagesize = 200): Promise<KugouTrack[]> {
+  return getPlaylistTracks(gid, page, pagesize);
 }
 
 // 获取榜单歌曲（mobilecdn /api/v3/rank/song）
@@ -703,6 +712,7 @@ export const kugou = {
   getSongUrl,
   getLyric,
   getPlaylist,
+  getPlaylistByGid,
   getTopList,
   getRankList,
   qualityLabelFromBr,

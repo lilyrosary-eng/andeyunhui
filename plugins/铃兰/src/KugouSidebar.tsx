@@ -1,6 +1,7 @@
 import React from "react";
+const { useState, useEffect } = React;
 import { OnlineSidebarShell, SidebarTempSection, type TempPlaylistItem } from './OnlineSidebarShell';
-import type { KugouPlaylistCard } from './kugouApi';
+import { getKugouAuth, getUserPlaylists, type KugouAuth, type KugouPlaylistCard } from './kugouApi';
 import type { OnlineTempItem } from './useOnlineSource';
 
 function toTempItem(temp: OnlineTempItem): TempPlaylistItem {
@@ -25,6 +26,7 @@ export interface KugouSidebarProps {
   searchQuery?: string;
   onSearchChange?: (value: string) => void;
   onOpenMine?: () => void;
+  onSelectUserPlaylist?: (playlist: KugouPlaylistCard) => void;
 }
 
 function HeartIcon() {
@@ -62,7 +64,30 @@ export default function KugouSidebar({
   searchQuery,
   onSearchChange,
   onOpenMine,
+  onSelectUserPlaylist,
 }: KugouSidebarProps) {
+  const [auth, setAuth] = useState<KugouAuth | null>(() => getKugouAuth());
+  const [playlists, setPlaylists] = useState<KugouPlaylistCard[]>([]);
+  const [userExpanded, setUserExpanded] = useState(true);
+
+  useEffect(() => {
+    const handler = () => setAuth(getKugouAuth());
+    window.addEventListener('kugou-auth-changed', handler);
+    return () => window.removeEventListener('kugou-auth-changed', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!auth?.userid) {
+      setPlaylists([]);
+      return;
+    }
+    let cancelled = false;
+    getUserPlaylists(auth, 100)
+      .then((list) => { if (!cancelled) setPlaylists(list); })
+      .catch(() => { if (!cancelled) setPlaylists([]); });
+    return () => { cancelled = true; };
+  }, [auth?.userid]);
+
   const renderMineSection = () => {
     return React.createElement('div', { key: 'mine', className: 'space-y-1' },
       React.createElement('div', {
@@ -76,12 +101,26 @@ export default function KugouSidebar({
         '我喜欢的音乐'
       )),
       React.createElement('button', {
-        onClick: onOpenMine,
+        key: 'my-playlists-toggle',
+        onClick: () => setUserExpanded(v => !v),
         className: 'w-full text-left px-3 py-2 rounded-xl transition-colors text-sm hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400',
       }, React.createElement('div', { className: 'font-medium truncate flex items-center gap-2' },
         React.createElement(ListIcon, { key: 'icon' }),
-        '我的歌单'
-      ))
+        React.createElement('span', { key: 'label', className: 'flex-1' }, '我的歌单'),
+        React.createElement('span', { key: 'chev', className: 'text-neutral-400' }, userExpanded ? '−' : '+')
+      )),
+      userExpanded && (playlists.length > 0
+        ? playlists.map(pl =>
+            React.createElement('button', {
+              key: pl.id,
+              onClick: () => onSelectUserPlaylist?.(pl),
+              className: 'w-full text-left px-3 py-1.5 rounded-lg transition-colors text-xs hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-stone-400 truncate',
+            }, pl.name)
+          )
+        : React.createElement('div', {
+            key: 'empty',
+            className: 'px-3 py-1.5 text-xs text-neutral-400 dark:text-stone-500',
+          }, auth ? '暂无歌单' : '登录后同步歌单'))
     );
   };
 

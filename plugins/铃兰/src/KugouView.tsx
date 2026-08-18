@@ -34,6 +34,7 @@ import {
   getSongUrl,
   getTopList,
   getPlaylist,
+  getPlaylistByGid,
   getRankList,
   getMvUrl,
   qualityLabelFromBr,
@@ -343,25 +344,12 @@ function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?:
           )}
         </section>
 
-        {/* 歌单 */}
+        {/* 歌单：只显示数量，具体歌单在左侧侧边栏 */}
         <section className="mt-6">
-          <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100 mb-3">{T('music.kugou.minePlaylists') || '我的歌单'}</h3>
-          {dataLoading ? (
-            <div className="text-sm text-neutral-400 dark:text-stone-500 py-6 text-center">加载中…</div>
-          ) : playlists.length > 0 ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {playlists.map((p) => (
-                <div key={p.id} className="rounded-xl overflow-hidden bg-neutral-100/50 dark:bg-stone-800/40">
-                  <div className="aspect-square bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center">
-                    {p.cover ? <img src={safeImg(p.cover)} alt="" className="w-full h-full object-cover" /> : <MusicIcon size={20} className="text-neutral-400" />}
-                  </div>
-                  <div className="p-2 text-xs font-medium text-neutral-700 dark:text-stone-200 truncate">{p.name}</div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-sm text-neutral-400 dark:text-stone-500 py-6 text-center rounded-2xl bg-neutral-100/40 dark:bg-stone-800/30">{dataError || (T('music.kugou.mineEmptyPlaylists') || '暂无歌单')}</div>
-          )}
+          <div className="flex items-center justify-between rounded-2xl bg-neutral-100/60 dark:bg-stone-800/40 px-4 py-3">
+            <h3 className="text-sm font-semibold text-neutral-700 dark:text-stone-200">{T('music.kugou.minePlaylists') || '我的歌单'}</h3>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{dataLoading ? '…' : `${playlists.length} 个`}</span>
+          </div>
         </section>
 
         <div className="flex items-center justify-center mt-8">
@@ -457,6 +445,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   const allTracksRef = useRef<KugouTrack[]>([]);
   const [rankList, setRankList] = useState<KugouPlaylistCard[]>([]);
   const [activeRankId, setActiveRankId] = useState<number | null>(null);
+  const [playlistMode, setPlaylistMode] = useState<{ id: string; name: string } | null>(null);
   const [homeHeroTracks, setHomeHeroTracks] = useState<KugouTrack[]>([]);
   const [homeHeroLoading, setHomeHeroLoading] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -484,9 +473,29 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     return () => window.removeEventListener('kugou-auth-changed', handler);
   }, []);
 
-  // 暴露命令式方法给侧栏（临时歌单恢复播放）
+  // 侧栏「我的歌单」打开：按 global_collection_id 拉取歌曲并进入歌单视图
+  const openUserPlaylist = async (gid: string, name: string) => {
+    setLoading(true);
+    setError('');
+    try {
+      const list = await getPlaylistByGid(gid, 1, 200);
+      allTracksRef.current = list;
+      setTracks(list);
+      setHasMore(false);
+      setLoadingMore(false);
+      setActiveRankId(null);
+      setPlaylistMode({ id: gid, name });
+      changeTab('home');
+    } catch (e: any) {
+      setError('歌单加载失败：' + (e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 暴露命令式方法给侧栏（临时歌单恢复播放 / 我的歌单打开）
   React.useImperativeHandle(ref, () => ({
-    openPlaylist: () => {},
+    openPlaylist: (gid: string, name: string) => { void openUserPlaylist(gid, name); },
     restoreTemp: (payload: any) => {
       if (!payload?.tracks?.length) return;
       musicPlayer.setTracks(payload.tracks, 0);
@@ -598,7 +607,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   }
 
   async function doSearch(kwOverride?: string) {
-    const kw = (kwOverride ?? keyword).trim();
+    const kw = String(kwOverride ?? keyword ?? '').trim();
     if (!kw) return;
     const req = ++reqRef.current;
     setLoading(true);
@@ -654,8 +663,9 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   // 酷狗侧栏搜索需要真正调用 searchSongs）。
   React.useEffect(() => {
     if (searchQuery === undefined) return;
-    setKeyword(searchQuery);
-    if (!searchQuery.trim()) {
+    const q = String(searchQuery ?? '');
+    setKeyword(q);
+    if (!q.trim()) {
       // 侧栏搜索框清空时，同步清掉旧搜索结果，避免空关键词下仍展示上一轮结果。
       allTracksRef.current = [];
       setTracks([]);
@@ -667,7 +677,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     setActiveRankId(null);
     onActiveRankChange?.(null);
     const timer = setTimeout(() => {
-      void doSearch(searchQuery);
+      void doSearch(q);
     }, 400);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -687,11 +697,12 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
 
   // 点击歌手/专辑：切到搜索页并按关键词搜索（酷狗暂无详情抽屉，先对齐网易云的“可点文字”交互）
   const searchBy = (q: string) => {
-    if (!q.trim()) return;
-    setKeyword(q);
+    const s = String(q || '').trim();
+    if (!s) return;
+    setKeyword(s);
     setActiveRankId(null);
     changeTab('search');
-    void doSearch(q);
+    void doSearch(s);
   };
 
   // 播放 MV：解析直链后交给父组件跳转玉兰
@@ -716,29 +727,54 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
         if (quality === 'high' && tk.hash320) return tk.hash320;
         return tk.hash || tk.id;
       };
-      setPlayingId(sourceTracks[startIndex]?.id ?? null);
-      const { url, br } = await getSongUrl(pickHash(sourceTracks[startIndex]), sourceTracks[startIndex]?.albumId, auth, quality);
-      if (!url) {
-        setError('该歌曲暂无可播放地址（可能需会员或已下架）');
-        return;
-      }
-      // 批量取地址（带容错）
-      const playables: PlayableTrack[] = [];
-      for (const tk of sourceTracks) {
+      // 先找第一首能播的：VIP/下架歌曲跳过，避免整单卡住
+      let playIndex = -1;
+      let firstUrl = '';
+      let firstBr = 0;
+      for (let offset = 0; offset < sourceTracks.length; offset++) {
+        const idx = (startIndex + offset) % sourceTracks.length;
+        const tk = sourceTracks[idx];
         try {
           const r = await getSongUrl(pickHash(tk), tk.albumId, auth, quality);
-          playables.push(trackToPlayable(tk, r.url, qualityLabelFromBr(r.br)));
-        } catch {
-          playables.push(trackToPlayable(tk, '', ''));
-        }
+          if (r.url) {
+            playIndex = idx;
+            firstUrl = r.url;
+            firstBr = r.br;
+            break;
+          }
+        } catch { /* 跳过无法播放的歌曲 */ }
       }
-      onPlay(playables, startIndex, `酷狗 · ${playlistName}`);
+      if (playIndex < 0 || !firstUrl) {
+        setError('当前列表没有可播放的歌曲（可能均为 VIP 或已下架）');
+        return;
+      }
+      setPlayingId(sourceTracks[playIndex]?.id ?? null);
+
+      // 立即用“首曲可播 + 其余占位”开始播放，其余地址后台补全
+      const playables: PlayableTrack[] = sourceTracks.map((tk, i) =>
+        i === playIndex
+          ? trackToPlayable(tk, firstUrl, qualityLabelFromBr(firstBr))
+          : trackToPlayable(tk, '', ''),
+      );
+      onPlay(playables, playIndex, `酷狗 · ${playlistName}`);
       onTempPlaylist?.({
         id: `kugou-temp-${Date.now()}`,
         name: playlistName,
         tracks: playables,
         payload: { kind: tab === 'search' ? 'search' : 'recommend', keyword, tracks: playables },
       });
+
+      // 后台逐个补全播放地址（不阻塞播放）
+      for (let i = 0; i < sourceTracks.length; i++) {
+        if (i === playIndex) continue;
+        const tk = sourceTracks[i];
+        try {
+          const r = await getSongUrl(pickHash(tk), tk.albumId, auth, quality);
+          if (!r.url) continue;
+          playables[i] = trackToPlayable(tk, r.url, qualityLabelFromBr(r.br));
+          musicPlayer.updateTrackUrl(i, r.url);
+        } catch { /* 单曲失败不影响整体 */ }
+      }
     } catch (e: any) {
       setError('播放失败：' + (e?.message || e));
     } finally {
@@ -755,20 +791,23 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     <div className="flex flex-col min-h-0 h-full">
       {/* 顶栏：复用通用音乐模块模板（标题 + 登录按钮 + 云按钮） */}
       <MusicHeader
-        title={activeRankId !== null
-          ? (rankList.find((r) => r.id === activeRankId)?.name || '榜单')
-          : tab === 'search'
-            ? '搜索'
-            : tab === 'mine'
-              ? '我的'
-              : tab === 'roam'
-                ? '漫游'
-                : '酷狗音乐'}
-        onBackToSub={activeRankId !== null ? () => setActiveRankId(null) : undefined}
-        onBackToSubTitle="返回热榜"
+        title={playlistMode
+          ? playlistMode.name
+          : activeRankId !== null
+            ? (rankList.find((r) => r.id === activeRankId)?.name || '榜单')
+            : tab === 'search'
+              ? '搜索'
+              : tab === 'mine'
+                ? '我的'
+                : tab === 'roam'
+                  ? '漫游'
+                  : '酷狗音乐'}
+        onBackToSub={playlistMode ? () => setPlaylistMode(null) : activeRankId !== null ? () => setActiveRankId(null) : undefined}
+        onBackToSubTitle={playlistMode ? '返回' : '返回热榜'}
         onUserClick={() => {
           changeTab('mine');
           setActiveRankId(null);
+          setPlaylistMode(null);
         }}
         onCloudClick={onBack}
         cloudTitle="音乐模块"
@@ -978,15 +1017,15 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       )}
 
       {/* 榜单/搜索 歌曲列表（漫游 / 我的 未打开榜单详情时由各自区块承载） */}
-      {(activeRankId !== null || tab === 'search') && (
+      {(activeRankId !== null || tab === 'search' || playlistMode != null) && (
         <div className="flex-1 overflow-y-auto min-h-0">
           {tracks.length > 0 && (
             <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-200/40 dark:border-stone-700/30">
               <span className="text-xs text-neutral-400 dark:text-stone-500">
-                {activeRankId !== null ? '榜单歌曲' : '搜索结果'} · {tracks.length} 首
+                {playlistMode ? '歌单歌曲' : activeRankId !== null ? '榜单歌曲' : '搜索结果'} · {tracks.length} 首
               </span>
               <button
-                onClick={() => void playTrackList(tracks, 0, activeRankId !== null ? '酷狗榜单' : `搜索：${keyword}`)}
+                onClick={() => void playTrackList(tracks, 0, playlistMode ? playlistMode.name : activeRankId !== null ? '酷狗榜单' : `搜索：${keyword}`)}
                 className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-blue-500/90 hover:bg-blue-500 text-white text-xs font-medium"
               >
                 <PlayIcon size={12} />
@@ -1014,7 +1053,14 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
                 )}
               </div>
               <div className="flex-1 min-w-0">
-                <div className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</div>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
+                  {(t.payType === 3 || (t.privilege ?? 0) > 0) && (
+                    <span className="shrink-0 text-[9px] font-semibold leading-none px-1 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                      VIP
+                    </span>
+                  )}
+                </div>
                 <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">
                   {t.artist ? (
                     <button

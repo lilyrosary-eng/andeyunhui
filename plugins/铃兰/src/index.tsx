@@ -2151,6 +2151,11 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             setKugouActiveRankId(null);
             online.setActiveId(null);
           }}
+          onSelectUserPlaylist={(pl) => {
+            online.setActiveId(null);
+            setKugouActiveRankId(null);
+            (kugouViewRef.current as any)?.openPlaylist?.(pl.gid || String(pl.id), pl.name);
+          }}
         />
       ) : qishuiOpen ? (
         <QishuiSidebar
