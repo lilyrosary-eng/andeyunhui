@@ -290,72 +290,47 @@ function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?:
   if (auth) {
     return (
       <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
-        <div className="flex items-center gap-2 pt-4 pb-4">
-          <button
-            onClick={onBack}
-            className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium"
-            title="返回热榜"
-          >
-            <ArrowLeftIcon size={14} />
-            热榜
-          </button>
-          <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.mineTitle') || '我的'}</h2>
-        </div>
-
-        {/* 用户信息卡 */}
-        <div className="flex items-center gap-4 rounded-2xl p-4 bg-neutral-100/60 dark:bg-stone-800/50">
-          {safeImg(profile?.avatar) ? (
-            <img src={safeImg(profile.avatar)} alt="" className="w-16 h-16 rounded-full object-cover border border-white dark:border-stone-700" />
-          ) : (
-            <div className="w-16 h-16 rounded-full flex items-center justify-center bg-orange-500/10 text-orange-500">
-              <UserIcon size={28} />
+        <div className="max-w-md mx-auto flex flex-col gap-5 py-6">
+          {/* 用户信息卡（对齐网易云“我的”页） */}
+          <div className="flex flex-col items-center gap-3 p-5 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+            {safeImg(profile?.avatar) ? (
+              <img src={safeImg(profile.avatar)} alt="" className="w-20 h-20 rounded-full object-cover border-2 border-white dark:border-stone-700 shadow-sm" />
+            ) : (
+              <div className="w-20 h-20 rounded-full bg-orange-500/15 flex items-center justify-center text-orange-600 dark:text-orange-400 text-2xl font-bold">
+                {(profile?.nickname || auth.nickname || '酷').slice(0, 1)}
+              </div>
+            )}
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-2">
+                <span className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{profile?.nickname || auth.nickname || '酷狗用户'}</span>
+                {auth.vipType ? (
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/20">VIP</span>
+                ) : null}
+              </div>
+              {profile?.signature ? (
+                <div className="mt-1 text-xs text-neutral-500 dark:text-stone-400 max-w-[260px] truncate">{profile.signature}</div>
+              ) : null}
+              <div className="mt-2 text-[10px] text-neutral-400 dark:text-stone-500">ID: {auth.userid}</div>
             </div>
-          )}
-          <div className="flex-1 min-w-0">
-            <div className="text-lg font-semibold text-neutral-800 dark:text-stone-100 truncate">{profile?.nickname || auth.nickname || '酷狗用户'}</div>
-            {profile?.signature ? (
-              <div className="text-xs text-neutral-500 dark:text-stone-400 truncate mt-0.5">{profile.signature}</div>
-            ) : null}
-            <div className="text-[10px] text-neutral-400 dark:text-stone-500 mt-1">ID: {auth.userid}{auth.vipType ? ` · 会员` : ''}</div>
           </div>
-        </div>
 
-        {/* 收藏 */}
-        <section className="mt-6">
-          <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100 mb-3">{T('music.kugou.mineFavs') || '我喜欢的音乐'}</h3>
-          {dataLoading ? (
-            <div className="text-sm text-neutral-400 dark:text-stone-500 py-6 text-center">加载中…</div>
-          ) : favs.length > 0 ? (
-            <div className="space-y-1">
-              {favs.slice(0, 20).map((t) => (
-                <div key={t.id} className="flex items-center gap-3 px-3 py-2 rounded-xl bg-neutral-100/40 dark:bg-stone-800/30 cursor-pointer hover:bg-neutral-200/50 dark:hover:bg-stone-700/40" onDoubleClick={() => playTrackList([t], 0, t.name)}>
-                  <div className="w-9 h-9 rounded-lg overflow-hidden bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center shrink-0">
-                    {t.cover ? <img src={safeImg(t.cover)} alt="" className="w-full h-full object-cover" /> : <MusicIcon size={14} className="text-neutral-400" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-neutral-800 dark:text-stone-100 truncate">{t.name}</div>
-                    <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">{t.artist}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-sm text-neutral-400 dark:text-stone-500 py-6 text-center rounded-2xl bg-neutral-100/40 dark:bg-stone-800/30">{dataError || (T('music.kugou.mineEmptyFavs') || '暂无收藏')}</div>
-          )}
-        </section>
+          {/* 我喜欢的音乐：只显示数量 */}
+          <div className="flex items-center justify-between rounded-2xl bg-neutral-100/60 dark:bg-stone-800/40 px-4 py-3">
+            <h3 className="text-sm font-semibold text-neutral-700 dark:text-stone-200">{T('music.kugou.mineFavs') || '我喜欢的音乐'}</h3>
+            <span className="text-xs text-neutral-400 dark:text-stone-500">{dataLoading ? '…' : `${favs.length} 首`}</span>
+          </div>
 
-        {/* 歌单：只显示数量，具体歌单在左侧侧边栏 */}
-        <section className="mt-6">
+          {/* 歌单：只显示数量，具体歌单在左侧侧边栏 */}
           <div className="flex items-center justify-between rounded-2xl bg-neutral-100/60 dark:bg-stone-800/40 px-4 py-3">
             <h3 className="text-sm font-semibold text-neutral-700 dark:text-stone-200">{T('music.kugou.minePlaylists') || '我的歌单'}</h3>
             <span className="text-xs text-neutral-400 dark:text-stone-500">{dataLoading ? '…' : `${playlists.length} 个`}</span>
           </div>
-        </section>
 
-        <div className="flex items-center justify-center mt-8">
-          <button onClick={handleLogout} className="btn-press px-4 py-2 rounded-xl bg-red-500/10 text-red-600 dark:text-red-400 text-sm hover:bg-red-500/20 transition-colors">
-            {T('music.kugou.mineLogout') || '退出登录'}
-          </button>
+          <div className="flex items-center justify-center gap-3">
+            <button onClick={handleLogout} className="btn-press px-4 py-2 rounded-xl bg-red-500/10 text-red-600 dark:text-red-400 text-sm hover:bg-red-500/20 transition-colors">
+              {T('music.kugou.mineLogout') || '退出登录'}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -364,19 +339,7 @@ function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?:
   // ===== 游客态：扫码登录 =====
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
-      <div className="flex items-center gap-2 pt-4 pb-4">
-        <button
-          onClick={onBack}
-          className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium"
-          title="返回热榜"
-        >
-          <ArrowLeftIcon size={14} />
-          热榜
-        </button>
-        <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.mineTitle') || '我的'}</h2>
-      </div>
-
-      <div className="flex flex-col items-center gap-4 py-10 text-center">
+      <div className="max-w-sm mx-auto flex flex-col items-center gap-4 py-10 text-center">
         <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-orange-400 to-amber-500 flex items-center justify-center text-white shadow-lg">
           <UserIcon size={30} />
         </div>
