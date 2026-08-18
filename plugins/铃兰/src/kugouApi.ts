@@ -495,6 +495,43 @@ export async function getSongUrl(
   return { url, br };
 }
 
+// 下载单曲：取链后走宿主 download_file 落盘（无目录时弹保存框，对齐网易云）
+export async function downloadKugouTrack(
+  track: KugouTrack,
+  auth?: KugouAuth | null,
+): Promise<void> {
+  const res = await getSongUrl(track.hash || track.id, track.albumId, auth);
+  if (!res.url) throw new Error('获取下载地址失败（可能无版权或登录态失效）');
+  const safe = (s: string) => (s || '未知').replace(/[\\/:*?"<>|]/g, '_').slice(0, 80);
+  const fileName = `${safe(track.name)} - ${safe(track.artist)}.mp3`;
+
+  let savePath: string;
+  const downloadDir = (() => {
+    try { return localStorage.getItem('kugou.downloadDir') || ''; } catch { return ''; }
+  })();
+  if (downloadDir) {
+    const base = downloadDir.replace(/[\\/]+$/, '');
+    savePath = `${base}/来自酷狗/${fileName}`;
+  } else {
+    try {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const picked = await save({
+        defaultPath: fileName,
+        filters: [{ name: '音频', extensions: ['mp3'] }],
+      });
+      if (!picked) return;
+      savePath = picked;
+    } catch (e: any) {
+      if (e?.message?.includes('cancel') || e?.toString?.().includes('cancel')) return;
+      throw e;
+    }
+  }
+
+  const host = (window as any).__HOST_API__;
+  if (!host || typeof host.invoke !== 'function') throw new Error('宿主不可用，无法下载');
+  await host.invoke('download_file', { url: res.url, savePath, progressEvent: '' });
+}
+
 // 获取歌词：lyrics.kugou.com/search + /download，LRC 内容 base64 解码（实测可用）
 export async function getLyric(hash: string, keyword = ''): Promise<{ lyric: string; trans?: string }> {
   const searchBody = await kugouLegacyRequest('/search', {
@@ -784,6 +821,7 @@ export function kugouTrackBadges(t: KugouTrack): TrackBadge[] {
 export const kugou = {
   searchSongs,
   getSongUrl,
+  downloadKugouTrack,
   getLyric,
   getPlaylist,
   getPlaylistByGid,

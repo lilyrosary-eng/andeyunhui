@@ -7,7 +7,7 @@
 
 import React from 'react';
 const { useState, useEffect, useRef } = React;
-import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon, HeartIcon, VideoIcon } from 'lucide-react';
+import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon, HeartIcon, VideoIcon, DownloadIcon } from 'lucide-react';
 import { ArrowLeftIcon } from '../../_shared/icons';
 import { T } from '../../_shared/pluginRuntime';
 import {
@@ -34,6 +34,7 @@ import {
   KugouPlaylistCard,
   searchSongs,
   getSongUrl,
+  downloadKugouTrack,
   getTopList,
   getPlaylist,
   getPlaylistByGid,
@@ -707,6 +708,15 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     }
   };
 
+  // 下载当前歌曲
+  const handleDownload = async (t: KugouTrack) => {
+    try {
+      await downloadKugouTrack(t, kugouAuth);
+    } catch (e: any) {
+      setError('下载失败：' + (e?.message || e));
+    }
+  };
+
   async function playTrackList(sourceTracks: KugouTrack[], startIndex: number, playlistName: string) {
     try {
       // 取真实登录态：KugouView 作用域无 auth state，必须从 localStorage 读取，
@@ -1094,6 +1104,17 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
                   <VideoIcon size={15} />
                 </button>
               )}
+              <button
+                data-action="download"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleDownload(t);
+                }}
+                className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-emerald-500 dark:hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors shrink-0"
+                title="下载"
+              >
+                <DownloadIcon size={15} />
+              </button>
               {onToggleFavorite && (
                 <button
                   data-action="like"
