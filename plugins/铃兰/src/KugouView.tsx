@@ -438,6 +438,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   const [kugouAuth, setKugouAuthState] = useState<KugouAuth | null>(() => readKugouAuth());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [tracks, setTracks] = useState<KugouTrack[]>([]);
   const [keyword, setKeyword] = useState('');
   const [playingId, setPlayingId] = useState<string | null>(null);
@@ -748,6 +749,11 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
         setError('当前列表没有可播放的歌曲（可能均为 VIP 或已下架）');
         return;
       }
+      if (playIndex !== startIndex) {
+        const skipped = sourceTracks[startIndex]?.name || '所选歌曲';
+        setNotice(`“${skipped}”暂不可播放，已自动播放下一首`);
+        setTimeout(() => setNotice(''), 3000);
+      }
       setPlayingId(sourceTracks[playIndex]?.id ?? null);
 
       // 立即用“首曲可播 + 其余占位”开始播放，其余地址后台补全
@@ -852,6 +858,11 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
         <div className="flex items-center gap-2 px-3 py-3 text-sm text-neutral-500 dark:text-stone-400">
           <span className="w-4 h-4 rounded-full border-2 border-neutral-300 dark:border-stone-600 border-t-blue-500 animate-spin" />
           加载中…
+        </div>
+      )}
+      {notice && (
+        <div className="px-3 py-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-500/10 border-b border-amber-500/20">
+          {notice}
         </div>
       )}
       {error && (
@@ -1055,7 +1066,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
-                  {(t.payType === 3 || (t.privilege ?? 0) > 0) && (
+                  {((t.privilege ?? 0) >= 10) && (
                     <span className="shrink-0 text-[9px] font-semibold leading-none px-1 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400">
                       VIP
                     </span>
