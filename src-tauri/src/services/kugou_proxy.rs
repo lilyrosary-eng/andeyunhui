@@ -28,6 +28,7 @@ const ALLOWED_KUGOU_HOSTS: &[&str] = &[
     "kugou.com",
     "passport.kugou.com",
     "usercenter.kugou.com",
+    "kugouvip.kugou.com",
     // 直连后端 CDN（绕过 gateway 的 x-router 路由层，免签名、稳定）
     "mobilecdnbj.kugou.com",
     "msearchcdnbj.kugou.com",
@@ -70,6 +71,8 @@ const ALLOWED_KUGOU_PATH_PREFIXES: &[&str] = &[
     "/v1/search",
     "/search",
     "/download",
+    // VIP 详情
+    "/v1/get_union_vip",
     // MV：页面解析 encode_mvid + 取流
     "/mvweb/html/mv_",
     "/play/mv",

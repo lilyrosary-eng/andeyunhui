@@ -17,6 +17,8 @@ import {
   type KugouPlaylistCard,
   getFavorites,
   getUserPlaylists,
+  getKugouVipInfo,
+  type KugouVipInfo,
   safeImg,
 } from './kugouApi';
 import {
@@ -168,6 +170,7 @@ function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?:
   const [playlists, setPlaylists] = useState<KugouPlaylistCard[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState('');
+  const [vipInfo, setVipInfo] = useState<KugouVipInfo | null>(null);
   const pollRef = useRef<number | null>(null);
   const reqRef = useRef(0);
 
@@ -208,6 +211,8 @@ function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?:
         setAuth(a);
         onAuthChange?.(a);
         dlog('profile done, fetching favs+playlists');
+        getKugouVipInfo(a).then((v) => { if (!cancelled) setVipInfo(v); }).catch(() => {});
+
         // getFavorites 内部已拉取全量歌单并返回 { list, playlists }，避免双重请求。
         const favs = await Promise.race([
           getFavorites(a),
@@ -312,6 +317,28 @@ function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?:
               ) : null}
               <div className="mt-2 text-[10px] text-neutral-400 dark:text-stone-500">ID: {auth.userid}</div>
             </div>
+          </div>
+
+          {/* 会员状态（对齐网易云“我的”页） */}
+          <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+            <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 mb-2">会员状态</h3>
+            {vipInfo == null ? (
+              <div className="text-xs text-neutral-400 dark:text-stone-500">查询中…</div>
+            ) : vipInfo.isVip ? (
+              <div className="flex flex-col gap-1.5 text-xs text-neutral-600 dark:text-stone-300">
+                <div className="flex items-center justify-between">
+                  <span>{vipInfo.vipName || '酷狗VIP'}</span>
+                  <span className="font-medium text-amber-600 dark:text-amber-400">
+                    {vipInfo.expireTime
+                      ? `至 ${new Date(vipInfo.expireTime * 1000).toLocaleDateString()}`
+                      : '已开通'}
+                  </span>
+                </div>
+                <div className="text-[10px] text-neutral-400 dark:text-stone-500">免费听权限以酷狗官方账号状态为准</div>
+              </div>
+            ) : (
+              <div className="text-xs text-neutral-400 dark:text-stone-500">当前账号无会员</div>
+            )}
           </div>
 
           {/* 我喜欢的音乐：只显示数量 */}

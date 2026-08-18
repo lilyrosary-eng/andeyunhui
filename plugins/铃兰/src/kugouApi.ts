@@ -453,9 +453,31 @@ export async function getSongUrl(
     cookie: buildKugouCookie(auth),
   });
 
-  const url = body?.url || (Array.isArray(body?.backup_url) ? body.backup_url[0] : body?.backup_url) || '';
-  const br = Number(body?.bitRate || body?.bitrate || 0);
+  let url = body?.url || (Array.isArray(body?.backup_url) ? body.backup_url[0] : body?.backup_url) || '';
+  let br = Number(body?.bitRate || body?.bitrate || 0);
   const status = Number(body?.status ?? 0);
+
+  // m.kugou 拿不到时，带 KuGoo 登录态回退到 wwwapi play/getdata（VIP 歌曲可能在这里解锁）
+  if (!url && auth?.userid && auth?.token) {
+    try {
+      const fb = await kugouLegacyRequest('/yy/index.php', {
+        r: 'play/getdata',
+        hash,
+        album_id: albumId || 0,
+        platid: 4,
+        userid: auth.userid,
+        token: auth.token,
+      }, {
+        base: WWWAPI,
+        salt: KUGOU_WEB_SALT,
+        cookie: buildKugouCookie(auth),
+        referer: REFERER,
+      });
+      const d = fb?.data || {};
+      url = d.play_url || d.play_backup_url || d.url || '';
+      br = Number(d.bitrate || br || 0);
+    } catch { /* 回退失败不阻断 */ }
+  }
 
   try {
     const bodySample = JSON.stringify(body).slice(0, 800);
@@ -674,6 +696,35 @@ export async function getUserInfo(auth: KugouAuth): Promise<KugouProfile> {
   };
 }
 
+export interface KugouVipInfo {
+  vipType: number;
+  vipName?: string;
+  isVip: boolean;
+  expireTime?: number; // 秒级时间戳
+}
+
+// 查询酷狗 VIP 详情（/v1/get_union_vip）
+export async function getKugouVipInfo(auth: KugouAuth): Promise<KugouVipInfo | null> {
+  try {
+    const body = await kugouRequest('/v1/get_union_vip', {
+      busi_type: 'concept',
+    }, {
+      base: 'https://kugouvip.kugou.com',
+      auth,
+    });
+    if (body?.status !== 1) return null;
+    const d = body?.data || {};
+    return {
+      vipType: Number(d.vip_type ?? auth.vipType ?? 0),
+      vipName: d.vip_name || undefined,
+      isVip: Number(d.is_vip ?? 0) === 1 || Number(d.vip_type ?? 0) > 0,
+      expireTime: Number(d.expire_time || 0) || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // 我的歌单（当前 /v7/get_all_list，POST + Android 签名）
 export async function getUserPlaylists(auth: KugouAuth, pagesize = 50): Promise<KugouPlaylistCard[]> {
   const uid = Number(auth.userid) || auth.userid;
@@ -741,6 +792,7 @@ export const kugou = {
   qualityLabelFromBr,
   kugouTrackBadges,
   getUserInfo,
+  getKugouVipInfo,
   getFavorites,
   getUserPlaylists,
   getMvUrl,
