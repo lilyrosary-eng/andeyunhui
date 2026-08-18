@@ -67,6 +67,24 @@ export function getDevice(): { dfid: string; mid: string; uuid: string; clientti
   return d;
 }
 
+// 组装酷狗登录态 Cookie（m.kugou / wwwapi 播放接口需要带 KuGoo 才能解锁 VIP）
+function buildKugouCookie(auth: KugouAuth | null | undefined): string {
+  const dev = getDevice();
+  if (!auth?.userid || !auth?.token) return `kg_mid=${dev.mid}; kg_dfid=${dev.dfid}`;
+  const ct = Math.floor(Date.now() / 1000);
+  const KuGoo = [
+    `KugooID=${auth.userid}`,
+    `KugooPwd=${auth.token}`,
+    auth.nickname ? `NickName=${encodeURIComponent(auth.nickname)}` : '',
+    auth.avatar ? `Pic=${encodeURIComponent(auth.avatar)}` : '',
+    auth.username ? `UserName=${encodeURIComponent(auth.username)}` : '',
+    `t=${auth.token}`,
+    'a_id=1014',
+    `ct=${ct}`,
+  ].filter(Boolean).join('&');
+  return `KuGoo=${KuGoo}; kg_mid=${dev.mid}; kg_dfid=${dev.dfid}; userid=${auth.userid}; token=${auth.token}`;
+}
+
 // ============ 旧移动端请求 helper（mobilecdn / wwwapi 直连，免签名或 Web 签名） ============
 interface KugouLegacyRequestOpts {
   base?: string;
@@ -428,7 +446,12 @@ export async function getSongUrl(
   const body = await kugouLegacyRequest('/app/i/getSongInfo.php', {
     cmd: 'playInfo',
     hash,
-  }, { base: 'https://m.kugou.com' });
+    userid: auth?.userid ? String(auth.userid) : '0',
+    token: auth?.token || '',
+  }, {
+    base: 'https://m.kugou.com',
+    cookie: buildKugouCookie(auth),
+  });
 
   const url = body?.url || (Array.isArray(body?.backup_url) ? body.backup_url[0] : body?.backup_url) || '';
   const br = Number(body?.bitRate || body?.bitrate || 0);
@@ -437,7 +460,7 @@ export async function getSongUrl(
   try {
     const bodySample = JSON.stringify(body).slice(0, 800);
     (window as any).__HOST_API__?.invoke('debug_log', {
-      msg: `[music-play] getSongInfo hash=${hash} albumId=${albumId} status=${status} url=${url ? 'OK' : 'EMPTY'} body=${bodySample}`,
+      msg: `[music-play] getSongInfo hash=${hash} albumId=${albumId} uid=${auth?.userid ?? 0} status=${status} url=${url ? 'OK' : 'EMPTY'} cookie=${auth?.userid ? 'with_KuGoo' : 'none'} body=${bodySample}`,
     }).catch(() => {});
   } catch {}
 
