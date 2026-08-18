@@ -119,12 +119,9 @@ function DrawerModuleItem({
   const hasChildren = React.Children.count(children) > 0;
 
   const handleClick = () => {
+    // 带抽屉（子菜单）的项：点击只展开/收起，不自动进入模块，保持其余逻辑不变
     if (hasChildren) {
-      if (active) {
-        onToggleExpand?.();
-      } else {
-        onSelect?.();
-      }
+      onToggleExpand?.();
     } else {
       onSelect?.();
     }
