@@ -444,6 +444,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   ref,
 ) {
   const [tab, setTab] = useState<KugouTab>(initialTab);
+  const [kugouAuth, setKugouAuthState] = useState<KugouAuth | null>(() => readKugouAuth());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [tracks, setTracks] = useState<KugouTrack[]>([]);
@@ -472,6 +473,13 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     changeTab(initialTab);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialTab]);
+
+  // 登录态变化同步到顶部栏（扫码登录成功会派发 kugou-auth-changed）
+  React.useEffect(() => {
+    const handler = () => setKugouAuthState(readKugouAuth());
+    window.addEventListener('kugou-auth-changed', handler);
+    return () => window.removeEventListener('kugou-auth-changed', handler);
+  }, []);
 
   // 暴露命令式方法给侧栏（临时歌单恢复播放）
   React.useImperativeHandle(ref, () => ({
@@ -719,14 +727,31 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     <div className="flex flex-col min-h-0 h-full">
       {/* 顶栏：复用通用音乐模块模板（标题 + 登录按钮 + 云按钮） */}
       <MusicHeader
-        title="酷狗音乐"
+        title={activeRankId !== null
+          ? (rankList.find((r) => r.id === activeRankId)?.name || '榜单')
+          : tab === 'search'
+            ? '搜索'
+            : tab === 'mine'
+              ? '我的'
+              : tab === 'roam'
+                ? '漫游'
+                : '酷狗音乐'}
+        onBackToSub={activeRankId !== null ? () => setActiveRankId(null) : undefined}
+        onBackToSubTitle="返回热榜"
         onUserClick={() => {
           changeTab('mine');
           setActiveRankId(null);
         }}
         onCloudClick={onBack}
         cloudTitle="音乐模块"
-        user={{ loggedIn: !!readKugouAuth() }}
+        user={kugouAuth
+          ? {
+              loggedIn: true,
+              name: kugouAuth.nickname || '酷狗用户',
+              avatarUrl: kugouAuth.avatar || '',
+              initial: (kugouAuth.nickname || '酷').slice(0, 1),
+            }
+          : { loggedIn: false }}
       />
 
       {/* 顶部不再放子模块切换条；热榜 / 搜索切换改由云按钮（音乐模块）折叠菜单控制 */}
@@ -927,18 +952,6 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       {/* 榜单/搜索 歌曲列表（漫游 / 我的 未打开榜单详情时由各自区块承载） */}
       {(activeRankId !== null || tab === 'search') && (
         <div className="flex-1 overflow-y-auto min-h-0">
-          {activeRankId !== null && (
-            <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-200/70 dark:border-stone-700/60">
-              <button
-                onClick={() => setActiveRankId(null)}
-                className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium"
-                title="返回热榜"
-              >
-                <ArrowLeftIcon size={14} />
-                返回热榜
-              </button>
-            </div>
-          )}
           {tracks.length > 0 && (
             <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-200/40 dark:border-stone-700/30">
               <span className="text-xs text-neutral-400 dark:text-stone-500">
@@ -956,20 +969,23 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
           {tracks.map((t, i) => (
             <div
               key={t.id}
-              className="flex items-center gap-3 px-3 py-2.5 border-b border-neutral-200/40 dark:border-stone-700/30 cursor-pointer hover:bg-neutral-100/50 dark:hover:bg-stone-800/40"
-              onDoubleClick={() => doPlay(t, i)}
+              role="button"
+              tabIndex={0}
+              onClick={(e) => {
+                if ((e.target as HTMLElement).closest('[data-action]')) return;
+                doPlay(t, i);
+              }}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doPlay(t, i); } }}
+              className="group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 active:bg-neutral-300/50 dark:active:bg-stone-700/50 transition-colors text-left cursor-pointer"
             >
-              <div
-                className="w-10 h-10 rounded-lg overflow-hidden bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center shrink-0"
-                onClick={() => doPlay(t, i)}
-              >
+              <div className="w-10 h-10 rounded-md overflow-hidden bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center shrink-0">
                 {t.cover ? (
                   <img src={t.cover} alt="" className="w-full h-full object-cover" />
                 ) : (
                   <MusicIcon size={16} className="text-neutral-400 dark:text-stone-500" />
                 )}
               </div>
-              <div className="flex-1 min-w-0" onClick={() => doPlay(t, i)}>
+              <div className="flex-1 min-w-0">
                 <div className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</div>
                 <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">
                   {t.artist}{t.album ? ` · ${t.album}` : ''}
@@ -978,6 +994,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
               <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
               {onToggleFavorite && (
                 <button
+                  data-action="like"
                   onClick={(e) => {
                     e.stopPropagation();
                     onToggleFavorite(trackToPlayable(t, '', ''));
@@ -989,6 +1006,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
                 </button>
               )}
               <button
+                data-action="play"
                 onClick={() => doPlay(t, i)}
                 disabled={playingId === t.id}
                 className="btn-press w-8 h-8 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 flex items-center justify-center disabled:opacity-40 shrink-0"
