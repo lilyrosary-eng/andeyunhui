@@ -13,19 +13,6 @@ function toTempItem(temp: OnlineTempItem): TempPlaylistItem {
   };
 }
 
-function TrophyIcon() {
-  return React.createElement('svg', {
-    width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
-  }, [
-    React.createElement('path', { key: '1', d: 'M6 9H4.5a2.5 2.5 0 0 1 0-5H6' }),
-    React.createElement('path', { key: '2', d: 'M18 9h1.5a2.5 2.5 0 0 0 0-5H18' }),
-    React.createElement('path', { key: '3', d: 'M4 22h16' }),
-    React.createElement('path', { key: '4', d: 'M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22' }),
-    React.createElement('path', { key: '5', d: 'M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22' }),
-    React.createElement('path', { key: '6', d: 'M18 2H6v7a6 6 0 0 0 12 0V2z' }),
-  ]);
-}
-
 export interface KugouSidebarProps {
   ranks: KugouPlaylistCard[];
   activeRankId?: number | null;
@@ -78,7 +65,6 @@ export default function KugouSidebar({
   onSearchChange,
   onOpenMine,
 }: KugouSidebarProps) {
-  const [rankExpanded, setRankExpanded] = useState(true);
   const [auth, setAuth] = useState<KugouAuth | null>(getKugouAuth);
 
   useEffect(() => {
@@ -86,40 +72,6 @@ export default function KugouSidebar({
     window.addEventListener('kugou-auth-changed', handler);
     return () => window.removeEventListener('kugou-auth-changed', handler);
   }, []);
-
-  const renderRankSection = () => {
-    if (ranks.length === 0) return null;
-    return React.createElement('div', { key: 'ranks', className: 'space-y-1' },
-      React.createElement('button', {
-        key: 'header',
-        onClick: () => setRankExpanded(v => !v),
-        className: 'w-full flex items-center justify-between px-1 py-1 text-xs text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 transition-colors',
-      }, [
-        React.createElement('span', { key: 't' }, '酷狗榜单'),
-        React.createElement('span', { key: 'c' }, rankExpanded ? '−' : '+'),
-      ]),
-      rankExpanded && ranks.map(rank => {
-        const isActive = activeRankId === rank.id;
-        return React.createElement('button', {
-          key: rank.id,
-          onClick: () => onSelectRank(rank.id),
-          className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm ${
-            isActive
-              ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
-              : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
-          }`,
-        }, [
-          React.createElement('div', { key: 'name', className: 'font-medium truncate flex items-center gap-2' },
-            React.createElement(TrophyIcon, { key: 'icon' }),
-            rank.name
-          ),
-          rank.playCount != null
-            ? React.createElement('div', { key: 'count', className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${rank.playCount} 播放`)
-            : null,
-        ]);
-      })
-    );
-  };
 
   const renderMineSection = () => {
     if (!auth) return null;
@@ -161,7 +113,6 @@ export default function KugouSidebar({
     searchPlaceholder: '搜索酷狗音乐',
     children: React.createElement('div', { className: 'space-y-4' },
       renderMineSection(),
-      renderRankSection(),
       React.createElement(SidebarTempSection, {
         items: tempPlaylists.map(toTempItem),
         activeId: activeTempId,

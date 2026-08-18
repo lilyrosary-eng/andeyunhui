@@ -755,34 +755,6 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
           </button>
         </div>
       )}
-      {activeRankId !== null && (
-        <div className="flex items-center gap-3 overflow-x-auto scrollbar-thin px-3 py-2 border-b border-neutral-200/70 dark:border-stone-700/60">
-          {rankList.map((r) => {
-            const active = activeRankId === r.id;
-            return (
-              <button
-                key={r.id}
-                onClick={() => loadRank(r.id)}
-                className={`flex flex-col items-center gap-1 shrink-0 w-14 ${
-                  active ? 'opacity-100' : 'opacity-70 hover:opacity-100'
-                }`}
-                title={String(r.name)}
-              >
-                <span
-                  className={`w-14 h-14 rounded-xl flex items-center justify-center text-xs font-semibold text-center leading-tight px-1 overflow-hidden ${
-                    active
-                      ? 'bg-blue-500/20 text-blue-600 dark:text-blue-300 ring-1 ring-blue-500/40'
-                      : 'bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-700 dark:text-stone-200'
-                  }`}
-                >
-                  {r.name}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
       {/* 状态 */}
       {loading && (
         <div className="flex items-center gap-2 px-3 py-3 text-sm text-neutral-500 dark:text-stone-400">
