@@ -682,14 +682,28 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     return !!favoriteIds?.has(`kugou-${t.id}`);
   }
 
+  // 点击歌手/专辑：切到搜索页并按关键词搜索（酷狗暂无详情抽屉，先对齐网易云的“可点文字”交互）
+  const searchBy = (q: string) => {
+    if (!q.trim()) return;
+    setKeyword(q);
+    setActiveRankId(null);
+    changeTab('search');
+    void doSearch(q);
+  };
+
   async function playTrackList(sourceTracks: KugouTrack[], startIndex: number, playlistName: string) {
     try {
       // 取真实登录态：KugouView 作用域无 auth state，必须从 localStorage 读取，
       // 否则 getSongUrl 永远走游客态，播放取链会返回版权限制。
       const auth = readKugouAuth();
       const quality = currentQuality();
+      const pickHash = (tk: KugouTrack) => {
+        if (quality === 'lossless' && tk.sqHash) return tk.sqHash;
+        if (quality === 'high' && tk.hash320) return tk.hash320;
+        return tk.hash || tk.id;
+      };
       setPlayingId(sourceTracks[startIndex]?.id ?? null);
-      const { url, br } = await getSongUrl(sourceTracks[startIndex]?.hash || sourceTracks[startIndex]?.id, sourceTracks[startIndex]?.albumId, auth, quality);
+      const { url, br } = await getSongUrl(pickHash(sourceTracks[startIndex]), sourceTracks[startIndex]?.albumId, auth, quality);
       if (!url) {
         setError('该歌曲暂无可播放地址（可能需会员或已下架）');
         return;
@@ -698,7 +712,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       const playables: PlayableTrack[] = [];
       for (const tk of sourceTracks) {
         try {
-          const r = await getSongUrl(tk.hash || tk.id, tk.albumId, auth, quality);
+          const r = await getSongUrl(pickHash(tk), tk.albumId, auth, quality);
           playables.push(trackToPlayable(tk, r.url, qualityLabelFromBr(r.br)));
         } catch {
           playables.push(trackToPlayable(tk, '', ''));
@@ -988,7 +1002,21 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</div>
                 <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">
-                  {t.artist}{t.album ? ` · ${t.album}` : ''}
+                  {t.artist ? (
+                    <button
+                      data-action="search"
+                      onClick={(e) => { e.stopPropagation(); searchBy(t.artist); }}
+                      className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                    >{t.artist}</button>
+                  ) : null}
+                  {t.artist && t.album ? <span className="opacity-50 mx-1">·</span> : null}
+                  {t.album ? (
+                    <button
+                      data-action="search"
+                      onClick={(e) => { e.stopPropagation(); searchBy(t.album); }}
+                      className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
+                    >{t.album}</button>
+                  ) : null}
                 </div>
               </div>
               <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>

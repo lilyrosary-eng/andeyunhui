@@ -4,8 +4,9 @@ import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
 import { VolumePopup, PlaylistPopup } from './PlayerBar';
 import { T, useLang } from '../../_shared/pluginRuntime';
-import { parseLrc, isNeteaseRemote, neteaseSongId } from './lyricsSync';
+import { parseLrc, isNeteaseRemote, neteaseSongId, isKugouRemote, kugouSongId } from './lyricsSync';
 import { neteaseGetLyric } from './neteaseApi';
+import { getLyric as kugouGetLyric } from './kugouApi';
 // 沉浸播放页 — 覆盖音乐模块内容区，不覆盖一级导航栏
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, MusicIcon,
@@ -302,6 +303,15 @@ export function NowPlayingView({
       if (sid != null) {
         neteaseGetLyric(sid).then((lrc) => {
           setLyricsLines(lrc ? parseLrc(lrc) : []);
+        }).catch(() => setLyricsLines([]));
+      } else {
+        setLyricsLines([]);
+      }
+    } else if (isKugouRemote(track)) {
+      const hash = kugouSongId(track);
+      if (hash != null) {
+        kugouGetLyric(hash, track.title || '').then((lrc) => {
+          setLyricsLines(lrc && lrc.lyric ? parseLrc(lrc.lyric) : []);
         }).catch(() => setLyricsLines([]));
       } else {
         setLyricsLines([]);

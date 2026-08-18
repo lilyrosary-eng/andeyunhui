@@ -113,3 +113,12 @@ export function neteaseSongId(track: { id?: string }): number | null {
   const m = (track.id || '').match(/^netease-(\d+)$/);
   return m ? parseInt(m[1], 10) : null;
 }
+
+// 是否为酷狗远程曲：filePath 为 http(s) 直链，id 形如 kugou-<hash>
+export function isKugouRemote(track: { id?: string; filePath?: string }): boolean {
+  return !!track.filePath && /^https?:\/\//i.test(track.filePath) && /^kugou-/.test(track.id || '');
+}
+export function kugouSongId(track: { id?: string }): string | null {
+  const m = (track.id || '').match(/^kugou-([0-9a-fA-F]+)$/);
+  return m ? m[1] : null;
+}

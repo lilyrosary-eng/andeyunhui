@@ -3,8 +3,9 @@ import React from "react";
 // 音乐播放控制条 — 固定于音乐模块内容区底部，不覆盖导航栏
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
-import { lyricsSync, parseLrc, isNeteaseRemote, neteaseSongId } from './lyricsSync';
+import { lyricsSync, parseLrc, isNeteaseRemote, neteaseSongId, isKugouRemote, kugouSongId } from './lyricsSync';
 import { neteaseGetLyric } from './neteaseApi';
+import { getLyric as kugouGetLyric } from './kugouApi';
 import { getNeteaseQualityBr, setNeteaseQualityBr, getNeteaseQualityLabel, NETEASE_QUALITY_OPTIONS, getSongUrl } from './neteaseApi';
 import { formatTime } from '../../_shared/utils';
 
@@ -20,9 +21,22 @@ async function loadNeteaseLyric(t: Track): Promise<void> {
   }
 }
 
-// 统一歌词加载（本地 + 网易云）
+// 酷狗歌词加载分支：远程曲走 kugouApi.getLyric
+async function loadKugouLyric(t: Track): Promise<void> {
+  const hash = kugouSongId(t);
+  if (!hash) return;
+  const lrc = await kugouGetLyric(hash, t.title || '');
+  const parsed = lrc && lrc.lyric ? parseLrc(lrc.lyric) : [];
+  lyricsSync.setLines(parsed);
+  if (parsed.length === 0) {
+    hostApi.emit('lyrics-update', { currentLine: T('music.nowPlaying.noLyrics'), nextLine: '' }).catch(() => {});
+  }
+}
+
+// 统一歌词加载（本地 + 网易云 + 酷狗）
 function loadLyricsFor(t: Track, skipOnline: boolean, localFirst: boolean): Promise<void> {
   if (isNeteaseRemote(t)) return loadNeteaseLyric(t);
+  if (isKugouRemote(t)) return loadKugouLyric(t);
   return hostApi.invoke<LyricsResult>('get_lyrics', {
     trackPath: t.filePath,
     title: t.title,
