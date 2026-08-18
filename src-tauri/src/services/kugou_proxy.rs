@@ -68,6 +68,7 @@ const ALLOWED_KUGOU_PATH_PREFIXES: &[&str] = &[
     "/v5/url",
     "/pubsongs/v2",
     "/v1/search",
+    "/search",
     "/download",
 ];
 

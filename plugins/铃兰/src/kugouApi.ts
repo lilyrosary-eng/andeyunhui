@@ -276,6 +276,7 @@ export interface KugouTrack {
   hash?: string;       // 文件 hash（播放 URL 用）
   hash320?: string;    // 320k 音质 hash
   sqHash?: string;     // 无损音质 hash
+  mvHash?: string;     // MV hash（若搜索接口返回）
   albumId?: number;
   albumAudioId?: number;
   singerId?: number;
@@ -313,9 +314,14 @@ function assertKugouOk(body: any, label = 'kugou'): any {
   return body;
 }
 
+function stripHtml(v: any): string {
+  if (!v) return '';
+  return String(v).replace(/<\/?[^>]+>/g, '').trim();
+}
+
 function mapTrack(s: any): KugouTrack {
   const hash = s.hash || s.fileHash || s.audio_hash || s.HASH || '';
-  const name = s.songname || s.audio_name || s.song_name || s.filename || s.name || '未知歌曲';
+  const name = stripHtml(s.songname || s.songname_original || s.audio_name || s.song_name || s.filename || s.name || '未知歌曲');
 
   let artist = '';
   if (typeof s.singername === 'string' && s.singername) artist = s.singername;
@@ -324,22 +330,24 @@ function mapTrack(s: any): KugouTrack {
   else if (Array.isArray(s.singers) && s.singers.length > 0) {
     artist = s.singers.map((a: any) => (a && a.name) || a).filter(Boolean).join('/');
   }
+  artist = stripHtml(artist);
 
   if (!artist && typeof s.filename === 'string') {
     const parts = s.filename.split(' - ');
-    if (parts.length >= 2) artist = parts[parts.length - 1].trim();
+    if (parts.length >= 2) artist = stripHtml(parts[parts.length - 1]);
   }
 
   return {
     id: hash || String(s.audit_get_publish_time || s.id || ''),
     name,
     artist: artist || '未知歌手',
-    album: s.album_name || s.albumname || s.album || '',
+    album: stripHtml(s.album_name || s.albumname || s.album || ''),
     duration: (s.duration || s.timelength || s.timeLength || 0) * 1000 || 0,
-    cover: kugouImg(s.album_img || s.img || s.cover || s.photo || s.album_img_9x9 || '', 240),
+    cover: kugouImg(s.album_img || s.img || s.cover || s.photo || s.album_img_9x9 || s.trans_param?.union_cover || '', 240),
     hash,
     hash320: s['320hash'] || s.hash_320 || undefined,
     sqHash: s.sqhash || s.hash_flac || undefined,
+    mvHash: s.mvhash || s.mv_hash || undefined,
     albumId: s.album_id ? Number(s.album_id) : undefined,
     albumAudioId: s.album_audio_id ? Number(s.album_audio_id) : undefined,
     singerId: s.singer_id ? Number(s.singer_id) : undefined,
@@ -398,41 +406,32 @@ export async function getSongUrl(
   return { url, br };
 }
 
-// 获取歌词：新歌词接口（lyrics.kugou.com，LRC 直接 base64 解码）
+// 获取歌词：lyrics.kugou.com/search + /download，LRC 内容 base64 解码（实测可用）
 export async function getLyric(hash: string, keyword = ''): Promise<{ lyric: string; trans?: string }> {
-  const searchBody = await kugouRequest('/v1/search', {
-    appid: KUGOU_ANDROID_APPID,
-    clientver: KUGOU_ANDROID_CLIENTVER,
+  const searchBody = await kugouLegacyRequest('/search', {
+    ver: 1,
+    man: 'yes',
+    client: 'pc',
     keyword: keyword || '',
     hash: hash || '',
     duration: 0,
-    album_audio_id: 0,
-    lrctxt: 1,
-    man: 'no',
-  }, {
-    base: LYRICS_HOST,
-    notSignature: true,
-    clearDefaultParams: true,
-  });
+  }, { base: LYRICS_HOST });
   const cand = searchBody?.candidates?.[0];
   if (!cand?.id || !cand?.accesskey) return { lyric: '' };
 
-  const dlBody = await kugouRequest('/download', {
+  const dlBody = await kugouLegacyRequest('/download', {
     ver: 1,
-    client: 'android',
+    client: 'pc',
     id: cand.id,
     accesskey: cand.accesskey,
     fmt: 'lrc',
     charset: 'utf8',
-  }, {
-    base: LYRICS_HOST,
-    notSignature: true,
-    clearDefaultParams: true,
-  });
+  }, { base: LYRICS_HOST });
   const content = dlBody?.content || '';
   if (!content) return { lyric: '' };
   try {
-    return { lyric: decodeURIComponent(escape(atob(content))) };
+    const lrc = decodeURIComponent(escape(atob(content)));
+    return { lyric: lrc, trans: dlBody?.trans ? decodeURIComponent(escape(atob(dlBody.trans))) : undefined };
   } catch {
     return { lyric: content };
   }
