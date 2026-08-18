@@ -2298,6 +2298,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               onTabChange={setKugouTab}
               favoriteIds={favorites}
               onToggleFavorite={toggleFavorite}
+              onPlayMv={(mv) => dispatchOpenWith('video', [{ url: mv.url, name: mv.name, artist: mv.artist, cover: mv.cover }])}
               onRankListLoaded={setKugouRankList}
               onActiveRankChange={setKugouActiveRankId}
               onAuthChange={(auth) => {

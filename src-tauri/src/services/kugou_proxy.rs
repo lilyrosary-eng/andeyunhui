@@ -70,6 +70,10 @@ const ALLOWED_KUGOU_PATH_PREFIXES: &[&str] = &[
     "/v1/search",
     "/search",
     "/download",
+    // MV：页面解析 encode_mvid + 取流
+    "/mvweb/html/mv_",
+    "/play/mv",
+    "/v2/interface/index",
 ];
 
 // 3) 允许的 HTTP 方法（仅 POST/GET）

@@ -17,6 +17,7 @@ const hostApi: any = (window as any).__HOST_API__ || { invoke: async () => ({}) 
 import {
   makeKugouDevice,
   kugouSign,
+  kugouInfSign,
   KUGOU_WEB_SALT,
   kugouAndroidSign,
   kugouKeySign,
@@ -130,6 +131,45 @@ async function kugouLegacyRequest(
     headers: extra,
   });
   return parseKugouRaw(raw);
+}
+
+// 原始文本 GET（用于 MV 页面 HTML 解析）
+async function kugouRawGet(path: string, base: string): Promise<string> {
+  const raw: string = await hostApi.invoke<string>('kugou_http_post', {
+    method: 'GET',
+    url: `${base}${path}`,
+    body: '',
+    cookie: undefined,
+    referer: REFERER,
+    origin: undefined,
+    real_ip: REAL_IP,
+    user_agent: UA_WEB,
+    headers: {},
+  });
+  const parsed = JSON.parse(raw || '{}');
+  return typeof parsed.body === 'string' ? parsed.body : '';
+}
+
+// 已签名 GET（MV 接口用），可带额外 header（如 x-router）
+async function kugouSignedGet(url: string, extraHeaders: Record<string, string> = {}): Promise<any> {
+  const raw: string = await hostApi.invoke<string>('kugou_http_post', {
+    method: 'GET',
+    url,
+    body: '',
+    cookie: undefined,
+    referer: REFERER,
+    origin: undefined,
+    real_ip: REAL_IP,
+    user_agent: UA_WEB,
+    headers: extraHeaders,
+  });
+  return parseKugouRaw(raw);
+}
+
+function toQuery(obj: Record<string, any>): string {
+  return Object.keys(obj)
+    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(obj[k])}`)
+    .join('&');
 }
 
 // ============ 请求 helper ============
@@ -437,6 +477,48 @@ export async function getLyric(hash: string, keyword = ''): Promise<{ lyric: str
   }
 }
 
+// ========== MV 播放 ==========
+// 1) 通过 mvhash 抓 MV 页面 HTML，解析 encode_mvid
+// 2) play/mv 拿到 h264 各音质 hash
+// 3) v2/interface/index 换取 MP4 直链
+export async function getMvUrl(mvHash: string): Promise<string> {
+  const dev = getDevice();
+  const html = await kugouRawGet(`/mvweb/html/mv_${mvHash}.html`, 'https://www.kugou.com');
+  const encMatch = html.match(/var encode_mvid = "([^"]+)"/);
+  const encId = encMatch?.[1];
+  if (!encId) throw new Error('未能解析酷狗 MV 页面 id');
+
+  const mvParams = { id: encId, clientver: '1000' };
+  const mvSigned = kugouInfSign(mvParams, undefined, { mid: dev.mid, dfid: dev.dfid });
+  const mvInfo = await kugouSignedGet(`https://wwwapi.kugou.com/play/mv?${toQuery(mvSigned)}`);
+  const h264 = mvInfo?.data?.info?.h264;
+  const hash = h264?.fhd_hash || h264?.hd_hash || h264?.qhd_hash || h264?.sd_hash || h264?.ld_hash;
+  if (!hash) throw new Error('未获取到 MV 播放 hash');
+
+  const urlParams = {
+    cmd: 123,
+    ext: 'mp4',
+    hash,
+    ismp3: 0,
+    key: 'kugoumvcloud',
+    pid: 6,
+    ssl: 1,
+    appid: '1014',
+    clientver: '20000',
+  };
+  const urlSigned = kugouInfSign(urlParams, undefined, { mid: dev.mid, dfid: dev.dfid });
+  const v2 = await kugouSignedGet(
+    `https://gateway.kugou.com/v2/interface/index?${toQuery(urlSigned)}`,
+    { 'x-router': 'trackermv.kugou.com' },
+  );
+  if (v2?.status !== 1) throw new Error('MV 取流失败：' + (v2?.msg || v2?.error_msg || v2?.status));
+  for (const key of Object.keys(v2?.data || {})) {
+    const downurl = v2.data[key]?.downurl;
+    if (downurl) return downurl;
+  }
+  throw new Error('MV 响应中没有可用播放地址');
+}
+
 // 获取歌单歌曲列表（当前 /pubsongs/v2/get_other_list_file_nofilt）
 async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize = 30): Promise<KugouTrack[]> {
   const body = await kugouRequest('/pubsongs/v2/get_other_list_file_nofilt', {
@@ -628,4 +710,5 @@ export const kugou = {
   getUserInfo,
   getFavorites,
   getUserPlaylists,
+  getMvUrl,
 };

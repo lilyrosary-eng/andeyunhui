@@ -57,6 +57,40 @@ export function kugouKeySign(
 }
 
 /** 生成酷狗游客态所需的设备标识。 */
+/**
+ * H5 页面 infSign 签名（MV 等接口用）：
+ * 与 Web 盐一致，但默认参数为 srcappid/clientver/clienttime/mid/uuid/dfid，
+ * POST 时把 JSON body 原文参与签名。
+ */
+export function kugouInfSign(
+  params: Record<string, any>,
+  data?: Record<string, any> | string,
+  dev?: { mid: string; dfid: string },
+): Record<string, any> {
+  const now = Date.now();
+  const l: Record<string, any> = {
+    srcappid: '2919',
+    clientver: params.clientver ?? '20000',
+    clienttime: now,
+    mid: dev?.mid || now,
+    uuid: dev?.mid || now,
+    dfid: dev?.dfid || '-',
+    appid: '1014',
+    ...params,
+  };
+  const keys = Object.keys(l)
+    .filter((k) => l[k] !== undefined && l[k] !== null && l[k] !== '')
+    .sort();
+  const parts = keys.map((k) => `${k}=${stringifySignValue(l[k])}`);
+  if (data != null) {
+    parts.push(typeof data === 'object' ? JSON.stringify(data) : String(data));
+  }
+  parts.unshift(WEB_SALT);
+  parts.push(WEB_SALT);
+  l.signature = md5Lower(parts.join(''));
+  return l;
+}
+
 export function makeKugouDevice(): { dfid: string; mid: string; uuid: string; clienttime: number } {
   const rand = () => Math.random().toString(36).slice(2, 10);
   const dfid = (rand() + rand()).slice(0, 32);

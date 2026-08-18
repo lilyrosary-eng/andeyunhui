@@ -7,7 +7,7 @@
 
 import React from 'react';
 const { useState, useEffect, useRef } = React;
-import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon, HeartIcon } from 'lucide-react';
+import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon, HeartIcon, VideoIcon } from 'lucide-react';
 import { ArrowLeftIcon } from '../../_shared/icons';
 import { T } from '../../_shared/pluginRuntime';
 import {
@@ -35,6 +35,7 @@ import {
   getTopList,
   getPlaylist,
   getRankList,
+  getMvUrl,
   qualityLabelFromBr,
 } from './kugouApi';
 import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
@@ -61,6 +62,8 @@ interface KugouViewProps {
   // 本地收藏（与网易云红心并列的通用本地收藏）：行内红心按钮
   favoriteIds?: Set<string>;
   onToggleFavorite?: (track: PlayableTrack) => void;
+  // 播放 MV：解析到直链后交给父组件（复用网易云跳转玉兰链路）
+  onPlayMv?: (mv: { id: string; name: string; artist: string; cover: string; url: string }) => void;
 }
 
 // 为你推荐 / 热榜卡片（正方形封面 + 标题 + 数量）
@@ -440,7 +443,7 @@ function formatDuration(ms: number): string {
 }
 
 export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(function KugouView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange, onAuthChange, searchQuery, onTabChange, favoriteIds, onToggleFavorite },
+  { initialTab, onBack, onPlay, onTempPlaylist, onActivePlaylist, selectedRankId, onRankListLoaded, onActiveRankChange, onAuthChange, searchQuery, onTabChange, favoriteIds, onToggleFavorite, onPlayMv },
   ref,
 ) {
   const [tab, setTab] = useState<KugouTab>(initialTab);
@@ -689,6 +692,17 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     setActiveRankId(null);
     changeTab('search');
     void doSearch(q);
+  };
+
+  // 播放 MV：解析直链后交给父组件跳转玉兰
+  const handlePlayMv = async (t: KugouTrack) => {
+    if (!t.mvHash || !onPlayMv) return;
+    try {
+      const url = await getMvUrl(t.mvHash);
+      onPlayMv({ id: t.mvHash, name: t.name, artist: t.artist, cover: t.cover || '', url });
+    } catch (e: any) {
+      setError('MV 播放失败：' + (e?.message || e));
+    }
   };
 
   async function playTrackList(sourceTracks: KugouTrack[], startIndex: number, playlistName: string) {
@@ -1020,6 +1034,19 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
                 </div>
               </div>
               <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
+              {t.mvHash && onPlayMv && (
+                <button
+                  data-action="mv"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handlePlayMv(t);
+                  }}
+                  className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-sky-500 dark:hover:text-sky-400 hover:bg-sky-500/10 transition-colors shrink-0"
+                  title="播放 MV（跳转到玉兰）"
+                >
+                  <VideoIcon size={15} />
+                </button>
+              )}
               {onToggleFavorite && (
                 <button
                   data-action="like"
