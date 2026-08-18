@@ -455,6 +455,9 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   const [activeRankId, setActiveRankId] = useState<number | null>(null);
   const [homeHeroTracks, setHomeHeroTracks] = useState<KugouTrack[]>([]);
   const [homeHeroLoading, setHomeHeroLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const pageRef = useRef(1);
 
   // 统一切 tab：内部状态与父级 kugouTab 保持同步。
   const changeTab = (next: KugouTab) => {
@@ -573,6 +576,9 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       if (req !== reqRef.current) return;
       allTracksRef.current = list;
       setTracks(list);
+      pageRef.current = 1;
+      setHasMore(list.length >= 30);
+      setLoadingMore(false);
     } catch (e: any) {
       if (req === reqRef.current) setError('榜单加载失败：' + (e?.message || e));
     } finally {
@@ -597,10 +603,38 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       if (req !== reqRef.current) return;
       allTracksRef.current = list;
       setTracks(list);
+      pageRef.current = 1;
+      setHasMore(list.length >= 30);
+      setLoadingMore(false);
     } catch (e: any) {
       if (req === reqRef.current) setError('搜索失败：' + (e?.message || e));
     } finally {
       if (req === reqRef.current) setLoading(false);
+    }
+  }
+
+  async function loadMore() {
+    if (loadingMore || !hasMore) return;
+    const next = pageRef.current + 1;
+    setLoadingMore(true);
+    try {
+      const list = tab === 'search'
+        ? await searchSongs(keyword, 30, next)
+        : activeRankId != null
+          ? await getTopList(activeRankId, next, 30)
+          : [];
+      pageRef.current = next;
+      setTracks((prev) => {
+        const seen = new Set(prev.map((t) => t.id));
+        const merged = [...prev, ...list.filter((t) => !seen.has(t.id))];
+        allTracksRef.current = merged;
+        return merged;
+      });
+      setHasMore(list.length >= 30);
+    } catch (e: any) {
+      setError('加载更多失败：' + (e?.message || e));
+    } finally {
+      setLoadingMore(false);
     }
   }
 
@@ -614,6 +648,8 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       // 侧栏搜索框清空时，同步清掉旧搜索结果，避免空关键词下仍展示上一轮结果。
       allTracksRef.current = [];
       setTracks([]);
+      setHasMore(false);
+      setLoadingMore(false);
       return;
     }
     changeTab('search');
@@ -994,6 +1030,17 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
               </button>
             </div>
           ))}
+          {hasMore && (
+            <div className="py-3 text-center">
+              <button
+                onClick={() => void loadMore()}
+                disabled={loadingMore}
+                className="btn-press px-4 py-1.5 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-xs text-neutral-600 dark:text-stone-300 hover:bg-neutral-200/60 dark:hover:bg-stone-700/50 disabled:opacity-50"
+              >
+                {loadingMore ? '加载中…' : '加载更多'}
+              </button>
+            </div>
+          )}
           {!loading && !error && tracks.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-3 py-16 text-neutral-400 dark:text-stone-500">
               <MusicIcon size={32} />
