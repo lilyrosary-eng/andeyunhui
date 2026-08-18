@@ -1,8 +1,6 @@
 import React from "react";
-const { useState, useEffect } = React;
 import { OnlineSidebarShell, SidebarTempSection, type TempPlaylistItem } from './OnlineSidebarShell';
-import type { KugouPlaylistCard, KugouAuth } from './kugouApi';
-import { getKugouAuth } from './kugouApi';
+import type { KugouPlaylistCard } from './kugouApi';
 import type { OnlineTempItem } from './useOnlineSource';
 
 function toTempItem(temp: OnlineTempItem): TempPlaylistItem {
@@ -65,16 +63,7 @@ export default function KugouSidebar({
   onSearchChange,
   onOpenMine,
 }: KugouSidebarProps) {
-  const [auth, setAuth] = useState<KugouAuth | null>(getKugouAuth);
-
-  useEffect(() => {
-    const handler = () => setAuth(getKugouAuth());
-    window.addEventListener('kugou-auth-changed', handler);
-    return () => window.removeEventListener('kugou-auth-changed', handler);
-  }, []);
-
   const renderMineSection = () => {
-    if (!auth) return null;
     return React.createElement('div', { key: 'mine', className: 'space-y-1' },
       React.createElement('div', {
         className: 'px-1 py-1 text-xs text-neutral-400 dark:text-stone-500',
