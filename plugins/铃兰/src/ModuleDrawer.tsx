@@ -1,7 +1,7 @@
 /// <reference path="../../global.d.ts" />
 import React from "react";
 const { useState, useEffect } = React;
-import { X } from 'lucide-react';
+import { X, Compass } from 'lucide-react';
 import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon, ListenNowIcon, LibraryIcon, RadioIcon, SearchIcon, UserIcon, DownloadIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import type { NeteaseProfile } from './neteaseApi';
@@ -21,6 +21,10 @@ interface ModuleDrawerProps {
   isKugouOpen?: boolean;
   // 点击酷狗折叠菜单子项时回调：key 为 home/roam/search/mine
   onSelectKugou?: (key: 'home' | 'roam' | 'search' | 'mine') => void;
+  // 当前是否已切换到汽水音乐模块
+  isQishuiOpen?: boolean;
+  // 点击汽水折叠菜单子项时回调：key 为 recommend/top/search
+  onSelectQishui?: (key: 'recommend' | 'top' | 'search') => void;
 }
 
 // 通用首页图标（云按钮折叠菜单复用）
@@ -89,6 +93,17 @@ const accents = {
     borderActive: 'border-[#ffb74d]/60',
     borderActiveDark: 'dark:border-[#ffb74d]/40',
     check: 'bg-[#ff7700]',
+  } satisfies AccentSet,
+  qishui: {
+    text: 'text-[#00c2c7]',
+    textDark: 'dark:text-[#4dd0e1]',
+    bgSoft: 'bg-[#00c2c7]/10',
+    bgSoftDark: 'dark:bg-[#00c2c7]/10',
+    bgActive: 'bg-[#e0f7f9]/60',
+    bgActiveDark: 'dark:bg-[#1a3a3c]/40',
+    borderActive: 'border-[#4dd0e1]/60',
+    borderActiveDark: 'dark:border-[#4dd0e1]/40',
+    check: 'bg-[#00c2c7]',
   } satisfies AccentSet,
 };
 
@@ -212,15 +227,23 @@ const kugouItems: { key: 'home' | 'roam' | 'search' | 'mine'; icon: React.ReactE
   { key: 'mine', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 
-export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou }: ModuleDrawerProps) {
+// 汽水折叠菜单子项（推荐 / 榜单 / 搜索）：游客态第一版
+const qishuiItems: { key: 'recommend' | 'top' | 'search'; icon: React.ReactElement }[] = [
+  { key: 'recommend', icon: React.createElement(Compass, { size: 16 }) },
+  { key: 'top', icon: React.createElement(LibraryIcon, { size: 16 }) },
+  { key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
+];
+
+export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou, isQishuiOpen, onSelectQishui }: ModuleDrawerProps) {
   useLang();
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
   const [neteaseExpanded, setNeteaseExpanded] = useState(isNeteaseOpen);
   const [kugouExpanded, setKugouExpanded] = useState(!!isKugouOpen);
+  const [qishuiExpanded, setQishuiExpanded] = useState(!!isQishuiOpen);
 
-  // 修正：本地音乐只有在网易云和酷狗都未打开时才高亮
-  const isLocalActive = !isNeteaseOpen && !isKugouOpen;
+  // 修正：本地音乐只有在网易云/酷狗/汽水都未打开时才高亮
+  const isLocalActive = !isNeteaseOpen && !isKugouOpen && !isQishuiOpen;
 
   useEffect(() => {
     if (open) {
@@ -240,6 +263,10 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
   useEffect(() => {
     setKugouExpanded(!!isKugouOpen);
   }, [isKugouOpen]);
+
+  useEffect(() => {
+    setQishuiExpanded(!!isQishuiOpen);
+  }, [isQishuiOpen]);
 
   if (!mounted) return null;
 
@@ -357,6 +384,45 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
                   desc={desc}
                   onClick={() => {
                     if (onSelectKugou) onSelectKugou(item.key);
+                    onClose();
+                  }}
+                />
+              );
+            })}
+          </DrawerModuleItem>
+
+          <DrawerModuleItem
+            active={!!isQishuiOpen}
+            expanded={qishuiExpanded}
+            onToggleExpand={() => setQishuiExpanded((v) => !v)}
+            onSelect={() => { if (onSelectQishui) onSelectQishui('recommend'); onClose(); }}
+            icon={React.createElement(MusicIcon, { size: 18 })}
+            title={T('music.moduleDrawer.qishui.title') || '汽水音乐'}
+            accent={accents.qishui}
+          >
+            {qishuiItems.map((item) => {
+              const titleKey = item.key === 'recommend' ? 'music.moduleDrawer.qishui.recommend'
+                : item.key === 'top' ? 'music.moduleDrawer.qishui.top'
+                : 'music.moduleDrawer.qishui.search';
+              const descKey = item.key === 'recommend' ? 'music.moduleDrawer.qishui.recommendDesc'
+                : item.key === 'top' ? 'music.moduleDrawer.qishui.topDesc'
+                : 'music.moduleDrawer.qishui.searchDesc';
+              const titleDefault = item.key === 'recommend' ? '推荐'
+                : item.key === 'top' ? '榜单'
+                : '搜索';
+              const descDefault = item.key === 'recommend' ? '推荐歌单 / 热门榜单'
+                : item.key === 'top' ? '官方榜单精选'
+                : '找歌找专辑';
+              const title = T(titleKey) || titleDefault;
+              const desc = T(descKey) || descDefault;
+              return (
+                <DrawerSubItem
+                  key={item.key}
+                  icon={item.icon}
+                  title={title}
+                  desc={desc}
+                  onClick={() => {
+                    if (onSelectQishui) onSelectQishui(item.key);
                     onClose();
                   }}
                 />

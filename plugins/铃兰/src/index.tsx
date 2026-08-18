@@ -9,6 +9,9 @@ import { NowPlayingView } from './NowPlayingView';
 import { NeteaseView, type PlayableTrack, type TempPlaylist, type NeteaseViewHandle } from './NeteaseView';
 import { KugouView } from './KugouView';
 import KugouSidebar from './KugouSidebar';
+import { QishuiView, type QishuiViewHandle } from './QishuiView';
+import QishuiSidebar from './QishuiSidebar';
+import { qishuiGetRecommendPlaylists, type QishuiPlaylistCard } from './qishuiApi';
 import NeteaseSidebar from './NeteaseSidebar';
 import { useOnlineSource } from './useOnlineSource';
 import type { KugouPlaylistCard } from './kugouApi';
@@ -1074,6 +1077,18 @@ function MusicModule() {
   const [kugouSettingsOpen, setKugouSettingsOpen] = useState(false);
   const [kugouStatsOpen, setKugouStatsOpen] = useState(false);
   const kugouViewRef = useRef<NeteaseViewHandle | null>(null);
+  // 汽水音乐视图：与网易云 / 酷狗并列的第三在线平台（游客态第一版）
+  const [qishuiOpen, setQishuiOpen] = useState(false);
+  const [qishuiTab, setQishuiTab] = useState<'recommend' | 'top' | 'search' | 'playlist'>('recommend');
+  const [qishuiRecommend, setQishuiRecommend] = useState<QishuiPlaylistCard[]>([]);
+  const [qishuiActivePlaylistId, setQishuiActivePlaylistId] = useState<string | null>(null);
+  const qishuiViewRef = useRef<QishuiViewHandle | null>(null);
+  // 进入汽水模块时拉一次推荐歌单（侧栏铺开），仅游客态
+  useEffect(() => {
+    if (qishuiOpen && qishuiRecommend.length === 0) {
+      qishuiGetRecommendPlaylists(12).then((list) => setQishuiRecommend(list)).catch(() => {});
+    }
+  }, [qishuiOpen, qishuiRecommend.length]);
 
   const [currentTrack, setCurrentTrack] = useState<Track | null>(() => musicPlayer.getCurrentTrack());
   const unlistenRef = useRef<(() => void)[]>([]);
@@ -2137,6 +2152,23 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             online.setActiveId(null);
           }}
         />
+      ) : qishuiOpen ? (
+        <QishuiSidebar
+          tempPlaylists={online.temps}
+          tempActiveId={online.activeId}
+          onSelectTemp={(item) => {
+            online.setActiveId(item.id);
+            setQishuiActivePlaylistId(null);
+            (qishuiViewRef.current as any)?.restoreTemp?.(item.payload);
+          }}
+          recommend={qishuiRecommend}
+          activePlaylistId={qishuiActivePlaylistId}
+          onSelectPlaylist={(pl) => {
+            setQishuiActivePlaylistId(pl.id);
+            online.setActiveId(null);
+            (qishuiViewRef.current as any)?.openPlaylist?.(pl.id, pl.name);
+          }}
+        />
       ) : (
         <MusicSidebar
           playlists={filteredPlaylists}
@@ -2264,12 +2296,33 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               selectedRankId={kugouActiveRankId}
               searchQuery={searchQuery}
               onTabChange={setKugouTab}
+              favoriteIds={favorites}
+              onToggleFavorite={toggleFavorite}
               onRankListLoaded={setKugouRankList}
               onActiveRankChange={setKugouActiveRankId}
               onAuthChange={(auth) => {
                 // 登录态变化：同步给侧栏（侧栏已监听 kugou-auth-changed 事件，
                 // 这里透传一份以便后续在外层做登录态驱动的 UI 切换）。
                 try { window.__HOST_API__?.invoke('debug_log', { msg: `KUGOU_AUTH_CHANGED userid=${auth?.userid ?? 'null'}` }).catch(()=>{}); } catch {}
+              }}
+            />
+          ) : qishuiOpen ? (
+            <QishuiView
+              ref={qishuiViewRef}
+              initialTab={qishuiTab}
+              onBack={() => setShowModuleDrawer(true)}
+              onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
+                musicPlayer.setTracks(tracks, startIndex);
+                musicPlayer.play();
+                musicPlayer.currentPlaylistId = 'qishui-active';
+                online.registerPlay(tracks, startIndex, sourceName, 'qishui-temp');
+              }}
+              onTempPlaylist={() => {
+                online.setActiveId(null);
+              }}
+              onActivePlaylist={(id) => {
+                setQishuiActivePlaylistId(id);
+                online.setActiveId(null);
               }}
             />
           ) : null}
@@ -2357,6 +2410,16 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           setSearchQuery('');
         }}
         isKugouOpen={kugouOpen}
+        onSelectQishui={(key: 'recommend' | 'top' | 'search') => {
+          setQishuiTab(key);
+          setQishuiOpen(true);
+          setNeteaseOpen(false);
+          setKugouOpen(false);
+          setQishuiActivePlaylistId(null);
+          setSelectedPlaylist(null);
+          setSearchQuery('');
+        }}
+        isQishuiOpen={qishuiOpen}
         neteaseProfile={neteaseProfile}
       />
       {showNowPlaying && currentTrack && (

@@ -14,6 +14,7 @@ import type { PlayableTrack, TempPlaylist } from './NeteaseView';
 export interface OnlineTempItem {
   id: string;
   name: string;
+  count: number;
   payload: TempPlaylist;
 }
 
@@ -35,7 +36,7 @@ export interface OnlineSourceApi {
     tracks: PlayableTrack[],
     startIndex: number,
     name: string,
-    type: 'netease-temp' | 'kugou-temp',
+    type: 'netease-temp' | 'kugou-temp' | 'qishui-temp',
   ) => void;
   // 注册一个临时歌单（来自子模块内部如「我喜欢的音乐」整页播放）
   registerTemp: (temp: TempPlaylist) => void;
@@ -50,9 +51,9 @@ export function useOnlineSource(): OnlineSourceApi {
   const [sourceActiveId, setSourceActiveId] = useState<string | number | null>(null);
 
   const registerPlay = useCallback(
-    (tracks: PlayableTrack[], _startIndex: number, name: string, type: 'netease-temp' | 'kugou-temp') => {
+    (tracks: PlayableTrack[], _startIndex: number, name: string, type: 'netease-temp' | 'kugou-temp' | 'qishui-temp') => {
       // 在线播放注册为临时歌单（id 与类型绑定到具体平台，供浮窗区分来源）
-      const id = type === 'netease-temp' ? 'netease-active' : 'kugou-active';
+      const id = type === 'netease-temp' ? 'netease-active' : type === 'kugou-temp' ? 'kugou-active' : 'qishui-active';
       setActivePlaylist({ id, name, type, tracks });
     },
     [],
@@ -60,9 +61,10 @@ export function useOnlineSource(): OnlineSourceApi {
 
   const registerTemp = useCallback((temp: TempPlaylist) => {
     const id = String(temp.id ?? temp.name);
+    const count = temp.tracks?.length ?? 0;
     setTemps((prev) => {
       const without = prev.filter((t) => t.id !== id);
-      return [{ id, name: temp.name, payload: temp }, ...without].slice(0, MAX_TEMPS);
+      return [{ id, name: temp.name, count, payload: temp }, ...without].slice(0, MAX_TEMPS);
     });
     setActiveId(id);
   }, []);
