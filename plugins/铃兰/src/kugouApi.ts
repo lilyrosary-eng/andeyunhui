@@ -674,7 +674,7 @@ export async function getUserPlaylists(auth: KugouAuth, pagesize = 50): Promise<
   assertKugouOk(body, 'get_all_list');
   const list: any[] = body?.info || body?.data?.info || body?.list || [];
   return list.map((r: any) => ({
-    id: Number(r.specialid ?? r.id ?? r.global_collection_id ?? 0),
+    id: Number(r.specialid ?? r.id ?? r.global_collection_id ?? 0) || 0,
     gid: String(r.global_collection_id ?? r.specialid ?? r.id ?? ''),
     name: r.specialname ?? r.name ?? '未命名歌单',
     cover: kugouImg(r.pic || r.imgurl || r.cover || '', 240),

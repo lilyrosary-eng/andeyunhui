@@ -112,7 +112,7 @@ export default function KugouSidebar({
       userExpanded && (playlists.length > 0
         ? playlists.map(pl =>
             React.createElement('button', {
-              key: pl.id,
+              key: pl.gid || String(pl.id),
               onClick: () => onSelectUserPlaylist?.(pl),
               className: 'w-full text-left px-3 py-1.5 rounded-lg transition-colors text-xs hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-stone-400 truncate',
             }, pl.name)

@@ -783,7 +783,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   }
 
   async function doPlay(track: KugouTrack, index: number) {
-    const currentList = tab === 'home' && activeRankId === null ? homeHeroTracks : allTracksRef.current;
+    const currentList = tab === 'home' && activeRankId === null && !playlistMode ? homeHeroTracks : allTracksRef.current;
     await playTrackList(currentList, index, track.name);
   }
 
@@ -867,7 +867,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       )}
 
       {/* 首页热榜 */}
-      {tab === 'home' && activeRankId === null && (
+      {tab === 'home' && activeRankId === null && !playlistMode && (
         <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
           {/* 顶部标题 + 播放全部 */}
           <div className="flex items-center justify-between pt-4 pb-3">
@@ -949,7 +949,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       )}
 
       {/* 漫游：发现流（对齐网易云"漫游"，游客态复用榜单 + 为你推荐） */}
-      {tab === 'roam' && activeRankId === null && (
+      {tab === 'roam' && activeRankId === null && !playlistMode && (
         <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
           <div className="flex items-center gap-2 pt-4 pb-3">
             <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100">{T('music.kugou.roamTitle') || '漫游'}</h2>
@@ -1012,7 +1012,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       )}
 
       {/* 我的：游客态提示页 */}
-      {tab === 'mine' && activeRankId === null && (
+      {tab === 'mine' && activeRankId === null && !playlistMode && (
         <MineView onBack={() => changeTab('home')} onAuthChange={onAuthChange} />
       )}
 
