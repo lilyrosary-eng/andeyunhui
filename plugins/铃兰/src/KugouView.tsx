@@ -47,6 +47,7 @@ import {
 import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
 import { MusicHeader } from './MusicHeader';
 import { PlaylistDetailHeader } from './_shared/OnlineMusicTemplates';
+import { TrackRow, type TrackBadge } from './_shared/TrackRow';
 
 type KugouTab = 'home' | 'roam' | 'search' | 'mine';
 
@@ -1185,103 +1186,34 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
             </div>
           )}
           {tracks.map((t, i) => (
-            <div
+            <TrackRow
               key={t.id}
-              role="button"
-              tabIndex={0}
-              onClick={(e) => {
-                if ((e.target as HTMLElement).closest('[data-action]')) return;
-                doPlay(t, i);
+              track={{
+                id: `kugou-${t.id}`,
+                filePath: '',
+                title: t.name,
+                artist: t.artist,
+                album: t.album,
+                durationSecs: Math.round((t.duration || 0) / 1000),
+                coverPath: t.cover,
+                artistId: t.singerId,
+                albumId: t.albumId,
+                mvId: t.mvHash,
+                badges: [
+                  (t.privilege ?? 0) >= 10 ? { label: 'VIP', kind: 'vip' as const } : null,
+                ].filter((b): b is TrackBadge => b !== null),
               }}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doPlay(t, i); } }}
-              className="group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 active:bg-neutral-300/50 dark:active:bg-stone-700/50 transition-colors text-left cursor-pointer"
-            >
-              <div className="w-10 h-10 rounded-md overflow-hidden bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center shrink-0">
-                {t.cover ? (
-                  <img src={t.cover} alt="" className="w-full h-full object-cover" />
-                ) : (
-                  <MusicIcon size={16} className="text-neutral-400 dark:text-stone-500" />
-                )}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</span>
-                  {((t.privilege ?? 0) >= 10) && (
-                    <span className="shrink-0 text-[9px] font-semibold leading-none px-1 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400">
-                      VIP
-                    </span>
-                  )}
-                </div>
-                <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">
-                  {t.artist ? (
-                    <button
-                      data-action="search"
-                      onClick={(e) => { e.stopPropagation(); searchBy(t.artist); }}
-                      className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
-                    >{t.artist}</button>
-                  ) : null}
-                  {t.artist && t.album ? <span className="opacity-50 mx-1">·</span> : null}
-                  {t.album ? (
-                    <button
-                      data-action="search"
-                      onClick={(e) => { e.stopPropagation(); searchBy(t.album); }}
-                      className="hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
-                    >{t.album}</button>
-                  ) : null}
-                </div>
-              </div>
-              <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
-              {t.mvHash && onPlayMv && (
-                <button
-                  data-action="mv"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void handlePlayMv(t);
-                  }}
-                  className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-sky-500 dark:hover:text-sky-400 hover:bg-sky-500/10 transition-colors shrink-0"
-                  title="播放 MV（跳转到玉兰）"
-                >
-                  <VideoIcon size={15} />
-                </button>
-              )}
-              <button
-                data-action="download"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void handleDownload(t);
-                }}
-                className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-emerald-500 dark:hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors shrink-0"
-                title="下载"
-              >
-                <DownloadIcon size={15} />
-              </button>
-              {onToggleFavorite && (
-                <button
-                  data-action="like"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onToggleFavorite(trackToPlayable(t, '', ''));
-                  }}
-                  className="btn-jelly p-1.5 rounded-full text-neutral-400 dark:text-stone-500 hover:text-rose-500 dark:hover:text-rose-400 hover:bg-rose-500/10 transition-colors shrink-0"
-                  title={isFav(t) ? '取消收藏' : '收藏'}
-                >
-                  <HeartIcon size={15} fill={isFav(t) ? 'currentColor' : 'none'} />
-                </button>
-              )}
-              <button
-                data-action="play"
-                onClick={() => doPlay(t, i)}
-                disabled={playingId === t.id}
-                className="btn-press w-8 h-8 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 flex items-center justify-center disabled:opacity-40 shrink-0"
-                title="播放"
-              >
-                {playingId === t.id ? (
-                  <PlayIcon size={14} className="text-blue-500" />
-                ) : (
-                  <PlayIcon size={14} />
-                )}
-              </button>
-            </div>
+              index={i}
+              isPlaying={playingId === t.id}
+              onPlay={() => doPlay(t, i)}
+              onOpenArtist={(e) => { e.stopPropagation(); searchBy(t.artist); }}
+              onOpenAlbum={(e) => { e.stopPropagation(); searchBy(t.album); }}
+              onPlayMv={(e) => { e.stopPropagation(); void handlePlayMv(t); }}
+              onDownload={(e) => { e.stopPropagation(); void handleDownload(t); }}
+              onLike={(e) => { e.stopPropagation(); onToggleFavorite?.(trackToPlayable(t, '', '')); }}
+              isLiked={isFav(t)}
+              accentColor="#00aaff"
+            />
           ))}
           {hasMore && (
             <div className="py-3 text-center">
