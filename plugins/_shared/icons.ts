@@ -6,6 +6,7 @@
 // 遵循 lucide 风格的 SVG 路径，保持视觉一致性
 // =============================================
 
+
 const React = window.__HOST_REACT__;
 
 // ========== SVG 基础工厂 ==========
@@ -26,8 +27,8 @@ function SvgEl({
 
 // ========== 播放控制 ==========
 
-export function PlayIcon(p: { size?: number }) {
-  return SvgEl({ size: p?.size || 22, fill: 'currentColor', children: [
+export function PlayIcon(p: { size?: number; className?: string }) {
+  return SvgEl({ size: p?.size || 22, fill: 'currentColor', className: p?.className, children: [
     React.createElement('polygon', { key: 'a', points: '5 3 19 12 5 21 5 3' }),
   ] });
 }
@@ -122,16 +123,16 @@ export function Repeat1Icon(p: { size?: number }) {
 
 // ========== 通用 ==========
 
-export function MusicIcon(p: { size?: number }) {
-  return SvgEl({ size: p?.size || 24, strokeWidth: 1.5, children: [
+export function MusicIcon(p: { size?: number; className?: string }) {
+  return SvgEl({ size: p?.size || 24, strokeWidth: 1.5, className: p?.className, children: [
     React.createElement('path', { key: 'a', d: 'M9 18V5l12-2v13' }),
     React.createElement('circle', { key: 'b', cx: '6', cy: '18', r: '3' }),
     React.createElement('circle', { key: 'c', cx: '18', cy: '16', r: '3' }),
   ] });
 }
 
-export function CloudIcon(p: { size?: number }) {
-  return SvgEl({ size: p?.size || 18, strokeWidth: 1.5, children: [
+export function CloudIcon(p: { size?: number; className?: string }) {
+  return SvgEl({ size: p?.size || 18, strokeWidth: 1.5, className: p?.className, children: [
     React.createElement('path', { key: 'a', d: 'M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6-1.6A4 4 0 0 0 6.5 19' }),
   ] });
 }

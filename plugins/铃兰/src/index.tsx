@@ -1685,7 +1685,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       console.log('[Music] 插入 MV:', fp, '->', mvPath);
     } catch (e) {
       console.warn('[Music] 保存 MV 绑定失败:', fp, e);
-      alert('保存 MV 绑定失败：' + (e?.message || e?.toString?.() || '未知错误'));
+      alert('保存 MV 绑定失败：' + ((e as any)?.message || (e as any)?.toString?.() || '未知错误'));
     }
   }, [mvPathMap]);
 

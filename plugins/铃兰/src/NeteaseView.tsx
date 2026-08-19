@@ -69,7 +69,7 @@ function NeteaseTrackDownload({ track }: { track: NeteaseTrack }) {
               key={o.br}
               onClick={(e) => { e.stopPropagation(); handlePick(o.br); }}
               className="w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-neutral-100 dark:hover:bg-stone-700 transition-colors"
-              title={o.hint}
+              title={o.desc}
             >
               {o.label}
             </button>
@@ -202,6 +202,7 @@ const TAB_TITLE_KEYS: Record<NeteaseTab, string> = {
   radio: 'music.moduleDrawer.netease.radio',
   search: 'music.moduleDrawer.netease.search',
   login: 'music.moduleDrawer.netease.login',
+  downloads: 'music.moduleDrawer.netease.downloads',
 };
 
 export interface PlayableTrack {
@@ -428,7 +429,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
       console.warn('[netease] 获取用户信息失败', e);
       // 仅获取失败时不自动退出，保留"已登录"态并显示错误与重试按钮；
       // 用户可点"重新获取"或"退出登录"，避免 cookie 其实有效只是网络抖动时被清掉。
-      setProfileError('获取用户信息失败：' + (e?.message || String(e)));
+      setProfileError('获取用户信息失败：' + ((e as any)?.message || String(e)));
     } finally {
       setProfileLoading(false);
     }
@@ -496,11 +497,11 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
           }
         } catch (e) {
           if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
-          setQrStatus('轮询失败：' + String(e?.message || e));
+          setQrStatus('轮询失败：' + String((e as any)?.message || e));
         }
       }, 2000);
     } catch (e) {
-      setQrStatus('生成失败：' + String(e?.message || e));
+      setQrStatus('生成失败：' + String((e as any)?.message || e));
     } finally {
       setQrLoading(false);
     }
@@ -1543,7 +1544,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                     <div className="text-center">
                       <div className="flex items-center justify-center gap-2">
                         <span className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{profile.nickname}</span>
-                        {profile.vipType > 0 && (
+                        {(profile.vipType ?? 0) > 0 && (
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/20">VIP</span>
                         )}
                       </div>
@@ -1684,7 +1685,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
             drawer={drawer}
             onClose={closeDrawer}
             onPlayTracks={playTrackList}
-            onPlayMv={handlePlayMv}
+            onPlayMv={onPlayMv}
             onOpenArtist={openArtistDrawer}
             onOpenAlbum={openAlbumDrawer}
             onSubscribeAlbum={handleSubscribeAlbum}
@@ -2038,7 +2039,7 @@ type DetailDrawerProps = {
   drawer: { type: 'none' } | { type: 'artist'; id: number } | { type: 'album'; id: number };
   onClose: () => void;
   onPlayTracks: (list: NeteaseTrack[], startIndex: number, name?: string) => void;
-  onPlayMv: (e: React.MouseEvent, t: NeteaseTrack) => void;
+  onPlayMv?: (mv: { id: number; name: string; artist: string; cover: string; url: string }) => void;
   onOpenArtist: (id?: number) => void;
   onOpenAlbum: (id?: number) => void;
   onSubscribeAlbum: (id: number, subscribe: boolean) => void;
@@ -2433,9 +2434,9 @@ function DetailDrawer(props: DetailDrawerProps) {
                             <div className="absolute inset-0 flex items-center justify-center bg-black/20">
                               <PlayIcon size={22} className="text-white" />
                             </div>
-                            {m.playCount > 0 && (
+                            {(m.playCount ?? 0) > 0 && (
                               <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/50 text-white text-[10px]">
-                                {fmtCount(m.playCount)}
+                                {fmtCount(m.playCount ?? 0)}
                               </div>
                             )}
                           </div>

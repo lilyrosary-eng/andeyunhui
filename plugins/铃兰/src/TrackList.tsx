@@ -41,6 +41,8 @@ interface TrackListProps {
   onResetCover?: (track: Track) => void;
   onRescanTrack?: (track: Track) => void;
   onEditTrack?: (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => void;
+  // 下载单曲
+  onDownloadTrack?: (track: Track) => void;
   // 插入 MV：传入后右键菜单出现「插入 MV」项（用于本地歌曲）。
   onAttachMv?: (track: Track) => void;
   // 播放 MV：track.mvPath 存在时行内显示 MV 图标，点击调用。
