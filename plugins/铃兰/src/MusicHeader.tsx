@@ -17,6 +17,8 @@ interface MusicHeaderUser {
   avatarUrl?: string;
   // 首字母占位用的字符（通常取昵称首字，缺省「云」）
   initial?: string;
+  // VIP 徽章文案（如 "VIP" / "黑胶VIP"），不传则不显示
+  vipBadge?: string;
 }
 
 interface MusicHeaderProps {
@@ -53,6 +55,11 @@ function LoggedUserButton({ user, onClick }: { user: MusicHeaderUser; onClick: (
       <span className="text-xs text-neutral-700 dark:text-stone-200 max-w-[80px] truncate">
         {user.name || '已登录'}
       </span>
+      {user.vipBadge && (
+        <span className="px-1 py-0.5 rounded text-[9px] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
+          {user.vipBadge}
+        </span>
+      )}
     </button>
   );
 }

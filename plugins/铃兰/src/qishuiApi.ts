@@ -202,11 +202,19 @@ export async function qishuiSearch(keyword: string, type = 1, page = 1, pageSize
       ab_param: JSON.stringify({ enable_search_user: true, enable_search_video: 1 }),
     },
   });
-  const groups = r?.result_groups || r?.data?.result_groups || [];
-  const list = Array.isArray(groups)
-    ? groups.flatMap((g: any) => g.data || [])
-    : (r?.data?.songList || r?.data?.list || r?.list || []);
-  return list.map(mapTrack);
+  // 汽水搜索返回结构可能有多层包装，依次尝试多种路径
+  const groups = r?.result_groups || r?.data?.result_groups || r?.data?.groups || [];
+  let list: any[] = [];
+  if (Array.isArray(groups) && groups.length) {
+    // result_groups 模式：每个 group 内有 data 数组
+    list = groups.flatMap((g: any) => g.data || g.tracks || g.songs || []);
+  } else {
+    // 降级：直接从多种可能路径提取歌曲列表
+    list = r?.data?.songList || r?.data?.songs || r?.data?.list || r?.data?.tracks
+      || r?.songList || r?.songs || r?.list || r?.tracks || [];
+  }
+  console.log('[qishui] search response keys:', Object.keys(r || {}), 'groups:', groups.length, 'list:', list.length);
+  return (Array.isArray(list) ? list : []).map(mapTrack).filter((t: QishuiTrack) => t.id);
 }
 
 // 解析 discover/mix 返回的 block，提取歌单卡片
@@ -281,10 +289,25 @@ export async function qishuiGetPlaylistTracks(pid: string): Promise<QishuiTrack[
       count: 100,
     },
   });
-  const list = r?.data?.media_resources
-    ? r.data.media_resources.map((res: any) => res.entity?.track_wrapper?.track).filter(Boolean)
-    : (r?.data?.songs || r?.data?.list || r?.list || []);
-  return list.map(mapTrack);
+  // 多种可能路径：汽水 API 版本不同返回结构可能变化
+  let list: any[] = [];
+  if (r?.data?.media_resources) {
+    list = r.data.media_resources
+      .map((res: any) => res.entity?.track_wrapper?.track || res.entity?.track || res.track)
+      .filter(Boolean);
+  } else if (r?.data?.songs) {
+    list = r.data.songs;
+  } else if (r?.data?.list) {
+    list = r.data.list;
+  } else if (r?.data?.tracks) {
+    list = r.data.tracks;
+  } else if (r?.data?.playlist?.tracks) {
+    list = r.data.playlist.tracks;
+  } else {
+    list = r?.list || r?.tracks || [];
+  }
+  console.log('[qishui] playlist detail keys:', Object.keys(r || {}), 'tracks:', list.length);
+  return (Array.isArray(list) ? list : []).map(mapTrack).filter((t: QishuiTrack) => t.id);
 }
 
 // 歌词（LRC 文本）

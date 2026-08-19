@@ -7,7 +7,7 @@
 // 解密在拿到 song/url 后于 doPlay 内完成，再喂音乐播放器。
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Loader2, AlertCircle, Music2, Play, ListMusic, Compass } from 'lucide-react';
+import { Search, Loader2, AlertCircle, Music2, Play, ListMusic, Compass, User } from 'lucide-react';
 import {
   qishuiSearch,
   qishuiGetRecommendPlaylists,
@@ -29,7 +29,7 @@ import {
 
 const ACCENT = '#00c2c7'; // 汽水青蓝，对齐品牌色
 
-type QishuiTab = 'recommend' | 'top' | 'search' | 'playlist';
+type QishuiTab = 'recommend' | 'top' | 'search' | 'playlist' | 'about';
 
 interface QishuiViewProps {
   initialTab: QishuiTab;
@@ -237,6 +237,9 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
           <button className={`btn-press px-3 py-1.5 rounded-lg text-sm transition-colors ${tab === 'search' ? 'bg-neutral-200/70 dark:bg-stone-700 text-neutral-800 dark:text-stone-100' : 'text-neutral-500 dark:text-stone-400 hover:text-neutral-800 dark:hover:text-stone-100'}`} onClick={() => setTab('search')}>
             <Search size={14} /> 搜索
           </button>
+          <button className={`btn-press px-3 py-1.5 rounded-lg text-sm transition-colors ${tab === 'about' ? 'bg-neutral-200/70 dark:bg-stone-700 text-neutral-800 dark:text-stone-100' : 'text-neutral-500 dark:text-stone-400 hover:text-neutral-800 dark:hover:text-stone-100'}`} onClick={() => setTab('about')}>
+            <User size={14} /> 关于
+          </button>
         </div>
       </div>
 
@@ -325,6 +328,46 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
               onPlayAll={playAll}
             />
             <div className="space-y-0.5">{tracks.map(renderTrackRow)}</div>
+          </div>
+        )}
+
+        {!loading && tab === 'about' && (
+          <div className="max-w-md mx-auto flex flex-col gap-5 py-8">
+            <div className="flex flex-col items-center gap-3 p-5 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+              <div className="w-20 h-20 rounded-2xl flex items-center justify-center text-white shadow-lg" style={{ background: ACCENT }}>
+                <Music2 size={36} />
+              </div>
+              <div className="text-center">
+                <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100">汽水音乐</h2>
+                <p className="text-xs text-neutral-500 dark:text-stone-400 mt-1">字节跳动旗下音乐平台</p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+              <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 mb-2">当前状态</h3>
+              <div className="text-xs text-neutral-500 dark:text-stone-400 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span>登录状态</span>
+                  <span>游客模式（无需登录）</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>可用功能</span>
+                  <span>推荐 / 榜单 / 搜索 / 播放</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>音质</span>
+                  <span>标准 / 高品质</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+              <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 mb-2">说明</h3>
+              <p className="text-xs text-neutral-500 dark:text-stone-400 leading-relaxed">
+                汽水音乐为纯游客态访问，无需扫码登录即可使用搜索、推荐和播放功能。
+                VIP / 付费歌曲可能无法播放完整音频，取决于字节跳动开放接口的权限策略。
+              </p>
+            </div>
           </div>
         )}
       </div>

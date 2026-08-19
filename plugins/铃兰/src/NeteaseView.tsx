@@ -932,6 +932,10 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const openPlaylist = useCallback(async (id: number, name?: string) => {
     const req = ++reqRef.current;
     try {
+      // 先设 tab='listen' 再设 playlistId，确保 listen effect 的 playlistId 守卫生效。
+      // 必须在同一个 render batch 中完成，否则从漫游页（library）点击歌单时，
+      // listen effect 先跑会看到 playlistId===null 而清空 tracks/playlistInfo，导致歌单打不开。
+      setTab('listen');
       setPlaylistId(id);
       if (name) sourceNameRef.current = name;
       onActivePlaylist?.(id);
@@ -1251,6 +1255,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
                 name: profile?.nickname,
                 avatarUrl: profile?.avatarUrl,
                 initial: profile?.nickname ? profile.nickname.slice(0, 1) : '云',
+                vipBadge: vipInfo?.isVip ? (vipInfo.vipLevel > 0 ? '黑胶VIP' : 'VIP') : undefined,
               }
             : { loggedIn: false }
         }

@@ -1079,7 +1079,7 @@ function MusicModule() {
   const kugouViewRef = useRef<NeteaseViewHandle | null>(null);
   // 汽水音乐视图：与网易云 / 酷狗并列的第三在线平台（游客态第一版）
   const [qishuiOpen, setQishuiOpen] = useState(false);
-  const [qishuiTab, setQishuiTab] = useState<'recommend' | 'top' | 'search' | 'playlist'>('recommend');
+  const [qishuiTab, setQishuiTab] = useState<'recommend' | 'top' | 'search' | 'playlist' | 'about'>('recommend');
   const [qishuiRecommend, setQishuiRecommend] = useState<QishuiPlaylistCard[]>([]);
   const [qishuiActivePlaylistId, setQishuiActivePlaylistId] = useState<string | null>(null);
   const qishuiViewRef = useRef<QishuiViewHandle | null>(null);
@@ -2417,7 +2417,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           setSearchQuery('');
         }}
         isKugouOpen={kugouOpen}
-        onSelectQishui={(key: 'recommend' | 'top' | 'search') => {
+        onSelectQishui={(key: 'recommend' | 'top' | 'search' | 'about') => {
           setQishuiTab(key);
           setQishuiOpen(true);
           setNeteaseOpen(false);
