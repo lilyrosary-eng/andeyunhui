@@ -20,18 +20,6 @@ import {
   getKugouVipInfo,
   type KugouVipInfo,
   safeImg,
-} from './kugouApi';
-import {
-  kugouQrCreate,
-  kugouQrCheck,
-  readKugouAuth,
-  logoutKugou,
-  fetchKugouProfile,
-} from './kugouAuth';
-import { musicPlayer, Track } from './musicPlayer';
-import {
-  KugouTrack,
-  KugouPlaylistCard,
   searchSongs,
   getSongUrl,
   downloadKugouTrack,
@@ -44,6 +32,14 @@ import {
   getMvUrl,
   qualityLabelFromBr,
 } from './kugouApi';
+import {
+  kugouQrCreate,
+  kugouQrCheck,
+  readKugouAuth,
+  logoutKugou,
+  fetchKugouProfile,
+} from './kugouAuth';
+import { musicPlayer, Track } from './musicPlayer';
 import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
 import { MusicHeader } from './MusicHeader';
 import { PlaylistDetailHeader } from './_shared/OnlineMusicTemplates';
@@ -304,7 +300,7 @@ function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?:
           {/* 用户信息卡（对齐网易云“我的”页） */}
           <div className="flex flex-col items-center gap-3 p-5 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
             {safeImg(profile?.avatar) ? (
-              <img src={safeImg(profile.avatar)} alt="" className="w-20 h-20 rounded-full object-cover border-2 border-white dark:border-stone-700 shadow-sm" />
+              <img src={safeImg(profile?.avatar)} alt="" className="w-20 h-20 rounded-full object-cover border-2 border-white dark:border-stone-700 shadow-sm" />
             ) : (
               <div className="w-20 h-20 rounded-full bg-orange-500/15 flex items-center justify-center text-orange-600 dark:text-orange-400 text-2xl font-bold">
                 {(profile?.nickname || auth.nickname || '酷').slice(0, 1)}
@@ -511,7 +507,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
 
   // 暴露命令式方法给侧栏（临时歌单恢复播放 / 我的歌单打开）
   React.useImperativeHandle(ref, () => ({
-    openPlaylist: (pl: { id: string | number; gid?: string | null; name: string; cover?: string | null }) => { void openUserPlaylist(pl); },
+    openPlaylist: (id: number, name: string) => { void openUserPlaylist({ id, name, gid: null, cover: null }); },
     restoreTemp: (payload: any) => {
       if (!payload?.tracks?.length) return;
       musicPlayer.setTracks(payload.tracks, 0);
@@ -885,7 +881,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
           </div>
           <button
             className="btn-press px-3 py-1.5 rounded-lg bg-blue-500/90 hover:bg-blue-500 text-white text-sm font-medium disabled:opacity-50"
-            onClick={doSearch}
+            onClick={() => doSearch()}
             disabled={loading}
           >
             搜索
@@ -1202,7 +1198,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
                 mvId: t.mvHash,
                 badges: [
                   (t.privilege ?? 0) >= 10 ? { label: 'VIP', kind: 'vip' as const } : null,
-                ].filter((b): b is TrackBadge => b !== null),
+                ].filter((b): b is { label: string; kind: 'vip' } => b !== null),
               }}
               index={i}
               isPlaying={playingId === t.id}

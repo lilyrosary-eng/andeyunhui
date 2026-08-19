@@ -349,6 +349,7 @@ export interface KugouPlaylistCard {
   cover: string;
   creator?: string;
   playCount?: number;
+  trackCount?: number;
 }
 
 export interface KugouPlaylistItem {

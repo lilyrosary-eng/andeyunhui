@@ -1,6 +1,12 @@
 import React from "react";
 const { useState, useEffect } = React;
-import { T } from '../../_shared/pluginRuntime';
+import { T as _T } from '../../_shared/pluginRuntime';
+
+/** 带 fallback 的翻译函数 */
+function T(key: string, fallback?: string): string {
+  const result = _T(key);
+  return result === key && fallback ? fallback : result;
+}
 import { kugou, type KugouPlaylistCard } from './kugouApi';
 
 // 数字千分位（与语言无关，固定格式即可）
