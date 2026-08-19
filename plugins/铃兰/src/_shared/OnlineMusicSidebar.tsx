@@ -64,6 +64,7 @@ export interface SidebarUserPlaylist {
   id: string | number;
   name: string;
   trackCount?: number | null;
+  cover?: string | null;
 }
 
 // ============ 块1：我喜欢的音乐 ============
@@ -115,17 +116,29 @@ function SidebarUserSection({
       playlists.length > 0
         ? playlists.map(pl => {
             const isActive = activeId === pl.id;
+            const coverNode = pl.cover
+              ? React.createElement('img', {
+                  key: `cv-${pl.id}`,
+                  src: pl.cover,
+                  alt: '',
+                  className: 'w-9 h-9 rounded-lg object-cover flex-shrink-0',
+                  loading: 'lazy',
+                })
+              : React.createElement(Music2Icon, { key: `cv-${pl.id}` });
             const item = React.createElement('button', {
               key: pl.id,
               onClick: () => onSelect?.(pl),
-              className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm ${
+              className: `w-full flex items-center gap-2.5 px-3 py-2 rounded-xl transition-colors text-sm ${
                 isActive
                   ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
                   : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
               }`,
             }, [
-              React.createElement('div', { key: `name-${pl.id}`, className: 'font-medium truncate' }, pl.name),
-              React.createElement('div', { key: `count-${pl.id}`, className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${pl.trackCount ?? 0} 首`),
+              coverNode,
+              React.createElement('div', { key: `meta-${pl.id}`, className: 'min-w-0 flex-1' }, [
+                React.createElement('div', { key: `name-${pl.id}`, className: 'font-medium truncate' }, pl.name),
+                React.createElement('div', { key: `count-${pl.id}`, className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${pl.trackCount ?? 0} 首`),
+              ]),
             ]);
             if (!ContextMenu || !ContextMenuTrigger || !ContextMenuContent || !ContextMenuItem) return item;
             return React.createElement(ContextMenu, { key: pl.id },

@@ -65,9 +65,13 @@ const ALLOWED_KUGOU_PATH_PREFIXES: &[&str] = &[
     // 当前 Android API 体系（对齐社区 kugou_api）：
     // 搜索 / 榜单 / 播放 / 歌单歌曲 / 歌词
     "/v3/search",
+    "/v3/rcmd_list",
+    "/v3/everyday_song_recommend",
     "/ocean/v6/rank",
     "/v5/url",
     "/pubsongs/v2",
+    // 推荐歌单只有 specialid 时的兜底（mobilecdn 旧版歌单歌曲）
+    "/api/v3/special",
     "/v1/search",
     "/search",
     "/download",

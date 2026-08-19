@@ -14,13 +14,13 @@ function toTempItem(temp: OnlineTempItem): TempPlaylistItem {
 }
 
 function toUserPlaylist(pl: KugouPlaylistCard): SidebarUserPlaylist {
-  return { id: pl.gid ?? String(pl.id), name: pl.name, trackCount: pl.trackCount ?? 0 };
+  return { id: pl.gid ?? String(pl.id), name: pl.name, trackCount: pl.trackCount ?? 0, cover: pl.cover || null };
 }
 
 export interface KugouSidebarProps {
-  ranks: KugouPlaylistCard[];
+  ranks?: KugouPlaylistCard[];
   activeRankId?: number | null;
-  onSelectRank: (id: number) => void;
+  onSelectRank?: (id: number) => void;
   tempPlaylists: OnlineTempItem[];
   activeTempId?: string | null;
   onSelectTemp: (temp: OnlineTempItem) => void;
@@ -35,9 +35,6 @@ export interface KugouSidebarProps {
 }
 
 export default function KugouSidebar({
-  ranks,
-  activeRankId,
-  onSelectRank,
   tempPlaylists,
   activeTempId,
   onSelectTemp,
@@ -80,19 +77,12 @@ export default function KugouSidebar({
       if (src) onSelectTemp(src);
     },
     userPlaylists: playlists.map(toUserPlaylist),
-    activePlaylistId: activeRankId != null ? undefined : undefined,
+    activePlaylistId: undefined,
     onSelectUserPlaylist: (pl) => {
       const src = playlists.find(p => (p.gid ?? String(p.id)) === String(pl.id));
       if (src) onSelectUserPlaylist(src);
     },
     userEmptyText: auth ? '暂无歌单' : '登录后同步歌单',
-    ranks: ranks.map(toUserPlaylist),
-    activeRankId,
-    onSelectRank: (pl) => {
-      const src = ranks.find(r => (r.gid ?? String(r.id)) === Number(pl.id));
-      if (src) onSelectRank(src.id);
-    },
-    ranksTitle: '榜单',
     onClose: onCloseKugou,
     onOpenModuleSettings,
     onOpenStats,

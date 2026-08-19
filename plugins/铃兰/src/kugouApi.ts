@@ -442,7 +442,8 @@ export async function getSongUrl(
   albumId?: number,
   auth?: KugouAuth | null,
   quality: 'standard' | 'high' | 'lossless' = 'standard',
-): Promise<{ url: string; br: number }> {
+  freeListen = false,
+): Promise<{ url: string; br: number; freeListen?: boolean }> {
   const body = await kugouLegacyRequest('/app/i/getSongInfo.php', {
     cmd: 'playInfo',
     hash,
@@ -486,13 +487,38 @@ export async function getSongUrl(
     }).catch(() => {});
   } catch {}
 
+  // 免费试听：付费/VIP 歌曲无普通地址时，登录态下走酷狗免费试听通道拿限时地址（priv_url）。
+  // 酷狗「免费听」本质是对付费歌曲带免费试听标记请求播放地址，由 priv_url 返回限时长直链。
+  if (!url && freeListen && auth?.userid && auth?.token) {
+    try {
+      const fl = await kugouRequest('/v5/url', {
+        hash,
+        album_id: albumId || 0,
+        is_free_part: 1,
+        userid: auth.userid,
+        token: auth.token,
+      }, { auth, signKey: true });
+      const data = fl?.data || fl;
+      const priv = data?.priv_url || data?.free_url || data?.url;
+      if (priv) {
+        url = priv;
+        br = Number(data?.bitrate || br || 0);
+        (window as any).__HOST_API__?.invoke('debug_log', {
+          msg: `[music-play] freeListen OK hash=${hash} uid=${auth.userid}`,
+        }).catch(() => {});
+      }
+    } catch (e: any) {
+      console.warn('[kugou] 免费试听失败:', e?.message || e);
+    }
+  }
+
   if (!url) {
     if (status === 0) {
       throw new Error('该歌曲暂无可播放地址（可能需会员或已下架）');
     }
     throw new Error(`该歌曲暂无可播放地址（status=${status}）`);
   }
-  return { url, br };
+  return { url, br, freeListen: !!url && freeListen };
 }
 
 // 下载单曲：取链后走宿主 download_file 落盘（无目录时弹保存框，对齐网易云）
@@ -633,6 +659,23 @@ export async function getPlaylistByGid(gid: string, page = 1, pagesize = 200): P
   return getPlaylistTracks(gid, page, pagesize);
 }
 
+// 通过 specialid 从旧版 mobilecdn 拉歌单歌曲（推荐歌单只有 specialid 时的兜底）
+export async function getPlaylistBySpecialId(
+  specialId: number,
+  page = 1,
+  pagesize = 200,
+): Promise<KugouTrack[]> {
+  const body = await kugouLegacyRequest('/api/v3/special/song', {
+    specialid: specialId,
+    plat: 0,
+    version: 8352,
+    page,
+    pagesize,
+  }, { base: MOBILE_HOST });
+  const list: any[] = body?.data?.info || body?.info || body?.data?.songs || body?.songs || [];
+  return list.map(mapTrack).filter((t: KugouTrack) => t.hash);
+}
+
 // 获取榜单歌曲（mobilecdn /api/v3/rank/song）
 export async function getTopList(rankId: number, page = 1, pagesize = 30): Promise<KugouTrack[]> {
   const body = await kugouLegacyRequest('/api/v3/rank/song', {
@@ -664,6 +707,42 @@ export async function getRankList(): Promise<KugouPlaylistCard[]> {
     creator: r.intro,
     playCount: Number(r.play_times || r.total || r.play_count || r.count || 0),
   }));
+}
+
+// ============ 个性化推荐（手机版酷狗成熟能力，游客可降级） ============
+
+// 每日推荐：登录按口味推荐歌曲，游客也可用（实测返回 200，data.song_list 为歌曲数组）
+// 注意：该网关接口必须经聚合层路由，POST + x-router(everydayrec.service.kugou.com) + Android 签名，
+// 否则 gateway 直接返回 502（响应体 kws）。对齐社区 kugou_api(Dart) 的 RecommendApi.everyday。
+// 实测返回结构：{ data: { song_list_size, song_list: [ {hash,songname,author_name,album_name,time_length,pay_type,hash_flac,...} ] } }。
+export async function getEverydayRecommend(
+  auth?: KugouAuth | null,
+  page = 1,
+  pagesize = 20,
+): Promise<KugouTrack[]> {
+  try {
+    const d = await kugouRequest('/v3/everyday_song_recommend', {
+      page,
+      pagesize,
+      userid: auth?.userid || 0,
+      token: auth?.token || '',
+    }, {
+      method: 'POST',
+      router: 'everydayrec.service.kugou.com',
+      auth: auth ?? null,
+      body: {
+        platform: 'android',
+        userid: auth?.userid || 0,
+        page,
+        pagesize,
+      },
+    });
+    const list: any[] = d?.data?.song_list || d?.data?.info || d?.info || [];
+    return list.map(mapTrack).filter((t: KugouTrack) => t.hash);
+  } catch (e: any) {
+    console.warn('[kugou] 每日推荐失败:', e?.message || e);
+    return [];
+  }
 }
 
 // 由播放地址接口返回的实际码率推断音质标签
