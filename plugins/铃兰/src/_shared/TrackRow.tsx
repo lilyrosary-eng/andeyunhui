@@ -21,7 +21,7 @@
 
 import React from 'react';
 import { PlayIcon, HeartIcon, VideoIcon, DownloadIcon } from 'lucide-react';
-import { MusicIcon } from '../../_shared/icons';
+import { MusicIcon } from '../../../_shared/icons';
 
 // ============ 类型定义 ============
 
