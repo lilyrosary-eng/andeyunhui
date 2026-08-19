@@ -402,7 +402,7 @@ function mapTrack(s: any): KugouTrack {
     name,
     artist: artist || '未知歌手',
     album: stripHtml(s.album_name || s.albumname || s.album || ''),
-    duration: (s.duration || s.timelength || s.timeLength || 0) * 1000 || 0,
+    duration: (s.duration || s.timelength || s.timeLength || s.time_length || 0) * 1000 || 0, // KG_TAG
     cover: kugouImg(s.album_img || s.img || s.cover || s.photo || s.album_img_9x9 || s.trans_param?.union_cover || '', 240),
     hash,
     hash320: s['320hash'] || s.hash_320 || undefined,

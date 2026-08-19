@@ -21,6 +21,8 @@ import {
 } from './neteaseApi';
 import { musicPlayer, type Track } from './musicPlayer';
 import { MusicHeader } from './MusicHeader';
+import { PlaylistDetailHeader } from './_shared/OnlineMusicTemplates';
+import { TrackRow, type TrackBadge } from './_shared/TrackRow';
 import {
   neteaseDownloadManager,
   NETEASE_DOWNLOAD_DIR_KEY,
@@ -292,6 +294,8 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const [tracks, setTracks] = useState<NeteaseTrack[]>([]);
   const [keyword, setKeyword] = useState('');
   const [playingId, setPlayingId] = useState<number | null>(null);
+  // 临时歌单详情视图：侧栏「临时N」点击后在此展示 tracks 列表（复用 PlaylistDetailHeader + TrackRow 模板）
+  const [tempView, setTempView] = useState<TempPlaylist | null>(null);
   // 漫游页「当前播放」陈列：直接镜像 musicPlayer 单例，覆盖本地曲与网易云曲。
   const [nowPlaying, setNowPlaying] = useState<{ track: Track | null; isPlaying: boolean }>({
     track: musicPlayer.getCurrentTrack(),
@@ -359,12 +363,20 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     openPlaylist: (id: number, name: string) => { void openPlaylistRef.current(id, name); },
     restoreTemp: (payload: any) => {
       if (!payload) return;
-      const kind: string = payload.kind;
-      if (kind === 'playlist' && payload.id != null) {
-        void openPlaylistRef.current(payload.id, payload.name);
+      const inner = payload.payload && typeof payload.payload === 'object' ? payload.payload : payload;
+      const kind: string = inner.kind;
+      if (kind === 'playlist' && inner.id != null) {
+        setTempView(null);
+        void openPlaylistRef.current(inner.id, inner.name);
       } else if (kind === 'search') {
+        setTempView(null);
         setTab('search');
-        setKeyword(payload.keyword || '');
+        setKeyword(inner.keyword || '');
+      } else if (payload.tracks?.length) {
+        setTempView({ id: payload.id ?? payload.name ?? 'temp', name: payload.name || '临时歌单', coverPath: payload.coverPath, tracks: payload.tracks, payload });
+        setTab('listen');
+        setPlaylistId(null);
+        setPlaylistInfo(null);
       } else {
         setTab('library');
       }
@@ -927,6 +939,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const openPlaylist = useCallback(async (id: number, name?: string) => {
     const req = ++reqRef.current;
     try {
+      setTempView(null);
       setPlaylistId(id);
       if (name) sourceNameRef.current = name;
       onActivePlaylist?.(id);
@@ -1219,15 +1232,21 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
       {/* 顶部栏：复用通用音乐模块模板（标题 + 登录按钮 + 云按钮） */}
       <MusicHeader
         title={
-          playlistId != null
-            ? (sourceNameRef.current || (T(TAB_TITLE_KEYS.listen) || '热榜'))
-            : (tab === 'library'
-                ? '漫游'
-                : tab === 'login' && loggedIn
-                  ? '我的账号'
-                  : T(TAB_TITLE_KEYS[tab]))
+          tempView != null
+            ? tempView.name
+            : playlistId != null
+              ? (sourceNameRef.current || (T(TAB_TITLE_KEYS.listen) || '热榜'))
+              : (tab === 'library'
+                  ? '漫游'
+                  : tab === 'login' && loggedIn
+                    ? '我的账号'
+                    : T(TAB_TITLE_KEYS[tab]))
         }
-        onBackToSub={playlistId != null ? () => setPlaylistId(null) : undefined}
+        onBackToSub={
+          tempView != null
+            ? () => { setTempView(null); setTab(previousTabRef.current === 'login' ? 'listen' : (previousTabRef.current || 'listen')); }
+            : playlistId != null ? () => setPlaylistId(null) : undefined
+        }
         onBackToSubTitle={T(TAB_TITLE_KEYS.listen) || '现在就听'}
         onUserClick={() => {
           if (loggedIn) {
@@ -1253,7 +1272,37 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
 
       {/* 主内容区 */}
       <div ref={scrollRef} className="flex-1 h-full min-w-0 overflow-y-auto overflow-x-hidden px-4 pb-4">
-        {tab === 'listen' && (
+        {tab === 'listen' && (tempView ? (
+            <section className="min-w-0">
+              <PlaylistDetailHeader
+                coverUrl={tempView.coverPath}
+                name={tempView.name}
+                brandLabel={'网易云'}
+                trackCount={tempView.tracks.length}
+                accent="#f44336"
+                onPlayAll={() => onPlay(tempView.tracks, 0, tempView.name)}
+                canSubscribe={false}
+              />
+              <div className="flex flex-col gap-1">
+                {tempView.tracks.map((t, i) => {
+                  const m = /^netease-(\d+)$/.exec(t.id);
+                  const nid = m ? Number(m[1]) : null;
+                  return (
+                    <TrackRow
+                      key={t.id}
+                      track={t}
+                      index={i}
+                      isPlaying={nid != null && playingId === nid}
+                      onPlay={() => onPlay(tempView.tracks, i, tempView.name)}
+                      onLike={nid != null ? (e) => handleLike(e, { id: nid, name: t.title, artist: t.artist, album: t.album, duration: t.durationSecs * 1000, cover: t.coverPath } as unknown as NeteaseTrack) : undefined}
+                      isLiked={nid != null ? (likedSongs?.has(nid) ?? false) : false}
+                      accentColor="#f44336"
+                    />
+                  );
+                })}
+              </div>
+            </section>
+          ) : (
           <section className="min-w-0">
             <div className="flex items-center justify-between min-w-0 mb-3">
               <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100 truncate min-w-0">{T('music.moduleDrawer.netease.listenNow')}</h2>
@@ -1495,7 +1544,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
               </div>
             )}
           </section>
-        )}
+          ))}
 
         {tab === 'search' && (
           <section>

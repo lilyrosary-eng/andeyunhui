@@ -154,9 +154,10 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
     openPlaylist: (id: string, name: string) => { void openPlaylistRef.current(id, name); },
     restoreTemp: (payload: any) => {
       if (!payload) return;
-      if (payload.kind === 'playlist' && payload.id != null) {
+      const inner = payload.payload && typeof payload.payload === 'object' ? payload.payload : payload;
+      if (inner.kind === 'playlist' && inner.id != null) {
         void openPlaylistRef.current(payload.id, payload.name);
-      } else if (payload.kind === 'search') {
+      } else if (inner.kind === 'search') {
         setTab('search');
         setKeyword(payload.keyword || '');
         void doSearch();

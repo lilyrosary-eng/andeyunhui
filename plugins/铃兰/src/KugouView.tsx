@@ -518,12 +518,13 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       musicPlayer.play();
       musicPlayer.currentPlaylistId = payload.id ?? 'kugou-active';
       // 同步主视图：搜索临时歌单切回搜索页并重新拉结果；推荐/榜单临时歌单切回热榜。
-      if (payload.kind === 'search') {
+      const inner = payload.payload && typeof payload.payload === 'object' ? payload.payload : payload;
+      if (inner.kind === 'search') {
         setKeyword(payload.keyword || '');
         changeTab('search');
         setActiveRankId(null);
         if (payload.keyword) void doSearch(payload.keyword);
-      } else if (payload.kind === 'recommend') {
+      } else if (inner.kind === 'recommend') {
         changeTab('home');
         setActiveRankId(null);
       }
