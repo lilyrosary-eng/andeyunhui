@@ -253,7 +253,7 @@ export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
       key: 'liked-sec',
       liked: likedPlaylist,
       active: likedActive,
-      onSelect: () => likedPlaylist && onSelectUserPlaylist({ id: likedPlaylist.id, name: '我喜欢的音乐', trackCount: likedPlaylist.count }),
+      onSelect: () => { if (likedPlaylist && onSelectUserPlaylist) onSelectUserPlaylist({ id: likedPlaylist.id, name: '我喜欢的音乐', trackCount: likedPlaylist.count }); },
     }),
     React.createElement(SidebarTempSection, {
       key: 'temp-sec',

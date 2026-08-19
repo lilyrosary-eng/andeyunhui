@@ -284,7 +284,7 @@ export const DetailDrawer: React.FC<DetailDrawerProps> = ({
       setAllSongsOpen(false);
       setAllSongsLoaded(false);
     }
-  }, [drawer.type, drawer.id]);
+  }, [drawer.type, drawer.type === 'artist' ? drawer.id : drawer.type === 'album' ? drawer.id : undefined]);
 
   // 专辑曲目排序
   const sortedAlbumTracks = useMemo(() => {

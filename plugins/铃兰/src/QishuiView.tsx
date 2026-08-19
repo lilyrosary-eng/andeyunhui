@@ -19,7 +19,7 @@ import {
   QishuiPlaylistCard,
 } from './qishuiApi';
 import { decryptQishuiAudio } from './qishuiDecrypt';
-import type { PlayableTrack } from './types';
+import type { PlayableTrack } from './NeteaseView';
 import {
   PlaylistDetailHeader,
   PlaylistGridRow,

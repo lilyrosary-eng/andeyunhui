@@ -214,6 +214,9 @@ export interface PlayableTrack {
   durationSecs: number;
   coverPath?: string;
   quality?: string; // 实际播放音质标签（Hi-Res/无损/高品质/标准），异步取地址后填充
+  artistId?: number | string;
+  albumId?: number | string;
+  mvId?: number | string;
 }
 
 interface NeteaseViewProps {

@@ -34,6 +34,9 @@ export interface PlayableTrack {
   durationSecs: number;
   coverPath?: string;
   quality?: string;
+  artistId?: number | string;
+  albumId?: number | string;
+  mvId?: number | string;
 }
 
 export interface TrackBadge {
