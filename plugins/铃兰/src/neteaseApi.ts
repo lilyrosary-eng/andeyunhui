@@ -1,7 +1,7 @@
-/// <reference path="../global.d.ts" />
+/// <reference path="../../global.d.ts" />
 
 import CryptoJS from 'crypto-js';
-import QRCode from 'qrcode';
+import { qrTextToDataUrl } from './qrDataUrl';
 import { weapi, eapi } from './neteaseCrypto';
 
 const hostApi: any = (window as any).__HOST_API__ || { invoke: async () => ({}) };
@@ -349,7 +349,7 @@ async function eapiPost(path: string, data: Record<string, any>, deviceId?: stri
   // 对齐 MusicStorm：登录态（有 MUSIC_U）eapi 请求 referer/origin 置 null、UA 用 iPhone 9.0.90；
   // 非登录态才带 music.163.com referer。去掉顶层重复的 __csrf（已在 header 签名体内）。
   const isLogin = !!loginCookie;
-  const raw: string = await hostApi.invoke<string>('netease_http_post', {
+  const raw: string = await hostApi.invoke('netease_http_post', {
     method: 'POST',
     url,
     body: `params=${encodeURIComponent(params)}`,
@@ -397,7 +397,7 @@ async function eapiPostWithCookies(
   const cookie = buildDeviceCookieJar(did);
   // 对齐 MusicStorm：登录态 eapi 请求 referer/origin 置 null、UA 用 iPhone 9.0.90；去重 __csrf。
   const isLogin = !!loginCookie;
-  const rawResp: string = await hostApi.invoke<string>('netease_http_post', {
+  const rawResp: string = await hostApi.invoke('netease_http_post', {
     method: 'POST',
     url,
     body: `params=${encodeURIComponent(params)}`,
@@ -595,7 +595,7 @@ async function eapiRequest(uri: string, data: Record<string, any>): Promise<any>
   const cookie = [loginCookie, buildDeviceCookieJar(did)].filter(Boolean).join('; ') || buildDeviceCookieJar(did);
   // 对齐 MusicStorm 登录态 eapi：referer/origin 置 null（非 music.163.com），避免触发风控；
   // MUSIC_U/__csrf 已在 header 签名体内，不再于顶层 headers 重复塞 __csrf。
-  const raw: string = await hostApi.invoke<string>('netease_http_post', {
+  const raw: string = await hostApi.invoke('netease_http_post', {
     method: 'POST',
     url,
     body: `params=${encodeURIComponent(encParams)}`,
@@ -639,7 +639,7 @@ export async function neteaseQrKey(): Promise<string> {
 // qrurl = https://music.163.com/login?codekey=${key}；qrimg 由前端用该 url 生成 data URL。
 export async function neteaseQrCreate(key: string): Promise<QrSession> {
   const qrurl = `https://music.163.com/login?codekey=${encodeURIComponent(key)}`;
-  const qrimg = await QRCode.toDataURL(qrurl, { width: 200, margin: 2, type: 'image/png' });
+  const qrimg = qrTextToDataUrl(qrurl, 0, 'H');
   if (!qrimg) throw new Error('无法生成登录二维码');
   return { key, qrimg, qrurl };
 }
@@ -709,7 +709,7 @@ async function post(endpoint: string, data: Record<string, any>): Promise<any> {
     real_ip: REAL_IP,
     user_agent: UA_WEAPI,
   };
-  const raw: string = await hostApi.invoke<string>('netease_http_post', payload);
+  const raw: string = await hostApi.invoke('netease_http_post', payload);
   const parsed = JSON.parse(raw || '{}');
   console.log('[netease] weapi', weapiPath, 'csrf?', !!csrf, 'MUSIC_U?', !!loginCookie, 'status', parsed.status, 'body', String(parsed.body || '').slice(0, 300));
   if (parsed.status && parsed.status !== 200) {

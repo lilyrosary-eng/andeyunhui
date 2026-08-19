@@ -1,4 +1,4 @@
-/// <reference path="../global.d.ts" />
+/// <reference path="../../global.d.ts" />
 
 import CryptoJS from 'crypto-js';
 

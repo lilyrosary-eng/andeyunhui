@@ -1,4 +1,4 @@
-/// <reference path="../global.d.ts" />
+/// <reference path="../../global.d.ts" />
 import React from 'react';
 import { ChevronLeft, ChevronRight, Sparkles, Download, X } from 'lucide-react';
 import {

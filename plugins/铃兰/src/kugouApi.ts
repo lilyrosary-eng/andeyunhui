@@ -137,7 +137,7 @@ async function kugouLegacyRequest(
   const extra: Record<string, string> = { ...(opts.extra || {}) };
   if (opts.router) extra['x-router'] = opts.router;
 
-  const raw: string = await hostApi.invoke<string>('kugou_http_post', {
+  const raw: string = await hostApi.invoke('kugou_http_post', {
     method: 'GET',
     url,
     body: '',
@@ -153,7 +153,7 @@ async function kugouLegacyRequest(
 
 // 原始文本 GET（用于 MV 页面 HTML 解析）
 async function kugouRawGet(path: string, base: string): Promise<string> {
-  const raw: string = await hostApi.invoke<string>('kugou_http_post', {
+  const raw: string = await hostApi.invoke('kugou_http_post', {
     method: 'GET',
     url: `${base}${path}`,
     body: '',
@@ -170,7 +170,7 @@ async function kugouRawGet(path: string, base: string): Promise<string> {
 
 // 已签名 GET（MV 接口用），可带额外 header（如 x-router）
 async function kugouSignedGet(url: string, extraHeaders: Record<string, string> = {}): Promise<any> {
-  const raw: string = await hostApi.invoke<string>('kugou_http_post', {
+  const raw: string = await hostApi.invoke('kugou_http_post', {
     method: 'GET',
     url,
     body: '',
@@ -284,7 +284,7 @@ async function kugouRequest(
     extra['Content-Type'] = 'application/json';
   }
 
-  const raw: string = await hostApi.invoke<string>('kugou_http_post', {
+  const raw: string = await hostApi.invoke('kugou_http_post', {
     method: opts.method || 'GET',
     url,
     body: bodyString,

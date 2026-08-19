@@ -42,7 +42,7 @@ async function proxyGet(path: string, params: Record<string, any>): Promise<any>
     .join('&');
   const url = `${BASE}${path}?${query}`;
   console.log('[kugou-auth] REQ', path, '->', url.slice(0, 500));
-  const raw: string = await hostApi.invoke<string>('kugou_http_post', {
+  const raw: string = await hostApi.invoke('kugou_http_post', {
     method: 'GET',
     url,
     body: '',

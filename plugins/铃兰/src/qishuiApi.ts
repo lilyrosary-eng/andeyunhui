@@ -143,7 +143,7 @@ async function qishuiRequest(
 
   const bodyStr = opts.body ? JSON.stringify(opts.body) : '';
 
-  const raw: string = await hostApi.invoke<string>('qishui_http_post', {
+  const raw: string = await hostApi.invoke('qishui_http_post', {
     method,
     url,
     body: bodyStr,

@@ -532,6 +532,14 @@ const QRUtil = {
     return QRUtil.PATTERN_POSITION_TABLE[typeNumber - 1];
   },
 
+  getMode: (mode: string): number => {
+    if (mode === 'byte' || mode === 'BYTE' || mode === 'Byte') return 4;
+    if (mode === 'number' || mode === 'NUMBER' || mode === 'Number') return 1;
+    if (mode === 'alpha' || mode === 'ALPHA' || mode === 'Alpha' || mode === 'alphanumeric') return 2;
+    if (mode === 'kanji' || mode === 'KANJI' || mode === 'Kanji') return 8;
+    return 4; // 默认 byte
+  },
+
   getBCHTypeInfo: (data: number) => {
     let d = data << 10;
     while (QRUtil.getBCHDigit(d) - QRUtil.getBCHDigit(QRMath.G15) >= 0) {
@@ -558,7 +566,7 @@ const QRUtil = {
   },
 };
 
-const QRMath = {
+const QRMath: any = {
   glog: (n: number) => {
     if (n < 1) throw new Error('glog(' + n + ')');
     return QRMath.LOG_TABLE[n];
@@ -624,7 +632,7 @@ class QRPolynomial {
     return new QRPolynomial(num, 0);
   }
 
-  mod(e: QRPolynomial) {
+  mod(e: QRPolynomial): QRPolynomial {
     if (this.getLength() - e.getLength() < 0) {
       return this;
     }
@@ -678,4 +686,224 @@ const QRRSBlock = {
     [13, 145, 115, 6, 146, 116], [14, 74, 46, 23, 95, 47], [44, 54, 24, 7, 55, 25], [59, 46, 16, 1, 47, 17],
     [12, 151, 121, 7, 152, 122], [12, 75, 47, 26, 76, 48], [39, 54, 24, 14, 55, 25], [22, 45, 15, 41, 46, 16],
     [6, 151, 121, 14, 152, 122], [6, 75, 47, 34, 76, 48], [46, 54, 24, 10, 55, 25], [2, 45, 15, 64, 46, 16],
-    [17, 152, 122, 4, 153, 生成二维码部分由于长度限制被截断，我先继续输出剩余代码到文件，然后修改neteaseApi.ts。我需要用 write_to_file 把完整的 qrDataUrl.ts 写完。上面的 write_to_file 已经写了很长但可能截断？不，工具返回是省略，但文件应该是完整的。我需要确认一下文件末尾是否完整。让我先 read_file 一下。  
+    [17, 152, 122, 4, 153, 123], [4, 73, 45, 11, 74, 46], [31, 54, 24, 16, 55, 25], [33, 45, 15, 26, 46, 16],
+  ],
+
+  getRSBlocks: (typeNumber: number, errorCorrectionLevel: number) => {
+    const rsBlock = QRRSBlock.RS_BLOCK_TABLE[(typeNumber - 1) * 4 + errorCorrectionLevel];
+    if (rsBlock === undefined) {
+      throw new Error('bad rs block @ typeNumber:' + typeNumber + '/errorCorrectionLevel:' + errorCorrectionLevel);
+    }
+    const length = rsBlock.length / 3;
+    const list: { dataCount: number; totalCount: number }[] = [];
+    for (let i = 0; i < length; i += 1) {
+      const count = rsBlock[i * 3];
+      const totalCount = rsBlock[i * 3 + 1];
+      const dataCount = rsBlock[i * 3 + 2];
+      for (let j = 0; j < count; j += 1) {
+        list.push({ dataCount, totalCount });
+      }
+    }
+    return list;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// QRData / BitBuffer / 辅助函数 — 补全 QR Code 内部类型
+// ---------------------------------------------------------------------------
+
+class BitBuffer {
+  buffer: number[];
+  private length: number;
+
+  constructor() {
+    this.buffer = new Array(0);
+    this.length = 0;
+  }
+
+  getBuffer() {
+    return this.buffer;
+  }
+
+  getLengthInBits() {
+    return this.length;
+  }
+
+  putBit(bit: boolean) {
+    const bufIndex = Math.floor(this.length / 8);
+    if (this.buffer.length <= bufIndex) {
+      this.buffer.push(0);
+    }
+    if (bit) {
+      this.buffer[bufIndex] |= (0x80 >>> (this.length % 8));
+    }
+    this.length += 1;
+  }
+
+  put(num: number, length: number) {
+    for (let i = 0; i < length; i += 1) {
+      this.putBit(((num >>> (length - i - 1)) & 1) === 1);
+    }
+  }
+}
+
+class QRData {
+  private mode: number;
+  private data: string;
+
+  constructor(data: string, mode?: string) {
+    this.mode = QRUtil.getMode(mode || QRMODE_NAME);
+    this.data = data;
+  }
+
+  getMode() {
+    return this.mode;
+  }
+
+  getLength() {
+    return this.data.length;
+  }
+
+  write(buffer: BitBuffer) {
+    for (let i = 0; i < this.data.length; i += 1) {
+      buffer.put(this.data.charCodeAt(i), 8);
+    }
+  }
+}
+
+// 在 QRMath 上补全 G15 / G18 / G15_MASK 常量
+QRMath.G15 = (1 << 10) | (1 << 8) | (1 << 5) | (1 << 4) | (1 << 2) | (1 << 1) | (1 << 0);
+QRMath.G15_MASK = (1 << 14) | (1 << 12) | (1 << 10) | (1 << 4) | (1 << 1);
+QRMath.G18 = (1 << 12) | (1 << 11) | (1 << 10) | (1 << 9) | (1 << 8) | (1 << 5) | (1 << 2) | (1 << 0);
+
+// createImgTag / createDataURL 辅助函数（生成 PNG dataURL）
+function createImgTag(width: number, height: number, getPixel: (x: number, y: number) => number): string {
+  const gif = createGIF(width, height, getPixel);
+  return 'data:image/gif;base64,' + base64Encode(gif);
+}
+
+function createDataURL(width: number, height: number, getPixel: (x: number, y: number) => number): string {
+  const gif = createGIF(width, height, getPixel);
+  return 'data:image/gif;base64,' + base64Encode(gif);
+}
+
+// 生成简单的 GIF 字节流
+function createGIF(width: number, height: number, getPixel: (x: number, y: number) => number): number[] {
+  const w = width;
+  const h = height;
+  const ds: number[] = [];
+  // GIF Header
+  ds.push(0x47, 0x49, 0x46, 0x38, 0x37, 0x61); // GIF87a
+  // Logical Screen Descriptor
+  ds.push(w & 0xff, (w >> 8) & 0xff);
+  ds.push(h & 0xff, (h >> 8) & 0xff);
+  ds.push(0x80); // GCT flag = 1, color resolution = 0, sort = 0, GCT size = 0 (2 colors)
+  ds.push(0x00); // background color index
+  ds.push(0x00); // pixel aspect ratio
+  // Global Color Table (2 entries: black, white)
+  ds.push(0x00, 0x00, 0x00); // black
+  ds.push(0xff, 0xff, 0xff); // white
+  // Image Descriptor
+  ds.push(0x2c); // image separator
+  ds.push(0x00, 0x00, 0x00, 0x00); // left, top
+  ds.push(w & 0xff, (w >> 8) & 0xff);
+  ds.push(h & 0xff, (h >> 8) & 0xff);
+  ds.push(0x00); // no LCT
+  // Image Data
+  ds.push(0x02); // LZW minimum code size = 2
+  const pixels: number[] = [];
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      pixels.push(getPixel(x, y));
+    }
+  }
+  // LZW encode
+  const encoded = lzwEncode(pixels, 2);
+  for (let i = 0; i < encoded.length; i += 1) {
+    ds.push(encoded[i]);
+  }
+  ds.push(0x00); // block terminator
+  // Trailer
+  ds.push(0x3b);
+  return ds;
+}
+
+// LZW encoding for GIF
+function lzwEncode(pixels: number[], minCodeSize: number): number[] {
+  const clearCode = 1 << minCodeSize;
+  const endCode = clearCode + 1;
+  let codeSize = minCodeSize + 1;
+  let dict: Record<string, number> = {};
+  let nextCode = endCode + 1;
+  // init dict
+  for (let i = 0; i < clearCode; i += 1) {
+    dict[String.fromCharCode(i)] = i;
+  }
+  const output: number[] = [];
+  let bitBuffer = 0;
+  let bitCount = 0;
+
+  const writeCode = (code: number) => {
+    bitBuffer |= code << bitCount;
+    bitCount += codeSize;
+    while (bitCount >= 8) {
+      output.push(bitBuffer & 0xff);
+      bitBuffer >>= 8;
+      bitCount -= 8;
+    }
+  };
+
+  // flatten into sub-blocks later — for simplicity, output raw
+  const blocks: number[] = [];
+  const flushBlock = () => {
+    if (output.length === 0) return;
+    blocks.push(output.length);
+    for (let i = 0; i < output.length; i += 1) blocks.push(output[i]);
+    output.length = 0;
+  };
+
+  writeCode(clearCode);
+  let w = '';
+  for (let i = 0; i < pixels.length; i += 1) {
+    const c = String.fromCharCode(pixels[i]);
+    const wc = w + c;
+    if (dict[wc] !== undefined) {
+      w = wc;
+    } else {
+      writeCode(dict[w]);
+      dict[wc] = nextCode;
+      nextCode += 1;
+      if (nextCode > (1 << codeSize) && codeSize < 12) {
+        codeSize += 1;
+      }
+      w = c;
+    }
+  }
+  writeCode(dict[w] !== undefined ? dict[w] : 0);
+  writeCode(endCode);
+  if (bitCount > 0) {
+    output.push(bitBuffer & 0xff);
+  }
+  flushBlock();
+  blocks.push(0); // final terminator
+  return blocks;
+}
+
+// Simple base64 encoder
+function base64Encode(bytes: number[]): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let result = '';
+  let i = 0;
+  while (i < bytes.length) {
+    const b0 = bytes[i] || 0;
+    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    const triplet = (b0 << 16) | (b1 << 8) | b2;
+    result += chars[(triplet >> 18) & 0x3f];
+    result += chars[(triplet >> 12) & 0x3f];
+    result += i + 1 < bytes.length ? chars[(triplet >> 6) & 0x3f] : '=';
+    result += i + 2 < bytes.length ? chars[triplet & 0x3f] : '=';
+    i += 3;
+  }
+  return result;
+}
