@@ -320,6 +320,13 @@ return Err(format!("Host not in qishui allowlist: {host}"));
         .await
         .map_err(|e| format!("audio download failed: {e}"))?;
     let status = resp.status();
+    // 记录 Content-Length 用于诊断
+    let content_length = resp
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
         return Err(format!("audio download HTTP {}: {}", status.as_u16(), &text[..text.len().min(200)]));
@@ -328,5 +335,22 @@ return Err(format!("Host not in qishui allowlist: {host}"));
         .bytes()
         .await
         .map_err(|e| format!("read audio body: {e}"))?;
+    // 诊断日志：下载大小 vs Content-Length
+    eprintln!(
+        "[qishui_download_audio] url={} status={} content_len={} actual={} first_bytes={}",
+        &url[..url.len().min(80)],
+        status.as_u16(),
+        content_length,
+        bytes.len(),
+        if bytes.len() >= 4 { format!("{:02x?}", &bytes[..4]) } else { format!("{:02x?}", bytes.as_ref()) }
+    );
+    // 如果实际下载的数据远小于 Content-Length，说明下载不完整
+    if content_length > 0 && bytes.len() < content_length / 2 {
+        return Err(format!(
+            "audio download incomplete: got {} bytes but Content-Length is {}",
+            bytes.len(),
+            content_length
+        ));
+    }
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }

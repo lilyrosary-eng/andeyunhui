@@ -258,6 +258,11 @@ export async function decryptQishuiAudio(
     const off = sampleOffsets[s];
     const iv = ivs[s];
     if (!iv) continue;
+    // 边界检查：off + size 不得超出 buffer 范围
+    if (off < 0 || size <= 0 || off + size > buf.length) {
+      console.warn(`[qishui-decrypt] sample ${s} 越界: off=${off} size=${size} bufLen=${buf.length}, 跳过`);
+      continue;
+    }
     const blockCounter = new Uint8Array(16);
     blockCounter.set(iv, 0);
     const segment = new Uint8Array(encrypted, off, size);

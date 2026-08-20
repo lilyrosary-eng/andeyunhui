@@ -632,8 +632,9 @@ export async function getMvUrl(mvHash: string): Promise<string> {
   throw new Error('MV 响应中没有可用播放地址');
 }
 
-// 获取歌单歌曲列表（gateway 签名接口，500 时降级 mobilecdn）
+// 获取歌单歌曲列表（gateway 签名接口，500 时降级 mobilecdn → wwwapi）
 async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize = 30): Promise<KugouTrack[]> {
+  // 第一级：gateway 签名接口
   try {
     const body = await kugouRequest('/pubsongs/v2/get_other_list_file_nofilt', {
       area_code: 1,
@@ -650,22 +651,49 @@ async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize 
     const list: any[] = body?.songs || body?.data?.songs || body?.data?.info || [];
     const tracks = list.map(mapTrack).filter((t: KugouTrack) => t.hash);
     if (tracks.length) return tracks;
-    // 列表为空也降级
     throw new Error('gateway returned empty list');
   } catch (gwErr: any) {
-    // 降级：mobilecdn 免签名接口（/api/v3/special/song）
     console.warn('[kugou] gateway 歌单接口失败，降级 mobilecdn:', gwErr?.message || gwErr);
-    const body2 = await kugouLegacyRequest('/api/v3/special/song', {
-      specialid: Number(globalCollectionId) || 0,
-      global_collection_id: globalCollectionId,
-      plat: 0,
-      version: 8352,
+  }
+
+  // 第二级：mobilecdn 免签名接口，尝试两种 ID 参数
+  const sid = Number(globalCollectionId) || 0;
+  for (const params of [
+    { specialid: sid, global_collection_id: globalCollectionId },
+    { specialid: globalCollectionId },
+    { global_collection_id: globalCollectionId },
+  ]) {
+    try {
+      const body2 = await kugouLegacyRequest('/api/v3/special/song', {
+        ...params,
+        plat: 0,
+        version: 8352,
+        page,
+        pagesize,
+      }, { base: MOBILE_HOST });
+      const list2: any[] = body2?.data?.info || body2?.data?.songs || body2?.info || [];
+      const tracks2 = list2.map(mapTrack).filter((t: KugouTrack) => t.hash);
+      if (tracks2.length) return tracks2;
+    } catch { /* 继续尝试 */ }
+  }
+
+  // 第三级：wwwapi Web 签名接口（/yy/index.php r=pl/getsonglist 需要 Web salt 签名）
+  try {
+    const body3 = await kugouLegacyRequest('/yy/index.php', {
+      r: 'pl/getsonglist',
+      specialid: sid || globalCollectionId,
       page,
       pagesize,
-    }, { base: MOBILE_HOST });
-    const list2: any[] = body2?.data?.info || body2?.data?.songs || body2?.info || [];
-    return list2.map(mapTrack).filter((t: KugouTrack) => t.hash);
-  }
+      platid: 4,
+      userid: 0,
+      token: '',
+    }, { base: WWWAPI, salt: KUGOU_WEB_SALT });
+    const list3: any[] = body3?.data?.info || body3?.data?.list || body3?.data?.songs || [];
+    const tracks3 = list3.map(mapTrack).filter((t: KugouTrack) => t.hash);
+    if (tracks3.length) return tracks3;
+  } catch { /* 最终降级失败 */ }
+
+  return [];
 }
 
 // 对外歌单歌曲列表（兼容旧签名：specialId 作为 global_collection_id 传入）

@@ -335,6 +335,13 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
       });
       // base64 → ArrayBuffer
       const binStr = atob(b64);
+      // 检查下载的数据长度是否合理（加密 fMP4 至少几 KB）
+      if (binStr.length < 1024) {
+        console.error('[qishui] 下载音频数据过短:', binStr.length, 'bytes, b64:', b64.slice(0, 100));
+        setError(`音频数据异常（仅 ${binStr.length} 字节），可能 CDN 返回了错误页面或需要登录`);
+        setPlayingId(null);
+        return;
+      }
       const buf = new ArrayBuffer(binStr.length);
       const u8 = new Uint8Array(buf);
       for (let i = 0; i < binStr.length; i++) u8[i] = binStr.charCodeAt(i);

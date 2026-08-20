@@ -325,12 +325,14 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
             {neteaseItems.map((item) => {
               const isLogin = item.key === 'login';
               const isLoggedIn = isLogin && !!neteaseProfile;
+              // 翻译键映射：listen → listenNow（i18n 键名与代码 key 不一致）
+              const i18nKey = item.key === 'listen' ? 'listenNow' : item.key;
               const title = isLogin
                 ? (isLoggedIn ? neteaseProfile!.nickname : (T('music.moduleDrawer.netease.login') || '未登录'))
-                : (T(`music.moduleDrawer.netease.${item.key}`) || (item.key === 'library' ? '漫游' : item.key));
+                : (T(`music.moduleDrawer.netease.${i18nKey}`) || (item.key === 'library' ? '漫游' : item.key));
               const desc = isLogin
                 ? (isLoggedIn ? (T('music.moduleDrawer.netease.loginDesc') || '查看我的账号') : (T('music.moduleDrawer.netease.loginDesc') || '登录 / 注册'))
-                : (T(`music.moduleDrawer.netease.${item.key}Desc`) || '');
+                : (T(`music.moduleDrawer.netease.${i18nKey}Desc`) || '');
               const icon = isLogin && neteaseProfile?.avatarUrl
                 ? React.createElement('img', { src: neteaseProfile.avatarUrl, alt: '', className: 'w-full h-full rounded-full object-cover' })
                 : item.icon;
