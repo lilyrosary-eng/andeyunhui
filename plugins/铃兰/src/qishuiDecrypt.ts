@@ -65,7 +65,7 @@ interface BoxInfo {
 function scanBoxes(buf: Uint8Array, start: number, end: number, out: BoxInfo[]) {
   let p = start;
   while (p + 8 <= end) {
-    const size = (buf[p] << 24) | (buf[p + 1] << 16) | (buf[p + 2] << 8) | buf[p + 3];
+    const size = ((buf[p] << 24) | (buf[p + 1] << 16) | (buf[p + 2] << 8) | buf[p + 3]) >>> 0;
     const type = ASCII(buf, p + 4, 4);
     let boxSize = size;
     let headerLen = 8;
@@ -76,7 +76,7 @@ function scanBoxes(buf: Uint8Array, start: number, end: number, out: BoxInfo[]) 
       ) + Number((BigInt(buf[p + 12]) << 24n) | (BigInt(buf[p + 13]) << 16n) | (BigInt(buf[p + 14]) << 8n) | BigInt(buf[p + 15]));
       headerLen = 16;
     }
-    if (boxSize < 8 || p + boxSize > end + 8) break;
+    if (boxSize < 8 || p + boxSize > end) break;
     out.push({ type, start: p, size: boxSize, headerLen });
     p += boxSize;
   }
@@ -101,16 +101,16 @@ function findBox(buf: Uint8Array, path: string[]): BoxInfo | null {
 function parseStsz(buf: Uint8Array, box: BoxInfo): number[] {
   const p = box.start + box.headerLen;
   // sample_size(4), sample_count(4)
-  const count = (buf[p + 8] << 24) | (buf[p + 9] << 16) | (buf[p + 10] << 8) | buf[p + 11];
+  const count = ((buf[p + 8] << 24) | (buf[p + 9] << 16) | (buf[p + 10] << 8) | buf[p + 11]) >>> 0;
   const sizes: number[] = [];
-  if ((buf[p + 4] << 24 | buf[p + 5] << 16 | buf[p + 6] << 8 | buf[p + 7]) !== 0) {
-    const fixed = buf[p + 4] << 24 | buf[p + 5] << 16 | buf[p + 6] << 8 | buf[p + 7];
+  if ((((buf[p + 4] << 24) | (buf[p + 5] << 16) | (buf[p + 6] << 8) | buf[p + 7]) >>> 0) !== 0) {
+    const fixed = ((buf[p + 4] << 24) | (buf[p + 5] << 16) | (buf[p + 6] << 8) | buf[p + 7]) >>> 0;
     for (let i = 0; i < count; i++) sizes.push(fixed);
     return sizes;
   }
   let q = p + 12;
   for (let i = 0; i < count; i++) {
-    sizes.push((buf[q] << 24) | (buf[q + 1] << 16) | (buf[q + 2] << 8) | buf[q + 3]);
+    sizes.push(((buf[q] << 24) | (buf[q + 1] << 16) | (buf[q + 2] << 8) | buf[q + 3]) >>> 0);
     q += 4;
   }
   return sizes;
@@ -120,13 +120,13 @@ function parseStsz(buf: Uint8Array, box: BoxInfo): number[] {
 interface StscEntry { firstChunk: number; samplesPerChunk: number; }
 function parseStsc(buf: Uint8Array, box: BoxInfo): StscEntry[] {
   const p = box.start + box.headerLen;
-  const count = (buf[p + 4] << 24) | (buf[p + 5] << 16) | (buf[p + 6] << 8) | buf[p + 7];
+  const count = ((buf[p + 4] << 24) | (buf[p + 5] << 16) | (buf[p + 6] << 8) | buf[p + 7]) >>> 0;
   const out: StscEntry[] = [];
   let q = p + 8;
   for (let i = 0; i < count; i++) {
     out.push({
-      firstChunk: (buf[q] << 24) | (buf[q + 1] << 16) | (buf[q + 2] << 8) | buf[q + 3],
-      samplesPerChunk: (buf[q + 4] << 24) | (buf[q + 5] << 16) | (buf[q + 6] << 8) | buf[q + 7],
+      firstChunk: ((buf[q] << 24) | (buf[q + 1] << 16) | (buf[q + 2] << 8) | buf[q + 3]) >>> 0,
+      samplesPerChunk: ((buf[q + 4] << 24) | (buf[q + 5] << 16) | (buf[q + 6] << 8) | buf[q + 7]) >>> 0,
     });
     q += 8;
   }
@@ -137,7 +137,7 @@ function parseStsc(buf: Uint8Array, box: BoxInfo): StscEntry[] {
 function parseStco(buf: Uint8Array, box: BoxInfo): number[] {
   const p = box.start + box.headerLen;
   const version = buf[p];
-  const count = (buf[p + 4] << 24) | (buf[p + 5] << 16) | (buf[p + 6] << 8) | buf[p + 7];
+  const count = ((buf[p + 4] << 24) | (buf[p + 5] << 16) | (buf[p + 6] << 8) | buf[p + 7]) >>> 0;
   const offsets: number[] = [];
   let q = p + 8;
   for (let i = 0; i < count; i++) {
@@ -145,7 +145,7 @@ function parseStco(buf: Uint8Array, box: BoxInfo): number[] {
       offsets.push(Number((BigInt(buf[q]) << 24n) | (BigInt(buf[q + 1]) << 16n) | (BigInt(buf[q + 2]) << 8n) | BigInt(buf[q + 3]) << 32n) + Number((BigInt(buf[q + 4]) << 24n) | (BigInt(buf[q + 5]) << 16n) | (BigInt(buf[q + 6]) << 8n) | BigInt(buf[q + 7])));
       q += 8;
     } else {
-      offsets.push((buf[q] << 24) | (buf[q + 1] << 16) | (buf[q + 2] << 8) | buf[q + 3]);
+      offsets.push(((buf[q] << 24) | (buf[q + 1] << 16) | (buf[q + 2] << 8) | buf[q + 3]) >>> 0);
       q += 4;
     }
   }
@@ -153,18 +153,46 @@ function parseStco(buf: Uint8Array, box: BoxInfo): number[] {
   return offsets;
 }
 
-// 解析 senc：每个 sample 的 IV（16 字节）
-function parseSenc(buf: Uint8Array, sencBox: BoxInfo): Uint8Array[] {
+// 解析 tenc：获取默认 IV 长度和加密信息
+interface TencInfo { ivLength: number; }
+function parseTenc(buf: Uint8Array, box: BoxInfo): TencInfo {
+  const p = box.start + box.headerLen;
+  // version(1) flags(3) default_is_encrypted(1) default_iv_length(1) default_kid(16) default_iv(variable)
+  const ivLen = buf[p + 4 + 1]; // default_is_encrypted 在 offset 4, default_iv_length 在 offset 5
+  return { ivLength: ivLen || 16 };
+}
+
+// 解析 senc：每个 sample 的 IV（8 或 16 字节，可能有子样本信息）
+function parseSenc(buf: Uint8Array, sencBox: BoxInfo, ivLength: number): Uint8Array[] {
   const p = sencBox.start + sencBox.headerLen;
   // version(1) flags(3) sample_count(4)
-  const count = (buf[p + 4] << 24) | (buf[p + 5] << 16) | (buf[p + 6] << 8) | buf[p + 7];
+  const flags = buf[p + 3];
+  const hasSubSamples = (flags & 0x01) !== 0; // bit 0: subsample encryption
+  const count = ((buf[p + 4] << 24) | (buf[p + 5] << 16) | (buf[p + 6] << 8) | buf[p + 7]) >>> 0;
   const ivs: Uint8Array[] = [];
   let q = p + 8;
   for (let i = 0; i < count; i++) {
-    const iv = buf.slice(q, q + 16);
-    ivs.push(iv);
-    q += 16; // 简化：假设无子样本（汽水标准音频通常无 per-sample sub_sample 数据）
+    const iv = buf.slice(q, q + ivLength);
+    // 如果 IV 不足 16 字节，右侧补零（AES-CTR 需要 16 字节 counter）
+    if (ivLength < 16) {
+      const padded = new Uint8Array(16);
+      padded.set(iv, 0);
+      ivs.push(padded);
+    } else {
+      ivs.push(iv);
+    }
+    q += ivLength;
+    // 如果有子样本信息，跳过 subsample_count(2) + subsample entries
+    if (hasSubSamples) {
+      const subsampleCount = (buf[q] << 8) | buf[q + 1];
+      q += 2;
+      q += subsampleCount * 6; // 每个 subsample: clear(4) encrypted(4) = 8 字节... 但标准是 2+4+4=10？
+      // 实际上 CENC subsample = clear_trailing(4) + encrypted_bytes(4) = 8 字节，但有的实现用 6 字节
+      // 保守做法：8 字节 per subsample
+      // 修正：标准 CENC subsample = clear(2) + encrypted(4) = 6 字节
+    }
   }
+  console.log(`[qishui-decrypt] senc: flags=${flags} hasSubSamples=${hasSubSamples} ivLen=${ivLength} count=${count} parsed=${ivs.length}`);
   return ivs;
 }
 
@@ -215,41 +243,60 @@ export async function decryptQishuiAudio(
   const stco = boxes.find((b) => b.type === 'stco' || b.type === 'co64');
   const senc = boxes.find((b) => b.type === 'senc');
 
+  // 查找 tenc box：可能在 stbl/sinf/schi 下，尝试多层查找
+  let tencBox: BoxInfo | null = boxes.find((b) => b.type === 'tenc') ?? null;
+  if (!tencBox) {
+    // 尝试在 sinf → schi 中查找
+    const sinf = boxes.find((b) => b.type === 'sinf');
+    if (sinf) {
+      const sinfBoxes: BoxInfo[] = [];
+      scanBoxes(buf, sinf.start + sinf.headerLen, sinf.start + sinf.size, sinfBoxes);
+      const schi = sinfBoxes.find((b) => b.type === 'schi');
+      if (schi) {
+        const schiBoxes: BoxInfo[] = [];
+        scanBoxes(buf, schi.start + schi.headerLen, schi.start + schi.size, schiBoxes);
+        tencBox = schiBoxes.find((b) => b.type === 'tenc') ?? null;
+      }
+    }
+  }
+  const ivLength = tencBox ? parseTenc(buf, tencBox).ivLength : 16;
+
   if (!stsz || !stsc || !stco || !senc) {
     throw new Error('缺少必要 box（stsz/stsc/stco/senc）');
   }
 
   const sizes = parseStsz(buf, stsz);
   const stscEntries = parseStsc(buf, stsc);
-  const ivs = parseSenc(buf, senc);
-  void parseStco(buf, stco); // offset 用于重建（此处简化：保持原 offset，仅解密 sample 数据区）
-
-  // 计算 sample -> chunk 分布，定位每个 sample 在文件中的偏移
-  // 简化：依据 stco chunk offset + stsc，逐 sample 累加
+  const ivs = parseSenc(buf, senc, ivLength);
   const chunkOffsets = parseStco(buf, stco);
+
   // 构造 sample 全局偏移表
+  // 算法：遍历所有 chunk，用 stsc 确定每个 chunk 的 sample 数，
+  // 用 stco 确定每个 chunk 的起始偏移，用 stsz 确定每个 sample 的大小
   const sampleOffsets: number[] = [];
-  let chunkIdx = 0;
-  let sampleInChunk = 0;
-  let curSamplesPerChunk = stscEntries[0]?.samplesPerChunk ?? 0;
-  for (let s = 0; s < sizes.length; s++) {
-    if (sampleInChunk === 0) {
-      // 进入新 chunk
-      while (chunkIdx + 1 < stscEntries.length && stscEntries[chunkIdx + 1].firstChunk === chunkIdx + 2) {
-        chunkIdx++;
-        curSamplesPerChunk = stscEntries[chunkIdx].samplesPerChunk;
-      }
+  let sampleIdx = 0; // 已分配的全局 sample 序号
+  let stscIdx = 0;   // 当前 stsc 条目索引
+  // stsc 条目：firstChunk 表示从第几个 chunk 开始用这个 samplesPerChunk
+  // 遍历所有 chunk
+  for (let chunkIdx = 0; chunkIdx < chunkOffsets.length && sampleIdx < sizes.length; chunkIdx++) {
+    // 推进 stsc 条目：如果当前 chunk >= 下一条 stsc 的 firstChunk，则切换
+    while (stscIdx + 1 < stscEntries.length && (chunkIdx + 1) >= stscEntries[stscIdx + 1].firstChunk) {
+      stscIdx++;
     }
-    const base = chunkOffsets[chunkIdx] ?? 0;
-    // 当前 chunk 内前 sampleInChunk 个 sample 的累计长度
-    let offset = base;
-    for (let k = 0; k < sampleInChunk; k++) offset += sizes[sampleOffsets.length] ?? 0;
-    sampleOffsets.push(offset);
-    sampleInChunk++;
-    if (sampleInChunk >= curSamplesPerChunk) {
-      sampleInChunk = 0;
-      chunkIdx++;
+    const samplesPerChunk = stscEntries[stscIdx]?.samplesPerChunk ?? 0;
+    let offset = chunkOffsets[chunkIdx];
+    for (let i = 0; i < samplesPerChunk && sampleIdx < sizes.length; i++) {
+      sampleOffsets.push(offset);
+      offset += sizes[sampleIdx];
+      sampleIdx++;
     }
+  }
+
+  // 诊断日志
+  console.log(`[qishui-decrypt] bufLen=${buf.length} sizes=${sizes.length} ivs=${ivs.length} chunks=${chunkOffsets.length} stsc=${stscEntries.length} sampleOffsets=${sampleOffsets.length}`);
+  if (sampleOffsets.length > 0 && sizes.length > 0) {
+    const lastOff = sampleOffsets[sampleOffsets.length - 1] + (sizes[sizes.length - 1] || 0);
+    console.log(`[qishui-decrypt] last sample end=${lastOff} vs bufLen=${buf.length} ${lastOff > buf.length ? 'OVERFLOW' : 'OK'}`);
   }
 
   // 逐 sample 解密
