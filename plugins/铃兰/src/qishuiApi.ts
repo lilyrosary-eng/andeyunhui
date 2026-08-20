@@ -120,7 +120,7 @@ interface QishuiRequestOpts {
   referer?: string;
 }
 
-async function qishuiRequest(
+export async function qishuiRequest(
   path: string,
   opts: QishuiRequestOpts = {},
 ): Promise<any> {
