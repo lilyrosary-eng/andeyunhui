@@ -1,7 +1,7 @@
 /// <reference path="../../global.d.ts" />
 import React from "react";
 const { useState, useEffect } = React;
-import { X } from 'lucide-react';
+import { X, Sparkles } from 'lucide-react';
 import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon, ListenNowIcon, LibraryIcon, RadioIcon, SearchIcon, UserIcon, DownloadIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import type { NeteaseProfile } from './neteaseApi';
@@ -25,6 +25,10 @@ interface ModuleDrawerProps {
   isQishuiOpen?: boolean;
 // 点击汽水折叠菜单子项时回调：key 为 listen/library/search/about
 onSelectQishui?: (key: 'listen' | 'library' | 'search' | 'about') => void;
+  // 当前是否已切换到漫游电台模块（独立漫游，从网易云抽离）
+  isRoamOpen?: boolean;
+  // 点击漫游卡片时回调
+  onSelectRoam?: () => void;
 }
 
 // 通用首页图标（云按钮折叠菜单复用）
@@ -104,6 +108,17 @@ const accents = {
     borderActive: 'border-[#4dd0e1]/60',
     borderActiveDark: 'dark:border-[#4dd0e1]/40',
     check: 'bg-[#00c2c7]',
+  } satisfies AccentSet,
+  roam: {
+    text: 'text-[#7c4dff]',
+    textDark: 'dark:text-[#b388ff]',
+    bgSoft: 'bg-[#7c4dff]/10',
+    bgSoftDark: 'dark:bg-[#7c4dff]/10',
+    bgActive: 'bg-[#ede7f6]/60',
+    bgActiveDark: 'dark:bg-[#2a1a3e]/40',
+    borderActive: 'border-[#b388ff]/60',
+    borderActiveDark: 'dark:border-[#b388ff]/40',
+    check: 'bg-[#7c4dff]',
   } satisfies AccentSet,
 };
 
@@ -235,7 +250,7 @@ const qishuiItems: { key: 'listen' | 'library' | 'search' | 'about'; icon: React
 { key: 'about', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 
-export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou, isQishuiOpen, onSelectQishui }: ModuleDrawerProps) {
+export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou, isQishuiOpen, onSelectQishui, isRoamOpen, onSelectRoam }: ModuleDrawerProps) {
   useLang();
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
@@ -243,8 +258,8 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
   const [kugouExpanded, setKugouExpanded] = useState(!!isKugouOpen);
   const [qishuiExpanded, setQishuiExpanded] = useState(!!isQishuiOpen);
 
-  // 修正：本地音乐只有在网易云/酷狗/汽水都未打开时才高亮
-  const isLocalActive = !isNeteaseOpen && !isKugouOpen && !isQishuiOpen;
+  // 修正：本地音乐只有在网易云/酷狗/汽水/漫游都未打开时才高亮
+  const isLocalActive = !isNeteaseOpen && !isKugouOpen && !isQishuiOpen && !isRoamOpen;
 
   useEffect(() => {
     if (open) {
@@ -436,6 +451,16 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
               );
             })}
           </DrawerModuleItem>
+
+          {/* 漫游电台：独立模块，从网易云漫游抽离为通用模板 */}
+          <DrawerModuleItem
+            active={!!isRoamOpen}
+            onSelect={() => { if (onSelectRoam) onSelectRoam(); onClose(); }}
+            icon={React.createElement(Sparkles, { size: 18 })}
+            title="漫游电台"
+            desc="流式推荐 · 自动续推"
+            accent={accents.roam}
+          />
         </div>
       </div>
     </div>

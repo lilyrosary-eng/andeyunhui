@@ -19,7 +19,7 @@ interface Playlist {
   id: string;
   name: string;
   tracks: Track[];
-  type: 'directory' | 'custom' | 'netease-temp' | 'kugou-temp' | 'qishui-temp';
+  type: 'directory' | 'custom' | 'netease-temp' | 'kugou-temp' | 'qishui-temp' | 'roam-temp';
 }
 
 interface MusicSidebarProps {

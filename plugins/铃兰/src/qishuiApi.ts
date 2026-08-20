@@ -337,13 +337,44 @@ export async function qishuiGetLyric(id: string): Promise<string> {
   return r?.data?.lyric?.content || r?.data?.lyric || r?.lyric || '';
 }
 
-// 播放地址（加密流直链 + 解密密钥 spadeA）
+// 播放地址（PC 端接口 /pc/media-player 无需签名头，返回加密流直链 + spadeA 解密密钥）
 export interface QishuiSongUrl {
   url?: string;
   spadeA?: string;
   br?: number;
 }
 export async function qishuiGetSongUrl(id: string, br = 320000): Promise<QishuiSongUrl> {
+  // 优先使用 PC 端接口（无需 x-argus/x-helios 签名头）
+  try {
+    const r = await qishuiRequest('/pc/media-player', {
+      method: 'POST',
+      body: {
+        media_id: id,
+        media_type: 'track',
+        device_platform: 'web',
+      },
+    });
+    console.log('[qishui] pc/media-player keys:', Object.keys(r || {}).join(','));
+    const info = r?.player_infos?.[0];
+    console.log('[qishui] player_infos[0]:', info ? JSON.stringify(info).slice(0, 400) : 'EMPTY');
+    const vmRaw = info?.video_model;
+    const vm = typeof vmRaw === 'string' ? JSON.parse(vmRaw) : vmRaw;
+    const v0 = vm?.video_list?.[0];
+    const encryptInfo = v0?.encrypt_info || {};
+    console.log('[qishui] video_list[0] main_url:', v0?.main_url?.slice(0, 80) || 'EMPTY');
+    console.log('[qishui] spade_a:', encryptInfo.spade_a || 'NONE');
+    if (v0?.main_url) {
+      return {
+        url: v0.main_url,
+        spadeA: encryptInfo?.spade_a,
+        br: Number(v0?.video_meta?.bitrate || vm?.bitrate || br),
+      };
+    }
+  } catch (e: any) {
+    console.warn('[qishui] pc/media-player failed:', e?.message || e);
+  }
+
+  // 降级：移动端 /media-player（需要签名头，可能返回 1000062）
   const r = await qishuiRequest('/media-player', {
     method: 'POST',
     body: {
@@ -356,17 +387,11 @@ export async function qishuiGetSongUrl(id: string, br = 320000): Promise<QishuiS
       limited_free_param: {},
     },
   });
-  // 诊断：打印完整响应结构
-  console.log('[qishui] media-player response keys:', Object.keys(r || {}).join(','));
   const info = r?.data?.player_infos?.[0] || r?.player_infos?.[0];
-  console.log('[qishui] player_infos[0]:', info ? JSON.stringify(info).slice(0, 400) : 'EMPTY');
   const vmRaw = info?.video_model;
   const vm = typeof vmRaw === 'string' ? JSON.parse(vmRaw) : vmRaw;
-  console.log('[qishui] video_model:', vm ? JSON.stringify(vm).slice(0, 400) : 'EMPTY');
   const v0 = vm?.video_list?.[0];
   const encryptInfo = v0?.encrypt_info || {};
-  console.log('[qishui] video_list[0]:', v0 ? JSON.stringify(v0).slice(0, 300) : 'EMPTY');
-  console.log('[qishui] encrypt_info:', JSON.stringify(encryptInfo).slice(0, 200));
   return {
     url: v0?.main_url || v0?.backup_url || (typeof info?.url_player_info === 'string' ? info.url_player_info : undefined),
     spadeA: encryptInfo?.spade_a || info?.spade_a || info?.spadeA,

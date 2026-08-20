@@ -912,36 +912,10 @@ export async function getKugouVipInfo(auth: KugouAuth): Promise<KugouVipInfo | n
   }
 }
 
-// 我的歌单（改为 wwwapi Web 签名接口，避免 gateway 500）
+// 我的歌单（gateway /v7/get_all_list，可能 502；失败时返回空不抛异常）
 export async function getUserPlaylists(auth: KugouAuth, pagesize = 50): Promise<KugouPlaylistCard[]> {
+  const uid = Number(auth.userid) || auth.userid;
   try {
-    const uid = Number(auth.userid) || auth.userid;
-    const body = await kugouLegacyRequest('/yy/index.php', {
-      r: 'user/plist',
-      type: 0,
-      userid: uid,
-      token: auth.token,
-      page: 1,
-      pagesize,
-    }, {
-      base: WWWAPI,
-      salt: KUGOU_WEB_SALT,
-      cookie: buildKugouCookie(auth),
-      referer: REFERER,
-    });
-    const list: any[] = body?.data?.info || body?.data?.list || body?.info || [];
-    return list.map((r: any) => ({
-      id: Number(r.specialid ?? r.id ?? 0) || 0,
-      gid: String(r.global_collection_id ?? r.specialid ?? r.id ?? ''),
-      name: r.specialname ?? r.name ?? '未命名歌单',
-      cover: kugouImg(r.pic || r.imgurl || r.cover || '', 240),
-      creator: r.nickname || r.username || '',
-      playCount: Number(r.play_count || 0),
-    }));
-  } catch (e: any) {
-    console.warn('[kugou] 用户歌单加载失败，尝试 gateway:', e?.message || e);
-    // 回退到 gateway
-    const uid = Number(auth.userid) || auth.userid;
     const body = await kugouRequest('/v7/get_all_list', {
       plat: 1,
       userid: uid,
@@ -969,6 +943,9 @@ export async function getUserPlaylists(auth: KugouAuth, pagesize = 50): Promise<
       creator: r.nickname || r.username || '',
       playCount: Number(r.play_count || 0),
     }));
+  } catch (e: any) {
+    console.warn('[kugou] 用户歌单加载失败:', e?.message || e);
+    return [];
   }
 }
 

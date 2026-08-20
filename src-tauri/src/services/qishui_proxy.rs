@@ -54,6 +54,7 @@ const ALLOWED_QISHUI_PATH_PREFIXES: &[&str] = &[
     "/luna/discover",
     "/luna/playlist/detail",
     "/luna/media-player",
+    "/luna/pc/media-player",
     "/luna/h5/seo_track",
     "/luna/feed",
     "/luna/comments",

@@ -36,8 +36,8 @@ export interface OnlineSourceApi {
     tracks: PlayableTrack[],
     startIndex: number,
     name: string,
-    type: 'netease-temp' | 'kugou-temp' | 'qishui-temp',
-  ) => void;
+type: 'netease-temp' | 'kugou-temp' | 'qishui-temp' | 'roam-temp',
+) => void;
   // 注册一个临时歌单（来自子模块内部如「我喜欢的音乐」整页播放）
   registerTemp: (temp: TempPlaylist) => void;
 }
@@ -51,9 +51,9 @@ export function useOnlineSource(): OnlineSourceApi {
   const [sourceActiveId, setSourceActiveId] = useState<string | number | null>(null);
 
   const registerPlay = useCallback(
-    (tracks: PlayableTrack[], _startIndex: number, name: string, type: 'netease-temp' | 'kugou-temp' | 'qishui-temp') => {
-      // 在线播放注册为临时歌单（id 与类型绑定到具体平台，供浮窗区分来源）
-      const id = type === 'netease-temp' ? 'netease-active' : type === 'kugou-temp' ? 'kugou-active' : 'qishui-active';
+(tracks: PlayableTrack[], _startIndex: number, name: string, type: 'netease-temp' | 'kugou-temp' | 'qishui-temp' | 'roam-temp') => {
+// 在线播放注册为临时歌单（id 与类型绑定到具体平台，供浮窗区分来源）
+const id = type === 'netease-temp' ? 'netease-active' : type === 'kugou-temp' ? 'kugou-active' : type === 'qishui-temp' ? 'qishui-active' : 'roam-active';
       setActivePlaylist({ id, name, type, tracks });
     },
     [],

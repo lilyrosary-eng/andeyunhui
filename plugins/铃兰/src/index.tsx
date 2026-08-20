@@ -10,6 +10,7 @@ import { NeteaseView, type PlayableTrack, type TempPlaylist, type NeteaseViewHan
 import { KugouView } from './KugouView';
 import KugouSidebar from './KugouSidebar';
 import { QishuiView, type QishuiViewHandle } from './QishuiView';
+import { RoamView } from './RoamView';
 import QishuiSidebar from './QishuiSidebar';
 import { qishuiGetRecommendPlaylists, type QishuiPlaylistCard } from './qishuiApi';
 import NeteaseSidebar from './NeteaseSidebar';
@@ -32,7 +33,7 @@ export interface Playlist {
   id: string;
   name: string;
   tracks: Track[];
-  type: 'directory' | 'custom' | 'netease-temp' | 'kugou-temp' | 'qishui-temp';
+  type: 'directory' | 'custom' | 'netease-temp' | 'kugou-temp' | 'qishui-temp' | 'roam-temp';
 }
 
 interface MusicScanProgress {
@@ -1083,6 +1084,8 @@ function MusicModule() {
   const [qishuiRecommend, setQishuiRecommend] = useState<QishuiPlaylistCard[]>([]);
   const [qishuiActivePlaylistId, setQishuiActivePlaylistId] = useState<string | null>(null);
   const qishuiViewRef = useRef<QishuiViewHandle | null>(null);
+  // 漫游电台：从网易云漫游抽离的独立模块，作为第五个卡片
+  const [roamOpen, setRoamOpen] = useState(false);
   // 进入汽水模块时拉一次推荐歌单（侧栏铺开），仅游客态
   useEffect(() => {
     if (qishuiOpen && qishuiRecommend.length === 0) {
@@ -2333,6 +2336,21 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                 online.setActiveId(null);
               }}
             />
+          ) : roamOpen ? (
+            <RoamView
+              onBack={() => setShowModuleDrawer(true)}
+              onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
+                musicPlayer.setTracks(tracks, startIndex);
+                musicPlayer.play();
+                musicPlayer.currentPlaylistId = 'roam-active';
+                online.registerPlay(tracks, startIndex, sourceName, 'roam-temp');
+              }}
+              onTempPlaylist={(temp) => {
+                online.setActiveId(null);
+                online.registerTemp(temp);
+              }}
+              onOpenImmersive={() => setShowNowPlaying(true)}
+            />
           ) : null}
           {selectedPlaylist ? (
             <TrackList
@@ -2400,6 +2418,7 @@ onSelectLocalMusic={() => {
 setNeteaseOpen(false);
 setKugouOpen(false);
 setQishuiOpen(false);
+setRoamOpen(false);
 setShowModuleDrawer(false);
 }}
 onSelectNetease={(key: 'listen' | 'library' | 'radio' | 'search' | 'downloads' | 'login') => {
@@ -2407,12 +2426,14 @@ setNeteaseTab(key);
 setNeteaseOpen(true);
 setKugouOpen(false);
 setQishuiOpen(false);
+setRoamOpen(false);
 }}
 onSelectKugou={(key: 'home' | 'roam' | 'search' | 'mine') => {
 setKugouTab(key);
 setKugouOpen(true);
 setNeteaseOpen(false);
 setQishuiOpen(false);
+setRoamOpen(false);
           // 切换折叠菜单子项时，清理榜单详情 / 收藏夹等内层级状态，避免覆盖漫游 / 我的
           setKugouActiveRankId(null);
           setSelectedPlaylist(null);
@@ -2423,14 +2444,24 @@ setQishuiOpen(false);
         isKugouOpen={kugouOpen}
         onSelectQishui={(key: 'listen' | 'library' | 'search' | 'about') => {
           setQishuiTab(key);
-          setQishuiOpen(true);
-          setNeteaseOpen(false);
-          setKugouOpen(false);
+setQishuiOpen(true);
+setNeteaseOpen(false);
+setKugouOpen(false);
+setRoamOpen(false);
           setQishuiActivePlaylistId(null);
           setSelectedPlaylist(null);
           setSearchQuery('');
         }}
         isQishuiOpen={qishuiOpen}
+        isRoamOpen={roamOpen}
+        onSelectRoam={() => {
+          setRoamOpen(true);
+          setNeteaseOpen(false);
+          setKugouOpen(false);
+          setQishuiOpen(false);
+          setSelectedPlaylist(null);
+          setSearchQuery('');
+        }}
         neteaseProfile={neteaseProfile}
       />
       {showNowPlaying && currentTrack && (
