@@ -391,6 +391,10 @@ function mapTrack(s: any): KugouTrack {
   else if (Array.isArray(s.singers) && s.singers.length > 0) {
     artist = s.singers.map((a: any) => (a && a.name) || a).filter(Boolean).join('/');
   }
+  // 榜单歌曲用 authors 数组替代 singername
+  else if (Array.isArray(s.authors) && s.authors.length > 0) {
+    artist = s.authors.map((a: any) => (a && (a.author_name || a.name)) || a).filter(Boolean).join('/');
+  }
   artist = stripHtml(artist);
 
   if (!artist && typeof s.filename === 'string') {
@@ -404,7 +408,7 @@ function mapTrack(s: any): KugouTrack {
     artist: artist || '未知歌手',
     album: stripHtml(s.album_name || s.albumname || s.album || ''),
     duration: (s.duration || s.timelength || s.timeLength || s.time_length || 0) * 1000 || 0, // KG_TAG
-    cover: kugouImg(s.album_img || s.img || s.cover || s.photo || s.album_img_9x9 || s.trans_param?.union_cover || '', 240),
+    cover: kugouImg(s.album_img || s.img || s.cover || s.photo || s.album_img_9x9 || s.album_sizable_cover || s.trans_param?.union_cover || '', 240),
     hash,
     hash320: s['320hash'] || s.hash_320 || undefined,
     sqHash: s.sqhash || s.hash_flac || undefined,
@@ -413,7 +417,7 @@ function mapTrack(s: any): KugouTrack {
     privilege: s.privilege !== undefined ? Number(s.privilege) : undefined,
     albumId: s.album_id ? Number(s.album_id) : undefined,
     albumAudioId: s.album_audio_id ? Number(s.album_audio_id) : undefined,
-    singerId: s.singer_id ? Number(s.singer_id) : undefined,
+    singerId: s.singer_id ? Number(s.singer_id) : (Array.isArray(s.authors) && s.authors[0]?.author_id ? Number(s.authors[0].author_id) : undefined),
   };
 }
 
