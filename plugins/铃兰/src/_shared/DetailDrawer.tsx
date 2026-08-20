@@ -91,7 +91,7 @@ export type SharedDrawerType =
 export interface SharedDrawerCallbacks {
   onPlayTracks: (tracks: PlayableTrack[], startIndex: number, name?: string) => void;
   onPlayMv?: (mv: { id: string; name: string; artist: string; cover: string; url: string }) => void;
-  onOpenArtist?: (id: number | string) => void;
+  onOpenArtist?: (id: number | string, name?: string) => void;
   onOpenAlbum?: (id: number | string) => void;
   onSubscribe?: (id: number | string, subscribe: boolean) => void;
   onLikeTrack?: (trackId: string, liked: boolean) => void;
@@ -191,7 +191,7 @@ function AlbumHeader({
   onOpenArtist,
 }: {
   album: SharedAlbumData;
-  onOpenArtist?: (id: number | string) => void;
+  onOpenArtist?: (id: number | string, name?: string) => void;
 }) {
   return (
     <div className="flex gap-4 items-center">
@@ -206,7 +206,7 @@ function AlbumHeader({
         <h2 className="text-xl font-bold text-neutral-800 dark:text-stone-100 truncate">{album.name}</h2>
         {album.artistId && onOpenArtist ? (
           <button
-            onClick={() => onOpenArtist(album.artistId!)}
+            onClick={() => onOpenArtist?.(album.artistId ?? 0, album.artistName)}
             className="text-xs text-neutral-500 dark:text-stone-400 mt-0.5 hover:text-emerald-500 dark:hover:text-emerald-400 hover:underline cursor-pointer"
           >
             {album.artistName}
@@ -384,7 +384,7 @@ export const DetailDrawer: React.FC<DetailDrawerProps> = ({
                         : (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, true); }
                       }
                       isLiked={likedTracks?.has(t.id) || false}
-                      onOpenArtist={callbacks.onOpenArtist ? (e) => { e.stopPropagation(); callbacks.onOpenArtist!(t.artistId!); } : undefined}
+                      onOpenArtist={callbacks.onOpenArtist ? (e) => { e.stopPropagation(); callbacks.onOpenArtist!(t.artistId ?? 0, t.artist); } : undefined}
                       onOpenAlbum={callbacks.onOpenAlbum ? (e) => { e.stopPropagation(); callbacks.onOpenAlbum!(t.albumId!); } : undefined}
                       onPlayMv={callbacks.onPlayMv ? (e) => { e.stopPropagation(); callbacks.onPlayMv!({ id: String(t.mvId ?? ''), name: t.title, artist: t.artist, cover: t.coverPath ?? '', url: '' }); } : undefined}
                       onDownload={callbacks.onDownload ? () => { callbacks.onDownload!(t.id); } : undefined}
@@ -429,7 +429,7 @@ export const DetailDrawer: React.FC<DetailDrawerProps> = ({
                           : (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, true); }
                         }
                         isLiked={likedTracks?.has(t.id) || false}
-                        onOpenArtist={callbacks.onOpenArtist ? (e) => { e.stopPropagation(); callbacks.onOpenArtist!(t.artistId!); } : undefined}
+                        onOpenArtist={callbacks.onOpenArtist ? (e) => { e.stopPropagation(); callbacks.onOpenArtist!(t.artistId ?? 0, t.artist); } : undefined}
                         onOpenAlbum={callbacks.onOpenAlbum ? (e) => { e.stopPropagation(); callbacks.onOpenAlbum!(t.albumId!); } : undefined}
                         onPlayMv={callbacks.onPlayMv ? (e) => { e.stopPropagation(); callbacks.onPlayMv!({ id: String(t.mvId ?? ''), name: t.title, artist: t.artist, cover: t.coverPath ?? '', url: '' }); } : undefined}
                         onDownload={callbacks.onDownload ? () => { callbacks.onDownload!(t.id); } : undefined}
@@ -603,7 +603,7 @@ export const DetailDrawer: React.FC<DetailDrawerProps> = ({
                         : (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, true); }
                       }
                       isLiked={likedTracks?.has(t.id) || false}
-                      onOpenArtist={callbacks.onOpenArtist ? (e) => { e.stopPropagation(); callbacks.onOpenArtist!(t.artistId!); } : undefined}
+                      onOpenArtist={callbacks.onOpenArtist ? (e) => { e.stopPropagation(); callbacks.onOpenArtist!(t.artistId ?? 0, t.artist); } : undefined}
                       onOpenAlbum={callbacks.onOpenAlbum ? (e) => { e.stopPropagation(); callbacks.onOpenAlbum!(t.albumId!); } : undefined}
                       onPlayMv={callbacks.onPlayMv ? (e) => { e.stopPropagation(); callbacks.onPlayMv!({ id: String(t.mvId ?? ''), name: t.title, artist: t.artist, cover: t.coverPath ?? '', url: '' }); } : undefined}
                       onDownload={callbacks.onDownload ? () => { callbacks.onDownload!(t.id); } : undefined}

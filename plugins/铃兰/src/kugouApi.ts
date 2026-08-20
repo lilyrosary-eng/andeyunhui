@@ -632,53 +632,16 @@ export async function getMvUrl(mvHash: string): Promise<string> {
   throw new Error('MV 响应中没有可用播放地址');
 }
 
-// 获取歌单歌曲列表（gateway 签名接口，500 时降级 mobilecdn → wwwapi）
+// 获取歌单歌曲列表（直接走 mobilecdn 免签名接口，跳过 gateway 避免 500）
 async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize = 30): Promise<KugouTrack[]> {
-  // 第一级：gateway 签名接口
-  try {
-    const body = await kugouRequest('/pubsongs/v2/get_other_list_file_nofilt', {
-      area_code: 1,
-      begin_idx: (page - 1) * pagesize,
-      plat: 1,
-      type: 1,
-      mode: 1,
-      personal_switch: 1,
-      extend_fields: 'abtags,hot_cmt,popularization',
-      pagesize,
-      global_collection_id: globalCollectionId,
-    });
-    assertKugouOk(body, 'get_other_list_file_nofilt');
-    const list: any[] = body?.songs || body?.data?.songs || body?.data?.info || [];
-    const tracks = list.map(mapTrack).filter((t: KugouTrack) => t.hash);
-    if (tracks.length) return tracks;
-    throw new Error('gateway returned empty list');
-  } catch (gwErr: any) {
-    console.warn('[kugou] gateway 歌单接口失败，降级 mobilecdn:', gwErr?.message || gwErr);
-  }
+  // global_collection_id 通常就是 specialid（同为数字 ID），直接用 mobilecdn 拉取
+  // 仅当 mobilecdn 返回空时才尝试 wwwapi
+  const specialId = Number(globalCollectionId) || 0;
 
-  // 先用 wwwapi 查 specialid（global_collection_id → specialid 转换）
-  let specialId = Number(globalCollectionId) || 0;
-  try {
-    const infoBody = await kugouLegacyRequest('/yy/index.php', {
-      r: 'pl/info',
-      global_collection_id: globalCollectionId,
-      page: 1,
-      pagesize: 1,
-      platid: 4,
-      userid: 0,
-      token: '',
-    }, { base: WWWAPI, salt: KUGOU_WEB_SALT });
-    const sid = Number(infoBody?.data?.info?.[0]?.specialid || infoBody?.data?.specialid || infoBody?.specialid || 0);
-    if (sid) {
-      console.log('[kugou] global_collection_id', globalCollectionId, '→ specialid', sid);
-      specialId = sid;
-    }
-  } catch { /* 查不到 specialid，用原值兜底 */ }
-
-  // 第二级：mobilecdn 免签名接口
+  // 第一级：mobilecdn 免签名接口（最稳定，不经过 gateway）
   for (const params of [
-    { specialid: specialId, global_collection_id: globalCollectionId },
     { specialid: specialId },
+    { specialid: specialId, global_collection_id: globalCollectionId },
     { specialid: globalCollectionId },
     { global_collection_id: globalCollectionId },
   ]) {
@@ -699,7 +662,7 @@ async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize 
     } catch { /* 继续尝试 */ }
   }
 
-  // 第三级：wwwapi Web 签名接口（/yy/index.php r=pl/getsonglist 需要 Web salt 签名）
+  // 第二级：wwwapi Web 签名接口
   try {
     const body3 = await kugouLegacyRequest('/yy/index.php', {
       r: 'pl/getsonglist',
@@ -750,6 +713,23 @@ export async function getPlaylistBySpecialId(
   return list.map(mapTrack).filter((t: KugouTrack) => t.hash);
 }
 
+// 搜索歌手获取 singerid（mobilecdn 免签名）
+export async function searchSingerId(name: string): Promise<number> {
+  try {
+    const body = await kugouLegacyRequest('/api/v3/search/singer', {
+      keyword: name,
+      pagesize: 1,
+      page: 1,
+      showtype: 1,
+    }, { base: MOBILE_HOST });
+    const info = body?.data?.info || body?.data?.lists || body?.info || [];
+    if (info.length > 0) {
+      return Number(info[0].singerid ?? info[0].id ?? 0) || 0;
+    }
+  } catch { /* ignore */ }
+  return 0;
+}
+
 // 获取榜单歌曲（mobilecdn /api/v3/rank/song）
 export async function getTopList(rankId: number, page = 1, pagesize = 30): Promise<KugouTrack[]> {
   const body = await kugouLegacyRequest('/api/v3/rank/song', {
@@ -783,38 +763,59 @@ export async function getRankList(): Promise<KugouPlaylistCard[]> {
   }));
 }
 
+// 推荐歌单列表（m.kugou.com/plist/index，免签名）
+export async function getRecommendPlaylists(page = 1, pagesize = 20): Promise<KugouPlaylistCard[]> {
+  try {
+    const raw: string = await hostApi.invoke('kugou_http_post', {
+      method: 'GET',
+      url: `http://m.kugou.com/plist/index?json=true&page=${page}&pagesize=${pagesize}`,
+      body: '',
+      cookie: undefined,
+      referer: REFERER,
+      origin: undefined,
+      real_ip: REAL_IP,
+      user_agent: UA_WEB,
+      headers: {},
+    });
+    const parsed = JSON.parse(raw || '{}');
+    const body = typeof parsed.body === 'string' ? JSON.parse(parsed.body) : (parsed.body || {});
+    const list: any[] = body?.plist?.list?.info || [];
+    return list.map((r: any) => ({
+      id: Number(r.specialid ?? r.id ?? 0),
+      gid: String(r.specialid ?? r.global_collection_id ?? r.id ?? ''),
+      name: r.specialname ?? r.name ?? '未命名歌单',
+      cover: kugouImg(r.pic || r.imgurl || r.cover || '', 240),
+      creator: r.nickname || r.username || '',
+      playCount: Number(r.playcount || r.play_count || 0),
+      trackCount: Number(r.songcount || r.song_count || 0),
+    }));
+  } catch (e: any) {
+    console.warn('[kugou] 推荐歌单获取失败:', e?.message || e);
+    return [];
+  }
+}
+
 // ============ 个性化推荐（手机版酷狗成熟能力，游客可降级） ============
 
-// 每日推荐：登录按口味推荐歌曲，游客也可用（实测返回 200，data.song_list 为歌曲数组）
-// 注意：该网关接口必须经聚合层路由，POST + x-router(everydayrec.service.kugou.com) + Android 签名，
-// 否则 gateway 直接返回 502（响应体 kws）。对齐社区 kugou_api(Dart) 的 RecommendApi.everyday。
-// 实测返回结构：{ data: { song_list_size, song_list: [ {hash,songname,author_name,album_name,time_length,pay_type,hash_flac,...} ] } }。
+// 每日推荐：gateway 不稳定（500），改为 mobilecdn 排行榜热门歌曲作为推荐
+// 游客态下取 TOP500 前若干首作为个性化推荐替代
 export async function getEverydayRecommend(
   auth?: KugouAuth | null,
   page = 1,
   pagesize = 20,
 ): Promise<KugouTrack[]> {
   try {
-    const d = await kugouRequest('/v3/everyday_song_recommend', {
+    // 用 TOP500 榜单的热门歌曲作为推荐（mobilecdn 直连，稳定可用）
+    const body = await kugouLegacyRequest('/api/v3/rank/song', {
+      rankid: 8888, // TOP500
+      ranktype: 2,
       page,
       pagesize,
-      userid: auth?.userid || 0,
-      token: auth?.token || '',
-    }, {
-      method: 'POST',
-      router: 'everydayrec.service.kugou.com',
-      auth: auth ?? null,
-      body: {
-        platform: 'android',
-        userid: auth?.userid || 0,
-        page,
-        pagesize,
-      },
-    });
-    const list: any[] = d?.data?.song_list || d?.data?.info || d?.info || [];
+    }, { base: MOBILE_HOST });
+    const list: any[] = body?.data?.info || body?.info || [];
     return list.map(mapTrack).filter((t: KugouTrack) => t.hash);
   } catch (e: any) {
-    console.warn('[kugou] 每日推荐失败:', e?.message || e);
+    console.warn('[kugou] 推荐歌曲获取失败:', e?.message || e);
     return [];
   }
 }
@@ -915,36 +916,64 @@ export async function getKugouVipInfo(auth: KugouAuth): Promise<KugouVipInfo | n
   }
 }
 
-// 我的歌单（当前 /v7/get_all_list，POST + Android 签名）
+// 我的歌单（改为 wwwapi Web 签名接口，避免 gateway 500）
 export async function getUserPlaylists(auth: KugouAuth, pagesize = 50): Promise<KugouPlaylistCard[]> {
-  const uid = Number(auth.userid) || auth.userid;
-  const body = await kugouRequest('/v7/get_all_list', {
-    plat: 1,
-    userid: uid,
-    token: auth.token,
-  }, {
-    method: 'POST',
-    body: {
+  try {
+    const uid = Number(auth.userid) || auth.userid;
+    const body = await kugouLegacyRequest('/yy/index.php', {
+      r: 'user/plist',
+      type: 0,
       userid: uid,
       token: auth.token,
-      total_ver: 979,
-      type: 2,
       page: 1,
       pagesize,
-    },
-    auth,
-    router: 'cloudlist.service.kugou.com',
-  });
-  assertKugouOk(body, 'get_all_list');
-  const list: any[] = body?.info || body?.data?.info || body?.list || [];
-  return list.map((r: any) => ({
-    id: Number(r.specialid ?? r.id ?? r.global_collection_id ?? 0) || 0,
-    gid: String(r.global_collection_id ?? r.specialid ?? r.id ?? ''),
-    name: r.specialname ?? r.name ?? '未命名歌单',
-    cover: kugouImg(r.pic || r.imgurl || r.cover || '', 240),
-    creator: r.nickname || r.username || '',
-    playCount: Number(r.play_count || 0),
-  }));
+    }, {
+      base: WWWAPI,
+      salt: KUGOU_WEB_SALT,
+      cookie: buildKugouCookie(auth),
+      referer: REFERER,
+    });
+    const list: any[] = body?.data?.info || body?.data?.list || body?.info || [];
+    return list.map((r: any) => ({
+      id: Number(r.specialid ?? r.id ?? 0) || 0,
+      gid: String(r.global_collection_id ?? r.specialid ?? r.id ?? ''),
+      name: r.specialname ?? r.name ?? '未命名歌单',
+      cover: kugouImg(r.pic || r.imgurl || r.cover || '', 240),
+      creator: r.nickname || r.username || '',
+      playCount: Number(r.play_count || 0),
+    }));
+  } catch (e: any) {
+    console.warn('[kugou] 用户歌单加载失败，尝试 gateway:', e?.message || e);
+    // 回退到 gateway
+    const uid = Number(auth.userid) || auth.userid;
+    const body = await kugouRequest('/v7/get_all_list', {
+      plat: 1,
+      userid: uid,
+      token: auth.token,
+    }, {
+      method: 'POST',
+      body: {
+        userid: uid,
+        token: auth.token,
+        total_ver: 979,
+        type: 2,
+        page: 1,
+        pagesize,
+      },
+      auth,
+      router: 'cloudlist.service.kugou.com',
+    });
+    assertKugouOk(body, 'get_all_list');
+    const list: any[] = body?.info || body?.data?.info || body?.list || [];
+    return list.map((r: any) => ({
+      id: Number(r.specialid ?? r.id ?? r.global_collection_id ?? 0) || 0,
+      gid: String(r.global_collection_id ?? r.specialid ?? r.id ?? ''),
+      name: r.specialname ?? r.name ?? '未命名歌单',
+      cover: kugouImg(r.pic || r.imgurl || r.cover || '', 240),
+      creator: r.nickname || r.username || '',
+      playCount: Number(r.play_count || 0),
+    }));
+  }
 }
 
 export interface KugouFavoritesResult {
@@ -1069,6 +1098,7 @@ export const kugou = {
   getPlaylistByGid,
   getTopList,
   getRankList,
+  getRecommendPlaylists,
   qualityLabelFromBr,
   kugouTrackBadges,
   getUserInfo,

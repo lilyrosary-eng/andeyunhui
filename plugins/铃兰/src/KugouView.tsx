@@ -29,9 +29,11 @@ import {
   getPlaylistBySpecialId,
   getEverydayRecommend,
   getRankList,
+  getRecommendPlaylists,
   getMvUrl,
   getArtistDetail,
   getAlbumDetail,
+  searchSingerId,
   qualityLabelFromBr,
 } from './kugouApi';
 import {
@@ -442,6 +444,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   const reqRef = useRef(0);
   const allTracksRef = useRef<KugouTrack[]>([]);
   const [rankList, setRankList] = useState<KugouPlaylistCard[]>([]);
+  const [recommendPlaylists, setRecommendPlaylists] = useState<KugouPlaylistCard[]>([]);
   const [recommendTracks, setRecommendTracks] = useState<KugouTrack[]>([]);
   const [activeRankId, setActiveRankId] = useState<number | null>(null);
   const [playlistMode, setPlaylistMode] = useState<{ id: string; name: string; cover?: string | null } | null>(null);
@@ -560,6 +563,8 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       }
       // 个性化推荐（猜你喜欢）与榜单并行加载，游客态回落热门歌单
       loadRecommend();
+      // 推荐歌单（m.kugou.com/plist/index，免签名直连）
+      getRecommendPlaylists(1, 20).then(setRecommendPlaylists).catch(() => {});
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -766,9 +771,24 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   }
 
   // 打开歌手详情抽屉
-  const openArtistDrawer = React.useCallback(async (id: number | string) => {
-    const sid = String(id);
-    setDrawer({ type: 'artist', id: sid });
+  const openArtistDrawer = React.useCallback(async (id: number | string, name?: string) => {
+    let sid = Number(id);
+    // 如果没有 singerId 但有歌手名，先搜索获取 singerId
+    if (!sid && name) {
+      try {
+        const searchBody = await searchSingerId(name);
+        if (searchBody) {
+          sid = Number(searchBody);
+        }
+      } catch (e) {
+        console.warn('[kugou] 搜索歌手ID失败:', e);
+      }
+    }
+    if (!sid) {
+      console.warn('[kugou] 无法获取歌手ID');
+      return;
+    }
+    setDrawer({ type: 'artist', id: String(sid) });
     setDrawerArtist(null);
     setDrawerLoading(true);
     try {
@@ -1008,9 +1028,9 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       {/* 首页：个性化 Hero + 横向滚动歌单（对齐网易云「为你推荐」） */}
       {tab === 'home' && activeRankId === null && !playlistMode && (
         <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
-          {/* Hero 大卡片 + 横向滚动歌单 */}
-          {rankList.length > 0 && (() => {
-            const rec = rankList;
+          {/* Hero 大卡片 + 横向滚动歌单（个性化推荐歌单） */}
+          {recommendPlaylists.length > 0 && (() => {
+            const rec = recommendPlaylists;
             const openRec = (pl: KugouPlaylistCard) =>
               openUserPlaylist({ id: pl.id, gid: pl.gid, name: pl.name, cover: pl.cover });
             return (
@@ -1040,10 +1060,10 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
             );
           })()}
 
-          {!loading && !error && rankList.length === 0 && (
+          {!loading && !error && recommendPlaylists.length === 0 && rankList.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-3 py-16 text-neutral-400 dark:text-stone-500">
               <MusicIcon size={32} />
-              <span className="text-sm">暂无榜单数据</span>
+              <span className="text-sm">暂无推荐内容</span>
             </div>
           )}
         </div>
@@ -1201,7 +1221,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
               index={i}
               isPlaying={playingId === t.id}
               onPlay={() => doPlay(t, i)}
-              onOpenArtist={(e) => { e.stopPropagation(); if (t.singerId) openArtistDrawer(t.singerId); }}
+              onOpenArtist={(e) => { e.stopPropagation(); openArtistDrawer(t.singerId || 0, t.artist); }}
               onOpenAlbum={(e) => { e.stopPropagation(); if (t.albumId) openAlbumDrawer(t.albumId); }}
               onPlayMv={(e) => { e.stopPropagation(); void handlePlayMv(t); }}
               onDownload={(e) => { e.stopPropagation(); void handleDownload(t); }}
@@ -1248,7 +1268,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
             }));
             void playTrackList(ktracks, idx, name || '酷狗音乐');
           },
-          onOpenArtist: openArtistDrawer,
+          onOpenArtist: (id) => openArtistDrawer(id, undefined),
           onOpenAlbum: openAlbumDrawer,
           onPlayMv: onPlayMv ? (mv) => { if (mv.url) onPlayMv(mv); } : undefined,
           onDownload: undefined,

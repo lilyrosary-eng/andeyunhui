@@ -97,18 +97,25 @@ function toQs(obj: Record<string, any>): string {
 }
 
 // ============ 封面 URL 提取 ============
-// 汽水封面结构: { uri: "tos-cn-xxx/xxx", urls: ["https://p3-luna.douyinpic.com/img/", ...], template_prefix: "tplv-xxx" }
-// 完整 URL = urls[0] + uri + (template_prefix ? "~" + template_prefix + ".image" : "")
+// 汽水封面结构多样，统一处理：
+// 1. { uri: "tos-cn-xxx/xxx", urls: ["https://p3-luna.douyinpic.com/img/", ...] } → urls[0] + uri
+// 2. { uri: "tos-cn-xxx/xxx" } → 用默认域名拼接
+// 3. { url: "https://..." } → 直接用
+// 4. 字符串 → 直接用
+const DEFAULT_IMG_HOST = 'https://p3-luna.douyinpic.com/img/';
 function extractCover(urlCover: any): string | undefined {
   if (!urlCover) return undefined;
   if (typeof urlCover === 'string') return urlCover;
+  // 尝试 url 字段
+  if (typeof urlCover.url === 'string' && urlCover.url) return urlCover.url;
   const uri = urlCover.uri;
-  const urls = urlCover.urls;
   if (!uri) return undefined;
+  const urls = urlCover.urls;
   if (urls && Array.isArray(urls) && urls.length > 0) {
     return `${urls[0]}${uri}`;
   }
-  return undefined;
+  // 有 uri 但没有 urls，用默认域名拼接
+  return `${DEFAULT_IMG_HOST}${uri}`;
 }
 
 // ============ 请求 helper ============
@@ -167,13 +174,18 @@ function mapTrack(s: any): QishuiTrack {
     : (s.artist || '');
   const album = s.album?.name || s.albumName || '';
   const id = String(s.id ?? s.songId ?? '') || `qishui-trk-${Math.random().toString(36).slice(2, 8)}`;
+  const cover = extractCover(s.url_cover || s.album?.url_cover) || s.cover || s.coverUrl;
+  // 诊断：封面解析失败时打印原始结构
+  if (!cover && s.url_cover) {
+    console.warn('[qishui] 封面解析失败, url_cover=', JSON.stringify(s.url_cover).slice(0, 200));
+  }
   return {
     id,
     name: s.name || s.title || '未知歌曲',
     artist,
     album,
     duration: (s.duration ? s.duration / 1000 : s.dt ? s.dt / 1000 : 0),
-    cover: extractCover(s.url_cover || s.album?.url_cover) || s.cover || s.coverUrl,
+    cover,
     fee: s.fee ?? s.payType ?? 0,
     artistId: s.artists?.[0]?.id ? String(s.artists[0].id) : (s.artistId ? String(s.artistId) : undefined),
     albumId: s.album?.id ? String(s.album.id) : (s.albumId ? String(s.albumId) : undefined),

@@ -1,11 +1,12 @@
 // 汽水音乐登录认证（字节跳动统一登录系统）
 //
-// passport 域名已从 passport.douyin.com（DNS 不存在）改为 www.douyin.com
-// API 路径更新为最新：get_qrcode / check_qrconnect / account/info
+// 方案 A（优先）：passport/web/get_qrcode 二维码登录（www.douyin.com）
+// 方案 B（降级）：Cookie 导入登录
+//
 // 二维码登录流程：
 //   1. POST /passport/web/get_qrcode/ → 获取 qrcode图片URL + token
 //   2. 轮询 GET /passport/web/check_qrconnect/?token=xxx → 等待扫码
-//   3. 扫码成功后返回 session_cookie + user info
+//   3. 扫码成功后返回 session_cookie + redirect_url
 //   4. 后续请求带 cookie 即可
 
 import { qishuiRequest } from './qishuiApi';
@@ -14,6 +15,7 @@ const hostApi: any = (window as any).__HOST_API__ || { invoke: async () => ({}) 
 
 const PASSPORT_HOST = 'https://www.douyin.com';
 const PASSPORT_AID = '1606'; // music.douyin.com web 端 aid
+const UA_BROWSER = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 export interface QishuiQrCode {
   qrcode: string;       // 二维码图片 URL
@@ -38,12 +40,20 @@ export async function qishuiQrCreate(): Promise<QishuiQrCode> {
     referer: 'https://music.douyin.com/',
     origin: 'https://music.douyin.com',
     real_ip: '113.66.232.251',
-    user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-    headers: {},
+    user_agent: UA_BROWSER,
+    headers: {
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Sec-Fetch-Site': 'same-origin',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Dest': 'empty',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
     content_type: 'application/json',
   });
   const parsed = JSON.parse(raw || '{}');
   const body = typeof parsed.body === 'string' ? JSON.parse(parsed.body) : (parsed.body || {});
+  console.log('[qishui] get_qrcode response:', JSON.stringify(body).slice(0, 300));
   if (body.message && body.message !== 'success') {
     const desc = body.data?.description || body.message || 'qrcode create failed';
     if (body.data?.error_code === 4031 || desc.includes('安全风险')) {
@@ -76,8 +86,15 @@ export async function qishuiQrCheck(token: string): Promise<QishuiQrStatus> {
     referer: 'https://music.douyin.com/',
     origin: 'https://music.douyin.com',
     real_ip: '113.66.232.251',
-    user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-    headers: {},
+    user_agent: UA_BROWSER,
+    headers: {
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Sec-Fetch-Site': 'same-origin',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Dest': 'empty',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
   });
   const parsed = JSON.parse(raw || '{}');
   const cookies: string[] = parsed.cookies || [];

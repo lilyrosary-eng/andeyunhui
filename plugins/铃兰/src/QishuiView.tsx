@@ -354,7 +354,9 @@ setQrLoading(false);
     if (!track) return;
     setPlayingId(track.id);
     try {
+      console.log('[qishui] doPlay: trackId=', track.id, 'name=', track.name);
       const resp = await qishuiGetSongUrl(track.id, 320000);
+      console.log('[qishui] getSongUrl: url=', resp.url ? 'OK' : 'EMPTY', 'spadeA=', resp.spadeA ? 'OK' : 'EMPTY', 'br=', resp.br);
       if (!resp.url || !resp.spadeA) {
         setError('该歌曲暂无可播放地址（可能需会员或已下架）');
         setPlayingId(null);
