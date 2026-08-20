@@ -1076,6 +1076,7 @@ fn main() {
             // ========== 汽水音乐 WebAPI 代理：TS 端字节系签名 + Rust 无 CORS 转发 ==========
             andeyunhui_lib::services::qishui_proxy::qishui_http_post,
 andeyunhui_lib::services::qishui_proxy::qishui_download_audio,
+andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 音乐下载：前端取链后由 Rust 落地到本地文件 ==========
             download_file,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========

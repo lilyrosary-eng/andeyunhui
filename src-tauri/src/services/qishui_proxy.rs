@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
+use tauri::Manager;
 
 // ========== 白名单 ==========
 const ALLOWED_QISHUI_HOSTS: &[&str] = &[
@@ -59,6 +60,7 @@ const ALLOWED_QISHUI_PATH_PREFIXES: &[&str] = &[
     "/luna/pc/search",
     "/luna/pc/track_v2",
     "/luna/pc/playlist/detail",
+    "/luna/pc/user/info",
     "/luna/album",
     "/luna/artist",
     // 登录/扫码相关
@@ -187,6 +189,7 @@ fn global_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .no_proxy()
+            .http1_only()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
             .pool_max_idle_per_host(6)
@@ -365,4 +368,37 @@ return Err(format!("Host not in qishui allowlist: {host}"));
         ));
     }
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+/// 保存解密后的汽水音频数据到临时文件，返回可播放的 asset URL 路径。
+/// 替代 blob: URL——Tauri WebView2 对 blob: URL 在 <audio> 中可能返回 500。
+#[tauri::command(rename_all = "snake_case")]
+pub async fn qishui_save_temp_audio(
+    app: tauri::AppHandle,
+    data: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| format!("base64 decode failed: {e}"))?;
+
+    let temp_dir = app.path().app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let audio_dir = temp_dir.join("qishui_audio");
+    std::fs::create_dir_all(&audio_dir)
+        .map_err(|e| format!("create dir failed: {e}"))?;
+
+    let filename = format!("qishui_{}.m4a", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis());
+    let filepath = audio_dir.join(&filename);
+    std::fs::write(&filepath, &bytes)
+        .map_err(|e| format!("write file failed: {e}"))?;
+
+    // 加入 asset scope
+    let _ = app.asset_protocol_scope().allow_file(&filepath);
+
+    // 返回文件路径，前端用 convertFileSrc 转为 asset URL
+    Ok(filepath.to_string_lossy().to_string())
 }

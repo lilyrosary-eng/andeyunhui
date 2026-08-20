@@ -207,6 +207,7 @@ fn global_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .no_proxy()
+            .http1_only()  // 禁用 HTTP/2，部分 CDN 对 H2 请求返回 500
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
             .pool_max_idle_per_host(6)
@@ -243,6 +244,9 @@ async fn proxy_internal(
     } else {
         client.post(url).body(body.to_string())
     };
+
+    // 诊断：打印完整 URL 和关键 header
+    eprintln!("[kugou_proxy] REQ {} {} body_len={}", method, &url[..url.len().min(200)], body.len());
 
     let resp = req
         .headers(headers)

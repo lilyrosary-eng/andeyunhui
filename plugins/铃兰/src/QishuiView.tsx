@@ -102,6 +102,8 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
   const [qrStatus, setQrStatus] = useState('');
   const [qrLoading, setQrLoading] = useState(false);
   const pollRef = useRef<number | null>(null);
+// Cookie 导入登录
+const cookieInputRef = useRef('');
   // 歌手/专辑抽屉
   const [drawer, setDrawer] = useState<SharedDrawerType>({ type: 'none' });
   const [drawerArtist, setDrawerArtist] = useState<SharedArtistData | null>(null);
@@ -247,9 +249,41 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
     } finally {
       setQrLoading(false);
     }
-  }, []);
+}, []);
 
-  // 退出登录
+// Cookie 导入登录
+const handleCookieLogin = useCallback(async () => {
+const cookieStr = cookieInputRef.current.trim();
+if (!cookieStr) {
+setQrStatus('请粘贴 Cookie');
+return;
+}
+setQrLoading(true);
+setQrStatus('正在验证 Cookie…');
+try {
+// 尝试用 cookie 获取用户信息
+const info = await qishuiGetUserInfo(cookieStr);
+if (!info) {
+setQrStatus('Cookie 无效或已过期，请重新获取');
+return;
+}
+const newAuth: QishuiAuth = {
+userid: info.userid,
+name: info.name,
+avatar: info.avatar,
+cookie: cookieStr,
+};
+saveQishuiAuth(newAuth);
+setAuth(newAuth);
+setQrStatus('');
+} catch (e: any) {
+setQrStatus('登录失败：' + (e?.message || e));
+} finally {
+setQrLoading(false);
+}
+}, []);
+
+// 退出登录
   const handleLogout = useCallback(async () => {
     if (auth?.cookie) await qishuiLogout(auth.cookie);
     clearQishuiAuth();
@@ -345,7 +379,28 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
       const buf = new ArrayBuffer(binStr.length);
       const u8 = new Uint8Array(buf);
       for (let i = 0; i < binStr.length; i++) u8[i] = binStr.charCodeAt(i);
-      const objectUrl = await decryptQishuiAudio(buf, resp.spadeA);
+      const decrypted = await decryptQishuiAudio(buf, resp.spadeA);
+      // 将解密后的 Uint8Array 转 base64，交给 Rust 写入临时文件
+      let objectUrl = '';
+      try {
+        // 分块拼接，避免 spread 操作符对大数组的栈溢出
+        let binary = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < decrypted.length; i += chunkSize) {
+          binary += String.fromCharCode(...decrypted.subarray(i, i + chunkSize));
+        }
+        const b64Data = btoa(binary);
+        const filePath: string = await hostApi.invoke('qishui_save_temp_audio', { data: b64Data });
+        // 用 convertFileSrc 将文件路径转为 asset URL（通过宿主 API）
+        objectUrl = hostApi.convertFileSrc
+          ? hostApi.convertFileSrc(filePath.replace(/\\/g, '/'))
+          : `asset://localhost/${encodeURIComponent(filePath)}`;
+        console.log('[qishui] 音频已保存到临时文件:', filePath);
+      } catch (e: any) {
+        console.error('[qishui] 保存临时音频失败，回退到 blob:', e?.message || e);
+        const blob = new Blob([decrypted], { type: 'audio/mp4' });
+        objectUrl = URL.createObjectURL(blob);
+      }
       const quality = track.br ? `${Math.round(track.br / 1000)}k` : '';
       const playable = trackToPlayable({ ...track, url: objectUrl }, objectUrl, quality);
       const playables: PlayableTrack[] = list.map((tr, i) =>
@@ -658,6 +713,26 @@ onOpenAlbum={() => { if (t.albumId) openAlbumDrawer(t.albumId, t.album); }}
                   {qrLoading ? '生成中…' : '立即扫码登录'}
                 </button>
                 <div className="text-xs text-neutral-400 dark:text-stone-500 text-center min-h-[1.2em]">{qrStatus}</div>
+                {/* Cookie 导入登录（二维码被安全检测拦截时的替代方案） */}
+                <details className="w-full mt-2">
+                <summary className="cursor-pointer text-xs text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200 transition-colors">Cookie 导入登录</summary>
+                <div className="mt-2 flex flex-col gap-2">
+                  <textarea
+                    placeholder="粘贴 music.douyin.com 的 Cookie（F12 → Application → Cookies）"
+                    className="w-full h-20 px-3 py-2 text-xs rounded-lg bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-700 dark:text-stone-200 resize-none focus:outline-none focus:ring-1 focus:ring-orange-400"
+                    onChange={(e) => { cookieInputRef.current = e.target.value; }}
+                  />
+                  <button
+                    onClick={handleCookieLogin}
+                    className="btn-press px-3 py-1.5 rounded-lg bg-neutral-200/60 dark:bg-stone-800/60 text-xs text-neutral-700 dark:text-stone-200 hover:bg-neutral-300/60 dark:hover:bg-stone-700/60 transition-colors"
+                  >
+                    用 Cookie 登录
+                  </button>
+                  <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
+                    1. 浏览器打开 music.douyin.com 并登录<br />2. F12 → Application → Cookies<br />3. 复制所有 cookie 键值对（格式：key=value; key=value）
+                  </p>
+                </div>
+              </details>
               </div>
             )}
             <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">

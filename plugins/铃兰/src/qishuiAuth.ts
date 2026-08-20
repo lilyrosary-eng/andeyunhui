@@ -45,7 +45,11 @@ export async function qishuiQrCreate(): Promise<QishuiQrCode> {
   const parsed = JSON.parse(raw || '{}');
   const body = typeof parsed.body === 'string' ? JSON.parse(parsed.body) : (parsed.body || {});
   if (body.message && body.message !== 'success') {
-    throw new Error(body.data?.description || body.message || 'qrcode create failed');
+    const desc = body.data?.description || body.message || 'qrcode create failed';
+    if (body.data?.error_code === 4031 || desc.includes('安全风险')) {
+      throw new Error('抖音安全检测拦截了二维码登录。请使用 Cookie 导入方式登录（展开下方 Cookie 导入登录）。');
+    }
+    throw new Error(desc);
   }
   const data = body.data || {};
   return {

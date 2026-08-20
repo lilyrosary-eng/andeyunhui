@@ -216,11 +216,11 @@ function rebuildMp4(buf: Uint8Array): Uint8Array {
   return out;
 }
 
-// 主解密：输入加密 fMP4 的 ArrayBuffer 与 spade_a 字符串，返回 objectURL
+// 主解密：输入加密 fMP4 的 ArrayBuffer 与 spade_a 字符串，返回解密后的 Uint8Array
 export async function decryptQishuiAudio(
   encrypted: ArrayBuffer,
   spadeA: string
-): Promise<string> {
+): Promise<Uint8Array> {
   const hexKey = decryptSpadeKey(spadeA);
   if (!hexKey || hexKey.length !== 32) {
     throw new Error('无效的 spade_a 密钥');
@@ -329,6 +329,5 @@ export async function decryptQishuiAudio(
     ? String.fromCharCode(clean[4], clean[5], clean[6], clean[7])
     : 'N/A';
   console.log(`[qishui-decrypt] 解密完成: dataLen=${clean.length} ftyp=${ftyp} (expect 'ftyp')`);
-  const blob = new Blob([clean], { type: 'audio/mp4' });
-  return URL.createObjectURL(blob);
+  return clean;
 }

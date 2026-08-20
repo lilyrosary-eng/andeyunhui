@@ -90,6 +90,7 @@ const ALLOWED_COMMANDS = new Set([
   // 汽水音乐 WebAPI 代理（音乐模块）：TS 端字节系签名 + Rust 无 CORS 转发
   'qishui_http_post',
 'qishui_download_audio',
+'qishui_save_temp_audio',
   // 音乐下载：前端取链后由 Rust 落地到本地文件
   'download_file',
   // 保存文件对话框（tauri-plugin-dialog）：下载时选择保存路径。沙箱仅放行 save。
