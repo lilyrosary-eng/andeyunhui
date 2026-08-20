@@ -22,7 +22,7 @@ import {
 // ---- 酷狗 ----
 import {
   getRankList as kugouGetRankList,
-  getRankSongs as kugouGetRankSongs,
+  getTopList as kugouGetRankSongs,
   getSongUrl as kugouGetSongUrl,
   type KugouTrack,
   type KugouAuth,
