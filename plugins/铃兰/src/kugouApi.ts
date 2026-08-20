@@ -656,10 +656,29 @@ async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize 
     console.warn('[kugou] gateway 歌单接口失败，降级 mobilecdn:', gwErr?.message || gwErr);
   }
 
-  // 第二级：mobilecdn 免签名接口，尝试两种 ID 参数
-  const sid = Number(globalCollectionId) || 0;
+  // 先用 wwwapi 查 specialid（global_collection_id → specialid 转换）
+  let specialId = Number(globalCollectionId) || 0;
+  try {
+    const infoBody = await kugouLegacyRequest('/yy/index.php', {
+      r: 'pl/info',
+      global_collection_id: globalCollectionId,
+      page: 1,
+      pagesize: 1,
+      platid: 4,
+      userid: 0,
+      token: '',
+    }, { base: WWWAPI, salt: KUGOU_WEB_SALT });
+    const sid = Number(infoBody?.data?.info?.[0]?.specialid || infoBody?.data?.specialid || infoBody?.specialid || 0);
+    if (sid) {
+      console.log('[kugou] global_collection_id', globalCollectionId, '→ specialid', sid);
+      specialId = sid;
+    }
+  } catch { /* 查不到 specialid，用原值兜底 */ }
+
+  // 第二级：mobilecdn 免签名接口
   for (const params of [
-    { specialid: sid, global_collection_id: globalCollectionId },
+    { specialid: specialId, global_collection_id: globalCollectionId },
+    { specialid: specialId },
     { specialid: globalCollectionId },
     { global_collection_id: globalCollectionId },
   ]) {
@@ -673,7 +692,10 @@ async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize 
       }, { base: MOBILE_HOST });
       const list2: any[] = body2?.data?.info || body2?.data?.songs || body2?.info || [];
       const tracks2 = list2.map(mapTrack).filter((t: KugouTrack) => t.hash);
-      if (tracks2.length) return tracks2;
+      if (tracks2.length) {
+        console.log('[kugou] mobilecdn 歌单歌曲成功:', tracks2.length, '首, params:', JSON.stringify(params));
+        return tracks2;
+      }
     } catch { /* 继续尝试 */ }
   }
 
@@ -681,7 +703,7 @@ async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize 
   try {
     const body3 = await kugouLegacyRequest('/yy/index.php', {
       r: 'pl/getsonglist',
-      specialid: sid || globalCollectionId,
+      specialid: specialId || globalCollectionId,
       page,
       pagesize,
       platid: 4,
@@ -690,8 +712,13 @@ async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize 
     }, { base: WWWAPI, salt: KUGOU_WEB_SALT });
     const list3: any[] = body3?.data?.info || body3?.data?.list || body3?.data?.songs || [];
     const tracks3 = list3.map(mapTrack).filter((t: KugouTrack) => t.hash);
-    if (tracks3.length) return tracks3;
-  } catch { /* 最终降级失败 */ }
+    if (tracks3.length) {
+      console.log('[kugou] wwwapi 歌单歌曲成功:', tracks3.length, '首');
+      return tracks3;
+    }
+  } catch (e: any) {
+    console.warn('[kugou] wwwapi 歌单歌曲也失败:', e?.message || e);
+  }
 
   return [];
 }

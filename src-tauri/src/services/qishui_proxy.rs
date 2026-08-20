@@ -17,6 +17,7 @@ const ALLOWED_QISHUI_HOSTS: &[&str] = &[
     "api3-normal-lq.qishui.com",
     "api.qishui.com",
     "music.douyin.com",
+    "www.douyin.com",     // passport 登录走 www.douyin.com/passport/web/*
     "passport.douyin.com",
     "sso.douyin.com",
     // 音频 CDN 域名（加密流直链）——精确匹配
@@ -68,8 +69,12 @@ const ALLOWED_QISHUI_PATH_PREFIXES: &[&str] = &[
     "/passport/web/qrcode/create",
     "/passport/web/qrcode/check",
     "/passport/web/qrcode/heartbeat",
-    "/passport/web/account/info",
+    "/passport/web/get_qrcode",
+    "/passport/web/check_qrconnect",
+    "/passport/web/expire_qrcode",
     "/passport/web/account/logout",
+    "/passport/web/account/info",
+    "/passport/account/info",
     "/passport/account/_logout",
 ];
 

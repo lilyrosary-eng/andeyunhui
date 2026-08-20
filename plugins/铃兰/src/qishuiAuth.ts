@@ -1,10 +1,10 @@
 // 汽水音乐登录认证（字节跳动统一登录系统）
 //
-// 字节系 passport 域名：passport.douyin.com
-// 汽水 web 端 aid=386088，但 passport 需要正确的 aid（实测 web 端 aid=1606 可用）
+// passport 域名已从 passport.douyin.com（DNS 不存在）改为 www.douyin.com
+// API 路径更新为最新：get_qrcode / check_qrconnect / account/info
 // 二维码登录流程：
-//   1. POST /passport/web/qrcode/create/ → 获取 qrcode图片URL + token
-//   2. 轮询 GET /passport/web/qrcode/check/?token=xxx → 等待扫码
+//   1. POST /passport/web/get_qrcode/ → 获取 qrcode图片URL + token
+//   2. 轮询 GET /passport/web/check_qrconnect/?token=xxx → 等待扫码
 //   3. 扫码成功后返回 session_cookie + user info
 //   4. 后续请求带 cookie 即可
 
@@ -12,7 +12,7 @@ import { qishuiRequest } from './qishuiApi';
 
 const hostApi: any = (window as any).__HOST_API__ || { invoke: async () => ({}) };
 
-const PASSPORT_HOST = 'https://passport.douyin.com';
+const PASSPORT_HOST = 'https://www.douyin.com';
 const PASSPORT_AID = '1606'; // music.douyin.com web 端 aid
 
 export interface QishuiQrCode {
@@ -33,7 +33,7 @@ export interface QishuiAuth {
 export async function qishuiQrCreate(): Promise<QishuiQrCode> {
   const raw: string = await hostApi.invoke('qishui_http_post', {
     method: 'POST',
-    url: `${PASSPORT_HOST}/passport/web/qrcode/create/?aid=${PASSPORT_AID}&app_name=luna&device_platform=web`,
+    url: `${PASSPORT_HOST}/passport/web/get_qrcode/?aid=${PASSPORT_AID}&app_name=luna_music&device_platform=web&passport_sdk_version=4.1.0&language=zh`,
     body: JSON.stringify({}),
     referer: 'https://music.douyin.com/',
     origin: 'https://music.douyin.com',
@@ -67,7 +67,7 @@ export interface QishuiQrStatus {
 export async function qishuiQrCheck(token: string): Promise<QishuiQrStatus> {
   const raw: string = await hostApi.invoke('qishui_http_post', {
     method: 'GET',
-    url: `${PASSPORT_HOST}/passport/web/qrcode/check/?aid=${PASSPORT_AID}&app_name=luna&device_platform=web&token=${encodeURIComponent(token)}`,
+    url: `${PASSPORT_HOST}/passport/web/check_qrconnect/?aid=${PASSPORT_AID}&app_name=luna_music&device_platform=web&token=${encodeURIComponent(token)}&passport_sdk_version=4.1.0&language=zh`,
     body: '',
     referer: 'https://music.douyin.com/',
     origin: 'https://music.douyin.com',
@@ -131,7 +131,7 @@ export async function qishuiLogout(cookie: string): Promise<void> {
   try {
     await hostApi.invoke('qishui_http_post', {
       method: 'GET',
-      url: `${PASSPORT_HOST}/passport/web/account/logout/?aid=${PASSPORT_AID}&app_name=luna&device_platform=web`,
+      url: `${PASSPORT_HOST}/passport/web/account/logout/?aid=${PASSPORT_AID}&app_name=luna_music&device_platform=web`,
       body: '',
       cookie,
       referer: 'https://music.douyin.com/',

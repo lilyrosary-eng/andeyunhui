@@ -324,6 +324,11 @@ export async function decryptQishuiAudio(
 
   // 重建干净 MP4（去掉加密标记）
   const clean = rebuildMp4(buf);
-  const blob = new Blob([clean], { type: 'video/mp4' });
+  // 检查解密后数据的前 4 字节是否像 MP4（ftyp box）
+  const ftyp = clean.length >= 8
+    ? String.fromCharCode(clean[4], clean[5], clean[6], clean[7])
+    : 'N/A';
+  console.log(`[qishui-decrypt] 解密完成: dataLen=${clean.length} ftyp=${ftyp} (expect 'ftyp')`);
+  const blob = new Blob([clean], { type: 'audio/mp4' });
   return URL.createObjectURL(blob);
 }
