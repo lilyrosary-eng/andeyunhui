@@ -713,19 +713,15 @@ export async function getPlaylistBySpecialId(
   return list.map(mapTrack).filter((t: KugouTrack) => t.hash);
 }
 
-// 搜索歌手获取 singerid（mobilecdn 免签名）
+// 搜索歌手获取 singerid（mobilecdn /api/v3/singer/info 免签名）
 export async function searchSingerId(name: string): Promise<number> {
   try {
-    const body = await kugouLegacyRequest('/api/v3/search/singer', {
-      keyword: name,
-      pagesize: 1,
-      page: 1,
-      showtype: 1,
+    const body = await kugouLegacyRequest('/api/v3/singer/info', {
+      singername: name,
     }, { base: MOBILE_HOST });
-    const info = body?.data?.info || body?.data?.lists || body?.info || [];
-    if (info.length > 0) {
-      return Number(info[0].singerid ?? info[0].id ?? 0) || 0;
-    }
+    const sid = Number(body?.data?.singerid ?? body?.singerid ?? 0) || 0;
+    if (sid) console.log('[kugou] 歌手名→ID:', name, '→', sid);
+    return sid;
   } catch { /* ignore */ }
   return 0;
 }

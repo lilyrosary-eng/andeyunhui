@@ -356,11 +356,17 @@ export async function qishuiGetSongUrl(id: string, br = 320000): Promise<QishuiS
       limited_free_param: {},
     },
   });
+  // 诊断：打印完整响应结构
+  console.log('[qishui] media-player response keys:', Object.keys(r || {}).join(','));
   const info = r?.data?.player_infos?.[0] || r?.player_infos?.[0];
+  console.log('[qishui] player_infos[0]:', info ? JSON.stringify(info).slice(0, 400) : 'EMPTY');
   const vmRaw = info?.video_model;
   const vm = typeof vmRaw === 'string' ? JSON.parse(vmRaw) : vmRaw;
+  console.log('[qishui] video_model:', vm ? JSON.stringify(vm).slice(0, 400) : 'EMPTY');
   const v0 = vm?.video_list?.[0];
   const encryptInfo = v0?.encrypt_info || {};
+  console.log('[qishui] video_list[0]:', v0 ? JSON.stringify(v0).slice(0, 300) : 'EMPTY');
+  console.log('[qishui] encrypt_info:', JSON.stringify(encryptInfo).slice(0, 200));
   return {
     url: v0?.main_url || v0?.backup_url || (typeof info?.url_player_info === 'string' ? info.url_player_info : undefined),
     spadeA: encryptInfo?.spade_a || info?.spade_a || info?.spadeA,

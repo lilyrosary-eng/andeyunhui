@@ -49,8 +49,9 @@ const ALLOWED_KUGOU_PATH_PREFIXES: &[&str] = &[
     "/api/v3/category",
     "/yy/index.php",
     "/music/social/api",
-    // m.kugou.com 老式歌单详情 / 播放信息
+    // m.kugou.com 老式歌单详情 / 播放信息 / 推荐歌单列表
     "/plist/list",
+    "/plist/index",
     "/app/i/getSongInfo.php",
     // 扫码登录（网页端 login-user.kugou.com/v2/*，明文返回 userid+token，无需解密 secu_params）
     "/v2/qrcode",
