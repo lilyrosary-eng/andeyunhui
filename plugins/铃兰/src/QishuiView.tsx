@@ -283,14 +283,14 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
     }
   }, []);
 
-  // 打开专辑详情抽屉
-  const openAlbumDrawer = useCallback(async (id: string | number) => {
+  // 打开专辑详情抽屉（albumName 可选，用于搜索降级）
+  const openAlbumDrawer = useCallback(async (id: string | number, albumName?: string) => {
     const aid = String(id);
     setDrawer({ type: 'album', id: aid });
     setDrawerAlbum(null);
     setDrawerLoading(true);
     try {
-      const detail = await qishuiGetAlbumDetail(aid);
+      const detail = await qishuiGetAlbumDetail(aid, albumName);
       if (detail) {
         setDrawerAlbum({
           id: detail.id,
@@ -497,7 +497,7 @@ index={i}
 isPlaying={playingId === t.id}
 onPlay={() => handlePlayTrack(t)}
 onOpenArtist={() => { if (t.artistId) openArtistDrawer(t.artistId); }}
-onOpenAlbum={() => { if (t.albumId) openAlbumDrawer(t.albumId); }}
+onOpenAlbum={() => { if (t.albumId) openAlbumDrawer(t.albumId, t.album); }}
 />
                     ))}
                   </div>
@@ -543,7 +543,7 @@ index={i}
 isPlaying={playingId === t.id}
 onPlay={() => handlePlayTrack(t)}
 onOpenArtist={() => { if (t.artistId) openArtistDrawer(t.artistId); }}
-onOpenAlbum={() => { if (t.albumId) openAlbumDrawer(t.albumId); }}
+onOpenAlbum={() => { if (t.albumId) openAlbumDrawer(t.albumId, t.album); }}
 />
                   ))}
                 </div>

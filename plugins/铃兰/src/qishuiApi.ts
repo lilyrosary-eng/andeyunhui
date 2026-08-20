@@ -407,27 +407,68 @@ export interface QishuiAlbumDetail {
   tracks: QishuiTrack[];
 }
 
-export async function qishuiGetAlbumDetail(albumId: string): Promise<QishuiAlbumDetail | null> {
-  const r = await qishuiRequest('/album/detail', {
+export async function qishuiGetAlbumDetail(albumId: string, albumName?: string): Promise<QishuiAlbumDetail | null> {
+  // 尝试路径 1：原 /album/detail（以防后续上线）
+  try {
+    const r = await qishuiRequest('/album/detail', {
+      method: 'POST',
+      body: { album_id: albumId, cursor: '', count: 100 },
+    });
+    if (r && r.data) {
+      const a = r?.data?.album || r?.album || {};
+      if (a.id || a.name) {
+        const songs: any[] = r?.data?.media_resources || r?.media_resources || [];
+        const trackList = songs
+          .map((res: any) => res.entity?.track_wrapper?.track || res.entity?.track || res.track)
+          .filter(Boolean)
+          .map(mapTrack)
+          .filter((t: QishuiTrack) => t.id);
+        const artist = a.artists?.[0] || a.artist;
+        return {
+          id: String(a.id ?? albumId),
+          name: a.name || a.title || '未知专辑',
+          cover: extractCover(a.url_cover),
+          artistName: artist?.name || '未知歌手',
+          artistId: artist?.id ? String(artist.id) : undefined,
+          description: a.description || a.intro,
+          tracks: trackList,
+        };
+      }
+    }
+  } catch { /* 404 时降级 */ }
+
+  // 降级方案：汽水 API 无独立专辑详情端点，用专辑名搜索曲目
+  const searchName = albumName || '';
+  if (!searchName) return null;
+  const sr = await qishuiRequest('/search/track', {
     method: 'POST',
-    body: { album_id: albumId, cursor: '', count: 100 },
+    body: { keyword: searchName, search_id: '', cursor: '0', count: 30 },
   });
-  const a = r?.data?.album || r?.album || {};
-  if (!a.id && !a.name) return null;
-  const songs: any[] = r?.data?.media_resources || r?.media_resources || [];
-  const trackList = songs
-    .map((res: any) => res.entity?.track_wrapper?.track || res.entity?.track || res.track)
+  const rawTracks: any[] = sr?.data?.tracks || sr?.data?.result_groups?.flatMap((g: any) => g?.data || []) || sr?.data?.list || [];
+  const allTracks = rawTracks
+    .map((item: any) => item.entity?.track_wrapper?.track || item.entity?.track || item.track || item)
     .filter(Boolean)
     .map(mapTrack)
     .filter((t: QishuiTrack) => t.id);
-  const artist = a.artists?.[0] || a.artist;
+  // 按 albumId 筛选（如果 track 带了 albumId）
+  const filtered = allTracks.filter((t) => t.albumId === albumId);
+  const tracks = filtered.length > 0 ? filtered : allTracks;
+  if (!tracks.length) return null;
+  // 从第一条提取专辑信息
+  const first = rawTracks.find((item: any) => {
+    const tr = item.entity?.track_wrapper?.track || item.entity?.track || item.track || item;
+    return tr?.album?.id === albumId || tr?.albumId === albumId;
+  });
+  const tr = first?.entity?.track_wrapper?.track || first?.entity?.track || first?.track || first || {};
+  const album = tr.album || {};
+  const artist = tr.artists?.[0] || tr.artistInfos?.[0];
   return {
-    id: String(a.id ?? albumId),
-    name: a.name || a.title || '未知专辑',
-    cover: extractCover(a.url_cover),
+    id: albumId,
+    name: album.name || searchName,
+    cover: extractCover(album.url_cover),
     artistName: artist?.name || '未知歌手',
     artistId: artist?.id ? String(artist.id) : undefined,
-    description: a.description || a.intro,
-    tracks: trackList,
+    description: '',
+    tracks,
   };
 }

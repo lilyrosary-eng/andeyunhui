@@ -30,6 +30,8 @@ import {
   getEverydayRecommend,
   getRankList,
   getMvUrl,
+  getArtistDetail,
+  getAlbumDetail,
   qualityLabelFromBr,
 } from './kugouApi';
 import {
@@ -44,6 +46,7 @@ import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
 import { MusicHeader } from './MusicHeader';
 import { PlaylistDetailHeader } from './_shared/OnlineMusicTemplates';
 import { TrackRow, type TrackBadge } from './_shared/TrackRow';
+import { DetailDrawer, type SharedDrawerType, type SharedArtistData, type SharedAlbumData } from './_shared/DetailDrawer';
 
 type KugouTab = 'home' | 'roam' | 'search' | 'mine';
 
@@ -447,6 +450,11 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const pageRef = useRef(1);
+  // 歌手/专辑详情抽屉
+  const [drawer, setDrawer] = useState<SharedDrawerType>({ type: 'none' });
+  const [drawerArtist, setDrawerArtist] = useState<SharedArtistData | null>(null);
+  const [drawerAlbum, setDrawerAlbum] = useState<SharedAlbumData | null>(null);
+  const [drawerLoading, setDrawerLoading] = useState(false);
 
   // 统一切 tab：内部状态与父级 kugouTab 保持同步。
   const changeTab = (next: KugouTab) => {
@@ -571,6 +579,15 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     }
   }
 
+  // Hero 榜单曲目加载完后，如果推荐列表仍空（getEverydayRecommend 失败），
+  // 用 heroTracks 填充推荐列表，保证首页有歌曲流。
+  React.useEffect(() => {
+    if (homeHeroTracks.length > 0 && recommendTracks.length === 0) {
+      setRecommendTracks(homeHeroTracks.slice(0, 20));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homeHeroTracks]);
+
   // 进入某个榜单详情
   function openRank(rankId: number) {
     loadRank(rankId);
@@ -600,13 +617,34 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     }
   }
 
-  // 个性化推荐：每日推荐歌曲（登录更精准、游客也可用），实测经 gateway 聚合层 x-router 路由可用。
+  // 个性化推荐：每日推荐歌曲（登录更精准、游客也可用），失败时降级到榜单热门歌曲。
   async function loadRecommend() {
     try {
       const list = await getEverydayRecommend(kugouAuth, 1, 20);
-      if (list.length) setRecommendTracks(list);
+      if (list.length) {
+        setRecommendTracks(list);
+        return;
+      }
+      // 空列表降级
+      throw new Error('empty list');
     } catch (e: any) {
-      console.warn('[Kugou] 个性化推荐失败，回落榜单:', e);
+      console.warn('[Kugou] 个性化推荐失败，降级榜单热门:', e?.message || e);
+      // 降级：取第一个榜单（TOP500）的前 20 首作为推荐
+      try {
+        if (rankList.length) {
+          const fallback = await getTopList(rankList[0].id, 1, 20);
+          if (fallback.length) {
+            setRecommendTracks(fallback);
+            return;
+          }
+        }
+        // rankList 还没加载，用预加载的 homeHeroTracks
+        if (homeHeroTracks.length) {
+          setRecommendTracks(homeHeroTracks.slice(0, 20));
+        }
+      } catch (e2: any) {
+        console.warn('[Kugou] 榜单降级也失败:', e2?.message || e2);
+      }
     }
   }
 
@@ -727,15 +765,59 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     return !!favoriteIds?.has(`kugou-${t.id}`);
   }
 
-  // 点击歌手/专辑：切到搜索页并按关键词搜索（酷狗暂无详情抽屉，先对齐网易云的“可点文字”交互）
-  const searchBy = (q: string) => {
-    const s = String(q || '').trim();
-    if (!s) return;
-    setKeyword(s);
-    setActiveRankId(null);
-    changeTab('search');
-    void doSearch(s);
-  };
+  // 打开歌手详情抽屉
+  const openArtistDrawer = React.useCallback(async (id: number | string) => {
+    const sid = String(id);
+    setDrawer({ type: 'artist', id: sid });
+    setDrawerArtist(null);
+    setDrawerLoading(true);
+    try {
+      const detail = await getArtistDetail(sid);
+      if (detail) {
+        setDrawerArtist({
+          id: detail.id,
+          name: detail.name,
+          cover: detail.cover,
+          description: detail.description,
+          musicSize: detail.musicSize,
+          albumSize: detail.albumSize,
+          mvSize: detail.mvSize,
+          hotSongs: detail.hotSongs.map((t) => trackToPlayable(t, '')),
+          albums: detail.albums.map((a) => ({ id: a.id, name: a.name, cover: a.cover || '' })),
+        });
+      }
+    } catch (e) {
+      console.error('[kugou] artist detail failed', e);
+    } finally {
+      setDrawerLoading(false);
+    }
+  }, []);
+
+  // 打开专辑详情抽屉
+  const openAlbumDrawer = React.useCallback(async (id: number | string) => {
+    const aid = String(id);
+    setDrawer({ type: 'album', id: aid });
+    setDrawerAlbum(null);
+    setDrawerLoading(true);
+    try {
+      const detail = await getAlbumDetail(aid);
+      if (detail) {
+        setDrawerAlbum({
+          id: detail.id,
+          name: detail.name,
+          cover: detail.cover || '',
+          artistName: detail.artistName,
+          artistId: detail.artistId,
+          description: detail.description,
+          tracks: detail.tracks.map((t) => trackToPlayable(t, '')),
+        });
+      }
+    } catch (e) {
+      console.error('[kugou] album detail failed', e);
+    } finally {
+      setDrawerLoading(false);
+    }
+  }, []);
 
   // 播放 MV：解析直链后交给父组件跳转玉兰
   const handlePlayMv = async (t: KugouTrack) => {
@@ -923,20 +1005,69 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
         </div>
       )}
 
-      {/* 首页热榜 */}
+      {/* 首页：个性化推荐歌曲 + Hero */}
       {tab === 'home' && activeRankId === null && !playlistMode && (
         <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
-          {/* 个性化推荐：Hero 大卡片 + 横向滚动歌单 */}
+          {/* 个性化推荐歌曲流（每日推荐 / 榜单歌曲降级） */}
+          {recommendTracks.length > 0 && (
+            <section className="mt-4 mb-8">
+              <div className="flex items-center gap-2 mb-4">
+                <Sparkles size={18} className="text-orange-500" />
+                <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">每日推荐</h3>
+                <span className="text-xs text-neutral-400 dark:text-stone-500">根据你的口味个性化推荐</span>
+                <button
+                  onClick={() => void playTrackList(recommendTracks, 0, '每日推荐')}
+                  className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-blue-500/90 hover:bg-blue-500 text-white text-xs font-medium ml-auto"
+                >
+                  <PlayIcon size={12} />
+                  播放全部
+                </button>
+              </div>
+              <div className="space-y-1">
+                {recommendTracks.slice(0, 10).map((t, i) => (
+                  <div
+                    key={t.id + i}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => void playTrackList(recommendTracks, i, '每日推荐')}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        void playTrackList(recommendTracks, i, '每日推荐');
+                      }
+                    }}
+                    className="group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 active:bg-neutral-300/50 dark:active:bg-stone-700/50 transition-colors text-left cursor-pointer"
+                  >
+                    <div className="w-10 h-10 rounded-md overflow-hidden bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center shrink-0">
+                      {t.cover ? (
+                        <img src={t.cover} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <MusicIcon size={16} className="text-neutral-400 dark:text-stone-500" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</div>
+                      <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">
+                        {t.artist}{t.album ? ` · ${t.album}` : ''}
+                      </div>
+                    </div>
+                    <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Hero 大卡片 + 横向滚动歌单 */}
           {rankList.length > 0 && (() => {
             const rec = rankList;
             const openRec = (pl: KugouPlaylistCard) =>
               openUserPlaylist({ id: pl.id, gid: pl.gid, name: pl.name, cover: pl.cover });
             return (
-              <section className="mt-4 mb-8">
+              <section className="mb-8">
                 <div className="flex items-center gap-2 mb-4">
                   <Sparkles size={18} className="text-orange-500" />
-                  <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">为你推荐</h3>
-                  <span className="text-xs text-neutral-400 dark:text-stone-500">个性化歌单推荐</span>
+                  <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">热门歌单</h3>
                 </div>
                 <HeroCard
                   rank={rec[0]}
@@ -958,7 +1089,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
             );
           })()}
 
-          {!loading && !error && rankList.length === 0 && (
+          {!loading && !error && rankList.length === 0 && recommendTracks.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-3 py-16 text-neutral-400 dark:text-stone-500">
               <MusicIcon size={32} />
               <span className="text-sm">暂无榜单数据</span>
@@ -1119,8 +1250,8 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
               index={i}
               isPlaying={playingId === t.id}
               onPlay={() => doPlay(t, i)}
-              onOpenArtist={(e) => { e.stopPropagation(); searchBy(t.artist); }}
-              onOpenAlbum={(e) => { e.stopPropagation(); searchBy(t.album); }}
+              onOpenArtist={(e) => { e.stopPropagation(); if (t.singerId) openArtistDrawer(t.singerId); }}
+              onOpenAlbum={(e) => { e.stopPropagation(); if (t.albumId) openAlbumDrawer(t.albumId); }}
               onPlayMv={(e) => { e.stopPropagation(); void handlePlayMv(t); }}
               onDownload={(e) => { e.stopPropagation(); void handleDownload(t); }}
               onLike={(e) => { e.stopPropagation(); onToggleFavorite?.(trackToPlayable(t, '', '')); }}
@@ -1147,6 +1278,37 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
           )}
         </div>
       )}
+
+      {/* 歌手/专辑详情抽屉 */}
+      <DetailDrawer
+        drawer={drawer}
+        onClose={() => { setDrawer({ type: 'none' }); setDrawerArtist(null); setDrawerAlbum(null); }}
+        callbacks={{
+          onPlayTracks: (trks, idx, name) => {
+            // 将 PlayableTrack[] 转回 KugouTrack[] 进行播放
+            const ktracks: KugouTrack[] = trks.map((t) => ({
+              id: t.id.replace('kugou-', ''),
+              name: t.title,
+              artist: t.artist,
+              album: t.album,
+              duration: (t.durationSecs || 0) * 1000,
+              cover: t.coverPath,
+              hash: t.id.replace('kugou-', ''),
+            }));
+            void playTrackList(ktracks, idx, name || '酷狗音乐');
+          },
+          onOpenArtist: openArtistDrawer,
+          onOpenAlbum: openAlbumDrawer,
+          onPlayMv: onPlayMv ? (mv) => { if (mv.url) onPlayMv(mv); } : undefined,
+          onDownload: undefined,
+        }}
+        artist={drawerArtist}
+        album={drawerAlbum}
+        isLoading={drawerLoading}
+        accentColor="#00aaff"
+        loggedIn={!!kugouAuth}
+        likedTracks={favoriteIds}
+      />
     </div>
   );
 });

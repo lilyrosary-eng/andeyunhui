@@ -632,22 +632,40 @@ export async function getMvUrl(mvHash: string): Promise<string> {
   throw new Error('MV 响应中没有可用播放地址');
 }
 
-// 获取歌单歌曲列表（当前 /pubsongs/v2/get_other_list_file_nofilt）
+// 获取歌单歌曲列表（gateway 签名接口，500 时降级 mobilecdn）
 async function getPlaylistTracks(globalCollectionId: string, page = 1, pagesize = 30): Promise<KugouTrack[]> {
-  const body = await kugouRequest('/pubsongs/v2/get_other_list_file_nofilt', {
-    area_code: 1,
-    begin_idx: (page - 1) * pagesize,
-    plat: 1,
-    type: 1,
-    mode: 1,
-    personal_switch: 1,
-    extend_fields: 'abtags,hot_cmt,popularization',
-    pagesize,
-    global_collection_id: globalCollectionId,
-  });
-  assertKugouOk(body, 'get_other_list_file_nofilt');
-  const list: any[] = body?.songs || body?.data?.songs || body?.data?.info || [];
-  return list.map(mapTrack).filter((t: KugouTrack) => t.hash);
+  try {
+    const body = await kugouRequest('/pubsongs/v2/get_other_list_file_nofilt', {
+      area_code: 1,
+      begin_idx: (page - 1) * pagesize,
+      plat: 1,
+      type: 1,
+      mode: 1,
+      personal_switch: 1,
+      extend_fields: 'abtags,hot_cmt,popularization',
+      pagesize,
+      global_collection_id: globalCollectionId,
+    });
+    assertKugouOk(body, 'get_other_list_file_nofilt');
+    const list: any[] = body?.songs || body?.data?.songs || body?.data?.info || [];
+    const tracks = list.map(mapTrack).filter((t: KugouTrack) => t.hash);
+    if (tracks.length) return tracks;
+    // 列表为空也降级
+    throw new Error('gateway returned empty list');
+  } catch (gwErr: any) {
+    // 降级：mobilecdn 免签名接口（/api/v3/special/song）
+    console.warn('[kugou] gateway 歌单接口失败，降级 mobilecdn:', gwErr?.message || gwErr);
+    const body2 = await kugouLegacyRequest('/api/v3/special/song', {
+      specialid: Number(globalCollectionId) || 0,
+      global_collection_id: globalCollectionId,
+      plat: 0,
+      version: 8352,
+      page,
+      pagesize,
+    }, { base: MOBILE_HOST });
+    const list2: any[] = body2?.data?.info || body2?.data?.songs || body2?.info || [];
+    return list2.map(mapTrack).filter((t: KugouTrack) => t.hash);
+  }
 }
 
 // 对外歌单歌曲列表（兼容旧签名：specialId 作为 global_collection_id 传入）
@@ -902,6 +920,88 @@ if (t.sqHash) {
 badges.push({ label: 'SQ', kind: 'lossless' });
 }
 return badges;
+}
+
+// ============ 歌手 / 专辑详情（DetailDrawer 接入用） ============
+
+export interface KugouArtistDetail {
+  id: string;
+  name: string;
+  cover?: string;
+  description?: string;
+  musicSize?: number;
+  albumSize?: number;
+  mvSize?: number;
+  hotSongs: KugouTrack[];
+  albums: { id: string; name: string; cover?: string }[];
+}
+
+export async function getArtistDetail(singerId: number | string): Promise<KugouArtistDetail | null> {
+  const sid = Number(singerId);
+  if (!sid) return null;
+  // 歌手基本信息
+  const infoBody = await kugouLegacyRequest('/api/v3/singer/info', { singerid: sid }, { base: MOBILE_HOST });
+  const info = infoBody?.data || {};
+  // 歌手热门歌曲
+  const songBody = await kugouLegacyRequest('/api/v3/singer/song', {
+    singerid: sid, page: 1, pagesize: 30,
+  }, { base: MOBILE_HOST });
+  const songList: any[] = songBody?.data?.info || [];
+  const hotSongs = songList.map(mapTrack).filter((t: KugouTrack) => t.hash);
+  // 歌手专辑列表
+  const albumBody = await kugouLegacyRequest('/api/v3/singer/album', {
+    singerid: sid, page: 1, pagesize: 30,
+  }, { base: MOBILE_HOST });
+  const albumList: any[] = albumBody?.data?.info || [];
+  const albums = albumList.map((a: any) => ({
+    id: String(a.albumid ?? a.album_id ?? ''),
+    name: a.albumname ?? a.album_name ?? '未知专辑',
+    cover: kugouImg(a.imgurl || a.cover || '', 240),
+  }));
+  return {
+    id: String(sid),
+    name: info.singername || '未知歌手',
+    cover: kugouImg(info.imgurl || '', 240),
+    description: info.profile || info.intro || '',
+    musicSize: Number(info.songcount || 0),
+    albumSize: Number(info.albumcount || albumList.length || 0),
+    mvSize: Number(info.mvcount || 0),
+    hotSongs,
+    albums,
+  };
+}
+
+export interface KugouAlbumDetail {
+  id: string;
+  name: string;
+  cover?: string;
+  artistName: string;
+  artistId?: string;
+  description?: string;
+  tracks: KugouTrack[];
+}
+
+export async function getAlbumDetail(albumId: number | string): Promise<KugouAlbumDetail | null> {
+  const aid = Number(albumId);
+  if (!aid) return null;
+  // 专辑信息
+  const infoBody = await kugouLegacyRequest('/api/v3/album/info', { albumid: aid }, { base: MOBILE_HOST });
+  const info = infoBody?.data || {};
+  // 专辑歌曲
+  const songBody = await kugouLegacyRequest('/api/v3/album/song', {
+    albumid: aid, page: 1, pagesize: 100,
+  }, { base: MOBILE_HOST });
+  const songList: any[] = songBody?.data?.info || [];
+  const tracks = songList.map(mapTrack).filter((t: KugouTrack) => t.hash);
+  return {
+    id: String(aid),
+    name: info.albumname || info.album_name || '未知专辑',
+    cover: kugouImg(info.imgurl || info.cover || '', 240),
+    artistName: info.singername || info.singer_name || '未知歌手',
+    artistId: info.singerid ? String(info.singerid) : undefined,
+    description: info.intro || info.description || '',
+    tracks,
+  };
 }
 
 // 重新导出一个便捷对象（与 netease 模块的导出名对齐）

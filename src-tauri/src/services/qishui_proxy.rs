@@ -19,7 +19,7 @@ const ALLOWED_QISHUI_HOSTS: &[&str] = &[
     "music.douyin.com",
     "passport.douyin.com",
     "sso.douyin.com",
-    // 音频 CDN 域名（加密流直链）
+    // 音频 CDN 域名（加密流直链）——精确匹配
     "p3-luna.douyinpic.com",
     "p6-luna.douyinpic.com",
     "p9-luna.douyinpic.com",
@@ -33,6 +33,16 @@ const ALLOWED_QISHUI_HOSTS: &[&str] = &[
     "v3-lq.douyinpic.com",
     "v6-lq.douyinpic.com",
     "v9-lq.douyinpic.com",
+];
+
+// 后缀匹配白名单：CDN 域名动态子域名（如 v95-se-zjwztc-luna.douyinvod.com）
+// 这些域名的子域名前缀不固定，只能按后缀放行。
+const ALLOWED_QISHUI_HOST_SUFFIXES: &[&str] = &[
+    ".douyinvod.com",    // 汽水音频加密流 CDN（动态子域名）
+    ".douyinpic.com",    // 图片/封面 CDN
+    ".byteimg.com",      // 字节系图片 CDN
+    ".bytednsdoc.com",   // 字节系静态资源
+    ".bytecdntp.com",    // 字节系 CDN
 ];
 
 // 汽水真实接口路径（按 api3-lq.qishui.com 移动端网关抓包 + 开源实现修正）。
@@ -81,7 +91,7 @@ fn validate_request(method: &str, url: &str) -> Result<String, String> {
         return Err(format!("Method not allowed by qishui proxy: {method}"));
     }
     let host = host_of(url).ok_or_else(|| "Cannot parse host from url".to_string())?;
-    if !ALLOWED_QISHUI_HOSTS.iter().any(|h| h == &host) {
+    if !is_host_allowed(&host) {
         return Err(format!("Host not in qishui allowlist: {host}"));
     }
     let path = url
@@ -266,20 +276,28 @@ pub async fn qishui_http_post(
     Ok(serde_json::to_string(&out).unwrap_or_default())
 }
 
+/// 判断域名是否在白名单中：精确匹配 + 后缀匹配
+fn is_host_allowed(host: &str) -> bool {
+    if ALLOWED_QISHUI_HOSTS.iter().any(|h| h == &host) {
+        return true;
+    }
+    ALLOWED_QISHUI_HOST_SUFFIXES.iter().any(|s| host.ends_with(s))
+}
+
 /// 下载汽水音乐加密音频流（二进制），返回 base64 编码。
 /// 前端收到后解码为 ArrayBuffer 交给 qishuiDecrypt 解密。
 #[tauri::command(rename_all = "snake_case")]
 pub async fn qishui_download_audio(
-    url: String,
-    user_agent: Option<String>,
-    referer: Option<String>,
+url: String,
+user_agent: Option<String>,
+referer: Option<String>,
 ) -> Result<String, String> {
-    use base64::Engine;
-    // 域名白名单校验
-    let host = host_of(&url).ok_or("Cannot parse host from url")?;
-    if !ALLOWED_QISHUI_HOSTS.iter().any(|h| h == &host) {
-        return Err(format!("Host not in qishui allowlist: {host}"));
-    }
+use base64::Engine;
+// 域名白名单校验（精确 + 后缀匹配）
+let host = host_of(&url).ok_or("Cannot parse host from url")?;
+if !is_host_allowed(&host) {
+return Err(format!("Host not in qishui allowlist: {host}"));
+}
     let client = global_client();
     let ua = user_agent
         .as_deref()
