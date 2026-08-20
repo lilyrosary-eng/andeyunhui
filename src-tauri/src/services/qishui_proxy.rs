@@ -17,6 +17,8 @@ const ALLOWED_QISHUI_HOSTS: &[&str] = &[
     "api3-normal-lq.qishui.com",
     "api.qishui.com",
     "music.douyin.com",
+    "passport.douyin.com",
+    "sso.douyin.com",
     // 音频 CDN 域名（加密流直链）
     "p3-luna.douyinpic.com",
     "p6-luna.douyinpic.com",
@@ -48,6 +50,17 @@ const ALLOWED_QISHUI_PATH_PREFIXES: &[&str] = &[
     "/luna/pc/playlist/detail",
     "/luna/album",
     "/luna/artist",
+    // 登录/扫码相关
+    "/passport/qrcode/create",
+    "/passport/qrcode/check",
+    "/passport/qrcode/heartbeat",
+    "/passport/user_info",
+    "/passport/web/qrcode/create",
+    "/passport/web/qrcode/check",
+    "/passport/web/qrcode/heartbeat",
+    "/passport/web/account/info",
+    "/passport/web/account/logout",
+    "/passport/account/_logout",
 ];
 
 const ALLOWED_QISHUI_METHODS: &[&str] = &["POST", "GET"];
@@ -269,10 +282,11 @@ pub async fn qishui_download_audio(
     }
     let client = global_client();
     let ua = user_agent
+        .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or("Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36 com.luna.music/100197030");
     let mut headers = reqwest::header::HeaderMap::new();
-    if let Ok(v) = reqwest::header::HeaderValue::from_str(ua) {
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&ua) {
         headers.insert(reqwest::header::USER_AGENT, v);
     }
     headers.insert(reqwest::header::ACCEPT, reqwest::header::HeaderValue::from_static("*/*"));

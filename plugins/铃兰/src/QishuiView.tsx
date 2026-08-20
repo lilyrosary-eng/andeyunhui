@@ -16,6 +16,16 @@ import {
   type QishuiPlaylistCard,
 } from './qishuiApi';
 import { decryptQishuiAudio } from './qishuiDecrypt';
+import {
+  qishuiQrCreate,
+  qishuiQrCheck,
+  qishuiGetUserInfo,
+  qishuiLogout,
+  loadQishuiAuth,
+  saveQishuiAuth,
+  clearQishuiAuth,
+  type QishuiAuth,
+} from './qishuiAuth';
 import { MusicHeader } from './MusicHeader';
 import {
   PlaylistDetailHeader,
@@ -83,6 +93,12 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
   // 歌单详情
   const [activePlaylist, setActivePlaylist] = useState<{ id: string; name: string; cover?: string } | null>(null);
   const [playlistInfo, setPlaylistInfo] = useState<{ name: string; cover?: string; trackCount: number } | null>(null);
+  // 登录态
+  const [auth, setAuth] = useState<QishuiAuth | null>(() => loadQishuiAuth());
+  const [qrImg, setQrImg] = useState('');
+  const [qrStatus, setQrStatus] = useState('');
+  const [qrLoading, setQrLoading] = useState(false);
+  const pollRef = useRef<number | null>(null);
 
   useEffect(() => { setTab(initialTab); }, [initialTab]);
 
@@ -175,6 +191,70 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
     },
   }), []);
 
+  // 二维码登录
+  const startQrLogin = useCallback(async () => {
+    setQrLoading(true);
+    setQrImg('');
+    setQrStatus('正在生成二维码…');
+    try {
+      const { qrcode, token } = await qishuiQrCreate();
+      if (!qrcode || !token) {
+        setQrStatus('二维码生成失败，请稍后重试');
+        return;
+      }
+      setQrImg(qrcode);
+      setQrStatus('请用抖音/汽水音乐 App 扫码登录');
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      pollRef.current = window.setInterval(async () => {
+        const st = await qishuiQrCheck(token);
+        if (st.status === 'scanned') {
+          setQrStatus('已扫描，请在手机上确认登录');
+        } else if (st.status === 'confirmed' && st.cookie) {
+          if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+          setQrImg('');
+          setQrStatus('登录成功！正在获取用户信息…');
+          const newAuth: QishuiAuth = {
+            userid: st.userid || '',
+            name: st.name || '汽水用户',
+            avatar: st.avatar,
+            cookie: st.cookie,
+          };
+          // 尝试拉取用户信息
+          const info = await qishuiGetUserInfo(st.cookie);
+          if (info) {
+            newAuth.name = info.name;
+            newAuth.avatar = info.avatar;
+          }
+          saveQishuiAuth(newAuth);
+          setAuth(newAuth);
+          setQrStatus('');
+        } else if (st.status === 'expired') {
+          if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+          setQrStatus('二维码已过期，请重新点击登录');
+          setQrImg('');
+        }
+      }, 2000);
+    } catch (e: any) {
+      setQrStatus(`登录失败：${e?.message || e}`);
+    } finally {
+      setQrLoading(false);
+    }
+  }, []);
+
+  // 退出登录
+  const handleLogout = useCallback(async () => {
+    if (auth?.cookie) await qishuiLogout(auth.cookie);
+    clearQishuiAuth();
+    setAuth(null);
+    setQrStatus('');
+    setQrImg('');
+  }, [auth]);
+
+  // 清理轮询
+  useEffect(() => {
+    return () => { if (pollRef.current) window.clearInterval(pollRef.current); };
+  }, []);
+
   // 播放：取加密地址 + 解密 → objectURL → 回传播放器
   const doPlay = useCallback(async (list: QishuiTrack[], startIndex: number, sourceName: string) => {
     const track = list[startIndex];
@@ -256,7 +336,7 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
         onUserClick={() => setTab('about')}
         onCloudClick={onBack}
         cloudTitle="音乐模块"
-        user={{ loggedIn: false }}
+        user={auth ? { loggedIn: true, name: auth.name, avatarUrl: auth.avatar, initial: auth.name.charAt(0) } : { loggedIn: false }}
       />
 
       {/* 主内容区 */}
@@ -455,36 +535,66 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
           </section>
         )}
 
-        {/* 关于 */}
+        {/* 关于 / 登录 */}
         {tab === 'about' && (
           <div className="max-w-md mx-auto flex flex-col gap-5 py-8">
-            <div className="flex flex-col items-center gap-3 p-5 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
-              <div className="w-20 h-20 rounded-2xl flex items-center justify-center text-white shadow-lg" style={{ background: ACCENT }}>
-                <Music2 size={36} />
-              </div>
-              <div className="text-center">
-                <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100">汽水音乐</h2>
-                <p className="text-xs text-neutral-500 dark:text-stone-400 mt-1">字节跳动旗下音乐平台</p>
-              </div>
-            </div>
-            <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
-              <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 mb-2">当前状态</h3>
-              <div className="text-xs text-neutral-500 dark:text-stone-400 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span>登录状态</span>
-                  <span>游客模式（无需登录）</span>
+            {auth ? (
+              // 已登录：显示用户信息
+              <div className="flex flex-col items-center gap-3 p-5 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                <div className="w-20 h-20 rounded-full overflow-hidden bg-neutral-200 dark:bg-stone-700 flex items-center justify-center text-white shadow-lg" style={{ background: ACCENT }}>
+                  {auth.avatar ? (
+                    <img src={auth.avatar} alt={auth.name} className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-2xl font-bold">{auth.name.charAt(0)}</span>
+                  )}
                 </div>
-                <div className="flex items-center justify-between">
-                  <span>可用功能</span>
-                  <span>推荐 / 榜单 / 搜索 / 播放</span>
+                <div className="text-center">
+                  <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100">{auth.name}</h2>
+                  <p className="text-xs text-neutral-500 dark:text-stone-400 mt-1">汽水音乐用户</p>
                 </div>
+                <button
+                  onClick={handleLogout}
+                  className="btn-press px-4 py-1.5 rounded-lg bg-neutral-200/60 dark:bg-stone-800/60 text-sm text-neutral-700 dark:text-stone-200 hover:bg-neutral-300/60 dark:hover:bg-stone-700/60 transition-colors"
+                >
+                  退出登录
+                </button>
               </div>
-            </div>
+            ) : qrImg ? (
+              // 二维码已生成
+              <div className="max-w-sm mx-auto flex flex-col items-center gap-4 p-6 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100">扫码登录汽水音乐</h2>
+                <img src={qrImg} alt="登录二维码" className="w-48 h-48 rounded-xl bg-white p-2" />
+                <div className="text-sm text-neutral-500 dark:text-stone-400 text-center min-h-[1.5em]">{qrStatus}</div>
+                <button onClick={startQrLogin} className="btn-press px-4 py-1.5 rounded-lg bg-neutral-200/60 dark:bg-stone-800/60 text-sm text-neutral-700 dark:text-stone-200 hover:bg-neutral-300/60 dark:hover:bg-stone-700/60 transition-colors">
+                  刷新二维码
+                </button>
+              </div>
+            ) : (
+              // 未登录：显示登录按钮
+              <div className="max-w-sm mx-auto flex flex-col items-center gap-4 p-8 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
+                <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-white shadow-lg" style={{ background: ACCENT }}>
+                  <Music2 size={32} />
+                </div>
+                <div className="text-center">
+                  <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100 mb-1">登录汽水音乐</h2>
+                  <p className="text-xs text-neutral-500 dark:text-stone-400">扫码登录后可同步歌单、收藏与更高音质</p>
+                </div>
+                <button
+                  onClick={startQrLogin}
+                  disabled={qrLoading}
+                  className="btn-press w-full px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-colors disabled:opacity-50"
+                  style={{ background: ACCENT }}
+                >
+                  {qrLoading ? '生成中…' : '立即扫码登录'}
+                </button>
+                <div className="text-xs text-neutral-400 dark:text-stone-500 text-center min-h-[1.2em]">{qrStatus}</div>
+              </div>
+            )}
             <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
               <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 mb-2">说明</h3>
               <p className="text-xs text-neutral-500 dark:text-stone-400 leading-relaxed">
-                汽水音乐为纯游客态访问，无需扫码登录即可使用搜索、推荐和播放功能。
-                VIP / 付费歌曲可能无法播放完整音频。
+                汽水音乐支持游客模式，无需登录即可使用搜索、推荐和播放功能。
+                登录后可同步收藏歌单、获取更高音质及个性化推荐。VIP / 付费歌曲可能无法播放完整音频。
               </p>
             </div>
           </div>
