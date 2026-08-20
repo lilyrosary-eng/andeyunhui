@@ -184,36 +184,18 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     return () => window.removeEventListener('roam-theme-mode-changed', handler);
   }, []);
 
-  // EQ 动画 — 使用 Web Audio API AnalyserNode 的真实频率数据
-  // 如果 AnalyserNode 不可用，则降级为伪正弦动画
+  // EQ 动画 — 伪正弦动画（不依赖 Web Audio API，避免 AudioContext 导致卡死）
   useEffect(() => {
-    const analyser = musicPlayer.getAnalyser();
-    const freqData = analyser ? new Uint8Array(analyser.frequencyBinCount) : null;
     const animate = () => {
-      if (analyser && freqData) {
-        analyser.getByteFrequencyData(freqData);
-        setEqHeights(prev => {
-          const next = [...prev];
-          const step = Math.floor(freqData.length / EQ_BARS) || 1;
-          for (let i = 0; i < EQ_BARS; i++) {
-            const idx = i * step;
-            const v = freqData[idx] || 0;
-            next[i] = 5 + (v / 255) * 90;
-          }
-          return next;
-        });
-      } else {
-        // 降级：伪正弦动画
-        const t = performance.now() / 240;
-        setEqHeights(prev => {
-          const next = [...prev];
-          for (let i = 0; i < EQ_BARS; i++) {
-            const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * 0.75;
-            next[i] = 10 + v * 80;
-          }
-          return next;
-        });
-      }
+      const t = performance.now() / 240;
+      setEqHeights(prev => {
+        const next = [...prev];
+        for (let i = 0; i < EQ_BARS; i++) {
+          const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * 0.75;
+          next[i] = 10 + v * 80;
+        }
+        return next;
+      });
       eqRafRef.current = requestAnimationFrame(animate);
     };
     eqRafRef.current = requestAnimationFrame(animate);
