@@ -11,6 +11,9 @@ import { KugouView } from './KugouView';
 import KugouSidebar from './KugouSidebar';
 import { QishuiView, type QishuiViewHandle } from './QishuiView';
 import { RoamView } from './RoamView';
+import RoamSidebar, { type RoamSource, type RoamSeedTrack, type RoamHistoryEntry } from './RoamSidebar';
+import RoamSettingsPanel from './RoamSettingsPanel';
+import { getRoamSourceApi, clearRoamCache } from './roamSources';
 import QishuiSidebar from './QishuiSidebar';
 import { qishuiGetRecommendPlaylists, type QishuiPlaylistCard } from './qishuiApi';
 import NeteaseSidebar from './NeteaseSidebar';
@@ -1084,9 +1087,33 @@ function MusicModule() {
   const [qishuiRecommend, setQishuiRecommend] = useState<QishuiPlaylistCard[]>([]);
   const [qishuiActivePlaylistId, setQishuiActivePlaylistId] = useState<string | null>(null);
   const qishuiViewRef = useRef<QishuiViewHandle | null>(null);
-  // 漫游电台：从网易云漫游抽离的独立模块，作为第五个卡片
-  const [roamOpen, setRoamOpen] = useState(false);
-  // 进入汽水模块时拉一次推荐歌单（侧栏铺开），仅游客态
+// 漫游电台：从网易云漫游抽离的独立模块，作为第五个卡片
+const [roamOpen, setRoamOpen] = useState(false);
+const [roamSource, setRoamSource] = useState<RoamSource>('netease');
+const [roamHistories, setRoamHistories] = useState<Record<RoamSource, RoamHistoryEntry[]>>({
+  linglan: [],
+  netease: [],
+  kugou: [],
+  qishui: [],
+});
+const [roamSeedTracks, setRoamSeedTracks] = useState<Partial<Record<RoamSource, RoamSeedTrack>>>({});
+const [roamSettingsOpen, setRoamSettingsOpen] = useState(false);
+
+// 进入漫游电台时懒加载各平台默认歌曲（未播放时显示）
+useEffect(() => {
+  if (!roamOpen) return;
+  const sources: RoamSource[] = ['linglan', 'netease', 'kugou', 'qishui'];
+  sources.forEach((src) => {
+    if (roamSeedTracks[src]) return; // 已加载
+    getRoamSourceApi(src).fetchBatch(1, 0).then(({ tracks }) => {
+      if (tracks.length) {
+        setRoamSeedTracks((prev) => ({ ...prev, [src]: tracks[0] }));
+      }
+    }).catch(() => {});
+  });
+}, [roamOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+// 进入汽水模块时拉一次推荐歌单（侧栏铺开），仅游客态
   useEffect(() => {
     if (qishuiOpen && qishuiRecommend.length === 0) {
       qishuiGetRecommendPlaylists(12).then((list) => setQishuiRecommend(list)).catch(() => {});
@@ -2178,6 +2205,41 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           }}
           onClose={() => setQishuiOpen(false)}
         />
+      ) : roamOpen ? (
+        <RoamSidebar
+          activeSource={roamSource}
+          histories={roamHistories}
+          seedTracks={roamSeedTracks}
+          onSelectSource={(src) => {
+            // 切换漫游路径时清空旧路径的缓存
+            if (src !== roamSource) {
+              clearRoamCache();
+              setRoamSource(src);
+            }
+          }}
+          onSelectTrack={(src, track, fromHistory) => {
+            if (src !== roamSource) {
+              clearRoamCache();
+              setRoamSource(src);
+            }
+            // 播放选中的歌曲
+            const api = getRoamSourceApi(src);
+            api.getSongUrl(track).then(({ url }) => {
+              if (!url) return;
+              const playable = { ...track, filePath: url } as any;
+              musicPlayer.setTracks([playable], 0);
+              musicPlayer.play();
+              musicPlayer.currentPlaylistId = 'roam-active';
+              online.registerPlay([playable], 0, '漫游电台', 'roam-temp');
+            }).catch(() => {});
+          }}
+          onClearHistory={(src) => {
+            setRoamHistories((prev) => ({ ...prev, [src]: [] }));
+          }}
+          onClose={() => setRoamOpen(false)}
+          onOpenSettings={() => setRoamSettingsOpen(v => !v)}
+          settingsActive={roamSettingsOpen}
+        />
       ) : (
         <MusicSidebar
           playlists={filteredPlaylists}
@@ -2337,7 +2399,11 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               }}
             />
           ) : roamOpen ? (
+            roamSettingsOpen ? (
+              <RoamSettingsPanel onClose={() => setRoamSettingsOpen(false)} />
+            ) : (
             <RoamView
+              source={roamSource}
               onBack={() => setShowModuleDrawer(true)}
               onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
                 musicPlayer.setTracks(tracks, startIndex);
@@ -2350,7 +2416,12 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
                 online.registerTemp(temp);
               }}
               onOpenImmersive={() => setShowNowPlaying(true)}
+              onHistoryUpdate={(src, entries) => {
+                setRoamHistories((prev) => ({ ...prev, [src]: entries }));
+              }}
+              initialHistory={roamHistories[roamSource]}
             />
+            )
           ) : null}
           {selectedPlaylist ? (
             <TrackList
@@ -2419,6 +2490,9 @@ setNeteaseOpen(false);
 setKugouOpen(false);
 setQishuiOpen(false);
 setRoamOpen(false);
+setRoamSettingsOpen(false);
+clearRoamCache();
+setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
 setShowModuleDrawer(false);
 }}
 onSelectNetease={(key: 'listen' | 'library' | 'radio' | 'search' | 'downloads' | 'login') => {
@@ -2427,6 +2501,9 @@ setNeteaseOpen(true);
 setKugouOpen(false);
 setQishuiOpen(false);
 setRoamOpen(false);
+setRoamSettingsOpen(false);
+clearRoamCache();
+setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
 }}
 onSelectKugou={(key: 'home' | 'roam' | 'search' | 'mine') => {
 setKugouTab(key);
@@ -2434,34 +2511,41 @@ setKugouOpen(true);
 setNeteaseOpen(false);
 setQishuiOpen(false);
 setRoamOpen(false);
-          // 切换折叠菜单子项时，清理榜单详情 / 收藏夹等内层级状态，避免覆盖漫游 / 我的
-          setKugouActiveRankId(null);
-          setSelectedPlaylist(null);
-          // 酷狗侧栏搜索与本地歌单过滤共用全局 searchQuery；进入酷狗时清掉，
-          // 避免本地遗留关键词把刚打开的“热榜/漫游”自动拽到搜索页。
-          setSearchQuery('');
-        }}
+setRoamSettingsOpen(false);
+clearRoamCache();
+setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
+// 切换折叠菜单子项时，清理榜单详情 / 收藏夹等内层级状态，避免覆盖漫游 / 我的
+setKugouActiveRankId(null);
+setSelectedPlaylist(null);
+// 酷狗侧栏搜索与本地歌单过滤共用全局 searchQuery；进入酷狗时清掉，
+// 避免本地遗留关键词把刚打开的“热榜/漫游”自动拽到搜索页。
+setSearchQuery('');
+}}
         isKugouOpen={kugouOpen}
-        onSelectQishui={(key: 'listen' | 'library' | 'search' | 'about') => {
-          setQishuiTab(key);
+onSelectQishui={(key: 'listen' | 'library' | 'search' | 'about') => {
+setQishuiTab(key);
 setQishuiOpen(true);
 setNeteaseOpen(false);
 setKugouOpen(false);
 setRoamOpen(false);
-          setQishuiActivePlaylistId(null);
-          setSelectedPlaylist(null);
-          setSearchQuery('');
-        }}
+setRoamSettingsOpen(false);
+clearRoamCache();
+setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
+setQishuiActivePlaylistId(null);
+setSelectedPlaylist(null);
+setSearchQuery('');
+}}
         isQishuiOpen={qishuiOpen}
         isRoamOpen={roamOpen}
-        onSelectRoam={() => {
-          setRoamOpen(true);
-          setNeteaseOpen(false);
-          setKugouOpen(false);
-          setQishuiOpen(false);
-          setSelectedPlaylist(null);
-          setSearchQuery('');
-        }}
+onSelectRoam={() => {
+setRoamOpen(true);
+setRoamSettingsOpen(false);
+setNeteaseOpen(false);
+setKugouOpen(false);
+setQishuiOpen(false);
+setSelectedPlaylist(null);
+setSearchQuery('');
+}}
         neteaseProfile={neteaseProfile}
       />
       {showNowPlaying && currentTrack && (
