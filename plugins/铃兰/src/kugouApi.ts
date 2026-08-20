@@ -894,7 +894,14 @@ export async function getFavorites(auth: KugouAuth, pagesize = 50): Promise<Kugo
 
 export interface TrackBadge { label: string; kind: 'vip' | 'lossless' | 'hires'; }
 export function kugouTrackBadges(t: KugouTrack): TrackBadge[] {
-  return [];
+const badges: TrackBadge[] = [];
+if (t.payType && t.payType >= 3) {
+badges.push({ label: 'VIP', kind: 'vip' });
+}
+if (t.sqHash) {
+badges.push({ label: 'SQ', kind: 'lossless' });
+}
+return badges;
 }
 
 // 重新导出一个便捷对象（与 netease 模块的导出名对齐）
