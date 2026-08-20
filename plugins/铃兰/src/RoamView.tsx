@@ -1,16 +1,12 @@
 /// <reference path="../../global.d.ts" />
-// 独立漫游视图：从网易云「漫游」tab 抽离为通用模板，
-// 作为模块抽屉中的第五个卡片入口。
-// 支持多平台漫游路径（铃兰/网易云/酷狗/汽水）。
+// 独立漫游视图 — 完整复刻 player.html 「夏日薄荷」设计
 //
-// 设计原则：轻量高效，不引入各平台完整生命周期，
-// 只保留漫游核心：流式推荐 → 自动播放 → 续推 → 沉浸式单曲展示。
+// 左右分栏 + 黑胶唱片 + 两行歌词 + EQ 均衡器 + 萤火虫 + 光斑/光束 + 翻转过渡
+// 核心漫游逻辑保留：流式推荐 → 自动播放 → 续推 → 历史记录
 
 import React from 'react';
 const { useState, useEffect, useRef, useCallback } = React;
-import { Sparkles, Music as MusicIcon } from 'lucide-react';
-import { CloudIcon } from '../../_shared/icons';
-import { MusicHeader } from './MusicHeader';
+import { Sparkles, Music as MusicIcon, Cloud } from 'lucide-react';
 import { musicPlayer } from './musicPlayer';
 import {
   getRoamSourceApi,
@@ -23,60 +19,75 @@ import type { PlayableTrack, TempPlaylist } from './NeteaseView';
 
 // ---- 工具函数 ----
 function roamToPlayable(t: RoamSeedTrack, url?: string, quality = ''): PlayableTrack {
-  return {
-    id: t.id,
-    filePath: url || t.filePath || '',
-    title: t.title,
-    artist: t.artist,
-    album: t.album,
-    durationSecs: t.durationSecs,
-    coverPath: t.cover,
-    quality,
-  };
+  return { id: t.id, filePath: url || t.filePath || '', title: t.title, artist: t.artist, album: t.album, durationSecs: t.durationSecs, coverPath: t.cover, quality };
+}
+function formatTime(sec: number): string {
+  if (!sec || !isFinite(sec)) return '0:00';
+  const t = Math.floor(sec); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+function getCoverUrl(path?: string): string | null {
+  if (!path) return null;
+  if (/^https?:\/\//i.test(path)) return path;
+  return window.__HOST_API__?.convertFileSrc(path) || path;
 }
 
-function formatDuration(sec: number): string {
-  const total = Math.round(sec);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${s.toString().padStart(2, '0')}`;
+// 为当前歌曲生成主题色（从封面颜色推导，或用默认薄荷绿）
+function getSongTheme(cover?: string | null): { hue: number; fog: string } {
+  if (!cover) return { hue: 0, fog: 'rgba(150, 208, 118, 0.55)' };
+  let hash = 0;
+  for (let i = 0; i < cover.length; i++) hash = ((hash << 5) - hash + cover.charCodeAt(i)) | 0;
+  const hue = Math.abs(hash) % 360;
+  const fogColors = [
+    'rgba(150, 208, 118, 0.55)', 'rgba(248, 198, 104, 0.55)',
+    'rgba(120, 168, 224, 0.55)', 'rgba(236, 150, 200, 0.55)',
+    'rgba(255, 255, 255, 0.55)',
+  ];
+  return { hue, fog: fogColors[Math.abs(hash) % fogColors.length] };
 }
 
-// ---- 组件 Props ----
+// player.html 的预设主题（Mint / Magnolia / Lotus / Iris / Lily）
+const PRESET_THEMES = [
+  { hue: 0,   fog: 'rgba(150, 208, 118, 0.55)' },  // Mint（薄荷）
+  { hue: 55,  fog: 'rgba(248, 198, 104, 0.55)' },  // Magnolia（金阳）
+  { hue: 205, fog: 'rgba(120, 168, 224, 0.55)' }, // Lotus（湖蓝）
+  { hue: 320, fog: 'rgba(236, 150, 200, 0.55)' }, // Iris（粉霞）
+  { hue: 0,   fog: 'rgba(255, 255, 255, 0.55)' },  // Lily（雪白）
+];
+
 interface RoamViewProps {
   source: RoamSource;
   onBack: () => void;
   onPlay: (tracks: PlayableTrack[], startIndex: number, sourceName: string) => void;
   onTempPlaylist?: (temp: TempPlaylist) => void;
   onOpenImmersive?: () => void;
-  onOpenArtist?: (id: number | string, name?: string) => void;
-  onOpenAlbum?: (id: number | string, name?: string) => void;
-  // 漫游历史更新回调
   onHistoryUpdate?: (source: RoamSource, entries: RoamHistoryEntry[]) => void;
-  // 初始历史
   initialHistory?: RoamHistoryEntry[];
 }
 
-// ---- 漫游展示窗口 ----
 const ROAM_WINDOW_SIZE = 3;
+const sourceLabel: Record<RoamSource, string> = { linglan: '铃兰', netease: '网易云', kugou: '酷狗', qishui: '汽水' };
 
-export function RoamView({
-  source,
-  onBack,
-  onPlay,
-  onTempPlaylist,
-  onOpenImmersive,
-  onOpenArtist,
-  onOpenAlbum,
-  onHistoryUpdate,
-  initialHistory,
-}: RoamViewProps) {
+// EQ bars 数量
+const EQ_BARS = 32;
+
+export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersive, onHistoryUpdate, initialHistory }: RoamViewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [nowPlaying, setNowPlaying] = useState<{ track: any; isPlaying: boolean }>({ track: null, isPlaying: false });
   const [roamReloadKey, setRoamReloadKey] = useState(0);
+  const [progress, setProgress] = useState({ current: 0, duration: 0 });
+  const [flipped, setFlipped] = useState(false);
+  const [transitioning, setTransitioning] = useState(false);
+  const [isDark, setIsDark] = useState(document.documentElement.classList.contains('dark'));
+  const [eqHeights, setEqHeights] = useState<number[]>(new Array(EQ_BARS).fill(15));
+  const [songTheme, setSongTheme] = useState({ hue: 0, fog: 'rgba(150, 208, 118, 0.55)' });
+  const [themeMode, setThemeMode] = useState<'preset' | 'follow'>(() => {
+    const v = localStorage.getItem('roam_theme_mode');
+    return v === 'preset' ? 'preset' : 'follow';
+  });
+  const presetIdxRef = useRef(0);
 
-  // 漫游队列与缓冲
+  // refs
   const roamReservoir = useRef<RoamSeedTrack[]>([]);
   const roamExtending = useRef(false);
   const roamTrackListRef = useRef<RoamSeedTrack[]>([]);
@@ -84,87 +95,94 @@ export function RoamView({
   const roamStartedRef = useRef(false);
   const roamForceReloadRef = useRef(false);
   const reqRef = useRef(0);
-
-  // 漫游历史
   const historyRef = useRef<RoamHistoryEntry[]>(initialHistory || []);
   const onHistoryUpdateRef = useRef(onHistoryUpdate);
   onHistoryUpdateRef.current = onHistoryUpdate;
-
-  // ref 回调稳定化
   const onPlayRef = useRef(onPlay);
   const onTempPlaylistRef = useRef(onTempPlaylist);
   onPlayRef.current = onPlay;
   onTempPlaylistRef.current = onTempPlaylist;
-
-  // 展示窗口
   const roamWindowRef = useRef<RoamSeedTrack[]>([]);
+  const flipTimerRef = useRef<any>(null);
+  const burstFromRef = useRef(0);
+  const trackIdxRef = useRef(0);
+  const eqRafRef = useRef<number>(0);
+
+  // 暗色模式监听
+  useEffect(() => {
+    const observer = new MutationObserver(() => setIsDark(document.documentElement.classList.contains('dark')));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
+
+  // 监听主题模式切换
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as 'preset' | 'follow';
+      setThemeMode(detail);
+    };
+    window.addEventListener('roam-theme-mode-changed', handler);
+    return () => window.removeEventListener('roam-theme-mode-changed', handler);
+  }, []);
+
+  // EQ 动画
+  useEffect(() => {
+    const animate = () => {
+      const t = performance.now() / 240;
+      setEqHeights(prev => {
+        const next = [...prev];
+        for (let i = 0; i < EQ_BARS; i++) {
+          const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * 0.75;
+          next[i] = 10 + v * 80;
+        }
+        return next;
+      });
+      eqRafRef.current = requestAnimationFrame(animate);
+    };
+    eqRafRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(eqRafRef.current);
+  }, []);
 
   const slideRoamWindow = useCallback((tracks: RoamSeedTrack[], currentId: string) => {
     const idx = tracks.findIndex((t) => t.id === currentId);
     if (idx < 0) return;
     const start = Math.max(0, idx - 1);
-    const end = Math.min(tracks.length, start + ROAM_WINDOW_SIZE);
-    roamWindowRef.current = tracks.slice(start, end);
+    roamWindowRef.current = tracks.slice(start, start + ROAM_WINDOW_SIZE);
   }, []);
 
-  // 添加到历史
   const addToHistory = useCallback((track: RoamSeedTrack) => {
     const entry: RoamHistoryEntry = { track, playedAt: Date.now() };
-    // 避免重复
     const filtered = historyRef.current.filter((e) => e.track.id !== track.id);
     historyRef.current = [...filtered, entry];
-    // 限制 100 条
-    if (historyRef.current.length > 100) {
-      historyRef.current = historyRef.current.slice(-100);
-    }
+    if (historyRef.current.length > 100) historyRef.current = historyRef.current.slice(-100);
     onHistoryUpdateRef.current?.(source, historyRef.current);
   }, [source]);
 
-  // 拉取下一批漫游曲目
   const fetchRoamBatch = useCallback(async (count = 8): Promise<RoamSeedTrack[]> => {
     const api = getRoamSourceApi(source);
     const result = await api.fetchBatch(count, 0);
     if (result.tracks.length < count && roamReservoir.current.length < count) {
-      // 补充更多
-      try {
-        const more = await api.fetchBatch(50, 0);
-        roamReservoir.current = [...roamReservoir.current, ...more.tracks];
-      } catch {}
+      try { const more = await api.fetchBatch(50, 0); roamReservoir.current = [...roamReservoir.current, ...more.tracks]; } catch {}
     }
     return result.tracks;
   }, [source]);
 
-  // 推入播放队列
   const pushRoamTracks = useCallback(async (batch: RoamSeedTrack[], startIndex: number, first: boolean) => {
     if (!batch.length) return;
     const api = getRoamSourceApi(source);
     if (first) {
       const t0 = batch[startIndex] ?? batch[0];
       const urlRes = await api.getSongUrl(t0).catch(() => ({ url: '' }));
-      const playlist: PlayableTrack[] = batch.map((t, i) =>
-        (i === startIndex && urlRes.url)
-          ? roamToPlayable(t, urlRes.url, urlRes.br ? `${urlRes.br}` : '')
-          : roamToPlayable(t, '')
-      );
+      const playlist: PlayableTrack[] = batch.map((t, i) => (i === startIndex && urlRes.url) ? roamToPlayable(t, urlRes.url, urlRes.br ? `${urlRes.br}` : '') : roamToPlayable(t, ''));
       onPlayRef.current(playlist, startIndex, '漫游电台');
       const tempId = `roam-${Date.now()}`;
-      onTempPlaylistRef.current?.({
-        id: tempId,
-        name: '漫游电台',
-        coverPath: playlist[startIndex]?.coverPath,
-        tracks: playlist,
-        payload: { kind: 'recommend', name: '漫游电台', tracks: playlist },
-      });
+      onTempPlaylistRef.current?.({ id: tempId, name: '漫游电台', coverPath: playlist[startIndex]?.coverPath, tracks: playlist, payload: { kind: 'recommend', name: '漫游电台', tracks: playlist } });
       setRoamCurrentId(playlist[startIndex]?.id ?? null);
       addToHistory(batch[startIndex] ?? batch[0]);
-      // 并发补全地址
       const tasks: Promise<void>[] = [];
       for (let i = 0; i < batch.length; i++) {
         if (i === startIndex && urlRes.url) continue;
-        tasks.push((async () => {
-          const u = await api.getSongUrl(batch[i]).catch(() => null);
-          if (u?.url) musicPlayer.updateTrackUrl(i, u.url);
-        })());
+        tasks.push((async () => { const u = await api.getSongUrl(batch[i]).catch(() => null); if (u?.url) musicPlayer.updateTrackUrl(i, u.url); })());
       }
       await Promise.all(tasks);
     } else {
@@ -173,16 +191,12 @@ export function RoamView({
       musicPlayer.appendTracks(playlist);
       const tasks: Promise<void>[] = [];
       for (let i = 0; i < batch.length; i++) {
-        tasks.push((async () => {
-          const u = await api.getSongUrl(batch[i]).catch(() => null);
-          if (u?.url) musicPlayer.updateTrackUrl(baseIdx + i, u.url);
-        })());
+        tasks.push((async () => { const u = await api.getSongUrl(batch[i]).catch(() => null); if (u?.url) musicPlayer.updateTrackUrl(baseIdx + i, u.url); })());
       }
       await Promise.all(tasks);
     }
   }, [source, addToHistory]);
 
-  // 续推
   const extendRoam = useCallback(async () => {
     if (roamExtending.current) return;
     roamExtending.current = true;
@@ -194,14 +208,10 @@ export function RoamView({
         const curId = musicPlayer.getCurrentTrack()?.id;
         if (curId) slideRoamWindow(roamTrackListRef.current, curId);
       }
-    } catch (e) {
-      console.warn('[roam] 续推失败', e);
-    } finally {
-      roamExtending.current = false;
-    }
+    } catch (e) { console.warn('[roam] 续推失败', e); }
+    finally { roamExtending.current = false; }
   }, [fetchRoamBatch, pushRoamTracks, slideRoamWindow]);
 
-  // 首屏首歌
   const startRoamWithFirst = useCallback(async (first: RoamSeedTrack[], req: number) => {
     const api = getRoamSourceApi(source);
     const urlRes = await api.getSongUrl(first[0]).catch(() => ({ url: '' }));
@@ -212,10 +222,7 @@ export function RoamView({
     if (!musicPlayer.getCurrentTrack()) {
       onPlayRef.current(playlist, 0, '漫游电台');
       const tempId = `roam-${Date.now()}`;
-      onTempPlaylistRef.current?.({
-        id: tempId, name: '漫游电台', coverPath: playlist[0]?.coverPath,
-        tracks: playlist, payload: { kind: 'recommend', name: '漫游电台', tracks: playlist },
-      });
+      onTempPlaylistRef.current?.({ id: tempId, name: '漫游电台', coverPath: playlist[0]?.coverPath, tracks: playlist, payload: { kind: 'recommend', name: '漫游电台', tracks: playlist } });
       setRoamCurrentId(playlist[0]?.id ?? null);
       roamTrackListRef.current = [...first];
       addToHistory(first[0]);
@@ -223,7 +230,6 @@ export function RoamView({
       musicPlayer.appendTracks(playlist);
       roamTrackListRef.current = [...roamTrackListRef.current, ...first];
     }
-    // 后台补满
     fetchRoamBatch(7).then((rest) => {
       if (req !== reqRef.current || !rest.length) return;
       pushRoamTracks(rest, 0, false);
@@ -237,18 +243,14 @@ export function RoamView({
     roamForceReloadRef.current = false;
     roamReservoir.current = [];
     roamTrackListRef.current = [];
+    trackIdxRef.current = 0;
     const req = ++reqRef.current;
-    setLoading(true);
-    setError('');
+    setLoading(true); setError('');
     (async () => {
       try {
         const first = await fetchRoamBatch(1);
         if (req !== reqRef.current) return;
-        if (!first.length) {
-          setError('暂无推荐歌曲，请稍后再试');
-          setLoading(false);
-          return;
-        }
+        if (!first.length) { setError('暂无推荐歌曲，请稍后再试'); setLoading(false); return; }
         await startRoamWithFirst(first, req);
       } catch (e: any) {
         if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); }
@@ -256,21 +258,30 @@ export function RoamView({
     })();
   }, [roamReloadKey, source]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 订阅播放器事件
+  // 播放器事件
   useEffect(() => {
     const syncNow = () => setNowPlaying({ track: musicPlayer.getCurrentTrack(), isPlaying: musicPlayer.getIsPlaying() });
+    const syncProgress = (data: any) => {
+      if (data && typeof data.currentTime === 'number') setProgress({ current: data.currentTime, duration: data.duration || 0 });
+    };
     const syncCurrent = () => {
-      const curId = musicPlayer.getCurrentTrack()?.id ?? null;
-      setRoamCurrentId(curId);
+      setRoamCurrentId(musicPlayer.getCurrentTrack()?.id ?? null);
       syncNow();
+      setProgress({ current: musicPlayer.getCurrentTime(), duration: musicPlayer.getDuration() });
     };
     const maybeExtend = () => {
       const curId = musicPlayer.getCurrentTrack()?.id;
       if (curId) {
         slideRoamWindow(roamTrackListRef.current, curId);
-        // 记录到历史
         const track = roamTrackListRef.current.find((t) => t.id === curId);
         if (track) addToHistory(track);
+        // 更新主题色
+        if (themeMode === 'preset') {
+          presetIdxRef.current = (presetIdxRef.current + 1) % PRESET_THEMES.length;
+          setSongTheme(PRESET_THEMES[presetIdxRef.current]);
+        } else {
+          setSongTheme(getSongTheme(getCoverUrl(track?.cover)));
+        }
       }
       setRoamCurrentId(curId ?? null);
       syncNow();
@@ -282,137 +293,229 @@ export function RoamView({
     };
     syncNow();
     setRoamCurrentId(musicPlayer.getCurrentTrack()?.id ?? null);
+    setProgress({ current: musicPlayer.getCurrentTime(), duration: musicPlayer.getDuration() });
     const unsubTrackChange = musicPlayer.on('trackChange', maybeExtend);
     const unsubPlay = musicPlayer.on('play', syncCurrent);
     const unsubPause = musicPlayer.on('pause', syncNow);
-    // 进入时补一批
+    const unsubProgress = musicPlayer.on('progress', syncProgress);
     const tracks = musicPlayer.getTracks();
     const idx = musicPlayer.getCurrentIndex();
     const nextInQueue = idx >= 0 && idx + 1 < tracks.length;
     if ((!nextInQueue || roamReservoir.current.length <= 2) && !roamExtending.current) extendRoam();
-    return () => {
-      unsubTrackChange();
-      unsubPlay();
-      unsubPause();
-    };
+    return () => { unsubTrackChange(); unsubPlay(); unsubPause(); unsubProgress(); };
   }, [extendRoam, slideRoamWindow, addToHistory]);
 
   const refreshRoam = useCallback(() => {
-    roamReservoir.current = [];
-    roamStartedRef.current = false;
-    roamForceReloadRef.current = true;
-    clearRoamCache();
-    setRoamReloadKey((k) => k + 1);
+    roamReservoir.current = []; roamStartedRef.current = false; roamForceReloadRef.current = true;
+    clearRoamCache(); setRoamReloadKey((k) => k + 1);
   }, []);
 
-  // 渲染
-  const coverOf = (path?: string) => {
-    if (!path) return null;
-    if (/^https?:\/\//i.test(path)) return path;
-    return window.__HOST_API__?.convertFileSrc(path) || path;
-  };
+  // 翻转动画（防抖 200ms）
+  const scheduleFlip = useCallback(() => {
+    if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
+    flipTimerRef.current = setTimeout(() => {
+      setTransitioning(true);
+      setFlipped(f => !f);
+      setTimeout(() => setTransitioning(false), 760);
+    }, 200);
+  }, []);
 
+  const handleNext = useCallback(() => {
+    burstFromRef.current = trackIdxRef.current;
+    musicPlayer.next();
+    scheduleFlip();
+  }, [scheduleFlip]);
+
+  const handlePrev = useCallback(() => {
+    burstFromRef.current = trackIdxRef.current;
+    musicPlayer.prev();
+    scheduleFlip();
+  }, [scheduleFlip]);
+
+  // 渲染数据
   const cur = nowPlaying.track;
-  const curCover = coverOf(cur?.coverPath);
-  const curRoamTrack = roamTrackListRef.current.find((t) => t.id === cur?.id) || null;
+  const curCover = getCoverUrl(cur?.coverPath);
+  const dur = progress.duration || cur?.durationSecs || 0;
+  const pos = progress.current || 0;
+  const pct = dur > 0 ? (pos / dur) * 100 : 0;
 
-  const sourceLabel: Record<RoamSource, string> = {
-    linglan: '铃兰',
-    netease: '网易云',
-    kugou: '酷狗',
-    qishui: '汽水',
-  };
+  // 颜色 token
+  const ink = isDark ? 'rgba(255,255,255,0.93)' : 'rgba(255,255,255,0.96)';
+  const inkSoft = isDark ? 'rgba(255,255,255,0.62)' : 'rgba(255,255,255,0.80)';
+  const inkLine = isDark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.50)';
+  const glow = isDark ? '0 2px 10px rgba(0,0,0,0.5)' : '0 2px 0 rgba(155,196,110,0.25), 0 8px 30px rgba(110,168,76,0.35)';
+  const stageBg = isDark
+    ? 'radial-gradient(ellipse at 22% 38%, #1a2a16 0%, #1c1917 38%, #0e0c0a 78%, #0a0908 100%)'
+    : 'radial-gradient(ellipse at 22% 38%, #f3fbe2 0%, #d6ecc4 38%, #b3d896 78%, #8cbc6d 100%)';
+
+  // 右下角两行文字：第一行=歌曲名，第二行=歌手·专辑
+  const lyricLine1 = cur?.title || '尚未开始漫游';
+  const lyricLine2 = cur ? `${cur.artist || '未知歌手'}${cur.album ? ' · ' + cur.album : ''}` : '进入漫游页将自动为你播放推荐';
+
+  // CSS keyframes 和 stage 样式
+  const stageStyle = `
+    .roam-stage { position: relative; width: 100%; height: 100%; overflow: hidden; background: ${stageBg}; --hue: ${songTheme.hue}deg; --fog: ${songTheme.fog}; }
+    .roam-stage * { box-sizing: border-box; }
+    @keyframes roam-spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+    @keyframes roam-breathe { 0%,100% { box-shadow: 0 12px 28px -10px rgba(0,0,0,0.4), 0 0 0 0 rgba(255,255,255,0.55);} 50% { box-shadow: 0 12px 28px -10px rgba(0,0,0,0.4), 0 0 0 10px rgba(255,255,255,0);} }
+    @keyframes roam-charGlow { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
+    @keyframes roam-float { 0%,100% { transform: translateY(0) scale(0.6); opacity: 0; } 20% { opacity: 1; } 50% { transform: translateY(-30px) scale(1.2); opacity: 1; } 80% { opacity: 0.8; } }
+    .roam-right-cover, .roam-left-cover { position: absolute; top: 0; bottom: 0; overflow: hidden; transition: left 0.7s cubic-bezier(.22,.61,.36,1), width 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease; }
+    .roam-right-cover { left: 44%; width: 56%; z-index: 1; }
+    .roam-left-cover { left: 0; width: 44%; z-index: 2; filter: blur(22px) saturate(1.55) brightness(1.07) hue-rotate(var(--hue)); }
+    .roam-left-cover img, .roam-right-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .roam-right-cover img { filter: saturate(1.08) brightness(1.03) hue-rotate(var(--hue)); }
+    .roam-stage.flipped .roam-left-cover { left: 56%; width: 44%; }
+    .roam-stage.flipped .roam-right-cover { left: 0; width: 56%; }
+    .roam-left { position: absolute; top: 0; bottom: 0; left: 0; width: 44%; z-index: 4; display: flex; flex-direction: column; padding: clamp(14px, 3%, 36px) clamp(16px, 4%, 50px); overflow: hidden; transition: left 0.7s cubic-bezier(.22,.61,.36,1), width 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease; background: ${isDark ? 'linear-gradient(135deg, rgba(30,42,26,0.35) 0%, rgba(28,25,23,0.12) 40%, rgba(20,40,15,0.18) 100%)' : 'linear-gradient(135deg, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.08) 40%, rgba(190,222,170,0.14) 100%)'}; backdrop-filter: blur(8px) saturate(140%); -webkit-backdrop-filter: blur(8px) saturate(140%); border-right: 1px solid ${inkLine}; }
+    .roam-stage.flipped .roam-left { left: 56%; }
+    .roam-stage.transitioning .roam-left, .roam-stage.transitioning .roam-left-cover, .roam-stage.transitioning .roam-right-cover, .roam-stage.transitioning .roam-lyrics, .roam-stage.transitioning .roam-fireflies { opacity: 0; }
+    .roam-transition-overlay { position: absolute; inset: 0; z-index: 6; pointer-events: none; opacity: 0; background-color: var(--fog); backdrop-filter: blur(15px) saturate(150%); -webkit-backdrop-filter: blur(15px) saturate(150%); transition: opacity 0.45s ease; }
+    .roam-stage.transitioning .roam-transition-overlay { opacity: 1; }
+    .roam-vinyl-wrap { position: absolute; left: 22%; top: 50%; transform: translate(-50%, -50%); width: clamp(90px, 13vw, 160px); aspect-ratio: 1; z-index: 7; transition: left 0.7s cubic-bezier(.22,.61,.36,1); }
+    .roam-stage.flipped .roam-vinyl-wrap { left: 78%; }
+    .roam-vinyl { width: 100%; height: 100%; border-radius: 50%; position: relative; overflow: hidden; box-shadow: 0 30px 60px -20px rgba(40,60,30,0.5), 0 0 0 1px rgba(255,255,255,0.65), inset 0 0 26px rgba(255,255,255,0.55), inset 0 0 0 7px rgba(255,255,255,0.18); }
+    .roam-vinyl.spinning { animation: roam-spin 28s linear infinite; }
+    .roam-bokeh { position: absolute; inset: 0; pointer-events: none; mix-blend-mode: screen; z-index: 3; }
+    .roam-bokeh .puff { position: absolute; border-radius: 50%; filter: blur(40px); opacity: 0.55; }
+    .roam-fireflies { position: absolute; inset: 0; pointer-events: none; z-index: 5; overflow: hidden; transition: opacity 0.45s ease; }
+    .roam-fireflies i { position: absolute; width: 4px; height: 4px; background: #fff; border-radius: 50%; box-shadow: 0 0 12px 2px rgba(255,255,255,0.7); opacity: 0; animation: roam-float 9s ease-in-out infinite; }
+    .roam-vignette { position: absolute; inset: 0; z-index: 8; pointer-events: none; background: radial-gradient(ellipse at center, transparent 55%, rgba(20,40,15,0.22) 100%); mix-blend-mode: multiply; }
+    .roam-stage.flipped .roam-lyrics { right: auto; left: clamp(16px, 3%, 40px); align-items: flex-start; text-align: left; }
+  `;
 
   return (
-    <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden overflow-x-hidden relative bg-white dark:bg-[#1e1e1e]">
-      <MusicHeader
-        title={`漫游电台 · ${sourceLabel[source]}`}
-        onBackToSub={undefined}
-        onUserClick={() => {}}
-        onCloudClick={onBack}
-        cloudTitle="音乐模块"
-        user={{ loggedIn: false }}
-      />
+    <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative" style={{ background: stageBg }}>
+      <style dangerouslySetInnerHTML={{ __html: stageStyle }} />
 
-      <div className="flex-1 h-full min-w-0 overflow-y-auto overflow-x-hidden px-4 pb-4">
-        <section className="min-w-0">
-          <div className="mb-3 flex items-center justify-between pt-2">
-            <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">漫游</h2>
-            <button
-              onClick={refreshRoam}
-              className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-100 dark:bg-stone-800 text-neutral-600 dark:text-stone-300 text-sm hover:bg-stone-200 dark:hover:bg-stone-700 transition-colors"
-              title="换一批漫游"
-            >
-              <Sparkles size={14} />
-              换一批
-            </button>
+      {/* 顶部栏 */}
+      <div className="shrink-0 flex items-center justify-between min-w-0 px-4 pt-3 pb-2 relative z-20">
+        <div className="flex items-center gap-2 min-w-0">
+          <button onClick={onBack} className="btn-press flex items-center justify-center p-2 -ml-1 rounded-lg transition-colors" style={{ color: ink }} title="返回模块抽屉">
+            <Cloud size={18} />
+          </button>
+          <h2 className="text-sm font-semibold truncate" style={{ color: ink }}>漫游电台 · {sourceLabel[source]}</h2>
+        </div>
+        <button onClick={refreshRoam} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors" style={{ background: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.92)', color: isDark ? 'rgba(255,255,255,0.9)' : '#2c5a1a' }} title="换一批漫游">
+          <Sparkles size={14} /> 换一批
+        </button>
+      </div>
+
+      {/* 主舞台 */}
+      <div className="flex-1 relative overflow-hidden">
+        {loading ? (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="text-center" style={{ color: inkSoft }}>
+              <div className="w-28 h-28 mx-auto mb-4 rounded-full border-4 border-current border-t-transparent animate-spin" style={{ animationDuration: '1.5s' }} />
+              <div className="text-sm">正在为你挑选歌曲…</div>
+            </div>
           </div>
-
-          {loading ? (
-            <div className="text-sm text-neutral-400 dark:text-stone-500 py-8 text-center">加载中…</div>
-          ) : error ? (
-            <div className="text-sm text-red-500/80 dark:text-red-400/80 py-8 text-center">{error}</div>
-          ) : !cur ? (
-            <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-              <div className="w-40 h-40 rounded-3xl bg-[var(--element-muted)] text-[var(--element-bg)] flex items-center justify-center shadow-sm">
-                <MusicIcon size={56} />
-              </div>
-              <div className="text-base font-semibold text-neutral-500 dark:text-stone-400">尚未开始漫游</div>
-              <div className="text-sm text-neutral-400 dark:text-stone-500">进入漫游页将自动为你播放推荐</div>
+        ) : error ? (
+          <div className="absolute inset-0 flex items-center justify-center"><div className="text-sm text-red-400/80 text-center">{error}</div></div>
+        ) : !cur ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+            <div className="w-36 h-36 rounded-3xl flex items-center justify-center shadow-lg" style={{ background: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.3)' }}>
+              <MusicIcon size={52} style={{ color: inkSoft }} />
             </div>
-          ) : (
-            <div className="flex flex-col items-center pt-6 pb-4">
-              {/* 居中大封面 */}
+            <div className="text-base font-semibold" style={{ color: inkSoft }}>尚未开始漫游</div>
+            <div className="text-sm" style={{ color: inkLine }}>进入漫游页将自动为你播放推荐</div>
+          </div>
+        ) : (
+          <div className={`roam-stage ${flipped ? 'flipped' : ''} ${transitioning ? 'transitioning' : ''}`}>
+            {/* 右侧清晰封面 */}
+            <div className="roam-right-cover">
+              {curCover ? <img src={curCover} alt="" /> : <div className="w-full h-full flex items-center justify-center" style={{ background: isDark ? '#1e2a1a' : '#a4c084' }}><MusicIcon size={72} style={{ color: inkLine }} /></div>}
+            </div>
+
+            {/* 左侧模糊封面 + 光斑 */}
+            <div className="roam-left-cover">
+              {curCover ? <img src={curCover} alt="" /> : <div className="w-full h-full" style={{ background: isDark ? '#1a2a16' : '#d6ecc4' }} />}
+              <div className="roam-bokeh">
+                <div className="puff" style={{ width: 360, height: 360, left: -120, top: -90, background: 'radial-gradient(circle, #ffffff 0%, transparent 70%)' }} />
+                <div className="puff" style={{ width: 420, height: 420, left: '8%', top: '18%', background: 'radial-gradient(circle, #e8ffd1 0%, transparent 70%)' }} />
+                <div className="puff" style={{ width: 260, height: 260, left: '30%', top: '60%', background: 'radial-gradient(circle, #ffffff 0%, transparent 70%)', opacity: 0.4 }} />
+                <div className="puff" style={{ width: 480, height: 480, right: '5%', top: '30%', background: 'radial-gradient(circle, #fff4c4 0%, transparent 70%)', opacity: 0.45 }} />
+              </div>
+            </div>
+
+            {/* 左侧玻璃面板 */}
+            <div className="roam-left">
+              {/* 标题区 */}
+              <div className="flex flex-col gap-1" style={{ paddingLeft: 'clamp(12px, 2%, 22px)' }}>
+                <div className="flex items-center gap-2 mb-2" style={{ fontFamily: 'ui-monospace, monospace', fontSize: '9px', letterSpacing: '0.4em', textTransform: 'uppercase', color: inkSoft }}>
+                  <span style={{ width: 24, height: 1, background: inkLine }} /> A roam playlist
+                </div>
+                <h1 className="font-black leading-none" style={{ fontSize: 'clamp(26px, 4vw, 56px)', letterSpacing: '-0.02em', color: ink, textShadow: glow, wordBreak: 'break-word' }}>
+                  {(cur.title || 'UNKNOWN').slice(0, 24)}
+                </h1>
+                <h2 className="mt-2" style={{ fontSize: 'clamp(11px, 1vw, 16px)', letterSpacing: '0.15em', textTransform: 'uppercase', color: ink, fontWeight: 400 }}>
+                  {(cur.artist || '未知歌手').slice(0, 36)}
+                </h2>
+                {cur.album && (
+                  <p className="mt-2" style={{ fontSize: '10px', lineHeight: 1.6, maxWidth: 200, color: inkSoft, borderLeft: `1px solid ${inkLine}`, paddingLeft: 10 }}>{cur.album}</p>
+                )}
+              </div>
+
+              {/* EQ 均衡器（底部，不与唱片重叠） */}
+              <div className="mt-auto flex items-end justify-center" style={{ gap: 3, width: '100%', height: 28, marginBottom: 8 }}>
+                {eqHeights.map((h, i) => (
+                  <span key={i} style={{
+                    flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h * 0.6}%`,
+                    background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
+                    borderRadius: 2, opacity: 0.85,
+                  }} />
+                ))}
+              </div>
+            </div>
+
+            {/* 黑胶唱片 — 点击进入沉浸式播放 */}
+            <div className="roam-vinyl-wrap" style={{ cursor: 'pointer' }} onClick={onOpenImmersive} title="点击进入沉浸式播放">
+              <div className="absolute rounded-full" style={{ inset: '-20%', background: 'radial-gradient(circle, rgba(255,255,255,0.3), transparent 70%)', filter: 'blur(22px)', zIndex: -1 }} />
               <div
-                onClick={onOpenImmersive}
-                className="relative w-56 h-56 rounded-3xl overflow-hidden shadow-lg ring-1 ring-black/10 dark:ring-white/10 cursor-pointer transition-transform hover:scale-[1.02]"
-                title="打开沉浸播放"
+                className={`roam-vinyl ${nowPlaying.isPlaying ? 'spinning' : ''}`}
+                style={{
+                  background: curCover ? `url(${curCover}) center/cover` : isDark ? 'radial-gradient(circle at 38% 32%, #2a3a22, #0a1209)' : 'radial-gradient(circle at 38% 32%, #ffffff, #cad9ad)',
+                }}
               >
-                {curCover ? (
-                  React.createElement('img', { src: curCover, alt: '', className: 'w-full h-full object-cover', style: { width: '100%', height: '100%', objectFit: 'cover' } })
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center bg-[var(--element-muted)] text-[var(--element-bg)]">
-                    <MusicIcon size={56} />
-                  </div>
-                )}
-                {nowPlaying.isPlaying && (
-                  <div className="absolute bottom-2 right-2 flex items-end gap-[2px] px-1.5 py-1 rounded-md bg-black/40 backdrop-blur-sm">
-                    {[1, 2, 3].map((i) => (
-                      <span key={i} className="w-[3px] bg-white rounded-full animate-[music-bar_0.8s_ease-in-out_infinite]" style={{ height: '8px', animationDelay: `${i * 0.12}s` }} />
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* 下方元数据 */}
-              <div className="mt-5 flex flex-col items-center text-center px-4 w-full max-w-md">
-                <div className="text-lg font-semibold text-neutral-800 dark:text-stone-100 leading-tight">{cur.title}</div>
-                <div className="mt-1.5 text-sm leading-tight flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1">
-                  <span className="text-neutral-500 dark:text-stone-400">{cur.artist || '—'}</span>
-                  <span className="opacity-50">·</span>
-                  <span className="text-neutral-500 dark:text-stone-400">{cur.album || '—'}</span>
-                </div>
-
-                {/* 音质徽章 + 时长 + 播放状态 */}
-                <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
-                  {cur.quality && (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20">
-                      {cur.quality}
-                    </span>
-                  )}
-                  {cur.durationSecs > 0 && (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border bg-neutral-100 dark:bg-stone-800 text-neutral-600 dark:text-stone-400 border-neutral-200 dark:border-stone-700">
-                      {formatDuration(cur.durationSecs)}
-                    </span>
-                  )}
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border bg-neutral-100 dark:bg-stone-800 text-neutral-600 dark:text-stone-400 border-neutral-200 dark:border-stone-700">
-                    {nowPlaying.isPlaying ? '正在播放' : '已暂停'}
-                  </span>
-                </div>
+                <div className="absolute inset-0 rounded-full" style={{ background: 'conic-gradient(from 210deg, transparent 0deg, rgba(255,255,255,0.18) 26deg, transparent 68deg, rgba(255,255,255,0.08) 150deg, transparent 192deg)', mixBlendMode: 'screen' }} />
+                <div className="absolute rounded-full" style={{ width: 5, height: 5, background: '#c4c4c4', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', zIndex: 2, boxShadow: '0 0 0 2px rgba(0,0,0,0.5)' }} />
               </div>
             </div>
-          )}
-        </section>
+
+            {/* 两行歌词 */}
+            <div
+              className="roam-lyrics"
+              style={{
+                position: 'absolute', right: 'clamp(16px, 3%, 40px)', bottom: 'clamp(16px, 4%, 36px)',
+                zIndex: 5, display: 'flex', flexDirection: 'column', gap: 'clamp(6px, 0.8vw, 10px)',
+                alignItems: 'flex-end', textAlign: 'right', pointerEvents: 'none',
+                transition: 'right 0.7s cubic-bezier(.22,.61,.36,1), left 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease',
+              }}
+            >
+              <p style={{ fontFamily: "'Noto Sans SC', system-ui, sans-serif", fontWeight: 500, fontSize: 'clamp(13px, 1.4vw, 20px)', letterSpacing: '0.12em', color: ink, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
+                {[...lyricLine1].slice(0, 20).map((ch, i) => (
+                  <span key={i} className="inline-block" style={{ animation: `roam-charGlow 3.6s ease-in-out ${(i * 0.14).toFixed(2)}s infinite` }}>{ch}</span>
+                ))}
+              </p>
+              <p style={{ fontFamily: "'Noto Sans SC', system-ui, sans-serif", fontWeight: 300, fontSize: 'clamp(10px, 0.9vw, 13px)', letterSpacing: '0.08em', color: inkSoft, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
+                {lyricLine2}
+              </p>
+            </div>
+
+            {/* 翻转过渡遮罩 */}
+            <div className="roam-transition-overlay" />
+
+            {/* 萤火虫 */}
+            <div className="roam-fireflies">
+              {[[6, 22, 0, 11], [22, 60, 1.6, 8], [38, 14, 3.2, 10], [56, 78, 4.4, 12], [72, 38, 2.2, 9], [88, 66, 5, 11]].map(([l, t, d, dur], i) => (
+                <i key={i} style={{ left: `${l}%`, top: `${t}%`, animationDelay: `${d}s`, animationDuration: `${dur}s` }} />
+              ))}
+            </div>
+
+            {/* 暗角 */}
+            <div className="roam-vignette" />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -12,6 +12,7 @@ import { T, useLang } from '../../_shared/pluginRuntime';
 const STORAGE_KEY_AUTO_EXTEND = 'roam_auto_extend';
 const STORAGE_KEY_HISTORY_LIMIT = 'roam_history_limit';
 const STORAGE_KEY_QUALITY = 'roam_quality_pref';
+const STORAGE_KEY_THEME_MODE = 'roam_theme_mode'; // 'preset' | 'follow'
 
 export function RoamSettingsPanel({ onClose }: { onClose: () => void }) {
   useLang();
@@ -21,6 +22,10 @@ export function RoamSettingsPanel({ onClose }: { onClose: () => void }) {
     return v ? parseInt(v, 10) : 100;
   });
   const [quality, setQuality] = useState(() => localStorage.getItem(STORAGE_KEY_QUALITY) || 'auto');
+  const [themeMode, setThemeMode] = useState<'preset' | 'follow'>(() => {
+    const v = localStorage.getItem(STORAGE_KEY_THEME_MODE);
+    return v === 'preset' ? 'preset' : 'follow';
+  });
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_AUTO_EXTEND, String(autoExtend));
@@ -31,6 +36,10 @@ export function RoamSettingsPanel({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_QUALITY, quality);
   }, [quality]);
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_THEME_MODE, themeMode);
+    window.dispatchEvent(new CustomEvent('roam-theme-mode-changed', { detail: themeMode }));
+  }, [themeMode]);
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-[#1e1e1e]">
@@ -126,6 +135,53 @@ export function RoamSettingsPanel({ onClose }: { onClose: () => void }) {
                   )}
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* 视觉主题 */}
+          <div className="rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60 p-4">
+            <div className="text-sm font-medium text-neutral-700 dark:text-stone-200 mb-3">视觉主题</div>
+            <div className="space-y-2">
+              <button
+                onClick={() => setThemeMode('follow')}
+                className={`w-full flex items-center justify-between rounded-lg px-3 py-2.5 transition-colors ${
+                  themeMode === 'follow'
+                    ? 'bg-[#7c4dff]/10 text-[#7c4dff] dark:text-[#b388ff]'
+                    : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-300'
+                }`}
+              >
+                <div className="text-left">
+                  <div className="text-sm font-medium">跟随歌曲</div>
+                  <div className="text-[10px] text-neutral-400 dark:text-stone-500">根据当前歌曲封面动态生成配色与主题</div>
+                </div>
+                {themeMode === 'follow' && (
+                  <div className="w-4 h-4 rounded-full bg-[#7c4dff] flex items-center justify-center shrink-0">
+                    <svg width={8} height={8} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={3}>
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                )}
+              </button>
+              <button
+                onClick={() => setThemeMode('preset')}
+                className={`w-full flex items-center justify-between rounded-lg px-3 py-2.5 transition-colors ${
+                  themeMode === 'preset'
+                    ? 'bg-[#7c4dff]/10 text-[#7c4dff] dark:text-[#b388ff]'
+                    : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-300'
+                }`}
+              >
+                <div className="text-left">
+                  <div className="text-sm font-medium">使用预设</div>
+                  <div className="text-[10px] text-neutral-400 dark:text-stone-500">轮换薄荷、金阳、湖蓝、粉霞、雪白五套预设主题</div>
+                </div>
+                {themeMode === 'preset' && (
+                  <div className="w-4 h-4 rounded-full bg-[#7c4dff] flex items-center justify-center shrink-0">
+                    <svg width={8} height={8} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={3}>
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                )}
+              </button>
             </div>
           </div>
 

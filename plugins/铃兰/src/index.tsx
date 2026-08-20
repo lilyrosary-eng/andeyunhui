@@ -13,7 +13,7 @@ import { QishuiView, type QishuiViewHandle } from './QishuiView';
 import { RoamView } from './RoamView';
 import RoamSidebar, { type RoamSource, type RoamSeedTrack, type RoamHistoryEntry } from './RoamSidebar';
 import RoamSettingsPanel from './RoamSettingsPanel';
-import { getRoamSourceApi, clearRoamCache } from './roamSources';
+import { getRoamSourceApi, clearRoamCache, setLinglanRoamPool } from './roamSources';
 import QishuiSidebar from './QishuiSidebar';
 import { qishuiGetRecommendPlaylists, type QishuiPlaylistCard } from './qishuiApi';
 import NeteaseSidebar from './NeteaseSidebar';
@@ -1102,6 +1102,12 @@ const [roamSettingsOpen, setRoamSettingsOpen] = useState(false);
 // 进入漫游电台时懒加载各平台默认歌曲（未播放时显示）
 useEffect(() => {
   if (!roamOpen) return;
+  // 铃兰：合并所有本地歌单的 tracks 打乱注入
+  // 每次 playlists 变化时重新注入（解决首次进入时 playlists 尚未加载的问题）
+  const allLocalTracks = playlists.flatMap((p) => p.tracks || []);
+  if (allLocalTracks.length) {
+    setLinglanRoamPool(allLocalTracks);
+  }
   const sources: RoamSource[] = ['linglan', 'netease', 'kugou', 'qishui'];
   sources.forEach((src) => {
     if (roamSeedTracks[src]) return; // 已加载
@@ -1111,7 +1117,7 @@ useEffect(() => {
       }
     }).catch(() => {});
   });
-}, [roamOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+}, [roamOpen, playlists]); // eslint-disable-line react-hooks/exhaustive-deps
 
 // 进入汽水模块时拉一次推荐歌单（侧栏铺开），仅游客态
   useEffect(() => {
@@ -2239,6 +2245,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onClose={() => setRoamOpen(false)}
           onOpenSettings={() => setRoamSettingsOpen(v => !v)}
           settingsActive={roamSettingsOpen}
+          onOpenStats={() => setShowStats(v => !v)}
+          statsActive={showStats}
         />
       ) : (
         <MusicSidebar

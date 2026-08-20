@@ -40,6 +40,24 @@ import {
 // ---- 铃兰（本地音乐）----
 import { musicPlayer, type Track } from './musicPlayer';
 
+// 铃兰漫游用：外部注入的本地 tracks 池（合并所有歌单后打乱）
+// 由 index.tsx 在进入漫游时设置
+let linglanTrackPool: Track[] = [];
+let linglanPoolCursor = 0; // 消费指针，每次 fetchBatch 从这里开始取
+export function setLinglanRoamPool(tracks: Track[]) {
+  // 合并 + 去重 + 打乱
+  const seen = new Set<string>();
+  const deduped: Track[] = [];
+  for (const t of tracks) {
+    if (t.filePath && !seen.has(t.filePath)) {
+      seen.add(t.filePath);
+      deduped.push(t);
+    }
+  }
+  linglanTrackPool = deduped.sort(() => Math.random() - 0.5);
+  linglanPoolCursor = 0;
+}
+
 // ============ 映射函数 ============
 
 function neteaseToRoam(t: NeteaseTrack, url: string, quality = ''): RoamSeedTrack {
@@ -186,12 +204,24 @@ const qishuiApiImpl: RoamSourceApi = {
 
 const linglanApi: RoamSourceApi = {
   async fetchBatch(count: number, _offset: number) {
-    // 从本地播放列表中随机取
-    const tracks = musicPlayer.getTracks();
-    if (!tracks.length) return { tracks: [], nextOffset: 0 };
-    const shuffled = [...tracks].sort(() => Math.random() - 0.5);
-    const slice = shuffled.slice(0, Math.min(count, Math.max(count, 10)));
-    return { tracks: slice.map(localToRoam), nextOffset: 0 };
+    // 从外部注入的本地歌曲池中取（已打乱），使用消费指针确保每次取不同的歌
+    if (!linglanTrackPool.length) {
+      // 降级：从 musicPlayer 取
+      const tracks = musicPlayer.getTracks();
+      if (!tracks.length) return { tracks: [], nextOffset: 0 };
+      const shuffled = [...tracks].sort(() => Math.random() - 0.5);
+      const slice = shuffled.slice(0, Math.min(count, Math.max(count, 10)));
+      return { tracks: slice.map(localToRoam), nextOffset: 0 };
+    }
+    // 从游标位置取 count 首，不够则从头循环
+    const take = Math.max(count, 1);
+    const result: Track[] = [];
+    for (let i = 0; i < take; i++) {
+      const idx = (linglanPoolCursor + i) % linglanTrackPool.length;
+      result.push(linglanTrackPool[idx]);
+    }
+    linglanPoolCursor = (linglanPoolCursor + take) % linglanTrackPool.length;
+    return { tracks: result.map(localToRoam), nextOffset: 0 };
   },
   async getSongUrl(track: RoamSeedTrack) {
     // 本地歌曲 filePath 就是播放地址
@@ -216,6 +246,8 @@ export function getRoamSourceApi(source: RoamSource): RoamSourceApi {
 export function clearRoamCache(): void {
   kugouRankCache = null;
   qishuiPlaylistCache = null;
+  linglanTrackPool = [];
+  linglanPoolCursor = 0;
 }
 
 // ============ 类型导出 ============
