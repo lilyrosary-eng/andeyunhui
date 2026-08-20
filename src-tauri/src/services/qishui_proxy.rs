@@ -17,6 +17,20 @@ const ALLOWED_QISHUI_HOSTS: &[&str] = &[
     "api3-normal-lq.qishui.com",
     "api.qishui.com",
     "music.douyin.com",
+    // 音频 CDN 域名（加密流直链）
+    "p3-luna.douyinpic.com",
+    "p6-luna.douyinpic.com",
+    "p9-luna.douyinpic.com",
+    "p26-luna.douyinpic.com",
+    "p3-pc.douyinpic.com",
+    "p6-pc.douyinpic.com",
+    "p9-pc.douyinpic.com",
+    "lf3-music-tos.douyinpic.com",
+    "lf6-music-tos.douyinpic.com",
+    "lf9-music-tos.douyinpic.com",
+    "v3-lq.douyinpic.com",
+    "v6-lq.douyinpic.com",
+    "v9-lq.douyinpic.com",
 ];
 
 // 汽水真实接口路径（按 api3-lq.qishui.com 移动端网关抓包 + 开源实现修正）。
@@ -237,4 +251,50 @@ pub async fn qishui_http_post(
         "body": resp.body,
     });
     Ok(serde_json::to_string(&out).unwrap_or_default())
+}
+
+/// 下载汽水音乐加密音频流（二进制），返回 base64 编码。
+/// 前端收到后解码为 ArrayBuffer 交给 qishuiDecrypt 解密。
+#[tauri::command(rename_all = "snake_case")]
+pub async fn qishui_download_audio(
+    url: String,
+    user_agent: Option<String>,
+    referer: Option<String>,
+) -> Result<String, String> {
+    use base64::Engine;
+    // 域名白名单校验
+    let host = host_of(&url).ok_or("Cannot parse host from url")?;
+    if !ALLOWED_QISHUI_HOSTS.iter().any(|h| h == &host) {
+        return Err(format!("Host not in qishui allowlist: {host}"));
+    }
+    let client = global_client();
+    let ua = user_agent
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36 com.luna.music/100197030");
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(ua) {
+        headers.insert(reqwest::header::USER_AGENT, v);
+    }
+    headers.insert(reqwest::header::ACCEPT, reqwest::header::HeaderValue::from_static("*/*"));
+    if let Some(r) = referer.filter(|s| !s.is_empty()) {
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(&r) {
+            headers.insert(reqwest::header::REFERER, v);
+        }
+    }
+    let resp = client
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| format!("audio download failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("audio download HTTP {}: {}", status.as_u16(), &text[..text.len().min(200)]));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read audio body: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }

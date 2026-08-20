@@ -181,15 +181,25 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
     if (!track) return;
     setPlayingId(track.id);
     try {
-      const { url, spadeA } = await qishuiGetSongUrl(track.id, 320000);
-      if (!url || !spadeA) {
+      const resp = await qishuiGetSongUrl(track.id, 320000);
+      if (!resp.url || !resp.spadeA) {
         setError('该歌曲暂无可播放地址（可能需会员或已下架）');
         setPlayingId(null);
         return;
       }
-      const resp = await fetch(url);
-      const buf = await resp.arrayBuffer();
-      const objectUrl = await decryptQishuiAudio(buf, spadeA);
+      // 沙箱内无 fetch，用 hostApi 代理下载二进制音频
+      const hostApi = (window as any).__HOST_API__;
+      const b64: string = await hostApi.invoke('qishui_download_audio', {
+        url: resp.url,
+        user_agent: 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36 com.luna.music/100197030',
+        referer: 'https://music.douyin.com/',
+      });
+      // base64 → ArrayBuffer
+      const binStr = atob(b64);
+      const buf = new ArrayBuffer(binStr.length);
+      const u8 = new Uint8Array(buf);
+      for (let i = 0; i < binStr.length; i++) u8[i] = binStr.charCodeAt(i);
+      const objectUrl = await decryptQishuiAudio(buf, resp.spadeA);
       const quality = track.br ? `${Math.round(track.br / 1000)}k` : '';
       const playable = trackToPlayable({ ...track, url: objectUrl }, objectUrl, quality);
       const playables: PlayableTrack[] = list.map((tr, i) =>

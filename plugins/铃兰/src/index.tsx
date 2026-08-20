@@ -2396,20 +2396,23 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
         open={showModuleDrawer}
         onClose={() => setShowModuleDrawer(false)}
         isNeteaseOpen={neteaseOpen}
-        onSelectLocalMusic={() => {
-          setNeteaseOpen(false);
-          setKugouOpen(false);
-          setShowModuleDrawer(false);
-        }}
-        onSelectNetease={(key: 'listen' | 'library' | 'radio' | 'search' | 'downloads' | 'login') => {
-          setNeteaseTab(key);
-          setNeteaseOpen(true);
-          setKugouOpen(false);
-        }}
-        onSelectKugou={(key: 'home' | 'roam' | 'search' | 'mine') => {
-          setKugouTab(key);
-          setKugouOpen(true);
-          setNeteaseOpen(false);
+onSelectLocalMusic={() => {
+setNeteaseOpen(false);
+setKugouOpen(false);
+setQishuiOpen(false);
+setShowModuleDrawer(false);
+}}
+onSelectNetease={(key: 'listen' | 'library' | 'radio' | 'search' | 'downloads' | 'login') => {
+setNeteaseTab(key);
+setNeteaseOpen(true);
+setKugouOpen(false);
+setQishuiOpen(false);
+}}
+onSelectKugou={(key: 'home' | 'roam' | 'search' | 'mine') => {
+setKugouTab(key);
+setKugouOpen(true);
+setNeteaseOpen(false);
+setQishuiOpen(false);
           // 切换折叠菜单子项时，清理榜单详情 / 收藏夹等内层级状态，避免覆盖漫游 / 我的
           setKugouActiveRankId(null);
           setSelectedPlaylist(null);
