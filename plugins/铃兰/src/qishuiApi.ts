@@ -355,3 +355,79 @@ export async function qishuiGetSongUrl(id: string, br = 320000): Promise<QishuiS
     br: Number(v0?.video_meta?.bitrate || vm?.bitrate || br),
   };
 }
+
+// ============ 歌手 / 专辑详情（DetailDrawer 接入用） ============
+
+// 歌手详情
+export interface QishuiArtistDetail {
+  id: string;
+  name: string;
+  cover?: string;
+  description?: string;
+  hotSongs: QishuiTrack[];
+  albums: { id: string; name: string; cover?: string }[];
+}
+
+export async function qishuiGetArtistDetail(artistId: string): Promise<QishuiArtistDetail | null> {
+  const r = await qishuiRequest('/artist/detail', {
+    method: 'POST',
+    body: { artist_id: artistId, cursor: '', count: 50 },
+  });
+  const a = r?.data?.artist || r?.artist || {};
+  if (!a.id && !a.name) return null;
+  const songs: any[] = r?.data?.media_resources || r?.media_resources || [];
+  const trackList = songs
+    .map((res: any) => res.entity?.track_wrapper?.track || res.entity?.track || res.track)
+    .filter(Boolean)
+    .map(mapTrack)
+    .filter((t: QishuiTrack) => t.id);
+  const albums: any[] = r?.data?.albums || r?.albums || [];
+  return {
+    id: String(a.id ?? artistId),
+    name: a.name || '未知歌手',
+    cover: extractCover(a.url_avatar) || extractCover(a.url_cover),
+    description: a.description || a.intro,
+    hotSongs: trackList,
+    albums: albums.map((al: any) => ({
+      id: String(al.id ?? al.album_id ?? ''),
+      name: al.name || al.title || '未知专辑',
+      cover: extractCover(al.url_cover),
+    })),
+  };
+}
+
+// 专辑详情
+export interface QishuiAlbumDetail {
+  id: string;
+  name: string;
+  cover?: string;
+  artistName: string;
+  artistId?: string;
+  description?: string;
+  tracks: QishuiTrack[];
+}
+
+export async function qishuiGetAlbumDetail(albumId: string): Promise<QishuiAlbumDetail | null> {
+  const r = await qishuiRequest('/album/detail', {
+    method: 'POST',
+    body: { album_id: albumId, cursor: '', count: 100 },
+  });
+  const a = r?.data?.album || r?.album || {};
+  if (!a.id && !a.name) return null;
+  const songs: any[] = r?.data?.media_resources || r?.media_resources || [];
+  const trackList = songs
+    .map((res: any) => res.entity?.track_wrapper?.track || res.entity?.track || res.track)
+    .filter(Boolean)
+    .map(mapTrack)
+    .filter((t: QishuiTrack) => t.id);
+  const artist = a.artists?.[0] || a.artist;
+  return {
+    id: String(a.id ?? albumId),
+    name: a.name || a.title || '未知专辑',
+    cover: extractCover(a.url_cover),
+    artistName: artist?.name || '未知歌手',
+    artistId: artist?.id ? String(artist.id) : undefined,
+    description: a.description || a.intro,
+    tracks: trackList,
+  };
+}

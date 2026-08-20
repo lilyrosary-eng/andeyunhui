@@ -12,6 +12,8 @@ import {
   qishuiGetPlaylistTracks,
   qishuiGetPlaylistInfo,
   qishuiGetSongUrl,
+  qishuiGetArtistDetail,
+  qishuiGetAlbumDetail,
   type QishuiTrack,
   type QishuiPlaylistCard,
 } from './qishuiApi';
@@ -36,6 +38,7 @@ import {
 } from './_shared/OnlineMusicTemplates';
 import { EmptyState } from './_shared/OnlineMusicExtras';
 import { TrackRow, type PlayableTrack } from './_shared/TrackRow';
+import { DetailDrawer, type SharedDrawerType, type SharedArtistData, type SharedAlbumData } from './_shared/DetailDrawer';
 import type { TempPlaylist } from './NeteaseView';
 
 const ACCENT = '#00c2c7'; // 汽水青蓝
@@ -99,6 +102,11 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
   const [qrStatus, setQrStatus] = useState('');
   const [qrLoading, setQrLoading] = useState(false);
   const pollRef = useRef<number | null>(null);
+  // 歌手/专辑抽屉
+  const [drawer, setDrawer] = useState<SharedDrawerType>({ type: 'none' });
+  const [drawerArtist, setDrawerArtist] = useState<SharedArtistData | null>(null);
+  const [drawerAlbum, setDrawerAlbum] = useState<SharedAlbumData | null>(null);
+  const [drawerLoading, setDrawerLoading] = useState(false);
 
   useEffect(() => { setTab(initialTab); }, [initialTab]);
 
@@ -249,6 +257,57 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
     setQrStatus('');
     setQrImg('');
   }, [auth]);
+
+  // 打开歌手详情抽屉
+  const openArtistDrawer = useCallback(async (id: string | number) => {
+    const sid = String(id);
+    setDrawer({ type: 'artist', id: sid });
+    setDrawerArtist(null);
+    setDrawerLoading(true);
+    try {
+      const detail = await qishuiGetArtistDetail(sid);
+      if (detail) {
+        setDrawerArtist({
+          id: detail.id,
+          name: detail.name,
+          cover: detail.cover,
+          description: detail.description,
+          hotSongs: detail.hotSongs.map((t) => trackToPlayable(t, '')),
+          albums: detail.albums.map((a) => ({ id: a.id, name: a.name, cover: a.cover || '' })),
+        });
+      }
+    } catch (e) {
+      console.error('[qishui] artist detail failed', e);
+    } finally {
+      setDrawerLoading(false);
+    }
+  }, []);
+
+  // 打开专辑详情抽屉
+  const openAlbumDrawer = useCallback(async (id: string | number) => {
+    const aid = String(id);
+    setDrawer({ type: 'album', id: aid });
+    setDrawerAlbum(null);
+    setDrawerLoading(true);
+    try {
+      const detail = await qishuiGetAlbumDetail(aid);
+      if (detail) {
+        setDrawerAlbum({
+          id: detail.id,
+          name: detail.name,
+          cover: detail.cover || '',
+          artistName: detail.artistName,
+          artistId: detail.artistId,
+          description: detail.description,
+          tracks: detail.tracks.map((t) => trackToPlayable(t, '')),
+        });
+      }
+    } catch (e) {
+      console.error('[qishui] album detail failed', e);
+    } finally {
+      setDrawerLoading(false);
+    }
+  }, []);
 
   // 清理轮询
   useEffect(() => {
@@ -431,13 +490,15 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
                 {!loading && tracks.length > 0 && (
                   <div className="space-y-0.5">
                     {tracks.map((t, i) => (
-                      <TrackRow
-                        key={t.id + i}
-                        track={trackToPlayable(t, '')}
-                        index={i}
-                        isPlaying={playingId === t.id}
-                        onPlay={() => handlePlayTrack(t)}
-                      />
+<TrackRow
+key={t.id + i}
+track={{...trackToPlayable(t, ''), artistId: t.artistId, albumId: t.albumId}}
+index={i}
+isPlaying={playingId === t.id}
+onPlay={() => handlePlayTrack(t)}
+onOpenArtist={() => { if (t.artistId) openArtistDrawer(t.artistId); }}
+onOpenAlbum={() => { if (t.albumId) openAlbumDrawer(t.albumId); }}
+/>
                     ))}
                   </div>
                 )}
@@ -475,13 +536,15 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
                 </div>
                 <div className="space-y-0.5">
                   {tracks.map((t, i) => (
-                    <TrackRow
-                      key={t.id + i}
-                      track={trackToPlayable(t, '')}
-                      index={i}
-                      isPlaying={playingId === t.id}
-                      onPlay={() => handlePlayTrack(t)}
-                    />
+<TrackRow
+key={t.id + i}
+track={{...trackToPlayable(t, ''), artistId: t.artistId, albumId: t.albumId}}
+index={i}
+isPlaying={playingId === t.id}
+onPlay={() => handlePlayTrack(t)}
+onOpenArtist={() => { if (t.artistId) openArtistDrawer(t.artistId); }}
+onOpenAlbum={() => { if (t.albumId) openAlbumDrawer(t.albumId); }}
+/>
                   ))}
                 </div>
               </>
@@ -600,6 +663,33 @@ export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(fu
           </div>
         )}
       </div>
+
+      {/* 歌手/专辑详情抽屉（从上方滑出） */}
+      <DetailDrawer
+        drawer={drawer}
+        onClose={() => { setDrawer({ type: 'none' }); setDrawerArtist(null); setDrawerAlbum(null); }}
+        callbacks={{
+          onPlayTracks: (trks, idx, name) => {
+            // 将 PlayableTrack[] 转回 QishuiTrack[] 进行播放
+            const qtracks: QishuiTrack[] = trks.map((t) => ({
+              id: t.id.replace('qishui-', ''),
+              name: t.title,
+              artist: t.artist,
+              album: t.album,
+              duration: t.durationSecs,
+              cover: t.coverPath,
+            }));
+            void doPlay(qtracks, idx, name || '汽水音乐');
+          },
+          onOpenArtist: openArtistDrawer,
+          onOpenAlbum: openAlbumDrawer,
+        }}
+        artist={drawerArtist}
+        album={drawerAlbum}
+        isLoading={drawerLoading}
+        accentColor={ACCENT}
+        loggedIn={!!auth}
+      />
     </div>
   );
 });
