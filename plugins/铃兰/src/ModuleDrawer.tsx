@@ -1,7 +1,7 @@
 /// <reference path="../../global.d.ts" />
 import React from "react";
 const { useState, useEffect } = React;
-import { X, Compass } from 'lucide-react';
+import { X } from 'lucide-react';
 import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon, ListenNowIcon, LibraryIcon, RadioIcon, SearchIcon, UserIcon, DownloadIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import type { NeteaseProfile } from './neteaseApi';
@@ -23,8 +23,8 @@ interface ModuleDrawerProps {
   onSelectKugou?: (key: 'home' | 'roam' | 'search' | 'mine') => void;
   // 当前是否已切换到汽水音乐模块
   isQishuiOpen?: boolean;
-  // 点击汽水折叠菜单子项时回调：key 为 recommend/top/search
-  onSelectQishui?: (key: 'recommend' | 'top' | 'search') => void;
+// 点击汽水折叠菜单子项时回调：key 为 listen/library/search/about
+onSelectQishui?: (key: 'listen' | 'library' | 'search' | 'about') => void;
 }
 
 // 通用首页图标（云按钮折叠菜单复用）
@@ -227,11 +227,12 @@ const kugouItems: { key: 'home' | 'roam' | 'search' | 'mine'; icon: React.ReactE
   { key: 'mine', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 
-// 汽水折叠菜单子项（推荐 / 榜单 / 搜索）：游客态第一版
-const qishuiItems: { key: 'recommend' | 'top' | 'search'; icon: React.ReactElement }[] = [
-  { key: 'recommend', icon: React.createElement(Compass, { size: 16 }) },
-  { key: 'top', icon: React.createElement(LibraryIcon, { size: 16 }) },
-  { key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
+// 汽水折叠菜单子项（现在就听 / 漫游 / 搜索 / 关于）：游客态，对齐网易云 tab 结构
+const qishuiItems: { key: 'listen' | 'library' | 'search' | 'about'; icon: React.ReactElement }[] = [
+{ key: 'listen', icon: React.createElement(ListenNowIcon, { size: 16 }) },
+{ key: 'library', icon: React.createElement(LibraryIcon, { size: 16 }) },
+{ key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
+{ key: 'about', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 
 export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic, onSelectNetease, neteaseProfile, isKugouOpen, onSelectKugou, isQishuiOpen, onSelectQishui }: ModuleDrawerProps) {
@@ -395,24 +396,28 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
             active={!!isQishuiOpen}
             expanded={qishuiExpanded}
             onToggleExpand={() => setQishuiExpanded((v) => !v)}
-            onSelect={() => { if (onSelectQishui) onSelectQishui('recommend'); onClose(); }}
+            onSelect={() => { if (onSelectQishui) onSelectQishui('listen'); onClose(); }}
             icon={React.createElement(MusicIcon, { size: 18 })}
             title={T('music.moduleDrawer.qishui.title') || '汽水音乐'}
             accent={accents.qishui}
           >
             {qishuiItems.map((item) => {
-              const titleKey = item.key === 'recommend' ? 'music.moduleDrawer.qishui.recommend'
-                : item.key === 'top' ? 'music.moduleDrawer.qishui.top'
-                : 'music.moduleDrawer.qishui.search';
-              const descKey = item.key === 'recommend' ? 'music.moduleDrawer.qishui.recommendDesc'
-                : item.key === 'top' ? 'music.moduleDrawer.qishui.topDesc'
-                : 'music.moduleDrawer.qishui.searchDesc';
-              const titleDefault = item.key === 'recommend' ? '推荐'
-                : item.key === 'top' ? '榜单'
-                : '搜索';
-              const descDefault = item.key === 'recommend' ? '推荐歌单 / 热门榜单'
-                : item.key === 'top' ? '官方榜单精选'
-                : '找歌找专辑';
+              const titleKey = item.key === 'listen' ? 'music.moduleDrawer.qishui.listen'
+                : item.key === 'library' ? 'music.moduleDrawer.qishui.library'
+                : item.key === 'search' ? 'music.moduleDrawer.qishui.search'
+                : 'music.moduleDrawer.qishui.about';
+              const descKey = item.key === 'listen' ? 'music.moduleDrawer.qishui.listenDesc'
+                : item.key === 'library' ? 'music.moduleDrawer.qishui.libraryDesc'
+                : item.key === 'search' ? 'music.moduleDrawer.qishui.searchDesc'
+                : 'music.moduleDrawer.qishui.aboutDesc';
+              const titleDefault = item.key === 'listen' ? '现在就听'
+                : item.key === 'library' ? '漫游'
+                : item.key === 'search' ? '搜索'
+                : '关于';
+              const descDefault = item.key === 'listen' ? '推荐歌单 / 热门榜单'
+                : item.key === 'library' ? '发现更多歌单'
+                : item.key === 'search' ? '找歌找专辑'
+                : '游客态说明';
               const title = T(titleKey) || titleDefault;
               const desc = T(descKey) || descDefault;
               return (

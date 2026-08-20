@@ -1,17 +1,13 @@
 // 汽水音乐（字节跳动 luna/helium）API 层
 //
-// 设计对齐 kugouApi.ts 范式，接口路径/参数按真实抓包 + 开源实现（guowenye/qishui-api、
-// SaKongA/PopDownloader、520Qiuyu/qishuiMusicAnalysis）修正：
-//   - 域名：api3-lq.qishui.com（移动端网关）
+// 域名：api3-lq.qishui.com（移动端网关）
+// 经实测：游客态只读接口无需签名头（x-helios/x-argus 等），直接 POST 即可。
 //   - 推荐：POST /luna/discover/mix
-//   - 榜单： discover 返回的 block 中解析，无独立 /rank
-//   - 搜索：POST /luna/search/track
-//   - 歌单详情：POST /luna/playlist/detail
+//   - 搜索：POST /luna/search/track → result_groups[].data[].entity.track
+//   - 歌单详情：POST /luna/playlist/detail → media_resources[].entity.track_wrapper.track
 //   - 歌词：GET /luna/h5/seo_track?track_id=...&device_platform=web
-//   - 播放地址：POST /luna/media-player（拿到 player_infos 后再取真实音频 URL）
-//   - 游客态只读接口仍需字节系签名头（x-helios/x-argus/x-gorgon/x-ladon/x-khronos 等）。
-//     本层支持 window.__QISHUI_SIGN__ 外部注入完整签名头，便于抓包替换验证。
-// 登录态（扫码）后续 Phase 补。
+//   - 播放地址：POST /luna/media-player → data.player_infos[].video_model.video_list[]
+// 封面 URL 结构：url_cover.urls[0] + url_cover.uri，或直接用 url_cover.urls[0] + '/' + url_cover.uri
 
 const hostApi: any = (window as any).__HOST_API__ || { invoke: async () => ({}) };
 
@@ -32,9 +28,9 @@ const ORIGIN = 'https://music.douyin.com';
 // 伪造国内出口 IP，避免非 CN 出口被拦（与 netease/kugou 同策略）
 const REAL_IP = '113.66.232.251';
 const UA_WEB =
-  'Mozilla/5.0 (Linux; Android 13; 23013RK75C Build/TKQ1.220905.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36 com.luna.music/100197030 (Linux; U; Android 13; zh_CN; 23013RK75C; Build/TKQ1.220905.001; Cronet/TTNetVersion:120.0.0.0)';
+  'Mozilla/5.0 (Linux; Android 13; 23013RK75C Build/TKQ1.220905.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36 com.luna.music/100197030 (Linux; U; Android 13; zh_CN; 23013RK75C; Build:TKQ1.220905.001; Cronet/TTNetVersion:120.0.0.0)';
 
-// 移动端公共 query，与真实 App 对齐；version_code 等随官方更新可能需调整
+// 移动端公共 query，与真实 App 对齐
 function getCommonParams(): Record<string, string> {
   const did = getDeviceId();
   return {
@@ -60,7 +56,7 @@ function getCommonParams(): Record<string, string> {
 
 // ============ 类型 ============
 export interface QishuiTrack {
-  id: string;            // 汽水 songId 为字符串
+  id: string;
   name: string;
   artist: string;
   album: string;
@@ -68,8 +64,8 @@ export interface QishuiTrack {
   cover?: string;
   url?: string;          // 解密后 objectURL（运行时填充）
   fee?: number;          // 0 免费 / 其他 付费/会员
-  encryptUrl?: string;   // 加密流直链（song/url 返回）
-  spadeA?: string;       // 解密密钥（song/url 返回）
+  encryptUrl?: string;   // 加密流直链
+  spadeA?: string;       // 解密密钥
   br?: number;           // 码率 bps
   artistId?: string;
   albumId?: string;
@@ -100,34 +96,26 @@ function toQs(obj: Record<string, any>): string {
   ).toString();
 }
 
-// ============ 字节系轻量签名（x-helios 占位） ============
-// 完整 x-helios/x-argus/x-gorgon/x-ladon 为 JSVMP，前端无法稳定生成。
-// 游客态只读接口校验相对较松，但仍需一组基本 header。
-// 优先使用 window.__QISHUI_SIGN__ 外部注入的完整签名头；否则用占位方案。
-function buildSignHeaders(): Record<string, string> {
-  const external = getExternalSign();
-  if (external) return external;
-
-  const ts = Math.floor(Date.now() / 1000).toString();
-  const did = getDeviceId();
-  // 占位 helios：抓包后请覆盖 window.__QISHUI_SIGN__
-  const helios = btoa(`${did}.${ts}`);
-  return {
-    'x-helios': helios,
-    'x-argus': '',
-    'x-gorgon': '',
-    'x-ladon': '',
-    'x-khronos': ts,
-    'x-common-params-v2': '',
-    'x-client-id': did,
-  };
+// ============ 封面 URL 提取 ============
+// 汽水封面结构: { uri: "tos-cn-xxx/xxx", urls: ["https://p3-luna.douyinpic.com/img/", ...], template_prefix: "tplv-xxx" }
+// 完整 URL = urls[0] + uri + (template_prefix ? "~" + template_prefix + ".image" : "")
+function extractCover(urlCover: any): string | undefined {
+  if (!urlCover) return undefined;
+  if (typeof urlCover === 'string') return urlCover;
+  const uri = urlCover.uri;
+  const urls = urlCover.urls;
+  if (!uri) return undefined;
+  if (urls && Array.isArray(urls) && urls.length > 0) {
+    return `${urls[0]}${uri}`;
+  }
+  return undefined;
 }
 
 // ============ 请求 helper ============
 interface QishuiRequestOpts {
   method?: 'GET' | 'POST';
-  params?: Record<string, any>; // 会合并进 URL query（GET/POST 都拼）
-  body?: Record<string, any>;   // POST 时作为 JSON body
+  params?: Record<string, any>;
+  body?: Record<string, any>;
   cookie?: string;
   referer?: string;
 }
@@ -139,7 +127,9 @@ async function qishuiRequest(
   const method = opts.method || (opts.body ? 'POST' : 'GET');
   const query = { ...getCommonParams(), ...(opts.params || {}) };
   const url = `${API_BASE}${path}?${toQs(query)}`;
-  const extra = buildSignHeaders();
+
+  // 签名头：优先使用外部注入；否则不发（实测游客态无需签名）
+  const extra = getExternalSign() || {};
 
   const bodyStr = opts.body ? JSON.stringify(opts.body) : '';
 
@@ -163,10 +153,13 @@ async function qishuiRequest(
   if (typeof parsed.body === 'string') {
     try { return JSON.parse(parsed.body); } catch { return { raw: parsed.body }; }
   }
-  return parsed.body || {};
+  return parsed.body || parsed;
 }
 
 // ============ 业务函数 ============
+
+// 从 API 返回的 track 对象提取 QishuiTrack
+// 真实结构: { id, name, album: { id, name, url_cover: { uri, urls } }, artists: [{ id, name }], duration, ... }
 function mapTrack(s: any): QishuiTrack {
   const artists = s.artists || s.artistInfos || [];
   const artist = Array.isArray(artists)
@@ -180,14 +173,15 @@ function mapTrack(s: any): QishuiTrack {
     artist,
     album,
     duration: (s.duration ? s.duration / 1000 : s.dt ? s.dt / 1000 : 0),
-    cover: s.cover || s.coverUrl || s.album?.cover,
+    cover: extractCover(s.url_cover || s.album?.url_cover) || s.cover || s.coverUrl,
     fee: s.fee ?? s.payType ?? 0,
-    artistId: s.artistId ? String(s.artistId) : undefined,
-    albumId: s.albumId ? String(s.albumId) : undefined,
+    artistId: s.artists?.[0]?.id ? String(s.artists[0].id) : (s.artistId ? String(s.artistId) : undefined),
+    albumId: s.album?.id ? String(s.album.id) : (s.albumId ? String(s.albumId) : undefined),
   };
 }
 
-// 搜索：search_type=track 为歌曲；playlist 为歌单
+// 搜索：POST /luna/search/track
+// 返回结构: { result_groups: [{ id: "tracks", data: [{ meta: {item_type:"track"}, entity: { track: {...} } }] }] }
 export async function qishuiSearch(keyword: string, type = 1, page = 1, pageSize = 30): Promise<QishuiTrack[]> {
   const r = await qishuiRequest('/search/track', {
     method: 'POST',
@@ -202,24 +196,22 @@ export async function qishuiSearch(keyword: string, type = 1, page = 1, pageSize
       ab_param: JSON.stringify({ enable_search_user: true, enable_search_video: 1 }),
     },
   });
-  // 汽水搜索返回结构可能有多层包装，依次尝试多种路径
-  const groups = r?.result_groups || r?.data?.result_groups || r?.data?.groups || [];
-  let list: any[] = [];
-  if (Array.isArray(groups) && groups.length) {
-    // result_groups 模式：每个 group 内有 data 数组
-    list = groups.flatMap((g: any) => g.data || g.tracks || g.songs || []);
-  } else {
-    // 降级：直接从多种可能路径提取歌曲列表
-    list = r?.data?.songList || r?.data?.songs || r?.data?.list || r?.data?.tracks
-      || r?.songList || r?.songs || r?.list || r?.tracks || [];
-  }
-  console.log('[qishui] search response keys:', Object.keys(r || {}), 'groups:', groups.length, 'list:', list.length);
+  // 解析: result_groups[].data[].entity.track
+  const groups = r?.result_groups || [];
+  const list: any[] = Array.isArray(groups)
+    ? groups.flatMap((g: any) => {
+        const items = g.data || g.tracks || g.songs || [];
+        return items.map((item: any) => item?.entity?.track || item?.track || item).filter(Boolean);
+      })
+    : [];
+  console.log('[qishui] search: groups=', groups.length, 'tracks=', list.length);
   return (Array.isArray(list) ? list : []).map(mapTrack).filter((t: QishuiTrack) => t.id);
 }
 
 // 解析 discover/mix 返回的 block，提取歌单卡片
+// 真实结构: { inner_block: [{ type, title, resources: [{ entity: { playlist: { id, title, url_cover, count_tracks, ... } } }] }] }
 function extractPlaylistsFromDiscover(data: any): QishuiPlaylistCard[] {
-  const blocks = data?.inner_block || data?.blocks || data?.data || (Array.isArray(data) ? data : []);
+  const blocks = data?.inner_block || data?.blocks || data?.data?.inner_block || (Array.isArray(data?.data) ? data.data : []);
   const out: QishuiPlaylistCard[] = [];
   for (const b of Array.isArray(blocks) ? blocks : []) {
     const resources = b.resources || b.data || b.items || [];
@@ -228,10 +220,10 @@ function extractPlaylistsFromDiscover(data: any): QishuiPlaylistCard[] {
       if (!p) continue;
       out.push({
         id: String(p.id ?? p.playlist_id ?? p.pid ?? '') || `qishui-disc-${out.length}`,
-        name: p.name || p.title || '未知歌单',
-        coverImgUrl: p.cover?.url || p.coverUrl || p.cover || '',
-        trackCount: p.trackCount || p.songCount || p.track_count || 0,
-        playCount: p.playCount || p.play_count || 0,
+        name: p.name || p.title || p.public_title || '未知歌单',
+        coverImgUrl: extractCover(p.url_cover) || p.coverUrl || p.cover || '',
+        trackCount: p.trackCount || p.count_tracks || p.songCount || p.track_count || p.resource_cnt?.track_cnt || 0,
+        playCount: p.playCount || p.play_count || p.stats?.count_collected || 0,
         creator: p.creator?.name || p.creator,
       });
     }
@@ -239,7 +231,7 @@ function extractPlaylistsFromDiscover(data: any): QishuiPlaylistCard[] {
   return out;
 }
 
-// 推荐歌单（discover/mix block_type=playlist）
+// 推荐歌单
 export async function qishuiGetRecommendPlaylists(limit = 20): Promise<QishuiPlaylistCard[]> {
   const r = await qishuiRequest('/discover/mix', {
     method: 'POST',
@@ -255,7 +247,7 @@ export async function qishuiGetRecommendPlaylists(limit = 20): Promise<QishuiPla
   return extractPlaylistsFromDiscover(r);
 }
 
-// 榜单：discover/mix 中 block_type=chart 或 discover_feed_radio 里的榜单块
+// 榜单
 export async function qishuiGetTopLists(): Promise<QishuiPlaylistCard[]> {
   const r = await qishuiRequest('/discover/mix', {
     method: 'POST',
@@ -270,7 +262,7 @@ export async function qishuiGetTopLists(): Promise<QishuiPlaylistCard[]> {
   });
   const list = extractPlaylistsFromDiscover(r);
   if (list.length) return list;
-  // 兜底：尝试通用 discover
+  // 兜底：通用 discover
   const r2 = await qishuiRequest('/discover', {
     method: 'POST',
     body: { cursor: '', count: 30 },
@@ -279,6 +271,7 @@ export async function qishuiGetTopLists(): Promise<QishuiPlaylistCard[]> {
 }
 
 // 歌单详情（歌曲列表）
+// 返回结构: { media_resources: [{ id, type:"track", entity: { track_wrapper: { track: {...} } } }], playlist: { title, ... } }
 export async function qishuiGetPlaylistTracks(pid: string): Promise<QishuiTrack[]> {
   const r = await qishuiRequest('/playlist/detail', {
     method: 'POST',
@@ -286,31 +279,44 @@ export async function qishuiGetPlaylistTracks(pid: string): Promise<QishuiTrack[
       playlist_id: pid,
       playlist_type: 0,
       cursor: '',
-      count: 100,
+      count: 200,
     },
   });
-  // 多种可能路径：汽水 API 版本不同返回结构可能变化
+  // 解析: media_resources[].entity.track_wrapper.track
   let list: any[] = [];
-  if (r?.data?.media_resources) {
+  if (r?.media_resources) {
+    list = r.media_resources
+      .map((res: any) => res.entity?.track_wrapper?.track || res.entity?.track || res.track)
+      .filter(Boolean);
+  } else if (r?.data?.media_resources) {
     list = r.data.media_resources
       .map((res: any) => res.entity?.track_wrapper?.track || res.entity?.track || res.track)
       .filter(Boolean);
-  } else if (r?.data?.songs) {
-    list = r.data.songs;
-  } else if (r?.data?.list) {
-    list = r.data.list;
-  } else if (r?.data?.tracks) {
-    list = r.data.tracks;
-  } else if (r?.data?.playlist?.tracks) {
-    list = r.data.playlist.tracks;
-  } else {
-    list = r?.list || r?.tracks || [];
   }
-  console.log('[qishui] playlist detail keys:', Object.keys(r || {}), 'tracks:', list.length);
+  console.log('[qishui] playlist detail: tracks=', list.length);
   return (Array.isArray(list) ? list : []).map(mapTrack).filter((t: QishuiTrack) => t.id);
 }
 
-// 歌词（LRC 文本）
+// 获取歌单信息
+export async function qishuiGetPlaylistInfo(pid: string): Promise<{ name: string; cover?: string; trackCount: number }> {
+  const r = await qishuiRequest('/playlist/detail', {
+    method: 'POST',
+    body: {
+      playlist_id: pid,
+      playlist_type: 0,
+      cursor: '',
+      count: 1,
+    },
+  });
+  const p = r?.playlist || r?.data?.playlist;
+  return {
+    name: p?.title || p?.name || p?.public_title || '歌单详情',
+    cover: extractCover(p?.url_cover),
+    trackCount: p?.count_tracks || p?.trackCount || p?.resource_cnt?.track_cnt || 0,
+  };
+}
+
+// 歌词
 export async function qishuiGetLyric(id: string): Promise<string> {
   const r = await qishuiRequest('/h5/seo_track', {
     method: 'GET',
@@ -338,7 +344,7 @@ export async function qishuiGetSongUrl(id: string, br = 320000): Promise<QishuiS
       limited_free_param: {},
     },
   });
-  const info = r?.data?.player_infos?.[0];
+  const info = r?.data?.player_infos?.[0] || r?.player_infos?.[0];
   const vmRaw = info?.video_model;
   const vm = typeof vmRaw === 'string' ? JSON.parse(vmRaw) : vmRaw;
   const v0 = vm?.video_list?.[0];
