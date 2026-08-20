@@ -926,34 +926,17 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
       {/* 首页热榜 */}
       {tab === 'home' && activeRankId === null && !playlistMode && (
         <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-6">
-          {/* 顶部标题 + 播放全部 */}
-          <div className="flex items-center justify-between pt-4 pb-3">
-            <h2 className="text-2xl font-bold text-neutral-800 dark:text-stone-100">热榜</h2>
-            <button
-              onClick={() => {
-                if (homeHeroTracks.length) {
-                  void playTrackList(homeHeroTracks, 0, '热榜');
-                }
-              }}
-              disabled={homeHeroLoading || homeHeroTracks.length === 0}
-              className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-500/90 hover:bg-blue-500 text-white text-sm font-medium disabled:opacity-50"
-            >
-              <PlayIcon size={14} />
-              播放全部
-            </button>
-          </div>
-
-          {/* 为你推荐：Hero 大卡片 + 横向滚动歌单（始终展示，对齐网易云首页结构） */}
+          {/* 个性化推荐：Hero 大卡片 + 横向滚动歌单 */}
           {rankList.length > 0 && (() => {
             const rec = rankList;
             const openRec = (pl: KugouPlaylistCard) =>
               openUserPlaylist({ id: pl.id, gid: pl.gid, name: pl.name, cover: pl.cover });
             return (
-              <section className="mt-2 mb-8">
+              <section className="mt-4 mb-8">
                 <div className="flex items-center gap-2 mb-4">
                   <Sparkles size={18} className="text-orange-500" />
                   <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">为你推荐</h3>
-                  <span className="text-xs text-neutral-400 dark:text-stone-500">热门歌单</span>
+                  <span className="text-xs text-neutral-400 dark:text-stone-500">个性化歌单推荐</span>
                 </div>
                 <HeroCard
                   rank={rec[0]}
@@ -966,7 +949,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
                 />
                 {rec.length > 1 && (
                   <div className="flex gap-3 overflow-x-auto scrollbar-thin py-3 mt-2">
-                    {rec.slice(1, 11).map((r) => (
+                    {rec.slice(1).map((r) => (
                       <RankCard key={r.id} rank={r} onClick={() => openRec(r)} />
                     ))}
                   </div>
@@ -974,82 +957,6 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
               </section>
             );
           })()}
-
-          {/* 每日推荐歌曲（个性化歌曲流，登录更精准，游客也可用） */}
-          {recommendTracks.length > 0 && (
-            <section className="mb-8">
-              <div className="flex items-center gap-2 mb-4">
-                <Sparkles size={18} className="text-orange-500" />
-                <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">每日推荐</h3>
-                <span className="text-xs text-neutral-400 dark:text-stone-500">根据你的口味个性化推荐</span>
-                <button
-                  onClick={() => void playTrackList(recommendTracks, 0, '每日推荐')}
-                  className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-blue-500/90 hover:bg-blue-500 text-white text-xs font-medium ml-auto"
-                >
-                  <PlayIcon size={12} />
-                  播放全部
-                </button>
-              </div>
-              <div className="space-y-1">
-                {recommendTracks.slice(0, 10).map((t, i) => (
-                  <div
-                    key={t.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => void playTrackList(recommendTracks, i, '每日推荐')}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        void playTrackList(recommendTracks, i, '每日推荐');
-                      }
-                    }}
-                    className="group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-stone-800/50 active:bg-neutral-300/50 dark:active:bg-stone-700/50 transition-colors text-left cursor-pointer"
-                  >
-                    <div className="w-10 h-10 rounded-md overflow-hidden bg-neutral-200/60 dark:bg-stone-700/60 flex items-center justify-center shrink-0">
-                      {t.cover ? (
-                        <img src={t.cover} alt="" className="w-full h-full object-cover" />
-                      ) : (
-                        <MusicIcon size={16} className="text-neutral-400 dark:text-stone-500" />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium text-sm text-neutral-800 dark:text-stone-100 truncate">{t.name}</div>
-                      <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">
-                        {t.artist}{t.album ? ` · ${t.album}` : ''}
-                      </div>
-                    </div>
-                    <span className="text-xs text-neutral-400 dark:text-stone-500 shrink-0">{formatDuration(t.duration)}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
-          {/* 热榜 */}
-          {rankList.length > 0 && (
-            <section>
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-base font-bold text-neutral-800 dark:text-stone-100">热榜</h3>
-                <button
-                  onClick={() => {
-                    if (homeHeroTracks.length) {
-                      void playTrackList(homeHeroTracks, 0, '热榜');
-                    }
-                  }}
-                  disabled={homeHeroLoading || homeHeroTracks.length === 0}
-                  className="btn-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-neutral-100/70 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 text-xs font-medium disabled:opacity-50"
-                >
-                  <PlayIcon size={12} />
-                  播放全部
-                </button>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-                {rankList.map((r) => (
-                  <RankCard key={r.id} rank={r} size="lg" onClick={() => openRank(r.id)} />
-                ))}
-              </div>
-            </section>
-          )}
 
           {!loading && !error && rankList.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-3 py-16 text-neutral-400 dark:text-stone-500">
