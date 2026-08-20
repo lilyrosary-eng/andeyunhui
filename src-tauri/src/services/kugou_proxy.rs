@@ -143,10 +143,8 @@ fn build_headers(
     if let Ok(v) = reqwest::header::HeaderValue::from_str(ua) {
         headers.insert(reqwest::header::USER_AGENT, v);
     }
-    {
-        let v = reqwest::header::HeaderValue::from_static("application/x-www-form-urlencoded");
-        headers.insert(reqwest::header::CONTENT_TYPE, v);
-    }
+    // Note: Content-Type 不再默认设置，由 caller 通过 extra headers 传入（POST 请求时）。
+    // GET 请求设置 Content-Type 会导致 gateway openresty 返回 500。
     {
         let v = reqwest::header::HeaderValue::from_static("*/*");
         headers.insert(reqwest::header::ACCEPT, v);
@@ -253,6 +251,8 @@ async fn proxy_internal(
         .map_err(|e| format!("request failed: {e}"))?;
 
     let status = resp.status().as_u16();
+    // 诊断日志：打印请求 URL 和响应状态
+    eprintln!("[kugou_proxy] {} {} → status {}", method, &url[..url.len().min(120)], status);
 
     let cookies: Vec<String> = resp
         .headers()

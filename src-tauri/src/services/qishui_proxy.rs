@@ -228,7 +228,14 @@ async fn proxy_internal(
         .headers(headers)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| {
+            let is_connect = e.is_connect();
+            let is_timeout = e.is_timeout();
+            let is_request = e.is_request();
+            let kind = if is_timeout { "timeout" } else if is_connect { "connect" } else if is_request { "request" } else { "unknown" };
+            eprintln!("[qishui_proxy] {} {} error: kind={} msg={}", method, &url[..url.len().min(80)], kind, e);
+            format!("request failed ({kind}): {e}")
+        })?;
     let status = resp.status().as_u16();
     let cookies: Vec<String> = resp
         .headers()

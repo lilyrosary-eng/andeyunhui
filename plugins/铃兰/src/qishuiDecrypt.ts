@@ -208,9 +208,10 @@ function rebuildMp4(buf: Uint8Array): Uint8Array {
     }
   }
   for (const idx of encaIdxs) {
-    out[idx] = 0x6d; // m
+    out[idx] = 0x6d;     // m
     out[idx + 1] = 0x70; // p
-    // 4a -> 4a 已对；最后两位 61(a) 保持
+    out[idx + 2] = 0x34; // 4
+    // out[idx + 3] = 0x61 保持不变 (a)
   }
   return out;
 }
