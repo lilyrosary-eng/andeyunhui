@@ -27,7 +27,7 @@ import {
   type KugouTrack,
   type KugouAuth,
 } from './kugouApi';
-import { getKugouAuth } from './kugouAuth';
+import { readKugouAuth } from './kugouAuth';
 
 // ---- 汽水 ----
 import {
@@ -151,7 +151,7 @@ const kugouApiImpl: RoamSourceApi = {
   async getSongUrl(track: RoamSeedTrack) {
     // track.id 格式为 kugou-{hash}
     const hash = track.id.replace(/^kugou-/, '');
-    const auth: KugouAuth | null = getKugouAuth();
+    const auth: KugouAuth | null = readKugouAuth();
     const r = await kugouGetSongUrl(hash, undefined, auth, 'standard', !!auth?.userid);
     return { url: r.url, br: r.br };
   },
