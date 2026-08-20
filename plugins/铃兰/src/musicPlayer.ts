@@ -38,6 +38,10 @@ type PlayerEvent = 'play' | 'pause' | 'trackChange' | 'progress' | 'end';
 
 class MusicPlayer {
   private audio: HTMLAudioElement;
+  // Web Audio API 频谱分析器（懒加载，用于音频可视化）
+  private _audioCtx: AudioContext | null = null;
+  private _analyser: AnalyserNode | null = null;
+  private _source: MediaElementAudioSourceNode | null = null;
   private tracks: Track[] = [];
   private currentIndex: number = -1;
   private isPlaying: boolean = false;
@@ -400,6 +404,40 @@ class MusicPlayer {
   getPlayMode(): PlayMode { return this.playMode; }
   getCurrentTime(): number { return this.audio.currentTime || 0; }
   getDuration(): number { return this.audio.duration || 0; }
+
+  /**
+   * 获取（懒加载）AnalyserNode，用于音频频谱可视化。
+   * 内部创建 AudioContext + MediaElementAudioSourceNode 连接到 audio 元素。
+   * 多次调用返回同一实例。如果创建失败则返回 null。
+   */
+  getAnalyser(): AnalyserNode | null {
+    if (this._analyser) return this._analyser;
+    try {
+      const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!Ctx) return null;
+      const ctx: AudioContext = new Ctx();
+      const src = ctx.createMediaElementSource(this.audio);
+      const an = ctx.createAnalyser();
+      an.fftSize = 128;
+      an.smoothingTimeConstant = 0.7;
+      src.connect(an);
+      an.connect(ctx.destination);
+      this._audioCtx = ctx;
+      this._source = src;
+      this._analyser = an;
+      return this._analyser;
+    } catch (e) {
+      console.warn('[musicPlayer] AnalyserNode 创建失败', e);
+      return null;
+    }
+  }
+
+  /** 恢复 AudioContext（某些浏览器需要用户交互后才能 resume） */
+  resumeAudioContext(): void {
+    if (this._audioCtx && this._audioCtx.state === 'suspended') {
+      this._audioCtx.resume().catch(() => {});
+    }
+  }
 
   /**
    * 释放播放器持有的所有资源：暂停音频、清空 src、移除事件监听。

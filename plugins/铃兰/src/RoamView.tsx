@@ -16,6 +16,7 @@ import {
   type RoamHistoryEntry,
 } from './roamSources';
 import type { PlayableTrack, TempPlaylist } from './NeteaseView';
+import { parseLrc, type LyricLine } from './lyricsSync';
 
 // ---- 工具函数 ----
 function roamToPlayable(t: RoamSeedTrack, url?: string, quality = ''): PlayableTrack {
@@ -46,12 +47,66 @@ function getSongTheme(cover?: string | null): { hue: number; fog: string } {
 }
 
 // player.html 的预设主题（Mint / Magnolia / Lotus / Iris / Lily）
-const PRESET_THEMES = [
-  { hue: 0,   fog: 'rgba(150, 208, 118, 0.55)' },  // Mint（薄荷）
-  { hue: 55,  fog: 'rgba(248, 198, 104, 0.55)' },  // Magnolia（金阳）
-  { hue: 205, fog: 'rgba(120, 168, 224, 0.55)' }, // Lotus（湖蓝）
-  { hue: 320, fog: 'rgba(236, 150, 200, 0.55)' }, // Iris（粉霞）
-  { hue: 0,   fog: 'rgba(255, 255, 255, 0.55)' },  // Lily（雪白）
+// 使用预设时完全使用这些预设的封面占位、文案、配色，不使用歌曲自带信息
+interface PresetTheme {
+  title: string;
+  sub: string;
+  lede: string;
+  l1: string;
+  l2: string;
+  hue: number;
+  fog: string;
+  bgGradient: string;
+  inkColor: string;
+  inkSoftColor: string;
+  coverGradient: string;
+}
+const PRESET_THEMES: PresetTheme[] = [
+  {
+    title: 'Mint', sub: 'Flower your dreams',
+    lede: 'A handwritten letter to the season of slow afternoons, jasmine on the windowsill, & the quiet joy of doing nothing at all.',
+    l1: '爱上一个人不需明天', l2: '月光落在窗台，风也温柔',
+    hue: 0, fog: 'rgba(150, 208, 118, 0.55)',
+    bgGradient: 'radial-gradient(ellipse at 22% 38%, #f3fbe2 0%, #d6ecc4 38%, #b3d896 78%, #8cbc6d 100%)',
+    inkColor: 'rgba(255,255,255,0.96)', inkSoftColor: 'rgba(255,255,255,0.80)',
+    coverGradient: 'radial-gradient(circle at 38% 32%, #ffffff, #cad9ad)',
+  },
+  {
+    title: 'Magnolia', sub: 'Chase the light',
+    lede: 'Northern winds and a sky that burns green — a playlist for the longest night of the year.',
+    l1: '极光落进你眼眸', l2: '夜色温柔如初见',
+    hue: 55, fog: 'rgba(248, 198, 104, 0.55)',
+    bgGradient: 'radial-gradient(ellipse at 22% 38%, #fff5e2 0%, #f0d8a4 38%, #d8b870 78%, #c0a050 100%)',
+    inkColor: 'rgba(255,255,255,0.96)', inkSoftColor: 'rgba(255,255,255,0.78)',
+    coverGradient: 'radial-gradient(circle at 38% 32%, #fff8e8, #e8c878)',
+  },
+  {
+    title: 'Lotus', sub: 'Soft evenings',
+    lede: 'A slow-burn record for rainy windows, warm lamps, and the kind of silence that feels like company.',
+    l1: '丝绒般的晚风', l2: '心事轻轻在摇晃',
+    hue: 205, fog: 'rgba(120, 168, 224, 0.55)',
+    bgGradient: 'radial-gradient(ellipse at 22% 38%, #e2f0ff 0%, #b4d4f4 38%, #7aa8d8 78%, #5a88b8 100%)',
+    inkColor: 'rgba(255,255,255,0.96)', inkSoftColor: 'rgba(255,255,255,0.80)',
+    coverGradient: 'radial-gradient(circle at 38% 32%, #f0f8ff, #a0c4e8)',
+  },
+  {
+    title: 'Iris', sub: 'Quiet mornings',
+    lede: 'Coffee steam, open curtains, and a city that hasn\'t quite woken up yet.',
+    l1: '晨光漫过窗台', l2: '万物正在苏醒',
+    hue: 320, fog: 'rgba(236, 150, 200, 0.55)',
+    bgGradient: 'radial-gradient(ellipse at 22% 38%, #ffeef6 0%, #f4c4dc 38%, #d898b8 78%, #b87098 100%)',
+    inkColor: 'rgba(255,255,255,0.96)', inkSoftColor: 'rgba(255,255,255,0.80)',
+    coverGradient: 'radial-gradient(circle at 38% 32%, #fff0f8, #e8a8c8)',
+  },
+  {
+    title: 'Lily', sub: 'Pure hush',
+    lede: 'A still, snow-lit morning — soft light on bare branches, the whole world quieted to a single clean breath.',
+    l1: '白雾漫过旧窗棂', l2: '一切都温柔下来',
+    hue: 0, fog: 'rgba(255, 255, 255, 0.55)',
+    bgGradient: 'radial-gradient(ellipse at 22% 38%, #ffffff 0%, #f0f0f0 38%, #d8d8d8 78%, #b8b8b8 100%)',
+    inkColor: 'rgba(40,40,40,0.92)', inkSoftColor: 'rgba(40,40,40,0.65)',
+    coverGradient: 'radial-gradient(circle at 38% 32%, #ffffff, #e0e0e0)',
+  },
 ];
 
 interface RoamViewProps {
@@ -86,6 +141,10 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     return v === 'preset' ? 'preset' : 'follow';
   });
   const presetIdxRef = useRef(0);
+  // 歌词状态
+  const [lyricLines, setLyricLines] = useState<LyricLine[]>([]);
+  const [curLyric, setCurLyric] = useState<{ cur: string; next: string }>({ cur: '', next: '' });
+  const lyricCacheRef = useRef<Map<string, LyricLine[]>>(new Map());
 
   // refs
   const roamReservoir = useRef<RoamSeedTrack[]>([]);
@@ -125,18 +184,36 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     return () => window.removeEventListener('roam-theme-mode-changed', handler);
   }, []);
 
-  // EQ 动画
+  // EQ 动画 — 使用 Web Audio API AnalyserNode 的真实频率数据
+  // 如果 AnalyserNode 不可用，则降级为伪正弦动画
   useEffect(() => {
+    const analyser = musicPlayer.getAnalyser();
+    const freqData = analyser ? new Uint8Array(analyser.frequencyBinCount) : null;
     const animate = () => {
-      const t = performance.now() / 240;
-      setEqHeights(prev => {
-        const next = [...prev];
-        for (let i = 0; i < EQ_BARS; i++) {
-          const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * 0.75;
-          next[i] = 10 + v * 80;
-        }
-        return next;
-      });
+      if (analyser && freqData) {
+        analyser.getByteFrequencyData(freqData);
+        setEqHeights(prev => {
+          const next = [...prev];
+          const step = Math.floor(freqData.length / EQ_BARS) || 1;
+          for (let i = 0; i < EQ_BARS; i++) {
+            const idx = i * step;
+            const v = freqData[idx] || 0;
+            next[i] = 5 + (v / 255) * 90;
+          }
+          return next;
+        });
+      } else {
+        // 降级：伪正弦动画
+        const t = performance.now() / 240;
+        setEqHeights(prev => {
+          const next = [...prev];
+          for (let i = 0; i < EQ_BARS; i++) {
+            const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * 0.75;
+            next[i] = 10 + v * 80;
+          }
+          return next;
+        });
+      }
       eqRafRef.current = requestAnimationFrame(animate);
     };
     eqRafRef.current = requestAnimationFrame(animate);
@@ -278,10 +355,13 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
         // 更新主题色
         if (themeMode === 'preset') {
           presetIdxRef.current = (presetIdxRef.current + 1) % PRESET_THEMES.length;
-          setSongTheme(PRESET_THEMES[presetIdxRef.current]);
+          const preset = PRESET_THEMES[presetIdxRef.current];
+          setSongTheme({ hue: preset.hue, fog: preset.fog });
         } else {
           setSongTheme(getSongTheme(getCoverUrl(track?.cover)));
         }
+        // 加载歌词
+        loadLyricsForTrack(track || null);
       }
       setRoamCurrentId(curId ?? null);
       syncNow();
@@ -305,9 +385,47 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     return () => { unsubTrackChange(); unsubPlay(); unsubPause(); unsubProgress(); };
   }, [extendRoam, slideRoamWindow, addToHistory]);
 
+  // 加载歌词
+  const loadLyricsForTrack = useCallback(async (track: RoamSeedTrack | null) => {
+    if (!track) { setLyricLines([]); setCurLyric({ cur: '', next: '' }); return; }
+    // 检查缓存
+    const cached = lyricCacheRef.current.get(track.id);
+    if (cached) { setLyricLines(cached); return; }
+    // 本地歌曲尝试读取本地歌词
+    if (track.id.startsWith('local-')) {
+      // 本地歌曲歌词暂不可用
+      setLyricLines([]);
+      return;
+    }
+    try {
+      const api = getRoamSourceApi(source);
+      if (!api.getLyric) { setLyricLines([]); return; }
+      const lrcText = await api.getLyric(track);
+      if (!lrcText) { setLyricLines([]); return; }
+      const lines = parseLrc(lrcText);
+      lyricCacheRef.current.set(track.id, lines);
+      setLyricLines(lines);
+    } catch { setLyricLines([]); }
+  }, [source]);
+
+  // 歌词同步：根据播放进度更新当前行
+  useEffect(() => {
+    if (!lyricLines.length) { setCurLyric({ cur: '', next: '' }); return; }
+    const ct = musicPlayer.getCurrentTime() * 1000;
+    let idx = -1;
+    for (let i = 0; i < lyricLines.length; i++) {
+      if (lyricLines[i].time_ms <= ct) idx = i;
+      else break;
+    }
+    const cur = idx >= 0 ? lyricLines[idx].text : '';
+    const next = idx + 1 < lyricLines.length ? lyricLines[idx + 1].text : '';
+    setCurLyric({ cur, next });
+  }, [progress.current, lyricLines]);
+
   const refreshRoam = useCallback(() => {
     roamReservoir.current = []; roamStartedRef.current = false; roamForceReloadRef.current = true;
-    clearRoamCache(); setRoamReloadKey((k) => k + 1);
+    clearRoamCache(); lyricCacheRef.current.clear(); setLyricLines([]);
+    setRoamReloadKey((k) => k + 1);
   }, []);
 
   // 翻转动画（防抖 200ms）
@@ -332,25 +450,40 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     scheduleFlip();
   }, [scheduleFlip]);
 
+  // 预设模式数据
+  const curPreset = themeMode === 'preset' ? PRESET_THEMES[presetIdxRef.current] : null;
+
   // 渲染数据
   const cur = nowPlaying.track;
-  const curCover = getCoverUrl(cur?.coverPath);
+  const curCover = themeMode === 'preset' ? null : getCoverUrl(cur?.coverPath);
   const dur = progress.duration || cur?.durationSecs || 0;
   const pos = progress.current || 0;
   const pct = dur > 0 ? (pos / dur) * 100 : 0;
 
   // 颜色 token
-  const ink = isDark ? 'rgba(255,255,255,0.93)' : 'rgba(255,255,255,0.96)';
-  const inkSoft = isDark ? 'rgba(255,255,255,0.62)' : 'rgba(255,255,255,0.80)';
+  const ink = isDark ? 'rgba(255,255,255,0.93)' : (curPreset ? curPreset.inkColor : 'rgba(255,255,255,0.96)');
+  const inkSoft = isDark ? 'rgba(255,255,255,0.62)' : (curPreset ? curPreset.inkSoftColor : 'rgba(255,255,255,0.80)');
   const inkLine = isDark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.50)';
   const glow = isDark ? '0 2px 10px rgba(0,0,0,0.5)' : '0 2px 0 rgba(155,196,110,0.25), 0 8px 30px rgba(110,168,76,0.35)';
   const stageBg = isDark
     ? 'radial-gradient(ellipse at 22% 38%, #1a2a16 0%, #1c1917 38%, #0e0c0a 78%, #0a0908 100%)'
-    : 'radial-gradient(ellipse at 22% 38%, #f3fbe2 0%, #d6ecc4 38%, #b3d896 78%, #8cbc6d 100%)';
+    : (curPreset ? curPreset.bgGradient : 'radial-gradient(ellipse at 22% 38%, #f3fbe2 0%, #d6ecc4 38%, #b3d896 78%, #8cbc6d 100%)');
 
-  // 右下角两行文字：第一行=歌曲名，第二行=歌手·专辑
-  const lyricLine1 = cur?.title || '尚未开始漫游';
-  const lyricLine2 = cur ? `${cur.artist || '未知歌手'}${cur.album ? ' · ' + cur.album : ''}` : '进入漫游页将自动为你播放推荐';
+  // 右下角两行：预设模式用预设歌词，跟随模式用实际歌词
+  const lyricLine1 = themeMode === 'preset' && curPreset
+    ? curPreset.l1
+    : (curLyric.cur || cur?.title || '尚未开始漫游');
+  const lyricLine2 = themeMode === 'preset' && curPreset
+    ? curPreset.l2
+    : (curLyric.next || (cur ? `${cur.artist || '未知歌手'}${cur.album ? ' · ' + cur.album : ''}` : '进入漫游页将自动为你播放推荐'));
+
+  // 标题区：预设模式用预设标题，跟随模式用歌曲信息
+  const displayTitle = themeMode === 'preset' && curPreset ? curPreset.title : (cur?.title || 'UNKNOWN');
+  const displayArtist = themeMode === 'preset' && curPreset ? curPreset.sub : (cur?.artist || '未知歌手');
+  const displayAlbum = themeMode === 'preset' && curPreset ? curPreset.lede : (cur?.album || '');
+  const vinylBg = themeMode === 'preset' && curPreset
+    ? curPreset.coverGradient
+    : (curCover ? `url(${curCover}) center/cover` : isDark ? 'radial-gradient(circle at 38% 32%, #2a3a22, #0a1209)' : 'radial-gradient(circle at 38% 32%, #ffffff, #cad9ad)');
 
   // CSS keyframes 和 stage 样式
   const stageStyle = `
@@ -424,12 +557,24 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
           <div className={`roam-stage ${flipped ? 'flipped' : ''} ${transitioning ? 'transitioning' : ''}`}>
             {/* 右侧清晰封面 */}
             <div className="roam-right-cover">
-              {curCover ? <img src={curCover} alt="" /> : <div className="w-full h-full flex items-center justify-center" style={{ background: isDark ? '#1e2a1a' : '#a4c084' }}><MusicIcon size={72} style={{ color: inkLine }} /></div>}
+              {themeMode === 'preset' && curPreset ? (
+                <div className="w-full h-full" style={{ background: curPreset.coverGradient }} />
+              ) : curCover ? (
+                <img src={curCover} alt="" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center" style={{ background: isDark ? '#1e2a1a' : '#a4c084' }}><MusicIcon size={72} style={{ color: inkLine }} /></div>
+              )}
             </div>
 
             {/* 左侧模糊封面 + 光斑 */}
             <div className="roam-left-cover">
-              {curCover ? <img src={curCover} alt="" /> : <div className="w-full h-full" style={{ background: isDark ? '#1a2a16' : '#d6ecc4' }} />}
+              {themeMode === 'preset' && curPreset ? (
+                <div className="w-full h-full" style={{ background: curPreset.bgGradient }} />
+              ) : curCover ? (
+                <img src={curCover} alt="" />
+              ) : (
+                <div className="w-full h-full" style={{ background: isDark ? '#1a2a16' : '#d6ecc4' }} />
+              )}
               <div className="roam-bokeh">
                 <div className="puff" style={{ width: 360, height: 360, left: -120, top: -90, background: 'radial-gradient(circle, #ffffff 0%, transparent 70%)' }} />
                 <div className="puff" style={{ width: 420, height: 420, left: '8%', top: '18%', background: 'radial-gradient(circle, #e8ffd1 0%, transparent 70%)' }} />
@@ -446,13 +591,13 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                   <span style={{ width: 24, height: 1, background: inkLine }} /> A roam playlist
                 </div>
                 <h1 className="font-black leading-none" style={{ fontSize: 'clamp(26px, 4vw, 56px)', letterSpacing: '-0.02em', color: ink, textShadow: glow, wordBreak: 'break-word' }}>
-                  {(cur.title || 'UNKNOWN').slice(0, 24)}
+                  {displayTitle.slice(0, 24)}
                 </h1>
                 <h2 className="mt-2" style={{ fontSize: 'clamp(11px, 1vw, 16px)', letterSpacing: '0.15em', textTransform: 'uppercase', color: ink, fontWeight: 400 }}>
-                  {(cur.artist || '未知歌手').slice(0, 36)}
+                  {displayArtist.slice(0, 36)}
                 </h2>
-                {cur.album && (
-                  <p className="mt-2" style={{ fontSize: '10px', lineHeight: 1.6, maxWidth: 200, color: inkSoft, borderLeft: `1px solid ${inkLine}`, paddingLeft: 10 }}>{cur.album}</p>
+                {displayAlbum && (
+                  <p className="mt-2" style={{ fontSize: '10px', lineHeight: 1.6, maxWidth: 200, color: inkSoft, borderLeft: `1px solid ${inkLine}`, paddingLeft: 10 }}>{displayAlbum}</p>
                 )}
               </div>
 
@@ -474,7 +619,7 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
               <div
                 className={`roam-vinyl ${nowPlaying.isPlaying ? 'spinning' : ''}`}
                 style={{
-                  background: curCover ? `url(${curCover}) center/cover` : isDark ? 'radial-gradient(circle at 38% 32%, #2a3a22, #0a1209)' : 'radial-gradient(circle at 38% 32%, #ffffff, #cad9ad)',
+                  background: vinylBg,
                 }}
               >
                 <div className="absolute inset-0 rounded-full" style={{ background: 'conic-gradient(from 210deg, transparent 0deg, rgba(255,255,255,0.18) 26deg, transparent 68deg, rgba(255,255,255,0.08) 150deg, transparent 192deg)', mixBlendMode: 'screen' }} />

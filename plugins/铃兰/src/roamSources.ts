@@ -15,6 +15,7 @@ import {
   getPersonalFm as neteaseGetPersonalFm,
   getSongUrl as neteaseGetSongUrl,
   getSongWiki as neteaseGetSongWiki,
+  neteaseGetLyric as neteaseGetLyricFn,
   isLoggedIn as neteaseIsLoggedIn,
   type NeteaseTrack,
 } from './neteaseApi';
@@ -24,6 +25,7 @@ import {
   getRankList as kugouGetRankList,
   getTopList as kugouGetRankSongs,
   getSongUrl as kugouGetSongUrl,
+  getLyric as kugouGetLyricFn,
   type KugouTrack,
   type KugouAuth,
 } from './kugouApi';
@@ -34,6 +36,7 @@ import {
   qishuiGetRecommendPlaylists,
   qishuiGetPlaylistTracks,
   qishuiGetSongUrl,
+  qishuiGetLyric as qishuiGetLyricFn,
   type QishuiTrack,
 } from './qishuiApi';
 
@@ -45,6 +48,8 @@ import { musicPlayer, type Track } from './musicPlayer';
 let linglanTrackPool: Track[] = [];
 let linglanPoolCursor = 0; // 消费指针，每次 fetchBatch 从这里开始取
 export function setLinglanRoamPool(tracks: Track[]) {
+  // 只在池为空时注入，避免 playlists 变化时重置游标导致歌曲重复
+  if (linglanTrackPool.length > 0) return;
   // 合并 + 去重 + 打乱
   const seen = new Set<string>();
   const deduped: Track[] = [];
@@ -121,6 +126,8 @@ export interface RoamSourceApi {
   getSongUrl(track: RoamSeedTrack): Promise<{ url: string; br?: number }>;
   // 获取歌曲百科（可选）
   getWiki?(track: RoamSeedTrack): Promise<any | null>;
+  // 获取歌词（LRC 文本，可选）
+  getLyric?(track: RoamSeedTrack): Promise<string | null>;
 }
 
 // ============ 网易云实现 ============
@@ -143,6 +150,10 @@ const neteaseApi: RoamSourceApi = {
   async getWiki(track: RoamSeedTrack) {
     const nid = Number(track.id.replace(/^netease-/, ''));
     return neteaseGetSongWiki(nid);
+  },
+  async getLyric(track: RoamSeedTrack) {
+    const nid = Number(track.id.replace(/^netease-/, ''));
+    return neteaseGetLyricFn(nid);
   },
 };
 
@@ -173,6 +184,11 @@ const kugouApiImpl: RoamSourceApi = {
     const r = await kugouGetSongUrl(hash, undefined, auth, 'standard', !!auth?.userid);
     return { url: r.url, br: r.br };
   },
+  async getLyric(track: RoamSeedTrack) {
+    const hash = track.id.replace(/^kugou-/, '');
+    const r = await kugouGetLyricFn(hash, track.title ? `${track.title} ${track.artist || ''}` : '');
+    return r.lyric || null;
+  },
 };
 
 // ============ 汽水实现 ============
@@ -197,6 +213,10 @@ const qishuiApiImpl: RoamSourceApi = {
     const id = track.id.replace(/^qishui-/, '');
     const r = await qishuiGetSongUrl(id);
     return { url: r.url || '', br: r.br };
+  },
+  async getLyric(track: RoamSeedTrack) {
+    const id = track.id.replace(/^qishui-/, '');
+    return qishuiGetLyricFn(id);
   },
 };
 

@@ -1103,7 +1103,7 @@ const [roamSettingsOpen, setRoamSettingsOpen] = useState(false);
 useEffect(() => {
   if (!roamOpen) return;
   // 铃兰：合并所有本地歌单的 tracks 打乱注入
-  // 每次 playlists 变化时重新注入（解决首次进入时 playlists 尚未加载的问题）
+  // 只在池为空时注入，避免 playlists 变化时重置游标导致歌曲重复
   const allLocalTracks = playlists.flatMap((p) => p.tracks || []);
   if (allLocalTracks.length) {
     setLinglanRoamPool(allLocalTracks);
@@ -2461,8 +2461,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             </div>
           )}
         </div>
-        {/* PlayerBar 固定在内容区下方；设置/统计页也保持显示，不被覆盖。 */}
-        {currentTrack && (() => {
+        {/* PlayerBar 固定在内容区下方；漫游页不显示播放栏。 */}
+        {currentTrack && !roamOpen && (() => {
           // 网易云歌曲：红心读/写走统一的网易云状态（neteaseLiked + toggleNeteaseLike）
           const neteaseMatch = /^netease-(\d+)$/.exec(currentTrack.id);
           const isNetease = !!neteaseMatch;
