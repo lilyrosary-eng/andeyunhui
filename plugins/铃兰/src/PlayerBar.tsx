@@ -13,10 +13,9 @@ import { formatTime } from '../../_shared/utils';
 async function loadNeteaseLyric(t: Track): Promise<void> {
   const sid = neteaseSongId(t);
   if (sid == null) return;
-  const lrc = await neteaseGetLyric(sid);
-  const parsed = lrc ? parseLrc(lrc) : [];
-  lyricsSync.setLines(parsed);
-  if (parsed.length === 0) {
+  const parsed = await neteaseGetLyric(sid);
+  if (parsed) lyricsSync.setLines(parsed);
+  if (!parsed || parsed.length === 0) {
     hostApi.emit('lyrics-update', { currentLine: T('music.nowPlaying.noLyrics'), nextLine: '' }).catch(() => {});
   }
 }

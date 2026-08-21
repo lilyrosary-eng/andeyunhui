@@ -13,18 +13,18 @@ interface ModuleDrawerProps {
   isNeteaseOpen: boolean;
   // 点击「本地音乐」时回调：应关闭网易云并关闭抽屉
   onSelectLocalMusic: () => void;
-  // 点击网易云折叠菜单子项时回调：key 为 listen/library/radio/search/downloads/login
-  onSelectNetease?: (key: 'listen' | 'library' | 'radio' | 'search' | 'downloads' | 'login') => void;
+  // 点击网易云折叠菜单子项时回调：key 为 listen/radio/search/downloads/login
+  onSelectNetease?: (key: 'listen' | 'radio' | 'search' | 'downloads' | 'login') => void;
   // 网易云当前登录资料，null 表示未登录
   neteaseProfile?: NeteaseProfile | null;
   // 当前是否已切换到酷狗音乐模块
   isKugouOpen?: boolean;
-  // 点击酷狗折叠菜单子项时回调：key 为 home/roam/search/mine
-  onSelectKugou?: (key: 'home' | 'roam' | 'search' | 'mine') => void;
+  // 点击酷狗折叠菜单子项时回调：key 为 home/search/mine
+  onSelectKugou?: (key: 'home' | 'search' | 'mine') => void;
   // 当前是否已切换到汽水音乐模块
   isQishuiOpen?: boolean;
-// 点击汽水折叠菜单子项时回调：key 为 listen/library/search/about
-onSelectQishui?: (key: 'listen' | 'library' | 'search' | 'about') => void;
+// 点击汽水折叠菜单子项时回调：key 为 listen/search/about
+onSelectQishui?: (key: 'listen' | 'search' | 'about') => void;
   // 当前是否已切换到漫游电台模块（独立漫游，从网易云抽离）
   isRoamOpen?: boolean;
   // 点击漫游卡片时回调
@@ -42,9 +42,8 @@ function HomeIcon() {
 }
 
 // 折叠菜单子项（网易云注入功能下的各个部分）
-const neteaseItems: { key: 'listen' | 'library' | 'radio' | 'search' | 'login' | 'downloads'; icon: React.ReactElement }[] = [
+const neteaseItems: { key: 'listen' | 'radio' | 'search' | 'login' | 'downloads'; icon: React.ReactElement }[] = [
   { key: 'listen', icon: React.createElement(ListenNowIcon, { size: 16 }) },
-  { key: 'library', icon: React.createElement(LibraryIcon, { size: 16 }) },
   { key: 'radio', icon: React.createElement(RadioIcon, { size: 16 }) },
   { key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
   { key: 'downloads', icon: React.createElement(DownloadIcon, { size: 16 }) },
@@ -208,7 +207,7 @@ function DrawerModuleItem({
   );
 }
 
-// 折叠子项（可复用模板）：网易云 / 酷狗 的子菜单项共用同一套布局
+// 折叠子项（可复用模板）：网易云 / 酷狗 / 汽水的子菜单项共用同一套布局
 interface DrawerSubItemProps {
   icon: React.ReactNode;
   title: string;
@@ -234,18 +233,16 @@ function DrawerSubItem({ icon, title, desc, onClick }: DrawerSubItemProps) {
   );
 }
 
-// 酷狗折叠菜单子项（热榜 / 漫游 / 搜索 / 我的）：游客态，漫游=发现流，我的=游客提示
-const kugouItems: { key: 'home' | 'roam' | 'search' | 'mine'; icon: React.ReactElement }[] = [
+// 酷狗折叠菜单子项（热榜 / 搜索 / 我的）：游客态，漫游已抽离为独立漫游电台模块
+const kugouItems: { key: 'home' | 'search' | 'mine'; icon: React.ReactElement }[] = [
   { key: 'home', icon: React.createElement(HomeIcon, { size: 16 }) },
-  { key: 'roam', icon: React.createElement(LibraryIcon, { size: 16 }) },
   { key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
   { key: 'mine', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
 
-// 汽水折叠菜单子项（现在就听 / 漫游 / 搜索 / 关于）：游客态，对齐网易云 tab 结构
-const qishuiItems: { key: 'listen' | 'library' | 'search' | 'about'; icon: React.ReactElement }[] = [
+// 汽水折叠菜单子项（现在就听 / 搜索 / 关于）：游客态，漫游已抽离为独立漫游电台模块
+const qishuiItems: { key: 'listen' | 'search' | 'about'; icon: React.ReactElement }[] = [
 { key: 'listen', icon: React.createElement(ListenNowIcon, { size: 16 }) },
-{ key: 'library', icon: React.createElement(LibraryIcon, { size: 16 }) },
 { key: 'search', icon: React.createElement(SearchIcon, { size: 16 }) },
 { key: 'about', icon: React.createElement(UserIcon, { size: 16 }) },
 ];
@@ -344,7 +341,7 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
               const i18nKey = item.key === 'listen' ? 'listenNow' : item.key;
               const title = isLogin
                 ? (isLoggedIn ? neteaseProfile!.nickname : (T('music.moduleDrawer.netease.login') || '未登录'))
-                : (T(`music.moduleDrawer.netease.${i18nKey}`) || (item.key === 'library' ? '漫游' : item.key));
+                : (T(`music.moduleDrawer.netease.${i18nKey}`) || item.key);
               const desc = isLogin
                 ? (isLoggedIn ? (T('music.moduleDrawer.netease.loginDesc') || '查看我的账号') : (T('music.moduleDrawer.netease.loginDesc') || '登录 / 注册'))
                 : (T(`music.moduleDrawer.netease.${i18nKey}Desc`) || '');
@@ -377,19 +374,15 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
           >
             {kugouItems.map((item) => {
               const titleKey = item.key === 'home' ? 'music.moduleDrawer.kugou.home'
-                : item.key === 'roam' ? 'music.moduleDrawer.kugou.roam'
                 : item.key === 'search' ? 'music.moduleDrawer.kugou.search'
                 : 'music.moduleDrawer.kugou.mine';
               const descKey = item.key === 'home' ? 'music.moduleDrawer.kugou.homeDesc'
-                : item.key === 'roam' ? 'music.moduleDrawer.kugou.roamDesc'
                 : item.key === 'search' ? 'music.moduleDrawer.kugou.searchDesc'
                 : 'music.moduleDrawer.kugou.mineDesc';
               const titleDefault = item.key === 'home' ? '热榜'
-                : item.key === 'roam' ? '漫游'
                 : item.key === 'search' ? '搜索'
                 : '我的';
               const descDefault = item.key === 'home' ? '官方榜单 / 为你推荐'
-                : item.key === 'roam' ? '发现好歌无限流'
                 : item.key === 'search' ? '找歌找专辑'
                 : '登录查看收藏 / 歌单';
               const title = T(titleKey) || titleDefault;
@@ -420,19 +413,15 @@ export function ModuleDrawer({ open, onClose, isNeteaseOpen, onSelectLocalMusic,
           >
             {qishuiItems.map((item) => {
               const titleKey = item.key === 'listen' ? 'music.moduleDrawer.qishui.listen'
-                : item.key === 'library' ? 'music.moduleDrawer.qishui.library'
                 : item.key === 'search' ? 'music.moduleDrawer.qishui.search'
                 : 'music.moduleDrawer.qishui.about';
               const descKey = item.key === 'listen' ? 'music.moduleDrawer.qishui.listenDesc'
-                : item.key === 'library' ? 'music.moduleDrawer.qishui.libraryDesc'
                 : item.key === 'search' ? 'music.moduleDrawer.qishui.searchDesc'
                 : 'music.moduleDrawer.qishui.aboutDesc';
               const titleDefault = item.key === 'listen' ? '现在就听'
-                : item.key === 'library' ? '漫游'
                 : item.key === 'search' ? '搜索'
                 : '关于';
               const descDefault = item.key === 'listen' ? '推荐歌单 / 热门榜单'
-                : item.key === 'library' ? '发现更多歌单'
                 : item.key === 'search' ? '找歌找专辑'
                 : '游客态说明';
               const title = T(titleKey) || titleDefault;

@@ -16,7 +16,8 @@ import {
   type RoamHistoryEntry,
 } from './roamSources';
 import type { PlayableTrack, TempPlaylist } from './NeteaseView';
-import { parseLrc, type LyricLine } from './lyricsSync';
+import { type LyricLine, lyricModeStore, type LyricMode } from './lyricsSync';
+import LyricModeButton from './LyricModeButton';
 
 // ---- 工具函数 ----
 function roamToPlayable(t: RoamSeedTrack, url?: string, quality = ''): PlayableTrack {
@@ -153,6 +154,13 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
   const [lyricLines, setLyricLines] = useState<LyricLine[]>([]);
   const [curLyric, setCurLyric] = useState<{ cur: string; next: string }>({ cur: '', next: '' });
   const lyricCacheRef = useRef<Map<string, LyricLine[]>>(new Map());
+  // 「译/音」三态 + 当前/下一行对应的翻译或音译小字（跟随共享歌词翻译模式）
+  const [lyricMode, setLyricMode] = useState<LyricMode>(() => lyricModeStore.get());
+  const [curSub, setCurSub] = useState('');
+  const [nextSub, setNextSub] = useState('');
+  useEffect(() => {
+    return lyricModeStore.subscribe(setLyricMode);
+  }, []);
 
   // refs
   const roamReservoir = useRef<RoamSeedTrack[]>([]);
@@ -438,27 +446,31 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     try {
       const api = getRoamSourceApi(source);
       if (!api.getLyric) { setLyricLines([]); return; }
-      const lrcText = await api.getLyric(track);
-      if (!lrcText) { setLyricLines([]); return; }
-      const lines = parseLrc(lrcText);
+      const lines = await api.getLyric(track);
+      if (!lines) { setLyricLines([]); return; }
       lyricCacheRef.current.set(track.id, lines);
       setLyricLines(lines);
     } catch { setLyricLines([]); }
   }, [source]);
 
-  // 歌词同步：根据播放进度更新当前行
+  // 歌词同步：根据播放进度更新当前行，并按「译/音」模式取到对应的翻译/音译小字
   useEffect(() => {
-    if (!lyricLines.length) { setCurLyric({ cur: '', next: '' }); return; }
+    if (!lyricLines.length) { setCurLyric({ cur: '', next: '' }); setCurSub(''); setNextSub(''); return; }
     const ct = musicPlayer.getCurrentTime() * 1000;
     let idx = -1;
     for (let i = 0; i < lyricLines.length; i++) {
       if (lyricLines[i].time_ms <= ct) idx = i;
       else break;
     }
-    const cur = idx >= 0 ? lyricLines[idx].text : '';
-    const next = idx + 1 < lyricLines.length ? lyricLines[idx + 1].text : '';
-    setCurLyric({ cur, next });
-  }, [progress.current, lyricLines]);
+    const curLine = idx >= 0 ? lyricLines[idx] : null;
+    const nextLine = idx + 1 < lyricLines.length ? lyricLines[idx + 1] : null;
+    setCurLyric({ cur: curLine ? curLine.text : '', next: nextLine ? nextLine.text : '' });
+    // 小字内容：翻译模式取 translation，音译模式取 romaji
+    if (curLine) setCurSub(lyricMode === 'romaji' ? (curLine.romaji || '') : (curLine.translation || ''));
+    else setCurSub('');
+    if (nextLine) setNextSub(lyricMode === 'romaji' ? (nextLine.romaji || '') : (nextLine.translation || ''));
+    else setNextSub('');
+  }, [progress.current, lyricLines, lyricMode]);
 
   const refreshRoam = useCallback(() => {
     roamReservoir.current = []; roamStartedRef.current = false; roamForceReloadRef.current = true;
@@ -532,6 +544,14 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
   const displayTitle = themeMode === 'preset' && curPreset ? curPreset.title : (cur?.title || 'UNKNOWN');
   const displayArtist = themeMode === 'preset' && curPreset ? curPreset.sub : (cur?.artist || '未知歌手');
   const displayAlbum = themeMode === 'preset' && curPreset ? curPreset.lede : (cur?.album || '');
+
+  // 自适应字号：根据文字长度计算，字越多字号越小，保证一行内完全显示
+  // 标题：短文字最大 56px，每多一个字减小，最低不小于 11px
+  const titleFontPx = Math.max(11, Math.min(Math.round(56 * scaleFactor), Math.round((window.innerWidth * 0.42) / Math.max(displayTitle.length, 1) * 1.6)));
+  // 歌手：最大 16px，最低 8px
+  const artistFontPx = Math.max(8, Math.min(Math.round(16 * scaleFactor), Math.round((window.innerWidth * 0.42) / Math.max(displayArtist.length, 1) * 1.8)));
+  // 专辑：最大 12px，最低 7px
+  const albumFontPx = Math.max(7, Math.min(Math.round(12 * scaleFactor), Math.round((window.innerWidth * 0.42) / Math.max(displayAlbum.length, 1) * 1.8)));
   const vinylBg = themeMode === 'preset' && curPreset
     ? curPreset.coverGradient
     : (curCover ? `url(${curCover}) center/cover` : isDark ? 'radial-gradient(circle at 38% 32%, #2a3a22, #0a1209)' : 'radial-gradient(circle at 38% 32%, #ffffff, #cad9ad)');
@@ -636,35 +656,32 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
             {/* 左侧玻璃面板 */}
             <div className="roam-left">
-              {/* 标题区 — 限制宽度不覆盖唱片，长文字自适应缩容 */}
+  {/* 标题区 — 限制宽度不覆盖唱片，长文字自适应缩小字号完全显示 */}
               <div className="flex flex-col gap-1" style={{ paddingLeft: 'clamp(12px, 2%, 22px)', maxWidth: 'calc(100% - 20px)' }}>
                 <div className="flex items-center gap-2 mb-2" style={{ fontFamily: 'ui-monospace, monospace', fontSize: `${9 * scaleFactor}px`, letterSpacing: '0.4em', textTransform: 'uppercase', color: inkSoft }}>
                   <span style={{ width: 24 * scaleFactor, height: 1, background: inkLine }} /> A roam playlist
                 </div>
-                {/* 标题：长文字自动缩小字号，防止溢出覆盖唱片 */}
+                {/* 标题：字号根据文字长度动态缩小，保证完全显示 */}
                 <h1 className="font-black leading-none" style={{
-                  fontSize: `clamp(18px, ${4 * scaleFactor}vw, ${Math.round(56 * scaleFactor)}px)`,
+                  fontSize: `${titleFontPx}px`,
                   letterSpacing: '-0.02em', color: ink, textShadow: glow,
-                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  maxWidth: '100%',
+                  whiteSpace: 'nowrap',
                 }}>
                   {displayTitle}
                 </h1>
                 {/* 歌手：同上自适应 */}
                 <h2 className="mt-2" style={{
-                  fontSize: `clamp(10px, ${1 * scaleFactor}vw, ${Math.round(16 * scaleFactor)}px)`,
+                  fontSize: `${artistFontPx}px`,
                   letterSpacing: '0.15em', textTransform: 'uppercase', color: ink, fontWeight: 400,
-                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  maxWidth: '100%',
+                  whiteSpace: 'nowrap',
                 }}>
                   {displayArtist}
                 </h2>
                 {displayAlbum && (
                   <p className="mt-2" style={{
-                    fontSize: `${10 * scaleFactor}px`, lineHeight: 1.6,
-                    maxWidth: '100%', color: inkSoft,
+                    fontSize: `${albumFontPx}px`, lineHeight: 1.6, color: inkSoft,
                     borderLeft: `1px solid ${inkLine}`, paddingLeft: 10,
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    whiteSpace: 'nowrap',
                   }}>{displayAlbum}</p>
                 )}
               </div>
@@ -744,14 +761,22 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                 transition: 'right 0.7s cubic-bezier(.22,.61,.36,1), left 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease',
               }}
             >
-              <p style={{ fontWeight: 500, fontSize: `clamp(13px, ${1.4 * scaleFactor}vw, ${Math.round(20 * scaleFactor)}px)`, letterSpacing: '0.12em', color: ink, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
-                {[...lyricLine1].slice(0, 20).map((ch, i) => (
-                  <span key={i} className="inline-block" style={{ animation: `roam-charGlow 3.6s ease-in-out ${(i * 0.14).toFixed(2)}s infinite` }}>{ch}</span>
+              <p style={{ fontWeight: 500, fontSize: `clamp(13px, ${1.4 * scaleFactor}vw, ${Math.round(20 * scaleFactor)}px)`, letterSpacing: '0.04em', color: ink, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
+                {[...lyricLine1].map((ch, i) => (
+                  <span key={i} style={{ display: 'inline-block', animation: `roam-charGlow 3.6s ease-in-out ${(i * 0.14).toFixed(2)}s infinite`, whiteSpace: 'pre' }}>{ch}</span>
                 ))}
               </p>
+              {/* 当前行下方：按「译/音」模式显示翻译/音译小字 */}
+              {themeMode !== 'preset' && lyricMode !== 'off' && curSub && (
+                <p style={{ fontWeight: 300, fontSize: `clamp(9px, ${0.72 * scaleFactor}vw, ${Math.round(11 * scaleFactor)}px)`, letterSpacing: '0.06em', color: inkSoft, opacity: 0.72, textShadow: glow, lineHeight: 1.2, margin: 0 }}>{curSub}</p>
+              )}
               <p style={{ fontWeight: 300, fontSize: `clamp(10px, ${0.9 * scaleFactor}vw, ${Math.round(13 * scaleFactor)}px)`, letterSpacing: '0.08em', color: inkSoft, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
                 {lyricLine2}
               </p>
+              {/* 下一行下方：按「译/音」模式显示翻译/音译小字 */}
+              {themeMode !== 'preset' && lyricMode !== 'off' && nextSub && (
+                <p style={{ fontWeight: 300, fontSize: `clamp(9px, ${0.72 * scaleFactor}vw, ${Math.round(11 * scaleFactor)}px)`, letterSpacing: '0.06em', color: inkSoft, opacity: 0.72, textShadow: glow, lineHeight: 1.2, margin: 0 }}>{nextSub}</p>
+              )}
             </div>
 
             {/* 翻转过渡遮罩 */}
@@ -831,6 +856,8 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                 <button onClick={handleNext} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="下一首">
                   <svg width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
                 </button>
+                {/* 「译/音」三态切换：就近看到歌词时在此切换显示翻译/音译小字 */}
+                <LyricModeButton />
               </div>
             </div>
             )}

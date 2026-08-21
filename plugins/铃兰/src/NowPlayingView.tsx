@@ -4,7 +4,8 @@ import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
 import { VolumePopup, PlaylistPopup } from './PlayerBar';
 import { T, useLang } from '../../_shared/pluginRuntime';
-import { parseLrc, isNeteaseRemote, neteaseSongId, isKugouRemote, kugouSongId } from './lyricsSync';
+import { parseLrc, isNeteaseRemote, neteaseSongId, isKugouRemote, kugouSongId, lyricModeStore, type LyricMode } from './lyricsSync';
+import LyricModeButton from './LyricModeButton';
 import { neteaseGetLyric } from './neteaseApi';
 import { getLyric as kugouGetLyric } from './kugouApi';
 // 沉浸播放页 — 覆盖音乐模块内容区，不覆盖一级导航栏
@@ -106,12 +107,15 @@ const LyricsList = React.memo(({
   focusIdx,
   align,
   onLyricClick,
+  subMode = 'off',
 }: {
   lyricsLines: LyricLine[];
   currentLyricIdx: number;
   focusIdx: number;
   align: LyricsAlign;
   onLyricClick: (line: LyricLine) => void;
+  // 「译/音」模式：off 不显示；translate 显示翻译；romaji 显示罗马音音译
+  subMode?: LyricMode;
 }) => {
   // 悬停行：高亮后定时自动恢复，避免长时间保持深色
   const [hoveredIdx, setHoveredIdx] = useState(-1);
@@ -179,6 +183,8 @@ const LyricsList = React.memo(({
 
   return lyricsLines.map((line, i) => {
     const style = lineStyles[i];
+    // 按模式取该行的翻译 / 罗马音（无则不显示小字）
+    const subText = subMode === 'translate' ? line.translation : subMode === 'romaji' ? line.romaji : undefined;
     return React.createElement('div', {
       key: i,
       className: 'cursor-pointer',
@@ -193,7 +199,20 @@ const LyricsList = React.memo(({
       title: T('music.nowPlaying.jumpHere'),
       onMouseEnter: () => triggerHover(i),
       onMouseLeave: clearHover,
-    }, line.text || '\u00A0');
+    }, [
+      React.createElement('div', { key: 't' }, line.text || '\u00A0'),
+      subText && React.createElement('div', {
+        key: 's',
+        style: {
+          fontSize: 'clamp(10px, 1.1vw, 14px)',
+          lineHeight: 1.2,
+          marginTop: 'clamp(2px, 0.4vh, 5px)',
+          opacity: 0.82,
+          color: i === currentLyricIdx ? 'var(--element-bg, #5a7f5d)' : 'var(--text-secondary, #78716c)',
+          letterSpacing: '0.04em',
+        },
+      }, subText),
+    ]);
   });
 });
 
@@ -219,6 +238,11 @@ export function NowPlayingView({
   const [lyricsLines, setLyricsLines] = useState<LyricLine[]>([]);
   const [currentLyricIdx, setCurrentLyricIdx] = useState(-1);
   const [prevCoverUrl, setPrevCoverUrl] = useState<string | null>(null);
+  // 「译/音」三态：跟随共享歌词翻译模式（与 PlayerBar / RoamView 联动）
+  const [lyricMode, setLyricMode] = useState<LyricMode>(() => lyricModeStore.get());
+  useEffect(() => {
+    return lyricModeStore.subscribe(setLyricMode);
+  }, []);
   const lyricsScrollRef = useRef<HTMLDivElement>(null);
   const [bgVisible, setBgVisible] = useState(true);
   const prevLyricIdxRef = useRef(-1);
@@ -301,8 +325,8 @@ export function NowPlayingView({
     if (isNeteaseRemote(track)) {
       const sid = neteaseSongId(track);
       if (sid != null) {
-        neteaseGetLyric(sid).then((lrc) => {
-          setLyricsLines(lrc ? parseLrc(lrc) : []);
+        neteaseGetLyric(sid).then((lines) => {
+          setLyricsLines(lines || []);
         }).catch(() => setLyricsLines([]));
       } else {
         setLyricsLines([]);
@@ -509,6 +533,8 @@ export function NowPlayingView({
           }),
           React.createElement(PlaylistPopup, { playlists, currentPlaylistId, currentTrack: track, onSelectTrack }),
           React.createElement(VolumePopup, { volume, onVolumeChange }),
+          // 「译/音」三态切换：就近看到歌词时在此切换显示翻译/音译小字
+          React.createElement(LyricModeButton, {}),
         ),
       ),
 
@@ -552,6 +578,7 @@ export function NowPlayingView({
             focusIdx: focusLyricIdx,
             align: lyricsAlign,
             onLyricClick: handleLyricClick,
+            subMode: lyricMode,
           }),
         ),
       ),

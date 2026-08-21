@@ -2518,7 +2518,7 @@ clearAllRoamCache();
 setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
 setShowModuleDrawer(false);
 }}
-onSelectNetease={(key: 'listen' | 'library' | 'radio' | 'search' | 'downloads' | 'login') => {
+onSelectNetease={(key: 'listen' | 'radio' | 'search' | 'downloads' | 'login') => {
 setNeteaseTab(key);
 setNeteaseOpen(true);
 setKugouOpen(false);
@@ -2528,7 +2528,7 @@ setRoamSettingsOpen(false);
 clearAllRoamCache();
 setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
 }}
-onSelectKugou={(key: 'home' | 'roam' | 'search' | 'mine') => {
+onSelectKugou={(key: 'home' | 'search' | 'mine') => {
 setKugouTab(key);
 setKugouOpen(true);
 setNeteaseOpen(false);
@@ -2545,7 +2545,7 @@ setSelectedPlaylist(null);
 setSearchQuery('');
 }}
         isKugouOpen={kugouOpen}
-onSelectQishui={(key: 'listen' | 'library' | 'search' | 'about') => {
+onSelectQishui={(key: 'listen' | 'search' | 'about') => {
 setQishuiTab(key);
 setQishuiOpen(true);
 setNeteaseOpen(false);

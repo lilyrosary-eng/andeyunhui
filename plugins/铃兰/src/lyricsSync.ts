@@ -7,7 +7,39 @@ import { musicPlayer } from './musicPlayer';
 export interface LyricLine {
   time_ms: number;
   text: string;
+  // 可选的翻译 / 罗马音（音译），由在线源（如网易云）填充，视图按「译/音」模式选择展示
+  translation?: string;
+  romaji?: string;
 }
+
+// 「译/音」三态模式：关闭 → 译（翻译）→ 音（音译）→ 关闭
+export type LyricMode = 'off' | 'translate' | 'romaji';
+
+// 模块级共享歌词翻译模式（仿 lyricsSync 单例，跨 PlayerBar / RoamView / NowPlayingView 传播）
+// 持久化到 localStorage，避免刷新/切换视图后丢失
+let lyricMode: LyricMode = (() => {
+  try { return (localStorage.getItem('music_lyric_mode') as LyricMode) || 'off'; }
+  catch { return 'off'; }
+})();
+const modeListeners = new Set<(m: LyricMode) => void>();
+export const lyricModeStore = {
+  get(): LyricMode { return lyricMode; },
+  set(m: LyricMode): void {
+    lyricMode = m;
+    try { localStorage.setItem('music_lyric_mode', m); } catch {}
+    modeListeners.forEach((l) => { try { l(m); } catch {} });
+  },
+  subscribe(l: (m: LyricMode) => void): () => void {
+    modeListeners.add(l);
+    return () => { modeListeners.delete(l); };
+  },
+  // 循环切换：off → translate → romaji → off
+  cycle(): LyricMode {
+    const next: LyricMode = lyricMode === 'off' ? 'translate' : lyricMode === 'translate' ? 'romaji' : 'off';
+    lyricModeStore.set(next);
+    return next;
+  },
+};
 
 let lines: LyricLine[] = [];
 let emitting = false;
@@ -121,4 +153,39 @@ export function isKugouRemote(track: { id?: string; filePath?: string }): boolea
 export function kugouSongId(track: { id?: string }): string | null {
   const m = (track.id || '').match(/^kugou-([0-9a-fA-F]+)$/);
   return m ? m[1] : null;
+}
+
+// 把翻译 / 罗马音 LRC 按时间戳（容差 0.5s）挂到原文行，返回带可选 translation/romaji 的歌词行
+export function mergeLyricFields(lines: LyricLine[], tLrc?: string, romaLrc?: string): LyricLine[] {
+  if (tLrc || romaLrc) {
+    const tMap = buildTextMap(tLrc);
+    const romaMap = buildTextMap(romaLrc);
+    if (tMap.size || romaMap.size) {
+      for (const ln of lines) {
+        if (tMap.size) ln.translation = findBestMatch(tMap, ln.time_ms);
+        if (romaMap.size) ln.romaji = findBestMatch(romaMap, ln.time_ms);
+      }
+    }
+  }
+  return lines;
+}
+
+function buildTextMap(lrc?: string): Map<number, string> {
+  const map = new Map<number, string>();
+  if (!lrc) return map;
+  for (const ln of parseLrc(lrc)) {
+    if (ln.text && !map.has(ln.time_ms)) map.set(ln.time_ms, ln.text);
+  }
+  return map;
+}
+
+// 找到时间戳最接近（容差 0.5s）的文本；无则返回 undefined
+function findBestMatch(map: Map<number, string>, time_ms: number): string | undefined {
+  let best = '';
+  let bestDiff = 500;
+  for (const [t, v] of map) {
+    const d = Math.abs(t - time_ms);
+    if (d < bestDiff) { bestDiff = d; best = v; }
+  }
+  return best || undefined;
 }

@@ -8,6 +8,7 @@
 // 统一 track 类型为 RoamSeedTrack，各平台在内部完成映射。
 
 import type { RoamSeedTrack, RoamSource } from './RoamSidebar';
+import { parseLrc, mergeLyricFields, type LyricLine } from './lyricsSync';
 
 // ---- 网易云 ----
 import {
@@ -128,8 +129,8 @@ export interface RoamSourceApi {
   getSongUrl(track: RoamSeedTrack): Promise<{ url: string; br?: number }>;
   // 获取歌曲百科（可选）
   getWiki?(track: RoamSeedTrack): Promise<any | null>;
-  // 获取歌词（LRC 文本，可选）
-  getLyric?(track: RoamSeedTrack): Promise<string | null>;
+  // 获取歌词（结构化歌词行：原文 + 可选 translation/romaji）
+  getLyric?(track: RoamSeedTrack): Promise<LyricLine[] | null>;
 }
 
 // ============ 网易云实现 ============
@@ -189,7 +190,10 @@ const kugouApiImpl: RoamSourceApi = {
   async getLyric(track: RoamSeedTrack) {
     const hash = track.id.replace(/^kugou-/, '');
     const r = await kugouGetLyricFn(hash, track.title ? `${track.title} ${track.artist || ''}` : '');
-    return r.lyric || null;
+    if (!r?.lyric) return null;
+    const lines = parseLrc(r.lyric);
+    // 酷狗接口额外返回翻译歌词 tlyric（trans），挂到对应原文行
+    return r.trans ? mergeLyricFields(lines, r.trans) : lines;
   },
 };
 
@@ -218,7 +222,8 @@ const qishuiApiImpl: RoamSourceApi = {
   },
   async getLyric(track: RoamSeedTrack) {
     const id = track.id.replace(/^qishui-/, '');
-    return qishuiGetLyricFn(id);
+    const t = await qishuiGetLyricFn(id);
+    return t ? parseLrc(t) : null;
   },
 };
 
@@ -246,13 +251,12 @@ const linglanApi: RoamSourceApi = {
   async getLyric(track: RoamSeedTrack) {
     // 本地歌曲：通过宿主读取 .lrc 文件或内嵌标签
     const fp = track.filePath || track.id;
-    if (!fp) return '';
+    const api = (window as any).__HOST_API__;
+    if (!fp || !api?.invoke) return null;
     try {
-      const api = (window as any).__HOST_API__;
-      if (!api?.invoke) return '';
       const res = await api.invoke<{ text: string; source: string }>('get_lyrics_text', { trackPath: fp });
-      return res?.text || '';
-    } catch { return ''; }
+      return res?.text ? parseLrc(res.text) : null;
+    } catch { return null; }
   },
 };
 
