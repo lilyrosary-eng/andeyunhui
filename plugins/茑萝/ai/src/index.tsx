@@ -270,6 +270,12 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
   const [convOpen, setConvOpen] = useState(false);
   // 「关联项目」文件浏览器开合（#12）
   const [projOpen, setProjOpen] = useState(false);
+  // Agent 模式：开启时走 ai_chat_agent（工具调用 + 计划/待办），关闭时走 ai_chat 纯对话
+  const [agentMode, setAgentMode] = useState(false);
+  // Agent 工具调用轨迹（本请求内累积，用于渲染工具 chip 轨迹）
+  const [agentSteps, setAgentSteps] = useState<{ name: string; ok: boolean; detail: string }[]>([]);
+  // 当前计划快照（plan 工具回传，供渲染「计划/待办」面板）
+  const [livePlan, setLivePlan] = useState<{ title: string; todos: { id: string; content: string; done: boolean }[] } | null>(null);
   // 对话持久化加载完成标记：加载完成前不写盘，避免初始空 state 覆盖磁盘已有数据
   const [convLoaded, setConvLoaded] = useState(false);
 
@@ -315,6 +321,26 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
       const th = e?.payload?.thinking;
       if (!pid) return;
       setProfiles((ps: any[]) => ps.map((p) => (p.id === pid ? { ...p, thinking: th } : p)));
+    }).then((u: any) => { un = u; }).catch(() => {});
+    return () => { if (un) un(); };
+  }, []);
+
+  // 监听 ai-agent-step（仅 Agent 模式回发）：按 requestId 过滤本次请求；
+  // 工具调用记入轨迹；含 plan 快照时更新「计划/待办」面板。
+  React.useEffect(() => {
+    let un: any = null;
+    hostApi.listen<any>('ai-agent-step', (e: any) => {
+      const p = e?.payload;
+      if (!p || p.requestId !== activeReq.current) return;
+      if (p.stage === 'tool') {
+        setAgentSteps((prev) => [...prev, { name: p.name, ok: !!p.ok, detail: p.detail || '' }]);
+      }
+      if (p.plan && typeof p.plan === 'object') {
+        setLivePlan({
+          title: p.plan.title || '',
+          todos: Array.isArray(p.plan.todos) ? p.plan.todos : [],
+        });
+      }
     }).then((u: any) => { un = u; }).catch(() => {});
     return () => { if (un) un(); };
   }, []);
@@ -699,11 +725,20 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
     } : c)));
     setInput('');
     setBusy(true);
+    // 每次发送重置 Agent 工具轨迹 / 计划面板
+    setAgentSteps((prev) => (agentMode ? [] : prev));
+    setLivePlan((prev) => (agentMode ? null : prev));
     const reqId = 'r_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     activeReq.current = reqId;
     assistantId.current = aid;
     try {
-      await hostApi.invoke('ai_chat', { requestId: reqId, messages: payload, profileId: activeProfile.id });
+      if (agentMode) {
+        // Agent 模式：走 ai_chat_agent（非流式判断 + 工具调用循环，最终文本仍以 ai-delta 推送）；
+        // 项目文件上下文经 system 参数并入，menu persona 由后端合并。
+        await hostApi.invoke('ai_chat_agent', { requestId: reqId, messages: payload, profileId: activeProfile.id, system: buildSystemPrompt() });
+      } else {
+        await hostApi.invoke('ai_chat', { requestId: reqId, messages: payload, profileId: activeProfile.id });
+      }
     } catch (e) {
       // 后端已通过 ai-error 事件反馈，这里兜底
       if (activeReq.current === reqId) {
@@ -715,7 +750,7 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
         assistantId.current = null;
       }
     }
-  }, [input, busy, activeProfile, messages, buildSystemPrompt, appendHint]);
+  }, [input, busy, activeProfile, messages, buildSystemPrompt, appendHint, agentMode]);
 
   // 对话管理：清空 / 新建 / 切换 / 删除（#10）
   const clearChat = useCallback(() => {
@@ -821,6 +856,48 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
         )}
       </div>
 
+      {/* Agent 工具轨迹 + 计划/待办面板（Agent 模式有调用时展示） */}
+      {(agentSteps.length > 0 || livePlan) && (
+        <div className="px-3 pt-3 shrink-0 space-y-2">
+          {agentSteps.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {agentSteps.map((s, i) => (
+                <span key={i} title={s.detail}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] border ${
+                    s.ok
+                      ? 'bg-black/5 dark:bg-white/5 border-neutral-200 dark:border-stone-700 text-neutral-600 dark:text-stone-300'
+                      : 'bg-red-500/10 border-red-500/30 text-red-600 dark:text-red-400'
+                  }`}>
+                  🛠 {s.name} <span className={s.ok ? 'text-emerald-500' : ''}>{s.ok ? '✓' : '✗'}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          {livePlan && (
+            <div className="rounded-xl border border-neutral-200 dark:border-stone-700 bg-white/60 dark:bg-stone-800/60 p-2.5">
+              <div className="text-xs font-medium text-neutral-700 dark:text-stone-200 mb-1.5">📋 {livePlan.title || '计划'}</div>
+              {livePlan.todos.length === 0 ? (
+                <div className="text-[11px] text-neutral-400 dark:text-stone-500">（暂无待办）</div>
+              ) : (
+                <ul className="space-y-1">
+                  {livePlan.todos.map((t) => (
+                    <li key={t.id} className="flex items-center gap-1.5 text-xs">
+                      <span className={`inline-flex w-4 h-4 items-center justify-center rounded border shrink-0 text-[10px] ${
+                        t.done
+                          ? 'bg-[var(--element-bg)] text-white border-transparent'
+                          : 'border-neutral-300 dark:border-stone-600'
+                      }`}>{t.done ? '✓' : ''}</span>
+                      <span className={t.done ? 'line-through text-neutral-400 dark:text-stone-500' : 'text-neutral-700 dark:text-stone-200'}>{t.content}</span>
+                      <span className="text-[10px] text-neutral-400 dark:text-stone-500 ml-auto">#{t.id}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 上下文文件 chips */}
       {ctxFiles.length > 0 && (
         <div className="px-3 pt-2 flex flex-wrap gap-1.5 shrink-0">
@@ -906,6 +983,15 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
                     思考·关
                   </>
                 )}
+              </button>
+              <button onClick={() => setAgentMode((m) => !m)} disabled={busy}
+                title="Agent 模式：开启后可调用工具（时间/计算/计划待办）并实时渲染计划；关闭为纯对话"
+                className={`btn-press shrink-0 px-2.5 py-2 rounded-lg text-xs border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  agentMode
+                    ? 'border-[var(--element-border)] bg-[rgba(230,195,92,0.14)] text-[var(--element-bg)] font-medium'
+                    : 'border-neutral-200 dark:border-stone-700 text-neutral-600 dark:text-stone-300'
+                }`}>
+                {agentMode ? 'Agent·开' : 'Agent·关'}
               </button>
               <button onClick={addContextFile} title="添加文件作为上下文"
                 className="btn-press shrink-0 px-2.5 py-2 rounded-lg text-xs bg-neutral-200/70 dark:bg-stone-700 hover:bg-neutral-300 dark:hover:bg-stone-600 transition-colors">📎 文件</button>
