@@ -13,6 +13,8 @@ const STORAGE_KEY_AUTO_EXTEND = 'roam_auto_extend';
 const STORAGE_KEY_HISTORY_LIMIT = 'roam_history_limit';
 const STORAGE_KEY_QUALITY = 'roam_quality_pref';
 const STORAGE_KEY_THEME_MODE = 'roam_theme_mode'; // 'preset' | 'follow'
+const STORAGE_KEY_COVER_FILTER = 'roam_cover_filter'; // 'on' | 'off'
+const STORAGE_KEY_BAR_POSITION = 'roam_bar_position'; // 'stage' | 'overlay'
 
 export function RoamSettingsPanel({ onClose }: { onClose: () => void }) {
   useLang();
@@ -25,6 +27,14 @@ export function RoamSettingsPanel({ onClose }: { onClose: () => void }) {
   const [themeMode, setThemeMode] = useState<'preset' | 'follow'>(() => {
     const v = localStorage.getItem(STORAGE_KEY_THEME_MODE);
     return v === 'preset' ? 'preset' : 'follow';
+  });
+  const [coverFilter, setCoverFilter] = useState<'on' | 'off'>(() => {
+    const v = localStorage.getItem(STORAGE_KEY_COVER_FILTER);
+    return v === 'off' ? 'off' : 'on';
+  });
+  const [barPosition, setBarPosition] = useState<'stage' | 'overlay'>(() => {
+    const v = localStorage.getItem(STORAGE_KEY_BAR_POSITION);
+    return v === 'overlay' ? 'overlay' : 'stage';
   });
 
   useEffect(() => {
@@ -40,6 +50,14 @@ export function RoamSettingsPanel({ onClose }: { onClose: () => void }) {
     localStorage.setItem(STORAGE_KEY_THEME_MODE, themeMode);
     window.dispatchEvent(new CustomEvent('roam-theme-mode-changed', { detail: themeMode }));
   }, [themeMode]);
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_COVER_FILTER, coverFilter);
+    window.dispatchEvent(new CustomEvent('roam-cover-filter-changed', { detail: coverFilter }));
+  }, [coverFilter]);
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_BAR_POSITION, barPosition);
+    window.dispatchEvent(new CustomEvent('roam-bar-position-changed', { detail: barPosition }));
+  }, [barPosition]);
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-[#1e1e1e]">
@@ -175,6 +193,77 @@ export function RoamSettingsPanel({ onClose }: { onClose: () => void }) {
                   <div className="text-[10px] text-neutral-400 dark:text-stone-500">轮换薄荷、金阳、湖蓝、粉霞、雪白五套预设主题</div>
                 </div>
                 {themeMode === 'preset' && (
+                  <div className="w-4 h-4 rounded-full bg-[#7c4dff] flex items-center justify-center shrink-0">
+                    <svg width={8} height={8} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={3}>
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* 封面滤镜（仅在跟随歌曲模式下生效） */}
+          <div className="rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium text-neutral-700 dark:text-stone-200">封面滤镜</div>
+                <div className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">
+                  跟随歌曲时，是否对封面应用色相偏移与饱和度调整
+                </div>
+              </div>
+              <button
+                onClick={() => setCoverFilter((v) => v === 'on' ? 'off' : 'on')}
+                className={`relative w-11 h-6 rounded-full transition-colors ${
+                  coverFilter === 'on' ? 'bg-[#7c4dff]' : 'bg-neutral-300 dark:bg-stone-600'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                    coverFilter === 'on' ? 'translate-x-5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+
+          {/* 播放栏位置 */}
+          <div className="rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60 p-4">
+            <div className="text-sm font-medium text-neutral-700 dark:text-stone-200 mb-3">播放栏位置</div>
+            <div className="space-y-2">
+              <button
+                onClick={() => setBarPosition('stage')}
+                className={`w-full flex items-center justify-between rounded-lg px-3 py-2.5 transition-colors ${
+                  barPosition === 'stage'
+                    ? 'bg-[#7c4dff]/10 text-[#7c4dff] dark:text-[#b388ff]'
+                    : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-300'
+                }`}
+              >
+                <div className="text-left">
+                  <div className="text-sm font-medium">舞台底部</div>
+                  <div className="text-[10px] text-neutral-400 dark:text-stone-500">播放栏横贯整个舞台底部，不与封面重叠</div>
+                </div>
+                {barPosition === 'stage' && (
+                  <div className="w-4 h-4 rounded-full bg-[#7c4dff] flex items-center justify-center shrink-0">
+                    <svg width={8} height={8} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={3}>
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                )}
+              </button>
+              <button
+                onClick={() => setBarPosition('overlay')}
+                className={`w-full flex items-center justify-between rounded-lg px-3 py-2.5 transition-colors ${
+                  barPosition === 'overlay'
+                    ? 'bg-[#7c4dff]/10 text-[#7c4dff] dark:text-[#b388ff]'
+                    : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-300'
+                }`}
+              >
+                <div className="text-left">
+                  <div className="text-sm font-medium">遮罩区内</div>
+                  <div className="text-[10px] text-neutral-400 dark:text-stone-500">播放栏嵌入左侧玻璃面板底部</div>
+                </div>
+                {barPosition === 'overlay' && (
                   <div className="w-4 h-4 rounded-full bg-[#7c4dff] flex items-center justify-center shrink-0">
                     <svg width={8} height={8} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={3}>
                       <polyline points="20 6 9 17 4 12" />

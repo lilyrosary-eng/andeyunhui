@@ -140,6 +140,14 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     const v = localStorage.getItem('roam_theme_mode');
     return v === 'preset' ? 'preset' : 'follow';
   });
+  const [coverFilter, setCoverFilter] = useState<'on' | 'off'>(() => {
+    const v = localStorage.getItem('roam_cover_filter');
+    return v === 'off' ? 'off' : 'on';
+  });
+  const [barPosition, setBarPosition] = useState<'stage' | 'overlay'>(() => {
+    const v = localStorage.getItem('roam_bar_position');
+    return v === 'overlay' ? 'overlay' : 'stage';
+  });
   const presetIdxRef = useRef(0);
   // 歌词状态
   const [lyricLines, setLyricLines] = useState<LyricLine[]>([]);
@@ -183,24 +191,57 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     window.addEventListener('roam-theme-mode-changed', handler);
     return () => window.removeEventListener('roam-theme-mode-changed', handler);
   }, []);
-
-  // EQ 动画 — 伪正弦动画（不依赖 Web Audio API，避免 AudioContext 导致卡死）
+  // 监听封面滤镜开关
   useEffect(() => {
+    const handler = (e: Event) => {
+      setCoverFilter((e as CustomEvent).detail as 'on' | 'off');
+    };
+    window.addEventListener('roam-cover-filter-changed', handler);
+    return () => window.removeEventListener('roam-cover-filter-changed', handler);
+  }, []);
+  // 监听播放栏位置切换
+  useEffect(() => {
+    const handler = (e: Event) => {
+      setBarPosition((e as CustomEvent).detail as 'stage' | 'overlay');
+    };
+    window.addEventListener('roam-bar-position-changed', handler);
+    return () => window.removeEventListener('roam-bar-position-changed', handler);
+  }, []);
+
+  // EQ 动画 — 真实律动：优先使用 AnalyserNode 的频域数据，降级到伪律动
+  useEffect(() => {
+    const freqData = new Uint8Array(64);
     const animate = () => {
-      const t = performance.now() / 240;
-      setEqHeights(prev => {
-        const next = [...prev];
-        for (let i = 0; i < EQ_BARS; i++) {
-          const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * 0.75;
-          next[i] = 10 + v * 80;
-        }
-        return next;
-      });
+      const analyser = musicPlayer.getAnalyser();
+      if (analyser && nowPlaying.isPlaying) {
+        analyser.getByteFrequencyData(freqData);
+        setEqHeights(prev => {
+          const next = [...prev];
+          for (let i = 0; i < EQ_BARS; i++) {
+            const dataIdx = Math.floor((i / EQ_BARS) * freqData.length);
+            const v = freqData[dataIdx] / 255; // 0~1
+            next[i] = 5 + v * 90;
+          }
+          return next;
+        });
+      } else {
+        // 降级：伪律动
+        const t = performance.now() / 240;
+        const amp = nowPlaying.isPlaying ? 0.9 : 0.25;
+        setEqHeights(prev => {
+          const next = [...prev];
+          for (let i = 0; i < EQ_BARS; i++) {
+            const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * amp;
+            next[i] = 8 + v * 82;
+          }
+          return next;
+        });
+      }
       eqRafRef.current = requestAnimationFrame(animate);
     };
     eqRafRef.current = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(eqRafRef.current);
-  }, []);
+  }, [nowPlaying.isPlaying]);
 
   const slideRoamWindow = useCallback((tracks: RoamSeedTrack[], currentId: string) => {
     const idx = tracks.findIndex((t) => t.id === currentId);
@@ -477,12 +518,12 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     @keyframes roam-float { 0%,100% { transform: translateY(0) scale(0.6); opacity: 0; } 20% { opacity: 1; } 50% { transform: translateY(-30px) scale(1.2); opacity: 1; } 80% { opacity: 0.8; } }
     .roam-right-cover, .roam-left-cover { position: absolute; top: 0; bottom: 0; overflow: hidden; transition: left 0.7s cubic-bezier(.22,.61,.36,1), width 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease; }
     .roam-right-cover { left: 44%; width: 56%; z-index: 1; }
-    .roam-left-cover { left: 0; width: 44%; z-index: 2; filter: blur(22px) saturate(1.55) brightness(1.07) hue-rotate(var(--hue)); }
+    .roam-left-cover { left: 0; width: 44%; z-index: 2; filter: ${coverFilter === 'on' ? 'blur(22px) saturate(1.55) brightness(1.07) hue-rotate(var(--hue))' : 'blur(22px) brightness(1.05)'}; }
     .roam-left-cover img, .roam-right-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
-    .roam-right-cover img { filter: saturate(1.08) brightness(1.03) hue-rotate(var(--hue)); }
+    .roam-right-cover img { filter: ${coverFilter === 'on' ? 'saturate(1.08) brightness(1.03) hue-rotate(var(--hue))' : 'none'}; }
     .roam-stage.flipped .roam-left-cover { left: 56%; width: 44%; }
     .roam-stage.flipped .roam-right-cover { left: 0; width: 56%; }
-    .roam-left { position: absolute; top: 0; bottom: 0; left: 0; width: 44%; z-index: 4; display: flex; flex-direction: column; padding: clamp(14px, 3%, 36px) clamp(16px, 4%, 50px); overflow: hidden; transition: left 0.7s cubic-bezier(.22,.61,.36,1), width 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease; background: ${isDark ? 'linear-gradient(135deg, rgba(30,42,26,0.35) 0%, rgba(28,25,23,0.12) 40%, rgba(20,40,15,0.18) 100%)' : 'linear-gradient(135deg, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.08) 40%, rgba(190,222,170,0.14) 100%)'}; backdrop-filter: blur(8px) saturate(140%); -webkit-backdrop-filter: blur(8px) saturate(140%); border-right: 1px solid ${inkLine}; }
+    .roam-left { position: absolute; top: 0; bottom: 0; left: 0; width: 44%; z-index: 4; display: flex; flex-direction: column; padding: clamp(14px, 3%, 36px) clamp(16px, 4%, 50px) clamp(14px, 3%, 36px) clamp(16px, 4%, 50px); overflow: hidden; transition: left 0.7s cubic-bezier(.22,.61,.36,1), width 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease; background: ${isDark ? 'linear-gradient(135deg, rgba(30,42,26,0.35) 0%, rgba(28,25,23,0.12) 40%, rgba(20,40,15,0.18) 100%)' : 'linear-gradient(135deg, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.08) 40%, rgba(190,222,170,0.14) 100%)'}; backdrop-filter: blur(8px) saturate(140%); -webkit-backdrop-filter: blur(8px) saturate(140%); border-right: 1px solid ${inkLine}; }
     .roam-stage.flipped .roam-left { left: 56%; }
     .roam-stage.transitioning .roam-left, .roam-stage.transitioning .roam-left-cover, .roam-stage.transitioning .roam-right-cover, .roam-stage.transitioning .roam-lyrics, .roam-stage.transitioning .roam-fireflies { opacity: 0; }
     .roam-transition-overlay { position: absolute; inset: 0; z-index: 6; pointer-events: none; opacity: 0; background-color: var(--fog); backdrop-filter: blur(15px) saturate(150%); -webkit-backdrop-filter: blur(15px) saturate(150%); transition: opacity 0.45s ease; }
@@ -583,16 +624,47 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                 )}
               </div>
 
-              {/* EQ 均衡器（底部，不与唱片重叠） */}
-              <div className="mt-auto flex items-end justify-center" style={{ gap: 3, width: '100%', height: 28, marginBottom: 8 }}>
-                {eqHeights.map((h, i) => (
-                  <span key={i} style={{
-                    flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h * 0.6}%`,
-                    background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
-                    borderRadius: 2, opacity: 0.85,
-                  }} />
-                ))}
-              </div>
+              {/* 遮罩区内播放栏（overlay 模式） */}
+              {barPosition === 'overlay' && (
+                <div className="mt-auto flex flex-col items-center gap-2" style={{ width: '100%', maxWidth: 400, paddingTop: 'clamp(12px, 2%, 20px)' }}>
+                  {/* EQ 均衡器 */}
+                  <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', height: 28, marginBottom: 4 }}>
+                    {eqHeights.map((h, i) => (
+                      <span key={i} style={{
+                        flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h * 0.5}%`,
+                        background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
+                        borderRadius: 2, opacity: 0.85,
+                      }} />
+                    ))}
+                  </div>
+                  {/* 进度条 */}
+                  <div className="flex items-center gap-2 w-full" style={{ fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: ink }}>
+                    <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28 }}>{formatTime(pos)}</span>
+                    <div className="flex-1 relative rounded-full cursor-pointer" style={{ height: 2, background: inkLine }}
+                      onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); musicPlayer.seek(ratio * dur); }}>
+                      <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
+                      <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
+                    </div>
+                    <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{formatTime(dur)}</span>
+                  </div>
+                  {/* 控制按钮 */}
+                  <div className="flex items-center" style={{ gap: 'clamp(8px, 1.2vw, 18px)', color: ink }}>
+                    <button onClick={handlePrev} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="上一首">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
+                    </button>
+                    <button onClick={() => musicPlayer.togglePlay()} className="rounded-full flex items-center justify-center transition-transform hover:scale-105" style={{ width: 'clamp(36px, 4vw, 48px)', height: 'clamp(36px, 4vw, 48px)', background: 'rgba(255,255,255,0.92)', color: '#2c5a1a', boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)', border: 'none', cursor: 'pointer', animation: nowPlaying.isPlaying ? 'roam-breathe 3.4s ease-in-out infinite' : 'none' }} title={nowPlaying.isPlaying ? '暂停' : '播放'}>
+                      {nowPlaying.isPlaying ? (
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                      ) : (
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                      )}
+                    </button>
+                    <button onClick={handleNext} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="下一首">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* 黑胶唱片 — 点击进入沉浸式播放 */}
@@ -641,6 +713,69 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
             {/* 暗角 */}
             <div className="roam-vignette" />
+
+            {/* EQ 均衡器 + 专属播放栏（舞台底部独立层，仅 stage 模式） */}
+            {barPosition === 'stage' && (
+            <div className="roam-bottom-bar" style={{
+              position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 9,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'clamp(6px, 0.8vw, 12px)',
+              padding: 'clamp(10px, 1.5%, 18px) clamp(16px, 4%, 50px) clamp(12px, 1.8%, 22px)',
+              background: isDark ? 'linear-gradient(0deg, rgba(20,30,18,0.75) 0%, rgba(20,30,18,0.3) 60%, transparent 100%)' : 'linear-gradient(0deg, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0.15) 60%, transparent 100%)',
+              backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
+              transition: 'opacity 0.45s ease',
+              opacity: transitioning ? 0 : 1,
+            }}>
+              {/* EQ 均衡器 */}
+              <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', maxWidth: 500, height: 28 }}>
+                {eqHeights.map((h, i) => (
+                  <span key={i} style={{
+                    flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h * 0.5}%`,
+                    background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
+                    borderRadius: 2, opacity: 0.85,
+                  }} />
+                ))}
+              </div>
+
+              {/* 进度条 */}
+              <div className="flex items-center gap-2 w-full" style={{ maxWidth: 500, fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: ink }}>
+                <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28 }}>{formatTime(pos)}</span>
+                <div className="flex-1 relative rounded-full cursor-pointer" style={{ height: 2, background: inkLine }}
+                  onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); musicPlayer.seek(ratio * dur); }}>
+                  <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
+                  <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
+                </div>
+                <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{formatTime(dur)}</span>
+              </div>
+
+              {/* 控制按钮 */}
+              <div className="flex items-center" style={{ gap: 'clamp(10px, 1.5vw, 20px)', color: ink }}>
+                <button onClick={handlePrev} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="上一首">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
+                </button>
+                <button
+                  onClick={() => musicPlayer.togglePlay()}
+                  className="rounded-full flex items-center justify-center transition-transform hover:scale-105"
+                  style={{
+                    width: 'clamp(36px, 4vw, 48px)', height: 'clamp(36px, 4vw, 48px)',
+                    background: 'rgba(255,255,255,0.92)', color: '#2c5a1a',
+                    boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)',
+                    border: 'none', cursor: 'pointer',
+                    animation: nowPlaying.isPlaying ? 'roam-breathe 3.4s ease-in-out infinite' : 'none',
+                  }}
+                  title={nowPlaying.isPlaying ? '暂停' : '播放'}
+                >
+                  {nowPlaying.isPlaying ? (
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                  )}
+                </button>
+                <button onClick={handleNext} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="下一首">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
+                </button>
+              </div>
+            </div>
+            )}
           </div>
         )}
       </div>

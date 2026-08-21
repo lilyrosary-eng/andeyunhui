@@ -48,8 +48,6 @@ import { musicPlayer, type Track } from './musicPlayer';
 let linglanTrackPool: Track[] = [];
 let linglanPoolCursor = 0; // 消费指针，每次 fetchBatch 从这里开始取
 export function setLinglanRoamPool(tracks: Track[]) {
-  // 只在池为空时注入，避免 playlists 变化时重置游标导致歌曲重复
-  if (linglanTrackPool.length > 0) return;
   // 合并 + 去重 + 打乱
   const seen = new Set<string>();
   const deduped: Track[] = [];
@@ -61,6 +59,10 @@ export function setLinglanRoamPool(tracks: Track[]) {
   }
   linglanTrackPool = deduped.sort(() => Math.random() - 0.5);
   linglanPoolCursor = 0;
+}
+// 确保池非空（仅检查外部注入的池，不从 musicPlayer 取——musicPlayer 里的是漫游队列不是本地歌单）
+function ensureLinglanPool(): Track[] {
+  return linglanTrackPool;
 }
 
 // ============ 映射函数 ============
@@ -224,23 +226,17 @@ const qishuiApiImpl: RoamSourceApi = {
 
 const linglanApi: RoamSourceApi = {
   async fetchBatch(count: number, _offset: number) {
-    // 从外部注入的本地歌曲池中取（已打乱），使用消费指针确保每次取不同的歌
-    if (!linglanTrackPool.length) {
-      // 降级：从 musicPlayer 取
-      const tracks = musicPlayer.getTracks();
-      if (!tracks.length) return { tracks: [], nextOffset: 0 };
-      const shuffled = [...tracks].sort(() => Math.random() - 0.5);
-      const slice = shuffled.slice(0, Math.min(count, Math.max(count, 10)));
-      return { tracks: slice.map(localToRoam), nextOffset: 0 };
-    }
+    // 确保池非空（外部注入或从 musicPlayer 取）
+    const pool = ensureLinglanPool();
+    if (!pool.length) return { tracks: [], nextOffset: 0 };
     // 从游标位置取 count 首，不够则从头循环
     const take = Math.max(count, 1);
     const result: Track[] = [];
     for (let i = 0; i < take; i++) {
-      const idx = (linglanPoolCursor + i) % linglanTrackPool.length;
-      result.push(linglanTrackPool[idx]);
+      const idx = (linglanPoolCursor + i) % pool.length;
+      result.push(pool[idx]);
     }
-    linglanPoolCursor = (linglanPoolCursor + take) % linglanTrackPool.length;
+    linglanPoolCursor = (linglanPoolCursor + take) % pool.length;
     return { tracks: result.map(localToRoam), nextOffset: 0 };
   },
   async getSongUrl(track: RoamSeedTrack) {
@@ -263,7 +259,13 @@ export function getRoamSourceApi(source: RoamSource): RoamSourceApi {
 }
 
 // 清空缓存（切换路径时调用）
+// 注意：不清空铃兰池——铃兰池由 setLinglanRoamPool 管理，避免切换路径时丢掉本地歌曲
 export function clearRoamCache(): void {
+  kugouRankCache = null;
+  qishuiPlaylistCache = null;
+}
+// 强制清空所有缓存（切换模块时调用）
+export function clearAllRoamCache(): void {
   kugouRankCache = null;
   qishuiPlaylistCache = null;
   linglanTrackPool = [];

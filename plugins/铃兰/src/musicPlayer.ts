@@ -48,6 +48,10 @@ class MusicPlayer {
   private smtcUnlisten: (() => void) | null = null;
   // 持久化：当前播放的歌单 ID，组件重载时恢复选中状态
   currentPlaylistId: string | null = null;
+  // Web Audio API（延迟初始化，只在第一次播放时创建，避免启动卡死）
+  private audioCtx: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private sourceNode: MediaElementAudioSourceNode | null = null;
   private eventListeners: Record<PlayerEvent, Set<(data: unknown) => void>> = {
     play: new Set(),
     pause: new Set(),
@@ -308,10 +312,65 @@ class MusicPlayer {
       this.currentIndex = 0;
       this.loadTrack(0);
     }
+    // 延迟初始化 AudioContext（只在第一次播放时创建，此时有用户交互不会卡死）
+    this.ensureAudioContext();
+    // 确保 AudioContext 处于 running 状态，否则 createMediaElementSource 会吞掉声音
+    if (this.audioCtx?.state === 'suspended') {
+      this.audioCtx.resume().catch(() => {});
+    }
     this.audio.play().catch((err) => {
       console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
       this.emit('pause', undefined);
     });
+  }
+
+  // 延迟初始化 AudioContext + AnalyserNode
+  // 使用 captureStream 旁听音频，不拦截 audio 输出路由，避免无声音
+  private ensureAudioContext(): void {
+    if (this.audioCtx) return;
+    try {
+      const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!Ctor) return;
+      const ctx: AudioContext = new Ctor();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 64;
+      analyser.smoothingTimeConstant = 0.7;
+      // 优先使用 captureStream（不拦截 audio 输出），降级到 createMediaElementSource
+      const audioEl = this.audio as any;
+      if (typeof audioEl.captureStream === 'function') {
+        const stream = audioEl.captureStream();
+        const source = ctx.createMediaStreamSource(stream);
+        source.connect(analyser);
+        // 不连 destination —— 旁听模式，声音仍走 audio 元素原生输出
+      } else if (typeof audioEl.mozCaptureStream === 'function') {
+        const stream = audioEl.mozCaptureStream();
+        const source = ctx.createMediaStreamSource(stream);
+        source.connect(analyser);
+      } else {
+        // 最终降级：createMediaElementSource（会接管音频路由，需连 destination）
+        const source = ctx.createMediaElementSource(this.audio);
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+        this.sourceNode = source;
+      }
+      this.audioCtx = ctx;
+      this.analyser = analyser;
+      ctx.resume().catch((e) => debugLog(`AudioContext resume 失败: ${e}`));
+      debugLog('AudioContext + AnalyserNode 初始化成功 (captureStream 模式)');
+    } catch (e) {
+      debugLog(`AudioContext 初始化失败: ${e}`);
+      this.audioCtx = null;
+      this.analyser = null;
+      this.sourceNode = null;
+    }
+  }
+
+  // 获取 AnalyserNode 供 EQ 动画使用
+  getAnalyser(): AnalyserNode | null {
+    if (this.audioCtx?.state === 'suspended') {
+      this.audioCtx.resume().catch(() => {});
+    }
+    return this.analyser;
   }
 
   pause(): void {
@@ -421,6 +480,15 @@ class MusicPlayer {
       this.audio.removeAttribute('src');
       this.audio.load();
     } catch { /* 忽略：audio 已处于异常态 */ }
+    // 清理 AudioContext
+    try {
+      this.sourceNode?.disconnect();
+      this.analyser?.disconnect();
+      this.audioCtx?.close();
+    } catch { /* 忽略 */ }
+    this.audioCtx = null;
+    this.analyser = null;
+    this.sourceNode = null;
     // 清空所有事件监听器，防止孤儿回调
     (Object.keys(this.eventListeners) as PlayerEvent[]).forEach(k => {
       this.eventListeners[k].clear();

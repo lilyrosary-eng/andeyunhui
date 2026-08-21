@@ -13,7 +13,7 @@ import { QishuiView, type QishuiViewHandle } from './QishuiView';
 import { RoamView } from './RoamView';
 import RoamSidebar, { type RoamSource, type RoamSeedTrack, type RoamHistoryEntry } from './RoamSidebar';
 import RoamSettingsPanel from './RoamSettingsPanel';
-import { getRoamSourceApi, clearRoamCache, setLinglanRoamPool } from './roamSources';
+import { getRoamSourceApi, clearRoamCache, clearAllRoamCache, setLinglanRoamPool } from './roamSources';
 import QishuiSidebar from './QishuiSidebar';
 import { qishuiGetRecommendPlaylists, type QishuiPlaylistCard } from './qishuiApi';
 import NeteaseSidebar from './NeteaseSidebar';
@@ -1103,7 +1103,7 @@ const [roamSettingsOpen, setRoamSettingsOpen] = useState(false);
 useEffect(() => {
   if (!roamOpen) return;
   // 铃兰：合并所有本地歌单的 tracks 打乱注入
-  // 只在池为空时注入，避免 playlists 变化时重置游标导致歌曲重复
+  // 每次进入漫游时都重新注入（clearAllRoamCache 已在离开时清空池）
   const allLocalTracks = playlists.flatMap((p) => p.tracks || []);
   if (allLocalTracks.length) {
     setLinglanRoamPool(allLocalTracks);
@@ -1117,7 +1117,7 @@ useEffect(() => {
       }
     }).catch(() => {});
   });
-}, [roamOpen, playlists]); // eslint-disable-line react-hooks/exhaustive-deps
+}, [roamOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
 // 进入汽水模块时拉一次推荐歌单（侧栏铺开），仅游客态
   useEffect(() => {
@@ -2220,12 +2220,25 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             // 切换漫游路径时清空旧路径的缓存
             if (src !== roamSource) {
               clearRoamCache();
+              // 切换到铃兰时重新注入本地歌曲池（clearRoamCache 不清铃兰池，但确保池有数据）
+              if (src === 'linglan') {
+                const allLocalTracks = playlists.flatMap((p) => p.tracks || []);
+                if (allLocalTracks.length) {
+                  setLinglanRoamPool(allLocalTracks);
+                }
+              }
               setRoamSource(src);
             }
           }}
           onSelectTrack={(src, track, fromHistory) => {
             if (src !== roamSource) {
               clearRoamCache();
+              if (src === 'linglan') {
+                const allLocalTracks = playlists.flatMap((p) => p.tracks || []);
+                if (allLocalTracks.length) {
+                  setLinglanRoamPool(allLocalTracks);
+                }
+              }
               setRoamSource(src);
             }
             // 播放选中的歌曲
@@ -2499,7 +2512,7 @@ setKugouOpen(false);
 setQishuiOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
-clearRoamCache();
+clearAllRoamCache();
 setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
 setShowModuleDrawer(false);
 }}
@@ -2510,7 +2523,7 @@ setKugouOpen(false);
 setQishuiOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
-clearRoamCache();
+clearAllRoamCache();
 setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
 }}
 onSelectKugou={(key: 'home' | 'roam' | 'search' | 'mine') => {
@@ -2520,7 +2533,7 @@ setNeteaseOpen(false);
 setQishuiOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
-clearRoamCache();
+clearAllRoamCache();
 setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
 // 切换折叠菜单子项时，清理榜单详情 / 收藏夹等内层级状态，避免覆盖漫游 / 我的
 setKugouActiveRankId(null);
@@ -2537,7 +2550,7 @@ setNeteaseOpen(false);
 setKugouOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
-clearRoamCache();
+clearAllRoamCache();
 setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
 setQishuiActivePlaylistId(null);
 setSelectedPlaylist(null);
