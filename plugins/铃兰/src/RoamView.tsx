@@ -574,15 +574,15 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
       {/* 顶部栏 */}
       <div className="shrink-0 flex items-center justify-between min-w-0 px-4 pt-3 pb-2 relative z-20">
-        <div className="flex items-center gap-2 min-w-0">
-          <button onClick={onBack} className="btn-press flex items-center justify-center p-2 -ml-1 rounded-lg transition-colors" style={{ color: ink }} title="返回模块抽屉">
+        <h2 className="text-sm font-semibold truncate" style={{ color: ink }}>漫游电台 · {sourceLabel[source]}</h2>
+        <div className="flex items-center gap-2">
+          <button onClick={refreshRoam} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors" style={{ background: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.92)', color: isDark ? 'rgba(255,255,255,0.9)' : '#2c5a1a' }} title="换一批漫游">
+            <Sparkles size={14} /> 换一批
+          </button>
+          <button onClick={onBack} className="btn-press flex items-center justify-center p-2 rounded-lg transition-colors" style={{ color: ink }} title="返回模块抽屉">
             <Cloud size={18} />
           </button>
-          <h2 className="text-sm font-semibold truncate" style={{ color: ink }}>漫游电台 · {sourceLabel[source]}</h2>
         </div>
-        <button onClick={refreshRoam} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors" style={{ background: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.92)', color: isDark ? 'rgba(255,255,255,0.9)' : '#2c5a1a' }} title="换一批漫游">
-          <Sparkles size={14} /> 换一批
-        </button>
       </div>
 
       {/* 主舞台 */}
@@ -636,19 +636,36 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
             {/* 左侧玻璃面板 */}
             <div className="roam-left">
-              {/* 标题区 */}
-              <div className="flex flex-col gap-1" style={{ paddingLeft: 'clamp(12px, 2%, 22px)' }}>
+              {/* 标题区 — 限制宽度不覆盖唱片，长文字自适应缩容 */}
+              <div className="flex flex-col gap-1" style={{ paddingLeft: 'clamp(12px, 2%, 22px)', maxWidth: 'calc(100% - 20px)' }}>
                 <div className="flex items-center gap-2 mb-2" style={{ fontFamily: 'ui-monospace, monospace', fontSize: `${9 * scaleFactor}px`, letterSpacing: '0.4em', textTransform: 'uppercase', color: inkSoft }}>
                   <span style={{ width: 24 * scaleFactor, height: 1, background: inkLine }} /> A roam playlist
                 </div>
-                <h1 className="font-black leading-none" style={{ fontSize: `clamp(26px, ${4 * scaleFactor}vw, ${Math.round(56 * scaleFactor)}px)`, letterSpacing: '-0.02em', color: ink, textShadow: glow, wordBreak: 'break-word' }}>
-                  {displayTitle.slice(0, 24)}
+                {/* 标题：长文字自动缩小字号，防止溢出覆盖唱片 */}
+                <h1 className="font-black leading-none" style={{
+                  fontSize: `clamp(18px, ${4 * scaleFactor}vw, ${Math.round(56 * scaleFactor)}px)`,
+                  letterSpacing: '-0.02em', color: ink, textShadow: glow,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  maxWidth: '100%',
+                }}>
+                  {displayTitle}
                 </h1>
-                <h2 className="mt-2" style={{ fontSize: `clamp(11px, ${1 * scaleFactor}vw, ${Math.round(16 * scaleFactor)}px)`, letterSpacing: '0.15em', textTransform: 'uppercase', color: ink, fontWeight: 400 }}>
-                  {displayArtist.slice(0, 36)}
+                {/* 歌手：同上自适应 */}
+                <h2 className="mt-2" style={{
+                  fontSize: `clamp(10px, ${1 * scaleFactor}vw, ${Math.round(16 * scaleFactor)}px)`,
+                  letterSpacing: '0.15em', textTransform: 'uppercase', color: ink, fontWeight: 400,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  maxWidth: '100%',
+                }}>
+                  {displayArtist}
                 </h2>
                 {displayAlbum && (
-                  <p className="mt-2" style={{ fontSize: `${10 * scaleFactor}px`, lineHeight: 1.6, maxWidth: Math.round(200 * scaleFactor), color: inkSoft, borderLeft: `1px solid ${inkLine}`, paddingLeft: 10 }}>{displayAlbum}</p>
+                  <p className="mt-2" style={{
+                    fontSize: `${10 * scaleFactor}px`, lineHeight: 1.6,
+                    maxWidth: '100%', color: inkSoft,
+                    borderLeft: `1px solid ${inkLine}`, paddingLeft: 10,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>{displayAlbum}</p>
                 )}
               </div>
 
@@ -666,13 +683,17 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                       }} />
                     ))}
                   </div>
-                  {/* 进度条 — 可点击区域向上拓展至2倍 */}
+                  {/* 进度条 — 视觉2px细线，点击区域向上拓展2倍 */}
                   <div className="flex items-center gap-2 w-full" style={{ fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: ink }}>
                     <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28 }}>{formatTime(pos)}</span>
-                    <div className="flex-1 relative rounded-full cursor-pointer" style={{ height: 2, background: inkLine, paddingTop: 14, paddingBottom: 14, marginTop: -14, marginBottom: -14 }}
+                    {/* 外层透明容器拓展点击区域（上方14px+下方14px），内层2px细线 */}
+                    <div className="flex-1 relative cursor-pointer" style={{ paddingTop: 14, paddingBottom: 14, marginTop: -14, marginBottom: -14 }}
                       onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); musicPlayer.seek(ratio * dur); }}>
-                      <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
-                      <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
+                      {/* 视觉细线层：仅2px高，居中于点击区域 */}
+                      <div className="relative rounded-full" style={{ height: 2, background: inkLine }}>
+                        <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
+                        <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
+                      </div>
                     </div>
                     <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{formatTime(dur)}</span>
                   </div>
@@ -769,13 +790,17 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                 ))}
               </div>
 
-              {/* 进度条 — 可点击区域向上拓展至2倍 */}
+              {/* 进度条 — 视觉2px细线，点击区域向上拓展2倍 */}
               <div className="flex items-center gap-2 w-full" style={{ maxWidth: 500, fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: ink }}>
                 <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28 }}>{formatTime(pos)}</span>
-                <div className="flex-1 relative rounded-full cursor-pointer" style={{ height: 2, background: inkLine, paddingTop: 14, paddingBottom: 14, marginTop: -14, marginBottom: -14 }}
+                {/* 外层透明容器拓展点击区域（上方14px+下方14px），内层2px细线 */}
+                <div className="flex-1 relative cursor-pointer" style={{ paddingTop: 14, paddingBottom: 14, marginTop: -14, marginBottom: -14 }}
                   onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); musicPlayer.seek(ratio * dur); }}>
-                  <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
-                  <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
+                  {/* 视觉细线层：仅2px高，居中于点击区域 */}
+                  <div className="relative rounded-full" style={{ height: 2, background: inkLine }}>
+                    <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
+                    <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
+                  </div>
                 </div>
                 <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{formatTime(dur)}</span>
               </div>
