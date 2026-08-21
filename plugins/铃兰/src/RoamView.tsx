@@ -208,26 +208,29 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     return () => window.removeEventListener('roam-bar-position-changed', handler);
   }, []);
 
-  // EQ 动画 — 真实律动：优先使用 AnalyserNode 的频域数据，降级到伪律动
+  // EQ 动画 — 真实律动：使用 AnalyserNode 的频域数据，降级到伪律动
   useEffect(() => {
     const freqData = new Uint8Array(64);
     const animate = () => {
       const analyser = musicPlayer.getAnalyser();
       if (analyser && nowPlaying.isPlaying) {
         analyser.getByteFrequencyData(freqData);
+        const bins = freqData.length;
         setEqHeights(prev => {
           const next = [...prev];
           for (let i = 0; i < EQ_BARS; i++) {
-            const dataIdx = Math.floor((i / EQ_BARS) * freqData.length);
-            const v = freqData[dataIdx] / 255; // 0~1
-            next[i] = 5 + v * 90;
+            // 对数映射，让低频在中间，高频在两端（更自然）
+            const ratio = i / EQ_BARS;
+            const dataIdx = Math.floor(Math.pow(ratio, 1.5) * (bins - 1));
+            const v = freqData[dataIdx] / 255;
+            next[i] = 5 + v * 92;
           }
           return next;
         });
       } else {
         // 降级：伪律动
         const t = performance.now() / 240;
-        const amp = nowPlaying.isPlaying ? 0.9 : 0.25;
+        const amp = nowPlaying.isPlaying ? 0.9 : 0.2;
         setEqHeights(prev => {
           const next = [...prev];
           for (let i = 0; i < EQ_BARS; i++) {
@@ -344,6 +347,8 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     roamReservoir.current = [];
     roamTrackListRef.current = [];
     trackIdxRef.current = 0;
+    // 重置历史记录，避免跨源混淆
+    historyRef.current = [];
     const req = ++reqRef.current;
     setLoading(true); setError('');
     (async () => {
@@ -370,18 +375,21 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
       setProgress({ current: musicPlayer.getCurrentTime(), duration: musicPlayer.getDuration() });
     };
     const maybeExtend = () => {
-      const curId = musicPlayer.getCurrentTrack()?.id;
+      const curTrack = musicPlayer.getCurrentTrack();
+      const curId = curTrack?.id;
       if (curId) {
         slideRoamWindow(roamTrackListRef.current, curId);
         const track = roamTrackListRef.current.find((t) => t.id === curId);
         if (track) addToHistory(track);
-        // 更新主题色
+        // 更新主题色：优先用 roamTrackListRef 中的 track（有 cover），降级用 musicPlayer 的 track
+        const coverTrack = track || curTrack;
+        const coverUrl = getCoverUrl(coverTrack?.coverPath || (curTrack as any)?.coverPath);
         if (themeMode === 'preset') {
           presetIdxRef.current = (presetIdxRef.current + 1) % PRESET_THEMES.length;
           const preset = PRESET_THEMES[presetIdxRef.current];
           setSongTheme({ hue: preset.hue, fog: preset.fog });
         } else {
-          setSongTheme(getSongTheme(getCoverUrl(track?.cover)));
+          setSongTheme(getSongTheme(coverUrl));
         }
         // 加载歌词
         loadLyricsForTrack(track || null);
@@ -414,12 +422,6 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     // 检查缓存
     const cached = lyricCacheRef.current.get(track.id);
     if (cached) { setLyricLines(cached); return; }
-    // 本地歌曲尝试读取本地歌词
-    if (track.id.startsWith('local-')) {
-      // 本地歌曲歌词暂不可用
-      setLyricLines([]);
-      return;
-    }
     try {
       const api = getRoamSourceApi(source);
       if (!api.getLyric) { setLyricLines([]); return; }
@@ -492,13 +494,13 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     ? 'radial-gradient(ellipse at 22% 38%, #1a2a16 0%, #1c1917 38%, #0e0c0a 78%, #0a0908 100%)'
     : (curPreset ? curPreset.bgGradient : 'radial-gradient(ellipse at 22% 38%, #f3fbe2 0%, #d6ecc4 38%, #b3d896 78%, #8cbc6d 100%)');
 
-  // 右下角两行：预设模式用预设歌词，跟随模式用实际歌词
+  // 右下角两行：只显示歌词，不显示歌曲信息（歌曲信息已在遮罩区显示）
   const lyricLine1 = themeMode === 'preset' && curPreset
     ? curPreset.l1
-    : (curLyric.cur || cur?.title || '尚未开始漫游');
+    : (curLyric.cur || '');
   const lyricLine2 = themeMode === 'preset' && curPreset
     ? curPreset.l2
-    : (curLyric.next || (cur ? `${cur.artist || '未知歌手'}${cur.album ? ' · ' + cur.album : ''}` : '进入漫游页将自动为你播放推荐'));
+    : (curLyric.next || '');
 
   // 标题区：预设模式用预设标题，跟随模式用歌曲信息
   const displayTitle = themeMode === 'preset' && curPreset ? curPreset.title : (cur?.title || 'UNKNOWN');
@@ -685,9 +687,12 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
             <div
               className="roam-lyrics"
               style={{
-                position: 'absolute', right: 'clamp(16px, 3%, 40px)', bottom: 'clamp(16px, 4%, 36px)',
+                position: 'absolute',
+                right: flipped ? 'auto' : 'clamp(16px, 3%, 40px)',
+                left: flipped ? 'clamp(16px, 3%, 40px)' : 'auto',
+                bottom: 'clamp(16px, 4%, 36px)',
                 zIndex: 5, display: 'flex', flexDirection: 'column', gap: 'clamp(6px, 0.8vw, 10px)',
-                alignItems: 'flex-end', textAlign: 'right', pointerEvents: 'none',
+                alignItems: flipped ? 'flex-start' : 'flex-end', textAlign: flipped ? 'left' : 'right', pointerEvents: 'none',
                 transition: 'right 0.7s cubic-bezier(.22,.61,.36,1), left 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease',
               }}
             >

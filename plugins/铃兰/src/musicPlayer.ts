@@ -314,18 +314,30 @@ class MusicPlayer {
     }
     // 延迟初始化 AudioContext（只在第一次播放时创建，此时有用户交互不会卡死）
     this.ensureAudioContext();
-    // 确保 AudioContext 处于 running 状态，否则 createMediaElementSource 会吞掉声音
+    // 先 resume，再 play，确保 AudioContext 处于 running 状态
     if (this.audioCtx?.state === 'suspended') {
-      this.audioCtx.resume().catch(() => {});
+      this.audioCtx.resume().then(() => {
+        this.audio.play().catch((err) => {
+          console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
+          this.emit('pause', undefined);
+        });
+      }).catch(() => {
+        this.audio.play().catch((err) => {
+          console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
+          this.emit('pause', undefined);
+        });
+      });
+    } else {
+      this.audio.play().catch((err) => {
+        console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
+        this.emit('pause', undefined);
+      });
     }
-    this.audio.play().catch((err) => {
-      console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
-      this.emit('pause', undefined);
-    });
   }
 
   // 延迟初始化 AudioContext + AnalyserNode
-  // 使用 captureStream 旁听音频，不拦截 audio 输出路由，避免无声音
+  // 使用 createMediaElementSource 接管音频路由，确保频域数据可用
+  // 关键：在 audio 'play' 事件后创建 + resume，避免 suspended 导致无声音
   private ensureAudioContext(): void {
     if (this.audioCtx) return;
     try {
@@ -333,30 +345,17 @@ class MusicPlayer {
       if (!Ctor) return;
       const ctx: AudioContext = new Ctor();
       const analyser = ctx.createAnalyser();
-      analyser.fftSize = 64;
-      analyser.smoothingTimeConstant = 0.7;
-      // 优先使用 captureStream（不拦截 audio 输出），降级到 createMediaElementSource
-      const audioEl = this.audio as any;
-      if (typeof audioEl.captureStream === 'function') {
-        const stream = audioEl.captureStream();
-        const source = ctx.createMediaStreamSource(stream);
-        source.connect(analyser);
-        // 不连 destination —— 旁听模式，声音仍走 audio 元素原生输出
-      } else if (typeof audioEl.mozCaptureStream === 'function') {
-        const stream = audioEl.mozCaptureStream();
-        const source = ctx.createMediaStreamSource(stream);
-        source.connect(analyser);
-      } else {
-        // 最终降级：createMediaElementSource（会接管音频路由，需连 destination）
-        const source = ctx.createMediaElementSource(this.audio);
-        source.connect(analyser);
-        analyser.connect(ctx.destination);
-        this.sourceNode = source;
-      }
+      analyser.fftSize = 128; // 更高频域分辨率
+      analyser.smoothingTimeConstant = 0.75;
+      const source = ctx.createMediaElementSource(this.audio);
+      source.connect(analyser);
+      analyser.connect(ctx.destination);
       this.audioCtx = ctx;
       this.analyser = analyser;
-      ctx.resume().catch((e) => debugLog(`AudioContext resume 失败: ${e}`));
-      debugLog('AudioContext + AnalyserNode 初始化成功 (captureStream 模式)');
+      this.sourceNode = source;
+      // 创建后立即 resume
+      ctx.resume().then(() => debugLog('AudioContext resumed')).catch((e) => debugLog(`AudioContext resume 失败: ${e}`));
+      debugLog('AudioContext + AnalyserNode 初始化成功');
     } catch (e) {
       debugLog(`AudioContext 初始化失败: ${e}`);
       this.audioCtx = null;

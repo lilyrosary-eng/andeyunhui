@@ -243,6 +243,17 @@ const linglanApi: RoamSourceApi = {
     // 本地歌曲 filePath 就是播放地址
     return { url: track.filePath };
   },
+  async getLyric(track: RoamSeedTrack) {
+    // 本地歌曲：通过宿主读取 .lrc 文件或内嵌标签
+    const fp = track.filePath || track.id;
+    if (!fp) return '';
+    try {
+      const api = (window as any).__HOST_API__;
+      if (!api?.invoke) return '';
+      const res = await api.invoke<{ text: string; source: string }>('get_lyrics_text', { trackPath: fp });
+      return res?.text || '';
+    } catch { return ''; }
+  },
 };
 
 // ============ 注册表 ============
