@@ -9,6 +9,7 @@ export const EVENTS = {
   ai: {
     delta: 'ai-delta', reasoning: 'ai-reasoning-delta', done: 'ai-done', error: 'ai-error',
     thinkingChanged: 'ai-thinking-changed', activeProfileChanged: 'ai-active-profile-changed',
+    agentStep: 'ai-agent-step',
   },
   transfer: {
     peerFound: 'transfer-peer-found', progress: 'transfer-progress', request: 'transfer-receive-request',
@@ -57,6 +58,7 @@ export const EVENT_PAYLOAD_KEYS: Record<string, string> = {
   'ai-error': '{ requestId: string; error: string }',
   'ai-thinking-changed': '{ profile_id: string; thinking: boolean }',
   'ai-active-profile-changed': '{ id: string }',
+  'ai-agent-step': '{ requestId: string; stage: string; name: string; ok: boolean; detail: string }',
   'transfer-peer-found': 'TransferPeer',
   'transfer-progress': 'TransferProgressItem',
   'transfer-receive-request': 'ReceiveRequest',

@@ -635,6 +635,392 @@ pub async fn ai_chat(
     Ok(())
 }
 
+// ============ Agent 能力：工具注册表 + 原生 tool_calls 循环（阶段1） ============
+// 借鉴 dsh(deepseek-harness, MIT) 的 core/tools 与 core/agent-loop 设计思路，
+// 落地为本项目的 OpenAI 兼容端点实现。与 ai_chat（纯对话流式）互补：
+// 不用流式检测 tool_calls（流式分段叠加易碎），改用「非流式判断 → 含 tool_calls
+// 则执行并按 role:"tool" 回填重发 → 直到纯文本」。Agent 为增量能力，默认前端不调即不启用，
+// ai_chat 行为完全不受影响。
+
+/// 模型可调用的工具。
+/// execute 为同步实现：阶段1内置 now/calculator 均为纯计算、无阻塞 IO。
+/// 未来如需网络/文件类异步工具，可引入 ToolContext + async execute。
+pub trait AiTool: Send + Sync {
+    fn name(&self) -> &'static str;
+    /// OpenAI functions 格式 schema，供 /chat/completions 的 tools 参数。
+    fn function_schema(&self) -> serde_json::Value;
+    /// 执行工具；args 为模型传入的 JSON 对象。错误以 Err(text) 返回，仍作为 tool 结果回填给模型。
+    fn execute(&self, _args: &serde_json::Value) -> Result<String, String>;
+}
+
+/// 当前本机时间工具：模型借此把「现在几点/今天日期」这类实时问题交给工具答，避免凭空编造。
+struct NowTool;
+impl AiTool for NowTool {
+    fn name(&self) -> &'static str {
+        "get_current_time"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "获取当前时刻（本机时区）。当用户询问『现在几点』『今天几号』『什么时候了』时调用。",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        })
+    }
+    fn execute(&self, _args: &serde_json::Value) -> Result<String, String> {
+        Ok(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+    }
+}
+
+/// 安全计算器：仅支持数字与 + - * / ( ) 及一元正负号。递归下降求值，杜绝任意代码执行。
+struct CalculatorTool;
+impl AiTool for CalculatorTool {
+    fn name(&self) -> &'static str {
+        "calculator"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "计算数学表达式。仅支持数字与 + - * / 及括号（如 (12.5+7)*3/2）。需要准确算术时调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "expression": { "type": "string", "description": "要计算的数学表达式" }
+                    },
+                    "required": ["expression"]
+                }
+            }
+        })
+    }
+    fn execute(&self, args: &serde_json::Value) -> Result<String, String> {
+        let expr = args
+            .get("expression")
+            .and_then(|v| v.as_str())
+            .ok_or("缺少 expression 参数")?;
+        let mut p = SafeEval { s: expr, pos: 0 };
+        let val = p.parse_expr()?;
+        p.skip_ws();
+        if p.pos < p.s.len() {
+            return Err(format!("表达式存在多余字符: '{}'", &p.s[p.pos..]));
+        }
+        Ok(format!("= {}", val))
+    }
+}
+
+/// 极简安全表达式求值器（递归下降）。
+struct SafeEval<'a> {
+    s: &'a str,
+    pos: usize,
+}
+
+impl<'a> SafeEval<'a> {
+    fn peek(&self) -> Option<char> {
+        self.s.get(self.pos..)?.chars().next()
+    }
+    fn skip_ws(&mut self) {
+        while let Some(c) = self.peek() {
+            if c.is_ascii_whitespace() {
+                self.pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+    fn parse_expr(&mut self) -> Result<f64, String> {
+        self.parse_add()
+    }
+    fn parse_add(&mut self) -> Result<f64, String> {
+        let mut v = self.parse_mul()?;
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some('+') => {
+                    self.pos += 1;
+                    v += self.parse_mul()?;
+                }
+                Some('-') => {
+                    self.pos += 1;
+                    v -= self.parse_mul()?;
+                }
+                _ => return Ok(v),
+            }
+        }
+    }
+    fn parse_mul(&mut self) -> Result<f64, String> {
+        let mut v = self.parse_atom()?;
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some('*') => {
+                    self.pos += 1;
+                    v *= self.parse_atom()?;
+                }
+                Some('/') => {
+                    self.pos += 1;
+                    let d = self.parse_atom()?;
+                    if d == 0.0 {
+                        return Err("除数为 0".into());
+                    }
+                    v /= d;
+                }
+                _ => return Ok(v),
+            }
+        }
+    }
+    fn parse_atom(&mut self) -> Result<f64, String> {
+        self.skip_ws();
+        match self.peek() {
+            Some('(') => {
+                self.pos += 1;
+                let v = self.parse_expr()?;
+                self.skip_ws();
+                if self.peek() != Some(')') {
+                    return Err("缺少右括号".into());
+                }
+                self.pos += 1;
+                Ok(v)
+            }
+            Some('+') | Some('-') => {
+                let sign = if self.peek() == Some('-') { -1.0 } else { 1.0 };
+                self.pos += 1;
+                Ok(sign * self.parse_atom()?)
+            }
+            _ => self.parse_number(),
+        }
+    }
+    fn parse_number(&mut self) -> Result<f64, String> {
+        self.skip_ws();
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() || c == '.' {
+                self.pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let tok = &self.s[start..self.pos];
+        if tok.is_empty() {
+            return Err("表达式为空".into());
+        }
+        tok.parse::<f64>()
+            .map_err(|_| format!("数字无效: '{}'", tok))
+    }
+}
+
+/// 当前注册的全部工具（有序数组）。
+fn registered_tools() -> Vec<Box<dyn AiTool>> {
+    vec![Box::new(NowTool), Box::new(CalculatorTool)]
+}
+
+/// 统一发送 ai-error 事件 + 返回错误消息。
+fn emit_agent_error(app: &AppHandle, request_id: &str, msg: &str) {
+    let _ = app.emit("ai-error", serde_json::json!({ "requestId": request_id, "error": msg }));
+}
+
+/// 把最终文本按「换行 / 最长 ~96 字符」切成增量块，推给前端保持近似逐字流式观感。字符级安全（不切 UTF-8）。
+fn split_deltas(text: &str) -> Vec<String> {
+    const MAX: usize = 96;
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for c in text.chars() {
+        cur.push(c);
+        if c == '\n' || cur.chars().count() >= MAX {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Agent 对话：原生 tool_calls + 循环。
+/// 流程：非流式请求（带 tools）→ 若返回 message.tool_calls →
+///   顺序执行工具 → 追加 assistant(含 tool_calls) + 若干 role:"tool" 消息 → 重发 → 重复
+///   → 直到返回纯文本内容，将其作为 ai-delta 分块推给前端，ai-done 收尾。
+/// 事件（payload 含 requestId 便于前端多请求区分）：
+///   - ai-agent-step { requestId, stage:"tool", name, ok, detail }  工具调用/结果（供前端透传展示）
+///   - ai-delta / ai-done / ai-error   与 ai_chat 一致
+#[tauri::command]
+pub async fn ai_chat_agent(
+    app: AppHandle,
+    request_id: String,
+    messages: Vec<ChatMessage>,
+    profile_id: Option<String>,
+    system: Option<String>,
+    max_rounds: Option<u32>,
+) -> Result<(), String> {
+    let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 12u32);
+    let profiles = load_profiles(&app);
+    let cfg = resolve_profile(&profiles, profile_id);
+    if cfg.api_key.trim().is_empty() {
+        let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
+        emit_agent_error(&app, &request_id, &msg);
+        return Err(msg);
+    }
+
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let (messages, _truncated) = truncate_messages_for_safety(messages);
+
+    // system：人设 + 前端 per-call（与 ai_chat 同规则），并追加 agent 工具使用提示。
+    let persona = compose_persona_system(&cfg);
+    let effective_system = match (&system, persona.is_empty()) {
+        (Some(s), true) => s.clone(),
+        (Some(s), false) => format!("{}\n\n{}", s, persona),
+        (None, false) => persona,
+        (None, true) => String::new(),
+    };
+    let agent_hint = "你被允许并且应当在合适时调用下方提供的工具来获取实时信息或完成计算。需要时先调用工具，拿到结果后再组织最终回答；不要编造工具返回的数据。";
+    let system_final = if effective_system.trim().is_empty() {
+        agent_hint.to_string()
+    } else {
+        format!("{}\n\n{}", effective_system, agent_hint)
+    };
+
+    // 初始 messages：统一 system + 用户历史（忽略历史里的旧 system，避免重复注入）。
+    let mut msgs: Vec<serde_json::Value> = vec![serde_json::json!({ "role": "system", "content": system_final })];
+    for m in &messages {
+        if m.role == "system" {
+            continue;
+        }
+        msgs.push(serde_json::json!({ "role": m.role, "content": m.content }));
+    }
+
+    let tools: Vec<serde_json::Value> = registered_tools().iter().map(|t| t.function_schema()).collect();
+    let client = reqwest::Client::new();
+    let mut final_text = String::new();
+    let mut tool_calls_occurred = false;
+
+    for _round in 0..max_rounds {
+        let mut body = serde_json::json!({
+            "model": cfg.model,
+            "messages": msgs,
+            "stream": false,
+            "tools": tools,
+            "tool_choice": "auto",
+        });
+        let thinking = cfg.thinking.unwrap_or(false);
+        if thinking {
+            body["reasoning_effort"] = serde_json::json!("high");
+            if is_deepseek_provider(&cfg) {
+                body["thinking"] = serde_json::json!({ "type": "enabled" });
+            }
+        } else {
+            body["temperature"] = serde_json::json!(cfg.temperature);
+            if let Some(mt) = cfg.max_tokens {
+                body["max_tokens"] = serde_json::json!(mt);
+            }
+        }
+
+        let resp = match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("请求失败: {}", e);
+                emit_agent_error(&app, &request_id, &msg);
+                return Err(msg);
+            }
+        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            let msg = format!("HTTP {}: {}", status, text);
+            emit_agent_error(&app, &request_id, &msg);
+            return Err(msg);
+        }
+        let payload: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+        if let Some(err) = payload.get("error") {
+            let msg = format!("上游报错: {}", err);
+            emit_agent_error(&app, &request_id, &msg);
+            return Err(msg);
+        }
+        let msg_obj = payload["choices"][0]["message"].clone();
+        let content = msg_obj
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // 含工具调用 → 执行并回填，进入下一轮。
+        if let Some(calls) = msg_obj.get("tool_calls").and_then(|c| c.as_array()) {
+            if calls.is_empty() {
+                if !content.is_empty() {
+                    final_text.push_str(&content);
+                }
+                break;
+            }
+            tool_calls_occurred = true;
+            let mut assistant_msg = serde_json::json!({ "role": "assistant", "content": content });
+            assistant_msg["tool_calls"] = msg_obj["tool_calls"].clone();
+            msgs.push(assistant_msg);
+
+            for call in calls {
+                let cid = call.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let fname = call["function"]["name"].as_str().unwrap_or("").to_string();
+                let arguments = call["function"]["arguments"].as_str().unwrap_or("");
+                let found = registered_tools().into_iter().find(|t| t.name() == fname);
+                let (ok, detail) = match found {
+                    None => (false, format!("未知工具: {}", fname)),
+                    Some(tool) => {
+                        // 宽松解析参数：部分模型返回非标准/截断 JSON → 降级为 error 回填给模型。
+                        let args: serde_json::Value =
+                            serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({}));
+                        match tool.execute(&args) {
+                            Ok(r) => (true, r),
+                            Err(e) => (false, e),
+                        }
+                    }
+                };
+                let _ = app.emit(
+                    "ai-agent-step",
+                    serde_json::json!({
+                        "requestId": request_id,
+                        "stage": "tool",
+                        "name": fname,
+                        "ok": ok,
+                        "detail": detail,
+                    }),
+                );
+                msgs.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": cid,
+                    "content": detail,
+                }));
+            }
+            continue;
+        }
+
+        // 纯文本 → 最终回答。
+        final_text.push_str(&content);
+        break;
+    }
+
+    // 达到最大轮数仍停在工具调用且无最终内容 → 给出收敛提示而非静默。
+    if final_text.trim().is_empty() {
+        final_text = if tool_calls_occurred {
+            format!("（已达单次请求最大工具轮数 {}，我暂停以避免失控。你可以继续让我往下做。）", max_rounds)
+        } else {
+            "[Agent 未返回内容]".to_string()
+        };
+    }
+
+    for chunk in split_deltas(&final_text) {
+        let _ = app.emit("ai-delta", serde_json::json!({ "requestId": request_id, "delta": chunk }));
+    }
+    let _ = app.emit("ai-done", serde_json::json!({ "requestId": request_id }));
+    Ok(())
+}
+
 /// 测试 AI 配置是否可用：向端点发起一次极小开销的非流式请求，
 /// 校验 base_url / api_key / model 是否正确，并返回耗时。不消耗对话额度（max_tokens=5）。
 #[tauri::command]
