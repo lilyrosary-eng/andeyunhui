@@ -2646,8 +2646,16 @@ setSearchQuery('');
           playlists={online.activePlaylist ? [...playlists, online.activePlaylist] : playlists}
           currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
           onSelectTrack={handlePopupSelectTrack}
-          favoriteIds={favorites}
-          onToggleFavorite={toggleFavorite}
+          favoriteIds={(() => {
+            const nm = /^netease-(\d+)$/.exec(currentTrack.id);
+            return nm ? neteaseLiked : favorites;
+          })()}
+          onToggleFavorite={(() => {
+            const nm = /^netease-(\d+)$/.exec(currentTrack.id);
+            if (!nm) return toggleFavorite;
+            const nid = Number(nm[1]);
+            return () => toggleNeteaseLike(nid, !neteaseLiked.has(nid));
+          })()}
         />
       )}
     </div>
