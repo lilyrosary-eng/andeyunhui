@@ -276,6 +276,8 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
   const [agentSteps, setAgentSteps] = useState<{ name: string; ok: boolean; detail: string }[]>([]);
   // 当前计划快照（plan 工具回传，供渲染「计划/待办」面板）
   const [livePlan, setLivePlan] = useState<{ title: string; todos: { id: string; content: string; done: boolean }[] } | null>(null);
+  // 文件写外部路径时的审批弹窗（后端 ai-agent-approval 事件触发，回调 ai_agent_approve 决定）
+  const [approval, setApproval] = useState<{ approvalId: string; tool: string; operation: string } | null>(null);
   // 对话持久化加载完成标记：加载完成前不写盘，避免初始空 state 覆盖磁盘已有数据
   const [convLoaded, setConvLoaded] = useState(false);
 
@@ -341,6 +343,18 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
           todos: Array.isArray(p.plan.todos) ? p.plan.todos : [],
         });
       }
+    }).then((u: any) => { un = u; }).catch(() => {});
+    return () => { if (un) un(); };
+  }, []);
+
+  // 监听 ai-agent-approval（Agent 文件写外部路径时的授权请求）：弹出审批条 → ai_agent_approve 决定。
+  // 单请求可能连续多次审批，逐个弹、逐个回。
+  React.useEffect(() => {
+    let un: any = null;
+    hostApi.listen<any>('ai-agent-approval', (e: any) => {
+      const p = e?.payload;
+      if (!p || p.requestId !== activeReq.current) return;
+      setApproval({ approvalId: p.approvalId, tool: p.tool || 'file', operation: p.operation || '' });
     }).then((u: any) => { un = u; }).catch(() => {});
     return () => { if (un) un(); };
   }, []);
@@ -735,7 +749,7 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
       if (agentMode) {
         // Agent 模式：走 ai_chat_agent（非流式判断 + 工具调用循环，最终文本仍以 ai-delta 推送）；
         // 项目文件上下文经 system 参数并入，menu persona 由后端合并。
-        await hostApi.invoke('ai_chat_agent', { requestId: reqId, messages: payload, profileId: activeProfile.id, system: buildSystemPrompt() });
+        await hostApi.invoke('ai_chat_agent', { requestId: reqId, messages: payload, profileId: activeProfile.id, system: buildSystemPrompt(), projectRoot: projectRoot });
       } else {
         await hostApi.invoke('ai_chat', { requestId: reqId, messages: payload, profileId: activeProfile.id });
       }
@@ -750,7 +764,7 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
         assistantId.current = null;
       }
     }
-  }, [input, busy, activeProfile, messages, buildSystemPrompt, appendHint, agentMode]);
+  }, [input, busy, activeProfile, messages, buildSystemPrompt, appendHint, agentMode, projectRoot]);
 
   // 对话管理：清空 / 新建 / 切换 / 删除（#10）
   const clearChat = useCallback(() => {
@@ -895,6 +909,27 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* 文件写外部路径审批条：等待用户决定（批准 → ai_agent_approve true，拒绝 → false） */}
+      {approval && (
+        <div className="px-3 pt-2 shrink-0">
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-2.5">
+            <div className="flex items-start gap-2">
+              <span className="text-base leading-none mt-0.5">🔐</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium text-amber-700 dark:text-amber-400">文件写入需要授权</div>
+                <div className="text-[11px] text-neutral-600 dark:text-stone-300 mt-0.5 break-all">{approval.operation}</div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button onClick={() => { hostApi.invoke('ai_agent_approve', { approvalId: approval.approvalId, approved: true }).catch(() => {}); setApproval(null); }}
+                  className="btn-press px-2.5 py-1 rounded text-[11px] element-primary">允许</button>
+                <button onClick={() => { hostApi.invoke('ai_agent_approve', { approvalId: approval.approvalId, approved: false }).catch(() => {}); setApproval(null); }}
+                  className="btn-press px-2.5 py-1 rounded text-[11px] bg-neutral-200/70 dark:bg-stone-700 hover:bg-red-500/80 hover:text-white">拒绝</button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

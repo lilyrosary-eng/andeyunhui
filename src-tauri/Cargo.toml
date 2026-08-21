@@ -42,7 +42,9 @@ sha2 = "0.10"
 # tokio 显式依赖：mcp_service 用 tokio::task::spawn_blocking 在独立线程跑 stdio JSON-RPC
 # （tauri 2 内部用 tokio，但应用代码需显式声明才能 use tokio::）
 # 传输模块需 net/io-util/macros：UDP 组播发现 + axum HTTP 服务端
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros", "process"] }
+# Agent 工具 trait 异步化：文件读写授权等待、命令超时需要在 async 上下文中 await
+async-trait = "0.1"
 # 局域网传输（LocalSend v2 兼容）：axum 提供 HTTP 文件传输服务端，futures-util 流式读写大文件
 axum = "0.7"
 futures-util = "0.3"

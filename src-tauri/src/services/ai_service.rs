@@ -643,19 +643,33 @@ pub async fn ai_chat(
 // 则执行并按 role:"tool" 回填重发 → 直到纯文本」。Agent 为增量能力，默认前端不调即不启用，
 // ai_chat 行为完全不受影响。
 
+/// 工具执行时的上下文（前端/本轮请求相关），随每一次调用传入 execute。
+#[derive(Clone)]
+pub struct ToolContext {
+    /// 用于发射授权请求等事件（emit ai-agent-approval）。
+    pub app: AppHandle,
+    /// 本轮请求 id，事件负载中回传，便于前端按请求区分。
+    pub request_id: String,
+    /// AI 编程面板当前项目根目录（文件工具判“项目内”用）。
+    pub project_root: Option<PathBuf>,
+}
+
 /// 模型可调用的工具。
-/// execute 为同步实现：阶段1内置 now/calculator 均为纯计算、无阻塞 IO。
-/// 未来如需网络/文件类异步工具，可引入 ToolContext + async execute。
+/// execute 为异步实现：文件写给项目根外需等待用户授权、命令执行需限时，故在 async 中 await。
+/// 阻塞 IO（std::fs / 进程等待）内部用 spawn_blocking，避免卡住 Tokio 运行时。
+#[async_trait::async_trait]
 pub trait AiTool: Send + Sync {
     fn name(&self) -> &'static str;
     /// OpenAI functions 格式 schema，供 /chat/completions 的 tools 参数。
     fn function_schema(&self) -> serde_json::Value;
-    /// 执行工具；args 为模型传入的 JSON 对象。错误以 Err(text) 返回，仍作为 tool 结果回填给模型。
-    fn execute(&self, _args: &serde_json::Value) -> Result<String, String>;
+    /// 执行工具；args 为模型传入的 JSON 对象，ctx 提供本轮上下文。
+    /// 错误以 Err(text) 返回，仍作为 tool 结果回填给模型。
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String>;
 }
 
 /// 当前本机时间工具：模型借此把「现在几点/今天日期」这类实时问题交给工具答，避免凭空编造。
 struct NowTool;
+#[async_trait::async_trait]
 impl AiTool for NowTool {
     fn name(&self) -> &'static str {
         "get_current_time"
@@ -670,13 +684,14 @@ impl AiTool for NowTool {
             }
         })
     }
-    fn execute(&self, _args: &serde_json::Value) -> Result<String, String> {
+    async fn execute(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
         Ok(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
     }
 }
 
 /// 安全计算器：仅支持数字与 + - * / ( ) 及一元正负号。递归下降求值，杜绝任意代码执行。
 struct CalculatorTool;
+#[async_trait::async_trait]
 impl AiTool for CalculatorTool {
     fn name(&self) -> &'static str {
         "calculator"
@@ -697,7 +712,7 @@ impl AiTool for CalculatorTool {
             }
         })
     }
-    fn execute(&self, args: &serde_json::Value) -> Result<String, String> {
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
         let expr = args
             .get("expression")
             .and_then(|v| v.as_str())
@@ -763,6 +778,7 @@ fn render_plan(p: &Plan) -> String {
 /// Plan / Todo 工具：维护一份「计划 + 待办清单」并实时回传完整状态。
 /// 通过 action 参数区分操作；返回完整计划渲染（模型据此继续决策）。
 struct PlanTool;
+#[async_trait::async_trait]
 impl AiTool for PlanTool {
     fn name(&self) -> &'static str {
         "plan"
@@ -786,7 +802,7 @@ impl AiTool for PlanTool {
             }
         })
     }
-    fn execute(&self, args: &serde_json::Value) -> Result<String, String> {
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("").trim();
         let mut g = plan_store()
             .lock()
@@ -841,6 +857,211 @@ impl AiTool for PlanTool {
             _ => return Err(format!("未知 action: '{}'（可选 create_plan/add_todo/mark_done/mark_undone/delete_todo/list）", action)),
         }
         Ok(render_plan(&g))
+    }
+}
+
+// ========== 文件读写 / 命令执行 工具（C 增强：让 Agent 能落到真实文件系统与 shell） ==========
+//
+// 安全边界（按用户授权意图）：
+// - read_file：任意路径读取（只读、非破坏），无审批。
+// - write_file：目标在项目根目录内 → 直接写；在项目根外 → 交互式审批（ai-agent-approval 事件
+//   → 前端弹窗 → 回调 ai_agent_approve），超时未决则视为拒绝。
+// - run_command：任意命令，限时 15s、非 shell 中文案，走项目根或 cwd 参数。
+// 阻塞 IO 一律 spawn_blocking，符合本仓库「阻塞操作不得占用 Tokio 运行时」约定。
+
+/// 待用户审批的挂起操作。
+struct PendingApproval {
+    _tool: String,
+    _operation: String,
+    sender: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// 全局审批注册表：approval_id → 挂起操作。ai_agent_approve 从这张表取回发送端并 resolve。
+static APPROVAL_STORE: OnceLock<Mutex<std::collections::HashMap<String, PendingApproval>>> = OnceLock::new();
+fn approval_store() -> &'static Mutex<std::collections::HashMap<String, PendingApproval>> {
+    APPROVAL_STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 发起一次审批：注册挂起操作 → 发射 ai-agent-approval → 等待用户决定（默认 120s 超时拒绝）。
+async fn request_approval(ctx: &ToolContext, tool: &str, operation: &str) -> Result<bool, String> {
+    let approval_id = format!("ap_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    approval_store()
+        .lock()
+        .map_err(|_| "审批存储锁获取失败".to_string())?
+        .insert(
+            approval_id.clone(),
+            PendingApproval { _tool: tool.to_string(), _operation: operation.to_string(), sender: tx },
+        );
+    let _ = ctx.app.emit(
+        "ai-agent-approval",
+        serde_json::json!({
+            "requestId": ctx.request_id,
+            "approvalId": approval_id,
+            "tool": tool,
+            "operation": operation,
+        }),
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+        Ok(Ok(true)) => Ok(true),
+        Ok(Ok(false)) => Err("用户拒绝了该文件操作".to_string()),
+        Ok(Err(_)) => Err("授权通道已关闭".to_string()),
+        Err(_) => {
+            let _ = approval_store().lock().map(|mut m| m.remove(&approval_id));
+            Err("授权请求超时（120s 未确认，已拒绝）".to_string())
+        }
+    }
+}
+
+/// 简短随机串（事件/审批 id 后缀，避免多请求冲突）。
+fn rand_short() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    format!("{:08x}", t)
+}
+
+/// 判断 target 是否落在 root 之下（对已存在路径 canonicalize；未存在的写目标取其最近存在祖先）：
+/// 用于「写文件项目根内直接放行 / 项目根外需审批」的判定。
+fn is_under_path(target: &std::path::Path, root: &std::path::Path) -> bool {
+    let r = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let norm = target
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            target
+                .parent()
+                .and_then(|p| p.canonicalize().ok().map(|c| c.join(target.file_name().unwrap_or_default())))
+                .unwrap_or_else(|| target.to_path_buf())
+        });
+    norm.starts_with(&r)
+}
+
+/// 文件工具：read_file（任意路径只读）/ write_file（项目根内直写，根外审批后写）。
+struct FileTool;
+#[async_trait::async_trait]
+impl AiTool for FileTool {
+    fn name(&self) -> &'static str {
+        "file"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "读写文件。action：read_file(path) 读取文件内容（任意路径，只读）；write_file(path, content) 写入文件（项目根目录内可直接写，根外需用户授权）。路径请传绝对路径。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "description": "read_file / write_file" },
+                        "path": { "type": "string", "description": "绝对路径" },
+                        "content": { "type": "string", "description": "write_file 时写入的完整内容" }
+                    },
+                    "required": ["action", "path"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        use tokio::task::spawn_blocking;
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if path.is_empty() { return Err("file 工具缺少 path 参数".to_string()); }
+        let p = std::path::PathBuf::from(path);
+        match action {
+            "read_file" => {
+                let content = spawn_blocking(move || -> Result<String, String> {
+                    let data = std::fs::read(&p).map_err(|e| format!("读取失败 {}: {}", p.display(), e))?;
+                    let text = String::from_utf8_lossy(&data).to_string();
+                    const CAP: usize = 60_000;
+                    if text.chars().count() > CAP {
+                        Ok(format!("（文件较大，已截断前 {} 字符）\n{}", CAP, text.chars().take(CAP).collect::<String>()))
+                    } else { Ok(text) }
+                }).await.map_err(|e| format!("读取任务调度失败: {}", e))??;
+                Ok(content)
+            }
+            "write_file" => {
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
+                if !under {
+                    request_approval(ctx, "file", &format!("写入外部路径: {}", p.display())).await?;
+                }
+                // 确保父目录存在；p 在闭包内被 move 使用，故另存展示串副本
+                let display = p.display().to_string();
+                let display_in_closure = display.clone();
+                let parent = p.parent().map(|q| q.to_path_buf());
+                spawn_blocking(move || -> Result<(), String> {
+                    if let Some(d) = parent {
+                        std::fs::create_dir_all(&d).map_err(|e| format!("创建目录失败 {}: {}", d.display(), e))?;
+                    }
+                    std::fs::write(&p, content.as_bytes()).map_err(|e| format!("写入失败 {}: {}", display_in_closure, e))
+                }).await.map_err(|e| format!("写入任务调度失败: {}", e))??;
+                Ok(format!("已写入 {}", display))
+            }
+            _ => Err(format!("未知 action: '{}'（可选 read_file/write_file）", action)),
+        }
+    }
+}
+
+/// 命令工具：运行 shell 命令，限时 15s、非交互，返回 stdout/stderr（截断）。
+struct CommandTool;
+#[async_trait::async_trait]
+impl AiTool for CommandTool {
+    fn name(&self) -> &'static str {
+        "run_command"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "执行 shell 命令并返回输出。限时 15 秒、非交互。参数：command(必填，要执行的命令)；cwd(可选，工作目录，默认项目根)。用于运行 git/npm/pnpm/node/脚本等。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "要执行的 shell 命令" },
+                        "cwd": { "type": "string", "description": "工作目录（默认项目根目录）" }
+                    },
+                    "required": ["command"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if command.is_empty() { return Err("run_command 缺少 command 参数".to_string()); }
+        let cwd = args.get("cwd").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
+        let cwd: Option<std::path::PathBuf> = cwd.map(std::path::PathBuf::from).or_else(|| ctx.project_root.clone());
+
+        // Windows 用 cmd /C，其余平台用 sh -c；由模型提供整条命令。
+        let (program, shell_arg): (&str, &str) = if cfg!(windows) {
+            ("cmd", "/C")
+        } else {
+            ("sh", "-c")
+        };
+        let mut proc = tokio::process::Command::new(program);
+        proc.arg(shell_arg).arg(&command);
+        if let Some(d) = &cwd { proc.current_dir(d); }
+        proc.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+
+        let out = tokio::time::timeout(std::time::Duration::from_secs(15), proc.output()).await;
+        let status = out.map_err(|_| "命令执行超时（>15s，已中止）".to_string())?
+            .map_err(|e| format!("命令执行失败: {}", e))?;
+        let mut text = String::new();
+        if !status.stdout.is_empty() {
+            text.push_str(&String::from_utf8_lossy(&status.stdout));
+        }
+        if !status.stderr.is_empty() {
+            if !text.is_empty() { text.push('\n'); }
+            text.push_str(&String::from_utf8_lossy(&status.stderr));
+        }
+        const OCAP: usize = 8000;
+        let text = if text.chars().count() > OCAP {
+            format!("{}（输出过长，已截断）", text.chars().take(OCAP).collect::<String>())
+        } else { text };
+        if status.status.success() {
+            Ok(if text.trim().is_empty() { "（命令成功，无输出）".to_string() } else { text })
+        } else {
+            Err(format!("命令退出码 {}：{}", status.status.code().unwrap_or(-1), text))
+        }
     }
 }
 
@@ -946,7 +1167,13 @@ impl<'a> SafeEval<'a> {
 
 /// 当前注册的全部工具（有序数组）。
 fn registered_tools() -> Vec<Box<dyn AiTool>> {
-    vec![Box::new(NowTool), Box::new(CalculatorTool), Box::new(PlanTool)]
+    vec![
+        Box::new(NowTool),
+        Box::new(CalculatorTool),
+        Box::new(PlanTool),
+        Box::new(FileTool),
+        Box::new(CommandTool),
+    ]
 }
 
 /// plan 工具执行后，返回当前计划的结构化快照（供前端渲染计划/待办面板）。
@@ -995,6 +1222,7 @@ pub async fn ai_chat_agent(
     profile_id: Option<String>,
     system: Option<String>,
     max_rounds: Option<u32>,
+    project_root: Option<String>,
 ) -> Result<(), String> {
     let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 12u32);
     let profiles = load_profiles(&app);
@@ -1034,6 +1262,12 @@ pub async fn ai_chat_agent(
 
     let tools: Vec<serde_json::Value> = registered_tools().iter().map(|t| t.function_schema()).collect();
     let client = reqwest::Client::new();
+    // 本轮工具上下文：文件工具靠 project_root 判“项目内”，命令默认 cwd、审批事件靠 app/request_id 回发
+    let tool_ctx = ToolContext {
+        app: app.clone(),
+        request_id: request_id.clone(),
+        project_root: project_root.filter(|s| !s.trim().is_empty()).map(PathBuf::from),
+    };
     let mut final_text = String::new();
     let mut tool_calls_occurred = false;
 
@@ -1117,7 +1351,7 @@ pub async fn ai_chat_agent(
                         // 宽松解析参数：部分模型返回非标准/截断 JSON → 降级为 error 回填给模型。
                         let args: serde_json::Value =
                             serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({}));
-                        match tool.execute(&args) {
+                        match tool.execute(&args, &tool_ctx).await {
                             Ok(r) => (true, r),
                             Err(e) => (false, e),
                         }
@@ -1163,6 +1397,23 @@ pub async fn ai_chat_agent(
     }
     let _ = app.emit("ai-done", serde_json::json!({ "requestId": request_id }));
     Ok(())
+}
+
+/// 前端回调用以决定一次待审批的 Agent 操作：approved=true 放行，false 拒绝。
+/// approval_id 来自 ai-agent-approval 事件。
+#[tauri::command]
+pub async fn ai_agent_approve(approval_id: String, approved: bool) -> Result<(), String> {
+    let pending = approval_store()
+        .lock()
+        .map_err(|_| "审批存储锁获取失败".to_string())?
+        .remove(&approval_id);
+    match pending {
+        Some(p) => {
+            let _ = p.sender.send(approved);
+            Ok(())
+        }
+        None => Err("授权请求不存在或已过期".to_string()),
+    }
 }
 
 /// 测试 AI 配置是否可用：向端点发起一次极小开销的非流式请求，
