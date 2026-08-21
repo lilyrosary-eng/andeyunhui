@@ -1667,7 +1667,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     if (!kw) return [];
     const out: TrackMetaCandidate[] = [];
     try {
-      const res = await neteaseSearchSongs(kw, 8);
+      const res = await neteaseSearchSongs(kw, 9);
       for (const s of res?.tracks ?? []) {
         out.push({
           key: 'netease-' + s.id,
@@ -1682,7 +1682,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     } catch (e) { console.warn('[Music] 网易云检索失败:', e); }
     if (out.length === 0) {
       try {
-        const kg = await kugouSearchSongs(kw, 8);
+        const kg = await kugouSearchSongs(kw, 9);
         for (const s of kg ?? []) {
           out.push({
             key: 'kugou-' + (s.hash || s.id || out.length),
@@ -1707,7 +1707,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     if (!kw) return [];
     const out: LyricCandidate[] = [];
     try {
-      const res = await neteaseSearchSongs(kw, 8);
+      const res = await neteaseSearchSongs(kw, 9);
       for (const s of res?.tracks ?? []) {
         out.push({
           key: 'netease-lyric-' + s.id,
@@ -1720,7 +1720,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     } catch (e) { console.warn('[Music] 网易云歌词检索失败:', e); }
     if (out.length === 0) {
       try {
-        const kg = await kugouSearchSongs(kw, 8);
+        const kg = await kugouSearchSongs(kw, 9);
         for (const s of kg ?? []) {
           out.push({
             key: 'kugou-lyric-' + (s.hash || s.id || out.length),

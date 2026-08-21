@@ -79,6 +79,15 @@ export interface LyricCandidate {
   kugouKeyword?: string;
 }
 
+// 候选源中文本地化：netease -> 网易云，kugou -> 酷狗
+export function sourceLabel(source: 'netease' | 'kugou' | string): string {
+  switch (source) {
+    case 'netease': return '网易云';
+    case 'kugou': return '酷狗';
+    default: return source;
+  }
+}
+
 export function TrackList({
   tracks,
   playlistName,
@@ -1055,7 +1064,7 @@ export function TrackList({
                         {c.artist || '未知歌手'}{c.album ? ` · ${c.album}` : ''}
                       </div>
                       <div className="text-[10px] text-neutral-400 dark:text-stone-500 mt-1 flex items-center gap-1.5">
-                        <span className="px-1 py-0.5 rounded bg-neutral-100 dark:bg-stone-700">{c.source}</span>
+                        <span className="px-1 py-0.5 rounded bg-neutral-100 dark:bg-stone-700">{sourceLabel(c.source)}</span>
                         {c.durationSecs
                           ? <span>{Math.floor(c.durationSecs / 60)}:{String(c.durationSecs % 60).padStart(2, '0')}</span>
                           : null}
@@ -1074,10 +1083,42 @@ export function TrackList({
           className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 dark:bg-black/60 backdrop-blur-sm p-4"
           onClick={closeLyricsEditor}
         >
-          <div
-            className="w-full max-w-3xl h-[80vh] flex flex-col rounded-xl bg-white dark:bg-stone-800 shadow-2xl overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="flex items-start gap-4">
+            {lyricCandidates !== null && (
+              <div
+                className="w-72 rounded-xl bg-white dark:bg-stone-800 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between px-3 py-2 bg-neutral-50 dark:bg-stone-800 text-xs text-neutral-500 dark:text-stone-400 border-b border-neutral-200 dark:border-stone-700 flex-shrink-0">
+                  <span>{T('music.lyrics.lyricCandidates') || '歌词候选'}</span>
+                  <button onClick={() => setLyricCandidates(null)} className="text-neutral-400 hover:text-neutral-600 dark:text-stone-500 dark:hover:text-stone-300">×</button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-1.5">
+                  {lyricCandidates.length === 0 ? (
+                    <div className="p-4 text-xs text-neutral-400 dark:text-stone-500">
+                      {T('music.lyrics.noCandidates') || '未找到候选歌词'}
+                    </div>
+                  ) : lyricCandidates.map((lc) => (
+                    <button
+                      key={lc.key}
+                      onClick={() => applyLyricCandidate(lc)}
+                      disabled={lyricCandidateLoading}
+                      title={T('music.lyrics.lyricCandidatesHint') || '点选抓取纯歌词填入「修改后」'}
+                      className="w-full px-3 py-2 text-left text-xs rounded-lg hover:bg-[var(--element-muted)] transition-colors disabled:opacity-50"
+                    >
+                      <div className="text-neutral-700 dark:text-stone-200 break-words">{lc.title}</div>
+                      <div className="mt-0.5 text-[10px] text-neutral-400 dark:text-stone-500">
+                        {lc.artist || '未知歌手'} · {sourceLabel(lc.source)}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div
+              className="w-full max-w-3xl h-[80vh] flex flex-col rounded-xl bg-white dark:bg-stone-800 shadow-2xl overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
             <div className="px-5 py-4 border-b border-neutral-200 dark:border-stone-700 flex items-center justify-between">
               <h3 className="text-base font-semibold text-neutral-800 dark:text-stone-100">
                 {T('music.track.lyricsEditorTitle')} — {lyricsTrack.title}
@@ -1133,35 +1174,7 @@ export function TrackList({
               ) : (reviewBefore !== null || lyricCandidates !== null) ? (
                 <div className="h-full flex gap-3">
                   <div className="flex-1 flex flex-col min-w-0">
-                    {lyricCandidates !== null ? (
-                      <>
-                        <div className="flex items-center justify-between px-1 pb-1.5">
-                          <span className="text-xs font-medium text-neutral-500 dark:text-stone-400">{T('music.lyrics.lyricCandidates') || '歌词候选'}</span>
-                          <span className="text-[10px] text-neutral-300 dark:text-stone-600">{T('music.lyrics.lyricCandidatesHint') || '点选抓取纯歌词填入右侧'}</span>
-                        </div>
-                        <div className="flex-1 overflow-y-auto rounded-lg border border-neutral-200 dark:border-stone-600 bg-neutral-50 dark:bg-stone-900/60">
-                          {lyricCandidates.length === 0 ? (
-                            <div className="p-4 text-xs text-neutral-400 dark:text-stone-500">
-                              {T('music.lyrics.noCandidates') || '未找到候选歌词'}
-                            </div>
-                          ) : lyricCandidates.map((lc) => (
-                            <button
-                              key={lc.key}
-                              onClick={() => applyLyricCandidate(lc)}
-                              disabled={lyricCandidateLoading}
-                              className="w-full px-3 py-2 text-left text-xs border-b border-neutral-100 dark:border-stone-700 last:border-b-0 hover:bg-[var(--element-muted)] transition-colors disabled:opacity-50"
-                            >
-                              <div className="text-neutral-700 dark:text-stone-200 break-words">{lc.title}</div>
-                              <div className="mt-0.5 text-[10px] text-neutral-400 dark:text-stone-500">
-                                {lc.artist || '未知歌手'} · {lc.source}
-                              </div>
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div className="flex items-center justify-between px-1 pb-1.5">
+                      <div className="flex items-center justify-between px-1 pb-1.5">
                           <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">{T('music.lyrics.before') || '修改前'}</span>
                           <span className="text-[10px] text-neutral-300 dark:text-stone-600">{T('music.lyrics.onlyRead') || '只读（可复制对照）'}</span>
                         </div>
@@ -1171,8 +1184,6 @@ export function TrackList({
                           className="flex-1 w-full resize-none p-4 text-sm leading-relaxed rounded-lg border border-neutral-200 dark:border-stone-600 bg-neutral-50 dark:bg-stone-900/60 text-neutral-500 dark:text-stone-400 focus:outline-none font-mono select-text"
                           spellCheck={false}
                         />
-                      </>
-                    )}
                   </div>
                   <div className="flex-1 flex flex-col min-w-0">
                     <div className="flex items-center justify-between px-1 pb-1.5">
@@ -1228,6 +1239,7 @@ export function TrackList({
               </button>
             </div>
           </div>
+        </div>
         </div>
       )}
     </div>
