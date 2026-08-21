@@ -48,10 +48,11 @@ class MusicPlayer {
   private smtcUnlisten: (() => void) | null = null;
   // 持久化：当前播放的歌单 ID，组件重载时恢复选中状态
   currentPlaylistId: string | null = null;
-  // Web Audio API（延迟初始化，只在第一次播放时创建，避免启动卡死）
-  private audioCtx: AudioContext | null = null;
-  private analyser: AnalyserNode | null = null;
-  private sourceNode: MediaElementAudioSourceNode | null = null;
+  // 伪律动状态：不使用 AudioContext/createMediaElementSource（在 WebView2 中会导致静音），
+  // 改为基于播放状态+音量+时间偏移的智能伪频域数据，供 EQ 动画使用。
+  private pseudoAnalyserData: Uint8Array = new Uint8Array(64);
+  private pseudoAnimFrame: number | null = null;
+  private pseudoStartTime: number = 0;
   private eventListeners: Record<PlayerEvent, Set<(data: unknown) => void>> = {
     play: new Set(),
     pause: new Set(),
@@ -72,8 +73,7 @@ class MusicPlayer {
   private bindEvents(): void {
     this.audio.addEventListener('play', () => {
       this.isPlaying = true;
-      // 在 play 事件回调中创建 AudioContext——此时浏览器一定允许 AudioContext 运行
-      this.ensureAudioContextOnPlay();
+      this.startPseudoAnalyser();
       this.setMediaSessionState('playing');
       this.pushSmtc();
       this.emit('play', null);
@@ -320,43 +320,51 @@ class MusicPlayer {
     });
   }
 
-  // 在 audio 'play' 事件回调中延迟创建 AudioContext（此时浏览器一定允许 AudioContext 运行）
-  // 使用 createMediaElementSource 接管音频路由，确保频域数据可用
-  private ensureAudioContextOnPlay(): void {
-    if (this.audioCtx) {
-      if (this.audioCtx.state === 'suspended') this.audioCtx.resume().catch(() => {});
-      return;
-    }
-    try {
-      const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
-      if (!Ctor) return;
-      const ctx: AudioContext = new Ctor();
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 128;
-      analyser.smoothingTimeConstant = 0.75;
-      const source = ctx.createMediaElementSource(this.audio);
-      source.connect(analyser);
-      analyser.connect(ctx.destination);
-      this.audioCtx = ctx;
-      this.analyser = analyser;
-      this.sourceNode = source;
-      // 在 play 事件回调中创建的 AudioContext 不会被 suspended，但仍确保 resume
-      ctx.resume().catch(() => {});
-      debugLog('AudioContext + AnalyserNode 初始化成功 (on play event)');
-    } catch (e) {
-      debugLog(`AudioContext 初始化失败: ${e}`);
-      this.audioCtx = null;
-      this.analyser = null;
-      this.sourceNode = null;
-    }
+  // 启动伪律动：用 requestAnimationFrame 生成模拟频域数据
+  private startPseudoAnalyser(): void {
+    if (this.pseudoAnimFrame !== null) return;
+    this.pseudoStartTime = performance.now();
+    const tick = () => {
+      if (!this.isPlaying) {
+        this.pseudoAnimFrame = null;
+        return;
+      }
+      const t = (performance.now() - this.pseudoStartTime) / 1000;
+      const vol = this.volume; // 0~1
+      const n = this.pseudoAnalyserData.length;
+      for (let i = 0; i < n; i++) {
+        // 低频区域高，高频区域低，模拟典型音乐频谱
+        const freqRatio = i / n;
+        // 多正弦叠加 + 随机抖动，模拟节拍感
+        const wave =
+          Math.sin(t * 3.2 + i * 0.35) * 0.5 +
+          Math.sin(t * 7.1 + i * 0.18) * 0.3 +
+          Math.sin(t * 1.5 + i * 0.7) * 0.2;
+        const base = (1 - freqRatio * 0.6) * vol * 200;
+        const noise = Math.random() * 30 * vol;
+        const val = Math.max(0, Math.min(255, base * (0.6 + wave * 0.4) + noise));
+        // 平滑插值，避免帧间跳变
+        this.pseudoAnalyserData[i] =
+          this.pseudoAnalyserData[i] * 0.7 + val * 0.3;
+      }
+      this.pseudoAnimFrame = requestAnimationFrame(tick);
+    };
+    this.pseudoAnimFrame = requestAnimationFrame(tick);
   }
 
-  // 获取 AnalyserNode 供 EQ 动画使用
-  getAnalyser(): AnalyserNode | null {
-    if (this.audioCtx?.state === 'suspended') {
-      this.audioCtx.resume().catch(() => {});
-    }
-    return this.analyser;
+  // 获取伪 AnalyserNode 数据供 EQ 动画使用
+  // 返回 { data, frequencyBinCount } 模拟 AnalyserNode 接口
+  private static fakeAnalyserWrap: { data: Uint8Array; frequencyBinCount: number } | null = null;
+  getAnalyser(): { getByteFrequencyData: (arr: Uint8Array) => void; frequencyBinCount: number } | null {
+    const data = this.pseudoAnalyserData;
+    return {
+      frequencyBinCount: data.length,
+      getByteFrequencyData: (arr: Uint8Array) => {
+        for (let i = 0; i < Math.min(arr.length, data.length); i++) {
+          arr[i] = data[i];
+        }
+      },
+    } as any;
   }
 
   pause(): void {
@@ -466,15 +474,11 @@ class MusicPlayer {
       this.audio.removeAttribute('src');
       this.audio.load();
     } catch { /* 忽略：audio 已处于异常态 */ }
-    // 清理 AudioContext
-    try {
-      this.sourceNode?.disconnect();
-      this.analyser?.disconnect();
-      this.audioCtx?.close();
-    } catch { /* 忽略 */ }
-    this.audioCtx = null;
-    this.analyser = null;
-    this.sourceNode = null;
+    // 停止伪律动动画帧
+    if (this.pseudoAnimFrame !== null) {
+      cancelAnimationFrame(this.pseudoAnimFrame);
+      this.pseudoAnimFrame = null;
+    }
     // 清空所有事件监听器，防止孤儿回调
     (Object.keys(this.eventListeners) as PlayerEvent[]).forEach(k => {
       this.eventListeners[k].clear();
