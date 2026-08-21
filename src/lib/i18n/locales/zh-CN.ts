@@ -880,6 +880,8 @@ export const zhCN: Record<string, string> = {
   'music.unknownArtist': '未知歌手',
   'music.favoritePlaylist': '我的收藏',
   'music.favoriteToggle': '收藏 / 取消收藏',
+  'music.favoriteAdd': '收藏',
+  'music.favoriteRemove': '取消收藏',
   'music.track.setCover': '手动设封面',
   'music.track.resetCover': '重置封面',
   'music.track.rescan': '重扫元数据',

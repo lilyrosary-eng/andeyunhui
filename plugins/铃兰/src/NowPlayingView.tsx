@@ -4,14 +4,14 @@ import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
 import { VolumePopup, PlaylistPopup } from './PlayerBar';
 import { T, useLang } from '../../_shared/pluginRuntime';
-import { parseLrc, isNeteaseRemote, neteaseSongId, isKugouRemote, kugouSongId, lyricModeStore, type LyricMode } from './lyricsSync';
+import { parseLrc, isNeteaseRemote, neteaseSongId, isKugouRemote, kugouSongId, lyricModeStore, splitInlineTranslation, type LyricMode, type LyricLine } from './lyricsSync';
 import LyricModeButton from './LyricModeButton';
 import { neteaseGetLyric } from './neteaseApi';
 import { getLyric as kugouGetLyric } from './kugouApi';
 // 沉浸播放页 — 覆盖音乐模块内容区，不覆盖一级导航栏
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, MusicIcon,
-  RepeatIcon, Repeat1Icon, ShuffleIcon, ArrowLeftIcon,
+  RepeatIcon, Repeat1Icon, ShuffleIcon, ArrowLeftIcon, HeartIcon,
 } from '../../_shared/icons';
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
@@ -65,7 +65,6 @@ function ProgressSeekBar({ currentTime, duration, onSeek }: { currentTime: numbe
   );
 }
 
-interface LyricLine { time_ms: number; text: string; }
 interface LyricsResult { lines: LyricLine[]; source: string; }
 type LyricsAlign = 'center' | 'left' | 'right';
 
@@ -85,6 +84,9 @@ interface NowPlayingViewProps {
   playlists: Playlist[];
   currentPlaylistId: string | null;
   onSelectTrack: (playlistId: string, track: Track, index: number) => void;
+  // 收藏：当前已收藏 id 集合 + 切换回调（用于沉浸播放页红心）
+  favoriteIds?: Set<string>;
+  onToggleFavorite?: (track: Track) => void;
 }
 
 // 歌词模糊离散档位：当前行 0，相邻行 1px，更远 1.5/2px。
@@ -231,6 +233,8 @@ export function NowPlayingView({
   playlists,
   currentPlaylistId,
   onSelectTrack,
+  favoriteIds,
+  onToggleFavorite,
 }: NowPlayingViewProps) {
   useLang();
   const [currentTime, setCurrentTime] = useState(0);
@@ -348,7 +352,16 @@ export function NowPlayingView({
         skipOnline,
         localFirst,
       }).then((result) => {
-        setLyricsLines(result.lines);
+        // 本地内嵌歌词常把「外语原文 + 中文翻译」写在同一行，拆出翻译挂到 translation
+        const lines = (result.lines || []).slice();
+        for (const ln of lines) {
+          const sp = splitInlineTranslation(ln.text);
+          if (sp.translation && sp.orig !== ln.text) {
+            ln.text = sp.orig;
+            ln.translation = sp.translation;
+          }
+        }
+        setLyricsLines(lines);
       }).catch(() => {});
     }
   }, [track.filePath]);
@@ -531,6 +544,19 @@ export function NowPlayingView({
             title: T('music.player.next'),
             children: React.createElement(SkipForwardIcon, { size: 18 }),
           }),
+          onToggleFavorite ? React.createElement('button', {
+            key: 'fav',
+            onClick: () => onToggleFavorite(track),
+            className: `btn-press p-1.5 rounded transition-colors ${
+              favoriteIds?.has(track.id || track.filePath)
+                ? 'text-rose-500'
+                : 'text-neutral-400 dark:text-stone-500 hover:text-rose-400'
+            }`,
+            title: favoriteIds?.has(track.id || track.filePath) ? T('music.favoriteRemove') : T('music.favoriteAdd'),
+          }, React.createElement(HeartIcon, {
+            size: 18,
+            fill: favoriteIds?.has(track.id || track.filePath) ? 'currentColor' : 'none',
+          })) : null,
           React.createElement(PlaylistPopup, { playlists, currentPlaylistId, currentTrack: track, onSelectTrack }),
           React.createElement(VolumePopup, { volume, onVolumeChange }),
           // 「译/音」三态切换：就近看到歌词时在此切换显示翻译/音译小字

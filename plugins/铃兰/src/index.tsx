@@ -2646,6 +2646,8 @@ setSearchQuery('');
           playlists={online.activePlaylist ? [...playlists, online.activePlaylist] : playlists}
           currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
           onSelectTrack={handlePopupSelectTrack}
+          favoriteIds={favorites}
+          onToggleFavorite={toggleFavorite}
         />
       )}
     </div>
