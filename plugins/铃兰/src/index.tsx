@@ -1383,11 +1383,13 @@ useEffect(() => {
       }
     });
     const unsubTrackChange = musicPlayer.on('trackChange', (track) => {
-      setCurrentTrack(track as Track | null);
+      // 浅拷贝 track 对象：updateTrackUrl 会修改同一 track 对象的 filePath，
+      // 如果不拷贝，React 的 Object.is 比较认为引用未变，不会重新渲染（封面不更新）。
+      const t = track as Track | null;
+      setCurrentTrack(t ? { ...t } : null);
       // 切歌时先把上一首的位置落库（若还在播），再记录新曲
       savePositionToDb();
       // 持久化播放状态：上次播放的 track_id / 所属歌单
-      const t = track as Track | null;
       if (t) {
         const tid = trackIdOf(t);
         savePlayerStateToDb('last_track_id', tid);
@@ -2482,7 +2484,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           const neteaseId = neteaseMatch ? Number(neteaseMatch[1]) : 0;
           return (
           <PlayerBar
-            key={currentTrack.filePath}
+            key={currentTrack.id + '|' + currentTrack.filePath}
             track={currentTrack}
             isPlaying={isPlaying}
             isFavorite={isNetease ? neteaseLiked.has(neteaseId) : favorites.has(trackIdOf(currentTrack))}

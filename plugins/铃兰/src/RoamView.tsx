@@ -367,7 +367,10 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
   // 播放器事件
   useEffect(() => {
-    const syncNow = () => setNowPlaying({ track: musicPlayer.getCurrentTrack(), isPlaying: musicPlayer.getIsPlaying() });
+    const syncNow = () => {
+      const t = musicPlayer.getCurrentTrack();
+      setNowPlaying({ track: t ? { ...t } : null, isPlaying: musicPlayer.getIsPlaying() });
+    };
     const syncProgress = (data: any) => {
       if (data && typeof data.currentTime === 'number') setProgress({ current: data.currentTime, duration: data.duration || 0 });
     };
@@ -383,9 +386,14 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
         slideRoamWindow(roamTrackListRef.current, curId);
         const track = roamTrackListRef.current.find((t) => t.id === curId);
         if (track) addToHistory(track);
-        // 更新主题色：优先用 roamTrackListRef 中的 track（有 cover），降级用 musicPlayer 的 track
-        const coverTrack = track || curTrack;
-        const coverUrl = getCoverUrl(coverTrack?.coverPath || (curTrack as any)?.coverPath);
+        // 更新主题色：优先用 roamTrackListRef 中的 track（RoamSeedTrack 有 cover 字段），
+        // 降级用 musicPlayer 的 track（PlayableTrack 有 coverPath 字段）
+        const roamTrack = track as (RoamSeedTrack & { coverPath?: string }) | null;
+        const coverUrl = getCoverUrl(
+          roamTrack?.cover ||       // RoamSeedTrack.cover
+          roamTrack?.coverPath ||   // 兼容：某些映射可能也设置了 coverPath
+          (curTrack as any)?.coverPath  // PlayableTrack.coverPath
+        );
         if (themeMode === 'preset') {
           presetIdxRef.current = (presetIdxRef.current + 1) % PRESET_THEMES.length;
           const preset = PRESET_THEMES[presetIdxRef.current];
@@ -632,12 +640,13 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
               {barPosition === 'overlay' && (
                 <div className="mt-auto flex flex-col items-center gap-2" style={{ width: '100%', maxWidth: 400, paddingTop: 'clamp(12px, 2%, 20px)' }}>
                   {/* EQ 均衡器 */}
-                  <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', height: 28, marginBottom: 4 }}>
+                  <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', height: 56, marginBottom: 4 }}>
                     {eqHeights.map((h, i) => (
                       <span key={i} style={{
-                        flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h * 0.5}%`,
+                        flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h}%`,
                         background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
                         borderRadius: 2, opacity: 0.85,
+                        transition: 'height 0.05s linear',
                       }} />
                     ))}
                   </div>
@@ -733,12 +742,13 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
               opacity: transitioning ? 0 : 1,
             }}>
               {/* EQ 均衡器 */}
-              <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', maxWidth: 500, height: 28 }}>
+              <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', maxWidth: 500, height: 56 }}>
                 {eqHeights.map((h, i) => (
                   <span key={i} style={{
-                    flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h * 0.5}%`,
+                    flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h}%`,
                     background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
                     borderRadius: 2, opacity: 0.85,
+                    transition: 'height 0.05s linear',
                   }} />
                 ))}
               </div>

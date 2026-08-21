@@ -350,6 +350,9 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
   useLang();
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  // 封面加载重试：img onError 时递增 key 触发重新加载（最多 3 次）
+  const [coverRetryKey, setCoverRetryKey] = useState(0);
+  const coverRetryRef = useRef(0);
   // 歌词可见态初始值取自单例，保证切回音乐模块/重载后仍与浮动窗口一致
   const [lyricsVisible, setLyricsVisible] = useState(() => lyricsSync.isVisible());
   const [lyricsLocked, setLyricsLocked] = useState(false);
@@ -365,6 +368,12 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
     });
     return () => unsub();
   }, []);
+
+  // 切歌时重置封面重试计数器
+  useEffect(() => {
+    coverRetryRef.current = 0;
+    setCoverRetryKey(0);
+  }, [track.id, track.filePath]);
 
   // 歌词滚动同步已下沉到 lyricsSync 单例（见 lyricsSync.ts），此处不再处理。
 
@@ -480,10 +489,17 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
       >
         {coverUrl ? (
           React.createElement('img', {
+            key: coverRetryKey, // onError 递增 key 触发重新挂载
             src: coverUrl,
             alt: '',
             className: 'w-full h-full object-cover',
             style: { width: '100%', height: '100%', objectFit: 'cover' },
+            onError: () => {
+              if (coverRetryRef.current < 3) {
+                coverRetryRef.current++;
+                setTimeout(() => setCoverRetryKey(coverRetryRef.current), 300);
+              }
+            },
           })
         ) : (
           React.createElement('div', {

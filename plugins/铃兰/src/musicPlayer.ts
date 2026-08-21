@@ -51,6 +51,9 @@ class MusicPlayer {
   // 伪律动状态：不使用 AudioContext/createMediaElementSource（在 WebView2 中会导致静音），
   // 改为基于播放状态+音量+时间偏移的智能伪频域数据，供 EQ 动画使用。
   private pseudoAnalyserData: Uint8Array = new Uint8Array(64);
+  // 用户是否已请求播放（点击播放/选曲）：用于区分"正在播放"和"暂停"状态，
+  // 解决网易云延迟取地址时 play() 失败 → isPlaying=false → updateTrackUrl 不触发 play 的问题。
+  private playRequested: boolean = false;
   private pseudoAnimFrame: number | null = null;
   private pseudoStartTime: number = 0;
   private eventListeners: Record<PlayerEvent, Set<(data: unknown) => void>> = {
@@ -292,6 +295,8 @@ class MusicPlayer {
 
   // 网易云等远程曲：点击后先以空 filePath 占位进入队列，后台异步补全地址时调用本方法。
   // 若补的是当前正在播放/等待的曲，则自动 reload 该曲（保留播放进度）。
+  // 关键修复：补全 URL 后重新 emit trackChange 让 UI 更新封面；
+  // 无论 isPlaying 状态如何，只要用户曾请求播放就自动续播（解决延迟取地址导致的静音）。
   updateTrackUrl(index: number, url: string): void {
     if (index < 0 || index >= this.tracks.length || !url) return;
     const track = this.tracks[index];
@@ -304,19 +309,29 @@ class MusicPlayer {
       const isRemote = /^https?:\/\//i.test(url);
       this.audio.src = isRemote ? url : (api?.convertFileSrc(url) || url);
       try { this.audio.currentTime = pos; } catch { /* ignore */ }
-      if (this.isPlaying) this.audio.play().catch(() => {});
+      // 重新 emit trackChange，让 UI 更新封面和歌曲信息（之前 filePath 为空时封面可能未加载）
+      this.emit('trackChange', track);
+      // 用户已请求播放则自动续播（不依赖 isPlaying，因为 play() 失败后 isPlaying=false）
+      if (this.playRequested) {
+        this.audio.play().catch((err) => {
+          console.warn('[MusicPlayer] updateTrackUrl play failed:', err.message);
+        });
+      }
     }
   }
 
   play(): void {
+    this.playRequested = true;  // 标记用户已请求播放
     try { window.__HOST_API__?.invoke('debug_log', { msg: `MUSIC_PLAY idx=${this.currentIndex}` }).catch(()=>{}); } catch {}
     if (this.currentIndex < 0 && this.tracks.length > 0) {
       this.currentIndex = 0;
       this.loadTrack(0);
     }
+    // 如果当前 track 的 filePath 为空（网易云延迟取地址占位），
+    // audio.play() 会失败但不影响后续 updateTrackUrl 时的自动续播。
     this.audio.play().catch((err) => {
       console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
-      this.emit('pause', undefined);
+      // 不 emit pause，保持 playRequested=true 让 updateTrackUrl 能续播
     });
   }
 
@@ -335,17 +350,17 @@ class MusicPlayer {
       for (let i = 0; i < n; i++) {
         // 低频区域高，高频区域低，模拟典型音乐频谱
         const freqRatio = i / n;
-        // 多正弦叠加 + 随机抖动，模拟节拍感
+        // 多正弦叠加 + 随机抖动，模拟节拍感（增强波动幅度）
         const wave =
-          Math.sin(t * 3.2 + i * 0.35) * 0.5 +
-          Math.sin(t * 7.1 + i * 0.18) * 0.3 +
-          Math.sin(t * 1.5 + i * 0.7) * 0.2;
-        const base = (1 - freqRatio * 0.6) * vol * 200;
-        const noise = Math.random() * 30 * vol;
-        const val = Math.max(0, Math.min(255, base * (0.6 + wave * 0.4) + noise));
+          Math.sin(t * 3.2 + i * 0.35) * 0.6 +
+          Math.sin(t * 7.1 + i * 0.18) * 0.35 +
+          Math.sin(t * 1.5 + i * 0.7) * 0.25;
+        const base = (1 - freqRatio * 0.55) * vol * 240;
+        const noise = Math.random() * 40 * vol;
+        const val = Math.max(0, Math.min(255, base * (0.5 + wave * 0.5) + noise));
         // 平滑插值，避免帧间跳变
         this.pseudoAnalyserData[i] =
-          this.pseudoAnalyserData[i] * 0.7 + val * 0.3;
+          this.pseudoAnalyserData[i] * 0.65 + val * 0.35;
       }
       this.pseudoAnimFrame = requestAnimationFrame(tick);
     };
@@ -368,6 +383,7 @@ class MusicPlayer {
   }
 
   pause(): void {
+    this.playRequested = false; // 用户主动暂停
     this.audio.pause();
   }
 
@@ -474,6 +490,7 @@ class MusicPlayer {
       this.audio.removeAttribute('src');
       this.audio.load();
     } catch { /* 忽略：audio 已处于异常态 */ }
+    this.playRequested = false;
     // 停止伪律动动画帧
     if (this.pseudoAnimFrame !== null) {
       cancelAnimationFrame(this.pseudoAnimFrame);
