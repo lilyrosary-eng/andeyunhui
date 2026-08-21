@@ -99,6 +99,7 @@ use andeyunhui_lib::services::search_service;
 use andeyunhui_lib::services::git_service;
 use andeyunhui_lib::services::pty_service;
 use andeyunhui_lib::smtc::*;
+use andeyunhui_lib::audio_spectrum;
 use std::sync::Mutex;
 
 /// 在托盘图标附近弹出菜单窗口（默认任务栏在底部 → 置于图标上方）。
@@ -146,6 +147,22 @@ async fn capsule_ip_location() -> Option<serde_json::Value> {
         Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
         _ => None,
     }
+}
+
+// ========== WASAPI Loopback 频谱分析 ==========
+#[tauri::command]
+fn spectrum_start(app: tauri::AppHandle) -> Result<(), String> {
+    audio_spectrum::start_spectrum_capture(app)
+}
+
+#[tauri::command]
+fn spectrum_stop() {
+    audio_spectrum::stop_spectrum_capture();
+}
+
+#[tauri::command]
+fn spectrum_get() -> Vec<u8> {
+    audio_spectrum::get_spectrum()
 }
 
 fn main() {
@@ -321,6 +338,19 @@ fn main() {
             // ============ Windows 原生 SMTC（任务栏「正在播放」）============
             // 注册本进程媒体会话，显示「安得云荟」+ 元信息，并接管系统媒体键。
             init_smtc(app.handle().clone());
+
+            // ============ WASAPI Loopback 频谱分析 ============
+            // 后台启动音频频谱采集（轻量级：256KB 栈 + 10ms 轮询 + 1024 点 FFT）
+            // 失败不阻塞启动，频谱功能自动降级为伪律动
+            #[cfg(windows)]
+            {
+                let spectrum_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = audio_spectrum::start_spectrum_capture(spectrum_app) {
+                        eprintln!("[Spectrum] 频谱采集启动失败: {}（将降级为伪律动）", e);
+                    }
+                });
+            }
 
             // ============ 局域网传输（LocalSend v2 兼容，黄金棋盘·传输）============
             // 初始化管理器，并在开屏即自动开启传输服务：保证两端服务常驻，
@@ -809,6 +839,10 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 let win_label = window.label();
+
+                // 停止频谱采集线程
+                #[cfg(windows)]
+                audio_spectrum::stop_spectrum_capture();
 
                 // 浮窗笔记等辅助窗口关闭时，不影响歌词悬浮窗和其他辅助窗口。
                 // 仅主窗口（label = "main"）关闭时才执行托盘隐藏或辅助窗口销毁逻辑。
@@ -1333,6 +1367,10 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             andeyunhui_lib::data_location::needs_data_root_setup,
             andeyunhui_lib::data_location::mark_data_root_guided,
             andeyunhui_lib::data_location::is_migration_pending,
+            // ========== WASAPI Loopback 频谱分析 ==========
+            spectrum_start,
+            spectrum_stop,
+            spectrum_get,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

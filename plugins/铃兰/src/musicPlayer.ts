@@ -48,9 +48,10 @@ class MusicPlayer {
   private smtcUnlisten: (() => void) | null = null;
   // 持久化：当前播放的歌单 ID，组件重载时恢复选中状态
   currentPlaylistId: string | null = null;
-  // 伪律动状态：不使用 AudioContext/createMediaElementSource（在 WebView2 中会导致静音），
-  // 改为基于播放状态+音量+时间偏移的智能伪频域数据，供 EQ 动画使用。
-  private pseudoAnalyserData: Uint8Array = new Uint8Array(64);
+  // 频谱数据：优先使用 Rust WASAPI Loopback 真实频谱，降级到伪律动。
+  // WASAPI Loopback 不干扰 WebView2 音频路由，解决了 createMediaElementSource 静音问题。
+  private spectrumData: Uint8Array = new Uint8Array(64);
+  private hasRealSpectrum: boolean = false;  // 是否收到过 Rust 真实频谱数据
   // 用户是否已请求播放（点击播放/选曲）：用于区分"正在播放"和"暂停"状态，
   // 解决网易云延迟取地址时 play() 失败 → isPlaying=false → updateTrackUrl 不触发 play 的问题。
   private playRequested: boolean = false;
@@ -71,6 +72,7 @@ class MusicPlayer {
     this.bindEvents();
     this.setupMediaSessionHandlers();
     this.setupSmtc();
+    this.setupSpectrumListener();
   }
 
   private bindEvents(): void {
@@ -335,7 +337,7 @@ class MusicPlayer {
     });
   }
 
-  // 启动伪律动：用 requestAnimationFrame 生成模拟频域数据
+  // 启动伪律动：仅在未收到 Rust 真实频谱时作为降级方案
   private startPseudoAnalyser(): void {
     if (this.pseudoAnimFrame !== null) return;
     this.pseudoStartTime = performance.now();
@@ -344,13 +346,16 @@ class MusicPlayer {
         this.pseudoAnimFrame = null;
         return;
       }
+      // 如果有真实频谱数据，不再生成伪律动
+      if (this.hasRealSpectrum) {
+        this.pseudoAnimFrame = null;
+        return;
+      }
       const t = (performance.now() - this.pseudoStartTime) / 1000;
       const vol = this.volume; // 0~1
-      const n = this.pseudoAnalyserData.length;
+      const n = this.spectrumData.length;
       for (let i = 0; i < n; i++) {
-        // 低频区域高，高频区域低，模拟典型音乐频谱
         const freqRatio = i / n;
-        // 多正弦叠加 + 随机抖动，模拟节拍感（增强波动幅度）
         const wave =
           Math.sin(t * 3.2 + i * 0.35) * 0.6 +
           Math.sin(t * 7.1 + i * 0.18) * 0.35 +
@@ -358,20 +363,38 @@ class MusicPlayer {
         const base = (1 - freqRatio * 0.55) * vol * 240;
         const noise = Math.random() * 40 * vol;
         const val = Math.max(0, Math.min(255, base * (0.5 + wave * 0.5) + noise));
-        // 平滑插值，避免帧间跳变
-        this.pseudoAnalyserData[i] =
-          this.pseudoAnalyserData[i] * 0.65 + val * 0.35;
+        this.spectrumData[i] =
+          this.spectrumData[i] * 0.65 + val * 0.35;
       }
       this.pseudoAnimFrame = requestAnimationFrame(tick);
     };
     this.pseudoAnimFrame = requestAnimationFrame(tick);
   }
 
-  // 获取伪 AnalyserNode 数据供 EQ 动画使用
-  // 返回 { data, frequencyBinCount } 模拟 AnalyserNode 接口
-  private static fakeAnalyserWrap: { data: Uint8Array; frequencyBinCount: number } | null = null;
+  // 监听 Rust 端 audio-spectrum 事件，接收真实频域数据
+  private spectrumUnlisten: (() => void) | null = null;
+  private setupSpectrumListener(): void {
+    const api = window.__HOST_API__;
+    if (!api?.listen) return;
+    api.listen<number[]>('audio-spectrum', (event) => {
+      const data = event.payload;
+      if (Array.isArray(data) && data.length > 0) {
+        this.hasRealSpectrum = true;
+        // 平滑插值，避免帧间跳变
+        const n = Math.min(data.length, this.spectrumData.length);
+        for (let i = 0; i < n; i++) {
+          this.spectrumData[i] = this.spectrumData[i] * 0.5 + (data[i] as number) * 0.5;
+        }
+      }
+    }).then((unlisten) => {
+      this.spectrumUnlisten = unlisten;
+    }).catch(() => {});
+  }
+
+  // 获取频谱数据供 EQ 动画使用
+  // 优先返回 Rust WASAPI Loopback 真实频谱，降级到伪律动
   getAnalyser(): { getByteFrequencyData: (arr: Uint8Array) => void; frequencyBinCount: number } | null {
-    const data = this.pseudoAnalyserData;
+    const data = this.spectrumData;
     return {
       frequencyBinCount: data.length,
       getByteFrequencyData: (arr: Uint8Array) => {
@@ -477,6 +500,13 @@ class MusicPlayer {
    * 避免复用「已销毁」的旧实例（audio.src 已清空、监听器已清空）导致功能失效。
    */
   destroy(): void {
+    try {
+      this.spectrumUnlisten?.();
+      this.spectrumUnlisten = null;
+      debugLog('music: spectrum listener removed');
+    } catch {
+      /* 忽略 */
+    }
     try {
       this.smtcUnlisten?.();
       this.smtcUnlisten = null;

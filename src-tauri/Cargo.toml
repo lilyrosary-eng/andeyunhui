@@ -90,6 +90,10 @@ env_logger = "0.11"
 # 进程内 ffmpeg 编码器（完整 L0：d3d11va→nvenc 零拷贝）
 # libloading 运行时加载 avcodec-*.dll / avformat-*.dll / avutil-*.dll
 libloading = "0.8"
+# WASAPI Loopback 频谱分析：纯 Rust FFT（MIT），零系统依赖
+# 仅用于音频频域分析（1024 点 FFT），极轻量
+rustfft = "6"
+num-complex = "0.4"
 
 # Windows 任务栏「正在播放」显示名修正：设置本进程 AUMID + 注册表显示名「安得云荟」，
 # 使 WebView2/Chromium 注册的媒体会话显示为「安得云荟」而非「未知应用」。

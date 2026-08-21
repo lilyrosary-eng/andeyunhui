@@ -10,6 +10,14 @@
 //! - `services` 业务模块（笔记/音乐/视频/图片/传输等）保持跨平台；其中 Windows 专属子模块
 //!   （录屏捕获、诊断）在 `services/mod.rs` 中按 `#[cfg(windows)]` 隔离。
 
+// WASAPI Loopback 频谱分析器：仅 Windows 编译（其他平台走空桩）
+#[cfg(windows)]
+#[path = "audio_spectrum.rs"]
+pub mod audio_spectrum;
+#[cfg(not(windows))]
+#[path = "pal/audio_spectrum.rs"]
+pub mod audio_spectrum;
+
 // === 平台隔离：命令模块仅桌面编译（移动端由 android/ios 入口驱动，命令注册见 T4） ===
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod commands;
