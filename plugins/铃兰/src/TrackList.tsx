@@ -63,6 +63,20 @@ interface TrackListProps {
   onPickAndEmbedCover?: (track: Track) => Promise<string | null>;
   onApplyCoverUrl?: (track: Track, coverUrl: string) => Promise<string | null>;
   onResetCoverEmbed?: (track: Track) => Promise<void>;
+  // 自动获取歌词：检索歌词候选 / 按候选抓取纯歌词文本
+  onFetchLyricCandidates?: (track: Track) => Promise<LyricCandidate[]>;
+  onFetchLyric?: (c: LyricCandidate) => Promise<string>;
+}
+
+// 歌词自动获取候选：仅用于定位歌词，应用时只取歌词文本，不覆盖其它元信息
+export interface LyricCandidate {
+  key: string;
+  title: string;
+  artist: string;
+  source: 'netease' | 'kugou';
+  neteaseId?: number;
+  kugouHash?: string;
+  kugouKeyword?: string;
 }
 
 export function TrackList({
@@ -88,6 +102,8 @@ export function TrackList({
   onPickAndEmbedCover,
   onApplyCoverUrl,
   onResetCoverEmbed,
+  onFetchLyricCandidates,
+  onFetchLyric,
 }: TrackListProps) {
   useLang();
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
@@ -116,6 +132,10 @@ export function TrackList({
   const [lyricsDraft, setLyricsDraft] = useState('');
   // 歌词对照快照：非 null 时编辑器进入「修改前 / 修改后」左右分栏对照
   const [reviewBefore, setReviewBefore] = useState<string | null>(null);
+  // 歌词自动获取候选：非 null 时左侧显示候选列表（点选抓取纯歌词填入「修改后」）
+  const [lyricCandidates, setLyricCandidates] = useState<LyricCandidate[] | null>(null);
+  // 正在检索候选 / 正在抓取某候选歌词
+  const [lyricCandidateLoading, setLyricCandidateLoading] = useState(false);
   const [lyricsSource, setLyricsSource] = useState('none');
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [lyricsError, setLyricsError] = useState<string | null>(null);
@@ -387,6 +407,7 @@ export function TrackList({
     setLyricsSource('none');
     setLyricsError(null);
     setReviewBefore(null);
+    setLyricCandidates(null);
     setLyricsLoading(true);
     try {
       const res = await loadLyricsText(t);
@@ -404,19 +425,57 @@ export function TrackList({
     setLyricsDraft('');
     setLyricsError(null);
     setReviewBefore(null);
+    setLyricCandidates(null);
+    setLyricCandidateLoading(false);
   };
 
-  // 进入歌词对照：以当前内容为「修改前」快照，右侧成为可编辑的「修改后」。
-  // 自动获取 / AI 翻译的实际生成逻辑后续接入，此处先展开左右分栏便于手动改写与对照。
+  // 进入歌词对照（AI 翻译等）：以当前内容为「修改前」快照，右侧成为可编辑的「修改后」。
+  // 实际生成逻辑后续接入，先展开左右分栏便于手动改写与对照。
   const enterLyricsReview = () => {
     if (!lyricsTrack || lyricsLoading) return;
     setReviewBefore(lyricsDraft);
+    setLyricCandidates(null);
+  };
+
+  // 自动获取歌词：检索候选并展示在左侧，点选候选抓取纯歌词填入「修改后」。
+  const fetchLyricCandidates = async () => {
+    if (!lyricsTrack || !onFetchLyricCandidates || lyricCandidateLoading) return;
+    setLyricCandidateLoading(true);
+    setReviewBefore(lyricsDraft); // 记录原始文本作为对照 / 回退基线
+    try {
+      const list = await onFetchLyricCandidates(lyricsTrack);
+      setLyricCandidates(list);
+      if (list.length === 0) {
+        // 无候选：回退到普通对照视图
+        setLyricCandidates(null);
+      }
+    } catch (e) {
+      console.warn('[Music] 歌词候选检索失败:', e);
+      setLyricCandidates(null);
+    } finally {
+      setLyricCandidateLoading(false);
+    }
+  };
+
+  // 点选某候选：抓取纯歌词文本填入「修改后」面板
+  const applyLyricCandidate = async (c: LyricCandidate) => {
+    if (!onFetchLyric || lyricCandidateLoading) return;
+    setLyricCandidateLoading(true);
+    try {
+      const text = await onFetchLyric(c);
+      setLyricsDraft(text);
+    } catch (e) {
+      console.warn('[Music] 候选歌词抓取失败:', c.key, e);
+    } finally {
+      setLyricCandidateLoading(false);
+    }
   };
 
   // 取消对照：右侧回退为「修改前」的内容并退出对照。
   const revertLyricsReview = () => {
     setLyricsDraft(reviewBefore ?? '');
     setReviewBefore(null);
+    setLyricCandidates(null);
   };
 
   const submitLyrics = async (saveToLrc: boolean) => {
@@ -1038,14 +1097,15 @@ export function TrackList({
                   ? T('music.track.lyricsSourceEmbedded')
                   : T('music.track.lyricsSourceNone')}
             </div>
-            {/* 歌词工具栏：自动获取 / AI 翻译（生成逻辑后接，先展开左右对照面板） */}
+            {/* 歌词工具栏：自动获取 / AI 翻译（AI 生成逻辑后接） */}
             <div className="px-5 pb-3 flex items-center gap-2">
               <button
-                onClick={enterLyricsReview}
-                title={T('music.lyrics.autoFetchDevHint') || '自动检索歌词，开发中'}
-                className="px-3 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
+                onClick={fetchLyricCandidates}
+                disabled={lyricCandidateLoading}
+                title={T('music.lyrics.autoFetchHint') || '按标题+歌手检索，点选候选抓取纯歌词填入「修改后」'}
+                className="px-3 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-50"
               >
-                {T('music.lyrics.autoFetch') || '自动获取'}
+                {lyricCandidateLoading ? (T('music.lyrics.autoFetching') || '检索中…') : (T('music.lyrics.autoFetch') || '自动获取')}
               </button>
               <button
                 onClick={enterLyricsReview}
@@ -1054,7 +1114,7 @@ export function TrackList({
               >
                 {T('music.lyrics.aiTranslate') || 'AI 翻译'}
               </button>
-              {reviewBefore !== null && (
+              {(reviewBefore !== null || lyricCandidates !== null) && (
                 <button
                   onClick={revertLyricsReview}
                   title={T('music.lyrics.revertToOriginalHint') || '回退为「修改前」内容'}
@@ -1070,19 +1130,49 @@ export function TrackList({
                 <div className="h-full flex items-center justify-center text-sm text-neutral-500 dark:text-stone-400">
                   {T('music.track.lyricsLoading')}
                 </div>
-              ) : reviewBefore !== null ? (
+              ) : (reviewBefore !== null || lyricCandidates !== null) ? (
                 <div className="h-full flex gap-3">
                   <div className="flex-1 flex flex-col min-w-0">
-                    <div className="flex items-center justify-between px-1 pb-1.5">
-                      <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">{T('music.lyrics.before') || '修改前'}</span>
-                      <span className="text-[10px] text-neutral-300 dark:text-stone-600">{T('music.lyrics.onlyRead') || '只读（可复制对照）'}</span>
-                    </div>
-                    <textarea
-                      readOnly
-                      value={reviewBefore}
-                      className="flex-1 w-full resize-none p-4 text-sm leading-relaxed rounded-lg border border-neutral-200 dark:border-stone-600 bg-neutral-50 dark:bg-stone-900/60 text-neutral-500 dark:text-stone-400 focus:outline-none font-mono select-text"
-                      spellCheck={false}
-                    />
+                    {lyricCandidates !== null ? (
+                      <>
+                        <div className="flex items-center justify-between px-1 pb-1.5">
+                          <span className="text-xs font-medium text-neutral-500 dark:text-stone-400">{T('music.lyrics.lyricCandidates') || '歌词候选'}</span>
+                          <span className="text-[10px] text-neutral-300 dark:text-stone-600">{T('music.lyrics.lyricCandidatesHint') || '点选抓取纯歌词填入右侧'}</span>
+                        </div>
+                        <div className="flex-1 overflow-y-auto rounded-lg border border-neutral-200 dark:border-stone-600 bg-neutral-50 dark:bg-stone-900/60">
+                          {lyricCandidates.length === 0 ? (
+                            <div className="p-4 text-xs text-neutral-400 dark:text-stone-500">
+                              {T('music.lyrics.noCandidates') || '未找到候选歌词'}
+                            </div>
+                          ) : lyricCandidates.map((lc) => (
+                            <button
+                              key={lc.key}
+                              onClick={() => applyLyricCandidate(lc)}
+                              disabled={lyricCandidateLoading}
+                              className="w-full px-3 py-2 text-left text-xs border-b border-neutral-100 dark:border-stone-700 last:border-b-0 hover:bg-[var(--element-muted)] transition-colors disabled:opacity-50"
+                            >
+                              <div className="text-neutral-700 dark:text-stone-200 break-words">{lc.title}</div>
+                              <div className="mt-0.5 text-[10px] text-neutral-400 dark:text-stone-500">
+                                {lc.artist || '未知歌手'} · {lc.source}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between px-1 pb-1.5">
+                          <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">{T('music.lyrics.before') || '修改前'}</span>
+                          <span className="text-[10px] text-neutral-300 dark:text-stone-600">{T('music.lyrics.onlyRead') || '只读（可复制对照）'}</span>
+                        </div>
+                        <textarea
+                          readOnly
+                          value={reviewBefore ?? ''}
+                          className="flex-1 w-full resize-none p-4 text-sm leading-relaxed rounded-lg border border-neutral-200 dark:border-stone-600 bg-neutral-50 dark:bg-stone-900/60 text-neutral-500 dark:text-stone-400 focus:outline-none font-mono select-text"
+                          spellCheck={false}
+                        />
+                      </>
+                    )}
                   </div>
                   <div className="flex-1 flex flex-col min-w-0">
                     <div className="flex items-center justify-between px-1 pb-1.5">

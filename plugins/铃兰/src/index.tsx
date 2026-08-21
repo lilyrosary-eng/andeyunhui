@@ -23,8 +23,9 @@ import NeteaseStatsView from './NeteaseStatsView';
 import NeteaseSettingsPanel from './NeteaseSettingsPanel';
 import KugouStatsView from './KugouStatsView';
 import KugouSettingsPanel from './KugouSettingsPanel';
-import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, searchSongs as neteaseSearchSongs, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
-import { searchSongs as kugouSearchSongs } from './kugouApi';
+import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, searchSongs as neteaseSearchSongs, neteaseGetLyric, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
+import { searchSongs as kugouSearchSongs, getLyric as kugouGetLyric } from './kugouApi';
+import type { LyricLine } from './lyricsSync';
 import type { TrackMetaCandidate } from './TrackList';
 import { NETEASE_DOWNLOAD_DIR_KEY } from './NeteaseDownloadManager';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
@@ -1698,6 +1699,63 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     return out;
   }, []);
 
+  // 自动获取歌词候选（网易云为主，酷狗回退）：仅用于定位歌词，不含其它元信息
+  const handleFetchLyricCandidates = useCallback(async (track: Track): Promise<LyricCandidate[]> => {
+    const title = (Array.isArray(track.title) ? track.title.join('') : (track.title || '')).trim();
+    const artist = (Array.isArray(track.artist) ? track.artist.join(' ') : (track.artist || '')).trim();
+    const kw = [title, artist].filter(Boolean).join(' ');
+    if (!kw) return [];
+    const out: LyricCandidate[] = [];
+    try {
+      const res = await neteaseSearchSongs(kw, 8);
+      for (const s of res?.tracks ?? []) {
+        out.push({
+          key: 'netease-lyric-' + s.id,
+          title: s.name || '',
+          artist: s.artist || '',
+          source: 'netease',
+          neteaseId: s.id,
+        });
+      }
+    } catch (e) { console.warn('[Music] 网易云歌词检索失败:', e); }
+    if (out.length === 0) {
+      try {
+        const kg = await kugouSearchSongs(kw, 8);
+        for (const s of kg ?? []) {
+          out.push({
+            key: 'kugou-lyric-' + (s.hash || s.id || out.length),
+            title: s.name || '',
+            artist: s.artist || '',
+            source: 'kugou',
+            kugouHash: s.hash,
+            kugouKeyword: title,
+          });
+        }
+      } catch (e) { console.warn('[Music] 酷狗歌词检索失败:', e); }
+    }
+    return out;
+  }, []);
+
+  // 按歌词候选抓取纯歌词文本（网易云结构化行 -> 纯文本；酷狗取原 LRC 文本）
+  const handleFetchLyric = useCallback(async (c: LyricCandidate): Promise<string> => {
+    if (c.neteaseId) {
+      const lines: LyricLine[] | null = await neteaseGetLyric(c.neteaseId);
+      const text = (lines || [])
+        .map((l) => (l.text || '').trim())
+        .filter(Boolean)
+        .join('\n');
+      if (!text) throw new Error('netease lyric empty');
+      return text;
+    }
+    if (c.kugouHash) {
+      const r = await kugouGetLyric(c.kugouHash, c.kugouKeyword ?? '');
+      const text = (r?.lyric || '').trim();
+      if (!text) throw new Error('kugou lyric empty');
+      return text;
+    }
+    throw new Error('unknown candidate source');
+  }, []);
+
   // 按远程封面 URL 下载并内嵌写入，返回新封面缓存路径
   const handleApplyCoverUrl = useCallback(async (track: Track, coverUrl: string): Promise<string | null> => {
     const fp = track.filePath || track.id;
@@ -2528,6 +2586,8 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               onPlayMv={handlePlayMv}
               loadLyricsText={loadLyricsText}
               saveTrackLyrics={saveTrackLyrics}
+              onFetchLyricCandidates={handleFetchLyricCandidates}
+              onFetchLyric={handleFetchLyric}
             />
           ) : (
             <div className="flex-1 flex items-center justify-center">
