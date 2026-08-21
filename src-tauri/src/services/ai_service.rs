@@ -935,7 +935,7 @@ fn is_under_path(target: &std::path::Path, root: &std::path::Path) -> bool {
     norm.starts_with(&r)
 }
 
-/// 文件工具：read_file（任意路径只读）/ write_file（项目根内直写，根外审批后写）。
+/// 文件工具：read_file（任意路径只读，支持偏移）/ write_file（整写）/ edit（精准补丁替换）。写操作项目根内直写、根外审批。
 struct FileTool;
 #[async_trait::async_trait]
 impl AiTool for FileTool {
@@ -947,13 +947,18 @@ impl AiTool for FileTool {
             "type": "function",
             "function": {
                 "name": self.name(),
-                "description": "读写文件。action：read_file(path) 读取文件内容（任意路径，只读）；write_file(path, content) 写入文件（项目根目录内可直接写，根外需用户授权）。路径请传绝对路径。",
+                "description": "读写/编辑文件。action：read_file(path, offset?, limit?) 读取文件内容（任意路径，只读；offset 为起始字符偏移、limit 为字符数，用于大文件分段读取）；write_file(path, content) 整写文件；edit(path, old_string, new_string, occurrences?) 精准补丁——在原文中定位并替换（不重写整个文件；occurrences 省略替换首个、填 all 替换全部）。写操作：项目根目录内可直接写，根外需用户授权。路径请传绝对路径。改代码优先用 edit，避免整写覆盖遗漏。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "description": "read_file / write_file" },
+                        "action": { "type": "string", "description": "read_file / write_file / edit" },
                         "path": { "type": "string", "description": "绝对路径" },
-                        "content": { "type": "string", "description": "write_file 时写入的完整内容" }
+                        "content": { "type": "string", "description": "write_file 时写入的完整内容" },
+                        "offset": { "type": "integer", "description": "read_file 时的起始字符偏移（从 0 开始，默认 0）" },
+                        "limit": { "type": "integer", "description": "read_file 时的最大字符数（默认 60000）" },
+                        "old_string": { "type": "string", "description": "edit 时要在原文中查找的旧文本（须唯一或由 occurrences 指定）" },
+                        "new_string": { "type": "string", "description": "edit 时替换成的新文本" },
+                        "occurrences": { "type": "string", "description": "edit 时替换数量：省略=首个，all=全部（默认首个）" }
                     },
                     "required": ["action", "path"]
                 }
@@ -968,13 +973,26 @@ impl AiTool for FileTool {
         let p = std::path::PathBuf::from(path);
         match action {
             "read_file" => {
+                // 偏移读取：offset/limit 按字符计，便于大文件分段（dsh 对齐）
+                let offset: usize = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let limit: usize = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(60_000) as usize;
                 let content = spawn_blocking(move || -> Result<String, String> {
                     let data = std::fs::read(&p).map_err(|e| format!("读取失败 {}: {}", p.display(), e))?;
-                    let text = String::from_utf8_lossy(&data).to_string();
-                    const CAP: usize = 60_000;
-                    if text.chars().count() > CAP {
-                        Ok(format!("（文件较大，已截断前 {} 字符）\n{}", CAP, text.chars().take(CAP).collect::<String>()))
-                    } else { Ok(text) }
+                    let full = String::from_utf8_lossy(&data).to_string();
+                    let chars = full.chars().collect::<Vec<_>>();
+                    // 偏移取自文件开头（截断点不可寻，故按全量再切）
+                    let total = chars.len();
+                    let start = offset.min(total);
+                    let end = (start + limit).min(total);
+                    let window: String = chars[start..end].iter().collect();
+                    let head = if offset > 0 {
+                        format!("（已从字符 #{} 开始显示，共 {} 字符）\n", start, total)
+                    } else if total > limit {
+                        format!("（文件较大，显示前 {} 字符,共 {} 字符；可用 offset 继续读取）\n", limit, total)
+                    } else {
+                        String::new()
+                    };
+                    Ok(format!("{}{}", head, window))
                 }).await.map_err(|e| format!("读取任务调度失败: {}", e))??;
                 Ok(content)
             }
@@ -996,7 +1014,54 @@ impl AiTool for FileTool {
                 }).await.map_err(|e| format!("写入任务调度失败: {}", e))??;
                 Ok(format!("已写入 {}", display))
             }
-            _ => Err(format!("未知 action: '{}'（可选 read_file/write_file）", action)),
+            "edit" => {
+                let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+                let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+                if old_string.is_empty() {
+                    return Err("edit 缺少 old_string 参数".to_string());
+                }
+                // 写语义与 write_file 一致：项目根内直写、根外审批
+                let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
+                if !under {
+                    request_approval(ctx, "file", &format!("编辑外部路径: {}", p.display())).await?;
+                }
+                // occurrences："all" 替换全部；省略/其它填多个数字语义忽略，默认首个
+                let all = args.get("occurrences").and_then(|v| v.as_str()).map(|s| s.trim() == "all").unwrap_or(false);
+                let display = p.display().to_string();
+                let display_in_closure = display.clone();
+                let old_owned = old_string.to_string();
+                let new_owned = new_string.to_string();
+                let result = spawn_blocking(move || -> Result<String, String> {
+                    let data = std::fs::read(&p).map_err(|e| format!("读取失败 {}: {}", p.display(), e))?;
+                    let text = String::from_utf8_lossy(&data).to_string();
+                    let mut count = 0usize;
+                    let new_text = if all {
+                        // 替换全部；替换次数 = old_string 在原文出现次数
+                        count = text.matches(&old_owned).count();
+                        text.replace(&old_owned, &new_owned)
+                    } else {
+                        // 仅替换首个；要求唯一，避免误改
+                        let matches = text.match_indices(&old_owned).collect::<Vec<_>>();
+                        if matches.is_empty() {
+                            return Err(format!("未找到待替换内容：{}", old_owned));
+                        }
+                        if matches.len() > 1 {
+                            return Err(format!("old_string 出现 {} 次，不唯一（请用 occurrences=all 或缩小范围）：{}", matches.len(), old_owned));
+                        }
+                        count = 1;
+                        let (idx, len) = (matches[0].0, matches[0].1.len());
+                        let mut s = String::with_capacity(text.len() + new_owned.len().saturating_sub(old_owned.len()));
+                        s.push_str(&text[..idx]);
+                        s.push_str(&new_owned);
+                        s.push_str(&text[idx + len..]);
+                        s
+                    };
+                    std::fs::write(&p, new_text.as_bytes()).map_err(|e| format!("写入失败 {}: {}", display_in_closure, e))?;
+                    Ok(count.to_string())
+                }).await.map_err(|e| format!("编辑任务调度失败: {}", e))??;
+                Ok(format!("已修改 {}（替换 {} 处）", display, result))
+            }
+            _ => Err(format!("未知 action: '{}'（可选 read_file/write_file/edit）", action)),
         }
     }
 }
@@ -1013,12 +1078,13 @@ impl AiTool for CommandTool {
             "type": "function",
             "function": {
                 "name": self.name(),
-                "description": "执行 shell 命令并返回输出。限时 15 秒、非交互。参数：command(必填，要执行的命令)；cwd(可选，工作目录，默认项目根)。用于运行 git/npm/pnpm/node/脚本等。",
+                "description": "执行 shell 命令并返回输出。非交互。参数：command(必填，要执行的命令)；cwd(可选，工作目录，默认项目根)；timeout(可选，超时秒数，默认15，上限120)。用于运行 git/npm/pnpm/node/脚本等。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "要执行的 shell 命令" },
-                        "cwd": { "type": "string", "description": "工作目录（默认项目根目录）" }
+                        "cwd": { "type": "string", "description": "工作目录（默认项目根目录）" },
+                        "timeout": { "type": "integer", "description": "超时秒数（默认15，上限120）" }
                     },
                     "required": ["command"]
                 }
@@ -1028,6 +1094,11 @@ impl AiTool for CommandTool {
     async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         if command.is_empty() { return Err("run_command 缺少 command 参数".to_string()); }
+        // timeout：可选超时秒数，默认 15，封顶 120，最小 1
+        let timeout_secs: u64 = args.get("timeout")
+            .and_then(|v| v.as_u64())
+            .map(|t| t.clamp(1, 120))
+            .unwrap_or(15);
         let cwd = args.get("cwd").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
         let cwd: Option<std::path::PathBuf> = cwd.map(std::path::PathBuf::from).or_else(|| ctx.project_root.clone());
 
@@ -1042,8 +1113,8 @@ impl AiTool for CommandTool {
         if let Some(d) = &cwd { proc.current_dir(d); }
         proc.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
 
-        let out = tokio::time::timeout(std::time::Duration::from_secs(15), proc.output()).await;
-        let status = out.map_err(|_| "命令执行超时（>15s，已中止）".to_string())?
+        let out = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), proc.output()).await;
+        let status = out.map_err(|_| format!("命令执行超时（>{}s，已中止）", timeout_secs))?
             .map_err(|e| format!("命令执行失败: {}", e))?;
         let mut text = String::new();
         if !status.stdout.is_empty() {
