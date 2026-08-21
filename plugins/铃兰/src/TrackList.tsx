@@ -24,6 +24,17 @@ interface OtherPlaylist {
   name: string;
 }
 
+// 自动获取元信息候选（网易云 / 酷狗搜索结果）
+export interface TrackMetaCandidate {
+  key: string;
+  title: string;
+  artist: string;
+  album: string;
+  durationSecs?: number;
+  coverUrl?: string;
+  source: 'netease' | 'kugou';
+}
+
 interface TrackListProps {
   tracks: Track[];
   playlistName: string;
@@ -49,6 +60,11 @@ interface TrackListProps {
   onPlayMv?: (track: Track) => void;
   loadLyricsText?: (track: Track) => Promise<{ text: string; source: string }>;
   saveTrackLyrics?: (track: Track, lyrics: string, saveToLrc: boolean) => Promise<void>;
+  // 自动获取元信息：检索候选 / 本地图片内嵌写封面 / 远程封面 URL 写内嵌 / 重置封面
+  onFetchMetaCandidates?: (track: Track) => Promise<TrackMetaCandidate[]>;
+  onPickAndEmbedCover?: (track: Track) => Promise<string | null>;
+  onApplyCoverUrl?: (track: Track, coverUrl: string) => Promise<string | null>;
+  onResetCoverEmbed?: (track: Track) => Promise<void>;
 }
 
 export function TrackList({
@@ -72,6 +88,10 @@ export function TrackList({
   onPlayMv,
   loadLyricsText,
   saveTrackLyrics,
+  onFetchMetaCandidates,
+  onPickAndEmbedCover,
+  onApplyCoverUrl,
+  onResetCoverEmbed,
 }: TrackListProps) {
   useLang();
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
@@ -264,6 +284,8 @@ export function TrackList({
   // 打开自定义「编辑曲目信息」弹窗
   const onEditInfo = (t: Track) => {
     setEditingTrack(t);
+    setDraftCoverPath(null);
+    setCandidates(null);
     setEditDraft({
       title: t.title || '',
       artist: t.artist || '',
@@ -282,6 +304,71 @@ export function TrackList({
       trackNumber: Number.isNaN(tn) ? undefined : tn,
     });
     setEditingTrack(null);
+  };
+
+  // ===== 自动获取元信息 / 封面集成（编辑弹窗内）=====
+  // 弹窗内显示的封面缩略图路径（选中候选/换图后本地覆盖展示，不回写当前曲目 state）
+  const [draftCoverPath, setDraftCoverPath] = useState<string | null>(null);
+  // 候选列表 + 检索状态
+  const [candidates, setCandidates] = useState<TrackMetaCandidate[] | null>(null);
+  const [candidateLoading, setCandidateLoading] = useState(false);
+  // 分项自动获取：当前在检索的字段（title/artist/album）
+  const [fieldAutoBusy, setFieldAutoBusy] = useState<null | 'title' | 'artist' | 'album'>(null);
+  // 一键自动获取：拉候选列表
+  const fetchCandidates = async () => {
+    if (!editingTrack || !onFetchMetaCandidates || candidateLoading) return;
+    setCandidateLoading(true);
+    try {
+      const list = await onFetchMetaCandidates(editingTrack);
+      setCandidates(list);
+      if (list.length === 0) alert(T('music.metaAutoNoResult') || '未找到匹配的歌曲信息');
+    } catch (e) {
+      console.warn('[Music] 自动获取失败:', e);
+      alert(T('music.metaAutoFail') || '获取失败，请稍后重试');
+    } finally {
+      setCandidateLoading(false);
+    }
+  };
+  // 选中某条候选：填充标题/歌手/专辑，并按需下载写回封面
+  const applyCandidate = async (c: TrackMetaCandidate) => {
+    if (!editingTrack) return;
+    setEditDraft((d) => ({ ...d, title: c.title, artist: c.artist, album: c.album }));
+    if (c.coverUrl && onApplyCoverUrl) {
+      const path = await onApplyCoverUrl(editingTrack, c.coverUrl);
+      if (path) setDraftCoverPath(path);
+    }
+    setCandidates(null);
+  };
+  // 分项自动获取：检索并取最匹配候选，仅回填指定字段
+  const autoFillField = async (field: 'title' | 'artist' | 'album') => {
+    if (!editingTrack || !onFetchMetaCandidates || fieldAutoBusy) return;
+    setFieldAutoBusy(field);
+    try {
+      const list = await onFetchMetaCandidates(editingTrack);
+      if (list.length > 0) {
+        const best = list[0];
+        setEditDraft((d) => ({ ...d, [field]: best[field] }));
+      } else {
+        alert(T('music.metaAutoNoResult') || '未找到匹配的歌曲信息');
+      }
+    } catch (e) {
+      console.warn('[Music] 分项自动获取失败:', e);
+      alert(T('music.metaAutoFail') || '获取失败，请稍后重试');
+    } finally {
+      setFieldAutoBusy(null);
+    }
+  };
+  // 更换封面：选本地图片 → 内嵌写入 → 本地预览
+  const changeCover = async () => {
+    if (!editingTrack || !onPickAndEmbedCover) return;
+    const path = await onPickAndEmbedCover(editingTrack);
+    if (path) setDraftCoverPath(path);
+  };
+  // 重置封面：删除覆盖，回退内嵌封面
+  const resetCover = async () => {
+    if (!editingTrack || !onResetCoverEmbed) return;
+    await onResetCoverEmbed(editingTrack);
+    setDraftCoverPath(null);
   };
 
   // 打开歌词编辑器：从后端加载原始歌词文本
@@ -706,12 +793,93 @@ export function TrackList({
             className="w-full max-w-md rounded-xl bg-white dark:bg-stone-800 shadow-2xl p-6"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-base font-semibold text-neutral-800 dark:text-stone-100 mb-5">
-              {T('music.track.editInfo')}
-            </h3>
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-base font-semibold text-neutral-800 dark:text-stone-100">
+                {T('music.track.editInfo')}
+              </h3>
+              {onFetchMetaCandidates && (
+                <button
+                  onClick={fetchCandidates}
+                  disabled={candidateLoading}
+                  className="px-2.5 py-1.5 text-xs rounded-lg bg-[var(--element-muted)]/60 text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors disabled:opacity-50"
+                  title={T('music.metaAutoOneKeyHint') || '按标题+歌手检索，从候选中一键补全并写回封面'}
+                >
+                  {candidateLoading ? (T('music.metaAutoLoading') || '检索中…') : ('⚡ ' + (T('music.metaAutoOneKey') || '一键自动获取'))}
+                </button>
+              )}
+            </div>
+            {/* 封面区：预览 + 更换/重置 */}
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-14 h-14 rounded-lg bg-neutral-100 dark:bg-stone-700 overflow-hidden flex-shrink-0 flex items-center justify-center">
+                {(draftCoverPath ?? editingTrack.coverPath) ? (
+                  <img
+                    src={(() => {
+                      const p = draftCoverPath ?? editingTrack.coverPath!;
+                      return /^https?:\/\//i.test(p) ? p : hostApi.convertFileSrc(p);
+                    })()}
+                    alt=""
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <MusicIcon size={20} />
+                )}
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-2">
+                  {onPickAndEmbedCover ? (
+                    <button
+                      onClick={changeCover}
+                      className="px-2.5 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
+                    >
+                      {T('music.track.editChangeCover') || '更换封面'}
+                    </button>
+                  ) : null}
+                  {onResetCoverEmbed ? (
+                    <button
+                      onClick={resetCover}
+                      className="px-2.5 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
+                    >
+                      {T('music.track.editResetCover') || '重置封面'}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+            {/* 一键自动获取候选列表 */}
+            {candidates !== null && (
+              <div className="mb-4 border border-neutral-200 dark:border-stone-600 rounded-lg overflow-hidden max-h-48 overflow-y-auto">
+                <div className="flex items-center justify-between px-3 py-1.5 bg-neutral-50 dark:bg-stone-800 text-xs text-neutral-500 dark:text-stone-400 border-b border-neutral-200 dark:border-stone-700">
+                  <span>{T('music.metaAutoCandidates') || '候选结果'}</span>
+                  <button onClick={() => setCandidates(null)} className="text-neutral-400 hover:text-neutral-600 dark:text-stone-500 dark:hover:text-stone-300">×</button>
+                </div>
+                {candidates.map((c) => (
+                  <button
+                    key={c.key}
+                    onClick={() => applyCandidate(c)}
+                    className="w-full px-3 py-1.5 text-left text-xs text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors flex items-center justify-between gap-2 border-b border-neutral-100 dark:border-stone-700/50 last:border-b-0"
+                  >
+                    <span className="truncate">{c.title} — {c.artist || '未知歌手'}</span>
+                    <span className="text-[10px] text-neutral-400 dark:text-stone-500 flex-shrink-0">
+                      {c.album || ''} · {c.source}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="space-y-4">
               <div>
-                <label className="block text-xs text-neutral-500 dark:text-stone-400 mb-1.5">{T('music.track.editTitle')}</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs text-neutral-500 dark:text-stone-400">{T('music.track.editTitle')}</label>
+                  {onFetchMetaCandidates && (
+                    <button
+                      onClick={() => autoFillField('title')}
+                      disabled={fieldAutoBusy !== null}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-stone-700 text-neutral-500 dark:text-stone-400 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-40"
+                    >
+                      {fieldAutoBusy === 'title' ? (T('music.metaAutoLoading') || '自动…') : (T('music.metaAutoField') || '自动')}
+                    </button>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={editDraft.title}
@@ -721,7 +889,18 @@ export function TrackList({
                 />
               </div>
               <div>
-                <label className="block text-xs text-neutral-500 dark:text-stone-400 mb-1.5">{T('music.track.editArtist')}</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs text-neutral-500 dark:text-stone-400">{T('music.track.editArtist')}</label>
+                  {onFetchMetaCandidates && (
+                    <button
+                      onClick={() => autoFillField('artist')}
+                      disabled={fieldAutoBusy !== null}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-stone-700 text-neutral-500 dark:text-stone-400 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-40"
+                    >
+                      {fieldAutoBusy === 'artist' ? (T('music.metaAutoLoading') || '自动…') : (T('music.metaAutoField') || '自动')}
+                    </button>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={editDraft.artist}
@@ -731,7 +910,18 @@ export function TrackList({
                 />
               </div>
               <div>
-                <label className="block text-xs text-neutral-500 dark:text-stone-400 mb-1.5">{T('music.track.editAlbum')}</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs text-neutral-500 dark:text-stone-400">{T('music.track.editAlbum')}</label>
+                  {onFetchMetaCandidates && (
+                    <button
+                      onClick={() => autoFillField('album')}
+                      disabled={fieldAutoBusy !== null}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-stone-700 text-neutral-500 dark:text-stone-400 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors disabled:opacity-40"
+                    >
+                      {fieldAutoBusy === 'album' ? (T('music.metaAutoLoading') || '自动…') : (T('music.metaAutoField') || '自动')}
+                    </button>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={editDraft.album}

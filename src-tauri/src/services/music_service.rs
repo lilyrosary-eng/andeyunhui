@@ -15,6 +15,7 @@ use lofty::read_from_path;
 use lofty::file::TaggedFileExt;
 use lofty::file::AudioFile;
 use lofty::tag::Accessor;
+use lofty::picture::{MimeType, Picture, PictureType};
 use serde::Serialize;
 use tauri::Emitter;
 use tauri::Manager;
@@ -280,8 +281,73 @@ fn cover_dir_of(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
         })
 }
 
-/// 手动设封面：解码 base64 图片，写入 music_covers 目录（文件名含内容哈希，天然去重），
-/// 并把该 file_path 的封面固定为覆盖值（持久化到 track_cover_override + playlist_track/favorite）。
+/// 将 image_bytes 作为封面写入音频文件内嵌标签（ID3v2 APIC / FLAC 图块 / MP4 covr），
+/// 覆盖原有全部内嵌图片。失败返回错误信息，供上层回退到「缓存式 override」兜底。
+fn embed_cover_into_file(resolved: &Path, image_bytes: &[u8], mime: Option<&str>) -> Result<(), String> {
+    let mut tagged_file = read_from_path(resolved).map_err(|e| format!("读取音频失败: {}", e))?;
+    // mime 缺失时按字节头推断，作为 Content-Type fallback
+    let mime_type = match mime.and_then(|m| {
+        let mt = MimeType::from_str(m);
+        (!matches!(mt, MimeType::Unknown(_))).then_some(mt)
+    }) {
+        Some(mt) => mt,
+        None => {
+            if image_bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                MimeType::Png
+            } else if image_bytes.starts_with(b"GIF8") {
+                MimeType::Gif
+            } else if image_bytes.starts_with(b"BM") {
+                MimeType::Bmp
+            } else if image_bytes.starts_with(b"II*\x00") || image_bytes.starts_with(b"MM\x00*") {
+                MimeType::Tiff
+            } else {
+                MimeType::Jpeg
+            }
+        }
+    };
+    let picture = Picture::unchecked(image_bytes.to_vec())
+        .pic_type(PictureType::CoverFront)
+        .mime_type(mime_type)
+        .description("cover")
+        .build();
+    {
+        let tag = if let Some(t) = tagged_file.primary_tag_mut() {
+            t
+        } else {
+            tagged_file
+                .first_tag_mut()
+                .ok_or_else(|| "文件不含可写标签".to_string())?
+        };
+        // 移除旧封面后写入固定索引 0（set_picture 索引越界时自动 push）
+        while tag.picture_count() > 0 {
+            tag.remove_picture(0);
+        }
+        tag.set_picture(0, picture);
+    }
+    tagged_file
+        .save_to_path(resolved, lofty::config::WriteOptions::default())
+        .map_err(|e| format!("内嵌封面写回失败: {}", e))?;
+    Ok(())
+}
+
+/// 取 file_path 对应的 canonicalize 后路径（与 extract_track_metadata 一致）。
+fn canonical_path_of(file_path: &str) -> PathBuf {
+    let path = Path::new(file_path);
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// 封面已成功写入内嵌标签后，重新提取内嵌封面缓存并同步数据库，
+/// 使所有歌单/收藏即时使用新封面。返回新封面缓存文件的绝对路径。
+fn sync_cover_after_embed(app: &tauri::AppHandle, file_path: &str) -> Result<String, String> {
+    let track = extract_track_metadata(Path::new(file_path), cover_dir_of(app).as_deref());
+    let cover_path = track.cover_path.unwrap_or_default();
+    crate::services::music_db::music_set_cover_override(app.clone(), file_path.to_string(), cover_path.clone())?;
+    Ok(cover_path)
+}
+
+/// 手动设封面：解码 base64 图片，
+/// 1) 优先写入音频文件内嵌标签（真正持久化到文件，迁移/分享也带封面）；
+/// 2) 任一步失败时回退为旧逻辑——封面写入 music_covers 目录并固定为 override。
 /// 返回新封面文件的绝对路径。
 pub fn set_cover_from_base64(
     app: &tauri::AppHandle,
@@ -293,6 +359,12 @@ pub fn set_cover_from_base64(
     let raw = base64::engine::general_purpose::STANDARD
         .decode(data_base64.trim())
         .map_err(|e| format!("base64 解码失败: {}", e))?;
+    // 优先写内嵌封面；失败则回退为缓存式 override（不改原文件，兼容不支持写入的格式）。
+    let resolved = canonical_path_of(&file_path);
+    match embed_cover_into_file(&resolved, &raw, mime.as_deref()) {
+        Ok(()) => return sync_cover_after_embed(app, &file_path),
+        Err(embed_err) => eprintln!("[music_service] 内嵌封面写入失败，回退缓存 override: {} ({})", file_path, embed_err),
+    }
     let ext = match mime.as_deref() {
         Some("image/png") => "png",
         Some("image/webp") => "webp",
@@ -308,6 +380,63 @@ pub fn set_cover_from_base64(
     let cover_path = cover_file.to_string_lossy().to_string();
     crate::services::music_db::music_set_cover_override(app.clone(), file_path, cover_path.clone())?;
     Ok(cover_path)
+}
+
+/// 按远程 URL 下载封面并写为音频文件内嵌封面（用于「一键/分项自动获取」）。
+/// reqwest 需在 async 上下文调用；fallback 到缓存 override 时同样下载到本地。
+pub async fn set_cover_from_url(
+    app: &tauri::AppHandle,
+    file_path: String,
+    url: String,
+) -> Result<String, String> {
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("封面下载请求失败: {}", e))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("封面下载读取失败: {}", e))?;
+    let image_bytes = bytes.to_vec();
+    // 从 URL / Content-Type 推断 mime（仅用于写入标签，缺省时按字节头推断）
+    let mime = url.rsplit('.').next().map(str::to_lowercase).and_then(|ext| {
+        match ext.as_str() {
+            "png" => Some("image/png".to_string()),
+            "gif" => Some("image/gif".to_string()),
+            "webp" => Some("image/webp".to_string()),
+            "bmp" => Some("image/bmp".to_string()),
+            "tif" | "tiff" => Some("image/tiff".to_string()),
+            _ => None,
+        }
+    });
+    let app2 = app.clone();
+    let fp = file_path.clone();
+    // 阻塞文件写盘放到线程池，避免占用 async worker
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = canonical_path_of(&fp);
+        let mime_str = mime.as_deref();
+        match embed_cover_into_file(&resolved, &image_bytes, mime_str) {
+            Ok(()) => sync_cover_after_embed(&app2, &fp).map_err(|e| format!("封面同步失败: {}", e)),
+            Err(embed_err) => {
+                eprintln!("[music_service] 内嵌封面写入失败，回退缓存 override: {} ({})", fp, embed_err);
+                let dir = cover_dir_of(&app2).ok_or_else(|| "无法获取封面目录".to_string())?;
+                let ext = match mime_str {
+                    Some("image/png") => "png",
+                    Some("image/webp") => "webp",
+                    _ => "jpg",
+                };
+                let mut hasher = DefaultHasher::new();
+                image_bytes.hash(&mut hasher);
+                let content_hash = format!("{:x}", hasher.finish());
+                let cover_file = dir.join(format!("{}_manual_{}.{}", path_hash_of(Path::new(&fp)), content_hash, ext));
+                std::fs::write(&cover_file, &image_bytes).map_err(|e| format!("封面写入失败: {}", e))?;
+                let cover_path = cover_file.to_string_lossy().to_string();
+                crate::services::music_db::music_set_cover_override(app2.clone(), fp, cover_path.clone())?;
+                Ok(cover_path)
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("封面写入任务失败: {}", e))?
 }
 
 /// 重扫单文件元数据（忽略手动封面覆盖，按内嵌封面重新提取）。

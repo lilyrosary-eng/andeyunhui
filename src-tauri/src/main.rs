@@ -1094,6 +1094,7 @@ fn main() {
             music_get_listen_stats,
             music_get_listen_ranking,
             music_set_cover,
+            music_set_cover_url,
             music_rescan_metadata,
             music_edit_track,
             music_get_all_cover_overrides,

@@ -23,7 +23,9 @@ import NeteaseStatsView from './NeteaseStatsView';
 import NeteaseSettingsPanel from './NeteaseSettingsPanel';
 import KugouStatsView from './KugouStatsView';
 import KugouSettingsPanel from './KugouSettingsPanel';
-import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
+import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, searchSongs as neteaseSearchSongs, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
+import { searchSongs as kugouSearchSongs } from './kugouApi';
+import type { TrackMetaCandidate } from './TrackList';
 import { NETEASE_DOWNLOAD_DIR_KEY } from './NeteaseDownloadManager';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
@@ -1658,6 +1660,97 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     }
   }, [coverOverrides]);
 
+  // 上传封面字节（内嵌写入音频文件 + 刷新 override 与内存），返回新封面缓存路径
+  const uploadAndReflectCover = useCallback(async (fp: string, b64: string, mime: string): Promise<string | null> => {
+    try {
+      const coverPath = await hostApi.invoke<string>('music_set_cover', { filePath: fp, dataBase64: b64, mime });
+      const next = new Map(coverOverrides); next.set(fp, coverPath);
+      setCoverOverrides(next);
+      setPlaylists(prev => applyCoverOverrides(prev, next));
+      setSelectedPlaylist(prev => (prev ? applyCoverOverrides([prev], next)[0] : prev));
+      return coverPath;
+    } catch (e) {
+      console.warn('[Music] 设置封面失败:', fp, e);
+      return null;
+    }
+  }, [coverOverrides]);
+
+  // 编辑弹窗「更换封面」：选本地图片 → 内嵌写入 → 返回封面路径
+  const handlePickAndEmbedCover = useCallback(async (track: Track): Promise<string | null> => {
+    const fp = track.filePath || track.id;
+    if (!fp) return null;
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = 'image/*';
+    input.style.position = 'fixed'; input.style.opacity = '0'; input.style.pointerEvents = 'none'; input.style.zIndex = '-1';
+    document.body.appendChild(input);
+    const picked = await new Promise<File | null>((resolve) => {
+      input.onchange = () => resolve(input.files && input.files[0] ? input.files[0] : null);
+      input.oncancel = () => resolve(null);
+      input.click();
+    });
+    input.remove();
+    if (!picked) return null;
+    const b64 = await fileToBase64(picked);
+    return uploadAndReflectCover(fp, b64, picked.type || 'image/jpeg');
+  }, [uploadAndReflectCover]);
+
+  // 自动获取元信息候选（网易云为主，酷狗回退）
+  const handleFetchMetaCandidates = useCallback(async (track: Track): Promise<TrackMetaCandidate[]> => {
+    const title = (Array.isArray(track.title) ? track.title.join('') : (track.title || '')).trim();
+    const artist = (Array.isArray(track.artist) ? track.artist.join(' ') : (track.artist || '')).trim();
+    const kw = [title, artist].filter(Boolean).join(' ');
+    if (!kw) return [];
+    const out: TrackMetaCandidate[] = [];
+    try {
+      const res = await neteaseSearchSongs(kw, 8);
+      for (const s of res?.tracks ?? []) {
+        out.push({
+          key: 'netease-' + s.id,
+          title: s.name || '',
+          artist: s.artist || '',
+          album: s.album || '',
+          durationSecs: Math.round((s.duration || 0) / 1000),
+          coverUrl: s.cover || '',
+          source: 'netease',
+        });
+      }
+    } catch (e) { console.warn('[Music] 网易云检索失败:', e); }
+    if (out.length === 0) {
+      try {
+        const kg = await kugouSearchSongs(kw, 8);
+        for (const s of kg ?? []) {
+          out.push({
+            key: 'kugou-' + (s.hash || s.id || out.length),
+            title: s.name || '',
+            artist: s.artist || '',
+            album: s.album || '',
+            durationSecs: Math.round((s.duration || 0) / 1000),
+            coverUrl: s.cover || '',
+            source: 'kugou',
+          });
+        }
+      } catch (e) { console.warn('[Music] 酷狗检索失败:', e); }
+    }
+    return out;
+  }, []);
+
+  // 按远程封面 URL 下载并内嵌写入，返回新封面缓存路径
+  const handleApplyCoverUrl = useCallback(async (track: Track, coverUrl: string): Promise<string | null> => {
+    const fp = track.filePath || track.id;
+    if (!fp || !coverUrl) return null;
+    try {
+      const coverPath = await hostApi.invoke<string>('music_set_cover_url', { filePath: fp, url: coverUrl });
+      const next = new Map(coverOverrides); next.set(fp, coverPath);
+      setCoverOverrides(next);
+      setPlaylists(prev => applyCoverOverrides(prev, next));
+      setSelectedPlaylist(prev => (prev ? applyCoverOverrides([prev], next)[0] : prev));
+      return coverPath;
+    } catch (e) {
+      console.warn('[Music] 下载/写封面失败:', fp, e);
+      return null;
+    }
+  }, [coverOverrides]);
+
   // 重扫该曲元数据（忽略手动封面），更新内存对应曲目（封面保留手动 override）
   const handleRescanTrack = useCallback(async (track: Track) => {
     const rescanned = await rescanTrackMetadata(track);
@@ -2464,6 +2557,10 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               onResetCover={handleResetCover}
               onRescanTrack={handleRescanTrack}
               onEditTrack={handleEditTrack}
+              onFetchMetaCandidates={handleFetchMetaCandidates}
+              onPickAndEmbedCover={handlePickAndEmbedCover}
+              onApplyCoverUrl={handleApplyCoverUrl}
+              onResetCoverEmbed={handleResetCover}
               onDownloadTrack={handleDownloadTrack}
               onAttachMv={handleAttachMv}
               onPlayMv={handlePlayMv}

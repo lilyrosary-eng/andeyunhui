@@ -2335,6 +2335,16 @@ pub fn music_set_cover(
     music_service::set_cover_from_base64(&app, file_path, data_base64, mime)
 }
 
+/// 按远程 URL 下载封面并写入音频文件内嵌标签（用于自动获取元信息）。
+#[tauri::command]
+pub async fn music_set_cover_url(
+    app: tauri::AppHandle,
+    file_path: String,
+    url: String,
+) -> Result<String, String> {
+    music_service::set_cover_from_url(&app, file_path, url).await
+}
+
 #[tauri::command]
 pub fn music_rescan_metadata(app: tauri::AppHandle, file_path: String) -> Result<music_service::Track, String> {
     music_service::rescan_track_metadata(&app, file_path)
