@@ -72,6 +72,8 @@ class MusicPlayer {
   private bindEvents(): void {
     this.audio.addEventListener('play', () => {
       this.isPlaying = true;
+      // 在 play 事件回调中创建 AudioContext——此时浏览器一定允许 AudioContext 运行
+      this.ensureAudioContextOnPlay();
       this.setMediaSessionState('playing');
       this.pushSmtc();
       this.emit('play', null);
@@ -312,40 +314,25 @@ class MusicPlayer {
       this.currentIndex = 0;
       this.loadTrack(0);
     }
-    // 延迟初始化 AudioContext（只在第一次播放时创建，此时有用户交互不会卡死）
-    this.ensureAudioContext();
-    // 先 resume，再 play，确保 AudioContext 处于 running 状态
-    if (this.audioCtx?.state === 'suspended') {
-      this.audioCtx.resume().then(() => {
-        this.audio.play().catch((err) => {
-          console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
-          this.emit('pause', undefined);
-        });
-      }).catch(() => {
-        this.audio.play().catch((err) => {
-          console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
-          this.emit('pause', undefined);
-        });
-      });
-    } else {
-      this.audio.play().catch((err) => {
-        console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
-        this.emit('pause', undefined);
-      });
-    }
+    this.audio.play().catch((err) => {
+      console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
+      this.emit('pause', undefined);
+    });
   }
 
-  // 延迟初始化 AudioContext + AnalyserNode
+  // 在 audio 'play' 事件回调中延迟创建 AudioContext（此时浏览器一定允许 AudioContext 运行）
   // 使用 createMediaElementSource 接管音频路由，确保频域数据可用
-  // 关键：在 audio 'play' 事件后创建 + resume，避免 suspended 导致无声音
-  private ensureAudioContext(): void {
-    if (this.audioCtx) return;
+  private ensureAudioContextOnPlay(): void {
+    if (this.audioCtx) {
+      if (this.audioCtx.state === 'suspended') this.audioCtx.resume().catch(() => {});
+      return;
+    }
     try {
       const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
       if (!Ctor) return;
       const ctx: AudioContext = new Ctor();
       const analyser = ctx.createAnalyser();
-      analyser.fftSize = 128; // 更高频域分辨率
+      analyser.fftSize = 128;
       analyser.smoothingTimeConstant = 0.75;
       const source = ctx.createMediaElementSource(this.audio);
       source.connect(analyser);
@@ -353,9 +340,9 @@ class MusicPlayer {
       this.audioCtx = ctx;
       this.analyser = analyser;
       this.sourceNode = source;
-      // 创建后立即 resume
-      ctx.resume().then(() => debugLog('AudioContext resumed')).catch((e) => debugLog(`AudioContext resume 失败: ${e}`));
-      debugLog('AudioContext + AnalyserNode 初始化成功');
+      // 在 play 事件回调中创建的 AudioContext 不会被 suspended，但仍确保 resume
+      ctx.resume().catch(() => {});
+      debugLog('AudioContext + AnalyserNode 初始化成功 (on play event)');
     } catch (e) {
       debugLog(`AudioContext 初始化失败: ${e}`);
       this.audioCtx = null;

@@ -342,13 +342,15 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
   // 初始加载
   useEffect(() => {
-    if (roamStartedRef.current && !roamForceReloadRef.current) { setLoading(false); return; }
+    // source 变化时强制重新初始化
+    roamStartedRef.current = false;
     roamForceReloadRef.current = false;
     roamReservoir.current = [];
     roamTrackListRef.current = [];
     trackIdxRef.current = 0;
-    // 重置历史记录，避免跨源混淆
-    historyRef.current = [];
+    // 重置历史记录，避免跨源混淆，并从 prop 恢复当前 source 的历史
+    historyRef.current = [...(initialHistory || [])];
+    lyricCacheRef.current.clear();
     const req = ++reqRef.current;
     setLoading(true); setError('');
     (async () => {
@@ -696,12 +698,12 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                 transition: 'right 0.7s cubic-bezier(.22,.61,.36,1), left 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease',
               }}
             >
-              <p style={{ fontFamily: "'Noto Sans SC', system-ui, sans-serif", fontWeight: 500, fontSize: 'clamp(13px, 1.4vw, 20px)', letterSpacing: '0.12em', color: ink, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
+              <p style={{ fontWeight: 500, fontSize: 'clamp(13px, 1.4vw, 20px)', letterSpacing: '0.12em', color: ink, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
                 {[...lyricLine1].slice(0, 20).map((ch, i) => (
                   <span key={i} className="inline-block" style={{ animation: `roam-charGlow 3.6s ease-in-out ${(i * 0.14).toFixed(2)}s infinite` }}>{ch}</span>
                 ))}
               </p>
-              <p style={{ fontFamily: "'Noto Sans SC', system-ui, sans-serif", fontWeight: 300, fontSize: 'clamp(10px, 0.9vw, 13px)', letterSpacing: '0.08em', color: inkSoft, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
+              <p style={{ fontWeight: 300, fontSize: 'clamp(10px, 0.9vw, 13px)', letterSpacing: '0.08em', color: inkSoft, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
                 {lyricLine2}
               </p>
             </div>

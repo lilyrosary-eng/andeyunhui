@@ -667,15 +667,76 @@ export async function neteaseQrCheck(key: string): Promise<{ code: number; cooki
 }
 
 // 歌词接口（eapi /api/song/lyric，需登录态）：返回 LRC 文本或 null
-export async function neteaseGetLyric(songId: number): Promise<string | null> {
+// tv=1 请求翻译歌词，rv=1 请求罗马音（读音），默认开启但可通过参数关闭
+export async function neteaseGetLyric(songId: number, opts?: { translation?: boolean; romaji?: boolean }): Promise<string | null> {
+  const translation = opts?.translation ?? true;  // 默认请求翻译
+  const romaji = opts?.romaji ?? true;              // 默认请求罗马音
   try {
-    const r = await eapiPost('/api/song/lyric', { id: songId, cp: false, tv: 0, lv: 0, rv: 0, kv: 0, yv: 0, _nmclfl: 1 });
+    const r = await eapiPost('/api/song/lyric', {
+      id: songId, cp: false,
+      tv: translation ? 1 : 0,
+      lv: 0, rv: romaji ? 1 : 0, kv: 0, yv: 0, _nmclfl: 1,
+    });
     const lrc = r?.lrc?.lyric as string | undefined;
-    return lrc || null;
+    if (!lrc) return null;
+    // 如果有翻译歌词，合并到原歌词中（在每行原文下方插入翻译行）
+    const tlyric = r?.tlyric?.lyric as string | undefined;
+    const romalrc = r?.romalrc?.lyric as string | undefined;
+    if (tlyric || romalrc) {
+      return mergeLyrics(lrc, tlyric, romalrc);
+    }
+    return lrc;
   } catch (e) {
     console.warn('[netease] 歌词获取失败', songId, e);
     return null;
   }
+}
+
+// 合并原文、翻译、罗马音歌词：按时间戳匹配，在原文行后插入翻译和罗马音
+function mergeLyrics(lrc: string, tlyric?: string, romalrc?: string): string {
+  const parseTime = (line: string): [number, string] | null => {
+    const m = line.match(/^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)$/);
+    if (!m) return null;
+    const sec = parseInt(m[1]) * 60 + parseInt(m[2]) + parseInt(m[3]) / (m[3].length === 2 ? 100 : 1000);
+    return [sec, m[4].trim()];
+  };
+  // 构建翻译和罗马音的时间映射
+  const tMap = new Map<number, string>();
+  const romaMap = new Map<number, string>();
+  if (tlyric) {
+    for (const line of tlyric.split('\n')) {
+      const parsed = parseTime(line);
+      if (parsed && parsed[1]) tMap.set(parsed[0], parsed[1]);
+    }
+  }
+  if (romalrc) {
+    for (const line of romalrc.split('\n')) {
+      const parsed = parseTime(line);
+      if (parsed && parsed[1]) romaMap.set(parsed[0], parsed[1]);
+    }
+  }
+  // 遍历原歌词，在每行后插入翻译和罗马音
+  const result: string[] = [];
+  for (const line of lrc.split('\n')) {
+    result.push(line);
+    const parsed = parseTime(line);
+    if (parsed) {
+      const [time, text] = parsed;
+      if (!text) continue; // 纯时间行不插入
+      // 查找时间最接近的翻译和罗马音（容差 0.5s）
+      let tFound = '', rFound = '';
+      for (const [t, v] of tMap) {
+        if (Math.abs(t - time) < 0.5) { tFound = v; break; }
+      }
+      for (const [t, v] of romaMap) {
+        if (Math.abs(t - time) < 0.5) { rFound = v; break; }
+      }
+      const origTime = line.match(/^\[[\d:.\]]+\]/)?.[0] || '';
+      if (tFound) result.push(`${origTime}${tFound}`);
+      if (rFound) result.push(`${origTime}${rFound}`);
+    }
+  }
+  return result.join('\n');
 }
 
 async function post(endpoint: string, data: Record<string, any>): Promise<any> {
