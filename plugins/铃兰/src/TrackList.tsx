@@ -48,8 +48,6 @@ interface TrackListProps {
   showAlbum?: boolean;
   favoriteIds?: Set<string>;
   onToggleFavorite?: (track: Track) => void;
-  onSetCover?: (track: Track) => void;
-  onResetCover?: (track: Track) => void;
   onRescanTrack?: (track: Track) => void;
   onEditTrack?: (track: Track, fields: { title?: string; artist?: string; album?: string; trackNumber?: number }) => void;
   // 下载单曲
@@ -80,8 +78,6 @@ export function TrackList({
   showAlbum = true,
   favoriteIds,
   onToggleFavorite,
-  onSetCover,
-  onResetCover,
   onRescanTrack,
   onEditTrack,
   onAttachMv,
@@ -478,18 +474,6 @@ export function TrackList({
             renderSubmenuTarget('copy'),
           ];
         })(),
-        onSetCover ? React.createElement('button', {
-          key: 'setCover',
-          onClick: () => { onSetCover(track); setOpenMenuIndex(null); },
-          className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
-          children: T('music.track.setCover'),
-        }) : null,
-        onResetCover ? React.createElement('button', {
-          key: 'resetCover',
-          onClick: () => { onResetCover(track); setOpenMenuIndex(null); },
-          className: 'w-full px-3 py-1.5 text-xs text-left text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors',
-          children: T('music.track.resetCover'),
-        }) : null,
         onRescanTrack ? React.createElement('button', {
           key: 'rescan',
           onClick: () => { onRescanTrack(track); setOpenMenuIndex(null); },
@@ -789,6 +773,7 @@ export function TrackList({
           className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 dark:bg-black/50 backdrop-blur-sm p-4"
           onClick={() => setEditingTrack(null)}
         >
+          <div className="flex items-start gap-4">
           <div
             className="w-full max-w-md rounded-xl bg-white dark:bg-stone-800 shadow-2xl p-6"
             onClick={(e) => e.stopPropagation()}
@@ -845,27 +830,6 @@ export function TrackList({
                 </div>
               </div>
             </div>
-            {/* 一键自动获取候选列表 */}
-            {candidates !== null && (
-              <div className="mb-4 border border-neutral-200 dark:border-stone-600 rounded-lg overflow-hidden max-h-48 overflow-y-auto">
-                <div className="flex items-center justify-between px-3 py-1.5 bg-neutral-50 dark:bg-stone-800 text-xs text-neutral-500 dark:text-stone-400 border-b border-neutral-200 dark:border-stone-700">
-                  <span>{T('music.metaAutoCandidates') || '候选结果'}</span>
-                  <button onClick={() => setCandidates(null)} className="text-neutral-400 hover:text-neutral-600 dark:text-stone-500 dark:hover:text-stone-300">×</button>
-                </div>
-                {candidates.map((c) => (
-                  <button
-                    key={c.key}
-                    onClick={() => applyCandidate(c)}
-                    className="w-full px-3 py-1.5 text-left text-xs text-neutral-700 dark:text-stone-200 hover:bg-[var(--element-muted)] transition-colors flex items-center justify-between gap-2 border-b border-neutral-100 dark:border-stone-700/50 last:border-b-0"
-                  >
-                    <span className="truncate">{c.title} — {c.artist || '未知歌手'}</span>
-                    <span className="text-[10px] text-neutral-400 dark:text-stone-500 flex-shrink-0">
-                      {c.album || ''} · {c.source}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
             <div className="space-y-4">
               <div>
                 <div className="flex items-center justify-between mb-1.5">
@@ -971,10 +935,48 @@ export function TrackList({
               </button>
             </div>
           </div>
+          {candidates !== null && (
+            <div
+              className="w-64 rounded-xl bg-white dark:bg-stone-800 shadow-2xl overflow-hidden flex flex-col max-h-[60vh]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between px-3 py-2 bg-neutral-50 dark:bg-stone-800 text-xs text-neutral-500 dark:text-stone-400 border-b border-neutral-200 dark:border-stone-700 flex-shrink-0">
+                <span>{T('music.metaAutoCandidates') || '候选结果'}</span>
+                <button onClick={() => setCandidates(null)} className="text-neutral-400 hover:text-neutral-600 dark:text-stone-500 dark:hover:text-stone-300">×</button>
+              </div>
+              <div className="p-3 overflow-y-auto grid grid-cols-2 gap-2">
+                {candidates.map((c) => (
+                  <button
+                    key={c.key}
+                    onClick={() => applyCandidate(c)}
+                    title={`${c.title} — ${c.artist || ''}${c.album ? '\n' + c.album : ''}`}
+                    className="flex flex-col rounded-lg border border-neutral-200 dark:border-stone-600 overflow-hidden text-left hover:bg-neutral-100 dark:hover:bg-stone-700 hover:border-[var(--element-muted)] transition-colors"
+                  >
+                    <div className="aspect-square w-full bg-neutral-100 dark:bg-stone-700 flex items-center justify-center overflow-hidden">
+                      {c.coverUrl ? (
+                        <img
+                          src={/^https?:\/\//i.test(c.coverUrl) ? c.coverUrl : hostApi.convertFileSrc(c.coverUrl)}
+                          alt=""
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <MusicIcon size={28} />
+                      )}
+                    </div>
+                    <div className="px-2 py-1.5">
+                      <div className="text-[11px] font-medium text-neutral-800 dark:text-stone-100 truncate">{c.title}</div>
+                      <div className="text-[10px] text-neutral-400 dark:text-stone-500 truncate mt-0.5">
+                        {c.artist || '未知歌手'} · {c.source}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
         </div>
       )}
-
-      {/* 歌词编辑器弹窗 */}
       {lyricsTrack && (
         <div
           className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 dark:bg-black/60 backdrop-blur-sm p-4"
@@ -1002,6 +1004,23 @@ export function TrackList({
                 : lyricsSource === 'embedded'
                   ? T('music.track.lyricsSourceEmbedded')
                   : T('music.track.lyricsSourceNone')}
+            </div>
+            {/* 歌词工具栏：自动获取 / AI 翻译（暂为占位） */}
+            <div className="px-5 pb-3 flex items-center gap-2">
+              <button
+                onClick={() => {}}
+                title={T('music.lyrics.autoFetchDevHint') || '自动检索歌词，开发中'}
+                className="px-3 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
+              >
+                {T('music.lyrics.autoFetch') || '自动获取'}
+              </button>
+              <button
+                onClick={() => {}}
+                title={T('music.lyrics.aiTranslateDevHint') || 'AI 翻译歌词（支持架空语），开发中'}
+                className="px-3 py-1 text-xs rounded-lg bg-neutral-100 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors"
+              >
+                {T('music.lyrics.aiTranslate') || 'AI 翻译'}
+              </button>
             </div>
 
             <div className="flex-1 p-4 overflow-hidden">

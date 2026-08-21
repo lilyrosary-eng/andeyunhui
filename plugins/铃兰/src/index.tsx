@@ -281,33 +281,6 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-// 手动设封面：选图片文件 → base64 → music_set_cover，更新内存 + override map
-async function setCoverForTrack(track: Track, overrides: Map<string, string>): Promise<Map<string, string>> {
-  const fp = track.filePath || track.id;
-  if (!fp) return overrides;
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*';
-  input.style.position = 'fixed';
-  input.style.opacity = '0';
-  input.style.pointerEvents = 'none';
-  input.style.zIndex = '-1';
-  document.body.appendChild(input);
-  const picked = await new Promise<File | null>((resolve) => {
-    input.onchange = () => resolve(input.files && input.files[0] ? input.files[0] : null);
-    input.oncancel = () => resolve(null);
-    input.click();
-  });
-  input.remove();
-  if (!picked) return overrides;
-  const b64 = await fileToBase64(picked);
-  const mime = picked.type || 'image/jpeg';
-  const coverPath = await hostApi.invoke<string>('music_set_cover', { filePath: fp, dataBase64: b64, mime });
-  const next = new Map(overrides);
-  next.set(fp, coverPath);
-  return next;
-}
-
 // 重扫单文件元数据（忽略手动封面），返回重抽后的 track（封面不含 override）
 async function rescanTrackMetadata(track: Track): Promise<Track | null> {
   const fp = track.filePath || track.id;
@@ -1633,15 +1606,6 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
     });
   }, [coverOverrides, mvPathMap]);
 
-  // 手动设封面：更新 override map + 内存所有同 file_path 曲目封面
-  const handleSetCover = useCallback(async (track: Track) => {
-    const next = await setCoverForTrack(track, coverOverrides);
-    setCoverOverrides(next);
-    setPlaylists(prev => applyCoverOverrides(prev, next));
-    // 同步当前选中歌单（UI 直接渲染 selectedPlaylist.tracks，若不更新则封面不刷新）
-    setSelectedPlaylist(prev => (prev ? applyCoverOverrides([prev], next)[0] : prev));
-  }, [coverOverrides]);
-
   // 重置封面：删除手动覆盖，回退到音频内嵌封面
   const handleResetCover = useCallback(async (track: Track) => {
     const fp = track.filePath || track.id;
@@ -2553,8 +2517,6 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               showAlbum={showAlbum}
               favoriteIds={favorites}
               onToggleFavorite={toggleFavorite}
-              onSetCover={handleSetCover}
-              onResetCover={handleResetCover}
               onRescanTrack={handleRescanTrack}
               onEditTrack={handleEditTrack}
               onFetchMetaCandidates={handleFetchMetaCandidates}
