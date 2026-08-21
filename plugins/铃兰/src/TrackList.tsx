@@ -100,7 +100,7 @@ export function TrackList({
   // 选择模式下的「批量移动 / 批量复制」目标歌单选择浮层（move=批量移动，copy=批量复制，null=未展开）
   const [batchMenu, setBatchMenu] = useState<'move' | 'copy' | null>(null);
   // 菜单位置（position: fixed 定位，直接渲染在 overflow-y-auto 容器外部）
-  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; right?: number; left?: number } | null>(null);
   // 保存每个「...」按钮的 ref，用于定位
   const moreBtnRefs = useRef<Map<number, HTMLButtonElement | null>>(new Map());
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -211,6 +211,16 @@ export function TrackList({
     setActiveSubmenu(null);
       setBatchMenu(null);
   }, [openMenuIndex]);
+
+  // 右键行：复用同一份自定义菜单（改用鼠标位置左对齐定位，并抑制浏览器默认右键菜单）
+  const handleRowContextMenu = useCallback((index: number, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenuPos({ top: e.clientY, left: Math.min(e.clientX, window.innerWidth - 220) });
+    setOpenMenuIndex(index);
+    setActiveSubmenu(null);
+    setBatchMenu(null);
+  }, []);
 
   const handleMove = useCallback((track: Track, targetId: string) => {
     onMoveTrack?.(track, targetId);
@@ -422,7 +432,7 @@ export function TrackList({
       style: {
         position: 'fixed',
         top: menuPos!.top,
-        right: menuPos!.right,
+        ...('left' in menuPos! ? { left: menuPos!.left } : { right: menuPos!.right }),
         zIndex: 9999,
       },
       className: 'glass-panel rounded-lg overflow-visible min-w-[180px] py-1 shadow-lg',
@@ -646,6 +656,7 @@ export function TrackList({
               return React.createElement('div', {
                 key: track.id,
                 onClick: (e: React.MouseEvent) => handleTrackClick(track, index, e),
+                onContextMenu: (e: React.MouseEvent) => handleRowContextMenu(index, e),
                 className: `flex items-center gap-3 px-3 py-2 mx-1 cursor-pointer transition-colors rounded-lg relative ${
                   isCurrent
                     ? 'bg-[var(--element-muted)]'
@@ -937,22 +948,21 @@ export function TrackList({
           </div>
           {candidates !== null && (
             <div
-              className="w-64 rounded-xl bg-white dark:bg-stone-800 shadow-2xl overflow-hidden flex flex-col max-h-[60vh]"
+              className="w-80 rounded-xl bg-white dark:bg-stone-800 shadow-2xl overflow-hidden flex flex-col max-h-[70vh]"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between px-3 py-2 bg-neutral-50 dark:bg-stone-800 text-xs text-neutral-500 dark:text-stone-400 border-b border-neutral-200 dark:border-stone-700 flex-shrink-0">
                 <span>{T('music.metaAutoCandidates') || '候选结果'}</span>
                 <button onClick={() => setCandidates(null)} className="text-neutral-400 hover:text-neutral-600 dark:text-stone-500 dark:hover:text-stone-300">×</button>
               </div>
-              <div className="p-3 overflow-y-auto grid grid-cols-2 gap-2">
+              <div className="flex-1 overflow-y-auto p-2 space-y-2">
                 {candidates.map((c) => (
                   <button
                     key={c.key}
                     onClick={() => applyCandidate(c)}
-                    title={`${c.title} — ${c.artist || ''}${c.album ? '\n' + c.album : ''}`}
-                    className="flex flex-col rounded-lg border border-neutral-200 dark:border-stone-600 overflow-hidden text-left hover:bg-neutral-100 dark:hover:bg-stone-700 hover:border-[var(--element-muted)] transition-colors"
+                    className="w-full flex items-start gap-3 rounded-lg border border-neutral-200 dark:border-stone-600 p-2 text-left hover:bg-neutral-100 dark:hover:bg-stone-700 hover:border-[var(--element-muted)] transition-colors"
                   >
-                    <div className="aspect-square w-full bg-neutral-100 dark:bg-stone-700 flex items-center justify-center overflow-hidden">
+                    <div className="w-14 h-14 rounded-md bg-neutral-100 dark:bg-stone-700 flex items-center justify-center overflow-hidden flex-shrink-0">
                       {c.coverUrl ? (
                         <img
                           src={/^https?:\/\//i.test(c.coverUrl) ? c.coverUrl : hostApi.convertFileSrc(c.coverUrl)}
@@ -960,13 +970,19 @@ export function TrackList({
                           className="w-full h-full object-cover"
                         />
                       ) : (
-                        <MusicIcon size={28} />
+                        <MusicIcon size={24} />
                       )}
                     </div>
-                    <div className="px-2 py-1.5">
-                      <div className="text-[11px] font-medium text-neutral-800 dark:text-stone-100 truncate">{c.title}</div>
-                      <div className="text-[10px] text-neutral-400 dark:text-stone-500 truncate mt-0.5">
-                        {c.artist || '未知歌手'} · {c.source}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-medium text-neutral-800 dark:text-stone-100 break-words">{c.title}</div>
+                      <div className="text-[11px] text-neutral-500 dark:text-stone-400 break-words mt-0.5">
+                        {c.artist || '未知歌手'}{c.album ? ` · ${c.album}` : ''}
+                      </div>
+                      <div className="text-[10px] text-neutral-400 dark:text-stone-500 mt-1 flex items-center gap-1.5">
+                        <span className="px-1 py-0.5 rounded bg-neutral-100 dark:bg-stone-700">{c.source}</span>
+                        {c.durationSecs
+                          ? <span>{Math.floor(c.durationSecs / 60)}:{String(c.durationSecs % 60).padStart(2, '0')}</span>
+                          : null}
                       </div>
                     </div>
                   </button>
