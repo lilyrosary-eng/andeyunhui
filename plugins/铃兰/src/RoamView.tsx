@@ -208,7 +208,7 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     return () => window.removeEventListener('roam-bar-position-changed', handler);
   }, []);
 
-  // EQ 动画 — 真实律动：使用 AnalyserNode 的频域数据，降级到伪律动
+  // EQ 动画 — 真实律动：使用 WASAPI Loopback 频域数据，降级到伪律动
   useEffect(() => {
     const freqData = new Uint8Array(64);
     const animate = () => {
@@ -222,7 +222,10 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
             // 对数映射，让低频在中间，高频在两端（更自然）
             const ratio = i / EQ_BARS;
             const dataIdx = Math.floor(Math.pow(ratio, 1.5) * (bins - 1));
-            const v = freqData[dataIdx] / 255;
+            let v = freqData[dataIdx] / 255;
+            // 易驱性增强：非线性增益（平方根拉伸低幅度 + 1.8x 增益 + 偏移）
+            v = Math.sqrt(v) * 1.8 + 0.03;
+            v = Math.min(1, v);
             next[i] = 5 + v * 92;
           }
           return next;
@@ -495,6 +498,19 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
   const pos = progress.current || 0;
   const pct = dur > 0 ? (pos / dur) * 100 : 0;
 
+  // 自适应缩放因子：基于视口宽度动态计算，小窗口 1.0，大窗口线性增长至上限 1.8
+  // 用于让标题、按钮、间距等元素在窗口放大时自然摊开
+  const [scaleFactor, setScaleFactor] = useState(1);
+  useEffect(() => {
+    const updateScale = () => {
+      const w = window.innerWidth;
+      setScaleFactor(Math.min(1.8, 1 + Math.max(0, (w - 900) / 1000)));
+    };
+    updateScale();
+    window.addEventListener('resize', updateScale);
+    return () => window.removeEventListener('resize', updateScale);
+  }, []);
+
   // 颜色 token
   const ink = isDark ? 'rgba(255,255,255,0.93)' : (curPreset ? curPreset.inkColor : 'rgba(255,255,255,0.96)');
   const inkSoft = isDark ? 'rgba(255,255,255,0.62)' : (curPreset ? curPreset.inkSoftColor : 'rgba(255,255,255,0.80)');
@@ -540,7 +556,7 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     .roam-stage.transitioning .roam-left, .roam-stage.transitioning .roam-left-cover, .roam-stage.transitioning .roam-right-cover, .roam-stage.transitioning .roam-lyrics, .roam-stage.transitioning .roam-fireflies { opacity: 0; }
     .roam-transition-overlay { position: absolute; inset: 0; z-index: 6; pointer-events: none; opacity: 0; background-color: var(--fog); backdrop-filter: blur(15px) saturate(150%); -webkit-backdrop-filter: blur(15px) saturate(150%); transition: opacity 0.45s ease; }
     .roam-stage.transitioning .roam-transition-overlay { opacity: 1; }
-    .roam-vinyl-wrap { position: absolute; left: 22%; top: 50%; transform: translate(-50%, -50%); width: clamp(90px, 13vw, 160px); aspect-ratio: 1; z-index: 7; transition: left 0.7s cubic-bezier(.22,.61,.36,1); }
+    .roam-vinyl-wrap { position: absolute; left: 22%; top: 50%; transform: translate(-50%, -50%); width: clamp(90px, ${13 * scaleFactor}vw, ${Math.round(160 * scaleFactor)}px); aspect-ratio: 1; z-index: 7; transition: left 0.7s cubic-bezier(.22,.61,.36,1); }
     .roam-stage.flipped .roam-vinyl-wrap { left: 78%; }
     .roam-vinyl { width: 100%; height: 100%; border-radius: 50%; position: relative; overflow: hidden; box-shadow: 0 30px 60px -20px rgba(40,60,30,0.5), 0 0 0 1px rgba(255,255,255,0.65), inset 0 0 26px rgba(255,255,255,0.55), inset 0 0 0 7px rgba(255,255,255,0.18); }
     .roam-vinyl.spinning { animation: roam-spin 28s linear infinite; }
@@ -622,25 +638,25 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
             <div className="roam-left">
               {/* 标题区 */}
               <div className="flex flex-col gap-1" style={{ paddingLeft: 'clamp(12px, 2%, 22px)' }}>
-                <div className="flex items-center gap-2 mb-2" style={{ fontFamily: 'ui-monospace, monospace', fontSize: '9px', letterSpacing: '0.4em', textTransform: 'uppercase', color: inkSoft }}>
-                  <span style={{ width: 24, height: 1, background: inkLine }} /> A roam playlist
+                <div className="flex items-center gap-2 mb-2" style={{ fontFamily: 'ui-monospace, monospace', fontSize: `${9 * scaleFactor}px`, letterSpacing: '0.4em', textTransform: 'uppercase', color: inkSoft }}>
+                  <span style={{ width: 24 * scaleFactor, height: 1, background: inkLine }} /> A roam playlist
                 </div>
-                <h1 className="font-black leading-none" style={{ fontSize: 'clamp(26px, 4vw, 56px)', letterSpacing: '-0.02em', color: ink, textShadow: glow, wordBreak: 'break-word' }}>
+                <h1 className="font-black leading-none" style={{ fontSize: `clamp(26px, ${4 * scaleFactor}vw, ${Math.round(56 * scaleFactor)}px)`, letterSpacing: '-0.02em', color: ink, textShadow: glow, wordBreak: 'break-word' }}>
                   {displayTitle.slice(0, 24)}
                 </h1>
-                <h2 className="mt-2" style={{ fontSize: 'clamp(11px, 1vw, 16px)', letterSpacing: '0.15em', textTransform: 'uppercase', color: ink, fontWeight: 400 }}>
+                <h2 className="mt-2" style={{ fontSize: `clamp(11px, ${1 * scaleFactor}vw, ${Math.round(16 * scaleFactor)}px)`, letterSpacing: '0.15em', textTransform: 'uppercase', color: ink, fontWeight: 400 }}>
                   {displayArtist.slice(0, 36)}
                 </h2>
                 {displayAlbum && (
-                  <p className="mt-2" style={{ fontSize: '10px', lineHeight: 1.6, maxWidth: 200, color: inkSoft, borderLeft: `1px solid ${inkLine}`, paddingLeft: 10 }}>{displayAlbum}</p>
+                  <p className="mt-2" style={{ fontSize: `${10 * scaleFactor}px`, lineHeight: 1.6, maxWidth: Math.round(200 * scaleFactor), color: inkSoft, borderLeft: `1px solid ${inkLine}`, paddingLeft: 10 }}>{displayAlbum}</p>
                 )}
               </div>
 
               {/* 遮罩区内播放栏（overlay 模式） */}
               {barPosition === 'overlay' && (
-                <div className="mt-auto flex flex-col items-center gap-2" style={{ width: '100%', maxWidth: 400, paddingTop: 'clamp(12px, 2%, 20px)' }}>
+                <div className="mt-auto flex flex-col items-center gap-2" style={{ width: '100%', maxWidth: Math.round(400 * scaleFactor), paddingTop: 'clamp(12px, 2%, 20px)' }}>
                   {/* EQ 均衡器 */}
-                  <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', height: 56, marginBottom: 4 }}>
+                  <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', height: 95, marginBottom: 4 }}>
                     {eqHeights.map((h, i) => (
                       <span key={i} style={{
                         flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h}%`,
@@ -650,10 +666,10 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                       }} />
                     ))}
                   </div>
-                  {/* 进度条 */}
+                  {/* 进度条 — 可点击区域向上拓展至2倍 */}
                   <div className="flex items-center gap-2 w-full" style={{ fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: ink }}>
                     <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28 }}>{formatTime(pos)}</span>
-                    <div className="flex-1 relative rounded-full cursor-pointer" style={{ height: 2, background: inkLine }}
+                    <div className="flex-1 relative rounded-full cursor-pointer" style={{ height: 2, background: inkLine, paddingTop: 14, paddingBottom: 14, marginTop: -14, marginBottom: -14 }}
                       onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); musicPlayer.seek(ratio * dur); }}>
                       <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
                       <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
@@ -661,19 +677,19 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                     <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{formatTime(dur)}</span>
                   </div>
                   {/* 控制按钮 */}
-                  <div className="flex items-center" style={{ gap: 'clamp(8px, 1.2vw, 18px)', color: ink }}>
+                  <div className="flex items-center" style={{ gap: `clamp(8px, ${1.2 * scaleFactor}vw, ${Math.round(18 * scaleFactor)}px)`, color: ink }}>
                     <button onClick={handlePrev} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="上一首">
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
+                      <svg width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
                     </button>
-                    <button onClick={() => musicPlayer.togglePlay()} className="rounded-full flex items-center justify-center transition-transform hover:scale-105" style={{ width: 'clamp(36px, 4vw, 48px)', height: 'clamp(36px, 4vw, 48px)', background: 'rgba(255,255,255,0.92)', color: '#2c5a1a', boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)', border: 'none', cursor: 'pointer', animation: nowPlaying.isPlaying ? 'roam-breathe 3.4s ease-in-out infinite' : 'none' }} title={nowPlaying.isPlaying ? '暂停' : '播放'}>
+                    <button onClick={() => musicPlayer.togglePlay()} className="rounded-full flex items-center justify-center transition-transform hover:scale-105" style={{ width: `clamp(36px, ${4 * scaleFactor}vw, ${Math.round(48 * scaleFactor)}px)`, height: `clamp(36px, ${4 * scaleFactor}vw, ${Math.round(48 * scaleFactor)}px)`, background: 'rgba(255,255,255,0.92)', color: '#2c5a1a', boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)', border: 'none', cursor: 'pointer', animation: nowPlaying.isPlaying ? 'roam-breathe 3.4s ease-in-out infinite' : 'none' }} title={nowPlaying.isPlaying ? '暂停' : '播放'}>
                       {nowPlaying.isPlaying ? (
-                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                        <svg viewBox="0 0 24 24" width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
                       ) : (
-                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                        <svg viewBox="0 0 24 24" width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                       )}
                     </button>
                     <button onClick={handleNext} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="下一首">
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
+                      <svg width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
                     </button>
                   </div>
                 </div>
@@ -707,12 +723,12 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                 transition: 'right 0.7s cubic-bezier(.22,.61,.36,1), left 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease',
               }}
             >
-              <p style={{ fontWeight: 500, fontSize: 'clamp(13px, 1.4vw, 20px)', letterSpacing: '0.12em', color: ink, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
+              <p style={{ fontWeight: 500, fontSize: `clamp(13px, ${1.4 * scaleFactor}vw, ${Math.round(20 * scaleFactor)}px)`, letterSpacing: '0.12em', color: ink, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
                 {[...lyricLine1].slice(0, 20).map((ch, i) => (
                   <span key={i} className="inline-block" style={{ animation: `roam-charGlow 3.6s ease-in-out ${(i * 0.14).toFixed(2)}s infinite` }}>{ch}</span>
                 ))}
               </p>
-              <p style={{ fontWeight: 300, fontSize: 'clamp(10px, 0.9vw, 13px)', letterSpacing: '0.08em', color: inkSoft, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
+              <p style={{ fontWeight: 300, fontSize: `clamp(10px, ${0.9 * scaleFactor}vw, ${Math.round(13 * scaleFactor)}px)`, letterSpacing: '0.08em', color: inkSoft, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
                 {lyricLine2}
               </p>
             </div>
@@ -742,7 +758,7 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
               opacity: transitioning ? 0 : 1,
             }}>
               {/* EQ 均衡器 */}
-              <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', maxWidth: 500, height: 56 }}>
+              <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', maxWidth: 500, height: 95 }}>
                 {eqHeights.map((h, i) => (
                   <span key={i} style={{
                     flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h}%`,
@@ -753,10 +769,10 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                 ))}
               </div>
 
-              {/* 进度条 */}
+              {/* 进度条 — 可点击区域向上拓展至2倍 */}
               <div className="flex items-center gap-2 w-full" style={{ maxWidth: 500, fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: ink }}>
                 <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28 }}>{formatTime(pos)}</span>
-                <div className="flex-1 relative rounded-full cursor-pointer" style={{ height: 2, background: inkLine }}
+                <div className="flex-1 relative rounded-full cursor-pointer" style={{ height: 2, background: inkLine, paddingTop: 14, paddingBottom: 14, marginTop: -14, marginBottom: -14 }}
                   onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); musicPlayer.seek(ratio * dur); }}>
                   <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
                   <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
@@ -765,15 +781,15 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
               </div>
 
               {/* 控制按钮 */}
-              <div className="flex items-center" style={{ gap: 'clamp(10px, 1.5vw, 20px)', color: ink }}>
+              <div className="flex items-center" style={{ gap: `clamp(10px, ${1.5 * scaleFactor}vw, ${Math.round(20 * scaleFactor)}px)`, color: ink }}>
                 <button onClick={handlePrev} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="上一首">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
+                  <svg width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
                 </button>
                 <button
                   onClick={() => musicPlayer.togglePlay()}
                   className="rounded-full flex items-center justify-center transition-transform hover:scale-105"
                   style={{
-                    width: 'clamp(36px, 4vw, 48px)', height: 'clamp(36px, 4vw, 48px)',
+                    width: `clamp(36px, ${4 * scaleFactor}vw, ${Math.round(48 * scaleFactor)}px)`, height: `clamp(36px, ${4 * scaleFactor}vw, ${Math.round(48 * scaleFactor)}px)`,
                     background: 'rgba(255,255,255,0.92)', color: '#2c5a1a',
                     boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)',
                     border: 'none', cursor: 'pointer',
@@ -782,13 +798,13 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                   title={nowPlaying.isPlaying ? '暂停' : '播放'}
                 >
                   {nowPlaying.isPlaying ? (
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                    <svg viewBox="0 0 24 24" width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
                   ) : (
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    <svg viewBox="0 0 24 24" width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                   )}
                 </button>
                 <button onClick={handleNext} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="下一首">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
+                  <svg width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
                 </button>
               </div>
             </div>
