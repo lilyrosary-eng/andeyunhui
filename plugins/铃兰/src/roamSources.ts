@@ -8,7 +8,7 @@
 // 统一 track 类型为 RoamSeedTrack，各平台在内部完成映射。
 
 import type { RoamSeedTrack, RoamSource } from './RoamSidebar';
-import { parseLrc, mergeLyricFields, type LyricLine } from './lyricsSync';
+import { parseLrc, mergeLyricFields, splitInlineTranslation, type LyricLine } from './lyricsSync';
 
 // ---- 网易云 ----
 import {
@@ -255,7 +255,19 @@ const linglanApi: RoamSourceApi = {
     if (!fp || !api?.invoke) return null;
     try {
       const res = await api.invoke<{ text: string; source: string }>('get_lyrics_text', { trackPath: fp });
-      return res?.text ? parseLrc(res.text) : null;
+      if (!res?.text) return null;
+      const lines = parseLrc(res.text);
+      // 内嵌歌词常把「外语原文 + 中文翻译」写在同一行，拆出翻译挂到 translation
+      if (lines.length) {
+        for (const ln of lines) {
+          const sp = splitInlineTranslation(ln.text);
+          if (sp.translation && sp.orig !== ln.text) {
+            ln.text = sp.orig;
+            ln.translation = sp.translation;
+          }
+        }
+      }
+      return lines;
     } catch { return null; }
   },
 };

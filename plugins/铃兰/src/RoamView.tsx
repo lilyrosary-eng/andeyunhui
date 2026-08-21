@@ -552,6 +552,42 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
   const artistFontPx = Math.max(8, Math.min(Math.round(16 * scaleFactor), Math.round((window.innerWidth * 0.42) / Math.max(displayArtist.length, 1) * 1.8)));
   // 专辑：最大 12px，最低 7px
   const albumFontPx = Math.max(7, Math.min(Math.round(12 * scaleFactor), Math.round((window.innerWidth * 0.42) / Math.max(displayAlbum.length, 1) * 1.8)));
+
+  // ---- 遮罩区文本自适应（限宽内自动缩小字号）----
+  // 上面按字符数估算出的字号是第一档，这里再按「真实渲染宽度」测量校正：
+  // 若实际超出容器宽度，则按超出的比例等比例缩小到刚好放得下（不低于下限），确保不换行、不被截断。
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const artistRef = useRef<HTMLHeadingElement>(null);
+  const albumRef = useRef<HTMLParagraphElement>(null);
+  const [titleFitPx, setTitleFitPx] = useState<number | null>(null);
+  const [artistFitPx, setArtistFitPx] = useState<number | null>(null);
+  const [albumFitPx, setAlbumFitPx] = useState<number | null>(null);
+  useEffect(() => {
+    const targets: Array<{ el: HTMLElement | null; max: number; floor: number; apply: (n: number) => void }> = [
+      { el: titleRef.current, max: titleFontPx, floor: 11, apply: setTitleFitPx },
+      { el: artistRef.current, max: artistFontPx, floor: 8, apply: setArtistFitPx },
+      { el: albumRef.current, max: albumFontPx, floor: 7, apply: setAlbumFitPx },
+    ];
+    for (const t of targets) {
+      const el = t.el;
+      if (!el) continue;
+      const cs = window.getComputedStyle(el);
+      // 左右内边距不随字号缩放，计算时从可用宽与内容宽中扣除，保证比例精确
+      const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+      const availW = el.clientWidth - padX; // 可用于文本的宽度
+      if (availW <= 0) { t.apply(t.max); continue; }
+      el.style.fontSize = `${t.max}px`; // 先以期望上限测量真实内容宽度
+      const contentW = el.scrollWidth - padX;
+      if (contentW > availW) {
+        // 超出则按比例缩小（下限保护），写回 style 避免闪烁，并同步 state 以驱动最终渲染
+        const fit = Math.max(t.floor, Math.round(contentW ? t.max * availW / contentW : t.max));
+        el.style.fontSize = `${fit}px`;
+        t.apply(fit);
+      } else {
+        t.apply(t.max);
+      }
+    }
+  }, [displayTitle, displayArtist, displayAlbum, titleFontPx, artistFontPx, albumFontPx]);
   const vinylBg = themeMode === 'preset' && curPreset
     ? curPreset.coverGradient
     : (curCover ? `url(${curCover}) center/cover` : isDark ? 'radial-gradient(circle at 38% 32%, #2a3a22, #0a1209)' : 'radial-gradient(circle at 38% 32%, #ffffff, #cad9ad)');
@@ -661,25 +697,25 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
                 <div className="flex items-center gap-2 mb-2" style={{ fontFamily: 'ui-monospace, monospace', fontSize: `${9 * scaleFactor}px`, letterSpacing: '0.4em', textTransform: 'uppercase', color: inkSoft }}>
                   <span style={{ width: 24 * scaleFactor, height: 1, background: inkLine }} /> A roam playlist
                 </div>
-                {/* 标题：字号根据文字长度动态缩小，保证完全显示 */}
-                <h1 className="font-black leading-none" style={{
-                  fontSize: `${titleFontPx}px`,
+                {/* 标题：字号先按字数估算，再按真实宽度测量微调，保证完全显示 */}
+                <h1 ref={titleRef} className="font-black leading-none" style={{
+                  fontSize: `${titleFitPx ?? titleFontPx}px`,
                   letterSpacing: '-0.02em', color: ink, textShadow: glow,
                   whiteSpace: 'nowrap',
                 }}>
                   {displayTitle}
                 </h1>
                 {/* 歌手：同上自适应 */}
-                <h2 className="mt-2" style={{
-                  fontSize: `${artistFontPx}px`,
+                <h2 ref={artistRef} className="mt-2" style={{
+                  fontSize: `${artistFitPx ?? artistFontPx}px`,
                   letterSpacing: '0.15em', textTransform: 'uppercase', color: ink, fontWeight: 400,
                   whiteSpace: 'nowrap',
                 }}>
                   {displayArtist}
                 </h2>
                 {displayAlbum && (
-                  <p className="mt-2" style={{
-                    fontSize: `${albumFontPx}px`, lineHeight: 1.6, color: inkSoft,
+                  <p ref={albumRef} className="mt-2" style={{
+                    fontSize: `${albumFitPx ?? albumFontPx}px`, lineHeight: 1.6, color: inkSoft,
                     borderLeft: `1px solid ${inkLine}`, paddingLeft: 10,
                     whiteSpace: 'nowrap',
                   }}>{displayAlbum}</p>
