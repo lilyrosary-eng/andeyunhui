@@ -57,7 +57,9 @@ function Music2Icon() {
 
 // ============ 通用数据类型 ============
 export interface SidebarLikedPlaylist {
-  id: string | number;
+  // id 允许 null：网易云「我喜欢的音乐」始终渲染，歌单 id 尚未就绪时仍占位，
+  // 点击交给 onSelectLiked 内部兜底（此时 active 判定与母本一致：null===null 视为激活）。
+  id: string | number | null;
   count?: number | null;
 }
 export interface SidebarUserPlaylist {
@@ -94,13 +96,17 @@ function SidebarLikedSection({
 }
 
 // ============ 块3：用户收藏歌单（含右键播放） ============
+// showCover=false 时隐藏封面/占位图标（网易云用户歌单用纯文字行，对齐母本布局）。
+// tempActive 指当前激活的是临时播放列表：此时用户歌单不应高亮（与 liked 判定一致）。
 function SidebarUserSection({
-  playlists, activeId, onSelect, emptyText = '暂无收藏歌单',
+  playlists, activeId, onSelect, emptyText = '暂无收藏歌单', showCover = true, tempActive = false,
 }: {
   playlists: SidebarUserPlaylist[];
   activeId?: string | number | null;
   onSelect?: (pl: SidebarUserPlaylist) => void;
   emptyText?: string;
+  showCover?: boolean;
+  tempActive?: boolean;
 }) {
   const [expanded, setExpanded] = useState(true);
   return React.createElement('div', { key: 'user', className: 'space-y-1' },
@@ -115,16 +121,18 @@ function SidebarUserSection({
     expanded && (
       playlists.length > 0
         ? playlists.map(pl => {
-            const isActive = activeId === pl.id;
-            const coverNode = pl.cover
-              ? React.createElement('img', {
-                  key: `cv-${pl.id}`,
-                  src: pl.cover,
-                  alt: '',
-                  className: 'w-9 h-9 rounded-lg object-cover flex-shrink-0',
-                  loading: 'lazy',
-                })
-              : React.createElement(Music2Icon, { key: `cv-${pl.id}` });
+            const isActive = !tempActive && activeId === pl.id;
+            const coverNode = showCover
+              ? (pl.cover
+                  ? React.createElement('img', {
+                      key: `cv-${pl.id}`,
+                      src: pl.cover,
+                      alt: '',
+                      className: 'w-9 h-9 rounded-lg object-cover flex-shrink-0',
+                      loading: 'lazy',
+                    })
+                  : React.createElement(Music2Icon, { key: `cv-${pl.id}` }))
+              : null;
             const item = React.createElement('button', {
               key: pl.id,
               onClick: () => onSelect?.(pl),
@@ -201,6 +209,10 @@ export interface OnlineMusicSidebarProps {
   userPlaylists?: SidebarUserPlaylist[];
   activePlaylistId?: string | number | null;
   onSelectUserPlaylist?: (pl: SidebarUserPlaylist) => void;
+  /** 独立处理「我喜欢的音乐」点击；缺省时回落 to onSelectUserPlaylist(合成 liked) */
+  onSelectLiked?: () => void;
+  /** 用户歌单行是否显示封面/占位图（网易云传 false 用纯文字行） */
+  showUserCover?: boolean;
   userEmptyText?: string;
   ranks?: SidebarUserPlaylist[];
   activeRankId?: string | number | null;
@@ -226,6 +238,8 @@ export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
     userPlaylists = [],
     activePlaylistId,
     onSelectUserPlaylist,
+    onSelectLiked,
+    showUserCover = true,
     userEmptyText,
     ranks = [],
     activeRankId,
@@ -253,7 +267,11 @@ export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
       key: 'liked-sec',
       liked: likedPlaylist,
       active: likedActive,
-      onSelect: () => { if (likedPlaylist && onSelectUserPlaylist) onSelectUserPlaylist({ id: likedPlaylist.id, name: '我喜欢的音乐', trackCount: likedPlaylist.count }); },
+      onSelect: () => {
+        if (onSelectLiked) { onSelectLiked(); return; }
+        // 无独立 onSelectLiked 时合成 liked 回落：id 为 null 时无可合成歌单，忽略
+        if (likedPlaylist && likedPlaylist.id != null && onSelectUserPlaylist) onSelectUserPlaylist({ id: likedPlaylist.id, name: '我喜欢的音乐', trackCount: likedPlaylist.count });
+      },
     }),
     React.createElement(SidebarTempSection, {
       key: 'temp-sec',
@@ -267,6 +285,8 @@ export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
       activeId: activePlaylistId,
       onSelect: onSelectUserPlaylist,
       emptyText: userEmptyText,
+      showCover: showUserCover,
+      tempActive: activeTempId != null,
     }),
     ranks.length > 0 && onSelectRank
       ? React.createElement(SidebarRanksSection, {

@@ -1,7 +1,7 @@
 import React from "react";
-import { OnlineSidebarShell, SidebarTempSection, type TempPlaylistItem } from './OnlineSidebarShell';
 import type { NeteasePlaylistItem } from './neteaseApi';
 import type { TempPlaylist } from './NeteaseView';
+import OnlineMusicSidebar, { type SidebarLikedPlaylist, type SidebarUserPlaylist } from './_shared/OnlineMusicSidebar';
 
 export interface NeteaseTempItem {
   id: string;
@@ -9,7 +9,7 @@ export interface NeteaseTempItem {
   payload: TempPlaylist;
 }
 
-function toTempItem(temp: NeteaseTempItem): TempPlaylistItem {
+function toTempItem(temp: NeteaseTempItem) {
   return {
     id: temp.id,
     name: temp.name,
@@ -17,43 +17,8 @@ function toTempItem(temp: NeteaseTempItem): TempPlaylistItem {
   };
 }
 
-const { useState } = React;
-const {
-  ContextMenu,
-  ContextMenuTrigger,
-  ContextMenuContent,
-  ContextMenuItem,
-} = window.__HOST_UI__ || {};
-
-function HeartIcon() {
-  return React.createElement('svg', {
-    width: 16, height: 16, viewBox: '0 0 24 24', fill: 'currentColor', stroke: 'none',
-  }, React.createElement('path', {
-    d: 'M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z',
-  }));
-}
-
-function ListIcon() {
-  return React.createElement('svg', {
-    width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
-  }, [
-    React.createElement('line', { key: '1', x1: '8', y1: '6', x2: '21', y2: '6' }),
-    React.createElement('line', { key: '2', x1: '8', y1: '12', x2: '21', y2: '12' }),
-    React.createElement('line', { key: '3', x1: '8', y1: '18', x2: '21', y2: '18' }),
-    React.createElement('line', { key: '4', x1: '3', y1: '6', x2: '3.01', y2: '6' }),
-    React.createElement('line', { key: '5', x1: '3', y1: '12', x2: '3.01', y2: '12' }),
-    React.createElement('line', { key: '6', x1: '3', y1: '18', x2: '3.01', y2: '18' }),
-  ]);
-}
-
-function Music2Icon() {
-  return React.createElement('svg', {
-    width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
-  }, [
-    React.createElement('path', { key: '1', d: 'M9 18V5l12-2v13' }),
-    React.createElement('circle', { key: '2', cx: '6', cy: '18', r: '3' }),
-    React.createElement('circle', { key: '3', cx: '18', cy: '16', r: '3' }),
-  ]);
+function toUserPlaylist(p: NeteasePlaylistItem): SidebarUserPlaylist {
+  return { id: p.id, name: p.name, trackCount: p.trackCount ?? 0, cover: p.coverImgUrl || null };
 }
 
 export interface NeteaseSidebarProps {
@@ -93,94 +58,35 @@ export default function NeteaseSidebar({
   searchQuery,
   onSearchChange,
 }: NeteaseSidebarProps) {
-  const [userExpanded, setUserExpanded] = useState(true);
+  // 「我喜欢的音乐」在网易云侧栏始终展示（即使歌单 id 尚未就绪/为 null，点击仍触发
+  // onSelectLiked 由其内部兜底）。id 为 null 时 count 用 0，active 判定与母本一致
+  // （activePlaylistId === id && 非临时态），故 favorite 块不因 id 缺失而消失。
+  const likedPlaylist: SidebarLikedPlaylist = { id: likedPlaylistId ?? null, count: likedPlaylistCount ?? 0 };
 
-  const renderLiked = () => {
-    const isActive = activePlaylistId === likedPlaylistId && activeTempId == null;
-    return React.createElement('button', {
-      key: 'liked',
-      onClick: onSelectLiked,
-      className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm ${
-        isActive
-          ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
-          : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
-      }`,
-    }, [
-      React.createElement('div', { key: 'name', className: 'font-medium truncate' }, '我喜欢的音乐'),
-      likedPlaylistCount != null ? React.createElement('div', { key: 'count', className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${likedPlaylistCount} 首`) : null,
-    ]);
-  };
-
-  const renderUserSection = () => {
-    const hasItems = userPlaylists.length > 0;
-    return React.createElement('div', { key: 'user', className: 'space-y-1' },
-      React.createElement('button', {
-        key: 'header',
-        onClick: () => setUserExpanded(v => !v),
-        className: 'w-full flex items-center justify-between px-1 py-1 text-xs text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300 transition-colors',
-      }, [
-        React.createElement('span', { key: 't' }, '用户自己的收藏歌单'),
-        React.createElement('span', { key: 'c' }, userExpanded ? '−' : '+'),
-      ]),
-      userExpanded && (
-        hasItems
-          ? userPlaylists.map(playlist => {
-              const isActive = activePlaylistId === playlist.id && activeTempId == null;
-              const item = React.createElement('button', {
-                key: playlist.id,
-                onClick: () => onSelectUserPlaylist(playlist),
-                className: `w-full text-left px-3 py-2 rounded-xl transition-colors text-sm ${
-                  isActive
-                    ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100'
-                    : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
-                }`,
-              }, [
-                React.createElement('div', { key: `name-${playlist.id}`, className: 'font-medium truncate' }, playlist.name),
-                React.createElement('div', { key: `count-${playlist.id}`, className: 'text-xs text-neutral-400 dark:text-stone-500 truncate mt-0.5' }, `${playlist.trackCount ?? 0} 首`),
-              ]);
-              if (!ContextMenu || !ContextMenuTrigger || !ContextMenuContent || !ContextMenuItem) return item;
-              return React.createElement(ContextMenu, { key: playlist.id },
-                React.createElement(ContextMenuTrigger, { className: 'w-full' }, item),
-                React.createElement(ContextMenuContent, null,
-                  React.createElement(ContextMenuItem, { onClick: () => onSelectUserPlaylist(playlist) }, '播放')
-                )
-              );
-            })
-          : React.createElement('div', { key: 'empty', className: 'px-3 py-2 text-xs text-neutral-400 dark:text-stone-500' }, '暂无收藏歌单')
-      )
-    );
-  };
-
-  const titleEl = React.createElement('button', {
-    onClick: onCloseNetease,
-    className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
-    title: '返回本地音乐',
-  }, '铃兰');
-
-  const content = React.createElement('div', { className: 'space-y-4' },
-    renderLiked(),
-    React.createElement(SidebarTempSection, {
-      items: tempPlaylists.map(toTempItem),
-      activeId: activeTempId,
-      onSelect: (item) => {
-        const src = tempPlaylists.find(t => t.id === item.id);
-        if (src) onSelectTemp(src);
-      },
-    }),
-    renderUserSection()
-  );
-
-  return React.createElement(OnlineSidebarShell, {
-    icon: React.createElement(Music2Icon),
-    title: titleEl,
+  return React.createElement(OnlineMusicSidebar, {
+    brandLabel: '铃兰',
+    likedPlaylist,
+    temps: tempPlaylists.map(toTempItem),
+    activeTempId,
+    onSelectTemp: (item) => {
+      const src = tempPlaylists.find(t => t.id === item.id);
+      if (src) onSelectTemp(src);
+    },
+    userPlaylists: userPlaylists.map(toUserPlaylist),
+    activePlaylistId,
+    onSelectUserPlaylist: (pl) => {
+      const src = userPlaylists.find(p => p.id === pl.id);
+      if (src) onSelectUserPlaylist(src);
+    },
+    onSelectLiked,
+    showUserCover: false, // 网易云用户歌单为纯文字行，不显示封面/占位图（对齐母本布局）
     onClose: onCloseNetease,
     onOpenModuleSettings,
     onOpenStats,
     statsActive,
+    onSelectFolder,
     searchQuery,
     onSearchChange,
     searchPlaceholder: '搜索本地音乐',
-    primaryAction: onSelectFolder ? { label: '添加文件夹', onClick: onSelectFolder } : undefined,
-    children: content,
   });
 }
