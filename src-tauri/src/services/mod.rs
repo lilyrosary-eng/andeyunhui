@@ -32,6 +32,9 @@ pub mod companion_service;
 pub mod multimodal_service;
 pub mod rag_service;
 pub mod shell_service;
+// 安全判定权威来源（统一沙箱模块）：白名单/黑名单/交互拦截/非交互加固/根因路由/受保护路径。
+// 功能内聚，禁止在别处复制安全判定逻辑。
+pub mod sandbox_service;
 pub mod lsp_service;
 pub mod mcp_service;
 // IDE 内容搜索（gitignore 感知并行遍历 + 字面量匹配）：命令面板 `#` 模式 / agent grep 工具

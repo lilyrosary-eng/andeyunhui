@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, AiProfile};
 use crate::services::mcp_service;
 use crate::services::{git_service, lsp_service, rag_service};
+use crate::services::sandbox_service;
 use tauri::{AppHandle, Emitter};
 
 // ============ Agent 能力：工具注册表 + 原生 tool_calls 循环（阶段1） ============
@@ -523,40 +524,6 @@ fn is_under_path(target: &std::path::Path, root: &std::path::Path) -> bool {
     norm.starts_with(&r)
 }
 
-/// 受保护路径判定：VCS 目录、依赖目录、密钥/凭据/环境变量文件。
-/// 用于写/编辑/删除的「硬拦截」（读取不受限）。命名大小写不敏感（Windows 友好）。
-fn protected_path(p: &std::path::Path) -> bool {
-    for seg in p.components() {
-        if let std::path::Component::Normal(s) = seg {
-            let seg = s.to_string_lossy().to_lowercase();
-            if seg == ".git" || seg == ".svn" || seg == ".hg" || seg == "node_modules" {
-                return true;
-            }
-        }
-    }
-    let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-    const SECRETS: &[&str] = &[
-        ".env", "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa", "credentials",
-        "credentials.json", "credentials.jsonc", ".npmrc", ".pypirc", ".netrc",
-        "known_hosts", "authorized_keys", ".bash_history", ".zsh_history", ".gitconfig",
-        ".mcp_config.json", "mcp_config.json",
-    ];
-    SECRETS.contains(&name.as_str()) || name.starts_with(".env.")
-}
-
-/// 危险命令兜底黑名单：命中即拒绝（防御纵深；真正的护栏是任意命令限时+审批）。
-/// 仅拦截几乎不可能在 agent 里合法出现的破坏性/不可逆操作，避免误伤正常构建命令。
-fn command_is_dangerous(cmd: &str) -> bool {
-    let c = cmd.to_lowercase();
-    const DANGEROUS: &[&str] = &[
-        "format c:", "diskpart", "mkfs", "dd if=/dev/zero",
-        "shutdown", "reboot", "init 0", "init 6", "poweroff",
-        ":(){", "rm -rf / --no-preserve-root", "rm -rf ~/.config",
-        "del /s /q /", "rd /s /q /", "git push --force",
-    ];
-    DANGEROUS.iter().any(|p| c.contains(p))
-}
-
 /// 会话级「信任项目」集合：首次在某个项目根内执行写操作时弹窗确认，
 /// 通过后本会话内该项目内写文件免单次审批。
 static TRUSTED_PROJECTS: OnceLock<Mutex<std::collections::HashSet<std::path::PathBuf>>> = OnceLock::new();
@@ -849,7 +816,7 @@ impl AiTool for FileTool {
             }
             "write_file" => {
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if protected_path(&p) {
+                if sandbox_service::is_protected_path(&p) {
                     return Err(format!("拒绝写入受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));
                 }
                 let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
@@ -879,7 +846,7 @@ impl AiTool for FileTool {
                 if old_string.is_empty() {
                     return Err("edit 缺少 old_string 参数".to_string());
                 }
-                if protected_path(&p) {
+                if sandbox_service::is_protected_path(&p) {
                     return Err(format!("拒绝编辑受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));
                 }
                 // 写语义与 write_file 一致：项目根内直写、根外审批；首次需信任项目
@@ -925,7 +892,7 @@ impl AiTool for FileTool {
             }
             "delete" => {
                 let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
-                if protected_path(&p) {
+                if sandbox_service::is_protected_path(&p) {
                     return Err(format!("拒绝删除受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));
                 }
                 if under {
@@ -1049,7 +1016,7 @@ impl AiTool for CommandTool {
     async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         if command.is_empty() { return Err("run_command 缺少 command 参数".to_string()); }
-        if command_is_dangerous(&command) {
+        if sandbox_service::command_is_dangerous(&command) {
             return Err("该命令命中危险操作黑名单（格式化/磁盘/关机/不可逆删除等），已拒绝执行".to_string());
         }
         // timeout：可选超时秒数，默认 15，封顶 120，最小 1
