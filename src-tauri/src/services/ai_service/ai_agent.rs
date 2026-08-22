@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
+use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text};
 
 /// Agent 对话：原生 tool_calls + 循环。
@@ -269,7 +269,7 @@ async fn run_agent(
                     }
                 }
                 // 执行窗口：并行窗口 join_all 并发、独占窗口串行（长 1）。返回 Vec<(ok, detail)>，与模型顺序对齐。
-                let results: Vec<(bool, String)> = if win_end - win_start > 1 {
+                let results: Vec<(bool, ToolExecResult)> = if win_end - win_start > 1 {
                     futures_util::future::join_all((win_start..win_end).map(|p| {
                         // 在 async 块外提取自有数据与工具引用，避免捕获遍历变量/整体移动 Vec。
                         let fname = prepared[p].1.clone();
@@ -278,10 +278,10 @@ async fn run_agent(
                         let tc = &tool_ctx;
                         async move {
                             match tool {
-                                None => (false, format!("未知工具: {}", fname)),
+                                None => (false, ToolExecResult::plain(format!("未知工具: {}", fname))),
                                 Some(t) => match t.execute(&args, tc).await {
                                     Ok(r) => (true, r),
-                                    Err(e) => (false, e),
+                                    Err(e) => (false, ToolExecResult::plain(e)),
                                 },
                             }
                         }
@@ -291,10 +291,10 @@ async fn run_agent(
                     let p = win_start;
                     let args = prepared[p].3.clone();
                     let one = match prepared[p].2 {
-                        None => (false, format!("未知工具: {}", prepared[p].1)),
+                        None => (false, ToolExecResult::plain(format!("未知工具: {}", prepared[p].1))),
                         Some(idx) => match tools[idx].execute(&args, &tool_ctx).await {
                             Ok(r) => (true, r),
-                            Err(e) => (false, e),
+                            Err(e) => (false, ToolExecResult::plain(e)),
                         },
                     };
                     vec![one]
@@ -303,7 +303,8 @@ async fn run_agent(
                 for (k, p) in (win_start..win_end).enumerate() {
                     let cid = prepared[p].0.clone();
                     let fname = prepared[p].1.clone();
-                    let (ok, detail) = &results[k];
+                    let (ok, res) = &results[k];
+                    let detail = &res.text;
                     let _ = app.emit(
                         "ai-agent-step",
                         serde_json::json!({
@@ -312,6 +313,9 @@ async fn run_agent(
                             "name": fname,
                             "ok": ok,
                             "detail": detail,
+                            // 结构化呈现 meta（对齐 dsh presentResult → ToolResultView）：Grep/Glob 为 search 卡片，
+                            // 其余工具为 None。前端有专属卡片能力时按 meta 渲染，否则回退渲染 detail。
+                            "meta": res.meta.as_ref(),
                             // plan 工具执行后附带当前计划结构化快照，供前端渲染计划/待办面板
                             "plan": if fname == "plan" { plan_snapshot_json() } else { serde_json::Value::Null },
                         }),

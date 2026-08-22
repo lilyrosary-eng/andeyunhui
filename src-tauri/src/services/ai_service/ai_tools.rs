@@ -35,6 +35,26 @@ pub(crate) enum ToolConcurrency {
     Exclusive,
 }
 
+/// 工具执行结果：text 为给模型的纯文本视图（回填到 role:"tool" 消息）；
+/// meta 为可选的结构化呈现意图（对齐 dsh presentResult → ToolResultView，如 search/terminal/read/diff 卡片）。
+/// 前端在 ai-agent-step 事件里可用 meta 渲染专属卡片；能力不足时回退渲染 text。
+#[derive(Debug, Clone)]
+pub(crate) struct ToolExecResult {
+    pub(crate) text: String,
+    pub(crate) meta: Option<serde_json::Value>,
+}
+
+impl ToolExecResult {
+    /// 普通纯文本结果（无结构化卡片 meta）。
+    pub(crate) fn plain(text: String) -> Self {
+        Self { text, meta: None }
+    }
+    /// 纯文本 + 结构化呈现 meta。
+    pub(crate) fn with_meta(text: String, meta: serde_json::Value) -> Self {
+        Self { text, meta: Some(meta) }
+    }
+}
+
 /// 模型可调用的工具。
 /// execute 为异步实现：文件写给项目根外需等待用户授权、命令执行需限时，故在 async 中 await。
 /// 阻塞 IO（std::fs / 进程等待）内部用 spawn_blocking，避免卡住 Tokio 运行时。
@@ -50,7 +70,7 @@ pub(crate) trait AiTool: Send + Sync {
     }
     /// 执行工具；args 为模型传入的 JSON 对象，ctx 提供本轮上下文。
     /// 错误以 Err(text) 返回，仍作为 tool 结果回填给模型。
-    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String>;
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String>;
 }
 
 /// 当前本机时间工具：模型借此把「现在几点/今天日期」这类实时问题交给工具答，避免凭空编造。
@@ -70,8 +90,8 @@ impl AiTool for NowTool {
             }
         })
     }
-    async fn execute(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
-        Ok(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+    async fn execute(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolExecResult, String> {
+        Ok(ToolExecResult::plain(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()))
     }
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Parallel
@@ -101,7 +121,7 @@ impl AiTool for CalculatorTool {
             }
         })
     }
-    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolExecResult, String> {
         let expr = args
             .get("expression")
             .and_then(|v| v.as_str())
@@ -112,7 +132,7 @@ impl AiTool for CalculatorTool {
         if p.pos < p.s.len() {
             return Err(format!("表达式存在多余字符: '{}'", &p.s[p.pos..]));
         }
-        Ok(format!("= {}", val))
+        Ok(ToolExecResult::plain(format!("= {}", val)))
     }
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Parallel
@@ -194,7 +214,7 @@ impl AiTool for PlanTool {
             }
         })
     }
-    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolExecResult, String> {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("").trim();
         let mut g = plan_store()
             .lock()
@@ -248,7 +268,7 @@ impl AiTool for PlanTool {
             "list" => {}
             _ => return Err(format!("未知 action: '{}'（可选 create_plan/add_todo/mark_done/mark_undone/delete_todo/list）", action)),
         }
-        Ok(render_plan(&g))
+        Ok(ToolExecResult::plain(render_plan(&g)))
     }
 }
 
@@ -531,7 +551,7 @@ impl AiTool for FileTool {
             }
         })
     }
-    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
         use tokio::task::spawn_blocking;
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("").trim();
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
@@ -566,7 +586,7 @@ impl AiTool for FileTool {
                     };
                     Ok(format!("{}{}", head, window))
                 }).await.map_err(|e| format!("读取任务调度失败: {}", e))??;
-                Ok(content)
+                Ok(ToolExecResult::plain(content))
             }
             "write_file" => {
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -592,7 +612,7 @@ impl AiTool for FileTool {
                     new_text: Some(content.clone()),
                     order: 0,
                 });
-                Ok(format!("已暂存写入 {}（内容 {} 字符，等用户审阅确认后落盘；可用 read_file 查看改后视图）", p.display(), content.chars().count()))
+                Ok(ToolExecResult::plain(format!("已暂存写入 {}（内容 {} 字符，等用户审阅确认后落盘；可用 read_file 查看改后视图）", p.display(), content.chars().count())))
             }
             "edit" => {
                 let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -642,7 +662,7 @@ impl AiTool for FileTool {
                     new_text: Some(preview_ok.2),
                     order: 0,
                 });
-                Ok(format!("已暂存编辑 {}（等用户审阅确认后落盘）", p.display()))
+                Ok(ToolExecResult::plain(format!("已暂存编辑 {}（等用户审阅确认后落盘）", p.display())))
             }
             "delete" => {
                 let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
@@ -682,7 +702,7 @@ impl AiTool for FileTool {
                     new_text: None,
                     order: 0,
                 });
-                Ok(format!("已暂存删除 {}（等用户审阅确认后落盘）", p.display()))
+                Ok(ToolExecResult::plain(format!("已暂存删除 {}（等用户审阅确认后落盘）", p.display())))
             }
             _ => Err(format!("未知 action: '{}'（可选 read_file/write_file/edit/delete）", action)),
         }
@@ -714,7 +734,7 @@ impl AiTool for CommandTool {
             }
         })
     }
-    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         if command.is_empty() { return Err("run_command 缺少 command 参数".to_string()); }
         if command_is_dangerous(&command) {
@@ -755,7 +775,7 @@ impl AiTool for CommandTool {
             format!("{}（输出过长，已截断）", text.chars().take(OCAP).collect::<String>())
         } else { text };
         if status.status.success() {
-            Ok(if text.trim().is_empty() { "（命令成功，无输出）".to_string() } else { text })
+            Ok(ToolExecResult::plain(if text.trim().is_empty() { "（命令成功，无输出）".to_string() } else { text }))
         } else {
             Err(format!("命令退出码 {}：{}", status.status.code().unwrap_or(-1), text))
         }
@@ -915,7 +935,7 @@ impl AiTool for GrepTool {
             }
         })
     }
-    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
         let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         if pattern.is_empty() {
             return Err("grep 缺少 pattern 参数".to_string());
@@ -1006,27 +1026,42 @@ impl AiTool for GrepTool {
 
         let count = matches.len();
         if count == 0 {
-            return Ok("No matches found".to_string());
+            return Ok(ToolExecResult::plain("No matches found".to_string()));
         }
-        // 按文件分组输出（dsh 约定：每个文件一段，下挂 Line N 行）
-        let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+        // 按文件分组（对齐 dsh SearchFileMatches：path + 有序匹配行），文本与结构化 meta 复用同一份分组
+        let mut files: Vec<(String, Vec<(usize, String)>)> = Vec::new();
         for (p, ln, line) in &matches {
-            match grouped.iter_mut().find(|(k, _)| k == p) {
-                Some((_, rows)) => rows.push(format!("Line {}: {}", ln, line)),
-                None => grouped.push((p.clone(), vec![format!("Line {}: {}", ln, line)])),
+            match files.iter_mut().find(|(k, _)| k == p) {
+                Some((_, rows)) => rows.push((*ln, line.clone())),
+                None => files.push((p.clone(), vec![(*ln, line.clone())])),
             }
         }
+        // 纯文本视图（回填 role:"tool" 消息用，保持既有格式）
         let mut s = format!("Found {} matches", count);
         if truncated {
             s.push_str(&format!("（已达单次上限 {} 条，结果已截断；请用更精确的 pattern/path/include）", GREP_MAX_MATCHES));
         }
-        for (p, rows) in grouped {
+        for (p, rows) in &files {
             s.push('\n');
-            s.push_str(&p);
+            s.push_str(p);
             s.push('\n');
-            s.push_str(&rows.join("\n"));
+            s.push_str(&rows.iter().map(|(ln, txt)| format!("Line {}: {}", ln, txt)).collect::<Vec<_>>().join("\n"));
         }
-        Ok(s)
+        // search 呈现 meta（对齐 dsh SearchResultView 'matches' 变体：按文件分组的可展开卡片）
+        let meta_files: Vec<serde_json::Value> = files.into_iter().map(|(p, rows)| {
+            serde_json::json!({
+                "path": p,
+                "matches": rows.into_iter().map(|(ln, txt)| serde_json::json!({ "line": ln, "text": txt })).collect::<Vec<_>>(),
+            })
+        }).collect();
+        let meta = serde_json::json!({
+            "card": "search",
+            "shape": "matches",
+            "files": meta_files,
+            "truncated": truncated,
+            "total": count,
+        });
+        Ok(ToolExecResult::with_meta(s, meta))
     }
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Parallel
@@ -1057,7 +1092,7 @@ impl AiTool for GlobTool {
             }
         })
     }
-    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
         let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         if pattern.is_empty() {
             return Err("glob 缺少 pattern 参数".to_string());
@@ -1100,15 +1135,25 @@ impl AiTool for GlobTool {
         .map_err(|e| format!("glob 任务调度失败: {}", e))??;
 
         if hit.is_empty() {
-            return Ok("No files found".to_string());
+            return Ok(ToolExecResult::plain("No files found".to_string()));
         }
         let total = hit.len();
         let truncated = total > GLOB_MAX_RESULTS;
-        let mut out: Vec<String> = hit.into_iter().take(GLOB_MAX_RESULTS).map(|(p, _)| p.to_string_lossy().to_string()).collect();
+        let paths: Vec<String> = hit.into_iter().take(GLOB_MAX_RESULTS).map(|(p, _)| p.to_string_lossy().to_string()).collect();
+        let mut s = paths.join("\n");
         if truncated {
-            out.push(format!("（Showing {} of {} paths；请缩小 pattern 或指定 path 查看更多）", GLOB_MAX_RESULTS, total));
+            s.push('\n');
+            s.push_str(&format!("（Showing {} of {} paths；请缩小 pattern 或指定 path 查看更多）", GLOB_MAX_RESULTS, total));
         }
-        Ok(out.join("\n"))
+        // search 呈现 meta（对齐 dsh SearchResultView 'paths' 变体：扁平路径列表卡片）
+        let meta = serde_json::json!({
+            "card": "search",
+            "shape": "paths",
+            "paths": paths,
+            "truncated": truncated,
+            "total": total,
+        });
+        Ok(ToolExecResult::with_meta(s, meta))
     }
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Parallel
@@ -1141,7 +1186,7 @@ impl AiTool for McpTool {
             }
         })
     }
-    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
         let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let tool_name = args.get("tool").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         if server.is_empty() {
@@ -1180,9 +1225,9 @@ impl AiTool for McpTool {
             }
         }
         if parts.is_empty() {
-            return Ok(format!("（MCP 工具 {}:{} 返回空内容）", server, tool_name));
+            return Ok(ToolExecResult::plain(format!("（MCP 工具 {}:{} 返回空内容）", server, tool_name)));
         }
-        Ok(parts.join("\n"))
+        Ok(ToolExecResult::plain(parts.join("\n")))
     }
 }
 
