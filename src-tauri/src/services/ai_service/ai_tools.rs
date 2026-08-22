@@ -399,6 +399,12 @@ pub(crate) struct PendingEdit {
     pub(crate) new_content: Option<String>,
     pub(crate) old_string: Option<String>,
     pub(crate) new_string: Option<String>,
+    // diff 载体（对齐 dsh FileDiff：oldText/newText，供前端渲染改动前后差异，不影响落盘）
+    //   write: old_text=None(新文件/覆盖写无 before-image)，new_text=新全文
+    //   edit:  行级上下文 old_text / 替换后的 new_text（与 ai_agent_apply_edits 落盘替换语义一致）
+    //   delete: old_text=磁盘原文(截断)，new_text=None
+    pub(crate) old_text: Option<String>,
+    pub(crate) new_text: Option<String>,
     pub(crate) order: usize,
 }
 
@@ -470,6 +476,27 @@ fn apply_pending_overlay(request_id: &str, path: &std::path::Path, base: String)
         Ok((format!("{}（已叠加 {} 条待审阅改动，尚未写入磁盘）", text, applied), false))
     } else {
         Ok((text, false))
+    }
+}
+
+/// 计算一次 edit 的行级 diff 载体（对齐 dsh FileDiff）：定位 old 在 view 中的所在行块，
+/// 返回 (found, 旧行, 新行)。行块取 old 前一换行后到其后一换行前；跨行则覆盖首行头→末行尾。
+/// 新行替换语义与落盘（ai_agent_apply_edits）一致：多次出现全替换，否则仅首个。
+fn extract_edit_diff(view: &str, old: &str, new: &str) -> (bool, String, String) {
+    match view.find(old) {
+        None => (false, String::new(), String::new()),
+        Some(idx) => {
+            let ls = view[..idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let after = idx + old.len();
+            let le = view[after..].find('\n').map(|i| after + i).unwrap_or(view.len());
+            let old_line = view[ls..le].to_string();
+            let new_line = if old_line.matches(old).count() > 1 {
+                old_line.replace(old, new)
+            } else {
+                old_line.replacen(old, new, 1)
+            };
+            (true, old_line, new_line)
+        }
     }
 }
 
@@ -560,6 +587,9 @@ impl AiTool for FileTool {
                     new_content: Some(content.clone()),
                     old_string: None,
                     new_string: None,
+                    // diff：覆盖写/新文件无 before-image → oldText=null（对齐 dsh）
+                    old_text: None,
+                    new_text: Some(content.clone()),
                     order: 0,
                 });
                 Ok(format!("已暂存写入 {}（内容 {} 字符，等用户审阅确认后落盘；可用 read_file 查看改后视图）", p.display(), content.chars().count()))
@@ -584,14 +614,17 @@ impl AiTool for FileTool {
                 let overlay_req = ctx.request_id.clone();
                 let p_for_ov = p.clone();
                 let wants = old_string.clone();
-                let preview_ok = spawn_blocking(move || -> Result<(bool, String), String> {
+                let replacement = new_string.clone();
+                // 返回 (是否可定位, 叠加视图, 所在行块 diff oldText, 替换后 diff newText)。
+                // diff 用行级上下文（含该 edit 的整行），便于前端行级 diff；替换语义与落盘一致。
+                let preview_ok = spawn_blocking(move || -> Result<(bool, String, String), String> {
                     let text = if let Ok(data) = std::fs::read(&p_for_ov) {
                         String::from_utf8_lossy(&data).to_string()
                     } else {
                         String::new()
                     };
                     let (overlaid, _deleted) = apply_pending_overlay(&overlay_req, &p_for_ov, text)?;
-                    Ok((overlaid.contains(&wants), overlaid))
+                    Ok(extract_edit_diff(&overlaid, &wants, &replacement))
                 }).await.map_err(|e| format!("校验任务调度失败: {}", e))??;
                 if !preview_ok.0 {
                     return Err(format!("old_string 在当前视图不存在，无法定位：{}", old_string));
@@ -604,6 +637,9 @@ impl AiTool for FileTool {
                     new_content: None,
                     old_string: Some(old_string),
                     new_string: Some(new_string),
+                    // diff：行级 old→new（old_text 为完整行、new_text 为替换后行，供前端 diff 渲染）
+                    old_text: Some(preview_ok.1),
+                    new_text: Some(preview_ok.2),
                     order: 0,
                 });
                 Ok(format!("已暂存编辑 {}（等用户审阅确认后落盘）", p.display()))
@@ -619,6 +655,22 @@ impl AiTool for FileTool {
                     request_approval(ctx, "file", &format!("删除外部路径: {}", p.display())).await?;
                 }
                 let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+                // diff 载体：读磁盘原文（spawn_blocking，超长截断）作 oldText；newText=None，便于前端确认删的是什么。
+                let p_for_del = p.clone();
+                let old_content = spawn_blocking(move || {
+                    std::fs::read_to_string(&p_for_del).unwrap_or_default()
+                }).await.map_err(|e| format!("删除读取任务调度失败: {}", e))?;
+                let old_text: Option<String> = {
+                    let chars: Vec<char> = old_content.chars().collect();
+                    if chars.is_empty() {
+                        None
+                    } else if chars.len() > 4000 {
+                        let head: String = chars[..4000].iter().collect();
+                        Some(format!("{}…（其余 {} 字符略）", head, chars.len() - 4000))
+                    } else {
+                        Some(old_content)
+                    }
+                };
                 record_edit(&ctx.request_id, PendingEdit {
                     id: edit_id,
                     action: "delete".to_string(),
@@ -626,6 +678,8 @@ impl AiTool for FileTool {
                     new_content: None,
                     old_string: None,
                     new_string: None,
+                    old_text,
+                    new_text: None,
                     order: 0,
                 });
                 Ok(format!("已暂存删除 {}（等用户审阅确认后落盘）", p.display()))
@@ -1252,4 +1306,51 @@ pub(crate) fn estimate_tools_tokens(tools: &[serde_json::Value]) -> usize {
         }
     }
     chars / 2 + tools.len() * 4
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_diff_single_line_replace() {
+        let (found, old, new) = extract_edit_diff("line1\nhello world\nline3", "world", "WORLD");
+        assert!(found);
+        assert_eq!(old, "hello world");
+        assert_eq!(new, "hello WORLD");
+    }
+
+    #[test]
+    fn edit_diff_last_line_no_newline() {
+        let (found, old, new) = extract_edit_diff("aa\nbb", "bb", "BB");
+        assert!(found);
+        assert_eq!(old, "bb");
+        assert_eq!(new, "BB");
+    }
+
+    #[test]
+    fn edit_diff_multi_occurrence_replaces_all_in_line() {
+        // 行内 old 出现多次 → 与落盘一致全替换
+        let (found, old, new) = extract_edit_diff("x foo y foo\nz", "foo", "BAR");
+        assert!(found);
+        assert_eq!(old, "x foo y foo");
+        assert_eq!(new, "x BAR y BAR");
+    }
+
+    #[test]
+    fn edit_diff_not_found_returns_empty() {
+        let (found, old, new) = extract_edit_diff("a\nb", "zz", "Q");
+        assert!(!found);
+        assert!(old.is_empty());
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn edit_diff_crosses_lines_uses_first_to_last_hunk() {
+        // old 跨行 → 行块覆盖首行头→末行尾
+        let (found, old, new) = extract_edit_diff("aa\nbb\ncc", "bb", "B2");
+        assert!(found);
+        assert_eq!(old, "bb");
+        assert_eq!(new, "B2");
+    }
 }

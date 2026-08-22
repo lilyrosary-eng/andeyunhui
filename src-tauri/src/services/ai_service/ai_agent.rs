@@ -358,16 +358,16 @@ async fn run_agent(
     if !staged.is_empty() {
         let _ = app.emit("ai-agent-edits", serde_json::json!({
             "requestId": request_id,
+            // 每条编辑携带 dsh 风格 FileDiff（oldText/newText），供前端 diff 库渲染改动前后差异：
+            //   write:  oldText=null（新文件/覆盖写无 before-image），newText=新全文
+            //   edit:   行级 oldText/newText
+            //   delete: oldText=磁盘原文(截断)，newText=null
             "edits": staged.iter().map(|e| serde_json::json!({
                 "id": e.id,
                 "action": e.action,
                 "path": e.path,
-                // 暴露摘要便于前端展示：write 记新内容前若干字；edit 记 old→new 前若干字
-                "summary": match e.action.as_str() {
-                    "write" => format!("写入 {} 字符", e.new_content.clone().unwrap_or_default().chars().count()),
-                    "edit" => format!("{} → {}", e.old_string.clone().unwrap_or_default(), e.new_string.clone().unwrap_or_default()),
-                    _ => "删除".to_string(),
-                }
+                "oldText": e.old_text,
+                "newText": e.new_text,
             })).collect::<Vec<_>>(),
         }));
     }
