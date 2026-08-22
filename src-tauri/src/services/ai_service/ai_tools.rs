@@ -1327,6 +1327,146 @@ impl AiTool for McpTool {
     }
 }
 
+/// 极简 form-url-encoded 百分号编码：保留字母数字与 `-_.~`，其余字节转 `%XX`，空格转 `+`。
+/// 仅用于 web_search 的 query 编码（query 通常较短，不值得为它引入 percent-encoding 依赖）。
+fn url_escape_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// web_search：通过 DuckDuckGo Instant Answer API 检索网页（免 key、无配置），返回结构化来源。
+/// 来源对齐 dsh WebSearchResultView：sources（url/title/snippet）+ truncated + 可选 answer。
+/// 结果做纯文本 + 结构化 meta 双视图；网络请求整体限时 15s 防挂起。
+struct WebSearchTool;
+#[async_trait::async_trait]
+impl AiTool for WebSearchTool {
+    fn name(&self) -> &'static str {
+        "web_search"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "联网搜索网页，返回相关来源列表（标题/摘要/URL）。查询会实时检索（DuckDuckGo Instant Answer），无法联网时返回空结果。用于获取外部实时信息、文档、最新动态。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "要搜索的查询词，应具体（如 'Tauri v2 listen event 官方文档'）" },
+                        "max_results": { "type": "integer", "description": "返回结果数上限（默认5，范围1-10）" }
+                    },
+                    "required": ["query"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolExecResult, String> {
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if query.is_empty() {
+            return Err("web_search 缺少 query 参数".to_string());
+        }
+        let max_results: usize = args.get("max_results").and_then(|v| v.as_u64()).map(|n| (n as usize).clamp(1, 10)).unwrap_or(5);
+        let url = format!(
+            "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
+            url_escape_component(&query)
+        );
+        // 限时 15s；沙箱/断网环境静默降级为空结果，不让 Agent 卡死
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            reqwest::Client::new().get(&url).header("User-Agent", "Mozilla/5.0").send(),
+        )
+        .await
+        .map_err(|_| "web_search 超时（>15s，已中止）".to_string())?
+        .map_err(|e| format!("web_search 请求失败: {}", e))?;
+        if !resp.status().is_success() {
+            return Ok(ToolExecResult::plain(format!("web_search 返回状态 {}", resp.status().as_u16())));
+        }
+        let json: serde_json::Value = resp.json().await.map_err(|e| format!("web_search 响应解析失败: {}", e))?;
+
+        // 结构化来源：递归把 RelatedTopics 拍成叶节点 {FirstURL, Text}
+        let mut leaves: Vec<(String, String)> = Vec::new();
+        if let Some(topics) = json.get("RelatedTopics").and_then(|v| v.as_array()) {
+            fn walk(v: &serde_json::Value, out: &mut Vec<(String, String)>) {
+                if let Some(url) = v.get("FirstURL").and_then(|u| u.as_str()) {
+                    let text = v.get("Text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                    if !url.is_empty() {
+                        out.push((url.to_string(), text));
+                    }
+                } else if let Some(sub) = v.get("Topics").and_then(|t| t.as_array()) {
+                    for s in sub {
+                        walk(s, out);
+                    }
+                }
+            }
+            for t in topics {
+                walk(t, &mut leaves);
+            }
+        }
+        let answer = json.get("AbstractText").and_then(|a| a.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+
+        let total = leaves.len();
+        let truncated = total > max_results;
+        let sliced: Vec<(String, String)> = leaves.into_iter().take(max_results).collect();
+        if sliced.is_empty() {
+            return Ok(ToolExecResult::plain(format!("web_search 无结果（query: {}）", query)));
+        }
+        // 纯文本视图（回填 role:"tool" 消息用）
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(a) = &answer {
+            lines.push(format!("摘要：{}", a));
+        }
+        for (i, (url, text)) in sliced.iter().enumerate() {
+            // Text 通常形如「Title - description」，拆出标题与摘要
+            let (title, snippet) = match text.split_once(" - ") {
+                Some((t, s)) => (t.trim().to_string(), Some(s.trim().to_string())),
+                None => (text.clone(), None),
+            };
+            let mut entry = format!("{}. {}", i + 1, title);
+            if let Some(s) = &snippet {
+                entry.push_str(&format!(" — {}", s));
+            }
+            entry.push_str(&format!("\n   {}", url));
+            lines.push(entry);
+        }
+        let mut s = format!("Web results for \"{}\"", query);
+        if truncated {
+            s.push_str(&format!("（{} 条中显示前 {} 条）", total, max_results));
+        }
+        s.push('\n');
+        s.push_str(&lines.join("\n"));
+        // web_search 呈现 meta（对齐 dsh WebSearchResultView 'search' 变体：可引用的来源列表卡片）
+        let sources: Vec<serde_json::Value> = sliced.into_iter().map(|(url, text)| {
+            let (title, snippet) = match text.split_once(" - ") {
+                Some((t, sn)) => (t.trim().to_string(), Some(sn.trim().to_string())),
+                None => (text, None),
+            };
+            let mut src = serde_json::json!({ "url": url, "title": title });
+            if let Some(sn) = snippet {
+                src["snippet"] = serde_json::Value::String(sn);
+            }
+            src
+        }).collect();
+        let meta = serde_json::json!({
+            "card": "web",
+            "kind": "search",
+            "sources": sources,
+            "answer": answer,
+            "truncated": truncated,
+        });
+        Ok(ToolExecResult::with_meta(s, meta))
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
+    }
+}
+
 /// 当前注册的全部工具（有序数组）。
 pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
     vec![
@@ -1338,6 +1478,7 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(GrepTool),
         Box::new(GlobTool),
         Box::new(McpTool),
+        Box::new(WebSearchTool),
     ]
 }
 
