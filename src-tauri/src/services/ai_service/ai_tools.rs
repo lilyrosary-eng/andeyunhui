@@ -4,6 +4,7 @@
 
 use std::io::BufRead;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, AiProfile};
 use crate::services::mcp_service;
@@ -1908,9 +1909,12 @@ impl AiTool for WebFetchTool {
 /// 当前注册的全部工具（有序数组）。
 /// 子代理工具（功能参考 IDE `<subagent>`；实现参考 dsh subagent-spawn-in-process）：
 /// 主 agent 把一段独立子任务委派给一个「spawn 出的子会话」——拥有独立 system、不继承父上下文，
-/// 用只读工具执行并将最终结论文本回填主 agent。最小纵向闭环：仅委派→执行→回收，
-/// 不含控制面（send_message / interrupt_agent）与并行 sibling 委派。
+/// 用只读工具执行并将最终结论文本回填主 agent。支持并行 sibling 委派：同一批多个 subagent 调用
+/// 由外层有界池并发执行，各自以唯一 request_id 独立闭环、互不干扰。
 struct SubagentTool;
+
+/// 并行子会话唯一 id 计数器：多个子代理并发时，各自持有独立 request_id，避免互抢审批/事件标识。
+static SUB_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// 子代理执行循环：以独立 system（role 定位 + 委派任务）开一个只读工具循环，直到拿到纯文本结论。
 /// 仅调只读工具（file/grep/glob），不触发审批；复用 execute_tool_once 同一执行闸口。
@@ -1941,10 +1945,11 @@ async fn run_subagent(
     let mut messages: Vec<serde_json::Value> =
         vec![serde_json::json!({ "role": "system", "content": system })];
     let client = reqwest::Client::new();
-    // 子代理用独立请求 id 前缀，避免覆盖主会话事件。
+    // 子代理用独立请求 id（原子序唯一），避免覆盖主会话事件、也避免并行子会话互抢同一标识。
+    let seq = SUB_SEQ.fetch_add(1, Ordering::Relaxed);
     let sub_ctx = ToolContext {
         app: app.clone(),
-        request_id: format!("{}:sub", request_id),
+        request_id: format!("{}:sub{}", request_id, seq),
         project_root,
         profile_id: None,
     };
@@ -2023,8 +2028,9 @@ impl AiTool for SubagentTool {
         })
     }
     fn concurrency(&self) -> ToolConcurrency {
-        // 子代理要起独立的循环与模型调用，保守独占串行，避免并发子会话互相干扰。
-        ToolConcurrency::Exclusive
+        // 并行子代理：可与其他工具/其他子代理并发，由外层有界池（PARALLEL_LIMIT）限制并发上限；
+        // 内部以唯一 request_id 独立闭环，无需独占屏障。
+        ToolConcurrency::Parallel
     }
     fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
         let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
