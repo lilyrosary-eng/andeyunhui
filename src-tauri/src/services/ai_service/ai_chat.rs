@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
-use crate::services::ai_service::ai_profile::{AiProfile, load_profiles, resolve_profile, compose_persona_system};
+use crate::services::ai_service::ai_profile::{AiProfile, load_profiles, resolve_profile, compose_persona_system, compose_effective_system, ensure_api_key};
 
 /// 单条对话消息（OpenAI 格式）
 #[derive(Debug, Deserialize)]
@@ -145,14 +145,7 @@ pub async fn ai_chat(
 ) -> Result<(), String> {
     let profiles = load_profiles(&app);
     let cfg = resolve_profile(&profiles, profile_id);
-    if cfg.api_key.trim().is_empty() {
-        let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
-        let _ = app.emit(
-            "ai-error",
-            serde_json::json!({ "requestId": request_id, "error": msg }),
-        );
-        return Err(msg);
-    }
+    ensure_api_key(&app, &request_id, &cfg)?;
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     // 诊断：截断前总字符数（终端可见）。配合前端 safeMessages 的 console.error 双线验证。
@@ -211,12 +204,7 @@ pub async fn ai_chat(
     // 人设 system：组合后合并进首条 system 消息（不破坏插件自带的项目上下文 / SOP / 状态注入）。
     let persona = compose_persona_system(&cfg);
     // 前端 per-call system（群聊各伴侣人设 / 单聊注入）前置，全局 persona 紧随其后。
-    let effective_system = match (&system, persona.is_empty()) {
-        (Some(s), true) => s.clone(),
-        (Some(s), false) => format!("{}\n\n{}", s, persona),
-        (None, false) => persona,
-        (None, true) => String::new(),
-    };
+    let effective_system = compose_effective_system(&system, &persona);
     let mut messages_json = messages_json;
     if !effective_system.is_empty() {
         if let Some(first) = messages_json.first_mut() {

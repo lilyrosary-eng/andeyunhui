@@ -30,6 +30,8 @@ interface Msg {
   content: string;
   streaming?: boolean;
   error?: boolean;
+  // 思考模式思维链（ai-reasoning-delta 累积，异步流式写入；仅会话内即时展示）
+  thinking?: string;
 }
 
 interface CtxFile {
@@ -489,6 +491,17 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
       if (!aid) return;
       updateActive((ms) => ms.map((m) => (m.id === aid ? { ...m, content: m.content + delta } : m)));
     };
+    // 思考模式：思维链（ai-reasoning-delta）累积到独立 thinking 字段，与正文分开渲染
+    const appendThinking = (delta: string) => {
+      const aid = assistantId.current;
+      if (!aid) return;
+      updateActive((ms) => ms.map((m) => (m.id === aid ? { ...m, thinking: (m.thinking ?? '') + delta } : m)));
+    };
+    // 截断告警（ai-warn）：历史过长被自动截断，以独立提示消息告知用户
+    const warn = (hint: string) => {
+      if (activeReq.current == null) return;
+      updateActive((ms) => [...ms, { id: 'w_' + Date.now().toString(36), role: 'assistant', content: '⚠ ' + hint }]);
+    };
     const finish = (err?: string) => {
       const aid = assistantId.current;
       setBusy(false);
@@ -512,8 +525,17 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
       const u3 = await hostApi.listen<{ requestId: string; error: string }>('ai-error', (e) => {
         if (e.payload.requestId === activeReq.current) finish(e.payload.error);
       });
-      if (cancelled) { u1(); u2(); u3(); return; }
-      unlistens.push(u1, u2, u3);
+      const u4 = await hostApi.listen<{ requestId: string; delta: string }>('ai-reasoning-delta', (e) => {
+        if (e.payload.requestId === activeReq.current) appendThinking(e.payload.delta);
+      });
+      const u5 = await hostApi.listen<{ requestId: string; kind?: string; kept?: number; hint?: string }>('ai-warn', (e) => {
+        if (e.payload.requestId === activeReq.current) {
+          const { kept, hint } = e.payload;
+          warn(hint || (kept != null ? `历史过长已被自动截断（保留最近 ${kept} 条），可归档旧对话` : '历史过长已被自动截断，可考虑归档旧对话'));
+        }
+      });
+      if (cancelled) { u1(); u2(); u3(); u4(); u5(); return; }
+      unlistens.push(u1, u2, u3, u4, u5);
     })();
     return () => {
       cancelled = true;
@@ -907,6 +929,12 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
               }`}>
                 {m.role === 'assistant' ? (
                   <div>
+                    {m.thinking ? (
+                      <details className="mb-1.5 rounded-lg bg-black/5 dark:bg-white/5 px-2 py-1.5 text-[11px] text-neutral-500 dark:text-stone-400" open>
+                        <summary className="cursor-pointer select-none text-neutral-600 dark:text-stone-300">🧠 思考</summary>
+                        <pre className="mt-1.5 whitespace-pre-wrap break-words font-sans">{m.thinking}</pre>
+                      </details>
+                    ) : null}
                     {parseContent(m.content).map((part, i) =>
                       part.type === 'code'
                         ? <CodeBlock key={i} lang={part.lang} value={part.value} />

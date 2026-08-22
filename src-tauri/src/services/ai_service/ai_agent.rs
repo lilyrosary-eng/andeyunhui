@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 use futures_util::StreamExt;
-use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
+use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
 use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text};
@@ -38,23 +38,14 @@ async fn run_agent(
     let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 12u32);
     let profiles = load_profiles(&app);
     let cfg = resolve_profile(&profiles, profile_id.clone());
-    if cfg.api_key.trim().is_empty() {
-        let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
-        emit_agent_error(&app, &request_id, &msg);
-        return Err(msg);
-    }
+    ensure_api_key(&app, &request_id, &cfg)?;
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let (messages, _truncated) = truncate_messages_for_safety(messages);
 
     // system：人设 + 前端 per-call（与 ai_chat 同规则），并追加 agent 工具使用提示。
     let persona = compose_persona_system(&cfg);
-    let effective_system = match (&system, persona.is_empty()) {
-        (Some(s), true) => s.clone(),
-        (Some(s), false) => format!("{}\n\n{}", s, persona),
-        (None, false) => persona,
-        (None, true) => String::new(),
-    };
+    let effective_system = compose_effective_system(&system, &persona);
     let agent_hint = "你被允许并且应当在合适时调用下方提供的工具来获取实时信息或完成计算。需要时先调用工具，拿到结果后再组织最终回答；不要编造工具返回的数据。";
     // 注入已启用 MCP 服务器的工具清单，让模型的 mcp 工具可正确填写 server/tool
     let mcp_guide = mcp_tools_guide(&app).await;
@@ -580,11 +571,7 @@ pub async fn ai_chat_agent(
     // 同步预检：无 API Key 直接拒绝（对齐原契约），无需开后台任务。
     let profiles = load_profiles(&app);
     let cfg = resolve_profile(&profiles, profile_id.clone());
-    if cfg.api_key.trim().is_empty() {
-        let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
-        emit_agent_error(&app, &request_id, &msg);
-        return Err(msg);
-    }
+    ensure_api_key(&app, &request_id, &cfg)?;
 
     // 同 id 已有运行中任务 → 先取消（防重复续聊叠跑）。
     cancel_worker(&request_id);

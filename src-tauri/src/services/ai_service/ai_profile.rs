@@ -271,3 +271,24 @@ pub(crate) fn compose_persona_system(cfg: &AiProfile) -> String {
     }
     parts.join("\n\n")
 }
+
+/// 组合「前端 per-call system」+「全局 persona」：per-call system 前置，persona 紧随其后。
+/// 供 ai_chat / ai_chat_agent 共用，避免两处各自复制同一套 match 逻辑。
+pub(crate) fn compose_effective_system(system: &Option<String>, persona: &str) -> String {
+    match (system, persona.is_empty()) {
+        (Some(s), true) => s.clone(),
+        (Some(s), false) => format!("{}\n\n{}", s, persona),
+        (None, false) => persona.to_string(),
+        (None, true) => String::new(),
+    }
+}
+
+/// 预检 API Key：为空则 emit ai-error 并返回 Err。供 ai_chat / ai_chat_agent 共用预检。
+pub(crate) fn ensure_api_key(app: &AppHandle, request_id: &str, cfg: &AiProfile) -> Result<(), String> {
+    if cfg.api_key.trim().is_empty() {
+        let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
+        let _ = app.emit("ai-error", serde_json::json!({ "requestId": request_id, "error": msg }));
+        return Err(msg);
+    }
+    Ok(())
+}
