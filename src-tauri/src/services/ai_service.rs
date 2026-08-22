@@ -937,6 +937,66 @@ fn is_under_path(target: &std::path::Path, root: &std::path::Path) -> bool {
     norm.starts_with(&r)
 }
 
+/// 受保护路径判定：VCS 目录、依赖目录、密钥/凭据/环境变量文件。
+/// 用于写/编辑/删除的「硬拦截」（读取不受限）。命名大小写不敏感（Windows 友好）。
+fn protected_path(p: &std::path::Path) -> bool {
+    for seg in p.components() {
+        if let std::path::Component::Normal(s) = seg {
+            let seg = s.to_string_lossy().to_lowercase();
+            if seg == ".git" || seg == ".svn" || seg == ".hg" || seg == "node_modules" {
+                return true;
+            }
+        }
+    }
+    let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    const SECRETS: &[&str] = &[
+        ".env", "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa", "credentials",
+        "credentials.json", "credentials.jsonc", ".npmrc", ".pypirc", ".netrc",
+        "known_hosts", "authorized_keys", ".bash_history", ".zsh_history", ".gitconfig",
+        ".mcp_config.json", "mcp_config.json",
+    ];
+    SECRETS.contains(&name.as_str()) || name.starts_with(".env.")
+}
+
+/// 危险命令兜底黑名单：命中即拒绝（防御纵深；真正的护栏是任意命令限时+审批）。
+/// 仅拦截几乎不可能在 agent 里合法出现的破坏性/不可逆操作，避免误伤正常构建命令。
+fn command_is_dangerous(cmd: &str) -> bool {
+    let c = cmd.to_lowercase();
+    const DANGEROUS: &[&str] = &[
+        "format c:", "diskpart", "mkfs", "dd if=/dev/zero",
+        "shutdown", "reboot", "init 0", "init 6", "poweroff",
+        ":(){", "rm -rf / --no-preserve-root", "rm -rf ~/.config",
+        "del /s /q /", "rd /s /q /", "git push --force",
+    ];
+    DANGEROUS.iter().any(|p| c.contains(p))
+}
+
+/// 会话级「信任项目」集合：首次在某个项目根内执行写操作时弹窗确认，
+/// 通过后本会话内该项目内写文件免单次审批。
+static TRUSTED_PROJECTS: OnceLock<Mutex<std::collections::HashSet<std::path::PathBuf>>> = OnceLock::new();
+fn trusted_projects() -> &'static Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    TRUSTED_PROJECTS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 首次访问未信任项目 → 弹「信任此项目」确认；通过后记录本会话信任。已信任则直接返回。
+async fn ensure_project_trusted(ctx: &ToolContext) -> Result<(), String> {
+    let Some(root) = &ctx.project_root else { return Ok(()); };
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if trusted_projects().lock().map_err(|_| "信任存储锁失败".to_string())?.contains(&canon) {
+        return Ok(());
+    }
+    let ok = request_approval(
+        ctx,
+        "trust",
+        &format!("首次在此项目内写文件，是否信任该目录（本会话内经此确认后，项目内写文件免单次确认）？\n{}", root.display()),
+    ).await?;
+    if !ok {
+        return Err("用户未信任该项目，已拒绝写入".to_string());
+    }
+    trusted_projects().lock().map_err(|_| "信任存储锁失败".to_string())?.insert(canon);
+    Ok(())
+}
+
 /// 一次待审阅的暂存编辑。write/edit/delete 先落到该结构（不立即写盘），
 /// read_file 会叠加这些暂存生成 overlay 视图（模型能读到改后内容），
 /// agent-loop 结束后 emit ai-agent-edits 交由前端审阅，用户确认后才真正写盘。
@@ -1093,8 +1153,13 @@ impl AiTool for FileTool {
             }
             "write_file" => {
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if protected_path(&p) {
+                    return Err(format!("拒绝写入受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));
+                }
                 let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
-                if !under {
+                if under {
+                    ensure_project_trusted(ctx).await?;
+                } else {
                     request_approval(ctx, "file", &format!("写入外部路径: {}", p.display())).await?;
                 }
                 let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
@@ -1115,9 +1180,14 @@ impl AiTool for FileTool {
                 if old_string.is_empty() {
                     return Err("edit 缺少 old_string 参数".to_string());
                 }
-                // 写语义与 write_file 一致：项目根内直写、根外审批
+                if protected_path(&p) {
+                    return Err(format!("拒绝编辑受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));
+                }
+                // 写语义与 write_file 一致：项目根内直写、根外审批；首次需信任项目
                 let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
-                if !under {
+                if under {
+                    ensure_project_trusted(ctx).await?;
+                } else {
                     request_approval(ctx, "file", &format!("编辑外部路径: {}", p.display())).await?;
                 }
                 // 暂存前先本地校验 old_string 在「当前叠加视图」中可定位（避免审阅时才发现替换失败）
@@ -1150,7 +1220,12 @@ impl AiTool for FileTool {
             }
             "delete" => {
                 let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
-                if !under {
+                if protected_path(&p) {
+                    return Err(format!("拒绝删除受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));
+                }
+                if under {
+                    ensure_project_trusted(ctx).await?;
+                } else {
                     request_approval(ctx, "file", &format!("删除外部路径: {}", p.display())).await?;
                 }
                 let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
@@ -1198,6 +1273,9 @@ impl AiTool for CommandTool {
     async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         if command.is_empty() { return Err("run_command 缺少 command 参数".to_string()); }
+        if command_is_dangerous(&command) {
+            return Err("该命令命中危险操作黑名单（格式化/磁盘/关机/不可逆删除等），已拒绝执行".to_string());
+        }
         // timeout：可选超时秒数，默认 15，封顶 120，最小 1
         let timeout_secs: u64 = args.get("timeout")
             .and_then(|v| v.as_u64())
