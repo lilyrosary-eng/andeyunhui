@@ -935,7 +935,94 @@ fn is_under_path(target: &std::path::Path, root: &std::path::Path) -> bool {
     norm.starts_with(&r)
 }
 
-/// 文件工具：read_file（任意路径只读，支持偏移）/ write_file（整写）/ edit（精准补丁替换）。写操作项目根内直写、根外审批。
+/// 一次待审阅的暂存编辑。write/edit/delete 先落到该结构（不立即写盘），
+/// read_file 会叠加这些暂存生成 overlay 视图（模型能读到改后内容），
+/// agent-loop 结束后 emit ai-agent-edits 交由前端审阅，用户确认后才真正写盘。
+#[derive(Clone)]
+struct PendingEdit {
+    id: String,
+    action: String, // write / edit / delete
+    path: String,
+    // write: 新全文；edit: 用于精确定位替换信息（old/new）；delete 无
+    new_content: Option<String>,
+    old_string: Option<String>,
+    new_string: Option<String>,
+    order: usize,
+}
+
+/// 请求级编辑暂存：request_id → 该请求产出的待审阅编辑（按到达顺序）。
+static EDIT_STORE: OnceLock<Mutex<std::collections::HashMap<String, Vec<PendingEdit>>>> = OnceLock::new();
+fn edit_store() -> &'static Mutex<std::collections::HashMap<String, Vec<PendingEdit>>> {
+    EDIT_STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 记录一次暂存编辑；order 为追加序号，read overlay 与最终落盘都按此顺序重放。
+fn record_edit(request_id: &str, mut e: PendingEdit) {
+    let mut store = edit_store().lock().unwrap_or_else(|_| {
+        // 锁中毒兜底：清空重建，极罕见
+        *EDIT_STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock().expect("edit store lock") = Default::default();
+        edit_store().lock().expect("edit store relock")
+    });
+    let list = store.entry(request_id.to_string()).or_default();
+    e.order = list.len();
+    list.push(e);
+}
+
+/// 把当前磁盘内容叠加该请求所有暂存编辑，重放生成「改后视图」。
+/// 返回 (overlay_text, deleted)。若该路径被 <delete> 暂存，deleted=true 且 overlay 为空。
+fn apply_pending_overlay(request_id: &str, path: &std::path::Path, base: String) -> Result<(String, bool), String> {
+    let store = edit_store().lock().map_err(|_| "编辑存储锁获取失败".to_string())?;
+    let Some(list) = store.get(request_id) else {
+        return Ok((base, false));
+    };
+    // 只取作用于同一文件的编辑，按 order 顺序重放
+    let mut text = base.clone();
+    let mut deleted = false;
+    let mut applied = 0usize;
+    for e in list {
+        if e.path != path.to_string_lossy().as_ref() { continue; }
+        match e.action.as_str() {
+            "delete" => { deleted = true; text = String::new(); applied += 1; }
+            "write" => {
+                text = e.new_content.clone().unwrap_or_default();
+                deleted = false;
+                applied += 1;
+            }
+            "edit" => {
+                let old = e.old_string.clone().unwrap_or_default();
+                let new = e.new_string.clone().unwrap_or_default();
+                if !old.is_empty() && text.contains(&old) {
+                    let all = text.matches(&old).count() > 1;
+                    if all {
+                        text = text.replace(&old, &new);
+                    } else {
+                        // 替换首个匹配
+                        if let Some(idx) = text.find(&old) {
+                            let mut s = String::with_capacity(text.len() + new.len().saturating_sub(old.len()));
+                            s.push_str(&text[..idx]);
+                            s.push_str(&new);
+                            s.push_str(&text[idx + old.len()..]);
+                            text = s;
+                        }
+                    }
+                    applied += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if deleted {
+        Ok((String::new(), true))
+    } else if applied > 0 {
+        // 追加提示「叠加了 N 条未确认改动」，帮助模型理解这是改后视图
+        Ok((format!("{}（已叠加 {} 条待审阅改动，尚未写入磁盘）", text, applied), false))
+    } else {
+        Ok((text, false))
+    }
+}
+
+/// 文件工具：read_file（只读，叠加暂存视图）/ write_file（暂存）/ edit（暂存）/ delete（暂存）。
+/// 所有写操作先进请求级暂存，经 ai-agent-edits 审阅后才真正落盘；项目根外写入仍先交互审批。
 struct FileTool;
 #[async_trait::async_trait]
 impl AiTool for FileTool {
@@ -947,11 +1034,11 @@ impl AiTool for FileTool {
             "type": "function",
             "function": {
                 "name": self.name(),
-                "description": "读写/编辑文件。action：read_file(path, offset?, limit?) 读取文件内容（任意路径，只读；offset 为起始字符偏移、limit 为字符数，用于大文件分段读取）；write_file(path, content) 整写文件；edit(path, old_string, new_string, occurrences?) 精准补丁——在原文中定位并替换（不重写整个文件；occurrences 省略替换首个、填 all 替换全部）。写操作：项目根目录内可直接写，根外需用户授权。路径请传绝对路径。改代码优先用 edit，避免整写覆盖遗漏。",
+                "description": "读写/编辑/删除文件。action：read_file(path, offset?, limit?) 读取文件内容（任意路径，只读；offset 为起始字符偏移、limit 为字符数，用于大文件分段读取）；write_file(path, content) 整写文件；edit(path, old_string, new_string, occurrences?) 精准补丁——在原文中定位并替换（不重写整个文件；occurrences 省略替换首个、填 all 替换全部，旧文本须可唯一定位）；delete(path) 删除文件。写/删操作不会立即落盘：会先进入待审阅状态，由用户逐条确认后才真正写入磁盘；期间你用 read_file 读到的是叠加了你所有未确认改动后的视图。项目根外的写/删会额外触发交互授权。路径请传绝对路径。改代码优先用 edit，避免整写覆盖遗漏。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "description": "read_file / write_file / edit" },
+                        "action": { "type": "string", "description": "read_file / write_file / edit / delete" },
                         "path": { "type": "string", "description": "绝对路径" },
                         "content": { "type": "string", "description": "write_file 时写入的完整内容" },
                         "offset": { "type": "integer", "description": "read_file 时的起始字符偏移（从 0 开始，默认 0）" },
@@ -976,11 +1063,17 @@ impl AiTool for FileTool {
                 // 偏移读取：offset/limit 按字符计，便于大文件分段（dsh 对齐）
                 let offset: usize = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let limit: usize = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(60_000) as usize;
+                let overlay_req = ctx.request_id.clone();
                 let content = spawn_blocking(move || -> Result<String, String> {
                     let data = std::fs::read(&p).map_err(|e| format!("读取失败 {}: {}", p.display(), e))?;
                     let full = String::from_utf8_lossy(&data).to_string();
-                    let chars = full.chars().collect::<Vec<_>>();
-                    // 偏移取自文件开头（截断点不可寻，故按全量再切）
+                    // 叠加该请求先前的未确认改动，生成「改后视图」（未删除时）
+                    let (overlaid, deleted) = apply_pending_overlay(&overlay_req, &p, full).map_err(|e| format!("叠加视图失败: {}", e))?;
+                    if deleted {
+                        return Ok(format!("（文件 {} 已被本请求暂存删除，尚未提交）", p.display()));
+                    }
+                    let chars = overlaid.chars().collect::<Vec<_>>();
+                    // 偏移取自叠加后内容的开头
                     let total = chars.len();
                     let start = offset.min(total);
                     let end = (start + limit).min(total);
@@ -1002,17 +1095,17 @@ impl AiTool for FileTool {
                 if !under {
                     request_approval(ctx, "file", &format!("写入外部路径: {}", p.display())).await?;
                 }
-                // 确保父目录存在；p 在闭包内被 move 使用，故另存展示串副本
-                let display = p.display().to_string();
-                let display_in_closure = display.clone();
-                let parent = p.parent().map(|q| q.to_path_buf());
-                spawn_blocking(move || -> Result<(), String> {
-                    if let Some(d) = parent {
-                        std::fs::create_dir_all(&d).map_err(|e| format!("创建目录失败 {}: {}", d.display(), e))?;
-                    }
-                    std::fs::write(&p, content.as_bytes()).map_err(|e| format!("写入失败 {}: {}", display_in_closure, e))
-                }).await.map_err(|e| format!("写入任务调度失败: {}", e))??;
-                Ok(format!("已写入 {}", display))
+                let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+                record_edit(&ctx.request_id, PendingEdit {
+                    id: edit_id,
+                    action: "write".to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    new_content: Some(content.clone()),
+                    old_string: None,
+                    new_string: None,
+                    order: 0,
+                });
+                Ok(format!("已暂存写入 {}（内容 {} 字符，等用户审阅确认后落盘；可用 read_file 查看改后视图）", p.display(), content.chars().count()))
             }
             "edit" => {
                 let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
@@ -1025,43 +1118,50 @@ impl AiTool for FileTool {
                 if !under {
                     request_approval(ctx, "file", &format!("编辑外部路径: {}", p.display())).await?;
                 }
-                // occurrences："all" 替换全部；省略/其它填多个数字语义忽略，默认首个
-                let all = args.get("occurrences").and_then(|v| v.as_str()).map(|s| s.trim() == "all").unwrap_or(false);
-                let display = p.display().to_string();
-                let display_in_closure = display.clone();
-                let old_owned = old_string.to_string();
-                let new_owned = new_string.to_string();
-                let result = spawn_blocking(move || -> Result<String, String> {
-                    let data = std::fs::read(&p).map_err(|e| format!("读取失败 {}: {}", p.display(), e))?;
-                    let text = String::from_utf8_lossy(&data).to_string();
-                    let mut count = 0usize;
-                    let new_text = if all {
-                        // 替换全部；替换次数 = old_string 在原文出现次数
-                        count = text.matches(&old_owned).count();
-                        text.replace(&old_owned, &new_owned)
+                // 暂存前先本地校验 old_string 在「当前叠加视图」中可定位（避免审阅时才发现替换失败）
+                let overlay_req = ctx.request_id.clone();
+                let preview_ok = spawn_blocking(move || -> Result<(bool, String), String> {
+                    let text = if let Ok(data) = std::fs::read(&p) {
+                        String::from_utf8_lossy(&data).to_string()
                     } else {
-                        // 仅替换首个；要求唯一，避免误改
-                        let matches = text.match_indices(&old_owned).collect::<Vec<_>>();
-                        if matches.is_empty() {
-                            return Err(format!("未找到待替换内容：{}", old_owned));
-                        }
-                        if matches.len() > 1 {
-                            return Err(format!("old_string 出现 {} 次，不唯一（请用 occurrences=all 或缩小范围）：{}", matches.len(), old_owned));
-                        }
-                        count = 1;
-                        let (idx, len) = (matches[0].0, matches[0].1.len());
-                        let mut s = String::with_capacity(text.len() + new_owned.len().saturating_sub(old_owned.len()));
-                        s.push_str(&text[..idx]);
-                        s.push_str(&new_owned);
-                        s.push_str(&text[idx + len..]);
-                        s
+                        String::new()
                     };
-                    std::fs::write(&p, new_text.as_bytes()).map_err(|e| format!("写入失败 {}: {}", display_in_closure, e))?;
-                    Ok(count.to_string())
-                }).await.map_err(|e| format!("编辑任务调度失败: {}", e))??;
-                Ok(format!("已修改 {}（替换 {} 处）", display, result))
+                    let (overlaid, _deleted) = apply_pending_overlay(&overlay_req, &p, text)?;
+                    Ok((overlaid.contains(old_string), overlaid))
+                }).await.map_err(|e| format!("校验任务调度失败: {}", e))??;
+                if !preview_ok.0 {
+                    return Err(format!("old_string 在当前视图不存在，无法定位：{}", old_string));
+                }
+                let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+                record_edit(&ctx.request_id, PendingEdit {
+                    id: edit_id,
+                    action: "edit".to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    new_content: None,
+                    old_string: Some(old_string.to_string()),
+                    new_string: Some(new_string.to_string()),
+                    order: 0,
+                });
+                Ok(format!("已暂存编辑 {}（等用户审阅确认后落盘）", p.display()))
             }
-            _ => Err(format!("未知 action: '{}'（可选 read_file/write_file/edit）", action)),
+            "delete" => {
+                let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
+                if !under {
+                    request_approval(ctx, "file", &format!("删除外部路径: {}", p.display())).await?;
+                }
+                let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+                record_edit(&ctx.request_id, PendingEdit {
+                    id: edit_id,
+                    action: "delete".to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    new_content: None,
+                    old_string: None,
+                    new_string: None,
+                    order: 0,
+                });
+                Ok(format!("已暂存删除 {}（等用户审阅确认后落盘）", p.display()))
+            }
+            _ => Err(format!("未知 action: '{}'（可选 read_file/write_file/edit/delete）", action)),
         }
     }
 }
@@ -1466,6 +1566,27 @@ pub async fn ai_chat_agent(
     for chunk in split_deltas(&final_text) {
         let _ = app.emit("ai-delta", serde_json::json!({ "requestId": request_id, "delta": chunk }));
     }
+    // agent-loop 结束后，把该请求所有暂存编辑发往前端审阅（前端逐个保留/撤销，经 ai_agent_apply_edits 落盘）
+    let staged = {
+        let store = edit_store().lock().map_err(|_| "编辑存储锁获取失败".to_string())?;
+        store.get(&request_id).cloned().unwrap_or_default()
+    };
+    if !staged.is_empty() {
+        let _ = app.emit("ai-agent-edits", serde_json::json!({
+            "requestId": request_id,
+            "edits": staged.iter().map(|e| serde_json::json!({
+                "id": e.id,
+                "action": e.action,
+                "path": e.path,
+                // 暴露摘要便于前端展示：write 记新内容前若干字；edit 记 old→new 前若干字
+                "summary": match e.action.as_str() {
+                    "write" => format!("写入 {} 字符", e.new_content.clone().unwrap_or_default().chars().count()),
+                    "edit" => format!("{…} → {…}", e.old_string.clone().unwrap_or_default(), e.new_string.clone().unwrap_or_default()),
+                    _ => "删除".to_string(),
+                }
+            })).collect::<Vec<_>>(),
+        }));
+    }
     let _ = app.emit("ai-done", serde_json::json!({ "requestId": request_id }));
     Ok(())
 }
@@ -1484,6 +1605,89 @@ pub async fn ai_agent_approve(approval_id: String, approved: bool) -> Result<(),
             Ok(())
         }
         None => Err("授权请求不存在或已过期".to_string()),
+    }
+}
+
+/// 把某请求暂存的编辑审阅后真正落盘。keep_ids 为空时全部落盘；
+/// 否则仅落盘 keep_ids 中通过审阅的编辑，其余丢弃。
+/// 按暂存顺序重放 write/edit/delete，保证与模型所见视图一致。
+#[tauri::command]
+pub async fn ai_agent_apply_edits(request_id: String, keep_ids: Option<Vec<String>>) -> Result<usize, String> {
+    let store = edit_store()
+        .lock()
+        .map_err(|_| "编辑存储锁获取失败".to_string())?;
+    let edits = store.get(&request_id).cloned().unwrap_or_default();
+    drop(store);
+    if edits.is_empty() {
+        return Ok(0);
+    }
+    let keep_all = keep_ids.as_ref().map(|v| v.is_empty()).unwrap_or(true);
+    let mut written = 0usize;
+    // 先串行重放 write/edit，最后处理 delete，避免碰撞
+    let mut deletions: Vec<&PendingEdit> = Vec::new();
+    for e in edits.iter().sorted_by_order() {
+        if !keep_all && !keep_ids.as_ref().map(|k| k.contains(&e.id)).unwrap_or(false) {
+            continue;
+        }
+        let p = std::path::PathBuf::from(&e.path);
+        match e.action.as_str() {
+            "delete" => { deletions.push(e); }
+            "write" => {
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|err| format!("创建目录失败 {}: {}", parent.display(), err))?;
+                }
+                let content = e.new_content.clone().unwrap_or_default();
+                std::fs::write(&p, content.as_bytes())
+                    .map_err(|err| format!("写入失败 {}: {}", p.display(), err))?;
+                written += 1;
+            }
+            "edit" => {
+                let old = e.old_string.clone().unwrap_or_default();
+                let new = e.new_string.clone().unwrap_or_default();
+                let text = std::fs::read_to_string(&p)
+                    .map_err(|err| format!("编辑前读取失败 {}: {}", p.display(), err))?;
+                if !text.contains(&old) {
+                    return Err(format!("落盘失败 {}：old_string 已不在文件中（可能被其它改动覆盖），{}", p.display(), old));
+                }
+                let new_text = if text.matches(&old).count() > 1 {
+                    text.replace(&old, &new)
+                } else {
+                    text.replacen(&old, &new, 1)
+                };
+                std::fs::write(&p, new_text.as_bytes())
+                    .map_err(|err| format!("编辑写入失败 {}: {}", p.display(), err))?;
+                written += 1;
+            }
+            _ => {}
+        }
+    }
+    for e in deletions {
+        if !keep_all && !keep_ids.as_ref().map(|k| k.contains(&e.id)).unwrap_or(false) {
+            continue;
+        }
+        let p = std::path::PathBuf::from(&e.path);
+        std::fs::remove_file(&p).map_err(|err| format!("删除失败 {}: {}", p.display(), err))?;
+        written += 1;
+    }
+    // 清理该请求的暂存
+    let store = edit_store()
+        .lock()
+        .map_err(|_| "编辑存储锁获取失败".to_string())?;
+    let mut s = store;
+    s.remove(&request_id);
+    Ok(written)
+}
+
+// 为 Vec<PendingEdit> 提供按 order 排序的迭代辅助
+trait SortedOrder {
+    fn sorted_by_order(&self) -> std::vec::IntoIter<PendingEdit>;
+}
+impl SortedOrder for Vec<PendingEdit> {
+    fn sorted_by_order(&self) -> std::vec::IntoIter<PendingEdit> {
+        let mut v = self.clone();
+        v.sort_by_key(|e| e.order);
+        v.into_iter()
     }
 }
 
