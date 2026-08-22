@@ -58,11 +58,98 @@ impl ToolExecResult {
 /// 模型可调用的工具。
 /// execute 为异步实现：文件写给项目根外需等待用户授权、命令执行需限时，故在 async 中 await。
 /// 阻塞 IO（std::fs / 进程等待）内部用 spawn_blocking，避免卡住 Tokio 运行时。
+/// 依据 function_schema 的 `.function.parameters` 做子集强制校验（required 缺失 + 类型 + enum + 嵌套）。
+/// 在工具 execute 之前统一拦截非法参数，把具体错误回填给模型，模型能据此自纠参数。
+pub(crate) fn validate_args_by_schema(schema: &serde_json::Value, value: &serde_json::Value, path: &str) -> Result<(), String> {
+    // 类型
+    if let Some(t) = schema.get("type").and_then(|t| t.as_str()) {
+        let ok = match t {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "number" => value.is_number(),
+            "integer" => {
+                value.is_i64()
+                    || value.is_u64()
+                    || value.as_f64().map_or(false, |f| f.fract() == 0.0)
+            }
+            "null" => value.is_null(),
+            _ => true, // 未知类型不过多约束
+        };
+        if !ok {
+            return Err(format!("`{}` 期望类型 {}，实际为 {}", path, t, json_type_name(value)));
+        }
+    }
+    // 枚举
+    if let Some(en) = schema.get("enum").and_then(|e| e.as_array()) {
+        if !en.contains(value) {
+            return Err(format!("`{}` 取值不在允许枚举范围内", path));
+        }
+    }
+    // 对象：required 必填 + 逐属性子级校验
+    if let (Some(props), Some(obj)) = (schema.get("properties").and_then(|p| p.as_object()), value.as_object()) {
+        if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+            for req in required {
+                if let Some(rn) = req.as_str() {
+                    if !obj.contains_key(rn) {
+                        return Err(format!("`{}` 缺少必需参数 `{}`", path, rn));
+                    }
+                }
+            }
+        }
+        for (k, v) in obj {
+            if let Some(sub) = props.get(k) {
+                validate_args_by_schema(sub, v, &format!("{}.{}", path, k))?;
+            }
+            // 未在 schema 声明的属性：放行（与默认 additionalProperties 一致）
+        }
+    }
+    // 数组：逐项子级校验
+    if let (Some(items), Some(arr)) = (schema.get("items"), value.as_array()) {
+        for (i, it) in arr.iter().enumerate() {
+            validate_args_by_schema(items, it, &format!("{}[{}]", path, i))?;
+        }
+    }
+    Ok(())
+}
+
+/// serde_json 值的类型名（用于错误提示）。
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    if v.is_null() {
+        "null"
+    } else if v.is_boolean() {
+        "boolean"
+    } else if v.is_number() {
+        "number"
+    } else if v.is_string() {
+        "string"
+    } else if v.is_array() {
+        "array"
+    } else if v.is_object() {
+        "object"
+    } else {
+        "unknown"
+    }
+}
+
 #[async_trait::async_trait]
 pub(crate) trait AiTool: Send + Sync {
     fn name(&self) -> &'static str;
     /// OpenAI functions 格式 schema，供 /chat/completions 的 tools 参数。
     fn function_schema(&self) -> serde_json::Value;
+    /// 工具参数强制校验（基于 function_schema 的 parameters 子集，见 validate_args_by_schema）。
+    /// 默认实现对所有工具生效；个别工具可覆盖以收紧/放宽。失败返回给模型可自纠的明确错误。
+    fn validate_args(&self, args: &serde_json::Value) -> Result<(), String> {
+        let params = self
+            .function_schema()
+            .pointer("/function/parameters")
+            .cloned();
+        match params {
+            Some(p) => validate_args_by_schema(&p, args, self.name()),
+            None => Ok(()),
+        }
+    }
     /// 工具并发执行级别（对齐 dsh executeToolCalls 的 exclusive/parallel）。
     /// 默认 Exclusive（安全默认）：有副作用或共享可变状态的工具需独占串行。
     fn concurrency(&self) -> ToolConcurrency {
@@ -1791,6 +1878,39 @@ mod tests {
     #[test]
     fn web_url_escape_component_encodes_query() {
         assert_eq!(url_escape_component("你好 world"), "%E4%BD%A0%E5%A5%BD+world");
+    }
+
+    #[test]
+    fn validate_schema_rejects_missing_required_and_wrong_type() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "max_results": { "type": "integer" }
+            },
+            "required": ["query"]
+        });
+        // 缺 required
+        assert!(validate_args_by_schema(&schema, &serde_json::json!({}), "web_search").is_err());
+        // 类型不符
+        assert!(validate_args_by_schema(&schema, &serde_json::json!({ "query": 123 }), "web_search").is_err());
+        // 合法 + 可选缺省
+        assert!(validate_args_by_schema(&schema, &serde_json::json!({ "query": "ok" }), "web_search").is_ok());
+        // integer 接受整数浮点
+        assert!(validate_args_by_schema(&schema, &serde_json::json!({ "query": "ok", "max_results": 3.0 }), "web_search").is_ok());
+    }
+
+    #[test]
+    fn validate_schema_walks_nested() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "files": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["files"]
+        });
+        assert!(validate_args_by_schema(&schema, &serde_json::json!({ "files": ["a", 1] }), "x").is_err());
+        assert!(validate_args_by_schema(&schema, &serde_json::json!({ "files": ["a", "b"] }), "x").is_ok());
     }
 
     #[test]

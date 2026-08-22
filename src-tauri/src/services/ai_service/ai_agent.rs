@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
+use crate::services::ai_service::ai_tools::{AiTool, ToolContext, ToolConcurrency, ToolExecResult, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text};
 
 /// Agent 对话：原生 tool_calls + 循环。
@@ -24,6 +24,31 @@ use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive
 /// 立即返回；本函数在 tokio::spawn 的后台任务里运行，期间通过事件把增量推给前端。cancel 为协作式
 /// 取消标记（用户在协作点主动退出），与注册表的 abort handle 共用一线（cancel 落 flag + abort 强制
 /// 中断在途 await）。
+/// 统一的单工具执行点：先做参数 schema 强制校验（模型可自纠的明确错误），通过后再 execute。
+/// 返回 Vec<(ok, ToolExecResult)> 的单个元素，与模型工具调用顺序对齐。
+async fn execute_tool_once(
+    tool: Option<&dyn AiTool>,
+    fname: &str,
+    args: &serde_json::Value,
+    tc: &ToolContext,
+) -> (bool, ToolExecResult) {
+    match tool {
+        None => (false, ToolExecResult::plain(format!("未知工具: {}", fname))),
+        Some(t) => {
+            // 参数强制校验（对齐 dsh 工具调用前 schema 校验）：缺参/类型错在 execute 前拦截，
+            // 以 Err 文本回填给模型，模型能据此修正参数重发。
+            if let Err(ve) = t.validate_args(args) {
+                let msg = format!("参数校验失败 [{}]: {}", fname, ve);
+                return (false, ToolExecResult::plain(msg));
+            }
+            match t.execute(args, tc).await {
+                Ok(r) => (true, r),
+                Err(e) => (false, ToolExecResult::plain(e)),
+            }
+        }
+    }
+}
+
 async fn run_agent(
     app: AppHandle,
     request_id: String,
@@ -274,30 +299,17 @@ async fn run_agent(
                         // 在 async 块外提取自有数据与工具引用，避免捕获遍历变量/整体移动 Vec。
                         let fname = prepared[p].1.clone();
                         let args = prepared[p].3.clone();
-                        let tool = prepared[p].2.map(|i| &tools[i]); // Option<&dyn AiTool>
+                        let tool = prepared[p].2.map(|i| tools[i].as_ref()); // Option<&dyn AiTool>
                         let tc = &tool_ctx;
-                        async move {
-                            match tool {
-                                None => (false, ToolExecResult::plain(format!("未知工具: {}", fname))),
-                                Some(t) => match t.execute(&args, tc).await {
-                                    Ok(r) => (true, r),
-                                    Err(e) => (false, ToolExecResult::plain(e)),
-                                },
-                            }
-                        }
+                        async move { execute_tool_once(tool, &fname, &args, tc).await }
                     }))
                     .await
                 } else {
                     let p = win_start;
                     let args = prepared[p].3.clone();
-                    let one = match prepared[p].2 {
-                        None => (false, ToolExecResult::plain(format!("未知工具: {}", prepared[p].1))),
-                        Some(idx) => match tools[idx].execute(&args, &tool_ctx).await {
-                            Ok(r) => (true, r),
-                            Err(e) => (false, ToolExecResult::plain(e)),
-                        },
-                    };
-                    vec![one]
+                    let tool = prepared[p].2.map(|i| tools[i].as_ref());
+                    let fname = prepared[p].1.clone();
+                    vec![execute_tool_once(tool, &fname, &args, &tool_ctx).await]
                 };
                 // 结果按模型顺序 commit：发射 step 事件 + 记录 Tool 事件。
                 for (k, p) in (win_start..win_end).enumerate() {
