@@ -1885,6 +1885,11 @@ fn estimate_tools_tokens(tools: &[serde_json::Value]) -> usize {
 /// 会话日志中的一条事件。所有变体都是「发生过的一次事实」，只追加、不原地修改。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum SessionEvent {
+    /// 用户回合（初始历史中的 user 消息，或后续多轮追加的用户新指令）。
+    User {
+        seq: u64,
+        content: String,
+    },
     /// 模型回合（可能携带工具请求）。`tool_calls` 采用 OpenAI 原生形状 `[{id,type,function:{name,arguments}}]`。
     Assistant {
         seq: u64,
@@ -1948,8 +1953,9 @@ impl EventSession {
 /// 若事件带 `seq` 字段，返回其可变引用（Compact/Interrupted 无则 None）。
 fn ev_seq_mut(ev: &mut SessionEvent) -> Option<&mut u64> {
     let seq = match ev {
-        SessionEvent::Assistant { seq, .. } => seq,
-        SessionEvent::Tool { seq, .. } => seq,
+        SessionEvent::User { seq, .. }
+        | SessionEvent::Assistant { seq, .. }
+        | SessionEvent::Tool { seq, .. } => seq,
         _ => return None,
     };
     Some(seq)
@@ -1978,6 +1984,19 @@ fn derive_messages(session: &EventSession, system: &str, extra_repairs: Vec<Sess
     let mut inserted_summary = false;
     for ev in all {
         match &ev {
+            // 用户回合直接派生为 role:"user"（遮蔽时同样跳过并插入摘要）。
+            SessionEvent::User { seq, content } => {
+                if *seq <= shadow_until {
+                    if !inserted_summary {
+                        if let Some(s) = &summary {
+                            out.push(serde_json::json!({ "role": "user", "content": s.clone() }));
+                        }
+                        inserted_summary = true;
+                    }
+                    continue;
+                }
+                out.push(serde_json::json!({ "role": "user", "content": content }));
+            }
             SessionEvent::Assistant { seq, content, tool_calls } => {
                 if *seq <= shadow_until {
                     // 被遮蔽 → 在其开头插入一次摘要（只插一次）
@@ -2034,6 +2053,13 @@ fn maybe_compress_session(session: &mut EventSession, high: usize, keep_tail: us
     let mut shadow_until = 0u64;
     for ev in &session.events[..end] {
         match ev {
+            SessionEvent::User { seq, content } => {
+                shadow_until = shadow_until.max(*seq);
+                let cont: String = content.chars().take(60).collect();
+                if !cont.is_empty() {
+                    sum.push_str(&format!("\n  · 用户指令：{}", cont));
+                }
+            }
             SessionEvent::Assistant { seq, content, tool_calls } => {
                 shadow_until = shadow_until.max(*seq);
                 let names: Vec<String> = tool_calls
@@ -2113,8 +2139,23 @@ fn emit_agent_error(app: &AppHandle, request_id: &str, msg: &str) {
     let _ = app.emit("ai-error", serde_json::json!({ "requestId": request_id, "error": msg }));
 }
 
-/// 把一次 Agent 会话的事件日志落盘到 app_data_dir/ai_sessions/<request_id>.json，纯审计用途。
-/// 本阶段不改前后端契约（resume 走后续 B），只做只追加快照，供审计与精确重放。
+/// 工具结果修剪器：超大工具输出（如 grep 命中大量内容、read 大文件）全量写入日志会拉升
+/// 后续每轮真实发送量。入事件前按长度截断，保留头尾 + 长度标注，控制上下文成本。
+/// 仅作用于入日志的 Tool.content；前端展示仍用完整 detail（emit 未走此函数）。
+const TOOL_RESULT_HEAD: usize = 4_000; // 保留前 4k 字符
+const TOOL_RESULT_TAIL: usize = 1_000; // 保留尾 1k 字符
+fn trim_tool_result(content: &str) -> String {
+    let total = content.chars().count();
+    if total <= TOOL_RESULT_HEAD + TOOL_RESULT_TAIL {
+        return content.to_string();
+    }
+    let head: String = content.chars().take(TOOL_RESULT_HEAD).collect();
+    let tail: String = content.chars().skip(total - TOOL_RESULT_TAIL).collect();
+    format!("{}…[中间 {} 字已省略以实现上下文控制]…{}", head, total - TOOL_RESULT_HEAD - TOOL_RESULT_TAIL, tail)
+}
+
+/// 把一次 Agent 会话的事件日志落盘到 app_data_dir/ai_sessions/<request_id>.json。
+/// append-only 快照：既做审计、也供 crash-resume 精确重放。
 fn persist_agent_session(app: &AppHandle, session: &EventSession) {
     let dir = app.path().app_data_dir();
     let Ok(dir) = dir else { return };
@@ -2124,6 +2165,15 @@ fn persist_agent_session(app: &AppHandle, session: &EventSession) {
     if let Ok(json) = serde_json::to_string_pretty(session) {
         let _ = fs::write(file, json);
     }
+}
+
+/// 若磁盘上已有同名 request_id 的事件日志（此前崩溃或上一轮正常结束），加载它作为续接基础；
+/// 否则返回一个全新的空会话。这样前端只需沿用同一会话 id 再次请求，即可自动“续聊”。
+fn load_agent_session(app: &AppHandle, id: &str) -> Option<EventSession> {
+    let dir = app.path().app_data_dir().ok()?;
+    let file = dir.join("ai_sessions").join(format!("{}.json", id));
+    let Ok(text) = fs::read_to_string(file) else { return None };
+    serde_json::from_str(&text).ok()
 }
 
 /// 把最终文本按「换行 / 最长 ~96 字符」切成增量块，推给前端保持近似逐字流式观感。字符级安全（不切 UTF-8）。
@@ -2204,20 +2254,48 @@ pub async fn ai_chat_agent(
     let mut final_text = String::new();
     let mut tool_calls_occurred = false;
 
-    // 事件溯源会话：request_id 即会话 id。把前端传入的全量历史（system 之外的 user/assistant 文本）
-    // 作为初始事件灌入日志，此后每一轮模型回合 / 工具结果都以事件追加，LLM 消息每次由 derive 派生。
-    let mut session = EventSession::new(&request_id);
-    for m in &messages {
-        if m.role == "system" {
-            continue;
+    // 事件溯源会话：request_id 即会话 id。
+    //   - 若磁盘已有同名日志（崩溃恢复 / 上一轮续聊）→ 加载为续接基础，仅把本轮新消息（不含 system）追加；
+    //   - 否则全新会话 → 把前端传入的环境之外历史（user/assistant 文本）作为初始事件灌入。
+    // 此后每一轮模型回合 / 工具结果都以事件追加，LLM 消息每次由 derive 派生。
+    let mut session = match load_agent_session(&app, &request_id) {
+        Some(mut old) => {
+            // 续接：追加新 user 指令即可；旧历史已在日志里，无需也不可能重复灌入。
+            for m in &messages {
+                if m.role == "system" {
+                    continue;
+                }
+                if m.role == "user" {
+                    old.push(SessionEvent::User {
+                        seq: 0, // push() 会覆写
+                        content: m.content.clone(),
+                    });
+                }
+            }
+            old
         }
-        // assistant 历史文本无工具调用 → 用空 tool_calls；user 历史同样落为回合事件。
-        session.push(SessionEvent::Assistant {
-            seq: 0, // push() 会覆写
-            content: m.content.clone(),
-            tool_calls: Vec::new(),
-        });
-    }
+        None => {
+            let mut fresh = EventSession::new(&request_id);
+            for m in &messages {
+                if m.role == "system" {
+                    continue;
+                }
+                // 严格按角色分流：user 落 User 事件、assistant 落 Assistant 事件，杜绝角色混淆。
+                match m.role.as_str() {
+                    "user" => fresh.push(SessionEvent::User {
+                        seq: 0, // push() 会覆写
+                        content: m.content.clone(),
+                    }),
+                    _ => fresh.push(SessionEvent::Assistant {
+                        seq: 0, // push() 会覆写
+                        content: m.content.clone(),
+                        tool_calls: Vec::new(),
+                    }),
+                }
+            }
+            fresh
+        }
+    };
 
     for _round in 0..max_rounds {
         // 熔断阈值随模型档案可配置：未配置则沿用旧默认（high=36k / hard=96k）。
@@ -2346,14 +2424,17 @@ pub async fn ai_chat_agent(
                     }),
                 );
                 // 工具结果：记录 Tool 事件（仅日志事实，不携带角色字段——由 derive 统一派生成 role:"tool"）。
+                // 入日志前经过修剪器控制上下文成本；前端展示仍用完整 detail。
                 session.push(SessionEvent::Tool {
                     seq: 0, // push() 会覆写
                     call_id: cid.clone(),
                     name: fname.clone(),
                     ok,
-                    content: detail.clone(),
+                    content: trim_tool_result(&detail),
                 });
             }
+            // 崩溃恢复：每轮工具结果落地即持久化一次，进程在中途被杀也能从那轮续拉。
+            persist_agent_session(&app, &session);
             continue;
         }
 
