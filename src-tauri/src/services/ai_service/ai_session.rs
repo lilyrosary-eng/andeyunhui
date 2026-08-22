@@ -39,6 +39,10 @@ pub(crate) enum SessionEvent {
         name: String,
         ok: bool,
         content: String,
+        /// 结构化呈现 meta（对齐 dsh presentationMeta：随日志持久化，replay/fork 后仍能恢复 UI 卡片）。
+        /// Option + #[serde(default)] 向后兼容旧版日志（缺该字段按 None 读）。
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
     },
     /// 压缩检查点（replace 遮蔽）：`summary` 是早期回合的摘要求，`shadow_until=<seq>` 表示
     /// seq ≤ 该值的旧事件被遮蔽、不再进入派生（但日志中仍保留，可审计）。
@@ -381,8 +385,8 @@ fn prefix_session(source: &EventSession, boundary: usize) -> Result<EventSession
             SessionEvent::Assistant { content, tool_calls, .. } => {
                 view.push(SessionEvent::Assistant { seq: 0, content: content.clone(), tool_calls: tool_calls.clone() });
             }
-            SessionEvent::Tool { call_id, name, ok, content, .. } => {
-                view.push(SessionEvent::Tool { seq: 0, call_id: call_id.clone(), name: name.clone(), ok: *ok, content: content.clone() });
+            SessionEvent::Tool { call_id, name, ok, content, meta, .. } => {
+                view.push(SessionEvent::Tool { seq: 0, call_id: call_id.clone(), name: name.clone(), ok: *ok, content: content.clone(), meta: meta.clone() });
             }
             _ => {} // Compact / Interrupted 不随前缀继承
         }

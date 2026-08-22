@@ -359,6 +359,9 @@ async fn run_agent(
                         name: fname,
                         ok: *ok,
                         content: trim_tool_result(detail),
+                        // 呈现 meta 随日志落盘（对齐 dsh presentationMeta）：来自 res.meta / present_result，
+                        // 供 replay/fork 后前端恢复 UI 卡片；不参与派生（derive 的 tool 消息只带 content）。
+                        meta: meta.clone(),
                     });
                 }
                 active = seg_end;
