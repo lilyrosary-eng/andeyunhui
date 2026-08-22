@@ -7,7 +7,7 @@ use tauri::{AppHandle, Emitter};
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
 use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
-use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json};
+use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text};
 
 /// Agent 对话：原生 tool_calls + 循环。
 /// 流程：非流式请求（带 tools）→ 若返回 message.tool_calls →
@@ -440,4 +440,43 @@ pub async fn ai_agent_apply_edits(request_id: String, keep_ids: Option<Vec<Strin
     let mut s = store;
     s.remove(&request_id);
     Ok(written)
+}
+
+/// 事件溯源 **fork**（对齐 dsh SessionStore.fork）：源会话 = 磁盘上已持久化的 ai_sessions/<source_id>.json。
+/// 以源日志合法前缀 events[0..=boundary] 为种子派生一个 child_id 子会话（血缘 parent=source_id），
+/// 立即落盘可被 ai_chat_agent(child_id) 续接成另一条探索分支。源日志不改。
+/// boundary 省略 → 取源最后一条事件；边界落在未闭合工具回合（OPEN_TURN）会拒绝。
+#[tauri::command]
+pub async fn ai_agent_fork(
+    app: AppHandle,
+    source_id: String,
+    child_id: String,
+    boundary: Option<usize>,
+) -> Result<String, String> {
+    let source = load_agent_session(&app, &source_id)
+        .ok_or_else(|| format!("源会话 {source_id} 不存在（尚未持久化）"))?;
+    let child = fork_session(&source, &child_id, boundary).map_err(|e| fork_err_text(&e))?;
+    persist_agent_session(&app, &child);
+    Ok(serde_json::to_string(&serde_json::json!({
+        "childId": child.id(),
+        "parentId": child.parent(),
+        "events": child.event_count(),
+    }))
+    .map_err(|e| e.to_string())?)
+}
+
+/// 事件溯源 **replay**：不调用 LLM、不改写任何日志，仅把磁盘上 ai_sessions/<source_id>.json
+/// 的事件日志（可选截至 boundary 的前缀）重新派生成当前会发给模型的 messages 快照返回，
+/// 供前端回放概览 / 审计 / 校验。boundary 语义与 ai_agent_fork 一致。
+#[tauri::command]
+pub async fn ai_agent_replay(
+    app: AppHandle,
+    source_id: String,
+    boundary: Option<usize>,
+) -> Result<String, String> {
+    let source = load_agent_session(&app, &source_id)
+        .ok_or_else(|| format!("会话 {source_id} 不存在（尚未持久化）"))?;
+    let msgs = replay_derived_messages(&source, boundary, "")
+        .map_err(|e| fork_err_text(&e))?;
+    serde_json::to_string(&msgs).map_err(|e| e.to_string())
 }

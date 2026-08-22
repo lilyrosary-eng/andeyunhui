@@ -60,6 +60,9 @@ pub(crate) enum SessionEvent {
 pub(crate) struct EventSession {
     id: String,
     created_at: String,
+    /// 派生来源会话 id（fork 时记录血缘；None 表示根源会话）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
     /// 当前事件序号（严格递增；等价于事件数组长度，但显式记录更稳健）。
     seq: u64,
     events: Vec<SessionEvent>,
@@ -71,6 +74,7 @@ impl EventSession {
         Self {
             id: id.into(),
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            parent: None,
             seq: 0,
             events: Vec::new(),
         }
@@ -83,6 +87,20 @@ impl EventSession {
             self.seq += 1;
         }
         self.events.push(ev);
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// 已落账的事件条数（fork/replay 返回给前端核对用）。
+    pub(crate) fn event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    /// 血缘：派生来源会话 id（None 为根源会话）。
+    pub(crate) fn parent(&self) -> Option<&str> {
+        self.parent.as_deref()
     }
 }
 
@@ -310,6 +328,99 @@ pub(crate) fn load_agent_session(app: &AppHandle, id: &str) -> Option<EventSessi
     let file = dir.join("ai_sessions").join(format!("{}.json", id));
     let Ok(text) = fs::read_to_string(file) else { return None };
     serde_json::from_str(&text).ok()
+}
+
+// ============ 事件溯源 replay / fork（对齐 dsh SessionStore.fork 语义） ============
+// dsh 的 fork(source, boundary?, childId?)：取源事件日志的合法前缀 events[0..=boundary] 作为
+// 子会话种子，header 记录 parentSession 与 seedLength；边界不得落在「未闭合回合」上（OPEN_TURN）。
+// 本实现用**事件索引**（0 起）充当 boundary（dsh 的 seq 即索引；我们的 seq 因压缩标记而不严格连续，
+// 索引才唯一且可作前缀切点）。fork 不改变源日志（append-only）；子会话以新 id 落盘，可被
+// ai_chat_agent(child_id) 续接成另一条探索分支。
+
+/// fork/replay 边界校验错误码（对应 dsh 的 INVALID_BOUNDARY / OPEN_TURN）。
+#[derive(Debug)]
+pub(crate) enum ForkError {
+    /// 边界越界 / 源无可 fork 内容。
+    InvalidBoundary(String),
+    /// 边界落在「assistant 已声明工具调用但结果未落账」的未闭合回合上，拒绝派生残缺回合。
+    OpenTurn(String),
+}
+
+pub(crate) fn fork_err_text(e: &ForkError) -> String {
+    match e {
+        ForkError::InvalidBoundary(m) | ForkError::OpenTurn(m) => m.clone(),
+    }
+}
+
+/// 取源会话的合法前缀，重建一个会话视图：仅保留对话承载事件（User/Assistant/Tool），
+/// 压缩标记 Compact / 中断修复 Interrupted 为一次性元数据，不随前缀继承（它们遮蔽的是更长历史
+/// 或本就不在对话流里，fork 新血缘无需携带）。子日志 seq 由 push 重新连续赋号。
+fn prefix_session(source: &EventSession, boundary: usize) -> Result<EventSession, ForkError> {
+    let events = &source.events;
+    if boundary >= events.len() {
+        let last = events.len().saturating_sub(1);
+        return Err(ForkError::InvalidBoundary(format!(
+            "fork 边界索引 {boundary} 超出源会话（最后索引: {last}）"
+        )));
+    }
+    // OPEN_TURN：边界事件若是携带 tool_calls 的 assistant 回合，其工具结果必然在其后
+    // （前缀被截断 → 该回合未闭合），拒绝 fork，避免派生出不完整回合。
+    if let SessionEvent::Assistant { tool_calls, .. } = &events[boundary] {
+        if !tool_calls.is_empty() {
+            return Err(ForkError::OpenTurn(format!(
+                "fork 边界索引 {boundary} 落在未闭合的工具调用回合上，请改以该回合的工具结果或其后的稳定点作为边界"
+            )));
+        }
+    }
+    let mut view = EventSession::new(source.id.clone());
+    for ev in &events[..=boundary] {
+        match ev {
+            SessionEvent::User { content, .. } => {
+                view.push(SessionEvent::User { seq: 0, content: content.clone() });
+            }
+            SessionEvent::Assistant { content, tool_calls, .. } => {
+                view.push(SessionEvent::Assistant { seq: 0, content: content.clone(), tool_calls: tool_calls.clone() });
+            }
+            SessionEvent::Tool { call_id, name, ok, content, .. } => {
+                view.push(SessionEvent::Tool { seq: 0, call_id: call_id.clone(), name: name.clone(), ok: *ok, content: content.clone() });
+            }
+            _ => {} // Compact / Interrupted 不随前缀继承
+        }
+    }
+    Ok(view)
+}
+
+/// 从源会话派生一个**子会话**（fork，对齐 dsh SessionStore.fork）：
+/// 取合法前缀 events[0..=boundary] 为种子，child_id 为子会话 id，血缘 parent 记录为源 id。
+/// boundary 省略 → 取源当前最后一条事件；空源 → 允许 fork 空子。
+pub(crate) fn fork_session(
+    source: &EventSession,
+    child_id: &str,
+    boundary: Option<usize>,
+) -> Result<EventSession, ForkError> {
+    if source.events.is_empty() {
+        return Ok(EventSession { id: child_id.to_string(), parent: Some(source.id.clone()), ..EventSession::new(child_id) });
+    }
+    let b = boundary.unwrap_or_else(|| source.events.len() - 1);
+    let mut child = prefix_session(source, b)?;
+    child.id = child_id.to_string();
+    child.parent = Some(source.id.clone());
+    Ok(child)
+}
+
+/// replay：不解入 LLM、不落盘，仅把源会话（可选截至 boundary 的前缀）重新派生成当前会发给模型的
+/// messages 快照，供审计 / 校验 / 前端回放概览使用。
+pub(crate) fn replay_derived_messages(
+    source: &EventSession,
+    boundary: Option<usize>,
+    system: &str,
+) -> Result<Vec<serde_json::Value>, ForkError> {
+    if source.events.is_empty() {
+        return Err(ForkError::InvalidBoundary("空会话无可重放的事件".into()));
+    }
+    let b = boundary.unwrap_or_else(|| source.events.len() - 1);
+    let view = prefix_session(source, b)?;
+    Ok(derive_messages(&view, system, Vec::new()))
 }
 
 /// 把最终文本按「换行 / 最长 ~96 字符」切成增量块，推给前端保持近似逐字流式观感。字符级安全（不切 UTF-8）。
