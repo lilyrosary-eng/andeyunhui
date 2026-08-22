@@ -293,6 +293,24 @@ async fn run_agent(
                         win_end += 1;
                     }
                 }
+                // 执行窗口前先广播 call-time 呈现（对齐 dsh presentCall）：对窗口内每个工具按模型顺序发
+                // 一个「将做什么」的 pending 卡，供前端在结果落地前渲染；与 stage:"tool" 结果事件用 cid 配对。
+                for p in win_start..win_end {
+                    let cid = prepared[p].0.clone();
+                    let fname = prepared[p].1.clone();
+                    let args = &prepared[p].3;
+                    let call_meta = prepared[p]
+                        .2
+                        .map(|i| tools[i].present_call(args))
+                        .unwrap_or_else(|| serde_json::json!({ "card": "generic", "kind": "other", "title": fname }));
+                    let _ = app.emit("ai-agent-step", serde_json::json!({
+                        "requestId": request_id,
+                        "stage": "tool-start",
+                        "cid": cid,
+                        "name": fname,
+                        "meta": call_meta,
+                    }));
+                }
                 // 执行窗口：并行窗口 join_all 并发、独占窗口串行（长 1）。返回 Vec<(ok, detail)>，与模型顺序对齐。
                 let results: Vec<(bool, ToolExecResult)> = if win_end - win_start > 1 {
                     futures_util::future::join_all((win_start..win_end).map(|p| {

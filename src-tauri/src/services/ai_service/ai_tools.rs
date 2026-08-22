@@ -150,6 +150,40 @@ pub(crate) trait AiTool: Send + Sync {
             None => Ok(()),
         }
     }
+    /// 调用前呈现（对齐 dsh presentCall → ToolCallView）：在工具执行前广播一个“将做什么”的 pending 卡。
+    /// 默认按工具名与常见参数（path/url/command/pattern/query/action）生成 generic 卡；个别工具
+    /// 覆盖为 terminal / diff 等专属卡。可与 ai-agent-step 的 stage:"tool" 结果事件按 cid 配对。
+    fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
+        let key = ["path", "url", "command", "pattern", "query", "target", "action"]
+            .iter()
+            .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let name = self.name();
+        let (kind, title): (&str, String) = match name {
+            "grep" | "glob" | "web_search" => ("search", format!("搜索 {}", key)),
+            "web_fetch" => ("fetch", format!("抓取 {}", key)),
+            "command" => ("execute", format!("执行 {}", key)),
+            "calculator" => ("other", "计算".to_string()),
+            "plan" => ("other", "制定计划".to_string()),
+            "file" => {
+                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                let (k, verb) = match action {
+                    "read_file" => ("read", "读取".to_string()),
+                    "write_file" => ("edit", "写入".to_string()),
+                    "edit" => ("edit", "修改".to_string()),
+                    "delete" => ("delete", "删除".to_string()),
+                    _ => ("other", "处理文件".to_string()),
+                };
+                (k, format!("{} {}", verb, key))
+            }
+            _ => ("other", name.to_string()),
+        };
+        let mut m = serde_json::json!({ "card": "generic", "kind": kind, "title": title });
+        if !key.is_empty() && matches!(kind, "read" | "edit" | "delete" | "fetch") {
+            m["locations"] = serde_json::json!([{ "path": key }]);
+        }
+        m
+    }
     /// 工具并发执行级别（对齐 dsh executeToolCalls 的 exclusive/parallel）。
     /// 默认 Exclusive（安全默认）：有副作用或共享可变状态的工具需独占串行。
     fn concurrency(&self) -> ToolConcurrency {
@@ -877,6 +911,59 @@ impl AiTool for FileTool {
             _ => Err(format!("未知 action: '{}'（可选 read_file/write_file/edit/delete）", action)),
         }
     }
+    /// 调用前呈现（对齐 dsh presentCall → DiffCallView / GenericCallView）：
+    /// write_file/edit → diff 卡（write 覆盖式 newText=content；edit 读一下盘生成 old/new 片段），
+    /// 其余 → generic 卡带 locations。
+    fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let generic = || {
+            let (kind, verb) = match action {
+                "read_file" => ("read", "读取".to_string()),
+                "write_file" => ("edit", "写入".to_string()),
+                "edit" => ("edit", "修改".to_string()),
+                "delete" => ("delete", "删除".to_string()),
+                _ => ("other", "处理文件".to_string()),
+            };
+            let mut m = serde_json::json!({ "card": "generic", "kind": kind, "title": format!("{} {}", verb, path) });
+            if !path.is_empty() {
+                m["locations"] = serde_json::json!([{ "path": path }]);
+            }
+            m
+        };
+        match action {
+            "write_file" => {
+                // 覆盖式写入：oldText 用 null（与 dsh 一致），newText 用请求内容（截断展示）
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let capped: String = content.chars().take(1200).collect();
+                serde_json::json!({
+                    "card": "diff",
+                    "path": path,
+                    "oldText": serde_json::Value::Null,
+                    "newText": capped,
+                    "truncated": content.chars().count() > 1200,
+                })
+            }
+            "edit" => {
+                let old = args.get("old").and_then(|v| v.as_str()).unwrap_or("");
+                let new = args.get("new").and_then(|v| v.as_str()).unwrap_or("");
+                // 读一下当前盘上文件生成“改前/改后”片段（call-time 轻量；读失败回 generic 卡）
+                let diff = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|view| {
+                        let (found, old_line, new_line) = extract_edit_diff(&view, old, new);
+                        found.then(|| serde_json::json!({
+                            "card": "diff",
+                            "path": path,
+                            "oldText": old_line,
+                            "newText": new_line,
+                        }))
+                    });
+                diff.unwrap_or_else(generic)
+            }
+            _ => generic(),
+        }
+    }
 }
 
 /// 命令工具：运行 shell 命令，限时 15s、非交互，返回 stdout/stderr（截断）。
@@ -962,6 +1049,15 @@ impl AiTool for CommandTool {
             "signal": signal,
         });
         Ok(ToolExecResult::with_meta(detail, meta))
+    }
+    /// 调用前呈现：命令本身就是一辆终端卡（对齐 dsh TerminalCallView）
+    fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
+        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let mut m = serde_json::json!({ "card": "terminal", "title": command });
+        if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
+            m["cwd"] = serde_json::Value::String(cwd.to_string());
+        }
+        m
     }
 }
 
