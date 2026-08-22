@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
@@ -622,5 +622,100 @@ pub async fn ai_agent_status(_app: AppHandle, request_id: String) -> Result<Stri
         })
         .to_string()),
         None => Ok(serde_json::json!({ "running": false }).to_string()),
+    }
+}
+
+// ============ 单元测试：worker 注册 / 取消状态机 ============
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
+    fn uniq(prefix: &str) -> String {
+        let n = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-{n}")
+    }
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// 造一个永远 sleep 的后台任务，从中取出 abort handle。
+    fn looping_abort(rt: &tokio::runtime::Runtime) -> tokio::task::AbortHandle {
+        let _guard = rt.enter();
+        let join = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        join.abort_handle()
+    }
+
+    #[test]
+    fn cancel_worker_removes_entry_and_marks_cancelled() {
+        let rt = test_runtime();
+        let id = uniq("t-cancel");
+        let abort = looping_abort(&rt);
+        let state = Arc::new(AtomicU8::new(ST_RUNNING));
+        let cancel = Arc::new(AtomicBool::new(false));
+        // 模拟 ai_chat_agent 的注册。
+        workers().lock().unwrap().insert(
+            id.clone(),
+            WorkerEntry { abort, cancel: cancel.clone(), state: state.clone() },
+        );
+        assert!(workers().lock().unwrap().contains_key(&id));
+
+        // 取消：应移除注册，并把共享状态置为 CANCELLED、置取消标记。
+        cancel_worker(&id);
+        rt.block_on(async { tokio::time::sleep(Duration::from_millis(30)).await; }); // 让 abort 落地
+        assert!(!workers().lock().unwrap().contains_key(&id), "取消后应从注册表移除");
+        assert_eq!(state.load(Ordering::SeqCst), ST_CANCELLED, "共享状态应转为 CANCELLED");
+        assert!(cancel.load(Ordering::SeqCst), "应置协作式取消标记");
+    }
+
+    #[test]
+    fn cancel_state_only_transitions_from_running() {
+        // compare_exchange 语义：已非 RUNNING 时取消不应改写为 CANCELLED。
+        let rt = test_runtime();
+        let id = uniq("t-cas");
+        let abort = looping_abort(&rt);
+        let done_state = Arc::new(AtomicU8::new(ST_DONE));
+        let cancel = Arc::new(AtomicBool::new(false));
+        workers().lock().unwrap().insert(
+            id.clone(),
+            WorkerEntry { abort, cancel: cancel.clone(), state: done_state.clone() },
+        );
+        cancel_worker(&id);
+        assert!(!workers().lock().unwrap().contains_key(&id));
+        // 虽然调用了 cancel_worker，但由于状态已是 DONE，compare_exchange 失败 → 保持 DONE。
+        assert_eq!(done_state.load(Ordering::SeqCst), ST_DONE);
+        // 取消标记仍会被置位（abort 无碍，仅状态机不再变动）。
+        assert!(cancel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn status_reports_running_then_idle_after_removal() {
+        let rt = test_runtime();
+        let id = uniq("t-status");
+        let abort = looping_abort(&rt);
+        let state = Arc::new(AtomicU8::new(ST_RUNNING));
+        let cancel = Arc::new(AtomicBool::new(false));
+        workers().lock().unwrap().insert(
+            id.clone(),
+            WorkerEntry { abort, cancel: cancel.clone(), state: state.clone() },
+        );
+        // running=true 时 status 附 state / cancelled。
+        let m = workers().lock().unwrap();
+        let w = m.get(&id).unwrap();
+        let running = w.state.load(Ordering::SeqCst) == ST_RUNNING;
+        drop(m);
+        assert!(running, "注册在表内且状态 RUNNING 应视为运行中");
+        // 移除后（如 run_agent 自然结束/取消）→ idle。
+        cancel_worker(&id);
+        assert!(!workers().lock().unwrap().contains_key(&id));
     }
 }
