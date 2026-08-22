@@ -1859,6 +1859,18 @@ fn estimate_tokens(msgs: &[serde_json::Value]) -> usize {
     chars / 2 + count * 3
 }
 
+/// 估算工具定义（tools 数组）的固定开销 token —— 它对每个请求都会发送，
+/// 不计入会低估真实发送量，进而在工具增多时逼近上游硬限制。
+fn estimate_tools_tokens(tools: &[serde_json::Value]) -> usize {
+    let mut chars = 0usize;
+    for t in tools {
+        if let Some(s) = serde_json::to_string(t).ok() {
+            chars += s.chars().count();
+        }
+    }
+    chars / 2 + tools.len() * 4
+}
+
 // ============ 事件溯源会话模型（对齐 dsh 的 append-only Session + surface 派生） ============
 // 核心思想：Agent 的交互历史不直接存成「消息数组」，而是维护一份**只追加（append-only）的事件日志**，
 // LLM 请求所需的 messages 每次都从日志**派生（derive）**。这样：
@@ -2210,8 +2222,9 @@ pub async fn ai_chat_agent(
     for _round in 0..max_rounds {
         // 熔断阈值随模型档案可配置：未配置则沿用旧默认（high=36k / hard=96k）。
         // 对 1M/128k 等大上下文模型调高 profile.max_context_tokens 即可放宽，不再一刀切。
+        // 统一按档案换算、不按模型类别分档：因为我们 AI 路由统一且 profile 已足够完备。
         let cap = cfg.context_cap();
-        let token_high = (cap / 5).max(8_000);      // 估算 token 达到即压缩
+        let token_high = (cap / 5).max(8_000);       // 估算 token 达到即压缩
         let token_hard = (cap / 2).min(cap).max(16_000); // 压缩后仍超 → 熔断终止
 
         // 上下文压缩：replace 遮蔽式（append-only，不删事件），早期回合压成摘要。
@@ -2224,7 +2237,10 @@ pub async fn ai_chat_agent(
         }
         // 派生当次请求的 messages（含中断工具恢复；纯文本系统已并入 system_final）。
         let derived = derive_messages(&session, &system_final, collect_interrupted_tools(&session));
-        if estimate_tokens(&derived) > token_hard {
+        // 真实发送量 = 派生消息 + 工具定义固定开销（tools 每请求都携带，必须计入，
+        // 否则工具增多时会低估实际上下文、逼近上游硬限制）。
+        let fixed_overhead = estimate_tools_tokens(&tools);
+        if estimate_tokens(&derived) > token_hard || estimate_tokens(&derived) + fixed_overhead > cap {
             let msg = format!("上下文超限（估算 >{} token，尝试压缩后仍超出），已终止本轮", token_hard);
             emit_agent_error(&app, &request_id, &msg);
             return Err(msg);
