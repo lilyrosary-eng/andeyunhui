@@ -1,0 +1,1229 @@
+
+// 全局 AI 服务 · 子模块：Agent 工具（Tool）
+// （由 ai_service.rs 机械拆分而来，逻辑零改动）
+
+use std::io::BufRead;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use crate::services::mcp_service;
+use tauri::{AppHandle, Emitter};
+
+// ============ Agent 能力：工具注册表 + 原生 tool_calls 循环（阶段1） ============
+// 借鉴 dsh(deepseek-harness, MIT) 的 core/tools 与 core/agent-loop 设计思路，
+// 落地为本项目的 OpenAI 兼容端点实现。与 ai_chat（纯对话流式）互补：
+// 不用流式检测 tool_calls（流式分段叠加易碎），改用「非流式判断 → 含 tool_calls
+// 则执行并按 role:"tool" 回填重发 → 直到纯文本」。Agent 为增量能力，默认前端不调即不启用，
+// ai_chat 行为完全不受影响。
+
+/// 工具执行时的上下文（前端/本轮请求相关），随每一次调用传入 execute。
+#[derive(Clone)]
+pub(crate) struct ToolContext {
+    /// 用于发射授权请求等事件（emit ai-agent-approval）。
+    pub app: AppHandle,
+    /// 本轮请求 id，事件负载中回传，便于前端按请求区分。
+    pub request_id: String,
+    /// AI 编程面板当前项目根目录（文件工具判“项目内”用）。
+    pub project_root: Option<PathBuf>,
+}
+
+/// 模型可调用的工具。
+/// execute 为异步实现：文件写给项目根外需等待用户授权、命令执行需限时，故在 async 中 await。
+/// 阻塞 IO（std::fs / 进程等待）内部用 spawn_blocking，避免卡住 Tokio 运行时。
+#[async_trait::async_trait]
+pub(crate) trait AiTool: Send + Sync {
+    fn name(&self) -> &'static str;
+    /// OpenAI functions 格式 schema，供 /chat/completions 的 tools 参数。
+    fn function_schema(&self) -> serde_json::Value;
+    /// 执行工具；args 为模型传入的 JSON 对象，ctx 提供本轮上下文。
+    /// 错误以 Err(text) 返回，仍作为 tool 结果回填给模型。
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String>;
+}
+
+/// 当前本机时间工具：模型借此把「现在几点/今天日期」这类实时问题交给工具答，避免凭空编造。
+struct NowTool;
+#[async_trait::async_trait]
+impl AiTool for NowTool {
+    fn name(&self) -> &'static str {
+        "get_current_time"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "获取当前时刻（本机时区）。当用户询问『现在几点』『今天几号』『什么时候了』时调用。",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        })
+    }
+    async fn execute(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
+        Ok(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+    }
+}
+
+/// 安全计算器：仅支持数字与 + - * / ( ) 及一元正负号。递归下降求值，杜绝任意代码执行。
+struct CalculatorTool;
+#[async_trait::async_trait]
+impl AiTool for CalculatorTool {
+    fn name(&self) -> &'static str {
+        "calculator"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "计算数学表达式。仅支持数字与 + - * / 及括号（如 (12.5+7)*3/2）。需要准确算术时调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "expression": { "type": "string", "description": "要计算的数学表达式" }
+                    },
+                    "required": ["expression"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
+        let expr = args
+            .get("expression")
+            .and_then(|v| v.as_str())
+            .ok_or("缺少 expression 参数")?;
+        let mut p = SafeEval { s: expr, pos: 0 };
+        let val = p.parse_expr()?;
+        p.skip_ws();
+        if p.pos < p.s.len() {
+            return Err(format!("表达式存在多余字符: '{}'", &p.s[p.pos..]));
+        }
+        Ok(format!("= {}", val))
+    }
+}
+
+// ========== Plan / Todo 工具（B 增强：让 Agent 有「可见、可更新」的任务清单） ==========
+//
+// 目标：模型在展开长任务时，先用 create_plan 确立计划，再按步骤 add_todo，
+// 每完成一步 mark_done，让前端（IDE · AI 编程）实时渲染出一块「计划/待办」面板。
+// 计划状态保存在本进程静态存储中（单份当前计划），供同进程内数次请求延续；
+// 工具结果回传「完整计划渲染」，使模型每一轮都能看到（并据此更新）任务全貌。
+//
+// 关键：execute 为同步函数，内部用 Mutex 瞬时加锁读写——无跨 await、无死锁风险。
+
+/// 单条待办。
+#[derive(Clone, serde::Serialize)]
+struct PlanTodo {
+    id: String,
+    content: String,
+    done: bool,
+}
+
+/// 当前计划。
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct Plan {
+    title: String,
+    next_id: u64,
+    todos: Vec<PlanTodo>,
+}
+
+/// 全局计划存储：单份「当前计划」，跨请求延续，供 plan 工具读写。
+static PLAN_STORE: OnceLock<Mutex<Plan>> = OnceLock::new();
+pub(crate) fn plan_store() -> &'static Mutex<Plan> {
+    PLAN_STORE.get_or_init(|| Mutex::new(Plan { title: String::new(), next_id: 1, todos: vec![] }))
+}
+
+/// 把当前计划渲染为模型可见的文本（含 id，便于调用方按 id 勾选/删除）。
+fn render_plan(p: &Plan) -> String {
+    if p.todos.is_empty() {
+        return if p.title.is_empty() {
+            "（当前尚未创建计划）".to_string()
+        } else {
+            format!("📋 计划「{}」\n（还没有任何待办）", p.title)
+        };
+    }
+    let mut s = format!("📋 计划「{}」", p.title);
+    for t in &p.todos {
+        let mark = if t.done { "[x]" } else { "[ ]" };
+        s.push_str(&format!("\n- {} #{} {}", mark, t.id, t.content));
+    }
+    s
+}
+
+/// Plan / Todo 工具：维护一份「计划 + 待办清单」并实时回传完整状态。
+/// 通过 action 参数区分操作；返回完整计划渲染（模型据此继续决策）。
+struct PlanTool;
+#[async_trait::async_trait]
+impl AiTool for PlanTool {
+    fn name(&self) -> &'static str {
+        "plan"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "管理一份『计划 + 待办清单』。action 取值：create_plan(title) 新建计划；add_todo(content) 追加待办；mark_done(id) 勾选完成；mark_undone(id) 取消勾选；delete_todo(id) 删除待办；list 查看当前计划。每次返回完整计划，便于你据此继续规划。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "description": "create_plan / add_todo / mark_done / mark_undone / delete_todo / list" },
+                        "title": { "type": "string", "description": "create_plan 时的新计划标题" },
+                        "content": { "type": "string", "description": "add_todo 时的待办内容" },
+                        "id": { "type": "string", "description": "mark_done / mark_undone / delete_todo 时的待办 id" }
+                    },
+                    "required": ["action"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let mut g = plan_store()
+            .lock()
+            .map_err(|_| "计划存储锁获取失败".to_string())?;
+        match action {
+            "create_plan" => {
+                g.title = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("未命名计划")
+                    .to_string();
+                g.next_id = 1;
+                g.todos.clear();
+            }
+            "add_todo" => {
+                let content = args
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if content.trim().is_empty() {
+                    return Err("add_todo 缺少 content 参数".to_string());
+                }
+                let id = g.next_id.to_string();
+                g.next_id += 1;
+                g.todos.push(PlanTodo { id, content, done: false });
+            }
+            "mark_done" | "mark_undone" => {
+                let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let done = action == "mark_done";
+                let mut hit = false;
+                for t in g.todos.iter_mut() {
+                    if t.id == id {
+                        t.done = done;
+                        hit = true;
+                        break;
+                    }
+                }
+                if !hit {
+                    return Err(format!("找不到待办 #{}", id));
+                }
+            }
+            "delete_todo" => {
+                let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let before = g.todos.len();
+                g.todos.retain(|t| t.id != id);
+                if g.todos.len() == before {
+                    return Err(format!("找不到待办 #{}", id));
+                }
+            }
+            "list" => {}
+            _ => return Err(format!("未知 action: '{}'（可选 create_plan/add_todo/mark_done/mark_undone/delete_todo/list）", action)),
+        }
+        Ok(render_plan(&g))
+    }
+}
+
+// ========== 文件读写 / 命令执行 工具（C 增强：让 Agent 能落到真实文件系统与 shell） ==========
+//
+// 安全边界（按用户授权意图）：
+// - read_file：任意路径读取（只读、非破坏），无审批。
+// - write_file：目标在项目根目录内 → 直接写；在项目根外 → 交互式审批（ai-agent-approval 事件
+//   → 前端弹窗 → 回调 ai_agent_approve），超时未决则视为拒绝。
+// - run_command：任意命令，限时 15s、非 shell 中文案，走项目根或 cwd 参数。
+// 阻塞 IO 一律 spawn_blocking，符合本仓库「阻塞操作不得占用 Tokio 运行时」约定。
+
+/// 待用户审批的挂起操作。
+pub(crate) struct PendingApproval {
+    _tool: String,
+    _operation: String,
+    pub(crate) sender: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// 全局审批注册表：approval_id → 挂起操作。ai_agent_approve 从这张表取回发送端并 resolve。
+static APPROVAL_STORE: OnceLock<Mutex<std::collections::HashMap<String, PendingApproval>>> = OnceLock::new();
+pub(crate) fn approval_store() -> &'static Mutex<std::collections::HashMap<String, PendingApproval>> {
+    APPROVAL_STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 发起一次审批：注册挂起操作 → 发射 ai-agent-approval → 等待用户决定（默认 120s 超时拒绝）。
+async fn request_approval(ctx: &ToolContext, tool: &str, operation: &str) -> Result<bool, String> {
+    let approval_id = format!("ap_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    approval_store()
+        .lock()
+        .map_err(|_| "审批存储锁获取失败".to_string())?
+        .insert(
+            approval_id.clone(),
+            PendingApproval { _tool: tool.to_string(), _operation: operation.to_string(), sender: tx },
+        );
+    let _ = ctx.app.emit(
+        "ai-agent-approval",
+        serde_json::json!({
+            "requestId": ctx.request_id,
+            "approvalId": approval_id,
+            "tool": tool,
+            "operation": operation,
+        }),
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+        Ok(Ok(true)) => Ok(true),
+        Ok(Ok(false)) => Err("用户拒绝了该文件操作".to_string()),
+        Ok(Err(_)) => Err("授权通道已关闭".to_string()),
+        Err(_) => {
+            let _ = approval_store().lock().map(|mut m| m.remove(&approval_id));
+            Err("授权请求超时（120s 未确认，已拒绝）".to_string())
+        }
+    }
+}
+
+/// 简短随机串（事件/审批 id 后缀，避免多请求冲突）。
+fn rand_short() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    format!("{:08x}", t)
+}
+
+/// 判断 target 是否落在 root 之下（对已存在路径 canonicalize；未存在的写目标取其最近存在祖先）：
+/// 用于「写文件项目根内直接放行 / 项目根外需审批」的判定。
+fn is_under_path(target: &std::path::Path, root: &std::path::Path) -> bool {
+    let r = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let norm = target
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            target
+                .parent()
+                .and_then(|p| p.canonicalize().ok().map(|c| c.join(target.file_name().unwrap_or_default())))
+                .unwrap_or_else(|| target.to_path_buf())
+        });
+    norm.starts_with(&r)
+}
+
+/// 受保护路径判定：VCS 目录、依赖目录、密钥/凭据/环境变量文件。
+/// 用于写/编辑/删除的「硬拦截」（读取不受限）。命名大小写不敏感（Windows 友好）。
+fn protected_path(p: &std::path::Path) -> bool {
+    for seg in p.components() {
+        if let std::path::Component::Normal(s) = seg {
+            let seg = s.to_string_lossy().to_lowercase();
+            if seg == ".git" || seg == ".svn" || seg == ".hg" || seg == "node_modules" {
+                return true;
+            }
+        }
+    }
+    let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    const SECRETS: &[&str] = &[
+        ".env", "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa", "credentials",
+        "credentials.json", "credentials.jsonc", ".npmrc", ".pypirc", ".netrc",
+        "known_hosts", "authorized_keys", ".bash_history", ".zsh_history", ".gitconfig",
+        ".mcp_config.json", "mcp_config.json",
+    ];
+    SECRETS.contains(&name.as_str()) || name.starts_with(".env.")
+}
+
+/// 危险命令兜底黑名单：命中即拒绝（防御纵深；真正的护栏是任意命令限时+审批）。
+/// 仅拦截几乎不可能在 agent 里合法出现的破坏性/不可逆操作，避免误伤正常构建命令。
+fn command_is_dangerous(cmd: &str) -> bool {
+    let c = cmd.to_lowercase();
+    const DANGEROUS: &[&str] = &[
+        "format c:", "diskpart", "mkfs", "dd if=/dev/zero",
+        "shutdown", "reboot", "init 0", "init 6", "poweroff",
+        ":(){", "rm -rf / --no-preserve-root", "rm -rf ~/.config",
+        "del /s /q /", "rd /s /q /", "git push --force",
+    ];
+    DANGEROUS.iter().any(|p| c.contains(p))
+}
+
+/// 会话级「信任项目」集合：首次在某个项目根内执行写操作时弹窗确认，
+/// 通过后本会话内该项目内写文件免单次审批。
+static TRUSTED_PROJECTS: OnceLock<Mutex<std::collections::HashSet<std::path::PathBuf>>> = OnceLock::new();
+fn trusted_projects() -> &'static Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    TRUSTED_PROJECTS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 首次访问未信任项目 → 弹「信任此项目」确认；通过后记录本会话信任。已信任则直接返回。
+async fn ensure_project_trusted(ctx: &ToolContext) -> Result<(), String> {
+    let Some(root) = &ctx.project_root else { return Ok(()); };
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if trusted_projects().lock().map_err(|_| "信任存储锁失败".to_string())?.contains(&canon) {
+        return Ok(());
+    }
+    let ok = request_approval(
+        ctx,
+        "trust",
+        &format!("首次在此项目内写文件，是否信任该目录（本会话内经此确认后，项目内写文件免单次确认）？\n{}", root.display()),
+    ).await?;
+    if !ok {
+        return Err("用户未信任该项目，已拒绝写入".to_string());
+    }
+    trusted_projects().lock().map_err(|_| "信任存储锁失败".to_string())?.insert(canon);
+    Ok(())
+}
+
+/// 一次待审阅的暂存编辑。write/edit/delete 先落到该结构（不立即写盘），
+/// read_file 会叠加这些暂存生成 overlay 视图（模型能读到改后内容），
+/// agent-loop 结束后 emit ai-agent-edits 交由前端审阅，用户确认后才真正写盘。
+#[derive(Clone)]
+pub(crate) struct PendingEdit {
+    pub(crate) id: String,
+    pub(crate) action: String, // write / edit / delete
+    pub(crate) path: String,
+    // write: 新全文；edit: 用于精确定位替换信息（old/new）；delete 无
+    pub(crate) new_content: Option<String>,
+    pub(crate) old_string: Option<String>,
+    pub(crate) new_string: Option<String>,
+    pub(crate) order: usize,
+}
+
+/// 请求级编辑暂存：request_id → 该请求产出的待审阅编辑（按到达顺序）。
+static EDIT_STORE: OnceLock<Mutex<std::collections::HashMap<String, Vec<PendingEdit>>>> = OnceLock::new();
+pub(crate) fn edit_store() -> &'static Mutex<std::collections::HashMap<String, Vec<PendingEdit>>> {
+    EDIT_STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 记录一次暂存编辑；order 为追加序号，read overlay 与最终落盘都按此顺序重放。
+fn record_edit(request_id: &str, mut e: PendingEdit) {
+    let mut store = edit_store().lock().unwrap_or_else(|_| {
+        // 锁中毒兜底：清空重建，极罕见
+        *EDIT_STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock().expect("edit store lock") = Default::default();
+        edit_store().lock().expect("edit store relock")
+    });
+    let list = store.entry(request_id.to_string()).or_default();
+    e.order = list.len();
+    list.push(e);
+}
+
+/// 把当前磁盘内容叠加该请求所有暂存编辑，重放生成「改后视图」。
+/// 返回 (overlay_text, deleted)。若该路径被 <delete> 暂存，deleted=true 且 overlay 为空。
+fn apply_pending_overlay(request_id: &str, path: &std::path::Path, base: String) -> Result<(String, bool), String> {
+    let store = edit_store().lock().map_err(|_| "编辑存储锁获取失败".to_string())?;
+    let Some(list) = store.get(request_id) else {
+        return Ok((base, false));
+    };
+    // 只取作用于同一文件的编辑，按 order 顺序重放
+    let mut text = base.clone();
+    let mut deleted = false;
+    let mut applied = 0usize;
+    for e in list {
+        if e.path != path.to_string_lossy().as_ref() { continue; }
+        match e.action.as_str() {
+            "delete" => { deleted = true; text = String::new(); applied += 1; }
+            "write" => {
+                text = e.new_content.clone().unwrap_or_default();
+                deleted = false;
+                applied += 1;
+            }
+            "edit" => {
+                let old = e.old_string.clone().unwrap_or_default();
+                let new = e.new_string.clone().unwrap_or_default();
+                if !old.is_empty() && text.contains(&old) {
+                    let all = text.matches(&old).count() > 1;
+                    if all {
+                        text = text.replace(&old, &new);
+                    } else {
+                        // 替换首个匹配
+                        if let Some(idx) = text.find(&old) {
+                            let mut s = String::with_capacity(text.len() + new.len().saturating_sub(old.len()));
+                            s.push_str(&text[..idx]);
+                            s.push_str(&new);
+                            s.push_str(&text[idx + old.len()..]);
+                            text = s;
+                        }
+                    }
+                    applied += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if deleted {
+        Ok((String::new(), true))
+    } else if applied > 0 {
+        // 追加提示「叠加了 N 条未确认改动」，帮助模型理解这是改后视图
+        Ok((format!("{}（已叠加 {} 条待审阅改动，尚未写入磁盘）", text, applied), false))
+    } else {
+        Ok((text, false))
+    }
+}
+
+/// 文件工具：read_file（只读，叠加暂存视图）/ write_file（暂存）/ edit（暂存）/ delete（暂存）。
+/// 所有写操作先进请求级暂存，经 ai-agent-edits 审阅后才真正落盘；项目根外写入仍先交互审批。
+struct FileTool;
+#[async_trait::async_trait]
+impl AiTool for FileTool {
+    fn name(&self) -> &'static str {
+        "file"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "读写/编辑/删除文件。action：read_file(path, offset?, limit?) 读取文件内容（任意路径，只读；offset 为起始字符偏移、limit 为字符数，用于大文件分段读取）；write_file(path, content) 整写文件；edit(path, old_string, new_string, occurrences?) 精准补丁——在原文中定位并替换（不重写整个文件；occurrences 省略替换首个、填 all 替换全部，旧文本须可唯一定位）；delete(path) 删除文件。写/删操作不会立即落盘：会先进入待审阅状态，由用户逐条确认后才真正写入磁盘；期间你用 read_file 读到的是叠加了你所有未确认改动后的视图。项目根外的写/删会额外触发交互授权。路径请传绝对路径。改代码优先用 edit，避免整写覆盖遗漏。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "description": "read_file / write_file / edit / delete" },
+                        "path": { "type": "string", "description": "绝对路径" },
+                        "content": { "type": "string", "description": "write_file 时写入的完整内容" },
+                        "offset": { "type": "integer", "description": "read_file 时的起始字符偏移（从 0 开始，默认 0）" },
+                        "limit": { "type": "integer", "description": "read_file 时的最大字符数（默认 60000）" },
+                        "old_string": { "type": "string", "description": "edit 时要在原文中查找的旧文本（须唯一或由 occurrences 指定）" },
+                        "new_string": { "type": "string", "description": "edit 时替换成的新文本" },
+                        "occurrences": { "type": "string", "description": "edit 时替换数量：省略=首个，all=全部（默认首个）" }
+                    },
+                    "required": ["action", "path"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        use tokio::task::spawn_blocking;
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if path.is_empty() { return Err("file 工具缺少 path 参数".to_string()); }
+        let p = std::path::PathBuf::from(path);
+        match action {
+            "read_file" => {
+                // 偏移读取：offset/limit 按字符计，便于大文件分段（dsh 对齐）
+                let offset: usize = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let limit: usize = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(60_000) as usize;
+                let overlay_req = ctx.request_id.clone();
+                let content = spawn_blocking(move || -> Result<String, String> {
+                    let data = std::fs::read(&p).map_err(|e| format!("读取失败 {}: {}", p.display(), e))?;
+                    let full = String::from_utf8_lossy(&data).to_string();
+                    // 叠加该请求先前的未确认改动，生成「改后视图」（未删除时）
+                    let (overlaid, deleted) = apply_pending_overlay(&overlay_req, &p, full).map_err(|e| format!("叠加视图失败: {}", e))?;
+                    if deleted {
+                        return Ok(format!("（文件 {} 已被本请求暂存删除，尚未提交）", p.display()));
+                    }
+                    let chars = overlaid.chars().collect::<Vec<_>>();
+                    // 偏移取自叠加后内容的开头
+                    let total = chars.len();
+                    let start = offset.min(total);
+                    let end = (start + limit).min(total);
+                    let window: String = chars[start..end].iter().collect();
+                    let head = if offset > 0 {
+                        format!("（已从字符 #{} 开始显示，共 {} 字符）\n", start, total)
+                    } else if total > limit {
+                        format!("（文件较大，显示前 {} 字符,共 {} 字符；可用 offset 继续读取）\n", limit, total)
+                    } else {
+                        String::new()
+                    };
+                    Ok(format!("{}{}", head, window))
+                }).await.map_err(|e| format!("读取任务调度失败: {}", e))??;
+                Ok(content)
+            }
+            "write_file" => {
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if protected_path(&p) {
+                    return Err(format!("拒绝写入受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));
+                }
+                let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
+                if under {
+                    ensure_project_trusted(ctx).await?;
+                } else {
+                    request_approval(ctx, "file", &format!("写入外部路径: {}", p.display())).await?;
+                }
+                let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+                record_edit(&ctx.request_id, PendingEdit {
+                    id: edit_id,
+                    action: "write".to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    new_content: Some(content.clone()),
+                    old_string: None,
+                    new_string: None,
+                    order: 0,
+                });
+                Ok(format!("已暂存写入 {}（内容 {} 字符，等用户审阅确认后落盘；可用 read_file 查看改后视图）", p.display(), content.chars().count()))
+            }
+            "edit" => {
+                let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if old_string.is_empty() {
+                    return Err("edit 缺少 old_string 参数".to_string());
+                }
+                if protected_path(&p) {
+                    return Err(format!("拒绝编辑受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));
+                }
+                // 写语义与 write_file 一致：项目根内直写、根外审批；首次需信任项目
+                let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
+                if under {
+                    ensure_project_trusted(ctx).await?;
+                } else {
+                    request_approval(ctx, "file", &format!("编辑外部路径: {}", p.display())).await?;
+                }
+                // 暂存前先本地校验 old_string 在「当前叠加视图」中可定位（避免审阅时才发现替换失败）
+                let overlay_req = ctx.request_id.clone();
+                let p_for_ov = p.clone();
+                let wants = old_string.clone();
+                let preview_ok = spawn_blocking(move || -> Result<(bool, String), String> {
+                    let text = if let Ok(data) = std::fs::read(&p_for_ov) {
+                        String::from_utf8_lossy(&data).to_string()
+                    } else {
+                        String::new()
+                    };
+                    let (overlaid, _deleted) = apply_pending_overlay(&overlay_req, &p_for_ov, text)?;
+                    Ok((overlaid.contains(&wants), overlaid))
+                }).await.map_err(|e| format!("校验任务调度失败: {}", e))??;
+                if !preview_ok.0 {
+                    return Err(format!("old_string 在当前视图不存在，无法定位：{}", old_string));
+                }
+                let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+                record_edit(&ctx.request_id, PendingEdit {
+                    id: edit_id,
+                    action: "edit".to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    new_content: None,
+                    old_string: Some(old_string),
+                    new_string: Some(new_string),
+                    order: 0,
+                });
+                Ok(format!("已暂存编辑 {}（等用户审阅确认后落盘）", p.display()))
+            }
+            "delete" => {
+                let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
+                if protected_path(&p) {
+                    return Err(format!("拒绝删除受保护路径（密钥/凭据/VCS/依赖目录）: {}", p.display()));
+                }
+                if under {
+                    ensure_project_trusted(ctx).await?;
+                } else {
+                    request_approval(ctx, "file", &format!("删除外部路径: {}", p.display())).await?;
+                }
+                let edit_id = format!("e_{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis()).unwrap_or(0), rand_short());
+                record_edit(&ctx.request_id, PendingEdit {
+                    id: edit_id,
+                    action: "delete".to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    new_content: None,
+                    old_string: None,
+                    new_string: None,
+                    order: 0,
+                });
+                Ok(format!("已暂存删除 {}（等用户审阅确认后落盘）", p.display()))
+            }
+            _ => Err(format!("未知 action: '{}'（可选 read_file/write_file/edit/delete）", action)),
+        }
+    }
+}
+
+/// 命令工具：运行 shell 命令，限时 15s、非交互，返回 stdout/stderr（截断）。
+struct CommandTool;
+#[async_trait::async_trait]
+impl AiTool for CommandTool {
+    fn name(&self) -> &'static str {
+        "run_command"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "执行 shell 命令并返回输出。非交互。参数：command(必填，要执行的命令)；cwd(可选，工作目录，默认项目根)；timeout(可选，超时秒数，默认15，上限120)。用于运行 git/npm/pnpm/node/脚本等。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "要执行的 shell 命令" },
+                        "cwd": { "type": "string", "description": "工作目录（默认项目根目录）" },
+                        "timeout": { "type": "integer", "description": "超时秒数（默认15，上限120）" }
+                    },
+                    "required": ["command"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if command.is_empty() { return Err("run_command 缺少 command 参数".to_string()); }
+        if command_is_dangerous(&command) {
+            return Err("该命令命中危险操作黑名单（格式化/磁盘/关机/不可逆删除等），已拒绝执行".to_string());
+        }
+        // timeout：可选超时秒数，默认 15，封顶 120，最小 1
+        let timeout_secs: u64 = args.get("timeout")
+            .and_then(|v| v.as_u64())
+            .map(|t| t.clamp(1, 120))
+            .unwrap_or(15);
+        let cwd = args.get("cwd").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
+        let cwd: Option<std::path::PathBuf> = cwd.map(std::path::PathBuf::from).or_else(|| ctx.project_root.clone());
+
+        // Windows 用 cmd /C，其余平台用 sh -c；由模型提供整条命令。
+        let (program, shell_arg): (&str, &str) = if cfg!(windows) {
+            ("cmd", "/C")
+        } else {
+            ("sh", "-c")
+        };
+        let mut proc = tokio::process::Command::new(program);
+        proc.arg(shell_arg).arg(&command);
+        if let Some(d) = &cwd { proc.current_dir(d); }
+        proc.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+
+        let out = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), proc.output()).await;
+        let status = out.map_err(|_| format!("命令执行超时（>{}s，已中止）", timeout_secs))?
+            .map_err(|e| format!("命令执行失败: {}", e))?;
+        let mut text = String::new();
+        if !status.stdout.is_empty() {
+            text.push_str(&String::from_utf8_lossy(&status.stdout));
+        }
+        if !status.stderr.is_empty() {
+            if !text.is_empty() { text.push('\n'); }
+            text.push_str(&String::from_utf8_lossy(&status.stderr));
+        }
+        const OCAP: usize = 8000;
+        let text = if text.chars().count() > OCAP {
+            format!("{}（输出过长，已截断）", text.chars().take(OCAP).collect::<String>())
+        } else { text };
+        if status.status.success() {
+            Ok(if text.trim().is_empty() { "（命令成功，无输出）".to_string() } else { text })
+        } else {
+            Err(format!("命令退出码 {}：{}", status.status.code().unwrap_or(-1), text))
+        }
+    }
+}
+
+/// 极简安全表达式求值器（递归下降）。
+struct SafeEval<'a> {
+    s: &'a str,
+    pos: usize,
+}
+
+impl<'a> SafeEval<'a> {
+    fn peek(&self) -> Option<char> {
+        self.s.get(self.pos..)?.chars().next()
+    }
+    fn skip_ws(&mut self) {
+        while let Some(c) = self.peek() {
+            if c.is_ascii_whitespace() {
+                self.pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+    fn parse_expr(&mut self) -> Result<f64, String> {
+        self.parse_add()
+    }
+    fn parse_add(&mut self) -> Result<f64, String> {
+        let mut v = self.parse_mul()?;
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some('+') => {
+                    self.pos += 1;
+                    v += self.parse_mul()?;
+                }
+                Some('-') => {
+                    self.pos += 1;
+                    v -= self.parse_mul()?;
+                }
+                _ => return Ok(v),
+            }
+        }
+    }
+    fn parse_mul(&mut self) -> Result<f64, String> {
+        let mut v = self.parse_atom()?;
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some('*') => {
+                    self.pos += 1;
+                    v *= self.parse_atom()?;
+                }
+                Some('/') => {
+                    self.pos += 1;
+                    let d = self.parse_atom()?;
+                    if d == 0.0 {
+                        return Err("除数为 0".into());
+                    }
+                    v /= d;
+                }
+                _ => return Ok(v),
+            }
+        }
+    }
+    fn parse_atom(&mut self) -> Result<f64, String> {
+        self.skip_ws();
+        match self.peek() {
+            Some('(') => {
+                self.pos += 1;
+                let v = self.parse_expr()?;
+                self.skip_ws();
+                if self.peek() != Some(')') {
+                    return Err("缺少右括号".into());
+                }
+                self.pos += 1;
+                Ok(v)
+            }
+            Some('+') | Some('-') => {
+                let sign = if self.peek() == Some('-') { -1.0 } else { 1.0 };
+                self.pos += 1;
+                Ok(sign * self.parse_atom()?)
+            }
+            _ => self.parse_number(),
+        }
+    }
+    fn parse_number(&mut self) -> Result<f64, String> {
+        self.skip_ws();
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() || c == '.' {
+                self.pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let tok = &self.s[start..self.pos];
+        if tok.is_empty() {
+            return Err("表达式为空".into());
+        }
+        tok.parse::<f64>()
+            .map_err(|_| format!("数字无效: '{}'", tok))
+    }
+}
+
+// ========== 代码智能 + 扩展 工具（合并 IDE Agent 长处，参照 dsh tool-fs-search 设计） ==========
+//
+// 保留 Rust function-call 底座，把 IDE Agent 里最有价值的搜索/扩展能力并入：
+// - grep：内容搜索，gitignore 感知，pattern/path/include 参数、按文件分组输出、匹配上限兜底（对齐 dsh）
+// - glob：文件名搜索，gitignore 感知，pattern/path 参数、按修改时间排序、路径上限兜底（对齐 dsh）
+// - mcp：复用本项目 mcp_service，把已配置的 MCP 工具暴露给 Agent（对齐 IDE 的 server+tool+args 范式）
+// 三者只读/非破坏，无需交互审批；阻塞 IO 一律 spawn_blocking。
+
+/// 单次 grep 最多保留的行匹配数（对齐 Claude Code GrepTool 默认 head_limit / dsh GREP_MAX_MATCHES）。
+const GREP_MAX_MATCHES: usize = 250;
+/// 单条匹配行的最大字符数（超出截断，UTF-8 安全）。
+const GREP_MAX_LINE_CHARS: usize = 2000;
+/// 单次 glob 最多返回路径数（对齐 dsh GLOB_MAX_RESULTS）。
+const GLOB_MAX_RESULTS: usize = 100;
+/// glob 遍历时顶层的 VCS 元数据目录（对齐 dsh GLOB_VCS_EXCLUDES）。
+const GLOB_VCS_EXCLUDES: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
+
+/// 判断路径是否命中单一 glob：完整路径或仅文件名命中其一即可（align dsh「无分隔符 pattern 匹配任意深度 basename」）。
+fn glob_matches(matcher: &globset::GlobMatcher, path: &std::path::Path) -> bool {
+    if matcher.is_match(path.to_string_lossy().as_ref()) {
+        return true;
+    }
+    match path.file_name() {
+        Some(n) => matcher.is_match(n.to_string_lossy().as_ref()),
+        None => false,
+    }
+}
+
+/// grep：在项目内用正则搜索文件内容，返回匹配行及行号（按文件分组输出）。
+struct GrepTool;
+#[async_trait::async_trait]
+impl AiTool for GrepTool {
+    fn name(&self) -> &'static str {
+        "grep"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "在项目内用正则表达式搜索文件内容，返回匹配行及行号、按文件分组。gitignore 感知（自动跳过 node_modules/.git 等）。定位关键词/代码时应使用本工具，而非 run_command 'grep'。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "要搜索的正则表达式（regex 语法，如 'fn .*_tool'）" },
+                        "path": { "type": "string", "description": "搜索的目标目录或文件，默认当前项目根；相对路径基于项目根解析" },
+                        "include": { "type": "string", "description": "仅搜索匹配该单一 glob 的文件（如 '*.ts'、'*.{js,ts}'），不支持逗号列表或取反" }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if pattern.is_empty() {
+            return Err("grep 缺少 pattern 参数".to_string());
+        }
+        // 提前校验正则合法性
+        regex::Regex::new(&pattern).map_err(|e| format!("正则无效: {}", e))?;
+        let root = args
+            .get("path").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| ctx.project_root.clone())
+            .ok_or_else(|| "grep 缺少 path，且未提供项目根目录".to_string())?;
+        let include = args
+            .get("include").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let matcher = match &include {
+            Some(g) => Some(
+                globset::GlobBuilder::new(g).literal_separator(false).build()
+                    .map_err(|e| format!("include glob 无效: {}", e))?.compile_matcher(),
+            ),
+            None => None,
+        };
+
+        // gitignore 感知遍历 + 逐行正则匹配，全部阻塞 IO → spawn_blocking
+        let (matches, truncated) = tokio::task::spawn_blocking(move || -> Result<(Vec<(String, usize, String)>, bool), String> {
+            let re = regex::Regex::new(&pattern).map_err(|e| format!("正则无效: {}", e))?;
+            let mut out: Vec<(String, usize, String)> = Vec::new();
+            let mut truncated = false;
+            let mut walk = ignore::WalkBuilder::new(&root);
+            walk.standard_filters(true);
+            for entry in walk.build().flatten() {
+                if out.len() >= GREP_MAX_MATCHES {
+                    truncated = true;
+                    break;
+                }
+                if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fp = entry.path();
+                if let Some(m) = &matcher {
+                    if !glob_matches(m, fp) {
+                        continue;
+                    }
+                }
+                let Ok(file) = std::fs::File::open(fp) else { continue; };
+                let mut reader = std::io::BufReader::new(file);
+                let mut line_no = 0usize;
+                let mut first_read = true;
+                let mut tmp: Vec<u8> = Vec::with_capacity(512);
+                loop {
+                    if out.len() >= GREP_MAX_MATCHES {
+                        truncated = true;
+                        break;
+                    }
+                    tmp.clear();
+                    let n = reader
+                        .read_until(b'\n', &mut tmp)
+                        .map_err(|e| format!("读取 {} 失败: {}", fp.display(), e))?;
+                    if n == 0 {
+                        break;
+                    }
+                    if first_read {
+                        // 二进制探针：首块含 NUL 视为二进制，跳过整文件
+                        if tmp.contains(&0) {
+                            break;
+                        }
+                        first_read = false;
+                    }
+                    line_no += 1;
+                    if tmp.last() == Some(&b'\n') {
+                        tmp.pop();
+                    }
+                    if tmp.last() == Some(&b'\r') {
+                        tmp.pop();
+                    }
+                    let line = String::from_utf8_lossy(&tmp);
+                    if re.is_match(&line) {
+                        let capped: String = line.chars().take(GREP_MAX_LINE_CHARS).collect();
+                        out.push((fp.to_string_lossy().to_string(), line_no, capped));
+                    }
+                }
+            }
+            if out.len() >= GREP_MAX_MATCHES {
+                truncated = true;
+            }
+            Ok((out, truncated))
+        })
+        .await
+        .map_err(|e| format!("grep 任务调度失败: {}", e))??;
+
+        let count = matches.len();
+        if count == 0 {
+            return Ok("No matches found".to_string());
+        }
+        // 按文件分组输出（dsh 约定：每个文件一段，下挂 Line N 行）
+        let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+        for (p, ln, line) in &matches {
+            match grouped.iter_mut().find(|(k, _)| k == p) {
+                Some((_, rows)) => rows.push(format!("Line {}: {}", ln, line)),
+                None => grouped.push((p.clone(), vec![format!("Line {}: {}", ln, line)])),
+            }
+        }
+        let mut s = format!("Found {} matches", count);
+        if truncated {
+            s.push_str(&format!("（已达单次上限 {} 条，结果已截断；请用更精确的 pattern/path/include）", GREP_MAX_MATCHES));
+        }
+        for (p, rows) in grouped {
+            s.push('\n');
+            s.push_str(&p);
+            s.push('\n');
+            s.push_str(&rows.join("\n"));
+        }
+        Ok(s)
+    }
+}
+
+/// glob：在项目内按文件名模式搜索文件路径（gitignore 感知、跳过 VCS 目录），按修改时间由新到旧排序。
+struct GlobTool;
+#[async_trait::async_trait]
+impl AiTool for GlobTool {
+    fn name(&self) -> &'static str {
+        "glob"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "按文件名 glob 模式搜索项目内文件路径（如 '**/*.ts'、'src/**/*.test.*'），返回文件路径列表，按修改时间由新到旧。gitignore 感知并跳过 VCS 目录。模式不含 '/' 时按任意深度 basename 匹配。定位文件用本工具而非 shell find/ls。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "匹配文件路径的 glob 模式（如 '**/*.ts'、'*.tsx'、'src/**/*.go'）" },
+                        "path": { "type": "string", "description": "搜索的起始目录，默认当前项目根；相对路径基于项目根解析" }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if pattern.is_empty() {
+            return Err("glob 缺少 pattern 参数".to_string());
+        }
+        let matcher = globset::GlobBuilder::new(&pattern).literal_separator(false).build()
+            .map_err(|e| format!("glob 模式无效: {}", e))?.compile_matcher();
+        let root = args
+            .get("path").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| ctx.project_root.clone())
+            .ok_or_else(|| "glob 缺少 path，且未提供项目根目录".to_string())?;
+
+        // 遍历收集命中文件及其修改时间，最后按 mtime 由新到旧排序、取前 N
+        let hit: Vec<(PathBuf, std::time::SystemTime)> = tokio::task::spawn_blocking(move || -> Result<Vec<(PathBuf, std::time::SystemTime)>, String> {
+            let mut found: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+            let mut walk = ignore::WalkBuilder::new(&root);
+            walk.standard_filters(true);
+            walk.filter_entry(|e| {
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    let n = e.file_name().to_string_lossy();
+                    return !GLOB_VCS_EXCLUDES.contains(&n.as_ref());
+                }
+                true
+            });
+            for entry in walk.build().flatten() {
+                if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fp = entry.path();
+                if !glob_matches(&matcher, fp) {
+                    continue;
+                }
+                let mtime = std::fs::metadata(fp).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                found.push((fp.to_path_buf(), mtime));
+            }
+            found.sort_by(|a, b| b.1.cmp(&a.1));
+            Ok(found)
+        })
+        .await
+        .map_err(|e| format!("glob 任务调度失败: {}", e))??;
+
+        if hit.is_empty() {
+            return Ok("No files found".to_string());
+        }
+        let total = hit.len();
+        let truncated = total > GLOB_MAX_RESULTS;
+        let mut out: Vec<String> = hit.into_iter().take(GLOB_MAX_RESULTS).map(|(p, _)| p.to_string_lossy().to_string()).collect();
+        if truncated {
+            out.push(format!("（Showing {} of {} paths；请缩小 pattern 或指定 path 查看更多）", GLOB_MAX_RESULTS, total));
+        }
+        Ok(out.join("\n"))
+    }
+}
+
+/// mcp：调用已配置的 MCP 服务器工具。复用 mcp_service::mcp_call_tool（spawn → call → kill）。
+/// 服务器 id 见 agent 系统提示注入的 MCP 工具清单；arguments 为该工具输入 schema 对应的 JSON 对象。
+struct McpTool;
+#[async_trait::async_trait]
+impl AiTool for McpTool {
+    fn name(&self) -> &'static str {
+        "mcp"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "调用已配置的 MCP（Model Context Protocol）服务器工具。server 填服务器 id，tool 填该服务器上的工具原始名，arguments 填工具输入结构对应的 JSON 对象（可省略则传空）。可调用的服务器与工具清单会在本会话系统提示中列出。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server": { "type": "string", "description": "MCP 服务器 id（系统提示中列出的 id）" },
+                        "tool": { "type": "string", "description": "该服务器上的工具原始名" },
+                        "arguments": { "type": "object", "description": "工具输入参数 JSON 对象（可选，默认空）" }
+                    },
+                    "required": ["server", "tool"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let tool_name = args.get("tool").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if server.is_empty() {
+            return Err("mcp 缺少 server 参数".to_string());
+        }
+        if tool_name.is_empty() {
+            return Err("mcp 缺少 tool 参数".to_string());
+        }
+        let arguments = args.get("arguments").cloned().filter(|v| v.is_object()).unwrap_or(serde_json::json!({}));
+        // 挂起/异常服务器不应无限阻塞 Agent：整体限时 30s
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            mcp_service::mcp_call_tool(ctx.app.clone(), server.clone(), tool_name.clone(), arguments),
+        )
+        .await
+        .map_err(|_| format!("MCP 调用超时（>30s，已中止）: {}:{}", server, tool_name))?
+        .map_err(|e| format!("MCP 调用失败: {}", e))?;
+        if !result.ok {
+            let detail = result.error.clone().unwrap_or_else(|| "无错误信息".to_string());
+            return Err(format!("MCP 工具 {}:{} 返回错误: {}", server, tool_name, detail));
+        }
+        // 渲染 content 块：text 拼接、image/audio/resource 占位（对齐 dsh extractText）
+        let mut parts: Vec<String> = Vec::new();
+        for block in &result.content {
+            let t = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match t {
+                "text" => {
+                    if let Some(txt) = block.get("text").and_then(|v| v.as_str()) {
+                        parts.push(txt.to_string());
+                    }
+                }
+                "image" => parts.push(format!("[image: {}, 内容已丢弃]", block.get("mimeType").and_then(|v| v.as_str()).unwrap_or("unknown"))),
+                "audio" => parts.push(format!("[audio: {}, 内容已丢弃]", block.get("mimeType").and_then(|v| v.as_str()).unwrap_or("unknown"))),
+                "resource" | "resource_link" => parts.push("[resource: 内容已丢弃]".to_string()),
+                _ => {}
+            }
+        }
+        if parts.is_empty() {
+            return Ok(format!("（MCP 工具 {}:{} 返回空内容）", server, tool_name));
+        }
+        Ok(parts.join("\n"))
+    }
+}
+
+/// 当前注册的全部工具（有序数组）。
+pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
+    vec![
+        Box::new(NowTool),
+        Box::new(CalculatorTool),
+        Box::new(PlanTool),
+        Box::new(FileTool),
+        Box::new(CommandTool),
+        Box::new(GrepTool),
+        Box::new(GlobTool),
+        Box::new(McpTool),
+    ]
+}
+
+/// 聚合已启用 MCP 服务器的工具清单，作为 guide 注入 agent 系统提示，让模型知道 mcp 工具可调用什么。
+/// 任一个服务器 list_tools 失败都静默降级（mcp_list_all_tools 内部已捕获）；整体限时 5s 防挂起。
+pub(crate) async fn mcp_tools_guide(app: &AppHandle) -> String {
+    let list = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        mcp_service::mcp_list_all_tools(app.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| Ok(Vec::new()))
+    .unwrap_or_default();
+    if list.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n\n可用 MCP 工具（用 mcp 工具调用，server 填服务器 id；arguments 按工具输入结构传 JSON）：");
+    for (id, name, tools) in list {
+        let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        s.push_str(&format!("\n- [{}] {}：{}", id, name, names.join(", ")));
+    }
+    s
+}
+
+/// 读取项目级「记忆/原则/工程契约」注入 Agent 上下文（对齐 IDE runAgent 的约定）：
+/// - 记忆/当日.md（今日不存在则取 记忆/ 目录下按文件名字典序最近一份 .md）
+/// - 原则/原则.md
+/// - 工程契约：AGENTS.md / CLAUDE.md / .cursorrules / GEMINI.md（取首个存在者）
+/// 仅读、仅在项目根内、各段有长度裁剪，避免上下文膨胀。
+pub(crate) async fn agent_memory_context(project_root: Option<&std::path::Path>) -> String {
+    use std::path::Path;
+    let Some(root) = project_root else { return String::new(); };
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let root_c = root.to_path_buf();
+    let (mem, prin, contract) = tokio::task::spawn_blocking(move || {
+        let read_top = |p: &Path, cap: usize| -> Option<String> {
+            std::fs::read_to_string(p).ok().map(|s| truncate_str(s, cap))
+        };
+        // 今日记忆；不存在则取目录下最近一份 .md（文件名升序取末个）
+        let mem = read_top(&root_c.join("记忆").join(format!("{}.md", today)), 9000).or_else(|| {
+            let mem_dir = root_c.join("记忆");
+            let mut names: Vec<String> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&mem_dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().map(|x| x == "md").unwrap_or(false) {
+                        if let Some(n) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
+                            names.push(n);
+                        }
+                    }
+                }
+            }
+            names.sort();
+            names.last().and_then(|n| read_top(&mem_dir.join(n), 9000))
+        });
+        let prin = read_top(&root_c.join("原则").join("原则.md"), 6000);
+        let contract = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "GEMINI.md"]
+            .iter()
+            .find_map(|c| read_top(&root_c.join(c), 8000));
+        (mem, prin, contract)
+    })
+    .await
+    .unwrap_or_default();
+    let mut s = String::new();
+    if let Some(m) = mem {
+        s.push_str(&format!("\n\n【今日/最近项目记忆】\n{}\n", m));
+    }
+    if let Some(p) = prin {
+        s.push_str(&format!("\n【项目原则】\n{}\n", p));
+    }
+    if let Some(c) = contract {
+        s.push_str(&format!("\n【项目工程契约】\n{}\n", c));
+    }
+    s
+}
+
+/// 按字符数截断到上限（UTF-8 安全），过长加省略标记。
+pub(crate) fn truncate_str(s: String, cap: usize) -> String {
+    if s.chars().count() <= cap {
+        s
+    } else {
+        let t: String = s.chars().take(cap).collect();
+        format!("{}…（过长已截断）", t)
+    }
+}
+
+/// 粗估一组消息的 token 用量（启发式：字符数/2 + 每条消息固定开销）。仅用于触发/熔断阈值，无需精确。
+pub(crate) fn estimate_tokens(msgs: &[serde_json::Value]) -> usize {
+    let mut chars = 0usize;
+    let mut count = 0usize;
+    for m in msgs {
+        count += 1;
+        if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
+            chars += c.chars().count();
+        }
+    }
+    chars / 2 + count * 3
+}
+
+/// 估算工具定义（tools 数组）的固定开销 token —— 它对每个请求都会发送，
+/// 不计入会低估真实发送量，进而在工具增多时逼近上游硬限制。
+pub(crate) fn estimate_tools_tokens(tools: &[serde_json::Value]) -> usize {
+    let mut chars = 0usize;
+    for t in tools {
+        if let Some(s) = serde_json::to_string(t).ok() {
+            chars += s.chars().count();
+        }
+    }
+    chars / 2 + tools.len() * 4
+}
