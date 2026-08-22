@@ -4,7 +4,7 @@ import { memo, useEffect, useState } from 'react';
 import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, ImagePlus } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import type { Conversation } from '@/components/capsule/types';
-import type { UseAiChatResult } from './useAiChat';
+import type { UseAiChatResult } from '@/core/ai/useAiChat';
 import { AiChatCompanionAvatar } from './AiChatCompanionCard';
 import { useCompanionStore } from '@/core/stores/companionStore';
 import { useUserAvatar } from '@/core/avatar/userAvatar';

@@ -3,9 +3,9 @@
 // 并沿用胶囊历史持久化 key。群聊不对胶囊开放（不传 onNewGroup）。
 import { memo } from 'react';
 import { useCapsuleStore } from '@/stores/capsuleStore';
-import { useAiChat } from '@/components/ai-chat/useAiChat';
+import { useAiChat } from '@/core/ai/useAiChat';
 import { AiChatConversation } from '@/components/ai-chat/AiChatConversation';
-import { AI_CHAT_CONVERSATIONS_KEY } from '@/components/ai-chat/util';
+import { AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
 
 const CAPSULE_CONV_KEY = AI_CHAT_CONVERSATIONS_KEY;
 

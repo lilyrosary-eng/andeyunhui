@@ -7,7 +7,7 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useCompanionStore } from '@/core/stores/companionStore';
 import { getEmbedConfig, setEmbedConfig, syncCompanionToSemantic, type EmbedConfig } from '@/core/stores/semanticMemory';
-import { getAiChatMemoryEnabled, setAiChatMemoryEnabled } from './useAiChat';
+import { getAiChatMemoryEnabled, setAiChatMemoryEnabled } from '@/core/ai/useAiChat';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
 
 const TOTAL = (c: { memories: unknown[]; core_memory?: unknown[] }) =>
