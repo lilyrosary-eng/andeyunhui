@@ -9,8 +9,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { uid, persistConversations, loadConversations, genTitle, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/components/ai-chat/util';
-import { retrieveChatContext, ingestChatTurn } from '@/mobile/stores/semanticMemory';
-import { useCompanionStore, buildPersonaContext } from '@/mobile/stores/companionStore';
+import { retrieveChatContext, ingestChatTurn } from '@/core/stores/semanticMemory';
+import { useCompanionStore, buildPersonaContext } from '@/core/stores/companionStore';
 
 export const DEFAULT_PERSIST_KEY = AI_CHAT_CONVERSATIONS_KEY;
 

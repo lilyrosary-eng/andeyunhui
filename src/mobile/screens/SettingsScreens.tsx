@@ -11,12 +11,12 @@ import { useTheme } from '../../lib/ThemeProvider';
 import { useNavStore } from '../stores/navStore';
 import { useChatStore } from '../stores/chatStore';
 import { useAgentStore } from '../stores/agentStore';
-import { useCompanionStore } from '../stores/companionStore';
+import { useCompanionStore } from '@/core/stores/companionStore';
 import {
   getProactiveEnabled, setProactiveEnabled,
   getProactiveIntervalMin, setProactiveIntervalMin,
 } from '../hooks/useProactiveMessage';
-import { getEmbedConfig, setEmbedConfig } from '../stores/semanticMemory';
+import { getEmbedConfig, setEmbedConfig } from '@/core/stores/semanticMemory';
 import { getAgentSilent, setAgentSilent } from '../stores/agentStore';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {

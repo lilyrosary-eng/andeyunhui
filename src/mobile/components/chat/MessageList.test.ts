@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderMd, escapeHtml } from './MessageList';
-import { buildCompanionContext, type Companion } from '../../stores/companionStore';
+import { buildCompanionContext, type Companion } from '@/core/stores/companionStore';
 
 // 现状固化测试：markdown 后处理 + 伴侣上下文注入文本。
 

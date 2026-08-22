@@ -5,7 +5,7 @@
 
 import { useState } from 'react';
 import { Plus, Check, Trash2, Heart } from 'lucide-react';
-import { useCompanionStore, type Companion } from '../stores/companionStore';
+import { useCompanionStore, type Companion } from '@/core/stores/companionStore';
 import { affinityOf } from '../../lib/affinity';
 
 function Avatar({ value, size }: { value: string; size: number }) {

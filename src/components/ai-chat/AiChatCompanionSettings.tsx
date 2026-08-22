@@ -6,7 +6,7 @@ import {
   useCompanionStore,
   type Companion,
   type Relationship,
-} from '@/mobile/stores/companionStore';
+} from '@/core/stores/companionStore';
 import { affinityOf } from '@/lib/affinity';
 
 function AvatarView({ avatar, name }: { avatar: string; name: string }) {

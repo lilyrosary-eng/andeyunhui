@@ -28,7 +28,7 @@ import { ChatInput } from '../components/chat/ChatInput';
 import { ModelSettingsSheet } from '../components/chat/ModelSettingsSheet';
 import { CompanionCard, CompanionEditSheet } from '../components/chat/CompanionCard';
 import { useChatStore } from '../stores/chatStore';
-import { useCompanionStore } from '../stores/companionStore';
+import { useCompanionStore } from '@/core/stores/companionStore';
 
 const KIND_ICON: Record<ComputeKind, ReactNode> = {
   local: <Cpu size={16} />,

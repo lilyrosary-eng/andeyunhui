@@ -6,7 +6,7 @@ import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import type { Conversation } from '@/components/capsule/types';
 import type { UseAiChatResult } from './useAiChat';
 import { AiChatCompanionAvatar } from './AiChatCompanionCard';
-import { useCompanionStore } from '@/mobile/stores/companionStore';
+import { useCompanionStore } from '@/core/stores/companionStore';
 import { useUserAvatar } from './userAvatar';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
 import { UsageMeter } from './UsageMeter';

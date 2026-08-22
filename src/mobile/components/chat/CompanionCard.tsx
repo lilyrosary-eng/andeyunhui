@@ -7,7 +7,7 @@
 import { useRef, useState } from 'react';
 import { Heart, Brain, Sparkles, Check, X, ImagePlus } from 'lucide-react';
 import { BottomSheet } from '../BottomSheet';
-import { useCompanionStore, type Companion } from '../../stores/companionStore';
+import { useCompanionStore, type Companion } from '@/core/stores/companionStore';
 import { affinityOf } from '../../../lib/affinity';
 
 /** 把选中的图片文件读成 data URL（限制 3MB，避免 JSON 膨胀） */

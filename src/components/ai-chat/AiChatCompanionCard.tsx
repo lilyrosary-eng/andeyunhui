@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { Heart } from 'lucide-react';
-import { useCompanionStore, type Companion } from '@/mobile/stores/companionStore';
+import { useCompanionStore, type Companion } from '@/core/stores/companionStore';
 import { affinityOf } from '@/lib/affinity';
 
 interface Props {

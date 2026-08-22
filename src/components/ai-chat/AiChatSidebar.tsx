@@ -6,7 +6,7 @@ import { ModuleSidebarShell } from '@/components/ModuleSidebarShell';
 import { NestedNavList, type NavLayerItem } from '@/components/NestedNavList';
 import { ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
 import { AiChatCompanionAvatar } from '@/components/ai-chat/AiChatCompanionCard';
-import { useCompanionStore } from '@/mobile/stores/companionStore';
+import { useCompanionStore } from '@/core/stores/companionStore';
 import type { Conversation } from '@/components/capsule/types';
 
 export interface AiChatSidebarProps {

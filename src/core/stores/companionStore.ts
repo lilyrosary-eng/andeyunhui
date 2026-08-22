@@ -1,6 +1,7 @@
 // 伴侣 Store（人机恋记忆点，阶段 1 + 1.5 多伴侣）。
 //
-// 职责：
+// 属于「共享功能层」：桌面与移动端共同使用（原住 src/mobile/stores，收拢到 core 消除
+// 「桌面依赖移动内幕」的倒挂）。职责：
 // 1. 多伴侣：companions[] + activeId；创建/选择/删除/更新/追加记忆全部走 Rust 命令
 //    （companion_list / create / select / delete / update / add_memory）。
 // 2. 构造「伴侣上下文」注入 system prompt（buildCompanionContext）。

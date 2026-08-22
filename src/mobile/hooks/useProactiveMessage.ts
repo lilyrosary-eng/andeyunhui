@@ -12,7 +12,7 @@
 
 import { useEffect, useRef } from 'react';
 import { useChatStore } from '../stores/chatStore';
-import { useCompanionStore } from '../stores/companionStore';
+import { useCompanionStore } from '@/core/stores/companionStore';
 
 const PROACTIVE_KEY = 'andeyunhui.mobile.proactive.enabled';
 const INTERVAL_KEY = 'andeyunhui.mobile.proactive.intervalMin';

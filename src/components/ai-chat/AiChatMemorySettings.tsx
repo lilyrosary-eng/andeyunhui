@@ -5,8 +5,8 @@
 // 与聊天消息保持一致的 markdown 体验。
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { useCompanionStore } from '@/mobile/stores/companionStore';
-import { getEmbedConfig, setEmbedConfig, syncCompanionToSemantic, type EmbedConfig } from '@/mobile/stores/semanticMemory';
+import { useCompanionStore } from '@/core/stores/companionStore';
+import { getEmbedConfig, setEmbedConfig, syncCompanionToSemantic, type EmbedConfig } from '@/core/stores/semanticMemory';
 import { getAiChatMemoryEnabled, setAiChatMemoryEnabled } from './useAiChat';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
 

@@ -26,11 +26,11 @@ import type { AiProfile, ChatMsg, ComputeSource, TimelineItem } from '../types/c
 import { classifyProfile } from '../types/chat';
 import type { ComputeKind } from '../components/ComputeChip';
 import { useChatStore } from '../stores/chatStore';
-import { useCompanionStore, buildCompanionContext, summarizeMemory } from '../stores/companionStore';
+import { useCompanionStore, buildCompanionContext, summarizeMemory } from '@/core/stores/companionStore';
 import { useAgentStore, buildAgentInstructions, extractToolCall } from '../stores/agentStore';
 import { guessReason } from './aiErrorReason';
 import { uid } from '../../lib/uid';
-import { buildSemanticContext, ingestMemory } from '../stores/semanticMemory';
+import { buildSemanticContext, ingestMemory } from '@/core/stores/semanticMemory';
 import { EVENTS } from '@/core/events/schema';
 
 const SYSTEM_PROMPT =

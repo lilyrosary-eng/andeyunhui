@@ -1,4 +1,7 @@
-// 语义记忆（L3 + L4）—— 阶段 4 · 深度记忆，Android 优先。
+// 语义记忆（L3 + L4）—— 阶段 4 · 深度记忆。
+//
+// 属于「共享功能层」：桌面与移动端共同使用（原住 src/mobile/stores，收拢到 core 消除
+// 「桌面依赖移动内幕」的倒挂）。
 //
 // L3 语义检索：把伴侣的摘要记忆 + 核心档案摄取进 RAG 库（rag.sqlite，复用桌面
 // rag_service）。对话时对「最近消息」嵌入 → rag_query 检索 Top-K → 注入 system。
@@ -17,7 +20,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useCompanionStore, buildPersonaContext, type Companion, type MemoryEntry } from './companionStore';
 import { isBrowserPreview } from './companionStore';
-import type { AiProfile } from '../types/chat';
+// type-only 引用（编译期擦除、零运行时耦合）：AiProfile 是迁移端共有的结构类型，
+// 此处仅用于 ai_get_profiles 返回值的类型标注，不引入任何移动端逻辑/运行时依赖。
+import type { AiProfile } from '@/mobile/types/chat';
 
 const SOURCE_PREFIX = 'companion-';
 
