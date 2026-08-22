@@ -520,6 +520,41 @@ fn extract_edit_diff(view: &str, old: &str, new: &str) -> (bool, String, String)
     }
 }
 
+/// 从文件扩展名推导语法高亮语言提示（对齐 dsh ReadResultView.lang；未知扩展返回 None）。
+fn guess_lang(p: &std::path::Path) -> Option<&'static str> {
+    let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("rs") => Some("rust"),
+        Some("ts") | Some("tsx") | Some("mts") | Some("cts") => Some("typescript"),
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => Some("javascript"),
+        Some("py") | Some("pyi") => Some("python"),
+        Some("go") => Some("go"),
+        Some("java") | Some("kt") | Some("kts") => Some("java"),
+        Some("rb") => Some("ruby"),
+        Some("php") => Some("php"),
+        Some("c") | Some("h") => Some("c"),
+        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") => Some("cpp"),
+        Some("cs") => Some("csharp"),
+        Some("swift") => Some("swift"),
+        Some("sql") => Some("sql"),
+        Some("html") | Some("htm") | Some("vue") => Some("html"),
+        Some("css") | Some("scss") | Some("less") => Some("css"),
+        Some("json") | Some("jsonc") => Some("json"),
+        Some("md") | Some("markdown") => Some("markdown"),
+        Some("yml") | Some("yaml") => Some("yaml"),
+        Some("toml") => Some("toml"),
+        Some("sh") | Some("bash") | Some("zsh") => Some("bash"),
+        Some("bat") | Some("cmd") => Some("bat"),
+        Some("ps1") => Some("powershell"),
+        Some("xml") | Some("svg") => Some("xml"),
+        Some("dockerfile") | Some("docker") => Some("dockerfile"),
+        Some("ini") | Some("cfg") => Some("ini"),
+        Some("lua") => Some("lua"),
+        Some("r") => Some("r"),
+        _ => None,
+    }
+}
+
 /// 文件工具：read_file（只读，叠加暂存视图）/ write_file（暂存）/ edit（暂存）/ delete（暂存）。
 /// 所有写操作先进请求级暂存，经 ai-agent-edits 审阅后才真正落盘；项目根外写入仍先交互审批。
 struct FileTool;
@@ -563,13 +598,14 @@ impl AiTool for FileTool {
                 let offset: usize = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let limit: usize = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(60_000) as usize;
                 let overlay_req = ctx.request_id.clone();
-                let content = spawn_blocking(move || -> Result<String, String> {
+                let (content, view) = spawn_blocking(move || -> Result<(String, serde_json::Value), String> {
                     let data = std::fs::read(&p).map_err(|e| format!("读取失败 {}: {}", p.display(), e))?;
                     let full = String::from_utf8_lossy(&data).to_string();
                     // 叠加该请求先前的未确认改动，生成「改后视图」（未删除时）
                     let (overlaid, deleted) = apply_pending_overlay(&overlay_req, &p, full).map_err(|e| format!("叠加视图失败: {}", e))?;
                     if deleted {
-                        return Ok(format!("（文件 {} 已被本请求暂存删除，尚未提交）", p.display()));
+                        return Ok((format!("（文件 {} 已被本请求暂存删除，尚未提交）", p.display()),
+                            serde_json::json!({ "card": "read", "path": p.display().to_string(), "offset": 0, "lines": [], "totalLines": 0 })));
                     }
                     let chars = overlaid.chars().collect::<Vec<_>>();
                     // 偏移取自叠加后内容的开头
@@ -584,9 +620,44 @@ impl AiTool for FileTool {
                     } else {
                         String::new()
                     };
-                    Ok(format!("{}{}", head, window))
+                    // 行号化视图（对齐 dsh ReadResultView）：行号保留文件真实行号，lang 由扩展名推导
+                    let full_lines: Vec<&str> = overlaid.split('\n').collect();
+                    let total_lines = full_lines.len();
+                    let mut starts: Vec<usize> = Vec::with_capacity(full_lines.len());
+                    let mut acc_char = 0usize;
+                    for l in &full_lines {
+                        starts.push(acc_char);
+                        acc_char += l.chars().count() + 1; // +1 换行符
+                    }
+                    let mut first_line = 1usize;
+                    for (i, l) in full_lines.iter().enumerate() {
+                        if start < starts[i] + l.chars().count() + 1 {
+                            first_line = i + 1;
+                            break;
+                        }
+                    }
+                    let mut lines: Vec<serde_json::Value> = Vec::new();
+                    for (i, l) in full_lines.iter().enumerate().skip(first_line - 1) {
+                        if starts[i] >= end {
+                            break;
+                        }
+                        let row_end = starts[i] + l.chars().count();
+                        let s = start.max(starts[i]) - starts[i];
+                        let e = end.min(row_end).saturating_sub(starts[i]);
+                        let text: String = l.chars().skip(s).take(e.saturating_sub(s)).collect();
+                        lines.push(serde_json::json!({ "number": i + 1, "text": text }));
+                    }
+                    let view = serde_json::json!({
+                        "card": "read",
+                        "path": p.display().to_string(),
+                        "offset": first_line,
+                        "lines": lines,
+                        "totalLines": total_lines,
+                        "lang": guess_lang(&p),
+                    });
+                    Ok((format!("{}{}", head, window), view))
                 }).await.map_err(|e| format!("读取任务调度失败: {}", e))??;
-                Ok(ToolExecResult::plain(content))
+                Ok(ToolExecResult::with_meta(content, view))
             }
             "write_file" => {
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
