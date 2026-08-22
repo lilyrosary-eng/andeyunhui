@@ -4,9 +4,7 @@
 import { useRef, useState } from 'react';
 import { Upload, RotateCcw } from 'lucide-react';
 import { useUserAvatar, setUserAvatar } from '@/core/avatar/userAvatar';
-
-const inputCls =
-  'w-full rounded-lg border border-black/10 bg-white/70 px-3 py-2 text-sm text-neutral-800 outline-none focus:border-sky-400 dark:border-white/10 dark:bg-stone-800/70 dark:text-stone-100';
+import { inputCls } from '@/components/bricks/formui';
 
 const MAX_DIM = 256;
 const JPEG_QUALITY = 0.85;

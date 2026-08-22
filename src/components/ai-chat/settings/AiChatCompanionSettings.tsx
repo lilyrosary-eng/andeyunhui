@@ -7,6 +7,8 @@ import {
   type Companion,
   type Relationship,
 } from '@/core/stores/companionStore';
+import { Section } from '@/components/bricks/Section';
+import { Field, inputCls } from '@/components/bricks/formui';
 import { affinityOf } from '@/lib/affinity';
 
 function AvatarView({ avatar, name }: { avatar: string; name: string }) {
@@ -17,27 +19,6 @@ function AvatarView({ avatar, name }: { avatar: string; name: string }) {
     </div>
   );
 }
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl border border-black/10 p-4 dark:border-white/10">
-      <div className="mb-3 text-sm font-medium text-neutral-800 dark:text-stone-100">{title}</div>
-      <div className="space-y-3">{children}</div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <div className="mb-1 text-xs text-neutral-500 dark:text-stone-400">{label}</div>
-      {children}
-    </label>
-  );
-}
-
-const inputCls =
-  'w-full rounded-lg border border-black/10 bg-white/70 px-3 py-2 text-sm text-neutral-800 outline-none focus:border-sky-400 dark:border-white/10 dark:bg-stone-800/70 dark:text-stone-100';
 
 export function AiChatCompanionSettings() {
   const collection = useCompanionStore((s) => s.collection);

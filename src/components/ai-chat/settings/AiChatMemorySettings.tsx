@@ -9,23 +9,12 @@ import { useCompanionStore } from '@/core/stores/companionStore';
 import { getEmbedConfig, setEmbedConfig, syncCompanionToSemantic, type EmbedConfig } from '@/core/stores/semanticMemory';
 import { getAiChatMemoryEnabled, setAiChatMemoryEnabled } from '@/core/ai/useAiChat';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
+import { Section } from '@/components/bricks/Section';
+import { inputCls } from '@/components/bricks/formui';
 
 const TOTAL = (c: { memories: unknown[]; core_memory?: unknown[] }) =>
   (c.memories?.length ?? 0) + (c.core_memory?.length ?? 0);
 
-const inputCls =
-  'w-full rounded-lg border border-black/10 bg-white/70 px-3 py-2 text-sm text-neutral-800 outline-none focus:border-sky-400 dark:border-white/10 dark:bg-stone-800/70 dark:text-stone-100';
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl border border-black/10 p-4 dark:border-white/10">
-      <div className="mb-3 text-sm font-medium text-neutral-800 dark:text-stone-100">{title}</div>
-      <div className="space-y-3">{children}</div>
-    </div>
-  );
-}
-
-/** 把一长串纯文本描述里的「关键词」用 markdown 包一下，避免被父级卡片宽度截断时无换行。 */
 function LongDesc({ md }: { md: string }) {
   return (
     <div
