@@ -1771,6 +1771,122 @@ async fn mcp_tools_guide(app: &AppHandle) -> String {
     s
 }
 
+/// 读取项目级「记忆/原则/工程契约」注入 Agent 上下文（对齐 IDE runAgent 的约定）：
+/// - 记忆/当日.md（今日不存在则取 记忆/ 目录下按文件名字典序最近一份 .md）
+/// - 原则/原则.md
+/// - 工程契约：AGENTS.md / CLAUDE.md / .cursorrules / GEMINI.md（取首个存在者）
+/// 仅读、仅在项目根内、各段有长度裁剪，避免上下文膨胀。
+async fn agent_memory_context(project_root: Option<&std::path::Path>) -> String {
+    use std::path::Path;
+    let Some(root) = project_root else { return String::new(); };
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let root_c = root.to_path_buf();
+    let (mem, prin, contract) = tokio::task::spawn_blocking(move || {
+        let read_top = |p: &Path, cap: usize| -> Option<String> {
+            std::fs::read_to_string(p).ok().map(|s| truncate_str(s, cap))
+        };
+        // 今日记忆；不存在则取目录下最近一份 .md（文件名升序取末个）
+        let mem = read_top(&root_c.join("记忆").join(format!("{}.md", today)), 9000).or_else(|| {
+            let mem_dir = root_c.join("记忆");
+            let mut names: Vec<String> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&mem_dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().map(|x| x == "md").unwrap_or(false) {
+                        if let Some(n) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
+                            names.push(n);
+                        }
+                    }
+                }
+            }
+            names.sort();
+            names.last().and_then(|n| read_top(&mem_dir.join(n), 9000))
+        });
+        let prin = read_top(&root_c.join("原则").join("原则.md"), 6000);
+        let contract = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "GEMINI.md"]
+            .iter()
+            .find_map(|c| read_top(&root_c.join(c), 8000));
+        (mem, prin, contract)
+    })
+    .await
+    .unwrap_or_default();
+    let mut s = String::new();
+    if let Some(m) = mem {
+        s.push_str(&format!("\n\n【今日/最近项目记忆】\n{}\n", m));
+    }
+    if let Some(p) = prin {
+        s.push_str(&format!("\n【项目原则】\n{}\n", p));
+    }
+    if let Some(c) = contract {
+        s.push_str(&format!("\n【项目工程契约】\n{}\n", c));
+    }
+    s
+}
+
+/// 按字符数截断到上限（UTF-8 安全），过长加省略标记。
+fn truncate_str(s: String, cap: usize) -> String {
+    if s.chars().count() <= cap {
+        s
+    } else {
+        let t: String = s.chars().take(cap).collect();
+        format!("{}…（过长已截断）", t)
+    }
+}
+
+/// 粗估一组消息的 token 用量（启发式：字符数/2 + 每条消息固定开销）。仅用于触发/熔断阈值，无需精确。
+fn estimate_tokens(msgs: &[serde_json::Value]) -> usize {
+    let mut chars = 0usize;
+    let mut count = 0usize;
+    for m in msgs {
+        count += 1;
+        if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
+            chars += c.chars().count();
+        }
+    }
+    chars / 2 + count * 3
+}
+
+/// 上下文压缩：当估算 token 超过 high 时，把「保留尾部之外」的历史回合（保留 system 头与首条 user 任务）
+/// 压成一条「工具执行摘要」的 user 消息，避免 msgs 无限增长。无状态、轻量、可逆性由最近回合保证。
+fn maybe_compress(msgs: &mut Vec<serde_json::Value>, high: usize, keep_tail: usize) -> bool {
+    if estimate_tokens(msgs) < high {
+        return false;
+    }
+    let n = msgs.len();
+    if n <= keep_tail + 2 {
+        return false; // 需保留 system(0) + 首条 user(1) + 至少 keep_tail 条
+    }
+    let end = n - keep_tail;
+    let pruned: Vec<serde_json::Value> = msgs.drain(2..end).collect();
+    let mut sum = String::from("【早期上下文已压缩为以下已完成工具回合的摘要，供你在此基础上延续任务】");
+    for m in &pruned {
+        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        match role {
+            "tool" => {
+                let raw = m.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                let len = raw.chars().count();
+                let head: String = raw.chars().take(90).collect();
+                sum.push_str(&format!("\n  · 工具返回（{} 字）：{}", len, head));
+            }
+            _ => {
+                let names: Vec<String> = m
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|c| c["function"]["name"].as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let content: String = m.get("content").and_then(|c| c.as_str()).unwrap_or("").chars().take(60).collect();
+                if !names.is_empty() {
+                    sum.push_str(&format!("\n  · 调用工具：[{}] {}", names.join(", "), content));
+                } else if !content.is_empty() {
+                    sum.push_str(&format!("\n  · 内容：{}", content));
+                }
+            }
+        }
+    }
+    msgs.insert(2, serde_json::json!({ "role": "user", "content": sum }));
+    true
+}
+
 /// plan 工具执行后，返回当前计划的结构化快照（供前端渲染计划/待办面板）。
 fn plan_snapshot_json() -> serde_json::Value {
     if let Ok(g) = plan_store().lock() {
@@ -1842,12 +1958,15 @@ pub async fn ai_chat_agent(
     let agent_hint = "你被允许并且应当在合适时调用下方提供的工具来获取实时信息或完成计算。需要时先调用工具，拿到结果后再组织最终回答；不要编造工具返回的数据。";
     // 注入已启用 MCP 服务器的工具清单，让模型的 mcp 工具可正确填写 server/tool
     let mcp_guide = mcp_tools_guide(&app).await;
+    // 注入项目级记忆/原则/工程契约（对齐 IDE 约定），仅读、限长
+    let project_root_pb = project_root.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+    let mem_ctx = agent_memory_context(project_root_pb.as_deref()).await;
     let base_system = if effective_system.trim().is_empty() {
         agent_hint.to_string()
     } else {
         format!("{}\n\n{}", effective_system, agent_hint)
     };
-    let system_final = format!("{}{}", base_system, mcp_guide);
+    let system_final = format!("{}{}{}", base_system, mcp_guide, mem_ctx);
 
     // 初始 messages：统一 system + 用户历史（忽略历史里的旧 system，避免重复注入）。
     let mut msgs: Vec<serde_json::Value> = vec![serde_json::json!({ "role": "system", "content": system_final })];
@@ -1864,12 +1983,27 @@ pub async fn ai_chat_agent(
     let tool_ctx = ToolContext {
         app: app.clone(),
         request_id: request_id.clone(),
-        project_root: project_root.filter(|s| !s.trim().is_empty()).map(PathBuf::from),
+        project_root: project_root_pb,
     };
     let mut final_text = String::new();
     let mut tool_calls_occurred = false;
 
     for _round in 0..max_rounds {
+        // 上下文压缩：历史超阈值时把早期回合压成摘要；压缩后仍超硬上限即熔断，避免请求失控。
+        const TOKEN_HIGH: usize = 36_000; // 估算 token 达到即压缩
+        const TOKEN_HARD: usize = 96_000; // 压缩后仍超 → 熔断终止
+        let compressed = maybe_compress(&mut msgs, TOKEN_HIGH, 8);
+        if compressed {
+            let _ = app.emit("ai-agent-step", serde_json::json!({
+                "requestId": request_id, "stage": "compress", "name": "context", "ok": true,
+                "detail": "早期工具回合已压缩为摘要，历史保持可用",
+            }));
+        }
+        if estimate_tokens(&msgs) > TOKEN_HARD {
+            let msg = format!("上下文超限（估算 >{} token，尝试压缩后仍超出），已终止本轮", TOKEN_HARD);
+            emit_agent_error(&app, &request_id, &msg);
+            return Err(msg);
+        }
         let mut body = serde_json::json!({
             "model": cfg.model,
             "messages": msgs,
