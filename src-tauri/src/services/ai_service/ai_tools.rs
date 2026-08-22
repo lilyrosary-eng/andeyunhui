@@ -5,6 +5,7 @@
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, AiProfile};
 use crate::services::mcp_service;
 use tauri::{AppHandle, Emitter};
 
@@ -24,6 +25,8 @@ pub(crate) struct ToolContext {
     pub request_id: String,
     /// AI 编程面板当前项目根目录（文件工具判“项目内”用）。
     pub project_root: Option<PathBuf>,
+    /// 当前使用模型的档案 id（子代理等需要起第二个循环的工具，用它复用同一模型档案）。
+    pub profile_id: Option<String>,
 }
 
 /// 工具并发执行级别（对齐 dsh executeToolCalls 的 exclusive/parallel 语义）。
@@ -52,6 +55,32 @@ impl ToolExecResult {
     /// 纯文本 + 结构化呈现 meta。
     pub(crate) fn with_meta(text: String, meta: serde_json::Value) -> Self {
         Self { text, meta: Some(meta) }
+    }
+}
+
+/// 统一的单工具执行点：先做参数 schema 强制校验（模型可自纠的明确错误），通过后再 execute。
+/// 返回 Vec<(ok, ToolExecResult)> 的单个元素，与模型工具调用顺序对齐。
+/// 归在工具层：Agent 主循环与子代理循环共用同一执行闸口。
+pub(crate) async fn execute_tool_once(
+    tool: Option<&dyn AiTool>,
+    fname: &str,
+    args: &serde_json::Value,
+    tc: &ToolContext,
+) -> (bool, ToolExecResult) {
+    match tool {
+        None => (false, ToolExecResult::plain(format!("未知工具: {}", fname))),
+        Some(t) => {
+            // 参数强制校验（对齐 dsh 工具调用前 schema 校验）：缺参/类型错在 execute 前拦截，
+            // 以 Err 文本回填给模型，模型能据此修正参数重发。
+            if let Err(ve) = t.validate_args(args) {
+                let msg = format!("参数校验失败 [{}]: {}", fname, ve);
+                return (false, ToolExecResult::plain(msg));
+            }
+            match t.execute(args, tc).await {
+                Ok(r) => (true, r),
+                Err(e) => (false, ToolExecResult::plain(e)),
+            }
+        }
     }
 }
 
@@ -1877,6 +1906,151 @@ impl AiTool for WebFetchTool {
 }
 
 /// 当前注册的全部工具（有序数组）。
+/// 子代理工具（功能参考 IDE `<subagent>`；实现参考 dsh subagent-spawn-in-process）：
+/// 主 agent 把一段独立子任务委派给一个「spawn 出的子会话」——拥有独立 system、不继承父上下文，
+/// 用只读工具执行并将最终结论文本回填主 agent。最小纵向闭环：仅委派→执行→回收，
+/// 不含控制面（send_message / interrupt_agent）与并行 sibling 委派。
+struct SubagentTool;
+
+/// 子代理执行循环：以独立 system（role 定位 + 委派任务）开一个只读工具循环，直到拿到纯文本结论。
+/// 仅调只读工具（file/grep/glob），不触发审批；复用 execute_tool_once 同一执行闸口。
+async fn run_subagent(
+    app: &AppHandle,
+    request_id: &str,
+    cfg: &AiProfile,
+    role: &str,
+    task: &str,
+    project_root: Option<PathBuf>,
+) -> Result<String, String> {
+    if cfg.api_key.trim().is_empty() {
+        return Err("子代理：未配置 API Key".to_string());
+    }
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    // 子代理只给只读工具，避免在子任务内触发审批/写盘，收敛副作用。
+    let reg = registered_tools();
+    let tools: Vec<serde_json::Value> = reg
+        .iter()
+        .filter(|t| matches!(t.name(), "file" | "grep" | "glob"))
+        .map(|t| t.function_schema())
+        .collect();
+    let root_hint = project_root.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+    let system = format!(
+        "你是「{}」。只专注完成以下委派任务并直接给出最终结论（不得再向外界委派子任务）：\n{}\n\n当前项目根目录：{}",
+        role, task, root_hint
+    );
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({ "role": "system", "content": system })];
+    let client = reqwest::Client::new();
+    // 子代理用独立请求 id 前缀，避免覆盖主会话事件。
+    let sub_ctx = ToolContext {
+        app: app.clone(),
+        request_id: format!("{}:sub", request_id),
+        project_root,
+        profile_id: None,
+    };
+    for _ in 0..6usize {
+        let mut body = serde_json::json!({
+            "model": cfg.model,
+            "messages": messages,
+            "stream": false,
+            "tools": tools,
+            "tool_choice": "auto",
+        });
+        if let Some(mt) = cfg.max_tokens {
+            body["max_tokens"] = serde_json::json!(mt);
+        }
+        let resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("子代理请求失败: {}", e))?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("子代理响应解析失败: {}", e))?;
+        let msg = &data["choices"][0]["message"];
+        let calls = msg.get("tool_calls").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+        if calls.is_empty() {
+            let text = msg.get("content").and_then(|c| c.as_str()).unwrap_or("").trim().to_string();
+            if text.is_empty() {
+                return Err("子代理：模型未产出结论".to_string());
+            }
+            return Ok(text);
+        }
+        // 记录本轮 assistant（带原生 tool_calls 形状）。
+        let mut am = serde_json::json!({ "role": "assistant", "content": serde_json::Value::Null });
+        am["tool_calls"] = msg.get("tool_calls").cloned().unwrap_or(serde_json::json!([]));
+        messages.push(am);
+        for call in &calls {
+            let fname = call.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+            let fargs = call.get("function").and_then(|f| f.get("arguments")).and_then(|a| a.as_str())
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(serde_json::json!({}));
+            let tool = reg.iter().find(|t| t.name() == fname).map(|b| b.as_ref() as &dyn AiTool);
+            let (_ok, res) = execute_tool_once(tool, fname, &fargs, &sub_ctx).await;
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                "content": res.text,
+            }));
+        }
+    }
+    Err("子代理：轮次耗尽未取得结论".to_string())
+}
+
+#[async_trait::async_trait]
+impl AiTool for SubagentTool {
+    fn name(&self) -> &'static str {
+        "subagent"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "function": {
+                "name": "subagent",
+                "description": "把一段独立子任务委派给一个独立的子助手执行并回收其最终结论。适合代码调研、读文件、搜索等可独立完成的小步骤。子助手有独立目标，不继承当前对话上下文。用 task 写清要它做什么并请直接给结论；role 可选，指明其身份定位（如 代码审阅员 / 调研员）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string", "description": "给子助手的目标指令，要求返回最终结论" },
+                        "role": { "type": "string", "description": "（可选）子助手身份定位，如 代码审阅员 / 调研员" }
+                    },
+                    "required": ["task"]
+                }
+            }
+        })
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        // 子代理要起独立的循环与模型调用，保守独占串行，避免并发子会话互相干扰。
+        ToolConcurrency::Exclusive
+    }
+    fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
+        let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
+        serde_json::json!({ "card": "generic", "kind": "other", "title": "委派子助手", "detail": task })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
+        let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if task.is_empty() {
+            return Err("subagent：缺少有效的 task 描述".to_string());
+        }
+        let role = args.get("role").and_then(|v| v.as_str()).unwrap_or("子助手").to_string();
+        let profiles = load_profiles(&ctx.app);
+        let cfg = resolve_profile(&profiles, ctx.profile_id.clone());
+        let text = run_subagent(&ctx.app, &ctx.request_id, &cfg, &role, &task, ctx.project_root.clone()).await?;
+        let capped: String = text.chars().take(4000).collect();
+        let meta = serde_json::json!({
+            "card": "generic",
+            "kind": "other",
+            "title": format!("子助手·{} 结论", role),
+            "detail": capped,
+            "truncated": text.chars().count() > 4000,
+        });
+        Ok(ToolExecResult::with_meta(text, meta))
+    }
+}
+
 pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
     vec![
         Box::new(NowTool),
@@ -1889,6 +2063,7 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(McpTool),
         Box::new(WebSearchTool),
         Box::new(WebFetchTool),
+        Box::new(SubagentTool),
     ]
 }
 

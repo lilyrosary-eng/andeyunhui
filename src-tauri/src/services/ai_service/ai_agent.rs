@@ -4,13 +4,13 @@
 
 use std::path::PathBuf;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{AiTool, ToolContext, ToolConcurrency, ToolExecResult, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
+use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text};
 
 /// Agent 对话：原生 tool_calls + 循环。
@@ -25,31 +25,6 @@ use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive
 /// 立即返回；本函数在 tokio::spawn 的后台任务里运行，期间通过事件把增量推给前端。cancel 为协作式
 /// 取消标记（用户在协作点主动退出），与注册表的 abort handle 共用一线（cancel 落 flag + abort 强制
 /// 中断在途 await）。
-/// 统一的单工具执行点：先做参数 schema 强制校验（模型可自纠的明确错误），通过后再 execute。
-/// 返回 Vec<(ok, ToolExecResult)> 的单个元素，与模型工具调用顺序对齐。
-async fn execute_tool_once(
-    tool: Option<&dyn AiTool>,
-    fname: &str,
-    args: &serde_json::Value,
-    tc: &ToolContext,
-) -> (bool, ToolExecResult) {
-    match tool {
-        None => (false, ToolExecResult::plain(format!("未知工具: {}", fname))),
-        Some(t) => {
-            // 参数强制校验（对齐 dsh 工具调用前 schema 校验）：缺参/类型错在 execute 前拦截，
-            // 以 Err 文本回填给模型，模型能据此修正参数重发。
-            if let Err(ve) = t.validate_args(args) {
-                let msg = format!("参数校验失败 [{}]: {}", fname, ve);
-                return (false, ToolExecResult::plain(msg));
-            }
-            match t.execute(args, tc).await {
-                Ok(r) => (true, r),
-                Err(e) => (false, ToolExecResult::plain(e)),
-            }
-        }
-    }
-}
-
 async fn run_agent(
     app: AppHandle,
     request_id: String,
@@ -62,7 +37,7 @@ async fn run_agent(
 ) -> Result<(), String> {
     let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 12u32);
     let profiles = load_profiles(&app);
-    let cfg = resolve_profile(&profiles, profile_id);
+    let cfg = resolve_profile(&profiles, profile_id.clone());
     if cfg.api_key.trim().is_empty() {
         let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
         emit_agent_error(&app, &request_id, &msg);
@@ -100,6 +75,7 @@ async fn run_agent(
         app: app.clone(),
         request_id: request_id.clone(),
         project_root: project_root_pb,
+        profile_id: profile_id.clone(),
     };
     let mut final_text = String::new();
     let mut tool_calls_occurred = false;
@@ -667,6 +643,7 @@ pub async fn ai_agent_status(_app: AppHandle, request_id: String) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
     use std::time::Duration;
 
     static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
