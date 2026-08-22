@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter};
 use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
+use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text};
 
 /// Agent 对话：原生 tool_calls + 循环。
@@ -148,7 +148,25 @@ async fn run_agent(
             }));
         }
         // 派生当次请求的 messages（含中断工具恢复；纯文本系统已并入 system_final）。
-        let derived = derive_messages(&session, &system_final, collect_interrupted_tools(&session));
+        // M3：在 turn 边界取走后台并行子代理的 settle 结论，拼进当轮 system，
+        //     让主 agent 能感知/汇总先前委派子代理的最新最终结论。
+        let settles = take_subagent_settles(&request_id);
+        let turn_system = if settles.is_empty() {
+            system_final.clone()
+        } else {
+            let mut block = String::from("\n\n以下是你先前委派的并行子代理已返回的最终结论，请结合汇总或给出后续行动：\n");
+            for s in &settles {
+                block.push_str(&format!("- [{}]（{}）", s.role, s.child_id));
+                if let Some(e) = &s.error {
+                    block.push_str(&format!("：失败 - {}\n", e));
+                } else {
+                    block.push_str(&format!("：{}\n", if s.conclusion.is_empty() { "（未产出结论）" } else { &s.conclusion }));
+                }
+            }
+            block.push_str("\n如需继续追问某个子代理，可用 send_message 向它投递新指令。");
+            format!("{}{}", system_final, block)
+        };
+        let derived = derive_messages(&session, &turn_system, collect_interrupted_tools(&session));
         // 真实发送量 = 派生消息 + 工具定义固定开销（tools 每请求都携带，必须计入，
         // 否则工具增多时会低估实际上下文、逼近上游硬限制）。
         let fixed_overhead = estimate_tools_tokens(&tools);
