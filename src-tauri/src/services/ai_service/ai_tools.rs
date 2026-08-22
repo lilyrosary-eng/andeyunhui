@@ -520,6 +520,18 @@ fn extract_edit_diff(view: &str, old: &str, new: &str) -> (bool, String, String)
     }
 }
 
+/// 取进程被信号杀死的信号名（TerminalResultView.signal）。仅 Unix 提供 `ExitStatusExt::signal`；
+/// 其它平台（如 Windows）恒为 None（进程只能通过退出码观察）。
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<String> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal().map(|s| format!("SIG{}", s))
+}
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> Option<String> {
+    None
+}
+
 /// 从文件扩展名推导语法高亮语言提示（对齐 dsh ReadResultView.lang；未知扩展返回 None）。
 fn guess_lang(p: &std::path::Path) -> Option<&'static str> {
     let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
@@ -845,11 +857,24 @@ impl AiTool for CommandTool {
         let text = if text.chars().count() > OCAP {
             format!("{}（输出过长，已截断）", text.chars().take(OCAP).collect::<String>())
         } else { text };
-        if status.status.success() {
-            Ok(ToolExecResult::plain(if text.trim().is_empty() { "（命令成功，无输出）".to_string() } else { text }))
+        // 命令「跑完」即为工具结果（对齐 dsh：退出码/信号是结果的一部分，非工具错误）。
+        // ok 恒为 true；模型从 detail 文本判别成功与否，前端可用 meta.exitCode/signal 渲染退出态 pill。
+        let success = status.status.success();
+        let exit_code = status.status.code();
+        let signal = if exit_code.is_none() { exit_signal(&status.status) } else { None };
+        let detail = if success {
+            if text.trim().is_empty() { "（命令成功，无输出）".to_string() } else { text.clone() }
         } else {
-            Err(format!("命令退出码 {}：{}", status.status.code().unwrap_or(-1), text))
-        }
+            format!("命令退出码 {}：{}", exit_code.unwrap_or(-1), text.clone())
+        };
+        // terminal 呈现 meta（对齐 dsh TerminalResultView）：output + exitCode/signal，供前端渲染终端卡片
+        let meta = serde_json::json!({
+            "card": "terminal",
+            "output": text,
+            "exitCode": exit_code,
+            "signal": signal,
+        });
+        Ok(ToolExecResult::with_meta(detail, meta))
     }
 }
 
