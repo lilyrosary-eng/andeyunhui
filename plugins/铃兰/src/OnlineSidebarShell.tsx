@@ -7,7 +7,7 @@ const {
   BarChart3,
 } = window.__HOST_UI__ || {};
 
-function Music2Icon() {
+export function Music2Icon() {
   return React.createElement('svg', {
     width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
   }, [
@@ -92,6 +92,15 @@ export interface TempPlaylistItem {
   id: string;
   name: string;
   count: number;
+}
+
+// 在线源临时歌单 → 侧栏项的统一映射（网易云 / 酷狗 / 汽水 共用同一结构）
+export function toTempPlaylistItem(item: { id: string; name: string; payload: { tracks?: unknown[] } }): TempPlaylistItem {
+  return {
+    id: item.id,
+    name: item.name,
+    count: item.payload.tracks?.length ?? 0,
+  };
 }
 
 export interface SidebarTempSectionProps {

@@ -1,17 +1,9 @@
 import React from "react";
 const { useState, useEffect } = React;
-import { SidebarTempSection, type TempPlaylistItem } from './OnlineSidebarShell';
+import { toTempPlaylistItem } from './OnlineSidebarShell';
 import OnlineMusicSidebar, { type SidebarUserPlaylist } from './_shared/OnlineMusicSidebar';
 import { getKugouAuth, getUserPlaylists, type KugouAuth, type KugouPlaylistCard } from './kugouApi';
 import type { OnlineTempItem } from './useOnlineSource';
-
-function toTempItem(temp: OnlineTempItem): TempPlaylistItem {
-  return {
-    id: temp.id,
-    name: temp.name,
-    count: temp.payload.tracks?.length ?? 0,
-  };
-}
 
 function toUserPlaylist(pl: KugouPlaylistCard): SidebarUserPlaylist {
   return { id: pl.gid ?? String(pl.id), name: pl.name, trackCount: pl.trackCount ?? 0, cover: pl.cover || null };
@@ -70,7 +62,7 @@ export default function KugouSidebar({
 
   return React.createElement(OnlineMusicSidebar, {
     brandLabel: '铃兰',
-    temps: tempPlaylists.map(toTempItem),
+    temps: tempPlaylists.map(toTempPlaylistItem),
     activeTempId,
     onSelectTemp: (item) => {
       const src = tempPlaylists.find(t => t.id === item.id);

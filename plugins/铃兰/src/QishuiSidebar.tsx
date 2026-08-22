@@ -1,16 +1,8 @@
 import React from 'react';
-import { SidebarTempSection, type TempPlaylistItem } from './OnlineSidebarShell';
+import { toTempPlaylistItem } from './OnlineSidebarShell';
 import OnlineMusicSidebar, { type SidebarUserPlaylist } from './_shared/OnlineMusicSidebar';
 import type { QishuiPlaylistCard } from './qishuiApi';
 import type { OnlineTempItem } from './useOnlineSource';
-
-function toTempItem(temp: OnlineTempItem): TempPlaylistItem {
-  return {
-    id: temp.id,
-    name: temp.name,
-    count: temp.payload.tracks?.length ?? 0,
-  };
-}
 
 function toUserPlaylist(p: QishuiPlaylistCard): SidebarUserPlaylist {
   return { id: p.id, name: p.name, trackCount: p.trackCount ?? 0 };
@@ -47,7 +39,7 @@ export default function QishuiSidebar({
 }: QishuiSidebarProps) {
   return React.createElement(OnlineMusicSidebar, {
     brandLabel: '铃兰',
-    temps: tempPlaylists.map(toTempItem),
+    temps: tempPlaylists.map(toTempPlaylistItem),
     activeTempId,
     onSelectTemp: (item) => {
       const src = tempPlaylists.find(t => t.id === item.id);

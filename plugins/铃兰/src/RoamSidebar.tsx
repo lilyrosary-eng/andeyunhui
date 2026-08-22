@@ -6,12 +6,10 @@
 
 import React from "react";
 const { useState, useEffect, useRef, useCallback } = React;
-import { ChevronDown, ChevronRight, Settings, Sparkles, Music as MusicIcon, Play, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Sparkles, Music as MusicIcon, Play, Trash2 } from 'lucide-react';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import { musicPlayer, type Track } from './musicPlayer';
 import { OnlineSidebarShell } from './OnlineSidebarShell';
-
-const { BarChart3 } = window.__HOST_UI__ || {};
 
 // 各平台推荐歌曲类型
 export interface RoamSeedTrack {
@@ -184,33 +182,6 @@ export function RoamSidebar(props: RoamSidebarProps) {
     React.createElement(Sparkles, { key: 'icon', size: 18, className: 'text-[#7c4dff] dark:text-[#b388ff]' }),
     '漫游电台',
   ]);
-
-  // 统计按钮（复用其他侧边栏的样式）
-  const statsButton = onOpenStats ? React.createElement('button', {
-    key: 'open-stats',
-    onClick: () => onOpenStats(),
-    title: statsActive ? '关闭统计' : '统计',
-    'aria-label': statsActive ? '关闭统计' : '统计',
-    className: `p-2 rounded-lg transition-colors ${
-      statsActive
-        ? 'text-[var(--element-color-raw)] bg-black/5 dark:bg-white/5'
-        : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-black/5 dark:hover:bg-white/5'
-    }`,
-    children: BarChart3 ? React.createElement(BarChart3, { size: 18, strokeWidth: 2 }) : '📊',
-  }) : null;
-
-  // 设置按钮
-  const settingsButton = React.createElement('button', {
-    key: 'open-settings',
-    onClick: () => onOpenSettings(),
-    title: settingsActive ? '关闭漫游设置' : '漫游设置',
-    className: `p-2 rounded-lg transition-colors ${
-      settingsActive
-        ? 'text-[#7c4dff] dark:text-[#b388ff] bg-[#7c4dff]/10'
-        : 'text-neutral-400 dark:text-stone-500 hover:text-[#7c4dff] dark:hover:text-[#b388ff] hover:bg-black/5 dark:hover:bg-white/5'
-    }`,
-    children: React.createElement(Settings, { size: 18 }),
-  });
 
   const content = React.createElement('div', { className: 'space-y-4' },
     React.createElement('p', { key: 'label', className: 'text-[10px] font-medium text-neutral-400 dark:text-stone-500 uppercase tracking-wider mb-1 px-1' }, '漫游路径'),

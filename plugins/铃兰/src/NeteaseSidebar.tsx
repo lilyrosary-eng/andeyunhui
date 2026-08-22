@@ -1,20 +1,13 @@
 import React from "react";
 import type { NeteasePlaylistItem } from './neteaseApi';
 import type { TempPlaylist } from './NeteaseView';
+import { toTempPlaylistItem } from './OnlineSidebarShell';
 import OnlineMusicSidebar, { type SidebarLikedPlaylist, type SidebarUserPlaylist } from './_shared/OnlineMusicSidebar';
 
 export interface NeteaseTempItem {
   id: string;
   name: string;
   payload: TempPlaylist;
-}
-
-function toTempItem(temp: NeteaseTempItem) {
-  return {
-    id: temp.id,
-    name: temp.name,
-    count: temp.payload.tracks?.length ?? 0,
-  };
 }
 
 function toUserPlaylist(p: NeteasePlaylistItem): SidebarUserPlaylist {
@@ -66,7 +59,7 @@ export default function NeteaseSidebar({
   return React.createElement(OnlineMusicSidebar, {
     brandLabel: '铃兰',
     likedPlaylist,
-    temps: tempPlaylists.map(toTempItem),
+    temps: tempPlaylists.map(toTempPlaylistItem),
     activeTempId,
     onSelectTemp: (item) => {
       const src = tempPlaylists.find(t => t.id === item.id);

@@ -11,7 +11,7 @@
 //   - 逻辑（拉取用户歌单、收藏）各自在调用方实现，模板只负责渲染与右键壳。
 
 import React from 'react';
-import { OnlineSidebarShell, SidebarTempSection, type TempPlaylistItem } from '../OnlineSidebarShell';
+import { OnlineSidebarShell, SidebarTempSection, Music2Icon, type TempPlaylistItem } from '../OnlineSidebarShell';
 
 const { useState } = React;
 const {
@@ -30,29 +30,6 @@ function HeartIcon() {
   }, React.createElement('path', {
     d: 'M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z',
   }));
-}
-
-function ListIcon() {
-  return React.createElement('svg', {
-    width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
-  }, [
-    React.createElement('line', { key: '1', x1: '8', y1: '6', x2: '21', y2: '6' }),
-    React.createElement('line', { key: '2', x1: '8', y1: '12', x2: '21', y2: '12' }),
-    React.createElement('line', { key: '3', x1: '8', y1: '18', x2: '21', y2: '18' }),
-    React.createElement('line', { key: '4', x1: '3', y1: '6', x2: '3.01', y2: '6' }),
-    React.createElement('line', { key: '5', x1: '3', y1: '12', x2: '3.01', y2: '12' }),
-    React.createElement('line', { key: '6', x1: '3', y1: '18', x2: '3.01', y2: '18' }),
-  ]);
-}
-
-function Music2Icon() {
-  return React.createElement('svg', {
-    width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
-  }, [
-    React.createElement('path', { key: '1', d: 'M9 18V5l12-2v13' }),
-    React.createElement('circle', { key: '2', cx: '6', cy: '18', r: '3' }),
-    React.createElement('circle', { key: '3', cx: '18', cy: '16', r: '3' }),
-  ]);
 }
 
 // ============ 通用数据类型 ============
@@ -170,8 +147,9 @@ function SidebarRanksSection({
   onSelect: (pl: SidebarUserPlaylist) => void;
   title?: string;
 }) {
-  if (ranks.length === 0) return null;
+  // 先声明 hooks 再早退，遵守 Rules of Hooks（榜单段仅当非空时被父级挂载）
   const [expanded, setExpanded] = useState(true);
+  if (ranks.length === 0) return null;
   return React.createElement('div', { key: 'ranks', className: 'space-y-1' },
     React.createElement('button', {
       key: 'header',
