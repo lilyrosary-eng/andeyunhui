@@ -18,6 +18,9 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 #[cfg(windows)]
 use windows::Win32::Foundation::POINT;
+// windows-core 0.61 别名由 crate 根（lib.rs）统一提供（见 lib.rs 顶部注释）：
+// webview2-com-sys 0.38 的 COM 类型实现该版本 Interface trait，`#[implement]` 宏生成的
+// 代码从 crate 根以 `windows_core` 名引用该 crate。
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
@@ -1016,6 +1019,58 @@ fn set_capsule_expanded(app: &tauri::AppHandle, expanded: bool) {
     }
     // emit_to 仅在全局窗表加锁借用窗句柄、不克隆 WebviewWindow，规避销毁竞态崩溃。
     let _ = app.emit_to("capsule", "capsule:expand", expanded);
+}
+
+/// 查询胶囊渲染进程是否健康（供重绘定时器等外部模块失效自查，
+/// 防止对已崩溃 renderer 的 WebView2 controller 持续发 COM 调用 → 0xcfffffff 宿主崩溃）。
+pub fn capsule_is_alive() -> bool {
+    CAPSULE_ALIVE.load(Ordering::SeqCst)
+}
+
+/// 在胶囊窗挂载时注册 WebView2 渲染进程失败回调（ProcessFailed）作为崩溃即时兜底。
+///
+/// 此前崩溃检测仅靠监视线程每 ~1s 的 `emit_to` 健康轮询；但渲染进程崩溃后窗口对象仍在内存、
+/// IPC channel 还在且 emit_to 可能仍返回 Ok，导致 `CAPSULE_ALIVE` 迟迟不置 false，重绘定时器 /
+/// present_overlay_now 持续对已死 renderer 的 controller 发 COM → 0xcfffffff 宿主崩溃拖死软件。
+///
+/// 注册后：WebView2 在渲染/浏览器进程异常退出时会同步触发本回调（在创建该 WebView 的
+/// 主线程上同步调用），立即 `capsule_handle_renderer_crash` —— mark_dead（原子，安全）+
+/// 主线程销毁坏窗 + 1.2s 自动重建。彻底替代依赖 emit_to 是否报错的不可靠探测。
+///
+/// 注意：回调运行在 WebView2 主线程（即创建该窗的 UI 线程）上，`capsule_handle_renderer_crash`
+/// 内部经 `run_on_main_thread`（非阻塞入队）与 async spawn 处理，不会在此线程上阻塞等待，
+/// 故无死锁风险。
+#[cfg(windows)]
+pub fn register_capsule_process_failed(
+    app: tauri::AppHandle,
+    ctrl: &webview2_com_sys::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+) {
+    use webview2_com::ProcessFailedEventHandler;
+    use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2, ICoreWebView2ProcessFailedEventArgs,
+    };
+    // controller → CoreWebView2（同步，无异步完成回调）→ 挂 ProcessFailed 事件
+    let webview: ICoreWebView2 = match unsafe { ctrl.CoreWebView2() } {
+        Ok(w) => w,
+        Err(_) => {
+            eprintln!("[Capsule] 注册 ProcessFailed 失败：无法取得 CoreWebView2");
+            return;
+        }
+    };
+    // 复用 webview2-com 现成的事件回调（库内经 #[implement] 生成 COM vtable），规避手写桥的
+    // windows-core 版本错配/不满足 Param 的编译失败。任何进程失败（渲染/浏览器/GPU 崩溃）都
+    // 视为胶囊失效，走统一崩溃处理；回调由 WebView2 在创建该 WebView 的线程上同步触发。
+    let handler = ProcessFailedEventHandler::create(Box::new(
+        move |_web: Option<ICoreWebView2>, _args: Option<ICoreWebView2ProcessFailedEventArgs>| {
+            crate::services::window_manager::capsule_handle_renderer_crash(app.clone());
+            Ok(())
+        },
+    ));
+    let mut token: i64 = 0;
+    if let Err(e) = unsafe { webview.add_ProcessFailed(&handler, &mut token) } {
+        eprintln!("[Capsule] add_ProcessFailed 注册失败: {e}");
+    }
+    // token 有意不保存：ProcessFailed 事件在窗口生命周期内长期有效，无需 remove。
 }
 
 /// 标记胶囊渲染健康（在 `overlay_window_get_or_create` 健康检查通过时调用）。

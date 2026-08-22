@@ -159,6 +159,9 @@ winapi = { version = "0.3", features = ["winuser", "wingdi", "processthreadsapi"
 windows-capture = "2.0"
 # WebView2 COM 透明窗：必须与 wry 内部 webview2-com 同版本（0.38），且实现 windows-core 0.61 的 Interface trait
 webview2-com-sys = "0.38"
+# 高层 WebView2 COM 事件回调（含现成 ProcessFailed/event_callback 等），避免手写 #[implement] 桥的
+# windows-core 版本错配；与 webview2-com-sys 同为 0.38 且已在 Cargo.lock（wry 传递依赖），直接复用
+webview2-com = "0.38"
 windows-core-061 = { package = "windows-core", version = "0.61" }
 
 # WebView2 COM 透明窗相关依赖（webview2-com-sys、windows-core 0.61）已迁移至

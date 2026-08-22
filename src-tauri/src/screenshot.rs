@@ -237,6 +237,14 @@ pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
             // DComp 根治：把胶囊/歌词从 WS_EX_LAYERED 重定向改为 DirectComposition swapchain，
             // 走 DWM 常规合成、不被外部媒体 overlay 抢占（详见 dcomp_overlay.rs）。仅 ANDY_DCOMP=1 生效。
             if let Ok(ctrl) = raw.controller().cast::<ICoreWebView2Controller>() {
+                // 胶囊崩溃即时兜底：注册 WebView2 ProcessFailed 回调（渲染/浏览器进程异常退出即
+                // mark_dead + 重建），替代依赖 emit_to 是否报错的 ~1s 轮询探测。见 window_manager.rs。
+                if label == "capsule" {
+                    crate::services::window_manager::register_capsule_process_failed(
+                        app.clone(),
+                        &ctrl,
+                    );
+                }
                 let ok = crate::dcomp_overlay::try_enable(ctrl, &label, hwnd);
                 if ok {
                     log::info!("[overlay] dcomp 已激活 label={}（走 DComp swapchain，外部媒体下不卡）", label);
@@ -321,6 +329,14 @@ pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
                             // 第二重保险：销毁标志
                             if REPAINT_STOP.lock().unwrap().remove(&st.label) {
                                 REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
+                                return;
+                            }
+                            // 第三重保险（胶囊专防）：胶囊渲染进程失效（崩溃后 mark_dead）时立即停止重绘，
+                            // 杜绝在崩溃→窗口真正销毁（Destroyed 才置 REPAINT_STOP）的窗口期内，对已失效
+                            // controller 持续调用 SetIsVisible/Notify（穿越到已死 renderer → 0xcfffffff 宿主崩溃）。
+                            if st.label == "capsule" && !crate::services::window_manager::capsule_is_alive() {
+                                REPAINT_INTERVALS.lock().unwrap().remove(&st.label);
+                                REPAINT_STOP.lock().unwrap().remove(&st.label);
                                 return;
                             }
                             let t0 = std::time::Instant::now();
@@ -451,6 +467,11 @@ pub fn set_overlay_repaint_rate(_webview: tauri::Webview, _interval_ms: u64) {}
 pub fn present_overlay_now(webview: tauri::Webview) {
     use webview2_com_sys::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
     use windows_core_061::Interface;
+    // 胶囊渲染进程已失效（崩溃后 mark_dead）：立即跳过，避免对已死 renderer 的 controller
+    // 发 COM 调用（穿越 → 0xcfffffff 宿主崩溃）。capsule_is_alive 原子读取，命令线程安全。
+    if webview.label() == "capsule" && !crate::services::window_manager::capsule_is_alive() {
+        return;
+    }
     // DComp 窗自动上屏，仅维持 SetIsVisible 暖机即可；layered 窗才需要 Notify 上屏一帧。
     let dcomp = crate::dcomp_overlay::is_active(webview.label());
     let _ = webview.with_webview(move |raw| {
