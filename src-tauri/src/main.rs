@@ -93,6 +93,7 @@ use andeyunhui_lib::services::ai_service;
 use andeyunhui_lib::services::companion_service;
 use andeyunhui_lib::services::multimodal_service;
 use andeyunhui_lib::services::shell_service;
+use andeyunhui_lib::services::usage_service;
 use andeyunhui_lib::services::lsp_service;
 use andeyunhui_lib::services::mcp_service;
 use andeyunhui_lib::services::search_service;
@@ -1310,6 +1311,9 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             shell_service::run_shell_command,
             // ========== 全局：AI agent 受限 shell（白名单 + Dry-Run 黑名单 + 超时）==========
             shell_service::run_agent_shell,
+            // ========== 全局：AI 用量/成本统计（usage.sqlite 持久化 + 聚合查询）==========
+            usage_service::usage_stats,
+            usage_service::usage_reset,
             // ========== 全局：IDE 内容搜索（命令面板 `#` 模式 / agent grep 工具）==========
             // gitignore 感知并行遍历 + 字面量匹配，参考 ripgrep 的 ignore crate
             search_service::search_content,

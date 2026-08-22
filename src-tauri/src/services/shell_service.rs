@@ -210,7 +210,7 @@ fn close_job(job: &Arc<Mutex<JobHandle>>) {
 #[cfg(not(windows))]
 fn close_job(_job: &Arc<Mutex<JobHandle>>) {}
 
-fn run_captured(command: &str, cwd: Option<&str>, timeout: u64, cap: usize, envs: &[(String, String)]) -> ShellResult {
+pub(crate) fn run_captured(command: &str, cwd: Option<&str>, timeout: u64, cap: usize, envs: &[(String, String)]) -> ShellResult {
     #[cfg(target_os = "windows")]
     let (shell, flag) = ("cmd", "/C");
     #[cfg(not(target_os = "windows"))]
@@ -330,7 +330,31 @@ fn run_captured(command: &str, cwd: Option<&str>, timeout: u64, cap: usize, envs
     }
 }
 
-/// 读取流并按上限截断（避免 LLM 上下文被巨量输出撑爆），忽略无效 UTF-8 字节。
+/// 异步执行统一封装：把阻塞的 [run_captured]（含 Windows Job Object 防 conhost 悬挂）交给
+/// `spawn_blocking`，供 Agent 的 run_command 工具等 async 调用方复用，避免在执行逻辑上再做一份。
+/// 语义与 [run_captured] 完全一致：Windows 走 cmd /C，stderr 单流读出，超时强制终止。
+pub(crate) async fn run_captured_async(
+    command: &str,
+    cwd: Option<std::path::PathBuf>,
+    timeout: u64,
+    cap: usize,
+    envs: Vec<(String, String)>,
+) -> ShellResult {
+    let command = command.to_string();
+    let cwd = cwd.map(|p| p.to_string_lossy().to_string());
+    tokio::task::spawn_blocking(move || run_captured(&command, cwd.as_deref(), timeout, cap, &envs))
+        .await
+        .unwrap_or_else(|_| ShellResult {
+            ok: false,
+            blocked: false,
+            timed_out: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            message: "命令执行任务被终止".into(),
+            hint: None,
+        })
+}
 fn read_capped<R: Read>(mut r: R, cap: usize) -> String {
     let mut buf = [0u8; 4096];
     let mut acc = String::with_capacity(cap.min(8192));

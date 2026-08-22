@@ -338,6 +338,17 @@ async fn run_agent(
                             "plan": if fname == "plan" { plan_snapshot_json() } else { serde_json::Value::Null },
                         }),
                     );
+                    // 通用 Hook：每单步工具执行完成后触发（副作用管线，无钩时 O(1) 空操作）。
+                    // 放在 session.push 之前：cid/fname 在 push 里被 move，此处仍需借用。
+                    crate::services::hook_service::trigger(
+                        crate::services::hook_service::HOOK_AGENT_STEP,
+                        &serde_json::json!({
+                            "requestId": request_id,
+                            "cid": &cid,
+                            "name": &fname,
+                            "ok": *ok,
+                        }),
+                    );
                     // 工具结果：记录 Tool 事件（仅日志事实，不携带角色字段——由 derive 统一派生成 role:"tool"）。
                     // 入日志前经过修剪器控制上下文成本；前端展示仍用完整 detail。
                     session.push(SessionEvent::Tool {

@@ -663,18 +663,6 @@ fn extract_edit_diff(view: &str, old: &str, new: &str) -> (bool, String, String)
     }
 }
 
-/// 取进程被信号杀死的信号名（TerminalResultView.signal）。仅 Unix 提供 `ExitStatusExt::signal`；
-/// 其它平台（如 Windows）恒为 None（进程只能通过退出码观察）。
-#[cfg(unix)]
-fn exit_signal(status: &std::process::ExitStatus) -> Option<String> {
-    use std::os::unix::process::ExitStatusExt;
-    status.signal().map(|s| format!("SIG{}", s))
-}
-#[cfg(not(unix))]
-fn exit_signal(_status: &std::process::ExitStatus) -> Option<String> {
-    None
-}
-
 /// 从文件扩展名推导语法高亮语言提示（对齐 dsh ReadResultView.lang；未知扩展返回 None）。
 fn guess_lang(p: &std::path::Path) -> Option<&'static str> {
     let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
@@ -1024,51 +1012,57 @@ impl AiTool for CommandTool {
             .and_then(|v| v.as_u64())
             .map(|t| t.clamp(1, 120))
             .unwrap_or(15);
-        let cwd = args.get("cwd").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
-        let cwd: Option<std::path::PathBuf> = cwd.map(std::path::PathBuf::from).or_else(|| ctx.project_root.clone());
+        let cwd: Option<std::path::PathBuf> = args.get("cwd")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim()).filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| ctx.project_root.clone());
 
-        // Windows 用 cmd /C，其余平台用 sh -c；由模型提供整条命令。
-        let (program, shell_arg): (&str, &str) = if cfg!(windows) {
-            ("cmd", "/C")
-        } else {
-            ("sh", "-c")
-        };
-        let mut proc = tokio::process::Command::new(program);
-        proc.arg(shell_arg).arg(&command);
-        if let Some(d) = &cwd { proc.current_dir(d); }
-        proc.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-
-        let out = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), proc.output()).await;
-        let status = out.map_err(|_| format!("命令执行超时（>{}s，已中止）", timeout_secs))?
-            .map_err(|e| format!("命令执行失败: {}", e))?;
-        let mut text = String::new();
-        if !status.stdout.is_empty() {
-            text.push_str(&String::from_utf8_lossy(&status.stdout));
+        // 复用受限 shell 的统一执行器（run_captured）：Windows 走 cmd /C，含 Job Object 防 conhost 悬挂、
+        // 按流上限截断、看门狗超时强制终止。策略上仍走本工具的「宽松黑名单兜底」命令，不套受限 shell 的弱白名单。
+        let r = crate::services::shell_service::run_captured_async(
+            &command,
+            cwd.clone(),
+            timeout_secs,
+            8000,
+            Vec::new(),
+        )
+        .await;
+        if r.blocked {
+            return Err(r.message);
         }
-        if !status.stderr.is_empty() {
+        if !r.ok {
+            return Err(r.message);
+        }
+        if r.timed_out {
+            return Err(format!("命令执行超时（>{}s，已中止）", timeout_secs));
+        }
+        let mut text = String::new();
+        if !r.stdout.is_empty() {
+            text.push_str(&r.stdout);
+        }
+        if !r.stderr.is_empty() {
             if !text.is_empty() { text.push('\n'); }
-            text.push_str(&String::from_utf8_lossy(&status.stderr));
+            text.push_str(&r.stderr);
         }
         const OCAP: usize = 8000;
         let text = if text.chars().count() > OCAP {
             format!("{}（输出过长，已截断）", text.chars().take(OCAP).collect::<String>())
         } else { text };
-        // 命令「跑完」即为工具结果（对齐 dsh：退出码/信号是结果的一部分，非工具错误）。
-        // ok 恒为 true；模型从 detail 文本判别成功与否，前端可用 meta.exitCode/signal 渲染退出态 pill。
-        let success = status.status.success();
-        let exit_code = status.status.code();
-        let signal = if exit_code.is_none() { exit_signal(&status.status) } else { None };
+        // 命令「跑完」即为工具结果（对齐 dsh：退出码是结果的一部分，非工具错误）。
+        // 模型从 detail 文本判别成功与否，前端可用 meta.exitCode 渲染退出态 pill。
+        let exit_code = r.exit_code;
+        let success = exit_code == Some(0);
         let detail = if success {
             if text.trim().is_empty() { "（命令成功，无输出）".to_string() } else { text.clone() }
         } else {
             format!("命令退出码 {}：{}", exit_code.unwrap_or(-1), text.clone())
         };
-        // terminal 呈现 meta（对齐 dsh TerminalResultView）：output + exitCode/signal + cwd，供前端渲染终端卡片
+        // terminal 呈现 meta（对齐 dsh TerminalResultView）：output + exitCode + cwd，供前端渲染终端卡片
         let meta = serde_json::json!({
             "card": "terminal",
             "output": text,
             "exitCode": exit_code,
-            "signal": signal,
             "cwd": cwd.as_deref().map(|c| c.to_string_lossy().to_string()),
         });
         Ok(ToolExecResult::with_meta(detail, meta))

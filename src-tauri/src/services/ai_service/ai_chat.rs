@@ -33,6 +33,57 @@ pub(crate) fn is_deepseek_provider(cfg: &AiProfile) -> bool {
     cfg.base_url.to_lowercase().contains("deepseek")
 }
 
+/// 粗判提供商（用于用量统计分组）。优先看 base_url 域名，其次看模型名前缀。
+fn detect_provider(cfg: &AiProfile) -> String {
+    let base = cfg.base_url.to_lowercase();
+    let model = cfg.model.to_lowercase();
+    if base.contains("deepseek") {
+        "deepseek"
+    } else if base.contains("anthropic") || base.contains("claude.ai") || model.starts_with("claude") {
+        "anthropic"
+    } else if base.contains("googleapis") || base.contains("generativelanguage") || model.starts_with("gemini") {
+        "google"
+    } else if base.contains("openai") || model.starts_with("gpt") || model.starts_with("o1") || model.starts_with("o3") {
+        "openai"
+    } else if base.contains("moonshot") {
+        "moonshot"
+    } else if base.contains("dashscope") || base.contains("qwen") {
+        "qwen"
+    } else {
+        "other"
+    }
+    .to_string()
+}
+
+/// 请求结束收尾：触发 `chat.done` 钩点 + 把用量落库（幂等、尽力而为、异步）。
+fn fire_chat_done(app: &AppHandle, cfg: &AiProfile, request_id: &str, last_usage: &Option<serde_json::Value>) {
+    let app = app.clone();
+    let profile_id = cfg.id.clone();
+    let provider = detect_provider(cfg);
+    let model = cfg.model.clone();
+    let usage = last_usage.clone();
+    // 触发全局钩点：payload 含模型/请求 id/usage，供外部管线（审计/联动/扩展）消费。
+    crate::services::hook_service::trigger(
+        crate::services::hook_service::HOOK_CHAT_DONE,
+        &serde_json::json!({
+            "requestId": request_id,
+            "profileId": profile_id,
+            "provider": provider,
+            "model": model,
+            "usage": usage,
+        }),
+    );
+    let Some(u) = last_usage else { return };
+    let nums = crate::services::usage_service::parse_usage(u);
+    if nums.prompt_tokens + nums.completion_tokens <= 0 {
+        return;
+    }
+    // 把阻塞落库交给后台任务，不阻塞当前对话流
+    tauri::async_runtime::spawn(async move {
+        crate::services::usage_service::record_usage_async(&app, profile_id, provider, model, nums).await;
+    });
+}
+
 /// 为 Anthropic 提供商构建带 cache_control 的 messages 数组。
 /// 把 system 消息和倒数第 3 条消息的 content 从字符串转为 block 数组格式，
 /// 并在最后一个 block 上加 cache_control: { type: "ephemeral" }。
@@ -304,6 +355,7 @@ pub async fn ai_chat(
                         None => continue,
                     };
                     if data == "[DONE]" {
+                        fire_chat_done(&app, &cfg, &request_id, &last_usage);
                         let _ = app.emit("ai-done", serde_json::json!({
                             "requestId": request_id,
                             "usage": last_usage,
@@ -352,6 +404,7 @@ pub async fn ai_chat(
         }
     }
 
+    fire_chat_done(&app, &cfg, &request_id, &last_usage);
     let _ = app.emit("ai-done", serde_json::json!({
         "requestId": request_id,
         "usage": last_usage,
