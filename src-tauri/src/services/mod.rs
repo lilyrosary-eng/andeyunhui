@@ -39,6 +39,8 @@ pub mod sandbox_service;
 pub mod usage_service;
 // 通用 Hook 引擎（进程内回调注册/触发）：chat.done / agent.step 等生命周期钩点。
 pub mod hook_service;
+// Agent 技能按需加载（progressive disclosure）：.agent/skills 目录索引 + 按名加载，供 skill 工具使用。
+pub mod skill_service;
 pub mod lsp_service;
 pub mod mcp_service;
 // IDE 内容搜索（gitignore 感知并行遍历 + 字面量匹配）：命令面板 `#` 模式 / agent grep 工具

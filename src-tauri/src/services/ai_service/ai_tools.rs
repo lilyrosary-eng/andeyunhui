@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, AiProfile};
 use crate::services::mcp_service;
-use crate::services::{git_service, lsp_service, rag_service};
+use crate::services::{git_service, lsp_service, rag_service, skill_service};
 use crate::services::sandbox_service;
 use tauri::{AppHandle, Emitter};
 
@@ -82,12 +82,61 @@ pub(crate) async fn execute_tool_once(
                 let msg = format!("参数校验失败 [{}]: {}", fname, ve);
                 return (false, ToolExecResult::plain(msg));
             }
+            // 会话前置拦截（Hook 闸口）：安全敏感操作在落地前给业务侧一次「批准/拒绝/改参」的机会。
+            // 仅对可写/有副作用工具拦截，只读工具（get_current_time/calculator/grep/glob 等）放行，
+            // 零 guard 注册时 O(1) 放行，不影响既有流程。
+            if is_side_effect_tool(fname) {
+                let verdict = {
+                    let payload = serde_json::json!({
+                        "tool": fname,
+                        "args": args,
+                        "requestId": tc.request_id,
+                    });
+                    crate::services::hook_service::guard(
+                        crate::services::hook_service::HOOK_PRE_TOOL_USE,
+                        &payload,
+                    )
+                };
+                match verdict {
+                    crate::services::hook_service::Verdict::Deny(reason) => {
+                        let msg = format!("执行已拦截 [{}]: {}", fname, reason);
+                        return (false, ToolExecResult::plain(msg));
+                    }
+                    crate::services::hook_service::Verdict::Allow(Some(over)) => {
+                        // 授权回调改写参数：若改写了 args 字段则生效，无则维持原参。
+                        if over.is_object() {
+                            if let Some(a) = over.get("args") {
+                                if a.is_object() {
+                                    // 用改写后的 args 重新执行（跳过再次拦截，避免死循环）
+                                    return match t.execute(a, tc).await {
+                                        Ok(r) => (true, r),
+                                        Err(e) => (false, ToolExecResult::plain(e)),
+                                    };
+                                }
+                            }
+                        }
+                        // 允许但无有效改写：正常执行
+                    }
+                    crate::services::hook_service::Verdict::Allow(None) => {}
+                }
+            }
             match t.execute(args, tc).await {
                 Ok(r) => (true, r),
                 Err(e) => (false, ToolExecResult::plain(e)),
             }
         }
     }
+}
+
+/// 判断某工具是否属于「有副作用 / 可写」类，值得在其执行前做前置拦截。
+/// 只读与纯计算工具直接放行，避免无谓开销。
+fn is_side_effect_tool(name: &str) -> bool {
+    // command/file(写/删)/mcp/git/subagent/web_fetch 均为可产生外部副作用或不可逆影响的操作；
+    // 其余（get_current_time/calculator/grep/glob/web_search/plan/lsp 等）为只读或局部状态，跳过拦截。
+    matches!(
+        name,
+        "command" | "file" | "mcp" | "git" | "subagent" | "web_fetch"
+    )
 }
 
 /// 模型可调用的工具。
@@ -1547,6 +1596,61 @@ impl AiTool for McpTool {
     }
 }
 
+/// skill：按名称加载项目技能全文（progressive disclosure）。
+/// 技能索引起初只注入名称 + 一句话说明；模型依据触发关键词判断需用到某技能时，
+/// 用本工具加载其完整 markdown 说明，获取可执行的具体步骤/规则后再执行。加载后可结合
+/// 既有 file/command 等工具落地。此工具为只读，不产生外部副作用。
+struct SkillTool;
+#[async_trait::async_trait]
+impl AiTool for SkillTool {
+    fn name(&self) -> &'static str {
+        "skill"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "加载项目技能详情。name 填系统提示中「项目可用技能」列出的技能名；返回该技能的完整说明（含操作步骤/规则/参数约定），加载后再按其执行。需要处理某项专属任务（前端/后端/数据/测试等，见技能关键词）时先调用本工具。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "技能名（系统提示「项目可用技能」中列出的 name；也支持 list 查看全部）" }
+                    },
+                    "required": ["name"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
+        let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        // list 别名：无最技能目录时报全量索引，方便模型探测可用技能。
+        if name.eq_ignore_ascii_case("list") {
+            let dir = skill_service::list_skills(ctx.project_root.as_deref());
+            if dir.skills.is_empty() {
+                return Ok(ToolExecResult::plain("（项目内未配置任何技能，可忽略 skill 工具）".to_string()));
+            }
+            let list: Vec<String> = dir
+                .skills
+                .iter()
+                .map(|s| {
+                    let kws = if s.keywords.is_empty() { String::new() } else { format!(" [{}]", s.keywords.join("/")) };
+                    format!("- {}：{}{}", s.name, s.description, kws)
+                })
+                .collect();
+            return Ok(ToolExecResult::plain(format!("项目可用技能（结构见 .agent/skills）：\n{}", list.join("\n"))));
+        }
+        if name.is_empty() {
+            return Err("skill 缺少 name 参数".to_string());
+        }
+        let content = skill_service::load_skill(ctx.project_root.as_deref(), &name)?;
+        Ok(ToolExecResult::plain(format!("技能「{}」说明（来源 {}）：\n{}", content.name, content.source, content.content)))
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
+    }
+}
+
 /// 极简 form-url-encoded 百分号编码：保留字母数字与 `-_.~`，其余字节转 `%XX`，空格转 `+`。
 /// 仅用于 web_search 的 query 编码（query 通常较短，不值得为它引入 percent-encoding 依赖）。
 fn url_escape_component(s: &str) -> String {
@@ -2846,6 +2950,7 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(GrepTool),
         Box::new(GlobTool),
         Box::new(McpTool),
+        Box::new(SkillTool),
         Box::new(WebSearchTool),
         Box::new(WebFetchTool),
         Box::new(SubagentTool),
@@ -2875,6 +2980,29 @@ pub(crate) async fn mcp_tools_guide(app: &AppHandle) -> String {
     for (id, name, tools) in list {
         let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         s.push_str(&format!("\n- [{}] {}：{}", id, name, names.join(", ")));
+    }
+    s
+}
+
+/// 技能索引注入（progressive disclosure）：只注入项目技能的名称 + 一句话说明 + 触发关键词，
+/// 完整技能说明在模型需要时用 skill 工具按名加载，避免上下文膨胀（对齐 agent-skills 的按需加载）。
+/// 无技能目录时返回空串，agent 上下文不受影响。
+pub(crate) fn skills_guide(project_root: Option<&std::path::Path>) -> String {
+    let dir = skill_service::list_skills(project_root);
+    if dir.skills.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "\n\n项目可用技能（用 skill 工具按 name 加载完整说明后再执行相应任务；按触发关键词判断是否用到）：",
+    );
+    for sk in &dir.skills {
+        let kws: Vec<String> = sk.keywords.clone();
+        let kws_txt = if kws.is_empty() {
+            String::new()
+        } else {
+            format!(" 关键词: {}", kws.join("/"))
+        };
+        s.push_str(&format!("\n- {}：{}{}", sk.name, sk.description, kws_txt));
     }
     s
 }

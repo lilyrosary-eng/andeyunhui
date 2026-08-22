@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter};
 use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
+use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text};
 
 /// Agent 对话：原生 tool_calls + 循环。
@@ -57,7 +57,9 @@ async fn run_agent(
     } else {
         format!("{}\n\n{}", effective_system, agent_hint)
     };
-    let system_final = format!("{}{}{}", base_system, mcp_guide, mem_ctx);
+    // 注入项目技能索引（progressive disclosure）：只带名称+关键词，详情用 skill 工具按需加载
+    let skill_guide = skills_guide(project_root_pb.as_deref());
+    let system_final = format!("{}{}{}{}", base_system, mcp_guide, skill_guide, mem_ctx);
 
     let tools: Vec<serde_json::Value> = registered_tools().iter().map(|t| t.function_schema()).collect();
     let client = reqwest::Client::new();

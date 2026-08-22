@@ -83,6 +83,94 @@ pub fn trigger(point: &str, payload: &Value) {
     }
 }
 
+/// Hook 判定结果（供 [guard] 使用）：返回「允许 / 拒绝 / 允许并改写」三类语义。
+///
+/// - `Allow(None)`：放行，参数不变。
+/// - `Allow(Some(args))`：放行，但把 payload 中的参数改写为给定 JSON（用于授权回调改写指令）。
+/// - `Deny(reason)`：拦截，调用方应中止该操作并向用户/模型说明原因。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Verdict {
+    Allow(Option<serde_json::Value>),
+    Deny(String),
+}
+
+/// 会话前置拦截钩点：在每个安全敏感工具（command / file 写 / 子代理等）执行前触发，
+/// 供业务侧挂载「批准 / 拒绝 / 改参」的判定函数。与副作用型的 [trigger] 不同，
+/// 本钩点返回 [Verdict]，由调用方决策，属于「流程拦截」而非「烧一手」。
+pub const HOOK_PRE_TOOL_USE: &str = "pre.tool_use";
+
+/// 拦截型钩子函数：接收 ``(部点, payload)``，返回 [Verdict]。
+/// 允许多个判定函数并存：按注册顺序执行，任一返回 `Deny` 立即短路拒绝；
+/// 否则取最后返回 `Allow(Some(args))` 的改写结果。
+pub type GuardFn = Box<dyn Fn(&str, &Value) -> Verdict + Send + Sync>;
+
+/// 单个钩点的判定函数集合：id → GuardFn（同 id 覆盖，保证幂等可更新）。
+type GuardPoint = HashMap<String, GuardFn>;
+static GUARDS: OnceLock<Mutex<HashMap<String, GuardPoint>>> = OnceLock::new();
+
+fn guards() -> &'static Mutex<HashMap<String, GuardPoint>> {
+    GUARDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 注册一个拦截判定函数。同 (point, id) 重复注册覆盖旧实现。返回是否首次为该 id 注册。
+pub fn register_guard(point: &str, id: &str, f: GuardFn) -> bool {
+    match guards().lock() {
+        Ok(mut g) => {
+            let existed = g
+                .entry(point.to_string())
+                .or_default()
+                .insert(id.to_string(), f)
+                .is_some();
+            !existed
+        }
+        Err(_) => false,
+    }
+}
+
+/// 注销拦截判定函数。不存在则静默。
+pub fn unregister_guard(point: &str) {
+    if let Ok(mut g) = guards().lock() {
+        g.remove(point);
+    }
+}
+
+/// 触发拦截判定（前置闸口）：按注册序执行，任一 Deny 短路拒绝；
+/// 均 Allow 时取最后一项 Allow(Some(args)) 的改写作为放行结果。
+///
+/// 「换出-执行-放回」与 [trigger] 一致：回调执行期间不持有全局锁，避免在回调内再注册导致死锁。
+/// 无任何 guard 注册时本函数 O(1) 返回 `Verdict::Allow(None)`（放行，零额外开销）。
+pub fn guard(point: &str, payload: &Value) -> Verdict {
+    let key = point.to_string();
+    let funcs: GuardPoint = {
+        let mut g = match guards().lock() {
+            Ok(g) => g,
+            Err(_) => return Verdict::Allow(None),
+        };
+        std::mem::take(g.entry(key.clone()).or_default())
+    };
+    let mut outcome = Verdict::Allow(None);
+    // 遍历副本，不持全局锁
+    for (_, f) in funcs.iter() {
+        let v = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&key, payload)))
+            .unwrap_or(Verdict::Deny("hook 判定函数执行异常（panic 已捕获）".to_string()));
+        match v {
+            Verdict::Deny(_) => {
+                outcome = v;
+                break;
+            }
+            Verdict::Allow(a) => {
+                if a.is_some() {
+                    outcome = Verdict::Allow(a);
+                }
+            }
+        }
+    }
+    if let Ok(mut g) = guards().lock() {
+        g.insert(key, funcs);
+    }
+    outcome
+}
+
 /// 列出已注册的所有钩点（用于诊断 / 前端展示）。
 pub fn hook_points() -> Vec<String> {
     match registry().lock() {
@@ -124,5 +212,31 @@ mod tests {
         register_hook("p.boom", "boom", Box::new(|_| panic!("kaboom")));
         register_hook("p.boom", "ok", Box::new(|_| {}));
         trigger("p.boom", &Value::Null); // 不应 panic 冒泡
+    }
+
+    #[test]
+    fn guard_deny_short_circuits() {
+        register_guard("pre.g1", "deny-all", Box::new(|_, _| Verdict::Deny("blocked".into())));
+        register_guard("pre.g1", "allow", Box::new(|_, _| Verdict::Allow(None)));
+        // 任一 Deny 立即短路拒绝
+        assert_eq!(guard("pre.g1", &Value::Null), Verdict::Deny("blocked".into()));
+        unregister_guard("pre.g1");
+        // 注销后放行
+        assert_eq!(guard("pre.g1", &Value::Null), Verdict::Allow(None));
+    }
+
+    #[test]
+    fn guard_rewrite_args() {
+        register_guard("pre.g2", "rewrite", Box::new(|_, _| {
+            Verdict::Allow(Some(serde_json::json!({ "args": { "command": "echo safe" } })))
+        }));
+        let payload = serde_json::json!({ "command": "rm -rf /" });
+        match guard("pre.g2", &payload) {
+            Verdict::Allow(Some(over)) => {
+                assert_eq!(over["args"]["command"], "echo safe");
+            }
+            other => panic!("期望 Allow(Some)，实际 {:?}", other),
+        }
+        unregister_guard("pre.g2");
     }
 }
