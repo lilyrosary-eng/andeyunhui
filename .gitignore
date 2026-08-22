@@ -76,11 +76,9 @@ research_plan_*.md
 research_report_*.md
 截图功能.md
 
-# 设计 / 诊断类内部文档（非对外文档；截图等资源 .png/.gif 仍会被跟踪）
-docs/*.md
-# 例外：对外门面文档需纳入版本控制（定位话术、发布草稿）
-!docs/POSITIONING.md
-!docs/release-v2.1.0-draft.md
+# docs/ 全部为本地研究/计划/报告/设计工作笔记（含对外门面文档、截图、图表），整目录不入库
+# 如需恢复某文档入库，请用 !docs/<相对路径> 显式放行
+docs/
 
 # ---- 安全：环境变量 / 密钥（避免误提交） ----
 .env
@@ -108,7 +106,6 @@ build_err.txt
 *.pptx
 sign.ps1
 andeyunhui-signing.pfx
-docs/
 
 
 # ffmpeg 共享库（单文件超 GitHub 100MB 限制，不入库；本地 external-deps 下保留供打包使用）
