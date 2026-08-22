@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{ToolContext, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
+use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json};
 
 /// Agent 对话：原生 tool_calls + 循环。
@@ -210,44 +210,99 @@ pub async fn ai_chat_agent(
                 tool_calls: msg_obj["tool_calls"].as_array().cloned().unwrap_or_default(),
             });
 
+            // ---- 工具并发调度（对齐 dsh executeToolCalls）----
+            // 只读/纯计算工具（Parallel）带界并发执行；有副作用/共享可变状态的工具（Exclusive）
+            // 以单元素窗口串行，起批次屏障；结果一律按模型顺序 commit 回填。
+            const PARALLEL_LIMIT: usize = 4; // dsh 默认 maxParallelToolCalls 上限，带界池
+            let tools = registered_tools();
+            // 整批调用解析为可调度单元（保留模型顺序）：(cid, fname, 工具下标或None, args)
+            let mut prepared: Vec<(String, String, Option<usize>, serde_json::Value)> = Vec::with_capacity(calls.len());
             for call in calls {
                 let cid = call.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let fname = call["function"]["name"].as_str().unwrap_or("").to_string();
                 let arguments = call["function"]["arguments"].as_str().unwrap_or("");
-                let found = registered_tools().into_iter().find(|t| t.name() == fname);
-                let (ok, detail) = match found {
-                    None => (false, format!("未知工具: {}", fname)),
-                    Some(tool) => {
-                        // 宽松解析参数：部分模型返回非标准/截断 JSON → 降级为 error 回填给模型。
-                        let args: serde_json::Value =
-                            serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({}));
-                        match tool.execute(&args, &tool_ctx).await {
+                // 宽松解析参数：部分模型返回非标准/截断 JSON → 降级为 error 回填给模型。
+                let args: serde_json::Value =
+                    serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({}));
+                let idx = tools.iter().position(|t| t.name() == fname);
+                prepared.push((cid, fname, idx, args));
+            }
+            let is_exclusive = |i: usize| match prepared[i].2 {
+                Some(idx) => tools[idx].concurrency() == ToolConcurrency::Exclusive,
+                None => true, // 未知工具按独占处理，避免误并发
+            };
+            let mut win_start = 0;
+            while win_start < prepared.len() {
+                let is_par = !is_exclusive(win_start);
+                // 组合窗口：独占 → 单元素屏障；并行 → 吃进连续 Parallel（上限 PARALLEL_LIMIT 保证带界并发）。
+                let mut win_end = win_start + 1;
+                if is_par {
+                    while win_end < prepared.len()
+                        && (win_end - win_start) < PARALLEL_LIMIT
+                        && !is_exclusive(win_end)
+                    {
+                        win_end += 1;
+                    }
+                }
+                // 执行窗口：并行窗口 join_all 并发、独占窗口串行（长 1）。返回 Vec<(ok, detail)>，与模型顺序对齐。
+                let results: Vec<(bool, String)> = if win_end - win_start > 1 {
+                    futures_util::future::join_all((win_start..win_end).map(|p| {
+                        // 在 async 块外提取自有数据与工具引用，避免捕获遍历变量/整体移动 Vec。
+                        let fname = prepared[p].1.clone();
+                        let args = prepared[p].3.clone();
+                        let tool = prepared[p].2.map(|i| &tools[i]); // Option<&dyn AiTool>
+                        let tc = &tool_ctx;
+                        async move {
+                            match tool {
+                                None => (false, format!("未知工具: {}", fname)),
+                                Some(t) => match t.execute(&args, tc).await {
+                                    Ok(r) => (true, r),
+                                    Err(e) => (false, e),
+                                },
+                            }
+                        }
+                    }))
+                    .await
+                } else {
+                    let p = win_start;
+                    let args = prepared[p].3.clone();
+                    let one = match prepared[p].2 {
+                        None => (false, format!("未知工具: {}", prepared[p].1)),
+                        Some(idx) => match tools[idx].execute(&args, &tool_ctx).await {
                             Ok(r) => (true, r),
                             Err(e) => (false, e),
-                        }
-                    }
+                        },
+                    };
+                    vec![one]
                 };
-                let _ = app.emit(
-                    "ai-agent-step",
-                    serde_json::json!({
-                        "requestId": request_id,
-                        "stage": "tool",
-                        "name": fname,
-                        "ok": ok,
-                        "detail": detail,
-                        // plan 工具执行后附带当前计划结构化快照，供前端渲染计划/待办面板
-                        "plan": if fname == "plan" { plan_snapshot_json() } else { serde_json::Value::Null },
-                    }),
-                );
-                // 工具结果：记录 Tool 事件（仅日志事实，不携带角色字段——由 derive 统一派生成 role:"tool"）。
-                // 入日志前经过修剪器控制上下文成本；前端展示仍用完整 detail。
-                session.push(SessionEvent::Tool {
-                    seq: 0, // push() 会覆写
-                    call_id: cid.clone(),
-                    name: fname.clone(),
-                    ok,
-                    content: trim_tool_result(&detail),
-                });
+                // 结果按模型顺序 commit：发射 step 事件 + 记录 Tool 事件。
+                for (k, p) in (win_start..win_end).enumerate() {
+                    let cid = prepared[p].0.clone();
+                    let fname = prepared[p].1.clone();
+                    let (ok, detail) = &results[k];
+                    let _ = app.emit(
+                        "ai-agent-step",
+                        serde_json::json!({
+                            "requestId": request_id,
+                            "stage": "tool",
+                            "name": fname,
+                            "ok": ok,
+                            "detail": detail,
+                            // plan 工具执行后附带当前计划结构化快照，供前端渲染计划/待办面板
+                            "plan": if fname == "plan" { plan_snapshot_json() } else { serde_json::Value::Null },
+                        }),
+                    );
+                    // 工具结果：记录 Tool 事件（仅日志事实，不携带角色字段——由 derive 统一派生成 role:"tool"）。
+                    // 入日志前经过修剪器控制上下文成本；前端展示仍用完整 detail。
+                    session.push(SessionEvent::Tool {
+                        seq: 0, // push() 会覆写
+                        call_id: cid,
+                        name: fname,
+                        ok: *ok,
+                        content: trim_tool_result(detail),
+                    });
+                }
+                win_start = win_end;
             }
             // 崩溃恢复：每轮工具结果落地即持久化一次，进程在中途被杀也能从那轮续拉。
             persist_agent_session(&app, &session);

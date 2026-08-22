@@ -26,6 +26,15 @@ pub(crate) struct ToolContext {
     pub project_root: Option<PathBuf>,
 }
 
+/// 工具并发执行级别（对齐 dsh executeToolCalls 的 exclusive/parallel 语义）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolConcurrency {
+    /// 可并行：只读 / 纯计算，声明周期内不跨 await 共享可变状态，可与此批其他工具并发。
+    Parallel,
+    /// 独占串行（屏障）：有副作用或共享可变状态，执行时刻不得与其他工具并发，起批次屏障作用。
+    Exclusive,
+}
+
 /// 模型可调用的工具。
 /// execute 为异步实现：文件写给项目根外需等待用户授权、命令执行需限时，故在 async 中 await。
 /// 阻塞 IO（std::fs / 进程等待）内部用 spawn_blocking，避免卡住 Tokio 运行时。
@@ -34,6 +43,11 @@ pub(crate) trait AiTool: Send + Sync {
     fn name(&self) -> &'static str;
     /// OpenAI functions 格式 schema，供 /chat/completions 的 tools 参数。
     fn function_schema(&self) -> serde_json::Value;
+    /// 工具并发执行级别（对齐 dsh executeToolCalls 的 exclusive/parallel）。
+    /// 默认 Exclusive（安全默认）：有副作用或共享可变状态的工具需独占串行。
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
+    }
     /// 执行工具；args 为模型传入的 JSON 对象，ctx 提供本轮上下文。
     /// 错误以 Err(text) 返回，仍作为 tool 结果回填给模型。
     async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String>;
@@ -58,6 +72,9 @@ impl AiTool for NowTool {
     }
     async fn execute(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> Result<String, String> {
         Ok(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
     }
 }
 
@@ -96,6 +113,9 @@ impl AiTool for CalculatorTool {
             return Err(format!("表达式存在多余字符: '{}'", &p.s[p.pos..]));
         }
         Ok(format!("= {}", val))
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
     }
 }
 
@@ -954,6 +974,9 @@ impl AiTool for GrepTool {
         }
         Ok(s)
     }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
+    }
 }
 
 /// glob：在项目内按文件名模式搜索文件路径（gitignore 感知、跳过 VCS 目录），按修改时间由新到旧排序。
@@ -1032,6 +1055,9 @@ impl AiTool for GlobTool {
             out.push(format!("（Showing {} of {} paths；请缩小 pattern 或指定 path 查看更多）", GLOB_MAX_RESULTS, total));
         }
         Ok(out.join("\n"))
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
     }
 }
 
