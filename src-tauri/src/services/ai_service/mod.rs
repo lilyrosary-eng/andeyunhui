@@ -22,7 +22,7 @@ pub mod ai_conversations;
 // 对外重导出：保持 crate::services::ai_service::xxx 路径不变
 pub use ai_profile::{AiProfile, AiProfiles, load_profiles, resolve_profile, ai_get_profiles, ai_set_profiles, ai_set_profile_thinking};
 pub use ai_chat::{ChatMessage, ai_chat};
-pub use ai_agent::{ai_chat_agent, ai_agent_approve, ai_agent_apply_edits, ai_agent_fork, ai_agent_replay};
+pub use ai_agent::{ai_chat_agent, ai_agent_approve, ai_agent_apply_edits, ai_agent_fork, ai_agent_replay, ai_agent_cancel, ai_agent_status};
 pub use ai_ocr::{ai_test_connection, ai_vision_ocr, translate_text, ai_ocr_enhance, ocr_export_pdf};
 pub use ai_conversations::{ai_get_conversations, ai_save_conversations};
 
@@ -30,7 +30,7 @@ pub use ai_conversations::{ai_get_conversations, ai_save_conversations};
 // main.rs 的 generate_handler 通过 ai_service::__cmd__* 路径引用，需一并重导出以保持路径不变。
 pub use ai_profile::{__cmd__ai_get_profiles, __cmd__ai_set_profiles, __cmd__ai_set_profile_thinking, __tauri_command_name_ai_get_profiles, __tauri_command_name_ai_set_profiles, __tauri_command_name_ai_set_profile_thinking};
 pub use ai_chat::{__cmd__ai_chat, __tauri_command_name_ai_chat};
-pub use ai_agent::{__cmd__ai_chat_agent, __cmd__ai_agent_approve, __cmd__ai_agent_apply_edits, __cmd__ai_agent_fork, __cmd__ai_agent_replay, __tauri_command_name_ai_chat_agent, __tauri_command_name_ai_agent_approve, __tauri_command_name_ai_agent_apply_edits, __tauri_command_name_ai_agent_fork, __tauri_command_name_ai_agent_replay};
+pub use ai_agent::{__cmd__ai_chat_agent, __cmd__ai_agent_approve, __cmd__ai_agent_apply_edits, __cmd__ai_agent_fork, __cmd__ai_agent_replay, __cmd__ai_agent_cancel, __cmd__ai_agent_status, __tauri_command_name_ai_chat_agent, __tauri_command_name_ai_agent_approve, __tauri_command_name_ai_agent_apply_edits, __tauri_command_name_ai_agent_fork, __tauri_command_name_ai_agent_replay, __tauri_command_name_ai_agent_cancel, __tauri_command_name_ai_agent_status};
 pub use ai_ocr::{__cmd__ai_test_connection, __cmd__ai_vision_ocr, __cmd__translate_text, __cmd__ai_ocr_enhance, __cmd__ocr_export_pdf, __tauri_command_name_ai_test_connection, __tauri_command_name_ai_vision_ocr, __tauri_command_name_translate_text, __tauri_command_name_ai_ocr_enhance, __tauri_command_name_ocr_export_pdf};
 pub use ai_conversations::{__cmd__ai_get_conversations, __cmd__ai_save_conversations, __tauri_command_name_ai_get_conversations, __tauri_command_name_ai_save_conversations};
 

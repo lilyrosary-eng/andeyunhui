@@ -3,6 +3,9 @@
 // （由 ai_service.rs 机械拆分而来，逻辑零改动）
 
 use std::path::PathBuf;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
@@ -16,8 +19,12 @@ use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive
 /// 事件（payload 含 requestId 便于前端多请求区分）：
 ///   - ai-agent-step { requestId, stage:"tool", name, ok, detail }  工具调用/结果（供前端透传展示）
 ///   - ai-delta / ai-done / ai-error   与 ai_chat 一致
-#[tauri::command]
-pub async fn ai_chat_agent(
+///
+/// 本函数为【后台 worker】执行的会话循环：`ai_chat_agent` 命令只负责把本任务注册进 worker 表并
+/// 立即返回；本函数在 tokio::spawn 的后台任务里运行，期间通过事件把增量推给前端。cancel 为协作式
+/// 取消标记（用户在协作点主动退出），与注册表的 abort handle 共用一线（cancel 落 flag + abort 强制
+/// 中断在途 await）。
+async fn run_agent(
     app: AppHandle,
     request_id: String,
     messages: Vec<ChatMessage>,
@@ -25,6 +32,7 @@ pub async fn ai_chat_agent(
     system: Option<String>,
     max_rounds: Option<u32>,
     project_root: Option<String>,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 12u32);
     let profiles = load_profiles(&app);
@@ -114,6 +122,14 @@ pub async fn ai_chat_agent(
     };
 
     for _round in 0..max_rounds {
+        // 协作式取消检查点一：每轮开跑前。
+        if cancel.load(Ordering::SeqCst) {
+            let _ = app.emit("ai-done", serde_json::json!({
+                "requestId": request_id, "cancelled": true,
+                "text": "已收到取消请求，agent 已停止",
+            }));
+            return Ok(());
+        }
         // 熔断阈值随模型档案可配置：未配置则沿用旧默认（high=36k / hard=96k）。
         // 对 1M/128k 等大上下文模型调高 profile.max_context_tokens 即可放宽，不再一刀切。
         // 统一按档案换算、不按模型类别分档：因为我们 AI 路由统一且 profile 已足够完备。
@@ -231,6 +247,14 @@ pub async fn ai_chat_agent(
                 Some(idx) => tools[idx].concurrency() == ToolConcurrency::Exclusive,
                 None => true, // 未知工具按独占处理，避免误并发
             };
+            // 协作式取消检查点二：每批工具执行前。
+            if cancel.load(Ordering::SeqCst) {
+                let _ = app.emit("ai-done", serde_json::json!({
+                    "requestId": request_id, "cancelled": true,
+                    "text": "已收到取消请求，agent 已停止",
+                }));
+                return Ok(());
+            }
             let mut win_start = 0;
             while win_start < prepared.len() {
                 let is_par = !is_exclusive(win_start);
@@ -479,4 +503,124 @@ pub async fn ai_agent_replay(
     let msgs = replay_derived_messages(&source, boundary, "")
         .map_err(|e| fork_err_text(&e))?;
     serde_json::to_string(&msgs).map_err(|e| e.to_string())
+}
+
+// ============ worker 隔离（对齐 dsh 的 agent 后台任务 / AbortSignal） ============
+// dsh 把每个 agent 放进独立 worker（cordis 容器 + AbortSignal + 可取消的后台任务）。落地到本项目
+// Tauri 架构即：`ai_chat_agent` 命令只负责把 run_agent 注册进一张全局 worker 表（tokio::spawn +
+// abort handle）并立即返回；事件经 emit 推送维持既有前端契约。并发多 agent、按 request_id 查状态、
+// 协作式取消（协作点检查 flag）+ 强制中断（abort 在途 await）双保险。
+
+/// worker 运行状态（AtomicU8）取值。
+const ST_RUNNING: u8 = 1;
+const ST_DONE: u8 = 2;
+const ST_CANCELLED: u8 = 3;
+
+/// 一张 worker 的登记信息。
+struct WorkerEntry {
+    /// 中断在途 await（reqwest / 工具 execute）用。
+    abort: tokio::task::AbortHandle,
+    /// 协作式取消标记；用户取消时置 true，run_agent 在检查点主动退出。
+    cancel: Arc<AtomicBool>,
+    /// 生命周期：RUNNING →（自然结束）DONE /（取消）CANCELLED。
+    state: Arc<AtomicU8>,
+}
+
+static AGENT_WORKERS: OnceLock<Mutex<HashMap<String, WorkerEntry>>> = OnceLock::new();
+fn workers() -> &'static Mutex<HashMap<String, WorkerEntry>> {
+    AGENT_WORKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Agent 入口：把会话循环注册为后台 worker 后立即返回（事件驱动，对齐原契约）。
+/// request_id 即会话/任务 id；若同 id 已有运行中任务，先取消旧的再起新的，防续聊叠跑。
+#[tauri::command]
+pub async fn ai_chat_agent(
+    app: AppHandle,
+    request_id: String,
+    messages: Vec<ChatMessage>,
+    profile_id: Option<String>,
+    system: Option<String>,
+    max_rounds: Option<u32>,
+    project_root: Option<String>,
+) -> Result<(), String> {
+    // 同步预检：无 API Key 直接拒绝（对齐原契约），无需开后台任务。
+    let profiles = load_profiles(&app);
+    let cfg = resolve_profile(&profiles, profile_id.clone());
+    if cfg.api_key.trim().is_empty() {
+        let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
+        emit_agent_error(&app, &request_id, &msg);
+        return Err(msg);
+    }
+
+    // 同 id 已有运行中任务 → 先取消（防重复续聊叠跑）。
+    cancel_worker(&request_id);
+
+    let state = Arc::new(AtomicU8::new(ST_RUNNING));
+    let cancel = Arc::new(AtomicBool::new(false));
+    // 给后台闭包与 worker 注册表各备一份所有权，避免 async move 把外部变量整体移走。
+    let cancel_cl = cancel.clone();
+    let req_id = request_id.clone();
+    let app_worker = app.clone();
+    let task = tokio::spawn(async move {
+        let _ = run_agent(
+            app_worker,
+            req_id.clone(),
+            messages,
+            profile_id,
+            system,
+            max_rounds,
+            project_root,
+            cancel_cl,
+        )
+        .await;
+        // 自然结束（非取消）→ 登记 DONE 后从注册表移除；取消走 cancel_worker 的 abort 路径。
+        let mut m = workers().lock().unwrap();
+        if let Some(w) = m.get(&req_id) {
+            let _ = w.state.compare_exchange(ST_RUNNING, ST_DONE, Ordering::SeqCst, Ordering::SeqCst);
+            m.remove(&req_id);
+        }
+    });
+
+    workers().lock().unwrap().insert(
+        request_id.clone(),
+        WorkerEntry { abort: task.abort_handle(), cancel: cancel.clone(), state },
+    );
+    Ok(())
+}
+
+fn cancel_worker(request_id: &str) {
+    let mut m = workers().lock().unwrap();
+    if let Some(w) = m.remove(request_id) {
+        w.cancel.store(true, Ordering::SeqCst);
+        let _ = w.state.compare_exchange(ST_RUNNING, ST_CANCELLED, Ordering::SeqCst, Ordering::SeqCst);
+        let _ = w.abort.abort();
+    }
+}
+
+/// 取消运行中的 agent（按 request_id）。主动置取消标记 + 强制 abort 中断在途 await。
+#[tauri::command]
+pub async fn ai_agent_cancel(_app: AppHandle, request_id: String) -> Result<(), String> {
+    let mut m = workers().lock().unwrap();
+    let Some(w) = m.remove(&request_id) else {
+        return Err(format!("未找到运行中的 agent：{request_id}"));
+    };
+    w.cancel.store(true, Ordering::SeqCst);
+    let _ = w.state.compare_exchange(ST_RUNNING, ST_CANCELLED, Ordering::SeqCst, Ordering::SeqCst);
+    let _ = w.abort.abort();
+    Ok(())
+}
+
+/// 查询指定 agent 的是否在运行（running=true 时附 state / 是否已请求取消）。
+#[tauri::command]
+pub async fn ai_agent_status(_app: AppHandle, request_id: String) -> Result<String, String> {
+    let m = workers().lock().unwrap();
+    match m.get(&request_id) {
+        Some(w) => Ok(serde_json::json!({
+            "running": w.state.load(Ordering::SeqCst) == ST_RUNNING,
+            "state": w.state.load(Ordering::SeqCst),
+            "cancelled": w.cancel.load(Ordering::SeqCst),
+        })
+        .to_string()),
+        None => Ok(serde_json::json!({ "running": false }).to_string()),
+    }
 }
