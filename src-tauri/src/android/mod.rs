@@ -130,13 +130,17 @@ pub fn rag_query(
     app: tauri::AppHandle,
     query_vec: Vec<f32>,
     top_k: Option<usize>,
+    namespace: Option<String>,
 ) -> Result<RagQueryResult, String> {
-    crate::services::rag_service::rag_query(&app, query_vec, top_k)
+    crate::services::rag_service::rag_query(&app, query_vec, top_k, namespace)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn rag_list_sources(app: tauri::AppHandle) -> Result<Vec<RagSourceInfo>, String> {
-    crate::services::rag_service::rag_list_sources(&app)
+pub fn rag_list_sources(
+    app: tauri::AppHandle,
+    namespace: Option<String>,
+) -> Result<Vec<RagSourceInfo>, String> {
+    crate::services::rag_service::rag_list_sources(&app, namespace)
 }
 
 #[tauri::command(rename_all = "camelCase")]
