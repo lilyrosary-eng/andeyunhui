@@ -67,6 +67,9 @@ export function createPluginConfig(pluginName: string) {
       },
       outDir: 'dist',
       emptyOutDir: true,
+      // 插件以按需加载的单个 IIFE 文件内联，运行时才拉取，非首屏瓶颈。
+      // 提高阈值避免每次构建都触发 500kB 告警（不影响实际结构/加载）。
+      chunkSizeWarningLimit: 1600,
     },
   });
 }

@@ -3,12 +3,12 @@ import { Bot, Trash2 } from 'lucide-react';
 import { AiChatSidebar } from '@/components/ai-chat/AiChatSidebar';
 import { AiChatConversation } from '@/components/ai-chat/AiChatConversation';
 import { AiChatCompanionCard } from '@/components/ai-chat/AiChatCompanionCard';
-import { AiChatCompanionSettings } from '@/components/ai-chat/AiChatCompanionSettings';
-import { AiChatMemorySettings } from '@/components/ai-chat/AiChatMemorySettings';
-import { UserAvatarSettings } from '@/components/ai-chat/UserAvatarSettings';
+import { AiChatCompanionSettings } from '@/components/ai-chat/settings/AiChatCompanionSettings';
+import { AiChatMemorySettings } from '@/components/ai-chat/settings/AiChatMemorySettings';
+import { UserAvatarSettings } from '@/components/bricks/UserAvatarSettings';
 import { ModuleSettingsPanel } from '@/components/ModuleSettingsPanel';
-import { useAiChat, DEFAULT_PERSIST_KEY } from '@/components/ai-chat/useAiChat';
-import { useCompanionStore, buildPersonaContext, buildCoreContext } from '@/mobile/stores/companionStore';
+import { useAiChat, DEFAULT_PERSIST_KEY } from '@/core/ai/useAiChat';
+import { useCompanionStore, buildPersonaContext, buildCoreContext } from '@/core/stores/companionStore';
 
 const COMPANION_ENABLED_KEY = 'andeyunhui.aichat.companion.enabled';
 function readCompanionEnabled(): boolean {
