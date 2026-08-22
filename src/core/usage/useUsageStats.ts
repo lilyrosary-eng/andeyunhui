@@ -1,5 +1,6 @@
 // AI 用量 / 成本统计 Hook（对接后端 usage_stats / usage_reset）。
 // 纯逻辑层：拉取月内用量汇总，供小圆环 + 悬停面板使用。不渲染 UI。
+// 跨模块通用能力：任何模块都可展示用量（用量环）。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 

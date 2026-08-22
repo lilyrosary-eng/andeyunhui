@@ -7,9 +7,9 @@ import type { Conversation } from '@/components/capsule/types';
 import type { UseAiChatResult } from './useAiChat';
 import { AiChatCompanionAvatar } from './AiChatCompanionCard';
 import { useCompanionStore } from '@/core/stores/companionStore';
-import { useUserAvatar } from './userAvatar';
+import { useUserAvatar } from '@/core/avatar/userAvatar';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
-import { UsageMeter } from './UsageMeter';
+import { UsageMeter } from '@/components/bricks/UsageMeter';
 
 /** 渲染用户头像：emoji 单字符居中；data:image/* 走 object-cover；其他用项目符号 */
 function UserAvatarView({ value, size = 32 }: { value: string; size?: number }) {

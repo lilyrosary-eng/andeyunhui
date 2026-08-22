@@ -1,5 +1,5 @@
-// 用户头像订阅（ai-chat 模块）。
-// 仅该模块用，所以放模块内。如未来要全局，提到 src/core/。
+// 用户头像订阅（跨模块通用能力）。
+// 任何模块（AI 对话 / 设置 / 伴侣 / 宿主）都可读写用户头像。storage key 沿用历史值以向后兼容。
 import { useSyncExternalStore } from 'react';
 
 const KEY = 'andeyunhui.aichat.user.avatar';

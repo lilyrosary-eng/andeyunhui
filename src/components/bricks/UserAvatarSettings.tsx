@@ -1,8 +1,9 @@
-// 用户头像设置卡：emoji 单字符 或 上传图片（缩到 256x256 data:image/png），
+// 用户头像设置卡（通用积木）：emoji 单字符 或 上传图片（缩到 256x256 data:image/png），
 // 实时同步到 localStorage + window 'user-avatar-changed' 事件 + useUserAvatar 订阅。
+// 跨模块通用能力：设置 / AI 对话 / 伴侣 等模块都可复用。
 import { useRef, useState } from 'react';
 import { Upload, RotateCcw } from 'lucide-react';
-import { useUserAvatar, setUserAvatar } from './userAvatar';
+import { useUserAvatar, setUserAvatar } from '@/core/avatar/userAvatar';
 
 const inputCls =
   'w-full rounded-lg border border-black/10 bg-white/70 px-3 py-2 text-sm text-neutral-800 outline-none focus:border-sky-400 dark:border-white/10 dark:bg-stone-800/70 dark:text-stone-100';

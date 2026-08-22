@@ -1,7 +1,6 @@
-// AI 用量小圆环 + 悬停面板（参考 dsh 的用量指示：一个小圆环，鼠标悬停展开使用详情）。
-// 展示近 30 天累计成本 / 请求数；悬停面板含总览 + 按模型 + 按日的明细。
-import { useState } from 'react';
-import { useUsageStats, type UsageSummary } from './useUsageStats';
+// AI 用量小圆环 + 悬停面板（通用积木）。
+// 跨模块通用能力：任何模块都可展示「近 30 天 AI 用量」。hover 展开详情面板。
+import { useUsageStats, type UsageSummary } from '@/core/usage/useUsageStats';
 
 /** 将 cost(USD) 格式化为紧凑可读字符串 */
 function fmtCost(cost: number): string {
