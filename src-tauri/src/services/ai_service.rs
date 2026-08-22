@@ -12,8 +12,10 @@
 //   ai_chat 可指定 profile_id 选用某份档案，未指定则用 active 激活项。
 
 use std::fs;
+use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use crate::services::mcp_service;
 use base64::Engine;
 use image::GenericImageView;
 use serde::{Deserialize, Serialize};
@@ -1108,8 +1110,8 @@ impl AiTool for FileTool {
                 Ok(format!("已暂存写入 {}（内容 {} 字符，等用户审阅确认后落盘；可用 read_file 查看改后视图）", p.display(), content.chars().count()))
             }
             "edit" => {
-                let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-                let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+                let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 if old_string.is_empty() {
                     return Err("edit 缺少 old_string 参数".to_string());
                 }
@@ -1120,14 +1122,16 @@ impl AiTool for FileTool {
                 }
                 // 暂存前先本地校验 old_string 在「当前叠加视图」中可定位（避免审阅时才发现替换失败）
                 let overlay_req = ctx.request_id.clone();
+                let p_for_ov = p.clone();
+                let wants = old_string.clone();
                 let preview_ok = spawn_blocking(move || -> Result<(bool, String), String> {
-                    let text = if let Ok(data) = std::fs::read(&p) {
+                    let text = if let Ok(data) = std::fs::read(&p_for_ov) {
                         String::from_utf8_lossy(&data).to_string()
                     } else {
                         String::new()
                     };
-                    let (overlaid, _deleted) = apply_pending_overlay(&overlay_req, &p, text)?;
-                    Ok((overlaid.contains(old_string), overlaid))
+                    let (overlaid, _deleted) = apply_pending_overlay(&overlay_req, &p_for_ov, text)?;
+                    Ok((overlaid.contains(&wants), overlaid))
                 }).await.map_err(|e| format!("校验任务调度失败: {}", e))??;
                 if !preview_ok.0 {
                     return Err(format!("old_string 在当前视图不存在，无法定位：{}", old_string));
@@ -1138,8 +1142,8 @@ impl AiTool for FileTool {
                     action: "edit".to_string(),
                     path: p.to_string_lossy().to_string(),
                     new_content: None,
-                    old_string: Some(old_string.to_string()),
-                    new_string: Some(new_string.to_string()),
+                    old_string: Some(old_string),
+                    new_string: Some(new_string),
                     order: 0,
                 });
                 Ok(format!("已暂存编辑 {}（等用户审阅确认后落盘）", p.display()))
@@ -1336,6 +1340,324 @@ impl<'a> SafeEval<'a> {
     }
 }
 
+// ========== 代码智能 + 扩展 工具（合并 IDE Agent 长处，参照 dsh tool-fs-search 设计） ==========
+//
+// 保留 Rust function-call 底座，把 IDE Agent 里最有价值的搜索/扩展能力并入：
+// - grep：内容搜索，gitignore 感知，pattern/path/include 参数、按文件分组输出、匹配上限兜底（对齐 dsh）
+// - glob：文件名搜索，gitignore 感知，pattern/path 参数、按修改时间排序、路径上限兜底（对齐 dsh）
+// - mcp：复用本项目 mcp_service，把已配置的 MCP 工具暴露给 Agent（对齐 IDE 的 server+tool+args 范式）
+// 三者只读/非破坏，无需交互审批；阻塞 IO 一律 spawn_blocking。
+
+/// 单次 grep 最多保留的行匹配数（对齐 Claude Code GrepTool 默认 head_limit / dsh GREP_MAX_MATCHES）。
+const GREP_MAX_MATCHES: usize = 250;
+/// 单条匹配行的最大字符数（超出截断，UTF-8 安全）。
+const GREP_MAX_LINE_CHARS: usize = 2000;
+/// 单次 glob 最多返回路径数（对齐 dsh GLOB_MAX_RESULTS）。
+const GLOB_MAX_RESULTS: usize = 100;
+/// glob 遍历时顶层的 VCS 元数据目录（对齐 dsh GLOB_VCS_EXCLUDES）。
+const GLOB_VCS_EXCLUDES: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
+
+/// 判断路径是否命中单一 glob：完整路径或仅文件名命中其一即可（align dsh「无分隔符 pattern 匹配任意深度 basename」）。
+fn glob_matches(matcher: &globset::GlobMatcher, path: &std::path::Path) -> bool {
+    if matcher.is_match(path.to_string_lossy().as_ref()) {
+        return true;
+    }
+    match path.file_name() {
+        Some(n) => matcher.is_match(n.to_string_lossy().as_ref()),
+        None => false,
+    }
+}
+
+/// grep：在项目内用正则搜索文件内容，返回匹配行及行号（按文件分组输出）。
+struct GrepTool;
+#[async_trait::async_trait]
+impl AiTool for GrepTool {
+    fn name(&self) -> &'static str {
+        "grep"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "在项目内用正则表达式搜索文件内容，返回匹配行及行号、按文件分组。gitignore 感知（自动跳过 node_modules/.git 等）。定位关键词/代码时应使用本工具，而非 run_command 'grep'。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "要搜索的正则表达式（regex 语法，如 'fn .*_tool'）" },
+                        "path": { "type": "string", "description": "搜索的目标目录或文件，默认当前项目根；相对路径基于项目根解析" },
+                        "include": { "type": "string", "description": "仅搜索匹配该单一 glob 的文件（如 '*.ts'、'*.{js,ts}'），不支持逗号列表或取反" }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if pattern.is_empty() {
+            return Err("grep 缺少 pattern 参数".to_string());
+        }
+        // 提前校验正则合法性
+        regex::Regex::new(&pattern).map_err(|e| format!("正则无效: {}", e))?;
+        let root = args
+            .get("path").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| ctx.project_root.clone())
+            .ok_or_else(|| "grep 缺少 path，且未提供项目根目录".to_string())?;
+        let include = args
+            .get("include").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let matcher = match &include {
+            Some(g) => Some(
+                globset::GlobBuilder::new(g).literal_separator(false).build()
+                    .map_err(|e| format!("include glob 无效: {}", e))?.compile_matcher(),
+            ),
+            None => None,
+        };
+
+        // gitignore 感知遍历 + 逐行正则匹配，全部阻塞 IO → spawn_blocking
+        let (matches, truncated) = tokio::task::spawn_blocking(move || -> Result<(Vec<(String, usize, String)>, bool), String> {
+            let re = regex::Regex::new(&pattern).map_err(|e| format!("正则无效: {}", e))?;
+            let mut out: Vec<(String, usize, String)> = Vec::new();
+            let mut truncated = false;
+            let mut walk = ignore::WalkBuilder::new(&root);
+            walk.standard_filters(true);
+            for entry in walk.build().flatten() {
+                if out.len() >= GREP_MAX_MATCHES {
+                    truncated = true;
+                    break;
+                }
+                if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fp = entry.path();
+                if let Some(m) = &matcher {
+                    if !glob_matches(m, fp) {
+                        continue;
+                    }
+                }
+                let Ok(file) = std::fs::File::open(fp) else { continue; };
+                let mut reader = std::io::BufReader::new(file);
+                let mut line_no = 0usize;
+                let mut first_read = true;
+                let mut tmp: Vec<u8> = Vec::with_capacity(512);
+                loop {
+                    if out.len() >= GREP_MAX_MATCHES {
+                        truncated = true;
+                        break;
+                    }
+                    tmp.clear();
+                    let n = reader
+                        .read_until(b'\n', &mut tmp)
+                        .map_err(|e| format!("读取 {} 失败: {}", fp.display(), e))?;
+                    if n == 0 {
+                        break;
+                    }
+                    if first_read {
+                        // 二进制探针：首块含 NUL 视为二进制，跳过整文件
+                        if tmp.contains(&0) {
+                            break;
+                        }
+                        first_read = false;
+                    }
+                    line_no += 1;
+                    if tmp.last() == Some(&b'\n') {
+                        tmp.pop();
+                    }
+                    if tmp.last() == Some(&b'\r') {
+                        tmp.pop();
+                    }
+                    let line = String::from_utf8_lossy(&tmp);
+                    if re.is_match(&line) {
+                        let capped: String = line.chars().take(GREP_MAX_LINE_CHARS).collect();
+                        out.push((fp.to_string_lossy().to_string(), line_no, capped));
+                    }
+                }
+            }
+            if out.len() >= GREP_MAX_MATCHES {
+                truncated = true;
+            }
+            Ok((out, truncated))
+        })
+        .await
+        .map_err(|e| format!("grep 任务调度失败: {}", e))??;
+
+        let count = matches.len();
+        if count == 0 {
+            return Ok("No matches found".to_string());
+        }
+        // 按文件分组输出（dsh 约定：每个文件一段，下挂 Line N 行）
+        let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+        for (p, ln, line) in &matches {
+            match grouped.iter_mut().find(|(k, _)| k == p) {
+                Some((_, rows)) => rows.push(format!("Line {}: {}", ln, line)),
+                None => grouped.push((p.clone(), vec![format!("Line {}: {}", ln, line)])),
+            }
+        }
+        let mut s = format!("Found {} matches", count);
+        if truncated {
+            s.push_str(&format!("（已达单次上限 {} 条，结果已截断；请用更精确的 pattern/path/include）", GREP_MAX_MATCHES));
+        }
+        for (p, rows) in grouped {
+            s.push('\n');
+            s.push_str(&p);
+            s.push('\n');
+            s.push_str(&rows.join("\n"));
+        }
+        Ok(s)
+    }
+}
+
+/// glob：在项目内按文件名模式搜索文件路径（gitignore 感知、跳过 VCS 目录），按修改时间由新到旧排序。
+struct GlobTool;
+#[async_trait::async_trait]
+impl AiTool for GlobTool {
+    fn name(&self) -> &'static str {
+        "glob"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "按文件名 glob 模式搜索项目内文件路径（如 '**/*.ts'、'src/**/*.test.*'），返回文件路径列表，按修改时间由新到旧。gitignore 感知并跳过 VCS 目录。模式不含 '/' 时按任意深度 basename 匹配。定位文件用本工具而非 shell find/ls。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "匹配文件路径的 glob 模式（如 '**/*.ts'、'*.tsx'、'src/**/*.go'）" },
+                        "path": { "type": "string", "description": "搜索的起始目录，默认当前项目根；相对路径基于项目根解析" }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if pattern.is_empty() {
+            return Err("glob 缺少 pattern 参数".to_string());
+        }
+        let matcher = globset::GlobBuilder::new(&pattern).literal_separator(false).build()
+            .map_err(|e| format!("glob 模式无效: {}", e))?.compile_matcher();
+        let root = args
+            .get("path").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| ctx.project_root.clone())
+            .ok_or_else(|| "glob 缺少 path，且未提供项目根目录".to_string())?;
+
+        // 遍历收集命中文件及其修改时间，最后按 mtime 由新到旧排序、取前 N
+        let hit: Vec<(PathBuf, std::time::SystemTime)> = tokio::task::spawn_blocking(move || -> Result<Vec<(PathBuf, std::time::SystemTime)>, String> {
+            let mut found: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+            let mut walk = ignore::WalkBuilder::new(&root);
+            walk.standard_filters(true);
+            walk.filter_entry(|e| {
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    let n = e.file_name().to_string_lossy();
+                    return !GLOB_VCS_EXCLUDES.contains(&n.as_ref());
+                }
+                true
+            });
+            for entry in walk.build().flatten() {
+                if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fp = entry.path();
+                if !glob_matches(&matcher, fp) {
+                    continue;
+                }
+                let mtime = std::fs::metadata(fp).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                found.push((fp.to_path_buf(), mtime));
+            }
+            found.sort_by(|a, b| b.1.cmp(&a.1));
+            Ok(found)
+        })
+        .await
+        .map_err(|e| format!("glob 任务调度失败: {}", e))??;
+
+        if hit.is_empty() {
+            return Ok("No files found".to_string());
+        }
+        let total = hit.len();
+        let truncated = total > GLOB_MAX_RESULTS;
+        let mut out: Vec<String> = hit.into_iter().take(GLOB_MAX_RESULTS).map(|(p, _)| p.to_string_lossy().to_string()).collect();
+        if truncated {
+            out.push(format!("（Showing {} of {} paths；请缩小 pattern 或指定 path 查看更多）", GLOB_MAX_RESULTS, total));
+        }
+        Ok(out.join("\n"))
+    }
+}
+
+/// mcp：调用已配置的 MCP 服务器工具。复用 mcp_service::mcp_call_tool（spawn → call → kill）。
+/// 服务器 id 见 agent 系统提示注入的 MCP 工具清单；arguments 为该工具输入 schema 对应的 JSON 对象。
+struct McpTool;
+#[async_trait::async_trait]
+impl AiTool for McpTool {
+    fn name(&self) -> &'static str {
+        "mcp"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "调用已配置的 MCP（Model Context Protocol）服务器工具。server 填服务器 id，tool 填该服务器上的工具原始名，arguments 填工具输入结构对应的 JSON 对象（可省略则传空）。可调用的服务器与工具清单会在本会话系统提示中列出。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server": { "type": "string", "description": "MCP 服务器 id（系统提示中列出的 id）" },
+                        "tool": { "type": "string", "description": "该服务器上的工具原始名" },
+                        "arguments": { "type": "object", "description": "工具输入参数 JSON 对象（可选，默认空）" }
+                    },
+                    "required": ["server", "tool"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+        let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let tool_name = args.get("tool").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if server.is_empty() {
+            return Err("mcp 缺少 server 参数".to_string());
+        }
+        if tool_name.is_empty() {
+            return Err("mcp 缺少 tool 参数".to_string());
+        }
+        let arguments = args.get("arguments").cloned().filter(|v| v.is_object()).unwrap_or(serde_json::json!({}));
+        // 挂起/异常服务器不应无限阻塞 Agent：整体限时 30s
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            mcp_service::mcp_call_tool(ctx.app.clone(), server.clone(), tool_name.clone(), arguments),
+        )
+        .await
+        .map_err(|_| format!("MCP 调用超时（>30s，已中止）: {}:{}", server, tool_name))?
+        .map_err(|e| format!("MCP 调用失败: {}", e))?;
+        if !result.ok {
+            let detail = result.error.clone().unwrap_or_else(|| "无错误信息".to_string());
+            return Err(format!("MCP 工具 {}:{} 返回错误: {}", server, tool_name, detail));
+        }
+        // 渲染 content 块：text 拼接、image/audio/resource 占位（对齐 dsh extractText）
+        let mut parts: Vec<String> = Vec::new();
+        for block in &result.content {
+            let t = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match t {
+                "text" => {
+                    if let Some(txt) = block.get("text").and_then(|v| v.as_str()) {
+                        parts.push(txt.to_string());
+                    }
+                }
+                "image" => parts.push(format!("[image: {}, 内容已丢弃]", block.get("mimeType").and_then(|v| v.as_str()).unwrap_or("unknown"))),
+                "audio" => parts.push(format!("[audio: {}, 内容已丢弃]", block.get("mimeType").and_then(|v| v.as_str()).unwrap_or("unknown"))),
+                "resource" | "resource_link" => parts.push("[resource: 内容已丢弃]".to_string()),
+                _ => {}
+            }
+        }
+        if parts.is_empty() {
+            return Ok(format!("（MCP 工具 {}:{} 返回空内容）", server, tool_name));
+        }
+        Ok(parts.join("\n"))
+    }
+}
+
 /// 当前注册的全部工具（有序数组）。
 fn registered_tools() -> Vec<Box<dyn AiTool>> {
     vec![
@@ -1344,7 +1666,31 @@ fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(PlanTool),
         Box::new(FileTool),
         Box::new(CommandTool),
+        Box::new(GrepTool),
+        Box::new(GlobTool),
+        Box::new(McpTool),
     ]
+}
+
+/// 聚合已启用 MCP 服务器的工具清单，作为 guide 注入 agent 系统提示，让模型知道 mcp 工具可调用什么。
+/// 任一个服务器 list_tools 失败都静默降级（mcp_list_all_tools 内部已捕获）；整体限时 5s 防挂起。
+async fn mcp_tools_guide(app: &AppHandle) -> String {
+    let list = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        mcp_service::mcp_list_all_tools(app.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| Ok(Vec::new()))
+    .unwrap_or_default();
+    if list.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n\n可用 MCP 工具（用 mcp 工具调用，server 填服务器 id；arguments 按工具输入结构传 JSON）：");
+    for (id, name, tools) in list {
+        let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        s.push_str(&format!("\n- [{}] {}：{}", id, name, names.join(", ")));
+    }
+    s
 }
 
 /// plan 工具执行后，返回当前计划的结构化快照（供前端渲染计划/待办面板）。
@@ -1416,11 +1762,14 @@ pub async fn ai_chat_agent(
         (None, true) => String::new(),
     };
     let agent_hint = "你被允许并且应当在合适时调用下方提供的工具来获取实时信息或完成计算。需要时先调用工具，拿到结果后再组织最终回答；不要编造工具返回的数据。";
-    let system_final = if effective_system.trim().is_empty() {
+    // 注入已启用 MCP 服务器的工具清单，让模型的 mcp 工具可正确填写 server/tool
+    let mcp_guide = mcp_tools_guide(&app).await;
+    let base_system = if effective_system.trim().is_empty() {
         agent_hint.to_string()
     } else {
         format!("{}\n\n{}", effective_system, agent_hint)
     };
+    let system_final = format!("{}{}", base_system, mcp_guide);
 
     // 初始 messages：统一 system + 用户历史（忽略历史里的旧 system，避免重复注入）。
     let mut msgs: Vec<serde_json::Value> = vec![serde_json::json!({ "role": "system", "content": system_final })];
@@ -1581,7 +1930,7 @@ pub async fn ai_chat_agent(
                 // 暴露摘要便于前端展示：write 记新内容前若干字；edit 记 old→new 前若干字
                 "summary": match e.action.as_str() {
                     "write" => format!("写入 {} 字符", e.new_content.clone().unwrap_or_default().chars().count()),
-                    "edit" => format!("{…} → {…}", e.old_string.clone().unwrap_or_default(), e.new_string.clone().unwrap_or_default()),
+                    "edit" => format!("{} → {}", e.old_string.clone().unwrap_or_default(), e.new_string.clone().unwrap_or_default()),
                     _ => "删除".to_string(),
                 }
             })).collect::<Vec<_>>(),
@@ -1623,9 +1972,10 @@ pub async fn ai_agent_apply_edits(request_id: String, keep_ids: Option<Vec<Strin
     }
     let keep_all = keep_ids.as_ref().map(|v| v.is_empty()).unwrap_or(true);
     let mut written = 0usize;
-    // 先串行重放 write/edit，最后处理 delete，避免碰撞
+    // 先串行重放 write/edit，最后处理 delete，避免碰撞。
+    // edits 按 record_edit 的 order 升序保存，直接按此顺序重放即可。
     let mut deletions: Vec<&PendingEdit> = Vec::new();
-    for e in edits.iter().sorted_by_order() {
+    for e in &edits {
         if !keep_all && !keep_ids.as_ref().map(|k| k.contains(&e.id)).unwrap_or(false) {
             continue;
         }

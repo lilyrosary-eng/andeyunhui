@@ -116,6 +116,7 @@ dependencies = [
  "env_logger",
  "epub-parser",
  "futures-util",
+ "globset",
  "gongfang-kit",
  "ignore",
  "image",
