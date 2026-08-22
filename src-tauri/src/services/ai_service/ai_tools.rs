@@ -1041,21 +1041,28 @@ impl AiTool for CommandTool {
         } else {
             format!("命令退出码 {}：{}", exit_code.unwrap_or(-1), text.clone())
         };
-        // terminal 呈现 meta（对齐 dsh TerminalResultView）：output + exitCode/signal，供前端渲染终端卡片
+        // terminal 呈现 meta（对齐 dsh TerminalResultView）：output + exitCode/signal + cwd，供前端渲染终端卡片
         let meta = serde_json::json!({
             "card": "terminal",
             "output": text,
             "exitCode": exit_code,
             "signal": signal,
+            "cwd": cwd.as_deref().map(|c| c.to_string_lossy().to_string()),
         });
         Ok(ToolExecResult::with_meta(detail, meta))
     }
-    /// 调用前呈现：命令本身就是一辆终端卡（对齐 dsh TerminalCallView）
+    /// 调用前呈现：命令本身就是一辆终端卡（对齐 dsh TerminalCallView），附 cwd/timeout 详情。
     fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
         let mut m = serde_json::json!({ "card": "terminal", "title": command });
+        if !command.is_empty() {
+            m["command"] = serde_json::Value::String(command.to_string());
+        }
         if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
             m["cwd"] = serde_json::Value::String(cwd.to_string());
+        }
+        if let Some(t) = args.get("timeout") {
+            m["timeout"] = t.clone();
         }
         m
     }
@@ -1504,9 +1511,23 @@ impl AiTool for McpTool {
             }
         }
         if parts.is_empty() {
-            return Ok(ToolExecResult::plain(format!("（MCP 工具 {}:{} 返回空内容）", server, tool_name)));
+            let msg = format!("（MCP 工具 {}:{} 返回空内容）", server, tool_name);
+            let meta = serde_json::json!({ "card": "generic", "kind": "other", "title": format!("MCP {}:{}", server, tool_name), "detail": msg });
+            return Ok(ToolExecResult::with_meta(msg, meta));
         }
-        Ok(ToolExecResult::plain(parts.join("\n")))
+        let text = parts.join("\n");
+        let meta = serde_json::json!({ "card": "generic", "kind": "other", "title": format!("MCP {}:{}", server, tool_name), "detail": text });
+        Ok(ToolExecResult::with_meta(text, meta))
+    }
+    /// 调用前呈现：MCP 调用无专属卡（对齐 dsh GenericCallView），但补全可识别的 server:tool 标题与 kind。
+    fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
+        let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("");
+        let tool_name = args.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+        serde_json::json!({
+            "card": "generic",
+            "kind": "other",
+            "title": format!("调用 MCP {}:{}", server, tool_name),
+        })
     }
 }
 
