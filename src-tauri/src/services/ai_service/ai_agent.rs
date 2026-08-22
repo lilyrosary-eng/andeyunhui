@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
+use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
 use crate::services::ai_service::ai_tools::{AiTool, ToolContext, ToolConcurrency, ToolExecResult, PendingEdit, registered_tools, mcp_tools_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store};
@@ -280,22 +281,20 @@ async fn run_agent(
                 }));
                 return Ok(());
             }
-            let mut win_start = 0;
-            while win_start < prepared.len() {
-                let is_par = !is_exclusive(win_start);
-                // 组合窗口：独占 → 单元素屏障；并行 → 吃进连续 Parallel（上限 PARALLEL_LIMIT 保证带界并发）。
-                let mut win_end = win_start + 1;
-                if is_par {
-                    while win_end < prepared.len()
-                        && (win_end - win_start) < PARALLEL_LIMIT
-                        && !is_exclusive(win_end)
-                    {
-                        win_end += 1;
+            let mut active = 0;
+            while active < prepared.len() {
+                // 段边界：连续 Parallel 组成一段；Exclusive 单独成段（长 1），起批次屏障。
+                // 段内用有界滚动缓冲（buffer_unordered）执行：任一卷位完成即补充下一个，对齐 dsh 的
+                // 「有界滚动池」——而非静态 join_all 那种「锁死整窗、等最快者也等最慢者」的批等待。
+                let mut seg_end = active + 1;
+                if !is_exclusive(active) {
+                    while seg_end < prepared.len() && !is_exclusive(seg_end) {
+                        seg_end += 1;
                     }
                 }
-                // 执行窗口前先广播 call-time 呈现（对齐 dsh presentCall）：对窗口内每个工具按模型顺序发
+                // 执行段前先广播 call-time 呈现（对齐 dsh presentCall）：对段内每个工具按模型顺序发
                 // 一个「将做什么」的 pending 卡，供前端在结果落地前渲染；与 stage:"tool" 结果事件用 cid 配对。
-                for p in win_start..win_end {
+                for p in active..seg_end {
                     let cid = prepared[p].0.clone();
                     let fname = prepared[p].1.clone();
                     let args = &prepared[p].3;
@@ -311,30 +310,34 @@ async fn run_agent(
                         "meta": call_meta,
                     }));
                 }
-                // 执行窗口：并行窗口 join_all 并发、独占窗口串行（长 1）。返回 Vec<(ok, detail)>，与模型顺序对齐。
-                let results: Vec<(bool, ToolExecResult)> = if win_end - win_start > 1 {
-                    futures_util::future::join_all((win_start..win_end).map(|p| {
-                        // 在 async 块外提取自有数据与工具引用，避免捕获遍历变量/整体移动 Vec。
+                // 滚动执行：带界并发（PARALLEL_LIMIT），完成即补下一个；结果按下标回填保持模型顺序。
+                let mut slots: Vec<Option<(bool, ToolExecResult)>> = (active..seg_end).map(|_| None).collect();
+                let mut buffered = futures_util::stream::iter(active..seg_end)
+                    .map(|p| {
+                        // 在闭包外提取自有数据与工具引用，避免捕获遍历变量/整体移动 Vec。
                         let fname = prepared[p].1.clone();
                         let args = prepared[p].3.clone();
                         let tool = prepared[p].2.map(|i| tools[i].as_ref()); // Option<&dyn AiTool>
                         let tc = &tool_ctx;
-                        async move { execute_tool_once(tool, &fname, &args, tc).await }
-                    }))
-                    .await
-                } else {
-                    let p = win_start;
-                    let args = prepared[p].3.clone();
-                    let tool = prepared[p].2.map(|i| tools[i].as_ref());
-                    let fname = prepared[p].1.clone();
-                    vec![execute_tool_once(tool, &fname, &args, &tool_ctx).await]
-                };
+                        async move { (p, execute_tool_once(tool, &fname, &args, tc).await) }
+                    })
+                    .buffer_unordered(PARALLEL_LIMIT);
+                while let Some((p, r)) = buffered.next().await {
+                    slots[p - active] = Some(r);
+                }
                 // 结果按模型顺序 commit：发射 step 事件 + 记录 Tool 事件。
-                for (k, p) in (win_start..win_end).enumerate() {
+                for (k, p) in (active..seg_end).enumerate() {
                     let cid = prepared[p].0.clone();
                     let fname = prepared[p].1.clone();
-                    let (ok, res) = &results[k];
+                    let (ok, res) = slots[k].as_ref().expect("滚动缓冲 slot 必有结果");
                     let detail = &res.text;
+                    // 结构化呈现 meta（对齐 dsh presentResult → ToolResultView）：优先用 execute 自带 meta，
+                    // 缺省再尝试工具的 present_result 二次结构化；都不提供则前端回退渲染 detail。
+                    let meta = res.meta.clone().or_else(|| {
+                        prepared[p]
+                            .2
+                            .and_then(|i| tools[i].present_result(detail, &prepared[p].3))
+                    });
                     let _ = app.emit(
                         "ai-agent-step",
                         serde_json::json!({
@@ -343,9 +346,7 @@ async fn run_agent(
                             "name": fname,
                             "ok": ok,
                             "detail": detail,
-                            // 结构化呈现 meta（对齐 dsh presentResult → ToolResultView）：Grep/Glob 为 search 卡片，
-                            // 其余工具为 None。前端有专属卡片能力时按 meta 渲染，否则回退渲染 detail。
-                            "meta": res.meta.as_ref(),
+                            "meta": meta.as_ref(),
                             // plan 工具执行后附带当前计划结构化快照，供前端渲染计划/待办面板
                             "plan": if fname == "plan" { plan_snapshot_json() } else { serde_json::Value::Null },
                         }),
@@ -360,7 +361,7 @@ async fn run_agent(
                         content: trim_tool_result(detail),
                     });
                 }
-                win_start = win_end;
+                active = seg_end;
             }
             // 崩溃恢复：每轮工具结果落地即持久化一次，进程在中途被杀也能从那轮续拉。
             persist_agent_session(&app, &session);

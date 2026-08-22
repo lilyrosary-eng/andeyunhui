@@ -184,6 +184,13 @@ pub(crate) trait AiTool: Send + Sync {
         }
         m
     }
+    /// 结果呈现钩子（对齐 dsh presentResult → ToolResultView）：把模型可见的纯文本结果二次结构化为
+    /// UI 卡片；返回 None 表示前端直接回退渲染纯文本（generic）。execute 已通过
+    /// ToolExecResult::with_meta 自带结构化 meta 的工具无需覆盖本方法；覆盖它适用于
+    /// 「execute 只回 plain 文本、但想顺带给前端带结构化卡」的工具（如 calculator）。
+    fn present_result(&self, _text: &str, _args: &serde_json::Value) -> Option<serde_json::Value> {
+        None
+    }
     /// 工具并发执行级别（对齐 dsh executeToolCalls 的 exclusive/parallel）。
     /// 默认 Exclusive（安全默认）：有副作用或共享可变状态的工具需独占串行。
     fn concurrency(&self) -> ToolConcurrency {
@@ -254,6 +261,20 @@ impl AiTool for CalculatorTool {
             return Err(format!("表达式存在多余字符: '{}'", &p.s[p.pos..]));
         }
         Ok(ToolExecResult::plain(format!("= {}", val)))
+    }
+    /// 结果呈现：execute 只回 plain 文本，这里二次结构化为 generic 卡（标题内联防代达式、detail 放结果），
+    /// 示范 present_result 独立钩子（对齐 dsh presentResult）：让进度渲染与模型回填文本解耦。
+    fn present_result(&self, text: &str, args: &serde_json::Value) -> Option<serde_json::Value> {
+        if text.is_empty() {
+            return None;
+        }
+        let expr = args.get("expression").and_then(|v| v.as_str()).unwrap_or("计算");
+        Some(serde_json::json!({
+            "card": "generic",
+            "kind": "other",
+            "title": format!("计算 {}", expr),
+            "detail": text,
+        }))
     }
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Parallel
