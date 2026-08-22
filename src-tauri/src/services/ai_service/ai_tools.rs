@@ -1341,6 +1341,109 @@ fn url_escape_component(s: &str) -> String {
     out
 }
 
+/// 块级标签（闭合后补换行），用于粗提纯 HTML 正文。
+fn is_block_tag(name: &str) -> bool {
+    matches!(name,
+        "p" | "div" | "li" | "ul" | "ol" | "br" | "tr" | "section" | "article"
+        | "nav" | "header" | "footer" | "main" | "aside" | "blockquote" | "pre"
+        | "table" | "form" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "hr")
+}
+
+/// 轻量 HTML→纯文本（单遍状态机）：丢弃 script/style/head 等容器，剥标签、块级补换行、
+/// 解码常见实体、压缩空白。用于 web_fetch 的正文提取（够用且不引入解析依赖）。
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let bytes = html.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'<' {
+            let closing = i + 1 < bytes.len() && bytes[i + 1] == b'/';
+            let name_start = if closing { i + 2 } else { i + 1 };
+            let mut j = name_start;
+            while j < bytes.len() && !matches!(bytes[j], b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/') {
+                j += 1;
+            }
+            let name = html[name_start.min(html.len())..j.min(html.len())].to_ascii_lowercase();
+            // 容器级标签（含子内容）整体跳过
+            if !closing
+                && matches!(name.as_str(), "script" | "style" | "head" | "noscript" | "svg" | "template")
+            {
+                let close_tag = format!("</{}>", name);
+                match html[i + 1..].find(close_tag.as_str()) {
+                    Some(rel) => {
+                        i += 1 + rel + close_tag.len();
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+            // 闭合块级标签 → 补换行
+            if closing && is_block_tag(&name) && !out.ends_with('\n') && !out.is_empty() {
+                out.push('\n');
+            }
+            // 跳过整个标签
+            let mut k = i + 1;
+            while k < bytes.len() && bytes[k] != b'>' {
+                k += 1;
+            }
+            i = if k < bytes.len() { k + 1 } else { bytes.len() };
+        } else if b == b'&' {
+            // 实体解码
+            if let Some(rel) = html[i + 1..].find(';') {
+                let ent = &html[i + 1..i + 1 + rel];
+                // 用字符串保存解码结果，避免借用 leak
+                let owned: Option<String> = match ent.to_ascii_lowercase().as_str() {
+                    "amp" => Some("&".into()),
+                    "lt" => Some("<".into()),
+                    "gt" => Some(">".into()),
+                    "quot" => Some("\"".into()),
+                    "apos" => Some("'".into()),
+                    "nbsp" => Some(" ".into()),
+                    _ => ent
+                        .strip_prefix("#x")
+                        .or_else(|| ent.strip_prefix("0x"))
+                        .and_then(|h| u32::from_str_radix(h, 16).ok().and_then(char::from_u32))
+                        .map(|c| c.to_string())
+                        .or_else(|| {
+                            ent.strip_prefix('#')
+                                .and_then(|d| d.parse::<u32>().ok().and_then(char::from_u32))
+                                .map(|c| c.to_string())
+                        }),
+                };
+                match owned {
+                    Some(v) => out.push_str(&v),
+                    None => out.push('&'),
+                }
+                i += 1 + rel + 1; // ';' 位置之后
+            } else {
+                out.push(b as char);
+                i += 1;
+            }
+        } else {
+            // 普通文本：ASCII 直接 push；多字节 UTF-8 按完整字符推进（避免把中文拆成 mojibake）
+            if b & 0b1000_0000 != 0 {
+                match html[i..].chars().next() {
+                    Some(c) => {
+                        out.push(c);
+                        i += c.len_utf8();
+                    }
+                    None => break,
+                }
+            } else {
+                out.push(b as char);
+                i += 1;
+            }
+        }
+    }
+    // 压缩空白：行内连续空白缩为一个空格，逐行 trim，去空行
+    out.split('\n')
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// web_search：通过 DuckDuckGo Instant Answer API 检索网页（免 key、无配置），返回结构化来源。
 /// 来源对齐 dsh WebSearchResultView：sources（url/title/snippet）+ truncated + 可选 answer。
 /// 结果做纯文本 + 结构化 meta 双视图；网络请求整体限时 15s 防挂起。
@@ -1467,6 +1570,87 @@ impl AiTool for WebSearchTool {
     }
 }
 
+/// web_fetch：抓取指定 URL 的正文（HTML→纯文本），返回可读 markdown/文本 + 检索摘要。
+/// 结果对齐 dsh WebFetchResultView：url（重定向后最终地址）+ statusCode + truncated。
+/// 正文即模型可见的纯文本（在 ai-agent-step 的 detail）；卡片仅带抓取摘要。限时 20s、跟随重定向。
+struct WebFetchTool;
+#[async_trait::async_trait]
+impl AiTool for WebFetchTool {
+    fn name(&self) -> &'static str {
+        "web_fetch"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "抓取指定网页 URL，返回转成纯文本的正文内容（含抓取状态）。用于 web_search 找到来源后深入读取页面具体细节。仅支持 http/https。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "要抓取的完整网址（http/https）" },
+                        "max_chars": { "type": "integer", "description": "正文最大字符数（默认8000，范围100-20000）" }
+                    },
+                    "required": ["url"]
+                }
+            }
+        })
+    }
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolExecResult, String> {
+        let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if url.is_empty() {
+            return Err("web_fetch 缺少 url 参数".to_string());
+        }
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err("web_fetch 仅支持 http/https 网址".to_string());
+        }
+        let max_chars: usize = args.get("max_chars").and_then(|v| v.as_u64()).map(|n| (n as usize).clamp(100, 20_000)).unwrap_or(8000);
+        // 限时 20s、跟随最多 5 次重定向；断网/超时视为结果（带状态），不抛工具错误
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|e| format!("web_fetch 客户端构建失败: {}", e))?;
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            client.get(&url).header("User-Agent", "Mozilla/5.0").send(),
+        )
+        .await
+        .map_err(|_| "web_fetch 超时（>20s，已中止）".to_string())?
+        .map_err(|e| format!("web_fetch 请求失败: {}", e))?;
+        let status_code = resp.status().as_u16();
+        let final_url = resp.url().to_string();
+        let body = resp.text().await.map_err(|e| format!("web_fetch 读取正文失败: {}", e))?;
+
+        let mut text = body.trim().to_string();
+        // 若已是文本性内容（非 HTML 特征）则原样使用，否则走 HTML→纯文本
+        if text.trim_start().starts_with('<') {
+            text = html_to_text(&text);
+        }
+        let truncated = text.chars().count() > max_chars;
+        let capped: String = text.chars().take(max_chars).collect();
+        let meta = serde_json::json!({
+            "card": "web",
+            "kind": "fetch",
+            "url": final_url,
+            "statusCode": status_code,
+            "truncated": truncated,
+        });
+        if !(200..300).contains(&status_code) {
+            return Ok(ToolExecResult::with_meta(
+                format!("web_fetch 返回状态 {}（{}）", status_code, final_url),
+                meta,
+            ));
+        }
+        let message = if capped.trim().is_empty() {
+            "（页面无可见文本）".to_string()
+        } else {
+            capped
+        };
+        Ok(ToolExecResult::with_meta(message, meta))
+    }
+}
+
 /// 当前注册的全部工具（有序数组）。
 pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
     vec![
@@ -1479,6 +1663,7 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(GlobTool),
         Box::new(McpTool),
         Box::new(WebSearchTool),
+        Box::new(WebFetchTool),
     ]
 }
 
@@ -1593,6 +1778,20 @@ pub(crate) fn estimate_tools_tokens(tools: &[serde_json::Value]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_html_to_text_strips_tags_and_decodes() {
+        let html = "<html><head><title>t</title></head><body><script>var x=1</script><p>你好 &amp; <b>世界</b></p><p>第二行</p></body></html>";
+        let out = html_to_text(html);
+        assert!(out.contains("你好 & 世界"), "out={:?}", out);
+        assert!(out.contains("第二行"));
+        assert!(!out.contains("var x=1"));
+    }
+
+    #[test]
+    fn web_url_escape_component_encodes_query() {
+        assert_eq!(url_escape_component("你好 world"), "%E4%BD%A0%E5%A5%BD+world");
+    }
 
     #[test]
     fn edit_diff_single_line_replace() {
