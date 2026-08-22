@@ -75,6 +75,16 @@ function baseName(p: string): string {
   return p.split(/[\\/]/).pop() || p;
 }
 
+// 待审阅的改动条目（来自后端 ai-agent-edits 事件；对齐 IDE 审阅面板的数据形态）：
+// 后端只下发 id/action/path/summary，old/new 全文在 ai_agent_apply_edits 落盘时由后端重放。
+interface AgentEdit {
+  id: string;
+  action: 'write' | 'edit' | 'delete';
+  path: string;
+  summary: string;
+  status: 'pending' | 'kept' | 'undone';
+}
+
 // 「关联项目」文件浏览器（模块级，避免父组件重渲染时反复挂载）：浏览当前打开的项目目录，点选文件加入上下文（#12）
 function ProjectBrowser({ root, onClose, onPick, onAttachAll }: {
   root: string;
@@ -278,6 +288,8 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
   const [livePlan, setLivePlan] = useState<{ title: string; todos: { id: string; content: string; done: boolean }[] } | null>(null);
   // 文件写外部路径时的审批弹窗（后端 ai-agent-approval 事件触发，回调 ai_agent_approve 决定）
   const [approval, setApproval] = useState<{ approvalId: string; tool: string; operation: string } | null>(null);
+  // Agent 落盘暂存编辑（后端 ai-agent-edits 事件触发）：待用户逐条保留/撤销/全部，确认后 ai_agent_apply_edits 落盘
+  const [pendingEdits, setPendingEdits] = useState<{ requestId: string; edits: AgentEdit[] } | null>(null);
   // 对话持久化加载完成标记：加载完成前不写盘，避免初始空 state 覆盖磁盘已有数据
   const [convLoaded, setConvLoaded] = useState(false);
 
@@ -355,6 +367,25 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
       const p = e?.payload;
       if (!p || p.requestId !== activeReq.current) return;
       setApproval({ approvalId: p.approvalId, tool: p.tool || 'file', operation: p.operation || '' });
+    }).then((u: any) => { un = u; }).catch(() => {});
+    return () => { if (un) un(); };
+  }, []);
+
+  // 监听 ai-agent-edits（Agent 结束后的暂存改动）：弹出底部审阅面板，用户保留/撤销后 ai_agent_apply_edits 落盘。
+  React.useEffect(() => {
+    let un: any = null;
+    hostApi.listen<any>('ai-agent-edits', (e: any) => {
+      const p = e?.payload;
+      if (!p || !p.requestId || p.requestId !== activeReq.current) return;
+      const edits: AgentEdit[] = (Array.isArray(p.edits) ? p.edits : []).map((x: any) => ({
+        id: x.id,
+        action: (x.action === 'write' || x.action === 'edit' || x.action === 'delete') ? x.action : 'write',
+        path: x.path || '',
+        summary: x.summary || '',
+        status: 'pending',
+      }));
+      if (edits.length === 0) return;
+      setPendingEdits({ requestId: p.requestId, edits });
     }).then((u: any) => { un = u; }).catch(() => {});
     return () => { if (un) un(); };
   }, []);
@@ -739,9 +770,10 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
     } : c)));
     setInput('');
     setBusy(true);
-    // 每次发送重置 Agent 工具轨迹 / 计划面板
+    // 每次发送重置 Agent 工具轨迹 / 计划面板 / 待审阅改动
     setAgentSteps((prev) => (agentMode ? [] : prev));
     setLivePlan((prev) => (agentMode ? null : prev));
+    setPendingEdits((prev) => (agentMode ? null : prev));
     const reqId = 'r_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     activeReq.current = reqId;
     assistantId.current = aid;
@@ -790,6 +822,27 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
       return list;
     });
   }, [busy]);
+
+  // ---- Agent 改动审阅：逐条 toggle 保留/撤销、全部、确认落盘（ai_agent_apply_edits），或放弃 ----
+  const toggleEdit = useCallback((id: string, want: 'kept' | 'undone') => {
+    setPendingEdits((prev) => (prev ? { ...prev, edits: prev.edits.map((e) => (e.id === id ? { ...e, status: e.status === want ? 'pending' : want } : e)) } : prev));
+  }, []);
+  const setAllEdits = useCallback((want: 'kept' | 'undone') => {
+    setPendingEdits((prev) => (prev ? { ...prev, edits: prev.edits.map((e) => ({ ...e, status: want })) } : prev));
+  }, []);
+  const confirmEdits = useCallback(async () => {
+    if (!pendingEdits) return;
+    const id = pendingEdits.requestId;
+    const ids = pendingEdits.edits.filter((e) => e.status !== 'undone').map((e) => e.id);
+    try {
+      const n = await hostApi.invoke<number>('ai_agent_apply_edits', { requestId: id, keepIds: ids });
+      appendHint(ids.length ? `✅ 已应用改动 ${n} 处` : '已放弃本次改动');
+    } catch (e) {
+      appendHint('⚠ 应用改动失败：' + String(e));
+    }
+    setPendingEdits(null);
+  }, [pendingEdits, appendHint]);
+  const discardEdits = useCallback(() => setPendingEdits(null), []);
 
   // 键盘：Enter 直接发送；Ctrl/Cmd+Enter 或 Shift+Enter 换行（#8）
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -929,6 +982,42 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
                   className="btn-press px-2.5 py-1 rounded text-[11px] bg-neutral-200/70 dark:bg-stone-700 hover:bg-red-500/80 hover:text-white">拒绝</button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Agent 改动审阅面板：后端 ai-agent-edits → 暂存改动，逐条保留/撤销/全部，确认后 ai_agent_apply_edits 落盘 */}
+      {pendingEdits && (
+        <div className="shrink-0 border-t border-neutral-200/70 dark:border-stone-700/70 bg-neutral-100/50 dark:bg-stone-800/40">
+          <div className="flex items-center gap-2 px-3 py-1.5">
+            <span className="text-xs font-medium text-neutral-700 dark:text-stone-200">✏️ 本次改动（{pendingEdits.edits.length} 处）</span>
+            <span className="text-[11px] text-neutral-400 dark:text-stone-500">
+              {pendingEdits.edits.filter((e) => e.status === 'kept').length} 保留 · {pendingEdits.edits.filter((e) => e.status === 'undone').length} 撤销
+            </span>
+            <span className="flex-1" />
+            <button onClick={() => setAllEdits('kept')} className="btn-press px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20">全部保留</button>
+            <button onClick={() => setAllEdits('undone')} className="btn-press px-2 py-0.5 rounded-md text-[11px] bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20">全部撤销</button>
+            <button onClick={confirmEdits} className="btn-press px-2 py-0.5 rounded-md text-[11px] element-primary">确认应用</button>
+            <button onClick={discardEdits} className="btn-press px-2 py-0.5 rounded-md text-[11px] text-neutral-400 dark:text-stone-500 hover:bg-black/5 dark:hover:bg-white/5" title="放弃本次改动">×</button>
+          </div>
+          <div className="max-h-56 overflow-auto divide-y divide-neutral-200/60 dark:divide-stone-700/60 border-t border-neutral-200/50 dark:border-stone-700/50">
+            {pendingEdits.edits.map((c) => (
+              <div key={c.id} className="flex items-center gap-2 p-2">
+                <span className={`text-[11px] px-1.5 py-0.5 rounded shrink-0 font-medium ${
+                  c.action === 'write' ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400'
+                    : c.action === 'edit' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                    : 'bg-red-500/15 text-red-600 dark:text-red-400'
+                }`}>
+                  {c.action === 'write' ? '写入' : c.action === 'edit' ? '编辑' : '删除'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm truncate text-neutral-700 dark:text-stone-200" title={c.path}>{c.path}</div>
+                  <div className="text-[11px] text-neutral-400 dark:text-stone-500 truncate mt-0.5">{c.summary}</div>
+                </div>
+                <button onClick={() => toggleEdit(c.id, 'kept')} className={`btn-press px-2 py-0.5 rounded text-[11px] ${c.status === 'kept' ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400' : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20'}`}>保留</button>
+                <button onClick={() => toggleEdit(c.id, 'undone')} className={`btn-press px-2 py-0.5 rounded text-[11px] ${c.status === 'undone' ? 'bg-red-500/20 text-red-600 dark:text-red-400' : 'bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20'}`}>撤销</button>
+              </div>
+            ))}
           </div>
         </div>
       )}
