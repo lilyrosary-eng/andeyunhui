@@ -4064,20 +4064,33 @@ function IdeAgent({
     return base.join('\n');
   }, [projectRoot, mcpTools, skillsIndex]);
 
-  // 流式事件监听（按 requestId 路由）
+  // 工具卡片配对表：cid → conv 卡片 id（tool-start pending 卡 → stage:"tool" 结果落地更新）
+  const toolCardRef = useRef<Map<string, string>>(new Map());
+  // 后端本轮暂存编辑（ai-agent-edits 事件），收尾转交给宿主审阅面板
+  const backendEditsRef = useRef<AgentEdit[]>([]);
+  // 危险操作审批弹窗：来自 ai-agent-approval 事件，回调 ai_agent_approve 决定放行/拒绝
+  const [approvalReq, setApprovalReq] = useState<{ requestId: string; approvalId: string; tool: string; operation: string } | null>(null);
+  const respondApproval = useCallback(async (approved: boolean) => {
+    const cur = approvalReq;
+    if (!cur) return;
+    setApprovalReq(null);
+    try {
+      await hostApi.invoke('ai_agent_approve', { approvalId: cur.approvalId, approved });
+    } catch (e) {
+      setConv((prev) => [...prev, { id: 'ap_' + Date.now().toString(36), role: 'tool', content: '⚠ 审批回传失败：' + String(e) }]);
+    }
+  }, [approvalReq]);
+
+  // 流式事件监听（按 requestId 路由）：渲染后端 ai_chat_agent 全程事件。
+  //  - ai-agent-step: stage="tool-start"(pending 卡)/stage="tool"(按 cid 配对更新)
+  //  - ai-delta/ai-done/ai-error：文本流式输出与收尾
+  //  - ai-agent-approval：危险操作审批弹窗
+  //  - ai-agent-edits：本轮暂存编辑，收尾交宿主审阅。
   useEffect(() => {
     let cancelled = false;
     const unlistens: Array<() => void> = [];
-    const append = () => {
-      const id = assistantIdRef.current;
-      if (id) {
-        // 增量刷新显示（去掉工具指令标签，避免把整文件内容刷出来）
-        setConv((prev) => prev.map((m) => (m.id === id ? { ...m, content: extractDirectives(bufRef.current).cleaned } : m)));
-      }
-    };
     const finish = (err?: string, usage?: any) => {
-      // 注意：此处【不能】置 busy=false。busy 由 runAgent 统一掌控（开始置 true、结束/取消/出错置 false）。
-      // 否则 ai-done 一到就提前解除 busy，而 runAgent 仍在处理读取/写入，按钮会闪回「运行」且因 input 为空而不可点。
+      // busy 由 runAgent 统一掌控（开始置 true、结束/取消/出错置 false）。
       reqRef.current = null;
       if (handlersRef.current) {
         if (err) {
@@ -4088,31 +4101,68 @@ function IdeAgent({
       }
     };
     (async () => {
-      const u1 = await hostApi.listen<{ requestId: string; delta: string }>('ai-delta', (e) => {
+      const uStep = await hostApi.listen<any>('ai-agent-step', (e) => {
+        const p = e.payload || {};
+        if (p.requestId !== reqRef.current) return;
+        if (p.stage === 'tool-start') {
+          const title = (p.meta && (p.meta.title || p.meta.cardTitle)) || p.name || '工具';
+          const card: AgentMsg = { id: 'tk_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), role: 'tool', content: '⋯ ' + title, streaming: true };
+          if (p.cid != null) toolCardRef.current.set(String(p.cid), card.id);
+          setConv((prev) => [...prev, card]);
+        } else if (p.stage === 'tool') {
+          const label = (p.ok === false ? '✗ ' : '✓ ') + ((p.meta && (p.meta.title || p.meta.cardTitle)) || p.name || '工具') + (p.ok === false && p.detail ? '\n' + String(p.detail).slice(0, 400) : '');
+          const cid = p.cid != null ? toolCardRef.current.get(String(p.cid)) : undefined;
+          if (cid) {
+            toolCardRef.current.delete(String(p.cid));
+            setConv((prev) => prev.map((m) => (m.id === cid ? { ...m, content: label, streaming: false } : m)));
+          } else {
+            setConv((prev) => [...prev, { id: 'tk_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), role: 'tool', content: label }]);
+          }
+        }
+      });
+      const uApproval = await hostApi.listen<any>('ai-agent-approval', (e) => {
+        const p = e.payload || {};
+        if (p.requestId !== reqRef.current) return;
+        setApprovalReq({ requestId: p.requestId, approvalId: p.approvalId, tool: p.tool, operation: p.operation });
+      });
+      const uEdits = await hostApi.listen<any>('ai-agent-edits', (e) => {
+        const p = e.payload || {};
+        if (p.requestId !== reqRef.current) return;
+        backendEditsRef.current = (Array.isArray(p.edits) ? p.edits : []).map((ed: any) => ({
+          id: ed.id || 'e_' + Date.now().toString(36),
+          path: ed.path,
+          old: ed.oldText || '',
+          new: ed.newText || '',
+          isNew: ed.action === 'write' || !ed.oldText,
+          status: 'pending',
+          error: undefined,
+        } as AgentEdit));
+        if (backendEditsRef.current.length) setPlanChips(backendEditsRef.current.map((x) => x.path));
+      });
+      const uDelta = await hostApi.listen<{ requestId: string; delta: string }>('ai-delta', (e) => {
         if (e.payload.requestId === reqRef.current) {
           bufRef.current += e.payload.delta;
-          append();
-          // 浮岛「AI 编程」agent 桥：把当前轮已清洗文本回传浮岛（多轮累积到 agentRunCleanedRef）
+          const id = assistantIdRef.current;
+          if (id) setConv((prev) => prev.map((m) => (m.id === id ? { ...m, content: bufRef.current } : m)));
+          // 浮岛「AI 编程」agent 桥：后端已输出清洗后文本，直接回传（多轮累积到 agentRunCleanedRef）
           if (capsuleAgentReqRef.current) {
-            const cleaned = extractDirectives(bufRef.current).cleaned;
             hostApi.emit('capsule-ide-agent-delta', {
               requestId: capsuleAgentReqRef.current,
-              text: (agentRunCleanedRef.current ? agentRunCleanedRef.current + '\n—\n' : '') + cleaned,
+              text: (agentRunCleanedRef.current ? agentRunCleanedRef.current + '\n—\n' : '') + e.payload.delta,
             });
           }
         }
       });
-      // ai-done 事件现在携带 usage 字段（prompt_cache.rs 的 cache_read_input_tokens / cache_creation_input_tokens）
-      const u2 = await hostApi.listen<{ requestId: string; usage?: any }>('ai-done', (e) => {
+      const uDone = await hostApi.listen<{ requestId: string; usage?: any }>('ai-done', (e) => {
         if (e.payload.requestId === reqRef.current) {
-          // 浮岛 agent 桥：提交本轮 cleaned 到 run 级缓冲（done 不在此发，由 runAgent 末尾统一发）
+          // 浮岛 agent 桥：提交本轮文本到 run 级缓冲（done 不在此发，由 runAgent 末尾统一发）
           if (capsuleAgentReqRef.current) {
-            agentRunCleanedRef.current = (agentRunCleanedRef.current ? agentRunCleanedRef.current + '\n—\n' : '') + extractDirectives(bufRef.current).cleaned;
+            agentRunCleanedRef.current = (agentRunCleanedRef.current ? agentRunCleanedRef.current + '\n—\n' : '') + bufRef.current;
           }
           finish(undefined, e.payload.usage);
         }
       });
-      const u3 = await hostApi.listen<{ requestId: string; error: string }>('ai-error', (e) => {
+      const uErr = await hostApi.listen<{ requestId: string; error: string }>('ai-error', (e) => {
         if (e.payload.requestId === reqRef.current) {
           // 浮岛 agent 桥：本轮出错直接报错回传（runAgent 末尾的 emitAgentEnd 会因 req 已清空而不重复发）
           if (capsuleAgentReqRef.current) {
@@ -4122,8 +4172,8 @@ function IdeAgent({
           finish(e.payload.error);
         }
       });
-      if (cancelled) { u1(); u2(); u3(); return; }
-      unlistens.push(u1, u2, u3);
+      if (cancelled) { uStep(); uApproval(); uEdits(); uDelta(); uDone(); uErr(); return; }
+      unlistens.push(uStep, uApproval, uEdits, uDelta, uDone, uErr);
     })();
     return () => { cancelled = true; unlistens.forEach((u) => u()); };
   }, []);
@@ -4192,40 +4242,12 @@ function IdeAgent({
     return () => { if (un) un(); };
   }, []);
 
-  const callChat = useCallback((messages: { role: string; content: string }[], opts?: { cacheable?: boolean }) => {
-    const cacheable = !!opts?.cacheable;
-    return new Promise<void>(async (resolve) => {
-      // Prompt Cache（前端层）：cacheable=true 时对 (system+history+user) 做 SHA-256 指纹，
-      // 命中 completionCache 直接重放文本，跳过 ai_chat 调用（零成本、零延迟）。
-      // 仅用于确定性调用（如 summarizeHistory 重试、相同 prompt 二次提交）。
-      // 对齐 prompt_cache.rs::lookup_completion：fingerprint → TTL 检查 → 重放文本。
-      let cacheKey: string | null = null;
-      if (cacheable) {
-        try {
-          cacheKey = await fingerprintMessages(messages, activeProfileId);
-          const cached = lookupCompletionCache(cacheKey);
-          if (cached !== null) {
-            // 命中：直接把缓存的 assistant 文本灌入 bufRef，刷新 UI，统计 hit。
-            bufRef.current = cached;
-            const id = assistantIdRef.current;
-            if (id) setConv((prev) => prev.map((m) => (m.id === id ? { ...m, content: extractDirectives(bufRef.current).cleaned } : m)));
-            setAgentStats((s) => ({ ...s, cacheHits: s.cacheHits + 1 }));
-            resolve();
-            return;
-          }
-          setAgentStats((s) => ({ ...s, cacheMisses: s.cacheMisses + 1 }));
-        } catch {
-          // fingerprint 失败不影响主流程，按未命中处理
-          cacheKey = null;
-        }
-      }
-
-      const reqId = 'ag_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      reqRef.current = reqId;
-      resolveRef.current = resolve;
-      // 预估输入 token（system + 全部历史）
+  // 发起单次后端 Agent 执行并等待其通过事件回收（ai-done/ai-error 前挂起）。
+  // 后端 ai_chat_agent 内部完成工具循环/子代理/记忆压缩，前端仅渲染事件。
+  const callBackendAgent = useCallback((requestId: string, messages: { role: string; content: string }[]) => {
+    return new Promise<void>((resolve) => {
       const inputTokens = messages.reduce((s, m) => s + estimateTokens(typeof m.content === 'string' ? m.content : ''), 0);
-      const capturedKey = cacheKey;
+      resolveRef.current = resolve;
       handlersRef.current = {
         onDelta: () => {},
         onDone: (e?: string, usage?: any) => {
@@ -4238,12 +4260,7 @@ function IdeAgent({
           const cost = estimateCost(inputTokens, outputTokens, prof?.model);
           // Prompt Cache（provider 侧）：解析 usage.cache_read_input_tokens /
           // cache_creation_input_tokens，对齐 prompt_cache.rs::apply_usage_to_stats。
-          // 命中 provider cache 时 cache_read 部分按 OpenAI 计费 1/10，此处仅做展示性统计。
           const u = parseUsageTokens(usage);
-          // 若 cacheable 且无错误且有输出，记录到 completionCache 供下次重放
-          if (capturedKey && !e && bufRef.current) {
-            recordCompletion(capturedKey, bufRef.current);
-          }
           setAgentStats((s) => ({
             ...s,
             totalInputTokens: s.totalInputTokens + inputTokens,
@@ -4256,20 +4273,29 @@ function IdeAgent({
           resolve();
         },
       };
-      hostApi.invoke('ai_chat', { requestId: reqId, messages, profileId: activeProfileId })
+      hostApi.invoke('ai_chat_agent', {
+        requestId,
+        messages,
+        profileId: activeProfileId,
+        projectRoot: projectRoot || undefined,
+        max_rounds: 8,
+      })
         .catch((e: any) => { handlersRef.current = null; resolveRef.current = null; errRef.current = String(e); bufRef.current += '\n⚠ ' + String(e); resolve(); });
     });
-  }, [activeProfileId, profiles]);
+  }, [activeProfileId, profiles, projectRoot]);
 
-  // 运行时取消：置标志、使当前请求失效并立即解除 callChat 的挂起，让循环可随时退出
+  // 运行时取消：通知后端终止后台 Agent，置标志、使当前请求失效并立即解除挂起
   const cancelAgent = useCallback(() => {
     cancelRef.current = true;
+    const rid = reqRef.current;
     reqRef.current = null;
     resolveRef.current?.();
     resolveRef.current = null;
+    setApprovalReq(null);
     setBusy(false);
     setAgentStats((s) => ({ ...s, roundStartTs: null }));
     setConv((prev) => [...prev, { id: 'c_' + Date.now().toString(36), role: 'assistant', content: '⛔ 已取消运行' }]);
+    if (rid) hostApi.invoke('ai_agent_cancel', { requestId: rid }).catch(() => {});
   }, []);
 
   // 浮岛「AI 编程」agent 桥：本轮/本任务结束时统一回传 done（错误则传 error），emit 后清空 requestId 防止重复
@@ -4283,20 +4309,8 @@ function IdeAgent({
     }
   }, []);
 
-  const runAgent = useCallback(async (overrideText?: string, seed?: ChatMessage[]) => {
-    let text = (overrideText ?? input).trim();
-    // 斜杠命令展开：/skill-name [可选任务] → 注入技能全文并启动 agent（渐进式披露的快捷入口）
-    // 仅对用户直接输入生效（overrideText 来自浮岛桥接，不展开）
-    if (!overrideText) {
-      const slashMatch = text.match(/^\/([a-z0-9-]+)(?:\s+([\s\S]+))?$/i);
-      if (slashMatch && skillRegistryRef.current.has(slashMatch[1])) {
-        const skill = skillRegistryRef.current.getSkill(slashMatch[1])!;
-        const taskPart = slashMatch[2]?.trim();
-        text = taskPart
-          ? `请按以下「${skill.name}」技能指南执行任务：${taskPart}\n\n--- 技能指南 ---\n${skill.body}`
-          : `请按以下「${skill.name}」技能指南执行（结合当前上下文）：\n\n--- 技能指南 ---\n${skill.body}`;
-      }
-    }
+const runAgent = useCallback(async (overrideText?: string, seed?: ChatMessage[]) => {
+    const text = (overrideText ?? input).trim();
     if (!text || busy) return;
     if (!activeProfileId) {
       setConv((prev) => [...prev, { id: 'h_' + Date.now().toString(36), role: 'assistant', content: '⚠ 尚未配置可用模型：请到「全局设置 → 模型」添加并填写 API Key。', error: true }]);
@@ -4311,772 +4325,48 @@ function IdeAgent({
       historyRef.current = [...seed];
       setConv(seed.map((m, i) => ({ id: 'seed_' + i, role: m.role, content: m.content })));
     }
-    // 重置恢复配方计数（每轮 agent 任务独立计数，避免长期会话累积上限）
-    resetRecoveryRecipes();
-    setHookCount(hookRegistry.count()); // 刷新状态栏 Hook 计数
-    // 重置压缩状态（冷却期计数器 + 历史记录，每轮 agent 任务独立）
-    resetCompactionState();
     // 标记本轮开始（用于状态栏计时器）
     setAgentStats((s) => ({ ...s, roundStartTs: Date.now(), rounds: s.rounds + 1 }));
     const uid = 'u_' + Date.now().toString(36);
     setConv((prev) => [...prev, { id: uid, role: 'user', content: text }]);
     historyRef.current.push({ role: 'user', content: text });
 
-    // MCP 工具刷新：每次 agent 启动时重新拉取，捕获用户在设置面板新增/删除/启用的服务器
-    // 后端 mcp_list_all_tools 会逐个 spawn 启用服务器并 list_tools，开销 ~500ms/服务器
-    const mcpList = await refreshMcpTools();
-    if (mcpList.length > 0) {
-      const bySrv = new Set(mcpList.map((it) => it.serverId));
-      setConv((prev) => [...prev, { id: 'mcp_' + Date.now().toString(36), role: 'tool', content: `🔌 已载入 ${mcpList.length} 个 MCP 工具（来自 ${bySrv.size} 个服务器：${[...bySrv].join(', ')}）` }]);
-    }
+    const requestId = 'ag_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    reqRef.current = requestId;
+    const aid = 'a_' + Date.now().toString(36);
+    assistantIdRef.current = aid;
+    // 重置本轮显示状态
+    bufRef.current = '';
+    backendEditsRef.current = [];
+    toolCardRef.current.clear();
+    setPlanChips([]);
+    setApprovalReq(null);
+    setHookCount(hookRegistry.count()); // 刷新状态栏 Hook 计数
+    setConv((prev) => [...prev, { id: aid, role: 'assistant', content: '', streaming: true }]);
 
-    // 记忆 / 原则文件夹：首次运行自动创建于项目根，并预读最新记忆与原则注入上下文
-    let memCtx = '';
-    let prinCtx = '';
-    const memDir = projectRoot ? resolvePath('记忆', projectRoot) : '';
-    const prinDir = projectRoot ? resolvePath('原则', projectRoot) : '';
-    if (projectRoot) {
-      try { await hostApi.invoke('ensure_directory', { path: memDir }); } catch { /* 忽略 */ }
-      try { await hostApi.invoke('ensure_directory', { path: prinDir }); } catch { /* 忽略 */ }
-      const d = new Date();
-      const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      memCtx = await readMemoryContext(memDir, resolvePath(`记忆/${today}.md`, projectRoot));
-      prinCtx = await readFileSafe(resolvePath('原则/原则.md', projectRoot));
-      if (memCtx || prinCtx) {
-        setConv((prev) => [...prev, { id: 'm_' + Date.now().toString(36), role: 'tool', content: '📂 已载入记忆与原则' }]);
-      }
-    }
-
-    // 忽略链：解析 .gitignore / .cursorignore（last-match-wins），用于硬拦截被忽略路径
-    const exemptDirs = [memDir, prinDir].filter(Boolean);
-    let ignorePatterns: { neg: boolean; re: RegExp }[] = [];
-    if (projectRoot) {
-      const gi = await readFileSafe(resolvePath('.gitignore', projectRoot));
-      const ci = await readFileSafe(resolvePath('.cursorignore', projectRoot));
-      ignorePatterns = parseIgnore([gi, ci].filter(Boolean).join('\n'));
-    }
-
-    // 工程契约：根目录 AGENTS.md / CLAUDE.md / .cursorrules / GEMINI.md（渐进式披露的基础层）
-    let convCtx = '';
-    if (projectRoot) {
-      const cands = ['AGENTS.md', 'CLAUDE.md', '.cursorrules', 'GEMINI.md'];
-      const parts: string[] = [];
-      for (const f of cands) {
-        const c = (await readFileSafe(resolvePath(f, projectRoot))).trim();
-        if (c) parts.push('【' + f + '】\n' + c.slice(0, 8000));
-      }
-      if (parts.length) {
-        convCtx = parts.join('\n\n');
-        setConv((prev) => [...prev, { id: 'a_' + Date.now().toString(36), role: 'tool', content: '📑 已载入项目工程契约（' + parts.length + ' 份）' }]);
-      }
-    }
-
-    // 许可令牌本地副本：runAgent 闭包内可变，使 buildMessages 与 checkPermission 共享同一份状态
-    // 消费时本地置 null + 同步 React 状态（UI 显示），下一轮 buildMessages 立即看到 null
-    let activeToken = approvalToken;
-
-    const buildMessages = (): { role: string; content: string }[] => {
-      const msgs: { role: string; content: string }[] = [{ role: 'system', content: SYSTEM_PROMPT }];
-      if (memCtx) msgs.push({ role: 'system', content: frameData('【今日/最近记忆】\n' + memCtx) });
-      if (prinCtx) msgs.push({ role: 'system', content: frameData('【工作原则】\n' + prinCtx) });
-      if (convCtx) msgs.push({ role: 'system', content: frameData('【项目工程契约】\n' + convCtx) });
-      // 策略引擎：注入当前 PermissionMode 约束（对齐 policy_engine.rs::PolicyRule 注入）
-      // 让 agent 知道当前模式，避免尝试会被拦截的操作（节省一轮）
-      const modeLines: string[] = [`【当前权限模式】${PERMISSION_MODE_META[permissionMode].label}（${permissionMode}）`];
-      modeLines.push(`约束：${PERMISSION_MODE_META[permissionMode].desc}`);
-      if (permissionMode === 'dangerous') {
-        if (activeToken) {
-          modeLines.push(`当前一次性许可令牌：${activeToken}`);
-          modeLines.push('破坏性操作（<write>/<edit>/非只读<shell>/<mcp>）必须带 approval="' + activeToken + '" 属性才能执行；令牌一次性使用，用后即失效。');
-          modeLines.push('示例：<shell command="rm -rf ./build" approval="' + activeToken + '"/>');
-        } else {
-          modeLines.push('⚠ 当前无有效许可令牌（已被消费或未生成）。所有破坏性操作都会被拦截，请提示用户在状态栏点击「刷新令牌」生成新令牌后再重试。');
-        }
-      }
-      msgs.push({ role: 'system', content: frameData(modeLines.join('\n')) });
-      msgs.push(...historyRef.current);
-      return msgs;
-    };
-
-    // 策略引擎检查（对齐 permission_enforcer.rs::check_with_required_mode）
-    // 返回 { allowed, reason } —— allowed=false 时附带拒绝原因供回填上下文
-    // opKind: 'write' | 'edit' | 'shell-destructive' | 'shell-readonly' | 'mcp'
-    // approval: 指令上的 approval 属性值（null=未提供）
-    const checkPermission = (opKind: 'write' | 'edit' | 'shell-destructive' | 'shell-readonly' | 'mcp', approval: string | null): { allowed: boolean; reason?: string } => {
-      // 逐工具规则优先（alwaysAllow/alwaysAsk/alwaysDeny）——覆盖 PermissionMode 默认行为
-      // opKind → 工具名映射（对齐 tools.ts BUILTIN_TOOLS 注册表）
-      const toolNameForOp: Record<string, string> = {
-        write: 'file_write', edit: 'file_edit',
-        'shell-destructive': 'shell', 'shell-readonly': 'shell', mcp: 'mcp',
-      };
-      const toolName = toolNameForOp[opKind];
-      const overrides = loadPermissionOverrides();
-      if (toolName && overrides[toolName]) {
-        const rule = overrides[toolName];
-        if (rule === 'alwaysDeny') return { allowed: false, reason: `🚫 工具「${toolName}」已被设为始终禁止` };
-        // alwaysAsk：落到 normal/dangerous 的破坏性分支由后续逻辑处理；这里仅对非破坏性操作强制拦截待确认
-        // alwaysAllow：跳过 PermissionMode 检查直接放行（危险操作仍受 isTrusted/受保护路径/白名单约束）
-        if (rule === 'alwaysAllow' && opKind !== 'shell-destructive' && opKind !== 'mcp') return { allowed: true };
-      }
-      // read-only：仅放行 shell-readonly（构建/测试/lint 等只读类），其余全 block
-      if (permissionMode === 'read-only') {
-        if (opKind === 'shell-readonly') return { allowed: true };
-        const tag = opKind === 'mcp' ? 'mcp' : opKind.startsWith('shell') ? 'shell' : opKind;
-        return { allowed: false, reason: `🚫 只读模式：<${tag}> 操作被拦截（仅放行 <read>/<ast>/只读 shell；切换到「常规」或「高危」模式再试）` };
-      }
-      // plan：所有写/shell/mcp 全 block（仅允许 <read>/<ast>）
-      if (permissionMode === 'plan') {
-        const tag = opKind === 'mcp' ? 'mcp' : opKind.startsWith('shell') ? 'shell' : opKind;
-        return { allowed: false, reason: `🚫 方案模式：<${tag}> 操作被拦截（方案模式仅允许 <read>/<ast>，让 agent 出方案不落地）` };
-      }
-      // normal：放行（具体写/shell 限制由 isTrusted + 受保护路径 + 白名单处理）
-      if (permissionMode === 'normal') return { allowed: true };
-      // dangerous：破坏性操作需 approval token 匹配
-      if (opKind === 'shell-readonly') return { allowed: true }; // 只读 shell 无需 token
-      if (!activeToken) {
-        return { allowed: false, reason: '🚫 高危模式：许可令牌已被消费或未生成，请让用户在状态栏点击「刷新令牌」生成新令牌后再重试' };
-      }
-      if (!approval || approval !== activeToken) {
-        return { allowed: false, reason: `🚫 高危模式：approval 属性缺失或不匹配（期望 "${activeToken}"，收到 "${approval || ''}"）。请在指令上加 approval="${activeToken}" 属性` };
-      }
-      // 匹配成功：消费令牌（一次性）+ 同步 UI
-      activeToken = null;
-      consumeToken();
-      return { allowed: true };
-    };
-
-    const pendingEdits: AgentEdit[] = [];
-    pendingEditsRef.current = pendingEdits; // 同步到 ref，供 saveCurrentSession 读取
-    const planSet = new Set(planChips);
-    const MAX_ITER = 14;
-    const EDIT_CEIL = 80; // 单会话改动上限：超过即疑似循环/幻觉，提前终止
-    const seenEditKeys = new Set<string>();
-    let loopGuard = false;
-    let shellCount = 0;
-    let readCount = 0;     // 累计 read/ast 次数（状态栏用）
-    let editCount = 0;     // 累计 edit/write 次数（状态栏用）
-    const SHELL_CEIL = 30; // 单会话 shell 执行上限，超过即疑似循环/幻觉，提前终止
-    // 熔断（自我保护）：Token 硬上限 + 80% 预警，防止意外死循环产生天价账单
-    const TOKEN_CAP = 200000;
-    let tokenWarned = false;
-    const recentSigs: string[] = []; // 最近若干轮工具调用签名，用于死循环检测
-
-    for (let iter = 0; iter < MAX_ITER; iter++) {
-      if (cancelRef.current) break;
-      const aid = 'a_' + Date.now().toString(36) + '_' + iter;
-      assistantIdRef.current = aid;
-      bufRef.current = '';
-      setConv((prev) => [...prev, { id: aid, role: 'assistant', content: '', streaming: true }]);
-      // 预检压缩（在发起下一轮 callChat 之前）：达 60% 阈值即触发，避免请求超限被 provider 拒绝。
-      // 对齐 compact.rs::should_compact 的「preemptive compaction」设计。
-      const preCompact = await compactHistoryIfNeeded(historyRef, activeProfileId, TOKEN_CAP, hostApi);
-      if (preCompact.compacted) {
-        // 压缩成功后重置 tokenWarned，让 80% 预警在压缩后的新基线上重新生效
-        tokenWarned = false;
-        const mergeTag = preCompact.merged ? '（合并已有摘要）' : '';
-        setConv((prev) => [...prev, { id: 'cmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: `📦 上下文已压缩${mergeTag}：移除 ${preCompact.removedCount} 条，摘要 ${preCompact.summaryChars} 字符\n原因：${preCompact.reason}` }]);
-      }
-      // 熔断：Token 硬上限检测（在发起下一轮对话前估算累计用量）
-      const usedTokens = historyRef.current.reduce((s, m) => s + estimateTokens(typeof m.content === 'string' ? m.content : ''), 0);
-      if (usedTokens > TOKEN_CAP) {
-        loopGuard = true;
-        historyRef.current.push({ role: 'user', content: '⚠ 已达 Token 硬上限，系统已强制终止本次会话以防产生天价账单。请用户总结已完成的进度。' });
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36), role: 'tool', content: `🛑 Token 熔断（${Math.round(usedTokens / 1000)}k/${TOKEN_CAP / 1000}k）` }]);
-        break;
-      }
-      if (usedTokens > TOKEN_CAP * 0.8 && !tokenWarned) {
-        tokenWarned = true;
-        historyRef.current.push({ role: 'user', content: `⚠ 已用约 ${Math.round(usedTokens / 1000)}k token（达上限 80%）。请立即总结当前进度、给出「已用成本」估算，并尽快 <done/> 收尾，避免触发硬上限熔断。` });
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36), role: 'tool', content: `🔥 Token 预警（${Math.round(usedTokens / 1000)}k/${TOKEN_CAP / 1000}k）` }]);
-      }
-      await callChat(buildMessages());
-      if (cancelRef.current) { setBusy(false); emitAgentEnd(); return; }
-      if (errRef.current) { setBusy(false); emitAgentEnd(errRef.current); return; }
-      const raw = bufRef.current;
-      const { reads, writes, edits, shells, asts, mcps, searches, rags, plans, subagents, skills, done, cleaned } =
-          extractDirectives(raw);
-      // 累计本轮工具调用次数（状态栏显示用）
-      readCount += reads.length + asts.length;
-      editCount += edits.length + writes.length;
-      historyRef.current.push({ role: 'assistant', content: raw });
-      setConv((prev) => prev.map((m) => (m.id === aid ? { ...m, content: cleaned, streaming: false } : m)));
-      // 死循环检测：最近 5 轮工具调用签名完全一致 → 判定逻辑死锁，强制换策略或询问用户
-      const sig = JSON.stringify({
-        r: reads, a: asts,
-        w: writes.map((x) => x.path + x.content.length),
-        e: edits.map((x) => x.path + '|' + x.old.length + '|' + x.new.length),
-        s: shells.map((x) => x.command),
-        m: mcps.map((x) => x.tool + '|' + JSON.stringify(x.args)),
-        g: searches, rag: rags,
-      });
-      recentSigs.push(sig);
-      if (recentSigs.length >= 5 && recentSigs.slice(-5).every((x) => x === recentSigs[recentSigs.length - 5])) {
-        historyRef.current.push({ role: 'user', content: '⚠ 检测到最近 5 轮工具调用高度重复（疑似陷入死循环）。请更换策略：换个思路、缩小改动范围，或直接询问用户，不要再重复相同操作。' });
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36), role: 'tool', content: '🔁 循环检测：重复操作警告' }]);
-        loopGuard = true;
-        break;
-      }
-      // ===== 计划模式：<plan><step>…</step></plan> → 更新结构化计划状态 =====
-      if (plans.length > 0) {
-        setPlanState({ steps: plans, confirmed: false, visible: true });
-        setConv((prev) => [...prev, { id: 'pl_' + Date.now().toString(36), role: 'tool', content: '📋 已制定 ' + plans.length + ' 步计划，等待确认后执行。' }]);
-        // plan 模式下不自动执行写入操作，等用户确认
-        if (permissionMode === 'plan') {
-          historyRef.current.push({ role: 'user', content: '计划已制定，等待用户确认。请勿继续执行写入操作，直到用户确认计划。' });
-        }
-      }
-      // ===== 子代理：<subagent task="..."/> → 启动独立子代理执行子任务 =====
-      for (const sa of subagents) {
-        // 子代理仅使用只读工具（read/search），在所有模式下放行；dangerous 模式需 approval token
-        const saAllowed = permissionMode !== 'dangerous' || (sa.approval && sa.approval === activeToken);
-        if (!saAllowed) {
-          setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: '🚫 高危模式：子代理需 approval="' + (activeToken || '') + '" 属性' }]);
-          historyRef.current.push({ role: 'user', content: '子代理被权限策略拦截：高危模式需 approval 属性' });
-          continue;
-        }
-        setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: '🤖 启动子代理：' + sa.task.slice(0, 60) + '…' }]);
-        // beforeSubagent 钩子（A2）：允许拦截/改写子代理任务
-        const saHook = await runHook('beforeSubagent', { task: sa.task, projectRoot });
-        if (saHook.cancel) {
-          setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: '🪝 Hook 拦截子代理' + (saHook.reason ? '（' + saHook.reason + '）' : '') }]);
-          historyRef.current.push({ role: 'user', content: `子代理被插件 Hook 拦截${saHook.reason ? '（' + saHook.reason + '）' : ''}（任务：${sa.task}）` });
-          continue;
-        }
-        const saTask = typeof saHook.modify === 'string' ? saHook.modify : sa.task;
-        try {
-          const result = await runSubAgent({
-            task: saTask,
-            projectRoot,
-            profileId: activeProfileId,
-            maxRounds: 5,
-            parentContext: historyRef.current.slice(-6).map((m) => m.content).join('\n---\n').slice(-2000),
-            role: sa.role,
-          });
-          const summary = result.summary.slice(0, 3000);
-          const tag = result.truncated ? '⚠ 子代理达到轮次上限，结果可能不完整' : '✅ 子代理完成';
-          setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: tag + '（' + result.rounds + ' 轮）：\n' + summary.slice(0, 200) + '…' }]);
-          historyRef.current.push({ role: 'user', content: frameData(`子代理结果（任务：${sa.task}）：\n${summary}`) });
-          // afterSubagent 钩子（A2）：通知外部插件子代理完成（不可改写）
-          await runHook('afterSubagent', { task: sa.task, result });
-        } catch (e) {
-          const err = '子代理执行失败：' + String(e);
-          setConv((prev) => [...prev, { id: 'sa_' + Date.now().toString(36), role: 'tool', content: '❌ ' + err }]);
-          historyRef.current.push({ role: 'user', content: err });
-          // onToolError 钩子（A1，对齐 hooks.rs::PostToolUseFailure）：通知外部插件子代理失败
-          await runHook('onToolError', { tool: 'subagent', error: String(e), input: sa.task });
-        }
-      }
-      // ===== 技能加载：<skill name="..."/> → 从注册表取全文注入上下文（渐进式披露） =====
-      // 只读工具，所有模式放行；命中则回填完整技能正文，未命中回填可用索引
-      for (const skillName of skills) {
-        const skill = skillRegistryRef.current.getSkill(skillName);
-        if (skill) {
-          setConv((prev) => [...prev, { id: 'sk_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🎯 加载技能：' + skillName }]);
-          // 限长注入，避免过长技能正文撑爆上下文
-          const MAX_SKILL = 12000;
-          const body = skill.body.length > MAX_SKILL
-            ? skill.body.slice(0, MAX_SKILL) + '\n…（技能正文过长已截断至 ' + MAX_SKILL + ' 字符）'
-            : skill.body;
-          historyRef.current.push({ role: 'user', content: frameData(`技能「${skill.name}」完整指南（来源：${skill.source}）：\n\n${body}`) });
-        } else {
-          setConv((prev) => [...prev, { id: 'sk_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ 技能未找到：' + skillName }]);
-          historyRef.current.push({ role: 'user', content: `技能「${skillName}」未找到。可用技能索引：\n${skillRegistryRef.current.getIndex()}` });
-        }
-      }
-      // RAG 语义检索（真实向量检索，替代原 MiniSearch 关键词检索）：
-      // agent 用 <search query="..."/> 或 <rag query="..."/> 对本地知识库做语义检索，
-      // 取回最相关的文档片段（含来源标题、相似度、片段文本），用于获取产品文档/规范/FAQ 等知识。
-      // 检索链路：rag_embed_api（Ollama nomic-embed-text 默认）→ rag_query（暴力余弦 top-k）。
-      const SEARCH_CEIL = 10; // 单轮检索上限，防 agent 滥用
-      let searchCountThisRound = 0;
-      for (const sq of searches) {
-        if (searchCountThisRound >= SEARCH_CEIL) {
-          historyRef.current.push({ role: 'user', content: `⚠ 单轮检索次数已达上限（${SEARCH_CEIL}），剩余 <search> 已跳过。请基于已有结果继续。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ 检索上限：剩余 <search> 已跳过' }]);
-          break;
-        }
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔎 RAG 检索中：' + sq.slice(0, 60) }]);
-        const injected = await runRagSearch(sq, (c) => setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: c }]));
-        historyRef.current.push({ role: 'user', content: frameData(`RAG 语义检索结果（query: "${sq}"）：\n${injected}`) });
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔎 RAG 检索完成：' + sq.slice(0, 60) }]);
-        searchCountThisRound++;
-      }
-      // <rag> 显式知识库语义检索（与 <search> 共用同一 RAG 检索管线，frameData 注入复用）
-      let ragCountThisRound = 0;
-      for (const rq of rags) {
-        if (ragCountThisRound >= SEARCH_CEIL) {
-          historyRef.current.push({ role: 'user', content: `⚠ 单轮检索次数已达上限（${SEARCH_CEIL}），剩余 <rag> 已跳过。请基于已有结果继续。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ 检索上限：剩余 <rag> 已跳过' }]);
-          break;
-        }
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '📚 知识库检索中：' + rq.slice(0, 60) }]);
-        const injected = await runRagSearch(rq, (c) => setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: c }]));
-        historyRef.current.push({ role: 'user', content: frameData(`知识库检索结果（query: "${rq}"）：\n${injected}`) });
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '📚 知识库检索完成：' + rq.slice(0, 60) }]);
-        ragCountThisRound++;
-      }
-      // 并行读取：多个 <read> 之间无依赖，用 Promise.all 并发 I/O 缩短总耗时
-      await Promise.all(reads.map(async (p) => {
-        const abs = resolvePath(p, projectRoot || null);
-        const prot = isProtectedPath(abs);
-        if (prot) {
-          historyRef.current.push({ role: 'user', content: `工具读取结果：路径 "${abs}" 被安全策略拦截（${prot}），未读取内容。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 拦截读取 ' + abs }]);
-          return;
-        }
-        if (projectRoot && isIgnoredPath(abs, projectRoot, ignorePatterns, exemptDirs)) {
-          historyRef.current.push({ role: 'user', content: `工具读取结果：路径 "${abs}" 被 .gitignore/.cursorignore 忽略规则拦截，未读取内容。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 忽略拦截 ' + abs }]);
-          return;
-        }
-        let content = '';
-        let note = '';
-        // beforeRead hook（对齐 hooks.rs::PreToolUse）：允许其他插件拦截读取
-        const readHook = await runHook('beforeRead', abs);
-        if (readHook.cancel) {
-          historyRef.current.push({ role: 'user', content: `工具读取结果：被插件 Hook 拦截${readHook.reason ? '（' + readHook.reason + '）' : ''}（路径 ${abs}）` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🪝 Hook 拦截读取 ' + abs }]);
-          return;
-        }
-        try {
-          content = await hostApi.invoke<string>('read_text_file', { path: abs });
-        } catch (e) {
-          // Windows 下对目录执行 read 会报 os error 5（拒绝访问）；退化为列目录，让 AI 自行探索结构
-          try {
-            const entries: any[] = await hostApi.invoke<any[]>('list_directory', { path: abs });
-            // 忽略链：过滤掉被 .gitignore/保护规则隐藏的条目，让 LLM 连路径都看不到（杜绝幻觉读取）
-            const visible = entries.filter((en) => {
-              const child = resolvePath(en.name, abs);
-              if (isProtectedPath(child)) return false;
-              if (projectRoot && isIgnoredPath(child, projectRoot, ignorePatterns, exemptDirs)) return false;
-              return true;
-            });
-            note = '（这是一个目录，以下是其顶层可见内容；已按 .gitignore / 保护规则过滤隐藏项）\n';
-            content = (visible.length ? visible : entries).map((en) => `${en.is_dir ? '📁' : '📄'} ${en.name}`).join('\n');
-          } catch {
-            content = '⚠ 读取失败：' + String(e);
-            // onToolError 钩子（A1，对齐 hooks.rs::PostToolUseFailure）：通知外部插件读取失败
-            await runHook('onToolError', { tool: 'read', error: String(e), input: abs });
-          }
-        }
-        // afterRead hook（对齐 hooks.rs::PostToolUse）：允许其他插件增强读取内容（如注入额外上下文）
-        const readAfterHook = await runHook('afterRead', abs, content);
-        if (typeof readAfterHook.modify === 'string') content = readAfterHook.modify;
-        // 上下文压缩：单次读取注入上限，避免大文件撑爆上下文（token 爆炸）
-        const MAX_INJECT = 16000;
-        const full = note + content;
-        const injected = full.length > MAX_INJECT
-          ? full.slice(0, MAX_INJECT) + `\n…（内容过长已截断至 ${MAX_INJECT} 字符；如需特定片段请让 agent 读取具体行）`
-          : full;
-        historyRef.current.push({ role: 'user', content: frameData(`工具读取结果：路径 "${abs}" 的内容如下：\n\`\`\`\n${injected}\n\`\`\``) });
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔍 读取 ' + abs }]);
-      }));
-      // 结构大纲：轻量 AST 解析，返回文件的函数/类/导出及行号，帮助 agent 精确定位 <edit> 锚点
-      // 并行结构：多个 <ast> 之间无依赖，用 Promise.all 并发 I/O
-      await Promise.all(asts.map(async (p) => {
-        const abs = resolvePath(p, projectRoot || null);
-        const prot = isProtectedPath(abs);
-        if (prot) {
-          historyRef.current.push({ role: 'user', content: `工具结构结果：路径 "${abs}" 被安全策略拦截（${prot}），未返回结构。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 拦截结构 ' + abs }]);
-          return;
-        }
-        if (projectRoot && isIgnoredPath(abs, projectRoot, ignorePatterns, exemptDirs)) {
-          historyRef.current.push({ role: 'user', content: `工具结构结果：路径 "${abs}" 被 .gitignore/.cursorignore 忽略规则拦截，未返回结构。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 忽略拦截结构 ' + abs }]);
-          return;
-        }
-        let content = '';
-        try { content = await hostApi.invoke<string>('read_text_file', { path: abs }); } catch (e) {
-          historyRef.current.push({ role: 'user', content: `工具结构结果：读取 "${abs}" 失败 - ${String(e)}` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ 结构失败 ' + abs }]);
-          return;
-        }
-        const ext = abs.split('.').pop()?.toLowerCase() || '';
-        const outline = outlineSource(content, ext);
-        const MAX_OUT = 6000;
-        const injected = (outline.length > MAX_OUT ? outline.slice(0, MAX_OUT) + '\n…（结构过长已截断）' : outline) || '（该文件未解析出可导出的结构，可能为空文件或非代码文件）';
-        historyRef.current.push({ role: 'user', content: frameData(`工具结构结果：路径 "${abs}" 的结构大纲如下：\n\`\`\`\n${injected}\n\`\`\``) });
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '📑 结构 ' + abs }]);
-      }));
-      for (const w of writes) {
-        const abs = resolvePath(w.path, projectRoot || null);
-        // 策略引擎拦截：read-only/plan 全 block；dangerous 需 approval token
-        const permW = checkPermission('write', w.approval);
-        if (!permW.allowed) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: '', new: w.content, isNew: false, status: 'blocked', error: permW.reason || '🚫 策略拦截' });
-          planSet.add(abs);
-          historyRef.current.push({ role: 'user', content: `工具写入结果：${permW.reason || '策略拦截'}（路径 ${abs}）` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: permW.reason || '🚫 策略拦截写入 ' + abs }]);
-          continue;
-        }
-        // 信任解析器拦截：未信任目录下禁止 <write>（借鉴 trust_resolver.rs 的 RequireApproval 状态）
-        if (!isTrusted) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: '', new: w.content, isNew: false, status: 'blocked', error: '🚫 项目未信任：写入被拦截（请在状态栏点击「信任此项目」）' });
-          planSet.add(abs);
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 未信任拦截写入 ' + abs }]);
-          continue;
-        }
-        const protW = isProtectedPath(abs);
-        if (protW) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: '', new: w.content, isNew: false, status: 'blocked', error: '🚫 安全策略拦截：' + protW });
-          planSet.add(abs);
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 拦截写入 ' + abs }]);
-          continue;
-        }
-        if (projectRoot && isIgnoredPath(abs, projectRoot, ignorePatterns, exemptDirs)) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: '', new: w.content, isNew: false, status: 'blocked', error: '🚫 被 .gitignore/.cursorignore 忽略规则拦截' });
-          planSet.add(abs);
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 忽略拦截写入 ' + abs }]);
-          continue;
-        }
-        // 记忆 / 原则文件：直接落盘，不进审阅面板
-        if (projectRoot && (abs.startsWith(memDir) || abs.startsWith(prinDir))) {
-          try { await hostApi.invoke('write_text_file', { path: abs, content: w.content }); } catch { /* 忽略 */ }
-          if (abs.startsWith(memDir)) memCtx = w.content;
-          if (abs.startsWith(prinDir)) prinCtx = w.content;
-          historyRef.current.push({ role: 'user', content: `工具写入结果：已写入记忆/原则文件 "${abs}"（内容 ${w.content.length} 字符）。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '📝 记忆/原则 ' + abs }]);
-          continue;
-        }
-        // 整文件写入：新建文件 → isNew；已存在 → 用旧内容作 old（建议改用 <edit> 做局部修改）
-        const wkey = 'W:' + abs + '|||' + w.content;
-        if (seenEditKeys.has(wkey)) {
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⏭ 跳过重复写入 ' + abs }]);
-          continue;
-        }
-        seenEditKeys.add(wkey);
-        // beforeWrite hook（对齐 hooks.rs::PreToolUse）：允许其他插件拦截或改写写入内容
-        const writeHook = await runHook('beforeWrite', abs, w.content);
-        if (writeHook.cancel) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: '', new: w.content, isNew: false, status: 'blocked', error: '🪝 Hook 拦截：' + (writeHook.reason || '插件拦截') });
-          planSet.add(abs);
-          historyRef.current.push({ role: 'user', content: `工具写入结果：被插件 Hook 拦截${writeHook.reason ? '（' + writeHook.reason + '）' : ''}（路径 ${abs}）` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🪝 Hook 拦截写入 ' + abs }]);
-          continue;
-        }
-        const finalContent = typeof writeHook.modify === 'string' ? writeHook.modify : w.content;
-        let oldContent = '';
-        let exists = true;
-        try { oldContent = await hostApi.invoke<string>('read_text_file', { path: abs }); } catch { exists = false; oldContent = ''; }
-        pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: exists ? oldContent : '', new: finalContent, isNew: !exists, status: 'pending' });
-        planSet.add(abs);
-        historyRef.current.push({ role: 'user', content: `工具写入结果：已记录对文件 "${abs}" 的整文件写入（内容 ${finalContent.length} 字符）。` });
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '✎ 写入 ' + abs }]);
-        // afterWrite hook（对齐 hooks.rs::PostToolUse）：通知其他插件写入已完成
-        await runHook('afterWrite', abs, finalContent);
-      }
-      for (const e of edits) {
-        const abs = resolvePath(e.path, projectRoot || null);
-        // 策略引擎拦截：read-only/plan 全 block；dangerous 需 approval token
-        const permE = checkPermission('edit', e.approval);
-        if (!permE.allowed) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: e.old, new: e.new, isNew: false, status: 'blocked', error: permE.reason || '🚫 策略拦截' });
-          planSet.add(abs);
-          historyRef.current.push({ role: 'user', content: `工具编辑结果：${permE.reason || '策略拦截'}（路径 ${abs}）` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: permE.reason || '🚫 策略拦截编辑 ' + abs }]);
-          continue;
-        }
-        // 信任解析器拦截：未信任目录下禁止 <edit>（同 <write> 策略）
-        if (!isTrusted) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: e.old, new: e.new, isNew: false, status: 'blocked', error: '🚫 项目未信任：编辑被拦截（请在状态栏点击「信任此项目」）' });
-          planSet.add(abs);
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 未信任拦截编辑 ' + abs }]);
-          continue;
-        }
-        const protE = isProtectedPath(abs);
-        if (protE) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: e.old, new: e.new, isNew: false, status: 'blocked', error: '🚫 安全策略拦截：' + protE });
-          planSet.add(abs);
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 拦截编辑 ' + abs }]);
-          continue;
-        }
-        if (projectRoot && isIgnoredPath(abs, projectRoot, ignorePatterns, exemptDirs)) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: e.old, new: e.new, isNew: false, status: 'blocked', error: '🚫 被 .gitignore/.cursorignore 忽略规则拦截' });
-          planSet.add(abs);
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 忽略拦截编辑 ' + abs }]);
-          continue;
-        }
-        // 记忆 / 原则文件：直接以 new 落盘，不进审阅面板
-        if (projectRoot && (abs.startsWith(memDir) || abs.startsWith(prinDir))) {
-          try { await hostApi.invoke('write_text_file', { path: abs, content: e.new }); } catch { /* 忽略 */ }
-          if (abs.startsWith(memDir)) memCtx = e.new;
-          if (abs.startsWith(prinDir)) prinCtx = e.new;
-          historyRef.current.push({ role: 'user', content: `工具写入结果：已写入记忆/原则文件 "${abs}"（内容 ${e.new.length} 字符）。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '📝 记忆/原则 ' + abs }]);
-          continue;
-        }
-        const ekey = 'E:' + abs + '|||' + e.old + '|||' + e.new;
-        if (seenEditKeys.has(ekey)) {
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⏭ 跳过重复编辑 ' + abs }]);
-          continue;
-        }
-        seenEditKeys.add(ekey);
-        // beforeEdit hook（对齐 hooks.rs::PreToolUse）：允许其他插件拦截或改写编辑内容
-        const editHook = await runHook('beforeEdit', abs, e.old, e.new);
-        if (editHook.cancel) {
-          pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: e.old, new: e.new, isNew: false, status: 'blocked', error: '🪝 Hook 拦截：' + (editHook.reason || '插件拦截') });
-          planSet.add(abs);
-          historyRef.current.push({ role: 'user', content: `工具编辑结果：被插件 Hook 拦截${editHook.reason ? '（' + editHook.reason + '）' : ''}（路径 ${abs}）` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🪝 Hook 拦截编辑 ' + abs }]);
-          continue;
-        }
-        const finalOld = (editHook.modify && typeof editHook.modify === 'object' && 'old' in editHook.modify) ? editHook.modify.old : e.old;
-        const finalNew = (editHook.modify && typeof editHook.modify === 'object' && 'new' in editHook.modify) ? editHook.modify.new : e.new;
-        pendingEdits.push({ id: 'e_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: abs, old: finalOld, new: finalNew, isNew: false, status: 'pending' });
-        planSet.add(abs);
-        historyRef.current.push({ role: 'user', content: `工具编辑结果：已记录对文件 "${abs}" 的局部增删（删 ${finalOld.length} / 增 ${finalNew.length} 字符）。` });
-        setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🟢 编辑 ' + abs }]);
-        // afterEdit hook（对齐 hooks.rs::PostToolUse）：通知其他插件编辑已完成
-        await runHook('afterEdit', abs, finalOld, finalNew);
-      }
-      // 受限 shell：调用服务端 run_agent_shell（白名单 + Dry-Run 黑名单 + 超时 + 工作区 cwd），结果回填上下文
-      for (const sh of shells) {
-        const cmd = (sh.command || '').trim();
-        if (!cmd) continue;
-        // 前端预检：五段式校验 + 8 类 CommandIntent 分类（完整移植 bash_validation.rs）
-        // 传入 isTrusted/projectRoot：未信任 → ReadOnly 模式（仅放行只读命令），已信任 → WorkspaceWrite 模式
-        const risk = classifyShell(cmd, { isTrusted, projectRoot: projectRoot || '' });
-        // 策略引擎拦截：read-only 仅放行只读 shell；plan 全 block；dangerous 非只读需 approval token
-        const isReadOnlyShell = risk.intent === 'readonly' && risk.validation !== 'block';
-        const permS = checkPermission(isReadOnlyShell ? 'shell-readonly' : 'shell-destructive', sh.approval);
-        if (!permS.allowed) {
-          const reasonTxt = risk.reason ? `（${risk.reason}）` : '';
-          historyRef.current.push({ role: 'user', content: `工具命令执行结果：${permS.reason || '策略拦截'}。\n被拦截命令：${cmd}` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: (permS.reason || '🚫 策略拦截 shell') + ' ' + risk.chip + risk.label + reasonTxt + '\n> ' + cmd }]);
-          continue;
-        }
-        // 信任解析器拦截：未信任目录下禁止非只读命令（含 block 级校验失败）
-        // risk.validation === 'block' 表示 ReadOnly 模式下命中 write/state-modifying/sed -i/git 写 等
-        if (!isTrusted && (risk.intent !== 'readonly' || risk.validation === 'block')) {
-          const reasonTxt = risk.reason ? `（${risk.reason}）` : '';
-          historyRef.current.push({ role: 'user', content: `工具命令执行结果：项目未信任，非只读命令被拦截${reasonTxt}。请在状态栏点击「信任此项目」后重试。\n被拦截命令：${cmd}` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 未信任拦截 shell ' + risk.chip + risk.label + reasonTxt + '\n> ' + cmd }]);
-          continue;
-        }
-        let res: any = null;
-        // beforeShell hook（对齐 hooks.rs::PreToolUse）：允许其他插件拦截或改写命令
-        const shellHook = await runHook('beforeShell', cmd, projectRoot);
-        if (shellHook.cancel) {
-          historyRef.current.push({ role: 'user', content: `工具命令执行结果：被插件 Hook 拦截${shellHook.reason ? '（' + shellHook.reason + '）' : ''}。\n被拦截命令：${cmd}` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🪝 Hook 拦截 shell' + (shellHook.reason ? '：' + shellHook.reason : '') + '\n> ' + cmd }]);
-          continue;
-        }
-        const finalCmd = typeof shellHook.modify === 'string' ? shellHook.modify : cmd;
-        try {
-          res = await hostApi.invoke<any>('run_agent_shell', { command: finalCmd, cwd: projectRoot || undefined, timeout_secs: 120 });
-        } catch (e) {
-          historyRef.current.push({ role: 'user', content: `工具命令执行结果：调用受限 shell 失败 - ${String(e)}` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚡ 执行 ' + risk.chip + risk.label + (risk.reason ? ' ⚠ ' + risk.reason : '') + ' ⚠ 调用失败\n> ' + finalCmd }]);
-          // onToolError 钩子（A1，对齐 hooks.rs::PostToolUseFailure）：通知外部插件 shell 执行失败
-          await runHook('onToolError', { tool: 'shell', error: String(e), input: finalCmd });
-          continue;
-        }
-        // afterShell hook（对齐 hooks.rs::PostToolUse）：通知其他插件命令执行结果（不可改写）
-        await runHook('afterShell', finalCmd, projectRoot, res);
-        const blocked = !!res?.blocked;
-        const timedOut = !!res?.timed_out;
-        const status = blocked
-          ? `被安全策略拦截（${res?.message || ''}）`
-          : timedOut
-            ? `超时终止（${res?.message || ''}）`
-            : `退出码 ${res?.exit_code ?? '?'}`;
-        const out = (res?.stdout || '') + (res?.stderr ? '\n[stderr]\n' + res.stderr : '');
-        const full = `$ ${cmd}\n${out}\n[${status}]`;
-        const INJ = 8000;
-        const injected = full.length > INJ ? full.slice(0, INJ) + '\n…（命令输出过长已截断，完整输出见本地终端）' : full;
-        // 确定性根因路由：若服务端命中已知环境问题（端口占用/缺依赖等），注入无需 LLM 推理的修复指引，
-        // 让 Agent 直接修环境而非误改业务代码（节省无谓 token）。
-        if (res?.hint) {
-          historyRef.current.push({ role: 'user', content: frameData(res.hint) });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🩺 根因诊断' }]);
-        }
-        // 前端恢复配方匹配（借鉴 recovery_recipes.rs）：命中常见失败场景即注入确定性恢复步骤，
-        // 让 Agent 直接走修复路径而非盲目重试或误改业务代码。每配方有 maxAttempts 防循环。
-        if (!blocked && (res?.exit_code !== 0 || res?.stderr)) {
-          const recipe = matchRecoveryRecipe(res?.stderr || '', res?.stdout || '');
-          if (recipe) {
-            const recipeText = `【恢复配方：${recipe.title}】检测到常见失败场景，建议按以下确定性步骤修复（不要盲目重试原命令）：\n${recipe.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
-            historyRef.current.push({ role: 'user', content: frameData(recipeText) });
-            setConv((prev) => [...prev, { id: 'rcp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🆘 恢复配方：' + recipe.title + '（剩余 ' + (recipe.maxAttempts - (recoveryUsedCounts.get(recipe.id) || 0)) + '/' + recipe.maxAttempts + ' 次）' }]);
-          } else {
-            // EscalationPolicy（对齐 recovery_recipes.rs）：配方命中但 maxAttempts 已耗尽，
-            // 按配方 escalation 字段决定后续处置 —— alert 注入人工介入提示；abort 中止 agent 循环。
-            const esc = checkRecoveryEscalation(res?.stderr || '', res?.stdout || '');
-            if (esc === 'alert') {
-              const alertText = `⚠【需人工介入】恢复配方自动修复次数已耗尽，但失败场景仍在复现。请人工排查后手动接手 —— 不要让 Agent 继续盲目重试，以免浪费 token 与时间。`;
-              historyRef.current.push({ role: 'user', content: frameData(alertText) });
-              setConv((prev) => [...prev, { id: 'esc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔔 升级策略：需人工介入' }]);
-            } else if (esc === 'abort') {
-              const abortText = `🛑【会话中止】恢复配方判定此失败无法靠 Agent 自动修复（如磁盘满/关键资源不可用），已触发 Abort 策略终止本轮 Agent 循环。请人工处理后再启动新会话。`;
-              historyRef.current.push({ role: 'user', content: frameData(abortText) });
-              setConv((prev) => [...prev, { id: 'esc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🛑 升级策略：中止 Agent 循环' }]);
-              loopGuard = true;
-              break; // 立即跳出 shells 循环，避免后续 shell 重复触发 abort 升级
-            }
-          }
-        }
-        historyRef.current.push({ role: 'user', content: frameData(`工具命令执行结果（受限 shell）：\n\`\`\`\n${injected}\n\`\`\``) });
-        setConv((prev) => [...prev, {
-          id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4),
-          role: 'tool',
-          content: '⚡ 执行 ' + risk.chip + risk.label + (risk.reason ? ' ⚠ ' + risk.reason : '') + (blocked ? ' 🚫' : timedOut ? ' ⏱' : ' ✓') + '\n> ' + cmd,
-        }]);
-        shellCount++;
-        if (shellCount > SHELL_CEIL) { loopGuard = true; break; }
-      }
-      // MCP 工具调用（对齐 mcp_client.rs::call_tool）：spawn → initialize → tools/call → kill
-      // 单次调用模式，无状态、无线程池；每次开销 ~500ms，agent 偶尔调用完全可接受
-      // 工具名格式：server_id:tool_name（如 "filesystem:read_file"）
-      const MCP_CEIL = 20; // 单会话 MCP 调用上限，防止 agent 滥用外部工具
-      let mcpCountThisRound = 0;
-      for (const mc of mcps) {
-        if (mcpCountThisRound >= MCP_CEIL) {
-          historyRef.current.push({ role: 'user', content: `⚠ MCP 工具调用次数已达单轮上限（${MCP_CEIL}），剩余 <mcp> 指令已跳过。请优先用 <read>/<shell> 完成任务。` });
-          break;
-        }
-        // 解析 tool="server_id:tool_name"
-        const colonIdx = mc.tool.indexOf(':');
-        if (colonIdx <= 0 || colonIdx === mc.tool.length - 1) {
-          historyRef.current.push({ role: 'user', content: `工具 MCP 调用结果：tool 格式错误 "${mc.tool}"，应为 "服务器id:工具名"（如 "filesystem:read_file"）。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '⚠ MCP 格式错误：' + mc.tool }]);
-          continue;
-        }
-        const serverId = mc.tool.slice(0, colonIdx);
-        const toolName = mc.tool.slice(colonIdx + 1);
-        // 策略引擎拦截：MCP 工具语义不可分类（filesystem:read_file 只读，github:create_issue 写）
-        // 保守策略：read-only/plan 全 block；dangerous 全部需 approval token（视作破坏性）
-        const permM = checkPermission('mcp', mc.approval);
-        if (!permM.allowed) {
-          historyRef.current.push({ role: 'user', content: `工具 MCP 调用结果：${permM.reason || '策略拦截'}（工具 ${mc.tool}）` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: permM.reason || '🚫 策略拦截 MCP ' + mc.tool }]);
-          continue;
-        }
-        // 验证工具存在（防止 agent 幻觉调用未配置的工具）
-        const known = mcpTools.some((it) => it.serverId === serverId && it.tool.name === toolName);
-        if (!known) {
-          const available = mcpTools.map((it) => `${it.serverId}:${it.tool.name}`).join(', ') || '（无可用工具）';
-          historyRef.current.push({ role: 'user', content: `工具 MCP 调用结果：工具 "${mc.tool}" 不在可用列表中。可用工具：${available}。请检查服务器 id 与工具名拼写。` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🚫 MCP 未知工具：' + mc.tool }]);
-          continue;
-        }
-        let result: any = null;
-        // beforeMcp 钩子（A2）：允许拦截/改写 MCP 调用（外部服务器风险高，应可被拦截）
-        const mcpArgs = mc.args || {};
-        const mcpHook = await runHook('beforeMcp', { serverId, toolName, args: mcpArgs });
-        if (mcpHook.cancel) {
-          historyRef.current.push({ role: 'user', content: `工具 MCP 调用结果：被插件 Hook 拦截${mcpHook.reason ? '（' + mcpHook.reason + '）' : ''}（工具 ${mc.tool}）` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🪝 Hook 拦截 MCP ' + mc.tool }]);
-          continue;
-        }
-        const finalArgs = (mcpHook.modify && typeof mcpHook.modify === 'object') ? mcpHook.modify : mcpArgs;
-        try {
-          result = await hostApi.invoke<any>('mcp_call_tool', {
-            serverId,
-            toolName,
-            arguments: finalArgs,
-          });
-        } catch (e) {
-          historyRef.current.push({ role: 'user', content: `工具 MCP 调用结果：调用 "${mc.tool}" 失败 - ${String(e)}` });
-          setConv((prev) => [...prev, { id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4), role: 'tool', content: '🔌 MCP 失败 ' + mc.tool + ' ⚠ ' + String(e) }]);
-          // onToolError 钩子（A1，对齐 hooks.rs::PostToolUseFailure）：通知外部插件 MCP 调用失败
-          await runHook('onToolError', { tool: 'mcp', error: String(e), input: { serverId, toolName, args: finalArgs } });
-          continue;
-        }
-        // 后端返回 McpToolCallResult { ok, content: Vec<Value>, error, is_tool_error }
-        // content 数组中每项形如 { type: "text", text: "..." } 或 { type: "image", data: "..." }
-        const ok = !!result?.ok;
-        const isToolError = !!result?.is_tool_error;
-        const errStr = result?.error || '';
-        const contentArr: any[] = Array.isArray(result?.content) ? result.content : [];
-        // 拼接文本内容（image/resource 类跳过，仅注入文本摘要）
-        const textParts: string[] = [];
-        for (const c of contentArr) {
-          if (c?.type === 'text' && typeof c.text === 'string') {
-            textParts.push(c.text);
-          } else if (c?.type === 'image') {
-            textParts.push(`[图片：${c.mimeType || 'unknown'}，${(c.data || '').length} 字节 base64]`);
-          } else if (c?.type === 'resource') {
-            const r = c.resource || {};
-            textParts.push(`[资源 ${r.uri || ''}${r.mimeType ? ' (' + r.mimeType + ')' : ''}${r.text ? '：\n' + r.text : ''}]`);
-          } else {
-            textParts.push(JSON.stringify(c));
-          }
-        }
-        const textContent = textParts.join('\n');
-        const INJ = 12000;
-        const injected = textContent.length > INJ
-          ? textContent.slice(0, INJ) + '\n…（MCP 输出过长已截断）'
-          : textContent;
-        const statusStr = !ok
-          ? `协议/网络错误：${errStr}`
-          : isToolError
-            ? `工具内部错误：${errStr || injected}`
-            : '成功';
-        const fullResult = `工具：${mc.tool}\n参数：${JSON.stringify(mc.args || {})}\n结果：${statusStr}\n${ok && !isToolError ? '```\n' + injected + '\n```' : ''}`;
-        historyRef.current.push({ role: 'user', content: frameData(`工具 MCP 调用结果（扩展工具）：\n${fullResult}`) });
-        setConv((prev) => [...prev, {
-          id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4),
-          role: 'tool',
-          content: '🔌 MCP ' + mc.tool + (ok ? (isToolError ? ' ⚠' : ' ✓') : ' 🚫') + '\n> 参数：' + JSON.stringify(mc.args || {}),
-        }]);
-        // afterMcp 钩子（A2）：通知外部插件 MCP 调用结果（不可改写）
-        await runHook('afterMcp', { serverId, toolName, args: finalArgs, result });
-        mcpCountThisRound++;
-      }
-      // 递增压缩冷却计数器（每轮迭代后 +1，达到 COOLDOWN_TURNS 后允许再次压缩）
-      tickCompactionCooldown();
-      if (done || (reads.length === 0 && writes.length === 0 && edits.length === 0 && shells.length === 0 && asts.length === 0 && mcps.length === 0 && searches.length === 0 && rags.length === 0)) break;
-      // 极端路径拦截：单会话改动数超上限，疑似陷入循环/幻觉，提前终止并保留全部改动待审阅
-      if (pendingEdits.length > EDIT_CEIL) { loopGuard = true; break; }
-    }
-
+    // 单次委派后端：后端 ai_chat_agent 内部完成工具循环/子代理/记忆；前端事件驱动渲染，ai-done/ai-error 回收
+    await callBackendAgent(requestId, historyRef.current.map((m) => ({ role: m.role, content: m.content })));
     if (cancelRef.current) { setBusy(false); emitAgentEnd(); return; }
-    if (loopGuard) {
-      setConv((prev) => [...prev, { id: 'g_' + Date.now().toString(36), role: 'assistant', content: `⚠ 本次会话改动数量超过上限（${EDIT_CEIL}），疑似陷入循环或幻觉，已提前终止。全部改动已保留在下方审阅面板，请你人工确认后再「完成」。` }]);
-    }
 
-    // 契约测试（类型检查 Hook）：将待审阅改动试写到磁盘 → 跑 tsc --noEmit / cargo check → 立即回滚，
-    // 在用户「保留」落盘前就暴露类型错误，避免错误传染。best-effort，绝不影响审阅。
-    let typeVerdict: string | null = null;
-    if (pendingEdits.length > 0 && projectRoot) {
-      typeVerdict = await trialTypeCheck(projectRoot, pendingEdits, hostApi);
-      if (typeVerdict) {
-        setConv((prev) => [...prev, { id: 'v_' + Date.now().toString(36), role: 'tool', content: typeVerdict! }]);
-      }
+    // 收尾：将最终文本/错误归档进对话历史，本轮编辑转交宿主审阅面板
+    const finalErr = errRef.current;
+    if (!finalErr && bufRef.current) {
+      historyRef.current.push({ role: 'assistant', content: bufRef.current });
     }
-
-    const editsOut: AgentEdit[] = pendingEdits;
-    setPlanChips([...planSet]);
+    const editsOut = backendEditsRef.current;
+    setPlanChips(editsOut.map((x) => x.path));
     setBusy(false);
-    // 结束本轮：清空计时器，累计 shells/edits/reads
-    setAgentStats((s) => ({
-      ...s,
-      roundStartTs: null,
-      totalShells: s.totalShells + shellCount,
-      totalEdits: s.totalEdits + editCount,
-      totalReads: s.totalReads + readCount,
-    }));
-    // beforeCommit hook（对齐 hooks.rs::PreToolUse）：允许其他插件在提交审阅前过滤或拦截改动
-    if (editsOut.length > 0) {
-      const commitHook = await runHook('beforeCommit', editsOut);
-      if (commitHook.cancel) {
-        setConv((prev) => [...prev, { id: 'hc_' + Date.now().toString(36), role: 'tool', content: '🪝 Hook 拦截提交：' + (commitHook.reason || '插件拦截') + '，改动已保留但未通知宿主' }]);
-      } else if (Array.isArray(commitHook.modify)) {
-        const filtered = commitHook.modify as AgentEdit[];
-        if (filtered.length > 0) onChanges(filtered, typeVerdict);
-        else setConv((prev) => [...prev, { id: 'hc_' + Date.now().toString(36), role: 'tool', content: '🪝 Hook 过滤后无剩余改动' }]);
-      } else {
-        onChanges(editsOut, typeVerdict);
-      }
+    setAgentStats((s) => ({ ...s, roundStartTs: null }));
+    if (finalErr) {
+      emitAgentEnd(finalErr);
+    } else {
+      if (editsOut.length > 0) onChanges(editsOut, null);
+      else setConv((prev) => [...prev, { id: 'd_' + Date.now().toString(36), role: 'assistant', content: '（本次没有文件被修改）' }]);
+      emitAgentEnd();
     }
-    else setConv((prev) => [...prev, { id: 'd_' + Date.now().toString(36), role: 'assistant', content: '（本次没有文件被修改）' }]);
     // 会话持久化：runAgent 结束自动保存（对齐 session.rs::flush）
-    // 等待 setConv 异步完成后再保存（用 setTimeout 0 让 convRef 更新到最新值）
     setTimeout(() => saveCurrentSession(), 0);
-    // 浮岛「AI 编程」agent 桥：本任务正常结束，回传 done（runAgent 唯一一处发 done 的出口）
-    emitAgentEnd();
-  }, [input, busy, activeProfileId, projectRoot, planChips, SYSTEM_PROMPT, onChanges, profiles, isTrusted, mcpTools, refreshMcpTools, permissionMode, approvalToken, consumeToken, saveCurrentSession, emitAgentEnd]);
+  }, [input, busy, activeProfileId, projectRoot, onChanges, saveCurrentSession, emitAgentEnd, callBackendAgent]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
@@ -5139,6 +4429,22 @@ function IdeAgent({
 
   return (
     <div className="flex flex-col h-full bg-neutral-50 dark:bg-stone-900 text-neutral-800 dark:text-stone-100">
+      {/* 后端 Agent 危险操作审批弹窗（ai-agent-approval） */}
+      {approvalReq && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40" role="dialog">
+          <div className="mx-4 max-w-md w-full rounded-xl border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-800 p-5 shadow-xl">
+            <div className="text-sm font-semibold mb-2">⚠ 需要授权</div>
+            <div className="text-xs text-neutral-500 dark:text-stone-400 mb-4 break-words">
+              后端 Agent 请求执行操作 <span className="font-medium text-neutral-700 dark:text-stone-200">{approvalReq.tool}</span>：
+              <pre className="mt-1 max-h-40 overflow-auto text-[11px] whitespace-pre-wrap bg-black/5 dark:bg-white/5 rounded p-2">{approvalReq.operation}</pre>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => respondApproval(false)} className="px-3 py-1.5 rounded text-xs bg-neutral-100 dark:bg-stone-700 hover:bg-neutral-200 dark:hover:bg-stone-600">拒绝</button>
+              <button onClick={() => respondApproval(true)} className="px-3 py-1.5 rounded text-xs bg-red-500 hover:bg-red-600 text-white">允许</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-200/60 dark:border-stone-700/60 shrink-0">
         <span className="text-sm font-medium shrink-0">AI 代理</span>
         <span className="text-[11px] text-neutral-400 dark:text-stone-500">自主编辑模式</span>

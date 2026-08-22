@@ -337,6 +337,8 @@ async fn run_agent(
                         serde_json::json!({
                             "requestId": request_id,
                             "stage": "tool",
+                            // 携带 cid 与同段 tool-start pending 卡配对，供前端结果落地时更新对应卡片
+                            "cid": cid,
                             "name": fname,
                             "ok": ok,
                             "detail": detail,
