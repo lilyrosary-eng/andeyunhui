@@ -1,8 +1,10 @@
 // 用户头像订阅（跨模块通用能力）。
 // 任何模块（AI 对话 / 设置 / 伴侣 / 宿主）都可读写用户头像。storage key 沿用历史值以向后兼容。
 import { useSyncExternalStore } from 'react';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
-const KEY = 'andeyunhui.aichat.user.avatar';
+const KEY = KEYS.desktop.userAvatar.key;
 
 /** 默认即「你」字图标，与未设置时表现一致。 */
 const DEFAULT_AVATAR = '你';
@@ -12,11 +14,7 @@ const listeners = new Set<Listener>();
 let cached: string = read();
 
 function read(): string {
-  try {
-    return localStorage.getItem(KEY) ?? DEFAULT_AVATAR;
-  } catch {
-    return DEFAULT_AVATAR;
-  }
+  return storage.getString(KEY, DEFAULT_AVATAR);
 }
 function notify() {
   for (const l of listeners) l();
@@ -36,7 +34,7 @@ export function setUserAvatar(value: string): void {
   const next = typeof value === 'string' && value.trim() ? value : DEFAULT_AVATAR;
   if (next === cached) return;
   cached = next;
-  try { localStorage.setItem(KEY, next); } catch { /* 忽略 */ }
+  storage.setString(KEY, next);
   window.dispatchEvent(new CustomEvent('user-avatar-changed'));
   notify();
 }

@@ -8,6 +8,8 @@ import { EVENTS } from '@/core/events/schema';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 import { uid, persistConversations, loadConversations, genTitle, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/components/ai-chat/util';
 import { retrieveChatContext, ingestChatTurn } from '@/core/stores/semanticMemory';
 import { useCompanionStore, buildPersonaContext } from '@/core/stores/companionStore';
@@ -15,12 +17,12 @@ import { useCompanionStore, buildPersonaContext } from '@/core/stores/companionS
 export const DEFAULT_PERSIST_KEY = AI_CHAT_CONVERSATIONS_KEY;
 
 /** 永久对话记忆开关（localStorage，默认开）。与 AiChatMemorySettings 共用同一 key。 */
-export const AI_CHAT_MEMORY_KEY = 'andeyunhui.aichat.memory.enabled';
+export const AI_CHAT_MEMORY_KEY = KEYS.desktop.aiChatMemory.key;
 export function getAiChatMemoryEnabled(): boolean {
-  try { return localStorage.getItem(AI_CHAT_MEMORY_KEY) !== 'false'; } catch { return true; }
+  return storage.getString(AI_CHAT_MEMORY_KEY, 'true') !== 'false';
 }
 export function setAiChatMemoryEnabled(on: boolean) {
-  try { localStorage.setItem(AI_CHAT_MEMORY_KEY, on ? 'true' : 'false'); } catch { /* 忽略 */ }
+  storage.setString(AI_CHAT_MEMORY_KEY, on ? 'true' : 'false');
 }
 const SYNC_EVENT = 'ai-chat:conversations-sync';
 const SYNC_REQ_EVENT = 'ai-chat:conversations-request';

@@ -1,5 +1,6 @@
 // AI 对话共用工具函数：id 生成、标题推断、会话工厂、localStorage 持久化。
 import type { Conversation } from '@/components/capsule/types';
+import { storage } from '@/core/storage';
 
 export function uid(): string {
   return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -77,22 +78,11 @@ function sanitizeConv(c: Conversation): Conversation {
 }
 
 export function loadConversations(key: string): Conversation[] {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return [];
-    return arr.map((c: Conversation) => sanitizeConv(c));
-  } catch {
-    return [];
-  }
+  const arr = storage.getJSON<Conversation[]>(key, []);
+  if (!Array.isArray(arr)) return [];
+  return arr.map(sanitizeConv).filter(Boolean);
 }
 
 export function persistConversations(key: string, list: Conversation[]): void {
-  try {
-    const safe = list.slice(0, 50).map(sanitizeConv);
-    localStorage.setItem(key, JSON.stringify(safe));
-  } catch {
-    /* 容量超限忽略 */
-  }
+  storage.setJSON(key, list.slice(0, 50).map(sanitizeConv));
 }
