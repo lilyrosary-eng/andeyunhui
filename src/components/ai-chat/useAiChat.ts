@@ -81,6 +81,12 @@ export interface UseAiChatOptions {
   personaPrompt?: string;
   /** 注入的 system 指令（可选，留空则用后端默认）。位于 personaPrompt 之后、检索记忆之前。 */
   systemPrompt?: string;
+  /**
+   * Agent 工具模式开关（默认 false = 纯对话）。为 true 时调用走 ai_chat_agent：
+   * 由后端挂载全套工具（web_search/web_fetch/file/grep/glob/plan 等），让对话具备联网/执行能力。
+   * 事件契约与 ai_chat 相同（ai-done/ai-error），仅新增 ai-agent-step 工具步骤事件。
+   */
+  agent?: boolean;
 }
 
 export interface UseAiChatResult {
@@ -90,13 +96,17 @@ export interface UseAiChatResult {
   busy: boolean;
   ready: boolean;
   profileId: string;
+  /** 是否 Agent 工具模式（联网/工具）。开=走 ai_chat_agent；关=纯对话。 */
+  agent: boolean;
+  setAgent: (on: boolean) => void;
   selectConv: (id: string) => void;
   newConversation: () => string;
   newGroup: (participantIds: string[], groupName?: string) => string;
   deleteConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
   clearAll: () => void;
-  send: (text: string) => Promise<void>;
+  /** 发送一条消息。images 为可选的多模态图片（data URL），后端 ai_vision_ocr 生成描述后注入 system。 */
+  send: (text: string, images?: string[]) => Promise<void>;
   /** 群聊：串行让每位参与者（伴侣）基于「用户这句话 + 此前所有人的回复」各回应一句。 */
   groupSend: (text: string) => Promise<void>;
   /** 群聊内部：让单个发言者说一句（注入其独立人设 system，复用全局流式落盘）。 */
@@ -107,7 +117,15 @@ export interface UseAiChatResult {
  * 共用 AI 对话逻辑。状态、持久化、流式、发送全在此，调用方只负责把数据画出来。
  */
 export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
-  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt } = options;
+  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, agent = false } = options;
+  // Agent 模式需随回调读取最新值（避免闭包陈旧）
+  const [agentOn, setAgentOn] = useState<boolean>(agent);
+  const agentRef = useRef(agentOn);
+  agentRef.current = agentOn;
+  const setAgent = useCallback((on: boolean) => {
+    setAgentOn(on);
+    agentRef.current = on;
+  }, []);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string>('');
@@ -261,22 +279,24 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     activeIdRef.current = fresh.id;
   }, []);
 
-  const send = useCallback(async (text: string) => {
+  const send = useCallback(async (text: string, images?: string[]) => {
     const content = text.trim();
-    if (!content || busyRef.current) return;
+    const hasImages = !!images?.length;
+    if (!content && !hasImages) return;
+    if (busyRef.current) return;
     const cid = activeIdRef.current;
     if (!cid) return;
     // 群聊会话：自动走串行多人发言调度（内部注入各伴侣人设）
     const conv = stateRef.current.conversations.find((c) => c.id === cid);
     if (conv?.mode === 'group' && (conv.participants?.length ?? 0) >= 2) {
-      return groupSend(text);
+      return groupSend(content || '（图片）');
     }
 
     const reqId = uid();
     reqRef.current = reqId;
     streamConvIdRef.current = cid;
 
-    const userMsg: ChatMsg = { id: uid(), role: 'user', content };
+    const userMsg: ChatMsg = { id: uid(), role: 'user', content: content || '（图片）', images };
     const asstId = uid();
     const asstMsg: ChatMsg = { id: asstId, role: 'assistant', content: '', reasoning: '' };
 
@@ -314,11 +334,38 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     if (ragContext) systemParts.push(ragContext);
     const finalSystem = systemParts.length ? systemParts.join('\n\n') : undefined;
 
+    // 多模态·发图（对齐移动端阶段 5）：逐张调用 ai_vision_ocr 生成描述，追加到发给模型的 user 消息，
+    // 让 AI「看见」图片（图片本体不发给后端，只发描述，兼容不支持视觉的模型）。失败静默标记不中断。
+    let imageNote = '';
+    if (hasImages) {
+      for (let i = 0; i < images!.length; i++) {
+        const img = images![i];
+        const mime = img.startsWith('data:image/') ? img.slice(11, img.indexOf(';')) : 'image/png';
+        const b64 = img.includes('base64,') ? img.split('base64,')[1] : img;
+        try {
+          const desc = await invoke<string>('ai_vision_ocr', {
+            imageBase64: b64,
+            imageMime: mime,
+            prompt: `请用中文描述这张图片的内容（第 ${i + 1} 张，共 ${images!.length} 张）。如果包含文字请指出。50 字以内。`,
+            profileId: profileIdRef.current,
+          });
+          imageNote += `\n[用户发来的图${i + 1}] ${desc}`;
+        } catch {
+          imageNote += `\n[用户发来的图${i + 1}] （图片理解失败）`;
+        }
+      }
+    }
+
     const payload = {
       requestId: reqId,
       profileId: profileIdRef.current,
       // 请求前硬防御：真实 token 估算尾部截断 + 单条硬切（双保险，坐实重复拼接真因）
-      messages: safeMessages(history.concat([userMsg]).map((m) => ({ role: m.role, content: m.content }))),
+      // 最后一条 user 内容若带图，把 OCR 描述拼接在原文后（本地显示保持原图/原文不变）。
+      messages: safeMessages(
+        history
+          .concat([hasImages ? { ...userMsg, content: (content || '（图片）') + imageNote } : userMsg])
+          .map((m) => ({ role: m.role, content: m.content })),
+      ),
       stream: true,
       ...(finalSystem ? { system: finalSystem } : {}),
     };
@@ -339,7 +386,20 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     }
 
     try {
-      await invoke('ai_chat', payload);
+      if (agentRef.current) {
+        // Agent 工具模式：走 ai_chat_agent（后台 worker，非阻塞立即返回）。
+        // 事件经 ai-agent-step/ai-done/ai-error 推送，useAiStream(prefix:'ai') 已兼容监听。
+        await invoke('ai_chat_agent', {
+          requestId: reqId,
+          messages: (payload as { messages: Array<{ role: string; content: string }> }).messages,
+          profileId: profileIdRef.current || null,
+          ...(finalSystem ? { system: finalSystem } : {}),
+          maxRounds: 8,
+          projectRoot: null,
+        });
+      } else {
+        await invoke('ai_chat', payload);
+      }
     } catch (err) {
       reqRef.current = null;
       asstRef.current = null;
@@ -562,6 +622,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     busy,
     ready,
     profileId,
+    agent: agentOn,
+    setAgent,
     selectConv,
     newConversation,
     newGroup,

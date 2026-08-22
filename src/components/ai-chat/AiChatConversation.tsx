@@ -1,7 +1,7 @@
 // 独立「AI 对话」模块 · 主区对话流 —— 大屏 UI，受控于上层共享的 useAiChat 实例。
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
 import { memo, useEffect, useState } from 'react';
-import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin } from 'lucide-react';
+import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, ImagePlus } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import type { Conversation } from '@/components/capsule/types';
 import type { UseAiChatResult } from './useAiChat';
@@ -9,6 +9,7 @@ import { AiChatCompanionAvatar } from './AiChatCompanionCard';
 import { useCompanionStore } from '@/mobile/stores/companionStore';
 import { useUserAvatar } from './userAvatar';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
+import { UsageMeter } from './UsageMeter';
 
 /** 渲染用户头像：emoji 单字符居中；data:image/* 走 object-cover；其他用项目符号 */
 function UserAvatarView({ value, size = 32 }: { value: string; size?: number }) {
@@ -37,7 +38,7 @@ export interface AiChatConversationProps {
   activeConv: Conversation | null;
   busy: boolean;
   profileId: string;
-  send: (text: string) => void;
+  send: (text: string, images?: string[]) => void;
   onClear?: () => void;
   /** 启用伴侣时显示：默认 block 大卡片，compact 横版嵌入头部右侧 */
   companionCard?: React.ReactNode;
@@ -59,6 +60,9 @@ export interface AiChatConversationProps {
   onKeepToggle?: (pinned: boolean) => void;
   onClose?: () => void;
   emptyHint?: string;
+  /** Agent 工具模式（联网/工具）。true=走 ai_chat_agent，false=纯对话。 */
+  agent?: boolean;
+  onToggleAgent?: (on: boolean) => void;
 }
 
 export const AiChatConversation = memo(function AiChatConversation({
@@ -81,8 +85,12 @@ export const AiChatConversation = memo(function AiChatConversation({
   onKeepToggle,
   onClose,
   emptyHint,
+  agent = false,
+  onToggleAgent,
 }: AiChatConversationProps) {
   const [input, setInput] = useState('');
+  // 多模态：待发送的图片（data URL，仅在用户点击发送前暂存，发送后清空）
+  const [pickedImages, setPickedImages] = useState<string[]>([]);
   // 思考展开状态：key = 消息 id。流式中（未填完 content）自动展开，用户也可手动切换。
   const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>({});
   // 胶囊内嵌会话下拉开关
@@ -122,9 +130,24 @@ export const AiChatConversation = memo(function AiChatConversation({
 
   const submit = () => {
     const text = input.trim();
-    if (!text || busy) return;
-    send(text);
+    if ((!text && pickedImages.length === 0) || busy) return;
+    send(text || '（图片）', pickedImages);
     setInput('');
+    setPickedImages([]);
+  };
+
+  // 选图：读取本地图片为 data URL（限制数量+扩展名），供多模态发图（ai_vision_ocr 描述注入）
+  const pickImages = (files: FileList | null) => {
+    if (!files?.length) return;
+    const list = [...files].filter((f) => f.type.startsWith('image/')).slice(0, 3 - pickedImages.length);
+    for (const f of list) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = typeof reader.result === 'string' ? reader.result : '';
+        if (url) setPickedImages((prev) => [...prev, url]);
+      };
+      reader.readAsDataURL(f);
+    }
   };
 
   // compact 形态的伴侣卡 absolute 居中嵌入头部；block 形态仍独占一行（备用）
@@ -256,13 +279,18 @@ export const AiChatConversation = memo(function AiChatConversation({
             {compactCard}
           </div>
         )}
-        {!compactCard && onClear && (
-          <button
-            onClick={onClear}
-            className="btn-press ml-auto text-xs px-3 py-1.5 rounded-lg text-neutral-500 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-          >
-            清空
-          </button>
+        {!compactCard && (
+          <div className="ml-auto flex items-center gap-2">
+            {!capsuleMode && <UsageMeter />}
+            {onClear && (
+              <button
+                onClick={onClear}
+                className="btn-press text-xs px-3 py-1.5 rounded-lg text-neutral-500 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+              >
+                清空
+              </button>
+            )}
+          </div>
         )}
       </div>
       )}
@@ -374,6 +402,19 @@ export const AiChatConversation = memo(function AiChatConversation({
                       </div>
                     );
                   })()}
+                  {/* 多模态：显示用户发的图（与文本同气泡） */}
+                  {m.images && m.images.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mb-1.5">
+                      {m.images.map((src, i) => (
+                        <img
+                          key={i}
+                          src={src}
+                          alt={`图${i + 1}`}
+                          className={`max-w-[200px] max-h-[200px] rounded-xl object-cover ${m.role === 'user' ? '' : 'border border-black/10 dark:border-white/10'}`}
+                        />
+                      ))}
+                    </div>
+                  )}
                   {m.error ? (
                     <span className="text-red-500 dark:text-red-400">{m.content}</span>
                   ) : m.content ? (
@@ -394,6 +435,23 @@ export const AiChatConversation = memo(function AiChatConversation({
         <div className="max-w-3xl mx-auto">
           <div className="flex items-end gap-3">
             <div className={`flex-1 rounded-2xl ${inputWrapCls} px-4 py-2.5 focus-within:border-sky-400 transition-colors`}>
+              {/* 多模态：已选图片缩略图预览（可单击移除） */}
+              {pickedImages.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {pickedImages.map((src, i) => (
+                    <div key={i} className="relative group">
+                      <img src={src} alt={`图${i + 1}`} className="w-14 h-14 rounded-lg object-cover border border-black/10 dark:border-white/10" />
+                      <button
+                        onClick={() => setPickedImages((prev) => prev.filter((_, j) => j !== i))}
+                        className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        aria-label="移除图片"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -401,17 +459,44 @@ export const AiChatConversation = memo(function AiChatConversation({
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
                 }}
                 rows={1}
-                placeholder="发消息给 AI，Enter 发送，Shift+Enter 换行"
+                placeholder={pickedImages.length ? '可选：再输入图片说明；留空直接发送图片' : "发消息给 AI，Enter 发送，Shift+Enter 换行"}
                 className={`w-full resize-none max-h-40 min-h-[24px] bg-transparent text-sm outline-none ${capsuleMode ? 'text-white placeholder:text-white/40' : 'text-neutral-800 dark:text-stone-100 placeholder:text-neutral-400'}`}
               />
               <div className="flex items-center justify-between mt-1.5">
-                <ThinkingToggle compact theme={capsuleMode ? 'dark' : 'light'} profileId={profileId} />
+                <div className="flex items-center gap-2">
+                  <ThinkingToggle compact theme={capsuleMode ? 'dark' : 'light'} profileId={profileId} />
+                  {onToggleAgent && (
+                    <button
+                      onClick={() => onToggleAgent(!agent)}
+                      title={agent ? '工具模式已开启（可联网/调用工具）' : '开启后可联网 / 调用工具'}
+                      className={`flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-md transition-colors ${
+                        agent
+                          ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300'
+                          : `${capsuleMode ? 'text-white/50 hover:text-white/80' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600'}`
+                      }`}
+                    >
+                      <Sparkles size={13} />
+                      <span>工具</span>
+                    </button>
+                  )}
+                  <label className={`flex items-center gap-1 text-[11px] cursor-pointer px-1.5 py-0.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 ${capsuleMode ? 'text-white/50 hover:text-white/80' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600'}`}>
+                    <ImagePlus size={14} />
+                    <span>图片</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      className="hidden"
+                      onChange={(e) => { pickImages(e.target.files); e.target.value = ''; }}
+                    />
+                  </label>
+                </div>
                 <span className={`text-[11px] ${capsuleMode ? 'text-white/40' : 'text-neutral-300 dark:text-stone-600'}`}>AI 可能出错，请核实重要信息</span>
               </div>
             </div>
             <button
               onClick={submit}
-              disabled={busy || !input.trim()}
+              disabled={busy || (!input.trim() && pickedImages.length === 0)}
               className={`btn-press w-11 h-11 flex items-center justify-center rounded-2xl ${sendBtnCls} transition-opacity`}
             >
               <Send size={18} />

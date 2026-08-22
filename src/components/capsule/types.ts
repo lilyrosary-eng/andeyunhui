@@ -19,6 +19,8 @@ export interface ChatMsg {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  /** 多模态：用户发送的图片（data URL 列表）。图片本体不发给后端，后端只收到 OCR 描述。 */
+  images?: string[];
   reasoning?: string; // 思考模式下的思维链（reasoning_content），可折叠遮罩展示
   error?: boolean;
   /** 群聊模式：哪条消息由哪个伴侣说的（companion.id）。单聊模式隐含为当前 active companion。 */
