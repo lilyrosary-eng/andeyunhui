@@ -11,6 +11,9 @@
 //   持久化到 app_data_dir/ai_config.json，全局共享，任意插件都可读写；
 //   ai_chat 可指定 profile_id 选用某份档案，未指定则用 active 激活项。
 
+// 敏感字段（如 api_key）落盘加密：AES-256-GCM + scrypt 机器绑定，透明加解密
+pub mod secret;
+
 pub mod ai_profile;
 pub mod ai_chat;
 pub mod ai_tools;

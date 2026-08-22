@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
+use super::secret::{decrypt_secret, encrypt_secret};
+
 fn default_temperature() -> f32 {
     0.3
 }
@@ -129,6 +131,22 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("ai_config.json"))
 }
 
+// 解密档案内的 api_key（透明：非 enc:v1: 前缀的旧明文原样保留；解密失败置空并打日志）
+fn decrypt_profile_keys(profiles: &mut AiProfiles) {
+    for p in profiles.profiles.iter_mut() {
+        if p.api_key.is_empty() {
+            continue;
+        }
+        match decrypt_secret(&p.api_key) {
+            Ok(v) => p.api_key = v,
+            Err(e) => {
+                log::warn!("[ai_profile] api_key 解密失败 ({}): {}", p.id, e);
+                p.api_key = String::new();
+            }
+        }
+    }
+}
+
 /// 读取全部模型档案；兼容旧版「单份 AiConfig」格式（无 id/name 字段）自动升级为单档案。
 pub fn load_profiles(app: &AppHandle) -> AiProfiles {
     let path = match config_path(app) {
@@ -143,7 +161,8 @@ pub fn load_profiles(app: &AppHandle) -> AiProfiles {
         Err(_) => return AiProfiles::default(),
     };
     // 新格式：多档案
-    if let Ok(p) = serde_json::from_str::<AiProfiles>(&text) {
+    if let Ok(mut p) = serde_json::from_str::<AiProfiles>(&text) {
+        decrypt_profile_keys(&mut p);
         return p;
     }
     // 旧格式：单份配置（字段兼容 AiProfile，id/name 走默认值）
@@ -158,7 +177,7 @@ pub fn load_profiles(app: &AppHandle) -> AiProfiles {
         } else {
             legacy.name.clone()
         };
-        return AiProfiles {
+        let mut pinned = AiProfiles {
             profiles: vec![AiProfile {
                 id: id.clone(),
                 name,
@@ -166,6 +185,8 @@ pub fn load_profiles(app: &AppHandle) -> AiProfiles {
             }],
             active: Some(id),
         };
+        decrypt_profile_keys(&mut pinned);
+        return pinned;
     }
     AiProfiles::default()
 }
@@ -194,13 +215,26 @@ pub fn ai_get_profiles(app: AppHandle) -> AiProfiles {
     load_profiles(&app)
 }
 
-/// 保存全部模型档案 + 激活项
-#[tauri::command]
-pub fn ai_set_profiles(app: AppHandle, payload: AiProfiles) -> Result<(), String> {
-    let path = config_path(&app)?;
-    let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+/// 保存全部模型档案 + 激活项；api_key 统一经 AES-256-GCM 加密落盘（透明）。
+/// 唯一写出口：所有「写入 ai_config.json」的路径都必须经过本函数，避免明文旁路。
+fn save_profiles(app: &AppHandle, profiles: &AiProfiles) -> Result<(), String> {
+    let path = config_path(app)?;
+    let cloned = profiles.clone();
+    let mut out = cloned;
+    for p in out.profiles.iter_mut() {
+        if p.api_key.is_empty() {
+            continue;
+        }
+        p.api_key = encrypt_secret(&p.api_key)?;
+    }
+    let json = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| format!("写入配置失败: {}", e))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn ai_set_profiles(app: AppHandle, payload: AiProfiles) -> Result<(), String> {
+    save_profiles(&app, &payload)
 }
 
 /// 仅更新单个档案的「思考模式」开关，供聊天界面内联切换（跨胶囊/IDE/攻防共享同一档案字段）。
@@ -218,9 +252,8 @@ pub fn ai_set_profile_thinking(app: AppHandle, profile_id: String, thinking: boo
     if !found {
         return Err(format!("未找到模型档案: {}", profile_id));
     }
-    let path = config_path(&app)?;
-    let json = serde_json::to_string_pretty(&profiles).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| format!("写入配置失败: {}", e))?;
+    // load_profiles 已解密 api_key，save_profiles 统一加密落盘（透明往返）
+    save_profiles(&app, &profiles)?;
     // 广播「思考模式」变化，使胶囊 / IDE / 攻防 各聊天界面实时同步同一档案字段
     let _ = app.emit(
         "ai-thinking-changed",

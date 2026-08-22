@@ -39,6 +39,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
 # .mufurong 内容哈希：判断安装包插件副本是否变化，替代不可靠的「字节大小/mtime」比对
 sha2 = "0.10"
+# API Key 等敏感字段落盘加密（AES-256-GCM 机器绑定）：
+# 纯 Rust、跨平台（含 Android 交叉编译），scrypt 做密钥派生（参考 deepseek-desktop 方案）
+aes-gcm = "0.10"
+scrypt = "0.11"
+rand = "0.8"
 # tokio 显式依赖：mcp_service 用 tokio::task::spawn_blocking 在独立线程跑 stdio JSON-RPC
 # （tauri 2 内部用 tokio，但应用代码需显式声明才能 use tokio::）
 # 传输模块需 net/io-util/macros：UDP 组播发现 + axum HTTP 服务端
