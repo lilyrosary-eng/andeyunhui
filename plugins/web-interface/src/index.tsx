@@ -16,7 +16,7 @@ const hostApi = window.__HOST_API__;
 import { WebTerminal } from './Terminal';
 import {
   loadPresets, savePresets, newPresetId, validatePreset, builtinTemplates,
-  suggestFromFile, scanRunnableFiles, baseName, extOf, RUNNABLE_EXTS,
+  suggestFromFile, scanAndRecognize, recognitionToPreset, baseName, dirName, extOf, RUNNABLE_EXTS,
   type WebPreset, type WebRun, type WebRunStatus,
 } from './presets';
 
@@ -150,7 +150,13 @@ function EditorForm({
   const [url, setUrl] = useState(initial.url);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const [scanInfo, setScanInfo] = useState<{ dir: string; files: { name: string; path: string; ext: string }[]; picked: Set<string> } | null>(null);
+  const [scanInfo, setScanInfo] = useState<{
+    dir: string;
+    appName: string;
+    url: string;
+    files: { name: string; path: string; ext: string; cmd: string }[];
+    picked: Set<string>;
+  } | null>(null);
 
   const save = () => {
     const msg = validatePreset({ name, args });
@@ -172,6 +178,18 @@ function EditorForm({
       // 若命令里有常见端口号，顺手填预览地址（取第一个 http://…:port）
       const m = hit.args.match(/:\s*(\d{2,5})/);
       if (m) setUrl('http://127.0.0.1:' + m[1]);
+      // 进一步：用「文件所在目录」做一次软件识别，得到更智能的名称与预览地址
+      // （比如选了 kohya_ss 下的 gui.bat，名称会识别成 kohya_ss 而不是 gui）
+      try {
+        const parent = dirName(files[0]);
+        const rec = await scanAndRecognize(
+          parent,
+          (p) => hostApi.invoke<{ name: string; path: string; is_dir: boolean }[]>('list_directory', { path: p }),
+          (p) => hostApi.invoke<string>('read_text_file', { path: p })
+        );
+        if (rec.appName) setName(rec.appName);
+        if (rec.url) setUrl(rec.url);
+      } catch { /* 识别失败就用上面的兜底结果 */ }
     } catch (e) {
       setErr('选择文件失败：' + (e as Error).message);
     } finally {
@@ -179,23 +197,40 @@ function EditorForm({
     }
   }, []);
 
-  // 选择文件夹 → 递归检索其中的可运行/脚本文件集 → 弹候选供勾选
+  // 选择文件夹 → 智能识别「这是什么软件」+ 找出真实入口脚本，自动填入
   const pickFolder = useCallback(async () => {
     setBusy(true); setErr('');
     try {
       const dir = await hostApi.invoke<string | null>('pick_directory');
       if (!dir) return;
-      const { files } = await scanRunnableFiles(dir, (p) =>
-        hostApi.invoke<{ name: string; path: string; is_dir: boolean }[]>('list_directory', { path: p })
+      const rec = await scanAndRecognize(
+        dir,
+        (p) => hostApi.invoke<{ name: string; path: string; is_dir: boolean }[]>('list_directory', { path: p }),
+        (p) => hostApi.invoke<string>('read_text_file', { path: p })
       );
-      if (files.length === 0) {
-        // 目录里没有可识别文件 → 仅当工作目录用
-        setName(baseName(dir.replace(/[\\/]+$/, '')));
-        setCwd(dir);
-        setErr('该目录下未发现可运行/脚本文件，已作为工作目录填入');
-        return;
+      let presetInfo: { name: string; args: string; cwd: string; url: string };
+      if (rec.appName || rec.candidates.length) {
+        presetInfo = recognitionToPreset(dir, rec);
+      } else {
+        presetInfo = { name: baseName(dir.replace(/[\\/]+$/, '')), args: '', cwd: dir, url: '' };
       }
-      setScanInfo({ dir, files, picked: new Set<string>() });
+      setName(presetInfo.name); setArgs(presetInfo.args); setCwd(presetInfo.cwd); setUrl(presetInfo.url);
+      // 同时展示入口脚本候选，供手动勾选调整（默认勾选识别到的首个入口）
+      const defaultPick = new Set(rec.candidates.length ? [rec.candidates[0].path] : []);
+      setScanInfo({
+        dir,
+        appName: rec.appName,
+        url: rec.url,
+        files: rec.candidates.map((c) => ({ name: c.name, path: c.path, ext: c.ext, cmd: c.cmd })),
+        picked: defaultPick,
+      });
+      setErr(
+        rec.appName
+          ? `已识别为 ${rec.appName}` + (rec.url ? `，预览 ${rec.url}` : '')
+          : rec.candidates.length
+            ? '未识别到知名软件，请勾选右侧已找到的入口脚本后点击「填写所选」'
+            : '该目录下未发现入口脚本，已填入工作目录'
+      );
     } catch (e) {
       setErr('检索文件夹失败：' + (e as Error).message);
     } finally {
@@ -204,22 +239,21 @@ function EditorForm({
   }, []);
 
   // 应用文件夹中勾选的文件集：每个文件生成一行运行命令，cwd 用文件夹根
-  const applyScanPicked = useCallback((info: { dir: string; files: { name: string; path: string }[]; picked: Set<string> }) => {
+  const applyScanPicked = useCallback((info: { dir: string; appName: string; url: string; files: { name: string; path: string; ext: string; cmd: string }[]; picked: Set<string> }) => {
     const chosen = info.files.filter((f) => info.picked.has(f.path));
     if (chosen.length === 0) { setErr('请先勾选至少一个文件'); return; }
-    const cmds = chosen.map((f) => {
-      const s = suggestFromFile(f.path);
-      return s ? s.args : f.path;
-    });
-    if (cmds.length === 1) {
-      const s = suggestFromFile(chosen[0].path);
-      if (s) { setName(s.name); setArgs(s.args); }
+    const cmds = chosen.map((f) => f.cmd || f.path);
+    if (chosen.length === 1) {
+      const file = chosen[0];
+      setName(info.appName || baseName(file.path).replace(extOf(file.name), ''));
+      setArgs(cmds[0]);
     } else {
-      // 多文件：以文件夹名做预设名，命令逐行列出，cwd 指向文件夹
-      setName(baseName(info.dir.replace(/[\\/]+$/, '')));
+      // 多文件：以识别到的软件名（或文件夹名）做预设名，命令逐行列出
+      setName(info.appName || baseName(info.dir.replace(/[\\/]+$/, '')));
       setArgs(cmds.join('\n'));
     }
     setCwd(info.dir);
+    if (info.url) setUrl(info.url);
     setScanInfo(null);
     setErr('');
   }, []);
@@ -260,7 +294,10 @@ function EditorForm({
         <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-xs font-medium text-neutral-600 dark:text-stone-300">
-              在 <code className="text-sky-600 dark:text-sky-400">{scanInfo.dir}</code> 找到 {scanInfo.files.length} 个可运行/脚本文件，勾选后填写
+              {scanInfo.appName
+                ? <>识别为 <code className="text-sky-600 dark:text-sky-400">{scanInfo.appName}</code>，找到 {scanInfo.files.length} 个入口脚本
+                  {scanInfo.url ? <>，预览 <code className="text-sky-600 dark:text-sky-400">{scanInfo.url}</code></> : null}</>
+                : <>在 <code className="text-sky-600 dark:text-sky-400">{scanInfo.dir}</code> 找到 {scanInfo.files.length} 个可运行/脚本文件，勾选后填写</>}
             </span>
             <button className="text-xs text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200" onClick={() => setScanInfo(null)}>收起</button>
           </div>

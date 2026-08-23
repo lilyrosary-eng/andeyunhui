@@ -160,48 +160,197 @@ export function suggestFromFile(filePath: string): Pick<WebPreset, 'name' | 'arg
   return { name, args, cwd: dirName(filePath) };
 }
 
+// ============================================================
+// 软件识别：选文件夹 → 判定「这是什么软件」+ 找出真实入口脚本
+//
+// 关键改进（解决"只管选择不管识别"的问题）：
+//  1. 不再递归扫描目录里全部可运行文件（那会扫出 python_embeded /
+//     venv / Lib 里几百个无用脚本）。改为「按软件指纹识别 + 浅层找入口」。
+//  2. 预设名用「软件名」（kohya_ss / ComfyUI…）而非入口脚本名（run/gui）。
+//  3. 读取入口脚本内容，提取真实启动命令与端口，尽量省去手填。
+// 环境/依赖目录一律跳过，避免把 Python 运行时当入口。
+// ============================================================
+
+/** 需跳过的环境/依赖目录名（扫描时不进去递归，也不当作入口候选） */
+const SKIP_DIR_RE = /^(python.*|python_embeded|python-?3\d*|venv|\.venv|env|envs?|site-packages|node_modules|[Ll]ib|[Dd]ll.*|\.git|__pycache__|\.cache|build|dist|assets|resources|models?|logs|docs|tests?|\.github)$/;
+
+/** 入口脚本扩展名 → 建议运行方式（bat/sh 留空=直接在终端执行原文件） */
+const ENTRY_EXTS: Record<string, string> = {
+  '.bat': '',
+  '.cmd': '',
+  '.exe': '',
+  '.ps1': 'powershell -ExecutionPolicy Bypass -File',
+  '.sh': 'bash',
+  '.py': 'python',
+};
+
+/** 启动候选（扫描识别结果） */
+export interface LaunchCandidate {
+  path: string;      // 入口脚本绝对路径
+  name: string;      // 文件名
+  ext: string;
+  kind: 'bat' | 'cmd' | 'exe' | 'ps1' | 'sh' | 'py';
+  cmd: string;       // 建议运行命令
+  appHint?: string;  // 识别到的软件名
+}
+
+/** 识别结果：预设在用的字段 */
+export interface AppRecognition {
+  appName: string;   // 预设 name，如 "kohya_ss" / "ComfyUI（秋叶整合包）"
+  stdin: string;     // 预设 args（建议命令，多行=依次执行）
+  cwd: string;       // 预设 cwd（软件根）
+  url: string;       // 推断的预览地址
+}
+
+/** 按目录名/根目录关键文件识别「知名软件指纹」；命中返回软件名+建议入口文件名，否则 null */
+function matchKnownApp(
+  baseNameLower: string,
+  files: Set<string>,
+  dirs: Set<string>
+): { appName: string; entry?: string; suffix?: string } | null {
+  const has = (names: string[]) => names.some((n) => files.has(n));
+  // kohya_ss：入口 gui.bat / kohya_gui.py，目录往往叫 kohya_ss / kohya-ss
+  if (/kohya/.test(baseNameLower) || has(['gui.bat', 'kohya_gui.py', 'gui.ps1'])) {
+    return { appName: 'kohya_ss', entry: has(['gui.bat']) ? 'gui.bat' : 'kohya_gui.py' };
+  }
+  // ComfyUI 桌面版：根目录就是 ComfyUI.exe
+  if (has(['ComfyUI.exe', 'ComfyUI.exe.png'])) {
+    return { appName: 'ComfyUI', entry: 'ComfyUI.exe' };
+  }
+  // 秋叶整合包 / ComfyUI 源码：ComfyUI\main.py + python 环境 + run.bat
+  if (/comfy/i.test(baseNameLower) || has(['run.bat', 'main.exp']) || dirs.has('ComfyUI')) {
+    const hasPython = dirs.has('python') || dirs.has('python_embeded') || dirs.has('venv');
+    return {
+      appName: hasPython ? 'ComfyUI（整合包）' : 'ComfyUI',
+      entry: has(['run.bat']) ? 'run.bat' : 'ComfyUI\\main.py',
+    };
+  }
+  return null;
+}
+
+/** 从脚本文本里粗取「端口」（依次匹配 --port/--listen/gradio/app 端口约定） */
+function extractPort(text: string): string | null {
+  const m = text.match(/(?:--port|--listen)\s+(\d{2,5})/i);
+  if (m) return m[1];
+  if (/gradio|server\.launch/i.test(text)) return '7860';
+  return null;
+}
+
 /**
- * 扫描一个文件夹（list_directory 需逐层递归），收集其中可识别为「可运行/脚本」的
- * 文件项。返回 { 可运行文件, 提示信息 } 供前端展示候选。
- * - 限制：最多 MAX_FILES 个文件、MAX_DEPTH 层，避免卡死大目录。
+ * 扫描文件夹并识别软件入口。
+ * list: list_directory 封装；readText: read_text_file 封装（返回文本）。
+ * 只浅层（根 + 各子目录一层）找入口脚本，跳过环境目录。
  */
-export async function scanRunnableFiles(
+export async function scanAndRecognize(
   rootDir: string,
   list: (dir: string) => Promise<{ name: string; path: string; is_dir: boolean }[]>,
-  opts: { maxFiles?: number; maxDepth?: number } = {}
-): Promise<{ files: { name: string; path: string; ext: string }[]; hitDepth?: number }> {
-  const { maxFiles = 200, maxDepth = 4 } = opts;
-  const files: { name: string; path: string; ext: string }[] = [];
-  const seen = new Set<string>();
+  readText: (p: string) => Promise<string>
+): Promise<{ candidates: LaunchCandidate[]; appName: string; url: string }> {
+  const infer = (s: string): string | null => {
+    if (!s) return null;
+    if (s.includes('kohya')) return 'kohya_ss';
+    if (/comfy/i.test(s)) return 'ComfyUI';
+    return null;
+  };
 
-  const walk = async (dir: string, depth: number) => {
-    if (files.length >= maxFiles || depth > maxDepth) return;
-    let entries: { name: string; path: string; is_dir: boolean }[];
-    try {
-      entries = await list(dir);
-    } catch {
-      return;
-    }
-    // 目录在前、文件在后（与 Rust list_directory 排序一致），先深入目录再收集文件，
-    // 保证可运行文件按目录树顺序稳定出现。
-    for (const e of entries) {
-      if (files.length >= maxFiles) return;
-      if (e.is_dir) {
-        if (depth < maxDepth && !seen.has(e.path)) {
-          seen.add(e.path);
-          await walk(e.path, depth + 1);
-        }
-      } else {
-        const ext = extOf(e.name);
-        if (isRunnableExt(ext)) {
-          files.push({ name: e.name, path: e.path, ext });
+  let rootEntries: { name: string; path: string; is_dir: boolean }[] = [];
+  try { rootEntries = await list(rootDir); } catch { /* 忽略 */ }
+
+  const files = new Set(rootEntries.filter((e) => !e.is_dir).map((e) => e.name));
+  const dirs = new Set(rootEntries.filter((e) => e.is_dir).map((e) => e.name));
+  const baseLower = baseName(rootDir).toLowerCase();
+  const known = matchKnownApp(baseLower, files, dirs);
+
+  // 收集候选入口：优先根一层，其次各子目录一层；全部跳过环境目录
+  const candidates: LaunchCandidate[] = [];
+  const candidateSet = new Set<string>();
+  const pushEntry = (p: string, name: string, loc: number) => {
+    if (candidateSet.has(p)) return;
+    const ext = extOf(name);
+    const runner = ENTRY_EXTS[ext];
+    if (runner === undefined) return;
+    // 跳过明显非入口：卸载/ninstall/updater/python.exe 等
+    if (/uninstall|安装|卸载|setup-|-install|python(\.exe|w)?$/i.test(name)) return;
+    candidateSet.add(p);
+    candidates.push({
+      path: p, name, ext,
+      kind: (ext.slice(1) || 'bat') as LaunchCandidate['kind'],
+      cmd: runner ? `${runner} ${shellQuote(p)}` : shellQuote(p),
+      appHint: fileAppHint(known, name),
+    });
+    void loc;
+  };
+
+  // 浅层（深度<=2）遍历，避免深入 python 环境
+  const collected: { name: string; path: string; is_dir: boolean; depth: number }[] = [];
+  collected.push(...rootEntries.map((e) => ({ ...e, depth: 1 })));
+  for (const e of rootEntries) {
+    if (!e.is_dir) continue;
+    if (SKIP_DIR_RE.test(e.name)) continue;
+    let sub: { name: string; path: string; is_dir: boolean }[] = [];
+    try { sub = await list(e.path); } catch { continue; }
+    collected.push(...sub.map((x) => ({ ...x, depth: 2 })));
+  }
+  collected.sort((a, b) => a.depth - b.depth || (a.is_dir === b.is_dir ? 0 : a.is_dir ? 1 : -1));
+  for (const c of collected) {
+    if (!c.is_dir) pushEntry(c.path, c.name, c.depth);
+  }
+
+  // 已知软件时：把其入口脚提到最前，并读取其内容抽取端口/确认命令
+  let appName = known ? known.appName : '';
+  let url = '';
+  if (known) {
+    const entry = known.entry;
+    if (entry) {
+      // 优先找根目录下的同基础名入口
+      const matched = candidates.find((c) => baseName(c.path).toLowerCase() === entry.toLowerCase()) || candidates.find((c) => baseName(c.path).toLowerCase().replace(/\.(bat|cmd|exe|ps1)$/, '') === entry.toLowerCase());
+      if (matched) {
+        // 只对文本类脚本读内容抽取端口/软件名；exe 是二进制，读它无意义
+        const textExt = extOf(matched.name);
+        if (textExt === '.bat' || textExt === '.cmd' || textExt === '.ps1' || textExt === '.sh' || textExt === '.py') {
+          try {
+            const text = await readText(matched.path);
+            const hint = infer(text);
+            if (hint) appName = hint === 'ComfyUI' ? (known.entry?.includes('main.py') ? 'ComfyUI（源码）' : 'ComfyUI') : hint;
+            const port = extractPort(text.slice(0, 4000));
+            if (port) url = `http://127.0.0.1:${port}`;
+          } catch { /* 读不到就算了 */ }
         }
       }
     }
-  };
+  }
+  // 兜底端口：已知软件默认
+  if (!url) {
+    if (/comfy/i.test(appName)) url = 'http://127.0.0.1:8188';
+    else if (/kohya/i.test(appName)) url = 'http://127.0.0.1:7860';
+  }
 
-  await walk(rootDir, 1);
-  return { files };
+  // 无任何入口时退化为：把根目录自身作为 cwd，空命令，让用户手填
+  return { candidates, appName, url };
+}
+
+function fileAppHint(known: { appName: string; entry?: string } | null, name: string): string | undefined {
+  if (!known) return undefined;
+  // 入口文件在软件内：名用软件名（不带后缀涉及，由上层决定）；此处仅给辅助提示
+  return known.appName;
+}
+
+/** 识别结果组装成预设字段 */
+export function recognitionToPreset(
+  rootDir: string,
+  r: { candidates: LaunchCandidate[]; appName: string; url: string }
+): { name: string; args: string; cwd: string; url: string } {
+  if (r.appName) {
+    const entry = r.candidates[0];
+    const args = entry ? entry.cmd : '';
+    return { name: r.appName, args, cwd: rootDir, url: r.url };
+  }
+  // 未识别软件：仍可立即用第一个候选
+  if (r.candidates.length) {
+    const e = r.candidates[0];
+    return { name: baseName(e.path).replace(extOf(e.name), ''), args: e.cmd, cwd: rootDir, url: r.url };
+  }
+  return { name: baseName(rootDir.replace(/[\\/]+$/, '')), args: '', cwd: rootDir, url: r.url };
 }
 
 /** 一批内置预设模板，供「新建」时快速选择 */
