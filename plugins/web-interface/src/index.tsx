@@ -50,6 +50,7 @@ function RunPane({
   const [reloadKey, setReloadKey] = useState(0);
   const [probeReady, setProbeReady] = useState(true);
   const readyFired = useRef(false);
+  const loadedOnce = useRef(false);
 
   const markReady = useCallback(() => {
     if (!readyFired.current) {
@@ -57,6 +58,13 @@ function RunPane({
       onReady();
     }
   }, [onReady]);
+
+  // iframe 成功加载服务页 → 标记就绪、关掉等待遮罩、停自动重载
+  const handleIframeLoad = useCallback(() => {
+    loadedOnce.current = true;
+    setProbeReady(true);
+    markReady();
+  }, [markReady]);
 
   // 兜底：启动若干秒后即使 iframe 没触发 load 也按「运行中」处理
   useEffect(() => {
@@ -66,28 +74,22 @@ function RunPane({
 
   const hasUrl = !!preset.url?.trim();
 
-  // 预览地址「就绪探测」：no-cors fetch 轮询直到服务端口起来，再加载 iframe。
-  // 避免大型应用（kohya/ComfyUI）启动慢时误报"拒绝连接"。超时(90s)后也渲染以便手动刷新。
+  // 预览「就绪」：直接挂 iframe；连接被拒时 Chrome 不会触发 iframe 的 onLoad，
+  // 因此只要还没成功加载就持续自动重建 iframe（every 3.5s），服务起来后 onLoad
+  // 触发即稳定显示。避免大型应用启动慢时长期停在"连接被拒"。沙箱禁用 fetch，
+  // 故不用端口探测，改用 iframe onLoad 判定就绪。
   useEffect(() => {
     if (!hasUrl) return;
+    loadedOnce.current = false;
     setProbeReady(false);
-    let cancelled = false;
     let attempts = 0;
-    const tryOnce = async () => {
-      if (cancelled) return;
-      try {
-        await fetch(preset.url, { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(3000) });
-        if (!cancelled) setProbeReady(true);
-      } catch {
-        if (cancelled) return;
-        attempts += 1;
-        if (attempts > 45) { if (!cancelled) setProbeReady(true); return; }
-        setTimeout(tryOnce, 2000);
-      }
-    };
-    tryOnce();
-    return () => { cancelled = true; };
-  }, [hasUrl, preset.url, reloadKey]);
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      if (loadedOnce.current || attempts > 40) { window.clearInterval(timer); setProbeReady(true); return; }
+      setReloadKey((k) => k + 1);
+    }, 3500);
+    return () => window.clearInterval(timer);
+  }, [hasUrl, preset.url]);
 
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-2">
@@ -98,7 +100,7 @@ function RunPane({
           <code className="flex-1 truncate text-xs text-neutral-600 dark:text-stone-300">{preset.url}</code>
           <button
             className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
-            onClick={() => setReloadKey((k) => k + 1)}
+            onClick={() => { loadedOnce.current = false; setProbeReady(false); setReloadKey((k) => k + 1); }}
             title="刷新预览"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -125,21 +127,23 @@ function RunPane({
       <div className="flex-1 min-h-0 flex flex-col">
         {/* 预览 iframe（服务内容区） */}
         <div className="flex-1 min-h-0 rounded-xl border border-black/10 dark:border-white/10 overflow-hidden bg-white dark:bg-stone-950 relative">
-          {hasUrl && !probeReady ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 text-center text-xs text-neutral-400 dark:text-stone-500">
-              <span className="inline-block h-5 w-5 rounded-full border-2 border-neutral-300 border-t-sky-500 animate-spin" />
-              <div>等待服务启动，就绪后自动加载预览…</div>
-              <div className="text-[11px] opacity-70">首次启动大型应用（如 kohya / ComfyUI）可能需数十秒</div>
+          {hasUrl ? (
+            <div className="absolute inset-0">
+              {!probeReady && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 bg-white/75 dark:bg-stone-950/75 text-xs text-neutral-400 dark:text-stone-500">
+                  <span className="inline-block h-4 w-4 rounded-full border-2 border-neutral-300 border-t-sky-500 animate-spin" />
+                  等待服务启动，就绪后自动加载预览…
+                </div>
+              )}
+              <iframe
+                key={reloadKey}
+                src={preset.url}
+                onLoad={handleIframeLoad}
+                className="h-full w-full border-0"
+                title={preset.name}
+                sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+              />
             </div>
-          ) : hasUrl ? (
-            <iframe
-              key={reloadKey}
-              src={preset.url}
-              onLoad={markReady}
-              className="h-full w-full border-0"
-              title={preset.name}
-              sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
-            />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center text-xs text-neutral-400 dark:text-stone-500">
               该预设未配置预览地址，请看下方终端日志
