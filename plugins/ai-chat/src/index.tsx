@@ -165,6 +165,19 @@ const Root = memo(function Root() {
         }}
       />
       {settingsOpen ? (
+        // AI 办公 / AI 工作流：设置与「AI 对话」隔离 —— 只暴露 AIGC 产物/任务相关设置，
+        // 不混杂主对话的「伴侣 / 记忆 / 清除对话」等 AI 对话专属项。
+        sub.id === 'work' || sub.id === 'workflow' ? (
+          <ModuleSettingsPanel title={sub.name} icon={sub.icon} onClose={() => setSettingsOpen(false)}>
+            <div className="rounded-xl border border-black/10 dark:border-white/10 p-4">
+              <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">{sub.name} 设置</div>
+              <div className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5">
+                任务区 / 产物区设置对 AI 办公与 AI 工作流统一生效，与「AI 对话」模块相互隔离
+              </div>
+            </div>
+            <AiWorkProductSettings />
+          </ModuleSettingsPanel>
+        ) : (
         <ModuleSettingsPanel title="AI 对话" icon={<Bot size={20} />} onClose={() => setSettingsOpen(false)}>
           <div className="rounded-xl border border-black/10 dark:border-white/10 p-4">
             <label className="flex cursor-pointer items-center justify-between gap-3">
@@ -218,8 +231,8 @@ const Root = memo(function Root() {
               </button>
             </div>
           </div>
-          <AiWorkProductSettings />
         </ModuleSettingsPanel>
+        )
       ) : sub.id === 'chat' ? (
         <AiChatConversation
           activeConv={activeConv}
@@ -236,6 +249,7 @@ const Root = memo(function Root() {
         />
       ) : sub.id === 'work' ? (
       <AiWorkView
+        profileId={aiWorkChat.profileId}
         products={productStore.products}
         onSaveOutput={productStore.save}
         activeConv={aiWorkChat.activeConv}
