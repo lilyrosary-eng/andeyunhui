@@ -12,6 +12,7 @@ import { useCompanionStore, buildPersonaContext, buildCoreContext } from '@/core
 import { submoduleById, type AISubmoduleId, SUBMODULE_STORAGE_KEY } from '@/core/ai/submodules';
 import { AISubmoduleDrawer } from '@/components/ai-chat/AISubmoduleSwitcher';
 import { AiSubmodulePlaceholder } from '@/components/ai-chat/AiSubmodulePlaceholder';
+import { AiWorkView } from '@/components/ai-chat/AiWorkView';
 
 const COMPANION_ENABLED_KEY = 'andeyunhui.aichat.companion.enabled';
 function readCompanionEnabled(): boolean {
@@ -172,6 +173,16 @@ const Root = memo(function Root() {
           showCompanionAvatar={companionEnabled}
         />
       )
+    ) : sub.id === 'work' ? (
+      <AiWorkView
+        activeConv={activeConv}
+        busy={busy}
+        profileId={profileId}
+        send={sendWithCompanion}
+        onClear={() => deleteConversation(activeId)}
+        agent={agent}
+        onToggleAgent={setAgent}
+      />
     ) : (
         <AiSubmodulePlaceholder mod={sub} />
       )}
