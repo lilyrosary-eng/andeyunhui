@@ -388,6 +388,8 @@ class MusicPlayer {
       }
     }).then((unlisten) => {
       this.spectrumUnlisten = unlisten;
+      // 通知 Rust：已订阅频谱 → 采集线程解除休眠（无监听时 Rust 自动暂停，省 CPU）
+      api.invoke('spectrum_set_listener', { active: true }).catch(() => {});
     }).catch(() => {});
   }
 
@@ -503,6 +505,8 @@ class MusicPlayer {
     try {
       this.spectrumUnlisten?.();
       this.spectrumUnlisten = null;
+      // 通知 Rust：已退订频谱 → 无监听时采集线程休眠（省 CPU）
+      window.__HOST_API__?.invoke('spectrum_set_listener', { active: false }).catch(() => {});
       debugLog('music: spectrum listener removed');
     } catch {
       /* 忽略 */

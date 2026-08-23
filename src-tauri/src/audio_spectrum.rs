@@ -8,7 +8,7 @@
 
 #![cfg(windows)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,6 +35,33 @@ static SPECTRUM_DATA: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 /// 全局句柄，供 stop_spectrum 命令使用
 static CAPTURE_STOP: AtomicBool = AtomicBool::new(false);
+
+/// 活跃的 JS 监听者计数。>0 才做 WASAPI 轮询 / FFT / 推送；
+/// 为 0 时采集线程退化为轻负载休眠，避免无人收听时白白占 CPU。
+/// Tauri 的 emit 本身只投递给注册了该事件的 JS 监听器（非真·全局广播），
+/// 这里用计数做「无监听即暂停」的门控，同时实现定向（仅在有监听者时推）。
+static SPECTRUM_LISTENERS: AtomicUsize = AtomicUsize::new(0);
+
+/// 前端订阅/退订频谱事件时调用，驱动「无监听即暂停」。
+/// active=true：监听计数 +1；active=false：-1（saturating，防止泄漏为负）。
+pub fn set_listener(active: bool) {
+    if active {
+        SPECTRUM_LISTENERS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        let _ = SPECTRUM_LISTENERS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+            if c > 0 {
+                Some(c - 1)
+            } else {
+                None
+            }
+        });
+    }
+}
+
+/// 当前是否有前端在监听频谱事件
+pub fn has_listener() -> bool {
+    SPECTRUM_LISTENERS.load(Ordering::Relaxed) > 0
+}
 
 /// 启动频谱采集线程。返回 Ok 表示已启动（幂等：重复调用会先停旧线程再启新）。
 pub fn start_spectrum_capture(app: tauri::AppHandle) -> Result<(), String> {
@@ -114,6 +141,13 @@ fn spectrum_loop(app: tauri::AppHandle) {
     let mut last_push = Instant::now();
 
     while !CAPTURE_STOP.load(Ordering::SeqCst) {
+        // 无前端监听 → 退化为轻负载休眠，跳过 WASAPI 轮询 / FFT / 推送。
+        // 仅保持 IAudioClient 运行；恢复监听后一次性排空累积缓冲即可，无需重新初始化。
+        if !has_listener() {
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
         // 排空 WASAPI 缓冲
         unsafe {
             loop {

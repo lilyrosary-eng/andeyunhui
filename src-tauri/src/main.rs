@@ -166,6 +166,11 @@ fn spectrum_get() -> Vec<u8> {
     audio_spectrum::get_spectrum()
 }
 
+#[tauri::command]
+fn spectrum_set_listener(active: bool) {
+    audio_spectrum::set_listener(active);
+}
+
 fn main() {
     // === WebView2「Window to Visual」托管模式（根治外部媒体下胶囊浮岛卡顿）===
     // 必须在【任何 WebView2 环境创建之前】（即 tauri::Builder 之前）设置，迟于此时点无效。
@@ -344,7 +349,8 @@ fn main() {
             init_smtc(app.handle().clone());
 
             // ============ WASAPI Loopback 频谱分析 ============
-            // 后台启动音频频谱采集（轻量级：256KB 栈 + 10ms 轮询 + 1024 点 FFT）
+            // 后台启动音频频谱采集（轻量级：256KB 栈 + 10ms 轮询 + 1024 点 FFT；
+            // 无前端监听时自动进入休眠，仅在 musicPlayer 订阅后恢复采集）
             // 失败不阻塞启动，频谱功能自动降级为伪律动
             #[cfg(windows)]
             {
@@ -1386,6 +1392,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             spectrum_start,
             spectrum_stop,
             spectrum_get,
+            spectrum_set_listener,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
