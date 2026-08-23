@@ -58,6 +58,10 @@ export const KEYS = {
     agentEnabled:      { key: 'andeyunhui.mobile.agent.enabled', kind: 'flag', scope: 'mobile', default: '0' },
     agentSilent:       { key: 'andeyunhui.mobile.agent.silent', kind: 'flag', scope: 'mobile', default: '0' },
   },
+  companion: {
+    cache:             { key: 'andeyunhui.mobile.companion.cache', kind: 'json', scope: 'shared', note: 'core/stores/companionStore 浏览器预览兜底缓存' },
+    ragEmbed:          { key: 'andeyunhui.mobile.rag.embed', kind: 'json', scope: 'shared', note: 'core/stores/semanticMemory 嵌入端点配置' },
+  },
   devtools: {
     logLevel:          { key: 'log_level', kind: 'string', scope: 'dev', note: '生产排障口头开关' },
   },
@@ -66,8 +70,6 @@ export const KEYS = {
     mobileChat:        { key: 'andeyunhui.mobile.conversations', kind: 'json', scope: 'mobile', note: 'mobile/stores/chatStore.ts CHAT_KEY，已封装模块，内部逻辑不动' },
     capsuleChat:       { key: 'andeyunhui.capsule.conversations', kind: 'json', scope: 'desktop', note: 'components/capsule/CapsuleChat.tsx CHAT_STORE_KEY，已封装模块，内部逻辑不动' },
     aideChat:          { key: 'andeyunhui.capsule.aide.conversations.v2', kind: 'json', scope: 'desktop', note: 'components/capsule/CapsuleAide.tsx AIDE_STORE_KEY，已封装模块，内部逻辑不动' },
-    companionCache:    { key: 'andeyunhui.mobile.companion.cache', kind: 'json', scope: 'mobile', note: 'core/stores/companionStore.ts CACHE_KEY，已收拢到 core，内部逻辑不动' },
-    ragEmbed:          { key: 'andeyunhui.mobile.rag.embed', kind: 'json', scope: 'mobile', note: 'core/stores/semanticMemory.ts EMBED_KEY，已收拢到 core，内部逻辑不动' },
     translateSource:   { key: 'ts_translate_source', kind: 'string', scope: 'desktop', note: 'lib/translateLanguages.ts KEY_SOURCE，已封装模块，内部逻辑不动' },
     translateTarget:   { key: 'ts_translate_target', kind: 'string', scope: 'desktop', note: 'lib/translateLanguages.ts KEY_TARGET，已封装模块，内部逻辑不动' },
     deskpetManifest:   { key: 'deskpet:manifest', kind: 'json', scope: 'desktop', note: 'deskpetManifest.ts DESKPET_MANIFEST_KEY，已封装模块，内部逻辑不动' },

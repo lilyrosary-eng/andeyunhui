@@ -20,6 +20,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useCompanionStore, buildPersonaContext, type Companion, type MemoryEntry } from './companionStore';
 import { isBrowserPreview } from './companionStore';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 // type-only 引用（编译期擦除、零运行时耦合）：AiProfile 是迁移端共有的结构类型，
 // 此处仅用于 ai_get_profiles 返回值的类型标注，不引入任何移动端逻辑/运行时依赖。
 import type { AiProfile } from '@/mobile/types/chat';
@@ -42,7 +44,7 @@ function ensureInit(): Promise<boolean> {
 }
 
 /** 嵌入端点配置（localStorage；用户可在设置里配云端 OpenAI 兼容嵌入端点） */
-const EMBED_KEY = 'andeyunhui.mobile.rag.embed';
+const EMBED_KEY = KEYS.companion.ragEmbed.key;
 
 export interface EmbedConfig {
   endpoint: string;
@@ -50,15 +52,11 @@ export interface EmbedConfig {
   model: string;
 }
 export function getEmbedConfig(): EmbedConfig | null {
-  try {
-    const raw = localStorage.getItem(EMBED_KEY);
-    if (!raw) return null;
-    const c = JSON.parse(raw) as EmbedConfig;
-    return c && c.endpoint ? c : null;
-  } catch { return null; }
+  const c = storage.getJSON<EmbedConfig | null>(EMBED_KEY, null);
+  return c && c.endpoint ? c : null;
 }
 export function setEmbedConfig(c: EmbedConfig) {
-  try { localStorage.setItem(EMBED_KEY, JSON.stringify(c)); } catch { /* 忽略 */ }
+  storage.setJSON(EMBED_KEY, c);
 }
 
 /** 解析嵌入配置：显式配置优先；否则自动复用当前算力来源（降门槛）。 */

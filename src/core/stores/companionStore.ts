@@ -12,6 +12,8 @@
 
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 export interface Relationship {
   warmth: number;
@@ -52,24 +54,16 @@ export interface CompanionCollection {
 }
 
 /** 浏览器预览兜底缓存（无 Tauri 后端时使用，避免切页后状态被 load 重置） */
-const CACHE_KEY = 'andeyunhui.mobile.companion.cache';
+const CACHE_KEY = KEYS.companion.cache.key;
 
 function readCache(): CompanionCollection | null {
-  try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as CompanionCollection;
-    if (parsed && Array.isArray(parsed.companions) && parsed.companions.length) return parsed;
-  } catch { /* 忽略 */ }
+  const parsed = storage.getJSON<CompanionCollection | null>(CACHE_KEY, null);
+  if (parsed && Array.isArray(parsed.companions) && parsed.companions.length) return parsed;
   return null;
 }
 
 function writeCache(col: CompanionCollection) {
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify(col)); } catch { /* 忽略 */ }
-}
-
-function clearCache() {
-  try { localStorage.removeItem(CACHE_KEY); } catch { /* 忽略 */ }
+  storage.setJSON(CACHE_KEY, col);
 }
 
 /** 判断当前是否为浏览器预览（无 Tauri IPC）：invoke 抛错即视为预览 */
