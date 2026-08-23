@@ -165,9 +165,11 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   // 取当前激活 AI 档案 id（沙箱内 zustand store 隔离，故走 invoke）
   const loadProfile = useCallback(async () => {
     try {
-      const data = await invoke<{ profiles: Array<{ id: string; enabled?: boolean }> }>('ai_get_profiles');
+      // 后端用顶层 active 指定当前激活档案（档案上的 enabled 字段并不存在），
+      // 故按 active 回落取档案，避免 profileId 为空导致思考开关静默失效。
+      const data = await invoke<{ profiles: Array<{ id: string }>; active?: string }>('ai_get_profiles');
       const list = Array.isArray(data?.profiles) ? data.profiles : [];
-      const active = list.find((p) => p.enabled) ?? list[0];
+      const active = (data?.active ? list.find((p) => p.id === data.active) : undefined) ?? list[0];
       const pid = active?.id ?? '';
       profileIdRef.current = pid;
       setProfileId(pid);

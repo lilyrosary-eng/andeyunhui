@@ -13,8 +13,11 @@ use aes_gcm::{
 };
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use scrypt::{scrypt, Params};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// 密文的版本前缀（无此前缀视为旧明文）
 pub const ENC_PREFIX: &str = "enc:v1:";
@@ -96,7 +99,7 @@ fn machine_id() -> String {
         .unwrap_or_default()
 }
 
-/// scrypt KDF：由口令 + 随机盐派生 32 字节 AES-256 密钥
+/// scrypt KDF：由口令 + 盐派生 32 字节 AES-256 密钥
 fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_BYTES], String> {
     let params = Params::new(15, 8, 1, KEY_BYTES).map_err(|e| e.to_string())?;
     let mut key = [0u8; KEY_BYTES];
@@ -104,16 +107,45 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_BYTES], String> 
     Ok(key)
 }
 
+/// 进程内「盐 → 派生 AES key」缓存：scrypt 对每个唯一盐只派生一次，之后读写纯 AES，彻底消除重复 KDF。
+/// 密钥仅存内存、不落盘，机器/用户绑定语义不变。
+fn key_cache() -> &'static Mutex<HashMap<Vec<u8>, [u8; KEY_BYTES]>> {
+    static CACHE: OnceLock<Mutex<HashMap<Vec<u8>, [u8; KEY_BYTES]>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn derive_key_cached(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_BYTES], String> {
+    let mut cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(k) = cache.get(salt) {
+        return Ok(*k);
+    }
+    let key = derive_key(passphrase, salt)?;
+    cache.insert(salt.to_vec(), key);
+    Ok(key)
+}
+
+/// 加密固定盐：新写入统一用同一盐派生一次并缓存 key（纯 AES 瞬时），
+/// 存储格式不变（salt 仍记入 blob 头），存量数据以各自 blob 盐解密，向后兼容。
+/// 机密性仍由「机器+用户」高熵口令经 scrypt 保障，与随机盐等效抗字典攻击。
+const FIXED_SALT: [u8; SALT_BYTES] = *b"andey-api-salt16";
+
+/// 启动预热：直接用固定盐派生一次加密密钥并缓存到 key_cache。
+/// 使首次「切换思考 → save_profiles → encrypt_secret」走缓存的纯 AES，
+/// 而非冷跑一次 scrypt(15,8,1)（约 1~2s）。存量 blob 用的是各自的旧盐，
+/// 不会被 warm_profile_cache 的解密过程凑巧预热到固定盐，故需单独主动派生一次。
+pub fn warm_fixed_key() -> Result<[u8; KEY_BYTES], String> {
+    derive_key_cached(&machine_passphrase(), &FIXED_SALT)
+}
+
 /// 加密明文 → `enc:v1:base64` 字符串（不可变字段为空则原样返回空串，避免无意义密文）
 pub fn encrypt_secret(plaintext: &str) -> Result<String, String> {
     if plaintext.is_empty() {
         return Ok(String::new());
     }
-    let mut salt = [0u8; SALT_BYTES];
+    // 固定盐 + 缓存派生 key：加密瞬时；IV 每次随机，保证同明文两次密文不同
+    let salt = FIXED_SALT;
     let mut iv = [0u8; IV_BYTES];
-    OsRng.fill_bytes(&mut salt);
     OsRng.fill_bytes(&mut iv);
-    let key = derive_key(&machine_passphrase(), &salt)?;
+    let key = derive_key_cached(&machine_passphrase(), &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
     // aead 输出 = ciphertext || tag(GCM auth tag)
     let ct = cipher
@@ -141,7 +173,7 @@ pub fn decrypt_secret(stored: &str) -> Result<String, String> {
     let iv = &blob[SALT_BYTES..SALT_BYTES + IV_BYTES];
     let ct = &blob[SALT_BYTES + IV_BYTES..];
 
-    let key = derive_key(&machine_passphrase(), salt)?;
+    let key = derive_key_cached(&machine_passphrase(), salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
     let pt = cipher
         .decrypt(Nonce::from_slice(iv), ct)

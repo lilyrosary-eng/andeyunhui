@@ -2,6 +2,7 @@
 // 全局 AI 服务 · 子模块：模型档案（Profile）
 // （由 ai_service.rs 机械拆分而来，逻辑零改动）
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
@@ -155,10 +156,20 @@ fn profile_cache() -> &'static std::sync::Mutex<Option<AiProfiles>> {
     PROFILE_CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// 明文 api_key → 密文 的进程内缓存：只对「变更过 / 新出现的」api_key 跑一次 scrypt 派生，
+/// 未变（如仅切换 thinking）则直接复用上次落盘密文，避免每次保存都全量重算导致写档案卡几十秒。
+static ENC_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> =
+    std::sync::OnceLock::new();
+fn enc_cache() -> &'static std::sync::Mutex<HashMap<String, String>> {
+    ENC_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// 启动预热：后台异步加载一次填入缓存，随后的 load_profiles 全部走缓存（毫秒级）。
 /// 不阻塞启动流程（scrypt 解密多个 key 可能耗时数秒，放到后台线程）。
 pub fn warm_profile_cache(app: AppHandle) {
     tauri::async_runtime::spawn_blocking(move || {
+        // 先预热固定盐派生密钥，再解密档案：首次「切换思考 → save_profiles 加密」不再冷跑 scrypt
+        let _ = super::secret::warm_fixed_key();
         let _ = load_profiles(&app);
     });
 }
@@ -250,14 +261,23 @@ pub async fn ai_get_profiles(app: AppHandle) -> AiProfiles {
 /// 唯一写出口：所有「写入 ai_config.json」的路径都必须经过本函数，避免明文旁路。
 fn save_profiles(app: &AppHandle, profiles: &AiProfiles) -> Result<(), String> {
     let path = config_path(app)?;
-    let cloned = profiles.clone();
-    let mut out = cloned;
+    let mut out = profiles.clone();
+    // 复用「明文→密文」缓存，避免 api_key 未变时全量重跑 scrypt（写库瞬时）。
+    let mut enc_guard = enc_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let mut next_enc: HashMap<String, String> = HashMap::with_capacity(out.profiles.len());
     for p in out.profiles.iter_mut() {
         if p.api_key.is_empty() {
             continue;
         }
-        p.api_key = encrypt_secret(&p.api_key)?;
+        let enc = match enc_guard.get(&p.api_key) {
+            Some(e) => e.clone(),
+            None => encrypt_secret(&p.api_key)?,
+        };
+        next_enc.insert(p.api_key.clone(), enc.clone());
+        p.api_key = enc;
     }
+    *enc_guard = next_enc; // 仅当全部加密成功后才刷新缓存
+    drop(enc_guard);
     let json = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| format!("写入配置失败: {}", e))?;
     // 落盘成功即刷新内存缓存（用原始解密态 profiles），下次读取直接命中，无需再解密

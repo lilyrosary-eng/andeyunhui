@@ -44,14 +44,25 @@ export function ThinkingToggle({ profileId, disabled, compact, theme = 'dark' }:
   // 接收其它聊天界面切换「思考模式」的事件，保持胶囊 / IDE / 攻防 三处开关实时同步
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     listen<{ profile_id: string; thinking: boolean }>(EVENTS.ai.thinkingChanged, (e) => {
       if (e.payload.profile_id === profileId) setThinking(e.payload.thinking);
     })
       .then((u) => {
         unlisten = u;
+        if (cancelled || !profileId) return;
+        // 兜底首次事件丢失窗口：监听就绪后再拉一次后端持久化值，对齐真实开关状态
+        invoke<{ profiles: Array<{ id: string; thinking?: boolean | null }> }>('ai_get_profiles')
+          .then((d) => {
+            if (cancelled) return;
+            const p = (d.profiles || []).find((x) => x.id === profileId);
+            setThinking(p?.thinking === true);
+          })
+          .catch(() => {});
       })
       .catch(() => {});
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, [profileId]);
@@ -59,13 +70,22 @@ export function ThinkingToggle({ profileId, disabled, compact, theme = 'dark' }:
   const toggle = async () => {
     if (!profileId || loading) return;
     const next = !thinking;
-    setThinking(next);
+    setThinking(next); // 乐观翻转，点击立即有视觉反馈
     setLoading(true);
+    // 命令为后台写入：后端已缓存 api_key 密文，正常瞬时返回。极端情况下（首次冷写/加密慢）
+    // 用超时兜底：不返回也先放开 loading，最终以 ai-thinking-changed 事件校正开关。
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) setLoading(false);
+    }, 1000);
     try {
       await invoke('ai_set_profile_thinking', { profileId, thinking: next });
-    } catch {
+    } catch (e) {
+      console.warn('[thinking] 设置思考模式失败，已回滚', e);
       setThinking(!next);
     } finally {
+      settled = true;
+      clearTimeout(timer);
       setLoading(false);
     }
   };
