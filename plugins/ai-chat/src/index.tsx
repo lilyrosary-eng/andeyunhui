@@ -13,6 +13,7 @@ import { submoduleById, type AISubmoduleId, SUBMODULE_STORAGE_KEY } from '@/core
 import { AISubmoduleDrawer } from '@/components/ai-chat/AISubmoduleSwitcher';
 import { AiSubmodulePlaceholder } from '@/components/ai-chat/AiSubmodulePlaceholder';
 import { AiWorkView } from '@/components/ai-chat/AiWorkView';
+import { AiWorkflowView } from '@/components/ai-chat/AiWorkflowView';
 
 const COMPANION_ENABLED_KEY = 'andeyunhui.aichat.companion.enabled';
 function readCompanionEnabled(): boolean {
@@ -183,6 +184,8 @@ const Root = memo(function Root() {
         agent={agent}
         onToggleAgent={setAgent}
       />
+    ) : sub.id === 'workflow' ? (
+      <AiWorkflowView profileId={profileId} />
     ) : (
         <AiSubmodulePlaceholder mod={sub} />
       )}
