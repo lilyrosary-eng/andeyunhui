@@ -4,6 +4,7 @@
 //   - prompt  输入 / 起始提示（提供上下文）
 //   - llm     模型生成（提示词内可用 {ref:节点id} 引用前序输出）
 //   - output  汇聚成产出出（落进 AIWork 独立产物库 aiWork.products）
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { storage } from '@/core/storage';
 import { uid } from '@/core/ai/util';
 
@@ -79,4 +80,53 @@ export function createWorkflow(name?: string): WorkflowDoc {
     edges: [],
     updatedAt: Date.now(),
   };
+}
+
+/** AIWorkflow 任务状态 Hook —— 把任务列表/选中/变更集中到宿主（Root）托管，
+ *  以便共享侧栏（AiChatSidebar）复用同一份数据渲染任务列表，视图组件只拿单个活动文档。 */
+export function useAiWorkflows() {
+  const [workflows, setWorkflows] = useState<WorkflowDoc[]>(() => loadWorkflows());
+  const [activeId, setActiveId] = useState<string | null>(() => null);
+
+  // 首次进入，自动选中列表第一个；删除当前任务后自动回落
+  useEffect(() => {
+    if (!activeId && workflows.length) setActiveId(workflows[0].id);
+  }, [activeId, workflows]);
+
+  // 事实源即状态，任何变更即落盘
+  useEffect(() => { persistWorkflows(workflows); }, [workflows]);
+
+  const active = useMemo(() => workflows.find((w) => w.id === activeId) ?? null, [workflows, activeId]);
+
+  /** 对当前活动文档做一次不可变更新（保持引用稳定，自动 bump updatedAt） */
+  const updateActive = useCallback((fn: (d: WorkflowDoc) => WorkflowDoc) => {
+    setWorkflows((prev) => {
+      const i = prev.findIndex((w) => w.id === activeId);
+      if (i < 0) return prev;
+      const next = [...prev];
+      next[i] = { ...fn(prev[i]), updatedAt: Date.now() };
+      return next;
+    });
+  }, [activeId]);
+
+  const newWorkflow = useCallback(() => {
+    const doc = createWorkflow();
+    setWorkflows((prev) => [doc, ...prev]);
+    setActiveId(doc.id);
+    return doc.id;
+  }, []);
+
+  const selectWorkflow = useCallback((id: string) => setActiveId(id), []);
+
+  const renameWorkflow = useCallback((id: string, name: string) => {
+    const n = name.trim() || '未命名任务';
+    setWorkflows((prev) => prev.map((w) => (w.id === id ? { ...w, name: n.slice(0, 40), updatedAt: Date.now() } : w)));
+  }, []);
+
+  const removeWorkflow = useCallback((id: string) => {
+    setWorkflows((prev) => prev.filter((w) => w.id !== id));
+    setActiveId((cur) => (cur === id ? null : cur));
+  }, []);
+
+  return { workflows, activeId, active, updateActive, newWorkflow, selectWorkflow, renameWorkflow, removeWorkflow };
 }

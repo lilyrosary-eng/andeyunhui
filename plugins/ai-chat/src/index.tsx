@@ -14,6 +14,9 @@ import { AISubmoduleDrawer } from '@/components/ai-chat/AISubmoduleSwitcher';
 import { AiSubmodulePlaceholder } from '@/components/ai-chat/AiSubmodulePlaceholder';
 import { AiWorkView } from '@/components/ai-chat/AiWorkView';
 import { AiWorkflowView } from '@/components/ai-chat/AiWorkflowView';
+import { useAiWorkProducts } from '@/core/ai/aiWorkProducts';
+import { useAiWorkflows } from '@/core/ai/aiWorkflows';
+import type { AiWorkTab } from '@/components/ai-chat/AiWorkTabs';
 
 const COMPANION_ENABLED_KEY = 'andeyunhui.aichat.companion.enabled';
 function readCompanionEnabled(): boolean {
@@ -38,12 +41,27 @@ const Root = memo(function Root() {
     return (raw === 'work' || raw === 'workflow' || raw === 'chat') ? raw : 'chat';
   });
   const [subDrawerOpen, setSubDrawerOpen] = useState(false);
+  // workflow 内容区分段（任务区/产物区），受控于宿主
+  const [wfTab, setWfTab] = useState<AiWorkTab>('task');
   const sub = submoduleById(subId);
   const switchSub = (id: AISubmoduleId) => {
     setSubId(id);
     setSettingsOpen(false);
+    setWfTab('task'); // 切换子模块时，工作流的任务/产物区回到任务区
     try { localStorage.setItem(SUBMODULE_STORAGE_KEY, id); } catch { /* 忽略 */ }
   };
+
+  // work / workflow 子模块状态：产物库 + 工作流任务统一托管于此，
+  // 复用的共享侧栏（AiChatSidebar）与各视图共用同一份数据，不再自建第二层侧栏。
+  const productStore = useAiWorkProducts();
+  const wf = useAiWorkflows();
+  const wfChangeTab = useCallback((t: AiWorkTab) => {
+    setWfTab(t);
+    if (t === 'task') productStore.back(); // 切回任务区时清空查看态
+  }, [productStore.back]);
+  useEffect(() => {
+    if (productStore.viewing) setWfTab('product'); // 侧栏点选产物 → 自动切到产物区
+  }, [productStore.viewing]);
 
   // 复用侧边栏模块设置齿轮（#13）：宿主齿轮点击派发 module-settings-toggle 事件，
   // 此处监听并切换 ai-chat 独立设置面板，第二次点击即关闭（对齐其它子插件实现）。
@@ -99,6 +117,21 @@ const Root = memo(function Root() {
         }}
         submodule={sub}
         onOpenSubmoduleSwitcher={() => setSubDrawerOpen(true)}
+        work={{
+          products: productStore.products,
+          viewingId: productStore.viewing?.id ?? null,
+          onView: productStore.view,
+          onDeleteProduct: productStore.remove,
+        }}
+        workflow={{
+          workflows: wf.workflows,
+          activeId: wf.activeId,
+          onSelect: wf.selectWorkflow,
+          onNew: wf.newWorkflow,
+          onRename: wf.renameWorkflow,
+          onDelete: wf.removeWorkflow,
+        }}
+        productMode={subId === 'workflow' && wfTab === 'product'}
       />
       {sub.id === 'chat' ? (
       settingsOpen ? (
@@ -176,16 +209,22 @@ const Root = memo(function Root() {
       )
     ) : sub.id === 'work' ? (
       <AiWorkView
-        activeConv={activeConv}
-        busy={busy}
-        profileId={profileId}
-        send={sendWithCompanion}
-        onClear={() => deleteConversation(activeId)}
-        agent={agent}
-        onToggleAgent={setAgent}
+        products={productStore.products}
+        viewing={productStore.viewing}
+        onSaveOutput={productStore.save}
+        onDeleteProduct={productStore.remove}
+        onBack={productStore.back}
       />
     ) : sub.id === 'workflow' ? (
-      <AiWorkflowView profileId={profileId} />
+      <AiWorkflowView
+        profileId={profileId}
+        doc={wf.active}
+        onUpdate={wf.updateActive}
+        viewing={productStore.viewing}
+        onDeleteProduct={productStore.remove}
+        tab={wfTab}
+        onTabChange={wfChangeTab}
+      />
     ) : (
         <AiSubmodulePlaceholder mod={sub} />
       )}
