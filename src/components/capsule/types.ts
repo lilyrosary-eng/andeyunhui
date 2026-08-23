@@ -56,12 +56,47 @@ export interface ChatMsg {
   severity?: 0 | 1 | 2 | 3;
 }
 
+// ==== AIWork / AIWorkflow 共用任务蓝图类型 ====
+// AIWork（流式对话）与 AIWorkflow（节点画布）编辑的是「同一条任务」。
+// 该任务即一条 Conversation：messages 承载流式对话历史，aiWork 承载节点蓝图，
+// 两个视图（对话工作台 / 蓝图编辑器）读写同一份记录，切换即可控制粒度并预览效果。
+export type WfNodeType = 'prompt' | 'llm' | 'output';
+
+export interface WfNode {
+  id: string;
+  type: WfNodeType;
+  label: string;
+  /** 画布相对坐标 */
+  x: number;
+  y: number;
+  params: Record<string, string>;
+  status: 'idle' | 'running' | 'ok' | 'error';
+  output?: string;
+}
+
+export interface WfEdge {
+  id: string;
+  /** source 节点的输出 → target 节点的输入 */
+  source: string;
+  target: string;
+}
+
+/** 统一任务内嵌的 AIWorkflow 蓝图（流式对话 + 节点画布编辑同一任务）。 */
+export interface AiWorkBlueprint {
+  /** 任务一句话描述（AIWorkflow「按任务生成蓝图」用） */
+  task?: string;
+  nodes: WfNode[];
+  edges: WfEdge[];
+}
+
 // 多会话：下拉选择 / 新建对话
 export interface Conversation {
   id: string;
   title: string;
   messages: ChatMsg[];
   updatedAt: number;
+  /** 统一任务：AIWorkflow 节点蓝图（AIWork 对话 与 AIWorkflow 画布共用一条任务） */
+  aiWork?: AiWorkBlueprint;
   /** 会话模式：单聊（默认）/ 群聊 */
   mode?: 'single' | 'group';
   /** 群聊参与者：companion.id 列表（顺序即发言顺序）。仅 group 模式使用。 */

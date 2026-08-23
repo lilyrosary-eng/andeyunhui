@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useCallback } from 'react';
+import { memo, useState, useEffect, useCallback, useMemo } from 'react';
 import { Bot, Trash2 } from 'lucide-react';
 import { AiChatSidebar } from '@/components/ai-chat/AiChatSidebar';
 import { AiChatConversation } from '@/components/ai-chat/AiChatConversation';
@@ -15,7 +15,10 @@ import { AiSubmodulePlaceholder } from '@/components/ai-chat/AiSubmodulePlacehol
 import { AiWorkView } from '@/components/ai-chat/AiWorkView';
 import { AiWorkflowView } from '@/components/ai-chat/AiWorkflowView';
 import { useAiWorkProducts } from '@/core/ai/aiWorkProducts';
-import { useAiWorkflows } from '@/core/ai/aiWorkflows';
+import type { WorkflowDoc } from '@/core/ai/aiWorkflows';
+import {
+  createAiWorkTask, workflowFromConv, applyWorkflowToConv, migrateLegacyWorkflows,
+} from '@/core/ai/aiWorkTasks';
 import { AI_AIWORK_CONVERSATIONS_KEY } from '@/core/ai/util';
 import type { AiWorkTab } from '@/components/ai-chat/AiWorkTabs';
 import { AiWorkProductSettings } from './AiWorkProductSettings';
@@ -28,14 +31,18 @@ function readCompanionEnabled(): boolean {
 declare const window: Window & { __PLUGIN_REGISTRY__?: { register: (p: Record<string, unknown>) => void } };
 
 const Root = memo(function Root() {
+  // 一次性把旧版 AIWorkflow 独立任务迁移进统一任务列表（幂等，须在 aiWorkChat 初始化前执行）
+  migrateLegacyWorkflows();
+
   // 逻辑单例：侧栏与主区共享同一份 useAiChat，避免状态分裂
   const {
     conversations, activeId, activeConv, busy, profileId,
     selectConv, newConversation, newGroup, deleteConversation, renameConversation, clearAll, send, agent, setAgent,
   } = useAiChat({ persistKey: DEFAULT_PERSIST_KEY });
 
-  // AIWork 独立对话实例：与主「AI 对话」彻底隔离，专属存储 key，侧栏任务区 / 工作台共用。
-  const aiWorkChat = useAiChat({ persistKey: AI_AIWORK_CONVERSATIONS_KEY });
+  // AIWork 统一任务实例：与主「AI 对话」彻底隔离，专属存储 key，侧栏任务区 / 对话工作台 / 蓝图画布共用。
+  // allowEmpty = 与 AIWorkflow 一致：没任务不再自动保留保底会话，由 UI 提示「创建任务」。
+  const aiWorkChat = useAiChat({ persistKey: AI_AIWORK_CONVERSATIONS_KEY, allowEmpty: true });
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [companionEnabled, setCompanionEnabled] = useState(readCompanionEnabled);
@@ -56,10 +63,9 @@ const Root = memo(function Root() {
     try { localStorage.setItem(SUBMODULE_STORAGE_KEY, id); } catch { /* 忽略 */ }
   };
 
-  // work / workflow 子模块状态：产物库 + 工作流任务统一托管于此，
+  // work / workflow 子模块状态：产物库 + 统一任务（AIWork 对话 与 AIWorkflow 蓝图共用的同一条任务）托管于此，
   // 复用的共享侧栏（AiChatSidebar）与各视图共用同一份数据，不再自建第二层侧栏。
   const productStore = useAiWorkProducts();
-  const wf = useAiWorkflows();
   const changeArea = useCallback((t: AiWorkTab) => {
     setArea(t);
     if (t === 'task') productStore.back(); // 切回任务区时清空查看态
@@ -67,6 +73,24 @@ const Root = memo(function Root() {
   useEffect(() => {
     if (productStore.viewing) setArea('product'); // 侧栏点选产物 → 自动切到产物区
   }, [productStore.viewing]);
+
+  // —— 统一任务：AIWork 对话 与 AIWorkflow 蓝图编辑同一条 Conversation（aiWork 字段） ——
+  /** 新建统一任务（带默认起始蓝图），AIWork / AIWorkflow 共用 */
+  const newTask = useCallback(() => {
+    aiWorkChat.newConversation(createAiWorkTask());
+  }, [aiWorkChat.newConversation]);
+  /** 当前活动任务对应的 AIWorkflow 文档（节点画布渲染用） */
+  const activeTaskConv = aiWorkChat.conversations.find((c) => c.id === aiWorkChat.activeId) ?? null;
+  const wfDoc = useMemo(
+    () => (activeTaskConv ? workflowFromConv(activeTaskConv) : null),
+    [activeTaskConv],
+  );
+  /** AIWorkflow 画布编辑 → 回写统一任务的 aiWork 蓝图 */
+  const updateWorkflow = useCallback((fn: (d: WorkflowDoc) => WorkflowDoc) => {
+    const id = aiWorkChat.activeId;
+    if (!id) return;
+    aiWorkChat.patchConv(id, (c) => applyWorkflowToConv(c, fn(workflowFromConv(c))));
+  }, [aiWorkChat.activeId, aiWorkChat.patchConv]);
 
   // 复用侧边栏模块设置齿轮（#13）：宿主齿轮点击派发 module-settings-toggle 事件，
   // 此处监听并切换 ai-chat 独立设置面板，第二次点击即关闭（对齐其它子插件实现）。
@@ -128,7 +152,7 @@ const Root = memo(function Root() {
           sessions: aiWorkChat.conversations,
           activeSessionId: aiWorkChat.activeId,
           onSelectSession: aiWorkChat.selectConv,
-          onNewSession: aiWorkChat.newConversation,
+          onNewSession: newTask,
           onDeleteSession: aiWorkChat.deleteConversation,
           onRenameSession: aiWorkChat.renameConversation,
           products: productStore.products,
@@ -138,14 +162,6 @@ const Root = memo(function Root() {
           onFav: productStore.fav,
           onPending: productStore.pending,
           onDeleteProduct: productStore.remove,
-        }}
-        workflow={{
-          workflows: wf.workflows,
-          activeId: wf.activeId,
-          onSelect: wf.selectWorkflow,
-          onNew: wf.newWorkflow,
-          onRename: wf.renameWorkflow,
-          onDelete: wf.removeWorkflow,
         }}
       />
       {settingsOpen ? (
@@ -229,15 +245,15 @@ const Root = memo(function Root() {
         onToggleAgent={aiWorkChat.setAgent}
         conversations={aiWorkChat.conversations}
         onSelectConv={aiWorkChat.selectConv}
-        onNewConv={aiWorkChat.newConversation}
+        onNewConv={newTask}
         onDeleteConv={aiWorkChat.deleteConversation}
         onRenameConv={aiWorkChat.renameConversation}
       />
     ) : sub.id === 'workflow' ? (
       <AiWorkflowView
         profileId={profileId}
-        doc={wf.active}
-        onUpdate={wf.updateActive}
+        doc={wfDoc}
+        onUpdate={updateWorkflow}
       />
     ) : (
         <AiSubmodulePlaceholder mod={sub} />

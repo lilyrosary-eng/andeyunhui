@@ -7,27 +7,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { storage } from '@/core/storage';
 import { uid } from '@/core/ai/util';
-
-export type WfNodeType = 'prompt' | 'llm' | 'output';
-
-export interface WfNode {
-  id: string;
-  type: WfNodeType;
-  label: string;
-  /** 画布相对坐标 */
-  x: number;
-  y: number;
-  params: Record<string, string>;
-  status: 'idle' | 'running' | 'ok' | 'error';
-  output?: string;
-}
-
-export interface WfEdge {
-  id: string;
-  /** source 节点的输出 → target 节点的输入 */
-  source: string;
-  target: string;
-}
+// 节点/边/蓝图类型已上提到 capsule/types（Conversation 内嵌 aiWork 蓝图需共用），此处仅再导出，保持既有引用不变。
+export type { WfNodeType, WfNode, WfEdge } from '@/components/capsule/types';
+import type { WfNode, WfEdge } from '@/components/capsule/types';
 
 export interface WorkflowDoc {
   id: string;

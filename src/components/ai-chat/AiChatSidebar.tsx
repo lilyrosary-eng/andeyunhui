@@ -1,7 +1,7 @@
 // 独立「AI 对话」模块 · 左侧共享侧栏 —— 复用侧边栏模板（ModuleSidebarShell + NestedNavList）。
 // 按当前子模块切换内容，避免各子模块视图内部再自建第二层侧栏。
 // 对 work / workflow 子模块，侧栏顶部有一组「任务区 | 产物区」切换——切换覆盖的就是侧栏本身：
-//   - 任务区：work → AIWork 对话会话；workflow → 任务列表
+//   - 任务区：二者共用同一份「统一任务」列表（AIWork 流式对话 与 AIWorkflow 蓝图编辑同一条任务）
 //   - 产物区：二者共用同一份专属产物库列表
 // chat 子模块为纯会话列表，不显示该切换。全部逻辑由宿主（Root）托管，侧栏只负责展示与触发。
 import { memo, useState } from 'react';
@@ -13,7 +13,6 @@ import { GroupCreateDialog } from '@/components/ai-chat/GroupCreateDialog';
 import { AiWorkTabs, type AiWorkTab } from '@/components/ai-chat/AiWorkTabs';
 import type { Conversation } from '@/components/capsule/types';
 import type { AISubmoduleDef } from '@/core/ai/submodules';
-import type { WorkflowDoc } from '@/core/ai/aiWorkflows';
 import type { AiWorkProduct } from '@/core/ai/aiWorkProducts';
 
 export interface AiChatSidebarProps {
@@ -54,15 +53,6 @@ export interface AiChatSidebarProps {
     /** 右键「删除」：移出记录 + 删除本地文件 */
     onDeleteProduct: (id: string) => void;
   };
-  /** workflow 子模块：任务列表（任务区） */
-  workflow?: {
-    workflows: WorkflowDoc[];
-    activeId: string | null;
-    onSelect: (id: string) => void;
-    onNew: () => void;
-    onRename: (id: string, name: string) => void;
-    onDelete: (id: string) => void;
-  };
 }
 
 export const AiChatSidebar = memo(function AiChatSidebar({
@@ -79,7 +69,6 @@ export const AiChatSidebar = memo(function AiChatSidebar({
   area = 'task',
   onAreaChange,
   work,
-  workflow,
 }: AiChatSidebarProps) {
   const [query, setQuery] = useState('');
   const [showGroupDialog, setShowGroupDialog] = useState(false);
@@ -125,46 +114,23 @@ export const AiChatSidebar = memo(function AiChatSidebar({
     };
   });
 
-  // work 子模块 · 任务区：AIWork 会话列表
-  const sessionItems: NavLayerItem[] = (work?.sessions ?? []).map((c) => ({
+  // work / workflow 子模块 · 任务区：AIWork 对话 与 AIWorkflow 蓝图编辑同一份统一任务列表
+  const taskItems: NavLayerItem[] = (work?.sessions ?? []).map((c) => ({
     id: c.id,
     icon: <MessageSquare size={15} />,
-    title: c.title || '新对话',
+    title: c.title || '未命名任务',
     subtitle: c.messages.length ? `${c.messages.length} 条消息` : '暂无消息',
     active: c.id === work?.activeSessionId,
     contextMenu: (
       <>
         <ContextMenuItem onSelect={() => {
-          const next = window.prompt('重命名对话', c.title);
+          const next = window.prompt('任务改名', c.title);
           if (next !== null) work?.onRenameSession(c.id, next);
         }}>
           <span className="flex items-center gap-2"><Pencil size={14} /> 重命名</span>
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onSelect={() => work?.onDeleteSession(c.id)}>
-          <span className="flex items-center gap-2 text-red-500"><Trash2 size={14} /> 删除</span>
-        </ContextMenuItem>
-      </>
-    ),
-  }));
-
-  // workflow 子模块 · 任务区：任务列表
-  const taskItems: NavLayerItem[] = (workflow?.workflows ?? []).map((w) => ({
-    id: w.id,
-    icon: <Workflow size={15} />,
-    title: w.name || '未命名任务',
-    subtitle: `${w.nodes.length} 节点`,
-    active: w.id === workflow?.activeId,
-    contextMenu: (
-      <>
-        <ContextMenuItem onSelect={() => {
-          const next = window.prompt('任务改名', w.name);
-          if (next !== null) workflow?.onRename(w.id, next);
-        }}>
-          <span className="flex items-center gap-2"><Pencil size={14} /> 重命名</span>
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => workflow?.onDelete(w.id)}>
           <span className="flex items-center gap-2 text-red-500"><Trash2 size={14} /> 删除</span>
         </ContextMenuItem>
       </>
@@ -248,23 +214,19 @@ export const AiChatSidebar = memo(function AiChatSidebar({
 
   let title = 'AI 对话';
   if (!isChat && inProduct) title = '专属产物库';
-  else if (isWork) title = '对话任务';
-  else if (isWorkflow) title = '工作流任务';
+  else if (showArea) title = '任务';
 
   let icon = <Bot size={20} />;
-  if (!isChat && inProduct) icon = <FileText size={20} />;
-  else if (isWork) icon = <MessageSquare size={20} />;
-  else if (isWorkflow) icon = <Workflow size={20} />;
+  if (!isChat && inProduct) icon = <Workflow size={20} />;
+  else if (showArea) icon = <Workflow size={20} />;
 
   const primaryAction = isChat
     ? { label: '新对话', onClick: onNew }
     : inProduct
       ? undefined
-      : isWork && work
-        ? { label: '新对话', onClick: work.onNewSession }
-        : workflow
-          ? { label: '新建任务', onClick: workflow.onNew }
-          : undefined;
+      : showArea
+        ? { label: '新建任务', onClick: work?.onNewSession ?? (() => {}) }
+        : undefined;
 
   return (
     <ModuleSidebarShell
@@ -319,17 +281,11 @@ export const AiChatSidebar = memo(function AiChatSidebar({
               layers={[{ title: '产物', children: productGrid ?? <div className="flex-1 flex items-center justify-center text-xs text-neutral-400 dark:text-stone-500 py-8">还没有产出，对话后可保存到专属产物库</div> }]}
               onBack={() => {}}
             />
-          ) : isWork ? (
-            <NestedNavList
-              layers={[{ title: '对话任务', items: sessionItems, emptyText: '暂无对话，点「新对话」开始' }]}
-              onBack={() => {}}
-              onItemClick={(item) => work?.onSelectSession(item.id)}
-            />
-          ) : isWorkflow ? (
+          ) : showArea ? (
             <NestedNavList
               layers={[{ title: '任务', items: taskItems, emptyText: '还没有任务，点「新建任务」创建' }]}
               onBack={() => {}}
-              onItemClick={(item) => workflow?.onSelect(item.id)}
+              onItemClick={(item) => work?.onSelectSession(item.id)}
             />
           ) : (
             <div className="flex-1 flex items-center justify-center px-2">

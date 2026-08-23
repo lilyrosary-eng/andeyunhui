@@ -91,6 +91,12 @@ export interface UseAiChatOptions {
    * 事件契约与 ai_chat 相同（ai-done/ai-error），仅新增 ai-agent-step 工具步骤事件。
    */
   agent?: boolean;
+  /**
+   * 是否允许空会话列表（默认 false）。为 true 时若持久化数据为空则不自动创建保底会话，
+   * 直接保持空列表（activeId 为空串）——用于 AIWork 统一任务区：没任务时由 UI 提示「创建任务」。
+   * 主「AI 对话」保持 false（始终至少一个会话）。
+   */
+  allowEmpty?: boolean;
 }
 
 export interface UseAiChatResult {
@@ -104,10 +110,12 @@ export interface UseAiChatResult {
   agent: boolean;
   setAgent: (on: boolean) => void;
   selectConv: (id: string) => void;
-  newConversation: () => string;
+  newConversation: (seed?: Partial<Conversation>) => string;
   newGroup: (participantIds: string[], groupName?: string) => string;
   deleteConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
+  /** 对某条会话做不可变更新（自动 bump updatedAt）。AIWork 统一任务回写蓝图用。 */
+  patchConv: (id: string, fn: (c: Conversation) => Conversation) => void;
   clearAll: () => void;
   /** 发送一条消息。images 为可选的多模态图片（data URL），后端 ai_vision_ocr 生成描述后注入 system。 */
   send: (text: string, images?: string[], attachments?: SendAttachment[]) => Promise<void>;
@@ -121,7 +129,7 @@ export interface UseAiChatResult {
  * 共用 AI 对话逻辑。状态、持久化、流式、发送全在此，调用方只负责把数据画出来。
  */
 export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
-  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, agent = false } = options;
+  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, agent = false, allowEmpty = false } = options;
   const syncEvent = syncEventFor(persistKey);
   const syncReqEvent = syncReqEventFor(persistKey);
   // Agent 模式需随回调读取最新值（避免闭包陈旧）
@@ -186,18 +194,13 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   // 初始化：加载持久化会话 + 档案
   useEffect(() => {
     const loaded = loadConversations(persistKey);
-    let initial: Conversation[];
-    if (loaded.length) {
-      initial = loaded;
-    } else {
-      initial = [makeConv()];
-    }
+    const initial = loaded.length ? loaded : allowEmpty ? [] : [makeConv()];
     setConversations(initial);
-    setActiveId(initial[0].id);
-    activeIdRef.current = initial[0].id;
+    setActiveId(initial[0]?.id ?? '');
+    activeIdRef.current = initial[0]?.id ?? '';
     void loadProfile().finally(() => setReady(true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [persistKey]);
+  }, [persistKey, allowEmpty]);
 
   // 持久化（会话变化即写本地）；且向其它窗口广播合并（应用远端时不重复广播）
   useEffect(() => {
@@ -239,8 +242,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     activeIdRef.current = id;
   }, []);
 
-  const newConversation = useCallback(() => {
-    const conv = makeConv();
+  const newConversation = useCallback((seed?: Partial<Conversation>) => {
+    const conv: Conversation = { ...makeConv(), ...seed };
     setConversations((prev) => [conv, ...prev]);
     setActiveId(conv.id);
     activeIdRef.current = conv.id;
@@ -267,13 +270,19 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setConversations((prev) => {
       const next = prev.filter((c) => c.id !== id);
       if (id === activeIdRef.current) {
-        const fallback = next[0] ?? makeConv();
-        if (!next.length) next.push(fallback);
-        setActiveId(fallback.id);
-        activeIdRef.current = fallback.id;
+        // allowEmpty：删空后不再自动补一个保底会话，回到「没任务提示创建」
+        const fallback = allowEmpty ? (next[0] ?? null) : (next[0] ?? makeConv());
+        if (!allowEmpty && !next.length) next.push(fallback!);
+        setActiveId(fallback?.id ?? '');
+        activeIdRef.current = fallback?.id ?? '';
       }
       return next;
     });
+  }, [allowEmpty]);
+
+  // 对某条会话做不可变更新（自动 bump updatedAt）—— AIWork 统一任务回写蓝图用。
+  const patchConv = useCallback((id: string, fn: (c: Conversation) => Conversation) => {
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...fn(c), updatedAt: Date.now() } : c)));
   }, []);
 
   const renameConversation = useCallback((id: string, title: string) => {
@@ -655,6 +664,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     newGroup,
     deleteConversation,
     renameConversation,
+    patchConv,
     clearAll,
     send,
     groupSend,
