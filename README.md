@@ -41,6 +41,8 @@ React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌�
 - 办公 · 茑萝：文档（docx）、演示（pptx）、表格（xlsx / csv）的导入、编辑与导出；文档用 TipTap 编辑、演示用原生幻灯片编辑器、表格用自研轻量表格引擎（SheetJS 读写 xlsx）；含 CodeMirror IDE、绘画子模块与 RAG 知识库（ONNX 本地向量嵌入）。
 - 专业 · 薄荷：环境变量管理、端口扫描、进程列表、剪贴板读写、图片/文档格式转换、ffmpeg 媒体转码等工具集合。
 - 浮岛 AI 编程 · Capsule：内置多会话 AI 编程助手与 IDE 服务，支持 AI 对话、代码生成、保持态（keep-state）与跨胶囊协作；可挂为浮窗独立使用。
+- AI 办公工作台 · AIWork / AIWorkflow：AIWork 为独立 AIGC 工作台（独立对话实例 + 独立产物库，支持产物落盘、分类展示、收藏与待决，与笔记解耦）；AIWorkflow 提供对话式蓝图——任务侧栏 + 节点连线画布（拖拽 / 选中、增改删连线、按任务生成蓝图、逐节点执行 + 日志 + 持久化），把「读取 → 生成 → 写入笔记」串成可复用流程；后端统一编排命令聚合上下文、持久化蓝图与执行日志。
+- Web 接口模块 · WebInterface：本地 Web 服务，可将本地软件 / 文件夹智能识别为可访问接口（识别软件名与入口端口），提供预设管理、PTY 终端与 iframe 预览，在浏览器中访问与调试本地运行的网页服务；预览就绪采用 iframe 自动重载（沙箱受限环境下以轮询探测替代 fetch 端口探测）。
 - 黄金棋盘 · GoldChessboardHub：仿桌宠热插拔的桌面浮岛中枢，集成文件搜索面板（FileSearchPanel）、跨设备传输面板（TransferPanel，与主窗口共用 `useTransfer` 逻辑层）、AI 多会话管理；支持原生拖放接收文件、设备发现与配对、传输进度追踪；可独立挂为浮窗运行，与 Capsule 浮岛共享茑萝侧栏入口。
 - 攻防内核 · gongfang-kit：独立 Rust crate 提供安全/攻防相关能力框架。
 - 格式转换 · markitdown：多格式转 Markdown 服务。
@@ -118,6 +120,13 @@ andeyunhui/
 - 开发环境：Node.js >= 20、pnpm >= 9、Rust 稳定版工具链、Tauri v2 相关系统依赖（WebView2；Android 需 Android SDK / NDK）。
 
 > 桌面端的 ffmpeg 共享库（含 GPL 组件）体积超过 GitHub 单文件限制，已从版本库移除并加入 `.gitignore`，本地打包时由 `external-deps/全局/ffmpeg/` 提供（详见下方「构建说明」）。
+
+## 当前开发状态
+
+- **当前版本**：Windows 桌面端持续推进，最新可构建版本为 2.4.0（NSIS 安装包 `安得云荟_2.4.0_x64-setup.exe`）；版本号以 `src-tauri/tauri.conf.json` 与设置页「关于软件」为准。
+- **Android 端**：在 `feat/android-v1` 分支迭代（与 `main` 并行），复用同一套 React 前端代码；Tauri Android 产物（APK/AAB）仍在开发中，尚未正式发布。本 README 中涉及 Android 的描述为规划目标，安装与使用请以 Windows 桌面端为准。
+- **近期重点模块**：Web 接口模块（本地网页服务调试）、AI 办公工作台（AIWork / AIWorkflow，AIGC 产物落地与对话式蓝图），以及阅读 · 三色堇的排版与页码稳定性修复。
+- 版本演进与已知问题详见 [`CHANGELOG.md`](./CHANGELOG.md)，设计与诊断文档见 `docs/`。
 
 ## 快速开始
 
