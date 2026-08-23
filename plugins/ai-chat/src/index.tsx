@@ -21,7 +21,7 @@ const Root = memo(function Root() {
   // 逻辑单例：侧栏与主区共享同一份 useAiChat，避免状态分裂
   const {
     conversations, activeId, activeConv, busy, profileId,
-    selectConv, newConversation, newGroup, deleteConversation, renameConversation, clearAll, send,
+    selectConv, newConversation, newGroup, deleteConversation, renameConversation, clearAll, send, agent, setAgent,
   } = useAiChat({ persistKey: DEFAULT_PERSIST_KEY });
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -144,6 +144,8 @@ const Root = memo(function Root() {
           busy={busy}
           profileId={profileId}
           send={sendWithCompanion}
+          agent={agent}
+          onToggleAgent={setAgent}
           onClear={() => deleteConversation(activeId)}
           companionCard={companionEnabled ? (
             <AiChatCompanionCard variant="compact" onEdit={() => setSettingsOpen(true)} />

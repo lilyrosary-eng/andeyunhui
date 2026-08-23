@@ -2,7 +2,7 @@
 // 不渲染任何 UI：管理多会话 state、localStorage 持久化、流式事件接线、发送。
 // UI 由调用方自行设计：主窗口用双栏 AiChatSidebar + AiChatConversation；胶囊复用同一套 AiChatConversation（capsuleMode 形态）。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatMsg, Conversation } from '@/components/capsule/types';
+import type { ChatMsg, Conversation, SendAttachment, AttachmentMeta } from '@/components/capsule/types';
 import { useAiStream } from '@/components/capsule/useAiStream';
 import { EVENTS } from '@/core/events/schema';
 import { invoke } from '@tauri-apps/api/core';
@@ -108,7 +108,7 @@ export interface UseAiChatResult {
   renameConversation: (id: string, title: string) => void;
   clearAll: () => void;
   /** 发送一条消息。images 为可选的多模态图片（data URL），后端 ai_vision_ocr 生成描述后注入 system。 */
-  send: (text: string, images?: string[]) => Promise<void>;
+  send: (text: string, images?: string[], attachments?: SendAttachment[]) => Promise<void>;
   /** 群聊：串行让每位参与者（伴侣）基于「用户这句话 + 此前所有人的回复」各回应一句。 */
   groupSend: (text: string) => Promise<void>;
   /** 群聊内部：让单个发言者说一句（注入其独立人设 system，复用全局流式落盘）。 */
@@ -283,24 +283,30 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     activeIdRef.current = fresh.id;
   }, []);
 
-  const send = useCallback(async (text: string, images?: string[]) => {
+  const send = useCallback(async (text: string, images?: string[], attachments?: SendAttachment[]) => {
     const content = text.trim();
     const hasImages = !!images?.length;
-    if (!content && !hasImages) return;
+    const atx: SendAttachment[] = attachments ?? [];
+    if (!content && !hasImages && atx.length === 0) return;
     if (busyRef.current) return;
     const cid = activeIdRef.current;
     if (!cid) return;
     // 群聊会话：自动走串行多人发言调度（内部注入各伴侣人设）
     const conv = stateRef.current.conversations.find((c) => c.id === cid);
     if (conv?.mode === 'group' && (conv.participants?.length ?? 0) >= 2) {
-      return groupSend(content || '（图片）');
+      return groupSend(content || '（附件）');
     }
 
     const reqId = uid();
     reqRef.current = reqId;
     streamConvIdRef.current = cid;
 
-    const userMsg: ChatMsg = { id: uid(), role: 'user', content: content || '（图片）', images };
+    // 附件陈列元数据（仅名字/类型/大小，不落文本内容，避免撑爆 localStorage）
+    const atxMeta: AttachmentMeta[] = atx.map(({ kind, name, mime, size }) => ({ kind, name, mime, size }));
+    const userMsg: ChatMsg = {
+      id: uid(), role: 'user', content: content || '（附件）', images,
+      attachments: atxMeta.length ? atxMeta : undefined,
+    };
     const asstId = uid();
     const asstMsg: ChatMsg = { id: asstId, role: 'assistant', content: '', reasoning: '' };
 
@@ -360,14 +366,26 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       }
     }
 
+    // 附件·注入：text 附件把读取到的内容拼入发给模型的 user 消息；
+    // file（二进制）仅写明文件名，内容不送（避免无效/超大 payload）。
+    let attachNote = '';
+    for (const a of atx) {
+      if (a.kind === 'text' && a.text) {
+        attachNote += `\n[用户上传的文件 ${a.name} 的内容]\n${a.text}`;
+      } else if (a.kind === 'file') {
+        attachNote += `\n[用户上传了文件 ${a.name}（${a.mime || '二进制'}，${a.size ?? ''} 字节；内容未读取）]`;
+      }
+    }
+
+    const shouldInject = hasImages || attachNote.length > 0;
     const payload = {
       requestId: reqId,
       profileId: profileIdRef.current,
       // 请求前硬防御：真实 token 估算尾部截断 + 单条硬切（双保险，坐实重复拼接真因）
-      // 最后一条 user 内容若带图，把 OCR 描述拼接在原文后（本地显示保持原图/原文不变）。
+      // 最后一条 user 内容若带图/带附件，把 OCR 描述与文件内容拼接在原文后（本地显示保持原图/原文不变）。
       messages: safeMessages(
         history
-          .concat([hasImages ? { ...userMsg, content: (content || '（图片）') + imageNote } : userMsg])
+          .concat([shouldInject ? { ...userMsg, content: content + imageNote + attachNote } : userMsg])
           .map((m) => ({ role: m.role, content: m.content })),
       ),
       stream: true,

@@ -1,9 +1,9 @@
 // 独立「AI 对话」模块 · 主区对话流 —— 大屏 UI，受控于上层共享的 useAiChat 实例。
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
 import { memo, useEffect, useState } from 'react';
-import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, ImagePlus } from 'lucide-react';
+import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
-import type { Conversation } from '@/components/capsule/types';
+import type { Conversation, SendAttachment, AttachmentKind } from '@/components/capsule/types';
 import type { UseAiChatResult } from '@/core/ai/useAiChat';
 import { AiChatCompanionAvatar } from './AiChatCompanionCard';
 import { useCompanionStore } from '@/core/stores/companionStore';
@@ -34,11 +34,42 @@ function UserAvatarView({ value, size = 32 }: { value: string; size?: number }) 
   );
 }
 
+// ---- 附件拾取（粘贴 + 导入）+ 分类 ----
+interface Picked {
+  kind: AttachmentKind;
+  name: string;
+  mime: string;
+  size?: number;
+  /** 图片：dataUrl，用于缩略图展示 + 发送时 OCR */
+  dataUrl?: string;
+  /** text 附件：读取到的文本内容（发送时注入，之后丢弃，不落库） */
+  text?: string;
+}
+
+/** 文本类文件扩展名白名单：命中即读内容给 AI；否则仅陈列文件名 */
+const TEXT_EXTS = new Set([
+  'txt', 'md', 'markdown', 'log', 'json', 'js', 'jsx', 'ts', 'tsx', 'vue',
+  'py', 'c', 'cpp', 'h', 'hpp', 'java', 'go', 'rs', 'rb', 'php', 'sh', 'bat', 'ps1',
+  'yml', 'yaml', 'toml', 'ini', 'conf', 'cfg', 'env', 'sql', 'css', 'scss', 'html', 'xml',
+  'csv', 'tsv', 'gitignore', 'dockerfile', 'editorconfig', 'cls',
+]);
+/** 文本附件内容上限（超过则降级为仅陈列，避免超大文本注入烧 token） */
+const MAX_TEXT_BYTES = 200 * 1024;
+/** 图片最多 3 张；附件总数上限 */
+const MAX_IMG = 3;
+const MAX_PICKED = 12;
+
+function isTextLike(f: { name: string; type: string }): boolean {
+  if (f.type.startsWith('text/')) return true;
+  const ext = (f.name.split('.').pop() || '').toLowerCase();
+  return TEXT_EXTS.has(ext);
+}
+
 export interface AiChatConversationProps {
   activeConv: Conversation | null;
   busy: boolean;
   profileId: string;
-  send: (text: string, images?: string[]) => void;
+  send: (text: string, images?: string[], attachments?: SendAttachment[]) => void;
   onClear?: () => void;
   /** 启用伴侣时显示：默认 block 大卡片，compact 横版嵌入头部右侧 */
   companionCard?: React.ReactNode;
@@ -89,8 +120,9 @@ export const AiChatConversation = memo(function AiChatConversation({
   onToggleAgent,
 }: AiChatConversationProps) {
   const [input, setInput] = useState('');
-  // 多模态：待发送的图片（data URL，仅在用户点击发送前暂存，发送后清空）
-  const [pickedImages, setPickedImages] = useState<string[]>([]);
+  // 待发送附件（图片 / 文本 / 其它文件），仅在点击发送前暂存，发送后清空。
+  // 图片走 dataUrl(缩略图+OCR)；文本读内容注入；其它文件仅陈列文件名。dataUrl/text 不落库。
+  const [picked, setPicked] = useState<Picked[]>([]);
   // 思考展开状态：key = 消息 id。流式中（未填完 content）自动展开，用户也可手动切换。
   const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>({});
   // 胶囊内嵌会话下拉开关
@@ -130,23 +162,64 @@ export const AiChatConversation = memo(function AiChatConversation({
 
   const submit = () => {
     const text = input.trim();
-    if ((!text && pickedImages.length === 0) || busy) return;
-    send(text || '（图片）', pickedImages);
+    if ((!text && picked.length === 0) || busy) return;
+    // 图片单独走 images（发送时 OCR 注入）；非图片走 attachments（文本注入/文件陈列）
+    const images = picked.filter((p) => p.kind === 'image').map((p) => p.dataUrl || '');
+    const attachments: SendAttachment[] = picked
+      .filter((p) => p.kind !== 'image')
+      .map(({ kind, name, mime, size, text }) => ({ kind, name, mime, size, text }));
+    send(text || '（附件）', images, attachments);
     setInput('');
-    setPickedImages([]);
+    setPicked([]);
   };
 
-  // 选图：读取本地图片为 data URL（限制数量+扩展名），供多模态发图（ai_vision_ocr 描述注入）
-  const pickImages = (files: FileList | null) => {
-    if (!files?.length) return;
-    const list = [...files].filter((f) => f.type.startsWith('image/')).slice(0, 3 - pickedImages.length);
-    for (const f of list) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const url = typeof reader.result === 'string' ? reader.result : '';
-        if (url) setPickedImages((prev) => [...prev, url]);
-      };
-      reader.readAsDataURL(f);
+  // 追加一项附件（带图片/总数上限）
+  const addPicked = (item: Picked) => {
+    setPicked((prev) => {
+      if (prev.length >= MAX_PICKED) return prev;
+      if (item.kind === 'image' && prev.filter((p) => p.kind === 'image').length >= MAX_IMG) return prev;
+      return [...prev, item];
+    });
+  };
+
+  // 解析一批 File 进附件列表：图片(限 3 张)转 dataUrl、文本(限大小)读内容、其它仅陈列
+  const intoPicked = (files: File[]) => {
+    for (const f of files) {
+      if (f.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const url = typeof reader.result === 'string' ? reader.result : '';
+          if (url) addPicked({ kind: 'image', name: f.name, mime: f.type, size: f.size, dataUrl: url });
+        };
+        reader.readAsDataURL(f);
+      } else if (isTextLike(f) && (f.size ?? 0) <= MAX_TEXT_BYTES) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const txt = typeof reader.result === 'string' ? reader.result : '';
+          if (txt) addPicked({ kind: 'text', name: f.name, mime: f.type, size: f.size, text: txt });
+        };
+        reader.readAsText(f, 'utf-8');
+      } else {
+        // 其它（含超大文本/二进制）：仅陈列文件名
+        addPicked({ kind: 'file', name: f.name, mime: f.type || 'application/octet-stream', size: f.size });
+      }
+    }
+  };
+
+  // 粘贴：图片 / 文件直接拾取；纯文本默认进 textarea
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const items = Array.from(cd.items || []);
+    const imgItem = items.find((i) => i.kind === 'file' && i.type && i.type.startsWith('image/'));
+    const files = Array.from(cd.files || []);
+    // 有图片或文件时阻止默认（避免把图片/文件二进制文本塞进输入框）
+    if (imgItem || files.length) {
+      e.preventDefault();
+      const pickedFiles: File[] = [];
+      if (imgItem) { const f = imgItem.getAsFile(); if (f) pickedFiles.push(f); }
+      for (const f of files) { if (!(f.type.startsWith('image/') && imgItem)) pickedFiles.push(f); }
+      intoPicked(pickedFiles);
     }
   };
 
@@ -415,6 +488,25 @@ export const AiChatConversation = memo(function AiChatConversation({
                       ))}
                     </div>
                   )}
+                  {/* 附件（非图片）：文本已在请求中注入，二进制仅陈列文件名 */}
+                  {m.attachments && m.attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-1.5">
+                      {m.attachments.map((a, i) => (
+                        <span
+                          key={i}
+                          className={`flex items-center gap-1 max-w-[220px] truncate text-[11px] px-1.5 py-0.5 rounded-md border ${
+                            m.role === 'user'
+                              ? 'border-black/10 dark:border-white/10'
+                              : 'border-neutral-300 dark:border-stone-600'
+                          } ${mutedCls}`}
+                          title={`${a.name}${a.size != null ? `（${a.size} 字节）` : ''}${a.kind === 'text' ? ' — 文本内容已随消息发送' : ''}`}
+                        >
+                          {a.kind === 'text' ? <FileText size={12} /> : <FileIcon size={12} />}
+                          <span className="truncate">{a.name}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {m.error ? (
                     <span className="text-red-500 dark:text-red-400">{m.content}</span>
                   ) : m.content ? (
@@ -435,16 +527,26 @@ export const AiChatConversation = memo(function AiChatConversation({
         <div className="max-w-3xl mx-auto">
           <div className="flex items-end gap-3">
             <div className={`flex-1 rounded-2xl ${inputWrapCls} px-4 py-2.5 focus-within:border-sky-400 transition-colors`}>
-              {/* 多模态：已选图片缩略图预览（可单击移除） */}
-              {pickedImages.length > 0 && (
+              {/* 附件区：已选图片缩略图 + 文本/二进制文件 chip（可单击移除） */}
+              {picked.length > 0 && (
                 <div className="flex flex-wrap gap-2 mb-2">
-                  {pickedImages.map((src, i) => (
-                    <div key={i} className="relative group">
-                      <img src={src} alt={`图${i + 1}`} className="w-14 h-14 rounded-lg object-cover border border-black/10 dark:border-white/10" />
+                  {picked.map((p, i) => (
+                    <div key={i} className="group relative">
+                      {p.kind === 'image' && p.dataUrl ? (
+                        <img src={p.dataUrl} alt={`图${i + 1}`} className="w-14 h-14 rounded-lg object-cover border border-black/10 dark:border-white/10" />
+                      ) : (
+                        <span
+                          className={`flex items-center gap-1 max-w-[160px] truncate text-[11px] px-2 py-1 rounded-lg border ${capsuleMode ? 'border-white/10 text-white/70' : 'border-black/10 dark:border-white/10 text-neutral-500 dark:text-stone-400'}`}
+                          title={`${p.name}${p.size != null ? `（${p.size} 字节）` : ''}${p.kind === 'text' ? ' — 文本内容将随消息发送' : p.kind === 'image' ? ' — 正在读取图片' : ''}`}
+                        >
+                          {p.kind === 'text' ? <FileText size={12} /> : <FileIcon size={12} />}
+                          <span className="truncate">{p.name}</span>
+                        </span>
+                      )}
                       <button
-                        onClick={() => setPickedImages((prev) => prev.filter((_, j) => j !== i))}
+                        onClick={() => setPicked((prev) => prev.filter((_, j) => j !== i))}
                         className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        aria-label="移除图片"
+                        aria-label="移除附件"
                       >
                         <X size={12} />
                       </button>
@@ -458,8 +560,9 @@ export const AiChatConversation = memo(function AiChatConversation({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
                 }}
+                onPaste={onPaste}
                 rows={1}
-                placeholder={pickedImages.length ? '可选：再输入图片说明；留空直接发送图片' : "发消息给 AI，Enter 发送，Shift+Enter 换行"}
+                placeholder={picked.length ? '可选：输入图片/文件说明；留空直接发送' : "发消息给 AI，粘贴图片/文件或输入文本，Enter 发送"}
                 className={`w-full resize-none max-h-40 min-h-[24px] bg-transparent text-sm outline-none ${capsuleMode ? 'text-white placeholder:text-white/40' : 'text-neutral-800 dark:text-stone-100 placeholder:text-neutral-400'}`}
               />
               <div className="flex items-center justify-between mt-1.5">
@@ -468,7 +571,7 @@ export const AiChatConversation = memo(function AiChatConversation({
                   {onToggleAgent && (
                     <button
                       onClick={() => onToggleAgent(!agent)}
-                      title={agent ? '工具模式已开启（可联网/调用工具）' : '开启后可联网 / 调用工具'}
+                      title={agent ? '联网模式已开启（可联网 / 调用工具）' : '开启后可联网 / 调用工具'}
                       className={`flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-md transition-colors ${
                         agent
                           ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300'
@@ -476,18 +579,17 @@ export const AiChatConversation = memo(function AiChatConversation({
                       }`}
                     >
                       <Sparkles size={13} />
-                      <span>工具</span>
+                      <span>联网</span>
                     </button>
                   )}
                   <label className={`flex items-center gap-1 text-[11px] cursor-pointer px-1.5 py-0.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 ${capsuleMode ? 'text-white/50 hover:text-white/80' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600'}`}>
-                    <ImagePlus size={14} />
-                    <span>图片</span>
+                    <Paperclip size={14} />
+                    <span>导入</span>
                     <input
                       type="file"
-                      accept="image/*"
                       multiple
                       className="hidden"
-                      onChange={(e) => { pickImages(e.target.files); e.target.value = ''; }}
+                      onChange={(e) => { intoPicked(Array.from(e.target.files || [])); e.target.value = ''; }}
                     />
                   </label>
                 </div>
@@ -496,7 +598,7 @@ export const AiChatConversation = memo(function AiChatConversation({
             </div>
             <button
               onClick={submit}
-              disabled={busy || (!input.trim() && pickedImages.length === 0)}
+              disabled={busy || (!input.trim() && picked.length === 0)}
               className={`btn-press w-11 h-11 flex items-center justify-center rounded-2xl ${sendBtnCls} transition-opacity`}
             >
               <Send size={18} />

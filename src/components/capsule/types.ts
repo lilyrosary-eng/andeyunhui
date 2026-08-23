@@ -15,12 +15,35 @@ export interface PlayInfo {
   key?: string;
 }
 
+/** 附件类型：image=图片(走视觉理解)；text=文本类(读内容给AI)；file=其它二进制(仅陈列文件名) */
+export type AttachmentKind = 'image' | 'text' | 'file';
+
+/** 消息里陈列的附件元数据（仅存名字/类型/大小，不落大体积内容，避免撑爆 localStorage） */
+export interface AttachmentMeta {
+  kind: AttachmentKind;
+  name: string;
+  mime: string;
+  size?: number;
+}
+
+/** 发送时的附件（带临时内容：text 附件的文本内容，仅发送阶段持有，不落库） */
+export interface SendAttachment {
+  kind: AttachmentKind;
+  name: string;
+  mime: string;
+  size?: number;
+  /** text 附件：读取到的文本内容（发送时注入请求，之后丢弃） */
+  text?: string;
+}
+
 export interface ChatMsg {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   /** 多模态：用户发送的图片（data URL 列表）。图片本体不发给后端，后端只收到 OCR 描述。 */
   images?: string[];
+  /** 非图片附件（文本/二进制）陈列元数据：文本内容已注入请求、二进制仅展示文件名。 */
+  attachments?: AttachmentMeta[];
   reasoning?: string; // 思考模式下的思维链（reasoning_content），可折叠遮罩展示
   error?: boolean;
   /** 群聊模式：哪条消息由哪个伴侣说的（companion.id）。单聊模式隐含为当前 active companion。 */
