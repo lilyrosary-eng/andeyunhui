@@ -46,6 +46,7 @@ static GEN: AtomicU64 = AtomicU64::new(0);
 /// - id：前端分配的唯一会话 id
 /// - cwd：工作目录（可选，默认用户家目录）
 /// - cols/rows：初始终端尺寸
+/// - env：注入到子进程的环境变量（可选）。用于抑制外部浏览器（如 BROWSER=…）等场景。
 /// 读线程通过 app.emit("pty-output:<id>", data) 推流；进程退出时 emit("pty-exit:<id>")。
 #[tauri::command]
 pub async fn pty_create(
@@ -54,6 +55,7 @@ pub async fn pty_create(
     cwd: Option<String>,
     cols: u16,
     rows: u16,
+    env: Option<HashMap<String, String>>,
 ) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err("pty_create: id 不能为空".to_string());
@@ -77,6 +79,12 @@ pub async fn pty_create(
         let p = std::path::Path::new(c);
         if p.is_dir() {
             cmd.cwd(p);
+        }
+    }
+    // 注入环境变量（如抑制外部浏览器：BROWSER=…）
+    if let Some(vars) = env {
+        for (k, v) in vars {
+            cmd.env(k, v);
         }
     }
     // spawn 子进程

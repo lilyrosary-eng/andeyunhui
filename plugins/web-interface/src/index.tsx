@@ -7,18 +7,49 @@
 //   点一键启动 → 在一个真实终端里跑它（服务进程常驻终端，可看日志、可交互）；
 //   服务端口起来后，模块内 iframe 直接预览它的页面。
 //
-// 布局：左侧预设列表 + 右侧详情（状态卡片 / 编辑表单 / 启动后：预览 + 终端）
+// 布局：左侧（复用宿主 ModuleSidebarShell 统一侧边栏 + 右键菜单）
+//        + 右侧详情（状态卡片 / 编辑表单 / 启动后：预览 + 终端）
 // 复用：pty_create/write/resize/kill（白名单已放行）+ xterm.js
+//
+// 2026-08-23 增强：
+//   - 侧边栏复用宿主 ModuleSidebarShell（已有集成于 WebSidebarShell.tsx），
+//     不再手搓 <aside>，并获得主色高亮与右键「启动/编辑/删除」。
+//   - 预览自动轮询：服务未就绪前每 3.5s 自动重建 iframe，一次性成功后停；
+//     显示重连次数，并提供「停止/继续自动刷新」开关，不再需要手动刷新多次。
+// 抑制外部浏览器：启动时向子进程注入 BROWSER=空操作，脚本用 Python
+//     webbrowser 打开时不再弹 Edge，只在模块内 iframe 预览。
 // ============================================================
 const React = window.__HOST_REACT__;
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
 import { WebTerminal } from './Terminal';
+import { WebSidebarShell, GlobeIcon, type WebSidebarItem } from './WebSidebarShell';
 import {
   loadPresets, savePresets, newPresetId, validatePreset,
   suggestFromFile, scanAndRecognize, recognitionToPreset, baseName, dirName, extOf, RUNNABLE_EXTS,
   type WebPreset, type WebRun, type WebRunStatus,
 } from './presets';
+
+// ---------- 模块设置（持久化到 localStorage）----------
+const SETTINGS_KEY = 'web_interface.settings';
+const DEFAULT_SETTINGS: { suppressBrowser: boolean } = { suppressBrowser: true };
+
+function loadSettings(): { suppressBrowser: boolean } {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    const parsed = JSON.parse(raw) as Partial<{ suppressBrowser: boolean }>;
+    return { suppressBrowser: parsed.suppressBrowser !== false };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+// ---------- 抑制外部浏览器 ----------
+// gradio/kohya/ComfyUI 启动时若是 webbrowser.open 打开页面，Python 读到 BROWSER 后
+// 会执行该「空操作」命令（不带 %s 时会被回退到系统默认，故这里必须带 %s 作为命令模板），
+// 从而不弹系统默认浏览器（Edge），只看模块内 iframe 预览。
+const SUPPRESS_BROWSER_ENV: Record<string, string> = { BROWSER: 'cmd.exe /c exit %s' };
 
 // ---------- 小组件 ----------
 function StatusChip({ status }: { status: WebRunStatus }) {
@@ -38,17 +69,69 @@ function StatusChip({ status }: { status: WebRunStatus }) {
   );
 }
 
-// 启动后的运行区：预览(iframe) + 终端(可折叠)
+// 简洁开关（宿主未导出 Switch，用最小实现）
+function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+  return React.createElement('button', {
+    type: 'button', role: 'switch', 'aria-checked': on,
+    onClick: () => onChange(!on),
+    className: `relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${on ? 'bg-sky-500' : 'bg-neutral-300 dark:bg-stone-600'}`,
+    children: React.createElement('span', {
+      className: `inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${on ? 'translate-x-[21px]' : 'translate-x-[3px]'}`,
+    }),
+  });
+}
+
+// ---------- 模块设置内容（复用宿主 ModuleSettingsPanel）----------
+function SettingsContent({
+  suppressBrowser, onChangeSuppress, onClose,
+}: {
+  suppressBrowser: boolean;
+  onChangeSuppress: (v: boolean) => void;
+  onClose: () => void;
+}) {
+  const ModuleSettingsPanel = (window.__HOST_UI__ as Record<string, unknown>)?.ModuleSettingsPanel as
+    | React.FC<{ title: string; icon: React.ReactNode; onClose: () => void; children: React.ReactNode }>
+    | undefined;
+  if (!ModuleSettingsPanel) return null;
+  return React.createElement(ModuleSettingsPanel, {
+    title: 'Web 接口',
+    icon: React.createElement(GlobeIcon),
+    onClose,
+    children: React.createElement('div', { className: 'space-y-4' },
+      // 运行
+      React.createElement('div', { className: 'glass-panel p-4' },
+        React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, '运行'),
+        React.createElement('label', { className: 'flex items-center justify-between gap-3 cursor-pointer select-none py-1' },
+          React.createElement('span', { className: 'flex-1 text-sm text-neutral-600 dark:text-stone-300' },
+            '抑制外部浏览器',
+            React.createElement('span', { className: 'block text-xs text-neutral-400 dark:text-stone-500' }, '启动服务时不让脚本弹系统默认浏览器（Edge），只在模块内预览'),
+          ),
+          React.createElement(Toggle, { on: suppressBrowser, onChange: onChangeSuppress }),
+        ),
+      ),
+      // 说明
+      React.createElement('div', { className: 'glass-panel p-4' },
+        React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, '说明'),
+        React.createElement('p', { className: 'text-sm text-neutral-600 dark:text-stone-300' }, '新建预设时可选择本地文件/文件夹，自动识别入口脚本、运行命令与预览地址；服务进程常驻终端，端口就绪后会在模块内自动加载预览。'),
+      ),
+    ),
+  });
+}
+
+// 启动后的运行区：预览(iframe 自动轮询) + 终端(可折叠)
 function RunPane({
-  preset, onReady, onStopped,
+  preset, suppressBrowser, onReady, onStopped,
 }: {
   preset: WebPreset;
+  suppressBrowser: boolean;
   onReady: () => void;
   onStopped: () => void;
 }) {
   const [showTerminal, setShowTerminal] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
-  const [probeReady, setProbeReady] = useState(true);
+  const [probeReady, setProbeReady] = useState(false);
+  const [autoReload, setAutoReload] = useState(true);
+  const [reloadCount, setReloadCount] = useState(0);
   const readyFired = useRef(false);
   const loadedOnce = useRef(false);
 
@@ -59,37 +142,46 @@ function RunPane({
     }
   }, [onReady]);
 
-  // iframe 成功加载服务页 → 标记就绪、关掉等待遮罩、停自动重载
+  // iframe 成功加载服务页 → 标记就绪、关掉等待态（自动轮询随之停）
   const handleIframeLoad = useCallback(() => {
     loadedOnce.current = true;
     setProbeReady(true);
     markReady();
   }, [markReady]);
 
-  // 兜底：启动若干秒后即使 iframe 没触发 load 也按「运行中」处理
-  useEffect(() => {
-    const t = setTimeout(markReady, 8000);
-    return () => clearTimeout(t);
-  }, [markReady]);
-
   const hasUrl = !!preset.url?.trim();
 
-  // 预览「就绪」：直接挂 iframe；连接被拒时 Chrome 不会触发 iframe 的 onLoad，
-  // 因此只要还没成功加载就持续自动重建 iframe（every 3.5s），服务起来后 onLoad
-  // 触发即稳定显示。避免大型应用启动慢时长期停在"连接被拒"。沙箱禁用 fetch，
-  // 故不用端口探测，改用 iframe onLoad 判定就绪。
+  // 预览「自动轮询」：服务未就绪时每 3.5s 重建 iframe 触发重新加载；
+  // 一旦 iframe onLoad（服务真正就绪）则 loadedOnce 置位，轮询自动停止。
+  // 用户可点「停止自动刷新」手动接管（此时可用右侧刷新按钮/重挂 iframe）。
   useEffect(() => {
     if (!hasUrl) return;
     loadedOnce.current = false;
+    readyFired.current = false;
     setProbeReady(false);
-    let attempts = 0;
+    setReloadCount(0);
+    if (!autoReload) return;
     const timer = window.setInterval(() => {
-      attempts += 1;
-      if (loadedOnce.current || attempts > 40) { window.clearInterval(timer); setProbeReady(true); return; }
+      // 已成功加载，或用户停止了自动刷新 → 本轮不动作
+      if (loadedOnce.current || !autoReload) return;
       setReloadKey((k) => k + 1);
+      setReloadCount((n) => n + 1);
     }, 3500);
     return () => window.clearInterval(timer);
-  }, [hasUrl, preset.url]);
+  }, [hasUrl, preset.url, autoReload]);
+
+  // 手动刷新（停止自动刷新后仍可用）
+  const manualReload = useCallback(() => {
+    loadedOnce.current = false;
+    setProbeReady(false);
+    setReloadKey((k) => k + 1);
+  }, []);
+
+  // 注入抑制外部浏览器环境变量（仅在模块设置开启该选项时）
+  const termEnv = useMemo(
+    () => (suppressBrowser ? SUPPRESS_BROWSER_ENV : undefined),
+    [suppressBrowser]
+  );
 
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-2">
@@ -98,10 +190,52 @@ function RunPane({
         <div className="flex items-center gap-2 rounded-xl border border-black/10 dark:border-white/10 px-3 py-1.5 bg-white dark:bg-stone-900">
           <span className="text-xs text-neutral-400 dark:text-stone-500">预览</span>
           <code className="flex-1 truncate text-xs text-neutral-600 dark:text-stone-300">{preset.url}</code>
+
+          {/* 就绪/轮询状态 */}
+          {probeReady ? (
+            <span className="flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              已就绪
+            </span>
+          ) : autoReload ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+              <span className="inline-block h-3 w-3 rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
+              等待服务 · 已重试 {reloadCount} 次
+            </span>
+          ) : (
+            <span className="rounded-full border border-black/10 dark:border-white/10 px-2 py-0.5 text-[11px] text-neutral-400 dark:text-stone-500">
+              已停止自动刷新
+            </span>
+          )}
+
+          {/* 自动刷新开关 */}
+          {probeReady ? null : autoReload ? (
+            <button
+              className="btn-press rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
+              onClick={() => setAutoReload(false)}
+              title="停止自动刷新，改为手动刷新"
+            >
+              停止自动刷新
+            </button>
+          ) : (
+            <button
+              className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
+              onClick={() => { setAutoReload(true); manualReload(); }}
+              title="重新开启自动刷新"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <polyline points="21 3 21 9 15 9" />
+              </svg>
+              继续自动刷新
+            </button>
+          )}
+
+          {/* 手动刷新 */}
           <button
             className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
-            onClick={() => { loadedOnce.current = false; setProbeReady(false); setReloadKey((k) => k + 1); }}
-            title="刷新预览"
+            onClick={manualReload}
+            title="手动刷新预览"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M3 12a9 9 0 0 1 15.36-6.36L21 8" />
@@ -110,6 +244,8 @@ function RunPane({
               <path d="M3 21v-5h5" />
             </svg>
           </button>
+
+          {/* 终端折叠开关 */}
           <button
             className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
             onClick={() => setShowTerminal((s) => !s)}
@@ -130,9 +266,9 @@ function RunPane({
           {hasUrl ? (
             <div className="absolute inset-0">
               {!probeReady && (
-                <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 bg-white/75 dark:bg-stone-950/75 text-xs text-neutral-400 dark:text-stone-500">
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-white/75 dark:bg-stone-950/75 text-xs text-neutral-400 dark:text-stone-500">
                   <span className="inline-block h-4 w-4 rounded-full border-2 border-neutral-300 border-t-sky-500 animate-spin" />
-                  等待服务启动，就绪后自动加载预览…
+                  <span>等待服务启动，就绪后自动加载预览（已重试 {reloadCount} 次）…</span>
                 </div>
               )}
               <iframe
@@ -158,6 +294,7 @@ function RunPane({
               <WebTerminal
                 command={preset.args}
                 cwd={preset.cwd}
+                env={termEnv}
                 hint={preset.args}
                 onExit={onStopped}
               />
@@ -196,7 +333,14 @@ function EditorForm({
     const msg = validatePreset({ name, args });
     if (msg) { setErr(msg); return; }
     setErr('');
-    onSave({ ...initial, name: name.trim(), desc: desc.trim(), args: args.trim(), cwd: cwd.trim() || undefined, url: url.trim() });
+    onSave({
+      ...initial,
+      name: name.trim(),
+      desc: desc.trim(),
+      args: args.trim(),
+      cwd: cwd.trim() || undefined,
+      url: url.trim(),
+    });
   };
 
   // 打开文件对话框（限定可运行/脚本扩展名），选中后自动识别填入
@@ -408,11 +552,26 @@ function WebInterfaceModule() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState<WebPreset | 'new' | null>(null);
   const [run, setRun] = useState<WebRun | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [settings, setSettings] = useState(loadSettings);
+  const [showSettings, setShowSettings] = useState(false);
 
   // 持久化预设
   useEffect(() => { savePresets(presets); }, [presets]);
 
+  // 持久化模块设置
+  useEffect(() => {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* ignore */ }
+  }, [settings]);
+
   const selected = useMemo(() => presets.find((p) => p.id === selectedId) ?? null, [presets, selectedId]);
+
+  // 搜索过滤
+  const q = searchQuery.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!q) return presets;
+    return presets.filter((p) => (p.name + ' ' + (p.desc ?? '') + ' ' + p.args).toLowerCase().includes(q));
+  }, [presets, q]);
 
   const select = useCallback((id: string) => {
     setSelectedId(id);
@@ -422,7 +581,31 @@ function WebInterfaceModule() {
   const addPreset = useCallback(() => {
     setSelectedId(null);
     setEditing('new');
+    setShowSettings(false);
   }, []);
+
+  const handleOpenSettings = useCallback(() => {
+    setEditing(null);
+    setShowSettings((s) => !s);
+  }, []);
+
+  const startPreset = useCallback((preset: WebPreset) => {
+    setSelectedId(preset.id);
+    setEditing(null);
+    // 同预设重复启动 → 先停掉旧的
+    setRun({ presetId: preset.id, ptyId: '', status: 'starting', startedAt: Date.now() });
+  }, []);
+
+  // 侧边栏：按 id 启动
+  const startById = useCallback((id: string) => {
+    const p = presets.find((x) => x.id === id);
+    if (p) startPreset(p);
+  }, [presets, startPreset]);
+
+  const editById = useCallback((id: string) => {
+    const p = presets.find((x) => x.id === id);
+    if (p) { setSelectedId(id); setEditing(p); }
+  }, [presets]);
 
   const savePreset = useCallback((p: WebPreset) => {
     setPresets((prev) => {
@@ -444,12 +627,6 @@ function WebInterfaceModule() {
     if (selectedId === id) { setSelectedId(null); setEditing(null); }
   }, [run, selectedId]);
 
-  const start = useCallback(() => {
-    if (!selected) return;
-    // 同预设重复启动 → 先停掉旧的
-    setRun({ presetId: selected.id, ptyId: '', status: 'starting', startedAt: Date.now() });
-  }, [selected]);
-
   const stop = useCallback(() => setRun(null), []);
 
   const markRunning = useCallback(() => {
@@ -463,54 +640,46 @@ function WebInterfaceModule() {
 
   const isRunningThis = !!run && run.presetId === selected?.id;
 
+  // 侧边栏数据映射
+  const sidebarItems: WebSidebarItem[] = useMemo(() => filtered.map((p) => ({
+    id: p.id,
+    name: p.name,
+    desc: p.desc,
+    hint: p.args,
+    runStatus: run?.presetId === p.id ? run.status : undefined,
+  })), [filtered, run]);
+
   return (
     <div className="flex h-full w-full gap-3 overflow-hidden">
-      {/* 左侧：预设列表 */}
-      <aside className="w-60 shrink-0 flex flex-col gap-2 rounded-2xl border border-black/10 dark:border-white/10 p-2 bg-white/60 dark:bg-stone-900/60">
-        <div className="flex items-center justify-between px-1 py-1">
-          <span className="text-sm font-semibold text-neutral-700 dark:text-stone-200">预设</span>
-          <button
-            className="btn-press flex items-center gap-1 rounded-lg px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
-            onClick={addPreset}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            新建
-          </button>
-        </div>
+      {/* 左侧：统一侧边栏（复用宿主 ModuleSidebarShell + 右键菜单） */}
+      <WebSidebarShell
+        icon={<GlobeIcon />}
+        title="Web 接口"
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        searchPlaceholder="搜索预设"
+        onOpenModuleSettings={handleOpenSettings}
+        onAdd={addPreset}
+        onStart={startById}
+        onEdit={editById}
+        onDelete={deletePreset}
+        items={sidebarItems}
+        selectedId={selectedId}
+        onSelect={select}
+        emptyText={q ? '没有匹配的预设' : '还没有预设。点「新建」，选本地文件/文件夹自动识别后保存。'}
+      />
 
-        <div className="flex-1 min-h-0 overflow-y-auto space-y-1">
-          {presets.map((p) => (
-            <button
-              key={p.id}
-              className={`w-full text-left rounded-xl px-3 py-2 transition-colors ${
-                selectedId === p.id
-                  ? 'bg-sky-500/10 ring-1 ring-sky-500/30'
-                  : 'hover:bg-black/5 dark:hover:bg-white/5'
-              }`}
-              onClick={() => select(p.id)}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-neutral-800 dark:text-stone-100 truncate">{p.name}</span>
-                {run?.presetId === p.id && <StatusChip status={run.status} />}
-              </div>
-              {p.desc && <div className="mt-0.5 text-xs text-neutral-400 dark:text-stone-500 truncate">{p.desc}</div>}
-              <div className="mt-0.5 font-mono text-[11px] text-neutral-400 dark:text-stone-600 truncate">{p.args}</div>
-            </button>
-          ))}
-          {presets.length === 0 && (
-            <div className="px-3 py-6 text-center text-xs text-neutral-400 dark:text-stone-500">
-              还没有预设。点「新建」，选本地文件/文件夹自动识别后保存。
-            </div>
-          )}
-        </div>
-      </aside>
-
-      {/* 右侧：详情 / 编辑 / 运行区 */}
-      <div className="flex-1 min-w-0 flex flex-col">
-        {editing === 'new' ? (
+      {/* 右侧：详情 / 编辑 / 运行区 / 设置面板 */}
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+        {showSettings ? (
+          <div className="flex-1 min-h-0 flex flex-col">
+            <SettingsContent
+              suppressBrowser={settings.suppressBrowser}
+              onChangeSuppress={(v) => setSettings((s) => ({ ...s, suppressBrowser: v }))}
+              onClose={() => setShowSettings(false)}
+            />
+          </div>
+        ) : editing === 'new' ? (
           <EditorForm
             initial={{ id: '', name: '', desc: '', kind: 'command', args: '', cwd: '', url: '', createdAt: Date.now() }}
             onSave={(p) => savePreset({ ...p, id: newPresetId(), createdAt: Date.now() })}
@@ -518,11 +687,7 @@ function WebInterfaceModule() {
           />
         ) : !selected ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-neutral-400 dark:text-stone-500">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <line x1="2" y1="12" x2="22" y2="12" />
-              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-            </svg>
+            <GlobeIcon />
             <div className="text-sm">在左侧选择预设，或新建一个本地 Web 服务预设</div>
           </div>
         ) : editing ? (
@@ -541,7 +706,7 @@ function WebInterfaceModule() {
                   {!isRunningThis ? (
                     <button
                       className="btn-press flex items-center gap-1.5 rounded-lg bg-emerald-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-600"
-                      onClick={start}
+                      onClick={() => startPreset(selected)}
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <polygon points="5 3 19 12 5 21 5 3" />
@@ -581,7 +746,7 @@ function WebInterfaceModule() {
 
             {/* 运行区：preview + 终端 */}
             {isRunningThis && run ? (
-              <RunPane preset={selected} onReady={markRunning} onStopped={markStopped} />
+              <RunPane preset={selected} suppressBrowser={settings.suppressBrowser} onReady={markRunning} onStopped={markStopped} />
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-black/10 dark:border-white/10 text-neutral-400 dark:text-stone-500">
                 <div className="text-sm">点击「一键启动」在终端里运行：</div>

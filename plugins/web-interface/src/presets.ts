@@ -21,6 +21,8 @@ export interface WebPreset {
   cwd?: string;
   /** 预览地址（起点就绪后 iframe 加载它），如 http://127.0.0.1:8000 */
   url: string;
+  /** 是否抑制外部浏览器（默认开启：启动时注入 BROWSER 禁用，只在本软件内预览） */
+  suppressBrowser?: boolean;
   createdAt: number;
 }
 

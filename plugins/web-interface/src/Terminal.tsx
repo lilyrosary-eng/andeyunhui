@@ -44,6 +44,8 @@ export interface WebTerminalProps {
   command: string;
   /** 工作目录（可选） */
   cwd?: string;
+  /** 注入子进程的环境变量（可选）。用于抑制外部浏览器（如 BROWSER=…）等场景 */
+  env?: Record<string, string>;
   /** 开终端时先在顶部打印的提示行（如 `$ python -m http.server 8000`），仅作展示 */
   hint?: string;
   /** 进程退出回调（pty-exit） */
@@ -52,7 +54,7 @@ export interface WebTerminalProps {
   onError?: (msg: string) => void;
 }
 
-export function WebTerminal({ command, cwd, hint, onExit, onError }: WebTerminalProps) {
+export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'exited' | 'error'>('loading');
   const [errMsg, setErrMsg] = useState('');
@@ -96,7 +98,7 @@ export function WebTerminal({ command, cwd, hint, onExit, onError }: WebTerminal
 
         // 由模块分配的 ptyId，服务即跑在这个终端里
         ptyId = 'wp_pty_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-        await hostApi.invoke('pty_create', { id: ptyId, cwd: cwd || null, cols, rows });
+        await hostApi.invoke('pty_create', { id: ptyId, cwd: cwd || null, cols, rows, env: env || null });
         if (disposed) return;
 
         // 输出桥接：PTY → xterm
@@ -179,7 +181,7 @@ export function WebTerminal({ command, cwd, hint, onExit, onError }: WebTerminal
       cleanupRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [command, cwd, hint]);
+  }, [command, cwd, env, hint]);
 
   return (
     <div className="relative flex flex-col h-full w-full bg-white dark:bg-[#1e1e1e]">
