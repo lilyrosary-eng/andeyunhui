@@ -12,9 +12,11 @@
 // ============================================================
 const React = window.__HOST_REACT__;
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
+const hostApi = window.__HOST_API__;
 import { WebTerminal } from './Terminal';
 import {
   loadPresets, savePresets, newPresetId, validatePreset, builtinTemplates,
+  suggestFromFile, scanRunnableFiles, baseName, extOf, RUNNABLE_EXTS,
   type WebPreset, type WebRun, type WebRunStatus,
 } from './presets';
 
@@ -147,15 +149,84 @@ function EditorForm({
   const [cwd, setCwd] = useState(initial.cwd ?? '');
   const [url, setUrl] = useState(initial.url);
   const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [scanInfo, setScanInfo] = useState<{ dir: string; files: { name: string; path: string; ext: string }[]; picked: Set<string> } | null>(null);
 
   const save = () => {
     const msg = validatePreset({ name, args });
     if (msg) { setErr(msg); return; }
+    setErr('');
     onSave({ ...initial, name: name.trim(), desc: desc.trim(), args: args.trim(), cwd: cwd.trim() || undefined, url: url.trim() });
   };
 
+  // 打开文件对话框（限定可运行/脚本扩展名），选中后自动识别填入
+  const pickFile = useCallback(async () => {
+    setBusy(true); setErr('');
+    try {
+      const files = await hostApi.invoke<string[]>('pick_file', {
+        filters: [{ name: '可执行/脚本', extensions: Object.keys(RUNNABLE_EXTS).map((e) => e.slice(1)) }],
+      });
+      const hit = files && files.length ? suggestFromFile(files[0]) : null;
+      if (!hit) { setErr('未能识别该文件类型，请手动填写命令'); return; }
+      setName(hit.name); setArgs(hit.args); setCwd(hit.cwd ?? '');
+      // 若命令里有常见端口号，顺手填预览地址（取第一个 http://…:port）
+      const m = hit.args.match(/:\s*(\d{2,5})/);
+      if (m) setUrl('http://127.0.0.1:' + m[1]);
+    } catch (e) {
+      setErr('选择文件失败：' + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  // 选择文件夹 → 递归检索其中的可运行/脚本文件集 → 弹候选供勾选
+  const pickFolder = useCallback(async () => {
+    setBusy(true); setErr('');
+    try {
+      const dir = await hostApi.invoke<string | null>('pick_directory');
+      if (!dir) return;
+      const { files } = await scanRunnableFiles(dir, (p) =>
+        hostApi.invoke<{ name: string; path: string; is_dir: boolean }[]>('list_directory', { path: p })
+      );
+      if (files.length === 0) {
+        // 目录里没有可识别文件 → 仅当工作目录用
+        setName(baseName(dir.replace(/[\\/]+$/, '')));
+        setCwd(dir);
+        setErr('该目录下未发现可运行/脚本文件，已作为工作目录填入');
+        return;
+      }
+      setScanInfo({ dir, files, picked: new Set<string>() });
+    } catch (e) {
+      setErr('检索文件夹失败：' + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  // 应用文件夹中勾选的文件集：每个文件生成一行运行命令，cwd 用文件夹根
+  const applyScanPicked = useCallback((info: { dir: string; files: { name: string; path: string }[]; picked: Set<string> }) => {
+    const chosen = info.files.filter((f) => info.picked.has(f.path));
+    if (chosen.length === 0) { setErr('请先勾选至少一个文件'); return; }
+    const cmds = chosen.map((f) => {
+      const s = suggestFromFile(f.path);
+      return s ? s.args : f.path;
+    });
+    if (cmds.length === 1) {
+      const s = suggestFromFile(chosen[0].path);
+      if (s) { setName(s.name); setArgs(s.args); }
+    } else {
+      // 多文件：以文件夹名做预设名，命令逐行列出，cwd 指向文件夹
+      setName(baseName(info.dir.replace(/[\\/]+$/, '')));
+      setArgs(cmds.join('\n'));
+    }
+    setCwd(info.dir);
+    setScanInfo(null);
+    setErr('');
+  }, []);
+
   const label = 'text-xs font-medium text-neutral-500 dark:text-stone-400 mb-1 block';
   const input = 'w-full rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-stone-900 px-3 py-2 text-sm outline-none focus:border-sky-500';
+  const btnBase = 'btn-press inline-flex items-center gap-1 rounded-lg border border-black/10 dark:border-white/10 px-3 py-1.5 text-xs text-neutral-600 dark:text-stone-300 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50';
 
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-4 rounded-2xl border border-black/10 dark:border-white/10 p-4 bg-white dark:bg-stone-900 overflow-y-auto">
@@ -165,6 +236,64 @@ function EditorForm({
         </div>
         {err && <div className="text-xs text-red-500">{err}</div>}
       </div>
+
+      {/* 从本地导入：选文件 或 选文件夹检索文件集 */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-neutral-400 dark:text-stone-500">从本地导入：</span>
+        <button className={btnBase} onClick={pickFile} disabled={busy} title="选择一个 exe / bat / cmd / py 等文件，自动识别命令填入">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+            <polyline points="13 2 13 9 20 9" />
+          </svg>
+          选择文件
+        </button>
+        <button className={btnBase} onClick={pickFolder} disabled={busy} title="选择一个文件夹，检索其中可运行/脚本文件集">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          选择文件夹
+        </button>
+        {busy && <span className="text-xs text-neutral-400 dark:text-stone-500">读取中…</span>}
+      </div>
+
+      {scanInfo && (
+        <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs font-medium text-neutral-600 dark:text-stone-300">
+              在 <code className="text-sky-600 dark:text-sky-400">{scanInfo.dir}</code> 找到 {scanInfo.files.length} 个可运行/脚本文件，勾选后填写
+            </span>
+            <button className="text-xs text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200" onClick={() => setScanInfo(null)}>收起</button>
+          </div>
+          <div className="max-h-40 overflow-y-auto space-y-0.5">
+            {scanInfo.files.map((f) => {
+              const on = scanInfo.picked.has(f.path);
+              return (
+                <label key={f.path} className="flex items-center gap-2 rounded-md px-1.5 py-0.5 text-xs cursor-pointer hover:bg-black/5 dark:hover:bg-white/5">
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={() => {
+                      const next = new Set(scanInfo.picked);
+                      if (on) next.delete(f.path); else next.add(f.path);
+                      setScanInfo({ ...scanInfo, picked: next });
+                    }}
+                  />
+                  <span className="rounded bg-black/5 dark:bg-white/10 px-1 font-mono text-[10px]">{f.ext.slice(1)}</span>
+                  <span className="flex-1 truncate text-neutral-700 dark:text-stone-200">{f.name}</span>
+                </label>
+              );
+            })}
+          </div>
+          <div className="mt-2">
+            <button
+              className="btn-press rounded-lg bg-sky-500 px-3 py-1 text-xs font-medium text-white hover:bg-sky-600"
+              onClick={() => applyScanPicked(scanInfo)}
+            >
+              填写所选 ({scanInfo.picked.size})
+            </button>
+          </div>
+        </div>
+      )}
 
       <div>
         <label className={label}>名称 *</label>
@@ -177,7 +306,7 @@ function EditorForm({
       <div>
         <label className={label}>命令 / 脚本 *</label>
         <textarea className={input + ' font-mono min-h-[72px] resize-y'} value={args} onChange={(e) => setArgs(e.target.value)} placeholder={'如：python -m http.server 8000'} />
-        <div className="mt-1 text-xs text-neutral-400 dark:text-stone-500">服务进程会常驻在打开的终端里，回车后运行。</div>
+        <div className="mt-1 text-xs text-neutral-400 dark:text-stone-500">服务进程会常驻在打开的终端里，回车后运行。多行 = 依次执行多条命令。</div>
       </div>
       <div>
         <label className={label}>工作目录（可选）</label>
