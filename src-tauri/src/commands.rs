@@ -1029,18 +1029,20 @@ fn plugins_max_mtime(app: &AppHandle) -> u64 {
 /// 阶段 0：Rust 端完成 manifest 存在性、解析、必填字段、版本与依赖校验
 /// 结果会被缓存，仅当插件目录 mtime 变化时重新扫描
 #[tauri::command]
-pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, String> {
-    // 先解压 user_plugins/ 下的 .mufurong 文件（版本匹配的跳过，极快）
-    // 解压后新目录会改变 mtime，缓存自动失效
-    extract_mufurong_plugins(&app);
+pub async fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, String> {
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || scan_plugins_sync(app2))
+        .await
+        .map_err(|e| format!("插件扫描任务失败: {e}"))?
+}
 
-    // 同步解压 user_external_deps/ 下的 .mujin 文件（mtime 匹配的跳过，极快）
-    // 必须在 validate_required_assets 之前完成，否则用户安装的 .mujin 依赖会被误判为缺失
-    extract_mujin_deps(&app);
-
+/// 插件扫描/解压的同步主体（放到 spawn_blocking 线程执行，避免占死 UI/IPC 线程）。
+/// 快路径：插件目录 mtime 未变且已有缓存 → 直接命中，不触发解压开销。
+/// 慢路径：缓存失效/未初始化 → 先补齐 .mufurong/.mujin 解压，再全量扫描重建缓存。
+fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResult, String> {
     let current_mtime = plugins_max_mtime(&app);
 
-    // 检查缓存
+    // 快路径命中缓存则直接返回（解压放慢路径，避免热路径白白做 sha256+解压）
     if let Ok(cache) = PLUGIN_SCAN_CACHE.lock() {
         if let Some((ref cached, ref cached_time)) = *cache {
             if *cached_time >= SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(current_mtime) {
@@ -1048,6 +1050,14 @@ pub fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
             }
         }
     }
+
+    // 慢路径：先解压 user_plugins/ 下的 .mufurong 文件（版本匹配的跳过）。
+    // 解压后新目录会改变 mtime，缓存自动失效（本轮扫描后会以 now() 重建缓存）。
+    extract_mufurong_plugins(&app);
+
+    // 同步解压 user_external_deps/ 下的 .mujin 文件（mtime 匹配的跳过）。
+    // 必须在 validate_required_assets 之前完成，否则用户安装的 .mujin 依赖会被误判为缺失。
+    extract_mujin_deps(&app);
 
     // 早期返回：bundled-plugins 与 user_plugins 两个根目录都不存在才认为无插件
     // 顺序：bundled-plugins（内置，权威）优先于 user_plugins（第三方/用户态），
@@ -1494,11 +1504,14 @@ pub fn set_plugin_visibility(app: tauri::AppHandle, plugin_id: String, visible: 
 
 /// 强制刷新插件扫描缓存并重新扫描全部目录（响应「检测新插件」按钮）
 #[tauri::command]
-pub fn refresh_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, String> {
+pub async fn refresh_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, String> {
     if let Ok(mut cache) = PLUGIN_SCAN_CACHE.lock() {
         *cache = None;
     }
-    get_installed_plugins(app)
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || scan_plugins_sync(app2))
+        .await
+        .map_err(|e| format!("插件扫描任务失败: {e}"))?
 }
 
 /// 热重载插件：校验 id 存在后，向前端派发 `plugin-reload` 事件，
