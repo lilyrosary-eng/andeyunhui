@@ -184,13 +184,52 @@ pub async fn pty_resize(id: String, cols: u16, rows: u16) -> Result<(), String> 
     Ok(())
 }
 
-/// 终止 PTY 会话（kill 子进程 + drop master/writer，读线程随之 EOF 退出）。
+/// 强制结束进程树，做到最彻底、最干净利落的资源释放（杜绝终止后残留进程占内存/CPU）。
+///
+/// 背景：portable-pty 的 `child.kill()` 在 Windows 上仅 `TerminateProcess` **直接子进程**
+/// （即 cmd.exe 这个 shell 壳），它派生的服务进程（如 `python`、node 等）不会被杀掉，会变成
+/// 孤儿进程继续吃内存/CPU —— 用户「终止后电脑风扇狂转、资源释放不出来」即源于此。
+///
+/// 因此优先用系统级工具递归强杀整棵进程树；且必须在杀掉 shell 之前执行，否则 shell 一死就
+/// 无法依据 PPID 枚举到它的全部后代。
+#[cfg(windows)]
+fn force_kill_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    // /F 强制、/T 连带整棵进程树；creation_flags 0x0800_0000 = CREATE_NO_WINDOW，避免闪黑窗
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .creation_flags(0x0800_0000)
+        .output();
+}
+
+#[cfg(not(windows))]
+fn force_kill_tree(pid: u32) {
+    // Unix：仅杀直接子进程（近似整棵，够用）。直接子进程无法给出，系统缺少递归树 API 时此兜底即可。
+    let _ = std::process::Command::new("pkill")
+        .args(["-TERM", "-P", &pid.to_string()])
+        .output();
+}
+
+/// 终止 PTY 会话：先进程树强杀 + 杀直接子进程 + drop master/writer，读线程随之 EOF 退出。
 #[tauri::command]
 pub async fn pty_kill(id: String) -> Result<(), String> {
-    let mut reg = PTY_REGISTRY.lock().map_err(|e| format!("注册表锁失败: {}", e))?;
-    if let Some(mut session) = reg.remove(&id) {
+    // 先从注册表取出会话并释放锁（进程树清理可能耗时，避免长期占锁阻塞其他 PTY 操作）
+    let session_opt = {
+        let mut reg = PTY_REGISTRY.lock().map_err(|e| format!("注册表锁失败: {}", e))?;
+        reg.remove(&id)
+    };
+    if let Some(mut session) = session_opt {
+        // 先在 shell 存活时记录其 pid，用于进程树递归强杀
+        let pid = session.child.process_id();
+        if let Some(pid) = pid {
+            // 阻塞调用放入 blocking 线程池，不占用 tauri 异步运行线程
+            tauri::async_runtime::spawn_blocking(move || force_kill_tree(pid))
+                .await
+                .ok();
+        }
+        // 兜底：杀直接子进程（防 taskkill 没覆盖到或 pid 失效等情况）
         let _ = session.child.kill();
-        // 显式 drop 顺序：先 master（关 PTY）再 child；writer 随 session 出作用域自动 drop
+        // 显式 drop 顺序：先 master（关 PTY，读线程收到 EOF 退出）再 child；writer 随 session 出作用域自动 drop
         drop(session.master);
         drop(session.child);
     }

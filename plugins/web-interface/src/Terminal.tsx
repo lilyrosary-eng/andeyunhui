@@ -133,7 +133,8 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
             if (disposed || !fitAddon) return;
             try {
               fitAddon.fit();
-              if (ptyId) {
+              // 容器被 display:none 隐藏时会算出 0/极小尺寸，忽略以免向 PTY 发送非法行列
+              if (ptyId && term.cols > 2 && term.rows > 2) {
                 hostApi.invoke('pty_resize', { id: ptyId, cols: term.cols, rows: term.rows }).catch(() => {});
               }
             } catch { /* 容器不可见时忽略 */ }

@@ -52,23 +52,6 @@ function loadSettings(): { suppressBrowser: boolean } {
 const SUPPRESS_BROWSER_ENV: Record<string, string> = { BROWSER: 'cmd.exe /c exit %s' };
 
 // ---------- 小组件 ----------
-function StatusChip({ status }: { status: WebRunStatus }) {
-  const map: Record<WebRunStatus, { label: string; cls: string; dot: string }> = {
-    idle:     { label: '未启动', cls: 'text-neutral-400 dark:text-stone-500 border-black/10 dark:border-white/10', dot: 'bg-neutral-400 dark:bg-stone-500' },
-    starting: { label: '启动中', cls: 'text-amber-600 dark:text-amber-400 border-amber-500/30 bg-amber-500/10', dot: 'bg-amber-500 animate-pulse' },
-    running:  { label: '运行中', cls: 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30 bg-emerald-500/10', dot: 'bg-emerald-500' },
-    stopped:  { label: '已停止', cls: 'text-neutral-400 dark:text-stone-500 border-black/10 dark:border-white/10', dot: 'bg-neutral-400 dark:bg-stone-500' },
-    error:    { label: '异常', cls: 'text-red-600 dark:text-red-400 border-red-500/30 bg-red-500/10', dot: 'bg-red-500' },
-  };
-  const m = map[status] || map.idle;
-  return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium ${m.cls}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${m.dot}`} />
-      {m.label}
-    </span>
-  );
-}
-
 // 简洁开关（宿主未导出 Switch，用最小实现）
 function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
   return React.createElement('button', {
@@ -79,6 +62,42 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
       className: `inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${on ? 'translate-x-[21px]' : 'translate-x-[3px]'}`,
     }),
   });
+}
+
+// ---------- 终止确认弹窗 ----------
+// 用户点「终止」时先弹窗提示保存，确认后再激进地、干净利落地释放内存/CPU（后端做进程树强杀）。
+function ConfirmStopModal({ name, onConfirm, onCancel }: {
+  name: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return React.createElement('div', {
+    className: 'fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm',
+    onClick: onCancel, // 点遮罩 = 取消
+  },
+    React.createElement('div', {
+      className: 'w-[min(92vw,380px)] rounded-2xl border border-black/10 dark:border-white/10 bg-white dark:bg-[#1e1e1e] p-5 shadow-2xl',
+      onClick: (e: any) => e.stopPropagation(),
+    },
+      React.createElement('div', { className: 'text-base font-semibold text-neutral-800 dark:text-stone-100 mb-2' }, '终止服务'),
+      React.createElement('p', { className: 'text-sm text-neutral-500 dark:text-stone-400 mb-5 leading-relaxed' },
+        React.createElement(React.Fragment, null,
+          '「', name, '」正在运行。终止会立即强制结束相关进程，请先确认已保存好该服务相关的数据、文档或未完成操作。',
+          React.createElement('span', { className: 'mt-1 block font-medium text-red-500' }, '终止后将不可恢复。'),
+        ),
+      ),
+      React.createElement('div', { className: 'flex justify-end gap-2' },
+        React.createElement('button', {
+          onClick: onCancel,
+          className: 'btn-press rounded-lg px-4 py-2 text-sm text-neutral-600 dark:text-stone-300 hover:bg-black/5 dark:hover:bg-white/10',
+        }, '取消'),
+        React.createElement('button', {
+          onClick: onConfirm,
+          className: 'btn-press rounded-lg px-4 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600',
+        }, '确认终止'),
+      ),
+    ),
+  );
 }
 
 // ---------- 模块设置内容（复用宿主 ModuleSettingsPanel）----------
@@ -185,12 +204,11 @@ function SettingsContent({
 
 // 启动后的运行区：预览(iframe 自动轮询) + 终端(可折叠)
 function RunPane({
-  preset, suppressBrowser, openTerminal, onToggleTerminal, refreshSignal, onReady, onStopped,
+  preset, suppressBrowser, openTerminal, refreshSignal, onReady, onStopped,
 }: {
   preset: WebPreset;
   suppressBrowser: boolean;
   openTerminal: boolean;
-  onToggleTerminal: () => void;
   refreshSignal: number;
   onReady: () => void;
   onStopped: () => void;
@@ -256,83 +274,32 @@ function RunPane({
     [suppressBrowser]
   );
 
+  // ---------- 终端管理：主终端跑服务，可增开新终端；全部随任务（RunPane 卸载）关闭 ----------
+  const termCounterRef = useRef(1);
+  const [terminals, setTerminals] = useState<{ id: string; label?: string; command?: string; cwd?: string; env?: Record<string, string> }[]>(() => [
+    { id: 'primary', label: '服务', command: preset.args, cwd: preset.cwd, env: termEnv },
+  ]);
+  const [activeTermId, setActiveTermId] = useState('primary');
+
+  // 新建一个空白 shell 终端（可自由输入命令）
+  const addTerminal = useCallback(() => {
+    const label = String(termCounterRef.current++);
+    const id = 'term_' + label;
+    setTerminals((prev) => [...prev, { id, label, cwd: preset.cwd, env: termEnv }]);
+    setActiveTermId(id);
+  }, [preset.cwd, termEnv]);
+
+  // 关闭某个终端（至少保留一个；关闭由 WebTerminal 卸载触发 pty_kill）
+  const closeTerminal = useCallback((id: string) => {
+    setTerminals((prev) => {
+      const next = prev.filter((t) => t.id !== id);
+      if (next.length === 0) return prev;
+      return next;
+    });
+    setActiveTermId((cur) => (cur === id ? 'primary' : cur));
+  }, []);
+
   return (
-    <div className="flex-1 min-h-0 flex flex-col gap-2">
-      {/* 预览工具栏 */}
-      {hasUrl && (
-        <div className="flex items-center gap-2 rounded-xl border border-black/10 dark:border-white/10 px-3 py-1.5 bg-white dark:bg-stone-900">
-          <span className="text-xs text-neutral-400 dark:text-stone-500">预览</span>
-          <code className="flex-1 truncate text-xs text-neutral-600 dark:text-stone-300">{preset.url}</code>
-
-          {/* 就绪/轮询状态 */}
-          {probeReady ? (
-            <span className="flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              已就绪
-            </span>
-          ) : autoReload ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
-              <span className="inline-block h-3 w-3 rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
-              等待服务 · 已重试 {reloadCount} 次
-            </span>
-          ) : (
-            <span className="rounded-full border border-black/10 dark:border-white/10 px-2 py-0.5 text-[11px] text-neutral-400 dark:text-stone-500">
-              已停止自动刷新
-            </span>
-          )}
-
-          {/* 自动刷新开关 */}
-          {probeReady ? null : autoReload ? (
-            <button
-              className="btn-press rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
-              onClick={() => setAutoReload(false)}
-              title="停止自动刷新，改为手动刷新"
-            >
-              停止自动刷新
-            </button>
-          ) : (
-            <button
-              className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
-              onClick={() => { setAutoReload(true); manualReload(); }}
-              title="重新开启自动刷新"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-                <polyline points="21 3 21 9 15 9" />
-              </svg>
-              继续自动刷新
-            </button>
-          )}
-
-          {/* 手动刷新 */}
-          <button
-            className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
-            onClick={manualReload}
-            title="手动刷新预览"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 12a9 9 0 0 1 15.36-6.36L21 8" />
-              <path d="M21 3v5h-5" />
-              <path d="M21 12a9 9 0 0 1-15.36 6.36L3 16" />
-              <path d="M3 21v-5h5" />
-            </svg>
-          </button>
-
-          {/* 终端折叠开关 */}
-          <button
-            className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
-            onClick={onToggleTerminal}
-            title={openTerminal ? '收起终端' : '展开终端'}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="4 17 10 11 4 5" />
-              <line x1="12" y1="19" x2="20" y2="19" />
-            </svg>
-            <span>{openTerminal ? '隐藏终端' : '显示终端'}</span>
-          </button>
-        </div>
-      )}
-
       <div className="flex-1 min-h-0 flex flex-col">
         {/* 预览 iframe（服务内容区） */}
         <div className="flex-1 min-h-0 rounded-xl border border-black/10 dark:border-white/10 overflow-hidden bg-white dark:bg-stone-950 relative">
@@ -360,21 +327,56 @@ function RunPane({
           )}
         </div>
 
-        {/* 终端（服务进程常驻于此） */}
-        {openTerminal && (
-          <div className="mt-2 h-56 shrink-0 rounded-xl border border-black/10 dark:border-white/10 overflow-hidden">
-            <div className="h-full">
-              <WebTerminal
-                command={preset.args}
-                cwd={preset.cwd}
-                env={termEnv}
-                hint={preset.args}
-                onExit={onStopped}
-              />
-            </div>
+        {/* 终端（服务进程常驻于此；用 CSS 隐藏而非卸载，保证收起/展开是同一终端）
+            收起时仅仅 display:none，PTY 不杀、历史保留 */}
+        <div className={`mt-2 shrink-0 rounded-xl border border-black/10 dark:border-white/10 overflow-hidden ${openTerminal ? 'block' : 'hidden'}`}>
+          {/* 终端管理栏：标签页 + 新建终端 */}
+          <div className="flex items-center gap-0.5 border-b border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-1 pr-1">
+            {terminals.map((t) => {
+              const active = t.id === activeTermId;
+              return (
+                <div
+                  key={t.id}
+                  onClick={() => setActiveTermId(t.id)}
+                  title={t.id === 'primary' ? '服务终端（运行预设命令，不可关闭）' : '终端 ' + t.label}
+                  className={`group flex items-center gap-1 rounded-t-lg px-2 py-1.5 text-xs cursor-pointer select-none transition-colors ${
+                    active
+                      ? 'bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-stone-100 border-t border-x border-black/10 dark:border-white/10'
+                      : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200'
+                  }`}
+                >
+                  <span>{t.id === 'primary' ? '服务' : '终端 ' + t.label}</span>
+                  {t.id !== 'primary' && (
+                    <span
+                      onClick={(e) => { e.stopPropagation(); closeTerminal(t.id); }}
+                      title="关闭此终端"
+                      className="opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-500 rounded px-0.5"
+                    >×</span>
+                  )}
+                </div>
+              );
+            })}
+            <button
+              onClick={addTerminal}
+              title="新建终端"
+              className="px-1.5 py-1 text-neutral-400 hover:text-[var(--element-color-raw)] rounded transition-colors"
+            >+</button>
           </div>
-        )}
-      </div>
+          {/* 终端面板：所有终端常驻，仅切换 display */}
+          <div className="h-56">
+            {terminals.map((t) => (
+              <div key={t.id} className={`h-full ${t.id === activeTermId ? 'block' : 'hidden'}`}>
+                <WebTerminal
+                  command={t.command ?? ''}
+                  cwd={t.cwd}
+                  env={t.env}
+                  hint={t.id === 'primary' ? preset.args : undefined}
+                  onExit={t.id === 'primary' ? onStopped : undefined}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
     </div>
   );
 }
@@ -630,6 +632,8 @@ function WebInterfaceModule() {
   const [showSettings, setShowSettings] = useState(false);
   const [showTerminal, setShowTerminal] = useState(true);
   const [refreshSignal, setRefreshSignal] = useState(0);
+  // 终止确认弹窗：点「终止」先提示保存，确认后才真正停止并强杀进程树
+  const [confirmStop, setConfirmStop] = useState(false);
 
   // 持久化预设
   useEffect(() => { savePresets(presets); }, [presets]);
@@ -737,27 +741,43 @@ function WebInterfaceModule() {
 
   const isRunningThis = !!run && run.presetId === selected?.id;
 
+  // 服务运行中 → 侧边栏预设列表临时隐藏（预留空间给后续把 web 服务功能映射到侧边栏），
+  // 服务终止（run 为空）后自动恢复。列表始终在 presets 状态里，不删除任何数据。
+  const serviceRunning = !!run;
+
   // 侧边栏顶部主按钮：一键启动 / 终止（未选预设时引导去设置新建/选择）
   const runningSelected = !!run && run.presetId === selected?.id;
+  // 用户手动点「终止」：先弹确认（提示保存），确认后再真正停止并强杀进程树
+  const requestStop = useCallback(() => {
+    if (runningSelected) setConfirmStop(true);
+  }, [runningSelected]);
+  const handleStopConfirmed = useCallback(() => {
+    setConfirmStop(false);
+    stop(); // 触发 RunPane 卸载 → 终端 pty_kill → 后端进程树强杀，干净利落释放资源
+  }, [stop]);
   const primaryAction = {
     label: runningSelected ? '终止' : selected ? '一键启动' : '选择预设',
     onClick: () => {
-      if (runningSelected) { stop(); return; }
+      if (runningSelected) { requestStop(); return; }
       if (selected) { startPreset(selected); return; }
       handleOpenSettings();
     },
   };
 
-  // 侧边栏数据映射
-  const sidebarItems: WebSidebarItem[] = useMemo(() => filtered.map((p) => ({
-    id: p.id,
-    name: p.name,
-    desc: p.desc,
-    hint: p.args,
-    runStatus: run?.presetId === p.id ? run.status : undefined,
-  })), [filtered, run]);
+  // 侧边栏数据映射：运行中为空列表（临时隐藏全部预设），停止后恢复
+  const sidebarItems: WebSidebarItem[] = useMemo(() => {
+    if (serviceRunning) return [];
+    return filtered.map((p) => ({
+      id: p.id,
+      name: p.name,
+      desc: p.desc,
+      hint: p.args,
+      runStatus: run?.presetId === p.id ? run.status : undefined,
+    }));
+  }, [filtered, run, serviceRunning]);
 
   return (
+    <>
     <div className="flex h-full w-full gap-3 overflow-hidden">
       {/* 左侧：统一侧边栏（复用宿主 ModuleSidebarShell + 右键菜单） */}
       <WebSidebarShell
@@ -777,7 +797,9 @@ function WebInterfaceModule() {
         items={sidebarItems}
         selectedId={selectedId}
         onSelect={select}
-        emptyText={q ? '没有匹配的预设' : '还没有预设。点「新建」，选本地文件/文件夹自动识别后保存。'}
+        emptyText={serviceRunning
+          ? '服务运行中，预设列表已暂时隐藏。终止服务后会自动恢复。'
+          : (q ? '没有匹配的预设' : '还没有预设。点「新建」，选本地文件/文件夹自动识别后保存。')}
       />
 
       {/* 右侧：详情 / 编辑 / 运行区 / 设置面板 */}
@@ -811,72 +833,16 @@ function WebInterfaceModule() {
         ) : editing ? (
           <EditorForm initial={selected} onSave={savePreset} onCancel={() => setEditing(null)} />
         ) : (
-          <div className="flex-1 min-h-0 flex flex-col gap-3">
-            {/* 状态卡片 */}
-            <div className="shrink-0 rounded-2xl border border-black/10 dark:border-white/10 p-4 bg-white dark:bg-stone-900">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="text-base font-semibold text-neutral-800 dark:text-stone-100 truncate">{selected.name}</div>
-                  <span className="rounded-full border border-black/10 dark:border-white/10 px-2 py-0.5 text-[11px] text-neutral-400 dark:text-stone-500">命令</span>
-                  {run?.presetId === selected.id && <StatusChip status={run.status} />}
-                </div>
-                <div className="flex items-center gap-2">
-                  {!isRunningThis ? (
-                    <button
-                      className="btn-press flex items-center gap-1.5 rounded-lg bg-emerald-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-600"
-                      onClick={() => startPreset(selected)}
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polygon points="5 3 19 12 5 21 5 3" />
-                      </svg>
-                      一键启动
-                    </button>
-                  ) : (
-                    <button
-                      className="btn-press flex items-center gap-1.5 rounded-lg bg-red-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-red-600"
-                      onClick={stop}
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <rect x="6" y="6" width="12" height="12" rx="2" />
-                      </svg>
-                      停止
-                    </button>
-                  )}
-                  <button
-                    className="btn-press rounded-lg px-3 py-1.5 text-sm text-neutral-500 hover:bg-black/5 dark:hover:bg-white/10"
-                    onClick={() => setEditing(selected)}
-                  >
-                    编辑
-                  </button>
-                  <button
-                    disabled={isRunningThis}
-                    className={`btn-press rounded-lg px-3 py-1.5 text-sm transition-colors ${
-                      isRunningThis
-                        ? 'text-neutral-300 dark:text-stone-600 cursor-not-allowed'
-                        : 'text-red-500 hover:bg-red-500/10'
-                    }`}
-                    onClick={() => deletePreset(selected.id)}
-                    title={isRunningThis ? '运行中，请先终止后再删除' : '删除预设'}
-                  >
-                    删除
-                  </button>
-                </div>
-              </div>
-              {selected.cwd && (
-                <div className="mt-2 text-xs text-neutral-400 dark:text-stone-500">目录：<code className="text-neutral-600 dark:text-stone-300">{selected.cwd}</code></div>
-              )}
-            </div>
-
+          <div className="flex-1 min-h-0 flex flex-col">
             {/* 运行区：preview + 终端 */}
             {isRunningThis && run ? (
               <RunPane preset={selected} suppressBrowser={settings.suppressBrowser}
                 openTerminal={showTerminal}
-                onToggleTerminal={() => setShowTerminal((s) => !s)}
                 refreshSignal={refreshSignal}
                 onReady={markRunning} onStopped={markStopped} />
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-black/10 dark:border-white/10 text-neutral-400 dark:text-stone-500">
-                <div className="text-sm">点击「一键启动」在终端里运行：</div>
+                <div className="text-sm">在左侧侧边栏点击「一键启动」，在终端里运行：</div>
                 <code className="rounded-lg bg-black/5 dark:bg-white/5 px-3 py-1.5 font-mono text-xs">{selected.args}</code>
               </div>
             )}
@@ -884,6 +850,14 @@ function WebInterfaceModule() {
         )}
       </div>
     </div>
+      {confirmStop && selected && (
+        <ConfirmStopModal
+          name={selected.name}
+          onConfirm={handleStopConfirmed}
+          onCancel={() => setConfirmStop(false)}
+        />
+      )}
+    </>
   );
 }
 
