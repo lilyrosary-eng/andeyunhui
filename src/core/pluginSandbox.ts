@@ -59,6 +59,8 @@ const ALLOWED_COMMANDS = new Set([
   // 音乐模块 —— 铃兰（收藏 / 播放状态 / 听歌统计 / 封面覆盖 / 标签写回 / 歌单管理）
   // 注意：Phase 1~2 移植新增的 music_* 命令此前漏加白名单，导致沙箱内 invoke 被拦截
   // （"未授权命令"被插件侧 .catch 静默吞掉），表现为收藏/封面/播放状态/听歌统计/重扫全部失败。
+  // 频谱订阅/退订：铃兰 musicPlayer 驱动 Rust「无监听即休眠」，漏加会拦截→采集暂停→降级为伪律动。
+  'spectrum_set_listener',
   'music_replace_playlist_tracks',
   'music_set_favorite',
   'music_list_favorites',
