@@ -10,6 +10,10 @@ export function uid(): string {
 // 两者共用同一份对话历史，并通过跨 webview 事件实时同步。
 export const AI_CHAT_CONVERSATIONS_KEY = 'andeyunhui.capsule.conversations';
 
+// AIWork（AIGC 专业模块）独立的对话历史键：与 AI 对话完全隔离，互不串号。
+// 保存自 AIWork 子模块的对话，已从笔记联动中解耦，产出走独立产物库。
+export const AI_AIWORK_CONVERSATIONS_KEY = 'andeyunhui.aiwork.conversations';
+
 /**
  * 跨 webview 合并两端会话：按 id 去重，远端更新时间更晚或本地缺失则采用远端，
  * 本地有而远端没有的会话保留（避免任一端操作丢失对端历史）。结果按更新时间倒序。

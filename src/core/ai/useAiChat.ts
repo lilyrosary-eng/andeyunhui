@@ -24,8 +24,10 @@ export function getAiChatMemoryEnabled(): boolean {
 export function setAiChatMemoryEnabled(on: boolean) {
   storage.setString(AI_CHAT_MEMORY_KEY, on ? 'true' : 'false');
 }
-const SYNC_EVENT = 'ai-chat:conversations-sync';
-const SYNC_REQ_EVENT = 'ai-chat:conversations-request';
+// 跨 window 同步事件名：依 persistKey 分区派生，避免同一 webview 内多个 useAiChat 实例
+// （chat 与 AIWork 独立实例）监听同一全局事件互相 merge 串号。
+const syncEventFor = (key: string) => `ai-chat:conv-sync:${key.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+const syncReqEventFor = (key: string) => `ai-chat:conv-req:${key.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
 // 每次请求携带的历史消息上限（尾部截断），防止长对话 / 群聊累计历史超出模型上下文上限
 // （曾因群聊全量历史塞入单请求导致 209 万 token 触发 HTTP 400）。system 人设单独传，不受此限。
@@ -120,6 +122,8 @@ export interface UseAiChatResult {
  */
 export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, agent = false } = options;
+  const syncEvent = syncEventFor(persistKey);
+  const syncReqEvent = syncReqEventFor(persistKey);
   // Agent 模式需随回调读取最新值（避免闭包陈旧）
   const [agentOn, setAgentOn] = useState<boolean>(agent);
   const agentRef = useRef(agentOn);
@@ -200,35 +204,35 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     if (!ready) return;
     persistConversations(persistKey, conversations);
     if (!applyingRemote.current) {
-      void emit(SYNC_EVENT, { src: myLabel, conversations }).catch(() => {});
+      void emit(syncEvent, { src: myLabel, conversations }).catch(() => {});
     }
-  }, [conversations, persistKey, ready, myLabel]);
+  }, [conversations, persistKey, ready, myLabel, syncEvent]);
 
   // 监听其它窗口的会话变更，合并进本地（不覆盖对端独有历史）
   useEffect(() => {
     let un: UnlistenFn | undefined;
     let unReq: UnlistenFn | undefined;
-    listen<{ src: string; conversations: Conversation[] }>(SYNC_EVENT, (e) => {
+    listen<{ src: string; conversations: Conversation[] }>(syncEvent, (e) => {
       if (e.payload.src === myLabel) return;
       applyingRemote.current = true;
       setConversations((local) => mergeConversations(local, e.payload.conversations));
       setTimeout(() => { applyingRemote.current = false; }, 0);
     }).then((u) => { un = u; });
     // 收到拉取请求 → 回复本端全量（让对端获得已有历史，解决"打开即同步"）
-    listen<{ src: string }>(SYNC_REQ_EVENT, (e) => {
+    listen<{ src: string }>(syncReqEvent, (e) => {
       if (e.payload.src === myLabel) return;
       if (applyingRemote.current) return;
       const snapshot = stateRef.current.conversations;
       if (!snapshot.length) return;
-      void emit(SYNC_EVENT, { src: myLabel, conversations: snapshot }).catch(() => {});
+      void emit(syncEvent, { src: myLabel, conversations: snapshot }).catch(() => {});
     }).then((u) => { unReq = u; });
     return () => { un?.(); unReq?.(); };
-  }, [myLabel]);
+  }, [myLabel, syncEvent, syncReqEvent]);
 
   // 挂载时主动拉取另一端已有历史（胶囊与主窗口独立 webview，localStorage 隔离）
   useEffect(() => {
-    void emit(SYNC_REQ_EVENT, { src: myLabel }).catch(() => {});
-  }, [myLabel]);
+    void emit(syncReqEvent, { src: myLabel }).catch(() => {});
+  }, [myLabel, syncReqEvent]);
 
   const selectConv = useCallback((id: string) => {
     setActiveId(id);
