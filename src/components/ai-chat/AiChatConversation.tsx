@@ -579,12 +579,12 @@ export const AiChatConversation = memo(function AiChatConversation({
                       }`}
                     >
                       <Sparkles size={13} />
-                      <span>联网</span>
+                      {!capsuleMode && <span>联网</span>}
                     </button>
                   )}
-                  <label className={`flex items-center gap-1 text-[11px] cursor-pointer px-1.5 py-0.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 ${capsuleMode ? 'text-white/50 hover:text-white/80' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600'}`}>
+                  <label title="导入图片 / 文件（也可直接粘贴）" className={`flex items-center gap-1 text-[11px] cursor-pointer px-1.5 py-0.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 ${capsuleMode ? 'text-white/50 hover:text-white/80' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600'}`}>
                     <Paperclip size={14} />
-                    <span>导入</span>
+                    {!capsuleMode && <span>导入</span>}
                     <input
                       type="file"
                       multiple
@@ -593,7 +593,9 @@ export const AiChatConversation = memo(function AiChatConversation({
                     />
                   </label>
                 </div>
-                <span className={`text-[11px] ${capsuleMode ? 'text-white/40' : 'text-neutral-300 dark:text-stone-600'}`}>AI 可能出错，请核实重要信息</span>
+                {!capsuleMode && (
+                  <span className={`text-[11px] ${capsuleMode ? 'text-white/40' : 'text-neutral-300 dark:text-stone-600'}`}>AI 可能出错，请核实重要信息</span>
+                )}
               </div>
             </div>
             <button
