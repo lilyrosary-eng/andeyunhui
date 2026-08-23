@@ -5,6 +5,8 @@ import {
   // 播放器图标
   Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, List, ListMusic, Shuffle, Repeat1, Music, Mic2, Lock, Unlock,
   Maximize, Minimize, ArrowLeft, ChevronLeft, ChevronRight, Search, Plus, Check, MoreHorizontal, File, RefreshCw,
+  // Web 接口模块（第四个模块）
+  Globe,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -73,6 +75,8 @@ const iconMap: Record<string, LucideIcon> = {
   MoreHorizontal,
   File,
   RefreshCw,
+  // Web 接口模块
+  Globe,
 };
 
 /** 根据插件声明的 iconName 获取对应的 lucide 图标组件，找不到返回 null */

@@ -1,0 +1,10 @@
+{
+  "id": "web-interface",
+  "name": "Web 接口",
+  "version": "1.0.0",
+  "kind": "module",
+  "visible": true,
+  "entry": "index.js",
+  "iconName": "Globe",
+  "hostApiVersion": 1
+}
