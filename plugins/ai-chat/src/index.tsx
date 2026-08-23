@@ -9,6 +9,9 @@ import { UserAvatarSettings } from '@/components/bricks/UserAvatarSettings';
 import { ModuleSettingsPanel } from '@/components/ModuleSettingsPanel';
 import { useAiChat, DEFAULT_PERSIST_KEY } from '@/core/ai/useAiChat';
 import { useCompanionStore, buildPersonaContext, buildCoreContext } from '@/core/stores/companionStore';
+import { submoduleById, type AISubmoduleId, SUBMODULE_STORAGE_KEY } from '@/core/ai/submodules';
+import { AISubmoduleDrawer } from '@/components/ai-chat/AISubmoduleSwitcher';
+import { AiSubmodulePlaceholder } from '@/components/ai-chat/AiSubmodulePlaceholder';
 
 const COMPANION_ENABLED_KEY = 'andeyunhui.aichat.companion.enabled';
 function readCompanionEnabled(): boolean {
@@ -26,6 +29,19 @@ const Root = memo(function Root() {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [companionEnabled, setCompanionEnabled] = useState(readCompanionEnabled);
+
+  // 子模块切换（桌面版）：chat / work / workflow。胶囊浮岛不接入，保持现有 ai 对话。
+  const [subId, setSubId] = useState<AISubmoduleId>(() => {
+    const raw = (() => { try { return localStorage.getItem(SUBMODULE_STORAGE_KEY); } catch { return null; } })();
+    return (raw === 'work' || raw === 'workflow' || raw === 'chat') ? raw : 'chat';
+  });
+  const [subDrawerOpen, setSubDrawerOpen] = useState(false);
+  const sub = submoduleById(subId);
+  const switchSub = (id: AISubmoduleId) => {
+    setSubId(id);
+    setSettingsOpen(false);
+    try { localStorage.setItem(SUBMODULE_STORAGE_KEY, id); } catch { /* 忽略 */ }
+  };
 
   // 复用侧边栏模块设置齿轮（#13）：宿主齿轮点击派发 module-settings-toggle 事件，
   // 此处监听并切换 ai-chat 独立设置面板，第二次点击即关闭（对齐其它子插件实现）。
@@ -65,7 +81,7 @@ const Root = memo(function Root() {
   };
 
   return (
-    <div className="flex-1 flex h-full overflow-hidden">
+    <div className="relative flex-1 flex h-full overflow-hidden">
       <AiChatSidebar
         conversations={conversations}
         activeId={activeId}
@@ -79,8 +95,11 @@ const Root = memo(function Root() {
           // 这样在设置面板打开后再次点击会执行退出（对齐其它子插件的预期交互）。
           window.dispatchEvent(new CustomEvent('module-settings-toggle', { detail: { moduleId: 'ai-chat' } }));
         }}
+        submodule={sub}
+        onOpenSubmoduleSwitcher={() => setSubDrawerOpen(true)}
       />
-      {settingsOpen ? (
+      {sub.id === 'chat' ? (
+      settingsOpen ? (
         <ModuleSettingsPanel title="AI 对话" icon={<Bot size={20} />} onClose={() => setSettingsOpen(false)}>
           <div className="rounded-xl border border-black/10 dark:border-white/10 p-4">
             <label className="flex cursor-pointer items-center justify-between gap-3">
@@ -151,6 +170,17 @@ const Root = memo(function Root() {
             <AiChatCompanionCard variant="compact" onEdit={() => setSettingsOpen(true)} />
           ) : undefined}
           showCompanionAvatar={companionEnabled}
+        />
+      )
+    ) : (
+        <AiSubmodulePlaceholder mod={sub} />
+      )}
+      {subDrawerOpen && (
+        <AISubmoduleDrawer
+          open={subDrawerOpen}
+          current={subId}
+          onSelect={switchSub}
+          onClose={() => setSubDrawerOpen(false)}
         />
       )}
     </div>

@@ -26,6 +26,8 @@ export interface ModuleSidebarShellProps {
   searchPlaceholder?: string;
   /** 标题下方的返回按钮（如侧边栏内的「返回茑萝」），使用 UI 库的 Home 图标 */
   backAction?: { label?: string; onClick: () => void };
+  /** 标题行的右侧动作插槽（可选）：用于在模块标题右侧放按钮（如子模块切换入口），不传则不渲染 */
+  titleActions?: ReactNode;
   children: ReactNode;
 }
 
@@ -42,6 +44,7 @@ export function ModuleSidebarShell({
   onSearchChange,
   searchPlaceholder,
   backAction,
+  titleActions,
   children,
 }: ModuleSidebarShellProps) {
   const { t } = useI18n();
@@ -121,7 +124,10 @@ export function ModuleSidebarShell({
           {/* 顶部标题区：图标 + 标题 */}
           <div className="shrink-0 flex items-center gap-2 px-4 pt-4 pb-3">
             {icon}
-            <span className="font-bold text-lg tracking-tight text-neutral-800 dark:text-stone-100">{title}</span>
+            <span className="font-bold text-lg tracking-tight text-neutral-800 dark:text-stone-100 flex-1 truncate">{title}</span>
+            {titleActions && (
+              <div className="flex items-center gap-1 shrink-0">{titleActions}</div>
+            )}
           </div>
 
           {/* 返回按钮（可选）：标题下方、靠左，小房子图标 */}
