@@ -60,8 +60,15 @@ export function useUsageStats(days: number = 30): UseUsageStatsResult {
 
   const refresh = useCallback(async () => {
     try {
-      const data = await invoke<UsageSummary>('usage_stats', { days: daysRef.current });
-      setStats(data ?? EMPTY);
+      const data = (await invoke<Partial<UsageSummary> | null>('usage_stats', { days: daysRef.current })) ?? {};
+      // 归一化：后端可能缺返回 byModel / byDay，确保两个数组字段恒存在，
+      // 否则 UI 直接访问 .length / .slice 会抛 "Cannot read properties of undefined"
+      setStats({
+        ...EMPTY,
+        ...data,
+        byModel: Array.isArray(data.byModel) ? data.byModel : [],
+        byDay: Array.isArray(data.byDay) ? data.byDay : [],
+      });
     } catch (e) {
       console.error('[useUsageStats] 拉取用量失败', e);
       setStats(EMPTY);

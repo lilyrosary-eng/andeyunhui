@@ -57,9 +57,9 @@ function DetailPanel({ stats }: { stats: UsageSummary }) {
         </div>
       </div>
 
-      {stats.byModel.length > 0 ? (
+      {(stats.byModel?.length ?? 0) > 0 ? (
         <div className="space-y-1.5 mb-3">
-          {stats.byModel.slice(0, 4).map((m) => (
+          {(stats.byModel ?? []).slice(0, 4).map((m) => (
             <div key={m.model} className="flex items-center justify-between text-[11px]">
               <span className="truncate max-w-[150px] text-neutral-600 dark:text-stone-400">{m.model}</span>
               <span className="text-neutral-400 dark:text-stone-500 shrink-0 ml-2">
@@ -74,8 +74,8 @@ function DetailPanel({ stats }: { stats: UsageSummary }) {
 
       {/* 最近 7 天成本迷你柱状图 */}
       <div className="flex items-end gap-1 h-10">
-        {stats.byDay.slice(-7).map((d) => {
-          const max = Math.max(...stats.byDay.slice(-7).map((x) => x.cost), 0.0001);
+        {stats.byDay?.slice(-7).map((d) => {
+          const max = Math.max(...(stats.byDay ?? []).slice(-7).map((x) => x.cost), 0.0001);
           const h = Math.max((d.cost / max) * 100, 2);
           const label = new Date(d.day).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
           return (
@@ -86,8 +86,8 @@ function DetailPanel({ stats }: { stats: UsageSummary }) {
         })}
       </div>
       <div className="mt-1 flex justify-between text-[10px] text-neutral-400 dark:text-stone-600">
-        <span>{stats.byDay.length ? new Date(stats.byDay[Math.max(0, stats.byDay.length - 7)].day).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '-'}</span>
-        <span>{stats.byDay.length ? new Date(stats.byDay[stats.byDay.length - 1].day).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '-'}</span>
+        <span>{stats.byDay?.length ? new Date(stats.byDay[Math.max(0, stats.byDay.length - 7)].day).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '-'}</span>
+        <span>{stats.byDay?.length ? new Date(stats.byDay[stats.byDay.length - 1].day).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '-'}</span>
       </div>
     </div>
   );
