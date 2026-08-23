@@ -177,6 +177,12 @@ const ALLOWED_COMMANDS = new Set([
   'ai_get_profiles',
   'ai_set_profiles',
   'ai_chat',
+  // 一期 AI 办公 / 工作流：读取与写入笔记（成果物 → 笔记闭环）。
+  // 此前漏加白名单已被沙箱拦截，导致 AI 办公无法把产出物落地到笔记。
+  'get_all_notes',
+  'get_note_content',
+  'save_note',
+  'search_notes_content',
   // 思考模式开关：ide / gongfang 子插件内联 toggle 调用此命令写回 profile.thinking
   // （此前漏加白名单，导致沙箱拦截 ai_set_profile_thinking，思考按钮「点了没反应」）
   'ai_set_profile_thinking',
