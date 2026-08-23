@@ -11,6 +11,7 @@ const React = window.__HOST_REACT__;
 const {
   ModuleSidebarShell,
   SecondaryNavShell,
+  Ripple,
   ContextMenu,
   ContextMenuTrigger,
   ContextMenuContent,
@@ -48,7 +49,13 @@ export interface WebSidebarShellProps {
   onSearchChange?: (value: string) => void;
   searchPlaceholder?: string;
   onOpenModuleSettings?: () => void;
-  onAdd: () => void;
+  /** 顶部主按钮：一键启动 / 终止 */
+  primaryAction?: { label: string; onClick: () => void };
+  /** 底部「终端」开关 */
+  onToggleTerminal?: () => void;
+  terminalActive?: boolean;
+  /** 底部「刷新」按钮 */
+  onRefresh?: () => void;
   onStart: (id: string) => void;
   onEdit: (id: string) => void;
   onDelete: (id: string) => void;
@@ -121,20 +128,56 @@ function WebSidebarItem({ item, active, onSelect, onStart, onEdit, onDelete }: {
       React.createElement(ContextMenuItem, { key: 'open', onClick: () => onSelect(item.id) }, '打开'),
       React.createElement(ContextMenuItem, { key: 'start', onClick: () => onStart(item.id) }, '一键启动'),
       React.createElement(ContextMenuSeparator, { key: 'sep' }),
-      React.createElement(ContextMenuItem, { key: 'edit', onClick: () => onEdit(item.id) }, '编辑'),
+      React.createElement(ContextMenuItem, {
+        key: 'edit',
+        onClick: () => onEdit(item.id),
+      }, '编辑'),
       React.createElement(ContextMenuItem, {
         key: 'delete',
         onClick: () => onDelete(item.id),
+        disabled: item.runStatus === 'running' || item.runStatus === 'starting',
         variant: 'destructive',
-      }, '删除'),
+      }, item.runStatus === 'running' || item.runStatus === 'starting' ? '运行中 · 先终止再删除' : '删除'),
     ),
   );
 }
 
 export function WebSidebarShell({
   icon, title, searchQuery, onSearchChange, searchPlaceholder, onOpenModuleSettings,
-  onAdd, onStart, onEdit, onDelete, items, selectedId, onSelect, emptyText,
+  primaryAction, onToggleTerminal, terminalActive, onRefresh,
+  onStart, onEdit, onDelete, items, selectedId, onSelect, emptyText,
 }: WebSidebarShellProps) {
+  // 底部「终端 / 刷新」图标插槽（放在设置齿轮右侧，与宿主交互一致）
+  const footerIcn = (title: string, onQ: (() => void) | undefined, cls: string, children: React.ReactNode) =>
+    Ripple && onQ
+      ? React.createElement(Ripple, {
+          key: title,
+          as: 'button',
+          onClick: onQ,
+          title,
+          className: `btn-press w-9 h-9 flex items-center justify-center rounded-xl transition-colors ${cls}`,
+        }, children)
+      : null;
+
+  const footerExtra = React.createElement(React.Fragment, null, [
+    footerIcn(terminalActive ? '收起终端' : '展开终端', onToggleTerminal,
+      terminalActive
+        ? 'text-[var(--element-color-raw)] bg-[var(--element-muted)]'
+        : 'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)]',
+      React.createElement('svg', { width: '18', height: '18', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+        React.createElement('polyline', { key: 't1', points: '4 17 10 11 4 5' }),
+        React.createElement('line', { key: 't2', x1: '12', y1: '19', x2: '20', y2: '19' }),
+      )),
+    footerIcn('刷新预览', onRefresh,
+      'text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)]',
+      React.createElement('svg', { width: '18', height: '18', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+        React.createElement('path', { key: 'r1', d: 'M3 12a9 9 0 0 1 15.36-6.36L21 8' }),
+        React.createElement('path', { key: 'r2', d: 'M21 3v5h-5' }),
+        React.createElement('path', { key: 'r3', d: 'M21 12a9 9 0 0 1-15.36 6.36L3 16' }),
+        React.createElement('path', { key: 'r4', d: 'M3 21v-5h5' }),
+      )),
+  ]);
+
   // 兜底：宿主未提供 ModuleSidebarShell 时退回简单容器（与 OnlineSidebarShell 一致）
   if (!ModuleSidebarShell) {
     return React.createElement('div', {
@@ -146,9 +189,9 @@ export function WebSidebarShell({
       ),
       React.createElement('div', { key: 'primary', className: 'mb-3' },
         React.createElement('button', {
-          onClick: onAdd,
+          onClick: primaryAction?.onClick,
           className: 'btn-press w-full rounded-xl bg-sky-500 py-2 text-sm font-medium text-white hover:bg-sky-600',
-        }, '新建预设'),
+        }, primaryAction?.label || '启动'),
       ),
       React.createElement('div', { key: 'list', className: 'flex-1 min-h-0 overflow-y-auto space-y-1' },
         items.length === 0
@@ -158,6 +201,7 @@ export function WebSidebarShell({
               onSelect, onStart, onEdit, onDelete,
             })),
       ),
+      React.createElement('div', { key: 'footer', className: 'flex items-center gap-1 mt-3' }, footerExtra),
     ]);
   }
 
@@ -176,7 +220,8 @@ export function WebSidebarShell({
     searchQuery,
     onSearchChange,
     searchPlaceholder,
-    primaryAction: { label: '新建预设', onClick: onAdd },
+    primaryAction,
+    footerExtra,
     children: SecondaryNavShell
       ? React.createElement(SecondaryNavShell, null, list)
       : React.createElement('div', { className: 'flex-1 overflow-y-auto pr-1 space-y-3' }, list),

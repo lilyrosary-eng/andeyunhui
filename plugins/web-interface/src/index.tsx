@@ -83,10 +83,17 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
 
 // ---------- 模块设置内容（复用宿主 ModuleSettingsPanel）----------
 function SettingsContent({
-  suppressBrowser, onChangeSuppress, onClose,
+  presets, selectedId, runningId, suppressBrowser, onChangeSuppress, onAddPreset, onSelectPreset, onEditPreset, onDeletePreset, onClose,
 }: {
+  presets: WebPreset[];
+  selectedId: string | null;
+  runningId: string | null;
   suppressBrowser: boolean;
   onChangeSuppress: (v: boolean) => void;
+  onAddPreset: () => void;
+  onSelectPreset: (id: string) => void;
+  onEditPreset: (id: string) => void;
+  onDeletePreset: (id: string) => void;
   onClose: () => void;
 }) {
   const ModuleSettingsPanel = (window.__HOST_UI__ as Record<string, unknown>)?.ModuleSettingsPanel as
@@ -98,6 +105,64 @@ function SettingsContent({
     icon: React.createElement(GlobeIcon),
     onClose,
     children: React.createElement('div', { className: 'space-y-4' },
+      // 预设管理
+      React.createElement('div', { className: 'glass-panel p-4' },
+        React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, '预设'),
+        React.createElement('button', {
+          onClick: onAddPreset,
+          className: 'btn-press w-full flex items-center justify-center gap-1.5 element-muted hover:element-hover rounded-xl py-2 text-sm font-medium transition-colors mb-2',
+        },
+          React.createElement('svg', { width: '14', height: '14', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, React.createElement('line', { key: 'a', x1: '12', y1: '5', x2: '12', y2: '19' }), React.createElement('line', { key: 'b', x1: '5', y1: '12', x2: '19', y2: '12' })),
+          '新建预设',
+        ),
+        presets.length === 0
+          ? React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500' }, '还没有预设，点击「新建预设」创建。')
+          : React.createElement('div', { className: 'max-h-48 overflow-y-auto divide-y divide-black/5 dark:divide-white/5' },
+              presets.map((p) => {
+                const isSel = selectedId === p.id;
+                const isRunning = runningId === p.id;
+                return React.createElement('div', {
+                  key: p.id,
+                  className: `flex items-center gap-1 rounded-lg transition-colors ${isSel ? 'text-[var(--element-color-raw)]' : ''}`,
+                }, [
+                  React.createElement('button', {
+                    key: 'name',
+                    onClick: () => onSelectPreset(p.id),
+                    title: '选择此预设',
+                    className: `flex-1 min-w-0 flex items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors ${
+                      isSel
+                        ? 'bg-[var(--element-muted)] text-[var(--element-color-raw)]'
+                        : 'hover:bg-black/5 dark:hover:bg-white/5'
+                    }`,
+                  }, React.createElement('span', { className: 'text-sm text-neutral-700 dark:text-stone-200 truncate' }, p.name)),
+                  React.createElement('button', {
+                    key: 'edit',
+                    onClick: () => onEditPreset(p.id),
+                    title: '编辑此预设',
+                    className: 'shrink-0 p-1.5 rounded-md text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)]',
+                  }, React.createElement('svg', { width: '13', height: '13', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+                    React.createElement('path', { key: 'e1', d: 'M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z' }),
+                    React.createElement('path', { key: 'e2', d: 'm15 5 4 4' }),
+                  )),
+                  React.createElement('button', {
+                    key: 'delete',
+                    onClick: () => onDeletePreset(p.id),
+                    disabled: isRunning,
+                    title: isRunning ? '运行中，请先终止后再删除' : '删除此预设',
+                    className: `shrink-0 p-1.5 rounded-md transition-colors ${
+                      isRunning
+                        ? 'text-neutral-300 dark:text-stone-600 cursor-not-allowed'
+                        : 'text-neutral-400 dark:text-stone-500 hover:text-red-500 hover:bg-red-500/10'
+                    }`,
+                  }, React.createElement('svg', { width: '13', height: '13', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+                    React.createElement('path', { key: 'd1', d: 'M3 6h18' }),
+                    React.createElement('path', { key: 'd2', d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6' }),
+                    React.createElement('path', { key: 'd3', d: 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2' }),
+                  )),
+                ]);
+              }),
+            ),
+      ),
       // 运行
       React.createElement('div', { className: 'glass-panel p-4' },
         React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, '运行'),
@@ -120,14 +185,16 @@ function SettingsContent({
 
 // 启动后的运行区：预览(iframe 自动轮询) + 终端(可折叠)
 function RunPane({
-  preset, suppressBrowser, onReady, onStopped,
+  preset, suppressBrowser, openTerminal, onToggleTerminal, refreshSignal, onReady, onStopped,
 }: {
   preset: WebPreset;
   suppressBrowser: boolean;
+  openTerminal: boolean;
+  onToggleTerminal: () => void;
+  refreshSignal: number;
   onReady: () => void;
   onStopped: () => void;
 }) {
-  const [showTerminal, setShowTerminal] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
   const [probeReady, setProbeReady] = useState(false);
   const [autoReload, setAutoReload] = useState(true);
@@ -176,6 +243,12 @@ function RunPane({
     setProbeReady(false);
     setReloadKey((k) => k + 1);
   }, []);
+
+  // 侧边栏「刷新」按钮触发：每次信号自增即重挂预览
+  useEffect(() => {
+    if (refreshSignal <= 0) return; // 初始 0 不触发
+    manualReload();
+  }, [refreshSignal, manualReload]);
 
   // 注入抑制外部浏览器环境变量（仅在模块设置开启该选项时）
   const termEnv = useMemo(
@@ -248,14 +321,14 @@ function RunPane({
           {/* 终端折叠开关 */}
           <button
             className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10"
-            onClick={() => setShowTerminal((s) => !s)}
-            title={showTerminal ? '收起终端' : '展开终端'}
+            onClick={onToggleTerminal}
+            title={openTerminal ? '收起终端' : '展开终端'}
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <polyline points="4 17 10 11 4 5" />
               <line x1="12" y1="19" x2="20" y2="19" />
             </svg>
-            <span>{showTerminal ? '隐藏终端' : '显示终端'}</span>
+            <span>{openTerminal ? '隐藏终端' : '显示终端'}</span>
           </button>
         </div>
       )}
@@ -288,7 +361,7 @@ function RunPane({
         </div>
 
         {/* 终端（服务进程常驻于此） */}
-        {showTerminal && (
+        {openTerminal && (
           <div className="mt-2 h-56 shrink-0 rounded-xl border border-black/10 dark:border-white/10 overflow-hidden">
             <div className="h-full">
               <WebTerminal
@@ -555,6 +628,8 @@ function WebInterfaceModule() {
   const [searchQuery, setSearchQuery] = useState('');
   const [settings, setSettings] = useState(loadSettings);
   const [showSettings, setShowSettings] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(true);
+  const [refreshSignal, setRefreshSignal] = useState(0);
 
   // 持久化预设
   useEffect(() => { savePresets(presets); }, [presets]);
@@ -589,6 +664,22 @@ function WebInterfaceModule() {
     setShowSettings((s) => !s);
   }, []);
 
+  // 从设置面板选择一个预设（选中并关闭设置）
+  const selectFromSettings = useCallback((id: string) => {
+    setSelectedId(id);
+    setEditing(null);
+    setShowSettings(false);
+  }, []);
+
+  // 从设置面板编辑一个预设（进入编辑表单）
+  const editFromSettings = useCallback((id: string) => {
+    const p = presets.find((x) => x.id === id);
+    if (!p) return;
+    setSelectedId(id);
+    setEditing(p);
+    setShowSettings(false);
+  }, [presets]);
+
   const startPreset = useCallback((preset: WebPreset) => {
     setSelectedId(preset.id);
     setEditing(null);
@@ -622,10 +713,16 @@ function WebInterfaceModule() {
   }, []);
 
   const deletePreset = useCallback((id: string) => {
+    // 强锁：运行中的预设不允许删除（需先终止）
+    if (run?.presetId === id) return;
     setPresets((prev) => prev.filter((p) => p.id !== id));
-    if (run?.presetId === id) setRun(null);
     if (selectedId === id) { setSelectedId(null); setEditing(null); }
   }, [run, selectedId]);
+
+  // 从设置面板删除一个预设（需在 deletePreset 之后声明，避免依赖数组 TDZ）
+  const deleteFromSettings = useCallback((id: string) => {
+    deletePreset(id);
+  }, [deletePreset]);
 
   const stop = useCallback(() => setRun(null), []);
 
@@ -639,6 +736,17 @@ function WebInterfaceModule() {
   }, []);
 
   const isRunningThis = !!run && run.presetId === selected?.id;
+
+  // 侧边栏顶部主按钮：一键启动 / 终止（未选预设时引导去设置新建/选择）
+  const runningSelected = !!run && run.presetId === selected?.id;
+  const primaryAction = {
+    label: runningSelected ? '终止' : selected ? '一键启动' : '选择预设',
+    onClick: () => {
+      if (runningSelected) { stop(); return; }
+      if (selected) { startPreset(selected); return; }
+      handleOpenSettings();
+    },
+  };
 
   // 侧边栏数据映射
   const sidebarItems: WebSidebarItem[] = useMemo(() => filtered.map((p) => ({
@@ -659,7 +767,10 @@ function WebInterfaceModule() {
         onSearchChange={setSearchQuery}
         searchPlaceholder="搜索预设"
         onOpenModuleSettings={handleOpenSettings}
-        onAdd={addPreset}
+        primaryAction={primaryAction}
+        onToggleTerminal={() => setShowTerminal((s) => !s)}
+        terminalActive={showTerminal}
+        onRefresh={() => setRefreshSignal((s) => s + 1)}
         onStart={startById}
         onEdit={editById}
         onDelete={deletePreset}
@@ -674,8 +785,15 @@ function WebInterfaceModule() {
         {showSettings ? (
           <div className="flex-1 min-h-0 flex flex-col">
             <SettingsContent
+              presets={presets}
+              selectedId={selectedId}
+              runningId={run?.presetId ?? null}
               suppressBrowser={settings.suppressBrowser}
               onChangeSuppress={(v) => setSettings((s) => ({ ...s, suppressBrowser: v }))}
+              onAddPreset={() => { setShowSettings(false); addPreset(); }}
+              onSelectPreset={selectFromSettings}
+              onEditPreset={editFromSettings}
+              onDeletePreset={deleteFromSettings}
               onClose={() => setShowSettings(false)}
             />
           </div>
@@ -731,9 +849,14 @@ function WebInterfaceModule() {
                     编辑
                   </button>
                   <button
-                    className="btn-press rounded-lg px-3 py-1.5 text-sm text-red-500 hover:bg-red-500/10"
+                    disabled={isRunningThis}
+                    className={`btn-press rounded-lg px-3 py-1.5 text-sm transition-colors ${
+                      isRunningThis
+                        ? 'text-neutral-300 dark:text-stone-600 cursor-not-allowed'
+                        : 'text-red-500 hover:bg-red-500/10'
+                    }`}
                     onClick={() => deletePreset(selected.id)}
-                    title="删除预设"
+                    title={isRunningThis ? '运行中，请先终止后再删除' : '删除预设'}
                   >
                     删除
                   </button>
@@ -746,7 +869,11 @@ function WebInterfaceModule() {
 
             {/* 运行区：preview + 终端 */}
             {isRunningThis && run ? (
-              <RunPane preset={selected} suppressBrowser={settings.suppressBrowser} onReady={markRunning} onStopped={markStopped} />
+              <RunPane preset={selected} suppressBrowser={settings.suppressBrowser}
+                openTerminal={showTerminal}
+                onToggleTerminal={() => setShowTerminal((s) => !s)}
+                refreshSignal={refreshSignal}
+                onReady={markRunning} onStopped={markStopped} />
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-black/10 dark:border-white/10 text-neutral-400 dark:text-stone-500">
                 <div className="text-sm">点击「一键启动」在终端里运行：</div>
