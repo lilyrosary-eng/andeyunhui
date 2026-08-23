@@ -835,6 +835,69 @@ pub fn aiwork_create_note(app: AppHandle, title: String, content: String) -> Res
     Ok(serde_json::json!({ "noteId": note_id, "title": title }))
 }
 
+// ========== AIWork 产物文件落地（导出 / 删除 / 移动到收藏·待决） ==========
+// 产物保存目录 / 收藏目录 / 待决目录由前端在模块设置里配置并传绝对路径；
+// 产物命名为 {name}.md，文件操作走 spawn_blocking 避免阻塞 IPC 线程。
+
+/// 把一段 AI 产出写成 .md 文件落到任意目录，返回最终绝对路径（供产物记录保存 path）。
+#[tauri::command]
+pub async fn ai_work_save_product_file(
+    dir: String,
+    name: String,
+    content: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = std::path::Path::new(&dir);
+        // create_dir_all 后目录存在，safe_join_ext 即可正常 canonicalize 越界校验
+        std::fs::create_dir_all(base).map_err(|e| format!("创建目录失败: {e}"))?;
+        let path = crate::services::safe_join_ext(base, &name, "md")?;
+        std::fs::write(&path, content).map_err(|e| format!("写入产物失败: {e}"))?;
+        Ok::<String, String>(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 删除一个产物文件（不存在则视为已删除，幂等）。
+#[tauri::command]
+pub async fn ai_work_delete_product_file(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::Path::new(&path);
+        if p.exists() {
+            std::fs::remove_file(p).map_err(|e| format!("删除产物失败: {e}"))?;
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 把产物文件移动到另一目录（收藏 / 待决）；返回移动后的绝对路径。
+#[tauri::command]
+pub async fn ai_work_move_product_file(from: String, to_dir: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = std::path::Path::new(&to_dir);
+        std::fs::create_dir_all(base).map_err(|e| format!("创建目录失败: {e}"))?;
+        let src = std::path::Path::new(&from);
+        let fname = src
+            .file_name()
+            .and_then(|f| f.to_str())
+            .ok_or_else(|| "路径缺少文件名".to_string())?;
+        let dst = base.join(fname);
+        if dst.exists() {
+            std::fs::remove_file(&dst).map_err(|e| format!("移除旧文件失败: {e}"))?;
+        }
+        // rename 跨盘会失败，回退为 copy + remove
+        if std::fs::rename(src, &dst).is_err() {
+            std::fs::copy(src, &dst).map_err(|e| format!("移动产物失败: {e}"))?;
+            std::fs::remove_file(src).map_err(|e| format!("清理原文件失败: {e}"))?;
+        }
+        Ok::<String, String>(dst.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// AIWork 成果物上下文聚合：一次拉取多篇笔记的内容摘要，供 LLM 做周报 / 总结 / 大纲。
 /// 三选一：
 ///   - 传 `note_ids`：只读指定笔记；

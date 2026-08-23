@@ -338,7 +338,7 @@ export const AiWorkflowView = memo(function AiWorkflowView({
               body = ins.filter(Boolean).join('\n\n') || '(无上游输出)';
             }
             const title = subRefs(node.params.title || node.label, outputs);
-            addProduct(body, title);
+            await addProduct(body, title);
             output = `已产出《${title}》并存入产物库`;
           }
           outputs.set(id, output);

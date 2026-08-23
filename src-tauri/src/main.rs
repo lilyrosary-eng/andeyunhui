@@ -1001,6 +1001,10 @@ fn main() {
             // 一期 AIWork / AIWorkflow 后端编排命令
             aiwork_create_note,
             aiwork_context_aggregate,
+            // AIWork 产物文件落地（导出 / 删除 / 移动到收藏·待决）
+            ai_work_save_product_file,
+            ai_work_delete_product_file,
+            ai_work_move_product_file,
             workflow_save,
             workflow_get,
             workflow_list,

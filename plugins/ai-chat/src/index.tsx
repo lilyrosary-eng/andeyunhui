@@ -16,7 +16,9 @@ import { AiWorkView } from '@/components/ai-chat/AiWorkView';
 import { AiWorkflowView } from '@/components/ai-chat/AiWorkflowView';
 import { useAiWorkProducts } from '@/core/ai/aiWorkProducts';
 import { useAiWorkflows } from '@/core/ai/aiWorkflows';
+import { AI_AIWORK_CONVERSATIONS_KEY } from '@/core/ai/util';
 import type { AiWorkTab } from '@/components/ai-chat/AiWorkTabs';
+import { AiWorkProductSettings } from './AiWorkProductSettings';
 
 const COMPANION_ENABLED_KEY = 'andeyunhui.aichat.companion.enabled';
 function readCompanionEnabled(): boolean {
@@ -32,6 +34,9 @@ const Root = memo(function Root() {
     selectConv, newConversation, newGroup, deleteConversation, renameConversation, clearAll, send, agent, setAgent,
   } = useAiChat({ persistKey: DEFAULT_PERSIST_KEY });
 
+  // AIWork 独立对话实例：与主「AI 对话」彻底隔离，专属存储 key，侧栏任务区 / 工作台共用。
+  const aiWorkChat = useAiChat({ persistKey: AI_AIWORK_CONVERSATIONS_KEY });
+
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [companionEnabled, setCompanionEnabled] = useState(readCompanionEnabled);
 
@@ -41,13 +46,13 @@ const Root = memo(function Root() {
     return (raw === 'work' || raw === 'workflow' || raw === 'chat') ? raw : 'chat';
   });
   const [subDrawerOpen, setSubDrawerOpen] = useState(false);
-  // workflow 内容区分段（任务区/产物区），受控于宿主
-  const [wfTab, setWfTab] = useState<AiWorkTab>('task');
+  // work / workflow 子模块内容区分段（任务区 / 产物区），受控于宿主；切换覆盖的是侧栏列表。
+  const [area, setArea] = useState<AiWorkTab>('task');
   const sub = submoduleById(subId);
   const switchSub = (id: AISubmoduleId) => {
     setSubId(id);
     setSettingsOpen(false);
-    setWfTab('task'); // 切换子模块时，工作流的任务/产物区回到任务区
+    setArea('task'); // 切换子模块时回到任务区
     try { localStorage.setItem(SUBMODULE_STORAGE_KEY, id); } catch { /* 忽略 */ }
   };
 
@@ -55,12 +60,12 @@ const Root = memo(function Root() {
   // 复用的共享侧栏（AiChatSidebar）与各视图共用同一份数据，不再自建第二层侧栏。
   const productStore = useAiWorkProducts();
   const wf = useAiWorkflows();
-  const wfChangeTab = useCallback((t: AiWorkTab) => {
-    setWfTab(t);
+  const changeArea = useCallback((t: AiWorkTab) => {
+    setArea(t);
     if (t === 'task') productStore.back(); // 切回任务区时清空查看态
   }, [productStore.back]);
   useEffect(() => {
-    if (productStore.viewing) setWfTab('product'); // 侧栏点选产物 → 自动切到产物区
+    if (productStore.viewing) setArea('product'); // 侧栏点选产物 → 自动切到产物区
   }, [productStore.viewing]);
 
   // 复用侧边栏模块设置齿轮（#13）：宿主齿轮点击派发 module-settings-toggle 事件，
@@ -117,10 +122,21 @@ const Root = memo(function Root() {
         }}
         submodule={sub}
         onOpenSubmoduleSwitcher={() => setSubDrawerOpen(true)}
+        area={area}
+        onAreaChange={changeArea}
         work={{
+          sessions: aiWorkChat.conversations,
+          activeSessionId: aiWorkChat.activeId,
+          onSelectSession: aiWorkChat.selectConv,
+          onNewSession: aiWorkChat.newConversation,
+          onDeleteSession: aiWorkChat.deleteConversation,
+          onRenameSession: aiWorkChat.renameConversation,
           products: productStore.products,
           viewingId: productStore.viewing?.id ?? null,
           onView: productStore.view,
+          onArchive: productStore.archive,
+          onFav: productStore.fav,
+          onPending: productStore.pending,
           onDeleteProduct: productStore.remove,
         }}
         workflow={{
@@ -131,10 +147,8 @@ const Root = memo(function Root() {
           onRename: wf.renameWorkflow,
           onDelete: wf.removeWorkflow,
         }}
-        productMode={subId === 'workflow' && wfTab === 'product'}
       />
-      {sub.id === 'chat' ? (
-      settingsOpen ? (
+      {settingsOpen ? (
         <ModuleSettingsPanel title="AI 对话" icon={<Bot size={20} />} onClose={() => setSettingsOpen(false)}>
           <div className="rounded-xl border border-black/10 dark:border-white/10 p-4">
             <label className="flex cursor-pointer items-center justify-between gap-3">
@@ -188,11 +202,9 @@ const Root = memo(function Root() {
               </button>
             </div>
           </div>
-          <div className="text-xs text-neutral-400 dark:text-stone-500">
-            当前共 {conversations.length} 段对话。AI 对话由统一 AI 核心驱动，模型与开关在「全局设置 → 模型」中配置。
-          </div>
+          <AiWorkProductSettings />
         </ModuleSettingsPanel>
-      ) : (
+      ) : sub.id === 'chat' ? (
         <AiChatConversation
           activeConv={activeConv}
           busy={busy}
@@ -206,24 +218,26 @@ const Root = memo(function Root() {
           ) : undefined}
           showCompanionAvatar={companionEnabled}
         />
-      )
-    ) : sub.id === 'work' ? (
+      ) : sub.id === 'work' ? (
       <AiWorkView
         products={productStore.products}
-        viewing={productStore.viewing}
         onSaveOutput={productStore.save}
-        onDeleteProduct={productStore.remove}
-        onBack={productStore.back}
+        activeConv={aiWorkChat.activeConv}
+        busy={aiWorkChat.busy}
+        send={aiWorkChat.send}
+        agent={aiWorkChat.agent}
+        onToggleAgent={aiWorkChat.setAgent}
+        conversations={aiWorkChat.conversations}
+        onSelectConv={aiWorkChat.selectConv}
+        onNewConv={aiWorkChat.newConversation}
+        onDeleteConv={aiWorkChat.deleteConversation}
+        onRenameConv={aiWorkChat.renameConversation}
       />
     ) : sub.id === 'workflow' ? (
       <AiWorkflowView
         profileId={profileId}
         doc={wf.active}
         onUpdate={wf.updateActive}
-        viewing={productStore.viewing}
-        onDeleteProduct={productStore.remove}
-        tab={wfTab}
-        onTabChange={wfChangeTab}
       />
     ) : (
         <AiSubmodulePlaceholder mod={sub} />

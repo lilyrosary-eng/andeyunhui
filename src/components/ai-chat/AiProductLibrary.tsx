@@ -65,9 +65,6 @@ export const AiProductLibrary = memo(function AiProductLibrary({
         >
           <BookmarkCheck size={13} /> 删除
         </button>
-        <button onClick={onGoTask} className="btn-press rounded-md p-1 text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-300" title="返回任务区">
-          <Download size={13} className="rotate-180" />
-        </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
         <div className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-800 dark:text-stone-100">{viewing.content}</div>
