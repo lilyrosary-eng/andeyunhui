@@ -1,4 +1,5 @@
 pub mod note_service;
+pub mod workflow_service;
 pub mod transfer_station;
 pub mod image_service;
 pub mod music_service;

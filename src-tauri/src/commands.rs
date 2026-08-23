@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use base64::Engine;
 use crate::services::note_service;
+use crate::services::workflow_service;
 use crate::services::transfer_station;
 use crate::services::image_service;
 use crate::services::music_service;
@@ -819,6 +820,139 @@ pub fn save_note(app: AppHandle, note_id: &str, title: &str, content: &str) -> R
     }
 
     note_service::save_note(notes_dir, note_id, title, content)
+}
+
+// ========== 一期 AIWork / AIWorkflow 后端编排命令 ==========
+
+/// AIWork 成果物落地：原子新建一篇笔记（后端生成 note_id），返回新笔记的 id 与标题。
+/// 前端无需自行计算安全 id，一次调用即可把 AI 产出物沉淀进笔记库，形成「对话→文档→存档」闭环。
+#[tauri::command]
+pub fn aiwork_create_note(app: AppHandle, title: String, content: String) -> Result<Value, String> {
+    let root_dir = notes_root_dir(&app)?;
+    let notes_dir = root_dir.join("notes");
+    let note_id = format!("note_{}", chrono::Utc::now().timestamp_millis());
+    note_service::save_note(notes_dir, &note_id, &title, &content)?;
+    Ok(serde_json::json!({ "noteId": note_id, "title": title }))
+}
+
+/// AIWork 成果物上下文聚合：一次拉取多篇笔记的内容摘要，供 LLM 做周报 / 总结 / 大纲。
+/// 三选一：
+///   - 传 `note_ids`：只读指定笔记；
+///   - 传 `query`：走内容检索后读取匹配笔记；
+///   - 都不传：取最近 `limit` 篇（默认 10）。
+/// 每篇返回 `{ id, title, excerpt }`（excerpt 截断，避免全量塞入模型上下文）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiworkNoteContext {
+    pub id: String,
+    pub title: String,
+    pub excerpt: String,
+}
+
+const AIWORK_EXCERPT_CAP: usize = 1200;
+
+fn note_excerpt(content: &str) -> (String, String) {
+    // 首行以 "# " 开头视为标题；excerpt 跳过标题行，截断到上限。
+    let mut lines = content.lines();
+    let first = lines.next().unwrap_or_default();
+    let title = first.trim_start().strip_prefix("# ").map(|t| t.trim().to_string())
+        .unwrap_or_else(|| "无标题笔记".to_string());
+    let body: String = lines.collect::<Vec<_>>().join("\n");
+    let mut excerpt: String = body.trim().chars().take(AIWORK_EXCERPT_CAP).collect();
+    if body.trim().chars().count() > AIWORK_EXCERPT_CAP {
+        excerpt.push_str("\n…（过长已截断）");
+    }
+    (title, excerpt)
+}
+
+#[tauri::command]
+pub fn aiwork_context_aggregate(
+    app: AppHandle,
+    note_ids: Option<Vec<String>>,
+    query: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<AiworkNoteContext>, String> {
+    let root_dir = notes_root_dir(&app)?;
+    let notes_dir = root_dir.join("notes");
+    let pins_dir = root_dir.join("pins");
+    let cap = limit.unwrap_or(10).max(1);
+
+    // 1. 确定要读取的 id 列表
+    let ids: Vec<String> = if let Some(ids) = note_ids.filter(|v| !v.is_empty()) {
+        ids.into_iter().filter(|s| !s.is_empty()).collect()
+    } else if let Some(q) = query.filter(|s| !s.trim().is_empty()) {
+        note_service::search_notes_content(notes_dir.clone(), &q)?
+    } else {
+        // 按最近优先取前 cap 篇
+        note_service::get_all_notes(notes_dir.clone(), pins_dir)?
+            .into_iter()
+            .map(|n| n.id)
+            .take(cap)
+            .collect()
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<AiworkNoteContext> = Vec::new();
+    for id in ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        match note_service::get_note_content(notes_dir.clone(), &id) {
+            Ok(v) => {
+                let content = v.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+                let (title, excerpt) = note_excerpt(content);
+                out.push(AiworkNoteContext { id, title, excerpt });
+            }
+            Err(_) => continue, // 单篇失败不阻断整体
+        }
+        if out.len() >= cap {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+// ============= AIWorkflow：蓝图持久化 + 执行日志 =============
+
+/// 工作流原始目录（app_data_dir 下，供 workflow_service 使用）。
+fn workflow_root(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    notes_root_dir(app)
+}
+
+#[tauri::command]
+pub fn workflow_save(app: AppHandle, flow_id: String, name: String, json: Value) -> Result<(), String> {
+    let root = workflow_root(&app)?;
+    workflow_service::save_workflow(&root, &flow_id, &name, &json)
+}
+
+#[tauri::command]
+pub fn workflow_get(app: AppHandle, flow_id: String) -> Result<Value, String> {
+    let root = workflow_root(&app)?;
+    workflow_service::get_workflow(&root, &flow_id)
+}
+
+#[tauri::command]
+pub fn workflow_list(app: AppHandle) -> Result<Vec<workflow_service::WorkflowMeta>, String> {
+    let root = workflow_root(&app)?;
+    workflow_service::list_workflows(&root)
+}
+
+#[tauri::command]
+pub fn workflow_delete(app: AppHandle, flow_id: String) -> Result<(), String> {
+    let root = workflow_root(&app)?;
+    workflow_service::delete_workflow(&root, &flow_id)
+}
+
+#[tauri::command]
+pub fn workflow_log_append(app: AppHandle, run_id: String, node_label: String, status: String, detail: String) -> Result<(), String> {
+    let root = workflow_root(&app)?;
+    workflow_service::append_run_log(&root, &run_id, &node_label, &status, &detail)
+}
+
+#[tauri::command]
+pub fn workflow_log_list(app: AppHandle, run_id: String) -> Result<Vec<Value>, String> {
+    let root = workflow_root(&app)?;
+    workflow_service::list_run_logs(&root, &run_id)
 }
 
 #[tauri::command]

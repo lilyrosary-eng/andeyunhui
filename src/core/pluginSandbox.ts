@@ -183,6 +183,15 @@ const ALLOWED_COMMANDS = new Set([
   'get_note_content',
   'save_note',
   'search_notes_content',
+  // 一期 AIWork / AIWorkflow 后端编排命令：成果物落地 / 上下文聚合 / 蓝图持久化 / 执行日志
+  'aiwork_create_note',
+  'aiwork_context_aggregate',
+  'workflow_save',
+  'workflow_get',
+  'workflow_list',
+  'workflow_delete',
+  'workflow_log_append',
+  'workflow_log_list',
   // 思考模式开关：ide / gongfang 子插件内联 toggle 调用此命令写回 profile.thinking
   // （此前漏加白名单，导致沙箱拦截 ai_set_profile_thinking，思考按钮「点了没反应」）
   'ai_set_profile_thinking',
