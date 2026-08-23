@@ -319,6 +319,9 @@ fn main() {
             app.manage(PendingOpenFiles(Default::default()));
             // 数据根（可配置存放位置）：必须在任意 app_data 子路径被使用前维护 junction / 执行 pending 迁移
             andeyunhui_lib::data_location::prepare_data_root(&app.handle().clone());
+            // AI 模型档案是核心能力：启动即后台预热内存缓存（读盘+scrypt 解密一次），
+            // 之后任意窗口/插件读取都是毫秒级，不再触发式慢加载。
+            andeyunhui_lib::services::ai_service::warm_profile_cache(app.handle().clone());
             // 「以安得云荟打开」临时目录：启动即清空，确保每次打开都是全新的（关软件即销毁）
             let _ = clear_openwith_dir(app.handle().clone());
             // 文件关联：以安得云荟打开（Windows 上通过启动参数传入文件路径）。

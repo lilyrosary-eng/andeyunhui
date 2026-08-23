@@ -23,7 +23,7 @@ pub mod ai_ocr;
 pub mod ai_conversations;
 
 // 对外重导出：保持 crate::services::ai_service::xxx 路径不变
-pub use ai_profile::{AiProfile, AiProfiles, load_profiles, resolve_profile, ai_get_profiles, ai_set_profiles, ai_set_profile_thinking};
+pub use ai_profile::{AiProfile, AiProfiles, load_profiles, resolve_profile, warm_profile_cache, ai_get_profiles, ai_set_profiles, ai_set_profile_thinking};
 pub use ai_chat::{ChatMessage, ai_chat};
 pub use ai_agent::{ai_chat_agent, ai_agent_approve, ai_agent_apply_edits, ai_agent_fork, ai_agent_replay, ai_agent_cancel, ai_agent_status};
 pub use ai_ocr::{ai_test_connection, ai_vision_ocr, translate_text, ai_ocr_enhance, ocr_export_pdf};

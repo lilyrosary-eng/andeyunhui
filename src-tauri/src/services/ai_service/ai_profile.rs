@@ -147,8 +147,35 @@ fn decrypt_profile_keys(profiles: &mut AiProfiles) {
     }
 }
 
-/// 读取全部模型档案；兼容旧版「单份 AiConfig」格式（无 id/name 字段）自动升级为单档案。
+/// 内存缓存（已解密的档案集合）：避免每次读取都跑一次费时的 scrypt 解密。
+/// 写路径（save_profiles / ai_set_profile_thinking）会刷新本缓存，保证最终一致。
+static PROFILE_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<AiProfiles>>> =
+    std::sync::OnceLock::new();
+fn profile_cache() -> &'static std::sync::Mutex<Option<AiProfiles>> {
+    PROFILE_CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 启动预热：后台异步加载一次填入缓存，随后的 load_profiles 全部走缓存（毫秒级）。
+/// 不阻塞启动流程（scrypt 解密多个 key 可能耗时数秒，放到后台线程）。
+pub fn warm_profile_cache(app: AppHandle) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = load_profiles(&app);
+    });
+}
+
+/// 读取全部模型档案（优先内存缓存，命中即毫秒级返回）。
+/// 未命中冷路径才会读盘 + scrypt 解密一次，结果写缓存。
 pub fn load_profiles(app: &AppHandle) -> AiProfiles {
+    if let Some(p) = profile_cache().lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return p;
+    }
+    let fresh = read_profiles_disk(app);
+    *profile_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh.clone());
+    fresh
+}
+
+/// 底层磁盘读取 + scrypt 解密（慢，仅在「冷路径 / 缓存失效后」执行一次）
+fn read_profiles_disk(app: &AppHandle) -> AiProfiles {
     let path = match config_path(app) {
         Ok(p) => p,
         Err(_) => return AiProfiles::default(),
@@ -209,10 +236,14 @@ pub fn resolve_profile(profiles: &AiProfiles, profile_id: Option<String>) -> AiP
     default_profile()
 }
 
-/// 读取全部模型档案（返回前端用于下拉框 / 配置页；api_key 原样返回，仅本机存储）
+/// 读取全部模型档案（返回前端用于下拉框 / 配置页；api_key 原样返回，仅本机存储）。
+/// 内部 load_profiles 会对带 key 的档案执行 scrypt 解密（CPU 密集），故剥离到阻塞线程，
+/// 避免同步命令占死主线程/事件循环导致整个 App 冻结（详见 commit 思路，与 commands.rs 中 spawn_blocking 范式一致）。
 #[tauri::command]
-pub fn ai_get_profiles(app: AppHandle) -> AiProfiles {
-    load_profiles(&app)
+pub async fn ai_get_profiles(app: AppHandle) -> AiProfiles {
+    tauri::async_runtime::spawn_blocking(move || load_profiles(&app))
+        .await
+        .unwrap_or_default()
 }
 
 /// 保存全部模型档案 + 激活项；api_key 统一经 AES-256-GCM 加密落盘（透明）。
@@ -229,37 +260,50 @@ fn save_profiles(app: &AppHandle, profiles: &AiProfiles) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| format!("写入配置失败: {}", e))?;
+    // 落盘成功即刷新内存缓存（用原始解密态 profiles），下次读取直接命中，无需再解密
+    *profile_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(profiles.clone());
     Ok(())
 }
 
 #[tauri::command]
-pub fn ai_set_profiles(app: AppHandle, payload: AiProfiles) -> Result<(), String> {
-    save_profiles(&app, &payload)
+pub async fn ai_set_profiles(app: AppHandle, payload: AiProfiles) -> Result<(), String> {
+    // save_profiles 对带 key 的档案执行 scrypt 加密（CPU 密集），剥离到阻塞线程避免卡死主线程
+    tauri::async_runtime::spawn_blocking(move || save_profiles(&app, &payload))
+        .await
+        .map_err(|e| format!("保存模型档案任务失败: {e}"))?
 }
 
 /// 仅更新单个档案的「思考模式」开关，供聊天界面内联切换（跨胶囊/IDE/攻防共享同一档案字段）。
 #[tauri::command]
-pub fn ai_set_profile_thinking(app: AppHandle, profile_id: String, thinking: bool) -> Result<(), String> {
-    let mut profiles = load_profiles(&app);
-    let mut found = false;
-    for p in profiles.profiles.iter_mut() {
-        if p.id == profile_id {
-            p.thinking = Some(thinking);
-            found = true;
-            break;
+pub async fn ai_set_profile_thinking(app: AppHandle, profile_id: String, thinking: bool) -> Result<(), String> {
+    // 内部 load_profiles(逐个档案 scrypt 解密) + save_profiles(逐个档案 scrypt 加密) + emit 广播，
+    // 均可能耗时且为纯阻塞操作；异步命令 + spawn_blocking 剥离，避免点击一下就把主线程/事件循环占死而冻结全部窗口。
+    let app2 = app.clone();
+    let profile_id2 = profile_id.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut profiles = load_profiles(&app2);
+        let mut found = false;
+        for p in profiles.profiles.iter_mut() {
+            if p.id == profile_id2 {
+                p.thinking = Some(thinking);
+                found = true;
+                break;
+            }
         }
-    }
-    if !found {
-        return Err(format!("未找到模型档案: {}", profile_id));
-    }
-    // load_profiles 已解密 api_key，save_profiles 统一加密落盘（透明往返）
-    save_profiles(&app, &profiles)?;
-    // 广播「思考模式」变化，使胶囊 / IDE / 攻防 各聊天界面实时同步同一档案字段
-    let _ = app.emit(
-        "ai-thinking-changed",
-        serde_json::json!({ "profile_id": profile_id, "thinking": thinking }),
-    );
-    Ok(())
+        if !found {
+            return Err(format!("未找到模型档案: {}", profile_id2));
+        }
+        // load_profiles 已解密 api_key，save_profiles 统一加密落盘（透明往返）
+        save_profiles(&app2, &profiles)?;
+        // 广播「思考模式」变化，使胶囊 / IDE / 攻防 各聊天界面实时同步同一档案字段
+        let _ = app2.emit(
+            "ai-thinking-changed",
+            serde_json::json!({ "profile_id": profile_id2, "thinking": thinking }),
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("设置思考模式任务失败: {e}"))?
 }
 
 /// 组合人设 system 提示词：风格预设 + 自定义风格 + 称呼 + 额外要求（legacy system_prompt）。
