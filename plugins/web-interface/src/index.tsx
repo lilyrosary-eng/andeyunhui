@@ -15,7 +15,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
 import { WebTerminal } from './Terminal';
 import {
-  loadPresets, savePresets, newPresetId, validatePreset, builtinTemplates,
+  loadPresets, savePresets, newPresetId, validatePreset,
   suggestFromFile, scanAndRecognize, recognitionToPreset, baseName, dirName, extOf, RUNNABLE_EXTS,
   type WebPreset, type WebRun, type WebRunStatus,
 } from './presets';
@@ -48,6 +48,7 @@ function RunPane({
 }) {
   const [showTerminal, setShowTerminal] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
+  const [probeReady, setProbeReady] = useState(true);
   const readyFired = useRef(false);
 
   const markReady = useCallback(() => {
@@ -64,6 +65,29 @@ function RunPane({
   }, [markReady]);
 
   const hasUrl = !!preset.url?.trim();
+
+  // 预览地址「就绪探测」：no-cors fetch 轮询直到服务端口起来，再加载 iframe。
+  // 避免大型应用（kohya/ComfyUI）启动慢时误报"拒绝连接"。超时(90s)后也渲染以便手动刷新。
+  useEffect(() => {
+    if (!hasUrl) return;
+    setProbeReady(false);
+    let cancelled = false;
+    let attempts = 0;
+    const tryOnce = async () => {
+      if (cancelled) return;
+      try {
+        await fetch(preset.url, { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(3000) });
+        if (!cancelled) setProbeReady(true);
+      } catch {
+        if (cancelled) return;
+        attempts += 1;
+        if (attempts > 45) { if (!cancelled) setProbeReady(true); return; }
+        setTimeout(tryOnce, 2000);
+      }
+    };
+    tryOnce();
+    return () => { cancelled = true; };
+  }, [hasUrl, preset.url, reloadKey]);
 
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-2">
@@ -101,7 +125,13 @@ function RunPane({
       <div className="flex-1 min-h-0 flex flex-col">
         {/* 预览 iframe（服务内容区） */}
         <div className="flex-1 min-h-0 rounded-xl border border-black/10 dark:border-white/10 overflow-hidden bg-white dark:bg-stone-950 relative">
-          {hasUrl ? (
+          {hasUrl && !probeReady ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 text-center text-xs text-neutral-400 dark:text-stone-500">
+              <span className="inline-block h-5 w-5 rounded-full border-2 border-neutral-300 border-t-sky-500 animate-spin" />
+              <div>等待服务启动，就绪后自动加载预览…</div>
+              <div className="text-[11px] opacity-70">首次启动大型应用（如 kohya / ComfyUI）可能需数十秒</div>
+            </div>
+          ) : hasUrl ? (
             <iframe
               key={reloadKey}
               src={preset.url}
@@ -390,12 +420,6 @@ function WebInterfaceModule() {
     setEditing('new');
   }, []);
 
-  const addFromTemplate = useCallback((t: WebPreset) => {
-    setPresets((prev) => [...prev, t]);
-    setSelectedId(t.id);
-    setEditing(null);
-  }, []);
-
   const savePreset = useCallback((p: WebPreset) => {
     setPresets((prev) => {
       const i = prev.findIndex((x) => x.id === p.id);
@@ -474,26 +498,10 @@ function WebInterfaceModule() {
           ))}
           {presets.length === 0 && (
             <div className="px-3 py-6 text-center text-xs text-neutral-400 dark:text-stone-500">
-              还没有预设。点「新建」创建，或从下方模板快速开始。
+              还没有预设。点「新建」，选本地文件/文件夹自动识别后保存。
             </div>
           )}
         </div>
-
-        {presets.length === 0 && (
-          <div className="space-y-1 border-t border-black/10 dark:border-white/10 pt-2">
-            <div className="px-1 pb-1 text-xs text-neutral-400 dark:text-stone-500">快速开始</div>
-            {builtinTemplates().map((t) => (
-              <button
-                key={t.id}
-                className="w-full text-left rounded-xl px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5"
-                onClick={() => addFromTemplate(t)}
-              >
-                <div className="text-sm text-neutral-800 dark:text-stone-200">{t.name}</div>
-                <div className="font-mono text-[11px] text-neutral-400 dark:text-stone-600">{t.args}</div>
-              </button>
-            ))}
-          </div>
-        )}
       </aside>
 
       {/* 右侧：详情 / 编辑 / 运行区 */}

@@ -352,28 +352,3 @@ export function recognitionToPreset(
   }
   return { name: baseName(rootDir.replace(/[\\/]+$/, '')), args: '', cwd: rootDir, url: r.url };
 }
-
-/** 一批内置预设模板，供「新建」时快速选择 */
-export function builtinTemplates(): WebPreset[] {
-  const now = Date.now();
-  return [
-    {
-      id: newPresetId(),
-      name: '静态文件服务',
-      desc: 'python 自带的 http.server，托管当前目录',
-      kind: 'command',
-      args: 'python -m http.server 8000',
-      url: 'http://127.0.0.1:8000',
-      createdAt: now,
-    },
-    {
-      id: newPresetId(),
-      name: 'Vite Dev Server',
-      desc: '在当前项目里启动前端开发服务（需 cwd 指向项目）',
-      kind: 'command',
-      args: 'npm run dev',
-      url: 'http://localhost:5173',
-      createdAt: now,
-    },
-  ];
-}
