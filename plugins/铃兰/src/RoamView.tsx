@@ -6,7 +6,7 @@
 
 import React from 'react';
 const { useState, useEffect, useRef, useCallback } = React;
-import { Sparkles, Music as MusicIcon, Cloud } from 'lucide-react';
+import { Music as MusicIcon } from 'lucide-react';
 import { musicPlayer } from './musicPlayer';
 import {
   getRoamSourceApi,
@@ -627,19 +627,6 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
   return (
     <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative" style={{ background: stageBg }}>
       <style dangerouslySetInnerHTML={{ __html: stageStyle }} />
-
-      {/* 顶部栏 */}
-      <div className="shrink-0 flex items-center justify-between min-w-0 px-4 pt-3 pb-2 relative z-20">
-        <h2 className="text-sm font-semibold truncate" style={{ color: ink }}>漫游电台 · {sourceLabel[source]}</h2>
-        <div className="flex items-center gap-2">
-          <button onClick={refreshRoam} className="btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors" style={{ background: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.92)', color: isDark ? 'rgba(255,255,255,0.9)' : '#2c5a1a' }} title="换一批漫游">
-            <Sparkles size={14} /> 换一批
-          </button>
-          <button onClick={onBack} className="btn-press flex items-center justify-center p-2 rounded-lg transition-colors" style={{ color: ink }} title="返回模块抽屉">
-            <Cloud size={18} />
-          </button>
-        </div>
-      </div>
 
       {/* 主舞台 */}
       <div className="flex-1 relative overflow-hidden">

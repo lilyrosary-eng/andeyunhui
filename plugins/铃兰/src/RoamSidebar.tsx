@@ -6,7 +6,7 @@
 
 import React from "react";
 const { useState, useEffect, useRef, useCallback } = React;
-import { ChevronDown, ChevronRight, Sparkles, Music as MusicIcon, Play, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Sparkles, Music as MusicIcon, Play, Trash2, Cloud } from 'lucide-react';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import { musicPlayer, type Track } from './musicPlayer';
 import { OnlineSidebarShell } from './OnlineSidebarShell';
@@ -37,10 +37,10 @@ interface RoamSidebarProps {
   onSelectSource: (source: RoamSource) => void;
   onSelectTrack: (source: RoamSource, track: RoamSeedTrack, fromHistory: boolean) => void;
   onClearHistory: (source: RoamSource) => void;
+  onBack: () => void;
   onClose: () => void;
   onOpenSettings: () => void;
   settingsActive?: boolean;
-  // 统计按钮
   onOpenStats?: () => void;
   statsActive?: boolean;
 }
@@ -73,7 +73,7 @@ function getCoverUrl(path?: string): string | null {
 
 export function RoamSidebar(props: RoamSidebarProps) {
   useLang();
-  const { activeSource, histories, seedTracks, onSelectSource, onSelectTrack, onClearHistory, onClose, onOpenSettings, settingsActive, onOpenStats, statsActive } = props;
+  const { activeSource, histories, seedTracks, onSelectSource, onSelectTrack, onClearHistory, onBack, onClose, onOpenSettings, settingsActive, onOpenStats, statsActive } = props;
   const [expandedMenus, setExpandedMenus] = useState<Set<RoamSource>>(new Set(activeSource ? [activeSource] : []));
 
   useEffect(() => {
@@ -173,15 +173,22 @@ export function RoamSidebar(props: RoamSidebarProps) {
     );
   };
 
-  // 标题：可点击返回本地音乐（收起）
-  const titleEl = React.createElement('button', {
-    onClick: onClose,
-    className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
-    title: '返回本地音乐',
-  }, [
-    React.createElement(Sparkles, { key: 'icon', size: 18, className: 'text-[#7c4dff] dark:text-[#b388ff]' }),
-    '漫游电台',
-  ]);
+  // 标题行：Sparkles + "漫游电台" + Cloud 返回按钮（同一行）
+  const titleEl = React.createElement('div', { className: 'flex items-center gap-2' },
+    React.createElement('button', {
+      onClick: onClose,
+      className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors flex items-center gap-2',
+      title: '返回本地音乐',
+    }, [
+      React.createElement(Sparkles, { key: 'icon', size: 18, className: 'text-[#7c4dff] dark:text-[#b388ff]' }),
+      '漫游电台',
+    ]),
+    React.createElement('button', {
+      onClick: onBack,
+      className: 'ml-auto p-1.5 rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 dark:text-stone-500',
+      title: '返回模块抽屉',
+    }, React.createElement(Cloud, { size: 16 })),
+  );
 
   const content = React.createElement('div', { className: 'space-y-4' },
     React.createElement('p', { key: 'label', className: 'text-[10px] font-medium text-neutral-400 dark:text-stone-500 uppercase tracking-wider mb-1 px-1' }, '漫游路径'),

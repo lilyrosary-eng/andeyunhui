@@ -2373,6 +2373,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             setRoamHistories((prev) => ({ ...prev, [src]: [] }));
           }}
           onClose={() => setRoamOpen(false)}
+          onBack={() => setShowModuleDrawer(true)}
           onOpenSettings={() => setRoamSettingsOpen(v => !v)}
           settingsActive={roamSettingsOpen}
           onOpenStats={() => setShowStats(v => !v)}
@@ -2543,6 +2544,10 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             <RoamView
               source={roamSource}
               onBack={() => setShowModuleDrawer(true)}
+              onRefresh={() => {
+                clearRoamCache();
+                setRoamReloadKey((k) => k + 1);
+              }}
               onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
