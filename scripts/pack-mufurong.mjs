@@ -51,12 +51,19 @@ function packToMufurong(srcDir, destFile) {
 
 // ========== 主流程 ==========
 
-// 1. 先确保 bundled-plugins/ 已构建（运行 deploy-plugins.mjs）
-// 始终用最新源码重建 bundled-plugins，避免陈旧 .mufurong 进安装包
-// （典型坑：先 build 再改源码跑 dev，dev 刷新项目根 bundled-plugins，
-//  但安装包 .mufurong 仍是旧构建 → 安装后读旧代码并污染共享 user_plugins）
-console.log('[Pack] 强制用最新源码重建 bundled-plugins...');
-execSync('node scripts/deploy-plugins.mjs', { cwd: rootDir, stdio: 'inherit' });
+// 1. 确保 bundled-plugins/ 已构建
+// 当由 before-build.mjs → prepare-bundled-dlc.mjs 调用时，deploy-plugins.mjs
+// 已在 FULL_CHAIN 中先执行过，bundled-plugins/ 应是最新产物，无需重复构建。
+// 但 pack-mufurong.mjs 也可独立运行（如手动打 .mufurong），此时必须自行构建。
+// 判断依据：bundled-plugins/ 存在且非空 → 跳过；否则重建。
+const hasBundledPlugins = existsSync(bundledDir) &&
+  readdirSync(bundledDir).some(n => n !== '.gitkeep' && n !== 'manifest.json');
+if (hasBundledPlugins) {
+  console.log('[Pack] bundled-plugins/ 已存在，跳过 deploy-plugins.mjs（复用最新产物）');
+} else {
+  console.log('[Pack] bundled-plugins/ 不存在或为空，运行 deploy-plugins.mjs 构建...');
+  execSync('node scripts/deploy-plugins.mjs', { cwd: rootDir, stdio: 'inherit' });
+}
 
 // 2. 扫描所有插件
 const plugins = [];
@@ -68,6 +75,9 @@ if (existsSync(outputDir)) rmSync(outputDir, { recursive: true });
 mkdirSync(outputDir, { recursive: true });
 
 // 4. 打包每个插件为 .mufurong
+// 记录构建失败的插件；结束时若非空则以非零码退出，避免
+// "某插件打包失败被静默跳过、继续生成残缺安装包"这一极隐蔽的陷阱。
+const failedPlugins = [];
 let packed = 0;
 for (const { relPath, dir } of plugins) {
   const outFile = join(outputDir, 'plugins', relPath + '.mufurong');
@@ -77,6 +87,7 @@ for (const { relPath, dir } of plugins) {
     console.log(`[Pack] ✓ ${relPath} -> ${relative(rootDir, outFile)}`);
   } catch (e) {
     console.error(`[Pack] ✗ ${relPath} 打包失败: ${e.message}`);
+    failedPlugins.push(relPath);
   }
 }
 
@@ -133,3 +144,10 @@ writeFileSync(readmePath, readmeContent, 'utf-8');
 console.log(`\n[Pack] DLC 打包完成！`);
 console.log(`[Pack] 插件 .mufurong: ${packed} 个`);
 console.log(`[Pack] 输出目录: ${outputDir}`);
+
+// 关键：任一插件打包失败则整体失败退出，避免打包/CI 静默生成残缺安装包。
+if (failedPlugins.length > 0) {
+  console.error(`\n[Pack] ✗ 以下插件打包失败，已中止：${failedPlugins.join(', ')}`);
+  console.error('[Pack] 请修复上述插件的打包错误后重试（安装包已阻止以免装入残缺包）。');
+  process.exit(1);
+}

@@ -22,10 +22,11 @@
 //
 // BUILD_CLEAN=1 环境变量：跳过所有插件构建和部署，只保留空模块文件夹 + .gitkeep。
 // 用于 build_clean.bat 打包精简版安装包（不含插件代码，用户后续导入 .mufurong）。
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import { mkdirSync, cpSync, readFileSync, existsSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cpus } from 'node:os';
 
 // 关闭 IDE safe-delete 拦截：否则 Vite emptyDir 批量删除 dist/ 被拦（SAFE_DELETE_BULK_CONFIRM_REQUIRED），构建失败。
 // 官方开关：shim 仅在 SAFE_DELETE_ENABLED !== '0' 时启用。
@@ -140,7 +141,107 @@ function cleanStalePlugins(targetDir, validRelPaths, label) {
 const validRelPaths = new Set(plugins.map(p => p.relPath));
 cleanStalePlugins(bundledDir, validRelPaths, 'bundled-plugins');
 
-// ===== 部署每个插件（保留源码相对路径，与 plugins/ 结构一致） =====
+// ===== 预生成 Tailwind CSS =====
+// 插件构建需要 Tailwind 工具类（flex、h-full、overflow-hidden 等），
+// 但 Vite lib 模式下 Tailwind JIT 扫描不触发。
+// 解决方案：在并行构建前一次性预生成 Tailwind CSS，写入 .vite-temp/_tailwind-plugins.css，
+// 后续每个插件构建只需读取该文件，避免并发竞争。
+if (!BUILD_CLEAN && !IS_ANDROID) {
+  console.log('[Deploy] 预生成 Tailwind CSS...');
+  try {
+    const genScript = join(rootDir, '.vite-temp', '_gen-tw.cjs');
+    const outPath = join(rootDir, '.vite-temp', '_tailwind-plugins.css');
+    mkdirSync(join(rootDir, '.vite-temp'), { recursive: true });
+
+    const configPath = join(rootDir, 'tailwind.config.js').replace(/\\/g, '\\\\');
+    const cssOutPath = outPath.replace(/\\/g, '\\\\');
+    writeFileSync(genScript, `
+      const postcss = require('postcss');
+      const tailwindcss = require('tailwindcss');
+      const autoprefixer = require('autoprefixer');
+      const fs = require('fs');
+      const css = '@tailwind base; @tailwind components; @tailwind utilities;';
+      postcss([tailwindcss({ config: '${configPath}' }), autoprefixer()])
+        .process(css, { from: undefined })
+        .then(r => { fs.writeFileSync('${cssOutPath}', r.css); process.exit(0); })
+        .catch(e => { console.error(e); process.exit(1); });
+    `);
+    execSync(`node "${genScript}"`, { cwd: rootDir, stdio: 'pipe' });
+    const sizeKB = (statSync(outPath).size / 1024).toFixed(0);
+    console.log(`  ✓ Tailwind CSS 已预生成 (${sizeKB} KB)`);
+  } catch (e) {
+    console.warn(`[Deploy] ⚠ Tailwind CSS 预生成失败: ${e.message}`);
+  }
+}
+
+// ===== 并行构建插件 =====
+// 将构建（慢）与复制（快）分离：构建阶段并行执行，复制阶段串行执行。
+// 并发上限 MAX_CONCURRENT：避免同时启动过多 Vite 进程导致内存不足或 CPU 争抢。
+// 12900HX 24 线程，4-6 个并行 Vite 构建是甜区——既吃满 CPU 又不 OOM。
+const MAX_CONCURRENT = Math.min(6, cpus().length);
+
+/** 异步构建单个插件（有 vite.config.ts/js 的才需要构建） */
+function buildPluginAsync(plugin) {
+  return new Promise((resolve) => {
+    const { relPath, id } = plugin;
+    const pluginDir = join(pluginsDir, relPath);
+    const hasViteConfig = existsSync(join(pluginDir, 'vite.config.ts')) || existsSync(join(pluginDir, 'vite.config.js'));
+    if (!hasViteConfig) { resolve({ plugin, ok: true, skipped: true }); return; }
+
+    console.log(`[Deploy] ▶ 构建: ${id} (源: ${relPath})`);
+    const child = spawn('node', [`"${viteBin}"`, 'build'], {
+      cwd: pluginDir,
+      stdio: 'pipe',
+      shell: true,
+      timeout: 120_000,
+    });
+    let stderr = '';
+    child.stderr?.on('data', d => { stderr += d; });
+    child.on('close', code => {
+      if (code === 0) {
+        console.log(`[Deploy] ✓ 构建完成: ${id}`);
+        resolve({ plugin, ok: true });
+      } else {
+        console.error(`[Deploy] ✗ 构建失败: ${id} (exit ${code})`);
+        if (stderr) console.error(`  ${stderr.slice(0, 200)}`);
+        resolve({ plugin, ok: false });
+      }
+    });
+    child.on('error', e => {
+      console.error(`[Deploy] ✗ 构建异常: ${id}`, e.message);
+      resolve({ plugin, ok: false });
+    });
+  });
+}
+
+/** 并发限制执行器：同时最多 maxConcurrency 个 Promise 在跑 */
+async function parallelLimit(tasks, maxConcurrency) {
+  const results = [];
+  const executing = new Set();
+  for (const task of tasks) {
+    const p = task().then(r => { executing.delete(p); return r; });
+    executing.add(p);
+    results.push(p);
+    if (executing.size >= maxConcurrency) {
+      await Promise.race(executing);
+    }
+  }
+  return Promise.all(results);
+}
+
+// ===== 部署阶段1：并行构建所有插件 =====
+if (!BUILD_CLEAN && !IS_ANDROID) {
+  const buildTasks = plugins.map(p => () => buildPluginAsync(p));
+  console.log(`[Deploy] 并行构建 ${plugins.length} 个插件（并发: ${MAX_CONCURRENT}）...`);
+  const buildResults = await parallelLimit(buildTasks, MAX_CONCURRENT);
+
+  // 收集失败的插件
+  for (const { plugin, ok } of buildResults) {
+    if (!ok) failedPlugins.push(plugin.id);
+  }
+}
+
+// ===== 部署阶段2：串行复制产物到 bundled-plugins/ =====
 for (const { relPath, id, manifest } of plugins) {
   const pluginDir = join(pluginsDir, relPath);
   if (!existsSync(pluginDir)) continue;
@@ -151,38 +252,12 @@ for (const { relPath, id, manifest } of plugins) {
     continue;
   }
 
-  const hasViteConfig = existsSync(join(pluginDir, 'vite.config.ts')) || existsSync(join(pluginDir, 'vite.config.js'));
-  console.log(`\n[Deploy] ${hasViteConfig ? '构建' : '复制'}插件: ${id} (源: ${relPath})`);
-
-  // 1. 构建（有 vite 配置）或跳过（预构建插件）
-  //    直接通过 node 调用 vite 二进制（而非 pnpm exec / npx）：
-  //    - pnpm 11 的 ERR_PNPM_IGNORED_BUILDS 会导致 pnpm exec 内部的 install 检查失败
-  //    - npx 底层走 npm，不识别根 .npmrc 的 pnpm 专属键
-  //    - vite 已通过 shamefully-hoist=true 提升到根 node_modules，直接调用最稳定
-  if (hasViteConfig) {
-    try {
-      // 直接通过 node 调用 vite 二进制，绕过 pnpm exec（pnpm 11 的 ERR_PNPM_IGNORED_BUILDS 会导致 install 失败）
-      // vite 已通过 shamefully-hoist=true 提升到根 node_modules，cwd 设为插件目录以找到 vite.config.ts
-      execSync(`node "${viteBin}" build`, { cwd: pluginDir, stdio: 'inherit', timeout: 120_000 });
-    } catch (e) {
-      console.error(`[Deploy] ✗ 构建失败: ${id}`, e.message);
-      failedPlugins.push(id);
-      continue;
-    }
-  }
-
   // 复制产物：优先 dist/（vite 构建），其次 index.js（预构建）
   const distDir = join(pluginDir, 'dist');
   const entryFile = join(pluginDir, 'index.js');
   const manifestSrc = join(pluginDir, 'manifest.json');
 
-  // 2. 复制到 bundled-plugins（保留源码相对路径，与 plugins/ 结构一致）
-  //    Rust 端 walk() / find_plugin_root() 递归扫描，天然支持嵌套目录结构
   const bundleTarget = join(bundledDir, relPath);
-  // 关键：保留 bundleTarget 目录节点本身，仅清空其内容，不要 rmSync(recursive) 删除目录。
-  // 否则 dev 模式下 Rust 端对 bundled-plugins/ 的递归文件监听（ReadDirectoryChangesW）
-  // 在子目录被删除后会失效，导致 plugin-fs-change 不再派发、运行中 app 始终使用
-  // 旧的内存插件副本，部署改动不生效。清空内容后监听句柄保持有效，热重载可持续触发。
   if (existsSync(bundleTarget)) {
     for (const entry of readdirSync(bundleTarget)) {
       rmSync(join(bundleTarget, entry), { recursive: true, force: true });
@@ -198,13 +273,7 @@ for (const { relPath, id, manifest } of plugins) {
   }
   console.log(`  ✓ -> bundled-plugins/${relPath}`);
 
-  // 清理 AppData/user_plugins 下与本插件同 id/relPath 的陈旧影子副本。
-  // dev 下以项目根 bundled-plugins/ 为权威源；若 user_plugins 残留旧副本，
-  // find_plugin_root 优先查 user_plugins 会盖过最新代码，导致"部署成功但 app 跑旧插件"。
-  // 每次部署顺手清掉影子，使 FS 监听触发的自动热重载能拿到新代码。
   clearUserPluginShadow(relPath, id);
-
-  console.log(`[Deploy] ${id} 部署完成`);
 }
 
 // 清理 user_plugins 影子（见上方调用处注释）。仅 Windows（有 APPDATA）时生效。

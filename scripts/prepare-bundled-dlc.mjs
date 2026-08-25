@@ -48,17 +48,18 @@ console.log('[PrepareDLC] 调用 pack-mufurong.mjs 生成 .mufurong + .mujin ...
 try {
   execSync('node scripts/pack-mufurong.mjs', { cwd: rootDir, stdio: 'inherit' });
 } catch (e) {
+  // 🔴 不再静默降级：pack-mufurong 失败意味着插件/依赖打包异常，
+  //    应中止构建而非生成空壳安装包（否则用户拿到「能装但没有插件」的残缺包）。
   console.error(`[PrepareDLC] ✗ pack-mufurong.mjs 失败: ${e.message}`);
-  console.error('[PrepareDLC] 继续生成空 bundled-dlc/ 占位，安装包将不含插件');
-  writeFileSync(join(bundledDlcDir, '.gitkeep'), '');
-  process.exit(0);
+  console.error('[PrepareDLC] 已中止，安装包未生成（请修复插件打包错误后重试）');
+  process.exit(1);
 }
 
 // 3. 把 dist-dlc/ 整体复制到 bundled-dlc/
 if (!existsSync(distDlcDir)) {
-  console.error('[PrepareDLC] ✗ dist-dlc/ 未生成，回退到空占位');
-  writeFileSync(join(bundledDlcDir, '.gitkeep'), '');
-  process.exit(0);
+  // pack-mufurong.mjs 成功退出但未生成 dist-dlc/，属脚本内部 bug，中止构建
+  console.error('[PrepareDLC] ✗ dist-dlc/ 未生成（pack-mufurong.mjs 内部异常），已中止');
+  process.exit(1);
 }
 
 console.log('[PrepareDLC] 复制 dist-dlc/ -> bundled-dlc/ ...');

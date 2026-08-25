@@ -86,6 +86,7 @@ mkdirSync(outputDir, { recursive: true });
 // 逐个打包
 let packed = 0;
 const packedList = [];
+const failedDeps = [];
 for (const target of TARGETS) {
   const { src, out } = target;
   // 轻量模式跳过重型依赖
@@ -106,6 +107,7 @@ for (const target of TARGETS) {
     console.log(`[PackMujin] ✓ ${src} -> ${relative(rootDir, destFile)}`);
   } catch (e) {
     console.error(`[PackMujin] ✗ ${src} 打包失败: ${e.message}`);
+    failedDeps.push(src);
   }
 }
 
@@ -140,3 +142,10 @@ writeFileSync(readmePath, readmeContent, 'utf-8');
 console.log(`\n[PackMujin] 依赖打包完成！`);
 console.log(`[PackMujin] .mujin 依赖: ${packed} 个`);
 console.log(`[PackMujin] 输出目录: ${outputDir}`);
+
+// 关键：任一依赖打包失败则整体失败退出，避免静默生成残缺安装包。
+if (failedDeps.length > 0) {
+  console.error(`\n[PackMujin] ✗ 以下依赖打包失败，已中止：${failedDeps.join(', ')}`);
+  console.error('[PackMujin] 请修复上述依赖的打包错误后重试。');
+  process.exit(1);
+}

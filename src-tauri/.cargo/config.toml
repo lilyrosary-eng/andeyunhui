@@ -1,0 +1,10 @@
+# Build acceleration config - faster compilation and linking, no runtime impact
+
+[build]
+# sccache: compilation cache, incremental builds near-instant after first run
+rustc-wrapper = "sccache"
+
+[target.x86_64-pc-windows-msvc]
+# Use Rust's bundled LLVM LLD linker instead of MSVC default link.exe
+# 2-5x faster linking with LTO enabled
+linker = "C:/Users/Rosary/.rustup/toolchains/1.95.0-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
