@@ -1809,8 +1809,6 @@ video {
 } .border-amber-800 {
   --tw-border-opacity: 1;
   border-color: rgb(146 64 14 / var(--tw-border-opacity, 1));
-} .border-amber-800\/40 {
-  border-color: rgb(146 64 14 / 0.4);
 } .border-black {
   --tw-border-opacity: 1;
   border-color: rgb(0 0 0 / var(--tw-border-opacity, 1));
