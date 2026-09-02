@@ -354,12 +354,13 @@ export default function Capsule() {
     return () => window.removeEventListener('keydown', onKey);
   }, [collapse]);
 
-  // 展开时拉取整机会话快照，并每 2s 刷新（供堆叠 / 下拉切换）
-  // 会话列表与上屏卡片派生统一由 capsuleStore 维护，壳仅触发刷新。
+  // 展开时拉取整机会话快照，并低频对账外部系统会话（供堆叠 / 下拉切换）。
+  // 播放卡的实时更新已由 smtc_update 事件(onNowPlaying)驱动，这里只承担「外部会话被
+  // 关闭后清 selectedKey」的低频兜底，故降频到 15s，避免每 2s 一次后台 IPC 空转。
   useEffect(() => {
     if (expanded) {
       void refreshSessionList();
-      const id = setInterval(() => void refreshSessionList(), 2000);
+      const id = setInterval(() => void refreshSessionList(), 15 * 1000);
       return () => clearInterval(id);
     }
   }, [expanded, refreshSessionList]);

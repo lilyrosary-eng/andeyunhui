@@ -71,11 +71,13 @@ export function FileSearchPanel({ variant, onClose, keepOpen, onKeepToggle }: Fi
 
   useEffect(() => {
     void refreshStatus();
-    const id = setInterval(() => void refreshStatus(), 1500);
+    // 低频状态兜底：实时「已扫描 X 项」由 indexProgress 事件驱动，这里只兜底
+    // indexing/last_indexed 状态，无需 1.5s 轮询，降到 10s 避免后台 IPC 空转。
+    const id = setInterval(() => void refreshStatus(), 10 * 1000);
     return () => clearInterval(id);
   }, [refreshStatus]);
 
-  // 即时接收后台索引进度事件，让顶部「已扫描 X 项」无需等待 1.5s 轮询即刷新（扫描多少展示多少）
+  // 即时接收后台索引进度事件，让顶部「已扫描 X 项」无需等待轮询即刷新（扫描多少展示多少）
   useEffect(() => {
     let un: (() => void) | undefined;
     listen<{ count: number; done: boolean }>(EVENTS.fileSearch.indexProgress, (e) => {
