@@ -57,6 +57,10 @@ interface NotesState {
 let autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
 // Markdown 渲染 rAF 句柄（每帧仅渲染最后一次，预览跟手）
 let renderFrame: number | undefined;
+// Markdown 渲染缓存：content（空行保留处理后）→ HTML。仅缓存最近一次结果；
+// 输入未变时跳过 marked.parse（大笔记连续输入场景下，避免每次按键重复全量解析）。
+let mdRenderCacheSource: string | undefined;
+let mdRenderCacheHtml: string | undefined;
 
 export const useNotesStore = create<NotesState>((set, get) => ({
   notes: [],
@@ -192,7 +196,10 @@ function scheduleAutoSave(
   }, AUTO_SAVE_DEBOUNCE_MS);
 }
 
-/** Markdown 渲染（rAF 去抖：每帧仅执行最后一次，预览跟手） */
+/** Markdown 渲染（rAF 去抖：每帧仅执行最后一次，预览跟手）
+ *  缓存：对「空行保留处理后的源码」做 hash，源码未变则直接复用上次 HTML，
+ *  跳过 marked.parse 全量解析（大笔记连续输入时避免每次按键都重算）。
+ */
 function scheduleMarkdownRender(
   set: (partial: Partial<NotesState>) => void,
   get: () => NotesState,
@@ -207,7 +214,15 @@ function scheduleMarkdownRender(
     const preserved = (content || '').replace(/\n{2,}/g, (match) =>
       '<br>'.repeat(match.length),
     );
-    const html = await marked.parse(preserved, { gfm: true, breaks: true });
+    // 缓存命中：源码未变，跳过 marked.parse（仅仍需 resolve 图片——图片有独立 LRU 缓存）
+    let html: string;
+    if (preserved === mdRenderCacheSource) {
+      html = mdRenderCacheHtml ?? '';
+    } else {
+      html = await marked.parse(preserved, { gfm: true, breaks: true });
+      mdRenderCacheSource = preserved;
+      mdRenderCacheHtml = html;
+    }
     // 解析 localimg:// 占位引用为 data URL（图片不内联进笔记文本，渲染时再读取，带缓存）
     const resolved = await resolveLocalImagesInHtml(html);
     set({ htmlContent: resolved });
