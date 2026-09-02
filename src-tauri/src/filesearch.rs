@@ -358,13 +358,39 @@ pub fn start_indexing(app: &AppHandle) {
     }
     // 记录各数据盘启动时刻的 USN 检查点（NTFS），供 USN 增量线程从该点重放
     capture_usn_start();
-    std::thread::spawn(|| {
-        // 延迟 2s，避免与启动其余初始化争抢 IO
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        build_index();
-    });
+    // 仅首次启动才全量建索引；若索引库已存在（非首启），跳过全盘重建，
+    // 直接走 USN 增量 + notify 监听维护，避免「每次启动都全盘重扫」导致磁盘持续满载。
+    if !index_exists() {
+        std::thread::spawn(|| {
+            // 延迟 2s，避免与启动其余初始化争抢 IO
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            build_index();
+        });
+    } else {
+        // 库已就绪：无需全量扫描，标记完成，让 USN/notify 增量线程接手后续维护
+        log::info!("[FILESEARCH] 索引库已存在，跳过全量扫描，走增量维护");
+        let mut st = STATE.lock().unwrap();
+        st.indexing = false;
+        st.last_indexed = Some("已就绪".to_string());
+    }
     start_watcher();
     start_usn_sync();
+}
+
+/// 判断索引库是否已存在且非空（用于决定是否首次全量建库）。
+/// 仅需「是否已建过库」——files 表有任意记录即视为已就绪。
+fn index_exists() -> bool {
+    if DB_PATH.get().is_none() {
+        return false;
+    }
+    let Ok(conn) = connect() else {
+        return false;
+    };
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM files LIMIT 1)", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map(|n| n > 0)
+    .unwrap_or(false)
 }
 
 /// 仅监视 C 盘用户媒体库的变更（实时性），不递归 watch 其他盘根，避免整盘监听的句柄/性能问题。
