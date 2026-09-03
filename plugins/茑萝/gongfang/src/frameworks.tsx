@@ -209,6 +209,15 @@ interface GatewayStatusResult {
   active_node: GatewayNodeSummary | null;
 }
 
+// ============ 节点信誉评分（与 Rust 端 gateway/pool.rs ReputationBreakdown 对齐） ============
+interface ReputationBreakdown {
+  reputation: number;
+  error_penalty: number;
+  rtt_penalty: number;
+  gradient_penalty: number;
+  is_failing: boolean;
+}
+
 type InjectType = 'Focus' | 'Bypass' | 'Pause' | 'Resume';
 
 interface FrameworkMeta {
@@ -2612,6 +2621,25 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const [error, setError] = useState<string | null>(null);
   const [rotateMsg, setRotateMsg] = useState<string | null>(null);
   const [throttleRatio, setThrottleRatio] = useState(100);
+
+  // 节点信誉评分器
+  const [scoreErr, setScoreErr] = useState(0);    // 错误率 %
+  const [scoreRtt, setScoreRtt] = useState(100);  // EWMA RTT ms
+  const [scoreGrad, setScoreGrad] = useState(0);  // RTT 梯度 ms/sample
+  const [scoreResult, setScoreResult] = useState<ReputationBreakdown | null>(null);
+  const [scoreBusy, setScoreBusy] = useState(false);
+
+  const handleScore = useCallback(async () => {
+    setScoreBusy(true);
+    try {
+      const r = await tauriInvoke<ReputationBreakdown>('gongfang_gateway_score', { errorRate: scoreErr / 100, ewmaRtt: scoreRtt, rttGradient: scoreGrad });
+      setScoreResult(r);
+    } catch {
+      setScoreResult(null);
+    } finally {
+      setScoreBusy(false);
+    }
+  }, [scoreErr, scoreRtt, scoreGrad]);
   const [throttleMsg, setThrottleMsg] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -2732,6 +2760,89 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
             <span className="ml-2 text-[10px] text-rose-400/70">（若未启用 gongfang-gateway feature，所有命令将返回此错误）</span>
           </div>
         )}
+
+        {/* 节点信誉评分器（离线仿真信誉/故障判定） */}
+        <CollapsibleSection
+          title="节点信誉评分器"
+          storageKey="fw_gateway_score"
+          defaultOpen={false}
+          accent="defense"
+        >
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <div className="text-[10px] text-neutral-400 mb-1">错误率 %</div>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={scoreErr}
+                onChange={(e) => setScoreErr(Number(e.target.value))}
+                className="w-full px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+              />
+            </div>
+            <div>
+              <div className="text-[10px] text-neutral-400 mb-1">EWMA RTT (ms)</div>
+              <input
+                type="number"
+                min={0}
+                step={10}
+                value={scoreRtt}
+                onChange={(e) => setScoreRtt(Number(e.target.value))}
+                className="w-full px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+              />
+            </div>
+            <div>
+              <div className="text-[10px] text-neutral-400 mb-1">RTT 梯度 (ms/sample)</div>
+              <input
+                type="number"
+                min={-50}
+                step={1}
+                value={scoreGrad}
+                onChange={(e) => setScoreGrad(Number(e.target.value))}
+                className="w-full px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+              />
+            </div>
+          </div>
+          <div className="mt-2">
+            <button
+              onClick={handleScore}
+              disabled={scoreBusy}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {scoreBusy ? '计算中...' : '评分'}
+            </button>
+            <span className="ml-2 text-[10px] text-neutral-400">输入假想节点指标 → 看信誉分与故障判定，离线仿真。</span>
+          </div>
+          {scoreResult && (
+            <div className="mt-2 space-y-1.5 rounded border border-black/10 dark:border-stone-700/50 p-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-[var(--element-bg)]">信誉</span>
+                <span className={`text-xl font-mono font-semibold ${scoreResult.is_failing ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>{scoreResult.reputation.toFixed(0)}</span>
+                {scoreResult.is_failing
+                  ? <span className="px-1.5 py-0.5 rounded text-[10px] bg-rose-500/15 text-rose-600 dark:text-rose-400">故障</span>
+                  : <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">正常</span>}
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-[10px]">
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5">
+                  <div className="text-neutral-400">错误惩罚</div>
+                  <div className="font-mono text-neutral-600 dark:text-stone-300">-{scoreResult.error_penalty.toFixed(1)}</div>
+                </div>
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5">
+                  <div className="text-neutral-400">RTT 惩罚</div>
+                  <div className="font-mono text-neutral-600 dark:text-stone-300">-{scoreResult.rtt_penalty.toFixed(1)}</div>
+                </div>
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5">
+                  <div className="text-neutral-400">梯度惩罚</div>
+                  <div className="font-mono text-neutral-600 dark:text-stone-300">-{scoreResult.gradient_penalty.toFixed(1)}</div>
+                </div>
+              </div>
+              <p className="text-[10px] text-neutral-400 leading-relaxed">
+                规则：错误率每% 罚 0.4 分 · RTT&gt;500ms 罚20 / &gt;200 罚10 · 梯度&gt;10 罚15；故障=错误率&gt;10% 或 梯度&gt;15。
+              </p>
+            </div>
+          )}
+        </CollapsibleSection>
 
         {/* 状态概览 */}
         <CollapsibleSection

@@ -266,6 +266,7 @@ const ALLOWED_COMMANDS = new Set([
   'gongfang_gateway_rotate',
   'gongfang_gateway_throttle',
   'gongfang_gateway_pool',
+  'gongfang_gateway_score',
   'gongfang_events_recent',
   'gongfang_metrics_history',
   'gongfang_ai_reasoning_recent',

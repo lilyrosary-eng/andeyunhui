@@ -128,6 +128,44 @@ impl NodeHealth {
     }
 }
 
+/// 信誉评分分解（供前端/命令层展示评分原因）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReputationBreakdown {
+    pub reputation: f64,
+    pub error_penalty: f64,
+    pub rtt_penalty: f64,
+    pub gradient_penalty: f64,
+    pub is_failing: bool,
+}
+
+/// 纯函数：根据节点指标计算信誉分解（幂等、可单测）
+///
+/// 规则（同 update_reputation / is_failing）：
+/// - 错误率每 1% → 惩罚 0.4 分（40% 权重上限）
+/// - EWMA RTT > 500ms → 惩罚 20；> 200ms → 惩罚 10
+/// - RTT 梯度 > 10ms/sample → 惩罚 15（递增即危险）
+/// - 故障 = 错误率 > 10% 或 RTT 梯度 > 15ms/sample
+pub fn score_node(error_rate: f64, ewma_rtt: f64, rtt_gradient: f64) -> ReputationBreakdown {
+    let error_penalty = error_rate * 40.0;
+    let rtt_penalty = if ewma_rtt > 500.0 {
+        20.0
+    } else if ewma_rtt > 200.0 {
+        10.0
+    } else {
+        0.0
+    };
+    let gradient_penalty = if rtt_gradient > 10.0 { 15.0 } else { 0.0 };
+    let reputation = (100.0 - error_penalty - rtt_penalty - gradient_penalty).clamp(0.0, 100.0);
+    let is_failing = error_rate > 0.1 || rtt_gradient > 15.0;
+    ReputationBreakdown {
+        reputation,
+        error_penalty,
+        rtt_penalty,
+        gradient_penalty,
+        is_failing,
+    }
+}
+
 /// 单个代理节点
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyNode {
@@ -164,25 +202,22 @@ impl ProxyNode {
 
     /// 更新信誉评分（基于错误率 + RTT + 存活时长）
     pub fn update_reputation(&mut self) {
-        let error_penalty = self.health.error_rate() * 40.0;
-        let rtt_penalty = if self.health.ewma_rtt() > 500.0 {
-            20.0
-        } else if self.health.ewma_rtt() > 200.0 {
-            10.0
-        } else {
-            0.0
-        };
-        let gradient_penalty = if self.health.rtt_gradient() > 10.0 {
-            15.0 // RTT 递增趋势明显
-        } else {
-            0.0
-        };
-        self.reputation = (100.0 - error_penalty - rtt_penalty - gradient_penalty).max(0.0).min(100.0);
+        let b = score_node(
+            self.health.error_rate(),
+            self.health.ewma_rtt(),
+            self.health.rtt_gradient(),
+        );
+        self.reputation = b.reputation;
     }
 
     /// 是否即将故障（预测性切换判定）
     pub fn is_failing(&self) -> bool {
-        self.health.error_rate() > 0.1 || self.health.rtt_gradient() > 15.0
+        score_node(
+            self.health.error_rate(),
+            self.health.ewma_rtt(),
+            self.health.rtt_gradient(),
+        )
+        .is_failing
     }
 }
 
@@ -338,5 +373,24 @@ mod tests {
         let next = pool.failover();
         assert_eq!(next, Some(1));
         assert_eq!(pool.active_idx, 1);
+    }
+
+    #[test]
+    fn test_score_node() {
+        // 健康节点：无惩罚
+        let b = score_node(0.0, 100.0, -2.0);
+        assert!((b.reputation - 100.0).abs() < 1e-6);
+        assert!(!b.is_failing);
+        assert_eq!(b.error_penalty, 0.0);
+
+        // 错误率 30% → 罚 12 分
+        let b = score_node(0.3, 100.0, 0.0);
+        assert!((b.reputation - 88.0).abs() < 1e-6);
+        assert!(!b.is_failing);
+
+        // RTT>500 + 梯度>15 → 罚 35 分且故障
+        let b = score_node(0.0, 600.0, 20.0);
+        assert!((b.reputation - 65.0).abs() < 1e-6);
+        assert!(b.is_failing);
     }
 }

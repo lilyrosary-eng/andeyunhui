@@ -904,6 +904,11 @@ type SimOut = Vec<crate::pentest::sim::MutationResult>;
 #[cfg(not(feature = "pentest"))]
 type SimOut = Vec<serde_json::Value>;
 
+#[cfg(feature = "gateway")]
+type ScoreOut = crate::gateway::pool::ReputationBreakdown;
+#[cfg(not(feature = "gateway"))]
+type ScoreOut = serde_json::Value;
+
 #[tauri::command]
 pub fn gongfang_encode_analyze(input: String) -> Result<EncodeAnalysisOut, String> {
     if input.trim().is_empty() {
@@ -1238,6 +1243,29 @@ pub fn gongfang_gateway_throttle(ratio: f64) -> Result<String, String> {
     {
         let _ = ratio;
         Err("gateway feature 未启用".to_string())
+    }
+}
+
+/// 节点信誉评分分解：输入节点指标 → 信誉 + 各惩罚项 + 故障判定（离线可仿真）
+#[tauri::command]
+pub fn gongfang_gateway_score(
+    error_rate: f64,
+    ewma_rtt: f64,
+    rtt_gradient: f64,
+) -> Result<ScoreOut, String> {
+    if !(0.0..=1.0).contains(&error_rate) {
+        return Err("error_rate 须在 [0,1] 区间".to_string());
+    }
+    if ewma_rtt < 0.0 {
+        return Err("ewma_rtt 不能为负".to_string());
+    }
+    #[cfg(feature = "gateway")]
+    {
+        Ok(crate::gateway::pool::score_node(error_rate, ewma_rtt, rtt_gradient))
+    }
+    #[cfg(not(feature = "gateway"))]
+    {
+        Err("gateway feature 未启用，请用 --features gongfang-gateway 编译".to_string())
     }
 }
 
