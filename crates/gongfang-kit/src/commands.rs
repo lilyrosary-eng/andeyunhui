@@ -491,6 +491,31 @@ pub fn gongfang_hpp_analyze(response: String) -> Result<serde_json::Value, Strin
     }
 }
 
+/// 数据库识别 + payload 联动：输入错误消息或数据库名 → 识别库 → 推荐时间盲注/报错注入载荷
+#[tauri::command]
+pub fn gongfang_db_payloads(input: String) -> Result<serde_json::Value, String> {
+    if input.trim().is_empty() {
+        return Err("input 不能为空（数据库名或错误消息）".to_string());
+    }
+    #[cfg(feature = "pentest")]
+    {
+        use crate::pentest::payload::{db_from_input, payloads_for_db, Database};
+        let db = db_from_input(&input);
+        let payloads = payloads_for_db(db);
+        Ok(serde_json::json!({
+            "input": input.trim(),
+            "database": db.as_str(),
+            "confidence": if matches!(db, Database::Unknown) { "low（未能识别）" } else { "high（识别到）" },
+            "payloads": payloads,
+        }))
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = input;
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
 // ============ 爬虫实际爬取命令 ============
 
 /// 爬取结果（实际 HTTP 请求返回的页面数据）

@@ -117,6 +117,12 @@ interface HppReport {
   description: string;
   payload: string;
 }
+interface DbPayloadReport {
+  input: string;
+  database: string;
+  confidence: string;
+  payloads: string[];
+}
 
 // ============ 逆向框架结果类型 ============
 interface CryptoReport {
@@ -1610,6 +1616,26 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     }
   }, [hppInput, addLog]);
 
+  // 数据库 payload 联动
+  const [dbInput, setDbInput] = useState('');
+  const [dbResult, setDbResult] = useState<DbPayloadReport | null>(null);
+  const [dbBusy, setDbBusy] = useState(false);
+
+  const handleDbPayloads = useCallback(async () => {
+    if (!dbInput.trim()) return;
+    setDbBusy(true);
+    try {
+      const r = await tauriInvoke<DbPayloadReport>('gongfang_db_payloads', { input: dbInput.trim() });
+      setDbResult(r);
+      addLog({ action: '数据库载荷联动', target: dbInput.trim(), status: 'success', detail: `识别为 ${r.database} · ${r.payloads.length} 条载荷` });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '数据库载荷联动', target: dbInput.trim(), status: 'error', detail: msg });
+    } finally {
+      setDbBusy(false);
+    }
+  }, [dbInput, addLog]);
+
   const handleScan = useCallback(async () => {
     if (!scanHost.trim()) return;
     setScanBusy(true);
@@ -2165,6 +2191,51 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </div>
             )}
           </div>
+        </CollapsibleSection>
+
+        {/* 数据库 payload 联动 */}
+        <CollapsibleSection
+          title="数据库 payload 联动"
+          storageKey="fw_pentest_dbpayloads"
+          defaultOpen={false}
+          accent="attack"
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={dbInput}
+              onChange={(e) => setDbInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleDbPayloads()}
+              placeholder="数据库名（mysql/postgres/oracle…）或报错消息"
+              className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+            />
+            <button
+              onClick={handleDbPayloads}
+              disabled={dbBusy || !dbInput.trim()}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {dbBusy ? '识别中...' : '联动'}
+            </button>
+          </div>
+          <p className="text-[10px] text-neutral-400 mt-2">识别后端数据库类型，自动推荐对应的时间盲注 + 报错注入载荷（常见报错：MySQL / PG:: / ORA- / SQLite…）。</p>
+          {dbResult && (
+            <div className="mt-2 space-y-1.5 rounded border border-black/10 dark:border-stone-700/50 p-2">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="font-medium text-[var(--element-bg)]">数据库</span>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${dbResult.database === 'unknown' ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'}`}>{dbResult.database}</span>
+                <span className="ml-auto text-[10px] text-neutral-400">{dbResult.confidence}</span>
+              </div>
+              {dbResult.payloads.length > 0 ? (
+                <div className="space-y-1">
+                  {dbResult.payloads.map((p, i) => (
+                    <div key={i} className="px-1.5 py-1 font-mono text-[11px] text-neutral-600 dark:text-stone-300 break-all bg-black/[0.02] dark:bg-white/[0.03] rounded">{p}</div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] text-neutral-400">未能识别数据库或该库无对应载荷。</p>
+              )}
+            </div>
+          )}
         </CollapsibleSection>
 
         <PentestAssetTree scanResults={scanHistory.map((r) => ({ host: r.host, ip: r.host, open_ports: r.open_ports, duration_ms: r.duration_ms }))} />

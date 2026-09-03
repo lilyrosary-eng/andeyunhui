@@ -257,6 +257,7 @@ const ALLOWED_COMMANDS = new Set([
   'gongfang_simulate_waf',
   'gongfang_payloads',
   'gongfang_hpp_analyze',
+  'gongfang_db_payloads',
   'gongfang_humanize',
   'gongfang_fitness',
   'gongfang_fitness_migrate',
