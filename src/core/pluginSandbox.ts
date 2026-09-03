@@ -250,6 +250,8 @@ const ALLOWED_COMMANDS = new Set([
   'gongfang_scan',
   'gongfang_waf_detect',
   'gongfang_tech_fingerprint',
+  'gongfang_http_methods',
+  'gongfang_path_probe',
   'gongfang_humanize',
   'gongfang_fitness',
   'gongfang_fitness_migrate',

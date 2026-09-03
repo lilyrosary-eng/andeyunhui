@@ -79,6 +79,28 @@ interface WafDetectResult {
   signals: string[];
 }
 
+// ============ 技术栈指纹结果类型（与 Rust 端 fingerprint.rs TechFingerprint 对齐） ============
+interface TechFingerprint {
+  servers: string[];
+  languages: string[];
+  frameworks: string[];
+  cdns: string[];
+  cookies: string[];
+  security_headers_present: string[];
+  security_headers_missing: string[];
+}
+
+// ============ HTTP 方法枚举 / 常见路径探测（与 Rust 端 recon.rs 对齐） ============
+interface MethodReport {
+  allowed: string[];
+  risky: string[];
+}
+interface PathProbeItem {
+  path: string;
+  status: number;
+  note: string;
+}
+
 // ============ 逆向框架结果类型 ============
 interface CryptoReport {
   data_len: number;
@@ -240,6 +262,21 @@ function FrameworkPlaceholder({ meta, addLog }: { meta: FrameworkMeta; addLog: (
             </button>
           </div>
         </section>
+      </div>
+    </div>
+  );
+}
+
+// ============ 标签 chips 助手（技术栈指纹等用） ============
+function renderChips(label: string, items: string[]): React.ReactNode {
+  if (items.length === 0) return null;
+  return (
+    <div className="flex items-start gap-1.5">
+      <span className="shrink-0 text-[10px] text-neutral-400 w-14 leading-5">{label}</span>
+      <div className="flex flex-wrap gap-1">
+        {items.map((s) => (
+          <span key={s} className="px-1.5 py-0.5 rounded text-[10px] bg-sky-500/15 text-sky-600 dark:text-sky-400">{s}</span>
+        ))}
       </div>
     </div>
   );
@@ -1397,6 +1434,69 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const [wafResult, setWafResult] = useState<WafDetectResult | null>(null);
   const [wafBusy, setWafBusy] = useState(false);
 
+  // 技术栈指纹状态
+  const [techUrl, setTechUrl] = useState('');
+  const [techResult, setTechResult] = useState<TechFingerprint | null>(null);
+  const [techBusy, setTechBusy] = useState(false);
+
+  const handleTechFingerprint = useCallback(async () => {
+    if (!techUrl.trim()) return;
+    setTechBusy(true);
+    try {
+      const r = await tauriInvoke<TechFingerprint>('gongfang_tech_fingerprint', { url: techUrl.trim() });
+      setTechResult(r);
+      addLog({
+        action: '技术栈指纹',
+        target: techUrl.trim(),
+        status: 'success',
+        detail: `服务器 ${r.servers.join(',') || '未知'} · 语言 ${r.languages.join(',') || '未知'} · 缺 ${r.security_headers_missing.length} 个安全头`,
+      });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '技术栈指纹', target: techUrl.trim(), status: 'error', detail: msg });
+    } finally {
+      setTechBusy(false);
+    }
+  }, [techUrl, addLog]);
+
+  // HTTP 方法枚举 / 常见路径探测状态
+  const [mUrl, setMUrl] = useState('');
+  const [methodReport, setMethodReport] = useState<MethodReport | null>(null);
+  const [mBusy, setMBusy] = useState(false);
+  const [pPathUrl, setPPathUrl] = useState('');
+  const [pathResult, setPathResult] = useState<PathProbeItem[] | null>(null);
+  const [pPathBusy, setPPathBusy] = useState(false);
+
+  const handleHttpMethods = useCallback(async () => {
+    if (!mUrl.trim()) return;
+    setMBusy(true);
+    try {
+      const r = await tauriInvoke<MethodReport>('gongfang_http_methods', { url: mUrl.trim() });
+      setMethodReport(r);
+      addLog({ action: 'HTTP 方法', target: mUrl.trim(), status: 'success', detail: `允许 ${r.allowed.length} · 风险 ${r.risky.join(',') || '无'}` });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: 'HTTP 方法', target: mUrl.trim(), status: 'error', detail: msg });
+    } finally {
+      setMBusy(false);
+    }
+  }, [mUrl, addLog]);
+
+  const handlePathProbe = useCallback(async () => {
+    if (!pPathUrl.trim()) return;
+    setPPathBusy(true);
+    try {
+      const r = await tauriInvoke<PathProbeItem[]>('gongfang_path_probe', { url: pPathUrl.trim() });
+      setPathResult(r);
+      addLog({ action: '路径探测', target: pPathUrl.trim(), status: 'success', detail: `发现 ${r.length} 个非 404 路径` });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '路径探测', target: pPathUrl.trim(), status: 'error', detail: msg });
+    } finally {
+      setPPathBusy(false);
+    }
+  }, [pPathUrl, addLog]);
+
   const handleScan = useCallback(async () => {
     if (!scanHost.trim()) return;
     setScanBusy(true);
@@ -1589,6 +1689,156 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         </CollapsibleSection>
 
         {/* P1：资产树 + Payload 库（按主机聚合扫描结果 + 预设注入模板） */}
+        {/* 技术栈指纹（服务器/语言/框架/CMS/CDN + 安全响应头审计） */}
+        <CollapsibleSection
+          title="技术栈指纹 + 安全头审计"
+          storageKey="fw_pentest_tech"
+          defaultOpen={false}
+          accent="attack"
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={techUrl}
+              onChange={(e) => setTechUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleTechFingerprint()}
+              placeholder="目标 URL（识别 Web 技术栈 + 审计安全头）"
+              className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+            />
+            <button
+              onClick={handleTechFingerprint}
+              disabled={techBusy || !techUrl.trim()}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {techBusy ? '识别中...' : '识别'}
+            </button>
+          </div>
+
+          {techResult && (
+            <div className="space-y-2">
+              {renderChips('服务器', techResult.servers)}
+              {renderChips('语言', techResult.languages)}
+              {renderChips('框架/CMS', techResult.frameworks)}
+              {renderChips('CDN/反代', techResult.cdns)}
+              {renderChips('Cookie指纹', techResult.cookies)}
+              <div className="border-t border-black/5 dark:border-stone-700/50 pt-2">
+                <div className="text-[10px] text-neutral-400 mb-1">安全响应头审计</div>
+                <div className="flex flex-wrap gap-1">
+                  {techResult.security_headers_present.map((h) => (
+                    <span key={h} className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">{h} ✓</span>
+                  ))}
+                  {techResult.security_headers_missing.map((h) => (
+                    <span key={h} className="px-1.5 py-0.5 rounded text-[10px] bg-rose-500/15 text-rose-600 dark:text-rose-400">{h} ✗</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </CollapsibleSection>
+
+        {/* HTTP 方法枚举 */}
+        <CollapsibleSection
+          title="HTTP 方法枚举"
+          storageKey="fw_pentest_methods"
+          defaultOpen={false}
+          accent="attack"
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={mUrl}
+              onChange={(e) => setMUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleHttpMethods()}
+              placeholder="目标 URL（OPTIONS + 常见方法探测）"
+              className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+            />
+            <button
+              onClick={handleHttpMethods}
+              disabled={mBusy || !mUrl.trim()}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {mBusy ? '探测中...' : '探测'}
+            </button>
+          </div>
+          {methodReport && (
+            <div className="space-y-1.5 mt-2">
+              <div className="flex items-start gap-1.5">
+                <span className="shrink-0 text-[10px] text-neutral-400 w-14 leading-5">允许</span>
+                <div className="flex flex-wrap gap-1">
+                  {methodReport.allowed.length ? methodReport.allowed.map((m) => (
+                    <span key={m} className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${methodReport.risky.includes(m) ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-sky-500/15 text-sky-600 dark:text-sky-400'}`}>{m}</span>
+                  )) : <span className="text-[10px] text-neutral-400">未探测到（多为 GET/HEAD）</span>}
+                </div>
+              </div>
+              {methodReport.risky.length > 0 && (
+                <div className="text-[10px] text-rose-600 dark:text-rose-400">
+                  ⚠ 风险方法：{methodReport.risky.join(', ')}（可能允许未授权访问/篡改）
+                </div>
+              )}
+            </div>
+          )}
+        </CollapsibleSection>
+
+        {/* 常见敏感路径探测 */}
+        <CollapsibleSection
+          title="常见敏感路径探测"
+          storageKey="fw_pentest_paths"
+          defaultOpen={false}
+          accent="attack"
+          right={pathResult && pathResult.length > 0 ? <span className="text-[10px] text-neutral-400">发现 {pathResult.length}</span> : null}
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={pPathUrl}
+              onChange={(e) => setPPathUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handlePathProbe()}
+              placeholder="目标 URL（.git/.env/backup/admin 等常见路径）"
+              className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+            />
+            <button
+              onClick={handlePathProbe}
+              disabled={pPathBusy || !pPathUrl.trim()}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {pPathBusy ? '探测中...' : '探测'}
+            </button>
+          </div>
+          <p className="text-[10px] text-neutral-400 mt-2">探测常见敏感路径（robots / .env / .git / admin / backup 等），自动过滤 404。</p>
+          {pathResult && pathResult.length > 0 ? (
+            <div className="overflow-x-auto mt-2">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-neutral-400 border-b border-black/5 dark:border-stone-700/50">
+                    <th className="py-1.5 pr-3">路径</th>
+                    <th className="py-1.5 pr-3">状态</th>
+                    <th className="py-1.5">判定</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pathResult.map((p, i) => (
+                    <tr key={i} className="border-b border-black/[0.03] dark:border-stone-700/30">
+                      <td className="py-1.5 pr-3 font-mono text-[var(--element-bg)]">{p.path}</td>
+                      <td className="py-1.5 pr-3">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                          p.status >= 200 && p.status < 300 ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                          : p.status === 401 || p.status === 403 ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                          : 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+                        }`}>{p.status}</span>
+                      </td>
+                      <td className="py-1.5 text-neutral-500 dark:text-stone-400">{p.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            pathResult !== null && pathResult.length === 0 ? (
+              <p className="text-[11px] text-neutral-400 mt-2">未发现明显敏感路径（全部 404）。</p>
+            ) : null
+          )}
+        </CollapsibleSection>
+
         <PentestAssetTree scanResults={scanHistory.map((r) => ({ host: r.host, ip: r.host, open_ports: r.open_ports, duration_ms: r.duration_ms }))} />
       </div>
     </div>

@@ -235,7 +235,7 @@ pub async fn gongfang_waf_detect(url: String) -> Result<WafDetectResult, String>
 
 /// 技术栈指纹识别（服务器/语言/框架/CMS/CDN + 安全响应头审计）
 #[tauri::command]
-pub async fn gongfang_tech_fingerprint(url: String) -> Result<crate::pentest::fingerprint::TechFingerprint, String> {
+pub async fn gongfang_tech_fingerprint(url: String) -> Result<TechFpOut, String> {
     if url.trim().is_empty() {
         return Err("url 不能为空".to_string());
     }
@@ -244,6 +244,94 @@ pub async fn gongfang_tech_fingerprint(url: String) -> Result<crate::pentest::fi
         let resp = crate::pentest::probe::probe_target(&url).await;
         let headers: Vec<(String, String)> = resp.headers.into_iter().collect();
         Ok(crate::pentest::fingerprint::fingerprint(&headers, &resp.body))
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = url;
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
+/// HTTP 方法枚举（OPTIONS→Allow 头解析；无 Allow 则常见方法探测）+ 风险标记
+#[tauri::command]
+pub async fn gongfang_http_methods(url: String) -> Result<MethodReportOut, String> {
+    if url.trim().is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    #[cfg(feature = "pentest")]
+    {
+        use crate::pentest::recon::{discover_from_allow, method_allowed, COMMON_METHODS, MethodReport};
+        let client = reqwest::Client::new();
+        let mut report = MethodReport::default();
+        if let Ok(r) = client.request(reqwest::Method::OPTIONS, &url).send().await {
+            let allow = r
+                .headers()
+                .get("allow")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            report = discover_from_allow(allow.as_deref());
+        }
+        if report.allowed.is_empty() {
+            let base = url.trim_end_matches('/').to_string();
+            for m in COMMON_METHODS {
+                let Ok(method) = reqwest::Method::from_bytes(m.as_bytes()) else { continue };
+                if let Ok(resp) = client.request(method, &base).send().await {
+                    if method_allowed(resp.status().as_u16())
+                        && !report.allowed.iter().any(|x| x == m)
+                    {
+                        report.allowed.push(m.to_string());
+                    }
+                }
+            }
+        }
+        report.risky = report
+            .allowed
+            .iter()
+            .filter(|m| matches!(m.as_str(), "PUT" | "DELETE" | "TRACE" | "CONNECT"))
+            .cloned()
+            .collect();
+        Ok(report)
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = url;
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
+/// 常见敏感路径探测
+#[tauri::command]
+pub async fn gongfang_path_probe(url: String) -> Result<PathProbeOut, String> {
+    if url.trim().is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    #[cfg(feature = "pentest")]
+    {
+        use crate::pentest::recon::{classify_path_status, COMMON_PATHS, PathResult};
+        let base = url.trim().trim_end_matches('/');
+        let client = reqwest::Client::new();
+        let mut out = Vec::new();
+        for p in COMMON_PATHS.iter().take(30) {
+            let full = format!("{}/{}", base, p);
+            let status = match client
+                .get(&full)
+                .timeout(std::time::Duration::from_secs(8))
+                .send()
+                .await
+            {
+                Ok(r) => r.status().as_u16(),
+                Err(_) => 0,
+            };
+            if status == 404 {
+                continue; // 过滤不存在，减少噪音
+            }
+            out.push(PathResult {
+                path: (*p).to_string(),
+                status,
+                note: classify_path_status(status).to_string(),
+            });
+        }
+        Ok(out)
     }
     #[cfg(not(feature = "pentest"))]
     {
@@ -615,6 +703,21 @@ type DfaGraphOut = crate::reverse::protocol::DfaGraph;
 #[cfg(not(feature = "reverse"))]
 type DfaGraphOut = serde_json::Value;
 
+#[cfg(feature = "pentest")]
+type TechFpOut = crate::pentest::fingerprint::TechFingerprint;
+#[cfg(not(feature = "pentest"))]
+type TechFpOut = serde_json::Value;
+
+#[cfg(feature = "pentest")]
+type MethodReportOut = crate::pentest::recon::MethodReport;
+#[cfg(not(feature = "pentest"))]
+type MethodReportOut = serde_json::Value;
+
+#[cfg(feature = "pentest")]
+type PathProbeOut = Vec<crate::pentest::recon::PathResult>;
+#[cfg(not(feature = "pentest"))]
+type PathProbeOut = Vec<serde_json::Value>;
+
 #[tauri::command]
 pub fn gongfang_encode_analyze(input: String) -> Result<EncodeAnalysisOut, String> {
     if input.trim().is_empty() {
@@ -735,7 +838,7 @@ pub fn gongfang_symbol_add(req: SaveSymbolRequest) -> Result<(), String> {
 
 /// 协议状态机可视化：目标已学习则导出真实 DFA，否则返回空/示例
 #[tauri::command]
-pub fn gongfang_protocol_graph(url: Option<String>) -> Result<crate::reverse::protocol::DfaGraph, String> {
+pub fn gongfang_protocol_graph(url: Option<String>) -> Result<DfaGraphOut, String> {
     #[cfg(feature = "reverse")]
     {
         use crate::reverse::protocol::{demo_dfa, empty_graph};
