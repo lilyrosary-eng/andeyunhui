@@ -17,6 +17,7 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::protocol::ProtocolDfa;
@@ -72,9 +73,34 @@ impl SymbolStore {
         GLOBAL_STORE.read().clone().into()
     }
 
-    /// 保存到全局单例
+    /// 保存到全局单例，并在已设置存储路径时落盘
     pub fn save(&self) {
         *GLOBAL_STORE.write() = self.clone();
+        if let Some(p) = STORAGE_PATH.get() {
+            let _ = self.persist(p);
+        }
+    }
+
+    /// 序列化为 JSON 字符串
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self)
+            .unwrap_or_else(|_| "{\"symbols\":{},\"dfas\":{},\"crypto_algos\":{}}".to_string())
+    }
+
+    /// 从 JSON 字符串解析
+    pub fn from_json(s: &str) -> Option<Self> {
+        serde_json::from_str(s).ok()
+    }
+
+    /// 原子写盘（先写 .tmp 再改名，避免半截文件）
+    pub fn persist(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建符号库目录失败: {}", e))?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, self.to_json()).map_err(|e| format!("符号库写入失败: {}", e))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("符号库替换失败: {}", e))?;
+        Ok(())
     }
 
     /// 查询目标的协议状态机
@@ -136,3 +162,69 @@ impl SymbolStore {
 /// 全局符号存储单例（lazy init，内存版）
 static GLOBAL_STORE: once_cell::sync::Lazy<RwLock<SymbolStore>> =
     once_cell::sync::Lazy::new(|| RwLock::new(SymbolStore::new()));
+
+/// 全局持久化路径（set_storage_path 设置后，save() 自动落盘）
+static STORAGE_PATH: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
+
+/// 从文件加载符号库（文件不存在或损坏返回 None）
+pub fn load_symbol_file(path: &Path) -> Option<SymbolStore> {
+    let s = std::fs::read_to_string(path).ok()?;
+    SymbolStore::from_json(&s)
+}
+
+/// 设置符号库持久化目录（应用/内核启动时调用一次）；
+/// 若该目录下已有 symbols.json 则加载进全局存储，实现跨会话复用。
+pub fn set_storage_path(dir: PathBuf) {
+    let path = dir.join("symbols.json");
+    let _ = STORAGE_PATH.set(path);
+    if let Some(p) = STORAGE_PATH.get() {
+        if let Some(loaded) = load_symbol_file(p) {
+            *GLOBAL_STORE.write() = loaded;
+        }
+    }
+}
+
+/// 当前持久化路径（未设置则为 None）
+pub fn storage_path() -> Option<PathBuf> {
+    STORAGE_PATH.get().cloned()
+}
+
+// ================= 单元测试：序列化 / 落盘往返 =================
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_roundtrip_preserves_symbols() {
+        let mut store = SymbolStore::new();
+        store.add_symbol(
+            "https://example.com/api",
+            Symbol {
+                name: "decrypt_session".into(),
+                address: 0x401000,
+                kind: SymbolKind::CryptoFunction,
+                meta: HashMap::new(),
+            },
+        );
+        let json = store.to_json();
+        let restored = SymbolStore::from_json(&json).expect("应能解析");
+        let syms = restored.symbols("https://example.com/api").unwrap();
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "decrypt_session");
+        assert_eq!(syms[0].kind, SymbolKind::CryptoFunction);
+    }
+
+    #[test]
+    fn persist_load_file_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("gongfang_symbols_test_{}", std::process::id()));
+        let path = dir.join("symbols.json");
+        let mut store = SymbolStore::new();
+        store.record_crypto("target-a", "AES-256-CBC");
+        store.persist(&path).expect("写盘应成功");
+
+        let loaded = load_symbol_file(&path).expect("应加载成功");
+        assert_eq!(loaded.crypto_algo("target-a").map(|s| s.as_str()), Some("AES-256-CBC"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

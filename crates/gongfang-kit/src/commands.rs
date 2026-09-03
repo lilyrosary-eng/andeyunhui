@@ -11,7 +11,7 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::ai::{load_profiles, resolve_profile};
 use crate::kernel::priority::UserCommand;
@@ -86,6 +86,11 @@ pub async fn gongfang_start(app: AppHandle, profile_id: Option<String>) -> Resul
         }
     }
     let profiles = load_profiles(&app);
+    // 符号库持久化：内核启动时挂到 <app_data>/gongfang/symbols.json（跨会话复用）
+    #[cfg(feature = "reverse")]
+    if let Ok(dir) = app.path().app_data_dir() {
+        crate::reverse::symbols::set_storage_path(dir.join("gongfang"));
+    }
     let profile = resolve_profile(&profiles, profile_id);
     if profile.api_key.trim().is_empty() {
         return Err("未配置 AI API Key，请先在全局设置 → 模型 中填写".to_string());
@@ -648,6 +653,31 @@ pub fn gongfang_symbols(url: Option<String>) -> Result<Vec<SymbolSummary>, Strin
             }
         }
         Ok(result)
+    }
+    #[cfg(not(feature = "reverse"))]
+    {
+        let _ = url;
+        Err("reverse feature 未启用，请用 --features gongfang-reverse 编译".to_string())
+    }
+}
+
+/// 协议状态机可视化：目标已学习则导出真实 DFA，否则返回空/示例
+#[tauri::command]
+pub fn gongfang_protocol_graph(url: Option<String>) -> Result<crate::reverse::protocol::DfaGraph, String> {
+    #[cfg(feature = "reverse")]
+    {
+        use crate::reverse::protocol::{demo_dfa, empty_graph};
+        if let Some(u) = url {
+            let u = u.trim();
+            if !u.is_empty() {
+                let store = crate::reverse::symbols::SymbolStore::load();
+                if let Some(dfa) = store.protocol_dfa(u) {
+                    return Ok(dfa.to_graph(false));
+                }
+                return Ok(empty_graph()); // 该目标尚未学习
+            }
+        }
+        Ok(demo_dfa().to_graph(true)) // 无目标 → 示例演示
     }
     #[cfg(not(feature = "reverse"))]
     {

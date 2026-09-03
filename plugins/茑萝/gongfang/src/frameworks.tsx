@@ -102,6 +102,25 @@ interface EncodeAnalysis {
   preview: string | null;
 }
 
+// ============ 协议状态机可视化类型（与 Rust 端 protocol.rs DfaGraph 对齐） ============
+interface DfaNode {
+  id: number;
+  initial: boolean;
+  accept: boolean;
+}
+interface DfaEdge {
+  from: number;
+  to: number;
+  label: string;
+}
+interface DfaGraph {
+  nodes: DfaNode[];
+  edges: DfaEdge[];
+  state_count: number;
+  transition_count: number;
+  demo: boolean;
+}
+
 interface SymbolSummary {
   url: string;
   name: string;
@@ -807,6 +826,11 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const [encChain, setEncChain] = useState<EncodeAnalysis[] | null>(null);
   const [encBusy, setEncBusy] = useState(false);
 
+  // 协议状态机可视化状态
+  const [pUrl, setPUrl] = useState('');
+  const [pGraph, setPGraph] = useState<DfaGraph | null>(null);
+  const [pBusy, setPBusy] = useState(false);
+
   const handleEncodeAnalyze = useCallback(async () => {
     const input = encInput.trim();
     if (!input) return;
@@ -839,6 +863,84 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
       setEncBusy(false);
     }
   }, [encInput, addLog]);
+
+  // 协议状态机：加载 DFA 图数据
+  const handleProtocolGraph = useCallback(async () => {
+    setPBusy(true);
+    try {
+      const url = pUrl.trim() || null;
+      const g = await tauriInvoke<DfaGraph>('gongfang_protocol_graph', { url });
+      setPGraph(g);
+      addLog({ action: '协议状态机', target: url || '示例', status: 'success', detail: `${g.state_count} 状态 · ${g.transition_count} 转移` });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '协议状态机', target: pUrl.trim() || '示例', status: 'error', detail: msg });
+    } finally {
+      setPBusy(false);
+    }
+  }, [pUrl, addLog]);
+
+  // 渲染 DFA 为 SVG（圆周布局）
+  const renderProtocolGraph = (g: DfaGraph | null): React.ReactNode => {
+    if (!g || g.nodes.length === 0) {
+      return <p className="text-[11px] text-neutral-400">目标尚未学习状态机。用协议学习器学习后此处展示其 DFA；当前留空。</p>;
+    }
+    const W = 520, H = 300, cx = 260, cy = 150, r = Math.min(W, H) / 2 - 70;
+    const pos = new Map<number, { x: number; y: number }>();
+    g.nodes.forEach((node, i) => {
+      const a = (Math.PI * 2 * i) / g.nodes.length - Math.PI / 2;
+      pos.set(node.id, { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+    });
+    const edgeEls = g.edges.map((e, idx) => {
+      const p1 = pos.get(e.from), p2 = pos.get(e.to);
+      if (!p1 || !p2) return null;
+      let d: string; let lx: number; let ly: number;
+      if (e.from === e.to) {
+        d = `M ${p1.x - 30} ${p1.y - 6} Q ${p1.x - 56} ${p1.y - 50} ${p1.x + 6} ${p1.y - 28}`;
+        lx = p1.x - 26; ly = p1.y - 36;
+      } else {
+        const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+        const dx = p2.x - p1.x, dy = p2.y - p1.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const ox = (-dy / len) * 24, oy = (dx / len) * 24;
+        lx = mx + ox; ly = my + oy;
+        d = `M ${p1.x} ${p1.y} Q ${lx} ${ly} ${p2.x} ${p2.y}`;
+      }
+      return (
+        <g key={idx}>
+          <path d={d} fill="none" stroke="currentColor" strokeOpacity="0.45" strokeWidth="1.2" markerEnd="url(#dfaArrow)" />
+          <circle cx={lx} cy={ly} r={9} fill="var(--element-bg)" />
+          <text x={lx} y={ly + 3} textAnchor="middle" fontSize="8" fill="#fff" fontFamily="monospace">{e.label}</text>
+        </g>
+      );
+    });
+    const nodeEls = g.nodes.map((node) => {
+      const p = pos.get(node.id);
+      if (!p) return null;
+      return (
+        <g key={node.id}>
+          {node.initial && <circle cx={p.x} cy={p.y} r={20} fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="1.2" />}
+          <circle cx={p.x} cy={p.y} r={node.accept ? 15 : 12}
+            fill={node.accept ? 'rgba(16,185,129,0.15)' : 'rgba(0,0,0,0.05)'}
+            stroke={node.accept ? '#10b981' : node.initial ? '#0ea5e9' : 'currentColor'}
+            strokeWidth={node.accept ? 2.4 : 1.4}
+          />
+          {node.accept && <circle cx={p.x} cy={p.y} r={9} fill="none" stroke="#10b981" strokeOpacity="0.5" strokeWidth="1" />}
+          <text x={p.x} y={p.y + 3.5} textAnchor="middle" fontSize="11" fill="currentColor" fontFamily="monospace">{node.id}</text>
+        </g>
+      );
+    });
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-h-[320px]" role="img" aria-label="协议状态机 DFA">
+        <defs>
+          <marker id="dfaArrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 z" fill="currentColor" />
+          </marker>
+        </defs>
+        {edgeEls}{nodeEls}
+      </svg>
+    );
+  };
 
   // 符号库查询状态
   const [symUrl, setSymUrl] = useState('');
@@ -1101,6 +1203,51 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                 ))}
               </div>
             )}
+          </div>
+        </CollapsibleSection>
+
+        {/* 协议状态机（L* 学习结果可视化） */}
+        <CollapsibleSection
+          title="协议状态机"
+          storageKey="fw_reverse_protocol"
+          defaultOpen={false}
+          accent="info"
+          right={
+            pGraph && pGraph.state_count > 0 ? (
+              <span className="text-[10px] text-neutral-400">
+                {pGraph.state_count} 状态 · {pGraph.transition_count} 转移{pGraph.demo ? ' · 示例' : ''}
+              </span>
+            ) : (
+              <span className="text-[10px] text-neutral-400">未学习</span>
+            )
+          }
+        >
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={pUrl}
+                onChange={(e) => setPUrl(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleProtocolGraph()}
+                placeholder="目标 URL（留空展示示例）"
+                className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+              />
+              <button
+                onClick={handleProtocolGraph}
+                disabled={pBusy}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+              >
+                {pBusy ? '加载中...' : '加载'}
+              </button>
+            </div>
+            <div className="flex items-center gap-3 text-[10px] text-neutral-400">
+              <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-sky-500" />起始</span>
+              <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border-2 border-emerald-500" />接受</span>
+              <span className="flex items-center gap-1"><span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--element-bg)]" />转移符号(hex)</span>
+            </div>
+            <div className="rounded-lg border border-black/10 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2">
+              {renderProtocolGraph(pGraph)}
+            </div>
           </div>
         </CollapsibleSection>
 

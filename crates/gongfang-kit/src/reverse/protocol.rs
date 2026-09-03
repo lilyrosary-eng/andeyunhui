@@ -77,6 +77,92 @@ impl ProtocolDfa {
     }
 }
 
+// ================= 可视化导出 =================
+/// 节点（前端渲染用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DfaNode {
+    pub id: usize,
+    pub initial: bool,
+    pub accept: bool,
+}
+/// 有向边（label 为十六进制转移符号，如 "01"）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DfaEdge {
+    pub from: usize,
+    pub to: usize,
+    pub label: String,
+}
+/// DFA 图形数据（前端 SVG 渲染输入）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DfaGraph {
+    pub nodes: Vec<DfaNode>,
+    pub edges: Vec<DfaEdge>,
+    pub state_count: usize,
+    pub transition_count: usize,
+    /// true = 示例数据；false = 来自目标学习
+    pub demo: bool,
+}
+
+impl ProtocolDfa {
+    /// 导出为前端可视化图数据
+    pub fn to_graph(&self, demo: bool) -> DfaGraph {
+        let nodes = self
+            .states
+            .iter()
+            .map(|&id| DfaNode {
+                id,
+                initial: id == self.initial,
+                accept: self.accept_states.contains(&id),
+            })
+            .collect();
+        let mut edges: Vec<DfaEdge> = self
+            .transitions
+            .iter()
+            .map(|((from, input), to)| DfaEdge {
+                from: *from,
+                to: *to,
+                label: format!("{:02x}", input),
+            })
+            .collect();
+        edges.sort_by_key(|e| (e.from, e.to, e.label.clone()));
+        DfaGraph {
+            nodes,
+            edges,
+            state_count: self.state_count(),
+            transition_count: self.transition_count(),
+            demo,
+        }
+    }
+}
+
+/// 空图（目标未学习）
+pub fn empty_graph() -> DfaGraph {
+    DfaGraph {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        state_count: 0,
+        transition_count: 0,
+        demo: false,
+    }
+}
+
+/// 示例协议 DFA（离线演示用：登录/查询状态机，字母表 01/02/03）
+pub fn demo_dfa() -> ProtocolDfa {
+    let mut dfa = ProtocolDfa::new();
+    dfa.alphabet = vec![0x01, 0x02, 0x03];
+    dfa.states = vec![0, 1, 2, 3];
+    dfa.transitions.insert((0, 0x01), 1); // LOGIN→登录中
+    dfa.transitions.insert((0, 0x02), 3); // HELLO→异常
+    dfa.transitions.insert((1, 0x02), 2); // 认证→已登录(accept)
+    dfa.transitions.insert((1, 0x03), 1); // RETRY→重试
+    dfa.transitions.insert((2, 0x01), 1); // 登出→登录中
+    dfa.transitions.insert((2, 0x03), 2); // 查询→保持已登录
+    dfa.transitions.insert((3, 0x01), 1); // 异常恢复
+    dfa.transitions.insert((3, 0x02), 3); // 保持异常
+    dfa.accept_states = vec![2];
+    dfa
+}
+
 /// 探测结果（单次查询的响应）
 #[derive(Debug, Clone)]
 pub struct ProbeResult {
