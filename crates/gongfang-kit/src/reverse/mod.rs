@@ -21,6 +21,9 @@ pub mod protocol;
 pub mod symbols;
 
 #[cfg(feature = "reverse")]
+pub mod detect;
+
+#[cfg(feature = "reverse")]
 pub mod cfg;
 
 #[cfg(feature = "reverse")]

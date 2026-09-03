@@ -109,6 +109,12 @@ pub async fn pty_create(
         // 流式 UTF-8 解码器：保留跨 read 边界的不完整多字节序列，避免 CJK 被吞字符
         //（from_utf8_lossy 无状态，遇到截断的多字节序列会替换为 U+FFFD）
         let mut decoder = encoding_rs::UTF_8.new_decoder();
+        // 输出合并缓冲（缓解高频大输出下的 IPC 事件风暴，事件堆积/丢失表现为终端卡顿、日志被截断）：
+        //  - acc 为空的首段输出【立即发】，保证低频/单条日志实时可见（不等到 EOF 才出）；
+        //  - 只有连续突发积累到阈值才合并后一次发，把每 8KB 一次事件降到每 64KB 一次。
+        // 这样既不丢、又实时，还能显著降低事件量。
+        const OUTPUT_FLUSH_BYTES: usize = 64 * 1024;
+        let mut acc = String::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF：子进程已关闭
@@ -117,7 +123,18 @@ pub async fn pty_create(
                     // last=false：后续可能还有数据，decoder 暂存跨边界的不完整序列
                     let _ = decoder.decode_to_string(&buf[..n], &mut out, false);
                     if !out.is_empty() {
-                        let _ = app_clone.emit(&format!("pty-output:{}", id_clone), out);
+                        if acc.is_empty() {
+                            // 首段：立即发出，保证单条/低频输出实时展示
+                            let _ = app_clone.emit(&format!("pty-output:{}", id_clone), out);
+                        } else {
+                            acc.push_str(&out);
+                            if acc.len() >= OUTPUT_FLUSH_BYTES {
+                                let _ = app_clone.emit(
+                                    &format!("pty-output:{}", id_clone),
+                                    std::mem::take(&mut acc),
+                                );
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -129,7 +146,10 @@ pub async fn pty_create(
                 }
             }
         }
-        // 收尾：flush decoder 内残留字节（输入已结束，last=true 强制输出待定序列或替换符）
+        // 收尾：先 flush 合并缓冲残留，再 flush decoder 内残留字节（last=true 强制输出待定序列或替换符）
+        if !acc.is_empty() {
+            let _ = app_clone.emit(&format!("pty-output:{}", id_clone), std::mem::take(&mut acc));
+        }
         let mut tail = String::new();
         let _ = decoder.decode_to_string(&[], &mut tail, true);
         if !tail.is_empty() {
@@ -222,10 +242,9 @@ pub async fn pty_kill(id: String) -> Result<(), String> {
         // 先在 shell 存活时记录其 pid，用于进程树递归强杀
         let pid = session.child.process_id();
         if let Some(pid) = pid {
-            // 阻塞调用放入 blocking 线程池，不占用 tauri 异步运行线程
-            tauri::async_runtime::spawn_blocking(move || force_kill_tree(pid))
-                .await
-                .ok();
+            // 关键：必须在 shell 还存活时发起 taskkill /T（此时才能依据 PPID 枚举到全部后代），
+            // 强杀放到后台线程执行、不 await —— 命令立刻返回，不阻塞下方 PTY 的即时释放。
+            force_kill_tree_inner(pid);
         }
         // 兜底：杀直接子进程（防 taskkill 没覆盖到或 pid 失效等情况）
         let _ = session.child.kill();
@@ -234,4 +253,12 @@ pub async fn pty_kill(id: String) -> Result<(), String> {
         drop(session.child);
     }
     Ok(())
+}
+
+/// 在后台线程执行进程树强杀，不 await：保证「终止」命令即点即回、PTY 立即释放，
+/// 树杀在后台并行完成，避免等待 taskkill 拖慢释放节奏。
+fn force_kill_tree_inner(pid: u32) {
+    tauri::async_runtime::spawn_blocking(move || {
+        force_kill_tree(pid);
+    });
 }

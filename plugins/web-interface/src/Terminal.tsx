@@ -82,7 +82,7 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
           cursorBlink: true,
           convertEol: true, // Windows CR 正常换行
           fontSize: 12.5,
-          scrollback: 5000,
+          scrollback: 20000,
           fontFamily: '"Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace',
           theme: dark
             ? { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4' }
@@ -101,9 +101,22 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
         await hostApi.invoke('pty_create', { id: ptyId, cwd: cwd || null, cols, rows, env: env || null });
         if (disposed) return;
 
-        // 输出桥接：PTY → xterm
+        // 输出批处理：高频 pty-output 事件（尤其大日志）经 rAF 合并到一帧内一次 term.write，
+        // 避免每次事件都触发 WebView2 回调和 xterm 渲染，缓解主线程堆积、防止日志被截断/卡顿。
+        // 落后帧最多 ~16ms，实时性可接受；本地无可用的 createFrameBuffer 时退化为直接 write。
+        let fb: { push: (s: string) => void; flush: () => void; destroy: () => void } | null = null;
+        if (typeof hostApi.createFrameBuffer === 'function') {
+          fb = hostApi.createFrameBuffer((items: string[]) => {
+            if (!disposed && term) term.write(items.join(''));
+          });
+        }
+
+        // 输出桥接：PTY → xterm（经 frameBuffer 批处理）
         const outUnlistenP = hostApi.listen(`pty-output:${ptyId}`, (e: any) => {
-          if (e?.payload && !disposed) term?.write(e.payload);
+          if (e?.payload) {
+            if (fb && !disposed) fb.push(e.payload as string);
+            else if (!disposed) term?.write(e.payload);
+          }
         });
         // 进程退出
         const exitUnlistenP = hostApi.listen(`pty-exit:${ptyId}`, () => {
@@ -155,7 +168,7 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
           if (!disposed && ptyId && command) {
             hostApi.invoke('pty_write', { id: ptyId, data: command + '\r' }).catch(() => {});
           }
-        }, 350);
+        }, 600);
         setTimeout(() => { try { term?.focus(); } catch { /* */ } }, 60);
       } catch (e: any) {
         if (!disposed) {
@@ -172,6 +185,9 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
       disposers.forEach((d) => { try { d(); } catch { /* */ } });
       try { unlistenExit?.(); } catch { /* */ }
       try { unlistenErr?.(); } catch { /* */ }
+      // 先冲刷批处理缓冲里的残留输出，再销毁，避免卸载瞬间丢最后一段日志
+      try { fb?.flush(); } catch { /* */ }
+      try { fb?.destroy(); } catch { /* */ }
       if (ptyId) {
         hostApi.invoke('pty_kill', { id: ptyId }).catch(() => {});
       }

@@ -51,6 +51,17 @@ function loadSettings(): { suppressBrowser: boolean } {
 // 从而不弹系统默认浏览器（Edge），只看模块内 iframe 预览。
 const SUPPRESS_BROWSER_ENV: Record<string, string> = { BROWSER: 'cmd.exe /c exit %s' };
 
+// ---------- 预览地址规范化 ----------
+// 用户常只填 `127.0.0.1:8000` / `localhost:8000` 而漏掉协议，iframe src 会因此加载失败。
+// 这里统一补齐 `http://`（仅当完全没有 scheme 前缀时），保证预览可靠。
+const PROTOCOL_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+function normalizePreviewUrl(raw: string): string {
+  const v = (raw ?? '').trim();
+  if (!v) return '';
+  if (PROTOCOL_RE.test(v)) return v;
+  return 'http://' + v;
+}
+
 // ---------- 小组件 ----------
 // 简洁开关（宿主未导出 Switch，用最小实现）
 function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
@@ -217,6 +228,7 @@ function RunPane({
   const [probeReady, setProbeReady] = useState(false);
   const [autoReload, setAutoReload] = useState(true);
   const [reloadCount, setReloadCount] = useState(0);
+  const [reloadGaveUp, setReloadGaveUp] = useState(false);
   const readyFired = useRef(false);
   const loadedOnce = useRef(false);
 
@@ -227,38 +239,52 @@ function RunPane({
     }
   }, [onReady]);
 
-  // iframe 成功加载服务页 → 标记就绪、关掉等待态（自动轮询随之停）
+  // iframe onLoad：任何响应（含 404/502 错误页、以及目标页首帧）都会触发，误判不了"进程是否真出现"。
+  // 它只负责"本次 iframe 已加载出一帧"→ 先停掉自动轰炸，防止替用户无限刷新。
   const handleIframeLoad = useCallback(() => {
     loadedOnce.current = true;
     setProbeReady(true);
     markReady();
   }, [markReady]);
 
-  const hasUrl = !!preset.url?.trim();
+  const iframeSrc = normalizePreviewUrl(preset.url);
+  const hasUrl = !!iframeSrc;
+  // 自动重试上限：约 30×3.5s ≈ 105s 仍没加载出一帧则放弃自动，避免无限开飞机
+  const PREVIEW_MAX_RELOAD = 30;
 
-  // 预览「自动轮询」：服务未就绪时每 3.5s 重建 iframe 触发重新加载；
-  // 一旦 iframe onLoad（服务真正就绪）则 loadedOnce 置位，轮询自动停止。
-  // 用户可点「停止自动刷新」手动接管（此时可用右侧刷新按钮/重挂 iframe）。
+  // 预览「自动轮询」：服务未就绪时每 3.5s 重建 iframe 触发重新加载。
+  // 一旦 iframe 加载出一帧（loadedOnce 置位）即停；或达到重试上限（reloadGaveUp）也停，
+  // 避免永远刷 —— 避免就绪检测误判导致的无限重启/CPU 空转。
+  // 用户可点「停止自动刷新」手动接管（此时可用右侧刷新按钮重挂 iframe）。
   useEffect(() => {
     if (!hasUrl) return;
     loadedOnce.current = false;
     readyFired.current = false;
     setProbeReady(false);
     setReloadCount(0);
+    setReloadGaveUp(false);
     if (!autoReload) return;
     const timer = window.setInterval(() => {
-      // 已成功加载，或用户停止了自动刷新 → 本轮不动作
+      // 已加载出一帧，或用户停止自动刷新，或已达重试上限 → 本轮不动作
       if (loadedOnce.current || !autoReload) return;
+      setReloadCount((n) => {
+        if (n + 1 >= PREVIEW_MAX_RELOAD) {
+          setReloadGaveUp(true); // 达到上限：停掉自动轮询，提示用户手动处理
+          return n + 1;
+        }
+        return n + 1;
+      });
       setReloadKey((k) => k + 1);
-      setReloadCount((n) => n + 1);
     }, 3500);
     return () => window.clearInterval(timer);
   }, [hasUrl, preset.url, autoReload]);
+  // 注意：PREVIEW_MAX_RELOAD 为常量；reloadGaveUp 置位后 interval 仍在跑但不再自增（见上），由用户手动接管。
 
   // 手动刷新（停止自动刷新后仍可用）
   const manualReload = useCallback(() => {
     loadedOnce.current = false;
     setProbeReady(false);
+    setReloadGaveUp(false);
     setReloadKey((k) => k + 1);
   }, []);
 
@@ -307,17 +333,26 @@ function RunPane({
             <div className="absolute inset-0">
               {!probeReady && (
                 <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-white/75 dark:bg-stone-950/75 text-xs text-neutral-400 dark:text-stone-500">
-                  <span className="inline-block h-4 w-4 rounded-full border-2 border-neutral-300 border-t-sky-500 animate-spin" />
-                  <span>等待服务启动，就绪后自动加载预览（已重试 {reloadCount} 次）…</span>
+                  {reloadGaveUp ? (
+                    <>
+                      <span>自动重试已达上限，服务可能尚未就绪。</span>
+                      <span>可到终端查看日志；就绪后可点侧边栏「刷新」或右上按钮手动加载。</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="inline-block h-4 w-4 rounded-full border-2 border-neutral-300 border-t-sky-500 animate-spin" />
+                      <span>等待服务启动，就绪后自动加载预览（已重试 {reloadCount} 次）…</span>
+                    </>
+                  )}
                 </div>
               )}
               <iframe
                 key={reloadKey}
-                src={preset.url}
+                src={iframeSrc}
                 onLoad={handleIframeLoad}
                 className="h-full w-full border-0"
                 title={preset.name}
-                sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+                sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"
               />
             </div>
           ) : (
@@ -634,6 +669,8 @@ function WebInterfaceModule() {
   const [refreshSignal, setRefreshSignal] = useState(0);
   // 终止确认弹窗：点「终止」先提示保存，确认后才真正停止并强杀进程树
   const [confirmStop, setConfirmStop] = useState(false);
+  // 每次启动自增，作为 RunPane 的 key 强制重挂 → 重复启动也能真正重启
+  const [runKey, setRunKey] = useState(0);
 
   // 持久化预设
   useEffect(() => { savePresets(presets); }, [presets]);
@@ -687,7 +724,9 @@ function WebInterfaceModule() {
   const startPreset = useCallback((preset: WebPreset) => {
     setSelectedId(preset.id);
     setEditing(null);
-    // 同预设重复启动 → 先停掉旧的
+    // 每次启动都递增 runKey → 在渲染处给 RunPane 强制重挂。
+    // 保证「重复启动同一预设」也真正结束旧进程、重建全新终端，而不是 props 未变点了没反应。
+    setRunKey((k) => k + 1);
     setRun({ presetId: preset.id, ptyId: '', status: 'starting', startedAt: Date.now() });
   }, []);
 
@@ -836,7 +875,7 @@ function WebInterfaceModule() {
           <div className="flex-1 min-h-0 flex flex-col">
             {/* 运行区：preview + 终端 */}
             {isRunningThis && run ? (
-              <RunPane preset={selected} suppressBrowser={settings.suppressBrowser}
+              <RunPane key={runKey} preset={selected} suppressBrowser={settings.suppressBrowser}
                 openTerminal={showTerminal}
                 refreshSignal={refreshSignal}
                 onReady={markRunning} onStopped={markStopped} />

@@ -64,10 +64,16 @@ export function newPresetId(): string {
   return 'wp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
 }
 
-/** 校验预设是否可启动：command 必须给 args */
+/** 校验预设是否可启动：command 必须给 args；预览地址若填了须看起来像有效 URL */
 export function validatePreset(p: Partial<WebPreset>): string | null {
   if (!p.name || !p.name.trim()) return '请填写预设名称';
   if ((p.kind ?? 'command') === 'command' && (!p.args || !p.args.trim())) return '请填写要运行的命令或脚本';
+  const url = (p.url ?? '').trim();
+  if (url) {
+    // 模糊校验：缺少协议且不像 `host:port` 的字符串，多半是手误，尽早提示
+    const looksOk = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) || /^\S+:\d{2,5}$/.test(url);
+    if (!looksOk) return '预览地址需带协议（如 http://127.0.0.1:8000）或形如 host:端口';
+  }
   return null;
 }
 
@@ -230,9 +236,9 @@ function matchKnownApp(
   return null;
 }
 
-/** 从脚本文本里粗取「端口」（依次匹配 --port/--listen/gradio/app 端口约定） */
+/** 从脚本文本里粗取「端口」（依次匹配 --port/--listen/--server_port/gradio/app 端口约定） */
 function extractPort(text: string): string | null {
-  const m = text.match(/(?:--port|--listen)\s+(\d{2,5})/i);
+  const m = text.match(/(?:--port|--listen|--server_port)\s+(\d{2,5})/i);
   if (m) return m[1];
   if (/gradio|server\.launch/i.test(text)) return '7860';
   return null;

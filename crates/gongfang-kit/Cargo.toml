@@ -17,7 +17,7 @@ crawler = ["dep:futures-util", "dep:url"]
 crawler-browser = ["crawler", "dep:chromiumoxide"]
 # 启用逆向框架（L*协议文法归纳 + 卡方加密识别 + petgraph 控制流反混淆 + 符号持久化）
 # ghidra_headless 外部进程调用 + frida-gum 动态插桩后续阶段接入
-reverse = ["dep:petgraph"]
+reverse = ["dep:petgraph", "dep:base64"]
 # 启用渗透框架（编码变异 + SSTI 载荷 + 香农熵指纹 + petgraph 攻击拓扑）
 # 替代原计划 6 维度（SMT 求解器/ReDoS fuzzing/JIT Shellcode/FFT 频谱等已删除或降级）
 pentest = ["dep:petgraph"]
@@ -42,7 +42,7 @@ log = "0.4"
 # 会拉入 openssl-sys 并要求原生 OpenSSL 库，导致交叉编译失败；Windows 上 native-tls
 # 走 schannel 不需要 OpenSSL，故此前 cargo check 能过。改为 rustls-tls 后 Android 交叉
 # 编译可行，且 Windows 行为不变（app 侧本就用 rustls）。属 T2「非 Android 依赖门控」修复。
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
 # 无锁策略热交换（ArcSwap）：双轨制核心，亚毫秒级策略切换
 arc-swap = "1"
 # 无锁 MPMC 队列：用户提示词 @focus/@bypass 抢占式优先级队列
@@ -59,6 +59,8 @@ url = { version = "2", optional = true }
 chromiumoxide = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime"] }
 # === reverse feature 依赖（轻量图论库，MIT 协议）===
 petgraph = { version = "0.6", optional = true, default-features = false }
+# === reverse 编码识别解码依赖（MIT）===
+base64 = { version = "0.22", optional = true }
 
 # === automation feature 依赖（Windows SendInput HID 注入）===
 # 仅 Windows 平台 + automation feature 启用时拉入；非 Windows 平台 hid.rs 不编译

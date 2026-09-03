@@ -6,7 +6,7 @@ import React from "react";
 const { useState, useEffect, useCallback } = React;
 
 import type { AuditInput } from './audit';
-import { CrawlerUrlQueue, PentestAssetTree, GatewayStrategyHistory, AutomationTaskList } from './frameworkExtras';
+import { CrawlerUrlQueue, CrawlerProxyPool, PentestAssetTree, GatewayStrategyHistory, AutomationTaskList } from './frameworkExtras';
 import { DisassemblyView, ScriptEditor } from './professionalExtras';
 import { CollapsibleSection, useKernelRunning } from './ui';
 
@@ -88,6 +88,18 @@ interface CryptoReport {
   entropy: number;
   matched_algorithm: string | null;
   confidence: number | null;
+}
+
+// ============ 编码/哈希识别结果类型（与 Rust 端 detect.rs EncodeAnalysis 对齐） ============
+interface EncodeAnalysis {
+  kind: string;
+  label: string;
+  decoded: number[] | null;
+  is_text: boolean;
+  entropy: number;
+  hash_algo: string | null;
+  stream_hint: string | null;
+  preview: string | null;
 }
 
 interface SymbolSummary {
@@ -751,6 +763,8 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
 
         {/* P1：URL 队列（事件累积 + 手动添加） */}
         <CrawlerUrlQueue />
+        {/* P1.5：代理池（爬取走代理 + 风控自动死亡/回退） */}
+        <CrawlerProxyPool />
       </div>
     </div>
   );
@@ -786,6 +800,27 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const [cryptoReport, setCryptoReport] = useState<CryptoReport | null>(null);
   const [cryptoBusy, setCryptoBusy] = useState(false);
   const [cryptoError, setCryptoError] = useState<string | null>(null);
+
+  // 编码/哈希识别状态
+  const [encInput, setEncInput] = useState('');
+  const [encResult, setEncResult] = useState<EncodeAnalysis | null>(null);
+  const [encBusy, setEncBusy] = useState(false);
+
+  const handleEncodeAnalyze = useCallback(async () => {
+    const input = encInput.trim();
+    if (!input) return;
+    setEncBusy(true);
+    try {
+      const r = await tauriInvoke<EncodeAnalysis>('gongfang_encode_analyze', { input });
+      setEncResult(r);
+      addLog({ action: '编码/哈希识别', target: r.kind, status: 'success', detail: r.label });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '编码/哈希识别', target: encInput.trim(), status: 'error', detail: msg });
+    } finally {
+      setEncBusy(false);
+    }
+  }, [encInput, addLog]);
 
   // 符号库查询状态
   const [symUrl, setSymUrl] = useState('');
@@ -966,6 +1001,65 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </p>
             </div>
           )}
+        </CollapsibleSection>
+
+        {/* 编码/哈希识别（粘贴任意字符串，自动识别 hex/base64/url/明文/哈希） */}
+        <CollapsibleSection
+          title="编码 / 哈希 / 明文识别"
+          storageKey="fw_reverse_encode"
+          defaultOpen={true}
+          accent="info"
+          right={<span className="text-[10px] text-neutral-400">自动分类 + 尝试解码</span>}
+        >
+          <div className="space-y-2">
+            <textarea
+              value={encInput}
+              onChange={(e) => setEncInput(e.target.value)}
+              placeholder="粘贴任意字符串：hex / base64 / URL 编码 / 哈希 / 明文…"
+              rows={3}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)] resize-y"
+            />
+            <button
+              onClick={handleEncodeAnalyze}
+              disabled={encBusy || !encInput.trim()}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {encBusy ? '识别中...' : '识别'}
+            </button>
+            <p className="text-[10px] text-neutral-400 leading-relaxed">
+              例：Base64 文本 → 解码；偶数长度 hex → 解码；32/40/64 位 hex → 反推 MD5/SHA-1/SHA-256。
+            </p>
+
+            {encResult && (
+              <div className="rounded-lg border border-black/10 dark:border-stone-700/50 overflow-hidden">
+                <div className="flex items-center gap-2 px-3 py-2 bg-black/[0.03] dark:bg-white/[0.05] border-b border-black/5 dark:border-stone-700/50">
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-violet-500/15 text-violet-600 dark:text-violet-400">{encResult.kind}</span>
+                  <span className="text-xs text-[var(--element-bg)]">{encResult.label}</span>
+                  <span className="ml-auto text-[10px] text-neutral-400 tabular-nums">熵 {encResult.entropy.toFixed(2)}</span>
+                </div>
+                <div className="px-3 py-2 space-y-1.5">
+                  {encResult.is_text && encResult.preview && (
+                    <pre className="max-h-40 overflow-auto text-[11px] font-mono text-neutral-600 dark:text-stone-300 bg-black/[0.03] dark:bg-white/[0.05] rounded p-2 whitespace-pre-wrap break-all">
+                      {encResult.preview}
+                    </pre>
+                  )}
+                  {!encResult.is_text && encResult.decoded && encResult.decoded.length > 0 && (
+                    <div className="text-[10px] text-neutral-400">
+                      解码 {encResult.decoded.length} 字节（非文本）：{encResult.decoded.slice(0, 24).map((b) => b.toString(16).padStart(2, '0')).join(' ')}{encResult.decoded.length > 24 ? '…' : ''}
+                    </div>
+                  )}
+                  {encResult.hash_algo && (
+                    <div className="text-[10px] text-neutral-400">哈希算法：{encResult.hash_algo}</div>
+                  )}
+                  {encResult.stream_hint && (
+                    <div className="text-[10px] text-neutral-400">
+                      文件/压缩流特征：<span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400 font-mono">{encResult.stream_hint}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
         </CollapsibleSection>
 
         {/* 符号库查询 */}

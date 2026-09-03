@@ -273,12 +273,21 @@ pub async fn execute_recon(s: &Strategy, reward: &Arc<RewardSignal>) {
 }
 
 /// 抓取单个 URL：记录奖励/态势，提取标题与同域链接并递归入队，推送 CrawlResult 事件。
+/// 若代理池有存活代理则经由代理请求；403/429/5xx/网络错误会将该代理标记为死亡。
 async fn crawl_fetch(url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSignal>) -> bool {
     let ua = stealth::user_agent(&s.tls_profile);
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
+
+    // 代理池轮转：有存活代理则走代理，否则直连
+    let proxy = crate::crawler::pool::pool().next();
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
+    if let Some(p) = &proxy {
+        if let Ok(pr) = reqwest::Proxy::all(&p.url) {
+            builder = builder.proxy(pr);
+        } else {
+            log::warn!("[crawler] 代理 URL 无效，回退直连: {}", p.url);
+        }
+    }
+    let client = match builder.build() {
         Ok(c) => c,
         Err(e) => {
             log::warn!("[crawler] 客户端构建失败: {}", e);
@@ -289,14 +298,22 @@ async fn crawl_fetch(url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSig
     let resp = match client.get(url).header("User-Agent", ua).send().await {
         Ok(r) => r,
         Err(e) => {
+            if proxy.is_some() {
+                crate::crawler::pool::pool().mark_dead(&proxy.as_ref().unwrap().url);
+            }
             reward.record(EventKind::Timeout);
             emit_result(url, 0, None, 0, false, Some(e.to_string()));
-            log::warn!("[crawler] {} 失败: {}", url, e);
+            log::warn!("[crawler] {} via {:?} 失败: {}", url, proxy.as_ref().map(|p| p.url.as_str()), e);
             return false;
         }
     };
 
     let status = resp.status().as_u16();
+
+    // 风控/服务异常 → 标记当前代理死亡并回退
+    if proxy.is_some() && (status == 403 || status == 429 || status >= 500) {
+        crate::crawler::pool::pool().mark_dead(&proxy.as_ref().unwrap().url);
+    }
     let headers: Vec<(String, String)> = resp
         .headers()
         .iter()

@@ -55,4 +55,27 @@ impl ProxyPool {
     pub fn count(&self) -> usize {
         self.inner.lock().iter().filter(|p| p.alive).count()
     }
+
+    /// 列出全部代理（含死亡标记）
+    pub fn list(&self) -> Vec<ProxyEntry> {
+        self.inner.lock().clone()
+    }
+
+    /// 将所有代理重置为存活（换一轮/手动恢复时调用）
+    pub fn reset(&self) {
+        for p in self.inner.lock().iter_mut() {
+            p.alive = true;
+        }
+    }
+}
+
+// ================= 全局代理池（供数据面 / 命令层共享） =================
+// 与 EventBus / UrlQueue 的全局单例一致，无需穿过构造函数层层传递。
+
+pub static POOL: once_cell::sync::Lazy<parking_lot::Mutex<ProxyPool>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(ProxyPool::new()));
+
+/// 获取全局代理池句柄
+pub fn pool() -> parking_lot::MutexGuard<'static, ProxyPool> {
+    POOL.lock()
 }

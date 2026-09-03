@@ -349,6 +349,69 @@ pub fn gongfang_crawler_stats() -> Result<CrawlerStats, String> {
     }
 }
 
+// ============ 爬虫代理池管理 ============
+
+/// 爬虫代理池单条（前端展示）
+#[derive(Serialize)]
+pub struct CrawlerProxyEntry {
+    pub url: String,
+    pub tag: String,
+    pub alive: bool,
+}
+
+/// 添加代理（socks5://host:port 或 http://host:port）
+#[tauri::command]
+pub fn gongfang_proxy_add(url: String, tag: Option<String>) -> Result<(), String> {
+    if url.trim().is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    #[cfg(feature = "crawler")]
+    {
+        crate::crawler::pool::pool().add(crate::crawler::pool::ProxyEntry {
+            url: url.trim().to_string(),
+            tag: tag.unwrap_or_else(|| "default".to_string()),
+            alive: true,
+        });
+        Ok(())
+    }
+    #[cfg(not(feature = "crawler"))]
+    {
+        let _ = (url, tag);
+        Err("crawler feature 未启用，请用 --features gongfang-crawler 编译".to_string())
+    }
+}
+
+/// 列出候选代理（含死亡标记）
+#[tauri::command]
+pub fn gongfang_proxy_list() -> Result<Vec<CrawlerProxyEntry>, String> {
+    #[cfg(feature = "crawler")]
+    {
+        Ok(crate::crawler::pool::pool()
+            .list()
+            .into_iter()
+            .map(|p| CrawlerProxyEntry { url: p.url, tag: p.tag, alive: p.alive })
+            .collect())
+    }
+    #[cfg(not(feature = "crawler"))]
+    {
+        Err("crawler feature 未启用，请用 --features gongfang-crawler 编译".to_string())
+    }
+}
+
+/// 重置代理池（全部恢复存活）
+#[tauri::command]
+pub fn gongfang_proxy_reset() -> Result<(), String> {
+    #[cfg(feature = "crawler")]
+    {
+        crate::crawler::pool::pool().reset();
+        Ok(())
+    }
+    #[cfg(not(feature = "crawler"))]
+    {
+        Err("crawler feature 未启用，请用 --features gongfang-crawler 编译".to_string())
+    }
+}
+
 /// 从 HTML 提取 <title>
 #[allow(dead_code)]
 fn extract_title(html: &str) -> Option<String> {
@@ -501,6 +564,35 @@ pub fn gongfang_crypto_identify(hex_data: String) -> Result<CryptoReport, String
     #[cfg(not(feature = "reverse"))]
     {
         let _ = bytes;
+        Err("reverse feature 未启用，请用 --features gongfang-reverse 编译".to_string())
+    }
+}
+
+/// 编码/哈希/明文分类识别
+///
+/// 输入任意字符串，自动识别 hex/base64/base32/url/明文/哈希，并尝试解码。
+///
+/// 返回类型用 cfg 门控别名：reverse feature 启用时为 `reverse::detect::EncodeAnalysis`；
+/// 默认构建（不启用 feature）时退化为 `serde_json::Value` 占位并返回明确错误。
+/// 修复：签名层引用 feature-gated 类型（crate::reverse::detect）此前导致默认构建 E0433
+/// （cannot find `reverse` in `crate`），因为在函数体内 `#[cfg]` 分支无法保护签名类型解析。
+#[cfg(feature = "reverse")]
+type EncodeAnalysisOut = crate::reverse::detect::EncodeAnalysis;
+#[cfg(not(feature = "reverse"))]
+type EncodeAnalysisOut = serde_json::Value;
+
+#[tauri::command]
+pub fn gongfang_encode_analyze(input: String) -> Result<EncodeAnalysisOut, String> {
+    if input.trim().is_empty() {
+        return Err("input 不能为空".to_string());
+    }
+    #[cfg(feature = "reverse")]
+    {
+        Ok(crate::reverse::detect::analyze(&input))
+    }
+    #[cfg(not(feature = "reverse"))]
+    {
+        let _ = input;
         Err("reverse feature 未启用，请用 --features gongfang-reverse 编译".to_string())
     }
 }

@@ -224,6 +224,117 @@ export function CrawlerUrlQueue() {
 }
 
 // ============================================================
+// 1.5 CrawlerProxyPool — 爬虫代理池（添加/列表/重置）
+//    实际抓取时经此池轮转走代理；403/429/5xx/网络错误自动标记死亡并回退直连
+// ============================================================
+interface CrawlerProxyEntry {
+  url: string;
+  tag: string;
+  alive: boolean;
+}
+
+export function CrawlerProxyPool() {
+  const [proxies, setProxies] = useState<CrawlerProxyEntry[]>([]);
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
+  const invoke = (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke;
+
+  const refresh = useCallback(async () => {
+    try {
+      const list = await invoke<CrawlerProxyEntry[]>('gongfang_proxy_list');
+      setProxies(list);
+    } catch { /* feature 未启用等 */ }
+  }, [invoke]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleAdd = useCallback(async () => {
+    const url = input.trim();
+    if (!url) return;
+    setBusy(true);
+    try {
+      await invoke('gongfang_proxy_add', { url });
+      setInput('');
+      refresh();
+    } catch (e) { console.warn('[crawler] 添加代理失败', e); }
+    finally { setBusy(false); }
+  }, [input, invoke, refresh]);
+
+  const handleReset = useCallback(async () => {
+    setBusy(true);
+    try { await invoke('gongfang_proxy_reset', {}); refresh(); }
+    finally { setBusy(false); }
+  }, [invoke, refresh]);
+
+  const aliveCount = proxies.filter((p) => p.alive).length;
+
+  return (
+    <CollapsibleSection
+      title="代理池"
+      storageKey="fw_crawler_proxy"
+      defaultOpen={false}
+      accent="attack"
+      right={<span className="text-[10px] text-neutral-400">存活 {aliveCount}/{proxies.length}</span>}
+    >
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+          placeholder="socks5://host:port 或 http://host:port"
+          className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+        />
+        <button
+          onClick={handleAdd}
+          disabled={busy || !input.trim()}
+          className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+        >
+          添加
+        </button>
+        <button
+          onClick={handleReset}
+          disabled={busy}
+          className="btn-press px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 border border-black/10 dark:border-stone-700/50 hover:bg-black/5 dark:hover:bg-white/5"
+        >
+          重置
+        </button>
+      </div>
+      {proxies.length > 0 ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-neutral-400 border-b border-black/5 dark:border-stone-700/50">
+                <th className="py-1.5 pr-3">URL</th>
+                <th className="py-1.5 pr-3">标签</th>
+                <th className="py-1.5">状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {proxies.map((p, i) => (
+                <tr key={i} className="border-b border-black/[0.03] dark:border-stone-700/30">
+                  <td className="py-1.5 pr-3 font-mono text-[var(--element-bg)] max-w-[240px] truncate" title={p.url}>{p.url}</td>
+                  <td className="py-1.5 pr-3 text-neutral-500 dark:text-stone-400">{p.tag}</td>
+                  <td className="py-1.5">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${p.alive ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-rose-500/15 text-rose-600 dark:text-rose-400'}`}>
+                      {p.alive ? '存活' : '死亡'}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="text-[11px] text-neutral-400">
+          暂无代理，将直连抓取。添加后轮转走代理，风控（403/429/5xx/网络错误）会自动标记死亡并回退。
+        </p>
+      )}
+    </CollapsibleSection>
+  );
+}
+
+// ============================================================
 // 2. PentestAssetTree — 渗透资产树（按主机分组 + 漏洞列表 + Payload 库）
 // ============================================================
 interface ScanPortLite {

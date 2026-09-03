@@ -1,0 +1,22 @@
+
+  external-deps\茑萝\ide\codemirror\index.js  647.6kb
+
+Done in 66ms
+
+  external-deps\茑萝\wps\tiptap\index.js  368.2kb
+
+Done in 174ms
+
+  external-deps\全局\paddleocr\index.js  6.0kb
+
+Done in 6ms
+
+  public\ocr-worker.js  4.2kb
+
+Done in 8ms
+(node:22756) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+$ tsc && vite build
+
+A PostCSS plugin did not pass the `from` option to `postcss.parse`. This may cause imported assets to be incorrectly transformed. If you've recently added a PostCSS plugin that raised this warning, please contact the package author to fix the issue.
+[33msrc/components/ui/switch.tsx (1:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.[39m
