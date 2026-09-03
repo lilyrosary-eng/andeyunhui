@@ -100,6 +100,17 @@ interface PathProbeItem {
   status: number;
   note: string;
 }
+interface ErrorPageReport {
+  probe_path: string;
+  status: number;
+  fingerprints: string[];
+}
+interface MutationResult {
+  name: string;
+  payload: string;
+  keyword_blocked: boolean;
+  bypassed_rules: string[];
+}
 
 // ============ 逆向框架结果类型 ============
 interface CryptoReport {
@@ -1497,6 +1508,65 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     }
   }, [pPathUrl, addLog]);
 
+  // .well-known / 错误页指纹
+  const [wkUrl, setWkUrl] = useState('');
+  const [wkResult, setWkResult] = useState<PathProbeItem[] | null>(null);
+  const [wkBusy, setWkBusy] = useState(false);
+  const [errUrl, setErrUrl] = useState('');
+  const [errResult, setErrResult] = useState<ErrorPageReport | null>(null);
+  const [errBusy, setErrBusy] = useState(false);
+
+  const handleWellKnown = useCallback(async () => {
+    if (!wkUrl.trim()) return;
+    setWkBusy(true);
+    try {
+      const r = await tauriInvoke<PathProbeItem[]>('gongfang_wellknown_probe', { url: wkUrl.trim() });
+      setWkResult(r);
+      addLog({ action: '.well-known 发现', target: wkUrl.trim(), status: 'success', detail: `发现 ${r.length} 个端点` });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '.well-known 发现', target: wkUrl.trim(), status: 'error', detail: msg });
+    } finally {
+      setWkBusy(false);
+    }
+  }, [wkUrl, addLog]);
+
+  const handleErrorPage = useCallback(async () => {
+    if (!errUrl.trim()) return;
+    setErrBusy(true);
+    try {
+      const r = await tauriInvoke<ErrorPageReport>('gongfang_error_page', { url: errUrl.trim() });
+      setErrResult(r);
+      addLog({ action: '错误页指纹', target: errUrl.trim(), status: 'success', detail: `状态 ${r.status} · 命中 ${r.fingerprints.join(',') || '无'}` });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '错误页指纹', target: errUrl.trim(), status: 'error', detail: msg });
+    } finally {
+      setErrBusy(false);
+    }
+  }, [errUrl, addLog]);
+
+  // WAF 编码变异模拟
+  const [simInput, setSimInput] = useState('');
+  const [simResult, setSimResult] = useState<MutationResult[] | null>(null);
+  const [simBusy, setSimBusy] = useState(false);
+
+  const handleSimulate = useCallback(async () => {
+    if (!simInput.trim()) return;
+    setSimBusy(true);
+    try {
+      const r = await tauriInvoke<MutationResult[]>('gongfang_simulate_waf', { payload: simInput.trim() });
+      setSimResult(r);
+      const bypassed = r.filter((m) => m.bypassed_rules.length > 0).length;
+      addLog({ action: 'WAF 变异模拟', target: simInput.trim(), status: 'success', detail: `${r.length} 个变体 · ${bypassed} 个命中绕过` });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: 'WAF 变异模拟', target: simInput.trim(), status: 'error', detail: msg });
+    } finally {
+      setSimBusy(false);
+    }
+  }, [simInput, addLog]);
+
   const handleScan = useCallback(async () => {
     if (!scanHost.trim()) return;
     setScanBusy(true);
@@ -1836,6 +1906,142 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
             pathResult !== null && pathResult.length === 0 ? (
               <p className="text-[11px] text-neutral-400 mt-2">未发现明显敏感路径（全部 404）。</p>
             ) : null
+          )}
+        </CollapsibleSection>
+
+        {/* .well-known 端点发现 */}
+        <CollapsibleSection
+          title="/.well-known/ 端点发现"
+          storageKey="fw_pentest_wellknown"
+          defaultOpen={false}
+          accent="attack"
+          right={wkResult && wkResult.length > 0 ? <span className="text-[10px] text-neutral-400">发现 {wkResult.length}</span> : null}
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={wkUrl}
+              onChange={(e) => setWkUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleWellKnown()}
+              placeholder="目标 URL（security.txt / openid-config / jwks 等）"
+              className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+            />
+            <button
+              onClick={handleWellKnown}
+              disabled={wkBusy || !wkUrl.trim()}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {wkBusy ? '探测中...' : '探测'}
+            </button>
+          </div>
+          <p className="text-[10px] text-neutral-400 mt-2">探测 RFC 8615 `/.well-known/` 端点（security.txt / openid-config / jwks / host-meta 等），过滤 404。</p>
+          {wkResult && wkResult.length > 0 ? (
+            <div className="overflow-x-auto mt-2">
+              <table className="w-full text-xs">
+                <tbody>
+                  {wkResult.map((p, i) => (
+                    <tr key={i} className="border-b border-black/[0.03] dark:border-stone-700/30">
+                      <td className="py-1.5 pr-3 font-mono text-[var(--element-bg)]">{p.path}</td>
+                      <td className="py-1.5 pr-3">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${p.status >= 200 && p.status < 300 ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-sky-500/15 text-sky-600 dark:text-sky-400'}`}>{p.status}</span>
+                      </td>
+                      <td className="py-1.5 text-neutral-500 dark:text-stone-400">{p.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            wkResult !== null && wkResult.length === 0 ? <p className="text-[11px] text-neutral-400 mt-2">未发现 `/.well-known/` 端点。</p> : null
+          )}
+        </CollapsibleSection>
+
+        {/* 错误页指纹 */}
+        <CollapsibleSection
+          title="错误页指纹"
+          storageKey="fw_pentest_errorpage"
+          defaultOpen={false}
+          accent="attack"
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={errUrl}
+              onChange={(e) => setErrUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleErrorPage()}
+              placeholder="目标 URL（请求不存在的路径触发 404 并指纹错误页）"
+              className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+            />
+            <button
+              onClick={handleErrorPage}
+              disabled={errBusy || !errUrl.trim()}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {errBusy ? '识别中...' : '识别'}
+            </button>
+          </div>
+          <p className="text-[10px] text-neutral-400 mt-2">请求一个低碰撞路径，从 404/500 错误页特征反推服务器/框架/语言。</p>
+          {errResult && (
+            <div className="space-y-1.5 mt-2">
+              <div className="flex items-center gap-2 text-[11px]">
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-black/[0.05] dark:bg-white/[0.06] text-neutral-600 dark:text-stone-300">{errResult.status}</span>
+                <span className="text-neutral-400 font-mono truncate">{errResult.probe_path}</span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {errResult.fingerprints.length > 0 ? errResult.fingerprints.map((f) => (
+                  <span key={f} className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">{f}</span>
+                )) : <span className="text-[10px] text-neutral-400">未从错误页识别到服务器/框架特征（可能已自定义错误页）。</span>}
+              </div>
+            </div>
+          )}
+        </CollapsibleSection>
+
+        {/* WAF 编码变异模拟 */}
+        <CollapsibleSection
+          title="WAF 编码变异模拟"
+          storageKey="fw_pentest_sim"
+          defaultOpen={false}
+          accent="attack"
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={simInput}
+              onChange={(e) => setSimInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSimulate()}
+              placeholder="输入载荷，如 union select 1,2,3 或 <script>alert(1)</script>"
+              className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+            />
+            <button
+              onClick={handleSimulate}
+              disabled={simBusy || !simInput.trim()}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {simBusy ? '模拟中...' : '模拟'}
+            </button>
+          </div>
+          <p className="text-[10px] text-neutral-400 mt-2">对载荷施加多种编码，对比常见 WAF 规则（union_select / union空白select / xss / 路径穿越）标出绕过。</p>
+          {simResult && (
+            <div className="mt-2 space-y-1">
+              {simResult.map((m, i) => (
+                <div key={i} className="flex items-start gap-2 rounded border border-black/5 dark:border-stone-700/40 p-1.5">
+                  <span className="shrink-0 w-24 text-[10px] text-neutral-400 leading-5">{m.name}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                      {m.keyword_blocked
+                        ? <span className="px-1 py-0.5 rounded text-[9px] bg-rose-500/15 text-rose-600 dark:text-rose-400">关键词拦截</span>
+                        : <span className="px-1 py-0.5 rounded text-[9px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">关键词绕过</span>}
+                      {m.bypassed_rules.length > 0
+                        ? m.bypassed_rules.map((rr) => (
+                            <span key={rr} className="px-1 py-0.5 rounded text-[9px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">绕 {rr}</span>
+                          ))
+                        : <span className="px-1 py-0.5 rounded text-[9px] bg-rose-500/15 text-rose-600 dark:text-rose-400">全部规则命中</span>}
+                    </div>
+                    <div className="font-mono text-[10px] text-neutral-500 dark:text-stone-400 break-all">{m.payload}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </CollapsibleSection>
 

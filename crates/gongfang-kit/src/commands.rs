@@ -340,6 +340,105 @@ pub async fn gongfang_path_probe(url: String) -> Result<PathProbeOut, String> {
     }
 }
 
+/// RFC 8615 `/.well-known/` 端点发现（security.txt / openid-config / jwks 等）
+#[tauri::command]
+pub async fn gongfang_wellknown_probe(url: String) -> Result<PathProbeOut, String> {
+    if url.trim().is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    #[cfg(feature = "pentest")]
+    {
+        use crate::pentest::recon::{classify_path_status, WELL_KNOWN_PATHS, PathResult};
+        let base = url.trim().trim_end_matches('/');
+        let client = reqwest::Client::new();
+        let mut out = Vec::new();
+        for p in WELL_KNOWN_PATHS {
+            let full = format!("{}/{}", base, p);
+            let status = match client
+                .get(&full)
+                .timeout(std::time::Duration::from_secs(8))
+                .send()
+                .await
+            {
+                Ok(r) => r.status().as_u16(),
+                Err(_) => 0,
+            };
+            if status == 404 || status == 0 {
+                continue;
+            }
+            out.push(PathResult {
+                path: (*p).to_string(),
+                status,
+                note: classify_path_status(status).to_string(),
+            });
+        }
+        Ok(out)
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = url;
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
+/// 错误页指纹：请求一个低碰撞路径触发 404/500，从错误页特征识别服务器/框架
+#[tauri::command]
+pub async fn gongfang_error_page(url: String) -> Result<ErrorPageOut, String> {
+    if url.trim().is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    #[cfg(feature = "pentest")]
+    {
+        use crate::pentest::recon::{fingerprint_error_page, ErrorPageReport};
+        let base = url.trim().trim_end_matches('/');
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let probe_path = format!("{}/__gf_err_{}", base, nonce);
+        let client = reqwest::Client::new();
+        let (status, body) = match client.get(&probe_path).send().await {
+            Ok(r) => {
+                let s = r.status().as_u16();
+                let b = r.text().await.unwrap_or_default();
+                (s, b)
+            }
+            Err(_) => (0, String::new()),
+        };
+        let fingerprints = fingerprint_error_page(&body);
+        Ok(ErrorPageReport {
+            probe_path,
+            status,
+            fingerprints,
+        })
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = url;
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
+// ============ WAF 编码变异模拟 ============
+
+/// WAF 编码变异模拟：对载荷施加多种编码，评估对常见规则的绕过效果
+#[tauri::command]
+pub fn gongfang_simulate_waf(payload: String) -> Result<SimOut, String> {
+    let payload = payload.trim();
+    if payload.is_empty() {
+        return Err("payload 不能为空".to_string());
+    }
+    #[cfg(feature = "pentest")]
+    {
+        Ok(crate::pentest::sim::simulate(payload))
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = payload;
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
 // ============ 爬虫实际爬取命令 ============
 
 /// 爬取结果（实际 HTTP 请求返回的页面数据）
@@ -717,6 +816,16 @@ type MethodReportOut = serde_json::Value;
 type PathProbeOut = Vec<crate::pentest::recon::PathResult>;
 #[cfg(not(feature = "pentest"))]
 type PathProbeOut = Vec<serde_json::Value>;
+
+#[cfg(feature = "pentest")]
+type ErrorPageOut = crate::pentest::recon::ErrorPageReport;
+#[cfg(not(feature = "pentest"))]
+type ErrorPageOut = serde_json::Value;
+
+#[cfg(feature = "pentest")]
+type SimOut = Vec<crate::pentest::sim::MutationResult>;
+#[cfg(not(feature = "pentest"))]
+type SimOut = Vec<serde_json::Value>;
 
 #[tauri::command]
 pub fn gongfang_encode_analyze(input: String) -> Result<EncodeAnalysisOut, String> {
