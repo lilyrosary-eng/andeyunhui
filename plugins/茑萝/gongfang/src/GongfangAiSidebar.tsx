@@ -9,16 +9,9 @@ const { useState, useRef, useCallback, useEffect, useMemo } = React;
 
 const hostApi = window.__HOST_API__;
 
-// 攻防命令直接走 __TAURI_INTERNALS__.invoke（未加入插件沙箱白名单）
-const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: <U = unknown>(c: string, a?: Record<string, unknown>) => Promise<U> };
-  };
-  if (!w.__TAURI_INTERNALS__?.invoke) {
-    return Promise.reject(new Error('Tauri invoke 不可用'));
-  }
-  return w.__TAURI_INTERNALS__.invoke<T>(cmd, args);
-};
+// 攻防命令统一走沙箱 hostApi.invoke（已加入 pluginSandbox 白名单），不直连 __TAURI_INTERNALS__
+const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+  (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke(cmd, args) as Promise<T>;
 
 // ============ 类型 ============
 type ChatRole = 'user' | 'assistant' | 'tool';
@@ -227,7 +220,7 @@ async function executeCmd(cmd: CmdDirective): Promise<string> {
         break;
       }
       case 'throttle': {
-        const r = await tauriInvoke<string>('gongfang_gateway_throttle', { percent: parseInt(attrs.percent || '100', 10) });
+        const r = await tauriInvoke<string>('gongfang_gateway_throttle', { ratio: Math.min(1, Math.max(0.05, parseInt(attrs.percent || '100', 10) / 100)) });
         result = r;
         break;
       }

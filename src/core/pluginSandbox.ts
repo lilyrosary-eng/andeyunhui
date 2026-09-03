@@ -230,6 +230,36 @@ const ALLOWED_COMMANDS = new Set([
   'plugin:opener|open_url',
   // 桌宠引擎：销毁其常驻浮窗（与 overlay_window_get_or_create 配对）
   'overlay_window_destroy',
+  // 攻防模块（gongfang）：内核双轨制 / 爬虫 / 逆向 / 渗透 / 自动化 / 网关 / 目标工作区
+  // 此前插件直连 __TAURI_INTERNALS__.invoke 绕过白名单，现收编至沙箱统一治理
+  'gongfang_status',
+  'gongfang_start',
+  'gongfang_stop',
+  'gongfang_inject',
+  'gongfang_fetch',
+  'gongfang_crawler_stats',
+  'gongfang_crypto_identify',
+  'gongfang_symbols',
+  'gongfang_scan',
+  'gongfang_waf_detect',
+  'gongfang_humanize',
+  'gongfang_fitness',
+  'gongfang_fitness_migrate',
+  'gongfang_fitness_reset',
+  'gongfang_gateway_status',
+  'gongfang_gateway_rotate',
+  'gongfang_gateway_throttle',
+  'gongfang_gateway_pool',
+  'gongfang_events_recent',
+  'gongfang_metrics_history',
+  'gongfang_ai_reasoning_recent',
+  'gongfang_set_emit_tick',
+  'gongfang_target_list',
+  'gongfang_target_save',
+  'gongfang_target_delete',
+  'gongfang_target_activate',
+  'gongfang_target_get',
+  'gongfang_target_set_metadata',
 ]);
 
 // ========== 安全 Console：所有输出带插件前缀 ==========

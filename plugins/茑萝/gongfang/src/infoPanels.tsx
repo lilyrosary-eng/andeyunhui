@@ -6,18 +6,12 @@ const React = window.__HOST_REACT__;
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
 
-import { CollapsibleSection } from './ui';
+import { CollapsibleSection, useKernelRunning } from './ui';
 
-// ============ Tauri invoke 封装（攻防命令未加入插件沙箱白名单） ============
-const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: <U = T>(c: string, a?: Record<string, unknown>) => Promise<U> };
-  };
-  if (!w.__TAURI_INTERNALS__?.invoke) {
-    return Promise.reject(new Error('Tauri 运行时不可用'));
-  }
-  return w.__TAURI_INTERNALS__.invoke<T>(cmd, args);
-};
+// ============ Tauri invoke 封装 ============
+// 统一走沙箱 hostApi.invoke（已加入 pluginSandbox 白名单），不直连 __TAURI_INTERNALS__
+const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+  (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke(cmd, args) as Promise<T>;
 
 // ============ 类型定义（与 Rust 端 events.rs 对齐） ============
 type Phase = 'Idle' | 'Recon' | 'Exploit' | 'Pivot' | 'Clean';
@@ -488,12 +482,29 @@ export function MetricsChart({ height = 220 }: { height?: number }) {
     }
   }, [seconds]);
 
-  // 定时刷新
+  // 事件驱动：内核启动/策略/奖励/阶段变化时立即刷新
+  const running = useKernelRunning();
+  useEffect(() => {
+    let unsub: (() => void) | null = null;
+    hostApi
+      .listen<{ kind: string }>('gongfang_event', (e) => {
+        const k = e.payload.kind;
+        if (k === 'kernel_started' || k === 'strategy_committed' || k === 'reward_recorded' || k === 'phase_executed') {
+          refresh();
+        }
+      })
+      .then((u) => (unsub = u))
+      .catch(() => {});
+    return () => { if (unsub) unsub(); };
+  }, [refresh]);
+
+  // 定时刷新：仅内核运行中才轮询（避免未启动时空转拉取）
   useEffect(() => {
     refresh();
+    if (!running) return;
     const id = setInterval(refresh, 2000);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [running, refresh]);
 
   const chart = chartRef.current as { timeScale?: () => { fitContent?: () => void } } | null;
   if (chart?.timeScale) {
@@ -583,11 +594,27 @@ export function AiReasoningPanel({ height = 280 }: { height?: number }) {
     }
   }, []);
 
+  const running = useKernelRunning();
+  // 事件驱动：AI 推理完成立即追加（无需等轮询）
+  useEffect(() => {
+    let unsub: (() => void) | null = null;
+    hostApi
+      .listen<ReasoningEntry & { kind?: string }>('gongfang_event', (e) => {
+        if (e.payload.kind !== 'ai_reasoning') return;
+        setEntries((prev) => [e.payload as ReasoningEntry, ...prev].slice(0, 50));
+      })
+      .then((u) => (unsub = u))
+      .catch(() => {});
+    return () => { if (unsub) unsub(); };
+  }, []);
+
+  // 定时刷新：仅内核运行中才轮询（避免未启动时空转拉取）
   useEffect(() => {
     refresh();
+    if (!running) return;
     const id = setInterval(refresh, 3000);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [running, refresh]);
 
   return (
     <CollapsibleSection

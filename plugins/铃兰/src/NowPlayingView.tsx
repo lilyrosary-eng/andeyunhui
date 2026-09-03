@@ -99,6 +99,17 @@ function getBlurLevel(dist: number): number {
   return BLUR_LEVELS[3];
 }
 
+// 长句会被 CSS 折成两行/更多，offsetHeight 更大，若用「真实高度 / 2」作锚点会把焦点中心往下拽偏，
+// 导致该行虽占据视口中心、紧邻的下一行却被判成相距较远（dist≥1 → 变模糊、透明度低），观感「翻到下一行不准确/不清楚」。
+//
+// 根治：自动滚动与模糊判定共用同一个「钳制锚点」——锚点半高不超过约一行高度。这样：
+//   - 短行：offsetHeight/2 本就小于上限，行为完全不变（向后兼容）；
+//   - 长句折行：锚点贴近其视觉首行，不再被整行高度拖拽，后续行的间距与清晰度恢复正常。
+const ANCHOR_HALF_MAX = 44; // ≈ 主歌词一行高度的一半（约 40px 行高 × 0.5）；短行半高 < 44 不触发钳制
+function lyricAnchorTop(el: HTMLElement): number {
+  return el.offsetTop + Math.min(el.offsetHeight / 2, ANCHOR_HALF_MAX);
+}
+
 // ========== 歌词列表子组件（React.memo 隔离进度事件引起的冗余重渲染）==========
 // 清晰度（blur/opacity）跟随「滚动视口中心行」focusIdx，而不是播放进度行，
 // 这样用户手动滚动到任意位置时，视野中央的歌词会同步变清晰。
@@ -206,12 +217,18 @@ const LyricsList = React.memo(({
       subText && React.createElement('div', {
         key: 's',
         style: {
-          fontSize: 'clamp(10px, 1.1vw, 14px)',
+          // 当前行翻译：与主歌词「等比例」放大并加粗（约 ×1.25，不放大到与主歌词同大，保持视觉层级）。
+          // 非当前行保持小字半透明；仅当前行才突出强调。
+          fontSize: i === currentLyricIdx
+            ? 'clamp(12.5px, 1.35vw, 17px)'
+            : 'clamp(10px, 1.1vw, 14px)',
           lineHeight: 1.2,
           marginTop: 'clamp(2px, 0.4vh, 5px)',
-          opacity: 0.82,
+          opacity: i === currentLyricIdx ? 0.95 : 0.82,
+          fontWeight: i === currentLyricIdx ? 600 : 400,
           color: i === currentLyricIdx ? 'var(--element-bg, #5a7f5d)' : 'var(--text-secondary, #78716c)',
           letterSpacing: '0.04em',
+          transition: 'font-size 0.4s ease, opacity 0.4s ease, color 0.4s ease',
         },
       }, subText),
     ]);
@@ -377,9 +394,8 @@ export function NowPlayingView({
     const lineEl = container.children[currentLyricIdx] as HTMLElement | undefined;
     if (lineEl) {
       const containerHeight = container.clientHeight;
-      const lineTop = lineEl.offsetTop;
-      const lineHeight = lineEl.offsetHeight;
-      const targetScroll = lineTop - containerHeight / 2 + lineHeight / 2;
+      // 用钳制锚点（而非 lineEl.offsetHeight/2）居中：折行行不会被整行高度拽偏，短行行为不变
+      const targetScroll = lyricAnchorTop(lineEl) - containerHeight / 2;
       if (rAF.current) cancelAnimationFrame(rAF.current);
       rAF.current = requestAnimationFrame(() => {
         container.scrollTo({ top: targetScroll, behavior: 'smooth' });
@@ -397,7 +413,8 @@ export function NowPlayingView({
     for (let i = 0; i < lines.length; i++) {
       const el = container.children[i] as HTMLElement | undefined;
       if (!el) continue;
-      const lineCenter = el.offsetTop + el.offsetHeight / 2;
+      // 与自动滚动共用同一锚点轴（钳制锚点半高），滚动到位后焦点判定不会因折行行高度而重新漂偏
+      const lineCenter = lyricAnchorTop(el);
       const d = Math.abs(lineCenter - center);
       if (d < bestDist) { bestDist = d; best = i; }
     }

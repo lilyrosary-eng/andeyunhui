@@ -24,16 +24,12 @@ function fmtStamp(d = new Date()): string {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
-// ============ Tauri invoke 封装 ============
-const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: <U = T>(c: string, a?: Record<string, unknown>) => Promise<U> };
-  };
-  if (!w.__TAURI_INTERNALS__?.invoke) {
-    return Promise.reject(new Error('Tauri 运行时不可用'));
-  }
-  return w.__TAURI_INTERNALS__.invoke<T>(cmd, args);
+// ============ Tauri invoke 封装（统一走沙箱 hostApi，已加入 pluginSandbox 白名单） ============
+const hostApi = window.__HOST_API__ as {
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 };
+const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+  hostApi.invoke(cmd, args) as Promise<T>;
 
 // =====================================================================
 // 组件 1：DisassemblyView — 逆向反汇编视图

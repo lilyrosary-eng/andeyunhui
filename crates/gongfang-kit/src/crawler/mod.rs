@@ -13,11 +13,17 @@
 
 pub mod immortal;
 pub mod pool;
+pub mod queue;
 pub mod scheduler;
 pub mod stealth;
 
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use std::sync::Arc;
 
+use crate::crawler::queue::queue;
+use crate::crawler::scheduler::EwmaRtt;
+use crate::kernel::events;
 use crate::kernel::reward::{EventKind, RewardSignal};
 use crate::kernel::strategy::{Phase, Strategy, StrategyDelta};
 
@@ -212,72 +218,212 @@ pub fn validate_fingerprint_consistency(
     Ok(())
 }
 
-/// Recon 阶段执行入口（数据面 Tick 调用）
+/// 当前已播种的 seed（避免每 Tick 重复入队同一 focus_url）
+static CURRENT_SEED: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+/// 当前正在抓取的 seed（前端展示用）
+pub fn current_seed() -> Option<String> {
+    CURRENT_SEED.lock().clone()
+}
+
+/// Recon 阶段执行入口（数据面 50ms Tick 调用）
+///
+/// 从全局 URL 队列 FIFO 出队一个 URL，按策略 QPS 节流后抓取。
+/// focus_url 变化时作为 seed 重启一轮（避免对同一 URL 每 50ms 重复连打）。
 pub async fn execute_recon(s: &Strategy, reward: &Arc<RewardSignal>) {
-    let url = match &s.focus_url {
-        Some(u) if !u.is_empty() => u.clone(),
-        _ => {
-            log::debug!("[crawler] 无 focus_url，跳过 Recon");
+    // 播种：focus_url 变化 → 清空并重启队列，seed = depth0
+    {
+        let focus = s.focus_url.clone().unwrap_or_default();
+        let mut cur = CURRENT_SEED.lock();
+        if !focus.is_empty() && cur.as_deref() != Some(focus.as_str()) {
+            let mut q = queue();
+            q.clear();
+            q.enqueue(&focus, 0);
+            log::info!("[crawler] 播种 seed 重启队列: {} (QPS={})", focus, s.qps);
+            *cur = Some(focus);
+        }
+    }
+
+    // 出队一个 URL
+    let next = {
+        let mut q = queue();
+        if q.is_empty() {
             return;
         }
+        q.pop()
     };
+    let Some((url, depth)) = next else { return };
+
+    // QPS 限速：请求前等待到最小间隔，避免 50ms tick 连打
+    let interval = EwmaRtt::min_interval(s.qps);
+    if !interval.is_zero() {
+        tokio::time::sleep(interval).await;
+    }
 
     log::info!(
-        "[crawler] Recon 抓取 {} (qps={} stealth={} tls={})",
+        "[crawler] 抓取 {} (depth={} qps={} stealth={} tls={})",
         url,
+        depth,
         s.qps,
         s.stealth_level,
         s.tls_profile
     );
 
+    crawl_fetch(&url, depth, s, reward).await;
+}
+
+/// 抓取单个 URL：记录奖励/态势，提取标题与同域链接并递归入队，推送 CrawlResult 事件。
+async fn crawl_fetch(url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSignal>) -> bool {
     let ua = stealth::user_agent(&s.tls_profile);
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .unwrap();
-
-    match client.get(&url).header("User-Agent", ua).send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            // 收集响应头
-            let headers: Vec<(String, String)> = resp
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
-            // 读取前 4KB 作为预览（用于检测挑战/CAPTCHA）
-            let body = resp.text().await.unwrap_or_default();
-            let body_preview: String = body.chars().take(4096).collect();
-
-            let assessment = ResponseAssessment::from_response(status, &headers, &body_preview);
-            reward.record(assessment.to_event_kind());
-
-            log::info!(
-                "[crawler] {} -> {} challenge={:?} cf={} dd={} captcha={} empty={}",
-                url,
-                status,
-                assessment.challenge,
-                assessment.is_cloudflare,
-                assessment.is_datadome,
-                assessment.is_captcha,
-                assessment.is_empty
-            );
-
-            // 根据态势生成策略补丁（此处仅记录日志，实际 commit 由数据面或控制面处理）
-            let delta = assessment.to_delta(s);
-            if delta.qps.is_some() || delta.tls_profile.is_some() || delta.use_browser.is_some() {
-                log::info!(
-                    "[crawler] 响应态势触发策略调整 qps={:?} tls={:?} browser={:?} stealth={:?}",
-                    delta.qps,
-                    delta.tls_profile,
-                    delta.use_browser,
-                    delta.stealth_level
-                );
-            }
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[crawler] 客户端构建失败: {}", e);
+            return false;
         }
+    };
+
+    let resp = match client.get(url).header("User-Agent", ua).send().await {
+        Ok(r) => r,
         Err(e) => {
             reward.record(EventKind::Timeout);
+            emit_result(url, 0, None, 0, false, Some(e.to_string()));
             log::warn!("[crawler] {} 失败: {}", url, e);
+            return false;
+        }
+    };
+
+    let status = resp.status().as_u16();
+    let headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    let body = resp.text().await.unwrap_or_default();
+    let body_preview: String = body.chars().take(4096).collect();
+
+    let assessment = ResponseAssessment::from_response(status, &headers, &body_preview);
+    reward.record(assessment.to_event_kind());
+
+    log::info!(
+        "[crawler] {} -> {} challenge={:?} cf={} dd={} captcha={} empty={}",
+        url,
+        status,
+        assessment.challenge,
+        assessment.is_cloudflare,
+        assessment.is_datadome,
+        assessment.is_captcha,
+        assessment.is_empty
+    );
+
+    let delta = assessment.to_delta(s);
+    if delta.qps.is_some() || delta.tls_profile.is_some() || delta.use_browser.is_some() {
+        log::info!(
+            "[crawler] 响应态势触发策略调整 qps={:?} tls={:?} browser={:?} stealth={:?}",
+            delta.qps,
+            delta.tls_profile,
+            delta.use_browser,
+            delta.stealth_level
+        );
+    }
+
+    // 提取标题 + 同域链接，深度内递归入队
+    let title = extract_title(&body);
+    let links = extract_same_domain_links(&body, url);
+    if !links.is_empty() {
+        let mut q = queue();
+        for link in &links {
+            q.enqueue(link, depth + 1);
+        }
+        log::info!(
+            "[crawler] {} 提取 {} 个同域链接，入队 depth={}",
+            url,
+            links.len(),
+            depth + 1
+        );
+    }
+
+    emit_result(url, status, title, links.len(), true, None);
+    true
+}
+
+/// 推送 CrawlResult 事件到前端（经全局事件总线，无总线时静默）
+fn emit_result(
+    url: &str,
+    status: u16,
+    title: Option<String>,
+    link_count: usize,
+    success: bool,
+    error: Option<String>,
+) {
+    events::try_emit(events::KernelEvent::CrawlResult {
+        ts: events::now_ts(),
+        url: url.to_string(),
+        status,
+        title,
+        link_count,
+        success,
+        error,
+    });
+}
+
+/// 从 HTML 提取 `<title>`（纯字符串匹配，零依赖）
+fn extract_title(html: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    let start = lower.find("<title")?;
+    let content_start = html[start..].find('>')? + start + 1;
+    let end = lower[content_start..].find("</title>")? + content_start;
+    let t = html[content_start..end].trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
+/// 提取与 base 同域的绝对 `<a href>` 链接（相对转绝对 + 同域过滤 + 去重）
+fn extract_same_domain_links(html: &str, base: &str) -> Vec<String> {
+    let base_url = match url::Url::parse(base) {
+        Ok(u) => u,
+        Err(_) => return Vec::new(),
+    };
+    let base_host = base_url
+        .host_str()
+        .map(|h| h.to_lowercase())
+        .unwrap_or_default();
+
+    let mut links = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for chunk in html.split("href") {
+        let trimmed = chunk.trim_start();
+        if !trimmed.starts_with('=') {
+            continue;
+        }
+        let after_eq = trimmed[1..].trim_start();
+        let (quote, rest) = if let Some(r) = after_eq.strip_prefix('"') {
+            ('"', r)
+        } else if let Some(r) = after_eq.strip_prefix('\'') {
+            ('\'', r)
+        } else {
+            continue;
+        };
+        let Some(end) = rest.find(quote) else { continue };
+        let href = &rest[..end];
+        if href.is_empty() || href.starts_with('#') || href.starts_with("javascript:") || href.starts_with("mailto:") {
+            continue;
+        }
+        // 解析绝对链接
+        let abs = match base_url.join(href) {
+            Ok(u) if u.scheme() == "http" || u.scheme() == "https" => u,
+            _ => continue,
+        };
+        let host = abs.host_str().map(|h| h.to_lowercase()).unwrap_or_default();
+        if host != base_host {
+            continue; // 仅同域，避免爬出目标站
+        }
+        let s = abs.as_str().to_string();
+        if seen.insert(s.clone()) {
+            links.push(s);
         }
     }
+    links
 }

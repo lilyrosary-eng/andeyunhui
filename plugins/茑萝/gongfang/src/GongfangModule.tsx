@@ -12,7 +12,7 @@ import { RiskConfirm, isDisclaimerAccepted, revokeDisclaimer } from './RiskConfi
 import { GongfangAiSidebar } from './GongfangAiSidebar';
 import { EventStream, MetricsChart, AiReasoningPanel, TargetWorkspace } from './infoPanels';
 import { ExportButton } from './professionalExtras';
-import { useHotkeys, SituationalBar } from './ui';
+import { useHotkeys, SituationalBar, useKernelRunning } from './ui';
 
 type TabKey = 'crawler' | 'reverse' | 'pentest' | 'automation' | 'gateway';
 
@@ -117,14 +117,10 @@ function GongfangModule() {
   const [situation, setSituation] = useState<TopSituation | null>(null);
   const { logs, addLog, clearLog } = useAuditLog();
 
-  // Tauri invoke 封装（顶部态势感知条用）
+  // Tauri invoke 封装（顶部态势感知条用，统一走沙箱 hostApi，已加入白名单）
   const fetchSituation = useCallback(async () => {
     try {
-      const w = window as unknown as {
-        __TAURI_INTERNALS__?: { invoke: <U>(c: string, a?: Record<string, unknown>) => Promise<U> };
-      };
-      if (!w.__TAURI_INTERNALS__?.invoke) return;
-      const s = await w.__TAURI_INTERNALS__.invoke<{
+      const s = await (window.__HOST_API__ as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke<{
         running: boolean;
         strategy: { phase: string; qps: number; generation: number };
         reward: number;
@@ -143,13 +139,21 @@ function GongfangModule() {
     }
   }, []);
 
-  // accepted 后启动 2s 轮询
+  // 内核是否运行（事件驱动），据此控制态势条轮询开关
+  const running = useKernelRunning();
+
+  // 进入模块（同意声明后）拉取一次初始态势
   useEffect(() => {
     if (!accepted) return;
     fetchSituation();
+  }, [accepted, fetchSituation]);
+
+  // 态势条轮询：仅内核运行中才轮询（避免未启动时的空转拉取）；停止后自动停表
+  useEffect(() => {
+    if (!accepted || !running) return;
     const id = setInterval(fetchSituation, 2000);
     return () => clearInterval(id);
-  }, [accepted, fetchSituation]);
+  }, [accepted, running, fetchSituation]);
 
   // 全局快捷键：1-5 切 Tab / I 切信息台 / T 切目标 / L 审计
   useHotkeys([

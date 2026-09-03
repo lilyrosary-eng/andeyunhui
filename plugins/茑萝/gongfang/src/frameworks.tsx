@@ -8,19 +8,15 @@ const { useState, useEffect, useCallback } = React;
 import type { AuditInput } from './audit';
 import { CrawlerUrlQueue, PentestAssetTree, GatewayStrategyHistory, AutomationTaskList } from './frameworkExtras';
 import { DisassemblyView, ScriptEditor } from './professionalExtras';
-import { CollapsibleSection } from './ui';
+import { CollapsibleSection, useKernelRunning } from './ui';
 
 // ============ Tauri invoke 封装 ============
-// 攻防命令（gongfang_*）尚未加入插件沙箱白名单，直接走 __TAURI_INTERNALS__.invoke。
-const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
-  const w = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: <U = T>(c: string, a?: Record<string, unknown>) => Promise<U> };
-  };
-  if (!w.__TAURI_INTERNALS__?.invoke) {
-    return Promise.reject(new Error('Tauri 运行时不可用'));
-  }
-  return w.__TAURI_INTERNALS__.invoke<T>(cmd, args);
+// 统一走沙箱 hostApi.invoke（已加入 pluginSandbox 白名单），不直连 __TAURI_INTERNALS__
+const hostApi = window.__HOST_API__ as {
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 };
+const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+  hostApi.invoke(cmd, args) as Promise<T>;
 
 // ============ 攻防状态类型（与 Rust 端 GongfangStatus 对齐） ============
 interface Strategy {
@@ -1094,7 +1090,7 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     setScanBusy(true);
     try {
       const ports = useCustomPorts && scanPorts.trim()
-        ? scanPorts.split(',').map((p) => parseInt(p.trim(), 16)).filter((p) => !isNaN(p) && p > 0 && p <= 65535)
+        ? scanPorts.split(',').map((p) => parseInt(p.trim(), 10)).filter((p) => !isNaN(p) && p > 0 && p <= 65535)
         : null;
       const r = await tauriInvoke<ScanResult>('gongfang_scan', { host: scanHost.trim(), ports });
       setScanResult(r);
@@ -1684,11 +1680,13 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     fetchNodes();
   }, [fetchStatus, fetchNodes]);
 
-  // 每 3 秒自动刷新状态（即使未运行，也保留轮询以便看到策略变化）
+  // 每 3 秒自动刷新状态：仅内核运行中才轮询（避免未启动/未启用 feature 时的空转拉取与报错风暴）
+  const running = useKernelRunning();
   useEffect(() => {
+    if (!running) return;
     const id = setInterval(fetchStatus, 3000);
     return () => clearInterval(id);
-  }, [fetchStatus]);
+  }, [running, fetchStatus]);
 
   const handleRotate = useCallback(async (mode: 'direct' | 'proxy' | 'stealth') => {
     setBusy(true);

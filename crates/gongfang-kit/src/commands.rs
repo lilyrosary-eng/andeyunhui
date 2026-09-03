@@ -318,6 +318,37 @@ pub async fn gongfang_fetch(url: String) -> Result<FetchResult, String> {
     }
 }
 
+// ============ 爬虫队列统计 ============
+
+/// 爬虫队列统计快照（前端 URL 队列控制台展示）
+#[derive(Serialize)]
+pub struct CrawlerStats {
+    pub pending: usize,
+    pub visited: usize,
+    pub total: usize,
+    pub seed: Option<String>,
+}
+
+/// 查询爬虫 URL 队列统计
+#[tauri::command]
+pub fn gongfang_crawler_stats() -> Result<CrawlerStats, String> {
+    #[cfg(feature = "crawler")]
+    {
+        let q = crate::crawler::queue::queue();
+        let s = q.stats();
+        Ok(CrawlerStats {
+            pending: s.pending,
+            visited: s.visited,
+            total: s.total,
+            seed: crate::crawler::current_seed(),
+        })
+    }
+    #[cfg(not(feature = "crawler"))]
+    {
+        Err("crawler feature 未启用，请用 --features gongfang-crawler 编译".to_string())
+    }
+}
+
 /// 从 HTML 提取 <title>
 #[allow(dead_code)]
 fn extract_title(html: &str) -> Option<String> {

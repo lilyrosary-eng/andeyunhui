@@ -273,3 +273,40 @@ export function useSessionTimer(running: boolean, startTs: number | null) {
   if (!running || !startTs) return null;
   return fmtElapsed(now - startTs);
 }
+
+// ============ useKernelRunning ============
+// 内核是否运行（事件驱动 + 一次性状态播种）。
+// 目的：所有信息台/态势栏/网关面板据此只在「内核运行中」才轮询，杜绝未启动时的空转风暴。
+// 通过订阅 gongfang_event 的 kernel_started / kernel_stopped 即时翻转；
+// 首次挂载拉一次 gongfang_status 播种（避免模块挂载时内核已在运行却收不到启动事件）。
+const hostApi = window.__HOST_API__ as {
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  listen: <T>(event: string, handler: (e: { payload: T }) => void) => Promise<() => void>;
+};
+
+export function useKernelRunning(): boolean {
+  const [running, setRunning] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    let unsub: (() => void) | null = null;
+    // 一次性播种（不做定时轮询）
+    hostApi
+      .invoke('gongfang_status')
+      .then((s) => {
+        if (!cancelled) setRunning(!!(s as { running?: boolean })?.running);
+      })
+      .catch(() => {});
+    hostApi
+      .listen<{ kind: string }>('gongfang_event', (e) => {
+        if (e.payload.kind === 'kernel_started') setRunning(true);
+        else if (e.payload.kind === 'kernel_stopped') setRunning(false);
+      })
+      .then((u) => (unsub = u))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (unsub) unsub();
+    };
+  }, []);
+  return running;
+}

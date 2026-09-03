@@ -89,6 +89,16 @@ pub enum KernelEvent {
     KernelStarted { ts: i64 },
     /// 内核停止
     KernelStopped { ts: i64 },
+    /// 爬虫单页抓取结果（队列/递归/前端展示用）
+    CrawlResult {
+        ts: i64,
+        url: String,
+        status: u16,
+        title: Option<String>,
+        link_count: usize,
+        success: bool,
+        error: Option<String>,
+    },
     /// 通用日志（info/warn/error）
     Log {
         ts: i64,

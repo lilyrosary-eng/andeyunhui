@@ -10,7 +10,7 @@ const React = window.__HOST_REACT__;
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
 
-import { CollapsibleSection } from './ui';
+import { CollapsibleSection, useKernelRunning } from './ui';
 
 // ============ 通用：监听 gongfang_event 中的特定 kind ============
 function useEventFilter<T extends { kind: string; ts: number }>(
@@ -56,95 +56,97 @@ function fmtClock(ts: number): string {
 }
 
 // ============================================================
-// 1. CrawlerUrlQueue — 爬虫 URL 队列（事件累积 + 手动添加）
+// 1. CrawlerUrlQueue — 爬虫抓取控制台（真实队列 stats + 结果事件回流）
+//    由后端全局队列驱动：stats 反映待抓/已抓，crawl_result 事件实时回流结果
 // ============================================================
-interface UrlItem {
-  id: string;
+interface CrawlStats {
+  pending: number;
+  visited: number;
+  total: number;
+  seed: string | null;
+}
+interface CrawlResultEvt {
+  kind: string;
+  ts: number;
   url: string;
-  addedAt: number;
-  status: 'pending' | 'running' | 'done' | 'failed';
-  note?: string;
+  status: number;
+  title: string | null;
+  link_count: number;
+  success: boolean;
+  error: string | null;
 }
 
 export function CrawlerUrlQueue() {
-  const [items, setItems] = useState<UrlItem[]>([]);
+  const [stats, setStats] = useState<CrawlStats | null>(null);
+  const [results, setResults] = useState<CrawlResultEvt[]>([]);
   const [input, setInput] = useState('');
-  const idCounter = useRef(0);
+  const [busy, setBusy] = useState(false);
+  const running = useKernelRunning();
+  const invoke = (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke;
 
-  // 订阅 PhaseExecuted 事件，自动将 focus_url 加入队列
+  const refreshStats = useCallback(async () => {
+    try {
+      const s = await invoke<CrawlStats>('gongfang_crawler_stats');
+      setStats(s);
+    } catch { /* feature 未启用或内核未运行 */ }
+  }, [invoke]);
+
+  // 订阅 crawl_result 事件：实时回流抓取结果，并刷新统计
   useEffect(() => {
     let unsub: (() => void) | null = null;
     hostApi
-      .listen<{ kind: string; ts: number; focus_url?: string | null; phase?: string }>('gongfang_event', (e) => {
-        if (e.payload.kind !== 'phase_executed') return;
-        const url = e.payload.focus_url;
-        if (!url) return;
-        setItems((prev) => {
-          if (prev.some((i) => i.url === url)) {
-            // 已存在则更新状态
-            return prev.map((i) =>
-              i.url === url
-                ? {
-                    ...i,
-                    status: e.payload.phase === 'Clean' ? 'done' : 'running',
-                  }
-                : i,
-            );
-          }
-          return [
-            ...prev,
-            {
-              id: `ev_${idCounter.current++}`,
-              url,
-              addedAt: e.payload.ts,
-              status: 'running',
-            },
-          ];
-        });
+      .listen<CrawlResultEvt>('gongfang_event', (e) => {
+        if (e.payload.kind !== 'crawl_result') return;
+        setResults((prev) => [e.payload, ...prev].slice(0, 200));
+        refreshStats();
       })
       .then((u) => (unsub = u))
       .catch(() => {});
-    return () => {
-      if (unsub) unsub();
-    };
-  }, []);
+    return () => { if (unsub) unsub(); };
+  }, [refreshStats]);
 
-  const handleAdd = () => {
+  // 定时刷新 stats：仅内核运行中才轮询（避免空转）
+  useEffect(() => {
+    refreshStats();
+    if (!running) return;
+    const id = setInterval(refreshStats, 2000);
+    return () => clearInterval(id);
+  }, [running, refreshStats]);
+
+  // 输入 URL → Focus 指令播种，接管内核爬取（同域递归、深度内扩散）
+  const handleCrawl = useCallback(async () => {
     const url = input.trim();
     if (!url) return;
-    if (items.some((i) => i.url === url)) return;
-    setItems((prev) => [
-      ...prev,
-      { id: `m_${idCounter.current++}`, url, addedAt: Date.now(), status: 'pending' },
-    ]);
-    setInput('');
-  };
+    setBusy(true);
+    try {
+      await invoke('gongfang_inject', { cmd: { Focus: { url } } });
+      setInput('');
+      refreshStats();
+    } catch (e) {
+      console.warn('[crawler] 播种失败（需先启动内核）：', e);
+    } finally {
+      setBusy(false);
+    }
+  }, [input, invoke, refreshStats]);
 
-  const handleStatus = (id: string, status: UrlItem['status']) => {
-    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, status } : i)));
-  };
-
-  const handleRemove = (id: string) => {
-    setItems((prev) => prev.filter((i) => i.id !== id));
-  };
-
-  const statusMeta: Record<UrlItem['status'], { label: string; cls: string }> = {
-    pending: { label: '待抓取', cls: 'bg-neutral-500/15 text-neutral-500 dark:text-stone-400' },
-    running: { label: '抓取中', cls: 'bg-sky-500/15 text-sky-600 dark:text-sky-400' },
-    done: { label: '完成', cls: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' },
-    failed: { label: '失败', cls: 'bg-rose-500/15 text-rose-600 dark:text-rose-400' },
-  };
+  const shown = results.slice(0, 50);
 
   return (
     <CollapsibleSection
-      title="URL 队列"
-      storageKey="fw_crawler_url_queue"
-      defaultOpen={false}
+      title="爬虫抓取控制台"
+      storageKey="fw_crawler_queue_console"
+      defaultOpen={true}
       accent="attack"
       right={
-        <span className="text-[10px] text-neutral-400">
-          {items.length} 条 · 自动捕获 focus_url + 手动添加
-        </span>
+        stats ? (
+          <span className="flex items-center gap-1 text-[10px] text-neutral-400">
+            <span className="px-1 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400">待爬 {stats.pending}</span>
+            <span className="px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">已抓 {stats.visited}</span>
+            <span className="px-1 py-0.5 rounded bg-neutral-500/15 text-neutral-500 dark:text-stone-400">共 {stats.total}</span>
+          </span>
+        ) : (
+          <span className="text-[10px] text-neutral-400">内核未启动</span>
+        )
       }
     >
       <div className="flex items-center gap-2">
@@ -152,63 +154,69 @@ export function CrawlerUrlQueue() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-          placeholder="https://目标URL（回车添加）"
+          onKeyDown={(e) => e.key === 'Enter' && handleCrawl()}
+          placeholder="https://目标URL（回车开始抓取，同域递归默认 2 层）"
           className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
         />
         <button
-          onClick={handleAdd}
-          disabled={!input.trim()}
-          className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40"
+          onClick={handleCrawl}
+          disabled={busy || !input.trim() || !running}
+          title={running ? '' : '需先启动内核'}
+          className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-sky-500 hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          添加
+          {busy ? '播种中...' : '开始抓取'}
         </button>
         <button
-          onClick={() => setItems([])}
+          onClick={() => setResults([])}
           className="btn-press px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 border border-black/10 dark:border-stone-700/50 hover:bg-black/5 dark:hover:bg-white/5"
         >
           清空
         </button>
       </div>
-      {items.length > 0 ? (
-        <div className="overflow-x-auto max-h-[280px] overflow-y-auto">
+      <p className="text-[10px] text-neutral-400 leading-relaxed mt-2">
+        输入种子 URL → 内核按同域、深度限制（默认 2 层）递归扩散抓取，抓取限速由 QPS 控制。
+        {stats?.seed ? `  当前 seed：${stats.seed}` : '  尚未播种。'}
+      </p>
+
+      {results.length > 0 ? (
+        <div className="overflow-x-auto max-h-[320px] overflow-y-auto rounded border border-black/5 dark:border-stone-700/50">
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-white/80 dark:bg-stone-900/80 backdrop-blur">
               <tr className="text-left text-neutral-400 border-b border-black/5 dark:border-stone-700/50">
-                <th className="py-1.5 pr-3">URL</th>
-                <th className="py-1.5 pr-3">添加</th>
-                <th className="py-1.5 pr-3">状态</th>
-                <th className="py-1.5">操作</th>
+                <th className="py-1.5 pl-3 pr-2">状态</th>
+                <th className="py-1.5 pr-2">URL</th>
+                <th className="py-1.5 pr-2">标题</th>
+                <th className="py-1.5 pr-3">链接</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((item) => {
-                const meta = statusMeta[item.status];
-                return (
-                  <tr key={item.id} className="border-b border-black/[0.03] dark:border-stone-700/30 group">
-                    <td className="py-1.5 pr-3 font-mono text-[var(--element-bg)] max-w-[280px] truncate" title={item.url}>
-                      {item.url}
-                    </td>
-                    <td className="py-1.5 pr-3 text-neutral-400 tabular-nums">{fmtRel(item.addedAt)}</td>
-                    <td className="py-1.5 pr-3">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${meta.cls}`}>{meta.label}</span>
-                    </td>
-                    <td className="py-1.5">
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => handleStatus(item.id, 'done')} className="text-[10px] text-emerald-500 hover:underline" title="标记完成">✓</button>
-                        <button onClick={() => handleStatus(item.id, 'failed')} className="text-[10px] text-rose-500 hover:underline" title="标记失败">✗</button>
-                        <button onClick={() => handleRemove(item.id)} className="text-[10px] text-neutral-400 hover:underline" title="移除">删</button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+              {shown.map((r, i) => (
+                <tr key={i} className="border-b border-black/[0.03] dark:border-stone-700/30">
+                  <td className="py-1.5 pl-3 pr-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                      !r.success
+                        ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                        : r.status >= 200 && r.status < 300
+                          ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                          : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                    }`}>
+                      {r.success ? r.status : 'ERR'}
+                    </span>
+                  </td>
+                  <td className="py-1.5 pr-2 font-mono text-[var(--element-bg)] max-w-[260px] truncate" title={r.url}>{r.url}</td>
+                  <td className="py-1.5 pr-2 text-neutral-600 dark:text-stone-300 max-w-[150px] truncate" title={r.title ?? ''}>
+                    {r.title ?? (r.error ? r.error.slice(0, 40) : '—')}
+                  </td>
+                  <td className="py-1.5 pr-3 text-neutral-400 tabular-nums">{r.link_count}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
+          {results.length > 50 && <div className="px-3 py-1 text-[10px] text-neutral-400">仅显示最近 50/{results.length} 条</div>}
         </div>
       ) : (
         <p className="text-[11px] text-neutral-400">
-          暂无 URL。运行内核后，注入 Focus 指令的目标 URL 会自动入队；也可手动添加待抓取 URL。
+          暂无抓取结果。启动内核后输入 URL 点「开始抓取」，内核会按同域递归抓取，结果实时列在这里。
         </p>
       )}
     </CollapsibleSection>
@@ -418,13 +426,10 @@ export function GatewayStrategyHistory() {
   useEffect(() => {
     let unsub: (() => void) | null = null;
     // 拉取历史
-    const w = window as unknown as {
-      __TAURI_INTERNALS__?: { invoke: <U>(c: string, a?: Record<string, unknown>) => Promise<U> };
-    };
-    w.__TAURI_INTERNALS__
-      ?.invoke<StrategyEvent[]>('gongfang_events_recent', { n: 200 })
+    (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> })
+      .invoke<StrategyEvent[]>('gongfang_events_recent', { n: 200 })
       .then((hist) => {
-        const filtered = hist.filter((e) => (e as { kind?: string }).kind === 'strategy_committed');
+        const filtered = (hist as StrategyEvent[]).filter((e) => (e as { kind?: string }).kind === 'strategy_committed');
         setEvents(filtered as StrategyEvent[]);
       })
       .catch(() => {});
