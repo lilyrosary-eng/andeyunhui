@@ -178,7 +178,7 @@ if (!BUILD_CLEAN && !IS_ANDROID) {
 // 将构建（慢）与复制（快）分离：构建阶段并行执行，复制阶段串行执行。
 // 并发上限 MAX_CONCURRENT：避免同时启动过多 Vite 进程导致内存不足或 CPU 争抢。
 // 12900HX 24 线程，4-6 个并行 Vite 构建是甜区——既吃满 CPU 又不 OOM。
-const MAX_CONCURRENT = Math.min(6, cpus().length);
+const MAX_CONCURRENT = Math.min(4, cpus().length);
 
 /** 异步构建单个插件（有 vite.config.ts/js 的才需要构建） */
 function buildPluginAsync(plugin) {
@@ -203,7 +203,7 @@ function buildPluginAsync(plugin) {
         resolve({ plugin, ok: true });
       } else {
         console.error(`[Deploy] ✗ 构建失败: ${id} (exit ${code})`);
-        if (stderr) console.error(`  ${stderr.slice(0, 200)}`);
+        if (stderr) console.error(`  ${stderr}`);
         resolve({ plugin, ok: false });
       }
     });
@@ -245,6 +245,11 @@ if (!BUILD_CLEAN && !IS_ANDROID) {
 for (const { relPath, id, manifest } of plugins) {
   const pluginDir = join(pluginsDir, relPath);
   if (!existsSync(pluginDir)) continue;
+  // 构建阶段失败的插件：跳过部署，避免把旧包/残留 dist 打进安装包（修复原"装入旧包"隐患）
+  if (failedPlugins.includes(id)) {
+    console.warn(`[Deploy] ⚠ 跳过部署失败插件（避免装入旧包）: ${id}`);
+    continue;
+  }
 
   // BUILD_CLEAN=1 / Android：跳过插件构建和部署，只保留空模块文件夹
   if (BUILD_CLEAN || IS_ANDROID) {

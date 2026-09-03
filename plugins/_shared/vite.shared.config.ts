@@ -23,11 +23,14 @@ function getTailwindCss(): string {
   if (cachedTailwindCss !== null) return cachedTailwindCss;
   generating = true;
 
-  const outPath = join(ROOT_DIR, '.vite-temp', '_tailwind-plugins.css');
+  // 每个进程使用唯一临时文件名，避免 18 个插件并行构建时多进程
+  // 同时写/执行同一固定路径引发 Windows 文件锁或读到半截脚本（exit 1）。
+  const uid = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const outPath = join(ROOT_DIR, '.vite-temp', `_tailwind-plugins-${uid}.css`);
   mkdirSync(join(ROOT_DIR, '.vite-temp'), { recursive: true });
 
   // 用 .cjs 临时脚本生成（CJS 格式，require 可用）
-  const scriptPath = join(ROOT_DIR, '.vite-temp', '_gen-tw.cjs');
+  const scriptPath = join(ROOT_DIR, '.vite-temp', `_gen-tw-${uid}.cjs`);
   const configPath = join(ROOT_DIR, 'tailwind.config.js').replace(/\\/g, '\\\\');
   const cssOutPath = outPath.replace(/\\/g, '\\\\');
   writeFileSync(scriptPath, `
@@ -41,7 +44,7 @@ function getTailwindCss(): string {
       .then(r => { fs.writeFileSync('${cssOutPath}', r.css); });
   `);
 
-  execSync(`node "${scriptPath}"`, { cwd: ROOT_DIR, stdio: 'pipe' });
+  execSync(`node "${scriptPath}"`, { cwd: ROOT_DIR, stdio: 'inherit' });
   generating = false;
   if (!existsSync(outPath)) throw new Error('Failed to generate Tailwind CSS');
   cachedTailwindCss = readFileSync(outPath, 'utf-8');
@@ -57,6 +60,9 @@ export function createPluginConfig(pluginName: string) {
   const cssInjectionJs = `(function(){if(typeof document!=='undefined'){var s=document.createElement('style');s.textContent=${JSON.stringify(tailwindCss)};document.head.appendChild(s);}})();`;
 
   return defineConfig({
+    // 每个插件进程使用独立 cacheDir，避免多插件并发构建时共享 Vite/esbuild
+    // 依赖预构建缓存目录引发 Windows 文件锁竞争（偶发 ENOENT）。
+    cacheDir: join(ROOT_DIR, '.vite-temp', `vcache-${process.pid}`),
     plugins: [
       react(),
       // Vite 插件：在插件入口文件头部注入 Tailwind CSS 注入代码
