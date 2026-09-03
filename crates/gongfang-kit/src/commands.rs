@@ -439,6 +439,58 @@ pub fn gongfang_simulate_waf(payload: String) -> Result<SimOut, String> {
     }
 }
 
+// ============ 载荷库 & HPP ============
+
+/// 载荷库：按分类返回载荷列表（ssti/sqli/xss/cmd/path/error/time）
+#[tauri::command]
+pub fn gongfang_payloads(category: String) -> Result<Vec<String>, String> {
+    let category = category.trim();
+    if category.is_empty() {
+        return Err("category 不能为空（ssti/sqli/xss/cmd/path/error/time）".to_string());
+    }
+    #[cfg(feature = "pentest")]
+    {
+        Ok(crate::pentest::payload::payloads(category))
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = category;
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
+/// HPP 探针响应推断：根据响应体归纳后端参数聚合策略 + 给出 HPP 载荷
+#[tauri::command]
+pub fn gongfang_hpp_analyze(response: String) -> Result<serde_json::Value, String> {
+    if response.trim().is_empty() {
+        return Err("response 不能为空".to_string());
+    }
+    #[cfg(feature = "pentest")]
+    {
+        use crate::pentest::encoder::{hpp_infer_aggregate, HppAggregate, hpp_payload};
+        let agg = hpp_infer_aggregate(&response);
+        let description = match agg {
+            HppAggregate::First => "取首个参数（PHP / Tomcat）",
+            HppAggregate::Last => "取末个参数（ASP.NET）",
+            HppAggregate::All => "全部拼接（ASP）",
+            HppAggregate::Dedup => "去重保留首个（Spring）",
+            HppAggregate::Unknown => "未能推断（请确认探针响应含 id=1 / id=3 / 1,2,3）",
+        };
+        let payload = hpp_payload("id", &["union", "select", "1,2,3"], agg);
+        Ok(serde_json::json!({
+            "probe": "id=1&id=2&id=3&id=1",
+            "aggregate": agg.as_str(),
+            "description": description,
+            "payload": payload,
+        }))
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = response;
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
 // ============ 爬虫实际爬取命令 ============
 
 /// 爬取结果（实际 HTTP 请求返回的页面数据）

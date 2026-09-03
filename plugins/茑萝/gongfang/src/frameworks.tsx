@@ -111,6 +111,12 @@ interface MutationResult {
   keyword_blocked: boolean;
   bypassed_rules: string[];
 }
+interface HppReport {
+  probe: string;
+  aggregate: string;
+  description: string;
+  payload: string;
+}
 
 // ============ 逆向框架结果类型 ============
 interface CryptoReport {
@@ -1567,6 +1573,43 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     }
   }, [simInput, addLog]);
 
+  // 载荷库 / HPP 推断
+  const [payloadCat, setPayloadCat] = useState('sqli');
+  const [payloadList, setPayloadList] = useState<string[] | null>(null);
+  const [payloadBusy, setPayloadBusy] = useState(false);
+  const [hppInput, setHppInput] = useState('');
+  const [hppResult, setHppResult] = useState<HppReport | null>(null);
+  const [hppBusy, setHppBusy] = useState(false);
+
+  const handleLoadPayloads = useCallback(async () => {
+    setPayloadBusy(true);
+    try {
+      const r = await tauriInvoke<string[]>('gongfang_payloads', { category: payloadCat });
+      setPayloadList(r);
+      addLog({ action: '载荷库', target: payloadCat, status: 'success', detail: `${r.length} 条` });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '载荷库', target: payloadCat, status: 'error', detail: msg });
+    } finally {
+      setPayloadBusy(false);
+    }
+  }, [payloadCat, addLog]);
+
+  const handleHppAnalyze = useCallback(async () => {
+    if (!hppInput.trim()) return;
+    setHppBusy(true);
+    try {
+      const r = await tauriInvoke<HppReport>('gongfang_hpp_analyze', { response: hppInput.trim() });
+      setHppResult(r);
+      addLog({ action: 'HPP 推断', status: 'success', detail: `聚合策略 ${r.aggregate}` });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: 'HPP 推断', status: 'error', detail: msg });
+    } finally {
+      setHppBusy(false);
+    }
+  }, [hppInput, addLog]);
+
   const handleScan = useCallback(async () => {
     if (!scanHost.trim()) return;
     setScanBusy(true);
@@ -2043,6 +2086,85 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               ))}
             </div>
           )}
+        </CollapsibleSection>
+
+        {/* 载荷库 */}
+        <CollapsibleSection
+          title="载荷库"
+          storageKey="fw_pentest_payloads"
+          defaultOpen={false}
+          accent="attack"
+          right={payloadList && payloadList.length > 0 ? <span className="text-[10px] text-neutral-400">{payloadList.length} 条</span> : null}
+        >
+          <div className="flex items-center gap-2">
+            <select
+              value={payloadCat}
+              onChange={(e) => { setPayloadCat(e.target.value); setPayloadList(null); }}
+              className="px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+            >
+              <option value="sqli">SQL 注入</option>
+              <option value="xss">XSS</option>
+              <option value="cmd">命令注入</option>
+              <option value="path">路径穿越</option>
+              <option value="ssti">SSTI</option>
+              <option value="error">报错注入</option>
+              <option value="time">时间盲注</option>
+            </select>
+            <button
+              onClick={handleLoadPayloads}
+              disabled={payloadBusy}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {payloadBusy ? '加载中...' : '加载'}
+            </button>
+          </div>
+          {payloadList && payloadList.length > 0 ? (
+            <div className="mt-2 max-h-[260px] overflow-y-auto rounded border border-black/5 dark:border-stone-700/50 divide-y divide-black/5 dark:divide-stone-700/50">
+              {payloadList.map((p, i) => (
+                <div key={i} className="px-2 py-1 font-mono text-[11px] text-neutral-600 dark:text-stone-300 break-all bg-black/[0.02] dark:bg-white/[0.03]">{i + 1}. {p}</div>
+              ))}
+            </div>
+          ) : (
+            payloadList !== null ? <p className="text-[11px] text-neutral-400 mt-2">该分类暂无载荷。</p> : null
+          )}
+        </CollapsibleSection>
+
+        {/* HPP 推断 */}
+        <CollapsibleSection
+          title="HPP 参数污染推断"
+          storageKey="fw_pentest_hpp"
+          defaultOpen={false}
+          accent="attack"
+        >
+          <div className="space-y-2">
+            <p className="text-[10px] text-neutral-400">先向目标发送探针 <code className="px-1 rounded bg-black/5 dark:bg-white/10 font-mono">id=1&id=2&id=3&id=1</code>，把响应正文粘贴到下方推断后端聚合策略。</p>
+            <textarea
+              value={hppInput}
+              onChange={(e) => setHppInput(e.target.value)}
+              rows={3}
+              placeholder="粘贴探针响应正文（应含 id=1 / id=3 / 1,2,3 之一）"
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)] resize-y"
+            />
+            <button
+              onClick={handleHppAnalyze}
+              disabled={hppBusy || !hppInput.trim()}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {hppBusy ? '分析中...' : '分析'}
+            </button>
+            {hppResult && (
+              <div className="rounded border border-black/10 dark:border-stone-700/50 p-2 space-y-1">
+                <div className="text-xs font-medium text-[var(--element-bg)]">聚合策略：<span className="text-violet-600 dark:text-violet-400">{hppResult.aggregate}</span></div>
+                <div className="text-[11px] text-neutral-500 dark:text-stone-400">{hppResult.description}</div>
+                <div className="text-[10px] text-neutral-400">
+                  探针：<code className="font-mono">{hppResult.probe}</code>
+                </div>
+                <div className="text-[10px] text-neutral-400">
+                  HPP 载荷：<code className="font-mono text-[var(--element-bg)]">{hppResult.payload}</code>
+                </div>
+              </div>
+            )}
+          </div>
         </CollapsibleSection>
 
         <PentestAssetTree scanResults={scanHistory.map((r) => ({ host: r.host, ip: r.host, open_ports: r.open_ports, duration_ms: r.duration_ms }))} />
