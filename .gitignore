@@ -16,6 +16,7 @@ dist-ssr
 bundled-plugins
 bundled-dlc
 plugins/*/dist
+.vite-temp/
 
 # Editor directories and files
 .vscode/*
