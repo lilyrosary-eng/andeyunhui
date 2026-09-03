@@ -52,6 +52,32 @@ pub enum SymbolKind {
     ChecksumFunction,
 }
 
+impl SymbolKind {
+    /// 转为字符串（前端/命令层用）
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SymbolKind::Function => "function",
+            SymbolKind::CryptoFunction => "crypto",
+            SymbolKind::CompareFunction => "compare",
+            SymbolKind::SBox => "sbox",
+            SymbolKind::ProtocolField => "protocol",
+            SymbolKind::ChecksumFunction => "checksum",
+        }
+    }
+
+    /// 从字符串解析（未知默认 CryptoFunction）
+    pub fn from_str(s: &str) -> SymbolKind {
+        match s.to_lowercase().as_str() {
+            "function" => SymbolKind::Function,
+            "compare" => SymbolKind::CompareFunction,
+            "sbox" => SymbolKind::SBox,
+            "protocol" => SymbolKind::ProtocolField,
+            "checksum" => SymbolKind::ChecksumFunction,
+            _ => SymbolKind::CryptoFunction,
+        }
+    }
+}
+
 /// 符号存储（按目标 URL 分组）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SymbolStore {

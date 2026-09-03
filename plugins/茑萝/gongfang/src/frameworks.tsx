@@ -1006,6 +1006,26 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     }
   }, [symUrl, addLog]);
 
+  // 把识别结果存为符号（写入持久化符号库）
+  const handleSaveSymbol = useCallback(async () => {
+    if (!encResult) return;
+    const target = symUrl.trim() || pUrl.trim() || 'inline';
+    const isEnc = ['hex', 'base64', 'base32', 'url'].includes(encResult.kind);
+    const nameSource = encResult.is_text && encResult.preview ? encResult.preview.slice(0, 20).replace(/\s+/g, '_') : encResult.kind;
+    const name = `${nameSource}_${encResult.kind}`;
+    setSymBusy(true);
+    try {
+      await tauriInvoke('gongfang_symbol_add', { req: { url: target, name, kind: isEnc ? 'protocol' : 'crypto' } });
+      addLog({ action: '存为符号', target, status: 'success', detail: name });
+      await handleSymbolsQuery();
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '存为符号', target, status: 'error', detail: msg });
+    } finally {
+      setSymBusy(false);
+    }
+  }, [encResult, symUrl, pUrl, addLog, handleSymbolsQuery]);
+
   // 置信度百分比（0-1 → 0-100）
   const confidencePct = cryptoReport?.confidence != null
     ? Math.round(cryptoReport.confidence * 100)
@@ -1184,6 +1204,15 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                       文件/压缩流特征：<span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400 font-mono">{encResult.stream_hint}</span>
                     </div>
                   )}
+                  <div className="pt-1">
+                    <button
+                      onClick={handleSaveSymbol}
+                      title={`保存到符号库（目标：${symUrl.trim() || pUrl.trim() || 'inline'}）`}
+                      className="btn-press px-2 py-1 rounded-lg text-[10px] text-violet-600 dark:text-violet-400 border border-violet-500/30 hover:bg-violet-500/10 transition-colors"
+                    >
+                      保存为符号
+                    </button>
+                  </div>
                 </div>
               </div>
             )}

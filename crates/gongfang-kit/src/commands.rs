@@ -233,6 +233,25 @@ pub async fn gongfang_waf_detect(url: String) -> Result<WafDetectResult, String>
     }
 }
 
+/// 技术栈指纹识别（服务器/语言/框架/CMS/CDN + 安全响应头审计）
+#[tauri::command]
+pub async fn gongfang_tech_fingerprint(url: String) -> Result<crate::pentest::fingerprint::TechFingerprint, String> {
+    if url.trim().is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    #[cfg(feature = "pentest")]
+    {
+        let resp = crate::pentest::probe::probe_target(&url).await;
+        let headers: Vec<(String, String)> = resp.headers.into_iter().collect();
+        Ok(crate::pentest::fingerprint::fingerprint(&headers, &resp.body))
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = url;
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
 // ============ 爬虫实际爬取命令 ============
 
 /// 爬取结果（实际 HTTP 请求返回的页面数据）
@@ -586,6 +605,16 @@ type EncodeAnalysisOut = crate::reverse::detect::EncodeAnalysis;
 #[cfg(not(feature = "reverse"))]
 type EncodeAnalysisOut = serde_json::Value;
 
+#[cfg(feature = "reverse")]
+type EncodeChainOut = crate::reverse::detect::EncodeAnalysis;
+#[cfg(not(feature = "reverse"))]
+type EncodeChainOut = serde_json::Value;
+
+#[cfg(feature = "reverse")]
+type DfaGraphOut = crate::reverse::protocol::DfaGraph;
+#[cfg(not(feature = "reverse"))]
+type DfaGraphOut = serde_json::Value;
+
 #[tauri::command]
 pub fn gongfang_encode_analyze(input: String) -> Result<EncodeAnalysisOut, String> {
     if input.trim().is_empty() {
@@ -607,7 +636,7 @@ pub fn gongfang_encode_analyze(input: String) -> Result<EncodeAnalysisOut, Strin
 pub fn gongfang_encode_chain(
     input: String,
     max_layers: Option<u8>,
-) -> Result<Vec<crate::reverse::detect::EncodeAnalysis>, String> {
+) -> Result<Vec<EncodeChainOut>, String> {
     if input.trim().is_empty() {
         return Err("input 不能为空".to_string());
     }
@@ -657,6 +686,49 @@ pub fn gongfang_symbols(url: Option<String>) -> Result<Vec<SymbolSummary>, Strin
     #[cfg(not(feature = "reverse"))]
     {
         let _ = url;
+        Err("reverse feature 未启用，请用 --features gongfang-reverse 编译".to_string())
+    }
+}
+
+/// 保存符号请求
+#[derive(Deserialize)]
+pub struct SaveSymbolRequest {
+    pub url: String,
+    pub name: String,
+    pub kind: Option<String>,
+    pub address: Option<u64>,
+}
+
+/// 把识别结果/关键字符串一键存为符号（写入持久化符号库，跨会话复用）
+#[tauri::command]
+pub fn gongfang_symbol_add(req: SaveSymbolRequest) -> Result<(), String> {
+    if req.url.trim().is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    if req.name.trim().is_empty() {
+        return Err("name 不能为空".to_string());
+    }
+    #[cfg(feature = "reverse")]
+    {
+        use crate::reverse::symbols::SymbolKind;
+        let kind = match req.kind.as_deref() {
+            Some(k) => SymbolKind::from_str(k),
+            None => SymbolKind::CryptoFunction,
+        };
+        let symbol = crate::reverse::symbols::Symbol {
+            name: req.name.trim().to_string(),
+            address: req.address.unwrap_or(0),
+            kind,
+            meta: std::collections::HashMap::new(),
+        };
+        // load 返回全局克隆（无锁占用），add_symbol 内部 save() 会写回全局 + 落盘
+        let mut store = crate::reverse::symbols::SymbolStore::load().as_ref().clone();
+        store.add_symbol(req.url.trim(), symbol);
+        Ok(())
+    }
+    #[cfg(not(feature = "reverse"))]
+    {
+        let _ = req;
         Err("reverse feature 未启用，请用 --features gongfang-reverse 编译".to_string())
     }
 }
