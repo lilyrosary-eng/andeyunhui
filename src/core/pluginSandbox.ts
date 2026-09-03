@@ -243,6 +243,7 @@ const ALLOWED_COMMANDS = new Set([
   'gongfang_proxy_reset',
   'gongfang_crypto_identify',
   'gongfang_encode_analyze',
+  'gongfang_encode_chain',
   'gongfang_symbols',
   'gongfang_scan',
   'gongfang_waf_detect',

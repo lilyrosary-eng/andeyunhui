@@ -597,6 +597,26 @@ pub fn gongfang_encode_analyze(input: String) -> Result<EncodeAnalysisOut, Strin
     }
 }
 
+/// 多层/递归解码链：反复解码（base64(hex(base64(…))) 剥洋葱）直到明文或上限
+#[tauri::command]
+pub fn gongfang_encode_chain(
+    input: String,
+    max_layers: Option<u8>,
+) -> Result<Vec<crate::reverse::detect::EncodeAnalysis>, String> {
+    if input.trim().is_empty() {
+        return Err("input 不能为空".to_string());
+    }
+    #[cfg(feature = "reverse")]
+    {
+        Ok(crate::reverse::detect::analyze_chain(&input, max_layers.unwrap_or(8)))
+    }
+    #[cfg(not(feature = "reverse"))]
+    {
+        let _ = (input, max_layers);
+        Err("reverse feature 未启用，请用 --features gongfang-reverse 编译".to_string())
+    }
+}
+
 /// 符号摘要（前端展示用）
 #[derive(Serialize)]
 pub struct SymbolSummary {

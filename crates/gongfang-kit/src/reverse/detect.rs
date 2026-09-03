@@ -87,11 +87,27 @@ pub fn analyze(input: &str) -> EncodeAnalysis {
         }
     }
 
-    // 3) Base32（A–Z / 2–7 / =，长度 %8==0）；仅识别未解码
+    // 3) Base32（A–Z / 2–7 / =，每 8 字符编码 5 字节）
     if looks_like_base32(&compact) {
+        if let Ok(bytes) = decode_base32(&compact) {
+            let entropy = shannon_entropy(&bytes);
+            let (is_text, preview) = text_probe(&bytes);
+            let hint = sniff_magic(&bytes);
+            return EncodeAnalysis {
+                kind: "base32".into(),
+                label: format!("Base32 编码（解码 {} 字节）", bytes.len()),
+                decoded: Some(bytes),
+                is_text,
+                entropy,
+                hash_algo: None,
+                stream_hint: hint.map(|s| s.to_string()),
+                preview,
+            };
+        }
+        // 形似 Base32 但解码失败（字符非法等）的兜底
         return EncodeAnalysis {
             kind: "base32".into(),
-            label: "Base32 编码（未内置解码）".into(),
+            label: "Base32 编码（解码失败）".into(),
             decoded: None,
             is_text: false,
             entropy: shannon_entropy(t.as_bytes()),
@@ -239,6 +255,37 @@ fn decode_base64(s: &str) -> Result<Vec<u8>, ()> {
         .map_err(|_| ())
 }
 
+/// Base32 解码（RFC 4648 标准集：A–Z / 2–7，自动忽略 '=' 填充）
+fn decode_base32(s: &str) -> Result<Vec<u8>, ()> {
+    let bytes: Vec<u8> = s.bytes().filter(|b| *b != b'=').collect();
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(bytes.len() * 5 / 8);
+    let mut acc: u64 = 0;
+    let mut bits: u32 = 0;
+    for b in bytes {
+        let v = base32_val(b).ok_or(())?;
+        acc = (acc << 5) | v as u64;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            // 保留低 bits 位、清零高位（避免残留旧位干扰后续）
+            acc &= (1u64 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+fn base32_val(b: u8) -> Option<u8> {
+    match b {
+        b'A'..=b'Z' => Some(b - b'A'),
+        b'2'..=b'7' => Some(b - b'2' + 26),
+        _ => None,
+    }
+}
+
 /// URL 百分号解码（%XX）
 fn percent_decode(s: &str) -> Result<Vec<u8>, ()> {
     let bytes = s.as_bytes();
@@ -295,6 +342,39 @@ fn truncate_str(s: &str, max: usize) -> String {
         let t: String = s.chars().take(max).collect();
         format!("{}…", t)
     }
+}
+
+/// 多层（递归）解码链：反复解码直到明文 / 无法解码 / 达到上限
+///
+/// 处理形如 `base64(hex(base64(plain)))` 的多层包裹。每层返回一次 EncodeAnalysis。
+pub fn analyze_chain(input: &str, max_layers: u8) -> Vec<EncodeAnalysis> {
+    let max = (max_layers.max(1) as usize).min(16);
+    let mut chain = Vec::new();
+    let mut current = input.trim().to_string();
+    for _ in 0..max {
+        let a = analyze(&current);
+        let terminal = a.kind == "plain"
+            || a.kind == "unknown"
+            || a.kind == "cipher"
+            || a.kind == "hash"
+            || a.decoded.is_none()
+            || a.decoded.as_ref().map(|d| d == current.as_bytes()).unwrap_or(false);
+        let decoded = a.decoded.clone();
+        chain.push(a);
+        if terminal {
+            break;
+        }
+        if let Some(bytes) = decoded {
+            let next = String::from_utf8_lossy(&bytes).into_owned();
+            if next == current {
+                break; // 防同层循环
+            }
+            current = next;
+        } else {
+            break;
+        }
+    }
+    chain
 }
 
 /// 识别已知文件/压缩流魔数（gzip/zlib/zip/PNG/JPEG/PDF/ELF/MZ/bzip2）
@@ -407,5 +487,23 @@ mod tests {
         let a = analyze("789c");
         assert_eq!(a.kind, "hex");
         assert_eq!(a.stream_hint.as_deref(), Some("zlib"));
+    }
+
+    #[test]
+    fn base32_decodes() {
+        // base32("fooba") = "MZXW6YTB"
+        let a = analyze("MZXW6YTB");
+        assert_eq!(a.kind, "base32");
+        assert_eq!(a.decoded.as_deref(), Some(&b"fooba"[..]));
+        assert!(a.is_text);
+    }
+
+    #[test]
+    fn chain_unwraps_double_base64() {
+        // base64("aGk=")="YUdrPQ==" → 第1层解出 "aGk=" → 第2层解出 "hi"
+        let chain = analyze_chain("YUdrPQ==", 8);
+        assert!(chain.len() >= 3, "应解出≥3层，实际 {}", chain.len());
+        assert_eq!(chain.last().unwrap().kind, "plain");
+        assert_eq!(chain.last().unwrap().preview.as_deref(), Some("hi"));
     }
 }

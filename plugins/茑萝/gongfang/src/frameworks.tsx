@@ -804,6 +804,7 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   // 编码/哈希识别状态
   const [encInput, setEncInput] = useState('');
   const [encResult, setEncResult] = useState<EncodeAnalysis | null>(null);
+  const [encChain, setEncChain] = useState<EncodeAnalysis[] | null>(null);
   const [encBusy, setEncBusy] = useState(false);
 
   const handleEncodeAnalyze = useCallback(async () => {
@@ -817,6 +818,23 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     } catch (e) {
       const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
       addLog({ action: '编码/哈希识别', target: encInput.trim(), status: 'error', detail: msg });
+    } finally {
+      setEncBusy(false);
+    }
+  }, [encInput, addLog]);
+
+  // 多层/递归解码（base64(hex(base64(…))) 剥洋葱）
+  const handleEncodeChain = useCallback(async () => {
+    const input = encInput.trim();
+    if (!input) return;
+    setEncBusy(true);
+    try {
+      const chain = await tauriInvoke<EncodeAnalysis[]>('gongfang_encode_chain', { input, maxLayers: 8 });
+      setEncChain(chain);
+      addLog({ action: '多层解码', target: `共 ${chain.length} 层`, status: 'success' });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      addLog({ action: '多层解码', target: encInput.trim(), status: 'error', detail: msg });
     } finally {
       setEncBusy(false);
     }
@@ -1026,6 +1044,14 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
             >
               {encBusy ? '识别中...' : '识别'}
             </button>
+            <button
+              onClick={handleEncodeChain}
+              disabled={encBusy || !encInput.trim()}
+              title="对 base64(hex(base64(…))) 等多层包裹逐层解码"
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-violet-500 hover:bg-violet-600 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {encBusy ? '解码中...' : '多层解码'}
+            </button>
             <p className="text-[10px] text-neutral-400 leading-relaxed">
               例：Base64 文本 → 解码；偶数长度 hex → 解码；32/40/64 位 hex → 反推 MD5/SHA-1/SHA-256。
             </p>
@@ -1057,6 +1083,22 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                     </div>
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* 多层解码链 */}
+            {encChain && encChain.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-neutral-400">多层解码链（{encChain.length} 层）：</div>
+                {encChain.map((layer, i) => (
+                  <div key={i} className="flex items-start gap-2 rounded bg-black/[0.03] dark:bg-white/[0.04] border border-black/5 dark:border-stone-700/40 p-1.5">
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-violet-500/15 text-violet-600 dark:text-violet-400 shrink-0">{i + 1}·{layer.kind}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[10px] text-neutral-400">{layer.label}</div>
+                      {layer.preview && <pre className="text-[10px] font-mono text-[var(--element-bg)] whitespace-pre-wrap break-all mt-0.5">{layer.preview}</pre>}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
