@@ -81,7 +81,7 @@ impl KnowledgeBase {
 
     /// 预置反爬产品知识（对应 03 文档 5.1 反爬产品库）
     fn seed_default_knowledge(&self) {
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "cf-basic".to_string(),
             title: "Cloudflare 基础防护".to_string(),
             content: "特征：CF-Ray 响应头、5xx challenge 页面、JS 挑战。绕过：浏览器模式 + 住宅代理 + Chrome 120 TLS 指纹。降速到 5 req/min。".to_string(),
@@ -89,7 +89,7 @@ impl KnowledgeBase {
             category: KnowledgeCategory::AntiBot,
         });
 
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "datadome-basic".to_string(),
             title: "DataDome 防护".to_string(),
             content: "特征：x-datadome 响应头、CAPTCHA 重定向。绕过：完整行为模拟 + Canvas/WebGL 一致性指纹 + 移动代理。".to_string(),
@@ -97,7 +97,7 @@ impl KnowledgeBase {
             category: KnowledgeCategory::AntiBot,
         });
 
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "akamai-basic".to_string(),
             title: "Akamai Bot Manager".to_string(),
             content: "特征：_abck Cookie、sensor data 收集。绕过：完整浏览器链 + 真实鼠标轨迹（贝塞尔曲线）+ 长会话保持。".to_string(),
@@ -105,7 +105,7 @@ impl KnowledgeBase {
             category: KnowledgeCategory::AntiBot,
         });
 
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "fp-chrome-122".to_string(),
             title: "Chrome 122 Windows 指纹模板".to_string(),
             content: "UA: Chrome/122.0.0.0; WebGL RENDERER: ANGLE; Canvas 哈希需与 hardwareConcurrency=8 一致；locale=zh-CN 时 Accept-Language 必须含 zh。".to_string(),
@@ -113,7 +113,7 @@ impl KnowledgeBase {
             category: KnowledgeCategory::Fingerprint,
         });
 
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "ban-429".to_string(),
             title: "429 限流封禁案例".to_string(),
             content: "原因：QPS 超限。解决：降速 50% + 切换出口 IP + 增加 Referer 头。Retry-After 头表示冷却时间（秒）。".to_string(),
@@ -122,35 +122,35 @@ impl KnowledgeBase {
         });
 
         // ===== 反爬产品库扩充 =====
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "cf-turnstile".to_string(),
             title: "Cloudflare Turnstile 人机验证".to_string(),
             content: "特征：cf-turnstile 篇章、令牌需在 300s 内提交、无感验证者可二次校验。绕过：真实浏览器渲染 + 系数滑动路径；失败重试需换 IP。".to_string(),
             tags: vec!["cloudflare".to_string(), "turnstile".to_string(), "captcha".to_string()],
             category: KnowledgeCategory::AntiBot,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "cf-waf".to_string(),
             title: "Cloudflare WAF 规则拦截".to_string(),
             content: "特征：403 + cf-mitigated: challenge / manage 段头、1-3s 等待。绕过：URL 编码拆分 / multipart 分段 / 缩短页面请求间隔；命中规则时换 UA 族。".to_string(),
             tags: vec!["cloudflare".to_string(), "waf".to_string(), "403".to_string(), "cf-mitigated".to_string()],
             category: KnowledgeCategory::AntiBot,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "kasada".to_string(),
             title: "Kasada 动态挑战".to_string(),
             content: "特征：kasada 动态 JS + polyBot、无静态 challenge 页面。绕过：需加载并执行其 polyBot 段，超时 2s 内完成；难以纯静态绕过，必须真浏览器。".to_string(),
             tags: vec!["kasada".to_string(), "polybot".to_string(), "challenge".to_string()],
             category: KnowledgeCategory::AntiBot,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "akamai-sensor".to_string(),
             title: "Akamai sensor_data 上报".to_string(),
             content: "特征：_abck Cookie 每请求滚动、sensor_data 段带环境样本。绕过：采集真实 WebGL/Canvas/AudioContext 快照 + 鼠标轨迹；指纹一致性比速度更重要。".to_string(),
             tags: vec!["akamai".to_string(), "sensor_data".to_string(), "_abck".to_string()],
             category: KnowledgeCategory::AntiBot,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "perimeterx".to_string(),
             title: "PerimeterX/人身验证".to_string(),
             content: "特征：px-captcha Cookie、_px3 段。绕过：真实点击序列 + 一致性指纹 + 请求节流；接口被二次校验时同会话内保留 Cookie。".to_string(),
@@ -159,28 +159,28 @@ impl KnowledgeBase {
         });
 
         // ===== 指纹模板库扩充 =====
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "fp-chrome-134".to_string(),
             title: "Chrome 134 Windows 指纹模板".to_string(),
             content: "UA: Chrome/134.0.0.0; AudioContext 采样率需与 WebGL 一致; deviceMemory=8 + hardwareConcurrency=8; 无 navigator.webdriver。".to_string(),
             tags: vec!["chrome_134".to_string(), "windows".to_string(), "angle".to_string()],
             category: KnowledgeCategory::Fingerprint,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "fp-firefox-120".to_string(),
             title: "Firefox 120 指纹模板".to_string(),
             content: "UA 含 Gecko/2020; Canvas 默认噪声算法不同；localStorage 与 IndexedDB 存在差异；需安装 uBlock 类插件时 report 头一致。".to_string(),
             tags: vec!["firefox_120".to_string(), "gecko".to_string(), "canvas".to_string()],
             category: KnowledgeCategory::Fingerprint,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "fp-macos-safari".to_string(),
             title: "Safari 17 macOS 指纹模板".to_string(),
             content: "UA: Safari/605.1.15 段; WebGL vendor = Apple; 字体渲染存在 retinex 差异; 用 Apple 证书段需 TTS。".to_string(),
             tags: vec!["safari_17".to_string(), "macos".to_string(), "apple".to_string()],
             category: KnowledgeCategory::Fingerprint,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "fp-headless".to_string(),
             title: "无头浏览器指纹检测规避".to_string(),
             content: "检测点：navigator.webdriver / chrome 运行时段 / headless UA / 缺字体集。规避：patch webdriver、注入字体、开启 GPU。".to_string(),
@@ -189,28 +189,28 @@ impl KnowledgeBase {
         });
 
         // ===== 封禁案例库扩充 =====
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "ban-403-cf".to_string(),
             title: "Cloudflare 403 封禁案例".to_string(),
             content: "原因：IP 信誉或行为指纹。解决：切换住宅代理 + 冷启动窗口（前 3 请求低 QPS）+ 完整指纹。".to_string(),
             tags: vec!["403".to_string(), "cloudflare".to_string(), "ip-reputation".to_string()],
             category: KnowledgeCategory::BanCase,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "ban-session".to_string(),
             title: "会话跟踪封禁案例".to_string(),
             content: "原因：请求间隔分布过均匀（被统计判定机器人）。解决：注入泊松时序抖动 + 随机暂停 + 长尾重试。".to_string(),
             tags: vec!["session".to_string(), "timing".to_string(), "behavior".to_string()],
             category: KnowledgeCategory::BanCase,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "ban-captcha-loop".to_string(),
             title: "验证码循环封禁案例".to_string(),
             content: "原因：多次验证失败触发硬封禁。解决：验证前先校准指纹，连续 2 次失败即换 IP，避免进入死循环。".to_string(),
             tags: vec!["captcha".to_string(), "loop".to_string(), "ban".to_string()],
             category: KnowledgeCategory::BanCase,
         });
-        self.add(KnowledgeEntry {
+        self.seed_add(KnowledgeEntry {
             id: "ban-behavior".to_string(),
             title: "行为异常封禁案例".to_string(),
             content: "原因：鼠标轨迹直线/零停留/零滚动超出人类阈值。解决：贝塞尔弯曲轨迹 + 随机停留 + 滚动段。".to_string(),
@@ -219,8 +219,28 @@ impl KnowledgeBase {
         });
     }
 
+    /// 内部写入：仅更新内存数据与倒排索引（种子构建与叠加层回放用），不记持久化台账
+    fn seed_add(&self, entry: KnowledgeEntry) {
+        self.insert_internal(entry);
+    }
+
     /// 添加知识条目（自动构建倒排索引；内部可变，可在运行时经 Arc 调用）
+    /// 同时记录到持久化叠加层落盘，跨重启保留
     pub fn add(&self, entry: KnowledgeEntry) {
+        let overlay_entry = entry.clone();
+        self.insert_internal(entry);
+        {
+            let mut ov = OVERLAY.lock().unwrap();
+            let id = overlay_entry.id.clone();
+            ov.added.insert(id.clone(), overlay_entry);
+            // 重新加入后解除删除粘性
+            ov.removed_ids.retain(|r| r != &id);
+        }
+        save_persist();
+    }
+
+    /// 内部写入核心：索引 + entries（不含台账）
+    fn insert_internal(&self, entry: KnowledgeEntry) {
         for tag in &entry.tags {
             self.inverted_index
                 .write()
@@ -242,7 +262,28 @@ impl KnowledgeBase {
     }
 
     /// 删除知识条目（同时重建倒排索引，保证索引一致）
+    /// 删除 id 记为粘性（seed 重启会重播种，需持续拦截）；用户新增条目同步移出台账
     pub fn remove(&self, id: &str) -> bool {
+        let ok = self.delete_internal(id);
+        if ok {
+            {
+                let mut ov = OVERLAY.lock().unwrap();
+                ov.added.remove(id);
+                if !ov.removed_ids.iter().any(|r| r == id) {
+                    ov.removed_ids.push(id.to_string());
+                }
+                if ov.removed_ids.len() > MAX_REMOVED {
+                    let drop_n = ov.removed_ids.len() - MAX_REMOVED;
+                    ov.removed_ids.drain(0..drop_n);
+                }
+            }
+            save_persist();
+        }
+        ok
+    }
+
+    /// 内部删除核心：索引重建 + entries（不含台账）
+    fn delete_internal(&self, id: &str) -> bool {
         let mut entries = self.entries.write();
         if entries.remove(id).is_none() {
             return false;
@@ -264,6 +305,16 @@ impl KnowledgeBase {
             }
         }
         true
+    }
+
+    /// 回放持久化叠加层（启动时调用）：先删除粘性 id，再补用户新增条目
+    pub fn load_overlay(&self, ov: &OverlayData) {
+        for id in &ov.removed_ids {
+            self.delete_internal(id);
+        }
+        for e in ov.added.values() {
+            self.insert_internal(e.clone());
+        }
     }
 
     /// 按 id 获取单条（供管理）
@@ -359,7 +410,133 @@ impl Default for KnowledgeBase {
 static GLOBAL_KB: once_cell::sync::Lazy<Arc<KnowledgeBase>> =
     once_cell::sync::Lazy::new(|| Arc::new(KnowledgeBase::new()));
 
-/// 获取全局知识库（无需 AppHandle，纯内存）
+// ============ JSON 落盘持久化（叠加层） ============
+// 只持久化"相对种子集"的增量：用户新增条目 + 粘性删除 id。
+// seed 每次启动重新播种，故删除必须记粘性才能在重启后持续拦截。
+
+/// 叠加层数据（JSON 结构，serde 兼容）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OverlayData {
+    /// 用户新增条目（id → entry）
+    pub added: HashMap<String, KnowledgeEntry>,
+    /// 粘性删除 id（含被删 seed，重启重播种后仍需拦截）
+    pub removed_ids: Vec<String>,
+}
+
+/// 删除粘性列表阈值，防止无限膨胀
+const MAX_REMOVED: usize = 512;
+
+/// 持久化 JSON 文件路径（None = 未启用）
+static STORAGE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+/// 当前叠加层台账（与磁盘一致）
+static OVERLAY: once_cell::sync::Lazy<std::sync::Mutex<OverlayData>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(OverlayData::default()));
+/// 是否已把磁盘叠加层回放到全局知识库
+static LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 启用持久化：指定目录（自动加载已有叠加层）。
+/// 与 reverse::symbols::set_storage_path 同目录，共用 <app_data>/gongfang/。
+pub fn set_storage_path(dir: std::path::PathBuf) {
+    *STORAGE.lock().unwrap() = Some(dir.join("knowledge.json"));
+    LOADED.store(false, std::sync::atomic::Ordering::Relaxed);
+    ensure_loaded();
+}
+
+/// 首次访问/启动时把磁盘叠加层回放到全局知识库（幂等）
+fn ensure_loaded() {
+    if LOADED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let path = STORAGE.lock().unwrap().clone();
+    let Some(path) = path else { return };
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(ov) = serde_json::from_str::<OverlayData>(&text) {
+            GLOBAL_KB.load_overlay(&ov);
+        }
+    }
+    LOADED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 把当前叠加层落盘（未启用持久化时为空操作）
+fn save_persist() {
+    let path = STORAGE.lock().unwrap().clone();
+    let Some(path) = path else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let data = OVERLAY.lock().unwrap().clone();
+    if let Ok(json) = serde_json::to_string_pretty(&data) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// 获取全局知识库（无需 AppHandle，纯内存）；首次访问顺带回放持久化
 pub fn global() -> Arc<KnowledgeBase> {
+    ensure_loaded();
     GLOBAL_KB.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 叠加层 JSON 回路：新增条目 + 粘性删除 id 序列化/反序列化后保持一致
+    #[test]
+    fn overlay_json_roundtrip() {
+        let ov = OverlayData {
+            added: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "my-waf-1".to_string(),
+                    KnowledgeEntry {
+                        id: "my-waf-1".to_string(),
+                        title: "自定义 WAF".to_string(),
+                        content: "特征 + 绕过".to_string(),
+                        tags: vec!["custom".to_string()],
+                        category: KnowledgeCategory::AntiBot,
+                    },
+                );
+                m
+            },
+            removed_ids: vec!["cf-basic".to_string()],
+        };
+        let json = serde_json::to_string_pretty(&ov).expect("序列化");
+        let back: OverlayData = serde_json::from_str(&json).expect("反序列化");
+        assert_eq!(back.added.len(), 1);
+        let e = back.added.get("my-waf-1").unwrap();
+        assert_eq!(e.title, "自定义 WAF");
+        assert_eq!(e.category, KnowledgeCategory::AntiBot);
+        assert_eq!(back.removed_ids, vec!["cf-basic".to_string()]);
+    }
+
+    /// 叠加层回放：新库先删粘性 id，再补用户新增条目（不污染种子集）
+    #[test]
+    fn overlay_replay_on_fresh_kb() {
+        let kb = KnowledgeBase::new(); // 17 条种子
+        let seed_total = kb.entries.write().len();
+        assert!(seed_total >= 17);
+        let saved_entries = {
+            let mut m = HashMap::new();
+            m.insert(
+                "user-1".to_string(),
+                KnowledgeEntry {
+                    id: "user-1".to_string(),
+                    title: "用户新增".to_string(),
+                    content: "x".to_string(),
+                    tags: vec!["u".to_string()],
+                    category: KnowledgeCategory::BanCase,
+                },
+            );
+            m
+        };
+        let ov = OverlayData {
+            added: saved_entries,
+            removed_ids: vec!["cf-basic".to_string()],
+        };
+        kb.load_overlay(&ov);
+        assert!(kb.get("user-1").is_some(), "用户新增条目应被回放");
+        assert!(kb.get("cf-basic").is_none(), "被删 seed 应被拦截");
+        assert_eq!(kb.entries.write().len(), seed_total, "净变化 +1(新增) -1(删除)");
+    }
 }

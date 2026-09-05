@@ -91,6 +91,10 @@ pub async fn gongfang_start(app: AppHandle, profile_id: Option<String>) -> Resul
     if let Ok(dir) = app.path().app_data_dir() {
         crate::reverse::symbols::set_storage_path(dir.join("gongfang"));
     }
+    // AI 知识库持久化：<app_data>/gongfang/knowledge.json（同目录，栈叠加层落盘）
+    if let Ok(dir) = app.path().app_data_dir() {
+        crate::kernel::knowledge::set_storage_path(dir.join("gongfang"));
+    }
     let profile = resolve_profile(&profiles, profile_id);
     if profile.api_key.trim().is_empty() {
         return Err("未配置 AI API Key，请先在全局设置 → 模型 中填写".to_string());
