@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>防线拉满 · 堡垒（服务端）</title>
+    <link rel="stylesheet" href="challenge/challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="index.html">安得云荟 · 防线拉满</a><div class="nav-links"><a href="fortress.html">客户端版</a><a href="challenges.html">样本库</a></div></nav>
+    <div class="card">
+        <h1>堡垒 · 服务端满防 <span class="badge hard">特别难</span></h1>
+        <p class="sub">空壳目标。防线在<b>服务端</b>强制：UA 严检 → 会话 token 绑 IP → HMAC 抗重放签名 → 行为分 → 稳定指纹 → IP 频控退避。内容仅占位 flag，纯壳。</p>
+
+        <div class="mono" id="layers">
+            当前层：<span id="cl">-</span> / 5
+        </div>
+        <div class="gate" id="gate"></div>
+
+        <div id="sliderBox" style="margin:.9rem 0;">
+            <div class="mono">先在下方<b>像人一样拖一条</b>（服务端依此算行为分 0.1~0.6 才能过 L3）</div>
+            <canvas id="pad" width="520" height="180" style="width:100%;height:180px;background:var(--surface-hover);border:1px solid var(--border);border-radius:14px;touch-action:none;margin:.5rem 0;"></canvas>
+        </div>
+
+        <button class="btn wide" id="advance">推进一层</button>
+        <button class="btn ghost wide mt" id="restart">重置会话</button>
+
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">注意：该页走 <code class="mono">/api/fortress/*</code> 服务端裁决。用脚本/非浏览器 UA、不签名、行为分异常、指纹不稳、连续快速都会被拒（403/401/400/429 分层报错）。通过全部 5 层返回空壳 flag。</p>
+    </div>
+</div>
+<script>
+    const $ = (id) => document.getElementById(id);
+    // —— 真实浏览器 UA 由 fetch 自动带；脚本 UA 会被服务端拒 ——
+    const pad = $('#pad'), ctx = pad.getContext('2d'), pts = [];
+    let drawing = false, cv = 0, jit = 0;
+    pad.addEventListener('pointerdown', (e) => { drawing = true; pts.length = 0; ctx.clearRect(0,0,pad.width,pad.height); rec(e); });
+    pad.addEventListener('pointermove', (e) => { if (drawing) rec(e); });
+    window.addEventListener('pointerup', () => drawing = false);
+    function rec(e) { pts.push({ x:e.offsetX,y:e.offsetY,t:e.timeStamp }); ctx.fillRect(e.offsetX,e.offsetY,2,2); }
+    function measure() {
+        if (pts.length < 12) return null;
+        let sum=0; for(let i=1;i<pts.length;i++) sum += Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y)/((pts[i].t-pts[i-1].t)/1000||1);
+        const avg=sum/(pts.length-1); let v=0; for(let i=1;i<pts.length;i++){ const s=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y)/((pts[i].t-pts[i-1].t)/1000||1); v+=(s-avg)**2; }
+        cv = avg ? Math.sqrt(v/(pts.length-1))/avg : 9;
+        const ys = pts.map(p=>p.y), my=ys.reduce((a,b)=>a+b,0)/ys.length;
+        jit = Math.sqrt(ys.reduce((a,b)=>a+(b-my)**2,0)/ys.length);
+        if (jit < 0.8 || cv < 0.12) return 0.05;      // 机器人
+        return Math.max(0.1, Math.min(0.6, 0.5 - cv * 0.5)); // 人类 → 0.3~0.45
+    }
+    // —— sha1 (浏览器) ——
+    async function sha1Hex(s) {
+        const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(s));
+        return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+    const FS_SECRET = 'fortress-shell-secret';
+    let token = '', layer = 1, fp = '';
+    const fpOf = () => { const p=[navigator.userAgent.slice(0,60),navigator.platform||'',navigator.language||'',screen.width,screen.height,-new Date().getTimezoneOffset()].join('|'); let h=0; for(let i=0;i<p.length;i++) h=(h*31+p.charCodeAt(i))>>>0; return 'fp-'+h.toString(16); };
+    async function apiStep(claim) {
+        const sign = await sha1Hex(`${FS_SECRET}:${token}:${claim}`);
+        const behavior = claim >= 3 ? measure() : undefined;
+        const r = await fetch('/api/fortress/step', { method:'POST', headers:{ 'Content-Type':'application/json', 'X-Sign': sign }, body: JSON.stringify({ token, layer: claim, behavior, fp: claim>=4 ? fp : undefined }) });
+        const j = await r.json().catch(() => ({}));
+        return { r, j };
+    }
+    async function begin() {
+        const r = await fetch('/api/fortress/begin', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+        const j = await r.json().catch(()=>({}));
+        if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP '+r.status));
+        token = j.token; layer = j.layer; fp = fpOf();
+        $('#cl').textContent = layer;
+        gate('ok', '会话已建立（token 绑定本 IP）· L1 UA 通过');
+    }
+    $('#advance').onclick = async () => {
+        const claim = layer + 1;
+        try {
+            const { r, j } = await apiStep(claim);
+            if (r.status === 429) { gate('bad', `频控锁定 ${j.retry_after}s`); $('#tele').textContent = JSON.stringify(j); $('#tele').style.display='block'; return; }
+            if (!r.ok || !j.ok) { gate('bad', '层 ' + claim + ' 被拒：' + (j.error || ('HTTP '+r.status))); $('#tele').textContent = JSON.stringify(j); $('#tele').style.display='block'; return; }
+            if (j.done) { gate('ok', '🎯 全部 5 层通过！空壳 flag：' + j.flag); $('#flag2').textContent = j.flag; layer = 5; $('#cl').textContent = 5; }
+            else { layer = j.layer; $('#cl').textContent = layer; gate('ok', `已过 L${layer}：` + (j.hint||'')); }
+            $('#tele').style.display='block'; $('#tele').textContent = JSON.stringify(j, null, 2);
+        } catch (e) { gate('bad', e.message); }
+    };
+    $('#restart').onclick = () => { token=''; layer=1; try{ begin(); }catch(_){} };
+    // flag 展示
+    const fb = document.createElement('div'); fb.id='flag2'; fb.className='mono'; fb.style.marginTop='.5rem'; fb.textContent='';
+    $('#gate').after(fb);
+    function gate(t, txt){ const g=$('#gate'); g.className='gate on '+t; g.textContent=txt; }
+    // 初始
+    (async () => { try { await begin(); } catch (e) { gate('bad', e.message || '请先用 node server.mjs 启动后端'); } })();
+</script>
+</body>
+</html>

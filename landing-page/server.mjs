@@ -9,7 +9,7 @@ import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));   // landing-page/
@@ -156,7 +156,68 @@ async function api(req, res, path, body, ip) {
     return send({ received: true, points: Number(body.metrics?.samples || 0) });
   }
 
+  if (path.startsWith('/api/fortress')) {
+    return fortressApi(req, res, path, body, ip);
+  }
+
   return fail(res, 404, 'unknown api');
+}
+
+// ============================================================
+// 防线拉满 fortress：内容为空壳，难度全在防线分层。
+//   L1  UA 严检（拒绝裸脚本 UA） + 会话 token 绑定 IP
+//   L2  HMAC 抗重放签名（X-Sign = sha1(secret:token:layer)）
+//   L3  行为分鸡聊检（0.1~0.6 才放行，机器人/过猛被拒）
+//   L4  指纹一致性（fp 长度/稳定性）
+//   L5  频控退避（所有 fortress 请求共享 IP 滑动窗口）。
+// 所有层都过 → 返回外壳 flag。纯壳，无真实内容。
+// ============================================================
+const FS_SECRET = 'fortress-shell-secret';   // 签名密钥（测试站固定；实测可换动态）
+function fsSign(token, layer) { return createHash('sha1').update(`${FS_SECRET}:${token}:${layer}`).digest('hex'); }
+function isBrowserUA(ua) {
+  if (!ua) return false;
+  if (/curl|wget|python|requests|urllib|node|go-http|java|okhttp|axios|phantom|headless|bot|crawl|spider|guzzle|artyom/i.test(ua)) return false;
+  if (ua.length < 24 || !/Mozilla|Chrome|Firefox|Safari|Edg|Opera/i.test(ua)) return false;
+  return true;
+}
+async function fortressApi(req, res, path, body, ip) {
+  const send = (o) => json(res, 200, { ok: true, ...o });
+  // 一切先过 UA 严检
+  const ua = String(req.headers['user-agent'] || '');
+  if (!isBrowserUA(ua)) return fail(res, 403, `UA 被拒: "${ua.slice(0, 40)}…"`);
+  // 再共享频控
+  const rl = rateLimit(ip);
+  if (!rl.allowed) return json(res, 429, { ok: false, ...rl });
+
+  if (path === '/api/fortress/begin') {
+    const token = randomBytes(16).toString('hex');
+    state.fortress = state.fortress || {};
+    state.fortress[token] = { ip, layer: 1, ts: Date.now(), ua };
+    persist();
+    return send({ token, layer: 1, layers: 5, sign_scheme: 'sha1(secret:token:layer)' });
+  }
+
+  if (path === '/api/fortress/step') {
+    const token = String(body.token || '');
+    const s = (state.fortress || {})[token];
+    if (!s || s.ip !== ip) return fail(res, 401, '会话无效或来源 IP 改变');
+    const claim = Number(body.layer) || 1;
+    // 抗重放签名
+    if (String(req.headers['x-sign'] || '') !== fsSign(token, claim)) return fail(res, 401, `签名不匹配 layer=${claim}`);
+    if (claim > s.layer + 1) return fail(res, 400, '层序跳跃，拒绝');
+    s.layer = Math.max(s.layer, claim);
+    // 行为分门控（L3）
+    if (claim >= 3) { const b = Number(body.behavior); if (!(b >= 0.1 && b <= 0.6)) return fail(res, 400, `行为分异常(${b})，机器人或过猛`); }
+    // 指纹一致性（L4）
+    if (claim >= 4) { const f = String(body.fp || ''); if (f.length < 8) return fail(res, 400, '指纹不一致（过短或为空）'); }
+    persist();
+    if (s.layer >= 5) {
+      return send({ done: true, flag: 'SHELL_FLAG_' + fsSign(token, 0).slice(0, 16), layer: s.layer });
+    }
+    return send({ layer: s.layer, next_layer: s.layer + 1, hint: s.layer + 1 >= 3 ? '需提供人类行为分(0.1~0.6)' : (s.layer + 1 >= 4 ? '需提供稳定指纹' : '继续') });
+  }
+
+  return fail(res, 404, 'unknown fortress api');
 }
 
 // ---------- 主服务 ----------

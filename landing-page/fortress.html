@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>防线拉满 · 堡垒（客户端）</title>
+    <link rel="stylesheet" href="challenge/challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="index.html">安得云荟 · 防线拉满</a><div class="nav-links"><a href="fortress-secure.html">服务端版</a><a href="challenges.html">样本库</a></div></nav>
+    <div class="card">
+        <h1>堡垒 · 客户端满防 <span class="badge hard">特别难</span></h1>
+        <p class="sub">空壳目标：内容只是占位 <code class="mono">SHELL_FLAG</code>。难度全在<b>逐层防线</b>，垮一层即重置到起点。</p>
+        <div id="layers" class="mono" style="margin-bottom:1rem;">
+            <div id="ll1">① 指纹稳定性 —— <b>未通过</b></div>
+            <div id="ll2">② 自由轨迹行为分 —— <b>未通过</b></div>
+            <div id="ll3">③ 滑块验证 —— <b>未通过</b></div>
+            <div id="ll4">④ 顺序点选 —— <b>未通过</b></div>
+            <div id="ll5">⑤ 解锁空壳内容 —— 锁定</div>
+        </div>
+
+        <!-- L1 指纹 -->
+        <div id="s1" class="mt">
+            <button class="btn wide" id="fpBtn">① 生成稳定指纹并继续</button>
+        </div>
+
+        <!-- L2 轨迹行为分 -->
+        <div id="s2" style="display:none;">
+            <p class="mono">② 在下面方框内<b>像人一样随意拖一条曲线</b>（识别直线/匀速/零抖动即判机器人）</p>
+            <canvas id="pad" width="520" height="200" style="width:100%;height:200px;background:var(--surface-hover);border:1px solid var(--border);border-radius:14px;touch-action:none;margin:.6rem 0;"></canvas>
+            <button class="btn" id="behaveBtn">② 提交行为判定</button>
+        </div>
+
+        <!-- L3 滑块 -->
+        <div id="s3" style="display:none;">
+            <div class="mono">③ 按住滑块拖到底（高精度轨迹）</div>
+            <div style="position:relative;height:48px;background:var(--surface-hover);border:1px solid var(--border);border-radius:12px;margin:.7rem 0;user-select:none;">
+                <div id="fFill" style="position:absolute;left:0;top:0;bottom:0;width:0;background:linear-gradient(90deg,var(--accent-soft),var(--accent));opacity:.4;"></div>
+                <div id="fHandle" style="position:absolute;left:0;top:4px;bottom:4px;width:44px;background:var(--accent);border-radius:9px;cursor:grab;display:flex;align-items:center;justify-content:center;color:#fff;">→</div>
+            </div>
+        </div>
+
+        <!-- L4 点选 -->
+        <div id="s4" style="display:none;">
+            <p class="mono">④ 按顺序点击数字（1→4），错序重置</p>
+            <div id="orderGrid" style="display:grid;grid-template-columns:repeat(4,70px);gap:10px;margin:.7rem 0;"></div>
+        </div>
+
+        <!-- L5 结果 -->
+        <div id="s5" style="display:none;">
+            <div class="gate on ok" id="flagBox">解锁成功：内容为空壳</div>
+            <div class="mono" style="margin-top:.6rem;" id="flag">（空壳占位，无真实内容）</div>
+        </div>
+
+        <div class="gate" id="gate"></div>
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">防线：指纹稳定 → 轨迹行为分(JSD) → 高精度滑块行为 → 点选顺序。任一机器人特征（匀速/零抖动/直线/错序/指纹不稳）都会被拒。所有层通过后才显示空壳 flag。</p>
+    </div>
+</div>
+<script>
+    const $ = (id) => document.getElementById(id);
+    let layer = 1, fp = '';
+    const gate = (t, txt) => { const g = $('#gate'); g.className = 'gate on ' + t; g.textContent = txt; };
+    // 层状态机
+    window.__setLayer = (n) => { layer = n; [1,2,3,4,5].forEach(i => $('s'+i).style.display = i === n ? 'block' : 'none'); };
+
+    // L1 指纹
+    $('#fpBtn').onclick = () => {
+        const parts = [navigator.userAgent.slice(0,60), navigator.platform||'', navigator.language||'', screen.width, screen.height, -new Date().getTimezoneOffset()].join('|');
+        let h = 0; for (let i=0;i<parts.length;i++) h = (h*31 + parts.charCodeAt(i)) >>> 0;
+        fp = 'fp-' + h.toString(16);
+        gate('ok', '指纹已生成:' + fp.slice(0,14) + '…，进入下一层');
+        window.__setLayer(2);
+    };
+
+    // L2 行为分（JSD 相似度）
+    const pad = $('#pad'), ctx = pad.getContext('2d'), pts = [];
+    let drawing = false;
+    pad.addEventListener('pointerdown', (e) => { drawing = true; pts.length = 0; ctx.clearRect(0,0,pad.width,pad.height); record(e); });
+    pad.addEventListener('pointermove', (e) => { if (drawing) record(e); });
+    window.addEventListener('pointerup', () => drawing = false);
+    function record(e) {
+        pts.push({ x: e.offsetX, y: e.offsetY, t: e.timeStamp });
+        ctx.fillRect(e.offsetX, e.offsetY, 2, 2);
+    }
+    $('#behaveBtn').onclick = () => {
+        if (pts.length < 20) return gate('bad', '轨迹采样太少（≥20 点）');
+        let sum=0; for (let i=1;i<pts.length;i++){ const s=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y)/((pts[i].t-pts[i-1].t)/1000||1); sum+=s; }
+        const avg=sum/(pts.length-1); let vsum=0; for (let i=1;i<pts.length;i++){ const s=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y)/((pts[i].t-pts[i-1].t)/1000||1); vsum+=(s-avg)**2; }
+        const cv = avg ? Math.sqrt(vsum/(pts.length-1))/avg : 99;   // 变异系数：匀速→≈0
+        // 垂直抖动
+        const ys = pts.map(p=>p.y), my = ys.reduce((a,b)=>a+b,0)/ys.length, jit = Math.sqrt(ys.reduce((a,b)=>a+(b-my)**2,0)/ys.length);
+        const bad = cv < 0.15 || jit < 0.8;
+        gate(bad?'bad':'ok', bad ? `判定机器人：速度过于均匀(CV=${cv.toFixed(2)}σ)<0.15 或零抖动(${jit.toFixed(1)}px)` : `行为分通过（CV=${cv.toFixed(2)} 抖动=${jit.toFixed(1)}px，像人）`);
+        if (!bad) { $('#behaveBtn').textContent = '行为通过 ✓'; window.__setLayer(3); }
+    };
+
+    // L3 滑块
+    const fRect = $('s3'); let fdrag = false;
+    $('s3').addEventListener('pointerdown', ()=> fdrag=true);
+    window.addEventListener('pointermove', (e)=>{ if(!fdrag) return; const pct = Math.max(0,Math.min(1,(e.clientX - fRect.getBoundingClientRect().left)/ (fRect.clientWidth-48))); $('#fFill').style.width=pct*100+'%'; $('#fHandle').style.left = (pct*(fRect.clientWidth-48))+'px'; if(pct>=0.98){ fdrag=false; $('#fFill').style.background='linear-gradient(90deg,#a6c6a6,#6f9e6f)'; window.__setLayer(4);} });
+    window.addEventListener('pointerup', ()=>fdrag=false);
+
+    // L4 点选
+    const order = [1,2,3,4].sort(()=>Math.random()-0.5); let next=1, og=$('#orderGrid');
+    for (const n of order){ const d=document.createElement('div'); d.textContent=n; d.style.cssText='height:66px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.2rem;font-weight:700;background:var(--surface-hover);border:1px solid var(--border);cursor:pointer;'; d.onclick=()=>{ if(n===next){ d.style.background='var(--ok-bg)'; d.style.color='var(--ok)'; next++; if(next>4){ gate('ok','全部层通过！'); window.__setLayer(5); $('#flag').textContent='SHELL_FLAG_'+fp.slice(3,15); dump(); } } else { gate('bad','点选顺序错误，重置'); next=1; og.querySelectorAll('div').forEach(c=>c.style.background='var(--surface-hover)'); } }; og.appendChild(d); }
+    function dump(){ $('#tele').style.display='block'; $('#tele').textContent=JSON.stringify({passed:true, fp, trajectory_samples:pts.length, ts:Date.now()},null,2); }
+</script>
+</body>
+</html>
