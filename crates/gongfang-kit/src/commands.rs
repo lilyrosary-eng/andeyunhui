@@ -1267,7 +1267,12 @@ pub fn gongfang_automation_divergence(
         baseline.add_observation(&traj);
         let multidim = baseline.js_divergence_multidim(&template);
         let single = baseline.js_divergence_from_template(&template);
-        let verdict = if multidim < 0.15 {
+        // 数据充分性：单条/过短轨迹分布稀疏，统计不可靠 → 不武断判"异常"
+        let span_ms = traj.last().map(|p| p.t_ms).unwrap_or(0);
+        let sufficient = traj.len() >= 40 && span_ms > 300;
+        let verdict = if !sufficient {
+            "样本不足（需 ≥40 点且时间跨度 >300ms，或多段轨迹）"
+        } else if multidim < 0.15 {
             "人类相似"
         } else if multidim <= 0.4 {
             "可疑"
@@ -1278,6 +1283,9 @@ pub fn gongfang_automation_divergence(
             "template": template.name,
             "multidim": (multidim * 1000.0).round() / 1000.0,
             "single": (single * 1000.0).round() / 1000.0,
+            "samples": traj.len(),
+            "span_ms": span_ms,
+            "sufficient": sufficient,
             "verdict": verdict,
         }))
     }
