@@ -2550,6 +2550,7 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const bestIdx = fitness.length > 0
     ? fitness.reduce((best, cur, i) => cur.success_rate > fitness[best].success_rate ? i : best, 0)
     : -1;
+  const bestFitName = bestIdx >= 0 ? fitness[bestIdx].name : null;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -2770,6 +2771,40 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
             </div>
           }
         >
+          {/* 热迁移机制提示 */}
+          <div className="rounded bg-black/[0.03] dark:bg-white/[0.04] border border-black/5 dark:border-stone-700/40 px-2.5 py-2 space-y-1.5">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--element-bg)]">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                <path d="M13 2 3 14h6l-2 8 11-13h-6l1-7z" />
+              </svg>
+              热迁移机制
+              {fitness.length > 0 && bestFitName && (
+                <span className="ml-auto font-normal text-[10px] text-neutral-500 dark:text-stone-400 truncate min-w-0">
+                  当前 <span className="font-mono text-[var(--element-bg)]">{currentTemplate ?? '—'}</span>
+                  {currentTemplate === bestFitName ? (
+                    <span className="ml-1 text-emerald-600 dark:text-emerald-400">已达最优</span>
+                  ) : (
+                    <>
+                      <span className="ml-1">→ 最优 <span className="font-mono text-emerald-600 dark:text-emerald-400">{bestFitName}</span></span>
+                      <button
+                        onClick={handleMigrate}
+                        disabled={humanizeBusy}
+                        className="ml-1.5 px-1.5 py-0.5 rounded text-[9px] text-white bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40"
+                      >
+                        立即迁移
+                      </button>
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
+            <ul className="space-y-0.5 list-disc pl-4 text-[10px] leading-relaxed text-neutral-500 dark:text-stone-400">
+              <li>自动触发：单模板样本 ≥5 时，失败率＞50% 或 平均散度＞0.5 → 自动切换到最高分模板</li>
+              <li>评分：score = 成功率 × 权重 − 平均散度 × 0.5（散度越低越接近人类基线）</li>
+              <li>不重启内核：arc-swap 原子切换策略指针，下一个 HID 报文即生效</li>
+            </ul>
+          </div>
+
           {migrateMsg && (
             <div className="text-xs text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 rounded-lg px-2.5 py-1.5">
               {migrateMsg}
