@@ -2,6 +2,29 @@
 //! A) 反追踪真实测：直连 vs 经代理A/B egress 轮换 + XFF 混淆 → 目标看到的出口
 //! B) 体系攻击：打 /api/system（要求 IP 隐藏）→ 未隐藏者 L2 被 403 拦，隐藏者穿到 flag
 use serde_json::Value;
+use std::time::{Duration, Instant};
+
+// ---- 低轮换率策略：出口持有 ≥ churn 窗口时才允许轮换 ----
+struct EgressManager {
+    proxies: Vec<String>,
+    idx: usize,
+    started: Instant,
+    min_hold: Duration,
+}
+impl EgressManager {
+    fn new(proxies: Vec<String>, min_hold: Duration) -> Self {
+        Self { proxies, idx: 0, started: Instant::now(), min_hold }
+    }
+    /// 只有达到 min_hold 才自动轮换（否则维持当前出口 → 滑动窗内 distinct 保持 ≤1）
+    fn current_url(&mut self) -> String {
+        if self.started.elapsed() >= self.min_hold { self.force_rotate(); }
+        self.proxies[self.idx].clone()
+    }
+    fn force_rotate(&mut self) {
+        self.idx = (self.idx + 1) % self.proxies.len();
+        self.started = Instant::now();
+    }
+}
 
 fn sha1_hex(input: &str) -> String {
     let mut data = input.as_bytes().to_vec();
@@ -120,4 +143,26 @@ async fn main() {
         let (_, v) = post(c, &format!("{base}/api/system/churn"), None, None, &format!(r#"{{"cid":"{ucid}"}}"#)).await;
         println!("  [稳定用户] {label} -> distinct_ips={} → {}", v["distinct_ips"], v["verdict"].as_str().unwrap_or(""));
     }
+
+    println!("\n===== D) 反追踪对抗：低轮换率策略（漏过一致性识破） =====");
+    // 攻击者改用"低轮换率"：出口持有 ≥ churn 窗口(60s) 才允许切换
+    // → 任意时刻滑动窗内只有 ≤1 个 distinct → 体系永远判"一致"，即便轮换了也没被识破。
+    let hold_ms = std::env::args().find(|a| a.starts_with("--hold="))
+        .and_then(|a| a.trim_start_matches("--hold=").parse::<u64>().ok())
+        .unwrap_or(62000);
+    let mut egress = EgressManager::new(
+        vec!["http://127.0.0.2:8798".to_string(), "http://127.0.0.3:8799".to_string()],
+        Duration::from_secs(65), // min_hold > churn 窗口 60s
+    );
+    let cid = "fp-ROTATE-SLOW";
+    let c_hold = client(Some(&egress.current_url()));
+    let (_, v1) = post(&c_hold, &format!("{base}/api/system/churn"), None, None, &format!(r#"{{"cid":"{cid}"}}"#)).await;
+    println!("  t0 持有出口({}) -> distinct={} → {}", v1["seen_ip"].as_str().unwrap_or(""), v1["distinct_ips"], v1["verdict"].as_str().unwrap_or(""));
+    println!("  持有中(min_hold=65s ≥ 窗口60s，暂不轮换)…");
+    tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+    // 达到持有期后做一次"合规"轮换
+    egress.force_rotate();
+    let c_rot = client(Some(&egress.current_url()));
+    let (_, v2) = post(&c_rot, &format!("{base}/api/system/churn"), None, None, &format!(r#"{{"cid":"{cid}"}}"#)).await;
+    println!("  t1 轮换后出口({}) -> distinct={} → {} （旧出口已滑出窗口→判一致=漏过识破）", v2["seen_ip"].as_str().unwrap_or(""), v2["distinct_ips"], v2["verdict"].as_str().unwrap_or(""));
 }
