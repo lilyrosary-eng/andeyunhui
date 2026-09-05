@@ -2480,6 +2480,17 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     }
   }, [addLog, handleRefreshFitness]);
 
+  // 拉取当前生效模板（gongfang_automation_templates，用于可视化标记"当前"）
+  const loadCurrentTpl = useCallback(async () => {
+    try {
+      const r = await tauriInvoke<{ current: string }>('gongfang_automation_templates', {});
+      if (r && r.current) setCurrentTemplate(r.current);
+    } catch {
+      /* 引擎未启动 / feature 未启用时静默 */
+    }
+  }, []);
+  useEffect(() => { loadCurrentTpl(); }, [loadCurrentTpl]);
+
   // 自动化行为实验室
   const [labTemplates, setLabTemplates] = useState<AutionTemplatesReport | null>(null);
   const [labTplBusy, setLabTplBusy] = useState(false);
@@ -2767,6 +2778,54 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           {fitnessError && (
             <div className="text-xs text-rose-600 dark:text-rose-400 bg-rose-500/10 rounded-lg px-2.5 py-1.5">
               {fitnessError}
+            </div>
+          )}
+
+          {/* 适应度可视化：成功率条形对比 + BEST/当前标记 */}
+          {fitness.length > 0 && (
+            <div className="space-y-1.5">
+              {fitness.map((f, i) => {
+                const isBest = i === bestIdx;
+                const isCurrent = f.name === currentTemplate;
+                const ratePct = f.success_rate * 100;
+                const barColor = f.success_rate > 0.8
+                  ? 'bg-emerald-500'
+                  : f.success_rate > 0.5
+                  ? 'bg-amber-500'
+                  : 'bg-rose-500';
+                const rateText = f.success_rate > 0.8
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : f.success_rate > 0.5
+                  ? 'text-amber-600 dark:text-amber-400'
+                  : 'text-rose-600 dark:text-rose-400';
+                return (
+                  <div
+                    key={f.id}
+                    className={`rounded border px-2 py-1 transition-colors ${
+                      isBest
+                        ? 'border-emerald-500/40 bg-emerald-500/[0.04]'
+                        : 'border-black/5 dark:border-stone-700/40'
+                    } ${isCurrent ? 'ring-1 ring-violet-400/50' : ''}`}
+                  >
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-mono text-neutral-400 dark:text-stone-500 shrink-0">{f.id}</span>
+                        <span className="font-medium text-[var(--element-bg)] truncate">{f.name}</span>
+                        {isBest && <span className="shrink-0 px-1 rounded text-[9px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">BEST</span>}
+                        {isCurrent && <span className="shrink-0 px-1 rounded text-[9px] bg-violet-500/15 text-violet-600 dark:text-violet-400">当前</span>}
+                        <span className="shrink-0 text-[9px] text-neutral-400">偏离 {f.avg_divergence.toFixed(3)}</span>
+                      </div>
+                      <span className={`shrink-0 font-mono text-[10px] ${rateText}`}>{ratePct.toFixed(1)}%</span>
+                    </div>
+                    <div className="mt-1 h-1.5 rounded bg-black/5 dark:bg-white/10 overflow-hidden">
+                      <div
+                        className={`h-full rounded transition-[width] duration-300 ${barColor}`}
+                        style={{ width: `${Math.max(2, Math.min(100, ratePct))}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
 
