@@ -1269,6 +1269,114 @@ pub fn gongfang_gateway_score(
     }
 }
 
+/// 流量时序仿真：以 Poisson 过程按 lambda(次/秒) 生成 count 个请求间隔并统计
+#[tauri::command]
+pub fn gongfang_gateway_traffic(lambda: f64, count: Option<usize>) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "gateway")]
+    {
+        use crate::gateway::shaping::poisson_interval_ms;
+        let n = count.unwrap_or(20).clamp(1, 100);
+        let mut intervals = Vec::with_capacity(n);
+        for _ in 0..n {
+            intervals.push(poisson_interval_ms(lambda));
+        }
+        let sum: u64 = intervals.iter().sum();
+        let avg_ms = sum as f64 / n as f64;
+        Ok(serde_json::json!({
+            "lambda_req_per_sec": lambda,
+            "expected_interval_ms": if lambda > 0.0 { serde_json::Value::from((1000.0 / lambda).round() as u64) } else { serde_json::Value::Null },
+            "count": n,
+            "avg_ms": avg_ms.round(),
+            "min_ms": intervals.iter().min().copied().unwrap_or(0),
+            "max_ms": intervals.iter().max().copied().unwrap_or(0),
+            "intervals_ms": intervals,
+        }))
+    }
+    #[cfg(not(feature = "gateway"))]
+    {
+        let _ = (lambda, count);
+        Err("gateway feature 未启用，请用 --features gongfang-gateway 编译".to_string())
+    }
+}
+
+/// 路由决策仿真：输入一组假想节点指标，评分并选出最优节点 + 冗余比例
+#[tauri::command]
+pub fn gongfang_gateway_route_sim(nodes: Vec<serde_json::Value>) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "gateway")]
+    {
+        use crate::gateway::pool::{score_node, ReputationBreakdown};
+        let mut scored: Vec<(String, String, ReputationBreakdown)> = Vec::new();
+        for node in nodes {
+            let url = node.get("url").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            let region = node.get("region").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            let err = node.get("error_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let rtt = node.get("ewma_rtt").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let grad = node.get("rtt_gradient").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            scored.push((url, region, score_node(err, rtt, grad)));
+        }
+        let selected = scored
+            .iter()
+            .filter(|(_, _, b)| !b.is_failing)
+            .max_by(|a, c| a.2.reputation.partial_cmp(&c.2.reputation).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(u, _, _)| u.clone());
+        let active = scored.iter().filter(|(_, _, b)| !b.is_failing).count();
+        let standby = scored.len().saturating_sub(active);
+        let redundancy_ratio = if active > 0 { standby as f64 / active as f64 } else { 0.0 };
+        let list: Vec<serde_json::Value> = scored
+            .into_iter()
+            .map(|(url, region, b)| {
+                serde_json::json!({
+                    "url": url, "region": region,
+                    "reputation": b.reputation,
+                    "error_penalty": b.error_penalty,
+                    "rtt_penalty": b.rtt_penalty,
+                    "gradient_penalty": b.gradient_penalty,
+                    "is_failing": b.is_failing,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "nodes": list,
+            "selected": selected,
+            "active": active,
+            "standby": standby,
+            "redundancy_ratio": redundancy_ratio,
+        }))
+    }
+    #[cfg(not(feature = "gateway"))]
+    {
+        let _ = nodes;
+        Err("gateway feature 未启用，请用 --features gongfang-gateway 编译".to_string())
+    }
+}
+
+/// 策略仿真：@rotate/@throttle → 期望的带宽策略与请求节奏
+#[tauri::command]
+pub fn gongfang_gateway_strategy_sim(routing: String, ratio: f64) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "gateway")]
+    {
+        use crate::gateway::{BandwidthPolicy, RoutingMode};
+        let mode = RoutingMode::from_str(&routing).unwrap_or(RoutingMode::Direct);
+        let mut bp = BandwidthPolicy::default();
+        bp.apply_throttle(ratio);
+        Ok(serde_json::json!({
+            "routing": mode.as_str(),
+            "routing_cn": mode.as_cn(),
+            "ratio": bp.ratio,
+            "request_timeout_ms": bp.request_timeout_ms,
+            "max_concurrent": bp.max_concurrent,
+            "high_priority_bypass": bp.high_priority_bypass,
+            "est_interval_silent_ms": 3300,
+            "est_interval_burst_ms": 200,
+        }))
+    }
+    #[cfg(not(feature = "gateway"))]
+    {
+        let _ = (routing, ratio);
+        Err("gateway feature 未启用，请用 --features gongfang-gateway 编译".to_string())
+    }
+}
+
 /// 查询代理节点池（@gateway_pool / 前端面板）
 #[tauri::command]
 pub fn gongfang_gateway_pool() -> Result<Vec<GatewayNodeSummary>, String> {

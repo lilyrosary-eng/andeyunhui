@@ -218,6 +218,43 @@ interface ReputationBreakdown {
   is_failing: boolean;
 }
 
+// ============ 网关仿真（与 Rust 端三个 gongfang_gateway_*_sim 命令对齐） ============
+interface TrafficReport {
+  lambda_req_per_sec: number;
+  expected_interval_ms: number | null;
+  count: number;
+  avg_ms: number;
+  min_ms: number;
+  max_ms: number;
+  intervals_ms: number[];
+}
+interface RouteNode {
+  url: string;
+  region: string;
+  reputation: number;
+  error_penalty: number;
+  rtt_penalty: number;
+  gradient_penalty: number;
+  is_failing: boolean;
+}
+interface RouteSimReport {
+  nodes: RouteNode[];
+  selected: string | null;
+  active: number;
+  standby: number;
+  redundancy_ratio: number;
+}
+interface StrategySimReport {
+  routing: string;
+  routing_cn: string;
+  ratio: number;
+  request_timeout_ms: number;
+  max_concurrent: number;
+  high_priority_bypass: boolean;
+  est_interval_silent_ms: number;
+  est_interval_burst_ms: number;
+}
+
 type InjectType = 'Focus' | 'Bypass' | 'Pause' | 'Resume';
 
 interface FrameworkMeta {
@@ -2640,6 +2677,54 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
       setScoreBusy(false);
     }
   }, [scoreErr, scoreRtt, scoreGrad]);
+
+  // 网关仿真状态
+  const [trafficLambda, setTrafficLambda] = useState(1);
+  const [trafficCount, setTrafficCount] = useState(20);
+  const [trafficResult, setTrafficResult] = useState<TrafficReport | null>(null);
+  const [trafficBusy, setTrafficBusy] = useState(false);
+
+  const ROUTE_SAMPLE = JSON.stringify([
+    { url: 'http://node-a:7890', region: 'CN-Shanghai', error_rate: 0.02, ewma_rtt: 120, rtt_gradient: 2 },
+    { url: 'http://node-b:7890', region: 'US-West', error_rate: 0.4, ewma_rtt: 400, rtt_gradient: 12 },
+    { url: 'http://node-c:7890', region: 'EU-Frankfurt', error_rate: 0.0, ewma_rtt: 600, rtt_gradient: 20 },
+  ], null, 2);
+  const [routeJson, setRouteJson] = useState(ROUTE_SAMPLE);
+  const [routeResult, setRouteResult] = useState<RouteSimReport | null>(null);
+  const [routeBusy, setRouteBusy] = useState(false);
+
+  const [stratRouting, setStratRouting] = useState('direct');
+  const [stratRatio, setStratRatio] = useState(100);
+  const [stratResult, setStratResult] = useState<StrategySimReport | null>(null);
+  const [stratBusy, setStratBusy] = useState(false);
+
+  const handleTraffic = useCallback(async () => {
+    setTrafficBusy(true);
+    try {
+      const r = await tauriInvoke<TrafficReport>('gongfang_gateway_traffic', { lambda: trafficLambda, count: trafficCount });
+      setTrafficResult(r);
+    } catch { setTrafficResult(null); } finally { setTrafficBusy(false); }
+  }, [trafficLambda, trafficCount]);
+
+  const handleRoute = useCallback(async () => {
+    setRouteBusy(true);
+    try {
+      const nodes = JSON.parse(routeJson || '[]');
+      const r = await tauriInvoke<RouteSimReport>('gongfang_gateway_route_sim', { nodes });
+      setRouteResult(r);
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      alert(`路由仿真 JSON 解析或执行失败：${msg}`);
+    } finally { setRouteBusy(false); }
+  }, [routeJson]);
+
+  const handleStrategy = useCallback(async () => {
+    setStratBusy(true);
+    try {
+      const r = await tauriInvoke<StrategySimReport>('gongfang_gateway_strategy_sim', { routing: stratRouting, ratio: stratRatio / 100 });
+      setStratResult(r);
+    } catch { setStratResult(null); } finally { setStratBusy(false); }
+  }, [stratRouting, stratRatio]);
   const [throttleMsg, setThrottleMsg] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -2842,6 +2927,154 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               </p>
             </div>
           )}
+        </CollapsibleSection>
+
+        {/* 流量时序仿真（Poisson） */}
+        <CollapsibleSection
+          title="流量时序仿真 (Poisson)"
+          storageKey="fw_gateway_traffic"
+          defaultOpen={false}
+          accent="defense"
+        >
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-neutral-400">λ(次/秒)</span>
+              <input
+                type="number"
+                min={0.1}
+                step={0.5}
+                value={trafficLambda}
+                onChange={(e) => setTrafficLambda(Number(e.target.value))}
+                className="w-20 px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-neutral-400">样本数</span>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={trafficCount}
+                onChange={(e) => setTrafficCount(Number(e.target.value))}
+                className="w-20 px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+              />
+            </div>
+            <button
+              onClick={handleTraffic}
+              disabled={trafficBusy}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40"
+            >
+              {trafficBusy ? '生成中...' : '仿真'}
+            </button>
+          </div>
+          {trafficResult && (
+            <div className="mt-2 space-y-1.5">
+              <div className="grid grid-cols-3 gap-2 text-[10px]">
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">期望间隔</div><div className="font-mono text-[var(--element-bg)]">{trafficResult.expected_interval_ms ?? '—'} ms</div></div>
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">实际平均</div><div className="font-mono text-[var(--element-bg)]">{trafficResult.avg_ms} ms</div></div>
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">min–max</div><div className="font-mono text-[var(--element-bg)]">{trafficResult.min_ms}–{trafficResult.max_ms}</div></div>
+              </div>
+              <div className="text-[10px] text-neutral-400">间隔序列（ms）：<span className="font-mono">{trafficResult.intervals_ms.join(', ')}</span></div>
+            </div>
+          )}
+        </CollapsibleSection>
+
+        {/* 路由决策仿真 */}
+        <CollapsibleSection
+          title="路由决策仿真"
+          storageKey="fw_gateway_route_sim"
+          defaultOpen={false}
+          accent="defense"
+        >
+          <div className="space-y-2">
+            <textarea
+              value={routeJson}
+              onChange={(e) => setRouteJson(e.target.value)}
+              rows={4}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={handleRoute}
+                disabled={routeBusy}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40"
+              >
+                {routeBusy ? '仿真中...' : '仿真选路'}
+              </button>
+              <button
+                onClick={() => { setRouteJson(ROUTE_SAMPLE); setRouteResult(null); }}
+                className="btn-press px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 border border-black/10 dark:border-stone-700/50"
+              >
+                载入示例
+              </button>
+            </div>
+            <p className="text-[10px] text-neutral-400">JSON 数组：`[{url, region, error_rate, ewma_rtt, rtt_gradient}]`，按信誉选出非故障最高分节点。</p>
+            {routeResult && (
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-[var(--element-bg)] font-medium">选中</span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">{routeResult.selected ?? '（无可用节点）'}</span>
+                  <span className="ml-auto text-[10px] text-neutral-400">活跃 {routeResult.active} · 备用 {routeResult.standby} · 冗余 {(routeResult.redundancy_ratio * 100).toFixed(0)}%</span>
+                </div>
+                {routeResult.nodes.map((n, i) => (
+                  <div key={i} className="flex items-center gap-2 text-[11px] rounded border border-black/5 dark:border-stone-700/40 p-1">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${n.url === routeResult.selected ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : n.is_failing ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400' : 'bg-black/5 dark:bg-white/10 text-neutral-600 dark:text-stone-300'}`}>{n.reputation.toFixed(0)}</span>
+                    <span className="font-mono text-[var(--element-bg)] truncate">{n.url}</span>
+                    <span className="ml-auto text-[10px] text-neutral-400">err-{n.error_penalty.toFixed(1)} rtt-{n.rtt_penalty.toFixed(1)} g-{n.gradient_penalty.toFixed(1)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        {/* 策略仿真 @rotate/@throttle */}
+        <CollapsibleSection
+          title="策略仿真 @rotate/@throttle"
+          storageKey="fw_gateway_strategy_sim"
+          defaultOpen={false}
+          accent="defense"
+        >
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <select
+                value={stratRouting}
+                onChange={(e) => setStratRouting(e.target.value)}
+                className="px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+              >
+                <option value="direct">直连</option>
+                <option value="proxy">代理</option>
+                <option value="stealth">隐身</option>
+              </select>
+              <input
+                type="range"
+                min={5}
+                max={100}
+                step={5}
+                value={stratRatio}
+                onChange={(e) => setStratRatio(Number(e.target.value))}
+                className="flex-1 h-1.5 bg-black/10 dark:bg-white/10 rounded-full appearance-none cursor-pointer accent-[var(--element-bg)]"
+              />
+              <span className="text-xs font-mono w-12 text-right">{stratRatio}%</span>
+              <button
+                onClick={handleStrategy}
+                disabled={stratBusy}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40"
+              >
+                {stratBusy ? '仿真中...' : '仿真'}
+              </button>
+            </div>
+            {stratResult && (
+              <div className="grid grid-cols-3 gap-2 text-[10px]">
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">路由</div><div className="font-medium text-[var(--element-bg)]">{stratResult.routing_cn}</div></div>
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">超时</div><div className="font-mono text-[var(--element-bg)]">{(stratResult.request_timeout_ms / 1000).toFixed(1)}s</div></div>
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">并发</div><div className="font-mono text-[var(--element-bg)]">{stratResult.max_concurrent}</div></div>
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">静默间隔</div><div className="font-mono text-[var(--element-bg)]">~{stratResult.est_interval_silent_ms} ms</div></div>
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">突发间隔</div><div className="font-mono text-[var(--element-bg)]">~{stratResult.est_interval_burst_ms} ms</div></div>
+                <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">高优先豁免</div><div className="text-[var(--element-bg)]">{stratResult.high_priority_bypass ? '是' : '否'}</div></div>
+              </div>
+            )}
+          </div>
         </CollapsibleSection>
 
         {/* 状态概览 */}
