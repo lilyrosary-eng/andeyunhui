@@ -1282,6 +1282,53 @@ pub fn gongfang_automation_divergence(
     }
 }
 
+/// 自动化：探针调整器实验——模拟噪声幅度自适应试探（成功加压制/失败回退细化）
+///
+/// success 序列为 bool 数组：true=未触发风控(成功)，false=触发(失败/回退)。
+/// 观察幅度如何自动爬升试探边界，命中失败后回退上次成功值并减小步长。
+#[tauri::command]
+pub fn gongfang_automation_probe(successes: Vec<bool>) -> Result<serde_json::Value, String> {
+    let successes: Vec<bool> = successes;
+    if successes.is_empty() {
+        return Err("successes 不能为空（true=成功/false=失败回退）".to_string());
+    }
+    #[cfg(feature = "automation")]
+    {
+        use crate::automation::baseline::ProbeAdjuster;
+        let mut ap = ProbeAdjuster::new(0.5, 3.0, 0.2);
+        let mut steps: Vec<serde_json::Value> = Vec::with_capacity(successes.len());
+        let mut rollbacks = 0u32;
+        for ok in &successes {
+            let before = ap.current();
+            ap.feedback(*ok);
+            if !ok {
+                rollbacks += 1;
+            }
+            steps.push(serde_json::json!({
+                "ok": ok,
+                "amplitude_before": (before * 100.0).round() / 100.0,
+                "amplitude_after": (ap.current() * 100.0).round() / 100.0,
+            }));
+        }
+        let final_amp = (ap.current() * 100.0).round() / 100.0;
+        Ok(serde_json::json!({
+            "min": 0.5, "max": 3.0, "initial_step": 0.2,
+            "steps": steps,
+            "rollbacks": rollbacks,
+            "final_amplitude": final_amp,
+            "note": format!(
+                "{} 步内回退 {} 次 → 最终噪声幅度 {:.2}。命中风控自动回退并细化步长，未命中则试探性加压制。",
+                successes.len(), rollbacks, final_amp
+            ),
+        }))
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = successes;
+        Err("automation feature 未启用，请用 --features gongfang-automation 编译".to_string())
+    }
+}
+
 // ============ 网关框架专属命令 ============
 
 /// 网关节点摘要（命令层类型，始终编译）

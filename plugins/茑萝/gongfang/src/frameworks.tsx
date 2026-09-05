@@ -203,6 +203,11 @@ interface AutionTrajectoryReport {
 interface AutionDivergenceReport {
   template: string; multidim: number; single: number; verdict: string;
 }
+interface AutionProbeReport {
+  min: number; max: number; initial_step: number;
+  steps: { ok: boolean; amplitude_before: number; amplitude_after: number }[];
+  rollbacks: number; final_amplitude: number; note: string;
+}
 
 // ============ 网关框架结果类型（与 Rust 端 commands.rs 字段对齐） ============
 interface GatewayNodeSummary {
@@ -2512,6 +2517,22 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     } catch { setDivResult(null); } finally { setDivBusy(false); }
   }, [trajStartX, trajStartY, trajEndX, trajEndY, divTpl]);
 
+  // 探针调整器实验
+  const [probeSeq, setProbeSeq] = useState('T T T T F T T');
+  const [probeResult, setProbeResult] = useState<AutionProbeReport | null>(null);
+  const [probeBusy, setProbeBusy] = useState(false);
+
+  const parseProbe = (s: string): boolean[] => s.split(/[\s,]+/).map((t) => t.trim().toUpperCase()).filter(Boolean).map((t) => t[0] !== 'F');
+
+  const handleProbe = useCallback(async () => {
+    setProbeBusy(true);
+    try {
+      const b = parseProbe(probeSeq);
+      if (!b.length) { setProbeResult(null); return; }
+      setProbeResult(await tauriInvoke<AutionProbeReport>('gongfang_automation_probe', { successes: b }));
+    } catch { setProbeResult(null); } finally { setProbeBusy(false); }
+  }, [probeSeq]);
+
   const lvInfo = levelDesc(humanizeLevel);
 
   // 找出成功率最高的模板（热迁移的目标）
@@ -2592,6 +2613,47 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                   <span className="text-[10px] text-neutral-400">多维散度 <span className="font-mono text-[var(--element-bg)]">{divResult.multidim}</span> · 单向 {divResult.single}</span>
                 </div>
                 <p className="text-[10px] text-neutral-400 leading-relaxed">直线匀速轨迹是典型自动化特征，对照拟人模板应判定为「可疑/异常」。</p>
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        {/* 探针调整器实验 */}
+        <CollapsibleSection title="探针调整器（噪声幅度自适应）" storageKey="fw_automation_lab_probe" defaultOpen={false} accent="info">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={probeSeq}
+                onChange={(e) => setProbeSeq(e.target.value)}
+                placeholder="T/F 序列：T=成功(未触发风控) F=失败(回退)"
+                className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400"
+              />
+              <button onClick={handleProbe} disabled={probeBusy} className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">{probeBusy ? '模拟中...' : '模拟'}</button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[
+                { label: '全成功', v: 'T T T T T T T T' },
+                { label: '先成功再失败回退', v: 'T T T T F T T' },
+                { label: '反复触发风控', v: 'T F T F T F' },
+              ].map((p) => (
+                <button key={p.label} onClick={() => { setProbeSeq(p.v); setProbeResult(null); }} className="btn-press px-2 py-1 rounded-lg text-[10px] text-neutral-500 dark:text-stone-400 border border-black/10 dark:border-stone-700/50">{p.label}</button>
+              ))}
+            </div>
+            <p className="text-[10px] text-neutral-400">观察幅度从 0.5 起自动试探爬升，命中失败(F)回退到上次成功值并细化步长，未命中(T)继续加压制——模拟风控边界搜寻。</p>
+            {probeResult && (
+              <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-2 space-y-1.5">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-[var(--element-bg)] font-medium">最终幅度</span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-sky-500/15 text-sky-600 dark:text-sky-400">{probeResult.final_amplitude}</span>
+                  <span className="ml-auto text-[10px] text-neutral-400">{probeResult.rollbacks} 次回退</span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {probeResult.steps.map((s, i) => (
+                    <span key={i} className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${s.ok ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-rose-500/15 text-rose-600 dark:text-rose-400'}`}>{s.amplitude_after.toFixed(2)}</span>
+                  ))}
+                </div>
+                <div className="text-[10px] text-neutral-400">{probeResult.note}</div>
               </div>
             )}
           </div>
