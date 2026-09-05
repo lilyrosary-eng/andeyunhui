@@ -1827,7 +1827,7 @@ pub fn gongfang_ai_knowledge_stats() -> Result<serde_json::Value, String> {
 
 /// AI 知识库新增条目：类别 + 标题 + 内容 + 标签（运行时写入全局知识库，充实 RAG）
 #[tauri::command]
-pub fn gongfang_ai_knowledge_add(
+pub async fn gongfang_ai_knowledge_add(
     title: String,
     content: String,
     tags: Option<Vec<String>>,
@@ -1871,7 +1871,10 @@ pub fn gongfang_ai_knowledge_add(
     let id = format!("{}-{}", slug, ts);
     let entry = KnowledgeEntry { id: id.clone(), title, content, tags, category };
     let kb = crate::kernel::knowledge::global();
-    kb.add(entry);
+    // 落盘(JSON 写)是阻塞 I/O，放入 spawn_blocking 避免占用 async 线程
+    tokio::task::spawn_blocking(move || kb.add(entry))
+        .await
+        .map_err(|e| format!("知识库写入任务失败: {}", e))?;
     // 返回"分类中文名 + 当前规模"，供前端确认并刷新
     let cat_label = match crate::kernel::knowledge::global().get(&id).map(|e| e.category) {
         Some(KnowledgeCategory::AntiBot) => "反爬",
@@ -1885,14 +1888,19 @@ pub fn gongfang_ai_knowledge_add(
     }))
 }
 
-/// AI 知识库删除条目：按 id 移除（含索引重建）
+/// AI 知识库删除条目：按 id 移除（含索引重建 + 落盘）
 #[tauri::command]
-pub fn gongfang_ai_knowledge_remove(id: String) -> Result<serde_json::Value, String> {
+pub async fn gongfang_ai_knowledge_remove(id: String) -> Result<serde_json::Value, String> {
     let id = id.trim().to_string();
     if id.is_empty() {
         return Err("id 不能为空".to_string());
     }
-    let removed = crate::kernel::knowledge::global().remove(&id);
+    let kb = crate::kernel::knowledge::global();
+    let target = id.clone();
+    // 删除含索引重建 + JSON 落盘（阻塞 I/O），放入 spawn_blocking
+    let removed = tokio::task::spawn_blocking(move || kb.remove(&target))
+        .await
+        .map_err(|e| format!("知识库删除任务失败: {}", e))?;
     Ok(serde_json::json!({ "removed": removed, "id": id }))
 }
 

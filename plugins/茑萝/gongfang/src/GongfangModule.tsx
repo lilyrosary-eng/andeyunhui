@@ -62,19 +62,31 @@ const LogIcon = (
 );
 
 // ============ Tab 按钮 ============
-function TabButton({ active, onClick, icon, label, badge }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; badge?: string }) {
+function TabButton({ active, onClick, icon, label, badge, badgeTone, disabled, disabledReason }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; badge?: string; badgeTone?: 'ok' | 'warn' | 'neutral'; disabled?: boolean; disabledReason?: string }) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
+      title={disabledReason}
       className={`btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-        active
+        disabled
+          ? 'cursor-not-allowed text-neutral-400 dark:text-stone-500 opacity-60'
+          : active
           ? 'bg-[var(--element-muted)] text-[var(--element-bg)]'
           : 'text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200 hover:bg-black/5 dark:hover:bg-white/5'
       }`}
     >
       {icon}
       {label}
-      {badge && <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-600 dark:text-amber-400">{badge}</span>}
+      {badge && (
+        <span className={`ml-1 px-1.5 py-0.5 rounded text-[10px] ${
+          badgeTone === 'ok'
+            ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+            : badgeTone === 'warn'
+            ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400'
+            : 'bg-neutral-500/10 text-neutral-500 dark:text-stone-400'
+        }`}>{badge}</span>
+      )}
     </button>
   );
 }
@@ -106,6 +118,24 @@ interface TopSituation {
   generation?: number;
 }
 
+// gongfang_status.features：标注各子框架是否随内核编译（未编译的前端置灰，不做假可用）
+interface Features {
+  crawler: boolean;
+  reverse: boolean;
+  pentest: boolean;
+  automation: boolean;
+  gateway: boolean;
+}
+
+// TabKey → features 字段（用于按编译能力优雅降级）
+const TAB_FEATURE: Record<TabKey, keyof Features> = {
+  crawler: 'crawler',
+  reverse: 'reverse',
+  pentest: 'pentest',
+  automation: 'automation',
+  gateway: 'gateway',
+};
+
 function GongfangModule() {
   const [accepted, setAccepted] = useState<boolean>(() => isDisclaimerAccepted());
   const [tab, setTab] = useState<TabKey>('crawler');
@@ -116,6 +146,9 @@ function GongfangModule() {
   // 顶部态势感知条：轻量拉取 gongfang_status（2s 轮询，仅 accepted 后）
   const [situation, setSituation] = useState<TopSituation | null>(null);
   const { logs, addLog, clearLog } = useAuditLog();
+  // 编译能力（features）+ 拉取失败标志：feature 未编译的框架前端置灰
+  const [features, setFeatures] = useState<Features | null>(null);
+  const [featureWarn, setFeatureWarn] = useState(false);
 
   // Tauri invoke 封装（顶部态势感知条用，统一走沙箱 hostApi，已加入白名单）
   const fetchSituation = useCallback(async () => {
@@ -125,6 +158,7 @@ function GongfangModule() {
         strategy: { phase: string; qps: number; generation: number };
         reward: number;
         error_rate: number;
+        features: Features;
       }>('gongfang_status');
       setSituation({
         running: s.running,
@@ -134,8 +168,10 @@ function GongfangModule() {
         qps: s.strategy?.qps,
         generation: s.strategy?.generation,
       });
+      if (s.features) setFeatures(s.features);
+      setFeatureWarn(false);
     } catch {
-      /* 内核未启动或命令不可用 */
+      setFeatureWarn(true);
     }
   }, []);
 
@@ -237,11 +273,29 @@ function GongfangModule() {
 
       {/* 五大框架 Tab + 信息台切换 */}
       <div className="flex items-center gap-1 px-5 py-2 border-b border-white/60 dark:border-stone-700/30">
-        <TabButton active={tab === 'crawler'} onClick={() => switchTab('crawler')} icon={CrawlerIcon} label="网络爬虫" badge="就绪" />
-        <TabButton active={tab === 'reverse'} onClick={() => switchTab('reverse')} icon={ReverseIcon} label="逆向工程" badge="骨架" />
-        <TabButton active={tab === 'pentest'} onClick={() => switchTab('pentest')} icon={PentestIcon} label="渗透测试" badge="骨架" />
-        <TabButton active={tab === 'automation'} onClick={() => switchTab('automation')} icon={AutoIcon} label="自动化测试" badge="骨架" />
-        <TabButton active={tab === 'gateway'} onClick={() => switchTab('gateway')} icon={GatewayIcon} label="API 网关" badge="骨架" />
+        {featureWarn && <span className="text-[10px] text-amber-600 dark:text-amber-400 mr-2" title="gongfang_status 拉取失败，无法确认各框架编译能力">状态不可用</span>}
+        {([
+          { key: 'crawler' as TabKey, icon: CrawlerIcon, label: '网络爬虫' },
+          { key: 'reverse' as TabKey, icon: ReverseIcon, label: '逆向工程' },
+          { key: 'pentest' as TabKey, icon: PentestIcon, label: '渗透测试' },
+          { key: 'automation' as TabKey, icon: AutoIcon, label: '自动化测试' },
+          { key: 'gateway' as TabKey, icon: GatewayIcon, label: 'API 网关' },
+        ]).map((t) => {
+          const enabled = features ? features[TAB_FEATURE[t.key]] : true; // 未取到前不拦截
+          return (
+            <TabButton
+              key={t.key}
+              active={tab === t.key}
+              onClick={() => switchTab(t.key)}
+              icon={t.icon}
+              label={t.label}
+              disabled={!enabled}
+              disabledReason="该框架未随当前内核编译，请用 --features 构建后再使用"
+              badge={features === null ? undefined : enabled ? '就绪' : '未编译'}
+              badgeTone={enabled ? 'ok' : 'warn'}
+            />
+          );
+        })}
         <div className="flex-1" />
         {/* 快捷键提示 */}
         <span className="text-[10px] text-neutral-400 mr-1 hidden md:inline">快捷键 1-5 切框架 · I 信息台 · T 目标 · L 审计</span>
@@ -283,11 +337,20 @@ function GongfangModule() {
         <div className="flex-1 flex flex-col h-full overflow-hidden">
           {/* 框架内容区 */}
           <div className={`overflow-hidden ${showInfo ? 'flex-1 min-h-0' : 'flex-1'}`}>
-            {tab === 'crawler' && <CrawlerPanel addLog={addLog} />}
-            {tab === 'reverse' && <ReversePanel addLog={addLog} />}
-            {tab === 'pentest' && <PentestPanel addLog={addLog} />}
-            {tab === 'automation' && <AutomationPanel addLog={addLog} />}
-            {tab === 'gateway' && <GatewayPanel addLog={addLog} />}
+            {features && !features[TAB_FEATURE[tab]] ? (
+              <div className="h-full flex flex-col items-center justify-center gap-2 text-center px-6">
+                <p className="text-sm font-medium text-neutral-500 dark:text-stone-400">该框架未随当前内核编译</p>
+                <p className="text-xs text-neutral-400 max-w-sm">当前二进制未启用对应 feature，命令不可用。请用 <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono text-[10px]">--features gongfang-...</code> 重新构建后再使用。</p>
+              </div>
+            ) : (
+              <>
+                {tab === 'crawler' && <CrawlerPanel addLog={addLog} />}
+                {tab === 'reverse' && <ReversePanel addLog={addLog} />}
+                {tab === 'pentest' && <PentestPanel addLog={addLog} />}
+                {tab === 'automation' && <AutomationPanel addLog={addLog} />}
+                {tab === 'gateway' && <GatewayPanel addLog={addLog} />}
+              </>
+            )}
           </div>
 
           {/* 底部信息台：三栏可独立折叠（时序图 + 事件流 + AI 推理日志）

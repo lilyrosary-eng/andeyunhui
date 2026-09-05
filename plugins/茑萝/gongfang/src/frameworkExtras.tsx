@@ -81,6 +81,7 @@ export function CrawlerUrlQueue() {
   const [results, setResults] = useState<CrawlResultEvt[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
   const running = useKernelRunning();
   const invoke = (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke;
 
@@ -88,7 +89,10 @@ export function CrawlerUrlQueue() {
     try {
       const s = await invoke<CrawlStats>('gongfang_crawler_stats');
       setStats(s);
-    } catch { /* feature 未启用或内核未运行 */ }
+      setErrMsg(null);
+    } catch {
+      setErrMsg('无法获取爬虫统计（feature 未编译或内核未启动）');
+    }
   }, [invoke]);
 
   // 订阅 crawl_result 事件：实时回流抓取结果，并刷新统计
@@ -121,9 +125,11 @@ export function CrawlerUrlQueue() {
     try {
       await invoke('gongfang_inject', { cmd: { Focus: { url } } });
       setInput('');
+      setErrMsg(null);
       refreshStats();
     } catch (e) {
       console.warn('[crawler] 播种失败（需先启动内核）：', e);
+      setErrMsg('播种失败：内核未启动或 feature 未启用');
     } finally {
       setBusy(false);
     }
@@ -143,12 +149,14 @@ export function CrawlerUrlQueue() {
             <span className="px-1 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400">待爬 {stats.pending}</span>
             <span className="px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">已抓 {stats.visited}</span>
             <span className="px-1 py-0.5 rounded bg-neutral-500/15 text-neutral-500 dark:text-stone-400">共 {stats.total}</span>
-          </span>
-        ) : (
+          </span> : (
           <span className="text-[10px] text-neutral-400">内核未启动</span>
         )
       }
     >
+      {errMsg && (
+        <div className="text-[11px] text-rose-600 dark:text-rose-400 bg-rose-500/10 rounded-lg px-2.5 py-1.5 mb-1">{errMsg}</div>
+      )}
       <div className="flex items-center gap-2">
         <input
           type="text"

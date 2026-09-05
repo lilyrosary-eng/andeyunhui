@@ -169,8 +169,14 @@ pub async fn chat(profile: &AiProfile, messages: Vec<ChatMessage>) -> Result<Str
         .await
         .map_err(|e| format!("AI 响应解析失败: {}", e))?;
 
-    v["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "AI 响应缺少 content 字段".to_string())
+    // 安全链解析：逐个字段 .get，缺失时返回明确错误而非 panic
+    let content = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first())
+        .and_then(|f| f.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| "AI 响应缺少 content 字段".to_string())?;
+    Ok(content.to_string())
 }
