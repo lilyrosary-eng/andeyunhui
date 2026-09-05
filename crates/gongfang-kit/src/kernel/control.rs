@@ -57,6 +57,8 @@ pub struct ControlPlane {
     #[allow(dead_code)]
     app: AppHandle,
     profile: AiProfile,
+    /// 是否配置了 API Key（无 key 时跳过 L1/L2，直走启发式 L0，避免空跑 LLM）
+    has_key: bool,
     strategy: Arc<StrategyStore>,
     priority: Arc<PriorityCommandQueue>,
     reward: Arc<RewardSignal>,
@@ -78,9 +80,11 @@ impl ControlPlane {
         tx: broadcast::Sender<StrategyDelta>,
         event_bus: Arc<EventBus>,
     ) -> Self {
+        let has_key = !profile.api_key.trim().is_empty();
         Self {
             app,
             profile,
+            has_key,
             strategy,
             priority,
             reward,
@@ -257,6 +261,22 @@ impl ControlPlane {
                 None,
                 &format!("sig={:?} obs={}", sig.0, obs),
                 "(规则缓存命中，跳过 LLM)",
+                delta.clone(),
+            );
+            return delta;
+        }
+
+        // 无 AI Key：跳过 L1/L2 LLM，直走启发式 L0（避免空跑大模型请求/净失败计数）
+        if !self.has_key {
+            let delta = self.l0_fallback();
+            events::emit_ai_reasoning(
+                &self.event_bus,
+                ReasoningLevel::L0,
+                0,
+                true,
+                None,
+                &obs,
+                "(无 AI Key，启发式 L0 兜底)",
                 delta.clone(),
             );
             return delta;

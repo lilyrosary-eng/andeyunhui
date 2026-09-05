@@ -2546,6 +2546,35 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
 
   const lvInfo = levelDesc(humanizeLevel);
 
+  // Pivot 真实注入目标（绝对屏幕坐标）：未设置时数据面跳过注入，不做假坐标
+  const [tgtX, setTgtX] = useState('800');
+  const [tgtY, setTgtY] = useState('600');
+  const [tgtMsg, setTgtMsg] = useState<string | null>(null);
+  const [tgtBusy, setTgtBusy] = useState(false);
+
+  const handleSetTarget = useCallback(async () => {
+    const x = Number(tgtX);
+    const y = Number(tgtY);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) { setTgtMsg('坐标必须为数字'); return; }
+    setTgtBusy(true);
+    try {
+      await tauriInvoke('gongfang_automation_target', { x, y });
+      setTgtMsg(`已设置注入目标 (${x}, ${y})`);
+    } catch {
+      setTgtMsg('设置失败：自动化 feature 未编译或内核未启动');
+    } finally { setTgtBusy(false); }
+  }, [tgtX, tgtY]);
+
+  const handleClearTarget = useCallback(async () => {
+    setTgtBusy(true);
+    try {
+      await tauriInvoke('gongfang_automation_target_clear');
+      setTgtMsg('已清除注入目标（Pivot 将跳过真实注入）');
+    } catch {
+      setTgtMsg('清除失败');
+    } finally { setTgtBusy(false); }
+  }, []);
+
   // 找出成功率最高的模板（热迁移的目标）
   const bestIdx = fitness.length > 0
     ? fitness.reduce((best, cur, i) => cur.success_rate > fitness[best].success_rate ? i : best, 0)
@@ -2913,6 +2942,27 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           <p className="text-[10px] text-neutral-400 leading-relaxed">
             热迁移：在运行时不重启内核的前提下，通过 arc-swap 切换策略指针到最优模板；偏离度越低，行为越接近真实人类。
           </p>
+        </CollapsibleSection>
+
+        {/* Pivot 真实注入目标（绝对屏幕坐标；未设置则数据面跳过注入，不做假坐标） */}
+        <CollapsibleSection title="Pivot 注入目标" storageKey="fw_automation_pivot_target" defaultOpen={false} accent="info"
+          right={<span className="text-[10px] text-neutral-400">SendInput 真实注入坐标</span>}
+        >
+          <div className="space-y-1.5">
+            <div className="text-[10px] text-neutral-500 dark:text-stone-400 leading-relaxed">
+              该坐标是 Pivot 阶段 <code className="px-1 rounded bg-black/5 dark:bg-white/10 font-mono">SendInput</code> 将真实鼠标移到的绝对屏幕位置（px）。
+              未设置时内核<b>跳过真实注入</b>，不会往假坐标移动鼠标——一切轨迹只用于演示。设置后请谨慎使用。
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-[10px] text-neutral-400">X</label>
+              <input type="number" value={tgtX} onChange={(e) => setTgtX(e.target.value)} className="w-20 px-2 py-1 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]" />
+              <label className="text-[10px] text-neutral-400">Y</label>
+              <input type="number" value={tgtY} onChange={(e) => setTgtY(e.target.value)} className="w-20 px-2 py-1 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]" />
+              <button onClick={handleSetTarget} disabled={tgtBusy} className="btn-press px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">{tgtBusy ? '保存中...' : '设置目标'}</button>
+              <button onClick={handleClearTarget} disabled={tgtBusy} className="btn-press px-2.5 py-1 rounded-lg text-[11px] text-rose-600 dark:text-rose-400 border border-rose-500/30 hover:bg-rose-500/10 disabled:opacity-40">清除</button>
+            </div>
+            {tgtMsg && <div className="text-[10px] text-neutral-500 dark:text-stone-400">{tgtMsg}</div>}
+          </div>
         </CollapsibleSection>
 
         {/* P1：任务列表 + 模板对比（前端状态机 + 基于 fitness 找最优模板） */}

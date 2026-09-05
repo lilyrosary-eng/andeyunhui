@@ -43,6 +43,27 @@ use std::sync::Arc;
 use crate::kernel::reward::RewardSignal;
 use crate::kernel::strategy::Strategy;
 
+/// Pivot 注入的真实目标坐标（绝对屏幕坐标，单位 px）。
+/// 由前端通过 gongfang_automation_target 设置；未设置时 Pivot 跳过真实注入，
+/// 避免往硬编码假坐标 SendInput（这是"不做玩具"的关键：管线真、目标必须是真的）。
+static PIVOT_TARGET: once_cell::sync::Lazy<std::sync::Mutex<Option<(f32, f32)>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+
+/// 读取当前注入目标（None = 未设置）
+pub fn target() -> Option<(f32, f32)> {
+    *PIVOT_TARGET.lock().unwrap()
+}
+
+/// 设置注入目标坐标（覆盖）
+pub fn set_target(x: f32, y: f32) {
+    *PIVOT_TARGET.lock().unwrap() = Some((x, y));
+}
+
+/// 清除注入目标（回到"不注入"状态）
+pub fn clear_target() {
+    *PIVOT_TARGET.lock().unwrap() = None;
+}
+
 /// Pivot 阶段执行入口（数据面 Tick 调用）
 ///
 /// 自动化框架在 Pivot Phase 触发：
@@ -77,8 +98,13 @@ pub async fn execute_pivot(s: &Strategy, reward: &Arc<RewardSignal>) {
     );
 
     // 2. 生成贝塞尔轨迹（从原点到目标，含过冲回正）
-    //    实际场景中目标位置由前端 DOM 解析传入，这里用占位演示
-    let target = (800.0f32, 600.0f32);
+    //    目标为绝对屏幕坐标，由前端 gongfang_automation_target 设置；未设置则跳过真实注入
+    let Some(target) = target() else {
+        log::warn!(
+            "[automation] 未设置 Pivot 注入目标（gongfang_automation_target），跳过真实注入，避免假坐标"
+        );
+        return;
+    };
     let trajectory = bezier::generate_trajectory(
         (0.0, 0.0),
         target,

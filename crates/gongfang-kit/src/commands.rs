@@ -97,7 +97,9 @@ pub async fn gongfang_start(app: AppHandle, profile_id: Option<String>) -> Resul
     }
     let profile = resolve_profile(&profiles, profile_id);
     if profile.api_key.trim().is_empty() {
-        return Err("未配置 AI API Key，请先在全局设置 → 模型 中填写".to_string());
+        log::warn!(
+            "[gongfang] 未配置 AI API Key：L1/L2 大模型推理不可用，内核将以启发式 L0 兜底启动"
+        );
     }
     let engine = Arc::new(KernelEngine::new(app, profile));
     let handle = engine.start();
@@ -1329,6 +1331,36 @@ pub fn gongfang_automation_probe(successes: Vec<bool>) -> Result<serde_json::Val
     #[cfg(not(feature = "automation"))]
     {
         let _ = successes;
+        Err("automation feature 未启用，请用 --features gongfang-automation 编译".to_string())
+    }
+}
+
+/// 设置 Pivot 真实注入目标（绝对屏幕坐标，px）。
+/// 未设置时数据面 Pivot 跳过真实 SendInput（避免假坐标），设置后注入真实轨迹到该点。
+#[tauri::command]
+pub fn gongfang_automation_target(x: f32, y: f32) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    {
+        crate::automation::set_target(x, y);
+        Ok(serde_json::json!({ "x": x, "y": y, "set": true }))
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (x, y);
+        Err("automation feature 未启用，请用 --features gongfang-automation 编译".to_string())
+    }
+}
+
+/// 清除 Pivot 注入目标（回到"不注入"状态）
+#[tauri::command]
+pub fn gongfang_automation_target_clear() -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    {
+        crate::automation::clear_target();
+        Ok(serde_json::json!({ "cleared": true }))
+    }
+    #[cfg(not(feature = "automation"))]
+    {
         Err("automation feature 未启用，请用 --features gongfang-automation 编译".to_string())
     }
 }

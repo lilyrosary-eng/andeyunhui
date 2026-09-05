@@ -266,6 +266,8 @@ const ALLOWED_COMMANDS = new Set([
   'gongfang_automation_trajectory',
   'gongfang_automation_divergence',
   'gongfang_automation_probe',
+  'gongfang_automation_target',
+  'gongfang_automation_target_clear',
   'gongfang_gateway_status',
   'gongfang_gateway_rotate',
   'gongfang_gateway_throttle',
