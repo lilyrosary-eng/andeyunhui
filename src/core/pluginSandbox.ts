@@ -273,6 +273,7 @@ const ALLOWED_COMMANDS = new Set([
   'gongfang_gateway_shaping_demo',
   'gongfang_gateway_obfuscate',
   'gongfang_gateway_entropy_demo',
+  'gongfang_gateway_curl',
   'gongfang_events_recent',
   'gongfang_metrics_history',
   'gongfang_ai_reasoning_recent',

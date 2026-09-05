@@ -275,6 +275,15 @@ interface EntropyReport {
   noise_path: string | null;
   verdict: string;
 }
+interface CurlReport {
+  command: string;
+  interval_ms: number;
+  in_burst: boolean;
+  fingerprint: string;
+  header_order: string[];
+  mode: string;
+  note: string;
+}
 
 type InjectType = 'Focus' | 'Bypass' | 'Pause' | 'Resume';
 
@@ -2776,6 +2785,21 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
       setEntropyResult(await tauriInvoke<EntropyReport>('gongfang_gateway_entropy_demo', { patterns }));
     } catch { setEntropyResult(null); } finally { setEntropyBusy(false); }
   }, [entropyInput]);
+
+  // 隐身请求生成 (curl)
+  const [curlUrl, setCurlUrl] = useState('https://example.com');
+  const [curlRaw, setCurlRaw] = useState('');
+  const [curlMode, setCurlMode] = useState('stealth');
+  const [curlResult, setCurlResult] = useState<CurlReport | null>(null);
+  const [curlBusy, setCurlBusy] = useState(false);
+
+  const handleCurl = useCallback(async () => {
+    if (!curlUrl.trim()) return;
+    setCurlBusy(true);
+    try {
+      setCurlResult(await tauriInvoke<CurlReport>('gongfang_gateway_curl', { url: curlUrl.trim(), raw: curlRaw.trim() || null, mode: curlMode }));
+    } catch { setCurlResult(null); } finally { setCurlBusy(false); }
+  }, [curlUrl, curlRaw, curlMode]);
   const [throttleMsg, setThrottleMsg] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -3241,6 +3265,66 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                     : <span className="ml-auto px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">多样化充分</span>}
                 </div>
                 <div className="text-[11px] text-neutral-500 dark:text-stone-400">{entropyResult.verdict}</div>
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        {/* 隐身请求生成 (curl) */}
+        <CollapsibleSection
+          title="隐身请求生成 (curl)"
+          storageKey="fw_gateway_curl"
+          defaultOpen={false}
+          accent="defense"
+        >
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={curlUrl}
+                onChange={(e) => setCurlUrl(e.target.value)}
+                placeholder="https://example.com"
+                className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+              />
+              <select
+                value={curlMode}
+                onChange={(e) => setCurlMode(e.target.value)}
+                className="px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+              >
+                <option value="direct">直连</option>
+                <option value="proxy">代理</option>
+                <option value="stealth">隐身</option>
+              </select>
+              <button
+                onClick={handleCurl}
+                disabled={curlBusy || !curlUrl.trim()}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40"
+              >
+                {curlBusy ? '生成中...' : '生成'}
+              </button>
+            </div>
+            <textarea
+              value={curlRaw}
+              onChange={(e) => setCurlRaw(e.target.value)}
+              rows={2}
+              placeholder="可选：JSON 请求体（会自动做 Payload 混淆）"
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400"
+            />
+            {curlResult && (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 text-[10px] text-neutral-400">
+                  <span>指纹 {curlResult.fingerprint}</span>
+                  <span>间隔 {curlResult.interval_ms}ms</span>
+                  <span>{curlResult.in_burst ? '突发' : '静默'}</span>
+                  {curlResult.note && <span className="text-amber-600 dark:text-amber-400">{curlResult.note}</span>}
+                </div>
+                <pre className="whitespace-pre-wrap break-all rounded border border-black/10 dark:border-stone-700/50 bg-black/[0.03] dark:bg-white/[0.04] p-2 text-[10px] font-mono text-[var(--element-bg)] overflow-x-auto">{curlResult.command}</pre>
+                <button
+                  onClick={() => navigator.clipboard?.writeText(curlResult.command)}
+                  className="btn-press px-2 py-1 rounded-lg text-[10px] text-neutral-500 dark:text-stone-400 border border-black/10 dark:border-stone-700/50"
+                >
+                  复制
+                </button>
               </div>
             )}
           </div>

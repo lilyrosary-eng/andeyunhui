@@ -1443,6 +1443,83 @@ pub fn gongfang_gateway_entropy_demo(patterns: Vec<String>) -> Result<serde_json
     }
 }
 
+/// 隐身请求生成：把整形建议落地成可直接复制的 curl（指纹 UA + 建议头序 + 可选 Payload 混淆）
+#[tauri::command]
+pub fn gongfang_gateway_curl(
+    url: String,
+    raw: Option<String>,
+    mode: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    #[cfg(feature = "gateway")]
+    {
+        use crate::gateway::shaping::next_advice;
+        let advice = next_advice();
+        let fp = &advice.fingerprint;
+        let mut headers: Vec<(String, String)> = Vec::new();
+        let mut have: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for h in &advice.header_order {
+            let lh = h.to_lowercase();
+            if have.contains(&lh) {
+                continue;
+            }
+            let val = match h.as_str() {
+                "User-Agent" => fp.user_agent.clone(),
+                "Accept" => fp.accept.clone(),
+                "Accept-Language" => fp.accept_language.clone(),
+                "Accept-Encoding" => "gzip, deflate, br".to_string(),
+                "Connection" => "keep-alive".to_string(),
+                _ => String::new(), // Host 等由 curl 推导，其余占位
+            };
+            headers.push((h.clone(), val));
+            have.insert(lh);
+        }
+        if !have.contains("user-agent") {
+            headers.push(("User-Agent".to_string(), fp.user_agent.clone()));
+        }
+        if !have.contains("accept") {
+            headers.push(("Accept".to_string(), fp.accept.clone()));
+        }
+
+        let mut cmd = format!("curl -sS '{}' \\\n", url);
+        for (k, v) in &headers {
+            if v.is_empty() {
+                cmd.push_str(&format!("  -H '{}:' \\\n", k));
+            } else {
+                cmd.push_str(&format!("  -H '{}: {}' \\\n", k, v));
+            }
+        }
+        let mut note = String::new();
+        if let Some(r) = raw {
+            let r = r.trim().to_string();
+            let obf = crate::gateway::shaping::obfuscate_json_payload(&r);
+            if obf != r {
+                note = "（已对 JSON 做 Payload 混淆，注入冗余字段）".to_string();
+            }
+            cmd.push_str(&format!("  --data-raw '{}' \\\n", obf));
+        }
+        cmd.push_str("  --compressed\n");
+
+        Ok(serde_json::json!({
+            "command": cmd,
+            "interval_ms": advice.interval_ms,
+            "in_burst": advice.in_burst,
+            "fingerprint": fp.os,
+            "header_order": advice.header_order,
+            "mode": mode.unwrap_or_else(|| "auto".to_string()),
+            "note": note,
+        }))
+    }
+    #[cfg(not(feature = "gateway"))]
+    {
+        let _ = (url, raw, mode);
+        Err("gateway feature 未启用，请用 --features gongfang-gateway 编译".to_string())
+    }
+}
+
 /// 查询代理节点池（@gateway_pool / 前端面板）
 #[tauri::command]
 pub fn gongfang_gateway_pool() -> Result<Vec<GatewayNodeSummary>, String> {

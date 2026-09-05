@@ -1237,6 +1237,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             gongfang_gateway_shaping_demo,
             gongfang_gateway_obfuscate,
             gongfang_gateway_entropy_demo,
+            gongfang_gateway_curl,
             // 攻防 P0：通用信息层 + 目标工作区
             gongfang_events_recent,
             gongfang_metrics_history,
