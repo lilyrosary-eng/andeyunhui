@@ -10,7 +10,7 @@
 // ============================================================
 const React = window.__HOST_REACT__;
 const hostApi = window.__HOST_API__;
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useCallback } = React;
 
 interface XtermBundle {
   Terminal: any;
@@ -58,7 +58,55 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'exited' | 'error'>('loading');
   const [errMsg, setErrMsg] = useState('');
+  const [toast, setToast] = useState<string | null>(null);
+  // 用 ref 保存 ptyId，便于组件级 pasteText 在 effect 之外也能拿到当前终端写输入
+  const ptyIdRef = useRef<string | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+
+  const showToast = useCallback((text: string) => {
+    setToast(text);
+    setTimeout(() => setToast(null), 1200);
+  }, []);
+
+  // 复制选中文本到剪贴板（优先 navigator.clipboard，兜底 execCommand）
+  const copyText = useCallback((text: string) => {
+    const legacy = () => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      ta.style.pointerEvents = 'none';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch { /* ignore */ }
+      document.body.removeChild(ta);
+      showToast('已复制');
+    };
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(text).then(() => showToast('已复制')).catch(legacy);
+    } else {
+      legacy();
+    }
+  }, [showToast]);
+
+  // 读取剪贴板文本并写入当前终端（模拟粘贴）。优先无痕读剪贴板，失败回退 Rust 命令
+  const pasteText = useCallback(async () => {
+    let text = '';
+    try {
+      const t = await navigator.clipboard.readText();
+      if (t) text = t;
+    } catch { /* 权限/无痕被拒则回退 */ }
+    if (!text) {
+      try {
+        const t = String(await hostApi.invoke('clipboard_read'));
+        if (t) text = t;
+      } catch { /* 读不到就忽略 */ }
+    }
+    if (text && ptyIdRef.current) {
+      hostApi.invoke('pty_write', { id: ptyIdRef.current, data: text }).catch(() => {});
+      showToast('已粘贴');
+    }
+  }, [showToast]);
 
   useEffect(() => {
     let disposed = false;
@@ -96,8 +144,48 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
         const cols = term.cols || 80;
         const rows = term.rows || 24;
 
+        // 终端文本可选中，并支持复制（Ctrl+C / Ctrl+Shift+C / 右键复制选中内容）。
+        // 容器显式放行 user-select；用 capture 阶段 keydown 拦截，避免 WebView2 把 Ctrl+Shift+C 当作 devtools 检查。
+        try { container.style.userSelect = 'text'; } catch { /* ignore */ }
+        const onTermKeyDown = (e: KeyboardEvent) => {
+          if (disposed) return;
+          const mod = e.ctrlKey || e.metaKey;
+          // 粘贴：Ctrl+V / Ctrl+Shift+V / Shift+Insert
+          if (mod && e.code === 'KeyV') {
+            e.preventDefault(); e.stopPropagation(); pasteText(); return;
+          }
+          if (e.shiftKey && e.code === 'Insert') {
+            e.preventDefault(); e.stopPropagation(); pasteText(); return;
+          }
+          // 复制：Ctrl+C / Ctrl+Shift+C
+          const sel = term?.getSelection?.() as string | undefined;
+          if (mod && e.shiftKey && e.code === 'KeyC') {
+            // 无选中也吞掉 Ctrl+Shift+C，避免误触 WebView2 的 devtools 检查视图
+            e.preventDefault(); e.stopPropagation();
+            if (sel) copyText(sel);
+            return;
+          }
+          if (mod && e.code === 'KeyC' && sel) {
+            e.preventDefault(); e.stopPropagation(); copyText(sel);
+          }
+        };
+        container.addEventListener('keydown', onTermKeyDown, true);
+        disposers.push(() => { try { container.removeEventListener('keydown', onTermKeyDown, true); } catch { /* ignore */ } });
+        const onTermContext = (e: MouseEvent) => {
+          if (disposed) return;
+          const sel = term?.getSelection?.() as string | undefined;
+          if (sel) {
+            e.preventDefault(); copyText(sel); // 有选中 → 右键复制选中
+          } else {
+            e.preventDefault(); pasteText();   // 无选中 → 右键粘贴（对齐 Windows 终端惯例）
+          }
+        };
+        container.addEventListener('contextmenu', onTermContext);
+        disposers.push(() => { try { container.removeEventListener('contextmenu', onTermContext); } catch { /* ignore */ } });
+
         // 由模块分配的 ptyId，服务即跑在这个终端里
         ptyId = 'wp_pty_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+        ptyIdRef.current = ptyId;
         await hostApi.invoke('pty_create', { id: ptyId, cwd: cwd || null, cols, rows, env: env || null });
         if (disposed) return;
 
@@ -162,6 +250,7 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
 
         setStatus('ready');
         if (hint) term?.write('\x1b[90m$ ' + hint.replace(/\r?\n/g, ' ') + '\x1b[0m\r\n');
+        term?.write('\r\n\x1b[90m[ Ctrl+C / Ctrl+Shift+C 复制选中 · 右键或 Ctrl+V / Shift+Insert 粘贴 ]\x1b[0m\r\n');
 
         // 等 shell 就绪后把命令写进去执行 —— 服务进程从此常驻此终端
         setTimeout(() => {
@@ -192,6 +281,7 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
         hostApi.invoke('pty_kill', { id: ptyId }).catch(() => {});
       }
       try { term?.dispose(); } catch { /* */ }
+      ptyIdRef.current = null;
     };
     return () => {
       cleanupRef.current?.();
@@ -213,6 +303,11 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
         </div>
       )}
       <div ref={containerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
+      {status === 'ready' && toast && (
+        <div className="absolute bottom-2 right-2 z-20 rounded-md bg-black/70 dark:bg-white/10 px-2 py-1 text-[11px] text-white dark:text-stone-200 shadow">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }

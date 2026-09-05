@@ -596,18 +596,37 @@ function App() {
       return <PluginErrorBoundary pluginId="capsule"><CapsuleSettingsPanel /></PluginErrorBoundary>;
     }
     if (pluginRegistry && (mainPluginIds.includes(activeModule) || subPluginIds.includes(activeModule))) {
+      // 插件模块改为「保活挂载（keep-alive）」：所有插件组件常驻、仅用 display 切换显隐。
+      // 修复：此前按 activeModule 只在激活时渲染单实例 → 切走即卸载 web-interface 组件，
+      // 其 PTY 终端被 pty_kill、运行状态/日志/滚动全部丢失，切回被迫重跑脚本。
+      // 常驻后这些状态全部保留。key 恒为插件 id（稳定），避免 active 切换导致重挂。
       logger.app.mainPluginRenderStart(activeModule, !!pluginRegistry);
-      const def = pluginRegistry.get(activeModule);
-      if (!def) {
-        logger.app.mainPluginMissing(activeModule, pluginRegistry.getAll().map(p => p.id));
+      const defs = pluginRegistry
+        .getAll()
+        .filter((d) => d.kind === 'module' || mainPluginIds.includes(d.id) || subPluginIds.includes(d.id))
+        .filter((d) => d.component);
+      if (defs.length === 0) {
+        logger.app.mainPluginMissing(activeModule, pluginRegistry.getAll().map((p) => p.id));
         return <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500">插件未加载</div>;
       }
-      if (!def.component) {
-        logger.app.mainPluginNoComponent(activeModule, Object.keys(def));
-        return <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500">插件组件缺失</div>;
-      }
-      logger.app.mainPluginRendering(activeModule, typeof def.component, def.name);
-      return <PluginErrorBoundary key={`${activeModule}-${activeReloadKey}`} pluginId={activeModule}><def.component /></PluginErrorBoundary>;
+      return (
+        <>
+          {defs.map((def) => {
+            const show = activeModule === def.id;
+            if (show) logger.app.mainPluginRendering(def.id, typeof def.component, def.name);
+            return (
+              <div
+                key={def.id}
+                className="h-full overflow-hidden"
+                style={{ display: show ? undefined : 'none' }}
+                aria-hidden={show ? undefined : true}
+              >
+                <PluginErrorBoundary pluginId={def.id}>{def.component ? <def.component /> : null}</PluginErrorBoundary>
+              </div>
+            );
+          })}
+        </>
+      );
     }
     return <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500">未找到该模块</div>;
   };
