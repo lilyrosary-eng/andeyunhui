@@ -1,4 +1,7 @@
 # 挑战后端运行时数据（积分/VIP/会话/频控）—— 启动时自动重建，不入库
 data/
+# 可破坏沙箱靶场运行时 DB
+sandbox/data/
 # 放行挑战后端脚本（主仓 *.mjs 规则会误拦）
 !server.mjs
+!reset.mjs
