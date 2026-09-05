@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>防线体系 · 安得云荟</title>
+    <link rel="stylesheet" href="challenge/challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="index.html">安得云荟 · 防线体系</a><div class="nav-links"><a href="fortress.html">堡垒</a><a href="fortress-secure.html">堡垒服务端</a><a href="challenges.html">样本库</a></div></nav>
+
+    <div class="card">
+        <h1>防线体系（反追踪 + 体系攻击对端）</h1>
+        <p class="sub">把「UA → IP隐藏 → 行为 → 指纹 → 频控/签名」化为一个<b>系统会话</b>；反追踪真实能力在此实测（隐藏 IP / egress 轮换 / XFF 混淆）。</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+            <div>
+                <div class="tag" style="margin-bottom:.4rem;">防线分层（服务端权威 /api/system）</div>
+                <div class="mono" style="line-height:1.9;">
+                    ① UA 严检（拒脚本源）<br/>
+                    ② 来源 IP 必须隐藏（须经代理出口）<br/>
+                    ③ 行为分 0.1~0.6<br/>
+                    ④ 指纹一致性<br/>
+                    ⑤ IP 频控退避（连打即 429）
+                </div>
+            </div>
+            <div>
+                <div class="tag" style="margin-bottom:.4rem;">反追踪能力证明（实测观测）</div>
+                <div class="mono" style="line-height:1.9;">
+                    直连  → 出口 <b>127.0.0.1</b>（真实 IP 暴露）<br/>
+                    代理A → 出口 <b>127.0.0.2</b>（IP 已替换）<br/>
+                    代理B → 出口 <b>127.0.0.3</b>（轮换，防一致性追踪）<br/>
+                    XFF   → 注入 <b>203.0.113.7,198.51.100.4</b> 混淆链
+                </div>
+            </div>
+        </div>
+        <div class="hint">体系攻击语义：不隐藏 IP 的攻击者即在 L2 被 403 拦（<code class="mono">来源直连、IP 未隐藏</code>）；经代理隐藏后 5 层全过拿 <code class="mono">SYS_FLAG</code>。用 <code class="mono">gongfang_system_attack</code> 打 `/api/system` 复现。</div>
+    </div>
+
+    <div class="card">
+        <h2>出口 IP 实时观测</h2>
+        <p class="sub">浏览器页面只能直连；经代理的 egress 轮换由后端工具（gongfang_system_attack / curl -x）验证。此处在浏览器可观测到的真实出口：</p>
+        <div class="mono" id="ipout">读取中…</div>
+        <button class="btn mt" id="ipBtn">重新读取直连出口</button>
+        <div class="hint">正面结论：代理出口替换 → 目标只能看到代理的 IP，看不到客户端真实 IP；多代理轮换让跨请求一致性失效。这是可落地的「隐藏 IP + 混淆掩码」机制（非伪造源 IP，而是替换 egress + 旋转）。</div>
+    </div>
+</div>
+<script>
+    const out = document.getElementById('ipout'), btn = document.getElementById('ipBtn');
+    async function readIp() {
+        out.textContent = '读取中…';
+        try { const r = await fetch('/api/ip-echo', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' }); const j = await r.json(); out.textContent = '目标看到的出口: ' + j.remote + (j.xff ? '  XFF: ' + j.xff : ''); }
+        catch (e) { out.textContent = '读取失败：' + e.message + '（请先用 node server.mjs 启动后端）'; }
+    }
+    btn.onclick = readIp; readIp();
+</script>
+</body>
+</html>

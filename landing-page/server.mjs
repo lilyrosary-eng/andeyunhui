@@ -5,7 +5,7 @@
 // 运行：node server.mjs   （默认端口 8787，可用 PORT 覆盖）
 // 说明：密码仅做形态校验（测试站不实际鉴权强度），token 为内存+落盘。
 // ============================================================
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
@@ -160,6 +160,14 @@ async function api(req, res, path, body, ip) {
     return fortressApi(req, res, path, body, ip);
   }
 
+  if (path === '/api/ip-echo') {
+    return send({ remote: ip, xff: req.headers['x-forwarded-for'] || null });
+  }
+
+  if (path.startsWith('/api/system')) {
+    return systemApi(req, res, path, body, ip);
+  }
+
   return fail(res, 404, 'unknown api');
 }
 
@@ -222,6 +230,71 @@ async function fortressApi(req, res, path, body, ip) {
   return fail(res, 404, 'unknown fortress api');
 }
 
+// ============================================================
+// 体系防线 system：把各层防线 + 「来源 IP 隐藏」化为一个系统会话。
+//   L1  UA 严检                          L2  来源 IP 必须隐藏（须经代理出口，非本机直连）
+//   L3  行为分(0.1~0.6)                  L4  指纹一致
+//   L5  频控退避。全过 → 系统 flag。
+// 语义：真实反追踪要求——攻击者不能以直连本机 IP 现身，必须经代理隐藏/轮换出口。
+// ============================================================
+async function systemApi(req, res, path, body, ip) {
+  const send = (o) => json(res, 200, { ok: true, ...o });
+  const ua = String(req.headers['user-agent'] || '');
+  if (!isBrowserUA(ua)) return fail(res, 403, 'UA 被拒（需真实浏览器源）');
+  const rl = rateLimit(ip);
+  if (!rl.allowed) return json(res, 429, { ok: false, ...rl });
+
+  const hidden = ip !== '127.0.0.1' && ip !== '::ffff:127.0.0.1' && ip !== '::1';
+
+  if (path === '/api/system/begin') {
+    const token = randomBytes(16).toString('hex');
+    state.system = state.system || {};
+    state.system[token] = { ip, hidden, layer: 1, ts: Date.now(), ua };
+    persist();
+    return send({ token, layer: 1, layers: 5, hidden_seen: hidden, scheme: 'UA→IP隐藏(须经代理)→行为→指纹→频控' });
+  }
+  if (path === '/api/system/step') {
+    const token = String(body.token || '');
+    const s = (state.system || {})[token];
+    if (!s || s.ip !== ip) return fail(res, 401, '会话无效/来源改变');
+    const claim = Number(body.layer) || 1;
+    if (String(req.headers['x-sign'] || '') !== fsSign(token, claim)) return fail(res, 401, `签名不匹配 layer=${claim}`);
+    if (claim > s.layer + 1) return fail(res, 400, '层序跳跃');
+    // L2：来源 IP 必须隐藏（经代理出口）
+    if (claim >= 2 && !s.hidden) return fail(res, 403, '来源直连、IP 未隐藏：系统要求经由代理出口');
+    // L3：行为分
+    if (claim >= 3) { const b = Number(body.behavior); if (!(b >= 0.1 && b <= 0.6)) return fail(res, 400, '行为分异常'); }
+    // L4：指纹
+    if (claim >= 4) { const f = String(body.fp || ''); if (f.length < 8) return fail(res, 400, '指纹不足'); }
+    s.layer = Math.max(s.layer, claim); persist();
+    if (s.layer >= 5) return send({ done: true, flag: 'SYS_FLAG_' + fsSign(token, 0).slice(0, 16), layer: s.layer, egress_seen: ip, hidden });
+    return send({ layer: s.layer, next_layer: s.layer + 1, hint: s.layer + 1 >= 2 ? 'L2 需经代理出口(隐藏IP)' : '继续' });
+  }
+  return fail(res, 404, 'unknown system api');
+}
+
+// ============================================================
+// 真实 HTTP 正向代理：绑定不同 loopback 别名 → 目标看到的出口 IP 不同。
+// 用于演示「隐藏 IP + egress 轮换」反追踪能力（仅演示代理出口替换机制）。
+// ============================================================
+function createForwardProxy(bindHost, bindPort, egress) {
+  return createServer((req, res) => {
+    let target;
+    try { target = new URL(req.url); } catch { res.writeHead(400); res.end('bad'); return; }
+    if (!/^https?:$/.test(target.protocol)) { res.writeHead(400); res.end('http-only'); return; }
+    const fwd = httpRequest({
+      host: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: target.pathname + target.search,
+      method: req.method,
+      headers: req.headers,
+      localAddress: egress,   // 关键：出口源 IP 绑定到别名
+    }, (fr) => { res.writeHead(fr.statusCode, fr.headers); fr.pipe(res); });
+    fwd.on('error', () => { res.writeHead(502); res.end('proxy error'); });
+    req.pipe(fwd);
+  }).listen(bindPort, bindHost, () => console.log(`[proxy]${bindHost}:${bindPort} egress=${egress}`));
+}
+
 // ---------- 主服务 ----------
 load().then(() => {
   createServer(async (req, res) => {
@@ -242,4 +315,7 @@ load().then(() => {
   }).listen(PORT, () => {
     console.log(`[challenge-server] http://127.0.0.1:${PORT}  · 挑战样本库后端已启动`);
   });
+  // 反追踪演示：两个不同出口别名的正向代理（egress 轮换）
+  createForwardProxy('127.0.0.2', 8798, '127.0.0.2');
+  createForwardProxy('127.0.0.3', 8799, '127.0.0.3');
 });
