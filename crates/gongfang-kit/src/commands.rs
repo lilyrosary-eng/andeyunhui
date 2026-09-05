@@ -1763,6 +1763,143 @@ pub fn gongfang_ai_reasoning_recent(n: Option<usize>) -> Result<Vec<crate::kerne
     }
 }
 
+/// AI 知识库检索：模拟 L2 深度推理的 RAG 注入（返回 top-K 匹配条目）
+#[tauri::command]
+pub fn gongfang_ai_knowledge_search(query: String) -> Result<serde_json::Value, String> {
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err("query 不能为空".to_string());
+    }
+    let kb = crate::kernel::knowledge::global();
+    let hits = kb.search(&query, 5);
+    let entries: Vec<serde_json::Value> = hits
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id, "title": e.title, "content": e.content,
+                "tags": e.tags, "category": format!("{:?}", e.category),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "query": query, "count": entries.len(), "entries": entries }))
+}
+
+/// AI 知识库统计：全部条目 + 分类计数 + L0 规则缓存大小
+#[tauri::command]
+pub fn gongfang_ai_knowledge_stats() -> Result<serde_json::Value, String> {
+    use crate::kernel::knowledge::KnowledgeCategory;
+    let kb = crate::kernel::knowledge::global();
+    let all = kb.all_entries();
+    let mut anti = 0usize;
+    let mut fp = 0usize;
+    let mut ban = 0usize;
+    for e in &all {
+        match e.category {
+            KnowledgeCategory::AntiBot => anti += 1,
+            KnowledgeCategory::Fingerprint => fp += 1,
+            KnowledgeCategory::BanCase => ban += 1,
+        }
+    }
+    let entries: Vec<serde_json::Value> = all
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id, "title": e.title, "content": e.content, "tags": e.tags,
+                "category": match e.category {
+                    KnowledgeCategory::AntiBot => "反爬",
+                    KnowledgeCategory::Fingerprint => "指纹",
+                    KnowledgeCategory::BanCase => "封禁",
+                },
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "total": all.len(),
+        "rule_cache": kb.rule_cache_len(),
+        "counts": { "antibots": anti, "fingerprint": fp, "bancase": ban },
+        "entries": entries,
+    }))
+}
+
+/// AI 推理路由仿真：给定场景 → 走 L0 规则缓存 / L1/L2（含 RAG 注入预览）
+#[tauri::command]
+pub fn gongfang_ai_router_sim(
+    status: Option<u16>,
+    error_rate: f64,
+    tls: String,
+) -> Result<serde_json::Value, String> {
+    let tls = tls.trim().to_string();
+    if tls.is_empty() {
+        return Err("tls 不能为空（如 chrome_122 / a_bogus）".to_string());
+    }
+    let kb = crate::kernel::knowledge::global();
+    let sig = crate::kernel::knowledge::KnowledgeBase::signature_from_observation(
+        crate::kernel::strategy::Phase::default(),
+        error_rate as f32,
+        &tls,
+        status,
+        None,
+    );
+    let l0_hit = kb.lookup_rule(&sig);
+    let rag_hits = kb.search(&sig.0, 3);
+    let rag: Vec<serde_json::Value> = rag_hits
+        .iter()
+        .map(|e| serde_json::json!({ "id": e.id, "title": e.title }))
+        .collect();
+    Ok(serde_json::json!({
+        "signature": sig.0,
+        "l0_hit": l0_hit.is_some(),
+        "recommended_level": if l0_hit.is_some() { "L0（规则缓存命中 <1ms）" } else { "L1（需 LLM；L2 深度推理注入 RAG）" },
+        "rag_count": rag.len(),
+        "rag": rag,
+    }))
+}
+
+/// AI 推理统计：聚合推理日志 → 各级命中数 / 平均时延 / 成功率
+#[tauri::command]
+pub fn gongfang_ai_reasoning_stats() -> Result<serde_json::Value, String> {
+    use crate::kernel::events::ReasoningLevel;
+    match crate::kernel::events::global() {
+        Some(bus) => {
+            let rec = bus.recent_reasoning(100);
+            let mut counts = [0u32; 4]; // L0, L1, L2, L0Fallback
+            let mut latencies: Vec<f64> = Vec::new();
+            let mut ok: u32 = 0;
+            for r in &rec {
+                match r.level {
+                    ReasoningLevel::L0 => counts[0] += 1,
+                    ReasoningLevel::L1 => counts[1] += 1,
+                    ReasoningLevel::L2 => counts[2] += 1,
+                    ReasoningLevel::L0Fallback => counts[3] += 1,
+                }
+                latencies.push(r.latency_ms as f64);
+                if r.success {
+                    ok += 1;
+                }
+            }
+            let total = rec.len() as u32;
+            let avg_latency = if latencies.is_empty() {
+                0.0
+            } else {
+                latencies.iter().sum::<f64>() / latencies.len() as f64
+            };
+            let success_rate = if total > 0 { ok as f64 / total as f64 } else { 0.0 };
+            Ok(serde_json::json!({
+                "total": total,
+                "levels": { "L0": counts[0], "L1": counts[1], "L2": counts[2], "L0Fallback": counts[3] },
+                "avg_latency_ms": (avg_latency * 100.0).round() / 100.0,
+                "success_rate": (success_rate * 100.0).round() / 100.0,
+            }))
+        }
+        None => Ok(serde_json::json!({
+            "total": 0,
+            "levels": { "L0": 0, "L1": 0, "L2": 0, "L0Fallback": 0 },
+            "avg_latency_ms": 0,
+            "success_rate": 0,
+        })),
+    }
+}
+
 /// 设置是否推送 Tick 事件到前端（默认不推送，避免 50ms 一次的洪水；前端按需开启）
 #[tauri::command]
 pub fn gongfang_set_emit_tick(enabled: bool) -> Result<(), String> {

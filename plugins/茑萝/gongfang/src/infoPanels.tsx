@@ -897,3 +897,135 @@ export function TargetWorkspace({ onActivate }: { onActivate?: (target: TargetSu
     </div>
   );
 }
+
+// ============================================================
+// AI 推理层实验室：知识库(RAG) + 推理路由仿真 + 推理统计
+// ============================================================
+interface KnEntry { id: string; title: string; content: string; tags: string[]; category: string; }
+interface KnStats { total: number; rule_cache: number; counts: { antibots: number; fingerprint: number; bancase: number }; entries: KnEntry[]; }
+interface RouterSim { signature: string; l0_hit: boolean; recommended_level: string; rag_count: number; rag: { id: string; title: string }[]; }
+interface ReasoningStats { total: number; levels: { L0: number; L1: number; L2: number; L0Fallback: number }; avg_latency_ms: number; success_rate: number; }
+interface KnSearch { query: string; count: number; entries: KnEntry[]; }
+
+export function AiReasoningLab() {
+  const [stats, setStats] = useState<KnStats | null>(null);
+  const [statsBusy, setStatsBusy] = useState(false);
+  const [showEntries, setShowEntries] = useState(false);
+
+  const [rStatus, setRStatus] = useState('403');
+  const [rErr, setRErr] = useState('0.3');
+  const [rTls, setRTls] = useState('chrome_122');
+  const [router, setRouter] = useState<RouterSim | null>(null);
+  const [routerBusy, setRouterBusy] = useState(false);
+
+  const [rStats, setRStats] = useState<ReasoningStats | null>(null);
+  const [rStatsBusy, setRStatsBusy] = useState(false);
+
+  const [knQ, setKnQ] = useState('cloudflare 403');
+  const [knRes, setKnRes] = useState<KnSearch | null>(null);
+  const [knBusy, setKnBusy] = useState(false);
+
+  const loadStats = useCallback(async () => {
+    setStatsBusy(true);
+    try { setStats(await tauriInvoke<KnStats>('gongfang_ai_knowledge_stats', {})); } catch { setStats(null); } finally { setStatsBusy(false); }
+  }, []);
+
+  const runRouter = useCallback(async () => {
+    setRouterBusy(true);
+    try {
+      setRouter(await tauriInvoke<RouterSim>('gongfang_ai_router_sim', { status: Number(rStatus) || null, errorRate: Number(rErr) || 0, tls: rTls.trim() || 'chrome_122' }));
+    } catch { setRouter(null); } finally { setRouterBusy(false); }
+  }, [rStatus, rErr, rTls]);
+
+  const loadReasoningStats = useCallback(async () => {
+    setRStatsBusy(true);
+    try { setRStats(await tauriInvoke<ReasoningStats>('gongfang_ai_reasoning_stats', {})); } catch { setRStats(null); } finally { setRStatsBusy(false); }
+  }, []);
+
+  const runSearch = useCallback(async () => {
+    if (!knQ.trim()) return;
+    setKnBusy(true);
+    try { setKnRes(await tauriInvoke<KnSearch>('gongfang_ai_knowledge_search', { query: knQ.trim() })); } catch { setKnRes(null); } finally { setKnBusy(false); }
+  }, [knQ]);
+
+  const catLabel = (c: string) => c === '反爬' ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400' : c === '指纹' ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400' : 'bg-amber-500/15 text-amber-600 dark:text-amber-400';
+
+  return (
+    <CollapsibleSection title="AI 推理层" badge="知识库 · 路由" badgeTone="violet" storageKey="info_ai_lab" bodyClassName="px-3 py-2 space-y-3">
+      {/* 知识库统计 */}
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <button onClick={loadStats} disabled={statsBusy} className="btn-press px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">{statsBusy ? '加载中...' : '知识库统计'}</button>
+          {stats && (
+            <span className="text-[11px] text-neutral-500 dark:text-stone-300">
+              共 {stats.total} 条 · 反爬{stats.counts.antibots} / 指纹{stats.counts.fingerprint} / 封禁{stats.counts.bancase} · <span className="text-[var(--element-bg)]">L0 规则缓存 {stats.rule_cache}</span>
+            </span>
+          )}
+        </div>
+        {stats && stats.entries.length > 0 && (
+          <>
+            <button onClick={() => setShowEntries((v) => !v)} className="text-[10px] text-neutral-400 hover:text-[var(--element-bg)]">{showEntries ? '收起条目' : '展开条目'}</button>
+            {showEntries && (
+              <div className="space-y-1 mt-1">
+                {stats.entries.map((e, i) => (
+                  <div key={i} className="rounded border border-black/5 dark:border-stone-700/40 p-1.5">
+                    <div className="flex items-center gap-1.5 text-[11px]">
+                      <span className={`px-1 py-0.5 rounded text-[9px] ${catLabel(e.category)}`}>{e.category}</span>
+                      <span className="font-medium text-[var(--element-bg)]">{e.title}</span>
+                    </div>
+                    <div className="text-[10px] text-neutral-500 dark:text-stone-400 mt-0.5">{e.content}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* 推理路由仿真 */}
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          <input type="number" value={rStatus} onChange={(e) => setRStatus(e.target.value)} placeholder="状态码" className="w-16 px-2 py-1 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]" />
+          <input type="number" step={0.1} max={1} value={rErr} onChange={(e) => setRErr(e.target.value)} placeholder="错误率" className="w-20 px-2 py-1 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]" />
+          <input type="text" value={rTls} onChange={(e) => setRTls(e.target.value)} placeholder="tls profile" className="flex-1 px-2 py-1 rounded-lg text-[11px] font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]" />
+          <button onClick={runRouter} disabled={routerBusy} className="btn-press px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">路由仿真</button>
+        </div>
+        {router && (
+          <div className="rounded border border-black/5 dark:border-stone-700/40 p-1.5 space-y-1">
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${router.l0_hit ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-sky-500/15 text-sky-600 dark:text-sky-400'}`}>{router.recommended_level}</span>
+              <span className="text-neutral-400 text-[10px]">签名 <span className="font-mono text-[var(--element-bg)]">{router.signature}</span></span>
+            </div>
+            {!router.l0_hit && router.rag_count > 0 && (
+              <div className="text-[10px] text-neutral-500 dark:text-stone-400">RAG 注入（L2）：{router.rag.map((r) => r.title).join('、')}</div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 推理聚合统计 + 知识检索 */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <button onClick={loadReasoningStats} disabled={rStatsBusy} className="btn-press px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">推理统计</button>
+        {rStats && (
+          <span className="text-[11px] text-neutral-500 dark:text-stone-300">共 {rStats.total} · L0 {rStats.levels.L0}/L1 {rStats.levels.L1}/L2 {rStats.levels.L2}/兜底 {rStats.levels.L0Fallback} · 均延 {(rStats.avg_latency_ms).toFixed(1)}ms · 成功率 {rStats.success_rate}%</span>
+        )}
+      </div>
+      <div className="flex items-center gap-1.5">
+        <input type="text" value={knQ} onChange={(e) => setKnQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runSearch()} placeholder="检索知识库（如 cloudflare 403 / akamai）" className="flex-1 px-2 py-1 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400" />
+        <button onClick={runSearch} disabled={knBusy || !knQ.trim()} className="btn-press px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">检索</button>
+      </div>
+      {knRes && knRes.count > 0 && (
+        <div className="space-y-1">
+          {knRes.entries.map((e, i) => (
+            <div key={i} className="rounded border border-black/5 dark:border-stone-700/40 p-1.5">
+              <div className="text-[11px] font-medium text-[var(--element-bg)]">{e.title}</div>
+              <div className="text-[10px] text-neutral-500 dark:text-stone-400 mt-0.5">{e.content}</div>
+              <div className="text-[9px] text-neutral-400 mt-0.5 flex gap-1 flex-wrap">{e.tags.map((t) => <span key={t} className="px-1 bg-black/5 dark:bg-white/10 rounded">{t}</span>)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {knRes && knRes.count === 0 && <div className="text-[11px] text-neutral-400">未命中知识条目。</div>}
+    </CollapsibleSection>
+  );
+}

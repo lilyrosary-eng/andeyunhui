@@ -10,7 +10,7 @@ import { CrawlerPanel, ReversePanel, PentestPanel, AutomationPanel, GatewayPanel
 import { useAuditLog, AuditLogDrawer, type AuditInput } from './audit';
 import { RiskConfirm, isDisclaimerAccepted, revokeDisclaimer } from './RiskConfirm';
 import { GongfangAiSidebar } from './GongfangAiSidebar';
-import { EventStream, MetricsChart, AiReasoningPanel, TargetWorkspace } from './infoPanels';
+import { EventStream, MetricsChart, AiReasoningPanel, TargetWorkspace, AiReasoningLab } from './infoPanels';
 import { ExportButton } from './professionalExtras';
 import { useHotkeys, SituationalBar, useKernelRunning } from './ui';
 
@@ -300,6 +300,9 @@ function GongfangModule() {
               <AiReasoningPanel height={200} />
             </div>
           )}
+
+          {/* AI 推理层实验室：知识库(RAG) + 路由仿真 + 推理统计 */}
+          <AiReasoningLab />
         </div>
       </div>
 

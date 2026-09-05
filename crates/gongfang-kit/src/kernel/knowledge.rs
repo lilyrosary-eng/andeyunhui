@@ -164,6 +164,16 @@ impl KnowledgeBase {
         self.rule_cache.read().get(sig).cloned()
     }
 
+    /// 列出全部知识条目（前端知识库展示）
+    pub fn all_entries(&self) -> Vec<KnowledgeEntry> {
+        self.entries.values().cloned().collect()
+    }
+
+    /// L0 规则缓存大小（已学习规则数）
+    pub fn rule_cache_len(&self) -> usize {
+        self.rule_cache.read().len()
+    }
+
     /// L2 决策成功后回写 L0 规则缓存
     /// 相同场景第二次出现时直接走 L0（<1ms），覆盖 80% 请求
     pub fn record_rule(&self, sig: SceneSignature, delta: crate::kernel::strategy::StrategyDelta) {
