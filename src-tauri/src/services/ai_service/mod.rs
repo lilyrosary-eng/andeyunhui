@@ -17,6 +17,7 @@ pub mod secret;
 pub mod ai_profile;
 pub mod ai_chat;
 pub mod ai_tools;
+pub mod gongfang_tools;
 pub mod ai_session;
 pub mod ai_agent;
 pub mod ai_ocr;

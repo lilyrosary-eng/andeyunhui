@@ -2961,76 +2961,8 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(GitTool),
         Box::new(LspTool),
         Box::new(RagSearchTool),
-        Box::new(GongfangTool),
+        Box::new(crate::services::ai_service::gongfang_tools::GongfangFullTool),
     ]
-}
-
-// ============ gongfang 攻防侦察工具（AI 统一网关接入） ============
-// 目的：让 AI/Agent 通过既有统一执行闸（execute_tool_once：schema 校验 + 副作用审批 +
-// 并发协调）调用 gongfang 后端，而不是绕过闸口直连 Tauri 通道（那是"AI 驱动卡死"的根因）。
-// 复用 gongfang_kit 同一批后端函数，无重复实现。仅对用户显式给的 url 做侦察级 GET。
-struct GongfangTool;
-#[async_trait::async_trait]
-impl AiTool for GongfangTool {
-    fn name(&self) -> &'static str {
-        "gongfang"
-    }
-    fn function_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "gongfang",
-                "description": "对用户显式给出的目标 URL 做侦察级分析（只读 GET，非入侵）。action 可选：waf(WAF检测)/tech(技术栈指纹)/methods(HTTP方法)/paths(常见路径)/wellknown(.well-known端点)/error(错误页指纹)/crawl(抓取首页正文)。仅在目标经受权时使用。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["waf","tech","methods","paths","wellknown","error","crawl"], "description": "要执行的侦察动作" },
-                        "url": { "type": "string", "description": "目标 URL（绝对地址，需显式给出）" }
-                    },
-                    "required": ["action", "url"]
-                }
-            }
-        })
-    }
-    fn concurrency(&self) -> ToolConcurrency {
-        ToolConcurrency::Exclusive // 网络副作用工具：独占串行，避免并发打爆
-    }
-    async fn execute(&self, args: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolExecResult, String> {
-        let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        if url.is_empty() {
-            return Err("gongfang 缺少 url 参数（目标必须显式给出）".to_string());
-        }
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("recon").to_string();
-        #[cfg(feature = "gongfang")]
-        {
-            let text = match action.as_str() {
-                "waf" => serialize_pretty(gongfang_kit::commands::gongfang_waf_detect(url.clone()).await)?,
-                "tech" => serialize_pretty(gongfang_kit::commands::gongfang_tech_fingerprint(url.clone()).await)?,
-                "methods" => serialize_pretty(gongfang_kit::commands::gongfang_http_methods(url.clone()).await)?,
-                "paths" => serialize_pretty(gongfang_kit::commands::gongfang_path_probe(url.clone()).await)?,
-                "wellknown" => serialize_pretty(gongfang_kit::commands::gongfang_wellknown_probe(url.clone()).await)?,
-                "error" => serialize_pretty(gongfang_kit::commands::gongfang_error_page(url.clone()).await)?,
-                "crawl" => serialize_pretty(gongfang_kit::commands::gongfang_fetch(url.clone()).await)?,
-                other => return Err(format!("未知 gongfang action: {other}")),
-            };
-            let meta = serde_json::json!({ "card": "generic", "kind": "recon", "title": format!("gongfang[{action}] {url}"), "locations": [{ "path": url }] });
-            Ok(ToolExecResult::with_meta(text, meta))
-        }
-        #[cfg(not(feature = "gongfang"))]
-        {
-            let _ = action;
-            Err("gongfang feature 未启用：请用 --features gongfang 构建后再调用本工具".to_string())
-        }
-    }
-}
-
-// 通用 JSON 序列化（对 gongfang_* 的 Result<T,String> 定值做 pretty 文本给模型）
-#[cfg(feature = "gongfang")]
-fn serialize_pretty<T: serde::Serialize>(r: Result<T, String>) -> Result<String, String> {
-    match r {
-        Ok(v) => serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}")),
-        Err(e) => Err(e),
-    }
 }
 
 /// 聚合已启用 MCP 服务器的工具清单，作为 guide 注入 agent 系统提示，让模型知道 mcp 工具可调用什么。
