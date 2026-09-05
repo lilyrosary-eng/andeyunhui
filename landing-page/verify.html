@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>安全验证 · 安得云荟</title>
+    <link rel="icon" type="image/png" href="logo.png" />
+    <link rel="preload" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" onload="this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css"></noscript>
+    <style>
+        :root {
+            --bg:#f4f2ec; --surface:#fcfaf7; --surface-hover:#f0ede8; --text-primary:#3d3a36;
+            --text-secondary:#8a8580; --text-muted:#b5b0aa; --border:#e5e0da; --accent:#b8a9c9;
+            --accent-soft:#c9bdd6; --shadow:rgba(60,58,55,.06); --radius:1.2rem; --transition:.3s ease;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif; background:var(--bg); color:var(--text-primary); line-height:1.6; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:2rem 1.5rem 4rem; }
+        .container { max-width:820px; width:100%; }
+        .navbar { display:flex; justify-content:space-between; align-items:center; padding:.6rem 1.8rem; background:var(--surface); border-radius:3rem; border:1px solid var(--border); box-shadow:0 2px 12px var(--shadow); margin-bottom:2.2rem; flex-wrap:wrap; gap:.8rem; }
+        .logo { font-size:1.25rem; font-weight:600; color:var(--text-primary); display:flex; align-items:center; gap:10px; text-decoration:none; }
+        .logo i { color:var(--accent); font-size:1.6rem; }
+        .nav-links { display:flex; gap:2rem; align-items:center; flex-wrap:wrap; }
+        .nav-links a { color:var(--text-secondary); text-decoration:none; font-size:.9rem; transition:color var(--transition); display:flex; align-items:center; gap:6px; }
+        .nav-links a:hover { color:var(--text-primary); }
+        .card { background:var(--surface); border-radius:var(--radius); border:1px solid var(--border); box-shadow:0 8px 30px var(--shadow); padding:2rem 2rem 1.8rem; }
+        .card h1 { font-size:1.35rem; margin-bottom:.3rem; }
+        .card .sub { color:var(--text-secondary); font-size:.9rem; margin-bottom:1.6rem; }
+        .step { color:var(--text-secondary); font-size:.82rem; margin-bottom:.8rem; }
+        /* 滑块 ===== */
+        .slider { position:relative; height:50px; background:var(--surface-hover); border:1px solid var(--border); border-radius:12px; overflow:hidden; user-select:none; -webkit-user-select:none; }
+        .slider .fill { position:absolute; left:0; top:0; bottom:0; width:0; background:linear-gradient(90deg,var(--accent-soft),var(--accent)); opacity:.35; }
+        .slider .track { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--text-secondary); font-size:.85rem; pointer-events:none; }
+        .slider .handle { position:absolute; left:4px; top:4px; bottom:4px; width:44px; background:var(--accent); border-radius:9px; cursor:grab; display:flex; align-items:center; justify-content:center; color:#fff; box-shadow:0 3px 8px rgba(184,169,201,.5); }
+        .slider.dragging .handle { cursor:grabbing; }
+        .slider.done { border-color:#9cc29c; }
+        .slider.done .handle { background:#6f9e6f; }
+        /* 结果 ===== */
+        .metrics { margin-top:1.4rem; display:grid; grid-template-columns:1fr 1fr; gap:.7rem; }
+        .m { background:var(--surface-hover); border-radius:.9rem; padding:.7rem .9rem; }
+        .m .k { font-size:.74rem; color:var(--text-muted); }
+        .m .v { font-size:1.05rem; font-weight:600; margin-top:.15rem; }
+        .verdict { margin-top:1.2rem; padding:1rem 1.1rem; border-radius:.9rem; font-weight:600; display:none; }
+        .verdict.pass { background:#eef5ee; color:#4c7c4c; }
+        .verdict.sus { background:#faf3e3; color:#a67c1f; }
+        .verdict.fail { background:#fbecec; color:#b85050; }
+        .telemetry { margin-top:1rem; font-size:.78rem; color:var(--text-secondary); }
+        .telemetry pre { white-space:pre-wrap; word-break:break-all; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.72rem; color:var(--text-primary); margin-top:.4rem; max-height:220px; overflow:auto; background:var(--surface-hover); border-radius:.8rem; padding:.7rem .9rem; }
+        .actions { margin-top:1rem; display:flex; gap:.6rem; }
+        .actions button { padding:.55rem 1.1rem; border:none; border-radius:.8rem; cursor:pointer; font-size:.85rem; }
+        .btn-primary { background:var(--accent); color:#fff; }
+        .btn-ghost { background:var(--surface-hover); color:var(--text-primary); border:1px solid var(--border) !important; }
+        .hint { margin-top:1.4rem; font-size:.74rem; color:var(--text-muted); text-align:left; line-height:1.7; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <nav class="navbar">
+        <a class="logo" href="index.html"><i data-lucide="shield-check"></i> 安得云荟</a>
+        <div class="nav-links">
+            <a href="login.html">登录</a>
+            <a href="support.html">支持</a>
+        </div>
+    </nav>
+
+    <div class="card">
+        <h1>安全验证</h1>
+        <p class="sub">滑块 + 行为分析（反自动化实验场）</p>
+
+        <p class="step">① 按住滑块拖到最右侧（按住时高精度记录轨迹）</p>
+        <div class="slider" id="slider">
+            <div class="fill" id="fill"></div>
+            <div class="track" id="track">拖动滑块完成验证</div>
+            <div class="handle" id="handle"><i data-lucide="move-right"></i></div>
+        </div>
+
+        <div class="metrics">
+            <div class="m"><div class="k">轨迹采样</div><div class="v" id="vN">-</div></div>
+            <div class="m"><div class="k">时长 ms</div><div class="v" id="vT">-</div></div>
+            <div class="m"><div class="k">垂直抖动 σ(px)</div><div class="v" id="vJit">-</div></div>
+            <div class="m"><div class="k">速度变异系数</div><div class="v" id="vCv">-</div></div>
+            <div class="m"><div class="k">横向过冲(px)</div><div class="v" id="vOver">-</div></div>
+            <div class="m"><div class="k">行为散度(JSD)</div><div class="v" id="vJsd">-</div></div>
+        </div>
+
+        <div class="verdict" id="verdict"></div>
+
+        <div class="actions">
+            <button class="btn-primary" id="copyBtn">复制遥测 JSON</button>
+            <button class="btn-ghost" id="resetBtn">重试</button>
+        </div>
+
+        <div class="telemetry">
+            <div><b>遥测（后端可用时 POST /api/verify）</b></div>
+            <pre id="telemetryPre">{ }</pre>
+        </div>
+
+        <div class="hint">
+            实验设计：该页用「高精度滑块轨迹」复现商城级反自动化的行为判定。
+            机器人拖动往往具备<b>匀速</b>(速度 CV≈0)、<b>零抖动</b>(垂直 σ→0)、<b>零横向过冲</b>、
+            <b>方向熵低</b> 等机械特征；人类会有自然抖动、变速与细小回正。判定为加权启发式，仅用于攻防行为分析实验。
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.344.0/lucide.min.js"></script>
+<script>
+    lucide.createIcons();
+    const $ = (s) => document.querySelector(s);
+    const slider = $('#slider'), handle = $('#handle'), fill = $('#fill'), track = $('#track');
+    const trackW = () => slider.clientWidth - handle.offsetWidth - 4;
+    let down = false, pts = [], over = 0, done = false, maxRight = 0;
+
+    // ———— 高精度录制 ————
+    slider.addEventListener('pointerdown', (e) => {
+        if (done) return;
+        down = true; pts = []; over = 0; maxRight = 0;
+        slider.classList.add('dragging');
+        try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+        record(e, 0);
+    });
+    slider.addEventListener('pointermove', (e) => { if (down) record(e, (e.timestamp - (pts[pts.length - 1]?.t || e.timeStamp))); });
+    window.addEventListener('pointerup', () => { if (down) { down = false; slider.classList.remove('dragging'); finish(); } });
+
+    function record(e, dt) {
+        const t0 = pts[0]?.t ?? e.timeStamp;
+        const x = Math.max(0, Math.min(trackW(), e.clientX - slider.getBoundingClientRect().left - handle.offsetWidth / 2));
+        maxRight = Math.max(maxRight, x);
+        pts.push({ x, y: e.clientY, dt: dt || (e.timeStamp - t0), t: e.timeStamp });
+        const pct = x / trackW();
+        fill.style.width = (pct * 100) + '%';
+        handle.style.left = (x + 'px');
+    }
+
+    // ———— 指标计算 ————
+    function jitter(ys) { const m = ys.reduce((a, b) => a + b, 0) / ys.length; return Math.sqrt(ys.reduce((a, b) => a + (b - m) ** 2, 0) / ys.length); }
+    function cv(speeds) { const m = speeds.reduce((a, b) => a + b, 0) / speeds.length; return m ? Math.sqrt(speeds.reduce((a, b) => a + (b - m) ** 2, 0) / speeds.length) / m : 0; }
+    function overshoot(p) { return Math.max(0, maxRight - trackW()); }
+    // 行为散度：速度直方图 vs 人类参考（居中高峰 + 恒有抖动）→ Jensen-Shannon
+    function jsd(speeds) {
+        const bins = 12;
+        const h = new Array(bins).fill(1e-6), ref = new Array(bins).fill(1e-6);
+        const maxs = Math.max(...speeds, 1e-6);
+        let tot = 0;
+        for (const s of speeds) { h[Math.min(bins - 1, Math.floor((s / maxs) * bins))]++; }
+        const w = speeds.reduce((a, b) => a + b) || 1;
+        // 人类参考：在 30%-70% 速度区间呈中间高峰 + 低频两侧
+        for (let i = 0; i < bins; i++) ref[i] += Math.exp(-((i - bins * 0.5) / (bins * 0.22)) ** 2) + 0.2;
+        const hn = h.reduce((a, b) => a + b), rn = ref.reduce((a, b) => a + b);
+        let p = h.map(v => v / hn), q = ref.map(v => v / rn);
+        let m = p.map((v, i) => (v + q[i]) / 2);
+        const kl = (a, b) => a.reduce((s, v, i) => s + (v > 0 ? v * Math.log(v / m[i]) : 0), 0);
+        return +(0.5 * kl(p, m) + 0.5 * kl(q, m)).toFixed(3); // [0, ~0.4]
+    }
+
+    function finish() {
+        if (pts.length < 3) return;
+        const span = maxRight - (pts[0]?.x || 0);
+        const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+        let speeds = [];
+        for (let i = 1; i < pts.length; i++) speeds.push(Math.abs(pts[i].x - pts[i - 1].x) / (pts[i].dt / 1000 || 1));
+        const N = pts.length, T = pts[pts.length - 1].t - pts[0].t;
+        const jit = jitter(ys), vcv = cv(speeds), overpx = overshoot(xs), d = jsd(speeds);
+
+        set('#vN', N); set('#vT', Math.round(T)); set('#vJit', jit.toFixed(2));
+        set('#vCv', vcv.toFixed(2)); set('#vOver', overpx.toFixed(1)); set('#vJsd', d);
+
+        const passed = maxRight >= trackW() - 2;
+        // 判定：机械特征组合
+        let failScore = 0;
+        if (vcv < 0.12) failScore += 2;      // 太匀速
+        if (jit < 0.6) failScore += 2;       // 零抖动
+        if (overpx < 1 && span > 40) failScore += 1.5; // 零横向过冲
+        if (N < 8) failScore += 1.5;         // 采样过少（程序合成）
+        let verdictEl = $('#verdict');
+        if (!passed) {
+            verdictEl.className = 'verdict fail'; verdictEl.textContent = '未滑到底，请重试';
+        } else if (failScore >= 3) {
+            verdictEl.className = 'verdict fail'; verdictEl.textContent = '判定：疑似自动化（机械拖拽特征明显）';
+        } else if (failScore >= 1.5) {
+            verdictEl.className = 'verdict sus'; verdictEl.textContent = '判定：可疑（建议重试，行为偏机械）';
+        } else {
+            verdictEl.className = 'verdict pass'; verdictEl.textContent = '判定：通过（行为接近人类）✓';
+        }
+        verdictEl.style.display = 'block';
+        slider.classList.add('done'); done = true;
+
+        const telemetry = {
+            passed, verdict: verdictEl.textContent,
+            metrics: { samples: N, duration_ms: Math.round(T), vertical_jitter_px: +jit.toFixed(2), speed_cv: +vcv.toFixed(2), overshoot_px: +overpx.toFixed(1), behavior_jsd: d, fail_score: failScore },
+            sample: pts.slice(0, 60).map(p => ({ x: +p.x.toFixed(1), y: +p.y.toFixed(1), dt_ms: +(p.dt || 0).toFixed(1) })),
+            ua_fingerprint: { ua: navigator.userAgent.slice(0, 120), platform: navigator.platform, lang: navigator.language, cores: navigator.hardwareConcurrency || 0, tz: -new Date().getTimezoneOffset() },
+            ts: Date.now(),
+        };
+        $('#telemetryPre').textContent = JSON.stringify(telemetry, null, 2);
+
+        // 后端可选
+        try { fetch('/api/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(telemetry) }).catch(() => {}); } catch (_) {}
+        $('#copyBtn').onclick = () => {
+            const ta = document.createElement('textarea'); ta.value = JSON.stringify(telemetry, null, 2); document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); } catch (_) {} document.body.removeChild(ta);
+        };
+    }
+    function set(id, v) { $(id).textContent = v; }
+    $('#resetBtn').onclick = () => { done = false; down = false; pts = []; maxRight = 0; fill.style.width = '0%'; handle.style.left = '4px'; $('#verdict').style.display = 'none'; slider.classList.remove('done'); $('#telemetryPre').textContent = '{ }'; };
+</script>
+</body>
+</html>

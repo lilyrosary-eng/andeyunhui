@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>登录 · 安得云荟</title>
+    <link rel="icon" type="image/png" href="logo.png" />
+    <link rel="preload" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css" onload="this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.344.0/font/lucide.min.css"></noscript>
+    <style>
+        :root {
+            --bg: #f4f2ec; --surface: #fcfaf7; --surface-hover: #f0ede8;
+            --text-primary: #3d3a36; --text-secondary: #8a8580; --text-muted: #b5b0aa;
+            --border: #e5e0da; --accent: #b8a9c9; --accent-soft: #c9bdd6;
+            --shadow: rgba(60,58,55,.06); --radius: 1.2rem; --transition: .3s ease;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background: var(--bg); color: var(--text-primary); line-height: 1.6;
+            min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 2rem 1.5rem 4rem;
+        }
+        .container { max-width: 1100px; width: 100%; }
+        .navbar {
+            display: flex; justify-content: space-between; align-items: center; padding: .6rem 1.8rem;
+            background: var(--surface); border-radius: 3rem; border: 1px solid var(--border);
+            box-shadow: 0 2px 12px var(--shadow); margin-bottom: 3.5rem; flex-wrap: wrap; gap: .8rem;
+        }
+        .logo { font-size: 1.25rem; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 10px; text-decoration: none; }
+        .logo i { color: var(--accent); font-size: 1.6rem; }
+        .nav-links { display: flex; gap: 2rem; align-items: center; flex-wrap: wrap; }
+        .nav-links a { color: var(--text-secondary); text-decoration: none; font-size: .9rem; transition: color var(--transition); display: flex; align-items: center; gap: 6px; }
+        .nav-links a:hover { color: var(--text-primary); }
+        .card {
+            background: var(--surface); border-radius: var(--radius); border: 1px solid var(--border);
+            box-shadow: 0 8px 30px var(--shadow); max-width: 440px; margin: 0 auto; padding: 2.2rem 2rem;
+        }
+        .card h1 { font-size: 1.4rem; margin-bottom: .3rem; color: var(--text-primary); }
+        .card .sub { color: var(--text-secondary); font-size: .9rem; margin-bottom: 1.6rem; }
+        .field { margin-bottom: 1.1rem; }
+        .field label { display: block; font-size: .82rem; color: var(--text-secondary); margin-bottom: .35rem; }
+        .field input {
+            width: 100%; padding: .7rem .9rem; font-size: .95rem; color: var(--text-primary);
+            background: #fff; border: 1px solid var(--border); border-radius: .8rem; outline: none; transition: border-color var(--transition);
+        }
+        .field input:focus { border-color: var(--accent); }
+        .row { display: flex; align-items: center; justify-content: space-between; font-size: .82rem; margin: .4rem 0 1.2rem; }
+        .row label { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); cursor: pointer; }
+        .row a { color: var(--accent); text-decoration: none; }
+        .btn {
+            display: block; width: 100%; padding: .75rem; border: none; border-radius: .8rem; cursor: pointer;
+            background: var(--accent); color: #fff; font-size: .95rem; font-weight: 600; transition: opacity var(--transition);
+        }
+        .btn:hover { opacity: .88; }
+        .msg { margin-top: 1rem; font-size: .82rem; min-height: 1.2em; }
+        .msg.ok { color: #6f9e6f; }
+        .msg.err { color: #c25b5b; }
+        .telemetry { margin-top: 1rem; padding: .8rem .9rem; background: var(--surface-hover); border-radius: .8rem; font-size: .78rem; color: var(--text-secondary); display: none; }
+        .telemetry pre { white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .72rem; color: var(--text-primary); margin-top: .4rem; max-height: 180px; overflow: auto; }
+        .hint { margin-top: 1.4rem; font-size: .74rem; color: var(--text-muted); text-align: center; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <nav class="navbar">
+        <a class="logo" href="index.html"><i data-lucide="cloud"></i> 安得云荟</a>
+        <div class="nav-links">
+            <a href="index.html">首页</a>
+            <a href="download.html">下载</a>
+            <a href="support.html">支持</a>
+            <a href="login.html"><i data-lucide="log-in"></i> 登录</a>
+        </div>
+    </nav>
+
+    <div class="card">
+        <h1>登录</h1>
+        <p class="sub">本地优先 · 数据归你</p>
+        <form id="loginForm" novalidate>
+            <div class="field">
+                <label>邮箱 / 用户名</label>
+                <input id="account" name="account" placeholder="you@example.com" autocomplete="username" />
+            </div>
+            <div class="field">
+                <label>密码</label>
+                <input id="password" name="password" type="password" placeholder="••••••••" autocomplete="current-password" />
+            </div>
+            <div class="row">
+                <label><input type="checkbox" checked /> 记住设备</label>
+                <a href="index.html">忘记密码？</a>
+            </div>
+            <button class="btn" type="submit" id="submitBtn">登 录</button>
+        </form>
+        <div class="msg" id="msg"></div>
+        <div class="telemetry" id="telemetry">
+            <div><b>前端行为遥测（防自动化 demo）</b></div>
+            <pre id="telemetryPre"></pre>
+        </div>
+        <div class="hint">实验页面：登录动作会采集输入时序与鼠标轨迹，用于自动化/行为分析实验</div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.344.0/lucide.min.js"></script>
+<script>
+    lucide.createIcons();
+    const $ = (s) => document.querySelector(s);
+    // —— 遥测采集：输入间隔 + 鼠标轨迹 ——
+    const keys = [];        // 按键间隔 ms
+    let lastKey = 0, perKey = 0;
+    const moves = [];       // {x,y,t}
+    const t0 = performance.now();
+    const patch = (e) => {
+        perKey++;
+        const now = performance.now() - t0;
+        if (lastKey) keys.push(now - lastKey);
+        lastKey = now;
+        // 保留最近500个采样
+        if (perKey > 600) { moves.length = 0; perKey = 0; }
+    };
+    document.addEventListener('keydown', patch);
+    // 拖拽/点击过程鼠标轨迹（登录按钮区域内触发）
+    let rec = false;
+    document.addEventListener('mousedown', () => { rec = true; moves.length = 0; });
+    document.addEventListener('mousemove', (e) => { if (rec) moves.push({ x: e.clientX, y: e.clientY, t: performance.now() - t0 }); });
+    document.addEventListener('mouseup', () => { rec = false; });
+
+    function sampleCount() { return moves.length; }
+    function straightness() {
+        if (moves.length < 3) return 0;
+        const a = moves[0], b = moves[moves.length - 1];
+        let maxDev = 0;
+        for (const m of moves) {
+            const d = Math.abs((b.x - a.x) * (a.y - m.y) - (a.x - m.x) * (b.y - a.y)) /
+                (Math.hypot(b.x - a.x, b.y - a.y) || 1);
+            maxDev = Math.max(maxDev, d);
+        }
+        const span = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        return +(maxDev / span).toFixed(3); // 直线=0，越弯越大
+    }
+    function avgSpeed() {
+        if (moves.length < 2) return 0;
+        let sum = 0, n = 0;
+        for (let i = 1; i < moves.length; i++) {
+            const dt = (moves[i].t - moves[i-1].t) || 1;
+            sum += Math.hypot(moves[i].x - moves[i-1].x, moves[i].y - moves[i-1].y) / dt;
+            n++;
+        }
+        return +(sum / n).toFixed(1);
+    }
+
+    $('#loginForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const account = $('#account').value.trim();
+        const password = $('#password').value;
+        const msg = $('#msg');
+        if (!account || !password) { msg.className = 'msg err'; msg.textContent = '请输入账号与密码'; return; }
+
+        const telemetry = {
+            account_len: account.length,
+            pwd_len: password.length,
+            keydown_intervals_ms: keys.slice(0, 30),
+            keydown_count: keys.length,
+            mouse_samples: sampleCount(),
+            mouse_straightness: straightness(),
+            mouse_avg_speed_px_ms: avgSpeed(),
+            ua_fingerprint: {
+                ua: navigator.userAgent.slice(0, 120),
+                platform: navigator.platform,
+                lang: navigator.language,
+                cores: navigator.hardwareConcurrency || 0,
+                tz_offset: -new Date().getTimezoneOffset(),
+                screen: `${screen.width}x${screen.height}`,
+            },
+            ts: Date.now(),
+        };
+
+        // 尝试后端接口（demo 无后端则走本页回显）
+        let resp;
+        try {
+            resp = await fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ account, telemetry }),
+            });
+        } catch (_) { resp = null; }
+
+        msg.className = 'msg ok';
+        msg.textContent = resp && resp.ok ? '登录成功（后端已接收遥测）' : '登录成功（演示模式，无后端）';
+        $('#telemetry').style.display = 'block';
+        $('#telemetryPre').textContent = JSON.stringify(telemetry, null, 2);
+        if (typeof registerPass === 'function') registerPass();
+    });
+</script>
+</body>
+</html>
