@@ -1377,6 +1377,72 @@ pub fn gongfang_gateway_strategy_sim(routing: String, ratio: f64) -> Result<serd
     }
 }
 
+/// 隐身请求整形演示：返回一次完整的整形建议（间隔/突发/指纹/头序/熵/噪声）
+#[tauri::command]
+pub fn gongfang_gateway_shaping_demo() -> Result<serde_json::Value, String> {
+    #[cfg(feature = "gateway")]
+    {
+        let advice = crate::gateway::shaping::next_advice();
+        serde_json::to_value(&advice).map_err(|e| format!("序列化失败: {}", e))
+    }
+    #[cfg(not(feature = "gateway"))]
+    {
+        Err("gateway feature 未启用，请用 --features gongfang-gateway 编译".to_string())
+    }
+}
+
+/// Payload 混淆演示：对一个 JSON 对象做无害冗余注入 + 字段顺序随机化
+#[tauri::command]
+pub fn gongfang_gateway_obfuscate(raw: String) -> Result<serde_json::Value, String> {
+    let raw = raw.trim().to_string();
+    if raw.is_empty() {
+        return Err("raw 不能为空（一个 JSON 对象）".to_string());
+    }
+    #[cfg(feature = "gateway")]
+    {
+        use crate::gateway::shaping::obfuscate_json_payload;
+        let obfuscated = obfuscate_json_payload(&raw);
+        Ok(serde_json::json!({ "original": raw, "obfuscated": obfuscated }))
+    }
+    #[cfg(not(feature = "gateway"))]
+    {
+        let _ = raw;
+        Err("gateway feature 未启用，请用 --features gongfang-gateway 编译".to_string())
+    }
+}
+
+/// 请求熵监控实验：给定一批请求模式 → 计算 Shannon 熵 + 是否需要注入假请求
+#[tauri::command]
+pub fn gongfang_gateway_entropy_demo(patterns: Vec<String>) -> Result<serde_json::Value, String> {
+    let patterns: Vec<String> = patterns.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if patterns.is_empty() {
+        return Err("patterns 不能为空".to_string());
+    }
+    #[cfg(feature = "gateway")]
+    {
+        use crate::gateway::shaping::EntropyMonitor;
+        let mut m = EntropyMonitor::new(2.0);
+        for p in &patterns {
+            m.record(p.clone());
+        }
+        let needs_noise = m.needs_noise();
+        let entropy = (m.entropy() * 100.0).round() / 100.0;
+        Ok(serde_json::json!({
+            "threshold": 2.0,
+            "entropy": entropy,
+            "needs_noise": needs_noise,
+            "count": patterns.len(),
+            "noise_path": if needs_noise { serde_json::Value::from(EntropyMonitor::noise_path()) } else { serde_json::Value::Null },
+            "verdict": if needs_noise { "模式过于规则，建议注入假请求提升熵" } else { "模式多样化充分" },
+        }))
+    }
+    #[cfg(not(feature = "gateway"))]
+    {
+        let _ = patterns;
+        Err("gateway feature 未启用，请用 --features gongfang-gateway 编译".to_string())
+    }
+}
+
 /// 查询代理节点池（@gateway_pool / 前端面板）
 #[tauri::command]
 pub fn gongfang_gateway_pool() -> Result<Vec<GatewayNodeSummary>, String> {

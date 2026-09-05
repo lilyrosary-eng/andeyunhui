@@ -255,6 +255,27 @@ interface StrategySimReport {
   est_interval_burst_ms: number;
 }
 
+// ============ 隐身整形实验室（gateway 三个 demo 命令） ============
+interface OsFp { os: string; user_agent: string; accept_language: string; accept: string; browser: string; }
+interface ShapingAdvice {
+  interval_ms: number;
+  in_burst: boolean;
+  fingerprint: OsFp;
+  header_order: string[];
+  needs_noise: boolean;
+  noise_path: string | null;
+  current_entropy: number;
+}
+interface ObfuscateReport { original: string; obfuscated: string; }
+interface EntropyReport {
+  threshold: number;
+  entropy: number;
+  needs_noise: boolean;
+  count: number;
+  noise_path: string | null;
+  verdict: string;
+}
+
 type InjectType = 'Focus' | 'Bypass' | 'Pause' | 'Resume';
 
 interface FrameworkMeta {
@@ -2725,6 +2746,36 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
       setStratResult(r);
     } catch { setStratResult(null); } finally { setStratBusy(false); }
   }, [stratRouting, stratRatio]);
+
+  // 隐身整形实验室
+  const [shaping, setShaping] = useState<ShapingAdvice | null>(null);
+  const [shapingBusy, setShapingBusy] = useState(false);
+  const [obfRaw, setObfRaw] = useState(JSON.stringify({ query: 'select * from users', limit: 10 }, null, 2));
+  const [obfResult, setObfResult] = useState<ObfuscateReport | null>(null);
+  const [obfBusy, setObfBusy] = useState(false);
+  const [entropyInput, setEntropyInput] = useState(['GET /api/users 200', 'GET /api/users 200', 'GET /api/users 200', 'GET /api/users 200', 'GET /api/users 200', 'GET /api/users 200', 'GET /api/users 200', 'GET /api/users 200'].join('\n'));
+  const [entropyResult, setEntropyResult] = useState<EntropyReport | null>(null);
+  const [entropyBusy, setEntropyBusy] = useState(false);
+
+  const handleShaping = useCallback(async () => {
+    setShapingBusy(true);
+    try { setShaping(await tauriInvoke<ShapingAdvice>('gongfang_gateway_shaping_demo', {})); }
+    catch { setShaping(null); } finally { setShapingBusy(false); }
+  }, []);
+
+  const handleObfuscate = useCallback(async () => {
+    setObfBusy(true);
+    try { setObfResult(await tauriInvoke<ObfuscateReport>('gongfang_gateway_obfuscate', { raw: obfRaw })); }
+    catch { setObfResult(null); } finally { setObfBusy(false); }
+  }, [obfRaw]);
+
+  const handleEntropy = useCallback(async () => {
+    setEntropyBusy(true);
+    try {
+      const patterns = entropyInput.split('\n').map((s) => s.trim()).filter(Boolean);
+      setEntropyResult(await tauriInvoke<EntropyReport>('gongfang_gateway_entropy_demo', { patterns }));
+    } catch { setEntropyResult(null); } finally { setEntropyBusy(false); }
+  }, [entropyInput]);
   const [throttleMsg, setThrottleMsg] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -3072,6 +3123,124 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                 <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">静默间隔</div><div className="font-mono text-[var(--element-bg)]">~{stratResult.est_interval_silent_ms} ms</div></div>
                 <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">突发间隔</div><div className="font-mono text-[var(--element-bg)]">~{stratResult.est_interval_burst_ms} ms</div></div>
                 <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-1.5"><div className="text-neutral-400">高优先豁免</div><div className="text-[var(--element-bg)]">{stratResult.high_priority_bypass ? '是' : '否'}</div></div>
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        {/* 隐身请求整形演示 */}
+        <CollapsibleSection
+          title="隐身请求整形演示"
+          storageKey="fw_gateway_shaping_demo"
+          defaultOpen={false}
+          accent="defense"
+        >
+          <div className="mb-2">
+            <button
+              onClick={handleShaping}
+              disabled={shapingBusy}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40"
+            >
+              {shapingBusy ? '生成中...' : '生成整形建议'}
+            </button>
+          </div>
+          {shaping && (
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${shaping.in_burst ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-black/5 dark:bg-white/10 text-neutral-600 dark:text-stone-300'}`}>间隔 {shaping.interval_ms}ms</span>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] ${shaping.in_burst ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-black/5 dark:bg-white/10 text-neutral-600 dark:text-stone-300'}`}>{shaping.in_burst ? '突发' : '静默'}</span>
+                <span className="px-1.5 py-0.5 rounded text-[10px] bg-black/5 dark:bg-white/10 text-neutral-600 dark:text-stone-300">指纹 {shaping.fingerprint.os}</span>
+                <span className="px-1.5 py-0.5 rounded text-[10px] bg-black/5 dark:bg-white/10 text-neutral-600 dark:text-stone-300">熵 {shaping.current_entropy.toFixed(2)}</span>
+                {shaping.needs_noise && <span className="px-1.5 py-0.5 rounded text-[10px] bg-rose-500/15 text-rose-600 dark:text-rose-400">需噪声 → {shaping.noise_path}</span>}
+              </div>
+              <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-2">
+                <div className="text-[10px] text-neutral-400 mb-0.5">头序（{shaping.header_order.length}）：</div>
+                <div className="flex flex-wrap gap-1">
+                  {shaping.header_order.map((h, i) => (
+                    <span key={i} className="px-1 py-0.5 rounded text-[10px] font-mono bg-black/5 dark:bg-white/10 text-neutral-600 dark:text-stone-300">{h}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-2 text-[10px] text-neutral-500 dark:text-stone-400 break-all font-mono">{shaping.fingerprint.user_agent}</div>
+            </div>
+          )}
+        </CollapsibleSection>
+
+        {/* Payload 混淆 */}
+        <CollapsibleSection
+          title="Payload 混淆演示"
+          storageKey="fw_gateway_obfuscate"
+          defaultOpen={false}
+          accent="defense"
+        >
+          <div className="space-y-2">
+            <textarea
+              value={obfRaw}
+              onChange={(e) => setObfRaw(e.target.value)}
+              rows={3}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"
+            />
+            <button
+              onClick={handleObfuscate}
+              disabled={obfBusy}
+              className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40"
+            >
+              {obfBusy ? '混淆中...' : '混淆'}
+            </button>
+            <p className="text-[10px] text-neutral-400">注入 `_ts / _nonce / _comment` 冗余字段并随机字段顺序，字节流变化但语义不变（绕过哈希指纹检测）。</p>
+            {obfResult && obfResult.obfuscated !== obfResult.original && (
+              <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-2">
+                <div className="text-[10px] text-neutral-400 mb-1">混淆后：</div>
+                <div className="text-[10px] font-mono text-[var(--element-bg)] break-all">{obfResult.obfuscated}</div>
+              </div>
+            )}
+            {obfResult && obfResult.obfuscated === obfResult.original && (
+              <p className="text-[10px] text-amber-600 dark:text-amber-400">输入不是可解析的 JSON 对象，混淆器原样返回。</p>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        {/* 请求熵监控实验 */}
+        <CollapsibleSection
+          title="请求熵监控实验"
+          storageKey="fw_gateway_entropy"
+          defaultOpen={false}
+          accent="defense"
+        >
+          <div className="space-y-2">
+            <textarea
+              value={entropyInput}
+              onChange={(e) => setEntropyInput(e.target.value)}
+              rows={4}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={handleEntropy}
+                disabled={entropyBusy}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40"
+              >
+                {entropyBusy ? '计算中...' : '计算熵'}
+              </button>
+              <button
+                onClick={() => setEntropyInput(['GET /api/users 200', 'GET /api/posts 200', 'GET /api/profile 200', 'POST /api/login 201', 'GET /static/a.png 200', 'GET /api/users 200', 'GET /api/posts 200', 'GET /api/profile 200'].join('\n'))}
+                className="btn-press px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 border border-black/10 dark:border-stone-700/50"
+              >
+                多样化示例
+              </button>
+            </div>
+            <p className="text-[10px] text-neutral-400">每行一条 `方法 路径 状态`。模式越单一熵越低，低于阈值 2.0 时建议注入假请求。</p>
+            {entropyResult && (
+              <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-2 space-y-1">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-[var(--element-bg)] font-medium">Shannon 熵</span>
+                  <span className={`text-lg font-mono font-semibold ${entropyResult.entropy < entropyResult.threshold ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>{entropyResult.entropy}</span>
+                  <span className="text-[10px] text-neutral-400">(阈值 {entropyResult.threshold})</span>
+                  {entropyResult.needs_noise
+                    ? <span className="ml-auto px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-600 dark:text-amber-400">建议注入 {entropyResult.noise_path}</span>
+                    : <span className="ml-auto px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">多样化充分</span>}
+                </div>
+                <div className="text-[11px] text-neutral-500 dark:text-stone-400">{entropyResult.verdict}</div>
               </div>
             )}
           </div>
