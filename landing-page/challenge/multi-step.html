@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>多步复合防线 · 挑战样本</title>
+    <link rel="stylesheet" href="challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../index.html">主页</a></div></nav>
+    <div class="card">
+        <h1>多步复合防线 <span class="badge adv">进阶</span></h1>
+        <p class="sub">登录被拆成多道关卡，逐一解锁：<b>密码</b> → <b>滑块</b> → <b>短信/邮件码</b>。验证软件能否连续跨过多道验证完成完整登录链路。</p>
+        <ol id="steps" class="mono" style="margin-bottom:16px;">
+            <li id="s1">① 账号密码（当前）</li>
+            <li id="s2">② 滑块拼图（锁定中）</li>
+            <li id="s3">③ 短信/邮件验证码（锁定中）</li>
+        </ol>
+
+        <!-- Step1 密码 -->
+        <div class="step" data-step="1">
+            <div class="field"><label>密码（hint: 任意 ≥6 位）</label><input id="pwd" type="password" placeholder="请输入密码" /></div>
+            <button class="btn" id="nextPwd">下一步</button>
+        </div>
+
+        <!-- Step2 滑块 -->
+        <div class="step" data-step="2" style="display:none;">
+            <div style="text-align:center;font-size:2rem;margin:8px 0;">🖼️</div>
+            <div class="mono">将滑块拖到最右端以解锁拼图</div>
+            <div style="position:relative;height:48px;background:var(--surface-hover);border:1px solid var(--border);border-radius:12px;margin:12px 0;user-select:none;">
+                <div id="sFill" style="position:absolute;left:0;top:0;bottom:0;width:0;background:linear-gradient(90deg,var(--accent-soft),var(--accent));opacity:.4;"></div>
+                <div id="sHandle" style="position:absolute;left:0;top:4px;bottom:4px;width:44px;background:var(--accent);border-radius:9px;cursor:grab;display:flex;align-items:center;justify-content:center;color:#fff;">→</div>
+            </div>
+        </div>
+
+        <!-- Step3 验证码 -->
+        <div class="step" data-step="3" style="display:none;">
+            <div class="mono">验证码已发送（测试用固定码：<b>8888</b>）</div>
+            <div class="field"><label>短信/邮件验证码</label><input id="sms" inputmode="numeric" placeholder="4 位验证码" /></div>
+            <button class="btn" id="nextSms">完成登录</button>
+        </div>
+
+        <div class="gate" id="gate"></div>
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">目标：完整跑通 登录=密码+滑块+验证码 的全链路；任一关卡未过则链路终止。记录每步耗时与滑块轨迹供行为分析。</p>
+    </div>
+</div>
+<script>
+    const $ = (id) => document.getElementById(id);
+    let step = 1, tel = { steps: [], slidePts: [] };
+    function setStep(n) {
+        step = n;
+        document.querySelectorAll('.step').forEach(s => s.style.display = (+s.dataset.step === n ? 'block' : 'none'));
+        for (let i = 1; i <= 3; i++) { const li = $('#s' + i); li.style.color = i < n ? 'var(--ok)' : i === n ? 'var(--accent)' : ''; li.textContent = i < n ? ['','① 账号密码 ✓','② 滑块拼图 ✓','③ 短信/邮件码 ✓'][i] : ['','① 账号密码（当前）','② 滑块拼图（当前）','③ 短信/邮件验证码（当前）'][i]; }
+    }
+    const t0 = performance.now();
+
+    $('#nextPwd').onclick = () => {
+        if ($('#pwd').value.length < 6) { $(' #gate').className = 'gate on bad'; $(' #gate').textContent = '密码长度不足 6 位'; return; }
+        tel.steps.push({ step: 'pwd', dur_ms: Math.round(performance.now() - t0) });
+        setStep(2);
+    };
+    // 滑块
+    const track = $(' .step[data-step="2"]'), handle = $('#sHandle');
+    let dragging = false;
+    const trackW = () => track.clientWidth - handle.offsetWidth;
+    document.addEventListener('pointerdown', (e) => { if (step !== 2) return; dragging = true; });
+    document.addEventListener('pointermove', (e) => {
+        if (!dragging || step !== 2) return;
+        const pct = Math.max(0, Math.min(1, (e.clientX - track.getBoundingClientRect().left) / trackW()));
+        $('#sFill').style.width = pct * 100 + '%'; handle.style.left = pct * trackW() + 'px';
+        if (pct >= 0.99) { dragging = false; tel.slidePts = tel.slidePts.concat($('.slidePts') || []); tel.steps.push({ step: 'slider', dur_ms: Math.round(performance.now() - t0) }); setStep(3); }
+    });
+    document.addEventListener('pointerup', () => dragging = false);
+
+    $('#nextSms').onclick = () => {
+        if ($('#sms').value.trim() !== '8888') { $(' #gate').className = 'gate on bad'; $(' #gate').textContent = '验证码错误（测试码 8888）'; return; }
+        tel.steps.push({ step: 'sms', dur_ms: Math.round(performance.now() - t0) });
+        tel.passed = true;
+        $('#gate').className = 'gate on ok'; $('#gate').textContent = '✅ 多步防线全部通过，登录成功';
+        $('#tele').style.display = 'block';
+        $('#tele').textContent = JSON.stringify({ passed: true, steps: tel.steps, slide_point_count: tel.slidePts.length || 0, ua: navigator.userAgent.slice(0, 120), ts: Date.now() }, null, 2);
+    };
+    setStep(1);
+</script>
+</body>
+</html>

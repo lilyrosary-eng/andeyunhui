@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>频控/限速 · 挑战样本</title>
+    <link rel="stylesheet" href="challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../index.html">主页</a></div></nav>
+    <div class="card">
+        <h1>频控 / 限速 <span class="badge adv">进阶</span></h1>
+        <p class="sub">模拟 429 频控：<b>10 秒内操作超过 5 次</b> → 触发锁定时长并递增冷却（退避）。验证自动化是否带匀速/泊松间隔而非连打。</p>
+        <div class="mono" id="status">状态：正常 · 剩余可用：<span id="left">5/5</span></div>
+        <button class="btn wide mt" id="act">执行操作</button>
+        <div id="cooldown" style="display:none;margin-top:12px;font-size:1.3rem;font-weight:700;color:var(--bad);">⏳ 已锁定，冷却 <span id="cd">0</span>s</div>
+        <div class="gate" id="gate"></div>
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">目标：验证软件限速/退避策略——过快(机械连打)会被退避惩罚，规律节流则稳定通过。冷却与可用次数实时变化。</p>
+    </div>
+</div>
+<script>
+    const $ = (id) => document.getElementById(id);
+    // 窗口 10s / 上限 5 次 / 锁定 8s→16s 递增
+    const WINDOW = 10000, LIMIT = 5;
+    let windowStart = performance.now(), count = 0, lockedUntil = 0, lockLevel = 0, events = [];
+    let timer = null;
+
+    function tick() {
+        const now = performance.now();
+        if (now >= lockedUntil) { $('#cooldown').style.display = 'none'; $('#act').disabled = false; $('#status').textContent = '状态：正常'; }
+        // 窗口过期后重置
+        if (now - windowStart >= WINDOW) { windowStart = now; count = 0; $('#status').textContent = '状态：正常（新窗口）'; }
+        $('#left').textContent = `${Math.max(0, LIMIT - count)}/5`;
+    }
+
+    $('#act').onclick = () => {
+        const now = performance.now();
+        if (now < lockedUntil) return;
+        if ((now - windowStart) >= WINDOW) { windowStart = now; count = 0; }
+        events.push(now - t0);
+        if (count >= LIMIT) {
+            // 超过窗口内额度 → 锁定
+            lockLevel = Math.min(lockLevel + 1, 3);
+            const lockMs = 8000 * lockLevel; // 8s,16s,24s
+            lockedUntil = now + lockMs;
+            $('#cooldown').style.display = 'block';
+            $('#act').disabled = true;
+            let left = lockMs / 1000;
+            $('#cd').textContent = Math.ceil(left);
+            timer = setInterval(() => { left -= 0.1; $('#cd').textContent = Math.ceil(left); if (left <= 0) clearInterval(timer); }, 100);
+            const g = $('#gate'); g.className = 'gate on bad'; g.textContent = `⚠ 频率超限，锁定 ${lockMs / 1000}s（第 ${lockLevel} 次退避）`;
+            count = 0; windowStart = performance.now();
+            dump('blocked', true);
+        } else {
+            count++;
+            const g = $('#gate'); g.className = count >= LIMIT ? 'gate on warn' : 'gate on ok';
+            g.textContent = count >= LIMIT ? `操作已到上限，再点将触发锁定` : `操作成功（本窗口 ${count}/${LIMIT}）`;
+            dump('ok', false);
+        }
+    };
+    const t0 = performance.now();
+    setInterval(tick, 200);
+
+    function dump(state, blocked) {
+        $('#tele').style.display = 'block';
+        $('#tele').textContent = JSON.stringify({ state, blocked, event_times_ms: events.slice(-12), lock_level: lockLevel, window_ms: WINDOW, limit: LIMIT, ua: navigator.userAgent.slice(0, 120), ts: Date.now() }, null, 2);
+    }
+</script>
+</body>
+</html>

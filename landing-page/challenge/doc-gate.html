@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>文档预览门控 · 挑战样本</title>
+    <link rel="stylesheet" href="challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../index.html">主页</a></div></nav>
+    <div class="card">
+        <h1>文档预览门控 <span class="badge normal">常用</span></h1>
+        <p class="sub">多级内容门控：<b>游客</b>只见摘要 → <b>登录</b>可预览正文(截断) → <b>VIP</b> 解锁完整敏感章节。验证抓取能否穿透内容权限获取全量正文。</p>
+
+        <div class="doc">
+            <h2 id="docTitle">《量化交易系统架构白皮书》</h2>
+            <p id="docAbstract" class="mono">摘要：本文档阐述量化交易系统的整体架构、风控与交割链路……（仅游客可见此摘要）</p>
+            <div id="docBody" style="max-height:0;overflow:hidden;transition:max-height .5s ease;">
+                <p id="docRestricted">
+                    <b>[登录可见]</b> 第一章 系统总览：本系统采用事件驱动 + 双缓冲架构，控制面与数据面分离……（正文从第 1 章到第 8 章，这里只展示前面几段。）
+                </p>
+                <p id="docVip">
+                    <b>[VIP 可见]</b> 第八章 敏感参数：风控阈值表、灰度发布开关、高杠杆账户名单等敏感章节，仅 VIP 订阅可见全量内容。普通登录用户也只能看到前 7 章概述。
+                </p>
+            </div>
+        </div>
+
+        <div id="controls" class="mt">
+            <button class="btn ghost wide" id="loginBtn">登录预览全文</button>
+            <div class="field" id="vipField" style="display:none;">
+                <label>VIP 兑换码（hint: 填任意 ≥6 位，模拟 VIP 校验）</label>
+                <input id="vipCode" placeholder="请输入 VIP 兑换码" />
+            </div>
+            <button class="btn wide mt" id="vipBtn" style="display:none;">开通 VIP / 预览敏感章节</button>
+        </div>
+
+        <div class="gate on" id="gate"></div>
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">目标：普通抓取只能取到摘要；需"登录态 + VIP 凭证"组合才能拿到完整正文。验证软件爬虫/去反爬能否携带正确凭证穿透多级门控。</p>
+    </div>
+</div>
+<script>
+    const el = (id) => document.getElementById(id);
+    let level = 0; // 0游客 1登录 2VIP
+    let teleMoves = []; let rec = false;
+    document.addEventListener('mousedown', () => { rec = true; teleMoves = []; });
+    document.addEventListener('mousemove', (e) => { if (rec) teleMoves.push({ x: e.clientX, y: e.clientY, t: performance.now() }); });
+    document.addEventListener('mouseup', () => rec = false);
+
+    function setLevel(lv) {
+        level = lv;
+        const body = el('docBody');
+        body.style.maxHeight = lv === 0 ? '0px' : (lv === 1 ? '160px' : 'none');
+        el('docBody').scrollTop = 0;
+        if (lv >= 1) { el('docRestricted').style.display = 'block'; }
+        if (lv >= 2) { el('docVip').style.display = 'block'; }
+        const g = el('gate');
+        if (lv === 0) g.className = 'gate on warn';
+        if (lv === 1) { g.className = 'gate on'; }
+        if (lv === 2) { g.className = 'gate on ok'; }
+        g.textContent = lv === 0 ? '当前：游客。仅可见摘要，正文被门控。' : lv === 1 ? '当前：已登录。可预览正文(截断)，敏感章节需要 VIP。' : '当前：VIP。已解锁全部敏感章节。';
+    }
+    setLevel(0);
+
+    const login = () => {
+        setLevel(1); el('loginBtn').style.display = 'none';
+        el('vipField').style.display = 'block'; el('vipBtn').style.display = 'block';
+        dump('login');
+    };
+    const vip = () => {
+        const c = el('vipCode').value.trim();
+        if (c.length < 6) { el('gate').className = 'gate on bad'; el('gate').textContent = '兑换码无效（至少 6 位）'; return; }
+        setLevel(2); dump('vip');
+    };
+    el('loginBtn').onclick = login;
+    el('vipBtn').onclick = vip;
+
+    function dump(step) {
+        el('tele').style.display = 'block';
+        el('tele').textContent = JSON.stringify({
+            step, level,
+            title: el('docTitle').textContent.trim(),
+            visibleTextLength: document.querySelector('.doc').innerText.length,
+            access_level: level === 0 ? 'guest' : level === 1 ? 'login' : 'vip',
+            telemetry: {
+                mouse_samples: teleMoves.length,
+                mouse_path: teleMoves.slice(0, 40).map(p => ({ x: p.x, y: p.y })),
+                ua: navigator.userAgent.slice(0, 120),
+            },
+            ts: Date.now(),
+        }, null, 2);
+    }
+</script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+/* ===== 挑战测试样本共享样式（莫兰迪，与主站一致） ===== */
+:root {
+    --bg:#f4f2ec; --surface:#fcfaf7; --surface-hover:#f0ede8; --text-primary:#3d3a36;
+    --text-secondary:#8a8580; --text-muted:#b5b0aa; --border:#e5e0da; --accent:#b8a9c9;
+    --accent-soft:#c9bdd6; --shadow:rgba(60,58,55,.06); --radius:1.2rem; --transition:.3s ease;
+    --ok:#6f9e6f; --ok-bg:#eef5ee; --warn:#a67c1f; --warn-bg:#faf3e3; --bad:#b85050; --bad-bg:#fbecec;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif; background:var(--bg); color:var(--text-primary); line-height:1.6; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:1.6rem 1.2rem 4rem; }
+.wrap { max-width:860px; width:100%; }
+.navbar { display:flex; justify-content:space-between; align-items:center; padding:.6rem 1.6rem; background:var(--surface); border-radius:3rem; border:1px solid var(--border); box-shadow:0 2px 12px var(--shadow); margin-bottom:1.8rem; flex-wrap:wrap; gap:.7rem; }
+.logo { font-size:1.2rem; font-weight:600; color:var(--text-primary); text-decoration:none; display:flex; align-items:center; gap:8px; }
+.nav-links { display:flex; gap:1.4rem; align-items:center; flex-wrap:wrap; }
+.nav-links a { color:var(--text-secondary); text-decoration:none; font-size:.88rem; transition:color var(--transition); }
+.nav-links a:hover { color:var(--text-primary); }
+.card { background:var(--surface); border-radius:var(--radius); border:1px solid var(--border); box-shadow:0 8px 30px var(--shadow); padding:1.8rem 1.8rem; margin-bottom:1.2rem; }
+.card h1 { font-size:1.3rem; margin-bottom:.2rem; }
+.card .sub { color:var(--text-secondary); font-size:.88rem; margin-bottom:1.2rem; }
+.badge { display:inline-block; padding:.15rem .6rem; border-radius:999px; font-size:.72rem; margin-left:.4rem; }
+.badge.normal { background:var(--ok-bg); color:var(--ok); }
+.badge.adv { background:var(--warn-bg); color:var(--warn); }
+.badge.hard { background:var(--bad-bg); color:var(--bad); }
+.grid-list { display:grid; grid-template-columns:1fr 1fr; gap:.8rem; }
+.item { background:var(--surface-hover); border-radius:.95rem; padding:.9rem 1.05rem; text-decoration:none; color:var(--text-primary); border:1px solid var(--border); transition:transform var(--transition), box-shadow var(--transition); display:block; }
+.item:hover { transform:translateY(-2px); box-shadow:0 6px 18px var(--shadow); }
+.item .t { font-weight:600; font-size:.95rem; display:flex; align-items:center; gap:6px; }
+.item .d { font-size:.78rem; color:var(--text-secondary); margin-top:.25rem; }
+/* 通用控件 */
+.btn { padding:.6rem 1.2rem; border:none; border-radius:.8rem; cursor:pointer; font-size:.9rem; background:var(--accent); color:#fff; font-weight:600; transition:opacity var(--transition); }
+.btn:disabled { opacity:.45; cursor:not-allowed; }
+.btn.ghost { background:var(--surface-hover); color:var(--text-primary); border:1px solid var(--border); }
+.btn.wide { display:block; width:100%; }
+.gate { padding:.8rem 1rem; border-radius:.85rem; margin-top:.9rem; font-size:.86rem; display:none; }
+.gate.on { display:block; }
+.gate.ok { background:var(--ok-bg); color:var(--ok); }
+.gate.warn { background:var(--warn-bg); color:var(--warn); }
+.gate.bad { background:var(--bad-bg); color:var(--bad); }
+.field { margin:.9rem 0 .6rem; }
+.field label { display:block; font-size:.8rem; color:var(--text-secondary); margin-bottom:.3rem; }
+.field input, .field select { width:100%; padding:.6rem .8rem; font-size:.92rem; border:1px solid var(--border); border-radius:.75rem; background:#fff; color:var(--text-primary); outline:none; }
+.field input:focus, .field select:focus { border-color:var(--accent); }
+.mono { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.78rem; color:var(--text-secondary); }
+pre.tele { white-space:pre-wrap; word-break:break-all; background:var(--surface-hover); border-radius:.8rem; padding:.7rem .9rem; font-size:.72rem; max-height:200px; overflow:auto; color:var(--text-primary); }
+.mt { margin-top:1rem; }
+.hint { font-size:.78rem; color:var(--text-muted); margin-top:1.1rem; line-height:1.7; }
+.tag { font-size:.7rem; color:var(--text-muted); }

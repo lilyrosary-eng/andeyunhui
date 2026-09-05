@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>条件下载 · 挑战样本</title>
+    <link rel="stylesheet" href="challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../index.html">主页</a></div></nav>
+    <div class="card">
+        <h1>条件下载 <span class="badge normal">常用</span></h1>
+        <p class="sub">下载需<b>同时满足</b>：已登录 + 积分 ≥ 100 + VIP + 当日剩余次数 &gt; 0。任一不满足即拒绝并提示缺失项。验证"要满足条件才能下载"的复合拦截。</p>
+
+        <div class="product">
+            <h2>《爬虫与反爬对抗 · 实战手册》.pdf</h2>
+            <p class="mono">大小 12.6 MB · 2025 版 · 每日下载次数有限</p>
+        </div>
+
+        <div class="field"><label>账号状态</label>
+            <select id="stLogin"><option value="0">未登录</option><option value="1">已登录</option></select>
+        </div>
+        <div class="field"><label>积分（当前值）</label>
+            <input id="stPoints" type="number" value="80" />
+        </div>
+        <div class="field"><label>会员等级</label>
+            <select id="stVip"><option value="0">普通用户</option><option value="1">VIP</option></select>
+        </div>
+        <div class="field"><label>今日剩余下载次数</label>
+            <input id="stCount" type="number" value="5" min="0" />
+        </div>
+
+        <button class="btn wide mt" id="dlBtn">下载文件</button>
+        <div class="gate" id="gate"></div>
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">目标：绕过"未登录/积分不足/非 VIP/次数耗尽"的硬性拒绝。验证软件能否以合适凭证组合直接命中下载接口，或识别上述前置条件。</p>
+    </div>
+</div>
+<script>
+    const $ = (id) => document.getElementById(id);
+    function conditions() {
+        return {
+            logged_in: $('#stLogin').value === '1',
+            points: parseInt($('#stPoints').value) || 0,
+            vip: $('#stVip').value === '1',
+            count_left: parseInt($('#stCount').value) || 0,
+        };
+    }
+    function missing(c) {
+        const m = [];
+        if (!c.logged_in) m.push('未登录');
+        if (c.points < 100) m.push(`积分不足(${c.points}/100)`);
+        if (!c.vip) m.push('非 VIP');
+        if (c.count_left <= 0) m.push('今日下载次数已用尽');
+        return m;
+    }
+    function attemptDownload() {
+        const c = conditions();
+        const miss = missing(c);
+        const g = $('#gate');
+        if (miss.length === 0) {
+            g.className = 'gate on ok'; g.textContent = '✅ 下载已开始（条件全部满足）';
+            // 模拟真实下载接口请求
+            try { fetch('/api/download/manual.pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cond: c }) }).catch(() => {}); } catch (_) {}
+        } else {
+            g.className = 'gate on bad'; g.textContent = `下载被拒绝：${miss.join('；')}`;
+        }
+        $('#tele').style.display = 'block';
+        $('#tele').textContent = JSON.stringify({ cond: c, missing: miss, allowed: miss.length === 0, ts: Date.now() }, null, 2);
+    }
+    $('#dlBtn').onclick = attemptDownload;
+</script>
+</body>
+</html>

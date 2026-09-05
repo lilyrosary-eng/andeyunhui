@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>挑战样本库 · 安得云荟</title>
+    <link rel="icon" type="image/png" href="../logo.png" />
+    <link rel="stylesheet" href="challenge/challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar">
+        <a class="logo" href="../index.html">安得云荟 · 挑战样本库</a>
+        <div class="nav-links"><span class="tag">功能验证测试样本（自有站点）</span></div>
+    </nav>
+
+    <div class="card">
+        <h1>挑战样本库</h1>
+        <p class="sub">常用 → 进阶 → 复杂，多方向测试样本。每页都是独立"防护目标"，用于验证软件攻防/自动化/反追踪能力能否突破。</p>
+        <div class="grid-list">
+            <a class="item" href="challenge/doc-gate.html"><div class="t"><span>文档预览门控</span><span class="badge normal">常用</span></div><div class="d">游客只见摘要 → 登录预览全文 → VIP 解锁敏感章节（多级内容门控）</div></a>
+            <a class="item" href="challenge/download-gate.html"><div class="t"><span>条件下载</span><span class="badge normal">常用</span></div><div class="d">下载需同时满足：登录 + 积分门槛 + VIP + 当日次数剩余（复合条件）</div></a>
+            <a class="item" href="challenge/verify/click-order.html"><div class="t"><span>顺序点选验证码</span><span class="badge normal">常用</span></div><div class="d">按 1→N 顺序点选，错序即重置；记录点选间隔与坐标</div></a>
+            <a class="item" href="challenge/verify/select.html"><div class="t"><span>图选验证码</span><span class="badge normal">常用</span></div><div class="d">勾选所有含"圆形"的格子，模拟语义图选</div></a>
+            <a class="item" href="challenge/verify/rotate.html"><div class="t"><span>旋转验证</span><span class="badge adv">进阶</span></div><div class="d">拖动滑块把圆盘转到目标角度（容差判定）</div></a>
+            <a class="item" href="challenge/verify/char.html"><div class="t"><span>字符验证码</span><span class="badge adv">进阶</span></div><div class="d">扭曲字符输入 + 刷新；记录输入时序</div></a>
+            <a class="item" href="verify.html"><div class="t"><span>滑块验证</span><span class="badge normal">常用</span></div><div class="d">高精度滑块 + 行为散度判定（重点对端）</div></a>
+            <a class="item" href="challenge/multi-step.html"><div class="t"><span>多步复合防线</span><span class="badge adv">进阶</span></div><div class="d">密码 → 滑块 → 邮件码 → 完成，串联多关卡</div></a>
+            <a class="item" href="challenge/rate-limit.html"><div class="t"><span>频控/限速</span><span class="badge adv">进阶</span></div><div class="d">快速连续操作触发锁定 + 冷却倒计时（模拟 429）</div></a>
+            <a class="item" href="challenge/device-risk.html"><div class="t"><span>设备风控</span><span class="badge hard">复杂</span></div><div class="d">陌生设备/指纹变化触发二次验证（模拟设备信誉）</div></a>
+        </div>
+        <p class="hint">说明：以上均为自有站点上的功能自测样本。每页独立、纯前端可实现，含通关判定与遥测，便于自动化/反追踪做端到端验证。推送到 adyh.cc.cd 后即可访问。</p>
+    </div>
+</div>
+</body>
+</html>

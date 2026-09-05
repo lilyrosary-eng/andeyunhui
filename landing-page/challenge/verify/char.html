@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>字符验证码 · 挑战样本</title>
+    <link rel="stylesheet" href="../challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="../../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../../index.html">主页</a></div></nav>
+    <div class="card">
+        <h1>字符验证码 <span class="badge adv">进阶</span></h1>
+        <p class="sub">识别下方<b>扭曲字符</b>并输入（含干扰线）。记录输入时序与按键间隔。</p>
+        <div id="code" style="font-family:Impact,'Arial Black',sans-serif;font-size:2.6rem;letter-spacing:6px;color:var(--text-primary);margin:18px 0;text-align:center;user-select:none;"></div>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <input id="inp" style="flex:1;padding:.7rem .9rem;font-size:1rem;border:1px solid var(--border);border-radius:.8rem;" placeholder="请输入验证码" autocomplete="off" autocapitalize="off" />
+            <button class="btn ghost" id="refresh">换一题</button>
+            <button class="btn" id="submit">确定</button>
+        </div>
+        <div class="gate" id="gate"></div>
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">目标：验证软件 OCR/字符识别能否在干扰+扭曲下准确读取；输入节奏是否像人（眨眼间隔/粘贴行为）。</p>
+    </div>
+</div>
+<script>
+    const $ = (id) => document.getElementById(id);
+    const CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // 去易混淆
+    const keys = []; let last = 0, code = '';
+    function gen() {
+        code = Array.from({ length: 5 }, () => CHARS[Math.floor(Math.random() * CHARS.length)]).join('');
+        $('#code').textContent = code;
+    }
+    const render = () => {
+        // 逐字符加随机旋转/偏移，模拟扭曲 + 干扰线
+        let html = '';
+        for (let i = 0; i < code.length; i++) {
+            const rot = (Math.random() - 0.5) * 22;
+            const dx = (Math.random() - 0.5) * 6;
+            html += `<span style="display:inline-block;transform:rotate(${rot}deg);margin:0 2px;position:relative;top:${dx.toFixed(0)}px">${code[i]}</span>`;
+        }
+        $('#code').innerHTML = html + '<div style="position:absolute;inset:0;pointer-events:none;opacity:.25;">' + '<svg width="100%" height="100%"><line x1="0" y1="10" x2="100%" y2="30" stroke="currentColor"/><line x1="0" y1="40" x2="100%" y2="15" stroke="currentColor"/></svg></div>';
+        $('#inp').value = '';
+    };
+    gen(); render();
+    $('#refresh').onclick = () => { gen(); render(); };
+    document.addEventListener('keydown', () => { const now = performance.now(); if (last) keys.push(now - last); last = now; });
+    $('#submit').onclick = () => {
+        const v = $('#inp').value.trim().toUpperCase();
+        const g = $('#gate');
+        const ok = v === code;
+        g.className = 'gate ' + (ok ? 'on ok' : 'on bad');
+        g.textContent = ok ? '✅ 识别正确，通过' : `识别错误：输入 ${v || '(空)'}，期望 ${code}。`;
+        $('#tele').style.display = 'block';
+        $('#tele').textContent = JSON.stringify({ passed: ok, code, input: v, key_intervals_ms: keys, ua: navigator.userAgent.slice(0, 120), ts: Date.now() }, null, 2);
+        if (ok) setTimeout(() => { gen(); render(); }, 900);
+    };
+</script>
+</body>
+</html>

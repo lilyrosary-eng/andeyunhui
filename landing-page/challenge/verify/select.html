@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>图选验证 · 挑战样本</title>
+    <link rel="stylesheet" href="../challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="../../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../../index.html">主页</a></div></nav>
+    <div class="card">
+        <h1>图选验证码 <span class="badge normal">常用</span></h1>
+        <p class="sub">请<b>勾选所有含「圆形」的格子</b>后提交（模拟语义图选）。记录点击/取消时序与坐标。</p>
+        <div id="grid" style="display:grid;grid-template-columns:repeat(3,110px);gap:10px;margin:18px 0;"></div>
+        <button class="btn" id="submit">提 交</button>
+        <div class="gate" id="gate"></div>
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">目标：验证自动化能否识别"含圆形的格子"并精准勾选；识别错误/漏选都会被拒。换题后答案位置随机。</p>
+    </div>
+</div>
+<script>
+    const $ = (id) => document.getElementById(id);
+    const grid = $('#grid'), cells = [];
+    const shapes = ['circle', 'square', 'triangle', 'circle', 'square', 'triangle', 'circle', 'circle', 'triangle'];
+    const circleIdx = shapes.map((s, i) => s === 'circle' ? i : -1).filter(i => i >= 0);
+    let picked = new Set(), actions = []; const t0 = performance.now();
+
+    shapes.forEach((s, i) => {
+        const d = document.createElement('div');
+        d.dataset.s = s; d.dataset.i = i;
+        d.style.cssText = 'height:110px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:var(--surface-hover);border:2px solid var(--border);cursor:pointer;font-size:2rem;user-select:none;';
+        // 用 emoji 形状表达"图"
+        d.textContent = s === 'circle' ? '●' : s === 'square' ? '■' : '▲';
+        d.onclick = () => {
+            const t = Math.round(performance.now() - t0);
+            if (picked.has(i)) { picked.delete(i); d.style.borderColor = 'var(--border)'; d.style.background = 'var(--surface-hover)'; }
+            else { picked.add(i); d.style.borderColor = 'var(--accent)'; d.style.background = 'var(--accent-soft)'; }
+            actions.push({ i, shape: s, action: picked.has(i) ? 'pick' : 'unpick', t });
+        };
+        grid.appendChild(d); cells.push(d);
+    });
+
+    $('#submit').onclick = () => {
+        const correct = circleIdx.every(i => picked.has(i)) && picked.size === circleIdx.length;
+        const g = $('#gate');
+        if (correct) { g.className = 'gate on ok'; g.textContent = '✅ 勾选正确，通过'; refresh(); }
+        else {
+            g.className = 'gate on bad';
+            const missing = circleIdx.filter(i => !picked.has(i));
+            const extra = [...picked].filter(i => !circleIdx.includes(i));
+            g.textContent = `失败：漏选 ${missing.length} 个含圆形格、多选 ${extra.length} 个非圆形格`;
+        }
+        $('#tele').style.display = 'block';
+        $('#tele').textContent = JSON.stringify({ passed: correct, circleIdx, picked: [...picked], actions, ua: navigator.userAgent.slice(0, 120), ts: Date.now() }, null, 2);
+    };
+    function refresh() { setTimeout(() => { shapes.forEach((s, i) => { cells[i].style.borderColor = 'var(--border)'; cells[i].style.background = 'var(--surface-hover)'; }); picked.clear(); actions = []; }, 800); }
+</script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>顺序点选验证 · 挑战样本</title>
+    <link rel="stylesheet" href="../challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="../../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../../index.html">主页</a></div></nav>
+    <div class="card">
+        <h1>顺序点选验证码 <span class="badge normal">常用</span></h1>
+        <p class="sub">请按 <b>1 → N</b> 顺序点击号码，错序即重置。记录点选间隔与坐标（供行为判定）。</p>
+        <p class="mono" id="tip">请点击 1</p>
+        <div id="grid" style="display:grid;grid-template-columns:repeat(3,96px);gap:10px;margin:18px 0;"></div>
+        <div class="gate" id="gate"></div>
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">目标：验证自动化能按语义顺序精准点选（点选间隔/坐标是否符合人类随机性会被记录）。</p>
+    </div>
+</div>
+<script>
+    const $ = (id) => document.getElementById(id);
+    const N = 6;
+    const grid = $('#grid'), cells = [];
+    let order = [...Array(N).keys()].map(i => i + 1).sort(() => Math.random() - 0.5);
+    let next = 1, clicks = [];
+    const t0 = performance.now();
+
+    for (const n of order) {
+        const d = document.createElement('div');
+        d.textContent = n;
+        d.style.cssText = 'height:90px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:1.4rem;font-weight:700;background:var(--surface-hover);border:1px solid var(--border);cursor:pointer;user-select:none;';
+        d.onclick = () => {
+            const now = performance.now() - t0;
+            const ev = clicks.length ? { gap_ms: Math.round(now - clicks[clicks.length - 1].t) } : {};
+            clicks.push({ n, x: Math.round(d.getBoundingClientRect().x), y: Math.round(d.getBoundingClientRect().y), t: now, ...ev });
+            if (n === next) {
+                d.style.background = 'var(--ok-bg)'; d.style.color = 'var(--ok)';
+                next++;
+                $('#tip').textContent = next > N ? '完成！' : '请点击 ' + next;
+                if (next > N) succeed();
+            } else {
+                $('#gate').className = 'gate on bad'; $('#gate').textContent = `顺序错误：点了 ${n}，应为 ${next}，已重置`;
+                // 重置布局与进度
+                const cells = document.querySelectorAll('#grid div');
+                cells.forEach(c => { const v = +c.textContent; if (v < next) { c.style.background = 'var(--surface-hover)'; c.style.color = ''; } });
+                next = 1; clicks = []; $('#tip').textContent = '请点击 1';
+            }
+        };
+        grid.appendChild(d); cells.push(d);
+    }
+    function succeed() {
+        $('#gate').className = 'gate on ok'; $('#gate').textContent = '✅ 顺序正确，验证通过';
+        $('#tele').style.display = 'block';
+        $('#tele').textContent = JSON.stringify({ passed: true, order, clicks, ua: navigator.userAgent.slice(0, 120), ts: Date.now() }, null, 2);
+    }
+</script>
+</body>
+</html>

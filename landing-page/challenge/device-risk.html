@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>设备风控 · 挑战样本</title>
+    <link rel="stylesheet" href="challenge.css" />
+</head>
+<body>
+<div class="wrap">
+    <nav class="navbar"><a class="logo" href="../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../index.html">主页</a></div></nav>
+    <div class="card">
+        <h1>设备风控 <span class="badge hard">复杂</span></h1>
+        <p class="sub">模拟设备信誉：先对本地指纹哈希。「陌生设备 / 指纹不一致」→ 触发二次验证（短信码），一致则直通。验证软件指纹一致性。</p>
+
+        <div class="mono" id="fpLine">本设备指纹：<span id="fp">-</span></div>
+        <div class="gate" id="gate"></div>
+
+        <div class="field mt"><label>指纹（默认取自动计算，可手动覆盖以模拟更换设备）</label><input id="fpInput" placeholder="留空=使用本设备指纹" /></div>
+
+        <div id="lvl2" style="display:none;">
+            <div class="field"><label>二次验证码（hint: 任意 4 位数字）</label><input id="code2" placeholder="4 位验证码" /></div>
+            <button class="btn" id="code2Btn">提交二次验证</button>
+        </div>
+        <div id="direct"><button class="btn" id="loginBtn">登录</button></div>
+
+        <pre class="tele mt" id="tele" style="display:none;"></pre>
+        <p class="hint">目标：验证软件会话维持——同一指纹直通；指纹变化或陌生指纹被要求二次验证。风控降级到"需人机确认"。</p>
+    </div>
+</div>
+<script>
+    const $ = (id) => document.getElementById(id);
+    // 简化设备指纹：UA + platform + 语言 + 时区 + 屏宽 的简易哈希
+    const parts = [
+        navigator.userAgent.slice(0, 60),
+        navigator.platform || '',
+        navigator.language || '',
+        -new Date().getTimezoneOffset(),
+        screen.width + 'x' + screen.height,
+    ].join('|');
+    let hash = 0;
+    for (let i = 0; i < parts.length; i++) hash = (hash * 31 + parts.charCodeAt(i)) >>> 0;
+    const myFp = 'fp-' + hash.toString(16);
+    // 首次访问：记录"已知设备"
+    const KNOWN_KEY = 'gf_device_fp';
+    let known = localStorage.getItem(KNOWN_KEY);
+    if (!known) { known = myFp; localStorage.setItem(KNOWN_KEY, myFp); }
+    $('#fp').textContent = myFp;
+
+    function status() {
+        const given = $('#fpInput').value.trim();
+        const useFp = given || myFp;
+        const sameDevice = useFp === known;
+        const g = $('#gate');
+        if (sameDevice) {
+            g.className = 'gate on ok'; g.textContent = `熟悉设备：指纹一致（${useFp.slice(0, 12)}…），直接放行。`;
+            $('#lvl2').style.display = 'none'; $('#direct').style.display = 'block';
+        } else {
+            g.className = 'gate on warn'; g.textContent = `陌生设备/指纹变化（${useFp.slice(0, 12)}…）需二次验证。`;
+            $('#lvl2').style.display = 'block'; $('#direct').style.display = 'none';
+        }
+        dump({ useFp, sameDevice });
+    }
+    $('#fpInput').oninput = status;
+
+    $('#loginBtn').onclick = () => {
+        const g = $('#gate'); g.className = 'gate on ok'; g.textContent = '✅ 直通登录成功（熟悉设备）';
+    };
+    $('#code2Btn').onclick = () => {
+        const c = $('#code2').value.trim();
+        const g = $('#gate');
+        if (!/^\d{4}$/.test(c)) { g.className = 'gate on bad'; g.textContent = '验证码须为 4 位数字'; return; }
+        g.className = 'gate on ok'; g.textContent = '✅ 二次验证通过，登录成功（陌生设备已登记）';
+        localStorage.setItem(KNOWN_KEY, $('#fpInput').value.trim() || myFp);
+        $('#lvl2').style.display = 'none'; $('#direct').style.display = 'block';
+    };
+
+    function dump(extra) {
+        $('#tele').style.display = 'block';
+        $('#tele').textContent = JSON.stringify({ device_fp: myFp, known, ...extra, ua_parts: parts, ua: navigator.userAgent.slice(0, 120), ts: Date.now() }, null, 2);
+    }
+    status();
+</script>
+</body>
+</html>
