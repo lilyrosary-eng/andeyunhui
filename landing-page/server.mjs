@@ -231,6 +231,21 @@ async function fortressApi(req, res, path, body, ip) {
 }
 
 // ============================================================
+// IP 变化一致性计数（按身份 cid 统计短窗内出口 IP）—— 用于识破代理轮换
+// ============================================================
+const CHURN = new Map(); // cid -> Map<ip, last_seen_ts>
+const CHURN_WINDOW = 60000; // 60s 窗口
+function noteChurn(cid, ip) {
+  const now = Date.now();
+  let m = CHURN.get(cid) || new Map();
+  for (const [k, t] of m) if (now - t > CHURN_WINDOW) m.delete(k);
+  m.set(ip, now);
+  if (m.size > 32) { const oldest = [...m.entries()].sort((a, b) => a[1] - b[1])[0]; m.delete(oldest[0]); }
+  CHURN.set(cid, m);
+  return { distinct: m.size, ips: [...m.keys()] };
+}
+
+// ============================================================
 // 体系防线 system：把各层防线 + 「来源 IP 隐藏」化为一个系统会话。
 //   L1  UA 严检                          L2  来源 IP 必须隐藏（须经代理出口，非本机直连）
 //   L3  行为分(0.1~0.6)                  L4  指纹一致
@@ -253,6 +268,15 @@ async function systemApi(req, res, path, body, ip) {
     persist();
     return send({ token, layer: 1, layers: 5, hidden_seen: hidden, scheme: 'UA→IP隐藏(须经代理)→行为→指纹→频控' });
   }
+  if (path === '/api/system/churn') {
+    // IP 变化一致性计数：按身份(cid)统计短窗内出现的不同出口 IP。
+    // 稳定用户→1 个 IP；轮换代理→同一身份涌现多个出口 → 体系"识破"旋转。
+    const cid = String(body.cid || body.fp || (req.headers['user-agent'] || '').slice(0, 12));
+    const info = noteChurn(cid, ip);
+    const verdict = info.distinct <= 1 ? '一致（正常：单一出口）' : info.distinct === 2 ? '轻度变化（可疑：双出口）' : '识破：IP 轮换/不一致（疑似代理旋转）';
+    return send({ cid, seen_ip: ip, distinct_ips: info.distinct, seen_ips: info.ips, verdict });
+  }
+
   if (path === '/api/system/step') {
     const token = String(body.token || '');
     const s = (state.system || {})[token];

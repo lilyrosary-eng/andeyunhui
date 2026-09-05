@@ -105,4 +105,19 @@ async fn main() {
         if !flag.is_empty() || code != 200 { break; }
         tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     }
+
+    println!("\n===== C) 体系识破能力：IP 变化一致性计数 =====");
+    // 攻击者：保持同一身份(cid=fp)但轮换出口 → distinct 应被体系数出并判"识破"
+    let cid = "fp-ATTACKER-ROTATE";
+    let probes = [("直连(.1)", &c_direct), ("代理A(.2)", &c_proxyA), ("代理B(.3)", &c_proxyB)];
+    for (label, c) in probes {
+        let (_, v) = post(c, &format!("{base}/api/system/churn"), None, None, &format!(r#"{{"cid":"{cid}"}}"#)).await;
+        println!("  [轮换攻击者] {label} -> distinct_ips={} 出口={} → {}", v["distinct_ips"], v["seen_ip"].as_str().unwrap_or(""), v["verdict"].as_str().unwrap_or(""));
+    }
+    // 稳定用户：单一出口 → 体系判"一致"
+    let ucid = "fp-NORMAL-USER";
+    for (label, c) in [("直连(.1)", &c_direct), ("直连(.1)", &c_direct)] {
+        let (_, v) = post(c, &format!("{base}/api/system/churn"), None, None, &format!(r#"{{"cid":"{ucid}"}}"#)).await;
+        println!("  [稳定用户] {label} -> distinct_ips={} → {}", v["distinct_ips"], v["verdict"].as_str().unwrap_or(""));
+    }
 }

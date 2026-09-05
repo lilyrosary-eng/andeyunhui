@@ -32,6 +32,12 @@
                     代理B → 出口 <b>127.0.0.3</b>（轮换，防一致性追踪）<br/>
                     XFF   → 注入 <b>203.0.113.7,198.51.100.4</b> 混淆链
                 </div>
+                <div class="tag" style="margin:.7rem 0 .4rem;">体系识破能力（/api/system/churn 一致性计数）</div>
+                <div class="mono" style="line-height:1.9;">
+                    同身份 1 出口 → <b style="color:var(--ok)">一致</b><br/>
+                    同身份 2 出口 → <b style="color:var(--warn)">可疑（轻度变化）</b><br/>
+                    同身份 ≥3 出口 → <b style="color:var(--bad)">识破：IP 轮换/旋转</b>
+                </div>
             </div>
         </div>
         <div class="hint">体系攻击语义：不隐藏 IP 的攻击者即在 L2 被 403 拦（<code class="mono">来源直连、IP 未隐藏</code>）；经代理隐藏后 5 层全过拿 <code class="mono">SYS_FLAG</code>。用 <code class="mono">gongfang_system_attack</code> 打 `/api/system` 复现。</div>
