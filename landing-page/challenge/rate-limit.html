@@ -17,56 +17,39 @@
         <div id="cooldown" style="display:none;margin-top:12px;font-size:1.3rem;font-weight:700;color:var(--bad);">⏳ 已锁定，冷却 <span id="cd">0</span>s</div>
         <div class="gate" id="gate"></div>
         <pre class="tele mt" id="tele" style="display:none;"></pre>
-        <p class="hint">目标：验证软件限速/退避策略——过快(机械连打)会被退避惩罚，规律节流则稳定通过。冷却与可用次数实时变化。</p>
+        <p class="hint">频控在<b>服务端按 IP</b> 执行（10s 窗口 5 次，锁 8s→16s→24s 递增）。规律节流稳定通过；机械连打触发退避。刷新/换 IP 不会重置服务端锁定。</p>
     </div>
 </div>
 <script>
     const $ = (id) => document.getElementById(id);
-    // 窗口 10s / 上限 5 次 / 锁定 8s→16s 递增
-    const WINDOW = 10000, LIMIT = 5;
-    let windowStart = performance.now(), count = 0, lockedUntil = 0, lockLevel = 0, events = [];
-    let timer = null;
-
-    function tick() {
+    let cdTimer = null;
+    async function op() {
         const now = performance.now();
-        if (now >= lockedUntil) { $('#cooldown').style.display = 'none'; $('#act').disabled = false; $('#status').textContent = '状态：正常'; }
-        // 窗口过期后重置
-        if (now - windowStart >= WINDOW) { windowStart = now; count = 0; $('#status').textContent = '状态：正常（新窗口）'; }
-        $('#left').textContent = `${Math.max(0, LIMIT - count)}/5`;
-    }
-
-    $('#act').onclick = () => {
-        const now = performance.now();
-        if (now < lockedUntil) return;
-        if ((now - windowStart) >= WINDOW) { windowStart = now; count = 0; }
-        events.push(now - t0);
-        if (count >= LIMIT) {
-            // 超过窗口内额度 → 锁定
-            lockLevel = Math.min(lockLevel + 1, 3);
-            const lockMs = 8000 * lockLevel; // 8s,16s,24s
-            lockedUntil = now + lockMs;
-            $('#cooldown').style.display = 'block';
-            $('#act').disabled = true;
-            let left = lockMs / 1000;
-            $('#cd').textContent = Math.ceil(left);
-            timer = setInterval(() => { left -= 0.1; $('#cd').textContent = Math.ceil(left); if (left <= 0) clearInterval(timer); }, 100);
-            const g = $('#gate'); g.className = 'gate on bad'; g.textContent = `⚠ 频率超限，锁定 ${lockMs / 1000}s（第 ${lockLevel} 次退避）`;
-            count = 0; windowStart = performance.now();
-            dump('blocked', true);
-        } else {
-            count++;
-            const g = $('#gate'); g.className = count >= LIMIT ? 'gate on warn' : 'gate on ok';
-            g.textContent = count >= LIMIT ? `操作已到上限，再点将触发锁定` : `操作成功（本窗口 ${count}/${LIMIT}）`;
-            dump('ok', false);
+        try {
+            const r = await fetch('/api/op', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+            const j = await r.json().catch(() => ({}));
+            if (r.status === 429 || j.allowed === false) {
+                const secs = j.retry_after || 0;
+                $('#cooldown').style.display = 'block'; $('#cd').textContent = secs || 0;
+                $('#act').disabled = true;
+                let left = secs;
+                clearInterval(cdTimer);
+                cdTimer = setInterval(() => { left -= 0.1; $('#cd').textContent = Math.max(0, Math.ceil(left)); if (left <= 0) { clearInterval(cdTimer); $('#cooldown').style.display = 'none'; $('#act').disabled = false; } }, 100);
+                const g = $('#gate'); g.className = 'gate on bad';
+                g.textContent = `⚠ 服务端频控触发：锁定 ${secs}s（${j.level ? '退避 L' + j.level : ''}）`;
+                $('#status').textContent = '状态：已锁定';
+            } else {
+                $('#status').textContent = `状态：正常 · 剩余可用：${j.remaining || 0}/5`;
+                const g = $('#gate'); g.className = 'gate on ok';
+                g.textContent = `操作成功（本窗口剩余 ${j.remaining ?? 0} 次）`;
+            }
+            $('#tele').style.display = 'block';
+            $('#tele').textContent = JSON.stringify(j, null, 2);
+        } catch (e) {
+            $('#gate').className = 'gate on bad'; $('#gate').textContent = '请求失败：请先启动后端 node server.mjs';
         }
-    };
-    const t0 = performance.now();
-    setInterval(tick, 200);
-
-    function dump(state, blocked) {
-        $('#tele').style.display = 'block';
-        $('#tele').textContent = JSON.stringify({ state, blocked, event_times_ms: events.slice(-12), lock_level: lockLevel, window_ms: WINDOW, limit: LIMIT, ua: navigator.userAgent.slice(0, 120), ts: Date.now() }, null, 2);
     }
+    $('#act').onclick = op;
 </script>
 </body>
 </html>

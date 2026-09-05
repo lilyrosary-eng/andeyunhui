@@ -58,6 +58,8 @@
         .telemetry { margin-top: 1rem; padding: .8rem .9rem; background: var(--surface-hover); border-radius: .8rem; font-size: .78rem; color: var(--text-secondary); display: none; }
         .telemetry pre { white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .72rem; color: var(--text-primary); margin-top: .4rem; max-height: 180px; overflow: auto; }
         .hint { margin-top: 1.4rem; font-size: .74rem; color: var(--text-muted); text-align: center; }
+        .mini { padding: .4rem .8rem; border: none; border-radius: .7rem; cursor: pointer; font-size: .76rem; background: #fff; color: var(--text-primary); border: 1px solid var(--border); }
+        .mini:hover { border-color: var(--accent); }
     </style>
 </head>
 <body>
@@ -86,13 +88,22 @@
             </div>
             <div class="row">
                 <label><input type="checkbox" checked /> 记住设备</label>
-                <a href="index.html">忘记密码？</a>
+                <button type="button" id="modeBtn" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:.82rem;">切换到注册</button>
             </div>
             <button class="btn" type="submit" id="submitBtn">登 录</button>
         </form>
         <div class="msg" id="msg"></div>
+        <div class="account" id="accountCard" style="display:none;margin-top:1rem;padding:.9rem 1rem;background:var(--surface-hover);border-radius:.85rem;">
+            <div style="font-size:.85rem;font-weight:600;">账户（服务端权威）</div>
+            <div class="mono" id="acctLine">-</div>
+            <div style="margin-top:.6rem;display:flex;gap:.6rem;">
+                <button type="button" class="mini" id="earnBtn">赚 +30 积分</button>
+                <button type="button" class="mini" id="vipBtn">开通 VIP</button>
+                <a class="mini" href="challenge/download-gate.html" style="text-decoration:none;display:inline-flex;align-items:center;">去下载页 →</a>
+            </div>
+        </div>
         <div class="telemetry" id="telemetry">
-            <div><b>前端行为遥测（防自动化 demo）</b></div>
+            <div><b>前端行为遥测（反自动化 demo）</b></div>
             <pre id="telemetryPre"></pre>
         </div>
         <div class="hint">实验页面：登录动作会采集输入时序与鼠标轨迹，用于自动化/行为分析实验</div>
@@ -102,7 +113,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.344.0/lucide.min.js"></script>
 <script>
     lucide.createIcons();
-    const $ = (s) => document.querySelector(s);
     // —— 遥测采集：输入间隔 + 鼠标轨迹 ——
     const keys = [];        // 按键间隔 ms
     let lastKey = 0, perKey = 0;
@@ -113,39 +123,54 @@
         const now = performance.now() - t0;
         if (lastKey) keys.push(now - lastKey);
         lastKey = now;
-        // 保留最近500个采样
         if (perKey > 600) { moves.length = 0; perKey = 0; }
     };
     document.addEventListener('keydown', patch);
-    // 拖拽/点击过程鼠标轨迹（登录按钮区域内触发）
     let rec = false;
     document.addEventListener('mousedown', () => { rec = true; moves.length = 0; });
     document.addEventListener('mousemove', (e) => { if (rec) moves.push({ x: e.clientX, y: e.clientY, t: performance.now() - t0 }); });
     document.addEventListener('mouseup', () => { rec = false; });
+
+    const ACCT_KEY = 'gf_account';
+    const $ = (id) => document.getElementById(id);
+    let mode = 'login';
+    const setMode = (m) => { mode = m; $('#submitBtn').textContent = m === 'login' ? '登 录' : '注 册'; $('#modeBtn').textContent = m === 'login' ? '切换到注册' : '我有账号，去登录'; };
+    $('#modeBtn').onclick = () => setMode(mode === 'login' ? 'register' : 'login');
 
     function sampleCount() { return moves.length; }
     function straightness() {
         if (moves.length < 3) return 0;
         const a = moves[0], b = moves[moves.length - 1];
         let maxDev = 0;
-        for (const m of moves) {
-            const d = Math.abs((b.x - a.x) * (a.y - m.y) - (a.x - m.x) * (b.y - a.y)) /
-                (Math.hypot(b.x - a.x, b.y - a.y) || 1);
-            maxDev = Math.max(maxDev, d);
-        }
-        const span = Math.hypot(b.x - a.x, b.y - a.y) || 1;
-        return +(maxDev / span).toFixed(3); // 直线=0，越弯越大
+        for (const m of moves) { const d = Math.abs((b.x - a.x) * (a.y - m.y) - (a.x - m.x) * (b.y - a.y)) / (Math.hypot(b.x - a.x, b.y - a.y) || 1); maxDev = Math.max(maxDev, d); }
+        return +((maxDev / (Math.hypot(b.x - a.x, b.y - a.y) || 1)).toFixed(3));
     }
     function avgSpeed() {
         if (moves.length < 2) return 0;
         let sum = 0, n = 0;
-        for (let i = 1; i < moves.length; i++) {
-            const dt = (moves[i].t - moves[i-1].t) || 1;
-            sum += Math.hypot(moves[i].x - moves[i-1].x, moves[i].y - moves[i-1].y) / dt;
-            n++;
-        }
+        for (let i = 1; i < moves.length; i++) { const dt = (moves[i].t - moves[i-1].t) || 1; sum += Math.hypot(moves[i].x - moves[i-1].x, moves[i].y - moves[i-1].y) / dt; n++; }
         return +(sum / n).toFixed(1);
     }
+    function renderAccount(a) {
+        localStorage.setItem(ACCT_KEY, JSON.stringify(a));
+        $('#accountCard').style.display = 'block';
+        $('#acctLine').textContent = `${a.account} · 积分 ${a.points} · ${a.vip ? 'VIP ✓' : '普通'} · 今日可下载 ${a.count_left}`;
+    }
+    async function api(path, body) {
+        const r = await fetch('/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+        return j;
+    }
+
+    // 已登录恢复
+    (async () => {
+        const saved = JSON.parse(localStorage.getItem(ACCT_KEY) || 'null');
+        if (saved && saved.token) {
+            try { const a = await api('account', { token: saved.token }); renderAccount({ account: saved.account, token: saved.token, points: a.points, vip: a.vip, count_left: a.count_left }); }
+            catch (_) {}
+        }
+    })();
 
     $('#loginForm').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -155,40 +180,26 @@
         if (!account || !password) { msg.className = 'msg err'; msg.textContent = '请输入账号与密码'; return; }
 
         const telemetry = {
-            account_len: account.length,
-            pwd_len: password.length,
-            keydown_intervals_ms: keys.slice(0, 30),
-            keydown_count: keys.length,
-            mouse_samples: sampleCount(),
-            mouse_straightness: straightness(),
-            mouse_avg_speed_px_ms: avgSpeed(),
-            ua_fingerprint: {
-                ua: navigator.userAgent.slice(0, 120),
-                platform: navigator.platform,
-                lang: navigator.language,
-                cores: navigator.hardwareConcurrency || 0,
-                tz_offset: -new Date().getTimezoneOffset(),
-                screen: `${screen.width}x${screen.height}`,
-            },
+            account_len: account.length, pwd_len: password.length,
+            keydown_intervals_ms: keys.slice(0, 30), keydown_count: keys.length,
+            mouse_samples: sampleCount(), mouse_straightness: straightness(), mouse_avg_speed_px_ms: avgSpeed(),
+            ua_fingerprint: { ua: navigator.userAgent.slice(0, 120), platform: navigator.platform, lang: navigator.language, cores: navigator.hardwareConcurrency || 0, tz_offset: -new Date().getTimezoneOffset(), screen: `${screen.width}x${screen.height}` },
             ts: Date.now(),
         };
-
-        // 尝试后端接口（demo 无后端则走本页回显）
-        let resp;
         try {
-            resp = await fetch('/api/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ account, telemetry }),
-            });
-        } catch (_) { resp = null; }
-
-        msg.className = 'msg ok';
-        msg.textContent = resp && resp.ok ? '登录成功（后端已接收遥测）' : '登录成功（演示模式，无后端）';
-        $('#telemetry').style.display = 'block';
-        $('#telemetryPre').textContent = JSON.stringify(telemetry, null, 2);
-        if (typeof registerPass === 'function') registerPass();
+            const r = await api(mode === 'login' ? 'login' : 'register', { account, password, telemetry });
+            renderAccount({ account, token: r.token, points: r.points, vip: r.vip, count_left: r.count_left });
+            msg.className = 'msg ok'; msg.textContent = mode === 'login' ? '登录成功（凭据已落服务端）' : '注册成功';
+            $('#telemetry').style.display = 'block';
+            $('#telemetryPre').textContent = JSON.stringify({ ...telemetry, server: { points: r.points, vip: r.vip, count_left: r.count_left } }, null, 2);
+        } catch (err) {
+            msg.className = 'msg err'; msg.textContent = err.message || '请求失败（确认已用 node server.mjs 启动后端）';
+        }
     });
+
+    // 服务端积分 / VIP
+    $('#earnBtn').onclick = async () => { const a = JSON.parse(localStorage.getItem(ACCT_KEY) || 'null'); if (!a) return; const j = await api('earn', { token: a.token }); renderAccount({ ...a, points: j.points }); };
+    $('#vipBtn').onclick = async () => { const a = JSON.parse(localStorage.getItem(ACCT_KEY) || 'null'); if (!a) return; const j = await api('grant-vip', { token: a.token }); renderAccount({ ...a, vip: j.vip }); };
 </script>
 </body>
 </html>

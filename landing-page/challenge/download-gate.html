@@ -8,68 +8,70 @@
 </head>
 <body>
 <div class="wrap">
-    <nav class="navbar"><a class="logo" href="../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../index.html">主页</a></div></nav>
+    <nav class="navbar"><a class="logo" href="../challenges.html">← 挑战样本库</a><div class="nav-links"><a href="../login.html">登录/注册</a></div></nav>
     <div class="card">
         <h1>条件下载 <span class="badge normal">常用</span></h1>
-        <p class="sub">下载需<b>同时满足</b>：已登录 + 积分 ≥ 100 + VIP + 当日剩余次数 &gt; 0。任一不满足即拒绝并提示缺失项。验证"要满足条件才能下载"的复合拦截。</p>
+        <p class="sub">下载条件<b>由服务端裁决并持久化</b>：已登录 + 积分 ≥ 100 + VIP + 今日次数 &gt; 0。任一不满足即拒绝并返回缺失项。</p>
 
         <div class="product">
             <h2>《爬虫与反爬对抗 · 实战手册》.pdf</h2>
             <p class="mono">大小 12.6 MB · 2025 版 · 每日下载次数有限</p>
         </div>
 
-        <div class="field"><label>账号状态</label>
-            <select id="stLogin"><option value="0">未登录</option><option value="1">已登录</option></select>
-        </div>
-        <div class="field"><label>积分（当前值）</label>
-            <input id="stPoints" type="number" value="80" />
-        </div>
-        <div class="field"><label>会员等级</label>
-            <select id="stVip"><option value="0">普通用户</option><option value="1">VIP</option></select>
-        </div>
-        <div class="field"><label>今日剩余下载次数</label>
-            <input id="stCount" type="number" value="5" min="0" />
+        <div class="gate on" id="loginGate">
+            <button class="btn wide" id="goLogin">去登录 / 注册（领取初始积分）</button>
         </div>
 
-        <button class="btn wide mt" id="dlBtn">下载文件</button>
-        <div class="gate" id="gate"></div>
+        <div id="panel" style="display:none;">
+            <div class="mono" id="acctLine">-</div>
+            <div style="display:flex;gap:.6rem;margin:.9rem 0;">
+                <button class="btn ghost" id="earnBtn">赚 +30 积分</button>
+                <button class="btn ghost" id="vipBtn">开通 VIP</button>
+                <button class="btn" id="dlBtn" style="flex:1;">下载文件</button>
+            </div>
+        </div>
+
+        <div class="gate" id="result"></div>
         <pre class="tele mt" id="tele" style="display:none;"></pre>
-        <p class="hint">目标：绕过"未登录/积分不足/非 VIP/次数耗尽"的硬性拒绝。验证软件能否以合适凭证组合直接命中下载接口，或识别上述前置条件。</p>
+        <p class="hint">目标：绕过"未登录/积分不足/非 VIP/次数耗尽"的硬性拒绝。积分/VIP/次数均为服务端状态（见 data/state.json），下载成功会扣减当日次数并持久化。</p>
     </div>
 </div>
 <script>
     const $ = (id) => document.getElementById(id);
-    function conditions() {
-        return {
-            logged_in: $('#stLogin').value === '1',
-            points: parseInt($('#stPoints').value) || 0,
-            vip: $('#stVip').value === '1',
-            count_left: parseInt($('#stCount').value) || 0,
-        };
+    const ACCT_KEY = 'gf_account';
+    async function api(path, body) {
+        const r = await fetch('/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+        return j;
     }
-    function missing(c) {
-        const m = [];
-        if (!c.logged_in) m.push('未登录');
-        if (c.points < 100) m.push(`积分不足(${c.points}/100)`);
-        if (!c.vip) m.push('非 VIP');
-        if (c.count_left <= 0) m.push('今日下载次数已用尽');
-        return m;
+    function acc() { return JSON.parse(localStorage.getItem(ACCT_KEY) || 'null'); }
+    function render(a) {
+        $('#acctLine').textContent = `${a.account} · 积分 ${a.points} · ${a.vip ? 'VIP ✓' : '普通'} · 今日可下载 ${a.count_left}`;
     }
-    function attemptDownload() {
-        const c = conditions();
-        const miss = missing(c);
-        const g = $('#gate');
-        if (miss.length === 0) {
-            g.className = 'gate on ok'; g.textContent = '✅ 下载已开始（条件全部满足）';
-            // 模拟真实下载接口请求
-            try { fetch('/api/download/manual.pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cond: c }) }).catch(() => {}); } catch (_) {}
-        } else {
-            g.className = 'gate on bad'; g.textContent = `下载被拒绝：${miss.join('；')}`;
-        }
-        $('#tele').style.display = 'block';
-        $('#tele').textContent = JSON.stringify({ cond: c, missing: miss, allowed: miss.length === 0, ts: Date.now() }, null, 2);
+    async function refresh() {
+        const a = acc();
+        if (!a || !a.token) { $('#loginGate').style.display = 'block'; $('#panel').style.display = 'none'; return; }
+        $('#loginGate').style.display = 'none'; $('#panel').style.display = 'block';
+        try { const j = await api('account', { token: a.token }); render({ account: a.account, token: a.token, ...j }); } catch (_) { localStorage.removeItem(ACCT_KEY); location.reload(); }
     }
-    $('#dlBtn').onclick = attemptDownload;
+    $('#goLogin').onclick = () => location.href = '../login.html';
+    $('#earnBtn').onclick = async () => { const a = acc(); if (!a) return; try { const j = await api('earn', { token: a.token }); render({ ...a, points: j.points }); result('ok', `已获取 +${j.earned} 积分，当前 ${j.points}`); } catch (e) { result('bad', e.message); } };
+    $('#vipBtn').onclick = async () => { const a = acc(); if (!a) return; try { const j = await api('grant-vip', { token: a.token }); render({ ...a, vip: j.vip }); result('ok', '已开通 VIP'); } catch (e) { result('bad', e.message); } };
+    $('#dlBtn').onclick = async () => {
+        const a = acc(); if (!a) return;
+        const g = $('#result');
+        try {
+            const j = await api('download', { token: a.token });
+            render({ ...a, points: j.points, vip: j.vip, count_left: j.count_left });
+            if (j.allowed) { g.className = 'gate on ok'; g.textContent = '✅ 下载已开始（服务端已核验并扣减当日次数）'; }
+            else { g.className = 'gate on bad'; g.textContent = `下载被拒绝：${j.reason}`; }
+            $('#tele').style.display = 'block';
+            $('#tele').textContent = JSON.stringify(j, null, 2);
+        } catch (e) { g.className = 'gate on bad'; g.textContent = e.message; }
+    };
+    function result(tone, txt) { const g = $('#result'); g.className = 'gate on ' + tone; g.textContent = txt; }
+    refresh();
 </script>
 </body>
 </html>
