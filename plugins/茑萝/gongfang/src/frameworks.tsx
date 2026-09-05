@@ -184,6 +184,26 @@ interface FitnessReport {
   avg_divergence: number;
 }
 
+// ============ 自动化行为实验室 ============
+interface AutionTemplate {
+  id: number; name: string; speed_factor: number; overshoot: number;
+  noise_amplitude: number; tremor_frequency: number; poll_interval_ms: number; weight: number;
+}
+interface AutionTemplatesReport {
+  templates: AutionTemplate[];
+  fitness: { id: number; name: string; success: number; failure: number; success_rate: number; avg_divergence: number }[];
+  current: string;
+}
+interface AutionTrajectoryReport {
+  template: string; template_id: number; point_count: number; raw_point_count: number;
+  duration_ms: number; overshoot: number; noise_amplitude: number; tremor_frequency: number;
+  start: number[]; target: number[];
+  sample: { x: number; y: number; t_ms: number }[];
+}
+interface AutionDivergenceReport {
+  template: string; multidim: number; single: number; verdict: string;
+}
+
 // ============ 网关框架结果类型（与 Rust 端 commands.rs 字段对齐） ============
 interface GatewayNodeSummary {
   url: string;
@@ -2455,6 +2475,43 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     }
   }, [addLog, handleRefreshFitness]);
 
+  // 自动化行为实验室
+  const [labTemplates, setLabTemplates] = useState<AutionTemplatesReport | null>(null);
+  const [labTplBusy, setLabTplBusy] = useState(false);
+  const [trajStartX, setTrajStartX] = useState(100);
+  const [trajStartY, setTrajStartY] = useState(100);
+  const [trajEndX, setTrajEndX] = useState(700);
+  const [trajEndY, setTrajEndY] = useState(500);
+  const [trajTpl, setTrajTpl] = useState(0);
+  const [trajResult, setTrajResult] = useState<AutionTrajectoryReport | null>(null);
+  const [trajBusy, setTrajBusy] = useState(false);
+  const [divTpl, setDivTpl] = useState(0);
+  const [divResult, setDivResult] = useState<AutionDivergenceReport | null>(null);
+  const [divBusy, setDivBusy] = useState(false);
+
+  const handleLabTemplates = useCallback(async () => {
+    setLabTplBusy(true);
+    try { setLabTemplates(await tauriInvoke<AutionTemplatesReport>('gongfang_automation_templates', {})); }
+    catch { setLabTemplates(null); } finally { setLabTplBusy(false); }
+  }, []);
+
+  const handleTrajectory = useCallback(async () => {
+    setTrajBusy(true);
+    try {
+      setTrajResult(await tauriInvoke<AutionTrajectoryReport>('gongfang_automation_trajectory', {
+        startX: trajStartX, startY: trajStartY, targetX: trajEndX, targetY: trajEndY, templateId: trajTpl,
+      }));
+    } catch { setTrajResult(null); } finally { setTrajBusy(false); }
+  }, [trajStartX, trajStartY, trajEndX, trajEndY, trajTpl]);
+
+  const handleDivergence = useCallback(async () => {
+    setDivBusy(true);
+    try {
+      const pts = Array.from({ length: 20 }, (_, i) => ({ x: trajStartX + ((trajEndX - trajStartX) * i) / 19, y: trajStartY + ((trajEndY - trajStartY) * i) / 19, t_ms: i * 50 }));
+      setDivResult(await tauriInvoke<AutionDivergenceReport>('gongfang_automation_divergence', { points: pts, templateId: divTpl }));
+    } catch { setDivResult(null); } finally { setDivBusy(false); }
+  }, [trajStartX, trajStartY, trajEndX, trajEndY, divTpl]);
+
   const lvInfo = levelDesc(humanizeLevel);
 
   // 找出成功率最高的模板（热迁移的目标）
@@ -2472,6 +2529,73 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           <span className="px-2 py-0.5 rounded text-[11px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">{automationMeta.status}</span>
         </div>
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{automationMeta.subtitle}</p>
+
+        {/* 行为模板库 */}
+        <CollapsibleSection title="行为模板库" storageKey="fw_automation_lab_templates" defaultOpen={false} accent="info">
+          <div className="space-y-2">
+            <button onClick={handleLabTemplates} disabled={labTplBusy} className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">
+              {labTplBusy ? '加载中...' : '加载模板库'}
+            </button>
+            {labTemplates && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-neutral-400">当前活跃模板：<span className="text-[var(--element-bg)] font-medium">{labTemplates.current}</span></div>
+                {labTemplates.templates.map((t) => (
+                  <div key={t.id} className="flex items-center gap-2 text-[11px] rounded border border-black/5 dark:border-stone-700/40 p-1">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${t.id === labTemplates.fitness.find((f) => f.name === labTemplates.current)?.id ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : ''}`}>{t.id}</span>
+                    <span className="font-medium text-[var(--element-bg)]">{t.name}</span>
+                    <span className="text-[10px] text-neutral-400">速度{t.speed_factor} 过冲{t.overshoot} 噪声{t.noise_amplitude} {t.tremor_frequency}Hz 轮询{t.poll_interval_ms}ms</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        {/* 轨迹生成 */}
+        <CollapsibleSection title="轨迹生成演示（贝塞尔 + 生理噪声）" storageKey="fw_automation_lab_traj" defaultOpen={false} accent="info">
+          <div className="space-y-2">
+            <div className="grid grid-cols-3 gap-2">
+              <div><div className="text-[10px] text-neutral-400 mb-1">起点 X</div><input type="number" value={trajStartX} onChange={(e) => setTrajStartX(Number(e.target.value))} className="w-full px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]" /></div>
+              <div><div className="text-[10px] text-neutral-400 mb-1">起点 Y</div><input type="number" value={trajStartY} onChange={(e) => setTrajStartY(Number(e.target.value))} className="w-full px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]" /></div>
+              <div><div className="text-[10px] text-neutral-400 mb-1">模板</div><select value={trajTpl} onChange={(e) => setTrajTpl(Number(e.target.value))} className="w-full px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"><option value={0}>普通</option><option value={1}>急躁</option><option value={2}>谨慎</option><option value={3}>游戏</option><option value={4}>疲劳</option></select></div>
+              <div><div className="text-[10px] text-neutral-400 mb-1">目标 X</div><input type="number" value={trajEndX} onChange={(e) => setTrajEndX(Number(e.target.value))} className="w-full px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]" /></div>
+              <div><div className="text-[10px] text-neutral-400 mb-1">目标 Y</div><input type="number" value={trajEndY} onChange={(e) => setTrajEndY(Number(e.target.value))} className="w-full px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]" /></div>
+              <div className="flex items-end"><button onClick={handleTrajectory} disabled={trajBusy} className="btn-press w-full px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">{trajBusy ? '生成中...' : '生成轨迹'}</button></div>
+            </div>
+            {trajResult && (
+              <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-2 space-y-1">
+                <div className="text-[10px] text-neutral-400">模板 {trajResult.template} · 生成 {trajResult.point_count} 点 · 时长 {trajResult.duration_ms}ms · 过冲{trajResult.overshoot} · 噪声{trajResult.noise_amplitude}</div>
+                <div className="flex flex-wrap gap-1 pt-1">
+                  {trajResult.sample.map((p, i) => (
+                    <span key={i} className="px-1 py-0.5 rounded text-[9px] font-mono bg-black/5 dark:bg-white/10 text-neutral-500 dark:text-stone-400">({p.x.toFixed(0)}, {p.y.toFixed(0)})</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        {/* 行为散度对比 */}
+        <CollapsibleSection title="行为散度对比（人类相似判定）" storageKey="fw_automation_lab_div" defaultOpen={false} accent="info">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-neutral-400">对照模板</span>
+              <select value={divTpl} onChange={(e) => setDivTpl(Number(e.target.value))} className="px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]"><option value={0}>普通</option><option value={1}>急躁</option><option value={2}>谨慎</option><option value={3}>游戏</option><option value={4}>疲劳</option></select>
+              <button onClick={handleDivergence} disabled={divBusy} className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">
+                {divBusy ? '对比中...' : '对比直线匀速轨迹'}
+              </button>
+            </div>
+            {divResult && (
+              <div className="bg-black/[0.03] dark:bg-white/[0.04] rounded p-2 space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${divResult.multidim < 0.15 ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : divResult.multidim <= 0.4 ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-rose-500/15 text-rose-600 dark:text-rose-400'}`}>{divResult.verdict}</span>
+                  <span className="text-[10px] text-neutral-400">多维散度 <span className="font-mono text-[var(--element-bg)]">{divResult.multidim}</span> · 单向 {divResult.single}</span>
+                </div>
+                <p className="text-[10px] text-neutral-400 leading-relaxed">直线匀速轨迹是典型自动化特征，对照拟人模板应判定为「可疑/异常」。</p>
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
 
         {/* 技术选型 */}
         <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_automation_techstack" defaultOpen={false} accent="info">

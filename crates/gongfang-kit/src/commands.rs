@@ -1143,6 +1143,145 @@ pub fn gongfang_fitness_reset() -> Result<(), String> {
     }
 }
 
+/// 自动化：列出行为模板库 + 各模板适应度 + 当前模板
+#[tauri::command]
+pub fn gongfang_automation_templates() -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    {
+        use crate::automation::profiles::{current_template, fitness_report, BehaviorTemplate};
+        let presets = BehaviorTemplate::presets();
+        let report = fitness_report();
+        let cur = current_template();
+        let list: Vec<serde_json::Value> = presets
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id, "name": p.name,
+                    "speed_factor": p.speed_factor, "overshoot": p.overshoot,
+                    "noise_amplitude": p.noise_amplitude,
+                    "tremor_frequency": p.tremor_frequency,
+                    "poll_interval_ms": p.poll_interval_ms, "weight": p.weight,
+                })
+            })
+            .collect();
+        let fitness: Vec<serde_json::Value> = report
+            .iter()
+            .map(|(id, name, success, failure, rate, avg_div)| {
+                serde_json::json!({
+                    "id": id, "name": name, "success": success, "failure": failure,
+                    "success_rate": rate, "avg_divergence": avg_div,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "templates": list,
+            "fitness": fitness,
+            "current": cur.name,
+        }))
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        Err("automation feature 未启用，请用 --features gongfang-automation 编译".to_string())
+    }
+}
+
+/// 自动化：轨迹生成演示（贝塞尔 + 生理噪声），按模板参数
+#[tauri::command]
+pub fn gongfang_automation_trajectory(
+    start_x: f32,
+    start_y: f32,
+    target_x: f32,
+    target_y: f32,
+    template_id: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    {
+        use crate::automation::bezier::generate_trajectory;
+        use crate::automation::noise::apply_physiological_noise;
+        use crate::automation::profiles::BehaviorTemplate;
+        let tid = template_id.unwrap_or(0);
+        let presets = BehaviorTemplate::presets();
+        let template = presets.iter().find(|p| p.id == tid).unwrap_or(&presets[0]).clone();
+        let raw = generate_trajectory((start_x, start_y), (target_x, target_y), template.speed_factor, template.overshoot);
+        let noisy = apply_physiological_noise(&raw, template.noise_amplitude, template.tremor_frequency);
+        let duration_ms = noisy.last().map(|p| p.t_ms).unwrap_or(0);
+        let step = noisy.len().saturating_div(20).max(1);
+        let sample: Vec<serde_json::Value> = noisy
+            .iter()
+            .step_by(step)
+            .take(20)
+            .map(|p| serde_json::json!({ "x": p.x, "y": p.y, "t_ms": p.t_ms }))
+            .collect();
+        Ok(serde_json::json!({
+            "template": template.name, "template_id": template.id,
+            "point_count": noisy.len(), "raw_point_count": raw.len(),
+            "duration_ms": duration_ms, "overshoot": template.overshoot,
+            "noise_amplitude": template.noise_amplitude, "tremor_frequency": template.tremor_frequency,
+            "start": [start_x, start_y], "target": [target_x, target_y],
+            "sample": sample,
+        }))
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (start_x, start_y, target_x, target_y, template_id);
+        Err("automation feature 未启用，请用 --features gongfang-automation 编译".to_string())
+    }
+}
+
+/// 自动化：行为散度对比——给定一段轨迹 → 与模板基线算 JS 散度，判人类相似度
+#[tauri::command]
+pub fn gongfang_automation_divergence(
+    points: Vec<serde_json::Value>,
+    template_id: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let points: Vec<serde_json::Value> = points
+        .into_iter()
+        .filter(|p| p.get("x").is_some() && p.get("y").is_some())
+        .collect();
+    if points.len() < 3 {
+        return Err("points 至少需要 3 个轨迹点 {x, y[, t_ms]}".to_string());
+    }
+    #[cfg(feature = "automation")]
+    {
+        use crate::automation::baseline::BehaviorBaseline;
+        use crate::automation::bezier::TrajectoryPoint;
+        use crate::automation::profiles::BehaviorTemplate;
+        let tid = template_id.unwrap_or(0);
+        let presets = BehaviorTemplate::presets();
+        let template = presets.iter().find(|p| p.id == tid).unwrap_or(&presets[0]).clone();
+        let traj: Vec<TrajectoryPoint> = points
+            .iter()
+            .map(|p| TrajectoryPoint {
+                x: p.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                y: p.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                t_ms: p.get("t_ms").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            })
+            .collect();
+        let mut baseline = BehaviorBaseline::new();
+        baseline.add_observation(&traj);
+        let multidim = baseline.js_divergence_multidim(&template);
+        let single = baseline.js_divergence_from_template(&template);
+        let verdict = if multidim < 0.15 {
+            "人类相似"
+        } else if multidim <= 0.4 {
+            "可疑"
+        } else {
+            "异常（自动化特征明显）"
+        };
+        Ok(serde_json::json!({
+            "template": template.name,
+            "multidim": (multidim * 1000.0).round() / 1000.0,
+            "single": (single * 1000.0).round() / 1000.0,
+            "verdict": verdict,
+        }))
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (points, template_id);
+        Err("automation feature 未启用，请用 --features gongfang-automation 编译".to_string())
+    }
+}
+
 // ============ 网关框架专属命令 ============
 
 /// 网关节点摘要（命令层类型，始终编译）
