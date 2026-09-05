@@ -283,6 +283,8 @@ const ALLOWED_COMMANDS = new Set([
   'gongfang_ai_reasoning_recent',
   'gongfang_ai_knowledge_search',
   'gongfang_ai_knowledge_stats',
+  'gongfang_ai_knowledge_add',
+  'gongfang_ai_knowledge_remove',
   'gongfang_ai_router_sim',
   'gongfang_ai_reasoning_stats',
   'gongfang_set_emit_tick',

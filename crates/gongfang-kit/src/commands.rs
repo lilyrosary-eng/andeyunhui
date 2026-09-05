@@ -1821,6 +1821,77 @@ pub fn gongfang_ai_knowledge_stats() -> Result<serde_json::Value, String> {
     }))
 }
 
+/// AI 知识库新增条目：类别 + 标题 + 内容 + 标签（运行时写入全局知识库，充实 RAG）
+#[tauri::command]
+pub fn gongfang_ai_knowledge_add(
+    title: String,
+    content: String,
+    tags: Option<Vec<String>>,
+    category: String,
+) -> Result<serde_json::Value, String> {
+    use crate::kernel::knowledge::{KnowledgeCategory, KnowledgeEntry};
+    let title = title.trim().to_string();
+    let content = content.trim().to_string();
+    if title.is_empty() {
+        return Err("title 不能为空".to_string());
+    }
+    if content.is_empty() {
+        return Err("content 不能为空".to_string());
+    }
+    let category = match category.trim().to_lowercase().as_str() {
+        "antibots" | "antibot" | "反爬" => KnowledgeCategory::AntiBot,
+        "fingerprint" | "指纹" => KnowledgeCategory::Fingerprint,
+        "bancase" | "ban" | "封禁" => KnowledgeCategory::BanCase,
+        other => return Err(format!("未知分类：{}（可用 antibot / fingerprint / bancase）", other)),
+    };
+    let tags: Vec<String> = tags
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    // id：基于时间戳 + 标题 slug，保证唯一可稳定删除
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut slug = String::new();
+    for c in title.chars() {
+        if c.is_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        }
+    }
+    if slug.is_empty() {
+        slug = "kb".to_string();
+    }
+    let id = format!("{}-{}", slug, ts);
+    let entry = KnowledgeEntry { id: id.clone(), title, content, tags, category };
+    let kb = crate::kernel::knowledge::global();
+    kb.add(entry);
+    // 返回"分类中文名 + 当前规模"，供前端确认并刷新
+    let cat_label = match crate::kernel::knowledge::global().get(&id).map(|e| e.category) {
+        Some(KnowledgeCategory::AntiBot) => "反爬",
+        Some(KnowledgeCategory::Fingerprint) => "指纹",
+        _ => "封禁",
+    };
+    Ok(serde_json::json!({
+        "id": id,
+        "category": cat_label,
+        "added": true,
+    }))
+}
+
+/// AI 知识库删除条目：按 id 移除（含索引重建）
+#[tauri::command]
+pub fn gongfang_ai_knowledge_remove(id: String) -> Result<serde_json::Value, String> {
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err("id 不能为空".to_string());
+    }
+    let removed = crate::kernel::knowledge::global().remove(&id);
+    Ok(serde_json::json!({ "removed": removed, "id": id }))
+}
+
 /// AI 推理路由仿真：给定场景 → 走 L0 规则缓存 / L1/L2（含 RAG 注入预览）
 #[tauri::command]
 pub fn gongfang_ai_router_sim(

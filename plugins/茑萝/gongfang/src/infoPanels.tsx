@@ -925,10 +925,35 @@ export function AiReasoningLab() {
   const [knRes, setKnRes] = useState<KnSearch | null>(null);
   const [knBusy, setKnBusy] = useState(false);
 
+  // 新增知识条目表单
+  const [addCat, setAddCat] = useState('antibot');
+  const [addTitle, setAddTitle] = useState('');
+  const [addContent, setAddContent] = useState('');
+  const [addTags, setAddTags] = useState('');
+  const [addBusy, setAddBusy] = useState(false);
+
   const loadStats = useCallback(async () => {
     setStatsBusy(true);
     try { setStats(await tauriInvoke<KnStats>('gongfang_ai_knowledge_stats', {})); } catch { setStats(null); } finally { setStatsBusy(false); }
   }, []);
+
+  const addEntry = useCallback(async () => {
+    if (!addTitle.trim() || !addContent.trim()) return;
+    setAddBusy(true);
+    try {
+      const tags = addTags.split(/[,，\s]+/).map((t) => t.trim()).filter(Boolean);
+      await tauriInvoke<{ added: boolean }>('gongfang_ai_knowledge_add', { title: addTitle.trim(), content: addContent.trim(), tags, category: addCat });
+      setAddTitle(''); setAddContent(''); setAddTags('');
+      await loadStats();
+    } catch { /* invoke 错误提示可由外层捕获 */ } finally { setAddBusy(false); }
+  }, [addTitle, addContent, addTags, addCat, loadStats]);
+
+  const removeEntry = useCallback(async (id: string) => {
+    try {
+      await tauriInvoke<{ removed: boolean }>('gongfang_ai_knowledge_remove', { id });
+      await loadStats();
+    } catch { /* ignore */ }
+  }, [loadStats]);
 
   const runRouter = useCallback(async () => {
     setRouterBusy(true);
@@ -971,15 +996,38 @@ export function AiReasoningLab() {
                   <div key={i} className="rounded border border-black/5 dark:border-stone-700/40 p-1.5">
                     <div className="flex items-center gap-1.5 text-[11px]">
                       <span className={`px-1 py-0.5 rounded text-[9px] ${catLabel(e.category)}`}>{e.category}</span>
-                      <span className="font-medium text-[var(--element-bg)]">{e.title}</span>
+                      <span className="flex-1 font-medium text-[var(--element-bg)] truncate">{e.title}</span>
+                      <button onClick={() => removeEntry(e.id)} title="删除该条目" className="text-[9px] px-1 rounded hover:bg-rose-500/10 text-neutral-400 hover:text-rose-500">删</button>
                     </div>
                     <div className="text-[10px] text-neutral-500 dark:text-stone-400 mt-0.5">{e.content}</div>
+                    <div className="text-[9px] text-neutral-400 mt-0.5 flex gap-1 flex-wrap items-center">
+                      <span className="font-mono text-neutral-400/70">{e.id}</span>
+                      {e.tags.map((t) => <span key={t} className="px-1 bg-black/5 dark:bg-white/10 rounded">{t}</span>)}
+                    </div>
                   </div>
                 ))}
               </div>
             )}
           </>
         )}
+      </div>
+
+      {/* 新增知识条目（充实 RAG 知识库） */}
+      <div className="space-y-1.5 rounded border border-black/5 dark:border-stone-700/40 p-2">
+        <div className="flex items-center gap-2 text-[10px] text-neutral-500 dark:text-stone-300">新增知识条目（运行时写入全局知识库）</div>
+        <div className="flex items-center gap-1.5">
+          <select value={addCat} onChange={(e) => setAddCat(e.target.value)} className="px-1.5 py-1 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)]">
+            <option value="antibot">反爬</option>
+            <option value="fingerprint">指纹</option>
+            <option value="bancase">封禁</option>
+          </select>
+          <input type="text" value={addTitle} onChange={(e) => setAddTitle(e.target.value)} placeholder="标题" className="flex-1 px-2 py-1 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400" />
+        </div>
+        <textarea value={addContent} onChange={(e) => setAddContent(e.target.value)} placeholder="内容（如：特征 + 绕过方案）" rows={2} className="w-full px-2 py-1 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 resize-none" />
+        <div className="flex items-center gap-1.5">
+          <input type="text" value={addTags} onChange={(e) => setAddTags(e.target.value)} placeholder="标签（逗号分隔）" className="flex-1 px-2 py-1 rounded-lg text-[11px] bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400" />
+          <button onClick={addEntry} disabled={addBusy || !addTitle.trim() || !addContent.trim()} className="btn-press px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40">{addBusy ? '写入中...' : '添加'}</button>
+        </div>
       </div>
 
       {/* 推理路由仿真 */}

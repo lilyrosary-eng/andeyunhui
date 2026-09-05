@@ -48,28 +48,39 @@ pub struct SceneSignature(pub String);
 pub type RuleCache = HashMap<SceneSignature, crate::kernel::strategy::StrategyDelta>;
 
 /// RAG 知识库（内存版，零依赖）
+///
+/// 字段用 RwLock 内部可变，保证全局单例（Arc<KnowledgeBase>）可在运行时
+/// 增删查改条目（gongfang_ai_knowledge_add / remove 命令）。
 pub struct KnowledgeBase {
     /// 全量知识条目（id → entry）
-    entries: HashMap<String, KnowledgeEntry>,
+    entries: RwLock<HashMap<String, KnowledgeEntry>>,
     /// 关键词倒排索引（keyword → entry_ids）
-    inverted_index: HashMap<String, Vec<String>>,
+    inverted_index: RwLock<HashMap<String, Vec<String>>>,
     /// L0 规则缓存（场景签名 → 策略补丁）
     rule_cache: RwLock<RuleCache>,
 }
 
 impl KnowledgeBase {
     pub fn new() -> Self {
-        let mut kb = Self {
-            entries: HashMap::new(),
-            inverted_index: HashMap::new(),
+        let kb = Self {
+            entries: RwLock::new(HashMap::new()),
+            inverted_index: RwLock::new(HashMap::new()),
             rule_cache: RwLock::new(HashMap::new()),
         };
         kb.seed_default_knowledge();
         kb
     }
 
+    /// 校验分类是否合法
+    pub fn category_valid(c: KnowledgeCategory) -> bool {
+        matches!(
+            c,
+            KnowledgeCategory::AntiBot | KnowledgeCategory::Fingerprint | KnowledgeCategory::BanCase
+        )
+    }
+
     /// 预置反爬产品知识（对应 03 文档 5.1 反爬产品库）
-    fn seed_default_knowledge(&mut self) {
+    fn seed_default_knowledge(&self) {
         self.add(KnowledgeEntry {
             id: "cf-basic".to_string(),
             title: "Cloudflare 基础防护".to_string(),
@@ -109,12 +120,110 @@ impl KnowledgeBase {
             tags: vec!["429".to_string(), "rate-limit".to_string(), "retry-after".to_string()],
             category: KnowledgeCategory::BanCase,
         });
+
+        // ===== 反爬产品库扩充 =====
+        self.add(KnowledgeEntry {
+            id: "cf-turnstile".to_string(),
+            title: "Cloudflare Turnstile 人机验证".to_string(),
+            content: "特征：cf-turnstile 篇章、令牌需在 300s 内提交、无感验证者可二次校验。绕过：真实浏览器渲染 + 系数滑动路径；失败重试需换 IP。".to_string(),
+            tags: vec!["cloudflare".to_string(), "turnstile".to_string(), "captcha".to_string()],
+            category: KnowledgeCategory::AntiBot,
+        });
+        self.add(KnowledgeEntry {
+            id: "cf-waf".to_string(),
+            title: "Cloudflare WAF 规则拦截".to_string(),
+            content: "特征：403 + cf-mitigated: challenge / manage 段头、1-3s 等待。绕过：URL 编码拆分 / multipart 分段 / 缩短页面请求间隔；命中规则时换 UA 族。".to_string(),
+            tags: vec!["cloudflare".to_string(), "waf".to_string(), "403".to_string(), "cf-mitigated".to_string()],
+            category: KnowledgeCategory::AntiBot,
+        });
+        self.add(KnowledgeEntry {
+            id: "kasada".to_string(),
+            title: "Kasada 动态挑战".to_string(),
+            content: "特征：kasada 动态 JS + polyBot、无静态 challenge 页面。绕过：需加载并执行其 polyBot 段，超时 2s 内完成；难以纯静态绕过，必须真浏览器。".to_string(),
+            tags: vec!["kasada".to_string(), "polybot".to_string(), "challenge".to_string()],
+            category: KnowledgeCategory::AntiBot,
+        });
+        self.add(KnowledgeEntry {
+            id: "akamai-sensor".to_string(),
+            title: "Akamai sensor_data 上报".to_string(),
+            content: "特征：_abck Cookie 每请求滚动、sensor_data 段带环境样本。绕过：采集真实 WebGL/Canvas/AudioContext 快照 + 鼠标轨迹；指纹一致性比速度更重要。".to_string(),
+            tags: vec!["akamai".to_string(), "sensor_data".to_string(), "_abck".to_string()],
+            category: KnowledgeCategory::AntiBot,
+        });
+        self.add(KnowledgeEntry {
+            id: "perimeterx".to_string(),
+            title: "PerimeterX/人身验证".to_string(),
+            content: "特征：px-captcha Cookie、_px3 段。绕过：真实点击序列 + 一致性指纹 + 请求节流；接口被二次校验时同会话内保留 Cookie。".to_string(),
+            tags: vec!["perimeterx".to_string(), "px-captcha".to_string(), "_px3".to_string()],
+            category: KnowledgeCategory::AntiBot,
+        });
+
+        // ===== 指纹模板库扩充 =====
+        self.add(KnowledgeEntry {
+            id: "fp-chrome-134".to_string(),
+            title: "Chrome 134 Windows 指纹模板".to_string(),
+            content: "UA: Chrome/134.0.0.0; AudioContext 采样率需与 WebGL 一致; deviceMemory=8 + hardwareConcurrency=8; 无 navigator.webdriver。".to_string(),
+            tags: vec!["chrome_134".to_string(), "windows".to_string(), "angle".to_string()],
+            category: KnowledgeCategory::Fingerprint,
+        });
+        self.add(KnowledgeEntry {
+            id: "fp-firefox-120".to_string(),
+            title: "Firefox 120 指纹模板".to_string(),
+            content: "UA 含 Gecko/2020; Canvas 默认噪声算法不同；localStorage 与 IndexedDB 存在差异；需安装 uBlock 类插件时 report 头一致。".to_string(),
+            tags: vec!["firefox_120".to_string(), "gecko".to_string(), "canvas".to_string()],
+            category: KnowledgeCategory::Fingerprint,
+        });
+        self.add(KnowledgeEntry {
+            id: "fp-macos-safari".to_string(),
+            title: "Safari 17 macOS 指纹模板".to_string(),
+            content: "UA: Safari/605.1.15 段; WebGL vendor = Apple; 字体渲染存在 retinex 差异; 用 Apple 证书段需 TTS。".to_string(),
+            tags: vec!["safari_17".to_string(), "macos".to_string(), "apple".to_string()],
+            category: KnowledgeCategory::Fingerprint,
+        });
+        self.add(KnowledgeEntry {
+            id: "fp-headless".to_string(),
+            title: "无头浏览器指纹检测规避".to_string(),
+            content: "检测点：navigator.webdriver / chrome 运行时段 / headless UA / 缺字体集。规避：patch webdriver、注入字体、开启 GPU。".to_string(),
+            tags: vec!["headless".to_string(), "webdriver".to_string(), "canvas".to_string()],
+            category: KnowledgeCategory::Fingerprint,
+        });
+
+        // ===== 封禁案例库扩充 =====
+        self.add(KnowledgeEntry {
+            id: "ban-403-cf".to_string(),
+            title: "Cloudflare 403 封禁案例".to_string(),
+            content: "原因：IP 信誉或行为指纹。解决：切换住宅代理 + 冷启动窗口（前 3 请求低 QPS）+ 完整指纹。".to_string(),
+            tags: vec!["403".to_string(), "cloudflare".to_string(), "ip-reputation".to_string()],
+            category: KnowledgeCategory::BanCase,
+        });
+        self.add(KnowledgeEntry {
+            id: "ban-session".to_string(),
+            title: "会话跟踪封禁案例".to_string(),
+            content: "原因：请求间隔分布过均匀（被统计判定机器人）。解决：注入泊松时序抖动 + 随机暂停 + 长尾重试。".to_string(),
+            tags: vec!["session".to_string(), "timing".to_string(), "behavior".to_string()],
+            category: KnowledgeCategory::BanCase,
+        });
+        self.add(KnowledgeEntry {
+            id: "ban-captcha-loop".to_string(),
+            title: "验证码循环封禁案例".to_string(),
+            content: "原因：多次验证失败触发硬封禁。解决：验证前先校准指纹，连续 2 次失败即换 IP，避免进入死循环。".to_string(),
+            tags: vec!["captcha".to_string(), "loop".to_string(), "ban".to_string()],
+            category: KnowledgeCategory::BanCase,
+        });
+        self.add(KnowledgeEntry {
+            id: "ban-behavior".to_string(),
+            title: "行为异常封禁案例".to_string(),
+            content: "原因：鼠标轨迹直线/零停留/零滚动超出人类阈值。解决：贝塞尔弯曲轨迹 + 随机停留 + 滚动段。".to_string(),
+            tags: vec!["behavior".to_string(), "mouse".to_string(), "anomaly".to_string()],
+            category: KnowledgeCategory::BanCase,
+        });
     }
 
-    /// 添加知识条目（自动构建倒排索引）
-    pub fn add(&mut self, entry: KnowledgeEntry) {
+    /// 添加知识条目（自动构建倒排索引；内部可变，可在运行时经 Arc 调用）
+    pub fn add(&self, entry: KnowledgeEntry) {
         for tag in &entry.tags {
             self.inverted_index
+                .write()
                 .entry(tag.clone())
                 .or_default()
                 .push(entry.id.clone());
@@ -123,12 +232,43 @@ impl KnowledgeBase {
         for word in entry.title.split(|c: char| !c.is_alphanumeric()) {
             if word.len() > 1 {
                 self.inverted_index
+                    .write()
                     .entry(word.to_lowercase())
                     .or_default()
                     .push(entry.id.clone());
             }
         }
-        self.entries.insert(entry.id.clone(), entry);
+        self.entries.write().insert(entry.id.clone(), entry);
+    }
+
+    /// 删除知识条目（同时重建倒排索引，保证索引一致）
+    pub fn remove(&self, id: &str) -> bool {
+        let mut entries = self.entries.write();
+        if entries.remove(id).is_none() {
+            return false;
+        }
+        drop(entries);
+        // 重建倒排索引（条目少，重建成本可忽略）
+        let mut idx = self.inverted_index.write();
+        idx.clear();
+        for e in self.entries.read().values() {
+            for tag in &e.tags {
+                idx.entry(tag.clone()).or_default().push(e.id.clone());
+            }
+            for word in e.title.split(|c: char| !c.is_alphanumeric()) {
+                if word.len() > 1 {
+                    idx.entry(word.to_lowercase())
+                        .or_default()
+                        .push(e.id.clone());
+                }
+            }
+        }
+        true
+    }
+
+    /// 按 id 获取单条（供管理）
+    pub fn get(&self, id: &str) -> Option<KnowledgeEntry> {
+        self.entries.read().get(id).cloned()
     }
 
     /// 关键词检索（替代 BM25，简单包含匹配）
@@ -140,21 +280,24 @@ impl KnowledgeBase {
             .map(|s| s.to_lowercase())
             .collect();
 
+        let idx = self.inverted_index.read();
         let mut scores: HashMap<String, usize> = HashMap::new();
         for kw in &keywords {
-            if let Some(ids) = self.inverted_index.get(kw) {
+            if let Some(ids) = idx.get(kw) {
                 for id in ids {
                     *scores.entry(id.clone()).or_default() += 1;
                 }
             }
         }
+        drop(idx);
 
+        let entries = self.entries.read();
         let mut hits: Vec<(String, usize)> = scores.into_iter().collect();
         hits.sort_by(|a, b| b.1.cmp(&a.1));
 
         hits.into_iter()
             .take(limit)
-            .filter_map(|(id, _)| self.entries.get(&id).cloned())
+            .filter_map(|(id, _)| entries.get(&id).cloned())
             .collect()
     }
 
@@ -166,7 +309,7 @@ impl KnowledgeBase {
 
     /// 列出全部知识条目（前端知识库展示）
     pub fn all_entries(&self) -> Vec<KnowledgeEntry> {
-        self.entries.values().cloned().collect()
+        self.entries.read().values().cloned().collect()
     }
 
     /// L0 规则缓存大小（已学习规则数）
