@@ -200,7 +200,9 @@ async function fortressApi(req, res, path, body, ip) {
   if (path === '/api/fortress/step') {
     const token = String(body.token || '');
     const s = (state.fortress || {})[token];
-    if (!s || s.ip !== ip) return fail(res, 401, '会话无效或来源 IP 改变');
+    if (!s || s.ip !== ip) {
+      return fail(res, 401, '会话无效或来源 IP 改变');
+    }
     const claim = Number(body.layer) || 1;
     // 抗重放签名
     if (String(req.headers['x-sign'] || '') !== fsSign(token, claim)) return fail(res, 401, `签名不匹配 layer=${claim}`);
