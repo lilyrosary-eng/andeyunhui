@@ -35,8 +35,8 @@ import {
   PlaylistGridRow,
   SearchBar,
   SectionTitle,
-} from './_shared/OnlineMusicTemplates';
-import { EmptyState } from './_shared/OnlineMusicExtras';
+} from '@shared/OnlineMusicTemplates';
+import { EmptyState } from '@shared/OnlineMusicExtras';
 import { TrackRow, type PlayableTrack } from './_shared/TrackRow';
 import { DetailDrawer, type SharedDrawerType, type SharedArtistData, type SharedAlbumData } from './_shared/DetailDrawer';
 import type { TempPlaylist } from './NeteaseView';

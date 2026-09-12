@@ -1,8 +1,8 @@
 import React from "react";
 import type { NeteasePlaylistItem } from './neteaseApi';
 import type { TempPlaylist } from './NeteaseView';
-import { toTempPlaylistItem } from './OnlineSidebarShell';
-import OnlineMusicSidebar, { type SidebarLikedPlaylist, type SidebarUserPlaylist } from './_shared/OnlineMusicSidebar';
+import { toTempPlaylistItem } from '@shared/OnlineSidebarShell';
+import OnlineMusicSidebar, { type SidebarLikedPlaylist, type SidebarUserPlaylist } from '@shared/OnlineMusicSidebar';
 
 export interface NeteaseTempItem {
   id: string;

@@ -80,7 +80,7 @@ export function createPluginConfig(pluginName: string) {
       },
     ],
     resolve: {
-      alias: { '@': SRC_DIR },
+      alias: { '@': SRC_DIR, '@shared': __dirname },
       dedupe: [
         '@codemirror/state', '@codemirror/view', '@codemirror/language',
         '@codemirror/commands', '@codemirror/search', '@codemirror/autocomplete',

@@ -1,7 +1,7 @@
 import React from "react";
 const { useState, useEffect } = React;
-import { toTempPlaylistItem } from './OnlineSidebarShell';
-import OnlineMusicSidebar, { type SidebarUserPlaylist } from './_shared/OnlineMusicSidebar';
+import { toTempPlaylistItem } from '@shared/OnlineSidebarShell';
+import OnlineMusicSidebar, { type SidebarUserPlaylist } from '@shared/OnlineMusicSidebar';
 import { getKugouAuth, getUserPlaylists, type KugouAuth, type KugouPlaylistCard } from './kugouApi';
 import type { OnlineTempItem } from './useOnlineSource';
 

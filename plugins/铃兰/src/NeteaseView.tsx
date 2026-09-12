@@ -21,7 +21,7 @@ import {
 } from './neteaseApi';
 import { musicPlayer, type Track } from './musicPlayer';
 import { MusicHeader } from './MusicHeader';
-import { PlaylistDetailHeader } from './_shared/OnlineMusicTemplates';
+import { PlaylistDetailHeader } from '@shared/OnlineMusicTemplates';
 import {
   neteaseDownloadManager,
   NETEASE_DOWNLOAD_DIR_KEY,

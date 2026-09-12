@@ -9,7 +9,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 import { ChevronDown, ChevronRight, Sparkles, Music as MusicIcon, Play, Trash2, Cloud } from 'lucide-react';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import { musicPlayer, type Track } from './musicPlayer';
-import { OnlineSidebarShell } from './OnlineSidebarShell';
+import { OnlineSidebarShell } from '@shared/OnlineSidebarShell';
 
 // 各平台推荐歌曲类型
 export interface RoamSeedTrack {

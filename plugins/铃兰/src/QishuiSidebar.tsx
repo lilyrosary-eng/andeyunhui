@@ -1,6 +1,6 @@
 import React from 'react';
-import { toTempPlaylistItem } from './OnlineSidebarShell';
-import OnlineMusicSidebar, { type SidebarUserPlaylist } from './_shared/OnlineMusicSidebar';
+import { toTempPlaylistItem } from '@shared/OnlineSidebarShell';
+import OnlineMusicSidebar, { type SidebarUserPlaylist } from '@shared/OnlineMusicSidebar';
 import type { QishuiPlaylistCard } from './qishuiApi';
 import type { OnlineTempItem } from './useOnlineSource';
 

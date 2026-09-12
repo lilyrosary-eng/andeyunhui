@@ -46,7 +46,7 @@ import {
 import { musicPlayer, Track } from './musicPlayer';
 import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
 import { MusicHeader } from './MusicHeader';
-import { PlaylistDetailHeader } from './_shared/OnlineMusicTemplates';
+import { PlaylistDetailHeader } from '@shared/OnlineMusicTemplates';
 import { TrackRow, type TrackBadge } from './_shared/TrackRow';
 import { DetailDrawer, type SharedDrawerType, type SharedArtistData, type SharedAlbumData } from './_shared/DetailDrawer';
 
