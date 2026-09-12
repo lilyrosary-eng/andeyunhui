@@ -221,24 +221,35 @@ function matchKnownApp(
   if (/kohya/.test(baseNameLower) || has(['gui.bat', 'kohya_gui.py', 'gui.ps1'])) {
     return { appName: 'kohya_ss', entry: has(['gui.bat']) ? 'gui.bat' : 'kohya_gui.py' };
   }
-  // ComfyUI 桌面版：根目录就是 ComfyUI.exe
+  // ComfyUI 桌面版：根目录就是 ComfyUI.exe（其内嵌服务默认端口 8000，不是 8188）
   if (has(['ComfyUI.exe', 'ComfyUI.exe.png'])) {
-    return { appName: 'ComfyUI', entry: 'ComfyUI.exe' };
+    return { appName: 'ComfyUI（桌面版）', entry: 'ComfyUI.exe' };
   }
-  // 秋叶整合包 / ComfyUI 源码：ComfyUI\main.py + python 环境 + run.bat
+  // 秋叶整合包 / ComfyUI 源码：ComfyUI\main.py + python 环境 + run*.bat
+  // 启动脚本命名多变：run.bat / run312.bat / run_nvidia_gpu.bat…，
+  // 之前只认 run.bat，秋叶包（run312.bat）因此被当成「入口未识别」，读不到 --port 8189，
+  // 最终兜底到错误的 8188 → 预览一直「拒绝连接」。
   if (/comfy/i.test(baseNameLower) || has(['run.bat', 'main.exp']) || dirs.has('ComfyUI')) {
-    const hasPython = dirs.has('python') || dirs.has('python_embeded') || dirs.has('venv');
+    // 秋叶包的环境目录叫 venv312 / venv310 这类，不能只认 venv
+    const hasPython = dirs.has('python') || dirs.has('python_embeded') || [...dirs].some((d) => /^venv/i.test(d));
+    const runEntry = [...files].find((f) => /^run.*\.bat$/i.test(f));
     return {
       appName: hasPython ? 'ComfyUI（整合包）' : 'ComfyUI',
-      entry: has(['run.bat']) ? 'run.bat' : 'ComfyUI\\main.py',
+      entry: runEntry ?? 'ComfyUI\\main.py',
     };
   }
   return null;
 }
 
-/** 从脚本文本里粗取「端口」（依次匹配 --port/--listen/--server_port/gradio/app 端口约定） */
+/** 从脚本文本里粗取「端口」：
+ *  --port 8189 / --port=8189 / --server_port 8189 / --listen 0.0.0.0:8189，
+ *  都没命中再按 gradio 约定回落 7860。
+ *  注意 --listen 只在 host:port 形式才提数字 —— 否则 `--listen --port 8189`
+ *  会被 --listen 分支吞掉而漏掉真正的 --port；而 `--listen 127.0.0.1`（纯地址）
+ *  也不能把 127 当成端口。 */
 function extractPort(text: string): string | null {
-  const m = text.match(/(?:--port|--listen|--server_port)\s+(\d{2,5})/i);
+  const m = text.match(/(?:--port|--server_port)[=\s]+(\d{2,5})\b/i)
+    || text.match(/--listen[=\s]+[0-9.]+:(\d{2,5})\b/i);
   if (m) return m[1];
   if (/gradio|server\.launch/i.test(text)) return '7860';
   return null;
@@ -327,10 +338,27 @@ export async function scanAndRecognize(
       }
     }
   }
-  // 兜底端口：已知软件默认
+  // 端口提取不只看已知入口 —— 启动脚本命名多变（run312.bat / run_nvidia_gpu.bat / start.bat），
+  // known.entry 未必覆盖；秋叶包就因此读不到 --port 8189、兜底到了错误的 8188。
+  // 这里对所有文本类候选逐个读，抓到端口即用；都抓不到才走下面的默认兜底。
   if (!url) {
-    if (/comfy/i.test(appName)) url = 'http://127.0.0.1:8188';
-    else if (/kohya/i.test(appName)) url = 'http://127.0.0.1:7860';
+    const textExts = new Set(['.bat', '.cmd', '.ps1', '.sh', '.py']);
+    for (const c of candidates) {
+      if (!textExts.has(extOf(c.name))) continue;
+      try {
+        const port = extractPort((await readText(c.path)).slice(0, 4000));
+        if (port) { url = `http://127.0.0.1:${port}`; break; }
+      } catch { /* 读不到就跳过 */ }
+    }
+  }
+  // 兜底端口：已知软件默认（准确端口以上面的脚本提取为准）
+  if (!url) {
+    if (/comfy/i.test(appName)) {
+      // ComfyUI 桌面版内嵌服务默认 8000；便携 / 源码 / 整合包默认 8188
+      url = /桌面/.test(appName) ? 'http://127.0.0.1:8000' : 'http://127.0.0.1:8188';
+    } else if (/kohya/i.test(appName)) {
+      url = 'http://127.0.0.1:7860';
+    }
   }
 
   // 无任何入口时退化为：把根目录自身作为 cwd，空命令，让用户手填

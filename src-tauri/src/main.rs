@@ -1135,6 +1135,8 @@ fn main() {
             andeyunhui_lib::services::qishui_proxy::qishui_http_post,
 andeyunhui_lib::services::qishui_proxy::qishui_download_audio,
 andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
+            // ========== 哔哩哔哩 WebAPI 代理（玉兰视频模块·网络视频）：TS 端 wbi 签名 + Rust 无 CORS 转发 ==========
+            andeyunhui_lib::services::bilibili_proxy::bilibili_request,
             // ========== 音乐下载：前端取链后由 Rust 落地到本地文件 ==========
             download_file,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========

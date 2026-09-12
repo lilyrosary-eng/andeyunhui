@@ -33,6 +33,16 @@ interface VideoSidebarProps {
   onRescan: () => void;
   onOpenSettings: () => void;
   rootPaths: string[];
+  onOpenCloud: () => void;
+}
+
+// 云形图标（切换按钮 logo）
+function CloudIcon() {
+  return React.createElement('svg', {
+    width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none',
+    stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
+    children: React.createElement('path', { d: 'M17.5 19a4.5 4.5 0 0 0 .5-8.97 6 6 0 0 0-11.64-2A4 4 0 0 0 6.5 19h11z' }),
+  });
 }
 
 // ========== 图标 ==========
@@ -81,7 +91,8 @@ export function VideoSidebar(props: VideoSidebarProps) {
     folders, videos, playingFile, selectedFolder,
     searchQuery, onSearchChange,
     onFolderClick, onVideoClick, onBackToFolders,
-    onChangeRoot, onRescan, onOpenSettings,
+    onChangeRoot, onRescan,   onOpenSettings,
+  onOpenCloud,
   } = props;
 
   const isStateB = selectedFolder !== null;
@@ -149,6 +160,11 @@ export function VideoSidebar(props: VideoSidebarProps) {
         searchQuery,
         onSearchChange,
         searchPlaceholder: isStateB ? T('video.sidebar.searchVideos') : T('video.sidebar.searchFolders'),
+        titleActions: React.createElement('button', {
+          onClick: onOpenCloud,
+          title: '云',
+          className: 'btn-press flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:text-[var(--element-bg)] hover:bg-[var(--element-muted)] transition-colors',
+        }, React.createElement(CloudIcon), React.createElement('span', null, '云')),
         primaryAction: { label: T('video.sidebar.chooseFolder'), onClick: onChangeRoot },
         secondaryActions: [
           {

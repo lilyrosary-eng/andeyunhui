@@ -52,6 +52,53 @@ fn is_video(name: &str) -> bool {
     }
 }
 
+/// 自然排序（人类直觉排序）：`1 < 2 < ... < 10 < 11`，而非字典序 `1 < 10 < 11 < 2`。
+/// 将连续数字段按数值（先比长度再比字典序，规避前导零歧义）比较，文本段仍按字典序。
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut a_chars = a.chars().peekable();
+    let mut b_chars = b.chars().peekable();
+
+    while let (Some(&ac), Some(&bc)) = (a_chars.peek(), b_chars.peek()) {
+        if ac.is_ascii_digit() && bc.is_ascii_digit() {
+            let mut an = String::new();
+            let mut bn = String::new();
+            while let Some(&c) = a_chars.peek() {
+                if c.is_ascii_digit() {
+                    an.push(c);
+                    a_chars.next();
+                } else {
+                    break;
+                }
+            }
+            while let Some(&c) = b_chars.peek() {
+                if c.is_ascii_digit() {
+                    bn.push(c);
+                    b_chars.next();
+                } else {
+                    break;
+                }
+            }
+            // 先比数字段长度（位数），位数相同再按字典序比较，规避前导零
+            match an.len().cmp(&bn.len()) {
+                std::cmp::Ordering::Equal => match an.cmp(&bn) {
+                    std::cmp::Ordering::Equal => continue,
+                    other => return other,
+                },
+                other => return other,
+            }
+        } else {
+            match ac.cmp(&bc) {
+                std::cmp::Ordering::Equal => {
+                    a_chars.next();
+                    b_chars.next();
+                }
+                other => return other,
+            }
+        }
+    }
+    a_chars.count().cmp(&b_chars.count())
+}
+
 /// 扫描视频根目录，通过 Tauri 事件流式推送结果
 pub fn scan_video_root_streaming(
     app: &tauri::AppHandle,
@@ -122,7 +169,7 @@ pub fn scan_video_root_streaming(
     leaf_dirs.sort_by(|a, b| {
         let na = a.0.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let nb = b.0.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        na.cmp(nb)
+        natural_cmp(na, nb)
     });
 
     if leaf_dirs.len() > MAX_RESULT_FOLDERS {
@@ -139,7 +186,7 @@ pub fn scan_video_root_streaming(
             return Ok(());
         }
 
-        videos.sort();
+        videos.sort_by(|a, b| natural_cmp(&a, &b));
         let count = videos.len();
         let name = dir.file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -211,6 +258,6 @@ pub fn get_folder_videos(folder_path: &str) -> Result<Vec<VideoFile>, String> {
         })
         .collect();
 
-    videos.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    videos.sort_by(|a, b| natural_cmp(&a.file_name, &b.file_name));
     Ok(videos)
 }

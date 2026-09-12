@@ -605,7 +605,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
               min: 0, max: duration || 0, step: 0.1,
               value: currentTime,
               onChange: handleSeek,
-              className: 'w-full h-0.5 rounded-full appearance-none cursor-pointer',
+              className: 'w-full h-0.5 rounded-full appearance-none cursor-pointer focus:outline-none focus-visible:outline-none',
               style: { background: `linear-gradient(to right, var(--element-bg, #5a7f5d) ${progressPct}%, rgba(255,255,255,0.2) ${progressPct}%)` },
             }),
           ),

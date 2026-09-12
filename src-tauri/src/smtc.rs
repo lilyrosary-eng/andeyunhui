@@ -119,7 +119,7 @@ mod imp {
         Win32::System::Variant::VT_LPWSTR,
         Win32::System::WinRT::{
             ISystemMediaTransportControlsInterop, RoGetActivationFactory, RoInitialize,
-            RO_INIT_SINGLETHREADED,
+            RO_INIT_MULTITHREADED,
         },
         Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
         Win32::UI::Shell::{GetCurrentProcessExplicitAppUserModelID, SetCurrentProcessExplicitAppUserModelID},
@@ -219,17 +219,18 @@ mod imp {
     static LAST_GLOBAL: Mutex<Option<SmtcUpdate>> = Mutex::new(None);
 
     /// 确保当前线程已初始化 Windows Runtime。
-    /// 关键陷阱：tauri/winit 在主线程经 OleInitialize 把线程置于 STA。windows-rs 0.62 只暴露
-    /// RO_INIT_SINGLETHREADED；本模块的 WinRT 调用统一跑在「专用工作线程 / 独立线程」这一固定
-    /// 线程上（单线程 + current-thread 运行时保证公寓亲和），故一律用 STA 即可。若线程已被初始化
-    /// 为 MTA（RPC_E_CHANGED_MODE），WinRT 敏捷对象在 MTA 下同样可用，忽略即可。
+    /// 关键陷阱：本模块的 WinRT 异步调用（RequestAsync 等）在 STA 线程上会死锁（完成回调经消息泵
+    /// 投递，但阻塞 await 不泵消息 → 回调永远不到），故一律用 MTA。若线程已被初始化为 STA
+    /// （RPC_E_CHANGED_MODE，如 tauri 主线程经 OleInitialize 置于 STA），同步 WinRT/Shell 调用
+    /// 仍可用，忽略即可。
     fn ensure_winrt() {
         unsafe {
-            // STA 即可：本模块所有 WinRT 调用都跑在「专用工作线程 / 独立线程」这一固定线程上，
-            // 公寓亲和由单线程 + current-thread 运行时保证，无需 MTA。若线程已被初始化为 MTA
-            // （RPC_E_CHANGED_MODE），WinRT 敏捷对象在 MTA 下同样可用，忽略即可。旧实现在此递归
-            // 调用自身（试图退回 MTA）会无限循环直至栈溢出，现已去除。
-            let _ = RoInitialize(RO_INIT_SINGLETHREADED);
+            // 必须用 MTA：本模块的 WinRT 异步调用（GlobalSystemMediaTransportControlsSessionManager::
+            // RequestAsync 等）在 STA 线程上会死锁——其完成回调经 STA 消息泵投递，但若线程正卡在
+            // 阻塞式 await（不泵消息），回调永远到不了，RequestAsync 永不返回，smtc_status 永久 pending。
+            // MTA 下完成回调走线程池直接置事件，无需消息泵，死锁解除。若线程已被初始化为 STA
+            // （RPC_E_CHANGED_MODE，例如 tauri 主线程），WinRT 敏捷对象在 STA 下仍可同步调用，忽略即可。
+            let _ = RoInitialize(RO_INIT_MULTITHREADED);
         }
     }
 
@@ -465,7 +466,8 @@ mod imp {
             let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
             std::thread::spawn(move || {
                 unsafe {
-                    let _ = RoInitialize(RO_INIT_SINGLETHREADED);
+                    // MTA：WinRT 异步（RequestAsync）在 STA 下会死锁，必须 MTA。
+                    let _ = RoInitialize(RO_INIT_MULTITHREADED);
                 }
                 // 纯同步循环（不在任何 tokio 运行时内），逐个执行作业；每个作业自行 block_on。
                 while let Ok(job) = rx.recv() {
@@ -498,7 +500,8 @@ mod imp {
         F: Future,
     {
         unsafe {
-            let _ = RoInitialize(RO_INIT_SINGLETHREADED);
+            // MTA：run_winrt_block 承载的 RequestAsync 等 WinRT 异步在 STA 下会死锁，必须 MTA。
+            let _ = RoInitialize(RO_INIT_MULTITHREADED);
         }
         SMTC_RT.with(|cell| {
             let mut g = cell.borrow_mut();
@@ -1694,21 +1697,35 @@ mod imp {
         let reg_displayname = read_reg_displayname().unwrap_or_default();
 
         // 枚举系统里所有活动媒体会话，确认 WebView2(MSEdge) 是否在抢占任务栏（双卡片）。
-        let mut system_sessions: Vec<String> = Vec::new();
-        if let Ok(op) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-            if let Ok(mgr) = op.await {
-                if let Ok(sessions) = mgr.GetSessions() {
-                    let size = sessions.Size().unwrap_or(0);
-                    for i in 0..size {
-                        if let Ok(s) = sessions.GetAt(i) {
-                            if let Ok(aumid) = s.SourceAppUserModelId() {
-                                system_sessions.push(aumid.to_string());
+        // 关键：RequestAsync 是 WinRT 异步调用，不能在命令线程直接 await（STA 无消息泵会死锁）。
+        // 也不能走共享的 smtc_run worker —— 若该 worker 已被其它 RequestAsync 卡死，本任务会永远排队。
+        // 故用「独立全新线程 + run_winrt_block」并套 5s 超时护盾：无论是否死锁，status 必在 ~5s 内返回。
+        let (sx, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        std::thread::spawn(move || {
+            let list = run_winrt_block(async move {
+                let mut v: Vec<String> = Vec::new();
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    if let Ok(op) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+                        if let Ok(mgr) = op.await {
+                            if let Ok(sessions) = mgr.GetSessions() {
+                                let size = sessions.Size().unwrap_or(0);
+                                for i in 0..size {
+                                    if let Ok(s) = sessions.GetAt(i) {
+                                        if let Ok(aumid) = s.SourceAppUserModelId() {
+                                            v.push(aumid.to_string());
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
-        }
+                })
+                .await;
+                v
+            });
+            let _ = sx.send(list);
+        });
+        let system_sessions = rx.await.unwrap_or_default();
 
         SmtcStatus {
             session_created,

@@ -617,7 +617,7 @@ function App() {
             return (
               <div
                 key={def.id}
-                className="h-full overflow-hidden"
+                className="h-full w-full overflow-hidden"
                 style={{ display: show ? undefined : 'none' }}
                 aria-hidden={show ? undefined : true}
               >
@@ -648,7 +648,7 @@ function App() {
         <div className="flex flex-1 min-w-0 overflow-hidden">
           <AppNav mainPluginIds={mainPluginIds} />
           <HostSidebar />
-          <div className="flex flex-1 min-w-0 h-full overflow-hidden">
+          <div className="flex-1 min-w-0 h-full overflow-hidden">
             {renderModule()}
           </div>
         </div>

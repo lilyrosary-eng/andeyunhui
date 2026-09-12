@@ -5,6 +5,12 @@ export default {
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
     "./plugins/**/*.{js,ts,jsx,tsx}",
+    // 🔴 必须排除 plugins/**/dist —— dist 是各插件并发构建的产物：
+    // (a) 扫描它没有意义，类名全部来自源码，dist 只是打包副本；
+    // (b) 有严重竞态：18 个插件并行构建时，A 插件的 Tailwind 扫描读到 B 插件的
+    //     dist/index.js 的瞬间，B 正好 emptyOutDir 清空重建 → ENOENT → 构建失败。
+    //     这是 music（铃兰）构建「时不时失败」的根因（2026-09-05）。
+    "!./plugins/**/dist/**",
   ],
   theme: {
     extend: {

@@ -137,22 +137,23 @@ export function CrawlerUrlQueue() {
 
   const shown = results.slice(0, 50);
 
+  const queueRight = stats
+    ? (
+      <span className="flex items-center gap-1 text-[10px] text-neutral-400">
+        <span className="px-1 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400">待爬 {stats.pending}</span>
+        <span className="px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">已抓 {stats.visited}</span>
+        <span className="px-1 py-0.5 rounded bg-neutral-500/15 text-neutral-500 dark:text-stone-400">共 {stats.total}</span>
+      </span>
+    )
+    : <span className="text-[10px] text-neutral-400">内核未启动</span>;
+
   return (
     <CollapsibleSection
       title="爬虫抓取控制台"
       storageKey="fw_crawler_queue_console"
       defaultOpen={true}
       accent="attack"
-      right={
-        stats ? (
-          <span className="flex items-center gap-1 text-[10px] text-neutral-400">
-            <span className="px-1 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400">待爬 {stats.pending}</span>
-            <span className="px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">已抓 {stats.visited}</span>
-            <span className="px-1 py-0.5 rounded bg-neutral-500/15 text-neutral-500 dark:text-stone-400">共 {stats.total}</span>
-          </span> : (
-          <span className="text-[10px] text-neutral-400">内核未启动</span>
-        )
-      }
+      right={queueRight}
     >
       {errMsg && (
         <div className="text-[11px] text-rose-600 dark:text-rose-400 bg-rose-500/10 rounded-lg px-2.5 py-1.5 mb-1">{errMsg}</div>

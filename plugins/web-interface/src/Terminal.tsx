@@ -52,9 +52,11 @@ export interface WebTerminalProps {
   onExit?: () => void;
   /** 终端初始化失败回调 */
   onError?: (msg: string) => void;
+  /** PTY 输出回调（原样文本）。供上层解析服务自报的监听地址等 */
+  onOutput?: (text: string) => void;
 }
 
-export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTerminalProps) {
+export function WebTerminal({ command, cwd, env, hint, onExit, onError, onOutput }: WebTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'exited' | 'error'>('loading');
   const [errMsg, setErrMsg] = useState('');
@@ -116,6 +118,9 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
     let unlistenExit: (() => void) | null = null;
     let unlistenErr: (() => void) | null = null;
     let resizeObserver: ResizeObserver | null = null;
+    // 命令兜底下发定时器：即便 shell 始终无输出，到点也会把命令写进去。
+    // 声明在 try 之外，保证 pty_create 失败时 cleanup 仍能安全清理它。
+    let sendFallbackTimer = 0;
     const disposers: Array<() => void> = [];
 
     (async () => {
@@ -132,9 +137,26 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
           fontSize: 12.5,
           scrollback: 20000,
           fontFamily: '"Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace',
+          // 选中高亮必须显式给色：xterm 默认 selection 是半透明白，在浅色主题（白底）
+          // 几乎完全不可见、深色主题下也偏灰，表现为「拖选没反应」。这里用 VS Code 同款
+          // 高对比选中色，并补 selectionInactiveBackground（失焦时仍能看到选区）。
           theme: dark
-            ? { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4' }
-            : { background: '#ffffff', foreground: '#24292e', cursor: '#24292e' },
+            ? {
+                background: '#1e1e1e',
+                foreground: '#d4d4d4',
+                cursor: '#d4d4d4',
+                selectionBackground: '#264f78',
+                selectionForeground: '#ffffff',
+                selectionInactiveBackground: '#3a3d41',
+              }
+            : {
+                background: '#ffffff',
+                foreground: '#24292e',
+                cursor: '#24292e',
+                selectionBackground: '#add6ff',
+                selectionForeground: '#000000',
+                selectionInactiveBackground: '#e5ebf1',
+              },
           allowProposedApi: true,
         });
         fitAddon = new bundle.FitAddon();
@@ -199,11 +221,38 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
           });
         }
 
-        // 输出桥接：PTY → xterm（经 frameBuffer 批处理）
+        // 命令下发（幂等，只发一次）：等 shell 就绪后再写，避免写进未就绪的 shell 被丢弃。
+        // 原先是固定 600ms 后写入 —— PowerShell 等启动更慢的 shell 会吃掉/丢弃这条命令，
+        // 表现为「点了一键启动，终端开了但服务没跑起来」。
+        // 改为：收到 PTY 首帧输出即视为 shell 就绪并立即下发；另设 2.5s 兜底定时器，
+        // 兼顾「shell 静默启动、始终无输出」的场景。多行命令逐行下发，
+        // 避免整段一次性粘贴被部分 shell 当成单行处理。
+        let commandSent = false;
+        const sendCommand = () => {
+          if (commandSent || disposed || !ptyId || !command) return;
+          commandSent = true;
+          window.clearTimeout(sendFallbackTimer);
+          const lines = String(command).split(/\r?\n/).filter((l) => l.trim().length > 0);
+          if (lines.length <= 1) {
+            hostApi.invoke('pty_write', { id: ptyId, data: command + '\r' }).catch(() => {});
+            return;
+          }
+          lines.forEach((line, i) => {
+            window.setTimeout(() => {
+              if (disposed || !ptyId) return;
+              hostApi.invoke('pty_write', { id: ptyId, data: line + '\r' }).catch(() => {});
+            }, i * 120);
+          });
+        };
+        sendFallbackTimer = window.setTimeout(sendCommand, 2500);
+
+        // 输出桥接：PTY → xterm（经 frameBuffer 批处理）；首帧输出即触发命令下发
         const outUnlistenP = hostApi.listen(`pty-output:${ptyId}`, (e: any) => {
           if (e?.payload) {
             if (fb && !disposed) fb.push(e.payload as string);
             else if (!disposed) term?.write(e.payload);
+            sendCommand();
+            onOutput?.(String(e.payload));
           }
         });
         // 进程退出
@@ -252,12 +301,7 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
         if (hint) term?.write('\x1b[90m$ ' + hint.replace(/\r?\n/g, ' ') + '\x1b[0m\r\n');
         term?.write('\r\n\x1b[90m[ Ctrl+C / Ctrl+Shift+C 复制选中 · 右键或 Ctrl+V / Shift+Insert 粘贴 ]\x1b[0m\r\n');
 
-        // 等 shell 就绪后把命令写进去执行 —— 服务进程从此常驻此终端
-        setTimeout(() => {
-          if (!disposed && ptyId && command) {
-            hostApi.invoke('pty_write', { id: ptyId, data: command + '\r' }).catch(() => {});
-          }
-        }, 600);
+        // 命令下发已交给 sendCommand（首帧输出触发 + 2.5s 兜底），此处不再重复写
         setTimeout(() => { try { term?.focus(); } catch { /* */ } }, 60);
       } catch (e: any) {
         if (!disposed) {
@@ -270,6 +314,7 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError }: WebTer
 
     cleanupRef.current = () => {
       disposed = true;
+      window.clearTimeout(sendFallbackTimer);
       try { resizeObserver?.disconnect(); } catch { /* */ }
       disposers.forEach((d) => { try { d(); } catch { /* */ } });
       try { unlistenExit?.(); } catch { /* */ }

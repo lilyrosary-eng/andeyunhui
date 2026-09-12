@@ -208,6 +208,13 @@ React.createElement('label', { className: 'block text-xs font-medium text-neutra
   return panel as React.ReactElement;
 }
 
+// ========== 云功能抽屉（右侧滑出，对齐音乐模块 ModuleDrawer 设计语言） ==========
+// 实现见 ./VideoCloudDrawer.tsx（本地视频 / 云端视频 + 登录态，结构对齐音乐在线模块）
+import { VideoCloudDrawer } from './VideoCloudDrawer';
+// 网络视频（对齐音乐模块网络音乐：平台列表 + 原生/内嵌网页 + 下载）
+import { OnlineVideoView } from './online/OnlineVideoView';
+import type { OnlineVideoItem } from './online/videoPlatforms';
+
 // ========== 主组件 ==========
 function VideoModule() {
   useLang();
@@ -228,6 +235,9 @@ function VideoModule() {
   // 铃兰传来的临时 MV 列表（纯内存，不持久化、关闭软件即销毁）。
   const [mvTemp, setMvTemp] = useState<VideoFile[]>([]);
   const [settings, setSettings] = useState<VideoSettings>(loadSettings);
+  const [showCloudDrawer, setShowCloudDrawer] = useState(false);
+  // 网络视频：当前打开的在线平台 id（null = 未进入在线视图）
+  const [onlinePlatformId, setOnlinePlatformId] = useState<string | null>(null);
 
   // 保存设置
   const handleSettingsChange = useCallback((partial: Partial<VideoSettings>) => {
@@ -325,6 +335,21 @@ function VideoModule() {
 
   // 切换文件（上一集/下一集）
   const handleFileChange = useCallback((file: VideoFile) => {
+    setPlayingFile(file);
+  }, []);
+
+  // 网络视频：把在线平台的播放项（已解析出真实地址）交给我们的播放器（去广告 + 统一控制 + SMTC）。
+  // 退出在线视图，回到主播放区；并填入临时列表（mvTemp 同款内存态），使播放器可正常接管。
+  const handleOnlinePlay = useCallback((item: OnlineVideoItem) => {
+    const file: VideoFile = {
+      filePath: '',
+      fileName: item.title,
+      sizeBytes: 0,
+      url: item.url,
+      cover: item.cover,
+    };
+    setMvTemp([file]);
+    setOnlinePlatformId(null);
     setPlayingFile(file);
   }, []);
 
@@ -467,9 +492,18 @@ function VideoModule() {
       });
     }
 
+    // 网络视频在线视图（优先级高于本地浏览/播放，覆盖主内容区；播放时由 handleOnlinePlay 退出）
+    if (onlinePlatformId) {
+      return React.createElement(OnlineVideoView, {
+        initialPlatformId: onlinePlatformId,
+        onPlayVideo: handleOnlinePlay,
+        onExit: () => setOnlinePlatformId(null),
+      });
+    }
+
     // 播放视图
     if (playingFile) {
-      // 网络流（铃兰 MV）用临时列表 mvTemp；本地文件用当前文件夹 videos
+      // 网络流（铃兰 MV / 网络视频）用临时列表 mvTemp；本地文件用当前文件夹 videos
       const list = playingFile.url ? mvTemp : videos;
       return React.createElement(VideoPlayer, {
         file: playingFile,
@@ -512,7 +546,7 @@ function VideoModule() {
   };
 
   return (
-    <div className="flex-1 flex h-full overflow-hidden">
+    <div className="relative flex-1 flex h-full overflow-hidden">
       {React.createElement(VideoSidebar, {
         folders: visibleFolders,
         videos,
@@ -527,10 +561,20 @@ function VideoModule() {
         onRescan: handleRescan,
         onOpenSettings: handleOpenModuleSettings,
         rootPaths,
+        onOpenCloud: () => setShowCloudDrawer(true),
       })}
       <div className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]">
         {renderContent()}
       </div>
+      <VideoCloudDrawer
+        open={showCloudDrawer}
+        onClose={() => setShowCloudDrawer(false)}
+        isLocalActive={!onlinePlatformId}
+        onOpenPlatform={(id) => {
+          setOnlinePlatformId(id);
+          setShowCloudDrawer(false);
+        }}
+      />
     </div>
   );
 }

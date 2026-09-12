@@ -215,7 +215,7 @@ function SettingsContent({
 
 // 启动后的运行区：预览(iframe 自动轮询) + 终端(可折叠)
 function RunPane({
-  preset, suppressBrowser, openTerminal, refreshSignal, onReady, onStopped,
+  preset, suppressBrowser, openTerminal, refreshSignal, onReady, onStopped, onError,
 }: {
   preset: WebPreset;
   suppressBrowser: boolean;
@@ -223,14 +223,21 @@ function RunPane({
   refreshSignal: number;
   onReady: () => void;
   onStopped: () => void;
+  /** 终端创建失败回调：模块层据此退出「启动中」状态并提示，避免卡在 starting */
+  onError?: (msg: string) => void;
 }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [probeReady, setProbeReady] = useState(false);
   const [autoReload, setAutoReload] = useState(true);
   const [reloadCount, setReloadCount] = useState(0);
   const [reloadGaveUp, setReloadGaveUp] = useState(false);
+  // serving：预览端口已真正可达（服务在监听）；仅在此之后才挂载 iframe
+  const [serving, setServing] = useState(false);
+  const servingRef = useRef(false);
+  // 实际生效的预览地址：探测命中哪个（127.0.0.1 或 localhost）就用哪个
+  const [activeSrc, setActiveSrc] = useState('');
+  const [probeTick, setProbeTick] = useState(0);
   const readyFired = useRef(false);
-  const loadedOnce = useRef(false);
 
   const markReady = useCallback(() => {
     if (!readyFired.current) {
@@ -239,54 +246,132 @@ function RunPane({
     }
   }, [onReady]);
 
-  // iframe onLoad：任何响应（含 404/502 错误页、以及目标页首帧）都会触发，误判不了"进程是否真出现"。
-  // 它只负责"本次 iframe 已加载出一帧"→ 先停掉自动轰炸，防止替用户无限刷新。
+  // iframe onLoad 只表示「页面已渲染出一帧」，仅用于收起遮罩。
+  // 绝不能再当服务就绪判据 —— 「拒绝连接」的错误页同样会触发 onLoad。
   const handleIframeLoad = useCallback(() => {
-    loadedOnce.current = true;
     setProbeReady(true);
-    markReady();
-  }, [markReady]);
+  }, []);
 
   const iframeSrc = normalizePreviewUrl(preset.url);
   const hasUrl = !!iframeSrc;
-  // 自动重试上限：约 30×3.5s ≈ 105s 仍没加载出一帧则放弃自动，避免无限开飞机
-  const PREVIEW_MAX_RELOAD = 30;
+  // 备选地址：127.0.0.1 与 localhost 互换。
+  // 不少服务只监听 IPv4(127.0.0.1) 或只监听 IPv6(::1)，而 Windows 上 localhost 可能解析到 ::1，
+  // 只试单一地址会把「监听中」误判成「服务未就绪」。探测时两个都试，取先通的那个。
+  const altSrc = useMemo(() => {
+    if (!iframeSrc) return '';
+    if (iframeSrc.includes('127.0.0.1')) return iframeSrc.replace('127.0.0.1', 'localhost');
+    if (iframeSrc.includes('localhost')) return iframeSrc.replace('localhost', '127.0.0.1');
+    return '';
+  }, [iframeSrc]);
+  // 端口探测间隔 / 上限：2s × 120 ≈ 240s，覆盖 ComfyUI 这类分钟级冷启动
+  // （原方案 3.5s × 30 ≈ 105s，ComfyUI 首次加载依赖常超时放弃）
+  const PROBE_INTERVAL_MS = 2000;
+  const PREVIEW_MAX_PROBE = 120;
 
-  // 预览「自动轮询」：服务未就绪时每 3.5s 重建 iframe 触发重新加载。
-  // 一旦 iframe 加载出一帧（loadedOnce 置位）即停；或达到重试上限（reloadGaveUp）也停，
-  // 避免永远刷 —— 避免就绪检测误判导致的无限重启/CPU 空转。
-  // 用户可点「停止自动刷新」手动接管（此时可用右侧刷新按钮重挂 iframe）。
+  // 预览「真实就绪探测」：先探测端口是否可达，可达后才挂载 iframe。
+  //
+  // 关键修复：此前仅靠 iframe 的 onLoad 判定就绪，但「拒绝连接」的错误页同样会触发
+  // onLoad → 被误判为「服务已就绪」并停掉自动轮询，于是 iframe 永远卡在错误页上，
+  // 表现为「ComfyUI 日志已显示监听，预览却一直拒绝连接」。
+  // 现改用 no-cors fetch 探测端口：无监听会 reject（网络错误），有监听则返回 opaque
+  // 响应，与 CORS 无关，跨域本地服务也能可靠判定。
   useEffect(() => {
-    if (!hasUrl) return;
-    loadedOnce.current = false;
-    readyFired.current = false;
+    if (!hasUrl || !autoReload) return;
+    let cancelled = false;
+    let timer = 0;
+    // 单次探测：通了返回该地址，不通返回空串
+    const probeOnce = async (url: string): Promise<string> => {
+      try {
+        await fetch(url, { mode: 'no-cors', cache: 'no-store' });
+        return url;
+      } catch {
+        return '';
+      }
+    };
+    const probe = async () => {
+      if (cancelled || servingRef.current) return;
+      // 先试配置地址，不通再试备选地址（127.0.0.1 ↔ localhost）
+      const hit = (await probeOnce(iframeSrc)) || (altSrc ? await probeOnce(altSrc) : '');
+      if (!cancelled && !servingRef.current && hit) {
+        servingRef.current = true;
+        setActiveSrc(hit);
+        setServing(true);
+        markReady();
+        return;
+      }
+      // 两个都不通 = 服务尚未监听，继续探测
+      if (cancelled || servingRef.current) return;
+      setReloadCount((n) => {
+        if (n + 1 >= PREVIEW_MAX_PROBE) setReloadGaveUp(true);
+        return n + 1;
+      });
+    };
+    void probe();
+    timer = window.setInterval(() => {
+      if (servingRef.current) {
+        window.clearInterval(timer);
+        return;
+      }
+      void probe();
+    }, PROBE_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [hasUrl, iframeSrc, altSrc, autoReload, probeTick, markReady]);
+
+  // 预览地址变化（切换预设）：重置探测状态，重新开始探测
+  useEffect(() => {
+    servingRef.current = false;
+    setServing(false);
+    setActiveSrc('');
     setProbeReady(false);
     setReloadCount(0);
     setReloadGaveUp(false);
-    if (!autoReload) return;
-    const timer = window.setInterval(() => {
-      // 已加载出一帧，或用户停止自动刷新，或已达重试上限 → 本轮不动作
-      if (loadedOnce.current || !autoReload) return;
-      setReloadCount((n) => {
-        if (n + 1 >= PREVIEW_MAX_RELOAD) {
-          setReloadGaveUp(true); // 达到上限：停掉自动轮询，提示用户手动处理
-          return n + 1;
-        }
-        return n + 1;
-      });
-      setReloadKey((k) => k + 1);
-    }, 3500);
-    return () => window.clearInterval(timer);
-  }, [hasUrl, preset.url, autoReload]);
-  // 注意：PREVIEW_MAX_RELOAD 为常量；reloadGaveUp 置位后 interval 仍在跑但不再自增（见上），由用户手动接管。
+    readyFired.current = false;
+  }, [iframeSrc]);
 
-  // 手动刷新（停止自动刷新后仍可用）
+  // 手动刷新：重新走一遍端口探测（服务重启 / 想强制重挂预览时用）
   const manualReload = useCallback(() => {
-    loadedOnce.current = false;
+    servingRef.current = false;
+    setServing(false);
+    setActiveSrc('');
     setProbeReady(false);
     setReloadGaveUp(false);
+    setReloadCount(0);
     setReloadKey((k) => k + 1);
+    setProbeTick((t) => t + 1);
   }, []);
+
+  // 服务自报监听地址：从终端输出解析（如 "To see the GUI go to: http://0.0.0.0:8189"）。
+  // 这是比轮询探测更强的就绪信号 —— 服务打印出监听地址就等于已经在监听。
+  // 0.0.0.0 / [::] 表示「监听所有网卡」，不是可访问地址，统一换算成 127.0.0.1。
+  const [detectedUrl, setDetectedUrl] = useState('');
+  const outTailRef = useRef('');
+  const handleTermOutputRef = useRef<(t: string) => void>(() => {});
+  const handleTermOutput = useCallback((text: string) => {
+    // PTY 输出按小块到达，一条 URL 很容易被拆进相邻两块（Windows ConPTY 尤其常见），
+    // 对单块做正则必然漏检 —— 必须与上一块的尾部拼接后再匹配。
+    const combined = outTailRef.current + String(text);
+    outTailRef.current = combined.slice(-240);
+    // 只认本机监听地址，避免把日志里的外网 URL（镜像站、下载源等）误当服务地址
+    const m = combined.match(/https?:\/\/(0\.0\.0\.0|\[::\]|127\.0\.0\.1|localhost|\[::1\]):(\d{2,5})/i);
+    if (!m) return;
+    outTailRef.current = ''; // 命中后清掉缓冲，避免同一条日志残留触发第二次
+    const url = `http://127.0.0.1:${m[2]}`;
+    if (url === (servingRef.current ? activeSrc : iframeSrc)) return;
+    if (!servingRef.current) {
+      // 服务自报的地址与预设配置不同：直接改用，跳过剩余探测轮询（零门槛纠偏）
+      servingRef.current = true;
+      setActiveSrc(url);
+      setServing(true);
+      markReady();
+    } else {
+      // 已在预览但配置地址与实际监听不一致 → 提示用户一键切换
+      setDetectedUrl(url);
+    }
+  }, [activeSrc, iframeSrc, markReady]);
+  useEffect(() => { handleTermOutputRef.current = handleTermOutput; }, [handleTermOutput]);
 
   // 侧边栏「刷新」按钮触发：每次信号自增即重挂预览
   useEffect(() => {
@@ -306,6 +391,28 @@ function RunPane({
     { id: 'primary', label: '服务', command: preset.args, cwd: preset.cwd, env: termEnv },
   ]);
   const [activeTermId, setActiveTermId] = useState('primary');
+
+  // 终端面板高度（可拖拽）：默认 224px（原为固定 h-56），范围 120~640px。
+  // 看长日志（ComfyUI 输出很多）时可拉高；不需要时拉低给预览让位。
+  const [termHeight, setTermHeight] = useState(224);
+  const termResizeRef = useRef<{ startY: number; startH: number } | null>(null);
+  const onTermResizeStart = useCallback((e: any) => {
+    e.preventDefault();
+    termResizeRef.current = { startY: e.clientY as number, startH: termHeight };
+    const onMove = (ev: MouseEvent) => {
+      const st = termResizeRef.current;
+      if (!st) return;
+      // 向上拖 = 变高（clientY 变小）
+      setTermHeight(Math.min(640, Math.max(120, st.startH + (st.startY - ev.clientY))));
+    };
+    const onUp = () => {
+      termResizeRef.current = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [termHeight]);
 
   // 新建一个空白 shell 终端（可自由输入命令）
   const addTerminal = useCallback(() => {
@@ -335,25 +442,57 @@ function RunPane({
                 <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-white/75 dark:bg-stone-950/75 text-xs text-neutral-400 dark:text-stone-500">
                   {reloadGaveUp ? (
                     <>
-                      <span>自动重试已达上限，服务可能尚未就绪。</span>
-                      <span>可到终端查看日志；就绪后可点侧边栏「刷新」或右上按钮手动加载。</span>
+                      <span>自动探测已达上限，服务可能尚未就绪。</span>
+                      <span>可到终端查看日志；就绪后可点侧边栏「刷新」或右上按钮重新探测。</span>
                     </>
                   ) : (
                     <>
                       <span className="inline-block h-4 w-4 rounded-full border-2 border-neutral-300 border-t-sky-500 animate-spin" />
-                      <span>等待服务启动，就绪后自动加载预览（已重试 {reloadCount} 次）…</span>
+                      <span className="px-4 text-center break-all">
+                        {serving
+                          ? '服务已就绪，正在加载预览…'
+                          : `等待服务真正开始监听：探测 ${iframeSrc}${altSrc ? ` / ${altSrc}` : ''}`
+                            + `（已探测 ${reloadCount} 次）。若长时间不就绪，请看终端日志确认实际端口。`}
+                      </span>
                     </>
                   )}
                 </div>
               )}
-              <iframe
-                key={reloadKey}
-                src={iframeSrc}
-                onLoad={handleIframeLoad}
-                className="h-full w-full border-0"
-                title={preset.name}
-                sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"
-              />
+              {/* 服务自报地址与当前预览地址不一致（如配置填错端口）：提示一键切换 */}
+              {detectedUrl && (
+                <div className="absolute top-2 left-2 right-2 z-20 flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 dark:text-amber-300 backdrop-blur">
+                  <span className="flex-1 truncate">终端检测到服务监听在 {detectedUrl}（与当前预览地址不同）</span>
+                  <button
+                    onClick={() => {
+                      servingRef.current = true;
+                      setActiveSrc(detectedUrl);
+                      setServing(true);
+                      setProbeReady(false);
+                      setReloadKey((k) => k + 1);
+                    }}
+                    className="btn-press shrink-0 rounded-md bg-amber-500 px-2 py-1 text-[11px] font-medium text-white hover:bg-amber-600"
+                  >改用该地址</button>
+                  <button
+                    onClick={() => setDetectedUrl('')}
+                    className="shrink-0 text-[11px] text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200"
+                  >忽略</button>
+                </div>
+              )}
+              {/* 仅当端口探测可达后才挂载 iframe：避免先加载出「拒绝连接」错误页并永久卡在上面 */}
+              {serving && (
+                // sandbox 说明：
+                //  - allow-modals：ComfyUI 等若用 alert/confirm 做提示，缺此项会被静默拦截。
+                //  - allow-popups 刻意保留：ComfyUI 的「查看大图 / 打开工作流」走 window.open，
+                //    去掉会静默失效；若将来要彻底禁止外部窗口，移除该项即可。
+                <iframe
+                  key={reloadKey}
+                  src={activeSrc || iframeSrc}
+                  onLoad={handleIframeLoad}
+                  className="h-full w-full border-0"
+                  title={preset.name}
+                  sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads allow-modals"
+                />
+              )}
             </div>
           ) : (
             <div className="absolute inset-0 flex items-center justify-center text-xs text-neutral-400 dark:text-stone-500">
@@ -397,8 +536,15 @@ function RunPane({
               className="px-1.5 py-1 text-neutral-400 hover:text-[var(--element-color-raw)] rounded transition-colors"
             >+</button>
           </div>
+          {/* 终端高度拖拽条：上下拖动调整高度（120~640px）。
+              释放后 ResizeObserver 会自动触发 xterm fit + pty_resize，终端不会错位。 */}
+          <div
+            onMouseDown={onTermResizeStart}
+            title="拖动调整终端高度"
+            className="h-1 shrink-0 cursor-row-resize bg-transparent hover:bg-sky-500/40 active:bg-sky-500/60 transition-colors"
+          />
           {/* 终端面板：所有终端常驻，仅切换 display */}
-          <div className="h-56">
+          <div className="shrink-0" style={{ height: termHeight }}>
             {terminals.map((t) => (
               <div key={t.id} className={`h-full ${t.id === activeTermId ? 'block' : 'hidden'}`}>
                 <WebTerminal
@@ -407,6 +553,8 @@ function RunPane({
                   env={t.env}
                   hint={t.id === 'primary' ? preset.args : undefined}
                   onExit={t.id === 'primary' ? onStopped : undefined}
+                  onError={t.id === 'primary' ? onError : undefined}
+                  onOutput={t.id === 'primary' ? (txt: string) => handleTermOutputRef.current(txt) : undefined}
                 />
               </div>
             ))}
@@ -463,9 +611,15 @@ function EditorForm({
       const hit = files && files.length ? suggestFromFile(files[0]) : null;
       if (!hit) { setErr('未能识别该文件类型，请手动填写命令'); return; }
       setName(hit.name); setArgs(hit.args); setCwd(hit.cwd ?? '');
-      // 若命令里有常见端口号，顺手填预览地址（取第一个 http://…:port）
-      const m = hit.args.match(/:\s*(\d{2,5})/);
-      if (m) setUrl('http://127.0.0.1:' + m[1]);
+      // 若命令里有端口号，顺手填预览地址。按「明确程度」依次尝试：
+      //   --port 8188 / -p 8188 / 127.0.0.1:8188 / 后接空白或行尾的 :8188
+      // 不能直接用 /:(\d{2,5})/ —— 那会把路径（C:\8080）、版本号、时间（12:30）误当成端口。
+      const portMatch =
+        hit.args.match(/--port[=\s]+(\d{2,5})\b/i) ||
+        hit.args.match(/(?:^|\s)-p[=\s]+(\d{2,5})\b/i) ||
+        hit.args.match(/\b(?:127\.0\.0\.1|0\.0\.0\.0|localhost):(\d{2,5})\b/i) ||
+        hit.args.match(/:(\d{2,5})(?=\s|$|['"])/);
+      if (portMatch) setUrl('http://127.0.0.1:' + portMatch[1]);
       // 进一步：用「文件所在目录」做一次软件识别，得到更智能的名称与预览地址
       // （比如选了 kohya_ss 下的 gui.bat，名称会识别成 kohya_ss 而不是 gui）
       try {
@@ -671,6 +825,8 @@ function WebInterfaceModule() {
   const [confirmStop, setConfirmStop] = useState(false);
   // 每次启动自增，作为 RunPane 的 key 强制重挂 → 重复启动也能真正重启
   const [runKey, setRunKey] = useState(0);
+  // 启动失败提示：终端创建失败时由 RunPane 上报，避免卡在「启动中」却无任何反馈
+  const [runError, setRunError] = useState('');
 
   // 持久化预设
   useEffect(() => { savePresets(presets); }, [presets]);
@@ -724,6 +880,7 @@ function WebInterfaceModule() {
   const startPreset = useCallback((preset: WebPreset) => {
     setSelectedId(preset.id);
     setEditing(null);
+    setRunError(''); // 重新开始时清掉上一次的失败提示
     // 每次启动都递增 runKey → 在渲染处给 RunPane 强制重挂。
     // 保证「重复启动同一预设」也真正结束旧进程、重建全新终端，而不是 props 未变点了没反应。
     setRunKey((k) => k + 1);
@@ -776,6 +933,13 @@ function WebInterfaceModule() {
   const markStopped = useCallback(() => {
     // 进程退出 → 回到空闲态，方便一键重建（终端已随 pty 退出）
     setRun(null);
+  }, []);
+
+  // 终端创建失败（PTY 创建失败 / xterm 加载失败等）：
+  // 此类失败不会触发 pty-exit，若不上报则 run 会永远停在 starting
+  const handleRunError = useCallback((msg: string) => {
+    setRun(null);
+    setRunError(msg || '终端启动失败');
   }, []);
 
   const isRunningThis = !!run && run.presetId === selected?.id;
@@ -873,12 +1037,18 @@ function WebInterfaceModule() {
           <EditorForm initial={selected} onSave={savePreset} onCancel={() => setEditing(null)} />
         ) : (
           <div className="flex-1 min-h-0 flex flex-col">
+            {/* 启动失败提示：否则终端创建失败时只会一直停在「启动中」而没有任何反馈 */}
+            {runError && (
+              <div className="mb-2 shrink-0 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">
+                启动失败：{runError}
+              </div>
+            )}
             {/* 运行区：preview + 终端 */}
             {isRunningThis && run ? (
               <RunPane key={runKey} preset={selected} suppressBrowser={settings.suppressBrowser}
                 openTerminal={showTerminal}
                 refreshSignal={refreshSignal}
-                onReady={markRunning} onStopped={markStopped} />
+                onReady={markRunning} onStopped={markStopped} onError={handleRunError} />
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-black/10 dark:border-white/10 text-neutral-400 dark:text-stone-500">
                 <div className="text-sm">在左侧侧边栏点击「一键启动」，在终端里运行：</div>

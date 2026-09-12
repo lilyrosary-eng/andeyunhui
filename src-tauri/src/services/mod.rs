@@ -27,6 +27,8 @@ pub mod netease_proxy;
 pub mod kugou_proxy;
 // 汽水音乐 WebAPI 代理：与 kugou_proxy 同构，签名在 TS 端完成（字节系 JSVMP 签名）
 pub mod qishui_proxy;
+// 哔哩哔哩 WebAPI 代理：与 netease_proxy 同构，wbi 签名在 TS 端完成（玉兰视频模块·网络视频）
+pub mod bilibili_proxy;
 pub mod agent_service;
 pub mod ai_service;
 pub mod companion_service;
