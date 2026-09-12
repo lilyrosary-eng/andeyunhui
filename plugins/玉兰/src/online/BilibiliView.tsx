@@ -4,7 +4,7 @@ import React from 'react';
 import { searchBili, resolveBili, type BiliSearchResult } from './bilibiliApi';
 import { videoDownloadManager, VIDEO_DOWNLOAD_DIR_KEY, type VideoDownloadTask } from './OnlineVideoDownloadManager';
 import type { OnlineVideoItem } from './videoPlatforms';
-import { SearchIcon, PlayIcon, DownloadIcon, CloudIcon } from './onlineIcons';
+import { SearchIcon, PlayIcon, DownloadIcon, CloudIcon } from '@shared/icons';
 
 const { useState, useEffect, useRef } = React;
 

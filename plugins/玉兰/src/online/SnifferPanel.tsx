@@ -6,7 +6,7 @@
 import React from 'react';
 import { sniffResources, type SniffResource } from './sniff';
 import { videoDownloadManager, VIDEO_DOWNLOAD_DIR_KEY } from './OnlineVideoDownloadManager';
-import { SearchIcon, DownloadIcon, CloseIcon } from './onlineIcons';
+import { SearchIcon, DownloadIcon, CloseIcon } from '@shared/icons';
 
 const { useState } = React;
 

@@ -4,7 +4,7 @@
 import React from 'react';
 import type { VideoPlatform } from './videoPlatforms';
 import VideoWebview from './VideoWebview';
-import { GlobeIcon } from './onlineIcons';
+import { GlobeIcon } from '@shared/icons';
 import { SnifferPanel } from './SnifferPanel';
 
 const { useState, useEffect, useRef, useCallback } = React;

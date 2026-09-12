@@ -5,7 +5,7 @@
 import React from 'react';
 import { VideoWebview } from './VideoWebview';
 import type { OnlineVideoItem } from './videoPlatforms';
-import { CloudIcon, PlayIcon, GlobeIcon } from './onlineIcons';
+import { CloudIcon, PlayIcon, GlobeIcon } from '@shared/icons';
 import { SnifferPanel } from './SnifferPanel';
 
 const { useState, useRef, useCallback } = React;

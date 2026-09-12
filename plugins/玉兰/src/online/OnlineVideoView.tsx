@@ -10,6 +10,7 @@ import { DouyinView } from './DouyinView';
 import { WebviewPlatformView } from './WebviewPlatformView';
 import type { OnlineVideoItem } from './videoPlatforms';
 import { useNativeEngine } from './useNativeEngine';
+import { PlaylistGridRow } from '@shared/OnlineMusicTemplates';
 
 const { useState } = React;
 
@@ -67,19 +68,11 @@ export function OnlineVideoView({ initialPlatformId, onPlayVideo, onExit }: Prop
       platform
         ? React.createElement(PlatformBody, { key: platform.id, platform, onPlayVideo })
         : React.createElement('div', { className: 'flex-1 flex flex-col items-center justify-center gap-6 p-10' },
-            React.createElement('div', { className: 'grid grid-cols-2 gap-4' },
-              videoPlatforms.map((p) =>
-                React.createElement('button', {
-                  key: p.id,
-                  onClick: () => setActiveId(p.id),
-                  className: 'btn-press group relative w-52 h-32 rounded-2xl flex flex-col items-center justify-center gap-2 text-white shadow-lg overflow-hidden',
-                  style: { background: `linear-gradient(135deg, ${p.accent}, ${p.accent}cc)` },
-                },
-                  React.createElement('span', { className: 'text-lg font-semibold drop-shadow' }, p.name),
-                  React.createElement('span', { className: 'text-xs opacity-90 px-3 text-center' }, p.desc),
-                ),
-              ),
-            ),
+            React.createElement(PlaylistGridRow, {
+              items: videoPlatforms.map((p) => ({ id: p.id, name: p.name, coverUrl: undefined, subtitle: p.desc, accent: p.accent })),
+              accent: '#3b82f6',
+              onOpen: (id: string | number) => setActiveId(String(id)),
+            }),
             React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500 max-w-md text-center' }, '点击任一平台进入（默认以官方网页播放器打开；可在上方开关启用「原生视频引擎」以获得去广告播放与嗅探下载能力）'),
           ),
     ),

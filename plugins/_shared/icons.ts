@@ -280,6 +280,14 @@ export function ChevronRightIcon(p: { size?: number }) {
   ] });
 }
 
+export function GlobeIcon(p: { size?: number }) {
+  return SvgEl({ size: p?.size || 18, children: [
+    React.createElement('circle', { key: 'a', cx: '12', cy: '12', r: '9' }),
+    React.createElement('line', { key: 'b', x1: '3', y1: '12', x2: '21', y2: '12' }),
+    React.createElement('path', { key: 'c', d: 'M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z' }),
+  ] });
+}
+
 // ========== 网易云子项区分图标 ==========
 
 export function ListenNowIcon(p: { size?: number }) {
