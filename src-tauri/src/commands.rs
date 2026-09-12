@@ -1965,6 +1965,185 @@ pub async fn download_file(
     Ok(())
 }
 
+// ================= 网络视频嗅探下载 =================
+// 两类：直链（mp4/ts/图片/文件）+ HLS(m3u8→mp4)。对齐音乐模块「前端取链 → Rust 落地」模式，
+// 但视频体积大，上限放宽到 8GB；HLS 走 ffmpeg 转封装（external-deps/全局/ffmpeg/ffmpeg.exe）。
+
+/// 直链视频/图片/文件下载（复用 download_file 流式逻辑，上限 8GB 适配长视频）。
+#[tauri::command]
+pub async fn download_video(
+    app: tauri::AppHandle,
+    url: String,
+    save_path: String,
+    progress_event: Option<String>,
+) -> Result<(), String> {
+    use std::io::Write;
+    use futures_util::StreamExt;
+    const MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(120))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+        .build()
+        .map_err(|e| format!("创建下载客户端失败: {}", e))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("请求下载地址失败: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("下载地址返回状态 {}", resp.status()));
+    }
+    let total = resp.content_length().unwrap_or(0);
+    let path = PathBuf::from(&save_path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut f = fs::File::create(&path).map_err(|e| format!("创建文件失败: {}", e))?;
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    let mut last_emit_bytes: u64 = 0;
+    if let Some(ref ev) = progress_event {
+        let _ = app.emit(ev, serde_json::json!({ "downloaded": 0, "total": total, "speed": 0 }));
+    }
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("读取下载内容失败: {}", e))?;
+        let len = chunk.len() as u64;
+        if downloaded + len > MAX_BYTES {
+            let _ = fs::remove_file(&path);
+            return Err("文件过大，已超过下载上限".to_string());
+        }
+        f.write_all(&chunk).map_err(|e| format!("写入文件失败: {}", e))?;
+        downloaded += len;
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(last_emit).as_millis();
+        if progress_event.is_some() && (elapsed >= 200 || downloaded == total) {
+            let speed = if elapsed > 0 {
+                (downloaded - last_emit_bytes) as f64 / (elapsed as f64 / 1000.0)
+            } else {
+                0.0
+            };
+            if let Some(ref ev) = progress_event {
+                let _ = app.emit(ev, serde_json::json!({ "downloaded": downloaded, "total": total, "speed": speed }));
+            }
+            last_emit = now;
+            last_emit_bytes = downloaded;
+        }
+    }
+    if let Some(ref ev) = progress_event {
+        let _ = app.emit(ev, serde_json::json!({ "downloaded": downloaded, "total": total, "speed": 0 }));
+    }
+    if total > 0 && downloaded != total {
+        let _ = fs::remove_file(&path);
+        return Err("下载中断，文件不完整".to_string());
+    }
+    Ok(())
+}
+
+/// HLS(m3u8) 转封装为 mp4：复用 external-deps 的 ffmpeg.exe 拉取切片并合并。
+/// 适用于嗅探到的 m3u8 流（含加密 key 时依赖同域可访问）。
+#[tauri::command]
+pub async fn download_hls(
+    app: tauri::AppHandle,
+    m3u8_url: String,
+    save_path: String,
+    referer: Option<String>,
+    cookie: Option<String>,
+    progress_event: Option<String>,
+) -> Result<(), String> {
+    let app2 = app.clone();
+    let progress = progress_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        run_ffmpeg_hls(
+            &app2,
+            &m3u8_url,
+            &save_path,
+            referer.as_deref(),
+            cookie.as_deref(),
+            progress.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("ffmpeg 任务失败: {}", e))?
+}
+
+/// 阻塞运行 ffmpeg 转封装（在 spawn_blocking 内执行，避免阻塞 async 线程）。
+fn run_ffmpeg_hls(
+    app: &tauri::AppHandle,
+    m3u8_url: &str,
+    save_path: &str,
+    referer: Option<&str>,
+    cookie: Option<&str>,
+    progress_event: Option<&str>,
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let ffmpeg_dir = get_ffmpeg_dir(app).ok_or_else(|| "未找到 ffmpeg（外部依赖未就绪）".to_string())?;
+    let ffmpeg = ffmpeg_dir.join("ffmpeg.exe");
+    if !ffmpeg.exists() {
+        return Err("ffmpeg.exe 不存在，无法转封装 HLS".to_string());
+    }
+    let path = PathBuf::from(save_path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.arg("-i").arg(m3u8_url).arg("-c").arg("copy").arg("-y").arg(save_path);
+    cmd.arg("-loglevel").arg("error").arg("-stats");
+    let mut headers = String::new();
+    if let Some(r) = referer {
+        headers.push_str(&format!("Referer: {}\r\n", r));
+    }
+    if let Some(c) = cookie {
+        headers.push_str(&format!("Cookie: {}\r\n", c));
+    }
+    headers.push_str("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36\r\n");
+    cmd.arg("-headers").arg(headers);
+    cmd.stdin(Stdio::null());
+    cmd.stderr(Stdio::piped());
+    if let Some(ev) = progress_event {
+        let _ = app.emit(ev, serde_json::json!({ "downloaded": 0, "total": 0, "speed": 0, "phase": "hls" }));
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("启动 ffmpeg 失败: {}", e))?;
+    let mut total_bytes: u64 = 0;
+    if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = [0u8; 4096];
+        let mut acc = String::new();
+        loop {
+            match stderr.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if let Some(pos) = acc.rfind("size=") {
+                        let rest = &acc[pos + 5..];
+                        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                        if let Ok(b) = num.parse::<u64>() {
+                            total_bytes = b;
+                        }
+                    }
+                    if acc.len() > 4096 {
+                        acc = acc[acc.len() - 2048..].to_string();
+                    }
+                    if let Some(ev) = progress_event {
+                        let _ = app.emit(ev, serde_json::json!({ "downloaded": total_bytes, "total": 0, "speed": 0, "phase": "hls" }));
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| format!("等待 ffmpeg 完成失败: {}", e))?;
+    if !status.success() {
+        let _ = fs::remove_file(&path);
+        return Err(format!("ffmpeg 转封装失败 (退出码 {:?})", status.code()));
+    }
+    if let Some(ev) = progress_event {
+        let _ = app.emit(ev, serde_json::json!({ "downloaded": total_bytes, "total": total_bytes, "speed": 0, "phase": "done" }));
+    }
+    Ok(())
+}
+
 // ================= 托盘模式命令 =================
 
 /// 切换托盘模式（启用/禁用点击关闭按钮时隐藏到托盘）

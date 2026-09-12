@@ -1139,6 +1139,9 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             andeyunhui_lib::services::bilibili_proxy::bilibili_request,
             // ========== 音乐下载：前端取链后由 Rust 落地到本地文件 ==========
             download_file,
+            // ========== 网络视频嗅探下载：直链 + HLS(m3u8→mp4) ==========
+            download_video,
+            download_hls,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
             smtc_control,
