@@ -1,77 +1,88 @@
 /// <reference path="../../global.d.ts" />
-// 视频模块 · 网络视频主视图
-// 左侧平台侧栏 + 右侧内容区。内容区无选中平台时显示平台卡片网格；选中后渲染对应平台视图。
-// 原生平台（哔哩哔哩）播放走我们的播放器（onPlayVideo 把 VideoFile 交回 VideoModule）。
+// 网络视频主视图：左侧平台侧栏 + 右侧内容区。
+// 对齐音乐模块「在线音乐」路由：选中平台后覆盖整个主内容区。
+// 原生引擎开关：每平台独立、存设置（useNativeEngine），关 → 降级为网页播放（WebviewPlatformView）。
 import React from 'react';
+import { videoPlatforms, type VideoPlatform } from './videoPlatforms';
 import { OnlineVideoSidebar } from './OnlineVideoSidebar';
-import { VIDEO_PLATFORMS, getVideoPlatform, type OnlineVideoItem } from './videoPlatforms';
-import { CloudIcon, BackIcon } from './onlineIcons';
-import { WebviewPlatformView } from './WebviewPlatformView';
 import { BilibiliView } from './BilibiliView';
 import { DouyinView } from './DouyinView';
+import { WebviewPlatformView } from './WebviewPlatformView';
+import type { OnlineVideoItem } from './videoPlatforms';
+import { useNativeEngine } from './useNativeEngine';
 
 const { useState } = React;
 
 interface Props {
-  initialPlatformId: string | null;
-  /** 把原生播放地址交回主播放器（复用 VideoPlayer + SMTC） */
+  initialPlatformId?: string | null;
   onPlayVideo: (item: OnlineVideoItem) => void;
   onExit: () => void;
 }
 
+function platformBody(platform: VideoPlatform, nativeOn: boolean, onPlayVideo: (item: OnlineVideoItem) => void) {
+  if (platform.id === 'bilibili') {
+    return nativeOn ? React.createElement(BilibiliView, { onPlayVideo }) : React.createElement(WebviewPlatformView, { platform });
+  }
+  if (platform.id === 'douyin') {
+    return nativeOn ? React.createElement(DouyinView, { onPlayVideo }) : React.createElement(WebviewPlatformView, { platform });
+  }
+  // 腾讯/爱奇艺：原生取流受限，恒为网页播放
+  return React.createElement(WebviewPlatformView, { platform });
+}
+
+function PlatformBody({ platform, onPlayVideo }: { platform: VideoPlatform; onPlayVideo: (item: OnlineVideoItem) => void }) {
+  // key={platform.id} 保证切换平台时重新初始化
+  const [nativeOn, setNativeOn] = useNativeEngine(platform.id, platform.nativeEngineDefault ?? false);
+  const nativeSupported = platform.id === 'bilibili' || platform.id === 'douyin';
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(
+      'div',
+      { className: 'shrink-0 flex items-center gap-3 px-4 py-3 border-b border-neutral-200/60 dark:border-stone-700/60 bg-white/70 dark:bg-stone-800/70 backdrop-blur' },
+      React.createElement('div', { className: 'min-w-0' },
+        React.createElement('p', { className: 'text-base font-semibold truncate', style: { color: platform.accent } }, platform.name),
+        React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500 truncate' }, platform.desc),
+      ),
+      React.createElement('div', { className: 'flex items-center gap-2 ml-auto' },
+        nativeSupported
+          ? React.createElement('label', { className: 'flex items-center gap-2 text-xs text-neutral-500 dark:text-stone-400 cursor-pointer select-none' },
+              React.createElement('span', null, '原生视频引擎'),
+              React.createElement('input', { type: 'checkbox', checked: nativeOn, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setNativeOn(e.target.checked), className: 'accent-sky-500 w-4 h-4' }),
+            )
+          : React.createElement('span', { className: 'text-xs text-neutral-400 dark:text-stone-500' }, '原生引擎：暂不支持（DRM 限制，仅网页播放）'),
+      ),
+    ),
+    platformBody(platform, nativeOn, onPlayVideo),
+  );
+}
+
 export function OnlineVideoView({ initialPlatformId, onPlayVideo, onExit }: Props) {
-  const [activeId, setActiveId] = useState<string | null>(initialPlatformId);
+  const [activeId, setActiveId] = useState<string | null>(initialPlatformId ?? null);
+  const platform = videoPlatforms.find((p) => p.id === activeId) || null;
 
-  const active = activeId ? getVideoPlatform(activeId) : undefined;
-
-  const renderMain = () => {
-    if (!active) {
-      // 平台卡片网格
-      return React.createElement('div', { className: 'h-full overflow-y-auto p-6' },
-        React.createElement('h2', { className: 'text-lg font-semibold text-neutral-800 dark:text-stone-100 mb-1' }, '网络视频'),
-        React.createElement('p', { className: 'text-sm text-neutral-400 dark:text-stone-500 mb-6' }, '选择平台开始观看 · 原生平台可去广告播放并下载'),
-        React.createElement('div', { className: 'grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4' },
-          VIDEO_PLATFORMS.map((p) => React.createElement('button', {
-            key: p.id,
-            onClick: () => setActiveId(p.id),
-            className: 'group flex flex-col gap-3 rounded-2xl border border-neutral-200/70 dark:border-stone-700/60 p-5 text-left transition-all hover:shadow-md hover:-translate-y-0.5',
-          },
-            React.createElement('div', { className: 'flex h-12 w-12 items-center justify-center rounded-xl text-white text-lg font-bold', style: { background: p.accent } }, p.name.slice(0, 1)),
-            React.createElement('div', {},
-              React.createElement('p', { className: 'text-base font-semibold text-neutral-800 dark:text-stone-100' }, p.name),
-              React.createElement('p', { className: 'text-xs mt-1 text-neutral-400 dark:text-stone-500' }, p.desc),
-            ),
-          )),
-        ),
-      );
-    }
-
-    // 平台内容区头部（返回网格）
-    const header = React.createElement('div', { className: 'shrink-0 flex items-center gap-2 px-4 py-2.5 border-b border-neutral-200/60 dark:border-stone-700/60' },
-      React.createElement('button', {
-        onClick: () => setActiveId(null),
-        className: 'btn-press p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-stone-700 transition-colors',
-        title: '返回平台列表',
-      }, React.createElement(BackIcon, { size: 16 })),
-      React.createElement(CloudIcon, { size: 16, style: { color: active.accent } }),
-      React.createElement('span', { className: 'text-sm font-medium', style: { color: active.accent } }, active.name),
-    );
-
-    let body: React.ReactNode;
-    if (active.id === 'bilibili') {
-      body = React.createElement(BilibiliView, { onPlayVideo });
-    } else if (active.id === 'douyin') {
-      body = React.createElement(DouyinView, { onPlayVideo });
-    } else {
-      body = React.createElement(WebviewPlatformView, { platform: active });
-    }
-
-    return React.createElement('div', { className: 'absolute inset-0 flex flex-col' }, header, React.createElement('div', { className: 'relative flex-1' }, body));
-  };
-
-  return React.createElement('div', { className: 'relative flex h-full w-full overflow-hidden' },
+  return React.createElement('div', { className: 'absolute inset-0 flex' },
     React.createElement(OnlineVideoSidebar, { activeId, onSelect: setActiveId, onExit }),
-    React.createElement('div', { className: 'relative flex-1 h-full bg-[#f5f5f0] dark:bg-[#1c1917]' }, renderMain()),
+    React.createElement('div', { className: 'relative flex-1 flex flex-col bg-neutral-50 dark:bg-stone-900' },
+      platform
+        ? React.createElement(PlatformBody, { key: platform.id, platform, onPlayVideo })
+        : React.createElement('div', { className: 'flex-1 flex flex-col items-center justify-center gap-6 p-10' },
+            React.createElement('div', { className: 'grid grid-cols-2 gap-4' },
+              videoPlatforms.map((p) =>
+                React.createElement('button', {
+                  key: p.id,
+                  onClick: () => setActiveId(p.id),
+                  className: 'btn-press group relative w-52 h-32 rounded-2xl flex flex-col items-center justify-center gap-2 text-white shadow-lg overflow-hidden',
+                  style: { background: `linear-gradient(135deg, ${p.accent}, ${p.accent}cc)` },
+                },
+                  React.createElement('span', { className: 'text-lg font-semibold drop-shadow' }, p.name),
+                  React.createElement('span', { className: 'text-xs opacity-90 px-3 text-center' }, p.desc),
+                ),
+              ),
+            ),
+            React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500 max-w-md text-center' }, '点击任一平台进入（默认以官方网页播放器打开；可在上方开关启用「原生视频引擎」以获得去广告播放与嗅探下载能力）'),
+          ),
+    ),
   );
 }
 

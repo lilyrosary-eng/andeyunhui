@@ -1,16 +1,12 @@
 /// <reference path="../../global.d.ts" />
 // 抖音 · 特殊视图
 // 抖音无稳定公开 Web API、且播放地址强加密，无法像 B 站那样原生取流。
-// 特殊处理方式：
-//  1) 内嵌网页浏览抖音（用户自行找到想看的视频）；
-//  2) 粘贴抖音「分享链接」→ 在网页内打开；
-//  3) 点「提取当前视频」→ 对内嵌网页执行 eval 读取 <video> 的直链，
-//     若拿到真实 http(s) 地址（非 blob:）则交给我们的播放器去广告播放。
-// 注：抖音多数页面视频为 blob/加密流，提取可能失败，属预期（DRM 限制）。
+// 处理方式：内嵌网页浏览 + 粘贴分享链接打开 + 「提取当前视频」(单视频直链) + 「嗅探」(资源列表多选下载)。
 import React from 'react';
 import { VideoWebview } from './VideoWebview';
 import type { OnlineVideoItem } from './videoPlatforms';
 import { CloudIcon, PlayIcon, GlobeIcon } from './onlineIcons';
+import { SnifferPanel } from './SnifferPanel';
 
 const { useState, useRef, useCallback } = React;
 
@@ -22,6 +18,7 @@ export function DouyinView({ onPlayVideo }: Props) {
   const [shareLink, setShareLink] = useState('');
   const [url, setUrl] = useState('https://www.douyin.com');
   const [note, setNote] = useState<string | null>(null);
+  const [sniffOpen, setSniffOpen] = useState(false);
   const handleRef = useRef<{ evalJs: (code: string) => Promise<string> } | null>(null);
 
   const onReady = useCallback((h: { evalJs: (code: string) => Promise<string> }) => {
@@ -31,7 +28,6 @@ export function DouyinView({ onPlayVideo }: Props) {
   const openShare = () => {
     const link = shareLink.trim();
     if (!link) return;
-    // 兼容 v.douyin.com 短链与 www.douyin.com/video/xxx 长链
     setUrl(link.startsWith('http') ? link : `https://${link}`);
     setNote(null);
   };
@@ -49,7 +45,7 @@ export function DouyinView({ onPlayVideo }: Props) {
       if (!src || src === 'NO_VIDEO') {
         setNote('当前页面未检测到视频元素');
       } else if (src === 'NO_SRC' || src.startsWith('blob:')) {
-        setNote('该视频为加密/blob 流，无法直接提取（抖音 DRM 限制）');
+        setNote('该视频为加密/blob 流，无法直接提取（抖音 DRM 限制），可用「嗅探」尝试抓取页面媒体');
       } else {
         onPlayVideo({ id: `douyin-${Date.now()}`, title: '抖音视频', url: src, meta: { from: 'douyin' } });
         setNote('已提取直链，正在用我们的播放器打开（去广告）');
@@ -85,11 +81,21 @@ export function DouyinView({ onPlayVideo }: Props) {
         className: 'btn-press flex items-center gap-1 px-3 py-1.5 rounded-xl text-sm text-white',
         style: { background: '#fe2c55' },
       }, React.createElement(PlayIcon, { size: 14 }), '提取当前视频'),
+      React.createElement('button', {
+        onClick: () => setSniffOpen(true),
+        className: 'btn-press flex items-center gap-1 px-3 py-1.5 rounded-xl text-sm text-white',
+        style: { background: '#00bcd4' },
+      }, React.createElement(GlobeIcon, { size: 14 }), '嗅探'),
     ),
     note && React.createElement('div', { className: 'shrink-0 px-4 py-1.5 text-xs text-amber-600 dark:text-amber-400 bg-amber-50/60 dark:bg-amber-950/30' }, note),
     React.createElement('div', { className: 'relative flex-1' },
       React.createElement(VideoWebview, { label: 'video-webview-douyin', url, onReady }),
     ),
+    sniffOpen && React.createElement(SnifferPanel, {
+      evalJs: (c: string) => (handleRef.current ? handleRef.current.evalJs(c) : Promise.reject(new Error('网页尚未就绪'))),
+      referer: 'https://www.douyin.com',
+      onClose: () => setSniffOpen(false),
+    }),
   );
 }
 

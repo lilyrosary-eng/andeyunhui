@@ -24,10 +24,12 @@ export interface VideoPlatform {
   desc: string;
   /** 是否能下载（native 通常能；webview/special 视情况） */
   downloadable: boolean;
+  /** 原生视频引擎默认开关（存设置，按平台预设；用户可在平台视图里改） */
+  nativeEngineDefault?: boolean;
 }
 
 export interface OnlineVideoItem {
-  id: string;            // bvid / 视频 id
+  id: string; // bvid / 视频 id
   title: string;
   author?: string;
   cover?: string;
@@ -48,6 +50,7 @@ export const VIDEO_PLATFORMS: VideoPlatform[] = [
     accentDark: '#fc9bbb',
     desc: '原生搜索 · 去广告播放 · 可下载',
     downloadable: true,
+    nativeEngineDefault: true,
   },
   {
     id: 'douyin',
@@ -58,6 +61,7 @@ export const VIDEO_PLATFORMS: VideoPlatform[] = [
     accentDark: '#3a3a44',
     desc: '网页浏览 + 提取视频',
     downloadable: false,
+    nativeEngineDefault: false,
   },
   {
     id: 'tencent',
@@ -68,6 +72,7 @@ export const VIDEO_PLATFORMS: VideoPlatform[] = [
     accentDark: '#ff9d40',
     desc: '内嵌网页观看（DRM，无法原生取流）',
     downloadable: false,
+    nativeEngineDefault: false,
   },
   {
     id: 'iqiyi',
@@ -78,8 +83,12 @@ export const VIDEO_PLATFORMS: VideoPlatform[] = [
     accentDark: '#3fd443',
     desc: '内嵌网页观看（DRM，无法原生取流）',
     downloadable: false,
+    nativeEngineDefault: false,
   },
 ];
+
+// 小写别名，兼容既有引用（与音乐模块风格保持一致，也便于在线视图统一调用）
+export const videoPlatforms = VIDEO_PLATFORMS;
 
 export function getVideoPlatform(id: string): VideoPlatform | undefined {
   return VIDEO_PLATFORMS.find((p) => p.id === id);

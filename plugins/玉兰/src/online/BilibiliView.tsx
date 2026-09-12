@@ -2,7 +2,7 @@
 // 哔哩哔哩原生视图：搜索 → 取真实播放地址 → 我们的播放器（去广告）；支持下载。
 import React from 'react';
 import { searchBili, resolveBili, type BiliSearchResult } from './bilibiliApi';
-import { bilibiliDownloadManager, BILIBILI_DOWNLOAD_DIR_KEY, type BilibiliDownloadItem } from './BilibiliDownloadManager';
+import { videoDownloadManager, VIDEO_DOWNLOAD_DIR_KEY, type VideoDownloadTask } from './OnlineVideoDownloadManager';
 import type { OnlineVideoItem } from './videoPlatforms';
 import { SearchIcon, PlayIcon, DownloadIcon, CloudIcon } from './onlineIcons';
 
@@ -26,11 +26,11 @@ export function BilibiliView({ onPlayVideo }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [qn, setQn] = useState(80);
   const [showDownloads, setShowDownloads] = useState(false);
-  const [dlQueue, setDlQueue] = useState<BilibiliDownloadItem[]>([]);
-  const [dlDir, setDlDir] = useState(localStorage.getItem(BILIBILI_DOWNLOAD_DIR_KEY) || '');
+  const [dlQueue, setDlQueue] = useState<VideoDownloadTask[]>([]);
+  const [dlDir, setDlDir] = useState(localStorage.getItem(VIDEO_DOWNLOAD_DIR_KEY) || '');
 
   useEffect(() => {
-    const unsub = bilibiliDownloadManager.subscribe(setDlQueue);
+    const unsub = videoDownloadManager.subscribe(setDlQueue);
     return unsub;
   }, []);
 
@@ -72,7 +72,7 @@ export function BilibiliView({ onPlayVideo }: Props) {
       alert('请先设置下载目录（右上角「目录」）');
       return;
     }
-    bilibiliDownloadManager.enqueue([item], qn);
+    videoDownloadManager.enqueue([{ title: item.title, url: item.id, kind: 'bili', subDir: '来自哔哩哔哩' }]);
     setShowDownloads(true);
   };
 
@@ -80,13 +80,13 @@ export function BilibiliView({ onPlayVideo }: Props) {
     try {
       const r = await (window as any).__HOST_API__?.invoke?.('open_download_dir_dialog', {});
       if (r) {
-        localStorage.setItem(BILIBILI_DOWNLOAD_DIR_KEY, r);
+        localStorage.setItem(VIDEO_DOWNLOAD_DIR_KEY, r);
         setDlDir(r);
       }
     } catch {
       const v = prompt('输入下载目录（视频将存到 <目录>/来自哔哩哔哩/）：');
       if (v) {
-        localStorage.setItem(BILIBILI_DOWNLOAD_DIR_KEY, v);
+        localStorage.setItem(VIDEO_DOWNLOAD_DIR_KEY, v);
         setDlDir(v);
       }
     }
