@@ -38,9 +38,12 @@ export function VideoWebview({ label, url, onReady }: VideoWebviewProps) {
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
         const main = getCurrentWindow();
-        const pos = await main.outerPosition();
-        const sx = pos.x + Math.round(rect.left);
-        const sy = pos.y + Math.round(rect.top);
+        const dpr = await main.scaleFactor();
+        const outer = await main.outerPosition();
+        // overlay 浮窗 .position() 接收逻辑坐标（Tauri 会 ×scaleFactor 转物理）。
+        // outerPosition 是物理像素，须先 /dpr 还原逻辑，再加内容区视口逻辑坐标 rect。
+        const sx = outer.x / dpr + rect.left;
+        const sy = outer.y / dpr + rect.top;
         const win = await ensureOverlayWindow(label, url, {
           x: sx,
           y: sy,
@@ -50,7 +53,7 @@ export function VideoWebview({ label, url, onReady }: VideoWebviewProps) {
           shadow: false,
           transparent: false,
           skipTaskbar: true,
-          alwaysOnTop: false,
+          alwaysOnTop: true,
           resizable: false,
         });
         if (disposed) {
@@ -85,8 +88,9 @@ export function VideoWebview({ label, url, onReady }: VideoWebviewProps) {
       if (!win || !rect) return;
       try {
         const main = getCurrentWindow();
-        const pos = await main.outerPosition();
-        await win.setPosition(new LogicalPosition(pos.x + Math.round(rect.left), pos.y + Math.round(rect.top)));
+        const dpr = await main.scaleFactor();
+        const outer = await main.outerPosition();
+        await win.setPosition(new LogicalPosition(outer.x / dpr + rect.left, outer.y / dpr + rect.top));
       } catch { /* 忽略同步失败 */ }
     });
     ro.observe(el);
