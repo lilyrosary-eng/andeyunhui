@@ -58,23 +58,23 @@ impl ResponseAssessment {
             let key = k.to_lowercase();
             match key.as_str() {
                 "cf-ray" => {
+                    // 仅标记 CDN 身份：cf-ray 在 Cloudflare 后端的每一次正常响应都会带，
+                    // 不代表请求被拦截（真正的拦截由 4xx 状态码 + 挑战页 body 特征判定）
                     is_cloudflare = true;
-                    challenge = Some("cf-ray".to_string());
                 }
                 "x-datadome" => {
                     is_datadome = true;
-                    challenge = Some("x-datadome".to_string());
                 }
                 _ => {}
             }
-            if key == "set-cookie" && v.contains("_abck") {
-                challenge = Some("akamai-abck".to_string());
-            }
+            // _abck 仅为 Akamai 打点 cookie，同样不作为挑战证据
         }
 
         let body_lower = body_preview.to_lowercase();
         let is_captcha = body_lower.contains("captcha") || body_lower.contains("recaptcha");
-        let is_empty = body_preview.trim().len() < 200 && status == 200;
+        // 空壳判定：只有响应内容近空（<64 字节）才算蜜罐/空页，
+        // 避免误伤小型静态页（如 landing page / 单页应用壳）
+        let is_empty = body_preview.trim().len() < 64 && status == 200;
 
         if is_captcha {
             challenge = Some("captcha".to_string());
