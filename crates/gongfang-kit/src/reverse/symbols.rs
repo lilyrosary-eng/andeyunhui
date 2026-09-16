@@ -245,7 +245,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gongfang_symbols_test_{}", std::process::id()));
         let path = dir.join("symbols.json");
         let mut store = SymbolStore::new();
-        store.record_crypto("target-a", "AES-256-CBC");
+        store.record_crypto("target-a", "AES-256-CBC".to_string());
         store.persist(&path).expect("写盘应成功");
 
         let loaded = load_symbol_file(&path).expect("应加载成功");

@@ -213,6 +213,7 @@ pub struct WafDetectResult {
 /// WAF 指纹检测
 #[tauri::command]
 pub async fn gongfang_waf_detect(url: String) -> Result<WafDetectResult, String> {
+    let url = crate::normalize_url(&url);
     if url.trim().is_empty() {
         return Err("url 不能为空".to_string());
     }
@@ -242,6 +243,7 @@ pub async fn gongfang_waf_detect(url: String) -> Result<WafDetectResult, String>
 /// 技术栈指纹识别（服务器/语言/框架/CMS/CDN + 安全响应头审计）
 #[tauri::command]
 pub async fn gongfang_tech_fingerprint(url: String) -> Result<TechFpOut, String> {
+    let url = crate::normalize_url(&url);
     if url.trim().is_empty() {
         return Err("url 不能为空".to_string());
     }
@@ -261,6 +263,7 @@ pub async fn gongfang_tech_fingerprint(url: String) -> Result<TechFpOut, String>
 /// HTTP 方法枚举（OPTIONS→Allow 头解析；无 Allow 则常见方法探测）+ 风险标记
 #[tauri::command]
 pub async fn gongfang_http_methods(url: String) -> Result<MethodReportOut, String> {
+    let url = crate::normalize_url(&url);
     if url.trim().is_empty() {
         return Err("url 不能为空".to_string());
     }
@@ -308,6 +311,7 @@ pub async fn gongfang_http_methods(url: String) -> Result<MethodReportOut, Strin
 /// 常见敏感路径探测
 #[tauri::command]
 pub async fn gongfang_path_probe(url: String) -> Result<PathProbeOut, String> {
+    let url = crate::normalize_url(&url);
     if url.trim().is_empty() {
         return Err("url 不能为空".to_string());
     }
@@ -349,6 +353,7 @@ pub async fn gongfang_path_probe(url: String) -> Result<PathProbeOut, String> {
 /// RFC 8615 `/.well-known/` 端点发现（security.txt / openid-config / jwks 等）
 #[tauri::command]
 pub async fn gongfang_wellknown_probe(url: String) -> Result<PathProbeOut, String> {
+    let url = crate::normalize_url(&url);
     if url.trim().is_empty() {
         return Err("url 不能为空".to_string());
     }
@@ -390,6 +395,7 @@ pub async fn gongfang_wellknown_probe(url: String) -> Result<PathProbeOut, Strin
 /// 错误页指纹：请求一个低碰撞路径触发 404/500，从错误页特征识别服务器/框架
 #[tauri::command]
 pub async fn gongfang_error_page(url: String) -> Result<ErrorPageOut, String> {
+    let url = crate::normalize_url(&url);
     if url.trim().is_empty() {
         return Err("url 不能为空".to_string());
     }
@@ -543,6 +549,7 @@ pub struct FetchResult {
 /// 这是"对话即攻防"的核心：用户输入 URL，AI 调用 fetch，返回真实数据
 #[tauri::command]
 pub async fn gongfang_fetch(url: String) -> Result<FetchResult, String> {
+    let url = crate::normalize_url(&url);
     if url.trim().is_empty() {
         return Err("url 不能为空".to_string());
     }

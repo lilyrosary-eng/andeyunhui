@@ -238,9 +238,11 @@ pub async fn execute_recon(s: &Strategy, reward: &Arc<RewardSignal>) {
         if !focus.is_empty() && cur.as_deref() != Some(focus.as_str()) {
             let mut q = queue();
             q.clear();
-            q.enqueue(&focus, 0);
-            log::info!("[crawler] 播种 seed 重启队列: {} (QPS={})", focus, s.qps);
-            *cur = Some(focus);
+            // URL 规范化：裸域/无 scheme 的 focus 自动补 https://，避免 reqwest builder error
+            let seed = crate::normalize_url(&focus);
+            q.enqueue(&seed, 0);
+            log::info!("[crawler] 播种 seed 重启队列: {} (QPS={})", seed, s.qps);
+            *cur = Some(seed);
         }
     }
 
@@ -274,7 +276,9 @@ pub async fn execute_recon(s: &Strategy, reward: &Arc<RewardSignal>) {
 
 /// 抓取单个 URL：记录奖励/态势，提取标题与同域链接并递归入队，推送 CrawlResult 事件。
 /// 若代理池有存活代理则经由代理请求；403/429/5xx/网络错误会将该代理标记为死亡。
-async fn crawl_fetch(url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSignal>) -> bool {
+async fn crawl_fetch(raw_url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSignal>) -> bool {
+    // URL 规范化兜底：队列中可能混入裸域/相对链接，统一补 scheme 后再请求
+    let url = crate::normalize_url(raw_url);
     let ua = stealth::user_agent(&s.tls_profile);
 
     // 代理池轮转：有存活代理则走代理，否则直连
@@ -295,14 +299,14 @@ async fn crawl_fetch(url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSig
         }
     };
 
-    let resp = match client.get(url).header("User-Agent", ua).send().await {
+    let resp = match client.get(&url).header("User-Agent", ua).send().await {
         Ok(r) => r,
         Err(e) => {
             if proxy.is_some() {
                 crate::crawler::pool::pool().mark_dead(&proxy.as_ref().unwrap().url);
             }
             reward.record(EventKind::Timeout);
-            emit_result(url, 0, None, 0, false, Some(e.to_string()));
+            emit_result(&url, 0, None, 0, false, Some(e.to_string()));
             log::warn!("[crawler] {} via {:?} 失败: {}", url, proxy.as_ref().map(|p| p.url.as_str()), e);
             return false;
         }
@@ -349,7 +353,7 @@ async fn crawl_fetch(url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSig
 
     // 提取标题 + 同域链接，深度内递归入队
     let title = extract_title(&body);
-    let links = extract_same_domain_links(&body, url);
+    let links = extract_same_domain_links(&body, &url);
     if !links.is_empty() {
         let mut q = queue();
         for link in &links {
@@ -363,7 +367,7 @@ async fn crawl_fetch(url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSig
         );
     }
 
-    emit_result(url, status, title, links.len(), true, None);
+    emit_result(&url, status, title, links.len(), true, None);
     true
 }
 

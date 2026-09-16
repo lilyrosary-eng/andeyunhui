@@ -213,9 +213,11 @@ impl ControlPlane {
                 });
             }
             UserCommand::Focus { url } => {
+                // URL 规范化：裸域/无 scheme 的 focus 自动补 https://，避免数据面 reqwest builder error
+                let incoming = crate::normalize_url(&url);
                 return Some(StrategyDelta {
                     phase: Some(Phase::Recon),
-                    focus_url: Some(Some(url.clone())),
+                    focus_url: Some(Some(incoming)),
                     ..Default::default()
                 });
             }
