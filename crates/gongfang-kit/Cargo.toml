@@ -35,7 +35,7 @@ full = ["crawler-browser", "reverse", "pentest", "automation", "gateway"]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "rt", "macros", "time", "process", "fs"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time", "process", "fs", "net", "io-util"] }
 log = "0.4"
 # TLS 后端统一为 rustls（纯 Rust，跨平台、无原生 OpenSSL 依赖）：
 # 与 app 的 reqwest 配置保持一致。原默认特性含 native-tls，在 Android/Linux 目标下
