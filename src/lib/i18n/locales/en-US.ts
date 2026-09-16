@@ -1070,6 +1070,7 @@ export const enUS: Record<string, string> = {
   'image.settings.dirs': 'Image root folders',
   'image.settings.noDirs': 'No folders added yet',
   'image.settings.scanned': 'Scanned {folders} folders, {albums} custom albums',
+  'image.settings.rememberProgress': 'Remember reading position (restore on reopen)',
   // Sidebar
   'image.sidebar.scanning': 'Scanning...',
   'image.sidebar.noFolders': 'No folders yet',
@@ -1090,6 +1091,7 @@ export const enUS: Record<string, string> = {
   'image.viewer.noImages': 'This folder has no images',
   'image.viewer.loadFailed': 'Failed to load image',
   'image.viewer.full': 'Full',
+  'image.viewer.jumpHint': 'Click to enter a page number',
   'image.viewer.vertical': 'Vertical',
   'image.viewer.hForward': 'Horizontal Fwd',
   'image.viewer.hReverse': 'Horizontal Rev',

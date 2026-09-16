@@ -1072,6 +1072,7 @@ export const deDE: Record<string, string> = {
   'image.settings.dirs': 'Bild-Stammordner',
   'image.settings.noDirs': 'Noch keine Ordner hinzugefügt',
   'image.settings.scanned': '{folders} Ordner, {albums} benutzerdefinierte Alben gescannt',
+  'image.settings.rememberProgress': 'Leseposition merken (beim erneuten Öffnen wiederherstellen)',
   // Seitenleiste
   'image.sidebar.scanning': 'Scanne...',
   'image.sidebar.noFolders': 'Noch keine Ordner',
@@ -1092,6 +1093,7 @@ export const deDE: Record<string, string> = {
   'image.viewer.noImages': 'Dieser Ordner enthält keine Bilder',
   'image.viewer.loadFailed': 'Bild konnte nicht geladen werden',
   'image.viewer.full': 'Voll',
+  'image.viewer.jumpHint': 'Klicken, um eine Seitenzahl einzugeben',
   'image.viewer.vertical': 'Vertikal',
   'image.viewer.hForward': 'Horizontal vor',
   'image.viewer.hReverse': 'Horizontal rück',

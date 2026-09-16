@@ -42,6 +42,10 @@ function ImageModule() {
   const [rescanCounter, setRescanCounter] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  // 记住浏览进度（图库级，localStorage 持久化；与视频/阅读的进度记录同款模式）
+  const [rememberProgress, setRememberProgress] = useState<boolean>(() => {
+    try { return localStorage.getItem('image.rememberProgress') === '1'; } catch { return false; }
+  });
   // 以安得云荟打开 / 拖入：定位打开的图片 + 强制重挂载查看器
   const [openWithInitialPath, setOpenWithInitialPath] = useState<string | null>(null);
   const [openWithNonce, setOpenWithNonce] = useState(0);
@@ -313,7 +317,22 @@ function ImageModule() {
                 ),
               ),
               React.createElement('div', { className: 'glass-panel p-4' },
-                React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500' },
+                React.createElement('div', { className: 'flex items-center justify-between gap-3' },
+                  React.createElement('span', { className: 'text-xs text-neutral-500 dark:text-stone-400' }, T('image.settings.rememberProgress')),
+                  React.createElement('button', {
+                    onClick: () => {
+                      const next = !rememberProgress;
+                      try { localStorage.setItem('image.rememberProgress', next ? '1' : '0'); } catch { /* ignore */ }
+                      setRememberProgress(next);
+                    },
+                    className: `relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${rememberProgress ? 'bg-[var(--element-bg)]' : 'bg-neutral-300 dark:bg-stone-600'}`,
+                  },
+                    React.createElement('span', {
+                      className: `absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${rememberProgress ? 'translate-x-4' : ''}`,
+                    }),
+                  ),
+                ),
+                React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500 mt-2' },
                   T('image.settings.scanned', { folders: folders.length, albums: customAlbums.length })
                 ),
               ),

@@ -45,6 +45,8 @@ const ALLOWED_COMMANDS = new Set([
   'pick_directory',
   'pick_file',
   'get_folder_images',
+  // 图片模块：缩略图生成（200px JPEG，磁盘缓存复用）。漏加会导致缩略图条全白（invoke 被拦截且被 .catch 吞错）
+  'generate_thumbnail',
   // 音乐模块
   'load_music_cache',
   'get_dir_mtime',

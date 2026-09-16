@@ -1072,6 +1072,7 @@ export const zhTW: Record<string, string> = {
   'image.settings.dirs': '圖片根目錄',
   'image.settings.noDirs': '尚未新增任何資料夾',
   'image.settings.scanned': '已掃描 {folders} 個資料夾，{albums} 個自訂相簿',
+  'image.settings.rememberProgress': '記住瀏覽進度（重新開啟時恢復位置）',
   // 側邊欄
   'image.sidebar.scanning': '掃描中...',
   'image.sidebar.noFolders': '暫無資料夾',
@@ -1092,6 +1093,7 @@ export const zhTW: Record<string, string> = {
   'image.viewer.noImages': '該資料夾沒有圖片',
   'image.viewer.loadFailed': '圖片載入失敗',
   'image.viewer.full': '完整',
+  'image.viewer.jumpHint': '點擊輸入頁碼跳轉',
   'image.viewer.vertical': '直式',
   'image.viewer.hForward': '橫式正',
   'image.viewer.hReverse': '橫式反',

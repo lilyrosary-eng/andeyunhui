@@ -1072,6 +1072,7 @@ export const koKR: Record<string, string> = {
   'image.settings.dirs': '이미지 루트 폴더',
   'image.settings.noDirs': '아직 추가된 폴더가 없습니다',
   'image.settings.scanned': '폴더 {folders}개, 사용자 정의 앨범 {albums}개 스캔',
+  'image.settings.rememberProgress': '열람 위치 기억(다시 열 때 복원)',
   // 사이드바
   'image.sidebar.scanning': '스캔 중...',
   'image.sidebar.noFolders': '폴더가 아직 없습니다',
@@ -1092,6 +1093,7 @@ export const koKR: Record<string, string> = {
   'image.viewer.noImages': '이 폴더에 이미지가 없습니다',
   'image.viewer.loadFailed': '이미지 로드 실패',
   'image.viewer.full': '전체',
+  'image.viewer.jumpHint': '클릭하여 페이지 번호 입력 후 이동',
   'image.viewer.vertical': '세로',
   'image.viewer.hForward': '가로 정방향',
   'image.viewer.hReverse': '가로 역방향',

@@ -1071,6 +1071,7 @@ export const frFR: Record<string, string> = {
   'image.settings.dirs': 'Dossiers racine des images',
   'image.settings.noDirs': 'Aucun dossier ajouté pour l\'instant',
   'image.settings.scanned': '{folders} dossiers, {albums} albums personnalisés analysés',
+  'image.settings.rememberProgress': "Mémoriser la position (restaurée à la réouverture)",
   // Barre latérale
   'image.sidebar.scanning': 'Analyse...',
   'image.sidebar.noFolders': 'Aucun dossier pour l\'instant',
@@ -1091,6 +1092,7 @@ export const frFR: Record<string, string> = {
   'image.viewer.noImages': 'Ce dossier ne contient aucune image',
   'image.viewer.loadFailed': 'Échec du chargement de l\'image',
   'image.viewer.full': 'Complet',
+  'image.viewer.jumpHint': 'Cliquez pour saisir un numéro de page',
   'image.viewer.vertical': 'Vertical',
   'image.viewer.hForward': 'Horizontal avant',
   'image.viewer.hReverse': 'Horizontal arrière',

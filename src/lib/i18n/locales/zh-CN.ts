@@ -1176,6 +1176,7 @@ export const zhCN: Record<string, string> = {
   'image.settings.dirs': '图片根目录',
   'image.settings.noDirs': '尚未添加任何文件夹',
   'image.settings.scanned': '已扫描 {folders} 个文件夹，{albums} 个自定义相册',
+  'image.settings.rememberProgress': '记住浏览进度（重新打开时恢复位置）',
   // 侧边栏
   'image.sidebar.scanning': '扫描中...',
   'image.sidebar.noFolders': '暂无文件夹',
@@ -1196,6 +1197,7 @@ export const zhCN: Record<string, string> = {
   'image.viewer.noImages': '该文件夹没有图片',
   'image.viewer.loadFailed': '图片加载失败',
   'image.viewer.full': '完整',
+  'image.viewer.jumpHint': '点击输入页码跳转',
   'image.viewer.vertical': '竖版',
   'image.viewer.hForward': '横版正',
   'image.viewer.hReverse': '横版反',

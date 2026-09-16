@@ -2657,9 +2657,13 @@ pub fn get_folder_images(folder_path: String) -> Result<Vec<String>, String> {
 }
 
 /// 生成缩略图（200px 宽 JPEG，首次生成后缓存复用）
+/// 异步 + spawn_blocking：图像解码/编码是 CPU 密集操作，同步命令会在主线程执行，
+/// 大文件夹批量生成缩略图时会直接把 UI 卡死。
 #[tauri::command]
-pub fn generate_thumbnail(app: tauri::AppHandle, image_path: String, width: u32) -> Result<String, String> {
-    image_service::generate_thumbnail(&app, &image_path, width)
+pub async fn generate_thumbnail(app: tauri::AppHandle, image_path: String, width: u32) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || image_service::generate_thumbnail(&app, &image_path, width))
+        .await
+        .map_err(|e| format!("缩略图任务失败: {e}"))?
 }
 
 /// 打开目录选择对话框，返回选中的路径（用户取消时返回 None）

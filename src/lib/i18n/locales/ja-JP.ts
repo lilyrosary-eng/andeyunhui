@@ -1072,6 +1072,7 @@ export const jaJP: Record<string, string> = {
   'image.settings.dirs': '画像ルートフォルダ',
   'image.settings.noDirs': 'フォルダがまだ追加されていません',
   'image.settings.scanned': '{folders} 個のフォルダ、{albums} 個のカスタムアルバムをスキャン',
+  'image.settings.rememberProgress': '閲覧位置を記憶する（再開時に復元）',
   // サイドバー
   'image.sidebar.scanning': 'スキャン中...',
   'image.sidebar.noFolders': 'フォルダがまだありません',
@@ -1092,6 +1093,7 @@ export const jaJP: Record<string, string> = {
   'image.viewer.noImages': 'このフォルダには画像がありません',
   'image.viewer.loadFailed': '画像の読み込みに失敗しました',
   'image.viewer.full': '全体',
+  'image.viewer.jumpHint': 'クリックでページ番号を入力して移動',
   'image.viewer.vertical': '縦',
   'image.viewer.hForward': '横・正',
   'image.viewer.hReverse': '横・逆',
