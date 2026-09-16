@@ -286,7 +286,7 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     const api = getRoamSourceApi(source);
     if (first) {
       const t0 = batch[startIndex] ?? batch[0];
-      const urlRes = await api.getSongUrl(t0).catch(() => ({ url: '' }));
+      const urlRes = await api.getSongUrl(t0).catch((): { url: string; br?: number } => ({ url: '' }));
       const playlist: PlayableTrack[] = batch.map((t, i) => (i === startIndex && urlRes.url) ? roamToPlayable(t, urlRes.url, urlRes.br ? `${urlRes.br}` : '') : roamToPlayable(t, ''));
       onPlayRef.current(playlist, startIndex, '漫游电台');
       const tempId = `roam-${Date.now()}`;
@@ -328,7 +328,7 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
   const startRoamWithFirst = useCallback(async (first: RoamSeedTrack[], req: number) => {
     const api = getRoamSourceApi(source);
-    const urlRes = await api.getSongUrl(first[0]).catch(() => ({ url: '' }));
+    const urlRes = await api.getSongUrl(first[0]).catch((): { url: string; br?: number } => ({ url: '' }));
     const playlist: PlayableTrack[] = [roamToPlayable(first[0], urlRes.url, urlRes.br ? `${urlRes.br}` : '')];
     slideRoamWindow(first, first[0].id);
     setLoading(false);
@@ -791,14 +791,14 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
               </p>
               {/* 当前行下方：按「译/音」模式显示翻译/音译小字 */}
               {themeMode !== 'preset' && lyricMode !== 'off' && curSub && (
-                <p style={{ fontWeight: 300, fontSize: `clamp(9px, ${0.72 * scaleFactor}vw, ${Math.round(11 * scaleFactor)}px)`, letterSpacing: '0.06em', color: inkSoft, opacity: 0.72, textShadow: glow, lineHeight: 1.2, margin: 0 }}>{curSub}</p>
+                <p style={{ fontWeight: 300, fontSize: `clamp(9px, ${0.72 * scaleFactor}vw, ${Math.round(11 * scaleFactor)}px)`, letterSpacing: '0.06em', color: inkSoft, opacity: 0.72, textShadow: glow, lineHeight: 1.2, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{curSub}</p>
               )}
               <p style={{ fontWeight: 300, fontSize: `clamp(10px, ${0.9 * scaleFactor}vw, ${Math.round(13 * scaleFactor)}px)`, letterSpacing: '0.08em', color: inkSoft, textShadow: glow, lineHeight: 1.2, margin: 0 }}>
                 {lyricLine2}
               </p>
               {/* 下一行下方：按「译/音」模式显示翻译/音译小字 */}
               {themeMode !== 'preset' && lyricMode !== 'off' && nextSub && (
-                <p style={{ fontWeight: 300, fontSize: `clamp(9px, ${0.72 * scaleFactor}vw, ${Math.round(11 * scaleFactor)}px)`, letterSpacing: '0.06em', color: inkSoft, opacity: 0.72, textShadow: glow, lineHeight: 1.2, margin: 0 }}>{nextSub}</p>
+                <p style={{ fontWeight: 300, fontSize: `clamp(9px, ${0.72 * scaleFactor}vw, ${Math.round(11 * scaleFactor)}px)`, letterSpacing: '0.06em', color: inkSoft, opacity: 0.72, textShadow: glow, lineHeight: 1.2, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{nextSub}</p>
               )}
             </div>
 

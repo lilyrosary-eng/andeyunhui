@@ -146,7 +146,7 @@ const neteaseApi: RoamSourceApi = {
   },
   async getSongUrl(track: RoamSeedTrack) {
     // track.id 格式为 netease-{数字}
-    const nid = track.id.replace(/^netease-/, '');
+    const nid = Number(track.id.replace(/^netease-/, ''));
     const r = await neteaseGetSongUrl(nid);
     return { url: r.url || '', br: r.br };
   },
@@ -254,7 +254,7 @@ const linglanApi: RoamSourceApi = {
     const api = (window as any).__HOST_API__;
     if (!fp || !api?.invoke) return null;
     try {
-      const res = await api.invoke<{ text: string; source: string }>('get_lyrics_text', { trackPath: fp });
+      const res = await api.invoke('get_lyrics_text', { trackPath: fp }) as { text: string; source: string } | null;
       if (!res?.text) return null;
       const lines = parseLrc(res.text);
       // 内嵌歌词常把「外语原文 + 中文翻译」写在同一行，拆出翻译挂到 translation

@@ -94,14 +94,14 @@ function TransferTab() {
 
           {stagedOpen && staged.length > 0 && (
             <div
-              className="absolute left-0 right-0 top-full mt-1 rounded-xl border border-white/20 dark:border-stone-700/50 bg-white dark:bg-stone-800 shadow-xl p-1.5 max-h-44 overflow-y-auto"
+              className="absolute left-0 right-0 top-full mt-1 rounded-xl border border-white/20 dark:border-stone-700/50 bg-white dark:bg-stone-800 shadow-xl p-1.5 max-h-[144px] overflow-y-auto"
               style={{ zIndex: 15 }}
               onClick={(e) => e.stopPropagation()}
             >
               {staged.map((p) => {
                 const name = p.split(/[/]/).pop() || p;
                 return (
-                  <div key={p} className="flex items-center gap-2 px-2 py-1 rounded-lg" title={p}>
+                  <div key={p} className="flex items-center gap-2 px-2 h-6 rounded-lg" title={p}>
                     <span className="flex-1 min-w-0 text-xs text-neutral-600 dark:text-stone-300 truncate">{name}</span>
                     <button onClick={() => setStaged((prev) => { const next = prev.filter((x) => x !== p); if (next.length === 0) setStagedOpen(false); return next; })} className="shrink-0 text-neutral-400 hover:text-red-500 w-4 h-4 flex items-center justify-center">×</button>
                   </div>
@@ -166,7 +166,7 @@ function TransferTab() {
         <div className="absolute inset-0 bg-black/20 flex items-center justify-center z-20" onClick={() => setConfirmPeer(null)}>
           <div className="bg-white dark:bg-stone-800 rounded-xl p-5 w-72 shadow-xl border border-white/20 dark:border-stone-700/50" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100">发送给「{confirmPeer.alias}」？</h3>
-            <p className="text-xs text-neutral-500 dark:text-stone-400 mt-2">
+            <p className="text-xs text-neutral-500 dark:text-stone-400 mt-2 max-h-[144px] overflow-y-auto break-all">
               共 {staged.length} 个文件（{staged.map((p) => p.split(/[/]/).pop()).join('、')}）
             </p>
             <div className="flex gap-2 justify-end mt-4">

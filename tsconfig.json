@@ -17,6 +17,8 @@
     "noFallthroughCasesInSwitch": true,
     "paths": {
       "@/*": ["./src/*"],
+      "@shared/*": ["./plugins/_shared/*"],
+      "@shared": ["./plugins/_shared"],
       "@tiptap/core": ["./node_modules/@tiptap/core"],
       "@tiptap/pm": ["./node_modules/@tiptap/pm"]
     },

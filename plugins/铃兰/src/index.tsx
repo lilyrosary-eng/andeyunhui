@@ -24,9 +24,10 @@ import NeteaseSettingsPanel from './NeteaseSettingsPanel';
 import KugouStatsView from './KugouStatsView';
 import KugouSettingsPanel from './KugouSettingsPanel';
 import { isLikedPlaylist, likeNeteaseSong, downloadNeteaseTrack, searchSongs as neteaseSearchSongs, neteaseGetLyric, type NeteasePlaylistItem, type NeteaseProfile } from './neteaseApi';
-import { searchSongs as kugouSearchSongs, getLyric as kugouGetLyric } from './kugouApi';
+import { searchSongs as kugouSearchSongs, getLyric as kugouGetLyric, getFavorites, addKugouFavorite, removeKugouFavorite, type KugouAuth } from './kugouApi';
+import { readKugouAuth } from './kugouAuth';
 import type { LyricLine } from './lyricsSync';
-import type { TrackMetaCandidate } from './TrackList';
+import type { TrackMetaCandidate, LyricCandidate } from './TrackList';
 import { NETEASE_DOWNLOAD_DIR_KEY } from './NeteaseDownloadManager';
 import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import { useRootPaths, useBlacklist, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
@@ -304,6 +305,10 @@ async function resumeLastPosition(selected: Playlist | null) {
     if (!lastId) return;
     const idx = selected.tracks.findIndex((t) => trackIdOf(t) === lastId);
     if (idx < 0) return;
+    // 关键修复：若播放器当前已加载同一首歌（如切到其它模块再切回音乐模块时），
+    // 不打断正在进行的播放、也不把进度回退到上次保存点（resumeLastPosition 由模块挂载触发）。
+    const cur = musicPlayer.getCurrentTrack();
+    if (cur && trackIdOf(cur) === lastId) return;
     const posStr = (await hostApi.invoke<string | null>('music_get_player_state', { key: 'position' })) || '0';
     const pos = parseInt(posStr, 10);
     if (!isFinite(pos) || pos <= 5) return;
@@ -1046,6 +1051,18 @@ function MusicModule() {
   const [neteaseProfile, setNeteaseProfile] = useState<NeteaseProfile | null>(null);
   // 网易云红心状态（受控源）：列表与底部播放栏共用，确保两侧同步
   const [neteaseLiked, setNeteaseLiked] = useState<Set<number>>(new Set());
+  // 酷狗红心：独立集合（键 kugou-<hash>），不进本地「我的收藏」；登录时从云端「我喜欢的音乐」读取并与本地取并集。
+  const [kugouLiked, setKugouLiked] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('music_kugou_favorites') || '[]')); } catch { return new Set(); }
+  });
+  const [kugouLikedList, setKugouLikedList] = useState<KugouPlaylistCard | null>(null);
+  const [kugouAuth, setKugouAuth] = useState<KugouAuth | null>(null);
+  const kugouLikedRef = useRef(kugouLiked);
+  const kugouLikedListRef = useRef<KugouPlaylistCard | null>(null);
+  const kugouAuthRef = useRef<KugouAuth | null>(null);
+  useEffect(() => { kugouLikedRef.current = kugouLiked; }, [kugouLiked]);
+  useEffect(() => { kugouLikedListRef.current = kugouLikedList; }, [kugouLikedList]);
+  useEffect(() => { kugouAuthRef.current = kugouAuth; }, [kugouAuth]);
   // 网易云视图 ref：供侧栏调用 openPlaylist / restoreTemp
   const neteaseViewRef = useRef<NeteaseViewHandle | null>(null);
   // 酷狗音乐视图：与网易云完全并列的第二在线平台
@@ -1125,7 +1142,23 @@ useEffect(() => {
     ]).then(([customs, favs, overrides, mvMap, volState, modeState]) => {
       if (cancelled) return;
       console.log('[Music][探针] 挂载恢复: 自定义歌单=', customs.length, '收藏=', favs.size, '封面覆盖=', overrides.size, 'MV 绑定=', mvMap.size);
-      if (favs.size > 0) setFavorites(favs);
+      if (favs.size > 0) {
+        // 收藏只保留本地曲目；遗留的 kugou- 键迁出到独立的酷狗收藏集合（不混来源）。
+        const localSet = new Set<string>();
+        const kugouSet = new Set<string>();
+        for (const id of favs) {
+          if (id.startsWith('kugou-')) kugouSet.add(id);
+          else localSet.add(id);
+        }
+        setFavorites(localSet);
+        if (kugouSet.size) {
+          setKugouLiked((prev) => {
+            const n = new Set([...prev, ...kugouSet]);
+            try { localStorage.setItem('music_kugou_favorites', JSON.stringify([...n])); } catch { /* ignore */ }
+            return n;
+          });
+        }
+      }
       if (overrides.size > 0) setCoverOverrides(overrides);
       if (mvMap.size > 0) setMvPathMap(mvMap);
       if (customs.length > 0) {
@@ -1587,6 +1620,51 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
       return next;
     });
     likeNeteaseSong(songId, like).catch((e) => console.warn('[netease] 红心写入失败', songId, e));
+  }, []);
+
+  // 酷狗红心：写云端（best-effort，cloudlist 走加密服务）+ 更新独立集合 + 持久化 localStorage
+  const toggleKugouLike = useCallback((track: PlayableTrack) => {
+    const id = track.id;
+    if (!id.startsWith('kugou-')) return; // 只处理酷狗曲目
+    const rawHash = id.slice('kugou-'.length);
+    const nowLiked = !kugouLikedRef.current.has(id);
+    setKugouLiked((prev) => {
+      const n = new Set(prev);
+      if (nowLiked) n.add(id); else n.delete(id);
+      try { localStorage.setItem('music_kugou_favorites', JSON.stringify([...n])); } catch { /* ignore */ }
+      return n;
+    });
+    const auth = kugouAuthRef.current;
+    const list = kugouLikedListRef.current;
+    if (auth && list) {
+      const op = nowLiked
+        ? addKugouFavorite(auth, list, { hash: rawHash, name: track.title, albumId: Number(track.albumId) || 0, mixsongid: Number(track.mixsongid) || 0 })
+        : removeKugouFavorite(auth, list, rawHash);
+      op.catch((e: any) => console.warn('[kugou] 云端收藏同步失败(本地已更新):', rawHash, e?.message || e));
+    }
+  }, []);
+
+  // 登录态初始化：从云端「我喜欢的音乐」读取并与本地并集，得到完整 kugouLiked
+  const seedKugouLiked = useCallback(async (auth: KugouAuth) => {
+    try {
+      const favs = await getFavorites(auth);
+      if (favs.liked) setKugouLikedList(favs.liked);
+      const cloudIds = new Set(favs.list.map((t) => `kugou-${t.id}`));
+      setKugouLiked((prev) => {
+        const n = new Set([...prev, ...cloudIds]);
+        try { localStorage.setItem('music_kugou_favorites', JSON.stringify([...n])); } catch { /* ignore */ }
+        return n;
+      });
+    } catch (e: any) {
+      console.warn('[kugou] 登录态初始化收藏失败:', e?.message || e);
+    }
+  }, []);
+
+  // 启动即从本地存储的酷狗登录态初始化云端收藏
+  useEffect(() => {
+    const a = readKugouAuth();
+    if (a) { setKugouAuth(a); void seedKugouLiked(a); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 封面覆盖映射加载/变更后，确保已加载的歌单曲目也应用覆盖。
@@ -2506,14 +2584,15 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
               selectedRankId={kugouActiveRankId}
               searchQuery={searchQuery}
               onTabChange={setKugouTab}
-              favoriteIds={favorites}
-              onToggleFavorite={toggleFavorite}
+              favoriteIds={kugouLiked}
+              onToggleFavorite={toggleKugouLike}
               onPlayMv={(mv) => dispatchOpenWith('video', [{ url: mv.url, name: mv.name, artist: mv.artist, cover: mv.cover }])}
               onRankListLoaded={setKugouRankList}
               onActiveRankChange={setKugouActiveRankId}
               onAuthChange={(auth) => {
-                // 登录态变化：同步给侧栏（侧栏已监听 kugou-auth-changed 事件，
-                // 这里透传一份以便后续在外层做登录态驱动的 UI 切换）。
+                // 登录态变化：同步酷狗 auth 到外层，并从云端「我喜欢的音乐」初始化收藏集合。
+                setKugouAuth(auth ?? null);
+                if (auth) void seedKugouLiked(auth);
                 try { window.__HOST_API__?.invoke('debug_log', { msg: `KUGOU_AUTH_CHANGED userid=${auth?.userid ?? 'null'}` }).catch(()=>{}); } catch {}
               }}
             />
@@ -2544,10 +2623,6 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
             <RoamView
               source={roamSource}
               onBack={() => setShowModuleDrawer(true)}
-              onRefresh={() => {
-                clearRoamCache();
-                setRoamReloadKey((k) => k + 1);
-              }}
               onPlay={(tracks: PlayableTrack[], startIndex: number, sourceName: string) => {
                 musicPlayer.setTracks(tracks, startIndex);
                 musicPlayer.play();
@@ -2602,17 +2677,19 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
         </div>
         {/* PlayerBar 固定在内容区下方；漫游页不显示播放栏。 */}
         {currentTrack && !roamOpen && (() => {
-          // 网易云歌曲：红心读/写走统一的网易云状态（neteaseLiked + toggleNeteaseLike）
+          // 网易云/酷狗歌曲：红心读/写走各自独立状态；其余本地曲目走 favorites
           const neteaseMatch = /^netease-(\d+)$/.exec(currentTrack.id);
           const isNetease = !!neteaseMatch;
           const neteaseId = neteaseMatch ? Number(neteaseMatch[1]) : 0;
+          const kugouMatch = /^kugou-(.+)$/.exec(currentTrack.id);
+          const isKugou = !!kugouMatch;
           return (
           <PlayerBar
             key={currentTrack.id + '|' + currentTrack.filePath}
             track={currentTrack}
             isPlaying={isPlaying}
-            isFavorite={isNetease ? neteaseLiked.has(neteaseId) : favorites.has(trackIdOf(currentTrack))}
-            onToggleFavorite={isNetease ? (() => toggleNeteaseLike(neteaseId, !neteaseLiked.has(neteaseId))) : toggleFavorite}
+            isFavorite={isNetease ? neteaseLiked.has(neteaseId) : isKugou ? kugouLiked.has(currentTrack.id) : favorites.has(trackIdOf(currentTrack))}
+            onToggleFavorite={isNetease ? (() => toggleNeteaseLike(neteaseId, !neteaseLiked.has(neteaseId))) : isKugou ? (() => toggleKugouLike(currentTrack as unknown as PlayableTrack)) : toggleFavorite}
             onTogglePlay={togglePlay}
             onPrev={prevTrack}
             onNext={nextTrack}
@@ -2711,15 +2788,21 @@ setSearchQuery('');
           playlists={online.activePlaylist ? [...playlists, online.activePlaylist] : playlists}
           currentPlaylistId={musicPlayer.currentPlaylistId ?? selectedPlaylist?.id ?? null}
           onSelectTrack={handlePopupSelectTrack}
+          // 网易云红心是 Set<number>（按数字 songId），而 NowPlayingView 直接拿 track.id（字符串 netease-<id>）比对，
+          // 故需把 neteaseLiked 映射成 netease-<id> 字符串集合，否则沉浸页红心永远显示「未收藏」且与 favoriteIds 类型不符。
           favoriteIds={(() => {
             const nm = /^netease-(\d+)$/.exec(currentTrack.id);
-            return nm ? neteaseLiked : favorites;
+            if (nm) return new Set([...neteaseLiked].map((id) => `netease-${id}`));
+            const km = /^kugou-(.+)$/.exec(currentTrack.id);
+            if (km) return kugouLiked;
+            return favorites;
           })()}
           onToggleFavorite={(() => {
             const nm = /^netease-(\d+)$/.exec(currentTrack.id);
-            if (!nm) return toggleFavorite;
-            const nid = Number(nm[1]);
-            return () => toggleNeteaseLike(nid, !neteaseLiked.has(nid));
+            if (nm) { const nid = Number(nm[1]); return () => toggleNeteaseLike(nid, !neteaseLiked.has(nid)); }
+            const km = /^kugou-(.+)$/.exec(currentTrack.id);
+            if (km) return () => toggleKugouLike(currentTrack as unknown as PlayableTrack);
+            return toggleFavorite;
           })()}
         />
       )}

@@ -145,6 +145,7 @@ export interface GridCardItem {
   name: string;
   coverUrl?: string;
   subtitle?: string; // 例如 "12 首"
+  accent?: string; // 可选：单卡独立品牌色（默认用外层 accent）
 }
 export interface PlaylistGridRowProps extends AccentProps {
   items: GridCardItem[];
@@ -176,13 +177,15 @@ export const PlaylistGridRow: React.FC<PlaylistGridRowProps> = ({
         <ChevronRight />
       </button>
       <div ref={scrollRef} className="flex gap-3 overflow-x-auto min-w-0 pb-2 scrollbar-thin scroll-smooth">
-        {items.map((p) => (
+        {items.map((p) => {
+          const cardAccent = p.accent ?? accent;
+          return (
           <button key={p.id} onClick={() => onOpen(p.id, p.name)} className="btn-press group flex-shrink-0 flex flex-col text-left w-28 sm:w-32" title={p.name}>
             <div className="relative aspect-square rounded-xl overflow-hidden bg-neutral-200/60 dark:bg-stone-800/60 mb-2">
               {p.coverUrl ? (
                 <img src={p.coverUrl} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-xl font-bold text-white/80" style={{ background: `linear-gradient(135deg, ${hexToRgba(accent, 0.7)}, ${hexToRgba('#3b82f6', 0.7)})` }}>
+                <div className="w-full h-full flex items-center justify-center text-xl font-bold text-white/80" style={{ background: `linear-gradient(135deg, ${hexToRgba(cardAccent, 0.8)}, ${hexToRgba(cardAccent, 0.45)})` }}>
                   {p.name.slice(0, 1)}
                 </div>
               )}
@@ -190,7 +193,8 @@ export const PlaylistGridRow: React.FC<PlaylistGridRowProps> = ({
             <div className="text-xs font-medium text-neutral-800 dark:text-stone-100 line-clamp-2">{p.name}</div>
             {p.subtitle ? <div className="text-[10px] text-neutral-500 dark:text-stone-400 truncate">{p.subtitle}</div> : null}
           </button>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

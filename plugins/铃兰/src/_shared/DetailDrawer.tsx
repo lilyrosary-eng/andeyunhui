@@ -379,9 +379,11 @@ export const DetailDrawer: React.FC<DetailDrawerProps> = ({
                       index={i}
                       isPlaying={false}
                       onPlay={() => callbacks.onPlayTracks(artist!.hotSongs!, i, `${artist.name} 热门`)}
-                      onLike={likedTracks?.has(t.id)
-                        ? (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, false); }
-                        : (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, true); }
+                      onLike={likedTracks
+                        ? (likedTracks.has(t.id)
+                          ? (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, false); }
+                          : (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, true); })
+                        : undefined
                       }
                       isLiked={likedTracks?.has(t.id) || false}
                       onOpenArtist={callbacks.onOpenArtist ? (e) => { e.stopPropagation(); callbacks.onOpenArtist!(t.artistId ?? 0, t.artist); } : undefined}
@@ -598,9 +600,11 @@ export const DetailDrawer: React.FC<DetailDrawerProps> = ({
                       index={i}
                       isPlaying={false}
                       onPlay={() => callbacks.onPlayTracks(album.tracks!, album.tracks!.indexOf(t), album.name)}
-                      onLike={likedTracks?.has(t.id)
-                        ? (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, false); }
-                        : (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, true); }
+                      onLike={likedTracks
+                        ? (likedTracks.has(t.id)
+                          ? (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, false); }
+                          : (e) => { e.stopPropagation(); callbacks.onLikeTrack?.(t.id, true); })
+                        : undefined
                       }
                       isLiked={likedTracks?.has(t.id) || false}
                       onOpenArtist={callbacks.onOpenArtist ? (e) => { e.stopPropagation(); callbacks.onOpenArtist!(t.artistId ?? 0, t.artist); } : undefined}

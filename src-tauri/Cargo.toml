@@ -13,7 +13,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
+# unstable：解锁多 webview（Window::add_child），「网络视频」的内嵌浏览器依赖它。
+# 见 src/embedded_browser.rs —— 用它把子 webview 精确铺在面板矩形上，
+# 取代旧方案 alwaysOnTop 独立浮窗（遮挡主窗 UI / 不跟随移动 / 尺寸不同步）。
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png", "unstable"] }
 # 原生文件拖出 drag 依赖（Windows DoDragDrop）已迁移至 [target.'cfg(windows)'.dependencies]，仅 Windows 编译
 tauri-plugin-opener = "=2.5.3"
 tauri-plugin-dialog = "2"

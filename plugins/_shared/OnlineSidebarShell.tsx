@@ -20,6 +20,8 @@ export function Music2Icon() {
 export interface OnlineSidebarShellProps {
   icon?: React.ReactNode;
   title: React.ReactNode;
+  /** 宿主模块 id（'music' / 'video' 等），透传给 ModuleSidebarShell 用于折叠状态隔离 */
+  moduleId?: string;
   onClose: () => void;
   onOpenModuleSettings?: () => void;
   onOpenStats?: () => void;
@@ -34,6 +36,7 @@ export interface OnlineSidebarShellProps {
 export function OnlineSidebarShell({
   icon,
   title,
+  moduleId,
   onClose,
   onOpenModuleSettings,
   onOpenStats,
@@ -44,6 +47,18 @@ export function OnlineSidebarShell({
   primaryAction,
   children,
 }: OnlineSidebarShellProps) {
+  // 标题兼容：调用方若传字符串（未自带返回按钮），则包一层可点按钮调用 onClose。
+  // 音乐侧栏自行传入 button 元素（不受影响）；视频侧栏也自行传入 button（双保险）。
+  const titleNode =
+    typeof title === 'string'
+      ? React.createElement('button', {
+          key: 'shell-title',
+          onClick: () => onClose(),
+          className: 'font-bold text-lg text-neutral-800 dark:text-stone-100 hover:text-[var(--element-color-raw)] transition-colors',
+          title: '返回',
+        }, title)
+      : title;
+
   const statsButton = onOpenStats
     ? React.createElement('button', {
         key: 'open-stats',
@@ -63,16 +78,18 @@ export function OnlineSidebarShell({
     return React.createElement('div', { className: 'w-[260px] h-full flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 p-4 overflow-y-auto' },
       React.createElement('div', { className: 'flex items-center gap-2 mb-4 px-1' },
         icon ?? React.createElement(Music2Icon),
-        title
+        titleNode
       ),
       children
     );
   }
 
   return React.createElement(ModuleSidebarShell, {
-    moduleId: 'music',
+    // ⚠️ 必须透传 moduleId：此前硬编码 'music'，导致视频在线侧栏与音乐侧栏
+    // 共用同一个折叠状态 key（moduleToggleKey('music')），折叠一个另一个也跟着变。
+    moduleId: moduleId || 'music',
     icon: icon ?? React.createElement(Music2Icon),
-    title,
+    title: titleNode,
     onOpenModuleSettings,
     footerExtra: statsButton,
     searchQuery,

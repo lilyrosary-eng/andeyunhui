@@ -217,6 +217,8 @@ export interface PlayableTrack {
   artistId?: number | string;
   albumId?: number | string;
   mvId?: number | string;
+  hash?: string;       // 酷狗文件 hash（云端收藏写接口需要）
+  mixsongid?: number; // 酷狗 mixsongid（云端收藏写接口需要）
 }
 
 interface NeteaseViewProps {

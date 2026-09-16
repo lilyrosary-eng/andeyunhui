@@ -23,8 +23,10 @@ interface VideoFile {
   filePath: string;
   fileName: string;
   sizeBytes: number;
-  // 网络流（如网易云 MV）：存在时直接用 url 播放，不走本地 convertFileSrc。
+  // 网络流（如网易云 MV / 网络视频）：存在时直接用 url 播放，不走本地 convertFileSrc。
   url?: string;
+  // 网络流分片（B 站 durl 分段等）：长度 > 1 时播放器按序连续播放。
+  urls?: string[];
   cover?: string;     // 网络流封面（MV 用）
 }
 
@@ -93,6 +95,16 @@ function SettingsContent({
   const ModuleSettingsPanel = (window.__HOST_UI__ as Record<string, unknown>)?.ModuleSettingsPanel as React.FC<{
     title: string; icon: React.ReactNode; onClose: () => void; children: React.ReactNode;
   }> | undefined;
+  // 网络视频下载目录（统一走宿主 pick_directory；此前模块内没有设置项，
+  // 且平台视图里调的是不存在的命令，导致下载目录基本设不上）
+  const [dlDir, setDlDir] = useState<string>(() => localStorage.getItem(VIDEO_DOWNLOAD_DIR_KEY) || '');
+  const chooseDlDir = async () => {
+    const r = await pickDownloadDir();
+    if (r) {
+      localStorage.setItem(VIDEO_DOWNLOAD_DIR_KEY, r);
+      setDlDir(r);
+    }
+  };
 
   const panel = ModuleSettingsPanel
     ? React.createElement(ModuleSettingsPanel, {
@@ -117,6 +129,15 @@ React.createElement('label', { className: 'block text-xs font-medium text-neutra
                     )
                   ),
                 ),
+          ),
+          // 网络视频下载目录
+          React.createElement('div', { className: 'glass-panel p-4' },
+            React.createElement('h3', { className: 'text-sm font-medium text-neutral-700 dark:text-stone-200 mb-2' }, '网络视频下载目录'),
+            React.createElement('p', { className: 'text-xs text-neutral-500 dark:text-stone-400 break-all mb-2' }, dlDir || '未设置（未设置时网络视频的下载任务会直接失败）'),
+            React.createElement('button', {
+              onClick: chooseDlDir,
+              className: 'btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-600 dark:text-stone-300 bg-neutral-100 dark:bg-stone-700 hover:bg-neutral-200 dark:hover:bg-stone-600 transition-colors',
+            }, dlDir ? '更换目录' : '选择目录'),
           ),
           // 播放设置
           React.createElement('div', { className: 'glass-panel p-4 space-y-3' },
@@ -211,9 +232,13 @@ React.createElement('label', { className: 'block text-xs font-medium text-neutra
 // ========== 云功能抽屉（右侧滑出，对齐音乐模块 ModuleDrawer 设计语言） ==========
 // 实现见 ./VideoCloudDrawer.tsx（本地视频 / 云端视频 + 登录态，结构对齐音乐在线模块）
 import { VideoCloudDrawer } from './VideoCloudDrawer';
-// 网络视频（对齐音乐模块网络音乐：平台列表 + 原生/内嵌网页 + 下载）
+// 网络视频（纯 API 架构，对齐音乐模块网络音乐：平台列表 + API 取流 + 下载）
 import { OnlineVideoView } from './online/OnlineVideoView';
 import type { OnlineVideoItem } from './online/videoPlatforms';
+import type { VideoTempEntry } from './online/OnlineVideoSidebar';
+import { VIDEO_DOWNLOAD_DIR_KEY } from './online/OnlineVideoDownloadManager';
+import { pickDownloadDir } from './online/pickDir';
+import { toPlayableUrl, toPlayableUrls } from './online/mediaProxy';
 
 // ========== 主组件 ==========
 function VideoModule() {
@@ -238,6 +263,9 @@ function VideoModule() {
   const [showCloudDrawer, setShowCloudDrawer] = useState(false);
   // 网络视频：当前打开的在线平台 id（null = 未进入在线视图）
   const [onlinePlatformId, setOnlinePlatformId] = useState<string | null>(null);
+  // 网络视频：临时播放列表（在线播过的项，纯内存；侧栏「临时播放列表」段展示）
+  const [onlineTemps, setOnlineTemps] = useState<VideoTempEntry[]>([]);
+  const [onlineActiveTempId, setOnlineActiveTempId] = useState<string | null>(null);
 
   // 保存设置
   const handleSettingsChange = useCallback((partial: Partial<VideoSettings>) => {
@@ -340,18 +368,36 @@ function VideoModule() {
 
   // 网络视频：把在线平台的播放项（已解析出真实地址）交给我们的播放器（去广告 + 统一控制 + SMTC）。
   // 退出在线视图，回到主播放区；并填入临时列表（mvTemp 同款内存态），使播放器可正常接管。
+  // urls（多段 durl）一并带上：播放器会按序连续播放，避免「长视频只能播第一段」。
   const handleOnlinePlay = useCallback((item: OnlineVideoItem) => {
+    // 播放地址经 mediaProxy 包一层本地协议：B站/抖音 CDN 强制校验 Referer，
+    // <video> 直连必 403，必须由 Rust 带正确 Referer 代取（见 online/mediaProxy.ts）。
     const file: VideoFile = {
       filePath: '',
       fileName: item.title,
       sizeBytes: 0,
-      url: item.url,
-      cover: item.cover,
+      url: toPlayableUrl(item.url, item.referer),
+      urls: toPlayableUrls(item.urls, item.referer),
+      // 封面同样要过中继：平台图片 CDN 也校验 Referer，直连会 403
+      cover: toPlayableUrl(item.cover, item.referer),
     };
     setMvTemp([file]);
     setOnlinePlatformId(null);
     setPlayingFile(file);
   }, []);
+
+  // 网络视频：记录临时播放列表条目（最多 12 条，最近在前），供侧栏「临时播放列表」段使用。
+  const rememberOnlineTemp = useCallback((platformId: string, item: OnlineVideoItem) => {
+    const entry: VideoTempEntry = { id: item.id, name: item.title, platformId, item };
+    setOnlineTemps(prev => [entry, ...prev.filter(t => !(t.id === entry.id && t.platformId === platformId))].slice(0, 12));
+    setOnlineActiveTempId(entry.id);
+  }, []);
+
+  // 播放 + 记录（在线视图调用）
+  const handleOnlinePlayAndRemember = useCallback((platformId: string, item: OnlineVideoItem) => {
+    rememberOnlineTemp(platformId, item);
+    handleOnlinePlay(item);
+  }, [rememberOnlineTemp, handleOnlinePlay]);
 
   // 以安得云荟打开 / 拖入主窗口 / 铃兰播放 MV，统一入口：
   //  - 本地项：复制进固定临时目录 → 注册为常驻库文件夹 → 播放目标
@@ -496,8 +542,15 @@ function VideoModule() {
     if (onlinePlatformId) {
       return React.createElement(OnlineVideoView, {
         initialPlatformId: onlinePlatformId,
-        onPlayVideo: handleOnlinePlay,
+        onPlayVideo: handleOnlinePlayAndRemember,
         onExit: () => setOnlinePlatformId(null),
+        onOpenModuleSettings: handleOpenModuleSettings,
+        temps: onlineTemps,
+        activeTempId: onlineActiveTempId,
+        onSelectTemp: (entry: VideoTempEntry) => {
+          setOnlineActiveTempId(entry.id);
+          handleOnlinePlay(entry.item);
+        },
       });
     }
 

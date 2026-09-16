@@ -61,6 +61,13 @@ pub mod data_location;
 // 业务服务：跨平台，内部 Windows 专属子模块在 services/mod.rs 隔离。
 pub mod services;
 
+// 媒体中继（bimedia:// 自定义协议）：为 <video> 补上 CDN 要求的 Referer，绕开防盗链 403。
+pub mod media_relay;
+
+// 内嵌浏览器（子 webview + 资源嗅探）：把「网络视频」面板区当作浏览器用。
+// 依赖 tauri 的 `unstable` feature（Window::add_child），见 Cargo.toml。
+pub mod embedded_browser;
+
 // === 云就绪 stub（T3）：Account / RemoteStorage / CloudSync，跨平台（Windows 与 Android 共管） ===
 pub mod cloud;
 

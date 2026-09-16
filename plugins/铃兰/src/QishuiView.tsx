@@ -400,7 +400,7 @@ setQrLoading(false);
         console.log('[qishui] 音频已保存到临时文件:', filePath);
       } catch (e: any) {
         console.error('[qishui] 保存临时音频失败，回退到 blob:', e?.message || e);
-        const blob = new Blob([decrypted], { type: 'audio/mp4' });
+        const blob = new Blob([decrypted as BlobPart], { type: 'audio/mp4' });
         objectUrl = URL.createObjectURL(blob);
       }
       const quality = track.br ? `${Math.round(track.br / 1000)}k` : '';

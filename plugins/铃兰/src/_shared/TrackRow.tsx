@@ -37,6 +37,8 @@ export interface PlayableTrack {
   artistId?: number | string;
   albumId?: number | string;
   mvId?: number | string;
+  hash?: string;
+  mixsongid?: number;
 }
 
 export interface TrackBadge {

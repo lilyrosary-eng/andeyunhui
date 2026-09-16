@@ -418,6 +418,9 @@ function trackToPlayable(t: KugouTrack, url: string, quality = ''): PlayableTrac
     durationSecs: Math.round((t.duration || 0) / 1000),
     coverPath: t.cover,
     quality,
+    hash: t.hash,
+    mixsongid: t.mixsongid,
+    albumId: t.albumId,
   };
 }
 
@@ -768,6 +771,14 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
 
   function isFav(t: KugouTrack): boolean {
     return !!favoriteIds?.has(`kugou-${t.id}`);
+  }
+
+  // 在抽屉曲目里按 id 找完整 PlayableTrack（含 hash），供红心云端写使用
+  function findDrawerTrack(id: string): PlayableTrack | undefined {
+    const inArtist = drawerArtist?.hotSongs?.find((t) => t.id === id);
+    if (inArtist) return inArtist;
+    const inAlbum = drawerAlbum?.tracks?.find((t) => t.id === id);
+    return inAlbum;
   }
 
   // 打开歌手详情抽屉
@@ -1272,6 +1283,12 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
           onOpenAlbum: openAlbumDrawer,
           onPlayMv: onPlayMv ? (mv) => { if (mv.url) onPlayMv(mv); } : undefined,
           onDownload: undefined,
+          // 详情抽屉红心：在抽屉曲目里取到完整 PlayableTrack（含 hash）后转发给 onToggleFavorite，
+          // 与列表行共用同一收藏源（favoriteIds 的 kugou-<id> 键），保证云端写能拿到 hash。
+          onLikeTrack: (trackId) => {
+            const full = findDrawerTrack(trackId);
+            if (full) onToggleFavorite?.(full);
+          },
         }}
         artist={drawerArtist}
         album={drawerAlbum}

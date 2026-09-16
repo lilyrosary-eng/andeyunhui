@@ -40,6 +40,8 @@ class MusicPlayer {
   private audio: HTMLAudioElement;
   private tracks: Track[] = [];
   private currentIndex: number = -1;
+  // 已加载到 audio 的 src（用于「同曲不重载」守卫，避免重设 audio.src 触发媒体元素 reset）
+  private loadedSrc: string = '';
   private isPlaying: boolean = false;
   private volume: number = 0.7;
   private playMode: PlayMode = 'list';
@@ -282,14 +284,27 @@ class MusicPlayer {
     // 不要走 convertFileSrc（它只用于本地文件路径，会把远程 URL 编码成 asset:// 导致 500）。
     const isRemote = !!track.filePath && /^https?:\/\//i.test(track.filePath);
     const src = !track.filePath ? '' : (isRemote ? track.filePath : (api?.convertFileSrc(track.filePath) || track.filePath));
+    // 关键修复：若目标曲与「当前已加载曲」完全相同（同一 index + 同一 src 且已加载到 audio），
+    // 不要重设 audio.src —— 否则会触发媒体元素 reset（播放中断、currentTime 归零、SMTC 卡片丢失）。
+    // 典型场景：切到其它模块再切回音乐模块时，resumeLastPosition 会重复 setTracks 到同一首歌，
+    // 旧逻辑每次都重设 src 导致「切回音乐模块播放被暂停、点击播放栏无效」。
+    if (index === this.currentIndex && src && this.loadedSrc === src) {
+      debugLog(`music loadTrack skip(reload same track) idx=${index}`);
+      this.emit('trackChange', track);
+      this.updateMediaSessionMeta(track);
+      this.pushSmtc();
+      return;
+    }
     if (src) {
       this.audio.src = src;
+      this.loadedSrc = src;
       this.currentIndex = index;
       this.emit('trackChange', track);
       this.updateMediaSessionMeta(track);
       this.pushSmtc();
     } else {
       // filePath 为空（网易云延迟取地址占位）：标记等待，待 updateTrackUrl 补完后 reload
+      this.loadedSrc = '';
       this.currentIndex = index;
       this.emit('trackChange', track);
     }
@@ -309,7 +324,9 @@ class MusicPlayer {
       const pos = this.audio.currentTime || 0;
       const api = window.__HOST_API__;
       const isRemote = /^https?:\/\//i.test(url);
-      this.audio.src = isRemote ? url : (api?.convertFileSrc(url) || url);
+      const nextSrc = isRemote ? url : (api?.convertFileSrc(url) || url);
+      this.audio.src = nextSrc;
+      this.loadedSrc = nextSrc;
       try { this.audio.currentTime = pos; } catch { /* ignore */ }
       // 重新 emit trackChange，让 UI 更新封面和歌曲信息（之前 filePath 为空时封面可能未加载）
       this.emit('trackChange', track);
@@ -521,6 +538,7 @@ class MusicPlayer {
     try {
       this.audio.pause();
       this.audio.src = '';
+      this.loadedSrc = '';
       this.audio.removeAttribute('src');
       this.audio.load();
     } catch { /* 忽略：audio 已处于异常态 */ }

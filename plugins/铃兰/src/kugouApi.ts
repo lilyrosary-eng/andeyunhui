@@ -340,6 +340,8 @@ export interface KugouTrack {
   albumId?: number;
   albumAudioId?: number;
   singerId?: number;
+  mixsongid?: number;   // 酷狗 mixsongid（云端加歌需要）
+  fileid?: number | string; // 歌单内文件 ID（云端删歌需要）
 }
 
 export interface KugouPlaylistCard {
@@ -418,6 +420,8 @@ function mapTrack(s: any): KugouTrack {
     albumId: s.album_id ? Number(s.album_id) : undefined,
     albumAudioId: s.album_audio_id ? Number(s.album_audio_id) : undefined,
     singerId: s.singer_id ? Number(s.singer_id) : (Array.isArray(s.authors) && s.authors[0]?.author_id ? Number(s.authors[0].author_id) : undefined),
+    mixsongid: s.mixsongid ? Number(s.mixsongid) : undefined,
+    fileid: s.fileid ?? s.ID ?? s.file_id ?? undefined,
   };
 }
 
@@ -956,6 +960,8 @@ export async function getUserPlaylists(auth: KugouAuth, pagesize = 50): Promise<
 export interface KugouFavoritesResult {
   list: KugouTrack[];
   playlists: KugouPlaylistCard[];
+  /** 「我喜欢的音乐」歌单卡片（云端写收藏用的 listid 来自这里） */
+  liked?: KugouPlaylistCard;
 }
 
 // 一次拉取「我喜欢的音乐」与全量歌单
@@ -968,7 +974,75 @@ export async function getFavorites(auth: KugouAuth, pagesize = 50): Promise<Kugo
   if (liked) {
     list = await getPlaylistTracks(liked.gid || String(liked.id), 1, 200);
   }
-  return { list, playlists };
+  return { list, playlists, liked };
+}
+
+/**
+ * 云端收藏写接口（A+B 方案）：把歌曲加入「我喜欢的音乐」歌单。
+ * 端点参考 MakcRe/KuGouMusicApi 的 playlist_tracks_add（cloudlist.service/v6/add_song）。
+ * 注意：酷狗 cloudlist 走加密服务（RSA+AES 会话），当前走网关 android 签名 + x-router 为 best-effort，
+ * 若服务端要求完整 cloudlist 加密，需进一步移植 crypto；失败不影响本地收藏状态。
+ */
+export async function addKugouFavorite(
+  auth: KugouAuth,
+  list: KugouPlaylistCard,
+  song: { hash: string; name: string; albumId?: number; mixsongid?: number },
+): Promise<any> {
+  const listid = list.id || Number(list.gid) || 0;
+  if (!listid) throw new Error('缺少「我喜欢的音乐」歌单 ID');
+  const clienttime = Math.floor(Date.now() / 1000);
+  const body = {
+    userid: Number(auth.userid) || 0,
+    token: auth.token,
+    listid,
+    list_ver: 0,
+    type: 0,
+    slow_upload: 1,
+    scene: 'false;null',
+    data: [{
+      number: 1,
+      name: song.name || '',
+      hash: song.hash,
+      size: 0,
+      sort: 0,
+      timelen: 0,
+      bitrate: 0,
+      album_id: Number(song.albumId) || 0,
+      mixsongid: Number(song.mixsongid) || 0,
+    }],
+  };
+  const res = await kugouRequest(
+    '/cloudlist.service/v6/add_song',
+    { last_time: clienttime, last_area: 'gztx', userid: Number(auth.userid) || 0, token: auth.token },
+    { method: 'POST', body, auth },
+  );
+  return assertKugouOk(res, 'add_song');
+}
+
+/**
+ * 云端取消收藏：从「我喜欢的音乐」歌单删除歌曲（按 fileid 定位，需先在我喜欢的音乐里查 fileid）。
+ * 端点参考 MakcRe/KuGouMusicApi 的 playlist_tracks_del（/v4/delete_songs，x-router: cloudlist.service.kugou.com）。
+ */
+export async function removeKugouFavorite(
+  auth: KugouAuth,
+  list: KugouPlaylistCard,
+  hash: string,
+): Promise<any> {
+  const listid = list.id || Number(list.gid) || 0;
+  if (!listid) throw new Error('缺少「我喜欢的音乐」歌单 ID');
+  const tracks = await getPlaylistTracks(list.gid || String(list.id), 1, 200);
+  const target = tracks.find((t) => t.hash === hash || t.id === hash);
+  const fileid = target?.fileid;
+  if (fileid == null) {
+    console.warn('[kugou] 未在我喜欢的音乐中找到该曲 fileid，跳过云端删除:', hash);
+    return null;
+  }
+  const res = await kugouRequest(
+    '/v4/delete_songs',
+    { listid, userid: Number(auth.userid) || 0, token: auth.token, list_ver: 0, type: 0, data: [{ fileid: Number(fileid) }] },
+    { method: 'POST', auth, router: 'cloudlist.service.kugou.com' },
+  );
+  return assertKugouOk(res, 'delete_songs');
 }
 
 export interface TrackBadge { label: string; kind: 'vip' | 'lossless' | 'hires'; }

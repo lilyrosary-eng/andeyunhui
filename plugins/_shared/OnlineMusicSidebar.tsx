@@ -11,7 +11,7 @@
 //   - 逻辑（拉取用户歌单、收藏）各自在调用方实现，模板只负责渲染与右键壳。
 
 import React from 'react';
-import { OnlineSidebarShell, SidebarTempSection, Music2Icon, type TempPlaylistItem } from '../OnlineSidebarShell';
+import { OnlineSidebarShell, SidebarTempSection, Music2Icon, type TempPlaylistItem } from './OnlineSidebarShell';
 
 const { useState } = React;
 const {
@@ -180,6 +180,8 @@ function SidebarRanksSection({
 // ============ 主模板 ============
 export interface OnlineMusicSidebarProps {
   brandLabel: string; // 标题栏文字，如 "铃兰"（保留原样）
+  /** 宿主模块 id（'music' / 'video' 等），透传至 OnlineSidebarShell，避免与其它模块共用折叠状态 */
+  moduleId?: string;
   likedPlaylist?: SidebarLikedPlaylist;
   temps: TempPlaylistItem[]; // 已转成 TempPlaylistItem 的临时列表
   activeTempId?: string | null;
@@ -209,6 +211,7 @@ export interface OnlineMusicSidebarProps {
 export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
   const {
     brandLabel,
+    moduleId,
     likedPlaylist,
     temps,
     activeTempId,
@@ -280,6 +283,7 @@ export default function OnlineMusicSidebar(props: OnlineMusicSidebarProps) {
   return React.createElement(OnlineSidebarShell, {
     icon: React.createElement(Music2Icon),
     title: titleEl,
+    moduleId,
     onClose,
     onOpenModuleSettings,
     onOpenStats,

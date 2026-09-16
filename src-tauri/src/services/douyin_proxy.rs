@@ -1,65 +1,68 @@
-//! 哔哩哔哩 WebAPI 代理层
+//! ⚠️ 当前未接入（2026-09-13 实测结论）
 //!
-//! 与 netease_proxy / kugou_proxy / qishui_proxy 同构：Rust 仅负责「无 CORS 的 HTTP 转发 +
-//! 白名单校验 + header 兜底」，加解密 / wbi 签名在 TS 端完成（见 plugins/玉兰/src/online/bilibiliApi.ts）。
+//! 抖音的视频详情已改为客户端调用带 `a_bogus` 签名的接口，纯 HTTP 无法获取：
+//!   · 分享页 `window._SSR_DATA.data` 为空对象；`_ROUTER_DATA.loaderData` 仅含静态渲染配置，
+//!     不含 `videoInfoRes` / `play_addr`（整份 HTML 中这些 token 出现 0 次）
+//!   · 各详情接口返回空响应（0 字节）或 403 "blocked"
+//!   · 预热 Cookie 只能拿到反爬挑战 `__ac_nonce`
 //!
-//! B 站绝大多数读接口是 GET（带 wbi 签名的 query），少部分（如投币、收藏写操作）是 POST。
-//! 故本代理同时支持 GET / POST，method 透传。
+//! 因此前端 `videoPlatforms.ts` 中抖音已降级为 `'unsupported'`，本代理暂无调用方。
+//! 保留原因：这是一个**通用且带白名单校验**的 HTTP 转发层，接入签名方案后可直接复用；
+//! `douyin_request` 命令仍在 `main.rs` 注册，前端 `douyinApi.ts` 亦保留。
+//!
+//! ---------------------------------------------------------------------------
+//! 抖音 WebAPI / 分享页代理层
+//!
+//! 与 netease_proxy / kugou_proxy / bilibili_proxy 同构：Rust 仅负责「无 CORS 的 HTTP 转发 +
+//! 白名单校验 + header 兜底 + 跟随重定向后的最终 URL 回传」。
+//! 解析逻辑（分享短链 → aweme_id → 播放地址）在 TS 端完成，见 plugins/玉兰/src/online/douyinApi.ts。
+//!
+//! 为什么需要回传 final_url：
+//!   抖音分享链接形如 https://v.douyin.com/xxxx/，本身不含视频 id，必须先请求它、跟随 302 到
+//!   https://www.douyin.com/video/{aweme_id} 才能拿到 id。reqwest 默认跟随重定向，
+//!   resp.url() 即最终地址，这里把它一并回传，省掉 TS 端再发一次请求。
 
 use std::collections::HashMap;
 
 // ========== 白名单（防止插件越权把代理当任意 HTTP 客户端） ==========
-// 1) 仅允许这些 bilibili 域名
-const ALLOWED_BILIBILI_HOSTS: &[&str] = &[
-    "api.bilibili.com",
-    "www.bilibili.com",
-    "bilibili.com",
-    "app.bilibili.com",
-    "live.bilibili.com",
-    "interface.bilibili.com",
-    "cm.bilibili.com",
-    "data.bilibili.com",
-    "passport.bilibili.com",
-    "s1.hdslb.com",
+// 1) 仅允许这些抖音域名
+const ALLOWED_DOUYIN_HOSTS: &[&str] = &[
+    "v.douyin.com",       // 分享短链（纯跳转）
+    "www.douyin.com",
+    "douyin.com",
+    "m.douyin.com",
+    "www.iesdouyin.com",  // 分享页（HTML 内含 window._ROUTER_DATA）
+    "iesdouyin.com",
 ];
 
-// 2) 仅允许这些路径前缀（只读、低风险；wbi 接口优先）
-const ALLOWED_BILIBILI_PATH_PREFIXES: &[&str] = &[
-    // wbi 密钥（img_url / sub_url，一切 wbi 签名接口的前置依赖）
-    // ⚠️ 缺这一条会让 getWbiKeys() 直接失败，进而导致搜索/取流/下载全链路不可用。
-    "/x/web-interface/nav",
-    // 游客态设备指纹（返回 b_3/b_4，用于拼 buvid3/buvid4 Cookie，降低 -412 风控概率）
-    "/x/frontend/finger/spi",
-    // 搜索（wbi）
-    "/x/web-interface/wbi/search/all/v2",
-    "/x/web-interface/search/all/v2",
-    "/x/web-interface/search/default",
-    // 视频信息 / 播放地址（wbi）
-    "/x/wbi/view",
-    "/x/web-interface/view",
-    "/x/v2/view",
-    "/x/player/wbi/playurl",
-    "/x/player/playurl",
-    "/x/player/wbi/v2",
-    "/x/player/v2",
-    // 分区 / 热门 / 推荐
-    "/x/web-interface/index/top/feed/rcmd",
-    "/x/web-interface/popular",
-    "/x/web-interface/ranking/v2",
-    "/x/web-interface/dynamic/region",
-    // 用户空间投稿
-    "/x/space/wbi/arc/search",
-    "/x/space/arc/search",
-    // 收藏夹
-    "/x/v3/fav/folder/created/list",
-    "/x/v3/fav/resource/list",
+// 2) 仅允许这些路径前缀（只读、低风险）。
+//    例外：v.douyin.com 是纯跳转短链服务，路径是随机短码，不做路径校验（仅限该 host）。
+const ALLOWED_DOUYIN_PATH_PREFIXES: &[&str] = &[
+    // 分享页（视频 / 图集）
+    "/share/video/",
+    "/share/slides/",
+    // 视频详情页 / 短链落地页
+    "/video/",
+    "/note/",
+    // 网页端接口（详情 / 相关推荐）
+    "/aweme/v1/web/aweme/detail/",
+    "/aweme/v1/web/aweme/related/",
+    "/aweme/v1/web/aweme/post/",
+    // 发现页（仅用于预热 Cookie）
+    "/discover",
 ];
+
+/// 允许的精确路径（首页，仅用于预热 Cookie；不能写成 "/" 前缀，否则等于放行全部路径）
+const ALLOWED_DOUYIN_EXACT_PATHS: &[&str] = &["/"];
 
 // 3) 允许的 HTTP 方法
-const ALLOWED_BILIBILI_METHODS: &[&str] = &["GET", "POST"];
+const ALLOWED_DOUYIN_METHODS: &[&str] = &["GET", "POST"];
 
 // 4) 单请求体上限（防滥用），10 MB
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// 短链跳转域名：路径为随机短码，跳过路径白名单校验。
+const SHORTLINK_HOST: &str = "v.douyin.com";
 
 fn host_of(url: &str) -> Option<String> {
     let u = url.trim();
@@ -76,12 +79,12 @@ fn host_of(url: &str) -> Option<String> {
 }
 
 fn validate_request(method: &str, url: &str) -> Result<String, String> {
-    if !ALLOWED_BILIBILI_METHODS.contains(&method.to_uppercase().as_str()) {
-        return Err(format!("Method not allowed by bilibili proxy: {method}"));
+    if !ALLOWED_DOUYIN_METHODS.contains(&method.to_uppercase().as_str()) {
+        return Err(format!("Method not allowed by douyin proxy: {method}"));
     }
     let host = host_of(url).ok_or_else(|| "Cannot parse host from url".to_string())?;
-    if !ALLOWED_BILIBILI_HOSTS.iter().any(|h| h == &host) {
-        return Err(format!("Host not in bilibili allowlist: {host}"));
+    if !ALLOWED_DOUYIN_HOSTS.iter().any(|h| h == &host) {
+        return Err(format!("Host not in douyin allowlist: {host}"));
     }
     let path = url
         .trim_start_matches("https://")
@@ -90,11 +93,14 @@ fn validate_request(method: &str, url: &str) -> Result<String, String> {
         .map(|(_, rest)| format!("/{rest}"))
         .unwrap_or_else(|| "/".to_string());
     let path_only = path.split('?').next().unwrap_or("/");
-    if !ALLOWED_BILIBILI_PATH_PREFIXES
-        .iter()
-        .any(|p| path_only.starts_with(p))
-    {
-        return Err(format!("Path not in bilibili allowlist: {path_only}"));
+    // 短链服务不做路径校验；其余 host 需命中前缀或精确路径
+    let path_ok = host == SHORTLINK_HOST
+        || ALLOWED_DOUYIN_EXACT_PATHS.contains(&path_only)
+        || ALLOWED_DOUYIN_PATH_PREFIXES
+            .iter()
+            .any(|p| path_only.starts_with(p));
+    if !path_ok {
+        return Err(format!("Path not in douyin allowlist: {path_only}"));
     }
     Ok(path)
 }
@@ -114,7 +120,7 @@ fn build_headers(
         headers.insert(reqwest::header::USER_AGENT, v);
     }
     {
-        let v = reqwest::header::HeaderValue::from_static("*/*");
+        let v = reqwest::header::HeaderValue::from_static("text/html,application/json,*/*");
         headers.insert(reqwest::header::ACCEPT, v);
     }
     {
@@ -147,13 +153,15 @@ fn build_headers(
 }
 
 #[derive(serde::Serialize, Clone)]
-pub struct BilibiliProxyResponse {
+pub struct DouyinProxyResponse {
     pub status: u16,
     pub body: String,
     pub cookies: Vec<String>,
+    /// 跟随重定向后的最终 URL（短链解析必需）
+    pub final_url: String,
 }
 
-async fn bilibili_request_internal(
+async fn douyin_request_internal(
     method: &str,
     url: &str,
     body: &str,
@@ -161,7 +169,7 @@ async fn bilibili_request_internal(
     extra: &HashMap<String, String>,
     referer: Option<&str>,
     user_agent: Option<&str>,
-) -> Result<BilibiliProxyResponse, String> {
+) -> Result<DouyinProxyResponse, String> {
     let _path = validate_request(method, url)?;
 
     if body.len() > MAX_BODY_BYTES {
@@ -172,6 +180,9 @@ async fn bilibili_request_internal(
 
     let client = reqwest::Client::builder()
         .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .map_err(|e| format!("build client: {e}"))?;
 
@@ -189,6 +200,7 @@ async fn bilibili_request_internal(
         .map_err(|e| format!("request failed: {e}"))?;
 
     let status = resp.status().as_u16();
+    let final_url = resp.url().to_string();
 
     let cookies: Vec<String> = resp
         .headers()
@@ -202,16 +214,17 @@ async fn bilibili_request_internal(
         .await
         .map_err(|e| format!("read body: {e}"))?;
 
-    Ok(BilibiliProxyResponse {
+    Ok(DouyinProxyResponse {
         status,
         body: text,
         cookies,
+        final_url,
     })
 }
 
-/// 通用哔哩哔哩请求代理（四件套校验 + 转发 + 回传结构化 JSON 字符串）。
+/// 通用抖音请求代理（白名单校验 + 转发 + 回传结构化 JSON 字符串，含 final_url）。
 #[tauri::command(rename_all = "snake_case")]
-pub async fn bilibili_request(
+pub async fn douyin_request(
     method: String,
     url: String,
     body: Option<String>,
@@ -221,7 +234,7 @@ pub async fn bilibili_request(
     user_agent: Option<String>,
 ) -> Result<String, String> {
     let extra = headers.unwrap_or_default();
-    let resp = bilibili_request_internal(
+    let resp = douyin_request_internal(
         &method,
         &url,
         &body.unwrap_or_default(),
@@ -235,6 +248,7 @@ pub async fn bilibili_request(
         "status": resp.status,
         "cookies": resp.cookies,
         "body": resp.body,
+        "final_url": resp.final_url,
     });
     Ok(serde_json::to_string(&out).unwrap_or_default())
 }

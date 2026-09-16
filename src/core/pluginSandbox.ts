@@ -110,6 +110,23 @@ const ALLOWED_COMMANDS = new Set([
   'scan_video_root',
   'delete_video_cache',
   'get_folder_videos',
+  // 视频模块 —— 网络视频（纯 API 架构）
+  // ⚠️ 这四个命令此前全部漏加白名单，导致沙箱内 invoke 被拦截，而插件侧有 .catch 兜底，
+  // 于是「搜索/取流/下载」全部静默失败 —— 表现为「B 站还是用不了」，
+  // 但后端代理、白名单、签名链路其实都是通的（排查时极易误判为后端问题）。
+  // 教训：新增任何走 __HOST_API__.invoke 的插件命令，必须同步加到这里。
+  'bilibili_request', // B 站代理：wbi 签名在 TS 端完成，Rust 仅无 CORS 转发
+  'douyin_request', // 抖音代理：网址直连面板的「解析」按钮会调用（抖音需 a_bogus 签名，可能失败）
+  'download_video', // 视频下载：多段按序下载 + ffmpeg concat 拼接（8GB 上限、无总超时）
+  'download_hls', // m3u8 转封装 mp4（网址直连面板粘贴 .m3u8 时走这条）
+  // 内嵌浏览器（网络视频·「面板区当浏览器」）：子 webview 生命周期 + 资源嗅探
+  // ⚠️ 同前：漏加会被沙箱拦截且插件侧 .catch 吞错 → 静默失败
+  'browser_open',
+  'browser_set_bounds',
+  'browser_navigate',
+  'browser_sniff',
+  'browser_current_url',
+  'browser_close',
   // 阅读模块
   'scan_reading_root',
   'load_reading_cache',

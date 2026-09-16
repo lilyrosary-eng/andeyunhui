@@ -229,6 +229,11 @@ const LyricsList = React.memo(({
           fontWeight: i === currentLyricIdx ? 600 : 400,
           color: i === currentLyricIdx ? 'var(--element-bg, #5a7f5d)' : 'var(--text-secondary, #78716c)',
           letterSpacing: '0.04em',
+          // 音译/翻译适配：保留换行（pre-wrap）、允许长串（无空格的罗马音）断行（break-word），
+          // 避免「多行音译挤在一行/溢出被裁切」的问题（本地不做音译，但网络音乐受影响）。
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          overflowWrap: 'anywhere',
           transition: 'font-size 0.4s ease, opacity 0.4s ease, color 0.4s ease',
         },
       }, subText),

@@ -25,7 +25,12 @@ interface VideoFile {
   filePath: string;
   fileName: string;
   sizeBytes: number;
-  url?: string;       // 网络流（如网易云 MV）：存在时直接用 url 播放
+  url?: string;       // 网络流（如网易云 MV / 网络视频）：存在时直接用 url 播放
+  /**
+   * 网络流分片地址（如 B 站 durl 分段）。长度 > 1 时按序连续播放，
+   * 否则长视频只能播第一段（表现为「只能播前几分钟」）。
+   */
+  urls?: string[];
   cover?: string;
 }
 
@@ -167,16 +172,30 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const hideTimerRef = useRef<number>(0);
-  // 网络流（如网易云 MV）直接用 url；本地文件经 convertFileSrc 转成可访问地址。
-  const videoUrl = file.url ?? hostApi.convertFileSrc(file.filePath);
+  // 网络流分片（B 站 durl 分段等）：>1 段时按序连续播放
+  const segments = file.urls && file.urls.length > 1 ? file.urls : null;
+  const [segIndex, setSegIndex] = useState(0);
+  // 切分片后需要自动续播
+  const continuePlayRef = useRef(false);
+  // 换文件时重置分片游标
+  useEffect(() => {
+    setSegIndex(0);
+    continuePlayRef.current = false;
+  }, [file.filePath, file.url]);
+
+  // 网络流（如网易云 MV / 网络视频）直接用 url；本地文件经 convertFileSrc 转成可访问地址。
+  const videoUrl = segments
+    ? segments[Math.min(segIndex, segments.length - 1)]
+    : file.url ?? hostApi.convertFileSrc(file.filePath);
 
   // 当前视频在列表中的位置（本地文件用 filePath，网络流 MV 用 url 作为定位 key）
   const currentIndex = useMemo(() =>
     videoList.findIndex(v => (v.filePath || v.url) === (file.filePath || file.url)),
     [file.filePath, file.url, videoList]
   );
-  const isFirst = currentIndex <= 0;
-  const isLast = currentIndex >= videoList.length - 1;
+  const hasMoreSegments = !!segments && segIndex < segments.length - 1;
+  const isFirst = currentIndex <= 0 && !hasMoreSegments;
+  const isLast = currentIndex >= videoList.length - 1 && !hasMoreSegments;
 
   // 用 ref 保存最新导航状态，避免 smtc-control 监听器闭包捕获到过期的 currentIndex/isFirst/isLast。
   const navRef = useRef({ currentIndex, isFirst, isLast, videoList, onFileChange });
@@ -261,6 +280,12 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
     const onTimeUpdate = () => setCurrentTime(video.currentTime);
     const onLoadedMetadata = () => setDuration(video.duration);
     const onEnded = () => {
+      // 多分片网络流：先把当前视频的所有分段播完，再轮到「下一集」
+      if (segments && segIndex < segments.length - 1) {
+        continuePlayRef.current = true;
+        setSegIndex(segIndex + 1);
+        return;
+      }
       setIsPlaying(false);
       // 自动播放下一集
       if (settings.autoPlayNext && !isLast && currentIndex >= 0) {
@@ -284,7 +309,19 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       video.removeEventListener('loadedmetadata', onLoadedMetadata);
       video.removeEventListener('ended', onEnded);
     };
-  }, [file.filePath]);
+    // 依赖里带上 segments/segIndex：切分片后必须重新绑定，否则 onEnded 闭包里的
+    // segIndex 会停留在旧值，导致「播完一段就不再续播」。
+  }, [file.filePath, file.url, segments, segIndex, isLast, currentIndex, videoList, onFileChange, settings.autoPlayNext]);
+
+  // 分片续播：src 切换完成后自动接着播（用户手动暂停时不续播）
+  useEffect(() => {
+    if (!continuePlayRef.current) return;
+    continuePlayRef.current = false;
+    const v = videoRef.current;
+    if (!v) return;
+    const p = v.play();
+    if (p && typeof p.catch === 'function') p.catch(() => { /* 自动播放被拦截，忽略 */ });
+  }, [segIndex]);
 
   // Windows 任务栏「正在播放」媒体控件：
   //  - JS mediaSession：把文件名作为标题推送（兜底；Chromium 可能已被 --disable-features=MediaSession 禁用，故全程 guard）。

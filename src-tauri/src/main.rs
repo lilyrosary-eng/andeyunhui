@@ -320,6 +320,23 @@ fn main() {
                 .body(content)
                 .unwrap()
         })
+        // ================= 媒体中继协议 bimedia:// =================
+        // B站/抖音 CDN 强制校验 Referer（实测无 Referer 或应用来源一律 403，只有
+        // `Referer: https://www.bilibili.com` 才 206），而 <video> 的 Referer 由 WebView
+        // 决定、前端无法伪造。故把媒体请求转交 Rust：带正确 Referer 取流并转发 Range。
+        // URL 形态（tauri 2.x 约定）：Windows/Android 为 http://bimedia.localhost/<...>，
+        // macOS/Linux 为 bimedia://localhost/<...>。前端见 plugins/玉兰/src/online/mediaProxy.ts。
+        .register_asynchronous_uri_scheme_protocol("bimedia", |_ctx, request, responder| {
+            let uri = request.uri().clone();
+            let range = request
+                .headers()
+                .get(tauri::http::header::RANGE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            tauri::async_runtime::spawn(async move {
+                responder.respond(andeyunhui_lib::media_relay::handle(&uri, range).await);
+            });
+        })
         .setup(|app| {
             app.manage(PendingOpenFiles(Default::default()));
             // 数据根（可配置存放位置）：必须在任意 app_data 子路径被使用前维护 junction / 执行 pending 迁移
@@ -1137,11 +1154,20 @@ andeyunhui_lib::services::qishui_proxy::qishui_download_audio,
 andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 哔哩哔哩 WebAPI 代理（玉兰视频模块·网络视频）：TS 端 wbi 签名 + Rust 无 CORS 转发 ==========
             andeyunhui_lib::services::bilibili_proxy::bilibili_request,
+            // ========== 抖音 WebAPI / 分享页代理（玉兰视频模块·网络视频）：TS 端解析 + Rust 无 CORS 转发 ==========
+            andeyunhui_lib::services::douyin_proxy::douyin_request,
             // ========== 音乐下载：前端取链后由 Rust 落地到本地文件 ==========
             download_file,
-            // ========== 网络视频嗅探下载：直链 + HLS(m3u8→mp4) ==========
+            // ========== 网络视频下载：直链/多段拼接 + HLS(m3u8→mp4) ==========
             download_video,
             download_hls,
+            // ========== 内嵌浏览器（网络视频·面板区当浏览器）：子 webview + 资源嗅探 ==========
+            andeyunhui_lib::embedded_browser::browser_open,
+            andeyunhui_lib::embedded_browser::browser_set_bounds,
+            andeyunhui_lib::embedded_browser::browser_navigate,
+            andeyunhui_lib::embedded_browser::browser_sniff,
+            andeyunhui_lib::embedded_browser::browser_current_url,
+            andeyunhui_lib::embedded_browser::browser_close,
             // ========== 模块：Windows 原生 SMTC（任务栏「正在播放」）==========
             smtc_update,
             smtc_control,

@@ -217,13 +217,13 @@ function TransferPanel({
         {/* 下拉总览：列出全部待发送文件，可逐个移除或清空 */}
         {stagedOpen && staged.length > 0 && (
           <div
-            style={{ position: 'absolute', left: 0, right: 0, top: 'calc(100% + 4px)', zIndex: 15, background: '#232326', borderRadius: 9, border: '1px solid rgba(255,255,255,0.12)', boxShadow: '0 8px 28px rgba(0,0,0,0.5)', padding: 6, maxHeight: 180, overflowY: 'auto' }}
+            style={{ position: 'absolute', left: 0, right: 0, top: 'calc(100% + 4px)', zIndex: 15, background: '#232326', borderRadius: 9, border: '1px solid rgba(255,255,255,0.12)', boxShadow: '0 8px 28px rgba(0,0,0,0.5)', padding: 6, maxHeight: 75, overflowY: 'auto' }}
             onClick={(e) => e.stopPropagation()}
           >
             {staged.map((p) => {
               const name = p.split(/[/]/).pop() || p;
               return (
-                <div key={p} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 6px', borderRadius: 6 }} title={p}>
+                <div key={p} style={{ display: 'flex', alignItems: 'center', gap: 6, height: 25, padding: '0 6px', borderRadius: 6 }} title={p}>
                   <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: 'rgba(244,244,246,0.9)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
                   <button onClick={() => setStaged((prev) => { const next = prev.filter((x) => x !== p); if (next.length === 0) setStagedOpen(false); return next; })} title={t('capsule.remove')} style={{ ...btnBase, width: 18, height: 18, fontSize: 12, lineHeight: '16px', color: 'rgba(244,244,246,0.7)', flex: '0 0 auto' }}>×</button>
                 </div>
@@ -280,7 +280,7 @@ function TransferPanel({
         <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 20 }} onClick={(e) => { e.stopPropagation(); setConfirmPeer(null); }}>
           <div style={{ background: '#1c1c1e', borderRadius: 12, padding: 16, width: 260, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }} onClick={(e) => e.stopPropagation()}>
             <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f6f8' }}>{t('capsule.sendToConfirm', { alias: confirmPeer.alias })}</div>
-            <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.6)', marginTop: 6 }}>
+            <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.6)', marginTop: 6, maxHeight: 75, overflowY: 'auto', wordBreak: 'break-all' as const }}>
               共 {staged.length} 个文件（{staged.map((p) => p.split(/[/]/).pop()).join('、')}）
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
