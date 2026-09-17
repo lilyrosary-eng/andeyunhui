@@ -725,6 +725,60 @@ pub struct ListenStatRow {
     pub total_ms: i64,
 }
 
+/// 元数据规范化：全角空格→半角、折叠连续空白、去首尾空白、小写——用于「同一首歌」判定
+fn normalize_meta(s: &str) -> String {
+    let replaced: String = s.chars().map(|c| if c == '\u{3000}' { ' ' } else { c }).collect();
+    let mut out = String::new();
+    let mut prev_space = true;
+    for c in replaced.chars() {
+        if c == ' ' {
+            if !prev_space { out.push(' '); prev_space = true; }
+        } else {
+            prev_space = false;
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
+/// 同一首歌判定：规范化(标题,歌手)完全一致 且 时长差 ≤3s。
+/// 同一首歌被复制到多个文件夹时 track_id 不同、但元数据与时长一致 → 合并统计；
+/// 不同演绎（Live/Remix/翻唱）时长不同 → 保持分开，不误合并。
+/// 输入行 (track_id, title, artist, duration_ms, play_count)；返回按 play_count 降序的合并结果，
+/// track_id/title/artist 取簇内播放次数最多的行。仅读取层合并，历史数据无需迁移。
+fn merge_listen_tracks(
+    rows: Vec<(String, String, String, i64, i64)>,
+) -> Vec<RankingTrack> {
+    use std::collections::HashMap;
+    let mut groups: HashMap<(String, String), Vec<(String, String, String, i64, i64)>> = HashMap::new();
+    for (tid, title, artist, dur, pc) in rows {
+        groups
+            .entry((normalize_meta(&title), normalize_meta(&artist)))
+            .or_default()
+            .push((tid, title, artist, dur, pc));
+    }
+    let mut out = Vec::new();
+    for (_, mut items) in groups {
+        items.sort_by_key(|(_, _, _, dur, _)| *dur);
+        // 时长聚簇：排序后相邻差 ≤3000ms 归为同一演绎
+        let mut clusters: Vec<(i64, i64, i64, String, String, String)> = Vec::new(); // (rep_dur, pc_sum, best_pc, tid, title, artist)
+        for (tid, title, artist, dur, pc) in items {
+            match clusters.last_mut() {
+                Some(c) if (dur - c.0).abs() <= 3000 => {
+                    c.1 += pc;
+                    if pc > c.2 { c.2 = pc; c.3 = tid; c.4 = title; c.5 = artist; }
+                }
+                _ => clusters.push((dur, pc, pc, tid, title, artist)),
+            }
+        }
+        for (_, pc, _, tid, title, artist) in clusters {
+            out.push(RankingTrack { track_id: tid, title, artist, play_count: pc });
+        }
+    }
+    out.sort_by(|a, b| b.play_count.cmp(&a.play_count));
+    out
+}
+
 /// 记录一次播放（每次切歌/开始播放调用）。同时维护 listen_daily 与 listen_day_track 聚合。
 pub fn music_record_play_session(
     app: AppHandle,
@@ -755,7 +809,8 @@ pub fn music_record_play_session(
     Ok(())
 }
 
-/// 返回最近 N 天的每日汇总（按 day 升序）。
+/// 返回最近 N 天的每日汇总（按 day 升序）。track_count 读取层按「同一首歌」规则重算，
+/// 避免同一首歌被复制到多个文件夹时重复计数。
 pub fn music_get_listen_stats(app: AppHandle, days: i64) -> Result<Vec<ListenStatRow>, String> {
     let conn = open_db(&app)?;
     let mut stmt = conn
@@ -777,6 +832,54 @@ pub fn music_get_listen_stats(app: AppHandle, days: i64) -> Result<Vec<ListenSta
     let mut out = Vec::new();
     for row in rows {
         out.push(row.map_err(|e| format!("统计行解析失败: {}", e))?);
+    }
+
+    // 每天曲目数重算：读取区间内逐行 (day, title, artist, duration_ms)，按「同一首歌」聚簇去重
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT day, title, artist, duration_ms FROM listen_day_track
+             WHERE day >= date('now', '-{} days')",
+            days.max(1) - 1
+        ))
+        .map_err(|e| format!("查询每日曲目失败: {}", e))?;
+    let raw = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| format!("读取每日曲目失败: {}", e))?;
+    let mut per_day: std::collections::HashMap<String, Vec<(String, String, i64)>> = std::collections::HashMap::new();
+    for row in raw {
+        let (day, title, artist, dur) = row.map_err(|e| format!("每日曲目行解析失败: {}", e))?;
+        per_day.entry(day).or_default().push((title, artist, dur));
+    }
+    for row in out.iter_mut() {
+        if let Some(items) = per_day.get(&row.day) {
+            let mut groups: std::collections::HashMap<(String, String), Vec<i64>> = std::collections::HashMap::new();
+            for (t, a, d) in items {
+                groups
+                    .entry((normalize_meta(t), normalize_meta(a)))
+                    .or_default()
+                    .push(*d);
+            }
+            let mut cnt = 0i64;
+            for (_, mut durs) in groups {
+                durs.sort_unstable();
+                let mut last: Option<i64> = None;
+                for d in durs {
+                    match last {
+                        Some(l) if (d - l).abs() <= 3000 => {}
+                        _ => cnt += 1,
+                    }
+                    last = Some(d);
+                }
+            }
+            row.track_count = cnt;
+        }
     }
     Ok(out)
 }
@@ -839,48 +942,63 @@ pub fn music_get_listen_ranking(app: AppHandle, days: i64) -> Result<ListenRanki
     let prev_total_plays = sum_field(&prev_cond, "play_count")?;
     let prev_total_ms = sum_field(&prev_cond, "total_ms")?;
 
-    // Top 歌曲：按 track_id 汇总 play_count，取前 10
+    // Top 歌曲：读取原始行后按「同一首歌」合并（规范化标题+歌手 100% 相等 且 时长差 ≤3s），
+    // 同一首歌被复制到多个文件夹时合并统计；不同演绎（Live/Remix/翻唱）时长不同保持分开
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT track_id, title, artist, SUM(play_count) AS pc FROM listen_day_track
-             WHERE day >= date('now', '-{} days') GROUP BY track_id ORDER BY pc DESC LIMIT 10",
+            "SELECT track_id, title, artist, duration_ms, SUM(play_count) AS pc FROM listen_day_track
+             WHERE day >= date('now', '-{} days') GROUP BY track_id",
             days - 1
         ))
         .map_err(|e| format!("查询 Top 歌曲失败: {}", e))?;
-    let top_tracks = stmt
+    let raw_tracks = stmt
         .query_map([], |r| {
-            Ok(RankingTrack {
-                track_id: r.get(0)?,
-                title: r.get(1)?,
-                artist: r.get(2)?,
-                play_count: r.get(3)?,
-            })
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
         })
         .map_err(|e| format!("读取 Top 歌曲失败: {}", e))?;
-    let mut top_tracks = top_tracks
+    let raw_tracks = raw_tracks
         .map(|x| x.map_err(|e| format!("Top 歌曲行解析失败: {}", e)))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut top_tracks = merge_listen_tracks(raw_tracks);
+    top_tracks.truncate(10);
 
-    // Top 歌手：按 artist 汇总 play_count，取前 10
+    // Top 歌手：按规范化歌手名合并（同一歌手的不同写法合并统计），显示名取播放次数最多的原文
     let mut stmt = conn
         .prepare(&format!(
             "SELECT artist, SUM(play_count) AS pc FROM listen_day_track
              WHERE day >= date('now', '-{} days') AND artist IS NOT NULL AND artist != ''
-             GROUP BY artist ORDER BY pc DESC LIMIT 10",
+             GROUP BY artist",
             days - 1
         ))
         .map_err(|e| format!("查询 Top 歌手失败: {}", e))?;
-    let top_artists = stmt
+    let raw_artists = stmt
         .query_map([], |r| {
-            Ok(RankingArtist {
-                artist: r.get(0)?,
-                play_count: r.get(1)?,
-            })
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+            ))
         })
         .map_err(|e| format!("读取 Top 歌手失败: {}", e))?;
-    let mut top_artists = top_artists
-        .map(|x| x.map_err(|e| format!("Top 歌手行解析失败: {}", e)))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut artist_agg: std::collections::HashMap<String, (i64, String, i64)> = std::collections::HashMap::new();
+    for row in raw_artists {
+        let (artist, pc) = row.map_err(|e| format!("Top 歌手行解析失败: {}", e))?;
+        let key = normalize_meta(&artist);
+        let e = artist_agg.entry(key).or_insert((0, artist.clone(), 0));
+        e.0 += pc;
+        if pc > e.2 { e.2 = pc; e.1 = artist; }
+    }
+    let mut top_artists: Vec<RankingArtist> = artist_agg
+        .into_iter()
+        .map(|(_, (pc, name, _))| RankingArtist { artist: name, play_count: pc })
+        .collect();
+    top_artists.sort_by(|a, b| b.play_count.cmp(&a.play_count));
+    top_artists.truncate(10);
 
     // 空 artist 兜底为「未知」
     for t in top_tracks.iter_mut() {

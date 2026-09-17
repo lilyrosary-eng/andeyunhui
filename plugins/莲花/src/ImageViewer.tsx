@@ -219,8 +219,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
     return Math.min(Math.max((horiz ? el.scrollLeft : el.scrollTop) / total, 0), 1);
   }, [viewMode]);
 
-  // 菜单进度（0~1000）：拖动中锁定（scrubbing），其余时机跟随滚动与内容尺寸变化
-  const scrubbingRef = useRef(false);
+  // 菜单进度（0~1000）：跟随滚动、拖动与内容尺寸变化
   const [menuPct, setMenuPct] = useState(0);
 
   // 菜单进度条跳转：按比例滚动 + 窗口立即对准目标图片（即时缓冲、无感加载）
@@ -249,7 +248,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
     if (!menuOpen || viewMode === 'full') return;
     setMenuPct(readScrollRatio() * 1000);
     const t = setInterval(() => {
-      if (!scrubbingRef.current) setMenuPct(readScrollRatio() * 1000);
+      setMenuPct(readScrollRatio() * 1000);
     }, 200);
     return () => clearInterval(t);
   }, [menuOpen, viewMode, readScrollRatio]);
@@ -274,7 +273,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
         if (off <= target) { ans = mid; lo = mid + 1; } else { hi = mid - 1; }
       }
       setCurrentIndex(ans);
-      if (!scrubbingRef.current) setMenuPct(readScrollRatio() * 1000);
+      setMenuPct(readScrollRatio() * 1000);
     };
     const onScroll = () => { if (!raf) raf = requestAnimationFrame(update); };
     el.addEventListener('scroll', onScroll, { passive: true });
@@ -417,26 +416,15 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
         {/* 中心唤出的跳转菜单（滚动三模式）：进度按滚动相对比例映射，内容被图片加载撑大时自动同步 */}
         {menuOpen && viewMode !== 'full' && (
           <div className="absolute inset-0 z-30" onClick={() => setMenuOpen(false)}>
-            <style>{IMG_JUMP_RANGE_CSS}</style>
             <div
-              className="absolute bottom-12 left-1/2 -translate-x-1/2 rounded-2xl pl-4 pr-4 py-3 flex items-center gap-4 shadow-[0_18px_48px_-6px_rgba(0,0,0,0.55),0_6px_18px_rgba(0,0,0,0.35)]"
+              className="absolute bottom-12 left-1/2 -translate-x-1/2 rounded-2xl pl-4 pr-4 py-3 flex items-center gap-4"
+              style={{ boxShadow: '0 18px 48px -6px rgba(0,0,0,0.55), 0 6px 18px rgba(0,0,0,0.35)' }}
               onClick={(e) => e.stopPropagation()}
             >
               <span className="text-xs text-white tabular-nums whitespace-nowrap bg-white/10 rounded-full px-3 py-1">
                 {Math.min(currentIndex + 1, images.length)}<span className="text-white/50"> / {images.length}</span>
               </span>
-              <input
-                type="range"
-                min={0}
-                max={1000}
-                value={Math.round(menuPct)}
-                onChange={(e) => handleMenuScrub(parseInt(e.target.value, 10) / 1000)}
-                onPointerDown={() => { scrubbingRef.current = true; }}
-                onPointerUp={() => { scrubbingRef.current = false; }}
-                onPointerCancel={() => { scrubbingRef.current = false; }}
-                className="imgj-range w-[min(52vw,460px)]"
-                style={{ '--fill': `${Math.round(menuPct) / 10}%` } as React.CSSProperties}
-              />
+              <ScrubBar pct={menuPct / 10} onScrub={handleMenuScrub} />
             </div>
           </div>
         )}
@@ -575,14 +563,6 @@ const SCROLL_WINDOW = 20;
 const VERT_EST_H = 600;
 const HORIZ_EST_W = 720;
 
-// 菜单进度条样式：渐变已播放轨道 + 光晕 thumb（--fill 由内联变量驱动）
-const IMG_JUMP_RANGE_CSS = `
-.imgj-range{-webkit-appearance:none;appearance:none;height:6px;border-radius:9999px;background:linear-gradient(to right,var(--element-bg) var(--fill,0%),rgba(255,255,255,.16) var(--fill,0%));outline:none;cursor:pointer}
-.imgj-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 0 0 4px rgba(255,255,255,.14),0 2px 8px rgba(0,0,0,.45);transition:transform .12s ease}
-.imgj-range:hover::-webkit-slider-thumb{transform:scale(1.15)}
-.imgj-range:active::-webkit-slider-thumb{transform:scale(1.25)}
-`;
-
 // ========== 竖版模式 ==========
 function VerticalView({ imgUrls, scrollRef, onCenterClick, currentIndex }: {
   imgUrls: string[];
@@ -697,6 +677,53 @@ function HorizontalView({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ========== 自绘进度条（滚动模式菜单用） ==========
+// 不用 <input type="range">：thumb 样式依赖伪元素 CSS（<style> 注入），打包产物中出现过
+// 样式失效回退浏览器默认外观的问题；自绘全部走内联 style，与构建方式/运行环境无关，视觉不丢。
+function ScrubBar({ pct, onScrub }: { pct: number; onScrub: (ratio: number) => void }) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [hovering, setHovering] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const p = Math.min(Math.max(pct, 0), 100);
+
+  const ratioFromEvent = (clientX: number) => {
+    const el = trackRef.current;
+    if (!el) return 0;
+    const r = el.getBoundingClientRect();
+    return Math.min(Math.max((clientX - r.left) / Math.max(r.width, 1), 0), 1);
+  };
+
+  return (
+    <div
+      ref={trackRef}
+      style={{ position: 'relative', width: 'min(52vw, 460px)', height: 24, display: 'flex', alignItems: 'center', cursor: 'pointer', touchAction: 'none' }}
+      onPointerDown={(e) => {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        setDragging(true);
+        onScrub(ratioFromEvent(e.clientX));
+      }}
+      onPointerMove={(e) => { if (dragging) onScrub(ratioFromEvent(e.clientX)); }}
+      onPointerUp={() => setDragging(false)}
+      onPointerCancel={() => setDragging(false)}
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
+    >
+      {/* 轨道 */}
+      <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', height: 6, transform: 'translateY(-50%)', borderRadius: 9999, background: 'rgba(255,255,255,0.18)' }} />
+      {/* 已播放填充 */}
+      <div style={{ position: 'absolute', left: 0, width: `${p}%`, top: '50%', height: 6, transform: 'translateY(-50%)', borderRadius: 9999, background: 'var(--element-bg, #d4a531)' }} />
+      {/* 圆点（hover/拖动放大） */}
+      <div style={{
+        position: 'absolute', left: `${p}%`, top: '50%',
+        width: dragging ? 16 : (hovering ? 15 : 13), height: dragging ? 16 : (hovering ? 15 : 13),
+        transform: 'translate(-50%, -50%)', borderRadius: '50%', background: '#fff',
+        boxShadow: '0 0 0 4px rgba(255,255,255,0.14), 0 2px 8px rgba(0,0,0,0.45)',
+        transition: 'width 0.12s ease, height 0.12s ease', pointerEvents: 'none',
+      }} />
     </div>
   );
 }
