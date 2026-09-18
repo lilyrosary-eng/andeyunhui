@@ -52,12 +52,27 @@ function getTailwindCss(): string {
 }
 
 /**
+ * 插件全局滑条样式：与主程序 src/index.css 的 input[type=range] 规则保持一致。
+ * 插件注入的 Tailwind 只有 utilities，不含 index.css 的全局规则，若不在此补充，
+ * 插件内所有 input[type=range]（播放器进度、音量、绘画笔刷等）会回退浏览器默认灰条外观。
+ */
+const PLUGIN_RANGE_CSS = `
+input[type="range"]{-webkit-appearance:none;appearance:none;border-radius:9999px;background:rgba(127,127,127,.22)}
+input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:12px;height:12px;border-radius:50%;background:var(--element-bg,#5a7f5d);cursor:pointer;transition:background .15s;box-shadow:0 0 0 3px rgba(255,255,255,.12)}
+input[type="range"]:hover::-webkit-slider-thumb{background:color-mix(in srgb,var(--element-bg,#5a7f5d),black 15%)}
+input[type="range"]:active::-webkit-slider-thumb{background:color-mix(in srgb,var(--element-bg,#5a7f5d),black 30%)}
+input[type="range"]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--element-bg,#5a7f5d);border:none;cursor:pointer;transition:background .15s}
+input[type="range"]:hover::-moz-range-thumb{background:color-mix(in srgb,var(--element-bg,#5a7f5d),black 15%)}
+input[type="range"]:active::-moz-range-thumb{background:color-mix(in srgb,var(--element-bg,#5a7f5d),black 30%)}
+`;
+
+/**
  * 生成插件 vite 配置。
  */
 export function createPluginConfig(pluginName: string) {
   const tailwindCss = getTailwindCss();
   // 将 CSS 转为 JS 代码：在插件加载时创建 <style> 标签注入到 document.head
-  const cssInjectionJs = `(function(){if(typeof document!=='undefined'){var s=document.createElement('style');s.textContent=${JSON.stringify(tailwindCss)};document.head.appendChild(s);}})();`;
+  const cssInjectionJs = `(function(){if(typeof document!=='undefined'){var s=document.createElement('style');s.textContent=${JSON.stringify(tailwindCss + PLUGIN_RANGE_CSS)};document.head.appendChild(s);}})();`;
 
   return defineConfig({
     // 每个插件进程使用独立 cacheDir，避免多插件并发构建时共享 Vite/esbuild

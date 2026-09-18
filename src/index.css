@@ -436,10 +436,12 @@
   background: rgba(148, 163, 184, 0.4);
 }
 
-/* 原生 range 滑条 — thumb hover/active 变深 */
+/* 原生 range 滑条 — 统一圆角轨道 + thumb hover/active 变深 */
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
+  border-radius: 9999px;
+  background: rgba(127, 127, 127, 0.22);
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -450,6 +452,7 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--element-bg);
   cursor: pointer;
   transition: background 0.15s;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.12);
 }
 input[type="range"]:hover::-webkit-slider-thumb {
   background: color-mix(in srgb, var(--element-bg), black 15%);

@@ -218,6 +218,11 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
   // EQ 动画 — 真实律动：使用 WASAPI Loopback 频域数据，降级到伪律动
   useEffect(() => {
+    // 本页是频谱唯一消费者：挂载时唤醒 Rust 采集线程，卸载时休眠（省 CPU/IPC）
+    musicPlayer.requestSpectrum();
+    return () => { musicPlayer.releaseSpectrum(); };
+  }, []);
+  useEffect(() => {
     const freqData = new Uint8Array(64);
     const animate = () => {
       const analyser = musicPlayer.getAnalyser();

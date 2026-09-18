@@ -40,9 +40,14 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
   useEffect(() => {
     let cancelled = false;
     const un: Array<() => void> = [];
+    // 防孤儿监听器：每个 listen 注册成功后立即入列（cleanup 可即时清理），
+    // 且各 handler 首行做 cancelled 守卫——异步注册期间到达的事件被丢弃。
+    // 此前「全部注册完才统一入列」+ effect 渲染期重建，会让旧监听器在
+    // cleanup 与新注册完成之间存活多个 token 周期，同一 delta 被重复追加。
     (async () => {
       // delta：append 追加 delta 字段；replace 用 text 字段整体替换
       const u1 = await listen<{ requestId: string; delta?: string; text?: string }>(`${prefix}-delta`, (e) => {
+        if (cancelled) return;
         if (e.payload.requestId !== reqRef.current) return;
         const id = asstRef.current;
         const cid = streamConvIdRef.current;
@@ -53,6 +58,8 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
           return deltaMode === 'append' ? { ...m, content: m.content + chunk } : { ...m, content: chunk };
         }));
       });
+      if (cancelled) { u1(); return; }
+      un.push(u1);
 
       // finish：done / error 共用，清理请求态并定稿助手消息
       const finish = (err?: string) => {
@@ -71,27 +78,31 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
       };
 
       const u2 = await listen<{ requestId: string }>(`${prefix}-done`, (e) => {
+        if (cancelled) return;
         if (e.payload.requestId === reqRef.current) finish();
       });
+      if (cancelled) { u2(); return; }
+      un.push(u2);
+
       const u3 = await listen<{ requestId: string; error: string }>(`${prefix}-error`, (e) => {
+        if (cancelled) return;
         if (e.payload.requestId === reqRef.current) finish(e.payload.error);
       });
-
-      const unAll: Array<() => void> = [u1, u2, u3];
+      if (cancelled) { u3(); return; }
+      un.push(u3);
 
       // 思考过程增量（仅对话类模式有）
       if (hasReasoning) {
         const u4 = await listen<{ requestId: string; delta: string }>(`${prefix}-reasoning-delta`, (e) => {
+          if (cancelled) return;
           if (e.payload.requestId !== reqRef.current || !asstRef.current) return;
           const id = asstRef.current;
           const cid = streamConvIdRef.current;
           updateMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, reasoning: (m.reasoning || '') + e.payload.delta } : m)));
         });
-        unAll.push(u4);
+        if (cancelled) { u4(); return; }
+        un.push(u4);
       }
-
-      if (cancelled) { unAll.forEach((f) => f()); return; }
-      un.push(...unAll);
     })();
     return () => { cancelled = true; un.forEach((f) => f()); };
   }, [prefix, deltaMode, hasReasoning, updateMessages, setBusy]);

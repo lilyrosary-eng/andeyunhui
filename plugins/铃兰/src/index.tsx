@@ -450,6 +450,8 @@ type RankingTrack = {
   title: string;
   artist: string;
   playCount: number;
+  /** 合并来源数：同曲多文件夹副本 >1（后端按「同一首歌」规则合并） */
+  groupCount?: number;
 };
 
 type RankingArtist = {
@@ -602,18 +604,26 @@ function MusicStatsView({ onClose, favoriteCount = 0 }: { onClose: () => void; f
             </div>
 
             <div>
-              <div className="text-sm text-neutral-500 dark:text-stone-400 mb-3">{T('music.stats.dailyTrend')}</div>
+              <div className="flex items-baseline justify-between mb-3">
+                <div className="text-sm text-neutral-500 dark:text-stone-400">{T('music.stats.dailyTrend')}</div>
+                <div className="text-xs text-neutral-400 dark:text-stone-500 tabular-nums">
+                  {T('music.stats.distinctTracks')} · {statRows.reduce((s, r) => s + r.trackCount, 0)}
+                </div>
+              </div>
               <div className="space-y-1.5">
                 {daily.length === 0 ? (
                   <div className="text-neutral-400 dark:text-stone-500 text-sm py-6 text-center">{T('music.stats.noData')}</div>
                 ) : (
                   daily.map(([date, plays]) => (
                     <div key={date} className="flex items-center gap-3">
-                      <div className="w-20 shrink-0 text-xs text-neutral-500 dark:text-stone-400 tabular-nums">{date.slice(5)}</div>
+                      <div className="w-20 shrink-0 text-xs text-neutral-500 dark:text-stone-400 tabular-nums" title={date}>{date.slice(5)}</div>
                       <div className="flex-1 h-5 rounded-md bg-black/5 dark:bg-white/5 overflow-hidden">
                         <div
-                          className="h-full rounded-md bg-[var(--element-color-raw)]/80"
-                          style={{ width: maxPlays > 0 ? `${Math.max((plays / maxPlays) * 100, plays > 0 ? 4 : 0)}%` : '0%' }}
+                          className="h-full rounded-md"
+                          style={{
+                            width: maxPlays > 0 ? `${Math.max((plays / maxPlays) * 100, plays > 0 ? 4 : 0)}%` : '0%',
+                            background: 'linear-gradient(to right, var(--element-color-raw), color-mix(in srgb, var(--element-color-raw), white 30%))',
+                          }}
                         />
                       </div>
                       <div className="w-10 shrink-0 text-xs text-neutral-500 dark:text-stone-400 text-right tabular-nums">{plays}</div>
@@ -629,19 +639,45 @@ function MusicStatsView({ onClose, favoriteCount = 0 }: { onClose: () => void; f
                 {(ranking?.topTracks?.length ?? 0) === 0 ? (
                   <div className="text-neutral-400 dark:text-stone-500 text-sm py-6 text-center">{T('music.stats.noData')}</div>
                 ) : (
-                  <div className="space-y-1">
-                    {ranking!.topTracks.map((t, i) => (
-                      <div key={t.trackId} className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5">
-                        <div className="w-5 text-right text-xs text-neutral-400 dark:text-stone-500 tabular-nums">{i + 1}</div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm text-neutral-800 dark:text-stone-100 truncate">{t.title || T('music.stats.unknownTrack')}</div>
-                          <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">{t.artist}</div>
+                  <div className="space-y-1.5">
+                    {ranking!.topTracks.map((t, i) => {
+                      const maxPc = ranking!.topTracks[0]?.playCount || 1;
+                      const pct = Math.max(Math.round((t.playCount / maxPc) * 100), 4);
+                      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : null;
+                      return (
+                        <div key={t.trackId} className="px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5">
+                          <div className="flex items-center gap-3">
+                            <div className={'w-6 text-center text-xs tabular-nums flex-shrink-0 ' + (medal ? '' : 'text-neutral-400 dark:text-stone-500')}>
+                              {medal || i + 1}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm text-neutral-800 dark:text-stone-100 truncate">{t.title || T('music.stats.unknownTrack')}</div>
+                              <div className="text-xs text-neutral-500 dark:text-stone-400 truncate">{t.artist}</div>
+                            </div>
+                            <div className="shrink-0 text-xs text-neutral-500 dark:text-stone-400 tabular-nums flex items-center gap-1.5">
+                              {(t.groupCount ?? 1) > 1 && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded-full bg-[var(--element-bg)]/15 text-[10px] text-[var(--element-color-raw)]"
+                                  title={`${T('music.stats.mergedCopies')}: ${t.groupCount}`}
+                                >
+                                  ×{t.groupCount}
+                                </span>
+                              )}
+                              <span>{t.playCount} {T('music.stats.repeatUnit')}</span>
+                            </div>
+                          </div>
+                          <div className="mt-1.5 ml-9 h-1 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
+                            <div
+                              className="h-full rounded-full"
+                              style={{
+                                width: `${pct}%`,
+                                background: 'linear-gradient(to right, var(--element-bg, #5a7f5d), color-mix(in srgb, var(--element-bg, #5a7f5d), white 35%))',
+                              }}
+                            />
+                          </div>
                         </div>
-                        <div className="shrink-0 text-xs text-neutral-500 dark:text-stone-400 tabular-nums">
-                          {t.playCount} {T('music.stats.repeatUnit')}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -651,18 +687,36 @@ function MusicStatsView({ onClose, favoriteCount = 0 }: { onClose: () => void; f
                 {(ranking?.topArtists?.length ?? 0) === 0 ? (
                   <div className="text-neutral-400 dark:text-stone-500 text-sm py-6 text-center">{T('music.stats.noData')}</div>
                 ) : (
-                  <div className="space-y-1">
-                    {ranking!.topArtists.map((a, i) => (
-                      <div key={a.artist} className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5">
-                        <div className="w-5 text-right text-xs text-neutral-400 dark:text-stone-500 tabular-nums">{i + 1}</div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm text-neutral-800 dark:text-stone-100 truncate">{a.artist}</div>
+                  <div className="space-y-1.5">
+                    {ranking!.topArtists.map((a, i) => {
+                      const maxPc = ranking!.topArtists[0]?.playCount || 1;
+                      const pct = Math.max(Math.round((a.playCount / maxPc) * 100), 4);
+                      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : null;
+                      return (
+                        <div key={a.artist} className="px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5">
+                          <div className="flex items-center gap-3">
+                            <div className={'w-6 text-center text-xs tabular-nums flex-shrink-0 ' + (medal ? '' : 'text-neutral-400 dark:text-stone-500')}>
+                              {medal || i + 1}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm text-neutral-800 dark:text-stone-100 truncate">{a.artist}</div>
+                            </div>
+                            <div className="shrink-0 text-xs text-neutral-500 dark:text-stone-400 tabular-nums">
+                              {a.playCount} {T('music.stats.playCountUnit')}
+                            </div>
+                          </div>
+                          <div className="mt-1.5 ml-9 h-1 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
+                            <div
+                              className="h-full rounded-full"
+                              style={{
+                                width: `${pct}%`,
+                                background: 'linear-gradient(to right, var(--element-bg, #5a7f5d), color-mix(in srgb, var(--element-bg, #5a7f5d), white 35%))',
+                              }}
+                            />
+                          </div>
                         </div>
-                        <div className="shrink-0 text-xs text-neutral-500 dark:text-stone-400 tabular-nums">
-                          {a.playCount} {T('music.stats.playCountUnit')}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1230,9 +1284,9 @@ useEffect(() => {
       overrides = await loadCoverOverridesFromDb();
       if (!cancelled && overrides.size > 0) setCoverOverrides(overrides);
 
-      // 1. 先尝试为每个路径加载缓存
+      // 1. 先尝试为每个路径加载缓存（多 root 并行，避免串行 await 叠加模块切入延迟）
       const pathsToScan: string[] = [];
-      for (const rp of rootPaths) {
+      await Promise.all(rootPaths.map(async (rp) => {
         try {
           const cached = await hostApi.invoke('load_music_cache', { rootPath: rp }) as
             | { tracks: Track[]; dirMtimeMs: number }
@@ -1244,7 +1298,7 @@ useEffect(() => {
               if (cancelled) return;
               console.log('[Music] 缓存命中:', cached.tracks.length, '首 (路径:', rp, ')');
               allDirectoryPlaylists.push(...groupTracksIntoPlaylists(cached.tracks, rootPaths));
-              continue;
+              return;
             }
             console.log('[Music] 目录已变更，缓存失效需重扫:', rp);
           } else {
@@ -1254,7 +1308,7 @@ useEffect(() => {
           console.log('[Music] 缓存加载异常，需要扫描:', rp, e);
         }
         if (!cancelled) pathsToScan.push(rp);
-      }
+      }));
 
       if (cancelled) return;
 
@@ -1412,7 +1466,7 @@ useEffect(() => {
               artist: t.artist || '',
               album: t.album || '',
               durationMs: Math.round((t.durationSecs || 0) * 1000),
-              playedMs: Math.round(musicPlayer.getCurrentTime() * 1000),
+              playedMs: musicPlayer.consumePendingPlayedMs(),
             })
             .catch((e) => console.warn('[Music] 听歌统计记录失败:', tid, e));
         } catch (e) {

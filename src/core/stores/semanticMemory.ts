@@ -46,6 +46,11 @@ function ensureInit(): Promise<boolean> {
 /** 嵌入端点配置（localStorage；用户可在设置里配云端 OpenAI 兼容嵌入端点） */
 const EMBED_KEY = KEYS.companion.ragEmbed.key;
 
+/** 嵌入失败退避：失败后一段时间内不再尝试（避免每轮对话都打一次注定失败的请求）。
+ *  典型场景：算力来源是 LM Studio 且只加载了聊天模型，/v1/embeddings 必然 404/报错。 */
+let embedBackoffUntil = 0;
+const EMBED_BACKOFF_MS = 10 * 60 * 1000;
+
 export interface EmbedConfig {
   endpoint: string;
   apiKey: string;
@@ -57,6 +62,7 @@ export function getEmbedConfig(): EmbedConfig | null {
 }
 export function setEmbedConfig(c: EmbedConfig) {
   storage.setJSON(EMBED_KEY, c);
+  embedBackoffUntil = 0; // 用户改配置后立即重试（清退避）
 }
 
 /** 解析嵌入配置：显式配置优先；否则自动复用当前算力来源（降门槛）。 */
@@ -86,6 +92,7 @@ async function resolveEmbedConfig(): Promise<{ endpoint: string; apiKey: string;
 /** 嵌入一批文本（显式配置或自动复用算力来源；都无时静默降级） */
 async function embed(texts: string[]): Promise<number[][] | null> {
   if (!texts.length) return null;
+  if (Date.now() < embedBackoffUntil) return null; // 退避期内静默跳过
   const cfg = await resolveEmbedConfig();
   if (!cfg) return null; // 未配置 → L3 禁用（不阻塞对话）
   try {
@@ -98,8 +105,10 @@ async function embed(texts: string[]): Promise<number[][] | null> {
     if (res && Array.isArray(res.embeddings)) {
       return res.embeddings as number[][];
     }
+    embedBackoffUntil = Date.now() + EMBED_BACKOFF_MS;
     return null;
   } catch {
+    embedBackoffUntil = Date.now() + EMBED_BACKOFF_MS;
     return null;
   }
 }

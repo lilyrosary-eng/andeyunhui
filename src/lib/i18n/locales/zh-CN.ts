@@ -984,6 +984,8 @@ export const zhCN: Record<string, string> = {
   'music.stats.minute': '分',
   'music.stats.vs': '对比',
   'music.stats.dailyTrend': '每日播放趋势',
+  'music.stats.distinctTracks': '不同歌曲',
+  'music.stats.mergedCopies': '合并副本',
   'music.stats.noData': '暂无播放记录',
   'music.stats.topTracks': '常听歌曲',
   'music.stats.topArtists': '常听歌手',

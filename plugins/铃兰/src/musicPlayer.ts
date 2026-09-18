@@ -53,6 +53,8 @@ class MusicPlayer {
   // 频谱数据：优先使用 Rust WASAPI Loopback 真实频谱，降级到伪律动。
   // WASAPI Loopback 不干扰 WebView2 音频路由，解决了 createMediaElementSource 静音问题。
   private spectrumData: Uint8Array = new Uint8Array(64);
+  private lastTickTime = 0;
+  private pendingPlayedMs = 0;
   private hasRealSpectrum: boolean = false;  // 是否收到过 Rust 真实频谱数据
   // 用户是否已请求播放（点击播放/选曲）：用于区分"正在播放"和"暂停"状态，
   // 解决网易云延迟取地址时 play() 失败 → isPlaying=false → updateTrackUrl 不触发 play 的问题。
@@ -96,12 +98,27 @@ class MusicPlayer {
       this.handleEnded();
     });
     this.audio.addEventListener('timeupdate', () => {
+      // 实际听歌时长累计：仅播放中按 tick 增量累加，单次 delta 封顶 5s（seek 掠过不算「听」）。
+      // 用于切歌时结算上一曲的真实播放量（trackChange 时 audio.currentTime 已被重置为 0，
+      // 直接读 getCurrentTime 会把整首听完记成 0ms —— 累计听歌时长虚低的根因）。
+      const now = this.audio.currentTime;
+      if (this.playRequested && now > this.lastTickTime) {
+        this.pendingPlayedMs += Math.min(now - this.lastTickTime, 5) * 1000;
+      }
+      this.lastTickTime = now;
       this.updateMediaSessionPosition();
       this.emit('progress', {
         currentTime: this.audio.currentTime,
         duration: this.audio.duration || 0,
       });
     });
+  }
+
+  /** 结算并清零累计的实际听歌时长（切歌/暂停落库时调用）。 */
+  consumePendingPlayedMs(): number {
+    const v = Math.round(this.pendingPlayedMs);
+    this.pendingPlayedMs = 0;
+    return v;
   }
 
   // ===== Windows 任务栏「正在播放」媒体控件（Media Session API）=====
@@ -390,6 +407,21 @@ class MusicPlayer {
 
   // 监听 Rust 端 audio-spectrum 事件，接收真实频域数据
   private spectrumUnlisten: (() => void) | null = null;
+  // 频谱惰性激活：只有真实消费者（漫游页 EQ）注册时才唤醒 Rust 采集线程。
+  // 此前无条件 active:true → Rust 以 30fps 持续推送 64 桶事件，本地音乐模块
+  // 完全不消费，却让 IPC 队列被持续填充 → 切模块的请求排队 → 粘滞感。
+  private spectrumWanted = 0;
+  requestSpectrum(): void {
+    this.spectrumWanted++;
+    this.syncSpectrum();
+  }
+  releaseSpectrum(): void {
+    this.spectrumWanted = Math.max(0, this.spectrumWanted - 1);
+    this.syncSpectrum();
+  }
+  private syncSpectrum(): void {
+    window.__HOST_API__?.invoke('spectrum_set_listener', { active: this.spectrumWanted > 0 }).catch(() => {});
+  }
   private setupSpectrumListener(): void {
     const api = window.__HOST_API__;
     if (!api?.listen) return;
@@ -403,10 +435,9 @@ class MusicPlayer {
           this.spectrumData[i] = this.spectrumData[i] * 0.5 + (data[i] as number) * 0.5;
         }
       }
-    }).then((unlisten) => {
-      this.spectrumUnlisten = unlisten;
-      // 通知 Rust：已订阅频谱 → 采集线程解除休眠（无监听时 Rust 自动暂停，省 CPU）
-      api.invoke('spectrum_set_listener', { active: true }).catch(() => {});
+    }).then(() => {
+      // 初始同步：构造时 wanted=0 → Rust 采集线程保持休眠，直到有消费者请求
+      this.syncSpectrum();
     }).catch(() => {});
   }
 

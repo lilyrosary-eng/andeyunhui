@@ -169,9 +169,17 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   const reqRef = useRef<string | null>(null);
   const asstRef = useRef<string | null>(null);
   const streamConvIdRef = useRef<string>('');
+  // setBusy 必须是稳定引用：useAiStream 的 effect 依赖它，内联箭头函数会让 effect
+  // 随每次渲染重建——流式期间每个 delta 都触发渲染 → 监听器被反复拆卸重装，
+  // 异步注册跟不上重建节奏时产生「孤儿监听器」，同一 delta 被 2~3 个监听器重复
+  // 追加（流式回复文本重复损坏的根因）。
+  const setBusyStable = useCallback((v: boolean) => {
+    busyRef.current = v;
+    setBusy(v);
+  }, []);
   useAiStream(
     { prefix: EVENTS.chatStream.prefix, deltaMode: 'append', hasReasoning: true },
-    { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy: (v) => { busyRef.current = v; setBusy(v); } },
+    { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy: setBusyStable },
   );
 
   // 取当前激活 AI 档案 id（沙箱内 zustand store 隔离，故走 invoke）

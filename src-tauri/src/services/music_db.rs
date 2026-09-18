@@ -725,9 +725,16 @@ pub struct ListenStatRow {
     pub total_ms: i64,
 }
 
-/// 元数据规范化：全角空格→半角、折叠连续空白、去首尾空白、小写——用于「同一首歌」判定
+/// 元数据规范化：多歌手分隔符归一（/ & ， 、 ； 等统一视为空格）、全角空格→半角、
+/// 折叠连续空白、去首尾空白、小写——用于「同一首歌」判定。
+/// 只归一不拆分不排序：乐队名（如 AC/DC）保持整体不被误拆；键是小写，显示名保留原文。
 fn normalize_meta(s: &str) -> String {
-    let replaced: String = s.chars().map(|c| if c == '\u{3000}' { ' ' } else { c }).collect();
+    let replaced: String = s.chars().map(|c| match c {
+        // 多歌手分隔符（半角/全角）→ 空格，使 "A/B"、"A & B"、"A、B" 归并为同一键
+        '/' | '\u{FF0F}' | '&' | '\u{FF06}' | ',' | '\u{FF0C}' | ';' | '\u{FF1B}' | '、' => ' ',
+        '\u{3000}' => ' ', // 全角空格
+        _ => c,
+    }).collect();
     let mut out = String::new();
     let mut prev_space = true;
     for c in replaced.chars() {
@@ -738,7 +745,7 @@ fn normalize_meta(s: &str) -> String {
             out.extend(c.to_lowercase());
         }
     }
-    out
+    out.trim_end().to_string()
 }
 
 /// 同一首歌判定：规范化(标题,歌手)完全一致 且 时长差 ≤3s。
@@ -761,18 +768,19 @@ fn merge_listen_tracks(
     for (_, mut items) in groups {
         items.sort_by_key(|(_, _, _, dur, _)| *dur);
         // 时长聚簇：排序后相邻差 ≤3000ms 归为同一演绎
-        let mut clusters: Vec<(i64, i64, i64, String, String, String)> = Vec::new(); // (rep_dur, pc_sum, best_pc, tid, title, artist)
+        let mut clusters: Vec<(i64, i64, i64, String, String, String, i64)> = Vec::new(); // (rep_dur, pc_sum, best_pc, tid, title, artist, group_size)
         for (tid, title, artist, dur, pc) in items {
             match clusters.last_mut() {
                 Some(c) if (dur - c.0).abs() <= 3000 => {
                     c.1 += pc;
+                    c.6 += 1;
                     if pc > c.2 { c.2 = pc; c.3 = tid; c.4 = title; c.5 = artist; }
                 }
-                _ => clusters.push((dur, pc, pc, tid, title, artist)),
+                _ => clusters.push((dur, pc, pc, tid, title, artist, 1)),
             }
         }
-        for (_, pc, _, tid, title, artist) in clusters {
-            out.push(RankingTrack { track_id: tid, title, artist, play_count: pc });
+        for (_, pc, _, tid, title, artist, gc) in clusters {
+            out.push(RankingTrack { track_id: tid, title, artist, play_count: pc, group_count: gc });
         }
     }
     out.sort_by(|a, b| b.play_count.cmp(&a.play_count));
@@ -891,6 +899,8 @@ pub struct RankingTrack {
     pub title: String,
     pub artist: String,
     pub play_count: i64,
+    /// 合并来源数：同曲被复制到多个文件夹时 >1，前端显示「×N」徽章
+    pub group_count: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -1020,4 +1030,55 @@ pub fn music_get_listen_ranking(app: AppHandle, days: i64) -> Result<ListenRanki
         top_tracks,
         top_artists,
     })
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::{normalize_meta, merge_listen_tracks};
+
+    #[test]
+    fn multi_artist_separators_merge_to_same_key() {
+        assert_eq!(normalize_meta("A/B"), normalize_meta("A & B"));
+        assert_eq!(normalize_meta("A、B"), normalize_meta("A/B"));
+        assert_eq!(normalize_meta("A，B"), normalize_meta("A & B"));
+        assert_eq!(normalize_meta("周杰伦／费玉清"), normalize_meta("周杰伦 & 费玉清"));
+    }
+
+    #[test]
+    fn case_and_spaces_fold() {
+        assert_eq!(normalize_meta("Taylor Swift"), normalize_meta("taylor  swift"));
+        assert_eq!(normalize_meta("　全角　空格　"), "全角 空格");
+    }
+
+    #[test]
+    fn band_names_stay_whole_in_key() {
+        // 只归一为稳定键，不拆分语义：AC/DC → "ac dc"，与 "AC DC" 同键
+        assert_eq!(normalize_meta("AC/DC"), normalize_meta("AC DC"));
+    }
+
+    #[test]
+    fn merge_same_song_from_two_folders() {
+        // 同一首歌复制到两个文件夹：track_id 不同、元数据时长一致 → 合并，播放数累加
+        let rows = vec![
+            ("t1".into(), "Song".into(), "Singer".into(), 200_000, 3),
+            ("t2".into(), "song".into(), "singer".into(), 200_100, 5),
+        ];
+        let out = merge_listen_tracks(rows);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].play_count, 8);
+        // 代表行取播放次数最多的原文
+        assert_eq!(out[0].track_id, "t2");
+        assert_eq!(out[0].title, "song");
+    }
+
+    #[test]
+    fn different_versions_stay_apart() {
+        // 同名同歌手但时长差异大（Live/Remix）→ 保持分开
+        let rows = vec![
+            ("t1".into(), "Song".into(), "Singer".into(), 200_000, 3),
+            ("t2".into(), "Song".into(), "Singer".into(), 320_000, 2),
+        ];
+        let out = merge_listen_tracks(rows);
+        assert_eq!(out.len(), 2);
+    }
 }

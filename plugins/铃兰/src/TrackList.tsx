@@ -749,6 +749,8 @@ export function TrackList({
                       ? 'bg-black/5 dark:bg-white/5'
                       : 'hover:bg-[var(--element-muted)]'
                 }`,
+                // 大歌单（数百行）渲染减负：视口外的行跳过渲染布局，估计行高 ~52px
+                style: { contentVisibility: 'auto', containIntrinsicSize: 'auto 52px' },
                 children: [
                   // 复选框：仅在选择模式下显示
                   selectionMode
@@ -769,6 +771,8 @@ export function TrackList({
                       children: React.createElement('img', {
                         src: coverUrl,
                         alt: '',
+                        loading: 'lazy',
+                        decoding: 'async',
                         className: 'w-full h-full object-cover',
                         style: { width: '100%', height: '100%', objectFit: 'cover' },
                       }),
