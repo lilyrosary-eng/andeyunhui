@@ -110,6 +110,18 @@ export function FileSearchPanel({ variant, onClose, keepOpen, onKeepToggle }: Fi
               {status?.last_indexed ? ` · ${status.last_indexed}` : ''}
             </div>
           </div>
+          <button
+            onClick={async () => {
+              try {
+                await invoke('fs_index_build');
+                setStatus((s) => ({ indexing: true, count: s?.count ?? 0, last_indexed: s?.last_indexed ?? null }));
+              } catch { /* ignore */ }
+            }}
+            title={t('niaoluo.search.rebuild')}
+            style={{ appearance: 'none', border: 'none', background: 'transparent', color: GOLD, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', borderRadius: 10, width: 28, height: 28 }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
+          </button>
           {variant === 'overlay' && onKeepToggle && (
             <KeepButton pinned={!!keepOpen} onToggle={onKeepToggle} size={28} />
           )}

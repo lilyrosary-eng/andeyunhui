@@ -206,7 +206,10 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setConversations(initial);
     setActiveId(initial[0]?.id ?? '');
     activeIdRef.current = initial[0]?.id ?? '';
-    void loadProfile().finally(() => setReady(true));
+    // 持久化链路即刻就绪：ready 曾绑在 loadProfile（网络 invoke）上，导致 profile
+    // 加载期间的会话变更（如刚点「新对话」）不被持久化——切模块后新对话丢失。
+    setReady(true);
+    void loadProfile();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [persistKey, allowEmpty]);
 

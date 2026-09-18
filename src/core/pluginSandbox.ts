@@ -36,7 +36,6 @@ const ALLOWED_COMMANDS = new Set([
   // 存储
   'plugin_storage_get',
   'plugin_storage_set',
-  'plugin_log',
   // 图片模块
   'load_image_cache',
   'cancel_scan',

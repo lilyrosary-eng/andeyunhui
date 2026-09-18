@@ -191,14 +191,16 @@ export function GoldChessboardHub() {
     const onTab = () => {
       setTab(storage.getString(KEYS.niaoluo.capsuleTab.key, 'search') === 'transfer' ? 'transfer' : 'search');
     };
-    window.addEventListener('capsule-tab-changed', onTab);
-    // 也监听 storage 事件（跨 webview 同步，仅主窗口内有效）
-    window.addEventListener('storage', (e) => {
+    // storage 事件处理器必须是同一具名引用，cleanup 才能正确移除（此前用匿名函数
+    // 注册、却试图移除 onTab，导致监听器随模块反复挂载/卸载持续泄漏）。
+    const onStorage = (e: StorageEvent) => {
       if (e.key === KEYS.niaoluo.capsuleTab.key) onTab();
-    });
+    };
+    window.addEventListener('capsule-tab-changed', onTab);
+    window.addEventListener('storage', onStorage);
     return () => {
       window.removeEventListener('capsule-tab-changed', onTab);
-      window.removeEventListener('storage', onTab as EventListener);
+      window.removeEventListener('storage', onStorage);
     };
   }, []);
 

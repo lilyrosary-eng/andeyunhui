@@ -3737,6 +3737,65 @@ pub fn get_blacklist_paths(app: tauri::AppHandle, module: String) -> Result<Vec<
     Ok(entries.into_iter().map(|e| e.path).collect())
 }
 
+// ================= 插件持久化存储（plugin_storage_get/set）=================
+// 每个插件一个 JSON 文档：<app_data>/plugin_storage/<plugin_id>.json。
+// 供插件保存自身设置/状态（插件模板文档已承诺此 API）。plugin_id 由
+// pluginSandbox 在转发时自动注入（防伪造其它插件的存储空间）。
+
+fn plugin_storage_path(app: &tauri::AppHandle, plugin_id: &str) -> Result<std::path::PathBuf, String> {
+    let safe: String = plugin_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    if safe.is_empty() {
+        return Err("plugin_id 无效".to_string());
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("plugin_storage");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建插件存储目录失败: {e}"))?;
+    Ok(dir.join(format!("{safe}.json")))
+}
+
+fn read_plugin_doc(path: &std::path::Path) -> std::collections::HashMap<String, serde_json::Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 读取插件存储中某个 key 的值（不存在返回 None）
+#[tauri::command]
+pub fn plugin_storage_get(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    key: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let path = plugin_storage_path(&app, &plugin_id)?;
+    let doc = read_plugin_doc(&path);
+    Ok(doc.get(&key).cloned())
+}
+
+/// 写入插件存储的某个 key（整文档原子写：临时文件 + rename）
+#[tauri::command]
+pub fn plugin_storage_set(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let path = plugin_storage_path(&app, &plugin_id)?;
+    let mut doc = read_plugin_doc(&path);
+    doc.insert(key, value);
+    let json = serde_json::to_string(&doc).map_err(|e| format!("序列化插件存储失败: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("写入插件存储失败: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("写入插件存储失败: {e}"))?;
+    Ok(())
+}
+
 // ================= 原生文档转换（docx / pptx / xlsx / pdf）=================
 
 /// 将源文件复制到中转站「暂存」目录（图标栏中转站列出），并生成 file 存档快照。

@@ -1089,6 +1089,8 @@ fn main() {
             add_to_blacklist,
             remove_from_blacklist,
             get_blacklist_paths,
+            plugin_storage_get,
+            plugin_storage_set,
             tray_summon_main,
             tray_quit,
             capsule_ip_location,

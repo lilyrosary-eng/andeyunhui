@@ -63,27 +63,37 @@ pub fn has_listener() -> bool {
     SPECTRUM_LISTENERS.load(Ordering::Relaxed) > 0
 }
 
+/// 采集线程句柄：重启时 join 等待旧线程真正退出，避免新旧线程
+/// 同时持有 WASAPI client、重复 emit（此前用固定 sleep(50ms) 猜测等待，
+/// 旧线程若处于 100ms 休眠档会读到被新线程改回的运行标志而存活）。
+static SPECTRUM_JOIN: std::sync::Mutex<Option<thread::JoinHandle<()>>> = std::sync::Mutex::new(None);
+
 /// 启动频谱采集线程。返回 Ok 表示已启动（幂等：重复调用会先停旧线程再启新）。
 pub fn start_spectrum_capture(app: tauri::AppHandle) -> Result<(), String> {
-    // 如果已有线程在跑，先停掉
-    if CAPTURE_STOP.load(Ordering::SeqCst) == false {
-        // 可能是上次启动设的 false（运行中），也可能是初始 false
-        // 用 swap 来确保：如果之前是 false（运行中），设为 true 停止它
-        // 如果之前已经是 true（已停止），保持 true
+    // 停旧线程并 join 等待其真正退出（主循环每 10ms 检查一次停止标志）
+    CAPTURE_STOP.store(true, Ordering::SeqCst);
+    if let Some(h) = SPECTRUM_JOIN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    {
+        let _ = h.join();
     }
-    CAPTURE_STOP.store(true, Ordering::SeqCst); // 停止旧线程
-    std::thread::sleep(Duration::from_millis(50)); // 等旧线程退出
 
     CAPTURE_STOP.store(false, Ordering::SeqCst); // 新线程标志：false = 运行中
 
     let app_handle = app.clone();
-    thread::Builder::new()
+    let handle = thread::Builder::new()
         .name("spectrum-capture".into())
         .stack_size(256 * 1024) // 256KB 栈，足够 WASAPI + FFT
         .spawn(move || {
             spectrum_loop(app_handle);
         })
         .map_err(|e| format!("启动频谱线程失败: {e}"))?;
+
+    *SPECTRUM_JOIN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(handle);
 
     Ok(())
 }

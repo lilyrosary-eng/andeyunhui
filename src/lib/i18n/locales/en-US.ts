@@ -161,6 +161,7 @@ export const enUS: Record<string, string> = {
   'niaoluo.search.title': 'File Search',
   'niaoluo.search.placeholder': 'Search files / folders...',
   'niaoluo.search.indexing': 'Indexing files...',
+  'niaoluo.search.rebuild': 'Rebuild index',
   'niaoluo.search.indexed': '{count} items indexed',
   'niaoluo.search.noResults': 'No matching results',
   'niaoluo.search.prompt': 'Type to search (name / path)',

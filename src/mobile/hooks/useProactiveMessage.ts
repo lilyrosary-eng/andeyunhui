@@ -16,6 +16,18 @@ import { useCompanionStore } from '@/core/stores/companionStore';
 
 const PROACTIVE_KEY = 'andeyunhui.mobile.proactive.enabled';
 const INTERVAL_KEY = 'andeyunhui.mobile.proactive.intervalMin';
+/** 上次主动消息时间戳（持久化）——重启 app 后「打开即补发」才能兑现 */
+const LAST_TS_KEY = 'andeyunhui.mobile.proactive.lastTs';
+
+function loadLastTs(): number {
+  try {
+    const v = Number(localStorage.getItem(LAST_TS_KEY));
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  } catch { return 0; }
+}
+function saveLastTs(ts: number) {
+  try { localStorage.setItem(LAST_TS_KEY, String(ts)); } catch { /* 忽略 */ }
+}
 
 export function getProactiveEnabled(): boolean {
   try { return localStorage.getItem(PROACTIVE_KEY) === '1'; } catch { return false; }
@@ -46,7 +58,13 @@ function notify(title: string, body: string) {
 
 /** 主动消息心跳：app 活跃期间每 intervalMin 检查一次 */
 export function useProactiveMessage() {
-  const lastRef = useRef<number>(Date.now());
+  // 上次发送时间从持久化恢复：打开 app 时 now - lastTs 才可能超过阈值，
+  // 「打开即补发」分支（30s 后的 first 检查）才能真正触发。
+  const lastRef = useRef<number>(loadLastTs());
+  const settle = (ts: number) => {
+    lastRef.current = ts;
+    saveLastTs(ts);
+  };
 
   useEffect(() => {
     if (!getProactiveEnabled()) return;
@@ -60,7 +78,7 @@ export function useProactiveMessage() {
 
       const text = await useCompanionStore.getState().proactiveMessage();
       if (!text) return;
-      lastRef.current = now;
+      settle(now);
 
       // 追加到活跃会话（作为助手消息），并通知
       const convId = useChatStore.getState().activeConvId;
@@ -84,7 +102,7 @@ export function useProactiveMessage() {
       if ((companion.relationship.warmth ?? 0) < 20) return;
       const text = await useCompanionStore.getState().proactiveMessage();
       if (!text) return;
-      lastRef.current = now;
+      settle(now);
       const convId = useChatStore.getState().activeConvId;
       const id = `pro_${Date.now()}`;
       useChatStore.getState().updateTimeline(convId, (prev) => [

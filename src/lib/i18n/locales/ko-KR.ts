@@ -143,6 +143,7 @@ export const koKR: Record<string, string> = {
   'niaoluo.search.title': '파일 검색',
   'niaoluo.search.placeholder': '파일 / 폴더 검색...',
   'niaoluo.search.indexing': '파일 인덱싱 중...',
+  'niaoluo.search.rebuild': '인덱스 재구축',
   'niaoluo.search.indexed': '{count}개 항목 인덱싱됨',
   'niaoluo.search.noResults': '일치하는 결과 없음',
   'niaoluo.search.prompt': '키워드를 입력하여 검색 (이름 / 경로)',

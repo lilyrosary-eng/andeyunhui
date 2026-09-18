@@ -143,6 +143,7 @@ export const deDE: Record<string, string> = {
   'niaoluo.search.title': 'Dateisuche',
   'niaoluo.search.placeholder': 'Dateien / Ordner suchen...',
   'niaoluo.search.indexing': 'Indiziere Dateien...',
+  'niaoluo.search.rebuild': 'Index neu erstellen',
   'niaoluo.search.indexed': '{count} Einträge indiziert',
   'niaoluo.search.noResults': 'Keine Ergebnisse',
   'niaoluo.search.prompt': 'Zum Suchen tippen (Name / Pfad)',

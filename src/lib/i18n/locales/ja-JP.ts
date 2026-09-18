@@ -143,6 +143,7 @@ export const jaJP: Record<string, string> = {
   'niaoluo.search.title': 'ファイル検索',
   'niaoluo.search.placeholder': 'ファイル / フォルダを検索…',
   'niaoluo.search.indexing': 'ファイルをインデックス中…',
+  'niaoluo.search.rebuild': 'インデックス再構築',
   'niaoluo.search.indexed': '{count} 項目をインデックス済み',
   'niaoluo.search.noResults': '一致する結果はありません',
   'niaoluo.search.prompt': 'キーワードを入力して検索（名前 / パス）',

@@ -143,6 +143,7 @@ export const zhTW: Record<string, string> = {
   'niaoluo.search.title': '檔案搜尋',
   'niaoluo.search.placeholder': '搜尋檔案 / 資料夾…',
   'niaoluo.search.indexing': '正在索引檔案…',
+  'niaoluo.search.rebuild': '重建索引',
   'niaoluo.search.indexed': '已索引 {count} 項',
   'niaoluo.search.noResults': '無匹配結果',
   'niaoluo.search.prompt': '輸入關鍵字即時搜尋（名稱 / 路徑）',

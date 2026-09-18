@@ -143,6 +143,7 @@ export const frFR: Record<string, string> = {
   'niaoluo.search.title': 'Recherche de fichiers',
   'niaoluo.search.placeholder': 'Rechercher des fichiers / dossiers...',
   'niaoluo.search.indexing': 'Indexation des fichiers...',
+  'niaoluo.search.rebuild': 'Reconstruire l\'index',
   'niaoluo.search.indexed': '{count} éléments indexés',
   'niaoluo.search.noResults': 'Aucun résultat',
   'niaoluo.search.prompt': 'Saisissez pour rechercher (nom / chemin)',

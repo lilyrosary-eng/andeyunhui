@@ -160,6 +160,7 @@ export const zhCN: Record<string, string> = {
   'niaoluo.search.title': '文件搜索',
   'niaoluo.search.placeholder': '搜索文件 / 文件夹…',
   'niaoluo.search.indexing': '正在索引文件…',
+  'niaoluo.search.rebuild': '重建索引',
   'niaoluo.search.indexed': '已索引 {count} 项',
   'niaoluo.search.noResults': '无匹配结果',
   'niaoluo.search.prompt': '输入关键字即时搜索（名称 / 路径）',
