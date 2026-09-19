@@ -233,11 +233,20 @@ function ImageModule() {
 
   const displayFolderList = displayFolders();
 
-  // 根据搜索词过滤文件夹列表（大小写不敏感）
+  // 根据搜索词过滤文件夹列表（大小写不敏感 + 模糊匹配）
   const filteredFolders = useMemo(() => {
     if (!searchQuery.trim()) return displayFolderList;
     const q = searchQuery.trim().toLowerCase();
-    return displayFolderList.filter(f => f.folderName.toLowerCase().includes(q));
+    return displayFolderList.filter(f => {
+      const name = f.folderName.toLowerCase();
+      if (name.includes(q)) return true;
+      // 模糊匹配：按字符顺序匹配
+      let qi = 0;
+      for (let i = 0; i < name.length && qi < q.length; i++) {
+        if (name[i] === q[qi]) qi++;
+      }
+      return qi === q.length;
+    });
   }, [displayFolderList, searchQuery]);
 
   if (rootPaths.length === 0) {
@@ -356,6 +365,21 @@ function ImageModule() {
                 React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500 mt-2' },
                   T('image.settings.scanned', { folders: folders.length, albums: customAlbums.length })
                 ),
+              ),
+              React.createElement('div', { className: 'glass-panel p-4' },
+                React.createElement('label', { className: 'block text-xs font-medium text-neutral-500 dark:text-stone-400 mb-2' }, T('image.settings.cache')),
+                React.createElement('p', { className: 'text-xs text-neutral-400 dark:text-stone-500 mb-3' }, T('image.settings.cacheDesc')),
+                React.createElement('button', {
+                  onClick: async () => {
+                    try {
+                      const removed = await hostApi.invoke<number>('cleanup_thumbnail_cache');
+                      alert(T('image.settings.cacheCleared', { n: removed }));
+                    } catch (e) {
+                      console.error('[Image] 清理缓存失败:', e);
+                    }
+                  },
+                  className: 'btn-press px-3 py-1.5 rounded-lg text-xs bg-neutral-100 dark:bg-stone-700/50 text-neutral-600 dark:text-stone-300 hover:bg-neutral-200 dark:hover:bg-stone-700 transition-colors',
+                }, T('image.settings.clearCache')),
               ),
             ),
           })

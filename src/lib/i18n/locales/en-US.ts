@@ -1075,6 +1075,10 @@ export const enUS: Record<string, string> = {
   'image.settings.noDirs': 'No folders added yet',
   'image.settings.scanned': 'Scanned {folders} folders, {albums} custom albums',
   'image.settings.rememberProgress': 'Remember reading position (restore on reopen)',
+  'image.settings.cache': 'Cache Management',
+  'image.settings.cacheDesc': 'Clear thumbnail cache to free disk space. Thumbnails will be regenerated on next access.',
+  'image.settings.clearCache': 'Clear Thumbnail Cache',
+  'image.settings.cacheCleared': 'Cleared {n} thumbnail cache files',
   // Sidebar
   'image.sidebar.scanning': 'Scanning...',
   'image.sidebar.noFolders': 'No folders yet',

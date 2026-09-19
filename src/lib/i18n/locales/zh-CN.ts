@@ -1183,6 +1183,10 @@ export const zhCN: Record<string, string> = {
   'image.settings.noDirs': '尚未添加任何文件夹',
   'image.settings.scanned': '已扫描 {folders} 个文件夹，{albums} 个自定义相册',
   'image.settings.rememberProgress': '记住浏览进度（重新打开时恢复位置）',
+  'image.settings.cache': '缓存管理',
+  'image.settings.cacheDesc': '清理缩略图缓存可释放磁盘空间，下次访问时会重新生成',
+  'image.settings.clearCache': '清理缩略图缓存',
+  'image.settings.cacheCleared': '已清理 {n} 个缩略图缓存文件',
   // 侧边栏
   'image.sidebar.scanning': '扫描中...',
   'image.sidebar.noFolders': '暂无文件夹',
