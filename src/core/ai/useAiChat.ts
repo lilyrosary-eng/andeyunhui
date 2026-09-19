@@ -178,7 +178,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setBusy(v);
   }, []);
   useAiStream(
-    { prefix: EVENTS.chatStream.prefix, deltaMode: 'append', hasReasoning: true },
+    { prefix: EVENTS.chatStream.prefix, deltaMode: 'append', hasReasoning: true, hasAgentStep: true },
     { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy: setBusyStable },
   );
 
@@ -332,7 +332,9 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       attachments: atxMeta.length ? atxMeta : undefined,
     };
     const asstId = uid();
-    const asstMsg: ChatMsg = { id: asstId, role: 'assistant', content: '', reasoning: '' };
+    // traceId = 本次请求 id，同时是 agent 事件日志的落盘会话 id（ai_sessions/<id>.json）；
+    // 消息上带此 id 后，「执行轨迹」面板才能关联到后端事件日志。
+    const asstMsg: ChatMsg = { id: asstId, role: 'assistant', content: '', reasoning: '', traceId: reqId };
 
     let isFirst = true;
     setConversations((prev) => prev.map((c) => {

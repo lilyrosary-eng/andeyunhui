@@ -33,6 +33,7 @@ function App() {
   const pluginRegistry = useAppStore(s => s.pluginRegistry);
   const visibilityTick = useAppStore(s => s.visibilityTick);
   const activeModule = useAppStore(s => s.activeModule);
+  const activatedPlugins = useAppStore(s => s.activatedPlugins);
   const showExtensionSettings = useAppStore(s => s.showExtensionSettings);
   const setPluginRegistry = useAppStore(s => s.setPluginRegistry);
   const bumpVisibility = useAppStore(s => s.bumpVisibility);
@@ -613,6 +614,11 @@ function App() {
         <>
           {defs.map((def) => {
             const show = activeModule === def.id;
+            // 惰性挂载 + 保活：只挂载「当前模块」与「访问过的模块」（activatedPlugins）。
+            // 此前无条件挂载所有已加载插件（display:none 保活）→ 用越久、开过的模块越多，
+            // 常驻组件树越大（各自的订阅/定时器/动画全在跑）→ 切模块粘滞、内存上涨。
+            // 首次访问时 setActiveModule 会把它加入 activatedPlugins，自动开始保活，功能不丢。
+            if (!show && !activatedPlugins.has(def.id)) return null;
             if (show) logger.app.mainPluginRendering(def.id, typeof def.component, def.name);
             return (
               <div

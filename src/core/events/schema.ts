@@ -42,7 +42,10 @@ export const EVENTS = {
     clearConversations: 'capsule-ide-clear-conversations',
   },
   scan: {
+    // 'scan-progress'/'scan-chunk' 现为阅读专用；图片曾与其共用导致跨模块事件串台
+    // （图片模块收到阅读的 BookSummary，卡片渲染成 "{n} 张" 占位），已拆分为 image-scan-*
     progress: 'scan-progress', chunk: 'scan-chunk',
+    imageProgress: 'image-scan-progress', imageChunk: 'image-scan-chunk',
     musicProgress: 'music-scan-progress', musicChunk: 'music-scan-chunk',
     videoProgress: 'video-scan-progress', videoChunk: 'video-scan-chunk',
   },

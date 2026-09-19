@@ -1084,7 +1084,6 @@ fn main() {
             toggle_tray_mode,
             get_tray_mode,
             export_backup,
-            get_blacklist,
             get_all_blacklist,
             add_to_blacklist,
             remove_from_blacklist,
@@ -1124,10 +1123,10 @@ fn main() {
             music_delete_playlist,
             music_list_playlists,
             music_list_playlist_tracks,
-            music_add_track_to_playlist,
+
             music_replace_playlist_tracks,
-            music_remove_track_from_playlist,
-            music_reorder_playlist_track,
+
+
             music_set_favorite,
             music_list_favorites,
             music_save_player_state,
@@ -1143,7 +1142,7 @@ fn main() {
             music_delete_cover_override,
             music_clean_cover_cache,
             music_set_mv_path,
-            music_delete_mv_path,
+
             music_get_all_mv_paths,
             // ========== 网易云 WebAPI 代理（Phase 3）：TS 加密 + Rust 无 CORS 转发 ==========
             andeyunhui_lib::services::netease_proxy::netease_http_post,
@@ -1157,7 +1156,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 哔哩哔哩 WebAPI 代理（玉兰视频模块·网络视频）：TS 端 wbi 签名 + Rust 无 CORS 转发 ==========
             andeyunhui_lib::services::bilibili_proxy::bilibili_request,
             // ========== 抖音 WebAPI / 分享页代理（玉兰视频模块·网络视频）：TS 端解析 + Rust 无 CORS 转发 ==========
-            andeyunhui_lib::services::douyin_proxy::douyin_request,
+
             // ========== 音乐下载：前端取链后由 Rust 落地到本地文件 ==========
             download_file,
             // ========== 网络视频下载：直链/多段拼接 + HLS(m3u8→mp4) ==========
@@ -1191,7 +1190,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 模块：阅读 / 三色堇 ==========
             scan_reading_root,
             load_reading_cache,
-            delete_reading_cache,
+
             open_book,
             cancel_open_book,
             // ========== 模块：歌词 / 铃兰（悬浮窗）==========
@@ -1295,13 +1294,13 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             gongfang_target_get,
             gongfang_target_set_metadata,
             // ========== 模块：截图系统（全局热键 / 多屏 / 标注）==========
-            capture_screen,
+
             start_screenshot,
             read_screenshot,
             read_recorder_snapshot,
             peek_screenshot,
             store_screenshot_note_id,
-            get_screenshot_note_id,
+
             hide_overlay_window,
             reveal_screenshot_overlay,
             set_overlay_transparent,
@@ -1326,8 +1325,8 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             clipboard_write_image,
             clipboard_write_image_from_path,
             clipboard_diagnose,
-            recording_service::recording_border_probe,
-            crop_native,
+
+
             crop_native_rgba,
             save_screenshot,
             save_cropped,
@@ -1345,7 +1344,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             recording_service::pause_recording,
             recording_service::resume_recording,
             recording_service::get_recording_status,
-            recording_service::list_recording_monitors,
+
             recording_service::show_recorder_widget,
             recording_service::hide_recorder_widget,
             recording_service::show_recorder_select,
@@ -1373,6 +1372,8 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             ai_service::ai_agent_replay,
             ai_service::ai_agent_cancel,
             ai_service::ai_agent_status,
+            ai_service::ai_agent_sessions,
+            ai_service::ai_agent_events,
             ai_service::ai_test_connection,
             ai_service::ai_vision_ocr,
             ai_service::translate_text,
@@ -1402,7 +1403,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 全局：IDE 终端（本地 shell 命令执行）==========
             shell_service::run_shell_command,
             // ========== 全局：AI agent 受限 shell（白名单 + Dry-Run 黑名单 + 超时）==========
-            shell_service::run_agent_shell,
+
             // ========== 全局：AI 用量/成本统计（usage.sqlite 持久化 + 聚合查询）==========
             usage_service::usage_stats,
             usage_service::usage_reset,
@@ -1433,7 +1434,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             mcp_service::mcp_remove_server,
             mcp_service::mcp_list_tools,
             mcp_service::mcp_list_all_tools,
-            mcp_service::mcp_call_tool,
+
             // ========== RAG 共享后台服务（知识库检索增强）==========
             // IDE（<search>/<rag> 语义检索）与 gongfang 等任意插件均可复用 rag_query；
             // rag_embed_api 代理 Ollama / OpenAI 兼容嵌入端点（沙箱屏蔽 fetch，必须走 Rust）。

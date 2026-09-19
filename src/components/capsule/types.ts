@@ -54,6 +54,21 @@ export interface ChatMsg {
    * 由 router 在每轮群聊发言规划时给出量级估计。
    */
   severity?: 0 | 1 | 2 | 3;
+  /**
+   * Agent 执行会话 id（= 本次请求的 requestId，落盘于 app_data/ai_sessions/<id>.json）。
+   * 有值时消息气泡显示「执行轨迹」入口，可查看事件日志（工具调用/压缩/中断修复）。
+   */
+  traceId?: string;
+  /** Agent 执行步骤（ai-agent-step 事件实时累积；轨迹面板在落盘前也能展示）。 */
+  agentSteps?: AgentStep[];
+}
+
+/** 一条 agent 工具步骤（后端 ai-agent-step 事件载荷）。 */
+export interface AgentStep {
+  stage: string;
+  name: string;
+  ok: boolean;
+  detail: string;
 }
 
 // ==== AIWork / AIWorkflow 共用任务蓝图类型 ====

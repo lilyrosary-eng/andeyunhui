@@ -70,7 +70,7 @@ pub fn scan_image_root_streaming(
         // 取消检查
         if SCAN_CANCEL.load(Ordering::Relaxed) {
             SCAN_CANCEL.store(false, Ordering::SeqCst);
-            app.emit("scan-progress", ScanProgress { found: 0, total: 0, done: true }).ok();
+            app.emit("image-scan-progress", ScanProgress { found: 0, total: 0, done: true }).ok();
             return Ok(());
         }
 
@@ -129,7 +129,7 @@ pub fn scan_image_root_streaming(
     for (dir, mut images) in leaf_dirs {
         if SCAN_CANCEL.load(Ordering::Relaxed) {
             SCAN_CANCEL.store(false, Ordering::SeqCst);
-            app.emit("scan-progress", ScanProgress { found, total, done: true }).ok();
+            app.emit("image-scan-progress", ScanProgress { found, total, done: true }).ok();
             return Ok(());
         }
 
@@ -157,18 +157,18 @@ pub fn scan_image_root_streaming(
         found += 1;
 
         if chunk.len() >= CHUNK_SIZE {
-            app.emit("scan-chunk", chunk.clone()).ok();
-            app.emit("scan-progress", ScanProgress { found, total, done: false }).ok();
+            app.emit("image-scan-chunk", chunk.clone()).ok();
+            app.emit("image-scan-progress", ScanProgress { found, total, done: false }).ok();
             chunk.clear();
         }
     }
 
     // 推送最后一批
     if !chunk.is_empty() {
-        app.emit("scan-chunk", chunk).ok();
+        app.emit("image-scan-chunk", chunk).ok();
     }
 
-    app.emit("scan-progress", ScanProgress { found, total, done: true }).ok();
+    app.emit("image-scan-progress", ScanProgress { found, total, done: true }).ok();
 
     // 保存缓存（附带源目录 mtime，增量检测用）
     match app.path().app_data_dir() {

@@ -359,13 +359,45 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
   const [showQuality, setShowQuality] = useState(false);
   const qualityRef = useRef<HTMLDivElement>(null);
 
+  // 模块可见性降频：音乐模块被切走后（保活树 display:none）progress 仍每秒多次推送，
+  // 若照常 setState，隐藏的 PlayerBar 子树会持续重渲（切模块粘滞的来源之一）。
+  // 用 IntersectionObserver 跟踪可见性（display:none → isIntersecting=false）：
+  // 不可见时只暂存最新值不渲染，重新可见立即补齐，进度条不滞后。
+  // 注意：仅影响「本组件渲染」；播放、歌词浮窗（lyricsSync）与 SMTC 上报均不受影响。
+  const rootRef = useRef<HTMLDivElement>(null);
+  const visibleRef = useRef(true);
+  const pendingProgressRef = useRef({ ct: 0, dur: 0 });
+
   useEffect(() => {
     const unsub = musicPlayer.on('progress', (data: unknown) => {
       const { currentTime: ct, duration: dur } = data as { currentTime: number; duration: number };
+      if (!visibleRef.current) {
+        pendingProgressRef.current = { ct, dur };
+        return;
+      }
       setCurrentTime(ct);
       setDuration(dur);
     });
     return () => unsub();
+  }, []);
+
+  // 可见性跟踪（一次设置；首次回调不补值，避免用初始 {0,0} 覆盖真实进度）
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    let first = true;
+    const ob = new IntersectionObserver((entries) => {
+      const vis = entries.some((e) => e.isIntersecting);
+      visibleRef.current = vis;
+      if (vis && !first) {
+        const { ct, dur } = pendingProgressRef.current;
+        setCurrentTime(ct);
+        setDuration(dur);
+      }
+      first = false;
+    });
+    ob.observe(el);
+    return () => ob.disconnect();
   }, []);
 
   // 切歌时重置封面重试计数器
@@ -426,7 +458,15 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
     if (newVisible) {
       // 先开启单例同步，确保即便本组件随后被卸载，浮动窗口仍持续滚动
       lyricsSync.setVisible(true);
-      await hostApi.invoke('show_lyrics_widget').catch(() => {});
+      // 召唤失败不再静默（懒建 5 次重试仍失败会抛错，静默吞掉会让用户以为「点了没反应」）
+      try {
+        await hostApi.invoke('show_lyrics_widget');
+      } catch (err) {
+        console.error('[Music] 显示桌面歌词窗口失败:', err);
+        lyricsSync.setVisible(false);
+        setLyricsVisible(false);
+        return;
+      }
       setTimeout(() => {
         const savedFontSize = localStorage.getItem('music_lyrics_font_size');
         const savedShowNextLine = localStorage.getItem('music_lyrics_show_next_line');
@@ -536,7 +576,7 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
   );
 
   return (
-    <div className="flex-shrink-0 border-t border-neutral-200/30 dark:border-stone-700/30 bg-white/70 dark:bg-stone-800/70 backdrop-blur-xl px-6 py-3">
+    <div ref={rootRef} className="flex-shrink-0 border-t border-neutral-200/30 dark:border-stone-700/30 bg-white/70 dark:bg-stone-800/70 backdrop-blur-xl px-6 py-3">
       <div className="flex items-center gap-4">
         {/* 左：封面+信息 — 垂直居中于整条播放栏，不上不下 */}
         {coverInfoEl}

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
@@ -657,6 +657,72 @@ pub async fn ai_agent_status(_app: AppHandle, request_id: String) -> Result<Stri
         .to_string()),
         None => Ok(serde_json::json!({ "running": false }).to_string()),
     }
+}
+
+// ============ 会话历史检索（前端「执行轨迹」面板 / 审计 UI） ============
+
+/// 列出磁盘上已持久化的 agent 会话元数据，按创建时间倒序：
+/// `[{ id, createdAt, parent, eventCount, userPreview, toolCount }]`
+#[tauri::command]
+pub async fn ai_agent_sessions(app: AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("ai_sessions");
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok("[]".to_string()); // 目录不存在 = 尚无 agent 会话
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = p.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(session) = serde_json::from_str::<EventSession>(&text) else {
+            continue;
+        };
+        let mut user_preview = String::new();
+        let mut tool_count = 0usize;
+        for ev in session.events() {
+            match ev {
+                SessionEvent::User { content, .. } if user_preview.is_empty() => {
+                    user_preview = content.chars().take(80).collect();
+                }
+                SessionEvent::Tool { .. } => tool_count += 1,
+                _ => {}
+            }
+        }
+        out.push(serde_json::json!({
+            "id": id,
+            "createdAt": session.created_at(),
+            "parent": session.parent(),
+            "eventCount": session.event_count(),
+            "userPreview": user_preview,
+            "toolCount": tool_count,
+        }));
+    }
+    out.sort_by(|a, b| {
+        b["createdAt"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(a["createdAt"].as_str().unwrap_or(""))
+    });
+    serde_json::to_string(&out).map_err(|e| e.to_string())
+}
+
+/// 读取单个 agent 会话的完整事件日志（append-only 原始事件，供轨迹面板 / 审计渲染）。
+#[tauri::command]
+pub async fn ai_agent_events(app: AppHandle, source_id: String) -> Result<String, String> {
+    let session = load_agent_session(&app, &source_id)
+        .ok_or_else(|| format!("会话 {source_id} 不存在（尚未持久化）"))?;
+    serde_json::to_string(&session).map_err(|e| e.to_string())
 }
 
 // ============ 单元测试：worker 注册 / 取消状态机 ============

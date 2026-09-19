@@ -1223,14 +1223,6 @@ pub fn store_screenshot_note_id(
     Ok(())
 }
 
-#[tauri::command]
-pub fn get_screenshot_note_id(
-    state: tauri::State<'_, std::sync::Mutex<ScreenshotData>>,
-) -> Result<String, String> {
-    let s = state.lock().map_err(|e| format!("锁失败: {}", e))?;
-    Ok(s.note_id.clone())
-}
-
 /// 启动截图：
 /// 1) 取覆盖窗「真实矩形」（物理像素）作为捕获区域——保证捕获 == 显示，1:1 对齐、无偏移无白边；
 /// 2) BitBlt 整窗 → 原生 PNG 存内存（保存用）+ 降采样 JPEG 预览（秒开用）；
@@ -1473,40 +1465,6 @@ pub async fn read_screenshot(scale: f64) -> Result<tauri::ipc::Response, String>
 
 /// 按「原生物理像素」选区从原生 RGBA 字节重裁，返回 PNG（保证最终输出清晰，而非降采样预览）。
 // async：PNG 编码在主线程外执行，避免大图裁剪时卡 UI。
-#[tauri::command]
-pub async fn crop_native(
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-) -> Result<tauri::ipc::Response, String> {
-    let slot = SHOT.lock().map_err(|e| format!("锁失败: {}", e))?;
-    let shot = slot
-        .as_ref()
-        .ok_or_else(|| "尚无截屏数据，请先触发截图".to_string())?;
-    let iw = shot.native_w as i32;
-    let ih = shot.native_h as i32;
-    // 选区物理坐标 → native 图像坐标（减去捕获原点）
-    let x0 = (x - shot.native_ox).max(0).min(iw - 1);
-    let y0 = (y - shot.native_oy).max(0).min(ih - 1);
-    let ww = ((w as u32).min((iw - x0) as u32)).max(1);
-    let hh = ((h as u32).min((ih - y0) as u32)).max(1);
-    // 直接从留存的原生 RGBA 字节裁剪（避免解码整张全屏 PNG，保存从数秒降到毫秒级）
-    let row_bytes = iw as usize * 4;
-    let mut out: Vec<u8> = Vec::with_capacity((ww as usize) * (hh as usize) * 4);
-    let src = &shot.raw;
-    for yy in 0..(hh as usize) {
-        let start = ((y0 as usize + yy) * row_bytes) + (x0 as usize * 4);
-        out.extend_from_slice(&src[start..start + (ww as usize) * 4]);
-    }
-    let img = RgbaImage::from_raw(ww, hh, out)
-        .ok_or_else(|| "裁剪图像构造失败".to_string())?;
-    let mut buf = Cursor::new(Vec::new());
-    img.write_to(&mut buf, ImageFormat::Png)
-        .map_err(|e| format!("裁剪 PNG 编码失败: {}", e))?;
-    Ok(tauri::ipc::Response::new(buf.into_inner()))
-}
-
 /// 与 `crop_native` 同逻辑，但**直接返回原生 RGBA 字节**（不编码 PNG）。
 /// 用于「保存」链路：前端拿到原始像素后交给 `save_screenshot`，
 /// 省去「前端 PNG 编码 → IPC 传 base64 → Rust 再解码」这一最慢的环节，保存真正进入毫秒级。
@@ -2241,21 +2199,6 @@ fn encode_png(img: RgbaImage) -> Result<Vec<u8>, String> {
     encode_png_fast(img.as_raw(), w, h)
 }
 
-// 旧命令保留（备用）：直接捕获整虚拟桌面为 PNG（未降采样）。
-#[tauri::command]
-pub fn capture_screen() -> Result<Vec<u8>, String> {
-    // 注意：capture_region 的 (x,y) 是「相对虚拟桌面原点的偏移」，整桌面即传 (0,0)
-    let x = 0;
-    let y = 0;
-    let w = unsafe { winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CXVIRTUALSCREEN) };
-    let h = unsafe { winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CYVIRTUALSCREEN) };
-    let img = capture_region(x, y, w, h)?;
-    let mut buf = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(img)
-        .write_to(&mut buf, ImageFormat::Png)
-        .map_err(|e| format!("PNG 编码失败: {}", e))?;
-    Ok(buf.into_inner())
-}
 
 /// 将 PNG（data URL 或纯 base64）写入系统剪贴板
 ///

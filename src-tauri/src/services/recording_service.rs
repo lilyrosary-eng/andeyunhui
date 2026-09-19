@@ -1834,25 +1834,6 @@ pub fn get_recording_status() -> RecordingStatus {
     }
 }
 
-/// 获取显示器列表（供前端选择录制目标）
-#[tauri::command]
-pub fn list_recording_monitors() -> Result<Vec<MonitorInfo>, String> {
-    let monitors = Monitor::enumerate().map_err(|e| format!("枚举显示器失败: {}", e))?;
-    let mut list = Vec::new();
-    for (i, mon) in monitors.iter().enumerate() {
-        let (l, t, r, b) = monitor_rect_phys(mon);
-        list.push(MonitorInfo {
-            index: i,
-            name: format!("显示器 {}", i + 1),
-            x: l,
-            y: t,
-            width: r - l,
-            height: b - t,
-        });
-    }
-    Ok(list)
-}
-
 /// 显示器信息（返回给前端）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2013,79 +1994,6 @@ pub fn create_recording_border_window(app: &AppHandle) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-/// 诊断「红框区域内无法操作」：返回边框窗实际 EXSTYLE（是否真的带 WS_EX_TRANSPARENT）、
-/// 窗口矩形，以及在录制区域中心点做 `WindowFromPoint` 命中测试，看该点归属于哪个 HWND/类。
-/// 若中心点仍归属于本边框窗 → 点击被本窗拦截（未真正穿透）；若归属于别的窗口 → 穿透正常。
-#[tauri::command]
-pub fn recording_border_probe(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    let win = app
-        .get_webview_window(RECORDING_BORDER_LABEL)
-        .ok_or_else(|| "边框窗不存在（可能未开始录屏）".to_string())?;
-    let hwnd = win.hwnd().map_err(|e| e.to_string())?;
-    let ex = unsafe {
-        winapi::um::winuser::GetWindowLongPtrW(hwnd.0 as *mut _, winapi::um::winuser::GWL_EXSTYLE)
-    };
-    let has_transparent = (ex & (winapi::um::winuser::WS_EX_TRANSPARENT as isize)) != 0;
-    let has_layered = (ex & (winapi::um::winuser::WS_EX_LAYERED as isize)) != 0;
-    let rect = unsafe {
-        let mut r = winapi::shared::windef::RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        winapi::um::winuser::GetWindowRect(hwnd.0 as *mut _, &mut r);
-        r
-    };
-    let cx = (rect.left + rect.right) / 2;
-    let cy = (rect.top + rect.bottom) / 2;
-    let hit = unsafe {
-        winapi::um::winuser::WindowFromPoint(winapi::shared::windef::POINT { x: cx, y: cy })
-    };
-    let hit_info = if hit.is_null() {
-        "null".to_string()
-    } else {
-        unsafe {
-            let mut buf = [0u16; 256];
-            let n = winapi::um::winuser::GetClassNameW(hit, buf.as_mut_ptr(), buf.len() as i32);
-            let class = if n > 0 {
-                String::from_utf16_lossy(&buf[..n as usize])
-            } else {
-                "?".into()
-            };
-            let is_self = hit == hwnd.0 as *mut _;
-            format!(
-                "hwnd=0x{:X} class={} isBorderSelf={}",
-                hit as usize, class, is_self
-            )
-        }
-    };
-    let verdict = if has_transparent && hit_info.contains("isBorderSelf=false") {
-        "WS_EX_TRANSPARENT 已置位且中心点击穿透到下层窗口 → 穿透正常，问题在别处"
-    } else if has_transparent {
-        "WS_EX_TRANSPARENT 已置位但中心命中仍归本边框窗 → WebView2 子控件拦截，需 WM_NCHITTEST 返回 HTTRANSPARENT"
-    } else {
-        "✗ WS_EX_TRANSPARENT 未真正生效（SetWindowLongPtr 后缺 SetWindowPos SWP_FRAMECHANGED）→ 整块区域被拦截"
-    };
-    Ok(serde_json::json!({
-        "exStyle": format!("0x{:X}", ex),
-        "hasTransparent": has_transparent,
-        "hasLayered": has_layered,
-        "rect": format!(
-            "{}x{} @({},{})=>({},{})",
-            rect.right - rect.left,
-            rect.bottom - rect.top,
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom
-        ),
-        "centerPoint": format!("({},{}", cx, cy),
-        "hitTestAtCenter": hit_info,
-        "verdict": verdict,
-    }))
 }
 
 /// 隐藏录屏控制台窗口

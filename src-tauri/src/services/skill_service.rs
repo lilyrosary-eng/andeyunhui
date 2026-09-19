@@ -11,7 +11,6 @@
 //! 调用方（agent 系统提示 / skill 工具）把索引与详情供给模型。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 

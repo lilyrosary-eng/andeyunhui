@@ -106,6 +106,16 @@ impl EventSession {
     pub(crate) fn parent(&self) -> Option<&str> {
         self.parent.as_deref()
     }
+
+    /// 创建时间（前端轨迹面板列表展示用）。
+    pub(crate) fn created_at(&self) -> &str {
+        &self.created_at
+    }
+
+    /// 完整事件日志（只读；供轨迹面板 / 审计渲染）。
+    pub(crate) fn events(&self) -> &[SessionEvent] {
+        &self.events
+    }
 }
 
 /// 若事件带 `seq` 字段，返回其可变引用（Compact/Interrupted 无则 None）。

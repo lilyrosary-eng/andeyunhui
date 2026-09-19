@@ -69,7 +69,6 @@ pub mod media_relay;
 pub mod embedded_browser;
 
 // === 云就绪 stub（T3）：Account / RemoteStorage / CloudSync，跨平台（Windows 与 Android 共管） ===
-pub mod cloud;
 
 // === 平台专属入口 ===
 #[cfg(target_os = "android")]

@@ -13,6 +13,8 @@ export interface AiStreamConfig {
   deltaMode: 'append' | 'replace';
   /** 是否监听 reasoning-delta（仅对话类模式有思考过程增量） */
   hasReasoning: boolean;
+  /** 是否监听 agent-step（agent 模式工具步骤；实时累积到消息的 agentSteps，供执行轨迹面板） */
+  hasAgentStep?: boolean;
 }
 
 export interface AiStreamRefs {
@@ -34,7 +36,7 @@ export interface AiStreamRefs {
  * 忠实复刻原三套内联实现，仅去重，不改行为。
  */
 export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
-  const { prefix, deltaMode, hasReasoning } = config;
+  const { prefix, deltaMode, hasReasoning, hasAgentStep } = config;
   const { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy } = refs;
 
   useEffect(() => {
@@ -103,7 +105,21 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
         if (cancelled) { u4(); return; }
         un.push(u4);
       }
+
+      // agent 工具步骤（运行中实时累积，供执行轨迹面板在落盘前展示）
+      if (hasAgentStep) {
+        const u5 = await listen<{ requestId: string; stage: string; name: string; ok: boolean; detail: string }>(`${prefix}-agent-step`, (e) => {
+          if (cancelled) return;
+          if (e.payload.requestId !== reqRef.current || !asstRef.current) return;
+          const id = asstRef.current;
+          const cid = streamConvIdRef.current;
+          const step = { stage: e.payload.stage, name: e.payload.name, ok: e.payload.ok, detail: e.payload.detail };
+          updateMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, agentSteps: [...(m.agentSteps || []), step] } : m)));
+        });
+        if (cancelled) { u5(); return; }
+        un.push(u5);
+      }
     })();
     return () => { cancelled = true; un.forEach((f) => f()); };
-  }, [prefix, deltaMode, hasReasoning, updateMessages, setBusy]);
+  }, [prefix, deltaMode, hasReasoning, hasAgentStep, updateMessages, setBusy]);
 }

@@ -2426,14 +2426,14 @@ pub fn export_backup(app: tauri::AppHandle, path: String) -> Result<(), String> 
     // 递归拷贝
     copy_dir(&notes_dir, &tmp_dir.join("notes"))?;
 
-    // 使用系统命令创建 zip（Windows 内置）
+    // 使用系统命令创建 zip（Windows 内置）。路径含单引号时用 '' 转义，防命令破裂。
     let mut zip_cmd = std::process::Command::new("powershell");
     zip_cmd.args([
             "-NoProfile", "-Command",
             &format!(
                 "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
-                tmp_dir.join("notes").display(),
-                path,
+                tmp_dir.join("notes").display().to_string().replace('\'', "''"),
+                path.replace('\'', "''"),
             ),
         ]);
     #[cfg(windows)]
@@ -2869,23 +2869,8 @@ pub fn music_list_playlist_tracks(app: tauri::AppHandle, playlist_id: String) ->
 }
 
 #[tauri::command]
-pub fn music_add_track_to_playlist(app: tauri::AppHandle, playlist_id: String, track: music_db::PlaylistTrack) -> Result<(), String> {
-    music_db::music_add_track_to_playlist(app, playlist_id, track)
-}
-
-#[tauri::command]
 pub fn music_replace_playlist_tracks(app: tauri::AppHandle, playlist_id: String, tracks: Vec<music_db::PlaylistTrack>) -> Result<(), String> {
     music_db::music_replace_playlist_tracks(app, playlist_id, tracks)
-}
-
-#[tauri::command]
-pub fn music_remove_track_from_playlist(app: tauri::AppHandle, playlist_id: String, track_id: String) -> Result<(), String> {
-    music_db::music_remove_track_from_playlist(app, playlist_id, track_id)
-}
-
-#[tauri::command]
-pub fn music_reorder_playlist_track(app: tauri::AppHandle, playlist_id: String, track_id: String, new_position: i64) -> Result<(), String> {
-    music_db::music_reorder_playlist_track(app, playlist_id, track_id, new_position)
 }
 
 #[tauri::command]
@@ -2993,11 +2978,6 @@ pub fn music_set_mv_path(
 }
 
 #[tauri::command]
-pub fn music_delete_mv_path(app: tauri::AppHandle, file_path: String) -> Result<(), String> {
-    music_db::music_delete_mv_path(app, file_path)
-}
-
-#[tauri::command]
 pub fn music_get_all_mv_paths(
     app: tauri::AppHandle,
 ) -> Result<Vec<music_db::MvPathRow>, String> {
@@ -3068,12 +3048,6 @@ pub fn load_reading_cache(app: tauri::AppHandle, root_path: String) -> Result<Op
         .map(|(data, _mtime)| data))
 }
 
-/// 删除阅读扫描缓存（重新扫描前调用）
-#[tauri::command]
-pub fn delete_reading_cache(app: tauri::AppHandle, root_path: String) -> Result<(), String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    cache_service::delete_cache(&app_data, "reading_scan", &root_path)
-}
 
 /// 流式打开书籍：先推 open-book-meta，再按章分块推 open-book-chunk，
 /// 完成推 open-book-progress(done=true)。命中书籍缓存时秒开；解析结果落盘缓存。
@@ -3632,8 +3606,7 @@ pub struct BlacklistEntry {
     pub blocked_at: String,     // 屏蔽时间
 }
 
-/// 获取指定模块的黑名单
-#[tauri::command]
+/// 获取指定模块的黑名单（get_blacklist_paths 内部调用；原命令壳已删——前端只消费 paths 版本）
 pub fn get_blacklist(app: tauri::AppHandle, module: String) -> Result<Vec<BlacklistEntry>, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let blacklist_path = app_data.join("content_blacklist.json");
@@ -3884,49 +3857,55 @@ pub fn wps_export_pptx(path: String, json: String) -> Result<(), String> {
 ///
 /// 图片以本地文件形式落盘到 app_data/pptx_media/，src 仅记录路径（前端用 asset: 协议加载），
 /// 避免 base64 内联导致内存/JSON 体积爆炸、导入大文件时卡死或闪退。
+/// 重活（PPTX 解析 + LibreOffice 全量转 PNG，冷启动可达数十秒）放专用阻塞线程，
+/// 避免占用 Tauri 命令通道卡住其它同步 IPC（与 convert_to_markdown 同策略）。
 #[tauri::command]
-pub fn wps_import_pptx(app: AppHandle, path: String) -> Result<String, String> {
-    let bytes = std::fs::read(&path).map_err(|e| format!("读取 {} 失败: {}", path, e))?;
-    let media_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("pptx_media");
-    std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建图片目录失败: {}", e))?;
-    // 防御：解析若 panic，返回错误而非崩溃整个应用（之前解析崩溃会导致导入闪退）
-    let work = std::panic::AssertUnwindSafe(|| {
-        crate::services::pptx_import::pptx_to_json(&bytes, &media_dir)
-    });
-    let mut json = match std::panic::catch_unwind(work) {
-        Ok(r) => r?,
-        Err(_) => return Err(
-            "导入解析发生崩溃（panic）。请重新导入并查看弹出的「导入诊断」摘要，或把 app_data/logs/app.log 发我定位。".into(),
-        ),
-    };
+pub async fn wps_import_pptx(app: AppHandle, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let bytes = std::fs::read(&path).map_err(|e| format!("读取 {} 失败: {}", path, e))?;
+        let media_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("pptx_media");
+        std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建图片目录失败: {}", e))?;
+        // 防御：解析若 panic，返回错误而非崩溃整个应用（之前解析崩溃会导致导入闪退）
+        let work = std::panic::AssertUnwindSafe(|| {
+            crate::services::pptx_import::pptx_to_json(&bytes, &media_dir)
+        });
+        let mut json = match std::panic::catch_unwind(work) {
+            Ok(r) => r?,
+            Err(_) => return Err(
+                "导入解析发生崩溃（panic）。请重新导入并查看弹出的「导入诊断」摘要，或把 app_data/logs/app.log 发我定位。".into(),
+            ),
+        };
 
-    // 尝试用 LibreOffice headless 生成每页高精度 PNG，注入到幻灯片数据中。
-    // 成功则放映时直接展示图片（像素级还原）；失败或不装 LibreOffice 则退回自定义渲染。
-    let png_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("pptx_png");
-    if let Ok(pngs) = export_slides_png_libreoffice(&path, &png_dir) {
-        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) {
-            if let Some(slides) = v.get_mut("slides").and_then(|s| s.as_array_mut()) {
-                for (i, png) in pngs.iter().enumerate() {
-                    if let Some(s) = slides.get_mut(i) {
-                        if let Some(obj) = s.as_object_mut() {
-                            obj.insert("pngSrc".into(), serde_json::json!(png));
+        // 尝试用 LibreOffice headless 生成每页高精度 PNG，注入到幻灯片数据中。
+        // 成功则放映时直接展示图片（像素级还原）；失败或不装 LibreOffice 则退回自定义渲染。
+        let png_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("pptx_png");
+        if let Ok(pngs) = export_slides_png_libreoffice(&path, &png_dir) {
+            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(slides) = v.get_mut("slides").and_then(|s| s.as_array_mut()) {
+                    for (i, png) in pngs.iter().enumerate() {
+                        if let Some(s) = slides.get_mut(i) {
+                            if let Some(obj) = s.as_object_mut() {
+                                obj.insert("pngSrc".into(), serde_json::json!(png));
+                            }
                         }
                     }
                 }
+                json = serde_json::to_string(&v).map_err(|e| e.to_string())?;
             }
-            json = serde_json::to_string(&v).map_err(|e| e.to_string())?;
         }
-    }
 
-    Ok(json)
+        Ok(json)
+    })
+    .await
+    .map_err(|e| format!("导入线程异常: {}", e))?
 }
 
 // ---- LibreOffice headless：PPTX → 每页 PNG ----

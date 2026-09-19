@@ -264,7 +264,10 @@ export function useStreamingOpen<TMeta, TItem>(
 //   2) 先试缓存命中（cacheCommand），未命中再流式扫描（scanCommand）；
 //   3) spawn_blocking 卸载在 Rust 侧，前端只消费事件；
 //   4) 原子取消（cancel_scan）+ 卸载清理。
-// 阅读/image 共用 'scan-chunk'/'scan-progress'，video 用 'video-scan-chunk'/...
+// 各模块使用独立事件名：阅读 'scan-chunk'/'scan-progress'、image 'image-scan-chunk'/...、
+// video 'video-scan-chunk'/...。历史教训：阅读与 image 曾共用 'scan-chunk'，
+// 图片模块切换到监听后会收到阅读在途的书本数据（BookSummary 无 imageCount）→ 卡片显示 "{n} 张" 占位。
+// 事件监听是宿主窗口级的（插件与宿主同窗口），新增模块务必用独立事件名，勿复用。
 // 各模块仅传入事件名与命令名即可复用同一套高并发机制，消除四处重复实现。
 
 export interface ScanProgressLite {

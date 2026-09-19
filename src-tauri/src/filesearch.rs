@@ -314,7 +314,7 @@ fn build_index() {
                 .is_ok()
             {
                 count += 1;
-                // 维护三元组子串索引（name 与 path 都索引，支持文件名/路径片段搜索）
+                // 维护三元组子串索引（只索引文件名，控制库体积；路径片段由 fs_search 的 LIKE 回退兜底）
                 db_insert_trigrams(&conn, &p, &name.to_lowercase(), &p.to_lowercase());
             }
             since_commit += 1;
@@ -589,16 +589,17 @@ fn char_trigrams(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// 写入某路径的三元组（同时索引 name 与 path，使「按文件名」与「按路径片段」都能走索引）。
-fn db_insert_trigrams(conn: &Connection, path: &str, name_lower: &str, path_lower: &str) {
+/// 写入某路径的三元组（**只索引文件名**）。
+///
+/// 历史上同时索引 name 与完整 path：全盘百万文件的完整路径 3-gram 使 trigrams 表膨胀到 ~24GB
+/// （实测 2026-09-19），而路径片段查询是低频需求。现只索引文件名——表体积预计降 80%+，
+/// 「按文件名/名称片段」搜索完全不受影响；纯路径片段查询由 fs_search 的 LIKE 回退兜底（不丢功能）。
+fn db_insert_trigrams(conn: &Connection, path: &str, name_lower: &str, _path_lower: &str) {
     let mut stmt = match conn.prepare("INSERT INTO trigrams (gram, path) VALUES (?1,?2)") {
         Ok(s) => s,
         Err(_) => return,
     };
-    for g in char_trigrams(name_lower)
-        .into_iter()
-        .chain(char_trigrams(path_lower))
-    {
+    for g in char_trigrams(name_lower) {
         let _ = stmt.execute(params![g, path]);
     }
 }
@@ -671,7 +672,11 @@ pub fn fs_search(query: String, limit: Option<usize>) -> Vec<SearchResult> {
 
     let candidates = search_candidates(conn, &ql);
     if candidates.is_empty() {
-        return Vec::new();
+        // 三元组未命中 → 回退「包含匹配」全表扫描。
+        // 触发场景：①纯路径片段查询（trigram 只索引文件名，2026-09-19 瘦身后）；
+        // ②文件名 3-gram 恰好不含查询串但路径含。全表 LIKE 在这两类低频查询上可接受，
+        // 优于「直接返回空」丢功能。
+        return run_search_sql(conn, &ql, &format!("%{ql}%"), limit_i as i64);
     }
     let ph = vec!["?"; candidates.len()].join(",");
     let sql = format!(

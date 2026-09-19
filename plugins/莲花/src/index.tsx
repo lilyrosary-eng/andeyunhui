@@ -71,12 +71,17 @@ function ImageModule() {
 
   // 加载扫描结果（优先缓存，无缓存时扫描）—— 共享 useScanStream：帧缓冲 + 缓存优先 + 可取消
   const { start: scanStart, cancel: scanCancel } = useScanStream<ImageFolder>({
-    chunkEvent: 'scan-chunk',
-    progressEvent: 'scan-progress',
+    chunkEvent: 'image-scan-chunk',
+    progressEvent: 'image-scan-progress',
     cacheCommand: 'load_image_cache',
     scanCommand: 'scan_image_root',
     rootPaths,
-    onItems: (items) => setFolders(prev => [...prev, ...items]),
+    // 防御：事件名虽已与阅读模块隔离，仍过滤非图片结构数据（如跨模块串台的书本数据），
+    // 避免 folderName/imageCount 缺失导致卡片显示 {n} 张 占位。
+    onItems: (items) => setFolders(prev => [
+      ...prev,
+      ...items.filter((it) => !!it && typeof it.folderPath === 'string' && typeof it.folderName === 'string' && typeof it.imageCount === 'number'),
+    ]),
     onProgress: (p) => setScanProgress(p),
     onDone: () => setLoading(false),
     onError: (e) => {

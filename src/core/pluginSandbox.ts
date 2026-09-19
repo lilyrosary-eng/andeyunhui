@@ -117,7 +117,6 @@ const ALLOWED_COMMANDS = new Set([
   // 但后端代理、白名单、签名链路其实都是通的（排查时极易误判为后端问题）。
   // 教训：新增任何走 __HOST_API__.invoke 的插件命令，必须同步加到这里。
   'bilibili_request', // B 站代理：wbi 签名在 TS 端完成，Rust 仅无 CORS 转发
-  'douyin_request', // 抖音代理：网址直连面板的「解析」按钮会调用（抖音需 a_bogus 签名，可能失败）
   'download_video', // 视频下载：多段按序下载 + ffmpeg concat 拼接（8GB 上限、无总超时）
   'download_hls', // m3u8 转封装 mp4（网址直连面板粘贴 .m3u8 时走这条）
   // 内嵌浏览器（网络视频·「面板区当浏览器」）：子 webview 生命周期 + 资源嗅探
@@ -213,6 +212,13 @@ const ALLOWED_COMMANDS = new Set([
   // 思考模式开关：ide / gongfang 子插件内联 toggle 调用此命令写回 profile.thinking
   // （此前漏加白名单，导致沙箱拦截 ai_set_profile_thinking，思考按钮「点了没反应」）
   'ai_set_profile_thinking',
+  // ⚠️ agent 模式与执行轨迹：此前漏加，导致 ai-chat 插件内 agent 模式 invoke 被静默拦截
+  // （表现为「agent 开关无效/报错」），以及执行轨迹面板无法读取会话日志。
+  'ai_chat_agent',
+  'ai_agent_cancel',
+  'ai_agent_status',
+  'ai_agent_sessions',
+  'ai_agent_events',
   // 对话持久化：ai 子插件读取/保存多会话（ai_conversations.json），漏加会被沙箱拦截导致「已降级为新对话」
   'ai_get_conversations',
   'ai_save_conversations',

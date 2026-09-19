@@ -10,7 +10,6 @@ import { KEYS } from '@/core/storage/keys';
 import { EVENTS } from '@/core/events/schema';
 
 const LYRICS_EVENT = EVENTS.lyrics.update;
-const LOCK_ICON_SIZE = 18;
 
 /** 歌词字体大小默认值，可通过事件同步更新 */
 const DEFAULT_FONT_SIZE = 28;
@@ -20,7 +19,6 @@ export function LyricsWidget() {
   const [currentLine, setCurrentLine] = useState('');
   const [nextLine, setNextLine] = useState('');
   const [locked, setLocked] = useState(false);
-  const [showLockIcon, setShowLockIcon] = useState(false);
   const [fontSize, setFontSize] = useState(() => {
     const saved = storage.getString(KEYS.desktop.lyricsFontSize.key, '');
     return saved ? parseInt(saved, 10) : DEFAULT_FONT_SIZE;
@@ -28,7 +26,6 @@ export function LyricsWidget() {
   const [showNextLine, setShowNextLine] = useState(() => {
     return storage.getString(KEYS.desktop.lyricsShowNext.key, 'true') === 'true';
   });
-  const lockTimerRef = useRef<ReturnType<typeof setTimeout>>(0);
   // 记录上一次已保存的位置，避免位置未变化时每 2 秒无谓写盘并打印日志
   const lastSavedPos = useRef<{ x: number; y: number } | null>(null);
 
@@ -61,13 +58,20 @@ export function LyricsWidget() {
     invoke<boolean>('get_lyrics_widget_locked').then(setLocked).catch(() => {});
   }, []);
 
-  // 监听锁定状态变更（由主面板或本窗口的锁定按钮触发，保证两端按钮同步）
+  // 监听锁定状态变更（仅由主面板 PlayerBar 的锁按钮触发；浮窗自身已无锁按钮）
   useEffect(() => {
     const unlisten = listen<{ locked: boolean }>(EVENTS.lyrics.lockChanged, (event) => {
       setLocked(event.payload.locked);
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
+
+  // 锁定 → 窗口级鼠标穿透（与桌宠同款：对自身窗口调 setIgnoreCursorEvents，
+  // 避免 Rust 侧克隆 WebviewWindow 在销毁竞态下崩溃）。锁定后整个浮窗不接收鼠标，
+  // 解锁只能从主面板 PlayerBar 的锁按钮操作。
+  useEffect(() => {
+    getCurrentWindow().setIgnoreCursorEvents(locked).catch(() => {});
+  }, [locked]);
 
   // 拖拽：mousedown 开始拖拽，mousemove 更新位置，mouseup 结束并保存
   const handleMouseDown = useCallback(
@@ -249,41 +253,15 @@ export function LyricsWidget() {
     };
   }, [fontSize, showNextLine, currentLine, nextLine]);
 
-  // 鼠标悬停显示锁图标
-  const handleMouseEnter = useCallback(() => {
-    if (locked) return;
-    setShowLockIcon(true);
-  }, [locked]);
-
-  const handleMouseLeave = useCallback(() => {
-    if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
-    lockTimerRef.current = setTimeout(() => setShowLockIcon(false), 500);
-  }, []);
-
-  // 点击锁定/解锁图标：切换歌词窗口锁定状态
-  const handleToggleLock = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      e.preventDefault();
-      const newLocked = !locked;
-      invoke('set_lyrics_widget_locked', { locked: newLocked }).catch(() => {});
-      setLocked(newLocked);
-      setShowLockIcon(false);
-    },
-    [locked],
-  );
-
   return (
     <div
       className="w-full h-full flex flex-col items-center justify-center select-none relative"
       style={{
         background: 'transparent',
-        // 锁定态：歌词区鼠标穿透到背后窗口（点击穿透），仅解锁按钮保持可交互
+        // 锁定态：窗口级 setIgnoreCursorEvents 真穿透（见上方 effect），此处 CSS 再兜底一层
         pointerEvents: locked ? 'none' : 'auto',
       }}
       onMouseDown={handleMouseDown}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
     >
       {/* 内容容器：上下留白由窗口 safeY 提供（不再用 py-3，避免与纵向缓冲重复占用导致上下被裁） */}
       <div ref={contentRef} className="flex flex-col items-center">
@@ -320,52 +298,6 @@ export function LyricsWidget() {
         )}
       </div>
 
-      {/* 锁定/解锁图标：hover 时淡入；锁定态常驻显示并可点击解锁（穿透下仍保持可交互） */}
-      <div
-        className="absolute top-2 right-2 transition-opacity duration-200"
-        style={{
-          opacity: locked ? 0.85 : (showLockIcon ? 0.7 : 0),
-          pointerEvents: (locked || showLockIcon) ? 'auto' : 'none',
-          cursor: 'pointer',
-        }}
-        // 关键：阻止 mousedown 冒泡到父级（父级 onMouseDown 会触发 startDragging），
-        // 否则点击锁定图标会顺带拖动整个歌词窗口
-        onMouseDown={(e) => e.stopPropagation()}
-        onClick={handleToggleLock}
-        title={locked ? '解锁歌词' : '锁定歌词'}
-      >
-        {locked ? (
-          <svg
-            width={LOCK_ICON_SIZE}
-            height={LOCK_ICON_SIZE}
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="white"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{ filter: 'drop-shadow(0 1px 3px rgba(0,0,0,0.5))' }}
-          >
-            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          </svg>
-        ) : (
-          <svg
-            width={LOCK_ICON_SIZE}
-            height={LOCK_ICON_SIZE}
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="white"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{ filter: 'drop-shadow(0 1px 3px rgba(0,0,0,0.5))' }}
-          >
-            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-            <path d="M7 11V7a5 5 0 0 1 9.9-1" />
-          </svg>
-        )}
-      </div>
     </div>
   );
 }

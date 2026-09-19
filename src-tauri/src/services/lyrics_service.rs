@@ -108,6 +108,8 @@ pub fn create_lyrics_widget(_app: &AppHandle) -> Result<(), Box<dyn std::error::
 /// 显示歌词窗口
 #[tauri::command]
 pub async fn show_lyrics_widget(app: AppHandle) -> Result<(), String> {
+    // 取消空闲回收计时（本次召唤后窗口可见；即便创建失败也无隐藏窗口可回收）
+    LYRICS_HIDDEN_AT.store(0, std::sync::atomic::Ordering::SeqCst);
     // P0-3 懒建：窗口不存在（或被销毁）时 marshal 主线程走统一重试引擎创建；
     // 已存在则直接复用（与旧逻辑一致，仅 show + 重新落位）
     crate::services::window_manager::ensure_transparent_window_on_main(
@@ -138,23 +140,80 @@ pub async fn show_lyrics_widget(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 关闭歌词窗口（P0-3+ 生命周期优化：低频浮窗「关闭=销毁」，释放整棵 WebView2 进程树）
+// ============ 歌词窗口空闲回收 ============
+// 窗口常驻（隐藏保留）换取毫秒级召唤，代价是约 420MB 的 WebView2 进程树常驻。
+// 空闲超时（隐藏后超过 LYRICS_IDLE_DESTROY_SECS 未再召唤）自动销毁，兼顾
+// 「高频开关毫秒级」与「长期不用释放内存」。
+// 注意：销毁必须 marshal 主线程执行（后台线程碰窗句柄是红线，见 window_manager 教训）。
+const LYRICS_IDLE_DESTROY_SECS: u64 = 600;
+static LYRICS_HIDDEN_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LYRICS_IDLE_REAPER_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 启动空闲回收线程（全进程仅一次）：每 60s 检查一次，隐藏超时即销毁歌词窗口。
+fn ensure_idle_reaper(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
+    if LYRICS_IDLE_REAPER_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        let hidden_at = LYRICS_HIDDEN_AT.load(Ordering::SeqCst);
+        if hidden_at == 0 || now_secs().saturating_sub(hidden_at) < LYRICS_IDLE_DESTROY_SECS {
+            continue;
+        }
+        // 到点：marshal 主线程安全销毁（闭包内双重检查，防期间被重新召唤/已可见）
+        let app_main = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            use std::sync::atomic::Ordering;
+            if LYRICS_HIDDEN_AT.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            if let Some(w) = app_main.get_webview_window(LYRICS_WINDOW_LABEL) {
+                if !w.is_visible().unwrap_or(true) {
+                    let _ = w.destroy();
+                    LYRICS_HIDDEN_AT.store(0, Ordering::SeqCst);
+                    eprintln!("[Lyrics] 空闲超时，歌词窗口已销毁（释放内存，下次召唤重新懒建）");
+                }
+            } else {
+                LYRICS_HIDDEN_AT.store(0, Ordering::SeqCst);
+            }
+        });
+    });
+}
+
+/// 隐藏歌词窗口（窗口常驻保留，召唤走毫秒级 show）
 ///
-/// 命令名维持 `hide_lyrics_widget`（插件调用点无感），语义改为销毁：位置/锁定/字体等
-/// 配置已全部持久化（load/save_lyrics_config），重开走 `show_lyrics_widget` 懒建自动恢复。
-/// 对比旧 hide 语义：高频开关场景需要重建冷启动（数秒），但低频场景换回 ~420MB/树/次。
+/// 生命周期取舍演进：曾为「关闭=销毁」（回收 ~420MB WebView2 进程树），但代价是每次
+/// 重开都要懒建冷启动（数秒 + 概率失败，用户实测「召唤很久 / 偶尔召唤不出来」），
+/// 与高频开关的实际用法（播放时随手开关歌词）严重不匹配。现改为隐藏保留：
+/// - 召唤 = `show_lyrics_widget` 的 show() + 落位，毫秒级；
+/// - 进程退出（非托盘路径）与托盘模式收起歌词窗时仍销毁，内存不会泄漏到退出后；
+/// - 位置/锁定/字体全部持久化，隐藏不丢状态；首次召唤仍走一次懒建（仅一次）。
 #[tauri::command]
 pub fn hide_lyrics_widget(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
-        // 窗口销毁必须走 WebviewWindow::destroy（内部主线程安全）；Tauri 的 destroy 不触发
-        // CloseRequested，插件侧无残留监听。配置已持久化，无状态丢失。
-        window.destroy().map_err(|e| format!("销毁歌词窗口失败: {}", e))?;
-        eprintln!("[Lyrics] 歌词窗口已销毁（释放进程树，重开将懒建）");
+        window.hide().map_err(|e| format!("隐藏歌词窗口失败: {}", e))?;
+        // 记账空闲起点 + 启动回收线程（常驻是毫秒级的前提，但不能永久占内存）
+        LYRICS_HIDDEN_AT.store(now_secs(), std::sync::atomic::Ordering::SeqCst);
+        ensure_idle_reaper(&app);
+        eprintln!("[Lyrics] 歌词窗口已隐藏（常驻保留；10 分钟未召唤将自动销毁释放内存）");
     }
     Ok(())
 }
 
-/// 设置歌词窗口锁定状态（true = 鼠标穿透：歌词区点击穿过到背后窗口，仅解锁按钮可点）
+/// 设置歌词窗口锁定状态（true = 窗口级鼠标穿透：整个浮窗不接收鼠标，像桌宠一样）
+///
+/// 穿透由浮窗前端对自身窗口调用 setIgnoreCursorEvents 应用（见 LyricsWidget.tsx 的 locked effect），
+/// 本命令只负责持久化 + 广播同步；解锁入口仅剩主面板 PlayerBar 的锁按钮（浮窗锁图标已移除）。
 #[tauri::command]
 pub fn set_lyrics_widget_locked(app: AppHandle, locked: bool) -> Result<(), String> {
     // 始终持久化锁定状态（无论悬浮窗口当前是否存在）

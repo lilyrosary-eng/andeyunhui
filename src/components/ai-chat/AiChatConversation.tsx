@@ -1,9 +1,10 @@
 // 独立「AI 对话」模块 · 主区对话流 —— 大屏 UI，受控于上层共享的 useAiChat 实例。
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
 import { memo, useEffect, useState } from 'react';
-import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon } from 'lucide-react';
+import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
-import type { Conversation, SendAttachment, AttachmentKind } from '@/components/capsule/types';
+import type { Conversation, SendAttachment, AttachmentKind, ChatMsg } from '@/components/capsule/types';
+import { AgentTracePanel } from './AgentTracePanel';
 import type { UseAiChatResult } from '@/core/ai/useAiChat';
 import { AiChatCompanionAvatar } from './AiChatCompanionCard';
 import { useCompanionStore } from '@/core/stores/companionStore';
@@ -129,6 +130,8 @@ export const AiChatConversation = memo(function AiChatConversation({
   const [pickerOpen, setPickerOpen] = useState(false);
   // 后端 ai_chat 安全截断提示（messages 过长被自动裁剪）
   const [truncateWarn, setTruncateWarn] = useState<{ kept: number } | null>(null);
+  // 执行轨迹面板：点开某条 assistant 消息的 agent 事件日志（工具调用/压缩/中断修复）
+  const [traceMsg, setTraceMsg] = useState<ChatMsg | null>(null);
   const messages = activeConv?.messages ?? [];
   const companion = useCompanionStore((s) => s.companion);
   const userAvatar = useUserAvatar();
@@ -368,6 +371,15 @@ export const AiChatConversation = memo(function AiChatConversation({
       </div>
       )}
 
+      {/* 执行轨迹面板（fixed 右侧抽屉，位置无关） */}
+      {traceMsg?.traceId && (
+        <AgentTracePanel
+          traceId={traceMsg.traceId}
+          liveSteps={traceMsg.agentSteps}
+          onClose={() => setTraceMsg(null)}
+        />
+      )}
+
       {/* 群聊信息条：参与者头像组 + 成本提示（不暴露 severity / 争论 / 调侃，维持沉浸感） */}
       {activeConv?.mode === 'group' && (() => {
         const companionsAll = useCompanionStore.getState().collection.companions;
@@ -452,6 +464,21 @@ export const AiChatConversation = memo(function AiChatConversation({
                       <div className="text-[11px] font-medium text-neutral-400 dark:text-stone-500 mb-1">{speaker.name}</div>
                     ) : null;
                   })()}
+                  {/* 执行轨迹入口：agent 轮次（有 traceId）或有实时步骤时显示 */}
+                  {m.role === 'assistant' && (m.traceId || (m.agentSteps?.length ?? 0) > 0) && (
+                    <button
+                      type="button"
+                      onClick={() => setTraceMsg(m)}
+                      className={`flex items-center gap-1 text-[11px] ${mutedCls} hover:opacity-80 transition-colors mb-1`}
+                      title="查看 agent 执行轨迹（工具调用 / 上下文压缩 / 中断修复）"
+                    >
+                      <Activity size={11} />
+                      <span>
+                        执行轨迹
+                        {(m.agentSteps?.length ?? 0) > 0 ? ` · ${m.agentSteps!.length} 步` : ''}
+                      </span>
+                    </button>
+                  )}
                   {m.reasoning && (() => {
                     // 流式输出（content 为空且忙碌）时强制展开，否则按用户折叠状态
                     const streaming = busy && m.role === 'assistant' && !m.content;

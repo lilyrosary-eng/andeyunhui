@@ -299,41 +299,6 @@ pub fn music_list_playlist_tracks(app: AppHandle, playlist_id: String) -> Result
 }
 
 
-pub fn music_add_track_to_playlist(
-    app: AppHandle,
-    playlist_id: String,
-    track: PlaylistTrack,
-) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    let pos: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_track WHERE playlist_id = ?1",
-            params![playlist_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("计算曲目位置失败: {}", e))?;
-    conn.execute(
-        "INSERT INTO playlist_track
-         (playlist_id, track_id, position, title, artist, album, file_path, cover_path, duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-         ON CONFLICT(playlist_id, track_id) DO NOTHING",
-        params![
-            playlist_id,
-            track.track_id,
-            pos,
-            track.title,
-            track.artist,
-            track.album,
-            track.file_path,
-            track.cover_path,
-            track.duration_ms
-        ],
-    )
-    .map_err(|e| format!("添加曲目到歌单失败: {}", e))?;
-    Ok(())
-}
-
-
 // 整歌单曲目同步（前端每次变更后调用）：删除旧曲目并批量插入新曲目，保持 position 连续。
 // 用于前端自建歌单与 SQLite 对齐，避免逐曲 diff 的脆弱性。
 pub fn music_replace_playlist_tracks(
@@ -369,101 +334,6 @@ pub fn music_replace_playlist_tracks(
         )
         .map_err(|e| format!("写入歌单曲目失败: {}", e))?;
     }
-    tx.commit().map_err(|e| format!("提交事务失败: {}", e))?;
-    Ok(())
-}
-
-pub fn music_remove_track_from_playlist(
-    app: AppHandle,
-    playlist_id: String,
-    track_id: String,
-) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    conn.execute(
-        "DELETE FROM playlist_track WHERE playlist_id = ?1 AND track_id = ?2",
-        params![playlist_id, track_id],
-    )
-    .map_err(|e| format!("从歌单移除曲目失败: {}", e))?;
-    // 重排 position，保持连续
-    conn.execute(
-        "UPDATE playlist_track SET position = (
-            SELECT COUNT(*) FROM playlist_track p2
-            WHERE p2.playlist_id = playlist_track.playlist_id
-              AND p2.position <= playlist_track.position
-        ) - 1 WHERE playlist_id = ?1",
-        params![playlist_id],
-    )
-    .map_err(|e| format!("重排歌单位置失败: {}", e))?;
-    Ok(())
-}
-
-
-pub fn music_reorder_playlist_track(
-    app: AppHandle,
-    playlist_id: String,
-    track_id: String,
-    new_position: i64,
-) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    // 先把目标曲目移到末尾，再按 (原 position 排序, 排除目标) 重新连续编号，
-    // 最后把目标插到 new_position。避免相关子查询的 AND/OR 优先级与跨歌单污染问题。
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM playlist_track WHERE playlist_id = ?1",
-            params![playlist_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("查询曲目数失败: {}", e))?;
-    if count == 0 {
-        return Ok(());
-    }
-    let clamped = new_position.clamp(0, count - 1);
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("开启事务失败: {}", e))?;
-    // 1) 目标曲目临时置为最大 position（排到末尾）
-    tx.execute(
-        "UPDATE playlist_track SET position = ?1 WHERE playlist_id = ?2 AND track_id = ?3",
-        params![count, playlist_id, track_id],
-    )
-    .map_err(|e| format!("暂存目标曲目失败: {}", e))?;
-    // 2) 其余曲目按原 position 升序重新连续编号 0..count-2
-    let mut ids: Vec<String> = Vec::new();
-    {
-        let mut stmt = tx
-            .prepare(
-                "SELECT track_id FROM playlist_track
-                 WHERE playlist_id = ?1 AND track_id <> ?2
-                 ORDER BY position ASC",
-            )
-            .map_err(|e| format!("查询重排序列失败: {}", e))?;
-        let mut rows = stmt
-            .query(params![playlist_id, track_id])
-            .map_err(|e| format!("读取重排序列失败: {}", e))?;
-        while let Some(row) = rows.next().map_err(|e| format!("重排序列行迭代失败: {}", e))? {
-            let id: String = row.get(0).map_err(|e| format!("重排序列行解析失败: {}", e))?;
-            ids.push(id);
-        }
-    }
-    for (i, id) in ids.iter().enumerate() {
-        tx.execute(
-            "UPDATE playlist_track SET position = ?1 WHERE playlist_id = ?2 AND track_id = ?3",
-            params![i as i64, playlist_id, id],
-        )
-        .map_err(|e| format!("重排曲目失败: {}", e))?;
-    }
-    // 3) 目标曲目放到 clamped 位置（把 >=clamped 的都后移一位）
-    tx.execute(
-        "UPDATE playlist_track SET position = position + 1
-         WHERE playlist_id = ?1 AND track_id <> ?2 AND position >= ?3",
-        params![playlist_id, track_id, clamped],
-    )
-    .map_err(|e| format!("后移曲目失败: {}", e))?;
-    tx.execute(
-        "UPDATE playlist_track SET position = ?1 WHERE playlist_id = ?2 AND track_id = ?3",
-        params![clamped, playlist_id, track_id],
-    )
-    .map_err(|e| format!("放置目标曲目失败: {}", e))?;
     tx.commit().map_err(|e| format!("提交事务失败: {}", e))?;
     Ok(())
 }
@@ -581,17 +451,6 @@ pub fn music_set_mv_path(app: AppHandle, file_path: String, mv_path: String) -> 
         params![file_path, mv_path],
     )
     .map_err(|e| format!("写入 MV 绑定失败: {}", e))?;
-    Ok(())
-}
-
-/// 删除本地 MV 绑定（如用户取消 MV 关联）。
-pub fn music_delete_mv_path(app: AppHandle, file_path: String) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    conn.execute(
-        "DELETE FROM track_mv_path WHERE file_path = ?1",
-        params![file_path],
-    )
-    .map_err(|e| format!("删除 MV 绑定失败: {}", e))?;
     Ok(())
 }
 

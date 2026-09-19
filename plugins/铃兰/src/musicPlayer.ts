@@ -371,7 +371,10 @@ class MusicPlayer {
     });
   }
 
-  // 启动伪律动：仅在未收到 Rust 真实频谱时作为降级方案
+  // 启动伪律动：仅在未收到 Rust 真实频谱时作为降级方案。
+  // 惰性与真实频谱同源：只有频谱消费者（漫游页 EQ，走 requestSpectrum）存在时才跑——
+  // 此前 play 事件无条件启动，非漫游页播放时每帧空转 64 桶计算且让主线程永不空闲
+  // （破坏浏览器空闲调度，所有交互与它争帧预算 → 音乐模块「粘滞感」的来源之一）。
   private startPseudoAnalyser(): void {
     if (this.pseudoAnimFrame !== null) return;
     this.pseudoStartTime = performance.now();
@@ -382,6 +385,11 @@ class MusicPlayer {
       }
       // 如果有真实频谱数据，不再生成伪律动
       if (this.hasRealSpectrum) {
+        this.pseudoAnimFrame = null;
+        return;
+      }
+      // 无消费者（不在漫游页）：停跑，等 requestSpectrum 再次唤醒
+      if (this.spectrumWanted === 0) {
         this.pseudoAnimFrame = null;
         return;
       }
@@ -414,6 +422,9 @@ class MusicPlayer {
   requestSpectrum(): void {
     this.spectrumWanted++;
     this.syncSpectrum();
+    // 消费者就位：若正在播放且尚无真实频谱，立即恢复伪律动兜底
+    // （否则 EQ 要等 Rust 真实频谱首帧才有动画）
+    if (this.isPlaying && !this.hasRealSpectrum) this.startPseudoAnalyser();
   }
   releaseSpectrum(): void {
     this.spectrumWanted = Math.max(0, this.spectrumWanted - 1);

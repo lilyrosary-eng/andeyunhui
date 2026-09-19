@@ -32,19 +32,35 @@ pub fn start_device_listening(app: tauri::AppHandle) {
         return; // 已在监听，幂等返回
     }
     std::thread::spawn(move || {
+        // MouseMove 节流到 ~60Hz（16ms）：高刷鼠标每秒可产生 500~1000 次移动事件，
+        // 而 rdev 是系统级低级钩子——回调在「系统输入路径」上同步执行，回调里的任何耗时
+        // 都会直接拖慢整机鼠标响应；且 emit 要序列化 payload 并跨 webview 投递。
+        // 不节流时「移动鼠标 = 每秒数百次广播」，表现为全局发涩（不只应用内）。
+        // 限频到与屏幕刷新率对齐即可（光标跟随/朝向本就按帧率更新，无视觉损失），事件量降 90%+。
+        let mut last_move: Option<std::time::Instant> = None;
         // rdev 0.5 的 listen 接受捕获式 FnMut 闭包：把 app move 进回调即可（满足 'static）。
         let result = rdev::listen(move |event| {
             let payload = match event.event_type {
-                rdev::EventType::MouseMove { x, y } => DeviceEvent::MouseMove { x, y },
+                rdev::EventType::MouseMove { x, y } => {
+                    let now = std::time::Instant::now();
+                    if let Some(t) = last_move {
+                        if now.duration_since(t) < std::time::Duration::from_millis(16) {
+                            return;
+                        }
+                    }
+                    last_move = Some(now);
+                    DeviceEvent::MouseMove { x, y }
+                }
                 rdev::EventType::ButtonPress(_) => DeviceEvent::MouseDown,
                 rdev::EventType::ButtonRelease(_) => DeviceEvent::MouseUp,
                 rdev::EventType::KeyPress(key) => DeviceEvent::KeyDown { key: format!("{:?}", key) },
                 rdev::EventType::KeyRelease(key) => DeviceEvent::KeyUp { key: format!("{:?}", key) },
                 _ => return,
             };
-            // 全局广播：deskpet 浮窗前端的 `listen` 只接收全局事件（与 deskpet:settings /
-            // deskpet:manifest 一致的通道），窗口作用域的 emit 收不到。其它窗口无监听，无副作用。
-            let _ = app.emit("device-changed", &payload);
+            // 定向投递到桌宠浮窗（label = "deskpet"，与 capsule:expand 同款 emit_to + 前端 listen）。
+            // 原为 app.emit 全局广播：每条事件都要遍历所有 webview 投递，而监听者仅 deskpet 浮窗
+            // （DeskpetPet.tsx 的 device-changed），其余窗口收到即丢弃——定向后彻底省掉这份开销。
+            let _ = app.emit_to("deskpet", "device-changed", &payload);
         });
         // 钩子启动失败（如被其它全局钩子占用）：允许下次重试
         if result.is_err() {
