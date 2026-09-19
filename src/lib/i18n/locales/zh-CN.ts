@@ -1174,6 +1174,9 @@ export const zhCN: Record<string, string> = {
   'image.emptyTitle': '图片模块',
   'image.emptyDesc': '选择一个包含图片的文件夹作为根目录，将自动按子文件夹分组展示',
   'image.noFolders': '未找到包含图片的文件夹',
+  'image.noResults.empty': '此文件夹为空',
+  'image.noResults.no-images': '未找到图片文件',
+  'image.noResults.no-permissions': '无权限访问此文件夹',
   'image.selectFolderHint': '从左侧选择一个文件夹开始浏览',
   // 设置面板
   'image.settings.dirs': '图片根目录',

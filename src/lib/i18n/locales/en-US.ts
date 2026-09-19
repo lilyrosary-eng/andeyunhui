@@ -1066,6 +1066,9 @@ export const enUS: Record<string, string> = {
   'image.emptyTitle': 'Image module',
   'image.emptyDesc': 'Choose a folder containing images as the root; it will be grouped by subfolders automatically',
   'image.noFolders': 'No folders with images found',
+  'image.noResults.empty': 'This folder is empty',
+  'image.noResults.no-images': 'No image files found',
+  'image.noResults.no-permissions': 'No permission to access this folder',
   'image.selectFolderHint': 'Select a folder on the left to start browsing',
   // Settings panel
   'image.settings.dirs': 'Image root folders',

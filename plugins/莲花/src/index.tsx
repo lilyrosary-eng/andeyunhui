@@ -22,6 +22,7 @@ interface ScanProgress {
   found: number;
   total: number;
   done: boolean;
+  skipped: number;
 }
 
 interface CustomAlbum {
@@ -38,6 +39,7 @@ function ImageModule() {
   const [folders, setFolders] = useState<ImageFolder[]>([]);
   const [loading, setLoading] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
+  const [skippedCount, setSkippedCount] = useState(0);
   const [selectedFolder, setSelectedFolder] = useState<ImageFolder | null>(null);
   const [rescanCounter, setRescanCounter] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
@@ -82,7 +84,12 @@ function ImageModule() {
       ...prev,
       ...items.filter((it) => !!it && typeof it.folderPath === 'string' && typeof it.folderName === 'string' && typeof it.imageCount === 'number'),
     ]),
-    onProgress: (p) => setScanProgress(p),
+    onProgress: (p) => {
+      setScanProgress(p);
+      if (p.skipped && p.skipped > 0) {
+        setSkippedCount(p.skipped);
+      }
+    },
     onDone: () => setLoading(false),
     onError: (e) => {
       if (String(e).includes('扫描已在进行中')) return;
@@ -253,18 +260,27 @@ function ImageModule() {
 
   if (loading && folders.length === 0) {
     return (
-      <LoadingState
-        progressText={scanProgress ? T('image.scanProgress', { n: scanProgress.found }) : T('image.scanning')}
-        onCancel={() => hostApi.invoke('cancel_scan').catch(() => {})}
-      />
+      <div className="flex-1 flex flex-col items-center justify-center h-full">
+        <LoadingState
+          progressText={scanProgress ? T('image.scanProgress', { n: scanProgress.found }) : T('image.scanning')}
+          onCancel={() => hostApi.invoke('cancel_scan').catch(() => {})}
+        />
+        {skippedCount > 0 && (
+          <p className="text-xs text-amber-500 mt-2">跳过 {skippedCount} 个无权限目录</p>
+        )}
+      </div>
     );
   }
 
   if (!loading && folders.length === 0) {
+    let reason: 'empty' | 'no-images' | 'no-permissions' = 'no-images';
+    if (skippedCount > 0) {
+      reason = 'no-permissions';
+    }
     return (
       <NoResultsState
-                    text={T('image.noFolders')}
-                    buttonText={T('shared.changeDir')}
+        text={T(`image.noResults.${reason}`)}
+        buttonText={T('shared.changeDir')}
         onSelect={handleAddRoot}
       />
     );
