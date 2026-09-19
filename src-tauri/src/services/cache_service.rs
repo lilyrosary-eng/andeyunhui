@@ -115,3 +115,32 @@ pub fn load_file_cache<T: DeserializeOwned>(
     let env: FileCacheEnvelope<T> = serde_json::from_str(&json).ok()?;
     Some((env.data, env.mtime))
 }
+
+pub fn cleanup_old_caches(app_data: &Path, max_age_days: u64) -> Result<usize, String> {
+    let dir = cache_dir(app_data);
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let now = std::time::SystemTime::now();
+    let max_age = std::time::Duration::from_secs(max_age_days * 24 * 60 * 60);
+    let mut removed = 0;
+
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    if now.duration_since(mtime).unwrap_or_default() > max_age {
+                        if std::fs::remove_file(&path).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(removed)
+}

@@ -17,6 +17,7 @@ const MAX_IMAGE_FILES: usize = 50_000;
 const MAX_DEPTH: usize = 12;
 const MAX_RESULT_FOLDERS: usize = 5_000;
 const CHUNK_SIZE: usize = 50;
+const THUMBNAIL_CACHE_MAX_SIZE: u64 = 500 * 1024 * 1024; // 500MB
 
 pub static SCAN_CANCEL: AtomicBool = AtomicBool::new(false);
 
@@ -275,4 +276,48 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
     thumb.save(&thumb_path)
         .map_err(|e| format!("保存缩略图失败: {}", e))?;
     Ok(thumb_path.to_string_lossy().to_string())
+}
+
+pub fn cleanup_thumbnail_cache(app: &tauri::AppHandle) -> Result<usize, String> {
+    let cache_dir = app.path().app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("cache")
+        .join("thumbnails");
+
+    if !cache_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut entries: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total_size: u64 = 0;
+
+    for entry in std::fs::read_dir(&cache_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("jpg") {
+            let meta = entry.metadata().map_err(|e| e.to_string())?;
+            let mtime = meta.modified().map_err(|e| e.to_string())?;
+            total_size += meta.len();
+            entries.push((path, meta.len(), mtime));
+        }
+    }
+
+    if total_size <= THUMBNAIL_CACHE_MAX_SIZE {
+        return Ok(0);
+    }
+
+    entries.sort_by(|a, b| a.2.cmp(&b.2));
+
+    let mut removed = 0;
+    for (path, size, _) in &entries {
+        if total_size <= THUMBNAIL_CACHE_MAX_SIZE {
+            break;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            total_size -= size;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
 }

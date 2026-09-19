@@ -2666,6 +2666,21 @@ pub async fn generate_thumbnail(app: tauri::AppHandle, image_path: String, width
         .map_err(|e| format!("缩略图任务失败: {e}"))?
 }
 
+#[tauri::command]
+pub async fn cleanup_thumbnail_cache(app: tauri::AppHandle) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || image_service::cleanup_thumbnail_cache(&app))
+        .await
+        .map_err(|e| format!("清理缩略图缓存任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn cleanup_old_caches(app: tauri::AppHandle, max_age_days: u64) -> Result<usize, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || crate::services::cache_service::cleanup_old_caches(&app_data, max_age_days))
+        .await
+        .map_err(|e| format!("清理旧缓存任务失败: {e}"))?
+}
+
 /// 打开目录选择对话框，返回选中的路径（用户取消时返回 None）
 #[tauri::command]
 pub async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {

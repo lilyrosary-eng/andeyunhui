@@ -1111,6 +1111,8 @@ fn main() {
             delete_image_cache,
             get_folder_images,
             generate_thumbnail,
+            cleanup_thumbnail_cache,
+            cleanup_old_caches,
             // ========== 模块：音乐 / 铃兰 ==========
             scan_music_root,
             load_music_cache,
