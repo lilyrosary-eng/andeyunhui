@@ -41,13 +41,68 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   const viewAreaRef = useRef<HTMLDivElement>(null);
   const wheelLock = useRef(0);
 
+  // 随机模式 + 幻灯片模式
+  const [isRandomMode, setIsRandomMode] = useState(false);
+  const [isSlideshow, setIsSlideshow] = useState(false);
+  const [slideshowInterval, setSlideshowInterval] = useState(() => {
+    const saved = localStorage.getItem('image.slideshowInterval');
+    return saved ? parseFloat(saved) : 3;
+  });
+  const slideshowTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const shuffledImages = useMemo(() => {
+    if (!isRandomMode) return images;
+    const arr = [...images];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }, [images, isRandomMode]);
+
+  const getNextIndex = useCallback((current: number, total: number, random: boolean) => {
+    if (random) {
+      if (total <= 1) return 0;
+      let next = current;
+      while (next === current) {
+        next = Math.floor(Math.random() * total);
+      }
+      return next;
+    }
+    return (current + 1) % total;
+  }, []);
+
   const goToNext = useCallback(() => {
+    if (isSlideshow) setIsSlideshow(false);
     setCurrentIndex(i => Math.min(i + 1, images.length - 1));
-  }, [images.length]);
+  }, [images.length, isSlideshow]);
 
   const goToPrev = useCallback(() => {
+    if (isSlideshow) setIsSlideshow(false);
     setCurrentIndex(i => Math.max(i - 1, 0));
-  }, []);
+  }, [isSlideshow]);
+
+  // 幻灯片定时器
+  useEffect(() => {
+    if (!isSlideshow) {
+      if (slideshowTimer.current) {
+        clearInterval(slideshowTimer.current);
+        slideshowTimer.current = null;
+      }
+      return;
+    }
+    slideshowTimer.current = setInterval(() => {
+      const total = shuffledImages.length;
+      if (total === 0) return;
+      setCurrentIndex(prev => getNextIndex(prev, total, isRandomMode));
+    }, slideshowInterval * 1000);
+    return () => {
+      if (slideshowTimer.current) {
+        clearInterval(slideshowTimer.current);
+        slideshowTimer.current = null;
+      }
+    };
+  }, [isSlideshow, slideshowInterval, isRandomMode, shuffledImages.length, getNextIndex, setCurrentIndex]);
 
   // ===== 进度记录（模块设置可开关；与视频/阅读同款 localStorage 模式）=====
   // 结构：{ i: 索引, p: 图片路径 }，恢复时优先按路径匹配（抗增删图偏移），失败再按索引 clamp。
@@ -93,16 +148,16 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
 
   // 位置变化防抖持久化（仅当「记住浏览进度」开启）
   useEffect(() => {
-    if (loading || images.length === 0) return;
+    if (loading || shuffledImages.length === 0) return;
     const t = setTimeout(() => {
       try {
         if (localStorage.getItem('image.rememberProgress') === '1') {
-          localStorage.setItem('image.progress.' + folderPath, JSON.stringify({ i: currentIndex, p: images[currentIndex] || '' }));
+          localStorage.setItem('image.progress.' + folderPath, JSON.stringify({ i: currentIndex, p: shuffledImages[currentIndex] || '' }));
         }
       } catch { /* ignore */ }
     }, 400);
     return () => clearTimeout(t);
-  }, [currentIndex, images, folderPath, loading]);
+  }, [currentIndex, shuffledImages, folderPath, loading]);
 
   // 卸载/切换文件夹时立即落盘最后一次位置（防抖的兜底，防最后一步丢失）
   useEffect(() => {
@@ -169,7 +224,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
 
   // 滚动模式挂载/切模式：定位到恢复进度（无进度时 reverse 从末尾开始，倒序阅读的起点）
   useEffect(() => {
-    if (viewMode === 'full' || loading || images.length === 0) return;
+    if (viewMode === 'full' || loading || shuffledImages.length === 0) return;
     const el = scrollContainerRef.current;
     if (!el) return;
     const kids = (el.children[0] as HTMLElement | undefined)?.children;
@@ -187,12 +242,12 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
 
   // 预加载相邻图片
   useEffect(() => {
-    if (viewMode !== 'full' || images.length === 0) return;
+    if (viewMode !== 'full' || shuffledImages.length === 0) return;
     const preload = (idx: number) => {
-      if (idx >= 0 && idx < images.length) {
+      if (idx >= 0 && idx < shuffledImages.length) {
         try {
           const img = new Image();
-          img.src = hostApi.convertFileSrc(images[idx]);
+          img.src = hostApi.convertFileSrc(shuffledImages[idx]);
         } catch (e) {
           // 预加载失败不影响主流程
         }
@@ -279,7 +334,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
     el.addEventListener('scroll', onScroll, { passive: true });
     update();
     return () => { el.removeEventListener('scroll', onScroll); if (raf) cancelAnimationFrame(raf); };
-  }, [viewMode, images.length, readScrollRatio]);
+  }, [viewMode, shuffledImages.length, readScrollRatio]);
 
   // 菜单打开期间：浮层挡住滚动容器，滚轮经浮层转发继续滚动
   // （React 合成 onWheel 底层是 passive，preventDefault 无效，须原生监听）
@@ -305,14 +360,14 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
     if (inX && inY) setMenuOpen(v => !v);
   }, []);
 
-  const imgUrls = useMemo(() => images.map(p => {
+  const imgUrls = useMemo(() => shuffledImages.map(p => {
     try {
       return hostApi.convertFileSrc(p);
     } catch (e) {
       console.error('[ImageViewer] convertFileSrc 失败:', p, e);
       return '';  // 返回空字符串，由 onError 兜底显示"图片加载失败"
     }
-  }), [images]);
+  }), [shuffledImages]);
 
   if (loading) {
     return (
@@ -322,7 +377,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
     );
   }
 
-  if (images.length === 0) {
+  if (shuffledImages.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-4">
         <p className="text-sm text-neutral-400 dark:text-stone-500">{T('image.viewer.noImages')}</p>
@@ -350,27 +405,95 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
           </div>
         </div>
 
-        {/* 中间：模式切换 */}
-        <div className="flex items-center gap-0.5 bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
-          {MODES.map(mode => (
-            <button
-              key={mode}
-              onClick={() => setViewMode(mode)}
-              className={`btn-press p-1.5 rounded-md transition-colors text-xs ${
-                viewMode === mode
-                  ? 'bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-200 shadow-sm'
-                  : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'
-              }`}
-              title={T(ModeLabels[mode])}
-            >
-              <ModeIcon mode={mode} />
-            </button>
-          ))}
+        {/* 中间：模式切换 + 随机 + 幻灯片 */}
+        <div className="flex items-center gap-0.5">
+          <div className="flex items-center gap-0.5 bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
+            {MODES.map(mode => (
+              <button
+                key={mode}
+                onClick={() => setViewMode(mode)}
+                className={`btn-press p-1.5 rounded-md transition-colors text-xs ${
+                  viewMode === mode
+                    ? 'bg-white dark:bg-stone-700 text-neutral-700 dark:text-stone-200 shadow-sm'
+                    : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'
+                }`}
+                title={T(ModeLabels[mode])}
+              >
+                <ModeIcon mode={mode} />
+              </button>
+            ))}
+          </div>
+
+          {/* 随机模式 */}
+          <button
+            onClick={() => setIsRandomMode(r => !r)}
+            className={`btn-press p-1.5 rounded-md transition-colors text-xs ${
+              isRandomMode
+                ? 'bg-purple-100 dark:bg-purple-900/40 text-purple-600 dark:text-purple-400 shadow-sm'
+                : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'
+            }`}
+            title={T('image.viewer.random')}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="16 3 21 3 21 8" />
+              <line x1="4" y1="20" x2="21" y2="3" />
+              <polyline points="21 16 21 21 16 21" />
+              <line x1="15" y1="15" x2="21" y2="21" />
+              <line x1="4" y1="4" x2="9" y2="9" />
+            </svg>
+          </button>
+
+          {/* 幻灯片模式 */}
+          <button
+            onClick={() => {
+              const next = !isSlideshow;
+              setIsSlideshow(next);
+              if (!next && slideshowTimer.current) {
+                clearInterval(slideshowTimer.current);
+                slideshowTimer.current = null;
+              }
+            }}
+            className={`btn-press p-1.5 rounded-md transition-colors text-xs ${
+              isSlideshow
+                ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 shadow-sm'
+                : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'
+            }`}
+            title={T('image.viewer.slideshow')}
+          >
+            {isSlideshow ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+            )}
+          </button>
+
+          {/* 间隔输入框 */}
+          <input
+            type="number"
+            min="0.1"
+            max="3600"
+            step="0.1"
+            value={slideshowInterval}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v) && v >= 0.1 && v <= 3600) {
+                setSlideshowInterval(v);
+                localStorage.setItem('image.slideshowInterval', String(v));
+              }
+            }}
+            className="w-14 px-1 py-0.5 text-xs text-center rounded border border-neutral-200 dark:border-stone-600 bg-white/60 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
+            title={T('image.viewer.interval')}
+          />
+          <span className="text-[10px] text-neutral-400 dark:text-stone-500 -ml-1">s</span>
         </div>
 
         {/* 右侧：序号（点击可输入页码跳转） */}
         {viewMode === 'full' && (
-          <PageIndicator index={currentIndex} total={images.length} onJump={(i) => setCurrentIndex(i)} />
+          <PageIndicator index={currentIndex} total={shuffledImages.length} onJump={(i) => setCurrentIndex(i)} />
         )}
       </div>
       )}
@@ -380,7 +503,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
         {viewMode === 'full' && (
           <FullView
             imgUrls={imgUrls}
-            imgPaths={images}
+            imgPaths={shuffledImages}
             currentIndex={currentIndex}
             setCurrentIndex={setCurrentIndex}
             onWheel={handleWheelFull}
@@ -422,7 +545,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
               onClick={(e) => e.stopPropagation()}
             >
               <span className="text-xs text-white tabular-nums whitespace-nowrap bg-white/10 rounded-full px-3 py-1">
-                {Math.min(currentIndex + 1, images.length)}<span className="text-white/50"> / {images.length}</span>
+                {Math.min(currentIndex + 1, shuffledImages.length)}<span className="text-white/50"> / {shuffledImages.length}</span>
               </span>
               <ScrubBar pct={menuPct / 10} onScrub={handleMenuScrub} />
             </div>
@@ -431,9 +554,9 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
       </div>
 
       {/* 底部缩略图条（仅完整模式；沉浸时隐藏） */}
-      {viewMode === 'full' && images.length > 1 && !chromeHidden && (
+      {viewMode === 'full' && shuffledImages.length > 1 && !chromeHidden && (
         <ThumbnailStrip
-          paths={images}
+          paths={shuffledImages}
           currentIndex={currentIndex}
           onSelect={setCurrentIndex}
         />
