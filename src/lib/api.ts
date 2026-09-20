@@ -100,6 +100,7 @@ export const api = {
   // 常用笔记
   toggleFavoriteNote: (noteId: string) => invoke<boolean>('toggle_favorite_note', { noteId }),
   getAllFavorites: () => invoke<string[]>('get_all_favorites'),
+  getNextFavorite: () => invoke<string | null>('get_next_favorite'),
 
   // 创建浮窗笔记子窗口
   // 改用前端 WebviewWindow API 建窗：规避 Windows 上在命令里用

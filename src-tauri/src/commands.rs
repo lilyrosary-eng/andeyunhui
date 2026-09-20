@@ -1101,6 +1101,18 @@ pub fn get_all_favorites(app: AppHandle) -> Result<Vec<String>, String> {
     Ok(note_service::get_all_favorites(&notes_dir))
 }
 
+#[tauri::command]
+pub fn get_next_favorite(app: AppHandle) -> Result<Option<String>, String> {
+    let root_dir = notes_root_dir(&app)?;
+    let notes_dir = root_dir.join("notes");
+    let favorites = note_service::get_all_favorites(&notes_dir);
+    if favorites.is_empty() {
+        return Ok(None);
+    }
+    // 返回第一个（按最后修改时间排序）
+    Ok(favorites.into_iter().next())
+}
+
 // ================= 插件相关新命令 =================
 
 /// 插件 manifest 结构（与 extensions/{id}/manifest.json 对应）

@@ -1003,6 +1003,15 @@ fn main() {
                                 let _ = app.emit("open-dropzone-floating", ());
                                 return;
                             }
+                            // 常用笔记热键（Ctrl+Shift+N）
+                            let fav_sc_str = "Ctrl+Shift+N";
+                            let is_fav = screenshot::parse_shortcut(fav_sc_str)
+                                .map(|sc| shortcut == &sc)
+                                .unwrap_or(false);
+                            if is_fav {
+                                let _ = app.emit("favorite-shortcut-triggered", ());
+                                return;
+                            }
                             let _ = app.emit("open-screenshot", ());
                         }
                     }
@@ -1037,6 +1046,7 @@ fn main() {
             duplicate_note,
             toggle_favorite_note,
             get_all_favorites,
+            get_next_favorite,
             // ========== 核心：插件系统（扫描 / 沙箱 / 热插拔 / 分发安装）==========
             get_installed_plugins,
             refresh_plugins,

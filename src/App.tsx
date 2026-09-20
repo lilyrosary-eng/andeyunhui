@@ -262,6 +262,25 @@ function App() {
     return () => { void un.then((fn) => fn()); };
   }, []);
 
+  // 常用笔记快捷键监听
+  useEffect(() => {
+    const un = listen('favorite-shortcut-triggered', async () => {
+      try {
+        const noteId = await api.getNextFavorite();
+        if (noteId) {
+          const notes = useNotesStore.getState().notes;
+          const note = notes.find(n => n.id === noteId);
+          if (note) {
+            await api.createFloatingNoteWindow(noteId, note.title || '未命名', 200, 200);
+          }
+        }
+      } catch (e) {
+        console.error('[App] 常用笔记快捷键处理失败:', e);
+      }
+    });
+    return () => { void un.then((fn) => fn()); };
+  }, []);
+
   // ====== 派生数据 ======
   const mainPluginIds = useMemo(() => {
     if (!pluginRegistry) return [] as string[];
