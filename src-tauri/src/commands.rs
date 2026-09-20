@@ -1087,6 +1087,20 @@ pub fn duplicate_note(app: AppHandle, note_id: String) -> Result<String, String>
     note_service::duplicate_note(notes_dir, &note_id)
 }
 
+#[tauri::command]
+pub fn toggle_favorite_note(app: AppHandle, note_id: String) -> Result<bool, String> {
+    let root_dir = notes_root_dir(&app)?;
+    let notes_dir = root_dir.join("notes");
+    note_service::toggle_favorite_note(notes_dir, &note_id)
+}
+
+#[tauri::command]
+pub fn get_all_favorites(app: AppHandle) -> Result<Vec<String>, String> {
+    let root_dir = notes_root_dir(&app)?;
+    let notes_dir = root_dir.join("notes");
+    Ok(note_service::get_all_favorites(&notes_dir))
+}
+
 // ================= 插件相关新命令 =================
 
 /// 插件 manifest 结构（与 extensions/{id}/manifest.json 对应）

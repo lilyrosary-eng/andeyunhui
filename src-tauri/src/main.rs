@@ -1035,6 +1035,8 @@ fn main() {
             get_all_note_tags_map,
             delete_note,
             duplicate_note,
+            toggle_favorite_note,
+            get_all_favorites,
             // ========== 核心：插件系统（扫描 / 沙箱 / 热插拔 / 分发安装）==========
             get_installed_plugins,
             refresh_plugins,
