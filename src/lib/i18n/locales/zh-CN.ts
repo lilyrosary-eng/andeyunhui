@@ -626,6 +626,7 @@ export const zhCN: Record<string, string> = {
   'capsule.action.dropzone': '中转站',
   'capsule.action.clipboard': '剪贴板',
   'capsule.action.transfer': '传输',
+  'capsule.action.favorite': '常用笔记',
 
   // ============ 薄荷 · 专业工具箱 ============
   'mint.title': '薄荷',

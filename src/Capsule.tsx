@@ -25,6 +25,8 @@ import { KeepButton } from '@/components/KeepButton';
 import { useI18n } from '@/lib/i18n';
 import { useTransfer } from '@/core/transfer/useTransfer';
 import { useCapsuleStore } from '@/stores/capsuleStore';
+import { useNotesStore } from '@/stores/notesStore';
+import { api } from '@/lib/api';
 import CapsuleChat from '@/components/capsule/CapsuleChat';
 import CapsuleAide from '@/components/capsule/CapsuleAide';
 import {
@@ -626,6 +628,16 @@ export default function Capsule() {
         if (w) {
           await w.show();
           await w.setFocus();
+        }
+      } else if (kind === 'favorite') {
+        // 常用笔记：召唤下一个常用笔记浮窗
+        const noteId = await api.getNextFavorite();
+        if (noteId) {
+          const notes = useNotesStore.getState().notes;
+          const note = notes.find((n: { id: string }) => n.id === noteId);
+          if (note) {
+            await api.createFloatingNoteWindow(noteId, note.title || '未命名', 200, 200);
+          }
         }
       }
     } catch {

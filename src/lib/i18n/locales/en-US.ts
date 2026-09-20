@@ -626,6 +626,7 @@ export const enUS: Record<string, string> = {
   'capsule.action.dropzone': 'Transfer Station',
   'capsule.action.clipboard': 'Clipboard',
   'capsule.action.transfer': 'Transfer',
+  'capsule.action.favorite': 'Favorites',
 
   // ============ Mint · Professional Toolbox ============
   'mint.title': 'Mint',
