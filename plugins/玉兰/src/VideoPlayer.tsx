@@ -245,8 +245,12 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
     const video = videoRef.current;
     if (savedTime && video) {
       const t = parseFloat(savedTime);
-      if (t > 1) { // 跳过开头几秒，避免跳到结尾
+      // 只有未播放完毕才续播（距结尾超过 5 秒）
+      if (t > 1 && (!video.duration || video.duration - t > 5)) {
         video.currentTime = t;
+      } else {
+        // 已播放完毕，清除进度
+        localStorage.removeItem(savedKey);
       }
     }
   }, [file.filePath, settings.rememberProgress]);
@@ -280,6 +284,8 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
     const onTimeUpdate = () => setCurrentTime(video.currentTime);
     const onLoadedMetadata = () => setDuration(video.duration);
     const onEnded = () => {
+      // 清除续播进度：完整播放完毕不再续播
+      try { localStorage.removeItem(PROGRESS_KEY_PREFIX + file.filePath); } catch {}
       // 多分片网络流：先把当前视频的所有分段播完，再轮到「下一集」
       if (segments && segIndex < segments.length - 1) {
         continuePlayRef.current = true;

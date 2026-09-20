@@ -18,6 +18,8 @@ const DEFAULT_NEXT_LINE_OPACITY = 0.35;
 export function LyricsWidget() {
   const [currentLine, setCurrentLine] = useState('');
   const [nextLine, setNextLine] = useState('');
+  const [currentSub, setCurrentSub] = useState('');
+  const [nextSub, setNextSub] = useState('');
   const [locked, setLocked] = useState(false);
   const [fontSize, setFontSize] = useState(() => {
     const saved = storage.getString(KEYS.desktop.lyricsFontSize.key, '');
@@ -31,11 +33,13 @@ export function LyricsWidget() {
 
   // 监听歌词更新事件
   useEffect(() => {
-    const unlisten = listen<{ currentLine: string; nextLine: string }>(
+    const unlisten = listen<{ currentLine: string; nextLine: string; currentSub?: string; nextSub?: string }>(
       LYRICS_EVENT,
       (event) => {
         setCurrentLine(event.payload.currentLine);
         setNextLine(event.payload.nextLine);
+        setCurrentSub(event.payload.currentSub ?? '');
+        setNextSub(event.payload.nextSub ?? '');
       },
     );
     return () => { unlisten.then((fn) => fn()); };
@@ -279,6 +283,11 @@ export function LyricsWidget() {
         >
           {currentLine || '\u00A0'}
         </div>
+        {currentSub && (
+          <div style={{ fontSize: '0.75em', opacity: 0.7, marginTop: 4, color: '#ffffff', textShadow: '0 0 6px rgba(0,0,0,0.7)' }}>
+            {currentSub}
+          </div>
+        )}
 
         {/* 下一行预览 */}
         {showNextLine && nextLine && (
@@ -294,6 +303,11 @@ export function LyricsWidget() {
           }}
         >
             {nextLine}
+          </div>
+        )}
+        {showNextLine && nextSub && (
+          <div style={{ fontSize: `${fontSize * 0.55}px`, opacity: 0.5, marginTop: 2, color: '#ffffff', textShadow: '0 0 4px rgba(0,0,0,0.6)' }}>
+            {nextSub}
           </div>
         )}
       </div>

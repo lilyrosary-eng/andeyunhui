@@ -42,6 +42,9 @@ export function FloatingClipboardView() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; itemId: string } | null>(null);
   // 分类标签：全部 / 文本 / 图片（对应「剪贴板浮窗分两类」需求）
   const [tab, setTab] = useState<'all' | 'text' | 'image'>('all');
+  // 多选模式
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const lastTextRef = useRef('');
   const lastImgHashRef = useRef('');
 
@@ -74,13 +77,17 @@ export function FloatingClipboardView() {
       const saved = storage.getString(KEYS.desktop.clipStorage.key, '');
       if (saved) {
         const parsed: ClipItem[] = JSON.parse(saved);
+        // 重新打开浮窗时只保留最近 3 条
+        const recent = parsed
+          .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+          .slice(0, 3);
         setItems(prev => {
-          const textIds = new Set(parsed.map(i => i.id));
+          const textIds = new Set(recent.map(i => i.id));
           const imageItems = prev.filter(i => i.type === 'image' && !textIds.has(i.id));
-          return [...parsed, ...imageItems].sort((a, b) => b.timestamp - a.timestamp);
+          return [...recent, ...imageItems].sort((a, b) => b.timestamp - a.timestamp);
         });
-        if (parsed.length > 0 && parsed[0].type === 'text') {
-          lastTextRef.current = parsed[0].content;
+        if (recent.length > 0 && recent[0].type === 'text') {
+          lastTextRef.current = recent[0].content;
         }
       }
     } catch { /* ignore */ }
@@ -230,6 +237,31 @@ export function FloatingClipboardView() {
         storage.setJSON(KEYS.desktop.clipStorage.key, updated);
       }
     } catch { /* ignore */ }
+  }, []);
+
+  // 删除选中项
+  const deleteSelected = useCallback(() => {
+    setItems(prev => {
+      const remaining = prev.filter(item => !selectedIds.has(item.id));
+      try {
+        const saved = storage.getString(KEYS.desktop.clipStorage.key, '');
+        if (saved) {
+          const parsed: ClipItem[] = JSON.parse(saved);
+          const updated = parsed.filter(item => !selectedIds.has(item.id));
+          storage.setJSON(KEYS.desktop.clipStorage.key, updated);
+        }
+      } catch { /* ignore */ }
+      return remaining;
+    });
+    setSelectedIds(new Set());
+    setSelectMode(false);
+  }, [selectedIds]);
+
+  // 一键清空
+  const clearAll = useCallback(() => {
+    setItems([]);
+    setSelectedIds(new Set());
+    try { storage.remove(KEYS.desktop.clipStorage.key); } catch { /* ignore */ }
   }, []);
 
   // 过滤（先按分类标签，再按搜索关键字）
@@ -385,6 +417,33 @@ export function FloatingClipboardView() {
         ))}
       </div>
 
+      {/* 操作栏 */}
+      <div data-no-drag style={{ display: 'flex', gap: 8, padding: '4px 10px' }}>
+        <button
+          onClick={() => { setSelectMode(!selectMode); setSelectedIds(new Set()); }}
+          style={{
+            fontSize: 11, color: selectMode ? '#f59e0b' : '#9ca3af',
+            background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+          }}
+        >
+          {selectMode ? '取消' : '多选'}
+        </button>
+        {selectMode && selectedIds.size > 0 && (
+          <button
+            onClick={deleteSelected}
+            style={{ fontSize: 11, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+          >
+            删除 ({selectedIds.size})
+          </button>
+        )}
+        <button
+          onClick={clearAll}
+          style={{ fontSize: 11, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', padding: 0, marginLeft: 'auto' }}
+        >
+          一键清空
+        </button>
+      </div>
+
       {/* 历史列表 */}
       <div
         data-no-drag
@@ -413,7 +472,18 @@ export function FloatingClipboardView() {
         ) : filtered.map(item => (
           <div
             key={item.id}
-            onClick={() => writeToClipboard(item)}
+            onClick={() => {
+              if (selectMode) {
+                setSelectedIds(prev => {
+                  const next = new Set(prev);
+                  if (next.has(item.id)) next.delete(item.id);
+                  else next.add(item.id);
+                  return next;
+                });
+              } else {
+                writeToClipboard(item);
+              }
+            }}
             onContextMenu={(e) => handleContextMenu(e, item.id)}
             style={{
               padding: '6px 8px',
@@ -423,6 +493,7 @@ export function FloatingClipboardView() {
               display: 'flex',
               alignItems: 'flex-start',
               gap: '6px',
+              background: selectMode && selectedIds.has(item.id) ? 'rgba(96, 165, 250, 0.15)' : undefined,
             }}
             onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.06)'; }}
             onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}

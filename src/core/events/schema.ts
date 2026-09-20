@@ -86,7 +86,7 @@ export const EVENT_PAYLOAD_KEYS: Record<string, string> = {
   'open-with-files': 'string[]',
   'migration-progress': '{ percent: number }',
   'fs-index-progress': '{ count: number; done: boolean }',
-  'lyrics-update': '{ currentLine: string; nextLine: string }',
+  'lyrics-update': '{ currentLine: string; nextLine: string; currentSub?: string; nextSub?: string }',
   'lyrics-style-update': '{ fontSize?: number; showNextLine?: boolean }',
   'lyrics-lock-changed': '{ locked: boolean }',
   'floating-note-opened': 'string（noteId）',

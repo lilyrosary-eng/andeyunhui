@@ -66,21 +66,35 @@ function computeAndEmit(): void {
     if (lines[i].time_ms <= ct) idx = i;
     else break;
   }
-  const cur = idx >= 0 ? lines[idx].text : '';
-  const nxt = idx + 1 < lines.length ? lines[idx + 1].text : '';
-  if (cur !== lastText) {
-    lastText = cur;
+  const cur = idx >= 0 ? lines[idx] : null;
+  const nxt = idx + 1 < lines.length ? lines[idx + 1] : null;
+  const curText = cur?.text ?? '';
+  const nxtText = nxt?.text ?? '';
+
+  const mode = lyricModeStore.get();
+  let curSub = '';
+  let nxtSub = '';
+  if (mode === 'translate') {
+    curSub = cur?.translation ?? '';
+    nxtSub = nxt?.translation ?? '';
+  } else if (mode === 'romaji') {
+    curSub = cur?.romaji ?? '';
+    nxtSub = nxt?.romaji ?? '';
+  }
+
+  if (curText !== lastText) {
+    lastText = curText;
     // 节流：距上次 emit 不足 150ms 则延迟补发
     const now = Date.now();
     if (now - lastEmitTime >= 150) {
       lastEmitTime = now;
-      hostEmit('lyrics-update', { currentLine: cur, nextLine: nxt });
+      hostEmit('lyrics-update', { currentLine: curText, nextLine: nxtText, currentSub: curSub, nextSub: nxtSub });
     } else {
       if (pendingTimer) clearTimeout(pendingTimer);
       pendingTimer = setTimeout(() => {
         pendingTimer = null;
         lastEmitTime = Date.now();
-        hostEmit('lyrics-update', { currentLine: cur, nextLine: nxt });
+        hostEmit('lyrics-update', { currentLine: curText, nextLine: nxtText, currentSub: curSub, nextSub: nxtSub });
       }, 150);
     }
   }
