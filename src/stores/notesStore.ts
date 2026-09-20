@@ -260,7 +260,13 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   getNextFavorite: () => {
     const { summonQueue, favoriteIds } = get();
     for (const id of summonQueue) {
-      if (favoriteIds.has(id)) return id;
+      if (favoriteIds.has(id)) {
+        // 召唤后轮转到队尾（不等待关闭，立即轮转）
+        const newQueue = summonQueue.filter(x => x !== id);
+        newQueue.push(id);
+        set({ summonQueue: newQueue });
+        return id;
+      }
     }
     return null;
   },

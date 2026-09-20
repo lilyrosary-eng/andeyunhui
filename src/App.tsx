@@ -266,12 +266,11 @@ function App() {
   useEffect(() => {
     const un = listen('favorite-shortcut-triggered', async () => {
       try {
-        const noteId = await api.getNextFavorite();
+        const noteId = useNotesStore.getState().getNextFavorite();
         if (noteId) {
-          const notes = useNotesStore.getState().notes;
-          const note = notes.find(n => n.id === noteId);
-          if (note) {
-            await api.createFloatingNoteWindow(noteId, note.title || '未命名', 200, 200);
+          const content = await api.getNoteContent(noteId);
+          if (content) {
+            await api.createFloatingNoteWindow(noteId, content.title || '未命名', 200, 200);
           }
         }
       } catch (e) {

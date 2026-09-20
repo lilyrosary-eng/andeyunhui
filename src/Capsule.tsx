@@ -630,11 +630,10 @@ export default function Capsule() {
           await w.setFocus();
         }
       } else if (kind === 'favorite') {
-        // 常用笔记：召唤下一个常用笔记浮窗
+        // 常用笔记：召唤下一个常用笔记浮窗（使用前端 store 的轮转队列）
         try {
-          const noteId = await api.getNextFavorite();
+          const noteId = useNotesStore.getState().getNextFavorite();
           if (noteId) {
-            // 直接从后端读取笔记内容
             const content = await api.getNoteContent(noteId);
             if (content) {
               await api.createFloatingNoteWindow(noteId, content.title || '未命名', 200, 200);
@@ -997,36 +996,23 @@ export default function Capsule() {
                   <button onClick={(e) => { e.stopPropagation(); smtcControl('next'); }} disabled={!play?.can_next} title={t('capsule.next')} style={{ ...btnBase, width: 34, height: 34, opacity: play?.can_next ? 1 : 0.4 }}>
                     <IconNext />
                   </button>
-                  {/* 桌面歌词 */}
+{/* 桌面歌词 */}
                   <button
                     onClick={async (e) => {
                       e.stopPropagation();
                       try {
-                        const label = 'lyrics';
-                        const existing = await import('@tauri-apps/api/webviewWindow').then(m => m.WebviewWindow.getByLabel(label));
-                        if (existing) {
-                          const visible = await existing.isVisible();
-                          if (visible) {
-                            await existing.hide();
-                          } else {
-                            await existing.show();
-                          }
-                        } else {
-                          await invoke('show_lyrics_window');
-                        }
+                        await invoke('show_lyrics_widget');
                       } catch (err) {
                         console.error('[Capsule] 歌词窗口操作失败:', err);
                       }
                     }}
-                    style={{ ...btnBase, width: 32, height: 32, fontSize: 14, color: '#f2f2f4', background: 'rgba(255,255,255,0.06)' }}
+                    style={{ ...btnBase, width: 34, height: 34, color: '#f2f2f4', background: 'rgba(255,255,255,0.06)' }}
                     onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.14)')}
                     onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
                     title={t('capsule.action.lyrics')}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M9 18V5l12-2v13" />
-                      <circle cx="6" cy="18" r="3" />
-                      <circle cx="18" cy="16" r="3" />
+                      <path d="M4 17h4" /><path d="M4 13h7" /><path d="M4 9h10" /><path d="M15 6l3 3-3 3" />
                     </svg>
                   </button>
                 </div>
