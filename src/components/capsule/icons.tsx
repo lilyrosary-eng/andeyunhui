@@ -182,4 +182,4 @@ export const ACTIONS = [
 
 // 动作分两层：第一排=高频（用户指定）；第二排=其余，后续排满再加「更多」二级入口
 export const ACTION_LAYER1 = ['ai', 'screenshot', 'record', 'transfer', 'dropzone', 'clipboard'] as const;
-export const ACTION_LAYER2 = ['aide', 'search'] as const;
+export const ACTION_LAYER2 = ['aide', 'search', 'favorite'] as const;

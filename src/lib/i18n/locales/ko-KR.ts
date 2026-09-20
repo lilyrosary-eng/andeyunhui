@@ -192,6 +192,8 @@ export const koKR: Record<string, string> = {
   'notes.timeGroup.justNow': '방금',
   'notes.timeGroup.minutesAgo': '{n}분 전',
   'notes.timeGroup.hoursAgo': '{n}시간 전',
+  'notes.favorite': '즐겨찾기',
+  'notes.unfavorite': '즐겨찾기 해제',
 
   // 노트 편집기
   'notesEditor.editLinkUrl': '링크 URL 편집:',

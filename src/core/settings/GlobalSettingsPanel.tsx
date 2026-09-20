@@ -52,6 +52,7 @@ const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   { id: 'recorder', label: '全局录屏', keys: 'Ctrl + Alt + R' },
   { id: 'clipboard', label: '剪贴板浮窗', keys: 'Ctrl + Alt + C' },
   { id: 'dropzone', label: '中转站浮窗', keys: 'Ctrl + Alt + V' },
+  { id: 'favorite', label: '常用笔记', keys: 'Ctrl + Shift + N' },
 ];
 
 function loadShortcuts(): ShortcutDef[] {
@@ -175,6 +176,9 @@ export function GlobalSettingsPanel() {
     invoke<string>('get_dropzone_shortcut')
       .then((sc) => updateDisplay('dropzone', sc))
       .catch(() => {});
+    invoke<string>('get_favorite_shortcut')
+      .then((sc) => updateDisplay('favorite', sc))
+      .catch(() => {});
   }, []);
 
   // 键盘捕获：编辑快捷键时监听按键
@@ -213,6 +217,10 @@ export function GlobalSettingsPanel() {
           invoke('set_dropzone_shortcut', { shortcut }).catch((err) => {
             console.error('[中转站] 设置热键失败:', err);
           });
+        } else if (editingShortcutId === 'favorite') {
+          invoke('set_favorite_shortcut', { shortcut }).catch((err) => {
+            console.error('[常用笔记] 设置热键失败:', err);
+          });
         }
         setEditingShortcutId(null);
       }
@@ -234,6 +242,8 @@ export function GlobalSettingsPanel() {
     if (cc) invoke('set_clipboard_shortcut', { shortcut: cc.keys }).catch(() => {});
     const dc = DEFAULT_SHORTCUTS.find((s) => s.id === 'dropzone');
     if (dc) invoke('set_dropzone_shortcut', { shortcut: dc.keys }).catch(() => {});
+    const fc = DEFAULT_SHORTCUTS.find((s) => s.id === 'favorite');
+    if (fc) invoke('set_favorite_shortcut', { shortcut: fc.keys }).catch(() => {});
   };
 
   const handleStartEditShortcut = (id: string) => {

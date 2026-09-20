@@ -191,6 +191,8 @@ export const frFR: Record<string, string> = {
   'notes.timeGroup.justNow': 'À l\'instant',
   'notes.timeGroup.minutesAgo': 'il y a {n} min',
   'notes.timeGroup.hoursAgo': 'il y a {n} h',
+  'notes.favorite': 'Favori',
+  'notes.unfavorite': 'Retirer des favoris',
 
   // Éditeur de notes
   'notesEditor.editLinkUrl': 'Modifier l\'URL du lien :',

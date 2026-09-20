@@ -2996,6 +2996,81 @@ pub fn set_dropzone_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<
     Ok(())
 }
 
+// ============ 常用笔记热键（设置面板可改写并持久化）============
+pub const DEFAULT_FAVORITE_SHORTCUT: &str = "Ctrl+Shift+N";
+
+pub static FAVORITE_SHORTCUT_STR: OnceLock<Mutex<String>> = OnceLock::new();
+pub fn favorite_shortcut_state() -> &'static Mutex<String> {
+    FAVORITE_SHORTCUT_STR.get_or_init(|| Mutex::new(DEFAULT_FAVORITE_SHORTCUT.to_string()))
+}
+
+fn favorite_shortcut_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("favorite_shortcut.json"))
+}
+
+pub fn read_favorite_shortcut(app: &tauri::AppHandle) -> String {
+    if let Some(p) = favorite_shortcut_path(app) {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(s2) = v.get("shortcut").and_then(|x| x.as_str()) {
+                    if !s2.is_empty() {
+                        return s2.to_string();
+                    }
+                }
+            }
+        }
+    }
+    DEFAULT_FAVORITE_SHORTCUT.to_string()
+}
+
+fn write_favorite_shortcut(app: &tauri::AppHandle, sc: &str) -> Result<(), String> {
+    let p = favorite_shortcut_path(app).ok_or_else(|| "无法获取 app_data 目录".to_string())?;
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&p, serde_json::json!({ "shortcut": sc }).to_string())
+        .map_err(|e| e.to_string())
+}
+
+pub fn register_favorite_shortcut(app: &tauri::AppHandle, sc: &str) -> Result<(), String> {
+    let shortcut = parse_shortcut(sc)?;
+    app.global_shortcut()
+        .register(shortcut)
+        .map_err(|e| format!("注册常用笔记热键失败: {}", e))
+}
+
+#[tauri::command]
+pub fn get_favorite_shortcut(app: tauri::AppHandle) -> String {
+    let sc = read_favorite_shortcut(&app);
+    if let Ok(mut state) = favorite_shortcut_state().lock() {
+        *state = sc.clone();
+    }
+    sc
+}
+
+#[tauri::command]
+pub fn set_favorite_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
+    let new = parse_shortcut(&shortcut)?;
+    let old = favorite_shortcut_state()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| DEFAULT_FAVORITE_SHORTCUT.to_string());
+    if let Ok(old_sc) = parse_shortcut(&old) {
+        let _ = app.global_shortcut().unregister(old_sc);
+    }
+    app.global_shortcut().register(new).map_err(|e| {
+        if let Ok(old_sc) = parse_shortcut(&old) {
+            let _ = app.global_shortcut().register(old_sc);
+        }
+        format!("注册失败（已回退原热键）: {}", e)
+    })?;
+    write_favorite_shortcut(&app, &shortcut)?;
+    if let Ok(mut state) = favorite_shortcut_state().lock() {
+        *state = shortcut;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

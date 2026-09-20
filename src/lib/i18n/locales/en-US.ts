@@ -210,6 +210,8 @@ export const enUS: Record<string, string> = {
   'notes.timeGroup.justNow': 'Just now',
   'notes.timeGroup.minutesAgo': '{n} min ago',
   'notes.timeGroup.hoursAgo': '{n} h ago',
+  'notes.favorite': 'Favorite',
+  'notes.unfavorite': 'Unfavorite',
 
   // Notes editor
   'notesEditor.editLinkUrl': 'Edit link URL:',

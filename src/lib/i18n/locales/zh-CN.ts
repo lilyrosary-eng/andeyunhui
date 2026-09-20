@@ -209,6 +209,8 @@ export const zhCN: Record<string, string> = {
   'notes.timeGroup.justNow': '刚刚',
   'notes.timeGroup.minutesAgo': '{n} 分钟前',
   'notes.timeGroup.hoursAgo': '{n} 小时前',
+  'notes.favorite': '常用笔记',
+  'notes.unfavorite': '取消常用',
 
   // 笔记编辑器
   'notesEditor.editLinkUrl': '编辑链接 URL：',

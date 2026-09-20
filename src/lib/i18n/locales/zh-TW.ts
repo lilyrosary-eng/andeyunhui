@@ -192,6 +192,8 @@ export const zhTW: Record<string, string> = {
   'notes.timeGroup.justNow': '剛剛',
   'notes.timeGroup.minutesAgo': '{n} 分鐘前',
   'notes.timeGroup.hoursAgo': '{n} 小時前',
+  'notes.favorite': '常用筆記',
+  'notes.unfavorite': '取消常用',
 
   // 筆記編輯器
   'notesEditor.editLinkUrl': '編輯連結 URL：',

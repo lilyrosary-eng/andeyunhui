@@ -741,6 +741,17 @@ fn main() {
                 }
             }
 
+            // 注册常用笔记热键（默认 Ctrl+Shift+N；设置面板可改写并即时生效）
+            {
+                let sc = read_favorite_shortcut(app.handle());
+                if let Err(e) = register_favorite_shortcut(app.handle(), &sc) {
+                    eprintln!("[Shortcut] 注册常用笔记热键失败: {}", e);
+                }
+                if let Ok(mut state) = favorite_shortcut_state().lock() {
+                    *state = sc;
+                }
+            }
+
             // 悬浮歌词窗口的创建已并入下方 run_on_main_thread 异步预创建任务（不再在此同步阻塞 setup）。
 
             // 诊断模式：事件循环起来后自动跑隔离实验（4 种窗配置），结果打到 session 日志
@@ -1003,9 +1014,12 @@ fn main() {
                                 let _ = app.emit("open-dropzone-floating", ());
                                 return;
                             }
-                            // 常用笔记热键（Ctrl+Shift+N）
-                            let fav_sc_str = "Ctrl+Shift+N";
-                            let is_fav = screenshot::parse_shortcut(fav_sc_str)
+                            // 常用笔记热键
+                            let fav_sc = screenshot::favorite_shortcut_state()
+                                .lock()
+                                .map(|s| s.clone())
+                                .unwrap_or_else(|_| screenshot::DEFAULT_FAVORITE_SHORTCUT.to_string());
+                            let is_fav = screenshot::parse_shortcut(&fav_sc)
                                 .map(|sc| shortcut == &sc)
                                 .unwrap_or(false);
                             if is_fav {
@@ -1352,6 +1366,8 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             set_clipboard_shortcut,
             get_dropzone_shortcut,
             set_dropzone_shortcut,
+            get_favorite_shortcut,
+            set_favorite_shortcut,
             // ========== 模块：录屏系统（全局热键 / WGC 捕获 / ffmpeg 编码）==========
             recording_service::start_recording,
             recording_service::stop_recording,

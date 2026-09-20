@@ -201,3 +201,26 @@ pub fn get_dropzone_shortcut(_app: AppHandle) -> String {
 pub fn set_dropzone_shortcut(_app: AppHandle, _shortcut: String) -> Result<(), String> {
     Ok(())
 }
+
+pub const DEFAULT_FAVORITE_SHORTCUT: &str = "Ctrl+Shift+N";
+
+pub fn favorite_shortcut_state() -> &'static Mutex<String> {
+    static S: Mutex<String> = Mutex::new(String::new());
+    &S
+}
+
+pub fn read_favorite_shortcut(_app: &AppHandle) -> String {
+    DEFAULT_FAVORITE_SHORTCUT.into()
+}
+
+pub fn register_favorite_shortcut(_app: &AppHandle, _sc: &str) -> Result<(), String> {
+    Ok(())
+}
+
+pub fn get_favorite_shortcut(_app: AppHandle) -> String {
+    DEFAULT_FAVORITE_SHORTCUT.into()
+}
+
+pub fn set_favorite_shortcut(_app: AppHandle, _shortcut: String) -> Result<(), String> {
+    Ok(())
+}

@@ -192,6 +192,8 @@ export const deDE: Record<string, string> = {
   'notes.timeGroup.justNow': 'Gerade eben',
   'notes.timeGroup.minutesAgo': 'vor {n} Min.',
   'notes.timeGroup.hoursAgo': 'vor {n} Std.',
+  'notes.favorite': 'Favorit',
+  'notes.unfavorite': 'Favorit entfernen',
 
   // Notiz-Editor
   'notesEditor.editLinkUrl': 'Link-URL bearbeiten:',

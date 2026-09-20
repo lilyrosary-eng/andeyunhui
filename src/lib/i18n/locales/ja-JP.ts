@@ -192,6 +192,8 @@ export const jaJP: Record<string, string> = {
   'notes.timeGroup.justNow': 'たった今',
   'notes.timeGroup.minutesAgo': '{n} 分前',
   'notes.timeGroup.hoursAgo': '{n} 時間前',
+  'notes.favorite': 'お気に入り',
+  'notes.unfavorite': 'お気に入り解除',
 
   // ノートエディタ
   'notesEditor.editLinkUrl': 'リンク URL を編集：',

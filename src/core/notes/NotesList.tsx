@@ -65,6 +65,14 @@ export function NotesList() {
   const onRefreshNotes = useNotesStore(s => s.refreshNotes);
   const setContentSearchResults = useNotesStore(s => s.setContentSearchResults);
   const floatingNoteIds = useFloatingNoteStore(s => s.floatingNoteIds);
+  const favoriteMeta = useNotesStore(s => s.favoriteMeta);
+
+  const getGradientStyle = useCallback((id: string) => {
+    const meta = favoriteMeta.get(id);
+    if (!meta) return {};
+    const angle = Math.round(meta.gradientSeed * 360);
+    return { background: `linear-gradient(${angle}deg, rgba(187,222,251,0.4), rgba(252,228,236,0.4))` };
+  }, [favoriteMeta]);
 
   // ====== 内联编辑标题 ======
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -202,7 +210,7 @@ export function NotesList() {
                       }
                     }}
                     className={`px-3 py-2 rounded-xl cursor-pointer transition-colors text-sm ${currentNoteId === note.id ? 'bg-white/70 dark:bg-stone-700/50 shadow-sm text-neutral-800 dark:text-stone-100' : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400 hover:text-neutral-900 dark:hover:text-stone-200'}`}
-                    style={useNotesStore.getState().getGradientStyle(note.id)}
+                    style={getGradientStyle(note.id)}
                     onClick={() => {
                     logger.sidebar.selectNote(note.id, note.title);
                     onNoteSelect(note.id);
@@ -293,7 +301,7 @@ export function NotesList() {
                       }
                     }}
                     className={`px-3 py-2 rounded-xl cursor-pointer transition-colors text-sm ${currentNoteId === note.id ? 'bg-white/70 dark:bg-stone-700/50 shadow-sm text-neutral-800 dark:text-stone-100' : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400 hover:text-neutral-900 dark:hover:text-stone-200'}`}
-                    style={useNotesStore.getState().getGradientStyle(note.id)}
+                    style={getGradientStyle(note.id)}
                     onClick={() => {
                       if (editingId) return;
                       logger.sidebar.selectNote(note.id, note.title);
