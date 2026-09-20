@@ -630,13 +630,16 @@ export default function Capsule() {
           await w.setFocus();
         }
       } else if (kind === 'favorite') {
-        // 常用笔记：召唤下一个常用笔记浮窗（使用前端 store 的轮转队列）
+        // 常用笔记：召唤下一个常用笔记浮窗
+        // 用后端 API 读取（不依赖前端 store 是否已初始化），成功后轮转队列
         try {
-          const noteId = useNotesStore.getState().getNextFavorite();
+          const noteId = await api.getNextFavorite();
           if (noteId) {
             const content = await api.getNoteContent(noteId);
             if (content) {
               await api.createFloatingNoteWindow(noteId, content.title || '未命名', 200, 200);
+              // 召唤成功，轮转到队尾（前端 store 可能未初始化，安全调用）
+              try { useNotesStore.getState().onFavoriteNoteClosed(noteId, false); } catch {}
             }
           }
         } catch (err) {
@@ -1001,7 +1004,18 @@ export default function Capsule() {
                     onClick={async (e) => {
                       e.stopPropagation();
                       try {
-                        await invoke('show_lyrics_widget');
+                        const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+                        const win = await WebviewWindow.getByLabel('lyrics-widget');
+                        if (win) {
+                          const visible = await win.isVisible();
+                          if (visible) {
+                            await invoke('hide_lyrics_widget');
+                          } else {
+                            await invoke('show_lyrics_widget');
+                          }
+                        } else {
+                          await invoke('show_lyrics_widget');
+                        }
                       } catch (err) {
                         console.error('[Capsule] 歌词窗口操作失败:', err);
                       }

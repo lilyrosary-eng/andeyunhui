@@ -266,7 +266,10 @@ function App() {
   useEffect(() => {
     const un = listen('favorite-shortcut-triggered', async () => {
       try {
-        const noteId = useNotesStore.getState().getNextFavorite();
+        // 优先用前端 store（有轮转），fallback 用后端 API
+        let noteId: string | null = null;
+        try { noteId = useNotesStore.getState().getNextFavorite(); } catch {}
+        if (!noteId) noteId = await api.getNextFavorite();
         if (noteId) {
           const content = await api.getNoteContent(noteId);
           if (content) {
