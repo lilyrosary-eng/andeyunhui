@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use chrono::{DateTime, Local};
 use crate::services::safe_join_ext;
+use rand::Rng;
 
 // 从 Markdown 内容中提取标题（首行 # 开头的内容）
 fn extract_title(content: &str) -> String {
@@ -205,4 +206,73 @@ pub fn duplicate_note(notes_dir: PathBuf, note_id: &str) -> Result<String, Strin
     let new_path = safe_join_ext(&notes_dir, &new_id, "md")?;
     fs::copy(&source_path, &new_path).map_err(|e| format!("复制失败: {}", e))?;
     Ok(new_id)
+}
+
+// ========== 常用笔记系统 ==========
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FavoriteMeta {
+    pub created_at: u64,
+    pub gradient_seed: f64,
+}
+
+fn fav_dir_from(notes_dir: &PathBuf) -> PathBuf {
+    notes_dir.parent().unwrap_or(notes_dir).join("notes").join("fav")
+}
+
+fn ensure_fav_dir(notes_dir: &PathBuf) -> Result<PathBuf, String> {
+    let dir = fav_dir_from(notes_dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("创建 fav 目录失败: {}", e))?;
+    Ok(dir)
+}
+
+pub fn toggle_favorite_note(notes_dir: PathBuf, note_id: &str) -> Result<bool, String> {
+    let dir = ensure_fav_dir(&notes_dir)?;
+    let fav_path = dir.join(format!("{}.fav", note_id));
+
+    if fav_path.exists() {
+        fs::remove_file(&fav_path).map_err(|e| format!("删除 fav 文件失败: {}", e))?;
+        Ok(false)
+    } else {
+        let meta = FavoriteMeta {
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            gradient_seed: rand::thread_rng().gen::<f64>(),
+        };
+        let json = serde_json::to_string(&meta).map_err(|e| format!("序列化失败: {}", e))?;
+        fs::write(&fav_path, json).map_err(|e| format!("写入 fav 文件失败: {}", e))?;
+        Ok(true)
+    }
+}
+
+pub fn is_favorite_note(notes_dir: &PathBuf, note_id: &str) -> bool {
+    let dir = fav_dir_from(notes_dir);
+    dir.join(format!("{}.fav", note_id)).exists()
+}
+
+pub fn get_all_favorites(notes_dir: &PathBuf) -> Vec<String> {
+    let dir = fav_dir_from(notes_dir);
+    if !dir.exists() {
+        return Vec::new();
+    }
+    fs::read_dir(&dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("fav"))
+        .filter_map(|e| e.path().file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+        .collect()
+}
+
+pub fn get_favorite_meta(notes_dir: &PathBuf, note_id: &str) -> Option<FavoriteMeta> {
+    let dir = fav_dir_from(notes_dir);
+    let fav_path = dir.join(format!("{}.fav", note_id));
+    if !fav_path.exists() {
+        return None;
+    }
+    let json = fs::read_to_string(&fav_path).ok()?;
+    serde_json::from_str(&json).ok()
 }
