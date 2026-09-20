@@ -1,5 +1,5 @@
 import { useMemo, useEffect, useRef, useCallback, useState } from 'react';
-import { Copy, Pin, Trash2 } from 'lucide-react';
+import { Copy, Pin, Trash2, Star, StarOff } from 'lucide-react';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger, ContextMenuSeparator } from "@/components/ui/context-menu"
 import { api, NoteInfo } from "@/lib/api"
 import { logger } from "@/lib/logger"
@@ -202,6 +202,7 @@ export function NotesList() {
                       }
                     }}
                     className={`px-3 py-2 rounded-xl cursor-pointer transition-colors text-sm ${currentNoteId === note.id ? 'bg-white/70 dark:bg-stone-700/50 shadow-sm text-neutral-800 dark:text-stone-100' : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400 hover:text-neutral-900 dark:hover:text-stone-200'}`}
+                    style={useNotesStore.getState().getGradientStyle(note.id)}
                     onClick={() => {
                     logger.sidebar.selectNote(note.id, note.title);
                     onNoteSelect(note.id);
@@ -234,6 +235,12 @@ export function NotesList() {
                     api.togglePinNote(note.id).then(() => api.getAllNotes().then(onRefreshNotes));
                   }}>
                     <Pin size={14} />{note.pinned ? tt('notes.menu.unpin') : tt('notes.menu.pin')}
+                  </ContextMenuItem>
+                  <ContextMenuItem key="favorite" onClick={() => {
+                    useNotesStore.getState().toggleFavorite(note.id);
+                  }}>
+                    {useNotesStore.getState().isFavorite(note.id) ? <StarOff size={14} /> : <Star size={14} />}
+                    {useNotesStore.getState().isFavorite(note.id) ? tt('notes.unfavorite') : tt('notes.favorite')}
                   </ContextMenuItem>
                   <ContextMenuItem key="float" onClick={() => {
                     // 为了简化，使用默认坐标
@@ -286,6 +293,7 @@ export function NotesList() {
                       }
                     }}
                     className={`px-3 py-2 rounded-xl cursor-pointer transition-colors text-sm ${currentNoteId === note.id ? 'bg-white/70 dark:bg-stone-700/50 shadow-sm text-neutral-800 dark:text-stone-100' : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400 hover:text-neutral-900 dark:hover:text-stone-200'}`}
+                    style={useNotesStore.getState().getGradientStyle(note.id)}
                     onClick={() => {
                       if (editingId) return;
                       logger.sidebar.selectNote(note.id, note.title);
@@ -339,6 +347,12 @@ export function NotesList() {
                     api.togglePinNote(note.id).then(() => api.getAllNotes().then(onRefreshNotes));
                   }}>
                     <Pin size={14} />{note.pinned ? tt('notes.menu.unpin') : tt('notes.menu.pin')}
+                  </ContextMenuItem>
+                  <ContextMenuItem onClick={() => {
+                    useNotesStore.getState().toggleFavorite(note.id);
+                  }}>
+                    {useNotesStore.getState().isFavorite(note.id) ? <StarOff size={14} /> : <Star size={14} />}
+                    {useNotesStore.getState().isFavorite(note.id) ? tt('notes.unfavorite') : tt('notes.favorite')}
                   </ContextMenuItem>
                   <ContextMenuItem onClick={() => {
                     api.createFloatingNoteWindow(note.id, note.title, 100, 100)
