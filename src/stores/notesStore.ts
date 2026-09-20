@@ -3,6 +3,7 @@ import { api, type NoteInfo } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { marked } from 'marked';
 import { resolveLocalImagesInHtml } from '@/lib/localImage';
+import type { CSSProperties } from 'react';
 
 const AUTO_SAVE_DEBOUNCE_MS = 1000;
 
@@ -12,6 +13,11 @@ const AUTO_SAVE_DEBOUNCE_MS = 1000;
  * 将原本散落在 App.tsx 的 9 个 useState + 3 个 useCallback + 3 个 useEffect
  * 收敛为单一可信源，消除 prop drilling 与闭包陷阱。
  */
+interface FavoriteMeta {
+  createdAt: number;
+  gradientSeed: number;
+}
+
 interface NotesState {
   // 列表
   notes: NoteInfo[];
@@ -27,6 +33,10 @@ interface NotesState {
   currentNoteTags: string[];
   allTags: string[];
   noteTagsMap: Record<string, string[]>;
+  // 常用笔记
+  favoriteIds: Set<string>;
+  favoriteMeta: Map<string, FavoriteMeta>;
+  summonQueue: string[];
 
   // ---- actions ----
   setNotes: (notes: NoteInfo[]) => void;
@@ -51,6 +61,13 @@ interface NotesState {
   setContentSearchResults: (s: Set<string>) => void;
   /** 创建新笔记并加载 */
   createNote: () => Promise<void>;
+  // 常用笔记 actions
+  loadFavorites: () => Promise<void>;
+  toggleFavorite: (id: string) => Promise<void>;
+  isFavorite: (id: string) => boolean;
+  getGradientStyle: (id: string) => CSSProperties;
+  getNextFavorite: () => string | null;
+  onFavoriteNoteClosed: (id: string, modified: boolean) => void;
 }
 
 // 自动保存 timer 句柄（模块级，避免存入 store）
@@ -73,6 +90,9 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   currentNoteTags: [],
   allTags: [],
   noteTagsMap: {},
+  favoriteIds: new Set(),
+  favoriteMeta: new Map(),
+  summonQueue: [],
 
   setNotes: (notes) => set({ notes }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
@@ -154,6 +174,8 @@ export const useNotesStore = create<NotesState>((set, get) => ({
 
     api.getAllNoteTagsMap().then(map => set({ noteTagsMap: map }))
       .catch((err) => logger.notes.loadError('加载标签映射', err));
+
+    get().loadFavorites();
   },
 
   refreshNotes: (data) => {
@@ -168,6 +190,88 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     const updated = await api.getAllNotes();
     set({ notes: updated });
     get().loadNoteContent(newId);
+  },
+
+  loadFavorites: async () => {
+    try {
+      const ids = await api.getAllFavorites();
+      const metaMap = new Map<string, FavoriteMeta>();
+      for (const id of ids) {
+        const note = get().notes.find(n => n.id === id);
+        if (note) {
+          metaMap.set(id, {
+            createdAt: new Date(note.date).getTime(),
+            gradientSeed: Math.random(),
+          });
+        }
+      }
+      const queue = [...ids].sort((a, b) => {
+        const noteA = get().notes.find(n => n.id === a);
+        const noteB = get().notes.find(n => n.id === b);
+        return (noteB?.date.localeCompare(noteA?.date ?? '') ?? 0);
+      });
+      set({ favoriteIds: new Set(ids), favoriteMeta: metaMap, summonQueue: queue });
+    } catch (e) {
+      console.error('[Notes] 加载常用笔记失败:', e);
+    }
+  },
+
+  toggleFavorite: async (id: string) => {
+    try {
+      const isFav = await api.toggleFavoriteNote(id);
+      const { favoriteIds, favoriteMeta, summonQueue } = get();
+      const newIds = new Set(favoriteIds);
+      const newMeta = new Map(favoriteMeta);
+      const newQueue = [...summonQueue];
+
+      if (isFav) {
+        newIds.add(id);
+        newMeta.set(id, {
+          createdAt: Date.now(),
+          gradientSeed: Math.random(),
+        });
+        newQueue.push(id);
+      } else {
+        newIds.delete(id);
+        newMeta.delete(id);
+        const idx = newQueue.indexOf(id);
+        if (idx >= 0) newQueue.splice(idx, 1);
+      }
+
+      set({ favoriteIds: newIds, favoriteMeta: newMeta, summonQueue: newQueue });
+    } catch (e) {
+      console.error('[Notes] 切换常用笔记失败:', e);
+    }
+  },
+
+  isFavorite: (id: string) => {
+    return get().favoriteIds.has(id);
+  },
+
+  getGradientStyle: (id: string) => {
+    const meta = get().favoriteMeta.get(id);
+    if (!meta) return {};
+    const angle = Math.round(meta.gradientSeed * 360);
+    return {
+      background: `linear-gradient(${angle}deg, rgba(187,222,251,0.4), rgba(252,228,236,0.4))`,
+    };
+  },
+
+  getNextFavorite: () => {
+    const { summonQueue, favoriteIds } = get();
+    for (const id of summonQueue) {
+      if (favoriteIds.has(id)) return id;
+    }
+    return null;
+  },
+
+  onFavoriteNoteClosed: (id: string, modified: boolean) => {
+    if (!modified) {
+      const { summonQueue } = get();
+      const newQueue = summonQueue.filter(x => x !== id);
+      newQueue.push(id);
+      set({ summonQueue: newQueue });
+    }
   },
 }));
 

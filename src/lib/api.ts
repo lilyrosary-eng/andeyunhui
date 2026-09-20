@@ -97,6 +97,10 @@ export const api = {
   // 批量搜索笔记内容（Rust 端一次性扫描，返回匹配的 noteId 列表）
   searchNotesContent: (query: string) => invoke<string[]>('search_notes_content', { query }),
 
+  // 常用笔记
+  toggleFavoriteNote: (noteId: string) => invoke<boolean>('toggle_favorite_note', { noteId }),
+  getAllFavorites: () => invoke<string[]>('get_all_favorites'),
+
   // 创建浮窗笔记子窗口
   // 改用前端 WebviewWindow API 建窗：规避 Windows 上在命令里用
   // run_on_main_thread 同步 WebviewWindowBuilder::build() 导致的 WebView2
