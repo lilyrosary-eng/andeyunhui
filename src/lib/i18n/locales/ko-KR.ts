@@ -1098,6 +1098,9 @@ export const koKR: Record<string, string> = {
   'image.viewer.vertical': '세로',
   'image.viewer.hForward': '가로 정방향',
   'image.viewer.hReverse': '가로 역방향',
+  'image.viewer.random': '랜덤',
+  'image.viewer.slideshow': '슬라이드쇼',
+  'image.viewer.interval': '간격',
 
   // ============ 목련 · 동영상 모듈 ============
   'video.title': '동영상',

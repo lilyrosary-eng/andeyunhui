@@ -1098,6 +1098,9 @@ export const zhTW: Record<string, string> = {
   'image.viewer.vertical': '直式',
   'image.viewer.hForward': '橫式正',
   'image.viewer.hReverse': '橫式反',
+  'image.viewer.random': '隨機',
+  'image.viewer.slideshow': '幻燈片',
+  'image.viewer.interval': '間隔',
 
   // ============ 玉蘭 · 影片模組 ============
   'video.title': '玉蘭',

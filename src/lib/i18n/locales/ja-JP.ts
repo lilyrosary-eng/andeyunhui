@@ -1098,6 +1098,9 @@ export const jaJP: Record<string, string> = {
   'image.viewer.vertical': '縦',
   'image.viewer.hForward': '横・正',
   'image.viewer.hReverse': '横・逆',
+  'image.viewer.random': 'ランダム',
+  'image.viewer.slideshow': 'スライドショー',
+  'image.viewer.interval': '間隔',
 
   // ============ 木蓮 · 動画モジュール ============
   'video.title': '動画',

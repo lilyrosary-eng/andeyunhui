@@ -1097,6 +1097,9 @@ export const frFR: Record<string, string> = {
   'image.viewer.vertical': 'Vertical',
   'image.viewer.hForward': 'Horizontal avant',
   'image.viewer.hReverse': 'Horizontal arrière',
+  'image.viewer.random': 'Aléatoire',
+  'image.viewer.slideshow': 'Diaporama',
+  'image.viewer.interval': 'Intervalle',
 
   // ============ Magnolia · Module Vidéo ============
   'video.title': 'Vidéos',

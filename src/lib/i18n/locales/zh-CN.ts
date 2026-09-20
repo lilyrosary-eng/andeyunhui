@@ -1212,6 +1212,9 @@ export const zhCN: Record<string, string> = {
   'image.viewer.vertical': '竖版',
   'image.viewer.hForward': '横版正',
   'image.viewer.hReverse': '横版反',
+  'image.viewer.random': '随机',
+  'image.viewer.slideshow': '幻灯片',
+  'image.viewer.interval': '间隔',
 
   // ============ 玉兰 · 视频模块 ============
   'video.title': '玉兰',

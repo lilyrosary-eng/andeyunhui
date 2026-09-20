@@ -1098,6 +1098,9 @@ export const deDE: Record<string, string> = {
   'image.viewer.vertical': 'Vertikal',
   'image.viewer.hForward': 'Horizontal vor',
   'image.viewer.hReverse': 'Horizontal rück',
+  'image.viewer.random': 'Zufällig',
+  'image.viewer.slideshow': 'Diashow',
+  'image.viewer.interval': 'Intervall',
 
   // ============ Magnolie · Videomodul ============
   'video.title': 'Videos',
