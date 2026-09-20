@@ -62,6 +62,7 @@ export const jaJP: Record<string, string> = {
   'shortcut.recorder': 'グローバル画面録画',
   'shortcut.clipboard': 'クリップボードウィジェット',
   'shortcut.dropzone': 'トランスファーウィジェット',
+  'shortcut.favorite': 'お気に入りノート',
 
   // 設定 - 一般 - 通用
   'settings.general.common.title': '一般',

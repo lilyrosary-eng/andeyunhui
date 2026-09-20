@@ -62,6 +62,7 @@ export const enUS: Record<string, string> = {
   'shortcut.recorder': 'Global screen recording',
   'shortcut.clipboard': 'Clipboard widget',
   'shortcut.dropzone': 'Transfer station widget',
+  'shortcut.favorite': 'Favorites',
 
   // Settings - General - Common
   'settings.general.common.title': 'General',
@@ -629,6 +630,8 @@ export const enUS: Record<string, string> = {
   'capsule.action.clipboard': 'Clipboard',
   'capsule.action.transfer': 'Transfer',
   'capsule.action.favorite': 'Favorites',
+  'capsule.action.deskpet': 'Deskpet',
+  'capsule.action.lyrics': 'Desktop Lyrics',
 
   // ============ Mint · Professional Toolbox ============
   'mint.title': 'Mint',

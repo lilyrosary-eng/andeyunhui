@@ -62,6 +62,7 @@ export const zhTW: Record<string, string> = {
   'shortcut.recorder': '全域錄影',
   'shortcut.clipboard': '剪貼簿浮動視窗',
   'shortcut.dropzone': '中轉站浮動視窗',
+  'shortcut.favorite': '常用筆記',
 
   // 設定 - 一般 - 通用
   'settings.general.common.title': '通用',

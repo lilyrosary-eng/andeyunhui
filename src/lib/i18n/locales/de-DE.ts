@@ -62,6 +62,7 @@ export const deDE: Record<string, string> = {
   'shortcut.recorder': 'Globale Bildschirmaufzeichnung',
   'shortcut.clipboard': 'Zwischenablage-Widget',
   'shortcut.dropzone': 'Transferstation-Widget',
+  'shortcut.favorite': 'Favoriten-Notizen',
 
   // Einstellungen - Allgemein - Allgemein
   'settings.general.common.title': 'Allgemein',

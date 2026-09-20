@@ -45,9 +45,6 @@ interface ShortcutDef {
 }
 
 const DEFAULT_SHORTCUTS: ShortcutDef[] = [
-  { id: 'bold', label: '加粗', keys: 'Ctrl + B' },
-  { id: 'italic', label: '斜体', keys: 'Ctrl + I' },
-  { id: 'link', label: '链接', keys: 'Ctrl + K' },
   { id: 'screenshot', label: '全局截图', keys: 'Ctrl + Shift + S' },
   { id: 'recorder', label: '全局录屏', keys: 'Ctrl + Alt + R' },
   { id: 'clipboard', label: '剪贴板浮窗', keys: 'Ctrl + Alt + C' },
@@ -58,8 +55,20 @@ const DEFAULT_SHORTCUTS: ShortcutDef[] = [
 function loadShortcuts(): ShortcutDef[] {
   const parsed = storage.getJSON<ShortcutDef[]>(KEYS.desktop.shortcuts.key, DEFAULT_SHORTCUTS);
   if (Array.isArray(parsed) && parsed.length > 0) {
-    logger.shortcuts.configLoaded(parsed.length);
-    return parsed;
+    // 合并：确保新增的快捷键条目不丢失
+    const merged = [...DEFAULT_SHORTCUTS];
+    for (const s of parsed) {
+      const idx = merged.findIndex(m => m.id === s.id);
+      if (idx >= 0) {
+        // 已有条目：保留用户自定义的 keys
+        merged[idx] = { ...merged[idx], keys: s.keys };
+      } else {
+        // 旧版本遗留条目（如 bold/italic/link），保留
+        merged.push(s);
+      }
+    }
+    logger.shortcuts.configLoaded(merged.length);
+    return merged;
   }
   return DEFAULT_SHORTCUTS;
 }

@@ -62,6 +62,7 @@ export const frFR: Record<string, string> = {
   'shortcut.recorder': 'Enregistrement d\'écran global',
   'shortcut.clipboard': 'Widget presse-papiers',
   'shortcut.dropzone': 'Widget station de transfert',
+  'shortcut.favorite': 'Notes favorites',
 
   // Paramètres - Général - Général
   'settings.general.common.title': 'Général',

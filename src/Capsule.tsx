@@ -631,13 +631,37 @@ export default function Capsule() {
         }
       } else if (kind === 'favorite') {
         // 常用笔记：召唤下一个常用笔记浮窗
-        const noteId = await api.getNextFavorite();
-        if (noteId) {
-          const notes = useNotesStore.getState().notes;
-          const note = notes.find((n: { id: string }) => n.id === noteId);
-          if (note) {
-            await api.createFloatingNoteWindow(noteId, note.title || '未命名', 200, 200);
+        try {
+          const noteId = await api.getNextFavorite();
+          if (noteId) {
+            // 直接从后端读取笔记内容
+            const content = await api.getNoteContent(noteId);
+            if (content) {
+              await api.createFloatingNoteWindow(noteId, content.title || '未命名', 200, 200);
+            }
           }
+        } catch (err) {
+          console.error('[Capsule] 常用笔记操作失败:', err);
+        }
+      } else if (kind === 'deskpet') {
+        // 桌宠：切换显示/隐藏
+        try {
+          const label = 'deskpet';
+          const existing = await import('@tauri-apps/api/webviewWindow').then(m => m.WebviewWindow.getByLabel(label));
+          if (existing) {
+            const visible = await existing.isVisible();
+            if (visible) {
+              await existing.hide();
+            } else {
+              await existing.show();
+              await existing.setFocus();
+            }
+          } else {
+            // 首次打开：创建桌宠窗口
+            await invoke('show_deskpet');
+          }
+        } catch (err) {
+          console.error('[Capsule] 桌宠操作失败:', err);
         }
       }
     } catch {
@@ -972,6 +996,38 @@ export default function Capsule() {
                   </button>
                   <button onClick={(e) => { e.stopPropagation(); smtcControl('next'); }} disabled={!play?.can_next} title={t('capsule.next')} style={{ ...btnBase, width: 34, height: 34, opacity: play?.can_next ? 1 : 0.4 }}>
                     <IconNext />
+                  </button>
+                  {/* 桌面歌词 */}
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      try {
+                        const label = 'lyrics';
+                        const existing = await import('@tauri-apps/api/webviewWindow').then(m => m.WebviewWindow.getByLabel(label));
+                        if (existing) {
+                          const visible = await existing.isVisible();
+                          if (visible) {
+                            await existing.hide();
+                          } else {
+                            await existing.show();
+                          }
+                        } else {
+                          await invoke('show_lyrics_window');
+                        }
+                      } catch (err) {
+                        console.error('[Capsule] 歌词窗口操作失败:', err);
+                      }
+                    }}
+                    style={{ ...btnBase, width: 32, height: 32, fontSize: 14, color: '#f2f2f4', background: 'rgba(255,255,255,0.06)' }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.14)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+                    title={t('capsule.action.lyrics')}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9 18V5l12-2v13" />
+                      <circle cx="6" cy="18" r="3" />
+                      <circle cx="18" cy="16" r="3" />
+                    </svg>
                   </button>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 3, padding: '0 6px' }}>

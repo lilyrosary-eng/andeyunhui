@@ -62,6 +62,7 @@ export const zhCN: Record<string, string> = {
   'shortcut.recorder': '全局录屏',
   'shortcut.clipboard': '剪贴板浮窗',
   'shortcut.dropzone': '中转站浮窗',
+  'shortcut.favorite': '常用笔记',
 
   // 设置 - 常规 - 通用
   'settings.general.common.title': '通用',
@@ -629,6 +630,8 @@ export const zhCN: Record<string, string> = {
   'capsule.action.clipboard': '剪贴板',
   'capsule.action.transfer': '传输',
   'capsule.action.favorite': '常用笔记',
+  'capsule.action.deskpet': '桌宠',
+  'capsule.action.lyrics': '桌面歌词',
 
   // ============ 薄荷 · 专业工具箱 ============
   'mint.title': '薄荷',

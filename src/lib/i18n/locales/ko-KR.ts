@@ -62,6 +62,7 @@ export const koKR: Record<string, string> = {
   'shortcut.recorder': '전역 화면 녹화',
   'shortcut.clipboard': '클립보드 위젯',
   'shortcut.dropzone': '전송함 위젯',
+  'shortcut.favorite': '즐겨찾기 노트',
 
   // 설정 - 일반 - 일반
   'settings.general.common.title': '일반',
