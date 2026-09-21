@@ -1051,6 +1051,523 @@ impl GpuSameDeviceScaler {
     }
 }
 
+// ===========================================================================
+// 子进程（ffmpeg 管道）路径的取帧→NV12 策略
+// ===========================================================================
+//
+// 为什么需要：实测（2026-09-21 探针）区域录制 3282x1868 时，WGC 回调每帧耗时均 736ms
+// （其中 CPU 最近邻缩放 597ms、阻塞整帧读回 140ms），把捕获拖到 1.1fps：
+// 整机卡（回调长期占住帧池、GPU 同步饿死 DWM）+ 输出卡（11 个真实帧被复制成 576 帧）。
+// 根因是旧流程「CPU 整帧读回 → 逐像素 f64 最近邻缩放 → 喂 RGBA 给 ffmpeg 再让 ffmpeg
+// 做 RGBA→NV12」把全部重活压在捕获回调线程上。
+//
+// 业界做法（OBS / Windows Game Bar）是：回调里只做「取帧 + GPU 拷贝」，缩放与色彩转换留在
+// GPU，编码器直接吃 NV12。下面两个策略即照此实现，二选一（首帧惰性决定，失败自动降级）：
+//   1. `GpuSameDeviceNv12Scaler`：同设备 GPU 缩放 + GPU BGRA→NV12，CPU 只读回 ~3MB/帧；
+//   2. `CpuNv12Fallback`：GPU 路不可用时的兜底——复用一张 staging 纹理（不再每帧新建 24MB
+//      纹理）+ 预计算映射表（去掉每像素 f64 除法）在 CPU 上直接产出 NV12。
+// 二者产出的都是 ffmpeg `-pix_fmt nv12` 可直接消费的紧凑 NV12（Y 全分辨率 + UV 半分辨率）。
+
+/// 同设备 NV12 转换/缩放器（子进程路径的主路径）。
+///
+/// 与 `GpuNv12Converter` 的关键区别：**不做跨设备共享**。WGC 帧纹理默认不带
+/// `D3D11_RESOURCE_MISC_SHARED` 标志，`OpenSharedResource` 必然 `0x80070057`（实测本机
+/// 第一帧就失败）；而帧纹理与「帧自带 device/context」天然同设备，直接 `CopyResource` +
+/// 渲染即可，没有任何共享步骤，因此没有「共享失败」这一失败模式。
+///
+/// 单帧流程：`CopyResource(input ← WGC帧)` → Pass1 全屏三角形写 Y（R8 全分辨率）→
+/// Pass2 写 UV（R8G8 半分辨率）→ 阻塞 `Map` 读回两平面并拼装紧凑 NV12（~3MB@1080p）。
+/// `Map` 必须阻塞：它保证 `CopyResource` 已经真正读完 WGC 帧纹理，否则 WGC 归还帧后
+/// 该纹理会被下一帧复用，GPU 再读就是脏数据（历史「黑屏/噪点」的成因）。
+pub struct GpuSameDeviceNv12Scaler {
+    ctx: ID3D11DeviceContext,
+    input_tex: ID3D11Texture2D,
+    input_srv: ID3D11ShaderResourceView,
+    vs: ID3D11VertexShader,
+    ps_y: ID3D11PixelShader,
+    ps_uv: ID3D11PixelShader,
+    sampler: ID3D11SamplerState,
+    rt_y: ID3D11Texture2D,
+    rtv_y: ID3D11RenderTargetView,
+    staging_y: ID3D11Texture2D,
+    rt_uv: ID3D11Texture2D,
+    rtv_uv: ID3D11RenderTargetView,
+    staging_uv: ID3D11Texture2D,
+    out_w: u32,
+    out_h: u32,
+    broken: bool,
+    /// 仅前几帧做全零检测（真实黑屏画面不该永久禁用 GPU 路）
+    ok_frames: u32,
+}
+
+impl GpuSameDeviceNv12Scaler {
+    pub fn new(
+        device: &ID3D11Device,
+        ctx: &ID3D11DeviceContext,
+        in_w: u32,
+        in_h: u32,
+        out_w: u32,
+        out_h: u32,
+        input_fmt: DXGI_FORMAT,
+        crop: Option<(u32, u32, u32, u32)>,
+    ) -> Result<Self> {
+        unsafe {
+            let bgra = matches!(
+                input_fmt,
+                DXGI_FORMAT_B8G8R8A8_UNORM
+                    | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+                    | DXGI_FORMAT_B8G8R8X8_UNORM
+            );
+            let crop_norm = crop.map(|(cx, cy, cw, ch)| {
+                (
+                    cx as f32 / in_w as f32,
+                    cy as f32 / in_h as f32,
+                    (cw as f32).max(1.0) / in_w as f32,
+                    (ch as f32).max(1.0) / in_h as f32,
+                )
+            });
+            let mut vs_blob = None;
+            compile_hlsl(VS_HLSL, "VS", "vs_4_0", &mut vs_blob)?;
+            let mut ps_y_blob = None;
+            compile_hlsl(&build_ps_y(crop_norm, bgra), "PS", "ps_4_0", &mut ps_y_blob)?;
+            let mut ps_uv_blob = None;
+            compile_hlsl(
+                &build_ps_uv(crop_norm, bgra, in_w, in_h),
+                "PS",
+                "ps_4_0",
+                &mut ps_uv_blob,
+            )?;
+            let vs_code = std::slice::from_raw_parts(
+                vs_blob.as_ref().unwrap().GetBufferPointer() as *const u8,
+                vs_blob.as_ref().unwrap().GetBufferSize(),
+            );
+            let mut vs = None;
+            device.CreateVertexShader(vs_code, None, Some(&mut vs))?;
+            let vs = vs.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let ps_y_code = std::slice::from_raw_parts(
+                ps_y_blob.as_ref().unwrap().GetBufferPointer() as *const u8,
+                ps_y_blob.as_ref().unwrap().GetBufferSize(),
+            );
+            let mut ps_y = None;
+            device.CreatePixelShader(ps_y_code, None, Some(&mut ps_y))?;
+            let ps_y =
+                ps_y.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let ps_uv_code = std::slice::from_raw_parts(
+                ps_uv_blob.as_ref().unwrap().GetBufferPointer() as *const u8,
+                ps_uv_blob.as_ref().unwrap().GetBufferSize(),
+            );
+            let mut ps_uv = None;
+            device.CreatePixelShader(ps_uv_code, None, Some(&mut ps_uv))?;
+            let ps_uv =
+                ps_uv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            let input_tex = create_tex(
+                device,
+                in_w,
+                in_h,
+                input_fmt,
+                D3D11_BIND_SHADER_RESOURCE,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )?;
+            let mut srv = None;
+            device.CreateShaderResourceView(&input_tex, None, Some(&mut srv))?;
+            let input_srv =
+                srv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            // Y 平面：全分辨率 R8
+            let rt_y = create_tex(
+                device,
+                out_w,
+                out_h,
+                DXGI_FORMAT_R8_UNORM,
+                D3D11_BIND_RENDER_TARGET,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )?;
+            let mut rtv_y = None;
+            device.CreateRenderTargetView(&rt_y, None, Some(&mut rtv_y))?;
+            let rtv_y =
+                rtv_y.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let staging_y = create_tex(
+                device,
+                out_w,
+                out_h,
+                DXGI_FORMAT_R8_UNORM,
+                D3D11_BIND_FLAG(0),
+                D3D11_USAGE_STAGING,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )?;
+
+            // UV 平面：半分辨率 R8G8
+            let uv_w = (out_w + 1) / 2;
+            let uv_h = (out_h + 1) / 2;
+            let rt_uv = create_tex(
+                device,
+                uv_w,
+                uv_h,
+                DXGI_FORMAT_R8G8_UNORM,
+                D3D11_BIND_RENDER_TARGET,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )?;
+            let mut rtv_uv = None;
+            device.CreateRenderTargetView(&rt_uv, None, Some(&mut rtv_uv))?;
+            let rtv_uv =
+                rtv_uv.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let staging_uv = create_tex(
+                device,
+                uv_w,
+                uv_h,
+                DXGI_FORMAT_R8G8_UNORM,
+                D3D11_BIND_FLAG(0),
+                D3D11_USAGE_STAGING,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )?;
+
+            let sd = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                MipLODBias: 0.0,
+                MaxAnisotropy: 1,
+                ComparisonFunc: D3D11_COMPARISON_NEVER,
+                BorderColor: [0.0f32; 4],
+                MinLOD: 0.0,
+                MaxLOD: f32::MAX,
+            };
+            let mut sampler = None;
+            device.CreateSamplerState(&sd, Some(&mut sampler))?;
+            let sampler =
+                sampler.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+
+            Ok(Self {
+                ctx: ctx.clone(),
+                input_tex,
+                input_srv,
+                vs,
+                ps_y,
+                ps_uv,
+                sampler,
+                rt_y,
+                rtv_y,
+                staging_y,
+                rt_uv,
+                rtv_uv,
+                staging_uv,
+                out_w,
+                out_h,
+                broken: false,
+                ok_frames: 0,
+            })
+        }
+    }
+
+    /// 一帧：`src` 为本设备上的 WGC 帧纹理。
+    /// `Ok(true)`=out 写入一帧紧凑 NV12；`Ok(false)`=GPU 未就绪（本帧无产出，复用上一帧）。
+    pub fn convert(&mut self, src: &ID3D11Texture2D, out: &mut Vec<u8>) -> Result<bool> {
+        if self.broken {
+            return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+        }
+        let uv_w = (self.out_w + 1) / 2;
+        let uv_h = (self.out_h + 1) / 2;
+        unsafe {
+            // 同设备直拷（帧纹理与 input_tex 同尺寸同格式）
+            self.ctx.CopyResource(
+                Some(&self.input_tex as &ID3D11Resource),
+                Some(src as &ID3D11Resource),
+            );
+            self.set_state();
+
+            // Pass 1：Y（全分辨率）
+            self.ctx
+                .OMSetRenderTargets(Some(&[Some(self.rtv_y.clone())]), None);
+            self.ctx.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: self.out_w as f32,
+                Height: self.out_h as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            }]));
+            self.ctx.VSSetShader(Some(&self.vs), None);
+            self.ctx.PSSetShader(Some(&self.ps_y), None);
+            self.ctx
+                .PSSetShaderResources(0, Some(&[Some(self.input_srv.clone())]));
+            self.ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            self.ctx.Draw(3, 0);
+            self.ctx.CopyResource(
+                Some(&self.staging_y as &ID3D11Resource),
+                Some(&self.rt_y as &ID3D11Resource),
+            );
+
+            // Pass 2：UV（半分辨率）
+            self.ctx
+                .OMSetRenderTargets(Some(&[Some(self.rtv_uv.clone())]), None);
+            self.ctx.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: uv_w as f32,
+                Height: uv_h as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            }]));
+            self.ctx.VSSetShader(Some(&self.vs), None);
+            self.ctx.PSSetShader(Some(&self.ps_uv), None);
+            self.ctx.Draw(3, 0);
+            self.ctx.CopyResource(
+                Some(&self.staging_uv as &ID3D11Resource),
+                Some(&self.rt_uv as &ID3D11Resource),
+            );
+            self.ctx.Flush();
+
+            let y_size = (self.out_w * self.out_h) as usize;
+            let uv_size = y_size / 2;
+            out.clear();
+            out.reserve(y_size + uv_size);
+
+            // 阻塞 Map：保证 CopyResource 已真正读完 WGC 帧纹理（WGC 随即复用该纹理）
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            self.ctx
+                .Map(
+                    Some(&self.staging_y as &ID3D11Resource),
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut m),
+                )
+                .map_err(|e| {
+                    self.broken = true;
+                    e
+                })?;
+            let p = m.pData as *const u8;
+            let pitch = m.RowPitch as usize;
+            for row in 0..self.out_h as usize {
+                out.extend_from_slice(std::slice::from_raw_parts(
+                    p.add(row * pitch),
+                    self.out_w as usize,
+                ));
+            }
+            self.ctx.Unmap(Some(&self.staging_y as &ID3D11Resource), 0);
+
+            let mut m2 = D3D11_MAPPED_SUBRESOURCE::default();
+            self.ctx
+                .Map(
+                    Some(&self.staging_uv as &ID3D11Resource),
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut m2),
+                )
+                .map_err(|e| {
+                    self.broken = true;
+                    e
+                })?;
+            let p2 = m2.pData as *const u8;
+            let pitch2 = m2.RowPitch as usize;
+            for row in 0..uv_h as usize {
+                out.extend_from_slice(std::slice::from_raw_parts(
+                    p2.add(row * pitch2),
+                    (uv_w * 2) as usize,
+                ));
+            }
+            self.ctx
+                .Unmap(Some(&self.staging_uv as &ID3D11Resource), 0);
+
+            // 仅前 3 帧做全零检测：全零说明渲染管线静默失效（历史「渲染命令被丢弃」故障），
+            // 立即判死并让调用方永久回退 CPU 兜底；此后黑屏内容属正常画面，不误杀。
+            if self.ok_frames < 3 && out.iter().all(|&b| b == 0) {
+                self.broken = true;
+                return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+            }
+            self.ok_frames = self.ok_frames.saturating_add(1);
+            Ok(true)
+        }
+    }
+
+    #[inline]
+    unsafe fn set_state(&self) {
+        self.ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        self.ctx.IASetInputLayout(None);
+        self.ctx.GSSetShader(None, None);
+        self.ctx.RSSetState(None);
+        self.ctx.OMSetBlendState(None, None, u32::MAX);
+        self.ctx.OMSetDepthStencilState(None, 0);
+    }
+}
+
+/// GPU 路不可用时的 CPU 兜底：**仍产出 NV12**（与 GPU 路格式一致，ffmpeg 端参数无需切换），
+/// 但把旧实现的两处灾难性开销去掉：
+/// 1. 不再每帧调用 `frame.buffer()`（其内部每帧新建一张 24MB staging 纹理 + 阻塞 Map）——
+///    改为自持一张复用 staging 纹理，只 CopyResource + Map；
+/// 2. 不再每像素做 f64 除法——改用启动时预计算的最近邻映射表（xmap/ymap），每帧只查表；
+/// 并在同一次遍历里融合写 Y 与 UV（避免两遍扫描与中间 RGBA 缓冲）。
+pub struct CpuNv12Fallback {
+    ctx: ID3D11DeviceContext,
+    staging: ID3D11Texture2D,
+    out_w: u32,
+    out_h: u32,
+    /// 输出 x/y → 源坐标的最近邻映射（含裁剪偏移），整段录制期间不变
+    xmap: Vec<u32>,
+    ymap: Vec<u32>,
+    /// 源像素 RGBA 字节序偏移（BGRA=红在 2，RGBA=红在 0）
+    r_off: usize,
+    g_off: usize,
+    b_off: usize,
+}
+
+impl CpuNv12Fallback {
+    pub fn new(
+        device: &ID3D11Device,
+        ctx: &ID3D11DeviceContext,
+        in_w: u32,
+        in_h: u32,
+        out_w: u32,
+        out_h: u32,
+        input_fmt: DXGI_FORMAT,
+        crop: Option<(u32, u32, u32, u32)>,
+    ) -> Result<Self> {
+        unsafe {
+            let staging = create_tex(
+                device,
+                in_w,
+                in_h,
+                input_fmt,
+                D3D11_BIND_FLAG(0),
+                D3D11_USAGE_STAGING,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )?;
+            let (ox, oy, cw, ch) = match crop {
+                Some((cx, cy, cw, ch)) => (
+                    (cx as usize).min(in_w as usize),
+                    (cy as usize).min(in_h as usize),
+                    (cw as usize).min((in_w as usize).saturating_sub((cx as usize).min(in_w as usize))),
+                    (ch as usize).min((in_h as usize).saturating_sub((cy as usize).min(in_h as usize))),
+                ),
+                None => (0, 0, in_w as usize, in_h as usize),
+            };
+            let dw = out_w.max(1) as usize;
+            let dh = out_h.max(1) as usize;
+            let cw = cw.max(1);
+            let ch = ch.max(1);
+            // 最近邻映射：与旧 rgba_resize_crop_nearest 的取点规则一致（格心对齐），但不含除法
+            let xmap = (0..dw)
+                .map(|x| {
+                    let fx = (x as f64 + 0.5) / dw as f64;
+                    ((ox as f64 + fx * cw as f64).floor() as usize).min(in_w as usize - 1) as u32
+                })
+                .collect();
+            let ymap = (0..dh)
+                .map(|y| {
+                    let fy = (y as f64 + 0.5) / dh as f64;
+                    ((oy as f64 + fy * ch as f64).floor() as usize).min(in_h as usize - 1) as u32
+                })
+                .collect();
+            let (r_off, g_off, b_off) = if input_fmt == DXGI_FORMAT_B8G8R8A8_UNORM
+                || input_fmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+                || input_fmt == DXGI_FORMAT_B8G8R8X8_UNORM
+            {
+                (2usize, 1usize, 0usize)
+            } else {
+                (0usize, 1usize, 2usize)
+            };
+            Ok(Self {
+                ctx: ctx.clone(),
+                staging,
+                out_w,
+                out_h,
+                xmap,
+                ymap,
+                r_off,
+                g_off,
+                b_off,
+            })
+        }
+    }
+
+    /// 一帧：`src` 为本设备上的 WGC 帧纹理，`out` 收到紧凑 NV12（Y 全分辨率 + UV 半分辨率）。
+    pub fn convert(&mut self, src: &ID3D11Texture2D, out: &mut Vec<u8>) -> Result<bool> {
+        let dw = self.out_w as usize;
+        let dh = self.out_h as usize;
+        if dw == 0 || dh == 0 || dw % 2 != 0 || dh % 2 != 0 {
+            return Err(windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG));
+        }
+        unsafe {
+            self.ctx.CopyResource(
+                Some(&self.staging as &ID3D11Resource),
+                Some(src as &ID3D11Resource),
+            );
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            // 阻塞 Map：既是读回，也保证 CopyResource 已读完 WGC 帧纹理
+            self.ctx
+                .Map(
+                    Some(&self.staging as &ID3D11Resource),
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut m),
+                )?;
+            let base = m.pData as *const u8;
+            let pitch = m.RowPitch as usize;
+            let y_size = dw * dh;
+            let uv_size = y_size / 2;
+            out.clear();
+            out.resize(y_size + uv_size, 0);
+            let (y_plane, uv_plane) = out.split_at_mut(y_size);
+            let (r_off, g_off, b_off) = (self.r_off, self.g_off, self.b_off);
+            // 按 2x2 输出块遍历：一次取足 4 个源像素 → 写 4 个 Y 与 1 个 UV（BT.709 limited，
+            // 与 GPU 着色器 / 进程内编码器 feed_rgba 的系数完全一致，三条路径颜色统一）
+            for by in 0..dh / 2 {
+                let sy0 = self.ymap[by * 2] as usize;
+                let sy1 = self.ymap[by * 2 + 1] as usize;
+                let row0 = base.add(sy0 * pitch);
+                let row1 = base.add(sy1 * pitch);
+                let y_row0 = by * 2 * dw;
+                let y_row1 = (by * 2 + 1) * dw;
+                for bx in 0..dw / 2 {
+                    let sx0 = self.xmap[bx * 2] as usize;
+                    let sx1 = self.xmap[bx * 2 + 1] as usize;
+                    let mut rs = 0i32;
+                    let mut gs = 0i32;
+                    let mut bs = 0i32;
+                    for (row, sx, y_row, y_col) in [
+                        (row0, sx0, y_row0, bx * 2),
+                        (row0, sx1, y_row0, bx * 2 + 1),
+                        (row1, sx0, y_row1, bx * 2),
+                        (row1, sx1, y_row1, bx * 2 + 1),
+                    ] {
+                        let p = row.add(sx * 4);
+                        let r = *p.add(r_off) as i32;
+                        let g = *p.add(g_off) as i32;
+                        let b = *p.add(b_off) as i32;
+                        rs += r;
+                        gs += g;
+                        bs += b;
+                        let yv = ((47 * r + 157 * g + 16 * b + 128) >> 8) + 16;
+                        y_plane[y_row + y_col] = clamp_u8(yv);
+                    }
+                    let r = rs >> 2;
+                    let g = gs >> 2;
+                    let b = bs >> 2;
+                    let u = ((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128;
+                    let v = ((112 * r - 102 * g - 10 * b + 128) >> 8) + 128;
+                    let o = (by * (dw / 2) + bx) * 2;
+                    uv_plane[o] = clamp_u8(u);
+                    uv_plane[o + 1] = clamp_u8(v);
+                }
+            }
+            self.ctx.Unmap(Some(&self.staging as &ID3D11Resource), 0);
+            Ok(true)
+        }
+    }
+}
+
+#[inline]
+fn clamp_u8(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
 /// 进程内 GPU 转 RGBA 是否可用。探针用临时 D3D11 设备构建完整渲染管线并实测一次，
 /// 避免对不支持的驱动误启用。运行时若创建/映射失败会自动回退到「读回整帧 + ffmpeg scale」。
 static NV12_IN_PROCESS: OnceLock<bool> = OnceLock::new();
