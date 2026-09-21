@@ -1591,6 +1591,100 @@ fn clamp_u8(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
+/// **功能级** NV12 渲染自检：真正塞一帧纯红进去，跑完整「GPU 缩放 + BT.709 色彩转换」，
+/// 检查产出的 Y/UV 是否为纯红应有的值。
+///
+/// 与 `probe_nv12` 的关键区别：后者只验证 `GpuNv12Converter::new` **构造成功**（着色器能编译、
+/// 纹理能创建），完全不能证明 `Draw` 真的写出了像素。本机历史上多次出现「构造成功但产出全零
+/// （渲染命令被静默丢弃）」的失败，只有功能级自检能抓到——这也是为什么横幅里的
+/// 「GPU 转换器探针 通过」曾长期给人「GPU 路可用」的错误安全感。
+///
+/// 纯红 (255,0,0,255) 在 BT.709 limited 下的期望值：Y≈63、U≈102、V≈240；
+/// 若三者全 0，即可判定 Draw 未写出（设备或管线问题），而非画面本身是黑的。
+pub(crate) fn probe_nv12_render_functional() -> String {
+    unsafe {
+        let mut dev = None;
+        let mut ctx = None;
+        if D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1]),
+            D3D11_SDK_VERSION,
+            Some(&mut dev),
+            None,
+            Some(&mut ctx),
+        )
+        .is_err()
+        {
+            return "❌ 自检失败：D3D11CreateDevice 失败".into();
+        }
+        let (dev, ctx) = match (dev, ctx) {
+            (Some(d), Some(c)) => (d, c),
+            _ => return "❌ 自检失败：设备/上下文为空".into(),
+        };
+
+        // 纯红 64x64 源纹理
+        let (fw, fh) = (64u32, 64u32);
+        let mut pixels = vec![0u8; (fw * fh * 4) as usize];
+        for px in pixels.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 0, 0, 255]);
+        }
+        let src = match create_tex(
+            &dev,
+            fw,
+            fh,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            D3D11_BIND_SHADER_RESOURCE,
+            D3D11_USAGE_DEFAULT,
+            0,
+        ) {
+            Ok(t) => t,
+            Err(e) => return format!("❌ 自检失败：源纹理创建失败 {e}"),
+        };
+        ctx.UpdateSubresource(
+            Some(&src as &ID3D11Resource),
+            0,
+            None,
+            pixels.as_ptr() as *const core::ffi::c_void,
+            fw * 4,
+            0,
+        );
+
+        let mut scaler = match GpuSameDeviceNv12Scaler::new(
+            &dev,
+            &ctx,
+            fw,
+            fh,
+            fw,
+            fh,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            None,
+        ) {
+            Ok(s) => s,
+            Err(e) => return format!("❌ 自检失败：缩放器创建失败 {e:?}"),
+        };
+        let mut out: Vec<u8> = Vec::new();
+        match scaler.convert(&src, &mut out) {
+            Ok(true) => {
+                let y = out.first().copied().unwrap_or(0);
+                let uv_off = (fw * fh) as usize;
+                let u = out.get(uv_off).copied().unwrap_or(0);
+                let v = out.get(uv_off + 1).copied().unwrap_or(0);
+                let ok = y.abs_diff(63) <= 6 && u.abs_diff(102) <= 6 && v.abs_diff(240) <= 6;
+                format!(
+                    "{} 功能性自检：Y={} U={} V={}（期望 Y≈63 U≈102 V≈240）",
+                    if ok { "✅" } else { "❌" },
+                    y, u, v
+                )
+            }
+            Ok(false) => "❌ 自检失败：GPU 未就绪（Ok(false)）".into(),
+            Err(e) => format!("❌ 自检失败：convert 报错 {e:?}"),
+        }
+    }
+}
+
 /// 进程内 GPU 转 RGBA 是否可用。探针用临时 D3D11 设备构建完整渲染管线并实测一次，
 /// 避免对不支持的驱动误启用。运行时若创建/映射失败会自动回退到「读回整帧 + ffmpeg scale」。
 static NV12_IN_PROCESS: OnceLock<bool> = OnceLock::new();

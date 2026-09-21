@@ -1483,6 +1483,15 @@ pub async fn start_recording(
             crop,
             if use_av_encoder { "（进程内，无子进程参数）".to_string() } else { ffmpeg_args.join(" ") },
         ));
+        // GPU NV12 渲染**功能性**自检（进程内只跑一次）：真塞一帧纯红跑完整管线看产出值。
+        // 这是判断「GPU 路到底能不能用」的唯一可靠依据——旧的构造级探针通过 ≠ 能出画面。
+        static NV12_FUNC_PROBE: OnceLock<String> = OnceLock::new();
+        probe.note(&format!(
+            "[自检] {}",
+            NV12_FUNC_PROBE
+                .get_or_init(gpu_nv12::probe_nv12_render_functional)
+                .as_str()
+        ));
 
         // 启动 ffmpeg 进程（stdin 管道接收 RGBA 帧）—— 完整 L0 时跳过
         let mut child: Option<Child> = None;
