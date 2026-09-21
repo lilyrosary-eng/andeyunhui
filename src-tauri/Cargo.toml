@@ -213,6 +213,14 @@ gongfang-automation = ["gongfang-kit/automation"]
 # 攻防 + API 网关（代理池 + 流量整形 + arc-swap 策略热交换 + 预测性故障转移）
 gongfang-gateway = ["gongfang-kit/gateway"]
 
+[profile.dev]
+# dev（pnpm tauri dev）默认 opt-level = 0，对录屏这类逐像素/逐帧热点代码慢一个数量级，
+# 会让「本地实测」严重失真（实测：同一段 CPU 最近邻+色彩转换在未优化下约 500ms/帧）。
+# 故仅对本 crate 提升到 opt-level = 2：热点路径接近 release，而依赖仍按默认 0 编译
+# （不触发全量重建，dev 迭代成本几乎不变）。
+[profile.dev.package.andeyunhui]
+opt-level = 2
+
 [profile.release]
 # 全链路优化：跨 crate 内联 + 死代码消除，性能提升 10-20%
 lto = true
