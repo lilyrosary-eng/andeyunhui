@@ -343,11 +343,17 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                     }
                     Err(e) => {
                         self.gpu_failed = true;
+                        self.probe.note(&format!(
+                            "❌ 同设备 GPU NV12 缩放器创建失败 → 回退 CPU NV12 兜底 | 错误: {e:?} | 帧格式={:?} 帧尺寸={}x{} 输出={}x{}",
+                            frame.desc().Format, fw, fh, self.out_w, self.out_h
+                        ));
                         eprintln!("[录屏] 同设备 GPU NV12 缩放器创建失败，回退 CPU NV12 兜底: {e}");
                     }
                 }
             }
             let mut produced = false;
+            // CPU 兜底已自行上报分段耗时（Map / 循环），GPU 路才需要整体记为「读回」
+            let mut used_cpu = false;
             if let Some(scaler) = self.nv12_scaler.as_mut() {
                 let p = Arc::get_mut(&mut buf).expect("刚取得的缓冲必为独占引用");
                 p.clear();
@@ -363,6 +369,12 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                         self.gpu_stat_skip += 1;
                     }
                     Err(e) => {
+                        let detail = scaler.last_fail_detail.clone();
+                        self.probe.note(&format!(
+                            "❌ 同设备 GPU NV12 转换失败（第 {} 帧）→ 永久回退 CPU 兜底 | 错误: {e:?} | 细节: {}",
+                            self.gpu_stat_ok + self.gpu_stat_skip + 1,
+                            if detail.is_empty() { "无".into() } else { detail },
+                        ));
                         eprintln!("[录屏] 同设备 GPU NV12 转换失败，永久回退 CPU NV12 兜底: {e}");
                         self.gpu_failed = true;
                         self.nv12_scaler = None;
@@ -396,7 +408,13 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                     p.clear();
                     __fg.set_path(probe::PATH_SUB_CPU);
                     match c.convert(frame.as_raw_texture(), p) {
-                        Ok(true) => produced = true,
+                        Ok(true) => {
+                            produced = true;
+                            used_cpu = true;
+                            // 探针：拆开「阻塞 Map（GPU 同步/读回）」与「转换循环（CPU）」，
+                            // 以区分「GPU 同步卡」还是「CPU 代码慢（未优化构建）」。
+                            __fg.set_stages(c.last_map_us, c.last_loop_us);
+                        }
                         Ok(false) => {}
                         Err(e) => {
                             eprintln!("[录屏] CPU NV12 兜底转换失败，本帧丢弃: {e}");
@@ -405,6 +423,10 @@ impl GraphicsCaptureApiHandler for WgcRecorder {
                 }
             }
             if produced {
+                if !used_cpu {
+                    // 探针：GPU 路本帧「缩放 + 色彩转换 + Map 读回」的合计耗时
+                    __fg.mark_read();
+                }
                 Some(buf)
             } else {
                 // 本帧无产出：缓冲归还对象池，避免池被抽干后反复重新分配

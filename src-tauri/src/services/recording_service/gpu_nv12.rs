@@ -1098,6 +1098,8 @@ pub struct GpuSameDeviceNv12Scaler {
     broken: bool,
     /// 仅前几帧做全零检测（真实黑屏画面不该永久禁用 GPU 路）
     ok_frames: u32,
+    /// 诊断：判死时的细节（如全零样本），供调用方写入探针日志
+    pub last_fail_detail: String,
 }
 
 impl GpuSameDeviceNv12Scaler {
@@ -1260,6 +1262,7 @@ impl GpuSameDeviceNv12Scaler {
                 out_h,
                 broken: false,
                 ok_frames: 0,
+                last_fail_detail: String::new(),
             })
         }
     }
@@ -1377,7 +1380,16 @@ impl GpuSameDeviceNv12Scaler {
 
             // 仅前 3 帧做全零检测：全零说明渲染管线静默失效（历史「渲染命令被丢弃」故障），
             // 立即判死并让调用方永久回退 CPU 兜底；此后黑屏内容属正常画面，不误杀。
+            // 注：真·黑屏画面在 BT.709 limited 下是 Y=16 / UV=128，绝非全零 → 全零必然是「Draw 没跑」
+            // 或「staging 未被写入」，故该判据不会误杀（调用方会用 err_text 把首字节样本记入探针日志）。
             if self.ok_frames < 3 && out.iter().all(|&b| b == 0) {
+                let y_size = (self.out_w * self.out_h) as usize;
+                self.last_fail_detail = format!(
+                    "全零自检未过（Draw 疑似被丢弃）：Y首字节={:?} UV首字节={:?} 已产出帧数={}",
+                    &out[..8.min(out.len())],
+                    &out[y_size.min(out.len())..(y_size + 8).min(out.len())],
+                    self.ok_frames
+                );
                 self.broken = true;
                 return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
             }
@@ -1415,6 +1427,10 @@ pub struct CpuNv12Fallback {
     r_off: usize,
     g_off: usize,
     b_off: usize,
+    /// 诊断：上一帧「阻塞 Map 读回」耗时（μs）——定位 GPU 同步是否才是真凶
+    pub last_map_us: u64,
+    /// 诊断：上一帧「查表 + Y/UV 转换循环」耗时（μs）——未优化构建下这段会非常慢
+    pub last_loop_us: u64,
 }
 
 impl CpuNv12Fallback {
@@ -1482,6 +1498,8 @@ impl CpuNv12Fallback {
                 r_off,
                 g_off,
                 b_off,
+                last_map_us: 0,
+                last_loop_us: 0,
             })
         }
     }
@@ -1498,6 +1516,7 @@ impl CpuNv12Fallback {
                 Some(&self.staging as &ID3D11Resource),
                 Some(src as &ID3D11Resource),
             );
+            let t_map = std::time::Instant::now();
             let mut m = D3D11_MAPPED_SUBRESOURCE::default();
             // 阻塞 Map：既是读回，也保证 CopyResource 已读完 WGC 帧纹理
             self.ctx
@@ -1510,6 +1529,7 @@ impl CpuNv12Fallback {
                 )?;
             let base = m.pData as *const u8;
             let pitch = m.RowPitch as usize;
+            self.last_map_us = t_map.elapsed().as_micros() as u64;
             let y_size = dw * dh;
             let uv_size = y_size / 2;
             out.clear();
@@ -1558,6 +1578,9 @@ impl CpuNv12Fallback {
                 }
             }
             self.ctx.Unmap(Some(&self.staging as &ID3D11Resource), 0);
+            // t_map 起于 Map 之前，此刻 elapsed = Map 阻塞 + 转换循环；减去 Map 即得循环耗时
+            self.last_loop_us =
+                (t_map.elapsed().as_micros() as u64).saturating_sub(self.last_map_us);
             Ok(true)
         }
     }

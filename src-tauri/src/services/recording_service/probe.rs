@@ -196,6 +196,12 @@ impl RecProbe {
         self.slot_overwrite.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 记录一条即时事件（如「GPU 路为何降级」的原因），落盘 + stderr。
+    /// 用途：捕获侧的 eprintln 只在 dev 终端可见，落盘后才能被事后取证。
+    pub(crate) fn note(&self, msg: &str) {
+        self.emit(&format!("[录屏探针] {}", msg));
+    }
+
     /// 投帧节拍器：非阻塞入队结果（满即丢瞬时帧）
     pub(crate) fn note_feed(&self, ok: bool) {
         if ok {
@@ -240,6 +246,13 @@ impl FrameGuard {
     /// 丢弃当前标记区间（不计入任何阶段）：用于分支切换后重新起算，避免把无关前序计入。
     pub(crate) fn reset_mark(&mut self) {
         self.mark = Instant::now();
+    }
+
+    /// 直接注入两个阶段的耗时（μs）：用于「阶段计时在被调方内部」的场景
+    /// （如 CPU 兜底的 Map 阻塞 vs 转换循环），避免为计时改动被调方签名。
+    pub(crate) fn set_stages(&mut self, read_us: u64, conv_us: u64) {
+        self.read_us = read_us;
+        self.conv_us = conv_us;
     }
 
     /// 标记本帧走的分支。
