@@ -28,17 +28,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cpus } from 'node:os';
 
-// 关闭 IDE safe-delete 拦截：否则 Vite emptyDir 批量删除 dist/ 被拦（SAFE_DELETE_BULK_CONFIRM_REQUIRED），构建失败。
-// 官方开关：shim 仅在 SAFE_DELETE_ENABLED !== '0' 时启用。
-process.env.SAFE_DELETE_ENABLED = '0';
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
 const pluginsDir = join(rootDir, 'plugins');
-
-// 关闭 IDE safe-delete 拦截（否则 Vite emptyDir 批量删除 dist/ 被拦，构建失败）。
-// 该开关官方支持：shim 仅在 SAFE_DELETE_ENABLED !== '0' 时启用。
-process.env.SAFE_DELETE_ENABLED = '0';
 
 // vite 二进制路径：直接调用以绕过 pnpm exec 的 install 检查（pnpm 11 的 ERR_PNPM_IGNORED_BUILDS 会阻止构建）
 const viteBin = join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js');

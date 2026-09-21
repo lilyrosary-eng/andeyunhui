@@ -40,13 +40,6 @@ check_*.txt
 chk_pdf*.txt
 research_report_*.md
 
-# 本地工作记录/设计文档（工程文件，不入库）
-.editor/
-
-# 其他本地工具缓存
-.editor/
-.editor/
-
 # 增量编译缓存
 *.tsbuildinfo
 

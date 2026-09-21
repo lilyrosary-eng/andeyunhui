@@ -11,16 +11,8 @@ import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// 关闭 IDE safe-delete 拦截：否则 Vite emptyDir 批量删除 dist/ 被拦，dev 起不来。
-// 官方开关：shim 仅在 SAFE_DELETE_ENABLED !== '0' 时启用。
-process.env.SAFE_DELETE_ENABLED = '0';
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
-
-// IDE 的 node-safe-delete-shim 会拦截 Vite emptyDir 的批量删除（SAFE_DELETE_BULK_CONFIRM_REQUIRED），
-// 导致插件 vite build 在清空 dist/ 时失败、dev 起不来。开发期无需该保护，关闭它即可放行。
-process.env.SAFE_DELETE_ENABLED = '0';
 
 const isAndroid =
   process.env.TAURI_ENV_PLATFORM === 'android' ||
