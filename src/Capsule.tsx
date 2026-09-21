@@ -636,13 +636,12 @@ export default function Capsule() {
         }
       } else if (kind === 'favorite') {
         // 常用笔记：用「后端收藏列表 + 局部索引」轮转，不依赖独立 webview 的 notesStore。
-        // 每次召唤取下一个收藏（循环），多收藏可连续打开多个不同笔记窗口；无收藏给明确提示。
+        // 每次召唤重新拉取最新收藏列表：用户可能刚「收藏/解除收藏」，若用缓存会召唤出
+        // 已解除常用笔记标记的旧笔记浮窗（陈旧列表 bug）。点击频率低，一次 IPC 开销可忽略。
         try {
           let noteId: string | null = null;
           try {
-            if (!favListRef.current || favListRef.current.length === 0) {
-              favListRef.current = (await api.getAllFavorites()) ?? [];
-            }
+            favListRef.current = (await api.getAllFavorites()) ?? [];
             const list = favListRef.current;
             if (list.length > 0) {
               noteId = list[favIdxRef.current % list.length];
