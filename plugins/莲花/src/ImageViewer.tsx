@@ -28,6 +28,8 @@ const ModeLabels: Record<ViewMode, string> = {
 };
 
 const MODES: ViewMode[] = ['full', 'vertical', 'horizontal-forward', 'horizontal-reverse'];
+/** 幻灯片间隔预设（秒） */
+const PRESET_INTERVALS = [0.1, 0.5, 1, 2, 3, 5, 10];
 
 // ========== 主组件 ==========
 export function ImageViewer({ folderPath, folderName, onBack, initialPath }: ImageViewerProps) {
@@ -471,50 +473,40 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
             )}
           </button>
 
-          {/* 间隔选择 */}
-          <div className="relative group">
-            <button
-              className="btn-press px-1.5 py-0.5 text-xs rounded border border-neutral-200 dark:border-stone-600 bg-white/60 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 hover:bg-neutral-100 dark:hover:bg-stone-700 min-w-[48px] text-center"
-              title={T('image.viewer.interval')}
-            >
-              {slideshowInterval}s
-            </button>
-            {/* 下拉菜单 */}
-            <div className="absolute top-full right-0 mt-1 hidden group-hover:block z-50 bg-white dark:bg-stone-800 rounded-lg shadow-lg border border-neutral-200 dark:border-stone-600 py-1 min-w-[80px]">
-              {[0.1, 0.5, 1, 2, 3, 5, 10].map(v => (
-                <button
-                  key={v}
-                  onClick={() => {
-                    setSlideshowInterval(v);
-                    localStorage.setItem('image.slideshowInterval', String(v));
-                  }}
-                  className={`block w-full px-3 py-1 text-xs text-left hover:bg-neutral-100 dark:hover:bg-stone-700 ${
-                    slideshowInterval === v ? 'text-blue-600 dark:text-blue-400 font-medium' : 'text-neutral-600 dark:text-stone-300'
-                  }`}
-                >
-                  {v}s
-                </button>
-              ))}
-              <div className="border-t border-neutral-200 dark:border-stone-600 my-1" />
-              <input
-                type="number"
-                min="0.1"
-                max="3600"
-                step="0.1"
-                value={slideshowInterval}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (!isNaN(v) && v >= 0.1 && v <= 3600) {
-                    setSlideshowInterval(v);
-                    localStorage.setItem('image.slideshowInterval', String(v));
-                  }
-                }}
-                onClick={(e) => e.stopPropagation()}
-                className="w-full px-3 py-1 text-xs bg-transparent text-neutral-600 dark:text-stone-300 focus:outline-none border-t border-neutral-200 dark:border-stone-600"
-                placeholder="自定义"
-              />
-            </div>
-          </div>
+          {/* 间隔：原生 select（系统层弹层，恒置顶、绝不被图片截断）+ 自定义数字输入（可手动填写任意值） */}
+          <input
+            type="number"
+            min="0.1"
+            max="3600"
+            step="0.1"
+            value={slideshowInterval}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v) && v >= 0.1 && v <= 3600) {
+                setSlideshowInterval(v);
+                localStorage.setItem('image.slideshowInterval', String(v));
+              }
+            }}
+            title={T('image.viewer.interval')}
+            className="w-14 px-1.5 py-0.5 text-xs rounded border border-neutral-200 dark:border-stone-600 bg-white/60 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 focus:outline-none text-center"
+          />
+          <select
+            value={PRESET_INTERVALS.includes(slideshowInterval) ? String(slideshowInterval) : ''}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v)) {
+                setSlideshowInterval(v);
+                localStorage.setItem('image.slideshowInterval', String(v));
+              }
+            }}
+            title={T('image.viewer.interval')}
+            className="px-1.5 py-0.5 text-xs rounded border border-neutral-200 dark:border-stone-600 bg-white/60 dark:bg-stone-800/60 text-neutral-600 dark:text-stone-300 focus:outline-none cursor-pointer"
+          >
+            <option value="" disabled>{slideshowInterval}s</option>
+            {PRESET_INTERVALS.map(v => (
+              <option key={v} value={v}>{v}s</option>
+            ))}
+          </select>
         </div>
 
         {/* 右侧：序号（点击可输入页码跳转） */}

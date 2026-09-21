@@ -275,6 +275,12 @@ function App() {
           if (content) {
             await api.createFloatingNoteWindow(noteId, content.title || '未命名', 200, 200);
           }
+        } else {
+          // 无收藏笔记：明确提示，避免「按了热键没反应」
+          try {
+            const { useCapsuleStore } = await import('@/stores/capsuleStore');
+            useCapsuleStore.getState().showToast('还没有收藏的笔记');
+          } catch {}
         }
       } catch (e) {
         console.error('[App] 常用笔记快捷键处理失败:', e);

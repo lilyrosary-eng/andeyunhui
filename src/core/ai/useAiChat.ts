@@ -86,6 +86,11 @@ export interface UseAiChatOptions {
   /** 注入的 system 指令（可选，留空则用后端默认）。位于 personaPrompt 之后、检索记忆之前。 */
   systemPrompt?: string;
   /**
+   * 伴侣模式：为 true 时请求后端跳过「全局 AI 人设」（AiProfile.persona），
+   * 只使用本调用注入的伴侣人设 —— 满足「ai 对话启动伴侣模式后只走伴侣人设、不受全局 AI 人设控制」。
+   */
+  excludeGlobalPersona?: boolean;
+  /**
    * Agent 工具模式开关（默认 false = 纯对话）。为 true 时调用走 ai_chat_agent：
    * 由后端挂载全套工具（web_search/web_fetch/file/grep/glob/plan 等），让对话具备联网/执行能力。
    * 事件契约与 ai_chat 相同（ai-done/ai-error），仅新增 ai-agent-step 工具步骤事件。
@@ -129,7 +134,7 @@ export interface UseAiChatResult {
  * 共用 AI 对话逻辑。状态、持久化、流式、发送全在此，调用方只负责把数据画出来。
  */
 export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
-  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, agent = false, allowEmpty = false } = options;
+  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, agent = false, allowEmpty = false, excludeGlobalPersona = false } = options;
   const syncEvent = syncEventFor(persistKey);
   const syncReqEvent = syncReqEventFor(persistKey);
   // Agent 模式需随回调读取最新值（避免闭包陈旧）
@@ -416,6 +421,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       ),
       stream: true,
       ...(finalSystem ? { system: finalSystem } : {}),
+      ...(excludeGlobalPersona ? { exclude_global_persona: true } : {}),
     };
 
     // 本轮对话完成后（ai-done 事件），异步沉淀整轮进长期记忆（namespace='ai-chat'）。

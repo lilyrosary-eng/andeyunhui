@@ -105,7 +105,18 @@ musicPlayer.on('progress', () => computeAndEmit());
 
 export const lyricsSync = {
   setLines(next: LyricLine[]): void {
-    lines = next;
+    // 关键：桌面歌词 emit 前对每行做「内嵌翻译拆分」。
+    // 本地歌词常把「外语原文 + 中文翻译」写在同一行（如 `I sang 于此放声歌唱`），
+    // 若不在 setLines 时拆出 translation，桌面歌词在译/音模式下 currentSub 恒为空、
+    // 原文行还整行混排，即「翻译规则对桌面歌词不生效」的根因。
+    // NowPlayingView 等模块内歌词已各自 splitInlineTranslation，这里统一处理使其一致。
+    // splitInlineTranslation 对纯单语行返回无 translation，安全不误拆。
+    lines = next.map((ln) => {
+      if (ln.translation) return ln;
+      const sp = splitInlineTranslation(ln.text);
+      if (sp.translation) return { ...ln, text: sp.orig, translation: sp.translation };
+      return ln;
+    });
     lastText = '';
     computeAndEmit();
   },

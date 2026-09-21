@@ -312,6 +312,11 @@ export default function Capsule() {
   const setSearchOpen = useCapsuleStore((s) => s.setSearchOpen);
   const setTransferOpen = useCapsuleStore((s) => s.setTransferOpen);
   const setKeepOpen = useCapsuleStore((s) => s.setKeepOpen);
+  // 浮岛「常用笔记」轮转：记录后端收藏列表 + 局部召唤索引。
+  // 浮岛是独立 webview，其 notesStore 收藏队列可能未初始化/为空（与主窗口 localStorage 不同步），
+  // 若走后端固定第一个就会“只能召唤一个”，故在此自持索引轮转，多收藏可连续打开不同笔记窗口。
+  const favListRef = useRef<string[] | null>(null);
+  const favIdxRef = useRef(0);
   // —— 接收请求 / toast（从 capsuleStore 订阅）——
   const receiveReq = useCapsuleStore((s) => s.receiveReq);
   const toast = useCapsuleStore((s) => s.toast);
@@ -630,17 +635,28 @@ export default function Capsule() {
           await w.setFocus();
         }
       } else if (kind === 'favorite') {
-        // 常用笔记：召唤下一个常用笔记浮窗
-        // 用后端 API 读取（不依赖前端 store 是否已初始化），成功后轮转队列
+        // 常用笔记：用「后端收藏列表 + 局部索引」轮转，不依赖独立 webview 的 notesStore。
+        // 每次召唤取下一个收藏（循环），多收藏可连续打开多个不同笔记窗口；无收藏给明确提示。
         try {
-          const noteId = await api.getNextFavorite();
+          let noteId: string | null = null;
+          try {
+            if (!favListRef.current || favListRef.current.length === 0) {
+              favListRef.current = (await api.getAllFavorites()) ?? [];
+            }
+            const list = favListRef.current;
+            if (list.length > 0) {
+              noteId = list[favIdxRef.current % list.length];
+              favIdxRef.current += 1;
+            }
+          } catch { noteId = null; }
           if (noteId) {
             const content = await api.getNoteContent(noteId);
             if (content) {
               await api.createFloatingNoteWindow(noteId, content.title || '未命名', 200, 200);
-              // 召唤成功，轮转到队尾（前端 store 可能未初始化，安全调用）
-              try { useNotesStore.getState().onFavoriteNoteClosed(noteId, false); } catch {}
             }
+          } else {
+            // 无收藏笔记：给用户明确反馈，避免「点击无效」的困惑
+            try { useCapsuleStore.getState().showToast('还没有收藏的笔记'); } catch {}
           }
         } catch (err) {
           console.error('[Capsule] 常用笔记操作失败:', err);

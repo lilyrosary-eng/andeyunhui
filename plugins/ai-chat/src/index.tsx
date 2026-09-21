@@ -110,6 +110,8 @@ const Root = memo(function Root() {
 
   // 启用伴侣时，发送消息注入伴侣上下文（仅影响 ai-chat 模块，不影响 ai编程/ai攻防）
   // 方案 B：人设画像(persona) 作为最高优先级记忆置顶，L2 核心档案(core) 列于其后。
+  // excludeGlobalPersona=true：伴侣模式下跳过「全局 AI 人设」，只走伴侣人设，
+  // 逻辑上「ai 对话启动伴侣模式后仅遵循伴侣设定、不受全局人设控制」。
   const sendWithCompanion = useCallback(
     (text: string) => {
       if (!(companionEnabled && companion)) return send(text);
@@ -118,6 +120,7 @@ const Root = memo(function Root() {
       return send(text, {
         ...(personaPrompt ? { personaPrompt } : {}),
         ...(corePrompt ? { systemPrompt: corePrompt } : {}),
+        excludeGlobalPersona: true,
       });
     },
     [send, companionEnabled, companion],

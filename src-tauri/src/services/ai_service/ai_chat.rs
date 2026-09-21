@@ -33,6 +33,13 @@ pub(crate) fn is_deepseek_provider(cfg: &AiProfile) -> bool {
     cfg.base_url.to_lowercase().contains("deepseek")
 }
 
+/// 本地兼容服务（LM Studio / Ollama / llama.cpp 等本地端点）判定。
+/// LM Studio 的 reasoning_effort 只支持 on/off，发 high 会被服务端 WARN 并回退为 on。
+fn is_local_compat_provider(cfg: &AiProfile) -> bool {
+    let base = cfg.base_url.to_lowercase();
+    base.contains("localhost") || base.contains("127.0.0.1")
+}
+
 /// 粗判提供商（用于用量统计分组）。优先看 base_url 域名，其次看模型名前缀。
 fn detect_provider(cfg: &AiProfile) -> String {
     let base = cfg.base_url.to_lowercase();
@@ -193,6 +200,9 @@ pub async fn ai_chat(
     profile_id: Option<String>,
     // 前端 per-call 注入的 system（如群聊中每位伴侣的独立人设）；传入时优先于全局 AiProfile.persona，合并为其前置段落。
     system: Option<String>,
+    // 伴侣模式下调用方置 true：跳过全局 AI 人设，仅使用前端 per-call 注入的伴侣人设，
+    // 满足「ai 对话启动伴侣模式后只走伴侣人设、不受全局 AI 人设控制」。
+    exclude_global_persona: Option<bool>,
 ) -> Result<(), String> {
     let profiles = load_profiles(&app);
     let cfg = resolve_profile(&profiles, profile_id);
@@ -253,7 +263,12 @@ pub async fn ai_chat(
     };
     let thinking = cfg.thinking.unwrap_or(false);
     // 人设 system：组合后合并进首条 system 消息（不破坏插件自带的项目上下文 / SOP / 状态注入）。
-    let persona = compose_persona_system(&cfg);
+    // 伴侣模式（exclude_global_persona=true）：跳过全局人设，仅保留前端注入的伴侣人设。
+    let persona = if exclude_global_persona.unwrap_or(false) {
+        String::new()
+    } else {
+        compose_persona_system(&cfg)
+    };
     // 前端 per-call system（群聊各伴侣人设 / 单聊注入）前置，全局 persona 紧随其后。
     let effective_system = compose_effective_system(&system, &persona);
     let mut messages_json = messages_json;
@@ -280,7 +295,10 @@ pub async fn ai_chat(
     if thinking {
         // 思考模式：思维链通过 reasoning_content 返回（与 content 同级）。
         // 思考模式不支持 temperature / top_p（OpenAI o-series 直接报错，DeepSeek 忽略），故省略。
-        body["reasoning_effort"] = serde_json::json!("high");
+        // reasoning_effort：OpenAI 兼容端点支持 low/medium/high；本地 GGUF（LM Studio）只支持
+        // on/off —— 发 high 会被服务端 WARN 回退为 on（且易让本地模型「反复思考良久」才回答），
+        // 故本地端点统一降级为 on。
+        body["reasoning_effort"] = serde_json::json!(if is_local_compat_provider(&cfg) { "on" } else { "high" });
         // DeepSeek 需显式 thinking 开关；OpenAI o-series 仅靠 reasoning_effort，多余字段会 400，
         // 故 thinking 块仅对 DeepSeek 附加。
         if is_deepseek_provider(&cfg) {
