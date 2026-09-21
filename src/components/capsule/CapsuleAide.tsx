@@ -32,6 +32,65 @@ function cleanAideHistory(msgs: Array<{ role?: string; content?: unknown }>): Ar
   return out.slice(-24);
 }
 
+// 消息气泡 memo 化：流式输出时 aideMessages 每 tick 都生成新引用，若直接内联渲染会让
+// 所有历史气泡全量重渲染。抽成 memo 组件 + 传原始值 props，只有「正在变化」的那条
+// 才重渲染（content/reasoning 变化），前面的历史气泡浅比较跳过，长对话翻页/流式卡顿缓解。
+const AideBubble = memo(function AideBubble({
+  messageId,
+  role,
+  content,
+  error,
+  reasoning,
+  reasoningOpen,
+  busy,
+  onToggleReasoning,
+}: {
+  messageId: string;
+  role: string;
+  content: string;
+  error?: boolean;
+  reasoning?: string;
+  reasoningOpen: boolean;
+  busy: boolean;
+  onToggleReasoning: (id: string) => void;
+}) {
+  const isUser = role === 'user';
+  const isAssistant = role === 'assistant';
+  return (
+    <div
+      style={{
+        alignSelf: isUser ? 'flex-end' : 'flex-start',
+        maxWidth: '85%',
+        background: isUser ? 'rgba(230,195,92,0.18)' : 'rgba(255,255,255,0.08)',
+        color: error ? '#ff9a9a' : '#f2f2f4',
+        borderRadius: 12,
+        padding: '8px 10px',
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+      }}
+    >
+      {isAssistant && reasoning ? (
+        <div style={{ marginBottom: 6 }}>
+          <button
+            onClick={() => onToggleReasoning(messageId)}
+            style={{ ...btnBase, padding: '1px 7px', fontSize: 10.5, borderRadius: 6, background: 'rgba(255,255,255,0.07)', color: 'rgba(244,244,246,0.62)', marginBottom: 4 }}
+          >
+            {reasoningOpen ? '▾' : '▸'} 思考过程{reasoningOpen ? '' : `（${reasoning.length} 字 · 点击展开）`}
+          </button>
+          {reasoningOpen && (
+            <div style={{ fontSize: 10.5, lineHeight: 1.55, fontStyle: 'italic', color: 'rgba(244,244,246,0.5)', background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '6px 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', filter: 'blur(0.3px)' }}>
+              {reasoning}
+            </div>
+          )}
+        </div>
+      ) : null}
+      {content || (isAssistant && busy ? '思考中…' : '')}
+    </div>
+  );
+});
+
 function CapsuleAide() {
   const { t } = useI18n();
   // 共享状态（订阅切片）
@@ -62,7 +121,24 @@ function CapsuleAide() {
   const [aideActiveConvId, setAideActiveConvId] = useState<string>(initialAideConvs[0].id);
   const aideActiveConvIdRef = useRef<string>(aideActiveConvId);
   useEffect(() => { aideActiveConvIdRef.current = aideActiveConvId; }, [aideActiveConvId]);
-  useEffect(() => { try { localStorage.setItem(AIDE_STORE_KEY, JSON.stringify(aideConversations)); } catch { /* 忽略 */ } }, [aideConversations]);
+  // 持久化防抖（debounce 600ms）：流式输出时每 tick 都变 aideConversations，直接写会
+  // 在 JS 主线程反复做全量 JSON.stringify + localStorage 写入（阻塞渲染）。
+  // 静默期（流式结束后 600ms）只写最后一次，杜绝写放大。
+  const aidePersistTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (aidePersistTimerRef.current !== null) window.clearTimeout(aidePersistTimerRef.current);
+    aidePersistTimerRef.current = window.setTimeout(() => {
+      aidePersistTimerRef.current = null;
+      try { localStorage.setItem(AIDE_STORE_KEY, JSON.stringify(aideConversations)); } catch { /* 忽略 */ }
+    }, 600);
+    return () => {
+      if (aidePersistTimerRef.current !== null) {
+        window.clearTimeout(aidePersistTimerRef.current);
+        // 卸载时立即冲刷（防抖窗口内的变更也不能丢，关闭面板/切走保住最后状态）
+        try { localStorage.setItem(AIDE_STORE_KEY, JSON.stringify(aideConversations)); } catch { /* 忽略 */ }
+      }
+    };
+  }, [aideConversations]);
   const aideStreamConvIdRef = useRef<string>(aideActiveConvId);
   const updateAideStreamMessages = useCallback((convId: string, updater: (prev: ChatMsg[]) => ChatMsg[]) => {
     setAideConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, messages: updater(c.messages), updatedAt: Date.now() } : c)));
@@ -73,6 +149,10 @@ function CapsuleAide() {
   const [aideInput, setAideInput] = useState('');
   const [aideBusy, setAideBusy] = useState(false);
   const [aideReasoningOpen, setAideReasoningOpen] = useState<Record<string, boolean>>({});
+  // 参考回调稳定化：memo 气泡的 onToggleReasoning 必须引用稳定，否则每渲染变新引用直接打破 memo
+  const toggleAideReasoning = useCallback((id: string) => {
+    setAideReasoningOpen((o) => ({ ...o, [id]: !o[id] }));
+  }, []);
   const aideReqRef = useRef<string | null>(null);
   const aideAsstRef = useRef<string | null>(null);
   const aideScrollRef = useRef<HTMLDivElement | null>(null);
@@ -289,38 +369,17 @@ function CapsuleAide() {
           <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.55)', textAlign: 'center', marginTop: 12 }}>{t('capsule.aideHint')}</div>
         )}
         {aideMessages.map((m) => (
-          <div
+          <AideBubble
             key={m.id}
-            style={{
-              alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-              maxWidth: '85%',
-              background: m.role === 'user' ? 'rgba(230,195,92,0.18)' : 'rgba(255,255,255,0.08)',
-              color: m.error ? '#ff9a9a' : '#f2f2f4',
-              borderRadius: 12,
-              padding: '8px 10px',
-              fontSize: 12.5,
-              lineHeight: 1.5,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}
-          >
-            {m.role === 'assistant' && m.reasoning ? (
-              <div style={{ marginBottom: 6 }}>
-                <button
-                  onClick={() => setAideReasoningOpen((o) => ({ ...o, [m.id]: !o[m.id] }))}
-                  style={{ ...btnBase, padding: '1px 7px', fontSize: 10.5, borderRadius: 6, background: 'rgba(255,255,255,0.07)', color: 'rgba(244,244,246,0.62)', marginBottom: 4 }}
-                >
-                  {aideReasoningOpen[m.id] ? '▾' : '▸'} 思考过程{aideReasoningOpen[m.id] ? '' : `（${m.reasoning.length} 字 · 点击展开）`}
-                </button>
-                {aideReasoningOpen[m.id] && (
-                  <div style={{ fontSize: 10.5, lineHeight: 1.55, fontStyle: 'italic', color: 'rgba(244,244,246,0.5)', background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '6px 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', filter: 'blur(0.3px)' }}>
-                    {m.reasoning}
-                  </div>
-                )}
-              </div>
-            ) : null}
-            {m.content || (m.role === 'assistant' && aideBusy ? '思考中…' : '')}
-          </div>
+            messageId={m.id}
+            role={m.role}
+            content={m.content}
+            error={m.error}
+            reasoning={m.reasoning}
+            reasoningOpen={!!aideReasoningOpen[m.id]}
+            busy={aideBusy}
+            onToggleReasoning={toggleAideReasoning}
+          />
         ))}
       </div>
 
