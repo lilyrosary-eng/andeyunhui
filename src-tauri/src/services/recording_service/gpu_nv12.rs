@@ -140,6 +140,8 @@ pub struct GpuNv12Converter {
     vs: ID3D11VertexShader,
     ps: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
+    /// 不做背面剔除的光栅化器状态（见 create_cull_none_rs 的说明：默认状态会把全屏三角整片剔除）
+    rs: ID3D11RasterizerState,
     out_w: u32,
     out_h: u32,
     in_w: u32,
@@ -159,6 +161,34 @@ pub struct GpuNv12Converter {
     rtv_uv: ID3D11RenderTargetView,
     staging_uv: Vec<ID3D11Texture2D>,
     pub nv12_buf: Vec<u8>,
+}
+
+/// 创建「不做背面剔除」的光栅化器状态（**GPU 路径能否出画面全系于它**）。
+///
+/// 为什么必须显式创建：全屏三角形的顶点是 `(-1,-1) / (3,-1) / (-1,3)`，在 y 轴向下的屏幕空间里
+/// 其缠绕方向是**逆时针**；而 D3D11 默认光栅化器状态为 `CullMode=BACK` +
+/// `FrontCounterClockwise=FALSE`（只保留顺时针面）→ **整个三角形被背面剔除，Draw 一个像素都不写**。
+/// `ClearRenderTargetView` 不走光栅化，所以症状是极具迷惑性的「清屏有值、渲染全零、且调试层零报错」。
+///
+/// 历史影响：本项目 GpuNv12Converter / GpuSameDeviceScaler / wgc_native 全用同一条 VS + 默认状态，
+/// 于是所有 GPU 路径都静默失败，并被误判为「设备不能渲染（命令被 DWM 丢弃）」而长期弃用，
+/// 只能退回「CPU 整帧读回 + 逐像素缩放」——这正是录屏卡顿的总根因。
+unsafe fn create_cull_none_rs(device: &ID3D11Device) -> Result<ID3D11RasterizerState> {
+    let desc = D3D11_RASTERIZER_DESC {
+        FillMode: D3D11_FILL_SOLID,
+        CullMode: D3D11_CULL_NONE,
+        FrontCounterClockwise: false.into(),
+        DepthBias: 0,
+        DepthBiasClamp: 0.0,
+        SlopeScaledDepthBias: 0.0,
+        DepthClipEnable: true.into(),
+        ScissorEnable: false.into(),
+        MultisampleEnable: false.into(),
+        AntialiasedLineEnable: false.into(),
+    };
+    let mut rs = None;
+    device.CreateRasterizerState(&desc, Some(&mut rs))?;
+    rs.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
 }
 
 unsafe fn create_tex(
@@ -393,6 +423,7 @@ impl GpuNv12Converter {
             let mut sampler = None;
             device.CreateSamplerState(&sd, Some(&mut sampler))?;
             let sampler = sampler.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let rs = create_cull_none_rs(&device)?;
 
             // NV12 像素着色器和渲染目标（Y: R8, UV: R8G8 half-res）
             let mut ps_y_blob = None;
@@ -446,6 +477,7 @@ impl GpuNv12Converter {
                 vs,
                 ps,
                 sampler,
+                rs,
                 out_w,
                 out_h,
                 in_w,
@@ -545,7 +577,8 @@ impl GpuNv12Converter {
         self.ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         self.ctx.IASetInputLayout(None);
         self.ctx.GSSetShader(None, None);
-        self.ctx.RSSetState(None);
+        // ★ 必须绑 CULL_NONE：全屏三角在 y 向下屏幕空间是逆时针，默认状态会把它整片剔除
+        self.ctx.RSSetState(Some(&self.rs));
         self.ctx.OMSetBlendState(None, None, u32::MAX);
         self.ctx.OMSetDepthStencilState(None, 0);
     }
@@ -808,6 +841,8 @@ pub struct GpuSameDeviceScaler {
     vs: ID3D11VertexShader,
     ps: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
+    /// 不做背面剔除的光栅化器状态（见 create_cull_none_rs 的说明：默认状态会把全屏三角整片剔除）
+    rs: ID3D11RasterizerState,
     out_w: u32,
     out_h: u32,
     in_w: u32,
@@ -924,6 +959,7 @@ impl GpuSameDeviceScaler {
             device.CreateSamplerState(&sd, Some(&mut sampler))?;
             let sampler =
                 sampler.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let rs = create_cull_none_rs(device)?;
 
             Ok(Self {
                 ctx: ctx.clone(),
@@ -935,6 +971,7 @@ impl GpuSameDeviceScaler {
                 vs,
                 ps,
                 sampler,
+                rs,
                 out_w,
                 out_h,
                 in_w,
@@ -952,7 +989,8 @@ impl GpuSameDeviceScaler {
         self.ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         self.ctx.IASetInputLayout(None);
         self.ctx.GSSetShader(None, None);
-        self.ctx.RSSetState(None);
+        // ★ 必须绑 CULL_NONE：全屏三角在 y 向下屏幕空间是逆时针，默认状态会把它整片剔除
+        self.ctx.RSSetState(Some(&self.rs));
         self.ctx.OMSetBlendState(None, None, u32::MAX);
         self.ctx.OMSetDepthStencilState(None, 0);
     }
@@ -1087,6 +1125,8 @@ pub struct GpuSameDeviceNv12Scaler {
     ps_y: ID3D11PixelShader,
     ps_uv: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
+    /// 不做背面剔除的光栅化器状态（见 create_cull_none_rs 的说明：默认状态会把全屏三角整片剔除）
+    rs: ID3D11RasterizerState,
     rt_y: ID3D11Texture2D,
     rtv_y: ID3D11RenderTargetView,
     staging_y: ID3D11Texture2D,
@@ -1243,6 +1283,7 @@ impl GpuSameDeviceNv12Scaler {
             device.CreateSamplerState(&sd, Some(&mut sampler))?;
             let sampler =
                 sampler.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+            let rs = create_cull_none_rs(device)?;
 
             Ok(Self {
                 ctx: ctx.clone(),
@@ -1252,6 +1293,7 @@ impl GpuSameDeviceNv12Scaler {
                 ps_y,
                 ps_uv,
                 sampler,
+                rs,
                 rt_y,
                 rtv_y,
                 staging_y,
@@ -1403,7 +1445,8 @@ impl GpuSameDeviceNv12Scaler {
         self.ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         self.ctx.IASetInputLayout(None);
         self.ctx.GSSetShader(None, None);
-        self.ctx.RSSetState(None);
+        // ★ 必须绑 CULL_NONE：全屏三角在 y 向下屏幕空间是逆时针，默认状态会把它整片剔除
+        self.ctx.RSSetState(Some(&self.rs));
         self.ctx.OMSetBlendState(None, None, u32::MAX);
         self.ctx.OMSetDepthStencilState(None, 0);
     }
@@ -1681,6 +1724,553 @@ pub(crate) fn probe_nv12_render_functional() -> String {
             }
             Ok(false) => "❌ 自检失败：GPU 未就绪（Ok(false)）".into(),
             Err(e) => format!("❌ 自检失败：convert 报错 {e:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod nv12_pipeline_tests {
+    use super::*;
+
+    /// 进一步隔离：Draw 到底卡在「顶点/光栅化/状态」还是「采样 SRV」。
+    ///
+    /// 阶段 2 已证明「Clear → R8 RT → staging → Map」链路正常，阶段 3 证明整条 Draw 写不出像素。
+    /// 本测试用**不采样的常量 PS** 与**采样 PS** 对比，把问题锁进更小的一环；
+    /// 并尝试开 D3D11 调试层（若系统装了 Graphics Tools）直接读出官方报错。
+    #[test]
+    fn nv12_draw_isolation() {
+        const PS_CONST: &str = r#"
+float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    return float4(0.25, 0, 0, 1);
+}
+"#;
+        unsafe {
+            // 优先带调试层创建设备（拿得到官方报错就一次定位）
+            let mut dev = None;
+            let mut ctx = None;
+            let dbg_ok = D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG,
+                Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1]),
+                D3D11_SDK_VERSION,
+                Some(&mut dev),
+                None,
+                Some(&mut ctx),
+            )
+            .is_ok();
+            if !dbg_ok {
+                println!("[隔离] 调试层不可用（未装 Graphics Tools），退化为普通设备");
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut dev),
+                    None,
+                    Some(&mut ctx),
+                )
+                .expect("create device");
+            }
+            let dev = dev.unwrap();
+            let ctx = ctx.unwrap();
+            let (fw, fh) = (64u32, 64u32);
+
+            // 源纹理（纯红）+ R8 RT + staging
+            let src = create_tex(
+                &dev,
+                fw,
+                fh,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                D3D11_BIND_SHADER_RESOURCE,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )
+            .unwrap();
+            let mut px = vec![0u8; (fw * fh * 4) as usize];
+            for c in px.chunks_exact_mut(4) {
+                c.copy_from_slice(&[255, 0, 0, 255]);
+            }
+            ctx.UpdateSubresource(
+                Some(&src as &ID3D11Resource),
+                0,
+                None,
+                px.as_ptr() as *const core::ffi::c_void,
+                fw * 4,
+                0,
+            );
+            let mut srv = None;
+            dev.CreateShaderResourceView(&src, None, Some(&mut srv))
+                .unwrap();
+            let srv = srv.unwrap();
+            let rt = create_tex(
+                &dev,
+                fw,
+                fh,
+                DXGI_FORMAT_R8_UNORM,
+                D3D11_BIND_RENDER_TARGET,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )
+            .unwrap();
+            let mut rtv = None;
+            dev.CreateRenderTargetView(&rt, None, Some(&mut rtv)).unwrap();
+            let rtv = rtv.unwrap();
+            let stg = create_tex(
+                &dev,
+                fw,
+                fh,
+                DXGI_FORMAT_R8_UNORM,
+                D3D11_BIND_FLAG(0),
+                D3D11_USAGE_STAGING,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )
+            .unwrap();
+
+            let mut vs_blob = None;
+            compile_hlsl(VS_HLSL, "VS", "vs_4_0", &mut vs_blob).expect("编译 VS");
+            let vs_blob = vs_blob.unwrap();
+            let mut vs = None;
+            dev.CreateVertexShader(
+                std::slice::from_raw_parts(
+                    vs_blob.GetBufferPointer() as *const u8,
+                    vs_blob.GetBufferSize(),
+                ),
+                None,
+                Some(&mut vs),
+            )
+            .expect("CreateVertexShader");
+            let vs = vs.unwrap();
+
+            let mut ps_blob = None;
+            compile_hlsl(PS_CONST, "PS", "ps_4_0", &mut ps_blob).expect("编译常量 PS");
+            let ps_blob = ps_blob.unwrap();
+            let mut ps_const = None;
+            dev.CreatePixelShader(
+                std::slice::from_raw_parts(
+                    ps_blob.GetBufferPointer() as *const u8,
+                    ps_blob.GetBufferSize(),
+                ),
+                None,
+                Some(&mut ps_const),
+            )
+            .expect("CreatePixelShader(常量)");
+            let ps_const = ps_const.unwrap();
+
+            let sd = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                MipLODBias: 0.0,
+                MaxAnisotropy: 1,
+                ComparisonFunc: D3D11_COMPARISON_NEVER,
+                BorderColor: [0.0f32; 4],
+                MinLOD: 0.0,
+                MaxLOD: f32::MAX,
+            };
+            let mut sampler = None;
+            dev.CreateSamplerState(&sd, Some(&mut sampler)).unwrap();
+            let sampler = sampler.unwrap();
+
+            // ★ 假设：全屏三角形在 y 向下的屏幕空间是逆时针，而默认光栅化器状态
+            //   （CullMode=BACK + FrontCounterClockwise=FALSE）只保留顺时针 → 整三角形被剔除。
+            //   绑一个 CULL_NONE 的光栅化器状态对照验证。
+            let rsd = D3D11_RASTERIZER_DESC {
+                FillMode: D3D11_FILL_SOLID,
+                CullMode: D3D11_CULL_NONE,
+                FrontCounterClockwise: false.into(),
+                DepthBias: 0,
+                DepthBiasClamp: 0.0,
+                SlopeScaledDepthBias: 0.0,
+                DepthClipEnable: true.into(),
+                ScissorEnable: false.into(),
+                MultisampleEnable: false.into(),
+                AntialiasedLineEnable: false.into(),
+            };
+            let mut rs_none = None;
+            dev.CreateRasterizerState(&rsd, Some(&mut rs_none))
+                .expect("CreateRasterizerState(CULL_NONE)");
+            let rs_none = rs_none.unwrap();
+            println!("[隔离] 已创建 CULL_NONE 光栅化器状态，下一步用它与默认状态对照");
+
+            // 与 scaler 完全一致的状态设置 + Draw
+            let draw_and_read = |ps: &ID3D11PixelShader, bind_srv: bool| -> u8 {
+                ctx.ClearRenderTargetView(Some(&rtv), &[0.0f32, 0.0, 0.0, 1.0]);
+                ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                ctx.IASetInputLayout(None);
+                ctx.GSSetShader(None, None);
+                ctx.RSSetState(None);
+                ctx.OMSetBlendState(None, None, u32::MAX);
+                ctx.OMSetDepthStencilState(None, 0);
+                ctx.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
+                ctx.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                    TopLeftX: 0.0,
+                    TopLeftY: 0.0,
+                    Width: fw as f32,
+                    Height: fh as f32,
+                    MinDepth: 0.0,
+                    MaxDepth: 1.0,
+                }]));
+                ctx.VSSetShader(Some(&vs), None);
+                ctx.PSSetShader(Some(ps), None);
+                if bind_srv {
+                    ctx.PSSetShaderResources(0, Some(&[Some(srv.clone())]));
+                    ctx.PSSetSamplers(0, Some(&[Some(sampler.clone())]));
+                }
+                ctx.Draw(3, 0);
+                // 读回管线状态：Draw 写不出像素最常见的原因就是「视口为空」（Clear 不需要视口，
+                // 故 Clear 正常而 Draw 全无输出时，第一嫌疑就是这里）
+                // ⚠️ pNumViewports 是「入参=调用方提供的数组容量 / 出参=实际视口数」，
+// 入参必须传 1（我们的容量），传 0 会拿不到真实数量（踩过一次，误判「视口=0」）。
+                let mut nvp: u32 = 1;
+                let mut vp_out = D3D11_VIEWPORT::default();
+                ctx.RSGetViewports(&mut nvp, Some(&mut vp_out));
+                let mut rts: [Option<ID3D11RenderTargetView>; 1] = [None];
+                ctx.OMGetRenderTargets(Some(&mut rts), None);
+                let nrt = if rts[0].is_some() { 1 } else { 0 };
+                println!(
+                    "[隔离] 管线状态：视口数={nvp} 视口={}x{} 绑定RTV数={nrt} 拓扑/输入布局已设",
+                    vp_out.Width, vp_out.Height
+                );
+                ctx.CopyResource(
+                    Some(&stg as &ID3D11Resource),
+                    Some(&rt as &ID3D11Resource),
+                );
+                let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+                ctx.Map(
+                    Some(&stg as &ID3D11Resource),
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut m),
+                )
+                .expect("map");
+                let v = *(m.pData as *const u8);
+                ctx.Unmap(Some(&stg as &ID3D11Resource), 0);
+                v
+            };
+
+            let a = draw_and_read(&ps_const, false);
+            println!("[隔离] 常量 PS（不采样）→ 首字节={a}（期望 ≈64；0 = 光栅化/状态环节有问题）");
+            if dbg_ok {
+                dump_d3d_debug_messages(&dev, "常量 PS Draw 之后");
+            }
+            let b = draw_and_read(&ps_const, true);
+            println!("[隔离] 常量 PS（绑 SRV）→ 首字节={b}（应与上一行相同；不同说明 SRV 绑定有副作用）");
+
+            // ★ 对照实验：绑 CULL_NONE 光栅化器状态后再画一次（其余完全不变）
+            ctx.ClearRenderTargetView(Some(&rtv), &[0.0f32, 0.0, 0.0, 1.0]);
+            ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx.IASetInputLayout(None);
+            ctx.GSSetShader(None, None);
+            ctx.RSSetState(Some(&rs_none)); // ← 唯一的差异
+            ctx.OMSetBlendState(None, None, u32::MAX);
+            ctx.OMSetDepthStencilState(None, 0);
+            ctx.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
+            ctx.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: fw as f32,
+                Height: fh as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            }]));
+            ctx.VSSetShader(Some(&vs), None);
+            ctx.PSSetShader(Some(&ps_const), None);
+            ctx.Draw(3, 0);
+            ctx.CopyResource(
+                Some(&stg as &ID3D11Resource),
+                Some(&rt as &ID3D11Resource),
+            );
+            let mut m4 = D3D11_MAPPED_SUBRESOURCE::default();
+            ctx.Map(
+                Some(&stg as &ID3D11Resource),
+                0,
+                D3D11_MAP_READ,
+                0,
+                Some(&mut m4),
+            )
+            .expect("map cullnone");
+            let c = *(m4.pData as *const u8);
+            ctx.Unmap(Some(&stg as &ID3D11Resource), 0);
+            println!(
+                "[隔离] ★ 常量 PS + CULL_NONE → 首字节={c}（期望 ≈64；若此处变 64 → 确认根因是背面剔除）"
+            );
+
+            // ── 追加诊断：读回 IA/VS/PS 关键状态 + 换 RGBA8 渲染目标对照 ──
+            let topo = ctx.IAGetPrimitiveTopology();
+            let mut vs_out: Option<ID3D11VertexShader> = None;
+            let mut nci_vs = 0u32;
+            ctx.VSGetShader(&mut vs_out, None, Some(&mut nci_vs));
+            let mut ps_out: Option<ID3D11PixelShader> = None;
+            let mut nci_ps = 0u32;
+            ctx.PSGetShader(&mut ps_out, None, Some(&mut nci_ps));
+            let has_il = ctx.IAGetInputLayout().is_ok();
+            println!(
+                "[隔离] 状态读回：拓扑={}（TRIANGLELIST=4）VS已绑={} PS已绑={} 输入布局={}",
+                topo.0,
+                vs_out.is_some(),
+                ps_out.is_some(),
+                has_il
+            );
+
+            // 换 RGBA8 渲染目标再画一次：区分「R8 格式不支持被 PS 写入」与「几何/光栅化问题」
+            let rt2 = create_tex(
+                &dev,
+                fw,
+                fh,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                D3D11_BIND_RENDER_TARGET,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )
+            .unwrap();
+            let mut rtv2 = None;
+            dev.CreateRenderTargetView(&rt2, None, Some(&mut rtv2)).unwrap();
+            let rtv2 = rtv2.unwrap();
+            let stg2 = create_tex(
+                &dev,
+                fw,
+                fh,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                D3D11_BIND_FLAG(0),
+                D3D11_USAGE_STAGING,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )
+            .unwrap();
+            ctx.ClearRenderTargetView(Some(&rtv2), &[0.0f32, 0.0, 0.0, 1.0]);
+            ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx.IASetInputLayout(None);
+            ctx.GSSetShader(None, None);
+            ctx.RSSetState(None);
+            ctx.OMSetBlendState(None, None, u32::MAX);
+            ctx.OMSetDepthStencilState(None, 0);
+            ctx.OMSetRenderTargets(Some(&[Some(rtv2.clone())]), None);
+            ctx.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: fw as f32,
+                Height: fh as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            }]));
+            ctx.VSSetShader(Some(&vs), None);
+            ctx.PSSetShader(Some(&ps_const), None);
+            ctx.Draw(3, 0);
+            ctx.CopyResource(
+                Some(&stg2 as &ID3D11Resource),
+                Some(&rt2 as &ID3D11Resource),
+            );
+            let mut m3 = D3D11_MAPPED_SUBRESOURCE::default();
+            ctx.Map(
+                Some(&stg2 as &ID3D11Resource),
+                0,
+                D3D11_MAP_READ,
+                0,
+                Some(&mut m3),
+            )
+            .expect("map rgba");
+            println!(
+                "[隔离] 常量 PS → RGBA8 渲染目标 首像素={:?}（期望 ≈[64,0,0,255]；若此处有值而 R8 为 0 → 是 R8 格式问题）",
+                &std::slice::from_raw_parts(m3.pData as *const u8, 4)
+            );
+            ctx.Unmap(Some(&stg2 as &ID3D11Resource), 0);
+        }
+    }
+
+    /// 打印 D3D11 调试层里已累积的消息（能直接看到 Draw 为何被丢弃）
+    unsafe fn dump_d3d_debug_messages(dev: &ID3D11Device, when: &str) {
+        let iq: ID3D11InfoQueue = match dev.cast() {
+            Ok(q) => q,
+            Err(_) => {
+                println!("[调试层] 无法获取 ID3D11InfoQueue");
+                return;
+            }
+        };
+        let n = iq.GetNumStoredMessages();
+        println!("[调试层] {when}: 共 {n} 条消息");
+        for i in 0..n.min(12) {
+            let mut msg = D3D11_MESSAGE::default();
+            let mut len = 0usize;
+            if iq.GetMessage(i, Some(&mut msg), &mut len).is_err() {
+                continue;
+            }
+            let text = if msg.pDescription.is_null() {
+                String::new()
+            } else {
+                String::from_utf8_lossy(std::slice::from_raw_parts(
+                    msg.pDescription as *const u8,
+                    msg.DescriptionByteLength,
+                ))
+                .trim_end_matches('\0')
+                .to_string()
+            };
+            println!("[调试层] #{}: {}", i, text);
+        }
+        iq.ClearStoredMessages();
+    }
+
+    /// 渲染管线**逐阶段二分**：把「源数据→拷贝→Map」「Clear→R8 渲染目标→staging→Map」
+    /// 「完整 VS+PS Draw」三段分开验证，定位全零发生在哪一环。
+    ///
+    /// 背景：功能性自检发现，即便在**我们自己新建的设备**上、喂纯红源纹理，
+    /// `convert` 产出的 Y/UV 也是全零 → 说明「windows-capture 设备不能渲染」是误判，
+    /// 真正的问题在这段渲染代码里。本测试就是为它准备的可重复、可离线的调试入口。
+    ///
+    /// 运行：`cargo test -p andeyunhui --lib nv12_pipeline -- --nocapture`
+    #[test]
+    fn nv12_pipeline_stage_bisect() {
+        unsafe {
+            let mut dev = None;
+            let mut ctx = None;
+            if D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1]),
+                D3D11_SDK_VERSION,
+                Some(&mut dev),
+                None,
+                Some(&mut ctx),
+            )
+            .is_err()
+            {
+                println!("[二分] 无法创建设备（测试环境不支持 D3D11）");
+                return;
+            }
+            let dev = dev.unwrap();
+            let ctx = ctx.unwrap();
+            let (fw, fh) = (64u32, 64u32);
+
+            // ── 阶段 1：源纹理填充 → staging → Map（验证「写入源 + 拷贝 + 读回」链路）──
+            let src = create_tex(
+                &dev,
+                fw,
+                fh,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                D3D11_BIND_SHADER_RESOURCE,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )
+            .expect("源纹理");
+            let mut px = vec![0u8; (fw * fh * 4) as usize];
+            for c in px.chunks_exact_mut(4) {
+                c.copy_from_slice(&[255, 0, 0, 255]);
+            }
+            ctx.UpdateSubresource(
+                Some(&src as &ID3D11Resource),
+                0,
+                None,
+                px.as_ptr() as *const core::ffi::c_void,
+                fw * 4,
+                0,
+            );
+            let stg = create_tex(
+                &dev,
+                fw,
+                fh,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                D3D11_BIND_FLAG(0),
+                D3D11_USAGE_STAGING,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )
+            .expect("staging(RGBA)");
+            ctx.CopyResource(
+                Some(&stg as &ID3D11Resource),
+                Some(&src as &ID3D11Resource),
+            );
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            ctx.Map(
+                Some(&stg as &ID3D11Resource),
+                0,
+                D3D11_MAP_READ,
+                0,
+                Some(&mut m),
+            )
+            .expect("map staging");
+            println!(
+                "[阶段1] 源→staging→Map 前4字节={:?}（期望 [255,0,0,255]）",
+                &std::slice::from_raw_parts(m.pData as *const u8, 4)
+            );
+            ctx.Unmap(Some(&stg as &ID3D11Resource), 0);
+
+            // ── 阶段 2：Clear(0.5) → R8 渲染目标 → staging → Map（验证 RT 链路本身）──
+            let rt = create_tex(
+                &dev,
+                fw,
+                fh,
+                DXGI_FORMAT_R8_UNORM,
+                D3D11_BIND_RENDER_TARGET,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )
+            .expect("R8 RT");
+            let mut rtv = None;
+            dev.CreateRenderTargetView(&rt, None, Some(&mut rtv))
+                .expect("RTV");
+            let rtv = rtv.unwrap();
+            let stgy = create_tex(
+                &dev,
+                fw,
+                fh,
+                DXGI_FORMAT_R8_UNORM,
+                D3D11_BIND_FLAG(0),
+                D3D11_USAGE_STAGING,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )
+            .expect("staging(R8)");
+            ctx.ClearRenderTargetView(Some(&rtv), &[0.5f32, 0.0, 0.0, 1.0]);
+            ctx.CopyResource(
+                Some(&stgy as &ID3D11Resource),
+                Some(&rt as &ID3D11Resource),
+            );
+            let mut m2 = D3D11_MAPPED_SUBRESOURCE::default();
+            ctx.Map(
+                Some(&stgy as &ID3D11Resource),
+                0,
+                D3D11_MAP_READ,
+                0,
+                Some(&mut m2),
+            )
+            .expect("map staging(R8)");
+            println!(
+                "[阶段2] Clear(0.5)→R8 RT→staging→Map 首字节={}（期望 ≈128）",
+                *(m2.pData as *const u8)
+            );
+            ctx.Unmap(Some(&stgy as &ID3D11Resource), 0);
+
+            // ── 阶段 3：完整 VS+PS_y/PS_uv（经 GpuSameDeviceNv12Scaler::convert）──
+            let mut scaler = GpuSameDeviceNv12Scaler::new(
+                &dev,
+                &ctx,
+                fw,
+                fh,
+                fw,
+                fh,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                None,
+            )
+            .expect("scaler");
+            let mut out: Vec<u8> = Vec::new();
+            let r = scaler.convert(&src, &mut out);
+            let uv_off = (fw * fh) as usize;
+            println!(
+                "[阶段3] convert ok={:?} 产出={}B Y首={:?} UV首={:?} 判死细节={:?}",
+                r.is_ok(),
+                out.len(),
+                &out[..8.min(out.len())],
+                if out.len() >= uv_off + 8 {
+                    &out[uv_off..uv_off + 8]
+                } else {
+                    &[]
+                },
+                scaler.last_fail_detail
+            );
         }
     }
 }
