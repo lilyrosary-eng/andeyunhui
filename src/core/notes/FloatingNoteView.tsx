@@ -1,10 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { emit } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { api } from '@/lib/api';
 import { Pin, Copy, X } from 'lucide-react';
 import { logger } from '@/lib/logger';
 import { t } from '@/lib/i18n';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 import { EVENTS } from '@/core/events/schema';
 
 const appWindow = getCurrentWebviewWindow();
@@ -12,6 +14,12 @@ const AUTO_SAVE_MS = 1000;
 
 /** 模块级防抖 timer：每次输入重置，避免高频保存 */
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * 浮窗笔记底色：浅粉 → 浅紫渐变（与「常用笔记卡片」同风格），
+ * 让文字在这层底上始终清晰、不会"隐身"。
+ */
+const NOTE_GRADIENT = 'linear-gradient(135deg, rgba(253,228,240,0.94), rgba(238,232,252,0.94))';
 
 /**
  * 显式拖拽与不可拖拽的 CSS（WebviewWindow 动态创建时
@@ -31,6 +39,26 @@ export function FloatingNoteView() {
   const [isFixed, setIsFixed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isCopying, setIsCopying] = useState(false);
+  // 跟随应用内统一设置的字体：优先取主窗口创建时通过 URL 传入的 fontFamily（浮窗 webview
+  // 的 localStorage 可能与主窗隔离）；再回退读 localStorage；并监听 app-font-changed 事件
+  // 实时同步设置变更。
+  const [globalFont, setGlobalFont] = useState(() => {
+    try {
+      const fromUrl = new URLSearchParams(window.location.search).get('fontFamily');
+      if (fromUrl) return fromUrl;
+    } catch { /* ignore */ }
+    return storage.getString(KEYS.theme.fontFamily.key, '');
+  });
+  useEffect(() => {
+    // 挂载即向主窗口请求当前字体（主窗口 app-font-request 监听 → 回发 app-font-changed），
+    // 兜底补上「URL 参数仅覆盖新建窗 / localStorage 可能隔离」两种情况。
+    try { emit('app-font-request').catch(() => {}); } catch { /* ignore */ }
+    let un: (() => void) | undefined;
+    listen<{ fontFamily?: string }>('app-font-changed', (e) => {
+      if (e.payload?.fontFamily) setGlobalFont(e.payload.fontFamily);
+    }).then((u) => { un = u; }).catch(() => {});
+    return () => { un?.(); };
+  }, []);
 
   // 加载完成后才允许自动保存（避免首次渲染触发保存）
   const loadedRef = useRef(false);
@@ -163,22 +191,34 @@ export function FloatingNoteView() {
 
   if (!noteId) {
     return (
-      <div className="flex items-center justify-center h-screen text-neutral-400 dark:text-stone-500 text-sm bg-white dark:bg-stone-900">
+      <div
+        className="flex items-center justify-center h-screen text-neutral-700 text-[15px] font-medium"
+        style={{
+          background: NOTE_GRADIENT,
+          fontFamily: globalFont && globalFont !== '系统默认' ? `"${globalFont}", sans-serif` : undefined,
+        }}
+      >
         {t('floatingNote.invalid')}
       </div>
     );
   }
 
   return (
-    <div className={`flex flex-col h-screen rounded-2xl border border-white/25 dark:border-stone-700/40 bg-white/[0.18] dark:bg-stone-800/[0.18] text-neutral-800 dark:text-stone-200 overflow-hidden ${isFixed ? 'pointer-events-none' : ''}`}>
+    <div
+      className={`flex flex-col h-screen rounded-2xl border border-white/40 shadow-lg overflow-hidden ${isFixed ? 'pointer-events-none' : ''}`}
+      style={{
+        background: NOTE_GRADIENT,
+        fontFamily: globalFont && globalFont !== '系统默认' ? `"${globalFont}", sans-serif` : undefined,
+      }}
+    >
       {/* ====== 自定义标题栏（拖拽区；固定时移除拖拽属性，不可拖动）====== */}
       <div
         data-tauri-drag-region={isFixed ? undefined : ''}
         style={isFixed ? undefined : DRAG_STYLE}
-        className="flex items-center justify-between gap-2 px-3 py-2.5 bg-white/[0.18] dark:bg-stone-800/[0.18] border-b border-neutral-200/30 dark:border-stone-700/30 select-none"
+        className="flex items-center justify-between gap-2 px-3 py-2.5 bg-white/25 text-neutral-800 border-b border-black/5 select-none"
       >
         {/* 标题（浮窗只读） */}
-        <span className="flex-1 min-w-0 text-sm font-medium truncate ml-1 select-none">
+        <span className="flex-1 min-w-0 text-base font-semibold truncate ml-1 select-none">
           {title || t('notes.floatingTitle')}
         </span>
         {/* 按钮组（不可拖拽） */}
@@ -246,7 +286,8 @@ export function FloatingNoteView() {
           <textarea
             value={content}
             onChange={(e) => setContent(e.target.value)}
-            className="w-full h-full resize-none p-5 bg-transparent font-mono text-sm leading-7 text-neutral-700 dark:text-stone-300 outline-none border-none placeholder:text-neutral-300 dark:placeholder:text-stone-600"
+            className="w-full h-full resize-none p-5 bg-transparent text-[15.5px] leading-7 font-semibold text-neutral-800 outline-none border-none placeholder:text-neutral-400"
+            style={{ fontFamily: 'inherit' }}
             placeholder={t('floatingNote.mdPlaceholder')}
             spellCheck={false}
           />

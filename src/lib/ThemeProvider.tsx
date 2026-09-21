@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode, type RefObject } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { emit, listen } from '@tauri-apps/api/event';
 import { isAndroid } from '../platform/isMobile';
 import { storage } from '../core/storage';
 import { KEYS } from '../core/storage/keys';
@@ -219,6 +220,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     } else {
       document.body.style.fontFamily = `"${val}", sans-serif`;
     }
+    // 广播给独立浮窗（笔记浮窗 / 歌词窗等）——其 localStorage 可能与主窗口隔离，
+    // 靠事件同步才能让「应用内字体设置」对浮窗同样生效。
+    try { emit('app-font-changed', { fontFamily: val }).catch(() => {}); } catch { /* ignore */ }
   }, []);
 
   const setBgImage = useCallback((val: string | null) => {
@@ -367,8 +371,21 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (fontFamily !== '系统默认') {
       document.body.style.fontFamily = `"${fontFamily}", sans-serif`;
     }
+    // mount 时也广播一次当前字体：让已打开的独立浮窗（笔记/歌词）拿不到隔离 localStorage
+    // 时，仍能同步到「应用内统一设置」的字体。
+    try { emit('app-font-changed', { fontFamily }).catch(() => {}); } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 mount 时批量应用
   }, []);
+
+  // 监听浮窗的字体请求（浮窗 localStorage 可能与主窗隔离、URL 参数仅覆盖新建窗）：
+  // 收到 app-font-request 就把当前生效字体广播回去，保证任何时刻打开的浮窗都能同步。
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    listen('app-font-request', () => {
+      try { emit('app-font-changed', { fontFamily }).catch(() => {}); } catch { /* ignore */ }
+    }).then((u) => { un = u; }).catch(() => {});
+    return () => { un?.(); };
+  }, [fontFamily]);
 
   // 监听系统主题变化
   useEffect(() => {

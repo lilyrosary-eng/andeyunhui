@@ -1,6 +1,7 @@
 // 独立「AI 对话」模块 · 主区对话流 —— 大屏 UI，受控于上层共享的 useAiChat 实例。
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect, useState, useRef, useLayoutEffect } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import type { Conversation, SendAttachment, AttachmentKind, ChatMsg } from '@/components/capsule/types';
@@ -135,6 +136,29 @@ export const AiChatConversation = memo(function AiChatConversation({
   const messages = activeConv?.messages ?? [];
   const companion = useCompanionStore((s) => s.companion);
   const userAvatar = useUserAvatar();
+
+  // 消息列表虚拟化：长对话只渲染可视区（翻阅毫秒级）。动态高度测量 + 流式跟随底部。
+  const listScrollRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => listScrollRef.current,
+    estimateSize: (i) => (messages[i]?.role === 'user' ? 60 : 240),
+    overscan: 6,
+    measureElement: (el) => el.getBoundingClientRect().height,
+  });
+  // 用户接近底部才自动跟随（流式追加/发送新消息滚动到底），上滑查看历史时不强拉
+  const stickBottomRef = useRef(true);
+  const lastMsg = messages[messages.length - 1];
+  useLayoutEffect(() => {
+    if (!stickBottomRef.current) return;
+    const el = listScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, lastMsg?.id, lastMsg?.content, busy]);
+  const handleListScroll = () => {
+    const el = listScrollRef.current;
+    if (!el) return;
+    stickBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  };
 
   // 共享 markdown 样式 + 代码块复制按钮（幂等挂一次）
   useEffect(() => {
@@ -411,7 +435,7 @@ export const AiChatConversation = memo(function AiChatConversation({
       )}
 
       {/* 对话流（胶囊形态可选封面 coverUrl） */}
-      <div className="flex-1 min-h-0 overflow-y-auto relative">
+      <div className="flex-1 min-h-0 overflow-y-auto relative" ref={listScrollRef} onScroll={handleListScroll}>
         {capsuleMode && coverUrl ? (
           <>
             <img src={coverUrl} alt="" className="absolute inset-0 w-full h-full object-cover opacity-30 pointer-events-none" />
@@ -430,9 +454,17 @@ export const AiChatConversation = memo(function AiChatConversation({
             </div>
           </div>
         ) : (
-          <div className="max-w-3xl mx-auto px-6 py-6 space-y-5">
-            {messages.map((m) => (
-              <div key={m.id} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
+          <div className="max-w-3xl mx-auto px-6 py-6 relative" style={{ height: virtualizer.getTotalSize() }}>
+            {virtualizer.getVirtualItems().map((vi) => {
+              const m = messages[vi.index];
+              return (
+              <div
+                key={m.id}
+                data-index={vi.index}
+                ref={virtualizer.measureElement}
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
+              >
+              <div className={`flex gap-3 pb-5 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
                 <div className={`flex items-center justify-center flex-shrink-0 ${m.role === 'user' ? '' : 'shadow-sm'}`}>
                   {m.role === 'user' ? (
                     <UserAvatarView value={userAvatar} size={32} />
@@ -543,7 +575,9 @@ export const AiChatConversation = memo(function AiChatConversation({
                   )}
                 </div>
               </div>
-            ))}
+            </div>
+            );
+          })}
           </div>
         )}
         </div>

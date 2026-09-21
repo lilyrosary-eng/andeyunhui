@@ -110,8 +110,16 @@ export const api = {
   // 框架内部正确在主线程创建窗口，不会重入死锁。
   createFloatingNoteWindow: async (noteId: string, title: string, x: number, y: number) => {
     const label = `floating-note-${noteId}`;
+    // 把主窗口当前生效字体作为 URL 参数带给浮窗：浮窗 webview 的 localStorage 可能与主窗隔离，
+    // 单靠事件只覆盖"设置变更"时刻；创建时直接带过去可保证浮窗打开即用应用内统一字体。
+    let fontParam = '';
+    try {
+      const applied = document.body.style.fontFamily || '';
+      const m = applied.match(/^"([^"]+)"/);
+      if (m) fontParam = m[1];
+    } catch { /* ignore */ }
     // 统一走 window_manager 引擎：主线程安全创建 + 重试 + 坏窗自愈；复用（已存在）由引擎内部处理
-    const win = await ensureOverlayWindow(label, `index.html?floating=true&noteId=${encodeURIComponent(noteId)}`, {
+    const win = await ensureOverlayWindow(label, `index.html?floating=true&noteId=${encodeURIComponent(noteId)}${fontParam ? `&fontFamily=${encodeURIComponent(fontParam)}` : ''}`, {
       width: 480,
       height: 420,
       minWidth: 300,

@@ -27,10 +27,13 @@ export function escapeHtml(s: string): string {
 /** 渲染 markdown 为 HTML（含行内加粗/链接/行内代码/列表/表格/标题/代码块复制按钮）。 */
 export function renderMarkdown(content: string): string {
   if (!content) return '';
+  const hit = mdCache.get(content);
+  if (hit !== undefined) return hit;
+  let result: string;
   try {
     const html = marked.parse(content, { async: false }) as string;
     // 给每个 <pre> 包一层 + 追加复制按钮
-    return html.replace(
+    result = html.replace(
       /<pre><code[^>]*>([\s\S]*?)<\/code><\/pre>/g,
       (_, codeHtml: string) => {
         const text = codeHtml
@@ -44,9 +47,18 @@ export function renderMarkdown(content: string): string {
       },
     );
   } catch {
-    return escapeHtml(content);
+    result = escapeHtml(content);
   }
+  // 内容级缓存：长对话/笔记在流式增量重渲染时，历史消息的 marked 解析结果直接命中，
+  // 避免每次 setState 都把全部历史消息重新 parse（同步 marked 是长对话卡顿的主要来源）。
+  if (mdCache.size >= MD_CACHE_MAX) mdCache.clear();
+  mdCache.set(content, result);
+  return result;
 }
+
+// markdown 渲染结果缓存（内容 → HTML）。仅缓存，无副作用；容量封顶，防内存膨胀。
+const mdCache = new Map<string, string>();
+const MD_CACHE_MAX = 2000;
 
 // CSS 用 currentColor 与 var(--*) 继承父级气泡颜色，dark/light 通用。
 const MD_STYLES_ID = '__andy_md_styles__';
