@@ -33,11 +33,10 @@ pub(crate) fn is_deepseek_provider(cfg: &AiProfile) -> bool {
     cfg.base_url.to_lowercase().contains("deepseek")
 }
 
-/// 本地兼容服务（LM Studio / Ollama / llama.cpp 等本地端点）判定。
-/// LM Studio 的 reasoning_effort 只支持 on/off，发 high 会被服务端 WARN 并回退为 on。
-fn is_local_compat_provider(cfg: &AiProfile) -> bool {
-    let base = cfg.base_url.to_lowercase();
-    base.contains("localhost") || base.contains("127.0.0.1")
+/// reasoning_effort 被上游拒绝的判定：各端点取值集合不统一（LM Studio 新版为
+/// none/minimal/low/medium/high/xhigh，旧版为 on/off），发错会返回 400 并在正文标注该参数名。
+fn is_reasoning_effort_rejected(text: &str) -> bool {
+    text.contains("reasoning_effort")
 }
 
 /// 粗判提供商（用于用量统计分组）。优先看 base_url 域名，其次看模型名前缀。
@@ -295,10 +294,9 @@ pub async fn ai_chat(
     if thinking {
         // 思考模式：思维链通过 reasoning_content 返回（与 content 同级）。
         // 思考模式不支持 temperature / top_p（OpenAI o-series 直接报错，DeepSeek 忽略），故省略。
-        // reasoning_effort：OpenAI 兼容端点支持 low/medium/high；本地 GGUF（LM Studio）只支持
-        // on/off —— 发 high 会被服务端 WARN 回退为 on（且易让本地模型「反复思考良久」才回答），
-        // 故本地端点统一降级为 on。
-        body["reasoning_effort"] = serde_json::json!(if is_local_compat_provider(&cfg) { "on" } else { "high" });
+        // reasoning_effort：OpenAI 兼容端点统一发 high；端点取值集合不一致时由下方发送逻辑
+        // 按 400 响应自适应降级（去掉该字段重发），不在此处按 base_url 猜端点类型。
+        body["reasoning_effort"] = serde_json::json!("high");
         // DeepSeek 需显式 thinking 开关；OpenAI o-series 仅靠 reasoning_effort，多余字段会 400，
         // 故 thinking 块仅对 DeepSeek 附加。
         if is_deepseek_provider(&cfg) {
@@ -319,23 +317,52 @@ pub async fn ai_chat(
     }
 
     let client = reqwest::Client::new();
-    let resp = match client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            let msg = format!("请求失败: {}", e);
-            let _ = app.emit(
-                "ai-error",
-                serde_json::json!({ "requestId": request_id, "error": msg }),
-            );
-            return Err(msg);
+    // 自适应降级：reasoning_effort 的取值集合因端点/版本而异，发错会被直接 400 拒绝。
+    // 命中「400 + 正文点名 reasoning_effort」时摘掉该字段重发一次，交由服务端用模型默认思考策略，
+    // 从而不依赖 base_url 猜测端点类型（本地 LM Studio、中转站、各家 OpenAI 兼容层通吃）。
+    let mut degraded = false;
+    let resp = loop {
+        let sent = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await;
+        let r = match sent {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("请求失败: {}", e);
+                let _ = app.emit(
+                    "ai-error",
+                    serde_json::json!({ "requestId": request_id, "error": msg }),
+                );
+                return Err(msg);
+            }
+        };
+        // 成功，或已降级过（降级后仍失败则走下方统一错误上报，避免死循环）。
+        if r.status().is_success() || degraded {
+            break r;
         }
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::BAD_REQUEST && is_reasoning_effort_rejected(&text) {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("reasoning_effort");
+            }
+            degraded = true;
+            eprintln!(
+                "[ai_chat] reasoning_effort 被上游拒绝（{}），已摘除该字段重发一次",
+                cfg.model
+            );
+            continue;
+        }
+        let msg = format!("HTTP {}: {}", status, text);
+        let _ = app.emit(
+            "ai-error",
+            serde_json::json!({ "requestId": request_id, "error": msg }),
+        );
+        return Err(msg);
     };
 
     if !resp.status().is_success() {
