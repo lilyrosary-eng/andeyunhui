@@ -598,8 +598,30 @@ pub async fn overlay_window_get_or_create(
     static CACHE_SELF_HEALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     use std::sync::atomic::Ordering;
 
+    // 【复用前置检查】label 上已有健康窗时直接返回，绝不销毁重建。
+    // 为什么必须放在循环之前：启动期可能同时存在多条针对同一 label 的建窗链
+    // （插件加载即建 / 可见性事件 / 侧栏点击 / 渲染崩溃自愈）。旧实现每次都无条件
+    // 「先 destroy 再 build」，A 链刚 build 好的窗会被 B 链的预销毁干掉，五轮重试全败后
+    // 该窗凭空消失（典型现象：黄金棋盘浮岛启动时概率消失，只能重启恢复）。
+    // 健康判定与下方 build 后一致：取得到句柄且 scale_factor 可用。
+    {
+        let probe_app = app.clone();
+        let probe_label = label.clone();
+        let existing_healthy: bool = run_on_main_thread_result(&app, move || {
+            probe_app
+                .get_webview_window(&probe_label)
+                .map(|w| w.scale_factor().is_ok())
+                .unwrap_or(false)
+        })?;
+        if existing_healthy {
+            capsule_mark_alive(&label);
+            return Ok(label);
+        }
+    }
+
     for attempt in 1..=5 {
         // 每次重试前先清残留坏窗，确保真正重建而非被占用的 label 阻挡。
+        // （走到这里说明不存在健康窗：要么没有窗，要么是坏窗残留——后者正是要清掉的）
         // 在主线程取窗并销毁，避免命令线程克隆 WebviewWindow 的 Rc 竞态 UAF。
         let clear_app = app.clone();
         let clear_label = label.clone();

@@ -23,16 +23,23 @@
     resizable: false,
   };
 
-  // 每次打开都先销毁旧窗再重建，保证拿到的是全新可用窗体：
-  // 规避「渲染崩溃残留 / 卡死窗体被复用 / DComp 窗体销毁不彻底导致 getByLabel 命中僵尸窗」
-  // 这类“关闭后重开无效、必须重启软件”的问题。收起（collapse）只是隐藏，不影响此逻辑。
+  // 单飞（single-flight）：并发召唤共用同一次建窗。
+  // 启动期会有多条召唤链同时发生——插件加载即建、可见性事件、侧栏点击——它们各自
+  // 「先 destroy 再 create」时会互相拆台：A 刚 build 好，B 的 destroy 就把它干掉，
+  // 最终 5 次重试全败、胶囊凭空消失（需重启才恢复）。改为单飞后，后来的调用直接复用
+  // 在飞的那次创建，配合 ensureOverlayWindow「复用优先」语义，不会再有互拆。
+  // 注意：不再在入口做 destroy。停用场景由下方可见性分支与 destroy 钩子负责销毁，
+  // 重新启用时窗已不存在，自然走新建；健康窗一律复用（重建整个 WebView2 代价数秒）。
+  var inflight = null;
   function ensureCapsule() {
-    return hostApi
-      .invoke('overlay_window_destroy', { label: CAPSULE_LABEL })
-      .catch(function () { /* 旧窗不存在时忽略 */ })
-      .then(function () {
-        return hostApi.createFloatingWindow(CAPSULE_LABEL, CAPSULE_URL, PROFILE);
-      });
+    if (inflight) return inflight;
+    inflight = Promise.resolve(
+      hostApi.createFloatingWindow(CAPSULE_LABEL, CAPSULE_URL, PROFILE)
+    ).then(
+      function (w) { inflight = null; return w; },
+      function (e) { inflight = null; throw e; }
+    );
+    return inflight;
   }
   ensureCapsule().catch(function (e) {
     console.error('[黄金棋盘] 创建浮窗失败', e);
