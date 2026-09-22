@@ -1,6 +1,27 @@
 import { marked } from 'marked';
 
 /**
+ * Markdown 源码 → 预览 HTML（纯函数，可单测）。
+ *
+ * 关键修复：**不再把连续换行预处理成 `<br>`**。
+ * 旧实现 `content.replace(/\n{2,}/g, '<br>'.repeat(len))` 会把真实换行删掉，
+ * 「上一段\n\n## 标题」因此被拼成一行，`##` 不在行首，marked 只当普通段落文本，
+ * 于是空行之后的所有行首块级语法（标题 / 列表 / 引用 / 围栏代码）全部失效。
+ *
+ * 现方案把源码原样交给 marked（gfm + breaks）：
+ * - 块级语法交给 marked 按标准 Markdown 规则识别（真实换行就是它的行边界）；
+ * - 段内单个换行由 breaks 选项转 <br>，与编辑区逐行显示保持一致；
+ * - 段间空行的视觉留白改由预览容器 CSS（段落上下 margin，见 NotesEditor 预览区类名）承担。
+ *   取舍：连续 3 个以上空行会折叠成一段间距——按「块级语法正确优先、空行视觉次之」定。
+ *   之所以不走「只保留多余空行」的预处理：任何在源码里插入/删除换行的做法都会重新
+ *   破坏 marked 的行边界判断，风险远大于收益。
+ */
+export function renderMarkdownPreview(md: string): string {
+  if (!md) return '';
+  return marked.parse(md, { gfm: true, breaks: true, async: false }) as string;
+}
+
+/**
  * Markdown → TipTap 兼容 HTML（利用已有的 marked 库）
  * TipTap 的 setContent 接受 HTML，但只识别它 schema 内的元素。
  * marked 输出的是标准 HTML，TipTap 可解析其中的 h1-h6、p、strong、em、code、ul/ol/li、blockquote、img 等。
@@ -81,4 +102,60 @@ export function editorHtmlToMd(html: string): string {
   md = md.replace(/&#39;/g, "'");
 
   return md.trim();
+}
+
+/** 文本编辑指令的输入/输出：选区用 [selectionStart, selectionEnd) 表示 */
+export interface MarkdownEditState {
+  text: string;
+  selectionStart: number;
+  selectionEnd: number;
+}
+
+/**
+ * 用 Markdown 标记包裹选区（加粗 `**`、斜体 `*`、内联代码 `` ` ``、链接 `[]()`）。
+ * 未选中文字时插入 placeholder 并选中它（链接按钮用 URL 兜底），方便直接继续输入。
+ * 工具栏按钮改成「插入字面标记」而非富文本命令，编辑区因此始终是原始 Markdown。
+ */
+export function wrapMarkdownSelection(
+  state: MarkdownEditState,
+  before: string,
+  after: string,
+  placeholder = '',
+): MarkdownEditState {
+  const { text, selectionStart, selectionEnd } = state;
+  const inner = text.slice(selectionStart, selectionEnd) || placeholder;
+  return {
+    text: text.slice(0, selectionStart) + before + inner + after + text.slice(selectionEnd),
+    // 回填后选中被包裹的内容（不含标记），便于覆写占位文本
+    selectionStart: selectionStart + before.length,
+    selectionEnd: selectionStart + before.length + inner.length,
+  };
+}
+
+/**
+ * 给选区覆盖的每一行加行首标记（标题 `## `、无序列表 `- `、引用 `> `）。
+ * 空行跳过以免产生「只有标记没有内容」的碎块；行尾换行符保留，不影响后续块级语法识别。
+ */
+export function prefixMarkdownLines(
+  state: MarkdownEditState,
+  prefix: string,
+): MarkdownEditState {
+  const { text, selectionStart, selectionEnd } = state;
+  const lineStart = text.lastIndexOf('\n', Math.max(0, selectionStart - 1)) + 1;
+  // 选区恰好停在行尾换行符处时回退一格，避免把下一行也算进选区
+  const scanFrom = selectionEnd > lineStart && text[selectionEnd - 1] === '\n'
+    ? selectionEnd - 1
+    : selectionEnd;
+  const nl = text.indexOf('\n', scanFrom);
+  const lineEnd = nl === -1 ? text.length : nl + 1;
+  const block = text.slice(lineStart, lineEnd);
+  const nextBlock = block
+    .split('\n')
+    .map((line) => (line.trim() === '' ? line : prefix + line))
+    .join('\n');
+  return {
+    text: text.slice(0, lineStart) + nextBlock + text.slice(lineEnd),
+    selectionStart: lineStart,
+    selectionEnd: lineStart + nextBlock.length,
+  };
 }

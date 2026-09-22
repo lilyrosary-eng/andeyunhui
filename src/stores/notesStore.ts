@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api, type NoteInfo } from '@/lib/api';
 import { logger } from '@/lib/logger';
-import { marked } from 'marked';
+import { renderMarkdownPreview } from '@/core/notes/markdown';
 import { resolveLocalImagesInHtml } from '@/lib/localImage';
 import type { CSSProperties } from 'react';
 
@@ -74,7 +74,7 @@ interface NotesState {
 let autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
 // Markdown 渲染 rAF 句柄（每帧仅渲染最后一次，预览跟手）
 let renderFrame: number | undefined;
-// Markdown 渲染缓存：content（空行保留处理后）→ HTML。仅缓存最近一次结果；
+// Markdown 渲染缓存：content（原始 Markdown）→ HTML。仅缓存最近一次结果；
 // 输入未变时跳过 marked.parse（大笔记连续输入场景下，避免每次按键重复全量解析）。
 let mdRenderCacheSource: string | undefined;
 let mdRenderCacheHtml: string | undefined;
@@ -307,7 +307,9 @@ function scheduleAutoSave(
 }
 
 /** Markdown 渲染（rAF 去抖：每帧仅执行最后一次，预览跟手）
- *  缓存：对「空行保留处理后的源码」做 hash，源码未变则直接复用上次 HTML，
+ *  渲染规则见 renderMarkdownPreview：源码原样交给 marked，不再对连续空行做 <br> 预处理
+ *  （旧做法删掉了真实换行，导致空行之后的 `##`/列表/引用/围栏代码全部失效）。
+ *  缓存：对原始 Markdown 源码做比较，源码未变则直接复用上次 HTML，
  *  跳过 marked.parse 全量解析（大笔记连续输入时避免每次按键都重算）。
  */
 function scheduleMarkdownRender(
@@ -319,18 +321,13 @@ function scheduleMarkdownRender(
     renderFrame = undefined;
     const { content } = get();
     logger.notes.render(content?.length || 0);
-    // 保留空行：将连续 2+ 个 \n 按空行数转为等量 <br>，
-    // 避免 Markdown 段落折叠导致预览空行数与编辑器不一致。
-    const preserved = (content || '').replace(/\n{2,}/g, (match) =>
-      '<br>'.repeat(match.length),
-    );
     // 缓存命中：源码未变，跳过 marked.parse（仅仍需 resolve 图片——图片有独立 LRU 缓存）
     let html: string;
-    if (preserved === mdRenderCacheSource) {
+    if (content === mdRenderCacheSource) {
       html = mdRenderCacheHtml ?? '';
     } else {
-      html = await marked.parse(preserved, { gfm: true, breaks: true });
-      mdRenderCacheSource = preserved;
+      html = renderMarkdownPreview(content || '');
+      mdRenderCacheSource = content;
       mdRenderCacheHtml = html;
     }
     // 解析 localimg:// 占位引用为 data URL（图片不内联进笔记文本，渲染时再读取，带缓存）

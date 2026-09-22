@@ -1,5 +1,5 @@
-import { useRef, useCallback, useState, useEffect, lazy, Suspense, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText, Sparkles, Loader2 } from 'lucide-react';
+import { useRef, useCallback, useState, useEffect } from 'react';
+import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText, Sparkles, Loader2, Eye } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { api } from '@/lib/api';
@@ -8,16 +8,17 @@ import { useAppStore } from '@/stores/appStore';
 import { useI18n } from '@/lib/i18n';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
-import type { RichTextEditorHandle } from './RichTextEditor';
+import { MarkdownSourceEditor, type MarkdownSourceEditorHandle } from './MarkdownSourceEditor';
 import { EVENTS } from '@/core/events/schema';
 
-// 富文本编辑器（TipTap + prosemirror + 转换逻辑，约 300KB+）改为懒加载：
-// 首屏只加载主程序，打开笔记时才按需拉取该 chunk，明显加快启动速度。
-const LazyRichTextEditor = lazy(() => import('./RichTextEditor').then(m => ({ default: m.RichTextEditor })));
+// 编辑区为「原始 Markdown 文本编辑」（受控 textarea），不再加载 TipTap 富文本编辑器，
+// 因此原先 300KB+ 的懒加载 chunk 已随 RichTextEditor 一并移除。
 
-type EditorMode = 'split' | 'edit-only';
+type EditorMode = 'split' | 'edit-only' | 'preview-only';
 
 const EDITOR_MODE_KEY = 'editor_view_mode';
+
+const EDITOR_MODES: EditorMode[] = ['split', 'edit-only', 'preview-only'];
 
 export function NotesEditor() {
   const { t: tr } = useI18n();
@@ -31,13 +32,16 @@ export function NotesEditor() {
   const onTagsChange = useNotesStore(s => s.saveTags);
   const wordWrap = useAppStore(s => s.wordWrap);
 
-  const editorRef = useRef<RichTextEditorHandle | null>(null);
-  // 用于触发 onUpdate 之外的 content 同步（如外部修改）
+  // 编辑区指令句柄（插入 Markdown 标记 / 回填润色结果）
+  const editorRef = useRef<MarkdownSourceEditorHandle | null>(null);
+  // content 的最新值镜像（拖拽/导入等异步流程中直接追加文本，避免闭包读到旧值）
   const contentRef = useRef(content);
   contentRef.current = content;
 
   const [editorMode, setEditorMode] = useState<EditorMode>(() => {
-    return (localStorage.getItem(EDITOR_MODE_KEY) as EditorMode) || 'split';
+    // 校验持久化值，避免历史脏数据导致三栏全不渲染
+    const saved = localStorage.getItem(EDITOR_MODE_KEY) as EditorMode | null;
+    return saved && EDITOR_MODES.includes(saved) ? saved : 'split';
   });
 
   const handleSetMode = useCallback((mode: EditorMode) => {
@@ -45,35 +49,26 @@ export function NotesEditor() {
     localStorage.setItem(EDITOR_MODE_KEY, mode);
   }, []);
 
-  // ---- 工具栏：TipTap 编辑器命令 ----
-  const getEditor = () => editorRef.current?.editor;
-
-  const handleBold = useCallback(() => getEditor()?.chain().focus().toggleBold().run(), []);
-  const handleItalic = useCallback(() => getEditor()?.chain().focus().toggleItalic().run(), []);
-  const handleCode = useCallback(() => getEditor()?.chain().focus().toggleCode().run(), []);
+  // ---- 工具栏：在光标处插入字面 Markdown 标记 ----
+  const handleBold = useCallback(() => editorRef.current?.wrapSelection('**', '**'), []);
+  const handleItalic = useCallback(() => editorRef.current?.wrapSelection('*', '*'), []);
+  const handleCode = useCallback(() => editorRef.current?.wrapSelection('`', '`'), []);
+  const handleList = useCallback(() => editorRef.current?.prefixLines('- '), []);
 
   const handleLink = useCallback(() => {
-    const editor = getEditor();
-    if (!editor) return;
-    const existing = editor.getAttributes('link').href;
-    const url = window.prompt(existing ? tr('notesEditor.editLinkUrl') : tr('notesEditor.enterLinkUrl'), existing || 'https://');
-    if (url === null) return;
-    if (url === '' || url === existing) {
-      editor.chain().focus().unsetLink().run();
-    } else {
-      editor.chain().focus().setLink({ href: url }).run();
-    }
+    const url = window.prompt(tr('notesEditor.enterLinkUrl'), 'https://');
+    if (url === null || url.trim() === '') return;
+    // 有选中文字则作为链接文本，未选中则用 URL 兜底（选区被整体替换为 [文本](URL)）
+    editorRef.current?.wrapSelection('[', `](${url})`, url);
   }, [tr]);
 
-  const handleList = useCallback(() => getEditor()?.chain().focus().toggleBulletList().run(), []);
-
-  // 键盘快捷键（Ctrl+B/I/K）
+  // 键盘快捷键（Ctrl+B/I/K）：仅在标题输入框或 Markdown 编辑区内生效
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const isCtrl = e.ctrlKey || e.metaKey;
       if (!isCtrl) return;
       const target = e.target as HTMLElement;
-      if (target.closest('.ProseMirror') || target.tagName === 'INPUT') {
+      if (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') {
         if (e.key === 'b' || e.key === 'i' || e.key === 'k') {
           e.preventDefault();
           if (e.key === 'b') handleBold();
@@ -85,13 +80,6 @@ export function NotesEditor() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [handleBold, handleItalic, handleLink]);
-
-  // 整块删除图片：TipTap 中图片是原子节点，Backspace / Delete 会自然删除整块节点。
-  // 此处保留键盘钩子仅用于特殊场景（如需要连带删除图片前后空行）
-  const handleEditorKeyDown = useCallback((_e: ReactKeyboardEvent) => {
-    // TipTap 的 Image 节点是原子的，Backspace/Delete 自然删除整张图。
-    // 保留此钩子为空，方便后续扩展。
-  }, []);
 
   // 标签编辑状态
   const [tagInput, setTagInput] = useState('');
@@ -111,7 +99,7 @@ export function NotesEditor() {
 
   const unusedTags = allTags.filter(t => !tags.includes(t));
 
-  // 万能拖拽功能（在 RichTextEditor 容器上）
+  // 万能拖拽功能（在编辑卡片容器上）
   const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     if ((window as unknown as Record<string, unknown>).__andengDragging) return;
@@ -214,10 +202,9 @@ export function NotesEditor() {
   const [polishing, setPolishing] = useState(false);
 
   const handleAiPolish = useCallback(async () => {
-    const editor = getEditor();
-    if (!editor || polishing) return;
-    const { from, to, empty } = editor.state.selection;
-    const selectedText = empty ? '' : editor.state.doc.textBetween(from, to, '\n');
+    if (polishing) return;
+    const selection = editorRef.current?.getSelection();
+    const selectedText = selection?.text ?? '';
     if (!selectedText.trim()) {
       alert(tr('notesEditor.polishSelectFirst'));
       return;
@@ -294,8 +281,8 @@ export function NotesEditor() {
     }
     // 剥离可能残留的 markdown 代码围栏
     result = result.replace(/^\s*```[^\n]*\n/, '').replace(/\n```\s*$/, '').trim();
-    // 用润色结果替换原选区
-    editor.chain().focus().insertContentAt({ from, to }, result).run();
+    // 用润色结果替换原选区（回填到原始 Markdown 文本）
+    editorRef.current?.replaceSelection(result);
   }, [polishing, tr]);
 
   const toolbarBtnClass = 'btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200 hover:bg-black/5 dark:hover:bg-white/5 transition-colors';
@@ -334,6 +321,17 @@ export function NotesEditor() {
           >
             <Maximize2 size={16} />
           </button>
+          <button
+            onClick={() => handleSetMode('preview-only')}
+            className={`btn-press p-1.5 rounded-md transition-all duration-200 ${
+              editorMode === 'preview-only'
+                ? 'bg-[var(--element-bg)] text-white shadow-sm'
+                : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'
+            }`}
+            title={tr('notesEditor.previewLabel')}
+          >
+            <Eye size={16} />
+          </button>
         </div>
       </div>
 
@@ -359,31 +357,33 @@ export function NotesEditor() {
         </datalist>
       </div>
 
-      {/* 格式化工具栏 */}
-      <div className="flex items-center gap-1 px-2 py-1.5 bg-white/50 dark:bg-stone-800/50 backdrop-blur-sm rounded-xl border border-white/50 dark:border-stone-600/30 flex-shrink-0 w-fit">
-        <button onClick={handleBold} className={toolbarBtnClass} title={tr('notesEditor.bold')}>
-          <Bold size={16} />
-        </button>
-        <button onClick={handleItalic} className={toolbarBtnClass} title={tr('notesEditor.italic')}>
-          <Italic size={16} />
-        </button>
-        <button onClick={handleLink} className={toolbarBtnClass} title={tr('notesEditor.link')}>
-          <Link2 size={16} />
-        </button>
-        <button onClick={handleCode} className={toolbarBtnClass} title={tr('notesEditor.inlineCode')}>
-          <Code size={16} />
-        </button>
-        <button onClick={handleList} className={toolbarBtnClass} title={tr('notesEditor.bulletList')}>
-          <List size={16} />
-        </button>
-        <div className="w-px h-4 bg-neutral-200/50 dark:bg-stone-600/50 mx-0.5" />
-        <button onClick={handleAiPolish} disabled={polishing} className={toolbarBtnClass} title={tr('notesEditor.aiPolish')}>
-          {polishing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
-        </button>
-        <button onClick={handleImportDocument} className={toolbarBtnClass} title={tr('notesEditor.importDoc')}>
-          <FileText size={16} />
-        </button>
-      </div>
+      {/* 格式化工具栏：仅预览模式下编辑区不可见，工具栏隐藏（插入标记无落点） */}
+      {editorMode !== 'preview-only' && (
+        <div className="flex items-center gap-1 px-2 py-1.5 bg-white/50 dark:bg-stone-800/50 backdrop-blur-sm rounded-xl border border-white/50 dark:border-stone-600/30 flex-shrink-0 w-fit">
+          <button onClick={handleBold} className={toolbarBtnClass} title={tr('notesEditor.bold')}>
+            <Bold size={16} />
+          </button>
+          <button onClick={handleItalic} className={toolbarBtnClass} title={tr('notesEditor.italic')}>
+            <Italic size={16} />
+          </button>
+          <button onClick={handleLink} className={toolbarBtnClass} title={tr('notesEditor.link')}>
+            <Link2 size={16} />
+          </button>
+          <button onClick={handleCode} className={toolbarBtnClass} title={tr('notesEditor.inlineCode')}>
+            <Code size={16} />
+          </button>
+          <button onClick={handleList} className={toolbarBtnClass} title={tr('notesEditor.bulletList')}>
+            <List size={16} />
+          </button>
+          <div className="w-px h-4 bg-neutral-200/50 dark:bg-stone-600/50 mx-0.5" />
+          <button onClick={handleAiPolish} disabled={polishing} className={toolbarBtnClass} title={tr('notesEditor.aiPolish')}>
+            {polishing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+          </button>
+          <button onClick={handleImportDocument} className={toolbarBtnClass} title={tr('notesEditor.importDoc')}>
+            <FileText size={16} />
+          </button>
+        </div>
+      )}
 
       {/* 编辑卡 */}
       <div
@@ -391,31 +391,31 @@ export function NotesEditor() {
         onDrop={handleDrop}
         onDragOver={handleDragOver}
       >
-        {/* 左侧：富文本编辑区（min-w-0：允许收缩，宽内容在栏内滚动而非把两栏撑开挤压） */}
-        <div className={`flex-1 flex flex-col min-h-0 min-w-0 ${editorMode === 'split' ? 'border-r border-neutral-200/30 dark:border-stone-700/30' : ''}`}>
-          <div className="px-4 py-3 border-b border-neutral-200/30 flex-shrink-0 dark:border-stone-700/30">
-            <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">{tr('notesEditor.editLabel')}</span>
-          </div>
-          <Suspense fallback={<div className="flex-1 flex items-center justify-center text-sm text-neutral-400 dark:text-stone-500">{tr('notesEditor.editorLoading')}</div>}>
-            <LazyRichTextEditor
-              editorRef={editorRef}
+        {/* 左侧：原始 Markdown 编辑区（仅预览模式隐藏；min-w-0：允许收缩，宽内容在栏内滚动而非把两栏撑开挤压） */}
+        {editorMode !== 'preview-only' && (
+          <div className={`flex-1 flex flex-col min-h-0 min-w-0 ${editorMode === 'split' ? 'border-r border-neutral-200/30 dark:border-stone-700/30' : ''}`}>
+            <div className="px-4 py-3 border-b border-neutral-200/30 flex-shrink-0 dark:border-stone-700/30">
+              <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">{tr('notesEditor.editLabel')}</span>
+            </div>
+            <MarkdownSourceEditor
+              ref={editorRef}
               content={content}
               onContentChange={onContentChange}
               placeholder={tr('notesEditor.contentPlaceholder')}
               wordWrap={wordWrap}
-              onKeyDown={handleEditorKeyDown}
             />
-          </Suspense>
-        </div>
+          </div>
+        )}
 
-        {/* 右侧：实时预览区（仅双栏模式，min-w-0 + 横向溢出受控，宽内容不挤压编辑区） */}
-        {editorMode === 'split' && (
+        {/* 右侧：实时预览区（仅编辑模式隐藏，min-w-0 + 横向溢出受控，宽内容不挤压编辑区）
+            段落留白：源码原样交给 marked 后空行会被折叠为段落边界，故用 [&_p]:my-* 复现视觉空行 */}
+        {editorMode !== 'edit-only' && (
           <div className="flex-1 flex flex-col min-h-0 min-w-0">
             <div className="px-4 py-3 border-b border-neutral-200/30 flex-shrink-0 dark:border-stone-700/30">
               <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">{tr('notesEditor.previewLabel')}</span>
             </div>
             <div
-              className="flex-1 w-full h-full p-5 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-neutral-700 leading-7 dark:text-stone-300 [&_p]:my-0 [&_p]:leading-7 [&_img]:max-w-full [&_img]:h-auto [&_pre]:overflow-x-auto [&_table]:max-w-full [&_td]:break-words"
+              className="flex-1 w-full h-full p-5 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-neutral-700 leading-7 dark:text-stone-300 [&_p]:my-2 [&_p]:leading-7 [&_img]:max-w-full [&_img]:h-auto [&_pre]:overflow-x-auto [&_table]:max-w-full [&_td]:break-words"
               dangerouslySetInnerHTML={{ __html: htmlContent }}
             />
           </div>
