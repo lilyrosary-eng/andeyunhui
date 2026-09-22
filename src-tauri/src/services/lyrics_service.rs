@@ -11,6 +11,19 @@ use lofty::tag::ItemKey;
 /// 歌词窗口标签
 pub const LYRICS_WINDOW_LABEL: &str = "lyrics-widget";
 
+/// 歌词窗口可见性变化事件。
+///
+/// 背景：桌面歌词的开关有两个入口——音乐模块播放栏（主窗）与黄金棋盘浮岛（独立 webview）。
+/// 两个 webview 的前端 store 互不相通，若各自维护一份「开着/关着」的内存态必然不同步
+/// （浮岛开窗后播放栏仍显示关、歌词数据也没人推）。故以「后端窗口真实可见性」为唯一事实源：
+/// show/hide/空闲销毁都广播本事件，两端只做监听与收敛，不再自己猜状态。
+fn emit_visibility(app: &AppHandle, visible: bool) {
+    let _ = app.emit(
+        "lyrics-widget-visibility-changed",
+        serde_json::json!({ "visible": visible }),
+    );
+}
+
 /// 歌词窗口配置持久化
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LyricsWidgetConfig {
@@ -120,6 +133,7 @@ pub async fn show_lyrics_widget(app: AppHandle) -> Result<(), String> {
             move || create_lyrics_widget(&a).map_err(|e| e.to_string())
         },
     )?;
+    let mut shown = false;
     if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
         // 重新定位到配置坐标：创建时窗口先置于离屏 (-4000,-4000)，若 WebView 初始化把
         // set_position 覆盖/未生效，窗口会永久停在离屏坐标，导致「歌词有数据但看不到」。
@@ -135,7 +149,12 @@ pub async fn show_lyrics_widget(app: AppHandle) -> Result<(), String> {
         let _ = window.set_position(tauri::PhysicalPosition::new(tx as i32, ty as i32));
         // 仅 show，不重复设置 always_on_top（创建时已设置，重复调用会触发 DWM 重组合）
         window.show().map_err(|e| format!("显示歌词窗口失败: {}", e))?;
+        shown = true;
         eprintln!("[Lyrics] 歌词窗口已显示，定位到 ({}, {})", tx, ty);
+    }
+    // 真正显示成功才广播：创建失败时不该让两端误以为已打开
+    if shown {
+        emit_visibility(&app, true);
     }
     Ok(())
 }
@@ -181,6 +200,8 @@ fn ensure_idle_reaper(app: &AppHandle) {
                 if !w.is_visible().unwrap_or(true) {
                     let _ = w.destroy();
                     LYRICS_HIDDEN_AT.store(0, Ordering::SeqCst);
+                    // 空闲销毁同样要让两端开关归位，否则浮岛按钮会一直亮着（窗其实已没了）
+                    emit_visibility(&app_main, false);
                     eprintln!("[Lyrics] 空闲超时，歌词窗口已销毁（释放内存，下次召唤重新懒建）");
                 }
             } else {
@@ -207,7 +228,18 @@ pub fn hide_lyrics_widget(app: AppHandle) -> Result<(), String> {
         ensure_idle_reaper(&app);
         eprintln!("[Lyrics] 歌词窗口已隐藏（常驻保留；10 分钟未召唤将自动销毁释放内存）");
     }
+    // 无论窗口是否存在都广播 false：让浮岛/播放栏两端的开关状态收敛（幂等）
+    emit_visibility(&app, false);
     Ok(())
+}
+
+/// 查询歌词窗口当前是否可见：浮岛按钮与播放栏开关共用的初始状态来源。
+#[tauri::command]
+pub fn get_lyrics_widget_visible(app: AppHandle) -> Result<bool, String> {
+    Ok(app
+        .get_webview_window(LYRICS_WINDOW_LABEL)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false))
 }
 
 /// 设置歌词窗口锁定状态（true = 窗口级鼠标穿透：整个浮窗不接收鼠标，像桌宠一样）

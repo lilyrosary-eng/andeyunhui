@@ -408,14 +408,31 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
 
   // 歌词滚动同步已下沉到 lyricsSync 单例（见 lyricsSync.ts），此处不再处理。
 
-  // 曲目切换时加载歌词（仅可见时）；实际滚动 emit 由 lyricsSync 单例驱动
+  // 曲目切换 / 歌词窗口打开时加载歌词（仅可见时）；实际滚动 emit 由 lyricsSync 单例驱动。
+  // 开关有两个入口（本面板按钮 / 黄金棋盘浮岛按钮），二者都收敛为「可见性变化」，
+  // 故数据侧准备统一放在这里：开启单例 emit + 下发样式 + 拉取歌词，避免两个入口各做一半。
   useEffect(() => {
-    if (!lyricsVisible) return;
+    if (!lyricsVisible) {
+      lyricsSync.setVisible(false);
+      lyricsSync.clear();
+      return;
+    }
+    lyricsSync.setVisible(true);
     lyricsSync.clear();
     hostApi.emit('lyrics-update', { currentLine: '', nextLine: '' }).catch(() => {});
+    // 样式（字号/是否显示下一行）延后下发：窗口刚 show 时前端可能还没挂载监听
+    const styleTimer = setTimeout(() => {
+      const savedFontSize = localStorage.getItem('music_lyrics_font_size');
+      const savedShowNextLine = localStorage.getItem('music_lyrics_show_next_line');
+      hostApi.emit('lyrics-style-update', {
+        fontSize: savedFontSize ? parseInt(savedFontSize, 10) : undefined,
+        showNextLine: savedShowNextLine !== null ? savedShowNextLine === 'true' : undefined,
+      }).catch(() => {});
+    }, 300);
     const skipOnline = localStorage.getItem('music_online_lyrics') === 'false';
     const localFirst = localStorage.getItem('music_local_lrc_first') === 'true';
     loadLyricsFor(track, skipOnline, localFirst);
+    return () => clearTimeout(styleTimer);
   }, [track.filePath, lyricsVisible]);
 
   const handleSeek = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -451,40 +468,17 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
     return () => document.removeEventListener('mousedown', onDoc);
   }, [showQuality]);
 
-  // 歌词窗口开关
+  // 歌词窗口开关：只负责请求后端改变窗口可见性。
+  // 状态收敛与歌词数据准备统一由 lyrics-widget-visibility-changed 事件驱动
+  // （同一链路也服务黄金棋盘浮岛按钮），两个入口不再各说各话。
   const handleToggleLyrics = useCallback(async () => {
-    const newVisible = !lyricsVisible;
-    setLyricsVisible(newVisible);
-    if (newVisible) {
-      // 先开启单例同步，确保即便本组件随后被卸载，浮动窗口仍持续滚动
-      lyricsSync.setVisible(true);
+    try {
+      await hostApi.invoke(lyricsVisible ? 'hide_lyrics_widget' : 'show_lyrics_widget');
+    } catch (err) {
       // 召唤失败不再静默（懒建 5 次重试仍失败会抛错，静默吞掉会让用户以为「点了没反应」）
-      try {
-        await hostApi.invoke('show_lyrics_widget');
-      } catch (err) {
-        console.error('[Music] 显示桌面歌词窗口失败:', err);
-        lyricsSync.setVisible(false);
-        setLyricsVisible(false);
-        return;
-      }
-      setTimeout(() => {
-        const savedFontSize = localStorage.getItem('music_lyrics_font_size');
-        const savedShowNextLine = localStorage.getItem('music_lyrics_show_next_line');
-        hostApi.emit('lyrics-style-update', {
-          fontSize: savedFontSize ? parseInt(savedFontSize, 10) : undefined,
-          showNextLine: savedShowNextLine !== null ? savedShowNextLine === 'true' : undefined,
-        }).catch(() => {});
-      }, 300);
-      hostApi.emit('lyrics-update', { currentLine: '', nextLine: '' }).catch(() => {});
-      const skipOnline = localStorage.getItem('music_online_lyrics') === 'false';
-      const localFirst = localStorage.getItem('music_local_lrc_first') === 'true';
-      loadLyricsFor(track, skipOnline, localFirst);
-    } else {
-      lyricsSync.setVisible(false);
-      lyricsSync.clear();
-      await hostApi.invoke('hide_lyrics_widget').catch(() => {});
+      console.error('[Music] 切换桌面歌词窗口失败:', err);
     }
-  }, [lyricsVisible, track]);
+  }, [lyricsVisible]);
 
   // 锁定/解锁歌词窗口
   const handleToggleLock = useCallback(async () => {
@@ -504,6 +498,24 @@ export function PlayerBar({ track, isPlaying, onTogglePlay, onPrev, onNext, volu
       setLyricsLocked(e.payload.locked);
     });
     return () => { unlisten.then((fn) => fn()).catch(() => {}); };
+  }, []);
+
+  // 歌词窗口可见性：后端窗口真实可见性是唯一事实源。
+  // 初始读一次以免刷新/切模块后状态错位；之后由事件驱动——这样黄金棋盘浮岛开关窗时，
+  // 本面板按钮与歌词数据推送都会跟着收敛。
+  useEffect(() => {
+    let alive = true;
+    hostApi.invoke<boolean>('get_lyrics_widget_visible')
+      .then((v) => { if (alive) setLyricsVisible(!!v); })
+      .catch(() => {});
+    const unlisten = hostApi.listen<{ visible: boolean }>('lyrics-widget-visibility-changed', (e) => {
+      if (!alive) return;
+      setLyricsVisible(!!e.payload?.visible);
+    });
+    return () => {
+      alive = false;
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
   }, []);
 
   // 远程封面（http/https，如网易云直链）直接原样使用，不走 convertFileSrc

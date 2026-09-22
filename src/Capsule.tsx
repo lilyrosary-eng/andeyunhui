@@ -317,6 +317,10 @@ export default function Capsule() {
   // 若走后端固定第一个就会“只能召唤一个”，故在此自持索引轮转，多收藏可连续打开不同笔记窗口。
   const favListRef = useRef<string[] | null>(null);
   const favIdxRef = useRef(0);
+  // —— 桌面歌词窗口可见性（与音乐模块播放栏共用同一事实源）——
+  // 浮岛是独立 webview，主窗前端 store 不共享，故以「后端窗口真实可见性 + 广播事件」收敛状态：
+  // 无论从浮岛还是播放栏开关，两端按钮高亮都会同步。
+  const [lyricsVisible, setLyricsVisible] = useState(false);
   // —— 接收请求 / toast（从 capsuleStore 订阅）——
   const receiveReq = useCapsuleStore((s) => s.receiveReq);
   const toast = useCapsuleStore((s) => s.toast);
@@ -515,6 +519,21 @@ export default function Capsule() {
     unsubs.push(useCapsuleStore.getState().initReceiveListeners());
     return () => unsubs.forEach((f) => f());
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 桌面歌词窗口可见性：初始读一次 + 监听广播事件，与音乐模块播放栏双向同步
+  useEffect(() => {
+    let alive = true;
+    invoke<boolean>('get_lyrics_widget_visible')
+      .then((v) => { if (alive) setLyricsVisible(!!v); })
+      .catch(() => {});
+    const unlisten = listen<{ visible: boolean }>('lyrics-widget-visibility-changed', (e) => {
+      if (alive) setLyricsVisible(!!e.payload?.visible);
+    });
+    return () => {
+      alive = false;
+      unlisten.then((f) => f()).catch(() => {});
+    };
   }, []);
 
   // 按需上屏一次（暂停轮询态下内容变化时使用）
@@ -1014,30 +1033,25 @@ export default function Capsule() {
                   <button onClick={(e) => { e.stopPropagation(); smtcControl('next'); }} disabled={!play?.can_next} title={t('capsule.next')} style={{ ...btnBase, width: 34, height: 34, opacity: play?.can_next ? 1 : 0.4 }}>
                     <IconNext />
                   </button>
-{/* 桌面歌词 */}
+{/* 桌面歌词：状态由后端可见性事件驱动（见上方 effect），与音乐模块播放栏同一个事实源 */}
                   <button
                     onClick={async (e) => {
                       e.stopPropagation();
                       try {
-                        const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
-                        const win = await WebviewWindow.getByLabel('lyrics-widget');
-                        if (win) {
-                          const visible = await win.isVisible();
-                          if (visible) {
-                            await invoke('hide_lyrics_widget');
-                          } else {
-                            await invoke('show_lyrics_widget');
-                          }
-                        } else {
-                          await invoke('show_lyrics_widget');
-                        }
+                        await invoke(lyricsVisible ? 'hide_lyrics_widget' : 'show_lyrics_widget');
                       } catch (err) {
                         console.error('[Capsule] 歌词窗口操作失败:', err);
                       }
                     }}
-                    style={{ ...btnBase, width: 34, height: 34, color: '#f2f2f4', background: 'rgba(255,255,255,0.06)' }}
+                    style={{
+                      ...btnBase,
+                      width: 34,
+                      height: 34,
+                      color: lyricsVisible ? '#e6c35c' : '#f2f2f4',
+                      background: lyricsVisible ? 'rgba(230,195,92,0.18)' : 'rgba(255,255,255,0.06)',
+                    }}
                     onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.14)')}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = lyricsVisible ? 'rgba(230,195,92,0.18)' : 'rgba(255,255,255,0.06)')}
                     title={t('capsule.action.lyrics')}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

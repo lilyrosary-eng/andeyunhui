@@ -43,7 +43,10 @@ export const lyricModeStore = {
 
 let lines: LyricLine[] = [];
 let emitting = false;
-let lastText = '';
+// 去重键：原文 + 翻译/罗马音一起参与比较。
+// 只比原文（曾经的 lastText）会漏掉「同一行但副行内容变了」的情况——典型是切换「译/音」模式：
+// 原文没变，curSub 却应当立刻换成译文，结果桌面歌词要等到下一行才生效。
+let lastKey = '';
 // 节流：progress 事件约 250ms 一次，但 burst 时可能更频繁。
 // 限制 emit 频率为 150ms 一次，防止 IPC 通道堵塞。
 let lastEmitTime = 0;
@@ -82,8 +85,10 @@ function computeAndEmit(): void {
     nxtSub = nxt?.romaji ?? '';
   }
 
-  if (curText !== lastText) {
-    lastText = curText;
+  // 四元组一起比对：任一变化（换行、译文/罗马音切换、翻译异步挂载完成）都要重发
+  const key = `${curText}\u0000${nxtText}\u0000${curSub}\u0000${nxtSub}`;
+  if (key !== lastKey) {
+    lastKey = key;
     // 节流：距上次 emit 不足 150ms 则延迟补发
     const now = Date.now();
     if (now - lastEmitTime >= 150) {
@@ -103,6 +108,13 @@ function computeAndEmit(): void {
 // 订阅一次，常驻于应用生命周期
 musicPlayer.on('progress', () => computeAndEmit());
 
+// 模式切换（译/音/关）不改变原文，必须主动重置去重键并重算，
+// 否则桌面歌词会停留在切换前的副行内容，直到下一行才刷新。
+lyricModeStore.subscribe(() => {
+  lastKey = '';
+  computeAndEmit();
+});
+
 export const lyricsSync = {
   setLines(next: LyricLine[]): void {
     // 关键：桌面歌词 emit 前对每行做「内嵌翻译拆分」。
@@ -117,17 +129,17 @@ export const lyricsSync = {
       if (sp.translation) return { ...ln, text: sp.orig, translation: sp.translation };
       return ln;
     });
-    lastText = '';
+    lastKey = '';
     computeAndEmit();
   },
   setVisible(v: boolean): void {
     emitting = v;
-    lastText = '';
+    lastKey = '';
     if (v) computeAndEmit();
   },
   clear(): void {
     lines = [];
-    lastText = '';
+    lastKey = '';
     if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
   },
   isVisible(): boolean {

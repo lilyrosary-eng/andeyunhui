@@ -255,7 +255,7 @@ export function LyricsWidget() {
       cancelled = true;
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
     };
-  }, [fontSize, showNextLine, currentLine, nextLine]);
+  }, [fontSize, showNextLine, currentLine, nextLine, currentSub, nextSub]);
 
   return (
     <div
@@ -283,8 +283,22 @@ export function LyricsWidget() {
         >
           {currentLine || '\u00A0'}
         </div>
+        {/* 当前行翻译/音译：必须随当前行字号缩放并共用当前行的字重与描边，
+            否则会退化成"普通行"小字（此前用 0.75em 相对的是容器默认 16px，
+            与用户设置的字号脱钩）。它属于当前行的一部分，故不再走次级行样式。 */}
         {currentSub && (
-          <div style={{ fontSize: '0.75em', opacity: 0.7, marginTop: 4, color: '#ffffff', textShadow: '0 0 6px rgba(0,0,0,0.7)' }}>
+          <div
+            className="text-center leading-tight px-4 transition-all duration-300"
+            style={{
+              fontSize: `${Math.round(fontSize * 0.72)}px`,
+              fontWeight: 600,
+              color: '#ffffff',
+              opacity: 0.85,
+              marginTop: 4,
+              textShadow: '0 0 6px rgba(0,0,0,0.8), 0 0 12px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.5)',
+              WebkitTextStroke: '0.5px rgba(0,0,0,0.25)',
+            }}
+          >
             {currentSub}
           </div>
         )}

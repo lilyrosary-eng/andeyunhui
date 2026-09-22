@@ -33,7 +33,11 @@ export const EVENTS = {
   migration: { started: 'migration-started', done: 'migration-done', progress: 'migration-progress' },
   fileSearch: { indexProgress: 'fs-index-progress' },
   smtc: { diag: 'smtc-diag', control: 'smtc-control' },
-  lyrics: { update: 'lyrics-update', styleUpdate: 'lyrics-style-update', lockChanged: 'lyrics-lock-changed' },
+  lyrics: {
+    update: 'lyrics-update', styleUpdate: 'lyrics-style-update', lockChanged: 'lyrics-lock-changed',
+    // 歌词窗口真实可见性：后端为唯一事实源，主面板播放栏与黄金棋盘浮岛按钮据此双向同步
+    visibilityChanged: 'lyrics-widget-visibility-changed',
+  },
   openWith: { files: 'open-with-files' },
   tauri: { error: 'tauri://error' },
   chatStream: {
@@ -89,6 +93,7 @@ export const EVENT_PAYLOAD_KEYS: Record<string, string> = {
   'lyrics-update': '{ currentLine: string; nextLine: string; currentSub?: string; nextSub?: string }',
   'lyrics-style-update': '{ fontSize?: number; showNextLine?: boolean }',
   'lyrics-lock-changed': '{ locked: boolean }',
+  'lyrics-widget-visibility-changed': '{ visible: boolean }',
   'floating-note-opened': 'string（noteId）',
   'floating-note-closed': '{ noteId: string }',
   'plugin-reload': 'string（pluginId）',
