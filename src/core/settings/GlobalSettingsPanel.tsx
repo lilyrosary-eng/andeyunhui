@@ -306,11 +306,12 @@ export function GlobalSettingsPanel() {
   const [deskpetManifest, setDeskpetManifest] = useState<PluginManifest | null>(null);
   const deskpetHot = (window as unknown as { __pluginHot__?: { load: (m: PluginManifest) => Promise<void>; unload: (id: string) => void } }).__pluginHot__;
 
-  // ---- 茑萝 RAG 模块：默认不在侧栏展示（manifest.visible=false，作为内置功能），由本开关控制显隐 ----
+  // ---- 茑萝 RAG 模块：插件默认随启动加载（manifest.visible=true），本开关仅控制是否在「茑萝」侧栏列表展示；
+  // 默认开启，用户关掉后以存储值 '0' 为准（重启仍关闭）----
   const setActiveModule = useAppStore((s) => s.setActiveModule);
   const activeModule = useAppStore((s) => s.activeModule);
   const [ragVisible, setRagVisible] = useState<boolean>(() => {
-    return storage.getString(KEYS.niaoluo.ragVisible.key, '0') === '1';
+    return storage.getString(KEYS.niaoluo.ragVisible.key, '1') === '1';
   });
   const toggleRagModule = (val: boolean) => {
     setRagVisible(val);
@@ -1065,7 +1066,7 @@ export function GlobalSettingsPanel() {
                 </div>
                 <div className="space-y-2 text-sm">
                   <p className="text-neutral-600 dark:text-stone-300">安得云荟</p>
-                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.version', { v: '2.4.0' })}</p>
+                  <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.version', { v: '2.4.1' })}</p>
                   <p className="text-neutral-500 dark:text-stone-400">{t('settings.about.author')}</p>
                 </div>
               </section>
