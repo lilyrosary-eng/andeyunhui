@@ -80,6 +80,7 @@ fn is_supported_file_assoc(arg: &str) -> Option<std::path::PathBuf> {
 }
 use andeyunhui_lib::TrayHolder;
 use andeyunhui_lib::services::lyrics_service;
+use andeyunhui_lib::services::clipboard_history;
 // recording_service / diagnostics 在 services/mod.rs 中已是 `#[cfg(windows)]` 模块（仅 Windows 编译），
 // 移动端不引入该模块；此处用同样 cfg 限定其引用，保证移动端编译不依赖这两个 Windows 专属模块（#android-v1）。
 #[cfg(windows)]
@@ -1252,12 +1253,12 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             clipboard_clear,
             clipboard_poll_image,
             // 剪贴板历史（运行期内存，浮窗与主面板共用）
-            services::clipboard_history::clipboard_history_get,
-            services::clipboard_history::clipboard_history_add_text,
-            services::clipboard_history::clipboard_history_add_image,
-            services::clipboard_history::clipboard_history_delete,
-            services::clipboard_history::clipboard_history_set_pinned,
-            services::clipboard_history::clipboard_history_clear,
+            clipboard_history::clipboard_history_get,
+            clipboard_history::clipboard_history_add_text,
+            clipboard_history::clipboard_history_add_image,
+            clipboard_history::clipboard_history_delete,
+            clipboard_history::clipboard_history_set_pinned,
+            clipboard_history::clipboard_history_clear,
             convert_image,
             convert_document,
             check_ffmpeg,
