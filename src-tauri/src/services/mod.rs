@@ -11,6 +11,8 @@ pub mod docx_wps;
 pub mod pptx_wps;
 pub mod pptx_import;
 pub mod lyrics_service;
+// 剪贴板历史：运行期内存单一事实源（浮窗与主面板共用，关软件即清空）
+pub mod clipboard_history;
 pub mod reading_service;
 // 录屏捕获（WGC / D3D11 / AudioCapture）为 Windows 专属后端：非 Windows 目标不编译该模块，
 // 避免裸引 windows / windows_capture / winapi 等仅 Windows 可用的 crate。

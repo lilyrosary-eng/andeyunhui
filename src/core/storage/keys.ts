@@ -40,7 +40,6 @@ export const KEYS = {
   desktop: {
     shortcuts:         { key: 'shortcuts', kind: 'json', scope: 'desktop', note: '即 GlobalSettingsPanel「快捷键」' },
     devConsoleHistory: { key: 'dev_console_history', kind: 'json', scope: 'desktop', note: 'slice(-50)' },
-    clipStorage:       { key: 'clipboard_history_v1', kind: 'json', scope: 'desktop', note: '见 FloatingClipboardView CLIP_STORAGE_KEY' },
     lyricsFontSize:    { key: 'music_lyrics_font_size', kind: 'string', scope: 'desktop' },
     lyricsShowNext:    { key: 'music_lyrics_show_next_line', kind: 'flag', scope: 'desktop' },
     chroma:            { key: 'deskpet:chroma', kind: 'json', scope: 'desktop', note: '{color,tolerance}' },

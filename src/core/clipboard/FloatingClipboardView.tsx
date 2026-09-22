@@ -1,13 +1,13 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Pin, X, Clipboard, Search, Lock, ImageIcon } from 'lucide-react';
-import { storage } from '@/core/storage';
-import { KEYS } from '@/core/storage/keys';
 
 const win = getCurrentWindow();
 
-const MAX_IMAGE_HISTORY = 5;
+/** 浮窗只展示最近 3 条：定位是"随手取用最近复制"，翻找历史去剪贴板本体 */
+const MAX_SHOWN = 3;
 
 interface ClipItem {
   id: string;
@@ -28,7 +28,11 @@ function formatTime(ts: number): string {
 
 /**
  * 剪贴板浮窗子窗口 — 透明背景、可拖拽、实时监测剪贴板。
- * 与主面板 ClipboardHistory 共享 localStorage 历史。
+ *
+ * 数据来自后端运行期内存（`clipboard_history_*`），与剪贴板本体系同一份：
+ * 两个窗口是独立 webview、localStorage 互不相通，共享只能走后端。
+ * 本窗口**只读**：只展示最近 3 条、点击即复制；删除/多选清理统一在剪贴板本体，
+ * 避免在此误清掉本体记录。剪贴板探测仍在本地轮询（谁活着谁上报，后端负责去重）。
  *
  * 拖拽方案：不使用 data-tauri-drag-region（会吞掉子元素点击），
  * 改用 mousedown → startDragging()，与录屏控制台一致。
@@ -39,12 +43,8 @@ export function FloatingClipboardView() {
   const [isPinned, setIsPinned] = useState(false);
   const [isFixed, setIsFixed] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; itemId: string } | null>(null);
   // 分类标签：全部 / 文本 / 图片（对应「剪贴板浮窗分两类」需求）
   const [tab, setTab] = useState<'all' | 'text' | 'image'>('all');
-  // 多选模式
-  const [selectMode, setSelectMode] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const lastTextRef = useRef('');
   const lastImgHashRef = useRef('');
 
@@ -71,38 +71,19 @@ export function FloatingClipboardView() {
     return () => { style.remove(); };
   }, []);
 
-  // 从 localStorage 加载文本历史
-  const loadFromStorage = useCallback(() => {
-    try {
-      const saved = storage.getString(KEYS.desktop.clipStorage.key, '');
-      if (saved) {
-        const parsed: ClipItem[] = JSON.parse(saved);
-        // 重新打开浮窗时只保留最近 3 条
-        const recent = parsed
-          .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-          .slice(0, 3);
-        setItems(prev => {
-          const textIds = new Set(recent.map(i => i.id));
-          const imageItems = prev.filter(i => i.type === 'image' && !textIds.has(i.id));
-          return [...recent, ...imageItems].sort((a, b) => b.timestamp - a.timestamp);
-        });
-        if (recent.length > 0 && recent[0].type === 'text') {
-          lastTextRef.current = recent[0].content;
-        }
-      }
-    } catch { /* ignore */ }
+  // 拉取共享历史（最新在前）
+  const refreshHistory = useCallback(async () => {
+    try { setItems(await invoke<ClipItem[]>('clipboard_history_get')); } catch { /* ignore */ }
   }, []);
 
   useEffect(() => {
-    loadFromStorage();
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === KEYS.desktop.clipStorage.key) loadFromStorage();
-    };
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
-  }, [loadFromStorage]);
+    refreshHistory();
+    // 任一端增删记录都广播事件：浮窗重新拉取（数据只有一份，不做增量同步）
+    const unlisten = listen('clipboard-history-changed', () => { refreshHistory(); });
+    return () => { unlisten.then((f) => f()).catch(() => {}); };
+  }, [refreshHistory]);
 
-  // 轮询剪贴板（hash 检测，避免每秒读取大图）
+  // 轮询剪贴板（hash 检测，避免每秒读取大图）；只上报，记录的裁决在后端
   useEffect(() => {
     const id = setInterval(async () => {
       try {
@@ -112,23 +93,11 @@ export function FloatingClipboardView() {
         if (imgInfo) {
           lastImgHashRef.current = imgInfo.hash;
           lastTextRef.current = '';
-          const newItem: ClipItem = {
-            id: Date.now() + '_img',
-            type: 'image',
-            content: imgInfo.tempPath,  // 仅存路径，不存 base64
-            preview: '图片',
-            timestamp: Date.now(),
-            pinned: false,
+          await invoke('clipboard_history_add_image', {
+            hash: imgInfo.hash,
+            tempPath: imgInfo.tempPath,
             thumbnail: imgInfo.thumbnail,
-          };
-          setItems(prev => {
-            const existing = prev.filter(i => !(i.type === 'image' && i.content === imgInfo.tempPath));
-            const imageCount = existing.filter(i => i.type === 'image' && !i.pinned).length;
-            const trimmed = imageCount >= MAX_IMAGE_HISTORY
-              ? existing.filter(i => i.type !== 'image' || i.pinned)
-              : existing;
-            return [newItem, ...trimmed].slice(0, 50);
-          });
+          }).catch(() => {});
           return;
         }
         // 无新图片 → 检测文本
@@ -136,33 +105,12 @@ export function FloatingClipboardView() {
         if (text && text !== lastTextRef.current) {
           lastTextRef.current = text;
           lastImgHashRef.current = '';
-          const newItem: ClipItem = {
-            id: Date.now() + '_txt',
-            type: 'text',
-            content: text,
-            preview: text.slice(0, 200),
-            timestamp: Date.now(),
-            pinned: false,
-            charCount: text.length,
-          };
-          setItems(prev => [newItem, ...prev.filter(i => !(i.type === 'text' && i.content === text))].slice(0, 50));
+          await invoke('clipboard_history_add_text', { text }).catch(() => {});
         }
       } catch { /* ignore */ }
     }, 1500);
     return () => clearInterval(id);
   }, []);
-
-  // 点击外部关闭右键菜单
-  useEffect(() => {
-    if (!contextMenu) return;
-    const close = () => setContextMenu(null);
-    window.addEventListener('click', close);
-    window.addEventListener('blur', close);
-    return () => {
-      window.removeEventListener('click', close);
-      window.removeEventListener('blur', close);
-    };
-  }, [contextMenu]);
 
   /** 切换置顶 */
   const handleTogglePin = useCallback(async () => {
@@ -218,54 +166,11 @@ export function FloatingClipboardView() {
     } catch { /* ignore */ }
   }, []);
 
-  // 右键菜单
-  const handleContextMenu = useCallback((e: React.MouseEvent, itemId: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY, itemId });
-  }, []);
-
-  // 删除记录
-  const deleteItem = useCallback((itemId: string) => {
-    setItems(prev => prev.filter(i => i.id !== itemId));
-    setContextMenu(null);
-    try {
-      const saved = storage.getString(KEYS.desktop.clipStorage.key, '');
-      if (saved) {
-        const parsed: ClipItem[] = JSON.parse(saved);
-        const updated = parsed.filter(i => i.id !== itemId);
-        storage.setJSON(KEYS.desktop.clipStorage.key, updated);
-      }
-    } catch { /* ignore */ }
-  }, []);
-
-  // 删除选中项
-  const deleteSelected = useCallback(() => {
-    setItems(prev => {
-      const remaining = prev.filter(item => !selectedIds.has(item.id));
-      try {
-        const saved = storage.getString(KEYS.desktop.clipStorage.key, '');
-        if (saved) {
-          const parsed: ClipItem[] = JSON.parse(saved);
-          const updated = parsed.filter(item => !selectedIds.has(item.id));
-          storage.setJSON(KEYS.desktop.clipStorage.key, updated);
-        }
-      } catch { /* ignore */ }
-      return remaining;
-    });
-    setSelectedIds(new Set());
-    setSelectMode(false);
-  }, [selectedIds]);
-
-  // 一键清空
-  const clearAll = useCallback(() => {
-    setItems([]);
-    setSelectedIds(new Set());
-    try { storage.remove(KEYS.desktop.clipStorage.key); } catch { /* ignore */ }
-  }, []);
+  // 只取最近 3 条：窗口被复用不重挂载时也始终只显示这几条（此前是挂载时截断，复用后越攒越多）
+  const shown = items.slice(0, MAX_SHOWN);
 
   // 过滤（先按分类标签，再按搜索关键字）
-  const filtered = items.filter((i) => {
+  const filtered = shown.filter((i) => {
     if (tab === 'text' && i.type !== 'text') return false;
     if (tab === 'image' && i.type !== 'image') return false;
     if (search && i.type === 'text' && !i.content.toLowerCase().includes(search.toLowerCase())) return false;
@@ -417,33 +322,6 @@ export function FloatingClipboardView() {
         ))}
       </div>
 
-      {/* 操作栏 */}
-      <div data-no-drag style={{ display: 'flex', gap: 8, padding: '4px 10px' }}>
-        <button
-          onClick={() => { setSelectMode(!selectMode); setSelectedIds(new Set()); }}
-          style={{
-            fontSize: 11, color: selectMode ? '#f59e0b' : '#9ca3af',
-            background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-          }}
-        >
-          {selectMode ? '取消' : '多选'}
-        </button>
-        {selectMode && selectedIds.size > 0 && (
-          <button
-            onClick={deleteSelected}
-            style={{ fontSize: 11, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-          >
-            删除 ({selectedIds.size})
-          </button>
-        )}
-        <button
-          onClick={clearAll}
-          style={{ fontSize: 11, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', padding: 0, marginLeft: 'auto' }}
-        >
-          一键清空
-        </button>
-      </div>
-
       {/* 历史列表 */}
       <div
         data-no-drag
@@ -472,19 +350,7 @@ export function FloatingClipboardView() {
         ) : filtered.map(item => (
           <div
             key={item.id}
-            onClick={() => {
-              if (selectMode) {
-                setSelectedIds(prev => {
-                  const next = new Set(prev);
-                  if (next.has(item.id)) next.delete(item.id);
-                  else next.add(item.id);
-                  return next;
-                });
-              } else {
-                writeToClipboard(item);
-              }
-            }}
-            onContextMenu={(e) => handleContextMenu(e, item.id)}
+            onClick={() => writeToClipboard(item)}
             style={{
               padding: '6px 8px',
               marginBottom: '2px',
@@ -493,7 +359,6 @@ export function FloatingClipboardView() {
               display: 'flex',
               alignItems: 'flex-start',
               gap: '6px',
-              background: selectMode && selectedIds.has(item.id) ? 'rgba(96, 165, 250, 0.15)' : undefined,
             }}
             onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.06)'; }}
             onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
@@ -582,54 +447,9 @@ export function FloatingClipboardView() {
         display: 'flex',
         justifyContent: 'space-between',
       }}>
-        <span>{filtered.length} 条</span>
-        <span>点击复制 · 右键删除</span>
+        <span>{filtered.length} / 最近 {MAX_SHOWN} 条</span>
+        <span>点击复制 · 清理请到剪贴板本体</span>
       </div>
-
-      {/* 右键菜单 */}
-      {contextMenu && (
-        <div
-          data-no-drag
-          style={{
-            position: 'fixed',
-            left: contextMenu.x,
-            top: contextMenu.y,
-            background: 'rgba(40, 40, 45, 0.98)',
-            backdropFilter: 'blur(16px)',
-            border: '1px solid rgba(255, 255, 255, 0.12)',
-            borderRadius: '8px',
-            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.5)',
-            padding: '4px',
-            zIndex: 9999,
-            minWidth: '120px',
-          }}
-          onClick={e => e.stopPropagation()}
-        >
-          <button
-            onClick={() => deleteItem(contextMenu.itemId)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              width: '100%',
-              padding: '6px 12px',
-              background: 'none',
-              border: 'none',
-              color: '#ef4444',
-              cursor: 'pointer',
-              fontSize: '12px',
-              fontFamily: 'inherit',
-              borderRadius: '4px',
-              textAlign: 'left',
-            }}
-            onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(239, 68, 68, 0.12)'; }}
-            onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'none'; }}
-          >
-            <X size={13} />
-            删除记录
-          </button>
-        </div>
-      )}
     </div>
   );
 }

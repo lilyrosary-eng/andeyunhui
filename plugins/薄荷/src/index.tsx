@@ -512,10 +512,6 @@ interface ClipItem {
   thumbnail?: string; // 缩略图 data URL（后端生成，减轻大图渲染压力）
 }
 
-const CLIP_STORAGE_KEY = 'clipboard_history_v1';
-const CLIP_MAX_TEXT = 200;
-const CLIP_MAX_IMAGE = 5; // 限制图片数量，避免内存爆炸
-
 function formatTime(ts: number): string {
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -540,30 +536,28 @@ function ClipboardHistory() {
   const lastImageRef = useRef('');
   const lastImgHashRef = useRef('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // 多选清理：勾选若干条后批量删除（记录只有一份，删除即全端同步）
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  // 从 localStorage 加载持久化文本历史
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(CLIP_STORAGE_KEY);
-      if (saved) {
-        const parsed: ClipItem[] = JSON.parse(saved);
-        setItems(parsed);
-        if (parsed.length > 0 && parsed[0].type === 'text') {
-          lastTextRef.current = parsed[0].content;
-        }
-      }
-    } catch { /* ignore */ }
-    // 初始读取当前剪贴板
-    hostInvoke('clipboard_read').then((t: string) => { setCurrent(t); lastTextRef.current = t; }).catch(() => {});
+  // 历史来自后端运行期内存（与剪贴板浮窗共用同一份数据）：
+  // 浮窗与主面板是两个独立 webview，localStorage 互不相通，故历史必须由后端收口；
+  // 后端进程内存也天然满足"本次运行全部保留、关掉软件即清空"。
+  const refreshHistory = useCallback(async () => {
+    try { setItems(await hostInvoke<ClipItem[]>('clipboard_history_get')); } catch { /* ignore */ }
   }, []);
 
-  // 持久化文本历史到 localStorage（图片不持久化，太占空间）
   useEffect(() => {
-    try {
-      const textItems = items.filter(i => i.type === 'text').slice(0, CLIP_MAX_TEXT);
-      localStorage.setItem(CLIP_STORAGE_KEY, JSON.stringify(textItems));
-    } catch { /* localStorage 满了，忽略 */ }
-  }, [items]);
+    refreshHistory();
+    // 另一端（浮窗）增删记录后同步刷新本面板
+    const hostListen = (window.__HOST_API__ as unknown as {
+      listen: (ev: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
+    }).listen;
+    const unlisten = hostListen('clipboard-history-changed', () => { refreshHistory(); });
+    // 初始读取当前剪贴板
+    hostInvoke('clipboard_read').then((t: string) => { setCurrent(t); lastTextRef.current = t; }).catch(() => {});
+    return () => { unlisten.then((fn) => fn()).catch(() => {}); };
+  }, [refreshHistory]);
 
   // 轮询剪贴板（1s 间隔，比原来 1.5s 更快）
   useEffect(() => {
@@ -577,24 +571,12 @@ function ClipboardHistory() {
           lastImageRef.current = imgInfo.tempPath;
           lastImgHashRef.current = imgInfo.hash;
           lastTextRef.current = '';
-          const newItem: ClipItem = {
-            id: Date.now() + '_img',
-            type: 'image',
-            content: imgInfo.tempPath,  // 仅存路径，不存 base64
-            preview: T('mint.clip.image'),
-            timestamp: Date.now(),
-            pinned: false,
-            thumbnail: imgInfo.thumbnail, // 后端生成的缩略图
-          };
-          setItems(prev => {
-            const existing = prev.filter(i => i.type !== 'image' || i.content !== imgInfo.tempPath);
-            // 限制图片数量，保留固定项
-            const imageCount = existing.filter(i => i.type === 'image' && !i.pinned).length;
-            const trimmed = imageCount >= CLIP_MAX_IMAGE
-              ? existing.filter(i => i.type !== 'image' || i.pinned)
-              : existing;
-            return [newItem, ...trimmed].slice(0, CLIP_MAX_TEXT + CLIP_MAX_IMAGE);
-          });
+          // 只负责"上报探测结果"，记录的增删与限量都由后端统一裁决（多窗口轮询不重复）
+          hostInvoke('clipboard_history_add_image', {
+            hash: imgInfo.hash,
+            tempPath: imgInfo.tempPath,
+            thumbnail: imgInfo.thumbnail,
+          }).catch(() => {});
           return;
         }
         // 无新图片 → 检测文本
@@ -604,16 +586,7 @@ function ClipboardHistory() {
           lastImageRef.current = '';
           lastImgHashRef.current = '';
           setCurrent(text);
-          const newItem: ClipItem = {
-            id: Date.now() + '_txt',
-            type: 'text',
-            content: text,
-            preview: text.slice(0, 200),
-            timestamp: Date.now(),
-            pinned: false,
-            charCount: text.length,
-          };
-          setItems(prev => [newItem, ...prev.filter(i => !(i.type === 'text' && i.content === text))].slice(0, CLIP_MAX_TEXT + CLIP_MAX_IMAGE));
+          hostInvoke('clipboard_history_add_text', { text }).catch(() => {});
         }
       } catch { /* 忽略轮询错误 */ }
     }, 1500);
@@ -692,15 +665,38 @@ function ClipboardHistory() {
   };
 
   const togglePin = (id: string) => {
-    setItems(prev => prev.map(i => i.id === id ? { ...i, pinned: !i.pinned } : i));
+    const item = items.find(i => i.id === id);
+    if (!item) return;
+    // 置顶状态存在后端记录里：否则刷新/另一端增删后置顶会丢
+    hostInvoke('clipboard_history_set_pinned', { id, pinned: !item.pinned }).catch(() => {});
   };
 
   const deleteItem = (id: string) => {
-    setItems(prev => prev.filter(i => i.id !== id));
+    hostInvoke('clipboard_history_delete', { ids: [id] }).catch(() => {});
   };
 
+  // 多选清理
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const deleteSelected = () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    hostInvoke('clipboard_history_delete', { ids }).catch(() => {});
+    setSelectedIds(new Set());
+    setSelectMode(false);
+  };
+
+  // 一键清理：保留固定项（固定项可用多选显式删除）
   const clearAll = () => {
-    setItems(prev => prev.filter(i => i.pinned)); // 保留固定的
+    hostInvoke('clipboard_history_clear', { keepPinned: true }).catch(() => {});
+    setSelectedIds(new Set());
+    setSelectMode(false);
   };
 
   const clearSystemClipboard = async () => {
@@ -766,7 +762,11 @@ function ClipboardHistory() {
           {T('mint.clip.floating')}
         </button>
         <button onClick={exportHistory} className="btn-press px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-sm">{T('mint.clip.export')}</button>
-        <button onClick={clearAll} className="btn-press px-3 py-1.5 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200/50 dark:border-red-700/30 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors text-sm">{T('mint.clear')}</button>
+        <button onClick={selectMode ? () => { setSelectMode(false); setSelectedIds(new Set()); } : () => setSelectMode(true)} className={`btn-press px-3 py-1.5 rounded-lg border text-sm transition-colors ${selectMode ? 'border-amber-300/60 bg-amber-50 dark:bg-amber-900/20 text-amber-600' : 'border-white/80 dark:border-stone-700/50 bg-white/70 dark:bg-stone-800/70 text-neutral-600 dark:text-stone-400 hover:bg-white'}`}>{selectMode ? T('mint.cancel') : T('mint.clip.select')}</button>
+        {selectMode && (
+          <button onClick={deleteSelected} disabled={selectedIds.size === 0} className="btn-press px-3 py-1.5 rounded-lg border border-red-200/50 dark:border-red-700/30 text-sm transition-colors disabled:opacity-40 text-red-500 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/30">{T('mint.clip.deleteSelected', { n: selectedIds.size })}</button>
+        )}
+        <button onClick={clearAll} className="btn-press px-3 py-1.5 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200/50 dark:border-red-700/30 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors text-sm">{T('mint.clip.clearAll')}</button>
       </div>
 
       {/* 统计信息 */}
@@ -807,7 +807,15 @@ function ClipboardHistory() {
             {search ? T('mint.clip.noMatch') : T('mint.clip.empty')}
           </div>
         ) : filtered.map((item) => (
-          <div key={item.id} className="px-3 py-2 border-b border-white/40 dark:border-stone-700/30 last:border-0 flex items-start gap-2 group hover:bg-white/30 dark:hover:bg-stone-700/20 transition-colors">
+          <div key={item.id}
+            onClick={selectMode ? () => toggleSelect(item.id) : undefined}
+            className={`px-3 py-2 border-b border-white/40 dark:border-stone-700/30 last:border-0 flex items-start gap-2 group transition-colors ${selectMode
+              ? `cursor-pointer ${selectedIds.has(item.id) ? 'bg-[var(--element-muted)]' : ''}`
+              : 'hover:bg-white/30 dark:hover:bg-stone-700/20'}`}>
+            {selectMode && (
+              <input type="checkbox" readOnly checked={selectedIds.has(item.id)}
+                className="mt-1 accent-[var(--element-bg)] flex-shrink-0 pointer-events-none" />
+            )}
             {/* 内容区 */}
             <div className="flex-1 min-w-0">
               {item.type === 'image' ? (
