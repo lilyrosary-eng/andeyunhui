@@ -13,7 +13,8 @@ export const KEYS = {
     saveDirInvalid:    { key: 'transfer:save-dir-invalid', kind: 'string', scope: 'desktop' }, // 事件名也如此，见 EVENTS 分组
   },
   niaoluo: {
-    ragVisible:        { key: 'niaoluo:rag-visible', kind: 'flag', scope: 'shared', default: '0' },
+    // 默认 '1'（显示）：RAG 为默认开启的茑萝子模块；用户在「全局设置 → 茑萝」关掉后写 '0'，重启仍保持关闭
+    ragVisible:        { key: 'niaoluo:rag-visible', kind: 'flag', scope: 'shared', default: '1' },
     capsuleTab:        { key: 'niaoluo:capsule-tab', kind: 'string', scope: 'shared', default: 'search' },
   },
   aiPolish: {

@@ -3,7 +3,7 @@
   "name": "RAG 知识库",
   "version": "1.0.0",
   "kind": "module",
-  "visible": false,
+  "visible": true,
   "entry": "index.js",
   "iconName": "BookOpen",
   "hostApiVersion": 1,

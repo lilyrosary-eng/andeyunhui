@@ -697,6 +697,18 @@ fn copy_dlc_file(
 // 这样 bundled-plugins/ 在打包后即使只读（Program Files）也能正常启用/禁用插件，
 // 且不污染源码 manifest.json。get_installed_plugins 读取此文件覆盖 manifest.visible。
 
+/// 「锁死」插件黑名单：名单内的插件一律强制不可见，用户无法启用。
+/// 为什么在名单里：gongfang（攻防：网络爬虫 / 逆向工程 / 渗透测试 / 自动化测试套件）
+/// 按产品要求锁死 —— 默认关闭、UI 不可见、不可被用户开启（对应 Cargo feature 亦默认不编译）。
+/// 判定优先级最高：即使 manifest.json 被改成 visible:true，或用户在拓展管理里点了启用
+/// （plugin_visibility.json 写了 true），扫描结果仍为 false。
+const FORCE_HIDDEN_PLUGIN_IDS: &[&str] = &["gongfang"];
+
+/// 某插件是否属于「锁死」黑名单
+fn is_force_hidden(plugin_id: &str) -> bool {
+    FORCE_HIDDEN_PLUGIN_IDS.contains(&plugin_id)
+}
+
 /// 读取 plugin_visibility.json，返回 id→visible 映射
 fn load_plugin_visibility_map(app: &AppHandle) -> std::collections::HashMap<String, bool> {
     let map = std::collections::HashMap::new();
@@ -1123,6 +1135,10 @@ pub struct PluginManifest {
     pub name: String,
     pub version: String,
     pub kind: String,           // "module" | "service"
+    /// 出厂默认可见性（manifest.json 的必填字段，serde 无 default）。
+    /// 注意：这只是插件自述的默认值；运行时以扫描函数 scan_plugins_sync 的可见性解析为准：
+    /// 锁死黑名单（FORCE_HIDDEN_PLUGIN_IDS）强制 false > 用户显式覆盖（plugin_visibility.json）
+    /// > 默认 true（含无记录的新机首次运行，故除锁死模块外全部默认开启）。
     pub visible: bool,
     pub entry: String,          // 入口文件名，如 "index.js"
     pub icon_name: String,      // lucide 图标名，如 "Music2"
@@ -1295,8 +1311,8 @@ fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResult, String> 
     let mut rejected = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
-    // 加载用户可见性覆盖（AppData/plugin_visibility.json）
-    // 优先级：plugin_visibility.json > manifest.json 的 visible 字段
+    // 加载用户可见性覆盖（AppData/plugin_visibility.json）：仅「用户显式开关过」的插件才有记录；
+    // 新机首次运行该文件不存在 → 返回空 map（不写任何种子数据），后续解析回落到「默认开启」。
     let visibility_map = load_plugin_visibility_map(&app);
 
     // 递归收集 bundled-plugins/ 与 user_plugins/ 下所有 manifest.json
@@ -1426,10 +1442,18 @@ fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResult, String> 
 
         seen_ids.insert(manifest.id.clone());
 
-        // 应用用户可见性覆盖（AppData/plugin_visibility.json 优先于 manifest.json）
-        if let Some(override_visible) = visibility_map.get(&manifest.id) {
-            manifest.visible = *override_visible;
-        }
+        // 可见性解析（唯一事实源，优先级从高到低）：
+        //   1) 锁死黑名单 FORCE_HIDDEN_PLUGIN_IDS → 强制 false（gongfang，用户不可启用）；
+        //   2) 用户显式覆盖记录 plugin_visibility.json → 以记录为准（关掉后重启仍保持关闭）；
+        //   3) 其余 → 默认 true（新机首次运行无记录 ⇒ 除锁死模块外全部默认开启，
+        //      含无 UI 的 service 类如 screen-recorder：不加载则其快捷功能直接不可用）。
+        // manifest.json 的 visible 只是插件自述的出厂默认，不参与这里的判定，
+        // 避免默认值散落在各插件 manifest 里（改一处漏一处）。
+        manifest.visible = if is_force_hidden(&manifest.id) {
+            false
+        } else {
+            visibility_map.get(&manifest.id).copied().unwrap_or(true)
+        };
 
         valid.push(manifest);
     }
@@ -1710,6 +1734,11 @@ pub fn get_auto_save_config(app: tauri::AppHandle) -> Result<transfer_station::A
 /// （bundled-plugins/ 打包后可能只读，且不污染源码）
 #[tauri::command]
 pub fn set_plugin_visibility(app: tauri::AppHandle, plugin_id: String, visible: bool) -> Result<(), String> {
+    // 锁死模块拒绝启用：写入 plugin_visibility.json 也会在扫描阶段被强制关闭，
+    // 这里提前报错，避免前端开关出现「开了但没生效」的假状态。
+    if visible && is_force_hidden(&plugin_id) {
+        return Err(format!("插件 '{}' 已锁定，不可启用", plugin_id));
+    }
     // 校验插件存在
     find_plugin_root(&app, &plugin_id)?;
     // 持久化到 AppData/plugin_visibility.json

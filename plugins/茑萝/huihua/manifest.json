@@ -3,7 +3,7 @@
   "name": "绘画",
   "version": "1.0.0",
   "kind": "module",
-  "visible": false,
+  "visible": true,
   "entry": "index.js",
   "iconName": "Paintbrush",
   "hostApiVersion": 1,

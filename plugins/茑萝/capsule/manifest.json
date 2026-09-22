@@ -6,7 +6,7 @@
   "entry": "index.js",
   "kind": "module",
   "iconName": "LayoutGrid",
-  "visible": false,
+  "visible": true,
   "parent": "niaoluo",
   "codename": "茑萝",
   "desc": "屏幕顶部居中常驻的黄金棋盘，后续功能待扩展。",

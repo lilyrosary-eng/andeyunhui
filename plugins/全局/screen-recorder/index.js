@@ -16,7 +16,9 @@
     name: '录屏',
     iconName: 'Video',
     kind: 'service',
-    visible: false,
+    // service 类插件不参与导航栏渲染（mainPluginIds 只取 kind==='module'），
+    // visible 仅标记「默认已启用」；改 false 会导致插件不随启动加载、录屏快捷键失效。
+    visible: true,
     component: RecorderPlaceholder,
     sidebar: undefined,
     settings: undefined,

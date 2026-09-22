@@ -36,13 +36,14 @@ export function HostSidebar() {
     };
   }, []);
 
-  // 茑萝子模块「rag」默认不在侧栏展示（其 manifest.visible=false，作为内置功能），
-  // 由「全局设置 → 茑萝 → 显示 RAG 知识库模块」开关控制。
+  // 茑萝子模块「rag」：RAG 插件本身默认随启动加载（manifest.visible=true，见 commands.rs 可见性解析），
+  // 本开关只控制它是否出现在「茑萝」侧栏子模块列表里。默认开启；
+  // 用户在「全局设置 → 茑萝 → 显示 RAG 知识库模块」关掉后写入 '0'，以存储值为准（重启仍关闭）。
   const [ragVisible, setRagVisible] = useState<boolean>(() => {
-    return storage.getString(KEYS.niaoluo.ragVisible.key, '0') === '1';
+    return storage.getString(KEYS.niaoluo.ragVisible.key, '1') === '1';
   });
   useEffect(() => {
-    const onRagVis = () => setRagVisible(storage.getString(KEYS.niaoluo.ragVisible.key, '0') === '1');
+    const onRagVis = () => setRagVisible(storage.getString(KEYS.niaoluo.ragVisible.key, '1') === '1');
     window.addEventListener('niaoluo-rag-visibility', onRagVis);
     return () => window.removeEventListener('niaoluo-rag-visibility', onRagVis);
   }, []);
@@ -120,7 +121,7 @@ export function HostSidebar() {
   let content: React.ReactNode = null;
 
   if (activeModule === 'extensions') {
-    // 黄金棋盘：先确保插件已加载（manifest.visible=false 默认不加载），再切换到主窗口搜索面板。
+    // 黄金棋盘：先确保插件已加载（被用户在设置里关掉时不随启动加载），再切换到主窗口搜索面板。
     // 浮岛胶囊仍由光标靠近顶部监视（capsule_start_monitor）自动弹出，不受此影响。
     const handlePluginClick = async (plugin: PluginDef) => {
       if (plugin.id !== 'capsule') {

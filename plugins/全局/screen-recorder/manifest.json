@@ -3,7 +3,7 @@
   "name": "录屏",
   "version": "1.0.0",
   "kind": "service",
-  "visible": false,
+  "visible": true,
   "entry": "index.js",
   "iconName": "Video",
   "hostApiVersion": 1,

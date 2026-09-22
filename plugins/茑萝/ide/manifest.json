@@ -3,7 +3,7 @@
   "name": "IDE",
   "version": "1.0.0",
   "kind": "module",
-  "visible": false,
+  "visible": true,
   "entry": "index.js",
   "iconName": "Code",
   "hostApiVersion": 1,

@@ -3,7 +3,7 @@
   "name": "加密解密",
   "version": "0.1.0",
   "kind": "module",
-  "visible": false,
+  "visible": true,
   "entry": "index.js",
   "iconName": "KeyRound",
   "hostApiVersion": 1,
