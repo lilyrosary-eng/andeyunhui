@@ -30,6 +30,8 @@ tauri-plugin-global-shortcut = "2"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 资源占用实时监控（CPU/内存/网络）：与主 crate 已通过 pro-tools-kit 间接依赖的版本一致，缓存复用。
+sysinfo = "0.30"
 chrono = "0.4"
 lofty = "0.24.0"
 walkdir = "2"
@@ -137,6 +139,8 @@ windows = { version = "0.62", features = [
   "Win32_Graphics_Direct3D_Fxc",
   "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dxgi",
+  # 资源占用实时监控：GPU 利用率 % 取自 PDH「GPU Engine」计数器（Utilization Percentage）
+  "Win32_System_Performance",
   "Win32_Foundation",
   # 方案 A（原生 WGC 捕获，wgc_native.rs）：帧池建在自建 D3D11 设备上，同设备 GPU 缩放后只读回
   # 小尺寸 RGBA。需要 WinRT Graphics.Capture + DirectX interop + HMONITOR。

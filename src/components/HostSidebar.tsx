@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import { Puzzle, Search, ArrowLeftRight } from 'lucide-react';
+import { Puzzle, Search, ArrowLeftRight, Gauge } from 'lucide-react';
 import type { PluginRegistry, PluginDef } from '@/core/pluginRegistry';
 import { PluginIcon } from '@/components/PluginIcon';
 import { ModuleSidebarShell } from '@/components/ModuleSidebarShell';
@@ -227,6 +227,17 @@ export function HostSidebar() {
           >
             <ArrowLeftRight size={18} />
             <span className="text-sm font-medium">传输</span>
+          </button>
+          <button
+            onClick={() => setCapsuleTab('resource')}
+            className={`w-full text-left px-3 py-2.5 rounded-xl transition-colors flex items-center gap-2.5 ${
+              capsuleTab === 'resource'
+                ? 'bg-[var(--element-bg)]/10 text-[var(--element-color-raw)]'
+                : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
+            }`}
+          >
+            <Gauge size={18} />
+            <span className="text-sm font-medium">资源监视</span>
           </button>
         </div>
       </SecondaryNavShell>

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { FileSearchPanel } from '@/components/FileSearchPanel';
+import { ResourceMonitor } from '@/components/ResourceMonitor';
 import { useI18n } from '@/lib/i18n';
 import { useTransfer } from '@/core/transfer/useTransfer';
 import { storage } from '@/core/storage';
@@ -182,14 +183,16 @@ function TransferTab() {
 
 // ======== 黄金棋盘主窗口 Hub（侧栏 Tab 由 HostSidebar 控制） ========
 export function GoldChessboardHub() {
-  const [tab, setTab] = useState<'search' | 'transfer'>(() => {
-    return storage.getString(KEYS.niaoluo.capsuleTab.key, 'search') === 'transfer' ? 'transfer' : 'search';
+  const [tab, setTab] = useState<'search' | 'transfer' | 'resource'>(() => {
+    const t = storage.getString(KEYS.niaoluo.capsuleTab.key, 'search');
+    return t === 'transfer' || t === 'resource' ? t : 'search';
   });
 
   // 响应 HostSidebar 的 tab 切换事件
   useEffect(() => {
     const onTab = () => {
-      setTab(storage.getString(KEYS.niaoluo.capsuleTab.key, 'search') === 'transfer' ? 'transfer' : 'search');
+      const t = storage.getString(KEYS.niaoluo.capsuleTab.key, 'search');
+      setTab(t === 'transfer' || t === 'resource' ? t : 'search');
     };
     // storage 事件处理器必须是同一具名引用，cleanup 才能正确移除（此前用匿名函数
     // 注册、却试图移除 onTab，导致监听器随模块反复挂载/卸载持续泄漏）。
@@ -208,6 +211,8 @@ export function GoldChessboardHub() {
     <div className="flex-1 flex min-w-0">
       {tab === 'search' ? (
         <FileSearchPanel variant="panel" />
+      ) : tab === 'resource' ? (
+        <ResourceMonitor />
       ) : (
         <TransferTab />
       )}

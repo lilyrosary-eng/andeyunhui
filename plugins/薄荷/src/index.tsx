@@ -373,60 +373,137 @@ function PortScanner() {
   );
 }
 
-// ========== t14 进程管理 ==========
+// ========== t14 进程管理（实时优化版）==========
 // 系统内存占用（与桌宠共用 pro-tools-kit 的 get_system_memory 模板）
 type SysMem = { total_kb: number; used_kb: number; used_percent: number };
 const fmtGb = (kb: number) => `${(kb / 1024 / 1024).toFixed(1)} GB`;
+const fmtSpeedShort = (bps: number) => {
+  if (bps < 1024) return `${bps.toFixed(0)} B/s`;
+  if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+  return `${(bps / 1024 / 1024).toFixed(2)} MB/s`;
+};
+interface ResSnap {
+  cpu_percent: number;
+  mem_percent: number;
+  net_up_bps: number;
+  net_down_bps: number;
+  gpu_percent: number | null;
+  gpu_name: string | null;
+}
+type ProcRow = { pid: number; name: string; cpu: number; mem_kb: number };
 
 function ProcessManager() {
   useLang();
-  const [list, setList] = useState<{ pid: number; name: string; cpu: number; mem_kb: number }[]>([]);
+  const [list, setList] = useState<ProcRow[]>([]);
   const [sysMem, setSysMem] = useState<SysMem | null>(null);
+  const [res, setRes] = useState<ResSnap | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [auto, setAuto] = useState(true);
+  const [query, setQuery] = useState('');
+  const [sortKey, setSortKey] = useState<'cpu' | 'mem'>('mem');
+  const autoRef = useRef(auto);
+  autoRef.current = auto;
+
   const refresh = async () => {
     setBusy(true); setError('');
     try {
-      const [pl, sm] = await Promise.all([
-        hostInvoke('list_processes') as Promise<typeof list>,
+      const [pl, sm, ru] = await Promise.all([
+        hostInvoke('list_processes') as Promise<ProcRow[]>,
         hostInvoke('get_system_memory') as Promise<SysMem>,
+        // get_resource_usage 可能在老版本后端不存在，失败则忽略（不影响进程表）
+        (hostInvoke('get_resource_usage').catch(() => null)) as Promise<ResSnap | null>,
       ]);
       setList(pl);
       setSysMem(sm);
+      setRes(ru);
     }
     catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   };
-  useEffect(() => { refresh(); }, []);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(() => { if (autoRef.current) refresh(); }, 2000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 搜索 + 排序（前端派生，不依赖后端顺序）
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let rows = list;
+    if (q) rows = rows.filter(p => p.name.toLowerCase().includes(q) || String(p.pid).includes(q));
+    if (sortKey === 'cpu') rows = [...rows].sort((a, b) => b.cpu - a.cpu);
+    else rows = [...rows].sort((a, b) => b.mem_kb - a.mem_kb);
+    return rows;
+  }, [list, query, sortKey]);
+
+  const memPct = res ? res.mem_percent : (sysMem ? sysMem.used_percent : 0);
 
   return (
     <div className="space-y-3">
-      {sysMem && (
+      {/* 实时资源条（调用 get_resource_usage：CPU/内存/网络/GPU） */}
+      {res && (
+        <div className="flex items-center gap-3 flex-wrap text-xs bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 rounded-xl px-3 py-2">
+          <span className="flex items-center gap-1">CPU <b className={res.cpu_percent > 60 ? 'text-orange-500' : 'text-emerald-500'}>{res.cpu_percent.toFixed(1)}%</b></span>
+          <span className="flex items-center gap-1">内存 <b className={memPct > 60 ? 'text-orange-500' : 'text-emerald-500'}>{memPct.toFixed(1)}%</b></span>
+          <span className="flex items-center gap-1">↓ <b className="text-sky-500">{fmtSpeedShort(res.net_down_bps)}</b></span>
+          <span className="flex items-center gap-1">↑ <b className="text-teal-500">{fmtSpeedShort(res.net_up_bps)}</b></span>
+          <span className="flex items-center gap-1">GPU{' '}
+            {res.gpu_percent != null
+              ? <b className={res.gpu_percent > 60 ? 'text-orange-500' : 'text-emerald-500'}>{res.gpu_percent.toFixed(1)}%</b>
+              : <b className="text-neutral-400">N/A</b>}
+          </span>
+        </div>
+      )}
+
+      {/* 控制栏：手动刷新 / 自动刷新开关 / 搜索 / 排序 */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <button onClick={refresh} disabled={busy} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors disabled:opacity-50">
+          {busy ? T('mint.refreshing') : T('mint.refresh')}
+        </button>
+        <button
+          onClick={() => setAuto(a => !a)}
+          className={`btn-press px-3 py-1.5 rounded-lg border text-xs transition-colors ${auto ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30' : 'bg-white/60 dark:bg-stone-800/60 border-white/70 text-neutral-500'}`}
+        >
+          {auto ? '自动刷新中' : '已暂停'}
+        </button>
+        <input
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="搜索进程名 / PID"
+          className="flex-1 min-w-[140px] px-3 py-1.5 rounded-lg bg-white/60 dark:bg-stone-800/60 border border-white/80 dark:border-stone-700/50 text-sm outline-none focus:border-[var(--element-border)]"
+        />
+        <div className="flex items-center gap-1 text-xs">
+          <span className="text-neutral-400">排序</span>
+          <button onClick={() => setSortKey('cpu')} className={`px-2 py-1 rounded ${sortKey === 'cpu' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'text-neutral-500'}`}>CPU</button>
+          <button onClick={() => setSortKey('mem')} className={`px-2 py-1 rounded ${sortKey === 'mem' ? 'bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100' : 'text-neutral-500'}`}>内存</button>
+        </div>
+      </div>
+
+      {sysMem && !res && (
         <div className="flex items-center gap-4 flex-wrap text-xs text-neutral-500 dark:text-stone-400 bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 rounded-xl px-3 py-2">
           <span>{T('mint.proc.sysMem')}{fmtGb(sysMem.total_kb)}</span>
           <span>{T('mint.proc.used')}{fmtGb(sysMem.used_kb)}</span>
           <span>{T('mint.proc.percent')}<b className={sysMem.used_percent > 60 ? 'text-orange-500' : 'text-emerald-500'}>{sysMem.used_percent.toFixed(1)}%</b></span>
         </div>
       )}
-      <div className="flex items-center gap-2">
-        <button onClick={refresh} disabled={busy} className="btn-press px-4 py-1.5 rounded-lg bg-[var(--element-muted)] text-neutral-800 dark:text-stone-100 transition-colors disabled:opacity-50">
-          {busy ? T('mint.refreshing') : T('mint.refresh')}
-        </button>
-        <span className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.proc.count', { n: list.length })}</span>
-      </div>
+
       {error && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl p-3">{error}</div>}
+
       <div className="rounded-xl bg-white/40 dark:bg-stone-800/40 border border-white/60 dark:border-stone-700/40 overflow-auto max-h-[55vh]">
         <table className="w-full text-sm border-collapse">
           <thead>
             <tr className="bg-white/60 dark:bg-stone-800/60 sticky top-0 text-left">
               <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">PID</th>
               <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">{T('mint.proc.name')}</th>
-              <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">CPU%</th>
-              <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200">{T('mint.proc.mem')}</th>
+              <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200 cursor-pointer select-none" onClick={() => setSortKey('cpu')}>CPU% ⇅</th>
+              <th className="px-3 py-2 font-medium text-neutral-700 dark:text-stone-200 cursor-pointer select-none" onClick={() => setSortKey('mem')}>{T('mint.proc.mem')} ⇅</th>
             </tr>
           </thead>
           <tbody>
-            {list.map(p => (
+            {shown.map(p => (
               <tr key={p.pid} className="even:bg-white/30 dark:even:bg-stone-800/30">
                 <td className="px-3 py-1.5 font-mono text-neutral-500 dark:text-stone-400">{p.pid}</td>
                 <td className="px-3 py-1.5 text-neutral-600 dark:text-stone-300 truncate max-w-[200px]">{p.name}</td>
@@ -434,9 +511,13 @@ function ProcessManager() {
                 <td className="px-3 py-1.5 font-mono text-neutral-600 dark:text-stone-300">{(p.mem_kb / 1024).toFixed(1)}</td>
               </tr>
             ))}
+            {shown.length === 0 && (
+              <tr><td colSpan={4} className="px-3 py-6 text-center text-neutral-400 dark:text-stone-500">无匹配进程</td></tr>
+            )}
           </tbody>
         </table>
       </div>
+      <div className="text-xs text-neutral-400 dark:text-stone-500">{T('mint.proc.count', { n: shown.length })}</div>
     </div>
   );
 }

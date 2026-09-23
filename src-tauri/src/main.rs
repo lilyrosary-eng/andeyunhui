@@ -18,6 +18,10 @@ use tauri::tray::{MouseButton, MouseButtonState};
 use std::net::UdpSocket;
 use std::time::Duration;
 use std::sync::mpsc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::Instant;
+use sysinfo::System as SysSystem;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tauri_plugin_global_shortcut::ShortcutState;
 
@@ -42,6 +46,10 @@ use andeyunhui_lib::transfer;
 use andeyunhui_lib::services::window_manager::overlay_window_destroy;
 mod filesearch;
 use filesearch::*;
+// 资源占用实时监控（CPU/GPU/显存/内存/网络）：Windows 原生 GPU/显存采集，
+// 仅 Windows 编译；其他平台 gpu_metrics() 直接返回 None，命令行跨平台可用。
+#[cfg(windows)]
+mod gpu_metrics;
 
 // 文件关联：以安得云荟打开（一次性列表，进程退出即销毁）
 struct PendingOpenFiles(pub std::sync::Mutex<Vec<String>>);
@@ -52,6 +60,122 @@ fn take_pending_open_files(state: tauri::State<PendingOpenFiles>) -> Vec<String>
     let out = v.clone();
     v.clear();
     out
+}
+
+// ============ 资源占用实时监控（CPU / GPU / 显存 / 内存 / 网络）============
+// 实时性来自前端每 ~1s 轮询一次触发 refresh：全局 CPU 与网络速率由持久 System +
+// 上一拍快照做差分得到。GPU/显存仅在 Windows 通过 PDH + DXGI 采集，失败优雅返回 None。
+#[derive(serde::Serialize, Clone)]
+pub struct ResourceUsage {
+    pub cpu_percent: f32,        // 全局 CPU 占用 %
+    pub cpu_per_core: Vec<f32>,  // 每核占用 %（按物理核心顺序）
+    pub mem_total_kb: u64,
+    pub mem_used_kb: u64,
+    pub mem_percent: f32,
+    pub net_up_bps: f64,         // 上行速率 字节/秒
+    pub net_down_bps: f64,       // 下行速率 字节/秒
+    pub gpu_percent: Option<f32>,    // GPU 利用率 %（Windows 原生，失败为 None）
+    pub gpu_name: Option<String>,
+    pub vram_total_kb: Option<u64>,
+    pub vram_used_kb: Option<u64>,
+}
+
+struct ResState {
+    sys: SysSystem,
+    prev_recv: u64,
+    prev_trans: u64,
+    prev_ts: Option<Instant>,
+}
+
+// 单一持久 System + 上一拍网络快照；首次调用无差分，速率记为 0
+static RES_STATE: OnceLock<Mutex<ResState>> = OnceLock::new();
+
+#[tauri::command]
+pub fn get_resource_usage() -> ResourceUsage {
+    let st = RES_STATE
+        .get_or_init(|| {
+            Mutex::new(ResState {
+                sys: SysSystem::new_all(),
+                prev_recv: 0,
+                prev_trans: 0,
+                prev_ts: None,
+            })
+        })
+        .lock()
+        .unwrap();
+
+    let sys = &mut st.sys;
+    sys.refresh_cpu();
+    sys.refresh_memory();
+    sys.refresh_networks();
+
+    // CPU：全局 + 每核
+    let cpu_percent = sys.cpu_usage();
+    let cpu_per_core: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
+
+    // 内存
+    let mem_total_kb = sys.total_memory();
+    let mem_used_kb = sys.used_memory();
+    let mem_percent = if mem_total_kb > 0 {
+        (mem_used_kb as f32 / mem_total_kb as f32) * 100.0
+    } else {
+        0.0
+    };
+
+    // 网络：累加所有非回环接口，与上一拍做时间差分
+    let mut recv = 0u64;
+    let mut trans = 0u64;
+    for (name, net) in sys.networks().iter() {
+        let n = name.to_lowercase();
+        if n.contains("loop") || n == "lo" {
+            continue;
+        }
+        recv = recv.saturating_add(net.received());
+        trans = trans.saturating_add(net.transmitted());
+    }
+    let now = Instant::now();
+    let (up_bps, down_bps) = match st.prev_ts {
+        Some(prev) => {
+            let dt = now.duration_since(prev).as_secs_f64();
+            if dt > 0.0 && st.prev_recv > 0 {
+                let down = (recv.saturating_sub(st.prev_recv)) as f64 / dt;
+                let up = (trans.saturating_sub(st.prev_trans)) as f64 / dt;
+                (up, down)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+        None => (0.0, 0.0),
+    };
+    st.prev_recv = recv;
+    st.prev_trans = trans;
+    st.prev_ts = Some(now);
+    drop(st);
+
+    // GPU / 显存：Windows 原生；非 Windows 或采集失败均为 None。
+    // 注意：gpu_metrics::query_gpu() 返回的显存是「字节」，这里统一换算为 KB，
+    // 与 mem_*_kb（sysinfo 同样返回 KB）保持一致 —— 前端 fmtBytes 按 KB 处理。
+    #[cfg(windows)]
+    let (gpu_percent, gpu_name, vram_total_bytes, vram_used_bytes) = crate::gpu_metrics::query_gpu();
+    #[cfg(not(windows))]
+    let (gpu_percent, gpu_name, vram_total_bytes, vram_used_bytes) =
+        (None, None, None, None);
+    let vram_total_kb = vram_total_bytes.map(|b| b / 1024);
+    let vram_used_kb = vram_used_bytes.map(|b| b / 1024);
+
+    ResourceUsage {
+        cpu_percent,
+        cpu_per_core,
+        mem_total_kb,
+        mem_used_kb,
+        mem_percent,
+        net_up_bps: up_bps,
+        net_down_bps: down_bps,
+        gpu_percent,
+        gpu_name,
+        vram_total_kb,
+        vram_used_kb,
+    }
 }
 
 // 支持「以安得云荟打开」的扩展名（与前端 openWith.ts 的 MODULE_BY_EXT 保持一致）
@@ -1247,6 +1371,8 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             scan_ports,
             list_processes,
             get_system_memory,
+            // 资源占用实时监控（CPU/GPU/显存/内存/网络），供黄金棋盘「资源监视」与薄荷进程管理共用
+            get_resource_usage,
             clipboard_read,
             clipboard_write,
             clipboard_read_image,
