@@ -726,17 +726,10 @@ fn copy_dlc_file(
 // 这样 bundled-plugins/ 在打包后即使只读（Program Files）也能正常启用/禁用插件，
 // 且不污染源码 manifest.json。get_installed_plugins 读取此文件覆盖 manifest.visible。
 
-/// 「锁死」插件黑名单：名单内的插件一律强制不可见，用户无法启用。
-/// 为什么在名单里：gongfang（攻防：网络爬虫 / 逆向工程 / 渗透测试 / 自动化测试套件）
-/// 按产品要求锁死 —— 默认关闭、UI 不可见、不可被用户开启（对应 Cargo feature 亦默认不编译）。
-/// 判定优先级最高：即使 manifest.json 被改成 visible:true，或用户在拓展管理里点了启用
-/// （plugin_visibility.json 写了 true），扫描结果仍为 false。
-const FORCE_HIDDEN_PLUGIN_IDS: &[&str] = &["gongfang"];
-
-/// 某插件是否属于「锁死」黑名单
-fn is_force_hidden(plugin_id: &str) -> bool {
-    FORCE_HIDDEN_PLUGIN_IDS.contains(&plugin_id)
-}
+// 历史说明：这里曾有一份「锁死」黑名单（FORCE_HIDDEN_PLUGIN_IDS，含 gongfang），
+// 强制该插件不可见且拒绝用户启用。该机制已按用户要求整体移除 —— 代码层不再做任何可见性阻挡，
+// 插件是否被分发改由「源码/部署目录里有没有这个插件」决定（把插件目录移出 plugins/ 即不参与构建与打包）。
+// 因此可见性判定的唯一依据是下方：用户显式覆盖记录 > 默认开启。
 
 /// 读取 plugin_visibility.json，返回 id→visible 映射
 fn load_plugin_visibility_map(app: &AppHandle) -> std::collections::HashMap<String, bool> {
@@ -1166,8 +1159,7 @@ pub struct PluginManifest {
     pub kind: String,           // "module" | "service"
     /// 出厂默认可见性（manifest.json 的必填字段，serde 无 default）。
     /// 注意：这只是插件自述的默认值；运行时以扫描函数 scan_plugins_sync 的可见性解析为准：
-    /// 锁死黑名单（FORCE_HIDDEN_PLUGIN_IDS）强制 false > 用户显式覆盖（plugin_visibility.json）
-    /// > 默认 true（含无记录的新机首次运行，故除锁死模块外全部默认开启）。
+    /// 用户显式覆盖（plugin_visibility.json）> 默认 true（含无记录的新机首次运行，故全部默认开启）。
     pub visible: bool,
     pub entry: String,          // 入口文件名，如 "index.js"
     pub icon_name: String,      // lucide 图标名，如 "Music2"
@@ -1472,17 +1464,13 @@ fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResult, String> 
         seen_ids.insert(manifest.id.clone());
 
         // 可见性解析（唯一事实源，优先级从高到低）：
-        //   1) 锁死黑名单 FORCE_HIDDEN_PLUGIN_IDS → 强制 false（gongfang，用户不可启用）；
-        //   2) 用户显式覆盖记录 plugin_visibility.json → 以记录为准（关掉后重启仍保持关闭）；
-        //   3) 其余 → 默认 true（新机首次运行无记录 ⇒ 除锁死模块外全部默认开启，
+        //   1) 用户显式覆盖记录 plugin_visibility.json → 以记录为准（关掉后重启仍保持关闭）；
+        //   2) 其余 → 默认 true（新机首次运行无记录 ⇒ 全部默认开启，
         //      含无 UI 的 service 类如 screen-recorder：不加载则其快捷功能直接不可用）。
         // manifest.json 的 visible 只是插件自述的出厂默认，不参与这里的判定，
         // 避免默认值散落在各插件 manifest 里（改一处漏一处）。
-        manifest.visible = if is_force_hidden(&manifest.id) {
-            false
-        } else {
-            visibility_map.get(&manifest.id).copied().unwrap_or(true)
-        };
+        // 注：不再有任何「锁死/强制隐藏」名单，可见性完全由用户记录 + 默认开启决定。
+        manifest.visible = visibility_map.get(&manifest.id).copied().unwrap_or(true);
 
         valid.push(manifest);
     }
@@ -1763,13 +1751,16 @@ pub fn get_auto_save_config(app: tauri::AppHandle) -> Result<transfer_station::A
 /// （bundled-plugins/ 打包后可能只读，且不污染源码）
 #[tauri::command]
 pub fn set_plugin_visibility(app: tauri::AppHandle, plugin_id: String, visible: bool) -> Result<(), String> {
-    // 锁死模块拒绝启用：写入 plugin_visibility.json 也会在扫描阶段被强制关闭，
-    // 这里提前报错，避免前端开关出现「开了但没生效」的假状态。
-    if visible && is_force_hidden(&plugin_id) {
-        return Err(format!("插件 '{}' 已锁定，不可启用", plugin_id));
+    // 插件目录缺失（未分发 / 已被移除）：不报错，直接跳过。
+    // 例：分发时把某个插件目录移出源码，旧的前端状态或用户脚本仍可能带该 id 调用本命令；
+    // 抛错只会制造无意义的红灯，而记录本身也没有意义（插件不在，扫描不到它）。
+    if find_plugin_root(&app, &plugin_id).is_err() {
+        eprintln!(
+            "[PluginVisibility] 插件 '{}' 目录不存在，已跳过 visible={}（未分发或已移除）",
+            plugin_id, visible
+        );
+        return Ok(());
     }
-    // 校验插件存在
-    find_plugin_root(&app, &plugin_id)?;
     // 持久化到 AppData/plugin_visibility.json
     save_plugin_visibility(&app, &plugin_id, visible)?;
     // 清除扫描缓存，让下次 get_installed_plugins 重新读取可见性
@@ -1795,20 +1786,33 @@ pub async fn refresh_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, 
         .map_err(|e| format!("插件扫描任务失败: {e}"))?
 }
 
-/// 热重载插件：校验 id 存在后，向前端派发 `plugin-reload` 事件，
+/// 热重载插件：向前端派发 `plugin-reload` 事件，
 /// 由 PluginHost 在应用内重新读取 manifest + 入口脚本并执行（无需重启）。
+/// 插件目录缺失时（未分发 / 已移除）不报错，仅记日志后跳过。
 #[tauri::command]
 pub fn reload_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
-    find_plugin_root(&app, &plugin_id)?;
+    if find_plugin_root(&app, &plugin_id).is_err() {
+        eprintln!(
+            "[PluginHot] 插件 '{}' 目录不存在，跳过 reload（未分发或已移除）",
+            plugin_id
+        );
+        return Ok(());
+    }
     app.emit("plugin-reload", plugin_id)
         .map_err(|e| format!("派发 reload 事件失败: {}", e))
 }
 
-/// 热卸载插件：校验 id 存在后，向前端派发 `plugin-unload` 事件，
+/// 热卸载插件：向前端派发 `plugin-unload` 事件，
 /// 由 PluginHost 在应用内从注册表移除该插件（无需重启）。
+/// 卸载是幂等操作：目录缺失也照常派发事件，让前端清掉注册表里可能残留的实例。
 #[tauri::command]
 pub fn unload_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
-    find_plugin_root(&app, &plugin_id)?;
+    if find_plugin_root(&app, &plugin_id).is_err() {
+        eprintln!(
+            "[PluginHot] 插件 '{}' 目录不存在，仍派发 unload 以清理运行时残留",
+            plugin_id
+        );
+    }
     app.emit("plugin-unload", plugin_id)
         .map_err(|e| format!("派发 unload 事件失败: {}", e))
 }
@@ -1827,19 +1831,29 @@ pub fn unload_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), Str
 /// 用户主动点击「垃圾桶」即视为授权删除，本命令不做 user/bundled 区分。
 #[tauri::command]
 pub fn delete_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
-    let plugin_dir = find_plugin_root(&app, &plugin_id)?;
+    // 目录缺失（已被删除 / 未分发）不报错：跳过文件删除，继续做记录清理与事件派发，
+    // 让前端列表里的残留条目也能点掉（否则用户面对一个删不掉的幽灵条目）。
+    match find_plugin_root(&app, &plugin_id) {
+        Ok(plugin_dir) => {
+            // 1) 删除插件目录
+            if plugin_dir.exists() {
+                std::fs::remove_dir_all(&plugin_dir)
+                    .map_err(|e| format!("删除插件目录失败: {}", e))?;
+            }
 
-    // 1) 删除插件目录
-    if plugin_dir.exists() {
-        std::fs::remove_dir_all(&plugin_dir)
-            .map_err(|e| format!("删除插件目录失败: {}", e))?;
-    }
-
-    // 2) 删除同目录下的 <plugin_id>.mufurong 源包（防止下次启动重新解压）
-    if let Some(parent) = plugin_dir.parent() {
-        let mufurong_path = parent.join(format!("{}.{}", plugin_id, MUFURONG_EXT));
-        if mufurong_path.exists() {
-            let _ = std::fs::remove_file(&mufurong_path);
+            // 2) 删除同目录下的 <plugin_id>.mufurong 源包（防止下次启动重新解压）
+            if let Some(parent) = plugin_dir.parent() {
+                let mufurong_path = parent.join(format!("{}.{}", plugin_id, MUFURONG_EXT));
+                if mufurong_path.exists() {
+                    let _ = std::fs::remove_file(&mufurong_path);
+                }
+            }
+        }
+        Err(_) => {
+            eprintln!(
+                "[PluginDelete] 插件 '{}' 目录不存在（已删除或未分发），仅清理记录与运行时",
+                plugin_id
+            );
         }
     }
 
@@ -1868,7 +1882,8 @@ pub fn delete_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), Str
 #[tauri::command]
 pub fn open_plugin_folder(app: tauri::AppHandle, plugin_id: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let plugin_dir = find_plugin_root(&app, &plugin_id)?;
+    let plugin_dir = find_plugin_root(&app, &plugin_id)
+        .map_err(|_| format!("插件 '{}' 未安装或已被移除，无法打开其目录", plugin_id))?;
     let path_str = plugin_dir.to_string_lossy().to_string();
     app.opener()
         .open_path(path_str, None::<&str>)
