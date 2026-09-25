@@ -1061,23 +1061,24 @@ pub fn gongfang_symbol_add(req: SaveSymbolRequest) -> Result<(), String> {
     }
 }
 
-/// 协议状态机可视化：目标已学习则导出真实 DFA，否则返回空/示例
+/// 协议状态机可视化：仅导出**目标已学习**的真实 DFA。
+///
+/// 无目标或目标未学习时**不返回任何演示/示例状态机**——状态机是对目标的断言，
+/// 用示例数据填充会让调用方（含 AI）把演示图当成真实分析结果。
 #[tauri::command]
 pub fn gongfang_protocol_graph(url: Option<String>) -> Result<DfaGraphOut, String> {
     #[cfg(feature = "reverse")]
     {
-        use crate::reverse::protocol::{demo_dfa, empty_graph};
-        if let Some(u) = url {
-            let u = u.trim();
-            if !u.is_empty() {
-                let store = crate::reverse::symbols::SymbolStore::load();
-                if let Some(dfa) = store.protocol_dfa(u) {
-                    return Ok(dfa.to_graph(false));
-                }
-                return Ok(empty_graph()); // 该目标尚未学习
-            }
+        use crate::reverse::protocol::empty_graph;
+        let u = url.as_deref().unwrap_or("").trim();
+        if u.is_empty() {
+            return Err("请先指定目标 URL（无目标时不返回示例状态机）".to_string());
         }
-        Ok(demo_dfa().to_graph(true)) // 无目标 → 示例演示
+        let store = crate::reverse::symbols::SymbolStore::load();
+        match store.protocol_dfa(u) {
+            Some(dfa) => Ok(dfa.to_graph()),
+            None => Ok(empty_graph()), // 该目标尚未学习：返回空图（state_count=0）
+        }
     }
     #[cfg(not(feature = "reverse"))]
     {

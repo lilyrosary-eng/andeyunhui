@@ -163,7 +163,6 @@ interface DfaGraph {
   edges: DfaEdge[];
   state_count: number;
   transition_count: number;
-  demo: boolean;
 }
 
 interface SymbolSummary {
@@ -316,9 +315,73 @@ interface FrameworkMeta {
   title: string;
   subtitle: string;
   posture: '攻' | '防' | '攻防';   // 攻防定位
-  capabilities: string[];          // 核心能力清单
-  techStack: { name: string; license: string }[]; // 技术选型（优先 MIT/Apache）
+  /** **已交付**能力：有后端实现，且能通过命令/面板实际使用 */
+  capabilities: string[];
+  /** 计划中：尚无后端实现，或已实现但未接入生产路径（如实标注，不混进上面一栏） */
+  capabilitiesPlanned: string[];
+  /** 技术选型（优先 MIT/Apache）；`integrated: false` = 仅登记，尚未接入 */
+  techStack: { name: string; license: string; integrated?: boolean }[];
   status: string;                  // 当前状态
+}
+
+// ============ 能力清单（已交付 / 计划中 两栏） ============
+// 单一实现：五个框架面板统一用，避免各写一份导致口径不一（曾在 UI 上把规划当能力展示）
+function CapabilityGrid({ meta }: { meta: FrameworkMeta }) {
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 mb-1.5">
+          已交付（{meta.capabilities.length}）
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {meta.capabilities.map((cap) => (
+            <div key={cap} className="flex items-start gap-2 text-[13px] text-neutral-600 dark:text-stone-300">
+              <span className="inline-block w-1 h-1 mt-1.5 rounded-full bg-emerald-500 shrink-0" />
+              <span>{cap}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {meta.capabilitiesPlanned.length > 0 && (
+        <div>
+          <div className="text-[11px] font-medium text-neutral-400 mb-1.5">
+            计划中（尚无后端实现，{meta.capabilitiesPlanned.length}）
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {meta.capabilitiesPlanned.map((cap) => (
+              <div key={cap} className="flex items-start gap-2 text-[13px] text-neutral-400 dark:text-stone-500">
+                <span className="inline-block w-1 h-1 mt-1.5 rounded-full bg-neutral-300 dark:bg-stone-600 shrink-0" />
+                <span>{cap}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============ 技术选型 chips（未接入的置灰 + 标注） ============
+function TechStackChips({ items }: { items: FrameworkMeta['techStack'] }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {items.map((t) => (
+        <span
+          key={t.name}
+          className={
+            t.integrated === false
+              ? 'px-2.5 py-1 rounded-lg text-xs text-neutral-400 dark:text-stone-500 border border-dashed border-black/10 dark:border-stone-700/60'
+              : 'px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50'
+          }
+        >
+          {t.name}
+          <span className="ml-1.5 text-[10px] text-neutral-400">
+            {t.license}{t.integrated === false ? ' · 未接入' : ''}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
 }
 
 // ============ 通用框架占位模板 ============
@@ -340,31 +403,14 @@ function FrameworkPlaceholder({ meta, addLog }: { meta: FrameworkMeta; addLog: (
         </div>
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{meta.subtitle}</p>
 
-        {/* 核心能力 */}
-        <CollapsibleSection title="核心能力规划" storageKey="fw_placeholder_capabilities" defaultOpen={false}>
-          <div className="grid grid-cols-2 gap-2">
-            {meta.capabilities.map((cap) => (
-              <div key={cap} className="flex items-center gap-2 text-[13px] text-neutral-600 dark:text-stone-300">
-                <span className="inline-block w-1 h-1 rounded-full bg-neutral-400" />
-                {cap}
-              </div>
-            ))}
-          </div>
+        {/* 核心能力（已交付 / 计划中 分栏） */}
+        <CollapsibleSection title="核心能力" storageKey="fw_placeholder_capabilities" defaultOpen={false}>
+          <CapabilityGrid meta={meta} />
         </CollapsibleSection>
 
         {/* 技术选型 */}
         <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_placeholder_techstack" defaultOpen={false}>
-          <div className="flex flex-wrap gap-2">
-            {meta.techStack.map((t) => (
-              <span
-                key={t.name}
-                className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50"
-              >
-                {t.name}
-                <span className="ml-1.5 text-[10px] text-neutral-400">{t.license}</span>
-              </span>
-            ))}
-          </div>
+          <TechStackChips items={meta.techStack} />
         </CollapsibleSection>
 
         {/* 操作占位区 */}
@@ -409,24 +455,30 @@ function renderChips(label: string, items: string[]): React.ReactNode {
 // ============ 框架一：网络爬虫 ============
 const crawlerMeta: FrameworkMeta = {
   title: '网络爬虫框架',
-  subtitle: '反检测、反封锁、智能调度。真实 HTTP 抓取 + 代理选路 + 请求头伪装，并对接 API 网关整形；真实 TLS/JA3 指纹伪装待接入（见下方「计划中」）。',
+  subtitle: '反检测、反封锁、智能调度。真实 HTTP 抓取 + 代理选路 + 真实 TLS/JA3-JA4 指纹（curl-impersonate 外部通道，实测 HTTP/2 + Akamai 指纹与真实 Chrome 一致），并对接 API 网关整形；二进制缺失时如实降级为 UA 档案并在上方状态卡标注。',
   posture: '攻防',
   capabilities: [
-    '真实 HTTP 抓取：连接复用 + 同域递归队列（去重 / 深度限制）',
+    '真实 HTTP 抓取：同域递归队列（去重 / 深度限制）+ 失败换代理重试',
     'QPS 限速 + 响应态势回调（403/429 触发降速与指纹轮换）',
-    '代理池：轮换选路 + 代理故障分类 + 失败换代理重试',
-    '浏览器同构请求头（UA / Accept / Language / Client Hints 自洽）',
-    'CDP 隐身脚本（webdriver 清除 + Canvas/WebGL 噪声，浏览器模式）',
-    '代理选路对接 API 网关（@rotate direct/proxy/stealth 整形）',
-    '计划中：真实 TLS/JA3-JA4 指纹伪装（需外部 impersonate 通道，当前仅 UA 档案）',
+    '代理池：轮换选路 + 代理故障分类',
+    '真实 TLS/JA3-JA4 指纹（curl-impersonate：HTTP/2 + GREASE，Chrome/Firefox/Safari 三档案）',
+    '统一 GET 通道：手动抓取 / WAF 探测与爬虫同一条链路、同一指纹',
+    'API 网关选路对接（@rotate direct/proxy/stealth + 请求间隔整形）',
+    '浏览器同构请求头（UA / Accept / Language / Client Hints 自洽，rustls 通道用）',
+    'CDP 隐身脚本（webdriver 清除 + Canvas/WebGL 噪声，需 crawler-browser）',
+  ],
+  capabilitiesPlanned: [
+    '网关突发 / 头序 / 熵注入全量落地（当前仅「间隔整形」进了抓取主链路）',
+    '进程级实例重建接入主链路（crawler/immortal.rs 已实现但未被调用）',
   ],
   techStack: [
-    { name: 'chromiumoxide', license: 'MPL-2.0' },
-    { name: 'rustls', license: 'Apache-2.0' },
+    { name: 'curl-impersonate', license: 'MIT' },
     { name: 'reqwest', license: 'MIT' },
+    { name: 'rustls', license: 'Apache-2.0' },
     { name: 'tokio', license: 'MIT' },
+    { name: 'chromiumoxide', license: 'MPL-2.0' },
   ],
-  status: '内核就绪',
+  status: '全链路已交付',
 };
 
 // ============ 状态卡片（模块级组件，避免渲染内重定义导致重挂载） ============
@@ -605,31 +657,14 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         </div>
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{crawlerMeta.subtitle}</p>
 
-        {/* 核心能力 */}
-        <CollapsibleSection title="核心能力规划" storageKey="fw_crawler_capabilities" defaultOpen={false} accent="attack">
-          <div className="grid grid-cols-2 gap-2">
-            {crawlerMeta.capabilities.map((cap) => (
-              <div key={cap} className="flex items-center gap-2 text-[13px] text-neutral-600 dark:text-stone-300">
-                <span className="inline-block w-1 h-1 rounded-full bg-neutral-400" />
-                {cap}
-              </div>
-            ))}
-          </div>
+        {/* 核心能力（已交付 / 计划中 分栏） */}
+        <CollapsibleSection title="核心能力" storageKey="fw_crawler_capabilities" defaultOpen={false} accent="attack">
+          <CapabilityGrid meta={crawlerMeta} />
         </CollapsibleSection>
 
         {/* 技术选型 */}
         <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_crawler_techstack" defaultOpen={false} accent="attack">
-          <div className="flex flex-wrap gap-2">
-            {crawlerMeta.techStack.map((t) => (
-              <span
-                key={t.name}
-                className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50"
-              >
-                {t.name}
-                <span className="ml-1.5 text-[10px] text-neutral-400">{t.license}</span>
-              </span>
-            ))}
-          </div>
+          <TechStackChips items={crawlerMeta.techStack} />
         </CollapsibleSection>
 
         {/* 使用指引（解决"不知道怎么用、不知道下一步"） */}
@@ -957,25 +992,32 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
 // ============ 框架二：逆向工程 ============
 const reverseMeta: FrameworkMeta = {
   title: '逆向工程框架',
-  subtitle: '协议分析、加解密绕过。静态分析（WASM/字节码）+ 动态插桩（Frida/ptrace）双轨并行推理机。',
+  subtitle: '协议分析、加解密绕过。已交付：加密算法识别（卡方检验）+ 多层编码链分析 + 协议 DFA 归纳；静态分析（Ghidra）与动态插桩（Frida）为规划项。',
   posture: '攻防',
   capabilities: [
+    '加密算法特征向量库匹配（卡方检验，零依赖自实现）',
+    '多层编码链识别与递归解码',
+    '协议 DFA 归纳与执行（基于真实流量样本；无样本时明确报错）',
+    '符号库持久化（<AppData>/gongfang/symbols.json，跨会话复用）',
+  ],
+  capabilitiesPlanned: [
     'WASM 语义解析（wasmparser 建 CFG/DFG）',
     '常量池提取（锁定 Salt/IV）',
-    'Frida-gum 动态 Hook（SSL_write/strcmp）',
-    '协议状态机重建（PrefixSpan 序列挖掘）',
+    'Ghidra headless 静态分析（反汇编 / P-Code / CFG）——接口占位，调用返回空结果',
+    'Frida-gum 动态 Hook（SSL_write/strcmp）——接口占位',
     'SIGTRAP 反调试对抗',
     '内存快照热加载脱壳（process_vm_readv）',
-    '加密算法特征向量库匹配',
     'P-Code → Rust 伪代码翻译（AI 辅助）',
+    'petgraph 控制流反混淆（已实现，但无命令入口、生产路径未调用）',
   ],
   techStack: [
-    { name: 'petgraph', license: 'MIT' },
-    { name: 'ghidra_headless', license: 'Apache-2.0' },
-    { name: 'frida-gum', license: 'wxWindows' },
+    { name: 'petgraph', license: 'MIT', integrated: false },
+    { name: 'ghidra_headless', license: 'Apache-2.0', integrated: false },
+    { name: 'frida-gum', license: 'wxWindows', integrated: false },
+    { name: 'base64', license: 'MIT' },
     { name: 'tokio', license: 'MIT' },
   ],
-  status: '内核就绪',
+  status: '部分交付',
 };
 
 function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
@@ -1029,17 +1071,21 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     }
   }, [encInput, addLog]);
 
-  // 协议状态机：加载 DFA 图数据
+  // 协议状态机：加载 DFA 图数据（必须指定目标 —— 后端不再返回示例状态机）
   const handleProtocolGraph = useCallback(async () => {
+    const url = pUrl.trim();
+    if (!url) {
+      addLog({ action: '协议状态机', target: '—', status: 'error', detail: '请先填写目标 URL（无目标时不返回示例状态机）' });
+      return;
+    }
     setPBusy(true);
     try {
-      const url = pUrl.trim() || null;
       const g = await tauriInvoke<DfaGraph>('gongfang_protocol_graph', { url });
       setPGraph(g);
-      addLog({ action: '协议状态机', target: url || '示例', status: 'success', detail: `${g.state_count} 状态 · ${g.transition_count} 转移` });
+      addLog({ action: '协议状态机', target: url, status: 'success', detail: `${g.state_count} 状态 · ${g.transition_count} 转移` });
     } catch (e) {
       const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
-      addLog({ action: '协议状态机', target: pUrl.trim() || '示例', status: 'error', detail: msg });
+      addLog({ action: '协议状态机', target: url, status: 'error', detail: msg });
     } finally {
       setPBusy(false);
     }
@@ -1207,15 +1253,14 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         </div>
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{reverseMeta.subtitle}</p>
 
+        {/* 核心能力（已交付 / 计划中 分栏） */}
+        <CollapsibleSection title="核心能力" storageKey="fw_reverse_capabilities" defaultOpen={false} accent="info">
+          <CapabilityGrid meta={reverseMeta} />
+        </CollapsibleSection>
+
         {/* 技术选型 */}
         <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_reverse_techstack" defaultOpen={false} accent="info">
-          <div className="flex flex-wrap gap-2">
-            {reverseMeta.techStack.map((t) => (
-              <span key={t.name} className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50">
-                {t.name}<span className="ml-1.5 text-[10px] text-neutral-400">{t.license}</span>
-              </span>
-            ))}
-          </div>
+          <TechStackChips items={reverseMeta.techStack} />
         </CollapsibleSection>
 
         {/* 加密识别 */}
@@ -1409,7 +1454,7 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           right={
             pGraph && pGraph.state_count > 0 ? (
               <span className="text-[10px] text-neutral-400">
-                {pGraph.state_count} 状态 · {pGraph.transition_count} 转移{pGraph.demo ? ' · 示例' : ''}
+                {pGraph.state_count} 状态 · {pGraph.transition_count} 转移
               </span>
             ) : (
               <span className="text-[10px] text-neutral-400">未学习</span>
@@ -1423,7 +1468,7 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                 value={pUrl}
                 onChange={(e) => setPUrl(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleProtocolGraph()}
-                placeholder="目标 URL（留空展示示例）"
+                placeholder="目标 URL（必填；未学习的目标返回空图）"
                 className="flex-1 px-2.5 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
               />
               <button
@@ -1526,27 +1571,33 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
 // ============ 框架三：渗透测试 ============
 const pentestMeta: FrameworkMeta = {
   title: '渗透测试框架',
-  subtitle: '漏洞扫描、WAF 绕过。三层引擎：静态参数分析 + 动态变异 + 多层编码混淆链，语义感知 Payload 生成。',
+  subtitle: '漏洞扫描、WAF 绕过。已交付：端口扫描 + WAF/技术栈真实探测 + 多层编码变异链 + HPP/DB 载荷；OpenAPI 参数推演、PPO 自适应变异为规划项。',
   posture: '攻',
   capabilities: [
-    '参数边界推演（OpenAPI/Swagger 解析）',
-    'WAF 指纹主动探测（cf-ray/aliyun-waf）',
-    'SQL 注入编码链（URL/Unicode/双重编码/注释符）',
-    'XSS 编码链（SVG/JSFuck/HTML 实体）',
-    'RCE 编码链（Base64/变量拼接/通配符）',
-    'Transfer-Encoding chunked 分块绕过',
-    'HPP 参数污染（Tomcat vs WebLogic 差异）',
-    'JSON 不可见 Unicode 混淆',
+    '端口扫描（内置 TCP Connect；SYN 模式可选接 naabu）',
+    'WAF / 技术栈指纹真实探测（cf-ray / x-datadome 等响应头）',
+    'SQL 注入编码链（URL / Unicode / 双重编码 / 注释符）',
+    'XSS / RCE 编码链与载荷库',
+    'HPP 参数污染差异分析（Tomcat vs WebLogic）',
+    'WAF 编码变异对照实验（同一载荷逐编码族评估规则命中，属模拟非实攻）',
+    '错误页 / 常见路径 / RFC 8615 well-known 探测',
+  ],
+  capabilitiesPlanned: [
+    'OpenAPI/Swagger 参数边界推演（当前仅有路径字典中的 swagger 条目）',
     'PPO 强化学习自适应变异（AI）',
+    'Transfer-Encoding chunked 分块绕过',
+    'JSON 不可见 Unicode 混淆',
+    'nuclei / httpx 引擎接入',
+    'petgraph 攻击拓扑（已实现，但无命令入口）',
   ],
   techStack: [
     { name: 'naabu', license: 'MIT' },
-    { name: 'nuclei', license: 'MIT' },
-    { name: 'httpx', license: 'MIT' },
-    { name: 'petgraph', license: 'MIT' },
+    { name: 'nuclei', license: 'MIT', integrated: false },
+    { name: 'httpx', license: 'MIT', integrated: false },
+    { name: 'petgraph', license: 'MIT', integrated: false },
     { name: 'reqwest', license: 'MIT' },
   ],
-  status: '内核就绪',
+  status: '部分交付',
 };
 
 function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
@@ -1712,10 +1763,10 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
     try {
       const r = await tauriInvoke<HppReport>('gongfang_hpp_analyze', { response: hppInput.trim() });
       setHppResult(r);
-      addLog({ action: 'HPP 推断', status: 'success', detail: `聚合策略 ${r.aggregate}` });
+      addLog({ action: 'HPP 推断', target: 'HPP 参数污染', status: 'success', detail: `聚合策略 ${r.aggregate}` });
     } catch (e) {
       const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
-      addLog({ action: 'HPP 推断', status: 'error', detail: msg });
+      addLog({ action: 'HPP 推断', target: 'HPP 参数污染', status: 'error', detail: msg });
     } finally {
       setHppBusy(false);
     }
@@ -1799,15 +1850,14 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         </div>
         <p className="text-sm text-neutral-500 dark:text-stone-400 leading-relaxed">{pentestMeta.subtitle}</p>
 
+        {/* 核心能力（已交付 / 计划中 分栏） */}
+        <CollapsibleSection title="核心能力" storageKey="fw_pentest_capabilities" defaultOpen={false} accent="attack">
+          <CapabilityGrid meta={pentestMeta} />
+        </CollapsibleSection>
+
         {/* 技术选型 */}
         <CollapsibleSection title="技术选型（全 MIT 协议，替代 NPSL/GPL）" storageKey="fw_pentest_techstack" defaultOpen={false} accent="attack">
-          <div className="flex flex-wrap gap-2">
-            {pentestMeta.techStack.map((t) => (
-              <span key={t.name} className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50">
-                {t.name}<span className="ml-1.5 text-[10px] text-neutral-400">{t.license}</span>
-              </span>
-            ))}
-          </div>
+          <TechStackChips items={pentestMeta.techStack} />
         </CollapsibleSection>
 
         {/* 端口扫描 */}
@@ -2352,26 +2402,31 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
 // ============ 框架四：自动化测试 ============
 const automationMeta: FrameworkMeta = {
   title: '自动化测试框架',
-  subtitle: '验证码绕过、行为模拟。多模态决策体：视觉解构 + 逻辑推理 + 贝塞尔曲线行为模型 + 人类噪声注入。',
+  subtitle: '行为模拟、人机混淆。已交付：贝塞尔轨迹 + 生理噪声 + SendInput 真实 HID 注入 + 模板适应度迁移；验证码识别（OCR/滑块/语音）为规划项。',
   posture: '攻防',
   capabilities: [
+    '鼠标轨迹（三次贝塞尔 + 过冲回正，SendInput 真实注入）',
+    '生理噪声（粉红噪声 + 疲劳抖动，随拟人化等级变化）',
+    '键盘输入（正态分布按键/字符间隔）',
+    '滚轮注入（视口滚动）',
+    '行为模板 + 适应度评分与自动迁移（arc-swap 热交换）',
+    '行为基线学习 + 探针幅度自适应调整',
+  ],
+  capabilitiesPlanned: [
     '图形验证码 OCR（Tesseract + imageproc 降噪）',
     '滑块/点选验证码（YOLOv8 ONNX 定位）',
-    '鼠标轨迹（三次贝塞尔 + 布朗运动噪声）',
-    '键盘输入（正态分布延迟 + 误触纠错）',
-    '视口非匀速平滑滚动',
-    'Ticket 窗口期预测复用',
     '语音验证码旁路（Twilio + Whisper）',
-    'Canvas 像素噪点反检测',
     'VLM 语义验证码推理（AI）',
+    'Ticket 窗口期预测复用',
+    '按键误触纠错',
+    'Canvas 像素噪点反检测（现由爬虫 CDP 脚本承担）',
   ],
   techStack: [
     { name: 'winapi (SendInput)', license: 'MIT' },
     { name: 'arc-swap', license: 'MIT/Apache-2.0' },
     { name: 'tokio', license: 'MIT' },
-    { name: 'petgraph', license: 'MIT' },
   ],
-  status: '内核就绪',
+  status: '部分交付',
 };
 
 function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
@@ -2704,15 +2759,14 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           </div>
         </CollapsibleSection>
 
+        {/* 核心能力（已交付 / 计划中 分栏） */}
+        <CollapsibleSection title="核心能力" storageKey="fw_automation_capabilities" defaultOpen={false} accent="info">
+          <CapabilityGrid meta={automationMeta} />
+        </CollapsibleSection>
+
         {/* 技术选型 */}
         <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_automation_techstack" defaultOpen={false} accent="info">
-          <div className="flex flex-wrap gap-2">
-            {automationMeta.techStack.map((t) => (
-              <span key={t.name} className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50">
-                {t.name}<span className="ml-1.5 text-[10px] text-neutral-400">{t.license}</span>
-              </span>
-            ))}
-          </div>
+          <TechStackChips items={automationMeta.techStack} />
         </CollapsibleSection>
 
         {/* 拟人化等级控制 */}
@@ -2984,20 +3038,21 @@ export { CrawlerPanel, ReversePanel, PentestPanel, AutomationPanel, GatewayPanel
 // ============ 框架五：API 网关 ============
 const gatewayMeta: FrameworkMeta = {
   title: 'API 网关框架',
-  subtitle: '自适应流量整形器。节点信誉矩阵 + Poisson 间隔 + 头序随机化 + Payload 混淆 + 预测性故障转移，让所有流量看起来像正常业务聚合。',
+  subtitle: '自适应流量整形器。节点信誉矩阵 + Poisson 间隔 + 头序随机化 + Payload 混淆 + 预测性故障转移；其中选路与间隔整形已进入爬虫抓取主链路，头序/熵/混淆当前经面板与命令使用（可导出 curl）。',
   posture: '攻防',
   capabilities: [
     '节点信誉矩阵（错误率 + EWMA RTT + 梯度惩罚）',
     'N+1 冗余池（备用节点 ≥ 活跃 50%）',
     '预测性故障转移（RTT 梯度递增 → 提前切换）',
-    'Poisson 间隔生成器（突发-静默模式模拟人类浏览）',
-    'HTTP 头序随机化（对齐 Chrome/Firefox/Safari 高频分布）',
-    'JSON Payload 混淆（冗余字段 + 字段顺序随机化）',
-    '请求熵监控器（Shannon 熵低于阈值时自动注入假请求）',
+    'Poisson 间隔生成器（突发-静默模式；间隔整形已进抓取主链路）',
+    'HTTP 头序随机化（对齐 Chrome/Firefox/Safari 高频分布；经面板导出，未进主链路）',
+    'JSON Payload 混淆（冗余字段 + 字段顺序随机化；经面板导出，未进主链路）',
+    '请求熵监控器（Shannon 熵低于阈值时给出注入建议）',
     'OS 指纹加权随机（Win+Chrome 65% / macOS+Safari 15% / ...）',
     'arc-swap 策略热交换（@rotate/@throttle 亚毫秒级切换）',
     'JSON 快照恢复（灾难性故障 < 100ms 重建）',
   ],
+  capabilitiesPlanned: [],
   techStack: [
     { name: 'arc-swap', license: 'MIT' },
     { name: 'parking_lot', license: 'Apache-2.0' },
@@ -3005,7 +3060,7 @@ const gatewayMeta: FrameworkMeta = {
     { name: 'serde', license: 'MIT' },
     { name: 'xorshift64*', license: '内置' },
   ],
-  status: '内核就绪',
+  status: '已交付',
 };
 
 // 路由模式徽标配色
@@ -3238,13 +3293,7 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
 
         {/* 技术选型 */}
         <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_gateway_techstack" defaultOpen={false} accent="defense">
-          <div className="flex flex-wrap gap-2">
-            {gatewayMeta.techStack.map((t) => (
-              <span key={t.name} className="px-2.5 py-1 rounded-lg text-xs bg-black/[0.04] dark:bg-white/[0.05] text-neutral-600 dark:text-stone-300 border border-black/5 dark:border-stone-700/50">
-                {t.name}<span className="ml-1.5 text-[10px] text-neutral-400">{t.license}</span>
-              </span>
-            ))}
-          </div>
+          <TechStackChips items={gatewayMeta.techStack} />
         </CollapsibleSection>
 
         {/* 错误提示 */}
@@ -3417,7 +3466,8 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                 载入示例
               </button>
             </div>
-            <p className="text-[10px] text-neutral-400">JSON 数组：`[{url, region, error_rate, ewma_rtt, rtt_gradient}]`，按信誉选出非故障最高分节点。</p>
+            {/* 说明文字必须包成字符串：直接写 {} 会被当成 JSX 表达式（逗号运算符 → 只渲染最后一项） */}
+            <p className="text-[10px] text-neutral-400">{'JSON 数组：[{url, region, error_rate, ewma_rtt, rtt_gradient}]，按信誉选出非故障最高分节点。'}</p>
             {routeResult && (
               <div className="space-y-1">
                 <div className="flex items-center gap-2 text-xs">
@@ -3851,16 +3901,9 @@ function GatewayPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         {/* P1：策略历史时间轴（订阅 strategy_committed 事件 + 拉取历史） */}
         <GatewayStrategyHistory />
 
-        {/* 核心能力清单 */}
+        {/* 核心能力清单（已交付 / 计划中 分栏） */}
         <CollapsibleSection title="核心能力" storageKey="fw_gateway_capabilities" defaultOpen={false} accent="defense">
-          <div className="grid grid-cols-2 gap-2">
-            {gatewayMeta.capabilities.map((cap) => (
-              <div key={cap} className="flex items-start gap-2 text-[13px] text-neutral-600 dark:text-stone-300">
-                <span className="inline-block w-1 h-1 mt-1.5 rounded-full bg-neutral-400 shrink-0" />
-                <span>{cap}</span>
-              </div>
-            ))}
-          </div>
+          <CapabilityGrid meta={gatewayMeta} />
         </CollapsibleSection>
       </div>
     </div>
