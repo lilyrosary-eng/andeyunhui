@@ -158,7 +158,7 @@ pub struct ProbeResult {
 /// 实现方可以：
 /// - 通过 reqwest 发送 HTTP/WebSocket 探测
 /// - 通过 raw socket 发送二进制协议探测
-/// - 通过 frida-gum Hook 目标函数模拟输入
+/// - 通过真实流量样本归纳（主动探测 + 响应聚类）
 pub trait ProbeOracle {
     fn probe(&mut self, input: &[u8]) -> ProbeResult;
 }

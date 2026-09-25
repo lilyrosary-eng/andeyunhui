@@ -2,8 +2,8 @@
 import React from "react";
 // 攻防模块 · 四大框架面板
 // 爬虫框架：内核已就绪，接入实际 Tauri 命令（启动/停止/状态/指令注入）。
-// 逆向导：符号库/协议图/二进制静态分析（内置轨）已接入 Tauri 命令；
-// Ghidra 深度轨与 Frida 动态插桩仍为规划项（UI 中如实列在「计划中」）。
+// 逆向导：符号库/协议图/二进制静态分析（内置轨，含 WASM）已接入 Tauri 命令；
+// 动态插桩（Frida 等）已明确不做（LGPL 系原生库与本项目许可偏好冲突），不再列为待办。
 const { useState, useEffect, useCallback } = React;
 
 import type { AuditInput } from './audit';
@@ -1035,7 +1035,7 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
 // ============ 框架二：逆向工程 ============
 const reverseMeta: FrameworkMeta = {
   title: '逆向工程框架',
-  subtitle: '协议分析、加解密绕过。已交付：加密算法识别（卡方检验）+ 多层编码链分析 + 协议 DFA 归纳 + 本地二进制真实反汇编（内置轨）；Ghidra 深度轨与 Frida 插桩为规划项。',
+  subtitle: '协议分析、加解密绕过。已交付：加密算法识别（卡方检验）+ 多层编码链分析 + 协议 DFA 归纳 + 本地二进制真实反汇编 / WASM 结构解析（内置轨）。动态插桩不做（许可证偏好），Ghidra 深度轨按需再接入。',
   posture: '攻防',
   capabilities: [
     '加密算法特征向量库匹配（卡方检验，零依赖自实现）',
@@ -1049,8 +1049,7 @@ const reverseMeta: FrameworkMeta = {
     '符号库持久化（<AppData>/gongfang/symbols.json，跨会话复用）',
   ],
   capabilitiesPlanned: [
-    'Ghidra headless 深度轨（P-Code IR / 反汇编 / 跨指令集）——接口占位，调用返回空结果',
-    'Frida-gum 动态 Hook（SSL_write/strcmp）——接口占位',
+    'Ghidra headless 深度轨（P-Code IR / 跨指令集）——按需接入：内置轨已覆盖 x86/x64 反汇编/CFG/常量池，接口与路径解析已对齐',
     'SIGTRAP 反调试对抗',
     '内存快照热加载脱壳（process_vm_readv）',
     'P-Code → Rust 伪代码翻译（AI 辅助）',
@@ -1064,7 +1063,6 @@ const reverseMeta: FrameworkMeta = {
     { name: 'base64', license: 'MIT' },
     { name: 'tokio', license: 'MIT' },
     { name: 'ghidra_headless', license: 'Apache-2.0', integrated: false },
-    { name: 'frida-gum', license: 'wxWindows', integrated: false },
   ],
   status: '部分交付',
 };

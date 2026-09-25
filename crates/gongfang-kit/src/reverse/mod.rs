@@ -5,7 +5,9 @@
 //! - 维度二控制流幽灵重构（Intel PT/mprotect 脏页）→ 降级（删 Intel PT/mprotect，保留图论反混淆）
 //! - 维度三白盒加密代数击穿（DFA/Gröbner/SAT）→ 降级（删 DFA/Gröbner，保留卡方检验+特征向量库）
 //! - 维度四协议状态机文法归纳（L*算法）→ 保留（纯算法，桌面可行，核心价值）
-//! - 维度五幽灵调试（ptrace/eBPF/uprobe）→ 删除（Linux 专属，Windows 用 VEH/frida-gum 后续接入）
+//! - 维度五幽灵调试（ptrace/eBPF/uprobe）→ **删除且不再规划**：Linux 专属，且 Windows 上的
+//!   跨平台动态插桩方案（frida-gum）为 LGPL 系（wxWindows）原生库，与本项目「优先 MIT、
+//!   避免传染性许可」的取舍冲突，故本框架不做动态插桩（能力清单已同步移除该宣称）。
 //! - 维度六跨指令集IR（自建SSA）→ 降级（删自建IR，用 ghidra_headless P-Code，符号持久化 serde JSON）
 //!
 //! 务实实现：
@@ -18,8 +20,9 @@
 //! - wasm.rs：WebAssembly 结构解析轨（wasmparser：节表/函数规模/控制块/调用/数据段常量池）；
 //!   由 disasm.rs 按 `\0asm` magic 分发，与反汇编轨并列
 //! - static_analysis.rs：ghidra_headless **深度轨**接口（可选外部进程，提供 P-Code IR
-//!   与跨指令集分析；未安装时如实回落内置轨）
-//! - dynamic.rs：frida-gum 动态插桩接口占位（后续接入）
+//!   与跨指令集分析）。**暂不接入**（已定：内置轨覆盖 x86/x64 反汇编/CFG/常量池，
+//!   深度轨仅在需要 P-Code IR 或 ARM 等架构时才有增量价值）；接口与路径解析已对齐，
+//!   需要时把 Ghidra 放进 external-deps/全局/ghidra 或设 GHIDRA_HEADLESS 即可启用。
 
 pub mod crypto;
 pub mod protocol;
@@ -39,8 +42,6 @@ pub mod wasm;
 
 #[cfg(feature = "reverse")]
 pub mod static_analysis;
-#[cfg(feature = "reverse")]
-pub mod dynamic;
 
 use std::sync::Arc;
 use crate::kernel::reward::RewardSignal;
