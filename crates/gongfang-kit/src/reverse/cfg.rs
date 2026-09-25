@@ -16,6 +16,12 @@
 //! 原理：OLLVM 控制流平坦化将所有基本块重定向到一个中央分发块，
 //! 分发块会成为所有路径的必经节点，介数中心性极高。
 //! 真实业务逻辑节点的介数中心性远低于分发块。
+//!
+//! 接入状态（如实标注，勿当成已交付能力）：**尚无命令入口、生产路径未调用**。
+//! 前置依赖是 Ghidra 静态分析（`static_analysis.rs` 目前是接口占位、返回空结果），
+//! 没有 CFG 输入源就没有调用意义；本文件保留是因为它是该路径的构件
+//! （`BasicBlock` 被 `static_analysis.rs` 的 `StaticAnalysisResult` 引用），
+//! 且算法真实自包含、零运行时开销。UI「逆向框架」已把它列为「计划中」。
 
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::{Deserialize, Serialize};

@@ -12,7 +12,6 @@
 //! 响应态势矩阵（对应 03 文档增强3）：根据响应特征自动调整策略
 //! 指纹一致性校验（对应 03 文档增强2）：UA/WebGL/locale/hardwareConcurrency 多信号一致
 
-pub mod immortal;
 pub mod pool;
 pub mod queue;
 pub mod scheduler;
@@ -292,6 +291,17 @@ struct RequestShaping {
     timeout_ms: u64,
     /// 路由模式名（日志/审计）
     routing: &'static str,
+    /// 建议请求头顺序（仅 rustls stealth 通道生效）。
+    /// impersonate 通道不得使用——`--impersonate` 自带的头序必须与指纹自洽，
+    /// 从外部重排会制造「指纹与头序不符」的更强特征。
+    header_order: Vec<String>,
+    /// 是否处于突发期（Poisson 突发-静默；间隔已体现在 `interval_ms`，此处仅供日志/审计）
+    in_burst: bool,
+    /// 会话熵值与「是否需要假请求」建议。
+    /// ⚠ 仅记录与告警，**不自动向目标注入假请求**：那等于模块自行决定对第三方目标
+    /// 追加流量，越过「只提供能力、不做目标决策」的边界，也与「不洪泛」相冲突。
+    entropy: f64,
+    needs_noise: bool,
 }
 
 /// 默认请求超时（未被网关整形影响时保持既有行为）
@@ -323,6 +333,10 @@ fn request_shaping(_s: &Strategy) -> RequestShaping {
             interval_ms: if direct { 0 } else { advice.shaping.interval_ms },
             timeout_ms,
             routing: advice.routing.as_str(),
+            header_order: if direct { Vec::new() } else { advice.shaping.header_order.clone() },
+            in_burst: advice.shaping.in_burst,
+            entropy: advice.shaping.current_entropy,
+            needs_noise: advice.shaping.needs_noise,
         }
     }
     #[cfg(not(feature = "gateway"))]
@@ -333,6 +347,10 @@ fn request_shaping(_s: &Strategy) -> RequestShaping {
             interval_ms: 0,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             routing: "direct",
+            header_order: Vec::new(),
+            in_burst: false,
+            entropy: 0.0,
+            needs_noise: false,
         }
     }
 }
@@ -434,7 +452,10 @@ async fn fetch_once(
     let mut req = client.get(url);
     if shaping.stealth {
         // Proxy/Stealth：浏览器同构头集合（UA/Accept/Language/Encoding/Client Hints 自洽）
-        for (k, v) in stealth::headers_for(tls_profile).pairs() {
+        // 头序按网关建议重排（实测 reqwest/hyper 按插入顺序发送，故该整形真实生效；
+        // Host/Content-Length 等由 hyper 自行追加到最后，属正常行为）
+        let ordered = order_headers(stealth::headers_for(tls_profile).pairs(), &shaping.header_order);
+        for (k, v) in ordered {
             req = req.header(k, v);
         }
         // 无 Referer 时补搜索引擎来源，贴近自然流量分布
@@ -461,13 +482,58 @@ async fn fetch_once(
     }
 }
 
+/// 按网关建议的头序重排请求头
+///
+/// 建议中未出现的头按原有相对顺序追加到末尾（保证不丢头）；
+/// `header_order` 为空表示不整形（Direct 模式）。
+fn order_headers(
+    pairs: Vec<(&'static str, &'static str)>,
+    order: &[String],
+) -> Vec<(&'static str, &'static str)> {
+    if order.is_empty() {
+        return pairs;
+    }
+    let mut out: Vec<(&'static str, &'static str)> = Vec::with_capacity(pairs.len());
+    for want in order {
+        for p in &pairs {
+            if p.0.eq_ignore_ascii_case(want.as_str()) {
+                out.push(*p);
+            }
+        }
+    }
+    for p in pairs {
+        if !out.iter().any(|x| x.0.eq_ignore_ascii_case(p.0)) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// 把 URL 归一成「请求模式」喂给网关熵监控器
+///
+/// 目的：让会话熵反映真实的路径分布，而不是恒为 0（此前爬虫从不记录，
+/// 导致 `needs_noise` 永远不可能由真实流量触发）。
+/// 归一：去 query/fragment → 取前 3 段路径 → 数字段折叠为 `#`（`/user/123` 与 `/user/456` 视为同模式）。
+#[cfg(feature = "gateway")]
+fn request_pattern(u: &url::Url) -> String {
+    let mut segs: Vec<String> = Vec::new();
+    for seg in u.path().split('/').filter(|s| !s.is_empty()).take(3) {
+        if seg.chars().all(|c| c.is_ascii_digit()) {
+            segs.push("#".to_string());
+        } else {
+            segs.push(seg.to_ascii_lowercase());
+        }
+    }
+    format!("/{}", segs.join("/"))
+}
+
 /// 抓取单个 URL：记录奖励/态势，提取标题与同域链接并递归入队，推送 CrawlResult 事件。
 ///
-/// 请求链路（P0 网关接线）：
-/// 1. 取网关建议 → 决定路由模式 / 整形间隔 / 隐身头 / 超时
+/// 请求链路（P0 网关接线 + C 阶段整形下沉）：
+/// 1. 取网关建议 → 决定路由模式 / 整形间隔 / 隐身头 / 请求头序 / 超时
 /// 2. 选路：网关活跃节点 → 爬虫自有代理池 → 直连
 /// 3. 失败换代理重试（仅代理链路故障才标记该代理死亡，目标拒绝不牵连代理）
-/// 4. 结果回写网关健康度，驱动故障转移
+/// 4. 结果回写网关健康度，驱动故障转移；请求模式喂给熵监控器
 async fn crawl_fetch(raw_url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSignal>) -> bool {
     // URL 规范化兜底：队列中可能混入裸域/相对链接，统一补 scheme 后再请求
     let url = crate::normalize_url(raw_url);
@@ -475,9 +541,26 @@ async fn crawl_fetch(raw_url: &str, depth: u32, s: &Strategy, reward: &Arc<Rewar
     let shaping = request_shaping(s);
 
     // 整形间隔：Proxy/Stealth 下平滑请求时序（Direct 为 0，不引入额外延迟）
+    // 该间隔由网关的 Poisson 突发-静默模型给出（突发期 ~200ms，静默期数秒）
     if shaping.interval_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(shaping.interval_ms)).await;
     }
+
+    // 熵监控：把本次请求模式计入会话分布。
+    // needs_noise 只记日志告警，**不自动注入假请求**（见 RequestShaping 字段说明）。
+    #[cfg(feature = "gateway")]
+    if let Ok(u) = url::Url::parse(&url) {
+        crate::gateway::shaping::record_request_pattern(&request_pattern(&u));
+    }
+    log::debug!(
+        "[crawler] 整形落地: routing={} interval={}ms burst={} entropy={:.2} needs_noise={} 头序={}项",
+        shaping.routing,
+        shaping.interval_ms,
+        shaping.in_burst,
+        shaping.entropy,
+        shaping.needs_noise,
+        shaping.header_order.len()
+    );
 
     let mut last_err: Option<String> = None;
 
