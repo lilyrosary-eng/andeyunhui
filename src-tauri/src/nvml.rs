@@ -99,6 +99,9 @@ fn load() -> Option<Nvml> {
             let mut buf = [0i8; NAME_BUF];
             let ret = get_name(dev, buf.as_mut_ptr(), NAME_BUF as u32);
             let name = if ret == 0 {
+                // 强制 NUL 结尾：万一驱动把 128 字节写满且不带终止符，
+                // CStr::from_ptr 会顺着内存越界读到 0xC0000005。多写一个 0 即可消除该风险。
+                buf[NAME_BUF - 1] = 0;
                 std::ffi::CStr::from_ptr(buf.as_ptr())
                     .to_string_lossy()
                     .to_string()

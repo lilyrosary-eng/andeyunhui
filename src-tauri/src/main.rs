@@ -231,6 +231,29 @@ fn get_resource_usage() -> ResourceUsage {
         // 去掉结尾反斜杠再转小写即为实例名。没有对应实例的卷（如无盘符的隐藏卷）保持 None，
         // 前端展示「—」而不是伪造一个 0。
         let ios = crate::hw_metrics::disk_io(sample.as_ref());
+        // 首次采集成功后打一条一次性诊断日志：把每块显卡的读数与磁盘实例名写进日志，
+        // 便于真机上直接核对「GPU 连的是哪块卡」「分区是否匹配上了 LogicalDisk 实例」，
+        // 不必靠 UI 反推后端到底采到了什么。
+        static RES_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if RES_LOGGED.set(()).is_ok() {
+            for g in &gpus {
+                log::info!(
+                    "[RES] GPU「{}」util={:?}% 显存={:?}/{:?}KB 频率={:?}MHz 功耗={:?}W",
+                    g.name,
+                    g.util_percent,
+                    g.vram_used_kb,
+                    g.vram_total_kb,
+                    g.clock_mhz,
+                    g.power_w
+                );
+            }
+            log::info!(
+                "[RES] CPU 频率={:?}MHz 功耗={:?}W | 磁盘IO实例={:?}",
+                cpu_extra.freq_mhz,
+                cpu_extra.power_w,
+                ios.iter().map(|x| x.instance.as_str()).collect::<Vec<_>>()
+            );
+        }
         for d in disks.iter_mut() {
             let inst = d.mount.trim_end_matches('\\').to_lowercase();
             if let Some(io) = ios.iter().find(|x| x.instance == inst) {

@@ -144,7 +144,7 @@ pub fn sample_all() -> Option<Sample> {
     if !s.collect() {
         return None;
     }
-    Some(Sample {
+    let sample = Sample {
         gpu_engine: s.read(IDX_GPU_ENGINE),
         gpu_vram: s.read(IDX_GPU_VRAM),
         cpu_power: s.read(IDX_CPU_POWER),
@@ -152,7 +152,25 @@ pub fn sample_all() -> Option<Sample> {
         disk_read: s.read(IDX_DISK_READ),
         disk_write: s.read(IDX_DISK_WRITE),
         disk_idle: s.read(IDX_DISK_IDLE),
-    })
+    };
+    // 首次采样成功后打一条一次性诊断日志，把每个槽位的实例数写进日志 ——
+    // 「某个指标一直是 N/A」时可直接对照本行判断是「计数器在本机不存在」还是「采集逻辑出错」。
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    if LOGGED.set(()).is_ok() {
+        let n = |v: &Option<Vec<(String, f64)>>| v.as_ref().map_or(-1, |x| x.len() as i32);
+        log::info!(
+            "[RES] PDH 就绪: gpu_engine={} gpu_vram={} cpu_power={} cpu_perf={} \
+             disk_read={} disk_write={} disk_idle={}（-1 = 该计数器在本机不可用）",
+            n(&sample.gpu_engine),
+            n(&sample.gpu_vram),
+            n(&sample.cpu_power),
+            n(&sample.cpu_perf),
+            n(&sample.disk_read),
+            n(&sample.disk_write),
+            n(&sample.disk_idle)
+        );
+    }
+    Some(sample)
 }
 
 impl PdhSession {
@@ -190,11 +208,43 @@ unsafe fn read_counter_array(counter: PDH_HCOUNTER) -> Option<Vec<(String, f64)>
     if size == 0 {
         return None;
     }
+    // 上限保护：正常实例数组远小于 1MB（本机最大的 GPU Engine 也只有 70KB）。
+    // 若句柄失效 / API 异常时 size 被填成垃圾大值，直接照它分配会触发
+    // Vec 分配失败 → handle_alloc_error → abort。超过上限一律按「不可用」处理。
+    const MAX_BYTES: u32 = 16 * 1024 * 1024;
+    if size > MAX_BYTES {
+        return None;
+    }
     let item_size = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>().max(1);
-    let cap = (size as usize) / item_size;
+    // ⚠⚠⚠ 必须**向上取整**（血案，勿改回除法）⚠⚠⚠
+    //
+    // PDH 返回的 size 是「条目数组 + 实例名字符串」的**总字节数** —— item 里的 szName 指针
+    // 指向同一块 buffer 内部紧跟在数组之后的字符串，所以 size 几乎不可能是 item_size(24) 的整数倍。
+    //
+    // 若写成 `size / item_size`（向下取整），分配的字节数会比 PDH 认定的可用空间少
+    // `size % item_size` 字节；而我们又把 size 原样作为 *lpdwBufferSize 传回去，
+    // PDH 判定「空间刚好够」→ **静默越界写**，不报 PDH_MORE_DATA、返回值仍是 0。
+    //
+    // 本机实测（哨兵字节检测，7 个计数器全中）：
+    //   GPU Engine                 size=71498  buf=71496  越界  2B
+    //   GPU Adapter Memory         size=276    buf=264    越界 12B   ← 溢出内容 "h\0y\0s\0_\00\0"
+    //   Energy Meter               size=280    buf=264    越界 16B   ← 溢出内容 "\0\0_\0T\0o\0t\0a\0l\0\0\0"
+    //   % Processor Performance    size=38     buf=24     越界 14B   ← 溢出内容 "_\0T\0o\0t\0a\0l\0\0\0"
+    //   LogicalDisk ×3             size=322    buf=312    越界 10B
+    // 溢出内容正是实例名 "_Total" 的宽字符 —— 确凿证明写到了 buffer 之外。
+    //
+    // 每次采样连续 7 次踩坏相邻堆块头 ⇒ 点开资源监视即 0xC0000005
+    // (STATUS_ACCESS_VIOLATION)。向上取整保证 `cap * item_size >= size`，缓冲必定够。
+    let cap = (size as usize + item_size - 1) / item_size;
     if cap == 0 {
         return None;
     }
+    debug_assert!(
+        cap * item_size >= size as usize,
+        "PDH 缓冲自检失败: cap*item_size={} < size={}",
+        cap * item_size,
+        size
+    );
     let mut buf: Vec<PDH_FMT_COUNTERVALUE_ITEM_W> = Vec::new();
     // PDH_FMT_COUNTERVALUE_ITEM_W 自带 Default（全零），无需手工构造 union 字段
     buf.resize_with(cap, PDH_FMT_COUNTERVALUE_ITEM_W::default);
@@ -232,8 +282,11 @@ unsafe fn pwstr_to_string_lower(p: windows::core::PWSTR) -> String {
     if p.0.is_null() {
         return String::new();
     }
+    // 长度上限做防御：性能计数器实例名远短于 512 宽字符（路径总长本身有 1024 限制），
+    // 万一 szName 指向的不是 NUL 结尾串，也不至于顺着内存无限读到访问违例。
+    const MAX: usize = 512;
     let mut len = 0usize;
-    while *p.0.add(len) != 0 {
+    while len < MAX && *p.0.add(len) != 0 {
         len += 1;
     }
     String::from_utf16_lossy(std::slice::from_raw_parts(p.0, len)).to_lowercase()
