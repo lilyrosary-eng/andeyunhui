@@ -1,7 +1,7 @@
 /// <reference path="../../../global.d.ts" />
 // 攻防模块 · P2 深度专业组件
 // 三大专业级组件：
-//   DisassemblyView — 逆向反汇编视图（IDA/Ghidra 风格符号表 + 伪反汇编预览）
+//   DisassemblyView — 符号表 / 符号明细（只呈现真实符号元信息，不含反汇编字节流）
 //   ScriptEditor    — CodeMirror 6 脚本编辑器（语法高亮 + 模板插入 + localStorage 持久化）
 //   ExportButton    — 会话报告导出（聚合多源数据 → JSON Blob 下载）
 // 设计：复用宿主 React + 动态 import CodeMirror（避免首屏负担），所有数据本地聚合
@@ -32,16 +32,17 @@ const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): 
   hostApi.invoke(cmd, args) as Promise<T>;
 
 // =====================================================================
-// 组件 1：DisassemblyView — 逆向反汇编视图
+// 组件 1：DisassemblyView — 符号表 / 符号明细
 // =====================================================================
 // 接收 SymbolSummary[]（与 frameworks.tsx 中 SymbolSummary 类型对齐）
 // 左侧：按 url 分组的符号列表（可折叠）
-// 右侧：选中符号后渲染反汇编表格（地址 | 字节码 | 指令 | 注释）
+// 右侧：选中符号后展示其真实元信息（地址 | 类型 | 后端返回的 meta 键值）
 //
-// 说明：当前后端 gongfang_symbols 返回的是已识别符号元信息（地址/类型/元数据），
-// 不含真实反汇编字节流。本视图基于符号地址 hash 生成确定性伪字节流 + 通用
-// x86-64 prologue/epilogue 指令模板，提供专业级可视化展示。
-// 接入真实反汇编后端（如 iced-x86）后，可直接替换 generatePseudoAsm 函数。
+// 说明（重要）：后端 gongfang_symbols 返回的是已识别符号的元信息（地址/类型/元数据），
+// **不含反汇编字节流**。本组件早期版本会按地址 hash「生成」伪字节流 + x86-64 指令模板来
+// 填充右侧表格——那是凭空捏造的展示数据，已整体移除：面板只呈现真实符号数据，
+// 需要真实反汇编时走逆向面板的「二进制静态分析（内置轨）」区块（gongfang_binary_analyze，
+// iced-x86 实测反汇编）。
 
 interface SymbolSummaryLike {
   url: string;
@@ -63,79 +64,8 @@ function symKindMeta(kind: string) {
   return SYM_KIND_META[kind] ?? { label: kind, cls: 'bg-neutral-500/15 text-neutral-500 dark:text-stone-400' };
 }
 
-// 基于地址 hash 生成确定性伪字节流（同地址每次结果一致）
-function hashSeed(addr: number): number {
-  let h = 0x811c9dc5;
-  let x = addr;
-  while (x !== 0) {
-    h ^= x & 0xff;
-    h = Math.imul(h, 0x01000193);
-    x = Math.floor(x / 256);
-  }
-  return h >>> 0;
-}
-
-interface AsmLine {
-  addr: number;
-  bytes: number[];
-  insn: string;
-  comment: string;
-}
-
-// 基于符号地址生成 x86-64 风格伪反汇编（prologue + body + epilogue）
-function generatePseudoAsm(sym: SymbolSummaryLike): AsmLine[] {
-  const base = sym.address;
-  const seed = hashSeed(base);
-  const bodyLen = 6 + (seed % 12); // 6-17 条指令
-  const lines: AsmLine[] = [];
-  let off = 0;
-
-  const push = (bytes: number[], insn: string, comment: string) => {
-    lines.push({ addr: base + off, bytes, insn, comment });
-    off += bytes.length;
-  };
-
-  // prologue
-  push([0x55], 'push rbp', '保存帧指针');
-  push([0x48, 0x89, 0xe5], 'mov rbp, rsp', '建立新栈帧');
-  const stackSize = ((seed % 8) + 1) * 16;
-  push([0x48, 0x83, 0xec, stackSize], `sub rsp, 0x${stackSize.toString(16)}`, `开辟 ${stackSize}B 栈空间`);
-
-  // body（基于 seed 生成不同指令序列）
-  const argRegs = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9'];
-  for (let i = 0; i < bodyLen; i++) {
-    const choice = (seed + i * 17) % 6;
-    if (choice === 0) {
-      const reg = argRegs[(seed + i) % argRegs.length];
-      push([0x48, 0x89, 0x7d, 0xf8 - i * 4], `mov [rbp-0x${(i * 4 + 8).toString(16)}], ${reg}`, `保存参数 ${i + 1}`);
-    } else if (choice === 1) {
-      push([0x48, 0x8b, 0x55, 0xf8 - i * 4], `mov rdx, [rbp-0x${(i * 4 + 8).toString(16)}]`, '加载局部变量');
-    } else if (choice === 2) {
-      const imm = (seed + i * 31) & 0xff;
-      push([0x48, 0xc7, 0x45, 0xf0, imm], `mov qword [rbp-0x${(i * 4 + 16).toString(16)}], 0x${imm.toString(16)}`, '写入立即数');
-    } else if (choice === 3) {
-      push([0xe8, 0x00, 0x00, 0x00, 0x00], `call <relative>`, '函数调用（相对地址）');
-    } else if (choice === 4) {
-      push([0x48, 0x39, 0xd0], 'cmp rax, rdx', '比较');
-    } else {
-      push([0x74, 0x05], `je +5`, '条件跳转');
-    }
-  }
-
-  // epilogue
-  push([0x48, 0x83, 0xc4, stackSize], `add rsp, 0x${stackSize.toString(16)}`, '回收栈空间');
-  push([0x5d], 'pop rbp', '恢复帧指针');
-  push([0xc3], 'ret', '返回');
-
-  return lines;
-}
-
 function fmtHex(n: number, width = 8): string {
   return '0x' + n.toString(16).padStart(width, '0');
-}
-
-function fmtBytes(bytes: number[]): string {
-  return bytes.map((b) => b.toString(16).padStart(2, '0')).join(' ');
 }
 
 export function DisassemblyView({ symbols }: { symbols: SymbolSummaryLike[] }) {
@@ -160,7 +90,10 @@ export function DisassemblyView({ symbols }: { symbols: SymbolSummaryLike[] }) {
     }
   }, [symbols, selected]);
 
-  const asmLines = useMemo(() => (selected ? generatePseudoAsm(selected) : []), [selected]);
+  const metaEntries = useMemo(
+    () => (selected ? Object.entries(selected.meta ?? {}) : []),
+    [selected],
+  );
 
   const toggleUrl = useCallback((url: string) => {
     setCollapsedUrls((prev) => {
@@ -173,19 +106,19 @@ export function DisassemblyView({ symbols }: { symbols: SymbolSummaryLike[] }) {
 
   return (
     <CollapsibleSection
-      title="反汇编视图"
+      title="符号表"
       storageKey="fw_reverse_disasm"
       defaultOpen={false}
       accent="info"
       right={
         <>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400">伪反汇编</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400">真实符号元信息</span>
           <span className="text-[10px] text-neutral-400">{symbols.length} 符号 · {grouped.length} 来源</span>
         </>
       }
     >
       {symbols.length === 0 ? (
-        <p className="text-[11px] text-neutral-400 text-center py-4">暂无符号数据。执行符号库查询后，选中符号即可查看反汇编预览。</p>
+        <p className="text-[11px] text-neutral-400 text-center py-4">暂无符号数据。执行符号库查询后，选中符号即可查看其元信息。</p>
       ) : (
         <div className="grid grid-cols-[220px_1fr] gap-3 h-[360px]">
           {/* 左侧：符号列表（按 url 分组） */}
@@ -230,44 +163,45 @@ export function DisassemblyView({ symbols }: { symbols: SymbolSummaryLike[] }) {
             })}
           </div>
 
-          {/* 右侧：反汇编视图 */}
+          {/* 右侧：符号元信息 */}
           {selected ? (
-            <div className="flex flex-col overflow-hidden border border-black/5 dark:border-stone-700/50 rounded-lg bg-[#1e1e2e] dark:bg-[#0d0d14]">
+            <div className="flex flex-col overflow-hidden border border-black/5 dark:border-stone-700/50 rounded-lg">
               {/* 顶部元信息栏 */}
-              <div className="flex items-center gap-3 px-3 py-2 border-b border-white/5 bg-black/30">
-                <span className="text-xs font-mono text-sky-300">{selected.name}</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-neutral-400 font-mono">{fmtHex(selected.address)}</span>
+              <div className="flex items-center gap-3 px-3 py-2 border-b border-black/5 dark:border-stone-700/50 bg-black/[0.02] dark:bg-black/20">
+                <span className="text-xs font-mono text-sky-600 dark:text-sky-400 truncate" title={selected.name}>{selected.name}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/5 text-neutral-500 dark:text-stone-400 font-mono">{fmtHex(selected.address)}</span>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded ${symKindMeta(selected.kind).cls}`}>{symKindMeta(selected.kind).label}</span>
-                <span className="text-[10px] text-neutral-500 font-mono">size={asmLines.reduce((a, l) => a + l.bytes.length, 0)}B</span>
-                <span className="text-[10px] text-neutral-500">x86-64 · SystemV AMD64</span>
               </div>
 
-              {/* 反汇编表格 */}
-              <div className="flex-1 overflow-auto font-mono text-[11px] leading-relaxed">
-                {asmLines.map((line, i) => (
-                  <div
-                    key={i}
-                    className="grid grid-cols-[110px_180px_1fr_140px] gap-2 px-3 py-0.5 hover:bg-white/5 border-b border-white/[0.02]"
-                  >
-                    <span className="text-neutral-500">{fmtHex(line.addr)}</span>
-                    <span className="text-amber-300/80">{fmtBytes(line.bytes)}</span>
-                    <span className="text-emerald-300">{line.insn}</span>
-                    <span className="text-neutral-500 text-[10px] truncate" title={line.comment}>; {line.comment}</span>
-                  </div>
-                ))}
+              {/* 元信息表（后端 gongfang_symbols 返回的真实键值） */}
+              <div className="flex-1 overflow-auto text-[11px]">
+                {metaEntries.length === 0 ? (
+                  <p className="text-[11px] text-neutral-400 text-center py-6">该符号未携带附加元数据。</p>
+                ) : (
+                  <table className="w-full">
+                    <tbody>
+                      {metaEntries.map(([k, v]) => (
+                        <tr key={k} className="border-b border-black/[0.03] dark:border-stone-700/30">
+                          <td className="px-3 py-1.5 font-mono text-neutral-500 dark:text-stone-400 align-top whitespace-nowrap w-[140px]">{k}</td>
+                          <td className="px-3 py-1.5 font-mono text-neutral-700 dark:text-stone-300 break-all">{v}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
 
-              {/* 底部提示 */}
-              <div className="px-3 py-1.5 border-t border-white/5 bg-black/30">
-                <p className="text-[10px] text-neutral-500 leading-relaxed">
-                  伪反汇编预览：基于符号地址确定性生成的 x86-64 指令模板（prologue/body/epilogue）。
-                  接入 iced-x86 真实反汇编后端后，可替换为真实字节流解码结果。
+              {/* 底部提示：指向真实反汇编通道 */}
+              <div className="px-3 py-1.5 border-t border-black/5 dark:border-stone-700/50 bg-black/[0.02] dark:bg-black/20">
+                <p className="text-[10px] text-neutral-500 dark:text-stone-500 leading-relaxed">
+                  本面板只展示符号库（gongfang_symbols）返回的真实符号元信息，不含反汇编字节流。
+                  需要真实反汇编请在下方「二进制静态分析（内置轨）」填入本地二进制路径后分析（iced-x86 实测反汇编）。
                 </p>
               </div>
             </div>
           ) : (
             <div className="flex items-center justify-center border border-dashed border-black/10 dark:border-stone-700/50 rounded-lg text-xs text-neutral-400">
-              从左侧选择一个符号查看反汇编
+              从左侧选择一个符号查看元信息
             </div>
           )}
         </div>

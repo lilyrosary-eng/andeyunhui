@@ -1831,7 +1831,7 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           </div>
         </CollapsibleSection>
 
-        {/* P2：反汇编视图（IDA/Ghidra 风格符号表 + 伪反汇编预览） */}
+        {/* P2：符号表（IDA/Ghidra 风格符号列表 + 真实符号元信息；伪反汇编已移除） */}
         <DisassemblyView symbols={symbols} />
       </div>
     </div>

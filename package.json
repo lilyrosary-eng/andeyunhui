@@ -16,6 +16,7 @@
     "postinstall": "node scripts/fix-node-modules.mjs",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
+    "typecheck:plugins": "tsc -p tsconfig.plugins.json",
     "test": "vitest run",
     "test:watch": "vitest"
   },

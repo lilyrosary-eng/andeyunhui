@@ -1,0 +1,17 @@
+{
+  // 插件源码不在根 tsconfig 的覆盖范围内（根配置 exclude: plugins）：
+  // 插件各自用独立 vite（esbuild）构建，只转译不做类型检查，插件内的类型错误长期不可见。
+  // 本配置为插件源码提供类型检查入口，由 `npm run typecheck:plugins` 调用。
+  //
+  // 范围说明：当前只纳入攻防插件（plugins/茑萝/gongfang，本地主力开发模块）。
+  // 全量纳入 plugins/** 会立刻暴露其它插件的历史遗留类型错误（ai-chat / web-interface /
+  // rag / wps / 莲花 / 薄荷 共 17 处，与攻防模块无关），待逐个收敛后再扩大 include。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // 允许 Array.prototype.at 等 ES2022 运行时能力（各插件 vite 构建实际按 ESNext 转译）
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["plugins/茑萝/gongfang/src/**/*.ts", "plugins/茑萝/gongfang/src/**/*.tsx"],
+  "exclude": ["node_modules", "bundled-plugins", "got-it"]
+}

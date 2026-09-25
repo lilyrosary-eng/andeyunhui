@@ -6,6 +6,13 @@
 const React = window.__HOST_REACT__;
 const { useState, useCallback, useEffect } = React;
 
+// ============ Tauri invoke 封装 ============
+// 统一走沙箱 hostApi.invoke（已加入 pluginSandbox 白名单）。
+// 必须自带泛型：宿主声明的 invoke 返回 Promise<unknown>，内联转型后再写 invoke<T> 会报 TS2558，
+// 且返回值会被推断成 unknown，取字段时连锁报错。
+const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+  (window.__HOST_API__ as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke(cmd, args) as Promise<T>;
+
 import { CrawlerPanel, ReversePanel, PentestPanel, AutomationPanel, GatewayPanel } from './frameworks';
 import { useAuditLog, AuditLogDrawer, type AuditInput } from './audit';
 import { RiskConfirm, isDisclaimerAccepted, revokeDisclaimer } from './RiskConfirm';
@@ -155,7 +162,7 @@ function GongfangModule() {
   // Tauri invoke 封装（顶部态势感知条用，统一走沙箱 hostApi，已加入白名单）
   const fetchSituation = useCallback(async () => {
     try {
-      const s = await (window.__HOST_API__ as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke<{
+      const s = await tauriInvoke<{
         running: boolean;
         strategy: { phase: string; qps: number; generation: number };
         reward: number;

@@ -12,6 +12,13 @@ const hostApi = window.__HOST_API__;
 
 import { CollapsibleSection, useKernelRunning } from './ui';
 
+// ============ Tauri invoke 封装 ============
+// 统一走沙箱 hostApi.invoke（已加入 pluginSandbox 白名单），不直连 __TAURI_INTERNALS__。
+// 必须自带泛型：宿主声明的 invoke 返回 Promise<unknown>，直接取引用转存会丢掉泛型能力
+// （TS2558），调用方的 invoke<T> 与返回值类型推断都会失效。
+const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+  (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke(cmd, args) as Promise<T>;
+
 // ============ 通用：监听 gongfang_event 中的特定 kind ============
 function useEventFilter<T extends { kind: string; ts: number }>(
   kindFilter: string | string[],
@@ -83,7 +90,7 @@ export function CrawlerUrlQueue() {
   const [busy, setBusy] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const running = useKernelRunning();
-  const invoke = (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke;
+  const invoke = tauriInvoke;
 
   const refreshStats = useCallback(async () => {
     try {
@@ -246,7 +253,7 @@ export function CrawlerProxyPool() {
   const [proxies, setProxies] = useState<CrawlerProxyEntry[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const invoke = (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke;
+  const invoke = tauriInvoke;
 
   const refresh = useCallback(async () => {
     try {
@@ -546,8 +553,7 @@ export function GatewayStrategyHistory() {
   useEffect(() => {
     let unsub: (() => void) | null = null;
     // 拉取历史
-    (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> })
-      .invoke<StrategyEvent[]>('gongfang_events_recent', { n: 200 })
+    tauriInvoke<StrategyEvent[]>('gongfang_events_recent', { n: 200 })
       .then((hist) => {
         const filtered = (hist as StrategyEvent[]).filter((e) => (e as { kind?: string }).kind === 'strategy_committed');
         setEvents(filtered as StrategyEvent[]);
