@@ -22,6 +22,8 @@ interface CapsuleState {
   aideOpen: boolean;
   searchOpen: boolean;
   transferOpen: boolean;
+  /** 资源监视面板（独属于浮岛，主窗口资源监视走 GoldChessboardHub 的 resource tab） */
+  resourceOpen: boolean;
   /** 子面板渲染门控：从收起态展开且子面板打开时，先等 setSize 完成再渲染子面板 */
   panelReady: boolean;
   /** 保持态：鼠标离开不自动收起 */
@@ -45,6 +47,7 @@ interface CapsuleState {
   setAideOpen: (v: boolean) => void;
   setSearchOpen: (v: boolean) => void;
   setTransferOpen: (v: boolean) => void;
+  setResourceOpen: (v: boolean) => void;
   setPanelReady: (v: boolean) => void;
   setKeepOpen: (v: boolean) => void;
   /** 收起即「回到主页」：关闭搜索/对话/传输并清除保持态（aide 不在此关闭，行为同改前） */
@@ -128,6 +131,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
   aideOpen: false,
   searchOpen: false,
   transferOpen: false,
+  resourceOpen: false,
   panelReady: true,
   keepOpen: false,
 
@@ -150,6 +154,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
   setAideOpen: (aideOpen) => set({ aideOpen }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
   setTransferOpen: (transferOpen) => set({ transferOpen }),
+  setResourceOpen: (resourceOpen) => set({ resourceOpen }),
   setPanelReady: (panelReady) => set({ panelReady }),
   setKeepOpen: (keepOpen) => set({ keepOpen }),
 
@@ -159,6 +164,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
       searchOpen: false,
       chatOpen: false,
       transferOpen: false,
+      resourceOpen: false,
       keepOpen: false,
     }),
 

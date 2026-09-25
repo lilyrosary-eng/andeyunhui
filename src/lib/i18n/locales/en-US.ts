@@ -632,6 +632,20 @@ export const enUS: Record<string, string> = {
   'capsule.action.favorite': 'Favorites',
   'capsule.action.deskpet': 'Deskpet',
   'capsule.action.lyrics': 'Desktop Lyrics',
+  'capsule.action.resource': 'Resources',
+  // Capsule · resource monitor panel
+  'capsule.liveNow': 'Live',
+  'capsule.paused': 'Paused',
+  'capsule.resume': 'Resume',
+  'capsule.collecting': 'Collecting…',
+  'capsule.collectFailed': 'Collection failed',
+  'capsule.res.cpu': 'CPU',
+  'capsule.res.gpu': 'GPU',
+  'capsule.res.vram': 'VRAM',
+  'capsule.res.mem': 'Memory',
+  'capsule.res.cores': 'cores',
+  'capsule.res.unsupported': 'Not supported',
+  'capsule.res.note': 'GPU = busiest engine · VRAM = all processes',
 
   // ============ Mint · Professional Toolbox ============
   'mint.title': 'Mint',

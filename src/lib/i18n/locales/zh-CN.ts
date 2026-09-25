@@ -632,6 +632,20 @@ export const zhCN: Record<string, string> = {
   'capsule.action.favorite': '常用笔记',
   'capsule.action.deskpet': '桌宠',
   'capsule.action.lyrics': '桌面歌词',
+  'capsule.action.resource': '资源监视',
+  // 浮岛 · 资源监视面板
+  'capsule.liveNow': '实时刷新中',
+  'capsule.paused': '已暂停',
+  'capsule.resume': '继续',
+  'capsule.collecting': '正在采集…',
+  'capsule.collectFailed': '采集失败',
+  'capsule.res.cpu': 'CPU 占用',
+  'capsule.res.gpu': 'GPU 占用',
+  'capsule.res.vram': '显存占用',
+  'capsule.res.mem': '内存占用',
+  'capsule.res.cores': '核',
+  'capsule.res.unsupported': '本机不支持',
+  'capsule.res.note': 'GPU 取最忙引擎 · 显存为全机合计',
 
   // ============ 薄荷 · 专业工具箱 ============
   'mint.title': '薄荷',

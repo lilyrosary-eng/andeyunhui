@@ -162,6 +162,15 @@ export const IconDeskpet = () => (
   </svg>
 );
 
+// 资源监视：仪表盘（与侧栏 HostSidebar 的 Gauge 语义一致）
+export const IconGauge = () => (
+  <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 14l4.5-4.5" />
+    <path d="M3.5 18a9.5 9.5 0 1 1 17 0" />
+    <circle cx="12" cy="14" r="1.6" fill="currentColor" stroke="none" />
+  </svg>
+);
+
 // 时钟：自带 1s 定时器与自身 state，更新仅限本组件，父级（整棵 Capsule）不再每秒重渲染。
 // 这是外部媒体后台播放时浮窗"不丝滑"的核心修复点——此前时钟 setClock 每秒触发整树重渲染。
 export const Clock = memo(function Clock() {
@@ -188,8 +197,9 @@ export const ACTIONS = [
   { kind: 'transfer', labelKey: 'capsule.action.transfer', Icon: IconTransfer },
   { kind: 'favorite', labelKey: 'capsule.action.favorite', Icon: IconFavorite },
   { kind: 'deskpet', labelKey: 'capsule.action.deskpet', Icon: IconDeskpet },
+  { kind: 'resource', labelKey: 'capsule.action.resource', Icon: IconGauge },
 ] as const;
 
 // 动作分两层：第一排=高频（用户指定）；第二排=其余，后续排满再加「更多」二级入口
 export const ACTION_LAYER1 = ['ai', 'screenshot', 'record', 'transfer', 'dropzone', 'clipboard'] as const;
-export const ACTION_LAYER2 = ['aide', 'search', 'favorite', 'deskpet'] as const;
+export const ACTION_LAYER2 = ['aide', 'search', 'favorite', 'deskpet', 'resource'] as const;

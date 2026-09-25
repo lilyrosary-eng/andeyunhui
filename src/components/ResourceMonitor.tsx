@@ -2,6 +2,13 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 // 与后端 get_resource_usage 返回结构一致
+interface DiskUsage {
+  mount: string;
+  total_kb: number;
+  used_kb: number;
+  percent: number;
+}
+
 interface ResourceUsage {
   cpu_percent: number;
   cpu_per_core: number[];
@@ -14,6 +21,7 @@ interface ResourceUsage {
   gpu_name: string | null;
   vram_total_kb: number | null;
   vram_used_kb: number | null;
+  disks: DiskUsage[];
 }
 
 const HISTORY = 48; // 保留约 48 个采样点（~48s）用于迷你曲线
@@ -89,12 +97,13 @@ function MetricCard({ children }: { children: ReactNode }) {
   );
 }
 
-function StatHeader({ title, live }: { title: string; live: boolean }) {
+function StatHeader({ title, live, hint }: { title: string; live: boolean; hint?: string }) {
   return (
-    <div className="flex items-center justify-between">
-      <span className="text-xs font-medium text-neutral-500 dark:text-stone-400">{title}</span>
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-xs font-medium text-neutral-500 dark:text-stone-400 shrink-0">{title}</span>
+      {hint && <span className="text-[10px] text-neutral-400 dark:text-stone-500 truncate">{hint}</span>}
       {live && (
-        <span className="flex items-center gap-1 text-[10px] text-emerald-500">
+        <span className="flex items-center gap-1 text-[10px] text-emerald-500 shrink-0">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
           实时
         </span>
@@ -113,6 +122,7 @@ export function ResourceMonitor() {
   const hist = useRef({
     cpu: [] as number[],
     gpu: [] as number[],
+    vram: [] as number[],
     mem: [] as number[],
     up: [] as number[],
     down: [] as number[],
@@ -127,12 +137,15 @@ export function ResourceMonitor() {
       setError('');
       setUpdatedAt(Date.now());
       const h = hist.current;
+      const vramPct =
+        r.vram_total_kb && r.vram_used_kb != null ? (r.vram_used_kb / r.vram_total_kb) * 100 : 0;
       h.cpu.push(r.cpu_percent);
       h.gpu.push(r.gpu_percent ?? 0);
+      h.vram.push(vramPct);
       h.mem.push(r.mem_percent);
       h.up.push(r.net_up_bps);
       h.down.push(r.net_down_bps);
-      for (const k of ['cpu', 'gpu', 'mem', 'up', 'down'] as const) {
+      for (const k of ['cpu', 'gpu', 'vram', 'mem', 'up', 'down'] as const) {
         if (h[k].length > HISTORY) h[k] = h[k].slice(-HISTORY);
       }
     } catch (e) {
@@ -154,9 +167,11 @@ export function ResourceMonitor() {
   const memColor = data ? levelColor(data.mem_percent) : '#10b981';
   const gpuColor = data?.gpu_percent != null ? levelColor(data.gpu_percent) : '#10b981';
   const vramPct =
-    data && data.vram_total_kb && data.vram_used_kb
+    data && data.vram_total_kb && data.vram_used_kb != null
       ? (data.vram_used_kb / data.vram_total_kb) * 100
       : 0;
+  const VRAM_COLOR = '#8b5cf6';
+  const DISK_COLOR = '#0ea5e9';
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg fade-in">
@@ -168,7 +183,7 @@ export function ResourceMonitor() {
         <div className="flex-1 min-w-0">
           <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100">资源监视</h2>
           <p className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5 truncate">
-            CPU · GPU · 显存 · 内存 · 网络 实时占用
+            CPU · GPU · 显存 · 内存 · 硬盘 · 网络 实时占用
             {updatedAt > 0 && ` · ${new Date(updatedAt).toLocaleTimeString('zh-CN')}`}
           </p>
         </div>
@@ -201,14 +216,11 @@ export function ResourceMonitor() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             {/* CPU */}
             <MetricCard>
-              <StatHeader title="CPU 占用" live={!paused} />
+              <StatHeader title="CPU 占用" live={!paused} hint={`${data.cpu_per_core.length} 核`} />
               <div className="flex items-end gap-2">
                 <span className="text-3xl font-bold tabular-nums" style={{ color: cpuColor }}>
                   {data.cpu_percent.toFixed(1)}
                   <span className="text-base">%</span>
-                </span>
-                <span className="text-xs text-neutral-400 dark:text-stone-500 mb-1">
-                  {data.cpu_per_core.length} 核
                 </span>
               </div>
               <Bar percent={data.cpu_percent} color={cpuColor} />
@@ -226,9 +238,9 @@ export function ResourceMonitor() {
               </div>
             </MetricCard>
 
-            {/* GPU */}
+            {/* GPU 利用率（与显存分开，各自独立成卡） */}
             <MetricCard>
-              <StatHeader title="GPU 占用" live={!paused} />
+              <StatHeader title="GPU 占用" live={!paused} hint={data.gpu_name ?? undefined} />
               {data.gpu_percent != null ? (
                 <>
                   <div className="flex items-end gap-2">
@@ -236,29 +248,40 @@ export function ResourceMonitor() {
                       {data.gpu_percent.toFixed(1)}
                       <span className="text-base">%</span>
                     </span>
-                    {data.gpu_name && (
-                      <span className="text-xs text-neutral-400 dark:text-stone-500 mb-1 truncate max-w-[160px]">
-                        {data.gpu_name}
-                      </span>
-                    )}
                   </div>
                   <Bar percent={data.gpu_percent} color={gpuColor} />
                   <Sparkline data={h.gpu} color={gpuColor} max={100} />
-                  {data.vram_total_kb != null && data.vram_used_kb != null && (
-                    <div className="mt-1">
-                      <div className="flex items-center justify-between text-[11px] text-neutral-400 dark:text-stone-500 mb-1">
-                        <span>显存</span>
-                        <span>
-                          {fmtBytes(data.vram_used_kb)} / {fmtBytes(data.vram_total_kb)}（{vramPct.toFixed(0)}%）
-                        </span>
-                      </div>
-                      <Bar percent={vramPct} color="#8b5cf6" />
-                    </div>
-                  )}
+                  <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
+                    取最忙图形引擎（与任务管理器口径一致）
+                  </p>
                 </>
               ) : (
                 <div className="text-sm text-neutral-400 dark:text-stone-500 py-4">
                   本机暂不支持 GPU 计数器（N/A）
+                </div>
+              )}
+            </MetricCard>
+
+            {/* 显存占用 */}
+            <MetricCard>
+              <StatHeader title="显存占用" live={!paused} hint="全机所有进程" />
+              {data.vram_total_kb != null && data.vram_used_kb != null ? (
+                <>
+                  <div className="flex items-end gap-2 flex-wrap">
+                    <span className="text-3xl font-bold tabular-nums" style={{ color: vramPct > 85 ? '#ef4444' : vramPct > 60 ? '#f59e0b' : VRAM_COLOR }}>
+                      {vramPct.toFixed(0)}
+                      <span className="text-base">%</span>
+                    </span>
+                    <span className="text-xs text-neutral-400 dark:text-stone-500 mb-1">
+                      {fmtBytes(data.vram_used_kb)} / {fmtBytes(data.vram_total_kb)}
+                    </span>
+                  </div>
+                  <Bar percent={vramPct} color={VRAM_COLOR} />
+                  <Sparkline data={h.vram} color={VRAM_COLOR} max={100} />
+                </>
+              ) : (
+                <div className="text-sm text-neutral-400 dark:text-stone-500 py-4">
+                  本机暂不支持显存计数器（N/A）
                 </div>
               )}
             </MetricCard>
@@ -279,6 +302,31 @@ export function ResourceMonitor() {
               <Sparkline data={h.mem} color={memColor} max={100} />
             </MetricCard>
 
+            {/* 硬盘（各固定分区逐行展示） */}
+            <MetricCard>
+              <StatHeader title="硬盘占用" live={!paused} hint={`${data.disks.length} 个分区`} />
+              {data.disks.length === 0 ? (
+                <div className="text-sm text-neutral-400 dark:text-stone-500 py-4">未检测到固定分区</div>
+              ) : (
+                <div className="flex flex-col gap-2.5 mt-0.5">
+                  {data.disks.map((d) => {
+                    const c = levelColor(d.percent);
+                    return (
+                      <div key={d.mount}>
+                        <div className="flex items-center justify-between text-[11px] mb-1">
+                          <span className="font-medium text-neutral-600 dark:text-stone-300">{d.mount}</span>
+                          <span className="text-neutral-400 dark:text-stone-500 tabular-nums">
+                            {fmtBytes(d.used_kb)} / {fmtBytes(d.total_kb)}（{d.percent.toFixed(0)}%）
+                          </span>
+                        </div>
+                        <Bar percent={d.percent} color={c} />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </MetricCard>
+
             {/* 网络 */}
             <MetricCard>
               <StatHeader title="网络速率" live={!paused} />
@@ -288,7 +336,7 @@ export function ResourceMonitor() {
                   <div className="text-xl font-bold tabular-nums text-sky-500">
                     {fmtSpeed(data.net_down_bps)}
                   </div>
-                  <Sparkline data={h.down} color="#0ea5e9" />
+                  <Sparkline data={h.down} color={DISK_COLOR} />
                 </div>
                 <div>
                   <div className="text-xs text-neutral-400 dark:text-stone-500">上行</div>

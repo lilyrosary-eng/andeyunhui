@@ -61,10 +61,10 @@ fn take_pending_open_files(state: tauri::State<PendingOpenFiles>) -> Vec<String>
     out
 }
 
-// ============ 资源占用实时监控（CPU / GPU / 显存 / 内存 / 网络）============
+// ============ 资源占用实时监控（CPU / GPU / 显存 / 内存 / 磁盘 / 网络）============
 // 实时性来自前端每 ~1s 轮询一次触发 refresh：CPU 由持久 System 的两次 refresh 差分，
-// 网络速率由持久 Networks 的累计字节 + 上一拍时间戳做差分得到。
-// GPU/显存仅在 Windows 通过 PDH + DXGI 采集，失败优雅返回 None。
+// 网络速率由持久 Networks 的累计字节 + 上一拍时间戳做差分得到，磁盘空间直接读瞬时值。
+// GPU/显存仅在 Windows 通过 PDH(+DXGI 取名称/容量)采集，失败优雅返回 None。
 #[derive(serde::Serialize, Clone)]
 pub struct ResourceUsage {
     pub cpu_percent: f32,        // 全局 CPU 占用 %
@@ -78,12 +78,24 @@ pub struct ResourceUsage {
     pub gpu_name: Option<String>,
     pub vram_total_kb: Option<u64>,
     pub vram_used_kb: Option<u64>,
+    pub disks: Vec<DiskUsage>,   // 各固定分区占用
+}
+
+/// 单个分区占用。字段一律 KB，与 mem_*_kb 及前端 fmtBytes 口径一致。
+#[derive(serde::Serialize, Clone)]
+pub struct DiskUsage {
+    pub mount: String,   // 挂载点，如 "C:\"
+    pub total_kb: u64,
+    pub used_kb: u64,
+    pub percent: f32,
 }
 
 struct ResState {
     sys: SysSystem,
     // sysinfo 0.30 起网络采集独立于 System：单独常驻一个 Networks 实例复用
     networks: sysinfo::Networks,
+    // 磁盘列表同样常驻复用（refresh() 只更新空间数据，不重扫盘符）
+    disks: sysinfo::Disks,
     prev_recv: u64,
     prev_trans: u64,
     prev_ts: Option<Instant>,
@@ -104,6 +116,7 @@ fn get_resource_usage() -> ResourceUsage {
             Mutex::new(ResState {
                 sys: SysSystem::new_all(),
                 networks: sysinfo::Networks::new_with_refreshed_list(),
+                disks: sysinfo::Disks::new_with_refreshed_list(),
                 prev_recv: 0,
                 prev_trans: 0,
                 prev_ts: None,
@@ -115,6 +128,7 @@ fn get_resource_usage() -> ResourceUsage {
     st.sys.refresh_cpu();
     st.sys.refresh_memory();
     st.networks.refresh();
+    st.disks.refresh();
 
     // CPU：全局 + 每核（sysinfo 0.30 全局 CPU 为 global_cpu_info()）
     let cpu_percent = st.sys.global_cpu_info().cpu_usage();
@@ -159,13 +173,41 @@ fn get_resource_usage() -> ResourceUsage {
     st.prev_recv = recv;
     st.prev_trans = trans;
     st.prev_ts = Some(now);
+
+    // 磁盘：只列固定分区（total_space>0 天然排除光驱/未挂载盘；再排除可移动盘）。
+    // 字段统一换算成 KB，与 mem_*_kb 口径一致。按挂载点排序，保证展示顺序稳定
+    // （sysinfo 的磁盘列表顺序不保证）。
+    let mut disks: Vec<DiskUsage> = st
+        .disks
+        .list()
+        .iter()
+        .filter(|d| !d.is_removable() && d.total_space() > 0)
+        .map(|d| {
+            let total = d.total_space();
+            let used = total.saturating_sub(d.available_space());
+            DiskUsage {
+                mount: d.mount_point().to_string_lossy().to_string(),
+                total_kb: total / 1024,
+                used_kb: used / 1024,
+                percent: if total > 0 {
+                    (used as f64 / total as f64 * 100.0) as f32
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
+    disks.sort_by(|a, b| a.mount.cmp(&b.mount));
     drop(st);
 
-    // GPU / 显存：Windows 原生；非 Windows 或采集失败均为 None。
-    // gpu_metrics::query_gpu() 返回的显存是「字节」，这里统一换算为 KB，
-    // 与上方 mem_*_kb（同样已由字节换算）口径一致 —— 前端 fmtBytes 按 KB 处理。
+    // GPU / 显存：Windows 原生。
+    // 口径见 gpu_metrics.rs 文件头：利用率=最忙引擎；显存已用=全机所有进程合计（PDH 专用显存），
+    // 总量=物理显存容量（DXGI）。这里把字节换算为 KB，与上方 mem_*_kb 及前端 fmtBytes 口径一致。
     #[cfg(windows)]
-    let (gpu_percent, gpu_name, vram_total_bytes, vram_used_bytes) = crate::gpu_metrics::query_gpu();
+    let (gpu_percent, gpu_name, vram_total_bytes, vram_used_bytes) = {
+        let g = crate::gpu_metrics::query_gpu();
+        (g.util_percent, g.name, g.vram_total, g.vram_used)
+    };
     #[cfg(not(windows))]
     let (gpu_percent, gpu_name, vram_total_bytes, vram_used_bytes) =
         (None, None, None, None);
@@ -184,6 +226,7 @@ fn get_resource_usage() -> ResourceUsage {
         gpu_name,
         vram_total_kb,
         vram_used_kb,
+        disks,
     }
 }
 

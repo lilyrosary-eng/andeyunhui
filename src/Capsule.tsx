@@ -29,8 +29,9 @@ import { useNotesStore } from '@/stores/notesStore';
 import { api } from '@/lib/api';
 import CapsuleChat from '@/components/capsule/CapsuleChat';
 import CapsuleAide from '@/components/capsule/CapsuleAide';
+import CapsuleResource from '@/components/capsule/CapsuleResource';
 import {
-  CAPSULE_W, CAPSULE_H, EXPANDED_W, EXPANDED_H, CHAT_H, SEARCH_H, TRANSFER_H, TOP_Y, GOLD,
+  CAPSULE_W, CAPSULE_H, EXPANDED_W, EXPANDED_H, CHAT_H, SEARCH_H, TRANSFER_H, RESOURCE_H, TOP_Y, GOLD,
   btnBase, DECO_LAYERS,
 } from '@/components/capsule/constants';
 import {
@@ -304,6 +305,7 @@ export default function Capsule() {
   const aideOpen = useCapsuleStore((s) => s.aideOpen);
   const searchOpen = useCapsuleStore((s) => s.searchOpen);
   const transferOpen = useCapsuleStore((s) => s.transferOpen);
+  const resourceOpen = useCapsuleStore((s) => s.resourceOpen);
   const panelReady = useCapsuleStore((s) => s.panelReady);
   const keepOpen = useCapsuleStore((s) => s.keepOpen);
   const setExpanded = useCapsuleStore((s) => s.setExpanded);
@@ -311,6 +313,7 @@ export default function Capsule() {
   const setAideOpen = useCapsuleStore((s) => s.setAideOpen);
   const setSearchOpen = useCapsuleStore((s) => s.setSearchOpen);
   const setTransferOpen = useCapsuleStore((s) => s.setTransferOpen);
+  const setResourceOpen = useCapsuleStore((s) => s.setResourceOpen);
   const setKeepOpen = useCapsuleStore((s) => s.setKeepOpen);
   // 浮岛「常用笔记」轮转：记录后端收藏列表 + 局部召唤索引。
   // 浮岛是独立 webview，其 notesStore 收藏队列可能未初始化/为空（与主窗口 localStorage 不同步），
@@ -544,7 +547,7 @@ export default function Capsule() {
   // 展开/收起/对话模式/搜索模式：重新定位（居中）+ 改尺寸 + 上报热区（窗口向左右与向下延展）
   useEffect(() => {
     const w = EXPANDED_W;
-    const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : EXPANDED_H;
+    const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
     // [修复] 用 getCurrentWebviewWindow 取胶囊窗自身（见挂载 effect 注释）：
     // getCurrentWindow() 会误返回主窗；WebviewWindow.getByLabel 是 async 且胶囊内注册表无自身。
     const win = getCurrentWebviewWindow();
@@ -555,7 +558,7 @@ export default function Capsule() {
     // 窗口高度同步门控：从收起态展开且子面板打开时，暂不渲染子面板，等 setSize 完成后
     // 再放开渲染。否则 36→470 高度过渡期间，React 已渲染的子面板内容被旧窗高裁剪。
     const expanding = expanded && !prevExpandedRef.current;
-    const subPanelOpen = chatOpen || searchOpen || transferOpen;
+    const subPanelOpen = chatOpen || searchOpen || transferOpen || resourceOpen;
     prevExpandedRef.current = expanded;
     if (expanding && subPanelOpen) {
       useCapsuleStore.getState().setPanelReady(false);
@@ -604,7 +607,7 @@ export default function Capsule() {
         window.setTimeout(presentOverlayNow, 160);
       })
       .catch(() => {});
-  }, [expanded, chatOpen, aideOpen, searchOpen, transferOpen, presentOverlayNow]);
+  }, [expanded, chatOpen, aideOpen, searchOpen, transferOpen, resourceOpen, presentOverlayNow]);
 
   async function onAction(kind: string) {
     // 闭包内读 store 最新值做互斥切换（click 同步执行，无竞态）
@@ -632,6 +635,14 @@ export default function Capsule() {
         s.setChatOpen(false);
         s.setSearchOpen(false);
         s.setTransferOpen(!s.transferOpen);
+      } else if (kind === 'resource') {
+        // 切换资源监视模式；与对话/搜索/传输/AI 编程互斥；强制展开（不被收起态折叠）
+        s.setExpanded(true);
+        s.setChatOpen(false);
+        s.setSearchOpen(false);
+        s.setTransferOpen(false);
+        s.setAideOpen(false);
+        s.setResourceOpen(!s.resourceOpen);
       } else if (kind === 'screenshot') {
         await emit(EVENTS.screenshot.open);
       } else if (kind === 'record') {
@@ -798,7 +809,7 @@ export default function Capsule() {
     smtcControl('volume', v);
   };
 
-  const pillH = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : EXPANDED_H;
+  const pillH = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
 
   // 浮岛动作按钮分两排渲染（第一排高频，第二排其余），按钮 JSX 仅在内部出现一次
   const renderActionRow = (kinds: readonly string[]) => (
@@ -819,7 +830,7 @@ export default function Capsule() {
               fontSize: 11,
               color: '#f2f2f4',
               background:
-                (a.kind === 'ai' && chatOpen) || (a.kind === 'aide' && aideOpen) || (a.kind === 'search' && searchOpen) || (a.kind === 'transfer' && transferOpen)
+                (a.kind === 'ai' && chatOpen) || (a.kind === 'aide' && aideOpen) || (a.kind === 'search' && searchOpen) || (a.kind === 'transfer' && transferOpen) || (a.kind === 'resource' && resourceOpen)
                   ? 'rgba(230,195,92,0.18)'
                   : 'rgba(255,255,255,0.06)',
             }}
@@ -931,7 +942,7 @@ export default function Capsule() {
           )}
 
           {/* 展开态 · 播放器模式（多会话可堆叠 / 下拉切换） */}
-          {expanded && !chatOpen && !searchOpen && !transferOpen && !aideOpen && (
+          {expanded && !chatOpen && !searchOpen && !transferOpen && !aideOpen && !resourceOpen && (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 14px 12px', minHeight: 0 }}>
               {/* 媒体源选择：多会话时下拉命中指定卡片 */}
               {allSessions.length > 1 && (
@@ -1110,6 +1121,9 @@ export default function Capsule() {
               onKeepToggle={() => setKeepOpen(!keepOpen)}
             />
           )}
+
+          {/* 展开态 · 资源监视（CPU / GPU / 显存 / 内存 四项实时占用） */}
+          {expanded && resourceOpen && panelReady && <CapsuleResource />}
         </div>
       </div>
     </div>
