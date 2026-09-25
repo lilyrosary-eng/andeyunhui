@@ -205,6 +205,12 @@ mod imp {
     fn thumb_cache() -> &'static Mutex<std::collections::HashMap<String, (String, Option<String>)>> {
         THUMB_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
     }
+    /// 缩略图跨进程读取超时：超时则该曲不上封面（沿用旧图/占位），不拖住后续轮询。
+    /// 封面已不在 emit 关键路径上（见 poll_global_session 的封面补齐），故不必压得很紧；
+    /// 本地封面常态 <100ms，1.2s 只拦真正的异常。
+    const THUMB_TIMEOUT_MS: u64 = 1200;
+    /// 封面临时文件保留个数（超出按 mtime 清理最旧的），见 `prune_thumb_files`。
+    const THUMB_KEEP: usize = 6;
     /// 时间线缓存：(aumid) -> (duration_ms, position_ms)。用于廉价换歌检测：时长变化或进度大幅
     /// 回跳 → 疑似换歌 → 触发全量元数据读取（TryGetMediaPropertiesAsync）。无需每轮跨进程读元数据，
     /// 即可近实时（≤1.5s）发现曲目切换；seek 误触发无害（标题未变 → 指纹不变 → 不 emit）。
@@ -232,8 +238,20 @@ mod imp {
         WATCHER_WAKE.get_or_init(tokio::sync::Notify::new)
     }
 
-    /// 请求整机监视尽快再轮询一次（供控制路径调用，幂等）。
+    /// 唤醒时是否「强制」本轮全量读取元数据（标题/艺人/专辑/封面）。
+    ///
+    /// 为什么还需要它：常态轮询每 4 轮（~6s）才读一次元数据（`META_TICK % 4`），换曲主要靠
+    /// timeline 回跳兜底，且兜底判据有洞——新曲与旧曲时长相同、或在曲目开头 2s 内切歌时
+    /// （`p > pos_ms + 2000` 不成立）都会漏检，于是标题/封面最坏要等满 ~6s 才上屏。
+    /// 而「用户点了下一首」这个动作本身已经明确告知换曲，没有任何理由再让内容滞后。
+    ///
+    /// 代价可控：只在控制命令（低频）后的那一轮多读一次元数据，常态轮询频率完全不变，
+    /// 因此不会重新引入「每 1.5s 跨进程读元数据拖累外部媒体」那个已被规避的历史问题。
+    static FORCE_META: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// 请求整机监视尽快再轮询一次（供控制路径调用，幂等），并让该轮强制读元数据。
     pub fn wake_global_watcher() {
+        FORCE_META.store(true, std::sync::atomic::Ordering::Relaxed);
         watcher_wake().notify_one();
     }
 
@@ -669,7 +687,11 @@ mod imp {
     /// 跨进程读取，避免每 1.5s 对每个外部会话调 TryGetMediaPropertiesAsync 拖累（外部媒体卡顿主因）。
     async fn poll_global_session(app: &AppHandle) {
         static META_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let need_meta = META_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4 == 0;
+        // 先推进常态节拍、再消费强制标志：顺序不能反。若用短路求值（`force || tick%4==0`），
+        // 被强制唤醒的那轮会跳过 fetch_add，把「每 4 轮一次」的节拍整体前移，周期读数被打乱。
+        let tick_due = META_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4 == 0;
+        let force_meta = FORCE_META.swap(false, std::sync::atomic::Ordering::Relaxed);
+        let need_meta = force_meta || tick_due;
         let mgr = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
             Ok(op) => match op.await {
                 Ok(m) => m,
@@ -706,6 +728,10 @@ mod imp {
         // 增量更新快照：状态每轮廉价读（GetPlaybackInfo）；元数据每 4 轮（~6s）或状态变化时
         // 才全量读（TryGetMediaPropertiesAsync + 缩略图指纹缓存）。稳定播放时跳过跨进程元数据 RPC。
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // 指纹已变、封面待补读的会话：(aumid, 元数据指纹, 缩略图引用)。
+        // 封面流的跨进程读取**不放在 emit 路径上**——否则「标题/艺人上屏」也得陪着等它
+        // （几百 ms，异常时更久）。改为元数据先上屏、封面随后补一次，见函数末尾「封面补齐」。
+        let mut pending_thumbs: Vec<(String, String, IRandomAccessStreamReference)> = Vec::new();
         for (aumid, s) in &collected {
             seen.insert(aumid.clone());
             let (is_playing, can_prev, can_next, dur_ms, pos_ms) = read_status_only(s);
@@ -721,14 +747,27 @@ mod imp {
                 .map(|&(d, p)| (dur_ms > 0 && d > 0 && dur_ms != d) || (p > pos_ms + 2000))
                 .unwrap_or(false);
             if need_meta || status_changed || no_prev || track_changed {
-                // 全量读元数据 + 缩略图（指纹缓存）；失败则保留旧条目并仅刷新状态
-                if let Some(info) = read_session_update(s, aumid).await {
+                // 全量读元数据（**不含**缩略图流）；指纹已变的会话把缩略图挂到 pending_thumbs，
+                // 由本函数末尾在元数据上屏之后再补读，使标题立即可见。
+                let t_read = std::time::Instant::now();
+                if let Some((info, pending)) = read_session_update(s, aumid).await {
+                    if let Some((fp, thumb)) = pending {
+                        pending_thumbs.push((aumid.clone(), fp, thumb));
+                    }
                     all_sessions().lock().unwrap().insert(aumid.clone(), info);
                 } else if let Some(mut p) = prev {
                     p.is_playing = is_playing;
                     p.can_prev = can_prev;
                     p.can_next = can_next;
                     all_sessions().lock().unwrap().insert(aumid.clone(), p);
+                }
+                // 只在「用户操作触发的强制轮」打点：日志稀疏，且恰好覆盖
+                // 「点下一首 → 新曲元数据读到」这一段，便于下次拿实测数字定位。
+                if force_meta {
+                    log::info!(
+                        "[SMTC-GLOBAL] 强制元数据读数 aumid={aumid} 用时 {}ms（封面转补读）",
+                        t_read.elapsed().as_millis()
+                    );
                 }
             } else if let Some(mut p) = prev {
                 // 廉价路径：仅刷新状态字段，不调 TryGetMediaPropertiesAsync
@@ -757,10 +796,21 @@ mod imp {
                 };
                 let info = match info {
                     Some(i) => i,
-                    None => match read_session_update(&s, aumid.as_deref().unwrap_or("")).await {
-                        Some(i) => i,
-                        None => return,
-                    },
+                    None => {
+                        // 快照缺失（罕见：活跃会话没走到上面的增量更新分支）→ 同步读一次并就地
+                        // 补齐封面，让这条兜底路径保持自洽，不引入 pending 传递。
+                        let a = aumid.as_deref().unwrap_or("");
+                        match read_session_update(&s, a).await {
+                            Some((mut i, Some((fp, thumb)))) => {
+                                if let Some(c) = read_thumbnail_cached(a, &fp, thumb).await {
+                                    i.cover_path = Some(c);
+                                }
+                                i
+                            }
+                            Some((i, None)) => i,
+                            None => return,
+                        }
+                    }
                 };
                 let changed = {
                     let g = LAST_GLOBAL.lock().unwrap();
@@ -785,6 +835,36 @@ mod imp {
                     let mut payload = info;
                     payload.media_type = "music".into();
                     let _ = app.emit("now-playing", &payload);
+                }
+                // 封面补齐（只处理活跃会话）：此刻标题/艺人已上屏，封面到货后强制二次上屏，
+                // 把「换曲后卡片多久更新」从「元数据 RPC + 封面流读取」压到「元数据 RPC」。
+                // 前端 playFingerprint 含 cover_path，而封面文件名已带元数据指纹 → 必定换图。
+                if let Some(a) = aumid.as_deref() {
+                    if let Some(idx) = pending_thumbs.iter().position(|(k, _, _)| k == a) {
+                        let (_, fp, thumb) = pending_thumbs.swap_remove(idx);
+                        let t_thumb = std::time::Instant::now();
+                        if let Some(cover) = read_thumbnail_cached(a, &fp, thumb).await {
+                            let mut info2 = all_sessions()
+                                .lock()
+                                .unwrap()
+                                .get(a)
+                                .cloned()
+                                .unwrap_or_default();
+                            info2.cover_path = Some(cover);
+                            info2.media_type = "music".into();
+                            all_sessions().lock().unwrap().insert(a.to_string(), info2.clone());
+                            if let Ok(mut g) = LAST_GLOBAL.lock() {
+                                *g = Some(info2.clone());
+                            }
+                            let _ = app.emit("now-playing", &info2);
+                        }
+                        if force_meta {
+                            log::info!(
+                                "[SMTC-GLOBAL] 封面补读 aumid={a} 用时 {}ms",
+                                t_thumb.elapsed().as_millis()
+                            );
+                        }
+                    }
                 }
             }
             None => {
@@ -878,11 +958,16 @@ mod imp {
         (is_playing, can_prev, can_next, dur_ms, pos_ms)
     }
 
-    /// 读取一个系统会话的播放信息（标题/艺人/专辑/封面/播放态/可用按钮）。`aumid` 作为稳定 key。
+    /// 读取一个系统会话的播放信息（标题/艺人/专辑/播放态/可用按钮）+ 封面**缓存引用**。
+    /// `aumid` 作为稳定 key。
+    ///
+    /// 返回值第二项为 `Some((元数据指纹, 缩略图引用))` 表示「封面需补读」：调用方应在元数据
+    /// 上屏**之后**再读这张缩略图。这样封面流的跨进程读取就不会拖住标题的上屏时间，
+    /// 见 `poll_global_session` 末尾的「封面补齐」。
     async fn read_session_update(
         s: &GlobalSystemMediaTransportControlsSession,
         aumid: &str,
-    ) -> Option<SmtcUpdate> {
+    ) -> Option<(SmtcUpdate, Option<(String, IRandomAccessStreamReference)>)> {
         // 播放态读取失败不丢弃整个会话——回落为「非播放」，避免瞬态 COM 读取失败导致外部会话
         // 从快照/上屏中消失（「有时识别不到外部媒体」真因之一：GetPlaybackInfo 偶发失败时
         // 旧实现用 ? 直接返回 None，该会话整轮被跳过、胶囊卡片瞬时空白）。
@@ -892,64 +977,68 @@ mod imp {
             .and_then(|i| i.PlaybackStatus().ok())
             .map(|st| st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
             .unwrap_or(false);
-        let (title, artist, album, cover_path) = match s.TryGetMediaPropertiesAsync() {
-            Ok(op) => match op.await.ok() {
-                Some(p) => {
-                    let title = p.Title().ok().map(|h| h.to_string()).unwrap_or_default();
-                    let artist = p.Artist().ok().map(|h| h.to_string()).unwrap_or_default();
-                    let album = p.AlbumTitle().ok().map(|h| h.to_string()).unwrap_or_default();
-                    // 缩略图按元数据指纹缓存：指纹未变则复用旧 cover_path，跳过跨进程缩略图流读取
-                    // + 临时文件写入（稳定播放时每 1.5s 轮询的最大开销，外部媒体卡顿主因）。
-                    // 仅当曲目切换（title/artist/album 变化）或首次时才重读缩略图。
-                    let fp = format!("{}\u{1}{}\u{1}{}", title, artist, album);
-                    let reuse = thumb_cache().lock().ok().and_then(|m| {
-                        m.get(aumid).and_then(|(c_fp, c_cover)| (c_fp == &fp).then(|| c_cover.clone()))
-                    });
-                    let cover = match reuse {
-                        Some(c) => c, // 指纹未变 → 复用，不重读缩略图
-                        None => {
-                            // 指纹变了或首次 → 读缩略图（3s 超时熔断）并更新缓存
-                            let c = match p.Thumbnail().ok() {
-                                Some(t) => {
-                                    tokio::time::timeout(std::time::Duration::from_secs(3), read_thumbnail(t))
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                }
-                                None => None,
-                            };
-                            if let Ok(mut m) = thumb_cache().lock() {
-                                m.insert(aumid.to_string(), (fp, c.clone()));
+        // 元数据（title/artist/album）+ 封面「缓存复用」。封面流的跨进程读取**不在这里做**：
+        // 它最坏要几百 ms 到秒级，留在返回路径上会让标题/艺人上屏陪着一起等。
+        // 指纹命中 → 直接复用缓存封面；指纹变了 → 沿用旧封面占位（避免封面闪没），并把缩略图
+        // 引用交回调用方，由上屏之后再补读（见 poll_global_session 末尾「封面补齐」）。
+        let (title, artist, album, cover_path, pending_thumb) =
+            match s.TryGetMediaPropertiesAsync() {
+                Ok(op) => match op.await.ok() {
+                    Some(p) => {
+                        let title = p.Title().ok().map(|h| h.to_string()).unwrap_or_default();
+                        let artist = p.Artist().ok().map(|h| h.to_string()).unwrap_or_default();
+                        let album = p.AlbumTitle().ok().map(|h| h.to_string()).unwrap_or_default();
+                        let fp = format!("{}\u{1}{}\u{1}{}", title, artist, album);
+                        let cached = thumb_cache().lock().ok().and_then(|m| m.get(aumid).cloned());
+                        match cached {
+                            // 指纹未变 → 复用缓存封面，零成本
+                            Some((c_fp, c_cover)) if c_fp == fp => {
+                                (title, artist, album, c_cover, None)
                             }
-                            c
+                            // 指纹已变 → 沿用旧封面占位，缩略图交调用方补读
+                            Some((_, c_cover)) => {
+                                let pending = p.Thumbnail().ok().map(|t| (fp, t));
+                                (title, artist, album, c_cover, pending)
+                            }
+                            // 首次见到该会话 → 同「指纹已变」，但无旧封面可占位
+                            None => {
+                                let pending = p.Thumbnail().ok().map(|t| (fp, t));
+                                (title, artist, album, None, pending)
+                            }
                         }
-                    };
-                    (title, artist, album, cover)
-                }
-                None => (String::new(), String::new(), String::new(), None),
-            },
-            Err(_) => (String::new(), String::new(), String::new(), None),
-        };
+                    }
+                    None => (String::new(), String::new(), String::new(), None, None),
+                },
+                Err(_) => (String::new(), String::new(), String::new(), None, None),
+            };
         let ctrl = s.GetPlaybackInfo().ok().and_then(|i| i.Controls().ok());
         let can_prev = ctrl.as_ref().and_then(|c| c.IsPreviousEnabled().ok()).unwrap_or(false);
         let can_next = ctrl.as_ref().and_then(|c| c.IsNextEnabled().ok()).unwrap_or(false);
-        Some(SmtcUpdate {
-            title,
-            artist,
-            album,
-            cover_path,
-            media_type: "music".into(),
-            is_playing,
-            can_prev,
-            can_next,
-            source: Some("system".into()),
-            key: Some(aumid.to_string()),
-        })
+        Some((
+            SmtcUpdate {
+                title,
+                artist,
+                album,
+                cover_path,
+                media_type: "music".into(),
+                is_playing,
+                can_prev,
+                can_next,
+                source: Some("system".into()),
+                key: Some(aumid.to_string()),
+            },
+            pending_thumb,
+        ))
     }
 
     /// 读取系统会话封面的缩略图字节，写入临时文件并返回路径（供前端 convertFileSrc 显示）。
     /// 任意环节失败均返回 None（胶囊显示音符占位图），不影响标题/艺人展示。
-    async fn read_thumbnail(thumb: IRandomAccessStreamReference) -> Option<String> {
+    ///
+    /// `fp` 是元数据指纹，用来给临时文件取**内容相关**的文件名。原实现文件名恒定
+    /// （`capsule_thumb.jpg`），而前端把它当作 CSS background-image 的 URL——换曲后 URL 不变，
+    /// WebView2 直接命中图片缓存，封面仍然显示上一曲。文件名带指纹后 URL 随曲目变化，
+    /// 缓存必然失效。
+    async fn read_thumbnail(thumb: IRandomAccessStreamReference, fp: &str) -> Option<String> {
         let stream = thumb.OpenReadAsync().ok()?.await.ok()?;
         let size = stream.Size().ok()? as u32;
         if size == 0 {
@@ -975,11 +1064,87 @@ mod imp {
         } else {
             "jpg"
         };
-        let path = std::env::temp_dir().join(format!("capsule_thumb.{}", ext));
+        let dir = std::env::temp_dir();
+        let tag = fnv1a64(fp);
+        let path = dir.join(format!("capsule_thumb_{tag:016x}.{ext}"));
         if std::fs::write(&path, &bytes).is_ok() {
+            // 每次换曲都会写出一个新文件名；保留最近若干个（给前端已引用但尚未解码完的旧 URL
+            // 留回退窗口），其余清理，避免 %TEMP% 随换曲次数线性膨胀。
+            prune_thumb_files(&dir, THUMB_KEEP);
             Some(path.to_string_lossy().to_string())
         } else {
             None
+        }
+    }
+
+    /// 读缩略图 → 写盘 → 更新指纹缓存，供「封面补齐」路径使用。
+    ///
+    /// 读失败（含超时）时**沿用该会话的旧封面路径**写回缓存：两个作用——
+    /// ① 卡片封面不会因为一次读取失败而闪没；② 缓存里的指纹已更新为新曲，下一轮不会再因
+    /// 指纹不匹配而反复重试（否则会退化成每轮一次跨进程缩略图读取，正是要避免的开销）。
+    async fn read_thumbnail_cached(
+        aumid: &str,
+        fp: &str,
+        thumb: IRandomAccessStreamReference,
+    ) -> Option<String> {
+        let fetched = match tokio::time::timeout(
+            std::time::Duration::from_millis(THUMB_TIMEOUT_MS),
+            read_thumbnail(thumb, fp),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(_) => {
+                log::warn!("[SMTC-GLOBAL] 缩略图读取超时（>{THUMB_TIMEOUT_MS}ms）aumid={aumid}");
+                None
+            }
+        };
+        let old = thumb_cache()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(aumid).and_then(|(_, c)| c.clone()));
+        let cover = fetched.or(old);
+        if let Ok(mut m) = thumb_cache().lock() {
+            m.insert(aumid.to_string(), (fp.to_string(), cover.clone()));
+        }
+        cover
+    }
+
+    /// FNV-1a 64：把元数据指纹映射成短文件名标签（只用于文件名区分，不需要密码学强度）。
+    fn fnv1a64(s: &str) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in s.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    /// 清理本模块写出的旧封面临时文件（前缀 `capsule_thumb_`）。
+    ///
+    /// 两条保护规则：① 任何仍被 `thumb_cache` 引用的路径一律不删（该会话的封面可能正显示在
+    /// 胶囊上，多会话切换时尤其如此）；② 其余按 mtime 只保留最新 `keep` 个。保留多个而非只留
+    /// 一个，是给「前端仍持有上一曲 URL、图片尚在解码」留出回退窗口。
+    fn prune_thumb_files(dir: &std::path::Path, keep: usize) {
+        let in_use: std::collections::HashSet<String> = thumb_cache()
+            .lock()
+            .map(|m| m.values().filter_map(|(_, c)| c.clone()).collect())
+            .unwrap_or_default();
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = rd
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("capsule_thumb_"))
+            .filter(|e| !in_use.contains(e.path().to_string_lossy().as_ref()))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        if files.len() <= keep {
+            return;
+        }
+        files.sort_by(|a, b| b.0.cmp(&a.0)); // 新 → 旧
+        for (_, p) in files.into_iter().skip(keep) {
+            let _ = std::fs::remove_file(p);
         }
     }
 
