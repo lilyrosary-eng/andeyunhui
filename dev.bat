@@ -1,5 +1,6 @@
 @echo off
-REM 便捷启动器：自动加载 VS 构建环境后启动 tauri dev。
-REM 等价于 `pnpm tauri dev`（package.json 已自动加载环境），此文件供双击/显式调用。
+REM Convenience launcher: load VS build env, then start tauri dev.
+REM Equivalent to `pnpm tauri dev` (package.json already loads the env).
+REM Keep this file ASCII-only + CRLF.
 call "%~dp0dev-env.bat" || exit /b 1
 pnpm tauri dev
