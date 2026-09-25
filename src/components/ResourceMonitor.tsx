@@ -171,7 +171,8 @@ export function ResourceMonitor() {
       ? (data.vram_used_kb / data.vram_total_kb) * 100
       : 0;
   const VRAM_COLOR = '#8b5cf6';
-  const DISK_COLOR = '#0ea5e9';
+  const NET_DOWN_COLOR = '#0ea5e9';
+  const NET_UP_COLOR = '#14b8a6';
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg fade-in">
@@ -336,14 +337,14 @@ export function ResourceMonitor() {
                   <div className="text-xl font-bold tabular-nums text-sky-500">
                     {fmtSpeed(data.net_down_bps)}
                   </div>
-                  <Sparkline data={h.down} color={DISK_COLOR} />
+                  <Sparkline data={h.down} color={NET_DOWN_COLOR} />
                 </div>
                 <div>
                   <div className="text-xs text-neutral-400 dark:text-stone-500">上行</div>
                   <div className="text-xl font-bold tabular-nums text-teal-500">
                     {fmtSpeed(data.net_up_bps)}
                   </div>
-                  <Sparkline data={h.up} color="#14b8a6" />
+                  <Sparkline data={h.up} color={NET_UP_COLOR} />
                 </div>
               </div>
             </MetricCard>
