@@ -67,6 +67,9 @@ pub struct ProcessInfo {
     pid: u32,
     name: String,
     cpu: f32,
+    /// 常驻内存，单位 **KB**。
+    /// ⚠ sysinfo 0.30 起 `Process::memory()` 返回**字节**（0.29 及以前才是 KB），
+    ///   此处必须显式 `/1024`，否则前端按 `*_kb` 口径再除 1024 会得到大 1024 倍的值。
     mem_kb: u64,
 }
 
@@ -81,7 +84,7 @@ pub fn list_processes() -> Result<Vec<ProcessInfo>, String> {
             pid: pid.as_u32(),
             name: p.name().to_string(),
             cpu: p.cpu_usage(),
-            mem_kb: p.memory(),
+            mem_kb: p.memory() / 1024,
         })
         .collect();
     list.sort_by(|a, b| b.mem_kb.cmp(&a.mem_kb));
@@ -556,8 +559,11 @@ static SYS_MEM: once_cell::sync::Lazy<Mutex<Option<sysinfo::System>>> =
 
 #[derive(serde::Serialize, Clone)]
 pub struct SystemMemoryInfo {
+    /// 物理内存总量，单位 **KB**（见下方命令内的单位换算说明）
     pub total_kb: u64,
+    /// 已用内存，单位 **KB**
     pub used_kb: u64,
+    /// 空闲内存，单位 **KB**
     pub free_kb: u64,
     pub used_percent: f32, // 0..100
 }
@@ -567,8 +573,11 @@ pub fn get_system_memory() -> SystemMemoryInfo {
     let mut guard = SYS_MEM.lock().unwrap();
     let sys = guard.get_or_insert_with(sysinfo::System::new_all);
     sys.refresh_memory();
-    let total_kb = sys.total_memory();
-    let used_kb = sys.used_memory();
+    // ⚠ 单位：sysinfo 0.30 起 `total_memory()/used_memory()` 返回**字节**（0.29 及以前是 KB）。
+    //   字段名是 *_kb，必须在这里换算，否则所有按 `kb/1024/1024` 转 GB 的消费者会大 1024 倍
+    //   （薄荷旧版就把 32GB 显示成 32768.0 GB）。used_percent 是比值，不受单位影响。
+    let total_kb = sys.total_memory() / 1024;
+    let used_kb = sys.used_memory() / 1024;
     let free_kb = total_kb.saturating_sub(used_kb);
     let used_percent = if total_kb > 0 {
         (used_kb as f32 / total_kb as f32) * 100.0
