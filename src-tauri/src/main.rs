@@ -45,10 +45,20 @@ use andeyunhui_lib::transfer;
 use andeyunhui_lib::services::window_manager::overlay_window_destroy;
 mod filesearch;
 use filesearch::*;
-// 资源占用实时监控（CPU/GPU/显存/内存/网络）：Windows 原生 GPU/显存采集，
-// 仅 Windows 编译；其他平台 gpu_metrics() 直接返回 None，命令行跨平台可用。
+// 资源占用实时监控（CPU/GPU/显存/内存/硬盘/网络）：Windows 原生采集，仅 Windows 编译；
+// 其他平台这些模块整体不参与编译，命令行跨平台可用。
+//   pdh_util    —— 全项目共用的**单个** PDH 查询（GPU 引擎/显存、RAPL 功耗、CPU 性能、磁盘 IO）
+//   gpu_metrics —— DXGI 多适配器枚举 + 按 LUID 聚合 PDH 读数 + 合并 NVML
+//   hw_metrics  —— CPU 有效频率/功耗、按卷的磁盘 IO
+//   nvml        —— libloading 运行时加载 nvml.dll（NVIDIA 功耗/频率）
 #[cfg(windows)]
 mod gpu_metrics;
+#[cfg(windows)]
+mod hw_metrics;
+#[cfg(windows)]
+mod nvml;
+#[cfg(windows)]
+mod pdh_util;
 
 // 文件关联：以安得云荟打开（一次性列表，进程退出即销毁）
 struct PendingOpenFiles(pub std::sync::Mutex<Vec<String>>);
@@ -64,30 +74,34 @@ fn take_pending_open_files(state: tauri::State<PendingOpenFiles>) -> Vec<String>
 // ============ 资源占用实时监控（CPU / GPU / 显存 / 内存 / 磁盘 / 网络）============
 // 实时性来自前端每 ~1s 轮询一次触发 refresh：CPU 由持久 System 的两次 refresh 差分，
 // 网络速率由持久 Networks 的累计字节 + 上一拍时间戳做差分得到，磁盘空间直接读瞬时值。
-// GPU/显存仅在 Windows 通过 PDH(+DXGI 取名称/容量)采集，失败优雅返回 None。
+// GPU/CPU 功耗频率/磁盘 IO 走 Windows 原生 PDH（+DXGI 取显卡名/容量、NVML 取显卡功耗频率），
+// 失败优雅返回 None；本机不可用的指标前端展示 N/A。
 #[derive(serde::Serialize, Clone)]
 pub struct ResourceUsage {
     pub cpu_percent: f32,        // 全局 CPU 占用 %
     pub cpu_per_core: Vec<f32>,  // 每核占用 %（按物理核心顺序）
+    pub cpu_freq_mhz: Option<f32>, // CPU 有效频率 MHz = %ProcessorPerformance × 标称基频
+    pub cpu_power_w: Option<f32>,  // CPU 封装功耗 W（Intel RAPL；其他平台为 None）
     pub mem_total_kb: u64,
     pub mem_used_kb: u64,
     pub mem_percent: f32,
     pub net_up_bps: f64,         // 上行速率 字节/秒
     pub net_down_bps: f64,       // 下行速率 字节/秒
-    pub gpu_percent: Option<f32>,    // GPU 利用率 %（Windows 原生，失败为 None）
-    pub gpu_name: Option<String>,
-    pub vram_total_kb: Option<u64>,
-    pub vram_used_kb: Option<u64>,
-    pub disks: Vec<DiskUsage>,   // 各固定分区占用
+    pub gpus: Vec<crate::gpu_metrics::GpuUsage>, // 逐块显卡（利用率/显存/频率/功耗）
+    pub disks: Vec<DiskUsage>,   // 各固定分区占用 + 实时 IO
 }
 
-/// 单个分区占用。字段一律 KB，与 mem_*_kb 及前端 fmtBytes 口径一致。
+/// 单个分区占用与实时 IO。空间字段一律 KB，与 mem_*_kb 及前端 fmtBytes 口径一致；
+/// IO 字段为字节/秒（与 net_*_bps 同口径）；取不到的项为 None（该卷没有对应计数器）。
 #[derive(serde::Serialize, Clone)]
 pub struct DiskUsage {
     pub mount: String,   // 挂载点，如 "C:\"
     pub total_kb: u64,
     pub used_kb: u64,
     pub percent: f32,
+    pub read_bps: Option<f64>,
+    pub write_bps: Option<f64>,
+    pub activity: Option<f32>, // 活动度 %：100 − 空闲时间占比
 }
 
 struct ResState {
@@ -194,38 +208,53 @@ fn get_resource_usage() -> ResourceUsage {
                 } else {
                     0.0
                 },
+                // 实时 IO 在下面拿到原生采样后回填
+                read_bps: None,
+                write_bps: None,
+                activity: None,
             }
         })
         .collect();
     disks.sort_by(|a, b| a.mount.cmp(&b.mount));
     drop(st);
 
-    // GPU / 显存：Windows 原生。
-    // 口径见 gpu_metrics.rs 文件头：利用率=最忙引擎；显存已用=全机所有进程合计（PDH 专用显存），
-    // 总量=物理显存容量（DXGI）。这里把字节换算为 KB，与上方 mem_*_kb 及前端 fmtBytes 口径一致。
+    // 原生指标（Windows）：**一次** PDH 采样喂给 GPU / CPU 频率功耗 / 磁盘 IO 三路。
+    // 只采样一次是关键：速率类计数器（GPU 利用率、Disk Bytes/sec、% Idle Time）都靠两次
+    // 采样之间的时间差算速率，分散成多次采样会把间隔压到 ~0，读数失真。
+    // 口径与降级策略见各模块文件头（gpu_metrics.rs / hw_metrics.rs / pdh_util.rs）。
     #[cfg(windows)]
-    let (gpu_percent, gpu_name, vram_total_bytes, vram_used_bytes) = {
-        let g = crate::gpu_metrics::query_gpu();
-        (g.util_percent, g.name, g.vram_total, g.vram_used)
+    let (gpus, cpu_freq_mhz, cpu_power_w) = {
+        let sample = crate::pdh_util::sample_all();
+        let gpus = crate::gpu_metrics::query_gpus(sample.as_ref());
+        let cpu_extra = crate::hw_metrics::cpu_extra(sample.as_ref());
+        // 磁盘 IO：PDH 的 LogicalDisk 实例名就是盘符（`c:`），而 sysinfo 给的挂载点是 `C:\`，
+        // 去掉结尾反斜杠再转小写即为实例名。没有对应实例的卷（如无盘符的隐藏卷）保持 None，
+        // 前端展示「—」而不是伪造一个 0。
+        let ios = crate::hw_metrics::disk_io(sample.as_ref());
+        for d in disks.iter_mut() {
+            let inst = d.mount.trim_end_matches('\\').to_lowercase();
+            if let Some(io) = ios.iter().find(|x| x.instance == inst) {
+                d.read_bps = io.read_bps;
+                d.write_bps = io.write_bps;
+                d.activity = io.activity;
+            }
+        }
+        (gpus, cpu_extra.freq_mhz, cpu_extra.power_w)
     };
     #[cfg(not(windows))]
-    let (gpu_percent, gpu_name, vram_total_bytes, vram_used_bytes) =
-        (None, None, None, None);
-    let vram_total_kb = vram_total_bytes.map(|b| b / 1024);
-    let vram_used_kb = vram_used_bytes.map(|b| b / 1024);
+    let (gpus, cpu_freq_mhz, cpu_power_w) = (Vec::new(), None, None);
 
     ResourceUsage {
         cpu_percent,
         cpu_per_core,
+        cpu_freq_mhz,
+        cpu_power_w,
         mem_total_kb,
         mem_used_kb,
         mem_percent,
         net_up_bps: up_bps,
         net_down_bps: down_bps,
-        gpu_percent,
-        gpu_name,
-        vram_total_kb,
-        vram_used_kb,
+        gpus,
         disks,
     }
 }

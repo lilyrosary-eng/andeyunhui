@@ -1,59 +1,50 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+// 资源监视（主窗口面板）
+//
+// 数据来源与口径全部集中在 src/components/resource/：
+//   model.ts          —— 接口类型 / 单位换算 / 配色（后端字段口径的唯一前端定义处）
+//   useResourceUsage  —— 1s 轮询 + 按显卡分桶的历史曲线
+//   gpuSelection      —— 「监视哪几块 GPU」的共享选择（主窗口与浮岛共用）
+// 本文件只负责版式。
+import { useState, type ReactNode } from 'react';
+import {
+  fmtBytes,
+  fmtFreq,
+  fmtPercent,
+  fmtPower,
+  fmtSpeed,
+  levelColor,
+  shortGpuName,
+  vramPercent,
+  type GpuUsage,
+} from '@/components/resource/model';
+import { useResourceUsage } from '@/components/resource/useResourceUsage';
+import { NO_GPUS, useSyncedGpuSelection } from '@/components/resource/gpuSelection';
+import { GpuPicker } from '@/components/resource/GpuPicker';
 
-// 与后端 get_resource_usage 返回结构一致
-interface DiskUsage {
-  mount: string;
-  total_kb: number;
-  used_kb: number;
-  percent: number;
-}
+const VRAM_COLOR = '#8b5cf6';
+const NET_DOWN_COLOR = '#0ea5e9';
+const NET_UP_COLOR = '#14b8a6';
+const NA_COLOR = '#94a3b8';
 
-interface ResourceUsage {
-  cpu_percent: number;
-  cpu_per_core: number[];
-  mem_total_kb: number;
-  mem_used_kb: number;
-  mem_percent: number;
-  net_up_bps: number;
-  net_down_bps: number;
-  gpu_percent: number | null;
-  gpu_name: string | null;
-  vram_total_kb: number | null;
-  vram_used_kb: number | null;
-  disks: DiskUsage[];
-}
-
-const HISTORY = 48; // 保留约 48 个采样点（~48s）用于迷你曲线
-
-function fmtBytes(kb: number): string {
-  const gb = kb / 1024 / 1024;
-  if (gb >= 1) return `${gb.toFixed(1)} GB`;
-  return `${(kb / 1024).toFixed(0)} MB`;
-}
-
-function fmtSpeed(bps: number): string {
-  if (bps < 1024) return `${bps.toFixed(0)} B/s`;
-  if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
-  return `${(bps / 1024 / 1024).toFixed(2)} MB/s`;
-}
-
-// 占用率配色：<60 绿，60-85 琥珀，>85 红
-function levelColor(p: number): string {
-  if (p > 85) return '#ef4444';
-  if (p > 60) return '#f59e0b';
-  return '#10b981';
-}
-
-// 迷你曲线（折线）
-function Sparkline({ data, color, max }: { data: number[]; color: string; max?: number }) {
+// 迷你曲线（折线 + 渐变面积）
+function Sparkline({
+  data,
+  color,
+  max,
+  height = 36,
+}: {
+  data: number[];
+  color: string;
+  max?: number;
+  height?: number;
+}) {
   const w = 240;
-  const h = 36;
-  if (data.length < 2) {
-    return <svg width={w} height={h} className="opacity-40" />;
-  }
+  const h = height;
+  if (data.length < 2) return <svg width={w} height={h} className="opacity-40" />;
   const m = max ?? Math.max(1, ...data);
-  const step = w / (HISTORY - 1);
+  // span 按「容量」而不是「已有数据条数」算，曲线才不会在缓冲未满时被横向拉伸
+  const span = Math.max(1, data.length - 1);
+  const step = w / span;
   const pts = data
     .map((v, i) => {
       const x = i * step;
@@ -112,67 +103,99 @@ function StatHeader({ title, live, hint }: { title: string; live: boolean; hint?
   );
 }
 
+/** 一行小字指标（频率 / 功耗 / 读写速度这类附属读数） */
+function Chips({ items }: { items: { k: string; v: string }[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-neutral-400 dark:text-stone-500">
+      {items.map((it) => (
+        <span key={it.k}>
+          {it.k} <span className="tabular-nums text-neutral-500 dark:text-stone-400">{it.v}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** 单块显卡的 GPU 占用块；hero=只监视一块时用大字号 */
+function GpuUtilBlock({ gpu, hist, hero, label }: { gpu: GpuUsage; hist: number[]; hero: boolean; label: string }) {
+  const color = gpu.util_percent != null ? levelColor(gpu.util_percent) : NA_COLOR;
+  return (
+    <div className="flex flex-col gap-1.5 min-w-0">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-xs text-neutral-500 dark:text-stone-400 truncate" title={gpu.name}>
+          {label}
+        </span>
+        <span
+          className={`font-bold tabular-nums shrink-0 ${hero ? 'text-3xl' : 'text-xl'}`}
+          style={{ color }}
+        >
+          {gpu.util_percent != null ? gpu.util_percent.toFixed(1) : '—'}
+          {gpu.util_percent != null && <span className={hero ? 'text-base' : 'text-xs'}>%</span>}
+        </span>
+      </div>
+      <Bar percent={gpu.util_percent ?? 0} color={color} />
+      <Chips
+        items={[
+          { k: '频率', v: fmtFreq(gpu.clock_mhz) },
+          { k: '功耗', v: fmtPower(gpu.power_w) },
+        ]}
+      />
+      <Sparkline data={hist} color={color} max={100} height={hero ? 36 : 26} />
+    </div>
+  );
+}
+
+/** 单块显卡的显存块 */
+function VramBlock({ gpu, hist, hero, label }: { gpu: GpuUsage; hist: number[]; hero: boolean; label: string }) {
+  const pct = vramPercent(gpu);
+  const color = pct == null ? NA_COLOR : pct > 85 ? '#ef4444' : pct > 60 ? '#f59e0b' : VRAM_COLOR;
+  return (
+    <div className="flex flex-col gap-1.5 min-w-0">
+      <div className="flex items-baseline justify-between gap-2 flex-wrap">
+        <span className="text-xs text-neutral-500 dark:text-stone-400 truncate" title={gpu.name}>
+          {label}
+        </span>
+        <span className={`font-bold tabular-nums shrink-0 ${hero ? 'text-3xl' : 'text-xl'}`} style={{ color }}>
+          {pct != null ? pct.toFixed(0) : '—'}
+          {pct != null && <span className={hero ? 'text-base' : 'text-xs'}>%</span>}
+        </span>
+      </div>
+      <Bar percent={pct ?? 0} color={color} />
+      <Chips
+        items={[
+          {
+            k: '已用',
+            v:
+              gpu.vram_used_kb != null && gpu.vram_total_kb != null
+                ? `${fmtBytes(gpu.vram_used_kb)} / ${fmtBytes(gpu.vram_total_kb)}`
+                : '—',
+          },
+        ]}
+      />
+      <Sparkline data={hist} color={color} max={100} height={hero ? 36 : 26} />
+    </div>
+  );
+}
+
+function EmptyHint({ text }: { text: string }) {
+  return <div className="text-sm text-neutral-400 dark:text-stone-500 py-4">{text}</div>;
+}
+
 export function ResourceMonitor() {
-  const [data, setData] = useState<ResourceUsage | null>(null);
-  const [error, setError] = useState('');
   const [paused, setPaused] = useState(false);
-  const [updatedAt, setUpdatedAt] = useState<number>(0);
+  const { data, error, updatedAt, hist, refresh } = useResourceUsage(paused);
 
-  // 历史曲线缓冲（用 ref 避免每次渲染重建）
-  const hist = useRef({
-    cpu: [] as number[],
-    gpu: [] as number[],
-    vram: [] as number[],
-    mem: [] as number[],
-    up: [] as number[],
-    down: [] as number[],
-  });
-  const pausedRef = useRef(paused);
-  pausedRef.current = paused;
-
-  const fetchOnce = async () => {
-    try {
-      const r = (await invoke('get_resource_usage')) as ResourceUsage;
-      setData(r);
-      setError('');
-      setUpdatedAt(Date.now());
-      const h = hist.current;
-      const vramPct =
-        r.vram_total_kb && r.vram_used_kb != null ? (r.vram_used_kb / r.vram_total_kb) * 100 : 0;
-      h.cpu.push(r.cpu_percent);
-      h.gpu.push(r.gpu_percent ?? 0);
-      h.vram.push(vramPct);
-      h.mem.push(r.mem_percent);
-      h.up.push(r.net_up_bps);
-      h.down.push(r.net_down_bps);
-      for (const k of ['cpu', 'gpu', 'vram', 'mem', 'up', 'down'] as const) {
-        if (h[k].length > HISTORY) h[k] = h[k].slice(-HISTORY);
-      }
-    } catch (e) {
-      setError((e as Error).message || String(e));
-    }
+  const gpus = data?.gpus ?? NO_GPUS;
+  // 只在「用户选择」上做过滤；所有 GPU 相关卡片都走这一份，保证两处卡片的范围一致
+  const shown = useSyncedGpuSelection(gpus);
+  const multi = shown.length > 1;
+  const gpuLabel = (g: GpuUsage) => {
+    const idx = gpus.findIndex((x) => x.id === g.id);
+    return multi ? `GPU${idx + 1} · ${shortGpuName(g.name)}` : shortGpuName(g.name);
   };
 
-  useEffect(() => {
-    fetchOnce();
-    const id = setInterval(() => {
-      if (!pausedRef.current) fetchOnce();
-    }, 1000);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const h = hist.current;
   const cpuColor = data ? levelColor(data.cpu_percent) : '#10b981';
   const memColor = data ? levelColor(data.mem_percent) : '#10b981';
-  const gpuColor = data?.gpu_percent != null ? levelColor(data.gpu_percent) : '#10b981';
-  const vramPct =
-    data && data.vram_total_kb && data.vram_used_kb != null
-      ? (data.vram_used_kb / data.vram_total_kb) * 100
-      : 0;
-  const VRAM_COLOR = '#8b5cf6';
-  const NET_DOWN_COLOR = '#0ea5e9';
-  const NET_UP_COLOR = '#14b8a6';
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg fade-in">
@@ -184,19 +207,20 @@ export function ResourceMonitor() {
         <div className="flex-1 min-w-0">
           <h2 className="text-base font-semibold text-neutral-800 dark:text-stone-100">资源监视</h2>
           <p className="text-xs text-neutral-400 dark:text-stone-500 mt-0.5 truncate">
-            CPU · GPU · 显存 · 内存 · 硬盘 · 网络 实时占用
+            CPU · GPU · 显存 · 内存 · 硬盘 · 网络 实时占用（含频率 / 功耗 / 磁盘 IO）
             {updatedAt > 0 && ` · ${new Date(updatedAt).toLocaleTimeString('zh-CN')}`}
           </p>
         </div>
+        <GpuPicker gpus={gpus} />
         <button
           onClick={() => setPaused((p) => !p)}
-          className="px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-xs"
+          className="px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 dark:border-stone-700/60 text-neutral-600 dark:text-stone-400 hover:bg-white dark:hover:bg-stone-700/70 transition-colors text-xs"
         >
           {paused ? '继续' : '暂停'}
         </button>
         <button
-          onClick={fetchOnce}
-          className="px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 text-neutral-600 dark:text-stone-400 hover:bg-white transition-colors text-xs"
+          onClick={() => void refresh()}
+          className="px-3 py-1.5 rounded-lg bg-white/70 dark:bg-stone-800/70 border border-white/80 dark:border-stone-700/60 text-neutral-600 dark:text-stone-400 hover:bg-white dark:hover:bg-stone-700/70 transition-colors text-xs"
         >
           刷新
         </button>
@@ -215,17 +239,23 @@ export function ResourceMonitor() {
 
         {data && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            {/* CPU */}
+            {/* CPU：占用 + 频率 + 功耗 */}
             <MetricCard>
               <StatHeader title="CPU 占用" live={!paused} hint={`${data.cpu_per_core.length} 核`} />
-              <div className="flex items-end gap-2">
+              <div className="flex items-baseline gap-2">
                 <span className="text-3xl font-bold tabular-nums" style={{ color: cpuColor }}>
                   {data.cpu_percent.toFixed(1)}
                   <span className="text-base">%</span>
                 </span>
               </div>
               <Bar percent={data.cpu_percent} color={cpuColor} />
-              <Sparkline data={h.cpu} color={cpuColor} max={100} />
+              <Chips
+                items={[
+                  { k: '频率', v: fmtFreq(data.cpu_freq_mhz) },
+                  { k: '功耗', v: fmtPower(data.cpu_power_w) },
+                ]}
+              />
+              <Sparkline data={hist.cpu} color={cpuColor} max={100} />
               {/* 每核迷你条 */}
               <div className="flex items-end gap-[2px] h-8 mt-1">
                 {data.cpu_per_core.map((c, i) => (
@@ -239,50 +269,53 @@ export function ResourceMonitor() {
               </div>
             </MetricCard>
 
-            {/* GPU 利用率（与显存分开，各自独立成卡） */}
+            {/* GPU 利用率：按选中的显卡逐块展示，各自独立聚合（不再把核显的占用当成独显） */}
             <MetricCard>
-              <StatHeader title="GPU 占用" live={!paused} hint={data.gpu_name ?? undefined} />
-              {data.gpu_percent != null ? (
-                <>
-                  <div className="flex items-end gap-2">
-                    <span className="text-3xl font-bold tabular-nums" style={{ color: gpuColor }}>
-                      {data.gpu_percent.toFixed(1)}
-                      <span className="text-base">%</span>
-                    </span>
-                  </div>
-                  <Bar percent={data.gpu_percent} color={gpuColor} />
-                  <Sparkline data={h.gpu} color={gpuColor} max={100} />
-                  <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
-                    取最忙图形引擎（与任务管理器口径一致）
-                  </p>
-                </>
+              <StatHeader
+                title="GPU 占用"
+                live={!paused}
+                hint={multi ? `监视 ${shown.length} 块` : gpus.length ? `${gpus.length} 块可用` : undefined}
+              />
+              {shown.length === 0 ? (
+                <EmptyHint text={gpus.length === 0 ? '本机未检测到显卡' : '未选择要监视的 GPU（点右上「GPU 选择」）'} />
               ) : (
-                <div className="text-sm text-neutral-400 dark:text-stone-500 py-4">
-                  本机暂不支持 GPU 计数器（N/A）
+                <div className={multi ? 'flex flex-col gap-3 divide-y divide-black/5 dark:divide-white/5' : ''}>
+                  {shown.map((g) => (
+                    <div key={g.id} className={multi ? 'pt-3 first:pt-0' : ''}>
+                      <GpuUtilBlock
+                        gpu={g}
+                        hist={hist.gpu[g.id]?.util ?? []}
+                        hero={!multi}
+                        label={gpuLabel(g)}
+                      />
+                    </div>
+                  ))}
                 </div>
+              )}
+              {shown.length > 0 && (
+                <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
+                  取该适配器最忙图形引擎（与任务管理器口径一致）
+                </p>
               )}
             </MetricCard>
 
-            {/* 显存占用 */}
+            {/* 显存占用（与 GPU 占用分开成卡；同为逐块展示） */}
             <MetricCard>
               <StatHeader title="显存占用" live={!paused} hint="全机所有进程" />
-              {data.vram_total_kb != null && data.vram_used_kb != null ? (
-                <>
-                  <div className="flex items-end gap-2 flex-wrap">
-                    <span className="text-3xl font-bold tabular-nums" style={{ color: vramPct > 85 ? '#ef4444' : vramPct > 60 ? '#f59e0b' : VRAM_COLOR }}>
-                      {vramPct.toFixed(0)}
-                      <span className="text-base">%</span>
-                    </span>
-                    <span className="text-xs text-neutral-400 dark:text-stone-500 mb-1">
-                      {fmtBytes(data.vram_used_kb)} / {fmtBytes(data.vram_total_kb)}
-                    </span>
-                  </div>
-                  <Bar percent={vramPct} color={VRAM_COLOR} />
-                  <Sparkline data={h.vram} color={VRAM_COLOR} max={100} />
-                </>
+              {shown.length === 0 ? (
+                <EmptyHint text={gpus.length === 0 ? '本机未检测到显卡' : '未选择要监视的 GPU'} />
               ) : (
-                <div className="text-sm text-neutral-400 dark:text-stone-500 py-4">
-                  本机暂不支持显存计数器（N/A）
+                <div className={multi ? 'flex flex-col gap-3 divide-y divide-black/5 dark:divide-white/5' : ''}>
+                  {shown.map((g) => (
+                    <div key={g.id} className={multi ? 'pt-3 first:pt-0' : ''}>
+                      <VramBlock
+                        gpu={g}
+                        hist={hist.gpu[g.id]?.vram ?? []}
+                        hero={!multi}
+                        label={gpuLabel(g)}
+                      />
+                    </div>
+                  ))}
                 </div>
               )}
             </MetricCard>
@@ -300,27 +333,47 @@ export function ResourceMonitor() {
                 </span>
               </div>
               <Bar percent={data.mem_percent} color={memColor} />
-              <Sparkline data={h.mem} color={memColor} max={100} />
+              <Sparkline data={hist.mem} color={memColor} max={100} />
             </MetricCard>
 
-            {/* 硬盘（各固定分区逐行展示） */}
+            {/* 硬盘：每个分区一行「空间占用 + 实时读/写速度 + 活动度」 */}
             <MetricCard>
-              <StatHeader title="硬盘占用" live={!paused} hint={`${data.disks.length} 个分区`} />
+              <StatHeader title="硬盘" live={!paused} hint={`${data.disks.length} 个分区`} />
               {data.disks.length === 0 ? (
-                <div className="text-sm text-neutral-400 dark:text-stone-500 py-4">未检测到固定分区</div>
+                <EmptyHint text="未检测到固定分区" />
               ) : (
-                <div className="flex flex-col gap-2.5 mt-0.5">
+                <div className="flex flex-col gap-3">
                   {data.disks.map((d) => {
                     const c = levelColor(d.percent);
+                    const activity = d.activity;
                     return (
                       <div key={d.mount}>
-                        <div className="flex items-center justify-between text-[11px] mb-1">
-                          <span className="font-medium text-neutral-600 dark:text-stone-300">{d.mount}</span>
-                          <span className="text-neutral-400 dark:text-stone-500 tabular-nums">
+                        <div className="flex items-center justify-between text-[11px] mb-1 gap-2">
+                          <span className="font-medium text-neutral-600 dark:text-stone-300 shrink-0">{d.mount}</span>
+                          <span className="text-neutral-400 dark:text-stone-500 tabular-nums truncate">
                             {fmtBytes(d.used_kb)} / {fmtBytes(d.total_kb)}（{d.percent.toFixed(0)}%）
                           </span>
                         </div>
                         <Bar percent={d.percent} color={c} />
+                        <div className="mt-1.5">
+                          <Chips
+                            items={[
+                              { k: '读', v: d.read_bps == null ? '—' : fmtSpeed(d.read_bps) },
+                              { k: '写', v: d.write_bps == null ? '—' : fmtSpeed(d.write_bps) },
+                              { k: '活动', v: fmtPercent(activity, 0) },
+                            ]}
+                          />
+                        </div>
+                        {/* 活动度条：与空间占用条区分开，用中性色 */}
+                        <div className="mt-1 h-1 w-full rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
+                          <div
+                            className="h-full rounded-full transition-all duration-500"
+                            style={{
+                              width: `${Math.max(0, Math.min(100, activity ?? 0))}%`,
+                              background: '#64748b',
+                            }}
+                          />
+                        </div>
                       </div>
                     );
                   })}
@@ -337,14 +390,14 @@ export function ResourceMonitor() {
                   <div className="text-xl font-bold tabular-nums text-sky-500">
                     {fmtSpeed(data.net_down_bps)}
                   </div>
-                  <Sparkline data={h.down} color={NET_DOWN_COLOR} />
+                  <Sparkline data={hist.down} color={NET_DOWN_COLOR} />
                 </div>
                 <div>
                   <div className="text-xs text-neutral-400 dark:text-stone-500">上行</div>
                   <div className="text-xl font-bold tabular-nums text-teal-500">
                     {fmtSpeed(data.net_up_bps)}
                   </div>
-                  <Sparkline data={h.up} color={NET_UP_COLOR} />
+                  <Sparkline data={hist.up} color={NET_UP_COLOR} />
                 </div>
               </div>
             </MetricCard>

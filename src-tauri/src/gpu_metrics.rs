@@ -1,88 +1,183 @@
-// ============ Windows 原生 GPU / 显存采集 ============
+// ============ Windows 原生多显卡采集（利用率 / 显存 / 频率 / 功耗）============
+//
 // 口径与 Windows 任务管理器对齐（依据微软 DirectX 官方 DevBlog「GPUs in the task manager」）：
 //
-// · GPU 利用率：PDH「\GPU Engine(*)\Utilization Percentage」，取**最忙的那个引擎实例**。
+// · GPU 利用率：PDH「\GPU Engine(*)\Utilization Percentage」取**最忙的那个引擎实例**。
 //   官方原文："we opted to pick the percentage utilization of the busiest engine as a
 //   representative of the overall GPU usage"，且明确否定了「跨引擎求平均」
 //   （10 个引擎里跑满 1 个 → 平均只有 10%，严重偏低）。
-//   故此处取 max，**不是** sum（sum 会随引擎实例增多而虚高）。
+//   ⇒ 取 max，**不是** sum（sum 会随引擎实例增多而虚高）。
 //
-// · 显存（VRAM）已用：PDH「\GPU Adapter Memory(<luid>)\Dedicated Usage」，按主适配器的
-//   LUID 精确匹配实例。官方原文：performance 页的专用显存 "represents the number of
-//   bytes currently consumed across all processes"（全机所有进程合计）。
+//   ⚠⚠ 关键修复（上一版的 bug）：**必须先按适配器 LUID 分组，再在各组内取 max**。
+//   上一版直接对全机所有引擎实例取 max，而引擎实例名里带 luid —— 于是核显负责桌面合成时
+//   它的 3D 引擎最忙，读出来的「GPU 占用」实际是**核显**的，独显的读数被完全掩盖。
+//   这正是用户反馈的「gpu 占用连到了我的核显」。现在每个适配器独立聚合。
+//
+// · 显存（VRAM）已用：PDH「\GPU Adapter Memory(<luid>)\Dedicated Usage」，按适配器 LUID
+//   精确匹配实例。官方原文：性能页的专用显存 "represents the number of bytes currently
+//   consumed across all processes"（全机所有进程合计）。
 //   ⚠ 不要用 IDXGIAdapter3::QueryVideoMemoryInfo().CurrentUsage —— 官方定义是
-//   "the application's current video memory usage"，只反映**本进程**占用，
-//   拿它当「显存占用」会严重偏小（实测本机该路径读出的量级与整卡占用差几个数量级）。
-//   这里只借 DXGI 取显卡名 / 物理显存容量 / LUID。
+//   "the application's current video memory usage"，只反映**本进程**占用。
 //
 // · 显存总量：DXGI DXGI_ADAPTER_DESC1::DedicatedVideoMemory（该适配器物理显存容量）。
+//   与任务管理器「专用 GPU 内存」口径一致（核显在这里通常只有 128MB 的划拨量，
+//   共享内存不计入）。
 //
-// 任何一步失败都返回 None，由调用方优雅降级为「N/A」。
-use std::ptr;
-use std::sync::{Mutex, OnceLock};
-
-use windows::core::{PCWSTR, PWSTR};
+// · 频率 / 功耗：仅 NVIDIA 能取（走 NVML，见 nvml.rs）。Intel 核显无公开消费级 API、
+//   AMD 需另接 ADL/ADLX，二者一律降级为 None（前端展示 N/A）。
+//
+// 任何一步失败都返回 None / 空值，由调用方优雅降级为「N/A」。
+use serde::Serialize;
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
-use windows::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
-};
 
-/// GPU 采集结果；任一项取不到为 None（前端显示 N/A）
-#[derive(Default)]
-pub struct GpuInfo {
-    /// GPU 利用率 %（最忙引擎）
+use crate::nvml;
+use crate::pdh_util::Sample;
+
+/// 单块显卡的采集结果；任一项取不到为 None（前端显示 N/A）
+#[derive(Serialize, Clone)]
+pub struct GpuUsage {
+    /// 稳定标识，前端用它持久化「要监视哪几块卡」。形如 `NVIDIA GeForce ...#0`。
+    ///
+    /// ⚠ **故意不用 DXGI LUID 当这个键**：LUID 只保证「系统运行期间唯一」，重启后会被重新
+    ///   分配 —— 拿它存选择会导致用户每次开机都得重选一遍。显卡名虽然理论上可能重复
+    ///   （同型号双卡），但配一个「同名序号」后缀就足够区分，且跨重启稳定。
+    pub id: String,
+    /// 显卡名（DXGI_ADAPTER_DESC1.Description）
+    pub name: String,
+    /// GPU 利用率 %（该适配器最忙引擎）
     pub util_percent: Option<f32>,
-    /// 显卡名
-    pub name: Option<String>,
-    /// 显存总量（字节，物理显存容量）
-    pub vram_total: Option<u64>,
-    /// 显存已用（字节，全机所有进程合计）
-    pub vram_used: Option<u64>,
+    /// 显存总量（KB，物理显存容量）
+    pub vram_total_kb: Option<u64>,
+    /// 显存已用（KB，全机所有进程合计）
+    pub vram_used_kb: Option<u64>,
+    /// 图形时钟（MHz，仅 NVIDIA）
+    pub clock_mhz: Option<u32>,
+    /// 整卡功耗（W，仅 NVIDIA）
+    pub power_w: Option<f32>,
 }
 
-/// 引擎利用率计数器路径（英文路径；PdhAddEnglishCounterW 在中文系统上同样可用）
-const ENGINE_COUNTER: &str = r"\GPU Engine(*)\Utilization Percentage";
-/// 适配器专用显存计数器路径（全机口径）
-const VRAM_COUNTER: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
+/// 枚举本机所有硬件适配器，并合并 PDH / NVML 读数。
+/// 返回顺序：独占显存大的在前（独显优先，便于前端把「GPU1」自然落在独显上）。
+pub fn query_gpus(sample: Option<&Sample>) -> Vec<GpuUsage> {
+    let mut list = dedup_adapters(enumerate_adapters(), sample);    // 独占显存降序；显存相同（如都是 0）时按名称升序，保证展示顺序稳定
+    list.sort_by(|a, b| {
+        b.vram_total
+            .unwrap_or(0)
+            .cmp(&a.vram_total.unwrap_or(0))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    // 同名适配器（同型号双卡）用「#序号」区分，保证 id 唯一且跨重启稳定
+    let mut name_seen: Vec<(String, usize)> = Vec::new();
+    list.into_iter()
+        .map(|a| {
+            let id = match name_seen.iter_mut().find(|(n, _)| *n == a.name) {
+                Some((_, c)) => {
+                    *c += 1;
+                    format!("{}#{}", a.name, *c)
+                }
+                None => {
+                    name_seen.push((a.name.clone(), 0));
+                    format!("{}#0", a.name)
+                }
+            };
+            // PDH 实例名前缀（含结尾下划线，避免前缀误伤别的 luid）
+            let key = format!("{}_", a.luid);
+            let util = sample
+                .and_then(|s| s.gpu_engine.as_ref())
+                .and_then(|items| busiest_engine_for(items, &key));
+            let vram_used = sample
+                .and_then(|s| s.gpu_vram.as_ref())
+                .map(|items| dedicated_usage_for(items, &key));
+            let nv = nvml::sample_by_name(&a.name);
+            GpuUsage {
+                id,
+                name: a.name,
+                util_percent: util,
+                vram_total_kb: a.vram_total.map(|b| b / 1024),
+                vram_used_kb: vram_used.map(|b| b / 1024),
+                clock_mhz: nv.and_then(|n| n.clock_mhz),
+                power_w: nv.and_then(|n| n.power_w),
+            }
+        })
+        .collect()
+}
 
-/// 一次性采集 GPU 利用率 + 显存 + 显卡名/容量。
-/// 内部只做**一次** PdhCollectQueryData：速率计数器（利用率）要求两次采样之间有时长间隔，
-/// 同一轮里重复 collect 会把间隔压到 ~0，导致读数失真。
-pub fn query_gpu() -> GpuInfo {
-    let primary = primary_adapter();
-    let name = primary.as_ref().and_then(|a| a.name.clone());
-    let vram_total = primary.as_ref().and_then(|a| a.vram_total);
-    let luid_prefix = primary.as_ref().and_then(|a| a.luid_prefix.clone());
-
-    let (util_percent, vram_used) = sample_pdh(luid_prefix.as_deref());
-    GpuInfo {
-        util_percent,
-        name,
-        vram_total,
-        vram_used,
+/// 去掉 DXGI 重复枚举出来的「影子」适配器。
+///
+/// 本机实测：DXGI 把同一块 Intel UHD Graphics 枚举了 **3 次**（LUID 各不相同：
+/// 0x00013e32 / 0x000ab8e7 / 0x0001d30c，DedicatedVideoMemory 都是 128MB），
+/// 但 `\GPU Engine` 与 `\GPU Adapter Memory` 只对其中 **1 个** LUID 存在实例 ——
+/// 另外两个拿不到任何读数，界面上只会多出两行全是「—」的噪音。
+///
+/// 判据刻意做得很窄，避免误删真双卡：
+///   · 只有 (名称, VendorId, DeviceId, SubSysId, Revision) **完全一致**的条目才进候选；
+///   · 候选内**只有**当一方完全没有 PDH 实例（= 影子）时才丢弃它；
+///   · 两台同型号真机同时在线时双方都有自己的 PDH 实例 ⇒ 一条都不丢。
+fn dedup_adapters(list: Vec<AdapterDesc>, sample: Option<&Sample>) -> Vec<AdapterDesc> {
+    let mut kept: Vec<AdapterDesc> = Vec::new();
+    for a in list {
+        let a_has = has_pdh_presence(sample, &format!("{}_", a.luid));
+        let twin = kept
+            .iter()
+            .position(|b| b.name == a.name && b.identity == a.identity);
+        match twin {
+            None => kept.push(a),
+            Some(pos) => {
+                let b_has = has_pdh_presence(sample, &format!("{}_", kept[pos].luid));
+                match (b_has, a_has) {
+                    // 老的是影子、新的是真身 → 用新的替换
+                    (false, true) => kept[pos] = a,
+                    // 新的是影子 → 丢弃（老的无论真假都留着）
+                    (true, false) | (false, false) => {}
+                    // 双方都是真身 → 真双卡，保留
+                    (true, true) => kept.push(a),
+                }
+            }
+        }
     }
+    kept
 }
 
-// ----------------- DXGI：主适配器（名称 / 容量 / LUID） -----------------
+/// 该适配器在 PDH 里是否有实例（引擎实例名含该 LUID，或显存计数器实例名以该 LUID 开头）
+fn has_pdh_presence(sample: Option<&Sample>, luid_key: &str) -> bool {
+    let Some(s) = sample else { return false };
+    if let Some(items) = s.gpu_engine.as_ref() {
+        if items.iter().any(|(n, _)| n.contains(luid_key)) {
+            return true;
+        }
+    }
+    if let Some(items) = s.gpu_vram.as_ref() {
+        if items.iter().any(|(n, _)| n.starts_with(luid_key)) {
+            return true;
+        }
+    }
+    false
+}
 
-struct PrimaryAdapter {
-    name: Option<String>,
+// ----------------- DXGI：枚举全部硬件适配器 -----------------
+
+struct AdapterDesc {
+    /// PDH 实例名前缀（去掉结尾下划线），形如 `luid_0x00000000_0x00013e32`
+    luid: String,
+    name: String,
     /// 物理显存容量（字节）
     vram_total: Option<u64>,
-    /// PDH 实例名前缀，形如 `luid_0x00000000_0x00013e32_`（小写）
-    luid_prefix: Option<String>,
+    /// (VendorId, DeviceId, SubSysId, Revision)：用来识别「同一块物理设备被枚举多次」
+    identity: (u32, u32, u32, u32),
 }
 
-/// 选「主适配器」：排除软件适配器（WARP / Basic Render，Flags 含 DXGI_ADAPTER_FLAG_SOFTWARE）
-/// 后取 DedicatedVideoMemory 最大的一块 —— 独显的该值远大于核显共享内存，故等价于选独显。
-fn primary_adapter() -> Option<PrimaryAdapter> {
+/// 枚举 DGXI 适配器，排除软件适配器（WARP / Basic Render）。
+/// 虚拟显示适配器（如模拟器的 IDD 驱动）不在 DXGI 的 SOFTWARE 标记内，会照常列出，
+/// 由前端选择器决定是否展示 —— 不做名称猜测式的硬过滤。
+fn enumerate_adapters() -> Vec<AdapterDesc> {
+    let mut out = Vec::new();
     unsafe {
         // CreateDXGIFactory1 是泛型 fn（T: Interface），必须显式标注目标接口类型
-        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
-        let mut best: Option<(usize, PrimaryAdapter)> = None;
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else {
+            return out;
+        };
         let mut i = 0u32;
         while let Ok(adapter) = factory.EnumAdapters1(i) {
             i += 1;
@@ -95,25 +190,27 @@ fn primary_adapter() -> Option<PrimaryAdapter> {
             }
             let name = decode_wide(&desc.Description);
             let dedicated = desc.DedicatedVideoMemory;
-            let luid_prefix = format!(
-                "luid_0x{:08x}_0x{:08x}_",
-                desc.AdapterLuid.HighPart as u32, desc.AdapterLuid.LowPart
-            );
-            let cand = PrimaryAdapter {
-                name: if name.is_empty() { None } else { Some(name) },
+            out.push(AdapterDesc {
+                // 与 PDH 实例名前缀逐字对齐：luid_0x{HighPart:08x}_0x{LowPart:08x}_（全小写）
+                luid: format!(
+                    "luid_0x{:08x}_0x{:08x}",
+                    desc.AdapterLuid.HighPart as u32, desc.AdapterLuid.LowPart
+                ),
+                name: if name.is_empty() {
+                    format!("GPU {}", i)
+                } else {
+                    name
+                },
                 vram_total: if dedicated > 0 {
                     Some(dedicated as u64)
                 } else {
                     None
                 },
-                luid_prefix: Some(luid_prefix),
-            };
-            if best.as_ref().map(|(s, _)| dedicated > *s).unwrap_or(true) {
-                best = Some((dedicated, cand));
-            }
+                identity: (desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision),
+            });
         }
-        best.map(|(_, a)| a)
     }
+    out
 }
 
 /// 定长 WCHAR 数组 → String（截到首个 NUL，并去掉首尾空白）
@@ -122,139 +219,14 @@ fn decode_wide(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..end]).trim().to_string()
 }
 
-// ----------------- PDH：利用率 + 专用显存 -----------------
+// ----------------- PDH 实例聚合 -----------------
 
-#[derive(Clone, Copy)]
-struct GpuPdh {
-    query: PDH_HQUERY,
-    /// 引擎利用率计数器；`\GPU Engine(*)` 不可用时为 None
-    engine: Option<PDH_HCOUNTER>,
-    /// 专用显存计数器；`\GPU Adapter Memory(*)` 不可用时为 None
-    vram: Option<PDH_HCOUNTER>,
-}
-
-// PDH_HQUERY / PDH_HCOUNTER 内含 *mut c_void（raw pointer 默认 !Send），
-// 会让 OnceLock<Mutex<Option<GpuPdh>>> 无法作为 static（要求 Sync）。
-// SAFETY: 这两个句柄是不透明的 PDH 内核句柄（HANDLE 语义，非内存地址），
-// PDH API 自身可从任意线程调用；此处只承诺「句柄可随 Mutex 在线程间移动」，
-// 所有访问仍严格在 GPU_PDH 的 Mutex 保护下串行进行。
-unsafe impl Send for GpuPdh {}
-
-static GPU_PDH: OnceLock<Mutex<Option<GpuPdh>>> = OnceLock::new();
-
-/// 惰性建立 PDH 查询与计数器（失败返回 None，调用方降级为 N/A）
-fn gpu_pdh_handle() -> Option<GpuPdh> {
-    let cell = GPU_PDH.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().ok()?;
-    if let Some(h) = *guard {
-        return Some(h);
-    }
-    unsafe {
-        let mut query = PDH_HQUERY(ptr::null_mut());
-        if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 {
-            return None;
-        }
-        let engine = add_counter(query, ENGINE_COUNTER);
-        let vram = add_counter(query, VRAM_COUNTER);
-        // 两个计数器都挂不上才认为 PDH 路径整体不可用
-        if engine.is_none() && vram.is_none() {
-            let _ = PdhCloseQuery(query);
-            return None;
-        }
-        // 预热一次：Utilization Percentage 是速率计数器，需要两个采样点才有意义。
-        // 先 collect 建立基线，使随后第一次读取（约 1s 后）即可拿到有效值而非首帧 0。
-        let _ = PdhCollectQueryData(query);
-        let h = GpuPdh { query, engine, vram };
-        *guard = Some(h);
-        Some(h)
-    }
-}
-
-/// 向查询添加英文路径计数器；单个计数器失败返回 None，不影响另一个
-unsafe fn add_counter(query: PDH_HQUERY, path: &str) -> Option<PDH_HCOUNTER> {
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut c = PDH_HCOUNTER(ptr::null_mut());
-    if PdhAddEnglishCounterW(query, PCWSTR(wide.as_ptr()), 0, &mut c) != 0 {
-        None
-    } else {
-        Some(c)
-    }
-}
-
-/// 单次采样：返回（GPU 利用率 %，显存已用字节）。
-/// 两者共用同一次 PdhCollectQueryData，保证速率计数器的时间间隔正确。
-fn sample_pdh(luid_prefix: Option<&str>) -> (Option<f32>, Option<u64>) {
-    let Some(h) = gpu_pdh_handle() else {
-        return (None, None);
-    };
-    unsafe {
-        if PdhCollectQueryData(h.query) != 0 {
-            return (None, None);
-        }
-        let util = h
-            .engine
-            .and_then(|c| read_counter_array(c))
-            .and_then(|items| busiest(items));
-        let vram = match (h.vram, luid_prefix) {
-            (Some(c), Some(prefix)) => {
-                read_counter_array(c).and_then(|items| matching_instance(items, prefix))
-            }
-            _ => None,
-        };
-        (util, vram)
-    }
-}
-
-/// 读取计数器当前的全部实例，返回（实例名小写，值）。失败/无实例返回 None。
-unsafe fn read_counter_array(counter: PDH_HCOUNTER) -> Option<Vec<(String, f64)>> {
-    let mut size: u32 = 0;
-    let mut count: u32 = 0;
-    // 第一次传 None 探明所需缓冲字节数（返回 PDH_MORE_DATA 属正常，不计错）
-    let _ = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, None);
-    if size == 0 {
-        return None;
-    }
-    let item_size = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>().max(1);
-    let cap = (size as usize) / item_size;
-    if cap == 0 {
-        return None;
-    }
-    let mut buf: Vec<PDH_FMT_COUNTERVALUE_ITEM_W> = Vec::new();
-    // PDH_FMT_COUNTERVALUE_ITEM_W 自带 Default（全零），无需手工构造 union 字段
-    buf.resize_with(cap, PDH_FMT_COUNTERVALUE_ITEM_W::default);
-    // 第二次取真实数组（size 作为 IN 传入缓冲字节数）
-    let ret = PdhGetFormattedCounterArrayW(
-        counter,
-        PDH_FMT_DOUBLE,
-        &mut size,
-        &mut count,
-        Some(buf.as_mut_ptr()),
-    );
-    if ret != 0 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(count as usize);
-    for item in buf.iter().take(count as usize) {
-        // CStatus != 0 表示该实例本次采样无效（如速率计数器首个采样点），跳过
-        if item.FmtValue.CStatus != 0 {
-            continue;
-        }
-        out.push((
-            pwstr_to_string_lower(item.szName),
-            item.FmtValue.Anonymous.doubleValue,
-        ));
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
-/// 取「最忙引擎」的利用率（与任务管理器口径一致），并夹到 0..=100
-fn busiest(items: Vec<(String, f64)>) -> Option<f32> {
+/// 取「指定适配器内最忙引擎」的利用率（与任务管理器口径一致），并夹到 0..=100。
+/// `luid_key` 形如 `luid_0x00000000_0x00013e32_`（含结尾下划线，避免前缀误伤）。
+fn busiest_engine_for(items: &[(String, f64)], luid_key: &str) -> Option<f32> {
     let max = items
         .iter()
+        .filter(|(n, _)| n.contains(luid_key))
         .map(|(_, v)| *v)
         .filter(|v| v.is_finite())
         .fold(f64::NEG_INFINITY, f64::max);
@@ -265,23 +237,12 @@ fn busiest(items: Vec<(String, f64)>) -> Option<f32> {
     }
 }
 
-/// 按 LUID 前缀匹配适配器实例，取专用显存字节数
-fn matching_instance(items: Vec<(String, f64)>, luid_prefix: &str) -> Option<u64> {
-    let prefix = luid_prefix.to_lowercase();
+/// 指定适配器的专用显存已用（字节）。
+/// 多 tile 适配器（同一 luid 出现 phys_0 / phys_1…）**求和**，与 DXGI 报告的整卡容量口径一致。
+fn dedicated_usage_for(items: &[(String, f64)], luid_key: &str) -> u64 {
     items
-        .into_iter()
-        .find(|(n, _)| n.starts_with(&prefix))
-        .map(|(_, v)| v.max(0.0) as u64)
-}
-
-/// PWSTR → 小写 String（PDH 实例名大小写在不同查询路径下不一致，统一小写后比较）
-unsafe fn pwstr_to_string_lower(p: PWSTR) -> String {
-    if p.0.is_null() {
-        return String::new();
-    }
-    let mut len = 0usize;
-    while *p.0.add(len) != 0 {
-        len += 1;
-    }
-    String::from_utf16_lossy(std::slice::from_raw_parts(p.0, len)).to_lowercase()
+        .iter()
+        .filter(|(n, _)| n.starts_with(luid_key))
+        .map(|(_, v)| if v.is_finite() { v.max(0.0) } else { 0.0 })
+        .sum::<f64>() as u64
 }

@@ -645,7 +645,16 @@ export const enUS: Record<string, string> = {
   'capsule.res.mem': 'Memory',
   'capsule.res.cores': 'cores',
   'capsule.res.unsupported': 'Not supported',
-  'capsule.res.note': 'GPU = busiest engine · VRAM = all processes',
+  'capsule.res.power': 'Power',
+  'capsule.res.note': 'GPU = busiest engine on that card · VRAM = all processes',
+  // Capsule · GPU selection (shared with the main window panel)
+  'capsule.res.gpuPick': 'GPUs',
+  'capsule.res.gpuPickTitle': 'GPUs to monitor',
+  'capsule.res.gpuAll': 'All',
+  'capsule.res.gpuNone': 'None',
+  'capsule.res.gpuFooter': 'Power and clock are only readable on NVIDIA cards; iGPUs and virtual display adapters show —',
+  'capsule.res.gpuNotSelected': 'No GPU selected',
+  'capsule.res.multiGpu': 'capsule shows the 1st only, selected',
 
   // ============ Mint · Professional Toolbox ============
   'mint.title': 'Mint',

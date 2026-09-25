@@ -10,7 +10,7 @@ export const EXPANDED_H = 340; // 播放器模式
 export const CHAT_H = 460; // 对话模式（更高，容纳消息列表）
 export const SEARCH_H = 470;
 export const TRANSFER_H = 470; // 搜索模式（容纳结果列表）
-export const RESOURCE_H = 320; // 资源监视模式（4 张指标卡 2×2；按内容贴合，不留大片空白）
+export const RESOURCE_H = 344; // 资源监视模式（4 张指标卡 2×2，每张含「主数值 + 频率/功耗副行」）
 export const TOP_Y = 6;
 
 export const GOLD = '#e6c35c';

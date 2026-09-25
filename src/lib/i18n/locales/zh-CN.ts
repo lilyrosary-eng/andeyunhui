@@ -645,7 +645,16 @@ export const zhCN: Record<string, string> = {
   'capsule.res.mem': '内存占用',
   'capsule.res.cores': '核',
   'capsule.res.unsupported': '本机不支持',
-  'capsule.res.note': 'GPU 取最忙引擎 · 显存为全机合计',
+  'capsule.res.power': '功耗',
+  'capsule.res.note': 'GPU 取该卡最忙引擎 · 显存为全机合计',
+  // 浮岛 · GPU 选择（与主窗口共用同一份选择，改哪边都同步）
+  'capsule.res.gpuPick': 'GPU 选择',
+  'capsule.res.gpuPickTitle': '监视哪些 GPU',
+  'capsule.res.gpuAll': '全选',
+  'capsule.res.gpuNone': '全不选',
+  'capsule.res.gpuFooter': '功耗与频率只有 NVIDIA 显卡能读；核显与虚拟显示适配器显示 —',
+  'capsule.res.gpuNotSelected': '未选择要监视的 GPU',
+  'capsule.res.multiGpu': '浮岛只显示第 1 块，共选中',
 
   // ============ 薄荷 · 专业工具箱 ============
   'mint.title': '薄荷',
