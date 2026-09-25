@@ -15,6 +15,8 @@
 //! - symbols.rs：serde JSON 符号持久化（跨会话复用高价值符号/协议字段/S盒）
 //! - disasm.rs：**内置静态分析轨**（object 解析 PE/ELF/Mach-O + iced-x86 反汇编，
 //!   出基本块/CFG/常量池/导入导出，并驱动 cfg.rs 反混淆）——纯 Rust、MIT、进程内、毫秒级
+//! - wasm.rs：WebAssembly 结构解析轨（wasmparser：节表/函数规模/控制块/调用/数据段常量池）；
+//!   由 disasm.rs 按 `\0asm` magic 分发，与反汇编轨并列
 //! - static_analysis.rs：ghidra_headless **深度轨**接口（可选外部进程，提供 P-Code IR
 //!   与跨指令集分析；未安装时如实回落内置轨）
 //! - dynamic.rs：frida-gum 动态插桩接口占位（后续接入）
@@ -31,6 +33,9 @@ pub mod cfg;
 
 #[cfg(feature = "reverse")]
 pub mod disasm;
+
+#[cfg(feature = "reverse")]
+pub mod wasm;
 
 #[cfg(feature = "reverse")]
 pub mod static_analysis;

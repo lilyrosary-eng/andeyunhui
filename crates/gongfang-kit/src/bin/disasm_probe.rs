@@ -72,12 +72,37 @@ async fn main() {
             println!("   · {w}");
         }
     }
+    if let Some(w) = &r.wasm {
+        println!(
+            "WASM     = v{} 类型 {} / 函数 {} / 指令 {} / 调用 {} / 内存 {} / 数据段 {} ({}B)",
+            w.version, w.type_count, w.function_count, w.total_instrs, w.total_calls, w.memories, w.data_segments, w.data_bytes
+        );
+        println!("自定义节 = {:?}", w.custom_sections);
+    }
+    if !r.warnings.is_empty() {
+        println!("警告:");
+        for w in r.warnings.iter().take(8) {
+            println!("   · {w}");
+        }
+        if r.warnings.len() > 8 {
+            println!("   … 另有 {} 条同类警告", r.warnings.len() - 8);
+        }
+    }
     println!("耗时     = {} ms", elapsed.as_millis());
-    println!(
-        "\n自检: 反汇编={} 基本块={} 边={} 常量池={}",
-        if r.disassembled() { "✓" } else { "✗" },
-        r.blocks.len() > 0,
-        r.edges.len() > 0,
-        r.strings.len() > 0
-    );
+    let ok = if r.wasm.is_some() {
+        format!(
+            "WASM结构={} 常量池={}",
+            r.wasm.as_ref().map(|w| w.function_count > 0).unwrap_or(false),
+            !r.strings.is_empty()
+        )
+    } else {
+        format!(
+            "反汇编={} 基本块={} 边={} 常量池={}",
+            if r.disassembled() { "✓" } else { "✗" },
+            r.block_count > 0,
+            r.edge_count > 0,
+            !r.strings.is_empty()
+        )
+    };
+    println!("\n自检: {ok}");
 }

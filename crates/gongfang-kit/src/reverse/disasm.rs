@@ -95,6 +95,8 @@ pub struct BinaryAnalysis {
     pub exports: Vec<String>,
     /// 控制流反混淆摘要（裁掉高介数分发块后的真实块计数）
     pub deobfuscation: Option<DeobfuscationSummary>,
+    /// WASM 模块结构（仅当输入是 WebAssembly 时存在；此时 blocks/edges 恒为空）
+    pub wasm: Option<super::wasm::WasmSummary>,
     /// 实际使用的分析引擎（内置轨恒为 "builtin"；深度轨为 "ghidra"）
     pub engine: &'static str,
     /// 如实记录降级/截断原因
@@ -130,7 +132,13 @@ pub fn analyze_bytes(bytes: &[u8], label: &str, include_graph: bool) -> Result<B
     if bytes.is_empty() {
         return Err("文件为空".to_string());
     }
-    let obj = object::File::parse(bytes).map_err(|e| format!("不是可识别的目标文件（PE/ELF/Mach-O）: {}", e))?;
+
+    // WASM 走独立解析轨（wasmparser），与 PE/ELF/Mach-O 的反汇编轨并列
+    if super::wasm::looks_like_wasm(bytes) {
+        return analyze_wasm(bytes, label);
+    }
+
+    let obj = object::File::parse(bytes).map_err(|e| format!("不是可识别的目标文件（PE/ELF/Mach-O/WASM）: {}", e))?;
 
     let arch = format!("{:?}", obj.architecture());
     let is_64bit = obj.is_64();
@@ -296,7 +304,51 @@ pub fn analyze_bytes(bytes: &[u8], label: &str, include_graph: bool) -> Result<B
         imports,
         exports,
         deobfuscation,
+        wasm: None,
         engine: "builtin",
+        warnings,
+    })
+}
+
+/// WASM 模块分析（复用同一 `BinaryAnalysis` 出口，便于前端/AI 统一处理）
+fn analyze_wasm(bytes: &[u8], label: &str) -> Result<BinaryAnalysis, String> {
+    let w = super::wasm::analyze(bytes)?;
+    let mut warnings = w.warnings.clone();
+    warnings.push(
+        "WASM 走结构解析轨（wasmparser）：给出节表/函数规模/控制块/调用数与常量池；\
+         不做 DFG 数据流还原，也不执行模块"
+            .to_string(),
+    );
+    // 把函数列表映射成通用的 FunctionInfo（地址字段填函数索引，便于 UI 直接展示）
+    let functions: Vec<FunctionInfo> = w
+        .functions
+        .iter()
+        .map(|f| FunctionInfo {
+            name: format!("func[{}]", f.index),
+            address: f.index as u64,
+            size: f.size,
+            source: "wasm_func",
+        })
+        .collect();
+    Ok(BinaryAnalysis {
+        file: label.to_string(),
+        format: "WASM".to_string(),
+        arch: format!("wasm-v{}", w.version),
+        entry: 0,
+        is_64bit: false,
+        sections: Vec::new(),
+        functions,
+        block_count: 0,
+        edge_count: 0,
+        blocks: Vec::new(),
+        edges: Vec::new(),
+        instruction_count: w.total_instrs,
+        strings: w.strings.clone(),
+        imports: w.imports.clone(),
+        exports: w.exports.clone(),
+        deobfuscation: None,
+        wasm: Some(w),
+        engine: "wasmparser",
         warnings,
     })
 }

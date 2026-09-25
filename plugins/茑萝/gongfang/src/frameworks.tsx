@@ -170,6 +170,27 @@ interface DfaGraph {
 interface BinSection { name: string; address: number; size: number; executable: boolean; data: boolean }
 interface BinFunction { name: string; address: number; size: number; source: string }
 interface BinDeobf { original_block_count: number; dispatcher_count: number; real_block_count: number; real_edge_count: number }
+// WASM 模块结构（与 Rust 端 reverse::wasm::WasmSummary 对齐）
+interface WasmFunction { index: number; locals: number; instrs: number; blocks: number; calls: number; size: number }
+interface WasmSummary {
+  version: number;
+  type_count: number;
+  imports: string[];
+  exports: string[];
+  memories: number;
+  tables: number;
+  globals: number;
+  function_count: number;
+  functions: WasmFunction[];
+  total_instrs: number;
+  total_calls: number;
+  code_bytes: number;
+  data_segments: number;
+  data_bytes: number;
+  strings: string[];
+  custom_sections: string[];
+  warnings: string[];
+}
 interface BinaryAnalysis {
   file: string;
   format: string;
@@ -185,6 +206,7 @@ interface BinaryAnalysis {
   imports: string[];
   exports: string[];
   deobfuscation: BinDeobf | null;
+  wasm: WasmSummary | null;
   engine: string;
   warnings: string[];
 }
@@ -1021,21 +1043,23 @@ const reverseMeta: FrameworkMeta = {
     '协议 DFA 归纳与执行（基于真实流量样本；无样本时明确报错）',
     '本地二进制静态分析：PE/ELF/Mach-O 段表 + 符号 + 导入导出',
     '真实反汇编（iced-x86，x86/x64）：实测 4.2MB PE 1.5s 出 79.7 万指令 / 22.3 万基本块 / 25.5 万 CFG 边',
+    'WASM 结构解析（wasmparser）：节表 / 类型 / 导入导出 / 逐函数指令与控制块统计 / 数据段常量池；实测 16,807 函数模块 0.4s',
     '常量池提取（数据段字符串，Salt / URL / 错误信息等；实测同一 PE 出 300 条）',
     '控制流反混淆（petgraph 高介数分发块裁剪，已由内置轨喂入真实基本块）',
     '符号库持久化（<AppData>/gongfang/symbols.json，跨会话复用）',
   ],
   capabilitiesPlanned: [
-    'WASM 语义解析（wasmparser 建 CFG/DFG）',
     'Ghidra headless 深度轨（P-Code IR / 反汇编 / 跨指令集）——接口占位，调用返回空结果',
     'Frida-gum 动态 Hook（SSL_write/strcmp）——接口占位',
     'SIGTRAP 反调试对抗',
     '内存快照热加载脱壳（process_vm_readv）',
     'P-Code → Rust 伪代码翻译（AI 辅助）',
+    'WASM 数据流图（DFG）重建——当前只做结构/规模/常量，不做 SSA 语义还原',
   ],
   techStack: [
     { name: 'iced-x86', license: 'MIT' },
     { name: 'object', license: 'MIT' },
+    { name: 'wasmparser', license: 'Apache-2.0 WITH LLVM-exc.' },
     { name: 'petgraph', license: 'MIT' },
     { name: 'base64', license: 'MIT' },
     { name: 'tokio', license: 'MIT' },
@@ -1694,27 +1718,64 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
                   />
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2">
-                    <div className="text-[10px] text-neutral-400 mb-1">段（前 8）</div>
-                    <div className="space-y-0.5 max-h-40 overflow-y-auto">
-                      {binResult.sections.slice(0, 8).map((s) => (
-                        <div key={s.name} className="flex items-center gap-2 text-[11px] font-mono">
-                          <span className={`w-1 h-1 rounded-full shrink-0 ${s.executable ? 'bg-emerald-500' : s.data ? 'bg-sky-500' : 'bg-neutral-300'}`} />
-                          <span className="text-neutral-600 dark:text-stone-300 truncate flex-1">{s.name}</span>
-                          <span className="text-neutral-400 tabular-nums">{s.size}B</span>
-                        </div>
-                      ))}
+                {/* WASM 专属结构块（仅当输入是 WebAssembly） */}
+                {binResult.wasm && (
+                  <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2 space-y-2">
+                    <div className="text-[10px] text-neutral-400">WebAssembly 结构（wasmparser · 不做 DFG 还原、不执行模块）</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <StatusCard label="类型 / 函数" value={`${binResult.wasm.type_count} / ${binResult.wasm.function_count}`} />
+                      <StatusCard label="指令 / 调用" value={`${binResult.wasm.total_instrs} / ${binResult.wasm.total_calls}`} />
+                      <StatusCard label="内存 / 表 / 全局" value={`${binResult.wasm.memories} / ${binResult.wasm.tables} / ${binResult.wasm.globals}`} />
+                      <StatusCard label="代码段 / 数据段" value={`${Math.round(binResult.wasm.code_bytes / 1024)}KB / ${binResult.wasm.data_segments} 段`} />
                     </div>
+                    <div>
+                      <div className="text-[10px] text-neutral-400 mb-1">函数（按指令数取前 10）</div>
+                      <div className="space-y-0.5 max-h-44 overflow-y-auto">
+                        {[...binResult.wasm.functions]
+                          .sort((a, b) => b.instrs - a.instrs)
+                          .slice(0, 10)
+                          .map((f) => (
+                            <div key={f.index} className="flex items-center gap-2 text-[11px] font-mono">
+                              <span className="text-neutral-400 shrink-0 w-24">func[{f.index}]</span>
+                              <span className="text-neutral-600 dark:text-stone-300 flex-1">{f.instrs} 指令 · {f.blocks} 控制块 · {f.calls} 调用 · {f.locals} 局部</span>
+                              <span className="text-neutral-400 tabular-nums">{f.size}B</span>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                    {binResult.wasm.custom_sections.length > 0 && (
+                      <div className="text-[10px] text-neutral-400 break-all">
+                        自定义节：{binResult.wasm.custom_sections.join(' / ')}
+                      </div>
+                    )}
                   </div>
-                  <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2">
-                    <div className="text-[10px] text-neutral-400 mb-1">函数（前 12，按地址）</div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {!binResult.wasm && (
+                    <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2">
+                      <div className="text-[10px] text-neutral-400 mb-1">段（前 8）</div>
+                      <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                        {binResult.sections.slice(0, 8).map((s) => (
+                          <div key={s.name} className="flex items-center gap-2 text-[11px] font-mono">
+                            <span className={`w-1 h-1 rounded-full shrink-0 ${s.executable ? 'bg-emerald-500' : s.data ? 'bg-sky-500' : 'bg-neutral-300'}`} />
+                            <span className="text-neutral-600 dark:text-stone-300 truncate flex-1">{s.name}</span>
+                            <span className="text-neutral-400 tabular-nums">{s.size}B</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className={`rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2 ${binResult.wasm ? 'sm:col-span-2' : ''}`}>
+                    <div className="text-[10px] text-neutral-400 mb-1">
+                      {binResult.wasm ? `导入 / 导出（${binResult.wasm.imports.length} / ${binResult.wasm.exports.length}）前 12` : '函数（前 12，按地址）'}
+                    </div>
                     <div className="space-y-0.5 max-h-40 overflow-y-auto">
-                      {binResult.functions.slice(0, 12).map((f) => (
-                        <div key={`${f.address}-${f.name}`} className="flex items-center gap-2 text-[11px] font-mono">
-                          <span className="text-neutral-400 shrink-0">0x{f.address.toString(16)}</span>
-                          <span className="text-neutral-600 dark:text-stone-300 truncate flex-1" title={f.name}>{f.name}</span>
-                        </div>
+                      {(binResult.wasm
+                        ? [...binResult.wasm.imports.map((n) => `import ${n}`), ...binResult.wasm.exports.map((n) => `export ${n}`)]
+                        : binResult.functions.map((f) => `0x${f.address.toString(16)} ${f.name}`)
+                      ).slice(0, 12).map((line, i) => (
+                        <div key={`${i}-${line.slice(0, 16)}`} className="text-[11px] font-mono text-neutral-600 dark:text-stone-300 truncate" title={line}>{line}</div>
                       ))}
                     </div>
                   </div>
