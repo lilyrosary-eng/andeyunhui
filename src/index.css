@@ -664,3 +664,24 @@ input[type="range"]:active::-moz-range-thumb {
 .reader-vertical .chapter-marker {
   padding-bottom: 2em;
 }
+
+/* ============ 笔记预览区：代码块最多展示 6 行 ============
+   超长内容（例如整段 AI 提示词）此前被 pre 的横向滑条压在一行里，翻阅体验差。
+   现改为：横向由 .md-code-block pre 的 white-space: pre-wrap 折行，纵向最多 6 行，
+   超出部分走纵向滑条。复制按钮由共享 renderer 注入（.md-copy-btn），与本规则无关。
+
+   为什么作用域限定在 .notes-preview：.md-code-block 那套样式同时服务 AI 对话气泡，
+   直接改会波及对话区，故只在笔记预览容器内覆盖。
+
+   高度为什么能精确等于 6 行：本规则同时声明 line-height 与 padding，
+   使算式不依赖 prose 与 .md-code-block 两套样式的加载先后（两者对 pre 的
+   字号/行高/内边距定义不同，只覆盖 max-height 会算出偏差）。
+   em 相对于 pre 自身字号，故 9.6em = 6 行 × 1.6 行高，与字号实际取值无关；
+   +24px 为上下 padding 12px×2（Tailwind preflight 为 border-box，
+   max-height 含内边距，必须补上）。 */
+.notes-preview .md-code-block pre {
+  line-height: 1.6;
+  padding: 12px 14px;
+  max-height: calc(9.6em + 24px);
+  overflow-y: auto;
+}

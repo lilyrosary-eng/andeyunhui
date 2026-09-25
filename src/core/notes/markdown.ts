@@ -1,4 +1,5 @@
 import { marked } from 'marked';
+import { renderMarkdown } from '@/lib/markdown';
 
 /**
  * Markdown 源码 → 预览 HTML（纯函数，可单测）。
@@ -15,10 +16,18 @@ import { marked } from 'marked';
  *   取舍：连续 3 个以上空行会折叠成一段间距——按「块级语法正确优先、空行视觉次之」定。
  *   之所以不走「只保留多余空行」的预处理：任何在源码里插入/删除换行的做法都会重新
  *   破坏 marked 的行边界判断，风险远大于收益。
+ *
+ * 渲染交给共享的 `renderMarkdown`（`src/lib/markdown.ts`）：它在 marked 之上为每个代码块
+ * 注入 `.md-code-block` 包裹层与「复制」按钮，并配套 `.md-copy-btn` 样式。笔记预览因此
+ * 与 AI 对话区共用同一套代码块交互，不再各写一份；按钮的点击由 NotesEditor 挂载的
+ * 全局事件代理（`attachMarkdownCopyHandler`）处理——预览是 dangerouslySetInnerHTML 注入的，
+ * 无法直接挂 React onClick。
+ * 代价：共享 renderer 自带内容级缓存，与 notesStore 的 mdRenderCache 形成两层缓存。
+ * 两层都以源码为键且结果一致，只是多占一份内存，换来的是零重复实现。
  */
 export function renderMarkdownPreview(md: string): string {
   if (!md) return '';
-  return marked.parse(md, { gfm: true, breaks: true, async: false }) as string;
+  return renderMarkdown(md);
 }
 
 /**

@@ -9,6 +9,7 @@ import { useI18n } from '@/lib/i18n';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { MarkdownSourceEditor, type MarkdownSourceEditorHandle } from './MarkdownSourceEditor';
+import { injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
 import { EVENTS } from '@/core/events/schema';
 
 // 编辑区为「原始 Markdown 文本编辑」（受控 textarea），不再加载 TipTap 富文本编辑器，
@@ -80,6 +81,15 @@ export function NotesEditor() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [handleBold, handleItalic, handleLink]);
+
+  // 预览区代码块：注入共享 markdown 样式（.md-code-block / .md-copy-btn）并注册复制事件代理。
+  // 预览 HTML 由 dangerouslySetInnerHTML 注入，复制按钮是字符串拼出来的，挂不了 React onClick；
+  // 共享模块用「document 捕获阶段代理」处理点击，对流式长列表友好，这里沿用同一套（不重复实现）。
+  // 样式注入是幂等的（AI 对话区可能已注入），重复调用无副作用。
+  useEffect(() => {
+    injectMarkdownStyles();
+    return attachMarkdownCopyHandler();
+  }, []);
 
   // 标签编辑状态
   const [tagInput, setTagInput] = useState('');
@@ -414,8 +424,11 @@ export function NotesEditor() {
             <div className="px-4 py-3 border-b border-neutral-200/30 flex-shrink-0 dark:border-stone-700/30">
               <span className="text-xs font-medium text-neutral-400 dark:text-stone-500">{tr('notesEditor.previewLabel')}</span>
             </div>
+            {/* notes-preview：代码块 6 行上限的作用域钩子（见 index.css）。
+                横向溢出交由 .md-code-block pre 的 pre-wrap 处理（长行折行，不再靠横向滑条），
+                故此处不再声明 [&_pre]:overflow-x-auto。 */}
             <div
-              className="flex-1 w-full h-full p-5 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-neutral-700 leading-7 dark:text-stone-300 [&_p]:my-2 [&_p]:leading-7 [&_img]:max-w-full [&_img]:h-auto [&_pre]:overflow-x-auto [&_table]:max-w-full [&_td]:break-words"
+              className="notes-preview flex-1 w-full h-full p-5 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-neutral-700 leading-7 dark:text-stone-300 [&_p]:my-2 [&_p]:leading-7 [&_img]:max-w-full [&_img]:h-auto [&_table]:max-w-full [&_td]:break-words"
               dangerouslySetInnerHTML={{ __html: htmlContent }}
             />
           </div>

@@ -189,6 +189,30 @@ describe('renderMarkdownPreview（预览块级语法修复）', () => {
   });
 });
 
+// 代码块复制按钮：由共享 renderer（src/lib/markdown.ts）注入，点击由事件代理处理。
+// 这里锁住「按钮存在 + 待复制文本正确 + 属性已转义」，防止后续换 renderer 时静默丢失。
+describe('renderMarkdownPreview（代码块复制按钮）', () => {
+  it('围栏代码块被包进 .md-code-block 并带上复制按钮', () => {
+    const html = renderMarkdownPreview('```\nconst a = 1;\n```');
+    expect(html).toContain('md-code-block');
+    expect(html).toContain('md-copy-btn');
+    expect(html).toContain('data-code=');
+  });
+
+  it('data-code 携带代码原文，且双引号被转义以免截断属性', () => {
+    const html = renderMarkdownPreview('```\nsay "hi" & bye\n```');
+    // 属性值里必须是实体，不能出现裸引号（否则属性会被引号截断）。
+    // 不断言闭合引号：围栏代码块的内容自带尾部换行，闭合引号不在同一行。
+    expect(html).toContain('data-code="say &quot;hi&quot; &amp; bye');
+    expect(html).not.toContain('data-code="say "hi"');
+  });
+
+  it('无围栏代码块时不注入复制按钮', () => {
+    const html = renderMarkdownPreview('只有普通段落');
+    expect(html).not.toContain('md-copy-btn');
+  });
+});
+
 // 编辑区改为受控 textarea 后必须显示字面 Markdown，这里用 SSR 断言渲染结果
 describe('MarkdownSourceEditor（编辑区保持字面 Markdown）', () => {
   it('`## 标题` 与 `**加粗**` 原样出现在 textarea 里，不被渲染成 HTML', () => {
