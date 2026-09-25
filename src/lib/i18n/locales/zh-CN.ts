@@ -683,6 +683,13 @@ export const zhCN: Record<string, string> = {
   'capsule.res.left': '剩余',
   // 浮岛 · 网络逐接口（虚拟/隧道口不计入汇总，避免与物理口重复计数）
   'capsule.res.netExcluded': '不计入汇总',
+  // 浮岛 · 诚实降级：指标缺失时整卡悬浮说明「为什么没有」（分发到别人机器上避免被当成软件坏了）
+  'capsule.res.naCpuBoth': '功耗与温度均不可用：该平台未提供 RAPL 功耗计数器，也未暴露 ACPI 热区',
+  'capsule.res.naAmd': 'AMD 显卡传感器需 ADL/ADLX 接口，本项目因该 SDK 的许可限制未接入',
+  'capsule.res.naGpuAll': '该显卡未提供功耗/频率/温度（驱动未暴露厂商遥测接口）',
+  'capsule.res.naShared': '该适配器未提供共享显存计数器',
+  'capsule.res.naPaging': '本机未提供页面文件计数器',
+  'capsule.res.naDiskIo': '该卷未提供响应时间/队列长度计数器',
   'capsule.res.noDisk': '未获取到分区信息',
   'capsule.res.allNote': '滚轮可滚动查看其余指标',
 

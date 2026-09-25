@@ -71,6 +71,7 @@ function Tile({
   detail,
   sub,
   extra,
+  hint,
   bar = true,
   wide = false,
 }: {
@@ -84,6 +85,8 @@ function Tile({
   sub?: string;
   /** 第三行附属读数（「全部」模式下的逐引擎利用率） */
   extra?: string;
+  /** 悬浮说明（整卡 hover 可见）—— 用于「这项为什么是 —」的原因 */
+  hint?: string;
   /** 是否画占用条（网络这种「速率」类指标没有百分比，画条会误导） */
   bar?: boolean;
   /** 横跨两列（内容较长的分区卡 / 网络卡） */
@@ -97,6 +100,7 @@ function Tile({
   };
   return (
     <div
+      title={hint}
       style={{
         background: 'rgba(255,255,255,0.055)',
         border: '1px solid rgba(255,255,255,0.09)',
@@ -142,6 +146,8 @@ function DiskTile({ d }: { d: DiskUsage }) {
     <Tile
       wide
       title={`${t('capsule.res.disk')} · ${d.mount}`}
+      // 响应与队列都没有时，整卡 hover 说明原因（避免「一列 — 像坏了」）
+      hint={d.resp_ms == null && d.queue == null ? t('capsule.res.naDiskIo') : undefined}
       value={pct.toFixed(0)}
       unit="%"
       color={pct > 85 ? DISK_BAD : pct > 60 ? DISK_WARN : DISK_OK}
@@ -197,6 +203,9 @@ function CapsuleResource() {
   const activeNets = (data?.nets ?? []).filter((n) => n.down_bps > 1 || n.up_bps > 1);
   // 电池同样用可选链：前端热更新会先于后端重编生效，老后端不带 battery 字段时不能崩在这里
   const bat = data?.battery;
+  /** 功耗/频率/温度三项全缺（这种卡最像「坏了」，值得给个悬浮说明） */
+  const gpuAllMissing = (g: GpuUsage) =>
+    g.clock_mhz == null && g.power_w == null && g.temp_c == null;
 
   return (
     <div
@@ -327,6 +336,11 @@ function CapsuleResource() {
               percent={data.cpu_percent}
               detail={`${data.cpu_per_core.length} ${t('capsule.res.cores')} · ${fmtFreq(data.cpu_freq_mhz)}`}
               sub={`${t('capsule.res.power')} ${fmtPower(data.cpu_power_w)} · ${fmtTemp(data.thermal_temp_c)}`}
+              hint={
+                data.cpu_power_w == null && data.thermal_temp_c == null
+                  ? t('capsule.res.naCpuBoth')
+                  : undefined
+              }
             />
 
             {/* GPU 占用 / 显存占用：精简=第 1 块；全部=逐块展开（占用与显存成对相邻） */}
@@ -344,6 +358,13 @@ function CapsuleResource() {
                     detail={shortGpuName(g.name)}
                     sub={`${fmtFreq(g.clock_mhz)} · ${fmtPower(g.power_w)} · ${fmtTemp(g.temp_c)}`}
                     extra={all ? engineLine(g) : undefined}
+                    hint={
+                      gpuAllMissing(g)
+                        ? g.vendor === 'amd'
+                          ? t('capsule.res.naAmd')
+                          : t('capsule.res.naGpuAll')
+                        : undefined
+                    }
                   />
                   <Tile
                     title={`${t('capsule.res.vram')}${suffix}`}
@@ -362,6 +383,9 @@ function CapsuleResource() {
                         : t('capsule.res.unsupported')
                     }
                     sub={vramPct == null ? shortGpuName(g.name) : undefined}
+                    hint={
+                      all && g.vram_shared_kb == null ? t('capsule.res.naShared') : undefined
+                    }
                   />
                 </Fragment>
               );
@@ -388,6 +412,7 @@ function CapsuleResource() {
               percent={data.mem_percent}
               detail={`${fmtBytes(data.mem_used_kb)} / ${fmtBytes(data.mem_total_kb)}`}
               extra={all ? `${t('capsule.res.paging')} ${fmtPercent(data.paging_percent, 0)}` : undefined}
+              hint={all && data.paging_percent == null ? t('capsule.res.naPaging') : undefined}
             />
 
             {/* ── 以下是「全部」模式追加的内容 ── */}

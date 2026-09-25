@@ -66,6 +66,10 @@ pub struct GpuUsage {
     pub id: String,
     /// 显卡名（DXGI_ADAPTER_DESC1.Description）
     pub name: String,
+    /// 厂商 token：`nvidia` / `intel` / `amd` / `other`（由 DXGI VendorId 判定）。
+    /// 前端用它给出「这项为什么是 N/A」的解释 —— AMD 是**许可决策**、Intel/NVIDIA 是**驱动或设备未暴露**，
+    /// 两者的说明完全不同，靠显卡名字串匹配判断厂商太脆，故由后端给出。
+    pub vendor: String,
     /// GPU 利用率 %（该适配器最忙引擎）
     pub util_percent: Option<f32>,
     /// 显存总量（KB，物理显存容量）
@@ -144,6 +148,7 @@ pub fn query_gpus(sample: Option<&Sample>) -> Vec<GpuUsage> {
             GpuUsage {
                 id,
                 name: a.name,
+                vendor: vendor_token(a.identity.0).to_string(),
                 util_percent: util.or_else(|| kmt.and_then(|k| k.util_percent)),
                 vram_total_kb: a.vram_total.map(|b| b / 1024),
                 vram_used_kb: vram_used
@@ -281,6 +286,16 @@ fn enumerate_adapters() -> Vec<AdapterDesc> {
         }
     }
     out
+}
+
+/// DXGI PCI VendorId → 厂商 token（见 `GpuUsage::vendor` 的说明）
+fn vendor_token(vendor_id: u32) -> &'static str {
+    match vendor_id {
+        0x10DE => "nvidia",
+        0x8086 => "intel",
+        0x1002 => "amd", // AMD/ATI
+        _ => "other",    // 虚拟显示适配器、基础渲染设备等
+    }
 }
 
 /// 定长 WCHAR 数组 → String（截到首个 NUL，并去掉首尾空白）

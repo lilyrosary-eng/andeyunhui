@@ -683,6 +683,13 @@ export const enUS: Record<string, string> = {
   'capsule.res.left': 'Left',
   // Capsule · per-interface network (virtual/tunnel interfaces are excluded from the total)
   'capsule.res.netExcluded': 'excluded',
+  // Capsule · honest degradation: hover text explaining why a metric is missing
+  'capsule.res.naCpuBoth': 'Power and temperature unavailable: no RAPL counter and no ACPI thermal zone on this platform',
+  'capsule.res.naAmd': 'AMD GPU sensors need ADL/ADLX; not integrated here due to that SDK licensing',
+  'capsule.res.naGpuAll': 'No power/clock/temperature from this GPU (vendor telemetry not exposed by the driver)',
+  'capsule.res.naShared': 'This adapter exposes no shared-memory counter',
+  'capsule.res.naPaging': 'No page-file counter on this machine',
+  'capsule.res.naDiskIo': 'This volume exposes no response-time/queue counters',
   'capsule.res.noDisk': 'No partition data',
   'capsule.res.allNote': 'Scroll to see the remaining metrics',
 

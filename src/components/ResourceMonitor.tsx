@@ -106,17 +106,42 @@ function StatHeader({ title, live, hint }: { title: string; live: boolean; hint?
   );
 }
 
-/** 一行小字指标（频率 / 功耗 / 读写速度这类附属读数） */
-function Chips({ items }: { items: { k: string; v: string }[] }) {
+/** 一行小字指标（频率 / 功耗 / 读写速度这类附属读数）。
+ *  `hint` 用于「这项为什么是 —」的解释，鼠标悬停可见 —— 分发到别人机器上时，
+ *  干巴巴的 `—` 会被当成软件坏了，说明原因比换个符号有用得多。 */
+function Chips({ items }: { items: { k: string; v: string; hint?: string }[] }) {
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-neutral-400 dark:text-stone-500">
       {items.map((it) => (
-        <span key={it.k}>
+        <span key={it.k} title={it.hint}>
           {it.k} <span className="tabular-nums text-neutral-500 dark:text-stone-400">{it.v}</span>
         </span>
       ))}
     </div>
   );
+}
+
+/**
+ * 「这块显卡为什么没有功耗/频率/温度」。
+ * AMD 是**许可决策**（ADLX 的 SDK 禁止与非宽松许可混用），Intel/NVIDIA 则是**驱动或设备没暴露** ——
+ * 两种说法的含义完全不同，所以由后端给出厂商 token 而不是靠显卡名字串猜。
+ */
+function gpuNoDataHint(g: GpuUsage, what: string): string {
+  if (g.vendor === 'amd') return `AMD 显卡的${what}需 ADL/ADLX 接口；本项目因该 SDK 的许可限制未接入`;
+  if (g.vendor === 'intel') return `核显/Arc 的${what}由 IGCL（ControlLib.dll）提供，本机驱动未暴露该项`;
+  if (g.vendor === 'nvidia') return `NVIDIA 的${what}由 NVML 提供，本机未取到（驱动版本或设备不支持）`;
+  return `该适配器（虚拟/基础渲染设备）不提供${what}遥测`;
+}
+
+/** 一块显卡的功耗/频率/温度**全部**缺失时的说明（这种卡看起来最像坏了，值得整行写明） */
+function gpuAllMissingNote(g: GpuUsage): string {
+  if (g.vendor === 'amd') {
+    return '该显卡不提供功耗/频率/温度：AMD 传感器需 ADL/ADLX，本项目因许可限制未接入';
+  }
+  if (g.vendor === 'other') {
+    return '该适配器（虚拟/基础渲染设备）不提供功耗/频率/温度';
+  }
+  return '该显卡的功耗/频率/温度均未取到：厂商遥测接口未在此驱动/设备上暴露';
 }
 
 /** 逐引擎利用率：只列出本机真有读数的引擎类型，避免整排「—」占地方 */
@@ -151,13 +176,31 @@ function GpuUtilBlock({ gpu, hist, hero, label }: { gpu: GpuUsage; hist: number[
       <Bar percent={gpu.util_percent ?? 0} color={color} />
       <Chips
         items={[
-          { k: '频率', v: fmtFreq(gpu.clock_mhz) },
-          { k: '功耗', v: fmtPower(gpu.power_w) },
-          { k: '温度', v: fmtTemp(gpu.temp_c) },
+          {
+            k: '频率',
+            v: fmtFreq(gpu.clock_mhz),
+            hint: gpu.clock_mhz == null ? gpuNoDataHint(gpu, '频率') : undefined,
+          },
+          {
+            k: '功耗',
+            v: fmtPower(gpu.power_w),
+            hint: gpu.power_w == null ? gpuNoDataHint(gpu, '功耗') : undefined,
+          },
+          {
+            k: '温度',
+            v: fmtTemp(gpu.temp_c),
+            hint: gpu.temp_c == null ? gpuNoDataHint(gpu, '温度') : undefined,
+          },
         ]}
       />
       {engines.length > 0 && (
         <Chips items={[{ k: '引擎', v: engines.map((e) => `${e.k} ${e.v}`).join(' · ') }]} />
+      )}
+      {/* 三项全缺时整行写明原因：这种卡看起来最像「坏了」 */}
+      {gpu.clock_mhz == null && gpu.power_w == null && gpu.temp_c == null && (
+        <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
+          {gpuAllMissingNote(gpu)}
+        </p>
       )}
       <Sparkline data={hist} color={color} max={100} height={hero ? 36 : 26} />
     </div>
@@ -190,7 +233,11 @@ function VramBlock({ gpu, hist, hero, label }: { gpu: GpuUsage; hist: number[]; 
                 : '—',
           },
           // 共享显存：核显的专用显存恒为 0/128MB，不列共享会看起来像坏了
-          { k: '共享', v: gpu.vram_shared_kb != null ? fmtBytes(gpu.vram_shared_kb) : '—' },
+          {
+            k: '共享',
+            v: gpu.vram_shared_kb != null ? fmtBytes(gpu.vram_shared_kb) : '—',
+            hint: gpu.vram_shared_kb == null ? '该适配器未提供共享显存计数器' : undefined,
+          },
         ]}
       />
       <Sparkline data={hist} color={color} max={100} height={hero ? 36 : 26} />
@@ -279,15 +326,42 @@ export function ResourceMonitor() {
               <Bar percent={data.cpu_percent} color={cpuColor} />
               <Chips
                 items={[
-                  { k: '频率', v: fmtFreq(data.cpu_freq_mhz) },
-                  { k: '功耗', v: fmtPower(data.cpu_power_w) },
-                  { k: '温度', v: fmtTemp(data.thermal_temp_c) },
+                  {
+                    k: '频率',
+                    v: fmtFreq(data.cpu_freq_mhz),
+                    hint:
+                      data.cpu_freq_mhz == null
+                        ? '本机未提供 % Processor Performance 计数器'
+                        : undefined,
+                  },
+                  {
+                    k: '功耗',
+                    v: fmtPower(data.cpu_power_w),
+                    hint:
+                      data.cpu_power_w == null
+                        ? '该平台未提供 RAPL 功耗计数器（Intel 平台专有）'
+                        : undefined,
+                  },
+                  {
+                    k: '温度',
+                    v: fmtTemp(data.thermal_temp_c),
+                    hint:
+                      data.thermal_temp_c == null
+                        ? '本机未暴露 ACPI 热区；Windows 无公开的 CPU 核心温度 API（需内核驱动）'
+                        : undefined,
+                  },
                 ]}
               />
               {/* 温度口径必须写出来：ACPI 热区在部分机型上只是主板温区，不是 CPU 核心温度 */}
               {data.thermal_temp_c != null && (
                 <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
                   温度取自 ACPI 热区最高值（部分机型为主板温区，非 CPU 核心温度）
+                </p>
+              )}
+              {/* 功耗与温度**同时**缺失时整行说明（与上一条互斥：那条要求温度有值） */}
+              {data.cpu_power_w == null && data.thermal_temp_c == null && (
+                <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
+                  功耗与温度均不可用：该平台未提供 RAPL 计数器，且未暴露 ACPI 热区
                 </p>
               )}
               <Sparkline data={hist.cpu} color={cpuColor} max={100} />
@@ -368,7 +442,15 @@ export function ResourceMonitor() {
                 </span>
               </div>
               <Bar percent={data.mem_percent} color={memColor} />
-              <Chips items={[{ k: '页面文件', v: fmtPercent(data.paging_percent, 0) }]} />
+              <Chips
+                items={[
+                  {
+                    k: '页面文件',
+                    v: fmtPercent(data.paging_percent, 0),
+                    hint: data.paging_percent == null ? '本机未提供页面文件计数器' : undefined,
+                  },
+                ]}
+              />
               <Sparkline data={hist.mem} color={memColor} max={100} />
             </MetricCard>
 
@@ -398,8 +480,16 @@ export function ResourceMonitor() {
                               { k: '写', v: d.write_bps == null ? '—' : fmtSpeed(d.write_bps) },
                               { k: '活动', v: fmtPercent(activity, 0) },
                               // 响应时间与队列才是「盘是不是已经成瓶颈」的判据，活动度只说「在忙」
-                              { k: '响应', v: fmtMs(d.resp_ms) },
-                              { k: '队列', v: d.queue == null ? '—' : d.queue.toFixed(1) },
+                              {
+                                k: '响应',
+                                v: fmtMs(d.resp_ms),
+                                hint: d.resp_ms == null ? '该卷未提供响应时间计数器' : undefined,
+                              },
+                              {
+                                k: '队列',
+                                v: d.queue == null ? '—' : d.queue.toFixed(1),
+                                hint: d.queue == null ? '该卷未提供队列长度计数器' : undefined,
+                              },
                             ]}
                           />
                         </div>

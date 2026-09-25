@@ -21,6 +21,8 @@ export interface GpuUsage {
   id: string;
   /** 显卡名（DXGI_ADAPTER_DESC1.Description） */
   name: string;
+  /** 厂商 token：`nvidia` / `intel` / `amd` / `other`（后端按 DXGI VendorId 判定） */
+  vendor: string;
   /** GPU 利用率 %（该适配器最忙引擎；与任务管理器同口径） */
   util_percent: number | null;
   vram_total_kb: number | null;
