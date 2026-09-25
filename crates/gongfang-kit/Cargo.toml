@@ -27,6 +27,12 @@ name = "openapi_probe"
 path = "src/bin/openapi_probe.rs"
 required-features = ["pentest"]
 
+# 自适应变异（UCB1）探针（dev-only）：在已知真值的规则模型上验证收敛
+[[bin]]
+name = "mutation_probe"
+path = "src/bin/mutation_probe.rs"
+required-features = ["pentest"]
+
 [features]
 # 默认零重型依赖：仅编译 kernel 骨架 + commands stub，主二进制零污染
 default = []

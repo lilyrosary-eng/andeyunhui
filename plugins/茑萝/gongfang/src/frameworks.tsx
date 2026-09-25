@@ -226,6 +226,18 @@ interface ApiReport {
   warnings: string[];
 }
 
+// 自适应变异（UCB1 多臂老虎机，与 Rust 端 pentest::mutation 对齐）
+interface MutationArm { arm: number; name: string; plays: number; mean_reward: number; ucb: number | null }
+interface MutationSelection {
+  ctx: string;
+  arm: number;
+  arm_name: string;
+  payload: string;
+  exploring: boolean;
+  total_plays: number;
+  arms: MutationArm[];
+}
+
 interface SymbolSummary {
   url: string;
   name: string;
@@ -1838,11 +1850,11 @@ const pentestMeta: FrameworkMeta = {
     'XSS / RCE 编码链与载荷库',
     'HPP 参数污染差异分析（Tomcat vs WebLogic）',
     'WAF 编码变异对照实验（同一载荷逐编码族评估规则命中，属模拟非实攻）',
+    '自适应变异选臂（UCB1 多臂老虎机，替代 PPO）：11 个真实编码家族间择优 + 按真实结果回填奖励；实测能把最差臂压到 1/3 次数、平均多绕过 0.16 条',
     'OpenAPI 3.x / Swagger 2.0 spec 解析 → 端点/参数/请求体属性 + 每参数边界候选（类型上下界 / 溢出 / 枚举越界 / 注入基线 / 必填缺失）；实测 petstore v2/v3 共解析 39 端点',
     '错误页 / 常见路径 / RFC 8615 well-known 探测',
   ],
   capabilitiesPlanned: [
-    'PPO 强化学习自适应变异（AI）——拟按项目一贯做法降级为多臂老虎机（UCB/Thompson）自适应变异',
     'Transfer-Encoding chunked 分块绕过',
     'JSON 不可见 Unicode 混淆',
     'nuclei / httpx 引擎接入',
@@ -2041,6 +2053,78 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const [apiBusy, setApiBusy] = useState(false);
   const [apiReport, setApiReport] = useState<ApiReport | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
+
+  // 自适应变异（UCB1）状态
+  const [mutCtx, setMutCtx] = useState('');
+  const [mutInput, setMutInput] = useState('union select 1');
+  const [mutSel, setMutSel] = useState<MutationSelection | null>(null);
+  const [mutBusy, setMutBusy] = useState(false);
+  const [mutError, setMutError] = useState<string | null>(null);
+
+  // 选臂：给出建议的编码家族 + 该家族变异后的载荷
+  const handleMutSelect = useCallback(async () => {
+    const ctx = mutCtx.trim();
+    const input = mutInput.trim();
+    if (!ctx || !input) {
+      setMutError('ctx（学习隔离键，建议用 WAF 名或目标）与载荷都不能为空');
+      return;
+    }
+    setMutBusy(true);
+    setMutError(null);
+    try {
+      const r = await tauriInvoke<MutationSelection>('gongfang_mutation_select', { ctx, input });
+      setMutSel(r);
+      addLog({
+        action: '自适应变异选臂',
+        target: ctx,
+        status: 'success',
+        detail: `选中 arm=${r.arm} ${r.arm_name}${r.exploring ? '（探索）' : ''}，累计 ${r.total_plays} 次`,
+      });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      setMutError(msg);
+    } finally {
+      setMutBusy(false);
+    }
+  }, [mutCtx, mutInput, addLog]);
+
+  // 回填真实结果：驱动后续选臂（success 布尔版；需要分级奖励时走 AI 工具面传 reward）
+  const handleMutReward = useCallback(async (success: boolean) => {
+    if (!mutSel) return;
+    setMutBusy(true);
+    try {
+      const r = await tauriInvoke<{ arms: MutationArm[] }>('gongfang_mutation_reward', {
+        ctx: mutSel.ctx,
+        arm: mutSel.arm,
+        success,
+      });
+      setMutSel({ ...mutSel, arms: r.arms });
+      addLog({
+        action: '自适应变异反馈',
+        target: mutSel.ctx,
+        status: success ? 'success' : 'warn',
+        detail: `arm=${mutSel.arm} ${success ? '绕过成功' : '未绕过'}，已计入统计`,
+      });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      setMutError(msg);
+    } finally {
+      setMutBusy(false);
+    }
+  }, [mutSel, addLog]);
+
+  const handleMutReset = useCallback(async () => {
+    const ctx = mutCtx.trim();
+    if (!ctx) return;
+    try {
+      await tauriInvoke('gongfang_mutation_stats', { ctx, reset: true });
+      setMutSel(null);
+      addLog({ action: '自适应变异', target: ctx, status: 'warn', detail: '统计已清空' });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      setMutError(msg);
+    }
+  }, [mutCtx, addLog]);
 
   const handleDbPayloads = useCallback(async () => {
     if (!dbInput.trim()) return;
@@ -2277,6 +2361,104 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               )}
             </div>
           )}
+        </CollapsibleSection>
+
+        {/* 自适应变异（UCB1 多臂老虎机）：选臂 → 探测 → 回填奖励 的闭环 */}
+        <CollapsibleSection
+          title="自适应变异选臂（UCB1，替代 PPO）"
+          storageKey="fw_pentest_mutation"
+          defaultOpen={false}
+          accent="attack"
+          right={
+            <>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">真学习</span>
+              <span className="text-[10px] text-neutral-400">零依赖 · 不发探测</span>
+            </>
+          }
+        >
+          <div className="space-y-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input
+                type="text"
+                value={mutCtx}
+                onChange={(e) => setMutCtx(e.target.value)}
+                placeholder="ctx（学习隔离键：WAF 名 / 目标主机）"
+                className="px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+              />
+              <input
+                type="text"
+                value={mutInput}
+                onChange={(e) => setMutInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleMutSelect()}
+                placeholder="待变异载荷，如 union select 1"
+                className="px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleMutSelect}
+                disabled={mutBusy}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+              >
+                {mutBusy ? '计算中...' : '选臂'}
+              </button>
+              <button
+                onClick={() => handleMutReward(true)}
+                disabled={mutBusy || !mutSel}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/10 disabled:opacity-40 transition-colors"
+              >
+                探测成功（回填）
+              </button>
+              <button
+                onClick={() => handleMutReward(false)}
+                disabled={mutBusy || !mutSel}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-600 dark:text-stone-300 border border-black/10 dark:border-stone-700/50 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-40 transition-colors"
+              >
+                未绕过（回填）
+              </button>
+              <button
+                onClick={handleMutReset}
+                className="btn-press ml-auto px-2.5 py-1.5 rounded-lg text-[11px] text-neutral-500 dark:text-stone-400 border border-black/10 dark:border-stone-700/50 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+              >
+                清空统计
+              </button>
+            </div>
+
+            {mutError && (
+              <div className="px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-400 break-all">{mutError}</div>
+            )}
+
+            {mutSel && (
+              <div className="space-y-2">
+                <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2">
+                  <div className="text-[10px] text-neutral-400 mb-1">
+                    本次建议：arm={mutSel.arm} · {mutSel.arm_name}
+                    {mutSel.exploring && <span className="ml-1 text-amber-600 dark:text-amber-400">（探索：该臂尚未试过）</span>}
+                  </div>
+                  <div className="text-[11px] font-mono text-neutral-600 dark:text-stone-300 break-all">{mutSel.payload}</div>
+                </div>
+                <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2 max-h-56 overflow-y-auto">
+                  <div className="text-[10px] text-neutral-400 mb-1">各臂统计（{mutSel.total_plays} 次尝试累计）</div>
+                  <div className="space-y-0.5">
+                    {mutSel.arms.map((a) => (
+                      <div key={a.arm} className="flex items-center gap-2 text-[11px]">
+                        <span className={`w-1 h-1 rounded-full shrink-0 ${a.arm === mutSel.arm ? 'bg-emerald-500' : 'bg-neutral-300'}`} />
+                        <span className="text-neutral-400 w-6 tabular-nums">{a.arm}</span>
+                        <span className="font-mono text-neutral-600 dark:text-stone-300 flex-1 truncate">{a.name}</span>
+                        <span className="text-neutral-400 tabular-nums w-20">plays {a.plays}</span>
+                        <span className="text-neutral-400 tabular-nums w-24">mean {a.mean_reward.toFixed(3)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                  机制：UCB1（mean + 1.4·√(lnN/n)），未试过的臂优先探索。奖励由你回填真实探测结果，越用越准；
+                  <span className="text-amber-600 dark:text-amber-400">本功能只选臂与生成载荷，不自行对目标发请求</span>。
+                  分级奖励（按多绕过的规则数）可在 AI 工具面用 reward 参数传 0.0~1.0。
+                </p>
+              </div>
+            )}
+          </div>
         </CollapsibleSection>
 
         {/* OpenAPI / Swagger 参数边界推演（spec 解析 → 端点/参数/边界候选；只解析不发探测） */}

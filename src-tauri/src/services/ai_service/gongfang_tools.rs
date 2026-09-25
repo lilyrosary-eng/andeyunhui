@@ -49,7 +49,7 @@ impl AiTool for GongfangFullTool {
             "type": "function",
             "function": {
                 "name": "gongfang",
-                "description": "攻防模块统一工具（用户明确授权目标时使用）。cmd 指定操作，args 为操作参数。只读侦察(recon)、抓取(fetch)、爬虫统计与代理池(crawler_stats/proxy_add/proxy_list/proxy_reset)、事件与指标(events_recent/metrics_history)、载荷(payloads)、编码识别(crypto/encode)、符号(symbols)、协议图(protocol_graph，需 url)、二进制静态分析(binary_analyze，需 path)、自动化(automation_*)、网关(gateway_*)、知识库(ai_knowledge_*)、目标工作区(target_*)、引擎(status/start/stop/inject)。不越权、不洪泛。",
+                "description": "攻防模块统一工具（用户明确授权目标时使用）。cmd 指定操作，args 为操作参数。只读侦察(recon)、抓取(fetch)、爬虫统计与代理池(crawler_stats/proxy_add/proxy_list/proxy_reset)、事件与指标(events_recent/metrics_history)、载荷(payloads/mutation_*)、编码识别(crypto/encode)、符号(symbols)、协议图(protocol_graph，需 url)、二进制静态分析(binary_analyze，需 path)、自动化(automation_*)、网关(gateway_*)、知识库(ai_knowledge_*)、目标工作区(target_*)、引擎(status/start/stop/inject)。不越权、不洪泛。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -113,6 +113,23 @@ impl AiTool for GongfangFullTool {
                 ).await),
                 "simulate_waf" => ok(gongfang_simulate_waf(k(&["payload"])?)),
                 "payloads" => ok(gongfang_payloads(k(&["category"])?)),
+                // 自适应变异（UCB1 多臂老虎机）：选臂 → 探测 → 回填分级奖励，形成闭环
+                "mutation_select" => ok(gongfang_mutation_select(k(&["ctx"])?, k(&["input"])?)),
+                "mutation_reward" => {
+                    let arm = json(args, "arm")
+                        .and_then(|x| x.as_u64())
+                        .ok_or_else(|| "缺少 arm（整数臂号，0 起）".to_string())? as usize;
+                    ok(gongfang_mutation_reward(
+                        k(&["ctx"])?,
+                        arm,
+                        json(args, "success").and_then(|x| x.as_bool()),
+                        json(args, "reward").and_then(|x| x.as_f64()),
+                    ))
+                }
+                "mutation_stats" => ok(gongfang_mutation_stats(
+                    json(args, "ctx").and_then(|x| x.as_str().map(str::to_string)),
+                    json(args, "reset").and_then(|x| x.as_bool()),
+                )),
                 "db_payloads" => ok(gongfang_db_payloads(k(&["input"])?)),
                 "hpp" => ok(gongfang_hpp_analyze(k(&["response"])?)),
                 // —— 编码/加密 ——

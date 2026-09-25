@@ -981,6 +981,92 @@ type OpenApiReportOut = crate::pentest::openapi::OpenApiReport;
 #[cfg(not(feature = "pentest"))]
 type OpenApiReportOut = serde_json::Value;
 
+#[cfg(feature = "pentest")]
+type MutationSelectionOut = crate::pentest::mutation::MutationSelection;
+#[cfg(not(feature = "pentest"))]
+type MutationSelectionOut = serde_json::Value;
+
+/// 自适应变异选臂（多臂老虎机 UCB1）：替代原计划里的 PPO 强化学习
+///
+/// `ctx` = 学习隔离键（建议用 WAF 规则名或目标主机），`input` = 待变异载荷。
+/// 返回：选中的编码家族 + **该家族变异后的载荷**（可直接用于探测）+ 当前各臂统计。
+/// 机制说明与边界（不自行发起任何探测）见 `pentest::mutation` 模块文档。
+#[tauri::command]
+pub fn gongfang_mutation_select(ctx: String, input: String) -> Result<MutationSelectionOut, String> {
+    #[cfg(feature = "pentest")]
+    {
+        if ctx.trim().is_empty() {
+            return Err("ctx 不能为空（建议用 WAF 规则名或目标主机）".to_string());
+        }
+        if input.trim().is_empty() {
+            return Err("input 不能为空".to_string());
+        }
+        Ok(crate::pentest::mutation::select(ctx.trim(), &input))
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = (ctx, input);
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
+/// 回填一次真实结果（探测后：该臂是否真的绕过），驱动后续选臂
+///
+/// 二选一给奖励：`reward`（0.0..1.0 分级，优先）或 `success`（布尔，等价 1.0/0.0）。
+/// 分级奖励能区分「多绕过 1 条」与「多绕过 4 条」，学习效果明显更好。
+#[tauri::command]
+pub fn gongfang_mutation_reward(
+    ctx: String,
+    arm: usize,
+    success: Option<bool>,
+    reward: Option<f64>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "pentest")]
+    {
+        let value = match (reward, success) {
+            (Some(r), _) => r,
+            (None, Some(s)) => {
+                if s {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            (None, None) => return Err("需提供 reward（0.0..1.0）或 success（bool）".to_string()),
+        };
+        let arms = crate::pentest::mutation::record_value(ctx.trim(), arm, value)?;
+        Ok(serde_json::json!({ "ctx": ctx.trim(), "arm": arm, "reward": value.clamp(0.0, 1.0), "arms": arms }))
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = (ctx, arm, success, reward);
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
+/// 变异臂统计（`reset=true` 清空；`ctx` 省略则返回全部上下文）
+#[tauri::command]
+pub fn gongfang_mutation_stats(
+    ctx: Option<String>,
+    reset: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "pentest")]
+    {
+        let reset = reset.unwrap_or(false);
+        let map = crate::pentest::mutation::stats(ctx.as_deref(), reset);
+        Ok(serde_json::json!({
+            "reset": reset,
+            "arms": crate::pentest::mutation::ARMS,
+            "contexts": map,
+        }))
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = (ctx, reset);
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
 /// OpenAPI / Swagger 参数边界推演
 ///
 /// 输入二选一：`url`（spec 地址，自动抓取，走统一 GET 通道=真实 TLS 指纹优先）
