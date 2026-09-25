@@ -8,6 +8,13 @@ edition = "2021"
 name = "gongfang_kit"
 path = "src/lib.rs"
 
+# TLS 指纹探针（Phase 1 技术选型 spike，dev-only）：
+# 仅在 crawler feature 开启时构建，避免无 crawler 的构建被它牵连失败。
+[[bin]]
+name = "tls_probe"
+path = "src/bin/tls_probe.rs"
+required-features = ["crawler"]
+
 [features]
 # 默认零重型依赖：仅编译 kernel 骨架 + commands stub，主二进制零污染
 default = []
@@ -27,6 +34,10 @@ pentest = ["dep:petgraph"]
 automation = ["dep:winapi"]
 # 启用 API 网关（reqwest 代理调度 + EWMA/PID 限流）—— 后续阶段
 gateway = []
+# 真实 TLS/JA3-JA4 指纹伪装通道（impersonate）。
+# 说明：这是纯开关，本身不引入依赖；实际 impersonate 实现（外部 curl-impersonate
+# 二进制或进程内 BoringSSL 客户端）在实现阶段接入，且必须排除出 Android/lite 构建。
+tls-impersonate = []
 # 一键全开
 full = ["crawler-browser", "reverse", "pentest", "automation", "gateway"]
 

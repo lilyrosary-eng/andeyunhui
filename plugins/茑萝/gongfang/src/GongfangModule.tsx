@@ -125,6 +125,8 @@ interface Features {
   pentest: boolean;
   automation: boolean;
   gateway: boolean;
+  /** 真实 TLS/JA3-JA4 指纹伪装通道是否可用（当前未实现，恒为 false） */
+  tls_impersonate: boolean;
 }
 
 // TabKey → features 字段（用于按编译能力优雅降级）

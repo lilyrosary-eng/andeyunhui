@@ -36,7 +36,7 @@ interface GongfangStatus {
   strategy: Strategy;
   reward: number;
   error_rate: number;
-  features: { crawler: boolean; reverse: boolean; pentest: boolean; automation: boolean; gateway: boolean };
+  features: { crawler: boolean; reverse: boolean; pentest: boolean; automation: boolean; gateway: boolean; tls_impersonate: boolean };
 }
 
 // ============ 爬虫实际爬取结果类型（与 Rust 端 FetchResult 对齐） ============
@@ -409,17 +409,16 @@ function renderChips(label: string, items: string[]): React.ReactNode {
 // ============ 框架一：网络爬虫 ============
 const crawlerMeta: FrameworkMeta = {
   title: '网络爬虫框架',
-  subtitle: '反检测、反封锁、智能调度。分布式浏览器农场 + TLS 指纹伪装 + CDP 协议控制，针对反爬对抗场景。',
+  subtitle: '反检测、反封锁、智能调度。真实 HTTP 抓取 + 代理选路 + 请求头伪装，并对接 API 网关整形；真实 TLS/JA3 指纹伪装待接入（见下方「计划中」）。',
   posture: '攻防',
   capabilities: [
-    '浏览器农场连接池预热（<80ms 取实例）',
-    '20+ 维度指纹矩阵生成（Canvas/WebGL/字体/音频）',
-    'TLS JA4/JA3 签名伪装（rustls 重写 ClientHello）',
-    'HTTP/2 帧序列伪装（SETTINGS/WINDOW_UPDATE 时序）',
-    'CDP 调用乱序抖动（规避反爬特征检测）',
-    'LocalStorage/IndexedDB 持久化（老访客身份）',
-    '429/503 智能退避调度器',
-    'Geo 一致性强绑定（IP/语言/时区）',
+    '真实 HTTP 抓取：连接复用 + 同域递归队列（去重 / 深度限制）',
+    'QPS 限速 + 响应态势回调（403/429 触发降速与指纹轮换）',
+    '代理池：轮换选路 + 代理故障分类 + 失败换代理重试',
+    '浏览器同构请求头（UA / Accept / Language / Client Hints 自洽）',
+    'CDP 隐身脚本（webdriver 清除 + Canvas/WebGL 噪声，浏览器模式）',
+    '代理选路对接 API 网关（@rotate direct/proxy/stealth 整形）',
+    '计划中：真实 TLS/JA3-JA4 指纹伪装（需外部 impersonate 通道，当前仅 UA 档案）',
   ],
   techStack: [
     { name: 'chromiumoxide', license: 'MPL-2.0' },
@@ -896,7 +895,12 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
             <StatusCard label="当前阶段" value={<span className={phase.cls}>{phase.label}</span>} />
             <StatusCard label="QPS" value={strategy?.qps ?? 0} />
             <StatusCard label="隐身等级" value={`${strategy?.stealth_level ?? 0}/100`} />
-            <StatusCard label="TLS 指纹" value={strategy?.tls_profile ?? '—'} valueCls="font-mono text-[12px]" />
+            {/* 诚实标注：未接入真实 TLS 指纹通道时，该项只是 UA 档案（不含 JA3/JA4） */}
+            <StatusCard
+              label={status?.features?.tls_impersonate ? 'TLS 指纹' : 'UA 档案'}
+              value={strategy?.tls_profile ?? '—'}
+              valueCls="font-mono text-[12px]"
+            />
             <StatusCard label="奖励值" value={status?.reward ?? 0} />
             <StatusCard
               label="错误率"

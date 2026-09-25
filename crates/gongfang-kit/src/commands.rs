@@ -32,6 +32,12 @@ pub struct Features {
     pub pentest: bool,
     pub automation: bool,
     pub gateway: bool,
+    /// 真实 TLS/JA3-JA4 指纹伪装通道是否可用。
+    ///
+    /// 现状：仅 `tls-impersonate` feature 开启时才可能为 true；
+    /// 未接入前恒为 false，前端据此把「TLS 指纹」显示为「UA 档案」，
+    /// 避免把「只换 UA」宣传成 TLS 指纹伪装。
+    pub tls_impersonate: bool,
 }
 
 #[derive(Serialize)]
@@ -50,6 +56,7 @@ fn features() -> Features {
         pentest: cfg!(feature = "pentest"),
         automation: cfg!(feature = "automation"),
         gateway: cfg!(feature = "gateway"),
+        tls_impersonate: cfg!(feature = "tls-impersonate"),
     }
 }
 

@@ -5,7 +5,11 @@
 //!
 //! 注意：chromiumoxide 较重，实际浏览器集成在后续阶段。此处先提供 JS 脚本常量与 UA 伪装。
 
-/// TLS 指纹档案对应的 User-Agent
+/// 按档案名返回 User-Agent 字符串
+///
+/// ⚠️ 明确边界：这里**只换 UA**，不改变 TLS ClientHello，因此**不提供 JA3/JA4 伪装**。
+/// rustls 官方不支持自定义 extension（其手册明确建议「要实验就 fork」），
+/// 真实 TLS 指纹需经外部 impersonate 通道（见 `tls-impersonate` feature）。
 pub fn user_agent(tls_profile: &str) -> &'static str {
     match tls_profile {
         "chrome_122" => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
