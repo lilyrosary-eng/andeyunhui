@@ -77,6 +77,12 @@ impl AiTool for GongfangFullTool {
                 // —— 侦察 ——
                 "waf" => ok(gongfang_waf_detect(k(&["url"])?).await),
                 "tech" => ok(gongfang_tech_fingerprint(k(&["url"])?).await),
+                // OpenAPI/Swagger 参数边界推演（给 spec 的 url 或 spec JSON 文本；只解析不发探测）
+                "openapi" => ok(gongfang_openapi_analyze(
+                    json(args, "url").and_then(|x| x.as_str().map(str::to_string)),
+                    json(args, "spec").and_then(|x| x.as_str().map(str::to_string)),
+                )
+                .await),
                 "methods" => ok(gongfang_http_methods(k(&["url"])?).await),
                 "paths" => ok(gongfang_path_probe(k(&["url"])?).await),
                 "wellknown" => ok(gongfang_wellknown_probe(k(&["url"])?).await),

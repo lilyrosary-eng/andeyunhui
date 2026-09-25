@@ -21,6 +21,12 @@ name = "disasm_probe"
 path = "src/bin/disasm_probe.rs"
 required-features = ["reverse"]
 
+# OpenAPI 参数边界推演探针（dev-only）：抓公开真实 spec 验证解析与边界生成
+[[bin]]
+name = "openapi_probe"
+path = "src/bin/openapi_probe.rs"
+required-features = ["pentest"]
+
 [features]
 # 默认零重型依赖：仅编译 kernel 骨架 + commands stub，主二进制零污染
 default = []

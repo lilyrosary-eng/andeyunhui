@@ -977,6 +977,57 @@ type TechFpOut = crate::pentest::fingerprint::TechFingerprint;
 type TechFpOut = serde_json::Value;
 
 #[cfg(feature = "pentest")]
+type OpenApiReportOut = crate::pentest::openapi::OpenApiReport;
+#[cfg(not(feature = "pentest"))]
+type OpenApiReportOut = serde_json::Value;
+
+/// OpenAPI / Swagger 参数边界推演
+///
+/// 输入二选一：`url`（spec 地址，自动抓取，走统一 GET 通道=真实 TLS 指纹优先）
+/// 或 `spec`（直接给 spec JSON 文本，便于离线/已下载的 spec）。
+///
+/// 产出：端点 → 参数 → 每个参数的边界候选值（类型边界 / 枚举 / 必填缺失 / 注入基线）。
+/// **只解析、不发任何探测请求**：是否真发、发多少由调用方（人工或 AI 显式指令）决定，
+/// 避免模块自行对目标做「参数 fuzz」这类越权动作。
+/// 仅支持 JSON spec；YAML 形态请先转 JSON（不为此引入 YAML 依赖）。
+#[tauri::command]
+pub async fn gongfang_openapi_analyze(
+    url: Option<String>,
+    spec: Option<String>,
+) -> Result<OpenApiReportOut, String> {
+    #[cfg(feature = "pentest")]
+    {
+        let text = if let Some(s) = spec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            s.to_string()
+        } else {
+            let u = url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "需提供 spec 的 url 或 spec 文本".to_string())?;
+            let u = crate::normalize_url(u);
+            log::info!("[openapi] 拉取 spec: {}", u);
+            let r = crate::http_channel::get(&u, crate::http_channel::DEFAULT_TIMEOUT_MS, "chrome_122")
+                .await
+                .map_err(|e| format!("拉取 spec 失败: {}", e))?;
+            if !(200..300).contains(&r.status) {
+                return Err(format!(
+                    "拉取 spec 失败：HTTP {}（channel={}）；若目标需鉴权请改用 spec 文本入参",
+                    r.status, r.channel
+                ));
+            }
+            r.body
+        };
+        crate::pentest::openapi::analyze_spec(&text)
+    }
+    #[cfg(not(feature = "pentest"))]
+    {
+        let _ = (url, spec);
+        Err("pentest feature 未启用，请用 --features gongfang-pentest 编译".to_string())
+    }
+}
+
+#[cfg(feature = "pentest")]
 type MethodReportOut = crate::pentest::recon::MethodReport;
 #[cfg(not(feature = "pentest"))]
 type MethodReportOut = serde_json::Value;

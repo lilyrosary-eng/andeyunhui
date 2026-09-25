@@ -211,6 +211,21 @@ interface BinaryAnalysis {
   warnings: string[];
 }
 
+// OpenAPI / Swagger 参数边界推演（与 Rust 端 pentest::openapi 对齐）
+interface ApiBoundary { value: string; kind: string; why: string }
+interface ApiParam { name: string; location: string; required: boolean; schema_type: string; enum_values: string[]; candidates: ApiBoundary[] }
+interface ApiEndpoint { method: string; path: string; operation_id: string | null; body_schema: string | null; params: ApiParam[] }
+interface ApiReport {
+  spec_version: string;
+  title: string | null;
+  servers: string[];
+  endpoint_count: number;
+  endpoints: ApiEndpoint[];
+  schema_count: number;
+  security_schemes: string[];
+  warnings: string[];
+}
+
 interface SymbolSummary {
   url: string;
   name: string;
@@ -1823,11 +1838,11 @@ const pentestMeta: FrameworkMeta = {
     'XSS / RCE 编码链与载荷库',
     'HPP 参数污染差异分析（Tomcat vs WebLogic）',
     'WAF 编码变异对照实验（同一载荷逐编码族评估规则命中，属模拟非实攻）',
+    'OpenAPI 3.x / Swagger 2.0 spec 解析 → 端点/参数/请求体属性 + 每参数边界候选（类型上下界 / 溢出 / 枚举越界 / 注入基线 / 必填缺失）；实测 petstore v2/v3 共解析 39 端点',
     '错误页 / 常见路径 / RFC 8615 well-known 探测',
   ],
   capabilitiesPlanned: [
-    'OpenAPI/Swagger 参数边界推演（当前仅有路径字典中的 swagger 条目）',
-    'PPO 强化学习自适应变异（AI）',
+    'PPO 强化学习自适应变异（AI）——拟按项目一贯做法降级为多臂老虎机（UCB/Thompson）自适应变异',
     'Transfer-Encoding chunked 分块绕过',
     'JSON 不可见 Unicode 混淆',
     'nuclei / httpx 引擎接入',
@@ -2020,6 +2035,13 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const [dbResult, setDbResult] = useState<DbPayloadReport | null>(null);
   const [dbBusy, setDbBusy] = useState(false);
 
+  // OpenAPI 参数边界推演状态
+  const [apiSpecUrl, setApiSpecUrl] = useState('');
+  const [apiSpecText, setApiSpecText] = useState('');
+  const [apiBusy, setApiBusy] = useState(false);
+  const [apiReport, setApiReport] = useState<ApiReport | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
+
   const handleDbPayloads = useCallback(async () => {
     if (!dbInput.trim()) return;
     setDbBusy(true);
@@ -2081,6 +2103,38 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
       setWafBusy(false);
     }
   }, [wafUrl, addLog]);
+
+  // OpenAPI/Swagger 参数边界推演（spec 拉取或粘贴 → 端点/参数/边界候选）
+  const handleOpenApiAnalyze = useCallback(async () => {
+    const url = apiSpecUrl.trim();
+    const spec = apiSpecText.trim();
+    if (!url && !spec) {
+      setApiError('请填写 spec 地址，或展开后粘贴 spec JSON');
+      return;
+    }
+    setApiBusy(true);
+    setApiError(null);
+    try {
+      const r = await tauriInvoke<ApiReport>('gongfang_openapi_analyze', {
+        url: url || null,
+        spec: spec || null,
+      });
+      setApiReport(r);
+      const withParams = r.endpoints.reduce((n, e) => n + e.params.length, 0);
+      addLog({
+        action: 'OpenAPI 参数推演',
+        target: url || '(粘贴的 spec)',
+        status: 'success',
+        detail: `${r.spec_version} · ${r.endpoint_count} 端点 · ${withParams} 参数 · schema ${r.schema_count}`,
+      });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      setApiError(msg);
+      addLog({ action: 'OpenAPI 参数推演', target: url || '(粘贴的 spec)', status: 'error', detail: msg });
+    } finally {
+      setApiBusy(false);
+    }
+  }, [apiSpecUrl, apiSpecText, addLog]);
 
   return (
     <div className="h-full overflow-y-auto">
@@ -2223,6 +2277,111 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
               )}
             </div>
           )}
+        </CollapsibleSection>
+
+        {/* OpenAPI / Swagger 参数边界推演（spec 解析 → 端点/参数/边界候选；只解析不发探测） */}
+        <CollapsibleSection
+          title="OpenAPI 参数边界推演"
+          storageKey="fw_pentest_openapi"
+          defaultOpen={false}
+          accent="attack"
+          right={
+            <>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">真实解析</span>
+              <span className="text-[10px] text-neutral-400">OpenAPI 3.x / Swagger 2.0（仅 JSON）</span>
+            </>
+          }
+        >
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={apiSpecUrl}
+                onChange={(e) => setApiSpecUrl(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleOpenApiAnalyze()}
+                placeholder="spec 地址（如 https://host/v3/api-docs 或 /swagger.json）"
+                className="flex-1 px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+              />
+              <button
+                onClick={handleOpenApiAnalyze}
+                disabled={apiBusy}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity shrink-0"
+              >
+                {apiBusy ? '分析中...' : '拉取并推演'}
+              </button>
+            </div>
+            <details className="text-[11px]">
+              <summary className="cursor-pointer text-neutral-500 dark:text-stone-400">或直接粘贴 spec JSON（离线/需鉴权时用）</summary>
+              <textarea
+                value={apiSpecText}
+                onChange={(e) => setApiSpecText(e.target.value)}
+                rows={4}
+                placeholder='{"openapi":"3.0.0", ...}'
+                className="mt-1 w-full px-2.5 py-1.5 rounded-lg text-[11px] font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)] resize-y"
+              />
+              <button
+                onClick={handleOpenApiAnalyze}
+                disabled={apiBusy}
+                className="btn-press mt-1 px-3 py-1 rounded-lg text-[11px] text-neutral-600 dark:text-stone-300 border border-black/10 dark:border-stone-700/50 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+              >
+                解析粘贴内容
+              </button>
+            </details>
+
+            {apiError && (
+              <div className="px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-400 break-all">{apiError}</div>
+            )}
+
+            {apiReport && (
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <StatusCard label="规范版本" value={apiReport.spec_version} />
+                  <StatusCard label="端点" value={apiReport.endpoint_count} />
+                  <StatusCard label="Schema" value={apiReport.schema_count} />
+                  <StatusCard label="安全方案" value={apiReport.security_schemes.length} />
+                </div>
+                {apiReport.servers.length > 0 && (
+                  <div className="text-[10px] text-neutral-400 font-mono break-all">基址：{apiReport.servers.join(' · ')}</div>
+                )}
+                <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2 max-h-80 overflow-y-auto space-y-1.5">
+                  {apiReport.endpoints.slice(0, 25).map((ep, i) => (
+                    <div key={`${ep.method}-${ep.path}-${i}`} className="text-[11px]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="px-1 py-0.5 rounded text-[9px] font-medium bg-[var(--element-bg)]/15 text-[var(--element-bg)]">{ep.method}</span>
+                        <span className="font-mono text-neutral-600 dark:text-stone-300 flex-1 truncate" title={ep.path}>{ep.path}</span>
+                        {ep.body_schema && <span className="text-[9px] text-neutral-400">body:{ep.body_schema}</span>}
+                      </div>
+                      {ep.params.length > 0 && (
+                        <div className="pl-4 mt-0.5 space-y-0.5">
+                          {ep.params.map((p) => (
+                            <div key={`${p.location}-${p.name}`} className="flex items-center gap-1.5 text-[10px]">
+                              <span className="font-mono text-neutral-500 dark:text-stone-400 w-36 truncate" title={p.name}>{p.name}</span>
+                              <span className="text-neutral-400">{p.location}/{p.schema_type}{p.required ? ' ·必填' : ''}</span>
+                              <span className="text-neutral-400">候选 {p.candidates.length}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {apiReport.endpoint_count > 25 && (
+                    <div className="text-[10px] text-neutral-400">… 其余 {apiReport.endpoint_count - 25} 个端点未展示</div>
+                  )}
+                </div>
+                {apiReport.warnings.length > 0 && (
+                  <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-400 space-y-0.5">
+                    {apiReport.warnings.slice(0, 6).map((w, i) => (
+                      <div key={i}>· {w}</div>
+                    ))}
+                  </div>
+                )}
+                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                  每个参数的边界候选（类型上下界 / 溢出 / 枚举越界 / 注入基线 / 必填缺失）已随报告返回，可直接取用；
+                  <span className="text-amber-600 dark:text-amber-400">本功能只解析、不发探测</span>——是否对目标发请求由你决定。
+                </p>
+              </div>
+            )}
+          </div>
         </CollapsibleSection>
 
         {/* P1：资产树 + Payload 库（按主机聚合扫描结果 + 预设注入模板） */}
