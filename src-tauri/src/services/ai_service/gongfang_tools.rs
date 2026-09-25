@@ -49,7 +49,7 @@ impl AiTool for GongfangFullTool {
             "type": "function",
             "function": {
                 "name": "gongfang",
-                "description": "攻防模块统一工具（用户明确授权目标时使用）。cmd 指定操作，args 为操作参数。只读侦察(recon)、抓取(fetch)、载荷(payloads)、编码识别(crypto/encode)、符号(symbols)、自动化(automation_*)、网关(gateway_*)、知识库(ai_knowledge_*)、目标工作区(target_*)、引擎(status/start/stop/inject)。不越权、不洪泛。",
+                "description": "攻防模块统一工具（用户明确授权目标时使用）。cmd 指定操作，args 为操作参数。只读侦察(recon)、抓取(fetch)、爬虫统计与代理池(crawler_stats/proxy_add/proxy_list/proxy_reset)、事件与指标(events_recent/metrics_history)、载荷(payloads)、编码识别(crypto/encode)、符号(symbols)、协议图(protocol_graph，需 url)、自动化(automation_*)、网关(gateway_*)、知识库(ai_knowledge_*)、目标工作区(target_*)、引擎(status/start/stop/inject)。不越权、不洪泛。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -82,6 +82,14 @@ impl AiTool for GongfangFullTool {
                 "wellknown" => ok(gongfang_wellknown_probe(k(&["url"])?).await),
                 "error_page" => ok(gongfang_error_page(k(&["url"])?).await),
                 "fetch" => ok(gongfang_fetch(k(&["url"])?).await),
+                // —— 爬虫（统计 + 代理池管理）——
+                "crawler_stats" => ok(gongfang_crawler_stats()),
+                "proxy_add" => ok(gongfang_proxy_add(k(&["url"])?, json(args, "tag").and_then(|x| x.as_str().map(str::to_string)))),
+                "proxy_list" => ok(gongfang_proxy_list()),
+                "proxy_reset" => ok(gongfang_proxy_reset()),
+                // —— 事件 / 指标（内核自省）——
+                "events_recent" => ok(gongfang_events_recent(json(args, "n").and_then(|x| x.as_u64().map(|u| u as usize)))),
+                "metrics_history" => ok(gongfang_metrics_history(json(args, "seconds").and_then(|x| x.as_u64().map(|u| u as u32)))),
                 // —— 引擎 ——
                 "status" => ok(gongfang_status()),
                 "start" => ok(gongfang_start(app, json(args, "profile_id").and_then(|x| x.as_str().map(str::to_string))).await),
@@ -105,8 +113,10 @@ impl AiTool for GongfangFullTool {
                 "crypto" => ok(gongfang_crypto_identify(k(&["hex_data"])?)),
                 "encode_analyze" => ok(gongfang_encode_analyze(k(&["input"])?)),
                 "encode_chain" => ok(gongfang_encode_chain(k(&["input"])?, json(args, "max_layers").and_then(|x| x.as_u64().map(|u| u as u8)))),
-                // —— 符号 ——
+                // —— 符号 / 协议 ——
                 "symbols" => ok(gongfang_symbols(json(args, "url").and_then(|x| x.as_str().map(str::to_string)))),
+                // 无 url 时后端明确报错（不再返回示例状态机）
+                "protocol_graph" => ok(gongfang_protocol_graph(json(args, "url").and_then(|x| x.as_str().map(str::to_string)))),
                 "symbol_add" => {
                     let req: gongfang_kit::commands::SaveSymbolRequest = serde_json::from_value(json(args, "req").unwrap_or(Value::Null))
                         .map_err(|e| format!("symbol_add req 解析失败: {e}"))?;
@@ -153,6 +163,7 @@ impl AiTool for GongfangFullTool {
                 "target_delete" => ok(gongfang_target_delete(app, k(&["id"])?)),
                 "target_activate" => ok(gongfang_target_activate(app, k(&["id"])?)),
                 "target_get" => ok(gongfang_target_get(app, k(&["id"])?)),
+                "target_set_metadata" => ok(gongfang_target_set_metadata(app, k(&["id"])?, k(&["key"])?, json(args, "value").unwrap_or(Value::Null))),
                 _ => return Err(format!("未知 gongfang cmd: {cmd}")),
             };
             let meta = serde_json::json!({ "card": "generic", "kind": "gongfang", "title": format!("gongfang::{cmd}") });
