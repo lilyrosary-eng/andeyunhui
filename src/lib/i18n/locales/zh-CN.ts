@@ -672,6 +672,10 @@ export const zhCN: Record<string, string> = {
   'capsule.res.engEnc': '编码',
   'capsule.res.engCopy': '拷贝',
   'capsule.res.shared': '共享',
+  // 浮岛 · 磁盘响应/队列与页面文件（磁盘两项在「全部」模式，页面文件在「全部」模式）
+  'capsule.res.resp': '响应',
+  'capsule.res.queue': '队列',
+  'capsule.res.paging': '页面文件',
   'capsule.res.noDisk': '未获取到分区信息',
   'capsule.res.allNote': '滚轮可滚动查看其余指标',
 

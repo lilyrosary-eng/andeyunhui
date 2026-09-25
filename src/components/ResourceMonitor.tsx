@@ -9,6 +9,7 @@ import { useState, type ReactNode } from 'react';
 import {
   fmtBytes,
   fmtFreq,
+  fmtMs,
   fmtPercent,
   fmtPower,
   fmtSpeed,
@@ -272,8 +273,15 @@ export function ResourceMonitor() {
                 items={[
                   { k: '频率', v: fmtFreq(data.cpu_freq_mhz) },
                   { k: '功耗', v: fmtPower(data.cpu_power_w) },
+                  { k: '温度', v: fmtTemp(data.thermal_temp_c) },
                 ]}
               />
+              {/* 温度口径必须写出来：ACPI 热区在部分机型上只是主板温区，不是 CPU 核心温度 */}
+              {data.thermal_temp_c != null && (
+                <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
+                  温度取自 ACPI 热区最高值（部分机型为主板温区，非 CPU 核心温度）
+                </p>
+              )}
               <Sparkline data={hist.cpu} color={cpuColor} max={100} />
               {/* 每核迷你条 */}
               <div className="flex items-end gap-[2px] h-8 mt-1">
@@ -352,6 +360,7 @@ export function ResourceMonitor() {
                 </span>
               </div>
               <Bar percent={data.mem_percent} color={memColor} />
+              <Chips items={[{ k: '页面文件', v: fmtPercent(data.paging_percent, 0) }]} />
               <Sparkline data={hist.mem} color={memColor} max={100} />
             </MetricCard>
 
@@ -380,6 +389,9 @@ export function ResourceMonitor() {
                               { k: '读', v: d.read_bps == null ? '—' : fmtSpeed(d.read_bps) },
                               { k: '写', v: d.write_bps == null ? '—' : fmtSpeed(d.write_bps) },
                               { k: '活动', v: fmtPercent(activity, 0) },
+                              // 响应时间与队列才是「盘是不是已经成瓶颈」的判据，活动度只说「在忙」
+                              { k: '响应', v: fmtMs(d.resp_ms) },
+                              { k: '队列', v: d.queue == null ? '—' : d.queue.toFixed(1) },
                             ]}
                           />
                         </div>

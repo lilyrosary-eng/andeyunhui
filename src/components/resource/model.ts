@@ -55,6 +55,10 @@ export interface DiskUsage {
   write_bps: number | null;
   /** 活动度 %（100 − 空闲时间占比） */
   activity: number | null;
+  /** 平均响应时间 ms（该卷无对应计数器时为 null） */
+  resp_ms: number | null;
+  /** 当前队列长度（排队中的请求数） */
+  queue: number | null;
 }
 
 export interface ResourceUsage {
@@ -64,9 +68,13 @@ export interface ResourceUsage {
   cpu_freq_mhz: number | null;
   /** CPU 封装功耗 W（Intel RAPL；AMD 等平台为 null） */
   cpu_power_w: number | null;
+  /** ACPI 热区最高温 °C（跨厂商免驱动；部分机型为主板温区，非 CPU 核心温度） */
+  thermal_temp_c: number | null;
   mem_total_kb: number;
   mem_used_kb: number;
   mem_percent: number;
+  /** 页面文件使用率 %（Windows 专有；无页面文件为 null） */
+  paging_percent: number | null;
   net_up_bps: number;
   net_down_bps: number;
   gpus: GpuUsage[];
@@ -115,6 +123,12 @@ export function fmtTemp(c: number | null): string {
 export function fmtPercent(p: number | null, digits = 1): string {
   if (p == null || !Number.isFinite(p)) return '—';
   return `${p.toFixed(digits)}%`;
+}
+
+/** 毫秒：≥10ms 取整，<10ms 保留一位小数（磁盘响应时间多在 1–20ms 区间）。null → 「—」 */
+export function fmtMs(ms: number | null): string {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  return ms >= 10 ? `${Math.round(ms)} ms` : `${ms.toFixed(1)} ms`;
 }
 
 /**

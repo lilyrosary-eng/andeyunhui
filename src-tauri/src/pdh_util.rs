@@ -15,6 +15,10 @@
 //   5  \LogicalDisk(*)\Disk Write Bytes/sec
 //   6  \LogicalDisk(*)\% Idle Time                  —— 活动度 = 100 − 它
 //   7  \GPU Adapter Memory(*)\Shared Usage          —— 每个适配器的共享显存（核显主要吃这块）
+//   8  \Thermal Zone Information(*)\Temperature     —— ACPI 热区温度（**开尔文**，需自行换算）
+//   9  \LogicalDisk(*)\Avg. Disk sec/Transfer       —— 平均每次传输耗时（秒，需换算 ms）
+//  10  \LogicalDisk(*)\Current Disk Queue Length    —— 当前排队请求数（判断盘是否成瓶颈）
+//  11  \Paging File(_Total)\% Usage                 —— 页面文件使用率 %
 //
 // 全部路径都挂不上才认为 PDH 整体不可用（session() 返回 None），调用方一律降级为 N/A。
 //
@@ -49,8 +53,16 @@ pub const IDX_DISK_WRITE: usize = 5;
 pub const IDX_DISK_IDLE: usize = 6;
 /// 适配器共享显存（分给 GPU 使用的系统内存，核显的主要占用来源）
 pub const IDX_GPU_VRAM_SHARED: usize = 7;
+/// ACPI 热区温度（开尔文）
+pub const IDX_THERMAL: usize = 8;
+/// 逻辑磁盘平均传输耗时（秒）
+pub const IDX_DISK_RESP: usize = 9;
+/// 逻辑磁盘当前队列长度
+pub const IDX_DISK_QUEUE: usize = 10;
+/// 页面文件使用率 %
+pub const IDX_PAGING: usize = 11;
 
-const SLOT_COUNT: usize = 8;
+const SLOT_COUNT: usize = 12;
 
 /// 英文路径常量。PdhAddEnglishCounterW 在中文系统上同样按英文索引，不受界面语言影响。
 const PATHS: [&str; SLOT_COUNT] = [
@@ -62,6 +74,10 @@ const PATHS: [&str; SLOT_COUNT] = [
     r"\LogicalDisk(*)\Disk Write Bytes/sec",
     r"\LogicalDisk(*)\% Idle Time",
     r"\GPU Adapter Memory(*)\Shared Usage",
+    r"\Thermal Zone Information(*)\Temperature",
+    r"\LogicalDisk(*)\Avg. Disk sec/Transfer",
+    r"\LogicalDisk(*)\Current Disk Queue Length",
+    r"\Paging File(_Total)\% Usage",
 ];
 
 /// 一轮采样结果：每个槽位是该计数器的全部实例（实例名统一已转小写，值为 f64）。
@@ -76,6 +92,10 @@ pub struct Sample {
     pub disk_write: Option<Vec<(String, f64)>>,
     pub disk_idle: Option<Vec<(String, f64)>>,
     pub gpu_vram_shared: Option<Vec<(String, f64)>>,
+    pub thermal: Option<Vec<(String, f64)>>,
+    pub disk_resp: Option<Vec<(String, f64)>>,
+    pub disk_queue: Option<Vec<(String, f64)>>,
+    pub paging: Option<Vec<(String, f64)>>,
 }
 
 impl Sample {
@@ -195,10 +215,15 @@ pub fn sample_all() -> Option<Sample> {
         disk_read: if rates { s.read(IDX_DISK_READ) } else { None },
         disk_write: if rates { s.read(IDX_DISK_WRITE) } else { None },
         disk_idle: if rates { s.read(IDX_DISK_IDLE) } else { None },
+        // `Avg. Disk sec/Transfer` 是「区间平均值」型计数器，同样要两次采样才有意义 → 受 rates 门控
+        disk_resp: if rates { s.read(IDX_DISK_RESP) } else { None },
         // 瞬时类（单次采样即有值，与窗口无关）：照常读取。
         gpu_vram: s.read(IDX_GPU_VRAM),
         gpu_vram_shared: s.read(IDX_GPU_VRAM_SHARED),
         cpu_perf: s.read(IDX_CPU_PERF),
+        thermal: s.read(IDX_THERMAL),
+        disk_queue: s.read(IDX_DISK_QUEUE),
+        paging: s.read(IDX_PAGING),
     };
     // 首次**有效**采样成功后打一条一次性诊断日志，把每个槽位的实例数写进日志 ——
     // 「某个指标一直是 N/A」时可直接对照本行判断是「计数器在本机不存在」还是「采集逻辑出错」。
@@ -209,7 +234,7 @@ pub fn sample_all() -> Option<Sample> {
             let n = |v: &Option<Vec<(String, f64)>>| v.as_ref().map_or(-1, |x| x.len() as i32);
             log::info!(
                 "[RES] PDH 就绪: gpu_engine={} gpu_vram={} gpu_vram_shared={} cpu_power={} cpu_perf={} \
-                 disk_read={} disk_write={} disk_idle={}（-1 = 该计数器在本机不可用）",
+                 disk_read={} disk_write={} disk_idle={} disk_resp={} thermal={} paging={}（-1 = 该计数器在本机不可用）",
                 n(&sample.gpu_engine),
                 n(&sample.gpu_vram),
                 n(&sample.gpu_vram_shared),
@@ -217,7 +242,10 @@ pub fn sample_all() -> Option<Sample> {
                 n(&sample.cpu_perf),
                 n(&sample.disk_read),
                 n(&sample.disk_write),
-                n(&sample.disk_idle)
+                n(&sample.disk_idle),
+                n(&sample.disk_resp),
+                n(&sample.thermal),
+                n(&sample.paging)
             );
         }
     }

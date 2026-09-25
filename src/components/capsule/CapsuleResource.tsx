@@ -20,6 +20,7 @@ import { KeepButton } from '@/components/KeepButton';
 import {
   fmtBytes,
   fmtFreq,
+  fmtMs,
   fmtPercent,
   fmtPower,
   fmtSpeed,
@@ -148,7 +149,10 @@ function DiskTile({ d }: { d: DiskUsage }) {
       sub={
         `${t('capsule.res.read')} ${d.read_bps == null ? '—' : fmtSpeed(d.read_bps)}` +
         ` · ${t('capsule.res.write')} ${d.write_bps == null ? '—' : fmtSpeed(d.write_bps)}` +
-        ` · ${t('capsule.res.activity')} ${fmtPercent(d.activity, 0)}`
+        ` · ${t('capsule.res.activity')} ${fmtPercent(d.activity, 0)}` +
+        // 响应时间与队列才是「盘是否已成瓶颈」的判据（活动度只说「在忙」）
+        ` · ${t('capsule.res.resp')} ${fmtMs(d.resp_ms)}` +
+        ` · ${t('capsule.res.queue')} ${d.queue == null ? '—' : d.queue.toFixed(1)}`
       }
     />
   );
@@ -315,7 +319,7 @@ function CapsuleResource() {
               color={levelColor(data.cpu_percent, true)}
               percent={data.cpu_percent}
               detail={`${data.cpu_per_core.length} ${t('capsule.res.cores')} · ${fmtFreq(data.cpu_freq_mhz)}`}
-              sub={`${t('capsule.res.power')} ${fmtPower(data.cpu_power_w)}`}
+              sub={`${t('capsule.res.power')} ${fmtPower(data.cpu_power_w)} · ${fmtTemp(data.thermal_temp_c)}`}
             />
 
             {/* GPU 占用 / 显存占用：精简=第 1 块；全部=逐块展开（占用与显存成对相邻） */}
@@ -376,6 +380,7 @@ function CapsuleResource() {
               color={levelColor(data.mem_percent, true)}
               percent={data.mem_percent}
               detail={`${fmtBytes(data.mem_used_kb)} / ${fmtBytes(data.mem_total_kb)}`}
+              extra={all ? `${t('capsule.res.paging')} ${fmtPercent(data.paging_percent, 0)}` : undefined}
             />
 
             {/* ── 以下是「全部」模式追加的内容 ── */}

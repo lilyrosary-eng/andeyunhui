@@ -672,6 +672,10 @@ export const enUS: Record<string, string> = {
   'capsule.res.engEnc': 'Enc',
   'capsule.res.engCopy': 'Copy',
   'capsule.res.shared': 'Shared',
+  // Capsule · disk response/queue and page file
+  'capsule.res.resp': 'Resp',
+  'capsule.res.queue': 'Queue',
+  'capsule.res.paging': 'Page file',
   'capsule.res.noDisk': 'No partition data',
   'capsule.res.allNote': 'Scroll to see the remaining metrics',
 

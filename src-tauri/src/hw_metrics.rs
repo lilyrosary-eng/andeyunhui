@@ -32,12 +32,29 @@
 //   · AMD 平台与不暴露 Energy Meter 的机型拿不到 → 返回 None，前端展示 N/A。这是硬限制，
 //     不是没实现：Windows 没有覆盖各家的功耗 API。
 //
+// ── 系统温度（ACPI 热区） ────────────────────────────────────────────────────
+// 取 \Thermal Zone Information(*)\Temperature 里各热区的**最高**值，单位是**开尔文**，自行换算 °C。
+//   · 为什么不用「CPU 核心温度」：Windows 没有公开的 CPU 核心温度 API（厂商工具走 MSR 或内核
+//     驱动），ACPI 热区是唯一**跨厂商、免驱动**的温度源。本机实测 \_tz.tz01 = 314K ≈ 40.9°C
+//     （idle 状态合理，与 42°C 的 GPU 温度同量级）。
+//   · 代价是口径随 OEM 变：有的机器只暴露一个主板温区、有的暴露 CPU/GPU 多热区、少数机型
+//     压根不暴露。故取最高值并在 UI 上标注来源 —— 比挑一个「可能是 CPU」的实例更诚实。
+//   · 容错两条：① 个别固件按「十分之一开尔文」上报（读数 >1000 时按 0.1K 处理）；
+//     ② 最终只接受 0–150 °C，其余一律 None（宁可 N/A，也不给一个看不出错的假温度）。
+//
 // ── 磁盘 IO ────────────────────────────────────────────────────────────────
 // 按**逻辑磁盘**（卷）取，与界面上「逐个分区一行」的粒度对齐：
 //   · 读/写 = \LogicalDisk(<卷>)\Disk Read|Write Bytes/sec（字节/秒）
 //   · 活动度 = 100 − \LogicalDisk(<卷>)\% Idle Time（与任务管理器「活动时间」同口径）
+//   · 响应时间 = \LogicalDisk(<卷>)\Avg. Disk sec/Transfer × 1000（秒 → 毫秒）
+//   · 队列长度 = \LogicalDisk(<卷>)\Current Disk Queue Length（当前排队的请求数）
+//   为什么补后两项：活动度只说明「盘在忙」，响应时间与队列才说明「盘是不是已经成瓶颈」
+//   （本机实测 C: 响应 2.3ms / 队列 0，空闲状态自洽）。
 //   实例名形如 `c:` / `d:` / `harddiskvolume3` / `_total`；调用方按盘符去匹配挂载点。
 //   注意：`% Disk Time` 允许 >100%，但 `% Idle Time` 不会，所以活动度走 100−idle 更稳。
+//
+// ── 页面文件 ────────────────────────────────────────────────────────────────
+// 取 \Paging File(_Total)\% Usage。物理内存卡旁边最该有的那个「是不是开始换页了」的指示。
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
@@ -45,11 +62,13 @@ use libloading::Library;
 
 use crate::pdh_util::Sample;
 
-/// CPU 汇总指标（频率 / 功耗各自独立降级）
+/// CPU/系统汇总指标（频率 / 功耗 / 温度各自独立降级）
 #[derive(Default, Clone, Copy)]
 pub struct CpuExtra {
     pub freq_mhz: Option<f32>,
     pub power_w: Option<f32>,
+    /// ACPI 热区最高温（°C）；部分机型为主板温区而非 CPU 核心温度
+    pub temp_c: Option<f32>,
 }
 
 /// 单个卷的实时 IO
@@ -60,14 +79,38 @@ pub struct DiskIo {
     pub write_bps: Option<f64>,
     /// 活动度 %（0–100）
     pub activity: Option<f32>,
+    /// 平均响应时间（毫秒）
+    pub resp_ms: Option<f32>,
+    /// 当前队列长度（排队中的请求数）
+    pub queue: Option<f32>,
 }
 
-/// 从一轮 PDH 采样里算出 CPU 频率与功耗
+/// 从一轮 PDH 采样里算出 CPU 频率、功耗与系统温度
 pub fn cpu_extra(sample: Option<&Sample>) -> CpuExtra {
     CpuExtra {
         freq_mhz: cpu_freq_mhz(sample),
         power_w: cpu_power_w(sample),
+        temp_c: system_temp_c(sample),
     }
+}
+
+/// ACPI 热区最高温（°C）。取各热区最大值；读数落在「十分之一开尔文」量级时按 0.1K 处理。
+/// 只接受 0–150 °C，其余返回 None（详见文件头「系统温度」段）。
+pub fn system_temp_c(sample: Option<&Sample>) -> Option<f32> {
+    let items = sample?.thermal.as_ref()?;
+    let mut best: Option<f32> = None;
+    for (_, raw) in items {
+        if !raw.is_finite() || *raw <= 0.0 {
+            continue;
+        }
+        // >1000 视为「十分之一开尔文」（如 3140 → 314.0 K）；正常开尔文约 250–450
+        let kelvin = if *raw > 1000.0 { *raw / 10.0 } else { *raw };
+        let celsius = (kelvin - 273.15) as f32;
+        if celsius.is_finite() && (0.0..=150.0).contains(&celsius) {
+            best = Some(best.map_or(celsius, |b| b.max(celsius)));
+        }
+    }
+    best
 }
 
 /// 有效频率（MHz）= % Processor Performance / 100 × 标称基频
@@ -101,13 +144,19 @@ fn cpu_power_w(sample: Option<&Sample>) -> Option<f32> {
     }
 }
 
-/// 按卷汇总实时 IO；实例名取三个计数器实例的并集（某些卷可能只挂了部分计数器）
+/// 按卷汇总实时 IO；实例名取各计数器实例的并集（某些卷可能只挂了部分计数器）
 pub fn disk_io(sample: Option<&Sample>) -> Vec<DiskIo> {
     let Some(s) = sample else {
         return Vec::new();
     };
     let mut names: Vec<String> = Vec::new();
-    for slot in [&s.disk_read, &s.disk_write, &s.disk_idle] {
+    for slot in [
+        &s.disk_read,
+        &s.disk_write,
+        &s.disk_idle,
+        &s.disk_resp,
+        &s.disk_queue,
+    ] {
         if let Some(items) = slot {
             for (n, _) in items {
                 if !names.iter().any(|x| x == n) {
@@ -126,9 +175,24 @@ pub fn disk_io(sample: Option<&Sample>) -> Vec<DiskIo> {
             activity: Sample::value_of(&s.disk_idle, &n)
                 .filter(|v| v.is_finite())
                 .map(|idle| (100.0 - idle.clamp(0.0, 100.0)) as f32),
+            // 响应时间：秒 → 毫秒（负值/NaN 视为取不到）
+            resp_ms: Sample::value_of(&s.disk_resp, &n)
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .map(|sec| (sec * 1000.0) as f32),
+            queue: Sample::value_of(&s.disk_queue, &n)
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .map(|q| q as f32),
             instance: n,
         })
         .collect()
+}
+
+/// 页面文件使用率 %（实例 `_total`，超出 0–100 视为异常 → None）
+pub fn paging_percent(sample: Option<&Sample>) -> Option<f32> {
+    let s = sample?;
+    Sample::value_of(&s.paging, "_total")
+        .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
+        .map(|v| v as f32)
 }
 
 // ----------------- 标称基频（powrprof.dll 运行时加载） -----------------

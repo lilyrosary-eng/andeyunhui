@@ -82,9 +82,13 @@ pub struct ResourceUsage {
     pub cpu_per_core: Vec<f32>,  // 每核占用 %（按物理核心顺序）
     pub cpu_freq_mhz: Option<f32>, // CPU 有效频率 MHz = %ProcessorPerformance × 标称基频
     pub cpu_power_w: Option<f32>,  // CPU 封装功耗 W（Intel RAPL；其他平台为 None）
+    /// ACPI 热区最高温 °C（跨厂商免驱动；部分机型为主板温区而非 CPU 核心温度）
+    pub thermal_temp_c: Option<f32>,
     pub mem_total_kb: u64,
     pub mem_used_kb: u64,
     pub mem_percent: f32,
+    /// 页面文件使用率 %（Windows 专有；无页面文件时 None）
+    pub paging_percent: Option<f32>,
     pub net_up_bps: f64,         // 上行速率 字节/秒
     pub net_down_bps: f64,       // 下行速率 字节/秒
     pub gpus: Vec<crate::gpu_metrics::GpuUsage>, // 逐块显卡（利用率/显存/频率/功耗）
@@ -102,6 +106,8 @@ pub struct DiskUsage {
     pub read_bps: Option<f64>,
     pub write_bps: Option<f64>,
     pub activity: Option<f32>, // 活动度 %：100 − 空闲时间占比
+    pub resp_ms: Option<f32>,  // 平均响应时间 ms（该卷无对应计数器时为 None）
+    pub queue: Option<f32>,    // 当前队列长度（排队中的请求数）
 }
 
 struct ResState {
@@ -212,80 +218,98 @@ fn get_resource_usage() -> ResourceUsage {
                 read_bps: None,
                 write_bps: None,
                 activity: None,
+                resp_ms: None,
+                queue: None,
             }
         })
         .collect();
     disks.sort_by(|a, b| a.mount.cmp(&b.mount));
     drop(st);
 
-    // 原生指标（Windows）：**一次** PDH 采样喂给 GPU / CPU 频率功耗 / 磁盘 IO 三路。
-    // 只采样一次是关键：速率类计数器（GPU 利用率、Disk Bytes/sec、% Idle Time）都靠两次
-    // 采样之间的时间差算速率，分散成多次采样会把间隔压到 ~0，读数失真。
-    // 口径与降级策略见各模块文件头（gpu_metrics.rs / hw_metrics.rs / pdh_util.rs）。
-    #[cfg(windows)]
-    let (gpus, cpu_freq_mhz, cpu_power_w) = {
-        let sample = crate::pdh_util::sample_all();
-        let gpus = crate::gpu_metrics::query_gpus(sample.as_ref());
-        let cpu_extra = crate::hw_metrics::cpu_extra(sample.as_ref());
-        // 磁盘 IO：PDH 的 LogicalDisk 实例名就是盘符（`c:`），而 sysinfo 给的挂载点是 `C:\`，
-        // 去掉结尾反斜杠再转小写即为实例名。没有对应实例的卷（如无盘符的隐藏卷）保持 None，
-        // 前端展示「—」而不是伪造一个 0。
-        let ios = crate::hw_metrics::disk_io(sample.as_ref());
-        // 首次采集成功后打一条一次性诊断日志：把每块显卡的读数与磁盘实例名写进日志，
-        // 便于真机上直接核对「GPU 连的是哪块卡」「分区是否匹配上了 LogicalDisk 实例」，
-        // 不必靠 UI 反推后端到底采到了什么。
-        static RES_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        if RES_LOGGED.set(()).is_ok() {
-            for g in &gpus {
-                log::info!(
-                    "[RES] GPU「{}」util={:?}% 显存={:?}/{:?}KB（共享{:?}KB）引擎 3D={:?}% 解码={:?}% \
-                     编码={:?}% 拷贝={:?}% 温度={:?}°C 频率={:?}MHz 功耗={:?}W",
-                    g.name,
-                    g.util_percent,
-                    g.vram_used_kb,
-                    g.vram_total_kb,
-                    g.vram_shared_kb,
-                    g.util_3d,
-                    g.util_video_decode,
-                    g.util_video_encode,
-                    g.util_copy,
-                    g.temp_c,
-                    g.clock_mhz,
-                    g.power_w
-                );
-            }
-            log::info!(
-                "[RES] CPU 频率={:?}MHz 功耗={:?}W | 磁盘IO实例={:?}",
-                cpu_extra.freq_mhz,
-                cpu_extra.power_w,
-                ios.iter().map(|x| x.instance.as_str()).collect::<Vec<_>>()
-            );
-        }
-        for d in disks.iter_mut() {
-            let inst = d.mount.trim_end_matches('\\').to_lowercase();
-            if let Some(io) = ios.iter().find(|x| x.instance == inst) {
-                d.read_bps = io.read_bps;
-                d.write_bps = io.write_bps;
-                d.activity = io.activity;
-            }
-        }
-        (gpus, cpu_extra.freq_mhz, cpu_extra.power_w)
-    };
-    #[cfg(not(windows))]
-    let (gpus, cpu_freq_mhz, cpu_power_w) = (Vec::new(), None, None);
-
-    ResourceUsage {
+    let mut usage = ResourceUsage {
         cpu_percent,
         cpu_per_core,
-        cpu_freq_mhz,
-        cpu_power_w,
+        cpu_freq_mhz: None,
+        cpu_power_w: None,
+        thermal_temp_c: None,
+        paging_percent: None,
         mem_total_kb,
         mem_used_kb,
         mem_percent,
         net_up_bps: up_bps,
         net_down_bps: down_bps,
-        gpus,
+        // 原生（Windows）指标在 fill_native 里回填；非 Windows 目标保持空 / None
+        gpus: Vec::new(),
         disks,
+    };
+    #[cfg(windows)]
+    fill_native(&mut usage);
+    usage
+}
+
+/// 回填 Windows 原生指标（GPU / CPU 频率·功耗·温度 / 页面文件 / 各卷实时 IO）。
+///
+/// ★ **一次采样喂全部指标**是硬要求：速率类计数器（GPU 利用率、Disk Bytes/sec、% Idle Time、
+///   Avg. Disk sec/Transfer）都靠两次采样之间的时间差算值，分散成多次采样会把间隔压到 ~0，
+///   读数失真。故这里只调一次 `sample_all()`。
+///
+/// 非 Windows 目标不存在本函数，调用点也因此只需**一处** cfg —— 早先这些字段是靠一个越滚越长
+/// 的元组在两个 cfg 分支里各写一遍返回的，每加一项都要同步改两处、且极易漏掉 mobile 分支。
+/// 口径与降级策略见各模块文件头（gpu_metrics.rs / hw_metrics.rs / pdh_util.rs）。
+#[cfg(windows)]
+fn fill_native(u: &mut ResourceUsage) {
+    let sample = crate::pdh_util::sample_all();
+    u.gpus = crate::gpu_metrics::query_gpus(sample.as_ref());
+    let cpu = crate::hw_metrics::cpu_extra(sample.as_ref());
+    u.cpu_freq_mhz = cpu.freq_mhz;
+    u.cpu_power_w = cpu.power_w;
+    u.thermal_temp_c = cpu.temp_c;
+    u.paging_percent = crate::hw_metrics::paging_percent(sample.as_ref());
+    // 各卷实时 IO：PDH 的 LogicalDisk 实例名就是盘符（`c:`），而 sysinfo 给的挂载点是 `C:\`，
+    // 去掉结尾反斜杠再转小写即为实例名。没有对应实例的卷（如无盘符的隐藏卷）保持 None，
+    // 前端展示「—」而不是伪造一个 0。
+    let ios = crate::hw_metrics::disk_io(sample.as_ref());
+    // 首次采集成功后打一条一次性诊断日志：把每块显卡的读数与磁盘实例名写进日志，
+    // 便于真机上直接核对「GPU 连的是哪块卡」「分区是否匹配上了 LogicalDisk 实例」，
+    // 不必靠 UI 反推后端到底采到了什么。
+    static RES_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if RES_LOGGED.set(()).is_ok() {
+        for g in &u.gpus {
+            log::info!(
+                "[RES] GPU「{}」util={:?}% 显存={:?}/{:?}KB（共享{:?}KB）引擎 3D={:?}% 解码={:?}% \
+                 编码={:?}% 拷贝={:?}% 温度={:?}°C 频率={:?}MHz 功耗={:?}W",
+                g.name,
+                g.util_percent,
+                g.vram_used_kb,
+                g.vram_total_kb,
+                g.vram_shared_kb,
+                g.util_3d,
+                g.util_video_decode,
+                g.util_video_encode,
+                g.util_copy,
+                g.temp_c,
+                g.clock_mhz,
+                g.power_w
+            );
+        }
+        log::info!(
+            "[RES] CPU 频率={:?}MHz 功耗={:?}W 热区温度={:?}°C 页面文件={:?}% | 磁盘IO实例={:?}",
+            cpu.freq_mhz,
+            cpu.power_w,
+            cpu.temp_c,
+            u.paging_percent,
+            ios.iter().map(|x| x.instance.as_str()).collect::<Vec<_>>()
+        );
+    }
+    for d in u.disks.iter_mut() {
+        let inst = d.mount.trim_end_matches('\\').to_lowercase();
+        if let Some(io) = ios.iter().find(|x| x.instance == inst) {
+            d.read_bps = io.read_bps;
+            d.write_bps = io.write_bps;
+            d.activity = io.activity;
+            d.resp_ms = io.resp_ms;
+            d.queue = io.queue;
+        }
     }
 }
 
