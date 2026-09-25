@@ -655,6 +655,18 @@ export const enUS: Record<string, string> = {
   'capsule.res.gpuFooter': 'Power and clock are only readable on NVIDIA cards; iGPUs and virtual display adapters show —',
   'capsule.res.gpuNotSelected': 'No GPU selected',
   'capsule.res.multiGpu': 'capsule shows the 1st only, selected',
+  // Capsule · density toggle (brief 2×2 ↔ all: adds network rate and per-partition disk I/O)
+  'capsule.res.all': 'All',
+  'capsule.res.brief': 'Brief',
+  'capsule.res.allHint': 'Show all metrics (disk I/O and network included)',
+  'capsule.res.briefHint': 'CPU / GPU / VRAM / memory only',
+  'capsule.res.disk': 'Disk',
+  'capsule.res.net': 'Network',
+  'capsule.res.read': 'R',
+  'capsule.res.write': 'W',
+  'capsule.res.activity': 'Act',
+  'capsule.res.noDisk': 'No partition data',
+  'capsule.res.allNote': 'Scroll to see the remaining metrics',
 
   // ============ Mint · Professional Toolbox ============
   'mint.title': 'Mint',

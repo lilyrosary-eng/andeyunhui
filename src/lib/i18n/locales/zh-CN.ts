@@ -655,6 +655,18 @@ export const zhCN: Record<string, string> = {
   'capsule.res.gpuFooter': '功耗与频率只有 NVIDIA 显卡能读；核显与虚拟显示适配器显示 —',
   'capsule.res.gpuNotSelected': '未选择要监视的 GPU',
   'capsule.res.multiGpu': '浮岛只显示第 1 块，共选中',
+  // 浮岛 · 密度切换（精简 2×2 ↔ 全部：追加网络速率与逐分区磁盘 IO）
+  'capsule.res.all': '全部',
+  'capsule.res.brief': '精简',
+  'capsule.res.allHint': '显示全部指标（含硬盘 IO 与网络）',
+  'capsule.res.briefHint': '只看 CPU / GPU / 显存 / 内存',
+  'capsule.res.disk': '硬盘',
+  'capsule.res.net': '网络',
+  'capsule.res.read': '读',
+  'capsule.res.write': '写',
+  'capsule.res.activity': '活动',
+  'capsule.res.noDisk': '未获取到分区信息',
+  'capsule.res.allNote': '滚轮可滚动查看其余指标',
 
   // ============ 薄荷 · 专业工具箱 ============
   'mint.title': '薄荷',

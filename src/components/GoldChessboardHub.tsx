@@ -207,8 +207,13 @@ export function GoldChessboardHub() {
     };
   }, []);
 
+  // 布局契约（勿删 `h-full`）：本节点是 App.tsx 主内容区（`flex-1 min-w-0 h-full
+  // overflow-hidden`，block 布局）的字节点，高度默认 auto。缺了 h-full 时，下面三个
+  // 面板根节点的 `h-full` 会退化成 auto（内容高度）→ 其内层
+  // `flex-1 min-h-0 overflow-y-auto` 拿到的高度 == 内容高度，scrollHeight 与 clientHeight
+  // 相等 → 滚轮完全滚不动，而超出视口的部分被祖先的 overflow-hidden 直接裁掉。
   return (
-    <div className="flex-1 flex min-w-0">
+    <div className="flex-1 flex min-w-0 h-full">
       {tab === 'search' ? (
         <FileSearchPanel variant="panel" />
       ) : tab === 'resource' ? (

@@ -943,7 +943,10 @@ export default function Capsule() {
 
           {/* 展开态 · 播放器模式（多会话可堆叠 / 下拉切换） */}
           {expanded && !chatOpen && !searchOpen && !transferOpen && !aideOpen && !resourceOpen && (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 14px 12px', minHeight: 0 }}>
+            // 滚动契约：外层胶囊本体是 `overflow: hidden` 的定高窗口（EXPANDED_H = 340），
+            // 本容器是它唯一的滚动出口。此前缺 overflowY，内容一旦超出就被直接裁掉、
+            // 滚轮完全无效（窗口/显示器缩放变化、系统字体放大、多会话下拉增多时必现）。
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 14px 12px', minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }}>
               {/* 媒体源选择：多会话时下拉命中指定卡片 */}
               {allSessions.length > 1 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
