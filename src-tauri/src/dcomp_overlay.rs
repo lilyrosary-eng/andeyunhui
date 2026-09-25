@@ -95,6 +95,18 @@ pub fn on_destroy(label: &str) {
     DCOMP_ACTIVE.lock().unwrap().remove(label);
 }
 
+/// WebView2 是否处于 Window-to-Visual 托管模式（W2V）。
+///
+/// **单一定义处**：main.rs 据此决定是否设置 `COREWEBVIEW2_FORCED_HOSTING_MODE`，
+/// 本模块据此决定是否让位。两处必须一致，故共用本函数而非各写一份 env 判断。
+/// 语义与 `ANDY_DCOMP` 同构：**默认开启**，显式设 `ANDY_W2V=0` / `false` 才关闭。
+#[cfg(windows)]
+pub fn w2v_enabled() -> bool {
+    std::env::var("ANDY_W2V")
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true)
+}
+
 /// 在 set_overlay_transparent 内、透明背景设置完成后调用。返回 true 表示已切到 DComp。
 /// ctrl 为已取出的 ICoreWebView2Controller；hwnd 从 Tauri 侧取，以裸指针(isize)传入以解耦
 /// 调用方的 windows crate 版本与本 crate（windows 0.62）。
@@ -105,18 +117,20 @@ pub fn try_enable(ctrl: ICoreWebView2Controller, label: &str, hwnd: Option<isize
     if label != "capsule" && label != "floating-lyrics" {
         return false;
     }
-    // W2V 探针：若 ANDY_W2V 已设，检测运行时是否真把控制器切到 composition 模式。
-    // Window-to-Visual 生效后，HWND 模式创建的控制器会实现 ICoreWebView2CompositionController
-    // （即 cast 成功）；若仍失败（E_NOINTERFACE），说明 W2V 未生效，需另寻原因。
-    // 仅日志探测，不接管渲染（避免与 W2V 自管的 DComp visual 冲突）。
-    if std::env::var("ANDY_W2V")
-        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-        .unwrap_or(false)
-    {
-        match ctrl.cast::<ICoreWebView2CompositionController>() {
-            Ok(_) => log::info!("[W2V-PROBE] {label} 控制器已实现 CompositionController → Window-to-Visual 已生效"),
-            Err(e) => log::warn!("[W2V-PROBE] {label} cast CompositionController 失败 ({e:?}) → W2V 未生效，仍为 HWND 模式"),
-        }
+    // W2V（Window-to-Visual 托管模式）生效时，本模块必须让位：WebView2 内容已由运行时自管的
+    // DComp visual 输出（走 DWM 常规合成管道），这里再插一层 SetRootVisualTarget 会与之冲突。
+    //
+    // 【已更正 —— 这里曾有一个必然假阴性的判据】
+    // 此前用 `ctrl.cast::<ICoreWebView2CompositionController>()` 的成败来判断 W2V 是否生效，
+    // 并打印「cast 失败 → W2V 未生效，仍为 HWND 模式」。该判据是错的：
+    // 微软文档明确 Window-to-Visual hosting 用的是**与 Windowed hosting 相同的那套 API**
+    // （仍是 CreateCoreWebView2Controller），只有 Visual hosting 才走
+    // CreateCoreWebView2CompositionController。因此 cast 失败是 W2V **正常工作**时的预期结果，
+    // 拿它判定生效与否只会恒报「未生效」。
+    // 实测反证：ANDY_W2V=1 时卡顿消失、且日志同时打「未生效」——两者不可能同真。
+    // 该模式下无法从控制器接口反推托管模式，故此处只做让位，不再输出任何判断性日志。
+    // 依据：https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/windowed-vs-visual-hosting
+    if w2v_enabled() {
         return false;
     }
     // 默认开启（ANDY_DCOMP 仅用于关闭：=0 / false 时退回 layered）。

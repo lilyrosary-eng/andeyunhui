@@ -20,6 +20,11 @@ pub fn is_active(_label: &str) -> bool {
 /// 指定标签的 DComp 透明层被销毁时的清理钩子（非 Windows 空实现）。
 pub fn on_destroy(_label: &str) {}
 
+/// WebView2 是否处于 Window-to-Visual 托管模式（W2V，非 Windows 恒为 false）。
+pub fn w2v_enabled() -> bool {
+    false
+}
+
 /// 尝试为指定 WebView2 控制器启用 DComp 透明合成（非 Windows 恒返回 false）。
 pub fn try_enable(_ctrl: ICoreWebView2Controller, _label: &str, _hwnd: Option<isize>) -> bool {
     false

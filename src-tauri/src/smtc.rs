@@ -217,6 +217,25 @@ mod imp {
     static ACTIVE_EXTERNAL: Mutex<Option<String>> = Mutex::new(None);
     /// 缓存上一次已发出的整机媒体信息，避免每 1.5s 轮询重复 emit 造成胶囊闪烁。
     static LAST_GLOBAL: Mutex<Option<SmtcUpdate>> = Mutex::new(None);
+    /// 唤醒信号：控制类命令（play/pause/prev/next）下发成功后立即唤醒整机监视线程再轮询一次，
+    /// 使胶囊状态回显不必等到下一个 1.5s 周期。
+    ///
+    /// 为什么需要它：整机监视固定每 1.5s 一轮（见 start_global_media_watcher），而胶囊的
+    /// 播放/暂停图标来自轮询 emit 的 now-playing。于是"在胶囊上点暂停"的感知延迟 =
+    /// 控制耗时（一次跨进程 RPC 串）+ 最多 1.5s 的等待下一轮。后者是用户可感延迟的主导项，
+    /// 且与渲染托管模式（W2V/dcomp）无关——这解释了「加不加 ANDY_W2V 都有延迟」。
+    /// `tokio::sync::Notify` 内部带一次性许可：命令若在轮询进行中到达，许可被存下，
+    /// 下一轮 select 立即返回，不会丢唤醒；多条命令也自然合并为一次额外轮询。
+    static WATCHER_WAKE: OnceLock<tokio::sync::Notify> = OnceLock::new();
+
+    fn watcher_wake() -> &'static tokio::sync::Notify {
+        WATCHER_WAKE.get_or_init(tokio::sync::Notify::new)
+    }
+
+    /// 请求整机监视尽快再轮询一次（供控制路径调用，幂等）。
+    pub fn wake_global_watcher() {
+        watcher_wake().notify_one();
+    }
 
     /// 确保当前线程已初始化 Windows Runtime。
     /// 关键陷阱：本模块的 WinRT 异步调用（RequestAsync 等）在 STA 线程上会死锁（完成回调经消息泵
@@ -633,7 +652,13 @@ mod imp {
                         poll_global_session(&app),
                     )
                     .await;
-                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    // 平时每 1.5s 一轮；若期间收到控制命令的唤醒信号（见 wake_global_watcher），
+                    // 立即再轮询一次，使「按键 → 胶囊状态回显」不再最坏等满 1.5s。
+                    // Notify 自带许可，命令在轮询进行中到达也不丢（见 WATCHER_WAKE 注释）。
+                    tokio::select! {
+                        _ = watcher_wake().notified() => {}
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(1500)) => {}
+                    }
                 }
             });
         });
@@ -1002,6 +1027,9 @@ mod imp {
         let aumid_for_log = aumid.clone();
         // 在独立线程跑 WinRT 控制并加 3s 超时：防止 COM 公寓模型异常导致调用永久挂起、
         // 耗尽 Tauri 命令线程、让整个软件（含主窗与所有浮窗）卡死。
+        // 计时起点：覆盖「线程创建 + MTA 初始化 + RequestAsync + GetSessions +
+        // 逐会话 SourceAppUserModelId + Try*Async」整段跨进程 RPC 串。
+        let t_ctl = std::time::Instant::now();
         let handled = run_winrt_timeout(move || {
             run_winrt_block(async move {
                 let mgr = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
@@ -1050,6 +1078,19 @@ mod imp {
             })
         });
         // handled: Some(true)=找到会话并已控制, Some(false)=未找到该 AUMID 的会话, None=超时熔断
+        //
+        // 命令用时记入日志：这是「外部媒体操作延迟」中**控制侧**那一段的可观测值。
+        // 与**回显侧**（下面 wake 触发的一轮重轮询）分开看，才能判断瓶颈在控制还是回显。
+        log::info!(
+            "[SMTC-GLOBAL] 控制 {action} target={aumid_for_log} 控制侧用时 {}ms handled={handled:?}",
+            t_ctl.elapsed().as_millis()
+        );
+        if matches!(handled, Some(true)) {
+            // 已成功下发 → 立即唤醒整机监视重轮询一次，把状态回显从「最坏 1.5s」压到「一轮轮询」。
+            // 不这么做时，用户在胶囊上按暂停后，图标要等下一个 1.5s 周期才翻转——
+            // 这正是「对外部媒体操作有延迟」里主观感受最强的一段，且它不随 ANDY_W2V 变化。
+            wake_global_watcher();
+        }
         match handled {
             Some(true) => RouteResult::Handled,
             Some(false) if !explicit => {

@@ -413,16 +413,29 @@ fn main() {
     // 正解：微软官方第三种托管模式「Window to Visual hosting」——运行时内部把内容绘到 DComp
     // Visual（走 DWM 常规合成管道，不被 overlay 抢占），输入仍由 OS 处理（无需 SendMouseInput），
     // 且【不需要】CreateCoreWebView2CompositionController，wry 现有 HWND 控制器路径原样可用。
+    // 官方原文：「To enable Window to Visual hosting, the environment variable
+    // COREWEBVIEW2_FORCED_HOSTING_MODE must be set to the value
+    // COREWEBVIEW2_HOSTING_MODE_WINDOW_TO_VISUAL before initializing your WebView2.」
     // 详见 https://learn.microsoft.com/en-us/microsoft-edge/WebView2/concepts/windowed-vs-visual-hosting
     // Wails v3 的 UseVisualHosting 选项即设此 env var。
     //
-    // 进程级生效（wry 共享单一 environment，无法仅对胶囊生效），故门控：默认关闭，
-    // ANDY_W2V=1 显式开启。验证项：(1) 外部媒体下胶囊不再卡；(2) 主窗/IDE Tab 焦点正常
-    // （已知该模式可能破坏页内 Tab 处理，见 datadiode/webview2#1）；(3) 胶囊圆角/透明/点击穿透正常。
-    // 验证通过后再改为默认开启，并清理 dcomp_overlay.rs。
-    if std::env::var("ANDY_W2V").map(|v| v != "0" && !v.eq_ignore_ascii_case("false")).unwrap_or(false) {
+    // 【默认开启（2026-09-25 实机验证后翻转）】原为「默认关闭 + ANDY_W2V=1 显式开启」。
+    // 翻转依据：同一台机器，10:18 那次运行（未设该变量）外部媒体下浮岛卡顿；10:45 / 10:48
+    // 两次（设了该变量）卡顿消失，两次之间唯一差异就是本变量 ⇒ 确认生效。
+    //
+    // 注意：曾有一条 `[W2V-PROBE] cast 失败 → W2V 未生效` 的日志，那是**假阴性**。
+    // Window-to-Visual 用的就是 Windowed hosting 那套 API（CreateCoreWebView2Controller），
+    // 控制器本就不实现 ICoreWebView2CompositionController，cast 失败才是正常结果。
+    // 该探针已删除，判据依据见 dcomp_overlay.rs::try_enable 的说明。
+    //
+    // 逃生开关：ANDY_W2V=0（或 false）退回 Windowed hosting。
+    // 保留观察项：该模式可能影响页内 Tab 焦点处理（datadiode/webview2#1）；异常时用上述开关回退。
+    // 进程级生效（wry 共享单一 environment，无法仅对胶囊生效）。
+    if andeyunhui_lib::dcomp_overlay::w2v_enabled() {
         std::env::set_var("COREWEBVIEW2_FORCED_HOSTING_MODE", "COREWEBVIEW2_HOSTING_MODE_WINDOW_TO_VISUAL");
         eprintln!("[W2V] 已启用 Window-to-Visual 托管模式（COREWEBVIEW2_FORCED_HOSTING_MODE）");
+    } else {
+        eprintln!("[W2V] 被 ANDY_W2V=0 显式关闭，保持 Windowed hosting");
     }
 
     // 尽早设置本进程 AUMID + 注册表显示名「安得云荟」，使随后创建的主窗口继承该 AUMID，
