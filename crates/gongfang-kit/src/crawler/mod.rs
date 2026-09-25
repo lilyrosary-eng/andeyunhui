@@ -54,7 +54,7 @@ impl ResponseAssessment {
         let mut is_datadome = false;
         let mut challenge = None;
 
-        for (k, v) in headers {
+        for (k, _v) in headers {
             let key = k.to_lowercase();
             match key.as_str() {
                 "cf-ray" => {
@@ -274,101 +274,288 @@ pub async fn execute_recon(s: &Strategy, reward: &Arc<RewardSignal>) {
     crawl_fetch(&url, depth, s, reward).await;
 }
 
+/// 单次抓取的整形计划（网关建议的落地形态；gateway 未启用时为直连默认值）
+struct RequestShaping {
+    /// 是否启用浏览器同构隐身头（Proxy/Stealth 模式；等价于「非直连」）
+    stealth: bool,
+    /// 网关活跃代理 URL（Proxy/Stealth 且网关池有真实节点时）
+    gateway_proxy: Option<String>,
+    /// 请求前整形间隔（毫秒）
+    interval_ms: u64,
+    /// 请求超时（毫秒）
+    timeout_ms: u64,
+    /// 路由模式名（日志/审计）
+    routing: &'static str,
+}
+
+/// 默认请求超时（未被网关整形影响时保持既有行为）
+const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+/// 单次抓取最大尝试次数（失败换代理重试）
+const MAX_FETCH_ATTEMPTS: usize = 3;
+
+/// 生成本次抓取的整形计划
+///
+/// - Direct（默认）→ 完全等价于既有行为：直连、仅 UA、15s 超时、无额外延迟
+/// - Proxy/Stealth（`@rotate` 触发）→ 网关选路 + 整形间隔 + 隐身头 + 带宽超时
+fn request_shaping(_s: &Strategy) -> RequestShaping {
+    #[cfg(feature = "gateway")]
+    {
+        let advice = crate::gateway::shaper().next_advice();
+        let direct = advice.routing == crate::gateway::RoutingMode::Direct;
+        // 网关池的 Direct 虚拟节点 url 为 "direct"，不是真代理
+        let gateway_proxy = advice.active_node.as_ref().and_then(|n| {
+            if n.url.is_empty() || n.url == "direct" { None } else { Some(n.url.clone()) }
+        });
+        let timeout_ms = if direct && advice.bandwidth_ratio >= 1.0 {
+            DEFAULT_TIMEOUT_MS
+        } else {
+            advice.request_timeout_ms
+        };
+        RequestShaping {
+            stealth: !direct,
+            gateway_proxy,
+            interval_ms: if direct { 0 } else { advice.shaping.interval_ms },
+            timeout_ms,
+            routing: advice.routing.as_str(),
+        }
+    }
+    #[cfg(not(feature = "gateway"))]
+    {
+        RequestShaping {
+            stealth: false,
+            gateway_proxy: None,
+            interval_ms: 0,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            routing: "direct",
+        }
+    }
+}
+
+/// 解析本次尝试使用的代理
+///
+/// 顺序：网关选路（Proxy/Stealth 且网关池有真实节点）→ 爬虫自有代理池 → 直连。
+/// 重试时重新问网关，避免死守已故障的同一节点。
+/// 返回 `(代理, 是否来自网关池)`——决定失败时该在哪个池里标记。
+fn next_proxy_for(
+    shaping: &RequestShaping,
+    attempt: usize,
+) -> Option<(crate::crawler::pool::ProxyEntry, bool)> {
+    let wrap = |url: String| crate::crawler::pool::ProxyEntry {
+        url,
+        tag: "gateway".to_string(),
+        alive: true,
+    };
+
+    #[cfg(feature = "gateway")]
+    {
+        if shaping.stealth && attempt > 0 {
+            let advice = crate::gateway::shaper().next_advice();
+            if let Some(n) = advice.active_node {
+                if !n.url.is_empty() && n.url != "direct" {
+                    return Some((wrap(n.url), true));
+                }
+            }
+        }
+    }
+
+    if attempt == 0 {
+        if let Some(u) = &shaping.gateway_proxy {
+            return Some((wrap(u.clone()), true));
+        }
+    }
+
+    crate::crawler::pool::pool().next().map(|p| (p, false))
+}
+
+/// 单次尝试的结果
+enum AttemptOutcome {
+    /// 拿到 HTTP 响应
+    Response {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+        rtt_ms: f64,
+    },
+    /// 传输层失败（可重试）
+    Transport(String),
+}
+
+/// 执行一次抓取尝试：构造 client（可选代理）+ 应用整形头 + 单次请求
+async fn fetch_once(
+    url: &str,
+    shaping: &RequestShaping,
+    proxy: Option<&crate::crawler::pool::ProxyEntry>,
+    tls_profile: &str,
+) -> AttemptOutcome {
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(shaping.timeout_ms.max(1_000)));
+
+    if let Some(p) = proxy {
+        match reqwest::Proxy::all(&p.url) {
+            Ok(pr) => builder = builder.proxy(pr),
+            Err(e) => log::warn!("[crawler] 代理 URL 无效，回退直连: {} ({})", p.url, e),
+        }
+    }
+
+    let client = match builder.build() {
+        Ok(c) => c,
+        Err(e) => return AttemptOutcome::Transport(format!("客户端构建失败: {}", e)),
+    };
+
+    let mut req = client.get(url);
+    if shaping.stealth {
+        // Proxy/Stealth：浏览器同构头集合（UA/Accept/Language/Encoding/Client Hints 自洽）
+        for (k, v) in stealth::headers_for(tls_profile).pairs() {
+            req = req.header(k, v);
+        }
+        // 无 Referer 时补搜索引擎来源，贴近自然流量分布
+        req = req.header("Referer", stealth::DEFAULT_REFERER);
+    } else {
+        // Direct：保持既有行为（仅 UA）
+        req = req.header("User-Agent", stealth::user_agent(tls_profile));
+    }
+
+    let started = std::time::Instant::now();
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let rtt_ms = started.elapsed().as_millis() as f64;
+            let body = resp.text().await.unwrap_or_default();
+            AttemptOutcome::Response { status, headers, body, rtt_ms }
+        }
+        Err(e) => AttemptOutcome::Transport(e.to_string()),
+    }
+}
+
 /// 抓取单个 URL：记录奖励/态势，提取标题与同域链接并递归入队，推送 CrawlResult 事件。
-/// 若代理池有存活代理则经由代理请求；403/429/5xx/网络错误会将该代理标记为死亡。
+///
+/// 请求链路（P0 网关接线）：
+/// 1. 取网关建议 → 决定路由模式 / 整形间隔 / 隐身头 / 超时
+/// 2. 选路：网关活跃节点 → 爬虫自有代理池 → 直连
+/// 3. 失败换代理重试（仅代理链路故障才标记该代理死亡，目标拒绝不牵连代理）
+/// 4. 结果回写网关健康度，驱动故障转移
 async fn crawl_fetch(raw_url: &str, depth: u32, s: &Strategy, reward: &Arc<RewardSignal>) -> bool {
     // URL 规范化兜底：队列中可能混入裸域/相对链接，统一补 scheme 后再请求
     let url = crate::normalize_url(raw_url);
-    let ua = stealth::user_agent(&s.tls_profile);
 
-    // 代理池轮转：有存活代理则走代理，否则直连
-    let proxy = crate::crawler::pool::pool().next();
-    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
-    if let Some(p) = &proxy {
-        if let Ok(pr) = reqwest::Proxy::all(&p.url) {
-            builder = builder.proxy(pr);
-        } else {
-            log::warn!("[crawler] 代理 URL 无效，回退直连: {}", p.url);
-        }
+    let shaping = request_shaping(s);
+
+    // 整形间隔：Proxy/Stealth 下平滑请求时序（Direct 为 0，不引入额外延迟）
+    if shaping.interval_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(shaping.interval_ms)).await;
     }
-    let client = match builder.build() {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("[crawler] 客户端构建失败: {}", e);
-            return false;
-        }
-    };
 
-    let resp = match client.get(&url).header("User-Agent", ua).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            if proxy.is_some() {
-                crate::crawler::pool::pool().mark_dead(&proxy.as_ref().unwrap().url);
+    let mut last_err: Option<String> = None;
+
+    for attempt in 0..MAX_FETCH_ATTEMPTS {
+        let proxy = next_proxy_for(&shaping, attempt);
+        let proxy_desc = proxy.as_ref().map(|(p, _)| p.url.as_str());
+
+        match fetch_once(&url, &shaping, proxy.as_ref().map(|(p, _)| p), &s.tls_profile).await {
+            AttemptOutcome::Transport(err) => {
+                // 仅「代理链路故障」才标记代理死亡；目标侧错误不牵连代理
+                if let Some((p, from_gateway)) = &proxy {
+                    if *from_gateway {
+                        #[cfg(feature = "gateway")]
+                        crate::gateway::shaper().record_request(0.0, true);
+                    } else {
+                        crate::crawler::pool::pool().mark_dead_if_proxy_error(&p.url, &err);
+                    }
+                }
+                log::warn!(
+                    "[crawler] {} 第 {}/{} 次尝试失败（routing={} proxy={:?}）: {}",
+                    url,
+                    attempt + 1,
+                    MAX_FETCH_ATTEMPTS,
+                    shaping.routing,
+                    proxy_desc,
+                    err
+                );
+                last_err = Some(err);
+
+                // 若不是最后一次，短暂退避后换代理重试
+                if attempt + 1 < MAX_FETCH_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt as u64 + 1)))
+                        .await;
+                }
+                continue;
             }
-            reward.record(EventKind::Timeout);
-            emit_result(&url, 0, None, 0, false, Some(e.to_string()));
-            log::warn!("[crawler] {} via {:?} 失败: {}", url, proxy.as_ref().map(|p| p.url.as_str()), e);
-            return false;
+
+            AttemptOutcome::Response { status, headers, body, rtt_ms } => {
+                // 健康度回写：驱动网关故障转移（Direct 模式下作用于虚拟直连节点，无副作用）
+                #[cfg(feature = "gateway")]
+                crate::gateway::shaper().record_request(rtt_ms, status == 0 || status >= 400);
+
+                // 目标侧风控/异常 → 换掉当前代理（沿用既有语义，仅爬虫池）
+                if crate::crawler::pool::is_target_rejection(status) {
+                    if let Some((p, from_gateway)) = &proxy {
+                        if !*from_gateway {
+                            crate::crawler::pool::pool().mark_dead(&p.url);
+                        }
+                    }
+                }
+
+                let body_preview: String = body.chars().take(4096).collect();
+                let assessment = ResponseAssessment::from_response(status, &headers, &body_preview);
+                reward.record(assessment.to_event_kind());
+
+                log::info!(
+                    "[crawler] {} -> {} challenge={:?} cf={} dd={} captcha={} empty={} routing={} proxy={:?} rtt={}ms",
+                    url,
+                    status,
+                    assessment.challenge,
+                    assessment.is_cloudflare,
+                    assessment.is_datadome,
+                    assessment.is_captcha,
+                    assessment.is_empty,
+                    shaping.routing,
+                    proxy_desc,
+                    rtt_ms as u64
+                );
+
+                let delta = assessment.to_delta(s);
+                if delta.qps.is_some() || delta.tls_profile.is_some() || delta.use_browser.is_some() {
+                    log::info!(
+                        "[crawler] 响应态势触发策略调整 qps={:?} tls={:?} browser={:?} stealth={:?}",
+                        delta.qps,
+                        delta.tls_profile,
+                        delta.use_browser,
+                        delta.stealth_level
+                    );
+                }
+
+                // 提取标题 + 同域链接，深度内递归入队
+                let title = extract_title(&body);
+                let links = extract_same_domain_links(&body, &url);
+                if !links.is_empty() {
+                    let mut q = queue();
+                    for link in &links {
+                        q.enqueue(link, depth + 1);
+                    }
+                    log::info!(
+                        "[crawler] {} 提取 {} 个同域链接，入队 depth={}",
+                        url,
+                        links.len(),
+                        depth + 1
+                    );
+                }
+
+                emit_result(&url, status, title, links.len(), true, None);
+                return true;
+            }
         }
-    };
-
-    let status = resp.status().as_u16();
-
-    // 风控/服务异常 → 标记当前代理死亡并回退
-    if proxy.is_some() && (status == 403 || status == 429 || status >= 500) {
-        crate::crawler::pool::pool().mark_dead(&proxy.as_ref().unwrap().url);
-    }
-    let headers: Vec<(String, String)> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
-    let body = resp.text().await.unwrap_or_default();
-    let body_preview: String = body.chars().take(4096).collect();
-
-    let assessment = ResponseAssessment::from_response(status, &headers, &body_preview);
-    reward.record(assessment.to_event_kind());
-
-    log::info!(
-        "[crawler] {} -> {} challenge={:?} cf={} dd={} captcha={} empty={}",
-        url,
-        status,
-        assessment.challenge,
-        assessment.is_cloudflare,
-        assessment.is_datadome,
-        assessment.is_captcha,
-        assessment.is_empty
-    );
-
-    let delta = assessment.to_delta(s);
-    if delta.qps.is_some() || delta.tls_profile.is_some() || delta.use_browser.is_some() {
-        log::info!(
-            "[crawler] 响应态势触发策略调整 qps={:?} tls={:?} browser={:?} stealth={:?}",
-            delta.qps,
-            delta.tls_profile,
-            delta.use_browser,
-            delta.stealth_level
-        );
     }
 
-    // 提取标题 + 同域链接，深度内递归入队
-    let title = extract_title(&body);
-    let links = extract_same_domain_links(&body, &url);
-    if !links.is_empty() {
-        let mut q = queue();
-        for link in &links {
-            q.enqueue(link, depth + 1);
-        }
-        log::info!(
-            "[crawler] {} 提取 {} 个同域链接，入队 depth={}",
-            url,
-            links.len(),
-            depth + 1
-        );
-    }
-
-    emit_result(&url, status, title, links.len(), true, None);
-    true
+    // 全部尝试失败
+    reward.record(EventKind::Timeout);
+    emit_result(&url, 0, None, 0, false, last_err.clone());
+    log::warn!("[crawler] {} 经 {} 次尝试仍失败: {:?}", url, MAX_FETCH_ATTEMPTS, last_err);
+    false
 }
 
 /// 推送 CrawlResult 事件到前端（经全局事件总线，无总线时静默）
@@ -392,8 +579,11 @@ fn emit_result(
 }
 
 /// 从 HTML 提取 `<title>`（纯字符串匹配，零依赖）
+///
+/// 用 `to_ascii_lowercase` 而非 `to_lowercase`：后者对部分非 ASCII 字符会改变字节长度，
+/// 导致用小写串里找到的下标去切原串时错位（panic 或截断）。
 fn extract_title(html: &str) -> Option<String> {
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     let start = lower.find("<title")?;
     let content_start = html[start..].find('>')? + start + 1;
     let end = lower[content_start..].find("</title>")? + content_start;
@@ -401,7 +591,34 @@ fn extract_title(html: &str) -> Option<String> {
     if t.is_empty() { None } else { Some(t.to_string()) }
 }
 
-/// 提取与 base 同域的绝对 `<a href>` 链接（相对转绝对 + 同域过滤 + 去重）
+/// 视为「非页面资源」的扩展名：爬虫预算应优先给可解析页面，而非图片/脚本/媒体等
+const ASSET_EXTENSIONS: &[&str] = &[
+    // 图片 / 样式 / 脚本
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "avif", "tiff",
+    "css", "js", "mjs", "map",
+    // 字体
+    "woff", "woff2", "ttf", "otf", "eot",
+    // 媒体
+    "mp4", "webm", "mkv", "mov", "avi", "mp3", "wav", "ogg", "flac", "m4a", "aac",
+    // 归档 / 文档 / 安装包
+    "zip", "gz", "tar", "rar", "7z", "bz2", "xz",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+    "apk", "exe", "dmg", "msi", "bin", "iso",
+];
+
+/// 判断 URL 是否指向非页面资源（按末段扩展名）
+fn is_asset_url(u: &url::Url) -> bool {
+    let last = u.path().rsplit('/').next().unwrap_or("");
+    match last.rsplit_once('.') {
+        Some((_, ext)) => ASSET_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()),
+        None => false,
+    }
+}
+
+/// 提取与 base 同域的绝对页面链接
+///
+/// 处理：属性名大小写不敏感（`<A HREF=` 也能命中）+ 相对转绝对 + 同域过滤
+/// + 去锚点 + 过滤非页面资源 + 去重。
 fn extract_same_domain_links(html: &str, base: &str) -> Vec<String> {
     let base_url = match url::Url::parse(base) {
         Ok(u) => u,
@@ -409,42 +626,128 @@ fn extract_same_domain_links(html: &str, base: &str) -> Vec<String> {
     };
     let base_host = base_url
         .host_str()
-        .map(|h| h.to_lowercase())
+        .map(|h| h.to_ascii_lowercase())
         .unwrap_or_default();
 
+    // 用 ASCII 小写副本定位属性名：字节长度与原串一致，故下标可直接用于原串切片
+    let lower = html.to_ascii_lowercase();
     let mut links = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for chunk in html.split("href") {
-        let trimmed = chunk.trim_start();
-        if !trimmed.starts_with('=') {
-            continue;
-        }
-        let after_eq = trimmed[1..].trim_start();
-        let (quote, rest) = if let Some(r) = after_eq.strip_prefix('"') {
+    let mut from = 0usize;
+
+    while let Some(rel) = lower[from..].find("href") {
+        let pos = from + rel;
+        from = pos + 4;
+
+        let rest = html[pos + 4..].trim_start();
+        let Some(after_eq) = rest.strip_prefix('=') else { continue };
+        let after_eq = after_eq.trim_start();
+        let (quote, inner) = if let Some(r) = after_eq.strip_prefix('"') {
             ('"', r)
         } else if let Some(r) = after_eq.strip_prefix('\'') {
             ('\'', r)
         } else {
             continue;
         };
-        let Some(end) = rest.find(quote) else { continue };
-        let href = &rest[..end];
-        if href.is_empty() || href.starts_with('#') || href.starts_with("javascript:") || href.starts_with("mailto:") {
+        let Some(end) = inner.find(quote) else { continue };
+        let href = inner[..end].trim();
+        if href.is_empty() || href.starts_with('#') {
             continue;
         }
-        // 解析绝对链接
-        let abs = match base_url.join(href) {
+        let hl = href.to_ascii_lowercase();
+        if hl.starts_with("javascript:")
+            || hl.starts_with("mailto:")
+            || hl.starts_with("tel:")
+            || hl.starts_with("data:")
+            || hl.starts_with("blob:")
+        {
+            continue;
+        }
+
+        let mut abs = match base_url.join(href) {
             Ok(u) if u.scheme() == "http" || u.scheme() == "https" => u,
             _ => continue,
         };
-        let host = abs.host_str().map(|h| h.to_lowercase()).unwrap_or_default();
-        if host != base_host {
-            continue; // 仅同域，避免爬出目标站
+        // 仅同域，避免爬出目标站
+        if abs.host_str().map(|h| h.to_ascii_lowercase()).unwrap_or_default() != base_host {
+            continue;
         }
-        let s = abs.as_str().to_string();
+        // 去锚点：`/page#a` 与 `/page#b` 是同一页面，避免重复入队
+        abs.set_fragment(None);
+        if is_asset_url(&abs) {
+            continue;
+        }
+        let s = abs.to_string();
         if seen.insert(s.clone()) {
             links.push(s);
         }
     }
     links
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_title_basic() {
+        let html = "<html><head><TITLE> 安得云荟 </TITLE></head></html>";
+        assert_eq!(extract_title(html).as_deref(), Some("安得云荟"));
+    }
+
+    #[test]
+    fn test_extract_title_non_ascii_no_panic() {
+        // to_ascii_lowercase 保证字节长度不变，含非 ASCII 时切片不应错位
+        let html = "<title>İstanbul 大标题</title>";
+        assert_eq!(extract_title(html).as_deref(), Some("İstanbul 大标题"));
+    }
+
+    #[test]
+    fn test_is_asset_url() {
+        let u = |s: &str| url::Url::parse(s).unwrap();
+        assert!(is_asset_url(&u("https://a.com/logo.png")));
+        assert!(is_asset_url(&u("https://a.com/app.js")));
+        assert!(is_asset_url(&u("https://a.com/style.CSS"))); // 扩展名大小写不敏感
+        assert!(!is_asset_url(&u("https://a.com/docs")));     // 无扩展名
+        assert!(!is_asset_url(&u("https://a.com/page.html")));
+        assert!(!is_asset_url(&u("https://a.com/v1.2/list"))); // 目录名含点但末段无扩展名
+    }
+
+    #[test]
+    fn test_links_relative_absolute_and_dedupe() {
+        let html = r#"
+            <a href="/about">about</a>
+            <a href='/about'>dup</a>
+            <a href="https://other.com/x">external</a>
+            <a href="contact">relative</a>
+        "#;
+        let links = extract_same_domain_links(html, "https://a.com/base/");
+        assert!(links.contains(&"https://a.com/about".to_string()));
+        // 同域去重
+        assert_eq!(links.iter().filter(|l| l.as_str() == "https://a.com/about").count(), 1);
+        // 跨域被过滤
+        assert!(!links.iter().any(|l| l.contains("other.com")));
+        // 相对路径转绝对
+        assert!(links.contains(&"https://a.com/base/contact".to_string()));
+    }
+
+    #[test]
+    fn test_links_uppercase_href_and_fragment_and_assets() {
+        let html = r#"
+            <A HREF="https://a.com/p1#sec">upper</A>
+            <a href="https://a.com/p1#other">same page different anchor</a>
+            <a href="https://a.com/logo.png">img</a>
+            <a href="javascript:void(0)">js</a>
+            <a href="mailto:a@b.com">mail</a>
+        "#;
+        let links = extract_same_domain_links(html, "https://a.com/");
+        // 大写属性名可命中
+        assert!(links.contains(&"https://a.com/p1".to_string()));
+        // 锚点被去掉，同页只留一条
+        assert_eq!(links.iter().filter(|l| l.starts_with("https://a.com/p1")).count(), 1);
+        // 资源与伪协议被过滤
+        assert!(!links.iter().any(|l| l.ends_with(".png")));
+        assert!(!links.iter().any(|l| l.starts_with("javascript:")));
+        assert!(!links.iter().any(|l| l.starts_with("mailto:")));
+    }
 }

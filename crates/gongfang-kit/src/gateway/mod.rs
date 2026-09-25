@@ -229,12 +229,23 @@ impl AdaptiveTrafficShaper {
         );
     }
 
-    /// 记录一次请求结果到代理池（数据面 Tick 调用）
+    /// 记录一次请求结果到代理池（数据面 Tick / 爬虫抓取调用）
+    ///
+    /// 闭环关键：不仅更新健康度，还在活跃节点被判故障时主动切换，
+    /// 避免「已判故障却继续用同一节点」的空转。否则健康度只是展示数据。
     pub fn record_request(&self, rtt_ms: f64, is_error: bool) {
         let mut pool = self.pool.lock();
         pool.record_active(rtt_ms, is_error);
-        // 触发预测性切换检查（RTT 梯度递增）
-        let _ = pool.predictive_failover();
+        // 活跃节点已判故障（错误率 >10% 或 RTT 梯度异常）→ 立即切换
+        let failing = pool.active().map(|n| n.is_failing()).unwrap_or(false);
+        if failing {
+            if let Some(i) = pool.failover() {
+                log::warn!("[gateway] 活跃节点判故障，已切换至节点 #{}", i);
+            }
+        } else {
+            // 未判故障时，仍做预测性切换检查（RTT 单调递增 → 提前切换）
+            let _ = pool.predictive_failover();
+        }
     }
 
     /// 生成下一次请求的整形建议
