@@ -18,7 +18,6 @@ use tauri::tray::{MouseButton, MouseButtonState};
 use std::net::UdpSocket;
 use std::time::Duration;
 use std::sync::mpsc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
 use sysinfo::System as SysSystem;
@@ -63,8 +62,9 @@ fn take_pending_open_files(state: tauri::State<PendingOpenFiles>) -> Vec<String>
 }
 
 // ============ 资源占用实时监控（CPU / GPU / 显存 / 内存 / 网络）============
-// 实时性来自前端每 ~1s 轮询一次触发 refresh：全局 CPU 与网络速率由持久 System +
-// 上一拍快照做差分得到。GPU/显存仅在 Windows 通过 PDH + DXGI 采集，失败优雅返回 None。
+// 实时性来自前端每 ~1s 轮询一次触发 refresh：CPU 由持久 System 的两次 refresh 差分，
+// 网络速率由持久 Networks 的累计字节 + 上一拍时间戳做差分得到。
+// GPU/显存仅在 Windows 通过 PDH + DXGI 采集，失败优雅返回 None。
 #[derive(serde::Serialize, Clone)]
 pub struct ResourceUsage {
     pub cpu_percent: f32,        // 全局 CPU 占用 %
@@ -82,20 +82,28 @@ pub struct ResourceUsage {
 
 struct ResState {
     sys: SysSystem,
+    // sysinfo 0.30 起网络采集独立于 System：单独常驻一个 Networks 实例复用
+    networks: sysinfo::Networks,
     prev_recv: u64,
     prev_trans: u64,
     prev_ts: Option<Instant>,
 }
 
-// 单一持久 System + 上一拍网络快照；首次调用无差分，速率记为 0
+// 单一持久 System + Networks + 上一拍网络快照；首次调用无差分，速率记为 0
 static RES_STATE: OnceLock<Mutex<ResState>> = OnceLock::new();
 
+// 注意：本命令必须是私有 fn，不能写 pub。
+// tauri-macros 2.6.3（command/wrapper.rs:162-168）对 pub 命令会额外给生成的
+// `__cmd__xxx` / `__tauri_command_name_xxx` 宏加 #[macro_export]，而 #[macro_export]
+// 把宏挂到 crate 根；main.rs 本身就是 crate 根 ⇒ 宏名在「同一模块内定义 + 重导入」
+// 冲突（E0255）。本文件其余命令均为私有 fn，与此保持一致。
 #[tauri::command]
-pub fn get_resource_usage() -> ResourceUsage {
-    let st = RES_STATE
+fn get_resource_usage() -> ResourceUsage {
+    let mut st = RES_STATE
         .get_or_init(|| {
             Mutex::new(ResState {
                 sys: SysSystem::new_all(),
+                networks: sysinfo::Networks::new_with_refreshed_list(),
                 prev_recv: 0,
                 prev_trans: 0,
                 prev_ts: None,
@@ -104,34 +112,35 @@ pub fn get_resource_usage() -> ResourceUsage {
         .lock()
         .unwrap();
 
-    let sys = &mut st.sys;
-    sys.refresh_cpu();
-    sys.refresh_memory();
-    sys.refresh_networks();
+    st.sys.refresh_cpu();
+    st.sys.refresh_memory();
+    st.networks.refresh();
 
-    // CPU：全局 + 每核
-    let cpu_percent = sys.cpu_usage();
-    let cpu_per_core: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
+    // CPU：全局 + 每核（sysinfo 0.30 全局 CPU 为 global_cpu_info()）
+    let cpu_percent = st.sys.global_cpu_info().cpu_usage();
+    let cpu_per_core: Vec<f32> = st.sys.cpus().iter().map(|c| c.cpu_usage()).collect();
 
-    // 内存
-    let mem_total_kb = sys.total_memory();
-    let mem_used_kb = sys.used_memory();
+    // 内存：sysinfo 0.30 起 total_memory()/used_memory() 返回「字节」，
+    // 这里统一换算成 KB，与 mem_*_kb 字段名及前端 fmtBytes（按 KB 口径）一致。
+    let mem_total_kb = st.sys.total_memory() / 1024;
+    let mem_used_kb = st.sys.used_memory() / 1024;
     let mem_percent = if mem_total_kb > 0 {
         (mem_used_kb as f32 / mem_total_kb as f32) * 100.0
     } else {
         0.0
     };
 
-    // 网络：累加所有非回环接口，与上一拍做时间差分
+    // 网络：累加所有非回环接口的累计收发字节（total_* 为自开机累计，语义无歧义），
+    // 再与上一拍快照做时间差分换算成字节/秒
     let mut recv = 0u64;
     let mut trans = 0u64;
-    for (name, net) in sys.networks().iter() {
+    for (name, net) in &st.networks {
         let n = name.to_lowercase();
         if n.contains("loop") || n == "lo" {
             continue;
         }
-        recv = recv.saturating_add(net.received());
-        trans = trans.saturating_add(net.transmitted());
+        recv = recv.saturating_add(net.total_received());
+        trans = trans.saturating_add(net.total_transmitted());
     }
     let now = Instant::now();
     let (up_bps, down_bps) = match st.prev_ts {
@@ -153,8 +162,8 @@ pub fn get_resource_usage() -> ResourceUsage {
     drop(st);
 
     // GPU / 显存：Windows 原生；非 Windows 或采集失败均为 None。
-    // 注意：gpu_metrics::query_gpu() 返回的显存是「字节」，这里统一换算为 KB，
-    // 与 mem_*_kb（sysinfo 同样返回 KB）保持一致 —— 前端 fmtBytes 按 KB 处理。
+    // gpu_metrics::query_gpu() 返回的显存是「字节」，这里统一换算为 KB，
+    // 与上方 mem_*_kb（同样已由字节换算）口径一致 —— 前端 fmtBytes 按 KB 处理。
     #[cfg(windows)]
     let (gpu_percent, gpu_name, vram_total_bytes, vram_used_bytes) = crate::gpu_metrics::query_gpu();
     #[cfg(not(windows))]

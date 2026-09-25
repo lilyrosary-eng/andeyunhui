@@ -12,8 +12,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE,
-    PDH_HCOUNTER, PDH_HQUERY,
+    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
 };
 
 /// 返回 (GPU 利用率%, 显卡名, 显存总量字节, 显存已用字节)
@@ -63,8 +62,9 @@ fn vram_usage() -> (Option<String>, Option<u64>, Option<u64>) {
                     .is_ok()
                 {
                     let desc = adapter.GetDesc().ok();
+                    // DXGI_ADAPTER_DESC::DedicatedVideoMemory 是 usize，info.Budget 是 u64，统一到 u64
                     let total = desc
-                        .map(|d| d.DedicatedVideoMemory)
+                        .map(|d| d.DedicatedVideoMemory as u64)
                         .unwrap_or(info.Budget);
                     (Some(total), Some(info.CurrentUsage))
                 } else {
@@ -90,6 +90,13 @@ struct GpuPdh {
     counter: PDH_HCOUNTER,
 }
 
+// PDH_HQUERY / PDH_HCOUNTER 内含 *mut c_void，raw pointer 默认 !Send，
+// 会让 OnceLock<Mutex<Option<GpuPdh>>> 无法作为 static（要求 Sync）。
+// SAFETY: 这两个句柄是不透明的 PDH 内核句柄（HANDLE 语义，非内存地址），
+// PDH API 自身可从任意线程调用；此处只承诺「句柄可随 Mutex 在线程间移动」，
+// 所有访问仍严格在 RES/GPU_PDH 的 Mutex 保护下串行进行。
+unsafe impl Send for GpuPdh {}
+
 static GPU_PDH: OnceLock<Mutex<Option<GpuPdh>>> = OnceLock::new();
 
 fn gpu_pdh_handle() -> Option<GpuPdh> {
@@ -99,11 +106,11 @@ fn gpu_pdh_handle() -> Option<GpuPdh> {
         return Some(h);
     }
     unsafe {
-        let mut query: PDH_HQUERY = ptr::null_mut();
+        let mut query: PDH_HQUERY = PDH_HQUERY(ptr::null_mut());
         if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 {
             return None;
         }
-        let mut counter: PDH_HCOUNTER = ptr::null_mut();
+        let mut counter: PDH_HCOUNTER = PDH_HCOUNTER(ptr::null_mut());
         let path: Vec<u16> = r"\\GPU Engine(*)\Utilization Percentage"
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -127,14 +134,8 @@ fn gpu_util_percent() -> Option<f32> {
         }
         let mut size: u32 = 0;
         let mut count: u32 = 0;
-        // 第一次以空缓冲探明所需字节数
-        let _ = PdhGetFormattedCounterArrayW(
-            h.counter,
-            PDH_FMT_DOUBLE,
-            &mut size,
-            &mut count,
-            ptr::null_mut(),
-        );
+        // 第一次传 None 探明所需缓冲字节数（返回 PDH_MORE_DATA 属正常，不计错）
+        let _ = PdhGetFormattedCounterArrayW(h.counter, PDH_FMT_DOUBLE, &mut size, &mut count, None);
         if size == 0 {
             return None;
         }
@@ -144,20 +145,15 @@ fn gpu_util_percent() -> Option<f32> {
             return None;
         }
         let mut buf: Vec<PDH_FMT_COUNTERVALUE_ITEM_W> = Vec::with_capacity(cap);
-        buf.resize_with(cap, || PDH_FMT_COUNTERVALUE_ITEM_W {
-            szName: PCWSTR::null(),
-            FmtValue: PDH_FMT_COUNTERVALUE {
-                CStatus: 0,
-                Anonymous: PDH_FMT_COUNTERVALUE_0 { doubleValue: 0.0 },
-            },
-        });
+        // PDH_FMT_COUNTERVALUE_ITEM_W 自带 Default（全零），无需手工构造 union 字段
+        buf.resize_with(cap, PDH_FMT_COUNTERVALUE_ITEM_W::default);
         // 第二次取真实数组（size 作为 IN 传入缓冲字节数）
         let ret = PdhGetFormattedCounterArrayW(
             h.counter,
             PDH_FMT_DOUBLE,
             &mut size,
             &mut count,
-            buf.as_mut_ptr(),
+            Some(buf.as_mut_ptr()),
         );
         if ret != 0 {
             return None;
