@@ -271,6 +271,7 @@ const ALLOWED_COMMANDS = new Set([
   'gongfang_symbols',
   'gongfang_symbol_add',
   'gongfang_protocol_graph',
+  'gongfang_binary_analyze',
   'gongfang_scan',
   'gongfang_waf_detect',
   'gongfang_tech_fingerprint',

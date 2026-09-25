@@ -913,6 +913,64 @@ type DfaGraphOut = crate::reverse::protocol::DfaGraph;
 #[cfg(not(feature = "reverse"))]
 type DfaGraphOut = serde_json::Value;
 
+#[cfg(feature = "reverse")]
+type BinaryAnalysisOut = crate::reverse::disasm::BinaryAnalysis;
+#[cfg(not(feature = "reverse"))]
+type BinaryAnalysisOut = serde_json::Value;
+
+/// 二进制静态分析（**内置轨**：object 解析 PE/ELF/Mach-O + iced-x86 反汇编）
+///
+/// 产出：段表 / 符号与导入导出 / 基本块与 CFG / 常量池（字符串）/ 控制流反混淆结果。
+/// 纯 Rust、MIT、进程内、无外部依赖（实测 4.2MB PE：79.7 万指令 / 22.3 万基本块 / 约 1.7s）。
+///
+/// 边界（如实说明）：
+/// - 只覆盖 x86/x64；ARM 等架构仅输出段/符号/常量池，并给出明确 warning
+/// - 线性扫描 + 领导者切块，不做「函数边界精确重建」的承诺；函数名在 strip 过的
+///   二进制上是 `sub_<addr>`（调用目标推断）
+/// - 深度轨（Ghidra headless：P-Code IR / 跨指令集）见 `static_analysis.rs`，尚未接入
+/// - 只读单个本地文件，不做目录遍历；超大文件直接拒绝，避免吃满内存
+///
+/// `include_graph`：是否回传基本块/边明细（默认 **false**）。真实二进制基本块达 20 万级，
+/// 默认只回计数以免 IPC 载荷拖垮前端；需要图数据（如后续做可视化）时显式传 true。
+#[tauri::command]
+pub async fn gongfang_binary_analyze(
+    path: String,
+    include_graph: Option<bool>,
+) -> Result<BinaryAnalysisOut, String> {
+    #[cfg(feature = "reverse")]
+    {
+        let p = path.trim();
+        if p.is_empty() {
+            return Err("path 不能为空".to_string());
+        }
+        let pb = std::path::PathBuf::from(p);
+        let meta = tokio::fs::metadata(&pb)
+            .await
+            .map_err(|e| format!("读取文件信息失败（{}）: {}", p, e))?;
+        if !meta.is_file() {
+            return Err("目标不是普通文件".to_string());
+        }
+        const MAX_BYTES: u64 = 200 * 1024 * 1024;
+        if meta.len() > MAX_BYTES {
+            return Err(format!(
+                "文件过大（{} MB）：内置轨上限 {} MB，请先裁剪或用 Ghidra 深度轨",
+                meta.len() / 1024 / 1024,
+                MAX_BYTES / 1024 / 1024
+            ));
+        }
+        let with_graph = include_graph.unwrap_or(false);
+        // 解析 + 反汇编是 CPU/IO 阻塞操作：必须 spawn_blocking，不能占住 tokio worker
+        tokio::task::spawn_blocking(move || crate::reverse::disasm::analyze_file(&pb, with_graph))
+            .await
+            .map_err(|e| format!("分析任务异常: {}", e))?
+    }
+    #[cfg(not(feature = "reverse"))]
+    {
+        let _ = (path, include_graph);
+        Err("reverse feature 未启用，请用 --features gongfang-reverse 编译".to_string())
+    }
+}
+
 #[cfg(feature = "pentest")]
 type TechFpOut = crate::pentest::fingerprint::TechFingerprint;
 #[cfg(not(feature = "pentest"))]

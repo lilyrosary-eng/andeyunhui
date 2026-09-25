@@ -15,6 +15,12 @@ name = "tls_probe"
 path = "src/bin/tls_probe.rs"
 required-features = ["crawler"]
 
+# 内置静态分析探针（dev-only）：对真实二进制验证 disasm.rs 的产出与耗时
+[[bin]]
+name = "disasm_probe"
+path = "src/bin/disasm_probe.rs"
+required-features = ["reverse"]
+
 [features]
 # 默认零重型依赖：仅编译 kernel 骨架 + commands stub，主二进制零污染
 default = []
@@ -24,7 +30,8 @@ crawler = ["dep:futures-util", "dep:url"]
 crawler-browser = ["crawler", "dep:chromiumoxide"]
 # 启用逆向框架（L*协议文法归纳 + 卡方加密识别 + petgraph 控制流反混淆 + 符号持久化）
 # ghidra_headless 外部进程调用 + frida-gum 动态插桩后续阶段接入
-reverse = ["dep:petgraph", "dep:base64"]
+# 内置静态分析轨（disasm.rs）：object 解析 PE/ELF/Mach-O + iced-x86 反汇编，二者均 MIT
+reverse = ["dep:petgraph", "dep:base64", "dep:object", "dep:iced-x86"]
 # 启用渗透框架（编码变异 + SSTI 载荷 + 香农熵指纹 + petgraph 攻击拓扑）
 # 替代原计划 6 维度（SMT 求解器/ReDoS fuzzing/JIT Shellcode/FFT 频谱等已删除或降级）
 pentest = ["dep:petgraph"]
@@ -73,6 +80,11 @@ chromiumoxide = { version = "0.7", optional = true, default-features = false, fe
 petgraph = { version = "0.6", optional = true, default-features = false }
 # === reverse 编码识别解码依赖（MIT）===
 base64 = { version = "0.22", optional = true }
+# === reverse 内置静态分析依赖（均 MIT，纯 Rust 无原生库）===
+# object：PE/ELF/Mach-O 解析（段/符号/导入导出），features=["read","std"] 只取读路径
+object = { version = "0.40", optional = true, default-features = false, features = ["read", "std"] }
+# iced-x86：x86/x64 反汇编器（含指令流控信息，用于基本块划分）
+iced-x86 = { version = "1.21", optional = true, default-features = false, features = ["std", "decoder", "instr_info"] }
 
 # === automation feature 依赖（Windows SendInput HID 注入）===
 # 仅 Windows 平台 + automation feature 启用时拉入；非 Windows 平台 hid.rs 不编译

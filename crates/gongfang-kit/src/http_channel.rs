@@ -68,16 +68,12 @@ pub async fn get(url: &str, timeout_ms: u64, tls_profile: &str) -> Result<GetRes
         .build()
         .map_err(|e| format!("HTTP 客户端构建失败: {}", e))?;
 
-    let mut req = client.get(url);
+    let req = client.get(url);
     #[cfg(feature = "crawler")]
-    {
-        // UA 伪装（等价于既有 gongfang_fetch 行为：只换 UA，不改 ClientHello）
-        req = req.header("User-Agent", crate::crawler::stealth::user_agent(tls_profile));
-    }
+    // UA 伪装（等价于既有 gongfang_fetch 行为：只换 UA，不改 ClientHello）——用遮蔽赋值避免无谓的 mut
+    let req = req.header("User-Agent", crate::crawler::stealth::user_agent(tls_profile));
     #[cfg(not(feature = "crawler"))]
-    {
-        let _ = tls_profile;
-    }
+    let _ = tls_profile;
 
     let started = Instant::now();
     let resp = req.send().await.map_err(|e| e.to_string())?;

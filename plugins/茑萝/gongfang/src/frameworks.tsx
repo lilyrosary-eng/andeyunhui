@@ -2,7 +2,8 @@
 import React from "react";
 // 攻防模块 · 四大框架面板
 // 爬虫框架：内核已就绪，接入实际 Tauri 命令（启动/停止/状态/指令注入）。
-// 逆向/渗透/自动化：后端内核已就绪，前端展示技术选型（暂未接入 Tauri 命令）。
+// 逆向导：符号库/协议图/二进制静态分析（内置轨）已接入 Tauri 命令；
+// Ghidra 深度轨与 Frida 动态插桩仍为规划项（UI 中如实列在「计划中」）。
 const { useState, useEffect, useCallback } = React;
 
 import type { AuditInput } from './audit';
@@ -163,6 +164,29 @@ interface DfaGraph {
   edges: DfaEdge[];
   state_count: number;
   transition_count: number;
+}
+
+// 二进制静态分析结果（与 Rust 端 reverse::disasm::BinaryAnalysis 对齐）
+interface BinSection { name: string; address: number; size: number; executable: boolean; data: boolean }
+interface BinFunction { name: string; address: number; size: number; source: string }
+interface BinDeobf { original_block_count: number; dispatcher_count: number; real_block_count: number; real_edge_count: number }
+interface BinaryAnalysis {
+  file: string;
+  format: string;
+  arch: string;
+  entry: number;
+  is_64bit: boolean;
+  sections: BinSection[];
+  functions: BinFunction[];
+  block_count: number;
+  edge_count: number;
+  instruction_count: number;
+  strings: string[];
+  imports: string[];
+  exports: string[];
+  deobfuscation: BinDeobf | null;
+  engine: string;
+  warnings: string[];
 }
 
 interface SymbolSummary {
@@ -989,30 +1013,34 @@ function CrawlerPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
 // ============ 框架二：逆向工程 ============
 const reverseMeta: FrameworkMeta = {
   title: '逆向工程框架',
-  subtitle: '协议分析、加解密绕过。已交付：加密算法识别（卡方检验）+ 多层编码链分析 + 协议 DFA 归纳；静态分析（Ghidra）与动态插桩（Frida）为规划项。',
+  subtitle: '协议分析、加解密绕过。已交付：加密算法识别（卡方检验）+ 多层编码链分析 + 协议 DFA 归纳 + 本地二进制真实反汇编（内置轨）；Ghidra 深度轨与 Frida 插桩为规划项。',
   posture: '攻防',
   capabilities: [
     '加密算法特征向量库匹配（卡方检验，零依赖自实现）',
     '多层编码链识别与递归解码',
     '协议 DFA 归纳与执行（基于真实流量样本；无样本时明确报错）',
+    '本地二进制静态分析：PE/ELF/Mach-O 段表 + 符号 + 导入导出',
+    '真实反汇编（iced-x86，x86/x64）：实测 4.2MB PE 1.5s 出 79.7 万指令 / 22.3 万基本块 / 25.5 万 CFG 边',
+    '常量池提取（数据段字符串，Salt / URL / 错误信息等；实测同一 PE 出 300 条）',
+    '控制流反混淆（petgraph 高介数分发块裁剪，已由内置轨喂入真实基本块）',
     '符号库持久化（<AppData>/gongfang/symbols.json，跨会话复用）',
   ],
   capabilitiesPlanned: [
     'WASM 语义解析（wasmparser 建 CFG/DFG）',
-    '常量池提取（锁定 Salt/IV）',
-    'Ghidra headless 静态分析（反汇编 / P-Code / CFG）——接口占位，调用返回空结果',
+    'Ghidra headless 深度轨（P-Code IR / 反汇编 / 跨指令集）——接口占位，调用返回空结果',
     'Frida-gum 动态 Hook（SSL_write/strcmp）——接口占位',
     'SIGTRAP 反调试对抗',
     '内存快照热加载脱壳（process_vm_readv）',
     'P-Code → Rust 伪代码翻译（AI 辅助）',
-    'petgraph 控制流反混淆（已实现，但无命令入口、生产路径未调用）',
   ],
   techStack: [
-    { name: 'petgraph', license: 'MIT', integrated: false },
-    { name: 'ghidra_headless', license: 'Apache-2.0', integrated: false },
-    { name: 'frida-gum', license: 'wxWindows', integrated: false },
+    { name: 'iced-x86', license: 'MIT' },
+    { name: 'object', license: 'MIT' },
+    { name: 'petgraph', license: 'MIT' },
     { name: 'base64', license: 'MIT' },
     { name: 'tokio', license: 'MIT' },
+    { name: 'ghidra_headless', license: 'Apache-2.0', integrated: false },
+    { name: 'frida-gum', license: 'wxWindows', integrated: false },
   ],
   status: '部分交付',
 };
@@ -1034,6 +1062,53 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
   const [pUrl, setPUrl] = useState('');
   const [pGraph, setPGraph] = useState<DfaGraph | null>(null);
   const [pBusy, setPBusy] = useState(false);
+
+  // 二进制静态分析（内置轨：本地文件真实反汇编）
+  const [binPath, setBinPath] = useState('');
+  const [binBusy, setBinBusy] = useState(false);
+  const [binResult, setBinResult] = useState<BinaryAnalysis | null>(null);
+  const [binError, setBinError] = useState<string | null>(null);
+
+  // 选择本地二进制（走沙箱放行的 pick_file）
+  const handlePickBinary = useCallback(async () => {
+    try {
+      const files = await tauriInvoke<string[]>('pick_file');
+      if (files && files.length > 0) {
+        setBinPath(files[0]);
+        setBinError(null);
+      }
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      setBinError(`选择文件失败：${msg}`);
+    }
+  }, []);
+
+  // 二进制静态分析：真实反汇编（非伪汇编）
+  const handleBinaryAnalyze = useCallback(async () => {
+    const p = binPath.trim();
+    if (!p) {
+      setBinError('请先选择文件或填写二进制路径');
+      return;
+    }
+    setBinBusy(true);
+    setBinError(null);
+    try {
+      const r = await tauriInvoke<BinaryAnalysis>('gongfang_binary_analyze', { path: p, includeGraph: false });
+      setBinResult(r);
+      addLog({
+        action: '二进制静态分析',
+        target: p,
+        status: 'success',
+        detail: `${r.format}/${r.arch} · ${r.instruction_count} 指令 · ${r.block_count} 基本块 · 常量池 ${r.strings.length}`,
+      });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      setBinError(msg);
+      addLog({ action: '二进制静态分析', target: p, status: 'error', detail: msg });
+    } finally {
+      setBinBusy(false);
+    }
+  }, [binPath, addLog]);
 
   const handleEncodeAnalyze = useCallback(async () => {
     const input = encInput.trim();
@@ -1556,6 +1631,118 @@ function ReversePanel({ addLog }: { addLog: (i: AuditInput) => void }) {
           {symbols.length === 0 && !symBusy && !symError && symUrl !== '' && (
             <p className="text-[11px] text-neutral-400">该 URL 暂无已学习符号。逆向过程中识别到的函数/S盒/协议字段会自动入库。</p>
           )}
+        </CollapsibleSection>
+
+        {/* P2：二进制静态分析（内置轨：本地文件真实反汇编，替代「伪反汇编」的编排需求） */}
+        <CollapsibleSection
+          title="二进制静态分析（内置轨）"
+          storageKey="fw_reverse_binanalyze"
+          defaultOpen={false}
+          accent="info"
+          right={
+            <>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">真实反汇编</span>
+              <span className="text-[10px] text-neutral-400">object + iced-x86 · 纯 Rust/MIT</span>
+            </>
+          }
+        >
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={binPath}
+                onChange={(e) => setBinPath(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleBinaryAnalyze()}
+                placeholder="本地二进制路径（PE/ELF/Mach-O，仅 x86/x64 反汇编）"
+                className="flex-1 px-2.5 py-1.5 rounded-lg text-xs font-mono bg-white dark:bg-stone-800 border border-black/10 dark:border-stone-700/50 text-[var(--element-bg)] placeholder:text-neutral-400 focus:outline-none focus:ring-1 focus:ring-[var(--element-bg)]"
+              />
+              <button
+                onClick={handlePickBinary}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-600 dark:text-stone-300 border border-black/10 dark:border-stone-700/50 hover:bg-black/5 dark:hover:bg-white/5 transition-colors shrink-0"
+              >
+                选择文件
+              </button>
+              <button
+                onClick={handleBinaryAnalyze}
+                disabled={binBusy}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity shrink-0"
+              >
+                {binBusy ? '分析中...' : '分析'}
+              </button>
+            </div>
+
+            {binError && (
+              <div className="px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-400 break-all">
+                {binError}
+              </div>
+            )}
+
+            {binResult && (
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <StatusCard label="格式 / 架构" value={`${binResult.format} · ${binResult.arch}`} />
+                  <StatusCard label="入口" value={`0x${binResult.entry.toString(16)}`} valueCls="font-mono text-[12px]" />
+                  <StatusCard label="指令数" value={binResult.instruction_count} />
+                  <StatusCard label="基本块 / CFG 边" value={`${binResult.block_count} / ${binResult.edge_count}`} />
+                  <StatusCard label="函数（符号+调用目标）" value={binResult.functions.length} />
+                  <StatusCard label="常量池字符串" value={binResult.strings.length} />
+                  <StatusCard label="导入 / 导出" value={`${binResult.imports.length} / ${binResult.exports.length}`} />
+                  <StatusCard
+                    label="反混淆后真实块"
+                    value={binResult.deobfuscation ? binResult.deobfuscation.real_block_count : '—'}
+                    valueCls="font-mono text-[12px]"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2">
+                    <div className="text-[10px] text-neutral-400 mb-1">段（前 8）</div>
+                    <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                      {binResult.sections.slice(0, 8).map((s) => (
+                        <div key={s.name} className="flex items-center gap-2 text-[11px] font-mono">
+                          <span className={`w-1 h-1 rounded-full shrink-0 ${s.executable ? 'bg-emerald-500' : s.data ? 'bg-sky-500' : 'bg-neutral-300'}`} />
+                          <span className="text-neutral-600 dark:text-stone-300 truncate flex-1">{s.name}</span>
+                          <span className="text-neutral-400 tabular-nums">{s.size}B</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2">
+                    <div className="text-[10px] text-neutral-400 mb-1">函数（前 12，按地址）</div>
+                    <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                      {binResult.functions.slice(0, 12).map((f) => (
+                        <div key={`${f.address}-${f.name}`} className="flex items-center gap-2 text-[11px] font-mono">
+                          <span className="text-neutral-400 shrink-0">0x{f.address.toString(16)}</span>
+                          <span className="text-neutral-600 dark:text-stone-300 truncate flex-1" title={f.name}>{f.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2">
+                  <div className="text-[10px] text-neutral-400 mb-1">常量池（前 20，按长度降序）</div>
+                  <div className="space-y-0.5 max-h-52 overflow-y-auto">
+                    {binResult.strings.slice(0, 20).map((s, i) => (
+                      <div key={`${i}-${s.slice(0, 24)}`} className="text-[11px] font-mono text-neutral-600 dark:text-stone-300 break-all">{s}</div>
+                    ))}
+                  </div>
+                </div>
+
+                {binResult.warnings.length > 0 && (
+                  <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-400 space-y-0.5">
+                    {binResult.warnings.map((w, i) => (
+                      <div key={i}>· {w}</div>
+                    ))}
+                  </div>
+                )}
+                <p className="text-[10px] text-neutral-400 leading-relaxed">
+                  engine={binResult.engine} · 线性扫描 + 领导者切块，不做函数边界精确重建；ARM 等非 x86 架构仅出段/符号/常量池。
+                  Ghidra 深度轨（P-Code IR / 跨指令集）尚未接入。
+                </p>
+              </div>
+            )}
+          </div>
         </CollapsibleSection>
 
         {/* P2：反汇编视图（IDA/Ghidra 风格符号表 + 伪反汇编预览） */}

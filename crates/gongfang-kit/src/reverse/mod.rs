@@ -13,7 +13,10 @@
 //! - crypto.rs：卡方检验检测非标准加密 + 已知算法特征向量库（汉明距离匹配）
 //! - cfg.rs：petgraph 控制流图反混淆（介数中心性裁剪 OLLVM 平坦化分发块）
 //! - symbols.rs：serde JSON 符号持久化（跨会话复用高价值符号/协议字段/S盒）
-//! - static_analysis.rs：ghidra_headless 外部进程接口占位（后续接入）
+//! - disasm.rs：**内置静态分析轨**（object 解析 PE/ELF/Mach-O + iced-x86 反汇编，
+//!   出基本块/CFG/常量池/导入导出，并驱动 cfg.rs 反混淆）——纯 Rust、MIT、进程内、毫秒级
+//! - static_analysis.rs：ghidra_headless **深度轨**接口（可选外部进程，提供 P-Code IR
+//!   与跨指令集分析；未安装时如实回落内置轨）
 //! - dynamic.rs：frida-gum 动态插桩接口占位（后续接入）
 
 pub mod crypto;
@@ -25,6 +28,9 @@ pub mod detect;
 
 #[cfg(feature = "reverse")]
 pub mod cfg;
+
+#[cfg(feature = "reverse")]
+pub mod disasm;
 
 #[cfg(feature = "reverse")]
 pub mod static_analysis;

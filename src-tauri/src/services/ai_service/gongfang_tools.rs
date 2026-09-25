@@ -49,7 +49,7 @@ impl AiTool for GongfangFullTool {
             "type": "function",
             "function": {
                 "name": "gongfang",
-                "description": "攻防模块统一工具（用户明确授权目标时使用）。cmd 指定操作，args 为操作参数。只读侦察(recon)、抓取(fetch)、爬虫统计与代理池(crawler_stats/proxy_add/proxy_list/proxy_reset)、事件与指标(events_recent/metrics_history)、载荷(payloads)、编码识别(crypto/encode)、符号(symbols)、协议图(protocol_graph，需 url)、自动化(automation_*)、网关(gateway_*)、知识库(ai_knowledge_*)、目标工作区(target_*)、引擎(status/start/stop/inject)。不越权、不洪泛。",
+                "description": "攻防模块统一工具（用户明确授权目标时使用）。cmd 指定操作，args 为操作参数。只读侦察(recon)、抓取(fetch)、爬虫统计与代理池(crawler_stats/proxy_add/proxy_list/proxy_reset)、事件与指标(events_recent/metrics_history)、载荷(payloads)、编码识别(crypto/encode)、符号(symbols)、协议图(protocol_graph，需 url)、二进制静态分析(binary_analyze，需 path)、自动化(automation_*)、网关(gateway_*)、知识库(ai_knowledge_*)、目标工作区(target_*)、引擎(status/start/stop/inject)。不越权、不洪泛。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -117,6 +117,13 @@ impl AiTool for GongfangFullTool {
                 "symbols" => ok(gongfang_symbols(json(args, "url").and_then(|x| x.as_str().map(str::to_string)))),
                 // 无 url 时后端明确报错（不再返回示例状态机）
                 "protocol_graph" => ok(gongfang_protocol_graph(json(args, "url").and_then(|x| x.as_str().map(str::to_string)))),
+                // 本地二进制静态分析（内置轨：段/符号/基本块/CFG/常量池/反混淆）
+                // 默认不回传图明细（20 万级基本块过 IPC 会拖垮前端）；AI 需要图时显式传 include_graph
+                "binary_analyze" => ok(gongfang_binary_analyze(
+                    k(&["path"])?,
+                    json(args, "include_graph").and_then(|x| x.as_bool()),
+                )
+                .await),
                 "symbol_add" => {
                     let req: gongfang_kit::commands::SaveSymbolRequest = serde_json::from_value(json(args, "req").unwrap_or(Value::Null))
                         .map_err(|e| format!("symbol_add req 解析失败: {e}"))?;
