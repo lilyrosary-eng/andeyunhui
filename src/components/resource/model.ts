@@ -61,6 +61,28 @@ export interface DiskUsage {
   queue: number | null;
 }
 
+/** 电池 / 电源状态（对应后端 BatteryStatus；桌面机型 present=false，整块不显示） */
+export interface BatteryStatus {
+  present: boolean;
+  /** 是否接着交流电源 */
+  ac_online: boolean;
+  /** 正在充电 */
+  charging: boolean;
+  /** 剩余电量 %（未知为 null） */
+  percent: number | null;
+  /** 放电剩余秒数（充电中/交流供电/未知为 null） */
+  seconds_left: number | null;
+}
+
+/** 单个网络接口（对应后端 NetIface） */
+export interface NetIface {
+  name: string;
+  down_bps: number;
+  up_bps: number;
+  /** 虚拟/隧道接口：只列出、不计入汇总（否则与承载它的物理口重复计数） */
+  virtual_iface: boolean;
+}
+
 export interface ResourceUsage {
   cpu_percent: number;
   cpu_per_core: number[];
@@ -77,8 +99,12 @@ export interface ResourceUsage {
   paging_percent: number | null;
   net_up_bps: number;
   net_down_bps: number;
+  /** 逐接口速率（汇总 net_*_bps 只累加 virtual_iface=false 的口） */
+  nets: NetIface[];
   gpus: GpuUsage[];
   disks: DiskUsage[];
+  /** 电池 / 电源状态（无电池机型 present=false） */
+  battery: BatteryStatus;
 }
 
 /** 迷你曲线保留的采样点数（约 48s @1s 轮询） */
@@ -129,6 +155,18 @@ export function fmtPercent(p: number | null, digits = 1): string {
 export function fmtMs(ms: number | null): string {
   if (ms == null || !Number.isFinite(ms)) return '—';
   return ms >= 10 ? `${Math.round(ms)} ms` : `${ms.toFixed(1)} ms`;
+}
+
+/**
+ * 秒 → 紧凑时长（`2h05m` / `45m`）。
+ * 用紧凑且语言中性的写法：主窗口（硬编码中文）与浮岛（走 i18n）共用同一份格式化。
+ * 非正数、非有限值、以及超过 7 天的一律「—」（个别机型会给出明显不靠谱的大值）。
+ */
+export function fmtDuration(sec: number | null): string {
+  if (sec == null || !Number.isFinite(sec) || sec <= 0 || sec > 86400 * 7) return '—';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`;
 }
 
 /**

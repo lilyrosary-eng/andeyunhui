@@ -19,6 +19,7 @@ import { useI18n } from '@/lib/i18n';
 import { KeepButton } from '@/components/KeepButton';
 import {
   fmtBytes,
+  fmtDuration,
   fmtFreq,
   fmtMs,
   fmtPercent,
@@ -190,6 +191,10 @@ function CapsuleResource() {
     if (g.util_copy != null) eng.push(`${t('capsule.res.engCopy')} ${Math.round(g.util_copy)}%`);
     return eng.length ? `${t('capsule.res.engine')} ${eng.join(' · ')}` : undefined;
   };
+  // 电量配色复用磁盘那三档（同一套深底配色；方向相反：电量越低越危险）
+  const batColor = (p: number | null) => (p == null ? NA_COLOR : p < 20 ? DISK_BAD : p < 40 ? DISK_WARN : DISK_OK);
+  // 只列当前真有流量的接口（阈值 1 B/s：一秒轮询下这点量属噪声）
+  const activeNets = (data?.nets ?? []).filter((n) => n.down_bps > 1 || n.up_bps > 1);
 
   return (
     <div
@@ -395,6 +400,22 @@ function CapsuleResource() {
                   percent={0}
                   detail={`↑ ${fmtSpeed(data.net_up_bps)}`}
                 />
+                {/* 逐接口明细：虚拟/隧道口标「不计入」——汇总只累加物理口，否则同一份流量算两遍 */}
+                {activeNets.map((n) => (
+                  <Tile
+                    key={n.name}
+                    wide
+                    bar={false}
+                    title={`${t('capsule.res.net')} · ${n.name}`}
+                    value={`↓ ${fmtSpeed(n.down_bps)}`}
+                    color={n.virtual_iface ? NA_COLOR : NET_DOWN_COLOR}
+                    percent={0}
+                    detail={
+                      `↑ ${fmtSpeed(n.up_bps)}` +
+                      (n.virtual_iface ? ` · ${t('capsule.res.netExcluded')}` : '')
+                    }
+                  />
+                ))}
                 {data.disks.map((d) => (
                   <DiskTile key={d.mount} d={d} />
                 ))}
@@ -407,6 +428,24 @@ function CapsuleResource() {
                     color={NA_COLOR}
                     percent={0}
                     detail={t('capsule.res.noDisk')}
+                  />
+                )}
+                {/* 电池：只在真有系统电池的机器上出现（台式机不显示） */}
+                {data.battery.present && (
+                  <Tile
+                    wide
+                    title={t('capsule.res.battery')}
+                    value={data.battery.percent != null ? data.battery.percent.toFixed(0) : 'N/A'}
+                    unit={data.battery.percent != null ? '%' : undefined}
+                    color={batColor(data.battery.percent)}
+                    percent={data.battery.percent ?? 0}
+                    detail={
+                      data.battery.charging
+                        ? t('capsule.res.charging')
+                        : data.battery.ac_online
+                          ? t('capsule.res.acOnline')
+                          : `${t('capsule.res.left')} ${fmtDuration(data.battery.seconds_left)}`
+                    }
                   />
                 )}
               </>

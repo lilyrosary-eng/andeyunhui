@@ -91,8 +91,12 @@ pub struct ResourceUsage {
     pub paging_percent: Option<f32>,
     pub net_up_bps: f64,         // 上行速率 字节/秒
     pub net_down_bps: f64,       // 下行速率 字节/秒
+    /// 逐接口速率（仅**物理**接口计入 net_*_bps，虚拟/隧道口只列出不计入，见 is_virtual_iface）
+    pub nets: Vec<NetIface>,
     pub gpus: Vec<crate::gpu_metrics::GpuUsage>, // 逐块显卡（利用率/显存/频率/功耗）
     pub disks: Vec<DiskUsage>,   // 各固定分区占用 + 实时 IO
+    /// 电池 / 电源状态（无电池机型 present=false）
+    pub battery: BatteryStatus,
 }
 
 /// 单个分区占用与实时 IO。空间字段一律 KB，与 mem_*_kb 及前端 fmtBytes 口径一致；
@@ -110,6 +114,35 @@ pub struct DiskUsage {
     pub queue: Option<f32>,    // 当前队列长度（排队中的请求数）
 }
 
+/// 单个网络接口的实时速率。
+///
+/// ★ 为什么要有 virtual_iface：汇总速率若把虚拟/隧道接口一起累加，同一份流量会被算两遍
+///   —— Hyper-V vEthernet（WSL2 / 沙盒 / Docker 都走它）、各类 VPN 隧道都会与承载它们的
+///   物理网卡**同时**计数（本机实测就带一个 vEthernet (Default Switch)）。故汇总只取物理接口，
+///   虚拟接口仍逐条列出、并标明「不计入」，便于用户核对而不是被悄悄丢掉。
+#[derive(serde::Serialize, Clone)]
+pub struct NetIface {
+    pub name: String,
+    pub down_bps: f64,
+    pub up_bps: f64,
+    /// 是否虚拟/隧道接口（判定见 is_virtual_iface）
+    pub virtual_iface: bool,
+}
+
+/// 电池 / 电源状态（桌面机型 present=false，前端整块不显示）。
+///
+/// 定义放在这里而不是 hw_metrics：这几个模块都是 `#[cfg(windows)]`，而本结构是**序列化契约**
+/// 的一部分，与 ResourceUsage / DiskUsage 同处一个位置，避免非 Windows 目标也要去引用它们。
+/// 采集见 `hw_metrics::battery_status()`。
+#[derive(serde::Serialize, Clone, Copy, Default)]
+pub struct BatteryStatus {
+    pub present: bool,             // 是否存在系统电池
+    pub ac_online: bool,           // 是否接着交流电源
+    pub charging: bool,            // 正在充电
+    pub percent: Option<f32>,      // 剩余电量 %
+    pub seconds_left: Option<u32>, // 放电剩余秒数（充电中/交流供电/未知均为 None）
+}
+
 struct ResState {
     sys: SysSystem,
     // sysinfo 0.30 起网络采集独立于 System：单独常驻一个 Networks 实例复用
@@ -118,6 +151,8 @@ struct ResState {
     disks: sysinfo::Disks,
     prev_recv: u64,
     prev_trans: u64,
+    /// 上一拍「逐接口累计收发字节」快照（key = 接口名）：逐口速率靠它差分
+    prev_net: std::collections::HashMap<String, (u64, u64)>,
     prev_ts: Option<Instant>,
 }
 
@@ -139,6 +174,7 @@ fn get_resource_usage() -> ResourceUsage {
                 disks: sysinfo::Disks::new_with_refreshed_list(),
                 prev_recv: 0,
                 prev_trans: 0,
+                prev_net: std::collections::HashMap::new(),
                 prev_ts: None,
             })
         })
@@ -164,34 +200,61 @@ fn get_resource_usage() -> ResourceUsage {
         0.0
     };
 
-    // 网络：累加所有非回环接口的累计收发字节（total_* 为自开机累计，语义无歧义），
-    // 再与上一拍快照做时间差分换算成字节/秒
-    let mut recv = 0u64;
-    let mut trans = 0u64;
+    // 网络：逐接口做累计值差分（total_* 是自开机累计，语义无歧义）换算成字节/秒。
+    // 汇总速率**只累加物理接口**，虚拟/隧道口逐条列出但不计入（原因见 NetIface 的注释）。
+    let now = Instant::now();
+    let dt = st
+        .prev_ts
+        .map(|p| now.duration_since(p).as_secs_f64())
+        .unwrap_or(0.0);
+    let mut nets: Vec<NetIface> = Vec::new();
+    let mut snapshot: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
+    let (mut recv, mut trans) = (0u64, 0u64);
     for (name, net) in &st.networks {
-        let n = name.to_lowercase();
-        if n.contains("loop") || n == "lo" {
+        let lower = name.to_lowercase();
+        if is_loopback_iface(&lower) {
             continue;
         }
-        recv = recv.saturating_add(net.total_received());
-        trans = trans.saturating_add(net.total_transmitted());
-    }
-    let now = Instant::now();
-    let (up_bps, down_bps) = match st.prev_ts {
-        Some(prev) => {
-            let dt = now.duration_since(prev).as_secs_f64();
-            if dt > 0.0 && st.prev_recv > 0 {
-                let down = (recv.saturating_sub(st.prev_recv)) as f64 / dt;
-                let up = (trans.saturating_sub(st.prev_trans)) as f64 / dt;
-                (up, down)
-            } else {
-                (0.0, 0.0)
-            }
+        let (tr, tt) = (net.total_received(), net.total_transmitted());
+        // 上一拍快照缺失（新出现的接口）时以当前值兜底 ⇒ 本拍速率为 0，而不是一个巨大的伪值
+        let (pr, pt) = st.prev_net.get(name).copied().unwrap_or((tr, tt));
+        // 计数器回绕（tr < pr）时本拍记 0，不产生负速率
+        let (down, up) = if dt > 0.0 && tr >= pr && tt >= pt {
+            ((tr - pr) as f64 / dt, (tt - pt) as f64 / dt)
+        } else {
+            (0.0, 0.0)
+        };
+        let virt = is_virtual_iface(&lower);
+        if !virt {
+            recv = recv.saturating_add(tr);
+            trans = trans.saturating_add(tt);
         }
-        None => (0.0, 0.0),
+        snapshot.insert(name.clone(), (tr, tt));
+        nets.push(NetIface {
+            name: name.clone(),
+            down_bps: down,
+            up_bps: up,
+            virtual_iface: virt,
+        });
+    }
+    // 速率高的在前：前端要「只列有流量的接口」，排序后可直接取前缀
+    nets.sort_by(|a, b| {
+        let (x, y) = (b.down_bps + b.up_bps, a.down_bps + a.up_bps);
+        x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    // 汇总速率与逐口数值同源：都是「物理口累计值的差分」（首拍 dt=0 ⇒ 0，不会把累计值当速率）
+    let (up_bps, down_bps) = if dt > 0.0 {
+        (
+            trans.saturating_sub(st.prev_trans) as f64 / dt,
+            recv.saturating_sub(st.prev_recv) as f64 / dt,
+        )
+    } else {
+        (0.0, 0.0)
     };
     st.prev_recv = recv;
     st.prev_trans = trans;
+    st.prev_net = snapshot;
     st.prev_ts = Some(now);
 
     // 磁盘：只列固定分区（total_space>0 天然排除光驱/未挂载盘；再排除可移动盘）。
@@ -238,13 +301,57 @@ fn get_resource_usage() -> ResourceUsage {
         mem_percent,
         net_up_bps: up_bps,
         net_down_bps: down_bps,
-        // 原生（Windows）指标在 fill_native 里回填；非 Windows 目标保持空 / None
+        nets,
         gpus: Vec::new(),
         disks,
+        battery: BatteryStatus::default(),
     };
     #[cfg(windows)]
     fill_native(&mut usage);
     usage
+}
+
+/// 回环接口：本机自身流量不该进网络速率
+/// （Windows 上除 "Loopback Pseudo-Interface 1" 外还有 Npcap Loopback Adapter 这类第三方回环）
+fn is_loopback_iface(lower_name: &str) -> bool {
+    lower_name.contains("loop") || lower_name == "lo"
+}
+
+/// 虚拟 / 隧道接口的名字特征（传入**小写**接口名）。
+///
+/// 为什么用名字而不是 API 标志：精确判据是 iphlpapi 的
+/// `MIB_IF_ROW2.InterfaceAndOperStatusFlags.HardwareInterface`，但 winapi 0.3.9 的 netioapi
+/// 模块连带需要 13 个 feature 才能编译（basetsd / ifdef / inaddr / in6addr / ipifcons / nldef /
+/// ntddndis / ntdef / vcruntime / winnt / ws2def / ws2ipdef…），走 windows crate 侧则触发全量
+/// 重编 ⇒ 与「轻量、别动 Cargo feature」冲突，故先用这份保守名单。
+///
+/// ★ 名称法在**中文系统**上恰好吃得开：本地化的名字（以太网 / WLAN / 蓝牙网络连接）都是**物理**
+///   网卡，而虚拟机与 VPN / 隧道适配器在任何语言下都保留英文名（本机实测：Wi-Fi 网卡被本地化成
+///   "WLAN"，而 Hyper-V 的口仍叫 "vEthernet (Default Switch)"）。
+///   名单只用于**从汇总里剔除**，逐口列表照旧全量展示 —— 万一看走眼，代价只是某口不进汇总，
+///   不会产生假读数（前端还会把它标为「不计入」，用户可自行核对）。
+fn is_virtual_iface(lower_name: &str) -> bool {
+    /// 虚拟机 / VPN / 隧道 / 伪适配器特征（小写比较）
+    const VIRTUAL_TOKENS: [&str; 17] = [
+        "vethernet",       // Hyper-V 虚拟交换机（WSL2 / 沙盒 / Docker 的默认出口）
+        "hyper-v",
+        "vmware",          // VMware Network Adapter VMnetN
+        "virtualbox",      // VirtualBox Host-Only Network
+        "host-only",
+        "virtual adapter", // Microsoft Wi-Fi Direct Virtual Adapter 等
+        "wi-fi direct",
+        "wan miniport",    // 各类拨号 / 隧道 WAN Miniport
+        "tap-windows",     // OpenVPN 的 TAP 驱动
+        "wintun",          // WireGuard / Clash 等新式 TUN
+        "openvpn",
+        "wireguard",
+        "tailscale",
+        "zerotier",
+        "radmin",
+        "sangfor",         // 深信服 VPN
+        "vpn",             // 兜底：各类「XXX VPN Adapter」
+    ];
+    VIRTUAL_TOKENS.iter().any(|t| lower_name.contains(t))
 }
 
 /// 回填 Windows 原生指标（GPU / CPU 频率·功耗·温度 / 页面文件 / 各卷实时 IO）。
@@ -265,6 +372,8 @@ fn fill_native(u: &mut ResourceUsage) {
     u.cpu_power_w = cpu.power_w;
     u.thermal_temp_c = cpu.temp_c;
     u.paging_percent = crate::hw_metrics::paging_percent(sample.as_ref());
+    // 电池：不走 PDH（走 winapi GetSystemPowerStatus），与那份采样无关，单独取
+    u.battery = crate::hw_metrics::battery_status();
     // 各卷实时 IO：PDH 的 LogicalDisk 实例名就是盘符（`c:`），而 sysinfo 给的挂载点是 `C:\`，
     // 去掉结尾反斜杠再转小写即为实例名。没有对应实例的卷（如无盘符的隐藏卷）保持 None，
     // 前端展示「—」而不是伪造一个 0。
@@ -299,6 +408,14 @@ fn fill_native(u: &mut ResourceUsage) {
             cpu.temp_c,
             u.paging_percent,
             ios.iter().map(|x| x.instance.as_str()).collect::<Vec<_>>()
+        );
+        log::info!(
+            "[RES] 电池 present={} 供电={} 充电={} 电量={:?}% 剩余={:?}s",
+            u.battery.present,
+            if u.battery.ac_online { "AC" } else { "电池" },
+            u.battery.charging,
+            u.battery.percent,
+            u.battery.seconds_left
         );
     }
     for d in u.disks.iter_mut() {

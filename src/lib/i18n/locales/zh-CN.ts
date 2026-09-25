@@ -676,6 +676,13 @@ export const zhCN: Record<string, string> = {
   'capsule.res.resp': '响应',
   'capsule.res.queue': '队列',
   'capsule.res.paging': '页面文件',
+  // 浮岛 · 电池（只在真有系统电池的机器上出现）
+  'capsule.res.battery': '电池',
+  'capsule.res.charging': '充电中',
+  'capsule.res.acOnline': '已接电源',
+  'capsule.res.left': '剩余',
+  // 浮岛 · 网络逐接口（虚拟/隧道口不计入汇总，避免与物理口重复计数）
+  'capsule.res.netExcluded': '不计入汇总',
   'capsule.res.noDisk': '未获取到分区信息',
   'capsule.res.allNote': '滚轮可滚动查看其余指标',
 

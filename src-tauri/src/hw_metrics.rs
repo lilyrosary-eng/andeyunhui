@@ -55,11 +55,20 @@
 //
 // ── 页面文件 ────────────────────────────────────────────────────────────────
 // 取 \Paging File(_Total)\% Usage。物理内存卡旁边最该有的那个「是不是开始换页了」的指示。
+//
+// ── 电池 / 电源状态 ────────────────────────────────────────────────────────
+// 走 winapi 的 GetSystemPowerStatus（winbase，项目**已启用**该 feature ⇒ 零新增依赖、零新增 Cargo 变更）。
+//   · 难得的一个**纯跨厂商**指标：数据来自 OS 的电池驱动，与 CPU/GPU 品牌无关，笔记本上谁都能读。
+//   · 台式机 / 无电池机型：BatteryFlag 的 0x80 位为 1 ⇒ present=false，前端整块不显示。
+//   · ⚠ 没做「放电功率」：本机实测 \Power Meter(*)\Power 在交流供电下恒为 0（台式机连这个
+//     计数器集都没有），只有电池供电时才有意义 ⇒ 只给「电量 + 剩余时间 + 供电方式」。
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use libloading::Library;
+use winapi::um::winbase::GetSystemPowerStatus;
 
+use crate::BatteryStatus;
 use crate::pdh_util::Sample;
 
 /// CPU/系统汇总指标（频率 / 功耗 / 温度各自独立降级）
@@ -193,6 +202,40 @@ pub fn paging_percent(sample: Option<&Sample>) -> Option<f32> {
     Sample::value_of(&s.paging, "_total")
         .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
         .map(|v| v as f32)
+}
+
+/// 电池 / 电源状态（详见文件头「电池」段）。取不到一律按「无电池」降级，绝不 panic。
+pub fn battery_status() -> BatteryStatus {
+    // BatteryFlag 位定义（Windows SDK）：0x80 = 无系统电池；0xFF = 未知
+    const NO_SYSTEM_BATTERY: u8 = 0x80;
+    const CHARGING: u8 = 0x08;
+    const UNKNOWN_BYTE: u8 = 0xFF;
+    unsafe {
+        let mut raw: winapi::um::winbase::SYSTEM_POWER_STATUS = std::mem::zeroed();
+        if GetSystemPowerStatus(&mut raw) == 0 {
+            return BatteryStatus::default();
+        }
+        let present = raw.BatteryFlag != UNKNOWN_BYTE && raw.BatteryFlag & NO_SYSTEM_BATTERY == 0;
+        let ac_online = raw.ACLineStatus == 1;
+        let percent = if present && raw.BatteryLifePercent != UNKNOWN_BYTE {
+            Some(raw.BatteryLifePercent as f32)
+        } else {
+            None
+        };
+        // BatteryLifeTime 未知时是 0xFFFFFFFF；且只有「电池供电中」才代表剩余可用时间
+        let seconds_left = if present && !ac_online && raw.BatteryLifeTime != u32::MAX {
+            Some(raw.BatteryLifeTime)
+        } else {
+            None
+        };
+        BatteryStatus {
+            present,
+            ac_online,
+            charging: present && raw.BatteryFlag & CHARGING != 0,
+            percent,
+            seconds_left,
+        }
+    }
 }
 
 // ----------------- 标称基频（powrprof.dll 运行时加载） -----------------

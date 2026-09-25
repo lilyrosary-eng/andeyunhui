@@ -8,6 +8,7 @@
 import { useState, type ReactNode } from 'react';
 import {
   fmtBytes,
+  fmtDuration,
   fmtFreq,
   fmtMs,
   fmtPercent,
@@ -216,6 +217,13 @@ export function ResourceMonitor() {
 
   const cpuColor = data ? levelColor(data.cpu_percent) : '#10b981';
   const memColor = data ? levelColor(data.mem_percent) : '#10b981';
+  // 电池配色与「占用率」相反：电量越低越危险（<20% 红、<40% 琥珀）
+  const bat = data?.battery;
+  const batColor =
+    bat?.percent == null ? NA_COLOR : bat.percent < 20 ? '#ef4444' : bat.percent < 40 ? '#f59e0b' : '#10b981';
+  // 只列当前真有流量的接口：断开或闲置的口（如未插网线时）列出来只是噪音。
+  // 阈值 1 B/s —— 一秒轮询间隔下这点量属于噪声。
+  const activeNets = (data?.nets ?? []).filter((n) => n.down_bps > 1 || n.up_bps > 1);
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg fade-in">
@@ -431,7 +439,53 @@ export function ResourceMonitor() {
                   <Sparkline data={hist.up} color={NET_UP_COLOR} />
                 </div>
               </div>
+              {/* 逐接口明细。虚拟/隧道口标注「不计入」：汇总只累加物理口，
+                  否则 Hyper-V vEthernet / VPN 隧道会让同一份流量被算两遍 */}
+              {activeNets.length > 0 && (
+                <div className="flex flex-col gap-0.5 mt-1">
+                  {activeNets.map((n) => (
+                    <div key={n.name} className="flex items-center justify-between gap-2 text-[10px]">
+                      <span
+                        className={`truncate ${
+                          n.virtual_iface
+                            ? 'text-neutral-300 dark:text-stone-600'
+                            : 'text-neutral-500 dark:text-stone-400'
+                        }`}
+                        title={n.name}
+                      >
+                        {n.name}
+                        {n.virtual_iface && <span className="ml-1 opacity-70">不计入汇总</span>}
+                      </span>
+                      <span className="tabular-nums shrink-0 text-neutral-400 dark:text-stone-500">
+                        ↓ {fmtSpeed(n.down_bps)} · ↑ {fmtSpeed(n.up_bps)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </MetricCard>
+
+            {/* 电池 / 电源：仅「有系统电池」的机器才出这张卡（台式机整卡不出现，不留空位） */}
+            {bat?.present && (
+              <MetricCard>
+                <StatHeader
+                  title="电池"
+                  live={!paused}
+                  hint={bat.ac_online ? '交流供电' : '电池供电'}
+                />
+                <div className="flex items-end gap-2">
+                  <span className="text-3xl font-bold tabular-nums" style={{ color: batColor }}>
+                    {bat.percent != null ? bat.percent.toFixed(0) : '—'}
+                    {bat.percent != null && <span className="text-base">%</span>}
+                  </span>
+                  <span className="text-xs text-neutral-400 dark:text-stone-500 mb-1">
+                    {bat.charging ? '充电中' : bat.ac_online ? '已接电源' : '放电中'}
+                  </span>
+                </div>
+                <Bar percent={bat.percent ?? 0} color={batColor} />
+                <Chips items={[{ k: '剩余时间', v: fmtDuration(bat.seconds_left) }]} />
+              </MetricCard>
+            )}
           </div>
         )}
       </div>

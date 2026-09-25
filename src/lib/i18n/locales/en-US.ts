@@ -676,6 +676,13 @@ export const enUS: Record<string, string> = {
   'capsule.res.resp': 'Resp',
   'capsule.res.queue': 'Queue',
   'capsule.res.paging': 'Page file',
+  // Capsule · battery (only shown on machines that actually have a battery)
+  'capsule.res.battery': 'Battery',
+  'capsule.res.charging': 'Charging',
+  'capsule.res.acOnline': 'AC power',
+  'capsule.res.left': 'Left',
+  // Capsule · per-interface network (virtual/tunnel interfaces are excluded from the total)
+  'capsule.res.netExcluded': 'excluded',
   'capsule.res.noDisk': 'No partition data',
   'capsule.res.allNote': 'Scroll to see the remaining metrics',
 
