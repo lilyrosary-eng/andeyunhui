@@ -3,7 +3,7 @@
   "name": "攻防",
   "version": "0.1.0",
   "kind": "module",
-  "visible": false,
+  "visible": true,
   "entry": "index.js",
   "iconName": "Shield",
   "hostApiVersion": 1,
