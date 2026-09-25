@@ -238,11 +238,18 @@ fn get_resource_usage() -> ResourceUsage {
         if RES_LOGGED.set(()).is_ok() {
             for g in &gpus {
                 log::info!(
-                    "[RES] GPU「{}」util={:?}% 显存={:?}/{:?}KB 频率={:?}MHz 功耗={:?}W",
+                    "[RES] GPU「{}」util={:?}% 显存={:?}/{:?}KB（共享{:?}KB）引擎 3D={:?}% 解码={:?}% \
+                     编码={:?}% 拷贝={:?}% 温度={:?}°C 频率={:?}MHz 功耗={:?}W",
                     g.name,
                     g.util_percent,
                     g.vram_used_kb,
                     g.vram_total_kb,
+                    g.vram_shared_kb,
+                    g.util_3d,
+                    g.util_video_decode,
+                    g.util_video_encode,
+                    g.util_copy,
+                    g.temp_c,
                     g.clock_mhz,
                     g.power_w
                 );

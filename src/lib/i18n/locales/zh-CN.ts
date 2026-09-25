@@ -652,7 +652,7 @@ export const zhCN: Record<string, string> = {
   'capsule.res.gpuPickTitle': '监视哪些 GPU',
   'capsule.res.gpuAll': '全选',
   'capsule.res.gpuNone': '全不选',
-  'capsule.res.gpuFooter': '功耗与频率只有 NVIDIA 显卡能读；核显与虚拟显示适配器显示 —',
+  'capsule.res.gpuFooter': '功耗、频率与温度只有 NVIDIA 显卡能读；核显与虚拟显示适配器显示 —',
   'capsule.res.gpuNotSelected': '未选择要监视的 GPU',
   'capsule.res.multiGpu': '浮岛只显示第 1 块，共选中',
   // 浮岛 · 密度切换（精简 2×2 ↔ 全部：追加网络速率与逐分区磁盘 IO）
@@ -665,6 +665,13 @@ export const zhCN: Record<string, string> = {
   'capsule.res.read': '读',
   'capsule.res.write': '写',
   'capsule.res.activity': '活动',
+  // 浮岛 · GPU 深度（逐引擎利用率与共享显存，只在「全部」模式显示）
+  'capsule.res.engine': '引擎',
+  'capsule.res.eng3d': '3D',
+  'capsule.res.engDec': '解码',
+  'capsule.res.engEnc': '编码',
+  'capsule.res.engCopy': '拷贝',
+  'capsule.res.shared': '共享',
   'capsule.res.noDisk': '未获取到分区信息',
   'capsule.res.allNote': '滚轮可滚动查看其余指标',
 

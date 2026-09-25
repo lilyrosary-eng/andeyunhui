@@ -23,11 +23,12 @@ import {
   fmtPercent,
   fmtPower,
   fmtSpeed,
+  fmtTemp,
   levelColor,
   shortGpuName,
   vramPercent,
 } from '@/components/resource/model';
-import type { DiskUsage } from '@/components/resource/model';
+import type { DiskUsage, GpuUsage } from '@/components/resource/model';
 import { useResourceUsage } from '@/components/resource/useResourceUsage';
 import { NO_GPUS, useSyncedGpuSelection } from '@/components/resource/gpuSelection';
 import { GpuPicker } from '@/components/resource/GpuPicker';
@@ -67,6 +68,7 @@ function Tile({
   percent,
   detail,
   sub,
+  extra,
   bar = true,
   wide = false,
 }: {
@@ -78,6 +80,8 @@ function Tile({
   detail: string;
   /** 第二行附属读数（频率 / 功耗 / 磁盘 IO） */
   sub?: string;
+  /** 第三行附属读数（「全部」模式下的逐引擎利用率） */
+  extra?: string;
   /** 是否画占用条（网络这种「速率」类指标没有百分比，画条会误导） */
   bar?: boolean;
   /** 横跨两列（内容较长的分区卡 / 网络卡） */
@@ -117,6 +121,11 @@ function Tile({
       {sub && (
         <span title={sub} style={{ ...lineStyle, color: 'rgba(244,244,246,0.42)' }}>
           {sub}
+        </span>
+      )}
+      {extra && (
+        <span title={extra} style={{ ...lineStyle, color: 'rgba(244,244,246,0.36)' }}>
+          {extra}
         </span>
       )}
     </div>
@@ -165,6 +174,18 @@ function CapsuleResource() {
   const renderGpus = all ? shownGpus : shownGpus.slice(0, 1);
   /** 全局序号（与主窗口面板的 GPU1/GPU2 对齐，便于跨面板对照） */
   const gpuOrd = (id: string) => gpus.findIndex((x) => x.id === id) + 1;
+  /**
+   * 逐引擎利用率（只「全部」模式用）：只列本机真有读数的引擎，避免整排「—」。
+   * 硬解/硬编是否真的生效看这一行 —— 录屏与转码排查时最直接。
+   */
+  const engineLine = (g: GpuUsage): string | undefined => {
+    const eng: string[] = [];
+    if (g.util_3d != null) eng.push(`${t('capsule.res.eng3d')} ${Math.round(g.util_3d)}%`);
+    if (g.util_video_decode != null) eng.push(`${t('capsule.res.engDec')} ${Math.round(g.util_video_decode)}%`);
+    if (g.util_video_encode != null) eng.push(`${t('capsule.res.engEnc')} ${Math.round(g.util_video_encode)}%`);
+    if (g.util_copy != null) eng.push(`${t('capsule.res.engCopy')} ${Math.round(g.util_copy)}%`);
+    return eng.length ? `${t('capsule.res.engine')} ${eng.join(' · ')}` : undefined;
+  };
 
   return (
     <div
@@ -310,7 +331,8 @@ function CapsuleResource() {
                     color={g.util_percent != null ? levelColor(g.util_percent, true) : NA_COLOR}
                     percent={g.util_percent ?? 0}
                     detail={shortGpuName(g.name)}
-                    sub={`${fmtFreq(g.clock_mhz)} · ${fmtPower(g.power_w)}`}
+                    sub={`${fmtFreq(g.clock_mhz)} · ${fmtPower(g.power_w)} · ${fmtTemp(g.temp_c)}`}
+                    extra={all ? engineLine(g) : undefined}
                   />
                   <Tile
                     title={`${t('capsule.res.vram')}${suffix}`}
@@ -320,7 +342,12 @@ function CapsuleResource() {
                     percent={vramPct ?? 0}
                     detail={
                       g.vram_total_kb != null && g.vram_used_kb != null
-                        ? `${fmtBytes(g.vram_used_kb)} / ${fmtBytes(g.vram_total_kb)}`
+                        ? `${fmtBytes(g.vram_used_kb)} / ${fmtBytes(g.vram_total_kb)}` +
+                          // 共享显存在「全部」模式才列：核显靠它才看得出真实占用，
+                          // 独显这项通常极小，精简版加上只是噪音
+                          (all && g.vram_shared_kb != null
+                            ? ` · ${t('capsule.res.shared')} ${fmtBytes(g.vram_shared_kb)}`
+                            : '')
                         : t('capsule.res.unsupported')
                     }
                     sub={vramPct == null ? shortGpuName(g.name) : undefined}

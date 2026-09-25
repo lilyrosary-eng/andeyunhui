@@ -652,7 +652,7 @@ export const enUS: Record<string, string> = {
   'capsule.res.gpuPickTitle': 'GPUs to monitor',
   'capsule.res.gpuAll': 'All',
   'capsule.res.gpuNone': 'None',
-  'capsule.res.gpuFooter': 'Power and clock are only readable on NVIDIA cards; iGPUs and virtual display adapters show —',
+  'capsule.res.gpuFooter': 'Power, clock and temperature are only readable on NVIDIA cards; iGPUs and virtual display adapters show —',
   'capsule.res.gpuNotSelected': 'No GPU selected',
   'capsule.res.multiGpu': 'capsule shows the 1st only, selected',
   // Capsule · density toggle (brief 2×2 ↔ all: adds network rate and per-partition disk I/O)
@@ -665,6 +665,13 @@ export const enUS: Record<string, string> = {
   'capsule.res.read': 'R',
   'capsule.res.write': 'W',
   'capsule.res.activity': 'Act',
+  // Capsule · GPU depth (per-engine utilization and shared VRAM, shown in "All" mode only)
+  'capsule.res.engine': 'Engines',
+  'capsule.res.eng3d': '3D',
+  'capsule.res.engDec': 'Dec',
+  'capsule.res.engEnc': 'Enc',
+  'capsule.res.engCopy': 'Copy',
+  'capsule.res.shared': 'Shared',
   'capsule.res.noDisk': 'No partition data',
   'capsule.res.allNote': 'Scroll to see the remaining metrics',
 

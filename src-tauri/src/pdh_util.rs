@@ -14,6 +14,7 @@
 //   4  \LogicalDisk(*)\Disk Read Bytes/sec
 //   5  \LogicalDisk(*)\Disk Write Bytes/sec
 //   6  \LogicalDisk(*)\% Idle Time                  —— 活动度 = 100 − 它
+//   7  \GPU Adapter Memory(*)\Shared Usage          —— 每个适配器的共享显存（核显主要吃这块）
 //
 // 全部路径都挂不上才认为 PDH 整体不可用（session() 返回 None），调用方一律降级为 N/A。
 //
@@ -46,8 +47,10 @@ pub const IDX_DISK_READ: usize = 4;
 pub const IDX_DISK_WRITE: usize = 5;
 /// 逻辑磁盘空闲时间百分比
 pub const IDX_DISK_IDLE: usize = 6;
+/// 适配器共享显存（分给 GPU 使用的系统内存，核显的主要占用来源）
+pub const IDX_GPU_VRAM_SHARED: usize = 7;
 
-const SLOT_COUNT: usize = 7;
+const SLOT_COUNT: usize = 8;
 
 /// 英文路径常量。PdhAddEnglishCounterW 在中文系统上同样按英文索引，不受界面语言影响。
 const PATHS: [&str; SLOT_COUNT] = [
@@ -58,6 +61,7 @@ const PATHS: [&str; SLOT_COUNT] = [
     r"\LogicalDisk(*)\Disk Read Bytes/sec",
     r"\LogicalDisk(*)\Disk Write Bytes/sec",
     r"\LogicalDisk(*)\% Idle Time",
+    r"\GPU Adapter Memory(*)\Shared Usage",
 ];
 
 /// 一轮采样结果：每个槽位是该计数器的全部实例（实例名统一已转小写，值为 f64）。
@@ -71,6 +75,7 @@ pub struct Sample {
     pub disk_read: Option<Vec<(String, f64)>>,
     pub disk_write: Option<Vec<(String, f64)>>,
     pub disk_idle: Option<Vec<(String, f64)>>,
+    pub gpu_vram_shared: Option<Vec<(String, f64)>>,
 }
 
 impl Sample {
@@ -192,6 +197,7 @@ pub fn sample_all() -> Option<Sample> {
         disk_idle: if rates { s.read(IDX_DISK_IDLE) } else { None },
         // 瞬时类（单次采样即有值，与窗口无关）：照常读取。
         gpu_vram: s.read(IDX_GPU_VRAM),
+        gpu_vram_shared: s.read(IDX_GPU_VRAM_SHARED),
         cpu_perf: s.read(IDX_CPU_PERF),
     };
     // 首次**有效**采样成功后打一条一次性诊断日志，把每个槽位的实例数写进日志 ——
@@ -202,10 +208,11 @@ pub fn sample_all() -> Option<Sample> {
         if LOGGED.set(()).is_ok() {
             let n = |v: &Option<Vec<(String, f64)>>| v.as_ref().map_or(-1, |x| x.len() as i32);
             log::info!(
-                "[RES] PDH 就绪: gpu_engine={} gpu_vram={} cpu_power={} cpu_perf={} \
+                "[RES] PDH 就绪: gpu_engine={} gpu_vram={} gpu_vram_shared={} cpu_power={} cpu_perf={} \
                  disk_read={} disk_write={} disk_idle={}（-1 = 该计数器在本机不可用）",
                 n(&sample.gpu_engine),
                 n(&sample.gpu_vram),
+                n(&sample.gpu_vram_shared),
                 n(&sample.cpu_power),
                 n(&sample.cpu_perf),
                 n(&sample.disk_read),

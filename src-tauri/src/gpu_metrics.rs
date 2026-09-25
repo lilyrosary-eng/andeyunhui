@@ -19,6 +19,21 @@
 //   ⚠ 不要用 IDXGIAdapter3::QueryVideoMemoryInfo().CurrentUsage —— 官方定义是
 //   "the application's current video memory usage"，只反映**本进程**占用。
 //
+// · 共享显存已用：同计数器集的「\GPU Adapter Memory(<luid>)\Shared Usage」（系统内存划给 GPU 的部分）。
+//   为什么必须补它：核显的**专用**显存恒为 0（或 128MB 划拨量），只看专用字段会显示成
+//   「0 / 128MB」像坏了一样；而核显实际用的是共享内存（本机实测核显 Shared=1.19GB、独显 0.78MB）。
+//   与任务管理器「共享 GPU 内存」同口径 —— 专用 + 共享两行才是完整图景。
+//
+// · 逐引擎利用率：同一份采样里按实例名的 `_engtype_` 标记再拆出 3D / VideoDecode /
+//   VideoEncode / Copy 四类（每类取最忙实例）。`util_percent` 仍是「全适配器最忙引擎」
+//   （与任务管理器总口径一致，不拆），拆分是**追加**信息。
+//   本机实测引擎类型共 10 种：3d / copy / gdi render / legacyoverlay / ofa_0 / security /
+//   videodecode / videoencode / videoprocessing / vr，其中还有 `engtype_` 空值的引擎
+//   ⇒ 解析必须容忍空值与非固定长度类型名（见 `engtype_of`）。
+//   对本项目最有用的是 videodecode / videoencode：录屏与转码到底走没走硬件编解码，一眼可辨。
+//
+// · 温度：仅 NVIDIA 能取（NVML，见 nvml.rs）。Intel 核显无公开消费级 API、
+//   AMD 需另接 ADL/ADLX，二者一律降级为 None（前端展示 N/A）。
 // · 显存总量：DXGI DXGI_ADAPTER_DESC1::DedicatedVideoMemory（该适配器物理显存容量）。
 //   与任务管理器「专用 GPU 内存」口径一致（核显在这里通常只有 128MB 的划拨量，
 //   共享内存不计入）。
@@ -52,8 +67,20 @@ pub struct GpuUsage {
     pub vram_total_kb: Option<u64>,
     /// 显存已用（KB，全机所有进程合计）
     pub vram_used_kb: Option<u64>,
+    /// 共享显存已用（KB，系统内存划给 GPU 的部分；核显主要吃这块）
+    pub vram_shared_kb: Option<u64>,
+    /// 3D 引擎利用率 %（该适配器内最忙的 3D 实例）
+    pub util_3d: Option<f32>,
+    /// 视频解码引擎利用率 %（VideoDecode；硬解是否生效看它）
+    pub util_video_decode: Option<f32>,
+    /// 视频编码引擎利用率 %（VideoEncode；硬编是否生效看它）
+    pub util_video_encode: Option<f32>,
+    /// 拷贝引擎利用率 %（Copy）
+    pub util_copy: Option<f32>,
     /// 图形时钟（MHz，仅 NVIDIA）
     pub clock_mhz: Option<u32>,
+    /// 核心温度（°C，仅 NVIDIA）
+    pub temp_c: Option<u32>,
     /// 整卡功耗（W，仅 NVIDIA）
     pub power_w: Option<f32>,
 }
@@ -84,12 +111,18 @@ pub fn query_gpus(sample: Option<&Sample>) -> Vec<GpuUsage> {
             };
             // PDH 实例名前缀（含结尾下划线，避免前缀误伤别的 luid）
             let key = format!("{}_", a.luid);
-            let util = sample
-                .and_then(|s| s.gpu_engine.as_ref())
-                .and_then(|items| busiest_engine_for(items, &key));
+            // 引擎实例只取一次：下面「全适配器最忙引擎」与「逐引擎拆分」共用这份切片，
+            // 保证两者读数来自同一次采样（否则两条曲线会互相错拍）。
+            let engines = sample.and_then(|s| s.gpu_engine.as_deref());
+            let util = engines.and_then(|items| busiest_engine_for(items, &key));
+            let util_of = |t: &str| engines.and_then(|items| engine_util_for(items, &key, t));
             let vram_used = sample
-                .and_then(|s| s.gpu_vram.as_ref())
-                .map(|items| dedicated_usage_for(items, &key));
+                .and_then(|s| s.gpu_vram.as_deref())
+                .map(|items| adapter_usage_for(items, &key));
+            // 共享显存：核显的专用显存恒为 0，只有这一项能反映它真实吃了多少内存
+            let vram_shared = sample
+                .and_then(|s| s.gpu_vram_shared.as_deref())
+                .map(|items| adapter_usage_for(items, &key));
             let nv = nvml::sample_by_name(&a.name);
             GpuUsage {
                 id,
@@ -97,7 +130,13 @@ pub fn query_gpus(sample: Option<&Sample>) -> Vec<GpuUsage> {
                 util_percent: util,
                 vram_total_kb: a.vram_total.map(|b| b / 1024),
                 vram_used_kb: vram_used.map(|b| b / 1024),
+                vram_shared_kb: vram_shared.map(|b| b / 1024),
+                util_3d: util_of("3d"),
+                util_video_decode: util_of("videodecode"),
+                util_video_encode: util_of("videoencode"),
+                util_copy: util_of("copy"),
                 clock_mhz: nv.and_then(|n| n.clock_mhz),
+                temp_c: nv.and_then(|n| n.temp_c),
                 power_w: nv.and_then(|n| n.power_w),
             }
         })
@@ -224,9 +263,22 @@ fn decode_wide(buf: &[u16]) -> String {
 /// 取「指定适配器内最忙引擎」的利用率（与任务管理器口径一致），并夹到 0..=100。
 /// `luid_key` 形如 `luid_0x00000000_0x00013e32_`（含结尾下划线，避免前缀误伤）。
 fn busiest_engine_for(items: &[(String, f64)], luid_key: &str) -> Option<f32> {
-    let max = items
-        .iter()
-        .filter(|(n, _)| n.contains(luid_key))
+    max_util(items.iter().filter(|(n, _)| n.contains(luid_key)))
+}
+
+/// 取「指定适配器内某一类引擎」的利用率（同类可能有多个实例，取最忙的那个）。
+/// `engtype` 用小写类型名，取值见文件头（`3d` / `videodecode` / `videoencode` / `copy`…）。
+fn engine_util_for(items: &[(String, f64)], luid_key: &str, engtype: &str) -> Option<f32> {
+    max_util(
+        items
+            .iter()
+            .filter(|(n, _)| n.contains(luid_key) && engtype_of(n) == Some(engtype)),
+    )
+}
+
+/// 一组引擎实例里取最大利用率；全为 NaN/非有限值时返回 None（宁可 N/A 也不要伪 0）
+fn max_util<'a>(iter: impl Iterator<Item = &'a (String, f64)>) -> Option<f32> {
+    let max = iter
         .map(|(_, v)| *v)
         .filter(|v| v.is_finite())
         .fold(f64::NEG_INFINITY, f64::max);
@@ -237,9 +289,28 @@ fn busiest_engine_for(items: &[(String, f64)], luid_key: &str) -> Option<f32> {
     }
 }
 
-/// 指定适配器的专用显存已用（字节）。
+/// 从 PDH 引擎实例名里取出引擎类型标记。
+///
+/// 实例名形如 `pid_10964_luid_0x00000000_0x00013e32_phys_0_eng_0_engtype_3d`（已转小写），
+/// 标记位于**末尾**。本机实测两类边界必须容忍：
+///   · `..._engtype_gdi render` —— 类型名里带空格（GDI Render）
+///   · `..._engtype_`           —— 空值（无类型引擎）
+/// 故取标记后 trim，空串按「无类型」返回 None（这样它不会被误认成任何一类）。
+fn engtype_of(instance: &str) -> Option<&str> {
+    const MARK: &str = "_engtype_";
+    let i = instance.rfind(MARK)?;
+    let t = instance[i + MARK.len()..].trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+/// 指定适配器在某个「按 luid 匹配」的显存计数器里的用量（字节）。
+/// 专用显存与共享显存共用本函数：两者实例名规则一致（`luid_..._phys_N`）。
 /// 多 tile 适配器（同一 luid 出现 phys_0 / phys_1…）**求和**，与 DXGI 报告的整卡容量口径一致。
-fn dedicated_usage_for(items: &[(String, f64)], luid_key: &str) -> u64 {
+fn adapter_usage_for(items: &[(String, f64)], luid_key: &str) -> u64 {
     items
         .iter()
         .filter(|(n, _)| n.starts_with(luid_key))

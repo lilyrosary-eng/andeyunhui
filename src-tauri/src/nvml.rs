@@ -1,10 +1,18 @@
 // ============ NVIDIA NVML 运行时动态加载 ============
 //
-// 用途：给 NVIDIA 显卡取**实时功耗**与**实时频率**。Windows 上没有能同时覆盖各家显卡的
-// 公开 API（PDH「GPU Engine」只有利用率，没有功耗/频率），只能走厂商库：
+// 用途：给 NVIDIA 显卡取**实时功耗 / 图形频率 / GPU 温度**。Windows 上没有能同时覆盖各家显卡的
+// 公开 API（PDH「GPU Engine」只有利用率，没有功耗/频率/温度），只能走厂商库：
 //   · NVIDIA → NVML（nvml.dll，随驱动装进 %SystemRoot%\System32）
-//   · AMD    → ADL/ADLX（本模块未接，字段降级为 N/A）
+//   · AMD    → ADLX/ADL（本模块未接，字段降级为 N/A）
 //   · Intel  → 无公开消费级 API（字段降级为 N/A）
+//
+// ⚠ 本机实测（RTX 3080 Ti Laptop，NVML 610.88）关于**哪些符号真的可用**：
+//   · nvmlDeviceGetTemperature(sensor 0) → ret=0，读到 42 °C      ✅ 已接入
+//   · nvmlDeviceGetPowerUsage            → ret=0，14887 mW        ✅ 已接入
+//   · nvmlDeviceGetClockInfo(0)          → ret=0，210 MHz         ✅ 已接入
+//   · nvmlDeviceGetFanSpeed              → ret=3（NOT_SUPPORTED）❌ 笔记本卡不暴露风扇，
+//     故**刻意不接**：接了也只是一列恒为 N/A 的噪音。
+//   · nvmlDeviceGetHandleByLUID / nvmlDeviceGetLuid **不在**该版本导出表里 ⇒ 只能按名称匹配。
 //
 // 为什么用 libloading 运行时加载，而不是加编译期依赖（nvml-wrapper 之类）：
 //   ① NVML 只对 NVIDIA 有意义，其他机器上装了也是零收益，不该进依赖树；
@@ -33,6 +41,8 @@ type NvmlDevice = *mut c_void;
 type NvmlRet = u32;
 /// nvmlClockType_t::NVML_CLOCK_GRAPHICS
 const NVML_CLOCK_GRAPHICS: i32 = 0;
+/// nvmlTemperatureSensors_t::NVML_TEMPERATURE_GPU（核心温度，非 hotspot/显存温度）
+const NVML_TEMPERATURE_GPU: i32 = 0;
 /// 名称缓冲长度（NVML 官方示例用的 96 足够；留 128 余量）
 const NAME_BUF: usize = 128;
 
@@ -42,12 +52,13 @@ struct Nvml {
     _lib: Library,
     power_usage: unsafe extern "C" fn(NvmlDevice, *mut u32) -> NvmlRet,
     clock_info: unsafe extern "C" fn(NvmlDevice, i32, *mut u32) -> NvmlRet,
+    temperature: unsafe extern "C" fn(NvmlDevice, i32, *mut u32) -> NvmlRet,
     devices: Vec<(String, NvmlDevice)>,
 }
 
 // SAFETY: devices 里是 NVML 的不透明设备句柄（驱动侧对象，非本进程堆地址），
 // NVML 自身的 API 是线程安全的；此处只承诺「句柄可随 static 跨线程共享」，
-// 且所有调用点都是只读查询（getPowerUsage / getClockInfo），无状态变更。
+// 且所有调用点都是只读查询（getPowerUsage / getClockInfo / getTemperature），无状态变更。
 unsafe impl Send for Nvml {}
 unsafe impl Sync for Nvml {}
 
@@ -58,6 +69,8 @@ pub struct NvmlSample {
     pub power_w: Option<f32>,
     /// 图形时钟（MHz）
     pub clock_mhz: Option<u32>,
+    /// 核心温度（摄氏度）
+    pub temp_c: Option<u32>,
 }
 
 static NVML: OnceLock<Option<Nvml>> = OnceLock::new();
@@ -82,6 +95,10 @@ fn load() -> Option<Nvml> {
             *lib.get(b"nvmlDeviceGetPowerUsage\0").ok()?;
         let clock_info: unsafe extern "C" fn(NvmlDevice, i32, *mut u32) -> NvmlRet =
             *lib.get(b"nvmlDeviceGetClockInfo\0").ok()?;
+        // 温度符号自 NVML 1.0（2011）就存在，与功耗/频率同属最老的一批 API，
+        // 故沿用「任一缺失即整体放弃」的策略，不为它单开可选分支。
+        let temperature: unsafe extern "C" fn(NvmlDevice, i32, *mut u32) -> NvmlRet =
+            *lib.get(b"nvmlDeviceGetTemperature\0").ok()?;
 
         if init() != 0 {
             return None;
@@ -117,6 +134,7 @@ fn load() -> Option<Nvml> {
             _lib: lib,
             power_usage,
             clock_info,
+            temperature,
             devices,
         })
     }
@@ -144,6 +162,7 @@ pub fn sample_by_name(dxgi_name: &str) -> Option<NvmlSample> {
     let dev = pick_device(&n.devices, dxgi_name)?;
     let mut power_w = None;
     let mut clock_mhz = None;
+    let mut temp_c = None;
     unsafe {
         let mut mw: u32 = 0;
         if (n.power_usage)(dev, &mut mw) == 0 {
@@ -153,10 +172,15 @@ pub fn sample_by_name(dxgi_name: &str) -> Option<NvmlSample> {
         if (n.clock_info)(dev, NVML_CLOCK_GRAPHICS, &mut mhz) == 0 {
             clock_mhz = Some(mhz);
         }
+        let mut c: u32 = 0;
+        if (n.temperature)(dev, NVML_TEMPERATURE_GPU, &mut c) == 0 {
+            temp_c = Some(c);
+        }
     }
     Some(NvmlSample {
         power_w,
         clock_mhz,
+        temp_c,
     })
 }
 

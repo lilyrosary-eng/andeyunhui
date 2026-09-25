@@ -25,8 +25,20 @@ export interface GpuUsage {
   util_percent: number | null;
   vram_total_kb: number | null;
   vram_used_kb: number | null;
+  /** 共享显存已用 KB（系统内存划给 GPU 的部分；核显主要吃这块，独显通常极小） */
+  vram_shared_kb: number | null;
+  /** 3D 引擎利用率 %（该适配器内最忙 3D 实例） */
+  util_3d: number | null;
+  /** 视频解码引擎利用率 %（硬解是否生效看它） */
+  util_video_decode: number | null;
+  /** 视频编码引擎利用率 %（硬编是否生效看它） */
+  util_video_encode: number | null;
+  /** 拷贝引擎利用率 % */
+  util_copy: number | null;
   /** 图形时钟 MHz（仅 NVIDIA 可取值） */
   clock_mhz: number | null;
+  /** 核心温度 °C（仅 NVIDIA 可取值） */
+  temp_c: number | null;
   /** 整卡功耗 W（仅 NVIDIA 可取值） */
   power_w: number | null;
 }
@@ -91,6 +103,12 @@ export function fmtFreq(mhz: number | null): string {
 export function fmtPower(w: number | null): string {
   if (w == null || !Number.isFinite(w)) return '—';
   return `${w.toFixed(1)} W`;
+}
+
+/** 温度：整数摄氏度。null → 「—」（PDH 热区给的是开尔文，后端已换算成 °C） */
+export function fmtTemp(c: number | null): string {
+  if (c == null || !Number.isFinite(c)) return '—';
+  return `${Math.round(c)} °C`;
 }
 
 /** 百分比：null → 「—」 */

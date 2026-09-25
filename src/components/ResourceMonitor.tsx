@@ -12,6 +12,7 @@ import {
   fmtPercent,
   fmtPower,
   fmtSpeed,
+  fmtTemp,
   levelColor,
   shortGpuName,
   vramPercent,
@@ -116,9 +117,21 @@ function Chips({ items }: { items: { k: string; v: string }[] }) {
   );
 }
 
+/** 逐引擎利用率：只列出本机真有读数的引擎类型，避免整排「—」占地方 */
+function engineItems(g: GpuUsage): { k: string; v: string }[] {
+  const pairs: [string, number | null][] = [
+    ['3D', g.util_3d],
+    ['解码', g.util_video_decode],
+    ['编码', g.util_video_encode],
+    ['拷贝', g.util_copy],
+  ];
+  return pairs.flatMap(([k, v]) => (v == null ? [] : [{ k, v: `${Math.round(v)}%` }]));
+}
+
 /** 单块显卡的 GPU 占用块；hero=只监视一块时用大字号 */
 function GpuUtilBlock({ gpu, hist, hero, label }: { gpu: GpuUsage; hist: number[]; hero: boolean; label: string }) {
   const color = gpu.util_percent != null ? levelColor(gpu.util_percent) : NA_COLOR;
+  const engines = engineItems(gpu);
   return (
     <div className="flex flex-col gap-1.5 min-w-0">
       <div className="flex items-baseline justify-between gap-2">
@@ -138,8 +151,12 @@ function GpuUtilBlock({ gpu, hist, hero, label }: { gpu: GpuUsage; hist: number[
         items={[
           { k: '频率', v: fmtFreq(gpu.clock_mhz) },
           { k: '功耗', v: fmtPower(gpu.power_w) },
+          { k: '温度', v: fmtTemp(gpu.temp_c) },
         ]}
       />
+      {engines.length > 0 && (
+        <Chips items={[{ k: '引擎', v: engines.map((e) => `${e.k} ${e.v}`).join(' · ') }]} />
+      )}
       <Sparkline data={hist} color={color} max={100} height={hero ? 36 : 26} />
     </div>
   );
@@ -170,6 +187,8 @@ function VramBlock({ gpu, hist, hero, label }: { gpu: GpuUsage; hist: number[]; 
                 ? `${fmtBytes(gpu.vram_used_kb)} / ${fmtBytes(gpu.vram_total_kb)}`
                 : '—',
           },
+          // 共享显存：核显的专用显存恒为 0/128MB，不列共享会看起来像坏了
+          { k: '共享', v: gpu.vram_shared_kb != null ? fmtBytes(gpu.vram_shared_kb) : '—' },
         ]}
       />
       <Sparkline data={hist} color={color} max={100} height={hero ? 36 : 26} />
