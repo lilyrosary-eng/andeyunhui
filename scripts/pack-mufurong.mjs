@@ -70,6 +70,16 @@ const plugins = [];
 scanPlugins(bundledDir, '', plugins);
 console.log(`[Pack] 发现 ${plugins.length} 个插件`);
 
+// 2.5 陈旧产物告警：bundled-plugins/ 里存在「源码 plugins/ 下已不存在」的插件。
+// 场景：有意不分发的插件（把源码目录移出 plugins/ 即可）如果 bundled-plugins 里还留着旧产物，
+// 那它仍会被打进分发包 —— 不报错（可能是有意保留），但必须显式提醒，避免「以为没分发、其实发了」。
+const stalePlugins = plugins.filter((p) => !existsSync(join(rootDir, 'plugins', p.relPath)));
+if (stalePlugins.length > 0) {
+  console.warn('[Pack] ⚠ 以下插件在源码 plugins/ 下已不存在，但 bundled-plugins/ 仍有产物，将被打包：');
+  for (const p of stalePlugins) console.warn(`  - ${p.relPath}`);
+  console.warn('[Pack]   如需排除，请先运行 node scripts/deploy-plugins.mjs 清理陈旧产物后重试。');
+}
+
 // 3. 清理输出目录
 if (existsSync(outputDir)) rmSync(outputDir, { recursive: true });
 mkdirSync(outputDir, { recursive: true });
