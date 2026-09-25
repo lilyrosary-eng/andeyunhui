@@ -50,11 +50,14 @@ use filesearch::*;
 //   pdh_util    —— 全项目共用的**单个** PDH 查询（GPU 引擎/显存、RAPL 功耗、CPU 性能、磁盘 IO）
 //   gpu_metrics —— DXGI 多适配器枚举 + 按 LUID 聚合 PDH 读数 + 合并 NVML
 //   hw_metrics  —— CPU 有效频率/功耗、按卷的磁盘 IO
-//   nvml        —— libloading 运行时加载 nvml.dll（NVIDIA 功耗/频率）
+//   nvml        —— libloading 运行时加载 nvml.dll（NVIDIA 功耗/频率/温度）
+//   igcl        —— libloading 运行时加载 ControlLib.dll（Intel 核显/Arc 频率/温度）
 #[cfg(windows)]
 mod gpu_metrics;
 #[cfg(windows)]
 mod hw_metrics;
+#[cfg(windows)]
+mod igcl;
 #[cfg(windows)]
 mod nvml;
 #[cfg(windows)]

@@ -32,8 +32,11 @@
 //   ⇒ 解析必须容忍空值与非固定长度类型名（见 `engtype_of`）。
 //   对本项目最有用的是 videodecode / videoencode：录屏与转码到底走没走硬件编解码，一眼可辨。
 //
-// · 温度：仅 NVIDIA 能取（NVML，见 nvml.rs）。Intel 核显无公开消费级 API、
-//   AMD 需另接 ADL/ADLX，二者一律降级为 None（前端展示 N/A）。
+// · 频率 / 温度：走厂商运行时库 —— NVIDIA 用 NVML（nvml.dll），Intel 核显/Arc 用 IGCL
+//   （ControlLib.dll），两者都随官方驱动安装、都免驱、都只需 libloading 运行时加载。
+//   AMD 需 ADL/ADLX，其 SDK 许可禁止与非宽松许可混用（本项目已决定不接）⇒ AMD 显卡一律 None。
+// · 功耗：仍只有 NVIDIA 能取（NVML）。Intel 核显功耗需读 MSR（要装第三方签名驱动），
+//   AMD 同样缺 ⇒ 这两家一律降级为 None（前端展示 N/A）。
 // · 显存总量：DXGI DXGI_ADAPTER_DESC1::DedicatedVideoMemory（该适配器物理显存容量）。
 //   与任务管理器「专用 GPU 内存」口径一致（核显在这里通常只有 128MB 的划拨量，
 //   共享内存不计入）。
@@ -47,6 +50,7 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
 
+use crate::igcl;
 use crate::nvml;
 use crate::pdh_util::Sample;
 
@@ -77,10 +81,10 @@ pub struct GpuUsage {
     pub util_video_encode: Option<f32>,
     /// 拷贝引擎利用率 %（Copy）
     pub util_copy: Option<f32>,
-    /// 图形时钟（MHz，仅 NVIDIA）
+    /// 图形时钟（MHz，NVIDIA 走 NVML、Intel 核显走 IGCL）
     pub clock_mhz: Option<u32>,
-    /// 核心温度（°C，仅 NVIDIA）
-    pub temp_c: Option<u32>,
+    /// 核心温度（°C，同上；两家都取不到时为 None）
+    pub temp_c: Option<f32>,
     /// 整卡功耗（W，仅 NVIDIA）
     pub power_w: Option<f32>,
 }
@@ -124,6 +128,10 @@ pub fn query_gpus(sample: Option<&Sample>) -> Vec<GpuUsage> {
                 .and_then(|s| s.gpu_vram_shared.as_deref())
                 .map(|items| adapter_usage_for(items, &key));
             let nv = nvml::sample_by_name(&a.name);
+            // 频率/温度：NVML（NVIDIA）与 IGCL（Intel 核显）两家设备互斥，谁命中用谁。
+            // 功耗仍只有 NVIDIA 能给 —— Intel 核显功耗需 MSR（要装第三方驱动）、AMD 需 ADL/ADLX
+            // （其 SDK 许可禁止与非宽松许可混用，本项目已决定不接）。
+            let ig = igcl::sample_by_name(&a.name);
             GpuUsage {
                 id,
                 name: a.name,
@@ -135,8 +143,13 @@ pub fn query_gpus(sample: Option<&Sample>) -> Vec<GpuUsage> {
                 util_video_decode: util_of("videodecode"),
                 util_video_encode: util_of("videoencode"),
                 util_copy: util_of("copy"),
-                clock_mhz: nv.and_then(|n| n.clock_mhz),
-                temp_c: nv.and_then(|n| n.temp_c),
+                clock_mhz: nv
+                    .and_then(|n| n.clock_mhz)
+                    .or_else(|| ig.and_then(|i| i.clock_mhz)),
+                temp_c: nv
+                    .and_then(|n| n.temp_c)
+                    .map(|c| c as f32)
+                    .or_else(|| ig.and_then(|i| i.temp_c)),
                 power_w: nv.and_then(|n| n.power_w),
             }
         })
