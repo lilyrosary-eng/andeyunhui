@@ -1000,6 +1000,10 @@ fn main() {
                 eprintln!("[Setup] 插件路径日志已写入: {:?}", log_path);
             }
 
+            // 攻防模块 · 真实 TLS 指纹通道：注入外部依赖搜索根，
+            // 供 curl-impersonate 二进制定位（gongfang-tls-impersonate feature 下才有实现）
+            init_tls_impersonate(app.handle());
+
             let tray_config_path = app_data.join("tray_config.json");
             let tray_enabled = if tray_config_path.exists() {
                 std::fs::read_to_string(&tray_config_path)

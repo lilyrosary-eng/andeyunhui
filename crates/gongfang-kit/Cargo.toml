@@ -34,10 +34,11 @@ pentest = ["dep:petgraph"]
 automation = ["dep:winapi"]
 # 启用 API 网关（reqwest 代理调度 + EWMA/PID 限流）—— 后续阶段
 gateway = []
-# 真实 TLS/JA3-JA4 指纹伪装通道（impersonate）。
-# 说明：这是纯开关，本身不引入依赖；实际 impersonate 实现（外部 curl-impersonate
-# 二进制或进程内 BoringSSL 客户端）在实现阶段接入，且必须排除出 Android/lite 构建。
-tls-impersonate = []
+# 真实 TLS/JA3-JA4 指纹伪装通道（curl-impersonate 外部进程，MIT）。
+# 实现落在 crawler/impersonate.rs，故强依赖 crawler：单独开启本 feature 而无 crawler
+# 会导致「feature 为真但没有任何链路接入」的不实状态，故在此显式绑定。
+# 外部二进制随 external-deps/全局/curl-impersonate/ 分发（Android/lite 构建已排除）。
+tls-impersonate = ["crawler"]
 # 一键全开
 full = ["crawler-browser", "reverse", "pentest", "automation", "gateway"]
 

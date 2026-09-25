@@ -139,6 +139,35 @@ pub fn get_ffmpeg_dir(app: &AppHandle) -> Option<PathBuf> {
     None
 }
 
+/// 攻防模块 · 真实 TLS 指纹通道（curl-impersonate）的搜索根注入。
+///
+/// gongfang-kit 是独立 crate，拿不到 AppHandle 的路径解析能力，故由宿主在启动时
+/// 把外部依赖目录交给它（顺序即优先级：user_external_deps 覆盖 external-deps，与
+/// `find_external_dep` 的覆盖语义一致）。
+/// 二进制预期位置：`<根>/全局/curl-impersonate/curl-impersonate.exe`（.mujin 打包同名）。
+///
+/// 未启用 `gongfang-tls-impersonate` feature 时为空实现（零开销）。
+pub fn init_tls_impersonate(app: &AppHandle) {
+    #[cfg(feature = "gongfang-tls-impersonate")]
+    {
+        let mut roots = Vec::new();
+        if let Some(d) = get_user_external_deps_dir(app) {
+            roots.push(d);
+        }
+        if let Some(d) = get_external_deps_dir(app) {
+            roots.push(d);
+        }
+        if roots.is_empty() {
+            log::warn!("[gongfang] TLS 指纹通道：未解析到外部依赖目录，将降级 rustls 通道");
+        }
+        gongfang_kit::crawler::impersonate::set_search_roots(roots);
+    }
+    #[cfg(not(feature = "gongfang-tls-impersonate"))]
+    {
+        let _ = app;
+    }
+}
+
 // ========== .mufurong 专属格式自动解压 ==========
 // .mufurong = ZIP 改后缀。用户把 .mufurong 文件放到 user_plugins/（或子目录）下，
 // 应用启动或刷新插件列表时自动扫描并解压到同名目录。

@@ -2,7 +2,8 @@
 //!
 //! 替代原计划的 6 模块：
 //! - 物理层 DPDK/io_uring → reqwest + 代理池
-//! - TLS ClientHello 手术 → rustls 默认 + UA 伪装（后续可接 tls-client crate）
+//! - TLS ClientHello 手术 → **curl-impersonate 外部进程**（真实 JA3/JA4 指纹，见 `tls-impersonate` feature
+//!   与 `impersonate.rs`）；未启用该 feature 时退回 rustls 默认 + UA 伪装
 //! - LD_PRELOAD 字体劫持 → CDP addScriptToEvaluateOnNewDocument JS 注入
 //! - netns 重置 → 进程级浏览器实例重建
 //! - 双令牌桶 + MPC → tokio::Semaphore 双桶 + EWMA
@@ -16,6 +17,11 @@ pub mod pool;
 pub mod queue;
 pub mod scheduler;
 pub mod stealth;
+
+// 真实 TLS/JA3-JA4 指纹通道（curl-impersonate 外部进程）：
+// 仅 `tls-impersonate` feature 下编译；未启用时 fetch 走 rustls 默认通道。
+#[cfg(feature = "tls-impersonate")]
+pub mod impersonate;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -381,12 +387,35 @@ enum AttemptOutcome {
 }
 
 /// 执行一次抓取尝试：构造 client（可选代理）+ 应用整形头 + 单次请求
+///
+/// 通道优先级（`tls-impersonate` feature 开启且二进制可定位时）：
+/// curl-impersonate 真实 TLS 指纹通道 → rustls/reqwest 通道。
+/// 前者由 curl-impersonate 自行决定**全套请求头**，故不再叠加 stealth 头；
+/// 后者维持既有行为（stealth 头集合 或 Direct 仅 UA）。
 async fn fetch_once(
     url: &str,
     shaping: &RequestShaping,
     proxy: Option<&crate::crawler::pool::ProxyEntry>,
     tls_profile: &str,
 ) -> AttemptOutcome {
+    #[cfg(feature = "tls-impersonate")]
+    {
+        if impersonate::is_available() {
+            let proxy_url = proxy.map(|p| p.url.as_str());
+            return match impersonate::fetch(url, proxy_url, shaping.timeout_ms, tls_profile).await {
+                Ok(r) => AttemptOutcome::Response {
+                    status: r.status,
+                    headers: r.headers,
+                    body: r.body,
+                    rtt_ms: r.rtt_ms,
+                },
+                Err(e) => AttemptOutcome::Transport(e),
+            };
+        }
+        // 二进制缺失（未打包/未导入 .mujin）：如实降级，不阻塞抓取
+        log::debug!("[crawler] tls-impersonate 通道不可用（缺 curl-impersonate 二进制），降级 rustls");
+    }
+
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(shaping.timeout_ms.max(1_000)));
 

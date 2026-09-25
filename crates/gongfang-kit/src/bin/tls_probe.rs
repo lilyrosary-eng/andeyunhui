@@ -5,6 +5,7 @@
 //!
 //! 运行：
 //!   cargo run --bin tls_probe --features crawler
+//!   cargo run --bin tls_probe --features crawler,tls-impersonate   # 含真实指纹通道对比
 //!   cargo run --bin tls_probe --features crawler -- https://tls.peet.ws/api/all
 //!
 //! 注意：这是验证工具，不是产品代码。它只做只读 GET，不改动任何状态。
@@ -141,5 +142,53 @@ async fn main() {
         probe(ep, true).await;
     }
 
+    // 真实指纹通道：同一端点、同一站点，对比 JA4/Akamai 是否对齐真实浏览器
+    for ep in &endpoints {
+        probe_impersonate(ep).await;
+    }
+
     println!("\n=== 完成 ===");
+}
+
+/// 经 curl-impersonate 通道发一次请求并回显指纹（需 `tls-impersonate` feature）
+///
+/// 期望（防退化基线）：
+/// - `http_version = 2`（h2 帧指纹参与识别，而 rustls 通道恒为 1.1）
+/// - `ja4 = t13d1516h2_8daaf6152771_*`（与真实 Chrome 对齐）
+/// - `akamai = 52d84b11737d980aef856699f885ca86`（真实 Chrome 的 h2 指纹）
+async fn probe_impersonate(endpoint: &str) {
+    #[cfg(feature = "tls-impersonate")]
+    {
+        use gongfang_kit::crawler::impersonate;
+
+        println!("\n--- {endpoint}  [impersonate chrome_122 → target {}] ---", impersonate::profile_target("chrome_122"));
+        let Some(bin) = impersonate::binary_path() else {
+            println!("  ✗ 未找到 curl-impersonate 二进制（external-deps/全局/curl-impersonate/ 或 CURL_IMPERSONATE_PATH）");
+            return;
+        };
+        println!("  二进制: {}", bin.display());
+
+        match impersonate::fetch(endpoint, None, 20_000, "chrome_122").await {
+            Ok(r) => {
+                println!("  HTTP {}  http_version={}  rtt={}ms  长度={}B", r.status, r.http_version, r.rtt_ms as u64, r.body.len());
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.body) {
+                    let mut hits = Vec::new();
+                    collect_keys(&v, &mut hits);
+                    let mut seen = std::collections::HashSet::new();
+                    for (k, val) in hits {
+                        if seen.insert(k.clone()) {
+                            println!("  {k} = {val}");
+                        }
+                    }
+                }
+            }
+            Err(e) => println!("  ✗ 通道失败: {e}"),
+        }
+    }
+    #[cfg(not(feature = "tls-impersonate"))]
+    {
+        let _ = endpoint;
+        println!("\n--- {endpoint}  [impersonate] ---");
+        println!("  ⊘ 未启用 tls-impersonate feature（cargo run --bin tls_probe --features crawler,tls-impersonate）");
+    }
 }

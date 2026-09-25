@@ -216,6 +216,8 @@ gongfang-pentest = ["gongfang-kit/pentest"]
 gongfang-automation = ["gongfang-kit/automation"]
 # 攻防 + API 网关（代理池 + 流量整形 + arc-swap 策略热交换 + 预测性故障转移）
 gongfang-gateway = ["gongfang-kit/gateway"]
+# 攻防 + 真实 TLS 指纹通道（curl-impersonate 外部进程，含 crawler）
+gongfang-tls-impersonate = ["gongfang-kit/tls-impersonate"]
 
 [profile.dev]
 # dev（pnpm tauri dev）默认 opt-level = 0，对录屏这类逐像素/逐帧热点代码慢一个数量级，

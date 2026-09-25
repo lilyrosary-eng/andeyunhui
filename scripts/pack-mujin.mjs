@@ -44,6 +44,9 @@ const TARGETS = [
   // 本地 OCR 依赖包（引擎 + ONNX 模型 + 字符表，用户自行下载放入「依赖」目录）
   { src: '全局/paddleocr',         out: '全局/paddleocr.mujin', heavy: true },
   { src: 'deskpet-assets',         out: 'deskpet-assets.mujin', heavy: true },
+  // 攻防模块真实 TLS 指纹通道（curl-impersonate，MIT，Windows x86_64 预编译二进制）。
+  // heavy：移动端无此需求（且该二进制为 Windows 专属），Android/BUILD_LITE 构建应跳过。
+  { src: '全局/curl-impersonate',  out: '全局/curl-impersonate.mujin', heavy: true },
 ];
 
 // 轻量构建模式：跳过 heavy 依赖。

@@ -34,10 +34,25 @@ pub struct Features {
     pub gateway: bool,
     /// 真实 TLS/JA3-JA4 指纹伪装通道是否可用。
     ///
-    /// 现状：仅 `tls-impersonate` feature 开启时才可能为 true；
-    /// 未接入前恒为 false，前端据此把「TLS 指纹」显示为「UA 档案」，
+    /// 判据：`tls-impersonate` feature 已编译 **且** curl-impersonate 二进制可定位。
+    /// 为 false 时前端把「TLS 指纹」显示为「UA 档案」（只换 UA 不改 ClientHello），
     /// 避免把「只换 UA」宣传成 TLS 指纹伪装。
     pub tls_impersonate: bool,
+}
+
+/// 真实 TLS/JA3-JA4 指纹通道是否**当前可用**。
+///
+/// 判据 = feature 已编译 **且** curl-impersonate 二进制可定位：
+/// 只报 feature 会出现「编译里有、运行时却没有 → 抓取仍裸露 rustls 指纹」
+/// 的不实状态，而前端正是据此把「TLS 指纹」如实降级显示为「UA 档案」。
+#[cfg(feature = "tls-impersonate")]
+fn tls_impersonate_available() -> bool {
+    crate::crawler::impersonate::is_available()
+}
+
+#[cfg(not(feature = "tls-impersonate"))]
+fn tls_impersonate_available() -> bool {
+    false
 }
 
 #[derive(Serialize)]
@@ -56,7 +71,7 @@ fn features() -> Features {
         pentest: cfg!(feature = "pentest"),
         automation: cfg!(feature = "automation"),
         gateway: cfg!(feature = "gateway"),
-        tls_impersonate: cfg!(feature = "tls-impersonate"),
+        tls_impersonate: tls_impersonate_available(),
     }
 }
 
