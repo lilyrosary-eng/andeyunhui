@@ -52,6 +52,9 @@ use filesearch::*;
 //   hw_metrics  —— CPU 有效频率/功耗、按卷的磁盘 IO
 //   nvml        —— libloading 运行时加载 nvml.dll（NVIDIA 功耗/频率/温度）
 //   igcl        —— libloading 运行时加载 ControlLib.dll（Intel 核显/Arc 频率/温度）
+//   d3dkmt      —— PDH 计数器不可用时的兜底（老系统/虚拟机/Server 的 GPU 利用率与显存）
+#[cfg(windows)]
+mod d3dkmt;
 #[cfg(windows)]
 mod gpu_metrics;
 #[cfg(windows)]

@@ -50,6 +50,7 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
 
+use crate::d3dkmt;
 use crate::igcl;
 use crate::nvml;
 use crate::pdh_util::Sample;
@@ -132,13 +133,25 @@ pub fn query_gpus(sample: Option<&Sample>) -> Vec<GpuUsage> {
             // 功耗仍只有 NVIDIA 能给 —— Intel 核显功耗需 MSR（要装第三方驱动）、AMD 需 ADL/ADLX
             // （其 SDK 许可禁止与非宽松许可混用，本项目已决定不接）。
             let ig = igcl::sample_by_name(&a.name);
+            // D3DKMT 兜底：PDH 的 GPU 计数器是 Win10 1709 / WDDM 2.x 才有的，老系统、Server 2016/2019、
+            // 未直通的虚拟机里根本不存在 ⇒ 缺值时改从 gdi32 直接查（整卡口径，无进程归属）。
+            // 只在**确实缺值**时才开适配器查询，健康机器上零额外开销。
+            let kmt = if util.is_none() || vram_used.is_none() || vram_shared.is_none() {
+                d3dkmt::sample(a.luid_low, a.luid_high)
+            } else {
+                None
+            };
             GpuUsage {
                 id,
                 name: a.name,
-                util_percent: util,
+                util_percent: util.or_else(|| kmt.and_then(|k| k.util_percent)),
                 vram_total_kb: a.vram_total.map(|b| b / 1024),
-                vram_used_kb: vram_used.map(|b| b / 1024),
-                vram_shared_kb: vram_shared.map(|b| b / 1024),
+                vram_used_kb: vram_used
+                    .or_else(|| kmt.and_then(|k| k.dedicated_bytes))
+                    .map(|b| b / 1024),
+                vram_shared_kb: vram_shared
+                    .or_else(|| kmt.and_then(|k| k.shared_bytes))
+                    .map(|b| b / 1024),
                 util_3d: util_of("3d"),
                 util_video_decode: util_of("videodecode"),
                 util_video_encode: util_of("videoencode"),
@@ -213,6 +226,9 @@ fn has_pdh_presence(sample: Option<&Sample>, luid_key: &str) -> bool {
 struct AdapterDesc {
     /// PDH 实例名前缀（去掉结尾下划线），形如 `luid_0x00000000_0x00013e32`
     luid: String,
+    /// 原始 LUID（D3DKMT 兜底要按它开适配器；PDH 侧用上面的格式化字符串）
+    luid_low: u32,
+    luid_high: i32,
     name: String,
     /// 物理显存容量（字节）
     vram_total: Option<u64>,
@@ -248,6 +264,8 @@ fn enumerate_adapters() -> Vec<AdapterDesc> {
                     "luid_0x{:08x}_0x{:08x}",
                     desc.AdapterLuid.HighPart as u32, desc.AdapterLuid.LowPart
                 ),
+                luid_low: desc.AdapterLuid.LowPart,
+                luid_high: desc.AdapterLuid.HighPart,
                 name: if name.is_empty() {
                     format!("GPU {}", i)
                 } else {
