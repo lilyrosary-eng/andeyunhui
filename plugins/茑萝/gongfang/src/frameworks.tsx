@@ -2986,7 +2986,7 @@ function PentestPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
 // ============ 框架四：自动化测试 ============
 const automationMeta: FrameworkMeta = {
   title: '自动化测试框架',
-  subtitle: '行为模拟、人机混淆。已交付：贝塞尔轨迹 + 生理噪声 + SendInput 真实 HID 注入 + 模板适应度迁移；验证码识别（OCR/滑块/语音）为规划项。',
+  subtitle: '行为模拟、人机混淆。已交付：贝塞尔轨迹 + 生理噪声 + SendInput 真实 HID 注入 + 模板适应度迁移 + 验证码识别（走视觉模型通道）。',
   posture: '攻防',
   capabilities: [
     '鼠标轨迹（三次贝塞尔 + 过冲回正，SendInput 真实注入）',
@@ -2995,13 +2995,12 @@ const automationMeta: FrameworkMeta = {
     '滚轮注入（视口滚动）',
     '行为模板 + 适应度评分与自动迁移（arc-swap 热交换）',
     '行为基线学习 + 探针幅度自适应调整',
+    '图形验证码识别（复用主应用视觉 OCR 通道，多模态模型；未配置视觉模型时明确报错，不编造）',
+    '滑块/点选验证码缺口定位（同一通道，要求模型输出坐标 JSON，可直接接鼠标轨迹注入）',
   ],
   capabilitiesPlanned: [
-    '图形验证码 OCR（Tesseract + imageproc 降噪）',
-    '滑块/点选验证码（YOLOv8 ONNX 定位）',
-    '语音验证码旁路（Twilio + Whisper）',
-    'VLM 语义验证码推理（AI）',
-    'Ticket 窗口期预测复用',
+    '语音验证码旁路（需本地 Whisper 或云转写服务，当前无实现且涉及额外依赖/费用，暂不做）',
+    'Ticket 窗口期预测复用（无实现方案）',
     '按键误触纠错',
     'Canvas 像素噪点反检测（现由爬虫 CDP 脚本承担）',
   ],
@@ -3014,6 +3013,73 @@ const automationMeta: FrameworkMeta = {
 };
 
 function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
+  // 验证码识别（视觉模型通道）状态
+  const [capDataUrl, setCapDataUrl] = useState('');
+  const [capMode, setCapMode] = useState<'text' | 'slider'>('text');
+  const [capBusy, setCapBusy] = useState(false);
+  const [capResult, setCapResult] = useState<string | null>(null);
+  const [capError, setCapError] = useState<string | null>(null);
+
+  // 选图：pick_file 拿路径 → read_file_base64 拿 data URL（两者均已在沙箱白名单）
+  const handlePickCaptcha = useCallback(async () => {
+    setCapError(null);
+    try {
+      const files = await tauriInvoke<string[]>('pick_file', {
+        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+      });
+      if (!files || files.length === 0) return;
+      const dataUrl = await tauriInvoke<string>('read_file_base64', { filePath: files[0] });
+      setCapDataUrl(dataUrl);
+      setCapResult(null);
+      addLog({ action: '验证码取图', target: files[0], status: 'success', detail: '已载入图片，待识别' });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      setCapError(`载入图片失败：${msg}`);
+    }
+  }, [addLog]);
+
+  // 识别：复用主应用既有的视觉 OCR 命令（多模态模型），不引入本地 OCR 原生依赖
+  const handleCaptchaRecognize = useCallback(async () => {
+    if (!capDataUrl) {
+      setCapError('请先选择验证码图片');
+      return;
+    }
+    const m = /^data:([^;]+);base64,(.*)$/s.exec(capDataUrl);
+    if (!m) {
+      setCapError('图片数据格式异常（期望 data URL）');
+      return;
+    }
+    const mime = m[1];
+    const b64 = m[2];
+    const prompt =
+      capMode === 'text'
+        ? '图中是图形验证码。只输出验证码字符本身（区分大小写、忽略干扰线），不要任何解释、标点或换行。'
+        : '图中是滑块/点选验证码。请定位缺口（或点选目标）在图中的像素坐标，只输出 JSON：{"x":<整数>,"y":<整数>}，不要任何解释。';
+    setCapBusy(true);
+    setCapError(null);
+    try {
+      const text = await tauriInvoke<string>('ai_vision_ocr', {
+        imageBase64: b64,
+        imageMime: mime,
+        prompt,
+        profileId: null,
+      });
+      setCapResult(text);
+      addLog({
+        action: '验证码识别',
+        target: capMode === 'text' ? '文本验证码' : '滑块定位',
+        status: 'success',
+        detail: text.slice(0, 60),
+      });
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e as Error)?.message ?? String(e);
+      setCapError(msg);
+      addLog({ action: '验证码识别', target: capMode, status: 'error', detail: msg });
+    } finally {
+      setCapBusy(false);
+    }
+  }, [capDataUrl, capMode, addLog]);
+
   // 拟人化等级状态
   const [humanizeLevel, setHumanizeLevel] = useState(5);
   const [currentTemplate, setCurrentTemplate] = useState<string | null>(null);
@@ -3351,6 +3417,77 @@ function AutomationPanel({ addLog }: { addLog: (i: AuditInput) => void }) {
         {/* 技术选型 */}
         <CollapsibleSection title="技术选型（优先 MIT/Apache 协议）" storageKey="fw_automation_techstack" defaultOpen={false} accent="info">
           <TechStackChips items={automationMeta.techStack} />
+        </CollapsibleSection>
+
+        {/* 验证码识别（视觉模型通道，复用主应用既有 ai_vision_ocr） */}
+        <CollapsibleSection
+          title="验证码识别（视觉模型）"
+          storageKey="fw_automation_captcha"
+          defaultOpen={false}
+          accent="info"
+          right={
+            <>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">真实可用</span>
+              <span className="text-[10px] text-neutral-400">多模态模型 · 零本地依赖</span>
+            </>
+          }
+        >
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={handlePickCaptcha}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-600 dark:text-stone-300 border border-black/10 dark:border-stone-700/50 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+              >
+                选择验证码图片
+              </button>
+              <div className="flex items-center rounded-lg border border-black/10 dark:border-stone-700/50 overflow-hidden">
+                {(['text', 'slider'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setCapMode(m)}
+                    className={`px-2.5 py-1.5 text-[11px] transition-colors ${
+                      capMode === m
+                        ? 'bg-[var(--element-bg)] text-white'
+                        : 'text-neutral-600 dark:text-stone-300 hover:bg-black/5 dark:hover:bg-white/5'
+                    }`}
+                  >
+                    {m === 'text' ? '文本验证码' : '滑块/点选定位'}
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={handleCaptchaRecognize}
+                disabled={capBusy || !capDataUrl}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-[var(--element-bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+              >
+                {capBusy ? '识别中...' : '识别'}
+              </button>
+            </div>
+
+            {capError && (
+              <div className="px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-400 break-all">{capError}</div>
+            )}
+
+            {capDataUrl && (
+              <div className="rounded-lg border border-black/5 dark:border-stone-700/50 bg-white/40 dark:bg-white/[0.02] p-2">
+                <img src={capDataUrl} alt="验证码" className="max-h-32 rounded border border-black/5 dark:border-stone-700/50" />
+              </div>
+            )}
+
+            {capResult && (
+              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2">
+                <div className="text-[10px] text-neutral-400 mb-1">识别结果（可直接用于自动化流程）</div>
+                <div className="text-[12px] font-mono text-emerald-700 dark:text-emerald-400 break-all">{capResult}</div>
+              </div>
+            )}
+
+            <p className="text-[10px] text-neutral-400 leading-relaxed">
+              走主应用既有的视觉 OCR 通道（需在全局设置 → 模型中配置支持图像的模型，或单独配置视觉模型）。
+              文本模式输出验证码字符，滑块模式要求模型返回缺口坐标 JSON，可直接喂给下方「鼠标轨迹」用
+              <span className="font-mono"> @automation_target </span> 生成人类轨迹后注入。
+              未配置视觉模型时会明确报错，不会返回编造结果。
+            </p>
+          </div>
         </CollapsibleSection>
 
         {/* 拟人化等级控制 */}

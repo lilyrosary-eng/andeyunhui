@@ -190,6 +190,8 @@ const ALLOWED_COMMANDS = new Set([
   'pick_save_file',
   // 图片模块：读取文件为 data URI（GIF 绕过 asset: 协议动画限制）
   'read_file_base64',
+  // 视觉模型 OCR（攻防插件用于验证码识别 / 滑块定位；复用主应用既有命令，不引入本地 OCR 依赖）
+  'ai_vision_ocr',
   // 全局 AI 能力：茑萝 · AI 编程 子插件调用（LLM 走后端，规避沙箱屏蔽 fetch）
   'ai_get_profiles',
   'ai_set_profiles',
