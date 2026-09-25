@@ -63,6 +63,11 @@ tor145（另有 `*_android` / `*_ios` 变体）。
 若退化成 `t13d1011h1_...` 或 `http_version=1.1`，说明请求没有走本通道
 （多半是二进制未定位到 → 已静默降级 rustls，`features.tls_impersonate` 会报 false）。
 
+端点差异（勿误判为退化）：`tls.browserleaks.com/json` 对同一 chrome123 请求报
+`t13d1517h2_8daaf6152771_b1ff8ab2d16f`——第三段（GREASE/扩展计数口径）与
+`tls.peet.ws` 的 `...1516h2_...` 差 1，但**第二段 `8daaf6152771` 完全一致**，
+后者才是密码套件/ALPN 的判别段。跨端点比对时只看第二段与 Akamai 指纹。
+
 ## 覆盖与降级
 
 查找顺序（`impersonate::binary_path`）：

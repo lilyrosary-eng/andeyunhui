@@ -150,9 +150,11 @@ async fn main() {
     println!("\n=== 完成 ===");
 }
 
-/// 经 curl-impersonate 通道发一次请求并回显指纹（需 `tls-impersonate` feature）
+/// 经**生产统一通道**（`http_channel::get`，与 gongfang_fetch / WAF 探测同一条路）发一次
+/// 请求并回显指纹（需 `tls-impersonate` feature）
 ///
 /// 期望（防退化基线）：
+/// - `channel = impersonate`（若为 rustls，说明二进制没定位到 → 已静默降级）
 /// - `http_version = 2`（h2 帧指纹参与识别，而 rustls 通道恒为 1.1）
 /// - `ja4 = t13d1516h2_8daaf6152771_*`（与真实 Chrome 对齐）
 /// - `akamai = 52d84b11737d980aef856699f885ca86`（真实 Chrome 的 h2 指纹）
@@ -160,17 +162,26 @@ async fn probe_impersonate(endpoint: &str) {
     #[cfg(feature = "tls-impersonate")]
     {
         use gongfang_kit::crawler::impersonate;
+        use gongfang_kit::http_channel;
 
-        println!("\n--- {endpoint}  [impersonate chrome_122 → target {}] ---", impersonate::profile_target("chrome_122"));
-        let Some(bin) = impersonate::binary_path() else {
-            println!("  ✗ 未找到 curl-impersonate 二进制（external-deps/全局/curl-impersonate/ 或 CURL_IMPERSONATE_PATH）");
-            return;
-        };
-        println!("  二进制: {}", bin.display());
+        println!("\n--- {endpoint}  [统一通道 chrome_122 → target {}] ---", impersonate::profile_target("chrome_122"));
+        match impersonate::binary_path() {
+            Some(bin) => println!("  二进制: {}", bin.display()),
+            None => println!("  ✗ 未找到 curl-impersonate 二进制（external-deps/全局/curl-impersonate/ 或 CURL_IMPERSONATE_PATH）"),
+        }
 
-        match impersonate::fetch(endpoint, None, 20_000, "chrome_122").await {
+        match http_channel::get(endpoint, 20_000, "chrome_122").await {
             Ok(r) => {
-                println!("  HTTP {}  http_version={}  rtt={}ms  长度={}B", r.status, r.http_version, r.rtt_ms as u64, r.body.len());
+                println!(
+                    "  channel={}  HTTP {}  rtt={}ms  长度={}B",
+                    r.channel,
+                    r.status,
+                    r.rtt_ms as u64,
+                    r.body.len()
+                );
+                if r.channel == http_channel::CH_RUSTLS {
+                    println!("  ⚠ 走了 rustls 通道：本次指纹将等同于上方基线，非真实浏览器指纹");
+                }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.body) {
                     let mut hits = Vec::new();
                     collect_keys(&v, &mut hits);

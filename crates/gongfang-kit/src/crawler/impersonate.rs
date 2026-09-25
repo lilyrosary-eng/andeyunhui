@@ -279,12 +279,8 @@ pub async fn fetch(
     if status == 0 {
         // curl 未能拿到响应（DNS/连接/TLS/超时/代理故障）→ 交由爬虫重试逻辑换代理
         let code = out.status.code().unwrap_or(-1);
-        return Err(format!(
-            "curl-impersonate 传输失败 (exit={}{}){}",
-            code,
-            if stderr.is_empty() { "" } else { ", " },
-            stderr
-        ));
+        let reason = if stderr.is_empty() { "无 stderr 输出".to_string() } else { stderr };
+        return Err(format!("curl-impersonate 传输失败 (exit={}): {}", code, reason));
     }
     if !out.status.success() {
         // 已拿到响应头但传输被中断（如 max-time 掐断 body）：保留结果，仅告警

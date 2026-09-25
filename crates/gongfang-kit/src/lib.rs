@@ -12,6 +12,8 @@
 pub mod ai;
 pub mod kernel;
 pub mod commands;
+/// 统一 HTTP GET 通道（真实 TLS 指纹优先，否则 rustls）：始终编译
+pub mod http_channel;
 
 #[cfg(feature = "crawler")]
 pub mod crawler;

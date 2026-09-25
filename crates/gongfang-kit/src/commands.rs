@@ -75,6 +75,18 @@ fn features() -> Features {
     }
 }
 
+/// 当前策略使用的 TLS 档案（内核未启动时用默认档案）。
+///
+/// 侦察类命令（WAF/技术栈探测、手动 fetch）据此与爬虫保持**同一档案**：
+/// 内核运行时跟随策略轮转，未运行时退回 Chrome 默认，避免各处硬编码不同档案。
+fn current_tls_profile() -> String {
+    let state = STATE.lock();
+    state
+        .as_ref()
+        .map(|s| s.engine.snapshot().tls_profile)
+        .unwrap_or_else(|| crate::http_channel::DEFAULT_TLS_PROFILE.to_string())
+}
+
 /// 查询攻防内核状态
 #[tauri::command]
 pub fn gongfang_status() -> Result<GongfangStatus, String> {
@@ -241,7 +253,7 @@ pub async fn gongfang_waf_detect(url: String) -> Result<WafDetectResult, String>
     }
     #[cfg(feature = "pentest")]
     {
-        let resp = crate::pentest::probe::probe_target(&url).await;
+        let resp = crate::pentest::probe::probe_target(&url, &current_tls_profile()).await;
         let waf_name = crate::pentest::regex_dfa::detect_waf(&resp.headers);
         let engine = crate::pentest::regex_dfa::detect_engine(&resp.headers);
         let entropy = crate::pentest::probe::shannon_entropy(&resp.body);
@@ -271,7 +283,7 @@ pub async fn gongfang_tech_fingerprint(url: String) -> Result<TechFpOut, String>
     }
     #[cfg(feature = "pentest")]
     {
-        let resp = crate::pentest::probe::probe_target(&url).await;
+        let resp = crate::pentest::probe::probe_target(&url, &current_tls_profile()).await;
         let headers: Vec<(String, String)> = resp.headers.into_iter().collect();
         Ok(crate::pentest::fingerprint::fingerprint(&headers, &resp.body))
     }
@@ -568,7 +580,8 @@ pub struct FetchResult {
 
 /// 实际爬取 URL — 发 HTTP GET 请求，返回页面内容 + 提取的标题和链接
 ///
-/// 这是"对话即攻防"的核心：用户输入 URL，AI 调用 fetch，返回真实数据
+/// 这是"对话即攻防"的核心：用户输入 URL，AI 调用 fetch，返回真实数据。
+/// 走统一通道：`tls-impersonate` 可用时呈现真实浏览器 TLS 指纹，否则退 rustls + UA。
 #[tauri::command]
 pub async fn gongfang_fetch(url: String) -> Result<FetchResult, String> {
     let url = crate::normalize_url(&url);
@@ -578,60 +591,46 @@ pub async fn gongfang_fetch(url: String) -> Result<FetchResult, String> {
     #[cfg(feature = "crawler")]
     {
         let start = std::time::Instant::now();
-        let ua = crate::crawler::stealth::user_agent("chrome_122");
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .map_err(|e| format!("HTTP 客户端构建失败: {}", e))?;
+        let fail = |err: String| FetchResult {
+            url: url.clone(),
+            status: 0,
+            content_type: String::new(),
+            content_length: 0,
+            title: None,
+            body_preview: String::new(),
+            links: vec![],
+            duration_ms: start.elapsed().as_millis() as u64,
+            error: Some(err),
+        };
 
-        match client.get(&url).header("User-Agent", ua).send().await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let content_type = resp
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                let body = resp.text().await.unwrap_or_default();
-                let content_length = body.len();
-
-                // 提取 <title>
-                let title = extract_title(&body);
-
-                // 提取 <a href="..."> 链接（最多 50 个）
-                let links = extract_links(&body, &url);
-
-                let body_preview: String = body.chars().take(2000).collect();
-                let duration_ms = start.elapsed().as_millis() as u64;
-
+        match crate::http_channel::get(
+            &url,
+            crate::http_channel::DEFAULT_TIMEOUT_MS,
+            &current_tls_profile(),
+        )
+        .await
+        {
+            Ok(r) => {
+                log::info!("[fetch] {} channel={} status={}", url, r.channel, r.status);
+                // 先取派生结果再消费 url，避免字段初始化顺序造成的借用冲突
+                let content_type = r.header("content-type").unwrap_or("").to_string();
+                let content_length = r.body.len();
+                let title = extract_title(&r.body); // <title>
+                let links = extract_links(&r.body, &url); // <a href="...">（最多 50 个）
+                let body_preview: String = r.body.chars().take(2000).collect();
                 Ok(FetchResult {
                     url,
-                    status,
+                    status: r.status,
                     content_type,
                     content_length,
                     title,
-                    body_preview,
                     links,
-                    duration_ms,
+                    body_preview,
+                    duration_ms: start.elapsed().as_millis() as u64,
                     error: None,
                 })
             }
-            Err(e) => {
-                let duration_ms = start.elapsed().as_millis() as u64;
-                Ok(FetchResult {
-                    url,
-                    status: 0,
-                    content_type: String::new(),
-                    content_length: 0,
-                    title: None,
-                    body_preview: String::new(),
-                    links: vec![],
-                    duration_ms,
-                    error: Some(e.to_string()),
-                })
-            }
+            Err(e) => Ok(fail(e)),
         }
     }
     #[cfg(not(feature = "crawler"))]
