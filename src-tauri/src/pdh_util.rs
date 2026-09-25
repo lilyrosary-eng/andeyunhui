@@ -24,6 +24,7 @@
 // ⚠ 为什么不用 GetSystemTimes / 自建计时：速率计数器由 PDH 内核侧计时，比自己打时间戳稳。
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use windows::core::PCWSTR;
 use windows::Win32::System::Performance::{
@@ -87,7 +88,22 @@ impl Sample {
 struct PdhSession {
     query: PDH_HQUERY,
     counters: [Option<PDH_HCOUNTER>; SLOT_COUNT],
+    /// 会话建立（预热 collect）的时刻。速率类计数器靠「两次 collect 的时间差」算值，
+    /// 窗口太短会算出伪 0，见 `RATE_WINDOW` 与 `sample_all`。
+    opened_at: Instant,
 }
+
+/// 速率类计数器可用的最小采样窗口。
+///
+/// 成因：`open()` 的预热 collect 与 `sample_all()` 的首次 collect 之间可能只隔几微秒，
+/// 而 `\Energy Meter\Power`、`\GPU Engine\Utilization Percentage`、`\LogicalDisk\* Bytes/sec`
+/// 都是「差值 ÷ 时间差」型计数器 —— 窗口越短，Δ 越接近 0，读数越接近 0。
+/// 本机实测该场景下 `cpu_power` 会读出 `Some(0.0)W`（真实 idle 应为 11.7–23.5W，见文件头），
+/// 前端会把伪 0 当成「功耗为 0」而非「暂无数据」，是**正确性**问题不是显示问题。
+///
+/// 阈值取 500ms：足以让 PDH 算出稳定速率，又短于前端 1s 轮询周期，正常不会触发。
+/// 真正让用户看不到空白的做法是启动预热（`warmup()`），本判断只作兜底。
+const RATE_WINDOW: Duration = Duration::from_millis(500);
 
 // PDH_HQUERY / PDH_HCOUNTER 内含 *mut c_void（raw pointer 默认 !Send），
 // 会让 OnceLock<...> 无法作为 static（要求 Sync）。
@@ -113,10 +129,19 @@ impl PdhSession {
                 let _ = PdhCloseQuery(query);
                 return None;
             }
-            // 预热一次：速率类计数器需要两个采样点才有意义。先 collect 建立基线，
-            // 使随后第一次读取（约 1s 后）即可拿到有效值，而不是首帧 0 / 空数组。
+            // 预热一次：速率类计数器需要两个采样点才有意义。先 collect 建立基线。
+            //
+            // ⚠ 更正一处曾写错的判断：这里**不能**保证「随后第一次读取即可拿到有效值」。
+            //   因为 `session()` 是在 `sample_all()` 内部被调用的，预热与紧随其后的那次
+            //   collect 只隔几微秒，速率窗口近似为 0 → 首次调用会读出伪 0（日志实测
+            //   `功耗=Some(0.0)W`）。真正的解法是启动时预热（见 `warmup()`），
+            //   让「会话建立」远早于「首次读取」；`RATE_WINDOW` 只作正确性兜底。
             let _ = PdhCollectQueryData(query);
-            Some(PdhSession { query, counters })
+            Some(PdhSession {
+                query,
+                counters,
+                opened_at: Instant::now(),
+            })
         }
     }
 
@@ -132,6 +157,18 @@ fn session() -> Option<&'static Mutex<PdhSession>> {
     SESSION.get_or_init(|| PdhSession::open().map(Mutex::new)).as_ref()
 }
 
+/// 应用启动时主动建立并预热 PDH 会话（幂等，后台线程调用即可）。
+///
+/// 为什么需要：速率类计数器必须「两次 collect 之间有足够时间差」才有值。若等第一个
+/// `get_resource_usage` 请求才建会话，那次请求自身就落在窗口不足的区间内，
+/// 首帧功耗 / GPU 利用率会显示出伪 0（而非 N/A），用户会误判「这个功能没生效」。
+/// 启动时预热一次，用户真正点开资源监视时距会话建立已远超 `RATE_WINDOW`，首帧即真实值。
+///
+/// 成本：7 个计数器句柄 + 一次 collect，实测整轮约 0.8ms，一次性，可忽略。
+pub fn warmup() {
+    let _ = session();
+}
+
 /// 一次采样：内部只调用**一次** PdhCollectQueryData，然后逐个读取需要的槽位。
 /// 任一步失败都返回 None；部分槽位失败时该字段为 None、其余字段照常返回。
 ///
@@ -144,31 +181,38 @@ pub fn sample_all() -> Option<Sample> {
     if !s.collect() {
         return None;
     }
+    // 距会话建立是否已够久（见 RATE_WINDOW）：不够则速率类计数器会算出伪 0。
+    let rates = s.opened_at.elapsed() >= RATE_WINDOW;
     let sample = Sample {
-        gpu_engine: s.read(IDX_GPU_ENGINE),
+        // 速率类（依赖两次 collect 的时间差）：窗口不足宁可给 None，也不要给伪 0。
+        gpu_engine: if rates { s.read(IDX_GPU_ENGINE) } else { None },
+        cpu_power: if rates { s.read(IDX_CPU_POWER) } else { None },
+        disk_read: if rates { s.read(IDX_DISK_READ) } else { None },
+        disk_write: if rates { s.read(IDX_DISK_WRITE) } else { None },
+        disk_idle: if rates { s.read(IDX_DISK_IDLE) } else { None },
+        // 瞬时类（单次采样即有值，与窗口无关）：照常读取。
         gpu_vram: s.read(IDX_GPU_VRAM),
-        cpu_power: s.read(IDX_CPU_POWER),
         cpu_perf: s.read(IDX_CPU_PERF),
-        disk_read: s.read(IDX_DISK_READ),
-        disk_write: s.read(IDX_DISK_WRITE),
-        disk_idle: s.read(IDX_DISK_IDLE),
     };
-    // 首次采样成功后打一条一次性诊断日志，把每个槽位的实例数写进日志 ——
+    // 首次**有效**采样成功后打一条一次性诊断日志，把每个槽位的实例数写进日志 ——
     // 「某个指标一直是 N/A」时可直接对照本行判断是「计数器在本机不存在」还是「采集逻辑出错」。
-    static LOGGED: OnceLock<()> = OnceLock::new();
-    if LOGGED.set(()).is_ok() {
-        let n = |v: &Option<Vec<(String, f64)>>| v.as_ref().map_or(-1, |x| x.len() as i32);
-        log::info!(
-            "[RES] PDH 就绪: gpu_engine={} gpu_vram={} cpu_power={} cpu_perf={} \
-             disk_read={} disk_write={} disk_idle={}（-1 = 该计数器在本机不可用）",
-            n(&sample.gpu_engine),
-            n(&sample.gpu_vram),
-            n(&sample.cpu_power),
-            n(&sample.cpu_perf),
-            n(&sample.disk_read),
-            n(&sample.disk_write),
-            n(&sample.disk_idle)
-        );
+    // 只在 rates 有效时打：窗口不足时速率槽位全是 None，打出来会被误读成「计数器不可用」。
+    if rates {
+        static LOGGED: OnceLock<()> = OnceLock::new();
+        if LOGGED.set(()).is_ok() {
+            let n = |v: &Option<Vec<(String, f64)>>| v.as_ref().map_or(-1, |x| x.len() as i32);
+            log::info!(
+                "[RES] PDH 就绪: gpu_engine={} gpu_vram={} cpu_power={} cpu_perf={} \
+                 disk_read={} disk_write={} disk_idle={}（-1 = 该计数器在本机不可用）",
+                n(&sample.gpu_engine),
+                n(&sample.gpu_vram),
+                n(&sample.cpu_power),
+                n(&sample.cpu_perf),
+                n(&sample.disk_read),
+                n(&sample.disk_write),
+                n(&sample.disk_idle)
+            );
+        }
     }
     Some(sample)
 }

@@ -573,6 +573,15 @@ fn main() {
             // AI 模型档案是核心能力：启动即后台预热内存缓存（读盘+scrypt 解密一次），
             // 之后任意窗口/插件读取都是毫秒级，不再触发式慢加载。
             andeyunhui_lib::services::ai_service::warm_profile_cache(app.handle().clone());
+            // 资源监视：启动即后台建立并预热 PDH 会话（7 个性能计数器挂在同一个 query 上）。
+            // 速率类计数器（CPU 功耗 / GPU 利用率 / 磁盘读写与活动度）靠两次采样之间的时间差
+            // 算值；若等用户点开资源监视时才建会话，那一帧的采样窗口近似为 0，会读出伪 0
+            // （实测日志：[RES] CPU 频率=Some(2974)MHz 功耗=Some(0.0)W，而真实 idle 是 11.7–23.5W）。
+            // 预热后用户点开即是真实值，不会先闪一下 0。成本 ~0.8ms、一次性，故无需门控。
+            #[cfg(windows)]
+            tauri::async_runtime::spawn(async move {
+                crate::pdh_util::warmup();
+            });
             // 「以安得云荟打开」临时目录：启动即清空，确保每次打开都是全新的（关软件即销毁）
             let _ = clear_openwith_dir(app.handle().clone());
             // 文件关联：以安得云荟打开（Windows 上通过启动参数传入文件路径）。

@@ -144,7 +144,22 @@ pub fn try_enable(ctrl: ICoreWebView2Controller, label: &str, hwnd: Option<isize
     let comp: ICoreWebView2CompositionController = match ctrl.cast() {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("[dcomp] {label} 失败于: cast CompositionController ({e:?}) —— WebView2 可能未以 composition 模式创建");
+            // 【这不是故障，是当前 WebView2 托管模式的必然结果 —— 故降为 debug】
+            // wry 0.55 只用 CreateCoreWebView2Controller（HWND 模式）创建控制器，该对象不实现
+            // ICoreWebView2CompositionController，cast 必返 E_NOINTERFACE(0x80004002)。
+            // 即：在 wry 改用 composition 控制器之前，本模块**永远走不到成功路径**
+            // （虽然下面 ANDY_DCOMP 默认「开启」，但开启的唯一效果就是做这次必然失败的 cast）。
+            //
+            // 透明浮窗被外部媒体 overlay 抢占的正确解法是 WebView2 的第三种托管模式
+            // Window-to-Visual（ANDY_W2V=1，见 main.rs 顶部），由 WebView2 自己绘到 DComp visual，
+            // 不需要本模块接管。
+            //
+            // 此前这里是 warn!：每次启动实测固定打两条（capsule 窗两次调用），会被误读成
+            // 「浮窗渲染管线坏了」而干扰排查（本仓库的会话日志里已出现多次这种误读）。
+            log::debug!(
+                "[dcomp] {label} 未启用：wry 以 HWND 模式建窗，控制器不实现 CompositionController \
+                 ({e:?})。属预期而非故障；需要 DComp 路径请改用 ANDY_W2V=1。"
+            );
             return false;
         }
     };
