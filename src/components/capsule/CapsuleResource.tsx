@@ -195,6 +195,8 @@ function CapsuleResource() {
   const batColor = (p: number | null) => (p == null ? NA_COLOR : p < 20 ? DISK_BAD : p < 40 ? DISK_WARN : DISK_OK);
   // 只列当前真有流量的接口（阈值 1 B/s：一秒轮询下这点量属噪声）
   const activeNets = (data?.nets ?? []).filter((n) => n.down_bps > 1 || n.up_bps > 1);
+  // 电池同样用可选链：前端热更新会先于后端重编生效，老后端不带 battery 字段时不能崩在这里
+  const bat = data?.battery;
 
   return (
     <div
@@ -431,20 +433,20 @@ function CapsuleResource() {
                   />
                 )}
                 {/* 电池：只在真有系统电池的机器上出现（台式机不显示） */}
-                {data.battery.present && (
+                {bat?.present && (
                   <Tile
                     wide
                     title={t('capsule.res.battery')}
-                    value={data.battery.percent != null ? data.battery.percent.toFixed(0) : 'N/A'}
-                    unit={data.battery.percent != null ? '%' : undefined}
-                    color={batColor(data.battery.percent)}
-                    percent={data.battery.percent ?? 0}
+                    value={bat.percent != null ? bat.percent.toFixed(0) : 'N/A'}
+                    unit={bat.percent != null ? '%' : undefined}
+                    color={batColor(bat.percent)}
+                    percent={bat.percent ?? 0}
                     detail={
-                      data.battery.charging
+                      bat.charging
                         ? t('capsule.res.charging')
-                        : data.battery.ac_online
+                        : bat.ac_online
                           ? t('capsule.res.acOnline')
-                          : `${t('capsule.res.left')} ${fmtDuration(data.battery.seconds_left)}`
+                          : `${t('capsule.res.left')} ${fmtDuration(bat.seconds_left)}`
                     }
                   />
                 )}
