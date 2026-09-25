@@ -40,8 +40,9 @@ if %EXT_EXIT% neq 0 (
 )
 
 REM 2. Run Tauri build (beforeBuildCommand auto-runs: deploy-plugins + copy-waiting + vite build)
+REM    gongfang 后端的 feature 已在 src-tauri/Cargo.toml 默认全开，无需再传 --features。
 echo [BUILD] [2/3] Running pnpm tauri build (full installer)...
-call pnpm tauri build -- --features gongfang,gongfang-reverse,gongfang-pentest,gongfang-automation,gongfang-gateway >> "%CD%\build.log" 2>&1
+call pnpm tauri build >> "%CD%\build.log" 2>&1
 set BUILD_EXIT=%ERRORLEVEL%
 echo BUILD_EXIT=%BUILD_EXIT% >> "%CD%\build.log"
 

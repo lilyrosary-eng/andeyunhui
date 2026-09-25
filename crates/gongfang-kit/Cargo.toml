@@ -34,11 +34,15 @@ path = "src/bin/mutation_probe.rs"
 required-features = ["pentest"]
 
 [features]
-# 默认零重型依赖：仅编译 kernel 骨架 + commands stub，主二进制零污染
-default = []
+# 默认全开：内核全部能力开箱即用，本 crate 内 `cargo check` / 跑探针 bin 都不用再加参数。
+# 注意宿主 src-tauri 以 default-features=false 引用本 crate，实际编译由宿主的 feature 驱动，
+# 这里的 default 只作用于「单独在本 crate 里构建/检查」的场景，两者已对齐为同一组能力。
+# 含 tls-impersonate，不含 crawler-browser（chromiumoxide 较重且当前无调用方，按需显式开启）。
+default = ["crawler", "reverse", "pentest", "automation", "gateway", "tls-impersonate"]
 # 启用爬虫框架（reqwest 代理池 + 双令牌桶 + EWMA + CDP 隐身 JS 脚本）
 crawler = ["dep:futures-util", "dep:url"]
 # 启用浏览器隐身（chromiumoxide 真实浏览器 + CDP 注入，较重，按需开启）
+# 当前唯一使用者 stealth::apply_stealth 尚无调用方；需要 JS 渲染页抓取时优先复用宿主内置 WebView2 通道。
 crawler-browser = ["crawler", "dep:chromiumoxide"]
 # 启用逆向框架（L*协议文法归纳 + 卡方加密识别 + petgraph 控制流反混淆 + 符号持久化）
 # ghidra_headless 外部进程调用 + frida-gum 动态插桩后续阶段接入
@@ -59,8 +63,8 @@ gateway = []
 # 会导致「feature 为真但没有任何链路接入」的不实状态，故在此显式绑定。
 # 外部二进制随 external-deps/全局/curl-impersonate/ 分发（Android/lite 构建已排除）。
 tls-impersonate = ["crawler"]
-# 一键全开
-full = ["crawler-browser", "reverse", "pentest", "automation", "gateway"]
+# 一键全开（= default 的全部能力 + 浏览器隐身）；等价于旧行为里的「什么都编」
+full = ["crawler", "crawler-browser", "reverse", "pentest", "automation", "gateway", "tls-impersonate"]
 
 [dependencies]
 # === 基础（始终编译，极轻量）===

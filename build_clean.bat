@@ -38,9 +38,11 @@ REM    gongfang is a plugin module (plugins/茑萝/gongfang). The clean installe
 REM    NOT bundle the gongfang plugin or its heavy external deps - they are distributed
 REM    independently as DLC via build_dlc.bat (.mufurong plugin + .mujin deps). However,
 REM    the gongfang backend (Rust Tauri commands) must be compiled into the binary so
-REM    that the imported gongfang plugin works fully, so we keep all gongfang features.
-echo [BUILD_CLEAN] Running pnpm tauri build --features gongfang,... (log -> build_clean.log)...
-call pnpm tauri build -- --features gongfang,gongfang-reverse,gongfang-pentest,gongfang-automation,gongfang-gateway > "%CD%\build_clean.log" 2>&1
+REM    that the imported gongfang plugin works fully - and it now is by default:
+REM    src-tauri/Cargo.toml has all gongfang features enabled in `default`, so no
+REM    --features argument is needed anywhere (this script used to pass it manually).
+echo [BUILD_CLEAN] Running pnpm tauri build (log -> build_clean.log)...
+call pnpm tauri build > "%CD%\build_clean.log" 2>&1
 set BUILD_EXIT=%ERRORLEVEL%
 echo BUILD_EXIT=%BUILD_EXIT% >> "%CD%\build_clean.log"
 

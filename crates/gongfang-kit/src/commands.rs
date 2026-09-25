@@ -1,7 +1,8 @@
 //! 攻防 Tauri 命令层
 //!
 //! 命令始终注册（gongfang-kit 骨架始终编译），feature 未启用时返回 stub 错误。
-//! 重型依赖（chromiumoxide 等）在 gongfang-kit 的 feature 后，主二进制零污染。
+//! 各 feature 默认全开（见 Cargo.toml `default`）：正常构建下这些 stub 分支不会走到；
+//! 仅在显式 `--no-default-features` 的精简构建里才生效。
 //!
 //! 设计原则：所有命令和类型定义始终编译（无 #[cfg(feature)] 标注），
 //! 命令内部用 #[cfg(feature)] 块判断逻辑，feature 未启用时返回 Err。

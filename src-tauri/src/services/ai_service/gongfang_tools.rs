@@ -202,7 +202,7 @@ impl AiTool for GongfangFullTool {
         #[cfg(not(feature = "gongfang"))]
         {
             let _ = (cmd, app);
-            Err("gongfang feature 未启用：请用 --features gongfang 构建".to_string())
+            Err("gongfang feature 未启用（构建时用了 --no-default-features；去掉该参数或显式加 gongfang 即可）".to_string())
         }
     }
 }
