@@ -267,6 +267,9 @@ pub async fn handle(uri: &tauri::http::Uri, range: Option<String>) -> Response<V
         .header(header::CONTENT_LENGTH, body.len().to_string());
 
     builder
+        // 注：本函数返回 tauri 协议处理器要求的 Response<Vec<u8>>，必须交出 Vec<u8>，
+        // 这里的一次整块拷贝是 API 约束（有界：单次 ≤ MAX_CHUNK = 16 MB），无法像
+        // axum 路由那样直接交出零拷贝 Bytes。真正的隐患是「16 MB 常驻」，不是这次拷贝。
         .body(body.to_vec())
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "bimedia: 构造响应失败"))
 }

@@ -2422,6 +2422,8 @@ fn run_ffmpeg_hls(
     if let Some(mut stderr) = child.stderr.take() {
         let mut buf = [0u8; 4096];
         let mut acc = String::new();
+        // 进度节流：旧实现每读到 4 KB 就 emit 一次（长视频转封装会发出上千次事件）。
+        let mut last_emit = std::time::Instant::now();
         loop {
             match stderr.read(&mut buf) {
                 Ok(0) => break,
@@ -2438,7 +2440,10 @@ fn run_ffmpeg_hls(
                         acc = acc[acc.len() - 2048..].to_string();
                     }
                     if let Some(ev) = progress_event {
-                        let _ = app.emit(ev, serde_json::json!({ "downloaded": total_bytes, "total": 0, "speed": 0, "phase": "hls" }));
+                        if last_emit.elapsed().as_millis() >= 200 {
+                            let _ = app.emit(ev, serde_json::json!({ "downloaded": total_bytes, "total": 0, "speed": 0, "phase": "hls" }));
+                            last_emit = std::time::Instant::now();
+                        }
                     }
                 }
                 Err(_) => break,
