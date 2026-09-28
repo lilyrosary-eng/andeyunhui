@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{oneshot, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -61,6 +61,12 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 const MIN_UPLOAD_RATE: u64 = 256 * 1024;
 /// 会话空闲回收阈值（30 分钟无进展即清理，连带删除未完成的残留文件）。
 const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+/// 单个上传连接的数据停滞上限：超过该时长收不到任何字节即判定连接已死。
+/// 没有它，一条挂死的连接会永久占住一个并发许可与文件句柄。
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// 并发接收上限：官方 LocalSend 会并行上传多文件，不限流时每个连接都持有
+/// 文件句柄 + 1 MB 写缓冲，几十并发即写缓冲累积 + 磁盘随机写风暴。
+const MAX_CONCURRENT_UPLOADS: usize = 6;
 
 /// 组播发现报文（v2）：发送公告与应答共用，靠 announce 区分。
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -219,6 +225,12 @@ pub struct TransferManager {
     discovery_handle: Mutex<Option<JoinHandle<()>>>,
     /// 空闲会话回收任务（见 gc_sessions）
     gc_handle: Mutex<Option<JoinHandle<()>>>,
+    /// 启动互斥：主窗与浮岛会同时调用 transfer_start，没有它两边都会过
+    /// `server_handle.is_some()` 检查并各自 bind 一次，第二次必然 AddrInUse，
+    /// 把一条假的「端口占用」错误写进 start_error 暴露给用户。
+    start_lock: tokio::sync::Mutex<()>,
+    /// 并发接收闸（见 MAX_CONCURRENT_UPLOADS）
+    upload_gate: Semaphore,
     /// 最近一次启动失败原因（HTTP 绑定失败 / 组播绑定失败等），transfer_status 返回给前端展示
     start_error: Mutex<Option<String>>,
     /// 待确认接收的 session_id → 确认通道
@@ -313,6 +325,8 @@ impl TransferManager {
             server_handle: Mutex::new(None),
             discovery_handle: Mutex::new(None),
             gc_handle: Mutex::new(None),
+            start_lock: tokio::sync::Mutex::new(()),
+            upload_gate: Semaphore::new(MAX_CONCURRENT_UPLOADS),
             start_error: Mutex::new(None),
             shutdown: Arc::new(Notify::new()),
         }
@@ -451,6 +465,10 @@ impl TransferManager {
 
     // ---------- 启动 / 停止 ----------
     pub async fn start(&self) {
+        // 串行化：主窗与浮岛会并发调用 transfer_start，旧写法两边都能通过
+        // `is_some()` 检查，随后各自 bind :53317，第二次必然失败并把
+        // 「HTTP 服务绑定失败」写进 start_error → 前端显示一条并不存在的错误。
+        let _guard = self.start_lock.lock().await;
         if self.server_handle.lock().unwrap().is_some() {
             return;
         }
@@ -888,7 +906,12 @@ impl TransferManager {
         }
     }
 
-    /// 回收空闲超时的会话：删除会话记录 + 未完成的残留文件与目录。
+    /// 回收空闲超时的会话：从内存表移除记录，并清理**未完成**的残片。
+    ///
+    /// ⚠️ 绝不能连已完成文件一起删：接收成功的文件就存在 save_dir/<session_id>/ 下，
+    /// 那是用户在「接收文件保存目录」里能找到的唯一副本。故这里：
+    ///   1. 只删 `done == false` 的未完成残片；
+    ///   2. 目录用非递归 `remove_dir`（非空即失败），双保险避免误删整目录。
     /// 旧实现只在「用户点拒绝」时清理，接收方不回话/断网的会话会永久残留
     /// （`_created` 字段存了却从未使用，注释里承诺的「后端定时清理」并不存在）。
     fn gc_sessions(&self) {
@@ -902,18 +925,35 @@ impl TransferManager {
             stale_ids
                 .into_iter()
                 .filter_map(|id| {
-                    sessions
-                        .remove(&id)
-                        .map(|s| (id, s.files.into_values().map(|f| f.path).collect()))
+                    sessions.remove(&id).map(|s| {
+                        let partials = s
+                            .files
+                            .into_values()
+                            .filter(|f| !f.done)
+                            .map(|f| f.path)
+                            .collect();
+                        (id, partials)
+                    })
                 })
                 .collect()
         };
-        for (id, paths) in &stale {
-            for p in paths {
+        if stale.is_empty() {
+            return;
+        }
+        for (id, partials) in &stale {
+            for p in partials {
                 let _ = std::fs::remove_file(p);
             }
-            let _ = std::fs::remove_dir_all(self.save_dir().join(id));
-            log::info!("[transfer] 回收空闲会话 {id}（超时 {} 分钟）", SESSION_TTL.as_secs() / 60);
+            // 非递归删除：目录里还有已完成的文件时必然失败，等于自带保护
+            let dir = self.save_dir().join(id);
+            if std::fs::remove_dir(&dir).is_ok() {
+                log::info!("[transfer] 回收空闲会话 {id}（超时 {} 分钟），删除未完成残片", SESSION_TTL.as_secs() / 60);
+            } else {
+                log::info!(
+                    "[transfer] 回收空闲会话 {id} 的内存记录（超时 {} 分钟）；目录内仍有已接收文件，保留",
+                    SESSION_TTL.as_secs() / 60
+                );
+            }
         }
     }
 }
@@ -1020,6 +1060,11 @@ async fn upload_handler(
         Some(v) => v,
         None => return (axum::http::StatusCode::FORBIDDEN, "invalid session/token").into_response(),
     };
+    // 并发闸：官方 LocalSend 会并行上传多文件，不限流时每个连接都持有文件句柄 + 1 MB 写缓冲，
+    // 几十个并发就是几十 MB 缓冲 + 磁盘随机写风暴。超出上限的请求在这里等（背压），而不是拒绝。
+    let Ok(_permit) = state.mgr.upload_gate.acquire().await else {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "closing").into_response();
+    };
     let file = match tokio::fs::File::create(&path).await {
         Ok(f) => f,
         Err(_) => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "create failed").into_response(),
@@ -1032,9 +1077,30 @@ async fn upload_handler(
     let session_id = q.session_id.clone();
     let file_id = q.file_id.clone();
     let mut last_emit = Instant::now();
-    while let Some(chunk) = stream.next().await {
-        match chunk {
+    loop {
+        // 停滞保护：60 s 收不到任何数据即判定连接已死，释放并发闸与文件句柄。
+        // 没有它，一个挂死的连接会永久占住一个许可。
+        let next = match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(_) => {
+                log::warn!("[transfer] {session_id}/{file_id} 接收停滞超时（{}s），中断", STALL_TIMEOUT.as_secs());
+                drop(file);
+                let _ = tokio::fs::remove_file(&path).await;
+                return (axum::http::StatusCode::REQUEST_TIMEOUT, "stalled").into_response();
+            }
+        };
+        match next {
             Ok(bytes) => {
+                // 超量保护：发送方声明的 size 就是本项目要写的字节数上限。
+                // 旧实现完全不校验，对端谎报小 size 即可无限写盘（填满磁盘）。
+                total += bytes.len() as u64;
+                if expected > 0 && total > expected {
+                    log::warn!("[transfer] {session_id}/{file_id} 收到超过声明大小的数据，已中止");
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&path).await;
+                    return (axum::http::StatusCode::PAYLOAD_TOO_LARGE, "size exceeded").into_response();
+                }
                 if let Err(e) = file.write_all(&bytes).await {
                     // 写入失败（常见于默认目录无写权限，如安装到 C:\Program Files\send 且以普通用户运行）：
                     // 触发一次性兜底，引导前端弹系统目录选择框换位置。
@@ -1043,7 +1109,6 @@ async fn upload_handler(
                         .notify_save_dir_invalid(&state.mgr.save_dir().join(&session_id), &e.to_string());
                     return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "write failed").into_response();
                 }
-                total += bytes.len() as u64;
                 // 每 ~200 ms 上报一次进度（旧实现每个 chunk 都发一次事件：
                 // 4 GB 文件约 6.5 万次 Tauri 事件 + 6.5 万次 React 重渲染 → 前端卡死）。
                 // total 用 session 里声明的文件大小：旧实现把它传成「已收字节」，
@@ -1090,12 +1155,18 @@ async fn download_handler(State(state): State<ServerState>, Query(q): Query<Uplo
         Ok(f) => f,
         Err(_) => return (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
     };
+    // Content-Length 取**磁盘真实大小**而非 session 里声明的 size：
+    // 传输被中断时两者会不一致，声明值会让客户端按错误长度读而挂住。
+    let len = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(_) => expected,
+    };
     // 流式回传：旧实现 `tokio::fs::read` 把整个文件读进内存再放进 Body，
     // 下载大文件时内存占用等于文件大小。
     let body = Body::from_stream(file_stream(file, state.mgr, None));
     Response::builder()
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-        .header(axum::http::header::CONTENT_LENGTH, expected.to_string())
+        .header(axum::http::header::CONTENT_LENGTH, len.to_string())
         .body(body)
         .unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "stream").into_response())
 }
@@ -1334,6 +1405,10 @@ async fn try_send(
                 "{base}/api/localsend/v2/upload?sessionId={session_id}&fileId={}&token={token}",
                 f.id
             ))
+            // 显式 Content-Length：流式 body 的默认长度未知，reqwest/hyper 会退化成
+            // chunked。官方 LocalSend 对非分块请求兼容性更稳，且声明长度还让接收端
+            // 能按 size 做超量保护。hyper 在头部已给 content-length 时按该长度分帧。
+            .header(reqwest::header::CONTENT_LENGTH, f.size.to_string())
             .timeout(upload_timeout(f.size))
             .body(body)
             .send()

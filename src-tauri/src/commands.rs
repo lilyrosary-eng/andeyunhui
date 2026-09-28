@@ -3921,19 +3921,37 @@ pub fn copy_file_to_dropzone(
     std::fs::create_dir_all(&dropzone_dir).map_err(|e| format!("创建目录失败: {}", e))?;
     let dest = dropzone_dir.join(format!("{}_{}", timestamp, file_name));
     std::fs::copy(source_path, &dest).map_err(|e| format!("复制文件失败: {}", e))?;
-    // 优先使用调用方已持有的内存字节（如刚编码好的 PNG），避免「写盘后又整文件读回」的冗余 I/O
-    let snapshot_bytes: Vec<u8> = match content {
-        Some(bytes) => bytes,
-        None => std::fs::read(&dest).unwrap_or_default(),
+    // 优先使用调用方已持有的内存字节（如刚编码好的 PNG），避免「写盘后又整文件读回」的冗余 I/O。
+    // 超大文件跳过快照：与 import_to_dropzone 同一条红线 —— 快照要整文件读进内存，
+    // 打开一个 2 GB 视频就会直接吃掉 2 GB 内存（这正是传输模块卡死的同款成因）。
+    const SNAPSHOT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+    let snapshot_bytes: Option<Vec<u8>> = match content {
+        Some(bytes) => Some(bytes),
+        None => {
+            let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            if size <= SNAPSHOT_MAX_BYTES {
+                std::fs::read(&dest).ok()
+            } else {
+                eprintln!(
+                    "[中转站] 跳过大文件存档快照（{} MiB > {} MiB 上限）: {}",
+                    size / 1024 / 1024,
+                    SNAPSHOT_MAX_BYTES / 1024 / 1024,
+                    file_name
+                );
+                None
+            }
+        }
     };
-    transfer_station::archive_snapshot(
-        app_data,
-        "file",
-        &format!("{}", timestamp),
-        &file_name,
-        &snapshot_bytes,
-        &extension,
-    );
+    if let Some(bytes) = snapshot_bytes {
+        transfer_station::archive_snapshot(
+            app_data,
+            "file",
+            &format!("{}", timestamp),
+            &file_name,
+            &bytes,
+            &extension,
+        );
+    }
     Ok(dest)
 }
 
