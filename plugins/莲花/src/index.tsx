@@ -1,6 +1,6 @@
 /// <reference path="../../global.d.ts" />
 import { ImageViewer } from './ImageViewer';
-import { ImageSidebar } from './ImageSidebar';
+import { ImageSidebar, albumCoverKey } from './ImageSidebar';
 import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 const React = window.__HOST_REACT__;
@@ -10,6 +10,10 @@ const hostApi = window.__HOST_API__;
 const STORAGE_KEY_ROOT = 'image_plugin_root_path';
 const STORAGE_KEY_ALBUMS = 'image_plugin_custom_albums';
 const STORAGE_KEY_RENAMES = 'image_plugin_folder_renames';
+// 相册自选封面：{ [封面键]: 图片绝对路径 }。两类相册共用一张表，用前缀区分：
+//   'f:<folderPath>' 扫描到的文件夹相册；'a:<albumId>' 自定义相册。
+// 未设置时回落到自动封面（文件夹用扫描出的 coverImage，自定义相册用第一张图）。
+const STORAGE_KEY_COVERS = 'image_plugin_album_covers';
 
 interface ImageFolder {
   folderPath: string;
@@ -67,6 +71,25 @@ function ImageModule() {
       return saved ? JSON.parse(saved) : {};
     } catch { return {}; }
   });
+
+  // 相册自选封面（键 → 图片路径），localStorage 持久化；与重命名同为「仅内部映射，不动文件系统」
+  const [albumCovers, setAlbumCovers] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_COVERS);
+      return saved ? JSON.parse(saved) : {};
+    } catch { return {}; }
+  });
+
+  // 设置 / 清除某个相册的自选封面（coverPath 为 null 表示恢复默认封面）
+  const handleSetCover = useCallback((key: string, coverPath: string | null) => {
+    setAlbumCovers(prev => {
+      const next = { ...prev };
+      if (coverPath) next[key] = coverPath;
+      else delete next[key];
+      try { localStorage.setItem(STORAGE_KEY_COVERS, JSON.stringify(next)); } catch { /* 配额满等忽略 */ }
+      return next;
+    });
+  }, []);
 
   // 已隐藏的文件夹黑名单（使用 Rust 集中管理，支持全局查看和恢复）
   const { hidden: hiddenFolders, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('image');
@@ -207,12 +230,20 @@ function ImageModule() {
     });
   }, []);
 
-  // 删除自定义相册
+  // 删除自定义相册：同时清掉它的自选封面映射，避免残留孤儿键
   const handleDeleteAlbum = useCallback((albumId: string) => {
     setCustomAlbums(prev => {
       const updated = prev.filter(a => a.id !== albumId);
       localStorage.setItem(STORAGE_KEY_ALBUMS, JSON.stringify(updated));
       return updated;
+    });
+    setAlbumCovers(prev => {
+      const key = albumCoverKey(albumId);
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      try { localStorage.setItem(STORAGE_KEY_COVERS, JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
     });
   }, []);
 
@@ -309,6 +340,8 @@ function ImageModule() {
         onDeleteFolder={handleDeleteFolder}
         onCreateAlbum={handleCreateAlbum}
         onDeleteAlbum={handleDeleteAlbum}
+        albumCovers={albumCovers}
+        onSetCover={handleSetCover}
         onOpenModuleSettings={handleOpenModuleSettings}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}

@@ -1095,6 +1095,12 @@ export const jaJP: Record<string, string> = {
   'image.sidebar.importImages': '画像をインポート',
   'image.sidebar.manageFolders': 'フォルダを管理',
   'image.sidebar.albumName': 'アルバム名',
+  'image.sidebar.setCover': 'カバーを設定',
+  'image.sidebar.coverPicker.pickFile': '画像を選択…',
+  'image.sidebar.coverPicker.loading': '読み込み中…',
+  'image.sidebar.coverPicker.empty': 'アルバム内に画像がありません。「画像を選択」から指定してください',
+  'image.sidebar.coverPicker.truncated': '先頭 {n} 枚のみ表示',
+  'image.sidebar.coverPicker.reset': '既定のカバーに戻す',
   'image.sidebar.search': 'フォルダを検索...',
   // ビューア
   'image.viewer.loading': '読み込み中...',

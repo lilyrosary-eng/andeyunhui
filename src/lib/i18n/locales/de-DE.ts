@@ -1095,6 +1095,12 @@ export const deDE: Record<string, string> = {
   'image.sidebar.importImages': 'Bilder importieren',
   'image.sidebar.manageFolders': 'Ordner verwalten',
   'image.sidebar.albumName': 'Albumname',
+  'image.sidebar.setCover': 'Cover festlegen',
+  'image.sidebar.coverPicker.pickFile': 'Bild auswählen…',
+  'image.sidebar.coverPicker.loading': 'Wird geladen…',
+  'image.sidebar.coverPicker.empty': 'Keine Bilder in diesem Album – nutze „Bild auswählen“',
+  'image.sidebar.coverPicker.truncated': 'Nur die ersten {n} Bilder werden angezeigt',
+  'image.sidebar.coverPicker.reset': 'Standard-Cover wiederherstellen',
   'image.sidebar.search': 'Ordner suchen...',
   // Viewer
   'image.viewer.loading': 'Lade...',

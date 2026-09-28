@@ -1094,6 +1094,12 @@ export const frFR: Record<string, string> = {
   'image.sidebar.importImages': 'Importer des images',
   'image.sidebar.manageFolders': 'Gérer les dossiers',
   'image.sidebar.albumName': 'Nom de l\'album',
+  'image.sidebar.setCover': 'Définir la couverture',
+  'image.sidebar.coverPicker.pickFile': 'Choisir une image…',
+  'image.sidebar.coverPicker.loading': 'Chargement…',
+  'image.sidebar.coverPicker.empty': 'Aucune image dans cet album — utilisez « Choisir une image »',
+  'image.sidebar.coverPicker.truncated': 'Seules les {n} premières images sont affichées',
+  'image.sidebar.coverPicker.reset': 'Rétablir la couverture par défaut',
   'image.sidebar.search': 'Rechercher des dossiers...',
   // Visionneuse
   'image.viewer.loading': 'Chargement...',

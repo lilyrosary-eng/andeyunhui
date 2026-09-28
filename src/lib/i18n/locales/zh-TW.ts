@@ -1095,6 +1095,12 @@ export const zhTW: Record<string, string> = {
   'image.sidebar.importImages': '匯入圖片',
   'image.sidebar.manageFolders': '管理資料夾',
   'image.sidebar.albumName': '相簿名稱',
+  'image.sidebar.setCover': '設定封面',
+  'image.sidebar.coverPicker.pickFile': '自選圖片…',
+  'image.sidebar.coverPicker.loading': '載入中…',
+  'image.sidebar.coverPicker.empty': '相簿內暫無圖片，請用「自選圖片」挑一張',
+  'image.sidebar.coverPicker.truncated': '僅列出前 {n} 張',
+  'image.sidebar.coverPicker.reset': '恢復預設封面',
   'image.sidebar.search': '搜尋資料夾...',
   // 檢視器
   'image.viewer.loading': '載入中...',

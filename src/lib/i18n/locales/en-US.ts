@@ -1163,6 +1163,12 @@ export const enUS: Record<string, string> = {
   'image.sidebar.importImages': 'Import images',
   'image.sidebar.manageFolders': 'Manage folders',
   'image.sidebar.albumName': 'Album name',
+  'image.sidebar.setCover': 'Set cover',
+  'image.sidebar.coverPicker.pickFile': 'Choose an image…',
+  'image.sidebar.coverPicker.loading': 'Loading…',
+  'image.sidebar.coverPicker.empty': 'No images in this album — use “Choose an image” instead',
+  'image.sidebar.coverPicker.truncated': 'Showing the first {n} images only',
+  'image.sidebar.coverPicker.reset': 'Reset to default cover',
   'image.sidebar.search': 'Search folders...',
   // Viewer
   'image.viewer.loading': 'Loading...',

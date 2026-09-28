@@ -930,7 +930,7 @@ function thumbSettled() {
   pumpThumbQueue();
 }
 
-function ThumbImg({ path }: { path: string }) {
+export function ThumbImg({ path }: { path: string }) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;

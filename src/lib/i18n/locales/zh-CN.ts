@@ -1271,6 +1271,12 @@ export const zhCN: Record<string, string> = {
   'image.sidebar.importImages': '导入图片',
   'image.sidebar.manageFolders': '管理文件夹',
   'image.sidebar.albumName': '相册名称',
+  'image.sidebar.setCover': '设置封面',
+  'image.sidebar.coverPicker.pickFile': '自选图片…',
+  'image.sidebar.coverPicker.loading': '载入中…',
+  'image.sidebar.coverPicker.empty': '相册内暂无图片，请用「自选图片」挑一张',
+  'image.sidebar.coverPicker.truncated': '仅列出前 {n} 张',
+  'image.sidebar.coverPicker.reset': '恢复默认封面',
   'image.sidebar.search': '搜索文件夹...',
   // 查看器
   'image.viewer.loading': '加载中...',
