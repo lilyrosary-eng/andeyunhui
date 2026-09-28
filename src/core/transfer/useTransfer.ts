@@ -81,7 +81,10 @@ export function useTransfer() {
       const p = e.payload;
       setProgress((prev) => {
         const next = prev.filter((x) => !(x.session_id === p.session_id && x.file_id === p.file_id));
-        return [...next, p];
+        const merged = [...next, p];
+        // 上限 50 条：后端已把进度事件节流到 ~200 ms/次，这里只需防止
+        // 长会话内「传输过的文件数」无限累积（旧实现只增不减）。
+        return merged.length > 50 ? merged.slice(merged.length - 50) : merged;
       });
     }).then((u) => offs.push(u));
     return () => offs.forEach((u) => u());

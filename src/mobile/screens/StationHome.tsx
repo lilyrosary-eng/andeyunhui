@@ -100,7 +100,9 @@ export function StationHome() {
     // 传输接收完成后文件落入中转站 → 自动刷新列表
     const un = listen(EVENTS.transfer.progress, (e) => {
       const p = e.payload as { done?: boolean; direction?: string };
-      if (p?.done && p.direction === 'recv') void refresh();
+      // 后端 direction 取值是 'send' | 'receive'；旧代码判 'recv' 恒为 false，
+      // 导致「接收完成后中转站自动刷新」从未生效。
+      if (p?.done && p.direction === 'receive') void refresh();
     });
     return () => {
       void un.then((f) => f());

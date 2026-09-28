@@ -44,7 +44,13 @@ export default function TransferReceiveModal() {
     listen<ReceiveRequest>(EVENTS.transfer.request, (e) => {
       const p = e.payload;
       if (!p?.session_id) return;
-      setQueue((q) => (q.some((x) => x.session_id === p.session_id) ? q : [...q, p]));
+      setQueue((q) => {
+        if (q.some((x) => x.session_id === p.session_id)) return q;
+        const next = [...q, p];
+        // 上限 20 条：发送方中途放弃的请求不会有 confirm/decline 回调，
+        // 旧实现只入队不出队，长会话下会一直堆积。
+        return next.length > 20 ? next.slice(next.length - 20) : next;
+      });
     })
       .then((u) => offs.push(u))
       .catch(() => {});

@@ -25,10 +25,10 @@ use axum::extract::{ConnectInfo, Query, State};
 use axum::response::{IntoResponse, Response, Json};
 use axum::routing::{get, post};
 use axum::Router;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;
@@ -47,6 +47,20 @@ pub const DEFAULT_PORT: u16 = 53317;
 const MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
 const MULTICAST_PORT: u16 = 53317;
 const ANNOUNCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 流式读写块大小（128 KB）：内存占用被限制在这一块以内，
+/// 与 LocalSend 一样「边读边发 / 边收边写」，不再整文件进内存。
+const STREAM_CHUNK: usize = 128 * 1024;
+/// 落盘缓冲（1 MB）：把零散的小 chunk 合并成大块写，避免每块一次 write 系统调用。
+const WRITE_BUF: usize = 1024 * 1024;
+/// 进度事件最小间隔（200 ms）：与 commands.rs 的下载进度节流保持一致。
+/// 不节流时 4 GB 文件（64 KB/块）会产生约 6.5 万次 Tauri 事件 → 前端卡死。
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+/// 上传超时的速率下限（256 KB/s）：按文件大小推算超时上限，
+/// 只用于兜底「连接彻底停住」，绝不按固定 30 s 掐断大文件。
+const MIN_UPLOAD_RATE: u64 = 256 * 1024;
+/// 会话空闲回收阈值（30 分钟无进展即清理，连带删除未完成的残留文件）。
+const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// 组播发现报文（v2）：发送公告与应答共用，靠 announce 区分。
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -168,7 +182,8 @@ struct SessionFile {
 struct Session {
     sender: ClientInfoV2,
     files: HashMap<String, SessionFile>,
-    _created: Instant,
+    /// 最近一次有数据写入的时刻：GC 用它判断会话是否已空闲（大文件长传输不会被误清）。
+    last_activity: Instant,
 }
 
 /// 进度事件载荷（前端）
@@ -202,6 +217,8 @@ pub struct TransferManager {
     app: AppHandle,
     server_handle: Mutex<Option<JoinHandle<()>>>,
     discovery_handle: Mutex<Option<JoinHandle<()>>>,
+    /// 空闲会话回收任务（见 gc_sessions）
+    gc_handle: Mutex<Option<JoinHandle<()>>>,
     /// 最近一次启动失败原因（HTTP 绑定失败 / 组播绑定失败等），transfer_status 返回给前端展示
     start_error: Mutex<Option<String>>,
     /// 待确认接收的 session_id → 确认通道
@@ -295,6 +312,7 @@ impl TransferManager {
             app,
             server_handle: Mutex::new(None),
             discovery_handle: Mutex::new(None),
+            gc_handle: Mutex::new(None),
             start_error: Mutex::new(None),
             shutdown: Arc::new(Notify::new()),
         }
@@ -438,6 +456,22 @@ impl TransferManager {
         }
         self.start_server().await;
         self.start_discovery().await;
+        self.start_gc();
+    }
+
+    /// 空闲会话回收：每 60 s 扫一次，清理超时未完成/无进展的会话与残留文件。
+    fn start_gc(&self) {
+        let mgr: &'static TransferManager = mgr();
+        let shutdown = self.shutdown.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(60)) => mgr.gc_sessions(),
+                    _ = shutdown.notified() => break,
+                }
+            }
+        });
+        *self.gc_handle.lock().unwrap() = Some(handle);
     }
 
     pub fn stop(&self) {
@@ -446,6 +480,9 @@ impl TransferManager {
             h.abort();
         }
         if let Some(h) = self.discovery_handle.lock().unwrap().take() {
+            h.abort();
+        }
+        if let Some(h) = self.gc_handle.lock().unwrap().take() {
             h.abort();
         }
     }
@@ -748,7 +785,7 @@ impl TransferManager {
             Session {
                 sender: req.info,
                 files: session_files,
-                _created: Instant::now(),
+                last_activity: Instant::now(),
             },
         );
         PrepareUploadResponseV2 {
@@ -761,62 +798,76 @@ impl TransferManager {
         self.sessions.lock().unwrap().remove(session_id);
     }
 
-    fn target_path(&self, session_id: &str, file_id: &str, token: &str) -> Option<PathBuf> {
+    /// 校验 session/file/token 并返回目标路径与「声明大小」。
+    /// 返回 size 是为了让接收端能给出真实进度（旧实现把「已收字节」当 total 传，
+    /// 导致进度条从第一块起就显示 100%）。
+    fn target_path(&self, session_id: &str, file_id: &str, token: &str) -> Option<(PathBuf, u64)> {
         let sessions = self.sessions.lock().unwrap();
         let s = sessions.get(session_id)?;
         let f = s.files.get(file_id)?;
         if f.token != token {
             return None;
         }
-        Some(f.path.clone())
+        Some((f.path.clone(), f.size))
     }
 
     fn mark_done(&self, session_id: &str, file_id: &str, _peer_alias: &str) {
-        let progress = {
+        // 先在锁内取出「进度快照 + 落盘路径」，随即释放锁：
+        // 中转站导入含元数据读取 / 目录创建 / 触发后台复制，属阻塞 IO，
+        // 旧实现持着 sessions 锁直接调用，会把所有并发的接收进度查询一起堵住。
+        let done: Option<(TransferProgress, PathBuf)> = {
             let mut sessions = self.sessions.lock().unwrap();
-            if let Some(s) = sessions.get_mut(session_id) {
-                if let Some(f) = s.files.get_mut(file_id) {
+            sessions.get_mut(session_id).and_then(|s| {
+                s.last_activity = Instant::now();
+                let alias = s.sender.alias.clone();
+                s.files.get_mut(file_id).map(|f| {
                     f.done = true;
                     f.received = f.size;
-                    // 接收落盘同时把文件「复制」进「中转站」（dropzone），构建生态闭环。
-                    // 用 move_source=false（复制语义）：保留 save_dir/<session_id>/ 下的「本地保存路径」存档，
-                    // dropzone 仅作中转站副本——这样用户在「接收文件保存目录」设置里能直接找到文件（本地保存），
-                    // 同时中转站仍可拖出 / OCR / 批量导出。删除中转站文件不影响本地存档。
-                    // 仅桌面执行：移动端无中转站概念，跳过该调用（T2 平台隔离）。
-                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                    let _ = import_to_dropzone(
-                        self.app.clone(),
-                        f.path.clone().to_string_lossy().to_string(),
-                        None,
-                        Some(false),
-                    );
-                    Some(TransferProgress {
-                        direction: "receive".to_string(),
-                        session_id: session_id.to_string(),
-                        file_id: file_id.to_string(),
-                        file_name: f.file_name.clone(),
-                        received: f.size,
-                        total: f.size,
-                        done: true,
-                        peer_alias: s.sender.alias.clone(),
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+                    (
+                        TransferProgress {
+                            direction: "receive".to_string(),
+                            session_id: session_id.to_string(),
+                            file_id: file_id.to_string(),
+                            file_name: f.file_name.clone(),
+                            received: f.size,
+                            total: f.size,
+                            done: true,
+                            peer_alias: alias,
+                        },
+                        f.path.clone(),
+                    )
+                })
+            })
         };
-        if let Some(p) = progress {
-            self.emit("transfer-progress", &p);
-            self.emit("transfer-received", &p);
-        }
+        let Some((progress, local_path)) = done else {
+            return;
+        };
+
+        // 接收落盘同时把文件「复制」进「中转站」（dropzone），构建生态闭环。
+        // 用 move_source=false（复制语义）：保留 save_dir/<session_id>/ 下的「本地保存路径」存档，
+        // dropzone 仅作中转站副本——这样用户在「接收文件保存目录」设置里能直接找到文件（本地保存），
+        // 同时中转站仍可拖出 / OCR / 批量导出。删除中转站文件不影响本地存档。
+        // 仅桌面执行：移动端无中转站概念，跳过该调用（T2 平台隔离）。
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let _ = import_to_dropzone(
+            self.app.clone(),
+            local_path.to_string_lossy().to_string(),
+            None,
+            Some(false),
+        );
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let _ = local_path;
+
+        self.emit("transfer-progress", &progress);
+        self.emit("transfer-received", &progress);
     }
 
     fn emit_receive_progress(&self, session_id: &str, file_id: &str, received: u64, total: u64) {
         let info = {
-            let sessions = self.sessions.lock().unwrap();
-            sessions.get(session_id).and_then(|s| {
+            let mut sessions = self.sessions.lock().unwrap();
+            sessions.get_mut(session_id).and_then(|s| {
+                // 刷新活跃时间：长传输不会被 GC 误判为空闲会话
+                s.last_activity = Instant::now();
                 s.files.get(file_id).map(|f| (f.file_name.clone(), s.sender.alias.clone()))
             })
         };
@@ -834,6 +885,35 @@ impl TransferManager {
                     peer_alias,
                 },
             );
+        }
+    }
+
+    /// 回收空闲超时的会话：删除会话记录 + 未完成的残留文件与目录。
+    /// 旧实现只在「用户点拒绝」时清理，接收方不回话/断网的会话会永久残留
+    /// （`_created` 字段存了却从未使用，注释里承诺的「后端定时清理」并不存在）。
+    fn gc_sessions(&self) {
+        let stale: Vec<(String, Vec<PathBuf>)> = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let stale_ids: Vec<String> = sessions
+                .iter()
+                .filter(|(_, s)| s.last_activity.elapsed() > SESSION_TTL)
+                .map(|(id, _)| id.clone())
+                .collect();
+            stale_ids
+                .into_iter()
+                .filter_map(|id| {
+                    sessions
+                        .remove(&id)
+                        .map(|s| (id, s.files.into_values().map(|f| f.path).collect()))
+                })
+                .collect()
+        };
+        for (id, paths) in &stale {
+            for p in paths {
+                let _ = std::fs::remove_file(p);
+            }
+            let _ = std::fs::remove_dir_all(self.save_dir().join(id));
+            log::info!("[transfer] 回收空闲会话 {id}（超时 {} 分钟）", SESSION_TTL.as_secs() / 60);
         }
     }
 }
@@ -936,18 +1016,22 @@ async fn upload_handler(
     body: Body,
 ) -> Response {
     let token = q.token.unwrap_or_default();
-    let path = match state.mgr.target_path(&q.session_id, &q.file_id, &token) {
-        Some(p) => p,
+    let (path, expected) = match state.mgr.target_path(&q.session_id, &q.file_id, &token) {
+        Some(v) => v,
         None => return (axum::http::StatusCode::FORBIDDEN, "invalid session/token").into_response(),
     };
-    let mut file = match tokio::fs::File::create(&path).await {
+    let file = match tokio::fs::File::create(&path).await {
         Ok(f) => f,
         Err(_) => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "create failed").into_response(),
     };
+    // 1 MB 缓冲：把网络来的小 chunk 合并成整块写，避免每块一次 write 系统调用
+    // （4 GB 文件按 64 KB/块曾产生约 50 万次 syscall）。
+    let mut file = BufWriter::with_capacity(WRITE_BUF, file);
     let mut stream = body.into_data_stream();
     let mut total: u64 = 0;
     let session_id = q.session_id.clone();
     let file_id = q.file_id.clone();
+    let mut last_emit = Instant::now();
     while let Some(chunk) = stream.next().await {
         match chunk {
             Ok(bytes) => {
@@ -960,13 +1044,33 @@ async fn upload_handler(
                     return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "write failed").into_response();
                 }
                 total += bytes.len() as u64;
-                state.mgr.emit_receive_progress(&session_id, &file_id, total, total);
+                // 每 ~200 ms 上报一次进度（旧实现每个 chunk 都发一次事件：
+                // 4 GB 文件约 6.5 万次 Tauri 事件 + 6.5 万次 React 重渲染 → 前端卡死）。
+                // total 用 session 里声明的文件大小：旧实现把它传成「已收字节」，
+                // 导致进度条从第一块起就显示 100%。
+                if last_emit.elapsed() >= PROGRESS_INTERVAL {
+                    state.mgr.emit_receive_progress(&session_id, &file_id, total, expected);
+                    last_emit = Instant::now();
+                }
             }
             Err(_) => {
                 return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "read failed").into_response();
             }
         }
     }
+    // 必须先 flush + 关闭文件句柄，再交给 mark_done（它会去复制这个文件）。
+    if let Err(e) = file.flush().await {
+        state
+            .mgr
+            .notify_save_dir_invalid(&state.mgr.save_dir().join(&session_id), &e.to_string());
+        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "flush failed").into_response();
+    }
+    drop(file);
+    if expected > 0 && total != expected {
+        // 发送方提前断流：如实记录，便于排查「传完却打不开」。
+        log::warn!("[transfer] {session_id}/{file_id} 大小不符：声明 {expected}，实收 {total}");
+    }
+    state.mgr.emit_receive_progress(&session_id, &file_id, total, expected.max(total));
     state.mgr.mark_done(&session_id, &file_id, "peer");
     axum::http::StatusCode::OK.into_response()
 }
@@ -978,20 +1082,101 @@ async fn cancel_handler(State(state): State<ServerState>, Query(q): Query<Upload
 
 async fn download_handler(State(state): State<ServerState>, Query(q): Query<UploadQuery>) -> Response {
     let token = q.token.unwrap_or_default();
-    let path = match state.mgr.target_path(&q.session_id, &q.file_id, &token) {
-        Some(p) => p,
+    let (path, expected) = match state.mgr.target_path(&q.session_id, &q.file_id, &token) {
+        Some(v) => v,
         None => return (axum::http::StatusCode::FORBIDDEN, "invalid").into_response(),
     };
-    let data = match tokio::fs::read(&path).await {
-        Ok(d) => d,
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
         Err(_) => return (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
     };
+    // 流式回传：旧实现 `tokio::fs::read` 把整个文件读进内存再放进 Body，
+    // 下载大文件时内存占用等于文件大小。
+    let body = Body::from_stream(file_stream(file, state.mgr, None));
     Response::builder()
-        .body(Body::from(data))
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(axum::http::header::CONTENT_LENGTH, expected.to_string())
+        .body(body)
         .unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "stream").into_response())
 }
 
 // ===================== 客户端：发送文件 =====================
+
+/// 单个待发送文件：**只记住路径与大小，不预读内容**。
+/// 旧实现把每个文件的完整字节读进 `Vec<u8>` 并全部留在内存，再在上传时 `clone()` 一份：
+/// 发 3 个 4 GB 文件 = 12 GB 常驻 + 4 GB 峰值，必然触发系统换页/卡死。
+/// 现在改为打开即流式发送，内存占用恒定为一块 STREAM_CHUNK。
+struct SendFile {
+    id: String,
+    path: PathBuf,
+    file_name: String,
+    size: u64,
+}
+
+/// 流式发送时的进度上报上下文（每块判断一次，用 Arc 避免逐块克隆字符串）。
+struct SendProgressCtx {
+    session_id: String,
+    file_id: String,
+    file_name: String,
+    peer_alias: String,
+    total: u64,
+}
+
+/// 把 `AsyncRead` 变成「逐块产出 + 节流上报进度」的字节流。
+/// `progress = None` 时是纯流式（用于接收端 download 回传）。
+fn file_stream(
+    file: tokio::fs::File,
+    mgr: &'static TransferManager,
+    progress: Option<Arc<SendProgressCtx>>,
+) -> impl Stream<Item = Result<Vec<u8>, std::io::Error>> {
+    // 文件句柄放进 unfold 的状态里：unfold 要求每次 poll 由状态传入，
+    // 不能从闭包外部捕获后 move 进 async 块。
+    futures_util::stream::unfold(
+        (file, 0u64, Instant::now()),
+        move |(mut file, sent, last_emit)| {
+            let progress = progress.clone();
+            async move {
+                let mut buf = vec![0u8; STREAM_CHUNK];
+                match file.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        let sent = sent + n as u64;
+                        if let Some(ctx) = progress {
+                            // 每 ~200 ms 上报一次，或该文件收尾时补报一次：
+                            // 旧实现整文件只在上传完成后报一条，进度条全程不动。
+                            if last_emit.elapsed() >= PROGRESS_INTERVAL || sent >= ctx.total {
+                                mgr.emit(
+                                    "transfer-progress",
+                                    TransferProgress {
+                                        direction: "send".to_string(),
+                                        session_id: ctx.session_id.clone(),
+                                        file_id: ctx.file_id.clone(),
+                                        file_name: ctx.file_name.clone(),
+                                        received: sent,
+                                        total: ctx.total,
+                                        done: false,
+                                        peer_alias: ctx.peer_alias.clone(),
+                                    },
+                                );
+                                return Some((Ok(buf), (file, sent, Instant::now())));
+                            }
+                        }
+                        Some((Ok(buf), (file, sent, last_emit)))
+                    }
+                    Err(e) => Some((Err(e), (file, sent, last_emit))),
+                }
+            }
+        },
+    )
+}
+
+/// 上传超时：按 256 KB/s 的极保守下限随文件大小伸缩，最短 60 s、最长 6 h。
+/// 旧的固定 30 s 是 reqwest 的「整个请求含读完 body」总时限 → 5 GB 文件必然中途被掐断。
+fn upload_timeout(size: u64) -> Duration {
+    let secs = (size / MIN_UPLOAD_RATE).clamp(60, 6 * 3600);
+    Duration::from_secs(secs)
+}
 
 /// 向指定指纹的对等端发送一组本地文件。返回发送会话信息或错误。
 pub async fn send_files(mgr: &TransferManager, fingerprint: &str, paths: Vec<String>) -> Result<String, String> {
@@ -1013,10 +1198,6 @@ pub async fn send_files(mgr: &TransferManager, fingerprint: &str, paths: Vec<Str
         let size = meta.len();
         let file_type = guess_file_type(&path);
         let id = Uuid::new_v4().to_string();
-        // 预读文件内容（原实现也是整文件读入内存，无回归）；协议回退时直接复用，不再重读大文件。
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| format!("读取文件失败：{e}"))?;
         files.insert(
             id.clone(),
             PrepareUploadFileV2 {
@@ -1028,7 +1209,12 @@ pub async fn send_files(mgr: &TransferManager, fingerprint: &str, paths: Vec<Str
                 checksum: None,
             },
         );
-        file_paths.push((id, path, file_name, size, bytes));
+        file_paths.push(SendFile {
+            id,
+            path,
+            file_name,
+            size,
+        });
     }
 
     let req = PrepareUploadRequestV2 {
@@ -1071,10 +1257,11 @@ pub async fn send_files(mgr: &TransferManager, fingerprint: &str, paths: Vec<Str
 
     let mut last_err = format!("发送失败：对端 {}:{} 无可用协议", peer.ip, peer.port);
     for &scheme in &schemes {
-        match try_send(mgr, &peer, &req, &file_paths, scheme).await {
+        match try_send(&peer, &req, &file_paths, scheme).await {
             Ok(sid) => return Ok(sid),
             Err((msg, true)) => {
-                // 传输层错误：尝试另一种协议方案（http <-> https）
+                // 仅在「prepare 阶段」的传输层错误才回退另一种协议：
+                // 上传中途失败若也回退，等于把整个大文件重传一遍。
                 last_err = msg;
                 continue;
             }
@@ -1085,19 +1272,22 @@ pub async fn send_files(mgr: &TransferManager, fingerprint: &str, paths: Vec<Str
 }
 
 /// 以指定 scheme（http/https）向对端发送整组文件。
-/// 返回 Ok(session_id)；失败返回 (消息, 是否传输层错误) —— 传输层错误才值得回退协议。
+/// 返回 Ok(session_id)；失败返回 (消息, 是否值得回退协议) —— 仅 prepare 阶段的传输层错误为 true。
 async fn try_send(
-    mgr: &TransferManager,
     peer: &Peer,
     req: &PrepareUploadRequestV2,
-    file_paths: &[(String, PathBuf, String, u64, Vec<u8>)],
+    file_paths: &[SendFile],
     scheme: &str,
 ) -> Result<String, (String, bool)> {
     let base = format!("{scheme}://{}:{}", peer.ip, peer.port);
+    // 流式 body 需要把管理器移进 'static 的 Stream 闭包，故统一用全局单例。
+    let mgr_static: &'static TransferManager = crate::transfer::mgr();
 
     let mut builder = reqwest::Client::builder()
         .no_proxy()
-        .timeout(std::time::Duration::from_secs(30))
+        // 只设「连接」超时：旧实现的 .timeout(30s) 是含 body 的整请求总时限，
+        // 大文件传不完就被掐断（且被判定为传输层错误 → 换协议重传一遍）。
+        .connect_timeout(Duration::from_secs(15))
         .user_agent(concat!("andeyunhui/", env!("CARGO_PKG_VERSION")));
     if scheme == "https" {
         // 局域网自签名证书：跳过证书/主机名校验，否则 TLS 握手直接失败
@@ -1111,6 +1301,7 @@ async fn try_send(
 
     let prepare: PrepareUploadResponseV2 = client
         .post(format!("{base}/api/localsend/v2/prepare-upload"))
+        .timeout(Duration::from_secs(20))
         .json(req)
         .send()
         .await
@@ -1120,31 +1311,44 @@ async fn try_send(
         .map_err(|e| (format!("解析对方响应失败（{scheme}）：{e}"), false))?;
 
     let session_id = prepare.session_id.clone();
-    for (id, _path, file_name, size, bytes) in file_paths {
+    for f in file_paths {
         let token = prepare
             .files
-            .get(id)
+            .get(&f.id)
             .cloned()
             .ok_or_else(|| ("缺少文件令牌".to_string(), false))?;
-        // 复用 send_files 预读的字节，协议回退时不再重新读大文件
-        let data = bytes.clone();
+        // 打开即发：不再整文件读入内存，也不 clone 字节
+        let file = tokio::fs::File::open(&f.path)
+            .await
+            .map_err(|e| (format!("读取文件失败（{}）：{e}", f.file_name), false))?;
+        let ctx = Arc::new(SendProgressCtx {
+            session_id: session_id.clone(),
+            file_id: f.id.clone(),
+            file_name: f.file_name.clone(),
+            peer_alias: peer.alias.clone(),
+            total: f.size,
+        });
+        let body = reqwest::Body::wrap_stream(file_stream(file, mgr_static, Some(ctx)));
         client
             .post(format!(
-                "{base}/api/localsend/v2/upload?sessionId={session_id}&fileId={id}&token={token}"
+                "{base}/api/localsend/v2/upload?sessionId={session_id}&fileId={}&token={token}",
+                f.id
             ))
-            .body(data)
+            .timeout(upload_timeout(f.size))
+            .body(body)
             .send()
             .await
-            .map_err(|e| (classify_send_error(&e, &peer.ip, peer.port, scheme), is_transport_err(&e)))?;
-        mgr.emit(
+            // 上传阶段一律不回退协议（false）：失败即报错，避免整文件重传
+            .map_err(|e| (classify_send_error(&e, &peer.ip, peer.port, scheme), false))?;
+        mgr_static.emit(
             "transfer-progress",
             TransferProgress {
                 direction: "send".to_string(),
                 session_id: session_id.clone(),
-                file_id: id.clone(),
-                file_name: file_name.clone(),
-                received: *size,
-                total: *size,
+                file_id: f.id.clone(),
+                file_name: f.file_name.clone(),
+                received: f.size,
+                total: f.size,
                 done: true,
                 peer_alias: peer.alias.clone(),
             },

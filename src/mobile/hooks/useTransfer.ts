@@ -218,9 +218,9 @@ export function useTransfer() {
         const next = prev.filter(
           (x) => !(x.session_id === p.session_id && x.file_id === p.file_id),
         );
-        // 完成项保留 3 秒后自动清除，避免列表无限堆积（移动端可视区有限）
         const merged = [...next, p];
-        return merged;
+        // 上限 50 条：后端已把进度事件节流到 ~200 ms/次，这里防止长会话内无限累积
+        return merged.length > 50 ? merged.slice(merged.length - 50) : merged;
       });
       // 完成项延时清理
       if (p.done) {
@@ -239,9 +239,12 @@ export function useTransfer() {
     listen(EVENTS.transfer.request, (e: { payload: ReceiveRequest }) => {
       const p = e.payload;
       if (!p?.session_id) return;
-      setReceiveRequests((q) =>
-        q.some((x) => x.session_id === p.session_id) ? q : [...q, p],
-      );
+      setReceiveRequests((q) => {
+        if (q.some((x) => x.session_id === p.session_id)) return q;
+        const next = [...q, p];
+        // 上限 20 条：发送方中途放弃的请求没有 confirm/decline 回调，旧实现只入队不出队
+        return next.length > 20 ? next.slice(next.length - 20) : next;
+      });
     }).then((u) => offs.push(u));
 
     return () => offs.forEach((u) => u());
