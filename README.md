@@ -156,7 +156,20 @@ pnpm lint:fix     # ESLint 自动修复
 
 ### 关于 ffmpeg 重依赖
 
-截屏录制与「薄荷」模块依赖 ffmpeg 共享库。`external-deps/全局/ffmpeg/` 已在 `.gitignore` 中忽略（单文件超 GitHub 100 MB 限制），不会进入版本库。本地开发/打包时请确保该目录包含完整 ffmpeg（可从 [gyan.dev FFmpeg](https://www.gyan.dev/ffmpeg/builds/) 的 full_build_shared 获取并放入）。CI / 干净克隆上由构建脚本负责补齐，不阻塞常规 `pnpm install`。
+截屏录制与「薄荷」模块依赖 ffmpeg。`external-deps/全局/ffmpeg/` 已在 `.gitignore` 中忽略（单文件超 GitHub 100 MB 限制），不会进入版本库。
+
+该目录**必须恰好是下面这组文件**（构建前由 `scripts/prepare-bundled-dlc.mjs` 硬校验，缺失或不完整会直接中止打包）：
+
+| 文件 | 来源 | 用途 |
+|---|---|---|
+| `ffmpeg.exe` | [gyan.dev FFmpeg](https://www.gyan.dev/ffmpeg/builds/) 的 **essentials_build / full_build**（自包含，~100 MB） | CLI：分段视频拼接、HLS 转封装、录屏回退、诊断自检 |
+| `avutil-*.dll`、`swresample-*.dll`、`avcodec-*.dll`、`avformat-*.dll` | 同版本 **shared** 构建的 `bin/` | 进程内 libavcodec 编码器（`services/recording_service/ffi.rs`），录屏零拷贝路径 |
+
+⚠️ **不要放入 `avfilter-*.dll` / `avdevice-*.dll` / `ffplay.exe` / `ffprobe.exe`**：`avfilter` 单个约 118 MiB，只有 *shared 版 CLI* 才需要它。用自包含 CLI + 上面 4 个 DLL 即可覆盖全部功能，安装包因此少约 29 MiB。
+
+> 历史故障：曾误放「shared 版 `ffmpeg.exe` + `avcodec` + `avfilter`」的残缺集 —— 79.7 MiB 依赖打进安装包却完全无法加载（CLI 与进程内编码器都起不来）。上面的校验就是为拦住这种包。
+
+CI / 干净克隆上缺这组文件时，打包会明确报错并中止；不影响常规 `pnpm install` / `pnpm dev` 的前端部分。
 
 ## 插件系统概览
 
