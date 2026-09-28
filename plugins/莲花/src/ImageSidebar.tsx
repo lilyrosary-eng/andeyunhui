@@ -16,8 +16,10 @@ export function albumCoverKey(albumId: string): string {
   return 'a:' + albumId;
 }
 
-/** 备选封面的候选上限：封面挑选用不着列出上千张，超出部分提示改用「自选图片」 */
-const COVER_CANDIDATE_MAX = 100;
+/** 每页列出的备选封面数量。面板网格是 5 列，加上「自选」格正好 25 格 = 5 整行。 */
+const COVER_PAGE_CANDIDATES = 24;
+/** 封面网格列数（与上面配套：5 列 × 5 行） */
+const COVER_GRID_COLS = 5;
 
 interface ImageFolder {
   folderPath: string;
@@ -129,31 +131,40 @@ function CoverIcon({ size = 14 }: { size?: number }) {
 
 /**
  * 相册封面选择面板。
- * 顺序按需求固定：第一个格子是「自选图片」（系统文件框任选一张），
- * 其后都是相册内已有图片作为备选。
+ * 顺序按需求固定：第一个格子是「自选图片」（系统文件框任选一张），其后都是相册内
+ * 已有图片作为备选；候选超过一页时按页切分，但「自选」在每页都固定占据第一格，
+ * 位置始终不变。
  */
 function CoverPickerOverlay(props: {
   title: string;
   candidates: string[];
   loading: boolean;
-  truncated: boolean;
+  page: number;
+  pageCount: number;
   current?: string;
   onPickFile: () => void;
   onPick: (path: string) => void;
   onReset: () => void;
+  onPage: (page: number) => void;
   onClose: () => void;
 }) {
-  const { title, candidates, loading, truncated, current, onPickFile, onPick, onReset, onClose } = props;
+  const { title, candidates, loading, page, pageCount, current, onPickFile, onPick, onReset, onPage, onClose } = props;
+  // 分页：备选按每页 COVER_PAGE_CANDIDATES 张切分；「自选」永远是当前页的第一格，
+  // 位置固定不变（翻页不会把它挤走或挪位）。
+  const start = page * COVER_PAGE_CANDIDATES;
+  const visible = candidates.slice(start, start + COVER_PAGE_CANDIDATES);
   return React.createElement('div', {
     className: 'fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4',
     onClick: onClose,
   }, React.createElement('div', {
-    className: 'w-[min(560px,92vw)] max-h-[72vh] flex flex-col rounded-2xl bg-white dark:bg-stone-800 shadow-2xl border border-black/10 dark:border-white/10 overflow-hidden',
+    className: 'w-[min(600px,92vw)] max-h-[78vh] flex flex-col rounded-2xl bg-white dark:bg-stone-800 shadow-2xl border border-black/10 dark:border-white/10 overflow-hidden',
     onClick: (e: React.MouseEvent) => e.stopPropagation(),
   },
     React.createElement('div', { key: 'hdr', className: 'flex items-center gap-2 px-4 py-3 border-b border-black/5 dark:border-white/10' },
       React.createElement('span', { key: 't', className: 'text-sm font-semibold text-neutral-700 dark:text-stone-200 flex-1 truncate' },
         `${T('image.sidebar.setCover')} · ${title}`),
+      React.createElement('span', { key: 'n', className: 'text-[11px] text-neutral-400 dark:text-stone-500 flex-shrink-0' },
+        T('image.sidebar.coverPicker.total', { n: candidates.length })),
       React.createElement('button', {
         key: 'x',
         onClick: onClose,
@@ -161,8 +172,8 @@ function CoverPickerOverlay(props: {
       }, '×'),
     ),
     React.createElement('div', { key: 'body', className: 'flex-1 overflow-y-auto p-3' },
-      React.createElement('div', { key: 'grid', className: 'grid grid-cols-4 gap-2' },
-        // ① 自选图片（永远第一个）
+      React.createElement('div', { key: 'grid', className: `grid gap-2`, style: { gridTemplateColumns: `repeat(${COVER_GRID_COLS}, minmax(0, 1fr))` } },
+        // ① 自选图片（每页都固定在第一格）
         React.createElement('button', {
           key: '__pick_file__',
           onClick: onPickFile,
@@ -172,8 +183,8 @@ function CoverPickerOverlay(props: {
           React.createElement(CoverIcon, { key: 'i', size: 18 }),
           React.createElement('span', { key: 'l', className: 'text-[10px] leading-tight text-center px-1' }, T('image.sidebar.coverPicker.pickFile')),
         ),
-        // ② 相册内备选（走 200px 缩略图缓存 + 全局限并发 4，避免大文件夹一次性解码原图）
-        candidates.map((p) => React.createElement('button', {
+        // ② 相册内备选（本页）：走 200px 缩略图缓存 + 全局限并发 4，只生成当前页可见的缩略图
+        visible.map((p) => React.createElement('button', {
           key: p,
           onClick: () => onPick(p),
           title: p,
@@ -186,14 +197,29 @@ function CoverPickerOverlay(props: {
       ),
       loading && React.createElement('p', { key: 'loading', className: 'text-xs text-neutral-400 dark:text-stone-500 mt-3 px-1' }, T('image.sidebar.coverPicker.loading')),
       !loading && candidates.length === 0 && React.createElement('p', { key: 'empty', className: 'text-xs text-neutral-400 dark:text-stone-500 mt-3 px-1' }, T('image.sidebar.coverPicker.empty')),
-      truncated && React.createElement('p', { key: 'trunc', className: 'text-[10px] text-neutral-400 dark:text-stone-500 mt-3 px-1' },
-        T('image.sidebar.coverPicker.truncated', { n: candidates.length })),
     ),
-    current && React.createElement('div', { key: 'ftr', className: 'px-4 py-2.5 border-t border-black/5 dark:border-white/10 flex justify-end' },
-      React.createElement('button', {
+    React.createElement('div', { key: 'ftr', className: 'px-4 py-2.5 border-t border-black/5 dark:border-white/10 flex items-center gap-3' },
+      // 分页控件（只有一页时不显示，避免噪音）
+      pageCount > 1 && React.createElement('div', { key: 'pager', className: 'flex items-center gap-1.5 mr-auto' },
+        React.createElement('button', {
+          key: 'prev',
+          disabled: page <= 0,
+          onClick: () => onPage(page - 1),
+          className: `w-6 h-6 rounded-lg text-sm leading-none ${page <= 0 ? 'text-neutral-300 dark:text-stone-600 cursor-not-allowed' : 'text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/10'}`,
+        }, '‹'),
+        React.createElement('span', { key: 'info', className: 'text-[11px] text-neutral-500 dark:text-stone-400 tabular-nums px-0.5' },
+          T('image.sidebar.coverPicker.page', { i: page + 1, n: pageCount })),
+        React.createElement('button', {
+          key: 'next',
+          disabled: page >= pageCount - 1,
+          onClick: () => onPage(page + 1),
+          className: `w-6 h-6 rounded-lg text-sm leading-none ${page >= pageCount - 1 ? 'text-neutral-300 dark:text-stone-600 cursor-not-allowed' : 'text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/10'}`,
+        }, '›'),
+      ),
+      current && React.createElement('button', {
         key: 'reset',
         onClick: onReset,
-        className: 'text-xs text-neutral-500 dark:text-stone-400 hover:text-red-400 transition-colors',
+        className: 'text-xs text-neutral-500 dark:text-stone-400 hover:text-red-400 transition-colors ml-auto',
       }, T('image.sidebar.coverPicker.reset')),
     ),
   ));
@@ -215,7 +241,9 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
   } | null>(null);
   const [coverCandidates, setCoverCandidates] = useState<string[]>([]);
   const [coverLoading, setCoverLoading] = useState(false);
-  const [coverTruncated, setCoverTruncated] = useState(false);
+  // 分页：完整候选列表留在内存（只是路径字符串，2000 张也就几百 KB），
+  // 每页只渲染 COVER_PAGE_CANDIDATES 张缩略图 → 大文件夹也不会一次拉起上千个缩略图任务。
+  const [coverPage, setCoverPage] = useState(0);
   // 序号守卫：面板连续切换相册时，丢弃上一次异步取图的迟到结果（并发场景不串数据）
   const pickerSeq = React.useRef(0);
 
@@ -223,12 +251,12 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
     const seq = ++pickerSeq.current;
     setCoverPicker(target);
     setCoverCandidates([]);
-    setCoverTruncated(false);
+    setCoverPage(0);
     const finish = (list: string[]) => {
       if (seq !== pickerSeq.current) return; // 已切到别的相册，丢弃
       const arr = Array.isArray(list) ? list.filter((p) => typeof p === 'string' && p) : [];
-      setCoverCandidates(arr.slice(0, COVER_CANDIDATE_MAX));
-      setCoverTruncated(arr.length > COVER_CANDIDATE_MAX);
+      setCoverCandidates(arr);
+      setCoverPage(0);
       setCoverLoading(false);
     };
     if (target.source.kind === 'album') {
@@ -247,6 +275,7 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
     pickerSeq.current++; // 让在途请求作废
     setCoverPicker(null);
     setCoverCandidates([]);
+    setCoverPage(0);
   };
 
   // 「自选」：走宿主的系统文件框（pick_file），并把所选文件父目录加入 asset scope，
@@ -440,17 +469,22 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
   ];
 
   // 封面选择面板：与侧栏同级渲染（fixed 覆盖层），两种布局分支都要挂上
+  const coverPageCount = Math.max(1, Math.ceil(coverCandidates.length / COVER_PAGE_CANDIDATES));
+  // 候选列表变化后页码可能越界（例如从 5 页的相册切到 1 页的相册），渲染前夹紧
+  const coverPageSafe = Math.min(coverPage, coverPageCount - 1);
   const coverOverlay = coverPicker && onSetCover
     ? React.createElement(CoverPickerOverlay, {
         key: 'cover-picker',
         title: coverPicker.title,
         candidates: coverCandidates,
         loading: coverLoading,
-        truncated: coverTruncated,
+        page: coverPageSafe,
+        pageCount: coverPageCount,
         current: coverPicker.current,
         onPickFile: pickCoverFromDisk,
         onPick: (p: string) => { onSetCover(coverPicker.key, p); closeCoverPicker(); },
         onReset: () => { onSetCover(coverPicker.key, null); closeCoverPicker(); },
+        onPage: (p: number) => setCoverPage(Math.max(0, Math.min(p, coverPageCount - 1))),
         onClose: closeCoverPicker,
       })
     : null;

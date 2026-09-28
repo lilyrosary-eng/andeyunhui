@@ -1098,7 +1098,8 @@ export const frFR: Record<string, string> = {
   'image.sidebar.coverPicker.pickFile': 'Choisir une image…',
   'image.sidebar.coverPicker.loading': 'Chargement…',
   'image.sidebar.coverPicker.empty': 'Aucune image dans cet album — utilisez « Choisir une image »',
-  'image.sidebar.coverPicker.truncated': 'Seules les {n} premières images sont affichées',
+  'image.sidebar.coverPicker.total': '{n} images',
+  'image.sidebar.coverPicker.page': 'Page {i} sur {n}',
   'image.sidebar.coverPicker.reset': 'Rétablir la couverture par défaut',
   'image.sidebar.search': 'Rechercher des dossiers...',
   // Visionneuse
