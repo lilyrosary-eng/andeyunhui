@@ -293,21 +293,20 @@
   html.has-custom-bg.dark .dark\:bg-\[\#1c1917\] {
     background-color: rgba(28, 25, 23, 0.3) !important;
   }
-  /* 启用自定义背景图时，图标栏（nav-primary-bg）与侧边栏（nav-secondary-bg）
-     也降为半透明磨砂。二者本就带 backdrop-blur-md，底色变透后背景图透入即呈磨砂质感；
-     保留约 0.2 衬底保证图标/文字可读。未选背景图时（无 has-custom-bg）不生效，外观零变化。 */
-  /* 上栏与一级图标栏进一步改为「常态全透、悬停才浮出衬底」：
+  /* 上栏、一级图标栏、二级侧栏统一改为「常态全透、悬停才浮出衬底」：
      常态把底色、分隔线与毛玻璃一起撤掉，背景图完整透出；鼠标移入才恢复磨砂衬底。
-     未开启自定义背景时这两条不生效，外观零变化。 */
+     未开启自定义背景时这些规则不生效，外观零变化。 */
   html.has-custom-bg .titlebar-surface,
-  html.has-custom-bg .nav-primary-bg {
+  html.has-custom-bg .nav-primary-bg,
+  html.has-custom-bg .nav-secondary-bg {
     background-color: transparent !important;
     border-color: transparent !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
   html.has-custom-bg .titlebar-surface:hover,
-  html.has-custom-bg .nav-primary-bg:hover {
+  html.has-custom-bg .nav-primary-bg:hover,
+  html.has-custom-bg .nav-secondary-bg:hover {
     backdrop-filter: blur(12px) !important;
     -webkit-backdrop-filter: blur(12px) !important;
   }
@@ -319,6 +318,11 @@
     background-color: rgba(255, 255, 255, 0.2) !important;
     border-color: rgba(255, 255, 255, 0.8) !important;
   }
+  /* 二级侧栏是内容面板（要读列表文字），悬停衬底比图标栏更实一档 */
+  html.has-custom-bg .nav-secondary-bg:hover {
+    background-color: rgba(255, 255, 255, 0.4) !important;
+    border-color: rgba(255, 255, 255, 0.8) !important;
+  }
   html.has-custom-bg.dark .titlebar-surface:hover {
     background-color: rgba(28, 25, 23, 0.3) !important;
     border-color: rgba(68, 64, 60, 0.5) !important;
@@ -327,11 +331,9 @@
     background-color: rgba(28, 25, 23, 0.2) !important;
     border-color: rgba(68, 64, 60, 0.5) !important;
   }
-  html.has-custom-bg .nav-secondary-bg {
-    background-color: rgba(255, 255, 255, 0) !important;
-  }
-  html.has-custom-bg.dark .nav-secondary-bg {
-    background-color: rgba(28, 25, 23, 0) !important;
+  html.has-custom-bg.dark .nav-secondary-bg:hover {
+    background-color: rgba(28, 25, 23, 0.4) !important;
+    border-color: rgba(68, 64, 60, 0.5) !important;
   }
   /* 全局设置面板：浅色模式卡片原用纯白 bg-white（不透），与其深色模式
      bg-stone-800/70（70% 透）的磨砂观感不对齐。仅在该面板（.settings-surface）下、

@@ -6,6 +6,7 @@ import { Ripple } from '@/components/motion/Ripple';
 import { useI18n } from '@/lib/i18n';
 import { storage } from '@/core/storage';
 import { KEYS, moduleToggleKey } from '@/core/storage/keys';
+import { useAppStore } from '@/stores/appStore';
 
 const SIDEBAR_EXPANDED_WIDTH = 260;
 const SIDEBAR_COLLAPSED_WIDTH = 48;
@@ -53,6 +54,10 @@ export function ModuleSidebarShell({
 }: ModuleSidebarShellProps) {
   const { t } = useI18n();
   const storageKey = moduleToggleKey(moduleId);
+  // 沉浸模式下上栏隐藏，内容区升到窗口顶端；本侧栏若跟着上移，头部 logo 会顶进悬浮层的
+  // 矢车菊 logo 里。这里补一条等于悬浮层高度的顶部内缩（与 ImmersiveChrome 的 h-[38px] 对齐），
+  // 让侧栏只横向左移、纵向保持原位，两者互不干扰。
+  const immersive = useAppStore(s => s.immersive);
 
   // 持久化状态
   const [collapsed, setCollapsed] = useState(() => {
@@ -93,7 +98,7 @@ export function ModuleSidebarShell({
 
   return (
     <div
-      className={`h-full flex-shrink-0 flex flex-col slide-in-left overflow-hidden ${collapsed ? '' : 'nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50'} ${hidden ? 'hidden' : ''}`}
+      className={`h-full flex-shrink-0 flex flex-col slide-in-left overflow-hidden ${collapsed ? '' : 'nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50'} ${immersive ? 'pt-[38px]' : ''} ${hidden ? 'hidden' : ''}`}
       style={{
         width: collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH,
         transition: `width ${COLLAPSE_WIDTH_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`,
