@@ -717,7 +717,7 @@ const lockTransition = useCallback(() => {
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#f5f5f0] dark:bg-[#1c1917]">
+    <div className="h-full flex flex-col bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top">
       {/* 顶部栏 */}
       <div className="shrink-0 px-6 py-3 border-b border-neutral-200/60 dark:border-stone-700/50 flex items-center gap-3">
         <button onClick={onBack}

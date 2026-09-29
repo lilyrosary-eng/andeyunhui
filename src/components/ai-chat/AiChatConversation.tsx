@@ -254,11 +254,13 @@ export const AiChatConversation = memo(function AiChatConversation({
   const compactCard = showCompanionAvatar ? companionCard : null;
   const blockCard = showCompanionAvatar ? null : companionCard;
 
-  // 胶囊形态：深色玻璃皮肤；主窗口形态：原浅色
-  // 沉浸态顶部让位由宿主侧的插件保活外壳统一处理（见 App.tsx），这里不重复加标记。
+  // 胶囊形态：深色玻璃皮肤；主窗口形态：原浅色且带 immersive-safe-top ——
+  // 本列自带 bg-[#f5f5f0] 表面色，让位标记打在它自己这层，顶部 38px 带子同色填满、无色差条，
+  // 同时头部那两行（h-12 / h-14）不再落进悬浮层的矢车菊 logo 与拖拽条下。
+  // （胶囊是独立窗口，不带 .immersive-mode，不受影响）
   const shellClass = capsuleMode
     ? 'flex-1 h-full flex flex-col bg-black/20 backdrop-blur-xl text-white/90'
-    : 'flex-1 h-full flex flex-col bg-[#f5f5f0] dark:bg-[#1c1917]';
+    : 'flex-1 h-full flex flex-col bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top';
   const borderCls = capsuleMode ? 'border-white/10' : 'border-black/5 dark:border-white/5';
   const mutedCls = capsuleMode ? 'text-white/50' : 'text-neutral-400 dark:text-stone-500';
   const bubbleCls = capsuleMode

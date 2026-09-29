@@ -536,7 +536,7 @@ function ReadingModule() {
           </div>
         )}
         {showStats && (
-          <div className="absolute inset-0 z-20 bg-[#f5f5f0] dark:bg-[#1c1917]">
+          <div className="absolute inset-0 z-20 bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top">
             <ReadingStatsPage
               books={books}
               onOpenBook={(b) => {
@@ -558,7 +558,7 @@ function ReadingModule() {
           </div>
         )}
         {showSettings && (
-          <div className="absolute inset-0 z-20 bg-[#f5f5f0] dark:bg-[#1c1917]">
+          <div className="absolute inset-0 z-20 bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top">
             <SettingsContent
               rootPaths={rootPaths}
               onRemoveRoot={handleRemoveRoot}

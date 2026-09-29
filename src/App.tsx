@@ -676,10 +676,10 @@ function App() {
             return (
               <div
                 key={def.id}
-                // immersive-safe-top：插件模块统一在这里让开悬浮层顶部 38px。
-                // 插件会把宿主 src 打进自己的包，无法可靠读取沉浸态，所以由宿主侧外壳统一处理，
-                // 插件自身一行都不用改，也不会因插件不同而表现不一致。
-                className="h-full w-full overflow-hidden immersive-safe-top"
+                // 这里刻意不加 immersive-safe-top：本外壳是透明的，加内缩只会让顶部 38px 露出
+                // 窗口底色，与插件自己的表面色撞成色差条。让位标记统一放在"自带表面底色、
+                // 且顶部有工具栏"的具体视图容器上（见 index.css 的规则说明）。
+                className="h-full w-full overflow-hidden"
                 style={{ display: show ? undefined : 'none' }}
                 aria-hidden={show ? undefined : true}
               >

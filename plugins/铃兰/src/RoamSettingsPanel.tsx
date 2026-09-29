@@ -60,7 +60,7 @@ export function RoamSettingsPanel({ onClose }: { onClose: () => void }) {
   }, [barPosition]);
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-[#1e1e1e]">
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-[#1e1e1e] immersive-safe-top">
       {/* 头部 */}
       <div className="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-neutral-200/60 dark:border-stone-700/60">
         <button

@@ -2378,7 +2378,7 @@ function ProfessionalModule() {
     <div className="flex-1 flex h-full overflow-hidden">
       {sidebar}
       <PushViewBox
-        className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]"
+        className="flex-1 h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top"
         activeKey={showSettings ? 'settings' : selectedTool ? `tool:${selectedTool.id}` : 'list'}
       >
         {showSettings ? (

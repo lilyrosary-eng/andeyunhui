@@ -13,7 +13,7 @@ export interface ModuleSettingsPanelProps {
 export function ModuleSettingsPanel({ title, icon, onClose, children }: ModuleSettingsPanelProps) {
   const { t } = useI18n();
   return (
-    <div className="flex-1 h-full overflow-y-auto main-panel-bg p-6 fade-in">
+    <div className="flex-1 h-full overflow-y-auto main-panel-bg p-6 fade-in immersive-safe-top">
       <div className="max-w-lg mx-auto">
         {/* 标题栏 */}
         <div className="flex items-center justify-between mb-6">

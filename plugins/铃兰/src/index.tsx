@@ -520,7 +520,7 @@ function MusicStatsView({ onClose, favoriteCount = 0 }: { onClose: () => void; f
   const isEmpty = !loading && !error && totalPlays === 0 && daily.length === 0;
 
   return (
-    <div className="flex flex-col h-full bg-[#f5f5f0] dark:bg-[#1c1917]">
+    <div className="flex flex-col h-full bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top">
       <div className="flex items-center gap-3 px-5 py-4 border-b border-neutral-200/50 dark:border-stone-700/50">
         <button
           onClick={onClose}

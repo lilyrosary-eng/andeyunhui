@@ -105,7 +105,7 @@ export function OnlineVideoView({
     }),
     React.createElement(
       'div',
-      { className: 'relative flex-1 flex flex-col bg-neutral-50 dark:bg-stone-900' },
+      { className: 'relative flex-1 flex flex-col bg-neutral-50 dark:bg-stone-900 immersive-safe-top' },
       showStats
         ? React.createElement(VideoStatsView, null)
         : platform

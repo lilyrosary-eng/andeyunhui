@@ -605,7 +605,7 @@ export function TrackList({
   const openTrack = openMenuIndex !== null ? tracks[openMenuIndex] : null;
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden">
+    <div className="flex-1 flex flex-col h-full overflow-hidden immersive-safe-top">
       <div className="flex items-center justify-between p-4 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-sm">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-medium text-neutral-700 dark:text-stone-200">{playlistName}</h2>

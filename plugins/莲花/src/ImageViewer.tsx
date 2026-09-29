@@ -391,7 +391,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917]">
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top">
       {/* 顶部工具栏（完整模式可点击图片中心隐藏，沉浸阅读） */}
       {!(viewMode === 'full' && chromeHidden) && (
       <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-sm">

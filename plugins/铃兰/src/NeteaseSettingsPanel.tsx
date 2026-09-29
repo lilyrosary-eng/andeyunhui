@@ -100,7 +100,7 @@ export default function NeteaseSettingsPanel({ onClose }: NeteaseSettingsPanelPr
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-[#f5f5f0] dark:bg-[#1c1917]">
+    <div className="h-full overflow-y-auto bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top">
       <div className="flex items-center gap-3 px-5 py-4 border-b border-neutral-200/50 dark:border-stone-700/50">
         <button
           onClick={onClose}

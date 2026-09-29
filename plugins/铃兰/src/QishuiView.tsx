@@ -440,7 +440,7 @@ setQrLoading(false);
   }, [tracks, doPlay, activePlaylist]);
 
   return (
-    <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden overflow-x-hidden relative bg-white dark:bg-[#1e1e1e]">
+    <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden overflow-x-hidden relative bg-white dark:bg-[#1e1e1e] immersive-safe-top">
       {/* 顶栏：复用通用音乐模块模板 */}
       <MusicHeader
         title={

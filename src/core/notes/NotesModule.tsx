@@ -11,9 +11,11 @@ export function NotesModule() {
   const showNoteSettings = useAppStore(s => s.showNoteSettings);
 
   return (
-    <div className="flex flex-1 h-full overflow-hidden immersive-safe-top">
+    <div className="flex flex-1 h-full overflow-hidden">
       <NotesSidebar />
-      <div className={`flex-1 h-full overflow-hidden ${showNoteSettings ? '' : 'main-panel-bg p-6'}`}>
+      {/* immersive-safe-top 打在编辑区自己这层（它自带 main-panel-bg）：顶部 38px 带子用同一底色
+          填满，不产生色差条。侧栏由 ModuleSidebarShell 自带同一个类（它自带 nav-secondary-bg）。 */}
+      <div className={`flex-1 h-full overflow-hidden immersive-safe-top ${showNoteSettings ? '' : 'main-panel-bg p-6'}`}>
         {showNoteSettings ? <NoteSettingsPanel /> : <NotesEditor />}
       </div>
     </div>

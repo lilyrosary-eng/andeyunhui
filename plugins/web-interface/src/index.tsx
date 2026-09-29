@@ -705,7 +705,7 @@ function EditorForm({
   const btnBase = 'btn-press inline-flex items-center gap-1 rounded-lg border border-black/10 dark:border-white/10 px-3 py-1.5 text-xs text-neutral-600 dark:text-stone-300 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50';
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col gap-4 rounded-2xl border border-black/10 dark:border-white/10 p-4 bg-white dark:bg-stone-900 overflow-y-auto">
+    <div className="flex-1 min-h-0 flex flex-col gap-4 rounded-2xl border border-black/10 dark:border-white/10 p-4 bg-white dark:bg-stone-900 overflow-y-auto immersive-safe-top">
       <div className="flex items-center justify-between">
         <div className="text-base font-semibold text-neutral-800 dark:text-stone-100">
           {initial.id ? '编辑预设' : '新建预设'}
