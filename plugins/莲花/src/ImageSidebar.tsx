@@ -25,9 +25,17 @@ const COVER_THUMB_CACHE_MAX = 3;
 /** 缩略图解析的全局限并发：与查看器缩略图条同款，避免批量拉缩略图时挤爆 CPU。 */
 const COVER_THUMB_CONCURRENCY = 4;
 
-// 缩略图解析队列（模块级：并发计数需要跨组件实例共享，与查看器 thumbQueue 同一模式）
+/** 把本地路径转成可渲染的 asset URL；失败返回 ''（渲染成空占位而不是报错）。 */
+function safeFileSrc(p: string): string {
+  try { return hostApi.convertFileSrc(p); } catch { return ''; }
+}
+
+/** 缩略图解析队列（模块级：并发计数需要跨组件实例共享，与查看器 thumbQueue 同一模式） */
 const coverThumbQueue: Array<() => void> = [];
 let coverThumbActive = 0;
+// 在途解析集合（按原图路径）：effect 重跑（含 StrictMode 双执行）时据此去重，
+// 不会对同一张图重复排期，也不会因为「占位已写」而漏掉真正的加载。
+const coverThumbInFlight = new Set<string>();
 function pumpCoverThumbQueue() {
   while (coverThumbActive < COVER_THUMB_CONCURRENCY && coverThumbQueue.length > 0) {
     coverThumbActive++;
@@ -179,10 +187,17 @@ function CoverPickerOverlay(props: {
   const { cacheKey, title, candidates, loading, page, pageCount, current, onPickFile, onPick, onReset, onPage, onClose } = props;
   // 已解析缩略图：pageKey -> (原图路径 -> asset URL)。放在 ref 里而不是 state，
   // 避免每次有新缩略图就整表复制；用 forceRender 触发重渲染。
+  // 取值约定：undefined = 未解析（需要加载）；'' = 解析失败（不重试）；其它 = 可用的图片 URL。
   const cacheRef = React.useRef(new Map<string, Map<string, string>>());
-  const disposedRef = React.useRef(false);
+  // 存活标记：必须在每次挂载时重新置 true。宿主在 dev 下开了 <React.StrictMode>，
+  // effect 会被「挂载 → 清理 → 再挂载」执行两遍；若只在清理时置 false、挂载时忘记复位，
+  // 二次挂载后所有在途任务都会被自己判死，缩略图永远出不来（正是上一版的翻车点）。
+  const aliveRef = React.useRef(false);
   const [, forceRender] = React.useState(0);
-  React.useEffect(() => () => { disposedRef.current = true; }, []);
+  React.useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
 
   const start = page * COVER_PAGE_CANDIDATES;
   const visible = candidates.slice(start, start + COVER_PAGE_CANDIDATES);
@@ -202,25 +217,28 @@ function CoverPickerOverlay(props: {
       if (oldest === undefined || oldest === pageKey) break;
       cache.delete(oldest);
     }
-    // 只排期本页缺失的：命中缓存（含刚回退一页）的格子立即有图，不再走后端
-    const pending: string[] = [];
+    // 只处理「未解析」且「不在途」的格子：命中缓存（含刚回退一页）的直接出图，
+    // 不走后端；在途的不重复排期（StrictMode 二次执行时也不会重复加载）。
     for (const p of visible) {
-      if (bucket.has(p)) continue;
-      bucket.set(p, ''); // 占位：避免同一张图重复排期；解析失败也留空占位，不做无效重试
-      pending.push(p);
-    }
-    for (const p of pending) {
+      if (bucket.get(p) !== undefined) continue;
+      if (coverThumbInFlight.has(p)) continue;
+      coverThumbInFlight.add(p);
       scheduleCoverThumb(() => {
-        if (disposedRef.current) { coverThumbSettled(); return; }
+        if (!aliveRef.current) { coverThumbInFlight.delete(p); coverThumbSettled(); return; }
         hostApi.invoke<string>('generate_thumbnail', { imagePath: p, width: 200 })
           .then((thumb) => {
-            if (disposedRef.current || !thumb) return;
-            try { bucket.set(p, hostApi.convertFileSrc(thumb)); } catch { /* ignore */ }
+            if (!aliveRef.current) return;
+            // 缩略图生成失败（格式不支持等）时退回原图：宁可多解一次码，
+            // 也不要让整格空白——「点了没反应 / 一片空白」是最难排查的体感。
+            bucket.set(p, thumb ? safeFileSrc(thumb) : safeFileSrc(p));
           })
-          .catch(() => { /* 单张失败不影响整页 */ })
+          .catch(() => {
+            if (aliveRef.current) bucket.set(p, safeFileSrc(p));
+          })
           .finally(() => {
+            coverThumbInFlight.delete(p);
             coverThumbSettled();
-            if (!disposedRef.current) forceRender((n) => n + 1);
+            if (aliveRef.current) forceRender((n) => n + 1);
           });
       });
     }
