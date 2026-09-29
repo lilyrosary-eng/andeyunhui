@@ -629,9 +629,53 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     .roam-stage.flipped .roam-lyrics { right: auto; left: clamp(16px, 3%, 40px); align-items: flex-start; text-align: left; }
   `;
 
+  // 舞台样式注入：打包版 CSP 会给 style-src 追加 nonce（Tauri 编译期注入），
+  // 按 CSP 规范「nonce/hash 存在时 'unsafe-inline' 被忽略」，动态插入的 <style> 会被整块拦掉，
+  // 表现为漫游舞台样式全失效、只剩封面被拉伸铺满（dev 走 Vite 服务无该 CSP，故只在打包后异常）。
+  // 这里改用「构造样式表」（CSSStyleSheet + adoptedStyleSheets）：它不经过 style-src 检查，
+  // dev/打包表现一致；不支持构造样式表的环境回退到 <style> 元素。
+  const stageSheetRef = useRef<CSSStyleSheet | null>(null);
+  const stageStyleElRef = useRef<HTMLStyleElement | null>(null);
+  const stageCssAppliedRef = useRef('');
+  useEffect(() => {
+    if (stageCssAppliedRef.current === stageStyle) return;
+    stageCssAppliedRef.current = stageStyle;
+    try {
+      if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in document) {
+        let sheet = stageSheetRef.current;
+        if (!sheet) {
+          sheet = new CSSStyleSheet();
+          document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+          stageSheetRef.current = sheet;
+        }
+        sheet.replaceSync(stageStyle);
+        return;
+      }
+    } catch { /* 构造样式表不可用 → 回退 <style> */ }
+    let el = stageStyleElRef.current;
+    if (!el) {
+      el = document.createElement('style');
+      el.setAttribute('data-roam-stage', '1');
+      document.head.appendChild(el);
+      stageStyleElRef.current = el;
+    }
+    el.textContent = stageStyle;
+  }, [stageStyle]);
+
+  // 卸载时移除注入的样式表 / 样式元素，避免残留影响其它页面
+  useEffect(() => () => {
+    const sheet = stageSheetRef.current;
+    if (sheet) {
+      document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== sheet);
+      stageSheetRef.current = null;
+    }
+    stageStyleElRef.current?.remove();
+    stageStyleElRef.current = null;
+    stageCssAppliedRef.current = '';
+  }, []);
+
   return (
     <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative" style={{ background: stageBg }}>
-      <style dangerouslySetInnerHTML={{ __html: stageStyle }} />
 
       {/* 主舞台 */}
       <div className="flex-1 relative overflow-hidden">
