@@ -951,8 +951,10 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
     await playTrackList(currentList, index, track.name);
   }
 
+  // immersive-safe-top 打在视图根上（自身透明，顶部 38px 带子由模块纸面底色填充）：
+  // 让顶部标题栏避开沉浸模式悬浮层占用的 38px，否则标题被压住、点击被拖拽条吞掉。
   return (
-    <div className="flex flex-col min-h-0 h-full">
+    <div className="flex flex-col min-h-0 h-full immersive-safe-top">
       {/* 顶栏：复用通用音乐模块模板（标题 + 登录按钮 + 云按钮） */}
       <MusicHeader
         title={playlistMode

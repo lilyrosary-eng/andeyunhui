@@ -89,13 +89,13 @@ export default function KugouStatsView({ onClose }: { onClose?: () => void }) {
   );
 
   if (loading) {
-    return React.createElement('div', { className: 'p-6' }, header,
+    return React.createElement('div', { className: 'p-6 immersive-safe-top' }, header,
       React.createElement('div', { className: 'text-neutral-400 dark:text-stone-500 text-sm py-12 text-center' }, T('music.stats.loading', '加载中…')),
     );
   }
 
   if (error) {
-    return React.createElement('div', { className: 'p-6' }, header,
+    return React.createElement('div', { className: 'p-6 immersive-safe-top' }, header,
       React.createElement('div', { className: 'text-red-500/80 text-sm py-12 text-center' }, error),
     );
   }
@@ -128,5 +128,7 @@ export default function KugouStatsView({ onClose }: { onClose?: () => void }) {
     ),
   );
 
-  return React.createElement('div', { className: 'p-6' }, header, summary, list);
+  // immersive-safe-top：根容器自身透明（顶部带子由模块纸面底色填充），
+  // 加在根上让「统计 + 返回/刷新」标题避开沉浸模式悬浮层占用的 38px。
+  return React.createElement('div', { className: 'p-6 immersive-safe-top' }, header, summary, list);
 }

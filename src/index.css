@@ -298,6 +298,13 @@
   html.immersive-mode .immersive-safe-top .immersive-safe-top {
     padding-top: 0;
   }
+  /* 中转站 OCR 工作区是绝对定位面板（absolute left-6 top-6，不参与父级文档流）：
+     父级的 .immersive-safe-top 只加了 padding-top，对绝对定位子元素不生效，
+     沉浸态下它仍从窗口顶部 24px 起算、顶部约 14px 落进悬浮层拖拽条（0~38px）里。
+     所以沉浸态单独把它整体下移：38px 悬浮带 + 原有 24px 间距 = 62px。非沉浸态此规则不生效，外观零变化。 */
+  html.immersive-mode .immersive-ocr-panel {
+    top: 62px;
+  }
   /* 启用自定义背景图时，主面板背景透明，露出底部的模糊背景层 */
   html.has-custom-bg .main-panel-bg {
     background-color: transparent !important;

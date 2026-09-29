@@ -377,9 +377,11 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
 
   return (
     <div className="relative flex-1 h-full overflow-hidden main-panel-bg p-6 fade-in flex flex-col immersive-safe-top">
-      {/* 主站左侧：OCR 工作区（自包含，支持拖入 / 选择 / 粘贴图片） */}
+      {/* 主站左侧：OCR 工作区（自包含，支持拖入 / 选择 / 粘贴图片）。
+          immersive-ocr-panel：绝对定位不吃父级 .immersive-safe-top 的 padding-top，
+          沉浸态由 CSS 单独下移（见 index.css），非沉浸态外观不变。 */}
       {variant === 'main' && ocrOpen && (
-        <div className="absolute left-6 top-6 bottom-6 w-80 z-10">
+        <div className="absolute left-6 top-6 bottom-6 w-80 z-10 immersive-ocr-panel">
           <OcrWorkspace prefillDataUrl={ocrPrefill} onClose={() => setOcrOpen(false)} />
         </div>
       )}

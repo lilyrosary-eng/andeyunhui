@@ -90,7 +90,9 @@ function KugouSettingsPanelInner({ onBack }: { onBack?: () => void }) {
       ])
     : null;
 
-  return React.createElement('div', { className: 'p-6' }, [
+  // immersive-safe-top：根容器自身透明（顶部带子由模块纸面底色填充），
+  // 加在根上让「返回 + 模块设置」标题避开沉浸模式悬浮层占用的 38px。
+  return React.createElement('div', { className: 'p-6 immersive-safe-top' }, [
     backBtn,
     React.createElement('h2', { key: 'h', className: 'text-lg font-semibold text-neutral-800 dark:text-stone-100 mb-4' }, T('music.settings.title', '模块设置')),
     React.createElement('div', { key: 'sec', className: 'space-y-2' }, qualityTrigger, qualityMenu),
