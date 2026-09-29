@@ -44,6 +44,12 @@ import type { PlayInfo, ReceiveRequest } from '@/components/capsule/types';
 import { EVENTS } from '@/core/events/schema';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
+import { injectCssOnce } from '@/lib/injectCss';
+
+// 收起态呼吸动画 @keyframes capsulePulse。
+// 走构造样式表注入：打包版 CSP 给 style-src 追加 nonce 后，JSX 渲染出的 <style> 会被整块拦掉
+// （dev 无该 CSP 所以只在打包版失效），回退 <style> 逻辑见 injectCssOnce。
+injectCssOnce('capsule-keyframes', '@keyframes capsulePulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.65)}}');
 
 // 生产构建里所有 [CAPSULE-PROBE] 诊断（fps RAF / longtask / console.log / outerSize 探针）会被
 // Vite 静态替换 + tree-shake 掉，透明浮窗不再背运行时诊断开销。DEV 模式下仍可在胶囊 DevTools 查看。
@@ -857,7 +863,6 @@ export default function Capsule() {
         pointerEvents: 'none',
       }}
     >
-      <style>{`@keyframes capsulePulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.65)}}`}</style>
       {/* 轻量 toast：接收相关反馈（请求 / 接收中 / 完成） */}
       {toast && (
         <div

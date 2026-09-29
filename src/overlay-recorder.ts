@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { EVENTS } from "./core/events/schema";
+import { injectCssOnce } from "./lib/injectCss";
 
 // ========== DOM 构建 ==========
 const root = document.getElementById("root")!;
@@ -572,15 +573,13 @@ listen(EVENTS.recorder.reveal, () => {
   scheduleAutoHide(3000);
 });
 
-// 闪烁动画
-const style = document.createElement("style");
-style.textContent = `
+// 闪烁动画（走构造样式表注入：打包版 CSP 给 style-src 追加 nonce 后动态 <style> 会被拦掉，回退见 injectCssOnce）
+injectCssOnce("overlay-recorder", `
   @keyframes rec-blink {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.3; }
   }
-`;
-document.head.appendChild(style);
+`);
 
 // 初始化：刷新状态并启动轮询（录制由区域选择流程启动）
 void (async () => {

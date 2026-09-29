@@ -9,6 +9,12 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { storage } from "../core/storage";
 import { KEYS } from "../core/storage/keys";
 import { EVENTS } from "../core/events/schema";
+import { injectCssOnce } from "../lib/injectCss";
+
+// 轻跳反馈动画 @keyframes pet-bounce。
+// 走构造样式表注入：打包版 CSP 给 style-src 追加 nonce 后，JSX 渲染出的 <style> 会被整块拦掉
+// （dev 无该 CSP 所以只在打包版失效），回退 <style> 逻辑见 injectCssOnce。
+injectCssOnce('deskpet-keyframes', '@keyframes pet-bounce{0%{transform:translateY(0)}30%{transform:translateY(-10px)}55%{transform:translateY(0)}75%{transform:translateY(-4px)}100%{transform:translateY(0)}}');
 
 // 浮窗基础尺寸（scale=1 时）：恰好包住桌宠的小方框，绝不做全屏透明页（否则干扰截图选区）
 const WIN_W = 150;
@@ -1134,7 +1140,7 @@ export function DeskpetPet() {
         willChange: "transform, opacity",
       }}
     >
-      <style>{`@keyframes pet-bounce{0%{transform:translateY(0)}30%{transform:translateY(-10px)}55%{transform:translateY(0)}75%{transform:translateY(-4px)}100%{transform:translateY(0)}}`}</style>
+      {/* 轻跳反馈动画 @keyframes pet-bounce：走构造样式表注入，打包版 CSP 下 JSX <style> 会被拦掉，回退见 injectCssOnce */}
       <div
         ref={leanRef}
         onPointerDown={onPointerDown}

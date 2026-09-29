@@ -21,6 +21,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { EVENTS } from "./core/events/schema";
+import { injectCssOnce } from "./lib/injectCss";
 
 // 透明分层窗首帧黑闪根治：把本覆盖窗 WebView2 默认背景设为透明
 // （否则长时隐藏后 show() 首帧露出 WebView2 默认黑底 → 闪黑）。页面挂载即调用一次。
@@ -238,14 +239,13 @@ countdownEl.appendChild(cdText);
 root.appendChild(countdownEl);
 
 // 倒计时数字弹跳动画（每次换数字重新触发）
-const cdStyle = document.createElement("style");
-cdStyle.textContent = `
+// 走构造样式表注入：打包版 CSP 给 style-src 追加 nonce 后动态 <style> 会被拦掉（回退见 injectCssOnce）
+injectCssOnce("overlay-recorder-select", `
 @keyframes cd-pop {
   0% { transform: scale(0.4); opacity: 0; }
   30% { transform: scale(1.15); opacity: 1; }
   100% { transform: scale(1); opacity: 1; }
-}`;
-document.head.appendChild(cdStyle);
+}`);
 
 // ========== 交互状态 ==========
 let dragging = false;

@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Pin, X, Clipboard, Search, Lock, ImageIcon } from 'lucide-react';
+import { injectCssOnce } from '../../lib/injectCss';
 
 const win = getCurrentWindow();
 
@@ -54,8 +55,8 @@ export function FloatingClipboardView() {
     document.documentElement.style.backgroundColor = 'transparent';
 
     // WebView2(Chromium) 的细滚动条样式（scrollbarWidth 仅 Firefox 生效，这里补 Chromium）
-    const style = document.createElement('style');
-    style.textContent = `
+    // 走构造样式表注入：打包版 CSP 给 style-src 追加 nonce 后动态 <style> 会被拦掉（回退见 injectCssOnce）
+    const disposeCss = injectCssOnce('clipboard-floating', `
       .clip-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
       .clip-scroll::-webkit-scrollbar-track { background: transparent; }
       .clip-scroll::-webkit-scrollbar-thumb {
@@ -66,9 +67,8 @@ export function FloatingClipboardView() {
         from { opacity: 0; transform: scale(0.96); }
         to   { opacity: 1; transform: scale(1); }
       }
-    `;
-    document.head.appendChild(style);
-    return () => { style.remove(); };
+    `);
+    return () => { disposeCss(); };
   }, []);
 
   // 拉取共享历史（最新在前）

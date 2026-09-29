@@ -160,14 +160,35 @@ const MD_STYLES_TEXT = `
 .md-message input[type=checkbox] { margin-right: 0.4em; }
 `;
 
-/** 幂等注入 markdown CSS 到 <head>（多次调用安全）。 */
+/** 幂等注入 markdown CSS（多次调用安全）。
+ *
+ *  优先走「构造样式表」（CSSStyleSheet + adoptedStyleSheets）：打包后 Tauri 会给 CSP 的 style-src
+ *  追加 nonce，按 CSP 规范 nonce/hash 存在时 'unsafe-inline' 被忽略 → 动态插入的 <style> 被整块拦掉。
+ *  dev 走 Vite 服务没有该 CSP，所以只在打包版异常：预览卡片底色/边框、复制按钮、pre-wrap 全失效，
+ *  多行提示词源码因此塌成一行并被裁断。构造样式表不经过 style-src 检查，dev / 打包表现一致。
+ *  旧版曾用 document.getElementById(MD_STYLES_ID) 做幂等判断，adoptedStyleSheets 不产生元素，
+ *  所以改用模块级标志。 */
+let mdStylesInjected = false;
 export function injectMarkdownStyles(): void {
-  if (typeof document === 'undefined') return;
-  if (document.getElementById(MD_STYLES_ID)) return;
+  if (typeof document === 'undefined' || mdStylesInjected) return;
+  try {
+    if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in document) {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(MD_STYLES_TEXT);
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+      mdStylesInjected = true;
+      return;
+    }
+  } catch { /* 构造样式表不可用，走下面的兜底 */ }
+  if (document.getElementById(MD_STYLES_ID)) {
+    mdStylesInjected = true;
+    return;
+  }
   const style = document.createElement('style');
   style.id = MD_STYLES_ID;
   style.textContent = MD_STYLES_TEXT;
   document.head.appendChild(style);
+  mdStylesInjected = true;
 }
 
 /** 全局复制按钮 click 代理（挂在 document，捕获阶段）。
