@@ -13,6 +13,8 @@ export const jaJP: Record<string, string> = {
   'titlebar.minimize': '最小化',
   'titlebar.maximize': '最大化',
   'titlebar.close': '閉じる',
+  'titlebar.immersiveEnter': '没入モード · コンテンツをウィンドウ全体に表示',
+  'titlebar.immersiveExit': '没入モードを終了（Esc）',
 
   // メインナビゲーション
   'nav.notes': 'Andeyunhui',

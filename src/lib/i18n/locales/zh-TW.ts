@@ -13,6 +13,8 @@ export const zhTW: Record<string, string> = {
   'titlebar.minimize': '最小化',
   'titlebar.maximize': '最大化',
   'titlebar.close': '關閉',
+  'titlebar.immersiveEnter': '沉浸模式 · 內容鋪滿整個視窗',
+  'titlebar.immersiveExit': '退出沉浸模式（Esc）',
 
   // 主導覽
   'nav.notes': '安得雲薈',

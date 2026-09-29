@@ -13,6 +13,8 @@ export const zhCN: Record<string, string> = {
   'titlebar.minimize': '最小化',
   'titlebar.maximize': '最大化',
   'titlebar.close': '关闭',
+  'titlebar.immersiveEnter': '沉浸模式 · 内容铺满全窗口',
+  'titlebar.immersiveExit': '退出沉浸模式（Esc）',
 
   // 主导航
   'nav.notes': '安得云荟',

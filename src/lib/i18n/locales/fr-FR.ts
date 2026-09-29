@@ -13,6 +13,8 @@ export const frFR: Record<string, string> = {
   'titlebar.minimize': 'Réduire',
   'titlebar.maximize': 'Agrandir',
   'titlebar.close': 'Fermer',
+  'titlebar.immersiveEnter': 'Mode immersif · contenu sur toute la fenêtre',
+  'titlebar.immersiveExit': 'Quitter le mode immersif (Échap)',
 
   // Navigation principale
   'nav.notes': 'Andeyunhui',

@@ -13,6 +13,8 @@ export const deDE: Record<string, string> = {
   'titlebar.minimize': 'Minimieren',
   'titlebar.maximize': 'Maximieren',
   'titlebar.close': 'Schließen',
+  'titlebar.immersiveEnter': 'Immersivmodus · Inhalt füllt das ganze Fenster',
+  'titlebar.immersiveExit': 'Immersivmodus beenden (Esc)',
 
   // Hauptnavigation
   'nav.notes': 'Andeyunhui',

@@ -13,6 +13,8 @@ export const enUS: Record<string, string> = {
   'titlebar.minimize': 'Minimize',
   'titlebar.maximize': 'Maximize',
   'titlebar.close': 'Close',
+  'titlebar.immersiveEnter': 'Immersive mode · fill the window with content',
+  'titlebar.immersiveExit': 'Exit immersive mode (Esc)',
 
   // Main navigation
   'nav.notes': 'Andeyunhui',

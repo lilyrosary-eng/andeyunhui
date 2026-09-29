@@ -510,6 +510,8 @@ input[type="range"]:active::-moz-range-thumb {
 @media (prefers-reduced-motion: reduce) {
   .ripple-dot { display: none; }
   .fade-in, .slide-in-left, .slide-in-up, .slide-in-right { animation: none; }
+  /* 矢车菊 logo 悬停旋转：动效敏感用户只保留变色/描边/标签提示 */
+  .logo-mark { transform: none !important; transition-property: color !important; }
 }
 
 /* ========== 跨平台降级处理 ========== */

@@ -13,6 +13,8 @@ export const koKR: Record<string, string> = {
   'titlebar.minimize': '최소화',
   'titlebar.maximize': '최대화',
   'titlebar.close': '닫기',
+  'titlebar.immersiveEnter': '몰입 모드 · 콘텐츠를 창 전체에 표시',
+  'titlebar.immersiveExit': '몰입 모드 종료(Esc)',
 
   // 메인 네비게이션
   'nav.notes': 'Andeyunhui',

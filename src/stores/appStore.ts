@@ -29,6 +29,9 @@ interface AppState {
   // 茑萝拓展设置面板切换
   showExtensionSettings: boolean;
 
+  /** 沉浸模式：隐藏上栏与一二级导航，主面板内容铺满全窗口（纯会话态，不落盘） */
+  immersive: boolean;
+
   // ---- actions ----
   setPluginRegistry: (r: PluginRegistry | null) => void;
   bumpVisibility: () => void;
@@ -37,6 +40,8 @@ interface AppState {
   setWordWrap: (v: boolean) => void;
   setVimMode: (v: boolean) => void;
   toggleExtensionSettings: () => void;
+  toggleImmersive: () => void;
+  setImmersive: (v: boolean) => void;
   /** 注册浮窗事件监听，返回 cleanup */
   initFloatingNoteListeners: () => () => void;
 }
@@ -50,6 +55,7 @@ export const useAppStore = create<AppState>((set) => ({
   wordWrap: true,
   vimMode: false,
   showExtensionSettings: false,
+  immersive: false,
 
   setPluginRegistry: (pluginRegistry) => set({ pluginRegistry }),
   bumpVisibility: () => set(s => ({ visibilityTick: s.visibilityTick + 1 })),
@@ -78,6 +84,8 @@ export const useAppStore = create<AppState>((set) => ({
   setWordWrap: (wordWrap) => set({ wordWrap }),
   setVimMode: (vimMode) => set({ vimMode }),
   toggleExtensionSettings: () => set(s => ({ showExtensionSettings: !s.showExtensionSettings })),
+  toggleImmersive: () => set(s => ({ immersive: !s.immersive })),
+  setImmersive: (immersive) => set({ immersive }),
 
   initFloatingNoteListeners: () => {
     // 浮窗打开 → 加入集合，若当前编辑的是该笔记则清空编辑器

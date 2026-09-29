@@ -9,6 +9,7 @@ import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferS
 import { Titlebar } from '@/components/Titlebar';
 import { AppNav } from '@/components/AppNav';
 import { HostSidebar } from '@/components/HostSidebar';
+import { ImmersiveChrome } from '@/components/ImmersiveChrome';
 import { GoldChessboardHub } from '@/components/GoldChessboardHub';
 import TransferReceiveModal from '@/components/TransferReceiveModal';
 import { logger } from '@/lib/logger';
@@ -35,6 +36,8 @@ function App() {
   const activeModule = useAppStore(s => s.activeModule);
   const activatedPlugins = useAppStore(s => s.activatedPlugins);
   const showExtensionSettings = useAppStore(s => s.showExtensionSettings);
+  const immersive = useAppStore(s => s.immersive);
+  const setImmersive = useAppStore(s => s.setImmersive);
   const setPluginRegistry = useAppStore(s => s.setPluginRegistry);
   const bumpVisibility = useAppStore(s => s.bumpVisibility);
   const setActiveModule = useAppStore(s => s.setActiveModule);
@@ -484,6 +487,20 @@ function App() {
     }
   }, [pluginRegistry, validModuleIds, activeModule, setActiveModule]);
 
+  // 沉浸模式：Esc 退出。用 capture 阶段抢在模块自身的 Esc 处理之前并阻断冒泡 ——
+  // 沉浸态下按 Esc 的语义就是「退出沉浸」，若放行给模块会出现「弹窗关了、沉浸还在」的错配。
+  useEffect(() => {
+    if (!immersive) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      setImmersive(false);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [immersive, setImmersive]);
+
   // 侧栏齿轮模块设置：黄金棋盘→capsule-settings，其他插件（如 IDE）自行接 module-settings-toggle。
   // 注意：HostSidebar 派发的是 window.dispatchEvent 的 DOM CustomEvent，
   // 必须用 window.addEventListener 接（Tauri listen 收不到 DOM 事件，之前因此点了无反应）。
@@ -681,11 +698,22 @@ function App() {
         <div className="flex flex-1 min-w-0 overflow-hidden">
           <AppNav mainPluginIds={mainPluginIds} />
           <HostSidebar />
-          <div className="flex-1 min-w-0 h-full overflow-hidden">
+          {/* 沉浸模式：内容区脱离文档流铺满整窗（盖住上栏与导航），而非卸载它们 ——
+              卸载会丢 HostSidebar 的搜索态、ModuleSidebarShell 的折叠态与插件保活树。
+              z-index 高于 AppNav 的 z-50，低于 ImmersiveChrome 的 z-[60]。
+              bg 用 .main-panel-bg 而非 bg-[var(--main-panel-bg)]：后者是普通任意值，
+              自定义背景模式下 html.has-custom-bg .main-panel-bg 会把它置透明露出背景层，
+              任意值不会命中该规则 → 沉浸态会盖死自定义背景。 */}
+          <div className={immersive
+            ? 'fade-in fixed inset-0 z-[55] main-panel-bg overflow-hidden'
+            : 'flex-1 min-w-0 h-full overflow-hidden'}
+          >
             {renderModule()}
           </div>
         </div>
       </div>
+      {/* 沉浸模式悬浮 chrome：矢车菊 logo（退出）+ 顶部拖拽条 + 窗口控制键 */}
+      {immersive && <ImmersiveChrome />}
       {/* 全局局域网传输接收确认弹窗：独立于任何传输面板，确保任意界面下收到请求都弹确认框 */}
       <TransferReceiveModal />
       {/* 数据迁移进度遮罩：迁移进行中叠加在加载页之上，避免用户以为卡死 */}
