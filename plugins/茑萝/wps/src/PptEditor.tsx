@@ -8,6 +8,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // 放映层 portal 到 body：避开 ThemeProvider 包裹层（zoom / 任何 transformed 祖先）对 position:fixed 的影响，确保覆盖层铺满视口。
 type ReactDOMLike = { createPortal: (el: React.ReactNode, node: Element) => React.ReactNode };
 const ReactDOM = window.__HOST_REACT_DOM__ as unknown as ReactDOMLike;
+import { injectCss } from '@shared/injectCss';
 
 import {
   loadDoc,
@@ -520,6 +521,11 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
   const onExitRef = useRef(onExit); // 避免 effect 因 onExit 引用变化反复重绑
   onExitRef.current = onExit;
 
+  // PPT 动画样式改由构造样式表注入：打包版 CSP 会拦掉动态 <style>（详见 @shared/injectCss）
+  useEffect(() => {
+    injectCss('wps-ppt-anim', '@keyframes pptFade{from{opacity:0}to{opacity:1}}@keyframes pptSlide{from{transform:translateX(40px);opacity:0}to{transform:translateX(0);opacity:1}}.ppt-anim-fade{animation:pptFade .35s ease}.ppt-anim-slide{animation:pptSlide .35s ease}' + ANIM_KEYFRAMES);
+  }, []);
+
   // 真正全屏：对覆盖层【元素本身】requestFullscreen，而非窗口级全屏。
   // 覆盖层已 portal 到 body，脱离了 ThemeProvider 的 zoom / 任何 transformed 祖先，
   // 因此元素级全屏不会再被祖先 transform 偏移（旧版「右推」根因）。元素级全屏不会重排
@@ -708,7 +714,6 @@ function PresentMode({ slides, start, onExit }: { slides: PptSlide[]; start: num
 
   return (
     <>
-    <style>{'@keyframes pptFade{from{opacity:0}to{opacity:1}}@keyframes pptSlide{from{transform:translateX(40px);opacity:0}to{transform:translateX(0);opacity:1}}.ppt-anim-fade{animation:pptFade .35s ease}.ppt-anim-slide{animation:pptSlide .35s ease}' + ANIM_KEYFRAMES}</style>
     <div
       ref={containerRef}
       className="fixed inset-0 z-[9999] bg-black flex items-center justify-center select-none"

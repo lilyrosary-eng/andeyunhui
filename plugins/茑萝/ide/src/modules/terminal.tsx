@@ -6,6 +6,7 @@ const React = window.__HOST_REACT__;
 const hostApi = window.__HOST_API__;
 const { useState, useEffect, useRef } = React;
 import { ideShared } from './shared';
+import { injectCss } from '@shared/injectCss';
 
 // ===== xterm.js 懒加载（缓存 Promise，与 loadCM 同模式）=====
 interface XtermBundle {
@@ -27,10 +28,7 @@ function loadXterm(): Promise<XtermBundle> {
     ]);
     // 注入 xterm CSS（仅一次）：插件包不走标准 CSS 提取，故用 ?inline 取字符串手动注入
     if (!xtermCssInjected && cssMod?.default) {
-      const style = document.createElement('style');
-      style.setAttribute('data-xterm-css', '1');
-      style.textContent = cssMod.default;
-      document.head.appendChild(style);
+      injectCss('xterm-css-ide', cssMod.default);
       xtermCssInjected = true;
     }
     return {

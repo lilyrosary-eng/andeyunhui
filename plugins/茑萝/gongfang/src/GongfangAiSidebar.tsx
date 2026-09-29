@@ -1,5 +1,6 @@
 /// <reference path="../../../global.d.ts" />
 import { marked } from 'marked';
+import { injectCss } from '@shared/injectCss';
 // 茑萝 · 攻防 AI 指挥官（侧边栏）
 // 职责：AI 对话控制枢纽，可调度五大框架，也支持纯人工快速指令
 // 设计：复用全局 ai_chat 流式接口 + <cmd> 标签自动执行（ReAct 式 agent 循环）
@@ -49,13 +50,9 @@ const MD_CSS = `
 let mdStyleInjected = false;
 function ensureMdStyle() {
   if (mdStyleInjected) return;
-  if (typeof document !== 'undefined' && !document.getElementById('niaoluo-md-style')) {
-    const s = document.createElement('style');
-    s.id = 'niaoluo-md-style';
-    s.textContent = MD_CSS;
-    document.head.appendChild(s);
-  }
   mdStyleInjected = true;
+  // 走构造样式表注入：打包版 CSP 会拦掉动态 <style>（详见 @shared/injectCss）
+  injectCss('niaoluo-md-style', MD_CSS);
 }
 function mdHtml(t: string): string {
   try {

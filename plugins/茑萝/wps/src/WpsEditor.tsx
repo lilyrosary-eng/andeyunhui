@@ -21,6 +21,7 @@ import { PptEditor } from './PptEditor';
 import { SheetEditor } from './SheetEditor';
 import { marked } from 'marked';
 import { open, save } from '@tauri-apps/plugin-dialog';
+import { injectCss } from '@shared/injectCss';
 
 // TipTap 懒加载（与插件沙箱同源：read_external_dep_file + new Function 挂载到 window.__EXT_TIPTAP__）
 // 依赖本身在 external-deps/茑萝/wps/tiptap（由 scripts/build-external-deps.mjs 构建，react/react-dom 复用宿主实例）。
@@ -314,6 +315,9 @@ export function WpsEditor() {
       .then((api) => setT(api))
       .catch((e: Error) => setTErr(e.message));
   }, []);
+
+  // 编辑器样式改由构造样式表注入：打包版 CSP 会拦掉动态 <style>（详见 @shared/injectCss）
+  useEffect(() => { injectCss('wps-editor-style', STYLE); }, []);
 
   if (tErr) {
     return (
@@ -817,8 +821,6 @@ function WpsEditorBody({ t }: { t: TiptapApi }) {
           )}
         </div>
       </div>
-
-      <style>{STYLE}</style>
     </div>
   );
 }

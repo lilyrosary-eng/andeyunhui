@@ -11,6 +11,7 @@
 const React = window.__HOST_REACT__;
 const hostApi = window.__HOST_API__;
 const { useState, useEffect, useRef, useCallback } = React;
+import { injectCss } from '@shared/injectCss';
 
 interface XtermBundle {
   Terminal: any;
@@ -28,10 +29,7 @@ function loadXterm(): Promise<XtermBundle> {
       import('@xterm/xterm/css/xterm.css?inline'),
     ]);
     if (!xtermCssInjected && cssMod?.default) {
-      const style = document.createElement('style');
-      style.setAttribute('data-webterm-css', '1');
-      style.textContent = cssMod.default;
-      document.head.appendChild(style);
+      injectCss('xterm-css-web', cssMod.default);
       xtermCssInjected = true;
     }
     return { Terminal: xtermMod.Terminal, FitAddon: fitMod.FitAddon };

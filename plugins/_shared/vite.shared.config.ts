@@ -71,8 +71,12 @@ input[type="range"]:active::-moz-range-thumb{background:color-mix(in srgb,var(--
  */
 export function createPluginConfig(pluginName: string) {
   const tailwindCss = getTailwindCss();
-  // 将 CSS 转为 JS 代码：在插件加载时创建 <style> 标签注入到 document.head
-  const cssInjectionJs = `(function(){if(typeof document!=='undefined'){var s=document.createElement('style');s.textContent=${JSON.stringify(tailwindCss + PLUGIN_RANGE_CSS)};document.head.appendChild(s);}})();`;
+  // CSS 注入：首选「构造样式表」（CSSStyleSheet + adoptedStyleSheets），不可用时回退 <style> 元素。
+  // 原因：Tauri 打包时会给 CSP 的 style-src 追加 nonce，按 CSP 规范 nonce/hash 存在时
+  // 'unsafe-inline' 被忽略 → 动态插入的 <style> 被整块拦掉，插件自带 CSS（Tailwind 补充量、
+  // input[type=range] 滑条外观等）在打包版全部失效（dev 走 Vite 服务无该 CSP，故只在打包后异常）。
+  // 构造样式表不经过 style-src 检查，dev / 打包表现一致。
+  const cssInjectionJs = `(function(){if(typeof document==='undefined')return;var css=${JSON.stringify(tailwindCss + PLUGIN_RANGE_CSS)};try{if(typeof CSSStyleSheet==='function'&&'adoptedStyleSheets' in document){var sh=new CSSStyleSheet();sh.replaceSync(css);document.adoptedStyleSheets=[].concat(document.adoptedStyleSheets,[sh]);return;}}catch(e){}var s=document.createElement('style');s.textContent=css;document.head.appendChild(s);})();`;
 
   return defineConfig({
     // 每个插件进程使用独立 cacheDir，避免多插件并发构建时共享 Vite/esbuild

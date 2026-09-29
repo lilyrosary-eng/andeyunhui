@@ -1,6 +1,7 @@
 /// <reference path="../../../global.d.ts" />
 import React from "react";
-import { marked } from "marked";
+import { marked } from 'marked';
+import { injectCss } from '@shared/injectCss';
 // 茑萝 · IDE · AI 编程 子插件（Cursor / Claude Code 风格）
 //
 // 多级嵌套：niaoluo（茑萝）→ ide（IDE）→ ai（AI 编程）。本插件是 IDE 的子插件，
@@ -230,13 +231,9 @@ const MD_CSS = `
 let mdStyleInjected = false;
 function ensureMdStyle() {
   if (mdStyleInjected) return;
-  if (typeof document !== 'undefined' && !document.getElementById('niaoluo-md-style')) {
-    const s = document.createElement('style');
-    s.id = 'niaoluo-md-style';
-    s.textContent = MD_CSS;
-    document.head.appendChild(s);
-  }
   mdStyleInjected = true;
+  // 走构造样式表注入：打包版 CSP 会拦掉动态 <style>（详见 @shared/injectCss）
+  injectCss('niaoluo-md-style', MD_CSS);
 }
 function mdHtml(t: string): string {
   try {
