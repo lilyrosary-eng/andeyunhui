@@ -181,7 +181,7 @@ export function WebSidebarShell({
   // 兜底：宿主未提供 ModuleSidebarShell 时退回简单容器（与 OnlineSidebarShell 一致）
   if (!ModuleSidebarShell) {
     return React.createElement('div', {
-      className: 'w-[260px] h-full flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 p-4 overflow-y-auto flex flex-col',
+      className: 'w-[260px] h-full flex-shrink-0 nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 immersive-safe-top p-4 overflow-y-auto flex flex-col',
     }, [
       React.createElement('div', { key: 'head', className: 'flex items-center gap-2 mb-4 px-1' },
         icon ?? React.createElement(GlobeIcon),

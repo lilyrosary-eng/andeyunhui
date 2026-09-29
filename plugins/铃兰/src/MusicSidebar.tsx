@@ -188,7 +188,7 @@ export function MusicSidebar({ playlists, selectedPlaylistId, onSelectPlaylist, 
 
   if (!ModuleSidebarShell) {
     return (
-      <div className="w-[260px] h-full flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 p-4 overflow-y-auto">
+      <div className="w-[260px] h-full flex-shrink-0 nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 immersive-safe-top p-4 overflow-y-auto">
         <div className="flex items-center gap-2 mb-4 px-1">
           <Music2Icon />
           <span className="font-bold text-lg text-neutral-800 dark:text-stone-100">{T('music.title')}</span>
