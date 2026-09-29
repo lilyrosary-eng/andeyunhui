@@ -34,7 +34,7 @@ interface Track {
 }
 
 type PlayMode = 'list' | 'single' | 'random';
-type PlayerEvent = 'play' | 'pause' | 'trackChange' | 'progress' | 'end';
+type PlayerEvent = 'play' | 'pause' | 'trackChange' | 'progress' | 'end' | 'queueChange';
 
 class MusicPlayer {
   private audio: HTMLAudioElement;
@@ -67,6 +67,7 @@ class MusicPlayer {
     trackChange: new Set(),
     progress: new Set(),
     end: new Set(),
+    queueChange: new Set(),
   };
 
   constructor() {
@@ -290,6 +291,20 @@ class MusicPlayer {
       this.currentIndex = startIndex;
       this.loadTrack(startIndex);
     }
+    this.emitQueueChange(tracks);
+  }
+
+  // 队列变更通知：供「临时播放栏」自动记录播放队列。
+  // 用微任务延迟一拍再广播——调用方习惯在 setTracks 之后同步设置 currentPlaylistId
+  // （如漫游电台 = 'roam-active'），延迟一拍才能读到正确来源，从而过滤掉漫游电台自身的队列。
+  private emitQueueChange(tracks: Track[]): void {
+    if (!tracks.length) return;
+    const snapshot = tracks.slice();
+    const notify = () => {
+      try { this.emit('queueChange', { tracks: snapshot, playlistId: this.currentPlaylistId }); } catch { /* 忽略 */ }
+    };
+    if (typeof queueMicrotask === 'function') queueMicrotask(notify);
+    else setTimeout(notify, 0);
   }
 
   private loadTrack(index: number): void {

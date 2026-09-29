@@ -13,7 +13,8 @@ import { QishuiView, type QishuiViewHandle } from './QishuiView';
 import { RoamView } from './RoamView';
 import RoamSidebar, { type RoamSource, type RoamSeedTrack, type RoamHistoryEntry } from './RoamSidebar';
 import RoamSettingsPanel from './RoamSettingsPanel';
-import { getRoamSourceApi, clearRoamCache, clearAllRoamCache, setLinglanRoamPool } from './roamSources';
+import { getRoamSourceApi, clearRoamCache, clearAllRoamCache, setLinglanRoamPool, setTempRoamPool } from './roamSources';
+import { getTempSlots, subscribeTempSlots, recordQueue, clearTempSlots, getTempSlotTracks, type TempSlotView } from './roamTempSlots';
 import QishuiSidebar from './QishuiSidebar';
 import { qishuiGetRecommendPlaylists, type QishuiPlaylistCard } from './qishuiApi';
 import NeteaseSidebar from './NeteaseSidebar';
@@ -1142,9 +1143,36 @@ const [roamHistories, setRoamHistories] = useState<Record<RoamSource, RoamHistor
   netease: [],
   kugou: [],
   qishui: [],
+  temp1: [],
+  temp2: [],
+  temp3: [],
 });
+// 临时播放栏：自动记录「非漫游电台来源」的播放队列（最多 3 栏，满则覆盖最旧，仅本次会话）
+const [tempSlots, setTempSlots] = useState<TempSlotView[]>(() => getTempSlots());
+useEffect(() => {
+  const off = musicPlayer.on('queueChange', (data) => {
+    const d = data as { tracks?: Track[]; playlistId?: string | null } | null;
+    recordQueue(d?.tracks, d?.playlistId ?? null);
+  });
+  const unsub = subscribeTempSlots(() => setTempSlots(getTempSlots()));
+  setTempSlots(getTempSlots());
+  return () => { off(); unsub(); };
+}, []);
 const [roamSeedTracks, setRoamSeedTracks] = useState<Partial<Record<RoamSource, RoamSeedTrack>>>({});
 const [roamSettingsOpen, setRoamSettingsOpen] = useState(false);
+
+// 进入某个漫游路径：清旧路径缓存，并确保该路径的数据源就绪
+// （铃兰 = 注入本地歌曲池；临时播放栏 = 注入该栏队列快照并随机打散）
+const enterRoamSource = useCallback((src: RoamSource) => {
+  clearRoamCache();
+  if (src === 'linglan') {
+    const allLocalTracks = playlists.flatMap((p) => p.tracks || []);
+    if (allLocalTracks.length) setLinglanRoamPool(allLocalTracks);
+  } else if (src === 'temp1' || src === 'temp2' || src === 'temp3') {
+    setTempRoamPool(src, getTempSlotTracks(src));
+  }
+  setRoamSource(src);
+}, [playlists]);
 
 // 进入漫游电台时懒加载各平台默认歌曲（未播放时显示）
 useEffect(() => {
@@ -2465,31 +2493,13 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           activeSource={roamSource}
           histories={roamHistories}
           seedTracks={roamSeedTracks}
+          tempSlots={tempSlots}
           onSelectSource={(src) => {
-            // 切换漫游路径时清空旧路径的缓存
-            if (src !== roamSource) {
-              clearRoamCache();
-              // 切换到铃兰时重新注入本地歌曲池（clearRoamCache 不清铃兰池，但确保池有数据）
-              if (src === 'linglan') {
-                const allLocalTracks = playlists.flatMap((p) => p.tracks || []);
-                if (allLocalTracks.length) {
-                  setLinglanRoamPool(allLocalTracks);
-                }
-              }
-              setRoamSource(src);
-            }
+            // 切换漫游路径时清空旧路径缓存（临时播放栏额外注入该栏队列快照）
+            if (src !== roamSource) enterRoamSource(src);
           }}
           onSelectTrack={(src, track, fromHistory) => {
-            if (src !== roamSource) {
-              clearRoamCache();
-              if (src === 'linglan') {
-                const allLocalTracks = playlists.flatMap((p) => p.tracks || []);
-                if (allLocalTracks.length) {
-                  setLinglanRoamPool(allLocalTracks);
-                }
-              }
-              setRoamSource(src);
-            }
+            if (src !== roamSource) enterRoamSource(src);
             // 播放选中的歌曲
             const api = getRoamSourceApi(src);
             api.getSongUrl(track).then(({ url }) => {
@@ -2504,6 +2514,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
           onClearHistory={(src) => {
             setRoamHistories((prev) => ({ ...prev, [src]: [] }));
           }}
+          onClearTempSlots={() => clearTempSlots()}
           onClose={() => setRoamOpen(false)}
           onBack={() => setShowModuleDrawer(true)}
           onOpenSettings={() => setRoamSettingsOpen(v => !v)}

@@ -5,7 +5,7 @@
 // 核心漫游逻辑保留：流式推荐 → 自动播放 → 续推 → 历史记录
 
 import React from 'react';
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, memo } = React;
 import { Music as MusicIcon } from 'lucide-react';
 import { musicPlayer } from './musicPlayer';
 import {
@@ -121,21 +121,194 @@ interface RoamViewProps {
 }
 
 const ROAM_WINDOW_SIZE = 3;
-const sourceLabel: Record<RoamSource, string> = { linglan: '铃兰', netease: '网易云', kugou: '酷狗', qishui: '汽水' };
+const sourceLabel: Record<RoamSource, string> = {
+  linglan: '铃兰', netease: '网易云', kugou: '酷狗', qishui: '汽水',
+  temp1: '临时1', temp2: '临时2', temp3: '临时3',
+};
 
 // EQ bars 数量
 const EQ_BARS = 32;
+
+// EQ 均衡器：频谱每帧只直写 DOM（refs.style.height），不走 React state。
+// 旧实现每帧 setEqHeights → 整个 RoamView（两张封面/光斑/黑胶/逐字符歌词/萤火虫/底部栏）
+// 以 60fps 全量重渲染并重建大量内联 style 对象，是漫游页「粘滞感」的主因；
+// 且模块被切走后（keep-alive 仅 display:none）仍继续空转 → 整个应用一起卡。
+// active=false（舞台不可见）时彻底停帧，零开销。
+const EqBars = memo(function EqBars({
+  active, isPlaying, ink, inkLine, height = 95, maxWidth, marginBottom, gap = 3,
+}: {
+  active: boolean;
+  isPlaying: boolean;
+  ink: string;
+  inkLine: string;
+  height?: number;
+  maxWidth?: number;
+  marginBottom?: number;
+  gap?: number;
+}) {
+  const barsRef = useRef<Array<HTMLSpanElement | null>>([]);
+  useEffect(() => {
+    if (!active) return;
+    const freqData = new Uint8Array(64);
+    let raf = 0;
+    const animate = () => {
+      const analyser = musicPlayer.getAnalyser();
+      const bars = barsRef.current;
+      if (analyser && isPlaying) {
+        analyser.getByteFrequencyData(freqData);
+        const bins = freqData.length;
+        for (let i = 0; i < EQ_BARS; i++) {
+          // 对数映射，让低频在中间，高频在两端（更自然）
+          const ratio = i / EQ_BARS;
+          const dataIdx = Math.floor(Math.pow(ratio, 1.5) * (bins - 1));
+          let v = freqData[dataIdx] / 255;
+          // 易驱性增强：非线性增益（平方根拉伸低幅度 + 1.8x 增益 + 偏移）
+          v = Math.sqrt(v) * 1.8 + 0.03;
+          const el = bars[i];
+          if (el) el.style.height = `${5 + Math.min(1, v) * 92}%`;
+        }
+      } else {
+        // 降级：伪律动
+        const t = performance.now() / 240;
+        const amp = isPlaying ? 0.9 : 0.2;
+        for (let i = 0; i < EQ_BARS; i++) {
+          const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * amp;
+          const el = bars[i];
+          if (el) el.style.height = `${8 + v * 82}%`;
+        }
+      }
+      raf = requestAnimationFrame(animate);
+    };
+    raf = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(raf);
+  }, [active, isPlaying]);
+  return (
+    <div className="flex items-end justify-center" style={{ gap, width: '100%', height, maxWidth, marginBottom }}>
+      {Array.from({ length: EQ_BARS }, (_, i) => (
+        <span
+          key={i}
+          ref={(el) => { barsRef.current[i] = el; }}
+          style={{
+            flex: '1 1 0', minWidth: 2, maxWidth: 8, height: '15%',
+            background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
+            borderRadius: 2, opacity: 0.85,
+            transition: 'height 0.05s linear',
+          }}
+        />
+      ))}
+    </div>
+  );
+});
+
+// 播放栏（EQ + 进度条 + 控制按钮）：自持播放状态/进度订阅，让父组件不再因 timeupdate（~4Hz）
+// 重渲染整页（RoamView 的 JSX 很大，每帧全量 diff 是「粘滞感」的另一来源）。
+// overlay = 左侧玻璃面板内的栏；stage = 舞台底部独立栏（含译/音切换）。
+const RoamPlayBar = memo(function RoamPlayBar({
+  variant, active, ink, inkLine, isDark, scaleFactor, transitioning, onPrev, onNext,
+}: {
+  variant: 'overlay' | 'stage';
+  active: boolean;
+  ink: string;
+  inkLine: string;
+  isDark: boolean;
+  scaleFactor: number;
+  transitioning: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  const [pos, setPos] = useState(() => musicPlayer.getCurrentTime());
+  const [dur, setDur] = useState(() => musicPlayer.getDuration());
+  const [isPlaying, setIsPlaying] = useState(() => musicPlayer.getIsPlaying());
+  useEffect(() => {
+    const onProgress = (data: unknown) => {
+      const d = data as { currentTime?: number; duration?: number } | null;
+      if (d && typeof d.currentTime === 'number') setPos(d.currentTime);
+      setDur((d?.duration || musicPlayer.getDuration()) || 0);
+    };
+    const onState = () => { setIsPlaying(musicPlayer.getIsPlaying()); setDur(musicPlayer.getDuration()); };
+    const offs = [
+      musicPlayer.on('progress', onProgress),
+      musicPlayer.on('play', onState),
+      musicPlayer.on('pause', onState),
+      musicPlayer.on('trackChange', onState),
+    ];
+    return () => { offs.forEach((f) => f()); };
+  }, []);
+  const pct = dur > 0 ? (pos / dur) * 100 : 0;
+  const seekTo = (e: React.MouseEvent<HTMLElement>) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    musicPlayer.seek(ratio * dur);
+  };
+  const isStage = variant === 'stage';
+  const btnPx = Math.round(18 * scaleFactor);
+  const circlePx = `clamp(36px, ${4 * scaleFactor}vw, ${Math.round(48 * scaleFactor)}px)`;
+  const progressRow = (
+    <div className="flex items-center gap-2 w-full" style={{ maxWidth: isStage ? 500 : undefined, fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: ink }}>
+      <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28 }}>{formatTime(pos)}</span>
+      {/* 外层透明容器拓展点击区域（上方14px+下方14px），内层2px细线 */}
+      <div className="flex-1 relative cursor-pointer" style={{ paddingTop: 14, paddingBottom: 14, marginTop: -14, marginBottom: -14 }} onClick={seekTo}>
+        <div className="relative rounded-full" style={{ height: 2, background: inkLine }}>
+          <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
+          <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
+        </div>
+      </div>
+      <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{formatTime(dur)}</span>
+    </div>
+  );
+  const controls = (
+    <div className="flex items-center" style={{ gap: isStage ? `clamp(10px, ${1.5 * scaleFactor}vw, ${Math.round(20 * scaleFactor)}px)` : `clamp(8px, ${1.2 * scaleFactor}vw, ${Math.round(18 * scaleFactor)}px)`, color: ink }}>
+      <button onClick={onPrev} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="上一首">
+        <svg width={btnPx} height={btnPx} viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
+      </button>
+      <button onClick={() => musicPlayer.togglePlay()} className="rounded-full flex items-center justify-center transition-transform hover:scale-105" style={{ width: circlePx, height: circlePx, background: 'rgba(255,255,255,0.92)', color: '#2c5a1a', boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)', border: 'none', cursor: 'pointer', animation: isPlaying ? 'roam-breathe 3.4s ease-in-out infinite' : 'none' }} title={isPlaying ? '暂停' : '播放'}>
+        {isPlaying ? (
+          <svg viewBox="0 0 24 24" width={btnPx} height={btnPx} fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+        ) : (
+          <svg viewBox="0 0 24 24" width={btnPx} height={btnPx} fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        )}
+      </button>
+      <button onClick={onNext} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="下一首">
+        <svg width={btnPx} height={btnPx} viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
+      </button>
+      {/* 「译/音」三态切换：就近看到歌词时在此切换显示翻译/音译小字 */}
+      {isStage && <LyricModeButton />}
+    </div>
+  );
+  if (!isStage) {
+    return (
+      <div className="mt-auto flex flex-col items-center gap-2" style={{ width: '100%', maxWidth: Math.round(400 * scaleFactor), paddingTop: 'clamp(12px, 2%, 20px)' }}>
+        <EqBars active={active} isPlaying={isPlaying} ink={ink} inkLine={inkLine} marginBottom={4} />
+        {progressRow}
+        {controls}
+      </div>
+    );
+  }
+  return (
+    <div className="roam-bottom-bar" style={{
+      position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 9,
+      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'clamp(6px, 0.8vw, 12px)',
+      padding: 'clamp(10px, 1.5%, 18px) clamp(16px, 4%, 50px) clamp(12px, 1.8%, 22px)',
+      background: isDark ? 'linear-gradient(0deg, rgba(20,30,18,0.75) 0%, rgba(20,30,18,0.3) 60%, transparent 100%)' : 'linear-gradient(0deg, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0.15) 60%, transparent 100%)',
+      backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
+      transition: 'opacity 0.45s ease',
+      opacity: transitioning ? 0 : 1,
+    }}>
+      <EqBars active={active} isPlaying={isPlaying} ink={ink} inkLine={inkLine} maxWidth={500} />
+      {progressRow}
+      {controls}
+    </div>
+  );
+});
 
 export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersive, onHistoryUpdate, initialHistory }: RoamViewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [nowPlaying, setNowPlaying] = useState<{ track: any; isPlaying: boolean }>({ track: null, isPlaying: false });
   const [roamReloadKey, setRoamReloadKey] = useState(0);
-  const [progress, setProgress] = useState({ current: 0, duration: 0 });
   const [flipped, setFlipped] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [isDark, setIsDark] = useState(document.documentElement.classList.contains('dark'));
-  const [eqHeights, setEqHeights] = useState<number[]>(new Array(EQ_BARS).fill(15));
   const [songTheme, setSongTheme] = useState({ hue: 0, fog: 'rgba(150, 208, 118, 0.55)' });
   const [themeMode, setThemeMode] = useState<'preset' | 'follow'>(() => {
     const v = localStorage.getItem('roam_theme_mode');
@@ -181,7 +354,6 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
   const flipTimerRef = useRef<any>(null);
   const burstFromRef = useRef(0);
   const trackIdxRef = useRef(0);
-  const eqRafRef = useRef<number>(0);
 
   // 暗色模式监听
   useEffect(() => {
@@ -216,51 +388,29 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     return () => window.removeEventListener('roam-bar-position-changed', handler);
   }, []);
 
-  // EQ 动画 — 真实律动：使用 WASAPI Loopback 频域数据，降级到伪律动
+  // 舞台可见性：模块被切走后宿主只把 keep-alive 的 DOM 设成 display:none（不卸载组件），
+// 若不停帧 / 不退订，漫游页会持续 60fps 动画 + Rust 30fps 频谱 IPC 空转 → 整个应用粘滞。
+  // IntersectionObserver 不触发 reflow，隐藏时 isIntersecting=false。
+  const stageRootRef = useRef<HTMLDivElement>(null);
+  const [stageVisible, setStageVisible] = useState(true);
   useEffect(() => {
-    // 本页是频谱唯一消费者：挂载时唤醒 Rust 采集线程，卸载时休眠（省 CPU/IPC）
+    const el = stageRootRef.current;
+    if (!el || typeof IntersectionObserver !== 'function') return;
+    const io = new IntersectionObserver((entries) => {
+      const last = entries[entries.length - 1];
+      if (last) setStageVisible(last.isIntersecting);
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  // 频谱订阅（计数式，务必与 release 配对）：仅舞台可见时唤醒 Rust 采集线程，隐藏即休眠。
+  // 本页是频谱唯一消费者，EQ 动画见 EqBars（不可见时同样停帧）。
+  useEffect(() => {
+    if (!stageVisible) return;
     musicPlayer.requestSpectrum();
     return () => { musicPlayer.releaseSpectrum(); };
-  }, []);
-  useEffect(() => {
-    const freqData = new Uint8Array(64);
-    const animate = () => {
-      const analyser = musicPlayer.getAnalyser();
-      if (analyser && nowPlaying.isPlaying) {
-        analyser.getByteFrequencyData(freqData);
-        const bins = freqData.length;
-        setEqHeights(prev => {
-          const next = [...prev];
-          for (let i = 0; i < EQ_BARS; i++) {
-            // 对数映射，让低频在中间，高频在两端（更自然）
-            const ratio = i / EQ_BARS;
-            const dataIdx = Math.floor(Math.pow(ratio, 1.5) * (bins - 1));
-            let v = freqData[dataIdx] / 255;
-            // 易驱性增强：非线性增益（平方根拉伸低幅度 + 1.8x 增益 + 偏移）
-            v = Math.sqrt(v) * 1.8 + 0.03;
-            v = Math.min(1, v);
-            next[i] = 5 + v * 92;
-          }
-          return next;
-        });
-      } else {
-        // 降级：伪律动
-        const t = performance.now() / 240;
-        const amp = nowPlaying.isPlaying ? 0.9 : 0.2;
-        setEqHeights(prev => {
-          const next = [...prev];
-          for (let i = 0; i < EQ_BARS; i++) {
-            const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * amp;
-            next[i] = 8 + v * 82;
-          }
-          return next;
-        });
-      }
-      eqRafRef.current = requestAnimationFrame(animate);
-    };
-    eqRafRef.current = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(eqRafRef.current);
-  }, [nowPlaying.isPlaying]);
+  }, [stageVisible]);
 
   const slideRoamWindow = useCallback((tracks: RoamSeedTrack[], currentId: string) => {
     const idx = tracks.findIndex((t) => t.id === currentId);
@@ -387,13 +537,9 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
       const t = musicPlayer.getCurrentTrack();
       setNowPlaying({ track: t ? { ...t } : null, isPlaying: musicPlayer.getIsPlaying() });
     };
-    const syncProgress = (data: any) => {
-      if (data && typeof data.currentTime === 'number') setProgress({ current: data.currentTime, duration: data.duration || 0 });
-    };
     const syncCurrent = () => {
       setRoamCurrentId(musicPlayer.getCurrentTrack()?.id ?? null);
       syncNow();
-      setProgress({ current: musicPlayer.getCurrentTime(), duration: musicPlayer.getDuration() });
     };
     const maybeExtend = () => {
       const curTrack = musicPlayer.getCurrentTrack();
@@ -430,16 +576,14 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     };
     syncNow();
     setRoamCurrentId(musicPlayer.getCurrentTrack()?.id ?? null);
-    setProgress({ current: musicPlayer.getCurrentTime(), duration: musicPlayer.getDuration() });
     const unsubTrackChange = musicPlayer.on('trackChange', maybeExtend);
     const unsubPlay = musicPlayer.on('play', syncCurrent);
     const unsubPause = musicPlayer.on('pause', syncNow);
-    const unsubProgress = musicPlayer.on('progress', syncProgress);
     const tracks = musicPlayer.getTracks();
     const idx = musicPlayer.getCurrentIndex();
     const nextInQueue = idx >= 0 && idx + 1 < tracks.length;
     if ((!nextInQueue || roamReservoir.current.length <= 2) && !roamExtending.current) extendRoam();
-    return () => { unsubTrackChange(); unsubPlay(); unsubPause(); unsubProgress(); };
+    return () => { unsubTrackChange(); unsubPlay(); unsubPause(); };
   }, [extendRoam, slideRoamWindow, addToHistory]);
 
   // 加载歌词
@@ -458,24 +602,36 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     } catch { setLyricLines([]); }
   }, [source]);
 
-  // 歌词同步：根据播放进度更新当前行，并按「译/音」模式取到对应的翻译/音译小字
+  // 歌词同步：自订阅 progress（不再由父组件的 progress state 驱动，避免 ~4Hz 整页重渲染），
+  // 按「译/音」模式取到对应的翻译/音译小字
   useEffect(() => {
     if (!lyricLines.length) { setCurLyric({ cur: '', next: '' }); setCurSub(''); setNextSub(''); return; }
-    const ct = musicPlayer.getCurrentTime() * 1000;
-    let idx = -1;
-    for (let i = 0; i < lyricLines.length; i++) {
-      if (lyricLines[i].time_ms <= ct) idx = i;
-      else break;
-    }
-    const curLine = idx >= 0 ? lyricLines[idx] : null;
-    const nextLine = idx + 1 < lyricLines.length ? lyricLines[idx + 1] : null;
-    setCurLyric({ cur: curLine ? curLine.text : '', next: nextLine ? nextLine.text : '' });
-    // 小字内容：翻译模式取 translation，音译模式取 romaji
-    if (curLine) setCurSub(lyricMode === 'romaji' ? (curLine.romaji || '') : (curLine.translation || ''));
-    else setCurSub('');
-    if (nextLine) setNextSub(lyricMode === 'romaji' ? (nextLine.romaji || '') : (nextLine.translation || ''));
-    else setNextSub('');
-  }, [progress.current, lyricLines, lyricMode]);
+    const sync = () => {
+      const ct = musicPlayer.getCurrentTime() * 1000;
+      let idx = -1;
+      for (let i = 0; i < lyricLines.length; i++) {
+        if (lyricLines[i].time_ms <= ct) idx = i;
+        else break;
+      }
+      const curLine = idx >= 0 ? lyricLines[idx] : null;
+      const nextLine = idx + 1 < lyricLines.length ? lyricLines[idx + 1] : null;
+      setCurLyric((prev) => (prev.cur === (curLine ? curLine.text : '') && prev.next === (nextLine ? nextLine.text : ''))
+        ? prev
+        : { cur: curLine ? curLine.text : '', next: nextLine ? nextLine.text : '' });
+      // 小字内容：翻译模式取 translation，音译模式取 romaji
+      setCurSub(prev => {
+        const v = curLine ? (lyricMode === 'romaji' ? (curLine.romaji || '') : (curLine.translation || '')) : '';
+        return prev === v ? prev : v;
+      });
+      setNextSub(prev => {
+        const v = nextLine ? (lyricMode === 'romaji' ? (nextLine.romaji || '') : (nextLine.translation || '')) : '';
+        return prev === v ? prev : v;
+      });
+    };
+    sync();
+    const off = musicPlayer.on('progress', sync);
+    return off;
+  }, [lyricLines, lyricMode]);
 
   const refreshRoam = useCallback(() => {
     roamReservoir.current = []; roamStartedRef.current = false; roamForceReloadRef.current = true;
@@ -511,9 +667,6 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
   // 渲染数据
   const cur = nowPlaying.track;
   const curCover = themeMode === 'preset' ? null : getCoverUrl(cur?.coverPath);
-  const dur = progress.duration || cur?.durationSecs || 0;
-  const pos = progress.current || 0;
-  const pct = dur > 0 ? (pos / dur) * 100 : 0;
 
   // 自适应缩放因子：基于视口宽度动态计算，小窗口 1.0，大窗口线性增长至上限 1.8
   // 用于让标题、按钮、间距等元素在窗口放大时自然摊开
@@ -675,7 +828,7 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
   }, []);
 
   return (
-    <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative" style={{ background: stageBg }}>
+    <div ref={stageRootRef} className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative" style={{ background: stageBg }}>
 
       {/* 主舞台 */}
       <div className="flex-1 relative overflow-hidden">
@@ -760,49 +913,17 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
               {/* 遮罩区内播放栏（overlay 模式） */}
               {barPosition === 'overlay' && (
-                <div className="mt-auto flex flex-col items-center gap-2" style={{ width: '100%', maxWidth: Math.round(400 * scaleFactor), paddingTop: 'clamp(12px, 2%, 20px)' }}>
-                  {/* EQ 均衡器 */}
-                  <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', height: 95, marginBottom: 4 }}>
-                    {eqHeights.map((h, i) => (
-                      <span key={i} style={{
-                        flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h}%`,
-                        background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
-                        borderRadius: 2, opacity: 0.85,
-                        transition: 'height 0.05s linear',
-                      }} />
-                    ))}
-                  </div>
-                  {/* 进度条 — 视觉2px细线，点击区域向上拓展2倍 */}
-                  <div className="flex items-center gap-2 w-full" style={{ fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: ink }}>
-                    <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28 }}>{formatTime(pos)}</span>
-                    {/* 外层透明容器拓展点击区域（上方14px+下方14px），内层2px细线 */}
-                    <div className="flex-1 relative cursor-pointer" style={{ paddingTop: 14, paddingBottom: 14, marginTop: -14, marginBottom: -14 }}
-                      onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); musicPlayer.seek(ratio * dur); }}>
-                      {/* 视觉细线层：仅2px高，居中于点击区域 */}
-                      <div className="relative rounded-full" style={{ height: 2, background: inkLine }}>
-                        <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
-                        <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
-                      </div>
-                    </div>
-                    <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{formatTime(dur)}</span>
-                  </div>
-                  {/* 控制按钮 */}
-                  <div className="flex items-center" style={{ gap: `clamp(8px, ${1.2 * scaleFactor}vw, ${Math.round(18 * scaleFactor)}px)`, color: ink }}>
-                    <button onClick={handlePrev} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="上一首">
-                      <svg width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
-                    </button>
-                    <button onClick={() => musicPlayer.togglePlay()} className="rounded-full flex items-center justify-center transition-transform hover:scale-105" style={{ width: `clamp(36px, ${4 * scaleFactor}vw, ${Math.round(48 * scaleFactor)}px)`, height: `clamp(36px, ${4 * scaleFactor}vw, ${Math.round(48 * scaleFactor)}px)`, background: 'rgba(255,255,255,0.92)', color: '#2c5a1a', boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)', border: 'none', cursor: 'pointer', animation: nowPlaying.isPlaying ? 'roam-breathe 3.4s ease-in-out infinite' : 'none' }} title={nowPlaying.isPlaying ? '暂停' : '播放'}>
-                      {nowPlaying.isPlaying ? (
-                        <svg viewBox="0 0 24 24" width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
-                      ) : (
-                        <svg viewBox="0 0 24 24" width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                      )}
-                    </button>
-                    <button onClick={handleNext} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="下一首">
-                      <svg width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
-                    </button>
-                  </div>
-                </div>
+                <RoamPlayBar
+                  variant="overlay"
+                  active={stageVisible}
+                  ink={ink}
+                  inkLine={inkLine}
+                  isDark={isDark}
+                  scaleFactor={scaleFactor}
+                  transitioning={transitioning}
+                  onPrev={handlePrev}
+                  onNext={handleNext}
+                />
               )}
             </div>
 
@@ -866,72 +987,17 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
 
             {/* EQ 均衡器 + 专属播放栏（舞台底部独立层，仅 stage 模式） */}
             {barPosition === 'stage' && (
-            <div className="roam-bottom-bar" style={{
-              position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 9,
-              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'clamp(6px, 0.8vw, 12px)',
-              padding: 'clamp(10px, 1.5%, 18px) clamp(16px, 4%, 50px) clamp(12px, 1.8%, 22px)',
-              background: isDark ? 'linear-gradient(0deg, rgba(20,30,18,0.75) 0%, rgba(20,30,18,0.3) 60%, transparent 100%)' : 'linear-gradient(0deg, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0.15) 60%, transparent 100%)',
-              backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
-              transition: 'opacity 0.45s ease',
-              opacity: transitioning ? 0 : 1,
-            }}>
-              {/* EQ 均衡器 */}
-              <div className="flex items-end justify-center" style={{ gap: 3, width: '100%', maxWidth: 500, height: 95 }}>
-                {eqHeights.map((h, i) => (
-                  <span key={i} style={{
-                    flex: '1 1 0', minWidth: 2, maxWidth: 8, height: `${h}%`,
-                    background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
-                    borderRadius: 2, opacity: 0.85,
-                    transition: 'height 0.05s linear',
-                  }} />
-                ))}
-              </div>
-
-              {/* 进度条 — 视觉2px细线，点击区域向上拓展2倍 */}
-              <div className="flex items-center gap-2 w-full" style={{ maxWidth: 500, fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: ink }}>
-                <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28 }}>{formatTime(pos)}</span>
-                {/* 外层透明容器拓展点击区域（上方14px+下方14px），内层2px细线 */}
-                <div className="flex-1 relative cursor-pointer" style={{ paddingTop: 14, paddingBottom: 14, marginTop: -14, marginBottom: -14 }}
-                  onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); musicPlayer.seek(ratio * dur); }}>
-                  {/* 视觉细线层：仅2px高，居中于点击区域 */}
-                  <div className="relative rounded-full" style={{ height: 2, background: inkLine }}>
-                    <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct}%`, background: '#fff' }} />
-                    <div className="absolute rounded-full" style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%,-50%)', width: 7, height: 7, background: '#fff', boxShadow: '0 0 0 2px rgba(255,255,255,0.2)' }} />
-                  </div>
-                </div>
-                <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{formatTime(dur)}</span>
-              </div>
-
-              {/* 控制按钮 */}
-              <div className="flex items-center" style={{ gap: `clamp(10px, ${1.5 * scaleFactor}vw, ${Math.round(20 * scaleFactor)}px)`, color: ink }}>
-                <button onClick={handlePrev} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="上一首">
-                  <svg width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
-                </button>
-                <button
-                  onClick={() => musicPlayer.togglePlay()}
-                  className="rounded-full flex items-center justify-center transition-transform hover:scale-105"
-                  style={{
-                    width: `clamp(36px, ${4 * scaleFactor}vw, ${Math.round(48 * scaleFactor)}px)`, height: `clamp(36px, ${4 * scaleFactor}vw, ${Math.round(48 * scaleFactor)}px)`,
-                    background: 'rgba(255,255,255,0.92)', color: '#2c5a1a',
-                    boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)',
-                    border: 'none', cursor: 'pointer',
-                    animation: nowPlaying.isPlaying ? 'roam-breathe 3.4s ease-in-out infinite' : 'none',
-                  }}
-                  title={nowPlaying.isPlaying ? '暂停' : '播放'}
-                >
-                  {nowPlaying.isPlaying ? (
-                    <svg viewBox="0 0 24 24" width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
-                  ) : (
-                    <svg viewBox="0 0 24 24" width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                  )}
-                </button>
-                <button onClick={handleNext} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="下一首">
-                  <svg width={Math.round(18 * scaleFactor)} height={Math.round(18 * scaleFactor)} viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10.5 6L4 18z"/></svg>
-                </button>
-                {/* 「译/音」三态切换：就近看到歌词时在此切换显示翻译/音译小字 */}
-                <LyricModeButton />
-              </div>
-            </div>
+              <RoamPlayBar
+                variant="stage"
+                active={stageVisible}
+                ink={ink}
+                inkLine={inkLine}
+                isDark={isDark}
+                scaleFactor={scaleFactor}
+                transitioning={transitioning}
+                onPrev={handlePrev}
+                onNext={handleNext}
+              />
             )}
           </div>
         )}

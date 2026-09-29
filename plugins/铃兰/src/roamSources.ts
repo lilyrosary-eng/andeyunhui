@@ -272,6 +272,64 @@ const linglanApi: RoamSourceApi = {
   },
 };
 
+// ============ 临时播放栏（临时1/2/3）实现 ============
+//
+// 队列由 index.tsx 在进入该栏时注入快照（去重 + 随机打散，与漫游一致），fetchBatch 按打散顺序
+// 循环消费；曲目若已带地址（本地文件 / 已取过的直链）直接用，否则按 id 前缀回落到所属平台接口现取。
+
+type TempSlotName = 'temp1' | 'temp2' | 'temp3';
+const tempPools: Partial<Record<TempSlotName, { tracks: RoamSeedTrack[]; cursor: number }>> = {};
+
+/** 注入某个临时栏的队列快照（进入该栏漫游时调用） */
+export function setTempRoamPool(slot: TempSlotName, tracks: RoamSeedTrack[]): void {
+  const seen = new Set<string>();
+  const deduped: RoamSeedTrack[] = [];
+  for (const t of tracks) {
+    const key = t.id || t.filePath || t.title;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(t);
+  }
+  // 随机打散：与漫游电台的「随机」观感一致
+  tempPools[slot] = { tracks: deduped.sort(() => Math.random() - 0.5), cursor: 0 };
+}
+
+/** 从曲目 id 前缀判定所属平台（在线源 id 均带平台前缀；其余按本地处理） */
+function platformOfTrack(track: RoamSeedTrack): RoamSource | null {
+  const id = track.id || '';
+  if (id.startsWith('netease-')) return 'netease';
+  if (id.startsWith('kugou-')) return 'kugou';
+  if (id.startsWith('qishui-')) return 'qishui';
+  return null;
+}
+
+function makeTempApi(slot: TempSlotName): RoamSourceApi {
+  return {
+    async fetchBatch(count: number, _offset: number) {
+      const pool = tempPools[slot];
+      if (!pool || !pool.tracks.length) return { tracks: [], nextOffset: 0 };
+      const take = Math.max(count, 1);
+      const out: RoamSeedTrack[] = [];
+      for (let i = 0; i < take; i++) {
+        out.push(pool.tracks[(pool.cursor + i) % pool.tracks.length]);
+      }
+      pool.cursor = (pool.cursor + take) % pool.tracks.length;
+      return { tracks: out, nextOffset: 0 };
+    },
+    async getSongUrl(track: RoamSeedTrack) {
+      if (track.filePath) return { url: track.filePath };
+      const p = platformOfTrack(track);
+      if (p) return sourceApis[p].getSongUrl(track);
+      return { url: '' };
+    },
+    async getLyric(track: RoamSeedTrack) {
+      const p = platformOfTrack(track);
+      if (p) return sourceApis[p].getLyric ? sourceApis[p].getLyric!(track) : null;
+      return linglanApi.getLyric ? linglanApi.getLyric(track) : null;
+    },
+  };
+}
+
 // ============ 注册表 ============
 
 const sourceApis: Record<RoamSource, RoamSourceApi> = {
@@ -279,6 +337,9 @@ const sourceApis: Record<RoamSource, RoamSourceApi> = {
   netease: neteaseApi,
   kugou: kugouApiImpl,
   qishui: qishuiApiImpl,
+  temp1: makeTempApi('temp1'),
+  temp2: makeTempApi('temp2'),
+  temp3: makeTempApi('temp3'),
 };
 
 export function getRoamSourceApi(source: RoamSource): RoamSourceApi {
