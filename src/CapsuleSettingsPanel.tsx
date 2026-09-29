@@ -29,7 +29,7 @@ export function CapsuleSettingsPanel() {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg">
+    <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg immersive-safe-top">
       <div className="px-8 pt-6 pb-2 shrink-0">
         <h2 className="text-lg font-semibold text-neutral-800 dark:text-stone-100">{t('capsule.settings.title')}</h2>
         <p className="text-xs text-neutral-400 dark:text-stone-500 mt-1">{t('capsule.settings.subtitle')}</p>

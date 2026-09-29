@@ -44,7 +44,7 @@ function TransferTab() {
   }, [handleDrop, handleDragOver]);
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg fade-in">
+    <div className="flex-1 flex flex-col h-full overflow-hidden main-panel-bg fade-in immersive-safe-top">
       {/* 标题栏 */}
       <div className="flex items-center gap-3 px-6 pt-5 pb-2 shrink-0">
         <div className="w-10 h-10 rounded-xl bg-[var(--element-bg)]/10 flex items-center justify-center text-[var(--element-color-raw)] text-lg font-bold">

@@ -376,7 +376,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
   );
 
   return (
-    <div className="relative flex-1 h-full overflow-hidden main-panel-bg p-6 fade-in flex flex-col">
+    <div className="relative flex-1 h-full overflow-hidden main-panel-bg p-6 fade-in flex flex-col immersive-safe-top">
       {/* 主站左侧：OCR 工作区（自包含，支持拖入 / 选择 / 粘贴图片） */}
       {variant === 'main' && ocrOpen && (
         <div className="absolute left-6 top-6 bottom-6 w-80 z-10">

@@ -255,6 +255,7 @@ export const AiChatConversation = memo(function AiChatConversation({
   const blockCard = showCompanionAvatar ? null : companionCard;
 
   // 胶囊形态：深色玻璃皮肤；主窗口形态：原浅色
+  // 沉浸态顶部让位由宿主侧的插件保活外壳统一处理（见 App.tsx），这里不重复加标记。
   const shellClass = capsuleMode
     ? 'flex-1 h-full flex flex-col bg-black/20 backdrop-blur-xl text-white/90'
     : 'flex-1 h-full flex flex-col bg-[#f5f5f0] dark:bg-[#1c1917]';

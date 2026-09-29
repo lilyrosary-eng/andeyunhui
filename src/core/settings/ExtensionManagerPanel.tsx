@@ -179,7 +179,7 @@ export function ExtensionManagerPanel() {
   const rejectedGroups = groupDiagnostics(diagnostics);
 
   return (
-    <div className="max-w-4xl mx-auto w-full h-full flex flex-col gap-6 pt-8 px-4">
+    <div className="max-w-4xl mx-auto w-full h-full flex flex-col gap-6 pt-8 px-4 immersive-safe-top">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight text-neutral-800 dark:text-stone-100">{t('ext.title')}</h1>
         <div className="flex items-center gap-2">

@@ -259,7 +259,7 @@ export function DeskpetSettingsPanel() {
   );
 
   return (
-    <div className="h-full overflow-y-auto bg-white dark:bg-stone-950">
+    <div className="h-full overflow-y-auto bg-white dark:bg-stone-950 immersive-safe-top">
       <div className="max-w-2xl mx-auto px-6 py-6">
         {/* 桌宠：显隐 + Phase A 基础设置（缩放 / 透明度 / 点击穿透） */}
         <section>

@@ -501,6 +501,15 @@ function App() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [immersive, setImmersive]);
 
+  // 沉浸态标记挂到 <html>，而不是只放在 store 里：插件构建会把宿主 src 一起打进自己的 IIFE
+  // （见 plugins/_shared/vite.shared.config.ts，只有 react/react-dom 是 external），
+  // 插件内 import 宿主 store 拿到的是另一份 zustand 实例 → 读不到 immersive。
+  // DOM 类名 + CSS 是跨 bundle 唯一可靠通道，插件里的侧栏/内容也能靠它让位。
+  useEffect(() => {
+    document.documentElement.classList.toggle('immersive-mode', immersive);
+    return () => document.documentElement.classList.remove('immersive-mode');
+  }, [immersive]);
+
   // 侧栏齿轮模块设置：黄金棋盘→capsule-settings，其他插件（如 IDE）自行接 module-settings-toggle。
   // 注意：HostSidebar 派发的是 window.dispatchEvent 的 DOM CustomEvent，
   // 必须用 window.addEventListener 接（Tauri listen 收不到 DOM 事件，之前因此点了无反应）。
@@ -608,7 +617,7 @@ function App() {
   // ====== 模块路由 ======
   const renderModule = () => {
     if (activeModule === 'settings') {
-      return <div className="flex-1 h-full overflow-hidden main-panel-bg settings-surface p-6 fade-in"><GlobalSettingsPanel /></div>;
+      return <div className="flex-1 h-full overflow-hidden main-panel-bg settings-surface p-6 fade-in immersive-safe-top"><GlobalSettingsPanel /></div>;
     }
     if (activeModule === 'transfer') {
       return <TransferStationPanel onOpenReadableFile={handleOpenReadableFile} />;
@@ -667,7 +676,10 @@ function App() {
             return (
               <div
                 key={def.id}
-                className="h-full w-full overflow-hidden"
+                // immersive-safe-top：插件模块统一在这里让开悬浮层顶部 38px。
+                // 插件会把宿主 src 打进自己的包，无法可靠读取沉浸态，所以由宿主侧外壳统一处理，
+                // 插件自身一行都不用改，也不会因插件不同而表现不一致。
+                className="h-full w-full overflow-hidden immersive-safe-top"
                 style={{ display: show ? undefined : 'none' }}
                 aria-hidden={show ? undefined : true}
               >
@@ -694,19 +706,15 @@ function App() {
       boot.__bootProgress?.(90, { text: "准备就绪", phase: "PHASE 05 / 05" });
     }}>
       <div className="flex flex-col h-screen w-screen main-panel-bg text-foreground antialiased overflow-hidden">
+        {/* 沉浸模式只隐藏上栏与一级导航：二级侧栏与模块内容一律保留原位（整体左移），
+            不再用「内容 fixed 覆盖全窗口」——那样必然要盖掉宿主级侧栏（茑萝），
+            而模块内嵌侧栏（笔记/AI 对话）本身就在内容树里，两者行为天然对不上。
+            顶部 38px 归悬浮层，模块内容与侧栏用 .immersive-safe-top 让位。 */}
         <Titlebar hidden={immersive} />
         <div className="flex flex-1 min-w-0 overflow-hidden">
           <AppNav mainPluginIds={mainPluginIds} hidden={immersive} />
-          <HostSidebar hidden={immersive} />
-          {/* 沉浸模式：内容区脱离文档流铺满整窗，导航则真正 display:none。
-              早期版本靠覆盖层的不透明底色盖住导航，而自定义背景模式下 .main-panel-bg 被置透明
-              → 上栏/图标条/侧栏从下面透出，看起来像"点了没反应"（实际状态已切换）。
-              z-index 高于 AppNav 的 z-50，低于 ImmersiveChrome 的 z-[60]。
-              覆盖层不再需要任何底色：窗口底色由根节点 main-panel-bg 提供，自定义背景图自然透出。 */}
-          <div className={immersive
-            ? 'fade-in fixed inset-0 z-[55] overflow-hidden'
-            : 'flex-1 min-w-0 h-full overflow-hidden'}
-          >
+          <HostSidebar />
+          <div className="flex-1 min-w-0 h-full overflow-hidden">
             {renderModule()}
           </div>
         </div>

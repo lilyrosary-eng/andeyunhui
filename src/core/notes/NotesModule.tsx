@@ -11,7 +11,7 @@ export function NotesModule() {
   const showNoteSettings = useAppStore(s => s.showNoteSettings);
 
   return (
-    <div className="flex flex-1 h-full overflow-hidden">
+    <div className="flex flex-1 h-full overflow-hidden immersive-safe-top">
       <NotesSidebar />
       <div className={`flex-1 h-full overflow-hidden ${showNoteSettings ? '' : 'main-panel-bg p-6'}`}>
         {showNoteSettings ? <NoteSettingsPanel /> : <NotesEditor />}
