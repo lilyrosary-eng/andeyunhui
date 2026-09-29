@@ -23,20 +23,21 @@ export function ImmersiveChrome() {
   const setImmersive = useAppStore(s => s.setImmersive);
 
   return (
-    <div className="pointer-events-none fade-in fixed inset-x-0 top-0 z-[60] flex h-[38px] items-center justify-between select-none">
-      {/* 拖拽条：铺满上沿，位于 logo 与控制键之下 */}
+    <div className="group/chrome pointer-events-none fade-in fixed inset-x-0 top-0 z-[60] flex h-[38px] items-center justify-between select-none">
+      {/* 拖拽条：铺满上沿，位于 logo 与控制键之下。鼠标移入整条悬浮带时，这里浮出白色衬底，
+          与控制键同步出现/淡出（同一个 group hover 触发，无需 JS） */}
       <div
         data-tauri-drag-region
-        className="pointer-events-auto absolute inset-x-0 top-0 h-full transition-colors duration-200 hover:bg-black/5 dark:hover:bg-white/5"
+        className="pointer-events-auto absolute inset-x-0 top-0 h-full bg-transparent transition-colors duration-200 group-hover/chrome:bg-white/30 dark:group-hover/chrome:bg-[#1c1917]/30"
       />
 
-      {/* 左：矢车菊 logo = 退出沉浸 */}
+      {/* 左：矢车菊 logo = 退出沉浸。它是常态唯一保留的入口，不随悬停隐藏 */}
       <div className="pointer-events-auto relative pl-3">
         <LogoButton onClick={() => setImmersive(false)} label={t('titlebar.immersiveExit')} />
       </div>
 
-      {/* 右：窗口控制键 */}
-      <div className="pointer-events-auto relative flex h-full items-center gap-0.5 pr-1">
+      {/* 右：窗口控制键 —— 常态隐藏（让画面彻底干净），悬停悬浮带或键盘 Tab 到达时浮现 */}
+      <div className="pointer-events-none relative flex h-full items-center gap-0.5 pr-1 opacity-0 transition-opacity duration-200 group-hover/chrome:pointer-events-auto group-hover/chrome:opacity-100 group-focus-within/chrome:pointer-events-auto group-focus-within/chrome:opacity-100">
         <button onClick={() => appWindow?.minimize()} className={`${CTRL_CLASS} rounded-md hover:text-neutral-800 hover:bg-black/10 dark:hover:text-stone-200 dark:hover:bg-white/10`} title={t('titlebar.minimize')}>
           <Minus size={15} />
         </button>
