@@ -36,8 +36,12 @@ export function ImmersiveChrome() {
         <LogoButton onClick={() => setImmersive(false)} label={t('titlebar.immersiveExit')} />
       </div>
 
-      {/* 右：窗口控制键 —— 常态隐藏（让画面彻底干净），悬停悬浮带或键盘 Tab 到达时浮现 */}
-      <div className="pointer-events-none relative flex h-full items-center gap-0.5 pr-1 opacity-0 transition-opacity duration-200 group-hover/chrome:pointer-events-auto group-hover/chrome:opacity-100 group-focus-within/chrome:pointer-events-auto group-focus-within/chrome:opacity-100">
+      {/* 右：窗口控制键 —— 常态隐藏（让画面彻底干净）。
+          出现：毫秒级，与白色衬底同时（hover 态上的 delay-0）。
+          消失：延迟 2s 再淡出（基础态上的 delay-[2000ms]）—— CSS 过渡在「移开」时会用基础态的
+          transition-delay，所以无需 JS 即能做到「移出后三键多停留两秒」；衬底不设延迟，立即淡出。
+          键盘 Tab 到达时同样立即出现。 */}
+      <div className="pointer-events-none relative flex h-full items-center gap-0.5 pr-1 opacity-0 transition-opacity duration-200 delay-[2000ms] group-hover/chrome:pointer-events-auto group-hover/chrome:opacity-100 group-hover/chrome:delay-0 group-focus-within/chrome:pointer-events-auto group-focus-within/chrome:opacity-100 group-focus-within/chrome:delay-0">
         <button onClick={() => appWindow?.minimize()} className={`${CTRL_CLASS} rounded-md hover:text-neutral-800 hover:bg-black/10 dark:hover:text-stone-200 dark:hover:bg-white/10`} title={t('titlebar.minimize')}>
           <Minus size={15} />
         </button>
