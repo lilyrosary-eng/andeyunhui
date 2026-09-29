@@ -870,7 +870,8 @@ function ScrubBar({ pct, onScrub }: { pct: number; onScrub: (ratio: number) => v
 }
 
 // ========== 右上角页码（点击可输入页码跳转） ==========
-function PageIndicator({ index, total, onJump }: { index: number; total: number; onJump: (i: number) => void }) {
+// 导出给相册封面选择面板复用：两处的页码交互保持一致（点击 → 填数字 → 回车精准跳转）。
+export function PageIndicator({ index, total, onJump }: { index: number; total: number; onJump: (i: number) => void }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState('');
   const commit = () => {

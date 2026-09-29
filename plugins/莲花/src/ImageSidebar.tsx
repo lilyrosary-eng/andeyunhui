@@ -1,7 +1,7 @@
 /// <reference path="../../global.d.ts" />
 import React from "react";
 import { T, useLang } from '../../_shared/pluginRuntime';
-import { ThumbImg } from './ImageViewer';
+import { ThumbImg, PageIndicator } from './ImageViewer';
 const { useState } = React;
 const hostApi = window.__HOST_API__;
 const { ModuleSidebarShell, SecondaryNavShell, ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = window.__HOST_UI__ || {};
@@ -16,10 +16,32 @@ export function albumCoverKey(albumId: string): string {
   return 'a:' + albumId;
 }
 
-/** 每页列出的备选封面数量。面板网格是 5 列，加上「自选」格正好 25 格 = 5 整行。 */
-const COVER_PAGE_CANDIDATES = 24;
-/** 封面网格列数（与上面配套：5 列 × 5 行） */
+/** 封面网格：五列四行 = 20 格；其中第一格固定是「自选」，故每页 19 张备选。 */
 const COVER_GRID_COLS = 5;
+const COVER_GRID_ROWS = 4;
+const COVER_PAGE_CANDIDATES = COVER_GRID_COLS * COVER_GRID_ROWS - 1;
+/** 缩略图按页缓存的上限：最多留 3 页，翻页越窗即淘汰；关闭面板（组件卸载）整表丢弃。 */
+const COVER_THUMB_CACHE_MAX = 3;
+/** 缩略图解析的全局限并发：与查看器缩略图条同款，避免批量拉缩略图时挤爆 CPU。 */
+const COVER_THUMB_CONCURRENCY = 4;
+
+// 缩略图解析队列（模块级：并发计数需要跨组件实例共享，与查看器 thumbQueue 同一模式）
+const coverThumbQueue: Array<() => void> = [];
+let coverThumbActive = 0;
+function pumpCoverThumbQueue() {
+  while (coverThumbActive < COVER_THUMB_CONCURRENCY && coverThumbQueue.length > 0) {
+    coverThumbActive++;
+    coverThumbQueue.shift()!();
+  }
+}
+function scheduleCoverThumb(task: () => void) {
+  coverThumbQueue.push(task);
+  pumpCoverThumbQueue();
+}
+function coverThumbSettled() {
+  coverThumbActive--;
+  pumpCoverThumbQueue();
+}
 
 interface ImageFolder {
   folderPath: string;
@@ -131,11 +153,17 @@ function CoverIcon({ size = 14 }: { size?: number }) {
 
 /**
  * 相册封面选择面板。
- * 顺序按需求固定：第一个格子是「自选图片」（系统文件框任选一张），其后都是相册内
- * 已有图片作为备选；候选超过一页时按页切分，但「自选」在每页都固定占据第一格，
- * 位置始终不变。
+ * 顺序按需求固定：第一格永远是「自选图片」（系统文件框任选一张），其余是相册内已有
+ * 图片；网格五列四行 = 20 格。候选超过一页时按页切分，但「自选」在每页都固定占据
+ * 第一格，位置始终不变。
+ *
+ * 缩略图性能策略（目标：任何一次翻页都是毫秒级）：
+ *   ① 按页缓存已解析的缩略图 URL，最多留 3 页，翻页越窗即淘汰（LRU）；
+ *   ② 只为本页缺失的缩略图排期解析，全局并发 4；
+ *   ③ 关闭面板 = 组件卸载，缓存表与在途结果一并丢弃（不污染下一次打开）。
  */
 function CoverPickerOverlay(props: {
+  cacheKey: string;
   title: string;
   candidates: string[];
   loading: boolean;
@@ -148,16 +176,61 @@ function CoverPickerOverlay(props: {
   onPage: (page: number) => void;
   onClose: () => void;
 }) {
-  const { title, candidates, loading, page, pageCount, current, onPickFile, onPick, onReset, onPage, onClose } = props;
-  // 分页：备选按每页 COVER_PAGE_CANDIDATES 张切分；「自选」永远是当前页的第一格，
-  // 位置固定不变（翻页不会把它挤走或挪位）。
+  const { cacheKey, title, candidates, loading, page, pageCount, current, onPickFile, onPick, onReset, onPage, onClose } = props;
+  // 已解析缩略图：pageKey -> (原图路径 -> asset URL)。放在 ref 里而不是 state，
+  // 避免每次有新缩略图就整表复制；用 forceRender 触发重渲染。
+  const cacheRef = React.useRef(new Map<string, Map<string, string>>());
+  const disposedRef = React.useRef(false);
+  const [, forceRender] = React.useState(0);
+  React.useEffect(() => () => { disposedRef.current = true; }, []);
+
   const start = page * COVER_PAGE_CANDIDATES;
   const visible = candidates.slice(start, start + COVER_PAGE_CANDIDATES);
+  const pageKey = `${cacheKey}#${page}`;
+
+  React.useEffect(() => {
+    if (loading) return;
+    const cache = cacheRef.current;
+    let bucket = cache.get(pageKey);
+    if (!bucket) {
+      bucket = new Map<string, string>();
+      cache.set(pageKey, bucket);
+    }
+    // LRU：只保留最近 3 页（Map 保持插入顺序，淘汰最旧的一页）
+    while (cache.size > COVER_THUMB_CACHE_MAX) {
+      const oldest = cache.keys().next().value as string | undefined;
+      if (oldest === undefined || oldest === pageKey) break;
+      cache.delete(oldest);
+    }
+    // 只排期本页缺失的：命中缓存（含刚回退一页）的格子立即有图，不再走后端
+    const pending: string[] = [];
+    for (const p of visible) {
+      if (bucket.has(p)) continue;
+      bucket.set(p, ''); // 占位：避免同一张图重复排期；解析失败也留空占位，不做无效重试
+      pending.push(p);
+    }
+    for (const p of pending) {
+      scheduleCoverThumb(() => {
+        if (disposedRef.current) { coverThumbSettled(); return; }
+        hostApi.invoke<string>('generate_thumbnail', { imagePath: p, width: 200 })
+          .then((thumb) => {
+            if (disposedRef.current || !thumb) return;
+            try { bucket.set(p, hostApi.convertFileSrc(thumb)); } catch { /* ignore */ }
+          })
+          .catch(() => { /* 单张失败不影响整页 */ })
+          .finally(() => {
+            coverThumbSettled();
+            if (!disposedRef.current) forceRender((n) => n + 1);
+          });
+      });
+    }
+  }, [pageKey, candidates, loading]);
+
   return React.createElement('div', {
     className: 'fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4',
     onClick: onClose,
   }, React.createElement('div', {
-    className: 'w-[min(600px,92vw)] max-h-[78vh] flex flex-col rounded-2xl bg-white dark:bg-stone-800 shadow-2xl border border-black/10 dark:border-white/10 overflow-hidden',
+    className: 'w-[min(600px,92vw)] flex flex-col rounded-2xl bg-white dark:bg-stone-800 shadow-2xl border border-black/10 dark:border-white/10 overflow-hidden',
     onClick: (e: React.MouseEvent) => e.stopPropagation(),
   },
     React.createElement('div', { key: 'hdr', className: 'flex items-center gap-2 px-4 py-3 border-b border-black/5 dark:border-white/10' },
@@ -171,9 +244,9 @@ function CoverPickerOverlay(props: {
         className: 'text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200 text-lg leading-none px-1',
       }, '×'),
     ),
-    React.createElement('div', { key: 'body', className: 'flex-1 overflow-y-auto p-3' },
-      React.createElement('div', { key: 'grid', className: `grid gap-2`, style: { gridTemplateColumns: `repeat(${COVER_GRID_COLS}, minmax(0, 1fr))` } },
-        // ① 自选图片（每页都固定在第一格）
+    React.createElement('div', { key: 'body', className: 'p-3' },
+      React.createElement('div', { key: 'grid', className: 'grid gap-2', style: { gridTemplateColumns: `repeat(${COVER_GRID_COLS}, minmax(0, 1fr))` } },
+        // ① 自选图片（每页都固定在第一格，位置不变）
         React.createElement('button', {
           key: '__pick_file__',
           onClick: onPickFile,
@@ -183,23 +256,28 @@ function CoverPickerOverlay(props: {
           React.createElement(CoverIcon, { key: 'i', size: 18 }),
           React.createElement('span', { key: 'l', className: 'text-[10px] leading-tight text-center px-1' }, T('image.sidebar.coverPicker.pickFile')),
         ),
-        // ② 相册内备选（本页）：走 200px 缩略图缓存 + 全局限并发 4，只生成当前页可见的缩略图
-        visible.map((p) => React.createElement('button', {
-          key: p,
-          onClick: () => onPick(p),
-          title: p,
-          className: `aspect-square rounded-xl overflow-hidden bg-[var(--element-muted)] border transition-all ${
-            p === current
-              ? 'border-[var(--element-border)] ring-2 ring-[var(--element-border)]'
-              : 'border-black/10 dark:border-white/10 hover:border-[var(--element-border)]'
-          }`,
-        }, React.createElement(ThumbImg, { key: 'thumb', path: p }))),
+        // ② 相册内备选（本页）：已缓存的直接出图，未缓存的按占位渲染后逐个补齐
+        visible.map((p) => {
+          const src = cacheRef.current.get(pageKey)?.get(p) || '';
+          return React.createElement('button', {
+            key: p,
+            onClick: () => onPick(p),
+            title: p,
+            className: `aspect-square rounded-xl overflow-hidden bg-[var(--element-muted)] border transition-all ${
+              p === current
+                ? 'border-[var(--element-border)] ring-2 ring-[var(--element-border)]'
+                : 'border-black/10 dark:border-white/10 hover:border-[var(--element-border)]'
+            }`,
+          }, src
+            ? React.createElement('img', { key: 'img', src, alt: '', className: 'w-full h-full object-cover', decoding: 'async', draggable: false })
+            : null);
+        }),
       ),
       loading && React.createElement('p', { key: 'loading', className: 'text-xs text-neutral-400 dark:text-stone-500 mt-3 px-1' }, T('image.sidebar.coverPicker.loading')),
       !loading && candidates.length === 0 && React.createElement('p', { key: 'empty', className: 'text-xs text-neutral-400 dark:text-stone-500 mt-3 px-1' }, T('image.sidebar.coverPicker.empty')),
     ),
     React.createElement('div', { key: 'ftr', className: 'px-4 py-2.5 border-t border-black/5 dark:border-white/10 flex items-center gap-3' },
-      // 分页控件（只有一页时不显示，避免噪音）
+      // 分页：‹ › 快速翻页 + 页码（点击可手动填，与查看器标准模式同一组件/同一交互）
       pageCount > 1 && React.createElement('div', { key: 'pager', className: 'flex items-center gap-1.5 mr-auto' },
         React.createElement('button', {
           key: 'prev',
@@ -207,8 +285,7 @@ function CoverPickerOverlay(props: {
           onClick: () => onPage(page - 1),
           className: `w-6 h-6 rounded-lg text-sm leading-none ${page <= 0 ? 'text-neutral-300 dark:text-stone-600 cursor-not-allowed' : 'text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/10'}`,
         }, '‹'),
-        React.createElement('span', { key: 'info', className: 'text-[11px] text-neutral-500 dark:text-stone-400 tabular-nums px-0.5' },
-          T('image.sidebar.coverPicker.page', { i: page + 1, n: pageCount })),
+        React.createElement(PageIndicator, { key: 'ind', index: page, total: pageCount, onJump: (i: number) => onPage(i) }),
         React.createElement('button', {
           key: 'next',
           disabled: page >= pageCount - 1,
@@ -475,6 +552,7 @@ export function ImageSidebar({ folders, customAlbums, loading, selectedFolder, o
   const coverOverlay = coverPicker && onSetCover
     ? React.createElement(CoverPickerOverlay, {
         key: 'cover-picker',
+        cacheKey: coverPicker.key,
         title: coverPicker.title,
         candidates: coverCandidates,
         loading: coverLoading,

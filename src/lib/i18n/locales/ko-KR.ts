@@ -1100,7 +1100,6 @@ export const koKR: Record<string, string> = {
   'image.sidebar.coverPicker.loading': '불러오는 중…',
   'image.sidebar.coverPicker.empty': '앨범에 이미지가 없습니다. “이미지 선택”을 사용하세요',
   'image.sidebar.coverPicker.total': '전체 {n}장',
-  'image.sidebar.coverPicker.page': '{i}/{n} 페이지',
   'image.sidebar.coverPicker.reset': '기본 커버로 되돌리기',
   'image.sidebar.search': '폴더 검색...',
   // 뷰어

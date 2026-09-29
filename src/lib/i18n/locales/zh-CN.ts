@@ -1276,7 +1276,6 @@ export const zhCN: Record<string, string> = {
   'image.sidebar.coverPicker.loading': '载入中…',
   'image.sidebar.coverPicker.empty': '相册内暂无图片，请用「自选图片」挑一张',
   'image.sidebar.coverPicker.total': '共 {n} 张',
-  'image.sidebar.coverPicker.page': '第 {i}/{n} 页',
   'image.sidebar.coverPicker.reset': '恢复默认封面',
   'image.sidebar.search': '搜索文件夹...',
   // 查看器

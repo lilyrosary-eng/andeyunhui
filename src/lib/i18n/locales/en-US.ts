@@ -1168,7 +1168,6 @@ export const enUS: Record<string, string> = {
   'image.sidebar.coverPicker.loading': 'Loading…',
   'image.sidebar.coverPicker.empty': 'No images in this album — use “Choose an image” instead',
   'image.sidebar.coverPicker.total': '{n} images',
-  'image.sidebar.coverPicker.page': 'Page {i} of {n}',
   'image.sidebar.coverPicker.reset': 'Reset to default cover',
   'image.sidebar.search': 'Search folders...',
   // Viewer

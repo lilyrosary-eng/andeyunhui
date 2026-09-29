@@ -1100,7 +1100,6 @@ export const deDE: Record<string, string> = {
   'image.sidebar.coverPicker.loading': 'Wird geladen…',
   'image.sidebar.coverPicker.empty': 'Keine Bilder in diesem Album – nutze „Bild auswählen“',
   'image.sidebar.coverPicker.total': '{n} Bilder',
-  'image.sidebar.coverPicker.page': 'Seite {i} von {n}',
   'image.sidebar.coverPicker.reset': 'Standard-Cover wiederherstellen',
   'image.sidebar.search': 'Ordner suchen...',
   // Viewer

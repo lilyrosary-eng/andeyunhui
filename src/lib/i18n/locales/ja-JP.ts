@@ -1100,7 +1100,6 @@ export const jaJP: Record<string, string> = {
   'image.sidebar.coverPicker.loading': '読み込み中…',
   'image.sidebar.coverPicker.empty': 'アルバム内に画像がありません。「画像を選択」から指定してください',
   'image.sidebar.coverPicker.total': '全 {n} 枚',
-  'image.sidebar.coverPicker.page': '{i}/{n} ページ',
   'image.sidebar.coverPicker.reset': '既定のカバーに戻す',
   'image.sidebar.search': 'フォルダを検索...',
   // ビューア

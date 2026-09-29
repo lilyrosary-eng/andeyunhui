@@ -1100,7 +1100,6 @@ export const zhTW: Record<string, string> = {
   'image.sidebar.coverPicker.loading': '載入中…',
   'image.sidebar.coverPicker.empty': '相簿內暫無圖片，請用「自選圖片」挑一張',
   'image.sidebar.coverPicker.total': '共 {n} 張',
-  'image.sidebar.coverPicker.page': '第 {i}/{n} 頁',
   'image.sidebar.coverPicker.reset': '恢復預設封面',
   'image.sidebar.search': '搜尋資料夾...',
   // 檢視器
