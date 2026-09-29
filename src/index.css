@@ -272,6 +272,14 @@
   .main-panel-bg {
     background-color: var(--main-panel-bg);
   }
+  /* 上栏底色：独立成类，不用 bg-[#f5f5f0] —— 后者是插件"纸面"共用色（见下方注释），
+     直接给它写 has-custom-bg 覆盖会波及所有插件面板。 */
+  .titlebar-surface {
+    background-color: #f5f5f0;
+  }
+  .dark .titlebar-surface {
+    background-color: #1c1917;
+  }
   /* 启用自定义背景图时，主面板背景透明，露出底部的模糊背景层 */
   html.has-custom-bg .main-panel-bg {
     background-color: transparent !important;
@@ -288,14 +296,39 @@
   /* 启用自定义背景图时，图标栏（nav-primary-bg）与侧边栏（nav-secondary-bg）
      也降为半透明磨砂。二者本就带 backdrop-blur-md，底色变透后背景图透入即呈磨砂质感；
      保留约 0.2 衬底保证图标/文字可读。未选背景图时（无 has-custom-bg）不生效，外观零变化。 */
+  /* 上栏与一级图标栏进一步改为「常态全透、悬停才浮出衬底」：
+     常态把底色、分隔线与毛玻璃一起撤掉，背景图完整透出；鼠标移入才恢复磨砂衬底。
+     未开启自定义背景时这两条不生效，外观零变化。 */
+  html.has-custom-bg .titlebar-surface,
   html.has-custom-bg .nav-primary-bg {
+    background-color: transparent !important;
+    border-color: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  html.has-custom-bg .titlebar-surface:hover,
+  html.has-custom-bg .nav-primary-bg:hover {
+    backdrop-filter: blur(12px) !important;
+    -webkit-backdrop-filter: blur(12px) !important;
+  }
+  html.has-custom-bg .titlebar-surface:hover {
+    background-color: rgba(245, 245, 240, 0.3) !important;
+    border-color: rgba(229, 229, 229, 0.5) !important;
+  }
+  html.has-custom-bg .nav-primary-bg:hover {
     background-color: rgba(255, 255, 255, 0.2) !important;
+    border-color: rgba(255, 255, 255, 0.8) !important;
+  }
+  html.has-custom-bg.dark .titlebar-surface:hover {
+    background-color: rgba(28, 25, 23, 0.3) !important;
+    border-color: rgba(68, 64, 60, 0.5) !important;
+  }
+  html.has-custom-bg.dark .nav-primary-bg:hover {
+    background-color: rgba(28, 25, 23, 0.2) !important;
+    border-color: rgba(68, 64, 60, 0.5) !important;
   }
   html.has-custom-bg .nav-secondary-bg {
     background-color: rgba(255, 255, 255, 0) !important;
-  }
-  html.has-custom-bg.dark .nav-primary-bg {
-    background-color: rgba(28, 25, 23, 0.2) !important;
   }
   html.has-custom-bg.dark .nav-secondary-bg {
     background-color: rgba(28, 25, 23, 0) !important;
@@ -510,8 +543,8 @@ input[type="range"]:active::-moz-range-thumb {
 @media (prefers-reduced-motion: reduce) {
   .ripple-dot { display: none; }
   .fade-in, .slide-in-left, .slide-in-up, .slide-in-right { animation: none; }
-  /* 矢车菊 logo 悬停旋转：动效敏感用户只保留变色/描边/标签提示 */
-  .logo-mark { transform: none !important; transition-property: color !important; }
+  /* 矢车菊 logo 悬停旋转/缩放：动效敏感用户只保留变色/描边/标签提示 */
+  .logo-mark, .logo-mark-rot { transform: none !important; transition-property: color !important; }
 }
 
 /* ========== 跨平台降级处理 ========== */

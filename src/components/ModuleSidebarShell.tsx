@@ -1,6 +1,7 @@
 import { type ReactNode, useState, useEffect, useCallback, useRef } from 'react';
-import { Settings, PanelLeftClose, PanelLeftOpen, Home } from 'lucide-react';
+import { Settings, PanelLeftClose, Home } from 'lucide-react';
 import { CollapsibleSearch } from '@/components/CollapsibleSearch';
+import { LogoButton } from '@/components/LogoButton';
 import { Ripple } from '@/components/motion/Ripple';
 import { useI18n } from '@/lib/i18n';
 import { storage } from '@/core/storage';
@@ -28,6 +29,8 @@ export interface ModuleSidebarShellProps {
   backAction?: { label?: string; onClick: () => void };
   /** 标题行的右侧动作插槽（可选）：用于在模块标题右侧放按钮（如子模块切换入口），不传则不渲染 */
   titleActions?: ReactNode;
+  /** 整体隐藏（沉浸模式下真正 display:none，而非靠不透明底色盖住 —— 自定义背景时底色是透明的，盖不住） */
+  hidden?: boolean;
   children: ReactNode;
 }
 
@@ -45,6 +48,7 @@ export function ModuleSidebarShell({
   searchPlaceholder,
   backAction,
   titleActions,
+  hidden = false,
   children,
 }: ModuleSidebarShellProps) {
   const { t } = useI18n();
@@ -89,28 +93,24 @@ export function ModuleSidebarShell({
 
   return (
     <div
-      className="h-full flex-shrink-0 nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50 flex flex-col slide-in-left overflow-hidden"
+      className={`h-full flex-shrink-0 flex flex-col slide-in-left overflow-hidden ${collapsed ? '' : 'nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50'} ${hidden ? 'hidden' : ''}`}
       style={{
         width: collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH,
         transition: `width ${COLLAPSE_WIDTH_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`,
       }}
     >
-      {/* 收起态：窄条，仅显示展开按钮 */}
+      {/* 收起态：整个侧栏只剩一枚模块 logo（由收起按钮变身而来），点击展开。
+          底色/边框/毛玻璃全部去掉 —— 收起后不该再留"一条竖条"，只留 logo 本身。 */}
       {collapsed ? (
-        <div className="h-full flex flex-col items-center justify-between py-3">
-          {/* 顶部：模块图标（缩小版，视觉锚点） */}
-          <div className="text-neutral-500 dark:text-stone-400 scale-75 origin-top">
-            {icon}
-          </div>
-          {/* 底部：展开按钮 */}
-          <Ripple
-            as="button"
+        <div className="h-full flex flex-col items-center pt-3">
+          <LogoButton
             onClick={toggleCollapse}
-            title={t('sidebar.expand')}
-            className="btn-press w-9 h-9 flex items-center justify-center rounded-xl text-neutral-400 dark:text-stone-500 hover:text-[var(--element-color-raw)] hover:bg-[var(--element-muted)] transition-colors"
-          >
-            <PanelLeftOpen size={18} />
-          </Ripple>
+            label={t('sidebar.expand')}
+            /* 外层 overflow-hidden 会裁掉自定义标签，这里改用系统 tooltip */
+            tooltip="native"
+            icon={icon}
+            colorClass="text-neutral-500 dark:text-stone-400"
+          />
         </div>
       ) : (
         <div

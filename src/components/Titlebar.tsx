@@ -4,13 +4,13 @@ import { appWindow } from '@/lib/appWindow';
 import { LogoButton } from '@/components/LogoButton';
 import { useAppStore } from '@/stores/appStore';
 
-export function Titlebar() {
+export function Titlebar({ hidden = false }: { hidden?: boolean }) {
   const { t } = useI18n();
   const toggleImmersive = useAppStore(s => s.toggleImmersive);
   return (
     <div
       data-tauri-drag-region
-      className="h-[38px] flex items-center justify-between bg-[#f5f5f0] dark:bg-[#1c1917] border-b border-neutral-200/50 dark:border-stone-700/50 select-none flex-shrink-0"
+      className={`h-[38px] flex items-center justify-between titlebar-surface border-b border-neutral-200/50 dark:border-stone-700/50 select-none flex-shrink-0 ${hidden ? 'hidden' : ''}`}
     >
       {/* 左侧：拖拽区域 + 矢车菊 logo（点击进入沉浸模式）+ 标题 */}
       <div className="flex items-center h-full pl-3 gap-2">

@@ -17,10 +17,12 @@ const navBtnClass = (active: boolean) =>
 
 interface AppNavProps {
   mainPluginIds: string[];
+  /** 沉浸模式下真正隐藏（display:none）—— 自定义背景时底色透明，靠覆盖层盖不住 */
+  hidden?: boolean;
 }
 
 /** 极简导航栏 — 始终显示全部模块图标，子目录切换逻辑已移至左侧侧边栏 */
-export function AppNav({ mainPluginIds }: AppNavProps) {
+export function AppNav({ mainPluginIds, hidden = false }: AppNavProps) {
   const { t } = useI18n();
   const activeModule = useAppStore(s => s.activeModule);
   const pluginRegistry = useAppStore(s => s.pluginRegistry) as PluginRegistry | null;
@@ -42,7 +44,7 @@ export function AppNav({ mainPluginIds }: AppNavProps) {
   }, [mainPluginIds, pluginRegistry, setActiveModule]);
 
   return (
-    <div className="w-[56px] h-full flex flex-col items-center py-4 nav-primary-bg backdrop-blur-md border-r border-white/80 flex-shrink-0 z-50 dark:border-stone-700/50">
+    <div className={`w-[56px] h-full flex flex-col items-center py-4 nav-primary-bg backdrop-blur-md border-r border-white/80 flex-shrink-0 z-50 dark:border-stone-700/50 ${hidden ? 'hidden' : ''}`}>
       {/* Logo */}
       <div className="w-8 h-8 rounded-full element-primary flex items-center justify-center mb-6 shadow-sm transition-all duration-200">
         {(() => {

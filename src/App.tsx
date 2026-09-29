@@ -694,18 +694,17 @@ function App() {
       boot.__bootProgress?.(90, { text: "准备就绪", phase: "PHASE 05 / 05" });
     }}>
       <div className="flex flex-col h-screen w-screen main-panel-bg text-foreground antialiased overflow-hidden">
-        <Titlebar />
+        <Titlebar hidden={immersive} />
         <div className="flex flex-1 min-w-0 overflow-hidden">
-          <AppNav mainPluginIds={mainPluginIds} />
-          <HostSidebar />
-          {/* 沉浸模式：内容区脱离文档流铺满整窗（盖住上栏与导航），而非卸载它们 ——
-              卸载会丢 HostSidebar 的搜索态、ModuleSidebarShell 的折叠态与插件保活树。
+          <AppNav mainPluginIds={mainPluginIds} hidden={immersive} />
+          <HostSidebar hidden={immersive} />
+          {/* 沉浸模式：内容区脱离文档流铺满整窗，导航则真正 display:none。
+              早期版本靠覆盖层的不透明底色盖住导航，而自定义背景模式下 .main-panel-bg 被置透明
+              → 上栏/图标条/侧栏从下面透出，看起来像"点了没反应"（实际状态已切换）。
               z-index 高于 AppNav 的 z-50，低于 ImmersiveChrome 的 z-[60]。
-              bg 用 .main-panel-bg 而非 bg-[var(--main-panel-bg)]：后者是普通任意值，
-              自定义背景模式下 html.has-custom-bg .main-panel-bg 会把它置透明露出背景层，
-              任意值不会命中该规则 → 沉浸态会盖死自定义背景。 */}
+              覆盖层不再需要任何底色：窗口底色由根节点 main-panel-bg 提供，自定义背景图自然透出。 */}
           <div className={immersive
-            ? 'fade-in fixed inset-0 z-[55] main-panel-bg overflow-hidden'
+            ? 'fade-in fixed inset-0 z-[55] overflow-hidden'
             : 'flex-1 min-w-0 h-full overflow-hidden'}
           >
             {renderModule()}

@@ -12,7 +12,7 @@ import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 
 /** 统一侧边栏 — 始终复用同一个 ModuleSidebarShell，仅中间的 children 内容根据 activeModule 切换。 */
-export function HostSidebar() {
+export function HostSidebar({ hidden = false }: { hidden?: boolean }) {
   const { t } = useI18n();
   const pluginRegistry = useAppStore(s => s.pluginRegistry) as PluginRegistry | null;
   const activeModule = useAppStore(s => s.activeModule);
@@ -262,6 +262,7 @@ export function HostSidebar() {
   return (
     <ModuleSidebarShell
       moduleId="niaoluo"
+      hidden={hidden}
       icon={<Puzzle size={20} className="text-[var(--element-bg)]" />}
       title={t('sidebar.niaoluo')}
       onOpenModuleSettings={onOpenModuleSettings}
