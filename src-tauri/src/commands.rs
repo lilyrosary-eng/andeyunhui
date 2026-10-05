@@ -2214,6 +2214,10 @@ fn ffmpeg_concat_segments(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
+    // CREATE_NO_WINDOW (0x08000000)：子进程不弹出控制台窗口。
+    // `Command::creation_flags` 是 Windows 独有的扩展方法（来自 std::os::windows::process），
+    // Linux 上不存在 ⇒ 必须门控，否则整个 crate 编译失败。
+    #[cfg(windows)]
     cmd.creation_flags(0x08000000);
 
     let output = cmd
@@ -3205,6 +3209,14 @@ pub struct ImportedFile {
 /// 原生文件拖出：把中转站里的文件以 OS 原生拖放（Windows DoDragDrop / CF_HDROP）写到桌面或文件夹。
 /// 这是根治 WebView2 不支持 JS `dataTransfer.items.add(File)` 拖出的方案——完全绕过 WebView2，
 /// 由 Rust 在 UI 主线程直接发起系统拖拽。前端在文件行上用 onMouseDown 触发。
+///
+/// ⚠ **仅 Windows**：依赖 `drag` crate（DoDragDrop 的封装），而该 crate 只在
+///   `cfg(windows)` 目标下声明（Cargo.toml 的 `[target.'cfg(windows)'.dependencies]`）。
+///   Linux/macOS 上没有等价实现——WebKitGTK 的拖出走的是 GTK DnD 模型，
+///   不接受「Rust 侧替 webview 发起系统级拖拽」这种用法。
+///   非 Windows 保留同名命令并返回明确错误，这样前端不必写平台分支即可调用，
+///   用户看到的是「该平台暂不支持原生拖出」而不是 `invoke 找不到命令`。
+#[cfg(windows)]
 #[tauri::command]
 pub fn start_native_file_drag(app: tauri::AppHandle, files: Vec<String>) -> Result<(), String> {
     if files.is_empty() {
@@ -3240,6 +3252,21 @@ pub fn start_native_file_drag(app: tauri::AppHandle, files: Vec<String>) -> Resu
     rx.recv()
         .map_err(|e| format!("等待拖拽结果失败: {}", e))?
         .map_err(|e| format!("原生拖拽失败: {}", e))
+}
+
+/// 非 Windows 版的原生拖出：同名同签名，返回明确的能力缺失说明。
+///
+/// 为什么不直接 `#[cfg]` 掉整个命令：前端 `invoke('start_native_file_drag')` 是
+/// 跨平台共用的代码路径，命令不存在会抛「command not found」，在用户看来是
+/// 「点了没反应」；返回一条可读错误至少能告诉他们原因，且未来接入 GTK DnD 时
+/// 只需替换这个函数体，前端与调用链都不用动。
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn start_native_file_drag(
+    _app: tauri::AppHandle,
+    _files: Vec<String>,
+) -> Result<(), String> {
+    Err("该平台暂不支持原生文件拖出（仅 Windows 实现了 DoDragDrop）".into())
 }
 
 /// 可读文本文件扩展名

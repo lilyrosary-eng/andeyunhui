@@ -16,11 +16,20 @@ pub mod clipboard_history;
 pub mod reading_service;
 // 录屏捕获（WGC / D3D11 / AudioCapture）为 Windows 专属后端：非 Windows 目标不编译该模块，
 // 避免裸引 windows / windows_capture / winapi 等仅 Windows 可用的 crate。
+//
+// ⚠ 非 Windows 走 `pal/recording_service.rs` 的同名空实现，而不是让 main.rs 逐处加 cfg：
+//   main.rs 在命令注册表与托盘回调里有 29 处引用，逐处加平台分支的维护成本极高且极易漏。
 #[cfg(windows)]
 pub mod recording_service;
+#[cfg(not(windows))]
+#[path = "../pal/recording_service.rs"]
+pub mod recording_service;
 pub mod window_manager;
-// 诊断模块依赖 Windows 捕获后端（windows_capture），仅 Windows 编译。
+// 诊断模块依赖 Windows 捕获后端（windows_capture），仅 Windows 编译；非 Windows 走同名桩。
 #[cfg(windows)]
+pub mod diagnostics;
+#[cfg(not(windows))]
+#[path = "../pal/diagnostics.rs"]
 pub mod diagnostics;
 pub mod log_service;
 // 网易云音乐 WebAPI 代理（Phase 3）：TS 端加密 + Rust 无 CORS 转发，四件套白名单校验

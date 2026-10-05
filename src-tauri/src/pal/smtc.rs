@@ -60,16 +60,37 @@ pub fn init_smtc(_app: AppHandle) {}
 
 pub fn ensure_app_identity() {}
 
+#[tauri::command]
 pub fn smtc_update(_app: AppHandle, _info: SmtcUpdate) {}
 
+#[tauri::command]
 pub fn smtc_list_sessions() -> Vec<SmtcUpdate> {
     Vec::new()
 }
 
+#[tauri::command]
 pub fn smtc_control(_app: AppHandle, _action: String, _target: String) {}
 
+#[tauri::command]
 pub fn set_active_module(_module: String) {}
 
+#[tauri::command]
 pub fn set_window_hidden(_hidden: bool) {}
 
+#[tauri::command]
 pub fn debug_log(_msg: String) {}
+
+/// 诊断：返回 Rust 端 SMTC 会话的真实运行状态。
+///
+/// 对应 Windows 版 `#[tauri::command] pub async fn smtc_status() -> SmtcStatus`
+/// （`src/smtc.rs`）。该命令是「任务栏媒体卡片显示异常」时的排查入口。
+///
+/// ⚠ 缺失即编译失败：`main.rs` 的 `invoke_handler` 会引用 `__cmd__smtc_status` 宏，
+///   而它由 `#[tauri::command]` 生成 —— 桩里没有这个函数就没有该宏。
+///
+/// 返回 `Default`（全 false / 空串）而非 Err：这是**诊断**命令，语义上「查不到任何状态」
+/// 就是一个合法结论，让调用方能正常拿到 JSON 展示，不必处理异常分支。
+#[tauri::command]
+pub async fn smtc_status() -> SmtcStatus {
+    SmtcStatus::default()
+}

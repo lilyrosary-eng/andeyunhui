@@ -61,6 +61,10 @@ use crate::nvml;
 use crate::pdh_util::Sample;
 
 /// 单块显卡的采集结果；任一项取不到为 None（前端显示 N/A）
+///
+/// ★ 字段与 `main.rs` 的 `GpuInfo` **逐字一致**——那是跨平台的序列化契约，
+///   本类型是 Windows 侧的具体实现。两者必须同步：改这里就要改那里。
+///   （曾经写成两套独立定义，Linux 编译时 `ResourceUsage` 引不到本类型而直接失败。）
 #[derive(Serialize, Clone)]
 pub struct GpuUsage {
     /// 稳定标识，前端用它持久化「要监视哪几块卡」。形如 `NVIDIA GeForce ...#0`。
@@ -101,6 +105,33 @@ pub struct GpuUsage {
     pub fan_rpm: Option<u32>,
     /// 风扇转速 %（NVML 官方口径：相对该卡最大转速，可能 >100；仅 NVIDIA 桌面卡）
     pub fan_percent: Option<u32>,
+}
+
+impl GpuUsage {
+    /// 转成跨平台契约类型 `GpuInfo`（逐字段搬运）。
+    ///
+    /// 之所以要多这一层：`ResourceUsage` 是平台中立的序列化契约，不能引用
+    /// 平台专属的 `GpuUsage`。字段逐字对应，serde 输出完全一致。
+    pub fn into_info(self) -> crate::GpuInfo {
+        crate::GpuInfo {
+            id: self.id,
+            name: self.name,
+            vendor: self.vendor,
+            util_percent: self.util_percent,
+            vram_total_kb: self.vram_total_kb,
+            vram_used_kb: self.vram_used_kb,
+            vram_shared_kb: self.vram_shared_kb,
+            util_3d: self.util_3d,
+            util_video_decode: self.util_video_decode,
+            util_video_encode: self.util_video_encode,
+            util_copy: self.util_copy,
+            clock_mhz: self.clock_mhz,
+            temp_c: self.temp_c,
+            power_w: self.power_w,
+            fan_rpm: self.fan_rpm,
+            fan_percent: self.fan_percent,
+        }
+    }
 }
 
 /// 枚举本机所有硬件适配器，并合并 PDH / NVML 读数。

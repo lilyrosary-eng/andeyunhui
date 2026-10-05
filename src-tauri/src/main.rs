@@ -65,6 +65,10 @@ mod igcl;
 mod nvml;
 #[cfg(windows)]
 mod pdh_util;
+/// Linux 原生资源采集（sysfs / procfs）：仅 Linux 编译。
+/// 与 `hw_metrics` 平行而非复用——后者的每一项都建立在 Windows 专有的 PDH 计数器上。
+#[cfg(target_os = "linux")]
+mod hw_metrics_linux;
 
 // 文件关联：以安得云荟打开（一次性列表，进程退出即销毁）
 struct PendingOpenFiles(pub std::sync::Mutex<Vec<String>>);
@@ -99,7 +103,14 @@ pub struct ResourceUsage {
     pub net_down_bps: f64,       // 下行速率 字节/秒
     /// 逐接口速率（仅**物理**接口计入 net_*_bps，虚拟/隧道口只列出不计入，见 is_virtual_iface）
     pub nets: Vec<NetIface>,
-    pub gpus: Vec<crate::gpu_metrics::GpuUsage>, // 逐块显卡（利用率/显存/频率/功耗）
+    /// 逐块显卡（利用率/显存/频率/功耗）
+    ///
+    /// ⚠ 跨平台契约字段，**不能**直接用 `gpu_metrics::GpuUsage`：
+    ///   那个类型定义在 `#[cfg(windows)] mod gpu_metrics` 里，Linux 目标上不存在，
+    ///   在结构体里引用它会让整个 crate 编译失败（`could not find gpu_metrics in the crate root`）。
+    ///   与 `BatteryStatus` 同样的处理：序列化契约必须放在平台中立位置，
+    ///   由各平台的采集代码负责填充（Linux 目前不采集 ⇒ 恒为空 Vec ⇒ 前端整块不显示）。
+    pub gpus: Vec<GpuInfo>,
     pub disks: Vec<DiskUsage>,   // 各固定分区占用 + 实时 IO
     /// 电池 / 电源状态（无电池机型 present=false）
     pub battery: BatteryStatus,
@@ -133,6 +144,48 @@ pub struct NetIface {
     pub up_bps: f64,
     /// 是否虚拟/隧道接口（判定见 is_virtual_iface）
     pub virtual_iface: bool,
+}
+
+/// 单块显卡的遥测（`ResourceUsage.gpus` 的元素类型）。
+///
+/// ★ 为什么不直接用 `gpu_metrics::GpuUsage`：
+///   那个结构体与 DXGI/NVML/IGCL 的**采集逻辑**写在一起，整体位于 `#[cfg(windows)]`。
+///   而 `ResourceUsage` 是**序列化契约**，每个平台都存在；在契约里引用平台专属类型，
+///   非 Windows 目标连编译都过不了（`could not find gpu_metrics in the crate root`）。
+///   与 `BatteryStatus` 完全同类问题，处理方式也一致。
+///
+/// 字段与 `gpu_metrics::GpuUsage` **逐字一致**（serde 默认按字段名序列化，两边 JSON 形状相同，
+/// 前端 `model.ts` 的 `GpuUsage` 接口无需区分平台）。改动时**两处必须同步**。
+#[derive(serde::Serialize, Clone)]
+pub struct GpuInfo {
+    /// 稳定标识（显卡名 + `#同名序号`），前端用它持久化「监视哪块卡」
+    pub id: String,
+    /// 显卡名
+    pub name: String,
+    /// 厂商 token：`nvidia` / `intel` / `amd` / `other`
+    pub vendor: String,
+    /// GPU 利用率 %（该适配器最忙引擎）
+    pub util_percent: Option<f32>,
+    /// 显存总量 KB
+    pub vram_total_kb: Option<u64>,
+    /// 显存已用 KB
+    pub vram_used_kb: Option<u64>,
+    /// 共享显存已用 KB
+    pub vram_shared_kb: Option<u64>,
+    pub util_3d: Option<f32>,
+    pub util_video_decode: Option<f32>,
+    pub util_video_encode: Option<f32>,
+    pub util_copy: Option<f32>,
+    /// 图形时钟 MHz
+    pub clock_mhz: Option<u32>,
+    /// 核心温度 °C
+    pub temp_c: Option<f32>,
+    /// 整卡功耗 W
+    pub power_w: Option<f32>,
+    /// 风扇转速 RPM（仅 NVIDIA 桌面卡）
+    pub fan_rpm: Option<u32>,
+    /// 风扇转速 %（仅 NVIDIA 桌面卡）
+    pub fan_percent: Option<u32>,
 }
 
 /// 电池 / 电源状态（桌面机型 present=false，前端整块不显示）。
@@ -293,6 +346,17 @@ fn get_resource_usage() -> ResourceUsage {
         })
         .collect();
     disks.sort_by(|a, b| a.mount.cmp(&b.mount));
+
+    // Linux 侧的实时 IO 需要「块设备名 → 挂载点」的映射（/proc/diskstats 按设备统计，
+    // 而 disks 列表按挂载点给出），必须在 drop(st) 之前取出来 —— 借不到盘符就退化成「该卷无 IO」。
+    #[cfg(target_os = "linux")]
+    let disk_dev_map: Vec<(String, String)> = st
+        .disks
+        .list()
+        .iter()
+        .filter(|d| !d.is_removable() && d.total_space() > 0)
+        .map(|d| (d.name().to_string_lossy().to_string(), d.mount_point().to_string_lossy().to_string()))
+        .collect();
     drop(st);
 
     let mut usage = ResourceUsage {
@@ -314,7 +378,8 @@ fn get_resource_usage() -> ResourceUsage {
     };
     #[cfg(windows)]
     fill_native(&mut usage);
-    usage
+    #[cfg(target_os = "linux")]
+    fill_native_linux(&mut usage, &disk_dev_map, dt);    usage
 }
 
 /// 回环接口：本机自身流量不该进网络速率
@@ -372,7 +437,10 @@ fn is_virtual_iface(lower_name: &str) -> bool {
 #[cfg(windows)]
 fn fill_native(u: &mut ResourceUsage) {
     let sample = crate::pdh_util::sample_all();
-    u.gpus = crate::gpu_metrics::query_gpus(sample.as_ref());
+    u.gpus = crate::gpu_metrics::query_gpus(sample.as_ref())
+        .into_iter()
+        .map(crate::gpu_metrics::GpuUsage::into_info)
+        .collect();
     let cpu = crate::hw_metrics::cpu_extra(sample.as_ref());
     u.cpu_freq_mhz = cpu.freq_mhz;
     u.cpu_power_w = cpu.power_w;
@@ -436,6 +504,36 @@ fn fill_native(u: &mut ResourceUsage) {
     }
 }
 
+/// Linux 侧填充「Windows 专属遥测」的对应项。
+///
+/// 与 `fill_native` 的关系：一个填 Windows 独有的原生计数器，本函数填 Linux 的等价物。
+/// 两边都只填**自己平台拿得到**的字段，取不到的保持 `None`（前端显示「—」）——
+/// 绝不用别的量去「凑」一列看起来有值的数字。
+///
+/// 各字段的来源与缺口见 `hw_metrics_linux.rs` 文件头。要点：
+///   · CPU 频率 ← /proc/cpuinfo（瞬时值，与 Windows 的「%Perf × 基频」口径不同）
+///   · 温度 ← hwmon（**可能是主板温区**，与 Windows 的 ACPI 热区同样的坑，前端已写明口径）
+///   · 电池 ← /sys/class/power_supply（覆盖比 Windows 那个 API 更好）
+///   · 磁盘 IO ← /proc/diskstats 差分，按挂载点回填
+///   · GPU ← **不取**（Linux 无等价的三条路，宁可整块不显示）
+///   · 页面文件 ← 不适用（Linux 用 swap）
+/// `dt` 是距上一拍的秒数（`as_secs_f64()` ⇒ f64，与磁盘速率换算同一口径）
+#[cfg(target_os = "linux")]
+fn fill_native_linux(u: &mut ResourceUsage, disk_dev_map: &[(String, String)], dt: f64) {
+    u.cpu_freq_mhz = hw_metrics_linux::cpu_freq_mhz();
+    u.thermal_temp_c = hw_metrics_linux::temp_c();
+    u.battery = hw_metrics_linux::battery_status();
+
+    // 磁盘实时 IO：/proc/diskstats 按挂载点回填到已有 disks 列表
+    let ios = hw_metrics_linux::disk_io(disk_dev_map, dt as f64);
+    for d in u.disks.iter_mut() {
+        if let Some(io) = ios.iter().find(|x| x.mount == d.mount) {
+            d.read_bps = io.read_bps;
+            d.write_bps = io.write_bps;
+        }
+    }
+}
+
 // 支持「以安得云荟打开」的扩展名（与前端 openWith.ts 的 MODULE_BY_EXT 保持一致）
 fn is_supported_file_assoc(arg: &str) -> Option<std::path::PathBuf> {
     const EXTS: &[&str] = &[
@@ -463,12 +561,14 @@ fn is_supported_file_assoc(arg: &str) -> Option<std::path::PathBuf> {
 use andeyunhui_lib::TrayHolder;
 use andeyunhui_lib::services::lyrics_service;
 use andeyunhui_lib::services::clipboard_history;
-// recording_service / diagnostics 在 services/mod.rs 中已是 `#[cfg(windows)]` 模块（仅 Windows 编译），
-// 移动端不引入该模块；此处用同样 cfg 限定其引用，保证移动端编译不依赖这两个 Windows 专属模块（#android-v1）。
-#[cfg(windows)]
+// recording_service / diagnostics 在 services/mod.rs 里对非 Windows 目标**已有同名桩**
+// （`pal/recording_service.rs` / `pal/diagnostics.rs`，见该文件 mod.rs 的双 cfg），
+// 所以这里的导入**不再需要** `#[cfg(windows)]`：
+//   早先这行带 cfg 时，一旦给 services/mod.rs 补上桩，这行就会把桩挡在门外 ——
+//   表现为 100+ 个「unlinked crate」错误，且与真正的编译失败混在一起难以定位。
+//   移动端（android/ios）同样走这两个桩，行为是返回「仅 Windows 可用」。
 use andeyunhui_lib::services::recording_service;
 use andeyunhui_lib::services::window_manager;
-#[cfg(windows)]
 use andeyunhui_lib::services::diagnostics;
 use andeyunhui_lib::services::log_service;
 use andeyunhui_lib::services::agent_service;
