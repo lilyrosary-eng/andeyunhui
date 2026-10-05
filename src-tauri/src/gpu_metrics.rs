@@ -37,6 +37,11 @@
 //   AMD 需 ADL/ADLX，其 SDK 许可禁止与非宽松许可混用（本项目已决定不接）⇒ AMD 显卡一律 None。
 // · 功耗：仍只有 NVIDIA 能取（NVML）。Intel 核显功耗需读 MSR（要装第三方签名驱动），
 //   AMD 同样缺 ⇒ 这两家一律降级为 None（前端展示 N/A）。
+// · 风扇转速：只有 NVIDIA 能取，且**只有桌面卡**。笔记本 GPU 的风扇由主板 EC 统一管控，
+//   NVML 对笔记本卡直接返回 NOT_SUPPORTED（本机实测 ret=3）——这是硬件事实，不是没实现。
+//   CPU / 机箱风扇在 Windows 上**没有**免驱 API：WMI `Win32_Fan` 只是读 SMBIOS Type 27，
+//   现代 OEM 基本不填 ⇒ 恒为空。唯一通用做法是读 SuperIO 芯片（Nuvoton/ITE），
+//   那需要内核态驱动（LibreHardwareMonitor 走的就是这条路），与本项目「免驱」原则冲突，故不做。
 // · 显存总量：DXGI DXGI_ADAPTER_DESC1::DedicatedVideoMemory（该适配器物理显存容量）。
 //   与任务管理器「专用 GPU 内存」口径一致（核显在这里通常只有 128MB 的划拨量，
 //   共享内存不计入）。
@@ -92,6 +97,10 @@ pub struct GpuUsage {
     pub temp_c: Option<f32>,
     /// 整卡功耗（W，仅 NVIDIA）
     pub power_w: Option<f32>,
+    /// 风扇转速 RPM（仅 NVIDIA **桌面卡**；笔记本卡 EC 统一管控风扇，恒为 None）
+    pub fan_rpm: Option<u32>,
+    /// 风扇转速 %（NVML 官方口径：相对该卡最大转速，可能 >100；仅 NVIDIA 桌面卡）
+    pub fan_percent: Option<u32>,
 }
 
 /// 枚举本机所有硬件适配器，并合并 PDH / NVML 读数。
@@ -169,6 +178,11 @@ pub fn query_gpus(sample: Option<&Sample>) -> Vec<GpuUsage> {
                     .map(|c| c as f32)
                     .or_else(|| ig.and_then(|i| i.temp_c)),
                 power_w: nv.and_then(|n| n.power_w),
+                // 风扇：只有 NVML 给得出（桌面卡）。Intel 核显无独立风扇、Arc 走 IGCL 也没有
+                // 这一项；AMD 需 ADL/ADLX（本项目因许可不接）⇒ 这两家恒为 None。
+                // 笔记本 NVIDIA 卡同样为 None：EC 接管风扇，NVML 返回 NOT_SUPPORTED。
+                fan_rpm: nv.and_then(|n| n.fan_rpm),
+                fan_percent: nv.and_then(|n| n.fan_percent),
             }
         })
         .collect()

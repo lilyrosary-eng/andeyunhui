@@ -10,8 +10,11 @@
 //   · nvmlDeviceGetTemperature(sensor 0) → ret=0，读到 42 °C      ✅ 已接入
 //   · nvmlDeviceGetPowerUsage            → ret=0，14887 mW        ✅ 已接入
 //   · nvmlDeviceGetClockInfo(0)          → ret=0，210 MHz         ✅ 已接入
-//   · nvmlDeviceGetFanSpeed              → ret=3（NOT_SUPPORTED）❌ 笔记本卡不暴露风扇，
-//     故**刻意不接**：接了也只是一列恒为 N/A 的噪音。
+//   · nvmlDeviceGetFanSpeed              → ret=3（NOT_SUPPORTED）❌ 笔记本卡不暴露风扇。
+//     这是**硬件事实而非实现缺失**：笔记本的风扇由主板 EC 统一管控，GPU 只拿到「无独立风扇」
+//     的回答；同型号的桌面卡同一个 API 是正常返回的。所以下面**照接**并在取不到时降级为 None：
+//     接上它对桌面卡用户是真收益，对本机只是恒为 None——与 IGCL 温度同一套「按能力降级」策略。
+//   · nvmlDeviceGetFanSpeedRPM           → 同上（桌面卡返回真实 RPM，笔记本 NOT_SUPPORTED）
 //   · nvmlDeviceGetHandleByLUID / nvmlDeviceGetLuid **不在**该版本导出表里 ⇒ 只能按名称匹配。
 //
 // 为什么用 libloading 运行时加载，而不是加编译期依赖（nvml-wrapper 之类）：
@@ -53,7 +56,51 @@ struct Nvml {
     power_usage: unsafe extern "C" fn(NvmlDevice, *mut u32) -> NvmlRet,
     clock_info: unsafe extern "C" fn(NvmlDevice, i32, *mut u32) -> NvmlRet,
     temperature: unsafe extern "C" fn(NvmlDevice, i32, *mut u32) -> NvmlRet,
+    /// 风扇转速（**可选**符号）：桌面卡专用，笔记本卡不导出/不响应。
+    /// 与上面三个「缺失即整体放弃」的核心符号不同——这里缺失只让风扇降级为 None，
+    /// 不能连带把已经能用的功耗/频率/温度一起废掉。
+    fan_speed_pct: Option<unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> NvmlRet>,
+    /// 真实 RPM（可选符号）。`nvmlDeviceGetFanSpeedRPM` 收一个带 version 的结构体。
+    fan_speed_rpm: Option<unsafe extern "C" fn(NvmlDevice, *mut FanSpeedInfo) -> NvmlRet>,
+    /// 该设备有几个风扇（可选符号）。取不到时按 1 个尝试。
+    num_fans: Option<unsafe extern "C" fn(NvmlDevice, *mut u32) -> NvmlRet>,
     devices: Vec<(String, NvmlDevice)>,
+}
+
+/// `nvmlFanSpeedInfo_t` = `nvmlFanSpeedInfo_v1_t`（官方 nvml.h 原文）
+///
+/// ⚠ 三个易错点，全部会导致「读不到」或「读出垃圾」，且都不报错：
+///  ① **字段顺序是 version → fan → speed**（version 在**第一个**，不是最后）。
+///  ② `version` 必须填 `nvmlFanSpeedInfo_v1` 宏，展开为
+///     `sizeof(nvmlFanSpeedInfo_v1_t) | (1 << 24U)` —— 即 **版本号在高 8 位**，
+///     结构体大小（3×u32 = 12）在低比特位。写成 `sizeof | 1`（网上常见的误传）会得到
+///     0x0000000C，驱动直接回 INVALID_ARGUMENT，且不写明原因 ⇒ 本项恒为 None。
+///  ③ `fan` 既是入参（目标风扇索引）也会被驱动回写为风扇总数。
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct FanSpeedInfo {
+    /// 入参：结构体格式版本 = `(1 << 24) | 12`
+    version: u32,
+    /// 入参：目标风扇索引（0 起）
+    fan: u32,
+    /// 出参：转速 RPM
+    speed: u32,
+}
+
+impl FanSpeedInfo {
+    /// `nvmlFanSpeedInfo_v1` 的实际取值：版本号(1) << 24 | sizeof(v1_t)=12
+    const VERSION_V1: u32 = (1 << 24) | (std::mem::size_of::<Self>() as u32);
+
+    /// 布局自检：字段顺序或类型一旦写错，`size_of` 就不再是 12（Debug 构建下立刻 panic，
+    /// Release 不含检查、零开销）。这比「读出垃圾 RPM 却看不出异常」安全得多。
+    fn new(fan: u32) -> Self {
+        debug_assert_eq!(std::mem::size_of::<Self>(), 12, "nvmlFanSpeedInfo_v1_t 应为 12 字节");
+        Self {
+            version: Self::VERSION_V1,
+            fan,
+            speed: 0,
+        }
+    }
 }
 
 // SAFETY: devices 里是 NVML 的不透明设备句柄（驱动侧对象，非本进程堆地址），
@@ -71,6 +118,14 @@ pub struct NvmlSample {
     pub clock_mhz: Option<u32>,
     /// 核心温度（摄氏度）
     pub temp_c: Option<u32>,
+    /// 风扇转速（**百分比**，官方口径是「相对该卡最大转速的百分比」，可能 >100）
+    ///
+    /// 笔记本卡恒为 None：EC 统一管控风扇时 NVML 直接返回 NOT_SUPPORTED。
+    pub fan_percent: Option<u32>,
+    /// 风扇转速（**真实 RPM**）。优先于百分比：百分比是 NVML 自己换算的「意图速度」，
+    /// 而官方文档明确写了「这是 intended speed，物理卡住时与实际转速不符」——
+    /// 两个值都可能虚高，所以取到 RPM 时前端一并展示。
+    pub fan_rpm: Option<u32>,
 }
 
 static NVML: OnceLock<Option<Nvml>> = OnceLock::new();
@@ -99,6 +154,23 @@ fn load() -> Option<Nvml> {
         // 故沿用「任一缺失即整体放弃」的策略，不为它单开可选分支。
         let temperature: unsafe extern "C" fn(NvmlDevice, i32, *mut u32) -> NvmlRet =
             *lib.get(b"nvmlDeviceGetTemperature\0").ok()?;
+
+        // ---- 风扇相关：三个符号各自可选，缺失只让风扇降级为 None ----
+        // 为什么不用「任一缺失即整体放弃」：风扇是**桌面卡专有**能力，老驱动上可能不导出。
+        // 若沿用严格策略，一台老机器上会连带丢掉已经能用的功耗/频率/温度 —— 那是净损失。
+        // （本函数已整体处于 unsafe 块内，故直接 lib.get(...) 不再嵌套 unsafe。）
+        let fan_speed_pct: Option<unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> NvmlRet> = lib
+            .get(b"nvmlDeviceGetFanSpeed_v2\0")
+            .ok()
+            .map(|f| *f as unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> NvmlRet);
+        let fan_speed_rpm: Option<unsafe extern "C" fn(NvmlDevice, *mut FanSpeedInfo) -> NvmlRet> =
+            lib.get(b"nvmlDeviceGetFanSpeedRPM\0")
+                .ok()
+                .map(|f| *f as unsafe extern "C" fn(NvmlDevice, *mut FanSpeedInfo) -> NvmlRet);
+        let num_fans: Option<unsafe extern "C" fn(NvmlDevice, *mut u32) -> NvmlRet> = lib
+            .get(b"nvmlDeviceGetNumFans\0")
+            .ok()
+            .map(|f| *f as unsafe extern "C" fn(NvmlDevice, *mut u32) -> NvmlRet);
 
         if init() != 0 {
             return None;
@@ -135,6 +207,9 @@ fn load() -> Option<Nvml> {
             power_usage,
             clock_info,
             temperature,
+            fan_speed_pct,
+            fan_speed_rpm,
+            num_fans,
             devices,
         })
     }
@@ -163,7 +238,11 @@ pub fn sample_by_name(dxgi_name: &str) -> Option<NvmlSample> {
     let mut power_w = None;
     let mut clock_mhz = None;
     let mut temp_c = None;
+    let (fan_percent, fan_rpm);
     unsafe {
+        // 风扇放在功耗/频率/温度之前读：任一失败都只让该项为 None，不影响其余。
+        fan_percent = read_fan_percent(n, dev);
+        fan_rpm = read_fan_rpm(n, dev);
         let mut mw: u32 = 0;
         if (n.power_usage)(dev, &mut mw) == 0 {
             power_w = Some(mw as f32 / 1000.0);
@@ -181,7 +260,55 @@ pub fn sample_by_name(dxgi_name: &str) -> Option<NvmlSample> {
         power_w,
         clock_mhz,
         temp_c,
+        fan_percent,
+        fan_rpm,
     })
+}
+
+/// 风扇总数；符号缺失或调用失败时按 1 尝试（单风扇是绝大多数桌面卡的形态）。
+unsafe fn fan_count(n: &Nvml, dev: NvmlDevice) -> u32 {
+    match n.num_fans {
+        Some(f) => {
+            let mut c: u32 = 0;
+            if f(dev, &mut c) == 0 && c > 0 {
+                c
+            } else {
+                1
+            }
+        }
+        None => 1,
+    }
+}
+
+/// 风扇转速百分比：多风扇取**最大**那路（与任务管理器取 GPU 最忙引擎同一思路：
+/// 「整卡风扇读数」应反映最积极的一路，而不是把机箱里几个风扇做平均）。
+/// 0 视为「停转/不报」→ 返回 None，避免展示一个假的 0%。
+unsafe fn read_fan_percent(n: &Nvml, dev: NvmlDevice) -> Option<u32> {
+    let f = n.fan_speed_pct?;
+    let count = fan_count(n, dev);
+    let mut best: Option<u32> = None;
+    for i in 0..count {
+        let mut pct: u32 = 0;
+        if f(dev, i, &mut pct) == 0 && pct > 0 {
+            best = Some(best.map_or(pct, |b: u32| b.max(pct)));
+        }
+    }
+    best
+}
+
+/// 风扇真实 RPM。多风扇取最大（口径同 `read_fan_percent`）。
+/// 传 `version` 是硬要求：填错驱动只回 INVALID_ARGUMENT、不说明原因 ⇒ 本项恒为 None。
+unsafe fn read_fan_rpm(n: &Nvml, dev: NvmlDevice) -> Option<u32> {
+    let f = n.fan_speed_rpm?;
+    let count = fan_count(n, dev);
+    let mut best: Option<u32> = None;
+    for i in 0..count {
+        let mut info = FanSpeedInfo::new(i);
+        if f(dev, &mut info) == 0 && info.speed > 0 {
+            best = Some(best.map_or(info.speed, |b: u32| b.max(info.speed)));
+        }
+    }
+    best
 }
 
 fn pick_device(devices: &[(String, NvmlDevice)], dxgi_name: &str) -> Option<NvmlDevice> {

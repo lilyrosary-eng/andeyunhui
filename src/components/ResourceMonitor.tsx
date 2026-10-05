@@ -15,6 +15,7 @@ import {
   fmtPower,
   fmtSpeed,
   fmtTemp,
+  fmtFan,
   levelColor,
   shortGpuName,
   vramPercent,
@@ -133,15 +134,30 @@ function gpuNoDataHint(g: GpuUsage, what: string): string {
   return `该适配器（虚拟/基础渲染设备）不提供${what}遥测`;
 }
 
-/** 一块显卡的功耗/频率/温度**全部**缺失时的说明（这种卡看起来最像坏了，值得整行写明） */
+/** 一块显卡的功耗/频率/温度/风扇**全部**缺失时的说明（这种卡看起来最像坏了，值得整行写明） */
 function gpuAllMissingNote(g: GpuUsage): string {
   if (g.vendor === 'amd') {
-    return '该显卡不提供功耗/频率/温度：AMD 传感器需 ADL/ADLX，本项目因许可限制未接入';
+    return '该显卡不提供功耗/频率/温度/风扇：AMD 传感器需 ADL/ADLX，本项目因许可限制未接入';
   }
   if (g.vendor === 'other') {
-    return '该适配器（虚拟/基础渲染设备）不提供功耗/频率/温度';
+    return '该适配器（虚拟/基础渲染设备）不提供功耗/频率/温度/风扇';
   }
-  return '该显卡的功耗/频率/温度均未取到：厂商遥测接口未在此驱动/设备上暴露';
+  return '该显卡的功耗/频率/温度/风扇均未取到：厂商遥测接口未在此驱动/设备上暴露';
+}
+
+/**
+ * 风扇缺失的说明。与 `gpuNoDataHint` 分开写，因为风扇缺失的**原因与其他遥测不同**：
+ * 笔记本显卡压根没有「GPU 自己的风扇」（由主板 EC 统一管控），这不是驱动或实现问题。
+ */
+function gpuFanHint(g: GpuUsage): string {
+  if (g.vendor === 'amd') return 'AMD 显卡风扇需 ADL/ADLX；本项目因该 SDK 许可限制未接入';
+  if (g.vendor === 'intel') return '核显没有独立风扇（由 CPU 散热系统统一管控），故不提供风扇读数';
+  if (g.vendor === 'nvidia') {
+    return /laptop|notebook|mobile/i.test(g.name)
+      ? '笔记本显卡的风扇由主板 EC 统一管控，NVML 不提供该卡的独立风扇转速'
+      : 'NVIDIA 风扇转速由 NVML 提供，本机未取到（驱动版本或设备不支持）';
+  }
+  return '该适配器（虚拟/基础渲染设备）不提供风扇遥测';
 }
 
 /** 逐引擎利用率：只列出本机真有读数的引擎类型，避免整排「—」占地方 */
@@ -191,13 +207,22 @@ function GpuUtilBlock({ gpu, hist, hero, label }: { gpu: GpuUsage; hist: number[
             v: fmtTemp(gpu.temp_c),
             hint: gpu.temp_c == null ? gpuNoDataHint(gpu, '温度') : undefined,
           },
+          {
+            k: '风扇',
+            v: fmtFan(gpu.fan_rpm, gpu.fan_percent),
+            hint: gpu.fan_rpm == null && gpu.fan_percent == null ? gpuFanHint(gpu) : undefined,
+          },
         ]}
       />
       {engines.length > 0 && (
         <Chips items={[{ k: '引擎', v: engines.map((e) => `${e.k} ${e.v}`).join(' · ') }]} />
       )}
-      {/* 三项全缺时整行写明原因：这种卡看起来最像「坏了」 */}
-      {gpu.clock_mhz == null && gpu.power_w == null && gpu.temp_c == null && (
+      {/* 四项全缺时整行写明原因：这种卡看起来最像「坏了」 */}
+      {gpu.clock_mhz == null &&
+        gpu.power_w == null &&
+        gpu.temp_c == null &&
+        gpu.fan_rpm == null &&
+        gpu.fan_percent == null && (
         <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
           {gpuAllMissingNote(gpu)}
         </p>
@@ -364,6 +389,12 @@ export function ResourceMonitor() {
                   功耗与温度均不可用：该平台未提供 RAPL 计数器，且未暴露 ACPI 热区
                 </p>
               )}
+              {/* CPU 风扇为什么整块都不列：Windows 没有免驱接口，与其给一列恒为「—」
+                  不如直接说清「这不是没做，是平台不提供」——避免分发出去被当成软件坏了 */}
+              <p className="text-[10px] text-neutral-400 dark:text-stone-500 leading-relaxed">
+                CPU / 机箱风扇转速不在此列出：Windows 未提供免驱 API（WMI Win32_Fan 只读 SMBIOS
+                Type 27，现代机型基本不填），唯一通用做法是读 SuperIO 芯片、需要内核态驱动
+              </p>
               <Sparkline data={hist.cpu} color={cpuColor} max={100} />
               {/* 每核迷你条 */}
               <div className="flex items-end gap-[2px] h-8 mt-1">

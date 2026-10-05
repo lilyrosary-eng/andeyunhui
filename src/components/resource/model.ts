@@ -43,6 +43,13 @@ export interface GpuUsage {
   temp_c: number | null;
   /** 整卡功耗 W（仅 NVIDIA 可取值） */
   power_w: number | null;
+  /**
+   * 风扇转速 RPM（仅 NVIDIA **桌面卡**）。
+   * 笔记本 GPU 的风扇由主板 EC 接管，NVML 返回 NOT_SUPPORTED ⇒ 恒为 null。
+   */
+  fan_rpm: number | null;
+  /** 风扇转速 %（NVML 官方口径 = 相对该卡最大转速，可能 >100；仅 NVIDIA 桌面卡） */
+  fan_percent: number | null;
 }
 
 /** 单个分区（对应后端 DiskUsage） */
@@ -145,6 +152,18 @@ export function fmtPower(w: number | null): string {
 export function fmtTemp(c: number | null): string {
   if (c == null || !Number.isFinite(c)) return '—';
   return `${Math.round(c)} °C`;
+}
+
+/**
+ * 风扇转速：优先显示真实 RPM，没有 RPM 时退回百分比。
+ * 只给百分比时用「~」前缀提醒它是 NVML 换算值（官方文档明说是 intended speed，
+ * 物理卡住时与实际不符），不给一个看起来同样精确的数字。
+ * null → 「—」（不可用与「真的停转」必须区分：后端已把 0 归为 None）。
+ */
+export function fmtFan(rpm: number | null, percent: number | null): string {
+  if (rpm != null && Number.isFinite(rpm) && rpm > 0) return `${Math.round(rpm)} RPM`;
+  if (percent != null && Number.isFinite(percent) && percent > 0) return `~${Math.round(percent)}%`;
+  return '—';
 }
 
 /** 百分比：null → 「—」 */

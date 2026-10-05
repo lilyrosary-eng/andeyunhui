@@ -673,6 +673,7 @@ export const zhCN: Record<string, string> = {
   'capsule.res.engDec': '解码',
   'capsule.res.engEnc': '编码',
   'capsule.res.engCopy': '拷贝',
+  'capsule.res.fan': '风扇',
   'capsule.res.shared': '共享',
   // 浮岛 · 磁盘响应/队列与页面文件（磁盘两项在「全部」模式，页面文件在「全部」模式）
   'capsule.res.resp': '响应',

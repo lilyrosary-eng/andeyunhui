@@ -673,6 +673,7 @@ export const enUS: Record<string, string> = {
   'capsule.res.engDec': 'Dec',
   'capsule.res.engEnc': 'Enc',
   'capsule.res.engCopy': 'Copy',
+  'capsule.res.fan': 'Fan',
   'capsule.res.shared': 'Shared',
   // Capsule · disk response/queue and page file
   'capsule.res.resp': 'Resp',

@@ -1,0 +1,93 @@
+# ============================================================
+# 行尾（EOL）策略
+# ============================================================
+# 为什么要这个文件：Windows 侧用 CRLF、Linux 侧用 LF，两边编辑同一仓库时，
+# git 会把**每一个**文件都报成"已修改"（整行删除 + 整行新增），
+# `git status` / `git diff` 彻底不可用，真实改动被淹没。
+# 本文件把三件事定死：仓库内一律存 LF、检出时按平台自动转换、哪些文件强制不动。
+#
+# 关键点：`text=auto` 只让 git **猜**哪些是文本；显式 `* text=auto eol=lf` 才是
+# 「一律按文本处理 + 仓库内固定 LF」。仓库里存 LF 是关键——只有存 LF，
+# 才可能在检出时按需转成 CRLF；反过来（仓库内存 CRLF）永远消不掉干扰。
+
+# ---- 默认：所有文本文件，仓库内固定 LF，检出按平台自动转换 ----
+* text=auto eol=lf
+
+# ---- 显式声明为文本（覆盖 auto 的猜测，避免二进制被误处理）----
+*.rs        text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.jsx       text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.json      text eol=lf
+*.toml      text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.xml       text eol=lf
+*.py        text eol=lf
+*.sh        text eol=lf
+*.sql       text eol=lf
+*.c         text eol=lf
+*.h         text eol=lf
+*.cpp       text eol=lf
+*.hpp       text eol=lf
+
+# ---- 必须原样保留、禁止转换的文件 ----
+# 这些格式里换行符是**语法的一部分**，转换会直接损坏文件：
+#   · .bat / .cmd：cmd.exe 按 CRLF 解析 bat，LF 版会在注释行报错甚至执行乱码
+#   · .svg / .css 里内联的 data: URI（有 base64 折行）
+#   · diff / patch：补丁的行尾就是被改文件的行尾，不能动
+
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# ---- 二进制：一律禁止行尾转换与文本 diff ----
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.ico       binary
+*.icns      binary
+*.pdf       binary
+*.zip       binary
+*.gz        binary
+*.xz        binary
+*.7z        binary
+*.exe       binary
+*.dll       binary
+*.so        binary
+*.dylib     binary
+*.a         binary
+*.o         binary
+*.rlib      binary
+*.wasm      binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.otf       binary
+*.mp3       binary
+*.wav       binary
+*.ogg       binary
+*.mp4       binary
+*.webm      binary
+*.db        binary
+*.sqlite    binary
+*.sqlite3   binary
+*.ttc       binary
+*.jar       binary
+
+# ---- 差异文件：行尾即内容 ----
+*.patch     -text
+*.diff      -text
+
+# ---- 语言统计用的数据文件，排除噪音 ----
+third_party/**      -text linguist-vendored
+external-deps/**    -text linguist-vendored

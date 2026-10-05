@@ -26,6 +26,7 @@ import {
   fmtPower,
   fmtSpeed,
   fmtTemp,
+  fmtFan,
   levelColor,
   shortGpuName,
   vramPercent,
@@ -195,6 +196,10 @@ function CapsuleResource() {
     if (g.util_video_decode != null) eng.push(`${t('capsule.res.engDec')} ${Math.round(g.util_video_decode)}%`);
     if (g.util_video_encode != null) eng.push(`${t('capsule.res.engEnc')} ${Math.round(g.util_video_encode)}%`);
     if (g.util_copy != null) eng.push(`${t('capsule.res.engCopy')} ${Math.round(g.util_copy)}%`);
+    // 风扇只在真有读数时列：笔记本卡/核显恒为 null，塞进去就是一行「—」，纯噪音
+    if (g.fan_rpm != null || g.fan_percent != null) {
+      eng.push(`${t('capsule.res.fan')} ${fmtFan(g.fan_rpm, g.fan_percent)}`);
+    }
     return eng.length ? `${t('capsule.res.engine')} ${eng.join(' · ')}` : undefined;
   };
   // 电量配色复用磁盘那三档（同一套深底配色；方向相反：电量越低越危险）
@@ -203,9 +208,13 @@ function CapsuleResource() {
   const activeNets = (data?.nets ?? []).filter((n) => n.down_bps > 1 || n.up_bps > 1);
   // 电池同样用可选链：前端热更新会先于后端重编生效，老后端不带 battery 字段时不能崩在这里
   const bat = data?.battery;
-  /** 功耗/频率/温度三项全缺（这种卡最像「坏了」，值得给个悬浮说明） */
+  /** 功耗/频率/温度/风扇全缺（这种卡最像「坏了」，值得给个悬浮说明） */
   const gpuAllMissing = (g: GpuUsage) =>
-    g.clock_mhz == null && g.power_w == null && g.temp_c == null;
+    g.clock_mhz == null &&
+    g.power_w == null &&
+    g.temp_c == null &&
+    g.fan_rpm == null &&
+    g.fan_percent == null;
 
   return (
     <div
