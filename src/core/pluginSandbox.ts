@@ -403,7 +403,7 @@ function createSafeApi(pluginId: string) {
     // ⚠ 安全：这是**放宽**了插件能读的文件范围，因此按扩展名白名单收紧 ——
     //   只允许音频/媒体文件。插件若需要读别的类型，应走既有的 ALLOWED_COMMANDS
     //   逐个评审放行，而不是把任意文件读取能力一次性给出去。
-    readFileAsObjectUrl: async (path: string): Promise<string> => {
+    readFileAsObjectUrl: async (path: string, maxBytes?: number): Promise<string> => {
       const ext = (path.split('?')[0].split('#')[0].split('.').pop() || '').toLowerCase();
       const ALLOW = new Set([
         'mp3', 'flac', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'wma', 'aiff', 'ape', 'alac',
@@ -411,7 +411,29 @@ function createSafeApi(pluginId: string) {
       if (!ALLOW.has(ext)) {
         throw new Error(`readFileAsObjectUrl: 不允许读取该类型文件 (.${ext || '无扩展名'})`);
       }
-      const res = await fetch(convertFileSrc(path));
+      const url = convertFileSrc(path);
+      // ⚠⚠ **必须做体积上限**（实测教训，代价是 OOM 掉整个桌面）：
+      // 整首读成 blob 会让**页缓存**暴涨 —— 内核 OOM 现场证据：
+      //     anon 451MB / file 5.65GB，栈顶 filemap_add_folio → do_read_fault
+      // 也就是说内存不是进程堆涨的，是「反复读整首歌」把 page cache 撑爆的。
+      // cgroup 有 MemoryMax 时更糟：页缓存不能通过全局回收自救（不允许拿别的
+      // cgroup 的页来释放自己），于是直接触发 OOM，把整机进程一起带走。
+      //
+      // 先用 Range 请求只取 1 字节，从 Content-Range 头拿到真实大小，
+      // 超限就直接失败 —— 宁可这条大文件播不了，也不能拖垮系统。
+      // （为什么不用 HEAD：Tauri 的 asset 协议是 GET 型应答器，HEAD 不一定被支持。）
+      const LIMIT = maxBytes && maxBytes > 0 ? maxBytes : 8 * 1024 * 1024;
+      const probe = await fetch(url, { headers: { Range: 'bytes=0-0' } });
+      const cr = probe.headers.get('content-range') || '';
+      const m = /\/(\d+)\s*$/.exec(cr);
+      const size = m ? Number(m[1]) : Number(probe.headers.get('content-length') || 0);
+      if (size > LIMIT) {
+        throw new Error(
+          `readFileAsObjectUrl: 文件 ${(size / 1048576).toFixed(1)}MB 超过上限 ` +
+            `${(LIMIT / 1048576).toFixed(0)}MB（整首读入会撑爆页缓存导致 OOM）`
+        );
+      }
+      const res = await fetch(url);
       if (!res.ok) throw new Error(`readFileAsObjectUrl: HTTP ${res.status}`);
       const blob = await res.blob();
       return URL.createObjectURL(blob);

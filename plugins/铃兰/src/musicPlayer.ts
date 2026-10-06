@@ -524,7 +524,11 @@ class MusicPlayer {
       if (typeof reader !== 'function') {
         throw new Error('宿主未提供 readFileAsObjectUrl');
       }
-      const url: string = await reader(rawPath);
+      // 8MB 上限：宿主侧会先用 Range 探大小，超限直接抛错。
+      // 之所以必须有这个上限 —— 见 pluginSandbox.ts 里的说明：
+      // 整首读成 blob 会把**页缓存**撑到 GB 级（内核 OOM 现场 anon 451MB / file 5.65GB，
+      // 栈顶 filemap_add_folio），cgroup 有 MemoryMax 时会直接 OOM 掉整机。
+      const url: string = await reader(rawPath, 8 * 1024 * 1024);
       this.objectUrl = url;
       debugLog(`music: blob 音源就绪（宿主侧） blobUrl.len=${url.length}`);
       return url;
