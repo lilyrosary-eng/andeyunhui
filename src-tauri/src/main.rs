@@ -524,6 +524,14 @@ fn fill_native_linux(u: &mut ResourceUsage, disk_dev_map: &[(String, String)], d
     u.thermal_temp_c = hw_metrics_linux::temp_c();
     u.battery = hw_metrics_linux::battery_status();
 
+    // GPU（NVIDIA 独显，走 nvidia-smi）+ 风扇转速（走内核 hwmon 的 EC 读数）。
+    // 这两项此前是「整块不显示」，理由写的是「Linux 无等价的三条路」—— 那三条路
+    // （PDH / nvml.dll / IGCL）确实都是 Windows 专属，但 Linux 侧根本不需要它们：
+    // nvidia-smi 是驱动自带的官方工具，实测可用；而笔记本 GPU 风扇由主板 EC 管控、
+    // NVML 取不到（Windows 侧同样拿不到），Linux 内核却把 EC 风扇挂在 hwmon 上。
+    // 详见 hw_metrics_linux.rs 里这两个函数的文件头注释。
+    u.gpus = hw_metrics_linux::nvidia_gpus();
+
     // 磁盘实时 IO：/proc/diskstats 按挂载点回填到已有 disks 列表
     let ios = hw_metrics_linux::disk_io(disk_dev_map, dt as f64);
     for d in u.disks.iter_mut() {

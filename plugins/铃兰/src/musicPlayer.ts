@@ -368,15 +368,27 @@ class MusicPlayer {
     else setTimeout(notify, 0);
   }
 
-  private loadTrack(index: number): void {
+  private async loadTrack(index: number): Promise<void> {
     if (index < 0 || index >= this.tracks.length) return;
     const track = this.tracks[index];
     const api = window.__HOST_API__;
     try { api?.invoke('debug_log', { msg: `MUSIC_LOAD_TRACK idx=${index} file=${track.filePath}` }).catch(()=>{}); } catch {}
+    // Linux 上本地文件要 fetch 成 blob 才是异步的 ⇒ 用序号守卫防止竞态：
+    // 快速连点切歌时，先发后到的旧请求不能覆盖新歌。
+    const seq = ++this.loadSeq;
     // 远程 URL（http/https，如网易云直链）直接原样赋值，
     // 不要走 convertFileSrc（它只用于本地文件路径，会把远程 URL 编码成 asset:// 导致 500）。
-    const isRemote = !!track.filePath && /^https?:\/\//i.test(track.filePath);
-    const src = !track.filePath ? '' : (isRemote ? track.filePath : (api?.convertFileSrc(track.filePath) || track.filePath));
+    // Linux 上本地文件额外走 blob: —— 原因见 resolvePlayableSrc 的注释
+    // （WebKitGTK 的媒体加载器不接管 asset:// 自定义 scheme）。
+    const src = !track.filePath ? '' : await this.resolvePlayableSrc(api, track.filePath);
+    // 期间用户又切了别的歌 ⇒ 丢弃本次结果，别把新歌的 src 覆盖掉
+    if (seq !== this.loadSeq) {
+      debugLog(`music loadTrack 竞态丢弃 idx=${index} (seq=${seq} 当前=${this.loadSeq})`);
+      if (this.isLinux() && src.startsWith('blob:') && src !== this.objectUrl) {
+        try { URL.revokeObjectURL(src); } catch { /* 忽略 */ }
+      }
+      return;
+    }
     // 关键修复：若目标曲与「当前已加载曲」完全相同（同一 index + 同一 src 且已加载到 audio），
     // 不要重设 audio.src —— 否则会触发媒体元素 reset（播放中断、currentTime 归零、SMTC 卡片丢失）。
     // 典型场景：切到其它模块再切回音乐模块时，resumeLastPosition 会重复 setTracks 到同一首歌，
@@ -416,20 +428,96 @@ class MusicPlayer {
     if (index === this.currentIndex && wasWaiting) {
       const pos = this.audio.currentTime || 0;
       const api = window.__HOST_API__;
-      const isRemote = /^https?:\/\//i.test(url);
-      const nextSrc = isRemote ? url : (api?.convertFileSrc(url) || url);
-      this.audio.src = nextSrc;
-      this.loadedSrc = nextSrc;
-      try { this.audio.currentTime = pos; } catch { /* ignore */ }
-      // 重新 emit trackChange，让 UI 更新封面和歌曲信息（之前 filePath 为空时封面可能未加载）
-      this.emit('trackChange', track);
-      // 用户已请求播放则自动续播（不依赖 isPlaying，因为 play() 失败后 isPlaying=false）
-      if (this.playRequested) {
-        this.audio.play().catch((err) => {
-          console.warn('[MusicPlayer] updateTrackUrl play failed:', err.message);
-        });
-      }
+      // 与 loadTrack 同一套处理：Linux 本地文件走 blob:
+      const seq = ++this.loadSeq;
+      void this.resolvePlayableSrc(api, url).then((nextSrc) => {
+        if (seq !== this.loadSeq) return; // 已被更新的切歌取代
+        this.audio.src = nextSrc;
+        this.loadedSrc = nextSrc;
+        try { this.audio.currentTime = pos; } catch { /* ignore */ }
+        // 重新 emit trackChange，让 UI 更新封面和歌曲信息（之前 filePath 为空时封面可能未加载）
+        this.emit('trackChange', track);
+        // 用户已请求播放则自动续播（不依赖 isPlaying，因为 play() 失败后 isPlaying=false）
+        if (this.playRequested) {
+          this.audio.play().catch((err) => {
+            console.warn('[MusicPlayer] updateTrackUrl play failed:', err.message);
+          });
+        }
+      });
     }
+  }
+
+  // ==============================================================
+  // 音源地址解析：Linux 必须绕开 asset:// 自定义 scheme
+  // ==============================================================
+  //
+  // 【实测根因】本地音乐在 Linux 上一直播不出，媒体元素报
+  //   error.code = 4 (MEDIA_ERR_SRC_NOT_SUPPORTED)、networkState = 3 (NETWORK_NO_SOURCE)
+  // 且 **Tauri 的 asset 协议处理器一次都没被调用**（连「路径不存在」「403」这些
+  // log::error 都没有），CSP 也没有违规记录。
+  //   ⇒ 请求根本没进 Tauri。原因是 **WebKitGTK 的媒体加载器不接管自定义 URI scheme**：
+  //     `convertFileSrc` 产出的 `asset://localhost/...`，图片走普通资源加载能通，
+  //     音视频走的是另一条（媒体）加载路径，那条不认自定义 scheme。
+  //   （Windows 是 WebView2，asset:// 走虚拟主机映射，媒体也通 —— 所以那边一直正常。）
+  //
+  // 【解法】仍然用 asset:// 把文件**读出来**（fetch 走普通资源加载，这条是通的，
+  //   且 CSP 的 connect-src 本就允许 `asset:`），再转成 `blob:` URL 交给媒体元素
+  //   —— blob: 是同源 URL，媒体加载器原生支持，dev（http://localhost:1420）与
+  //   打包后（tauri://）行为一致，不需要额外放开 file: 或改 CSP。
+  //
+  // 代价：整首歌进内存（FLAC 常见 30~60MB）。换曲时 revoke 旧的 objectURL 即可，
+  // 本地文件播放场景完全可接受；远程直链（酷狗/网易云 https）不走这条路。
+  private objectUrl: string | null = null;
+  /** 切歌序号守卫：Linux 上解析本地音源是异步的，靠它防止竞态覆盖。 */
+  private loadSeq = 0;
+
+  private isLinux(): boolean {
+    return typeof navigator !== 'undefined' && /Linux/i.test(navigator.userAgent);
+  }
+
+  /** 释放上一首的 objectURL，避免内存泄漏（切歌/销毁时调用）。 */
+  private releaseObjectUrl(): void {
+    if (this.objectUrl) {
+      try {
+        URL.revokeObjectURL(this.objectUrl);
+      } catch {
+        /* 忽略 */
+      }
+      this.objectUrl = null;
+    }
+  }
+
+  /**
+   * 把「本地文件路径」变成「媒体元素能吃的 src」。
+   * 远程直链原样返回。
+   */
+  private async resolvePlayableSrc(api: any, rawPath: string): Promise<string> {
+    const isRemote = /^https?:\/\//i.test(rawPath);
+    if (isRemote) return rawPath;
+
+    const assetUrl = api?.convertFileSrc?.(rawPath) || rawPath;
+    if (!this.isLinux()) return assetUrl;
+
+    try {
+      const res = await fetch(assetUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      this.releaseObjectUrl();
+      this.objectUrl = URL.createObjectURL(blob);
+      debugLog(`music: blob 音源就绪 ${(this.objectUrl.length)} chars blob=${blob.size}B type=${blob.type}`);
+      return this.objectUrl;
+    } catch (e) {
+      // 读不出来就退回原方案：宁可播不了，也不要把整条播放链搞崩
+      debugLog('music: blob 音源失败，回退 asset:// | ' + String(e));
+      return assetUrl;
+    }
+  }
+
+  /** 同步版本：Linux 上 blob 化需要时间，先用 asset:// 占位，随后由 resolve 回调纠正。 */
+  private srcForImmediateUse(api: any, rawPath: string): string {
+    const isRemote = /^https?:\/\//i.test(rawPath);
+    if (isRemote) return rawPath;
+    return api?.convertFileSrc?.(rawPath) || rawPath;
   }
 
   play(): void {
@@ -784,6 +872,8 @@ class MusicPlayer {
     try {
       this.audio.pause();
       this.audio.src = '';
+      // 释放 Linux blob 音源占用的内存（整首歌在内存里）
+      this.releaseObjectUrl();
       this.loadedSrc = '';
       this.audio.removeAttribute('src');
       this.audio.load();

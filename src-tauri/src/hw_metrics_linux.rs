@@ -251,3 +251,136 @@ pub fn disk_io(device_to_mount: &[(String, String)], dt_secs: f64) -> Vec<LinuxD
     *prev_ts = Some(std::time::Instant::now());
     out
 }
+
+// ============================================================================
+// GPU（NVIDIA）与风扇转速
+// ============================================================================
+//
+// 【修正一条此前的错误结论】本文件原来的文件头写着「GPU ← **不取**
+// （Linux 无等价的三条路，宁可整块不显示）」。那个前提**没有复核**：
+// Windows 侧走的是 PDH 计数器 + `nvml.dll` + IGCL `ControlLib.dll`，这三条确实都是
+// Windows 专属；但 Linux 侧**本来就不需要它们** —— `nvidia-smi` 是 NVIDIA 驱动
+// 自带的官方工具，随驱动安装、输出稳定的 CSV，且本机实测可用：
+//   $ nvidia-smi --query-gpu=name,utilization.gpu,... --format=csv,noheader,nounits
+//   NVIDIA GeForce RTX 3080 Ti Laptop GPU, 0, 17, 16384, 55, 43.61
+// 用它换掉「整块不显示」，代价为零（不新增任何 Rust 依赖，只 spawn 一个官方二进制）。
+//
+// 口径与降级：
+//   · 显存：nvidia-smi 给 MiB → ×1024 转 KB，与 Windows 侧 `Dedicated Usage` 同单位。
+//   · 共享显存、逐引擎利用率（3D/解码/编码/拷贝）：nvidia-smi 不提供 ⇒ 保持 None，
+//     **不用别的量去凑**（前端会显示「—」）。这是与 Windows 的实质差异。
+//   · 核显/AMD：nvidia-smi 只报独显 ⇒ 核显那条整块缺失。Windows 侧靠 PDH 能拿到
+//     核显，这确实是 Linux 的短板，但比「什么都不显示」好得多。
+//
+// 风扇：**笔记本 GPU 的风扇由主板 EC 统一管控，NVML 取不到**（gpu_metrics.rs
+// 里有同样的结论，所以 Windows 上也是 None）。但 Linux 内核的 hwmon 驱动
+// 会把 EC 暴露的风扇转速挂在 `/sys/class/hwmon/hwmon*/fan*_input` —— 本机实测：
+//   /sys/class/hwmon/hwmon5/name        = hp
+//   /sys/class/hwmon/hwmon5/fan1_input  = 2028      （RPM）
+//   /sys/class/hwmon/hwmon5/fan2_input  = ...
+// ⇒ **Linux 反而能拿到 Windows 拿不到的风扇转速**。取所有 fan*_input 的最大值
+//   作为代表值（多风扇机器上取最快的那个，与任务管理器口径一致）。
+//   `fan_percent` 保持 None：hwmon 不提供百分比，也不该用 RPM 猜一个百分比出来。
+
+/// 读取一组 hwmon 里的全部风扇转速（RPM），返回最大值。
+pub fn fan_rpm() -> Option<u32> {
+    let mut best: Option<u32> = None;
+    let Ok(entries) = std::fs::read_dir("/sys/class/hwmon") else {
+        return None;
+    };
+    for hw in entries.flatten() {
+        let dir = hw.path();
+        // 该目录下形如 fan1_input / fan2_input …（单位 RPM，Linux 内核统一约定）
+        let Ok(fans) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for f in fans.flatten() {
+            let name = f.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with("fan") && name.ends_with("_input")) {
+                continue;
+            }
+            if let Ok(v) = std::fs::read_to_string(f.path()) {
+                if let Ok(rpm) = v.trim().parse::<u32>() {
+                    // 过滤掉明显无效的读数（0 与 0xFFFFFFFF 都常见于驱动未就绪）
+                    if rpm > 0 && rpm < 100_000 {
+                        best = Some(best.map_or(rpm, |b: u32| b.max(rpm)));
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
+/// 用 `nvidia-smi` 采集独显遥测。驱动缺失 / 无 NVIDIA 卡时返回空 Vec（前端整块不显示）。
+pub fn nvidia_gpus() -> Vec<crate::GpuInfo> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,clocks.gr",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let fan = fan_rpm(); // 同一拍里只读一次 sysfs
+    let mut v = Vec::new();
+    // 同名显卡（多卡机器）按出现次序加 `#N` 后缀，与 Windows 侧 id 生成规则保持一致
+    let mut same_name_count: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split(',').map(str::trim).collect();
+        if cols.len() < 7 || cols[0].is_empty() {
+            continue;
+        }
+        let name = cols[0].to_string();
+        let n = same_name_count.entry(name.clone()).or_insert(0);
+        let id = if *n == 0 {
+            name.clone()
+        } else {
+            format!("{name}#{n}")
+        };
+        *n += 1;
+        // nvidia-smi 缺失值输出为 "[N/A]" / "[Not Supported]"，统一归一为 None
+        let num = |s: &str| -> Option<f32> {
+            if s.starts_with('[') {
+                None
+            } else {
+                s.parse::<f32>().ok()
+            }
+        };
+        let kib = |s: &str| -> Option<u64> {
+            if s.starts_with('[') {
+                None
+            } else {
+                s.parse::<u64>().ok().map(|mib| mib * 1024) // MiB → KiB
+            }
+        };
+        v.push(crate::GpuInfo {
+            id,
+            name,
+            vendor: "nvidia".to_string(),
+            util_percent: num(cols[1]),
+            vram_total_kb: kib(cols[3]),
+            vram_used_kb: kib(cols[2]),
+            // nvidia-smi 不提供「共享显存」与「逐引擎利用率」⇒ None，不凑数
+            vram_shared_kb: None,
+            util_3d: None,
+            util_video_decode: None,
+            util_video_encode: None,
+            util_copy: None,
+            clock_mhz: num(cols[6]).map(|c| c as u32),
+            temp_c: num(cols[4]),
+            power_w: num(cols[5]),
+            // 笔记本 GPU 风扇由 EC 管，NVML 取不到；改用内核 hwmon 暴露的 EC 风扇
+            fan_rpm: fan,
+            fan_percent: None,
+        });
+    }
+    v
+}
