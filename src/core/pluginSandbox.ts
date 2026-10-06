@@ -391,6 +391,34 @@ function createSafeApi(pluginId: string) {
     listen: listen,
     emit: emit,
     convertFileSrc: convertFileSrc,
+    // 宿主侧读文件 → 返回 blob: URL。存在的理由：插件沙箱**刻意**屏蔽了
+    // fetch / XMLHttpRequest / WebSocket（见下方 GLOBAL_OVERRIDES），所以插件
+    // 无法自己把本地文件读成 Blob。而 WebKitGTK 的媒体加载器又不接管 Tauri 的
+    // asset:// 自定义 scheme（图片走普通资源加载能通、音视频不走），
+    // 于是本地音乐在 Linux 上既不能直接播、也读不出来。
+    //
+    // 宿主窗口的 fetch 是完好的（沙箱只改插件那个 window），而插件 iframe 与宿主
+    // **同源** ⇒ 在宿主里创建的 blob: URL 插件侧可直接用于 <audio>。
+    //
+    // ⚠ 安全：这是**放宽**了插件能读的文件范围，因此按扩展名白名单收紧 ——
+    //   只允许音频/媒体文件。插件若需要读别的类型，应走既有的 ALLOWED_COMMANDS
+    //   逐个评审放行，而不是把任意文件读取能力一次性给出去。
+    readFileAsObjectUrl: async (path: string): Promise<string> => {
+      const ext = (path.split('?')[0].split('#')[0].split('.').pop() || '').toLowerCase();
+      const ALLOW = new Set([
+        'mp3', 'flac', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'wma', 'aiff', 'ape', 'alac',
+      ]);
+      if (!ALLOW.has(ext)) {
+        throw new Error(`readFileAsObjectUrl: 不允许读取该类型文件 (.${ext || '无扩展名'})`);
+      }
+      const res = await fetch(convertFileSrc(path));
+      if (!res.ok) throw new Error(`readFileAsObjectUrl: HTTP ${res.status}`);
+      const blob = await res.blob();
+      return URL.createObjectURL(blob);
+    },
+    revokeObjectUrl: (url: string) => {
+      try { URL.revokeObjectURL(url); } catch { /* 忽略 */ }
+    },
     // 帧缓冲工具：高频数据推送批处理，避免渲染风暴
     createFrameBuffer: createFrameBuffer,
     // 创建浮窗窗口（前端 WebviewWindow API，规避 sync 命令中 build 导致的主线程重入死锁）

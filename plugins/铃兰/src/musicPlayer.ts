@@ -477,13 +477,19 @@ class MusicPlayer {
 
   /** 释放上一首的 objectURL，避免内存泄漏（切歌/销毁时调用）。 */
   private releaseObjectUrl(): void {
-    if (this.objectUrl) {
-      try {
-        URL.revokeObjectURL(this.objectUrl);
-      } catch {
-        /* 忽略 */
-      }
-      this.objectUrl = null;
+    if (!this.objectUrl) return;
+    const url = this.objectUrl;
+    this.objectUrl = null;
+    // blob URL 是**宿主**创建的（沙箱里没有 fetch，也没有 createObjectURL 的用途），
+    // 优先用宿主的 revoke 保证在同一个上下文里释放。
+    const hostRevoke = (window as any).__HOST_API__?.revokeObjectUrl;
+    if (typeof hostRevoke === 'function') {
+      try { hostRevoke(url); return; } catch { /* 落到下面 */ }
+    }
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      /* 忽略 */
     }
   }
 
@@ -499,13 +505,20 @@ class MusicPlayer {
     if (!this.isLinux()) return assetUrl;
 
     try {
-      const res = await fetch(assetUrl);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
+      // ⚠ 不能用 fetch：插件沙箱**刻意**屏蔽了 fetch / XMLHttpRequest / WebSocket
+      //   （见 src/core/pluginSandbox.ts 的 GLOBAL_OVERRIDES），实测报
+      //   `TypeError: fetch is not a function`。所以走宿主侧的
+      //   `readFileAsObjectUrl`：宿主窗口的 fetch 完好，且插件与宿主同源，
+      //   在宿主里创建的 blob: URL 插件侧可直接喂给 <audio>。
+      const reader = (api as any)?.readFileAsObjectUrl;
+      if (typeof reader !== 'function') {
+        throw new Error('宿主未提供 readFileAsObjectUrl');
+      }
+      const url: string = await reader(rawPath);
       this.releaseObjectUrl();
-      this.objectUrl = URL.createObjectURL(blob);
-      debugLog(`music: blob 音源就绪 ${(this.objectUrl.length)} chars blob=${blob.size}B type=${blob.type}`);
-      return this.objectUrl;
+      this.objectUrl = url;
+      debugLog(`music: blob 音源就绪（宿主侧） blobUrl.len=${url.length}`);
+      return url;
     } catch (e) {
       // 读不出来就退回原方案：宁可播不了，也不要把整条播放链搞崩
       debugLog('music: blob 音源失败，回退 asset:// | ' + String(e));
