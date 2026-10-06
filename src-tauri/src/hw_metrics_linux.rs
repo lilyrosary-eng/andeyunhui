@@ -314,6 +314,14 @@ pub fn fan_rpm() -> Option<u32> {
 }
 
 /// 用 `nvidia-smi` 采集独显遥测。驱动缺失 / 无 NVIDIA 卡时返回空 Vec（前端整块不显示）。
+///
+/// ⚠⚠ **不要直接在命令线程里调用本函数** —— 请用 [`nvidia_gpus_cached`]。
+///
+/// 原因（实测踩过）：`nvidia-smi` 每次启动都要初始化 NVML、拉起 CUDA 上下文，
+/// 实测耗时 100~200ms、瞬时占用数百 MB。而前端资源监视器的轮询间隔是 **1000ms**
+/// （`src/components/resource/useResourceUsage.ts`），也就是**每秒 spawn 一次**
+/// `nvidia-smi`。这会让整个机器周期性卡顿，实测导致 swap 打满、进程被 OOM 杀掉。
+/// ⇒ spawn 必须挪到后台定时线程，命令线程只读缓存。
 pub fn nvidia_gpus() -> Vec<crate::GpuInfo> {
     let out = std::process::Command::new("nvidia-smi")
         .args([
@@ -383,4 +391,62 @@ pub fn nvidia_gpus() -> Vec<crate::GpuInfo> {
         });
     }
     v
+}
+
+// ============================================================================
+// GPU 采集缓存（性能修复）
+// ============================================================================
+//
+// 背景见 `nvidia_gpus` 的文档：资源监视器每秒调一次 `get_resource_usage`，
+// 若每次都 spawn `nvidia-smi`，等于每秒初始化一次 NVML —— 实测导致机器卡顿、
+// swap 打满、进程被 OOM 杀掉。
+//
+// 改法：spawn 挪到**后台定时线程**（默认 5 秒一跳，UI 上 5 秒刷一次 GPU 完全够用），
+// 命令线程只读缓存 ⇒ **调用路径上零进程创建、零 IO**，恒为微秒级。
+//
+// 缓存 TTL 略大于采集周期（6s vs 5s），这样即使后台线程被调度延迟，
+// 命令侧也不会触发"顺手 spawn 一次"的回退逻辑。
+
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+type GpuCache = (Instant, Vec<crate::GpuInfo>);
+
+fn gpu_cache() -> &'static Mutex<Option<GpuCache>> {
+    static C: OnceLock<Mutex<Option<GpuCache>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
+}
+
+/// 后台采集线程的启动闸门（只启动一次）。
+fn ensure_gpu_collector() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("gpu-collector".into())
+            .spawn(|| loop {
+                let data = nvidia_gpus();
+                if let Ok(mut g) = gpu_cache().lock() {
+                    *g = Some((Instant::now(), data));
+                }
+                std::thread::sleep(Duration::from_secs(5));
+            })
+            .ok();
+    });
+}
+
+/// 命令线程侧入口：**永不 spawn 进程**，只读后台线程写好的缓存。
+pub fn nvidia_gpus_cached() -> Vec<crate::GpuInfo> {
+    ensure_gpu_collector();
+    let ok = match gpu_cache().lock() {
+        Ok(g) => g,
+        Err(_) => return Vec::new(),
+    };
+    match ok.as_ref() {
+        Some((ts, v)) if ts.elapsed() < Duration::from_secs(6) => v.clone(),
+        // 缓存还没建立（第一次调用时后台线程可能还没跑完一拍）时，
+        // 这里**故意不等待、不自行 spawn** —— 返回空让前端显示「—」，
+        // 下一拍就有数据了。宁可空一拍，也不要在命令线程上同步阻塞 200ms。
+        _ => Vec::new(),
+    }
 }

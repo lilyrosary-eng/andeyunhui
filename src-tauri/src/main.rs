@@ -530,7 +530,11 @@ fn fill_native_linux(u: &mut ResourceUsage, disk_dev_map: &[(String, String)], d
     // nvidia-smi 是驱动自带的官方工具，实测可用；而笔记本 GPU 风扇由主板 EC 管控、
     // NVML 取不到（Windows 侧同样拿不到），Linux 内核却把 EC 风扇挂在 hwmon 上。
     // 详见 hw_metrics_linux.rs 里这两个函数的文件头注释。
-    u.gpus = hw_metrics_linux::nvidia_gpus();
+    // GPU（NVIDIA 独显）：**必须走带缓存的入口** —— 资源监视器每秒调一次本命令，
+    // 直连 nvidia-smi 等于每秒初始化一次 NVML（实测 100~200ms + 数百 MB 瞬时内存），
+    // 会把机器拖到 swap 打满、进程被 OOM 杀。缓存版把 spawn 挪到后台线程（5s 一跳），
+    // 命令侧零进程创建。详见 hw_metrics_linux.rs 的说明。
+    u.gpus = hw_metrics_linux::nvidia_gpus_cached();
 
     // 磁盘实时 IO：/proc/diskstats 按挂载点回填到已有 disks 列表
     let ios = hw_metrics_linux::disk_io(disk_dev_map, dt as f64);
