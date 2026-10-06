@@ -169,6 +169,9 @@ const ALLOWED_COMMANDS = new Set([
   'read_external_dep_file',
   // 本地 OCR 引擎（PaddleOCR 依赖包）：按相对路径读取二进制资产（ONNX 模型 / 权重）为 base64
   'read_external_dep_bytes',
+  // Linux 本地媒体 HTTP 服务：返回一条 http://127.0.0.1:PORT/... URL，
+  // 由本地服务流式按需读取（含 Range），**不把整首歌读进内存**。
+  'media_http_url',
   // 桌宠：按相对路径读取外部依赖绝对路径，供前端 convertFileSrc 走 asset 协议加载（避免大图 base64 超 IPC 载荷）
   'read-external-dep-path',
   // 桌宠：把用户本地图片/视频导入到 user_external_deps/deskpet-assets/pet/

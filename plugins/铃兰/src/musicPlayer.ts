@@ -384,8 +384,6 @@ class MusicPlayer {
     // 期间用户又切了别的歌 ⇒ 丢弃本次结果，别把新歌的 src 覆盖掉
     if (seq !== this.loadSeq) {
       debugLog(`music loadTrack 竞态丢弃 idx=${index} (seq=${seq} 当前=${this.loadSeq})`);
-      // ⚠ 必须用能真正释放宿主 blob 的那条路径（见 revokeBlobUrl 的注释）
-      MusicPlayer.revokeBlobUrl(src);
       return;
     }
     // 关键修复：若目标曲与「当前已加载曲」完全相同（同一 index + 同一 src 且已加载到 audio），
@@ -466,37 +464,11 @@ class MusicPlayer {
   //
   // 代价：整首歌进内存（FLAC 常见 30~60MB）。换曲时 revoke 旧的 objectURL 即可，
   // 本地文件播放场景完全可接受；远程直链（酷狗/网易云 https）不走这条路。
-  private objectUrl: string | null = null;
-  /** 切歌序号守卫：Linux 上解析本地音源是异步的，靠它防止竞态覆盖。 */
+  /** 切歌序号守卫：解析本地音源是异步的（Linux 要问后端要 URL），靠它防止竞态覆盖。 */
   private loadSeq = 0;
 
   private isLinux(): boolean {
     return typeof navigator !== 'undefined' && /Linux/i.test(navigator.userAgent);
-  }
-
-  /**
-   * 释放一个 blob URL。
-   *
-   * ⚠ blob 是**宿主上下文**创建的（沙箱里没有 fetch/createObjectURL 的用途），
-   * 所以必须优先用宿主的 revoke —— 在插件上下文里 `URL.revokeObjectURL`
-   * 对宿主创建的 URL **不保证生效**。这曾导致切歌竞态丢弃的 blob 全部泄漏：
-   * 音乐文件最大 60MB，快速切歌几十次就是 GB 级，实测把 swap 撑爆、进程被 OOM 杀。
-   */
-  private static revokeBlobUrl(url: string): void {
-    if (!url || !url.startsWith('blob:')) return;
-    const hostRevoke = (window as any).__HOST_API__?.revokeObjectUrl;
-    if (typeof hostRevoke === 'function') {
-      try { hostRevoke(url); return; } catch { /* 落到下面 */ }
-    }
-    try { URL.revokeObjectURL(url); } catch { /* 忽略 */ }
-  }
-
-  /** 释放上一首的 objectURL，避免内存泄漏（切歌/销毁时调用）。 */
-  private releaseObjectUrl(): void {
-    if (!this.objectUrl) return;
-    const url = this.objectUrl;
-    this.objectUrl = null;
-    MusicPlayer.revokeBlobUrl(url);
   }
 
   /**
@@ -507,42 +479,25 @@ class MusicPlayer {
     const isRemote = /^https?:\/\//i.test(rawPath);
     if (isRemote) return rawPath;
 
-    const assetUrl = api?.convertFileSrc?.(rawPath) || rawPath;
-    if (!this.isLinux()) return assetUrl;
-
-    // ⚠ 先释放上一首，再建新的 —— 否则峰值同时持有两份 blob。
-    //   本机音乐文件最大 60MB（FLAC），两份就是 120MB，叠加 WebKit 自己的解码缓冲
-    //   在快速切歌时足以把内存曲线拉得很高。
-    this.releaseObjectUrl();
-    try {
-      // ⚠ 不能用 fetch：插件沙箱**刻意**屏蔽了 fetch / XMLHttpRequest / WebSocket
-      //   （见 src/core/pluginSandbox.ts 的 GLOBAL_OVERRIDES），实测报
-      //   `TypeError: fetch is not a function`。所以走宿主侧的
-      //   `readFileAsObjectUrl`：宿主窗口的 fetch 完好，且插件与宿主同源，
-      //   在宿主里创建的 blob: URL 插件侧可直接喂给 <audio>。
-      const reader = (api as any)?.readFileAsObjectUrl;
-      if (typeof reader !== 'function') {
-        throw new Error('宿主未提供 readFileAsObjectUrl');
+    // ---- Linux：交给本地媒体 HTTP 服务 ----
+    // 不能用 asset:// —— WebKitGTK 的**媒体加载器不接管自定义 scheme**（图片走
+    // 普通资源加载能通、音视频不走那条路），表现为 error.code=4 / NETWORK_NO_SOURCE。
+    // 也不能整首 fetch 成 blob —— 那会反复把文件页塞进 page cache，实测把
+    // page cache 撑到 5.65GB 直接 OOM 掉整机（内核日志 anon 451MB / file 5.65GB，
+    // 栈顶 filemap_add_folio）。详见 src-tauri/src/media_http.rs 的文件头。
+    // 本地 HTTP 服务流式按需读（含 Range），内存恒定、还能拖进度。
+    if (this.isLinux()) {
+      try {
+        const url: string = await api.invoke('media_http_url', { path: rawPath });
+        debugLog('music: 使用本地媒体 HTTP 源');
+        return url;
+      } catch (e) {
+        debugLog('music: media_http_url 失败，回退 asset:// | ' + String(e));
+        return api?.convertFileSrc?.(rawPath) || rawPath;
       }
-      // 8MB 上限：宿主侧会先用 Range 探大小，超限直接抛错。
-      // 之所以必须有这个上限 —— 见 pluginSandbox.ts 里的说明：
-      // 整首读成 blob 会把**页缓存**撑到 GB 级（内核 OOM 现场 anon 451MB / file 5.65GB，
-      // 栈顶 filemap_add_folio），cgroup 有 MemoryMax 时会直接 OOM 掉整机。
-      const url: string = await reader(rawPath, 8 * 1024 * 1024);
-      this.objectUrl = url;
-      debugLog(`music: blob 音源就绪（宿主侧） blobUrl.len=${url.length}`);
-      return url;
-    } catch (e) {
-      // 读不出来就退回原方案：宁可播不了，也不要把整条播放链搞崩
-      debugLog('music: blob 音源失败，回退 asset:// | ' + String(e));
-      return assetUrl;
     }
-  }
 
-  /** 同步版本：Linux 上 blob 化需要时间，先用 asset:// 占位，随后由 resolve 回调纠正。 */
-  private srcForImmediateUse(api: any, rawPath: string): string {
-    const isRemote = /^https?:\/\//i.test(rawPath);
-    if (isRemote) return rawPath;
+    // ---- Windows / 其它：convertFileSrc 走 asset 虚拟主机映射，一直是好的 ----
     return api?.convertFileSrc?.(rawPath) || rawPath;
   }
 
@@ -898,8 +853,6 @@ class MusicPlayer {
     try {
       this.audio.pause();
       this.audio.src = '';
-      // 释放 Linux blob 音源占用的内存（整首歌在内存里）
-      this.releaseObjectUrl();
       this.loadedSrc = '';
       this.audio.removeAttribute('src');
       this.audio.load();

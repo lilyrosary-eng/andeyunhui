@@ -1769,6 +1769,9 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             get_system_memory,
             // 资源占用实时监控（CPU/GPU/显存/内存/网络），供黄金棋盘「资源监视」与薄荷进程管理共用
             get_resource_usage,
+            // Linux 本地媒体 HTTP 服务：给 <audio> 一条流式、可 Range 的 URL
+            #[cfg(target_os = "linux")]
+            andeyunhui_lib::media_http::media_http_url,
             clipboard_read,
             clipboard_write,
             clipboard_read_image,
