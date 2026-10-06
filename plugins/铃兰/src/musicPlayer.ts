@@ -61,6 +61,31 @@ class MusicPlayer {
   private playRequested: boolean = false;
   private pseudoAnimFrame: number | null = null;
   private pseudoStartTime: number = 0;
+  // ===== Web Audio AnalyserNode 直取频谱（非 Windows 平台的真实频谱来源）=====
+  //
+  // 背景：Windows 走 Rust WASAPI Loopback；但本机（Linux）音频图里**没有任何 sink
+  // monitor 节点**（monitor 只由 pipewire-pulse 按需创建，而 Pulse 客户端协议在此
+  // 环境不通），OS 级环回采集不可行 ⇒ 只能退伪律动。
+  // 而本插件自己持有 audio 元素（见构造函数 `new Audio()`），因此可以直接挂
+  // AnalyserNode 取真实频域数据，完全绕开 OS 采集。
+  //
+  // ⚠ 静音风险（本项目**历史上已踩过**，见 spectrumData 字段注释「解决了
+  //   createMediaElementSource 静音问题」——那正是 Windows 改用 WASAPI 的原因）：
+  //   createMediaElementSource 会把元素输出**改道**进 WebAudio 图，若 AudioContext
+  //   处于 suspended（浏览器自动播放策略）或忘了 connect(destination)，音乐会**直接静音**。
+  //   故设三道防线，任何一步不满足就只放弃频谱、绝不碰播放：
+  //     1) 只在 ctx.state === 'running' 之后才建源（建完若仍非 running 则断开并放弃）；
+  //     2) 建源后立刻 src.connect(ctx.destination) 保持出声；
+  //     3) 监听 statechange，一旦被挂起立刻 resume()。
+  //   另：整段包在 try/catch 里，异常一律回退伪律动。
+  private webAudioCtx: AudioContext | null = null;
+  private webAnalyser: AnalyserNode | null = null;
+  /** 复用的频域缓冲，避免每帧分配（128 bin）。 */
+  private webBins: Uint8Array | null = null;
+  /** 是否已尝试过建 Web Analyser（失败不再重试，避免每帧抛错）。 */
+  private webAnalyserTried = false;
+  /** 是否收到过 Rust 侧真实频谱事件。Windows 为 true ⇒ 永不建 Web Analyser。 */
+  private rustSpectrumSeen = false;
   private eventListeners: Record<PlayerEvent, Set<(data: unknown) => void>> = {
     play: new Set(),
     pause: new Set(),
@@ -408,6 +433,13 @@ class MusicPlayer {
         this.pseudoAnimFrame = null;
         return;
       }
+      // 非 Windows 兜底：用 Web Audio AnalyserNode 取真实频域数据。
+      // 仅在「从未收到过 Rust 事件」时才建源 ⇒ Windows 走原路径、行为完全不变。
+      if (!this.rustSpectrumSeen && this.ensureWebAnalyser()) {
+        this.pullWebSpectrum();
+        this.pseudoAnimFrame = requestAnimationFrame(tick);
+        return;
+      }
       const t = (performance.now() - this.pseudoStartTime) / 1000;
       const vol = this.volume; // 0~1
       const n = this.spectrumData.length;
@@ -426,6 +458,106 @@ class MusicPlayer {
       this.pseudoAnimFrame = requestAnimationFrame(tick);
     };
     this.pseudoAnimFrame = requestAnimationFrame(tick);
+  }
+
+  // ================================================================
+  // Web Audio AnalyserNode：非 Windows 平台的真实频谱来源
+  // ================================================================
+
+  /**
+   * 惰性建立 AudioContext + MediaElementSource + AnalyserNode。
+   *
+   * ⚠ 静音防护（本项目历史上踩过，详见 webAudioCtx 字段注释）：
+   *   只有 ctx.state === 'running' 才建源。建源会把 audio 输出改道进 WebAudio 图，
+   *   挂起态下改道 = 直接静音。因此顺序是「先建 ctx、确认 running、再建源」。
+   *
+   * @returns 是否持有可用的 AnalyserNode（false 表示放弃，回退伪律动）
+   */
+  private ensureWebAnalyser(): boolean {
+    if (this.webAnalyser) return true;
+    if (this.webAnalyserTried) return false;
+    this.webAnalyserTried = true;
+
+    const Ctor: typeof AudioContext | undefined =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return false;
+
+    try {
+      const ctx = new Ctor();
+      // 防线 1：非 running 一律不建源（自动播放策略下 ctx 初始可能是 suspended）
+      if (ctx.state !== 'running') {
+        void ctx.close().catch(() => {});
+        return false;
+      }
+
+      const src = ctx.createMediaElementSource(this.audio);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;              // → 128 个频域 bin，够 64 条可视化
+      analyser.smoothingTimeConstant = 0.72; // 自带时间平滑
+      analyser.minDecibels = -85;
+      analyser.maxDecibels = -20;
+      src.connect(analyser);
+      // 防线 2：必须回连 destination，否则元素声音被改道后无处输出 → 静音
+      src.connect(ctx.destination);
+
+      // 防线 3：被挂起立刻恢复（切后台/锁屏会触发）
+      ctx.addEventListener('statechange', () => {
+        if (ctx.state === 'suspended' && this.isPlaying) {
+          void ctx.resume().catch(() => {});
+        }
+      });
+
+      this.webAudioCtx = ctx;
+      this.webAnalyser = analyser;
+      this.webBins = new Uint8Array(analyser.frequencyBinCount);
+      debugLog('music: Web Audio 频谱已启用（非 Windows 真实频域数据）');
+      return true;
+    } catch (e) {
+      // 任何异常都只放弃频谱，不影响播放
+      debugLog('music: Web Audio 频谱初始化失败，回退伪律动: ' + String(e));
+      this.webAudioCtx = null;
+      this.webAnalyser = null;
+      this.webBins = null;
+      return false;
+    }
+  }
+
+  /**
+   * 从 AnalyserNode 取一帧频域数据，按**对数分组**聚合成 64 条。
+   *
+   * 为什么对数分组：AnalyserNode 的 bin 是线性频率，fftSize=256 时 128 个 bin 里
+   * 绝大部分落在 2kHz 以上（人耳对低频更敏感）。等宽切成 64 条会导致低频只有
+   * 2~3 根条在动、其余全静。改成 30Hz→Nyquist 的等比分箱后，低频段分辨率显著变好。
+   */
+  private pullWebSpectrum(): void {
+    const analyser = this.webAnalyser;
+    const bins = this.webBins;
+    if (!analyser || !bins) return;
+    analyser.getByteFrequencyData(bins as Uint8Array<ArrayBuffer>);
+
+    const n = this.spectrumData.length;
+    const nyquist = (this.webAudioCtx?.sampleRate ?? 44100) / 2;
+    const binHz = nyquist / bins.length;
+    const F_MIN = 30; // 20Hz 以下几乎无内容，从 30Hz 起
+    const ratio = nyquist / F_MIN;
+
+    for (let i = 0; i < n; i++) {
+      const f0 = F_MIN * Math.pow(ratio, i / n);
+      const f1 = F_MIN * Math.pow(ratio, (i + 1) / n);
+      let b0 = Math.floor(f0 / binHz);
+      let b1 = Math.ceil(f1 / binHz);
+      if (b0 >= bins.length) b0 = bins.length - 1;
+      if (b1 <= b0) b1 = b0 + 1;
+      if (b1 > bins.length) b1 = bins.length;
+      let peak = 0;
+      for (let b = b0; b < b1; b++) {
+        if (bins[b] > peak) peak = bins[b];
+      }
+      // getByteFrequencyData 已做 dB→0..255 映射，低频天然偏小，给一点增益让低频条可见
+      const v = Math.min(255, peak * 1.2);
+      this.spectrumData[i] = this.spectrumData[i] * 0.55 + v * 0.45;
+    }
   }
 
   // 监听 Rust 端 audio-spectrum 事件，接收真实频域数据
@@ -455,6 +587,9 @@ class MusicPlayer {
       const data = event.payload;
       if (Array.isArray(data) && data.length > 0) {
         this.hasRealSpectrum = true;
+        // 标记 Rust 侧真实频谱可用（Windows）：此后**永不**创建 MediaElementSource，
+        // 既保持 Windows 原有行为不变，也规避改道静音风险。
+        this.rustSpectrumSeen = true;
         // 平滑插值，避免帧间跳变
         const n = Math.min(data.length, this.spectrumData.length);
         for (let i = 0; i < n; i++) {
@@ -579,6 +714,15 @@ class MusicPlayer {
     try {
       this.spectrumUnlisten?.();
       this.spectrumUnlisten = null;
+      // 关闭 Web Audio 图：audio 输出曾被改道进 ctx，close() 同时断开，
+      // 元素后续由插件销毁流程清空 src，不会再有声音从旧图流出。
+      if (this.webAudioCtx) {
+        void this.webAudioCtx.close().catch(() => {});
+        this.webAudioCtx = null;
+        this.webAnalyser = null;
+        this.webBins = null;
+        debugLog('music: Web Audio 频谱已关闭');
+      }
       // 通知 Rust：已退订频谱 → 无监听时采集线程休眠（省 CPU）
       window.__HOST_API__?.invoke('spectrum_set_listener', { active: false }).catch(() => {});
       debugLog('music: spectrum listener removed');
