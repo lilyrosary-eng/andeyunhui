@@ -100,9 +100,45 @@ class MusicPlayer {
     this.audio.volume = this.volume;
     this.audio.preload = 'metadata';
     this.bindEvents();
+    this.bindMediaDiagnostics();
     this.setupMediaSessionHandlers();
     this.setupSmtc();
     this.setupSpectrumListener();
+  }
+
+  /**
+   * 媒体元素诊断：把「为什么播不出来」落到日志里。
+   *
+   * 背景：Linux 上曾出现 `play()` 被拒（`NotSupportedError: The operation is not
+   * supported.`），但外部条件全部正常 —— 文件可读（Rust 侧 lofty 能正常 probe 出
+   * 标题）、GStreamer 解码器齐全、asset 作用域已放开、声卡里也确实有输出设备。
+   * 这种情况下**只有元素自身的事件能给出答案**，否则只能靠猜：
+   *   - `error.code` 1=中止 2=网络 3=解码 4=src 不受支持
+   *   - `readyState` 0=HAVE_NOTHING … 4=HAVE_ENOUGH_DATA
+   *   - `networkState` 3=NETWORK_NO_SOURCE
+   * 顺带把 `currentSrc` 截断打出来（能看出 `convertFileSrc` 产出的 asset:// URL
+   * 是否被正确编码，文件名含空格/中文时尤其容易在这里出问题）。
+   */
+  private bindMediaDiagnostics(): void {
+    const a = this.audio;
+    const short = (s: string | undefined) => (s || '').slice(0, 160);
+    const snap = (tag: string) =>
+      debugLog(
+        `music[media] ${tag} rs=${a.readyState} ns=${a.networkState} ` +
+          `err=${a.error ? a.error.code + '/' + a.error.message : 'null'} ` +
+          `dur=${Number.isFinite(a.duration) ? a.duration.toFixed(1) : 'NaN'} ` +
+          `src=${short(a.currentSrc)}`
+      );
+
+    a.addEventListener('loadstart', () => snap('loadstart'));
+    a.addEventListener('loadedmetadata', () => snap('loadedmetadata'));
+    a.addEventListener('canplay', () => snap('canplay'));
+    a.addEventListener('playing', () => snap('playing'));
+    a.addEventListener('stalled', () => snap('stalled'));
+    a.addEventListener('waiting', () => snap('waiting'));
+    a.addEventListener('suspend', () => snap('suspend'));
+    a.addEventListener('emptied', () => snap('emptied'));
+    a.addEventListener('error', () => snap('error'));
   }
 
   private bindEvents(): void {
@@ -406,7 +442,16 @@ class MusicPlayer {
     // 如果当前 track 的 filePath 为空（网易云延迟取地址占位），
     // audio.play() 会失败但不影响后续 updateTrackUrl 时的自动续播。
     this.audio.play().catch((err) => {
-      console.warn('[MusicPlayer] 播放被阻止或失败:', err.message);
+      // 带上门禁状态：光看 err.message 区分不出「无授权 / 无源 / 解码失败」
+      console.warn(
+        '[MusicPlayer] 播放被阻止或失败:',
+        err && err.name,
+        err && err.message,
+        `| rs=${this.audio.readyState} ns=${this.audio.networkState}` +
+          ` mediaErr=${this.audio.error ? this.audio.error.code : 'null'}` +
+          ` paused=${this.audio.paused} vol=${this.audio.volume}` +
+          ` src=${(this.audio.currentSrc || '').slice(0, 160)}`
+      );
       // 不 emit pause，保持 playRequested=true 让 updateTrackUrl 能续播
     });
   }
