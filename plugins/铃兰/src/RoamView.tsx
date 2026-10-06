@@ -129,7 +129,7 @@ const sourceLabel: Record<RoamSource, string> = {
 // EQ bars 数量
 const EQ_BARS = 32;
 
-// EQ 均衡器：频谱每帧只直写 DOM（refs.style.height），不走 React state。
+// EQ 均衡器：频谱每帧只直写 DOM（refs.style.transform），不走 React state。
 // 旧实现每帧 setEqHeights → 整个 RoamView（两张封面/光斑/黑胶/逐字符歌词/萤火虫/底部栏）
 // 以 60fps 全量重渲染并重建大量内联 style 对象，是漫游页「粘滞感」的主因；
 // 且模块被切走后（keep-alive 仅 display:none）仍继续空转 → 整个应用一起卡。
@@ -165,7 +165,9 @@ const EqBars = memo(function EqBars({
           // 易驱性增强：非线性增益（平方根拉伸低幅度 + 1.8x 增益 + 偏移）
           v = Math.sqrt(v) * 1.8 + 0.03;
           const el = bars[i];
-          if (el) el.style.height = `${5 + Math.min(1, v) * 92}%`;
+          // 只改 transform：改 height 会每帧触发重栅格化 → 每帧新建 GPU 纹理
+          // → Intel 核显 GEM 缓冲被撑爆（2026-06 OOM 现场，见 render 处的注释）
+          if (el) el.style.transform = `scaleY(${0.05 + Math.min(1, v) * 0.92})`;
         }
       } else {
         // 降级：伪律动
@@ -174,7 +176,7 @@ const EqBars = memo(function EqBars({
         for (let i = 0; i < EQ_BARS; i++) {
           const v = (Math.sin(t + i * 0.6) * 0.5 + 0.5) * amp;
           const el = bars[i];
-          if (el) el.style.height = `${8 + v * 82}%`;
+          if (el) el.style.transform = `scaleY(${0.08 + v * 0.82})`;
         }
       }
       raf = requestAnimationFrame(animate);
@@ -189,10 +191,27 @@ const EqBars = memo(function EqBars({
           key={i}
           ref={(el) => { barsRef.current[i] = el; }}
           style={{
-            flex: '1 1 0', minWidth: 2, maxWidth: 8, height: '15%',
+            flex: '1 1 0', minWidth: 2, maxWidth: 8,
+            // ⚠⚠ 律动条必须用 **transform: scaleY()** 表达"高度"，**不能改 height**。
+            //
+            // 改 height 会让浏览器每帧重新布局（layout）并**重新栅格化**这个
+            // 带 `linear-gradient` 的元素 —— 也就是每帧都新建一张 GPU 纹理。
+            // 2026-10-06 实测后果：内核 OOM 栈停在
+            //     shmem_object_init [i915] → __i915_gem_object_create_user_ext
+            // 即 Intel 核显的 GEM 缓冲被撑爆，几十秒内打满 4G 上限、进程被杀。
+            // 用户最初观察到的「点歌词翻译就 OOM」正是这条路径
+            // （沉浸式播放页打开 ⇒ 律动条常驻 rAF ⇒ 每帧新建纹理）。
+            //
+            // transform 只走合成器、不触发重栅格化，是频谱/律动条这类
+            // 每帧动画的正确表达方式。`height: '100%'` 固定，缩放交给 scaleY。
+            height: '100%',
+            transform: 'scaleY(0.15)',
+            transformOrigin: 'bottom',
+            willChange: 'transform',
             background: `linear-gradient(180deg, ${ink}, ${inkLine})`,
             borderRadius: 2, opacity: 0.85,
-            transition: 'height 0.05s linear',
+            // 过渡也必须是 transform，改 height 同样会每帧触发重栅格化
+            transition: 'transform 0.05s linear',
           }}
         />
       ))}
