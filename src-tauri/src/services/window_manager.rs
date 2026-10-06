@@ -985,6 +985,24 @@ pub fn capsule_start_monitor(app: tauri::AppHandle) {
     CAPSULE_MONITOR_CANCEL.store(false, Ordering::SeqCst);
     CAPSULE_MONITOR_STARTED.store(true, Ordering::SeqCst);
     let _ = std::thread::spawn(move || {
+        // Linux 悬停检测用的 X11 连接：**只开一次**，在本线程内复用。
+        // （XOpenDisplay 有开销，而下面的循环每 16ms 跑一次。）
+        #[cfg(target_os = "linux")]
+        let (x11_dpy, x11_root) = {
+            use x11::xlib::{XDefaultRootWindow, XOpenDisplay};
+            static X11_INIT: std::sync::Once = std::sync::Once::new();
+            X11_INIT.call_once(|| unsafe {
+                x11::xlib::XInitThreads();
+            });
+            let dpy = unsafe { XOpenDisplay(std::ptr::null()) };
+            if dpy.is_null() {
+                eprintln!("[Capsule] X11 连接失败，悬停展开不可用（不影响点击展开）");
+                (std::ptr::null_mut(), 0)
+            } else {
+                let root = unsafe { XDefaultRootWindow(dpy) };
+                (dpy, root)
+            }
+        };
         let mut ticks: u32 = 0;
         loop {
             // 代数不匹配 → 新线程已接管，本线程退出
@@ -1023,8 +1041,66 @@ pub fn capsule_start_monitor(app: tauri::AppHandle) {
                     }
                 }
             }
-            #[cfg(not(windows))]
+            // ---------- 光标位置检测：悬停展开 ----------
+            //
+            // Windows 走 Win32 `GetCursorPos`；Linux 走 X11 `XQueryPointer`。
+            // 两者都取**根（桌面）坐标系的物理像素**——前端 `reportRect` 上报时已乘过
+            // `devicePixelRatio`（见 Capsule.tsx），所以 `CAPSULE_RECT` 与指针坐标同单位，
+            // 可直接命中，无需再做缩放换算。
+            //
+            // 判定范围（near）**与 Windows 侧逐字一致**：左右各留 40px、上方到屏幕顶、
+            // 下方 +70px。改这里必须同步改 Windows 分支，否则两端手感会漂。
+            //
+            // 其它平台（macOS/Android）没有等价的跨进程光标查询，保持不检测 ——
+            // 浮岛仍可点击展开，只是不再自动悬停展开。
+            #[cfg(target_os = "linux")]
+            if !x11_dpy.is_null() {
+                let dpy = x11_dpy;
+                let root = x11_root;
+                let mut root_ret: x11::xlib::Window = 0;
+                let mut child: x11::xlib::Window = 0;
+                let mut px: i32 = 0;
+                let mut py: i32 = 0;
+                let mut wx: i32 = 0;
+                let mut wy: i32 = 0;
+                let mut mask: u32 = 0;
+                let ok = unsafe {
+                    x11::xlib::XQueryPointer(
+                        dpy,
+                        root,
+                        &mut root_ret,
+                        &mut child,
+                        &mut px,
+                        &mut py,
+                        &mut wx,
+                        &mut wy,
+                        &mut mask,
+                    )
+                } != 0;
+                if ok {
+                    let rect = *CAPSULE_RECT.lock().unwrap();
+                    let expanded = *CAPSULE_EXPANDED.lock().unwrap();
+                    if let Some((rx, ry, rw, rh)) = rect {
+                        let near =
+                            px >= rx - 40 && px <= rx + rw + 40 && py >= 0 && py <= ry + rh + 70;
+                        if near {
+                            if !expanded {
+                                set_capsule_expanded(&app, true);
+                            }
+                        } else if expanded {
+                            set_capsule_expanded(&app, false);
+                        }
+                    }
+                }
+            }
+            #[cfg(any(not(windows), not(target_os = "linux")))]
             let _ = &app;
+        }
+        // 线程退出（含被新代线程接管 / 渲染崩溃 break）时释放 X11 连接，
+        // 否则每次浮岛重建都会泄漏一个 display 连接。
+        #[cfg(target_os = "linux")]
+        if !x11_dpy.is_null() {
+            unsafe { x11::xlib::XCloseDisplay(x11_dpy) };
         }
         CAPSULE_MONITOR_STARTED.store(false, Ordering::SeqCst);
     });
