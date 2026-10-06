@@ -280,7 +280,10 @@ const RoamPlayBar = memo(function RoamPlayBar({
       <button onClick={onPrev} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, lineHeight: 0 }} title="上一首">
         <svg width={btnPx} height={btnPx} viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12L20 18V6z"/></svg>
       </button>
-      <button onClick={() => musicPlayer.togglePlay()} className="rounded-full flex items-center justify-center transition-transform hover:scale-105" style={{ width: circlePx, height: circlePx, background: 'rgba(255,255,255,0.92)', color: '#2c5a1a', boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)', border: 'none', cursor: 'pointer', animation: isPlaying ? 'roam-breathe 3.4s ease-in-out infinite' : 'none' }} title={isPlaying ? '暂停' : '播放'}>
+      <button onClick={() => musicPlayer.togglePlay()} className="rounded-full flex items-center justify-center transition-transform hover:scale-105" style={{ width: circlePx, height: circlePx, background: 'rgba(255,255,255,0.92)', color: '#2c5a1a', boxShadow: '0 8px 20px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5)', border: 'none', cursor: 'pointer', /* ⚠ 原为 roam-breathe（动画 box-shadow）。box-shadow 动画会**逐帧重新栅格化**，
+       在这个带滤镜/渐变的大按钮上代价极高。改为静态阴影 + opacity 呼吸（合成器友好）。
+       若要恢复呼吸效果，请用 opacity 变化而不是 box-shadow 变化。*/
+       animation: isPlaying ? 'roam-breathe-soft 3.4s ease-in-out infinite' : 'none' }} title={isPlaying ? '暂停' : '播放'}>
         {isPlaying ? (
           <svg viewBox="0 0 24 24" width={btnPx} height={btnPx} fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
         ) : (
@@ -774,12 +777,21 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     .roam-stage { position: relative; width: 100%; height: 100%; overflow: hidden; background: ${stageBg}; --hue: ${songTheme.hue}deg; --fog: ${songTheme.fog}; }
     .roam-stage * { box-sizing: border-box; }
     @keyframes roam-spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
-    @keyframes roam-breathe { 0%,100% { box-shadow: 0 12px 28px -10px rgba(0,0,0,0.4), 0 0 0 0 rgba(255,255,255,0.55);} 50% { box-shadow: 0 12px 28px -10px rgba(0,0,0,0.4), 0 0 0 10px rgba(255,255,255,0);} }
+    /* 只动 opacity（合成器可直接处理，不触发重栅格化）。
+       原来的 box-shadow 关键帧已删除 —— 它每帧都要重画阴影，是 OOM 的帮凶之一。*/
+    @keyframes roam-breathe-soft { 0%,100% { opacity: 0.92; } 50% { opacity: 1; } }
     @keyframes roam-charGlow { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
     @keyframes roam-float { 0%,100% { transform: translateY(0) scale(0.6); opacity: 0; } 20% { opacity: 1; } 50% { transform: translateY(-30px) scale(1.2); opacity: 1; } 80% { opacity: 0.8; } }
     .roam-right-cover, .roam-left-cover { position: absolute; top: 0; bottom: 0; overflow: hidden; transition: left 0.7s cubic-bezier(.22,.61,.36,1), width 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease; }
     .roam-right-cover { left: 44%; width: 56%; z-index: 1; }
-    .roam-left-cover { left: 0; width: 44%; z-index: 2; filter: ${coverFilter === 'on' ? 'blur(22px) saturate(1.55) brightness(1.07) hue-rotate(var(--hue))' : 'blur(22px) brightness(1.05)'}; }
+    .roam-left-cover { left: 0; width: 44%; z-index: 2; /* ⚠ 实时 blur 在这里是不能承受的（详见本文件顶部注释）：
+       一块占 44% 宽的区域挂 blur(22px)，而该区域内还有持续动画的子元素
+       （黑胶 28s 旋转、萤火虫 9s 漂浮）⇒ 合成器每帧都要对整块区域重做模糊
+       并重新分配纹理。Intel 核显（i915）的 GEM 缓冲就是这么被撑爆的：
+       内核 OOM 栈停在 shmem_object_init [i915] → __i915_gem_object_create_user_ext。
+       真正的毛玻璃效果应由**静态预处理好的模糊图层**承担，而不是实时滤镜。
+       这里保留开关但默认关闭；`coverFilter` 开启会显著增加 GPU 压力。*/
+       ${coverFilter === 'on' ? 'saturate(1.55) brightness(1.07) hue-rotate(var(--hue))' : ''} }
     .roam-left-cover img, .roam-right-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .roam-right-cover img { filter: ${coverFilter === 'on' ? 'saturate(1.08) brightness(1.03) hue-rotate(var(--hue))' : 'none'}; }
     .roam-stage.flipped .roam-left-cover { left: 56%; width: 44%; }
