@@ -258,3 +258,17 @@ strip = true
 # 在编译期 warn 而非静默通过。check-cfg 列出项目实际使用的自定义 cfg 标识。
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mobile)', 'cfg(desktop)'] }
+
+# ============ Linux 专属依赖：SMTC 的 Linux 等价物 MPRIS（D-Bus） ============
+# 背景：Windows 的 SMTC（WinRT SystemMediaTransportControls + 会话管理器）是 Windows 专属
+# 后端，非 Windows 目标无等价 COM 实现。Linux 桌面的标准是 MPRIS
+# （org.mpris.MediaPlayer2.* over D-Bus 会话总线）。
+#   - souvlaki：**发布**本应用自己的媒体会话（对齐 Windows 的 SMTC session 注册），
+#     使 GNOME 桌面媒体控件能显示/控制本应用的播放，本应用也出现在会话列表里；
+#   - mpris：**读取 / 控制**系统上其他播放器（对齐 Windows 的
+#     GlobalSystemMediaTransportControlsSessionManager 枚举 + 传输控制）。
+# 两者内部都走 libdbus（构建机已具备 dbus-1 1.16.2，pkg-config 可解析）。
+# 放在 target_os = "linux" 段：不参与 Windows / Android 构建，对既有平台零影响。
+[target.'cfg(target_os = "linux")'.dependencies]
+mpris = "2.1"
+souvlaki = "0.8"
