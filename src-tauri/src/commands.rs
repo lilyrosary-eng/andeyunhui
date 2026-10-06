@@ -1597,9 +1597,14 @@ pub fn read_external_dep_bytes(app: tauri::AppHandle, relative_path: String) -> 
         let root = root.as_ref().unwrap();
         let full = root.join(&relative_path);
 
-        let canon_root = root
-            .canonicalize()
-            .map_err(|e| format!("解析根目录失败：{}", e))?;
+        // 注意：这里必须 continue 而非 `?`。候选根目录（尤其 user_external_deps）
+        // 可能尚未被创建，canonicalize 会失败；若用 `?` 直接冒泡，就永远走不到后面的
+        // external-deps 兜底，整个命令以「解析根目录失败」告终。与下面 canon_full
+        // 的处理保持一致语义：这个根不行就换下一个。
+        let canon_root = match root.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         let canon_full = match full.canonicalize() {
             Ok(p) => p,
             Err(_) => continue, // 文件不存在，尝试下一个候选根
@@ -1631,9 +1636,11 @@ pub fn read_external_dep_path(app: tauri::AppHandle, relative_path: String) -> R
         let root = root.as_ref().unwrap();
         let full = root.join(&relative_path);
 
-        let canon_root = root
-            .canonicalize()
-            .map_err(|e| format!("解析根目录失败：{}", e))?;
+        // 同上：根目录不存在时换下一个候选根，不要用 `?` 中断整个命令。
+        let canon_root = match root.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         let canon_full = match full.canonicalize() {
             Ok(p) => p,
             Err(_) => continue, // 文件不存在，尝试下一个候选根

@@ -99,12 +99,46 @@ pub fn hide_overlay_window(_app: AppHandle) {}
 #[tauri::command]
 pub fn reveal_screenshot_overlay(_app: AppHandle) {}
 
+/// 透明覆盖窗背景透明化（Linux / WebKitGTK 实现，对齐 Windows 的同名命令）。
+///
+/// Windows 侧这一步靠 WebView2 的 `ICoreWebView2Controller2::SetDefaultBackgroundColor(A=0)`
+/// 把 WebView 绘制层的默认背景设为全透明——这是「浮岛 / 桌宠 / 歌词」这类置顶浮层能
+/// 真正透出桌面（而不是露出一块白底或黑底）的关键。
+///
+/// WebKitGTK 没有 COM 控制器，等价能力是 `WebKitWebView::set_background_color`，
+/// Tauri 把它包成 `Webview::set_background_color`（Linux 有实现，见 tauri 源码
+/// `src/webview/mod.rs`，仅 macOS/iOS 标注 Not implemented）。
+///
+/// 与 Windows 的差异（重要，避免重复造轮子）：
+/// wry 在**建窗时**只要 `transparent == true` 就已经设过一次全透明
+/// （wry-0.55 `src/webkitgtk/mod.rs`：`if attributes.transparent { webview.set_background_color(RGBA(0,0,0,0)) }`），
+/// 所以本命令在 Linux 上通常是幂等的「再确认一次」。保留真实实现而非空桩的收益：
+///   1. 与 Windows 语义对齐——浮层页面前端无条件 invoke 本命令，两边行为一致；
+///   2. 兜住「建窗时 profile 显式传 transparent=false、运行期又要透明」的场景；
+///   3. 万一主窗的 `backgroundColor` 之类配置影响到浮窗，这里有明确的纠正点。
+///
+/// 注意「两层透明」缺一不可：窗口级透明来自建窗期的 `.transparent(true)`
+/// （GTK 侧铺 RGBA visual，需要合成器支持，GNOME/KDE 默认满足）；本命令只管
+/// WebView 绘制层。`set_background_color` 内部经 dispatcher 投递到主线程，
+/// 因此不必像 Windows 版那样手动 `run_on_main_thread`。
 #[tauri::command]
-pub fn set_overlay_transparent(_webview: Webview, _app: AppHandle) {}
+pub fn set_overlay_transparent(webview: Webview, _app: AppHandle) {
+    let label = webview.label().to_string();
+    if let Err(e) = webview.set_background_color(Some(tauri::webview::Color(0, 0, 0, 0))) {
+        eprintln!("[overlay] 设置 WebView 透明背景失败 label={label}: {e}");
+    }
+}
 
+/// 调整覆盖窗的重绘频率。
+///
+/// Windows 版的用途是「透明分层窗失焦被 WebView2 判定为遮挡 → 停渲染」，故用定时器
+/// 强制重绘续命。WebKitGTK 不按 Windows 那套遮挡检测停渲染，Linux 上无需该机制，
+/// 保留同名空实现只为不破坏前端调用契约。
 #[tauri::command]
 pub fn set_overlay_repaint_rate(_webview: Webview, _interval_ms: u64) {}
 
+/// 立即呈现覆盖窗（Windows 版用于唤醒被判定遮挡的 renderer）。
+/// Linux 无此问题，空实现。
 #[tauri::command]
 pub fn present_overlay_now(_webview: Webview) {}
 

@@ -121,6 +121,12 @@ export default defineConfig(() => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: [
         "**/src-tauri/**",
+        // Rust 产物目录：crates/*/target 下含数万个 .fingerprint/dep-* 文件（本机实测
+        // gongfang-kit 16287 个 + pro-tools-kit 4089 个）。Linux 下 inotify 有
+        // fs.inotify.max_user_watches 上限（发行版默认 65536），全量监听会直接
+        // 触发 ENOSPC 让 vite 崩溃退出；Windows 侧虽无此硬上限，但同样白白吃掉
+        // ReadDirectoryChangesW 资源。这些文件不属 Vite 模块图、无需 HMR。
+        "**/target/**",
         // external-deps 内的素材（桌宠 png、ffmpeg、paddleocr 等）由运行的 app 经
         // asset:// 或 read_external_dep_file 持续占用，Windows 上被锁文件会让 Vite 的
         // fs watcher 抛 EBUSY 直接崩溃（见 idleface.png EBUSY 报错）。这些文件不属 Vite
