@@ -187,6 +187,7 @@ dependencies = [
  "windows 0.62.2",
  "windows-capture",
  "windows-core 0.61.2",
+ "x11",
  "zip 3.0.0",
 ]
 

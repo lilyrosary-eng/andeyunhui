@@ -272,3 +272,4 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mobile)', 'cfg(desktop)'] 
 [target.'cfg(target_os = "linux")'.dependencies]
 mpris = "2.1"
 souvlaki = "0.8"
+x11 = { version = "2.21.0", features = ["xlib", "xinerama"] }
