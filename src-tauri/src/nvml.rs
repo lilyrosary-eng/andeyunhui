@@ -156,21 +156,23 @@ fn load() -> Option<Nvml> {
             *lib.get(b"nvmlDeviceGetTemperature\0").ok()?;
 
         // ---- 风扇相关：三个符号各自可选，缺失只让风扇降级为 None ----
+        // ⚠ 用 turbofish 在 `get` 上写明泛型：`Symbol<T>` 的 T 无法从 `*f as FnPtr` 反推
+        //   （rustc 1.95 直接报 E0282「type annotations needed for libloading::Symbol<'_, _>」）。
         // 为什么不用「任一缺失即整体放弃」：风扇是**桌面卡专有**能力，老驱动上可能不导出。
         // 若沿用严格策略，一台老机器上会连带丢掉已经能用的功耗/频率/温度 —— 那是净损失。
         // （本函数已整体处于 unsafe 块内，故直接 lib.get(...) 不再嵌套 unsafe。）
         let fan_speed_pct: Option<unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> NvmlRet> = lib
-            .get(b"nvmlDeviceGetFanSpeed_v2\0")
+            .get::<unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> NvmlRet>(b"nvmlDeviceGetFanSpeed_v2\0")
             .ok()
-            .map(|f| *f as unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> NvmlRet);
+            .map(|f| *f);
         let fan_speed_rpm: Option<unsafe extern "C" fn(NvmlDevice, *mut FanSpeedInfo) -> NvmlRet> =
-            lib.get(b"nvmlDeviceGetFanSpeedRPM\0")
+            lib.get::<unsafe extern "C" fn(NvmlDevice, *mut FanSpeedInfo) -> NvmlRet>(b"nvmlDeviceGetFanSpeedRPM\0")
                 .ok()
-                .map(|f| *f as unsafe extern "C" fn(NvmlDevice, *mut FanSpeedInfo) -> NvmlRet);
+                .map(|f| *f);
         let num_fans: Option<unsafe extern "C" fn(NvmlDevice, *mut u32) -> NvmlRet> = lib
-            .get(b"nvmlDeviceGetNumFans\0")
+            .get::<unsafe extern "C" fn(NvmlDevice, *mut u32) -> NvmlRet>(b"nvmlDeviceGetNumFans\0")
             .ok()
-            .map(|f| *f as unsafe extern "C" fn(NvmlDevice, *mut u32) -> NvmlRet);
+            .map(|f| *f);
 
         if init() != 0 {
             return None;
