@@ -62,11 +62,25 @@ pub fn get_bundled_plugins_dir(app: &AppHandle) -> Option<PathBuf> {
         return Some(dev_bundled);
     }
     // 兜底：CARGO_MANIFEST_DIR（编译期常量，= src-tauri/ 绝对路径）向上一层即项目根
-    // ../bundled-plugins 正是 predev 写入、且始终是最新的那份。
-    let manifest_bundled =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("bundled-plugins");
-    if manifest_bundled.exists() {
-        return Some(manifest_bundled);
+    // ../bundled-plugins 正是 predev 写入、且始终是最新那份。
+    //
+    // ⚠⚠ 仅**开发构建**启用（2026-10-08 血案）：
+    //   这一条会把**编译机的源码绝对路径硬编码进二进制**。开发机上源码目录一直在，
+    //   于是连安装版都会命中它 —— 实测 `plugin_paths.log`：
+    //       resource_dir      = \\?\D://安得云荟
+    //       bundled-plugins   = C://Users//Rosary//Desktop//andeyunhui//src-tauri//..//bundled-plugins
+    //   症状：改源码 → `deploy-plugins.mjs` 覆盖项目根 `bundled-plugins/` →
+    //        **打包版立刻跟着变**，看起来像「源码污染了打包产物」。
+    //   关掉后 release/安装版在本机与他人机器上行为一致：本函数返回 None，
+    //   由 `find_plugin_root` 的第二 root（`user_plugins`，
+    //   即 `bundled-dlc/plugins/*.mufurong` 的解压落地处）兜底。
+    #[cfg(debug_assertions)]
+    {
+        let manifest_bundled =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("bundled-plugins");
+        if manifest_bundled.exists() {
+            return Some(manifest_bundled);
+        }
     }
     None
 }
@@ -94,11 +108,25 @@ pub fn get_external_deps_dir(app: &AppHandle) -> Option<PathBuf> {
     if dev_deps.exists() {
         return Some(dev_deps);
     }
-    // 开发模式兜底：CARGO_MANIFEST_DIR（编译期常量，= src-tauri/ 绝对路径）
-    // ../external-deps = 项目根 external-deps/。release 在用户机器上此路径不存在，exists() 返回 false 自动跳过。
-    let manifest_deps = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("external-deps");
-    if manifest_deps.exists() {
-        return Some(manifest_deps);
+    // 打包后的**正式通道**：`bundled-dlc/external-deps/*.mujin` 由 extract_mujin_deps
+    // 解压到 AppData 的 `user_external_deps/`。安装目录本身**不带** external-deps
+    // （bundle.resources 只声明了 `../bundled-dlc`），所以这条才是 release/安装版
+    // 的实际命中路径 —— 必须排在 CARGO_MANIFEST_DIR 兜底**之前**，
+    // 否则会被那条「硬编码编译机路径」抢先命中（2026-10-08 实测）。
+    if let Some(user_deps) = get_user_external_deps_dir(app) {
+        if user_deps.exists() {
+            return Some(user_deps);
+        }
+    }
+    // 开发模式兜底：CARGO_MANIFEST_DIR（编译期常量 = src-tauri/ 绝对路径）。
+    // ⚠ 同样仅 debug 启用，理由见 get_bundled_plugins_dir 的注释。
+    #[cfg(debug_assertions)]
+    {
+        let manifest_deps =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("external-deps");
+        if manifest_deps.exists() {
+            return Some(manifest_deps);
+        }
     }
     None
 }

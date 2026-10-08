@@ -168,7 +168,15 @@ fn ffmpeg_dir(preset: Option<&str>) -> Option<PathBuf> {
         eprintln!("[ffmpeg] 预置 DLL 目录不存在，回退探测: {}", p);
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
-    // 1) 编译期常量：dev 下 = src-tauri，向上一层即项目根 external-deps（用户机 release 不存在则跳过）
+    // 1) 编译期常量：dev 下 = src-tauri，向上一层即项目根 external-deps。
+    //
+    // ⚠⚠ 仅 **debug 构建**启用（2026-10-08）：`env!("CARGO_MANIFEST_DIR")` 会把
+    //   **编译机的源码绝对路径硬编码进二进制**。若编译机就是运行机（自用发布场景），
+    //   release 版会静默从**源码目录**加载 ffmpeg DLL —— 与安装目录里的副本行为不一致，
+    //   且分发给别人后该路径不存在、行为又变。同类血案见
+    //   `commands.rs::get_bundled_plugins_dir`。release 请依赖 preset
+    //   （来自 `get_ffmpeg_dir` → user_external_deps/external-deps）或下面的 exe 逐级探测。
+    #[cfg(debug_assertions)]
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")

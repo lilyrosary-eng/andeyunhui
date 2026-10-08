@@ -41,7 +41,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../bundled-dlc": "bundled-dlc/"
+      "../bundled-dlc": "bundled-dlc/",
+      "../bundled-plugins": "bundled-plugins/"
     },
     "fileAssociations": [
       {
