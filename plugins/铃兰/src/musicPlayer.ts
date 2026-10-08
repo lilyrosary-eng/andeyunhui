@@ -501,28 +501,68 @@ class MusicPlayer {
     return api?.convertFileSrc?.(rawPath) || rawPath;
   }
 
+  /** 播放失败时把「门禁状态」写进日志 —— 光看 err.message 区分不出「无授权/无源/解码失败」。 */
+  private reportPlayFailure(err: unknown): void {
+    const e = err as { name?: string; message?: string } | undefined;
+    console.warn(
+      '[MusicPlayer] 播放被阻止或失败:',
+      e && e.name,
+      e && e.message,
+      `| rs=${this.audio.readyState} ns=${this.audio.networkState}` +
+        ` mediaErr=${this.audio.error ? this.audio.error.code : 'null'}` +
+        ` paused=${this.audio.paused} vol=${this.audio.volume}` +
+        ` src=${(this.audio.currentSrc || '').slice(0, 160)}`
+    );
+    // 不 emit pause，保持 playRequested=true 让 updateTrackUrl 能续播
+  }
+
+  /**
+   * 切到指定索引并播放。
+   *
+   * ⚠ 存在的唯一理由：`loadTrack` 是 async 的，而 `audio.src` 必须**在 play() 之前**就位。
+   * 原来的写法 `this.loadTrack(i); this.play();` 已经坏了 —— play() 会在 src 仍为空时执行。
+   * 所有「切歌后播放」的场景（下一首/上一首/点队列/自动连播）都必须走这里。
+   */
+  private playAt(index: number): void {
+    const wanted = index;
+    void this.loadTrack(index).then(() => {
+      // 期间被更晚的切歌取代 ⇒ 交给那次流程负责，这里不要插一脚
+      if (this.currentIndex !== wanted) return;
+      this.playRequested = true;
+      this.audio.play().catch((err) => this.reportPlayFailure(err));
+    });
+  }
+
   play(): void {
     this.playRequested = true;  // 标记用户已请求播放
     try { window.__HOST_API__?.invoke('debug_log', { msg: `MUSIC_PLAY idx=${this.currentIndex}` }).catch(()=>{}); } catch {}
-    if (this.currentIndex < 0 && this.tracks.length > 0) {
-      this.currentIndex = 0;
-      this.loadTrack(0);
+
+    // ⚠⚠ 必须先等 loadTrack 把 audio.src 设好，再调 play()。
+    //
+    // 血案（2026-10-08，Windows 侧反馈「无法播放音乐」）：`loadTrack` 原本是**同步**的，
+    // `this.audio.src` 在下面这行 play() 之前就已就位。为了给 Linux 的本地媒体 HTTP 服务
+    // 换取 URL，`loadTrack` 被改成 `async`（内部 `await resolvePlayableSrc(...)`）。
+    // **即使 resolvePlayableSrc 内部走的是同步分支（Windows 的 convertFileSrc），
+    // async 函数返回的仍是 Promise，await 必然产生一个微任务延迟** —— 于是
+    // `audio.src` 落后于 `audio.play()`，play() 在「无源」状态下被调用 ⇒ 点了播放没反应。
+    // 这个回归是跨平台的，Windows 上直接表现为「音乐播不出来」。
+    // 需要先加载的两种情况：
+    //   a) 还没有当前曲目（currentIndex < 0）；
+    //   b) 有当前曲目但 `loadedSrc` 为空 —— setTracks 刚设好 currentIndex、
+    //      loadTrack 的 Promise 还没 resolve 时用户就点了播放（异步化引入的窗口）。
+    // 单靠 currentIndex 判定是不够的，(b) 正是「点了播放没反应」的另一条路径。
+    const cur = this.currentIndex >= 0 ? this.tracks[this.currentIndex] : undefined;
+    const needLoad = this.currentIndex < 0 ? this.tracks.length > 0 : (!this.loadedSrc && !!cur?.filePath);
+    if (needLoad) {
+      const idx = this.currentIndex >= 0 ? this.currentIndex : 0;
+      this.currentIndex = idx;
+      this.playAt(idx);
+      return;
     }
-    // 如果当前 track 的 filePath 为空（网易云延迟取地址占位），
-    // audio.play() 会失败但不影响后续 updateTrackUrl 时的自动续播。
-    this.audio.play().catch((err) => {
-      // 带上门禁状态：光看 err.message 区分不出「无授权 / 无源 / 解码失败」
-      console.warn(
-        '[MusicPlayer] 播放被阻止或失败:',
-        err && err.name,
-        err && err.message,
-        `| rs=${this.audio.readyState} ns=${this.audio.networkState}` +
-          ` mediaErr=${this.audio.error ? this.audio.error.code : 'null'}` +
-          ` paused=${this.audio.paused} vol=${this.audio.volume}` +
-          ` src=${(this.audio.currentSrc || '').slice(0, 160)}`
-      );
-      // 不 emit pause，保持 playRequested=true 让 updateTrackUrl 能续播
-    });
+
+    // 曲目已加载（或该曲 filePath 缺失，如网易云延迟取地址占位）：直接播。
+    // 后者 play() 必然失败，但不影响后续 updateTrackUrl 时的自动续播。
+    this.audio.play().catch((err) => this.reportPlayFailure(err));
   }
 
   // 启动伪律动：仅在未收到 Rust 真实频谱时作为降级方案。
@@ -742,8 +782,7 @@ class MusicPlayer {
   private handleEnded(): void {
     const nextIndex = this.getNextIndex();
     if (nextIndex >= 0) {
-      this.loadTrack(nextIndex);
-      this.play();
+      this.playAt(nextIndex);
     } else {
       this.pause();
     }
@@ -781,18 +820,17 @@ class MusicPlayer {
 
   next(): void {
     const idx = this.getNextIndex();
-    if (idx >= 0) { this.loadTrack(idx); this.play(); }
+    if (idx >= 0) { this.playAt(idx); }
   }
 
   prev(): void {
     const idx = this.getPrevIndex();
-    if (idx >= 0) { this.loadTrack(idx); this.play(); }
+    if (idx >= 0) { this.playAt(idx); }
   }
   // 跳转到队列中指定索引播放（漫游队列点击切歌用）
   playIndex(index: number): void {
     if (index < 0 || index >= this.tracks.length) return;
-    this.loadTrack(index);
-    this.play();
+      this.playAt(index);
   }
 
   seek(time: number): void { this.audio.currentTime = time; }
