@@ -1,16 +1,29 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { emit, listen } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { api } from '@/lib/api';
-import { Pin, Copy, X } from 'lucide-react';
+import { Pin, Copy, X, Maximize2, Eye } from 'lucide-react';
 import { logger } from '@/lib/logger';
 import { t } from '@/lib/i18n';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { EVENTS } from '@/core/events/schema';
+// 与主编辑器共用同一套 Markdown 渲染与样式注入：浮窗是独立 webview，样式得自己注入一次。
+// 打包版 CSP 会拦掉动态 <style>，所以只能复用 injectMarkdownStyles（它走构造样式表）。
+import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
 
 const appWindow = getCurrentWebviewWindow();
 const AUTO_SAVE_MS = 1000;
+
+/** 浮窗只有单栏，故只保留两种模式（不提供主编辑器那种「双栏」）。 */
+type FloatMode = 'edit-only' | 'preview-only';
+const FLOAT_MODES: FloatMode[] = ['edit-only', 'preview-only'];
+/**
+ * 刻意与主编辑器的 'editor_view_mode' **分开存**：主编辑器可能是「双栏」，
+ * 共用一个键时，浮窗会读到它不支持的 'split'（只能降级），
+ * 而用户在浮窗里选「仅预览」又会把主编辑器一起改掉 —— 两边语义不同，键必须分开。
+ */
+const FLOAT_MODE_KEY = 'floating_note_view_mode';
 
 /** 模块级防抖 timer：每次输入重置，避免高频保存 */
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -39,6 +52,17 @@ export function FloatingNoteView() {
   const [isFixed, setIsFixed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isCopying, setIsCopying] = useState(false);
+  // 「仅编辑 / 仅预览」两态。默认保留原行为（纯编辑），不改变既有用户的第一眼预期。
+  const [mode, setMode] = useState<FloatMode>(() => {
+    try {
+      const saved = localStorage.getItem(FLOAT_MODE_KEY) as FloatMode | null;
+      return saved && FLOAT_MODES.includes(saved) ? saved : 'edit-only';
+    } catch { return 'edit-only'; }
+  });
+  const setFloatMode = useCallback((m: FloatMode) => {
+    setMode(m);
+    try { localStorage.setItem(FLOAT_MODE_KEY, m); } catch { /* 忽略 */ }
+  }, []);
   // 跟随应用内统一设置的字体：优先取主窗口创建时通过 URL 传入的 fontFamily（浮窗 webview
   // 的 localStorage 可能与主窗隔离）；再回退读 localStorage；并监听 app-font-changed 事件
   // 实时同步设置变更。
@@ -67,6 +91,18 @@ export function FloatingNoteView() {
   const contentRef = useRef(content);
   titleRef.current = title;
   contentRef.current = content;
+
+  // 预览所需的 Markdown 样式（代码块底色/折行/复制按钮）：复用主编辑器同一套注入函数。
+  useEffect(() => {
+    injectMarkdownStyles();
+    return attachMarkdownCopyHandler();
+  }, []);
+
+  // 仅在预览态才渲染：renderMarkdown 内部有缓存，来回切换不会重复解析。
+  const previewHtml = useMemo(
+    () => (mode === 'preview-only' ? renderMarkdown(content) : ''),
+    [mode, content],
+  );
 
   // 浮窗透明效果：覆盖全局 body 背景色，让窗口透明生效
   useEffect(() => {
@@ -263,6 +299,23 @@ export function FloatingNoteView() {
               <path d="M2 22L10 20" />
             </svg>
           </button>
+          {/* 仅编辑 / 仅预览：与主编辑器同一套语义、同一套图标与 i18n 文案 */}
+          <div className="flex items-center gap-0.5 bg-black/5 rounded-lg p-0.5 pointer-events-auto">
+            <button
+              onClick={() => setFloatMode('edit-only')}
+              className={`btn-press p-1.5 rounded-md transition-all duration-200 ${mode === 'edit-only' ? 'bg-[var(--element-bg)] text-white shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`}
+              title={t('notesEditor.modeEditOnly')}
+            >
+              <Maximize2 size={14} />
+            </button>
+            <button
+              onClick={() => setFloatMode('preview-only')}
+              className={`btn-press p-1.5 rounded-md transition-all duration-200 ${mode === 'preview-only' ? 'bg-[var(--element-bg)] text-white shadow-sm' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'}`}
+              title={t('notesEditor.previewLabel')}
+            >
+              <Eye size={14} />
+            </button>
+          </div>
           {/* 分割线 */}
           <div className="w-px h-4 mx-1 bg-neutral-200/50 dark:bg-stone-600/50" />
           {/* 关闭 */}
@@ -282,6 +335,12 @@ export function FloatingNoteView() {
           <div className="flex items-center justify-center h-full text-neutral-400 dark:text-stone-500 text-sm">
             {t('common.loading')}
           </div>
+        ) : mode === 'preview-only' ? (
+          /* 仅预览：与主编辑器预览同一套类（notes-preview + prose），观感一致 */
+          <div
+            className="notes-preview w-full h-full p-5 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-neutral-700 leading-7 dark:text-stone-300 [&_p]:my-2 [&_p]:leading-7 [&_img]:max-w-full [&_img]:h-auto [&_table]:max-w-full [&_td]:break-words"
+            dangerouslySetInnerHTML={{ __html: previewHtml }}
+          />
         ) : (
           <textarea
             value={content}
