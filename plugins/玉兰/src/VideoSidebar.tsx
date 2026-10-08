@@ -154,6 +154,8 @@ export function VideoSidebar(props: VideoSidebarProps) {
   return ModuleSidebarShell
     ? React.createElement(ModuleSidebarShell, {
         moduleId: 'video',
+        // 收起后不再留竖条：本模块内容区自带纸面色，须让收起那列同色，详见 ModuleSidebarShell 的说明
+        collapsedSurfaceClass: 'bg-[#f5f5f0] dark:bg-[#1c1917]',
         icon: React.createElement(VideoIcon),
         title: T('video.title'),
         onOpenModuleSettings: onOpenSettings,

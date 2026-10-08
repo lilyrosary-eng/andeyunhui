@@ -29,6 +29,19 @@ export interface ModuleSidebarShellProps {
   backAction?: { label?: string; onClick: () => void };
   /** 标题行的右侧动作插槽（可选）：用于在模块标题右侧放按钮（如子模块切换入口），不传则不渲染 */
   titleActions?: ReactNode;
+  /**
+   * 收起态那一列要铺的底色（Tailwind 类）。**默认不铺**。
+   *
+   * 为什么需要它：收起态刻意不带底色（见下方收起态分支的注释「收起后不该再留『一条竖条』」），
+   * 于是那一列露出来的是宿主面板色 `--main-panel-bg`。对「内容区也是 main-panel-bg」的模块
+   * （笔记）毫无问题，但**内容区自带纸面色** `bg-[#f5f5f0] dark:bg-[#1c1917]` 的模块
+   * （阅读/视频/图片/薄荷/音乐/AI 对话）就不一致了 ⇒ 收起后留下一条与内容区不同色的竖条。
+   * 这些模块把自己的表面色传进来即可让收起列与内容区同色，竖条消失。
+   *
+   * 作用域仅**收起态**：展开态仍走 `nav-secondary-bg`；开启自定义背景时
+   * `html.has-custom-bg .bg-\[\#f5f5f0\]` 会把纸面色统一降为半透明，两侧表现一致。
+   */
+  collapsedSurfaceClass?: string;
   children: ReactNode;
 }
 
@@ -46,6 +59,7 @@ export function ModuleSidebarShell({
   searchPlaceholder,
   backAction,
   titleActions,
+  collapsedSurfaceClass,
   children,
 }: ModuleSidebarShellProps) {
   const { t } = useI18n();
@@ -90,7 +104,7 @@ export function ModuleSidebarShell({
 
   return (
     <div
-      className={`h-full flex-shrink-0 flex flex-col slide-in-left overflow-hidden immersive-safe-top ${collapsed ? '' : 'nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50'}`}
+      className={`h-full flex-shrink-0 flex flex-col slide-in-left overflow-hidden immersive-safe-top ${collapsed ? (collapsedSurfaceClass || '') : 'nav-secondary-bg backdrop-blur-md border-r border-white/80 dark:border-stone-700/50'}`}
       style={{
         width: collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH,
         transition: `width ${COLLAPSE_WIDTH_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`,

@@ -88,6 +88,8 @@ export function OnlineSidebarShell({
     // ⚠️ 必须透传 moduleId：此前硬编码 'music'，导致视频在线侧栏与音乐侧栏
     // 共用同一个折叠状态 key（moduleToggleKey('music')），折叠一个另一个也跟着变。
     moduleId: moduleId || 'music',
+    // 在线侧栏同属纸面模块（玉兰/铃兰），收起态须与内容区同色
+    collapsedSurfaceClass: 'bg-[#f5f5f0] dark:bg-[#1c1917]',
     icon: icon ?? React.createElement(Music2Icon),
     title: titleNode,
     onOpenModuleSettings,
