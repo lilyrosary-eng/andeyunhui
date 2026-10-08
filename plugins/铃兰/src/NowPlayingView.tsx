@@ -89,9 +89,15 @@ interface NowPlayingViewProps {
   onToggleFavorite?: (track: Track) => void;
 }
 
-// 歌词模糊离散档位：当前行 0，相邻行 1px，更远 1.5/2px。
-// 录屏场景下大幅降低模糊半径，避免逐行 blur 叠加抬高 GPU/合成开销。
-const BLUR_LEVELS = [0, 1, 1.5, 2];
+// 歌词模糊离散档位：**当前行 / 上一行 / 下一行三行一律清晰（blur 0）**，更远才 1.5/2px。
+//
+// 为什么相邻行也设为 0：一行歌词很长时会被 CSS 折成多行，"只看清当前那一行"根本读不完，
+// 而且播放进度略有领先/滞后时，正在唱的那句会因为被判成相邻行而糊掉 —— 观感是"长歌词不清楚"。
+// 让前后各一行同时清晰，等于给阅读留出上下文，长句折行也能连贯读完。
+//
+// 只放宽 dist==1，dist>=2 仍保留模糊：模糊在这里同时承担"聚焦当前段落"的视觉层级，
+// 全去模糊会让整屏歌词失去焦点。逐行 blur 会叠加 GPU/合成开销，故选离散档位而非连续高斯。
+const BLUR_LEVELS = [0, 0, 1.5, 2];
 function getBlurLevel(dist: number): number {
   if (dist === 0) return BLUR_LEVELS[0];
   if (dist === 1) return BLUR_LEVELS[1];
@@ -479,8 +485,13 @@ export function NowPlayingView({
     }),
 
     // 顶部栏：返回按钮
+    //
+    // marginTop 32px = 返回按钮自身高度（IconButton 为 p-1.5 + 20px 图标 ⇒ 6+20+6 = 32），
+    // 即"往下调一个按钮的距离"：原来贴着窗口上沿，紧邻宿主悬浮层/拖拽条，容易误触、也不好看。
+    // 用固定像素而非 vh，是为了让位移与图标尺寸严格一致、不随窗口高度漂移。
     React.createElement('div', {
       className: 'flex items-center px-[clamp(12px,2vw,24px)] py-[clamp(8px,1.5vh,16px)] flex-shrink-0 relative z-10',
+      style: { marginTop: 32 },
     },
       React.createElement(IconButton, {
         onClick: onClose,
