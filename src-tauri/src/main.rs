@@ -611,12 +611,59 @@ fn open_tray_menu(app: &tauri::AppHandle, pos: tauri::PhysicalPosition<f64>) {
     );
 }
 
-#[tauri::command]
-fn tray_summon_main(app: tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
+/// 把主窗提到最前并聚焦。
+///
+/// # 为什么不能只调 `set_focus()`
+///
+/// 本机是 **GNOME Wayland** 会话，应用窗口跑在 XWayland 下。实测（2026-10-06）：
+/// 主窗被 WorkBuddy 的窗口压在下面时，用户在主窗可见区域点击，
+/// **点击全部落到 WorkBuddy 上**（表现为「窗口点不到，一点就到别的窗口」）。
+/// 从外部用 `XMapRaised` 抬窗**完全无效** —— mutter 自己管 XWayland 窗口的
+/// 叠放，客户端的 X11 置顶请求被忽略。
+///
+/// `set_focus()` 在 Wayland 下走 `gtk_window_present()`，通常够用；但为了覆盖
+/// 「窗口已可见、只是被压在下面」这种情况，这里额外用
+/// **always_on_top 闪一次再关掉** 的方式强制合成器重排层级 ——
+/// 这是 XWayland 下少数几个能让 mutter 改变叠放的途径。
+///
+/// 闪完立刻恢复 false，否则窗口会一直置顶、挡住其他程序。
+fn bring_main_to_front(app: &tauri::AppHandle) {
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = w.show();
+
+    // ⚠ 平台分流（2026-10-08）：`always_on_top` 闪一次**只对 Linux 有意义**。
+    //
+    // Linux/Wayland 下 mutter 会**忽略客户端对该 XWayland 窗口的 X11 置顶请求**
+    // （实测 `XMapRaised` 完全无效），所以只能借「always_on_top 闪一次再关掉」
+    // 迫使合成器重排层级 —— 否则主窗被其它窗口压住时，用户点它可见区域也会把
+    // 点击落到别人的窗口上（现象：「窗口点不到，一点就到别的窗口」）。
+    //
+    // Windows 侧 `window_manager` 的模态循环已能正确置顶，这个 workaround
+    // **只有闪屏副作用、没有收益**，故不启用。
+    #[cfg(target_os = "linux")]
+    {
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_focus();
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            // 留一帧让合成器完成重排，再恢复常规层级
+            std::thread::sleep(std::time::Duration::from_millis(220));
+            if let Some(w2) = app2.get_webview_window("main") {
+                let _ = w2.set_always_on_top(false);
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
         let _ = w.set_focus();
     }
+}
+
+#[tauri::command]
+fn tray_summon_main(app: tauri::AppHandle) {
+    bring_main_to_front(&app);
     // 从托盘恢复：窗口重新可见，恢复按激活模块裁决媒体会话优先级
     set_window_hidden(false);
     if let Some(m) = app.get_webview_window("tray-menu") {

@@ -8,6 +8,7 @@ import React from 'react';
 const { useState, useEffect, useRef, useCallback, memo } = React;
 import { Music as MusicIcon } from 'lucide-react';
 import { musicPlayer } from './musicPlayer';
+import { isLinux } from '@/platform/isLinux';
 import {
   getRoamSourceApi,
   clearRoamCache,
@@ -773,6 +774,12 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     : (curCover ? `url(${curCover}) center/cover` : isDark ? 'radial-gradient(circle at 38% 32%, #2a3a22, #0a1209)' : 'radial-gradient(circle at 38% 32%, #ffffff, #cad9ad)');
 
   // CSS keyframes 和 stage 样式
+  // 重滤镜（backdrop-filter / 大半径 blur）仅在**非 Linux**启用。
+  // Linux + Intel i915 核显下，这类实时滤镜会让合成器逐帧重做模糊并重新分配
+  // GEM 缓冲（实测把 8G 打满直接 OOM）；Windows 的 D3D 合成路径没有这个问题。
+  // 判定经 src/platform/isLinux.ts 单例（禁止组件内各自嗅探 UA）。
+  const HEAVY_FX = !isLinux();
+
   const stageStyle = `
     .roam-stage { position: relative; width: 100%; height: 100%; overflow: hidden; background: ${stageBg}; --hue: ${songTheme.hue}deg; --fog: ${songTheme.fog}; }
     .roam-stage * { box-sizing: border-box; }
@@ -784,29 +791,22 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     @keyframes roam-float { 0%,100% { transform: translateY(0) scale(0.6); opacity: 0; } 20% { opacity: 1; } 50% { transform: translateY(-30px) scale(1.2); opacity: 1; } 80% { opacity: 0.8; } }
     .roam-right-cover, .roam-left-cover { position: absolute; top: 0; bottom: 0; overflow: hidden; transition: left 0.7s cubic-bezier(.22,.61,.36,1), width 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease; }
     .roam-right-cover { left: 44%; width: 56%; z-index: 1; }
-    .roam-left-cover { left: 0; width: 44%; z-index: 2; /* ⚠ 实时 blur 在这里是不能承受的（详见本文件顶部注释）：
-       一块占 44% 宽的区域挂 blur(22px)，而该区域内还有持续动画的子元素
-       （黑胶 28s 旋转、萤火虫 9s 漂浮）⇒ 合成器每帧都要对整块区域重做模糊
-       并重新分配纹理。Intel 核显（i915）的 GEM 缓冲就是这么被撑爆的：
-       内核 OOM 栈停在 shmem_object_init [i915] → __i915_gem_object_create_user_ext。
-       真正的毛玻璃效果应由**静态预处理好的模糊图层**承担，而不是实时滤镜。
-       这里保留开关但默认关闭；coverFilter 开启会显著增加 GPU 压力。*/
-       ${coverFilter === 'on' ? 'saturate(1.55) brightness(1.07) hue-rotate(var(--hue))' : ''} }
+    .roam-left-cover { left: 0; width: 44%; z-index: 2;${HEAVY_FX ? ' filter: ' + (coverFilter === 'on' ? 'blur(22px) saturate(1.55) brightness(1.07) hue-rotate(var(--hue))' : 'blur(22px) brightness(1.05)') + ';' : ''} } }
     .roam-left-cover img, .roam-right-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .roam-right-cover img { filter: ${coverFilter === 'on' ? 'saturate(1.08) brightness(1.03) hue-rotate(var(--hue))' : 'none'}; }
     .roam-stage.flipped .roam-left-cover { left: 56%; width: 44%; }
     .roam-stage.flipped .roam-right-cover { left: 0; width: 56%; }
-    .roam-left { position: absolute; top: 0; bottom: 0; left: 0; width: 44%; z-index: 4; display: flex; flex-direction: column; padding: clamp(14px, 3%, 36px) clamp(16px, 4%, 50px) clamp(14px, 3%, 36px) clamp(16px, 4%, 50px); overflow: hidden; transition: left 0.7s cubic-bezier(.22,.61,.36,1), width 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease; background: ${isDark ? 'linear-gradient(135deg, rgba(30,42,26,0.35) 0%, rgba(28,25,23,0.12) 40%, rgba(20,40,15,0.18) 100%)' : 'linear-gradient(135deg, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.08) 40%, rgba(190,222,170,0.14) 100%)'}; /* 实时 backdrop-filter 已移除：它要回读并模糊元素背后的一切，任何 anim/transition 都会触发整块重新模糊。*/ 改用半透明渐变背景，观感接近但成本为零。 border-right: 1px solid ${inkLine}; }
+    .roam-left { position: absolute; top: 0; bottom: 0; left: 0; width: 44%; z-index: 4; display: flex; flex-direction: column; padding: clamp(14px, 3%, 36px) clamp(16px, 4%, 50px) clamp(14px, 3%, 36px) clamp(16px, 4%, 50px); overflow: hidden; transition: left 0.7s cubic-bezier(.22,.61,.36,1), width 0.7s cubic-bezier(.22,.61,.36,1), opacity 0.45s ease; background: ${isDark ? 'linear-gradient(135deg, rgba(30,42,26,0.35) 0%, rgba(28,25,23,0.12) 40%, rgba(20,40,15,0.18) 100%)' : 'linear-gradient(135deg, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.08) 40%, rgba(190,222,170,0.14) 100%)'}; ${HEAVY_FX ? ' backdrop-filter: blur(8px) saturate(140%); -webkit-backdrop-filter: blur(8px) saturate(140%);' : ''} /* 仅非 Linux 启用实时模糊，原因见 src/platform/isLinux.ts */ border-right: 1px solid ${inkLine}; }
     .roam-stage.flipped .roam-left { left: 56%; }
     .roam-stage.transitioning .roam-left, .roam-stage.transitioning .roam-left-cover, .roam-stage.transitioning .roam-right-cover, .roam-stage.transitioning .roam-lyrics, .roam-stage.transitioning .roam-fireflies { opacity: 0; }
-    .roam-transition-overlay { position: absolute; inset: 0; z-index: 6; pointer-events: none; opacity: 0; background-color: var(--fog); /* 实时 backdrop-filter 已移除：它要回读并模糊元素背后的一切，任何 anim/transition 都会触发整块重新模糊。*/ 动 opacity 期间原本会每帧重模糊整屏。 transition: opacity 0.45s ease; }
+    .roam-transition-overlay { position: absolute; inset: 0; z-index: 6; pointer-events: none; opacity: 0; background-color: var(--fog); ${HEAVY_FX ? ' backdrop-filter: blur(15px) saturate(150%); -webkit-backdrop-filter: blur(15px) saturate(150%);' : ''} /* 仅非 Linux 启用实时模糊 */ transition: opacity 0.45s ease; }
     .roam-stage.transitioning .roam-transition-overlay { opacity: 1; }
     .roam-vinyl-wrap { position: absolute; left: 22%; top: 50%; transform: translate(-50%, -50%); width: clamp(90px, ${13 * scaleFactor}vw, ${Math.round(160 * scaleFactor)}px); aspect-ratio: 1; z-index: 7; transition: left 0.7s cubic-bezier(.22,.61,.36,1); }
     .roam-stage.flipped .roam-vinyl-wrap { left: 78%; }
     .roam-vinyl { width: 100%; height: 100%; border-radius: 50%; position: relative; overflow: hidden; box-shadow: 0 30px 60px -20px rgba(40,60,30,0.5), 0 0 0 1px rgba(255,255,255,0.65), inset 0 0 26px rgba(255,255,255,0.55), inset 0 0 0 7px rgba(255,255,255,0.18); }
     .roam-vinyl.spinning { animation: roam-spin 28s linear infinite; }
     .roam-bokeh { position: absolute; inset: 0; pointer-events: none; mix-blend-mode: screen; z-index: 3; }
-    .roam-bokeh .puff { position: absolute; border-radius: 50%; opacity: 0.55; }
+    .roam-bokeh .puff { position: absolute; border-radius: 50%; opacity: 0.55;${HEAVY_FX ? ' filter: blur(40px);' : ''} }
     .roam-fireflies { position: absolute; inset: 0; pointer-events: none; z-index: 5; overflow: hidden; transition: opacity 0.45s ease; }
     .roam-fireflies i { position: absolute; width: 4px; height: 4px; background: #fff; border-radius: 50%; box-shadow: 0 0 12px 2px rgba(255,255,255,0.7); opacity: 0; animation: roam-float 9s ease-in-out infinite; }
     .roam-vignette { position: absolute; inset: 0; z-index: 8; pointer-events: none; background: radial-gradient(ellipse at center, transparent 55%, rgba(20,40,15,0.22) 100%); mix-blend-mode: multiply; }
