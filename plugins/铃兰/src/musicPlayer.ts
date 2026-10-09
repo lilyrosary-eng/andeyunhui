@@ -42,6 +42,10 @@ class MusicPlayer {
   private currentIndex: number = -1;
   // 已加载到 audio 的 src（用于「同曲不重载」守卫，避免重设 audio.src 触发媒体元素 reset）
   private loadedSrc: string = '';
+  // `loadedSrc` 对应的是**哪一条曲目**。单靠 loadedSrc 不够用：切歌后它仍是上一条的 src（非空），
+  // 于是「当前选中的这条是否已经加载好了」根本判断不出来（2026-10-09 血案，详见 play() 的注释）。
+  // -1 = audio 里没有可信的已加载曲目（初始态 / 已销毁 / **有加载在途**）。
+  private loadedIndex: number = -1;
   private isPlaying: boolean = false;
   private volume: number = 0.7;
   private playMode: PlayMode = 'list';
@@ -370,6 +374,9 @@ class MusicPlayer {
 
   private async loadTrack(index: number): Promise<void> {
     if (index < 0 || index >= this.tracks.length) return;
+    // 一进入就作废「已加载」标记：此刻 audio 里还是**上一条**的 src，
+    // 任何在这段 await 期间发生的 play() 都必须走「先加载再播」，而不是直接播旧源。
+    this.loadedIndex = -1;
     const track = this.tracks[index];
     const api = window.__HOST_API__;
     try { api?.invoke('debug_log', { msg: `MUSIC_LOAD_TRACK idx=${index} file=${track.filePath}` }).catch(()=>{}); } catch {}
@@ -392,6 +399,9 @@ class MusicPlayer {
     // 旧逻辑每次都重设 src 导致「切回音乐模块播放被暂停、点击播放栏无效」。
     if (index === this.currentIndex && src && this.loadedSrc === src) {
       debugLog(`music loadTrack skip(reload same track) idx=${index}`);
+      // 同一首歌、src 未变 ⇒ 不重设 audio.src（避免 reset），但「已加载」标记必须补回来：
+      // 上面入口处刚把它置成 -1，否则 play() 会误判为「需要加载」而多绕一圈。
+      this.loadedIndex = index;
       this.emit('trackChange', track);
       this.updateMediaSessionMeta(track);
       this.pushSmtc();
@@ -400,6 +410,7 @@ class MusicPlayer {
     if (src) {
       this.audio.src = src;
       this.loadedSrc = src;
+      this.loadedIndex = index;
       this.currentIndex = index;
       this.emit('trackChange', track);
       this.updateMediaSessionMeta(track);
@@ -431,6 +442,7 @@ class MusicPlayer {
         if (seq !== this.loadSeq) return; // 已被更新的切歌取代
         this.audio.src = nextSrc;
         this.loadedSrc = nextSrc;
+        this.loadedIndex = index;
         try { this.audio.currentTime = pos; } catch { /* ignore */ }
         // 重新 emit trackChange，让 UI 更新封面和歌曲信息（之前 filePath 为空时封面可能未加载）
         this.emit('trackChange', track);
@@ -548,11 +560,27 @@ class MusicPlayer {
     // 这个回归是跨平台的，Windows 上直接表现为「音乐播不出来」。
     // 需要先加载的两种情况：
     //   a) 还没有当前曲目（currentIndex < 0）；
-    //   b) 有当前曲目但 `loadedSrc` 为空 —— setTracks 刚设好 currentIndex、
-    //      loadTrack 的 Promise 还没 resolve 时用户就点了播放（异步化引入的窗口）。
-    // 单靠 currentIndex 判定是不够的，(b) 正是「点了播放没反应」的另一条路径。
+    //   b) 有当前曲目，但 audio 里那条**不是**它（切歌后 loadTrack 还没 resolve，
+    //      或者刚 setTracks 换了歌单）。
+    //      ⚠ 我上一版把判据写成 `!loadedSrc` 是**错的** —— 切歌后 loadedSrc 仍是旧值（非空），
+    //      于是被判成「已加载」⇒ 直接 play() 打在旧源上 ⇒ 新源一赋值就把媒体元素 reset 掉。
+    //      这就是 2026-10-09「第一次能播、之后再点列表里的歌一律播不出（进度停在 0，
+    //      拖进度条能出时长但播不动）」的真凶。正解见下面 needLoad 的注释。
     const cur = this.currentIndex >= 0 ? this.tracks[this.currentIndex] : undefined;
-    const needLoad = this.currentIndex < 0 ? this.tracks.length > 0 : (!this.loadedSrc && !!cur?.filePath);
+    // ⚠⚠ 判据不能只看 `!loadedSrc`（切歌后它仍是上一条的 src，非空）。
+    // 正解：判断「**audio 里那条就是当前选中的这条**」——用 loadedIndex 对比。
+    // loadedIndex 在 loadTrack 入口先置 -1，所以「加载在途」也天然被算作需要等待。
+    const needLoad = this.currentIndex < 0
+      ? this.tracks.length > 0
+      : (this.loadedIndex !== this.currentIndex || !this.loadedSrc);
+    // 决策留痕：这条日志能直接回答「这次点击为什么播不出」——
+    // needLoad=0 且 loadedIndex!=idx 就是旧 bug 的签名。
+    try {
+      window.__HOST_API__?.invoke('debug_log', {
+        msg: `MUSIC_PLAY_DECIDE idx=${this.currentIndex} loadedIndex=${this.loadedIndex}`
+          + ` hasSrc=${this.loadedSrc ? 1 : 0} hasPath=${cur?.filePath ? 1 : 0} needLoad=${needLoad ? 1 : 0}`,
+      }).catch(() => {});
+    } catch { /* 忽略 */ }
     if (needLoad) {
       const idx = this.currentIndex >= 0 ? this.currentIndex : 0;
       this.currentIndex = idx;
@@ -892,6 +920,7 @@ class MusicPlayer {
       this.audio.pause();
       this.audio.src = '';
       this.loadedSrc = '';
+      this.loadedIndex = -1;
       this.audio.removeAttribute('src');
       this.audio.load();
     } catch { /* 忽略：audio 已处于异常态 */ }
