@@ -129,13 +129,18 @@ fn caps_text_default() -> bool {
 
 impl Default for Caps {
     fn default() -> Self {
-        Caps { text: true, vision: false, reasoning: false, embedding: false }
+        Caps {
+            text: caps_text_default(),
+            vision: false,
+            reasoning: false,
+            embedding: false,
+        }
     }
 }
 
 /// 逐模型参数覆盖。语义与 v1 AiProfile 的同名字段一致，只是从「档案」挪到了「模型」。
 /// 全部 Option：None 表示用默认值，用户没改过就不占空间。
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct Overrides {
     #[serde(default)]
     pub temperature: Option<f32>,
@@ -158,15 +163,13 @@ pub struct Overrides {
 }
 
 /// 供应商 = 一个端点 + 一把 key，旗下挂多个模型。
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct Provider {
-    /// 缺失时降级为空串而非让整份配置解析失败——见 migrate_v1_to_v2 的说明
     #[serde(default)]
     pub id: String,
     /// 空则 UI 回落到 base_url 的主机名
     #[serde(default)]
     pub name: String,
-    /// 缺失时降级为空串：宁可少一个端点，也不要让用户看到「档案全没了」
     #[serde(default)]
     pub base_url: String,
     /// API Key（Bearer）。AES-GCM 加密在这一层，不是每个模型一份。
@@ -187,7 +190,7 @@ pub struct Provider {
 }
 
 /// 单个模型条目。
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct ModelEntry {
     /// ★ 沿用 v1 的 profile.id，见上方注释
     #[serde(default)]
@@ -217,7 +220,7 @@ pub struct Selection {
     pub model_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct AiConfig {
     #[serde(default)]
     pub providers: Vec<Provider>,
@@ -237,7 +240,7 @@ fn fnv1a(s: &str) -> u64 {
 }
 
 fn provider_id_for(base_url: &str, plain_key: &str) -> String {
-    format!("pv_{:08x}", (fnv1a(&format!("{}\u{1}{}", base_url, plain_key)) & 0xffff_ffff) as u32)
+    format!("pv_{:016x}", fnv1a(&format!("{}\u{1}{}", base_url, plain_key)))
 }
 
 /// v1 → v2 迁移。raw 是 ai_config.json 的原始 JSON：
@@ -282,9 +285,11 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
                     base_url: p.base_url.clone(),
                     api_key: p.api_key.clone(),
                     models: Vec::new(),
-                    vision_model: p.vision_model.clone(),
-                    image_model: p.image_model.clone(),
-                    tts_model: p.tts_model.clone(),
+                    // 三件套一律置 None，统一由下面的「取组内第一个非空值」逻辑填，
+                    // 免得这里赋一遍、那里再判一次，两处真相源容易走偏
+                    vision_model: None,
+                    image_model: None,
+                    tts_model: None,
                     last_scanned_at: None,
                 });
                 let i = cfg.providers.len() - 1;
@@ -307,12 +312,8 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
             id: p.id.clone(),
             model: p.model.clone(),
             label: None,
-            caps: Caps {
-                text: true,
-                vision: p.vision_model.as_deref() == Some(p.model.as_str()),
-                reasoning: false,
-                embedding: false,
-            },
+            // vision 留到分组结束后统一判定，见下方注释
+            caps: Caps { text: true, vision: false, reasoning: false, embedding: false },
             context_tokens: None,
             overrides: Overrides {
                 temperature: Some(p.temperature),
@@ -326,6 +327,21 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
                 max_context_tokens: p.max_context_tokens,
             },
         });
+    }
+
+    // caps.vision 的判定必须在分组之后做。
+    // v1 的写法有两种：单独配一个视觉模型（vision_model: "gpt-4v" + model: "gpt-4o"），
+    // 或留空回落到对话模型（vision_model: None）。在循环里用
+    // `profile.model == profile.vision_model` 判，只在「两者恰好同名」的退化情形下成立，
+    // 会让单独配了视觉模型的用户整组没有模型被标 vision，OCR 静默失效。
+    for prov in cfg.providers.iter_mut() {
+        if let Some(vm) = prov.vision_model.clone() {
+            for m in prov.models.iter_mut() {
+                if m.model == vm {
+                    m.caps.vision = true;
+                }
+            }
+        }
     }
 
     // v1 的 active 落到 v2 的 selection
@@ -695,6 +711,18 @@ mod v2_tests {
     }
 
     #[test]
+    fn 迁移_provider_id是稳定的字面量() {
+        // 把哈希实现钉死：换算法会让同一配置生成不同的 provider id，
+        // 于是「重新迁移一次」会造出重复供应商，用户看到同一端点出现多张卡。
+        // 单纯的「同输入两次相等」守不住这个约束——DefaultHasher 在同进程内也是确定的，
+        // 所以必须拿字面量比。
+        let cfg = migrate_v1_to_v2(&v1_json());
+        assert_eq!(cfg.providers[0].id, "pv_98e910dd905305ff", "本地端点 (127.0.0.1:11434 + sk-x)");
+        assert_eq!(cfg.providers[1].id, "pv_ac2e803f27a9f29a", "DeepSeek 端点 (+ sk-y)");
+        assert_ne!(cfg.providers[0].id, cfg.providers[1].id, "两个供应商不该撞 id");
+    }
+
+    #[test]
     fn 迁移_覆盖项承接原字段() {
         let cfg = migrate_v1_to_v2(&v1_json());
         let qwen = &cfg.providers[0].models[0];
@@ -713,10 +741,8 @@ mod v2_tests {
     #[test]
     fn 已是v2的原样返回() {
         let cfg = migrate_v1_to_v2(&v1_json());
-        let round = serde_json::to_value(&cfg).unwrap();
-        let again = migrate_v1_to_v2(&round);
-        assert_eq!(again.providers.len(), 2);
-        assert_eq!(again.selection.model_id.as_deref(), Some("p_bbb"));
+        let again = migrate_v1_to_v2(&serde_json::to_value(&cfg).unwrap());
+        assert_eq!(again, cfg);
     }
 
     #[test]
@@ -757,5 +783,51 @@ mod v2_tests {
         assert_eq!(cfg.providers.len(), 1, "供应商缺字段不该让整份配置报废");
         assert_eq!(cfg.providers[0].id, "");
         assert_eq!(cfg.providers[0].models[0].model, "gpt-x");
+    }
+
+    #[test]
+    fn 迁移_单独配置的视觉模型被标出() {
+        // v1 的真实用法：对话模型与视觉模型是两条独立档案
+        let raw = json!({ "profiles": [
+            { "id": "chat", "base_url": "http://x/v1", "api_key": "k", "model": "gpt-4o",
+              "vision_model": "gpt-4v" },
+            { "id": "vis", "base_url": "http://x/v1", "api_key": "k", "model": "gpt-4v" }
+        ]});
+        let cfg = migrate_v1_to_v2(&raw);
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers[0].vision_model.as_deref(), Some("gpt-4v"));
+        let vis = cfg.providers[0].models.iter().find(|m| m.id == "vis").unwrap();
+        assert!(vis.caps.vision, "被配成视觉模型的那条应标 vision");
+        let chat = cfg.providers[0].models.iter().find(|m| m.id == "chat").unwrap();
+        assert!(!chat.caps.vision, "对话模型不应被标 vision");
+    }
+
+    #[test]
+    fn 迁移_未配视觉模型时无人被标() {
+        let raw = json!({ "profiles": [
+            { "id": "a", "base_url": "http://x/v1", "api_key": "k", "model": "gpt-4o" }
+        ]});
+        assert!(!migrate_v1_to_v2(&raw).providers[0].models[0].caps.vision);
+    }
+
+    #[test]
+    fn 迁移_九个覆盖项全部承接() {
+        let raw = json!({ "profiles": [{
+            "id": "p_full", "base_url": "http://x/v1", "api_key": "k", "model": "m",
+            "temperature": 0.77, "max_tokens": 1234, "top_p": 0.33,
+            "system_prompt": "提示", "thinking": true,
+            "persona_call_me_as": "老板", "persona_preset": "rigorous",
+            "persona_style": "严肃", "max_context_tokens": 1000000
+        }]});
+        let o = &migrate_v1_to_v2(&raw).providers[0].models[0].overrides;
+        assert!((o.temperature.unwrap() - 0.77).abs() < f32::EPSILON);
+        assert_eq!(o.max_tokens, Some(1234));
+        assert!((o.top_p.unwrap() - 0.33).abs() < f32::EPSILON);
+        assert_eq!(o.system_prompt.as_deref(), Some("提示"));
+        assert_eq!(o.thinking, Some(true));
+        assert_eq!(o.persona_call_me_as.as_deref(), Some("老板"));
+        assert_eq!(o.persona_preset.as_deref(), Some("rigorous"));
+        assert_eq!(o.persona_style.as_deref(), Some("严肃"));
+        assert_eq!(o.max_context_tokens, Some(1_000_000));
     }
 }
