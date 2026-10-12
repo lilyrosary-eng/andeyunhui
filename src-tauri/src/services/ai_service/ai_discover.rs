@@ -7,6 +7,8 @@
 //   用户始终保有否决权。
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use tokio::task::JoinSet;
 
 pub const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -119,6 +121,127 @@ pub fn candidate_urls(endpoint: &str) -> Vec<String> {
         out.push(format!("http://{host}:{port}/api/models"));
     }
     out
+}
+
+/// 单个候选 URL 的探测结果
+struct Probe {
+    url: String,
+    models: Result<Vec<DiscoveredModel>, String>,
+}
+
+async fn probe_one(client: &reqwest::Client, url: String, api_key: Option<String>) -> Probe {
+    let mut req = client.get(&url).header("accept", "application/json");
+    // 没填 key 不算错误：Ollama / LM Studio 这类本地端点本来就无认证，
+    // 此时完全不带 Authorization 头，而不是带一个空 Bearer。
+    if let Some(k) = api_key.as_ref().filter(|s| !s.trim().is_empty()) {
+        req = req.header("Authorization", format!("Bearer {}", k.trim()));
+    }
+
+    let models = async {
+        let mut resp = req.send().await.map_err(|e| format!("端点不可达: {}", e))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let hint = if status == 401 || status == 403 { "；请检查 API Key" } else { "" };
+            return Err(format!("HTTP {}{}", status, hint));
+        }
+        let declared = resp.content_length();
+        if let Err(e) = size_guard(declared, 0) {
+            return Err(e);
+        }
+        let mut total: u64 = 0;
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            match resp.chunk().await {
+                Ok(Some(bytes)) => {
+                    total += bytes.len() as u64;
+                    size_guard(declared, total)?;
+                    buf.extend_from_slice(&bytes);
+                }
+                Ok(None) => break,
+                Err(e) => return Err(format!("读取响应体失败: {}", e)),
+            }
+        }
+        let body: serde_json::Value = serde_json::from_slice(&buf)
+            .map_err(|_| "响应不是合法 JSON（多半不是 API 端点）".to_string())?;
+        parse_listing(&body)
+    }
+    .await;
+
+    Probe { url, models }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchModelsInput {
+    /// 完整 base_url（"https://api.deepseek.com/v1"），或仅端口（"11434"），
+    /// 或 "host:port"。不含 "://" 即判定为端口模式。
+    pub endpoint: String,
+    /// 表单里输入、尚未保存的 key。为空则完全不带 Authorization 头。
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchModelsOutput {
+    /// 探测命中的 base_url（去掉末尾的 /models）。端口模式下可能与用户输入不同，
+    /// 前端要拿它回填表单——用户填 11434 可能命中 /v1 也可能命中 /api。
+    pub resolved_base_url: String,
+    pub models: Vec<DiscoveredModel>,
+    /// 试过但失败的候选，仅用于错误提示（「试过这些地址都没成功：…」）
+    pub attempted: Vec<String>,
+}
+
+/// 拉取端点的全部模型。
+///
+/// 并发打所有候选 URL，第一个返回可解析列表的胜出，其余立刻中止。
+/// 本命令**只读不写**——结果由前端勾选后经 ai_set_config 落盘。
+#[tauri::command]
+pub async fn ai_fetch_models(input: FetchModelsInput) -> Result<FetchModelsOutput, String> {
+    let urls = candidate_urls(&input.endpoint);
+    if urls.is_empty() {
+        return Err("请先填写 API 地址或端口".to_string());
+    }
+    let is_port_mode = !input.endpoint.contains("://");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(if is_port_mode { 5 } else { 10 }))
+        .build()
+        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+
+    let mut set = JoinSet::new();
+    for url in urls.iter() {
+        let c = client.clone();
+        let u = url.clone();
+        let k = input.api_key.clone();
+        set.spawn(async move { probe_one(&c, u, k).await });
+    }
+
+    let mut attempted: Vec<String> = Vec::new();
+    let mut winner: Option<FetchModelsOutput> = None;
+    while let Some(joined) = set.join_next().await {
+        let Ok(p) = joined else { continue };
+        match p.models {
+            Ok(models) => {
+                winner = Some(FetchModelsOutput {
+                    resolved_base_url: p.url.trim_end_matches("/models").to_string(),
+                    models,
+                    attempted: attempted.clone(),
+                });
+                break;
+            }
+            Err(msg) => attempted.push(format!("{} — {}", p.url, msg)),
+        }
+    }
+    // 胜出后中止其余仍在飞的请求，别让用户干等剩下的超时
+    set.abort_all();
+
+    if let Some(out) = winner {
+        return Ok(out);
+    }
+    Err(format!(
+        "试过这些地址都没拿到模型列表：\n{}",
+        attempted.join("\n")
+    ))
 }
 
 #[cfg(test)]
