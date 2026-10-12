@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronDown, ChevronRight, Plus, RefreshCw, Trash2, Search, Pencil, TestTube2, Check, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Plus, RefreshCw, Trash2, Search, Pencil, TestTube2, Check, X, Eye, EyeOff, ExternalLink } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import type { ModelUi, ProviderUi } from '../aiConfigCodec';
 import { ModelEditorDrawer } from './ModelEditorDrawer';
 
@@ -58,6 +59,7 @@ export function ProviderCard(props: ProviderCardProps) {
   const { provider: p, expanded, onToggle, t } = props;
   const [filter, setFilter] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [showKey, setShowKey] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const q = filter.trim();
@@ -158,9 +160,31 @@ export function ProviderCard(props: ProviderCardProps) {
             </div>
             <div>
               <label className={labelCls}>{t('modelSettings.apiKeyLabel')}</label>
-              <input className={inputCls} type="password" value={p.api_key} placeholder="sk-..."
-                onChange={(e) => props.onPatchProvider({ api_key: e.target.value })} />
+              <div className="relative">
+                <input className={`${inputCls} pr-10`} type={showKey ? 'text' : 'password'} value={p.api_key} placeholder="sk-..."
+                  autoComplete="off"
+                  onChange={(e) => props.onPatchProvider({ api_key: e.target.value })} />
+                <button
+                  onClick={() => setShowKey((s) => !s)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200 transition-colors"
+                  title={showKey ? t('modelSettings.hide') : t('modelSettings.show')}
+                >
+                  {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </div>
+            {/* DeepSeek 充值入口：仅当端点是 deepseek 时显示（v2 重构漏搬，现恢复） */}
+            {/deepseek/i.test(p.base_url) && (
+              <div className="sm:col-span-2 flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => { openUrl('https://platform.deepseek.com/top_up').catch(() => {}); }}
+                  className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#4d6bfe]/10 text-[#4d6bfe] hover:bg-[#4d6bfe]/20 transition-colors"
+                >
+                  <ExternalLink size={13} />{t('modelSettings.deepseekTopup')}
+                </button>
+                <span className="text-[11px] text-neutral-400 dark:text-stone-500">{t('modelSettings.deepseekHint')}</span>
+              </div>
+            )}
             <div className="grid grid-cols-3 gap-2">
               <div>
                 <label className={labelCls}>{t('modelSettings.visionModelLabel')}</label>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useI18n } from '@/lib/i18n';
-import { Plus, Radar } from 'lucide-react';
+import { Plus, Radar, Cpu } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { fromConfig, toConfig, type ConfigUi, type ModelUi, type ProviderUi } from '../aiConfigCodec';
@@ -165,6 +165,12 @@ export function ModelSettingsPage() {
 
   return (
     <div className="space-y-3">
+      <div>
+        <h2 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-1 flex items-center gap-1.5">
+          <Cpu size={14} />{t('modelSettings.heading')}
+        </h2>
+        <p className="text-xs text-neutral-400 dark:text-stone-500">{t('modelSettings.intro')}</p>
+      </div>
       <div className="flex items-center gap-2">
         <input
           className="flex-1 px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]"
