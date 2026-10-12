@@ -51,6 +51,9 @@ export const KEYS = {
   i18n: {
     language:          { key: 'language', kind: 'string', scope: 'shared', default: 'zh-CN', note: 'i18n 语言选择' },
   },
+  ai: {
+    providerExpanded:  { key: 'ai.providerExpanded', kind: 'json', scope: 'desktop', note: '供应商折叠面板展开状态（记忆用户展开过哪些卡片）' },
+  },
   mobile: {
     preview:           { key: 'mobile-preview', kind: 'flag', scope: 'mobile', default: '0', note: 'main.tsx 预览开关' },
     proactiveOn:       { key: 'andeyunhui.mobile.proactive.enabled', kind: 'flag', scope: 'mobile', default: '0', note: '见 useProactiveMessage PROACTIVE_KEY' },

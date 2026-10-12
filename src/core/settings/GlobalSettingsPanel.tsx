@@ -5,7 +5,7 @@ import { Settings, Palette, Puzzle, Sun, Moon, Monitor, Keyboard, Info, External
 import { ExtensionManagerPanel } from '@/core/settings/ExtensionManagerPanel'
 import { BackgroundImageEditor } from '@/core/settings/BackgroundImageEditor'
 import { BlacklistManager } from '@/core/settings/BlacklistManager'
-import { ModelSettings } from '@/core/settings/ModelSettings'
+import { ModelSettingsPage as ModelSettings } from './models/ModelSettingsPage'
 import { DevConsole } from '@/core/settings/DevConsole'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
