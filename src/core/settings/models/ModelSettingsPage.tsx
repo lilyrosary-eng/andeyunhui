@@ -181,7 +181,7 @@ export function ModelSettingsPage() {
   const comfyuiGenerate = async () => {
     if (cmfyBusy) return;
     const p = cmfyPrompt.trim();
-    if (!p) { setCmfyErr('请先填写画图提示词'); return; }
+    if (!p) { setCmfyErr(t('modelSettings.comfyui.needPrompt')); return; }
     setCmfyBusy(true); setCmfyErr(null); setCmfyImg(null);
     try {
       const dataUrl = await invoke<string>('comfyui_generate_image', { prompt: p, comfyuiUrl, checkpoint: comfyuiCkpt });
@@ -272,26 +272,26 @@ export function ModelSettingsPage() {
           与供应商的云端 image_model 并列的另一条生图后端；AI 工具自动触发为后续接入。 */}
       <div className="rounded-xl border border-neutral-200 dark:border-stone-700 bg-white/60 dark:bg-stone-900/40 p-4 space-y-3">
         <div className="flex items-center gap-1.5 text-sm font-medium text-neutral-700 dark:text-stone-200">
-          <ImageIcon size={14} />本地生图（ComfyUI）
+          <ImageIcon size={14} />{t('modelSettings.comfyui.title')}
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">ComfyUI 端点</label>
+            <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">{t('modelSettings.comfyui.endpoint')}</label>
             <input className="w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]" value={comfyuiUrl} placeholder="http://127.0.0.1:8188" onChange={(e) => saveComfyuiUrl(e.target.value)} />
           </div>
           <div>
-            <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">Checkpoint 模型文件名</label>
+            <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">{t('modelSettings.comfyui.checkpoint')}</label>
             <input className="w-full px-3 py-2 rounded-lg text-sm font-mono bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]" value={comfyuiCkpt} placeholder="sd_xl_base.safetensors" onChange={(e) => saveComfyuiCkpt(e.target.value)} />
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <input className="flex-1 px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]" value={cmfyPrompt} placeholder="画图提示词，如：一只橘猫躺在窗台上晒太阳" onChange={(e) => setCmfyPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !cmfyBusy) void comfyuiGenerate(); }} />
+          <input className="flex-1 px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]" value={cmfyPrompt} placeholder={t('modelSettings.comfyui.promptPlaceholder')} onChange={(e) => setCmfyPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !cmfyBusy) void comfyuiGenerate(); }} />
           <button onClick={() => void comfyuiGenerate()} disabled={cmfyBusy} className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-[var(--element-border)] text-white disabled:opacity-50">
-            {cmfyBusy ? '生成中…' : '生成'}
+            {cmfyBusy ? t('modelSettings.comfyui.generating') : t('modelSettings.comfyui.generate')}
           </button>
         </div>
         {cmfyErr && <div className="text-[11px] text-red-500 whitespace-pre-wrap break-all">{cmfyErr}</div>}
-        {cmfyImg && <img src={cmfyImg} alt="ComfyUI 生成结果" className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
+        {cmfyImg && <img src={cmfyImg} alt={t('modelSettings.comfyui.resultAlt')} className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
       </div>
     </div>
   );

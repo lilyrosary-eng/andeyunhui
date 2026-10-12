@@ -1404,4 +1404,12 @@ export const zhCN: Record<string, string> = {
   'modelSettings.caps.vision': '视觉',
   'modelSettings.caps.reasoning': '思考',
   'modelSettings.caps.embedding': '向量',
+  'modelSettings.comfyui.title': '本地生图（ComfyUI）',
+  'modelSettings.comfyui.endpoint': 'ComfyUI 端点',
+  'modelSettings.comfyui.checkpoint': 'Checkpoint 模型文件名',
+  'modelSettings.comfyui.promptPlaceholder': '画图提示词，如：一只橘猫躺在窗台上晒太阳',
+  'modelSettings.comfyui.generate': '生成',
+  'modelSettings.comfyui.generating': '生成中…',
+  'modelSettings.comfyui.needPrompt': '请先填写画图提示词',
+  'modelSettings.comfyui.resultAlt': 'ComfyUI 生成结果',
 };
