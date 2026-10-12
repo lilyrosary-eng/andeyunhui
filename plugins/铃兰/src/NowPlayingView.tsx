@@ -4,7 +4,7 @@ import { musicPlayer, type Track, type PlayMode } from './musicPlayer';
 import type { Playlist } from './index';
 import { VolumePopup, PlaylistPopup } from './PlayerBar';
 import { T, useLang } from '../../_shared/pluginRuntime';
-import { parseLrc, isNeteaseRemote, neteaseSongId, isKugouRemote, kugouSongId, lyricModeStore, splitInlineTranslation, type LyricMode, type LyricLine } from './lyricsSync';
+import { parseLrc, isNeteaseRemote, neteaseSongId, isKugouRemote, kugouSongId, lyricModeStore, splitInlineTranslation, lyricsRenderGuard, type LyricMode, type LyricLine, type LyricsDegradeLevel } from './lyricsSync';
 import LyricModeButton from './LyricModeButton';
 import { neteaseGetLyric } from './neteaseApi';
 import { getLyric as kugouGetLyric } from './kugouApi';
@@ -13,9 +13,17 @@ import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, MusicIcon,
   RepeatIcon, Repeat1Icon, ShuffleIcon, ArrowLeftIcon, HeartIcon,
 } from '../../_shared/icons';
+import { HEAVY_FX } from '@/platform/isLinux';
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
 const { IconButton } = window.__HOST_UI__ || {};
+
+// ============ 平台分流：重合成滤镜仅非 Linux 启用 ============
+//
+// HEAVY_FX 来自 src/platform/isLinux.ts（全应用唯一判据来源）。此前沉浸播放页**漏了这层分流**，
+// 在 Linux(WebKitGTK)+Intel i915 上「逐行 filter: blur() + filter 过渡」「全屏 blur(30px)」会
+// 让合成器逐帧重做模糊并重新分配 GEM 缓冲 → 打爆显存崩溃（Windows 的 D3D 合成路径无此问题）。
+// 这正是「Windows 全程正常、Linux 一进沉浸页/开翻译就崩」的根因。
 
 // ============ 进度条（点击跳转，非 range 拖动手柄）============
 function fmtTime(s: number): string {
@@ -128,6 +136,7 @@ const LyricsList = React.memo(({
   align,
   onLyricClick,
   subMode = 'off',
+  degrade = 0,
 }: {
   lyricsLines: LyricLine[];
   currentLyricIdx: number;
@@ -136,6 +145,8 @@ const LyricsList = React.memo(({
   onLyricClick: (line: LyricLine) => void;
   // 「译/音」模式：off 不显示；translate 显示翻译；romaji 显示罗马音音译
   subMode?: LyricMode;
+  // 熔断降级级别：0 正常；>=1 关闭逐行 filter；>=2 关闭译/音副行
+  degrade?: LyricsDegradeLevel;
 }) => {
   // 悬停行：高亮后定时自动恢复，避免长时间保持深色
   const [hoveredIdx, setHoveredIdx] = useState(-1);
@@ -162,20 +173,28 @@ const LyricsList = React.memo(({
       if (i === hoveredIdx) {
         color = 'var(--element-bg, #5a7f5d)';
       }
-      return {
-        fontSize: i === currentLyricIdx
-          ? 'clamp(18px, 3vw, 30px)'
-          : 'clamp(14px, 2vw, 22px)',
-        fontWeight,
-        color,
-        opacity: i === hoveredIdx ? 0.95 : opacity,
-        filter: i === hoveredIdx ? 'blur(0px)' : `blur(${blur}px)`,
-        textAlign: align as string,
-        paddingLeft: padL,
-        paddingRight: padR,
-      };
+      return (() => {
+        const style: React.CSSProperties = {
+          fontSize: i === currentLyricIdx
+            ? 'clamp(18px, 3vw, 30px)'
+            : 'clamp(14px, 2vw, 22px)',
+          fontWeight,
+          color,
+          opacity: i === hoveredIdx ? 0.95 : opacity,
+          textAlign: align,
+          paddingLeft: padL,
+          paddingRight: padR,
+        };
+        // 逐行 blur 仅在「非 Linux（HEAVY_FX）+ 正常态 + 非悬停 + 确实需要模糊(blur>0)」时施加。
+        //   - Linux：一律不加 filter ⇒ 从根上消除逐行 filter 的 GPU/显存压力（崩溃根因）；
+        //   - blur===0（当前行与相邻行，占视口大多数）不加 filter ⇒ 不生成多余合成层。
+        // 且**不给 filter 做过渡动画**（见下方 transition）：否则每次换行/滚动都会让一批行
+        // 同时逐帧重做高斯模糊，在 Intel i915 上直接打爆核显缓冲。
+        if (HEAVY_FX && degrade === 0 && blur > 0 && i !== hoveredIdx) style.filter = `blur(${blur}px)`;
+        return style;
+      })();
     });
-  }, [lyricsLines, currentLyricIdx, focusIdx, hoveredIdx, align]);
+  }, [lyricsLines, currentLyricIdx, focusIdx, hoveredIdx, align, degrade]);
 
   // 悬停：高亮并在 700ms 后自动恢复（即使鼠标仍停留）
   const triggerHover = useCallback((i: number) => {
@@ -203,8 +222,8 @@ const LyricsList = React.memo(({
 
   return lyricsLines.map((line, i) => {
     const style = lineStyles[i];
-    // 按模式取该行的翻译 / 罗马音（无则不显示小字）
-    const subText = subMode === 'translate' ? line.translation : subMode === 'romaji' ? line.romaji : undefined;
+    // 按模式取该行的翻译 / 罗马音（无则不显示小字）；熔断降级到 2 时不渲染副行
+    const subText = degrade >= 2 ? undefined : subMode === 'translate' ? line.translation : subMode === 'romaji' ? line.romaji : undefined;
     return React.createElement('div', {
       key: i,
       className: 'cursor-pointer',
@@ -213,7 +232,9 @@ const LyricsList = React.memo(({
         cursor: 'pointer',
         paddingTop: 'clamp(6px, 1.2vh, 14px)',
         paddingBottom: 'clamp(6px, 1.2vh, 14px)',
-        transition: 'color 0.4s ease, opacity 0.4s ease, font-size 0.4s ease, filter 0.4s ease',
+        // 注意：**不要给 filter 加过渡**。逐行 blur 只在换行/滚动时离散跳变（瞬间重排一次），
+        // 若加 0.4s 过渡，一批行会同时逐帧重做高斯模糊 —— 正是 i915 上崩溃的根因。
+        transition: 'color 0.4s ease, opacity 0.4s ease, font-size 0.4s ease',
       },
       onClick: () => onLyricClick(line),
       title: T('music.nowPlaying.jumpHere'),
@@ -247,6 +268,44 @@ const LyricsList = React.memo(({
   });
 });
 
+// ========== 歌词渲染错误边界（熔断的「异常」入口）==========
+// 渲染期抛错会被上层 PluginErrorBoundary 捕获并整块替换成错误页 —— 对「歌词这种非核心内容」
+// 代价太大。这里在歌词子树加一道更细的边界：一旦抛错，只把歌词降级为**纯文本兜底**
+// （不加模糊、不渲染译/音副行），同时通知熔断器降一级；整页其余部分照常工作。
+// 级别变化（自动降级 / 惰性恢复 / 手动重置）时重置 failed，让降级后的渲染再试一次。
+class LyricsBoundary extends React.Component<
+  { children: React.ReactNode; level: LyricsDegradeLevel; lines: LyricLine[]; align: LyricsAlign;
+    onLyricClick: (line: LyricLine) => void; onError: (err: Error) => void },
+  { failed: boolean }
+> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(err: Error) { this.props.onError(err); }
+  componentDidUpdate(prev: { level: LyricsDegradeLevel }) {
+    if (this.state.failed && prev.level !== this.props.level) this.setState({ failed: false });
+  }
+  render() {
+    if (this.state.failed) {
+      // 纯文本兜底：确保「歌词崩了也不拖垮整页」
+      return React.createElement('div', {
+        className: 'flex flex-col',
+        style: { padding: '0 clamp(10px, 2vw, 20px)' },
+      }, this.props.lines.map((l, i) => React.createElement('div', {
+        key: i,
+        className: 'cursor-pointer',
+        style: {
+          padding: 'clamp(6px, 1.2vh, 14px) 0',
+          textAlign: this.props.align,
+          color: 'var(--text-secondary, #78716c)',
+          fontSize: 'clamp(13px, 1.8vw, 20px)',
+        },
+        onClick: () => this.props.onLyricClick(l),
+      }, l.text || '\u00A0')));
+    }
+    return this.props.children;
+  }
+}
+
 export function NowPlayingView({
   track,
   isPlaying,
@@ -275,6 +334,13 @@ export function NowPlayingView({
   const [lyricMode, setLyricMode] = useState<LyricMode>(() => lyricModeStore.get());
   useEffect(() => {
     return lyricModeStore.subscribe(setLyricMode);
+  }, []);
+  // 歌词渲染熔断级别：初值取自持久化状态（崩过的机器重开也先按降级级别渲染），并订阅后续变化
+  const [degrade, setDegrade] = useState<LyricsDegradeLevel>(() => lyricsRenderGuard.get().level);
+  useEffect(() => {
+    lyricsRenderGuard.checkRecovery();               // 惰性恢复：久未异常则降一级
+    setDegrade(lyricsRenderGuard.get().level);
+    return lyricsRenderGuard.listen((s) => setDegrade(s.level));
   }, []);
   const lyricsScrollRef = useRef<HTMLDivElement>(null);
   const [bgVisible, setBgVisible] = useState(true);
@@ -382,6 +448,7 @@ export function NowPlayingView({
         localFirst,
       }).then((result) => {
         // 本地内嵌歌词常把「外语原文 + 中文翻译」写在同一行，拆出翻译挂到 translation
+        const t0 = performance.now();
         const lines = (result.lines || []).slice();
         for (const ln of lines) {
           const sp = splitInlineTranslation(ln.text);
@@ -390,6 +457,8 @@ export function NowPlayingView({
             ln.translation = sp.translation;
           }
         }
+        // 熔断：单次歌词处理耗时异常偏高就上报，窗口内累计到阈值自动降级（详见 lyricsRenderGuard）
+        lyricsRenderGuard.reportHeavy(performance.now() - t0);
         setLyricsLines(lines);
       }).catch(() => {});
     }
@@ -462,6 +531,8 @@ export function NowPlayingView({
     },
   },
     // 背景层：专辑封面模糊放大渐变铺底
+    // 全屏 blur(30px) 同属重合成滤镜：Linux 一律不启用（HEAVY_FX=false），直接铺图；
+    // 熔断降级到 >=1 时同样去掉，避免大面积高斯模糊吃核显缓冲。
     prevCoverUrl && coverUrl && React.createElement('div', {
       key: 'bg-cover',
       className: 'absolute inset-0',
@@ -469,10 +540,10 @@ export function NowPlayingView({
         backgroundImage: `url(${prevCoverUrl})`,
         backgroundSize: 'cover',
         backgroundPosition: 'center',
-        filter: 'blur(30px) saturate(1.2)',
+        filter: HEAVY_FX && degrade === 0 ? 'blur(30px) saturate(1.2)' : 'none',
         opacity: bgVisible ? 0.35 : 0,
         transition: 'opacity 1.2s ease',
-        transform: 'scale(1.15)',
+        transform: HEAVY_FX && degrade === 0 ? 'scale(1.15)' : 'none',
       },
     }),
     // 背景遮罩渐变
@@ -623,23 +694,39 @@ export function NowPlayingView({
           className: 'flex-1 overflow-y-auto overflow-x-hidden',
           style: {
             scrollBehavior: 'smooth',
-            willChange: 'scroll-position',
-            maskImage: 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)',
-            WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)',
+            // 平台分流（同 HEAVY_FX）：`will-change: scroll-position` 与 `mask-image` 在
+            // WebKitGTK 上各自会额外提升一个合成层；与逐行 blur 叠加会放大 GPU 压力。
+            // Linux 下这两处均不启用 —— 歌词退化为「纯 overflow 裁剪」，阅读不受影响
+            // （下方仍有约半屏的 padding，首尾行照样能滚到正中）。
+            willChange: HEAVY_FX ? 'scroll-position' : undefined,
+            maskImage: HEAVY_FX ? 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)' : undefined,
+            WebkitMaskImage: HEAVY_FX ? 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)' : undefined,
             // padding 设为约容器高度的一半：确保第一行/最后一行也能滚动到容器正中央，
             // 不会被 mask 渐变的 transparent 区域遮住（原 6vh 太小，首尾歌词看不清）。
             paddingTop: 'calc(50vh - 80px)',
             paddingBottom: 'calc(50vh - 80px)',
           },
         },
-          React.createElement(LyricsList, {
-            lyricsLines,
-            currentLyricIdx,
-            focusIdx: focusLyricIdx,
+          React.createElement(LyricsBoundary, {
+            level: degrade,
+            lines: lyricsLines,
             align: lyricsAlign,
             onLyricClick: handleLyricClick,
-            subMode: lyricMode,
-          }),
+            onError: (err: Error) => {
+              console.error('[music] 歌词渲染异常，已降级为纯文本兜底:', err && err.message);
+              lyricsRenderGuard.reportFailure(err && err.message);
+            },
+          },
+            React.createElement(LyricsList, {
+              lyricsLines,
+              currentLyricIdx,
+              focusIdx: focusLyricIdx,
+              align: lyricsAlign,
+              onLyricClick: handleLyricClick,
+              subMode: lyricMode,
+              degrade,
+            }),
+          ),
         ),
       ),
     ),

@@ -1032,6 +1032,13 @@ function dedupePlaylistsById(playlists: Playlist[]): Playlist[] {
   return Array.from(byId.values());
 }
 
+// ============ 模块加载探针（放在真正的模块顶层：仅在插件脚本被求值时执行一次）============
+// ⚠ 这两行原先被写在 MusicModule 组件体内（夹在两个 hook 之间；缩进看着像顶层、实际不是），
+//   结果**每次渲染都执行** —— 日志里 MUSIC_PLUGIN_LOADED /「模块开始求值」高频重复即由此而来，
+//   而且每次渲染都要打一次 debug_log IPC。移到模块作用域后，恢复「只确认一次脚本已执行」的本意。
+try { console.error('[music-diag] index.tsx 模块开始求值; __HOST_API__=' + typeof window.__HOST_API__); } catch {}
+try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).catch(()=>{}); } catch {}
+
 function MusicModule() {
   useLang();
   // 共享运行时：根目录管理（localStorage 持久化）
@@ -1543,11 +1550,6 @@ useEffect(() => {
         } catch { /* ignore */ }
       });
   }, []);
-
-// 模块加载探针（console.error 必然可见，用于确认 music 插件脚本是否真正执行）
-try { console.error('[music-diag] index.tsx 模块开始求值; __HOST_API__=' + typeof window.__HOST_API__); } catch {}
-// 模块加载时写入 Rust 端日志，便于确认插件脚本是否真正被加载执行（某些 dev 环境会使用 sandbox）。
-try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).catch(()=>{}); } catch {}
 
   const handleRemoveRoot = useCallback((pathToRemove: string) => {
     // 删除该目录的扫描缓存：否则移除后再重新选择同一文件夹会因缓存命中而复用旧数据

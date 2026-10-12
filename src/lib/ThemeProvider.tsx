@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef, ty
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { isAndroid } from '../platform/isMobile';
+import { HEAVY_FX } from '../platform/isLinux';
 import { storage } from '../core/storage';
 import { KEYS } from '../core/storage/keys';
 
@@ -427,7 +428,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
             display: 'block',
             objectFit: 'cover',
             objectPosition: 'center',
-            filter: `blur(${bgBlur}px)`,
+            filter: HEAVY_FX ? `blur(${bgBlur}px)` : 'none',
             transform: layerTransform,
             transformOrigin: 'center center',
             pointerEvents: 'none',
@@ -445,7 +446,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
             backgroundSize: 'cover',
             backgroundPosition: 'center',
             backgroundRepeat: 'no-repeat',
-            filter: `blur(${bgBlur}px)`,
+            filter: HEAVY_FX ? `blur(${bgBlur}px)` : 'none',
             transform: layerTransform,
             transformOrigin: 'center center',
             pointerEvents: 'none',

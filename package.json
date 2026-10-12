@@ -27,6 +27,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "dev-env.bat && tauri",
+    "build:linux": "bash scripts/build-linux.sh",
     "postinstall": "node scripts/fix-node-modules.mjs",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",

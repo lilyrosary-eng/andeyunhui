@@ -35,3 +35,19 @@ export function isLinux(): boolean {
   cachedLinux = /Linux/i.test(ua);
   return cachedLinux;
 }
+
+/**
+ * 是否启用「重合成特效」：backdrop-filter（实时取背模糊）/ 大半径 blur / 大面积实时模糊。
+ *
+ * 仅非 Linux 启用。原因：Linux(WebKitGTK) + Intel i915 核显下，这类实时滤镜会让合成器
+ * **逐帧重做模糊并重新分配 GEM 缓冲**，实测把显存打满直接崩溃（沉浸播放页/漫游页都因此崩过）；
+ * Windows 的 WebView2/Chromium 走 D3D 合成路径，天然没有这个问题。
+ *
+ * ★ 这是全应用**唯一**的重特效判据来源：所有重特效视图一律 `import { HEAVY_FX }`，
+ *   禁止各自再写 `!isLinux()` / 各自嗅探 UA（否则就会出现「姊妹视图漏分流」——已发生过多次）。
+ *
+ * 另：index.css 里还有一层全局兜底（`html.is-linux *` 关闭 backdrop-filter，见 main.tsx 打的
+ * 根 class），用于兜住纯 CSS/内联写的 backdrop-filter；本常量用于 JS 里需要按元素决策的场合
+ * （如 `filter: blur()` 的封面/背景、`will-change`、`mask-image`）。
+ */
+export const HEAVY_FX = !isLinux();

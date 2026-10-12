@@ -8,6 +8,11 @@ import { neteaseGetLyric } from './neteaseApi';
 import { getLyric as kugouGetLyric } from './kugouApi';
 import { getNeteaseQualityBr, setNeteaseQualityBr, getNeteaseQualityLabel, NETEASE_QUALITY_OPTIONS, getSongUrl } from './neteaseApi';
 import { formatTime } from '../../_shared/utils';
+import { HEAVY_FX } from '@/platform/isLinux';
+
+// 平台重特效判据统一来自 src/platform/isLinux.ts 的 HEAVY_FX（全应用唯一来源）。
+// backdrop-filter（实时取背模糊）在 Linux + Intel i915 上会让合成器逐帧重做模糊、重新分配
+// GEM 缓冲并打爆显存（与 RoamView/沉浸页同一机制）。音量/歌单弹窗会被沉浸页复用，故一并分流。
 
 // 网易云歌词加载分支：远程曲跳过本地 get_lyrics，改走 neteaseGetLyric
 async function loadNeteaseLyric(t: Track): Promise<void> {
@@ -186,7 +191,7 @@ function VolumePopup({
     }),
     showPopup && React.createElement('div', {
       className: 'absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 rounded-xl shadow-lg border border-neutral-200/30 dark:border-stone-700/30 z-50',
-      style: { background: 'var(--nav-primary-bg)', backdropFilter: 'blur(12px)' },
+      style: { background: 'var(--nav-primary-bg)', backdropFilter: HEAVY_FX ? 'blur(12px)' : undefined },
       onMouseEnter: () => {
         if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
       },

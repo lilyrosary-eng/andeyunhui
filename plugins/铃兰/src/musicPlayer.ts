@@ -1,5 +1,8 @@
 // 音乐播放器单例 — 在插件 IIFE 作用域内，不依赖宿主
 import { T } from '../../_shared/pluginRuntime';
+// 平台判定统一走 src/platform/isLinux.ts 单例（禁止各自 UA 嗅探；此前本文件内联过一份，
+// 与 RoamView/NowPlayingView/PlayerBar 的 HEAVY_FX 判据同源，避免双实现漂移）。
+import { isLinux } from '@/platform/isLinux';
 // debugLog 现在双写：①直接 console.log（在 WebView DevTools 控制台可见，不经 Rust 桥、
 // 永不被沙箱/ACL 吞掉，是最可靠的排查手段）；②再经 debug_log 命令转发到 Rust 终端。
 const debugLog = (m: string) => {
@@ -479,10 +482,6 @@ class MusicPlayer {
   /** 切歌序号守卫：解析本地音源是异步的（Linux 要问后端要 URL），靠它防止竞态覆盖。 */
   private loadSeq = 0;
 
-  private isLinux(): boolean {
-    return typeof navigator !== 'undefined' && /Linux/i.test(navigator.userAgent);
-  }
-
   /**
    * 把「本地文件路径」变成「媒体元素能吃的 src」。
    * 远程直链原样返回。
@@ -498,7 +497,7 @@ class MusicPlayer {
     // page cache 撑到 5.65GB 直接 OOM 掉整机（内核日志 anon 451MB / file 5.65GB，
     // 栈顶 filemap_add_folio）。详见 src-tauri/src/media_http.rs 的文件头。
     // 本地 HTTP 服务流式按需读（含 Range），内存恒定、还能拖进度。
-    if (this.isLinux()) {
+    if (isLinux()) {
       try {
         const url: string = await api.invoke('media_http_url', { path: rawPath });
         debugLog('music: 使用本地媒体 HTTP 源');

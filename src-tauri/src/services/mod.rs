@@ -19,9 +19,15 @@ pub mod reading_service;
 //
 // ⚠ 非 Windows 走 `pal/recording_service.rs` 的同名空实现，而不是让 main.rs 逐处加 cfg：
 //   main.rs 在命令注册表与托盘回调里有 29 处引用，逐处加平台分支的维护成本极高且极易漏。
+// Windows：WGC + D3D11/进程内 ffmpeg 真实现。
+// Linux：xdg-desktop-portal ScreenCast + PipeWire + 随包 ffmpeg 真实现（见 recording_service_linux.rs）。
+// 其余（Android/iOS/macOS）：走 pal 同名桩，保证命令注册表无需逐处 cfg。
 #[cfg(windows)]
 pub mod recording_service;
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "recording_service_linux.rs"]
+pub mod recording_service;
+#[cfg(not(any(windows, target_os = "linux")))]
 #[path = "../pal/recording_service.rs"]
 pub mod recording_service;
 pub mod window_manager;

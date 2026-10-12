@@ -41,6 +41,93 @@ export const lyricModeStore = {
   },
 };
 
+// ===== 歌词渲染熔断器（Circuit Breaker）=====
+//
+// 背景：沉浸播放页在部分机器（Intel i915 核显）会因「逐行 filter: blur() + filter 过渡」
+// 造成的合成层/显存爆发而崩溃；切到「译/音」模式后行数翻倍，风险进一步放大。
+// 这里提供一道熔断：渲染抛错、或歌词处理耗时异常偏高时逐级降级，避免整页被拖垮。
+//
+// 降级级别（逐级，不跳级）：
+//   0 正常    —— 逐行模糊 + 译/音副行
+//   1 关模糊  —— 去掉逐行 filter，仅留透明度聚焦（合成层几乎归零）
+//   2 关副行  —— 再关掉翻译/音译副行，只渲染原文（DOM 直接减半）
+//
+// 持久化到 localStorage：崩溃过一次的机器，重开也先按降级级别渲染，避免「一进沉浸页就崩」。
+// 惰性恢复：距上次异常超过 RECOVER_MS 后自动降一级（逐步恢复观察），防止永久卡在降级态。
+export type LyricsDegradeLevel = 0 | 1 | 2;
+export interface LyricsGuardState { level: LyricsDegradeLevel; lastIssue: number; }
+
+const DEGRADE_KEY = 'music_lyrics_degrade';
+const HEAVY_MS = 60;            // 单次歌词处理超过该毫秒数视为「重」
+const HEAVY_STRIKES = 3;        // 窗口内累计次数达到阈值才降级（避免偶发一次就降）
+const HEAVY_WINDOW_MS = 60_000;
+const RECOVER_MS = 10 * 60_000; // 10 分钟无异常则自动降一级
+
+function loadGuard(): LyricsGuardState {
+  try {
+    const raw = localStorage.getItem(DEGRADE_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<LyricsGuardState>;
+      const lv: LyricsDegradeLevel = p.level === 1 || p.level === 2 ? p.level : 0;
+      return { level: lv, lastIssue: typeof p.lastIssue === 'number' ? p.lastIssue : 0 };
+    }
+  } catch { /* 读取失败按正常态 */ }
+  return { level: 0, lastIssue: 0 };
+}
+
+let guard: LyricsGuardState = loadGuard();
+const guardListeners = new Set<(s: LyricsGuardState) => void>();
+let heavyStamps: number[] = [];
+
+function persistGuard(): void {
+  try { localStorage.setItem(DEGRADE_KEY, JSON.stringify(guard)); } catch { /* 忽略 */ }
+}
+function emitGuard(): void {
+  const s = { ...guard };
+  guardListeners.forEach((l) => { try { l(s); } catch { /* 单个订阅者异常不影响其余 */ } });
+}
+function escalate(delta = 1): void {
+  const next = Math.min(2, guard.level + delta) as LyricsDegradeLevel;
+  if (next === guard.level) return;
+  guard = { level: next, lastIssue: Date.now() };
+  persistGuard();
+  emitGuard();
+}
+
+export const lyricsRenderGuard = {
+  /** 只读当前状态（不做任何副作用）。 */
+  get(): LyricsGuardState { return { ...guard }; },
+  /** 惰性恢复检查：距上次异常足够久时降一级。建议在组件挂载时调用一次。 */
+  checkRecovery(): void {
+    if (guard.level > 0 && Date.now() - guard.lastIssue > RECOVER_MS) {
+      guard = { level: (guard.level - 1) as LyricsDegradeLevel, lastIssue: Date.now() };
+      persistGuard();
+      emitGuard();
+    }
+  },
+  listen(l: (s: LyricsGuardState) => void): () => void {
+    guardListeners.add(l);
+    return () => { guardListeners.delete(l); };
+  },
+  /** 渲染/处理异常：立即降一级。 */
+  reportFailure(_reason?: string): void { escalate(1); },
+  /** 处理耗时：窗口内累计到阈值再降级。 */
+  reportHeavy(ms: number): void {
+    if (!(ms > HEAVY_MS)) return;
+    const now = Date.now();
+    heavyStamps = heavyStamps.filter((t) => now - t < HEAVY_WINDOW_MS);
+    heavyStamps.push(now);
+    if (heavyStamps.length >= HEAVY_STRIKES) { heavyStamps = []; escalate(1); }
+  },
+  /** 手动恢复（例如用户在设置里点「恢复歌词效果」）。 */
+  reset(): void {
+    guard = { level: 0, lastIssue: 0 };
+    heavyStamps = [];
+    persistGuard();
+    emitGuard();
+  },
+};
+
 let lines: LyricLine[] = [];
 let emitting = false;
 // 去重键：原文 + 翻译/罗马音一起参与比较。
@@ -251,6 +338,10 @@ export function splitInlineTranslation(text: string): { orig: string; translatio
   if (!text) return { orig: text || '' };
   const trimmed = text.trim();
   if (!trimmed) return { orig: text };
+  // 超长行直接放弃拆分：下面的拉丁宽松层是 O(n²) 扫描，异常歌词（未同步的整篇文本、
+  // 被误当成单行的内容）会把主线程卡死 —— 表现为「一进沉浸页就崩/卡死」。
+  // 正常歌词行远低于此阈值，命中即退化为「整行原文」，无翻译但绝不卡。
+  if (trimmed.length > 2000) return { orig: trimmed };
 
   const chars = Array.from(trimmed);
   const n = chars.length;

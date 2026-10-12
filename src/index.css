@@ -329,9 +329,9 @@
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
-  html.has-custom-bg .titlebar-surface:hover,
-  html.has-custom-bg .nav-primary-bg:hover,
-  html.has-custom-bg .nav-secondary-bg:hover {
+  html.has-custom-bg:not(.is-linux) .titlebar-surface:hover,
+  html.has-custom-bg:not(.is-linux) .nav-primary-bg:hover,
+  html.has-custom-bg:not(.is-linux) .nav-secondary-bg:hover {
     backdrop-filter: blur(12px) !important;
     -webkit-backdrop-filter: blur(12px) !important;
   }
@@ -575,6 +575,21 @@ input[type="range"]:active::-moz-range-thumb {
 }
 
 /* ========== 跨平台降级处理 ========== */
+
+/* ★ Linux 桌面（WebKitGTK）：全局关闭 backdrop-filter。
+   WebKitGTK 的 backdrop-filter 是「实时取背模糊」——任何动画/过渡/层级变化都会让合成器
+   逐帧重做模糊并重新分配 GEM 缓冲，在 Intel i915 核显上实测打爆显存并崩溃（沉浸页/漫游页
+   已多次因此崩）。这里用 <html class="is-linux">（main.tsx 首帧前打上）做**单点兜底**：
+   一条规则覆盖全部 backdrop-filter（含 React 内联 style、Tailwind 的 backdrop-blur-*、
+   以及今后新写的），从机制上杜绝「某个组件漏了平台分流」。
+   !important 可压过内联 style；个别更高优先级的 !important 规则已另行加 :not(.is-linux) 排除。 */
+html.is-linux,
+html.is-linux *,
+html.is-linux *::before,
+html.is-linux *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
 
 /* Linux WebKitGTK 不支持 backdrop-filter，使用实色背景替代 */
 @supports not (backdrop-filter: blur(1px)) {

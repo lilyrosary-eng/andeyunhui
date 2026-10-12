@@ -7,6 +7,13 @@ import "./index.css"
 import { storage } from "./core/storage"
 import { KEYS } from "./core/storage/keys"
 import { EVENTS } from "./core/events/schema"
+import { isLinux } from "./platform/isLinux"
+
+// Linux 桌面标记（必须在首帧渲染前打上）：供 index.css 全局关闭 backdrop-filter。
+// WebKitGTK + Intel i915 下 backdrop-filter 是「实时取背模糊」，会让合成器逐帧重做并重新
+// 分配 GEM 缓冲 → 打爆显存崩溃（沉浸页/漫游页已因此崩过）。这里一次性给 <html> 打标记，
+// 由 CSS 统一兜掉全部 backdrop-filter（含内联与新增的），杜绝「某个组件漏分流」再复现。
+if (isLinux()) document.documentElement.classList.add('is-linux');
 
 // 尽早初始化前端全局错误捕获：把 window.onerror / unhandledrejection / console.error 写入会话日志文件
 initFileLogger();

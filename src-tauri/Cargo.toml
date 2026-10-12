@@ -273,3 +273,16 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mobile)', 'cfg(desktop)'] 
 mpris = "2.1"
 souvlaki = "0.8"
 x11 = { version = "2.21.0", features = ["xlib", "xinerama"] }
+
+# ============ Linux 录屏后端（替代 Windows 的 WGC + 进程内 ffmpeg）============
+# 背景：Windows 用 windows-capture(WGC) 持续抓帧、进程内 libavcodec 或 ffmpeg.exe 编码。
+# Linux 没有 WGC；且本机是 Wayland 会话 —— 纯 X11 抓屏（x11grab）在 Wayland 下拿不到别家窗口。
+# 唯一通吃 Wayland/X11 的正路是 **xdg-desktop-portal 的 ScreenCast 接口**（系统授权弹窗 →
+# 返回一个 PipeWire 流），再由本进程消费该流、喂 ffmpeg 编码成 MP4。
+#   - ashpd：portal 客户端（纯 Rust / zbus，无系统编译期依赖），负责拿 FD + node id；
+#   - pipewire：消费 ScreenCast 的 PipeWire 流、按帧读取（**构建期需 libpipewire-0.3-dev**，
+#     运行期需系统 libpipewire —— PipeWire 桌面（GNOME/KDE 现代版）默认自带）。
+#   - 编码仍走随包分发的 ffmpeg（见 get_ffmpeg_path / DLC），与 Windows 一致的“随包分发”策略。
+# 放 target_os = "linux" 段：不参与 Windows/Android 构建，对既有平台零影响。
+ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+pipewire = "0.8"

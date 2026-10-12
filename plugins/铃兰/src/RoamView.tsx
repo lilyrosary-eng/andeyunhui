@@ -8,7 +8,7 @@ import React from 'react';
 const { useState, useEffect, useRef, useCallback, memo } = React;
 import { Music as MusicIcon } from 'lucide-react';
 import { musicPlayer } from './musicPlayer';
-import { isLinux } from '@/platform/isLinux';
+import { HEAVY_FX } from '@/platform/isLinux';
 import {
   getRoamSourceApi,
   clearRoamCache,
@@ -19,6 +19,11 @@ import {
 import type { PlayableTrack, TempPlaylist } from './NeteaseView';
 import { type LyricLine, lyricModeStore, type LyricMode } from './lyricsSync';
 import LyricModeButton from './LyricModeButton';
+
+// 平台重特效判据统一来自 src/platform/isLinux.ts 的 HEAVY_FX（全应用唯一来源）。
+// ⚠ 本文件踩过坑：原先在 RoamView 组件内部写 `const HEAVY_FX = !isLinux()`，导致**更早定义的
+//   子组件**（如 RoamBottomBar）拿不到，其全宽 `backdrop-filter: blur(4px)` 在 Linux 上漏了分流。
+//   现改为顶层 import —— 本文件所有组件共用同一判据，结构上不可能再漏。
 
 // ---- 工具函数 ----
 function roamToPlayable(t: RoamSeedTrack, url?: string, quality = ''): PlayableTrack {
@@ -313,7 +318,9 @@ const RoamPlayBar = memo(function RoamPlayBar({
       display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'clamp(6px, 0.8vw, 12px)',
       padding: 'clamp(10px, 1.5%, 18px) clamp(16px, 4%, 50px) clamp(12px, 1.8%, 22px)',
       background: isDark ? 'linear-gradient(0deg, rgba(20,30,18,0.75) 0%, rgba(20,30,18,0.3) 60%, transparent 100%)' : 'linear-gradient(0deg, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0.15) 60%, transparent 100%)',
-      backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
+      // 全宽实时取背模糊：Linux 上必须关闭（i915 OOM 元凶，见模块顶层 HEAVY_FX 说明）。
+      backdropFilter: HEAVY_FX ? 'blur(4px)' : undefined,
+      WebkitBackdropFilter: HEAVY_FX ? 'blur(4px)' : undefined,
       transition: 'opacity 0.45s ease',
       opacity: transitioning ? 0 : 1,
     }}>
@@ -774,11 +781,8 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     : (curCover ? `url(${curCover}) center/cover` : isDark ? 'radial-gradient(circle at 38% 32%, #2a3a22, #0a1209)' : 'radial-gradient(circle at 38% 32%, #ffffff, #cad9ad)');
 
   // CSS keyframes 和 stage 样式
-  // 重滤镜（backdrop-filter / 大半径 blur）仅在**非 Linux**启用。
-  // Linux + Intel i915 核显下，这类实时滤镜会让合成器逐帧重做模糊并重新分配
-  // GEM 缓冲（实测把 8G 打满直接 OOM）；Windows 的 D3D 合成路径没有这个问题。
-  // 判定经 src/platform/isLinux.ts 单例（禁止组件内各自嗅探 UA）。
-  const HEAVY_FX = !isLinux();
+  // 重滤镜（backdrop-filter / 大半径 blur）仅在**非 Linux**启用，判据见模块顶层的 HEAVY_FX
+  // （统一放在模块作用域，本文件所有子组件共用；此处不再重复定义）。
 
   const stageStyle = `
     .roam-stage { position: relative; width: 100%; height: 100%; overflow: hidden; background: ${stageBg}; --hue: ${songTheme.hue}deg; --fog: ${songTheme.fog}; }

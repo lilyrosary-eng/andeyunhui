@@ -759,14 +759,76 @@ pub fn peek_screenshot(
     Err("截图预览仅在 Windows 上可用（GDI 内存 DC）".into())
 }
 
-#[tauri::command]
-pub fn clipboard_write_image(_app: tauri::AppHandle, _base64_png: String) -> Result<(), String> {
-    Err("clipboard_write_image 在 Android/Linux/macOS 上尚未实现 (Unsupported)".into())
+// ============ 剪贴板写图（Linux：arboard 真实实现）============
+//
+// Windows 侧走 Win32 `OpenClipboard` + `SetClipboardData`（见 src/screenshot.rs），Linux 无该 API；
+// 这里用 arboard 写入 RGBA8，补齐「截图 → 复制到剪贴板」这条在 Linux 上原先直接报 Unsupported 的路径。
+//
+// ⚠ 关键：X11 剪贴板是「选区所有权」模型 —— 写入方（本进程）必须在**存活期间持续持有**该选区，
+//   一次 drop 就让内容失效（Ctrl+V 拿不到）。所以用一个**进程级常驻**的 Clipboard，绝不每次
+//   调用新建后即 drop（那样写进去也立刻失效）。Wayland 下若无 XWayland / wl-clipboard，arboard
+//   会返回错误，命令如实返回 Err（与既有「平台不支持」的降级一致，不会崩）。
+#[cfg(target_os = "linux")]
+static LINUX_CLIPBOARD: std::sync::OnceLock<Mutex<arboard::Clipboard>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn linux_clipboard() -> Result<&'static Mutex<arboard::Clipboard>, String> {
+    if let Some(c) = LINUX_CLIPBOARD.get() {
+        return Ok(c);
+    }
+    let cb = arboard::Clipboard::new().map_err(|e| format!("初始化系统剪贴板失败: {e}"))?;
+    // set 失败说明其它线程已抢先初始化 —— 无害，直接用现有的
+    let _ = LINUX_CLIPBOARD.set(Mutex::new(cb));
+    LINUX_CLIPBOARD.get().ok_or_else(|| "初始化系统剪贴板失败".to_string())
+}
+
+/// 解码图片字节（PNG 等）并写入 Linux 系统剪贴板。
+#[cfg(target_os = "linux")]
+fn linux_write_image_to_clipboard(bytes: &[u8]) -> Result<(), String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("图片解码失败: {e}"))?;
+    let rgba = img.into_rgba8();
+    let (w, h) = rgba.dimensions();
+    let data = arboard::ImageData {
+        width: w as usize,
+        height: h as usize,
+        bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+    };
+    let cb = linux_clipboard()?;
+    let mut guard = cb.lock().map_err(|_| "剪贴板访问失败（锁中毒）".to_string())?;
+    guard.set_image(data).map_err(|e| format!("写入系统剪贴板失败: {e}"))
 }
 
 #[tauri::command]
-pub fn clipboard_write_image_from_path(_app: tauri::AppHandle, _path: String) -> Result<(), String> {
-    Err("clipboard_write_image_from_path 在 Android/Linux/macOS 上尚未实现 (Unsupported)".into())
+pub fn clipboard_write_image(_app: tauri::AppHandle, base64_png: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use base64::Engine as _;
+        // 兼容 data URL（`data:image/png;base64,xxxx`）与纯 base64 两种入参
+        let b64 = base64_png.split(',').nth(1).unwrap_or(&base64_png);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("Base64 解码失败: {e}"))?;
+        return linux_write_image_to_clipboard(&bytes);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = base64_png;
+        Err("clipboard_write_image 在 Android/iOS/macOS 上尚未实现 (Unsupported)".into())
+    }
+}
+
+#[tauri::command]
+pub fn clipboard_write_image_from_path(_app: tauri::AppHandle, path: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {e}"))?;
+        return linux_write_image_to_clipboard(&bytes);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Err("clipboard_write_image_from_path 在 Android/iOS/macOS 上尚未实现 (Unsupported)".into())
+    }
 }
 
 /// 对应 Windows 版：

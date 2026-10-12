@@ -13,6 +13,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { zipDir } from './lib/zip.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -35,18 +36,10 @@ function scanPlugins(dir, prefix, out) {
   }
 }
 
-// 用 PowerShell .NET API 打包目录为 .mufurong（ZIP 格式，不自动添加 .zip 后缀）
+// 用跨平台助手打包目录为 .mufurong（ZIP 格式，不自动添加 .zip 后缀）
+// Windows 走 PowerShell .NET；其它平台走 Info-ZIP（见 scripts/lib/zip.mjs）。
 function packToMufurong(srcDir, destFile) {
-  mkdirSync(dirname(destFile), { recursive: true });
-  if (existsSync(destFile)) rmSync(destFile);
-
-  // 用 EncodedCommand 传递脚本，避免引号转义问题
-  // 单引号字符串中的单引号用两个单引号转义
-  const src = srcDir.replace(/'/g, "''");
-  const dst = destFile.replace(/'/g, "''");
-  const ps = `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory('${src}', '${dst}', [System.IO.Compression.CompressionLevel]::Optimal, $false)`;
-  const encoded = Buffer.from(ps, 'utf16le').toString('base64');
-  execSync(`powershell -NoProfile -EncodedCommand ${encoded}`, { stdio: 'pipe' });
+  zipDir(srcDir, destFile);
 }
 
 // ========== 主流程 ==========

@@ -57,6 +57,23 @@ function checkFfmpegSet() {
     return [`目录不存在: ${relative(rootDir, dir)}`];
   }
   const files = readdirSync(dir);
+
+  if (process.platform !== 'win32') {
+    // Linux/macOS：随包 ffmpeg 是**无扩展名**的可执行文件（由 scripts/fetch-ffmpeg-linux.mjs 准备）。
+    // 不需要 Windows 那套共享 DLL —— 我们走 CLI 编码（见 services/recording_service_linux.rs）。
+    const bin = join(dir, 'ffmpeg');
+    if (!existsSync(bin)) {
+      problems.push('缺少 ffmpeg（Linux 录屏 / HLS 转封装 CLI；请先跑 scripts/fetch-ffmpeg-linux.mjs）');
+    } else {
+      try {
+        execSync(`"${bin}" -hide_banner -version`, { stdio: 'pipe', timeout: 20000 });
+      } catch {
+        problems.push('ffmpeg 无法独立运行（退出码非 0）。请放**静态构建**（johnvansickle / BtbN），不要放依赖本机共享库的动态版');
+      }
+    }
+    return problems;
+  }
+
   // ① 自包含 ffmpeg.exe：直接跑 -version，能跑通才算自包含
   //    （shared 版 CLI 换到别处会因缺 avformat/avutil 等 DLL 直接失败——这正是当初的故障形态）
   const exe = join(dir, 'ffmpeg.exe');
@@ -86,16 +103,31 @@ function checkFfmpegSet() {
   return problems;
 }
 
+// Linux/macOS：先准备随包 ffmpeg（Windows 用仓库内已提交的 ffmpeg.exe，无需此步）
+if (process.platform !== 'win32') {
+  console.log('[PrepareDLC] 准备随包 ffmpeg（scripts/fetch-ffmpeg-linux.mjs）...');
+  try {
+    execSync('node scripts/fetch-ffmpeg-linux.mjs', { cwd: rootDir, stdio: 'inherit' });
+  } catch (e) {
+    console.warn(`[PrepareDLC] ⚠ fetch-ffmpeg-linux 失败: ${e.message}`);
+  }
+}
+
 const ffmpegProblems = checkFfmpegSet();
 if (ffmpegProblems.length > 0) {
   console.error('[PrepareDLC] ✗ ffmpeg 依赖集不完整，已中止构建：');
   for (const p of ffmpegProblems) console.error(`            - ${p}`);
-  console.error('[PrepareDLC]   期望文件：ffmpeg.exe（自包含）+ avutil-*/swresample-*/avcodec-*/avformat-*.dll');
-  console.error('[PrepareDLC]   ⚠ 不要放入 avfilter/avdevice/ffplay/ffprobe：avfilter 单个约 118 MiB，');
-  console.error('[PrepareDLC]     只有 shared 版 CLI 才需要，白占安装包约 29 MiB。');
+  if (process.platform === 'win32') {
+    console.error('[PrepareDLC]   期望文件：ffmpeg.exe（自包含）+ avutil-*/swresample-*/avcodec-*/avformat-*.dll');
+    console.error('[PrepareDLC]   ⚠ 不要放入 avfilter/avdevice/ffplay/ffprobe：avfilter 单个约 118 MiB，');
+    console.error('[PrepareDLC]     只有 shared 版 CLI 才需要，白占安装包约 29 MiB。');
+  } else {
+    console.error('[PrepareDLC]   期望文件：external-deps/全局/ffmpeg/ffmpeg（静态构建，可执行）');
+    console.error('[PrepareDLC]   运行 node scripts/fetch-ffmpeg-linux.mjs 可自动准备。');
+  }
   process.exit(1);
 }
-console.log('[PrepareDLC] [OK] ffmpeg 依赖集校验通过（自包含 ffmpeg.exe + 进程内 4 个共享 DLL）');
+console.log('[PrepareDLC] [OK] ffmpeg 依赖集校验通过');
 
 // 2. 调用 pack-mufurong.mjs 生成 dist-dlc/（内部自动调用 pack-mujin.mjs）
 //    - dist-dlc/plugins/         *.mufurong
@@ -157,27 +189,33 @@ function collectMujins(dir) {
   return out;
 }
 
-const mujins = collectMujins(join(bundledDlcDir, 'external-deps'));
-let storeConverted = 0;
-let storeSaved = 0;
-for (const m of mujins) {
-  if (statSync(m).size === 0) continue;
-  const before = statSync(m).size;
-  try {
-    zipToStore(m);
-    storeConverted++;
-    storeSaved += before - statSync(m).size;
-  } catch (e) {
-    console.error(`[PrepareDLC] ✗ 转 store 失败: ${relative(rootDir, m)} — ${e.message}`);
-    process.exit(1);
+if (process.platform === 'win32') {
+  const mujins = collectMujins(join(bundledDlcDir, 'external-deps'));
+  let storeConverted = 0;
+  let storeSaved = 0;
+  for (const m of mujins) {
+    if (statSync(m).size === 0) continue;
+    const before = statSync(m).size;
+    try {
+      zipToStore(m);
+      storeConverted++;
+      storeSaved += before - statSync(m).size;
+    } catch (e) {
+      console.error(`[PrepareDLC] ✗ 转 store 失败: ${relative(rootDir, m)} — ${e.message}`);
+      process.exit(1);
+    }
   }
+  // 转 store 后 .mujin 会「变大」（原本 deflate 压过），这是预期：省下的体积体现在
+  // 安装包（NSIS LZMA）上，而不是这个中间产物上。故这里只报数量，不报「变大了」。
+  console.log(
+    `[PrepareDLC] .mujin 转 store: ${storeConverted} 个 ` +
+      `（预期解压后体积 +${(storeSaved / 1024 / 1024).toFixed(1)} MiB，由 NSIS LZMA 在安装包里压回并额外省下约 20%）`,
+  );
+} else {
+  // 非 Windows：转 store 是给 NSIS LZMA 让路的 Windows 专属优化；deb/AppImage 各自压缩，
+  // 且 .mujin 保持 deflate 对运行时零影响（zip crate 两种都能读）。故这里跳过。
+  console.log('[PrepareDLC] 非 Windows：跳过 .mujin 转 store（仅 NSIS 需要的优化；deb/AppImage 各自压缩）');
 }
-// 转 store 后 .mujin 会「变大」（原本 deflate 压过），这是预期：省下的体积体现在
-// 安装包（NSIS LZMA）上，而不是这个中间产物上。故这里只报数量，不报「变大了」。
-console.log(
-  `[PrepareDLC] .mujin 转 store: ${storeConverted} 个 ` +
-    `（预期解压后体积 +${(storeSaved / 1024 / 1024).toFixed(1)} MiB，由 NSIS LZMA 在安装包里压回并额外省下约 20%）`,
-);
 
 // 4. 统计结果
 function countFiles(dir, ext) {

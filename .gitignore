@@ -81,6 +81,9 @@ docs/
 
 # 额外构建产物（dist 变体，避免误提交大型产物）
 dist-dlc/
+
+# Linux 本地解包的构建依赖前缀（无 root 安装；见 scripts/setup-linux-build-deps.sh）
+.linux-deps/
 got-it/
 test/
 
