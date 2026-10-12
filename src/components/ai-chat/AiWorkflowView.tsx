@@ -1,25 +1,32 @@
 // AIWorkflow（AIGC 工作流编蓝图）· 右侧节点连线画布 —— 纯内容区，不自带侧栏。
 // 任务列表 / 新建 / 改名 / 删除 已并入共享侧栏（AiChatSidebar），由宿主 Root 托管状态。
-// 本组件只接收「活动文档」+ 变更回调，负责画布交互：
-//   - 左键点击选中、按住拖动移动节点
-//   - 右键节点：编辑参数 / 建立连线 / 删除节点
-//   - 右键空白：新建节点（起始/生成/产出）、按任务生成蓝图、重新排列、清空
-// 执行按拓扑序逐节点跑：prompt → llm（支持 {ref:节点id} 引用）→ image（配了 ComfyUI 走本地 SD，否则云端 image_model）→ output（产出入 AIWork 产物库）。
-import { memo, useCallback, useMemo, useRef, useState } from 'react';
+// 画布基于 React Flow（@xyflow/react，MIT）：
+//   - 左入右出端口（Handle），按住端口拖拽拉线 + 橡皮线 + 目标高亮，松手成边
+//   - ctrl/⌘+滚轮缩放、空白拖拽平移、Shift+拖拽框选、MiniMap、Controls
+//   - isValidConnection 连时即拦：自环 / 重复边 / 成环（不再等执行才报）
+//   - Delete/Backspace 删选中节点或边；Ctrl+Z / Ctrl+Shift+Z 撤销重做；Ctrl+D 复制选中
+//   - 拖动只在落帧时 commit（修掉旧实现每 pointermove 全量写 localStorage 的性能问题）
+// 执行引擎与语义保持原样：Kahn 拓扑排序逐节点跑，prompt → llm（{ref} 引用）→ image（ComfyUI/云端）→ output（产物库）。
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Workflow, Play, Wand2, Loader2, Plus, Trash2, Pencil, Brain, BookmarkCheck,
-  GitBranch, LayoutGrid, Eraser, CircleDot, X, CheckCircle2, XCircle, Image as ImageIcon,
+  LayoutGrid, Eraser, CircleDot, X, CheckCircle2, XCircle, Image as ImageIcon,
+  Undo2, Redo2, Copy,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import {
+  ReactFlow, ReactFlowProvider, Background, Controls, MiniMap, Handle, Position,
+  useNodesState, useEdgesState, addEdge, useReactFlow, MarkerType, BackgroundVariant,
+  type Node, type Edge, type Connection, type NodeChange, type NodeProps, type NodeTypes,
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 import { autoPos, type WorkflowDoc, type WfNode, type WfEdge, type WfNodeType } from '@/core/ai/aiWorkflows';
 import { addProduct } from '@/core/ai/aiWorkProducts';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 
 const NODE_W = 216;
-const NODE_H = 96;
-const GAP = 64;
 
 const TYPE_NAME: Record<WfNodeType, string> = { prompt: '起始输入', llm: '模型生成', image: '图像生成', output: '产出' };
 const TYPE_ICON: Record<WfNodeType, React.ReactNode> = {
@@ -34,7 +41,11 @@ const TYPE_TINT: Record<WfNodeType, string> = {
   image: 'bg-rose-500/10 text-rose-600 dark:text-rose-400',
   output: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
 };
-/** 每种节点的可编辑参数键（含 label 改名） */
+/** MiniMap 节点配色（与 TYPE_TINT 语义色对应） */
+const MINIMAP_COLOR: Record<WfNodeType, string> = {
+  prompt: '#0ea5e9', llm: '#8b5cf6', image: '#f43f5e', output: '#10b981',
+};
+/** 每种节点的可编辑参数键 */
 const TYPE_PARAMS: Record<WfNodeType, string[]> = {
   prompt: ['prompt'],
   llm: ['system', 'prompt'],
@@ -93,8 +104,8 @@ function parsePlan(raw: string): { nodes: WfNode[]; edges: WfEdge[] } | null {
       edges.push({ id: uidp('e'), source: ids[i], target: ids[i + 1] });
     }
     nodes.forEach((n, i) => {
-      n.x = 48 + i * (NODE_W + GAP);
-      n.y = 80 + (i % 4) * 48;
+      n.x = 48 + i * (NODE_W + 96);
+      n.y = 80 + (i % 4) * 150;
     });
     return { nodes, edges };
   } catch {
@@ -130,6 +141,71 @@ function topoOrder(nodes: WfNode[], edges: WfEdge[]): string[] | null {
   return out.length === nodes.length ? out : null;
 }
 
+/* ============ React Flow 适配层 ============ */
+
+type WfStatus = WfNode['status'];
+// 注意：用 type 别名而非 interface——RF 的 Node<Data> 要求 Data 可赋 Record<string, unknown>，interface 缺索引签名会报错。
+type WfNodeData = { label: string; params: Record<string, string>; status: WfStatus; output?: string };
+type WfRfNode = Node<WfNodeData, WfNodeType>;
+
+function wfToRf(n: WfNode): WfRfNode {
+  return {
+    id: n.id,
+    type: n.type,
+    position: { x: n.x, y: n.y },
+    data: { label: n.label, params: n.params, status: n.status, output: n.output },
+  };
+}
+
+/** 深拷贝快照（用于撤销栈；WfNode/WfEdge 均为纯数据） */
+function snapDoc(d: WorkflowDoc): { nodes: WfNode[]; edges: WfEdge[] } {
+  return {
+    nodes: d.nodes.map((n) => ({ ...n, params: { ...n.params } })),
+    edges: d.edges.map((e) => ({ ...e })),
+  };
+}
+
+/** 自定义节点卡片：左入右出端口 + 状态/摘要/产出（含图） */
+function WfCard({ data, selected, type }: NodeProps<WfRfNode>) {
+  const t = (type ?? 'llm') as WfNodeType;
+  return (
+    <div
+      className={`relative cursor-grab select-none rounded-xl border bg-white/90 shadow-sm backdrop-blur transition-shadow dark:bg-stone-900/80 ${
+        selected ? 'border-violet-400 shadow-md ring-2 ring-violet-500/20' : 'border-neutral-200/80 hover:border-violet-300 dark:border-stone-700/70'
+      } ${data.status === 'running' ? '!border-violet-400' : ''} ${data.status === 'error' ? '!border-red-400' : ''} ${data.status === 'ok' ? '!border-emerald-400' : ''}`}
+      style={{ width: NODE_W }}
+    >
+      <Handle type="target" position={Position.Left} id="in" className="!h-2.5 !w-2.5 !border-violet-400 !bg-white dark:!bg-stone-900" />
+      <div className="flex items-center gap-2 px-3 pt-2.5">
+        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${TYPE_TINT[t]}`}>{TYPE_ICON[t]}</span>
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-neutral-800 dark:text-stone-100">{data.label}</span>
+        {data.status === 'running' && <Loader2 size={13} className="animate-spin text-violet-500" />}
+        {data.status === 'ok' && <CheckCircle2 size={13} className="text-emerald-500" />}
+        {data.status === 'error' && <XCircle size={13} className="text-red-500" />}
+      </div>
+      <div className="mt-1.5 flex items-center gap-1.5 px-3 pb-2">
+        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${TYPE_TINT[t]}`}>{TYPE_NAME[t]}</span>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-400 dark:text-stone-500">{summaryOf(t, data.params)}</span>
+      </div>
+      {data.output && (
+        data.output.startsWith('data:image') ? (
+          <div className="mx-2 mb-2">
+            <img src={data.output} alt="" className="max-h-40 w-full rounded-md border border-neutral-200 object-cover dark:border-stone-700" />
+          </div>
+        ) : (
+          <div className="mx-2 mb-2 max-h-16 overflow-y-auto rounded-md bg-black/5 px-2 py-1.5 text-[11px] leading-relaxed text-neutral-500 dark:bg-black/30 dark:text-stone-400">
+            {data.output}
+          </div>
+        )
+      )}
+      <Handle type="source" position={Position.Right} id="out" className="!h-2.5 !w-2.5 !border-emerald-500 !bg-white dark:!bg-stone-900" />
+    </div>
+  );
+}
+
+// nodeTypes 必须模块级常量：组件内联对象会导致 RF 每次渲染重建节点（告警 + 性能损失）。
+const nodeTypes: NodeTypes = { prompt: WfCard, llm: WfCard, image: WfCard, output: WfCard };
+
 interface MenuState { x: number; y: number; nodeId?: string }
 
 export interface AiWorkflowViewProps {
@@ -140,27 +216,91 @@ export interface AiWorkflowViewProps {
   onUpdate: (fn: (d: WorkflowDoc) => WorkflowDoc) => void;
 }
 
-export const AiWorkflowView = memo(function AiWorkflowView({
-  profileId, doc, onUpdate,
-}: AiWorkflowViewProps) {
-  const active = doc;
-
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const [heights, setHeights] = useState<Record<string, number>>({});
   const [planning, setPlanning] = useState(false);
   const [running, setRunning] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
 
-  const canvasRef = useRef<HTMLDivElement>(null);
+  const [nodes, setNodes, onNodesChange] = useNodesState<WfRfNode>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const edgesRef = useRef(edges);
+  edgesRef.current = edges;
+  const docRef = useRef(doc);
+  docRef.current = doc;
+
+  // RF 内部状态先改、再推 doc 时置位，让 doc→RF 同步跳过一轮（否则会用旧 doc 覆盖刚拖好的位置）
+  const skipSync = useRef(false);
+  // 撤销/重做栈 + 版本号（refs 不触发重渲染，用 histV 驱动工具栏可用态）
+  const past = useRef<{ nodes: WfNode[]; edges: WfEdge[] }[]>([]);
+  const future = useRef<{ nodes: WfNode[]; edges: WfEdge[] }[]>([]);
+  const [, setHistV] = useState(0);
+  const bumpHist = useCallback(() => setHistV((v) => v + 1), []);
+
   const profileIdRef = useRef(profileId);
   profileIdRef.current = profileId;
+  const { screenToFlowPosition, fitView } = useReactFlow();
+  const didFit = useRef(false);
+
+  // 跟随应用明暗主题（class 策略），保证 RF 的边/手柄/背景在暗色下可见
+  const [dark, setDark] = useState(() => typeof document !== 'undefined' && document.documentElement.classList.contains('dark'));
+  useEffect(() => {
+    const obs = new MutationObserver(() => setDark(document.documentElement.classList.contains('dark')));
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    return () => obs.disconnect();
+  }, []);
 
   const pushLog = useCallback((line: string) => {
     setLogs((prev) => [...prev.slice(-5), line]);
   }, []);
+
+  /* ============ 带历史的文档提交 ============ */
+  const commit = useCallback((fn: (d: WorkflowDoc) => WorkflowDoc) => {
+    const d = docRef.current;
+    if (!d) return;
+    past.current = [...past.current.slice(-49), snapDoc(d)];
+    future.current = [];
+    onUpdate(fn);
+    bumpHist();
+  }, [onUpdate, bumpHist]);
+
+  const undo = useCallback(() => {
+    const d = docRef.current;
+    const prev = past.current.pop();
+    if (!d || !prev) return;
+    future.current = [...future.current, snapDoc(d)];
+    onUpdate((cur) => ({ ...cur, nodes: prev.nodes, edges: prev.edges }));
+    bumpHist();
+  }, [onUpdate, bumpHist]);
+
+  const redo = useCallback(() => {
+    const d = docRef.current;
+    const nxt = future.current.pop();
+    if (!d || !nxt) return;
+    past.current = [...past.current, snapDoc(d)];
+    onUpdate((cur) => ({ ...cur, nodes: nxt.nodes, edges: nxt.edges }));
+    bumpHist();
+  }, [onUpdate, bumpHist]);
+
+  /* ============ doc → RF 同步（外部变更：切任务/生成蓝图/执行态/撤销） ============ */
+  useEffect(() => {
+    if (skipSync.current) { skipSync.current = false; return; }
+    if (!doc) { setNodes([]); setEdges([]); return; }
+    const statusById = new Map(doc.nodes.map((n) => [n.id, n.status]));
+    setNodes(doc.nodes.map(wfToRf));
+    setEdges(doc.edges.map((e) => ({ ...e, animated: statusById.get(e.source) === 'running' })));
+  }, [doc, setNodes, setEdges]);
+
+  // 首次拿到节点时适配视野
+  useEffect(() => {
+    if (!didFit.current && nodes.length) {
+      didFit.current = true;
+      fitView({ padding: 0.25 });
+    }
+  }, [nodes, fitView]);
 
   /* ============ AI 一言问答（复用 ai_chat 流式事件） ============ */
   const aiAsk = useCallback(async (system: string, userText: string): Promise<string> => {
@@ -193,17 +333,17 @@ export const AiWorkflowView = memo(function AiWorkflowView({
     }
   }, []);
 
-  /* ============ 按任务生成蓝图（重写为只依赖 doc + onUpdate） ============ */
+  /* ============ 按任务生成蓝图 ============ */
   const generateBlueprint = useCallback(async () => {
-    if (!active || planning || running) return;
-    const t = active.task.trim();
+    if (!doc || planning || running) return;
+    const t = doc.task.trim();
     if (!t) { setError('请先在任务描述里写一句需求'); return; }
     setPlanning(true); setError(null); setLogs([]); setMenu(null);
     try {
       const raw = await aiAsk(PLAN_SYSTEM, `需求：${t}\n请只输出工作流规划 JSON。`);
       const parsed = parsePlan(raw);
       if (!parsed) { setError('未能解析蓝图结构，请换一种描述再试。'); return; }
-      onUpdate((d) => ({ ...d, nodes: parsed.nodes, edges: parsed.edges }));
+      commit((d) => ({ ...d, nodes: parsed.nodes, edges: parsed.edges }));
       pushLog(`蓝图生成：${parsed.nodes.length} 个节点、${parsed.edges.length} 条连线`);
     } catch (err) {
       setError('生成失败：' + String(err).slice(0, 120));
@@ -211,111 +351,207 @@ export const AiWorkflowView = memo(function AiWorkflowView({
       setPlanning(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, planning, running, aiAsk, onUpdate, pushLog]);
+  }, [doc, planning, running, aiAsk, commit, pushLog]);
 
   /* ============ 节点/边操作 ============ */
   const addNode = useCallback((type: WfNodeType) => {
-    if (!active) return;
-    const pos = autoPos(active.nodes);
+    const existing = docRef.current?.nodes ?? [];
     const id = uidp('n');
+    const center = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+    const pos = existing.length
+      ? { x: Math.max(0, Math.round(center.x - NODE_W / 2)), y: Math.max(0, Math.round(center.y - 40)) }
+      : autoPos(existing);
     const defaults: Record<string, string> =
       type === 'prompt' ? { prompt: '输入本节点要提供的上下文…' }
       : type === 'llm' ? { system: DEFAULT_SYSTEM, prompt: '' }
       : type === 'image' ? { prompt: '' }
       : { title: 'AI 成果', content: '' };
     const node: WfNode = { id, type, label: TYPE_NAME[type], ...pos, params: defaults, status: 'idle' };
-    onUpdate((d) => ({ ...d, nodes: [...d.nodes, node] }));
-    setSelectedId(id); setEditingId(id); setMenu(null);
-  }, [active, onUpdate]);
+    commit((d) => ({ ...d, nodes: [...d.nodes, node] }));
+    setEditingId(id); setMenu(null);
+  }, [commit, screenToFlowPosition]);
 
+  /** 属性栏编辑（入撤销栈） */
+  const editNode = useCallback((id: string, upd: Partial<WfNode>) => {
+    commit((d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === id ? { ...n, ...upd } : n)) }));
+  }, [commit]);
+
+  /** 执行态补丁（不入栈，避免 run 过程刷爆撤销历史） */
   const patchNode = useCallback((id: string, upd: Partial<WfNode>) => {
     onUpdate((d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === id ? { ...n, ...upd } : n)) }));
   }, [onUpdate]);
 
   const deleteNode = useCallback((id: string) => {
-    onUpdate((d) => ({
+    commit((d) => ({
       ...d,
       nodes: d.nodes.filter((n) => n.id !== id),
       edges: d.edges.filter((e) => e.source !== id && e.target !== id),
     }));
-    setSelectedId((s) => (s === id ? null : s));
     setEditingId((s) => (s === id ? null : s));
     setMenu(null);
-  }, [onUpdate]);
-
-  const addEdge = useCallback((source: string, target: string) => {
-    onUpdate((d) => {
-      if (d.edges.some((e) => e.source === source && e.target === target)) return d;
-      return { ...d, edges: [...d.edges, { id: uidp('e'), source, target }] };
-    });
-    setMenu(null);
-  }, [onUpdate]);
+  }, [commit]);
 
   const deleteEdge = useCallback((edgeId: string) => {
-    onUpdate((d) => ({ ...d, edges: d.edges.filter((e) => e.id !== edgeId) }));
+    commit((d) => ({ ...d, edges: d.edges.filter((e) => e.id !== edgeId) }));
     setMenu(null);
-  }, [onUpdate]);
+  }, [commit]);
 
+  /** 按边分层重排（最长路径分层；环兜底为 0 层） */
   const autoLayout = useCallback(() => {
-    if (!active) return;
-    onUpdate((d) => ({
-      ...d,
-      nodes: d.nodes.map((n, i) => ({ ...n, x: 48 + i * (NODE_W + GAP), y: 80 + (i % 4) * 48 })),
-    }));
+    const d = docRef.current;
+    if (!d || !d.nodes.length) return;
+    const preds = new Map<string, string[]>();
+    for (const n of d.nodes) preds.set(n.id, []);
+    for (const e of d.edges) if (preds.has(e.target)) preds.get(e.target)!.push(e.source);
+    const layer = new Map<string, number>();
+    const visiting = new Set<string>();
+    const layerOf = (id: string): number => {
+      const cached = layer.get(id);
+      if (cached !== undefined) return cached;
+      if (visiting.has(id)) return 0;
+      visiting.add(id);
+      let L = 0;
+      for (const p of preds.get(id) ?? []) L = Math.max(L, layerOf(p) + 1);
+      visiting.delete(id);
+      layer.set(id, L);
+      return L;
+    };
+    const positioned = new Map<string, { x: number; y: number }>();
+    const perLayer = new Map<number, number>();
+    for (const n of d.nodes) {
+      const L = layerOf(n.id);
+      const i = perLayer.get(L) ?? 0;
+      perLayer.set(L, i + 1);
+      positioned.set(n.id, { x: 48 + L * (NODE_W + 96), y: 80 + i * 150 });
+    }
+    commit((dd) => ({ ...dd, nodes: dd.nodes.map((n) => (positioned.has(n.id) ? { ...n, ...positioned.get(n.id)! } : n)) }));
     setMenu(null);
-  }, [active, onUpdate]);
+  }, [commit]);
 
   const clearCanvas = useCallback(() => {
-    if (!active) return;
-    onUpdate((d) => ({ ...d, nodes: [], edges: [] }));
-    setSelectedId(null); setEditingId(null); setMenu(null);
-  }, [active, onUpdate]);
+    commit((d) => ({ ...d, nodes: [], edges: [] }));
+    setEditingId(null); setMenu(null);
+  }, [commit]);
 
-  /* ============ 节点拖动（左键 + Pointer Capture） ============ */
-  const onNodePointerDown = useCallback((e: React.PointerEvent, node: WfNode) => {
-    e.stopPropagation();
-    setSelectedId(node.id);
-    const el = e.currentTarget as HTMLElement;
-    el.setPointerCapture(e.pointerId);
-    const startX = e.clientX, startY = e.clientY;
-    const ox = node.x, oy = node.y;
-    const move = (ev: PointerEvent) => {
-      onUpdate((d) => ({
-        ...d,
-        nodes: d.nodes.map((n) => (n.id === node.id
-          ? { ...n, x: Math.max(0, Math.round(ox + ev.clientX - startX)), y: Math.max(0, Math.round(oy + ev.clientY - startY)) }
-          : n)),
-      }));
-    };
-    const up = (ev: PointerEvent) => {
-      el.releasePointerCapture(ev.pointerId);
-      el.removeEventListener('pointermove', move);
-      el.removeEventListener('pointerup', up);
-      el.removeEventListener('pointercancel', up);
-    };
-    el.addEventListener('pointermove', move);
-    el.addEventListener('pointerup', up);
-    el.addEventListener('pointercancel', up);
-  }, [onUpdate]);
+  const duplicateSelected = useCallback(() => {
+    const ids = selectedNodeIds;
+    if (!ids.length) return;
+    commit((d) => {
+      const clones = d.nodes
+        .filter((n) => ids.includes(n.id))
+        .map((n) => ({ ...n, id: uidp('n'), x: n.x + 48, y: n.y + 48, label: `${n.label} 副本`, params: { ...n.params }, status: 'idle' as const, output: undefined }));
+      return { ...d, nodes: [...d.nodes, ...clones] };
+    });
+  }, [selectedNodeIds, commit]);
 
-  const onCanvasContextMenu = useCallback((e: React.MouseEvent) => {
+  /* ============ RF 事件 → doc ============ */
+  const handleNodesChange = useCallback((changes: NodeChange<WfRfNode>[]) => {
+    onNodesChange(changes);
+    // 只在拖动落帧时 commit（dragging:false），消灭每帧写盘
+    const moved = changes
+      .filter((c) => c.type === 'position' && 'id' in c && !(c as { dragging?: boolean }).dragging && (c as { position?: unknown }).position)
+      .map((c) => ({ id: (c as { id: string }).id, position: (c as unknown as { position: { x: number; y: number } }).position }));
+    if (moved.length) {
+      const pos = new Map(moved.map((m) => [m.id, m.position]));
+      skipSync.current = true;
+      commit((d) => ({ ...d, nodes: d.nodes.map((n) => (pos.has(n.id) ? { ...n, x: pos.get(n.id)!.x, y: pos.get(n.id)!.y } : n)) }));
+    }
+  }, [onNodesChange, commit]);
+
+  const handleNodesDelete = useCallback((deleted: Node[]) => {
+    const ids = new Set(deleted.map((n) => n.id));
+    skipSync.current = true;
+    commit((d) => ({
+      ...d,
+      nodes: d.nodes.filter((n) => !ids.has(n.id)),
+      edges: d.edges.filter((e) => !ids.has(e.source) && !ids.has(e.target)),
+    }));
+    setEditingId((s) => (s && ids.has(s) ? null : s));
+  }, [commit]);
+
+  const handleEdgesDelete = useCallback((deleted: Edge[]) => {
+    const ids = new Set(deleted.map((e) => e.id));
+    skipSync.current = true;
+    commit((d) => ({ ...d, edges: d.edges.filter((e) => !ids.has(e.id)) }));
+  }, [commit]);
+
+  const onConnect = useCallback((c: Connection) => {
+    if (!c.source || !c.target) return;
+    if (edgesRef.current.some((e) => e.source === c.source && e.target === c.target)) return;
+    const edge: Edge = {
+      id: uidp('e'),
+      source: c.source,
+      target: c.target,
+      sourceHandle: c.sourceHandle ?? undefined,
+      targetHandle: c.targetHandle ?? undefined,
+    };
+    setEdges((eds) => addEdge(edge, eds));
+    skipSync.current = true;
+    commit((d) => (
+      d.edges.some((e) => e.source === edge.source && e.target === edge.target)
+        ? d
+        : { ...d, edges: [...d.edges, { id: edge.id, source: edge.source, target: edge.target }] }
+    ));
+  }, [setEdges, commit]);
+
+  /** 连时校验：禁自环 / 禁重复边 / 禁成环（BFS 可达性） */
+  const isValidConnection = useCallback((c: Connection | Edge): boolean => {
+    const source = c.source;
+    const target = c.target;
+    if (!source || !target || source === target) return false;
+    if (edgesRef.current.some((e) => e.source === source && e.target === target)) return false;
+    const adj = new Map<string, string[]>();
+    for (const e of edgesRef.current) {
+      if (!adj.has(e.source)) adj.set(e.source, []);
+      adj.get(e.source)!.push(e.target);
+    }
+    const seen = new Set<string>();
+    const stack = [target];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      if (cur === source) return false;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      for (const nx of adj.get(cur) ?? []) stack.push(nx);
+    }
+    return true;
+  }, []);
+
+  /* ============ 右键菜单 ============ */
+  const onPaneContextMenu = useCallback((e: React.MouseEvent | MouseEvent) => {
     e.preventDefault();
     setEditingId(null);
     setMenu({ x: e.clientX, y: e.clientY });
   }, []);
 
-  const onNodeContextMenu = useCallback((e: React.MouseEvent, node: WfNode) => {
+  const onNodeContextMenu = useCallback((e: React.MouseEvent, node: Node) => {
     e.preventDefault();
     e.stopPropagation();
-    setSelectedId(node.id); setEditingId(node.id);
+    setEditingId(node.id);
     setMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
   }, []);
 
-  /* ============ 执行蓝图（拓扑序逐节点跑） ============ */
+  /* ============ 快捷键（输入框内不拦截） ============ */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      const k = e.key.toLowerCase();
+      if (k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
+      else if (k === 'y') { e.preventDefault(); redo(); }
+      else if (k === 'd') { e.preventDefault(); duplicateSelected(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [undo, redo, duplicateSelected]);
+
+  /* ============ 执行蓝图（拓扑序逐节点跑，语义与原版一致） ============ */
   const run = useCallback(async () => {
-    if (!active || running || planning) return;
-    const nodes = active.nodes;
-    const edges = active.edges;
+    if (!doc || running || planning) return;
+    const nodes = doc.nodes;
+    const edges = doc.edges;
     if (!nodes.length) { setError('画布还没有节点'); return; }
     const order = topoOrder(nodes, edges);
     if (!order) { setError('检测到环/孤立，无法确定执行顺序，请先修正连线'); return; }
@@ -371,45 +607,24 @@ export const AiWorkflowView = memo(function AiWorkflowView({
       setRunning(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, running, planning, aiAsk, patchNode, onUpdate, pushLog]);
+  }, [doc, running, planning, aiAsk, patchNode, onUpdate, pushLog]);
 
-  /* ============ 尺寸 / 边几何 ============ */
-  const contentW = useMemo(() => {
-    if (!active || !active.nodes.length) return 800;
-    return Math.max(800, ...active.nodes.map((n) => n.x + NODE_W)) + 120;
-  }, [active]);
-  const contentH = useMemo(() => {
-    if (!active || !active.nodes.length) return 600;
-    return Math.max(600, ...active.nodes.map((n) => n.y + (heights[n.id] || NODE_H))) + 160;
-  }, [active, heights]);
-
-  const edgeNodes = useMemo(() => {
-    if (!active) return [];
-    const byId = new Map(active.nodes.map((n) => [n.id, n]));
-    return active.edges.map((e) => ({
-      edge: e,
-      sx: (byId.get(e.source)?.x ?? 0) + NODE_W / 2,
-      sy: (byId.get(e.source)?.y ?? 0) + (heights[e.source] || NODE_H),
-      tx: (byId.get(e.target)?.x ?? 0) + NODE_W / 2,
-      ty: (byId.get(e.target)?.y ?? 0),
-    }));
-  }, [active, heights]);
-
-  const canRun = useMemo(() => !!active && active.nodes.length > 0 && !running && !planning, [active, running, planning]);
-
-  const commitHeight = useCallback((id: string, h: number) => {
-    setHeights((prev) => (prev[id] === h ? prev : { ...prev, [id]: h }));
-  }, []);
-
-  const nodeTargets = useMemo(() => {
-    if (!menu?.nodeId || !active) return [];
-    return active.nodes.filter((n) => n.id !== menu.nodeId && !active.edges.some((e) => e.source === menu.nodeId && e.target === n.id));
-  }, [menu, active]);
-
+  const editingNode = useMemo(
+    () => (doc && editingId ? doc.nodes.find((n) => n.id === editingId) ?? null : null),
+    [doc, editingId],
+  );
+  const selectedId = selectedNodeIds[0] ?? null;
   const activeEdgesForSel = useMemo(() => {
-    if (!active || !selectedId) return [];
-    return active.edges.filter((e) => e.source === selectedId || e.target === selectedId);
-  }, [active, selectedId]);
+    if (!doc || !selectedId) return [];
+    return doc.edges.filter((e) => e.source === selectedId || e.target === selectedId);
+  }, [doc, selectedId]);
+
+  const canRun = !!doc && doc.nodes.length > 0 && !running && !planning;
+
+  // 菜单防屏幕边缘裁剪
+  const menuPos = menu
+    ? { left: Math.min(menu.x, Math.max(8, (typeof window !== 'undefined' ? window.innerWidth : 0) - 210)), top: Math.min(menu.y, Math.max(8, (typeof window !== 'undefined' ? window.innerHeight : 0) - 260)) }
+    : null;
 
   return (
     <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
@@ -421,16 +636,28 @@ export const AiWorkflowView = memo(function AiWorkflowView({
         <div className="min-w-0">
           <div className="text-sm font-semibold text-neutral-800 dark:text-stone-100">AI 工作流 · 节点画布</div>
           <div className="truncate text-xs text-neutral-400 dark:text-stone-500">
-            {active
-              ? `${active.nodes.length} 节点 / ${active.edges.length} 连线 · 左键拖节点,右键出菜单`
+            {doc
+              ? `${doc.nodes.length} 节点 / ${doc.edges.length} 连线 · 拖端口连线, 滚轮缩放, 右键菜单`
               : '先在左侧新建一个任务'}
           </div>
         </div>
-        <div className="ml-auto flex shrink-0 items-center gap-3">
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <button onClick={undo} disabled={past.current.length === 0} title="撤销 (Ctrl+Z)"
+            className="btn-press rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-black/5 hover:text-neutral-600 disabled:opacity-30 dark:hover:bg-white/5 dark:hover:text-stone-300">
+            <Undo2 size={15} />
+          </button>
+          <button onClick={redo} disabled={future.current.length === 0} title="重做 (Ctrl+Shift+Z)"
+            className="btn-press rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-black/5 hover:text-neutral-600 disabled:opacity-30 dark:hover:bg-white/5 dark:hover:text-stone-300">
+            <Redo2 size={15} />
+          </button>
+          <button onClick={duplicateSelected} disabled={!selectedNodeIds.length} title="复制选中节点 (Ctrl+D)"
+            className="btn-press rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-black/5 hover:text-neutral-600 disabled:opacity-30 dark:hover:bg-white/5 dark:hover:text-stone-300">
+            <Copy size={15} />
+          </button>
           {canRun && (
             <button
               onClick={run}
-              className="btn-press flex items-center gap-1.5 rounded-lg border border-violet-500/40 px-3 py-1.5 text-xs font-medium text-violet-600 transition-colors hover:bg-violet-500/10 dark:text-violet-400"
+              className="btn-press ml-1 flex items-center gap-1.5 rounded-lg border border-violet-500/40 px-3 py-1.5 text-xs font-medium text-violet-600 transition-colors hover:bg-violet-500/10 dark:text-violet-400"
             >
               <Play size={14} /> 执行蓝图
             </button>
@@ -439,10 +666,10 @@ export const AiWorkflowView = memo(function AiWorkflowView({
       </div>
 
       {/* 任务描述 + 生成蓝图 */}
-      {active && (
+      {doc && (
         <div className="shrink-0 flex items-center gap-2 border-b border-neutral-200/60 px-4 py-2.5 dark:border-stone-700/60">
           <input
-            value={active.task}
+            value={doc.task}
             onChange={(e) => onUpdate((d) => ({ ...d, task: e.target.value }))}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); generateBlueprint(); } }}
             className="h-8 min-w-0 flex-1 rounded-lg border border-neutral-300/60 bg-white/60 px-3 text-xs text-neutral-800 outline-none transition-colors focus:border-violet-400 dark:border-stone-700/60 dark:bg-stone-800/40 dark:text-stone-200"
@@ -450,7 +677,7 @@ export const AiWorkflowView = memo(function AiWorkflowView({
           />
           <button
             onClick={generateBlueprint}
-            disabled={planning || running || !active.task.trim()}
+            disabled={planning || running || !doc.task.trim()}
             className="btn-press flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {planning ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
@@ -459,179 +686,140 @@ export const AiWorkflowView = memo(function AiWorkflowView({
         </div>
       )}
 
-      {/* 画布 */}
-      <div
-        ref={canvasRef}
-        onContextMenu={onCanvasContextMenu}
-        onClick={() => { if (!menu) { setSelectedId(null); setEditingId(null); } }}
-        className="relative m-3 min-h-0 flex-1 overflow-auto rounded-xl border border-neutral-200/60 bg-[radial-gradient(circle_at_1px_1px,rgba(0,0,0,0.06)_1px,transparent_0)] bg-[length:22px_22px] dark:border-stone-700/60 dark:bg-[radial-gradient(circle_at_1px_1px,rgba(255,255,255,0.07)_1px,transparent_0)] dark:bg-[length:22px_22px]"
-      >
-        {!active ? (
+      {/* 画布（React Flow） */}
+      <div className="relative m-3 min-h-0 flex-1 overflow-hidden rounded-xl border border-neutral-200/60 dark:border-stone-700/60">
+        {!doc ? (
           <div className="flex h-full items-center justify-center text-sm text-neutral-400 dark:text-stone-500">
             ← 先在左侧新建一个任务
           </div>
         ) : (
-          <div className="relative" style={{ width: contentW, height: contentH }}>
-            {/* 连线层 */}
-            <svg className="pointer-events-none absolute inset-0" width={contentW} height={contentH}>
-              {edgeNodes.map(({ edge, sx, sy, tx, ty }) => {
-                const my = (sy + ty) / 2;
-                return (
-                  <g key={edge.id}>
-                    <path
-                      d={`M ${sx} ${sy} C ${sx} ${my}, ${tx} ${my}, ${tx} ${ty}`}
-                      fill="none"
-                      stroke="rgba(124,58,237,0.55)"
-                      strokeWidth={1.6}
-                      markerEnd="url(#wf-arrow)"
-                    />
-                    <path
-                      d={`M ${sx} ${sy} C ${sx} ${my}, ${tx} ${my}, ${tx} ${ty}`}
-                      fill="none"
-                      stroke="transparent"
-                      strokeWidth={12}
-                      className="pointer-events-auto cursor-pointer"
-                      onClick={(e) => { e.stopPropagation(); setSelectedId(null); setEditingId(null); deleteEdge(edge.id); }}
-                    />
-                  </g>
-                );
-              })}
-              <defs>
-                <marker id="wf-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-                  <path d="M0,0 L7,4 L0,8 Z" fill="rgba(124,58,237,0.7)" />
-                </marker>
-              </defs>
-            </svg>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={handleNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            isValidConnection={isValidConnection}
+            onNodesDelete={handleNodesDelete}
+            onEdgesDelete={handleEdgesDelete}
+            onNodeContextMenu={onNodeContextMenu}
+            onPaneContextMenu={onPaneContextMenu}
+            onNodeDoubleClick={(_, node) => setEditingId(node.id)}
+            onSelectionChange={({ nodes: sel }) => setSelectedNodeIds(sel.map((n) => n.id))}
+            nodeTypes={nodeTypes}
+            defaultEdgeOptions={{
+              type: 'default',
+              markerEnd: { type: MarkerType.ArrowClosed, color: 'rgba(124,58,237,0.7)' },
+              style: { stroke: 'rgba(124,58,237,0.55)', strokeWidth: 1.6 },
+            }}
+            snapToGrid
+            snapGrid={[22, 22]}
+            deleteKeyCode={['Delete', 'Backspace']}
+            selectionOnDrag
+            selectionKeyCode="Shift"
+            multiSelectionKeyCode="MetaOrControl"
+            minZoom={0.2}
+            maxZoom={2}
+            fitView
+            fitViewOptions={{ padding: 0.25 }}
+            colorMode={dark ? 'dark' : 'light'}
+            className="bg-transparent"
+          >
+            <Background variant={BackgroundVariant.Dots} gap={22} size={1.5} color={dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.10)'} />
+            <Controls showInteractive={false} />
+            <MiniMap
+              pannable
+              zoomable
+              nodeStrokeWidth={3}
+              nodeColor={(n) => MINIMAP_COLOR[(n.type as WfNodeType) ?? 'llm']}
+              maskColor={dark ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.06)'}
+            />
+          </ReactFlow>
+        )}
 
-            {/* 节点层 */}
-            {active.nodes.map((node) => {
-              const isSel = node.id === selectedId;
-              return (
-                <div
-                  key={node.id}
-                  ref={(el) => { if (el) commitHeight(node.id, el.offsetHeight); }}
-                  onPointerDown={(e) => onNodePointerDown(e, node)}
-                  onContextMenu={(e) => onNodeContextMenu(e, node)}
-                  className={`absolute cursor-grab select-none rounded-xl border bg-white/90 shadow-sm backdrop-blur transition-shadow dark:bg-stone-900/80 ${
-                    isSel
-                      ? 'z-10 border-violet-400 shadow-md ring-2 ring-violet-500/20'
-                      : 'border-neutral-200/80 hover:border-violet-300 dark:border-stone-700/70'
-                  } ${node.status === 'running' ? '!border-violet-400' : ''} ${node.status === 'error' ? '!border-red-400' : ''} ${node.status === 'ok' ? '!border-emerald-400' : ''}`}
-                  style={{ left: node.x, top: node.y, width: NODE_W }}
-                >
-                  <span className="absolute left-1/2 -top-[5px] h-2.5 w-2.5 -translate-x-1/2 rounded-full border border-violet-400 bg-white dark:bg-stone-900" title="输入" />
-                  <div className="flex items-center gap-2 px-3 pt-2.5">
-                    <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${TYPE_TINT[node.type]}`}>
-                      {TYPE_ICON[node.type]}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-xs font-semibold text-neutral-800 dark:text-stone-100">{node.label}</span>
-                    <span className="text-[10px] uppercase tracking-wide text-neutral-400 dark:text-stone-500">{node.id}</span>
-                    {node.status === 'running' && <Loader2 size={13} className="animate-spin text-violet-500" />}
-                    {node.status === 'ok' && <CheckCircle2 size={13} className="text-emerald-500" />}
-                    {node.status === 'error' && <XCircle size={13} className="text-red-500" />}
-                  </div>
-                  <div className="mt-1.5 flex items-center gap-1.5 px-3 pb-2">
-                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${TYPE_TINT[node.type]}`}>{TYPE_NAME[node.type]}</span>
-                    <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-400 dark:text-stone-500">
-                      {summaryOf(node)}
-                    </span>
-                  </div>
-                  {node.output && (
-                    node.output.startsWith('data:image') ? (
-                      <div className="mx-2 mb-2">
-                        <img src={node.output} alt="" className="max-h-40 w-full rounded-md border border-neutral-200 object-cover dark:border-stone-700" />
-                      </div>
-                    ) : (
-                      <div className="mx-2 mb-2 max-h-16 overflow-y-auto rounded-md bg-black/5 px-2 py-1.5 text-[11px] leading-relaxed text-neutral-500 dark:bg-black/30 dark:text-stone-400">
-                        {node.output}
-                      </div>
-                    )
-                  )}
-                  <span className="absolute bottom-[-5px] left-1/2 h-2.5 w-2.5 -translate-x-1/2 rounded-full border border-emerald-500 bg-white dark:bg-stone-900" title="输出" />
-                </div>
-              );
-            })}
-
-            {active.nodes.length === 0 && (
-              <div className="pointer-events-none mt-16 flex flex-col items-center text-center text-neutral-400 dark:text-stone-500">
-                <GitBranch size={28} className="mb-2 opacity-40" />
-                <div className="text-sm font-medium text-neutral-500 dark:text-stone-400">画布为空</div>
-                <div className="mt-1 max-w-xs text-xs">右键空白处新建节点，或在上方输入需求「生成蓝图」。</div>
-              </div>
-            )}
+        {/* 空画布提示 + 快捷新建 */}
+        {doc && doc.nodes.length === 0 && !planning && !running && (
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center text-neutral-400 dark:text-stone-500">
+            <GitBranchPlaceholder />
+            <div className="text-sm font-medium text-neutral-500 dark:text-stone-400">画布为空</div>
+            <div className="mt-1 max-w-xs text-xs">右键空白处新建节点，或在上方输入需求「生成蓝图」。</div>
           </div>
+        )}
+        {doc && doc.nodes.length === 0 && !planning && !running && (
+          <button
+            onClick={() => addNode('prompt')}
+            className="absolute right-8 top-4 z-20 flex items-center gap-1 rounded-lg border border-violet-500/40 bg-white/90 px-3 py-1.5 text-xs font-medium text-violet-600 shadow-sm transition-colors hover:bg-violet-50 dark:bg-stone-800/90 dark:text-violet-400 dark:hover:bg-stone-700/70"
+          >
+            <Plus size={14} /> 新建起始节点
+          </button>
         )}
       </div>
 
       {/* 选中节点：属性底栏 */}
-      {active && editingId && (() => {
-        const node = active.nodes.find((n) => n.id === editingId);
-        if (!node) return null;
-        return (
-          <div className="shrink-0 border-t border-neutral-200/60 px-4 py-3 dark:border-stone-700/60">
-            <div className="mb-2 flex items-center gap-2">
-              <span className={`flex h-6 w-6 items-center justify-center rounded-md ${TYPE_TINT[node.type]}`}>{TYPE_ICON[node.type]}</span>
-              <input
-                value={node.label}
-                onChange={(e) => patchNode(node.id, { label: e.target.value })}
-                className="h-7 w-44 rounded-lg border border-transparent bg-transparent px-2 text-sm font-semibold text-neutral-800 outline-none transition-colors hover:border-neutral-300 focus:border-violet-400 dark:text-stone-100"
-              />
-              <span className="text-[11px] text-neutral-400 dark:text-stone-500">[{TYPE_NAME[node.type]}]</span>
-              <div className="flex items-center gap-1">
-                {(['prompt', 'llm', 'image', 'output'] as WfNodeType[]).map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => patchNode(node.id, { type: t })}
-                    className={`btn-press rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
-                      node.type === t ? 'bg-violet-500/10 text-violet-600 dark:text-violet-400' : 'text-neutral-400 hover:bg-black/5 dark:hover:bg-white/5'
-                    }`}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-              <div className="ml-auto flex items-center gap-2">
-                <button onClick={() => deleteNode(node.id)} className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-red-500 hover:bg-red-500/10">
-                  <Trash2 size={13} /> 删除
+      {editingNode && (
+        <div className="shrink-0 border-t border-neutral-200/60 px-4 py-3 dark:border-stone-700/60">
+          <div className="mb-2 flex items-center gap-2">
+            <span className={`flex h-6 w-6 items-center justify-center rounded-md ${TYPE_TINT[editingNode.type]}`}>{TYPE_ICON[editingNode.type]}</span>
+            <input
+              value={editingNode.label}
+              onChange={(e) => editNode(editingNode.id, { label: e.target.value })}
+              className="h-7 w-44 rounded-lg border border-transparent bg-transparent px-2 text-sm font-semibold text-neutral-800 outline-none transition-colors hover:border-neutral-300 focus:border-violet-400 dark:text-stone-100"
+            />
+            <span className="text-[11px] text-neutral-400 dark:text-stone-500">[{TYPE_NAME[editingNode.type]}]</span>
+            <div className="flex items-center gap-1">
+              {(['prompt', 'llm', 'image', 'output'] as WfNodeType[]).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => editNode(editingNode.id, { type: t })}
+                  className={`btn-press rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                    editingNode.type === t ? 'bg-violet-500/10 text-violet-600 dark:text-violet-400' : 'text-neutral-400 hover:bg-black/5 dark:hover:bg-white/5'
+                  }`}
+                >
+                  {TYPE_NAME[t]}
                 </button>
-                <button onClick={() => setEditingId(null)} className="btn-press rounded-md p-1 text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-300" title="关闭">
-                  <X size={14} />
-                </button>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {TYPE_PARAMS[node.type].map((k) => (
-                <label key={k} className="flex items-center gap-2 text-xs text-neutral-500 dark:text-stone-400">
-                  <span className="w-16 shrink-0">{k}</span>
-                  <input
-                    value={node.params[k] ?? ''}
-                    onChange={(e) => patchNode(node.id, { params: { ...node.params, [k]: e.target.value } })}
-                    placeholder={k}
-                    className="h-7 min-w-0 flex-1 rounded-md border border-neutral-300/60 bg-white/60 px-2 text-xs text-neutral-800 outline-none transition-colors focus:border-violet-400 dark:border-stone-700/60 dark:bg-stone-800/40 dark:text-stone-200"
-                  />
-                </label>
               ))}
-              {activeEdgesForSel.length > 0 && (
-                <div className="col-span-2 flex flex-wrap items-center gap-1.5 text-[11px] text-neutral-400 dark:text-stone-500">
-                  <span>连线：</span>
-                  {activeEdgesForSel.map((e) => {
-                    const otherId = e.source === node.id ? e.target : e.source;
-                    const other = active.nodes.find((n) => n.id === otherId);
-                    return (
-                      <span key={e.id} className="flex items-center gap-1 rounded-md bg-black/5 px-1.5 py-0.5 dark:bg-white/5">
-                        {other?.label ?? otherId}
-                        <button onClick={() => deleteEdge(e.id)} className="text-neutral-400 hover:text-red-500" title="删连线">
-                          <X size={11} />
-                        </button>
-                      </span>
-                    );
-                  })}
-                </div>
-              )}
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              <button onClick={() => deleteNode(editingNode.id)} className="btn-press flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-red-500 hover:bg-red-500/10">
+                <Trash2 size={13} /> 删除
+              </button>
+              <button onClick={() => setEditingId(null)} className="btn-press rounded-md p-1 text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-300" title="关闭">
+                <X size={14} />
+              </button>
             </div>
           </div>
-        );
-      })()}
+          <div className="grid grid-cols-2 gap-2">
+            {TYPE_PARAMS[editingNode.type].map((k) => (
+              <label key={k} className="flex items-center gap-2 text-xs text-neutral-500 dark:text-stone-400">
+                <span className="w-16 shrink-0">{k}</span>
+                <input
+                  value={editingNode.params[k] ?? ''}
+                  onChange={(e) => editNode(editingNode.id, { params: { ...editingNode.params, [k]: e.target.value } })}
+                  placeholder={k}
+                  className="h-7 min-w-0 flex-1 rounded-lg border border-neutral-300/60 bg-white/60 px-2 text-xs text-neutral-800 outline-none transition-colors focus:border-violet-400 dark:border-stone-700/60 dark:bg-stone-800/40 dark:text-stone-200"
+                />
+              </label>
+            ))}
+            {activeEdgesForSel.length > 0 && (
+              <div className="col-span-2 flex flex-wrap items-center gap-1.5 text-[11px] text-neutral-400 dark:text-stone-500">
+                <span>连线：</span>
+                {activeEdgesForSel.map((e) => {
+                  const otherId = e.source === editingNode.id ? e.target : e.source;
+                  const other = doc?.nodes.find((n) => n.id === otherId);
+                  return (
+                    <span key={e.id} className="flex items-center gap-1 rounded-md bg-black/5 px-1.5 py-0.5 dark:bg-white/5">
+                      {other?.label ?? otherId}
+                      <button onClick={() => deleteEdge(e.id)} className="text-neutral-400 hover:text-red-500" title="删连线">
+                        <X size={11} />
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 运行日志 + 错误 */}
       {(logs.length > 0 || error) && (
@@ -644,26 +832,19 @@ export const AiWorkflowView = memo(function AiWorkflowView({
       )}
 
       {/* ===== 右键上下文菜单（节点 / 空白画布） ===== */}
-      {menu && (
+      {menu && menuPos && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
           <div
             className="fixed z-50 min-w-[180px] overflow-hidden rounded-xl border border-neutral-200/80 bg-white/95 p-1 shadow-xl backdrop-blur dark:border-stone-700/70 dark:bg-stone-900/95"
-            style={{ left: menu.x, top: menu.y }}
+            style={{ left: menuPos.left, top: menuPos.top }}
             onClick={(e) => e.stopPropagation()}
           >
             {menu.nodeId ? (
               <>
                 <div className="px-3 py-1.5 text-[11px] font-semibold text-neutral-400 dark:text-stone-500">节点</div>
                 <MenuItem onClick={() => { setEditingId(menu.nodeId!); setMenu(null); }} icon={<Pencil size={14} />} label="编辑参数 / 改名" />
-                {nodeTargets.length > 0 && (
-                  <>
-                    <div className="my-1 flex items-center gap-1 px-3 text-[11px] text-neutral-400 dark:text-stone-500"><GitBranch size={12} /> 建立连线到…</div>
-                    {nodeTargets.slice(0, 8).map((t) => (
-                      <MenuItem key={t.id} onClick={() => addEdge(menu.nodeId!, t.id)} icon={<GitBranch size={13} />} label={t.label} indent />
-                    ))}
-                  </>
-                )}
+                <div className="my-1 px-3 text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">按住右侧端口拖到别的节点左侧即可连线</div>
                 <MenuSep />
                 <MenuItem onClick={() => deleteNode(menu.nodeId!)} icon={<Trash2 size={14} />} label="删除节点" danger />
               </>
@@ -676,36 +857,34 @@ export const AiWorkflowView = memo(function AiWorkflowView({
                 <MenuItem onClick={() => addNode('output')} icon={TYPE_ICON.output} label="产出 (output)" />
                 <MenuSep />
                 <MenuItem onClick={generateBlueprint} icon={<Wand2 size={14} />} label="按任务生成蓝图" />
-                <MenuItem onClick={autoLayout} icon={<LayoutGrid size={14} />} label="重新排列节点" />
+                <MenuItem onClick={autoLayout} icon={<LayoutGrid size={14} />} label="按连线分层重排" />
                 <MenuItem onClick={clearCanvas} icon={<Eraser size={14} />} label="清空画布" danger />
               </>
             )}
           </div>
         </>
       )}
-
-      {/* 顶部「新建节点」快捷按钮（空白画布也可快速起手） */}
-      {active && active.nodes.length === 0 && !planning && !running && (
-        <button
-          onClick={() => addNode('prompt')}
-          className="absolute right-8 top-16 z-20 flex items-center gap-1 rounded-lg border border-violet-500/40 bg-white/90 px-3 py-1.5 text-xs font-medium text-violet-600 shadow-sm transition-colors hover:bg-violet-50 dark:bg-stone-800/90 dark:text-violet-400 dark:hover:bg-stone-700/70"
-        >
-          <Plus size={14} /> 新建起始节点
-        </button>
-      )}
     </div>
   );
-});
+}
+
+/** 空画布占位图标（避免在 JSX 条件里直接写大组件） */
+function GitBranchPlaceholder() {
+  return (
+    <span className="mb-2 flex h-14 w-14 items-center justify-center rounded-2xl bg-black/5 dark:bg-white/5">
+      <LayoutGrid size={26} className="opacity-40" />
+    </span>
+  );
+}
 
 /** 节点参数摘要（展示用） */
-function summaryOf(node: WfNode): string {
-  const p = node.params;
-  if (node.type === 'prompt') return p.prompt || '（空输入）';
-  if (node.type === 'llm') {
+function summaryOf(type: WfNodeType, p: Record<string, string>): string {
+  if (type === 'prompt') return p.prompt || '（空输入）';
+  if (type === 'llm') {
     const src = p.prompt || '';
     return src ? (src.length > 30 ? src.slice(0, 30) + '…' : src) : '（含引用前序输出）';
   }
-  if (node.type === 'image') {
+  if (type === 'image') {
     const s = p.prompt || '';
     return s ? (s.length > 30 ? s.slice(0, 30) + '…' : s) : '（图像生成）';
   }
@@ -713,15 +892,15 @@ function summaryOf(node: WfNode): string {
   return p.content ? `${t} · 自定义内容` : `${t} · 自动汇聚上游`;
 }
 
-function MenuItem({ onClick, icon, label, danger, indent }: {
-  onClick: () => void; icon: React.ReactNode; label: string; danger?: boolean; indent?: boolean;
+function MenuItem({ onClick, icon, label, danger }: {
+  onClick: () => void; icon: React.ReactNode; label: string; danger?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
       className={`flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition-colors ${
-        indent ? 'pl-7 ' : ''
-      }${danger ? 'text-red-500 hover:bg-red-500/10' : 'text-neutral-700 hover:bg-violet-500/10 dark:text-stone-200'}`}
+        danger ? 'text-red-500 hover:bg-red-500/10' : 'text-neutral-700 hover:bg-violet-500/10 dark:text-stone-200'
+      }`}
     >
       <span className={`shrink-0 ${danger ? '' : 'text-neutral-400 dark:text-stone-500'}`}>{icon}</span>
       {label}
@@ -730,9 +909,14 @@ function MenuItem({ onClick, icon, label, danger, indent }: {
 }
 
 function MenuSep() {
-  return <div className="my-1 h-px bg-neutral-200/70 dark:bg-stone-700/60" />;
+  return <div className="my-1 h-px bg-neutral-200/70 dark:bg-stone-700/70" />;
 }
 
-AiWorkflowView.displayName = 'AiWorkflowView';
-
-export default AiWorkflowView;
+/** 导出件：包 ReactFlowProvider（useReactFlow 需要） */
+export const AiWorkflowView = memo(function AiWorkflowView(props: AiWorkflowViewProps) {
+  return (
+    <ReactFlowProvider>
+      <AiWorkflowCanvas {...props} />
+    </ReactFlowProvider>
+  );
+});
