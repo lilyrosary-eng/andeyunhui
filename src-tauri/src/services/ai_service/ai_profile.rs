@@ -266,7 +266,31 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
             }
         };
     }
-    let v1: AiProfiles = serde_json::from_value(raw.clone()).unwrap_or_default();
+    let v1: AiProfiles = if raw.get("profiles").is_some() {
+        serde_json::from_value(raw.clone()).unwrap_or_default()
+    } else if raw.get("base_url").is_some() {
+        // 最老格式：整份文件就是单个 AiProfile（见 v1 的 read_profiles_disk 旧分支）
+        serde_json::from_value::<AiProfile>(raw.clone())
+            .map(|p| {
+                let id = if p.id.trim().is_empty() {
+                    "legacy".to_string()
+                } else {
+                    p.id.clone()
+                };
+                let name = if p.name.trim().is_empty() {
+                    p.display_name()
+                } else {
+                    p.name.clone()
+                };
+                AiProfiles {
+                    profiles: vec![AiProfile { id, name, ..p }],
+                    active: None,
+                }
+            })
+            .unwrap_or_default()
+    } else {
+        AiProfiles::default()
+    };
 
     let mut cfg = AiConfig::default();
     // (base_url, 明文 key) → cfg.providers 中的下标
@@ -1056,5 +1080,25 @@ mod v2_tests {
     fn 解析_上下文上限缺省20万() {
         let cfg = cfg_with();
         assert_eq!(resolve_target(&cfg, Some("p_aaa")).context_cap(), 200_000);
+    }
+
+    // ---------- 最老单份格式（整份文件即单个 AiProfile，无 profiles 包装） ----------
+
+    #[test]
+    fn 最老单份格式也被迁移() {
+        // 整份文件就是一个 AiProfile，没有 profiles 包装
+        let raw = json!({ "id": "legacy", "name": "旧配置", "base_url": "http://x/v1",
+                          "api_key": "sk-z", "model": "m" });
+        let cfg = migrate_v1_to_v2(&raw);
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers[0].models[0].id, "legacy");
+        assert_eq!(cfg.providers[0].models[0].model, "m");
+    }
+
+    #[test]
+    fn 最老单份格式_id为空时兜底() {
+        let raw = json!({ "base_url": "http://x/v1", "api_key": "k", "model": "gpt-4o" });
+        let cfg = migrate_v1_to_v2(&raw);
+        assert_eq!(cfg.providers[0].models[0].id, "legacy");
     }
 }
