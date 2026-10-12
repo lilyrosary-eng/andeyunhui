@@ -521,6 +521,10 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       messages: safeMessages(history.map((m) => ({ role: m.role, content: m.content }))),
       stream: true,
       system,
+      // 伴侣发言 → 伴侣人设优先：排斥后端「模型级全局人设」（compose_persona_system）。
+      // 否则该伴侣绑定 profile 的 persona_* 会与上面的伴侣人设双层叠加，
+      // 本地小上下文模型被两套人设+引导塞爆 → 严重思考/无法输出/CPU 拉满（实测复现）。
+      exclude_global_persona: true,
     };
 
     try {
