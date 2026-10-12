@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
+use super::ai_profile::Caps;
+use super::caps_infer::infer_caps;
+
 pub const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -23,6 +26,9 @@ pub struct DiscoveredModel {
     pub context_tokens: Option<u64>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
+    /// 按模型名推断的能力标记，由 caps_infer::infer_caps 填充
+    #[serde(default)]
+    pub caps: Caps,
 }
 
 fn nonempty_str(v: Option<&serde_json::Value>) -> Option<String> {
@@ -44,6 +50,7 @@ fn parse_openai_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
         context_tokens: pos_u64(e.get("context_window"))
             .or_else(|| pos_u64(e.get("context_length"))),
         max_tokens: pos_u64(e.get("max_output_tokens")).or_else(|| pos_u64(e.get("max_tokens"))),
+        caps: Caps::default(),
     })
 }
 
@@ -51,7 +58,7 @@ fn parse_openai_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
 /// 取不到容量字段——Ollama 原生的 /api/tags 不报 context。
 fn parse_ollama_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
     let model = nonempty_str(e.get("model")).or_else(|| nonempty_str(e.get("name")))?;
-    Some(DiscoveredModel { model, label: nonempty_str(e.get("name")), context_tokens: None, max_tokens: None })
+    Some(DiscoveredModel { model, label: nonempty_str(e.get("name")), context_tokens: None, max_tokens: None, caps: Caps::default() })
 }
 
 /// 按响应体形状自动解析：先试 OpenAI 的 `data[]`，再试 Ollama 的 `models[]`。
@@ -59,10 +66,10 @@ fn parse_ollama_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
 /// 在用户看来完全一样，报错比给出错误列表诚实。
 pub fn parse_listing(body: &serde_json::Value) -> Result<Vec<DiscoveredModel>, String> {
     if let Some(data) = body.get("data").and_then(|v| v.as_array()) {
-        return Ok(data.iter().filter_map(parse_openai_entry).collect());
+        return Ok(with_caps(data.iter().filter_map(parse_openai_entry).collect()));
     }
     if let Some(models) = body.get("models").and_then(|v| v.as_array()) {
-        return Ok(models.iter().filter_map(parse_ollama_entry).collect());
+        return Ok(with_caps(models.iter().filter_map(parse_ollama_entry).collect()));
     }
     let keys: Vec<String> = body
         .as_object()
@@ -72,6 +79,15 @@ pub fn parse_listing(body: &serde_json::Value) -> Result<Vec<DiscoveredModel>, S
         "响应里既没有 data 也没有 models 数组（实际顶层键：{}）。请确认填的是 API 端点（如 https://x/v1），不是网页地址。",
         if keys.is_empty() { "无".to_string() } else { keys.join(", ") }
     ))
+}
+
+/// 给解析出的模型批量补上按模型名推断的能力标记。
+/// 能力推断只有后端有（caps_infer），前端不复制推断表。
+fn with_caps(mut models: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
+    for m in models.iter_mut() {
+        m.caps = infer_caps(&m.model);
+    }
+    models
 }
 
 /// 4 MiB 上限的两段式检查。抽成纯函数是因为 reqwest::Response 不好在单测里构造。
@@ -380,5 +396,14 @@ mod tests {
     fn 上限_无声明时只看累加() {
         assert!(size_guard(None, 100).is_ok());
         assert!(size_guard(None, MAX_RESPONSE_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn 解析_附带推断的能力标记() {
+        let body = json!({ "data": [{ "id": "qwen2.5-vl-72b" }, { "id": "nomic-embed-text" }] });
+        let m = parse_listing(&body).unwrap();
+        assert!(m[0].caps.vision);
+        assert!(m[1].caps.embedding);
+        assert!(!m[1].caps.text);
     }
 }

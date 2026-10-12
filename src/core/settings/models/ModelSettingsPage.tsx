@@ -6,7 +6,7 @@ import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { fromConfig, toConfig, type ConfigUi, type ModelUi, type ProviderUi } from '../aiConfigCodec';
 import { ProviderCard } from './ProviderCard';
-import { DiscoverModelsDialog } from './DiscoverModelsDialog';
+import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
 import { bestScore } from '@/lib/fuzzy';
 
 const newId = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
@@ -212,7 +212,7 @@ export function ModelSettingsPage() {
       <DiscoverModelsDialog
         provider={discoverSeed}
         onClose={closeDiscover}
-        onAdopt={(baseUrl: string, apiKey: string, models: ModelUi[]) => {
+        onAdopt={(baseUrl: string, apiKey: string, models: AdoptedModel[]) => {
           if (discoverFor === '__new__') {
             const p = blankProvider(baseUrl);
             p.api_key = apiKey;

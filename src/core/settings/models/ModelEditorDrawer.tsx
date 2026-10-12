@@ -43,17 +43,17 @@ export function ModelEditorDrawer(props: ModelEditorDrawerProps) {
           </div>
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <label className={labelCls}>temperature</label>
+              <label className={labelCls}>{t('modelSettings.temperature')}</label>
               <input className={inputCls} value={m.temperature} placeholder="0.3"
                 onChange={(e) => set({ temperature: e.target.value })} />
             </div>
             <div>
-              <label className={labelCls}>top_p</label>
+              <label className={labelCls}>{t('modelSettings.topP')}</label>
               <input className={inputCls} value={m.top_p} placeholder="0~1"
                 onChange={(e) => set({ top_p: e.target.value })} />
             </div>
             <div>
-              <label className={labelCls}>max_tokens</label>
+              <label className={labelCls}>{t('modelSettings.maxTokens')}</label>
               <input className={inputCls} value={m.max_tokens}
                 onChange={(e) => set({ max_tokens: e.target.value })} />
             </div>

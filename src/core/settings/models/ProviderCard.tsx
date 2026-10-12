@@ -114,23 +114,23 @@ export function ProviderCard(props: ProviderCardProps) {
           {/* 端点配置：只在这时候暴露，避免折叠状态下塞满表单 */}
           <div className="px-4 pb-3 grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-neutral-100 dark:border-stone-800">
             <div>
-              <label className={labelCls}>{t('modelSettings.providerName')}</label>
+              <label className={labelCls}>{t('modelSettings.providerLabel')}</label>
               <input className={inputCls} value={p.name} placeholder={t('modelSettings.unnamedProvider')}
                 onChange={(e) => props.onPatchProvider({ name: e.target.value })} />
             </div>
             <div>
-              <label className={labelCls}>{t('modelSettings.baseUrl')}</label>
+              <label className={labelCls}>{t('modelSettings.endpointLabel')}</label>
               <input className={inputCls} value={p.base_url} placeholder="https://api.deepseek.com/v1"
                 onChange={(e) => props.onPatchProvider({ base_url: e.target.value })} />
             </div>
             <div>
-              <label className={labelCls}>{t('modelSettings.apiKey')}</label>
+              <label className={labelCls}>{t('modelSettings.apiKeyLabel')}</label>
               <input className={inputCls} type="password" value={p.api_key} placeholder="sk-..."
                 onChange={(e) => props.onPatchProvider({ api_key: e.target.value })} />
             </div>
             <div className="grid grid-cols-3 gap-2">
               <div>
-                <label className={labelCls}>{t('modelSettings.visionModel')}</label>
+                <label className={labelCls}>{t('modelSettings.visionModelLabel')}</label>
                 <input className={inputCls} value={p.vision_model}
                   onChange={(e) => props.onPatchProvider({ vision_model: e.target.value })} />
               </div>
