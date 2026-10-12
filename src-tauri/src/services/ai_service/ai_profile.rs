@@ -160,10 +160,14 @@ pub struct Overrides {
 /// 供应商 = 一个端点 + 一把 key，旗下挂多个模型。
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Provider {
+    /// 缺失时降级为空串而非让整份配置解析失败——见 migrate_v1_to_v2 的说明
+    #[serde(default)]
     pub id: String,
     /// 空则 UI 回落到 base_url 的主机名
     #[serde(default)]
     pub name: String,
+    /// 缺失时降级为空串：宁可少一个端点，也不要让用户看到「档案全没了」
+    #[serde(default)]
     pub base_url: String,
     /// API Key（Bearer）。AES-GCM 加密在这一层，不是每个模型一份。
     #[serde(default)]
@@ -186,8 +190,10 @@ pub struct Provider {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ModelEntry {
     /// ★ 沿用 v1 的 profile.id，见上方注释
+    #[serde(default)]
     pub id: String,
     /// 上游真实模型名，如 "qwen3:8b"
+    #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub label: Option<String>,
@@ -240,9 +246,20 @@ fn provider_id_for(base_url: &str, plain_key: &str) -> String {
 ///
 /// 分组键必须用**解密后的明文**：每次加密都用随机 salt/IV，同一明文两次密文不同，
 /// 用密文分组会把同一把 key 拆成两个供应商。
+///
+/// 整份解析失败一律退回空配置，但**必须打日志**：静默清空等于告诉用户「档案全没了」，
+/// 比报错难查得多。所以各字段都带 `#[serde(default)]`，让单个字段缺失不至于报废整份配置，
+/// 真到了整体无法解析的地步，日志里也留得下线索。
 pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
     if raw.get("providers").is_some() {
-        return serde_json::from_value(raw.clone()).unwrap_or_default();
+        // 已经是 v2。解析失败必须留痕——静默退回空配置等于告诉用户「档案全没了」
+        return match serde_json::from_value(raw.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("[ai_profile] v2 配置解析失败，按空配置处理: {}", e);
+                AiConfig::default()
+            }
+        };
     }
     let v1: AiProfiles = serde_json::from_value(raw.clone()).unwrap_or_default();
 
@@ -251,7 +268,10 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
     let mut groups: Vec<((String, String), usize)> = Vec::new();
 
     for p in &v1.profiles {
-        let plain_key = decrypt_secret(&p.api_key).unwrap_or_else(|_| p.api_key.clone());
+        // 解密失败按空串处理，与 decrypt_profile_keys 既有行为一致。
+        // 不能退回密文：AES-GCM 每次随机 salt/IV，同一把 key 的多条档案密文各不相同，
+        // 用密文分组会把一个供应商拆成 N 个。
+        let plain_key = decrypt_secret(&p.api_key).unwrap_or_default();
         let group_key = (p.base_url.clone(), plain_key.clone());
         let idx = match groups.iter().find(|(k, _)| *k == group_key) {
             Some((_, i)) => *i,
@@ -704,5 +724,38 @@ mod v2_tests {
         let cfg = migrate_v1_to_v2(&json!({}));
         assert!(cfg.providers.is_empty());
         assert!(cfg.selection.model_id.is_none());
+    }
+
+    #[test]
+    fn 迁移_解不开的key归到空串组不分裂() {
+        // 同端点、两条解不开的 key（密文各不相同）应合并成一个供应商
+        let raw = json!({ "profiles": [
+            { "id": "a", "base_url": "http://x/v1", "api_key": "enc:v1:AAAA", "model": "m1" },
+            { "id": "b", "base_url": "http://x/v1", "api_key": "enc:v1:BBBB", "model": "m2" }
+        ]});
+        let cfg = migrate_v1_to_v2(&raw);
+        assert_eq!(cfg.providers.len(), 1, "解不开的 key 不该把供应商拆开");
+        assert_eq!(cfg.providers[0].models.len(), 2);
+    }
+
+    #[test]
+    fn v2缺字段不报废整份配置() {
+        // 缺 ModelEntry.model 也应解析成功，而不是整份变空
+        let raw = json!({ "providers": [{ "id": "pv_1", "base_url": "http://x/v1",
+                                         "models": [{ "id": "m1" }] }] });
+        let cfg = migrate_v1_to_v2(&raw);
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers[0].models.len(), 1);
+        assert_eq!(cfg.providers[0].models[0].id, "m1");
+    }
+
+    #[test]
+    fn v2缺供应商字段不报废整份配置() {
+        // 缺 Provider.id / base_url 也应解析成功，模型条目一个都不能少
+        let raw = json!({ "providers": [{ "models": [{ "id": "m1", "model": "gpt-x" }] }] });
+        let cfg = migrate_v1_to_v2(&raw);
+        assert_eq!(cfg.providers.len(), 1, "供应商缺字段不该让整份配置报废");
+        assert_eq!(cfg.providers[0].id, "");
+        assert_eq!(cfg.providers[0].models[0].model, "gpt-x");
     }
 }
