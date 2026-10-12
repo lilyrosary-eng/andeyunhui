@@ -87,7 +87,7 @@ const CM_PACKAGES = [
   'codemirror',
   '@codemirror/state', '@codemirror/view', '@codemirror/commands',
   '@codemirror/language', '@codemirror/search', '@codemirror/autocomplete',
-  '@codemirror/lint', '@codemirror/theme-one-dark',
+  '@codemirror/lint', '@codemirror/tooltip', '@codemirror/theme-one-dark',
   '@codemirror/lang-javascript', '@codemirror/lang-python', '@codemirror/lang-html',
   '@codemirror/lang-css', '@codemirror/lang-json',
   'style-mod', 'w3c-keyname', 'crelt',
