@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, AiProfile};
+use crate::services::ai_service::ai_profile::{ResolvedTarget, load_config, resolve_target};
 use crate::services::mcp_service;
 use crate::services::{git_service, lsp_service, rag_service, skill_service};
 use crate::services::sandbox_service;
@@ -2064,7 +2064,7 @@ enum SubRound {
 async fn subagent_model_round(
     client: &reqwest::Client,
     url: &str,
-    cfg: &AiProfile,
+    cfg: &ResolvedTarget,
     messages: &mut Vec<serde_json::Value>,
     tools: &[serde_json::Value],
     sub_ctx: &ToolContext,
@@ -2143,7 +2143,7 @@ async fn idle_wait_for_input(inbox: &mut mpsc::Receiver<String>, cancel: &Arc<At
 async fn run_subagent_once(
     app: &AppHandle,
     request_id: &str,
-    cfg: &AiProfile,
+    cfg: &ResolvedTarget,
     role: &str,
     task: &str,
     project_root: Option<PathBuf>,
@@ -2193,7 +2193,7 @@ async fn run_subagent_once(
 async fn run_subagent_worker(
     app: AppHandle,
     child_id: String,
-    cfg: AiProfile,
+    cfg: ResolvedTarget,
     role: String,
     task: String,
     project_root: Option<PathBuf>,
@@ -2332,7 +2332,7 @@ async fn run_subagent_worker(
 fn spawn_subagent_background(
     app: &AppHandle,
     parent_request_id: &str,
-    cfg: &AiProfile,
+    cfg: &ResolvedTarget,
     role: &str,
     task: &str,
     project_root: Option<PathBuf>,
@@ -2510,8 +2510,8 @@ impl AiTool for SubagentTool {
         }
         let role = args.get("role").and_then(|v| v.as_str()).unwrap_or("子助手").to_string();
         let bg = args.get("run_in_background").and_then(|v| v.as_bool()).unwrap_or(false);
-        let profiles = load_profiles(&ctx.app);
-        let cfg = resolve_profile(&profiles, ctx.profile_id.clone());
+        let config = load_config(&ctx.app);
+        let cfg = resolve_target(&config, ctx.profile_id.as_deref());
 
         if bg {
             // 后台可继续：spawn worker 返回 child_id，控制面/settle 依赖注册表与全局队列。
@@ -3229,7 +3229,7 @@ mod tests {
     #[test]
     fn spawn_background_registers_and_interrupt_cleans() {
         // 最小假档案（不发真实请求；仅验证注册/中断清理的簿记）。
-        let mut cfg = AiProfile::default();
+        let mut cfg = ResolvedTarget::default();
         cfg.base_url = "http://127.0.0.1:1/v1".into();
         cfg.api_key = "x".into();
         cfg.model = "dummy".into();
@@ -3247,7 +3247,7 @@ mod tests {
 
     #[test]
     fn send_message_to_done_child_is_rejected() {
-        let mut cfg = AiProfile::default();
+        let mut cfg = ResolvedTarget::default();
         cfg.base_url = "http://127.0.0.1:1/v1".into();
         cfg.api_key = "x".into();
         cfg.model = "dummy".into();
@@ -3261,7 +3261,7 @@ mod tests {
 
     #[test]
     fn list_subagents_groups_by_parent() {
-        let mut cfg = AiProfile::default();
+        let mut cfg = ResolvedTarget::default();
         cfg.base_url = "http://127.0.0.1:1/v1".into();
         cfg.api_key = "x".into();
         cfg.model = "dummy".into();
@@ -3283,7 +3283,7 @@ mod tests {
 #[cfg(test)]
 fn spawn_test_worker(
     parent: &str,
-    _cfg: &AiProfile,
+    _cfg: &ResolvedTarget,
     role: &str,
     task: &str,
 ) -> Result<String, String> {

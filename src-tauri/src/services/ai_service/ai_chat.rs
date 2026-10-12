@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
-use crate::services::ai_service::ai_profile::{AiProfile, load_profiles, resolve_profile, compose_persona_system, compose_effective_system, ensure_api_key};
+use crate::services::ai_service::ai_profile::{ResolvedTarget, load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
 
 /// 单条对话消息（OpenAI 格式）
 #[derive(Debug, Deserialize)]
@@ -20,7 +20,7 @@ pub struct ChatMessage {
 // Anthropic 允许最多 4 个 cache breakpoint；这里放 2 个：system + 倒数第 3 条消息。
 
 /// 检测是否为 Anthropic 提供商（通过模型名或 base_url 判断）
-fn is_anthropic_provider(cfg: &AiProfile) -> bool {
+fn is_anthropic_provider(cfg: &ResolvedTarget) -> bool {
     let model = cfg.model.to_lowercase();
     let base = cfg.base_url.to_lowercase();
     model.starts_with("claude")
@@ -29,7 +29,7 @@ fn is_anthropic_provider(cfg: &AiProfile) -> bool {
 }
 
 /// DeepSeek 提供商判定：base_url 含 deepseek（api.deepseek.com 等）。
-pub(crate) fn is_deepseek_provider(cfg: &AiProfile) -> bool {
+pub(crate) fn is_deepseek_provider(cfg: &ResolvedTarget) -> bool {
     cfg.base_url.to_lowercase().contains("deepseek")
 }
 
@@ -40,7 +40,7 @@ fn is_reasoning_effort_rejected(text: &str) -> bool {
 }
 
 /// 粗判提供商（用于用量统计分组）。优先看 base_url 域名，其次看模型名前缀。
-fn detect_provider(cfg: &AiProfile) -> String {
+fn detect_provider(cfg: &ResolvedTarget) -> String {
     let base = cfg.base_url.to_lowercase();
     let model = cfg.model.to_lowercase();
     if base.contains("deepseek") {
@@ -62,7 +62,7 @@ fn detect_provider(cfg: &AiProfile) -> String {
 }
 
 /// 请求结束收尾：触发 `chat.done` 钩点 + 把用量落库（幂等、尽力而为、异步）。
-fn fire_chat_done(app: &AppHandle, cfg: &AiProfile, request_id: &str, last_usage: &Option<serde_json::Value>) {
+fn fire_chat_done(app: &AppHandle, cfg: &ResolvedTarget, request_id: &str, last_usage: &Option<serde_json::Value>) {
     let app = app.clone();
     let profile_id = cfg.id.clone();
     let provider = detect_provider(cfg);
@@ -203,8 +203,8 @@ pub async fn ai_chat(
     // 满足「ai 对话启动伴侣模式后只走伴侣人设、不受全局 AI 人设控制」。
     exclude_global_persona: Option<bool>,
 ) -> Result<(), String> {
-    let profiles = load_profiles(&app);
-    let cfg = resolve_profile(&profiles, profile_id);
+    let config = load_config(&app);
+    let cfg = resolve_target(&config, profile_id.as_deref());
     ensure_api_key(&app, &request_id, &cfg)?;
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
@@ -459,7 +459,7 @@ pub async fn ai_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::ai_service::ai_profile::AiProfile;
+    use crate::services::ai_service::ai_profile::ResolvedTarget;
 
     fn msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
@@ -538,7 +538,7 @@ mod tests {
     // ---------- 提供商判定 ----------
     #[test]
     fn anthropic_provider_detection() {
-        let mut cfg = AiProfile::default();
+        let mut cfg = ResolvedTarget::default();
         cfg.model = "claude-sonnet-4".into();
         cfg.base_url = "https://api.anthropic.com".into();
         assert!(is_anthropic_provider(&cfg));
@@ -556,12 +556,12 @@ mod tests {
     // ---------- compose_persona_system ----------
     #[test]
     fn persona_all_empty_returns_empty() {
-        assert_eq!(compose_persona_system(&AiProfile::default()), "");
+        assert_eq!(compose_persona_system(&ResolvedTarget::default()), "");
     }
 
     #[test]
     fn persona_preset_maps_to_description() {
-        let mut cfg = AiProfile::default();
+        let mut cfg = ResolvedTarget::default();
         cfg.persona_preset = Some("sharp".into());
         let s = compose_persona_system(&cfg);
         assert!(s.contains("毒舌直率"));
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn persona_unknown_preset_falls_back_to_style() {
-        let mut cfg = AiProfile::default();
+        let mut cfg = ResolvedTarget::default();
         cfg.persona_preset = Some("custom".into());
         cfg.persona_style = Some("简洁".into());
         let s = compose_persona_system(&cfg);
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn persona_combines_all_parts() {
-        let mut cfg = AiProfile::default();
+        let mut cfg = ResolvedTarget::default();
         cfg.persona_preset = Some("gentle".into());
         cfg.persona_style = Some("多举例".into());
         cfg.persona_call_me_as = Some("小安".into());

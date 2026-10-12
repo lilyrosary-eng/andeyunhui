@@ -382,29 +382,6 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
     cfg
 }
 
-/// 首份默认档案（DeepSeek 占位，未填 key 时引导用户去设置）
-fn default_profile() -> AiProfile {
-    AiProfile {
-        id: "deepseek".to_string(),
-        name: "DeepSeek".to_string(),
-        base_url: "https://api.deepseek.com/v1".to_string(),
-        api_key: String::new(),
-        model: "deepseek-chat".to_string(),
-        vision_model: None,
-        temperature: default_temperature(),
-        max_tokens: None,
-        top_p: None,
-        system_prompt: None,
-        thinking: None,
-        persona_call_me_as: None,
-        persona_preset: None,
-        persona_style: None,
-        image_model: None,
-        tts_model: None,
-        max_context_tokens: None,
-    }
-}
-
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -414,9 +391,19 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("ai_config.json"))
 }
 
-// 解密档案内的 api_key（透明：非 enc:v1: 前缀的旧明文原样保留；解密失败置空并打日志）
-fn decrypt_profile_keys(profiles: &mut AiProfiles) {
-    for p in profiles.profiles.iter_mut() {
+// 解密供应商层级的 api_key 已并入 decrypt_provider_keys（见下方 CONFIG_CACHE 块）。
+
+/// 内存缓存（已解密的配置）：避免每次读取都跑一次费时的 scrypt 解密。
+/// 写路径（write_config / ai_set_profile_thinking）会刷新本缓存，保证最终一致。
+static CONFIG_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<AiConfig>>> =
+    std::sync::OnceLock::new();
+fn config_cache() -> &'static std::sync::Mutex<Option<AiConfig>> {
+    CONFIG_CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 解密供应商层级的 api_key（透明：非 enc:v1: 前缀的旧明文原样保留；解密失败置空并打日志）
+fn decrypt_provider_keys(cfg: &mut AiConfig) {
+    for p in cfg.providers.iter_mut() {
         if p.api_key.is_empty() {
             continue;
         }
@@ -430,12 +417,84 @@ fn decrypt_profile_keys(profiles: &mut AiProfiles) {
     }
 }
 
-/// 内存缓存（已解密的档案集合）：避免每次读取都跑一次费时的 scrypt 解密。
-/// 写路径（save_profiles / ai_set_profile_thinking）会刷新本缓存，保证最终一致。
-static PROFILE_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<AiProfiles>>> =
-    std::sync::OnceLock::new();
-fn profile_cache() -> &'static std::sync::Mutex<Option<AiProfiles>> {
-    PROFILE_CACHE.get_or_init(|| std::sync::Mutex::new(None))
+/// 读取配置（优先内存缓存，命中即毫秒级返回）。v1 文件在此自动迁移并落盘。
+pub fn load_config(app: &AppHandle) -> AiConfig {
+    if let Some(c) = config_cache().lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return c;
+    }
+    let fresh = read_config_disk(app);
+    *config_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh.clone());
+    fresh
+}
+
+/// 底层磁盘读取 + 迁移 + scrypt 解密（慢，仅冷路径执行一次）
+fn read_config_disk(app: &AppHandle) -> AiConfig {
+    let path = match config_path(app) {
+        Ok(p) => p,
+        Err(_) => return AiConfig::default(),
+    };
+    if !path.exists() {
+        return AiConfig::default();
+    }
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return AiConfig::default(),
+    };
+    if text.trim().is_empty() {
+        return AiConfig::default();
+    }
+    let raw: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[ai_profile] 配置不是合法 JSON: {}", e);
+            return AiConfig::default();
+        }
+    };
+    let was_v1 = raw.get("providers").is_none()
+        && (raw.get("profiles").is_some() || raw.get("base_url").is_some());
+    let mut cfg = migrate_v1_to_v2(&raw);
+    decrypt_provider_keys(&mut cfg);
+    if was_v1 {
+        // 首次迁移：立刻落盘 v2。原文件由 write_config 备份为 ai_config.json.bak
+        if let Err(e) = write_config(app, &cfg) {
+            log::warn!("[ai_profile] 迁移落盘失败: {}", e);
+        }
+    }
+    cfg
+}
+
+/// 保存配置；api_key 统一经 AES-256-GCM 加密落盘（透明）。
+/// 唯一写出口：所有「写入 ai_config.json」的路径都必须经过本函数，避免明文旁路。
+fn write_config(app: &AppHandle, cfg: &AiConfig) -> Result<(), String> {
+    let path = config_path(app)?;
+    // 迁移备份：只在首次迁移时创建，不覆盖已有备份（路径固定为 ai_config.json.bak）
+    if path.exists() {
+        let bak = path.with_file_name("ai_config.json.bak");
+        if !bak.exists() {
+            let _ = fs::copy(&path, &bak);
+        }
+    }
+    let mut out = cfg.clone();
+    // 复用「明文→密文」缓存，避免 api_key 未变时全量重跑 scrypt
+    let mut enc_guard = enc_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let mut next_enc: HashMap<String, String> = HashMap::with_capacity(out.providers.len());
+    for p in out.providers.iter_mut() {
+        if p.api_key.is_empty() {
+            continue;
+        }
+        let enc = match enc_guard.get(&p.api_key) {
+            Some(e) => e.clone(),
+            None => encrypt_secret(&p.api_key)?,
+        };
+        next_enc.insert(p.api_key.clone(), enc.clone());
+        p.api_key = enc;
+    }
+    let text = serde_json::to_string_pretty(&out).map_err(|e| format!("序列化配置失败: {}", e))?;
+    fs::write(&path, text).map_err(|e| format!("写入配置失败: {}", e))?;
+    drop(enc_guard);
+    *enc_cache().lock().unwrap_or_else(|e| e.into_inner()) = next_enc;
+    *config_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(cfg.clone());
+    Ok(())
 }
 
 /// 明文 api_key → 密文 的进程内缓存：只对「变更过 / 新出现的」api_key 跑一次 scrypt 派生，
@@ -446,92 +505,19 @@ fn enc_cache() -> &'static std::sync::Mutex<HashMap<String, String>> {
     ENC_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// 启动预热：后台异步加载一次填入缓存，随后的 load_profiles 全部走缓存（毫秒级）。
+/// 启动预热：后台异步加载一次填入缓存，随后的 load_config 全部走缓存（毫秒级）。
 /// 不阻塞启动流程（scrypt 解密多个 key 可能耗时数秒，放到后台线程）。
 pub fn warm_profile_cache(app: AppHandle) {
     tauri::async_runtime::spawn_blocking(move || {
         // 先预热固定盐派生密钥，再解密档案：首次「切换思考 → save_profiles 加密」不再冷跑 scrypt
         let _ = super::secret::warm_fixed_key();
-        let _ = load_profiles(&app);
+        let _ = load_config(&app);
     });
 }
 
-/// 读取全部模型档案（优先内存缓存，命中即毫秒级返回）。
-/// 未命中冷路径才会读盘 + scrypt 解密一次，结果写缓存。
-pub fn load_profiles(app: &AppHandle) -> AiProfiles {
-    if let Some(p) = profile_cache().lock().unwrap_or_else(|e| e.into_inner()).clone() {
-        return p;
-    }
-    let fresh = read_profiles_disk(app);
-    *profile_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh.clone());
-    fresh
-}
-
-/// 底层磁盘读取 + scrypt 解密（慢，仅在「冷路径 / 缓存失效后」执行一次）
-fn read_profiles_disk(app: &AppHandle) -> AiProfiles {
-    let path = match config_path(app) {
-        Ok(p) => p,
-        Err(_) => return AiProfiles::default(),
-    };
-    if !path.exists() {
-        return AiProfiles::default();
-    }
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => return AiProfiles::default(),
-    };
-    // 新格式：多档案
-    if let Ok(mut p) = serde_json::from_str::<AiProfiles>(&text) {
-        decrypt_profile_keys(&mut p);
-        return p;
-    }
-    // 旧格式：单份配置（字段兼容 AiProfile，id/name 走默认值）
-    if let Ok(legacy) = serde_json::from_str::<AiProfile>(&text) {
-        let id = if legacy.id.trim().is_empty() {
-            "legacy".to_string()
-        } else {
-            legacy.id.clone()
-        };
-        let name = if legacy.name.trim().is_empty() {
-            legacy.display_name()
-        } else {
-            legacy.name.clone()
-        };
-        let mut pinned = AiProfiles {
-            profiles: vec![AiProfile {
-                id: id.clone(),
-                name,
-                ..legacy
-            }],
-            active: Some(id),
-        };
-        decrypt_profile_keys(&mut pinned);
-        return pinned;
-    }
-    AiProfiles::default()
-}
-
-/// 按 profile_id 解析实际使用的档案：指定 > 激活项 > 首个 > 默认
-pub fn resolve_profile(profiles: &AiProfiles, profile_id: Option<String>) -> AiProfile {
-    if let Some(pid) = profile_id {
-        if let Some(p) = profiles.profiles.iter().find(|p| p.id == pid) {
-            return p.clone();
-        }
-    }
-    if let Some(aid) = &profiles.active {
-        if let Some(p) = profiles.profiles.iter().find(|p| p.id == *aid) {
-            return p.clone();
-        }
-    }
-    if let Some(first) = profiles.profiles.first() {
-        return first.clone();
-    }
-    default_profile()
-}
-
 /// 解析出的实际调用参数。字段名与 v1 AiProfile 的请求相关字段逐一对应，
-/// 所以 11 个 resolve_profile 调用点是机械替换而非重写。
-#[derive(Debug, Clone)]
+/// 所以 11 个调用点是机械替换而非重写（resolve_profile → resolve_target）。
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedTarget {
     /// 模型 id，usage_service 按它记账
     pub id: String,
@@ -659,88 +645,73 @@ pub fn resolve_target(config: &AiConfig, model_id: Option<&str>) -> ResolvedTarg
     }
 }
 
-/// 读取全部模型档案（返回前端用于下拉框 / 配置页；api_key 原样返回，仅本机存储）。
-/// 内部 load_profiles 会对带 key 的档案执行 scrypt 解密（CPU 密集），故剥离到阻塞线程，
-/// 避免同步命令占死主线程/事件循环导致整个 App 冻结（详见 commit 思路，与 commands.rs 中 spawn_blocking 范式一致）。
+/// 读取 v2 配置（新代码一律走这个）。
+/// scrypt 解密是 CPU 密集的，剥离到阻塞线程，避免同步命令占死事件循环。
 #[tauri::command]
-pub async fn ai_get_profiles(app: AppHandle) -> AiProfiles {
-    tauri::async_runtime::spawn_blocking(move || load_profiles(&app))
+pub async fn ai_get_config(app: AppHandle) -> AiConfig {
+    tauri::async_runtime::spawn_blocking(move || load_config(&app))
         .await
         .unwrap_or_default()
 }
 
-/// 保存全部模型档案 + 激活项；api_key 统一经 AES-256-GCM 加密落盘（透明）。
-/// 唯一写出口：所有「写入 ai_config.json」的路径都必须经过本函数，避免明文旁路。
-fn save_profiles(app: &AppHandle, profiles: &AiProfiles) -> Result<(), String> {
-    let path = config_path(app)?;
-    let mut out = profiles.clone();
-    // 复用「明文→密文」缓存，避免 api_key 未变时全量重跑 scrypt（写库瞬时）。
-    let mut enc_guard = enc_cache().lock().unwrap_or_else(|e| e.into_inner());
-    let mut next_enc: HashMap<String, String> = HashMap::with_capacity(out.profiles.len());
-    for p in out.profiles.iter_mut() {
-        if p.api_key.is_empty() {
-            continue;
-        }
-        let enc = match enc_guard.get(&p.api_key) {
-            Some(e) => e.clone(),
-            None => encrypt_secret(&p.api_key)?,
-        };
-        next_enc.insert(p.api_key.clone(), enc.clone());
-        p.api_key = enc;
-    }
-    *enc_guard = next_enc; // 仅当全部加密成功后才刷新缓存
-    drop(enc_guard);
-    let json = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| format!("写入配置失败: {}", e))?;
-    // 落盘成功即刷新内存缓存（用原始解密态 profiles），下次读取直接命中，无需再解密
-    *profile_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(profiles.clone());
-    Ok(())
+/// 保存 v2 配置。
+#[tauri::command]
+pub async fn ai_set_config(app: AppHandle, payload: AiConfig) -> Result<(), String> {
+    write_config(&app, &payload)
 }
 
+// ========== 以下三个是兼容命令，签名与语义保持 v1 不变 ==========
+//
+// 保留理由：它们被 13 处前端调用，其中 4 处在插件里（走 pluginSandbox.ts:199-200,219
+// 的白名单），另有移动端 useAiStream.ts 与思考开关 ThinkingToggle.tsx。
+// 直接换成 v2 形状是 breaking，会波及 3 个插件的构建与部署。
+// 新代码请用 ai_get_config / ai_set_config。
+
+/// 兼容命令：返回 v1 形状 `{profiles, active}`。
+#[tauri::command]
+pub async fn ai_get_profiles(app: AppHandle) -> AiProfiles {
+    let cfg = tauri::async_runtime::spawn_blocking(move || load_config(&app))
+        .await
+        .unwrap_or_default();
+    super::legacy_compat::to_legacy_profiles(&cfg)
+}
+
+/// 兼容命令：把 v1 形状写回 v2。**必须以现有配置为基线合并**——
+/// 移动端可能只带着一条档案回来，整体替换会让用户没动过的其余模型消失。
 #[tauri::command]
 pub async fn ai_set_profiles(app: AppHandle, payload: AiProfiles) -> Result<(), String> {
-    // save_profiles 对带 key 的档案执行 scrypt 加密（CPU 密集），剥离到阻塞线程避免卡死主线程
-    tauri::async_runtime::spawn_blocking(move || save_profiles(&app, &payload))
-        .await
-        .map_err(|e| format!("保存模型档案任务失败: {e}"))?
+    let existing = load_config(&app);
+    let cfg = super::legacy_compat::from_legacy_profiles(&existing, &payload);
+    write_config(&app, &cfg)
 }
 
-/// 仅更新单个档案的「思考模式」开关，供聊天界面内联切换（跨胶囊/IDE/攻防共享同一档案字段）。
+/// 思考模式开关：按 model id 定位 ModelEntry，写入 overrides.thinking。
 #[tauri::command]
 pub async fn ai_set_profile_thinking(app: AppHandle, profile_id: String, thinking: bool) -> Result<(), String> {
-    // 内部 load_profiles(逐个档案 scrypt 解密) + save_profiles(逐个档案 scrypt 加密) + emit 广播，
-    // 均可能耗时且为纯阻塞操作；异步命令 + spawn_blocking 剥离，避免点击一下就把主线程/事件循环占死而冻结全部窗口。
-    let app2 = app.clone();
-    let profile_id2 = profile_id.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let mut profiles = load_profiles(&app2);
-        let mut found = false;
-        for p in profiles.profiles.iter_mut() {
-            if p.id == profile_id2 {
-                p.thinking = Some(thinking);
-                found = true;
-                break;
-            }
+    let mut cfg = load_config(&app);
+    let mut found = false;
+    for prov in cfg.providers.iter_mut() {
+        if let Some(m) = prov.models.iter_mut().find(|m| m.id == profile_id) {
+            m.overrides.thinking = Some(thinking);
+            found = true;
+            break;
         }
-        if !found {
-            return Err(format!("未找到模型档案: {}", profile_id2));
-        }
-        // load_profiles 已解密 api_key，save_profiles 统一加密落盘（透明往返）
-        save_profiles(&app2, &profiles)?;
-        // 广播「思考模式」变化，使胶囊 / IDE / 攻防 各聊天界面实时同步同一档案字段
-        let _ = app2.emit(
-            "ai-thinking-changed",
-            serde_json::json!({ "profile_id": profile_id2, "thinking": thinking }),
-        );
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("设置思考模式任务失败: {e}"))?
+    }
+    if !found {
+        return Err(format!("未找到模型档案: {}", profile_id));
+    }
+    write_config(&app, &cfg)?;
+    // 广播给所有界面（含插件），使思考状态在任意聊天界面切换后相互同步
+    let _ = app.emit(
+        "ai-thinking-changed",
+        serde_json::json!({ "profile_id": profile_id, "thinking": thinking }),
+    );
+    Ok(())
 }
 
 /// 组合人设 system 提示词：风格预设 + 自定义风格 + 称呼 + 额外要求（legacy system_prompt）。
 /// 全部留空时返回空串，调用方据此决定是否注入（不破坏既有对话行为）。
-pub(crate) fn compose_persona_system(cfg: &AiProfile) -> String {
+pub(crate) fn compose_persona_system(cfg: &ResolvedTarget) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(preset) = &cfg.persona_preset {
         let p = preset.trim();
@@ -793,7 +764,7 @@ pub(crate) fn compose_effective_system(system: &Option<String>, persona: &str) -
 }
 
 /// 预检 API Key：为空则 emit ai-error 并返回 Err。供 ai_chat / ai_chat_agent 共用预检。
-pub(crate) fn ensure_api_key(app: &AppHandle, request_id: &str, cfg: &AiProfile) -> Result<(), String> {
+pub(crate) fn ensure_api_key(app: &AppHandle, request_id: &str, cfg: &ResolvedTarget) -> Result<(), String> {
     if cfg.api_key.trim().is_empty() {
         let msg = "未配置 API Key，请先在全局设置 → 模型 中填写".to_string();
         let _ = app.emit("ai-error", serde_json::json!({ "requestId": request_id, "error": msg }));

@@ -11,7 +11,7 @@
 // - 语音合成：POST {base_url}/audio/speech，请求 mp3，返回 audio data URL。
 // - profile 需配置 image_model / tts_model 才可用；未配置返回明确错误。
 
-use crate::services::ai_service::{self, AiProfile};
+use crate::services::ai_service::{self, load_config, resolve_target};
 
 /// AI 生成图片（OpenAI 兼容 /images/generations）。
 /// 返回 data URL（png）；无法取 base64 时尝试取 url（再转 data URL 会失败则回退原 url）。
@@ -21,8 +21,8 @@ pub async fn ai_generate_image(
     prompt: String,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    let profiles = ai_service::load_profiles(&app);
-    let cfg: AiProfile = ai_service::resolve_profile(&profiles, profile_id);
+    let config = ai_service::load_config(&app);
+    let cfg = ai_service::resolve_target(&config, profile_id.as_deref());
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key".to_string());
     }
@@ -83,8 +83,8 @@ pub async fn ai_tts(
     text: String,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    let profiles = ai_service::load_profiles(&app);
-    let cfg: AiProfile = ai_service::resolve_profile(&profiles, profile_id);
+    let config = ai_service::load_config(&app);
+    let cfg = ai_service::resolve_target(&config, profile_id.as_deref());
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key".to_string());
     }

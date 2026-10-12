@@ -5,7 +5,7 @@
 use base64::Engine;
 use image::GenericImageView;
 use tauri::AppHandle;
-use crate::services::ai_service::{AiProfile, load_profiles, resolve_profile};
+use crate::services::ai_service::ai_profile::{AiProfile, load_config, resolve_target};
 
 /// 测试 AI 配置是否可用：向端点发起一次极小开销的非流式请求，
 /// 校验 base_url / api_key / model 是否正确，并返回耗时。不消耗对话额度（max_tokens=5）。
@@ -79,8 +79,8 @@ pub async fn ai_vision_ocr(
     prompt: Option<String>,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    let profiles = load_profiles(&app);
-    let cfg = resolve_profile(&profiles, profile_id);
+    let config = load_config(&app);
+    let cfg = resolve_target(&config, profile_id.as_deref());
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
     }
@@ -188,8 +188,8 @@ pub async fn translate_text(
     source_lang: Option<String>,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    let profiles = load_profiles(&app);
-    let cfg = resolve_profile(&profiles, profile_id);
+    let config = load_config(&app);
+    let cfg = resolve_target(&config, profile_id.as_deref());
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
     }
@@ -266,8 +266,8 @@ pub async fn ai_ocr_enhance(
     text: String,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    let profiles = load_profiles(&app);
-    let cfg = resolve_profile(&profiles, profile_id);
+    let config = load_config(&app);
+    let cfg = resolve_target(&config, profile_id.as_deref());
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
     }

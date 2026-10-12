@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use crate::services::ai_service::{self, AiProfile, ChatMessage};
+use crate::services::ai_service::{self, ChatMessage, load_config, resolve_target};
 
 /// 伴侣档案
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -430,8 +430,8 @@ pub async fn ai_summarize_memory(
     messages: Vec<ChatMessage>,
     profile_id: Option<String>,
 ) -> Result<MemorySummary, String> {
-    let profiles = ai_service::load_profiles(&app);
-    let cfg: AiProfile = ai_service::resolve_profile(&profiles, profile_id);
+    let config = ai_service::load_config(&app);
+    let cfg = ai_service::resolve_target(&config, profile_id.as_deref());
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key，请先在模型设置中填写".to_string());
     }
@@ -534,8 +534,8 @@ pub async fn companion_proactive_message(
         .cloned()
         .ok_or_else(|| "未找到伴侣".to_string())?;
 
-    let profiles = ai_service::load_profiles(&app);
-    let cfg: AiProfile = ai_service::resolve_profile(&profiles, profile_id.or(active.profile_id.clone()));
+    let config = ai_service::load_config(&app);
+    let cfg = ai_service::resolve_target(&config, profile_id.as_deref().or(active.profile_id.as_deref()));
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key，请先在模型设置中填写".to_string());
     }

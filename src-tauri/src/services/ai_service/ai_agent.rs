@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use futures_util::StreamExt;
-use crate::services::ai_service::ai_profile::{load_profiles, resolve_profile, compose_persona_system, compose_effective_system, ensure_api_key};
+use crate::services::ai_service::ai_profile::{load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
 use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text};
@@ -36,8 +36,8 @@ async fn run_agent(
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 12u32);
-    let profiles = load_profiles(&app);
-    let cfg = resolve_profile(&profiles, profile_id.clone());
+    let config = load_config(&app);
+    let cfg = resolve_target(&config, profile_id.as_deref());
     ensure_api_key(&app, &request_id, &cfg)?;
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
@@ -582,8 +582,8 @@ pub async fn ai_chat_agent(
     project_root: Option<String>,
 ) -> Result<(), String> {
     // 同步预检：无 API Key 直接拒绝（对齐原契约），无需开后台任务。
-    let profiles = load_profiles(&app);
-    let cfg = resolve_profile(&profiles, profile_id.clone());
+    let config = load_config(&app);
+    let cfg = resolve_target(&config, profile_id.as_deref());
     ensure_api_key(&app, &request_id, &cfg)?;
 
     // 同 id 已有运行中任务 → 先取消（防重复续聊叠跑）。
