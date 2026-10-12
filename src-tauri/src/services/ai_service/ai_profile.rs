@@ -100,6 +100,226 @@ pub struct AiProfiles {
     pub active: Option<String>,
 }
 
+// ============ v2：供应商 / 模型 两层结构 ============
+//
+// 为什么要重构：v1 的每条 AiProfile 只能装一个 model，所以一个中转站的 87 个模型
+// 要建 87 条档案，各自重复填 base_url 与 api_key。v2 把 endpoint + key 上提到 Provider，
+// 模型只留 id / 上游模型名 / 能力标记 / 逐模型参数覆盖。
+//
+// ★ ModelEntry.id 沿用 v1 的 profile.id。这不是偷懒：usage_service.rs:148 按
+//   profile_id 记账的历史数据、companion_service.rs:51 持久化的引用、会话里存的 id
+//   全部靠它继续有效，换 id 就得写历史数据迁移。
+
+/// 能力标记。text 默认 true——没打标但有 id 的模型至少能做文本对话。
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub struct Caps {
+    #[serde(default = "caps_text_default")]
+    pub text: bool,
+    #[serde(default)]
+    pub vision: bool,
+    #[serde(default)]
+    pub reasoning: bool,
+    #[serde(default)]
+    pub embedding: bool,
+}
+
+fn caps_text_default() -> bool {
+    true
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Caps { text: true, vision: false, reasoning: false, embedding: false }
+    }
+}
+
+/// 逐模型参数覆盖。语义与 v1 AiProfile 的同名字段一致，只是从「档案」挪到了「模型」。
+/// 全部 Option：None 表示用默认值，用户没改过就不占空间。
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct Overrides {
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<bool>,
+    #[serde(default)]
+    pub persona_call_me_as: Option<String>,
+    #[serde(default)]
+    pub persona_preset: Option<String>,
+    #[serde(default)]
+    pub persona_style: Option<String>,
+    #[serde(default)]
+    pub max_context_tokens: Option<u64>,
+}
+
+/// 供应商 = 一个端点 + 一把 key，旗下挂多个模型。
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct Provider {
+    pub id: String,
+    /// 空则 UI 回落到 base_url 的主机名
+    #[serde(default)]
+    pub name: String,
+    pub base_url: String,
+    /// API Key（Bearer）。AES-GCM 加密在这一层，不是每个模型一份。
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub models: Vec<ModelEntry>,
+    /// 多模态三件套属于「供应商」而非单个模型：同端点不同模型名，
+    /// 且多数 /v1/models 列表里并不包含它们。
+    #[serde(default)]
+    pub vision_model: Option<String>,
+    #[serde(default)]
+    pub image_model: Option<String>,
+    #[serde(default)]
+    pub tts_model: Option<String>,
+    #[serde(default)]
+    pub last_scanned_at: Option<u64>,
+}
+
+/// 单个模型条目。
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ModelEntry {
+    /// ★ 沿用 v1 的 profile.id，见上方注释
+    pub id: String,
+    /// 上游真实模型名，如 "qwen3:8b"
+    pub model: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub caps: Caps,
+    /// 端点自报的上下文长度（`/v1/models` 的 context_window / context_length）。
+    /// 用户手工调整的值存在 overrides.max_context_tokens 里，后者优先。
+    #[serde(default)]
+    pub context_tokens: Option<u64>,
+    #[serde(default)]
+    pub overrides: Overrides,
+}
+
+/// 当前选中的供应商与模型。单选——「当前用哪个」就这一个值，
+/// 不同模型各自的温度/人设靠 overrides 天然区分，不需要额外的 enabled 位。
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+pub struct Selection {
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AiConfig {
+    #[serde(default)]
+    pub providers: Vec<Provider>,
+    #[serde(default)]
+    pub selection: Selection,
+}
+
+/// FNV-1a 64 位。不用 std 的 DefaultHasher——它的输出不保证跨 Rust 版本稳定，
+/// 而 provider.id 必须在重复迁移时得到同一个值，否则「再迁移一次」会造出重复供应商。
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn provider_id_for(base_url: &str, plain_key: &str) -> String {
+    format!("pv_{:08x}", (fnv1a(&format!("{}\u{1}{}", base_url, plain_key)) & 0xffff_ffff) as u32)
+}
+
+/// v1 → v2 迁移。raw 是 ai_config.json 的原始 JSON：
+/// - 顶层有 `providers` → 已是 v2，原样反序列化
+/// - 顶层有 `profiles` → 按 (base_url, 解密后的明文 key) 分组合并为供应商
+///
+/// 分组键必须用**解密后的明文**：每次加密都用随机 salt/IV，同一明文两次密文不同，
+/// 用密文分组会把同一把 key 拆成两个供应商。
+pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
+    if raw.get("providers").is_some() {
+        return serde_json::from_value(raw.clone()).unwrap_or_default();
+    }
+    let v1: AiProfiles = serde_json::from_value(raw.clone()).unwrap_or_default();
+
+    let mut cfg = AiConfig::default();
+    // (base_url, 明文 key) → cfg.providers 中的下标
+    let mut groups: Vec<((String, String), usize)> = Vec::new();
+
+    for p in &v1.profiles {
+        let plain_key = decrypt_secret(&p.api_key).unwrap_or_else(|_| p.api_key.clone());
+        let group_key = (p.base_url.clone(), plain_key.clone());
+        let idx = match groups.iter().find(|(k, _)| *k == group_key) {
+            Some((_, i)) => *i,
+            None => {
+                cfg.providers.push(Provider {
+                    id: provider_id_for(&p.base_url, &plain_key),
+                    name: p.name.trim().to_string(),
+                    base_url: p.base_url.clone(),
+                    api_key: p.api_key.clone(),
+                    models: Vec::new(),
+                    vision_model: p.vision_model.clone(),
+                    image_model: p.image_model.clone(),
+                    tts_model: p.tts_model.clone(),
+                    last_scanned_at: None,
+                });
+                let i = cfg.providers.len() - 1;
+                groups.push((group_key, i));
+                i
+            }
+        };
+        let prov = &mut cfg.providers[idx];
+        // 供应商级的三件套取组内第一个非空值
+        if prov.vision_model.is_none() {
+            prov.vision_model = p.vision_model.clone();
+        }
+        if prov.image_model.is_none() {
+            prov.image_model = p.image_model.clone();
+        }
+        if prov.tts_model.is_none() {
+            prov.tts_model = p.tts_model.clone();
+        }
+        prov.models.push(ModelEntry {
+            id: p.id.clone(),
+            model: p.model.clone(),
+            label: None,
+            caps: Caps {
+                text: true,
+                vision: p.vision_model.as_deref() == Some(p.model.as_str()),
+                reasoning: false,
+                embedding: false,
+            },
+            context_tokens: None,
+            overrides: Overrides {
+                temperature: Some(p.temperature),
+                max_tokens: p.max_tokens,
+                top_p: p.top_p,
+                system_prompt: p.system_prompt.clone(),
+                thinking: p.thinking,
+                persona_call_me_as: p.persona_call_me_as.clone(),
+                persona_preset: p.persona_preset.clone(),
+                persona_style: p.persona_style.clone(),
+                max_context_tokens: p.max_context_tokens,
+            },
+        });
+    }
+
+    // v1 的 active 落到 v2 的 selection
+    if let Some(active) = &v1.active {
+        if let Some(prov) = cfg.providers.iter().find(|p| p.models.iter().any(|m| &m.id == active)) {
+            cfg.selection = Selection {
+                provider_id: Some(prov.id.clone()),
+                model_id: Some(active.clone()),
+            };
+        }
+    }
+    cfg
+}
+
 /// 首份默认档案（DeepSeek 占位，未填 key 时引导用户去设置）
 fn default_profile() -> AiProfile {
     AiProfile {
@@ -388,4 +608,101 @@ pub(crate) fn ensure_api_key(app: &AppHandle, request_id: &str, cfg: &AiProfile)
         return Err(msg);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 三条档案：前两条同端点同 key（应合并），第三条独立；active 指向第二条。
+    fn v1_json() -> serde_json::Value {
+        json!({
+            "profiles": [
+                { "id": "p_aaa", "name": "本地", "base_url": "http://127.0.0.1:11434/v1",
+                  "api_key": "sk-x", "model": "qwen3:8b", "temperature": 0.5, "max_tokens": 4096 },
+                { "id": "p_bbb", "name": "", "base_url": "http://127.0.0.1:11434/v1",
+                  "api_key": "sk-x", "model": "llama3", "temperature": 0.3 },
+                { "id": "p_ccc", "name": "官方", "base_url": "https://api.deepseek.com/v1",
+                  "api_key": "sk-y", "model": "deepseek-chat", "temperature": 0.3,
+                  "vision_model": "deepseek-chat" }
+            ],
+            "active": "p_bbb"
+        })
+    }
+
+    #[test]
+    fn 迁移_模型id沿用原profile_id() {
+        let cfg = migrate_v1_to_v2(&v1_json());
+        let ids: Vec<&str> = cfg.providers.iter()
+            .flat_map(|p| p.models.iter().map(|m| m.id.as_str())).collect();
+        assert_eq!(ids, vec!["p_aaa", "p_bbb", "p_ccc"]);
+    }
+
+    #[test]
+    fn 迁移_同端点同key合并为一个供应商() {
+        let cfg = migrate_v1_to_v2(&v1_json());
+        assert_eq!(cfg.providers.len(), 2);
+        let local = &cfg.providers[0];
+        assert_eq!(local.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(local.models.len(), 2);
+    }
+
+    #[test]
+    fn 迁移_同端点不同key不合并() {
+        let raw = json!({ "profiles": [
+            { "id": "a", "base_url": "http://x/v1", "api_key": "sk-1", "model": "m1" },
+            { "id": "b", "base_url": "http://x/v1", "api_key": "sk-2", "model": "m2" }
+        ]});
+        assert_eq!(migrate_v1_to_v2(&raw).providers.len(), 2);
+    }
+
+    #[test]
+    fn 迁移_active成为selection() {
+        let cfg = migrate_v1_to_v2(&v1_json());
+        assert_eq!(cfg.selection.model_id.as_deref(), Some("p_bbb"));
+        assert_eq!(cfg.selection.provider_id.as_deref(), Some(cfg.providers[0].id.as_str()));
+    }
+
+    #[test]
+    fn 迁移_provider_id可重复() {
+        // 同一输入跑两次必须得到同一 id，否则「重新迁移」会造出重复供应商
+        let a = migrate_v1_to_v2(&v1_json());
+        let b = migrate_v1_to_v2(&v1_json());
+        let ids_a: Vec<&str> = a.providers.iter().map(|p| p.id.as_str()).collect();
+        let ids_b: Vec<&str> = b.providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids_a, ids_b);
+    }
+
+    #[test]
+    fn 迁移_覆盖项承接原字段() {
+        let cfg = migrate_v1_to_v2(&v1_json());
+        let qwen = &cfg.providers[0].models[0];
+        assert_eq!(qwen.overrides.temperature, Some(0.5));
+        assert_eq!(qwen.overrides.max_tokens, Some(4096));
+        assert!(qwen.caps.text);
+    }
+
+    #[test]
+    fn 迁移_vision_model标记对应模型能力() {
+        let cfg = migrate_v1_to_v2(&v1_json());
+        let ds = &cfg.providers[1].models[0];
+        assert!(ds.caps.vision, "vision_model 指向自身的模型应标 vision");
+    }
+
+    #[test]
+    fn 已是v2的原样返回() {
+        let cfg = migrate_v1_to_v2(&v1_json());
+        let round = serde_json::to_value(&cfg).unwrap();
+        let again = migrate_v1_to_v2(&round);
+        assert_eq!(again.providers.len(), 2);
+        assert_eq!(again.selection.model_id.as_deref(), Some("p_bbb"));
+    }
+
+    #[test]
+    fn 空文件不炸() {
+        let cfg = migrate_v1_to_v2(&json!({}));
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.selection.model_id.is_none());
+    }
 }
