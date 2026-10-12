@@ -4,36 +4,41 @@
 //   - 左键点击选中、按住拖动移动节点
 //   - 右键节点：编辑参数 / 建立连线 / 删除节点
 //   - 右键空白：新建节点（起始/生成/产出）、按任务生成蓝图、重新排列、清空
-// 执行按拓扑序逐节点跑：prompt → llm（支持 {ref:节点id} 引用）→ output（产出入 AIWork 产物库）。
+// 执行按拓扑序逐节点跑：prompt → llm（支持 {ref:节点id} 引用）→ image（配了 ComfyUI 走本地 SD，否则云端 image_model）→ output（产出入 AIWork 产物库）。
 import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import {
   Workflow, Play, Wand2, Loader2, Plus, Trash2, Pencil, Brain, BookmarkCheck,
-  GitBranch, LayoutGrid, Eraser, CircleDot, X, CheckCircle2, XCircle,
+  GitBranch, LayoutGrid, Eraser, CircleDot, X, CheckCircle2, XCircle, Image as ImageIcon,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { autoPos, type WorkflowDoc, type WfNode, type WfEdge, type WfNodeType } from '@/core/ai/aiWorkflows';
 import { addProduct } from '@/core/ai/aiWorkProducts';
+import { storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 const NODE_W = 216;
 const NODE_H = 96;
 const GAP = 64;
 
-const TYPE_NAME: Record<WfNodeType, string> = { prompt: '起始输入', llm: '模型生成', output: '产出' };
+const TYPE_NAME: Record<WfNodeType, string> = { prompt: '起始输入', llm: '模型生成', image: '图像生成', output: '产出' };
 const TYPE_ICON: Record<WfNodeType, React.ReactNode> = {
   prompt: <CircleDot size={15} />,
   llm: <Brain size={15} />,
+  image: <ImageIcon size={15} />,
   output: <BookmarkCheck size={15} />,
 };
 const TYPE_TINT: Record<WfNodeType, string> = {
   prompt: 'bg-sky-500/10 text-sky-600 dark:text-sky-400',
   llm: 'bg-violet-500/10 text-violet-600 dark:text-violet-400',
+  image: 'bg-rose-500/10 text-rose-600 dark:text-rose-400',
   output: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
 };
 /** 每种节点的可编辑参数键（含 label 改名） */
 const TYPE_PARAMS: Record<WfNodeType, string[]> = {
   prompt: ['prompt'],
   llm: ['system', 'prompt'],
+  image: ['prompt'],
   output: ['title', 'content'],
 };
 
@@ -45,6 +50,7 @@ const PLAN_SYSTEM = `你是「蓝图规划器」。用户给出一个 AIGC 任�
 可用节点类型：
 - prompt 起始/输入：params.prompt 为本节点提供的上下文文本
 - llm 模型生成：params.system 为可选系统提示，params.prompt 为用户内容，可用 {ref:节点id} 引用前序输出
+- image 图像生成：params.prompt 为画图提示词（可用 {ref:节点id} 引用前序文本作为画面描述），产出图片
 - output 汇聚产出（作为终点）：params.title 为存入产物库时的名字，params.content 可写 {ref:节点id}，留空则自动汇聚上游全部输出
 id 按 n1、n2、n3 顺序递增。通常以 output 收尾，把成果落到产物库。`;
 
@@ -67,7 +73,7 @@ function parsePlan(raw: string): { nodes: WfNode[]; edges: WfEdge[] } | null {
       .map((n, i) => {
         const nn = n as { id: string; type?: string; label?: string; params?: Record<string, string> };
         const type: WfNodeType =
-          nn.type === 'prompt' ? 'prompt' : nn.type === 'output' ? 'output' : 'llm';
+          nn.type === 'prompt' ? 'prompt' : nn.type === 'output' ? 'output' : nn.type === 'image' ? 'image' : 'llm';
         const id = typeof nn.id === 'string' ? nn.id : `n${i + 1}`;
         ids.push(id);
         return {
@@ -215,6 +221,7 @@ export const AiWorkflowView = memo(function AiWorkflowView({
     const defaults: Record<string, string> =
       type === 'prompt' ? { prompt: '输入本节点要提供的上下文…' }
       : type === 'llm' ? { system: DEFAULT_SYSTEM, prompt: '' }
+      : type === 'image' ? { prompt: '' }
       : { title: 'AI 成果', content: '' };
     const node: WfNode = { id, type, label: TYPE_NAME[type], ...pos, params: defaults, status: 'idle' };
     onUpdate((d) => ({ ...d, nodes: [...d.nodes, node] }));
@@ -329,6 +336,15 @@ export const AiWorkflowView = memo(function AiWorkflowView({
             const system = node.params.system || DEFAULT_SYSTEM;
             const prompt = subRefs(node.params.prompt || node.label, outputs);
             output = await aiAsk(system, prompt);
+          } else if (node.type === 'image') {
+            // 图像生成：prompt 支持 {ref:前序文本}。路由：配了 ComfyUI（端点+checkpoint）走本地 SD，
+            // 否则回落云端 image_model（ai_generate_image，per-profile）。产出为 data URL，向下游/产物流动。
+            const prompt = subRefs(node.params.prompt || node.label, outputs);
+            const comfyUrl = storage.getString(KEYS.ai.comfyuiUrl.key, '').trim();
+            const comfyCkpt = storage.getString(KEYS.ai.comfyuiCkpt.key, '').trim();
+            output = comfyUrl && comfyCkpt
+              ? await invoke<string>('comfyui_generate_image', { prompt, comfyuiUrl: comfyUrl, checkpoint: comfyCkpt })
+              : await invoke<string>('ai_generate_image', { prompt, profileId: profileIdRef.current });
           } else {
             let body = '';
             if (node.params.content && node.params.content.trim()) {
@@ -521,9 +537,15 @@ export const AiWorkflowView = memo(function AiWorkflowView({
                     </span>
                   </div>
                   {node.output && (
-                    <div className="mx-2 mb-2 max-h-16 overflow-y-auto rounded-md bg-black/5 px-2 py-1.5 text-[11px] leading-relaxed text-neutral-500 dark:bg-black/30 dark:text-stone-400">
-                      {node.output}
-                    </div>
+                    node.output.startsWith('data:image') ? (
+                      <div className="mx-2 mb-2">
+                        <img src={node.output} alt="" className="max-h-40 w-full rounded-md border border-neutral-200 object-cover dark:border-stone-700" />
+                      </div>
+                    ) : (
+                      <div className="mx-2 mb-2 max-h-16 overflow-y-auto rounded-md bg-black/5 px-2 py-1.5 text-[11px] leading-relaxed text-neutral-500 dark:bg-black/30 dark:text-stone-400">
+                        {node.output}
+                      </div>
+                    )
                   )}
                   <span className="absolute bottom-[-5px] left-1/2 h-2.5 w-2.5 -translate-x-1/2 rounded-full border border-emerald-500 bg-white dark:bg-stone-900" title="输出" />
                 </div>
@@ -556,7 +578,7 @@ export const AiWorkflowView = memo(function AiWorkflowView({
               />
               <span className="text-[11px] text-neutral-400 dark:text-stone-500">[{TYPE_NAME[node.type]}]</span>
               <div className="flex items-center gap-1">
-                {(['prompt', 'llm', 'output'] as WfNodeType[]).map((t) => (
+                {(['prompt', 'llm', 'image', 'output'] as WfNodeType[]).map((t) => (
                   <button
                     key={t}
                     onClick={() => patchNode(node.id, { type: t })}
@@ -650,6 +672,7 @@ export const AiWorkflowView = memo(function AiWorkflowView({
                 <div className="px-3 py-1.5 text-[11px] font-semibold text-neutral-400 dark:text-stone-500">新建节点</div>
                 <MenuItem onClick={() => addNode('prompt')} icon={TYPE_ICON.prompt} label="起始输入 (prompt)" />
                 <MenuItem onClick={() => addNode('llm')} icon={TYPE_ICON.llm} label="模型生成 (llm)" />
+                <MenuItem onClick={() => addNode('image')} icon={TYPE_ICON.image} label="图像生成 (image)" />
                 <MenuItem onClick={() => addNode('output')} icon={TYPE_ICON.output} label="产出 (output)" />
                 <MenuSep />
                 <MenuItem onClick={generateBlueprint} icon={<Wand2 size={14} />} label="按任务生成蓝图" />
@@ -681,6 +704,10 @@ function summaryOf(node: WfNode): string {
   if (node.type === 'llm') {
     const src = p.prompt || '';
     return src ? (src.length > 30 ? src.slice(0, 30) + '…' : src) : '（含引用前序输出）';
+  }
+  if (node.type === 'image') {
+    const s = p.prompt || '';
+    return s ? (s.length > 30 ? s.slice(0, 30) + '…' : s) : '（图像生成）';
   }
   const t = p.title || 'AI 成果';
   return p.content ? `${t} · 自定义内容` : `${t} · 自动汇聚上游`;

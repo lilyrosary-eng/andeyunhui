@@ -75,7 +75,7 @@ export interface AgentStep {
 // AIWork（流式对话）与 AIWorkflow（节点画布）编辑的是「同一条任务」。
 // 该任务即一条 Conversation：messages 承载流式对话历史，aiWork 承载节点蓝图，
 // 两个视图（对话工作台 / 蓝图编辑器）读写同一份记录，切换即可控制粒度并预览效果。
-export type WfNodeType = 'prompt' | 'llm' | 'output';
+export type WfNodeType = 'prompt' | 'llm' | 'image' | 'output';
 
 export interface WfNode {
   id: string;
