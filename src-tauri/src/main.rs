@@ -2019,6 +2019,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 全局：多模态（阶段 5 · AI 发图 + 语音）==========
             multimodal_service::ai_generate_image,
             multimodal_service::ai_tts,
+            multimodal_service::comfyui_generate_image,
             // ========== 全局：IDE 终端（本地 shell 命令执行）==========
             shell_service::run_shell_command,
             // ========== 全局：AI agent 受限 shell（白名单 + Dry-Run 黑名单 + 超时）==========
