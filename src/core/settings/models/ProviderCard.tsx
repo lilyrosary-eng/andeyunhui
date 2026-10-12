@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronDown, ChevronRight, Plus, RefreshCw, Trash2, Search, Pencil } from 'lucide-react';
+import { ChevronDown, ChevronRight, Plus, RefreshCw, Trash2, Search, Pencil, TestTube2, Check, X } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import type { ModelUi, ProviderUi } from '../aiConfigCodec';
 import { ModelEditorDrawer } from './ModelEditorDrawer';
 
@@ -73,6 +74,38 @@ export function ProviderCard(props: ProviderCardProps) {
 
   const editing = editingId ? p.models.find((m) => m.id === editingId) ?? null : null;
 
+  // 测试连接：用本供应商端点 + Key + 代表性模型（选中的优先，否则第一个）打一发 ping。
+  // 复用后端 ai_test_connection（v2 重构时桌面漏接，移动端仍在用；后端命令未删）。
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const testConnection = async () => {
+    const apiKey = p.api_key.trim();
+    const baseUrl = p.base_url.trim();
+    const target = p.models.find((m) => m.id === props.selectedModelId) ?? p.models[0];
+    if (!apiKey) { setTestMsg({ ok: false, text: t('modelSettings.needApiKey') }); return; }
+    if (!/^https?:\/\//.test(baseUrl)) { setTestMsg({ ok: false, text: t('modelSettings.badEndpoint') }); return; }
+    if (!target) { setTestMsg({ ok: false, text: t('modelSettings.noModels') }); return; }
+    setTesting(true);
+    setTestMsg(null);
+    try {
+      const res = await invoke<string>('ai_test_connection', {
+        config: {
+          id: target.id,
+          name: p.name || target.model,
+          base_url: baseUrl,
+          api_key: apiKey,
+          model: target.model,
+          vision_model: p.vision_model || null,
+        },
+      });
+      setTestMsg({ ok: true, text: res });
+    } catch (e) {
+      setTestMsg({ ok: false, text: t('modelSettings.connFailed', { err: String(e) }) });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <div className="rounded-xl border border-neutral-200 dark:border-stone-700 bg-white/60 dark:bg-stone-900/40">
       {/* 标题栏 */}
@@ -144,6 +177,22 @@ export function ProviderCard(props: ProviderCardProps) {
                 <input className={inputCls} value={p.tts_model}
                   onChange={(e) => props.onPatchProvider({ tts_model: e.target.value })} />
               </div>
+            </div>
+            {/* 测试连接：验证端点 + Key + 代表性模型可达（整行横跨） */}
+            <div className="sm:col-span-2 flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => void testConnection()}
+                disabled={testing}
+                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-50"
+                title={t('modelSettings.testConn')}
+              >
+                <TestTube2 size={13} />{testing ? t('modelSettings.testing') : t('modelSettings.testConn')}
+              </button>
+              {testMsg && (
+                <span className={`text-[11px] flex items-center gap-1 break-all ${testMsg.ok ? 'text-emerald-500' : 'text-red-500'}`}>
+                  {testMsg.ok ? <Check size={12} /> : <X size={12} />}{testMsg.text}
+                </span>
+              )}
             </div>
           </div>
 
@@ -231,6 +280,7 @@ export function ProviderCard(props: ProviderCardProps) {
 
       <ModelEditorDrawer
         model={editing}
+        onPatch={(full) => { if (editing) props.onPatchModel(editing.id, full); }}
         onClose={() => setEditingId(null)}
         onSave={(patch) => { if (editing) props.onPatchModel(editing.id, patch); setEditingId(null); }}
         t={t}
