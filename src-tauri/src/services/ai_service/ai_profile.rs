@@ -10,7 +10,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::secret::{decrypt_secret, encrypt_secret};
 
-fn default_temperature() -> f32 {
+/// 采样温度缺省值。legacy_compat.rs 也用它派生 v1 形状，
+/// 两处各写一份 0.3 的话，改了一处另一处就会静默跑偏。
+pub(crate) fn default_temperature() -> f32 {
     0.3
 }
 
@@ -239,7 +241,7 @@ fn fnv1a(s: &str) -> u64 {
     h
 }
 
-fn provider_id_for(base_url: &str, plain_key: &str) -> String {
+pub(crate) fn provider_id_for(base_url: &str, plain_key: &str) -> String {
     format!("pv_{:016x}", fnv1a(&format!("{}\u{1}{}", base_url, plain_key)))
 }
 
@@ -501,6 +503,136 @@ pub fn resolve_profile(profiles: &AiProfiles, profile_id: Option<String>) -> AiP
         return first.clone();
     }
     default_profile()
+}
+
+/// 解析出的实际调用参数。字段名与 v1 AiProfile 的请求相关字段逐一对应，
+/// 所以 11 个 resolve_profile 调用点是机械替换而非重写。
+#[derive(Debug, Clone)]
+pub struct ResolvedTarget {
+    /// 模型 id，usage_service 按它记账
+    pub id: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub vision_model: Option<String>,
+    pub image_model: Option<String>,
+    pub tts_model: Option<String>,
+    pub temperature: f32,
+    pub max_tokens: Option<u32>,
+    pub top_p: Option<f32>,
+    pub system_prompt: Option<String>,
+    pub thinking: Option<bool>,
+    pub persona_call_me_as: Option<String>,
+    pub persona_preset: Option<String>,
+    pub persona_style: Option<String>,
+    pub max_context_tokens: Option<u64>,
+}
+
+impl ResolvedTarget {
+    /// Agent 上下文估算上限（token）。未配置时默认 200k —— 兼容 v1 行为，
+    /// 对多数模型都留足余量。优先取用户手工设的值，其次端点自报的，最后 200k。
+    pub(crate) fn context_cap(&self) -> usize {
+        self.max_context_tokens
+            .filter(|v| *v > 0)
+            .and_then(|v| usize::try_from(v).ok())
+            .unwrap_or(200_000)
+    }
+}
+
+/// 内置 DeepSeek 占位：配置为空时用它，引导用户去设置。
+pub fn placeholder_target() -> ResolvedTarget {
+    ResolvedTarget {
+        id: "deepseek".to_string(),
+        base_url: "https://api.deepseek.com/v1".to_string(),
+        api_key: String::new(),
+        model: "deepseek-chat".to_string(),
+        vision_model: None,
+        image_model: None,
+        tts_model: None,
+        temperature: default_temperature(),
+        max_tokens: None,
+        top_p: None,
+        system_prompt: None,
+        thinking: None,
+        persona_call_me_as: None,
+        persona_preset: None,
+        persona_style: None,
+        max_context_tokens: None,
+    }
+}
+
+/// 跨全部供应商按模型 id 找条目。与「取首个」严格分开：找不到就返回 None。
+fn find_model_by_id<'a>(config: &'a AiConfig, wanted: &str) -> Option<(&'a Provider, &'a ModelEntry)> {
+    for prov in &config.providers {
+        if let Some(m) = prov.models.iter().find(|m| m.id == wanted) {
+            return Some((prov, m));
+        }
+    }
+    None
+}
+
+/// 配置中的首个模型条目（对应 v1 resolve_profile 的「首个档案」那一级）。
+/// 跳过空供应商，否则「有供应商但一个模型都没加」会误判成整份配置为空。
+fn first_model(config: &AiConfig) -> Option<(&Provider, &ModelEntry)> {
+    config
+        .providers
+        .iter()
+        .find_map(|prov| prov.models.first().map(|m| (prov, m)))
+}
+
+/// 按模型 id 解析实际调用参数：指定 > selection > 首个 > 内置占位。
+/// 级联语义与 v1 的 resolve_profile 一致，只是作用点从「档案」变成「模型」。
+pub fn resolve_target(config: &AiConfig, model_id: Option<&str>) -> ResolvedTarget {
+    // 三级查找各自独立返回 None，「取首个」不能混进按 id 查找里：
+    // 否则 model_id 为 None 时会在第一级就返回配置里的第一条模型，
+    // selection 永远轮不到——「不指定模型」就变成了「永远用第一条」而不是「用用户选中的那条」。
+    let found = model_id
+        .and_then(|id| find_model_by_id(config, id))
+        .or_else(|| {
+            config
+                .selection
+                .model_id
+                .as_deref()
+                .and_then(|id| find_model_by_id(config, id))
+        })
+        .or_else(|| first_model(config));
+
+    let (prov, m) = match found {
+        Some(v) => v,
+        None => return placeholder_target(),
+    };
+
+    let o = &m.overrides;
+    // 供应商级三件套优先；为空时回落到该模型自身的模型名。
+    //
+    // ★ 回落是无条件的，不看 m.caps.vision。v1 的 ai_ocr.rs:92-97 写的是「未单独配置时
+    //   回落到对话模型」，AiProfile.vision_model 的字段文档也写「留空则复用 model」。
+    //   加 caps.vision 条件会让 v1 的单档案配置 { model: "qwen2-vl", vision_model: None }
+    //   在迁移后拿不到视觉模型名——而 v1 的 OCR 正是拿这条档案的对话模型跑的，迁移反而让它失效。
+    // caps.vision 是模型自身能力的标签（给 UI 显示用），不是 OCR 的选择依据，两者允许不一致。
+    let vision_model = prov
+        .vision_model
+        .clone()
+        .or_else(|| Some(m.model.clone()));
+
+    ResolvedTarget {
+        id: m.id.clone(),
+        base_url: prov.base_url.clone(),
+        api_key: prov.api_key.clone(),
+        model: m.model.clone(),
+        vision_model,
+        image_model: prov.image_model.clone(),
+        tts_model: prov.tts_model.clone(),
+        temperature: o.temperature.unwrap_or_else(default_temperature),
+        max_tokens: o.max_tokens,
+        top_p: o.top_p,
+        system_prompt: o.system_prompt.clone(),
+        thinking: o.thinking,
+        persona_call_me_as: o.persona_call_me_as.clone(),
+        persona_preset: o.persona_preset.clone(),
+        persona_style: o.persona_style.clone(),
+        max_context_tokens: o.max_context_tokens.or(m.context_tokens),
+    }
 }
 
 /// 读取全部模型档案（返回前端用于下拉框 / 配置页；api_key 原样返回，仅本机存储）。
@@ -829,5 +961,100 @@ mod v2_tests {
         assert_eq!(o.persona_preset.as_deref(), Some("rigorous"));
         assert_eq!(o.persona_style.as_deref(), Some("严肃"));
         assert_eq!(o.max_context_tokens, Some(1_000_000));
+    }
+
+    // ---------- resolve_target ----------
+
+    /// v2 配置：由 v1_json() 迁移而来，与迁移测试共用同一份输入
+    fn cfg_with() -> AiConfig {
+        migrate_v1_to_v2(&v1_json())
+    }
+
+    #[test]
+    fn 解析_按指定模型() {
+        let cfg = cfg_with();
+        let t = resolve_target(&cfg, Some("p_ccc"));
+        assert_eq!(t.model, "deepseek-chat");
+        assert_eq!(t.id, "p_ccc");
+        assert_eq!(t.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(t.api_key, "sk-y");
+    }
+
+    #[test]
+    fn 解析_未指定时用selection() {
+        let cfg = cfg_with();
+        let t = resolve_target(&cfg, None);
+        assert_eq!(t.id, "p_bbb", "v1 active=p_bbb 应成为 selection");
+    }
+
+    #[test]
+    fn 解析_指定的模型不存在时回落selection() {
+        let cfg = cfg_with();
+        let t = resolve_target(&cfg, Some("p_nope"));
+        assert_eq!(t.id, "p_bbb");
+    }
+
+    #[test]
+    fn 解析_没有selection时用首个模型() {
+        // 级联的第三级：selection 缺失、或指向已被删掉的模型时，退回配置里的第一个模型。
+        // 「首个」必须排在 selection 之后——反过来就变成「永远用第一条」。
+        let mut cfg = cfg_with();
+        cfg.selection.model_id = None;
+        assert_eq!(resolve_target(&cfg, None).id, "p_aaa");
+        cfg.selection.model_id = Some("p_gone".into());
+        assert_eq!(resolve_target(&cfg, Some("p_gone")).id, "p_aaa");
+    }
+
+    #[test]
+    fn 解析_空配置回落占位() {
+        let t = resolve_target(&AiConfig::default(), None);
+        assert_eq!(t.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(t.model, "deepseek-chat");
+        assert_eq!(t.temperature, 0.3);
+    }
+
+    #[test]
+    fn 解析_温度缺省补03() {
+        let mut cfg = cfg_with();
+        cfg.providers[0].models[0].overrides.temperature = None;
+        let t = resolve_target(&cfg, Some("p_aaa"));
+        assert!((t.temperature - 0.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn 解析_视觉模型回落自身_不看caps() {
+        // v1 的回落是无条件的：caps.vision 为 false 也要回落，
+        // 否则 { model: "qwen2-vl", vision_model: None } 这类配置迁移后 OCR 会失效
+        let mut cfg = cfg_with();
+        cfg.providers[0].vision_model = None;
+        cfg.providers[0].models[0].caps.vision = false;
+        let t = resolve_target(&cfg, Some("p_aaa"));
+        assert_eq!(t.vision_model.as_deref(), Some("qwen3:8b"));
+    }
+
+    #[test]
+    fn 解析_供应商未建档的视觉模型仍可用() {
+        // v1 合法配置：单独配了 vision_model，但没为它单独建档。
+        // 此时没有任何模型被标 caps.vision，OCR 仍必须拿到 gpt-4v。
+        let mut cfg = cfg_with();
+        cfg.providers[0].vision_model = Some("gpt-4v".into());
+        cfg.providers[0].models[0].caps.vision = false;
+        let t = resolve_target(&cfg, Some("p_aaa"));
+        assert_eq!(t.vision_model.as_deref(), Some("gpt-4v"));
+    }
+
+    #[test]
+    fn 解析_供应商级视觉模型优先() {
+        let mut cfg = cfg_with();
+        cfg.providers[0].vision_model = Some("qwen-vl-max".into());
+        cfg.providers[0].models[0].caps.vision = true;
+        let t = resolve_target(&cfg, Some("p_aaa"));
+        assert_eq!(t.vision_model.as_deref(), Some("qwen-vl-max"));
+    }
+
+    #[test]
+    fn 解析_上下文上限缺省20万() {
+        let cfg = cfg_with();
+        assert_eq!(resolve_target(&cfg, Some("p_aaa")).context_cap(), 200_000);
     }
 }

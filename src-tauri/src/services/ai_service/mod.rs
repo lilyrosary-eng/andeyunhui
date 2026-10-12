@@ -15,6 +15,7 @@
 pub mod secret;
 
 pub mod ai_profile;
+pub mod legacy_compat;
 pub mod ai_chat;
 pub mod ai_tools;
 pub mod gongfang_tools;
@@ -24,7 +25,11 @@ pub mod ai_ocr;
 pub mod ai_conversations;
 
 // 对外重导出：保持 crate::services::ai_service::xxx 路径不变
+// resolve_profile 与 ResolvedTarget / resolve_target 并存：11 个调用点改到 resolve_target
+// 是 Task 3 的事，届时再摘掉 resolve_profile。
 pub use ai_profile::{AiProfile, AiProfiles, load_profiles, resolve_profile, warm_profile_cache, ai_get_profiles, ai_set_profiles, ai_set_profile_thinking};
+pub use ai_profile::{AiConfig, ModelEntry, Provider, ResolvedTarget, resolve_target};
+pub use legacy_compat::{to_legacy_profiles, from_legacy_profiles};
 pub use ai_chat::{ChatMessage, ai_chat};
 pub use ai_agent::{ai_chat_agent, ai_agent_approve, ai_agent_apply_edits, ai_agent_fork, ai_agent_replay, ai_agent_cancel, ai_agent_status, ai_agent_sessions, ai_agent_events};
 pub use ai_ocr::{ai_test_connection, ai_vision_ocr, translate_text, ai_ocr_enhance, ocr_export_pdf};
