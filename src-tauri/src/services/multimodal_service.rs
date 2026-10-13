@@ -352,6 +352,117 @@ pub async fn comfyui_object_info(comfyui_url: String) -> Result<serde_json::Valu
     resp.json().await.map_err(|e| format!("解析 ComfyUI object_info 失败: {}", e))
 }
 
+/// 一个 ComfyUI 工作流文件（UI 图或已转好的 API 工作流，均为 .json）。
+#[derive(serde::Serialize, Clone)]
+pub struct ComfyWorkflowFile {
+    /// 文件名（不含 .json）
+    pub name: String,
+    /// 完整路径
+    pub path: String,
+    /// 相对扫描目录的路径（子目录组织时保留层级，分隔符统一为 /）
+    pub relative: String,
+    /// 字节数
+    pub size: u64,
+    /// 修改时间（unix 秒）
+    pub modified_at: u64,
+}
+
+/// 扫描目录下的 ComfyUI 工作流文件（*.json）：递归子目录（深度≤4）、跳过隐藏项、上限 500 个，
+/// 按修改时间倒序（新的在前）。ComfyUI 端保存的工作流一般在
+/// <ComfyUI>/user/default/workflows（新）或 <ComfyUI>/userdata/workflows（旧）。
+pub fn scan_workflows_sync(dir: &str) -> Result<Vec<ComfyWorkflowFile>, String> {
+    let root = std::path::PathBuf::from(dir.trim());
+    if root.as_os_str().is_empty() {
+        return Err("未配置 ComfyUI 工作流目录".to_string());
+    }
+    if !root.exists() {
+        return Err(format!("目录不存在: {}", root.display()));
+    }
+    if !root.is_dir() {
+        return Err(format!("不是目录: {}", root.display()));
+    }
+    let mut out: Vec<ComfyWorkflowFile> = Vec::new();
+    walk_workflow_dir(&root, &root, 0, &mut out);
+    out.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then(a.relative.cmp(&b.relative)));
+    Ok(out)
+}
+
+fn walk_workflow_dir(root: &std::path::Path, dir: &std::path::Path, depth: usize, out: &mut Vec<ComfyWorkflowFile>) {
+    if depth > 4 || out.len() >= 500 {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            walk_workflow_dir(root, &path, depth + 1, out);
+            continue;
+        }
+        let is_json = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("json"))
+            .unwrap_or(false);
+        if !is_json {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let modified_at = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| name.clone());
+        out.push(ComfyWorkflowFile {
+            name: stem,
+            path: path.to_string_lossy().to_string(),
+            relative,
+            size: meta.len(),
+            modified_at,
+        });
+    }
+}
+
+/// 扫描 ComfyUI 工作流目录（Tauri 命令壳，逻辑在 scan_workflows_sync）。
+#[tauri::command]
+pub async fn comfyui_scan_workflows(dir: String) -> Result<Vec<ComfyWorkflowFile>, String> {
+    scan_workflows_sync(&dir)
+}
+
+/// 读取并解析一个工作流文件（JSON）。上限 8MB——UI 图内嵌缩略图元数据时可能较大。
+#[tauri::command]
+pub async fn comfyui_read_workflow(path: String) -> Result<serde_json::Value, String> {
+    let p = std::path::PathBuf::from(path.trim());
+    if p.as_os_str().is_empty() {
+        return Err("路径为空".to_string());
+    }
+    let meta = std::fs::metadata(&p).map_err(|e| format!("读取文件信息失败: {}", e))?;
+    if meta.len() > 8 * 1024 * 1024 {
+        return Err("工作流文件过大（>8MB）".to_string());
+    }
+    let text = std::fs::read_to_string(&p).map_err(|e| format!("读取文件失败: {}", e))?;
+    serde_json::from_str(&text).map_err(|e| format!("解析工作流 JSON 失败: {}", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +482,25 @@ mod tests {
         assert_eq!(obj["7"]["class_type"], "SaveImage");
         // 负向提示词固定兜底
         assert!(obj["3"]["inputs"]["text"].as_str().unwrap().contains("worst quality"));
+    }
+
+    #[test]
+    fn scan_workflows_finds_json_recursively_and_skips_hidden() {
+        let base = std::env::temp_dir().join(format!("ady_wf_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        std::fs::write(base.join("a.json"), "{}").unwrap();
+        std::fs::write(base.join("sub/b.json"), "{}").unwrap();
+        std::fs::write(base.join("note.txt"), "x").unwrap();
+        std::fs::write(base.join(".hidden.json"), "{}").unwrap();
+        let files = scan_workflows_sync(&base.to_string_lossy()).unwrap();
+        let mut relatives: Vec<String> = files.iter().map(|f| f.relative.clone()).collect();
+        relatives.sort();
+        assert_eq!(relatives, vec!["a.json".to_string(), "sub/b.json".to_string()]);
+        assert_eq!(files.iter().find(|f| f.relative == "a.json").unwrap().name, "a");
+        // 错误路径明确报错
+        assert!(scan_workflows_sync(&base.join("nope").to_string_lossy()).is_err());
+        assert!(scan_workflows_sync("").is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
