@@ -11,7 +11,7 @@
 // - 语音合成：POST {base_url}/audio/speech，请求 mp3，返回 audio data URL。
 // - profile 需配置 image_model / tts_model 才可用；未配置返回明确错误。
 
-use crate::services::ai_service::{self, load_config, resolve_target};
+use crate::services::ai_service;
 
 /// AI 生成图片（OpenAI 兼容 /images/generations）。
 /// 返回 data URL（png）；无法取 base64 时尝试取 url（再转 data URL 会失败则回退原 url）。
@@ -132,36 +132,10 @@ pub async fn ai_tts(
     Ok(format!("data:audio/mpeg;base64,{}", b64))
 }
 
-/// ComfyUI 本地生图（程序化接入）——与 ai_generate_image（OpenAI 兼容云端）并列的另一条生图后端。
-/// 流程：POST {url}/prompt 提交最小 txt2img 工作流 → 轮询 {url}/history/{prompt_id} 出图 → 从 {url}/view 取图 → PNG data URL。
-/// comfyui_url 形如 http://127.0.0.1:8188；checkpoint 为 ComfyUI models/checkpoints 下的模型文件名（如 sd_xl_base.safetensors）。
-/// 本地 SD 出图可能数十秒~数分钟，轮询上限 5 分钟。
-#[tauri::command]
-pub async fn comfyui_generate_image(
-    prompt: String,
-    comfyui_url: String,
-    checkpoint: String,
-) -> Result<String, String> {
-    let base = comfyui_url.trim().trim_end_matches('/').to_string();
-    if base.is_empty() {
-        return Err("未配置 ComfyUI 地址".to_string());
-    }
-    let ckpt = checkpoint.trim().to_string();
-    if ckpt.is_empty() {
-        return Err("未配置 ComfyUI 模型（checkpoint 文件名）".to_string());
-    }
-    let prompt = prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err("画图提示词为空".to_string());
-    }
-
-    // 标准 SD1.5/SDXL 通用 txt2img 工作流（最小可用集）。
-    // CheckpointLoaderSimple 输出 [MODEL, CLIP, VAE]，索引分别 0/1/2，故 vae 取 ["1",2]。
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let workflow = serde_json::json!({
+/// 标准 SD1.5/SDXL 通用 txt2img 工作流（最小可用集，纯函数便于测试）。
+/// CheckpointLoaderSimple 输出 [MODEL, CLIP, VAE]，索引分别 0/1/2，故 vae 取 ["1",2]。
+pub fn build_default_txt2img(prompt: &str, ckpt: &str, seed: u64) -> serde_json::Value {
+    serde_json::json!({
         "1": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": ckpt } },
         "2": { "class_type": "CLIPTextEncode", "inputs": { "text": prompt, "clip": ["1", 0] } },
         "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "text, watermark, worst quality, low quality, blurry", "clip": ["1", 0] } },
@@ -173,13 +147,29 @@ pub async fn comfyui_generate_image(
         } },
         "6": { "class_type": "VAEDecode", "inputs": { "samples": ["5", 0], "vae": ["1", 2] } },
         "7": { "class_type": "SaveImage", "inputs": { "images": ["6", 0], "filename_prefix": "andeyunhui" } }
-    });
+    })
+}
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+/// 解析 ComfyUI 有效基址：ComfyUI 每条路由同时挂在裸路径与 /api 前缀下，
+/// 但 API-only 反向代理（如 comfy-api-proxy）只转发 /api/*，裸路径探测会 404。
+/// 先试 {base}/system_stats，404 则试 {base}/api/system_stats，返回可用基址。
+async fn resolve_comfy_base(client: &reqwest::Client, base: &str) -> Result<String, String> {
+    for candidate in [base.to_string(), format!("{}/api", base)] {
+        match client.get(format!("{}/system_stats", candidate)).send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(candidate),
+            _ => continue,
+        }
+    }
+    Err(format!("ComfyUI 不可达或非 ComfyUI 服务（{}）：system_stats 探测失败", base))
+}
 
+/// 提交 API 工作流 → 轮询 /history 出图 → 从 /view 取图 → 图片 data URL。
+/// 本地 SD 出图可能数十秒~数分钟，轮询上限 5 分钟。当前仅取图片输出（视频/音频后续）。
+async fn run_comfy_workflow(
+    client: &reqwest::Client,
+    base: &str,
+    workflow: &serde_json::Value,
+) -> Result<String, String> {
     // 1) 提交工作流
     let submit_resp = client
         .post(format!("{}/prompt", base))
@@ -254,7 +244,7 @@ pub async fn comfyui_generate_image(
     }
 
     let (filename, subfolder, typ) = image_ref.ok_or_else(|| "ComfyUI 未返回图片".to_string())?;
-    // 3) 取图字节 → PNG data URL
+    // 3) 取图字节 → data URL（content-type 缺省按 png）
     let img_resp = client
         .get(format!("{}/view", base))
         .query(&[("filename", filename.as_str()), ("subfolder", subfolder.as_str()), ("type", typ.as_str())])
@@ -264,11 +254,122 @@ pub async fn comfyui_generate_image(
     if !img_resp.status().is_success() {
         return Err(format!("获取 ComfyUI 图片 HTTP {}", img_resp.status()));
     }
+    let content_type = img_resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/png")
+        .to_string();
     let bytes = img_resp.bytes().await.map_err(|e| format!("读取 ComfyUI 图片失败: {}", e))?;
     if bytes.is_empty() {
         return Err("ComfyUI 图片为空".to_string());
     }
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:image/png;base64,{}", b64))
+    Ok(format!("data:{};base64,{}", content_type, b64))
+}
+
+/// ComfyUI 本地生图（程序化接入）——与 ai_generate_image（OpenAI 兼容云端）并列的另一条生图后端。
+/// 两种用法：
+///   ① 传 prompt + checkpoint：走内置最小 txt2img 工作流（build_default_txt2img）；
+///   ② 传 workflow（API 格式 JSON，前端已用 applyWorkflowParameters 应用参数覆盖）：直接提交，
+///      复用用户在 ComfyUI 里调好的工作流（ControlNet/LoRA/精细流程均可）。
+/// comfyui_url 形如 http://127.0.0.1:8188；checkpoint 为 ComfyUI models/checkpoints 下的模型文件名。
+/// 轮询上限 5 分钟；当前仅返回首个图片输出（视频/音频输出后续支持）。
+#[tauri::command]
+pub async fn comfyui_generate_image(
+    prompt: Option<String>,
+    comfyui_url: String,
+    checkpoint: Option<String>,
+    workflow: Option<serde_json::Value>,
+) -> Result<String, String> {
+    let base = comfyui_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err("未配置 ComfyUI 地址".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+    let base = resolve_comfy_base(&client, &base).await?;
+
+    // 用法②：调用方提交完整工作流（优先）
+    if let Some(wf) = workflow {
+        let obj = wf
+            .as_object()
+            .filter(|o| !o.is_empty())
+            .ok_or_else(|| "workflow 必须是非空 JSON 对象".to_string())?;
+        // 每个节点都应是 { class_type, inputs } 形状
+        for (id, node) in obj {
+            let ok = node.get("class_type").and_then(|v| v.as_str()).is_some()
+                && node.get("inputs").and_then(|v| v.as_object()).is_some();
+            if !ok {
+                return Err(format!("workflow 节点 {} 缺少 class_type/inputs", id));
+            }
+        }
+        return run_comfy_workflow(&client, &base, &wf).await;
+    }
+
+    // 用法①：内置最小 txt2img
+    let ckpt = checkpoint.unwrap_or_default().trim().to_string();
+    if ckpt.is_empty() {
+        return Err("未配置 ComfyUI 模型（checkpoint 文件名）".to_string());
+    }
+    let prompt = prompt.unwrap_or_default().trim().to_string();
+    if prompt.is_empty() {
+        return Err("画图提示词为空".to_string());
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let wf = build_default_txt2img(&prompt, &ckpt, seed);
+    run_comfy_workflow(&client, &base, &wf).await
+}
+
+/// ComfyUI 节点定义（/object_info）——前端 convertGraphToApi 需要它把 UI 图转成 API 工作流。
+/// 完整 object_info 可能有数 MB（自定义节点越多越大），按需拉取、经 Rust 中转（避开 WebView 直连的 CORS）。
+#[tauri::command]
+pub async fn comfyui_object_info(comfyui_url: String) -> Result<serde_json::Value, String> {
+    let base = comfyui_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err("未配置 ComfyUI 地址".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+    let base = resolve_comfy_base(&client, &base).await?;
+    let resp = client
+        .get(format!("{}/object_info", base))
+        .send()
+        .await
+        .map_err(|e| format!("ComfyUI 不可达（{}）: {}", base, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("获取 ComfyUI object_info HTTP {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("解析 ComfyUI object_info 失败: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_txt2img_shape() {
+        let wf = build_default_txt2img("a cat", "sd_xl_base.safetensors", 42);
+        let obj = wf.as_object().unwrap();
+        assert_eq!(obj.len(), 7);
+        assert_eq!(obj["1"]["class_type"], "CheckpointLoaderSimple");
+        assert_eq!(obj["1"]["inputs"]["ckpt_name"], "sd_xl_base.safetensors");
+        assert_eq!(obj["2"]["class_type"], "CLIPTextEncode");
+        assert_eq!(obj["2"]["inputs"]["text"], "a cat");
+        // CheckpointLoaderSimple 输出 [MODEL, CLIP, VAE] → vae 引 ["1",2]
+        assert_eq!(obj["6"]["inputs"]["vae"], serde_json::json!(["1", 2]));
+        assert_eq!(obj["5"]["inputs"]["seed"], 42);
+        assert_eq!(obj["7"]["class_type"], "SaveImage");
+        // 负向提示词固定兜底
+        assert!(obj["3"]["inputs"]["text"].as_str().unwrap().contains("worst quality"));
+    }
 }
