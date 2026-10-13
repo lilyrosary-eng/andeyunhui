@@ -152,7 +152,11 @@ export function AgentTracePanel({
           } else if (kind === 'Tool') {
             const t = (ev as { Tool: { name: string; ok: boolean; content: string; meta?: Record<string, unknown> | null } }).Tool;
             title = `工具 · ${t.name}`;
-            body = t.content;
+            // 失败原因可能带机器可读的 `[comfyui-skill:<slug>]` 前缀（前端已据此写回工作流备注），
+            // 这里剥掉再展示——审计日志里原文仍在，只是不把内部标记摆给用户看。
+            body = t.content.startsWith('[comfyui-skill:')
+              ? t.content.slice(t.content.indexOf(']') + 1).trim()
+              : t.content;
             okFlag = t.ok;
             // 生图工具：meta.image 为 data URL（实时事件）——直接展示图片；
             // 落盘日志里是占位标记（后端剥离 base64），此时不渲染。

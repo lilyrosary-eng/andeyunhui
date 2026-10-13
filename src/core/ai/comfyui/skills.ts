@@ -53,3 +53,70 @@ export function saveSkillNotes(slug: string, text: string, s: Storage = storage)
   else all[slug] = text;
   s.setJSON(SKILLS_KEY, all);
 }
+
+/** 备注里「运行失败」小节的分隔标记（与用户手写内容天然分离，便于前端/人阅读）。 */
+export const FAIL_MARK = '## 运行失败';
+/** 同一原因重复出现时不再追加（把"同一坑踩 N 次"压缩成一条）。 */
+function alreadyRecorded(notes: string, reason: string): boolean {
+  return notes.includes(reason);
+}
+
+/**
+ * 把一次生图失败原因 append 进该工作流的备注（AI 写回备注 / 运行反馈闭环）。
+ * 纯函数逻辑抽出便于测试：已有同因记录则不重复追加；返回新备注文本（未变更时返回原文本）。
+ * 去重是必要的——失败往往成串出现（轮询超时、模型未加载），同因刷屏会淹没用户手写的经验。
+ */
+export function appendFailNote(notes: string, reason: string, now: Date = new Date()): string {
+  const r = reason.trim();
+  if (r === '') return notes;
+  const base = notes.trim();
+  if (alreadyRecorded(base, r)) return notes;
+  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const line = `- ${stamp} ${r}`;
+  if (!base) return `${FAIL_MARK}\n${line}`;
+  if (base.includes(FAIL_MARK)) return `${base}\n${line}`;
+  return `${base}\n\n${FAIL_MARK}\n${line}`;
+}
+
+/** 便捷封装：读 → append → 写。 */
+export function recordFailNote(slug: string, reason: string, s: Storage = storage): void {
+  const cur = loadSkillNotes(slug, s);
+  const next = appendFailNote(cur, reason);
+  if (next !== cur) saveSkillNotes(slug, next, s);
+}
+
+/** 后端失败原因里的技能包 slug 前缀（ai_tools.rs::SKILL_FAIL_PREFIX 的前端镜像）。 */
+export const SKILL_FAIL_PREFIX = '[comfyui-skill:';
+/** 写回备注时的原因上限（备注是给人看的经验，不是日志；过长会淹没用户手写内容）。 */
+const FAIL_REASON_MAX = 160;
+
+/**
+ * 解析生图失败原因里的技能包 slug 前缀。
+ * 格式：`[comfyui-skill:<slug>] <原因>`；无前缀（如云端生图失败）或格式残缺返回 null。
+ * 纯函数，便于测试。
+ */
+export function parseSkillFail(detail: string): { slug: string; reason: string } | null {
+  if (!detail.startsWith(SKILL_FAIL_PREFIX)) return null;
+  const close = detail.indexOf(']');
+  if (close < 0) return null;
+  const slug = detail.slice(SKILL_FAIL_PREFIX.length, close).trim();
+  if (!slug) return null;
+  const reason = detail.slice(close + 1).trim().slice(0, FAIL_REASON_MAX);
+  if (!reason) return null;
+  return { slug, reason };
+}
+
+/**
+ * 生图失败 → 写回该工作流备注（AI 写回备注闭环）。
+ * 解析失败（无前缀/格式残缺）则不动备注——写回是增强，不该误伤其它工作流的经验。
+ * 存储异常被吞（不影响对话流）。
+ */
+export function recordGenerateFail(detail: string, s: Storage = storage): void {
+  const parsed = parseSkillFail(detail);
+  if (!parsed) return;
+  try {
+    recordFailNote(parsed.slug, parsed.reason, s);
+  } catch {
+    /* 备注写回是增强能力，存储异常不应影响对话流 */
+  }
+}

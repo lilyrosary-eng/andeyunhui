@@ -5,6 +5,7 @@ import { useEffect } from 'react';
 import type { MutableRefObject } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { ChatMsg } from './types';
+import { recordGenerateFail } from '@/core/ai/comfyui/skills';
 
 export interface AiStreamConfig {
   /** 事件前缀：'ai'（对话）/ 'capsule-ide-chat'（编程对话）/ 'capsule-ide-agent'（编程代理） */
@@ -115,6 +116,11 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
           const cid = streamConvIdRef.current;
           const step = { stage: e.payload.stage, name: e.payload.name, ok: e.payload.ok, detail: e.payload.detail, meta: e.payload.meta };
           updateMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, agentSteps: [...(m.agentSteps || []), step] } : m)));
+          // AI 写回备注：生图失败时，把原因沉淀进该 ComfyUI 工作流的技能包备注，
+          // 下次规划（L3 注入）与运行（日志披露）都能看到，同一坑不踩第二次。
+          if (e.payload.name === 'generate_image' && e.payload.ok === false) {
+            recordGenerateFail(e.payload.detail);
+          }
         });
         if (cancelled) { u5(); return; }
         un.push(u5);

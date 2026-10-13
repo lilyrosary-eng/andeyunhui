@@ -27,6 +27,8 @@ export interface ComfyuiToolCfg {
   ckpt?: string;
   workflow?: ApiWorkflow;
   promptAt?: { nodeId: string; inputKey: string };
+  /** 蓝图工作流的技能包 slug——生图失败时后端随错误返回，前端据此写回备注。 */
+  skillSlug?: string;
 }
 
 /**
@@ -49,6 +51,8 @@ export async function resolveComfyuiConfig(): Promise<ComfyuiToolCfg | null> {
   if (!url) return null;
   const ckpt = storage.getString(KEYS.ai.comfyuiCkpt.key, '').trim();
   const bpWf = storage.getString(KEYS.ai.comfyuiBlueprintWf.key, '').trim();
+  // 技能包 slug：生图失败时随错误上报，前端写回备注（同一坑不踩第二次）
+  const skillSlug = storage.getString(KEYS.ai.comfyuiBlueprintWfSlug.key, '').trim();
 
   if (bpWf) {
     try {
@@ -69,7 +73,9 @@ export async function resolveComfyuiConfig(): Promise<ComfyuiToolCfg | null> {
         }
         if (Object.keys(apiWf).length > 0) {
           const promptAt = pickPromptAt(analyzeWorkflowParameters(apiWf, info));
-          if (promptAt) return { url, workflow: apiWf, promptAt };
+          if (promptAt) {
+            return { url, workflow: apiWf, promptAt, ...(skillSlug ? { skillSlug } : {}) };
+          }
         }
       }
     } catch {
@@ -78,5 +84,6 @@ export async function resolveComfyuiConfig(): Promise<ComfyuiToolCfg | null> {
   }
 
   // 无蓝图工作流：只要端点可用就交给 Rust（由 Rust 判 ckpt 是否齐备并给明确错误）
+  // 注意：此档不带 skillSlug——失败写回针对的是「某个具体工作流」的经验，内置流无对应备注对象。
   return ckpt ? { url, ckpt } : { url };
 }

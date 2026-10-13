@@ -63,6 +63,22 @@ pub(crate) struct ComfyuiToolCfg {
     pub(crate) workflow: Option<serde_json::Value>,
     /// 提示词写入位（workflow 存在时）。
     pub(crate) prompt_at: Option<ComfyuiPromptAt>,
+    /// 蓝图工作流的技能包 slug（备注键）。生图失败时随错误上报，
+    /// 由前端把失败原因 append 进该工作流的备注（AI 写回备注，同一坑不踩第二次）。
+    pub(crate) skill_slug: Option<String>,
+}
+
+/// 失败原因里携带技能包 slug 的机器可读前缀（前端解析后写回备注）。
+/// 形如 `[comfyui-skill:krea-afterlight-json] ComfyUI 执行失败: ...`。
+pub(crate) const SKILL_FAIL_PREFIX: &str = "[comfyui-skill:";
+
+/// 若本轮配置带了技能包 slug，给失败原因加上前缀（供前端写回备注）。
+/// 无 slug 时原样返回——写回是增强，不该影响错误文本的可读性。
+fn tag_skill_fail(cfg: Option<&ComfyuiToolCfg>, err: String) -> String {
+    match cfg.and_then(|c| c.skill_slug.as_deref()).filter(|s| !s.trim().is_empty()) {
+        Some(slug) => format!("{}{}] {}", SKILL_FAIL_PREFIX, slug.trim(), err),
+        None => err,
+    }
 }
 
 impl ComfyuiToolCfg {
@@ -3081,7 +3097,12 @@ impl AiTool for GenerateImageTool {
         }
         let cfg = ctx.comfyui.as_ref().filter(|c| c.is_ready());
         let (data_url, source) = match cfg {
-            Some(c) => (generate_via_comfy(c, &prompt).await?, "comfyui"),
+            Some(c) => match generate_via_comfy(c, &prompt).await {
+                Ok(u) => (u, "comfyui"),
+                // 失败原因带上技能包 slug 前缀（前端据此 append 进该工作流备注）
+                Err(e) => return Err(tag_skill_fail(Some(c), e)),
+            },
+            // 云端失败与工作流技能包无关，不加前缀
             None => (
                 crate::services::multimodal_service::ai_generate_image(
                     ctx.app.clone(),
@@ -3329,6 +3350,35 @@ mod tests {
         assert!(!cfg.is_ready(), "空 url = 未配置 → 走云端");
         assert!(cfg.workflow.is_none());
         assert!(cfg.prompt_at.is_none());
+        assert!(cfg.skill_slug.is_none());
+    }
+
+    #[test]
+    fn comfyui_tool_cfg_keeps_skill_slug_for_fail_writeback() {
+        let cfg: ComfyuiToolCfg = serde_json::from_value(
+            serde_json::json!({ "url": "http://127.0.0.1:8188", "skillSlug": "krea-json" }),
+        )
+        .unwrap();
+        assert_eq!(cfg.skill_slug.as_deref(), Some("krea-json"));
+    }
+
+    #[test]
+    fn tag_skill_fail_prefixes_only_with_slug() {
+        // 有 slug → 加机器可读前缀（前端据此写回备注）
+        let cfg = ComfyuiToolCfg {
+            url: "http://x".into(),
+            skill_slug: Some("krea-json".into()),
+            ..Default::default()
+        };
+        let tagged = tag_skill_fail(Some(&cfg), "ComfyUI 执行失败: x".into());
+        assert_eq!(tagged, "[comfyui-skill:krea-json] ComfyUI 执行失败: x");
+
+        // 无 slug / 空白 slug / 无配置 → 原样返回，不加前缀
+        let no_slug = ComfyuiToolCfg { url: "http://x".into(), ..Default::default() };
+        assert_eq!(tag_skill_fail(Some(&no_slug), "err".into()), "err");
+        let blank = ComfyuiToolCfg { url: "http://x".into(), skill_slug: Some("  ".into()), ..Default::default() };
+        assert_eq!(tag_skill_fail(Some(&blank), "err".into()), "err");
+        assert_eq!(tag_skill_fail(None, "err".into()), "err");
     }
 
     #[test]
