@@ -57,6 +57,7 @@ export const KEYS = {
     comfyuiCkpt:       { key: 'ai.comfyuiCkpt', kind: 'string', scope: 'desktop', default: '', note: 'ComfyUI checkpoint 模型文件名（models/checkpoints 下）' },
     comfyuiWorkflowsDir: { key: 'ai.comfyuiWorkflowsDir', kind: 'string', scope: 'desktop', default: '', note: 'ComfyUI 工作流目录（user/default/workflows 或 userdata/workflows）' },
     comfyuiBlueprintWf: { key: 'ai.comfyuiBlueprintWf', kind: 'string', scope: 'desktop', default: '', note: '蓝图生图节点使用的 ComfyUI 工作流文件路径（空=用内置最小流/云端）' },
+    comfyuiBlueprintWfSlug: { key: 'ai.comfyuiBlueprintWfSlug', kind: 'string', scope: 'desktop', default: '', note: '蓝图工作流的技能包 slug（备注键，随 comfyuiBlueprintWf 一起设置）' },
   },
   mobile: {
     preview:           { key: 'mobile-preview', kind: 'flag', scope: 'mobile', default: '0', note: 'main.tsx 预览开关' },

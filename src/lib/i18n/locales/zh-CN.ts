@@ -1430,4 +1430,6 @@ export const zhCN: Record<string, string> = {
   'modelSettings.comfyui.useForBlueprint': '供蓝图生图节点使用',
   'modelSettings.comfyui.clearBlueprint': '取消蓝图使用',
   'modelSettings.comfyui.blueprintBadge': '蓝图使用中',
+  'modelSettings.comfyui.notesTitle': '工作流备注（技能包）',
+  'modelSettings.comfyui.notesPlaceholder': '适用场景 / 关键参数 / 踩坑记录……AI 规划蓝图时会参考这些备注',
 };

@@ -27,6 +27,7 @@ import { convertGraphToApi } from '@/core/ai/comfyui/convert';
 import { detectWorkflow } from '@/core/ai/comfyui/format';
 import { getObjectInfo } from '@/core/ai/comfyui/objectInfo';
 import { analyzeWorkflowParameters, applyWorkflowParameters, type Workflow as ComfyWorkflow } from '@/core/ai/comfyui/params';
+import { loadSkillNotes, skillSummary } from '@/core/ai/comfyui/skills';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 
@@ -344,7 +345,13 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
     if (!t) { setError('请先在任务描述里写一句需求'); return; }
     setPlanning(true); setError(null); setLogs([]); setMenu(null);
     try {
-      const raw = await aiAsk(PLAN_SYSTEM, `需求：${t}\n请只输出工作流规划 JSON。`);
+      // L3 披露：蓝图指定了工作流且有备注时，把备注拼进规划系统提示，AI 按适配场景/参数建议/已知坑规划
+      const bpSlug = storage.getString(KEYS.ai.comfyuiBlueprintWfSlug.key, '').trim();
+      const bpNotes = bpSlug ? loadSkillNotes(bpSlug).trim() : '';
+      const notesSection = bpNotes
+        ? `\n\n【当前生图节点将使用的 ComfyUI 工作流备注（规划时请参考：适配场景 / 参数建议 / 已知坑）】\n${bpNotes}`
+        : '';
+      const raw = await aiAsk(PLAN_SYSTEM + notesSection, `需求：${t}\n请只输出工作流规划 JSON。`);
       const parsed = parsePlan(raw);
       if (!parsed) { setError('未能解析蓝图结构，请换一种描述再试。'); return; }
       commit((d) => ({ ...d, nodes: parsed.nodes, edges: parsed.edges }));
@@ -588,6 +595,12 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
             const comfyCkpt = storage.getString(KEYS.ai.comfyuiCkpt.key, '').trim();
             const bpWf = storage.getString(KEYS.ai.comfyuiBlueprintWf.key, '').trim();
             if (comfyUrl && bpWf) {
+              // 运行可见：蓝图工作流有备注时，先把摘要写进运行日志（软披露）
+              const bpNotes = storage.getString(KEYS.ai.comfyuiBlueprintWfSlug.key, '').trim();
+              if (bpNotes) {
+                const n = loadSkillNotes(bpNotes);
+                if (n) pushLog(`工作流备注: ${skillSummary(n)}`);
+              }
               const json = await invoke<unknown>('comfyui_read_workflow', { path: bpWf });
               const kind = detectWorkflow(json);
               if (kind === 'unknown') throw new Error('蓝图指定的工作流文件无法识别（既非 UI 画布图也非 API 工作流）');

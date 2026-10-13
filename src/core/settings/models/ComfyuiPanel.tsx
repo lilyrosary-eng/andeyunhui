@@ -5,16 +5,17 @@
 //      复用用户在 ComfyUI 里调好的工作流（convert/params 为移植自 dsh-comfyui 的纯函数层）；
 //   ③ 把一个工作流标记为「蓝图生图节点使用」（存路径，蓝图 image 节点运行时读取）。
 // object_info 按端点做会话级缓存（数 MB，拉一次就够）。
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X } from 'lucide-react';
+import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { convertGraphToApi } from '@/core/ai/comfyui/convert';
 import { detectWorkflow } from '@/core/ai/comfyui/format';
 import { getObjectInfo } from '@/core/ai/comfyui/objectInfo';
 import { analyzeWorkflowParameters, applyWorkflowParameters } from '@/core/ai/comfyui/params';
+import { loadSkillNotes, saveSkillNotes, skillSlug, skillSummary } from '@/core/ai/comfyui/skills';
 import type { Workflow, WorkflowParameter } from '@/core/ai/comfyui/params';
 
 type TFunc = (k: string, vars?: Record<string, string | number>) => string;
@@ -48,6 +49,10 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
   const [values, setValues] = useState<Record<string, unknown>>({});
   // ③ 蓝图挂钩
   const [blueprintWf, setBlueprintWf] = useState('');
+  const [blueprintSlug, setBlueprintSlug] = useState('');
+  // 技能包（工作流备注）：L1 列表摘要 + L2 详情编辑
+  const [notes, setNotes] = useState('');
+  const [notesSlug, setNotesSlug] = useState('');
 
   const saveUrl = (v: string) => { setComfyuiUrl(v); storage.setString(KEYS.ai.comfyuiUrl.key, v); };
   const saveCkpt = (v: string) => { setComfyuiCkpt(v); storage.setString(KEYS.ai.comfyuiCkpt.key, v); };
@@ -58,7 +63,15 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     setComfyuiCkpt(storage.getString(KEYS.ai.comfyuiCkpt.key, ''));
     setWfDir(storage.getString(KEYS.ai.comfyuiWorkflowsDir.key, ''));
     setBlueprintWf(storage.getString(KEYS.ai.comfyuiBlueprintWf.key, ''));
+    setBlueprintSlug(storage.getString(KEYS.ai.comfyuiBlueprintWfSlug.key, ''));
   }, []);
+
+  // 备注防抖保存（400ms；空白=删除）
+  useEffect(() => {
+    if (!notesSlug) return;
+    const timer = setTimeout(() => saveSkillNotes(notesSlug, notes), 400);
+    return () => clearTimeout(timer);
+  }, [notes, notesSlug]);
 
   const quickGenerate = async () => {
     const p = cmfyPrompt.trim();
@@ -103,11 +116,14 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     setValues(init);
   }, []);
 
-  const loadWorkflow = async (path: string) => {
-    setSelPath(path); setWfErr(''); setWfImg(''); setApi(null); setParams([]); setValues({});
+  const loadWorkflow = async (f: WfFile) => {
+    setSelPath(f.path); setWfErr(''); setWfImg(''); setApi(null); setParams([]); setValues({});
+    const slug = skillSlug(f.relative);
+    setNotesSlug(slug);
+    setNotes(loadSkillNotes(slug));
     setWfBusy(true);
     try {
-      const json = await invoke<unknown>('comfyui_read_workflow', { path });
+      const json = await invoke<unknown>('comfyui_read_workflow', { path: f.path });
       const kind = detectWorkflow(json);
       if (kind === 'ui') {
         setWfErr(t('modelSettings.comfyui.loadingObjectInfo'));
@@ -140,12 +156,26 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
 
   const useForBlueprint = () => {
     storage.setString(KEYS.ai.comfyuiBlueprintWf.key, selPath);
+    storage.setString(KEYS.ai.comfyuiBlueprintWfSlug.key, notesSlug);
     setBlueprintWf(selPath);
+    setBlueprintSlug(notesSlug);
   };
   const clearBlueprint = () => {
     storage.setString(KEYS.ai.comfyuiBlueprintWf.key, '');
+    storage.setString(KEYS.ai.comfyuiBlueprintWfSlug.key, '');
     setBlueprintWf('');
+    setBlueprintSlug('');
   };
+
+  // L1 披露：列表行展示各工作流备注摘要（扫完后算一次）
+  const summaries = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const f of files) {
+      const n = loadSkillNotes(skillSlug(f.relative));
+      if (n) m[f.path] = skillSummary(n);
+    }
+    return m;
+  }, [files]);
 
   const inputCls = 'w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]';
   const btnCls = 'shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-[var(--element-border)] text-white disabled:opacity-50';
@@ -202,10 +232,15 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
             const active = f.path === selPath;
             const isBp = f.path === blueprintWf;
             return (
-              <button key={f.path} onClick={() => void loadWorkflow(f.path)}
+              <button key={f.path} onClick={() => void loadWorkflow(f)}
                 className={`w-full text-left px-3 py-2 flex items-center gap-2 text-xs transition-colors ${active ? 'bg-violet-500/10' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}>
                 <FileJson size={13} className={active ? 'text-violet-500' : 'text-neutral-400'} />
                 <span className={`min-w-0 flex-1 truncate ${active ? 'text-violet-600 dark:text-violet-400 font-medium' : 'text-neutral-700 dark:text-stone-200'}`}>{f.relative}</span>
+                {summaries[f.path] && (
+                  <span className="shrink-0 flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400 max-w-[180px]">
+                    <ScrollText size={11} /><span className="truncate">{summaries[f.path]}</span>
+                  </span>
+                )}
                 {isBp && <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">{t('modelSettings.comfyui.blueprintBadge')}</span>}
                 <span className="shrink-0 text-[10px] text-neutral-400">{(f.size / 1024).toFixed(1)}K · {new Date(f.modified_at * 1000).toLocaleString()}</span>
               </button>
@@ -214,12 +249,24 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
         </div>
       )}
 
-      {/* 选中工作流：参数表单 + 生成 */}
+      {/* 选中工作流：备注（技能包 L2）+ 参数表单 + 生成 */}
       {selPath && (
         <div className="rounded-lg border border-neutral-200 dark:border-stone-700 p-3 space-y-2">
           <div className="flex items-center gap-2 text-[11px] text-neutral-500 dark:text-stone-400">
             <span className="font-mono truncate flex-1" title={selPath}>{selPath}</span>
             {api && <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-600 dark:text-violet-400">{t('modelSettings.comfyui.formatApi')}</span>}
+          </div>
+          <div>
+            <div className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-500 dark:text-stone-400 mb-1">
+              <ScrollText size={12} />{t('modelSettings.comfyui.notesTitle')}
+            </div>
+            <textarea
+              className="w-full px-2 py-1.5 rounded-lg text-xs bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)] resize-y"
+              rows={3}
+              value={notes}
+              placeholder={t('modelSettings.comfyui.notesPlaceholder')}
+              onChange={(e) => setNotes(e.target.value)}
+            />
           </div>
           {params.length > 0 && (
             <div className="grid grid-cols-2 gap-2">
