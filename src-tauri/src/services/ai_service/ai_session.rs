@@ -330,7 +330,19 @@ pub(crate) fn persist_agent_session(app: &AppHandle, session: &EventSession) {
     let sessions_dir = dir.join("ai_sessions");
     let _ = fs::create_dir_all(&sessions_dir);
     let file = sessions_dir.join(format!("{}.json", session.id));
-    if let Ok(json) = serde_json::to_string_pretty(session) {
+    // 落盘前瘦身：生图工具的 meta.image 是 data URL（可达数 MB base64），
+    // 若原样写入会让会话日志线性膨胀（每张图一条）。落盘只保留占位标记，
+    // 前端渲染走实时事件的 meta（内存），日志仅作审计与 replay 卡片骨架。
+    let mut slim = session.clone();
+    for ev in &mut slim.events {
+        if let SessionEvent::Tool { meta: Some(m), .. } = ev {
+            if let Some(img) = m.get("image").and_then(|v| v.as_str()) {
+                let marker = format!("<data-url:{} chars, not persisted>", img.chars().count());
+                m["image"] = serde_json::Value::String(marker);
+            }
+        }
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&slim) {
         let _ = fs::write(file, json);
     }
 }

@@ -15,7 +15,7 @@ import type { AgentStep } from '@/components/capsule/types';
 type SessionEvent =
   | { User: { seq: number; content: string } }
   | { Assistant: { seq: number; content: string; tool_calls: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }
-  | { Tool: { seq: number; call_id: string; name: string; ok: boolean; content: string } }
+  | { Tool: { seq: number; call_id: string; name: string; ok: boolean; content: string; meta?: Record<string, unknown> | null } }
   | { Compact: { seq: number; summary: string; shadow_until: number } }
   | { Interrupted: { seq: number; call_id: string; content: string } };
 
@@ -150,10 +150,22 @@ export function AgentTracePanel({
               extra = <div className="text-[11px] text-neutral-500 dark:text-stone-400 mt-0.5">请求工具：{names.join('、')}</div>;
             }
           } else if (kind === 'Tool') {
-            const t = (ev as { Tool: { name: string; ok: boolean; content: string } }).Tool;
+            const t = (ev as { Tool: { name: string; ok: boolean; content: string; meta?: Record<string, unknown> | null } }).Tool;
             title = `工具 · ${t.name}`;
             body = t.content;
             okFlag = t.ok;
+            // 生图工具：meta.image 为 data URL（实时事件）——直接展示图片；
+            // 落盘日志里是占位标记（后端剥离 base64），此时不渲染。
+            const src = String((t.meta as { image?: unknown } | null | undefined)?.image ?? '');
+            if (src.startsWith('data:') || /^https?:\/\//.test(src)) {
+              extra = (
+                <img
+                  src={src}
+                  alt={(t.meta as { title?: string } | null | undefined)?.title || '生成图'}
+                  className="mt-1.5 max-w-full max-h-[220px] rounded-lg object-contain border border-black/10 dark:border-white/10"
+                />
+              );
+            }
           } else if (kind === 'Compact') {
             const c = (ev as { Compact: { summary: string; shadow_until: number } }).Compact;
             title = `上下文压缩（遮蔽 seq ≤ ${c.shadow_until}）`;

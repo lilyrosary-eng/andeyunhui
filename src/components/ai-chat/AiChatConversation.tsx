@@ -550,6 +550,30 @@ export const AiChatConversation = memo(function AiChatConversation({
                       ))}
                     </div>
                   )}
+                  {/* 工具生成的图片（generate_image）：AI 说「画张图」→ 图片直接落在气泡里。
+                      落盘后再打开会话时 meta.image 已是占位标记（后端剥离了 base64），
+                      此时只显示图片已生成的文字说明，不再渲染空图。 */}
+                  {m.role === 'assistant' && (() => {
+                    const imgs = (m.agentSteps || [])
+                      .map((s) => s.meta)
+                      .filter((x): x is Record<string, unknown> => !!x && x.card === 'image')
+                      .map((x) => ({ src: String(x.image ?? ''), title: String(x.title ?? '') }))
+                      .filter((x) => x.src.startsWith('data:') || /^https?:\/\//.test(x.src));
+                    if (imgs.length === 0) return null;
+                    return (
+                      <div className="flex flex-wrap gap-2 mb-1.5">
+                        {imgs.map((x, i) => (
+                          <img
+                            key={i}
+                            src={x.src}
+                            alt={x.title || `生成图${i + 1}`}
+                            title={x.title}
+                            className="max-w-[240px] max-h-[240px] rounded-xl object-cover border border-black/10 dark:border-white/10"
+                          />
+                        ))}
+                      </div>
+                    );
+                  })()}
                   {/* 附件（非图片）：文本已在请求中注入，二进制仅陈列文件名 */}
                   {m.attachments && m.attachments.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 mb-1.5">

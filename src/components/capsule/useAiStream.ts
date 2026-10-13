@@ -108,12 +108,12 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
 
       // agent 工具步骤（运行中实时累积，供执行轨迹面板在落盘前展示）
       if (hasAgentStep) {
-        const u5 = await listen<{ requestId: string; stage: string; name: string; ok: boolean; detail: string }>(`${prefix}-agent-step`, (e) => {
+        const u5 = await listen<{ requestId: string; stage: string; name: string; ok: boolean; detail: string; meta?: Record<string, unknown> }>(`${prefix}-agent-step`, (e) => {
           if (cancelled) return;
           if (e.payload.requestId !== reqRef.current || !asstRef.current) return;
           const id = asstRef.current;
           const cid = streamConvIdRef.current;
-          const step = { stage: e.payload.stage, name: e.payload.name, ok: e.payload.ok, detail: e.payload.detail };
+          const step = { stage: e.payload.stage, name: e.payload.name, ok: e.payload.ok, detail: e.payload.detail, meta: e.payload.meta };
           updateMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, agentSteps: [...(m.agentSteps || []), step] } : m)));
         });
         if (cancelled) { u5(); return; }

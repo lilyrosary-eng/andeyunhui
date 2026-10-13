@@ -33,6 +33,43 @@ pub(crate) struct ToolContext {
     pub project_root: Option<PathBuf>,
     /// 当前使用模型的档案 id（子代理等需要起第二个循环的工具，用它复用同一模型档案）。
     pub profile_id: Option<String>,
+    /// ComfyUI 生图配置（前端每次 agent 请求时从设置解析后传入；Rust 侧读不到
+    /// 前端 localStorage，故走参数通道）。None/空 url = 未配置 → generate_image
+    /// 回退云端图片模型（ai_generate_image）。
+    pub comfyui: Option<ComfyuiToolCfg>,
+}
+
+/// 蓝图工作流里「提示词参数位」的定位（前端 analyzeWorkflowParameters 解析产出，
+/// 避免 Rust 侧重复实现节点类型启发式）。node_id 为 API 工作流的节点 id，
+/// input_key 为该节点上的输入键（如 CLIPTextEncode 的 text）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ComfyuiPromptAt {
+    pub(crate) node_id: String,
+    pub(crate) input_key: String,
+}
+
+/// generate_image 工具的 ComfyUI 配置（前端 comfyuiConfig.ts 解析结果的 Rust 侧镜像）。
+/// workflow 为前端已转好的 API 格式工作流（蓝图指定了工作流文件时）；为空则走
+/// 内置最小 txt2img（需 ckpt）。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct ComfyuiToolCfg {
+    /// ComfyUI 端点，如 http://127.0.0.1:8188。空 = 未配置。
+    pub(crate) url: String,
+    /// checkpoint 模型文件名（models/checkpoints 下）。
+    pub(crate) ckpt: String,
+    /// 蓝图指定的 API 工作流（完整节点图）。
+    pub(crate) workflow: Option<serde_json::Value>,
+    /// 提示词写入位（workflow 存在时）。
+    pub(crate) prompt_at: Option<ComfyuiPromptAt>,
+}
+
+impl ComfyuiToolCfg {
+    /// 是否配置了可用的 ComfyUI（url 非空）。
+    pub(crate) fn is_ready(&self) -> bool {
+        !self.url.trim().is_empty()
+    }
 }
 
 /// 工具并发执行级别（对齐 dsh executeToolCalls 的 exclusive/parallel 语义）。
@@ -2172,6 +2209,7 @@ async fn run_subagent_once(
         request_id: format!("{}:sub{}", request_id, seq),
         project_root,
         profile_id: None,
+        comfyui: None,
     };
     for _ in 0..6usize {
         match subagent_model_round(&client, &url, cfg, &mut messages, &tools, &sub_ctx).await? {
@@ -2223,6 +2261,7 @@ async fn run_subagent_worker(
         request_id: child_id.clone(),
         project_root,
         profile_id: None,
+        comfyui: None,
     };
     let mut total_rounds = 0usize;
     const MAX_ROUNDS: usize = 20;
@@ -2941,6 +2980,139 @@ impl AiTool for RagSearchTool {
     }
 }
 
+// ========== 生图工具（generate_image）——AI 对话直接驱动机器生图 ==========
+//
+// 路由（前端 comfyuiConfig.ts 解析后经 ToolContext.comfyui 传入）：
+//   ① 配了 ComfyUI 且蓝图指定了工作流 → 写入 prompt 参数位 → 整图提交（复用用户工作流）；
+//   ② 配了 ComfyUI 无蓝图 → 内置最小 txt2img（需 ckpt）；
+//   ③ 未配 ComfyUI → 云端 ai_generate_image（算力来源的 image_model）。
+// 图片本体只走 meta（前端渲染卡片），绝不回填进 text——base64 数 MB 会炸模型上下文。
+
+/// 在 API 工作流里启发式找提示词写入位（前端未给 prompt_at 时的兜底）：
+/// 优先 CLIPTextEncode 系节点的 text 输入，其次任意含 text 字符串输入的节点。
+fn comfyui_prompt_slot(wf: &serde_json::Value) -> Option<ComfyuiPromptAt> {
+    let nodes = wf.as_object()?;
+    let text_input = |node: &serde_json::Value| node.pointer("/inputs/text").and_then(|v| v.as_str()).is_some();
+    // 第一遍：知名文本编码类（正/负提示词都算，取首个即可被用户工作流覆盖）
+    for (id, node) in nodes {
+        let ct = node.get("class_type").and_then(|v| v.as_str()).unwrap_or("");
+        if (ct.contains("CLIPTextEncode") || ct == "PrimitiveString" || ct == "PrimitiveStringMultiline") && text_input(node) {
+            return Some(ComfyuiPromptAt { node_id: id.clone(), input_key: "text".to_string() });
+        }
+    }
+    // 第二遍：任何带 text 字符串输入的节点
+    for (id, node) in nodes {
+        if text_input(node) {
+            return Some(ComfyuiPromptAt { node_id: id.clone(), input_key: "text".to_string() });
+        }
+    }
+    None
+}
+
+/// 经 ComfyUI 生图：蓝图工作流（写入 prompt 位后整图提交）或内置最小 txt2img。
+/// 复用 multimodal_service::comfyui_generate_media（tauri 命令函数，可直接调用）。
+async fn generate_via_comfy(cfg: &ComfyuiToolCfg, prompt: &str) -> Result<String, String> {
+    if let Some(wf) = &cfg.workflow {
+        let mut wf = wf.clone();
+        // 提示词写入位：前端解析结果优先，启发式兜底；都找不到必须报错——
+        // 静默提交原提示词会让「按用户描述作画」落空，属不可静默的失败。
+        let slot = cfg
+            .prompt_at
+            .clone()
+            .or_else(|| comfyui_prompt_slot(&wf))
+            .ok_or_else(|| "蓝图工作流里找不到提示词输入（text），无法按描述作图；请在设置→模型→本地生图换用带 CLIPTextEncode 的工作流".to_string())?;
+        if let Some(inputs) = wf.get_mut(&slot.node_id).and_then(|n| n.get_mut("inputs")) {
+            if let Some(obj) = inputs.as_object_mut() {
+                obj.insert(slot.input_key.clone(), serde_json::json!(prompt));
+            }
+        }
+        crate::services::multimodal_service::comfyui_generate_media(None, cfg.url.clone(), None, Some(wf)).await
+    } else {
+        let ckpt = cfg.ckpt.trim().to_string();
+        if ckpt.is_empty() {
+            return Err("已配置 ComfyUI 但未填写 checkpoint 模型文件名（设置 → 模型 → 本地生图）".to_string());
+        }
+        crate::services::multimodal_service::comfyui_generate_media(Some(prompt.to_string()), cfg.url.clone(), Some(ckpt), None).await
+    }
+}
+
+/// 生图工具：用户说「画张图」时由模型调用。图片经 meta 回传前端直接渲染。
+struct GenerateImageTool;
+#[async_trait::async_trait]
+impl AiTool for GenerateImageTool {
+    fn name(&self) -> &'static str {
+        "generate_image"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "生成图片（文生图）。当用户要求画画、生成图像、出图、配图时调用。prompt 写详细的画面描述（主体、风格、构图、光线等，中英文均可）。已配置 ComfyUI 时走本地工作流（含用户在 ComfyUI 里调好的流程），否则走云端图片模型。生成成功后图片会直接展示在对话中，无需你转述画面内容。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "画面描述（越具体越好：主体、风格、构图、光线等）" }
+                    },
+                    "required": ["prompt"]
+                }
+            }
+        })
+    }
+    fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
+        let short: String = args
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(30)
+            .collect();
+        serde_json::json!({ "card": "generic", "kind": "other", "title": format!("生成图片 {}", short) })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
+        let prompt = args
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if prompt.is_empty() {
+            return Err("缺少 prompt 参数（画面描述）".to_string());
+        }
+        let cfg = ctx.comfyui.as_ref().filter(|c| c.is_ready());
+        let (data_url, source) = match cfg {
+            Some(c) => (generate_via_comfy(c, &prompt).await?, "comfyui"),
+            None => (
+                crate::services::multimodal_service::ai_generate_image(
+                    ctx.app.clone(),
+                    prompt.clone(),
+                    ctx.profile_id.clone(),
+                )
+                .await?,
+                "cloud",
+            ),
+        };
+        let used_workflow = cfg.map(|c| c.workflow.is_some()).unwrap_or(false);
+        let text = if source == "comfyui" {
+            format!(
+                "图片已生成（ComfyUI 本地{}），已直接展示给用户，无需转述画面内容。",
+                if used_workflow { "工作流" } else { "内置流程" }
+            )
+        } else {
+            "图片已生成（云端图片模型），已直接展示给用户，无需转述画面内容。".to_string()
+        };
+        let title: String = prompt.chars().take(60).collect();
+        let meta = serde_json::json!({
+            "card": "image",
+            "kind": "image",
+            "title": title,
+            "image": data_url,
+            "source": source,
+        });
+        Ok(ToolExecResult::with_meta(text, meta))
+    }
+}
+
 pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
     vec![
         Box::new(NowTool),
@@ -2961,6 +3133,7 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(GitTool),
         Box::new(LspTool),
         Box::new(RagSearchTool),
+        Box::new(GenerateImageTool),
         Box::new(crate::services::ai_service::gongfang_tools::GongfangFullTool),
     ]
 }
@@ -3099,6 +3272,64 @@ pub(crate) fn estimate_tools_tokens(tools: &[serde_json::Value]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comfyui_prompt_slot_prefers_clip_text_encode() {
+        let wf = serde_json::json!({
+            "1": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "x.safetensors" } },
+            "2": { "class_type": "CLIPTextEncode", "inputs": { "text": "old", "clip": ["1", 0] } },
+            "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "neg", "clip": ["1", 0] } }
+        });
+        let slot = comfyui_prompt_slot(&wf).expect("应找到提示词位");
+        assert_eq!(slot.input_key, "text");
+        let ct = wf.get(&slot.node_id).unwrap()["class_type"].as_str().unwrap();
+        assert_eq!(ct, "CLIPTextEncode");
+    }
+
+    #[test]
+    fn comfyui_prompt_slot_falls_back_to_any_text_input() {
+        // 无知名编码类时，回退到任意带 text 字符串输入的节点（自定义节点工作流）。
+        let wf = serde_json::json!({
+            "7": { "class_type": "MyCustomPrompt", "inputs": { "text": "hi", "other": 1 } },
+            "8": { "class_type": "KSampler", "inputs": { "seed": 1, "steps": 20 } }
+        });
+        let slot = comfyui_prompt_slot(&wf).expect("应找到提示词位");
+        assert_eq!(slot.node_id, "7");
+        assert_eq!(slot.input_key, "text");
+    }
+
+    #[test]
+    fn comfyui_prompt_slot_none_when_no_text_input() {
+        let wf = serde_json::json!({
+            "4": { "class_type": "EmptyLatentImage", "inputs": { "width": 512, "height": 512, "batch_size": 1 } }
+        });
+        assert!(comfyui_prompt_slot(&wf).is_none());
+    }
+
+    #[test]
+    fn comfyui_tool_cfg_deserializes_camel_case_from_frontend() {
+        // 前端 comfyuiConfig.ts 产出 camelCase（promptAt/nodeId/inputKey），Rust 侧须对齐。
+        let v = serde_json::json!({
+            "url": "http://127.0.0.1:8188",
+            "ckpt": "sd_xl_base.safetensors",
+            "workflow": { "2": { "class_type": "CLIPTextEncode", "inputs": { "text": "t", "clip": ["1", 0] } } },
+            "promptAt": { "nodeId": "2", "inputKey": "text" }
+        });
+        let cfg: ComfyuiToolCfg = serde_json::from_value(v).unwrap();
+        assert!(cfg.is_ready());
+        let at = cfg.prompt_at.expect("应有 promptAt");
+        assert_eq!(at.node_id, "2");
+        assert_eq!(at.input_key, "text");
+        assert!(cfg.workflow.is_some());
+    }
+
+    #[test]
+    fn comfyui_tool_cfg_defaults_and_empty_url_not_ready() {
+        let cfg: ComfyuiToolCfg = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!cfg.is_ready(), "空 url = 未配置 → 走云端");
+        assert!(cfg.workflow.is_none());
+        assert!(cfg.prompt_at.is_none());
+    }
 
     #[test]
     fn web_html_to_text_strips_tags_and_decodes() {

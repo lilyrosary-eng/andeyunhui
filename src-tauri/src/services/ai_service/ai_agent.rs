@@ -33,6 +33,7 @@ async fn run_agent(
     system: Option<String>,
     max_rounds: Option<u32>,
     project_root: Option<String>,
+    comfyui: Option<crate::services::ai_service::ai_tools::ComfyuiToolCfg>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 12u32);
@@ -63,12 +64,14 @@ async fn run_agent(
 
     let tools: Vec<serde_json::Value> = registered_tools().iter().map(|t| t.function_schema()).collect();
     let client = reqwest::Client::new();
-    // 本轮工具上下文：文件工具靠 project_root 判“项目内”，命令默认 cwd、审批事件靠 app/request_id 回发
+    // 本轮工具上下文：文件工具靠 project_root 判“项目内”，命令默认 cwd、审批事件靠 app/request_id 回发，
+    // comfyui 为前端解析后的生图配置（Rust 读不到前端 localStorage，走参数通道）。
     let tool_ctx = ToolContext {
         app: app.clone(),
         request_id: request_id.clone(),
         project_root: project_root_pb,
         profile_id: profile_id.clone(),
+        comfyui,
     };
     let mut final_text = String::new();
     let mut tool_calls_occurred = false;
@@ -580,6 +583,7 @@ pub async fn ai_chat_agent(
     system: Option<String>,
     max_rounds: Option<u32>,
     project_root: Option<String>,
+    comfyui: Option<crate::services::ai_service::ai_tools::ComfyuiToolCfg>,
 ) -> Result<(), String> {
     // 同步预检：无 API Key 直接拒绝（对齐原契约），无需开后台任务。
     let config = load_config(&app);
@@ -604,6 +608,7 @@ pub async fn ai_chat_agent(
             system,
             max_rounds,
             project_root,
+            comfyui,
             cancel_cl,
         )
         .await;

@@ -65,7 +65,7 @@ export const EVENT_PAYLOAD_KEYS: Record<string, string> = {
   'ai-error': '{ requestId: string; error: string }',
   'ai-thinking-changed': '{ profile_id: string; thinking: boolean }',
   'ai-active-profile-changed': '{ id: string }',
-  'ai-agent-step': '{ requestId: string; stage: string; name: string; ok: boolean; detail: string }',
+  'ai-agent-step': '{ requestId: string; stage: string; cid?: string; name: string; ok?: boolean; detail?: string; meta?: object|null; plan?: object|null }',
   'transfer-peer-found': 'TransferPeer',
   'transfer-progress': 'TransferProgressItem',
   'transfer-receive-request': 'ReceiveRequest',

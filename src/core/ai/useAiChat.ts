@@ -11,6 +11,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { uid, persistConversations, loadConversations, genTitle, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
+import { resolveComfyuiConfig } from '@/core/ai/comfyuiConfig';
 import { retrieveChatContext, ingestChatTurn } from '@/core/stores/semanticMemory';
 import { useCompanionStore, buildPersonaContext } from '@/core/stores/companionStore';
 
@@ -443,6 +444,9 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       if (agentRef.current) {
         // Agent 工具模式：走 ai_chat_agent（后台 worker，非阻塞立即返回）。
         // 事件经 ai-agent-step/ai-done/ai-error 推送，useAiStream(prefix:'ai') 已兼容监听。
+        // ComfyUI 生图配置在前端解析（Rust 读不到 localStorage），随机请求带入，
+        // generate_image 工具据此走本地工作流；未配置则为 null（工具回退云端图片模型）。
+        const comfyui = await resolveComfyuiConfig().catch(() => null);
         await invoke('ai_chat_agent', {
           requestId: reqId,
           messages: (payload as { messages: Array<{ role: string; content: string }> }).messages,
@@ -450,6 +454,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
           ...(finalSystem ? { system: finalSystem } : {}),
           maxRounds: 8,
           projectRoot: null,
+          ...(comfyui ? { comfyui } : {}),
         });
       } else {
         await invoke('ai_chat', payload);

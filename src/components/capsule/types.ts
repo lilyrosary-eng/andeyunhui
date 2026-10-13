@@ -69,6 +69,11 @@ export interface AgentStep {
   name: string;
   ok: boolean;
   detail: string;
+  /** 结构化呈现 meta（后端 ToolExecResult.meta / present_result）。
+   *  生图工具为 { card:'image', image:<dataURL>, title, source }，气泡内直接渲染图片。
+   *  注意：落盘日志里 image 已被后端替换为占位标记（避免多 MB base64 膨胀），
+   *  实时事件（内存）里才是完整 data URL。 */
+  meta?: Record<string, unknown>;
 }
 
 // ==== AIWork / AIWorkflow 共用任务蓝图类型 ====
