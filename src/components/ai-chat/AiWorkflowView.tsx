@@ -23,6 +23,10 @@ import {
 import '@xyflow/react/dist/style.css';
 import { autoPos, type WorkflowDoc, type WfNode, type WfEdge, type WfNodeType } from '@/core/ai/aiWorkflows';
 import { addProduct } from '@/core/ai/aiWorkProducts';
+import { convertGraphToApi } from '@/core/ai/comfyui/convert';
+import { detectWorkflow } from '@/core/ai/comfyui/format';
+import { getObjectInfo } from '@/core/ai/comfyui/objectInfo';
+import { analyzeWorkflowParameters, applyWorkflowParameters, type Workflow as ComfyWorkflow } from '@/core/ai/comfyui/params';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 
@@ -573,14 +577,40 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
             const prompt = subRefs(node.params.prompt || node.label, outputs);
             output = await aiAsk(system, prompt);
           } else if (node.type === 'image') {
-            // 图像生成：prompt 支持 {ref:前序文本}。路由：配了 ComfyUI（端点+checkpoint）走本地 SD，
-            // 否则回落云端 image_model（ai_generate_image，per-profile）。产出为 data URL，向下游/产物流动。
+            // 图像生成：prompt 支持 {ref:前序文本}。三条路由（按优先级）：
+            //   ① 蓝图指定了 ComfyUI 工作流（KEYS.ai.comfyuiBlueprintWf，设置面板里标记）：
+            //      读文件 →（UI 图则拉 object_info 转换成 API）→ 参数分析 → 把 prompt 填进
+            //      该工作流的提示词参数 → 提交。复用用户在 ComfyUI 里调好的工作流。
+            //   ② 配了 ComfyUI 端点+checkpoint：内置最小 txt2img。
+            //   ③ 回落云端 image_model（ai_generate_image，per-profile）。
             const prompt = subRefs(node.params.prompt || node.label, outputs);
             const comfyUrl = storage.getString(KEYS.ai.comfyuiUrl.key, '').trim();
             const comfyCkpt = storage.getString(KEYS.ai.comfyuiCkpt.key, '').trim();
-            output = comfyUrl && comfyCkpt
-              ? await invoke<string>('comfyui_generate_image', { prompt, comfyuiUrl: comfyUrl, checkpoint: comfyCkpt })
-              : await invoke<string>('ai_generate_image', { prompt, profileId: profileIdRef.current });
+            const bpWf = storage.getString(KEYS.ai.comfyuiBlueprintWf.key, '').trim();
+            if (comfyUrl && bpWf) {
+              const json = await invoke<unknown>('comfyui_read_workflow', { path: bpWf });
+              const kind = detectWorkflow(json);
+              if (kind === 'unknown') throw new Error('蓝图指定的工作流文件无法识别（既非 UI 画布图也非 API 工作流）');
+              const info = await getObjectInfo(comfyUrl).catch(() => undefined);
+              let apiWf: ComfyWorkflow;
+              if (kind === 'ui') {
+                if (!info) throw new Error('获取 ComfyUI 节点定义（object_info）失败，无法转换 UI 画布图');
+                const res = convertGraphToApi(json, info);
+                if (!res.ok) throw new Error(`工作流转换失败: ${res.error}`);
+                apiWf = res.workflow;
+              } else {
+                apiWf = json as ComfyWorkflow;
+              }
+              const params = analyzeWorkflowParameters(apiWf, info);
+              const promptParam = params.find((p) => p.type === 'string' && (p.name === 'prompt' || p.name.startsWith('prompt')));
+              if (!promptParam) throw new Error('该工作流没有可填的提示词参数（未找到 prompt 类文本输入）');
+              const finalWf = applyWorkflowParameters(apiWf, params, { [promptParam.name]: prompt }, info);
+              output = await invoke<string>('comfyui_generate_image', { comfyUrl, workflow: finalWf });
+            } else if (comfyUrl && comfyCkpt) {
+              output = await invoke<string>('comfyui_generate_image', { prompt, comfyuiUrl: comfyUrl, checkpoint: comfyCkpt });
+            } else {
+              output = await invoke<string>('ai_generate_image', { prompt, profileId: profileIdRef.current });
+            }
           } else {
             let body = '';
             if (node.params.content && node.params.content.trim()) {

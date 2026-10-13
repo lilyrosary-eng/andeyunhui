@@ -17,3 +17,4 @@ export {
   uploadKindOf,
 } from './params'
 export type { Workflow, WorkflowParameter } from './params'
+export { detectWorkflow } from './format'

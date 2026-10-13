@@ -19,6 +19,7 @@ import {
   refreshParameterMetadata,
   type WorkflowParameter,
 } from './params'
+import { detectWorkflow } from './format'
 
 /* ============ 假 object_info（沿用原套件的最小节点集） ============ */
 const objectInfo = {
@@ -276,6 +277,33 @@ describe('convert: Reroute 直通与未注册节点内联（原套件未覆盖�
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.error).toMatch(/子图/)
+  })
+})
+
+/* ============ format.ts ============ */
+
+describe('format: detectWorkflow', () => {
+  it('UI 画布图：nodes + links 数组', () => {
+    expect(detectWorkflow({ nodes: [], links: [], version: 0.4 })).toBe('ui')
+  })
+
+  it('API 工作流：每个值都是 { class_type, inputs }', () => {
+    expect(detectWorkflow({
+      '1': { class_type: 'KSampler', inputs: { seed: 1 } },
+      '2': { class_type: 'SaveImage', inputs: {} },
+    })).toBe('api')
+  })
+
+  it('混合/空/非对象 → unknown', () => {
+    expect(detectWorkflow({ '1': { class_type: 'X', inputs: {} }, foo: 'bar' })).toBe('unknown')
+    expect(detectWorkflow({})).toBe('unknown')
+    expect(detectWorkflow([])).toBe('unknown')
+    expect(detectWorkflow(null)).toBe('unknown')
+    expect(detectWorkflow('x')).toBe('unknown')
+  })
+
+  it('真实 fixture（krea-wf）被判为 api', () => {
+    expect(detectWorkflow(kreaWorkflow)).toBe('api')
   })
 })
 

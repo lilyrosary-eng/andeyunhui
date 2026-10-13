@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useI18n } from '@/lib/i18n';
-import { Plus, Radar, Cpu, Image as ImageIcon } from 'lucide-react';
+import { Plus, Radar, Cpu } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { fromConfig, toConfig, type ConfigUi, type ModelUi, type ProviderUi } from '../aiConfigCodec';
 import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
+import { ComfyuiPanel } from './ComfyuiPanel';
 import { bestScore } from '@/lib/fuzzy';
 
 const newId = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
@@ -37,13 +38,6 @@ export function ModelSettingsPage() {
   // 不能每次 render 现算——否则用户在弹窗里输入到一半的地址会被重置。
   const [discoverSeed, setDiscoverSeed] = useState<ProviderUi | null>(null);
   const [loaded, setLoaded] = useState(false);
-  // ComfyUI 本地生图：配置 + 手动生成验证（与供应商云端 image_model 并列的另一条生图后端）
-  const [comfyuiUrl, setComfyuiUrl] = useState('http://127.0.0.1:8188');
-  const [comfyuiCkpt, setComfyuiCkpt] = useState('');
-  const [cmfyPrompt, setCmfyPrompt] = useState('');
-  const [cmfyBusy, setCmfyBusy] = useState(false);
-  const [cmfyImg, setCmfyImg] = useState<string | null>(null);
-  const [cmfyErr, setCmfyErr] = useState<string | null>(null);
 
   // 展开状态：记住用户上次展开哪些供应商，切换到别的设置 tab 再回来不用重新展
   useEffect(() => {
@@ -55,12 +49,6 @@ export function ModelSettingsPage() {
     invoke<any>('ai_get_config')
       .then((d) => { setCfg(fromConfig(d)); setLoaded(true); })
       .catch((e) => { console.warn('[模型] 读取配置失败:', e); setLoaded(true); });
-  }, []);
-
-  // ComfyUI 配置读取
-  useEffect(() => {
-    setComfyuiUrl(storage.getString(KEYS.ai.comfyuiUrl.key, 'http://127.0.0.1:8188'));
-    setComfyuiCkpt(storage.getString(KEYS.ai.comfyuiCkpt.key, ''));
   }, []);
 
   // 自动持久化：800ms 防抖静默落盘，避免用户忘了点保存。首屏读取后不触发写入。
@@ -176,20 +164,6 @@ export function ModelSettingsPage() {
     });
   }, [highlights, query]);
 
-  const saveComfyuiUrl = (v: string) => { setComfyuiUrl(v); storage.setString(KEYS.ai.comfyuiUrl.key, v); };
-  const saveComfyuiCkpt = (v: string) => { setComfyuiCkpt(v); storage.setString(KEYS.ai.comfyuiCkpt.key, v); };
-  const comfyuiGenerate = async () => {
-    if (cmfyBusy) return;
-    const p = cmfyPrompt.trim();
-    if (!p) { setCmfyErr(t('modelSettings.comfyui.needPrompt')); return; }
-    setCmfyBusy(true); setCmfyErr(null); setCmfyImg(null);
-    try {
-      const dataUrl = await invoke<string>('comfyui_generate_image', { prompt: p, comfyuiUrl, checkpoint: comfyuiCkpt });
-      setCmfyImg(dataUrl);
-    } catch (e) { setCmfyErr(String(e)); }
-    finally { setCmfyBusy(false); }
-  };
-
   return (
     <div className="space-y-3">
       <div>
@@ -268,31 +242,9 @@ export function ModelSettingsPage() {
         t={t}
       />
 
-      {/* 本地生图（ComfyUI）：配置端点 + checkpoint，可手动生成验证。
-          与供应商的云端 image_model 并列的另一条生图后端；AI 工具自动触发为后续接入。 */}
-      <div className="rounded-xl border border-neutral-200 dark:border-stone-700 bg-white/60 dark:bg-stone-900/40 p-4 space-y-3">
-        <div className="flex items-center gap-1.5 text-sm font-medium text-neutral-700 dark:text-stone-200">
-          <ImageIcon size={14} />{t('modelSettings.comfyui.title')}
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">{t('modelSettings.comfyui.endpoint')}</label>
-            <input className="w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]" value={comfyuiUrl} placeholder="http://127.0.0.1:8188" onChange={(e) => saveComfyuiUrl(e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">{t('modelSettings.comfyui.checkpoint')}</label>
-            <input className="w-full px-3 py-2 rounded-lg text-sm font-mono bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]" value={comfyuiCkpt} placeholder="sd_xl_base.safetensors" onChange={(e) => saveComfyuiCkpt(e.target.value)} />
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <input className="flex-1 px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]" value={cmfyPrompt} placeholder={t('modelSettings.comfyui.promptPlaceholder')} onChange={(e) => setCmfyPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !cmfyBusy) void comfyuiGenerate(); }} />
-          <button onClick={() => void comfyuiGenerate()} disabled={cmfyBusy} className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-[var(--element-border)] text-white disabled:opacity-50">
-            {cmfyBusy ? t('modelSettings.comfyui.generating') : t('modelSettings.comfyui.generate')}
-          </button>
-        </div>
-        {cmfyErr && <div className="text-[11px] text-red-500 whitespace-pre-wrap break-all">{cmfyErr}</div>}
-        {cmfyImg && <img src={cmfyImg} alt={t('modelSettings.comfyui.resultAlt')} className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
-      </div>
+      {/* 本地生图（ComfyUI）：端点/checkpoint 快速通道 + 工作流库（扫目录→转换→参数化生成）
+          + 蓝图生图节点挂钩。与供应商云端 image_model 并列的另一条生图后端。 */}
+      <ComfyuiPanel t={t} />
     </div>
   );
 }
