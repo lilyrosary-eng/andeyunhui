@@ -23,6 +23,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { autoPos, type WorkflowDoc, type WfNode, type WfEdge, type WfNodeType } from '@/core/ai/aiWorkflows';
 import { addProduct } from '@/core/ai/aiWorkProducts';
+import { MediaOutput } from '@/components/MediaOutput';
 import { convertGraphToApi } from '@/core/ai/comfyui/convert';
 import { detectWorkflow } from '@/core/ai/comfyui/format';
 import { getObjectInfo } from '@/core/ai/comfyui/objectInfo';
@@ -193,9 +194,9 @@ function WfCard({ data, selected, type }: NodeProps<WfRfNode>) {
         <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-400 dark:text-stone-500">{summaryOf(t, data.params)}</span>
       </div>
       {data.output && (
-        data.output.startsWith('data:image') ? (
+        data.output.startsWith('data:image') || data.output.startsWith('data:video') || data.output.startsWith('data:audio') ? (
           <div className="mx-2 mb-2">
-            <img src={data.output} alt="" className="max-h-40 w-full rounded-md border border-neutral-200 object-cover dark:border-stone-700" />
+            <MediaOutput src={data.output} className="max-h-40 w-full rounded-md border border-neutral-200 object-cover dark:border-stone-700" />
           </div>
         ) : (
           <div className="mx-2 mb-2 max-h-16 overflow-y-auto rounded-md bg-black/5 px-2 py-1.5 text-[11px] leading-relaxed text-neutral-500 dark:bg-black/30 dark:text-stone-400">
@@ -618,9 +619,9 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
               const promptParam = params.find((p) => p.type === 'string' && (p.name === 'prompt' || p.name.startsWith('prompt')));
               if (!promptParam) throw new Error('该工作流没有可填的提示词参数（未找到 prompt 类文本输入）');
               const finalWf = applyWorkflowParameters(apiWf, params, { [promptParam.name]: prompt }, info);
-              output = await invoke<string>('comfyui_generate_image', { comfyUrl, workflow: finalWf });
+              output = await invoke<string>('comfyui_generate_media', { comfyUrl, workflow: finalWf });
             } else if (comfyUrl && comfyCkpt) {
-              output = await invoke<string>('comfyui_generate_image', { prompt, comfyuiUrl: comfyUrl, checkpoint: comfyCkpt });
+              output = await invoke<string>('comfyui_generate_media', { prompt, comfyuiUrl: comfyUrl, checkpoint: comfyCkpt });
             } else {
               output = await invoke<string>('ai_generate_image', { prompt, profileId: profileIdRef.current });
             }

@@ -2019,7 +2019,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 全局：多模态（阶段 5 · AI 发图 + 语音）==========
             multimodal_service::ai_generate_image,
             multimodal_service::ai_tts,
-            multimodal_service::comfyui_generate_image,
+            multimodal_service::comfyui_generate_media,
             multimodal_service::comfyui_object_info,
             multimodal_service::comfyui_scan_workflows,
             multimodal_service::comfyui_read_workflow,

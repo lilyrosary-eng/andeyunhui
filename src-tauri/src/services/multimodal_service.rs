@@ -163,8 +163,72 @@ async fn resolve_comfy_base(client: &reqwest::Client, base: &str) -> Result<Stri
     Err(format!("ComfyUI 不可达或非 ComfyUI 服务（{}）：system_stats 探测失败", base))
 }
 
-/// 提交 API 工作流 → 轮询 /history 出图 → 从 /view 取图 → 图片 data URL。
-/// 本地 SD 出图可能数十秒~数分钟，轮询上限 5 分钟。当前仅取图片输出（视频/音频后续）。
+/// 一条 /history 产出里的媒体引用（图片 / 视频 / GIF / 音频）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaRef {
+    /// 媒体种类（错误信息与日志用）：image / video / gif / audio
+    pub kind: &'static str,
+    pub filename: String,
+    pub subfolder: String,
+    /// ComfyUI 的 type 字段（output / input / temp）
+    pub typ: String,
+}
+
+/// 从 history 条目的 outputs 里挑第一个媒体引用（纯函数，便于测试）。
+/// 优先级 images > videos > gifs > audio：既有生图调用方行为不变（有图就返图）；
+/// 纯视频 / 音频工作流（VHS_VideoCombine、TTS-Audio 等）也能取到结果。
+/// 每个数组内取第一个非空 filename 的条目。
+pub fn pick_first_media(outputs: &serde_json::Value) -> Option<MediaRef> {
+    let outputs = outputs.as_object()?;
+    for kind in ["images", "videos", "gifs", "audio"] {
+        for out in outputs.values() {
+            let arr = match out.get(kind).and_then(|v| v.as_array()) {
+                Some(a) => a,
+                None => continue,
+            };
+            for item in arr {
+                let filename = item.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+                if filename.is_empty() {
+                    continue;
+                }
+                let subfolder = item.get("subfolder").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let typ = item.get("type").and_then(|v| v.as_str()).unwrap_or("output").to_string();
+                let label = match kind {
+                    "images" => "image",
+                    "videos" => "video",
+                    "gifs" => "gif",
+                    _ => "audio",
+                };
+                return Some(MediaRef { kind: label, filename: filename.to_string(), subfolder, typ });
+            }
+        }
+    }
+    None
+}
+
+/// 从 history 条目里提取可读的执行失败原因（status.messages 里的 exception_message）。
+fn history_error_text(entry: &serde_json::Value) -> String {
+    let mut details: Vec<String> = Vec::new();
+    if let Some(msgs) = entry.pointer("/status/messages").and_then(|v| v.as_array()) {
+        for m in msgs {
+            if let Some(payload) = m.get(1) {
+                if let Some(em) = payload.get("exception_message").and_then(|v| v.as_str()) {
+                    details.push(em.chars().take(300).collect::<String>());
+                } else if let Some(et) = payload.get("exception_type").and_then(|v| v.as_str()) {
+                    details.push(et.to_string());
+                }
+            }
+        }
+    }
+    if details.is_empty() {
+        "unknown error".to_string()
+    } else {
+        details.join("; ")
+    }
+}
+
+/// 提交 API 工作流 → 轮询 /history 出媒体 → 从 /view 取字节 → 媒体 data URL（image/video/gif/audio）。
+/// 本地 SD 出图可能数十秒~数分钟，轮询上限 5 分钟；执行失败（status=error）立即返回，不空等。
 async fn run_comfy_workflow(
     client: &reqwest::Client,
     base: &str,
@@ -204,8 +268,8 @@ async fn run_comfy_workflow(
         .ok_or_else(|| "ComfyUI 提交响应缺少 prompt_id".to_string())?
         .to_string();
 
-    // 2) 轮询 /history/{prompt_id} 直到产出图片
-    let mut image_ref: Option<(String, String, String)> = None; // (filename, subfolder, type)
+    // 2) 轮询 /history/{prompt_id} 直到产出媒体
+    let mut media_ref: Option<MediaRef> = None;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     loop {
         if std::time::Instant::now() > deadline {
@@ -219,65 +283,61 @@ async fn run_comfy_workflow(
             .json()
             .await
             .map_err(|e| format!("解析 ComfyUI 历史失败: {}", e))?;
-        // history["<prompt_id>"].outputs.<node>.images[0] = {filename, subfolder, type}
+        // history["<prompt_id>"].outputs.<node>.{images,videos,gifs,audio}[0]
         if let Some(entry) = hist.get(&prompt_id) {
-            if let Some(outputs) = entry.get("outputs").and_then(|v| v.as_object()) {
-                'scan: for (_node, out) in outputs {
-                    if let Some(imgs) = out.get("images").and_then(|v| v.as_array()) {
-                        if let Some(img) = imgs.first() {
-                            let filename = img.get("filename").and_then(|v| v.as_str()).unwrap_or("");
-                            if !filename.is_empty() {
-                                let subfolder = img.get("subfolder").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let typ = img.get("type").and_then(|v| v.as_str()).unwrap_or("output").to_string();
-                                image_ref = Some((filename.to_string(), subfolder, typ));
-                                break 'scan;
-                            }
-                        }
-                    }
+            // 执行失败快速返回（不空等到超时）
+            let status_str = entry.pointer("/status/status_str").and_then(|v| v.as_str()).unwrap_or("");
+            if status_str == "error" {
+                return Err(format!("ComfyUI 执行失败: {}", history_error_text(entry)));
+            }
+            if let Some(outputs) = entry.get("outputs") {
+                if let Some(m) = pick_first_media(outputs) {
+                    media_ref = Some(m);
                 }
             }
         }
-        if image_ref.is_some() {
+        if media_ref.is_some() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     }
 
-    let (filename, subfolder, typ) = image_ref.ok_or_else(|| "ComfyUI 未返回图片".to_string())?;
-    // 3) 取图字节 → data URL（content-type 缺省按 png）
-    let img_resp = client
+    let media = media_ref.ok_or_else(|| "ComfyUI 未返回媒体（图片/视频/音频）".to_string())?;
+    // 3) 取媒体字节 → data URL（content-type 缺省按 png）
+    let media_resp = client
         .get(format!("{}/view", base))
-        .query(&[("filename", filename.as_str()), ("subfolder", subfolder.as_str()), ("type", typ.as_str())])
+        .query(&[("filename", media.filename.as_str()), ("subfolder", media.subfolder.as_str()), ("type", media.typ.as_str())])
         .send()
         .await
-        .map_err(|e| format!("获取 ComfyUI 图片失败: {}", e))?;
-    if !img_resp.status().is_success() {
-        return Err(format!("获取 ComfyUI 图片 HTTP {}", img_resp.status()));
+        .map_err(|e| format!("获取 ComfyUI 媒体失败: {}", e))?;
+    if !media_resp.status().is_success() {
+        return Err(format!("获取 ComfyUI 媒体 HTTP {}", media_resp.status()));
     }
-    let content_type = img_resp
+    let content_type = media_resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("image/png")
         .to_string();
-    let bytes = img_resp.bytes().await.map_err(|e| format!("读取 ComfyUI 图片失败: {}", e))?;
+    let bytes = media_resp.bytes().await.map_err(|e| format!("读取 ComfyUI 媒体失败: {}", e))?;
     if bytes.is_empty() {
-        return Err("ComfyUI 图片为空".to_string());
+        return Err("ComfyUI 媒体为空".to_string());
     }
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(format!("data:{};base64,{}", content_type, b64))
 }
 
-/// ComfyUI 本地生图（程序化接入）——与 ai_generate_image（OpenAI 兼容云端）并列的另一条生图后端。
+/// ComfyUI 本地媒体生成（程序化接入）——与 ai_generate_image（OpenAI 兼容云端）并列的另一条生图后端。
 /// 两种用法：
 ///   ① 传 prompt + checkpoint：走内置最小 txt2img 工作流（build_default_txt2img）；
 ///   ② 传 workflow（API 格式 JSON，前端已用 applyWorkflowParameters 应用参数覆盖）：直接提交，
 ///      复用用户在 ComfyUI 里调好的工作流（ControlNet/LoRA/精细流程均可）。
 /// comfyui_url 形如 http://127.0.0.1:8188；checkpoint 为 ComfyUI models/checkpoints 下的模型文件名。
-/// 轮询上限 5 分钟；当前仅返回首个图片输出（视频/音频输出后续支持）。
+/// 轮询上限 5 分钟；执行失败（status=error）立即返回。返回首个媒体输出的 data URL
+/// （图片/视频/GIF/音频均可，content-type 取自 /view 响应；有图优先返图）。
 #[tauri::command]
-pub async fn comfyui_generate_image(
+pub async fn comfyui_generate_media(
     prompt: Option<String>,
     comfyui_url: String,
     checkpoint: Option<String>,
@@ -502,5 +562,39 @@ mod tests {
         assert!(scan_workflows_sync(&base.join("nope").to_string_lossy()).is_err());
         assert!(scan_workflows_sync("").is_err());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pick_first_media_priority_and_shapes() {
+        let img = |name: &str| serde_json::json!({ "filename": name, "subfolder": "", "type": "output" });
+        // 只有图片
+        let out = serde_json::json!({ "7": { "images": [img("a.png")] } });
+        let m = pick_first_media(&out).unwrap();
+        assert_eq!(m.kind, "image");
+        assert_eq!(m.filename, "a.png");
+        assert_eq!(m.typ, "output");
+        // 图 + 视频同在 → 图优先（既有生图调用方行为不变）
+        let out = serde_json::json!({
+            "9": { "videos": [{ "filename": "v.mp4", "subfolder": "sub", "type": "output" }] },
+            "7": { "images": [img("a.png")] },
+        });
+        let m = pick_first_media(&out).unwrap();
+        assert_eq!(m.kind, "image");
+        // 纯视频
+        let out = serde_json::json!({ "9": { "videos": [{ "filename": "v.mp4", "subfolder": "s", "type": "temp" }] } });
+        let m = pick_first_media(&out).unwrap();
+        assert_eq!(m.kind, "video");
+        assert_eq!(m.subfolder, "s");
+        assert_eq!(m.typ, "temp");
+        // GIF 与音频
+        let out = serde_json::json!({ "1": { "gifs": [img("a.webp")] } });
+        assert_eq!(pick_first_media(&out).unwrap().kind, "gif");
+        let out = serde_json::json!({ "1": { "audio": [img("a.mp3")] } });
+        assert_eq!(pick_first_media(&out).unwrap().kind, "audio");
+        // 空 filename 跳过；完全没有媒体 → None
+        let out = serde_json::json!({ "1": { "images": [{ "filename": "" }] } });
+        assert!(pick_first_media(&out).is_none());
+        assert!(pick_first_media(&serde_json::json!({})).is_none());
+        assert!(pick_first_media(&serde_json::json!({ "1": { "text": ["x"] } })).is_none());
     }
 }

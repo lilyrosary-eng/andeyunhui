@@ -16,6 +16,7 @@ import { detectWorkflow } from '@/core/ai/comfyui/format';
 import { getObjectInfo } from '@/core/ai/comfyui/objectInfo';
 import { analyzeWorkflowParameters, applyWorkflowParameters } from '@/core/ai/comfyui/params';
 import { loadSkillNotes, saveSkillNotes, skillSlug, skillSummary } from '@/core/ai/comfyui/skills';
+import { MediaOutput } from '@/components/MediaOutput';
 import type { Workflow, WorkflowParameter } from '@/core/ai/comfyui/params';
 
 type TFunc = (k: string, vars?: Record<string, string | number>) => string;
@@ -78,7 +79,7 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     if (!p) { setErr(t('modelSettings.comfyui.needPrompt')); return; }
     setBusy(true); setErr(''); setImg('');
     try {
-      const dataUrl = await invoke<string>('comfyui_generate_image', { prompt: p, comfyuiUrl, checkpoint: comfyuiCkpt });
+      const dataUrl = await invoke<string>('comfyui_generate_media', { prompt: p, comfyuiUrl, checkpoint: comfyuiCkpt });
       setImg(dataUrl);
     } catch (e) { setErr(String(e).slice(0, 200)); }
     finally { setBusy(false); }
@@ -148,7 +149,7 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     setWfBusy(true); setWfErr(''); setWfImg('');
     try {
       const finalWf = applyWorkflowParameters(api, params, values, await getObjectInfo(comfyuiUrl).catch(() => undefined));
-      const dataUrl = await invoke<string>('comfyui_generate_image', { comfyuiUrl, workflow: finalWf });
+      const dataUrl = await invoke<string>('comfyui_generate_media', { comfyuiUrl, workflow: finalWf });
       setWfImg(dataUrl);
     } catch (e) { setWfErr(String(e).slice(0, 200)); }
     finally { setWfBusy(false); }
@@ -207,7 +208,7 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
         </button>
       </div>
       {err && <div className="text-[11px] text-red-500 whitespace-pre-wrap break-all">{err}</div>}
-      {img && <img src={img} alt={t('modelSettings.comfyui.resultAlt')} className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
+      {img && <MediaOutput src={img} alt={t('modelSettings.comfyui.resultAlt')} className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
 
       <div className="border-t border-neutral-100 dark:border-stone-800 pt-3" />
 
@@ -305,7 +306,7 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
             )}
           </div>
           {wfErr && <div className="text-[11px] text-red-500 whitespace-pre-wrap break-all">{wfErr}</div>}
-          {wfImg && <img src={wfImg} alt={t('modelSettings.comfyui.resultAlt')} className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
+          {wfImg && <MediaOutput src={wfImg} alt={t('modelSettings.comfyui.resultAlt')} className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
         </div>
       )}
     </div>
