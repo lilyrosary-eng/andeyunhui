@@ -322,6 +322,90 @@ pub async fn comfyui_upload_image(
     Ok(if sub.is_empty() { name } else { format!("{}/{}", sub, name) })
 }
 
+/// 中断 ComfyUI 当前正在执行的工作流（`POST /interrupt`）。
+///
+/// 此前生成一旦提交就只能干等（轮询上限 5 分钟），用户点错了也没有退路。
+#[tauri::command]
+pub async fn comfyui_interrupt(comfyui_url: String) -> Result<(), String> {
+    let base = comfyui_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err("未配置 ComfyUI 地址".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+    let base = resolve_comfy_base(&client, &base).await?;
+    let resp = client
+        .post(format!("{}/interrupt", base))
+        .send()
+        .await
+        .map_err(|e| format!("ComfyUI 不可达（{}）: {}", base, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("中断 ComfyUI 执行 HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// 列出 ComfyUI 已安装的模型文件（`GET /models`，或 `GET /models/{folder}` 只列某类）。
+///
+/// 这是「AI 自建工作流」的**事实来源**之一：`CheckpointLoaderSimple.ckpt_name` 这类字段
+/// 只能填这里真实存在的文件名（通常还有子目录前缀）。让模型凭空编，只会换来一次失败执行。
+#[tauri::command]
+pub async fn comfyui_list_models(
+    comfyui_url: String,
+    folder: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let base = comfyui_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err("未配置 ComfyUI 地址".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+    let base = resolve_comfy_base(&client, &base).await?;
+    let path = match folder.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(f) => format!("{}/models/{}", base, f),
+        None => format!("{}/models", base),
+    };
+    let resp = client
+        .get(&path)
+        .send()
+        .await
+        .map_err(|e| format!("ComfyUI 不可达（{}）: {}", base, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("获取 ComfyUI 模型清单 HTTP {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("解析 ComfyUI 模型清单失败: {}", e))
+}
+
+/// 列出 ComfyUI 已安装的**自定义节点包**（`GET /custom_nodes`）。
+///
+/// ⚠️ 安全相关：自定义节点可执行任意 Python。AI 自建工作流前必须先知道现场装了哪些包，
+/// 再按白名单决定能不能用（见工具层的危险节点审计）。
+#[tauri::command]
+pub async fn comfyui_custom_nodes(comfyui_url: String) -> Result<serde_json::Value, String> {
+    let base = comfyui_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err("未配置 ComfyUI 地址".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
+    let base = resolve_comfy_base(&client, &base).await?;
+    let resp = client
+        .get(format!("{}/custom_nodes", base))
+        .send()
+        .await
+        .map_err(|e| format!("ComfyUI 不可达（{}）: {}", base, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("获取 ComfyUI 自定义节点清单 HTTP {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("解析 ComfyUI 自定义节点清单失败: {}", e))
+}
+
 /// 提交 API 工作流 → 轮询 /history 出媒体 → 从 /view 取字节 → 媒体 data URL（image/video/gif/audio）。
 /// 本地 SD 出图可能数十秒~数分钟，轮询上限 5 分钟；执行失败（status=error）立即返回，不空等。
 async fn run_comfy_workflow(

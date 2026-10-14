@@ -282,7 +282,9 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
   // Agent 模式：开启时走 ai_chat_agent（工具调用 + 计划/待办），关闭时走 ai_chat 纯对话
   const [agentMode, setAgentMode] = useState(false);
   // Agent 工具调用轨迹（本请求内累积，用于渲染工具 chip 轨迹）
-  const [agentSteps, setAgentSteps] = useState<{ name: string; ok: boolean; detail: string }[]>([]);
+  // meta 必须一并保留：工具产出的图片/音频/视频全靠它下发给界面，
+  // 早先只留 {name, ok, detail} 导致媒体在茑萝里一律不显示（宿主有渲染、这边没有）。
+  const [agentSteps, setAgentSteps] = useState<{ name: string; ok: boolean; detail: string; meta?: any }[]>([]);
   // 当前计划快照（plan 工具回传，供渲染「计划/待办」面板）
   const [livePlan, setLivePlan] = useState<{ title: string; todos: { id: string; content: string; done: boolean }[] } | null>(null);
   // 文件写外部路径时的审批弹窗（后端 ai-agent-approval 事件触发，回调 ai_agent_approve 决定）
@@ -346,7 +348,7 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
       const p = e?.payload;
       if (!p || p.requestId !== activeReq.current) return;
       if (p.stage === 'tool') {
-        setAgentSteps((prev) => [...prev, { name: p.name, ok: !!p.ok, detail: p.detail || '' }]);
+        setAgentSteps((prev) => [...prev, { name: p.name, ok: !!p.ok, detail: p.detail || '', meta: p.meta }]);
       }
       if (p.plan && typeof p.plan === 'object') {
         setLivePlan({
@@ -965,6 +967,38 @@ function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?:
               ))}
             </div>
           )}
+          {/* 工具产出的媒体：宿主 AiChatConversation 支持图片/音频/视频三种卡片，
+              这里此前把 step 压成 {name,ok,detail} 丢掉了 meta，媒体一律不显示。
+              补齐后与宿主同口径：按 card 分流，且**用 MIME 前缀再过滤一次**
+              （类型不符宁可不渲染——视频贴进 <img> 只会得到一张坏图）。 */}
+          {(() => {
+            const media = agentSteps
+              .map((s) => s.meta)
+              .filter((m: any) => m && (m.card === 'image' || m.card === 'audio' || m.card === 'video'));
+            if (media.length === 0) return null;
+            const nodes = media.map((m: any, i: number) => {
+              if (m.card === 'image' && typeof m.image === 'string' && m.image.startsWith('data:image/')) {
+                return <img key={i} src={m.image} alt={m.title || ''} title={m.title}
+                  className="max-w-[200px] max-h-[200px] rounded-lg object-cover border border-black/10 dark:border-white/10" />;
+              }
+              if (m.card === 'video' && typeof m.video === 'string' && m.video.startsWith('data:video/')) {
+                return <video key={i} src={m.video} controls title={m.title}
+                  className="max-w-[220px] max-h-[220px] rounded-lg border border-black/10 dark:border-white/10" />;
+              }
+              if (m.card === 'audio' && typeof m.audio === 'string' && m.audio.startsWith('data:audio/')) {
+                return <audio key={i} src={m.audio} controls title={m.title} className="max-w-[260px] h-9" />;
+              }
+              return null;
+            }).filter(Boolean);
+            if (nodes.length === 0) return null;
+            return <div className="flex flex-wrap gap-2">{nodes}</div>;
+          })()}
+          {/* 媒体在历史持久化时被按体积裁剪掉了：如实说明，别让人以为「AI 什么都没生成」 */}
+          {agentSteps.filter((s) => s.meta && typeof s.meta.omitted === 'string').map((s, i) => (
+            <span key={`om${i}`} className="text-[11px] text-neutral-400 dark:text-stone-500">
+              （{s.meta.omitted} 未随历史保存，重新生成即可查看）
+            </span>
+          ))}
           {livePlan && (
             <div className="rounded-xl border border-neutral-200 dark:border-stone-700 bg-white/60 dark:bg-stone-800/60 p-2.5">
               <div className="text-xs font-medium text-neutral-700 dark:text-stone-200 mb-1.5">📋 {livePlan.title || '计划'}</div>
