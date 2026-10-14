@@ -204,6 +204,118 @@ pub async fn vision_ask(
     Ok(content)
 }
 
+/// 视觉调用的**带 HTTP 上下文的**错误。
+///
+/// 为什么需要单独一个类型：`vision_ask` 把一切失败都压成 String，但**能力探测**
+/// 必须区分「400 说图片不支持」（可确证不支持）与「429 限流」（与能力无关）——
+/// 只看字符串就得回去正则解析我们自己拼的文案，比直接带出状态码脆弱得多。
+#[derive(Debug, Clone)]
+pub struct VisionHttpError {
+    pub status: u16,
+    pub body: String,
+}
+
+impl std::fmt::Display for VisionHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}: {}", self.status, self.body.chars().take(300).collect::<String>())
+    }
+}
+
+/// 与 `vision_ask` 完全同一条请求路径，但：① 保留 HTTP 状态码与响应体；
+/// ② **不把服务端在 200 里夹带的 error 当成功**。
+///
+/// 后者是探测正确性的关键：部分 OpenAI 兼容网关对不支持的模态返回
+/// **HTTP 200 + body 里带 error**。若按 `vision_ask` 的口径（200 即成功），
+/// 探测会把「不支持」误记成「支持」——正是我们要防的脏记忆。
+pub async fn vision_ask_raw(
+    app: &AppHandle,
+    image_base64: &str,
+    image_mime: &str,
+    prompt: Option<&str>,
+    profile_id: Option<&str>,
+    model: Option<&str>,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<String, VisionHttpError> {
+    let config = load_config(app);
+    let cfg = resolve_target(&config, profile_id);
+    let key = api_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg.api_key.trim().to_string());
+    if key.is_empty() {
+        // 没有 key 是配置问题，用 0 表示「未发出请求」——探测据此判未知
+        return Err(VisionHttpError { status: 0, body: "未配置 API Key".to_string() });
+    }
+    let endpoint = base_url.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(cfg.base_url.trim());
+    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+    let p = prompt.map(str::to_string).unwrap_or_else(|| "请描述这张图片".to_string());
+    let data_url = format!("data:{};base64,{}", image_mime, image_base64);
+
+    let ocr_model = model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| cfg.vision_model.clone().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| cfg.model.clone());
+
+    let body = serde_json::json!({
+        "model": ocr_model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": p },
+                { "type": "image_url", "image_url": { "url": data_url } }
+            ]
+        }],
+        "temperature": 0.0,
+        "max_tokens": 64,
+        "stream": false,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| VisionHttpError { status: 0, body: format!("创建请求客户端失败: {}", e) })?;
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| VisionHttpError { status: 0, body: format!("请求失败: {}", e) })?;
+
+    let status = resp.status().as_u16();
+    let raw = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(VisionHttpError { status, body: raw });
+    }
+
+    // 200 里夹带 error → 仍算失败（见上方文档）。用 200 保留状态码，
+    // 让 verdict_from 通过正文关键词判定「是否点名图片」。
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Err(VisionHttpError { status, body: raw });
+    };
+    if let Some(err_obj) = v.get("error") {
+        let em = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+        return Err(VisionHttpError { status, body: em.to_string() });
+    }
+    let content_val = &v["choices"][0]["message"]["content"];
+    let content = match content_val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => return Err(VisionHttpError { status, body: raw }),
+    };
+    Ok(content)
+}
+
 /// 翻译：传入文本 + 目标语言 + 可选源语言（"auto" 或留空表示自动识别），返回译文
 /// 走非流式 AI 对话；若未配置 AI 则返回错误供前端降级提示
 #[tauri::command]

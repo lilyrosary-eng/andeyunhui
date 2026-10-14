@@ -27,6 +27,8 @@ pub mod ai_agent;
 pub mod ai_ocr;
 pub mod ai_conversations;
 pub mod comfyui_build;
+pub mod image_store;
+pub mod caps_probe;
 
 // 对外重导出：保持 crate::services::ai_service::xxx 路径不变
 // resolve_profile 与 ResolvedTarget / resolve_target 并存：11 个调用点改到 resolve_target
@@ -38,6 +40,8 @@ pub use ai_chat::{ChatMessage, ai_chat};
 pub use ai_agent::{ai_chat_agent, ai_agent_approve, ai_agent_apply_edits, ai_agent_fork, ai_agent_replay, ai_agent_cancel, ai_agent_status, ai_agent_sessions, ai_agent_events};
 pub use ai_ocr::{ai_test_connection, ai_vision_ocr, translate_text, ai_ocr_enhance, ocr_export_pdf};
 pub use ai_conversations::{ai_get_conversations, ai_save_conversations};
+pub use image_store::{ai_media_usage, ai_media_cleanup};
+pub use caps_probe::{ai_probe_vision, ai_get_caps_probe_enabled, ai_set_caps_probe_enabled};
 
 // Tauri command 宏在各子模块生成 __cmd__<name> / __tauri_command_name_<name> 符号，
 // main.rs 的 generate_handler 通过 ai_service::__cmd__* 路径引用，需一并重导出以保持路径不变。
@@ -47,4 +51,6 @@ pub use ai_chat::{__cmd__ai_chat, __tauri_command_name_ai_chat};
 pub use ai_agent::{__cmd__ai_chat_agent, __cmd__ai_agent_approve, __cmd__ai_agent_apply_edits, __cmd__ai_agent_fork, __cmd__ai_agent_replay, __cmd__ai_agent_cancel, __cmd__ai_agent_status, __cmd__ai_agent_sessions, __cmd__ai_agent_events, __tauri_command_name_ai_chat_agent, __tauri_command_name_ai_agent_approve, __tauri_command_name_ai_agent_apply_edits, __tauri_command_name_ai_agent_fork, __tauri_command_name_ai_agent_replay, __tauri_command_name_ai_agent_cancel, __tauri_command_name_ai_agent_status, __tauri_command_name_ai_agent_sessions, __tauri_command_name_ai_agent_events};
 pub use ai_ocr::{__cmd__ai_test_connection, __cmd__ai_vision_ocr, __cmd__translate_text, __cmd__ai_ocr_enhance, __cmd__ocr_export_pdf, __tauri_command_name_ai_test_connection, __tauri_command_name_ai_vision_ocr, __tauri_command_name_translate_text, __tauri_command_name_ai_ocr_enhance, __tauri_command_name_ocr_export_pdf};
 pub use ai_conversations::{__cmd__ai_get_conversations, __cmd__ai_save_conversations, __tauri_command_name_ai_get_conversations, __tauri_command_name_ai_save_conversations};
+pub use image_store::{__cmd__ai_media_usage, __cmd__ai_media_cleanup, __tauri_command_name_ai_media_usage, __tauri_command_name_ai_media_cleanup};
+pub use caps_probe::{__cmd__ai_probe_vision, __cmd__ai_get_caps_probe_enabled, __cmd__ai_set_caps_probe_enabled, __tauri_command_name_ai_probe_vision, __tauri_command_name_ai_get_caps_probe_enabled, __tauri_command_name_ai_set_caps_probe_enabled};
 

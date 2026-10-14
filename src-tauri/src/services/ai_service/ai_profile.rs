@@ -168,6 +168,27 @@ impl CapsSource {
     }
 }
 
+impl ModelEntry {
+    /// 该模型是否可**可信地**直接接收图片 —— 也就是「对话模型原生看图」这条路的前提。
+    ///
+    /// 判据刻意严格：必须 `caps.vision == true` **且**来源为 `Provider`
+    /// （供应商权威上报，或用户显式探测确证）。
+    ///
+    /// 为什么排除 `Inferred`（名字启发式）：实测在用的 `agnes-*` / `step-*` / `hy-mt2-*`
+    /// 家族名字里没有任何视觉线索，靠它开分支等于**用错数据做路由** —— 把不支持视觉的
+    /// 模型判成支持，用户一发图就被端点 400，比多花一次调用糟得多。
+    ///
+    /// 为什么也排除 `Manual`：那是用户在编辑器里为**显示**打的标签，不是端点能力的证明
+    /// （用户完全可能标错，或标的是"我想让它当视觉模型用"的意图）。
+    ///
+    /// 为什么也排除 `None`（老数据）：来源不明，无法区分是推断还是手改，保守不启用。
+    ///
+    /// ⇒ 效果：**默认不直发**（行为与改造前一致，零回归），只有被确证的模型才走新分支。
+    pub fn vision_native_trusted(&self) -> bool {
+        self.caps.vision && matches!(self.caps.vision_source, Some(CapsSource::Provider))
+    }
+}
+
 fn caps_text_default() -> bool {
     true
 }
@@ -220,8 +241,7 @@ impl CapacitySource {
 /// 逐模型参数覆盖。语义与 v1 AiProfile 的同名字段一致，只是从「档案」挪到了「模型」。
 /// 全部 Option：None 表示用默认值，用户没改过就不占空间。
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
-pub struct Overrides {
-    #[serde(default)]
+pub struct Overrides {    #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
@@ -1319,5 +1339,55 @@ mod v2_tests {
         // 改造前的老数据无从区分来源 → 保守处理，宁可不更新也不冲掉用户填的值。
         // （空值可回填才是解决「59 个模型只认出 4 个」的主路径。）
         assert!(!CapacitySource::refreshable(Some(8192), None));
+    }
+
+    // ===== 能力来源（决定「对话模型原生看图」能否启用）=====
+
+    fn entry_with(vision: bool, src: Option<CapsSource>) -> ModelEntry {
+        ModelEntry {
+            model: "m".to_string(),
+            caps: Caps { text: true, vision, vision_source: src, ..Default::default() },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn 原生直发_只认权威来源() {
+        // Provider（供应商上报 / 用户显式探测确证）→ 可以直发
+        assert!(entry_with(true, Some(CapsSource::Provider)).vision_native_trusted());
+    }
+
+    #[test]
+    fn 原生直发_名字启发式不算() {
+        // ★ 这条是整个 D4 的关键约束：实测在用的 agnes-*/step-*/hy-mt2-* 家族名字里
+        //   没有任何视觉线索，靠 Inferred 开分支 = 用错数据做路由（用户发图直接 400）。
+        assert!(!entry_with(true, Some(CapsSource::Inferred)).vision_native_trusted());
+    }
+
+    #[test]
+    fn 原生直发_用户手改不算() {
+        // Manual 是用户在编辑器里为**显示**打的标签，不是端点能力的证明
+        assert!(!entry_with(true, Some(CapsSource::Manual)).vision_native_trusted());
+    }
+
+    #[test]
+    fn 原生直发_老数据不算() {
+        // 来源不明的老数据（改造前落盘）保守不启用 ⇒ 行为与改造前一致，零回归
+        assert!(!entry_with(true, None).vision_native_trusted());
+    }
+
+    #[test]
+    fn 原生直发_无视觉能力时来源再权威也不启用() {
+        assert!(!entry_with(false, Some(CapsSource::Provider)).vision_native_trusted());
+    }
+
+    #[test]
+    fn 能力来源_只有启发式可被覆盖() {
+        // 与 CapacitySource::refreshable 同口径：硬事实不被名字启发式冲掉，
+        // 老数据（None）保守冻结。
+        assert!(CapsSource::refreshable(Some(CapsSource::Inferred)));
+        assert!(!CapsSource::refreshable(Some(CapsSource::Provider)));
+        assert!(!CapsSource::refreshable(Some(CapsSource::Manual)));
+        assert!(!CapsSource::refreshable(None));
     }
 }

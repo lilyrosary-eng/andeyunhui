@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
 use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
-use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text};
+use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text, hydrate_images, persist_images};
 
 /// Agent 对话：原生 tool_calls + 循环。
 /// 流程：非流式请求（带 tools）→ 若返回 message.tool_calls →
@@ -66,6 +66,31 @@ async fn run_agent(
 
     let tools: Vec<serde_json::Value> = registered_tools().iter().map(|t| t.function_schema()).collect();
     let client = reqwest::Client::new();
+
+    // ── 图片路由：对话模型能不能「原生看图」 ────────────────────────────────
+    //
+    // 判据在 `ModelEntry::vision_native_trusted`：必须 vision==true **且**来源为
+    // Provider（供应商权威上报或用户显式探测确证）。名字启发式（Inferred）与用户
+    // 手改（Manual）都**不算** —— 见那里的文档：靠猜开分支等于用错数据做路由。
+    //
+    // 默认不直发 ⇒ 行为与改造前一致（零回归）；只有被确证的模型才走新分支。
+    let native_vision = config
+        .providers
+        .iter()
+        .flat_map(|p| p.models.iter())
+        .find(|m| m.id == cfg.id)
+        .map(|m| m.vision_native_trusted())
+        .unwrap_or(false);
+
+    // 必须在把 images move 进 ToolContext **之前**存盘：事件日志只留引用（不留 base64），
+    // 所以这一步会产生 `image://<id>`（供 derive 时读回）。非直发时不存，
+    // 省一次磁盘写，也让「没走直发」在日志上看得出来（事件里没有 image_refs）。
+    let image_refs = if native_vision && !images.is_empty() {
+        persist_images(&app, &images)
+    } else {
+        Vec::new()
+    };
+
     // 本轮工具上下文：文件工具靠 project_root 判“项目内”，命令默认 cwd、审批事件靠 app/request_id 回发，
     // media 为前端解析后的媒体后端配置（Rust 读不到前端 localStorage，走参数通道）；
     // images 为前端随请求带入的本轮图片（模型不直接持有，由 analyze_image 按序号取用）。
@@ -95,6 +120,8 @@ async fn run_agent(
                     old.push(SessionEvent::User {
                         seq: 0, // push() 会覆写
                         content: m.content.clone(),
+                        image_refs: Vec::new(),
+                        resolved_images: Vec::new(),
                     });
                 }
             }
@@ -111,6 +138,8 @@ async fn run_agent(
                     "user" => fresh.push(SessionEvent::User {
                         seq: 0, // push() 会覆写
                         content: m.content.clone(),
+                        image_refs: Vec::new(),
+                        resolved_images: Vec::new(),
                     }),
                     _ => fresh.push(SessionEvent::Assistant {
                         seq: 0, // push() 会覆写
@@ -122,6 +151,19 @@ async fn run_agent(
             fresh
         }
     };
+
+    // 把上文存好的图片引用挂到最后一条 user 事件，再读回成 data URL 供 derive 组图。
+    if !image_refs.is_empty() {
+        session.attach_images_to_last_user(image_refs);
+    }
+    if native_vision {
+        // ⚠️ hydrate 必须与 native_vision 一致：若早先用支持视觉的模型直发过图
+        //    （事件里留了 image_refs），切到不支持视觉的模型后若照常展开，会给它发
+        //    image_url → 整个请求 400。只在确证支持时才把引用读回成 data URL。
+        //
+        // 幂等，循环外一次即可（循环内只追加 assistant/tool 事件，不带图）。
+        hydrate_images(&app, &mut session);
+    }
 
     for _round in 0..max_rounds {
         // 协作式取消检查点一：每轮开跑前。
