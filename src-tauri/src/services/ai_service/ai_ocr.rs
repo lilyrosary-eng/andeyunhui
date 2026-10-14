@@ -5,7 +5,7 @@
 use base64::Engine;
 use image::GenericImageView;
 use tauri::AppHandle;
-use crate::services::ai_service::ai_profile::{AiProfile, AiConfig, ResolvedTarget, load_config, resolve_target};
+use crate::services::ai_service::ai_profile::{AiProfile, AiConfig, ResolvedTarget, find_provider_of_model, load_config, resolve_target};
 
 /// 测试 AI 配置是否可用：向端点发起一次极小开销的非流式请求，
 /// 校验 base_url / api_key / model 是否正确，并返回耗时。不消耗对话额度（max_tokens=5）。
@@ -121,16 +121,38 @@ pub async fn vision_ask(
 ) -> Result<String, String> {
     let config = load_config(app);
     let cfg = resolve_target(&config, profile_id);
-    // 端点 / 密钥：显式覆盖优先，否则用解析出的档案值
+    // 端点与凭证：显式覆盖 > **按应用级视觉模型名自动归属的供应商** > 当前档案。
+    //
+    // 中间这一层解决的是：「对话用 A 家、看图用 B 家的模型」时，B 的模型名会被
+    // 发到 A 的端点 —— 必然失败，而且失败形态看起来像「该模型不支持图片」
+    // （端点不认识这个模型名），排查方向会被带偏。用户既然在配置里加过这个模型，
+    // 系统就知道它在哪家，不必让他再配一次端点（那又退回"多处配置"）。
+    //
+    // 只在没有显式覆盖时才启用，避免抢掉调用方（agent 工具）的明确指定。
+    let owner = if api_key.is_none() && base_url.is_none() {
+        config
+            .media_models
+            .get("vision")
+            .and_then(|m| find_provider_of_model(&config, m))
+    } else {
+        None
+    };
+    // 端点 / 密钥：显式覆盖优先，其次自动归属的供应商，最后用解析出的档案值
     let key = api_key
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+        .or_else(|| owner.map(|p| p.api_key.trim().to_string()).filter(|s| !s.is_empty()))
         .unwrap_or_else(|| cfg.api_key.trim().to_string());
     if key.is_empty() {
         return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
     }
-    let endpoint = base_url.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(cfg.base_url.trim());
+    let endpoint = base_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| owner.map(|p| p.base_url.trim().to_string()).filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| cfg.base_url.trim().to_string());
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
     let p = prompt
         .map(str::to_string)
@@ -590,6 +612,43 @@ mod tests {
         // 用户把输入框清空（留下空串）不该被当成一个名为 "" 的模型发出去
         assert_eq!(resolve_vision_model(&config(Some("   ")), &target(Some("  "), "chat"), None), "chat");
         assert_eq!(resolve_vision_model(&config(None), &target(None, "chat"), Some("")), "chat");
+    }
+
+    #[test]
+    fn 按模型名找到所属供应商() {
+        // 用 serde 构造，避免依赖 Provider 的 Default 实现（字段多，构造噪音大）
+        let c: AiConfig = serde_json::from_str(r#"{
+            "providers": [
+                {"id":"a","name":"A","base_url":"https://a/v1","api_key":"ka",
+                 "models":[{"id":"ma","model":"m-a"}]},
+                {"id":"b","name":"B","base_url":"https://b/v1","api_key":"kb",
+                 "models":[{"id":"mb","model":"m-b"}]}
+            ]
+        }"#).unwrap();
+        let p = find_provider_of_model(&c, "m-b").expect("应找到 B");
+        assert_eq!(p.name, "B");
+        assert_eq!(p.base_url, "https://b/v1");
+        assert_eq!(p.api_key, "kb");
+    }
+
+    #[test]
+    fn 找不到归属返回None而不是瞎猜() {
+        let c = AiConfig::default();
+        assert!(find_provider_of_model(&c, "nope").is_none());
+        assert!(find_provider_of_model(&c, "   ").is_none(), "空白名不该匹配到任何东西");
+    }
+
+    #[test]
+    fn 归属匹配是全等而非前缀或忽略大小写() {
+        // ★ 刻意不做模糊匹配：一旦错，用户看到的是「配了 A 却打到了 B」，
+        //   比"找不到就回落当前档案"更难排查。
+        let c: AiConfig = serde_json::from_str(r#"{
+            "providers": [{"id":"a","name":"A","base_url":"https://a/v1",
+              "models":[{"id":"m1","model":"glm-4v"}]}]
+        }"#).unwrap();
+        assert!(find_provider_of_model(&c, "glm-4v-flash").is_none(), "前缀不该命中");
+        assert!(find_provider_of_model(&c, "GLM-4V").is_none(), "大小写不猜");
+        assert!(find_provider_of_model(&c, "glm-4v").is_some(), "全等应命中");
     }
 
     #[test]

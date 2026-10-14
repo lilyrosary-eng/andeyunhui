@@ -340,6 +340,32 @@ pub struct Selection {
     pub model_id: Option<String>,
 }
 
+/// 按模型名在配置里找它**属于哪个供应商**。
+///
+/// ## 为什么需要
+/// `AiConfig::media_models` 只存**模型名**，但一次调用还需要**端点与凭证**。
+/// 若一律用"当前选中的档案"，就会出现：对话用 A 家、看图用 B 家的模型 ——
+/// 于是 B 的模型名被发到 A 的端点，必然失败，而且失败形态看起来像
+/// 「这个模型不支持图片」（端点不认识这个模型名），排查方向会被带偏。
+///
+/// 与其让用户为此再配一次端点（那又退回"多处配置"），不如**按名字自动归属**：
+/// 用户既然在配置里加过这个模型，系统就知道它在哪家。
+///
+/// ## 匹配口径
+/// 按 `ModelEntry.model` **全等**比较，不做模糊匹配、不分大小写猜测 ——
+/// 模糊匹配一旦错，用户看到的是「配了 A 却打到了 B」，比"找不到"更难排查。
+/// 找不到就返回 None，调用方回落当前档案（保持旧行为）。
+pub fn find_provider_of_model<'a>(config: &'a AiConfig, model_name: &str) -> Option<&'a Provider> {
+    let want = model_name.trim();
+    if want.is_empty() {
+        return None;
+    }
+    config
+        .providers
+        .iter()
+        .find(|p| p.models.iter().any(|m| m.model == want))
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct AiConfig {
     #[serde(default)]
