@@ -67,9 +67,89 @@ export function makeGroupConv(participantIds: string[], groupName?: string): Con
 // 该上限与后端 truncate_messages_for_safety 的 PER_MSG_TOKEN_CAP(30k) 对齐。
 const MSG_CONTENT_MAX = 30_000;
 
-function sanitizeConv(c: Conversation): Conversation {
+/** 单条媒体 data URL 的持久化上限（字符数；≈220KB 二进制）。超过的一律不进历史。 */
+const MEDIA_MAX_CHARS = 300_000;
+/**
+ * 单个会话持久化的媒体**总量**上限（字符数；≈1.1MB），超出部分按「新的优先」丢弃。
+ *
+ * 为什么必须有：`agentSteps[].meta` 与蓝图 `node.output` 里挂的是**完整 media data URL**。
+ * 早先 sanitizeConv 只截断 `m.content`、完全不碰这两处，于是数 MB 的 base64 被原样写进
+ * localStorage；而 `storage.setJSON` 又会静默吞掉 QuotaExceededError —— 表现为
+ * 「历史记录莫名丢失」，丢的不是一张图，是**整个会话**。
+ * 宁可少存几张图，也不能悄悄丢会话。
+ */
+const MEDIA_BUDGET_CHARS = 1_500_000;
+/** 需要按预算瘦身的媒体字段（与后端 card 词汇一致）。 */
+const MEDIA_KEYS = ['image', 'audio', 'video'] as const;
+
+/** 从 data URL 取 MIME（供省略提示用）。 */
+function dataUrlMime(u: string): string {
+  if (!u.startsWith('data:')) return '';
+  const semi = u.indexOf(';');
+  return u.slice(5, semi >= 0 ? semi : undefined);
+}
+
+/**
+ * 按预算瘦身一条消息里的媒体。返回原引用（无变化）或副本。
+ * 超预算的媒体**清空本体**并留下 `omitted: <mime>`，UI 据此说明「未随历史保存」。
+ */
+function slimMessageMedia(m: unknown, budget: { left: number }): unknown {
+  if (!m || typeof m !== 'object') return m;
+  const msg = m as { agentSteps?: unknown };
+  const steps = msg.agentSteps;
+  if (!Array.isArray(steps) || steps.length === 0) return m;
+  let touched = false;
+  const next = steps.slice() as unknown[];
+  // 倒序遍历：让**最近生成**的媒体优先占用预算（用户更常回看最近的）
+  for (let i = next.length - 1; i >= 0; i--) {
+    const step = next[i] as { meta?: Record<string, unknown> } | undefined;
+    const meta = step?.meta;
+    if (!meta || typeof meta !== 'object') continue;
+    const slimmed: Record<string, unknown> = { ...meta };
+    let changed = false;
+    for (const key of MEDIA_KEYS) {
+      const v = slimmed[key];
+      if (typeof v !== 'string' || !v.startsWith('data:')) continue;
+      if (v.length <= MEDIA_MAX_CHARS && v.length <= budget.left) {
+        budget.left -= v.length;
+        continue;
+      }
+      slimmed[key] = '';
+      slimmed.omitted = dataUrlMime(v);
+      changed = true;
+    }
+    if (changed) {
+      next[i] = { ...step, meta: slimmed };
+      touched = true;
+    }
+  }
+  return touched ? { ...msg, agentSteps: next } : m;
+}
+
+/** 蓝图节点的 `output` 同样是 media data URL，走同一份预算。 */
+function slimWorkOutput(c: unknown, budget: { left: number }): unknown {
+  const work = (c as { aiWork?: { nodes?: unknown[] } } | null)?.aiWork;
+  if (!work || !Array.isArray(work.nodes)) return c;
+  let touched = false;
+  const nodes = (work.nodes as unknown[]).map((n) => {
+    if (!n || typeof n !== 'object') return n;
+    const node = n as { output?: unknown };
+    const out = node.output;
+    if (typeof out !== 'string' || !out.startsWith('data:')) return n;
+    if (out.length <= MEDIA_MAX_CHARS && out.length <= budget.left) {
+      budget.left -= out.length;
+      return n;
+    }
+    touched = true;
+    return { ...(n as Record<string, unknown>), output: '', outputOmitted: dataUrlMime(out) };
+  });
+  return touched ? { ...(c as Record<string, unknown>), aiWork: { ...work, nodes } } : c;
+}
+
+export function sanitizeConv(c: Conversation): Conversation {
   if (!c || !Array.isArray(c.messages)) return { ...c, updatedAt: c?.updatedAt ?? Date.now(), messages: [] };
-  return {
+  const budget = { left: MEDIA_BUDGET_CHARS };
+  const trimmed = {
     ...c,
     updatedAt: c.updatedAt ?? Date.now(),
     messages: c.messages.map((m) => {
@@ -79,6 +159,8 @@ function sanitizeConv(c: Conversation): Conversation {
       return m;
     }),
   };
+  const withSlimMedia = { ...trimmed, messages: trimmed.messages.map((m) => slimMessageMedia(m, budget)) };
+  return slimWorkOutput(withSlimMedia, budget) as Conversation;
 }
 
 export function loadConversations(key: string): Conversation[] {

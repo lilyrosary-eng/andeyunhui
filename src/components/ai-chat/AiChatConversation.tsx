@@ -558,7 +558,7 @@ export const AiChatConversation = memo(function AiChatConversation({
                       .map((s) => s.meta)
                       .filter((x): x is Record<string, unknown> => !!x && x.card === 'image')
                       .map((x) => ({ src: String(x.image ?? ''), title: String(x.title ?? '') }))
-                      .filter((x) => x.src.startsWith('data:') || /^https?:\/\//.test(x.src));
+                      .filter((x) => x.src.startsWith('data:image/') || /^https?:\/\//.test(x.src));
                     if (imgs.length === 0) return null;
                     return (
                       <div className="flex flex-wrap gap-2 mb-1.5">
@@ -581,7 +581,7 @@ export const AiChatConversation = memo(function AiChatConversation({
                       .map((s) => s.meta)
                       .filter((x): x is Record<string, unknown> => !!x && x.card === 'audio')
                       .map((x) => ({ src: String(x.audio ?? ''), title: String(x.title ?? '') }))
-                      .filter((x) => x.src.startsWith('data:') || /^https?:\/\//.test(x.src));
+                      .filter((x) => x.src.startsWith('data:audio/') || /^https?:\/\//.test(x.src));
                     if (audios.length === 0) return null;
                     return (
                       <div className="flex flex-col gap-1.5 mb-1.5">
@@ -593,6 +593,48 @@ export const AiChatConversation = memo(function AiChatConversation({
                             title={x.title}
                             className="max-w-[320px] h-9"
                           />
+                        ))}
+                      </div>
+                    );
+                  })()}
+                  {/* 工具生成的**视频**：ComfyUI 工作流可以吐视频（文生视频 / 图生视频），
+                      后端按 dataURL 的 MIME 出 card:"video"。早先没有这个分支，
+                      视频会被当成图片贴进 <img> → 显示成一张坏图。 */}
+                  {m.role === 'assistant' && (() => {
+                    const vids = (m.agentSteps || [])
+                      .map((s) => s.meta)
+                      .filter((x): x is Record<string, unknown> => !!x && x.card === 'video')
+                      .map((x) => ({ src: String(x.video ?? ''), title: String(x.title ?? '') }))
+                      .filter((x) => x.src.startsWith('data:video/') || /^https?:\/\//.test(x.src));
+                    if (vids.length === 0) return null;
+                    return (
+                      <div className="flex flex-wrap gap-2 mb-1.5">
+                        {vids.map((x, i) => (
+                          <video
+                            key={i}
+                            src={x.src}
+                            controls
+                            title={x.title}
+                            className="max-w-[300px] max-h-[300px] rounded-xl border border-black/10 dark:border-white/10"
+                          />
+                        ))}
+                      </div>
+                    );
+                  })()}
+                  {/* 媒体在历史持久化时被按体积裁剪掉了（详见 util.ts 的预算化瘦身）。
+                      如实说明，别让用户以为「AI 什么都没生成」。 */}
+                  {m.role === 'assistant' && (() => {
+                    const omitted = (m.agentSteps || [])
+                      .map((s) => s.meta)
+                      .filter((x): x is Record<string, unknown> => !!x && typeof x.omitted === 'string')
+                      .map((x) => String(x.omitted));
+                    if (omitted.length === 0) return null;
+                    return (
+                      <div className="flex flex-col gap-0.5 mb-1.5">
+                        {omitted.map((mime, i) => (
+                          <span key={i} className="text-[11px] text-neutral-400 dark:text-stone-500">
+                            （{mime || '媒体'} 未随历史保存，重新生成即可查看）
+                          </span>
                         ))}
                       </div>
                     );

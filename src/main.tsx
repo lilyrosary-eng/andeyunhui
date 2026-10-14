@@ -4,7 +4,7 @@ import { initFileLogger } from "./lib/file-logger"
 import { installLocalImageSanitizer } from "./lib/localImage"
 import { listen } from "@tauri-apps/api/event"
 import "./index.css"
-import { storage } from "./core/storage"
+import { storage, setStorageWriteFailureHandler } from "./core/storage"
 import { KEYS } from "./core/storage/keys"
 import { EVENTS } from "./core/events/schema"
 import { isLinux } from "./platform/isLinux"
@@ -17,6 +17,22 @@ if (isLinux()) document.documentElement.classList.add('is-linux');
 
 // 尽早初始化前端全局错误捕获：把 window.onerror / unhandledrejection / console.error 写入会话日志文件
 initFileLogger();
+// 存储写入失败（几乎只可能是 localStorage 配额已满）→ 留痕 + **一次性**可见告警。
+// 之前是静默 catch：用户看到的是「历史记录莫名丢失」，现场毫无线索。
+// 告警只弹一次（本会话），避免持续写入失败时反复打断。
+{
+  let warned = false;
+  setStorageWriteFailureHandler((key, err) => {
+    console.error("[storage] 写入失败 key=", key, err);
+    if (warned) return;
+    warned = true;
+    try {
+      window.alert("本地存储空间已满，最近的对话记录可能没有保存成功。\n建议清理一些历史会话后重试。");
+    } catch {
+      /* 非浏览器环境忽略 */
+    }
+  });
+}
 // 把 Rust 端 SMTC 诊断事件转发到会话日志文件（console.error 会被 file-logger 捕获），
 // 便于在打包版下看到任务栏媒体会话的真实状态，定位「未知应用」根因。
 listen(EVENTS.smtc.diag, (event) => {

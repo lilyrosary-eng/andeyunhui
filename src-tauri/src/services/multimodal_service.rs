@@ -21,15 +21,37 @@ pub async fn ai_generate_image(
     prompt: String,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    let config = ai_service::load_config(&app);
-    let cfg = ai_service::resolve_target(&config, profile_id.as_deref());
+    generate_image_inner(&app, &prompt, profile_id.as_deref(), None).await
+}
+
+/// 生图实现体。
+///
+/// `model_override` 供**媒体后端自带图像模型名**的场景使用：那种配置下模型名来自
+/// 媒体后端清单（`extras.models.image`），而不是档案的 `image_model`。
+/// 早先工具层忽略了媒体后端的 profileId 与 model，导致「媒体后端里配的 openai 生图条目」
+/// 实际不生效（只有视觉那条链真正接通）。
+pub async fn generate_image_inner(
+    app: &tauri::AppHandle,
+    prompt: &str,
+    profile_id: Option<&str>,
+    model_override: Option<&str>,
+) -> Result<String, String> {
+    let config = ai_service::load_config(app);
+    let cfg = ai_service::resolve_target(&config, profile_id);
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key".to_string());
     }
-    let model = cfg
-        .image_model
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
+    let model = model_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            cfg.image_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
         .ok_or_else(|| "该算力来源未配置图片生成模型（image_model），无法发图".to_string())?;
 
     let url = format!("{}/images/generations", cfg.base_url.trim_end_matches('/'));
@@ -83,15 +105,33 @@ pub async fn ai_tts(
     text: String,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    let config = ai_service::load_config(&app);
-    let cfg = ai_service::resolve_target(&config, profile_id.as_deref());
+    tts_inner(&app, &text, profile_id.as_deref(), None).await
+}
+
+/// 语音合成实现体。`model_override` 供**媒体后端自带 TTS 模型名**时使用
+/// （同 `generate_image_inner`：媒体后端清单里的 models.speech 早先被忽略）。
+pub async fn tts_inner(
+    app: &tauri::AppHandle,
+    text: &str,
+    profile_id: Option<&str>,
+    model_override: Option<&str>,
+) -> Result<String, String> {
+    let config = ai_service::load_config(app);
+    let cfg = ai_service::resolve_target(&config, profile_id);
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key".to_string());
     }
-    let model = cfg
-        .tts_model
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
+    let model = model_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            cfg.tts_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
         .ok_or_else(|| "该算力来源未配置语音模型（tts_model），无法播报".to_string())?;
 
     let url = format!("{}/audio/speech", cfg.base_url.trim_end_matches('/'));

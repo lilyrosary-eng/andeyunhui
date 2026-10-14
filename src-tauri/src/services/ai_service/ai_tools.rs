@@ -3240,8 +3240,8 @@ impl AiTool for GenerateImageTool {
                     Err(e) => return Err(tag_skill_fail(Some(c), e)),
                 }
             }
-            // 云端档（或未配置 → 回退云端）。云端失败与工作流技能包无关，不加前缀。
-            _ => {
+            // 云端档（或未配置 → 回退当前档案）。云端失败与工作流技能包无关，不加前缀。
+            cloud => {
                 // 云端 /images/generations 是纯文生图，没有图片输入位：明确拒绝，
                 // 别静默把附图丢掉让用户以为「照图生成」成功了。
                 if image_data.is_some() {
@@ -3250,11 +3250,18 @@ impl AiTool for GenerateImageTool {
                             .to_string(),
                     );
                 }
+                // ★ 尊重媒体后端配置：优先用后端自带的档案与图像模型名，都没有才回落当前对话档案。
+                //   早先直接传 ctx.profile_id，媒体后端里配的 openai 生图条目**完全不生效**。
+                let profile = cloud
+                    .and_then(|c| c.profile_id.clone())
+                    .or_else(|| ctx.profile_id.clone());
+                let model = cloud.and_then(|c| c.model.clone());
                 (
-                    crate::services::multimodal_service::ai_generate_image(
-                        ctx.app.clone(),
-                        prompt.clone(),
-                        ctx.profile_id.clone(),
+                    crate::services::multimodal_service::generate_image_inner(
+                        &ctx.app,
+                        &prompt,
+                        profile.as_deref(),
+                        model.as_deref(),
                     )
                     .await?,
                     "cloud",
@@ -3262,23 +3269,34 @@ impl AiTool for GenerateImageTool {
             }
         };
         let used_workflow = cfg.map(|c| c.workflow.is_some()).unwrap_or(false);
+        // ⚠️ 必须按 dataURL 的**实际 MIME** 判定，不能无条件当图片：
+        //    ComfyUI 工作流可以把视频/音频当输出（data:video/mp4;... 等），
+        //    硬编码 card:"image" 会让前端把视频贴进 <img>，显示成一张坏图。
+        let (card, kind) = media_card_for(&data_url);
+        let noun = match card {
+            "video" => "视频",
+            "audio" => "音频",
+            _ => "图片",
+        };
         let text = if source == "comfyui" {
             format!(
-                "图片已生成（ComfyUI 本地{}{}），已直接展示给用户，无需转述画面内容。",
+                "{}已生成（ComfyUI 本地{}{}），已直接展示给用户，无需转述内容。",
+                noun,
                 if used_workflow { "工作流" } else { "内置流程" },
                 if image_data.is_some() { "，图生图" } else { "" }
             )
         } else {
-            "图片已生成（云端图片模型），已直接展示给用户，无需转述画面内容。".to_string()
+            format!("{}已生成（云端图片模型），已直接展示给用户，无需转述画面内容。", noun)
         };
         let title: String = prompt.chars().take(60).collect();
-        let meta = serde_json::json!({
-            "card": "image",
-            "kind": "image",
+        let mut meta = serde_json::json!({
+            "card": card,
+            "kind": kind,
             "title": title,
-            "image": data_url,
             "source": source,
         });
+        // 媒体本体挂在以 card 为名的键上（image / video / audio 三选一），前端按 card 取
+        meta[card] = serde_json::json!(data_url);
         Ok(ToolExecResult::with_meta(text, meta))
     }
 }
@@ -3342,10 +3360,14 @@ impl AiTool for GenerateSpeechTool {
         // 目前只有 openai 兼容 /audio/speech 一种实现；其余后端类型暂未支持。
         let data_url = match c.backend_kind.as_str() {
             "openai" => {
-                crate::services::multimodal_service::ai_tts(
-                    ctx.app.clone(),
-                    text.clone(),
-                    c.profile_id.clone().or_else(|| ctx.profile_id.clone()),
+                // ★ 尊重媒体后端配置：档案优先用后端自带的，其次当前对话档案；
+                //   模型名用后端声明的（早先被忽略，导致后端的「语音模型名」只当就绪判据用）。
+                let profile = c.profile_id.clone().or_else(|| ctx.profile_id.clone());
+                crate::services::multimodal_service::tts_inner(
+                    &ctx.app,
+                    &text,
+                    profile.as_deref(),
+                    c.model.as_deref(),
                 )
                 .await?
             }
@@ -3354,13 +3376,13 @@ impl AiTool for GenerateSpeechTool {
         let text_out =
             "语音已生成，已直接展示给用户供播放，无需转述内容。".to_string();
         let title: String = text.chars().take(60).collect();
-        let meta = serde_json::json!({
+        let mut meta = serde_json::json!({
             "card": "audio",
-            "kind": "speech",
+            "kind": "audio",
             "title": title,
-            "audio": data_url,
             "source": "cloud",
         });
+        meta["audio"] = serde_json::json!(data_url);
         Ok(ToolExecResult::with_meta(text_out, meta))
     }
 }
@@ -3376,8 +3398,27 @@ impl AiTool for GenerateSpeechTool {
 // 模型）。本工具是**按需深挖**：用户问具体问题（报错说什么 / 有几个人）时，
 // 泛描述不够用，需要一个带问题的定向提问。两者互补，不是重复。
 
-/// 把 data URL 拆成 (mime, base64)。不是 data URL 时按 image/png 兜底（容错）。
+/// 按 data URL 的**实际 MIME** 判定媒体卡片类型，返回 `(card, kind)`。
 ///
+/// 为什么必须按 mime 判而不是写死：ComfyUI 工作流可以把**视频/音频**当输出
+/// （`pick_first_media` 就认 `videos` 键），拼出来的 dataURL 是 `data:video/mp4;...`。
+/// 早先无条件写 `card:"image"`，前端就把它贴进 `<img>` → 显示成一张坏图。
+fn media_card_for(data_url: &str) -> (&'static str, &'static str) {
+    let mime = data_url
+        .strip_prefix("data:")
+        .and_then(|r| r.split(';').next())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if mime.starts_with("video/") {
+        ("video", "video")
+    } else if mime.starts_with("audio/") {
+        ("audio", "audio")
+    } else {
+        ("image", "image")
+    }
+}
+
+/// 把 data URL 拆成 (mime, base64)。不是 data URL 时按 image/png 兜底（容错）。///
 /// 按 RFC 2397 解析：`data:[<mediatype>][;base64],<data>` —— **数据从第一个逗号之后开始**。
 /// （早先按「分号后一位」取数据，遇到 `data:image/jpeg;,XXX` 这种「有分号无 base64 标记」
 /// 的写法会把逗号一起带进 base64，把坏数据发给视觉端点。单测抓到的。）
@@ -3801,6 +3842,20 @@ mod tests {
         assert_eq!(v.profile_id.as_deref(), Some("p1"));
         assert!(v.is_ready());
         assert!(p.image.is_none(), "视觉不应落到 image 键上");
+    }
+
+    #[test]
+    fn media_card_for_按_mime_判定() {
+        // ComfyUI 工作流可以吐视频/音频，必须按实际 MIME 出 card，
+        // 否则前端会把视频贴进 <img> 显示成坏图。
+        assert_eq!(media_card_for("data:image/png;base64,AA"), ("image", "image"));
+        assert_eq!(media_card_for("data:video/mp4;base64,AA"), ("video", "video"));
+        assert_eq!(media_card_for("data:audio/mpeg;base64,AA"), ("audio", "audio"));
+        // MIME 大小写不敏感
+        assert_eq!(media_card_for("data:VIDEO/MP4;base64,AA"), ("video", "video"));
+        // 未知/非 data URL → 兜底当图片（与前端 <img> 的默认路径一致）
+        assert_eq!(media_card_for("weird"), ("image", "image"));
+        assert_eq!(media_card_for("data:application/octet-stream;base64,AA"), ("image", "image"));
     }
 
     #[test]

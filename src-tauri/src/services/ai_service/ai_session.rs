@@ -330,15 +330,21 @@ pub(crate) fn persist_agent_session(app: &AppHandle, session: &EventSession) {
     let sessions_dir = dir.join("ai_sessions");
     let _ = fs::create_dir_all(&sessions_dir);
     let file = sessions_dir.join(format!("{}.json", session.id));
-    // 落盘前瘦身：生图工具的 meta.image 是 data URL（可达数 MB base64），
-    // 若原样写入会让会话日志线性膨胀（每张图一条）。落盘只保留占位标记，
+    // 落盘前瘦身：媒体工具的 meta 里挂着 data URL（可达数 MB base64），
+    // 若原样写入会让会话日志线性膨胀（每张图/每段音频一条）。落盘只保留占位标记，
     // 前端渲染走实时事件的 meta（内存），日志仅作审计与 replay 卡片骨架。
+    //
+    // ⚠️ 必须覆盖**全部**媒体键。早先只处理了 image，漏了 audio，
+    //    导致每做一次 TTS 就往会话 JSON 里写一整段音频 base64。
+    const MEDIA_KEYS: [&str; 3] = ["image", "audio", "video"];
     let mut slim = session.clone();
     for ev in &mut slim.events {
         if let SessionEvent::Tool { meta: Some(m), .. } = ev {
-            if let Some(img) = m.get("image").and_then(|v| v.as_str()) {
-                let marker = format!("<data-url:{} chars, not persisted>", img.chars().count());
-                m["image"] = serde_json::Value::String(marker);
+            for key in MEDIA_KEYS {
+                if let Some(media) = m.get(key).and_then(|v| v.as_str()) {
+                    let marker = format!("<data-url:{} chars, not persisted>", media.chars().count());
+                    m[key] = serde_json::Value::String(marker);
+                }
             }
         }
     }
