@@ -346,6 +346,76 @@ pub struct AiConfig {
     pub providers: Vec<Provider>,
     #[serde(default)]
     pub selection: Selection,
+    /// **应用级**媒体模型名 —— 「视觉/语音/图像/音乐用哪个模型」的唯一配置处。
+    ///
+    /// ## 为什么要有这一层
+    /// 在这之前，媒体模型名散在两个地方，各自服务一条不同的调用链：
+    ///   - 供应商级三件套（`Provider::vision_model` 等）：`ai_vision_ocr` /
+    ///     `ai_generate_image` / `ai_tts` 这几个**独立命令**读它，
+    ///     桌面发图、移动端发图、插件都走这条路；
+    ///   - 媒体后端清单的能力链：`analyze_image` / `generate_image` /
+    ///     `generate_speech` 这些 **agent 工具**读它，而那份清单存在前端
+    ///     的浏览器本地库里 —— 插件与移动端**读不到**。
+    ///
+    /// 结果是「同一个概念（比如'视觉模型'）要配两遍，且只有一处对某些端可见」。
+    /// 用户明确要求「一处配置，不要每个供应商/每个模型一套」。
+    ///
+    /// ## 为什么不复用供应商字段
+    /// 供应商级必然变成「每个供应商配一套」——9 个供应商就要配 9 次，
+    /// 而用户对「用哪个模型看图」的判断与「走哪个供应商」无关。
+    ///
+    /// ## 放在这里的好处
+    /// `ai_config.json` 是**所有端都能读到**的地方（桌面 / 移动端 / 插件走同一份
+    /// 后端档案），所以这一处配置天然跨端共享 —— 而浏览器本地库做不到这一点。
+    #[serde(default, skip_serializing_if = "MediaModels::is_empty")]
+    pub media_models: MediaModels,
+}
+
+/// 应用级媒体模型名。字段名与 `MediaKind` 对齐（见前端 `ai/media/backends.ts`）。
+///
+/// 全部可选：留空表示「没配」，此时各调用点按自己的顺序回落
+/// （先回落供应商三件套，再回落对话模型）。
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+pub struct MediaModels {
+    /// 看图用（识图 / 图片理解）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<String>,
+    /// 语音合成用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<String>,
+    /// 生图用（云端图片模型；ComfyUI 走自己的 ckpt/工作流，不看这个）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// 音乐生成用（枚举留位，首期未启用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music: Option<String>,
+    /// 视频生成用（枚举留位，首期未启用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<String>,
+}
+
+impl MediaModels {
+    /// 五项全空 → 不落盘（省空间，也让「没配过」与「配了又清空」在文件上一致）。
+    pub fn is_empty(&self) -> bool {
+        self.vision.is_none()
+            && self.speech.is_none()
+            && self.image.is_none()
+            && self.music.is_none()
+            && self.video.is_none()
+    }
+
+    /// 取某个能力的模型名（去空白；空白视为未配）。
+    pub fn get(&self, kind: &str) -> Option<&str> {
+        let v = match kind {
+            "vision" => self.vision.as_deref(),
+            "speech" => self.speech.as_deref(),
+            "image" => self.image.as_deref(),
+            "music" => self.music.as_deref(),
+            "video" => self.video.as_deref(),
+            _ => None,
+        };
+        v.map(str::trim).filter(|s| !s.is_empty())
+    }
 }
 
 /// FNV-1a 64 位。不用 std 的 DefaultHasher——它的输出不保证跨 Rust 版本稳定，

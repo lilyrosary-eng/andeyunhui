@@ -5,7 +5,7 @@
 use base64::Engine;
 use image::GenericImageView;
 use tauri::AppHandle;
-use crate::services::ai_service::ai_profile::{AiProfile, load_config, resolve_target};
+use crate::services::ai_service::ai_profile::{AiProfile, AiConfig, ResolvedTarget, load_config, resolve_target};
 
 /// 测试 AI 配置是否可用：向端点发起一次极小开销的非流式请求，
 /// 校验 base_url / api_key / model 是否正确，并返回耗时。不消耗对话额度（max_tokens=5）。
@@ -84,6 +84,29 @@ pub async fn ai_vision_ocr(
     vision_ask(&app, &image_base64, &image_mime, prompt.as_deref(), profile_id.as_deref(), None, None, None).await
 }
 
+/// 视觉模型的解析顺序 —— **两条调用链共用这一处**，不再各写一份。
+///
+/// 背景：以前「图片理解」有两套并行解析，各自服务一条链路：
+///   - `ai_vision_ocr`（独立命令，桌面发图 / 移动端 / 插件）读**供应商三件套**；
+///   - `analyze_image`（agent 工具）读**媒体后端能力链**（配置存在浏览器本地库，
+///     插件与移动端读不到）。
+/// 于是同一个概念要配两遍，且只有桌面能用上后者。用户要求「一处配置」。
+///
+/// 现在的顺序：
+///   1. 显式覆盖（agent 工具传入的媒体后端模型名）—— 保留，它就是"本次指定用谁"
+///   2. **应用级媒体模型**（AI 页「媒体模型」里那一处）—— 用户要的"一处"
+///   3. 供应商三件套的视觉模型 —— 兼容改造前的配置，**不退化**
+///   4. 对话模型 —— 最后回落（多模态模型时代这是合理的默认）
+fn resolve_vision_model(config: &AiConfig, cfg: &ResolvedTarget, explicit: Option<&str>) -> String {
+    explicit
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| config.media_models.get("vision").map(str::to_string))
+        .or_else(|| cfg.vision_model.clone().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| cfg.model.clone())
+}
+
 /// 视觉问答的实现体。见 `ai_vision_ocr` 的文档。
 #[allow(clippy::too_many_arguments)]
 pub async fn vision_ask(
@@ -115,12 +138,7 @@ pub async fn vision_ask(
     let data_url = format!("data:{};base64,{}", image_mime, image_base64);
 
     // 模型优先级：显式覆盖 > 档案的视觉模型 > 对话模型（保留旧配置的回落路径）
-    let ocr_model = model
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| cfg.vision_model.clone().filter(|s| !s.trim().is_empty()))
-        .unwrap_or_else(|| cfg.model.clone());
+    let ocr_model = resolve_vision_model(&config, &cfg, model);
 
     let body = serde_json::json!({
         "model": ocr_model,
@@ -253,12 +271,7 @@ pub async fn vision_ask_raw(
     let p = prompt.map(str::to_string).unwrap_or_else(|| "请描述这张图片".to_string());
     let data_url = format!("data:{};base64,{}", image_mime, image_base64);
 
-    let ocr_model = model
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| cfg.vision_model.clone().filter(|s| !s.trim().is_empty()))
-        .unwrap_or_else(|| cfg.model.clone());
+    let ocr_model = resolve_vision_model(&config, &cfg, model);
 
     let body = serde_json::json!({
         "model": ocr_model,
@@ -519,4 +532,82 @@ pub fn ocr_export_pdf(path: String, image_base64: String, mime: String) -> Resul
     doc.save(&path)
         .map_err(|e| format!("保存 PDF 失败: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::ai_service::ai_profile::MediaModels;
+
+    fn target(vision_model: Option<&str>, model: &str) -> ResolvedTarget {
+        ResolvedTarget {
+            model: model.to_string(),
+            vision_model: vision_model.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn config(media_vision: Option<&str>) -> AiConfig {
+        AiConfig {
+            media_models: MediaModels {
+                vision: media_vision.map(str::to_string),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn 视觉模型解析_显式覆盖最优先() {
+        // agent 工具（analyze_image）传的媒体后端模型名 = 本次指定用谁
+        let got = resolve_vision_model(&config(Some("app-level")), &target(Some("prov"), "chat"), Some("explicit"));
+        assert_eq!(got, "explicit");
+    }
+
+    #[test]
+    fn 视觉模型解析_应用级优先于供应商三件套() {
+        // ★ 这条是「一处配置」的核心：AI 页里配的那一个，要压过每个供应商各配一个的旧字段
+        let got = resolve_vision_model(&config(Some("app-level")), &target(Some("prov"), "chat"), None);
+        assert_eq!(got, "app-level");
+    }
+
+    #[test]
+    fn 视觉模型解析_没配应用级时回落供应商三件套() {
+        // 兼容保护：改造前只配了三件套的用户，行为必须与之前**完全一致**
+        let got = resolve_vision_model(&config(None), &target(Some("prov"), "chat"), None);
+        assert_eq!(got, "prov");
+    }
+
+    #[test]
+    fn 视觉模型解析_都没配时回落对话模型() {
+        // 多模态时代这是最合理的默认：你正在用哪个模型，就用它看图
+        let got = resolve_vision_model(&config(None), &target(None, "chat-model"), None);
+        assert_eq!(got, "chat-model");
+    }
+
+    #[test]
+    fn 视觉模型解析_空白串视为未配() {
+        // 用户把输入框清空（留下空串）不该被当成一个名为 "" 的模型发出去
+        assert_eq!(resolve_vision_model(&config(Some("   ")), &target(Some("  "), "chat"), None), "chat");
+        assert_eq!(resolve_vision_model(&config(None), &target(None, "chat"), Some("")), "chat");
+    }
+
+    #[test]
+    fn media_models_读取与空判定() {
+        let m = MediaModels {
+            vision: Some(" v ".into()),
+            speech: Some("".into()),
+            ..Default::default()
+        };
+        assert_eq!(m.get("vision"), Some("v"), "应 trim 后返回");
+        assert_eq!(m.get("speech"), None, "空白视为未配");
+        assert_eq!(m.get("nonexistent"), None);
+        assert!(!m.is_empty(), "有任意一项非空就不算空");
+
+        let empty = MediaModels::default();
+        assert!(empty.is_empty());
+        // 全空时不该落盘（配置里不会出现一个空的 media_models 块）
+        let json = serde_json::to_string(&empty).unwrap();
+        assert_eq!(json, "{}", "字段级 skip_serializing_if 也不该输出空值");
+    }
 }

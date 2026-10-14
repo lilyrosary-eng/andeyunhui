@@ -3425,6 +3425,35 @@ impl AiTool for GenerateSpeechTool {
 // 模型）。本工具是**按需深挖**：用户问具体问题（报错说什么 / 有几个人）时，
 // 泛描述不够用，需要一个带问题的定向提问。两者互补，不是重复。
 
+/// 视觉调用的目标解析：**媒体后端优先，没有则回落到当前档案**。
+///
+/// 返回 `(profile_id, model, base_url, api_key)`；后三者/前者为 None 时表示
+/// 「交给 `vision_ask` 按它自己的顺序解析」（应用级媒体模型 → 供应商三件套 → 对话模型）。
+///
+/// ## 为什么要允许回落
+/// 以前没配媒体后端时，`analyze_image` 与看图自检会**直接报错**「未配置视觉后端」。
+/// 但在多模态已成主流的当下，用户正在用的对话模型往往本身就能看图 ——
+/// 让他为了看一眼图先去配一个"媒体后端"，是多余的门槛。
+///
+/// 于是链条变成：**原生直发 → 媒体后端 → 应用级媒体模型 → 供应商三件套 → 对话模型**，
+/// 每一级都是"上一级不可用才走这里"，而最末一级（对话模型）在绝大多数情况下可用。
+fn vision_target(
+    ctx: &ToolContext,
+) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>), String> {
+    if let Some(v) = ctx.media.vision.as_ref().filter(|c| c.is_ready()) {
+        if v.backend_kind != "openai" {
+            return Err(format!("暂不支持的视觉后端类型：{}", v.backend_kind));
+        }
+        return Ok((
+            v.profile_id.clone(),
+            v.model.clone(),
+            Some(v.base_url.clone()).filter(|s| !s.is_empty()),
+            Some(v.api_key.clone()).filter(|s| !s.is_empty()),
+        ));
+    }
+    Ok((ctx.profile_id.clone(), None, None, None))
+}
+
 /// 让视觉模型看一眼刚生成的媒体，按用户的原始要求指出最该改的点。
 ///
 /// 为什么需要：研究里反复强调「**零错误的图 ≠ 正确的图**」——图能跑出来不代表画对了，
@@ -3433,14 +3462,7 @@ impl AiTool for GenerateSpeechTool {
 ///
 /// ⚠️ 自检失败**不算生成失败**：它是增强，拿不到就如实说明，绝不能把已经生成好的图丢掉。
 async fn critique_output(ctx: &ToolContext, data_url: &str, request: &str) -> Result<String, String> {
-    let Some(v) = ctx.media.vision.as_ref().filter(|c| c.is_ready()) else {
-        return Err(
-            "未配置视觉后端；可在 设置 → 模型 → 媒体后端 里把某个后端绑定到「视觉」能力".to_string(),
-        );
-    };
-    if v.backend_kind != "openai" {
-        return Err(format!("暂不支持的视觉后端类型：{}", v.backend_kind));
-    }
+    let (pid, model, url, key) = vision_target(ctx)?;
     let (mime, b64) = split_data_url(data_url);
     let prompt = format!(
         "这是刚刚生成的图。用户最初的要求是：「{}」。\n请判断它是否满足要求，并指出**最该改的 1-3 点**，每点给出具体可执行的调整（提示词 / 采样步数 / 尺寸 / 模型 / 节点参数）。若已完全满足要求，只回复「符合」。",
@@ -3451,10 +3473,10 @@ async fn critique_output(ctx: &ToolContext, data_url: &str, request: &str) -> Re
         &b64,
         &mime,
         Some(&prompt),
-        v.profile_id.as_deref(),
-        v.model.as_deref(),
-        Some(v.base_url.as_str()).filter(|s| !s.is_empty()),
-        Some(v.api_key.as_str()).filter(|s| !s.is_empty()),
+        pid.as_deref(),
+        model.as_deref(),
+        url.as_deref(),
+        key.as_deref(),
     )
     .await
 }
@@ -3568,31 +3590,21 @@ impl AiTool for AnalyzeImageTool {
             Ok(v) if v >= 1 && v <= ctx.images.len() => v - 1,
             _ => return Err(format!("图片序号 {} 越界：本轮共附带 {} 张图", n, ctx.images.len())),
         };
-        let cfg = ctx
-            .media
-            .vision
-            .as_ref()
-            .filter(|c| c.is_ready())
-            .ok_or_else(|| {
-                "未配置视觉后端：请在设置 → 模型 → 媒体后端里添加一个并绑定到「视觉」能力（需该算力来源配好视觉模型）"
-                    .to_string()
-            })?;
+        let (pid, model, url, key) = vision_target(ctx)?;
         let (mime, b64) = split_data_url(&ctx.images[idx]);
-        // 首期只接 OpenAI 兼容视觉协议（ComfyUI 是生图后端，不做理解）
-        let text = match cfg.backend_kind.as_str() {
-            "openai" => crate::services::ai_service::ai_ocr::vision_ask(
-                &ctx.app,
-                &b64,
-                &mime,
-                Some(&q),
-                cfg.profile_id.as_deref(),
-                cfg.model.as_deref(),
-                Some(&cfg.base_url),
-                Some(&cfg.api_key),
-            )
-            .await?,
-            other => return Err(format!("暂不支持的视觉后端类型：{}", other)),
-        };
+        // 只接 OpenAI 兼容视觉协议（ComfyUI 是生图后端，不做理解）——
+        // backend_kind 的校验已在 vision_target 里做过。
+        let text = crate::services::ai_service::ai_ocr::vision_ask(
+            &ctx.app,
+            &b64,
+            &mime,
+            Some(&q),
+            pid.as_deref(),
+            model.as_deref(),
+            url.as_deref(),
+            key.as_deref(),
+        )
+        .await?;
         Ok(ToolExecResult::plain(text))
     }
 }
