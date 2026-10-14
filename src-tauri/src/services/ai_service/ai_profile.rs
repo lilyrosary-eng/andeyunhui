@@ -128,6 +128,44 @@ pub struct Caps {
     /// 取决于端点实现，不取决于这里的标签（标错不该让能力被静默阉割）。
     #[serde(default)]
     pub tools: bool,
+    /// **视觉**这一位的来源。决定重扫时能否覆盖，以及 UI 该标「实测/推断/未知」。
+    ///
+    /// 缺省 None：老数据（改造前落盘的），来源不明——按「不可刷新」保守处理，
+    /// 与 `CapacitySource` 同一口径，理由也一样（见其文档）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_source: Option<CapsSource>,
+}
+
+/// 能力位的**来源**。与 `CapacitySource` 分开是因为语义不同：
+/// 容量是「一个数」，能力是「一个真假判断」，判断错了会直接改变路由与 UI 文案。
+///
+/// 现状（改造前）只有 `Inferred`（名字启发式）与用户手改两种，且**不落盘**，
+/// 所以「实测得到支持视觉」这件事以前根本无处记录。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CapsSource {
+    /// 供应商**权威上报**（Ollama `capabilities` / OpenRouter `input_modalities`），
+    /// 或**实测探测**确证（发一张小图给该模型，端点接受）。
+    /// 两者都当作可信——实测甚至比上报更硬，因为它验的是「这个端点此刻真的收」。
+    Provider,
+    /// 名字启发式推断（`caps_infer`）。⚠️ 大概率不准：实测在用的
+    /// `agnes-*` / `step-*` / `hy-mt2-*` 等家族名字里没有任何线索。
+    Inferred,
+    /// 用户手改（**永不覆盖**）。
+    Manual,
+}
+
+impl CapsSource {
+    /// 重扫时能否用新推断覆盖这一位。
+    ///
+    /// 与 `CapacitySource::refreshable` 同一套逻辑，只是操作对象是布尔位：
+    /// - `Provider`（上报/实测）→ **不覆盖**：这是硬事实，不该被名字启发式冲掉
+    /// - `Inferred` → 可覆盖：下次可能推断得更准
+    /// - `Manual` → 冻结
+    /// - `None` → 冻结（老数据来源不明，保守不动）
+    pub fn refreshable(source: Option<Self>) -> bool {
+        matches!(source, Some(Self::Inferred))
+    }
 }
 
 fn caps_text_default() -> bool {
@@ -142,6 +180,7 @@ impl Default for Caps {
             reasoning: false,
             embedding: false,
             tools: false,
+            vision_source: None,
         }
     }
 }
@@ -430,6 +469,9 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
             for m in prov.models.iter_mut() {
                 if m.model == vm {
                     m.caps.vision = true;
+                    // 「vision_model 指向它自己」是 v1 用户的**显式声明**，
+                    // 不是我们的名字启发式推断 → 标 Manual，重扫/探测都不得覆盖。
+                    m.caps.vision_source = Some(CapsSource::Manual);
                 }
             }
         }

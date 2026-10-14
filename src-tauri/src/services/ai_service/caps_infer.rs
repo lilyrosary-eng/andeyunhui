@@ -53,18 +53,34 @@ pub(crate) fn has_token(n: &str, tok: &str) -> bool {
 }
 
 /// 按模型名推断能力标记。
+///
+/// ⚠️ 产出的 `vision` **必须**带 `vision_source: Inferred` —— 这个标记是
+/// 「重扫时能否被覆盖」与「UI 该显示实测还是推断」的唯一依据。
+/// 把它标成 None 会让探测结论被名字启发式永久压制（或反之）。
 pub fn infer_caps(model_name: &str) -> Caps {
     let n = model_name.to_lowercase();
     let has = |hints: &[&str]| hints.iter().any(|h| n.contains(h));
 
     // 向量模型既不是对话模型，也无视觉/思考/工具可言
     if has(EMBEDDING_HINTS) {
-        return Caps { text: false, embedding: true, ..Default::default() };
+        return Caps {
+            text: false,
+            embedding: true,
+            vision_source: Some(super::ai_profile::CapsSource::Inferred),
+            ..Default::default()
+        };
     }
     let reasoning = has(REASONING_HINTS) || REASONING_TOKENS.iter().any(|t| has_token(&n, t));
     let vision = has(VISION_HINTS);
     let tools = !has(NO_TOOLS_HINTS);
-    Caps { text: true, vision, reasoning, tools, embedding: false }
+    Caps {
+        text: true,
+        vision,
+        reasoning,
+        tools,
+        embedding: false,
+        vision_source: Some(super::ai_profile::CapsSource::Inferred),
+    }
 }
 
 /// 容量兜底表：模型名片段 → (上下文, 单次最大输出)。

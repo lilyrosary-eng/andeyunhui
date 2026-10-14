@@ -104,6 +104,9 @@ pub fn from_legacy_profiles(existing: &AiConfig, legacy: &AiProfiles) -> AiConfi
             caps: Caps {
                 text: true,
                 vision: p.vision_model.as_deref() == Some(p.model.as_str()),
+                // v1 配置里「视觉模型指向自己」是用户的**显式声明**，不是我们的推断 →
+                // 标 Manual，避免后续扫描/探测把它当可刷新的旧推断覆盖掉。
+                vision_source: Some(super::ai_profile::CapsSource::Manual),
                 ..Default::default()
             },
             context_tokens: None,

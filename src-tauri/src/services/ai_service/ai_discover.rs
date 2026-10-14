@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
-use super::ai_profile::Caps;
+use super::ai_profile::{Caps, CapsSource};
 use super::ai_profile::CapacitySource;
 use super::caps_infer::{infer_capacity, infer_caps};
 use super::reasoning::{builtin_spec, spec_from_entry, ReasoningSpec};
@@ -106,6 +106,8 @@ fn caps_from_entry(e: &serde_json::Value) -> Option<Caps> {
             reasoning: has_in(&caps, "thinking") || has_in(&caps, "reasoning"),
             tools: has_in(&caps, "tools"),
             embedding,
+            // 供应商上报 = 权威。视觉这一位标 Provider，重扫时不会被名字启发式冲掉。
+            vision_source: Some(CapsSource::Provider),
         });
     }
 
@@ -124,6 +126,7 @@ fn caps_from_entry(e: &serde_json::Value) -> Option<Caps> {
             reasoning: has_in(&params, "reasoning") || has_in(&params, "include_reasoning"),
             tools: has_in(&params, "tools"),
             embedding,
+            vision_source: Some(CapsSource::Provider),
         });
     }
 
