@@ -3427,7 +3427,7 @@ impl AiTool for GenerateSpeechTool {
 
 /// 视觉调用的目标解析：**媒体后端优先，没有则回落到当前档案**。
 ///
-/// 返回 `(profile_id, model, base_url, api_key)`；后三者/前者为 None 时表示
+/// 返回 `(profile_id, model, base_url, api_key)`；为 None 时表示
 /// 「交给 `vision_ask` 按它自己的顺序解析」（应用级媒体模型 → 供应商三件套 → 对话模型）。
 ///
 /// ## 为什么要允许回落
@@ -3437,6 +3437,15 @@ impl AiTool for GenerateSpeechTool {
 ///
 /// 于是链条变成：**原生直发 → 媒体后端 → 应用级媒体模型 → 供应商三件套 → 对话模型**，
 /// 每一级都是"上一级不可用才走这里"，而最末一级（对话模型）在绝大多数情况下可用。
+///
+/// ## ⚠️ 为什么媒体后端的模型名会被「有条件忽略」
+/// 媒体后端的 `extras.models.vision` 是**已经没有 UI 入口**的旧字段（能力链上的
+/// 输入框已撤，模型名统一到 AI 页「媒体模型」）。如果照旧把它当"本次显式指定"传下去，
+/// 它的优先级会高于「媒体模型」—— 结果是**用户在「媒体模型」里配了却不生效**
+/// （旧数据里存过这个字段的人才会踩到，更难排查）。
+///
+/// 所以：**应用级配了就以应用级为准**；应用级为空时才用旧字段兜底（不丢老配置）。
+/// 媒体后端始终只提供**端点与凭证**这一件事。
 fn vision_target(
     ctx: &ToolContext,
 ) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>), String> {
@@ -3444,9 +3453,13 @@ fn vision_target(
         if v.backend_kind != "openai" {
             return Err(format!("暂不支持的视觉后端类型：{}", v.backend_kind));
         }
+        let app_level_configured = crate::services::ai_service::ai_profile::load_config(&ctx.app)
+            .media_models
+            .get("vision")
+            .is_some();
         return Ok((
             v.profile_id.clone(),
-            v.model.clone(),
+            if app_level_configured { None } else { v.model.clone() },
             Some(v.base_url.clone()).filter(|s| !s.is_empty()),
             Some(v.api_key.clone()).filter(|s| !s.is_empty()),
         ));
