@@ -22,6 +22,7 @@ import { pickImageAt, pickPromptAt } from '@/core/ai/comfyuiConfig';
 import type { MediaKind } from './backends';
 import { resolveBackend, loadRoutes, toMediaToolCfg, type MediaToolCfg } from './routing';
 import { loadBackends } from './backends';
+import { loadAllowedModules } from './customNodes';
 
 /** 传给 Rust 的媒体参数：按能力分区，key 即 MediaKind。 */
 export type MediaPayload = Partial<Record<MediaKind, MediaToolCfg>>;
@@ -33,7 +34,12 @@ export type MediaPayload = Partial<Record<MediaKind, MediaToolCfg>>;
 async function resolveOne(kind: MediaKind): Promise<MediaToolCfg | null> {
   const r = resolveBackend(kind, loadBackends(storage), loadRoutes(storage));
   if (!r) return null;
-  const cfg = toMediaToolCfg(r);
+  let cfg = toMediaToolCfg(r);
+  // ComfyUI 档带上「已放行的自定义节点模块」：AI 自建工作流的安全审计要它。
+  // 来源是用户设置（customNodes.ts），模型无法自行放行。
+  if (cfg.backendKind === 'comfyui') {
+    cfg = { ...cfg, allowedCustom: loadAllowedModules() };
+  }
 
   // comfyui 档：蓝图工作流需读文件 → 转换 → 分析参数 → 定位提示词位。
   // 失败则退化为「仅 url（+ckpt）」——Rust 侧据此走内置最小 txt2img。

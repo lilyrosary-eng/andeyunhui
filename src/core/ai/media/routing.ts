@@ -84,6 +84,13 @@ export interface MediaToolCfg {
   promptAt?: { nodeId: string; inputKey: string };
   /** comfyui 档：**图片输入位**（Rust 据此把上传后的文件名写进工作流，实现图生图）。 */
   imageAt?: { nodeId: string; inputKey: string };
+  /**
+   * comfyui 档：用户**已放行**的自定义节点模块名（`object_info` 的 `python_module` 原文）。
+   *
+   * 只在 AI 自建工作流时被安全审计消费：未在此列出的自定义节点会被拒绝执行。
+   * 必须来自用户设置，**不能由模型决定**——见 core/ai/media/customNodes.ts。
+   */
+  allowedCustom?: string[];
 }
 
 /** 由解析结果构造 Rust 侧配置。 */

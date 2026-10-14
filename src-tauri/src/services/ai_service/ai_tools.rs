@@ -89,6 +89,12 @@ pub(crate) struct MediaToolCfg {
     /// ComfyUI：**图片输入位**（图生图/重绘/ControlNet 用）。缺省则可回落到
     /// `comfyui_image_slot` 的名字启发式；两者都没有说明该工作流不吃图片输入。
     pub(crate) image_at: Option<ComfyuiSlot>,
+    /// ComfyUI：用户**已放行**的自定义节点模块名（`object_info` 的 `python_module` 原文）。
+    ///
+    /// 只在 AI 自建工作流的安全审计里消费。⚠️ 必须来自用户设置——
+    /// 若改成模型的工具参数，模型就能自行放行，审计形同虚设。
+    #[serde(default)]
+    pub(crate) allowed_custom: Vec<String>,
     /// 蓝图工作流的技能包 slug（备注键）。失败时随错误上报，前端写回备注。
     pub(crate) skill_slug: Option<String>,
     /// openai 档：该能力的模型名（image → 图片模型，speech → TTS 模型）。
@@ -3530,10 +3536,10 @@ impl AiTool for AnalyzeImageTool {
 // ⚠️ 安全：自定义节点可执行任意 Python；审计分两层（高危直接拒 / 自定义需用户放行），
 //    未经用户同意的自定义节点不会被提交。详见 comfyui_build.rs。
 
-/// 取 ComfyUI 生图后端的基址；不是 comfyui 档就明确报错（别让模型以为能建图）。
-fn comfy_base_of(ctx: &ToolContext) -> Result<String, String> {
+/// 取 ComfyUI 生图后端的配置；不是 comfyui 档就明确报错（别让模型以为能建图）。
+fn comfy_cfg_of(ctx: &ToolContext) -> Result<&MediaToolCfg, String> {
     match ctx.media.image.as_ref().filter(|c| c.is_ready()) {
-        Some(c) if c.backend_kind == "comfyui" && !c.base_url.trim().is_empty() => Ok(c.base_url.clone()),
+        Some(c) if c.backend_kind == "comfyui" && !c.base_url.trim().is_empty() => Ok(c),
         _ => Err(
             "未配置 ComfyUI 本地生图后端，无法读取或自建工作流。请在设置 → 模型 → 媒体后端里添加 ComfyUI 并绑定到「图像」能力"
                 .to_string(),
@@ -3632,7 +3638,7 @@ impl AiTool for ComfyuiNodeSearchTool {
         serde_json::json!({ "card": "generic", "kind": "other", "title": format!("查询节点 {}", q) })
     }
     async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
-        let base = comfy_base_of(ctx)?;
+        let base = comfy_cfg_of(ctx)?.base_url.clone();
         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let info = crate::services::multimodal_service::comfyui_object_info(base).await?;
         let obj = info.as_object().ok_or_else(|| "ComfyUI object_info 返回形状异常（不是对象）".to_string())?;
@@ -3714,7 +3720,7 @@ impl AiTool for ComfyuiListModelsTool {
         serde_json::json!({ "card": "generic", "kind": "other", "title": format!("列出模型 {}", f) })
     }
     async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
-        let base = comfy_base_of(ctx)?;
+        let base = comfy_cfg_of(ctx)?.base_url.clone();
         let folder = args.get("folder").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let v = crate::services::multimodal_service::comfyui_list_models(base, folder.clone()).await?;
         // 两种形状：指定 folder 时是文件名数组；不指定时是 { folder: [文件名…] }
@@ -3791,7 +3797,8 @@ impl AiTool for ComfyuiBuildWorkflowTool {
         serde_json::json!({ "card": "generic", "kind": "other", "title": format!("搭建工作流（{} 个节点）", n) })
     }
     async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
-        let base = comfy_base_of(ctx)?;
+        let cfg = comfy_cfg_of(ctx)?;
+        let base = cfg.base_url.clone();
         // 解析中间表示
         let nodes = args.get("nodes").cloned().ok_or_else(|| "缺少 nodes 参数".to_string())?;
         let ir: super::comfyui_build::IrGraph = serde_json::from_value(serde_json::json!({ "nodes": nodes }))
@@ -3805,7 +3812,7 @@ impl AiTool for ComfyuiBuildWorkflowTool {
             .map_err(|e| format!("无法读取 ComfyUI 节点定义，不能执行自建工作流：{}", e))?;
         let workflow = super::comfyui_build::compile_graph(&ir, Some(&object_info))?;
         // 安全审计：高危拒绝；自定义节点需用户放行（模型无法自行放行）
-        let verdict = super::comfyui_build::audit_graph(&workflow, Some(&object_info), &[]);
+        let verdict = super::comfyui_build::audit_graph(&workflow, Some(&object_info), &cfg.allowed_custom);
         if !verdict.blocked.is_empty() {
             let list: Vec<String> = verdict
                 .blocked

@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText } from 'lucide-react';
+import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText, ShieldAlert } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { convertGraphToApi } from '@/core/ai/comfyui/convert';
@@ -16,6 +16,7 @@ import { detectWorkflow } from '@/core/ai/comfyui/format';
 import { getObjectInfo } from '@/core/ai/comfyui/objectInfo';
 import { analyzeWorkflowParameters, applyWorkflowParameters } from '@/core/ai/comfyui/params';
 import { loadSkillNotes, saveSkillNotes, skillSlug, skillSummary } from '@/core/ai/comfyui/skills';
+import { customModulesOf, loadAllowedModules, saveAllowedModules } from '@/core/ai/media/customNodes';
 import { MediaOutput } from '@/components/MediaOutput';
 import type { Workflow, WorkflowParameter } from '@/core/ai/comfyui/params';
 
@@ -51,6 +52,37 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
   // ③ 蓝图挂钩
   const [blueprintWf, setBlueprintWf] = useState('');
   const [blueprintSlug, setBlueprintSlug] = useState('');
+
+  // ── 自定义节点放行 ──────────────────────────────────────────────
+  // 自定义节点可执行任意 Python。AI 自建工作流时，Rust 侧安全审计会把
+  // 「非核心节点」（object_info 里 python_module != "nodes"）拦下并要求用户放行。
+  // 放行**只能**来自这里的勾选——模型的工具参数无法自行放行。
+  const [customModules, setCustomModules] = useState<Record<string, string[]> | null>(null);
+  const [allowedModules, setAllowedModules] = useState<string[]>(() => loadAllowedModules());
+  const [customBusy, setCustomBusy] = useState(false);
+  const [customErr, setCustomErr] = useState('');
+
+  /** 读取本机节点定义并归纳出自定义模块（模块名与审计口径逐字对齐）。 */
+  const scanCustomNodes = useCallback(async () => {
+    setCustomBusy(true);
+    setCustomErr('');
+    try {
+      const info = await getObjectInfo(comfyuiUrl.trim());
+      setCustomModules(customModulesOf(info));
+    } catch (e) {
+      setCustomErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCustomBusy(false);
+    }
+  }, [comfyuiUrl]);
+
+  const toggleModule = useCallback((mod: string, on: boolean) => {
+    setAllowedModules((prev) => {
+      const next = on ? [...prev, mod] : prev.filter((m) => m !== mod);
+      saveAllowedModules(next);
+      return next;
+    });
+  }, []);
   // 技能包（工作流备注）：L1 列表摘要 + L2 详情编辑
   const [notes, setNotes] = useState('');
   const [notesSlug, setNotesSlug] = useState('');
@@ -309,6 +341,54 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
           {wfImg && <MediaOutput src={wfImg} alt={t('modelSettings.comfyui.resultAlt')} className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
         </div>
       )}
+      {/* ── 自定义节点放行 ──────────────────────────────────────────
+          自定义节点可执行任意 Python。AI 自建工作流时，安全审计会把未放行的模块拦下；
+          放行只能在这里由用户勾选，模型的工具参数无法自行放行。 */}
+      <div className="rounded-lg border border-amber-300/60 dark:border-amber-700/50 bg-amber-50/40 dark:bg-amber-900/10 p-3 space-y-2">
+        <div className="flex items-center gap-2">
+          <ShieldAlert size={14} className="text-amber-600 dark:text-amber-400" />
+          <span className="text-xs font-medium text-neutral-700 dark:text-stone-200">
+            {t('modelSettings.comfyui.allowTitle')}
+          </span>
+          <button
+            onClick={() => void scanCustomNodes()}
+            disabled={customBusy}
+            className="ml-auto shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] border border-neutral-300 dark:border-stone-600 text-neutral-600 dark:text-stone-300 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+          >
+            {customBusy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            {t('modelSettings.comfyui.allowScan')}
+          </button>
+        </div>
+        <p className="text-[11px] leading-relaxed text-neutral-500 dark:text-stone-400">
+          {t('modelSettings.comfyui.allowHint')}
+        </p>
+        {customErr && <div className="text-[11px] text-red-500 break-all">{customErr}</div>}
+        {customModules !== null && Object.keys(customModules).length === 0 && (
+          <div className="text-[11px] text-neutral-400 dark:text-stone-500">
+            {t('modelSettings.comfyui.allowEmpty')}
+          </div>
+        )}
+        {customModules !== null && Object.keys(customModules).length > 0 && (
+          <div className="max-h-44 overflow-y-auto space-y-1">
+            {Object.entries(customModules).map(([mod, classes]) => (
+              <label key={mod} className="flex items-start gap-2 text-[11px] text-neutral-600 dark:text-stone-300">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={allowedModules.includes(mod)}
+                  onChange={(e) => toggleModule(mod, e.target.checked)}
+                />
+                <span className="min-w-0">
+                  <span className="break-all font-medium">{mod}</span>
+                  <span className="ml-1 text-neutral-400 dark:text-stone-500">
+                    {t('modelSettings.comfyui.allowNodeCount', { n: classes.length })}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

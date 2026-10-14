@@ -58,6 +58,9 @@ export const KEYS = {
     comfyuiWorkflowsDir: { key: 'ai.comfyuiWorkflowsDir', kind: 'string', scope: 'desktop', default: '', note: 'ComfyUI 工作流目录（user/default/workflows 或 userdata/workflows）' },
     comfyuiBlueprintWf: { key: 'ai.comfyuiBlueprintWf', kind: 'string', scope: 'desktop', default: '', note: '蓝图生图节点使用的 ComfyUI 工作流文件路径（空=用内置最小流/云端）' },
     comfyuiBlueprintWfSlug: { key: 'ai.comfyuiBlueprintWfSlug', kind: 'string', scope: 'desktop', default: '', note: '蓝图工作流的技能包 slug（备注键，随 comfyuiBlueprintWf 一起设置）' },
+    // 已放行的自定义节点模块名（JSON 数组）。自定义节点可执行任意 Python，
+    // AI 自建工作流时安全审计会拦下未放行的模块；放行只能来自用户在这里的勾选。
+    comfyuiAllowedModules: { key: 'ai.comfyuiAllowedModules', kind: 'string', scope: 'desktop', default: '[]', note: '已放行可用于 AI 自建工作流的自定义节点模块名（JSON 数组）' },
   },
   mobile: {
     preview:           { key: 'mobile-preview', kind: 'flag', scope: 'mobile', default: '0', note: 'main.tsx 预览开关' },
