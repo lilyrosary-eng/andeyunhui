@@ -78,8 +78,9 @@ export function isBackendReady(b: MediaBackend, kind: MediaKind): boolean {
   const hasModel = !!(b.extras.models?.[kind]?.trim());
   // 视觉档特例：挂了档案（profileId）时模型名可留空——Rust 侧 vision_ask 会回落到
   // 该档案的 vision_model（见 ai_ocr.rs），面板提示写的正是这条。
-  // ⚠️ 生图/语音**没有**这条回落路径（供应商的 image_model/tts_model 已是死字段），
-  //    所以它们仍必须显式给模型名，否则会把请求发到一个不存在的模型上。
+  // ⚠️ 生图/语音**不放开**：它们的云端分支最终读的是档案里的 image_model / tts_model
+  //    （multimodal_service.rs:29-33 / 91-95），**不读**本清单里的模型名，
+  //    所以模型名在这里只是就绪判据，留空会让路由提前跳过。
   if (kind === 'vision' && (b.extras.profileId?.trim() ?? '') !== '') return hasCred;
   return hasCred && hasModel;
 }
