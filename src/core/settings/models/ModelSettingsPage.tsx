@@ -9,7 +9,7 @@ import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
 import { ComfyuiPanel } from './ComfyuiPanel';
 import { MediaBackendsPanel } from './MediaBackendsPanel';
-import { inferProviderName, mergeModels, newModelKey, refillCapacity, sameBaseUrl } from './providerMatch';
+import { inferProviderName, mergeModels, newModelKey, refillCapacity, refillCaps, sameBaseUrl } from './providerMatch';
 import { bestScore } from '@/lib/fuzzy';
 
 const newId = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
@@ -238,7 +238,11 @@ export function ModelSettingsPage() {
       const { models: merged, added } = mergeModels(target.models, rows);
       // ★ 光「只增不减」不够：同名老条目的容量列会被永久挡在门外（重扫永远填不上）。
       //   这里按**逐字段来源**回填——空值和 provider/table 来源可刷新，手填的冻结。
-      const finalModels = refillCapacity(merged, rows);
+      const withCapacity = refillCapacity(merged, rows);
+      // 能力位同理（回填口径与容量**故意不同**，见 refillCaps 的说明）：
+      // 不带这一步，改造前落盘的老条目永远拿不到新推断 —— 实测用户的 GLM-4V-Flash
+      // 名字里明确带 4V 却一直是 vision=false，重扫多少遍都改不过来。
+      const finalModels = refillCaps(withCapacity, rows);
       patchProvider(target.id, {
         models: finalModels,
         // 空 key 不覆盖已有 key（重扫时用户常常不重填 key）

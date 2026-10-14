@@ -7,8 +7,10 @@
  *     添加都走这里，口径一致。
  *  ② **命名**：自动获取只拿得到 url/key，供应商名靠域名推断（用户诉求：
  *     「供应商名称不会自动获取，我们尝试支持一下」）。
- *  ③ **合并**：增量并入的「仅增不减」口径（见 mergeModels）。
+ *  ③ **合并**：增量并入的「仅增不减」口径（见 mergeModels），以及**回填**
+ *     （见 refillCapacity / refillCaps —— 光「只增不减」会让老条目的新信息进不来）。
  */
+import type { CapsSourceUi } from '../aiConfigCodec';
 
 /**
  * base_url 归一化，用于「是否同一个供应商」的比较。
@@ -160,5 +162,52 @@ export function refillCapacity<T extends CapacityFields>(current: T[], incoming:
       next.max_output_source = src.max_output_source;
     }
     return changed ? next : m;
+  });
+}
+
+/** 能力回填所需的最小形状（ModelUi / AdoptedModel 都满足）。 */
+export interface CapsFields {
+  model: string;
+  caps: { vision: boolean; vision_source: CapsSourceUi | '' };
+}
+
+/**
+ * 该能力位能否被本次发现的新值覆盖（与容量那套**故意不同**，见下）。
+ *
+ * - 旧值是 `manual` → 冻结（用户显式勾/取消过，以用户为准）
+ * - 新值是 `provider`（供应商权威上报 / 实测探测）→ 可覆盖一切非 manual
+ * - 新值是 `inferred`（名字启发式）→ 只覆盖 `inferred` 与 `''`
+ *
+ * **为什么 `''`（老数据）可以被 inferred 覆盖，而容量的老数据不行**：
+ * 改造前能力位**只用于 UI 展示**（`caps_infer.rs` 自述「本推断只用于 UI 展示」），
+ * 用户没有修正它的动机；而容量的老值可能是用户手填的重要数字（功能性的，不能冲）。
+ * 两者错误的后果不对称：能力标错只是标签不对，容量填错会影响请求参数。
+ */
+export function capsRefreshable(oldSource: CapsSourceUi | '', newSource: CapsSourceUi | ''): boolean {
+  if (oldSource === 'manual') return false;
+  if (newSource === 'provider') return true;
+  if (newSource === 'inferred') return oldSource === 'inferred' || oldSource === '';
+  return false;
+}
+
+/**
+ * 用本次发现到的能力**回填**已有条目（不增删模型，只更新视觉能力位）。
+ *
+ * 与 `refillCapacity` 同源的问题：`mergeModels` 的「同名保留原对象」把
+ * 「以前判不出、现在能判出」的能力一并永久挡在门外。实测（用户真实配置 184 个模型）：
+ * `GLM-4V-Flash` 名字里明确带 `4V`，却因为该条目是改造前落盘的老数据而一直是
+ * `vision=false` —— 重扫多少遍都不会被重新推断。
+ *
+ * 只回填 `vision` 这一位：其余能力位（text/reasoning/tools/embedding）不参与路由决策，
+ * 没有来源标记，也没有「探测」这种更强的证据来源。
+ */
+export function refillCaps<T extends CapsFields>(current: T[], incoming: T[]): T[] {
+  const byName = new Map(incoming.map((m) => [m.model, m]));
+  return current.map((m) => {
+    const src = byName.get(m.model);
+    if (!src) return m;
+    if (!capsRefreshable(m.caps.vision_source, src.caps.vision_source)) return m;
+    if (m.caps.vision === src.caps.vision && m.caps.vision_source === src.caps.vision_source) return m;
+    return { ...m, caps: { ...m.caps, vision: src.caps.vision, vision_source: src.caps.vision_source } };
   });
 }

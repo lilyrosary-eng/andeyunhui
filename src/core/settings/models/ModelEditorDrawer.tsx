@@ -214,7 +214,17 @@ export function ModelEditorDrawer(props: ModelEditorDrawerProps) {
               {(['text', 'vision', 'reasoning', 'tools', 'embedding'] as const).map((k) => (
                 <label key={k} className="flex items-center gap-2 text-xs text-neutral-700 dark:text-stone-300">
                   <input type="checkbox" checked={m.caps[k]}
-                    onChange={(e) => set({ caps: { ...m.caps, [k]: e.target.checked } })} />
+                    onChange={(e) => set({
+                      caps: {
+                        ...m.caps,
+                        [k]: e.target.checked,
+                        // 手改视觉位 → 标 manual（重扫/探测都不得覆盖），与容量字段
+                        // 的手改口径一致。不标的话下次重扫会用名字启发式把它冲掉 ——
+                        // 而用户改它，往往正是因为他不信我们的推断
+                        // （比如某个名字里没有线索、但实际支持视觉的模型）。
+                        ...(k === 'vision' ? { vision_source: 'manual' as const } : {}),
+                      },
+                    })} />
                   {t(`modelSettings.caps.${k}`)}
                 </label>
               ))}

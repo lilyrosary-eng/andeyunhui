@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { capacityRefreshable, inferProviderName, mergeModels, newModelKey, normalizeBaseUrl, refillCapacity, sameBaseUrl } from './providerMatch';
+import type { CapsSourceUi } from '../aiConfigCodec';
+import { capacityRefreshable, capsRefreshable, inferProviderName, mergeModels, newModelKey, normalizeBaseUrl, refillCapacity, refillCaps, sameBaseUrl } from './providerMatch';
 
 describe('normalizeBaseUrl', () => {
   it('去空白与尾部斜杠', () => {
@@ -188,5 +189,66 @@ describe('refillCapacity —— 回填老条目的容量列', () => {
     const cur = [row('a', '1', 'provider')];
     const out = refillCapacity(cur, [row('a', '1', 'provider')]);
     expect(out[0]).toBe(cur[0]);
+  });
+});
+
+describe('refillCaps —— 回填老条目的视觉能力位', () => {
+  const row = (model: string, vision: boolean, src: CapsSourceUi | '') => ({
+    model, caps: { vision, vision_source: src },
+  });
+
+  it('老数据（来源未标注）能被新推断填上', () => {
+    // 实测场景：GLM-4V-Flash 是改造前落盘的老条目，vision=false 且来源缺失；
+    // 重扫时新推断命中名字线索（含 4V）→ 应该被填成 true。
+    const out = refillCaps([row('GLM-4V-Flash', false, '')], [row('GLM-4V-Flash', true, 'inferred')]);
+    expect(out[0].caps.vision).toBe(true);
+    expect(out[0].caps.vision_source).toBe('inferred');
+  });
+
+  it('手改的（manual）不被覆盖', () => {
+    const out = refillCaps([row('m', true, 'manual')], [row('m', false, 'inferred')]);
+    expect(out[0].caps.vision).toBe(true);
+    expect(out[0].caps.vision_source).toBe('manual');
+  });
+
+  it('provider 能覆盖推断出来的旧值', () => {
+    const out = refillCaps([row('m', false, 'inferred')], [row('m', true, 'provider')]);
+    expect(out[0].caps.vision).toBe(true);
+    expect(out[0].caps.vision_source).toBe('provider');
+  });
+
+  it('新值只是推断时不覆盖 provider 旧值', () => {
+    // 硬事实不该被名字启发式冲掉
+    const out = refillCaps([row('m', true, 'provider')], [row('m', false, 'inferred')]);
+    expect(out[0].caps.vision).toBe(true);
+    expect(out[0].caps.vision_source).toBe('provider');
+  });
+
+  it('无变化时返回原对象引用', () => {
+    const cur = [row('m', true, 'inferred')];
+    const out = refillCaps(cur, [row('m', true, 'inferred')]);
+    expect(out[0]).toBe(cur[0]);
+  });
+
+  it('未在本次发现中的模型原样保留', () => {
+    const cur = [row('a', false, '')];
+    const out = refillCaps(cur, [row('b', true, 'provider')]);
+    expect(out[0]).toBe(cur[0]);
+  });
+});
+
+describe('capsRefreshable 口径', () => {
+  it('manual 冻结', () => {
+    expect(capsRefreshable('manual', 'provider')).toBe(false);
+    expect(capsRefreshable('manual', 'inferred')).toBe(false);
+  });
+  it('provider 可覆盖非 manual', () => {
+    expect(capsRefreshable('', 'provider')).toBe(true);
+    expect(capsRefreshable('inferred', 'provider')).toBe(true);
+  });
+  it('inferred 只覆盖 inferred 与未标注', () => {
+    expect(capsRefreshable('inferred', 'inferred')).toBe(true);
+    expect(capsRefreshable('', 'inferred')).toBe(true);
+    expect(capsRefreshable('provider', 'inferred')).toBe(false);
   });
 });
