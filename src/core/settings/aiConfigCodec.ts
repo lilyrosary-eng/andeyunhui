@@ -1,6 +1,23 @@
 // v2 配置与前端编辑态的编解码。抽成纯函数是为了能单测——
 // ModelSettings 里内联编解码时，测试只能整个组件挂载，太重。
 
+/**
+ * 视觉能力位的**来源**（与 Rust `CapsSource` 逐字对齐）。
+ *
+ * 决定两件事：① 重扫时该位能否被名字启发式覆盖；② 能否启用「对话模型原生看图」。
+ * 只有 `provider`（供应商权威上报，或用户显式探测确证）才算硬事实。
+ */
+export type CapsSourceUi = 'provider' | 'inferred' | 'manual';
+
+const capsSources: readonly string[] = ['provider', 'inferred', 'manual'];
+
+/**
+ * 视觉能力来源。非法/缺失 → `''`（未标注 = 老数据）。
+ *
+ * ⚠️ 这个字段**必须**在前端读写往返中保留。前端保存配置是**整体覆盖** `caps` 对象，
+ * 若这里不带上它，用户每保存一次档案就会把探测/上报得到的 `provider` 标记抹成
+ * `None` —— 而 `None` 在 Rust 侧是「冻结且不启用原生直发」，等于探测白做。
+ */
 export interface CapsUi {
   text: boolean;
   vision: boolean;
@@ -8,6 +25,8 @@ export interface CapsUi {
   embedding: boolean;
   /** 工具/函数调用能力。纯展示维度，不参与路由决策。 */
   tools: boolean;
+  /** 视觉位来源。`''` = 未标注（老数据）。见 `CapsSourceUi`。 */
+  vision_source: CapsSourceUi | '';
 }
 
 /** 一个推理档位（与 Rust reasoning::EffortOption 对齐）。 */
@@ -107,12 +126,16 @@ const numOrNull = (v: unknown): number | null => {
 
 function capsFrom(raw: any): CapsUi {
   const c = raw || {};
+  const vs = c.vision_source;
   return {
     text: c.text !== false,
     vision: c.vision === true,
     reasoning: c.reasoning === true,
     embedding: c.embedding === true,
     tools: c.tools === true,
+    // 非白名单值一律当「未标注」——比原样透传安全：Rust 侧只认那三个枚举值，
+    // 传个别的进去会被 serde 拒绝，导致整份配置保存失败。
+    vision_source: typeof vs === 'string' && capsSources.includes(vs) ? (vs as CapsSourceUi) : '',
   };
 }
 
@@ -210,7 +233,12 @@ function toModel(m: ModelUi) {
     id: m.id,
     model: m.model,
     label: s(m.label) || null,
-    caps: m.caps,
+    caps: {
+      ...m.caps,
+      // '' → null：Rust 侧是 `Option<CapsSource>`，空串会让 serde 反序列化失败
+      // （那样整份配置都保存不了，比丢一个标签严重得多）。
+      vision_source: m.caps.vision_source || null,
+    },
     context_tokens: ctx === null ? null : Math.trunc(ctx),
     max_output_tokens: mot === null ? null : Math.max(1, Math.trunc(mot)),
     // 来源随值一起落盘：值被清空时来源也清空（空值本来就可被回填）

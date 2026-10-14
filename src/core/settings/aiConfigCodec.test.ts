@@ -189,3 +189,44 @@ describe('effectiveEffort —— 与后端 ResolvedTarget::effort 同口径', ()
       .toBe('medium');
   });
 });
+
+describe('视觉能力来源（caps.vision_source）', () => {
+  /**
+   * 这一组的存在理由：前端保存配置是**整体覆盖** caps 对象。若 codec 不带这个字段，
+   * 用户每保存一次档案就会把探测/上报得到的 `provider` 抹成「未标注」，
+   * 而「未标注」在 Rust 侧是「冻结且不启用原生直发」—— 等于探测白做。
+   */
+  const withVision = (vision_source: unknown) => fromConfig({
+    providers: [{
+      id: 'p1', name: 'X', base_url: 'https://x/v1', api_key: 'k',
+      models: [{ id: 'm1', model: 'm', caps: { text: true, vision: true, vision_source } }],
+    }],
+    selection: {},
+  });
+
+  it('provider 往返后仍保留', () => {
+    const ui = withVision('provider');
+    expect(ui.providers[0].models[0].caps.vision_source).toBe('provider');
+    const back = toConfig(ui);
+    expect(back.providers[0].models[0].caps.vision_source).toBe('provider');
+  });
+
+  it('inferred 与 manual 同样往返保留', () => {
+    for (const s of ['inferred', 'manual'] as const) {
+      expect(toConfig(withVision(s)).providers[0].models[0].caps.vision_source).toBe(s);
+    }
+  });
+
+  it('缺失来源归为未标注并落盘为 null', () => {
+    const ui = withVision(undefined);
+    expect(ui.providers[0].models[0].caps.vision_source).toBe('');
+    // '' 若原样落盘会让 Rust 的 Option<CapsSource> 反序列化失败（整份配置存不了）
+    expect(toConfig(ui).providers[0].models[0].caps.vision_source).toBeNull();
+  });
+
+  it('非法来源被归为未标注（不原样透传给后端）', () => {
+    const ui = withVision('garbage');
+    expect(ui.providers[0].models[0].caps.vision_source).toBe('');
+    expect(toConfig(ui).providers[0].models[0].caps.vision_source).toBeNull();
+  });
+});

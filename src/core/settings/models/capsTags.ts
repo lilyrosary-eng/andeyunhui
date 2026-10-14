@@ -13,7 +13,24 @@ export function capTags(caps: CapsUi, t: TFunc): string[] {
   if (caps.embedding) return [t('modelSettings.caps.embedding')];
   const out: string[] = [];
   if (caps.text) out.push(t('modelSettings.caps.text'));
-  if (caps.vision) out.push(t('modelSettings.caps.vision'));
+  if (caps.vision) {
+    // 视觉位带来源后缀。只有 `provider`（供应商权威上报 / 实测探测确证）才是
+    // 「对话模型原生看图」这条分支的依据；`inferred`（名称推断）只是猜测。
+    // 不加区分的话，用户看到「视觉」会以为一定能直发 —— 而实际会被路由到
+    // analyze_image 工具那条老路径，现象上就是「它明明标了视觉却好像没看图」。
+    //
+    // 来源不明（''，改造前的老数据）**不加后缀**：宁可不标，也不要给它编一个
+    // 来源 —— 那正是我们花力气区分来源要避免的事。
+    const suffix =
+      caps.vision_source === 'provider'
+        ? t('modelSettings.caps.sourceProvider')
+        : caps.vision_source === 'inferred'
+          ? t('modelSettings.caps.sourceInferred')
+          : caps.vision_source === 'manual'
+            ? t('modelSettings.caps.sourceManual')
+            : '';
+    out.push(suffix ? `${t('modelSettings.caps.vision')}·${suffix}` : t('modelSettings.caps.vision'));
+  }
   if (caps.reasoning) out.push(t('modelSettings.caps.reasoning'));
   if (caps.tools) out.push(t('modelSettings.caps.tools'));
   return out;

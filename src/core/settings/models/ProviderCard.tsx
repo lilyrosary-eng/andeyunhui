@@ -59,6 +59,13 @@ export interface ProviderCardProps {
    * 非持久：父级在下一批新增 / 展开折叠 / 搜索 / 切 tab 时清空。
    */
   newModelIds?: Set<string>;
+  /**
+   * 「能力探测」开关是否开启（设置页全局开关，默认关）。
+   *
+   * 关闭时不渲染探测按钮：探测会**真发一次可能计费的请求**，入口不该在用户
+   * 没明确同意前就摆在那里（与自定义节点放行同一口径：能力开关必须来自用户设置）。
+   */
+  probeEnabled?: boolean;
   t: (k: string, vars?: Record<string, string | number>) => string;
 }
 
@@ -87,6 +94,43 @@ export function ProviderCard(props: ProviderCardProps) {
   // 复用后端 ai_test_connection（v2 重构时桌面漏接，移动端仍在用；后端命令未删）。
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // ── 视觉能力探测 ────────────────────────────────────────────────
+  // 给单个模型发一张 1×1 测试图，看端点接不接受图片输入。
+  // 结论的**落盘规则**与后端 `caps_probe` 的判据一致：
+  //   supported / unsupported → 可确证，写回 caps.vision 并把来源标 provider
+  //   unknown → 什么都不改（失败分不清是模型不支持还是限流/密钥/参数错，
+  //             写进去就是一条永久脏记忆）
+  const [probingId, setProbingId] = useState<string | null>(null);
+  const [probeMsg, setProbeMsg] = useState<{ id: string; ok: boolean; text: string } | null>(null);
+
+  const probeVision = async (m: ModelUi) => {
+    const apiKey = p.api_key.trim();
+    const baseUrl = p.base_url.trim();
+    if (!apiKey) { setProbeMsg({ id: m.id, ok: false, text: t('modelSettings.needApiKey') }); return; }
+    if (!/^https?:\/\//.test(baseUrl)) { setProbeMsg({ id: m.id, ok: false, text: t('modelSettings.badEndpoint') }); return; }
+    setProbingId(m.id);
+    setProbeMsg(null);
+    try {
+      const out = await invoke<{ verdict: 'supported' | 'unsupported' | 'unknown'; detail: string }>('ai_probe_vision', {
+        profileId: m.id,
+        baseUrl,
+        apiKey,
+        model: m.model,
+      });
+      if (out.verdict === 'supported' || out.verdict === 'unsupported') {
+        props.onPatchModel(m.id, {
+          caps: { ...m.caps, vision: out.verdict === 'supported', vision_source: 'provider' },
+        });
+      }
+      setProbeMsg({ id: m.id, ok: out.verdict === 'supported', text: out.detail });
+    } catch (e) {
+      setProbeMsg({ id: m.id, ok: false, text: String(e) });
+    } finally {
+      setProbingId(null);
+    }
+  };
+
   const testConnection = async () => {
     const apiKey = p.api_key.trim();
     const baseUrl = p.base_url.trim();
@@ -306,6 +350,27 @@ export function ProviderCard(props: ProviderCardProps) {
                             </span>
                           ))}
                         </span>
+                        {/* 探测视觉：仅在全局开关开启时出现（会真发一次可能计费的请求）。 */}
+                        {props.probeEnabled && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); void probeVision(m); }}
+                            disabled={probingId !== null}
+                            className={`shrink-0 p-1 rounded hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40 ${
+                              probeMsg?.id === m.id ? (probeMsg.ok ? 'text-emerald-600' : 'text-amber-600') : ''
+                            }`}
+                            title={
+                              probingId === m.id
+                                ? t('modelSettings.capsProbe.probing')
+                                : probeMsg?.id === m.id
+                                  ? probeMsg.text
+                                  : t('modelSettings.capsProbe.probe')
+                            }
+                          >
+                            {probingId === m.id
+                              ? <RefreshCw size={12} className="animate-spin" />
+                              : <TestTube2 size={12} />}
+                          </button>
+                        )}
                         <button onClick={() => setEditingId(m.id)}
                           className="shrink-0 p-1 rounded hover:bg-neutral-100 dark:hover:bg-stone-800"
                           title={t('modelSettings.editModel')}>
