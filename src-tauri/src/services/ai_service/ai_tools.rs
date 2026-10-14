@@ -2519,16 +2519,34 @@ fn interrupt_subagent(child_id: &str) -> Result<String, String> {
         m.remove(child_id).ok_or_else(|| format!("未找到子代理 {}", child_id))?
     };
     w.cancel.store(true, Ordering::SeqCst);
-    let _ = w.state.compare_exchange(SUBA_ST_RUNNING, SUBA_ST_DONE, Ordering::SeqCst, Ordering::SeqCst);
+    // ★ 只有「把子代理从**运行中**终结」的那一次才推中断 settle。
+    //
+    // 为什么必须看 CAS 的返回值：worker 自己在产出结论时（store(SETTLED) + notify）
+    // 已经推过一条 settle 了。原先这里两次 CAS 的结果都用 `let _ =` 丢掉、然后无条件
+    // notify —— 于是「worker 先跑完、父代理再中断」这条路径会推出**两条**同一子代理的
+    // settle（worker 的真实结论 + 「已由父代理中断」）。
+    //
+    // 影响不止测试：take_subagent_settles 是按父会话**全取且不去重**的，父代理会把
+    // 同一子代理的两条结论一起注入上下文。
+    //
+    // 反方向也要覆盖：worker 卡在模型请求中时被 cancel，它走的是循环顶部的
+    // `cancel → store(DONE) → return`（不推 settle），所以那一条必须由这里补上。
+    let was_running = w
+        .state
+        .compare_exchange(SUBA_ST_RUNNING, SUBA_ST_DONE, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok();
+    // SETTLED → DONE：仅终结状态（不可再被 send_message 复活），**不重复推 settle**。
     let _ = w.state.compare_exchange(SUBA_ST_SETTLED, SUBA_ST_DONE, Ordering::SeqCst, Ordering::SeqCst);
     let _ = w.abort.abort();
-    notify_subagent_settle(SubSettle {
-        child_id: child_id.to_string(),
-        parent_request_id: w.parent_request_id,
-        role: w.role,
-        conclusion: String::new(),
-        error: Some("已由父代理中断".to_string()),
-    });
+    if was_running {
+        notify_subagent_settle(SubSettle {
+            child_id: child_id.to_string(),
+            parent_request_id: w.parent_request_id,
+            role: w.role,
+            conclusion: String::new(),
+            error: Some("已由父代理中断".to_string()),
+        });
+    }
     Ok(format!("已中断子代理 {}", child_id))
 }
 
@@ -4496,9 +4514,28 @@ mod tests {
     // ============ 后台子代理控制面（M1/M2）测试 ============
     // 仅覆盖与网络无关的注册表 / 队列 / 状态机簿记；worker 的模型轮次依赖网络，不在此测。
 
+    /// 涉及全局 settle 队列 / 子代理注册表的测试**必须串行**。
+    ///
+    /// 为什么需要：`SUB_SETTLES` 与 `SUBAGENTS` 都是**进程级 static**，而 cargo test
+    /// 默认在同一二进制里**多线程并行**执行测试。这些测试为了断言「队列里只有我这一条」，
+    /// 会做全局 `clear()`（`list_subagents_groups_by_parent` 还会 retain 掉别人的 worker）
+    /// —— 于是它会把并行运行的另一个测试刚推入的记录一起清掉，对方的断言就拿到 0 条。
+    ///
+    /// 实测（2026-10-14，HEAD 无改动状态）：`spawn_background_registers_and_interrupt_cleans`
+    /// 以 **2/15** 的概率随机失败，根因就是这个越界清理，**不是**被测代码。
+    ///
+    /// ⚠️ 返回的 guard 必须**绑定到具名变量**（`let _g = ...`）并活到测试结束。
+    ///    写成 `let _ = ...` 会立即 drop，锁等于没加。
+    fn settle_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        sub_settles().lock().unwrap().clear();
+        g
+    }
+
     #[test]
     fn settle_queue_partitions_by_parent() {
-        sub_settles().lock().unwrap().clear();
+        let _g = settle_test_guard();
         notify_subagent_settle(SubSettle {
             child_id: "p1:sub1".into(),
             parent_request_id: "p1".into(),
@@ -4532,6 +4569,7 @@ mod tests {
 
     #[test]
     fn spawn_background_registers_and_interrupt_cleans() {
+        let _g = settle_test_guard();
         // 最小假档案（不发真实请求；仅验证注册/中断清理的簿记）。
         let mut cfg = ResolvedTarget::default();
         cfg.base_url = "http://127.0.0.1:1/v1".into();
@@ -4551,6 +4589,7 @@ mod tests {
 
     #[test]
     fn send_message_to_done_child_is_rejected() {
+        let _g = settle_test_guard();
         let mut cfg = ResolvedTarget::default();
         cfg.base_url = "http://127.0.0.1:1/v1".into();
         cfg.api_key = "x".into();
@@ -4565,6 +4604,9 @@ mod tests {
 
     #[test]
     fn list_subagents_groups_by_parent() {
+        // 这条也持锁：它结尾的 retain 会清掉其它父会话的 worker，
+        // 并行运行时会把别的测试刚 spawn 的子代理一起删掉。
+        let _g = settle_test_guard();
         let mut cfg = ResolvedTarget::default();
         cfg.base_url = "http://127.0.0.1:1/v1".into();
         cfg.api_key = "x".into();
