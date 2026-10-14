@@ -1232,6 +1232,8 @@ export const deDE: Record<string, string> = {
   'modelSettings.capsProbe.enable': 'Fähigkeitsprüfung (Vision)',
   'modelSettings.capsProbe.enableHint': 'Wenn aktiviert, kann ein 1x1-Testbild an ein einzelnes Modell gesendet werden, um zu bestätigen, ob es Bildeingaben wirklich akzeptiert. Eine Prüfung sendet eine echte Anfrage an den Endpunkt (evtl. kostenpflichtig), daher standardmäßig aus.',
   'modelSettings.capsProbe.probe': 'Vision prüfen',
+  'modelSettings.capsProbe.probeSelected': 'Ausgewählte prüfen ({n})',
+  'modelSettings.capsProbe.stop': 'Stoppen',
   'modelSettings.capsProbe.probing': 'Prüfe...',
   'modelSettings.capsProbe.supported': 'Vision unterstützt (bestätigt)',
   'modelSettings.capsProbe.unsupported': 'Vision nicht unterstützt (bestätigt)',

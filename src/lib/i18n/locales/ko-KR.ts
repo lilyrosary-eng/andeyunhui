@@ -1232,6 +1232,8 @@ export const koKR: Record<string, string> = {
   'modelSettings.capsProbe.enable': '능력 탐지(비전)',
   'modelSettings.capsProbe.enableHint': '활성화하면 1x1 테스트 이미지를 개별 모델로 보내 이미지 입력을 실제로 지원하는지 확인할 수 있습니다. 탐지는 엔드포인트에 실제 요청을 보내므로(과금될 수 있음) 기본적으로 꺼져 있습니다.',
   'modelSettings.capsProbe.probe': '비전 탐지',
+  'modelSettings.capsProbe.probeSelected': '선택 항목 탐지({n})',
+  'modelSettings.capsProbe.stop': '중지',
   'modelSettings.capsProbe.probing': '탐지 중...',
   'modelSettings.capsProbe.supported': '비전 지원(확인됨)',
   'modelSettings.capsProbe.unsupported': '비전 미지원(확인됨)',

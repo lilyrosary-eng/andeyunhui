@@ -1412,6 +1412,8 @@ export const zhCN: Record<string, string> = {
   'modelSettings.capsProbe.enable': '能力探测（视觉）',
   'modelSettings.capsProbe.enableHint': '开启后可对单个模型发一张 1×1 测试图，确证它是否真的支持视觉输入。探测会真实调用一次端点（可能计费），所以默认关闭。',
   'modelSettings.capsProbe.probe': '探测视觉',
+  'modelSettings.capsProbe.probeSelected': '探测选中（{n}）',
+  'modelSettings.capsProbe.stop': '停止',
   'modelSettings.capsProbe.probing': '探测中…',
   'modelSettings.capsProbe.supported': '支持视觉（已确证）',
   'modelSettings.capsProbe.unsupported': '不支持视觉（已确证）',

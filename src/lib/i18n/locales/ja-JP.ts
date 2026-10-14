@@ -1232,6 +1232,8 @@ export const jaJP: Record<string, string> = {
   'modelSettings.capsProbe.enable': '能力プローブ（視覚）',
   'modelSettings.capsProbe.enableHint': '有効にすると、1x1 のテスト画像を個別のモデルに送信し、画像入力に本当に対応しているかを確認できます。プローブは実際にエンドポイントへリクエストを送るため（課金される可能性があります）、既定では無効です。',
   'modelSettings.capsProbe.probe': '視覚を確認',
+  'modelSettings.capsProbe.probeSelected': '選択項目を確認（{n}）',
+  'modelSettings.capsProbe.stop': '停止',
   'modelSettings.capsProbe.probing': '確認中...',
   'modelSettings.capsProbe.supported': '視覚対応（確認済み）',
   'modelSettings.capsProbe.unsupported': '視覚非対応（確認済み）',

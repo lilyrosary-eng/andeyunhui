@@ -1304,6 +1304,8 @@ export const enUS: Record<string, string> = {
   'modelSettings.capsProbe.enable': 'Capability probe (vision)',
   'modelSettings.capsProbe.enableHint': 'When enabled, you can send a 1x1 test image to a single model to confirm whether it really accepts image input. A probe makes a real request to the endpoint (may be billed), so it is off by default.',
   'modelSettings.capsProbe.probe': 'Probe vision',
+  'modelSettings.capsProbe.probeSelected': 'Probe selected ({n})',
+  'modelSettings.capsProbe.stop': 'Stop',
   'modelSettings.capsProbe.probing': 'Probing...',
   'modelSettings.capsProbe.supported': 'Vision supported (confirmed)',
   'modelSettings.capsProbe.unsupported': 'Vision not supported (confirmed)',

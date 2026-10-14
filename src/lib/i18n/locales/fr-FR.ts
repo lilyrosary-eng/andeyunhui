@@ -1231,6 +1231,8 @@ export const frFR: Record<string, string> = {
   'modelSettings.capsProbe.enable': 'Sonde de capacités (vision)',
   'modelSettings.capsProbe.enableHint': 'Une fois activée, vous pouvez envoyer une image test 1x1 à un modèle donné pour confirmer qu\'il accepte réellement les images. Une sonde envoie une vraie requête au point de terminaison (facturation possible), donc désactivée par défaut.',
   'modelSettings.capsProbe.probe': 'Sonder la vision',
+  'modelSettings.capsProbe.probeSelected': 'Sonder la sélection ({n})',
+  'modelSettings.capsProbe.stop': 'Arrêter',
   'modelSettings.capsProbe.probing': 'Sonde en cours...',
   'modelSettings.capsProbe.supported': 'Vision prise en charge (confirmé)',
   'modelSettings.capsProbe.unsupported': 'Vision non prise en charge (confirmé)',

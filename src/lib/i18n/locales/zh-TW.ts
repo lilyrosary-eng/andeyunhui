@@ -1235,6 +1235,8 @@ export const zhTW: Record<string, string> = {
   'modelSettings.capsProbe.enable': '能力探測（視覺）',
   'modelSettings.capsProbe.enableHint': '開啟後可對單一模型發送一張 1×1 測試圖，確認它是否真的支援視覺輸入。探測會實際呼叫一次端點（可能計費），因此預設為關閉。',
   'modelSettings.capsProbe.probe': '探測視覺',
+  'modelSettings.capsProbe.probeSelected': '探測選取（{n}）',
+  'modelSettings.capsProbe.stop': '停止',
   'modelSettings.capsProbe.probing': '探測中…',
   'modelSettings.capsProbe.supported': '支援視覺（已確認）',
   'modelSettings.capsProbe.unsupported': '不支援視覺（已確認）',

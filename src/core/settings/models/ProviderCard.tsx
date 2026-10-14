@@ -104,13 +104,15 @@ export function ProviderCard(props: ProviderCardProps) {
   const [probingId, setProbingId] = useState<string | null>(null);
   const [probeMsg, setProbeMsg] = useState<{ id: string; ok: boolean; text: string } | null>(null);
 
-  const probeVision = async (m: ModelUi) => {
+  const probeVision = async (m: ModelUi, opts?: { quiet?: boolean }) => {
     const apiKey = p.api_key.trim();
     const baseUrl = p.base_url.trim();
     if (!apiKey) { setProbeMsg({ id: m.id, ok: false, text: t('modelSettings.needApiKey') }); return; }
     if (!/^https?:\/\//.test(baseUrl)) { setProbeMsg({ id: m.id, ok: false, text: t('modelSettings.badEndpoint') }); return; }
     setProbingId(m.id);
-    setProbeMsg(null);
+    // 批量时静音逐条消息：每条都 setProbeMsg 会让提示区不断闪，
+    // 进度改由工具栏的 done/total 表达。
+    if (!opts?.quiet) setProbeMsg(null);
     try {
       const out = await invoke<{ verdict: 'supported' | 'unsupported' | 'unknown'; detail: string }>('ai_probe_vision', {
         profileId: m.id,
@@ -123,12 +125,44 @@ export function ProviderCard(props: ProviderCardProps) {
           caps: { ...m.caps, vision: out.verdict === 'supported', vision_source: 'provider' },
         });
       }
-      setProbeMsg({ id: m.id, ok: out.verdict === 'supported', text: out.detail });
+      if (!opts?.quiet) setProbeMsg({ id: m.id, ok: out.verdict === 'supported', text: out.detail });
     } catch (e) {
-      setProbeMsg({ id: m.id, ok: false, text: String(e) });
+      if (!opts?.quiet) setProbeMsg({ id: m.id, ok: false, text: String(e) });
     } finally {
       setProbingId(null);
     }
+  };
+
+  // ── 批量探测：只测用户勾选的 ────────────────────────────────────
+  // 为什么不做「一键全测」：一个供应商几十上百个模型，全测就产生同样次数的外部请求，
+  // 成本与耗时都不可控，且中途无法叫停。改为「用户勾选 → 串行执行 → 可随时停止」。
+  const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
+  const [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
+  const batchCancel = useRef(false);
+
+  const toggleSelected = (id: string) => {
+    setSelectedModels((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const probeSelected = async () => {
+    const targets = p.models.filter((m) => selectedModels.has(m.id));
+    if (targets.length === 0) return;
+    batchCancel.current = false;
+    setBatch({ done: 0, total: targets.length });
+    for (let i = 0; i < targets.length; i++) {
+      if (batchCancel.current) break;
+      // 串行而非并发：每发一次都是真实计费/占额，并发既省不了多少时间，
+      // 又容易触发端点限流（那会把「不确定」写进结果，等于白跑）。
+      await probeVision(targets[i], { quiet: true });
+      setBatch({ done: i + 1, total: targets.length });
+    }
+    setBatch(null);
+    setSelectedModels(new Set());
   };
 
   const testConnection = async () => {
@@ -300,6 +334,18 @@ export function ProviderCard(props: ProviderCardProps) {
                 className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800">
                 <Plus size={13} />{t('modelSettings.addModel')}
               </button>
+              {/* 批量探测：只在勾选了模型、且全局开关开启时出现。 */}
+              {props.probeEnabled && selectedModels.size > 0 && (
+                <button
+                  onClick={() => (batch ? (batchCancel.current = true) : void probeSelected())}
+                  className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800"
+                  title={batch ? t('modelSettings.capsProbe.stop') : undefined}
+                >
+                  {batch
+                    ? <><X size={13} />{t('modelSettings.capsProbe.stop')} {batch.done}/{batch.total}</>
+                    : <><TestTube2 size={13} />{t('modelSettings.capsProbe.probeSelected', { n: selectedModels.size })}</>}
+                </button>
+              )}
             </div>
 
             {models.length === 0 ? (
@@ -328,6 +374,16 @@ export function ProviderCard(props: ProviderCardProps) {
                           ${isNew ? 'bg-amber-400/20' : selected ? 'bg-[var(--element-muted)]' : ''}
                           ${highlighted ? 'ring-1 ring-inset ring-[var(--element-border)]' : ''}`}
                       >
+                        {/* 勾选框：仅为「批量探测」服务（与左侧的 ○/● 语义不同 ——
+                            那个是「当前对话用哪个模型」，这个只是本次要探测谁）。 */}
+                        {props.probeEnabled && (
+                          <input
+                            type="checkbox"
+                            checked={selectedModels.has(m.id)}
+                            onChange={() => toggleSelected(m.id)}
+                            className="shrink-0 w-3 h-3 accent-[var(--element-border)]"
+                          />
+                        )}
                         <button
                           onClick={() => props.onSelectModel(m.id)}
                           className="shrink-0 w-3 text-center"
