@@ -3196,7 +3196,8 @@ impl AiTool for GenerateImageTool {
                     "type": "object",
                     "properties": {
                         "prompt": { "type": "string", "description": "画面描述（越具体越好：主体、风格、构图、光线等）" },
-                        "image": { "type": "integer", "description": "（可选）以用户发来的第几张图为底稿做图生图，从 1 开始。仅当用户明确要求「基于/参照/修改」某张附图时使用；纯文字作画时不要传。" }
+                        "image": { "type": "integer", "description": "（可选）以用户发来的第几张图为底稿做图生图，从 1 开始。仅当用户明确要求「基于/参照/修改」某张附图时使用；纯文字作画时不要传。" },
+                        "check": { "type": "string", "description": "（可选）填用户最初的画面要求原文，系统会让视觉模型看一眼成图并指出最该改的 1-3 点。当用户要求「改到满意 / 反复调整」时用它来判断下一步改什么；普通一次成图不要传（会多花一次视觉调用）。" }
                     },
                     "required": ["prompt"]
                 }
@@ -3294,6 +3295,8 @@ impl AiTool for GenerateImageTool {
         } else {
             format!("{}已生成（云端图片模型），已直接展示给用户，无需转述画面内容。", noun)
         };
+        // 自检在组装 meta 之前做（data_url 之后要被移动进 meta）
+        let text = append_critique(ctx, text, &data_url, check_request_of(args).as_deref()).await;
         let title: String = prompt.chars().take(60).collect();
         let mut meta = serde_json::json!({
             "card": card,
@@ -3403,6 +3406,58 @@ impl AiTool for GenerateSpeechTool {
 // 注：前端本就会对每张图调一次 ai_vision_ocr 生成泛描述注入消息（兼容不支持视觉的
 // 模型）。本工具是**按需深挖**：用户问具体问题（报错说什么 / 有几个人）时，
 // 泛描述不够用，需要一个带问题的定向提问。两者互补，不是重复。
+
+/// 让视觉模型看一眼刚生成的媒体，按用户的原始要求指出最该改的点。
+///
+/// 为什么需要：研究里反复强调「**零错误的图 ≠ 正确的图**」——图能跑出来不代表画对了，
+/// 偏移、接缝、糊掉的手、过强的效果只有看像素才知道。没有这一步，AI 建图就是
+/// 「跑完即交付」，用户只能自己发现不对再来一轮。
+///
+/// ⚠️ 自检失败**不算生成失败**：它是增强，拿不到就如实说明，绝不能把已经生成好的图丢掉。
+async fn critique_output(ctx: &ToolContext, data_url: &str, request: &str) -> Result<String, String> {
+    let Some(v) = ctx.media.vision.as_ref().filter(|c| c.is_ready()) else {
+        return Err(
+            "未配置视觉后端；可在 设置 → 模型 → 媒体后端 里把某个后端绑定到「视觉」能力".to_string(),
+        );
+    };
+    if v.backend_kind != "openai" {
+        return Err(format!("暂不支持的视觉后端类型：{}", v.backend_kind));
+    }
+    let (mime, b64) = split_data_url(data_url);
+    let prompt = format!(
+        "这是刚刚生成的图。用户最初的要求是：「{}」。\n请判断它是否满足要求，并指出**最该改的 1-3 点**，每点给出具体可执行的调整（提示词 / 采样步数 / 尺寸 / 模型 / 节点参数）。若已完全满足要求，只回复「符合」。",
+        request
+    );
+    super::ai_ocr::vision_ask(
+        &ctx.app,
+        &b64,
+        &mime,
+        Some(&prompt),
+        v.profile_id.as_deref(),
+        v.model.as_deref(),
+        Some(v.base_url.as_str()).filter(|s| !s.is_empty()),
+        Some(v.api_key.as_str()).filter(|s| !s.is_empty()),
+    )
+    .await
+}
+
+/// 取出工具的可选自检参数（用户最初的画面要求原文）。
+fn check_request_of(args: &serde_json::Value) -> Option<String> {
+    args.get("check")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 把自检结论追加到工具文本上。失败只附一句说明，不影响已生成的结果。
+async fn append_critique(ctx: &ToolContext, text: String, data_url: &str, check: Option<&str>) -> String {
+    let Some(req) = check else { return text };
+    match critique_output(ctx, data_url, req).await {
+        Ok(c) => format!("{}\n\n自检（视觉模型对成图的评价，据此可再调整重试）：{}", text, c),
+        Err(e) => format!("{}\n\n（未能自检：{}）", text, e),
+    }
+}
 
 /// 按 data URL 的**实际 MIME** 判定媒体卡片类型，返回 `(card, kind)`。
 ///
@@ -3769,7 +3824,7 @@ impl AiTool for ComfyuiBuildWorkflowTool {
             "type": "function",
             "function": {
                 "name": self.name(),
-                "description": "自己搭建并执行一张 ComfyUI 工作流（画图/视频/音频）。用于用户的需求无法用「一句描述走现成工作流」满足时（如换采样器、加 LoRA、改尺寸、两图拼接）。\n\n**必须遵守的顺序**：先用 comfyui_node_search 查真实节点与其输入规格，用 comfyui_list_models 查真实模型文件名，再提交这里的 nodes。节点名/输入名/文件名都不许编造。\n\n节点之间用**你自己起的 key** 互相引用，连线写成 [\"对方key\", 输出序号]（从 0 开始），不要写数字 id——Rust 侧会分配。\n\n**安全**：使用非核心（自定义）节点会被拒绝并要求用户先在设置里放行；执行代码/命令类节点一律拒绝。",
+                "description": "自己搭建并执行一张 ComfyUI 工作流（画图/视频/音频）。用于用户的需求无法用「一句描述走现成工作流」满足时（如换采样器、加 LoRA、改尺寸、两图拼接）。\n\n**必须遵守的顺序**：先用 comfyui_node_search 查真实节点与其输入规格，用 comfyui_list_models 查真实模型文件名，再提交这里的 nodes。节点名/输入名/文件名都不许编造。\n\n节点之间用**你自己起的 key** 互相引用，连线写成 [\"对方key\", 输出序号]（从 0 开始），不要写数字 id——Rust 侧会分配。\n\n**安全**：使用非核心（自定义）节点会被拒绝并要求用户先在设置里放行；执行代码/命令类节点一律拒绝。\n\n**看结果再迭代**：填了 check 会拿到视觉模型对成图的评价。图能跑出来不代表画对了，第一次结果通常需要调参重试。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -3785,7 +3840,8 @@ impl AiTool for ComfyuiBuildWorkflowTool {
                                 },
                                 "required": ["key", "class_type"]
                             }
-                        }
+                        },
+                        "check": { "type": "string", "description": "（可选）填用户最初的画面要求原文。填了之后系统会让视觉模型看一眼成图并指出最该改的 1-3 点，你可以据此调整节点参数再跑一次——这是把「能跑出图」变成「画得对」的关键一步。仅在你准备迭代时填（会多花一次视觉调用）。" }
                     },
                     "required": ["nodes"]
                 }
@@ -3850,6 +3906,12 @@ impl AiTool for ComfyuiBuildWorkflowTool {
             "audio" => "音频",
             _ => "图片",
         };
+        let text = format!(
+            "{}已生成（本机 ComfyUI 自建工作流，{} 个节点，已通过安全审计），已直接展示给用户，无需转述内容。",
+            noun,
+            ir.nodes.len()
+        );
+        let text = append_critique(ctx, text, &data_url, check_request_of(args).as_deref()).await;
         let mut meta = serde_json::json!({
             "card": card,
             "kind": kind,
@@ -3857,10 +3919,7 @@ impl AiTool for ComfyuiBuildWorkflowTool {
             "source": "comfyui-built",
         });
         meta[card] = serde_json::json!(data_url);
-        Ok(ToolExecResult::with_meta(
-            format!("{}已生成（本机 ComfyUI 自建工作流，{} 个节点，已通过安全审计），已直接展示给用户，无需转述内容。", noun, ir.nodes.len()),
-            meta,
-        ))
+        Ok(ToolExecResult::with_meta(text, meta))
     }
 }
 
@@ -4192,6 +4251,41 @@ mod tests {
         assert_eq!(v.profile_id.as_deref(), Some("p1"));
         assert!(v.is_ready());
         assert!(p.image.is_none(), "视觉不应落到 image 键上");
+    }
+
+    #[test]
+    fn check_request_of_只取非空字符串() {
+        assert_eq!(check_request_of(&serde_json::json!({ "check": "一只猫" })), Some("一只猫".to_string()));
+        assert_eq!(
+            check_request_of(&serde_json::json!({ "check": "  一只猫  " })),
+            Some("一只猫".to_string()),
+            "两端空白应被裁掉"
+        );
+        assert_eq!(check_request_of(&serde_json::json!({ "check": "   " })), None);
+        assert_eq!(check_request_of(&serde_json::json!({ "check": 123 })), None);
+        assert_eq!(check_request_of(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn 两个生成工具都声明可选check参数() {
+        for tool in ["generate_image", "comfyui_build_workflow"] {
+            let schema = match tool {
+                "generate_image" => GenerateImageTool.function_schema(),
+                _ => ComfyuiBuildWorkflowTool.function_schema(),
+            };
+            assert!(
+                schema["function"]["parameters"]["properties"].get("check").is_some(),
+                "{} 应声明可选 check（看图迭代）",
+                tool
+            );
+            let required: Vec<&str> = schema["function"]["parameters"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect();
+            assert!(!required.contains(&"check"), "{} 的 check 必须是可选", tool);
+        }
     }
 
     #[test]
