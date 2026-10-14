@@ -4,7 +4,7 @@ import { useI18n } from '@/lib/i18n';
 import { Plus, Radar, Cpu } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
-import { emptyReasoning, fromConfig, toConfig, type ConfigUi, type ModelUi, type ProviderUi } from '../aiConfigCodec';
+import { emptyMediaModels, emptyReasoning, fromConfig, toConfig, type ConfigUi, type ModelUi, type ProviderUi } from '../aiConfigCodec';
 import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
 import { ComfyuiPanel } from './ComfyuiPanel';
@@ -38,7 +38,7 @@ const TOAST_MS = 3600;
 
 export function ModelSettingsPage() {
   const { t } = useI18n();
-  const [cfg, setCfg] = useState<ConfigUi>({ providers: [], selected_provider_id: null, selected_model_id: null });
+  const [cfg, setCfg] = useState<ConfigUi>({ providers: [], selected_provider_id: null, selected_model_id: null, media_models: emptyMediaModels() });
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState('');
   // 打开发现弹窗时冻结一份目标：已有供应商用当前值，新建用空白。
@@ -180,6 +180,7 @@ export function ModelSettingsPage() {
     const msg = t('modelSettings.removeProviderConfirm', { n: p.models.length, name: p.name || p.base_url });
     if (!window.confirm(msg)) return;
     setCfg((prev) => ({
+      ...prev,
       providers: prev.providers.filter((x) => x.id !== providerId),
       selected_provider_id: prev.selected_provider_id === providerId ? null : prev.selected_provider_id,
       selected_model_id: prev.selected_model_id && p.models.some((m) => m.id === prev.selected_model_id)
@@ -418,8 +419,42 @@ export function ModelSettingsPage() {
           + 蓝图生图节点挂钩。与供应商云端 image_model 并列的另一条生图后端。 */}
       <ComfyuiPanel t={t} />
 
+      {/* 媒体模型 —— 视觉 / 语音 / 图像 / 音乐 各用哪个模型。
+          ★ 这是**一处配置**：与"走哪个供应商"解耦，且存在配置档案里，
+            所以桌面 / 移动端 / 插件都能读到（浏览器本地库做不到这点）。
+          解析顺序（见 Rust `resolve_vision_model`）：
+            本次显式指定 → 这里 → 供应商级兜底三件套 → 当前对话模型 */}
+      <div className="mt-6 rounded-xl border border-neutral-200 dark:border-stone-700 p-4">
+        <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">
+          {t('modelSettings.mediaModels.title')}
+        </div>
+        <p className="text-[11px] text-neutral-500 dark:text-stone-400 mt-1 mb-3 leading-relaxed">
+          {t('modelSettings.mediaModels.hint')}
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          {(['vision', 'speech', 'image', 'music'] as const).map((k) => (
+            <div key={k}>
+              <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">
+                {t(`modelSettings.mediaModels.${k}`)}
+              </label>
+              <input
+                className="w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-800 dark:text-stone-100 outline-none focus:ring-2 focus:ring-[var(--element-border)] transition-colors"
+                value={cfg.media_models[k]}
+                onChange={(e) =>
+                  setCfg((prev) => ({
+                    ...prev,
+                    media_models: { ...prev.media_models, [k]: e.target.value },
+                  }))
+                }
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* 媒体后端：把 ComfyUI / 云端媒体能力统一成「后端清单 + 能力链」，
-          让「说画张图时走哪条路」透明可控。清单编辑 + 路由排序，随 agent 请求下发。 */}
+          让「说画张图时走哪条路」透明可控。清单编辑 + 路由排序，随 agent 请求下发。
+          ⚠️ 它只管**路由**（走哪个端点、什么顺序），模型名统归上方「媒体模型」。 */}
       <MediaBackendsPanel t={t} />
 
       {/* 能力探测：确证某个模型到底支不支持视觉。

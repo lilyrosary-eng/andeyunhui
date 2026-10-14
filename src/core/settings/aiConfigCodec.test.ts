@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { effectiveEffort, fromConfig, toConfig, type ConfigUi } from './aiConfigCodec';
+import { effectiveEffort, emptyMediaModels, fromConfig, toConfig, type ConfigUi } from './aiConfigCodec';
 
 const PAYLOAD = {
   providers: [
@@ -140,7 +140,7 @@ describe('toConfig', () => {
   });
 
   it('空配置可往返', () => {
-    const empty: ConfigUi = { providers: [], selected_provider_id: null, selected_model_id: null };
+    const empty: ConfigUi = { providers: [], selected_provider_id: null, selected_model_id: null, media_models: emptyMediaModels() };
     const out = toConfig(empty);
     expect(out.providers).toEqual([]);
     expect(out.selection).toEqual({ provider_id: null, model_id: null });

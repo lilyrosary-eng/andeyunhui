@@ -109,10 +109,24 @@ export interface ProviderUi {
   models: ModelUi[];
 }
 
+/// 应用级「媒体模型」：**一处配置**，与「走哪个供应商」解耦。
+///
+/// 为什么是应用级而不是供应商级：视觉/语音用一个模型，与"用哪家 API"是两个独立判断。
+/// 放供应商级必然变成「每个供应商配一套」（这里就有 9 个供应商）。见 Rust 侧
+/// `MediaModels` 的文档。
+export interface MediaModelsUi {
+  vision: string;
+  speech: string;
+  image: string;
+  music: string;
+  video: string;
+}
+
 export interface ConfigUi {
   providers: ProviderUi[];
   selected_provider_id: string | null;
   selected_model_id: string | null;
+  media_models: MediaModelsUi;
 }
 
 const DEFAULT_TEMPERATURE = 0.3;
@@ -215,11 +229,33 @@ export function effectiveEffort(m: Pick<ModelUi, 'reasoning_effort' | 'thinking'
   return fallback;
 }
 
+/** 空白的媒体模型集合（新建配置 / 缺字段时的默认）。 */
+export function emptyMediaModels(): MediaModelsUi {
+  return { vision: '', speech: '', image: '', music: '', video: '' };
+}
+
+function mediaModelsFrom(raw: any): MediaModelsUi {
+  const m = raw || {};
+  return {
+    vision: s(m.vision),
+    speech: s(m.speech),
+    image: s(m.image),
+    music: s(m.music),
+    video: s(m.video),
+  };
+}
+
+/** 媒体模型集合是否全空（全空则不落盘，与 Rust 侧 `is_empty` 同口径）。 */
+function mediaModelsEmpty(m: MediaModelsUi): boolean {
+  return !m.vision && !m.speech && !m.image && !m.music && !m.video;
+}
+
 export function fromConfig(payload: any): ConfigUi {
   return {
     providers: Array.isArray(payload?.providers) ? payload.providers.map(providerFrom) : [],
     selected_provider_id: payload?.selection?.provider_id ?? null,
     selected_model_id: payload?.selection?.model_id ?? null,
+    media_models: mediaModelsFrom(payload?.media_models),
   };
 }
 
@@ -264,7 +300,18 @@ function toModel(m: ModelUi) {
 }
 
 export function toConfig(ui: ConfigUi): any {
+  // 全空时**省略整个字段**而不是传 null：Rust 侧 `media_models` 是普通结构体
+  // （不是 Option），收到 null 会直接反序列化失败 —— 那样整份配置都保存不了。
+  const mm = mediaModelsEmpty(ui.media_models) ? null : {
+    // '' → null：Rust 侧各字段是 Option<String>，空串会被当成"配了一个名字为空的模型"
+    vision: ui.media_models.vision || null,
+    speech: ui.media_models.speech || null,
+    image: ui.media_models.image || null,
+    music: ui.media_models.music || null,
+    video: ui.media_models.video || null,
+  };
   return {
+    ...(mm ? { media_models: mm } : {}),
     providers: ui.providers.map((p) => ({
       id: p.id,
       name: s(p.name),

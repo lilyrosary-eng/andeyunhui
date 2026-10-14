@@ -354,23 +354,16 @@ export function MediaBackendsPanel({ t: _t }: { t: TFunc }) {
                         >
                           {b.name}
                         </span>
-                        {/* ★ 「这个能力用哪个模型」的**唯一**入口。
-                            放在能力链行内而不是后端卡片里 —— 决策本来就是按「能力」做的：
-                            同一个后端可能同时供图像/视觉/语音，三者模型名各不相同。 */}
-                        {b.kind === 'openai' ? (
-                          <input
-                            className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-800 dark:text-stone-100 outline-none focus:ring-1 focus:ring-[var(--element-border)]"
-                            value={b.extras.models?.[k] ?? ''}
-                            onChange={(e) =>
-                              updateExtras(b.id, { models: { ...b.extras.models, [k]: e.target.value } })
-                            }
-                            placeholder={`${KIND_LABEL[k]}模型名（留空则用算力来源档案的默认）`}
-                          />
-                        ) : (
-                          <span className="flex-1 min-w-0 text-[11px] text-neutral-400 dark:text-stone-500 truncate" title={b.baseUrl}>
-                            {b.baseUrl || '未填端点'}
-                          </span>
-                        )}
+                        {/* 模型名**不在这里** —— 统一在 AI 页的「媒体模型」区块配置（一处）。
+                            能力链只管**路由**：走哪些后端、按什么顺序。
+                            行内再放一个输入框会立刻变成双入口（上一版就是这么做的，
+                            用户随即反馈"两处都能配，不知道谁生效"）。 */}
+                        <span
+                          className="flex-1 min-w-0 text-[11px] text-neutral-400 dark:text-stone-500 truncate"
+                          title={b.kind === 'comfyui' ? b.baseUrl : b.name}
+                        >
+                          {b.kind === 'comfyui' ? (b.baseUrl || '未填端点') : ''}
+                        </span>
                         <span
                           className={`shrink-0 text-[10px] ${
                             ready ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
