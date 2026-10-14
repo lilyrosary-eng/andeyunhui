@@ -26,6 +26,7 @@ pub mod ai_session;
 pub mod ai_agent;
 pub mod ai_ocr;
 pub mod ai_conversations;
+pub mod comfyui_build;
 
 // 对外重导出：保持 crate::services::ai_service::xxx 路径不变
 // resolve_profile 与 ResolvedTarget / resolve_target 并存：11 个调用点改到 resolve_target
