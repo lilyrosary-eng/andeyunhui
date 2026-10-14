@@ -69,6 +69,11 @@ export function ModelSettingsPage() {
   useEffect(() => {
     invoke<boolean>('ai_get_caps_probe_enabled').then(setProbeEnabled).catch(() => {});
   }, []);
+  /** 改「某能力用哪个模型」。写进配置档案（不是本地库），所以插件与移动端也读得到。 */
+  const setMediaModel = useCallback((kind: 'image' | 'vision' | 'speech', value: string) => {
+    setCfg((prev) => ({ ...prev, media_models: { ...prev.media_models, [kind]: value } }));
+  }, []);
+
   const toggleProbe = useCallback(async () => {
     const next = !probeEnabled;
     try {
@@ -419,43 +424,17 @@ export function ModelSettingsPage() {
           + 蓝图生图节点挂钩。与供应商云端 image_model 并列的另一条生图后端。 */}
       <ComfyuiPanel t={t} />
 
-      {/* 媒体模型 —— 视觉 / 语音 / 图像 / 音乐 各用哪个模型。
-          ★ 这是**一处配置**：与"走哪个供应商"解耦，且存在配置档案里，
-            所以桌面 / 移动端 / 插件都能读到（浏览器本地库做不到这点）。
-          解析顺序（见 Rust `resolve_vision_model`）：
-            本次显式指定 → 这里 → 供应商级兜底三件套 → 当前对话模型 */}
-      <div className="mt-6 rounded-xl border border-neutral-200 dark:border-stone-700 p-4">
-        <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">
-          {t('modelSettings.mediaModels.title')}
-        </div>
-        <p className="text-[11px] text-neutral-500 dark:text-stone-400 mt-1 mb-3 leading-relaxed">
-          {t('modelSettings.mediaModels.hint')}
-        </p>
-        <div className="grid grid-cols-2 gap-3">
-          {(['vision', 'speech', 'image', 'music'] as const).map((k) => (
-            <div key={k}>
-              <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">
-                {t(`modelSettings.mediaModels.${k}`)}
-              </label>
-              <input
-                className="w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-800 dark:text-stone-100 outline-none focus:ring-2 focus:ring-[var(--element-border)] transition-colors"
-                value={cfg.media_models[k]}
-                onChange={(e) =>
-                  setCfg((prev) => ({
-                    ...prev,
-                    media_models: { ...prev.media_models, [k]: e.target.value },
-                  }))
-                }
-              />
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* 媒体后端：把 ComfyUI / 云端媒体能力统一成「后端清单 + 能力链」，
-          让「说画张图时走哪条路」透明可控。清单编辑 + 路由排序，随 agent 请求下发。
-          ⚠️ 它只管**路由**（走哪个端点、什么顺序），模型名统归上方「媒体模型」。 */}
-      <MediaBackendsPanel t={t} />
+      {/* 媒体后端：**媒体能力的唯一配置处**。
+          - 「清单 + 路由」决定走哪个端点、按什么顺序降级；
+          - 每条能力链标题右侧的下拉框决定该能力**用哪个模型**（存在配置档案里，跨端可读）。
+          刻意不再另设一套「媒体模型」面板：那会变成两个入口配同一件事 ——
+          用户已经指出过这一点，是对的。 */}
+      <MediaBackendsPanel
+        t={t}
+        mediaModels={cfg.media_models}
+        providers={cfg.providers}
+        onChangeMediaModel={setMediaModel}
+      />
 
       {/* 能力探测：确证某个模型到底支不支持视觉。
           与「对话模型原生看图」直接相关——只有被确证（来源 provider）的模型

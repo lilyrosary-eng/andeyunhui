@@ -41,10 +41,23 @@ pub async fn generate_image_inner(
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key".to_string());
     }
-    let model = model_override
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    // 模型来源：**应用级「媒体模型」优先** → 调用方覆盖（媒体后端旧字段） → 供应商旧字段。
+    //
+    // ⚠️ 这里刻意**不**回落到 `cfg.model`（对话模型）：拿对话模型当图片模型必然失败，
+    //    宁可明确报错。这与视觉那条链不同 —— 视觉回落到对话模型是**合理**的
+    //    （多模态模型本身就能看图），生图没有这个前提。
+    //
+    // 为什么应用级要压过 model_override：后者来自媒体后端的 `extras.models.image`，
+    // 那个输入框已经撤了（配置统一到媒体后端面板的能力链下拉框），
+    // 属于"看不见、改不掉"的僵尸字段，不该再压过用户新配的值。
+    let app_level = config.media_models.get("image").map(str::to_string);
+    let model = app_level
+        .or_else(|| {
+            model_override
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
         .or_else(|| {
             cfg.image_model
                 .as_deref()
@@ -52,7 +65,9 @@ pub async fn generate_image_inner(
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
         })
-        .ok_or_else(|| "该算力来源未配置图片生成模型（image_model），无法发图".to_string())?;
+        .ok_or_else(|| {
+            "未配置图片生成模型：可在 设置 → 模型 → 媒体后端 的「图像能力链」里选一个".to_string()
+        })?;
 
     let url = format!("{}/images/generations", cfg.base_url.trim_end_matches('/'));
     let body = serde_json::json!({
@@ -121,10 +136,16 @@ pub async fn tts_inner(
     if cfg.api_key.trim().is_empty() {
         return Err("未配置 API Key".to_string());
     }
-    let model = model_override
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    // 同 `generate_image_inner`：应用级优先，且**不回落对话模型**（语音模型与对话模型
+    // 是两回事，拿前者当后者必然失败）。
+    let app_level = config.media_models.get("speech").map(str::to_string);
+    let model = app_level
+        .or_else(|| {
+            model_override
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
         .or_else(|| {
             cfg.tts_model
                 .as_deref()
@@ -132,7 +153,9 @@ pub async fn tts_inner(
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
         })
-        .ok_or_else(|| "该算力来源未配置语音模型（tts_model），无法播报".to_string())?;
+        .ok_or_else(|| {
+            "未配置语音模型：可在 设置 → 模型 → 媒体后端 的「语音能力链」里选一个".to_string()
+        })?;
 
     let url = format!("{}/audio/speech", cfg.base_url.trim_end_matches('/'));
     let body = serde_json::json!({

@@ -12,7 +12,7 @@
 //
 // 本面板只负责「编辑清单 + 排序路由」，不承载 ComfyUI 工作流库 / 供应商档案的编辑
 // （那些仍在各自面板里），避免职责重复。
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, Eye, RotateCcw } from 'lucide-react';
 import {
   ALL_KINDS,
@@ -26,6 +26,18 @@ import {
 } from '@/core/ai/media/backends';
 import { loadRoutes, saveRoutes, routeFor, defaultRoutes, type MediaRoutes } from '@/core/ai/media/routing';
 import { resetMediaConfig } from '@/core/ai/media/migrate';
+import type { MediaModelsUi, ProviderUi } from '../aiConfigCodec';
+
+/**
+ * 已有「应用级模型名」配置项的能力 —— 与 `ENABLED_KINDS` 保持一致。
+ *
+ * media_models 结构里还留了 music/video 两个字段（枚举留位），但它们**没有 UI 入口**
+ * 也没有消费点。刻意不在界面上渲染：摆一个填了不生效的框，比不摆更糟。
+ */
+const MEDIA_MODEL_KINDS = ['image', 'vision', 'speech'] as const;
+type MediaModelKind = (typeof MEDIA_MODEL_KINDS)[number];
+const hasMediaModel = (k: string): k is MediaModelKind =>
+  (MEDIA_MODEL_KINDS as readonly string[]).includes(k);
 
 type TFunc = (k: string, vars?: Record<string, string | number>) => string;
 
@@ -60,7 +72,45 @@ function blankBackend(kind: BackendKind): MediaBackend {
   };
 }
 
-export function MediaBackendsPanel({ t: _t }: { t: TFunc }) {
+export function MediaBackendsPanel({
+  t: _t,
+  mediaModels,
+  providers,
+  onChangeMediaModel,
+}: {
+  t: TFunc;
+  /** 应用级媒体模型（存在配置档案里，跨端共享）。下拉框的唯一数据来源。 */
+  mediaModels: MediaModelsUi;
+  /** 用于解析「选中的模型属于哪个供应商」—— 让用户能确认"到底找不找得到"。 */
+  providers: ProviderUi[];
+  onChangeMediaModel: (kind: MediaModelKind, value: string) => void;
+}) {
+  const t = _t;
+
+  /** 可用于下拉的媒体模型名（按供应商分组）。只列**配置里真实存在**的模型 ——
+   *  见下方 `modelOptions` 的注释：这正是「填了到底有没有用」这个疑问的解法。 */
+  const modelGroups = useMemo(() => {
+    const gs: { provider: string; models: string[] }[] = [];
+    for (const p of providers) {
+      const ms = p.models.map((m) => m.model.trim()).filter(Boolean);
+      if (ms.length) gs.push({ provider: p.name || p.base_url || '未命名', models: ms });
+    }
+    return gs;
+  }, [providers]);
+
+  /** 模型名 → 所属供应商名。口径与 Rust `find_provider_of_model` 一致：**全等**匹配。
+   *  找不到就返回 null，UI 上要明确警示（而不是让用户以为配好了）。 */
+  const ownerOf = (model: string): string | null => {
+    const want = model.trim();
+    if (!want) return null;
+    for (const p of providers) {
+      if (p.models.some((m) => m.model.trim() === want)) {
+        return p.name || p.base_url || '未命名';
+      }
+    }
+    return null;
+  };
+
   // 初始加载：惰性初始化（含首次打开时的默认路由补齐），避免 effect 内 setState 级联渲染。
   const [backends, setBackends] = useState<MediaBackend[]>(() => loadBackends());
   const [routes, setRoutes] = useState<MediaRoutes>(() => {
@@ -333,9 +383,47 @@ export function MediaBackendsPanel({ t: _t }: { t: TFunc }) {
             .filter((b): b is MediaBackend => !!b);
           return (
             <div key={k}>
-              <div className="flex items-center gap-1.5 mb-1">
+              <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                 <Icon size={13} className="text-neutral-500 dark:text-stone-400" />
                 <span className="text-[12px] text-neutral-700 dark:text-stone-300">{KIND_LABEL[k]}能力链</span>
+                {/* ★ 「这个能力用哪个模型」的**唯一**入口。
+                    用下拉而不是自由输入：后端是按模型名**全等**找所属供应商的，
+                    让用户手打就等于让他在盲填（错一个字符就找不到，界面还看不出来）。
+                    下拉里只列配置里真实存在的模型 —— 所见即所选，选完必然能找到端点。 */}
+                {hasMediaModel(k) && (
+                  <select
+                    value={mediaModels[k as MediaModelKind] ?? ''}
+                    onChange={(e) => onChangeMediaModel(k as MediaModelKind, e.target.value)}
+                    className="ml-1 px-1.5 py-0.5 rounded text-[11px] bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-700 dark:text-stone-200 outline-none focus:ring-1 focus:ring-[var(--element-border)] max-w-[220px]"
+                    title={t('modelSettings.mediaModels.pickHint')}
+                  >
+                    <option value="">{t('modelSettings.mediaModels.followChat')}</option>
+                    {modelGroups.map((g) => (
+                      <optgroup key={g.provider} label={g.provider}>
+                        {g.models.map((name) => (
+                          <option key={`${g.provider}/${name}`} value={name}>{name}</option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                )}
+                {/* 归属提示：让「能不能找到」这件事在界面上可见。
+                    下拉选项必然可解析，但历史手填值可能不在配置里 —— 那种情况必须警示。 */}
+                {hasMediaModel(k) &&
+                  (() => {
+                    const cur = mediaModels[k] ?? '';
+                    if (!cur.trim()) return null;
+                    const owner = ownerOf(cur);
+                    return owner ? (
+                      <span className="text-[10px] text-neutral-400 dark:text-stone-500">
+                        {t('modelSettings.mediaModels.via')} {owner}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-amber-600 dark:text-amber-400">
+                        {t('modelSettings.mediaModels.notFound')}
+                      </span>
+                    );
+                  })()}
               </div>
               {rows.length === 0 ? (
                 <div className="text-[11px] text-neutral-400 dark:text-stone-500 pl-4">

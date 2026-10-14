@@ -273,33 +273,16 @@ export function ProviderCard(props: ProviderCardProps) {
                 <span className="text-[11px] text-neutral-400 dark:text-stone-500">{t('modelSettings.deepseekHint')}</span>
               </div>
             )}
-            {/* 兜底三件套 —— 刻意标成「兜底」而不是删掉。
-                删除会让**插件与移动端的独立命令**（ai_generate_image / ai_tts / ai_vision_ocr）
-                无处配置：它们不带媒体后端参数，只能读档案里这三个字段。
-                但对话内的图像/视觉/语音一律走下方「媒体后端」的能力链 —— 那里才是主入口。
-                标注的目的是**消除歧义**：让用户知道这两个入口各自管什么，而不是猜。 */}
-            <div className="sm:col-span-3 -mb-1">
-              <span className="text-[11px] text-neutral-400 dark:text-stone-500">
-                {t('modelSettings.fallbackModelsHint')}
-              </span>
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label className={labelCls}>{t('modelSettings.visionModelLabel')}</label>
-                <input className={inputCls} value={p.vision_model}
-                  onChange={(e) => props.onPatchProvider({ vision_model: e.target.value })} />
-              </div>
-              <div>
-                <label className={labelCls}>{t('modelSettings.imageModel')}</label>
-                <input className={inputCls} value={p.image_model}
-                  onChange={(e) => props.onPatchProvider({ image_model: e.target.value })} />
-              </div>
-              <div>
-                <label className={labelCls}>{t('modelSettings.ttsModel')}</label>
-                <input className={inputCls} value={p.tts_model}
-                  onChange={(e) => props.onPatchProvider({ tts_model: e.target.value })} />
-              </div>
-            </div>
+            {/* 视觉 / 图像 / 语音的模型名**不在这里**了 ——
+                统一到下方「媒体后端」面板的能力链：每条链一个下拉框，只能选配置里
+                真实存在的模型，旁边还会显示"将走哪个供应商"。
+
+                三个旧字段（vision_model / image_model / tts_model）的**读取仍然保留**
+                （见 Rust `resolve_vision_model` 与 `multimodal_service` 的兼容层），
+                但不再有输入入口 —— 摆两个配同一件事的地方，就是之前"很乱"的来源。
+
+                ⚠️ 它们与「媒体模型」是同一件事的两个存储位置。日后若要彻底删除，
+                必须先做一次配置迁移，否则改造前配过它们的用户值会丢。 */}
             {/* 测试连接：验证端点 + Key + 代表性模型可达（整行横跨） */}
             <div className="sm:col-span-2 flex items-center gap-2 flex-wrap">
               <button
