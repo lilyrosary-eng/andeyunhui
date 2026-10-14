@@ -33,10 +33,17 @@ pub(crate) struct ToolContext {
     pub project_root: Option<PathBuf>,
     /// 当前使用模型的档案 id（子代理等需要起第二个循环的工具，用它复用同一模型档案）。
     pub profile_id: Option<String>,
-    /// ComfyUI 生图配置（前端每次 agent 请求时从设置解析后传入；Rust 侧读不到
-    /// 前端 localStorage，故走参数通道）。None/空 url = 未配置 → generate_image
-    /// 回退云端图片模型（ai_generate_image）。
-    pub comfyui: Option<ComfyuiToolCfg>,
+    /// 本轮请求的媒体后端配置（前端每次 agent 请求时解析后传入；Rust 侧读不到
+    /// 前端 localStorage，故走参数通道）。按能力分区：image / speech。
+    /// 前端已按「只降未配置」规则选定后端，Rust 只执行不降级。
+    pub(crate) media: MediaPayload,
+}
+
+/// 媒体配置集合：能力 → 已选定的后端配置。缺某能力键 = 该能力未配置后端。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct MediaPayload {
+    pub(crate) image: Option<MediaToolCfg>,
+    pub(crate) speech: Option<MediaToolCfg>,
 }
 
 /// 蓝图工作流里「提示词参数位」的定位（前端 analyzeWorkflowParameters 解析产出，
@@ -49,23 +56,48 @@ pub(crate) struct ComfyuiPromptAt {
     pub(crate) input_key: String,
 }
 
-/// generate_image 工具的 ComfyUI 配置（前端 comfyuiConfig.ts 解析结果的 Rust 侧镜像）。
-/// workflow 为前端已转好的 API 格式工作流（蓝图指定了工作流文件时）；为空则走
-/// 内置最小 txt2img（需 ckpt）。
+/// generate_image / generate_speech 工具的媒体配置（前端 resolve.ts 解析结果的 Rust 侧镜像）。
+///
+/// 关键约定（与用户对齐）：**路由决策在前端完成**——前端按「后端清单 + 路由表」及
+/// 「只降未配置、失败不转」的规则选定一个后端，Rust 只执行、不做任何降级决策。
+/// 因此本结构是「已选定的一个后端」的最小描述，含 backend_kind 以便走对应实现分支。
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub(crate) struct ComfyuiToolCfg {
-    /// ComfyUI 端点，如 http://127.0.0.1:8188。空 = 未配置。
-    pub(crate) url: String,
-    /// checkpoint 模型文件名（models/checkpoints 下）。
+pub(crate) struct MediaToolCfg {
+    /// 能力类别（image / speech），仅作日志与提示用。
+    pub(crate) kind: String,
+    /// 后端类型：comfyui / openai。
+    pub(crate) backend_kind: String,
+    /// 端点：comfyui 为 http://127.0.0.1:8188；openai 档通常为空（走档案凭证）。
+    pub(crate) base_url: String,
+    /// openai 档的直接 api key（前端一般不传，改走 profile_id 由 Rust 解析）。
+    pub(crate) api_key: String,
+    /// ComfyUI：checkpoint 模型文件名。
     pub(crate) ckpt: String,
-    /// 蓝图指定的 API 工作流（完整节点图）。
+    /// ComfyUI：蓝图工作流文件路径（解析用，传给 Rust 后已转成 workflow）。
+    pub(crate) workflow_path: String,
+    /// ComfyUI：蓝图指定的 API 工作流（完整节点图）。
     pub(crate) workflow: Option<serde_json::Value>,
-    /// 提示词写入位（workflow 存在时）。
+    /// ComfyUI：提示词写入位（workflow 存在时）。
     pub(crate) prompt_at: Option<ComfyuiPromptAt>,
-    /// 蓝图工作流的技能包 slug（备注键）。生图失败时随错误上报，
-    /// 由前端把失败原因 append 进该工作流的备注（AI 写回备注，同一坑不踩第二次）。
+    /// 蓝图工作流的技能包 slug（备注键）。失败时随错误上报，前端写回备注。
     pub(crate) skill_slug: Option<String>,
+    /// openai 档：该能力的模型名（image → 图片模型，speech → TTS 模型）。
+    pub(crate) model: Option<String>,
+    /// openai 档：引用哪个档案取凭证（Rust 据此解析，避免前端传 key）。
+    pub(crate) profile_id: Option<String>,
+}
+
+impl MediaToolCfg {
+    /// 最终就绪判定（防御性兜底）：前端已按路由表选好后端，此处只需确认本次调用
+    /// 有可用的执行路径——comfyui 要端点、openai 要能被识别。
+    pub(crate) fn is_ready(&self) -> bool {
+        match self.backend_kind.as_str() {
+            "comfyui" => !self.base_url.trim().is_empty(),
+            "openai" => true,
+            _ => false,
+        }
+    }
 }
 
 /// 失败原因里携带技能包 slug 的机器可读前缀（前端解析后写回备注）。
@@ -74,17 +106,10 @@ pub(crate) const SKILL_FAIL_PREFIX: &str = "[comfyui-skill:";
 
 /// 若本轮配置带了技能包 slug，给失败原因加上前缀（供前端写回备注）。
 /// 无 slug 时原样返回——写回是增强，不该影响错误文本的可读性。
-fn tag_skill_fail(cfg: Option<&ComfyuiToolCfg>, err: String) -> String {
+fn tag_skill_fail(cfg: Option<&MediaToolCfg>, err: String) -> String {
     match cfg.and_then(|c| c.skill_slug.as_deref()).filter(|s| !s.trim().is_empty()) {
         Some(slug) => format!("{}{}] {}", SKILL_FAIL_PREFIX, slug.trim(), err),
         None => err,
-    }
-}
-
-impl ComfyuiToolCfg {
-    /// 是否配置了可用的 ComfyUI（url 非空）。
-    pub(crate) fn is_ready(&self) -> bool {
-        !self.url.trim().is_empty()
     }
 }
 
@@ -2225,7 +2250,7 @@ async fn run_subagent_once(
         request_id: format!("{}:sub{}", request_id, seq),
         project_root,
         profile_id: None,
-        comfyui: None,
+        media: Default::default(),
     };
     for _ in 0..6usize {
         match subagent_model_round(&client, &url, cfg, &mut messages, &tools, &sub_ctx).await? {
@@ -2277,7 +2302,7 @@ async fn run_subagent_worker(
         request_id: child_id.clone(),
         project_root,
         profile_id: None,
-        comfyui: None,
+        media: Default::default(),
     };
     let mut total_rounds = 0usize;
     const MAX_ROUNDS: usize = 20;
@@ -3027,7 +3052,7 @@ fn comfyui_prompt_slot(wf: &serde_json::Value) -> Option<ComfyuiPromptAt> {
 
 /// 经 ComfyUI 生图：蓝图工作流（写入 prompt 位后整图提交）或内置最小 txt2img。
 /// 复用 multimodal_service::comfyui_generate_media（tauri 命令函数，可直接调用）。
-async fn generate_via_comfy(cfg: &ComfyuiToolCfg, prompt: &str) -> Result<String, String> {
+async fn generate_via_comfy(cfg: &MediaToolCfg, prompt: &str) -> Result<String, String> {
     if let Some(wf) = &cfg.workflow {
         let mut wf = wf.clone();
         // 提示词写入位：前端解析结果优先，启发式兜底；都找不到必须报错——
@@ -3042,13 +3067,13 @@ async fn generate_via_comfy(cfg: &ComfyuiToolCfg, prompt: &str) -> Result<String
                 obj.insert(slot.input_key.clone(), serde_json::json!(prompt));
             }
         }
-        crate::services::multimodal_service::comfyui_generate_media(None, cfg.url.clone(), None, Some(wf)).await
+        crate::services::multimodal_service::comfyui_generate_media(None, cfg.base_url.clone(), None, Some(wf)).await
     } else {
         let ckpt = cfg.ckpt.trim().to_string();
         if ckpt.is_empty() {
             return Err("已配置 ComfyUI 但未填写 checkpoint 模型文件名（设置 → 模型 → 本地生图）".to_string());
         }
-        crate::services::multimodal_service::comfyui_generate_media(Some(prompt.to_string()), cfg.url.clone(), Some(ckpt), None).await
+        crate::services::multimodal_service::comfyui_generate_media(Some(prompt.to_string()), cfg.base_url.clone(), Some(ckpt), None).await
     }
 }
 
@@ -3095,15 +3120,16 @@ impl AiTool for GenerateImageTool {
         if prompt.is_empty() {
             return Err("缺少 prompt 参数（画面描述）".to_string());
         }
-        let cfg = ctx.comfyui.as_ref().filter(|c| c.is_ready());
+        let cfg = ctx.media.image.as_ref().filter(|c| c.is_ready());
         let (data_url, source) = match cfg {
-            Some(c) => match generate_via_comfy(c, &prompt).await {
+            // comfyui 档：本地工作流 / 内置最小 txt2img
+            Some(c) if c.backend_kind == "comfyui" => match generate_via_comfy(c, &prompt).await {
                 Ok(u) => (u, "comfyui"),
                 // 失败原因带上技能包 slug 前缀（前端据此 append 进该工作流备注）
                 Err(e) => return Err(tag_skill_fail(Some(c), e)),
             },
-            // 云端失败与工作流技能包无关，不加前缀
-            None => (
+            // 云端档（或未配置 → 回退云端）。云端失败与工作流技能包无关，不加前缀。
+            _ => (
                 crate::services::multimodal_service::ai_generate_image(
                     ctx.app.clone(),
                     prompt.clone(),
@@ -3134,6 +3160,88 @@ impl AiTool for GenerateImageTool {
     }
 }
 
+// ========== 语音合成工具（generate_speech）——AI 对话直接出声 ==========
+//
+// 路由（前端 resolve.ts 解析后经 ToolContext.media.speech 传入）：
+//   - openai 档 → ai_tts（走 profile_id 取该档案的 tts_model 与凭证）。
+// 当前仅云端一种后端；后端清单抽象已为将来的本地 TTS 后端留位。
+// 音频本体只走 meta（前端渲染播放器），绝不回填进 text——base64 会炸模型上下文。
+
+/// 语音合成工具：用户说「读出来」「念一下」「转成语音」时由模型调用。
+struct GenerateSpeechTool;
+#[async_trait::async_trait]
+impl AiTool for GenerateSpeechTool {
+    fn name(&self) -> &'static str {
+        "generate_speech"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "把文本合成语音（TTS）。当用户要求朗读、念出来、转成语音、配音时调用。text 为要朗读的文本内容（可直接用用户给的原文，或你整理后的朗读稿）。生成成功后音频会直接展示在对话中供播放，无需你转述内容。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "要朗读的文本内容" }
+                    },
+                    "required": ["text"]
+                }
+            }
+        })
+    }
+    fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
+        let short: String = args
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(24)
+            .collect();
+        serde_json::json!({ "card": "generic", "kind": "other", "title": format!("合成语音 {}", short) })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
+        let text = args
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            return Err("缺少 text 参数（要朗读的文本）".to_string());
+        }
+        let cfg = ctx.media.speech.as_ref().filter(|c| c.is_ready());
+        let Some(c) = cfg else {
+            return Err(
+                "未配置语音后端：请在设置 → 模型 → 媒体后端里添加一个并绑定到「语音」能力（需该算力来源配好 TTS 模型）".to_string(),
+            );
+        };
+        // 目前只有 openai 兼容 /audio/speech 一种实现；其余后端类型暂未支持。
+        let data_url = match c.backend_kind.as_str() {
+            "openai" => {
+                crate::services::multimodal_service::ai_tts(
+                    ctx.app.clone(),
+                    text.clone(),
+                    c.profile_id.clone().or_else(|| ctx.profile_id.clone()),
+                )
+                .await?
+            }
+            other => return Err(format!("暂不支持的语音后端类型：{}", other)),
+        };
+        let text_out =
+            "语音已生成，已直接展示给用户供播放，无需转述内容。".to_string();
+        let title: String = text.chars().take(60).collect();
+        let meta = serde_json::json!({
+            "card": "audio",
+            "kind": "speech",
+            "title": title,
+            "audio": data_url,
+            "source": "cloud",
+        });
+        Ok(ToolExecResult::with_meta(text_out, meta))
+    }
+}
+
 pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
     vec![
         Box::new(NowTool),
@@ -3155,6 +3263,7 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(LspTool),
         Box::new(RagSearchTool),
         Box::new(GenerateImageTool),
+        Box::new(GenerateSpeechTool),
         Box::new(crate::services::ai_service::gongfang_tools::GongfangFullTool),
     ]
 }
@@ -3328,16 +3437,19 @@ mod tests {
     }
 
     #[test]
-    fn comfyui_tool_cfg_deserializes_camel_case_from_frontend() {
-        // 前端 comfyuiConfig.ts 产出 camelCase（promptAt/nodeId/inputKey），Rust 侧须对齐。
+    fn media_tool_cfg_deserializes_camel_case_from_frontend() {
+        // 前端 resolve.ts 产出 camelCase（backendKind/promptAt/nodeId/inputKey），Rust 侧须对齐。
         let v = serde_json::json!({
-            "url": "http://127.0.0.1:8188",
+            "kind": "image",
+            "backendKind": "comfyui",
+            "baseUrl": "http://127.0.0.1:8188",
             "ckpt": "sd_xl_base.safetensors",
             "workflow": { "2": { "class_type": "CLIPTextEncode", "inputs": { "text": "t", "clip": ["1", 0] } } },
             "promptAt": { "nodeId": "2", "inputKey": "text" }
         });
-        let cfg: ComfyuiToolCfg = serde_json::from_value(v).unwrap();
+        let cfg: MediaToolCfg = serde_json::from_value(v).unwrap();
         assert!(cfg.is_ready());
+        assert_eq!(cfg.backend_kind, "comfyui");
         let at = cfg.prompt_at.expect("应有 promptAt");
         assert_eq!(at.node_id, "2");
         assert_eq!(at.input_key, "text");
@@ -3345,28 +3457,48 @@ mod tests {
     }
 
     #[test]
-    fn comfyui_tool_cfg_defaults_and_empty_url_not_ready() {
-        let cfg: ComfyuiToolCfg = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(!cfg.is_ready(), "空 url = 未配置 → 走云端");
+    fn media_tool_cfg_defaults_and_empty_backend_not_ready() {
+        let cfg: MediaToolCfg = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!cfg.is_ready(), "空 backendKind = 未配置");
         assert!(cfg.workflow.is_none());
         assert!(cfg.prompt_at.is_none());
         assert!(cfg.skill_slug.is_none());
+        // comfyui 档未填 url → 不就绪
+        let comfy_no_url: MediaToolCfg =
+            serde_json::from_value(serde_json::json!({ "backendKind": "comfyui" })).unwrap();
+        assert!(!comfy_no_url.is_ready());
+        // openai 档只需 backendKind = openai → 就绪（凭证经 profileId 解析）
+        let openai: MediaToolCfg =
+            serde_json::from_value(serde_json::json!({ "kind": "speech", "backendKind": "openai" })).unwrap();
+        assert!(openai.is_ready());
     }
 
     #[test]
-    fn comfyui_tool_cfg_keeps_skill_slug_for_fail_writeback() {
-        let cfg: ComfyuiToolCfg = serde_json::from_value(
-            serde_json::json!({ "url": "http://127.0.0.1:8188", "skillSlug": "krea-json" }),
+    fn media_tool_cfg_keeps_skill_slug_for_fail_writeback() {
+        let cfg: MediaToolCfg = serde_json::from_value(
+            serde_json::json!({ "backendKind": "comfyui", "baseUrl": "http://127.0.0.1:8188", "skillSlug": "krea-json" }),
         )
         .unwrap();
         assert_eq!(cfg.skill_slug.as_deref(), Some("krea-json"));
     }
 
     #[test]
+    fn media_payload_deserializes_partial_kinds() {
+        // 只配 image 时，speech 应为 None（前端缺键即不传）
+        let p: MediaPayload = serde_json::from_value(serde_json::json!({
+            "image": { "backendKind": "comfyui", "baseUrl": "http://127.0.0.1:8188" }
+        }))
+        .unwrap();
+        assert!(p.image.is_some());
+        assert!(p.speech.is_none());
+    }
+
+    #[test]
     fn tag_skill_fail_prefixes_only_with_slug() {
         // 有 slug → 加机器可读前缀（前端据此写回备注）
-        let cfg = ComfyuiToolCfg {
-            url: "http://x".into(),
+        let cfg = MediaToolCfg {
+            backend_kind: "comfyui".into(),
+            base_url: "http://x".into(),
             skill_slug: Some("krea-json".into()),
             ..Default::default()
         };
@@ -3374,9 +3506,9 @@ mod tests {
         assert_eq!(tagged, "[comfyui-skill:krea-json] ComfyUI 执行失败: x");
 
         // 无 slug / 空白 slug / 无配置 → 原样返回，不加前缀
-        let no_slug = ComfyuiToolCfg { url: "http://x".into(), ..Default::default() };
+        let no_slug = MediaToolCfg { backend_kind: "comfyui".into(), base_url: "http://x".into(), ..Default::default() };
         assert_eq!(tag_skill_fail(Some(&no_slug), "err".into()), "err");
-        let blank = ComfyuiToolCfg { url: "http://x".into(), skill_slug: Some("  ".into()), ..Default::default() };
+        let blank = MediaToolCfg { backend_kind: "comfyui".into(), base_url: "http://x".into(), skill_slug: Some("  ".into()), ..Default::default() };
         assert_eq!(tag_skill_fail(Some(&blank), "err".into()), "err");
         assert_eq!(tag_skill_fail(None, "err".into()), "err");
     }

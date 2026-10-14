@@ -8,6 +8,7 @@ import { fromConfig, toConfig, type ConfigUi, type ModelUi, type ProviderUi } fr
 import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
 import { ComfyuiPanel } from './ComfyuiPanel';
+import { MediaBackendsPanel } from './MediaBackendsPanel';
 import { bestScore } from '@/lib/fuzzy';
 
 const newId = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
@@ -245,6 +246,10 @@ export function ModelSettingsPage() {
       {/* 本地生图（ComfyUI）：端点/checkpoint 快速通道 + 工作流库（扫目录→转换→参数化生成）
           + 蓝图生图节点挂钩。与供应商云端 image_model 并列的另一条生图后端。 */}
       <ComfyuiPanel t={t} />
+
+      {/* 媒体后端：把 ComfyUI / 云端媒体能力统一成「后端清单 + 能力链」，
+          让「说画张图时走哪条路」透明可控。清单编辑 + 路由排序，随 agent 请求下发。 */}
+      <MediaBackendsPanel t={t} />
     </div>
   );
 }

@@ -160,6 +160,9 @@ async function bootstrap() {
   } else {
     // 主界面即将构建（React 将挂载 App）
     boot.__bootProgress?.(28, { text: "构建界面", phase: "PHASE 02 / 05" });
+    // 媒体后端配置一次性迁移：把旧 ComfyUI 三键与档案里的 image/tts 模型聚成
+    // 「后端清单 + 路由表」。幂等、失败静默（不影响启动），且只读档案不写回。
+    void import('./core/ai/media/migrate').then((m) => m.migrateMediaBackends().catch(() => {})).catch(() => {});
     // 平台分流（§5.4.2）：Android 走 MobileApp，桌面走 App。
     // 🔴 桌面分支渲染的组件树与改动前完全相同 —— isAndroid() 在桌面恒返回 false。
     const [{ ThemeProvider }, { I18nProvider }, { isAndroid }] = await Promise.all([

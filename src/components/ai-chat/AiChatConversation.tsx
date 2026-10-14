@@ -574,6 +574,29 @@ export const AiChatConversation = memo(function AiChatConversation({
                       </div>
                     );
                   })()}
+                  {/* 工具生成的语音（generate_speech）：AI 说「念一下」→ 播放器直接落在气泡里。
+                      与图片同理，落盘后 meta.audio 已是占位标记，不再渲染空播放器。 */}
+                  {m.role === 'assistant' && (() => {
+                    const audios = (m.agentSteps || [])
+                      .map((s) => s.meta)
+                      .filter((x): x is Record<string, unknown> => !!x && x.card === 'audio')
+                      .map((x) => ({ src: String(x.audio ?? ''), title: String(x.title ?? '') }))
+                      .filter((x) => x.src.startsWith('data:') || /^https?:\/\//.test(x.src));
+                    if (audios.length === 0) return null;
+                    return (
+                      <div className="flex flex-col gap-1.5 mb-1.5">
+                        {audios.map((x, i) => (
+                          <audio
+                            key={i}
+                            src={x.src}
+                            controls
+                            title={x.title}
+                            className="max-w-[320px] h-9"
+                          />
+                        ))}
+                      </div>
+                    );
+                  })()}
                   {/* 附件（非图片）：文本已在请求中注入，二进制仅陈列文件名 */}
                   {m.attachments && m.attachments.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 mb-1.5">

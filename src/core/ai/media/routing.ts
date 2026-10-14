@@ -1,0 +1,111 @@
+/**
+ * 媒体路由表（方案 A · 单链）——「能力 → 有序后端 id 列表」。
+ *
+ * 语义（与用户对齐的关键约定）：
+ *   - 按列表顺序找**第一个配置完整**的后端（isBackendReady）作为本次调用目标；
+ *   - **降级只针对「未配置」**：列表前面的后端没配好就跳过试下一个；
+ *   - 已选中后端**执行失败不转下一个**——用户显式配了本地后端就是想用本地
+ *     （可能为隐私、或云端没额度），静默转云端属越权且可能产生费用。
+ *   - 全列表都不完整 → 返回 null，调用方给出可自纠的明确错误。
+ *
+ * 纯函数，Storage 注入可测。
+ */
+import { storage, type Storage } from '@/core/storage';
+import { ROUTES_KEY, loadBackends, isBackendReady, type MediaBackend, type MediaKind, ALL_KINDS } from './backends';
+
+/** 路由表：能力 → 有序后端 id 列表。未列出的能力视为「无后端」。 */
+export type MediaRoutes = Partial<Record<MediaKind, string[]>>;
+
+/** 读路由表（空对象=未配置）。 */
+export function loadRoutes(s: Storage = storage): MediaRoutes {
+  const v = s.getJSON<MediaRoutes>(ROUTES_KEY, {});
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+}
+
+/** 写路由表。 */
+export function saveRoutes(routes: MediaRoutes, s: Storage = storage): void {
+  s.setJSON(ROUTES_KEY, routes);
+}
+
+/** 某能力当前配置的后端 id 列表（未配置返回空数组）。 */
+export function routeFor(kind: MediaKind, routes: MediaRoutes): string[] {
+  const ids = routes[kind];
+  return Array.isArray(ids) ? ids : [];
+}
+
+/** 路由解析结果：选中的后端 + 本次能力。 */
+export interface ResolvedBackend {
+  kind: MediaKind;
+  backend: MediaBackend;
+}
+
+/**
+ * 为一个能力解析出**首个配置完整**的后端。
+ * 只跳过「未配置」的后端；不做执行失败后的降级（见文件头约定）。
+ * 无可用后端返回 null。
+ */
+export function resolveBackend(
+  kind: MediaKind,
+  backends: MediaBackend[],
+  routes: MediaRoutes,
+): ResolvedBackend | null {
+  const byId = new Map(backends.map((b) => [b.id, b]));
+  for (const id of routeFor(kind, routes)) {
+    const b = byId.get(id);
+    if (b && isBackendReady(b, kind)) return { kind, backend: b };
+  }
+  return null;
+}
+
+/** 便捷封装：直接从 Storage 读清单与路由并解析。 */
+export function resolveBackendFromStorage(kind: MediaKind, s: Storage = storage): ResolvedBackend | null {
+  return resolveBackend(kind, loadBackends(s), loadRoutes(s));
+}
+
+/**
+ * 把路由解析结果转成传给 Rust 的媒体配置（ai_chat_agent 的 media 参数）。
+ * 只带上**本次调用需要**的字段（后端已由前端选好，Rust 不再做路由决策）。
+ */
+export interface MediaToolCfg {
+  kind: MediaKind;
+  backendKind: string;
+  baseUrl: string;
+  apiKey: string;
+  ckpt?: string;
+  workflowPath?: string;
+  skillSlug?: string;
+  /** openai 档：该能力的模型名。 */
+  model?: string;
+  /** openai 档：引用哪个档案取凭证（Rust 侧据此解析，避免前端传 key）。 */
+  profileId?: string;
+  /** comfyui 档：resolve.ts 解析后的 API 工作流（完整节点图）。 */
+  workflow?: Record<string, unknown>;
+  /** comfyui 档：提示词写入位（Rust 据此把描述插进工作流）。 */
+  promptAt?: { nodeId: string; inputKey: string };
+}
+
+/** 由解析结果构造 Rust 侧配置。 */
+export function toMediaToolCfg(r: ResolvedBackend): MediaToolCfg {
+  const b = r.backend;
+  return {
+    kind: r.kind,
+    backendKind: b.kind,
+    baseUrl: b.baseUrl.trim(),
+    apiKey: b.apiKey.trim(),
+    ...(b.extras.ckpt?.trim() ? { ckpt: b.extras.ckpt.trim() } : {}),
+    ...(b.extras.workflowPath?.trim() ? { workflowPath: b.extras.workflowPath.trim() } : {}),
+    ...(b.extras.skillSlug?.trim() ? { skillSlug: b.extras.skillSlug.trim() } : {}),
+    ...(b.extras.models?.[r.kind]?.trim() ? { model: b.extras.models[r.kind]!.trim() } : {}),
+    ...(b.extras.profileId?.trim() ? { profileId: b.extras.profileId.trim() } : {}),
+  };
+}
+
+/** 首次调用时的默认路由（迁移用）：按清单里各后端声明的 caps 拼出单链。 */
+export function defaultRoutes(backends: MediaBackend[]): MediaRoutes {
+  const out: MediaRoutes = {};
+  for (const kind of ALL_KINDS) {
+    const ids = backends.filter((b) => b.caps.includes(kind)).map((b) => b.id);
+    if (ids.length) out[kind] = ids;
+  }
+  return out;
+}
