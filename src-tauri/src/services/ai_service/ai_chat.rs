@@ -260,7 +260,9 @@ pub async fn ai_chat(
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
             .collect::<Vec<_>>()
     };
-    let thinking = cfg.thinking.unwrap_or(false);
+    // 生效档位由 ResolvedTarget::effort() 统一推导（显式 effort 优先，回落到旧 thinking 开关）。
+    // thinking 仅表示「推理是否开着」，用于下方 reasoning_content 的转发门控。
+    let thinking = !cfg.reasoning_off();
     // 人设 system：组合后合并进首条 system 消息（不破坏插件自带的项目上下文 / SOP / 状态注入）。
     // 伴侣模式（exclude_global_persona=true）：跳过全局人设，仅保留前端注入的伴侣人设。
     let persona = if exclude_global_persona.unwrap_or(false) {
@@ -294,9 +296,9 @@ pub async fn ai_chat(
     if thinking {
         // 思考模式：思维链通过 reasoning_content 返回（与 content 同级）。
         // 思考模式不支持 temperature / top_p（OpenAI o-series 直接报错，DeepSeek 忽略），故省略。
-        // reasoning_effort：OpenAI 兼容端点统一发 high；端点取值集合不一致时由下方发送逻辑
-        // 按 400 响应自适应降级（去掉该字段重发），不在此处按 base_url 猜端点类型。
-        body["reasoning_effort"] = serde_json::json!("high");
+        // 档位取值来自「供应商上报 → 内置保守表」的集合（见 reasoning.rs），
+        // 不在此处按 base_url 猜端点类型；端点仍拒绝时由下方 400 自适应降级兜底。
+        body["reasoning_effort"] = serde_json::json!(cfg.effort());
         // DeepSeek 需显式 thinking 开关；OpenAI o-series 仅靠 reasoning_effort，多余字段会 400，
         // 故 thinking 块仅对 DeepSeek 附加。
         if is_deepseek_provider(&cfg) {

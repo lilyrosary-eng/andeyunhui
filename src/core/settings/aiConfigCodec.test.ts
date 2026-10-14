@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { fromConfig, toConfig, type ConfigUi } from './aiConfigCodec';
+import { effectiveEffort, fromConfig, toConfig, type ConfigUi } from './aiConfigCodec';
 
 const PAYLOAD = {
   providers: [
@@ -144,5 +144,48 @@ describe('toConfig', () => {
     const out = toConfig(empty);
     expect(out.providers).toEqual([]);
     expect(out.selection).toEqual({ provider_id: null, model_id: null });
+  });
+});
+
+describe('effectiveEffort —— 与后端 ResolvedTarget::effort 同口径', () => {
+  const spec = (ids: string[], def: string | null) => ({
+    efforts: ids.map((id) => ({ id, name: id })),
+    default: def,
+    from_provider: false,
+  });
+
+  it('显式档位优先于旧开关', () => {
+    expect(effectiveEffort({ reasoning_effort: 'medium', thinking: false, reasoning: spec(['off', 'medium'], 'off') }))
+      .toBe('medium');
+  });
+
+  it('旧开关 true 映射为 high（与改造前一致）', () => {
+    expect(effectiveEffort({ reasoning_effort: '', thinking: true, reasoning: spec(['off', 'high'], 'off') }))
+      .toBe('high');
+  });
+
+  it('都没有时用集合默认', () => {
+    expect(effectiveEffort({ reasoning_effort: '', thinking: false, reasoning: spec(['off', 'medium'], 'medium') }))
+      .toBe('medium');
+  });
+
+  it('没有集合信息时回落 off（老配置零回归）', () => {
+    expect(effectiveEffort({ reasoning_effort: '', thinking: false, reasoning: spec([], null) })).toBe('off');
+  });
+
+  it('越界档位收敛到集合默认（避免发出端点不认的值）', () => {
+    // 在 gpt-5 上设过 medium，切到只认 off/high 的模型
+    expect(effectiveEffort({ reasoning_effort: 'medium', thinking: false, reasoning: spec(['off', 'high'], 'off') }))
+      .toBe('off');
+  });
+
+  it('档位比较大小写不敏感', () => {
+    expect(effectiveEffort({ reasoning_effort: 'HIGH', thinking: false, reasoning: spec(['off', 'high'], 'off') }))
+      .toBe('high');
+  });
+
+  it('空集合时显式档位原样放行（兼容老配置）', () => {
+    expect(effectiveEffort({ reasoning_effort: 'medium', thinking: false, reasoning: spec([], null) }))
+      .toBe('medium');
   });
 });

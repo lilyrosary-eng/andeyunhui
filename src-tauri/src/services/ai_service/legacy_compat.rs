@@ -108,12 +108,15 @@ pub fn from_legacy_profiles(existing: &AiConfig, legacy: &AiProfiles) -> AiConfi
             },
             context_tokens: None,
             max_output_tokens: None,
+            reasoning: None,
             overrides: Overrides {
                 temperature: Some(p.temperature),
                 max_tokens: p.max_tokens,
                 top_p: p.top_p,
                 system_prompt: p.system_prompt.clone(),
+                // v1 只有布尔开关；档位留空，由 thinking 回落到 high/off（与改造前一致）
                 thinking: p.thinking,
+                reasoning_effort: None,
                 persona_call_me_as: p.persona_call_me_as.clone(),
                 persona_preset: p.persona_preset.clone(),
                 persona_style: p.persona_style.clone(),

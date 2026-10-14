@@ -1,5 +1,5 @@
 import { X } from 'lucide-react';
-import type { ModelUi } from '../aiConfigCodec';
+import { effectiveEffort, type ModelUi } from '../aiConfigCodec';
 
 const inputCls =
   'w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-800 dark:text-stone-100 outline-none focus:ring-2 focus:ring-[var(--element-border)] transition-colors';
@@ -93,10 +93,42 @@ export function ModelEditorDrawer(props: ModelEditorDrawerProps) {
             <textarea className={`${inputCls} min-h-[72px]`} value={m.system_prompt}
               onChange={(e) => set({ system_prompt: e.target.value })} />
           </div>
-          <label className="flex items-center gap-2 text-xs text-neutral-700 dark:text-stone-300">
-            <input type="checkbox" checked={m.thinking} onChange={(e) => set({ thinking: e.target.checked })} />
-            {t('modelSettings.thinking')}
-          </label>
+          {/* 推理档位：只在**供应商上报或兜底表给出的集合**里选——发端点不认识的值会被直接 400。
+              集合为空（老配置）时退化为原来的布尔开关，行为与改造前一致。 */}
+          <div>
+            <div className="flex items-baseline justify-between gap-2">
+              <label className={`${labelCls} mb-0`}>{t('modelSettings.reasoningEffort')}</label>
+              {m.reasoning.efforts.length > 0 && (
+                <span className="text-[10px] text-neutral-400">
+                  {m.reasoning.from_provider ? t('modelSettings.effortFromProvider') : t('modelSettings.effortFromBuiltin')}
+                </span>
+              )}
+            </div>
+            {m.reasoning.efforts.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                {m.reasoning.efforts.map((e) => {
+                  const on = effectiveEffort(m) === e.id.toLowerCase();
+                  return (
+                    <button key={e.id} type="button"
+                      onClick={() => set({ reasoning_effort: e.id, thinking: e.id.toLowerCase() !== 'off' })}
+                      className={`px-2.5 py-1 rounded-full text-[11px] border transition-colors ${
+                        on
+                          ? 'border-[var(--element-border)] bg-[rgba(230,195,92,0.14)] text-neutral-800 dark:text-stone-100 font-medium'
+                          : 'border-neutral-200 dark:border-stone-700 text-neutral-600 dark:text-stone-300 hover:border-neutral-300'
+                      }`}>
+                      {e.name}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <label className="flex items-center gap-2 text-xs text-neutral-700 dark:text-stone-300 mt-1">
+                <input type="checkbox" checked={m.thinking}
+                  onChange={(e) => set({ thinking: e.target.checked, reasoning_effort: '' })} />
+                {t('modelSettings.thinking')}
+              </label>
+            )}
+          </div>
 
           {/* 人设（称呼 / 风格预设 / 自定义风格）——v2 重构漏搬，现按旧桌面设计恢复。
               字段已在 ModelUi schema + toModel 序列化里，此处仅补编辑 UI；系统提示词在下方单独编辑。 */}

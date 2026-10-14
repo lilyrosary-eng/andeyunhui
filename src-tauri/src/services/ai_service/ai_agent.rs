@@ -178,9 +178,10 @@ async fn run_agent(
             "tools": tools,
             "tool_choice": "auto",
         });
-        let thinking = cfg.thinking.unwrap_or(false);
+        // 与 ai_chat 同口径：档位由 ResolvedTarget::effort() 推导（显式 effort 优先，回落旧 thinking）。
+        let thinking = !cfg.reasoning_off();
         if thinking {
-            body["reasoning_effort"] = serde_json::json!("high");
+            body["reasoning_effort"] = serde_json::json!(cfg.effort());
             if is_deepseek_provider(&cfg) {
                 body["thinking"] = serde_json::json!({ "type": "enabled" });
             }

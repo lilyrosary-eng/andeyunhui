@@ -158,8 +158,14 @@ pub struct Overrides {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// 旧的思考开关（布尔）。**保留不删**：插件与旧前端仍在读写它，
+    /// 且它是 `reasoning_effort` 缺省时的回落依据（true→high，false/None→off）。
     #[serde(default)]
     pub thinking: Option<bool>,
+    /// 推理档位（"off" / "low" / "medium" / "high" 等）。**优先于 `thinking`**。
+    /// 取值由供应商上报或内置保守表给出，见 reasoning.rs。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub persona_call_me_as: Option<String>,
     #[serde(default)]
@@ -219,6 +225,10 @@ pub struct ModelEntry {
     ///    两者不可互换——这里描述模型能产多长，那里描述本次要它产多长。
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    /// 推理档位集合（供应商上报优先，否则内置保守兜底）。UI 只从这里列出的档位中选，
+    /// 避免发出端点不认识的值（那会被直接 400）。见 reasoning.rs。
+    #[serde(default)]
+    pub reasoning: Option<super::reasoning::ReasoningSpec>,
     #[serde(default)]
     pub overrides: Overrides,
 }
@@ -353,12 +363,15 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
             caps: Caps { text: true, ..Default::default() },
             context_tokens: None,
             max_output_tokens: None,
+            reasoning: None,
             overrides: Overrides {
                 temperature: Some(p.temperature),
                 max_tokens: p.max_tokens,
                 top_p: p.top_p,
                 system_prompt: p.system_prompt.clone(),
+                // v1 只有布尔开关；档位留空，由 thinking 回落到 high/off（与改造前一致）
                 thinking: p.thinking,
+                reasoning_effort: None,
                 persona_call_me_as: p.persona_call_me_as.clone(),
                 persona_preset: p.persona_preset.clone(),
                 persona_style: p.persona_style.clone(),
@@ -544,6 +557,11 @@ pub struct ResolvedTarget {
     pub top_p: Option<f32>,
     pub system_prompt: Option<String>,
     pub thinking: Option<bool>,
+    /// 推理档位（优先于 thinking），见 `effort()`。
+    pub reasoning_effort: Option<String>,
+    /// 该模型可用的档位集合（发现时由供应商上报或内置兜底写入）。
+    /// 没有它就无法判断某个档位值是否合法，只能原样放行。
+    pub reasoning: Option<super::reasoning::ReasoningSpec>,
     pub persona_call_me_as: Option<String>,
     pub persona_preset: Option<String>,
     pub persona_style: Option<String>,
@@ -551,6 +569,49 @@ pub struct ResolvedTarget {
 }
 
 impl ResolvedTarget {
+    /// 生效的推理档位。优先级：显式 `reasoning_effort` > 旧 `thinking` 开关 > 档位集合的默认 > 关。
+    ///
+    /// 旧值映射刻意保持**与改造前完全一致**，避免回归：
+    /// `thinking: true` 时改造前发的是 `reasoning_effort: "high"`，故映射为 "high"；
+    /// `false` 时改造前不发该字段，故映射为 "off"。
+    ///
+    /// 第三级（档位集合的默认）只对**发现过的新模型**生效——老配置里没有 `reasoning` 字段，
+    /// 一律走 "off"，与改造前行为完全一致。
+    ///
+    /// 最后还会用集合**收敛**越界值：配置里可能留着「在别的模型上设过的档位」，
+    /// 直接发出去会被端点 400（用户明确要求这一点要谨慎）。
+    pub(crate) fn effort(&self) -> String {
+        let spec = self.reasoning.as_ref();
+        let explicit = self
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase());
+        let wanted = match explicit {
+            Some(e) => e,
+            None => match self.thinking {
+                Some(true) => "high".to_string(),
+                Some(false) => "off".to_string(),
+                None => {
+                    return spec
+                        .map(|s| s.default_effort())
+                        .unwrap_or_else(|| super::reasoning::EFFORT_OFF.to_string())
+                }
+            },
+        };
+        // 没有集合信息时无从判断合法性，原样放行（兼容老配置）
+        match spec {
+            Some(s) => super::reasoning::clamp_effort(s, &wanted),
+            None => wanted,
+        }
+    }
+
+    /// 是否「关闭推理」。"off" = 不发 reasoning_effort，走普通采样参数并恢复 temperature 等。
+    pub(crate) fn reasoning_off(&self) -> bool {
+        self.effort() == "off"
+    }
+
     /// Agent 上下文估算上限（token）。未配置时默认 200k —— 兼容 v1 行为，
     /// 对多数模型都留足余量。优先取用户手工设的值，其次端点自报的，最后 200k。
     pub(crate) fn context_cap(&self) -> usize {
@@ -576,6 +637,8 @@ pub fn placeholder_target() -> ResolvedTarget {
         top_p: None,
         system_prompt: None,
         thinking: None,
+        reasoning_effort: None,
+        reasoning: None,
         persona_call_me_as: None,
         persona_preset: None,
         persona_style: None,
@@ -650,6 +713,8 @@ pub fn resolve_target(config: &AiConfig, model_id: Option<&str>) -> ResolvedTarg
         top_p: o.top_p,
         system_prompt: o.system_prompt.clone(),
         thinking: o.thinking,
+        reasoning_effort: o.reasoning_effort.clone(),
+        reasoning: m.reasoning.clone(),
         persona_call_me_as: o.persona_call_me_as.clone(),
         persona_preset: o.persona_preset.clone(),
         persona_style: o.persona_style.clone(),
@@ -1083,5 +1148,68 @@ mod v2_tests {
         let raw = json!({ "base_url": "http://x/v1", "api_key": "k", "model": "gpt-4o" });
         let cfg = migrate_v1_to_v2(&raw);
         assert_eq!(cfg.providers[0].models[0].id, "legacy");
+    }
+
+    // ===== 推理档位（ResolvedTarget::effort）=====
+
+    #[test]
+    fn 档位_显式优先于旧开关() {
+        let t = ResolvedTarget {
+            reasoning_effort: Some("medium".into()),
+            thinking: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(t.effort(), "medium", "显式档位压过旧开关");
+    }
+
+    #[test]
+    fn 档位_旧开关映射与改造前一致() {
+        // 改造前：thinking=true 发 reasoning_effort "high"；false 不发（=off）
+        let on = ResolvedTarget { thinking: Some(true), ..Default::default() };
+        assert_eq!(on.effort(), "high");
+        assert!(!on.reasoning_off());
+        let off = ResolvedTarget { thinking: Some(false), ..Default::default() };
+        assert_eq!(off.effort(), "off");
+        assert!(off.reasoning_off());
+    }
+
+    #[test]
+    fn 档位_老配置零回归() {
+        // 老配置没有 reasoning 集合、也没有档位字段 → 必须与改造前一致地为 off
+        let legacy = ResolvedTarget::default();
+        assert_eq!(legacy.effort(), "off");
+        assert!(legacy.reasoning_off());
+    }
+
+    #[test]
+    fn 档位_无显式无开关时用集合默认() {
+        let spec = crate::services::ai_service::reasoning::builtin_spec("o3-mini");
+        let t = ResolvedTarget { reasoning: Some(spec), ..Default::default() };
+        assert_eq!(t.effort(), "medium", "o-series 内置默认 medium");
+    }
+
+    #[test]
+    fn 档位_越界值收敛到集合内避免400() {
+        // 在 gpt-5 上设了 medium，配置切到只认 off/high 的模型：不能把这个值发出去
+        let spec = crate::services::ai_service::reasoning::builtin_spec("deepseek-chat");
+        let t = ResolvedTarget {
+            reasoning_effort: Some("medium".into()),
+            reasoning: Some(spec),
+            ..Default::default()
+        };
+        assert_eq!(t.effort(), "off", "不在集合内 → 收敛到集合默认");
+        // 但集合里有的值要原样放行
+        let ok = ResolvedTarget {
+            reasoning_effort: Some("HIGH".into()),
+            reasoning: Some(crate::services::ai_service::reasoning::builtin_spec("deepseek-chat")),
+            ..Default::default()
+        };
+        assert_eq!(ok.effort(), "high", "大小写不敏感");
+    }
+
+    #[test]
+    fn 档位_无集合信息时原样放行以兼容老配置() {
+        let t = ResolvedTarget { reasoning_effort: Some("medium".into()), ..Default::default() };
+        assert_eq!(t.effort(), "medium", "没有集合就无从判断合法性，原样放行");
     }
 }

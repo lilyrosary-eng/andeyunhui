@@ -10,6 +10,29 @@ export interface CapsUi {
   tools: boolean;
 }
 
+/** 一个推理档位（与 Rust reasoning::EffortOption 对齐）。 */
+export interface EffortOptionUi {
+  id: string;
+  name: string;
+}
+
+/**
+ * 模型可用的推理档位集合（与 Rust reasoning::ReasoningSpec 对齐）。
+ * 取值**只来自**供应商上报或内置保守表——不在此处臆造，发错值会被端点 400。
+ */
+export interface ReasoningSpecUi {
+  efforts: EffortOptionUi[];
+  /** 默认档位（可能为空）。 */
+  default: string | null;
+  /** true = 供应商上报；false = 内置兜底（UI 据此提示来源）。 */
+  from_provider: boolean;
+}
+
+/** 空档位集合（工厂而非共享常量，避免被下游误改）。 */
+export function emptyReasoning(): ReasoningSpecUi {
+  return { efforts: [], default: null, from_provider: false };
+}
+
 export interface ModelUi {
   id: string;
   model: string;
@@ -26,7 +49,12 @@ export interface ModelUi {
   max_tokens: string;
   top_p: string;
   system_prompt: string;
+  /** 旧的布尔思考开关。保留：它是 reasoning_effort 缺省时的回落依据（true→high）。 */
   thinking: boolean;
+  /** 当前推理档位（'' = 未显式设置，按 thinking / 规范默认推导）。 */
+  reasoning_effort: string;
+  /** 可选档位集合与来源。 */
+  reasoning: ReasoningSpecUi;
   persona_call_me_as: string;
   persona_preset: string;
   persona_style: string;
@@ -76,6 +104,20 @@ const numStr = (v: unknown): string => {
   return n === null ? '' : String(n);
 };
 
+/** 解析档位集合；形状不对时返回空集合（UI 会退化成旧的布尔开关）。 */
+function reasoningFrom(raw: any): ReasoningSpecUi {
+  const efforts = Array.isArray(raw?.efforts)
+    ? raw.efforts
+        .filter((e: any) => typeof e?.id === 'string' && e.id.trim() !== '')
+        .map((e: any) => ({ id: String(e.id).trim(), name: (s(e.name) || String(e.id).trim()) }))
+    : [];
+  return {
+    efforts,
+    default: typeof raw?.default === 'string' && raw.default.trim() !== '' ? raw.default.trim() : null,
+    from_provider: raw?.fromProvider === true,
+  };
+}
+
 function modelFrom(raw: any): ModelUi {
   const o = raw?.overrides || {};
   return {
@@ -90,6 +132,8 @@ function modelFrom(raw: any): ModelUi {
     top_p: numStr(o.top_p),
     system_prompt: s(o.system_prompt),
     thinking: o.thinking === true,
+    reasoning_effort: s(o.reasoning_effort),
+    reasoning: reasoningFrom(raw?.reasoning),
     persona_call_me_as: s(o.persona_call_me_as),
     persona_preset: s(o.persona_preset),
     persona_style: s(o.persona_style),
@@ -108,6 +152,24 @@ function providerFrom(raw: any): ProviderUi {
     last_scanned_at: numOrNull(raw?.last_scanned_at),
     models: Array.isArray(raw?.models) ? raw.models.map(modelFrom) : [],
   };
+}
+
+/**
+ * 生效的推理档位——与后端 `ResolvedTarget::effort()` **同口径**，保证所见即所得。
+ *
+ *   显式档位 > 旧开关（true→high）> 档位集合的默认 > off
+ *
+ * 并且：显式档位**不在集合内**时收敛到集合默认（配置里可能留着「在别的模型上设过的档位」，
+ * 直接发出去会被端点 400）。
+ */
+export function effectiveEffort(m: Pick<ModelUi, 'reasoning_effort' | 'thinking' | 'reasoning'>): string {
+  const spec = m.reasoning;
+  const has = (id: string) => spec.efforts.some((e) => e.id.toLowerCase() === id);
+  const fallback = spec.efforts.length ? (spec.default ?? spec.efforts[0].id) : 'off';
+  const explicit = m.reasoning_effort.trim().toLowerCase();
+  if (explicit) return !spec.efforts.length || has(explicit) ? explicit : fallback;
+  if (m.thinking) return !spec.efforts.length || has('high') ? 'high' : fallback;
+  return fallback;
 }
 
 export function fromConfig(payload: any): ConfigUi {
@@ -131,6 +193,8 @@ function toModel(m: ModelUi) {
     caps: m.caps,
     context_tokens: ctx === null ? null : Math.trunc(ctx),
     max_output_tokens: mot === null ? null : Math.max(1, Math.trunc(mot)),
+    // 空集合不必落盘（null 更省空间，语义也明确）
+    reasoning: m.reasoning.efforts.length > 0 ? m.reasoning : null,
     overrides: {
       // 空温度回落 0.3：后端 resolve_target 也这么做，前端保持一致以便所见即所得
       temperature: t === null ? DEFAULT_TEMPERATURE : t,

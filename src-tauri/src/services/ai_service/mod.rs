@@ -17,6 +17,7 @@ pub mod secret;
 pub mod ai_profile;
 pub mod legacy_compat;
 pub mod caps_infer;
+pub mod reasoning;
 pub mod ai_discover;
 pub mod ai_chat;
 pub mod ai_tools;

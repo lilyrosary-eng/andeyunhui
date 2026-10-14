@@ -12,6 +12,7 @@ use tokio::task::JoinSet;
 
 use super::ai_profile::Caps;
 use super::caps_infer::{infer_capacity, infer_caps};
+use super::reasoning::{builtin_spec, spec_from_entry, ReasoningSpec};
 
 pub const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -29,6 +30,10 @@ pub struct DiscoveredModel {
     /// 按模型名推断的能力标记，由 caps_infer::infer_caps 填充
     #[serde(default)]
     pub caps: Caps,
+    /// 推理档位：供应商上报优先（spec_from_entry），没有则内置保守兜底（builtin_spec）。
+    /// UI 只从这里列出的档位中选，避免发出端点不认识的值。
+    #[serde(default)]
+    pub reasoning: Option<ReasoningSpec>,
 }
 
 fn nonempty_str(v: Option<&serde_json::Value>) -> Option<String> {
@@ -51,6 +56,8 @@ fn parse_openai_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
             .or_else(|| pos_u64(e.get("context_length"))),
         max_tokens: pos_u64(e.get("max_output_tokens")).or_else(|| pos_u64(e.get("max_tokens"))),
         caps: Caps::default(),
+        // 供应商若在上报里列了档位就原样采用；没列则留 None，由 with_caps 落兜底表
+        reasoning: spec_from_entry(e),
     })
 }
 
@@ -58,7 +65,15 @@ fn parse_openai_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
 /// 取不到容量字段——Ollama 原生的 /api/tags 不报 context。
 fn parse_ollama_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
     let model = nonempty_str(e.get("model")).or_else(|| nonempty_str(e.get("name")))?;
-    Some(DiscoveredModel { model, label: nonempty_str(e.get("name")), context_tokens: None, max_tokens: None, caps: Caps::default() })
+    // Ollama 原生 /api/tags 不报容量也不报档位，交给 with_caps 落兜底表
+    Some(DiscoveredModel {
+        model,
+        label: nonempty_str(e.get("name")),
+        context_tokens: None,
+        max_tokens: None,
+        caps: Caps::default(),
+        reasoning: None,
+    })
 }
 
 /// 按响应体形状自动解析：先试 OpenAI 的 `data[]`，再试 Ollama 的 `models[]`。
@@ -96,6 +111,10 @@ fn with_caps(mut models: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
             if m.max_tokens.is_none() {
                 m.max_tokens = Some(out);
             }
+        }
+        // 档位：供应商上报优先，没给才落内置保守表（见 reasoning.rs 的取值谨慎原则）
+        if m.reasoning.is_none() {
+            m.reasoning = Some(builtin_spec(&m.model));
         }
     }
     models

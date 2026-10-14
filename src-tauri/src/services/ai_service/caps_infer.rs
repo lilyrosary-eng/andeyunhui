@@ -45,7 +45,7 @@ const NO_TOOLS_HINTS: &[&str] = &["llava", "moondream", "minicpm-v", "cogvlm"];
 
 /// 短标记按**词边界**匹配：以非字母数字切分后逐段等值比对。
 /// 这样 `o1-mini` → ["o1","mini"] 命中，`gpt-4o` → ["gpt","4o"] 不命中。
-fn has_token(n: &str, tok: &str) -> bool {
+pub(crate) fn has_token(n: &str, tok: &str) -> bool {
     n.split(|c: char| !c.is_ascii_alphanumeric()).any(|seg| seg == tok)
 }
 

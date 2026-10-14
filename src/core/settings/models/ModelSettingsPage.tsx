@@ -4,7 +4,7 @@ import { useI18n } from '@/lib/i18n';
 import { Plus, Radar, Cpu } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
-import { fromConfig, toConfig, type ConfigUi, type ModelUi, type ProviderUi } from '../aiConfigCodec';
+import { emptyReasoning, fromConfig, toConfig, type ConfigUi, type ModelUi, type ProviderUi } from '../aiConfigCodec';
 import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
 import { ComfyuiPanel } from './ComfyuiPanel';
@@ -19,7 +19,8 @@ function blankModel(id?: string): ModelUi {
     id: id || newId('m'), model: '', label: '',
     caps: { text: true, vision: false, reasoning: false, embedding: false, tools: false },
     context_tokens: '', max_output_tokens: '', temperature: '', max_tokens: '', top_p: '', system_prompt: '',
-    thinking: false, persona_call_me_as: '', persona_preset: '', persona_style: '',
+    thinking: false, reasoning_effort: '', reasoning: emptyReasoning(),
+    persona_call_me_as: '', persona_preset: '', persona_style: '',
   };
 }
 
@@ -185,9 +186,13 @@ export function ModelSettingsPage() {
 
   const closeDiscover = useCallback(() => setDiscoverSeed(null), []);
 
-  /** 把采纳结果补成完整的 ModelUi 行（补齐 blankModel 的默认值）。 */
+  /**
+   * 把采纳结果补成完整的 ModelUi 行（补齐 blankModel 的默认值）。
+   * `reasoning` 可能是 null（老后端 / 无档位信息）→ 归一成空集合，UI 据此退化为布尔开关。
+   */
   const toModelRows = useCallback(
-    (incoming: AdoptedModel[]): ModelUi[] => incoming.map((m) => ({ ...blankModel(m.id), ...m })),
+    (incoming: AdoptedModel[]): ModelUi[] =>
+      incoming.map((m) => ({ ...blankModel(m.id), ...m, reasoning: m.reasoning ?? emptyReasoning() })),
     [],
   );
 
