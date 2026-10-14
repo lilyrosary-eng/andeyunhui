@@ -42,6 +42,21 @@ export function pickPromptAt(params: WorkflowParameter[]): { nodeId: string; inp
 }
 
 /**
+ * 从工作流参数表里挑出「**图片输入位**」（首个 upload === 'image' 的参数）。
+ *
+ * 图生图/重绘/ControlNet 的前提：Rust 侧先把用户附图上传到 ComfyUI 的 input/，
+ * 再把服务端返回的文件名写进这个位置。
+ *
+ * 这里有优势：前端拿得到 `/object_info`，`uploadKindOf` 是按**节点元数据**（`image_upload` 标志）
+ * 判出来的，比 Rust 侧「猜 LoadImage 节点名」准。所以前端给了就用前端的。
+ * 找不到返回 undefined —— 调用方据此明确报错，而不是随便挑一个位置写进去。
+ */
+export function pickImageAt(params: WorkflowParameter[]): { nodeId: string; inputKey: string } | undefined {
+  const p = params.find((x) => x.upload === 'image');
+  return p ? { nodeId: p.nodeId, inputKey: p.inputKey } : undefined;
+}
+
+/**
  * 从设置与蓝图挂钩解析 ComfyUI 生图配置。无可用配置返回 null。
  * 注意：workflow 未经 applyWorkflowParameters 预填提示词——prompt 由 Rust 侧按
  * promptAt 写入（每次生成都是新描述，前端无从预知）。

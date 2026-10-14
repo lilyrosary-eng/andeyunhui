@@ -227,6 +227,61 @@ fn history_error_text(entry: &serde_json::Value) -> String {
     }
 }
 
+/// 把一张图片上传到 ComfyUI 的 `input/` 目录，返回可用于工作流 `LoadImage.image` 的文件名。
+///
+/// 这是**图生图 / 重绘 / ControlNet** 的前置条件：ComfyUI 的工作流按**文件名**引用输入图片，
+/// 图片必须先落到它的 input 目录。此前只做文生图，正是缺这一步（`/upload/image` 从未被调用）。
+///
+/// ⚠️ 必须用**服务端返回的 name**，不能想当然用本地文件名：重名时 ComfyUI 会改名。
+pub async fn comfyui_upload_image(
+    base: &str,
+    filename: &str,
+    bytes: Vec<u8>,
+    mime: &str,
+) -> Result<String, String> {
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(filename.to_string())
+        .mime_str(mime)
+        .map_err(|e| format!("构造上传部件失败: {}", e))?;
+    let form = reqwest::multipart::Form::new()
+        .part("image", part)
+        .text("type", "input")
+        .text("overwrite", "true");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("创建上传客户端失败: {}", e))?;
+    let resp = client
+        .post(format!("{}/upload/image", base.trim_end_matches('/')))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("上传图片到 ComfyUI 失败（{}）: {}", base, e))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "ComfyUI 上传图片 HTTP {}: {}",
+            status,
+            body.chars().take(300).collect::<String>()
+        ));
+    }
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("解析上传响应失败: {}；原文：{}", e, body.chars().take(200).collect::<String>()))?;
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err("ComfyUI 上传成功但未返回文件名".to_string());
+    }
+    // 有 subfolder 时工作流里要写相对 input 的完整路径
+    let sub = v.get("subfolder").and_then(|x| x.as_str()).unwrap_or("").trim();
+    Ok(if sub.is_empty() { name } else { format!("{}/{}", sub, name) })
+}
+
 /// 提交 API 工作流 → 轮询 /history 出媒体 → 从 /view 取字节 → 媒体 data URL（image/video/gif/audio）。
 /// 本地 SD 出图可能数十秒~数分钟，轮询上限 5 分钟；执行失败（status=error）立即返回，不空等。
 async fn run_comfy_workflow(

@@ -50,12 +50,14 @@ pub struct MediaPayload {
     pub(crate) vision: Option<MediaToolCfg>,
 }
 
-/// 蓝图工作流里「提示词参数位」的定位（前端 analyzeWorkflowParameters 解析产出，
-/// 避免 Rust 侧重复实现节点类型启发式）。node_id 为 API 工作流的节点 id，
-/// input_key 为该节点上的输入键（如 CLIPTextEncode 的 text）。
+/// 工作流里一个「输入端」的定位（node_id + input_key）。
+///
+/// 提示词位与**图片位**共用此结构，故名字取通用的 Slot。由前端
+/// `analyzeWorkflowParameters` 解析产出（前端有 /object_info，能准确判 upload 类型），
+/// 避免 Rust 侧重复实现节点类型启发式。
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ComfyuiPromptAt {
+pub(crate) struct ComfyuiSlot {
     pub(crate) node_id: String,
     pub(crate) input_key: String,
 }
@@ -83,7 +85,10 @@ pub(crate) struct MediaToolCfg {
     /// ComfyUI：蓝图指定的 API 工作流（完整节点图）。
     pub(crate) workflow: Option<serde_json::Value>,
     /// ComfyUI：提示词写入位（workflow 存在时）。
-    pub(crate) prompt_at: Option<ComfyuiPromptAt>,
+    pub(crate) prompt_at: Option<ComfyuiSlot>,
+    /// ComfyUI：**图片输入位**（图生图/重绘/ControlNet 用）。缺省则可回落到
+    /// `comfyui_image_slot` 的名字启发式；两者都没有说明该工作流不吃图片输入。
+    pub(crate) image_at: Option<ComfyuiSlot>,
     /// 蓝图工作流的技能包 slug（备注键）。失败时随错误上报，前端写回备注。
     pub(crate) skill_slug: Option<String>,
     /// openai 档：该能力的模型名（image → 图片模型，speech → TTS 模型）。
@@ -3045,20 +3050,20 @@ impl AiTool for RagSearchTool {
 
 /// 在 API 工作流里启发式找提示词写入位（前端未给 prompt_at 时的兜底）：
 /// 优先 CLIPTextEncode 系节点的 text 输入，其次任意含 text 字符串输入的节点。
-fn comfyui_prompt_slot(wf: &serde_json::Value) -> Option<ComfyuiPromptAt> {
+fn comfyui_prompt_slot(wf: &serde_json::Value) -> Option<ComfyuiSlot> {
     let nodes = wf.as_object()?;
     let text_input = |node: &serde_json::Value| node.pointer("/inputs/text").and_then(|v| v.as_str()).is_some();
     // 第一遍：知名文本编码类（正/负提示词都算，取首个即可被用户工作流覆盖）
     for (id, node) in nodes {
         let ct = node.get("class_type").and_then(|v| v.as_str()).unwrap_or("");
         if (ct.contains("CLIPTextEncode") || ct == "PrimitiveString" || ct == "PrimitiveStringMultiline") && text_input(node) {
-            return Some(ComfyuiPromptAt { node_id: id.clone(), input_key: "text".to_string() });
+            return Some(ComfyuiSlot { node_id: id.clone(), input_key: "text".to_string() });
         }
     }
     // 第二遍：任何带 text 字符串输入的节点
     for (id, node) in nodes {
         if text_input(node) {
-            return Some(ComfyuiPromptAt { node_id: id.clone(), input_key: "text".to_string() });
+            return Some(ComfyuiSlot { node_id: id.clone(), input_key: "text".to_string() });
         }
     }
     None
@@ -3066,7 +3071,59 @@ fn comfyui_prompt_slot(wf: &serde_json::Value) -> Option<ComfyuiPromptAt> {
 
 /// 经 ComfyUI 生图：蓝图工作流（写入 prompt 位后整图提交）或内置最小 txt2img。
 /// 复用 multimodal_service::comfyui_generate_media（tauri 命令函数，可直接调用）。
-async fn generate_via_comfy(cfg: &MediaToolCfg, prompt: &str) -> Result<String, String> {
+/// 找**图片输入位**：`LoadImage` 一类节点的 `image` 字符串输入。
+///
+/// 前端给了 `image_at` 就用前端的（前端有 /object_info，能按 upload 元数据准确判定）；
+/// 这是找不到时的名字启发式。两者都没有 → 该工作流不吃图片输入。
+fn comfyui_image_slot(wf: &serde_json::Value) -> Option<ComfyuiSlot> {
+    let nodes = wf.as_object()?;
+    // 只认**字符串**输入：若该输入是连线（数组 [nodeId, idx]），说明图片来自图内生成而非上传
+    let has_str_image = |node: &serde_json::Value| {
+        node.pointer("/inputs/image").and_then(|v| v.as_str()).is_some()
+    };
+    for (id, node) in nodes {
+        let ct = node.get("class_type").and_then(|v| v.as_str()).unwrap_or("");
+        if ct.contains("LoadImage") && has_str_image(node) {
+            return Some(ComfyuiSlot { node_id: id.clone(), input_key: "image".to_string() });
+        }
+    }
+    for (id, node) in nodes {
+        if has_str_image(node) {
+            return Some(ComfyuiSlot { node_id: id.clone(), input_key: "image".to_string() });
+        }
+    }
+    None
+}
+
+/// 把附图的 data URL 解码并上传到 ComfyUI 的 `input/`，返回服务端给的引用名。
+async fn upload_input_image(cfg: &MediaToolCfg, data_url: &str) -> Result<String, String> {
+    let (mime, b64) = split_data_url(data_url);
+    let ext = match mime.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        _ => "png",
+    };
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("附图 base64 解码失败: {}", e))?;
+    if bytes.is_empty() {
+        return Err("附图内容为空".to_string());
+    }
+    // 文件名带时间戳：多轮/并发之间不互相覆盖（服务端仍会按需改名，以它返回的为准）
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let name = format!("ae_{}.{}", stamp, ext);
+    crate::services::multimodal_service::comfyui_upload_image(&cfg.base_url, &name, bytes, &mime).await
+}
+
+/// 生成图片。`image` 为用户附图（data URL）——给了就是**图生图**：
+/// 先把图上传到 ComfyUI 的 `input/`，再把服务端返回的文件名写进工作流的图片输入位。
+async fn generate_via_comfy(cfg: &MediaToolCfg, prompt: &str, image: Option<&str>) -> Result<String, String> {
     if let Some(wf) = &cfg.workflow {
         let mut wf = wf.clone();
         // 提示词写入位：前端解析结果优先，启发式兜底；都找不到必须报错——
@@ -3081,8 +3138,33 @@ async fn generate_via_comfy(cfg: &MediaToolCfg, prompt: &str) -> Result<String, 
                 obj.insert(slot.input_key.clone(), serde_json::json!(prompt));
             }
         }
+        // 图生图：上传附图并把文件名写进图片输入位
+        if let Some(data_url) = image {
+            let name = upload_input_image(cfg, data_url).await?;
+            let at = cfg
+                .image_at
+                .clone()
+                .or_else(|| comfyui_image_slot(&wf))
+                .ok_or_else(|| {
+                    "该工作流没有图片输入位（如 LoadImage 的 image），无法用附图做图生图。\
+                     请换一个带图片输入的工作流，或让用户改用文字描述（文生图）"
+                        .to_string()
+                })?;
+            if let Some(inputs) = wf.get_mut(&at.node_id).and_then(|n| n.get_mut("inputs")) {
+                if let Some(obj) = inputs.as_object_mut() {
+                    obj.insert(at.input_key.clone(), serde_json::json!(name));
+                }
+            }
+        }
         crate::services::multimodal_service::comfyui_generate_media(None, cfg.base_url.clone(), None, Some(wf)).await
     } else {
+        // 内置最小 txt2img 不吃图片输入——明确报错，别静默把附图丢掉
+        if image.is_some() {
+            return Err(
+                "内置的最小工作流只支持文生图。要图生图，请在设置→模型→本地生图里指定一个带图片输入（LoadImage）的工作流"
+                    .to_string(),
+            );
+        }
         let ckpt = cfg.ckpt.trim().to_string();
         if ckpt.is_empty() {
             return Err("已配置 ComfyUI 但未填写 checkpoint 模型文件名（设置 → 模型 → 本地生图）".to_string());
@@ -3103,11 +3185,12 @@ impl AiTool for GenerateImageTool {
             "type": "function",
             "function": {
                 "name": self.name(),
-                "description": "生成图片（文生图）。当用户要求画画、生成图像、出图、配图时调用。prompt 写详细的画面描述（主体、风格、构图、光线等，中英文均可）。已配置 ComfyUI 时走本地工作流（含用户在 ComfyUI 里调好的流程），否则走云端图片模型。生成成功后图片会直接展示在对话中，无需你转述画面内容。",
+                "description": "生成图片。当用户要求画画、生成图像、出图、配图时调用。prompt 写详细的画面描述（主体、风格、构图、光线等，中英文均可）。若用户**发来了一张图**并希望「照着这张图改/把它变成…/以它为基础生成」，把 image 设为那张图的序号（从 1 开始，可与 analyze_image 用同一个序号），即为图生图；不带 image 就是纯文生图。已配置 ComfyUI 时走本地工作流（含用户在 ComfyUI 里调好的流程），否则走云端图片模型。生成成功后图片会直接展示在对话中，无需你转述画面内容。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "prompt": { "type": "string", "description": "画面描述（越具体越好：主体、风格、构图、光线等）" }
+                        "prompt": { "type": "string", "description": "画面描述（越具体越好：主体、风格、构图、光线等）" },
+                        "image": { "type": "integer", "description": "（可选）以用户发来的第几张图为底稿做图生图，从 1 开始。仅当用户明确要求「基于/参照/修改」某张附图时使用；纯文字作画时不要传。" }
                     },
                     "required": ["prompt"]
                 }
@@ -3134,30 +3217,56 @@ impl AiTool for GenerateImageTool {
         if prompt.is_empty() {
             return Err("缺少 prompt 参数（画面描述）".to_string());
         }
+        // 附图（图生图）：与 analyze_image 同一套序号约定（1 起），越界时报出实际张数便于自纠
+        let image_data: Option<String> = match args.get("image").and_then(|v| v.as_u64()) {
+            None => None,
+            Some(n) => {
+                if ctx.images.is_empty() {
+                    return Err("传了 image 参数但本轮对话没有附带图片；纯文字作画请去掉 image".to_string());
+                }
+                match usize::try_from(n) {
+                    Ok(v) if v >= 1 && v <= ctx.images.len() => Some(ctx.images[v - 1].clone()),
+                    _ => return Err(format!("图片序号 {} 越界：本轮共附带 {} 张图", n, ctx.images.len())),
+                }
+            }
+        };
         let cfg = ctx.media.image.as_ref().filter(|c| c.is_ready());
         let (data_url, source) = match cfg {
             // comfyui 档：本地工作流 / 内置最小 txt2img
-            Some(c) if c.backend_kind == "comfyui" => match generate_via_comfy(c, &prompt).await {
-                Ok(u) => (u, "comfyui"),
-                // 失败原因带上技能包 slug 前缀（前端据此 append 进该工作流备注）
-                Err(e) => return Err(tag_skill_fail(Some(c), e)),
-            },
+            Some(c) if c.backend_kind == "comfyui" => {
+                match generate_via_comfy(c, &prompt, image_data.as_deref()).await {
+                    Ok(u) => (u, "comfyui"),
+                    // 失败原因带上技能包 slug 前缀（前端据此 append 进该工作流备注）
+                    Err(e) => return Err(tag_skill_fail(Some(c), e)),
+                }
+            }
             // 云端档（或未配置 → 回退云端）。云端失败与工作流技能包无关，不加前缀。
-            _ => (
-                crate::services::multimodal_service::ai_generate_image(
-                    ctx.app.clone(),
-                    prompt.clone(),
-                    ctx.profile_id.clone(),
+            _ => {
+                // 云端 /images/generations 是纯文生图，没有图片输入位：明确拒绝，
+                // 别静默把附图丢掉让用户以为「照图生成」成功了。
+                if image_data.is_some() {
+                    return Err(
+                        "当前图片后端是云端模型，不支持「以图生图」。要改图请改用 ComfyUI 并指定一个带图片输入（LoadImage）的工作流；或改为纯文字描述重新生成"
+                            .to_string(),
+                    );
+                }
+                (
+                    crate::services::multimodal_service::ai_generate_image(
+                        ctx.app.clone(),
+                        prompt.clone(),
+                        ctx.profile_id.clone(),
+                    )
+                    .await?,
+                    "cloud",
                 )
-                .await?,
-                "cloud",
-            ),
+            }
         };
         let used_workflow = cfg.map(|c| c.workflow.is_some()).unwrap_or(false);
         let text = if source == "comfyui" {
             format!(
-                "图片已生成（ComfyUI 本地{}），已直接展示给用户，无需转述画面内容。",
-                if used_workflow { "工作流" } else { "内置流程" }
+                "图片已生成（ComfyUI 本地{}{}），已直接展示给用户，无需转述画面内容。",
+                if used_workflow { "工作流" } else { "内置流程" },
+                if image_data.is_some() { "，图生图" } else { "" }
             )
         } else {
             "图片已生成（云端图片模型），已直接展示给用户，无需转述画面内容。".to_string()
@@ -3561,6 +3670,65 @@ mod tests {
             "4": { "class_type": "EmptyLatentImage", "inputs": { "width": 512, "height": 512, "batch_size": 1 } }
         });
         assert!(comfyui_prompt_slot(&wf).is_none());
+    }
+
+    // ===== 图片输入位（图生图）=====
+
+    #[test]
+    fn comfyui_image_slot_prefers_load_image() {
+        let wf = serde_json::json!({
+            "5": { "class_type": "MyCustomLoader", "inputs": { "image": "a.png" } },
+            "10": { "class_type": "LoadImage", "inputs": { "image": "b.png" } }
+        });
+        let s = comfyui_image_slot(&wf).expect("应找到图片输入位");
+        assert_eq!(s.node_id, "10", "LoadImage 优先于任意节点");
+        assert_eq!(s.input_key, "image");
+    }
+
+    #[test]
+    fn comfyui_image_slot_skips_linked_image_input() {
+        // image 是连线（数组 [nodeId, idx]）→ 图来自图内生成，不是上传位，不该命中。
+        // 认错会把上传文件名写进一个本该是连线的位置，工作流直接报错。
+        let wf = serde_json::json!({
+            "3": { "class_type": "VAEEncode", "inputs": { "image": ["4", 0] } }
+        });
+        assert!(comfyui_image_slot(&wf).is_none());
+    }
+
+    #[test]
+    fn comfyui_image_slot_falls_back_to_any_image_input() {
+        let wf = serde_json::json!({
+            "7": { "class_type": "CustomLoader", "inputs": { "image": "x.png", "tag": 1 } }
+        });
+        assert_eq!(comfyui_image_slot(&wf).unwrap().node_id, "7");
+    }
+
+    #[test]
+    fn media_tool_cfg_carries_image_at() {
+        let v = serde_json::json!({
+            "backendKind": "comfyui",
+            "baseUrl": "http://127.0.0.1:8188",
+            "imageAt": { "nodeId": "10", "inputKey": "image" }
+        });
+        let cfg: MediaToolCfg = serde_json::from_value(v).unwrap();
+        let at = cfg.image_at.expect("应有 imageAt");
+        assert_eq!(at.node_id, "10");
+        assert_eq!(at.input_key, "image");
+    }
+
+    #[test]
+    fn generate_image_schema_has_optional_image() {
+        let tool = GenerateImageTool;
+        let schema = tool.function_schema();
+        let props = &schema["function"]["parameters"]["properties"];
+        assert!(props.get("image").is_some(), "应声明可选 image（图生图）");
+        let required: Vec<&str> = schema["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(required, vec!["prompt"], "image 必须是可选参数（纯文生图不传）");
     }
 
     #[test]

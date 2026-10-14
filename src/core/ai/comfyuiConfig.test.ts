@@ -3,7 +3,7 @@
  * resolveComfyuiConfig 依赖 tauri invoke 与全局 storage，不做单测（其内部选位逻辑即本函数）。
  */
 import { describe, it, expect } from 'vitest';
-import { pickPromptAt } from './comfyuiConfig';
+import { pickImageAt, pickPromptAt } from './comfyuiConfig';
 import type { WorkflowParameter } from './comfyui/params';
 
 /** 造一个 WorkflowParameter 的最小壳（只填 pickPromptAt 关心的字段）。 */
@@ -45,5 +45,31 @@ describe('pickPromptAt', () => {
 
   it('空参数表返回 undefined', () => {
     expect(pickPromptAt([])).toBeUndefined();
+  });
+});
+
+describe('pickImageAt —— 图生图的图片输入位', () => {
+  const p = (over: Partial<WorkflowParameter> & { nodeId: string; inputKey: string }): WorkflowParameter =>
+    ({ name: over.inputKey, label: '', type: 'string', value: '', ...over } as WorkflowParameter);
+
+  it('挑出声明为 upload=image 的参数', () => {
+    const at = pickImageAt([
+      p({ nodeId: '2', inputKey: 'text' }),
+      p({ nodeId: '10', inputKey: 'image', upload: 'image' }),
+    ]);
+    expect(at).toEqual({ nodeId: '10', inputKey: 'image' });
+  });
+
+  it('只认 image 类上传位，不把视频/音频位当图片位', () => {
+    const at = pickImageAt([
+      p({ nodeId: '11', inputKey: 'video', upload: 'video' }),
+      p({ nodeId: '12', inputKey: 'image', upload: 'image' }),
+    ]);
+    expect(at?.nodeId).toBe('12');
+  });
+
+  it('没有上传位返回 undefined（调用方据此明确报错，而不是随便挑一个位置）', () => {
+    expect(pickImageAt([p({ nodeId: '2', inputKey: 'text' })])).toBeUndefined();
+    expect(pickImageAt([])).toBeUndefined();
   });
 });

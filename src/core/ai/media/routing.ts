@@ -82,6 +82,8 @@ export interface MediaToolCfg {
   workflow?: Record<string, unknown>;
   /** comfyui 档：提示词写入位（Rust 据此把描述插进工作流）。 */
   promptAt?: { nodeId: string; inputKey: string };
+  /** comfyui 档：**图片输入位**（Rust 据此把上传后的文件名写进工作流，实现图生图）。 */
+  imageAt?: { nodeId: string; inputKey: string };
 }
 
 /** 由解析结果构造 Rust 侧配置。 */

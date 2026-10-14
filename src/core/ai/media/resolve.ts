@@ -18,7 +18,7 @@ import { convertGraphToApi, type ApiWorkflow } from '@/core/ai/comfyui/convert';
 import { detectWorkflow } from '@/core/ai/comfyui/format';
 import { getObjectInfo } from '@/core/ai/comfyui/objectInfo';
 import { analyzeWorkflowParameters } from '@/core/ai/comfyui/params';
-import { pickPromptAt } from '@/core/ai/comfyuiConfig';
+import { pickImageAt, pickPromptAt } from '@/core/ai/comfyuiConfig';
 import type { MediaKind } from './backends';
 import { resolveBackend, loadRoutes, toMediaToolCfg, type MediaToolCfg } from './routing';
 import { loadBackends } from './backends';
@@ -55,9 +55,11 @@ async function resolveOne(kind: MediaKind): Promise<MediaToolCfg | null> {
           apiWf = json as ApiWorkflow;
         }
         if (Object.keys(apiWf).length > 0) {
-          const promptAt = pickPromptAt(analyzeWorkflowParameters(apiWf, info));
+          const params = analyzeWorkflowParameters(apiWf, info);
+          const promptAt = pickPromptAt(params);
+          const imageAt = pickImageAt(params);
           if (promptAt) {
-            return { ...cfg, workflow: apiWf, promptAt } as MediaToolCfg;
+            return { ...cfg, workflow: apiWf, promptAt, ...(imageAt ? { imageAt } : {}) } as MediaToolCfg;
           }
         }
       }
