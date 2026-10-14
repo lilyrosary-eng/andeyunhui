@@ -297,6 +297,105 @@ pub fn candidate_urls(endpoint: &str) -> Vec<String> {
 struct Probe {
     url: String,
     models: Result<Vec<DiscoveredModel>, String>,
+    /// 诊断：响应顶层出现的键（成功解析时才有）。
+    top_keys: Vec<String>,
+    /// 诊断：所有模型条目里出现过的键（去重排序）。
+    model_keys: Vec<String>,
+}
+
+/// 我们从端点响应里**读过**的键（诊断时用来算"报了但我们没读"的那批）。
+///
+/// 维护要求：给 `context_of` / `max_output_of` / `caps_from_entry` / `parse_*_entry`
+/// 新增字段名时，**必须同步加到这里**，否则新读的字段会被诊断误报成"未识别"。
+const RECOGNIZED_KEYS: &[&str] = &[
+    // 模型标识
+    "id", "name", "model", "display_name",
+    // 上下文长度方言
+    "context_window", "context_length", "max_context_length", "loaded_context_length",
+    "max_model_len", "max_input_tokens", "n_ctx", "details",
+    // 单次最大输出
+    "max_output_tokens", "max_completion_tokens", "max_tokens", "top_provider",
+    // 权威能力上报
+    "capabilities", "architecture", "supported_parameters",
+    // 推理档位
+    "reasoning", "reasoning_effort", "supported_reasoning_efforts", "thinking",
+    // 时间戳（OpenAI 形状自带，无信息量但也不该报成"未识别"）
+    "created", "object", "owned_by", "permission", "root", "parent",
+];
+
+/// 从原始响应里提取「端点到底报了什么」。
+///
+/// ## 为什么需要
+/// 容量识别不行的原因分两种，**修法完全不同**：
+///   ① 端点压根不报（只能靠兜底表 / 手填）；
+///   ② 端点报了，但字段名是另一种方言，我们没读（改几行代码就能修）。
+/// 在拿到原始键集合之前，这两者无法区分 —— 实测用户 184 个模型里只有 9 个拿到
+/// provider 值，但"是不是端点真没报"此前纯靠推测。
+///
+/// 返回 `(顶层键, 模型条目键集合)`，都已排序去重。
+fn extract_key_set(body: &serde_json::Value) -> (Vec<String>, Vec<String>) {
+    let mut top: Vec<String> = body
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    top.sort();
+
+    // 模型数组：OpenAI 的 data[] 或 Ollama 的 models[]
+    let arr = body
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.get("models").and_then(|v| v.as_array()));
+
+    let mut keys: std::collections::BTreeSet<String> = Default::default();
+    if let Some(a) = arr {
+        for e in a {
+            if let Some(o) = e.as_object() {
+                for k in o.keys() {
+                    keys.insert(k.clone());
+                }
+            }
+        }
+    }
+    (top, keys.into_iter().collect())
+}
+
+/// 诊断结果：把「端点报了什么」与「我们读了什么」摊开对照。
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointDiagnostics {
+    /// 实际命中的 URL。
+    pub reached_url: String,
+    /// 响应顶层键。
+    pub top_keys: Vec<String>,
+    /// 所有模型条目里出现过的键。
+    pub model_keys: Vec<String>,
+    /// **端点报了、但我们没读**的键 —— 这份清单就是下一步该支持的新方言。
+    pub unrecognized_keys: Vec<String>,
+    /// 命中端点上报告容量的模型数 / 总模型数（判断"端点报不报"的直接指标）。
+    pub ctx_reported: usize,
+    pub out_reported: usize,
+    pub total: usize,
+}
+
+impl EndpointDiagnostics {
+    fn build(url: String, top_keys: Vec<String>, model_keys: Vec<String>, models: &[DiscoveredModel]) -> Self {
+        let unrecognized: Vec<String> = model_keys
+            .iter()
+            .filter(|k| !RECOGNIZED_KEYS.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        Self {
+            reached_url: url,
+            top_keys,
+            model_keys,
+            unrecognized_keys: unrecognized,
+            // 「端点自报」而不是「最终值」：后者可能是兜底表补的，
+            // 用它判断"端点报不报"会得出错误结论（这正是之前的盲区）。
+            ctx_reported: models.iter().filter(|m| m.ctx_source == Some(CapacitySource::Provider)).count(),
+            out_reported: models.iter().filter(|m| m.out_source == Some(CapacitySource::Provider)).count(),
+            total: models.len(),
+        }
+    }
 }
 
 async fn probe_one(client: &reqwest::Client, url: String, api_key: Option<String>) -> Probe {
@@ -307,7 +406,7 @@ async fn probe_one(client: &reqwest::Client, url: String, api_key: Option<String
         req = req.header("Authorization", format!("Bearer {}", k.trim()));
     }
 
-    let models = async {
+    let outcome = async {
         let mut resp = req.send().await.map_err(|e| format!("端点不可达: {}", e))?;
         let status = resp.status();
         if !status.is_success() {
@@ -333,11 +432,16 @@ async fn probe_one(client: &reqwest::Client, url: String, api_key: Option<String
         }
         let body: serde_json::Value = serde_json::from_slice(&buf)
             .map_err(|_| "响应不是合法 JSON（多半不是 API 端点）".to_string())?;
-        parse_listing(&body)
+        let (top, keys) = extract_key_set(&body);
+        Ok((parse_listing(&body), top, keys))
     }
     .await;
 
-    Probe { url, models }
+    match outcome {
+        Ok((models, top_keys, model_keys)) => Probe { url, models, top_keys, model_keys },
+        // 失败路径也给一份空键集合：诊断面板仍要能显示「这个候选没成、原因是什么」
+        Err(e) => Probe { url, models: Err(e), top_keys: Vec::new(), model_keys: Vec::new() },
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,6 +464,10 @@ pub struct FetchModelsOutput {
     pub models: Vec<DiscoveredModel>,
     /// 试过但失败的候选，仅用于错误提示（「试过这些地址都没成功：…」）
     pub attempted: Vec<String>,
+    /// 端点诊断：把「端点报了什么」与「我们读了什么」摊开对照。
+    /// 让「端点不报」与「端点报了但我们没读」这两种情况可区分 —— 修法完全不同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<EndpointDiagnostics>,
 }
 
 /// 拉取端点的全部模型。
@@ -392,10 +500,17 @@ pub async fn ai_fetch_models(input: FetchModelsInput) -> Result<FetchModelsOutpu
         let Ok(p) = joined else { continue };
         match p.models {
             Ok(models) => {
+                let diag = EndpointDiagnostics::build(
+                    p.url.clone(),
+                    p.top_keys.clone(),
+                    p.model_keys.clone(),
+                    &models,
+                );
                 winner = Some(FetchModelsOutput {
                     resolved_base_url: p.url.trim_end_matches("/models").to_string(),
                     models,
                     attempted: attempted.clone(),
+                    diagnostics: Some(diag),
                 });
                 break;
             }
@@ -665,5 +780,92 @@ mod tests {
         let m = parse_listing(&body).unwrap();
         assert_eq!(m[0].context_tokens, None);
         assert_eq!(m[0].max_tokens, None);
+    }
+}
+
+#[cfg(test)]
+mod diag_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn 提取顶层键与模型键() {
+        let body = json!({
+            "object": "list",
+            "data": [
+                { "id": "a", "context_length": 8192, "weird_field": 1 },
+                { "id": "b", "context_length": 4096, "another_odd": true }
+            ]
+        });
+        let (top, keys) = extract_key_set(&body);
+        assert_eq!(top, vec!["data", "object"]);
+        // 模型条目的键取并集并排序去重
+        assert_eq!(keys, vec!["another_odd", "context_length", "id", "weird_field"]);
+    }
+
+    #[test]
+    fn 支持ollama形状() {
+        let body = json!({ "models": [{ "name": "x", "details": { "context_length": 2048 } }] });
+        let (top, keys) = extract_key_set(&body);
+        assert_eq!(top, vec!["models"]);
+        assert_eq!(keys, vec!["details", "name"]);
+    }
+
+    #[test]
+    fn 没有模型数组时键集合为空() {
+        let body = json!({ "error": "nope" });
+        let (top, keys) = extract_key_set(&body);
+        assert_eq!(top, vec!["error"]);
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn 未识别键清单只留我们没读的() {
+        let body = json!({
+            "data": [{ "id": "m", "context_length": 8192, "vendor_specific_ctx": 999, "max_tokens": 512 }]
+        });
+        let (top, keys) = extract_key_set(&body);
+        let models = parse_listing(&body).unwrap();
+        let d = EndpointDiagnostics::build("http://x/models".into(), top, keys, &models);
+        // id / context_length / max_tokens 都是我们读的 → 不该出现在"未识别"里
+        assert_eq!(d.unrecognized_keys, vec!["vendor_specific_ctx"]);
+    }
+
+    #[test]
+    fn 自报计数看的是来源而不是最终值() {
+        // ★ 关键回例：这行端点**只报了 id**，容量是兜底表补的。
+        //   如果用「最终值非空」计数，会误判成"端点报了容量" —— 那正是之前的盲区。
+        let body = json!({ "data": [{ "id": "gpt-4o" }] });
+        let (top, keys) = extract_key_set(&body);
+        let models = parse_listing(&body).unwrap();
+        assert!(models[0].context_tokens.is_some(), "兜底表应补上了值");
+        let d = EndpointDiagnostics::build("u".into(), top, keys, &models);
+        assert_eq!(d.ctx_reported, 0, "端点没报，计数必须是 0（尽管最终值非空）");
+        assert_eq!(d.out_reported, 0);
+        assert_eq!(d.total, 1);
+    }
+
+    #[test]
+    fn 自报计数能认出端点真的报了() {
+        let body = json!({ "data": [{ "id": "m", "context_window": 200000 }] });
+        let (top, keys) = extract_key_set(&body);
+        let models = parse_listing(&body).unwrap();
+        let d = EndpointDiagnostics::build("u".into(), top, keys, &models);
+        assert_eq!(d.ctx_reported, 1, "端点报了上下文，应计 1");
+        assert_eq!(d.out_reported, 0, "但没报最大输出");
+    }
+
+    #[test]
+    fn 已识别键清单覆盖各家方言() {
+        // 防"新增了读取字段但忘了同步 RECOGNIZED_KEYS" —— 那会把已支持的字段
+        // 误报成"未识别"，让诊断结论反向误导。
+        for k in [
+            "context_window", "context_length", "max_context_length", "loaded_context_length",
+            "max_model_len", "max_input_tokens", "n_ctx",
+            "max_output_tokens", "max_completion_tokens", "max_tokens", "top_provider",
+            "capabilities", "architecture", "supported_parameters",
+        ] {
+            assert!(RECOGNIZED_KEYS.contains(&k), "`{}` 应被视为已识别", k);
+        }
     }
 }

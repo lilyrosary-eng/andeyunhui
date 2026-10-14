@@ -19,6 +19,27 @@ interface DiscoveredModel {
   reasoning: ReasoningSpecUi | null;
 }
 
+/**
+ * 端点诊断（与 Rust `EndpointDiagnostics` 字段一一对齐，serde 用 camelCase）。
+ *
+ * 存在的理由：容量识别不行的原因分两种，**修法完全不同**：
+ *   ① 端点压根不报 → 只能靠兜底表 / 手填；
+ *   ② 端点报了、字段名是另一种方言 → 改几行代码就能修。
+ * 没有这份数据之前，这两者只能靠猜（实测 184 个模型只有 9 个拿到端点值，
+ * 但"是不是端点真没报"一直无从判断）。
+ */
+export interface EndpointDiagnostics {
+  reachedUrl: string;
+  topKeys: string[];
+  modelKeys: string[];
+  /** 端点报了、但我们没读的键 —— 这份清单就是下一步该支持的新方言。 */
+  unrecognizedKeys: string[];
+  /** 「端点**自报**」容量的模型数（不是最终值非空的数量 —— 后者含兜底表补的）。 */
+  ctxReported: number;
+  outReported: number;
+  total: number;
+}
+
 export interface AdoptedModel {
   id: string;
   model: string;
@@ -64,6 +85,8 @@ export function DiscoverModelsDialog(props: DiscoverModelsDialogProps) {
   const [error, setError] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<DiscoveredModel[] | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [diag, setDiag] = useState<EndpointDiagnostics | null>(null);
+  const [diagOpen, setDiagOpen] = useState(false);
 
   // 点弹窗外部收起 endpoint 下拉
   useEffect(() => {
@@ -86,6 +109,7 @@ export function DiscoverModelsDialog(props: DiscoverModelsDialogProps) {
     setEndpoint(url);
     setApiKey(key);
     setCandidates(null); // 换端点后旧候选作废，避免误采纳别的端点的模型
+    setDiag(null);
     setPicked(new Set());
     setError(null);
     setMenuOpen(false);
@@ -95,12 +119,13 @@ export function DiscoverModelsDialog(props: DiscoverModelsDialogProps) {
     if (!endpoint.trim()) { setError(t('modelSettings.discoverNoBaseUrl')); return; }
     setBusy(true); setError(null);
     try {
-      const out = await invoke<{ resolvedBaseUrl: string; models: DiscoveredModel[] }>('ai_fetch_models', {
+      const out = await invoke<{ resolvedBaseUrl: string; models: DiscoveredModel[]; diagnostics?: EndpointDiagnostics }>('ai_fetch_models', {
         input: { endpoint: endpoint.trim(), apiKey: apiKey.trim() || null },
       });
       if (out.models.length === 0) { setError(t('modelSettings.discoverEmpty')); return; }
       setEndpoint(out.resolvedBaseUrl);
       setCandidates(out.models);
+      setDiag(out.diagnostics ?? null);
       // 已配置过的默认不勾选，避免覆盖用户手调过的容量与能力
       const known = new Set(provider?.models.map((m) => m.model) ?? []);
       setPicked(new Set(out.models.filter((m) => !known.has(m.model)).map((m) => m.model)));
@@ -196,6 +221,45 @@ export function DiscoverModelsDialog(props: DiscoverModelsDialogProps) {
 
           {error && (
             <div className="text-[11px] text-red-500 whitespace-pre-wrap break-all">{error}</div>
+          )}
+
+          {/* 端点诊断：把「端点报了什么」与「我们读了什么」摊开对照。
+              最有价值的是标题右侧那三个数 —— 端点自报 0/81 就说明"不是我们没读对，
+              是端点压根不报"，那就只剩兜底表与手填两条路；反之就该去补字段方言。 */}
+          {diag && (
+            <div className="rounded-lg border border-neutral-200 dark:border-stone-700 text-[11px] overflow-hidden">
+              <button
+                onClick={() => setDiagOpen((v) => !v)}
+                className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-left hover:bg-neutral-50 dark:hover:bg-stone-800/50"
+              >
+                <ChevronDown size={12} className={diagOpen ? '' : '-rotate-90'} />
+                <span className="text-neutral-600 dark:text-stone-300">
+                  {t('modelSettings.diag.title')}
+                </span>
+                <span className="ml-auto text-neutral-400 tabular-nums">
+                  {t('modelSettings.diag.reported', { ctx: diag.ctxReported, out: diag.outReported, n: diag.total })}
+                </span>
+              </button>
+              {diagOpen && (
+                <div className="px-2.5 pb-2 pt-2 space-y-1.5 border-t border-neutral-100 dark:border-stone-800">
+                  <div className="text-neutral-400 break-all font-mono">{diag.reachedUrl}</div>
+                  {diag.unrecognizedKeys.length > 0 ? (
+                    <div>
+                      <span className="text-amber-600 dark:text-amber-400">{t('modelSettings.diag.unrecognized')}</span>
+                      <span className="font-mono text-neutral-600 dark:text-stone-300">
+                        {diag.unrecognizedKeys.join(', ')}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="text-emerald-600 dark:text-emerald-400">{t('modelSettings.diag.allRecognized')}</div>
+                  )}
+                  <div className="text-neutral-400">
+                    {t('modelSettings.diag.allKeys')}
+                    <span className="font-mono break-all">{diag.modelKeys.join(', ') || '—'}</span>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
           {candidates && (
