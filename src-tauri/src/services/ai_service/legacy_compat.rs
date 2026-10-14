@@ -109,6 +109,8 @@ pub fn from_legacy_profiles(existing: &AiConfig, legacy: &AiProfiles) -> AiConfi
             context_tokens: None,
             max_output_tokens: None,
             reasoning: None,
+            context_source: None,
+            max_output_source: None,
             overrides: Overrides {
                 temperature: Some(p.temperature),
                 max_tokens: p.max_tokens,

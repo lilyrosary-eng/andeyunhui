@@ -7,6 +7,12 @@ import type { ModelUi, ProviderUi } from '../aiConfigCodec';
 import { ModelEditorDrawer } from './ModelEditorDrawer';
 import { capTags } from './capsTags';
 import { newModelKey } from './providerMatch';
+import { capacitySourceLabel } from './ModelEditorDrawer';
+
+/** 手填的容量打个 ✎ —— 一眼看出「这个数是我自己填的、重扫不会覆盖」。 */
+function sourceMark(source: string, value: string): string {
+  return value.trim() && source === 'manual' ? '✎' : '';
+}
 
 const ROW_H = 40;
 
@@ -284,10 +290,14 @@ export function ProviderCard(props: ProviderCardProps) {
                             所以值可能是「识别出的」也可能是「手填的」，都可编辑。 */}
                         <span
                           className="shrink-0 flex items-center gap-1.5 text-[10px] text-neutral-400 tabular-nums"
-                          title={t('modelSettings.lenHint')}
+                          title={[
+                            t('modelSettings.lenHint'),
+                            `${t('modelSettings.lenIn')}：${capacitySourceLabel(m.context_tokens, m.context_source, t) || '—'}`,
+                            `${t('modelSettings.lenOut')}：${capacitySourceLabel(m.max_output_tokens, m.max_output_source, t) || '—'}`,
+                          ].join('\n')}
                         >
-                          <span>{t('modelSettings.lenIn')} {formatContext(m.context_tokens) || '—'}</span>
-                          <span>{t('modelSettings.lenOut')} {formatContext(m.max_output_tokens) || '—'}</span>
+                          <span>{t('modelSettings.lenIn')} {formatContext(m.context_tokens) || '—'}{sourceMark(m.context_source, m.context_tokens)}</span>
+                          <span>{t('modelSettings.lenOut')} {formatContext(m.max_output_tokens) || '—'}{sourceMark(m.max_output_source, m.max_output_tokens)}</span>
                         </span>
                         <span className="shrink-0 flex gap-1">
                           {capTags(m.caps, t).map((tag) => (

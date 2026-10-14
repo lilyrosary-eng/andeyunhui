@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use super::ai_profile::Caps;
+use super::ai_profile::CapacitySource;
 use super::caps_infer::{infer_capacity, infer_caps};
 use super::reasoning::{builtin_spec, spec_from_entry, ReasoningSpec};
 
@@ -27,9 +28,18 @@ pub struct DiscoveredModel {
     pub context_tokens: Option<u64>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
+    /// 容量来源：端点自报 or 兜底表推断。前端据此落盘，决定重扫时能否覆盖。
+    #[serde(default)]
+    pub ctx_source: Option<CapacitySource>,
+    #[serde(default)]
+    pub out_source: Option<CapacitySource>,
     /// 按模型名推断的能力标记，由 caps_infer::infer_caps 填充
     #[serde(default)]
     pub caps: Caps,
+    /// true = 能力来自供应商**权威上报**（Ollama `capabilities` / OpenRouter `input_modalities`），
+    /// 此时不再用名字启发式覆盖。不参与序列化——纯内部标记。
+    #[serde(skip)]
+    pub caps_reported: bool,
     /// 推理档位：供应商上报优先（spec_from_entry），没有则内置保守兜底（builtin_spec）。
     /// UI 只从这里列出的档位中选，避免发出端点不认识的值。
     #[serde(default)]
@@ -46,33 +56,115 @@ fn pos_u64(v: Option<&serde_json::Value>) -> Option<u64> {
     v.and_then(|x| x.as_u64()).filter(|n| *n > 0)
 }
 
+/// 上下文长度：各家 `/v1/models` 的字段名**不统一**，这里穷尽已知方言。
+///
+/// 实测教训：只认 `context_window` / `context_length` 时，59 个模型里只认出 4 个上下文。
+/// Ollama 的 `details.context_length`（0.30+ 才有）在 `details` 子对象里，同样要读。
+fn context_of(e: &serde_json::Value) -> Option<u64> {
+    const KEYS: &[&str] = &[
+        "context_window",           // 部分中转站
+        "context_length",           // OpenRouter、Ollama /v1/models
+        "max_context_length",       // LM Studio
+        "loaded_context_length",    // LM Studio（当前已加载的窗口）
+        "max_model_len",            // vLLM
+        "max_input_tokens",         // 若干中转站
+        "n_ctx",                    // llama.cpp
+    ];
+    KEYS.iter()
+        .find_map(|k| pos_u64(e.get(*k)))
+        .or_else(|| pos_u64(e.get("details").and_then(|d| d.get("context_length"))))
+}
+
+/// 单次最大输出。`max_tokens` 语义最含糊（有的端点拿它当上下文），故排在最后。
+fn max_output_of(e: &serde_json::Value) -> Option<u64> {
+    const KEYS: &[&str] = &["max_output_tokens", "max_completion_tokens", "max_tokens"];
+    KEYS.iter()
+        .find_map(|k| pos_u64(e.get(*k)))
+        // OpenRouter：单次最大输出挂在 top_provider 下
+        .or_else(|| pos_u64(e.get("top_provider").and_then(|t| t.get("max_completion_tokens"))))
+}
+
+/// 供应商**权威**能力上报。返回 None = 没报，调用方回落名字启发式（`infer_caps`）。
+///
+/// 支持两种已知形状：
+/// - Ollama 0.30+ `/api/tags`：`capabilities: ["completion","vision","tools","thinking","embedding"]`
+/// - OpenRouter `/api/v1/models`：`architecture.input_modalities`（含 `image` → 视觉）
+///   + `architecture.output_modalities` + `supported_parameters`（含 `tools` / `reasoning`）
+fn caps_from_entry(e: &serde_json::Value) -> Option<Caps> {
+    let as_arr = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_array()).cloned();
+    let has_in = |arr: &Option<Vec<serde_json::Value>>, k: &str| {
+        arr.as_ref().map(|a| a.iter().filter_map(|v| v.as_str()).any(|s| s.eq_ignore_ascii_case(k))).unwrap_or(false)
+    };
+
+    // ① Ollama：capabilities 数组
+    let caps = as_arr(e.get("capabilities"));
+    if caps.as_ref().map(|a| !a.is_empty()).unwrap_or(false) {
+        let embedding = has_in(&caps, "embedding");
+        return Some(Caps {
+            text: has_in(&caps, "completion") || !embedding,
+            vision: has_in(&caps, "vision"),
+            reasoning: has_in(&caps, "thinking") || has_in(&caps, "reasoning"),
+            tools: has_in(&caps, "tools"),
+            embedding,
+        });
+    }
+
+    // ② OpenRouter：architecture.input/output_modalities + supported_parameters
+    let arch = e.get("architecture");
+    let in_mods = as_arr(arch.and_then(|a| a.get("input_modalities")));
+    if in_mods.as_ref().map(|a| !a.is_empty()).unwrap_or(false) {
+        let out_mods = as_arr(arch.and_then(|a| a.get("output_modalities")));
+        let params = as_arr(e.get("supported_parameters"));
+        let embedding = has_in(&in_mods, "embedding")
+            || has_in(&out_mods, "embeddings")
+            || has_in(&out_mods, "embedding");
+        return Some(Caps {
+            text: has_in(&in_mods, "text") && !embedding,
+            vision: has_in(&in_mods, "image"),
+            reasoning: has_in(&params, "reasoning") || has_in(&params, "include_reasoning"),
+            tools: has_in(&params, "tools"),
+            embedding,
+        });
+    }
+
+    None
+}
+
 /// OpenAI 兼容形状的一行。上游用 `id` 表示模型名；缺失/为空 → None（跳过该行，不整批失败）。
 fn parse_openai_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
     let model = nonempty_str(e.get("id"))?;
+    let reported = caps_from_entry(e);
     Some(DiscoveredModel {
         model,
         label: nonempty_str(e.get("name")).or_else(|| nonempty_str(e.get("display_name"))),
-        context_tokens: pos_u64(e.get("context_window"))
-            .or_else(|| pos_u64(e.get("context_length"))),
-        max_tokens: pos_u64(e.get("max_output_tokens")).or_else(|| pos_u64(e.get("max_tokens"))),
-        caps: Caps::default(),
+        context_tokens: context_of(e),
+        max_tokens: max_output_of(e),
+        ctx_source: None,
+        out_source: None,
+        caps: reported.clone().unwrap_or_default(),
+        caps_reported: reported.is_some(),
         // 供应商若在上报里列了档位就原样采用；没列则留 None，由 with_caps 落兜底表
         reasoning: spec_from_entry(e),
     })
 }
 
-/// Ollama 原生形状的一行：{ name: "llama3:latest", model: "llama3:latest" }
-/// 取不到容量字段——Ollama 原生的 /api/tags 不报 context。
+/// Ollama 原生形状的一行：`{ name, model, details: { context_length }, capabilities: [...] }`。
+///
+/// 注意：**0.30 起 `/api/tags` 会报** `details.context_length` 与权威 `capabilities`，
+/// 所以这里不再是无脑留空（旧注释「Ollama 不报 context」已过时）。
 fn parse_ollama_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
     let model = nonempty_str(e.get("model")).or_else(|| nonempty_str(e.get("name")))?;
-    // Ollama 原生 /api/tags 不报容量也不报档位，交给 with_caps 落兜底表
+    let reported = caps_from_entry(e);
     Some(DiscoveredModel {
         model,
         label: nonempty_str(e.get("name")),
-        context_tokens: None,
-        max_tokens: None,
-        caps: Caps::default(),
-        reasoning: None,
+        context_tokens: context_of(e),
+        max_tokens: max_output_of(e),
+        ctx_source: None,
+        out_source: None,
+        caps: reported.clone().unwrap_or_default(),
+        caps_reported: reported.is_some(),
+        reasoning: spec_from_entry(e),
     })
 }
 
@@ -103,7 +195,15 @@ pub fn parse_listing(body: &serde_json::Value) -> Result<Vec<DiscoveredModel>, S
 /// 只回 id，兜底表让上下文/输出长度在设置页有个可用的初始值（用户仍可改）。
 fn with_caps(mut models: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
     for m in models.iter_mut() {
-        m.caps = infer_caps(&m.model);
+        // 能力：供应商**权威上报**优先，没报才退回名字启发式
+        if !m.caps_reported {
+            m.caps = infer_caps(&m.model);
+        }
+
+        // 容量：端点自报优先，缺的用兜底表补；并**如实记录来源**，
+        // 供重扫时判断该字段能否覆盖（见 CapacitySource::refreshable）。
+        let ctx_from_endpoint = m.context_tokens.is_some();
+        let out_from_endpoint = m.max_tokens.is_some();
         if let Some((ctx, out)) = infer_capacity(&m.model) {
             if m.context_tokens.is_none() {
                 m.context_tokens = Some(ctx);
@@ -112,6 +212,21 @@ fn with_caps(mut models: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
                 m.max_tokens = Some(out);
             }
         }
+        m.ctx_source = if ctx_from_endpoint {
+            Some(CapacitySource::Provider)
+        } else if m.context_tokens.is_some() {
+            Some(CapacitySource::Table)
+        } else {
+            None
+        };
+        m.out_source = if out_from_endpoint {
+            Some(CapacitySource::Provider)
+        } else if m.max_tokens.is_some() {
+            Some(CapacitySource::Table)
+        } else {
+            None
+        };
+
         // 档位：供应商上报优先，没给才落内置保守表（见 reasoning.rs 的取值谨慎原则）
         if m.reasoning.is_none() {
             m.reasoning = Some(builtin_spec(&m.model));
@@ -160,12 +275,18 @@ pub fn candidate_urls(endpoint: &str) -> Vec<String> {
     };
     let host = if host.is_empty() { "127.0.0.1".to_string() } else { host };
     let is_local = host == "localhost" || host == "127.0.0.1";
-    let mut out = vec![format!("http://{host}:{port}/v1/models")];
-    // 裸 /models 对所有主机都试；/api/models 仅本地追加。
-    out.push(format!("http://{host}:{port}/models"));
+    // ⚠️ 顺序是有意的：**本地先试原生富端点，再回落 OpenAI 兼容端点**。
+    //    原因：Ollama 的 `/v1/models` 也**能成功**，若排在前面就会永远命中它，
+    //    从而拿不到 `/api/tags` 的 `details.context_length` 与权威 `capabilities`
+    //    （旧代码正是这样，注释里还写着"Ollama 不报 context"——0.30 起已经报了）。
+    let mut out: Vec<String> = Vec::new();
     if is_local {
-        out.push(format!("http://{host}:{port}/api/models"));
+        out.push(format!("http://{host}:{port}/api/tags")); // Ollama 原生（容量 + 能力）
+        out.push(format!("http://{host}:{port}/api/v0/models")); // LM Studio 原生（含 max_context_length）
     }
+    out.push(format!("http://{host}:{port}/v1/models"));
+    // 裸 /models 对所有主机都试
+    out.push(format!("http://{host}:{port}/models"));
     out
 }
 
@@ -380,15 +501,93 @@ mod tests {
     }
 
     #[test]
-    fn 候选_纯端口试三个本地形状() {
+    fn 候选_纯端口本地优先原生富端点() {
+        // 顺序是有意的：Ollama 的 /v1/models 也能成功，若排在前面就会永远命中它，
+        // 从而拿不到 /api/tags 的 details.context_length 与权威 capabilities。
         assert_eq!(
             candidate_urls("11434"),
             vec![
+                "http://127.0.0.1:11434/api/tags",
+                "http://127.0.0.1:11434/api/v0/models",
                 "http://127.0.0.1:11434/v1/models",
                 "http://127.0.0.1:11434/models",
-                "http://127.0.0.1:11434/api/models",
             ]
         );
+    }
+
+    #[test]
+    fn 候选_远端不试原生端点() {
+        // 远端只打 /v1/models 与 /models，避免多等超时；且不含曾经写错的 /api/models
+        let u = candidate_urls("example.com:8000");
+        assert_eq!(u, vec!["http://example.com:8000/v1/models", "http://example.com:8000/models"]);
+    }
+
+    #[test]
+    fn 容量_字段方言全覆盖() {
+        let j = |k: &str, v: u64| serde_json::json!({ k: v });
+        for (key, val) in [
+            ("context_window", 111u64),
+            ("context_length", 222),
+            ("max_context_length", 333),
+            ("loaded_context_length", 444),
+            ("max_model_len", 555),
+            ("max_input_tokens", 666),
+            ("n_ctx", 777),
+        ] {
+            assert_eq!(context_of(&j(key, val)), Some(val), "{} 应被识别", key);
+        }
+        // Ollama 把上下文塞在 details 子对象里
+        assert_eq!(
+            context_of(&serde_json::json!({ "details": { "context_length": 8192 } })),
+            Some(8192)
+        );
+        // OpenRouter 的单次最大输出在 top_provider 下
+        assert_eq!(
+            max_output_of(&serde_json::json!({ "top_provider": { "max_completion_tokens": 4096 } })),
+            Some(4096)
+        );
+        // 都读不到 → None（不猜）
+        assert_eq!(context_of(&serde_json::json!({ "id": "x" })), None);
+    }
+
+    #[test]
+    fn 能力_优先供应商权威上报() {
+        // Ollama capabilities
+        let c = caps_from_entry(&serde_json::json!({
+            "capabilities": ["completion", "vision", "tools", "thinking"]
+        }))
+        .expect("应识别 Ollama capabilities");
+        assert!(c.vision && c.tools && c.reasoning && c.text && !c.embedding);
+
+        // Ollama 向量模型：capabilities 只有 embedding → 不算对话模型
+        let e = caps_from_entry(&serde_json::json!({ "capabilities": ["embedding"] })).unwrap();
+        assert!(e.embedding && !e.text);
+
+        // OpenRouter：input_modalities 含 image → 视觉
+        let o = caps_from_entry(&serde_json::json!({
+            "architecture": { "input_modalities": ["text", "image"], "output_modalities": ["text"] },
+            "supported_parameters": ["tools", "reasoning"]
+        }))
+        .expect("应识别 OpenRouter 形状");
+        assert!(o.vision && o.tools && o.reasoning && o.text && !o.embedding);
+
+        // 没报 → None（调用方回落名字启发式）
+        assert!(caps_from_entry(&serde_json::json!({ "id": "gpt-4o" })).is_none());
+    }
+
+    #[test]
+    fn 容量来源_端点与兜底表可区分() {
+        // 端点自报 → provider；兜底表命中 → table；都没有 → 无来源
+        let out = parse_listing(&serde_json::json!({
+            "data": [
+                { "id": "gpt-4o", "context_length": 99999 },
+                { "id": "unknown-xyz-1" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(out[0].ctx_source, Some(CapacitySource::Provider));
+        assert_eq!(out[0].context_tokens, Some(99999), "端点值优先于表");
+        assert_eq!(out[1].ctx_source, None, "表和端点都没有 → 无来源");
     }
 
     #[test]

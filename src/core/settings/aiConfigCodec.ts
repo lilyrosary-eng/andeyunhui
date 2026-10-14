@@ -33,6 +33,16 @@ export function emptyReasoning(): ReasoningSpecUi {
   return { efforts: [], default: null, from_provider: false };
 }
 
+/** 容量值来源（与 Rust `CapacitySource` 对齐）。 */
+export type CapacitySourceUi = 'provider' | 'table' | 'manual';
+
+const capacitySources: readonly string[] = ['provider', 'table', 'manual'];
+
+/** 非法/缺失 → ''（未标注）。 */
+function sourceFrom(v: unknown): CapacitySourceUi | '' {
+  return typeof v === 'string' && capacitySources.includes(v) ? (v as CapacitySourceUi) : '';
+}
+
 export interface ModelUi {
   id: string;
   model: string;
@@ -45,6 +55,14 @@ export interface ModelUi {
    * 语义不同，勿混用。同样是 端点自报 / 兜底表 / 用户手填 三者之一。
    */
   max_output_tokens: string;
+  /**
+   * 容量来源，决定**重扫时能否覆盖**（与 Rust `CapacitySource::refreshable` 同口径）：
+   * - `provider` / `table` → 可被新数据刷新
+   * - `manual` → 用户手填，永不覆盖
+   * - `''` → 未标注（改造前的老数据，无法区分来源，按手填**保守冻结**）
+   */
+  context_source: CapacitySourceUi | '';
+  max_output_source: CapacitySourceUi | '';
   temperature: string;
   max_tokens: string;
   top_p: string;
@@ -127,6 +145,8 @@ function modelFrom(raw: any): ModelUi {
     caps: capsFrom(raw?.caps),
     context_tokens: numStr(raw?.context_tokens),
     max_output_tokens: numStr(raw?.max_output_tokens),
+    context_source: sourceFrom(raw?.context_source),
+    max_output_source: sourceFrom(raw?.max_output_source),
     temperature: numStr(o.temperature),
     max_tokens: numStr(o.max_tokens),
     top_p: numStr(o.top_p),
@@ -193,6 +213,9 @@ function toModel(m: ModelUi) {
     caps: m.caps,
     context_tokens: ctx === null ? null : Math.trunc(ctx),
     max_output_tokens: mot === null ? null : Math.max(1, Math.trunc(mot)),
+    // 来源随值一起落盘：值被清空时来源也清空（空值本来就可被回填）
+    context_source: ctx === null ? null : m.context_source || null,
+    max_output_source: mot === null ? null : m.max_output_source || null,
     // 空集合不必落盘（null 更省空间，语义也明确）
     reasoning: m.reasoning.efforts.length > 0 ? m.reasoning : null,
     overrides: {

@@ -109,3 +109,56 @@ export function mergeModels<T extends MergeableModel>(current: T[], incoming: T[
   const added = incoming.filter((m) => m.model.trim() !== '' && !existing.has(m.model));
   return { models: [...current, ...added], added };
 }
+
+/** 回填所需的最小形状（ModelUi 满足）。 */
+export interface CapacityFields {
+  model: string;
+  context_tokens: string;
+  context_source: string;
+  max_output_tokens: string;
+  max_output_source: string;
+}
+
+/**
+ * 该容量字段能否被新数据覆盖（与 Rust `CapacitySource::refreshable` 同口径）。
+ *
+ * - 空值 → 可填（用户没填过，也没什么可丢的）
+ * - `provider` / `table` → 可刷新（推断值本就该跟着数据源更新）
+ * - `manual` → 冻结
+ * - **有值但来源未知**（改造前的老数据）→ 冻结：无法区分是用户手填还是旧推断，
+ *   保守起见不动。这是「宁可少更新，也不冲掉用户填的值」。
+ */
+export function capacityRefreshable(value: string, source: string): boolean {
+  if (!value.trim()) return true;
+  return source === 'provider' || source === 'table';
+}
+
+/**
+ * 用本次发现到的容量**回填**已有条目（不增删模型，只更新容量两列）。
+ *
+ * 为什么需要：`mergeModels` 的「同名保留原对象」保护了用户手调的值，但也把
+ * 「以前没有、现在能推断出来」的值永久挡在门外——重扫时同名直接跳过，
+ * `context_tokens` 永远保持 null。实测 59 个模型里只认出 4 个上下文，一大半是这个原因。
+ *
+ * 现在按**逐字段**的来源判断：可刷新的刷新，手填的冻结。
+ */
+export function refillCapacity<T extends CapacityFields>(current: T[], incoming: T[]): T[] {
+  const byName = new Map(incoming.map((m) => [m.model, m]));
+  return current.map((m) => {
+    const src = byName.get(m.model);
+    if (!src) return m;
+    const next = { ...m };
+    let changed = false;
+    if (capacityRefreshable(m.context_tokens, m.context_source)) {
+      if (next.context_tokens !== src.context_tokens || next.context_source !== src.context_source) changed = true;
+      next.context_tokens = src.context_tokens;
+      next.context_source = src.context_source;
+    }
+    if (capacityRefreshable(m.max_output_tokens, m.max_output_source)) {
+      if (next.max_output_tokens !== src.max_output_tokens || next.max_output_source !== src.max_output_source) changed = true;
+      next.max_output_tokens = src.max_output_tokens;
+      next.max_output_source = src.max_output_source;
+    }
+    return changed ? next : m;
+  });
+}

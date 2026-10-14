@@ -146,6 +146,38 @@ impl Default for Caps {
     }
 }
 
+/// 容量值（上下文 / 最大输出）的**来源**。
+///
+/// 存在的理由：重扫时必须能判断「这个值是用户手填的、还是我们推断的」——
+/// 否则只能一律不动（老条目永远回填不上，实测 59 个模型只认出 4 个上下文），
+/// 或者一律覆盖（把用户手调的值冲掉）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CapacitySource {
+    /// 端点自报（最可信）
+    Provider,
+    /// 内置兜底表推断（近似值）
+    Table,
+    /// 用户手填（**永不覆盖**）
+    Manual,
+}
+
+impl CapacitySource {
+    /// 重扫时能否用新值覆盖本字段。
+    ///
+    /// - `Provider` / `Table` → 可以刷新（推断值本该跟着数据源更新）
+    /// - `Manual` → 冻结
+    /// - **`None` 且有值 → 视为手填**：这是改造前的老数据，无法区分来源，
+    ///   按保守处理冻结（宁可不更新，也不能冲掉用户填的值）。
+    /// - 值为空 → 可填。
+    pub fn refreshable(value: Option<u64>, source: Option<Self>) -> bool {
+        if value.is_none() {
+            return true;
+        }
+        matches!(source, Some(Self::Provider) | Some(Self::Table))
+    }
+}
+
 /// 逐模型参数覆盖。语义与 v1 AiProfile 的同名字段一致，只是从「档案」挪到了「模型」。
 /// 全部 Option：None 表示用默认值，用户没改过就不占空间。
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
@@ -225,6 +257,12 @@ pub struct ModelEntry {
     ///    两者不可互换——这里描述模型能产多长，那里描述本次要它产多长。
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    /// 两个容量字段各自的来源——决定重扫时能否覆盖，见 `CapacitySource::refreshable`。
+    /// 缺省 None：老数据。带上值即视为手填，冻结不动。
+    #[serde(default)]
+    pub context_source: Option<CapacitySource>,
+    #[serde(default)]
+    pub max_output_source: Option<CapacitySource>,
     /// 推理档位集合（供应商上报优先，否则内置保守兜底）。UI 只从这里列出的档位中选，
     /// 避免发出端点不认识的值（那会被直接 400）。见 reasoning.rs。
     #[serde(default)]
@@ -364,6 +402,8 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
             context_tokens: None,
             max_output_tokens: None,
             reasoning: None,
+            context_source: None,
+            max_output_source: None,
             overrides: Overrides {
                 temperature: Some(p.temperature),
                 max_tokens: p.max_tokens,
@@ -1211,5 +1251,31 @@ mod v2_tests {
     fn 档位_无集合信息时原样放行以兼容老配置() {
         let t = ResolvedTarget { reasoning_effort: Some("medium".into()), ..Default::default() };
         assert_eq!(t.effort(), "medium", "没有集合就无从判断合法性，原样放行");
+    }
+
+    // ===== 容量来源（决定重扫能否覆盖）=====
+
+    #[test]
+    fn 容量来源_空值可回填() {
+        assert!(CapacitySource::refreshable(None, None));
+        assert!(CapacitySource::refreshable(None, Some(CapacitySource::Manual)));
+    }
+
+    #[test]
+    fn 容量来源_推断值可刷新() {
+        assert!(CapacitySource::refreshable(Some(8192), Some(CapacitySource::Provider)));
+        assert!(CapacitySource::refreshable(Some(8192), Some(CapacitySource::Table)));
+    }
+
+    #[test]
+    fn 容量来源_手填冻结() {
+        assert!(!CapacitySource::refreshable(Some(8192), Some(CapacitySource::Manual)));
+    }
+
+    #[test]
+    fn 容量来源_有值但来源未知按手填冻结() {
+        // 改造前的老数据无从区分来源 → 保守处理，宁可不更新也不冲掉用户填的值。
+        // （空值可回填才是解决「59 个模型只认出 4 个」的主路径。）
+        assert!(!CapacitySource::refreshable(Some(8192), None));
     }
 }

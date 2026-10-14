@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { X, Radar, Loader2, ChevronDown } from 'lucide-react';
-import type { CapsUi, ProviderUi, ReasoningSpecUi } from '../aiConfigCodec';
+import type { CapsUi, CapacitySourceUi, ProviderUi, ReasoningSpecUi } from '../aiConfigCodec';
 import { capTags } from './capsTags';
 
 // 后端返回的模型结构。注意：Rust 的 DiscoveredModel 没有 `id` 字段——模型名即天然 id，
@@ -12,6 +12,9 @@ interface DiscoveredModel {
   caps: CapsUi;
   context_tokens: number | null;
   max_tokens: number | null;
+  /** 容量来源（provider / table / null=都没识别出）。落盘后决定重扫能否覆盖。 */
+  ctx_source: CapacitySourceUi | null;
+  out_source: CapacitySourceUi | null;
   /** 推理档位（供应商上报优先，否则内置兜底）。 */
   reasoning: ReasoningSpecUi | null;
 }
@@ -24,6 +27,9 @@ export interface AdoptedModel {
   context_tokens: string;
   /** 模型的单次最大输出（能力上限），与请求参数 max_tokens 不同。 */
   max_output_tokens: string;
+  /** 上面两个值的来源，落盘供重扫时判断能否覆盖。 */
+  ctx_source: CapacitySourceUi | null;
+  out_source: CapacitySourceUi | null;
   reasoning: ReasoningSpecUi | null;
 }
 
@@ -115,6 +121,8 @@ export function DiscoverModelsDialog(props: DiscoverModelsDialogProps) {
       caps: m.caps,
       context_tokens: m.context_tokens ? String(m.context_tokens) : '',
       max_output_tokens: m.max_tokens ? String(m.max_tokens) : '',
+      ctx_source: m.ctx_source,
+      out_source: m.out_source,
       reasoning: m.reasoning,
     }));
     props.onAdopt(endpoint.trim(), apiKey.trim(), chosen);

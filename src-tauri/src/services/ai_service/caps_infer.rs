@@ -67,80 +67,80 @@ pub fn infer_caps(model_name: &str) -> Caps {
     Caps { text: true, vision, reasoning, tools, embedding: false }
 }
 
-/// 端点不报容量时的**兜底**知识表：(模型名片段, 上下文窗口, 最大输出)。
+/// 容量兜底表：模型名片段 → (上下文, 单次最大输出)。
 ///
-/// 匹配规则：**按数组顺序，先命中先赢**——所以更具体的名字必须排在更泛的前面
-/// （`gpt-4o-mini` 在 `gpt-4o` 前，`gpt-4o` 在 `gpt-4` 前）。
+/// 匹配规则：大小写不敏感的**子串包含**，**按顺序先命中先赢**——所以更具体的名字必须排在
+/// 更泛的前面（`gpt-4o-mini` 在 `gpt-4o` 前，`gpt-4o` 在 `gpt-4` 前）。
 ///
-/// ⚠️ 值为公开资料的近似值，仅供参考：**端点自报的值优先**于本表；
-///    用户在模型编辑器里填的值又优先于端点。三者优先级：用户 > 端点 > 本表。
-const CAPACITY: &[(&str, u64, u64)] = &[
-    // ---- OpenAI ----
-    ("gpt-4o-mini", 128_000, 16_384),
-    ("gpt-4o", 128_000, 16_384),
-    ("gpt-4-turbo", 128_000, 4_096),
-    ("gpt-4.1-mini", 1_047_576, 32_768),
-    ("gpt-4.1-nano", 1_047_576, 32_768),
-    ("gpt-4.1", 1_047_576, 32_768),
-    ("gpt-4-32k", 32_768, 4_096),
-    ("gpt-3.5-turbo", 16_385, 4_096),
-    ("gpt-4", 8_192, 8_192),
-    ("o1-mini", 128_000, 65_536),
-    ("o3-mini", 200_000, 100_000),
-    ("o4-mini", 200_000, 100_000),
-    ("o1", 200_000, 100_000),
-    ("o3", 200_000, 100_000),
-    // ---- Anthropic ----
-    ("claude-3-7-sonnet", 200_000, 64_000),
-    ("claude-3-5-sonnet", 200_000, 8_192),
-    ("claude-3-5-haiku", 200_000, 8_192),
-    ("claude-3-opus", 200_000, 4_096),
-    ("claude-3-haiku", 200_000, 4_096),
-    ("claude-3-sonnet", 200_000, 4_096),
-    ("claude-sonnet-4", 200_000, 64_000),
-    ("claude-opus-4", 200_000, 32_000),
-    ("claude", 200_000, 8_192),
-    // ---- Google ----
-    ("gemini-1.5-pro", 2_097_152, 8_192),
-    ("gemini-1.5-flash", 1_048_576, 8_192),
-    ("gemini-2.5", 1_048_576, 65_536),
-    ("gemini-2.0", 1_048_576, 8_192),
-    ("gemini", 1_048_576, 8_192),
-    // ---- DeepSeek ----
-    ("deepseek-reasoner", 65_536, 8_192),
-    ("deepseek-chat", 65_536, 8_192),
-    ("deepseek-coder", 65_536, 8_192),
-    ("deepseek", 65_536, 8_192),
-    // ---- 通义千问 ----
-    ("qwen-vl-max", 32_768, 2_048),
-    ("qwen-vl-plus", 32_768, 2_048),
-    ("qwen2.5-vl", 131_072, 8_192),
-    ("qwen-max", 32_768, 8_192),
-    ("qwen-plus", 131_072, 8_192),
-    ("qwen-turbo", 131_072, 8_192),
-    ("qwen2.5", 131_072, 8_192),
-    ("qwen3", 131_072, 32_768),
-    ("qwen", 32_768, 8_192),
-    // ---- 智谱 GLM ----
-    ("glm-4v", 8_192, 1_024),
-    ("glm-4-plus", 128_000, 4_096),
-    ("glm-4-air", 128_000, 4_096),
-    ("glm-4-flash", 128_000, 4_096),
-    ("glm-4", 128_000, 4_096),
-    // ---- 本地常见（Ollama / LM Studio）----
-    ("llama3.2", 131_072, 4_096),
-    ("llama3.1", 131_072, 4_096),
-    ("llama3", 8_192, 4_096),
-    ("mistral", 32_768, 8_192),
-    ("mixtral", 32_768, 8_192),
-    ("gemma", 8_192, 4_096),
-];
+/// ⚠️ 值为公开资料的近似值，仅供参考。优先级：**用户手填 > 端点自报 > 本表**。
+///
+/// 数据源：`assets/model_capacity.json`（编译期内嵌为默认值）。应用数据目录下若有同名文件
+/// 则**覆盖**内嵌默认——不必改代码/重编译即可更新，见 `init_capacity_table`。
+const DEFAULT_CAPACITY_JSON: &str = include_str!("../../../assets/model_capacity.json");
+
+#[derive(serde::Deserialize)]
+struct CapacityEntry {
+    /// 匹配片段（加载时统一转小写）
+    #[serde(rename = "match")]
+    pattern: String,
+    ctx: u64,
+    out: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct CapacityFile {
+    entries: Vec<CapacityEntry>,
+}
+
+/// 已加载的容量表。启动时由 `init_capacity_table` 填入；未初始化则惰性用内嵌默认。
+static CAPACITY_TABLE: std::sync::OnceLock<Vec<CapacityEntry>> = std::sync::OnceLock::new();
+
+/// 解析容量表 JSON。空表/解析失败返回 None（调用方回落内嵌默认）。
+fn parse_capacity_json(text: &str) -> Option<Vec<CapacityEntry>> {
+    let f: CapacityFile = serde_json::from_str(text).ok()?;
+    let entries: Vec<CapacityEntry> = f
+        .entries
+        .into_iter()
+        .filter(|e| !e.pattern.trim().is_empty())
+        .map(|mut e| {
+            e.pattern = e.pattern.trim().to_lowercase();
+            e
+        })
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+/// 初始化容量表（**幂等**，只有第一次调用生效）。
+///
+/// 来源优先级：`override_path` 指向的文件 > 内嵌默认。
+/// 覆盖文件读不到或解析失败时**静默回落内嵌默认**——容量只是增强信息，
+/// 不该因为一个坏文件让整个模型发现功能报错。
+pub fn init_capacity_table(override_path: Option<&std::path::Path>) {
+    let from_file = override_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| parse_capacity_json(&t));
+    let table = from_file
+        .or_else(|| parse_capacity_json(DEFAULT_CAPACITY_JSON))
+        .unwrap_or_default();
+    let _ = CAPACITY_TABLE.set(table);
+}
+
+fn capacity_table() -> &'static [CapacityEntry] {
+    CAPACITY_TABLE.get_or_init(|| parse_capacity_json(DEFAULT_CAPACITY_JSON).unwrap_or_default())
+}
 
 /// 按模型名查兜底容量，返回 (上下文窗口, 最大输出)。
 /// 查不到返回 None——**不猜**：给一个错的数字比留空更误导（用户会以为已识别）。
 pub fn infer_capacity(model_name: &str) -> Option<(u64, u64)> {
     let n = model_name.to_lowercase();
-    CAPACITY.iter().find(|(pat, _, _)| n.contains(pat)).map(|(_, ctx, out)| (*ctx, *out))
+    capacity_table()
+        .iter()
+        .find(|e| n.contains(&e.pattern))
+        .map(|e| (e.ctx, e.out))
 }
 
 #[cfg(test)]

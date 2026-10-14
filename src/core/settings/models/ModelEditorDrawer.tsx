@@ -5,6 +5,24 @@ const inputCls =
   'w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-800 dark:text-stone-100 outline-none focus:ring-2 focus:ring-[var(--element-border)] transition-colors';
 const labelCls = 'block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium';
 
+/**
+ * 容量来源标签——让用户知道这个数字该不该信。
+ * 端点是权威值；内置表是近似值；手填是用户自负；`''` 是改造前的老数据（无法区分）。
+ */
+export function capacitySourceLabel(
+  value: string,
+  source: string,
+  t: (k: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (!value.trim()) return '';
+  switch (source) {
+    case 'provider': return t('modelSettings.srcProvider');
+    case 'table': return t('modelSettings.srcTable');
+    case 'manual': return t('modelSettings.srcManual');
+    default: return t('modelSettings.srcUnknown');
+  }
+}
+
 export interface ModelEditorDrawerProps {
   model: ModelUi | null;
   /** 逐字段实时更新（不关抽屉；由父级自动保存落盘） */
@@ -78,14 +96,31 @@ export function ModelEditorDrawer(props: ModelEditorDrawerProps) {
               与上面的 maxTokens（本次请求要它产多长）语义不同。 */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className={labelCls}>{t('modelSettings.contextTokens')}</label>
+              <label className={labelCls}>
+                {t('modelSettings.contextTokens')}
+                <span className="ml-1.5 text-[10px] text-neutral-400">
+                  {capacitySourceLabel(m.context_tokens, m.context_source, t)}
+                </span>
+              </label>
               <input className={inputCls} value={m.context_tokens} placeholder={t('modelSettings.contextAuto')}
-                onChange={(e) => set({ context_tokens: e.target.value })} />
+                onChange={(e) => set({
+                  context_tokens: e.target.value,
+                  // 手改即标 manual → 重扫永不覆盖；清空则撤标，让下次重扫能自动填
+                  context_source: e.target.value.trim() ? 'manual' : '',
+                })} />
             </div>
             <div>
-              <label className={labelCls}>{t('modelSettings.maxOutputTokens')}</label>
+              <label className={labelCls}>
+                {t('modelSettings.maxOutputTokens')}
+                <span className="ml-1.5 text-[10px] text-neutral-400">
+                  {capacitySourceLabel(m.max_output_tokens, m.max_output_source, t)}
+                </span>
+              </label>
               <input className={inputCls} value={m.max_output_tokens} placeholder={t('modelSettings.contextAuto')}
-                onChange={(e) => set({ max_output_tokens: e.target.value })} />
+                onChange={(e) => set({
+                  max_output_tokens: e.target.value,
+                  max_output_source: e.target.value.trim() ? 'manual' : '',
+                })} />
             </div>
           </div>
           <div>

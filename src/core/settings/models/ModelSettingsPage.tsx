@@ -9,7 +9,7 @@ import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
 import { ComfyuiPanel } from './ComfyuiPanel';
 import { MediaBackendsPanel } from './MediaBackendsPanel';
-import { inferProviderName, mergeModels, newModelKey, sameBaseUrl } from './providerMatch';
+import { inferProviderName, mergeModels, newModelKey, refillCapacity, sameBaseUrl } from './providerMatch';
 import { bestScore } from '@/lib/fuzzy';
 
 const newId = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
@@ -18,7 +18,8 @@ function blankModel(id?: string): ModelUi {
   return {
     id: id || newId('m'), model: '', label: '',
     caps: { text: true, vision: false, reasoning: false, embedding: false, tools: false },
-    context_tokens: '', max_output_tokens: '', temperature: '', max_tokens: '', top_p: '', system_prompt: '',
+    context_tokens: '', max_output_tokens: '', context_source: '', max_output_source: '',
+    temperature: '', max_tokens: '', top_p: '', system_prompt: '',
     thinking: false, reasoning_effort: '', reasoning: emptyReasoning(),
     persona_call_me_as: '', persona_preset: '', persona_style: '',
   };
@@ -188,11 +189,21 @@ export function ModelSettingsPage() {
 
   /**
    * 把采纳结果补成完整的 ModelUi 行（补齐 blankModel 的默认值）。
-   * `reasoning` 可能是 null（老后端 / 无档位信息）→ 归一成空集合，UI 据此退化为布尔开关。
+   * 逐字段显式搬运，避免把 AdoptedModel 的专属键（ctx_source/out_source）漏进 ModelUi。
    */
   const toModelRows = useCallback(
     (incoming: AdoptedModel[]): ModelUi[] =>
-      incoming.map((m) => ({ ...blankModel(m.id), ...m, reasoning: m.reasoning ?? emptyReasoning() })),
+      incoming.map((m) => ({
+        ...blankModel(m.id),
+        model: m.model,
+        label: m.label,
+        caps: m.caps,
+        context_tokens: m.context_tokens,
+        max_output_tokens: m.max_output_tokens,
+        context_source: m.ctx_source ?? '',
+        max_output_source: m.out_source ?? '',
+        reasoning: m.reasoning ?? emptyReasoning(),
+      })),
     [],
   );
 
@@ -206,9 +217,13 @@ export function ModelSettingsPage() {
     const now = Math.floor(Date.now() / 1000);
 
     if (target) {
-      const { models: merged, added } = mergeModels(target.models, toModelRows(models));
+      const rows = toModelRows(models);
+      const { models: merged, added } = mergeModels(target.models, rows);
+      // ★ 光「只增不减」不够：同名老条目的容量列会被永久挡在门外（重扫永远填不上）。
+      //   这里按**逐字段来源**回填——空值和 provider/table 来源可刷新，手填的冻结。
+      const finalModels = refillCapacity(merged, rows);
       patchProvider(target.id, {
-        models: merged,
+        models: finalModels,
         // 空 key 不覆盖已有 key（重扫时用户常常不重填 key）
         ...(apiKey ? { api_key: apiKey } : {}),
         last_scanned_at: now,

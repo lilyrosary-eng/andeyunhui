@@ -896,6 +896,16 @@ fn main() {
             app.manage(PendingOpenFiles(Default::default()));
             // 数据根（可配置存放位置）：必须在任意 app_data 子路径被使用前维护 junction / 执行 pending 迁移
             andeyunhui_lib::data_location::prepare_data_root(&app.handle().clone());
+            // 容量兜底表：优先用数据目录下的覆盖文件（可不必改代码就更新），没有则用编译期内嵌默认。
+            // 放在 prepare_data_root 之后，确保走的是重定向后的真实数据目录。
+            {
+                let override_path = app
+                    .path()
+                    .app_data_dir()
+                    .ok()
+                    .map(|d| d.join("model_capacity.json"));
+                andeyunhui_lib::services::ai_service::caps_infer::init_capacity_table(override_path.as_deref());
+            }
             // AI 模型档案是核心能力：启动即后台预热内存缓存（读盘+scrypt 解密一次），
             // 之后任意窗口/插件读取都是毫秒级，不再触发式慢加载。
             andeyunhui_lib::services::ai_service::warm_profile_cache(app.handle().clone());

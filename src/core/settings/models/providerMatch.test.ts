@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inferProviderName, mergeModels, newModelKey, normalizeBaseUrl, sameBaseUrl } from './providerMatch';
+import { capacityRefreshable, inferProviderName, mergeModels, newModelKey, normalizeBaseUrl, refillCapacity, sameBaseUrl } from './providerMatch';
 
 describe('normalizeBaseUrl', () => {
   it('去空白与尾部斜杠', () => {
@@ -117,5 +117,76 @@ describe('newModelKey —— 高亮 key 必须带供应商命名空间', () => {
   it('分隔符防止拼接歧义', () => {
     // 若直接用字符串相加，('pv_a','b') 与 ('pv_ab','') 会撞成同一个 key
     expect(newModelKey('pv_a', 'b')).not.toBe(newModelKey('pv_ab', ''));
+  });
+});
+
+describe('capacityRefreshable —— 与后端 CapacitySource::refreshable 同口径', () => {
+  it('空值可回填', () => {
+    expect(capacityRefreshable('', '')).toBe(true);
+    expect(capacityRefreshable('   ', 'manual')).toBe(true);
+  });
+
+  it('端点/推断来源可刷新', () => {
+    expect(capacityRefreshable('8192', 'provider')).toBe(true);
+    expect(capacityRefreshable('8192', 'table')).toBe(true);
+  });
+
+  it('手填冻结', () => {
+    expect(capacityRefreshable('8192', 'manual')).toBe(false);
+  });
+
+  it('有值但来源未知按手填冻结（老数据保守处理）', () => {
+    expect(capacityRefreshable('8192', '')).toBe(false);
+  });
+});
+
+describe('refillCapacity —— 回填老条目的容量列', () => {
+  const row = (model: string, ctx = '', ctxSrc = '', out = '', outSrc = '') => ({
+    model, context_tokens: ctx, context_source: ctxSrc, max_output_tokens: out, max_output_source: outSrc,
+  });
+
+  it('空值被回填（这是「重扫永远填不上」的主修复）', () => {
+    const cur = [row('gpt-4o')];
+    const inc = [row('gpt-4o', '128000', 'table', '16384', 'table')];
+    const out = refillCapacity(cur, inc);
+    expect(out[0].context_tokens).toBe('128000');
+    expect(out[0].context_source).toBe('table');
+    expect(out[0].max_output_tokens).toBe('16384');
+  });
+
+  it('手填的值不被覆盖', () => {
+    const cur = [row('gpt-4o', '999', 'manual', '888', 'manual')];
+    const inc = [row('gpt-4o', '128000', 'provider', '16384', 'provider')];
+    const out = refillCapacity(cur, inc);
+    expect(out[0].context_tokens).toBe('999');
+    expect(out[0].max_output_tokens).toBe('888');
+  });
+
+  it('来源未知但有值（老数据）不被覆盖', () => {
+    const cur = [row('gpt-4o', '777', '')];
+    const inc = [row('gpt-4o', '128000', 'provider')];
+    expect(refillCapacity(cur, inc)[0].context_tokens).toBe('777');
+  });
+
+  it('两个字段按各自来源独立判定', () => {
+    // 上下文手填（冻结）、最大输出是推断（可刷新）
+    const cur = [row('gpt-4o', '999', 'manual', '100', 'table')];
+    const inc = [row('gpt-4o', '128000', 'provider', '16384', 'provider')];
+    const out = refillCapacity(cur, inc);
+    expect(out[0].context_tokens).toBe('999');
+    expect(out[0].max_output_tokens).toBe('16384');
+  });
+
+  it('本次未发现到的模型原样保留（不增不减）', () => {
+    const cur = [row('a', '1', 'table'), row('b', '2', 'table')];
+    const out = refillCapacity(cur, [row('a', '999', 'provider')]);
+    expect(out).toHaveLength(2);
+    expect(out[1]).toBe(cur[1]);
+  });
+
+  it('无变化时返回原对象引用（避免无谓重渲染）', () => {
+    const cur = [row('a', '1', 'provider')];
+    const out = refillCapacity(cur, [row('a', '1', 'provider')]);
+    expect(out[0]).toBe(cur[0]);
   });
 });
