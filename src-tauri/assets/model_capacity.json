@@ -28,18 +28,15 @@
     { "match": "claude-3-sonnet", "ctx": 200000, "out": 4096 },
     { "match": "claude-sonnet-4", "ctx": 200000, "out": 64000 },
     { "match": "claude-opus-4", "ctx": 200000, "out": 32000 },
-    { "match": "claude", "ctx": 200000, "out": 8192 },
 
     { "match": "gemini-1.5-pro", "ctx": 2097152, "out": 8192 },
     { "match": "gemini-1.5-flash", "ctx": 1048576, "out": 8192 },
     { "match": "gemini-2.5", "ctx": 1048576, "out": 65536 },
     { "match": "gemini-2.0", "ctx": 1048576, "out": 8192 },
-    { "match": "gemini", "ctx": 1048576, "out": 8192 },
 
     { "match": "deepseek-reasoner", "ctx": 65536, "out": 8192 },
     { "match": "deepseek-chat", "ctx": 65536, "out": 8192 },
     { "match": "deepseek-coder", "ctx": 65536, "out": 8192 },
-    { "match": "deepseek", "ctx": 65536, "out": 8192 },
 
     { "match": "qwen-vl-max", "ctx": 32768, "out": 2048 },
     { "match": "qwen-vl-plus", "ctx": 32768, "out": 2048 },
@@ -49,19 +46,15 @@
     { "match": "qwen-turbo", "ctx": 131072, "out": 8192 },
     { "match": "qwen2.5", "ctx": 131072, "out": 8192 },
     { "match": "qwen3", "ctx": 131072, "out": 32768 },
-    { "match": "qwen", "ctx": 32768, "out": 8192 },
 
     { "match": "glm-4v", "ctx": 8192, "out": 1024 },
     { "match": "glm-4-plus", "ctx": 128000, "out": 4096 },
     { "match": "glm-4-air", "ctx": 128000, "out": 4096 },
     { "match": "glm-4-flash", "ctx": 128000, "out": 4096 },
-    { "match": "glm-4", "ctx": 128000, "out": 4096 },
 
     { "match": "llama3.2", "ctx": 131072, "out": 4096 },
     { "match": "llama3.1", "ctx": 131072, "out": 4096 },
     { "match": "llama3", "ctx": 8192, "out": 4096 },
-    { "match": "mistral", "ctx": 32768, "out": 8192 },
-    { "match": "mixtral", "ctx": 32768, "out": 8192 },
-    { "match": "gemma", "ctx": 8192, "out": 4096 }
+    { "match": "mixtral", "ctx": 32768, "out": 8192 }
   ]
 }

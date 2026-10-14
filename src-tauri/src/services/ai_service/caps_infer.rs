@@ -262,7 +262,50 @@ mod tests {
     }
 
     #[test]
-    fn 容量表未知返回None不猜() {
-        assert!(infer_capacity("some-random-model-2026").is_none());
+    fn 内嵌默认表必须是合法json且条目充足() {
+        // ★ 血案（2026-10-14）：删容量条目时删掉了数组末尾那几条，但**漏改末条逗号**
+        //   → JSON 非法 → `parse_capacity_json` 返回 None → 回落内嵌默认 →
+        //   而内嵌默认就是这份坏文件 → **整张表静默变空**。
+        //   后果：所有模型容量全变横线，且没有任何错误提示（解析失败是刻意静默的，
+        //   见 init_capacity_table 的文档）。三个测试同时挂掉才暴露出这一点。
+        //
+        //   这条测试把「坏表」挡在最早的一道门：只要文件语法错或条目被误删到离谱，
+        //   编译后第一次跑测试就会红，而不是等用户发现"怎么全是横线"。
+        let parsed = parse_capacity_json(DEFAULT_CAPACITY_JSON);
+        assert!(parsed.is_some(), "内嵌默认容量表必须能解析（JSON 语法错 / entries 为空都会到这里）");
+        let t = parsed.unwrap();
+        assert!(t.len() >= 30, "条目数异常少（{} 条），可能被误删或格式损坏", t.len());
+
+        // 抽查常用条目必须还在（防止"批量清理"时顺手删掉主力）
+        let has = |p: &str| t.iter().any(|e| e.pattern == p);
+        for p in ["gpt-4o", "claude-3-5-sonnet", "deepseek-chat", "qwen2.5"] {
+            assert!(has(p), "常用条目 `{}` 不该缺失", p);
+        }
+
+        // pattern 一律小写（匹配是按小写子串做的，混入大写会永远命不中）
+        assert!(
+            t.iter().all(|e| e.pattern == e.pattern.to_lowercase()),
+            "所有 pattern 必须已归一为小写"
+        );
+    }
+
+    #[test]
+    fn 跨代泛化条目不该存在() {
+        // 这类 pattern 会命中规格完全不同的多代模型，必然给错值。
+        // 实测证据：`gemma` → 8192 同时命中 gemma-2（确实 8k）与 gemma-3（实际 128k）；
+        // `mistral` → 32768 命中 mistral-large-2（实际 128k）。
+        // 用户要求「兜底表收缩到可确认的」——宁缺不错：留空至少用户知道是空的。
+        let t = parse_capacity_json(DEFAULT_CAPACITY_JSON).expect("表应可解析");
+        for bad in ["claude", "gemini", "deepseek", "qwen", "glm-4", "mistral", "gemma"] {
+            assert!(
+                !t.iter().any(|e| e.pattern == bad),
+                "跨代泛化条目 `{}` 会给多代模型同一个错值，应已移除",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn 容量表未知返回None不猜() {        assert!(infer_capacity("some-random-model-2026").is_none());
     }
 }
