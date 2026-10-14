@@ -2254,6 +2254,10 @@ async fn run_subagent_once(
         request_id: format!("{}:sub{}", request_id, seq),
         project_root,
         profile_id: None,
+        // ⚠️ 子代理的工具白名单只有 file/grep/glob（见各构造点上方的 filter），
+        //    所以这里 media/images 为空是**安全**的，analyze_image / generate_* 根本不会被调用。
+        //    若日后放开子代理的工具白名单，必须同时把本轮的 media 与 images 传进来，
+        //    否则 analyze_image 会报出**误导性**的「本轮对话没有附带图片」（用户明明发了图）。
         media: Default::default(),
         images: Vec::new(),
     };
@@ -2307,6 +2311,10 @@ async fn run_subagent_worker(
         request_id: child_id.clone(),
         project_root,
         profile_id: None,
+        // ⚠️ 子代理的工具白名单只有 file/grep/glob（见各构造点上方的 filter），
+        //    所以这里 media/images 为空是**安全**的，analyze_image / generate_* 根本不会被调用。
+        //    若日后放开子代理的工具白名单，必须同时把本轮的 media 与 images 传进来，
+        //    否则 analyze_image 会报出**误导性**的「本轮对话没有附带图片」（用户明明发了图）。
         media: Default::default(),
         images: Vec::new(),
     };

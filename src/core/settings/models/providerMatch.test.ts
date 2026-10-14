@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inferProviderName, mergeModels, normalizeBaseUrl, sameBaseUrl } from './providerMatch';
+import { inferProviderName, mergeModels, newModelKey, normalizeBaseUrl, sameBaseUrl } from './providerMatch';
 
 describe('normalizeBaseUrl', () => {
   it('去空白与尾部斜杠', () => {
@@ -102,5 +102,20 @@ describe('mergeModels —— 增量合并「仅增不减」', () => {
   it('空列表并入等于原样追加', () => {
     const { models } = mergeModels([], [m('a'), m('b')]);
     expect(models.map((x) => x.model)).toEqual(['a', 'b']);
+  });
+});
+
+describe('newModelKey —— 高亮 key 必须带供应商命名空间', () => {
+  it('不同供应商的同名模型 key 不同（否则高亮会串台）', () => {
+    expect(newModelKey('pv_a', 'gpt-4o')).not.toBe(newModelKey('pv_b', 'gpt-4o'));
+  });
+
+  it('同一供应商同一模型 key 稳定', () => {
+    expect(newModelKey('pv_a', 'gpt-4o')).toBe(newModelKey('pv_a', 'gpt-4o'));
+  });
+
+  it('分隔符防止拼接歧义', () => {
+    // 若直接用字符串相加，('pv_a','b') 与 ('pv_ab','') 会撞成同一个 key
+    expect(newModelKey('pv_a', 'b')).not.toBe(newModelKey('pv_ab', ''));
   });
 });

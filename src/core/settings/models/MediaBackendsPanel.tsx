@@ -278,12 +278,12 @@ export function MediaBackendsPanel({ t: _t }: { t: TFunc }) {
                   />
                 </div>
                 <div>
-                  <label className={labelCls}>视觉模型名（可选，识图用）</label>
+                  <label className={labelCls}>视觉模型名（识图用，可留空）</label>
                   <input
                     className={inputCls}
                     value={b.extras.models?.vision ?? ''}
                     onChange={(e) => updateExtras(b.id, { models: { ...b.extras.models, vision: e.target.value } })}
-                    placeholder="留空则用该档案的视觉模型"
+                    placeholder="留空 = 用上方档案的「视觉模型」"
                   />
                 </div>
               </div>

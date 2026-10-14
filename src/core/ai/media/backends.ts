@@ -72,10 +72,15 @@ export function isBackendReady(b: MediaBackend, kind: MediaKind): boolean {
     return kind === 'image' && b.baseUrl.trim() !== '';
   }
   // openai 兼容：需能取到凭证与模型名。端点为可选（凭证经 profileId 从档案解析，
-  // 或后端自带 apiKey + baseUrl）。有 profileId 即视为有凭证来源。
+  // 或后端自带 apiKey + baseUrl）。
   const hasCred =
     (b.extras.profileId?.trim() ?? '') !== '' || (b.apiKey.trim() !== '' && b.baseUrl.trim() !== '');
   const hasModel = !!(b.extras.models?.[kind]?.trim());
+  // 视觉档特例：挂了档案（profileId）时模型名可留空——Rust 侧 vision_ask 会回落到
+  // 该档案的 vision_model（见 ai_ocr.rs），面板提示写的正是这条。
+  // ⚠️ 生图/语音**没有**这条回落路径（供应商的 image_model/tts_model 已是死字段），
+  //    所以它们仍必须显式给模型名，否则会把请求发到一个不存在的模型上。
+  if (kind === 'vision' && (b.extras.profileId?.trim() ?? '') !== '') return hasCred;
   return hasCred && hasModel;
 }
 

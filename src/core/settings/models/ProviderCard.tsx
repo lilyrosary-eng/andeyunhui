@@ -6,6 +6,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import type { ModelUi, ProviderUi } from '../aiConfigCodec';
 import { ModelEditorDrawer } from './ModelEditorDrawer';
 import { capTags } from './capsTags';
+import { newModelKey } from './providerMatch';
 
 const ROW_H = 40;
 
@@ -254,7 +255,8 @@ export function ProviderCard(props: ProviderCardProps) {
                     const highlighted = m.id === props.highlightModelId;
                     // 本批新增：橙色底（非持久）。优先级高于「已选中」底色——
                     // 它承载的是「刚才这一批新加了什么」这个瞬时信息。
-                    const isNew = props.newModelIds?.has(m.id) ?? false;
+                    // key 带供应商命名空间：模型 id 就是模型名，跨供应商会重名。
+                    const isNew = props.newModelIds?.has(newModelKey(p.id, m.id)) ?? false;
                     return (
                       <div
                         key={m.id}

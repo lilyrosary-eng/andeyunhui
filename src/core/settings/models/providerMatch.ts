@@ -78,6 +78,17 @@ export function inferProviderName(baseUrl: string): string {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+/**
+ * 「本批新增」高亮的 key —— **必须带供应商命名空间**。
+ *
+ * 模型 id 目前**就是模型名**（见 DiscoverModelsDialog.adopt 的 `id: m.model`），全局并不唯一：
+ * 两个供应商都提供 `gpt-4o` 时，只用模型名做 key 会让对方预设里的同名模型**一起亮起**。
+ * 用不可见分隔符拼接，避免与模型名本身可能的字符冲突。
+ */
+export function newModelKey(providerId: string, modelId: string): string {
+  return `${providerId}\u0000${modelId}`;
+}
+
 /** 合并所需的最小形状（ModelUi / AdoptedModel 都满足）。 */
 export interface MergeableModel {
   model: string;

@@ -229,4 +229,21 @@ describe('vision 能力位 —— 与 image 是两个方向', () => {
     const visionOnly = b({ id: 'b', caps: ['vision'], extras: { models: { vision: 'gpt-4o' } } });
     expect(isBackendReady(visionOnly, 'image')).toBe(false);
   })
+
+  it('视觉档挂了档案时模型名可留空（Rust 会回落档案的 vision_model）', () => {
+    // 面板提示就是「留空 = 用该档案的视觉模型」，判定必须与之一致，
+    // 否则用户照提示操作反而被判「未配置」而跳过。
+    expect(isBackendReady(b({ id: 'v', caps: ['vision'], extras: { profileId: 'p1' } }), 'vision')).toBe(true);
+  })
+
+  it('视觉档既无档案也无模型名 → 不就绪', () => {
+    expect(isBackendReady(b({ id: 'v', caps: ['vision'], extras: {} }), 'vision')).toBe(false);
+  })
+
+  it('生图/语音没有回落路径，模型名仍必填', () => {
+    // 供应商的 image_model/tts_model 是死字段，Rust 不会回落 → 留空必须判不就绪，
+    // 否则会把请求发到一个不存在的模型上。
+    expect(isBackendReady(b({ id: 'i', caps: ['image'], extras: { profileId: 'p1' } }), 'image')).toBe(false);
+    expect(isBackendReady(b({ id: 's', caps: ['speech'], extras: { profileId: 'p1' } }), 'speech')).toBe(false);
+  })
 })

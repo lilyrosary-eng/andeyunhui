@@ -9,7 +9,7 @@ import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
 import { ComfyuiPanel } from './ComfyuiPanel';
 import { MediaBackendsPanel } from './MediaBackendsPanel';
-import { inferProviderName, mergeModels, sameBaseUrl } from './providerMatch';
+import { inferProviderName, mergeModels, newModelKey, sameBaseUrl } from './providerMatch';
 import { bestScore } from '@/lib/fuzzy';
 
 const newId = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
@@ -213,7 +213,7 @@ export function ModelSettingsPage() {
         ...(apiKey ? { api_key: apiKey } : {}),
         last_scanned_at: now,
       });
-      setNewModelIds(new Set(added.map((m) => m.id)));
+      setNewModelIds(new Set(added.map((m) => newModelKey(target.id, m.id))));
       showToast(added.length > 0
         ? t('modelSettings.reuseToast', { name: target.name || target.base_url, n: added.length })
         : t('modelSettings.reuseToastNoNew', { name: target.name || target.base_url }));
@@ -225,7 +225,7 @@ export function ModelSettingsPage() {
       p.name = inferProviderName(baseUrl);
       p.models = toModelRows(models);
       setCfg((prev) => ({ ...prev, providers: [...prev.providers, p] }));
-      setNewModelIds(new Set(p.models.map((m) => m.id)));
+      setNewModelIds(new Set(p.models.map((m) => newModelKey(p.id, m.id))));
       revealProvider(p.id);
     }
     closeDiscover();
@@ -254,11 +254,22 @@ export function ModelSettingsPage() {
       providers: prev.providers
         .filter((p) => p.id !== providerId)
         .map((p) => (p.id === target.id
-          ? { ...p, models: [...p.models, ...incoming], api_key: p.api_key || src.api_key }
+          ? {
+              ...p,
+              models: [...p.models, ...incoming],
+              // 供应商级配置一并保留：target 已有值一律不动，空缺的用 src 补。
+              // （早先只搬 models/api_key，源预设的名称与多模态三件套被**静默丢弃**。）
+              api_key: p.api_key || src.api_key,
+              name: p.name || src.name,
+              vision_model: p.vision_model || src.vision_model,
+              image_model: p.image_model || src.image_model,
+              tts_model: p.tts_model || src.tts_model,
+              last_scanned_at: p.last_scanned_at ?? src.last_scanned_at,
+            }
           : p)),
       selected_provider_id: prev.selected_provider_id === providerId ? target.id : prev.selected_provider_id,
     }));
-    if (incoming.length) setNewModelIds(new Set(incoming.map((m) => m.id)));
+    if (incoming.length) setNewModelIds(new Set(incoming.map((m) => newModelKey(target.id, m.id))));
     showToast(t('modelSettings.mergeToast', { name: target.name || target.base_url }));
     revealProvider(target.id);
   }, [cfg.providers, patchProvider, showToast, revealProvider, t]);
