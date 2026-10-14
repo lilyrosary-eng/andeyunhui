@@ -1172,6 +1172,7 @@ export const frFR: Record<string, string> = {
   'modelSettings.providerLabel': 'Nom du fournisseur',
   'modelSettings.endpointLabel': 'Point de terminaison API',
   'modelSettings.apiKeyLabel': 'Clé API',
+  'modelSettings.fallbackModelsHint': 'Modèles de repli (uniquement pour les commandes autonomes des extensions / mobiles ; image, vision et voix en conversation se configurent dans « Backends média » ci-dessous)',
   'modelSettings.visionModelLabel': 'Modèle vision',
   'modelSettings.imageModel': 'Modèle de génération d’images',
   'modelSettings.ttsModel': 'Modèle de synthèse vocale',

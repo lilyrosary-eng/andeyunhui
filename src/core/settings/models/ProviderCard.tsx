@@ -239,6 +239,16 @@ export function ProviderCard(props: ProviderCardProps) {
                 <span className="text-[11px] text-neutral-400 dark:text-stone-500">{t('modelSettings.deepseekHint')}</span>
               </div>
             )}
+            {/* 兜底三件套 —— 刻意标成「兜底」而不是删掉。
+                删除会让**插件与移动端的独立命令**（ai_generate_image / ai_tts / ai_vision_ocr）
+                无处配置：它们不带媒体后端参数，只能读档案里这三个字段。
+                但对话内的图像/视觉/语音一律走下方「媒体后端」的能力链 —— 那里才是主入口。
+                标注的目的是**消除歧义**：让用户知道这两个入口各自管什么，而不是猜。 */}
+            <div className="sm:col-span-3 -mb-1">
+              <span className="text-[11px] text-neutral-400 dark:text-stone-500">
+                {t('modelSettings.fallbackModelsHint')}
+              </span>
+            </div>
             <div className="grid grid-cols-3 gap-2">
               <div>
                 <label className={labelCls}>{t('modelSettings.visionModelLabel')}</label>

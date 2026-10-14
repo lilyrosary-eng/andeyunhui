@@ -259,35 +259,12 @@ export function MediaBackendsPanel({ t: _t }: { t: TFunc }) {
                     placeholder="留空则用当前对话档案"
                   />
                 </div>
-                <div>
-                  <label className={labelCls}>图像模型名（可选）</label>
-                  <input
-                    className={inputCls}
-                    value={b.extras.models?.image ?? ''}
-                    onChange={(e) => updateExtras(b.id, { models: { ...b.extras.models, image: e.target.value } })}
-                    placeholder="如 dall-e-3"
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>语音模型名（可选）</label>
-                  <input
-                    className={inputCls}
-                    value={b.extras.models?.speech ?? ''}
-                    onChange={(e) => updateExtras(b.id, { models: { ...b.extras.models, speech: e.target.value } })}
-                    placeholder="如 tts-1"
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>视觉模型名（识图用，可留空）</label>
-                  <input
-                    className={inputCls}
-                    value={b.extras.models?.vision ?? ''}
-                    onChange={(e) => updateExtras(b.id, { models: { ...b.extras.models, vision: e.target.value } })}
-                    placeholder="留空 = 用上方档案的「视觉模型」"
-                  />
-                </div>
               </div>
             )}
+            {/* 模型名**不在**这里配：统一到下方「能力路由链」的对应行内联配置。
+                同一个后端可能同时提供图像/视觉/语音，各能力用的模型名不同 ——
+                放在后端卡片里会让用户按「后端」的思路填，而实际决策是按「能力」的；
+                而且会出现「卡片里填了、链上又填一处」的双入口歧义。 */}
 
             {/* 能力声明 */}
             <div className="flex items-center gap-2 flex-wrap">
@@ -370,10 +347,32 @@ export function MediaBackendsPanel({ t: _t }: { t: TFunc }) {
                     const ready = isBackendReady(b, k);
                     return (
                       <li key={b.id} className="flex items-center gap-2">
-                        <span className="text-[11px] text-neutral-400 dark:text-stone-500 w-4">{i + 1}.</span>
-                        <span className="text-[11px] text-neutral-700 dark:text-stone-300 flex-1">{b.name}</span>
+                        <span className="text-[11px] text-neutral-400 dark:text-stone-500 w-4 shrink-0">{i + 1}.</span>
                         <span
-                          className={`text-[10px] ${
+                          className="text-[11px] text-neutral-700 dark:text-stone-300 w-24 shrink-0 truncate"
+                          title={b.name}
+                        >
+                          {b.name}
+                        </span>
+                        {/* ★ 「这个能力用哪个模型」的**唯一**入口。
+                            放在能力链行内而不是后端卡片里 —— 决策本来就是按「能力」做的：
+                            同一个后端可能同时供图像/视觉/语音，三者模型名各不相同。 */}
+                        {b.kind === 'openai' ? (
+                          <input
+                            className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-800 dark:text-stone-100 outline-none focus:ring-1 focus:ring-[var(--element-border)]"
+                            value={b.extras.models?.[k] ?? ''}
+                            onChange={(e) =>
+                              updateExtras(b.id, { models: { ...b.extras.models, [k]: e.target.value } })
+                            }
+                            placeholder={`${KIND_LABEL[k]}模型名（留空则用算力来源档案的默认）`}
+                          />
+                        ) : (
+                          <span className="flex-1 min-w-0 text-[11px] text-neutral-400 dark:text-stone-500 truncate" title={b.baseUrl}>
+                            {b.baseUrl || '未填端点'}
+                          </span>
+                        )}
+                        <span
+                          className={`shrink-0 text-[10px] ${
                             ready ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
                           }`}
                         >
@@ -382,7 +381,7 @@ export function MediaBackendsPanel({ t: _t }: { t: TFunc }) {
                         <button
                           onClick={() => moveInRoute(k, b.id, -1)}
                           disabled={i === 0}
-                          className="text-neutral-400 hover:text-sky-500 disabled:opacity-30"
+                          className="shrink-0 text-neutral-400 hover:text-sky-500 disabled:opacity-30"
                           title="上移"
                         >
                           <ChevronUp size={12} />
@@ -390,7 +389,7 @@ export function MediaBackendsPanel({ t: _t }: { t: TFunc }) {
                         <button
                           onClick={() => moveInRoute(k, b.id, 1)}
                           disabled={i === rows.length - 1}
-                          className="text-neutral-400 hover:text-sky-500 disabled:opacity-30"
+                          className="shrink-0 text-neutral-400 hover:text-sky-500 disabled:opacity-30"
                           title="下移"
                         >
                           <ChevronDown size={12} />

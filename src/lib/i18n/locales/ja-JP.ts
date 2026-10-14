@@ -1173,6 +1173,7 @@ export const jaJP: Record<string, string> = {
   'modelSettings.providerLabel': 'プロバイダー名',
   'modelSettings.endpointLabel': 'API エンドポイント',
   'modelSettings.apiKeyLabel': 'API キー',
+  'modelSettings.fallbackModelsHint': 'フォールバックモデル（プラグイン / モバイルの単独コマンド専用。会話内の画像・視覚・音声は下の「メディアバックエンド」で設定）',
   'modelSettings.visionModelLabel': 'ビジョンモデル',
   'modelSettings.imageModel': '画像生成モデル',
   'modelSettings.ttsModel': '音声合成モデル',

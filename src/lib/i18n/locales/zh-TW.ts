@@ -1176,6 +1176,7 @@ export const zhTW: Record<string, string> = {
   'modelSettings.providerLabel': '供應商名稱',
   'modelSettings.endpointLabel': 'API 介面位址',
   'modelSettings.apiKeyLabel': 'API Key',
+  'modelSettings.fallbackModelsHint': '兜底模型（僅供外掛 / 行動端的獨立指令；對話內的圖像·視覺·語音請用下方「媒體後端」）',
   'modelSettings.visionModelLabel': '視覺模型',
   'modelSettings.imageModel': '圖片生成模型',
   'modelSettings.ttsModel': '語音合成模型',

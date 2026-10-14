@@ -1353,6 +1353,7 @@ export const zhCN: Record<string, string> = {
   'modelSettings.providerLabel': '供应商名称',
   'modelSettings.endpointLabel': 'API 接口地址',
   'modelSettings.apiKeyLabel': 'API Key',
+  'modelSettings.fallbackModelsHint': '兜底模型（仅供插件 / 移动端的独立命令；对话内的图像·视觉·语音请用下方「媒体后端」）',
   'modelSettings.visionModelLabel': '视觉模型',
   'modelSettings.imageModel': '图片生成模型',
   'modelSettings.ttsModel': '语音合成模型',

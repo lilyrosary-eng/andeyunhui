@@ -1173,6 +1173,7 @@ export const deDE: Record<string, string> = {
   'modelSettings.providerLabel': 'Anbietername',
   'modelSettings.endpointLabel': 'API-Endpunkt',
   'modelSettings.apiKeyLabel': 'API-Schlüssel',
+  'modelSettings.fallbackModelsHint': 'Fallback-Modelle (nur für eigenständige Befehle aus Plugins/Mobile; Bild/Vision/Sprache im Chat wird unten unter Medien-Backends konfiguriert)',
   'modelSettings.visionModelLabel': 'Vision-Modell',
   'modelSettings.imageModel': 'Bildmodell',
   'modelSettings.ttsModel': 'Sprachmodell',

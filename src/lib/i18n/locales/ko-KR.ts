@@ -1173,6 +1173,7 @@ export const koKR: Record<string, string> = {
   'modelSettings.providerLabel': '공급자 이름',
   'modelSettings.endpointLabel': 'API 엔드포인트',
   'modelSettings.apiKeyLabel': 'API 키',
+  'modelSettings.fallbackModelsHint': '폴백 모델(플러그인 / 모바일의 독립 명령 전용. 대화 내 이미지·비전·음성은 아래 \'미디어 백엔드\'에서 설정)',
   'modelSettings.visionModelLabel': '비전 모델',
   'modelSettings.imageModel': '이미지 생성 모델',
   'modelSettings.ttsModel': '음성 합성 모델',

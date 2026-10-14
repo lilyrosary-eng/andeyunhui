@@ -1245,6 +1245,7 @@ export const enUS: Record<string, string> = {
   'modelSettings.providerLabel': 'Provider name',
   'modelSettings.endpointLabel': 'API endpoint',
   'modelSettings.apiKeyLabel': 'API key',
+  'modelSettings.fallbackModelsHint': 'Fallback models (used only by plugin / mobile standalone commands; in-conversation image/vision/speech is configured in Media backends below)',
   'modelSettings.visionModelLabel': 'Vision model',
   'modelSettings.imageModel': 'Image model',
   'modelSettings.ttsModel': 'Speech model',
