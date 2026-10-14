@@ -15,12 +15,17 @@ import { storage, type Storage } from '@/core/storage';
 export const BACKENDS_KEY = 'andeyunhui.media.backends';
 export const ROUTES_KEY = 'andeyunhui.media.routes';
 
-/** 媒体能力：一个后端可支持多种（如 fooocus 只支持 image）。 */
-export type MediaKind = 'image' | 'speech' | 'video' | 'music';
+/**
+ * 媒体能力：一个后端可支持多种（如 fooocus 只支持 image）。
+ *
+ * `vision`（图片理解/识图）与 `image`（图片生成）是**两个方向**的能力，分开列：
+ * 用户可能想用云端视觉模型看图、同时用本地 ComfyUI 出图，混成一个就没法分别配置。
+ */
+export type MediaKind = 'image' | 'vision' | 'speech' | 'video' | 'music';
 
-/** 首期只启用 image/speech；video/music 枚举留位（后端可声明，路由表暂不配）。 */
-export const ENABLED_KINDS: MediaKind[] = ['image', 'speech'];
-export const ALL_KINDS: MediaKind[] = ['image', 'speech', 'video', 'music'];
+/** 首期只启用 image/vision/speech；video/music 枚举留位（后端可声明，路由表暂不配）。 */
+export const ENABLED_KINDS: MediaKind[] = ['image', 'vision', 'speech'];
+export const ALL_KINDS: MediaKind[] = ['image', 'vision', 'speech', 'video', 'music'];
 
 /** 后端种类：决定用哪套调用协议。 */
 export type BackendKind = 'comfyui' | 'openai';
@@ -62,9 +67,8 @@ export interface MediaBackend {
 export function isBackendReady(b: MediaBackend, kind: MediaKind): boolean {
   if (!b.caps.includes(kind)) return false;
   if (b.kind === 'comfyui') {
-    // ComfyUI 只做 image（首期），且必须有端点——没有端点就完全无法连接。
-    // 注意：这里不要求 ckpt/workflowPath——端点通了但模型没选，应由 Rust 给出
-    // 「请填 checkpoint」的明确错误（用户已配端点说明意图明确），而不是静默跳过。
+    // ComfyUI 是**生图**后端，只做 image，不理解图片（vision 恒不就绪）。
+    // 端点为空也算未配置：连不上就谈不上能力。
     return kind === 'image' && b.baseUrl.trim() !== '';
   }
   // openai 兼容：需能取到凭证与模型名。端点为可选（凭证经 profileId 从档案解析，

@@ -179,3 +179,54 @@ describe('存取与默认路由', () => {
     expect(BACKENDS_KEY).toBe('andeyunhui.media.backends');
   })
 })
+
+describe('多云端条目 —— 一个能力可挂多条，按链序生效', () => {
+  it('两条云端后端都能进链，首个就绪者胜出', () => {
+    const a = b({ id: 'cloud-a', baseUrl: 'https://a.example/v1', extras: { models: { image: 'dall-e-3' } } });
+    const c = b({ id: 'cloud-b', baseUrl: 'https://b.example/v1', extras: { models: { image: 'flux' } } });
+    expect(resolveBackend('image', [a, c], { image: ['cloud-a', 'cloud-b'] })?.backend.id).toBe('cloud-a');
+  })
+
+  it('首个未配置（无凭证来源）时落到第二个云端条目', () => {
+    const broken = b({ id: 'cloud-a', baseUrl: '', apiKey: '', extras: { models: { image: 'dall-e-3' } } });
+    const ok = b({ id: 'cloud-b', baseUrl: 'https://b.example/v1', extras: { models: { image: 'flux' } } });
+    expect(resolveBackend('image', [broken, ok], { image: ['cloud-a', 'cloud-b'] })?.backend.id).toBe('cloud-b');
+  })
+
+  it('不同能力可各自挂不同云端条目', () => {
+    const visionOnly = b({ id: 'v', caps: ['vision'], extras: { models: { vision: 'gpt-4o' } } });
+    const imgOnly = b({ id: 'i', caps: ['image'], extras: { models: { image: 'dall-e-3' } } });
+    const routes: MediaRoutes = { vision: ['v'], image: ['i'] };
+    expect(resolveBackend('vision', [visionOnly, imgOnly], routes)?.backend.id).toBe('v');
+    expect(resolveBackend('image', [visionOnly, imgOnly], routes)?.backend.id).toBe('i');
+  })
+
+  it('defaultRoutes 把多个云端条目都拼进同一条链', () => {
+    const a = b({ id: 'a', caps: ['image'], extras: { models: { image: 'x' } } });
+    const c = b({ id: 'c', caps: ['image'], extras: { models: { image: 'y' } } });
+    expect(defaultRoutes([a, c]).image).toEqual(['a', 'c']);
+  })
+})
+
+describe('vision 能力位 —— 与 image 是两个方向', () => {
+  it('openai 后端：需凭证 + 视觉模型名', () => {
+    expect(isBackendReady(b({ id: 'a', caps: ['vision'], extras: { models: { vision: 'gpt-4o' } } }), 'vision')).toBe(true);
+    expect(isBackendReady(b({ id: 'a', caps: ['vision'], extras: {} }), 'vision')).toBe(false);
+  })
+
+  it('comfyui 是生图后端，vision 恒不就绪', () => {
+    const comfy = b({
+      id: 'c', kind: 'comfyui', apiKey: '', baseUrl: 'http://127.0.0.1:8188',
+      caps: ['image', 'vision'], extras: { ckpt: 'sd.safetensors' },
+    });
+    expect(isBackendReady(comfy, 'image')).toBe(true);
+    expect(isBackendReady(comfy, 'vision')).toBe(false);
+  })
+
+  it('vision 与 image 不可互替', () => {
+    const imgOnly = b({ id: 'a', caps: ['image'], extras: { models: { image: 'dall-e-3' } } });
+    expect(isBackendReady(imgOnly, 'vision')).toBe(false);
+    const visionOnly = b({ id: 'b', caps: ['vision'], extras: { models: { vision: 'gpt-4o' } } });
+    expect(isBackendReady(visionOnly, 'image')).toBe(false);
+  })
+})

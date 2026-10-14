@@ -13,7 +13,7 @@
 // 本面板只负责「编辑清单 + 排序路由」，不承载 ComfyUI 工作流库 / 供应商档案的编辑
 // （那些仍在各自面板里），避免职责重复。
 import { useCallback, useState } from 'react';
-import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, RotateCcw } from 'lucide-react';
+import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, Eye, RotateCcw } from 'lucide-react';
 import {
   ALL_KINDS,
   ENABLED_KINDS,
@@ -32,6 +32,7 @@ type TFunc = (k: string, vars?: Record<string, string | number>) => string;
 /** 能力显示名。 */
 const KIND_LABEL: Record<MediaKind, string> = {
   image: '图像',
+  vision: '视觉',
   speech: '语音',
   video: '视频',
   music: '音乐',
@@ -39,6 +40,7 @@ const KIND_LABEL: Record<MediaKind, string> = {
 
 const KIND_ICON: Record<MediaKind, typeof ImageIcon> = {
   image: ImageIcon,
+  vision: Eye,
   speech: Volume2,
   video: ImageIcon,
   music: Volume2,
@@ -273,6 +275,15 @@ export function MediaBackendsPanel({ t: _t }: { t: TFunc }) {
                     value={b.extras.models?.speech ?? ''}
                     onChange={(e) => updateExtras(b.id, { models: { ...b.extras.models, speech: e.target.value } })}
                     placeholder="如 tts-1"
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>视觉模型名（可选，识图用）</label>
+                  <input
+                    className={inputCls}
+                    value={b.extras.models?.vision ?? ''}
+                    onChange={(e) => updateExtras(b.id, { models: { ...b.extras.models, vision: e.target.value } })}
+                    placeholder="留空则用该档案的视觉模型"
                   />
                 </div>
               </div>

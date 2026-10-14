@@ -132,4 +132,27 @@ describe('resolveMediaConfig', () => {
     );
     expect(await resolveMediaConfig()).toBeNull();
   });
+
+  it('vision 后端单独成键，不与 image 混用', async () => {
+    seed(
+      [
+        {
+          id: 'vision-p1',
+          name: '云端视觉',
+          kind: 'openai',
+          baseUrl: '',
+          apiKey: '',
+          caps: ['vision'],
+          extras: { models: { vision: 'gpt-4o' }, profileId: 'p1' },
+        },
+      ],
+      { vision: ['vision-p1'] },
+    );
+    const m = await resolveMediaConfig();
+    expect(m?.vision?.backendKind).toBe('openai');
+    expect(m?.vision?.model).toBe('gpt-4o');
+    expect(m?.vision?.profileId).toBe('p1');
+    expect(m?.image).toBeUndefined(); // 视觉不等于生图
+    expect(m?.speech).toBeUndefined();
+  });
 });

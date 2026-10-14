@@ -34,9 +34,12 @@ pub(crate) struct ToolContext {
     /// 当前使用模型的档案 id（子代理等需要起第二个循环的工具，用它复用同一模型档案）。
     pub profile_id: Option<String>,
     /// 本轮请求的媒体后端配置（前端每次 agent 请求时解析后传入；Rust 侧读不到
-    /// 前端 localStorage，故走参数通道）。按能力分区：image / speech。
+    /// 前端 localStorage，故走参数通道）。按能力分区：image / speech / vision。
     /// 前端已按「只降未配置」规则选定后端，Rust 只执行不降级。
     pub(crate) media: MediaPayload,
+    /// 用户**本轮**发来的图片（data URL）。`analyze_image` 工具按序号引用它们，
+    /// 避免把数 MB base64 塞进模型上下文。子代理不继承（任务不同）。
+    pub(crate) images: Vec<String>,
 }
 
 /// 媒体配置集合：能力 → 已选定的后端配置。缺某能力键 = 该能力未配置后端。
@@ -44,6 +47,7 @@ pub(crate) struct ToolContext {
 pub struct MediaPayload {
     pub(crate) image: Option<MediaToolCfg>,
     pub(crate) speech: Option<MediaToolCfg>,
+    pub(crate) vision: Option<MediaToolCfg>,
 }
 
 /// 蓝图工作流里「提示词参数位」的定位（前端 analyzeWorkflowParameters 解析产出，
@@ -2251,6 +2255,7 @@ async fn run_subagent_once(
         project_root,
         profile_id: None,
         media: Default::default(),
+        images: Vec::new(),
     };
     for _ in 0..6usize {
         match subagent_model_round(&client, &url, cfg, &mut messages, &tools, &sub_ctx).await? {
@@ -2303,6 +2308,7 @@ async fn run_subagent_worker(
         project_root,
         profile_id: None,
         media: Default::default(),
+        images: Vec::new(),
     };
     let mut total_rounds = 0usize;
     const MAX_ROUNDS: usize = 20;
@@ -3242,6 +3248,114 @@ impl AiTool for GenerateSpeechTool {
     }
 }
 
+// ========== 图片理解工具（analyze_image）——AI 对话直接「看图」 ==========
+//
+// 与 generate_image 对称：那个是「画出来」，这个是「看明白」。
+// 图片来自**用户本轮发来的图**（ToolContext.images，前端随 agent 请求带入）。
+// 模型不直接持有图片 base64——故用序号引用，避免把数 MB 数据塞进模型上下文。
+// 视觉后端走 media.vision（媒体后端链）；未配置时给出可自纠的明确错误。
+//
+// 注：前端本就会对每张图调一次 ai_vision_ocr 生成泛描述注入消息（兼容不支持视觉的
+// 模型）。本工具是**按需深挖**：用户问具体问题（报错说什么 / 有几个人）时，
+// 泛描述不够用，需要一个带问题的定向提问。两者互补，不是重复。
+
+/// 把 data URL 拆成 (mime, base64)。不是 data URL 时按 image/png 兜底（容错）。
+fn split_data_url(u: &str) -> (String, String) {
+    if let Some(rest) = u.strip_prefix("data:") {
+        if let Some(semi) = rest.find(';') {
+            let mime = rest[..semi].to_string();
+            let b64 = rest[semi + 1..]
+                .strip_prefix("base64,")
+                .unwrap_or(&rest[semi + 1..])
+                .to_string();
+            return (mime, b64);
+        }
+    }
+    ("image/png".to_string(), u.to_string())
+}
+
+struct AnalyzeImageTool;
+#[async_trait::async_trait]
+impl AiTool for AnalyzeImageTool {
+    fn name(&self) -> &'static str {
+        "analyze_image"
+    }
+    fn function_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": "查看并分析用户本轮发来的图片。当用户针对图片提问（图里有什么、这个报错说什么、图上有几个人、截图里的文字是什么）时调用。image 为图片序号（从 1 开始，对应用户发图的顺序），question 为要问的具体问题。分析结果直接用于组织回答，无需转述。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image": { "type": "integer", "description": "图片序号，从 1 开始" },
+                        "question": { "type": "string", "description": "针对这张图片要问的具体问题" }
+                    },
+                    "required": ["image", "question"]
+                }
+            }
+        })
+    }
+    fn present_call(&self, args: &serde_json::Value) -> serde_json::Value {
+        let n = args.get("image").and_then(|v| v.as_u64()).unwrap_or(0);
+        let q: String = args
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(24)
+            .collect();
+        serde_json::json!({ "card": "generic", "kind": "other", "title": format!("分析图 {} {}", n, q) })
+    }
+    async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolExecResult, String> {
+        let n = args.get("image").and_then(|v| v.as_u64()).unwrap_or(0);
+        let q = args
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if q.is_empty() {
+            return Err("缺少 question 参数（要问这张图片什么问题）".to_string());
+        }
+        if ctx.images.is_empty() {
+            return Err("本轮对话没有附带图片。请让用户先发图，或改用文字描述需求。".to_string());
+        }
+        // 序号 1 起；越界时报出实际张数，让模型能自纠（它常从 0 开始数）
+        let idx = match usize::try_from(n) {
+            Ok(v) if v >= 1 && v <= ctx.images.len() => v - 1,
+            _ => return Err(format!("图片序号 {} 越界：本轮共附带 {} 张图", n, ctx.images.len())),
+        };
+        let cfg = ctx
+            .media
+            .vision
+            .as_ref()
+            .filter(|c| c.is_ready())
+            .ok_or_else(|| {
+                "未配置视觉后端：请在设置 → 模型 → 媒体后端里添加一个并绑定到「视觉」能力（需该算力来源配好视觉模型）"
+                    .to_string()
+            })?;
+        let (mime, b64) = split_data_url(&ctx.images[idx]);
+        // 首期只接 OpenAI 兼容视觉协议（ComfyUI 是生图后端，不做理解）
+        let text = match cfg.backend_kind.as_str() {
+            "openai" => crate::services::ai_service::ai_ocr::vision_ask(
+                &ctx.app,
+                &b64,
+                &mime,
+                Some(&q),
+                cfg.profile_id.as_deref(),
+                cfg.model.as_deref(),
+                Some(&cfg.base_url),
+                Some(&cfg.api_key),
+            )
+            .await?,
+            other => return Err(format!("暂不支持的视觉后端类型：{}", other)),
+        };
+        Ok(ToolExecResult::plain(text))
+    }
+}
+
 pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
     vec![
         Box::new(NowTool),
@@ -3264,6 +3378,7 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(RagSearchTool),
         Box::new(GenerateImageTool),
         Box::new(GenerateSpeechTool),
+        Box::new(AnalyzeImageTool),
         Box::new(crate::services::ai_service::gongfang_tools::GongfangFullTool),
     ]
 }
@@ -3484,13 +3599,61 @@ mod tests {
 
     #[test]
     fn media_payload_deserializes_partial_kinds() {
-        // 只配 image 时，speech 应为 None（前端缺键即不传）
+        // 只配 image 时，speech/vision 应为 None（前端缺键即不传）
         let p: MediaPayload = serde_json::from_value(serde_json::json!({
             "image": { "backendKind": "comfyui", "baseUrl": "http://127.0.0.1:8188" }
         }))
         .unwrap();
         assert!(p.image.is_some());
         assert!(p.speech.is_none());
+        assert!(p.vision.is_none());
+    }
+
+    #[test]
+    fn media_payload_carries_vision_separately() {
+        // 视觉与生图是两个键，互不串味
+        let p: MediaPayload = serde_json::from_value(serde_json::json!({
+            "vision": { "kind": "vision", "backendKind": "openai", "model": "gpt-4o", "profileId": "p1" }
+        }))
+        .unwrap();
+        let v = p.vision.expect("vision 应被解析");
+        assert_eq!(v.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(v.profile_id.as_deref(), Some("p1"));
+        assert!(v.is_ready());
+        assert!(p.image.is_none(), "视觉不应落到 image 键上");
+    }
+
+    #[test]
+    fn split_data_url_拆出mime与base64() {
+        let (m, b) = split_data_url("data:image/png;base64,AAAA");
+        assert_eq!(m, "image/png");
+        assert_eq!(b, "AAAA");
+        // 非 data URL：整串当 base64，mime 兜底 image/png
+        let (m2, b2) = split_data_url("AAAA");
+        assert_eq!(m2, "image/png");
+        assert_eq!(b2, "AAAA");
+        // 缺 base64 标记也应能取出内容（部分前端只给 `data:image/jpeg;`）
+        let (m3, b3) = split_data_url("data:image/jpeg;,ZZZ");
+        assert_eq!(m3, "image/jpeg");
+        assert_eq!(b3, "ZZZ");
+    }
+
+    #[test]
+    fn analyze_image_registered_in_toolset() {
+        // 工具没注册进注册表 = 模型永远看不到它（静默失效），值得钉住
+        let names: Vec<&str> = registered_tools().iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"analyze_image"));
+        assert!(names.contains(&"generate_image"));
+        assert!(names.contains(&"generate_speech"));
+    }
+
+    #[test]
+    fn analyze_image_schema_requires_image_and_question() {
+        let tool = AnalyzeImageTool;
+        let schema = tool.function_schema();
+        let required = schema["function"]["parameters"]["required"].as_array().unwrap();
+        let req: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(req.contains(&"image") && req.contains(&"question"));
     }
 
     #[test]

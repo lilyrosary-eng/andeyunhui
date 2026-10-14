@@ -445,7 +445,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         // Agent 工具模式：走 ai_chat_agent（后台 worker，非阻塞立即返回）。
         // 事件经 ai-agent-step/ai-done/ai-error 推送，useAiStream(prefix:'ai') 已兼容监听。
         // 媒体后端配置在前端解析（Rust 读不到 localStorage）：按「后端清单 + 路由表」
-        // 为 image/speech 各选一个后端，随机请求带入 media 参数。
+        // 为 image/vision/speech 各选一个后端，随机请求带入 media 参数。
         // 未配置的能力不带该键——Rust 工具会给出可自纠的「未配置」提示。
         const media = await resolveMediaConfig().catch(() => null);
         await invoke('ai_chat_agent', {
@@ -456,6 +456,9 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
           maxRounds: 8,
           projectRoot: null,
           ...(media ? { media } : {}),
+          // 本轮图片随请求带入：模型不直接持有 base64，由 analyze_image 工具按序号取用。
+          // 只走参数通道、不进 messages —— 避免数 MB base64 落进会话日志与模型上下文。
+          ...(hasImages && images ? { images } : {}),
         });
       } else {
         await invoke('ai_chat', payload);

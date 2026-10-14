@@ -69,10 +69,10 @@ async function resolveOne(kind: MediaKind): Promise<MediaToolCfg | null> {
 }
 
 /**
- * 解析本轮请求需要携带的全部媒体配置（image / speech）。
+ * 解析本轮请求需要携带的全部媒体配置（image / vision / speech）。
  * 任一能力无可用后端就不带该键（Rust 工具会给出「未配置」的明确提示）。
  */
-export async function resolveMediaConfig(kinds: MediaKind[] = ['image', 'speech']): Promise<MediaPayload | null> {
+export async function resolveMediaConfig(kinds: MediaKind[] = ['image', 'vision', 'speech']): Promise<MediaPayload | null> {
   const entries = await Promise.all(
     kinds.map(async (k) => [k, await resolveOne(k).catch(() => null)] as const),
   );

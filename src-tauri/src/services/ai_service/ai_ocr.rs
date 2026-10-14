@@ -69,8 +69,10 @@ pub async fn ai_test_connection(config: AiProfile) -> Result<String, String> {
 // - 翻译：构造 system + user 单轮对话，提示模型只返回译文
 // - 失败时返回详细错误信息（含 HTTP 状态码 + 响应体片段），前端直接展示
 
-/// 视觉 OCR：传入图片 base64 + prompt，返回模型识别的文本
-/// 兼容 OpenAI Vision 协议（content 数组：[{type:"text",text:...},{type:"image_url",image_url:{url:"data:..."}}]）
+/// 视觉问答（OpenAI Vision 协议）。`ai_vision_ocr` 命令与 Agent 工具 `analyze_image` 共用。
+///
+/// overrides（model / base_url / api_key）供「媒体后端自带凭证」时使用：那种后端没有
+/// 挂到任何模型档案上，`resolve_target` 找不到它的端点与密钥，必须显式传入。
 #[tauri::command]
 pub async fn ai_vision_ocr(
     app: AppHandle,
@@ -79,21 +81,45 @@ pub async fn ai_vision_ocr(
     prompt: Option<String>,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    let config = load_config(&app);
-    let cfg = resolve_target(&config, profile_id.as_deref());
-    if cfg.api_key.trim().is_empty() {
+    vision_ask(&app, &image_base64, &image_mime, prompt.as_deref(), profile_id.as_deref(), None, None, None).await
+}
+
+/// 视觉问答的实现体。见 `ai_vision_ocr` 的文档。
+#[allow(clippy::too_many_arguments)]
+pub async fn vision_ask(
+    app: &AppHandle,
+    image_base64: &str,
+    image_mime: &str,
+    prompt: Option<&str>,
+    profile_id: Option<&str>,
+    model: Option<&str>,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<String, String> {
+    let config = load_config(app);
+    let cfg = resolve_target(&config, profile_id);
+    // 端点 / 密钥：显式覆盖优先，否则用解析出的档案值
+    let key = api_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg.api_key.trim().to_string());
+    if key.is_empty() {
         return Err("未配置 API Key，请先在全局设置 → 模型中填写".to_string());
     }
-
-    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let p = prompt.unwrap_or_else(|| "请提取图片中的全部文字，保持原始排版与顺序，仅输出识别结果不要任何说明".to_string());
+    let endpoint = base_url.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(cfg.base_url.trim());
+    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+    let p = prompt
+        .map(str::to_string)
+        .unwrap_or_else(|| "请提取图片中的全部文字，保持原始排版与顺序，仅输出识别结果不要任何说明".to_string());
     let data_url = format!("data:{};base64,{}", image_mime, image_base64);
 
-    // OCR 优先使用独立的视觉模型；未单独配置时回落到对话模型（兼容旧配置）。
-    let ocr_model = cfg
-        .vision_model
-        .clone()
-        .filter(|s| !s.trim().is_empty())
+    // 模型优先级：显式覆盖 > 档案的视觉模型 > 对话模型（保留旧配置的回落路径）
+    let ocr_model = model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| cfg.vision_model.clone().filter(|s| !s.trim().is_empty()))
         .unwrap_or_else(|| cfg.model.clone());
 
     let body = serde_json::json!({
@@ -117,7 +143,7 @@ pub async fn ai_vision_ocr(
 
     let resp = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+        .header("Authorization", format!("Bearer {}", key))
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
