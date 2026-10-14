@@ -13,7 +13,8 @@
 // 本面板只负责「编辑清单 + 排序路由」，不承载 ComfyUI 工作流库 / 供应商档案的编辑
 // （那些仍在各自面板里），避免职责重复。
 import { useCallback, useMemo, useState } from 'react';
-import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, Eye, RotateCcw } from 'lucide-react';
+import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, Eye, RotateCcw, Activity, Loader2 } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import {
   ALL_KINDS,
   ENABLED_KINDS,
@@ -109,6 +110,50 @@ export function MediaBackendsPanel({
       }
     }
     return null;
+  };
+
+  // ── 「测试」：真发一次最小请求，把"配了到底能不能用"变成可见的 ──────────
+  //
+  // 三种能力的测试代价**差别很大**，所以不能用同一套：
+  //   视觉 → 一张 1×1 图（几乎免费）
+  //   语音 → 合成两个字（成本可忽略）
+  //   图像 → **会真实生成一张图，可能计费** → 必须先确认
+  const [testing, setTesting] = useState<MediaModelKind | null>(null);
+  const [testMsg, setTestMsg] = useState<{ kind: MediaModelKind; ok: boolean; text: string } | null>(null);
+
+  const testKind = async (kind: MediaModelKind) => {
+    const name = mediaModels[kind]?.trim() ?? '';
+    if (!name) return;
+    const entry = providers.flatMap((p) => p.models).find((m) => m.model.trim() === name);
+    if (!entry) {
+      setTestMsg({ kind, ok: false, text: t('modelSettings.mediaModels.notFound') });
+      return;
+    }
+    if (kind === 'image' && !window.confirm(t('modelSettings.mediaModels.testImageCost'))) return;
+    setTesting(kind);
+    setTestMsg(null);
+    try {
+      if (kind === 'vision') {
+        // 复用能力探测：发一张 1×1 PNG，按状态码 + 正文判"支不支持看图"
+        const out = await invoke<{ verdict: string; detail: string }>('ai_probe_vision', {
+          profileId: entry.id, baseUrl: null, apiKey: null, model: name,
+        });
+        setTestMsg({ kind, ok: out.verdict === 'supported', text: out.detail });
+      } else if (kind === 'speech') {
+        await invoke<string>('ai_tts', { text: t('modelSettings.mediaModels.testSpeechText'), profileId: entry.id });
+        setTestMsg({ kind, ok: true, text: t('modelSettings.mediaModels.testOk') });
+      } else {
+        await invoke<string>('ai_generate_image', {
+          prompt: 'a single small red dot on a white background',
+          profileId: entry.id,
+        });
+        setTestMsg({ kind, ok: true, text: t('modelSettings.mediaModels.testOk') });
+      }
+    } catch (e) {
+      setTestMsg({ kind, ok: false, text: String(e) });
+    } finally {
+      setTesting(null);
+    }
   };
 
   // 初始加载：惰性初始化（含首次打开时的默认路由补齐），避免 effect 内 setState 级联渲染。
@@ -414,14 +459,38 @@ export function MediaBackendsPanel({
                     const cur = mediaModels[k] ?? '';
                     if (!cur.trim()) return null;
                     const owner = ownerOf(cur);
-                    return owner ? (
-                      <span className="text-[10px] text-neutral-400 dark:text-stone-500">
-                        {t('modelSettings.mediaModels.via')} {owner}
-                      </span>
-                    ) : (
-                      <span className="text-[10px] text-amber-600 dark:text-amber-400">
-                        {t('modelSettings.mediaModels.notFound')}
-                      </span>
+                    const r = testMsg?.kind === k ? testMsg : null;
+                    return (
+                      <>
+                        {owner ? (
+                          <span className="text-[10px] text-neutral-400 dark:text-stone-500">
+                            {t('modelSettings.mediaModels.via')} {owner}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-amber-600 dark:text-amber-400">
+                            {t('modelSettings.mediaModels.notFound')}
+                          </span>
+                        )}
+                        {/* 测试：真发一次最小请求。找不到归属时禁用 —— 连端点都定位不到，
+                            测也是白测。三种能力的代价不同，见 testKind 的说明。 */}
+                        <button
+                          onClick={() => void testKind(k)}
+                          disabled={testing !== null || !owner}
+                          className="px-1.5 py-0.5 rounded text-[10px] border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40 flex items-center gap-1 shrink-0"
+                          title={t('modelSettings.mediaModels.testHint')}
+                        >
+                          {testing === k ? <Loader2 size={10} className="animate-spin" /> : <Activity size={10} />}
+                          {testing === k ? t('modelSettings.mediaModels.testing') : t('modelSettings.mediaModels.test')}
+                        </button>
+                        {r && (
+                          <span
+                            className={`text-[10px] max-w-[260px] truncate ${r.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}
+                            title={r.text}
+                          >
+                            {r.ok ? '✓' : '✗'} {r.text}
+                          </span>
+                        )}
+                      </>
                     );
                   })()}
               </div>

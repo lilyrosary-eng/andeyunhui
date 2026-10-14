@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText, ShieldAlert } from 'lucide-react';
+import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText, ShieldAlert, Activity } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { convertGraphToApi } from '@/core/ai/comfyui/convert';
@@ -57,6 +57,23 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
   // 自定义节点可执行任意 Python。AI 自建工作流时，Rust 侧安全审计会把
   // 「非核心节点」（object_info 里 python_module != "nodes"）拦下并要求用户放行。
   // 放行**只能**来自这里的勾选——模型的工具参数无法自行放行。
+  // ComfyUI 连通测试：拉一次 /object_info 就算连通（顺便知道节点数）。
+  // 与供应商卡片的「测试连接」对齐 —— 每个可配的端点都该有一个"能不能用"的按钮。
+  const [connBusy, setConnBusy] = useState(false);
+  const [connMsg, setConnMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const testComfyConnection = async () => {
+    setConnBusy(true);
+    setConnMsg(null);
+    try {
+      const info = await getObjectInfo(comfyuiUrl.trim());
+      setConnMsg({ ok: true, text: t('modelSettings.comfyui.connOk', { n: Object.keys(info).length }) });
+    } catch (e) {
+      setConnMsg({ ok: false, text: String(e) });
+    } finally {
+      setConnBusy(false);
+    }
+  };
+
   const [customModules, setCustomModules] = useState<Record<string, string[]> | null>(null);
   const [allowedModules, setAllowedModules] = useState<string[]>(() => loadAllowedModules());
   const [customBusy, setCustomBusy] = useState(false);
@@ -229,6 +246,26 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
           <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">{t('modelSettings.comfyui.checkpoint')}</label>
           <input className={`${inputCls} font-mono`} value={comfyuiCkpt} placeholder="sd_xl_base.safetensors" onChange={(e) => saveCkpt(e.target.value)} />
         </div>
+      </div>
+      {/* 连通测试：拉一次 /object_info 就算通了（顺便知道节点数）。
+          与供应商卡片的「测试连接」对齐 —— 每个可配的端点都该有一个"能不能用"的按钮。 */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => void testComfyConnection()}
+          disabled={connBusy || !comfyuiUrl.trim()}
+          className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40"
+        >
+          {connBusy ? <Loader2 size={11} className="animate-spin" /> : <Activity size={11} />}
+          {connBusy ? t('modelSettings.comfyui.connTesting') : t('modelSettings.comfyui.connTest')}
+        </button>
+        {connMsg && (
+          <span
+            className={`text-[11px] truncate max-w-[320px] ${connMsg.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}
+            title={connMsg.text}
+          >
+            {connMsg.ok ? '✓' : '✗'} {connMsg.text}
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-2">
         <input className={`flex-1 ${inputCls}`} value={cmfyPrompt} placeholder={t('modelSettings.comfyui.promptPlaceholder')}
