@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use super::ai_profile::Caps;
-use super::caps_infer::infer_caps;
+use super::caps_infer::{infer_capacity, infer_caps};
 
 pub const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -81,11 +81,22 @@ pub fn parse_listing(body: &serde_json::Value) -> Result<Vec<DiscoveredModel>, S
     ))
 }
 
-/// 给解析出的模型批量补上按模型名推断的能力标记。
-/// 能力推断只有后端有（caps_infer），前端不复制推断表。
+/// 给解析出的模型批量补上「按模型名推断的能力标记」，并在端点未报容量时用静态表兜底。
+/// 推断与兜底表只有后端有（caps_infer），前端不复制这两张表。
+///
+/// 容量优先级：**端点自报 > 兜底表 > 留空**。绝大多数 OpenAI 兼容端点的 /v1/models
+/// 只回 id，兜底表让上下文/输出长度在设置页有个可用的初始值（用户仍可改）。
 fn with_caps(mut models: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
     for m in models.iter_mut() {
         m.caps = infer_caps(&m.model);
+        if let Some((ctx, out)) = infer_capacity(&m.model) {
+            if m.context_tokens.is_none() {
+                m.context_tokens = Some(ctx);
+            }
+            if m.max_tokens.is_none() {
+                m.max_tokens = Some(out);
+            }
+        }
     }
     models
 }
@@ -405,5 +416,33 @@ mod tests {
         assert!(m[0].caps.vision);
         assert!(m[1].caps.embedding);
         assert!(!m[1].caps.text);
+    }
+
+    #[test]
+    fn 容量_端点未报时用兜底表() {
+        // 只回 id 的端点（绝大多数情况）：兜底表给出上下文与输出长度
+        let body = json!({ "data": [{ "id": "gpt-4o" }] });
+        let m = parse_listing(&body).unwrap();
+        assert_eq!(m[0].context_tokens, Some(128_000));
+        assert_eq!(m[0].max_tokens, Some(16_384));
+    }
+
+    #[test]
+    fn 容量_端点自报优先于兜底表() {
+        // 端点报了 context_length/max_output_tokens：必须以端点为准，不被兜底表覆盖
+        let body = json!({ "data": [{
+            "id": "gpt-4o", "context_length": 99999, "max_output_tokens": 777
+        }] });
+        let m = parse_listing(&body).unwrap();
+        assert_eq!(m[0].context_tokens, Some(99_999));
+        assert_eq!(m[0].max_tokens, Some(777));
+    }
+
+    #[test]
+    fn 容量_表外模型留空不猜() {
+        let body = json!({ "data": [{ "id": "some-unknown-model-2026" }] });
+        let m = parse_listing(&body).unwrap();
+        assert_eq!(m[0].context_tokens, None);
+        assert_eq!(m[0].max_tokens, None);
     }
 }

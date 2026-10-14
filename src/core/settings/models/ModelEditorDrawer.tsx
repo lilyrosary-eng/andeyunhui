@@ -74,10 +74,19 @@ export function ModelEditorDrawer(props: ModelEditorDrawerProps) {
                 onChange={(e) => set({ max_tokens: e.target.value })} />
             </div>
           </div>
-          <div>
-            <label className={labelCls}>{t('modelSettings.contextTokens')}</label>
-            <input className={inputCls} value={m.context_tokens} placeholder={t('modelSettings.contextAuto')}
-              onChange={(e) => set({ context_tokens: e.target.value })} />
+          {/* 上下文（输入侧）与单次最大输出（输出侧）并列：两者都是「模型能力」，
+              与上面的 maxTokens（本次请求要它产多长）语义不同。 */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelCls}>{t('modelSettings.contextTokens')}</label>
+              <input className={inputCls} value={m.context_tokens} placeholder={t('modelSettings.contextAuto')}
+                onChange={(e) => set({ context_tokens: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>{t('modelSettings.maxOutputTokens')}</label>
+              <input className={inputCls} value={m.max_output_tokens} placeholder={t('modelSettings.contextAuto')}
+                onChange={(e) => set({ max_output_tokens: e.target.value })} />
+            </div>
           </div>
           <div>
             <label className={labelCls}>{t('modelSettings.systemPrompt')}</label>
@@ -135,7 +144,7 @@ export function ModelEditorDrawer(props: ModelEditorDrawerProps) {
               {t('modelSettings.capabilities')}
             </div>
             <div className="grid grid-cols-2 gap-2">
-              {(['text', 'vision', 'reasoning', 'embedding'] as const).map((k) => (
+              {(['text', 'vision', 'reasoning', 'tools', 'embedding'] as const).map((k) => (
                 <label key={k} className="flex items-center gap-2 text-xs text-neutral-700 dark:text-stone-300">
                   <input type="checkbox" checked={m.caps[k]}
                     onChange={(e) => set({ caps: { ...m.caps, [k]: e.target.checked } })} />

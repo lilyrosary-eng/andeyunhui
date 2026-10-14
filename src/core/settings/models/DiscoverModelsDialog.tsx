@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { X, Radar, Loader2 } from 'lucide-react';
+import { X, Radar, Loader2, ChevronDown } from 'lucide-react';
 import type { CapsUi, ProviderUi } from '../aiConfigCodec';
+import { capTags } from './capsTags';
 
 // 后端返回的模型结构。注意：Rust 的 DiscoveredModel 没有 `id` 字段——模型名即天然 id，
 // 所以前端用 model 作为 AdoptedModel 的 id（见 adopt()），不要读不存在的 m.id。
@@ -19,11 +20,15 @@ export interface AdoptedModel {
   label: string;
   caps: CapsUi;
   context_tokens: string;
+  /** 模型的单次最大输出（能力上限），与请求参数 max_tokens 不同。 */
+  max_output_tokens: string;
 }
 
 export interface DiscoverModelsDialogProps {
   /** 打开弹窗时的初始值：已有供应商传其当前快照，新建传一份空白。关闭时传 null。 */
   provider: ProviderUi | null;
+  /** 已保存的供应商清单——供 endpoint 下拉复用（选它即回填该供应商的 url 与 key）。 */
+  knownProviders?: ProviderUi[];
   onClose: () => void;
   onAdopt: (baseUrl: string, apiKey: string, models: AdoptedModel[]) => void;
   t: (k: string, vars?: Record<string, string | number>) => string;
@@ -33,7 +38,7 @@ const inputCls =
   'w-full px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-800 dark:text-stone-100 outline-none focus:ring-2 focus:ring-[var(--element-border)] transition-colors';
 const labelCls = 'block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium';
 
-function fmtContext(n: number | null): string {
+function fmtLen(n: number | null): string {
   if (!n || n <= 0) return '';
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
   if (n >= 1000) return `${Math.round(n / 1000)}K`;
@@ -41,15 +46,41 @@ function fmtContext(n: number | null): string {
 }
 
 export function DiscoverModelsDialog(props: DiscoverModelsDialogProps) {
-  const { provider, t } = props;
+  const { provider, knownProviders = [], t } = props;
   const [endpoint, setEndpoint] = useState(provider?.base_url ?? '');
   const [apiKey, setApiKey] = useState(provider?.api_key ?? '');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<DiscoveredModel[] | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
 
-  if (!provider) return null; // 未打开
+  // 点弹窗外部收起 endpoint 下拉
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuOpen]);
+
+  // ★ 调用方（ModelSettingsPage）在 discoverSeed 为空时**不挂载**本组件。
+  //   因此「关窗再开」= 全新实例 = 所有 state 回到初值。这是**有意依赖**的行为：
+  //   万一下拉被误操作弄没了、或想放弃手填，关窗重开即可恢复。
+  //   若将来改成常驻挂载，必须显式加 key 或重置 state，否则此恢复路径会失效。
+  if (!provider) return null;
+
+  /** 从下拉里选供应商：回填 url 与 key。哨兵项「新供应商」传空串 → 清空两框。 */
+  const pickOption = (url: string, key: string) => {
+    setEndpoint(url);
+    setApiKey(key);
+    setCandidates(null); // 换端点后旧候选作废，避免误采纳别的端点的模型
+    setPicked(new Set());
+    setError(null);
+    setMenuOpen(false);
+  };
 
   const run = async () => {
     if (!endpoint.trim()) { setError(t('modelSettings.discoverNoBaseUrl')); return; }
@@ -80,6 +111,7 @@ export function DiscoverModelsDialog(props: DiscoverModelsDialogProps) {
       label: m.label ?? '',
       caps: m.caps,
       context_tokens: m.context_tokens ? String(m.context_tokens) : '',
+      max_output_tokens: m.max_tokens ? String(m.max_tokens) : '',
     }));
     props.onAdopt(endpoint.trim(), apiKey.trim(), chosen);
   };
@@ -102,10 +134,39 @@ export function DiscoverModelsDialog(props: DiscoverModelsDialogProps) {
           <div>
             <label className={labelCls}>{t('modelSettings.endpointOrPort')}</label>
             <div className="flex gap-2">
-              <input className={inputCls} value={endpoint} disabled={busy}
-                placeholder={t('modelSettings.endpointPlaceholder')}
-                onChange={(e) => setEndpoint(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !busy) void run(); }} />
+              <div className="relative flex-1" ref={menuRef}>
+                <input className={`${inputCls} pr-9`} value={endpoint} disabled={busy}
+                  placeholder={t('modelSettings.endpointPlaceholder')}
+                  onChange={(e) => setEndpoint(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !busy) void run(); }} />
+                {/* 下拉：复用已保存的供应商（选它即回填 url + key）。首项是哨兵「新供应商」 */}
+                <button
+                  type="button"
+                  onClick={() => setMenuOpen((o) => !o)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-stone-200"
+                  title={t('modelSettings.discoverPickKnown')}
+                  aria-label={t('modelSettings.discoverPickKnown')}
+                >
+                  <ChevronDown size={16} />
+                </button>
+                {menuOpen && (
+                  <div className="absolute left-0 right-0 top-full mt-1 z-10 max-h-56 overflow-y-auto rounded-lg border border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-900 shadow-lg">
+                    <button type="button" onClick={() => pickOption('', '')}
+                      className="w-full text-left px-3 py-2 text-xs hover:bg-neutral-50 dark:hover:bg-stone-800 border-b border-neutral-100 dark:border-stone-800 text-neutral-700 dark:text-stone-200">
+                      {t('modelSettings.discoverNewProvider')}
+                    </button>
+                    {knownProviders.length === 0 ? (
+                      <div className="px-3 py-2 text-[11px] text-neutral-400">{t('modelSettings.discoverNoKnown')}</div>
+                    ) : knownProviders.map((p) => (
+                      <button key={p.id} type="button" onClick={() => pickOption(p.base_url, p.api_key)}
+                        className="w-full text-left px-3 py-2 hover:bg-neutral-50 dark:hover:bg-stone-800 border-b border-neutral-100 dark:border-stone-800 last:border-0">
+                        <div className="text-xs text-neutral-700 dark:text-stone-200 truncate">{p.name || p.base_url}</div>
+                        <div className="text-[10px] text-neutral-400 truncate">{p.base_url}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <button onClick={run} disabled={busy || !endpoint.trim()}
                 className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40">
                 {busy ? <Loader2 size={14} className="animate-spin" /> : <Radar size={14} />}
@@ -137,12 +198,18 @@ export function DiscoverModelsDialog(props: DiscoverModelsDialogProps) {
                       return next;
                     })} />
                   <span className="flex-1 truncate font-mono text-xs">{m.model}</span>
-                  <span className="shrink-0 text-[10px] text-neutral-400 w-12 text-right">{fmtContext(m.context_tokens)}</span>
-                  <span className="shrink-0 text-[10px] text-neutral-400 w-16 text-right">
-                    {m.caps.vision ? t('modelSettings.caps.vision')
-                      : m.caps.reasoning ? t('modelSettings.caps.reasoning')
-                      : m.caps.embedding ? t('modelSettings.caps.embedding')
-                      : t('modelSettings.caps.text')}
+                  <span className="shrink-0 text-[10px] text-neutral-400 tabular-nums"
+                    title={t('modelSettings.lenHint')}>
+                    {t('modelSettings.lenIn')} {fmtLen(m.context_tokens) || '—'}
+                    {' · '}
+                    {t('modelSettings.lenOut')} {fmtLen(m.max_tokens) || '—'}
+                  </span>
+                  <span className="shrink-0 flex gap-1">
+                    {capTags(m.caps, t).map((tag) => (
+                      <span key={tag} className="text-[10px] px-1 py-0.5 rounded bg-neutral-100 dark:bg-stone-800 text-neutral-500 dark:text-stone-400">
+                        {tag}
+                      </span>
+                    ))}
                   </span>
                 </label>
               ))}

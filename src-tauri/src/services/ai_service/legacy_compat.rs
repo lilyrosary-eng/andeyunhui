@@ -104,10 +104,10 @@ pub fn from_legacy_profiles(existing: &AiConfig, legacy: &AiProfiles) -> AiConfi
             caps: Caps {
                 text: true,
                 vision: p.vision_model.as_deref() == Some(p.model.as_str()),
-                reasoning: false,
-                embedding: false,
+                ..Default::default()
             },
             context_tokens: None,
+            max_output_tokens: None,
             overrides: Overrides {
                 temperature: Some(p.temperature),
                 max_tokens: p.max_tokens,

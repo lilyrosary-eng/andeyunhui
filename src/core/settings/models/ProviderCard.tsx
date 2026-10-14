@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { ModelUi, ProviderUi } from '../aiConfigCodec';
 import { ModelEditorDrawer } from './ModelEditorDrawer';
+import { capTags } from './capsTags';
 
 const ROW_H = 40;
 
@@ -26,14 +27,6 @@ function formatContext(n: string): string {
   return String(v);
 }
 
-function capTags(caps: ModelUi['caps'], t: ProviderCardProps['t']): string[] {
-  const out: string[] = [];
-  if (caps.vision) out.push(t('modelSettings.caps.vision'));
-  if (caps.reasoning) out.push(t('modelSettings.caps.reasoning'));
-  if (caps.embedding) out.push(t('modelSettings.caps.embedding'));
-  else if (caps.text) out.push(t('modelSettings.caps.text'));
-  return out;
-}
 
 export interface ProviderCardProps {
   provider: ProviderUi;
@@ -47,11 +40,18 @@ export interface ProviderCardProps {
   onRemoveModel: (modelId: string) => void;
   onOpenDiscover: () => void;
   onPatchProvider: (patch: Partial<ProviderUi>) => void;
+  /** 地址输入完成（失焦 / 回车）——父级据此做「同 url 复用预设」的去重与自动命名。 */
+  onCommitBaseUrl?: () => void;
   onRemoveProvider: () => void;
   /** 当前被选中的模型 id（来自父级 selection 状态），决定本卡片内每行的 ○/● */
   selectedModelId: string | null;
   /** 搜索命中的模型 id，滚动到它并高亮 */
   highlightModelId: string | null;
+  /**
+   * 「本批新增」的模型 id 集合——底色橙色高亮。
+   * 非持久：父级在下一批新增 / 展开折叠 / 搜索 / 切 tab 时清空。
+   */
+  newModelIds?: Set<string>;
   t: (k: string, vars?: Record<string, string | number>) => string;
 }
 
@@ -155,8 +155,11 @@ export function ProviderCard(props: ProviderCardProps) {
             </div>
             <div>
               <label className={labelCls}>{t('modelSettings.endpointLabel')}</label>
+              {/* 失焦/回车才提交：避免每敲一个字符就去比对重复地址（半截 URL 会误判） */}
               <input className={inputCls} value={p.base_url} placeholder="https://api.deepseek.com/v1"
-                onChange={(e) => props.onPatchProvider({ base_url: e.target.value })} />
+                onChange={(e) => props.onPatchProvider({ base_url: e.target.value })}
+                onBlur={() => props.onCommitBaseUrl?.()}
+                onKeyDown={(e) => { if (e.key === 'Enter') props.onCommitBaseUrl?.(); }} />
             </div>
             <div>
               <label className={labelCls}>{t('modelSettings.apiKeyLabel')}</label>
@@ -249,6 +252,9 @@ export function ProviderCard(props: ProviderCardProps) {
                     const m = models[vi.index];
                     const selected = m.id === props.selectedModelId;
                     const highlighted = m.id === props.highlightModelId;
+                    // 本批新增：橙色底（非持久）。优先级高于「已选中」底色——
+                    // 它承载的是「刚才这一批新加了什么」这个瞬时信息。
+                    const isNew = props.newModelIds?.has(m.id) ?? false;
                     return (
                       <div
                         key={m.id}
@@ -257,7 +263,7 @@ export function ProviderCard(props: ProviderCardProps) {
                           height: vi.size, transform: `translateY(${vi.start}px)`,
                         }}
                         className={`flex items-center gap-2 px-2.5 border-b border-neutral-100 dark:border-stone-800
-                          ${selected ? 'bg-[var(--element-muted)]' : ''}
+                          ${isNew ? 'bg-amber-400/20' : selected ? 'bg-[var(--element-muted)]' : ''}
                           ${highlighted ? 'ring-1 ring-inset ring-[var(--element-border)]' : ''}`}
                       >
                         <button
@@ -272,8 +278,14 @@ export function ProviderCard(props: ProviderCardProps) {
                         <span className="flex-1 truncate text-xs font-mono text-neutral-800 dark:text-stone-100" title={m.model}>
                           {m.label || m.model}
                         </span>
-                        <span className="shrink-0 text-[11px] text-neutral-400 w-14 text-right">
-                          {formatContext(m.context_tokens)}
+                        {/* 输入（上下文窗口）/ 输出（单次最大产出）两列：END 点只回 id 时靠兜底表填，
+                            所以值可能是「识别出的」也可能是「手填的」，都可编辑。 */}
+                        <span
+                          className="shrink-0 flex items-center gap-1.5 text-[10px] text-neutral-400 tabular-nums"
+                          title={t('modelSettings.lenHint')}
+                        >
+                          <span>{t('modelSettings.lenIn')} {formatContext(m.context_tokens) || '—'}</span>
+                          <span>{t('modelSettings.lenOut')} {formatContext(m.max_output_tokens) || '—'}</span>
                         </span>
                         <span className="shrink-0 flex gap-1">
                           {capTags(m.caps, t).map((tag) => (

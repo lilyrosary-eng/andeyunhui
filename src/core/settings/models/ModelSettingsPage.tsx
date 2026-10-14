@@ -9,14 +9,16 @@ import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
 import { ComfyuiPanel } from './ComfyuiPanel';
 import { MediaBackendsPanel } from './MediaBackendsPanel';
+import { inferProviderName, mergeModels, sameBaseUrl } from './providerMatch';
 import { bestScore } from '@/lib/fuzzy';
 
 const newId = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
 
 function blankModel(id?: string): ModelUi {
   return {
-    id: id || newId('m'), model: '', label: '', caps: { text: true, vision: false, reasoning: false, embedding: false },
-    context_tokens: '', temperature: '', max_tokens: '', top_p: '', system_prompt: '',
+    id: id || newId('m'), model: '', label: '',
+    caps: { text: true, vision: false, reasoning: false, embedding: false, tools: false },
+    context_tokens: '', max_output_tokens: '', temperature: '', max_tokens: '', top_p: '', system_prompt: '',
     thinking: false, persona_call_me_as: '', persona_preset: '', persona_style: '',
   };
 }
@@ -29,16 +31,34 @@ function blankProvider(baseUrl = ''): ProviderUi {
   };
 }
 
+/** 浮窗提示的显示时长（毫秒）。 */
+const TOAST_MS = 3600;
+
 export function ModelSettingsPage() {
   const { t } = useI18n();
   const [cfg, setCfg] = useState<ConfigUi>({ providers: [], selected_provider_id: null, selected_model_id: null });
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState('');
-  const [discoverFor, setDiscoverFor] = useState<string | null>(null);
   // 打开发现弹窗时冻结一份目标：已有供应商用当前值，新建用空白。
   // 不能每次 render 现算——否则用户在弹窗里输入到一半的地址会被重置。
+  // 它同时充当弹窗的挂载开关（null = 不挂载），见下方条件渲染。
   const [discoverSeed, setDiscoverSeed] = useState<ProviderUi | null>(null);
   const [loaded, setLoaded] = useState(false);
+  /**
+   * 「本批新增」的模型 id —— 模型行底色橙色高亮。**非持久**：
+   * 下一批新增会整体替换，展开/折叠、搜索时清空（用户诉求：非持久高亮）。
+   */
+  const [newModelIds, setNewModelIds] = useState<Set<string>>(new Set());
+  /** 浮窗提示（复用预设 / 并入重复地址时给出显性反馈，数秒后自动消失）。 */
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<number | null>(null);
+
+  const showToast = useCallback((text: string) => {
+    setToast(text);
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), TOAST_MS);
+  }, []);
+  useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current); }, []);
 
   // 展开状态：记住用户上次展开哪些供应商，切换到别的设置 tab 再回来不用重新展
   useEffect(() => {
@@ -48,7 +68,20 @@ export function ModelSettingsPage() {
   // 启动读取：走 v2 命令。插件与移动端仍走旧的 ai_get_profiles（兼容层挡住了）
   useEffect(() => {
     invoke<any>('ai_get_config')
-      .then((d) => { setCfg(fromConfig(d)); setLoaded(true); })
+      .then((d) => {
+        const next = fromConfig(d);
+        setCfg(next);
+        setLoaded(true);
+        // 「正在使用」的供应商自动展开（诉求 #7）。放在加载回调里而不是单独 effect：
+        // 这里正是「外部系统（配置）到位」的时刻，且不会触发 effect-内 setState 的级联渲染。
+        setExpanded((prev) => {
+          const sel = next.selected_provider_id;
+          if (!sel || prev[sel]) return prev;
+          const merged = { ...prev, [sel]: true };
+          storage.setString(KEYS.ai.providerExpanded.key, JSON.stringify(merged));
+          return merged;
+        });
+      })
       .catch((e) => { console.warn('[模型] 读取配置失败:', e); setLoaded(true); });
   }, []);
 
@@ -64,7 +97,27 @@ export function ModelSettingsPage() {
     return () => clearTimeout(timer);
   }, [cfg, loaded]);
 
+  /** 滚动到某个供应商卡片（复用/合并后把用户带过去，否则他不知道东西去哪了）。 */
+  const scrollToProvider = useCallback((id: string) => {
+    requestAnimationFrame(() => {
+      document.getElementById(`provider-card-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }, []);
+
+  /** 展开并滚动到某供应商。 */
+  const revealProvider = useCallback((id: string) => {
+    setExpanded((prev) => {
+      if (prev[id]) return prev;
+      const next = { ...prev, [id]: true };
+      storage.setString(KEYS.ai.providerExpanded.key, JSON.stringify(next));
+      return next;
+    });
+    scrollToProvider(id);
+  }, [scrollToProvider]);
+
   const toggleExpand = useCallback((id: string) => {
+    // 展开/折叠属于「更高类操作」：清掉本批新增高亮
+    setNewModelIds(new Set());
     setExpanded((prev) => {
       const next = { ...prev, [id]: !prev[id] };
       storage.setString(KEYS.ai.providerExpanded.key, JSON.stringify(next));
@@ -128,13 +181,82 @@ export function ModelSettingsPage() {
   // 打开发现弹窗。providerId 为 undefined 时是「新建供应商」模式。
   const openDiscover = useCallback((providerId?: string) => {
     setDiscoverSeed(providerId ? cfg.providers.find((p) => p.id === providerId) ?? blankProvider() : blankProvider());
-    setDiscoverFor(providerId ?? '__new__');
   }, [cfg.providers]);
 
-  const closeDiscover = useCallback(() => {
-    setDiscoverFor(null);
-    setDiscoverSeed(null);
-  }, []);
+  const closeDiscover = useCallback(() => setDiscoverSeed(null), []);
+
+  /** 把采纳结果补成完整的 ModelUi 行（补齐 blankModel 的默认值）。 */
+  const toModelRows = useCallback(
+    (incoming: AdoptedModel[]): ModelUi[] => incoming.map((m) => ({ ...blankModel(m.id), ...m })),
+    [],
+  );
+
+  /**
+   * 采纳发现结果（诉求 #3）：
+   * base_url 与已有预设**一模一样**时**不再新建**，而是复用该预设做增量合并；
+   * 无论用户从「新建」还是从「重扫」进来，口径一致。
+   */
+  const handleAdopt = useCallback((baseUrl: string, apiKey: string, models: AdoptedModel[]) => {
+    const target = cfg.providers.find((p) => sameBaseUrl(p.base_url, baseUrl));
+    const now = Math.floor(Date.now() / 1000);
+
+    if (target) {
+      const { models: merged, added } = mergeModels(target.models, toModelRows(models));
+      patchProvider(target.id, {
+        models: merged,
+        // 空 key 不覆盖已有 key（重扫时用户常常不重填 key）
+        ...(apiKey ? { api_key: apiKey } : {}),
+        last_scanned_at: now,
+      });
+      setNewModelIds(new Set(added.map((m) => m.id)));
+      showToast(added.length > 0
+        ? t('modelSettings.reuseToast', { name: target.name || target.base_url, n: added.length })
+        : t('modelSettings.reuseToastNoNew', { name: target.name || target.base_url }));
+      revealProvider(target.id);
+    } else {
+      const p = blankProvider(baseUrl);
+      p.api_key = apiKey;
+      // 自动获取拿不到供应商名 → 按域名推断（诉求 #4）；推断不出就留空由用户填
+      p.name = inferProviderName(baseUrl);
+      p.models = toModelRows(models);
+      setCfg((prev) => ({ ...prev, providers: [...prev.providers, p] }));
+      setNewModelIds(new Set(p.models.map((m) => m.id)));
+      revealProvider(p.id);
+    }
+    closeDiscover();
+  }, [cfg.providers, toModelRows, patchProvider, revealProvider, showToast, closeDiscover, t]);
+
+  /**
+   * 手动设置路径的同一套去重逻辑（诉求 #8）：
+   * 把某个预设的地址改到与另一个**一模一样**时，把它的模型并入对方并去掉这个空壳，
+   * 同时给出显性浮窗 + 跳转展开。挂在地址输入的「失焦/回车」上，不在每次按键时触发。
+   */
+  const commitBaseUrl = useCallback((providerId: string) => {
+    const src = cfg.providers.find((p) => p.id === providerId);
+    if (!src) return;
+    // 名称为空时按域名补一个——手填地址也享受自动命名
+    if (!src.name.trim() && src.base_url.trim()) {
+      const guessed = inferProviderName(src.base_url);
+      if (guessed) patchProvider(providerId, { name: guessed });
+    }
+    const target = cfg.providers.find((p) => p.id !== providerId && sameBaseUrl(p.base_url, src.base_url));
+    if (!target) return;
+    // 只搬「填过模型名」的行，避免把空行灌进对方预设
+    const existing = new Set(target.models.map((m) => m.model));
+    const incoming = src.models.filter((m) => m.model.trim() && !existing.has(m.model));
+    setCfg((prev) => ({
+      ...prev,
+      providers: prev.providers
+        .filter((p) => p.id !== providerId)
+        .map((p) => (p.id === target.id
+          ? { ...p, models: [...p.models, ...incoming], api_key: p.api_key || src.api_key }
+          : p)),
+      selected_provider_id: prev.selected_provider_id === providerId ? target.id : prev.selected_provider_id,
+    }));
+    if (incoming.length) setNewModelIds(new Set(incoming.map((m) => m.id)));
+    showToast(t('modelSettings.mergeToast', { name: target.name || target.base_url }));
+    revealProvider(target.id);
+  }, [cfg.providers, patchProvider, showToast, revealProvider, t]);
 
   // 搜索：命中模型名时自动展开对应卡片并高亮该行；命中供应商名/端点则整卡靠前
   const { visibleProviders, highlights } = useMemo(() => {
@@ -178,7 +300,7 @@ export function ModelSettingsPage() {
           className="flex-1 px-3 py-2 rounded-lg text-sm bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 outline-none focus:ring-2 focus:ring-[var(--element-border)]"
           value={query}
           placeholder={t('modelSettings.searchPlaceholder')}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => { setQuery(e.target.value); if (e.target.value.trim()) setNewModelIds(new Set()); }}
         />
         <button onClick={() => openDiscover()}
           className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800"
@@ -197,51 +319,47 @@ export function ModelSettingsPage() {
         </div>
       ) : (
         visibleProviders.map((p) => (
-          <ProviderCard
-            key={p.id}
-            provider={p}
-            expanded={!!expanded[p.id]}
-            onToggle={() => toggleExpand(p.id)}
-            hasSelected={p.models.some((m) => m.id === cfg.selected_model_id)}
-            selectedModelId={cfg.selected_model_id}
-            onSelectModel={(mid) => selectModel(p.id, mid)}
-            onPatchModel={(mid, patch) => patchModel(p.id, mid, patch)}
-            onAddModel={() => patchProvider(p.id, { models: [...p.models, blankModel()] })}
-            onRemoveModel={(mid) => removeModel(p.id, mid)}
-            onOpenDiscover={() => openDiscover(p.id)}
-            onPatchProvider={(patch) => patchProvider(p.id, patch)}
-            onRemoveProvider={() => removeProvider(p.id)}
-            highlightModelId={highlights[p.id] ?? null}
-            t={t}
-          />
+          <div key={p.id} id={`provider-card-${p.id}`}>
+            <ProviderCard
+              provider={p}
+              expanded={!!expanded[p.id]}
+              onToggle={() => toggleExpand(p.id)}
+              hasSelected={p.models.some((m) => m.id === cfg.selected_model_id)}
+              selectedModelId={cfg.selected_model_id}
+              onSelectModel={(mid) => selectModel(p.id, mid)}
+              onPatchModel={(mid, patch) => patchModel(p.id, mid, patch)}
+              onAddModel={() => patchProvider(p.id, { models: [...p.models, blankModel()] })}
+              onRemoveModel={(mid) => removeModel(p.id, mid)}
+              onOpenDiscover={() => openDiscover(p.id)}
+              onPatchProvider={(patch) => patchProvider(p.id, patch)}
+              onCommitBaseUrl={() => commitBaseUrl(p.id)}
+              onRemoveProvider={() => removeProvider(p.id)}
+              highlightModelId={highlights[p.id] ?? null}
+              newModelIds={newModelIds}
+              t={t}
+            />
+          </div>
         ))
       )}
 
-      <DiscoverModelsDialog
-        provider={discoverSeed}
-        onClose={closeDiscover}
-        onAdopt={(baseUrl: string, apiKey: string, models: AdoptedModel[]) => {
-          if (discoverFor === '__new__') {
-            const p = blankProvider(baseUrl);
-            p.api_key = apiKey;
-            p.models = models.map((m) => ({ ...blankModel(m.id), ...m }));
-            setCfg((prev) => ({ ...prev, providers: [...prev.providers, p] }));
-            setExpanded((prev) => {
-              const next = { ...prev, [p.id]: true };
-              storage.setString(KEYS.ai.providerExpanded.key, JSON.stringify(next));
-              return next;
-            });
-          } else if (discoverSeed) {
-            patchProvider(discoverSeed.id, {
-              base_url: baseUrl,
-              api_key: apiKey || discoverSeed.api_key,
-              last_scanned_at: Math.floor(Date.now() / 1000),
-            });
-          }
-          closeDiscover();
-        }}
-        t={t}
-      />
+      {/* ★ 条件挂载：关闭时整体卸载，使「关窗重开」= 全新实例 = 下拉与输入恢复初值。
+          这条恢复路径是用户明确要求的，别改成常驻挂载。 */}
+      {discoverSeed && (
+        <DiscoverModelsDialog
+          provider={discoverSeed}
+          knownProviders={cfg.providers}
+          onClose={closeDiscover}
+          onAdopt={handleAdopt}
+          t={t}
+        />
+      )}
+
+      {/* 显性浮窗：复用已有预设 / 并入重复地址时告知结果，数秒后自动消失 */}
+      {toast && (
+        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 rounded-xl bg-neutral-800 dark:bg-stone-700 text-white text-xs shadow-xl max-w-[80vw] text-center">
+          {toast}
+        </div>
+      )}
 
       {/* 本地生图（ComfyUI）：端点/checkpoint 快速通道 + 工作流库（扫目录→转换→参数化生成）
           + 蓝图生图节点挂钩。与供应商云端 image_model 并列的另一条生图后端。 */}

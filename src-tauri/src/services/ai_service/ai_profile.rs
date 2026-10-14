@@ -123,6 +123,11 @@ pub struct Caps {
     pub reasoning: bool,
     #[serde(default)]
     pub embedding: bool,
+    /// 是否支持函数/工具调用（function calling）。
+    /// 纯展示维度：不参与 resolve_target 的路由决策——Agent 工具循环能否跑通
+    /// 取决于端点实现，不取决于这里的标签（标错不该让能力被静默阉割）。
+    #[serde(default)]
+    pub tools: bool,
 }
 
 fn caps_text_default() -> bool {
@@ -136,6 +141,7 @@ impl Default for Caps {
             vision: false,
             reasoning: false,
             embedding: false,
+            tools: false,
         }
     }
 }
@@ -208,6 +214,11 @@ pub struct ModelEntry {
     /// 用户手工调整的值存在 overrides.max_context_tokens 里，后者优先。
     #[serde(default)]
     pub context_tokens: Option<u64>,
+    /// 模型自身的**单次最大输出**长度（能力上限，来自端点 max_output_tokens 或静态兜底表）。
+    /// ⚠️ 与 `overrides.max_tokens`（**请求参数**：本次回复最多要多少 token）语义不同，
+    ///    两者不可互换——这里描述模型能产多长，那里描述本次要它产多长。
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
     #[serde(default)]
     pub overrides: Overrides,
 }
@@ -339,8 +350,9 @@ pub fn migrate_v1_to_v2(raw: &serde_json::Value) -> AiConfig {
             model: p.model.clone(),
             label: None,
             // vision 留到分组结束后统一判定，见下方注释
-            caps: Caps { text: true, vision: false, reasoning: false, embedding: false },
+            caps: Caps { text: true, ..Default::default() },
             context_tokens: None,
+            max_output_tokens: None,
             overrides: Overrides {
                 temperature: Some(p.temperature),
                 max_tokens: p.max_tokens,
