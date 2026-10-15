@@ -775,9 +775,19 @@ export const AiChatConversation = memo(function AiChatConversation({
                     </span>
                   )}
                   {onToggleAgent && (
+                    /* ⚠️ 这个开关控制的是**整个工具系统**的开关，不只是联网 ——
+                       关着的时候模型**根本收不到任何工具定义**（联网搜索、读写文件、
+                       执行命令、生成图片/语音全都用不了），于是它只会回一句"我做不到"。
+                       原来按钮上写的是「联网」，用户想让它画张图时完全没理由去点它，
+                       现象就是"模型明明支持工具却什么都不做"。所以改名为「工具」，
+                       并在悬停提示里把"到底能开什么"列清楚。 */
                     <button
                       onClick={() => onToggleAgent(!agent)}
-                      title={agent ? '联网模式已开启（可联网 / 调用工具）' : '开启后可联网 / 调用工具'}
+                      title={
+                        agent
+                          ? '工具已开启：模型可联网搜索、读写文件、执行命令、生成图片/语音等'
+                          : '开启后模型才能调用工具（联网搜索 / 读写文件 / 执行命令 / 生成图片语音等）。关着时模型收不到任何工具定义'
+                      }
                       className={`flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-md transition-colors ${
                         agent
                           ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300'
@@ -785,7 +795,7 @@ export const AiChatConversation = memo(function AiChatConversation({
                       }`}
                     >
                       <Sparkles size={13} />
-                      {!capsuleMode && <span>联网</span>}
+                      {!capsuleMode && <span>工具</span>}
                     </button>
                   )}
                   <label title="导入图片 / 文件（也可直接粘贴）" className={`flex items-center gap-1 text-[11px] cursor-pointer px-1.5 py-0.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 ${capsuleMode ? 'text-white/50 hover:text-white/80' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600'}`}>

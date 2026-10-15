@@ -16,7 +16,7 @@
 // 所以用 `fixed` + 触发按钮的 `getBoundingClientRect()`；同时在滚动/缩放时**直接关闭**
 // —— 与其做「跟随滚动」，不如关掉：位置一变就关是零出错的。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronDown, Search } from 'lucide-react';
+import { Check, ChevronDown, Search, X } from 'lucide-react';
 
 export interface InlineSelectOption {
   value: string;
@@ -45,6 +45,16 @@ export interface InlineSelectProps {
   className?: string;
   /** 选项超过该数量时显示搜索框。默认 10。 */
   searchThreshold?: number;
+  /**
+   * 提供后，已选中时触发按钮右侧会出现一个 ×（清除选择）。
+   *
+   * 为什么需要：调用方可能刻意**不把"空值"作为列表里的一个选项**（例如"能力链兜底模型"
+   * 那个下拉 —— 默认路径本来就是走模型原生能力，把它做成列表项会让人以为"不选就不生效"）。
+   * 那就得另给一条清除通道，否则选过之后回不去。
+   */
+  onClear?: () => void;
+  /** × 的悬停提示。 */
+  clearTitle?: string;
 }
 
 const PANEL_MAX_H = 300;
@@ -57,6 +67,8 @@ export function InlineSelect({
   title,
   className = '',
   searchThreshold = 10,
+  onClear,
+  clearTitle,
 }: InlineSelectProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -104,25 +116,42 @@ export function InlineSelect({
     setOpen(true);
   }, []);
 
-  // 点外关闭 + Esc。scroll/resize 直接关（位置会失效，见文件头注释）。
+  // 点外关闭 + Esc。外部滚动/缩放时关闭（位置会失效，见文件头注释）。
   useEffect(() => {
     if (!open) return;
+    const inside = (t: Node | null) =>
+      !!t && (btnRef.current?.contains(t) || panelRef.current?.contains(t));
+
     const onDown = (e: PointerEvent) => {
-      const t = e.target as Node;
-      if (btnRef.current?.contains(t) || panelRef.current?.contains(t)) return;
+      if (inside(e.target as Node)) return;
       close();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.stopPropagation(); close(); }
     };
+    /**
+     * ★ 只在**面板之外**发生滚动时才关闭。
+     *
+     * 原实现是 `window.addEventListener('scroll', close, true)` —— 捕获阶段监听 window，
+     * 于是**面板自己内部滚动也会触发**（面板的选项列表是 `overflow-y-auto`，
+     * 列表一滚就产生 scroll 事件，捕获阶段在 window 上先被这个监听器收到），
+     * 结果是"滚轮一动下拉就消失"，选项多的模型列表根本没法翻。
+     *
+     * 判据用 `e.target`：滚动的元素在面板内 → 是用户在看选项，不该关；
+     * 在面板外（设置页被滚动）→ 面板位置失效，关掉。
+     */
+    const onScroll = (e: Event) => {
+      if (inside(e.target as Node)) return;
+      close();
+    };
     document.addEventListener('pointerdown', onDown, true);
     document.addEventListener('keydown', onKey, true);
-    window.addEventListener('scroll', close, true);
+    document.addEventListener('scroll', onScroll, true);
     window.addEventListener('resize', close);
     return () => {
       document.removeEventListener('pointerdown', onDown, true);
       document.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('scroll', close, true);
+      document.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('resize', close);
     };
   }, [open, close]);
@@ -144,22 +173,42 @@ export function InlineSelect({
 
   return (
     <>
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={() => (open ? close() : openPanel())}
-        title={title}
-        className={`inline-flex items-center gap-1 max-w-[240px] px-2 py-0.5 rounded-md text-[11px] border transition-colors ${
+      {/* 触发区必须是「容器 + 两个并列 button」：HTML 不允许 button 嵌套 button，
+          所以 × 不能塞进开合按钮里面。 */}
+      <span
+        className={`inline-flex items-center rounded-md text-[11px] border transition-colors ${
           current
             ? 'border-neutral-300 dark:border-stone-600 text-neutral-700 dark:text-stone-200 bg-white dark:bg-stone-900'
-            : 'border-dashed border-neutral-300 dark:border-stone-600 text-neutral-400 dark:text-stone-500 hover:text-neutral-600 dark:hover:text-stone-300'
+            : 'border-dashed border-neutral-300 dark:border-stone-600 text-neutral-400 dark:text-stone-500'
         } hover:bg-neutral-100 dark:hover:bg-stone-800 ${className}`}
       >
-        <span className="truncate">
-          {current ? (current.shortLabel ?? current.label) : placeholder}
-        </span>
-        <ChevronDown size={11} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
+        <button
+          ref={btnRef}
+          type="button"
+          onClick={() => (open ? close() : openPanel())}
+          title={title}
+          className={`inline-flex items-center gap-1 max-w-[240px] pl-2 ${
+            onClear && value ? 'pr-1' : 'pr-2'
+          } py-0.5 ${
+            current ? '' : 'hover:text-neutral-600 dark:hover:text-stone-300'
+          }`}
+        >
+          <span className="truncate">
+            {current ? (current.shortLabel ?? current.label) : placeholder}
+          </span>
+          <ChevronDown size={11} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+        {onClear && !!value && (
+          <button
+            type="button"
+            onClick={onClear}
+            title={clearTitle}
+            className="pr-1.5 pl-0.5 text-neutral-400 hover:text-red-500"
+          >
+            <X size={10} />
+          </button>
+        )}
+      </span>
 
       {open && pos && (
         <div

@@ -523,13 +523,13 @@ export function MediaBackendsPanel({
               <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                 <Icon size={13} className="text-neutral-500 dark:text-stone-400" />
                 <span className="text-[12px] text-neutral-700 dark:text-stone-300">{KIND_LABEL[k]}能力链</span>
-                {/* ★ 「这个能力用哪个模型」的**唯一**入口，且**留空就是默认路径**。
-                    ## 语义（重要，之前搞反了）
-                    留空 = **走模型自己的原生能力**（这才是默认；多模态已是主流，
-                    对话模型本身往往就能看图）。在这里选一个模型 = **兜底**：
-                    只有当原生能力不可用/不成立时才走它。所以这个下拉不提供
-                    「跟随对话模型」这种选项 —— 它和"原生"表达的是同一件事，
-                    摆在选项里只会让人以为不选就不生效。
+                {/* ★ 「这个能力用哪个模型」的**唯一**入口。语义：
+                    留空 = **走模型自己的原生能力**（这是默认路径，多模态已是主流，
+                    对话模型本身往往就能看图）；选一个模型 = **兜底**，只在原生不可用时才走它。
+                    ## 为什么列表里**没有**「模型原生能力 / 跟随对话模型」这一项
+                    因为默认路径**永远先走**，它不是一个"可选项"。把它做成列表项会让人误以为
+                    "不选就不生效"，而列表本身表达的是**兜底候选**（用户明确要求过这一点）。
+                    要取消兜底用触发按钮右侧的 ×。
                     ## 为什么不是自由输入
                     后端按模型名**全等**找所属供应商，手打等于盲填（错一个字符就找不到，
                     界面还看不出来）。所以只列配置里真实存在的模型，并在右侧标出它属于谁。 */}
@@ -538,23 +538,14 @@ export function MediaBackendsPanel({
                     className="ml-1"
                     value={mediaModels[k as MediaModelKind] ?? ''}
                     onChange={(v) => onChangeMediaModel(k as MediaModelKind, v)}
+                    onClear={() => onChangeMediaModel(k as MediaModelKind, '')}
+                    clearTitle={t('modelSettings.mediaModels.clearFallback')}
                     title={t('modelSettings.mediaModels.pickHint')}
-                    placeholder={t('modelSettings.mediaModels.nativeShort')}
-                    groups={[
-                      {
-                        label: '',
-                        options: [{
-                          value: '',
-                          label: t('modelSettings.mediaModels.nativeDefault'),
-                          shortLabel: t('modelSettings.mediaModels.nativeShort'),
-                          hint: t('modelSettings.mediaModels.defaultTag'),
-                        }],
-                      },
-                      ...modelGroups.map((g) => ({
-                        label: g.provider,
-                        options: g.models.map((name) => ({ value: name, label: name })),
-                      })),
-                    ]}
+                    placeholder={t('modelSettings.mediaModels.noFallback')}
+                    groups={modelGroups.map((g) => ({
+                      label: g.provider,
+                      options: g.models.map((name) => ({ value: name, label: name })),
+                    }))}
                   />
                 )}
                 {/* 归属提示：让「能不能找到」这件事在界面上可见。
