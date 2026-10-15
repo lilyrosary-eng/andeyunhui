@@ -11,9 +11,10 @@ import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import { KeepButton } from '@/components/KeepButton';
 import { useAiStream } from './useAiStream';
 import { btnBase, GOLD } from './constants';
-import { IconClose, IconSend } from './icons';
+import { IconClose, IconSend, IconStop } from './icons';
 import type { Conversation, ChatMsg } from './types';
 import { EVENTS } from '@/core/events/schema';
+import { mergeConversations } from '@/core/ai/util';
 
 const AIDE_STORE_KEY = 'andeyunhui.capsule.aide.conversations.v2'; // 升版本清空历史浮岛 AI 编程对话（与 IDE 对齐）
 const CONV_TITLE_MAX = 20;
@@ -187,16 +188,33 @@ function CapsuleAide() {
   }, []);
 
   // 挂载即加载模型档案 + 反向同步 IDE 当前对话（壳仅在 aideOpen 时挂载本组件）
+  //
+  // ★ 用 **merge 而不是整体替换**（原实现是 `setAideConversations(list)`）。
+  //   原因：本组件「壳仅在 expanded && aideOpen && panelReady 时挂载」⇒ 收起浮岛再打开
+  //   就会重跑这段。而它**只读不写**后端文件（浮岛本地变更只落 localStorage 的
+  //   AIDE_STORE_KEY，从不调 ai_save_conversations）。于是只要文件里有旧内容，
+  //   重挂载就会把浮岛这边更新的会话**整个覆盖掉** —— 用户现象正是「切一下就消失」。
+  //
+  //   merge 的语义与 `useAiChat` 的跨 webview 合并一致：按 id 去重、远端较新则采用、
+  //   本地独有的一律保留。两侧 id 空间本来就不同（浮岛 `ac…` / IDE `c_…`），
+  //   合并能同时容下，不会互相顶掉。
   useEffect(() => {
     ensureProfiles();
     invoke<{ conversations?: Array<Conversation>; active_id?: string | null }>('ai_get_conversations')
       .then((d) => {
-        const list = (d?.conversations || []).filter((c) => c && Array.isArray(c.messages));
-        if (!list.length) return;
-        setAideConversations(list);
-        const aid = (d.active_id && list.some((c) => c.id === d.active_id)) ? d.active_id! : list[0].id;
-        setAideActiveConvId(aid);
-        aideActiveConvIdRef.current = aid;
+        const remote = (d?.conversations || []).filter((c) => c && Array.isArray(c.messages));
+        if (!remote.length) return;
+        setAideConversations((local) => {
+          const merged = mergeConversations(local, remote);
+          // 活跃会话：仍存在就保持当前选择（不要因为远端有 active_id 就把用户正在看的切走）
+          const cur = aideActiveConvIdRef.current;
+          if (!merged.some((c) => c.id === cur)) {
+            const aid = (d.active_id && merged.some((c) => c.id === d.active_id)) ? d.active_id! : merged[0].id;
+            setAideActiveConvId(aid);
+            aideActiveConvIdRef.current = aid;
+          }
+          return merged;
+        });
       })
       .catch(() => {});
   }, [ensureProfiles]);
@@ -304,6 +322,35 @@ function CapsuleAide() {
     }
   }, [aideInput, aideBusy, aideProfileId, aideMessages, aideMode, t, updateAideStreamMessages, setAiHint]);
 
+  /**
+   * 停止浮岛当前回合。
+   *
+   * 浮岛**不自己发请求** —— 它 emit `capsule-ide-chat-request` / `agent-request` 交给 IDE，
+   * IDE 用**同一个 requestId** 调 `ai_chat` / `ai_chat_agent`（见 茑萝/ai 与 茑萝/ide）。
+   * 所以这里拿同一个 id 去取消即可：后端取消注册表是**进程级**的，插件与浮岛同进程。
+   *
+   * 与 `useAiChat.abort` 同一套做法：先断事件匹配（确定性收口）→ 补「已停止」标记 →
+   * 本地复位 busy → 通知后端。置空 `aideReqRef` 同时让那条 20s 超时兜底失效（避免
+   * 停止之后再弹一句「IDE 未响应」）。
+   */
+  const stopAide = useCallback(() => {
+    const rid = aideReqRef.current;
+    if (!rid) return;
+    const aid = aideAsstRef.current;
+    const convId = aideStreamConvIdRef.current;
+    aideReqRef.current = null;
+    aideAsstRef.current = null;
+    if (aid) {
+      updateAideStreamMessages(convId, (prev) => prev.map((m) => {
+        if (m.id !== aid) return m;
+        if (m.content.includes('（已停止）')) return m;
+        return { ...m, content: (m.content ? m.content + '\n\n' : '') + '（已停止）' };
+      }));
+    }
+    setAideBusy(false);
+    void invoke(aideMode === 'agent' ? 'ai_agent_cancel' : 'ai_chat_cancel', { requestId: rid }).catch(() => {});
+  }, [aideMode, updateAideStreamMessages]);
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px' }} onClick={(e) => e.stopPropagation()}>
       {/* 顶部细条：返回 + 标题 + 对话切换 + 新建 */}
@@ -400,13 +447,15 @@ function CapsuleAide() {
           style={{ width: '100%', display: 'block', resize: 'none', maxHeight: 90, minHeight: 34, height: 34, border: 'none', background: 'transparent', color: '#f4f4f6', padding: '4px 4px', fontSize: 12.5, lineHeight: 1.4, outline: 'none', fontFamily: 'inherit' }}
         />
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginTop: 4 }}>
+          {/* 生成中 → 同一位置变「停止」。此前忙时按钮是 disabled 的，
+              等于用户完全没法叫停（IDE 侧跑长回答时只能干等）。 */}
           <button
-            onClick={() => void sendAide()}
-            disabled={aideBusy || !aideInput.trim() || (aideMode === 'chat' && !aideProfileId)}
-            title={t('capsule.send')}
-            style={{ ...btnBase, width: 34, height: 34, background: 'rgba(230,195,92,0.18)', opacity: aideBusy || !aideInput.trim() || (aideMode === 'chat' && !aideProfileId) ? 0.45 : 1 }}
+            onClick={() => (aideBusy ? stopAide() : void sendAide())}
+            disabled={!aideBusy && (!aideInput.trim() || (aideMode === 'chat' && !aideProfileId))}
+            title={aideBusy ? t('capsule.stop') : t('capsule.send')}
+            style={{ ...btnBase, width: 34, height: 34, background: aideBusy ? 'rgba(244,244,246,0.16)' : 'rgba(230,195,92,0.18)', opacity: !aideBusy && (!aideInput.trim() || (aideMode === 'chat' && !aideProfileId)) ? 0.45 : 1 }}
           >
-            <IconSend />
+            {aideBusy ? <IconStop /> : <IconSend />}
           </button>
         </div>
       </div>

@@ -575,6 +575,7 @@ export const zhCN: Record<string, string> = {
   'capsule.chatHint': '向 AI 提问，回车发送（Shift+Enter 换行）',
   'capsule.inputMsg': '输入消息…',
   'capsule.noModel': '未配置模型',
+  'capsule.stop': '停止',
   'capsule.send': '发送',
   'capsule.selectConv': '选择会话（下拉切换）',
   'capsule.newConv': '新建会话',

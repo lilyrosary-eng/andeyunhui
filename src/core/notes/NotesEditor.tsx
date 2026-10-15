@@ -1,5 +1,5 @@
 import { useRef, useCallback, useState, useEffect } from 'react';
-import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText, Sparkles, Loader2, Eye } from 'lucide-react';
+import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText, Sparkles, Eye, Square } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { api } from '@/lib/api';
@@ -210,6 +210,11 @@ export function NotesEditor() {
 
   // ---- AI 润色：选中文字后调用全局 AI 进行润色，风格/篇幅取自「笔记模块专属设置」 ----
   const [polishing, setPolishing] = useState(false);
+  // 进行中的润色请求 id（供「停止」取消）+ 已停止标记。
+  // 标记的作用是：取消后**绝不能把半截结果回填进笔记** —— 那比不润色更糟
+  // （用户会以为润色完成了，实际是一句话被斩断）。
+  const polishReqRef = useRef<string | null>(null);
+  const polishStoppedRef = useRef(false);
 
   const handleAiPolish = useCallback(async () => {
     if (polishing) return;
@@ -251,6 +256,8 @@ export function NotesEditor() {
 
     setPolishing(true);
     const reqId = 'polish_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    polishReqRef.current = reqId;
+    polishStoppedRef.current = false;
     let acc = '';
     let done = false;
     let errMsg: string | null = null;
@@ -277,8 +284,12 @@ export function NotesEditor() {
       errMsg = errMsg || String(e);
     } finally {
       unlistenDelta(); unlistenDone(); unlistenError();
+      polishReqRef.current = null;
       setPolishing(false);
     }
+
+    // 用户已点「停止」→ 丢弃半截结果，不回填（回填会让笔记出现被斩断的句子）
+    if (polishStoppedRef.current) return;
 
     if (errMsg) {
       alert(tr('notesEditor.polishFailed') + errMsg);
@@ -294,6 +305,16 @@ export function NotesEditor() {
     // 用润色结果替换原选区（回填到原始 Markdown 文本）
     editorRef.current?.replaceSelection(result);
   }, [polishing, tr]);
+
+  /** 停止进行中的润色：标记已停 → 后端取消 → 本地复位（事件可能因强杀而不来）。 */
+  const stopPolish = useCallback(() => {
+    const rid = polishReqRef.current;
+    if (!rid) return;
+    polishStoppedRef.current = true;
+    polishReqRef.current = null;
+    setPolishing(false);
+    void invoke('ai_chat_cancel', { requestId: rid }).catch(() => {});
+  }, []);
 
   const toolbarBtnClass = 'btn-press p-1.5 rounded-lg text-neutral-400 dark:text-stone-500 hover:text-neutral-700 dark:hover:text-stone-200 hover:bg-black/5 dark:hover:bg-white/5 transition-colors';
 
@@ -386,8 +407,13 @@ export function NotesEditor() {
             <List size={16} />
           </button>
           <div className="w-px h-4 bg-neutral-200/50 dark:bg-stone-600/50 mx-0.5" />
-          <button onClick={handleAiPolish} disabled={polishing} className={toolbarBtnClass} title={tr('notesEditor.aiPolish')}>
-            {polishing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+          {/* 润色中 → 同一位置变「停止」（此前 disabled，长文本润色时无法叫停） */}
+          <button
+            onClick={() => (polishing ? stopPolish() : void handleAiPolish())}
+            className={toolbarBtnClass}
+            title={polishing ? '停止润色' : tr('notesEditor.aiPolish')}
+          >
+            {polishing ? <Square size={16} /> : <Sparkles size={16} />}
           </button>
           <button onClick={handleImportDocument} className={toolbarBtnClass} title={tr('notesEditor.importDoc')}>
             <FileText size={16} />

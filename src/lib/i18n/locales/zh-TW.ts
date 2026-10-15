@@ -577,6 +577,7 @@ export const zhTW: Record<string, string> = {
   'capsule.chatHint': '向 AI 提問，Enter 送出（Shift+Enter 換行）',
   'capsule.inputMsg': '輸入訊息…',
   'capsule.noModel': '未設定模型',
+  'capsule.stop': '停止',
   'capsule.send': '送出',
   'capsule.selectConv': '選擇對話（下拉切換）',
   'capsule.newConv': '新增對話',

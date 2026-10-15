@@ -577,6 +577,7 @@ export const koKR: Record<string, string> = {
   'capsule.chatHint': 'AI에게 질문하세요. Enter로 전송 (Shift+Enter 줄바꿈)',
   'capsule.inputMsg': '메시지 입력…',
   'capsule.noModel': '모델 미설정',
+  'capsule.stop': '중지',
   'capsule.send': '전송',
   'capsule.selectConv': '대화 선택 (드롭다운 전환)',
   'capsule.newConv': '새 대화',

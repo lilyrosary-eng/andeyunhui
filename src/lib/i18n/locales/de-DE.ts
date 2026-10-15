@@ -577,6 +577,7 @@ export const deDE: Record<string, string> = {
   'capsule.chatHint': 'Stellen Sie der KI eine Frage. Enter zum Senden (Shift+Enter für neue Zeile)',
   'capsule.inputMsg': 'Nachricht eingeben…',
   'capsule.noModel': 'Kein Modell konfiguriert',
+  'capsule.stop': 'Stoppen',
   'capsule.send': 'Senden',
   'capsule.selectConv': 'Unterhaltung wählen (Dropdown)',
   'capsule.newConv': 'Neue Unterhaltung',

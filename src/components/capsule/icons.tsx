@@ -110,6 +110,12 @@ export const IconSend = () => (
     <path d="M4 12l16-8-6 16-3-7z" fill="currentColor" stroke="none" />
   </svg>
 );
+/** 停止生成（实心方块，与 IconSend 同尺寸以便同一位置切换时不跳动）。 */
+export const IconStop = () => (
+  <svg {...svgProps} width={18} height={18}>
+    <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" />
+  </svg>
+);
 export const IconTransfer = () => (
   <svg {...svgProps} width={18} height={18}>
     <path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 12a9 9 0 0 1-15 6.7L3 16" />

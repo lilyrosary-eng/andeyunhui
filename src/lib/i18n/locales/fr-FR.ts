@@ -576,6 +576,7 @@ export const frFR: Record<string, string> = {
   'capsule.chatHint': 'Posez une question à l\'IA. Entrée pour envoyer (Maj+Entrée pour nouvelle ligne)',
   'capsule.inputMsg': 'Saisir un message…',
   'capsule.noModel': 'Aucun modèle configuré',
+  'capsule.stop': 'Arrêter',
   'capsule.send': 'Envoyer',
   'capsule.selectConv': 'Choisir une conversation (liste déroulante)',
   'capsule.newConv': 'Nouvelle conversation',

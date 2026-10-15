@@ -575,6 +575,7 @@ export const enUS: Record<string, string> = {
   'capsule.chatHint': 'Ask the AI; press Enter to send (Shift+Enter for newline)',
   'capsule.inputMsg': 'Type a message…',
   'capsule.noModel': 'No model configured',
+  'capsule.stop': 'Stop',
   'capsule.send': 'Send',
   'capsule.selectConv': 'Select conversation (switch via dropdown)',
   'capsule.newConv': 'New conversation',

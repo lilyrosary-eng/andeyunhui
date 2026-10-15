@@ -3,6 +3,9 @@
 // （由 ai_service.rs 机械拆分而来，逻辑零改动）
 
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 use crate::services::ai_service::ai_profile::{ResolvedTarget, load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
 
@@ -11,6 +14,53 @@ use crate::services::ai_service::ai_profile::{ResolvedTarget, load_config, resol
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+}
+
+// ============ 停止（取消）本次流式对话 ============
+//
+// agent 那条链（`ai_chat_agent`）从一开始就有 `ai_agent_cancel`：worker 存在注册表里，
+// 取消即 `abort.abort()`。但**纯对话这条链什么也没有** —— 一旦 `ai_chat` 发出，
+// 前端 `await invoke(...)` 要等到流结束才 resolve，用户只能干等（长回答可达数十秒）。
+//
+// 这里补上：一个按 `request_id` 索引的取消标志表，流式循环每读一块前查一次。
+// 用 `AtomicBool`（而非 abort 句柄）是因为 reqwest 的 `chunk()` 是可取消点，
+// 循环顶部轮询即可，不需要打断 future。
+//
+// ⚠️ 刻意**不发 `ai-error`**：用户主动停止不是错误。发 `ai-done` 让前端按正常路径收尾
+//    （复位 busy、保留已收到的部分文本）—— `useAiStream` 的 finish 会把 `content` 原样留下。
+static CHAT_CANCELS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+fn chat_cancels() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    CHAT_CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 请求结束时自动摘除标志，避免注册表随会话数无限增长。
+/// 用 Drop 而不是在每个 return 前手写 remove —— `ai_chat` 有 6 条提前返回路径
+/// （密钥缺失 / 建请求失败 / 非 2xx / 硬上限 / 读流失败 / 正常完成），漏一条就是一次泄漏。
+struct ChatCancelGuard {
+    id: String,
+}
+
+impl Drop for ChatCancelGuard {
+    fn drop(&mut self) {
+        chat_cancels().lock().unwrap().remove(&self.id);
+    }
+}
+
+/// 停止一次进行中的流式对话。
+///
+/// 前端在用户点「停止」时调用，与 `ai_chat` **并行**发起（后者仍挂在 `await` 上）。
+/// 找不到对应 request_id 时返回 Err（可能这一轮已经自然结束），调用方应忽略该错误。
+#[tauri::command]
+pub fn ai_chat_cancel(request_id: String) -> Result<(), String> {
+    let m = chat_cancels().lock().unwrap();
+    match m.get(&request_id) {
+        Some(flag) => {
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        None => Err(format!("没有进行中的对话：{request_id}")),
+    }
 }
 
 // ============ Prompt Cache 支持（借鉴 claw-code-main/api/src/prompt_cache.rs） ============
@@ -203,6 +253,15 @@ pub async fn ai_chat(
     // 满足「ai 对话启动伴侣模式后只走伴侣人设、不受全局 AI 人设控制」。
     exclude_global_persona: Option<bool>,
 ) -> Result<(), String> {
+    // 取消标志：先登记再干活，保证用户在首个 token 到达前就能停（否则「点了没反应」）。
+    // guard 持有期间标志常驻表中；函数返回（无论哪条路径）即自动摘除。
+    let cancel = Arc::new(AtomicBool::new(false));
+    chat_cancels()
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), cancel.clone());
+    let _cancel_guard = ChatCancelGuard { id: request_id.clone() };
+
     let config = load_config(&app);
     let cfg = resolve_target(&config, profile_id.as_deref());
     ensure_api_key(&app, &request_id, &cfg)?;
@@ -389,6 +448,16 @@ pub async fn ai_chat(
     // Anthropic OpenAI-compat 返回 cache_read_input_tokens / cache_creation_input_tokens）
     let mut last_usage: Option<serde_json::Value> = None;
     loop {
+        // ★ 用户点了「停止」→ 立刻收口，不再向下游索要数据。
+        //   发 `ai-done`（而非 `ai-error`）：主动停止不是故障，前端据此复位 busy，
+        //   并把已经收到的部分文本原样留在气泡里（`useAiStream` 的 finish 不覆写 content）。
+        if cancel.load(Ordering::SeqCst) {
+            let _ = app.emit(
+                "ai-done",
+                serde_json::json!({ "requestId": request_id, "stopped": true, "usage": last_usage }),
+            );
+            return Ok(());
+        }
         match resp.chunk().await {
             Ok(Some(bytes)) => {
                 buf.extend_from_slice(&bytes);
@@ -592,5 +661,33 @@ mod tests {
         assert!(s.contains("你应遵守以下风格要求：多举例"));
         assert!(s.contains("你可以称呼我为小安。"));
         assert!(s.contains("你是助手。"));
+    }
+    // ── 流式对话的「停止」注册表 ────────────────────────────────────────────
+    // 每条用例用**唯一 id**：注册表是进程级 static，而 cargo test 默认多线程并行，
+    // 复用 id 会让两条用例互相摘除对方的表项（这个坑在本项目已踩过一次）。
+
+    #[test]
+    fn 取消注册表_取消置位且guard负责摘除() {
+        let id = "t-cancel-guard".to_string();
+        let flag = Arc::new(AtomicBool::new(false));
+        chat_cancels().lock().unwrap().insert(id.clone(), flag.clone());
+        let guard = ChatCancelGuard { id: id.clone() };
+
+        assert!(ai_chat_cancel(id.clone()).is_ok(), "登记后应能取消");
+        assert!(flag.load(Ordering::SeqCst), "取消后标志必须置位");
+
+        drop(guard);
+        assert!(
+            ai_chat_cancel(id.clone()).is_err(),
+            "guard drop 后表中不应再残留它（否则注册表随会话数泄漏）"
+        );
+        assert!(chat_cancels().lock().unwrap().get(&id).is_none());
+    }
+
+    #[test]
+    fn 取消注册表_未知id如实报错而不是静默成功() {
+        // 静默成功会让前端以为「已停止」，而实际仍在跑 —— 必须如实报错，
+        // 让调用方有机会回落（例如本地复位 busy，至少 UI 不会卡住）。
+        assert!(ai_chat_cancel("不存在的请求id-3f9a".into()).is_err());
     }
 }

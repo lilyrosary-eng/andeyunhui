@@ -125,6 +125,11 @@ export interface UseAiChatResult {
   clearAll: () => void;
   /** 发送一条消息。images 为可选的多模态图片（data URL），后端 ai_vision_ocr 生成描述后注入 system。 */
   send: (text: string, images?: string[], attachments?: SendAttachment[]) => Promise<void>;
+  /**
+   * 停止本轮生成。agent 模式走 `ai_agent_cancel`，纯对话走 `ai_chat_cancel`。
+   * 已收到的部分文本会保留，并补一句「（已停止）」。
+   */
+  abort: () => void;
   /** 群聊：串行让每位参与者（伴侣）基于「用户这句话 + 此前所有人的回复」各回应一句。 */
   groupSend: (text: string) => Promise<void>;
   /** 群聊内部：让单个发言者说一句（注入其独立人设 system，复用全局流式落盘）。 */
@@ -187,6 +192,45 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     { prefix: EVENTS.chatStream.prefix, deltaMode: 'append', hasReasoning: true, hasAgentStep: true },
     { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy: setBusyStable },
   );
+
+  /**
+   * 停止本轮生成（用户点「停止」）。
+   *
+   * ## 为什么必须把 reqRef 置空
+   * 事件处理（`useAiStream`）按 `requestId === reqRef.current` 过滤。置空后，**本轮**
+   * 迟到的 delta / done / error 一律不再匹配 —— 于是收口是**确定性**的，不存在
+   * 「标记写完了又被一个迟到的 delta 追加到后面」这种竞态。代价是本轮后续事件全部丢弃，
+   * 这正是我们要的（已经在停了）。
+   *
+   * ## 为什么要本地复位 busy
+   * agent 那条链的取消会 `abort.abort()` **强杀**后台任务，任务不再跑到协作点，
+   * 于是 `ai-done` 可能永远不来。只依赖后端事件的话，按钮会永久卡在「停止中」。
+   * 所以本地复位是兜底，后端事件是补充 —— 两者都幂等。
+   *
+   * 标记文案沿用本层既有约定（`useAiStream` 的 `（无内容）`、`⚠ ` 同样是硬编码中文）；
+   * 非中文环境会看到这句中文，与既有情况一致，登记为已知 i18n 缺口。
+   */
+  const abort = useCallback(() => {
+    const rid = reqRef.current;
+    if (!rid) return;
+    const aid = asstRef.current;
+    const cid = streamConvIdRef.current;
+    // 1) 先断掉本轮的事件匹配（确定性收口）
+    reqRef.current = null;
+    asstRef.current = null;
+    // 2) 给已收到的部分补一句「已停止」，让用户知道这条不是完整的回答
+    if (aid) {
+      updateMessages(cid, (prev) => prev.map((m) => {
+        if (m.id !== aid) return m;
+        if (m.content.includes('（已停止）')) return m;
+        return { ...m, content: (m.content ? m.content + '\n\n' : '') + '（已停止）' };
+      }));
+    }
+    // 3) 本地复位（后端强杀时事件不会来，这一步保证 UI 不卡）
+    setBusyStable(false);
+    // 4) 通知后端真正停下（省掉剩余 token 与网络等待）；找不到就说明本轮已自然结束，忽略
+    void invoke(agentRef.current ? 'ai_agent_cancel' : 'ai_chat_cancel', { requestId: rid }).catch(() => {});
+  }, [setBusyStable, updateMessages]);
 
   // 取当前激活 AI 档案 id（沙箱内 zustand store 隔离，故走 invoke）
   const loadProfile = useCallback(async () => {
@@ -699,6 +743,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     patchConv,
     clearAll,
     send,
+    /** 停止本轮生成（点「停止」时调用）。已收到部分保留，并补「（已停止）」标记。 */
+    abort,
     groupSend,
     sendOne,
   };

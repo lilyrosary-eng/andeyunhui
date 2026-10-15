@@ -2,7 +2,7 @@
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
 import { memo, useEffect, useState, useRef, useLayoutEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity } from 'lucide-react';
+import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import type { Conversation, SendAttachment, AttachmentKind, ChatMsg } from '@/components/capsule/types';
 import { AgentTracePanel } from './AgentTracePanel';
@@ -72,6 +72,11 @@ export interface AiChatConversationProps {
   busy: boolean;
   profileId: string;
   send: (text: string, images?: string[], attachments?: SendAttachment[]) => void;
+  /**
+   * 停止本轮生成。不传则生成中按钮保持 disabled（旧行为）—— 但主程序三个入口
+   * （AI 对话 / AI 工作 / 胶囊对话）都已接入，胶囊 AI 编程见 CapsuleAide 自己的实现。
+   */
+  onStop?: () => void;
   onClear?: () => void;
   /** 启用伴侣时显示：默认 block 大卡片，compact 横版嵌入头部右侧 */
   companionCard?: React.ReactNode;
@@ -118,6 +123,7 @@ export const AiChatConversation = memo(function AiChatConversation({
   onKeepToggle,
   onClose,
   emptyHint,
+  onStop,
   agent = false,
   onToggleAgent,
 }: AiChatConversationProps) {
@@ -278,6 +284,11 @@ export const AiChatConversation = memo(function AiChatConversation({
   const sendBtnCls = capsuleMode
     ? 'bg-white/20 text-white disabled:opacity-40'
     : 'bg-gradient-to-br from-sky-400 to-indigo-500 text-white shadow-sm disabled:opacity-40';
+  // 停止态刻意用**实心深色**而不是发送键的渐变：一个是「发出去了」，一个是「正在收回来」，
+  // 视觉上不该长得像同一个按钮的两种状态。
+  const stopBtnCls = capsuleMode
+    ? 'bg-white/25 text-white hover:bg-white/35'
+    : 'bg-neutral-800 dark:bg-stone-200 text-white dark:text-stone-900 hover:opacity-90';
 
   return (
     <div className={shellClass}>
@@ -751,13 +762,27 @@ export const AiChatConversation = memo(function AiChatConversation({
                 )}
               </div>
             </div>
-            <button
-              onClick={submit}
-              disabled={busy || (!input.trim() && picked.length === 0)}
-              className={`btn-press w-11 h-11 flex items-center justify-center rounded-2xl ${sendBtnCls} transition-opacity`}
-            >
-              <Send size={18} />
-            </button>
+            {/* 生成中且接入了停止回调 → 同一个位置变成「停止」。
+                此前这个按钮在 busy 时是 disabled 的，等于**用户完全没有办法叫停**
+                （长回答可以跑几十秒）。做法与 ComfyUI 生图那个按钮一致：
+                位置固定，点下去要么开始要么停止，不必在忙的时候另找一个按钮。 */}
+            {busy && onStop ? (
+              <button
+                onClick={onStop}
+                title="停止生成"
+                className={`btn-press w-11 h-11 flex items-center justify-center rounded-2xl ${stopBtnCls} transition-opacity`}
+              >
+                <Square size={14} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                onClick={submit}
+                disabled={busy || (!input.trim() && picked.length === 0)}
+                className={`btn-press w-11 h-11 flex items-center justify-center rounded-2xl ${sendBtnCls} transition-opacity`}
+              >
+                <Send size={18} />
+              </button>
+            )}
           </div>
         </div>
       </div>

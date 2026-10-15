@@ -7,7 +7,7 @@
  * 这条链路的错误代价是数据丢失，所以把口径钉住。
  */
 import { describe, it, expect } from 'vitest';
-import { makeConv, sanitizeConv } from './util';
+import { makeConv, sanitizeConv, mergeConversations } from './util';
 
 /** 造一个指定长度的假 data URL（字符数 = prefix + n）。 */
 const fakeMedia = (mime: string, n: number) => `data:${mime};base64,` + 'A'.repeat(n);
@@ -93,5 +93,56 @@ describe('sanitizeConv —— 媒体体积预算', () => {
     const url = 'https://example.com/a.png';
     const out = sanitizeConv(convWithSteps([{ card: 'image', image: url }]));
     expect(metasOf(out)[0].image).toBe(url);
+  });
+});
+
+/**
+ * mergeConversations —— 跨来源合并会话。
+ *
+ * 现在有**两个**消费点，且都直接关系「对话会不会丢」：
+ *  ① `useAiChat` 的跨 webview 同步（胶囊浮窗 ↔ 主窗口，localStorage 隔离）
+ *  ② `CapsuleAide` 挂载时装载后端文件里的 IDE 对话
+ *     （此前是 `setAideConversations(list)` 整体替换 → 收起浮岛再打开就被旧文件覆盖，
+ *      表现为「切一下就消失」；改为 merge 后本地独有的一律保留）
+ *
+ * 所以这里把最关键的性质钉住：**任何一侧独有的会话都不能被对方抹掉**。
+ */
+describe('mergeConversations', () => {
+  const conv = (id: string, updatedAt: number, content = 'x') => ({
+    id, title: id, updatedAt,
+    messages: [{ id: 'm' + id, role: 'assistant' as const, content }],
+  });
+
+  it('两侧独有的会话都保留（这是防丢的核心性质）', () => {
+    const local = [conv('ac1', 100)];   // 只在浮岛侧存在
+    const remote = [conv('c_1', 100)];  // 只在 IDE 文件里存在，且**没有 updatedAt**
+    const out = mergeConversations(local, remote);
+    expect(out.map((c) => c.id).sort()).toEqual(['ac1', 'c_1']);
+  });
+
+  it('远端没有 updatedAt 时不会顶掉同 id 的本地较新版', () => {
+    // 后端 AiConversation 结构里没有 updatedAt（只有 id/title/messages），
+    // 反序列化回来是 undefined。若不特殊处理，`undefined ?? 0` 会让它被当成"最旧"，
+    // 于是 IDE 的旧内容反而覆盖浮岛的新内容 —— 正好是我们要避免的方向。
+    const local = [conv('same', 500, '浮岛的新内容')];
+    const remote = [conv('same', undefined as unknown as number, 'IDE的旧内容')];
+    const out = mergeConversations(local, remote);
+    expect(out).toHaveLength(1);
+    expect(out[0].messages[0].content).toBe('浮岛的新内容');
+  });
+
+  it('远端更新的同 id 会话会采用远端', () => {
+    const out = mergeConversations([conv('same', 100, '旧')], [conv('same', 200, '新')]);
+    expect(out[0].messages[0].content).toBe('新');
+  });
+
+  it('结果按更新时间倒序（最近的在最前）', () => {
+    const out = mergeConversations([conv('a', 100)], [conv('b', 300), conv('c', 200)]);
+    expect(out.map((c) => c.id)).toEqual(['b', 'c', 'a']);
+  });
+
+  it('任一侧为空时原样返回另一侧', () => {
+    expect(mergeConversations([], [conv('a', 1)]).map((c) => c.id)).toEqual(['a']);
+    expect(mergeConversations([conv('a', 1)], []).map((c) => c.id)).toEqual(['a']);
   });
 });

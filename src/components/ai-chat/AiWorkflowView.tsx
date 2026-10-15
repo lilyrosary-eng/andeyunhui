@@ -11,7 +11,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Workflow, Play, Wand2, Loader2, Plus, Trash2, Pencil, Brain, BookmarkCheck,
   LayoutGrid, Eraser, CircleDot, X, CheckCircle2, XCircle, Image as ImageIcon,
-  Undo2, Redo2, Copy,
+  Undo2, Redo2, Copy, Square,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -227,6 +227,11 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [planning, setPlanning] = useState(false);
   const [running, setRunning] = useState(false);
+  // 进行中的「生成蓝图」请求 id（供停止）+ 已停止标记。
+  // 标记用于**丢弃半截结果**：蓝图是 JSON，截断后必然解析失败，但那句
+  // 「未能解析蓝图结构，请换一种描述再试」会误导用户以为是自己的描述有问题。
+  const wfReqRef = useRef<string | null>(null);
+  const wfStoppedRef = useRef(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
@@ -316,16 +321,19 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
     let rejectDone!: (e: unknown) => void;
     const done = new Promise<string>((res, rej) => { resolveDone = res; rejectDone = rej; });
     const un: UnlistenFn[] = [];
+    wfReqRef.current = reqId;
     un.push(await listen<{ requestId: string; delta: string }>('ai-delta', (e) => {
       if (e.payload.requestId !== reqId) return;
       acc += e.payload.delta;
     }));
     un.push(await listen<{ requestId: string }>('ai-done', (e) => {
       if (e.payload.requestId !== reqId) return;
+      if (wfReqRef.current === reqId) wfReqRef.current = null;
       un.forEach((u) => u()); resolveDone(acc);
     }));
     un.push(await listen<{ requestId: string; error: string }>('ai-error', (e) => {
       if (e.payload.requestId !== reqId) return;
+      if (wfReqRef.current === reqId) wfReqRef.current = null;
       un.forEach((u) => u()); rejectDone(new Error(e.payload.error));
     }));
     try {
@@ -345,6 +353,7 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
     const t = doc.task.trim();
     if (!t) { setError('请先在任务描述里写一句需求'); return; }
     setPlanning(true); setError(null); setLogs([]); setMenu(null);
+    wfStoppedRef.current = false;
     try {
       // L3 披露：蓝图指定了工作流且有备注时，把备注拼进规划系统提示，AI 按适配场景/参数建议/已知坑规划
       const bpSlug = storage.getString(KEYS.ai.comfyuiBlueprintWfSlug.key, '').trim();
@@ -353,6 +362,8 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
         ? `\n\n【当前生图节点将使用的 ComfyUI 工作流备注（规划时请参考：适配场景 / 参数建议 / 已知坑）】\n${bpNotes}`
         : '';
       const raw = await aiAsk(PLAN_SYSTEM + notesSection, `需求：${t}\n请只输出工作流规划 JSON。`);
+      // 用户已点「停止」→ 丢弃（截断的 JSON 必然解析失败，那条报错会误导向"描述有问题"）
+      if (wfStoppedRef.current) return;
       const parsed = parsePlan(raw);
       if (!parsed) { setError('未能解析蓝图结构，请换一种描述再试。'); return; }
       commit((d) => ({ ...d, nodes: parsed.nodes, edges: parsed.edges }));
@@ -364,6 +375,16 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc, planning, running, aiAsk, commit, pushLog]);
+
+  /** 停止蓝图生成：标记已停 → 后端取消 → 本地复位（`aiAsk` 的 promise 会随后自行收尾）。 */
+  const stopPlan = useCallback(() => {
+    const rid = wfReqRef.current;
+    if (!rid) return;
+    wfStoppedRef.current = true;
+    wfReqRef.current = null;
+    setPlanning(false);
+    void invoke('ai_chat_cancel', { requestId: rid }).catch(() => {});
+  }, []);
 
   /* ============ 节点/边操作 ============ */
   const addNode = useCallback((type: WfNodeType) => {
@@ -719,13 +740,14 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
             className="h-8 min-w-0 flex-1 rounded-lg border border-neutral-300/60 bg-white/60 px-3 text-xs text-neutral-800 outline-none transition-colors focus:border-violet-400 dark:border-stone-700/60 dark:bg-stone-800/40 dark:text-stone-200"
             placeholder="用一句话描述任务，例如：构思短视频脚本并按分镜展开成成稿，回车生成蓝图"
           />
+          {/* 规划中 → 同一位置变「停止规划」（此前 disabled，长规划无法叫停） */}
           <button
-            onClick={generateBlueprint}
-            disabled={planning || running || !doc.task.trim()}
-            className="btn-press flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={() => (planning ? stopPlan() : void generateBlueprint())}
+            disabled={!planning && (running || !doc.task.trim())}
+            className={`btn-press flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${planning ? 'bg-neutral-700 hover:bg-neutral-800 dark:bg-stone-600 dark:hover:bg-stone-500' : 'bg-violet-600 hover:bg-violet-700'}`}
           >
-            {planning ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-            {planning ? '规划中…' : '生成蓝图'}
+            {planning ? <Square size={13} /> : <Wand2 size={14} />}
+            {planning ? '停止规划' : '生成蓝图'}
           </button>
         </div>
       )}

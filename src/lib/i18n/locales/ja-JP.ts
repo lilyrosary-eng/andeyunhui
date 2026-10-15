@@ -577,6 +577,7 @@ export const jaJP: Record<string, string> = {
   'capsule.chatHint': 'AI に質問。Enter で送信（Shift+Enter で改行）',
   'capsule.inputMsg': 'メッセージを入力…',
   'capsule.noModel': 'モデル未設定',
+  'capsule.stop': '停止',
   'capsule.send': '送信',
   'capsule.selectConv': '会話を選択（ドロップダウンで切替）',
   'capsule.newConv': '新しい会話',
