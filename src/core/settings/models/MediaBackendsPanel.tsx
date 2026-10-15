@@ -27,6 +27,7 @@ import {
 } from '@/core/ai/media/backends';
 import { loadRoutes, saveRoutes, routeFor, defaultRoutes, type MediaRoutes } from '@/core/ai/media/routing';
 import { effectiveBaseUrl } from '@/core/ai/media/backends';
+import { InlineSelect } from '@/components/ui/inline-select';
 import { resetMediaConfig } from '@/core/ai/media/migrate';
 import type { MediaModelsUi, ProviderUi } from '../aiConfigCodec';
 
@@ -484,26 +485,39 @@ export function MediaBackendsPanel({
               <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                 <Icon size={13} className="text-neutral-500 dark:text-stone-400" />
                 <span className="text-[12px] text-neutral-700 dark:text-stone-300">{KIND_LABEL[k]}能力链</span>
-                {/* ★ 「这个能力用哪个模型」的**唯一**入口。
-                    用下拉而不是自由输入：后端是按模型名**全等**找所属供应商的，
-                    让用户手打就等于让他在盲填（错一个字符就找不到，界面还看不出来）。
-                    下拉里只列配置里真实存在的模型 —— 所见即所选，选完必然能找到端点。 */}
+                {/* ★ 「这个能力用哪个模型」的**唯一**入口，且**留空就是默认路径**。
+                    ## 语义（重要，之前搞反了）
+                    留空 = **走模型自己的原生能力**（这才是默认；多模态已是主流，
+                    对话模型本身往往就能看图）。在这里选一个模型 = **兜底**：
+                    只有当原生能力不可用/不成立时才走它。所以这个下拉不提供
+                    「跟随对话模型」这种选项 —— 它和"原生"表达的是同一件事，
+                    摆在选项里只会让人以为不选就不生效。
+                    ## 为什么不是自由输入
+                    后端按模型名**全等**找所属供应商，手打等于盲填（错一个字符就找不到，
+                    界面还看不出来）。所以只列配置里真实存在的模型，并在右侧标出它属于谁。 */}
                 {hasMediaModel(k) && (
-                  <select
+                  <InlineSelect
+                    className="ml-1"
                     value={mediaModels[k as MediaModelKind] ?? ''}
-                    onChange={(e) => onChangeMediaModel(k as MediaModelKind, e.target.value)}
-                    className="ml-1 px-1.5 py-0.5 rounded text-[11px] bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 text-neutral-700 dark:text-stone-200 outline-none focus:ring-1 focus:ring-[var(--element-border)] max-w-[220px]"
+                    onChange={(v) => onChangeMediaModel(k as MediaModelKind, v)}
                     title={t('modelSettings.mediaModels.pickHint')}
-                  >
-                    <option value="">{t('modelSettings.mediaModels.followChat')}</option>
-                    {modelGroups.map((g) => (
-                      <optgroup key={g.provider} label={g.provider}>
-                        {g.models.map((name) => (
-                          <option key={`${g.provider}/${name}`} value={name}>{name}</option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
+                    placeholder={t('modelSettings.mediaModels.nativeShort')}
+                    groups={[
+                      {
+                        label: '',
+                        options: [{
+                          value: '',
+                          label: t('modelSettings.mediaModels.nativeDefault'),
+                          shortLabel: t('modelSettings.mediaModels.nativeShort'),
+                          hint: t('modelSettings.mediaModels.defaultTag'),
+                        }],
+                      },
+                      ...modelGroups.map((g) => ({
+                        label: g.provider,
+                        options: g.models.map((name) => ({ value: name, label: name })),
+                      })),
+                    ]}
+                  />
                 )}
                 {/* 归属提示：让「能不能找到」这件事在界面上可见。
                     下拉选项必然可解析，但历史手填值可能不在配置里 —— 那种情况必须警示。 */}

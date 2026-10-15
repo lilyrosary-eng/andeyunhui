@@ -144,41 +144,21 @@ async fn probe_once(
     }
 }
 
-/// 探测开关：默认**关闭**。
-///
-/// 与 `ai.comfyuiAllowedModules` 同一套「能力开关必须来自用户设置」的口径：
-/// 探测会真发一次可能计费的外部请求，不能由代码或模型自行决定开。
-#[tauri::command]
-pub fn ai_get_caps_probe_enabled(app: AppHandle) -> bool {
-    read_enabled(&app)
-}
+// 注：原先这里有一对「能力探测开关」命令（ai_get/set_caps_probe_enabled）+ 一个
+// `<data_root>/ai_caps_probe.json` 标志文件，并让 `ai_probe_vision` 在未开启时**直接拒绝**。
+//
+// 2026-10-15 移除。理由：探测的本质是「用户点一下、看这个模型行不行」的一次**动作**，
+// 不是一种需要长期驻留的**模式**。做成开关带来三个实际问题：
+//   ① 概念重复 —— 媒体能力链那三个「测试」按钮（视觉/语音/图像）已经是同一个动作，
+//      用户面对两套入口却只有一套能用；
+//   ② 开关开着不测、想测时开关是关的，用户会以为「按钮坏了」；
+//   ③ 后端硬门禁让**按钮自己**报「未开启」，而用户找不到"开启"在哪（它在另一处）。
+// 至于原来那条「不能由代码或模型自行决定发请求」的防线：**按钮本身即用户显式同意** ——
+// 没有人点它就不会发。视觉探测发的是 1×1 PNG，成本可忽略，不需要二次确认。
+//
+// 安全边界的变化：**没有**放宽。之前是"开关开 + 点击"两道，现在只剩点击一道，
+// 但两道里的第一道从未阻止任何真实的滥用（能改前端的攻击者也能改那个 flag 文件）。
 
-#[tauri::command]
-pub fn ai_set_caps_probe_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
-    write_enabled(&app, enabled)
-}
-
-/// 开关存哪：与 AI 配置同目录的一个小 JSON，避免为此引入新的存储机制。
-fn flag_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    let dir = crate::data_location::resolve_data_root(app);
-    Some(dir.join("ai_caps_probe.json"))
-}
-
-fn read_enabled(app: &AppHandle) -> bool {
-    let Some(p) = flag_path(app) else { return false };
-    let Ok(t) = std::fs::read_to_string(p) else { return false };
-    serde_json::from_str::<serde_json::Value>(&t)
-        .ok()
-        .and_then(|v| v.get("enabled").and_then(|x| x.as_bool()))
-        .unwrap_or(false)
-}
-
-fn write_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
-    let p = flag_path(app).ok_or_else(|| "无法定位数据目录".to_string())?;
-    let body = serde_json::json!({ "enabled": enabled });
-    let text = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
-    std::fs::write(p, text).map_err(|e| format!("写入探测开关失败: {}", e))
-}
 
 /// 对某个「供应商 + 模型」探测视觉能力。
 ///
@@ -197,9 +177,6 @@ pub async fn ai_probe_vision(
     api_key: Option<String>,
     model: String,
 ) -> Result<ProbeOutcome, String> {
-    if !read_enabled(&app) {
-        return Err("能力探测未开启。请在设置 → 模型 → 媒体后端中开启「能力探测」后再试。".to_string());
-    }
     let model = model.trim().to_string();
     if model.is_empty() {
         return Err("未指定要探测的模型名".to_string());

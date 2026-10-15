@@ -2011,8 +2011,6 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // Tauri 注册 —— 漏了的话前端一点就 "command not found"，而单测（打纯逻辑函数）
             // 与 tsc（不校验 invoke 字符串）都发现不了。见 `tauriCommands.test.ts` 那道防线。
             ai_service::ai_probe_vision,
-            ai_service::ai_get_caps_probe_enabled,
-            ai_service::ai_set_caps_probe_enabled,
             ai_service::ai_media_usage,
             ai_service::ai_media_cleanup,
             ai_service::translate_text,

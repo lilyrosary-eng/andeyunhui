@@ -62,27 +62,14 @@ export function ModelSettingsPage() {
   }, []);
   useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current); }, []);
 
-  // 能力探测开关。存在后端的小 JSON（`<data_root>/ai_caps_probe.json`），
-  // 因为**后端**才是执行探测的一方，它必须能独立判断有没有被授权发这次请求
-  // （只信前端传来的 flag 等于没开关）。
-  const [probeEnabled, setProbeEnabled] = useState(false);
-  useEffect(() => {
-    invoke<boolean>('ai_get_caps_probe_enabled').then(setProbeEnabled).catch(() => {});
-  }, []);
+  // 「能力探测」曾经有一个全局开关（存在后端 `ai_caps_probe.json`，并让后端硬门禁拦截）。
+  // 2026-10-15 移除：探测是**一次动作**（点一下看这个模型行不行），不是**一种模式**。
+  // 开关带来的实际问题是概念重复（媒体能力链那三个「测试」按钮做的是同一件事）、
+  // 以及"想测时开关是关的" —— 用户会以为按钮坏了。按钮点击本身即用户显式同意。
   /** 改「某能力用哪个模型」。写进配置档案（不是本地库），所以插件与移动端也读得到。 */
   const setMediaModel = useCallback((kind: 'image' | 'vision' | 'speech', value: string) => {
     setCfg((prev) => ({ ...prev, media_models: { ...prev.media_models, [kind]: value } }));
   }, []);
-
-  const toggleProbe = useCallback(async () => {
-    const next = !probeEnabled;
-    try {
-      await invoke('ai_set_caps_probe_enabled', { enabled: next });
-      setProbeEnabled(next);
-    } catch (e) {
-      showToast(String(e));
-    }
-  }, [probeEnabled, showToast]);
 
   // 展开状态：记住用户上次展开哪些供应商，切换到别的设置 tab 再回来不用重新展
   useEffect(() => {
@@ -393,7 +380,6 @@ export function ModelSettingsPage() {
               onCommitBaseUrl={() => commitBaseUrl(p.id)}
               onRemoveProvider={() => removeProvider(p.id)}
               highlightModelId={highlights[p.id] ?? null}
-              probeEnabled={probeEnabled}
               newModelIds={newModelIds}
               t={t}
             />
@@ -436,37 +422,6 @@ export function ModelSettingsPage() {
         onChangeMediaModel={setMediaModel}
       />
 
-      {/* 能力探测：确证某个模型到底支不支持视觉。
-          与「对话模型原生看图」直接相关——只有被确证（来源 provider）的模型
-          才会走直发分支，其余一律维持「经 analyze_image 工具」的老路径。
-          默认关闭：探测会真发一次可能计费的请求，入口不该在用户同意前就摆出来。 */}
-      <div className="mt-6 rounded-xl border border-neutral-200 dark:border-stone-700 p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">
-              {t('modelSettings.capsProbe.enable')}
-            </div>
-            <p className="text-[11px] text-neutral-500 dark:text-stone-400 mt-1 leading-relaxed">
-              {t('modelSettings.capsProbe.enableHint')}
-            </p>
-          </div>
-          <button
-            onClick={() => void toggleProbe()}
-            className={`shrink-0 w-11 h-6 rounded-full transition-colors relative ${
-              probeEnabled ? 'bg-[var(--element-border)]' : 'bg-neutral-300 dark:bg-stone-600'
-            }`}
-            role="switch"
-            aria-checked={probeEnabled}
-            title={t('modelSettings.capsProbe.enable')}
-          >
-            <span
-              className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${
-                probeEnabled ? 'left-[22px]' : 'left-0.5'
-              }`}
-            />
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

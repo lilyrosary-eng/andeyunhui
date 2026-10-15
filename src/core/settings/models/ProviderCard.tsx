@@ -65,7 +65,6 @@ export interface ProviderCardProps {
    * 关闭时不渲染探测按钮：探测会**真发一次可能计费的请求**，入口不该在用户
    * 没明确同意前就摆在那里（与自定义节点放行同一口径：能力开关必须来自用户设置）。
    */
-  probeEnabled?: boolean;
   t: (k: string, vars?: Record<string, string | number>) => string;
 }
 
@@ -317,8 +316,8 @@ export function ProviderCard(props: ProviderCardProps) {
                 className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800">
                 <Plus size={13} />{t('modelSettings.addModel')}
               </button>
-              {/* 批量探测：只在勾选了模型、且全局开关开启时出现。 */}
-              {props.probeEnabled && selectedModels.size > 0 && (
+              {/* 批量探测：勾选了模型才出现（勾选本身就是「要测谁」的声明）。 */}
+              {selectedModels.size > 0 && (
                 <button
                   onClick={() => (batch ? (batchCancel.current = true) : void probeSelected())}
                   className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800"
@@ -359,14 +358,12 @@ export function ProviderCard(props: ProviderCardProps) {
                       >
                         {/* 勾选框：仅为「批量探测」服务（与左侧的 ○/● 语义不同 ——
                             那个是「当前对话用哪个模型」，这个只是本次要探测谁）。 */}
-                        {props.probeEnabled && (
-                          <input
-                            type="checkbox"
-                            checked={selectedModels.has(m.id)}
-                            onChange={() => toggleSelected(m.id)}
-                            className="shrink-0 w-3 h-3 accent-[var(--element-border)]"
-                          />
-                        )}
+                        <input
+                          type="checkbox"
+                          checked={selectedModels.has(m.id)}
+                          onChange={() => toggleSelected(m.id)}
+                          className="shrink-0 w-3 h-3 accent-[var(--element-border)]"
+                        />
                         <button
                           onClick={() => props.onSelectModel(m.id)}
                           className="shrink-0 w-3 text-center"
@@ -399,27 +396,27 @@ export function ProviderCard(props: ProviderCardProps) {
                             </span>
                           ))}
                         </span>
-                        {/* 探测视觉：仅在全局开关开启时出现（会真发一次可能计费的请求）。 */}
-                        {props.probeEnabled && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); void probeVision(m); }}
-                            disabled={probingId !== null}
-                            className={`shrink-0 p-1 rounded hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40 ${
-                              probeMsg?.id === m.id ? (probeMsg.ok ? 'text-emerald-600' : 'text-amber-600') : ''
-                            }`}
-                            title={
-                              probingId === m.id
-                                ? t('modelSettings.capsProbe.probing')
-                                : probeMsg?.id === m.id
-                                  ? probeMsg.text
-                                  : t('modelSettings.capsProbe.probe')
-                            }
-                          >
-                            {probingId === m.id
-                              ? <RefreshCw size={12} className="animate-spin" />
-                              : <TestTube2 size={12} />}
-                          </button>
-                        )}
+                        {/* 探测视觉（= 测试这个模型能不能看图）。会真发一次最小请求
+                            （1×1 PNG，成本可忽略），点击本身即用户显式同意。 */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); void probeVision(m); }}
+                          disabled={probingId !== null}
+                          className={`shrink-0 p-1 rounded hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40 ${
+                            probeMsg?.id === m.id ? (probeMsg.ok ? 'text-emerald-600' : 'text-amber-600') : ''
+                          }`}
+                          title={
+                            probingId === m.id
+                              ? t('modelSettings.capsProbe.probing')
+                              : probeMsg?.id === m.id
+                                ? probeMsg.text
+                                : t('modelSettings.capsProbe.probe')
+                          }
+                        >
+                          {probingId === m.id
+                            ? <RefreshCw size={12} className="animate-spin" />
+                            : <TestTube2 size={12} />}
+                        </button>
+
                         <button onClick={() => setEditingId(m.id)}
                           className="shrink-0 p-1 rounded hover:bg-neutral-100 dark:hover:bg-stone-800"
                           title={t('modelSettings.editModel')}>
