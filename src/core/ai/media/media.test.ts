@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { createStorage, type Storage, type StorageBackend } from '@/core/storage';
 import { isBackendReady, loadBackends, saveBackends, findBackend, BACKENDS_KEY, type MediaBackend } from './backends';
+import { KEYS } from '@/core/storage/keys';
 import { resolveBackend, routeFor, loadRoutes, saveRoutes, toMediaToolCfg, defaultRoutes, type MediaRoutes } from './routing';
 
 function memoryStorage(): Storage {
@@ -56,8 +57,13 @@ describe('isBackendReady —— 降级判定的唯一依据', () => {
     expect(isBackendReady(b({ ...base, extras: { workflowPath: 'D:/wf.json' } }), 'image')).toBe(true);
     // 端点通了但没填模型：用户意图明确（已配端点），应报错而非跳过
     expect(isBackendReady(b({ ...base, extras: {} }), 'image')).toBe(true);
-    // 端点为空 → 完全无法连接 → 未配置
-    expect(isBackendReady(b({ ...base, baseUrl: '', extras: {} }), 'image')).toBe(false);
+    // ★ ComfyUI 的端点**只认「本地生图」面板那一处**（effectiveBaseUrl），
+    //   条目自己的 baseUrl 不再生效。所以「未配置」要通过清空面板端点来构造。
+    const noEp = memoryStorage();
+    noEp.setString(KEYS.ai.comfyuiUrl.key, '');
+    expect(isBackendReady(b({ ...base, extras: {} }), 'image', noEp)).toBe(false);
+    // 反向断言：条目自己填了 baseUrl 也**不再**让它变成就绪（这正是这次合并要钉住的）
+    expect(isBackendReady(b({ ...base, baseUrl: 'http://127.0.0.1:9999', extras: {} }), 'image', noEp)).toBe(false);
     // ComfyUI 首期只做 image
     expect(isBackendReady(b({ ...base, caps: ['speech'], extras: {} }), 'speech')).toBe(false);
   })
@@ -77,6 +83,8 @@ describe('resolveBackend —— 降级只跳过「未配置」', () => {
   const comfyReady = b({ id: 'comfy', kind: 'comfyui', apiKey: '', caps: ['image'], extras: { ckpt: 'sd.safetensors' } });
   const cloudReady = b({ id: 'cloud', caps: ['image'], extras: { models: { image: 'flux' } } });
   // 「未配置」= 端点为空（完全连不上）；缺模型不算未配置（应报错）
+  // 「未配置的 comfyui」= 面板端点被清空（见上一条测试的说明），不是条目 baseUrl 为空
+  const noEp = (() => { const s = memoryStorage(); s.setString(KEYS.ai.comfyuiUrl.key, ''); return s; })();
   const comfyUnset = b({ id: 'comfy', kind: 'comfyui', apiKey: '', baseUrl: '', caps: ['image'], extras: {} });
 
   it('首个后端就绪 → 选它，不继续往后看', () => {
@@ -85,12 +93,12 @@ describe('resolveBackend —— 降级只跳过「未配置」', () => {
   })
 
   it('首个后端未配置（端点为空）→ 跳过，落到下一个', () => {
-    const r = resolveBackend('image', [comfyUnset, cloudReady], { image: ['comfy', 'cloud'] });
+    const r = resolveBackend('image', [comfyUnset, cloudReady], { image: ['comfy', 'cloud'] }, noEp);
     expect(r?.backend.id).toBe('cloud');
   })
 
   it('全部未配置 → null（调用方给出可自纠的错误）', () => {
-    const r = resolveBackend('image', [comfyUnset], { image: ['comfy'] });
+    const r = resolveBackend('image', [comfyUnset], { image: ['comfy'] }, noEp);
     expect(r).toBeNull();
   })
 

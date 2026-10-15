@@ -10,6 +10,7 @@
  * 故每次 agent 请求把解析结果经 ai_chat_agent 的 media 参数传入（沿用 comfyui 参数通道的思路）。
  */
 import { storage, type Storage } from '@/core/storage';
+import { KEYS } from '@/core/storage/keys';
 
 /** 后端清单的存储键（独立于 KEYS 表，避免为它加 Rust 侧无感的登记项）。 */
 export const BACKENDS_KEY = 'andeyunhui.media.backends';
@@ -60,16 +61,41 @@ export interface MediaBackend {
 }
 
 /**
+ * 某个后端**实际使用的端点** —— ComfyUI 统一取「本地生图」面板那一处。
+ *
+ * ## 为什么合并
+ * 端点本来有两个存储位置：ComfyUI 面板的 `ai.comfyuiUrl`，与媒体后端条目自己的
+ * `baseUrl`，二者**互不相通**。于是：
+ *   - 在面板改了端点 → 手动生图/工作流库/蓝图跟着变，但 agent 的「画张图」仍走旧端点；
+ *   - 要让 AI 生图走通，还得在媒体后端里**再填一遍**同一个端点。
+ * 症状是「手动生图能用、让 AI 画却连不上」（或反过来），而且完全看不出原因。
+ *
+ * 自用是单机单实例（已与用户确认「就一台」），不需要两处各配一个，所以合并到面板。
+ * 条目自己的 `baseUrl` 对 ComfyUI **不再生效**（字段保留以兼容旧数据，不读它）。
+ */
+export function effectiveBaseUrl(b: MediaBackend, s: Storage = storage): string {
+  if (b.kind === 'comfyui') {
+    return s.getString(KEYS.ai.comfyuiUrl.key, KEYS.ai.comfyuiUrl.default).trim();
+  }
+  return b.baseUrl.trim();
+}
+
+/**
  * 一条后端是否「配置完整」（可用于该能力）。
  * 这是**降级判定的唯一依据**：路由只跳过「未配置」的后端，不因执行失败而转下一个
  * （用户显式配了本地后端就是想用本地——可能为隐私或额度，静默转云端属越权且可能花钱）。
  */
-export function isBackendReady(b: MediaBackend, kind: MediaKind): boolean {
+export function isBackendReady(b: MediaBackend, kind: MediaKind, s: Storage = storage): boolean {
   if (!b.caps.includes(kind)) return false;
   if (b.kind === 'comfyui') {
     // ComfyUI 是**生图**后端，只做 image，不理解图片（vision 恒不就绪）。
-    // 端点为空也算未配置：连不上就谈不上能力。
-    return kind === 'image' && b.baseUrl.trim() !== '';
+    //
+    // 端点判据**仍然保留**（端点为空 = 连不上 = 未配置），只是端点的**来源**换成了
+    // 「本地生图」面板那一处（见 effectiveBaseUrl）—— 条目自己的 baseUrl 不再生效。
+    // 那一处带默认值（127.0.0.1:8188），所以加了条目通常就直接就绪；
+    // 用户把面板端点清空时，这里仍能如实判为「未配置」。
+    // ㊟ 刻意不简化成恒 true：那会连带失去「跳过未配置后端」这个语义的载体。
+    return kind === 'image' && effectiveBaseUrl(b, s) !== '';
   }
   // openai 兼容：需能取到凭证与模型名。端点为可选（凭证经 profileId 从档案解析，
   // 或后端自带 apiKey + baseUrl）。

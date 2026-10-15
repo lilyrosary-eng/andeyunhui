@@ -11,7 +11,7 @@
  * 纯函数，Storage 注入可测。
  */
 import { storage, type Storage } from '@/core/storage';
-import { ROUTES_KEY, loadBackends, isBackendReady, type MediaBackend, type MediaKind, ALL_KINDS } from './backends';
+import { ROUTES_KEY, loadBackends, isBackendReady, effectiveBaseUrl, type MediaBackend, type MediaKind, ALL_KINDS } from './backends';
 
 /** 路由表：能力 → 有序后端 id 列表。未列出的能力视为「无后端」。 */
 export type MediaRoutes = Partial<Record<MediaKind, string[]>>;
@@ -48,18 +48,19 @@ export function resolveBackend(
   kind: MediaKind,
   backends: MediaBackend[],
   routes: MediaRoutes,
+  s: Storage = storage,
 ): ResolvedBackend | null {
   const byId = new Map(backends.map((b) => [b.id, b]));
   for (const id of routeFor(kind, routes)) {
     const b = byId.get(id);
-    if (b && isBackendReady(b, kind)) return { kind, backend: b };
+    if (b && isBackendReady(b, kind, s)) return { kind, backend: b };
   }
   return null;
 }
 
 /** 便捷封装：直接从 Storage 读清单与路由并解析。 */
 export function resolveBackendFromStorage(kind: MediaKind, s: Storage = storage): ResolvedBackend | null {
-  return resolveBackend(kind, loadBackends(s), loadRoutes(s));
+  return resolveBackend(kind, loadBackends(s), loadRoutes(s), s);
 }
 
 /**
@@ -99,7 +100,8 @@ export function toMediaToolCfg(r: ResolvedBackend): MediaToolCfg {
   return {
     kind: r.kind,
     backendKind: b.kind,
-    baseUrl: b.baseUrl.trim(),
+    // ComfyUI 统一取「本地生图」面板的端点（见 effectiveBaseUrl）；其它后端用条目自己的。
+    baseUrl: effectiveBaseUrl(b),
     apiKey: b.apiKey.trim(),
     ...(b.extras.ckpt?.trim() ? { ckpt: b.extras.ckpt.trim() } : {}),
     ...(b.extras.workflowPath?.trim() ? { workflowPath: b.extras.workflowPath.trim() } : {}),

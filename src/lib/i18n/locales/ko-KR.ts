@@ -1186,6 +1186,7 @@ export const koKR: Record<string, string> = {
   'modelSettings.comfyui.connTest': '연결 테스트',
   'modelSettings.comfyui.connTesting': '연결 중…',
   'modelSettings.comfyui.connOk': '연결됨({n}개 노드)',
+  'modelSettings.mediaBackends.comfyEndpointFrom': '엔드포인트(로컬 이미지 생성 패널에서)',
   'modelSettings.mediaModels.title': '미디어 모델(한 곳에서 설정)',
   'modelSettings.mediaModels.hint': '비전 / 음성 / 이미지 / 음악에 사용할 모델. 이 한 곳의 설정이 모든 클라이언트(데스크톱 / 모바일 / 플러그인)에 적용되므로 공급자마다 설정할 필요가 없습니다. 비워 두면 공급자 폴백, 그다음 현재 대화 모델로 폴백합니다.',
   'modelSettings.mediaModels.vision': '비전 모델(이미지 이해)',

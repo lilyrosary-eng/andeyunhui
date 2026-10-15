@@ -1363,6 +1363,7 @@ export const zhCN: Record<string, string> = {
   'modelSettings.mediaModels.testOk': '可用',
   'modelSettings.mediaModels.testSpeechText': '测试',
   'modelSettings.mediaModels.testImageCost': '生图测试会真实生成一张图（可能计费），继续吗？',
+  'modelSettings.mediaBackends.comfyEndpointFrom': '端点（取自「本地生图」面板）',
   'modelSettings.mediaModels.title': '媒体模型（一处配置）',
   'modelSettings.mediaModels.hint': '视觉 / 语音 / 图像 / 音乐各用哪个模型。这一处对所有端（桌面 / 移动端 / 插件）生效，不必每个供应商各配一遍；留空则回落到供应商的兜底设置，再回落到当前对话模型。',
   'modelSettings.mediaModels.vision': '视觉模型（看图）',

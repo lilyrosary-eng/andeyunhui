@@ -1185,6 +1185,7 @@ export const frFR: Record<string, string> = {
   'modelSettings.comfyui.connTest': 'Tester la connexion',
   'modelSettings.comfyui.connTesting': 'Connexion…',
   'modelSettings.comfyui.connOk': 'Connecté ({n} nœuds)',
+  'modelSettings.mediaBackends.comfyEndpointFrom': 'Point de terminaison (depuis le panneau Génération locale)',
   'modelSettings.mediaModels.title': 'Modèles média (un seul endroit)',
   'modelSettings.mediaModels.hint': 'Quel modèle utiliser pour vision / parole / image / musique. Ce seul réglage s\'applique à tous les clients (desktop / mobile / extensions), inutile de le configurer par fournisseur. Vide, il retombe sur le repli du fournisseur, puis sur le modèle de conversation.',
   'modelSettings.mediaModels.vision': 'Modèle de vision (compréhension d\'image)',

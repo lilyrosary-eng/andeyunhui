@@ -1258,6 +1258,7 @@ export const enUS: Record<string, string> = {
   'modelSettings.comfyui.connTest': 'Test connection',
   'modelSettings.comfyui.connTesting': 'Connecting…',
   'modelSettings.comfyui.connOk': 'Connected ({n} nodes)',
+  'modelSettings.mediaBackends.comfyEndpointFrom': 'Endpoint (from the Local image panel)',
   'modelSettings.mediaModels.title': 'Media models (single place)',
   'modelSettings.mediaModels.hint': 'Which model to use for vision / speech / image / music. This one setting applies to all clients (desktop / mobile / plugins), so you do not configure it per provider. Left empty, it falls back to the provider fallback, then to the current chat model.',
   'modelSettings.mediaModels.vision': 'Vision model (image understanding)',

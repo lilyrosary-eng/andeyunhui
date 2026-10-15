@@ -26,6 +26,7 @@ import {
   type MediaKind,
 } from '@/core/ai/media/backends';
 import { loadRoutes, saveRoutes, routeFor, defaultRoutes, type MediaRoutes } from '@/core/ai/media/routing';
+import { effectiveBaseUrl } from '@/core/ai/media/backends';
 import { resetMediaConfig } from '@/core/ai/media/migrate';
 import type { MediaModelsUi, ProviderUi } from '../aiConfigCodec';
 
@@ -305,13 +306,16 @@ export function MediaBackendsPanel({
             {b.kind === 'comfyui' && (
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <div>
-                  <label className={labelCls}>端点</label>
-                  <input
-                    className={inputCls}
-                    value={b.baseUrl}
-                    onChange={(e) => updateBackend(b.id, { baseUrl: e.target.value })}
-                    placeholder="http://127.0.0.1:8188"
-                  />
+                  {/* ★ 端点**不在这里配** —— 统一取「本地生图」面板那一处（`ai.comfyuiUrl`）。
+                      以前这里能各配一个，结果「手动生图能用、让 AI 画却连不上」（或反过来）
+                      且完全看不出原因。自用单机单实例，一处就够（见 effectiveBaseUrl）。 */}
+                  <label className={labelCls}>{t('modelSettings.mediaBackends.comfyEndpointFrom')}</label>
+                  <div
+                    className="px-3 py-2 rounded-lg text-xs font-mono truncate bg-neutral-50 dark:bg-stone-800/60 border border-dashed border-neutral-200 dark:border-stone-700 text-neutral-500 dark:text-stone-400"
+                    title={effectiveBaseUrl(b)}
+                  >
+                    {effectiveBaseUrl(b) || '—'}
+                  </div>
                 </div>
                 <div>
                   <label className={labelCls}>Checkpoint（内置流用）</label>

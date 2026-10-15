@@ -1186,6 +1186,7 @@ export const jaJP: Record<string, string> = {
   'modelSettings.comfyui.connTest': '接続テスト',
   'modelSettings.comfyui.connTesting': '接続中…',
   'modelSettings.comfyui.connOk': '接続済み（{n} ノード）',
+  'modelSettings.mediaBackends.comfyEndpointFrom': 'エンドポイント（「ローカル画像生成」パネルより）',
   'modelSettings.mediaModels.title': 'メディアモデル（1 か所で設定）',
   'modelSettings.mediaModels.hint': '視覚 / 音声 / 画像 / 音楽に使うモデル。この 1 か所の設定がすべてのクライアント（デスクトップ / モバイル / プラグイン）に適用され、プロバイダごとに設定する必要はありません。空の場合はプロバイダのフォールバック、次に対話モデルへフォールバックします。',
   'modelSettings.mediaModels.vision': '視覚モデル（画像理解）',

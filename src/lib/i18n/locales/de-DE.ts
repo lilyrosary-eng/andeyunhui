@@ -1186,6 +1186,7 @@ export const deDE: Record<string, string> = {
   'modelSettings.comfyui.connTest': 'Verbindung testen',
   'modelSettings.comfyui.connTesting': 'Verbinde…',
   'modelSettings.comfyui.connOk': 'Verbunden ({n} Knoten)',
+  'modelSettings.mediaBackends.comfyEndpointFrom': 'Endpunkt (aus dem Panel Lokale Bilderzeugung)',
   'modelSettings.mediaModels.title': 'Medienmodelle (eine Stelle)',
   'modelSettings.mediaModels.hint': 'Welches Modell für Vision / Sprache / Bild / Musik. Diese eine Einstellung gilt für alle Clients (Desktop / Mobile / Plugins), also nicht pro Anbieter. Leer fällt sie auf den Anbieter-Fallback und dann auf das aktuelle Chat-Modell zurück.',
   'modelSettings.mediaModels.vision': 'Vision-Modell (Bildverständnis)',

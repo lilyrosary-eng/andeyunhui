@@ -26,13 +26,21 @@ vi.mock('@/core/storage', () => ({
 vi.mock('@tauri-apps/api/core', () => ({ invoke: () => Promise.reject(new Error('no tauri')) }));
 
 import { BACKENDS_KEY, ROUTES_KEY } from './backends';
+import { KEYS } from '@/core/storage/keys';
 import type { MediaBackend } from './backends';
 import { resolveMediaConfig } from './resolve';
 
-function seed(backends: MediaBackend[], routes: Record<string, string[]>) {
+function seed(
+  backends: MediaBackend[],
+  routes: Record<string, string[]>,
+  opts?: { comfyEndpoint?: string },
+) {
   mem.clear();
   mem.set(BACKENDS_KEY, JSON.stringify(backends));
   mem.set(ROUTES_KEY, JSON.stringify(routes));
+  // ComfyUI 端点现在取自「本地生图」面板那一处（effectiveBaseUrl）；不设置时是默认值
+  // 127.0.0.1:8188。要构造"未配置"就必须**显式清空它** —— 条目自己的 baseUrl 已不生效。
+  if (opts?.comfyEndpoint !== undefined) mem.set(KEYS.ai.comfyuiUrl.key, opts.comfyEndpoint);
 }
 
 describe('resolveMediaConfig', () => {
@@ -86,7 +94,7 @@ describe('resolveMediaConfig', () => {
     expect(m?.image).toBeUndefined();
   });
 
-  it('链首未配置（comfyui 缺 url）→ 跳过取下一个就绪后端', async () => {
+  it('链首未配置（「本地生图」面板端点为空）→ 跳过取下一个就绪后端', async () => {
     seed(
       [
         {
@@ -109,6 +117,7 @@ describe('resolveMediaConfig', () => {
         },
       ],
       { image: ['comfyui-broken', 'profile-p1'] },
+      { comfyEndpoint: '' },
     );
     const m = await resolveMediaConfig();
     expect(m?.image?.backendKind).toBe('openai');
@@ -129,6 +138,7 @@ describe('resolveMediaConfig', () => {
         },
       ],
       { image: ['comfyui-broken'] },
+      { comfyEndpoint: '' },
     );
     expect(await resolveMediaConfig()).toBeNull();
   });

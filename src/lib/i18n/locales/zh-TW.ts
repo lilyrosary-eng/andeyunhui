@@ -1189,6 +1189,7 @@ export const zhTW: Record<string, string> = {
   'modelSettings.comfyui.connTest': '測試連線',
   'modelSettings.comfyui.connTesting': '連線中…',
   'modelSettings.comfyui.connOk': '已連線（{n} 個節點）',
+  'modelSettings.mediaBackends.comfyEndpointFrom': '端點（取自「本機生圖」面板）',
   'modelSettings.mediaModels.title': '媒體模型（一處設定）',
   'modelSettings.mediaModels.hint': '視覺 / 語音 / 圖像 / 音樂各用哪個模型。這一處對所有端（桌面 / 行動端 / 外掛）生效，不必每個供應商各設一次；留空則回落到供應商的兜底設定，再回落到目前對話模型。',
   'modelSettings.mediaModels.vision': '視覺模型（看圖）',
