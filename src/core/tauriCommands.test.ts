@@ -92,7 +92,10 @@ function handlerSet(relPath: string): Set<string> {
  */
 function invokedIn(onlyMobile: boolean): Map<string, string[]> {
   const found = new Map<string, string[]>();
-  const re = /invoke\s*(?:<[^>]*>)?\s*\(\s*'([A-Za-z0-9_]+)'/g;
+  // 匹配 invoke 之后到第一个 ( 之间的任意内容 —— **不能**写成 (?:<[^>]*>)?：
+    // 泛型可能嵌套（invoke<Record<string, unknown>>(...)），[^>]* 会在第一个 > 处失配，
+    // 于是整条调用被漏掉、命令被误报成未调用。这个坑我踩过一次（2026-10-15）。
+    const re = /invoke\s*[^(]*\(\s*'([A-Za-z0-9_]+)'/g;
   for (const [path, text] of Object.entries(FRONTEND)) {
     // glob 键是相对本测试文件的路径（形如 ../mobile/screens/x.tsx），
     // 所以不能按 '/src/mobile/' 判断。
