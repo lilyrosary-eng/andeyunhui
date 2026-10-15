@@ -10,6 +10,8 @@
  * ## 血案（2026-10-15）
  * 能力探测落地时实现了 5 个 tauri 命令（`ai_probe_vision` / `ai_get_caps_probe_enabled` /
  * `ai_set_caps_probe_enabled` / `ai_media_usage` / `ai_media_cleanup`），
+ * （注：其中 `ai_get/set_caps_probe_enabled` 两个后来随「探测去开关」一并删除 ——
+ *  这里保留它们的名字只是记录当时的事实，不必去代码里找。）
  * `ai_service/mod.rs` 里 `pub use` 也写了，**但忘了在 `main.rs` 的 `generate_handler!`
  * 里列一行**。于是：9 条单测全绿、`cargo test` 214/214、`tsc` 0 错 ——
  * 而前端一点就是 "command not found"。
