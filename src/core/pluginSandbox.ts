@@ -533,6 +533,38 @@ export interface SandboxGlobals {
 // 会自动开放 Function，无需在此逐个登记——契合「依赖全走 external-deps」约定。
 const TRUSTED_FUNCTION_PLUGINS = new Set(['ide', 'wps', 'ocr']);
 
+/**
+ * 未获放行的插件拿到的 `Function` —— **不是 `undefined`，而是一个禁止调用/构造的 `Proxy`**。
+ *
+ * ## 血案（2026-10-15）
+ * 原实现是 `Function: undefined`，目的是堵住 `new Function()` 动态执行代码。但
+ * `x instanceof Function` 是**第三方库代码里极常见的分支**，而 `instanceof` 的右值
+ * 不是对象时会直接抛：
+ *     TypeError: Right-hand side of 'instanceof' is not an object
+ * 实测：插件 `ai-chat` 的「AI 工作 → 蓝图」画布用 React Flow，其 `MiniMap` 内部有
+ *     `const getFunc = e => e instanceof Function ? e : () => e`
+ * 于是**只要蓝图画布渲染一次，整个 AI 页面就被 ErrorBoundary 捕获成崩溃**。
+ * 崩溃栈定位方式：报错 `<anonymous>:324:68430` 的"匿名函数行号 = 脚本行号 + 3
+ * （`new Function` 的包装头），据此还原到 bundle 第 321 行原文对上了这一句。
+ *
+ * ## 为什么必须是 Proxy 而不是"随便给个函数"
+ * `instanceof` 走 `OrdinaryHasInstance`：取右值的 `prototype`，再沿左值原型链查找。
+ * - 给一个普通空函数 → `prototype` 是它自己的 `{}`，**任何真函数都不匹配**，
+ *   库会走错分支（把函数当值包裹一层），bug 更隐蔽。
+ * - 给真 `Function` 的 `Proxy` → 原型链一致，`instanceof` 语义**完全正确**；
+ *   同时 `apply`/`construct` 陷阱把唯一的危险路径堵死。
+ *
+ * ⇒ 安全性**不降级**（`new Function` / `Function('code')` 仍然抛错），兼容性**恢复**。
+ */
+const sandboxedFunction = new Proxy(Function, {
+  apply() {
+    throw new Error('插件沙箱已禁用 Function 构造器：不允许动态执行代码');
+  },
+  construct() {
+    throw new Error('插件沙箱已禁用 Function 构造器：不允许动态执行代码');
+  },
+});
+
 export function createSandboxGlobals(
   pluginId: string,
   registry: PluginRegistry,
@@ -620,8 +652,12 @@ export function createSandboxGlobals(
   alert: undefined,
   prompt: undefined,
   confirm: undefined,
+  // ⚠️ 这一条**实际不生效**：`executeInSandbox` 会把 `eval` 从形参列表里过滤掉
+  //    （strict mode 不允许 `eval` 作形参名），所以插件里的裸 `eval` 仍解析到全局 eval。
+  //    保留字段只为让 `SandboxGlobals` 的类型与意图完整；**不要据此认为 eval 已被堵住**。
+  //    （有测试 assert 了现状；真要堵住需改整体包装方式，属独立任务。）
   eval: undefined,
-  Function: exposeFunction ? Function : undefined,
+  Function: exposeFunction ? Function : sandboxedFunction,
   WebSocket: undefined,
   Worker: undefined,
   // 宿主注入的全局变量
