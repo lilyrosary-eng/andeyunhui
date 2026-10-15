@@ -4,6 +4,7 @@ import { memo, useEffect, useState, useRef, useLayoutEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
+import { InlineSelect } from '@/components/ui/inline-select';
 import type { Conversation, SendAttachment, AttachmentKind, ChatMsg } from '@/components/capsule/types';
 import { AgentTracePanel } from './AgentTracePanel';
 import type { UseAiChatResult } from '@/core/ai/useAiChat';
@@ -77,6 +78,10 @@ export interface AiChatConversationProps {
    * （AI 对话 / AI 工作 / 胶囊对话）都已接入，胶囊 AI 编程见 CapsuleAide 自己的实现。
    */
   onStop?: () => void;
+  /** 当前会话的思考档位覆盖（''= 跟随配置）。仅非胶囊形态使用。 */
+  effort?: string;
+  /** 改当前会话的思考档位覆盖。不传则不渲染档位选择器（退化为旧行为）。 */
+  onEffortChange?: (v: string) => void;
   onClear?: () => void;
   /** 启用伴侣时显示：默认 block 大卡片，compact 横版嵌入头部右侧 */
   companionCard?: React.ReactNode;
@@ -124,6 +129,8 @@ export const AiChatConversation = memo(function AiChatConversation({
   onClose,
   emptyHint,
   onStop,
+  effort = '',
+  onEffortChange,
   agent = false,
   onToggleAgent,
 }: AiChatConversationProps) {
@@ -731,7 +738,42 @@ export const AiChatConversation = memo(function AiChatConversation({
               />
               <div className="flex items-center justify-between mt-1.5">
                 <div className="flex items-center gap-2">
-                  <ThinkingToggle compact theme={capsuleMode ? 'dark' : 'light'} profileId={profileId} />
+                  {/* 思考档位：**主窗口**用「会话级档位选择器」，**胶囊**仍用原来的开/关。
+                      为什么主窗口换掉那个开/关：档位（低/中/高）比"开/关"信息量大得多，
+                      而它只在对话时才有意义 —— 让人跑去设置页调档，等于把最该随手改的东西藏起来。
+                      为什么胶囊不动：浮窗空间有限，且它的行内控件已排满；胶囊照旧写
+                      **档案级** thinking（那是它的既有语义），主窗口的选择器是**会话级**覆盖，
+                      层级不同、不会互相顶掉（后端优先级：会话覆盖 > 配置）。
+                      两个控件都保留会让同一行出现两个思考开关 —— 那正是"多个入口"的老毛病。 */}
+                  {capsuleMode ? (
+                    <ThinkingToggle compact theme="dark" profileId={profileId} />
+                  ) : (
+                    <span className="flex items-center gap-1">
+                      <Brain size={13} className="text-neutral-400 dark:text-stone-500" />
+                      <InlineSelect
+                        value={effort}
+                        onChange={onEffortChange ?? (() => {})}
+                        placeholder="思考·默认"
+                        title="本次对话的思考档位。留空＝跟随模型配置。超出该模型支持范围的档位会被自动收敛。"
+                        searchThreshold={99}
+                        groups={[
+                          {
+                            label: '',
+                            options: [{ value: '', label: '跟随配置', shortLabel: '思考·默认', hint: '默认' }],
+                          },
+                          {
+                            label: '',
+                            options: [
+                              { value: 'off', label: '关闭思考' },
+                              { value: 'low', label: '思考·低' },
+                              { value: 'medium', label: '思考·中' },
+                              { value: 'high', label: '思考·高' },
+                            ],
+                          },
+                        ]}
+                      />
+                    </span>
+                  )}
                   {onToggleAgent && (
                     <button
                       onClick={() => onToggleAgent(!agent)}

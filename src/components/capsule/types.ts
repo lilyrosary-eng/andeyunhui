@@ -128,6 +128,15 @@ export interface Conversation {
    * calls = 本轮群聊累计触发的 AI 调用次数；用户可见的提示是"本次群聊已调用 N 次 AI"。
    */
   groupCost?: { calls: number };
+  /**
+   * 本条会话的**思考档位覆盖**（"off"/"low"/"medium"/"high"）。
+   *
+   * 留空 = 跟随模型配置（配置页里那个档位）。之所以存在**会话**上而不是改配置：
+   * 「这次想让它多想一点」是这一轮对话的诉求，不是对这个模型的长期设定 ——
+   * 写进配置会让两个入口互相覆盖，还会让"临时试一下"永久污染模型配置。
+   * 后端按该模型的支持集合**收敛**越界值（见 `ResolvedTarget::effort_with_override`）。
+   */
+  effort?: string;
 }
 
 // 接收请求载荷（与 Rust transfer.rs 的 transfer-receive-request 事件一致）

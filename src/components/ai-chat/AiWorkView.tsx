@@ -28,6 +28,9 @@ export interface AiWorkViewProps {
   send: (text: string, images?: string[], attachments?: SendAttachment[]) => void;
   /** 停止本轮生成（透传给 AiChatConversation；不传则生成中按钮保持 disabled）。 */
   onStop?: () => void;
+  /** 思考档位覆盖（透传）。''= 跟随配置。 */
+  effort?: string;
+  onEffortChange?: (v: string) => void;
   agent?: boolean;
   onToggleAgent?: (on: boolean) => void;
   conversations: Conversation[];
@@ -45,6 +48,8 @@ export const AiWorkView = memo(function AiWorkView({
   busy,
   send,
   onStop,
+  effort,
+  onEffortChange,
   agent,
   onToggleAgent,
   conversations,
@@ -99,6 +104,8 @@ export const AiWorkView = memo(function AiWorkView({
           profileId={profileId || ''}
           send={send}
           onStop={onStop}
+          effort={effort}
+          onEffortChange={onEffortChange}
           agent={agent}
           onToggleAgent={onToggleAgent}
           conversations={conversations}

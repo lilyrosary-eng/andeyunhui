@@ -37,6 +37,8 @@ async fn run_agent(
     // 用户本轮发来的图片（data URL）——analyze_image 工具按序号引用。
     images: Vec<String>,
     cancel: Arc<AtomicBool>,
+    // 请求级档位覆盖（对话页选的）。留空 = 用配置。见 `effort_with_override`。
+    effort: Option<String>,
 ) -> Result<(), String> {
     let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 12u32);
     let config = load_config(&app);
@@ -224,10 +226,11 @@ async fn run_agent(
             "tools": tools,
             "tool_choice": "auto",
         });
-        // 与 ai_chat 同口径：档位由 ResolvedTarget::effort() 推导（显式 effort 优先，回落旧 thinking）。
-        let thinking = !cfg.reasoning_off();
+        // 与 ai_chat 同口径：档位 = 请求级覆盖 ?? 配置（显式 effort 优先，回落旧 thinking）。
+        let effective_effort = cfg.effort_with_override(effort.as_deref());
+        let thinking = effective_effort != "off";
         if thinking {
-            body["reasoning_effort"] = serde_json::json!(cfg.effort());
+            body["reasoning_effort"] = serde_json::json!(effective_effort);
             if is_deepseek_provider(&cfg) {
                 body["thinking"] = serde_json::json!({ "type": "enabled" });
             }
@@ -633,6 +636,8 @@ pub async fn ai_chat_agent(
     media: Option<crate::services::ai_service::ai_tools::MediaPayload>,
     // 用户本轮发来的图片（data URL）。仅本 agent 请求有效，不落盘、不跨轮继承。
     images: Option<Vec<String>>,
+    // 请求级档位覆盖（对话页里临时选的思考档位）。留空 = 用配置。
+    effort: Option<String>,
 ) -> Result<(), String> {
     // 同步预检：无 API Key 直接拒绝（对齐原契约），无需开后台任务。
     let config = load_config(&app);
@@ -660,6 +665,7 @@ pub async fn ai_chat_agent(
             media.unwrap_or_default(),
             images.unwrap_or_default(),
             cancel_cl,
+            effort,
         )
         .await;
         // 自然结束（非取消）→ 登记 DONE 后从注册表移除；取消走 cancel_worker 的 abort 路径。

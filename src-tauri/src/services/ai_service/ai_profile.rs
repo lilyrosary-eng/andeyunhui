@@ -805,6 +805,31 @@ impl ResolvedTarget {
         }
     }
 
+    /// 生效档位 + **请求级覆盖**（对话页里临时选的档位）。
+    ///
+    /// 优先级：**请求级覆盖** > 配置（显式 `reasoning_effort` > 旧 `thinking` > 档位集默认 > off）。
+    ///
+    /// ## 为什么要有这一层而不是让前端去改配置
+    /// 「这次我想让它多想一点」是**一次对话**的诉求，不是对这个模型的长期设定。
+    /// 让对话页去改写 `ModelEntry.overrides` 会造成两个坏处：
+    ///   ① 同一件事两个入口（配置页 / 对话页）互相覆盖 —— 用户改哪个都"对"，但结果取决于顺序；
+    ///   ② 「临时试一下」会永久污染模型配置。
+    /// 所以做成**请求参数**：覆盖只在本次请求生效，配置永远是配置。
+    ///
+    /// 仍会走与配置路径**同一套** `clamp_effort` 收敛越界值 —— 否则用户选了个该模型
+    /// 不支持的档位就会被端点 400（这正是 `effort()` 文档里明确要谨慎的那件事）。
+    pub(crate) fn effort_with_override(&self, over: Option<&str>) -> String {
+        let Some(want) = over.map(str::trim).filter(|s| !s.is_empty()) else {
+            return self.effort();
+        };
+        let want = want.to_lowercase();
+        match self.reasoning.as_ref() {
+            Some(spec) => super::reasoning::clamp_effort(spec, &want),
+            // 没有档位集合信息时无从判断合法性，原样放行（与 `effort()` 同一口径）
+            None => want,
+        }
+    }
+
     /// 是否「关闭推理」。"off" = 不发 reasoning_effort，走普通采样参数并恢复 temperature 等。
     pub(crate) fn reasoning_off(&self) -> bool {
         self.effort() == "off"
@@ -1428,6 +1453,33 @@ mod v2_tests {
     #[test]
     fn 容量来源_手填冻结() {
         assert!(!CapacitySource::refreshable(Some(8192), Some(CapacitySource::Manual)));
+    }
+
+    #[test]
+    fn 请求级档位覆盖优先于配置() {
+        let mut t = ResolvedTarget::default();
+        t.reasoning_effort = Some("low".into());
+        // 无覆盖 → 用配置
+        assert_eq!(t.effort_with_override(None), "low");
+        // 空串/空白 → 视为没覆盖（前端清空下拉时的值）
+        assert_eq!(t.effort_with_override(Some("")), "low");
+        assert_eq!(t.effort_with_override(Some("   ")), "low");
+        // 有覆盖 → 压过配置
+        assert_eq!(t.effort_with_override(Some("high")), "high");
+        assert_eq!(t.effort_with_override(Some("OFF")), "off", "大小写不敏感");
+    }
+
+    #[test]
+    fn 请求级档位覆盖仍按模型支持集收敛() {
+        // 该模型只支持 off/high（如 DeepSeek）。用户选了一个它没有的档位时，
+        // 必须被收敛，否则发给端点会被 400 —— 与配置路径同一口径。
+        let t = ResolvedTarget {
+            reasoning: Some(crate::services::ai_service::reasoning::builtin_spec("deepseek-chat")),
+            ..Default::default()
+        };
+        assert_eq!(t.effort_with_override(Some("high")), "high", "支持的档位原样放行");
+        let got = t.effort_with_override(Some("medium"));
+        assert!(got == "off" || got == "high", "越界档位必须收敛到该模型集合内，实际 {got}");
     }
 
     #[test]

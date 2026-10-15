@@ -252,6 +252,10 @@ pub async fn ai_chat(
     // 伴侣模式下调用方置 true：跳过全局 AI 人设，仅使用前端 per-call 注入的伴侣人设，
     // 满足「ai 对话启动伴侣模式后只走伴侣人设、不受全局 AI 人设控制」。
     exclude_global_persona: Option<bool>,
+    // 请求级档位覆盖（对话页里临时选的思考档位；留空 = 用配置）。
+    // 只影响本次请求、不改配置 —— 见 `ResolvedTarget::effort_with_override` 的文档。
+    // （用 // 而不是 ///：doc 注释不允许出现在函数参数上。）
+    effort: Option<String>,
 ) -> Result<(), String> {
     // 取消标志：先登记再干活，保证用户在首个 token 到达前就能停（否则「点了没反应」）。
     // guard 持有期间标志常驻表中；函数返回（无论哪条路径）即自动摘除。
@@ -321,7 +325,10 @@ pub async fn ai_chat(
     };
     // 生效档位由 ResolvedTarget::effort() 统一推导（显式 effort 优先，回落到旧 thinking 开关）。
     // thinking 仅表示「推理是否开着」，用于下方 reasoning_content 的转发门控。
-    let thinking = !cfg.reasoning_off();
+    // 档位先应用**请求级覆盖**（对话页选的），再据此决定推理开关 —— 两者必须同源，
+    // 否则会出现「档位发了 off 但 reasoning 仍被转发」这类自相矛盾的状态。
+    let effective_effort = cfg.effort_with_override(effort.as_deref());
+    let thinking = effective_effort != "off";
     // 人设 system：组合后合并进首条 system 消息（不破坏插件自带的项目上下文 / SOP / 状态注入）。
     // 伴侣模式（exclude_global_persona=true）：跳过全局人设，仅保留前端注入的伴侣人设。
     let persona = if exclude_global_persona.unwrap_or(false) {
@@ -357,7 +364,7 @@ pub async fn ai_chat(
         // 思考模式不支持 temperature / top_p（OpenAI o-series 直接报错，DeepSeek 忽略），故省略。
         // 档位取值来自「供应商上报 → 内置保守表」的集合（见 reasoning.rs），
         // 不在此处按 base_url 猜端点类型；端点仍拒绝时由下方 400 自适应降级兜底。
-        body["reasoning_effort"] = serde_json::json!(cfg.effort());
+        body["reasoning_effort"] = serde_json::json!(effective_effort);
         // DeepSeek 需显式 thinking 开关；OpenAI o-series 仅靠 reasoning_effort，多余字段会 400，
         // 故 thinking 块仅对 DeepSeek 附加。
         if is_deepseek_provider(&cfg) {

@@ -37,7 +37,7 @@ const Root = memo(function Root() {
   // 逻辑单例：侧栏与主区共享同一份 useAiChat，避免状态分裂
   const {
     conversations, activeId, activeConv, busy, profileId,
-    selectConv, newConversation, newGroup, deleteConversation, renameConversation, clearAll, send, abort, agent, setAgent,
+    selectConv, newConversation, newGroup, deleteConversation, renameConversation, clearAll, send, abort, agent, setAgent, effort, setEffort,
   } = useAiChat({ persistKey: DEFAULT_PERSIST_KEY });
 
   // AIWork 统一任务实例：与主「AI 对话」彻底隔离，专属存储 key，侧栏任务区 / 对话工作台 / 蓝图画布共用。
@@ -243,6 +243,8 @@ const Root = memo(function Root() {
           profileId={profileId}
           send={sendWithCompanion}
           onStop={abort}
+          effort={effort}
+          onEffortChange={setEffort}
           agent={agent}
           onToggleAgent={setAgent}
           onClear={() => deleteConversation(activeId)}
@@ -260,6 +262,8 @@ const Root = memo(function Root() {
         busy={aiWorkChat.busy}
         send={aiWorkChat.send}
         onStop={aiWorkChat.abort}
+        effort={aiWorkChat.effort}
+        onEffortChange={aiWorkChat.setEffort}
         agent={aiWorkChat.agent}
         onToggleAgent={aiWorkChat.setAgent}
         conversations={aiWorkChat.conversations}

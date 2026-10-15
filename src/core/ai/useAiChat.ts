@@ -122,6 +122,10 @@ export interface UseAiChatResult {
   renameConversation: (id: string, title: string) => void;
   /** 对某条会话做不可变更新（自动 bump updatedAt）。AIWork 统一任务回写蓝图用。 */
   patchConv: (id: string, fn: (c: Conversation) => Conversation) => void;
+  /** 当前会话的思考档位覆盖（''= 跟随配置）。 */
+  effort: string;
+  /** 改当前会话的思考档位覆盖（对话页的选择器）。 */
+  setEffort: (v: string) => void;
   clearAll: () => void;
   /** 发送一条消息。images 为可选的多模态图片（data URL），后端 ai_vision_ocr 生成描述后注入 system。 */
   send: (text: string, images?: string[], attachments?: SendAttachment[]) => Promise<void>;
@@ -350,6 +354,15 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title: title.trim() || c.title } : c)));
   }, []);
 
+  /** 改**当前会话**的思考档位覆盖（对话页那个档位选择器）。空串 = 清除覆盖、跟随配置。 */
+  const setEffort = useCallback((v: string) => {
+    const cid = activeIdRef.current;
+    if (!cid) return;
+    setConversations((prev) => prev.map((c) => (
+      c.id === cid ? { ...c, effort: v.trim() || undefined } : c
+    )));
+  }, []);
+
   const clearAll = useCallback(() => {
     const fresh = makeConv();
     setConversations([fresh]);
@@ -467,6 +480,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       stream: true,
       ...(finalSystem ? { system: finalSystem } : {}),
       ...(excludeGlobalPersona ? { exclude_global_persona: true } : {}),
+      // 档位覆盖：读**这条会话**上存的（对话页选的）。留空不带该键 = 后端用配置。
+      ...(conv?.effort?.trim() ? { effort: conv.effort.trim() } : {}),
     };
 
     // 本轮对话完成后（ai-done 事件），异步沉淀整轮进长期记忆（namespace='ai-chat'）。
@@ -503,6 +518,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
           // 本轮图片随请求带入：模型不直接持有 base64，由 analyze_image 工具按序号取用。
           // 只走参数通道、不进 messages —— 避免数 MB base64 落进会话日志与模型上下文。
           ...(hasImages && images ? { images } : {}),
+          ...(conv?.effort?.trim() ? { effort: conv.effort.trim() } : {}),
         });
       } else {
         await invoke('ai_chat', payload);
@@ -566,10 +582,14 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     }));
     const cleanup = () => { unlis.forEach((u) => u()); };
 
+    // 档位覆盖：与单聊同一口径 —— 读这条会话上存的档位。群聊里每个人用自己的 profile，
+    // 但"这轮对话想多想少"是会话级的诉求，不该因为群聊就静默失效。
+    const convEffort = stateRef.current.conversations.find((c) => c.id === cid)?.effort?.trim() ?? '';
     const payload = {
       requestId: reqId,
       // 群聊：每位伴侣按其绑定的 AI 档案（profile_id）选模型；未绑定则回落全局默认档案
       profileId: companion.profile_id || profileIdRef.current,
+      ...(convEffort ? { effort: convEffort } : {}),
       // 请求前硬防御：真实 token 估算尾部截断 + 单条硬切（双保险，坐实重复拼接真因）
       messages: safeMessages(history.map((m) => ({ role: m.role, content: m.content }))),
       stream: true,
@@ -725,6 +745,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   }, [sendOne, planGroupRound]);
 
   const activeConv = conversations.find((c) => c.id === activeId) ?? null;
+  const activeConvEffort = activeConv?.effort?.trim() ?? '';
 
   return {
     conversations,
@@ -741,6 +762,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     deleteConversation,
     renameConversation,
     patchConv,
+    effort: activeConvEffort,
+    setEffort,
     clearAll,
     send,
     /** 停止本轮生成（点「停止」时调用）。已收到部分保留，并补「（已停止）」标记。 */
