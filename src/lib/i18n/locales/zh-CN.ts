@@ -1462,6 +1462,7 @@ export const zhCN: Record<string, string> = {
   'modelSettings.reuseToastNoNew': '已复用「{name}」预设，无新增模型',
   'modelSettings.mergeToast': '该地址已存在，已并入「{name}」',
   'modelSettings.comfyui.title': '本地生图（ComfyUI）',
+  'modelSettings.comfyui.purpose': '手动生图 + AI 生图的本地通道。上面配端点，下面「生成」出的图用来**确认 ComfyUI 真的在跑**（不是让你在这儿作图）；「工作流库」把你在 ComfyUI 里调好的工作流接给 AI 复用。',
   'modelSettings.comfyui.interrupt': '中断',
   'modelSettings.comfyui.interrupted': '已请求中断，ComfyUI 正在停止',
   'modelSettings.comfyui.connTest': '测试连接',

@@ -1202,6 +1202,7 @@ export const zhTW: Record<string, string> = {
   'modelSettings.mediaBackends.confirmCleanAll': '清空全部媒體檔案？此操作不可復原。',
   'modelSettings.mediaBackends.cleaned': '已清理 {n} 個 · 釋放 {size}',
   'modelSettings.mediaBackends.comfyEndpointFrom': '端點（取自「本機生圖」面板）',
+  'modelSettings.comfyui.purpose': '手動生圖 + AI 生圖的本機通道。上面設端點，下面「生成」出的圖用來**確認 ComfyUI 真的在跑**（不是讓你在這兒作圖）；「工作流庫」把你調好的工作流接給 AI 重用。',
   'modelSettings.fallbackModelsHint': '兜底模型（桌面 / 行動端 / 外掛共用；留空則回落到對話模型）',
   'modelSettings.visionModelLabel': '視覺模型',
   'modelSettings.imageModel': '圖片生成模型',

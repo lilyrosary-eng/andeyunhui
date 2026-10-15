@@ -398,15 +398,53 @@ export function MediaBackendsPanel({
             )}
 
             {b.kind === 'openai' && (
-              <div className="grid grid-cols-2 gap-2 mb-2">
+              <div className="space-y-2 mb-2">
+                {/* 「云端后端」到底是什么：**不另配端点与密钥**，而是直接借用某个
+                    「算力来源档案」（供应商）的端点 + API Key 去调它的图片/语音模型。
+                    所以这里要选的是"借谁的档案"，不是一个需要手打的 id。 */}
+                <p className="text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">
+                  云端后端不自带端点与密钥 —— 它借用所选「算力来源档案」的端点 + API Key，
+                  去调那家供应商的图片 / 语音模型。图片、语音两个能力可从不同的云端后端降级。
+                </p>
                 <div>
-                  <label className={labelCls}>算力来源档案 id</label>
-                  <input
-                    className={inputCls}
+                  <label className={labelCls}>使用哪个算力来源档案</label>
+                  {/* 原来是**自由文本输入 id** —— 用户既不知道有哪些 id 可用，打错也没提示。
+                      现在改成从配置里已有的供应商中选，并在下方回显它解析到哪个端点。 */}
+                  <InlineSelect
                     value={b.extras.profileId ?? ''}
-                    onChange={(e) => updateExtras(b.id, { profileId: e.target.value })}
-                    placeholder="留空则用当前对话档案"
+                    onChange={(v) => updateExtras(b.id, { profileId: v })}
+                    placeholder="跟随当前对话档案"
+                    title="留空＝用当前对话正在用的那个档案"
+                    searchThreshold={12}
+                    groups={[
+                      {
+                        label: '',
+                        options: [{ value: '', label: '跟随当前对话档案', hint: '默认' }],
+                      },
+                      {
+                        label: '算力来源档案',
+                        options: providers.map((p) => ({
+                          value: p.id,
+                          label: p.name || p.base_url || p.id,
+                          hint: p.base_url || undefined,
+                        })),
+                      },
+                    ]}
                   />
+                  {(() => {
+                    const pid = (b.extras.profileId ?? '').trim();
+                    if (!pid) return null;
+                    const hit = providers.find((x) => x.id === pid);
+                    return hit ? (
+                      <div className="mt-1 text-[10px] text-neutral-400 dark:text-stone-500 truncate" title={hit.base_url}>
+                        → {hit.name || hit.id} · {hit.base_url}
+                      </div>
+                    ) : (
+                      <div className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
+                        ⚠ 配置里找不到这个档案（可能是旧值），调用时会失败
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             )}

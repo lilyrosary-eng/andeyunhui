@@ -1271,6 +1271,7 @@ export const enUS: Record<string, string> = {
   'modelSettings.mediaBackends.confirmCleanAll': 'Delete ALL media files? This cannot be undone.',
   'modelSettings.mediaBackends.cleaned': 'Removed {n} · freed {size}',
   'modelSettings.mediaBackends.comfyEndpointFrom': 'Endpoint (from the Local image panel)',
+  'modelSettings.comfyui.purpose': 'The local channel for both manual and AI image generation. Set the endpoint above; the image from "Generate" below exists to **prove ComfyUI is actually running** (not as a drawing surface). The workflow library feeds your tuned ComfyUI workflows to the AI.',
   'modelSettings.fallbackModelsHint': 'Fallback models (shared by desktop / mobile / plugins; falls back to the chat model when empty)',
   'modelSettings.visionModelLabel': 'Vision model',
   'modelSettings.imageModel': 'Image model',

@@ -1199,6 +1199,7 @@ export const deDE: Record<string, string> = {
   'modelSettings.mediaBackends.confirmCleanAll': 'ALLE Mediendateien löschen? Nicht rückgängig zu machen.',
   'modelSettings.mediaBackends.cleaned': '{n} entfernt · {size} freigegeben',
   'modelSettings.mediaBackends.comfyEndpointFrom': 'Endpunkt (aus dem Panel Lokale Bilderzeugung)',
+  'modelSettings.comfyui.purpose': 'Der lokale Kanal fur manuelle und KI-Bildgenerierung. Endpunkt oben setzen; das Bild von Generieren dient dem Nachweis, dass ComfyUI lauft (keine Zeichenflache). Die Workflow-Bibliothek ubergibt Ihre Workflows an die KI.',
   'modelSettings.fallbackModelsHint': 'Fallback-Modelle (gemeinsam von Desktop / Mobile / Plugins genutzt; fällt bei leer auf das Chat-Modell zurück)',
   'modelSettings.visionModelLabel': 'Vision-Modell',
   'modelSettings.imageModel': 'Bildmodell',

@@ -1199,6 +1199,7 @@ export const koKR: Record<string, string> = {
   'modelSettings.mediaBackends.confirmCleanAll': '모든 미디어 파일을 삭제할까요? 되돌릴 수 없습니다.',
   'modelSettings.mediaBackends.cleaned': '{n}개 정리 · {size} 확보',
   'modelSettings.mediaBackends.comfyEndpointFrom': '엔드포인트(로컬 이미지 생성 패널에서)',
+  'modelSettings.comfyui.purpose': '수동 및 AI 이미지 생성의 로컬 경로입니다. 위에서 엔드포인트를 설정하고, 아래 생성으로 나오는 이미지는 ComfyUI가 실제로 동작하는지 확인용입니다(작업용이 아닙니다). 워크플로 라이브러리는 조정한 워크플로를 AI에 넘깁니다.',
   'modelSettings.fallbackModelsHint': '폴백 모델(데스크톱 / 모바일 / 플러그인 공용. 비어 있으면 대화 모델로 폴백)',
   'modelSettings.visionModelLabel': '비전 모델',
   'modelSettings.imageModel': '이미지 생성 모델',

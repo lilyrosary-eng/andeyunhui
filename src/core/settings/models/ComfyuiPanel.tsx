@@ -248,6 +248,13 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
       <div className="flex items-center gap-1.5 text-sm font-medium text-neutral-700 dark:text-stone-200">
         <ImageIcon size={14} />{t('modelSettings.comfyui.title')}
       </div>
+      {/* 用途说明。加这一行的原因：这一屏字段密集（端点/Checkpoint/提示词/工作流目录/
+          自定义节点放行），但**没有任何一句说清它是干嘛的**，用户会以为"难道直接在这渲染图片"。
+          实际用途有两件：① 手动生图（下面那个「生成」按钮，也是唯一能确认 ComfyUI
+          到底通不通的地方）；② 把你在 ComfyUI 里调好的工作流接给 AI 规划时复用。 */}
+      <p className="text-[11px] leading-relaxed text-neutral-500 dark:text-stone-400">
+        {t('modelSettings.comfyui.purpose')}
+      </p>
 
       {/* ① 端点 + checkpoint（内置最小流） */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

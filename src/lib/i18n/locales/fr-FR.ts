@@ -1198,6 +1198,7 @@ export const frFR: Record<string, string> = {
   'modelSettings.mediaBackends.confirmCleanAll': 'Supprimer TOUS les médias ? Irréversible.',
   'modelSettings.mediaBackends.cleaned': '{n} supprimés · {size} libérés',
   'modelSettings.mediaBackends.comfyEndpointFrom': 'Point de terminaison (depuis le panneau Génération locale)',
+  'modelSettings.comfyui.purpose': 'Le canal local pour la generation manuelle et par IA. Definissez l endpoint ci-dessus ; l image produite par Generer sert a prouver que ComfyUI tourne (ce n est pas une surface de dessin). La bibliotheque de workflows transmet vos workflows a l IA.',
   'modelSettings.fallbackModelsHint': 'Modèles de repli (partagés par desktop / mobile / extensions ; repli sur le modèle de conversation si vide)',
   'modelSettings.visionModelLabel': 'Modèle vision',
   'modelSettings.imageModel': 'Modèle de génération d’images',

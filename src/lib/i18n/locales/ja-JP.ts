@@ -1199,6 +1199,7 @@ export const jaJP: Record<string, string> = {
   'modelSettings.mediaBackends.confirmCleanAll': 'すべてのメディアファイルを削除しますか？元に戻せません。',
   'modelSettings.mediaBackends.cleaned': '{n} 件削除 · {size} 解放',
   'modelSettings.mediaBackends.comfyEndpointFrom': 'エンドポイント（「ローカル画像生成」パネルより）',
+  'modelSettings.comfyui.purpose': '手動生成と AI 生成の共通ローカル経路です。上のエンドポイントを設定し、下の「生成」で出る画像は ComfyUI が実際に動いているかの確認用です（作画用ではありません）。ワークフローライブラリは調整済みのワークフローを AI に渡します。',
   'modelSettings.fallbackModelsHint': 'フォールバックモデル（デスクトップ / モバイル / プラグイン共用。空の場合は対話モデルにフォールバック）',
   'modelSettings.visionModelLabel': 'ビジョンモデル',
   'modelSettings.imageModel': '画像生成モデル',
