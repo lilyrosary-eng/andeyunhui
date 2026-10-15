@@ -2005,6 +2005,15 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             ai_service::ai_agent_events,
             ai_service::ai_test_connection,
             ai_service::ai_vision_ocr,
+            // 能力探测 / 访存（caps_probe.rs、image_store.rs）。
+            // ⚠️ 这三组命令在 `mod.rs` 里已 `pub use`，但**必须在这里再列一次**才会被
+            // Tauri 注册 —— 漏了的话前端一点就 "command not found"，而单测（打纯逻辑函数）
+            // 与 tsc（不校验 invoke 字符串）都发现不了。见 `tauriCommands.test.ts` 那道防线。
+            ai_service::ai_probe_vision,
+            ai_service::ai_get_caps_probe_enabled,
+            ai_service::ai_set_caps_probe_enabled,
+            ai_service::ai_media_usage,
+            ai_service::ai_media_cleanup,
             ai_service::translate_text,
             ai_service::ai_ocr_enhance,
             ai_service::ocr_export_pdf,
