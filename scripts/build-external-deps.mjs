@@ -20,14 +20,34 @@ const require = createRequire(import.meta.url);
 // esbuild 将两个路径视为不同模块，导致 redi 重复打包，DI 容器（RediContext）被创建多次，
 // 破坏 Univer 依赖注入，运行时报 "Cannot read properties of undefined (reading 'setConfig')"。
 // 此插件用 require.resolve 获取实际文件路径（跟随符号链接），确保所有 redi 导入统一到同一文件。
+//
+// ⚠️ 2026-10-15：**必须容错解析**（血案见下）。
+//   这个插件只为 **Univer** 服务，而 Univer 目标已不在 `TARGETS` 里；插件却仍挂在**所有**
+//   target 的公共 `plugins:` 上。原实现无条件 `require.resolve`，一旦解析不到就
+//   在第一个 target（codemirror）直接抛错 → **整个 external-deps 构建失败**，
+//   表现为打包时 `[!] external-deps build failed (exit 1)`，
+//   而 `.mujin` 里留下的只是上一次的陈旧 index.js。
+//
+//   为什么"解析不到"是**常态**：本项目在 Windows 上用 `scripts/fix-node-modules.mjs`
+//   把符号链接**实体化**（该脚本自述"this host cannot create working symlinks/junctions"），
+//   顶层 `node_modules/@wendellhu/` 并不存在，只有 `.pnpm/` 虚拟存储里有。
+//   所以这里与下面的 `cmDedupePlugin` 统一口径：**解析不到就跳过**。
+//   （若日后 Univer 目标回归，只要依赖装好，这个去重仍会自动生效。）
 const rediResolvePlugin = {
   name: 'redi-resolve',
   setup(b) {
-    // require.resolve 跟随符号链接，返回实际文件路径（如 .../dist/esm/index.js）
-    const rediMainPath = require.resolve('@wendellhu/redi');
-    const rediReactPath = require.resolve('@wendellhu/redi/react-bindings');
-    b.onResolve({ filter: /^@wendellhu\/redi$/ }, () => ({ path: rediMainPath }));
-    b.onResolve({ filter: /^@wendellhu\/redi\/react-bindings$/ }, () => ({ path: rediReactPath }));
+    const resolved = [];
+    for (const pkg of ['@wendellhu/redi', '@wendellhu/redi/react-bindings']) {
+      try {
+        resolved.push([pkg, require.resolve(pkg)]);
+      } catch {
+        // 未安装则跳过：当前构建目标不需要 redi
+      }
+    }
+    for (const [pkg, realPath] of resolved) {
+      const re = new RegExp('^' + pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+      b.onResolve({ filter: re }, () => ({ path: realPath }));
+    }
   },
 };
 
