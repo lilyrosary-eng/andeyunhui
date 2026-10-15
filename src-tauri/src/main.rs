@@ -2045,7 +2045,6 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ComfyUI 控制面：中断执行 + 模型/自定义节点清单（AI 自建工作流的事实来源）
             multimodal_service::comfyui_interrupt,
             multimodal_service::comfyui_list_models,
-            multimodal_service::comfyui_custom_nodes,
             // ========== 全局：IDE 终端（本地 shell 命令执行）==========
             shell_service::run_shell_command,
             // ========== 全局：AI agent 受限 shell（白名单 + Dry-Run 黑名单 + 超时）==========

@@ -12,7 +12,7 @@
 //
 // 本面板只负责「编辑清单 + 排序路由」，不承载 ComfyUI 工作流库 / 供应商档案的编辑
 // （那些仍在各自面板里），避免职责重复。
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, Eye, RotateCcw, Activity, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -72,6 +72,15 @@ function blankBackend(kind: BackendKind): MediaBackend {
     caps: [],
     extras: {},
   };
+}
+
+/** 人类可读的字节数。用于媒体缓存占用展示。 */
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
 }
 
 export function MediaBackendsPanel({
@@ -154,6 +163,46 @@ export function MediaBackendsPanel({
       setTestMsg({ kind, ok: false, text: String(e) });
     } finally {
       setTesting(null);
+    }
+  };
+
+  // ── 媒体缓存（对话里发的图会落盘，见 image_store.rs）──────────────────────
+  // 这两个命令（ai_media_usage / ai_media_cleanup）之前**只做了后端、没有入口** ——
+  // 属于"半成品"，这里补上另一半。
+  const [usage, setUsage] = useState<{ bytes: number; count: number } | null>(null);
+  const [cacheBusy, setCacheBusy] = useState(false);
+  const [cacheMsg, setCacheMsg] = useState<string | null>(null);
+
+  const refreshUsage = useCallback(async () => {
+    try {
+      setUsage(await invoke<{ bytes: number; count: number }>('ai_media_usage'));
+    } catch {
+      setUsage(null); // 拿不到就显示 —，不编数字
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshUsage();
+  }, [refreshUsage]);
+
+  /** 清理媒体缓存。`days` 为 null = 清空全部。破坏性操作，一律先确认。 */
+  const cleanCache = async (days: number | null) => {
+    const ok = window.confirm(
+      days === null
+        ? t('modelSettings.mediaBackends.confirmCleanAll')
+        : t('modelSettings.mediaBackends.confirmClean', { n: days }),
+    );
+    if (!ok) return;
+    setCacheBusy(true);
+    setCacheMsg(null);
+    try {
+      const r = await invoke<{ removed: number; freed: number }>('ai_media_cleanup', { days });
+      await refreshUsage();
+      setCacheMsg(t('modelSettings.mediaBackends.cleaned', { n: r.removed, size: fmtBytes(r.freed) }));
+    } catch (e) {
+      setCacheMsg(String(e));
+    } finally {
+      setCacheBusy(false);
     }
   };
 
@@ -556,6 +605,40 @@ export function MediaBackendsPanel({
             </div>
           );
         })}
+      </div>
+
+      {/* 媒体缓存占用与清理。放在这里而不是别处：它和上方的媒体后端/能力链同属
+          「媒体」这一件事，用户要找"图存哪了、占多大"时自然往这儿看。 */}
+      <div className="mt-4 pt-3 border-t border-neutral-100 dark:border-stone-800">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[11px] text-neutral-500 dark:text-stone-400">
+            {t('modelSettings.mediaBackends.cache')}
+          </span>
+          <span className="text-[11px] text-neutral-700 dark:text-stone-300 tabular-nums">
+            {usage === null
+              ? '—'
+              : t('modelSettings.mediaBackends.cacheUsage', { n: usage.count, size: fmtBytes(usage.bytes) })}
+          </span>
+          <button
+            onClick={() => void cleanCache(7)}
+            disabled={cacheBusy}
+            className="px-2 py-0.5 rounded text-[10px] border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40"
+          >
+            {t('modelSettings.mediaBackends.clean7d')}
+          </button>
+          <button
+            onClick={() => void cleanCache(null)}
+            disabled={cacheBusy}
+            className="px-2 py-0.5 rounded text-[10px] border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40"
+          >
+            {t('modelSettings.mediaBackends.cleanAll')}
+          </button>
+          {cacheMsg && (
+            <span className="text-[10px] text-neutral-500 dark:text-stone-400 truncate max-w-[280px]" title={cacheMsg}>
+              {cacheMsg}
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );

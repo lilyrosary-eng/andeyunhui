@@ -403,31 +403,11 @@ pub async fn comfyui_list_models(
     resp.json().await.map_err(|e| format!("解析 ComfyUI 模型清单失败: {}", e))
 }
 
-/// 列出 ComfyUI 已安装的**自定义节点包**（`GET /custom_nodes`）。
-///
-/// ⚠️ 安全相关：自定义节点可执行任意 Python。AI 自建工作流前必须先知道现场装了哪些包，
-/// 再按白名单决定能不能用（见工具层的危险节点审计）。
-#[tauri::command]
-pub async fn comfyui_custom_nodes(comfyui_url: String) -> Result<serde_json::Value, String> {
-    let base = comfyui_url.trim().trim_end_matches('/').to_string();
-    if base.is_empty() {
-        return Err("未配置 ComfyUI 地址".to_string());
-    }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("创建请求客户端失败: {}", e))?;
-    let base = resolve_comfy_base(&client, &base).await?;
-    let resp = client
-        .get(format!("{}/custom_nodes", base))
-        .send()
-        .await
-        .map_err(|e| format!("ComfyUI 不可达（{}）: {}", base, e))?;
-    if !resp.status().is_success() {
-        return Err(format!("获取 ComfyUI 自定义节点清单 HTTP {}", resp.status()));
-    }
-    resp.json().await.map_err(|e| format!("解析 ComfyUI 自定义节点清单失败: {}", e))
-}
+// （`comfyui_custom_nodes` 已删除：它是"列出自定义节点包"的对外命令，但
+//  前端早已改用 `/object_info` 自己归纳（`core/ai/media/customNodes.ts` 的
+//  `customModulesOf`），Rust 侧也没有任何内部调用者 —— 是一条彻底的死命令。
+//  2026-10-15 前后端审查查出，连同 tauri 注册一并移除。）
+
 
 /// 提交 API 工作流 → 轮询 /history 出媒体 → 从 /view 取字节 → 媒体 data URL（image/video/gif/audio）。
 /// 本地 SD 出图可能数十秒~数分钟，轮询上限 5 分钟；执行失败（status=error）立即返回，不空等。

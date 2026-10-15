@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText, ShieldAlert, Activity } from 'lucide-react';
+import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText, ShieldAlert, Activity, Square } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { convertGraphToApi } from '@/core/ai/comfyui/convert';
@@ -71,6 +71,19 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
       setConnMsg({ ok: false, text: String(e) });
     } finally {
       setConnBusy(false);
+    }
+  };
+
+  // 中断当前 ComfyUI 执行。
+  // 生图可能跑很久（大模型 + 多步采样），此前生成中按钮是 disabled 的 ——
+  // 也就是说**用户没有任何办法叫停**，只能等着。这里把生成中的按钮改成"中断"。
+  // 后端 `comfyui_interrupt` 早就有了，但一直没有入口（本次审查查出的死命令之一）。
+  const interruptGen = async () => {
+    try {
+      await invoke('comfyui_interrupt', { comfyuiUrl: comfyuiUrl.trim() });
+      setErr(t('modelSettings.comfyui.interrupted'));
+    } catch (e) {
+      setErr(String(e));
     }
   };
 
@@ -271,9 +284,16 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
         <input className={`flex-1 ${inputCls}`} value={cmfyPrompt} placeholder={t('modelSettings.comfyui.promptPlaceholder')}
           onChange={(e) => setCmfyPrompt(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !busy) void quickGenerate(); }} />
-        <button onClick={() => void quickGenerate()} disabled={busy} className={btnCls}>
-          {busy ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-          {busy ? t('modelSettings.comfyui.generating') : t('modelSettings.comfyui.generate')}
+        {/* 生成中 → 这个按钮变成「中断」。刻意不做成两个并排的按钮：位置固定、
+            同一个位置"点下去要么开始要么停止"，比在忙时去找另一个按钮更直接。
+            端点为空时禁用（连不上就没得生成）。 */}
+        <button
+          onClick={() => (busy ? void interruptGen() : void quickGenerate())}
+          disabled={!busy && !comfyuiUrl.trim()}
+          className={btnCls}
+        >
+          {busy ? <Square size={14} /> : <Wand2 size={14} />}
+          {busy ? t('modelSettings.comfyui.interrupt') : t('modelSettings.comfyui.generate')}
         </button>
       </div>
       {err && <div className="text-[11px] text-red-500 whitespace-pre-wrap break-all">{err}</div>}
