@@ -30,6 +30,25 @@ interface WfFile {
   modified_at: number;
 }
 
+/**
+ * ComfyUI 报错的显示文本。
+ *
+ * 原来这里是 `String(e).slice(0, 200)`，**把最要紧的部分砍掉了** ——
+ * ComfyUI 校验失败时真正可操作的信息在 `node_errors.<id>.errors[].details`
+ * （例如 `clip, received_type(MODEL) mismatch input_type(CLIP)`），
+ * 而 200 字符往往刚到 `"node_errors":{"2":{"class_type":"CLIP` 就断了，
+ * 用户只能去翻 ComfyUI 服务端控制台。
+ *
+ * 现在：后端已把消息**按结构**整理成「结论 + 逐节点原因」（见 `format_comfy_submit_error`），
+ * 所以前端只留一个**失控保护**上限；真的超了要**明说**被截断，而不是静默砍掉 ——
+ * 静默截断会让人以为"信息就这些"，于是不知道还该去别处找线索。
+ * （渲染处是 `whitespace-pre-wrap break-all`，长文本正常换行，不会撑坏布局。）
+ */
+function errText(e: unknown, limit = 1000): string {
+  const s = String(e);
+  return s.length > limit ? `${s.slice(0, limit)} …（已截断，完整报错见 ComfyUI 控制台）` : s;
+}
+
 export function ComfyuiPanel({ t }: { t: TFunc }) {
   // ① 内置最小流
   const [comfyuiUrl, setComfyuiUrl] = useState('http://127.0.0.1:8188');
@@ -143,7 +162,7 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     try {
       const dataUrl = await invoke<string>('comfyui_generate_media', { prompt: p, comfyuiUrl, checkpoint: comfyuiCkpt });
       setImg(dataUrl);
-    } catch (e) { setErr(String(e).slice(0, 200)); }
+    } catch (e) { setErr(errText(e)); }
     finally { setBusy(false); }
   };
 
@@ -213,7 +232,7 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
       const finalWf = applyWorkflowParameters(api, params, values, await getObjectInfo(comfyuiUrl).catch(() => undefined));
       const dataUrl = await invoke<string>('comfyui_generate_media', { comfyuiUrl, workflow: finalWf });
       setWfImg(dataUrl);
-    } catch (e) { setWfErr(String(e).slice(0, 200)); }
+    } catch (e) { setWfErr(errText(e)); }
     finally { setWfBusy(false); }
   };
 

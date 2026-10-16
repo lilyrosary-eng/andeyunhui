@@ -196,12 +196,33 @@ pub async fn tts_inner(
 }
 
 /// 标准 SD1.5/SDXL 通用 txt2img 工作流（最小可用集，纯函数便于测试）。
-/// CheckpointLoaderSimple 输出 [MODEL, CLIP, VAE]，索引分别 0/1/2，故 vae 取 ["1",2]。
+///
+/// ## ★ 槽位索引必须逐个核对（血案 2026-10-16）
+///
+/// ComfyUI 是**强类型图**：连线把「某个节点的第 N 个输出」接到「某个输入」，类型不匹配
+/// 就直接 400，且报错在**服务端控制台**（`node_errors` 里只有一句
+/// `Return type mismatch between linked nodes`），前端只看到 `Prompt outputs failed validation`。
+///
+/// 这里的 `["node", slot]` 全部写死，一旦槽位错位**测试若不逐个断言就抓不到**。
+/// 本函数曾把两个 `CLIPTextEncode.clip` 都接到 `["1", 0]`（= **MODEL**），
+/// 而正确值是 `["1", 1]`（= CLIP）——句柄 `vae` 用 `["1",2]` 是对的、`model` 用 `["1",0]`
+/// 也是对的，**唯独 CLIP 那两处错**，所以从外部看"大部分连线都对"，很难怀疑到这里。
+/// 症状：本地生图**永远 400**，ComfyUI 控制台打
+/// `CLIPTextEncode: received_type(MODEL) mismatch input_type(CLIP)`。
+///
+/// ### 用到的输出槽位（改动本函数前请对照核验）
+/// | 节点 | 输出 | 被谁引用 |
+/// |---|---|---|
+/// | CheckpointLoaderSimple | 0=MODEL / 1=CLIP / 2=VAE | `model`←0、两个 `clip`←**1**、`vae`←2 |
+/// | CLIPTextEncode | 0=CONDITIONING | KSampler 的 `positive`/`negative` |
+/// | EmptyLatentImage | 0=LATENT | KSampler 的 `latent_image` |
+/// | KSampler | 0=LATENT | VAEDecode 的 `samples` |
+/// | VAEDecode | 0=IMAGE | SaveImage 的 `images` |
 pub fn build_default_txt2img(prompt: &str, ckpt: &str, seed: u64) -> serde_json::Value {
     serde_json::json!({
         "1": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": ckpt } },
-        "2": { "class_type": "CLIPTextEncode", "inputs": { "text": prompt, "clip": ["1", 0] } },
-        "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "text, watermark, worst quality, low quality, blurry", "clip": ["1", 0] } },
+        "2": { "class_type": "CLIPTextEncode", "inputs": { "text": prompt, "clip": ["1", 1] } },
+        "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "text, watermark, worst quality, low quality, blurry", "clip": ["1", 1] } },
         "4": { "class_type": "EmptyLatentImage", "inputs": { "width": 512, "height": 512, "batch_size": 1 } },
         "5": { "class_type": "KSampler", "inputs": {
             "seed": seed, "steps": 20, "cfg": 8.0,
@@ -267,6 +288,105 @@ pub fn pick_first_media(outputs: &serde_json::Value) -> Option<MediaRef> {
         }
     }
     None
+}
+
+/// 把 ComfyUI 的「提交被拒」响应整理成**可操作**的错误文本。
+///
+/// ## 为什么不能让调用方直接看原 body
+///
+/// ComfyUI 校验失败时返回 400，body 形状是：
+/// ```json
+/// { "error": { "type": "prompt_outputs_failed_validation",
+///              "message": "Prompt outputs failed validation" },
+///   "node_errors": { "2": { "class_type": "CLIPTextEncode",
+///                           "errors": [ { "message": "Return type mismatch between linked nodes",
+///                                         "details": "clip, received_type(MODEL) mismatch input_type(CLIP)" } ] } } }
+/// ```
+/// 真正能指导"该改哪一条连线"的信息全在 `node_errors.<id>.errors[].details` 里。
+///
+/// 而原先的实现是 `body.to_string().chars().take(300)` —— **把整个 body 序列化后砍到 300 字符**。
+/// `error` 那一坨（type/message/details/extra_info）先占满预算，`node_errors` 恰好被砍在中间。
+/// 实测症状（2026-10-16）：界面上只显示到 `"node_errors":{"2":{"class_type":"CLIP`，
+/// 用户只能去翻 ComfyUI 服务端控制台，才看到真正的那句
+/// `clip, received_type(MODEL) mismatch input_type(CLIP)`。
+///
+/// 所以这里**按结构提取**而不是按长度截断：先给结论，再逐节点列出原因（每节点最多 3 条、
+/// 最多列 6 个节点，超出只报个数）。形状不认识时才回落到原文（放宽到 600 字符），
+/// 保证不会比原来更差。
+pub fn format_comfy_submit_error(body: &serde_json::Value, status: Option<u16>) -> String {
+    let mut out = match status {
+        Some(s) => format!("ComfyUI 提交失败 HTTP {}", s),
+        None => "ComfyUI 拒绝了该工作流".to_string(),
+    };
+    let err = body.get("error");
+    let msg = err.and_then(|e| e.get("message")).and_then(|v| v.as_str()).unwrap_or("");
+    let kind = err.and_then(|e| e.get("type")).and_then(|v| v.as_str()).unwrap_or("");
+    let headline = if !msg.is_empty() { msg } else { kind };
+    if !headline.is_empty() {
+        out.push_str(&format!("（{}）", headline));
+    }
+
+    let nodes = match body.get("node_errors").and_then(|v| v.as_object()) {
+        Some(m) if !m.is_empty() => m,
+        _ => {
+            // 形状不认识（或压根没有 node_errors）→ 回落到原文。
+            //
+            // 但若上面已从 `error.message`/`error.type` 拿到可读结论，且 body 里**没有 error
+            // 之外的字段**，就不再把整份 body 倒一遍 —— 那只是把同一句话贴两次。
+            // 一旦存在 error 之外的字段（可能藏着额外线索），仍然完整附上，宁可啰嗦不可漏。
+            let has_more = body
+                .as_object()
+                .map(|o| o.keys().any(|k| k != "error"))
+                .unwrap_or(true);
+            if headline.is_empty() || has_more {
+                let raw = body.to_string();
+                if raw.len() > 2 {
+                    out.push_str(&format!("：{}", raw.chars().take(600).collect::<String>()));
+                }
+            }
+            return out;
+        }
+    };
+
+    // 节点 id 是数字字符串，按数值排更符合直觉（否则 "10" 会排在 "2" 前面）
+    let mut ids: Vec<(&String, &serde_json::Value)> = nodes.iter().collect();
+    ids.sort_by_key(|(id, _)| (id.parse::<u64>().unwrap_or(u64::MAX), (*id).clone()));
+
+    let mut parts: Vec<String> = Vec::new();
+    for (id, node) in ids.iter().take(6) {
+        let ct = node.get("class_type").and_then(|v| v.as_str()).unwrap_or("?");
+        let mut reasons: Vec<String> = Vec::new();
+        if let Some(arr) = node.get("errors").and_then(|v| v.as_array()) {
+            for e in arr.iter().take(3) {
+                let m = e.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let d = e.get("details").and_then(|v| v.as_str()).unwrap_or("");
+                let s = match (m.is_empty(), d.is_empty()) {
+                    (false, false) => format!("{}：{}", m, d),
+                    (false, true) => m.to_string(),
+                    (true, false) => d.to_string(),
+                    (true, true) => continue,
+                };
+                reasons.push(s);
+            }
+        }
+        // 少数版本把原因直接放在节点上，而不是 errors 数组里
+        if reasons.is_empty() {
+            if let Some(m) = node.get("message").and_then(|v| v.as_str()) {
+                reasons.push(m.to_string());
+            }
+        }
+        let detail = if reasons.is_empty() {
+            "（无详情）".to_string()
+        } else {
+            reasons.join("；")
+        };
+        parts.push(format!("节点 {} {} — {}", id, ct, detail));
+    }
+    out.push_str(&format!("。{}", parts.join(" | ")));
+    if ids.len() > 6 {
+        out.push_str(&format!("（另有 {} 个节点报错）", ids.len() - 6));
+    }
+    out
 }
 
 /// 从 history 条目里提取可读的执行失败原因（status.messages 里的 exception_message）。
@@ -430,18 +550,14 @@ async fn run_comfy_workflow(
         .await
         .map_err(|e| format!("解析 ComfyUI 提交响应失败: {}", e))?;
     if !submit_status.is_success() {
-        return Err(format!(
-            "ComfyUI 提交失败 HTTP {}: {}",
-            submit_status,
-            submit_body.to_string().chars().take(300).collect::<String>()
-        ));
+        // 按结构提取（而不是把整个 body 砍 300 字符）—— 见 format_comfy_submit_error 的文档：
+        // 后者会把真正可操作的 `node_errors.<id>.errors[].details` 恰好砍掉。
+        return Err(format_comfy_submit_error(&submit_body, Some(submit_status.as_u16())));
     }
     if let Some(errs) = submit_body.get("node_errors").and_then(|v| v.as_object()) {
         if !errs.is_empty() {
-            return Err(format!(
-                "ComfyUI 工作流节点错误: {}",
-                submit_body["node_errors"].to_string().chars().take(300).collect::<String>()
-            ));
+            // 少数实现即使 2xx 也带 node_errors（校验没过但没改状态码）
+            return Err(format_comfy_submit_error(&submit_body, None));
         }
     }
     let prompt_id = submit_body
@@ -718,12 +834,55 @@ mod tests {
         assert_eq!(obj["1"]["inputs"]["ckpt_name"], "sd_xl_base.safetensors");
         assert_eq!(obj["2"]["class_type"], "CLIPTextEncode");
         assert_eq!(obj["2"]["inputs"]["text"], "a cat");
-        // CheckpointLoaderSimple 输出 [MODEL, CLIP, VAE] → vae 引 ["1",2]
-        assert_eq!(obj["6"]["inputs"]["vae"], serde_json::json!(["1", 2]));
         assert_eq!(obj["5"]["inputs"]["seed"], 42);
         assert_eq!(obj["7"]["class_type"], "SaveImage");
         // 负向提示词固定兜底
         assert!(obj["3"]["inputs"]["text"].as_str().unwrap().contains("worst quality"));
+    }
+
+    /// ★ 逐条断言**所有连线的槽位** —— 这一条才是本地生图那个 400 的回归网。
+    ///
+    /// ComfyUI 是**强类型图**：把某节点的错误输出槽接到某个输入，只会得到服务端一句
+    /// `Return type mismatch between linked nodes: clip, received_type(MODEL) mismatch
+    /// input_type(CLIP)`，而前端拿到的 `error` 里**没有**指向具体槽位的信息
+    /// （只有 `node_errors` 里一句 `class_type`）。所以槽位错位**极难从报错反推**。
+    ///
+    /// 而"只断言其中几条"正是本函数曾经的漏洞来源：`vae` 与 `model` 被断言过，
+    /// 唯独两个 `clip` 漏了 —— 它们一直写着 `["1", 0]`（= **MODEL**），正确值 `["1", 1]`（= CLIP），
+    /// 于是**本地生图每次都 400**，且外部看起来"大部分连线都对"，不会怀疑到这里。
+    ///
+    /// ⇒ 结论：**这类连线的测试必须逐条覆盖，不能只挑几条**。所以本用例把每条链接都钉死，
+    /// 并额外校验"被引用的节点 id 真实存在"。
+    #[test]
+    fn default_txt2img_all_link_slots_are_type_correct() {
+        let wf = build_default_txt2img("p", "ckpt.safetensors", 1);
+        let link = |node: &str, input: &str| wf[node]["inputs"][input].clone();
+
+        // CheckpointLoaderSimple 输出 0=MODEL / 1=CLIP / 2=VAE
+        assert_eq!(
+            link("2", "clip"),
+            serde_json::json!(["1", 1]),
+            "正向 CLIPTextEncode.clip 必须接 CLIP(槽1)，接 MODEL(槽0) 会被 ComfyUI 拒为 400"
+        );
+        assert_eq!(
+            link("3", "clip"),
+            serde_json::json!(["1", 1]),
+            "负向 CLIPTextEncode.clip 同上"
+        );
+        assert_eq!(link("5", "model"), serde_json::json!(["1", 0]), "KSampler.model ← MODEL(槽0)");
+        assert_eq!(link("6", "vae"), serde_json::json!(["1", 2]), "VAEDecode.vae ← VAE(槽2)");
+
+        // 其余连线都取单输出节点的槽 0
+        assert_eq!(link("5", "positive"), serde_json::json!(["2", 0]), "← CLIPTextEncode 的 CONDITIONING");
+        assert_eq!(link("5", "negative"), serde_json::json!(["3", 0]));
+        assert_eq!(link("5", "latent_image"), serde_json::json!(["4", 0]), "← EmptyLatentImage");
+        assert_eq!(link("6", "samples"), serde_json::json!(["5", 0]), "← KSampler");
+        assert_eq!(link("7", "images"), serde_json::json!(["6", 0]), "← VAEDecode");
+
+        // 被引用的节点必须真实存在（防"引用了不存在的 id"，那同样是整单被拒）
+        for id in ["1", "2", "3", "4", "5", "6", "7"] {
+            assert!(wf.get(id).is_some(), "节点 {id} 缺失");
+        }
     }
 
     #[test]
@@ -778,5 +937,65 @@ mod tests {
         assert!(pick_first_media(&out).is_none());
         assert!(pick_first_media(&serde_json::json!({})).is_none());
         assert!(pick_first_media(&serde_json::json!({ "1": { "text": ["x"] } })).is_none());
+    }
+
+    /// ★ 提交被拒时，**必须把 node_errors 里的 details 原样吐出来**。
+    ///
+    /// 这条用**用户实测的真实 body**（2026-10-16，本地生图 400）写。
+    /// 原实现是 `body.to_string().chars().take(300)`：`error` 那坨先占满预算，
+    /// `node_errors` 恰好被砍在 `"class_type":"CLIP` 处 —— 用户只能去翻 ComfyUI
+    /// 服务端控制台才看到 `clip, received_type(MODEL) mismatch input_type(CLIP)`。
+    /// 而那句话才是「该改哪条连线」的唯一线索。
+    #[test]
+    fn 提交错误_提取节点详情而不是截断原body() {
+        let body = serde_json::json!({
+            "error": {
+                "details": "", "extra_info": {},
+                "message": "Prompt outputs failed validation",
+                "type": "prompt_outputs_failed_validation"
+            },
+            "node_errors": {
+                "2": { "class_type": "CLIPTextEncode", "errors": [{
+                    "type": "return_type_mismatch",
+                    "message": "Return type mismatch between linked nodes",
+                    "details": "clip, received_type(MODEL) mismatch input_type(CLIP)"
+                }]},
+                "3": { "class_type": "CLIPTextEncode", "errors": [{
+                    "type": "return_type_mismatch",
+                    "message": "Return type mismatch between linked nodes",
+                    "details": "clip, received_type(MODEL) mismatch input_type(CLIP)"
+                }]}
+            }
+        });
+        let s = format_comfy_submit_error(&body, Some(400));
+        assert!(s.contains("HTTP 400"), "应带状态码：{s}");
+        assert!(s.contains("Prompt outputs failed validation"), "应带结论：{s}");
+        assert!(s.contains("节点 2 CLIPTextEncode"), "应指出是哪个节点：{s}");
+        assert!(s.contains("节点 3 CLIPTextEncode"), "两个节点都要列：{s}");
+        // 这一句是原实现被砍掉的关键信息，必须完整保留（且两处都出现）
+        assert_eq!(
+            s.matches("clip, received_type(MODEL) mismatch input_type(CLIP)").count(),
+            2,
+            "details 必须原样保留且不被截断：{s}"
+        );
+        // 不该把原始 body 倒出来（那正是旧实现的问题：预算被无关字段吃掉）
+        assert!(!s.contains("extra_info"), "不应回吐原始 body 字段：{s}");
+    }
+
+    #[test]
+    fn 提交错误_无节点错误时回落原文() {
+        // 形状不认识（例如网关返回的 `{"error":"bad gateway"}`）→ 至少不能比原来更差
+        let s = format_comfy_submit_error(&serde_json::json!({ "error": "bad gateway" }), Some(502));
+        assert!(s.contains("HTTP 502"));
+        assert!(s.contains("bad gateway"), "回落到原文：{s}");
+    }
+
+    #[test]
+    fn 提交错误_空body不产生多余尾巴() {
+        // 空对象不该拼出「：{}」这种噪音
+        assert_eq!(format_comfy_submit_error(&serde_json::json!({}), Some(400)), "ComfyUI 提交失败 HTTP 400");
+        // 非 2xx 且无 node_errors → 给结论但不宣称是"节点错误"
+        let s = format_comfy_submit_error(&serde_json::json!({ "error": { "message": "boom" } }), None);
+        assert_eq!(s, "ComfyUI 拒绝了该工作流（boom）");
     }
 }
