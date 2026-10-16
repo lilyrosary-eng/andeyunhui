@@ -1187,6 +1187,7 @@ export const deDE: Record<string, string> = {
   'modelSettings.mediaModels.testImageCost': 'Der Bildtest erzeugt tatsächlich ein Bild (evtl. kostenpflichtig). Fortfahren?',
   'modelSettings.comfyui.interrupt': 'Abbrechen',
   'modelSettings.comfyui.interrupted': 'Abbruch angefordert, ComfyUI stoppt',
+  'modelSettings.comfyui.negativePlaceholder': 'Negativ-Prompt (leer = integrierte Qualitaets-Tags). z. B. extra fingers, blurry, watermark',
   'modelSettings.comfyui.connTest': 'Verbindung testen',
   'modelSettings.comfyui.connTesting': 'Verbinde…',
   'modelSettings.comfyui.connOk': 'Verbunden ({n} Knoten)',

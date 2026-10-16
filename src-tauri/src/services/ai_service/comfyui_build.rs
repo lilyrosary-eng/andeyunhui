@@ -271,6 +271,26 @@ fn is_wildcard_type(t: &str) -> bool {
     t == "*" || t.eq_ignore_ascii_case("any")
 }
 
+/// **只能由连线提供**的类型白名单。
+///
+/// 用途：判断某个输入拿到了「数组字面量」时，是不是明显的填错（详见 `compile_graph` 里那段）。
+///
+/// ## 为什么用白名单而不是黑名单
+/// 黑名单（"不是 STRING/INT/FLOAT 就当作连线型"）会把**自定义节点自创的类型名**也算进来 ——
+/// 而那些类型到底能不能吃字面量，我们并不知道。白名单只覆盖 ComfyUI 标准 link 类型，
+/// 不认识的一律放行。**宁可漏判，不可误拒**：误拒会把合法的自定义节点图直接堵死。
+const LINK_ONLY_TYPES: &[&str] = &[
+    "MODEL", "CLIP", "VAE", "CONDITIONING", "LATENT", "IMAGE", "MASK", "CONTROL_NET",
+    "STYLE_MODEL", "CLIP_VISION", "CLIP_VISION_OUTPUT", "GLIGEN", "UPSCALE_MODEL",
+    "SAMPLER", "SIGMAS", "GUIDER", "NOISE", "AUDIO", "VIDEO", "IPADAPTER",
+];
+
+/// 该类型是否「只能由连线提供」。大小写不敏感（自定义节点写法不一致）。
+fn is_link_only_type(t: &str) -> bool {
+    let t = t.trim().to_ascii_uppercase();
+    LINK_ONLY_TYPES.contains(&t.as_str())
+}
+
 /// 中间表示 → ComfyUI 原生 API 格式。
 ///
 /// 输入里 `inputs` 的值有两种：
@@ -370,7 +390,43 @@ pub fn compile_graph(ir: &IrGraph, object_info: Option<&Value>) -> Result<Value,
                     }
                     json!([tid.to_string(), idx])
                 }
-                None => value.clone(),
+                None => {
+                    // ★ 形状校验：声明为「只能连线提供」的输入，拿到了**数组字面量**，但它
+                    //   不是合法的两元素连线（长度 ≠ 2，`as_link` 已经排除了合法连线）。
+                    //   这类值**必然无效** —— ComfyUI 的 MODEL/CONDITIONING/LATENT 这些类型
+                    //   只有“由某个节点的输出经连线送进来”这一种来源，不存在字面量数组写法。
+                    //
+                    //   实测来源（2026-10-16）：本地 9B 模型把 `KSampler.positive` / `negative`
+                    //   写成了 `[]`（空数组）。它一路通过了编译，直到 ComfyUI 抛一句
+                    //   “Prompt outputs failed validation” —— 模型完全无从知道错在哪。
+                    //   在这里挡下并把「要连线、长什么样」说清楚，模型一次就能改对。
+                    //
+                    //   判据保守（三重）：
+                    //     ① 值确实是数组且长度 ≠ 2（长度 2 的由 as_link 处理；长度 2 但首项
+                    //        不是字符串的会落到这里 → 也确实是错的，一并报）
+                    //     ② 有 object_info 且能解析出该输入的声明类型
+                    //     ③ 该类型在白名单 [`LINK_ONLY_TYPES`] 里（不认识的一律放行）
+                    if let (Some(arr), Some(oi)) = (value.as_array(), object_info) {
+                        if arr.len() != 2 {
+                            if let Some(t) = resolve_input_type(oi.get(n.class_type.trim()), name) {
+                                if is_link_only_type(&t) {
+                                    return Err(format!(
+                                        "节点 {}（{}）的输入 {} 需要**连线**（类型 {}），\
+                                         但收到的是一个 {} 元素的数组 —— 这不是合法连线。\
+                                         连线必须写成 [\"对方节点的 key\", 输出序号]，\
+                                         例如 {{\"clip\": [\"ckpt\", 1]}}（输出序号从 0 开始）。",
+                                        n.key,
+                                        n.class_type,
+                                        name,
+                                        t,
+                                        arr.len()
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    value.clone()
+                }
             };
             inputs.insert(name.clone(), compiled);
         }
@@ -607,7 +663,10 @@ mod tests {
             },
             "AnyNode": { "input": { "required": { "anything": ["*", {}] } }, "output": ["*"] },
             // 声明不规范：完全没有 output 字段 → 必须"不判"
-            "LooseNode": { "input": { "required": { "x": ["STRING"] } } }
+            "LooseNode": { "input": { "required": { "x": ["STRING"] } } },
+            // 自创类型名（白名单不认识）→ 数组字面量也必须放行，不能误拒
+            "CustomNode": { "input": { "required": { "weird": ["MY_CUSTOM_TYPE", {}] } },
+                            "output": ["MY_OUT"] }
         })
     }
 
@@ -720,5 +779,75 @@ mod tests {
         assert!(is_wildcard_type("*"));
         assert!(is_wildcard_type(" ANY "));
         assert!(!is_wildcard_type("MODEL"));
+    }
+
+    /// ★ 形状校验：声明为「只能连线提供」的输入拿到了**数组字面量**（长度 ≠ 2）。
+    ///
+    /// 实测来源（2026-10-16）：本地 9B 模型把 `KSampler.positive` / `negative` 写成 `[]`。
+    /// 这类值**必然无效**，却能耗到 ComfyUI 才报错，而那句报错里**没有节点名也没有输入名** ——
+    /// 模型完全无从知道错在哪。这里提前挡下并把"要连线、长什么样"说清楚。
+    #[test]
+    fn 编译_连线型输入给了数组字面量要报错() {
+        for bad in [serde_json::json!([]), serde_json::json!(["a", "b", "c"]), serde_json::json!(["ckpt"])] {
+            let g = ir(json!({ "nodes": [
+                ckpt_node(),
+                { "key": "ks", "class_type": "KSampler", "inputs": {
+                    "model": ["ckpt", 0], "positive": bad, "negative": "n",
+                    "sampler_name": "euler" } }
+            ]}));
+            let e = compile_graph(&g, Some(&oi())).unwrap_err();
+            assert!(e.contains("需要**连线**"), "bad={bad} err={e}");
+            assert!(e.contains("positive"), "必须指明是哪个输入：{e}");
+            assert!(e.contains("CONDITIONING"), "必须指明需要什么类型：{e}");
+        }
+    }
+
+    /// 保守边界：**不是**连线型输入时，数组字面量照旧放行。
+    /// 这条比正例更要紧 —— 白名单认不出来的一律不能拒，否则会堵死自定义节点图。
+    #[test]
+    fn 编译_非连线型输入给数组字面量仍放行() {
+        // ① COMBO（枚举）输入拿到数组字面量：声明第 0 项是数组 → 本来就不判
+        //    （注意这里必须用**合法**的 conditioning 来源，否则会被上面那条**类型**校验先拦下 ——
+        //      实测这份用例第一版就是被它拦的，说明类型校验确实在工作）
+        let g = ir(json!({ "nodes": [
+            ckpt_node(),
+            { "key": "pos", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": ["ckpt", 1] } },
+            { "key": "ks", "class_type": "KSampler", "inputs": {
+                "model": ["ckpt", 0], "positive": ["pos", 0], "negative": ["pos", 0],
+                "sampler_name": ["euler", "ddim"] } }
+        ]}));
+        assert!(compile_graph(&g, Some(&oi())).is_ok(), "COMBO 输入应放行");
+
+        // ② 自创类型名（白名单不认识）→ 放行
+        let g = ir(json!({ "nodes": [
+            { "key": "c", "class_type": "CustomNode", "inputs": { "weird": ["x", "y", "z"] } }
+        ]}));
+        assert!(compile_graph(&g, Some(&oi())).is_ok(), "未知类型应放行");
+
+        // ③ 通配 "*" → 放行
+        let g = ir(json!({ "nodes": [
+            { "key": "a", "class_type": "AnyNode", "inputs": { "anything": ["x", "y", "z"] } }
+        ]}));
+        assert!(compile_graph(&g, Some(&oi())).is_ok(), "通配类型应放行");
+
+        // ④ 没有 object_info → 什么都不判
+        let g = ir(json!({ "nodes": [
+            ckpt_node(),
+            { "key": "ks", "class_type": "KSampler", "inputs": {
+                "model": ["ckpt", 0], "positive": [], "negative": [], "sampler_name": "euler" } }
+        ]}));
+        assert!(compile_graph(&g, None).is_ok(), "无 object_info 应放行");
+    }
+
+    #[test]
+    fn 白名单判据() {
+        assert!(is_link_only_type("CONDITIONING"));
+        assert!(is_link_only_type(" conditioning "), "应去空白且大小写不敏感");
+        assert!(is_link_only_type("LATENT"));
+        assert!(!is_link_only_type("STRING"));
+        assert!(!is_link_only_type("INT"));
+        assert!(!is_link_only_type("*"));
+        assert!(!is_link_only_type("MY_CUSTOM_TYPE"), "认不出来的一律不算，避免误拒");
     }
 }

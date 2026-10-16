@@ -1464,6 +1464,7 @@ export const zhCN: Record<string, string> = {
   'modelSettings.comfyui.purpose': '手动生图 + AI 生图的本地通道。上面配端点，下面「生成」出的图用来**确认 ComfyUI 真的在跑**（不是让你在这儿作图）；「工作流库」把你在 ComfyUI 里调好的工作流接给 AI 复用。',
   'modelSettings.comfyui.interrupt': '中断',
   'modelSettings.comfyui.interrupted': '已请求中断，ComfyUI 正在停止',
+  'modelSettings.comfyui.negativePlaceholder': '负向提示词（留空＝内置质量词）。例：extra fingers, blurry, watermark',
   'modelSettings.comfyui.connTest': '测试连接',
   'modelSettings.comfyui.connTesting': '连接中…',
   'modelSettings.comfyui.connOk': '已连接（{n} 个节点）',

@@ -640,7 +640,7 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
               const promptParam = params.find((p) => p.type === 'string' && (p.name === 'prompt' || p.name.startsWith('prompt')));
               if (!promptParam) throw new Error('该工作流没有可填的提示词参数（未找到 prompt 类文本输入）');
               const finalWf = applyWorkflowParameters(apiWf, params, { [promptParam.name]: prompt }, info);
-              output = await invoke<string>('comfyui_generate_media', { comfyUrl, workflow: finalWf });
+              output = await invoke<string>('comfyui_generate_media', { comfyuiUrl: comfyUrl, workflow: finalWf });
             } else if (comfyUrl && comfyCkpt) {
               output = await invoke<string>('comfyui_generate_media', { prompt, comfyuiUrl: comfyUrl, checkpoint: comfyCkpt });
             } else {

@@ -195,7 +195,17 @@ pub async fn tts_inner(
     Ok(format!("data:audio/mpeg;base64,{}", b64))
 }
 
+/// 内置 txt2img 的**默认负向提示词**。
+///
+/// 调用方不传（或传空白）时用它兜底。之所以要有默认值：负向词写不写、写什么，
+/// 直接决定成图质量（SD 系在没有人像/质量词约束时会显著跑偏），
+/// 而"忘了填"不该等于"没有负向提示"。
+pub const DEFAULT_NEGATIVE_PROMPT: &str = "text, watermark, worst quality, low quality, blurry";
+
 /// 标准 SD1.5/SDXL 通用 txt2img 工作流（最小可用集，纯函数便于测试）。
+///
+/// `negative` 为 `None` 或空白 → 用 [`DEFAULT_NEGATIVE_PROMPT`]；给了就用给的
+/// （**两个词都由调用方掌控**：设置页里用户能改，AI 侧也能通过工具参数改）。
 ///
 /// ## ★ 槽位索引必须逐个核对（血案 2026-10-16）
 ///
@@ -218,11 +228,20 @@ pub async fn tts_inner(
 /// | EmptyLatentImage | 0=LATENT | KSampler 的 `latent_image` |
 /// | KSampler | 0=LATENT | VAEDecode 的 `samples` |
 /// | VAEDecode | 0=IMAGE | SaveImage 的 `images` |
-pub fn build_default_txt2img(prompt: &str, ckpt: &str, seed: u64) -> serde_json::Value {
+pub fn build_default_txt2img(
+    prompt: &str,
+    negative: Option<&str>,
+    ckpt: &str,
+    seed: u64,
+) -> serde_json::Value {
+    let neg = negative
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_NEGATIVE_PROMPT);
     serde_json::json!({
         "1": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": ckpt } },
         "2": { "class_type": "CLIPTextEncode", "inputs": { "text": prompt, "clip": ["1", 1] } },
-        "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "text, watermark, worst quality, low quality, blurry", "clip": ["1", 1] } },
+        "3": { "class_type": "CLIPTextEncode", "inputs": { "text": neg, "clip": ["1", 1] } },
         "4": { "class_type": "EmptyLatentImage", "inputs": { "width": 512, "height": 512, "batch_size": 1 } },
         "5": { "class_type": "KSampler", "inputs": {
             "seed": seed, "steps": 20, "cfg": 8.0,
@@ -634,12 +653,17 @@ async fn run_comfy_workflow(
 /// comfyui_url 形如 http://127.0.0.1:8188；checkpoint 为 ComfyUI models/checkpoints 下的模型文件名。
 /// 轮询上限 5 分钟；执行失败（status=error）立即返回。返回首个媒体输出的 data URL
 /// （图片/视频/GIF/音频均可，content-type 取自 /view 响应；有图优先返图）。
+///
+/// `negative_prompt` 只对**用法①（内置最小 txt2img）**生效：留空用
+/// [`DEFAULT_NEGATIVE_PROMPT`]。用法②（调用方提交完整工作流）里正负提示词都在工作流内，
+/// 由调用方自己写（AI 自建工作流就是自己写 CLIPTextEncode 节点）。
 #[tauri::command]
 pub async fn comfyui_generate_media(
     prompt: Option<String>,
     comfyui_url: String,
     checkpoint: Option<String>,
     workflow: Option<serde_json::Value>,
+    negative_prompt: Option<String>,
 ) -> Result<String, String> {
     let base = comfyui_url.trim().trim_end_matches('/').to_string();
     if base.is_empty() {
@@ -682,7 +706,7 @@ pub async fn comfyui_generate_media(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let wf = build_default_txt2img(&prompt, &ckpt, seed);
+    let wf = build_default_txt2img(&prompt, negative_prompt.as_deref(), &ckpt, seed);
     run_comfy_workflow(&client, &base, &wf).await
 }
 
@@ -827,7 +851,7 @@ mod tests {
 
     #[test]
     fn default_txt2img_shape() {
-        let wf = build_default_txt2img("a cat", "sd_xl_base.safetensors", 42);
+        let wf = build_default_txt2img("a cat", None, "sd_xl_base.safetensors", 42);
         let obj = wf.as_object().unwrap();
         assert_eq!(obj.len(), 7);
         assert_eq!(obj["1"]["class_type"], "CheckpointLoaderSimple");
@@ -855,7 +879,7 @@ mod tests {
     /// 并额外校验"被引用的节点 id 真实存在"。
     #[test]
     fn default_txt2img_all_link_slots_are_type_correct() {
-        let wf = build_default_txt2img("p", "ckpt.safetensors", 1);
+        let wf = build_default_txt2img("p", None, "ckpt.safetensors", 1);
         let link = |node: &str, input: &str| wf[node]["inputs"][input].clone();
 
         // CheckpointLoaderSimple 输出 0=MODEL / 1=CLIP / 2=VAE
@@ -988,6 +1012,29 @@ mod tests {
         let s = format_comfy_submit_error(&serde_json::json!({ "error": "bad gateway" }), Some(502));
         assert!(s.contains("HTTP 502"));
         assert!(s.contains("bad gateway"), "回落到原文：{s}");
+    }
+
+    /// 正负两个词都**由调用方掌控**（设置页里用户改、AI 侧通过工具参数改），
+    /// 但"没传"不能等于"没有负向提示" —— SD 系在缺质量词约束时会明显跑偏。
+    /// 所以这里是三态：给了就用给的、空白回落到默认、默认必须非空。
+    #[test]
+    fn 正负提示词都由调用方决定_留空才用默认() {
+        // 给了就用给的，并落到**各自**的节点（2=正向 / 3=负向）
+        let wf = build_default_txt2img("a red cat", Some("blurry, lowres"), "c.safetensors", 1);
+        assert_eq!(wf["2"]["inputs"]["text"], "a red cat", "正向应落节点 2");
+        assert_eq!(wf["3"]["inputs"]["text"], "blurry, lowres", "负向应落节点 3");
+
+        // 不传 / 传空白 → 内置默认（且默认本身非空，别退化成"没有负向提示"）
+        assert!(!DEFAULT_NEGATIVE_PROMPT.trim().is_empty());
+        for empty in [None, Some(""), Some("   ")] {
+            let wf = build_default_txt2img("x", empty, "c.safetensors", 1);
+            assert_eq!(wf["3"]["inputs"]["text"], DEFAULT_NEGATIVE_PROMPT);
+        }
+
+        // 两侧都 trim（用户/模型常见尾随空白）
+        let wf = build_default_txt2img("  x  ", Some("  ugly  "), "c.safetensors", 1);
+        assert_eq!(wf["2"]["inputs"]["text"], "  x  ", "正向原样保留（不擅自 trim 用户正文）");
+        assert_eq!(wf["3"]["inputs"]["text"], "ugly");
     }
 
     #[test]

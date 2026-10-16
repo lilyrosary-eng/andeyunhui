@@ -1187,6 +1187,7 @@ export const koKR: Record<string, string> = {
   'modelSettings.mediaModels.testImageCost': '이미지 테스트는 실제로 이미지를 생성합니다(과금될 수 있음). 계속할까요?',
   'modelSettings.comfyui.interrupt': '중단',
   'modelSettings.comfyui.interrupted': '중단을 요청했습니다. ComfyUI가 멈추는 중입니다',
+  'modelSettings.comfyui.negativePlaceholder': '네거티브 프롬프트(비우면 내장 품질 태그). 예: extra fingers, blurry, watermark',
   'modelSettings.comfyui.connTest': '연결 테스트',
   'modelSettings.comfyui.connTesting': '연결 중…',
   'modelSettings.comfyui.connOk': '연결됨({n}개 노드)',

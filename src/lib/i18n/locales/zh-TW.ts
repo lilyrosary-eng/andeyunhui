@@ -1190,6 +1190,7 @@ export const zhTW: Record<string, string> = {
   'modelSettings.mediaModels.testImageCost': '生圖測試會真的生成一張圖（可能計費），要繼續嗎？',
   'modelSettings.comfyui.interrupt': '中斷',
   'modelSettings.comfyui.interrupted': '已請求中斷，ComfyUI 正在停止',
+  'modelSettings.comfyui.negativePlaceholder': '負向提示詞（留空＝內建品質詞）。例：extra fingers, blurry, watermark',
   'modelSettings.comfyui.connTest': '測試連線',
   'modelSettings.comfyui.connTesting': '連線中…',
   'modelSettings.comfyui.connOk': '已連線（{n} 個節點）',

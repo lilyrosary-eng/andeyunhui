@@ -54,6 +54,9 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
   const [comfyuiUrl, setComfyuiUrl] = useState('http://127.0.0.1:8188');
   const [comfyuiCkpt, setComfyuiCkpt] = useState('');
   const [cmfyPrompt, setCmfyPrompt] = useState('');
+  // 负向提示词。空 = 用后端内置质量词（见 Rust `DEFAULT_NEGATIVE_PROMPT`）——
+  // 刻意不在这里复制那份文案：留空即默认，两边不会漂移。
+  const [cmfyNegative, setCmfyNegative] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [img, setImg] = useState('');
@@ -138,11 +141,13 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
 
   const saveUrl = (v: string) => { setComfyuiUrl(v); storage.setString(KEYS.ai.comfyuiUrl.key, v); };
   const saveCkpt = (v: string) => { setComfyuiCkpt(v); storage.setString(KEYS.ai.comfyuiCkpt.key, v); };
+  const saveNegative = (v: string) => { setCmfyNegative(v); storage.setString(KEYS.ai.comfyuiNegative.key, v); };
 
   // 读配置（挂载时一次）
   useEffect(() => {
     setComfyuiUrl(storage.getString(KEYS.ai.comfyuiUrl.key, 'http://127.0.0.1:8188'));
     setComfyuiCkpt(storage.getString(KEYS.ai.comfyuiCkpt.key, ''));
+    setCmfyNegative(storage.getString(KEYS.ai.comfyuiNegative.key, ''));
     setWfDir(storage.getString(KEYS.ai.comfyuiWorkflowsDir.key, ''));
     setBlueprintWf(storage.getString(KEYS.ai.comfyuiBlueprintWf.key, ''));
     setBlueprintSlug(storage.getString(KEYS.ai.comfyuiBlueprintWfSlug.key, ''));
@@ -160,7 +165,7 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     if (!p) { setErr(t('modelSettings.comfyui.needPrompt')); return; }
     setBusy(true); setErr(''); setImg('');
     try {
-      const dataUrl = await invoke<string>('comfyui_generate_media', { prompt: p, comfyuiUrl, checkpoint: comfyuiCkpt });
+      const dataUrl = await invoke<string>('comfyui_generate_media', { prompt: p, comfyuiUrl, checkpoint: comfyuiCkpt, negativePrompt: cmfyNegative });
       setImg(dataUrl);
     } catch (e) { setErr(errText(e)); }
     finally { setBusy(false); }
@@ -173,7 +178,7 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
         setWfDir(picked);
         storage.setString(KEYS.ai.comfyuiWorkflowsDir.key, picked);
       }
-    } catch (e) { setWfErr(String(e).slice(0, 150)); }
+    } catch (e) { setWfErr(errText(e)); }
   };
 
   const scan = async () => {
@@ -322,6 +327,11 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
           {busy ? t('modelSettings.comfyui.interrupt') : t('modelSettings.comfyui.generate')}
         </button>
       </div>
+      {/* 负向提示词。单独一行：正向那行右侧是「生成/中断」按钮，塞不下第二个框。
+          留空 = 用后端内置质量词（这里**不复制**那份文案，留空即默认，两边不会漂移）。 */}
+      <input className={inputCls} value={cmfyNegative}
+        placeholder={t('modelSettings.comfyui.negativePlaceholder')}
+        onChange={(e) => saveNegative(e.target.value)} />
       {err && <div className="text-[11px] text-red-500 whitespace-pre-wrap break-all">{err}</div>}
       {img && <MediaOutput src={img} alt={t('modelSettings.comfyui.resultAlt')} className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
 

@@ -3147,7 +3147,15 @@ async fn upload_input_image(cfg: &MediaToolCfg, data_url: &str) -> Result<String
 
 /// 生成图片。`image` 为用户附图（data URL）——给了就是**图生图**：
 /// 先把图上传到 ComfyUI 的 `input/`，再把服务端返回的文件名写进工作流的图片输入位。
-async fn generate_via_comfy(cfg: &MediaToolCfg, prompt: &str, image: Option<&str>) -> Result<String, String> {
+async fn generate_via_comfy(
+    cfg: &MediaToolCfg,
+    prompt: &str,
+    image: Option<&str>,
+    // 负向提示词。**只对内置最小工作流生效** —— 用法②（用户自己的蓝图工作流）里
+    // 正负两个词都写在工作流内部，那是用户调好的东西，不该被这里覆盖。
+    // 调用方在"传了负向词但走的是工作流"时会把这件事说明白，而不是静默丢掉。
+    negative: Option<&str>,
+) -> Result<String, String> {
     if let Some(wf) = &cfg.workflow {
         let mut wf = wf.clone();
         // 提示词写入位：前端解析结果优先，启发式兜底；都找不到必须报错——
@@ -3180,7 +3188,14 @@ async fn generate_via_comfy(cfg: &MediaToolCfg, prompt: &str, image: Option<&str
                 }
             }
         }
-        crate::services::multimodal_service::comfyui_generate_media(None, cfg.base_url.clone(), None, Some(wf)).await
+        crate::services::multimodal_service::comfyui_generate_media(
+            None,
+            cfg.base_url.clone(),
+            None,
+            Some(wf),
+            None, // 工作流自带上面的正负提示词，不在这里覆盖
+        )
+        .await
     } else {
         // 内置最小 txt2img 不吃图片输入——明确报错，别静默把附图丢掉
         if image.is_some() {
@@ -3193,7 +3208,14 @@ async fn generate_via_comfy(cfg: &MediaToolCfg, prompt: &str, image: Option<&str
         if ckpt.is_empty() {
             return Err("已配置 ComfyUI 但未填写 checkpoint 模型文件名（设置 → 模型 → 本地生图）".to_string());
         }
-        crate::services::multimodal_service::comfyui_generate_media(Some(prompt.to_string()), cfg.base_url.clone(), Some(ckpt), None).await
+        crate::services::multimodal_service::comfyui_generate_media(
+            Some(prompt.to_string()),
+            cfg.base_url.clone(),
+            Some(ckpt),
+            None,
+            negative.map(str::to_string),
+        )
+        .await
     }
 }
 
@@ -3215,6 +3237,7 @@ impl AiTool for GenerateImageTool {
                     "properties": {
                         "prompt": { "type": "string", "description": "画面描述（越具体越好：主体、风格、构图、光线等）" },
                         "image": { "type": "integer", "description": "（可选）以用户发来的第几张图为底稿做图生图，从 1 开始。仅当用户明确要求「基于/参照/修改」某张附图时使用；纯文字作画时不要传。" },
+                        "negative": { "type": "string", "description": "（可选）负向提示词——不希望出现的元素/质量缺陷，如「blurry, extra fingers, watermark」。留空则用内置默认质量词（text, watermark, worst quality, low quality, blurry）。当用户抱怨「画崩了/多手指/糊」时，把对应缺陷写进这里再重画，比只改正向提示词有效得多。仅对内置流程有效；若已启用用户自己的 ComfyUI 工作流，工作流内部的负向词不会被覆盖（功能会明确告知）。" },
                         "check": { "type": "string", "description": "（可选）填用户最初的画面要求原文，系统会让视觉模型看一眼成图并指出最该改的 1-3 点。当用户要求「改到满意 / 反复调整」时用它来判断下一步改什么；普通一次成图不要传（会多花一次视觉调用）。" }
                     },
                     "required": ["prompt"]
@@ -3255,11 +3278,19 @@ impl AiTool for GenerateImageTool {
                 }
             }
         };
+        // 负向提示词（可选）。空白一律当"没传"，交给后端回落内置默认 ——
+        // 否则模型随手填个空串就会把默认质量词抹掉，成图质量无端变差。
+        let negative: Option<String> = args
+            .get("negative")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let cfg = ctx.media.image.as_ref().filter(|c| c.is_ready());
         let (data_url, source) = match cfg {
             // comfyui 档：本地工作流 / 内置最小 txt2img
             Some(c) if c.backend_kind == "comfyui" => {
-                match generate_via_comfy(c, &prompt, image_data.as_deref()).await {
+                match generate_via_comfy(c, &prompt, image_data.as_deref(), negative.as_deref()).await {
                     Ok(u) => (u, "comfyui"),
                     // 失败原因带上技能包 slug 前缀（前端据此 append 进该工作流备注）
                     Err(e) => return Err(tag_skill_fail(Some(c), e)),
@@ -3294,6 +3325,9 @@ impl AiTool for GenerateImageTool {
             }
         };
         let used_workflow = cfg.map(|c| c.workflow.is_some()).unwrap_or(false);
+        // 传了负向词、但走的是**用户自己的工作流** → 那个词没有被使用。
+        // 必须说出来：静默忽略会让模型以为"改负向词没用"，从而反复重试同一件事。
+        let neg_ignored = negative.is_some() && used_workflow && source == "comfyui";
         // ⚠️ 必须按 dataURL 的**实际 MIME** 判定，不能无条件当图片：
         //    ComfyUI 工作流可以把视频/音频当输出（data:video/mp4;... 等），
         //    硬编码 card:"image" 会让前端把视频贴进 <img>，显示成一张坏图。
@@ -3305,10 +3339,17 @@ impl AiTool for GenerateImageTool {
         };
         let text = if source == "comfyui" {
             format!(
-                "{}已生成（ComfyUI 本地{}{}），已直接展示给用户，无需转述内容。",
+                "{}已生成（ComfyUI 本地{}{}），已直接展示给用户，无需转述内容。{}",
                 noun,
                 if used_workflow { "工作流" } else { "内置流程" },
-                if image_data.is_some() { "，图生图" } else { "" }
+                if image_data.is_some() { "，图生图" } else { "" },
+                if neg_ignored {
+                    "⚠️ 你这次传的 negative 没有被使用：当前走的是用户自己的 ComfyUI 工作流，\
+                     它内部自带正负提示词。要改负向词，请改用 comfyui_build_workflow 自己搭图\
+                     （在 CLIPTextEncode 节点里写），或请用户换成内置流程。"
+                } else {
+                    ""
+                }
             )
         } else {
             format!("{}已生成（云端图片模型），已直接展示给用户，无需转述画面内容。", noun)
@@ -3941,7 +3982,10 @@ impl AiTool for ComfyuiBuildWorkflowTool {
             ));
         }
         // 提交执行
-        let data_url = crate::services::multimodal_service::comfyui_generate_media(None, base, None, Some(workflow))
+        // 自建工作流里正负提示词都是模型自己写的 CLIPTextEncode 节点，这里不额外传负向词
+        let data_url = crate::services::multimodal_service::comfyui_generate_media(
+            None, base, None, Some(workflow), None,
+        )
             .await?;
         let (card, kind) = media_card_for(&data_url);
         let noun = match card {

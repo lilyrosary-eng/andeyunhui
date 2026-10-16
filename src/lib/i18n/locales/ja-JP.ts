@@ -1187,6 +1187,7 @@ export const jaJP: Record<string, string> = {
   'modelSettings.mediaModels.testImageCost': '画像テストは実際に 1 枚生成します（課金される場合があります）。続行しますか？',
   'modelSettings.comfyui.interrupt': '中断',
   'modelSettings.comfyui.interrupted': '中断を要求しました。ComfyUI が停止中です',
+  'modelSettings.comfyui.negativePlaceholder': 'ネガティブプロンプト（空欄＝内蔵の品質タグ）。例：extra fingers, blurry, watermark',
   'modelSettings.comfyui.connTest': '接続テスト',
   'modelSettings.comfyui.connTesting': '接続中…',
   'modelSettings.comfyui.connOk': '接続済み（{n} ノード）',

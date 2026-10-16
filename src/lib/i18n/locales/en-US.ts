@@ -1259,6 +1259,7 @@ export const enUS: Record<string, string> = {
   'modelSettings.mediaModels.testImageCost': 'The image test will actually generate an image (may be billed). Continue?',
   'modelSettings.comfyui.interrupt': 'Interrupt',
   'modelSettings.comfyui.interrupted': 'Interrupt requested, ComfyUI is stopping',
+  'modelSettings.comfyui.negativePlaceholder': 'Negative prompt (empty = built-in quality tags). e.g. extra fingers, blurry, watermark',
   'modelSettings.comfyui.connTest': 'Test connection',
   'modelSettings.comfyui.connTesting': 'Connecting…',
   'modelSettings.comfyui.connOk': 'Connected ({n} nodes)',
