@@ -18,6 +18,7 @@ import { analyzeWorkflowParameters, applyWorkflowParameters } from '@/core/ai/co
 import { loadSkillNotes, saveSkillNotes, skillSlug, skillSummary } from '@/core/ai/comfyui/skills';
 import { customModulesOf, loadAllowedModules, saveAllowedModules } from '@/core/ai/media/customNodes';
 import { MediaOutput } from '@/components/MediaOutput';
+import { InlineSelect } from '@/components/ui/inline-select';
 import type { Workflow, WorkflowParameter } from '@/core/ai/comfyui/params';
 
 type TFunc = (k: string, vars?: Record<string, string | number>) => string;
@@ -53,6 +54,9 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
   // ① 内置最小流
   const [comfyuiUrl, setComfyuiUrl] = useState('http://127.0.0.1:8188');
   const [comfyuiCkpt, setComfyuiCkpt] = useState('');
+  // 本机 ComfyUI 实际装了哪些 checkpoint。拉不到就退回**自由文本输入** ——
+  // ComfyUI 没开时也要能填/保留一个名字，不能因为拿不到列表就让人没法配置。
+  const [ckptList, setCkptList] = useState<string[]>([]);
   const [cmfyPrompt, setCmfyPrompt] = useState('');
   // 负向提示词。空 = 用后端内置质量词（见 Rust `DEFAULT_NEGATIVE_PROMPT`）——
   // 刻意不在这里复制那份文案：留空即默认，两边不会漂移。
@@ -89,6 +93,7 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     try {
       const info = await getObjectInfo(comfyuiUrl.trim());
       setConnMsg({ ok: true, text: t('modelSettings.comfyui.connOk', { n: Object.keys(info).length }) });
+      void loadCkpts();
     } catch (e) {
       setConnMsg({ ok: false, text: String(e) });
     } finally {
@@ -141,6 +146,15 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
 
   const saveUrl = (v: string) => { setComfyuiUrl(v); storage.setString(KEYS.ai.comfyuiUrl.key, v); };
   const saveCkpt = (v: string) => { setComfyuiCkpt(v); storage.setString(KEYS.ai.comfyuiCkpt.key, v); };
+  /** 拉 checkpoints 列表（失败静默 → 退回自由文本输入）。测试连接成功后也会重新拉一次。 */
+  const loadCkpts = useCallback(async () => {
+    try {
+      const names = await invoke<string[]>('comfyui_list_models', { folder: 'checkpoints' });
+      setCkptList(Array.isArray(names) ? names.filter((x) => typeof x === 'string' && x.trim()) : []);
+    } catch {
+      setCkptList([]);
+    }
+  }, []);
   const saveNegative = (v: string) => { setCmfyNegative(v); storage.setString(KEYS.ai.comfyuiNegative.key, v); };
 
   // 读配置（挂载时一次）
@@ -148,10 +162,12 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     setComfyuiUrl(storage.getString(KEYS.ai.comfyuiUrl.key, 'http://127.0.0.1:8188'));
     setComfyuiCkpt(storage.getString(KEYS.ai.comfyuiCkpt.key, ''));
     setCmfyNegative(storage.getString(KEYS.ai.comfyuiNegative.key, ''));
+    void loadCkpts();
     setWfDir(storage.getString(KEYS.ai.comfyuiWorkflowsDir.key, ''));
     setBlueprintWf(storage.getString(KEYS.ai.comfyuiBlueprintWf.key, ''));
     setBlueprintSlug(storage.getString(KEYS.ai.comfyuiBlueprintWfSlug.key, ''));
-  }, []);
+    // loadCkpts 是 useCallback(…, []) 的稳定引用，进依赖数组不会造成重复执行
+  }, [loadCkpts]);
 
   // 备注防抖保存（400ms；空白=删除）
   useEffect(() => {
@@ -288,7 +304,26 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
         </div>
         <div>
           <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">{t('modelSettings.comfyui.checkpoint')}</label>
-          <input className={`${inputCls} font-mono`} value={comfyuiCkpt} placeholder="sd_xl_base.safetensors" onChange={(e) => saveCkpt(e.target.value)} />
+          {ckptList.length > 0 ? (
+            /* 下拉里只有**真实存在**的模型（来自 ComfyUI 的 /models/checkpoints）。
+               留空 = 自动（列表第一个）；选中 = 指定使用；AI 被点名具体模型时会覆盖这里。
+               要退回"自动"用右侧的 ×。 */
+            <InlineSelect
+              value={comfyuiCkpt}
+              onChange={saveCkpt}
+              onClear={() => saveCkpt('')}
+              clearTitle={t('modelSettings.comfyui.ckptBackToAuto')}
+              title={t('modelSettings.comfyui.ckptHint')}
+              placeholder={t('modelSettings.comfyui.ckptAutoNamed', { name: ckptList[0] })}
+              searchThreshold={8}
+              groups={[{ label: '', options: ckptList.map((n) => ({ value: n, label: n })) }]}
+            />
+          ) : (
+            /* 拉不到列表（ComfyUI 没开 / 没装 checkpoint）→ 保留自由文本，别让人没法配 */
+            <input className={`${inputCls} font-mono`} value={comfyuiCkpt}
+              placeholder={t('modelSettings.comfyui.ckptAuto')}
+              onChange={(e) => saveCkpt(e.target.value)} />
+          )}
         </div>
       </div>
       {/* 连通测试：拉一次 /object_info 就算通了（顺便知道节点数）。

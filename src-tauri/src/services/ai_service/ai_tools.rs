@@ -3155,6 +3155,9 @@ async fn generate_via_comfy(
     // 正负两个词都写在工作流内部，那是用户调好的东西，不该被这里覆盖。
     // 调用方在"传了负向词但走的是工作流"时会把这件事说明白，而不是静默丢掉。
     negative: Option<&str>,
+    // checkpoint 的**本次显式指定**（用户直接对 AI 说"用 xxx 模型画"）。
+    // 优先级：显式指定 > 设置页配置 > 自动（列表第一个）—— 见 `resolve_checkpoint_choice`。
+    ckpt_override: Option<&str>,
 ) -> Result<String, String> {
     if let Some(wf) = &cfg.workflow {
         let mut wf = wf.clone();
@@ -3204,10 +3207,14 @@ async fn generate_via_comfy(
                     .to_string(),
             );
         }
-        let ckpt = cfg.ckpt.trim().to_string();
-        if ckpt.is_empty() {
-            return Err("已配置 ComfyUI 但未填写 checkpoint 模型文件名（设置 → 模型 → 本地生图）".to_string());
-        }
+        // 空串交给后端去"自动挑一个"（列表第一个）—— 这里不再报错。
+        // 报错会让"设置页留空"这种配置直接不能用，而留空的语义就是"自动"。
+        let ckpt = crate::services::multimodal_service::resolve_checkpoint_choice(
+            ckpt_override,
+            Some(cfg.ckpt.as_str()),
+            &[],
+        )
+        .unwrap_or_default();
         crate::services::multimodal_service::comfyui_generate_media(
             Some(prompt.to_string()),
             cfg.base_url.clone(),
@@ -3237,6 +3244,7 @@ impl AiTool for GenerateImageTool {
                     "properties": {
                         "prompt": { "type": "string", "description": "画面描述（越具体越好：主体、风格、构图、光线等）" },
                         "image": { "type": "integer", "description": "（可选）以用户发来的第几张图为底稿做图生图，从 1 开始。仅当用户明确要求「基于/参照/修改」某张附图时使用；纯文字作画时不要传。" },
+                        "checkpoint": { "type": "string", "description": "（可选）指定用哪个 checkpoint 模型文件。**只在用户明确点名了某个模型时**填（如「用 waiIllustriousSDXL 画」），名字必须来自 comfyui_list_models 的返回值原文。留空则由系统按「设置页配置 > 列表第一个」自行选择；用你自己搭图的能力（comfyui_build_workflow）时不需要它。" },
                         "negative": { "type": "string", "description": "（可选）负向提示词——不希望出现的元素/质量缺陷，如「blurry, extra fingers, watermark」。留空则用内置默认质量词（text, watermark, worst quality, low quality, blurry）。当用户抱怨「画崩了/多手指/糊」时，把对应缺陷写进这里再重画，比只改正向提示词有效得多。仅对内置流程有效；若已启用用户自己的 ComfyUI 工作流，工作流内部的负向词不会被覆盖（功能会明确告知）。" },
                         "check": { "type": "string", "description": "（可选）填用户最初的画面要求原文，系统会让视觉模型看一眼成图并指出最该改的 1-3 点。当用户要求「改到满意 / 反复调整」时用它来判断下一步改什么；普通一次成图不要传（会多花一次视觉调用）。" }
                     },
@@ -3278,6 +3286,14 @@ impl AiTool for GenerateImageTool {
                 }
             }
         };
+        // checkpoint 的**本次显式指定**（可选）。只有用户点名某个模型时才该有值；
+        // 空白当"没传"，落到「设置页配置 > 列表第一个」。
+        let ckpt_override: Option<String> = args
+            .get("checkpoint")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         // 负向提示词（可选）。空白一律当"没传"，交给后端回落内置默认 ——
         // 否则模型随手填个空串就会把默认质量词抹掉，成图质量无端变差。
         let negative: Option<String> = args
@@ -3290,7 +3306,15 @@ impl AiTool for GenerateImageTool {
         let (data_url, source) = match cfg {
             // comfyui 档：本地工作流 / 内置最小 txt2img
             Some(c) if c.backend_kind == "comfyui" => {
-                match generate_via_comfy(c, &prompt, image_data.as_deref(), negative.as_deref()).await {
+                match generate_via_comfy(
+                    c,
+                    &prompt,
+                    image_data.as_deref(),
+                    negative.as_deref(),
+                    ckpt_override.as_deref(),
+                )
+                .await
+                {
                     Ok(u) => (u, "comfyui"),
                     // 失败原因带上技能包 slug 前缀（前端据此 append 进该工作流备注）
                     Err(e) => return Err(tag_skill_fail(Some(c), e)),

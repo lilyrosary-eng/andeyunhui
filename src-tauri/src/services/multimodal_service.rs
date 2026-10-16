@@ -202,6 +202,44 @@ pub async fn tts_inner(
 /// 而"忘了填"不该等于"没有负向提示"。
 pub const DEFAULT_NEGATIVE_PROMPT: &str = "text, watermark, worst quality, low quality, blurry";
 
+/// 决定内置流程用哪个 checkpoint。优先级：**显式指定 > 面板配置 > 自动（列表第一个）**。
+///
+/// - `explicit` —— 本次调用的显式指定（AI 通过 `generate_image.checkpoint` 给的）
+/// - `configured` —— 设置页里配的（可为空 = 用户选了"自动"）
+/// - `available` —— ComfyUI 里实际有哪些，**按 ComfyUI 给的顺序**
+///
+/// 空白一律当"没给"：前端把 `''` 传下来时不该被当成"一个名字为空的模型"。
+///
+/// ## 为什么"自动"是取第一个，而不是猜哪个"看起来像 SD 模型"
+/// 名字启发式在本项目已经踩过坑（`caps_infer` 的经历：真实模型集合里名字线索经常全不成立）。
+/// 顺序由 ComfyUI 决定（实测按名称排序），而且**设置页的下拉框会把列表列出来** ——
+/// 自动挑的是哪个一眼可见，觉得不对点一下就能换。宁可"可预测但不一定最优"，
+/// 也不要"猜错了还看不出来"。
+pub fn resolve_checkpoint_choice(
+    explicit: Option<&str>,
+    configured: Option<&str>,
+    available: &[String],
+) -> Option<String> {
+    for cand in [explicit, configured] {
+        if let Some(v) = cand.map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(v.to_string());
+        }
+    }
+    available.first().cloned()
+}
+
+/// 列 ComfyUI 的 checkpoint 文件名（走它自己的 `/models/checkpoints`）。
+/// 失败返回空 —— 调用方据此给出"没有任何 checkpoint"的明确错误，而不是静默瞎猜。
+async fn list_checkpoints(base: &str) -> Vec<String> {
+    match comfyui_list_models(base.to_string(), Some("checkpoints".to_string())).await {
+        Ok(v) => v
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str()).map(str::to_string).collect())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// 标准 SD1.5/SDXL 通用 txt2img 工作流（最小可用集，纯函数便于测试）。
 ///
 /// `negative` 为 `None` 或空白 → 用 [`DEFAULT_NEGATIVE_PROMPT`]；给了就用给的
@@ -694,10 +732,21 @@ pub async fn comfyui_generate_media(
     }
 
     // 用法①：内置最小 txt2img
-    let ckpt = checkpoint.unwrap_or_default().trim().to_string();
-    if ckpt.is_empty() {
-        return Err("未配置 ComfyUI 模型（checkpoint 文件名）".to_string());
-    }
+    //
+    // checkpoint 的优先级：**显式指定 > 面板配置 > 自动（列表第一个）**。
+    // 前端负责前两级（把"面板配置"作为显式值传下来，AI 的显式指定又会覆盖它），
+    // 传空就落到这里走自动 —— 这样"空白则自动选择"在两条路径上口径一致。
+    let ckpt = match checkpoint.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string) {
+        Some(c) => c,
+        None => {
+            let available = list_checkpoints(&base).await;
+            resolve_checkpoint_choice(None, None, &available).ok_or_else(|| {
+                "ComfyUI 里没有任何 checkpoint 模型，无法用内置流程生成。\
+                 请在 ComfyUI 的 models/checkpoints 里放一个模型（或在设置里指定一个）。"
+                    .to_string()
+            })?
+        }
+    };
     let prompt = prompt.unwrap_or_default().trim().to_string();
     if prompt.is_empty() {
         return Err("画图提示词为空".to_string());
@@ -1035,6 +1084,33 @@ mod tests {
         let wf = build_default_txt2img("  x  ", Some("  ugly  "), "c.safetensors", 1);
         assert_eq!(wf["2"]["inputs"]["text"], "  x  ", "正向原样保留（不擅自 trim 用户正文）");
         assert_eq!(wf["3"]["inputs"]["text"], "ugly");
+    }
+
+    /// checkpoint 的优先级：**显式指定 > 面板配置 > 自动（列表第一个）**。
+    /// 这条是用户明确点名的语义（"填入的是指定使用；给 AI 下达确切模型时可以绕过；
+    /// 未指定时用配置的那个"），所以逐档钉住。
+    #[test]
+    fn checkpoint_优先级与自动选择() {
+        let avail = vec!["a.safetensors".to_string(), "b.safetensors".to_string()];
+
+        // 显式（AI 指定 / 本次调用）压过配置
+        assert_eq!(
+            resolve_checkpoint_choice(Some("x.safetensors"), Some("y.safetensors"), &avail).unwrap(),
+            "x.safetensors"
+        );
+        // 没有显式 → 用配置
+        assert_eq!(
+            resolve_checkpoint_choice(None, Some("y.safetensors"), &avail).unwrap(),
+            "y.safetensors"
+        );
+        // 都没有 → 自动取列表第一个
+        assert_eq!(resolve_checkpoint_choice(None, None, &avail).unwrap(), "a.safetensors");
+        // 空白一律当"没给"（前端常把 '' 传下来）——否则会变成"一个名字为空的模型"
+        assert_eq!(resolve_checkpoint_choice(Some("   "), Some(""), &avail).unwrap(), "a.safetensors");
+        // 两侧 trim
+        assert_eq!(resolve_checkpoint_choice(Some(" x.safetensors "), None, &avail).unwrap(), "x.safetensors");
+        // 一个都没有 → None：调用方据此报出明确错误，而不是静默瞎猜
+        assert!(resolve_checkpoint_choice(None, None, &[]).is_none());
     }
 
     #[test]

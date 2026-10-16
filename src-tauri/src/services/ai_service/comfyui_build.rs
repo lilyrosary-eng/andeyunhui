@@ -325,70 +325,88 @@ pub fn compile_graph(ir: &IrGraph, object_info: Option<&Value>) -> Result<Value,
         class_of.insert(key, n.class_type.trim());
     }
     // ② 组装 + 解析连线 + 必填校验
+    //
+    // ★ 错误**一次报全**，不在第一处就返回。
+    //
+    // 为什么：弱模型每轮通常只改一处。若第一处错误就中止，一个 3 处错的图要吃掉它 3 轮
+    // （前端给 agent 的轮次预算是 8，还要分给 node_search / list_models 这些查询）。
+    // 实测（2026-10-16，本地 9B）它正是这样在一轮里塞进 3~5 个工具调用的 —— 轮次很紧。
+    // 所以这里把本节点的每处问题都收进 errs，最后一次性列出。
+    //
+    // 只有「无法继续」的错误才立即返回：空图、key 缺失/重复、class_type 缺失
+    // （上面 ① 已经处理）——那些情况下连节点身份都不成立，继续收集没有意义。
+    let mut errs: Vec<String> = Vec::new();
     let mut out = Map::new();
     for (i, n) in ir.nodes.iter().enumerate() {
         let id = i + 1;
         let mut inputs = Map::new();
         for (name, value) in &n.inputs {
-            let compiled = match as_link(value) {
+            // None = 这个输入有问题（已记进 errs），留空占位即可。
+            // ⚠️ 占位必须插入：否则下面的 `missing_required` 会因为"没这个输入"**再报一次**，
+            //    同一处错误被报两遍反而更难读。
+            let mut compiled: Option<Value> = None;
+            match as_link(value) {
                 Some((target, idx)) => {
                     let target = target.trim();
-                    let tid = id_of.get(target).ok_or_else(|| {
-                        format!("节点 {} 的输入 {} 连到了不存在的节点 key：{}", n.key, name, target)
-                    })?;
-                    if *tid == id {
-                        return Err(format!("节点 {} 的输入 {} 连到了自己", n.key, name));
-                    }
-                    // ★ 连线**类型**校验（软校验，见两个 resolve_* 的文档）。
-                    //
-                    // 为什么必须在提交前做：类型不匹配时 ComfyUI 只回一句
-                    // `Return type mismatch between linked nodes: <输入名>, received_type(A)
-                    // mismatch input_type(B)`，而 `node_errors` 里**没有槽位序号**信息 ——
-                    // 模型很难从这句话反推"该把第几个输出改掉"，于是反复试错。
-                    // 在这里挡下并直接给出「第几个输出 / 是什么类型 / 需要什么类型」，一次就能改对。
-                    //
-                    // 判据刻意保守：任一侧信息不全（无 object_info、没声明 output、
-                    // 输入名不在声明里、COMBO 下拉）就**放行**。宁可漏判，不可误拒 ——
-                    // 误拒会把合法的自定义节点图直接堵死，比漏判糟得多。
-                    if let Some(oi) = object_info {
-                        let src_schema = class_of.get(target).and_then(|c| oi.get(*c));
-                        let dst_schema = oi.get(n.class_type.trim());
-                        let actual = resolve_output_type(src_schema, idx).map_err(|why| {
-                            format!(
-                                "节点 {}（{}）的输入 {} 连到了节点 {}（{}）的第 {} 个输出，但{}",
-                                n.key,
-                                n.class_type,
-                                name,
-                                target,
-                                class_of.get(target).copied().unwrap_or("?"),
-                                idx,
-                                why
-                            )
-                        })?;
-                        let expected = resolve_input_type(dst_schema, name);
-                        if let (Some(actual), Some(expected)) = (actual, expected) {
-                            if !is_wildcard_type(&actual)
-                                && !is_wildcard_type(&expected)
-                                && actual != expected
-                            {
-                                return Err(format!(
-                                    "连线类型不匹配：节点 {}（{}）的输入 {} 需要 {}，\
-                                     但它接到了节点 {}（{}）的第 {} 个输出，那个输出是 {}。\
-                                     请改接该节点提供 {} 的那个输出（槽位序号见 comfyui_node_info 的 output）",
-                                    n.key,
-                                    n.class_type,
-                                    name,
-                                    expected,
-                                    target,
-                                    class_of.get(target).copied().unwrap_or("?"),
-                                    idx,
-                                    actual,
-                                    expected
-                                ));
+                    match id_of.get(target) {
+                        None => errs.push(format!(
+                            "节点 {} 的输入 {} 连到了不存在的节点 key：{}",
+                            n.key, name, target
+                        )),
+                        Some(tid) if *tid == id => {
+                            errs.push(format!("节点 {} 的输入 {} 连到了自己", n.key, name))
+                        }
+                        Some(tid) => {
+                            // ★ 连线**类型**校验（软校验，见两个 resolve_* 的文档）。
+                            //
+                            // 为什么必须在提交前做：类型不匹配时 ComfyUI 只回一句
+                            // `Return type mismatch between linked nodes: <输入名>, received_type(A)
+                            // mismatch input_type(B)`，而 `node_errors` 里**没有槽位序号**信息 ——
+                            // 模型很难从这句话反推"该把第几个输出改掉"，于是反复试错。
+                            // 在这里挡下并直接给出「第几个输出 / 是什么类型 / 需要什么类型」，一次就能改对。
+                            //
+                            // 判据刻意保守：任一侧信息不全（无 object_info、没声明 output、
+                            // 输入名不在声明里、COMBO 下拉）就**放行**。宁可漏判，不可误拒 ——
+                            // 误拒会把合法的自定义节点图直接堵死，比漏判糟得多。
+                            let mut link_ok = true;
+                            if let Some(oi) = object_info {
+                                let src_schema = class_of.get(target).and_then(|c| oi.get(*c));
+                                let dst_schema = oi.get(n.class_type.trim());
+                                match resolve_output_type(src_schema, idx) {
+                                    Err(why) => {
+                                        link_ok = false;
+                                        errs.push(format!(
+                                            "节点 {}（{}）的输入 {} 连到了节点 {}（{}）的第 {} 个输出，但{}",
+                                            n.key, n.class_type, name, target,
+                                            class_of.get(target).copied().unwrap_or("?"), idx, why
+                                        ));
+                                    }
+                                    Ok(actual) => {
+                                        let expected = resolve_input_type(dst_schema, name);
+                                        if let (Some(actual), Some(expected)) = (actual, expected) {
+                                            if !is_wildcard_type(&actual)
+                                                && !is_wildcard_type(&expected)
+                                                && actual != expected
+                                            {
+                                                link_ok = false;
+                                                errs.push(format!(
+                                                    "连线类型不匹配：节点 {}（{}）的输入 {} 需要 {}，\
+                                                     但它接到了节点 {}（{}）的第 {} 个输出，那个输出是 {}。\
+                                                     请改接该节点提供 {} 的那个输出（槽位序号见 comfyui_node_info 的 output）",
+                                                    n.key, n.class_type, name, expected, target,
+                                                    class_of.get(target).copied().unwrap_or("?"),
+                                                    idx, actual, expected
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if link_ok {
+                                compiled = Some(json!([tid.to_string(), idx]));
                             }
                         }
                     }
-                    json!([tid.to_string(), idx])
                 }
                 None => {
                     // ★ 形状校验：声明为「只能连线提供」的输入，拿到了**数组字面量**，但它
@@ -406,33 +424,33 @@ pub fn compile_graph(ir: &IrGraph, object_info: Option<&Value>) -> Result<Value,
                     //        不是字符串的会落到这里 → 也确实是错的，一并报）
                     //     ② 有 object_info 且能解析出该输入的声明类型
                     //     ③ 该类型在白名单 [`LINK_ONLY_TYPES`] 里（不认识的一律放行）
+                    let mut bad_shape = false;
                     if let (Some(arr), Some(oi)) = (value.as_array(), object_info) {
                         if arr.len() != 2 {
                             if let Some(t) = resolve_input_type(oi.get(n.class_type.trim()), name) {
                                 if is_link_only_type(&t) {
-                                    return Err(format!(
+                                    bad_shape = true;
+                                    errs.push(format!(
                                         "节点 {}（{}）的输入 {} 需要**连线**（类型 {}），\
                                          但收到的是一个 {} 元素的数组 —— 这不是合法连线。\
                                          连线必须写成 [\"对方节点的 key\", 输出序号]，\
                                          例如 {{\"clip\": [\"ckpt\", 1]}}（输出序号从 0 开始）。",
-                                        n.key,
-                                        n.class_type,
-                                        name,
-                                        t,
-                                        arr.len()
+                                        n.key, n.class_type, name, t, arr.len()
                                     ));
                                 }
                             }
                         }
                     }
-                    value.clone()
+                    if !bad_shape {
+                        compiled = Some(value.clone());
+                    }
                 }
-            };
-            inputs.insert(name.clone(), compiled);
+            }
+            inputs.insert(name.clone(), compiled.unwrap_or(Value::Null));
         }
         if let Some(schema) = object_info.and_then(|oi| oi.get(n.class_type.trim())) {
             if let Some(missing) = missing_required(schema, &inputs) {
-                return Err(format!(
+                errs.push(format!(
                     "节点 {}（{}）缺少必填输入：{}（可从 comfyui_node_info 查该节点的输入规格）",
                     n.key, n.class_type, missing
                 ));
@@ -442,6 +460,20 @@ pub fn compile_graph(ir: &IrGraph, object_info: Option<&Value>) -> Result<Value,
             id.to_string(),
             json!({ "class_type": n.class_type.trim(), "inputs": inputs }),
         );
+    }
+    if !errs.is_empty() {
+        let head = if errs.len() == 1 {
+            "工作流有 1 处问题：".to_string()
+        } else {
+            format!("工作流有 {} 处问题（一次全部列出，请一并修正后重新调用本工具）：", errs.len())
+        };
+        let body = errs
+            .iter()
+            .enumerate()
+            .map(|(k, e)| format!("{}. {}", k + 1, e))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("{head}\n{body}"));
     }
     Ok(Value::Object(out))
 }
@@ -849,5 +881,46 @@ mod tests {
         assert!(!is_link_only_type("INT"));
         assert!(!is_link_only_type("*"));
         assert!(!is_link_only_type("MY_CUSTOM_TYPE"), "认不出来的一律不算，避免误拒");
+    }
+
+    /// ★ 错误**一次报全**：弱模型每轮通常只改一处，逐处报会白吃它的轮次预算
+    /// （前端给 agent 共 8 轮，还要分给 node_search / list_models 这些查询）。
+    #[test]
+    fn 编译_多处错误一次全部列出() {
+        let g = ir(json!({ "nodes": [
+            ckpt_node(),
+            // ① 连线指向不存在的 key
+            { "key": "a", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": ["nope", 1] } },
+            // ② 类型不匹配（MODEL 接进需要 CLIP 的位置）
+            { "key": "b", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": ["ckpt", 0] } },
+            // ③ 连线型输入给了数组字面量
+            { "key": "c", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": [] } }
+        ]}));
+        let e = compile_graph(&g, Some(&oi())).unwrap_err();
+        assert!(e.contains("3 处问题"), "应报出总数：{e}");
+        assert!(e.contains("不存在的节点 key"), "① 应出现：{e}");
+        assert!(e.contains("类型不匹配"), "② 应出现：{e}");
+        assert!(e.contains("需要**连线**"), "③ 应出现：{e}");
+        // 带序号，便于模型逐条回应
+        assert!(e.contains("1. ") && e.contains("2. ") && e.contains("3. "), "应有编号：{e}");
+    }
+
+    /// 同一处错误**不能报两遍**。
+    /// 坏连线若被留成"没这个输入"，`missing_required` 会跟着再报一条同义的 ——
+    /// 那不是"更全"，只是更吵。所以出错的输入要留占位。
+    #[test]
+    fn 编译_同一处错误不重复报() {
+        let g = ir(json!({ "nodes": [
+            ckpt_node(),
+            { "key": "pos", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": ["nope", 1] } }
+        ]}));
+        let e = compile_graph(&g, Some(&oi())).unwrap_err();
+        assert_eq!(e.matches("不存在的节点 key").count(), 1, "不该重复：{e}");
+        assert!(!e.contains("缺少必填输入"), "坏连线不该再被报成缺必填：{e}");
+        assert!(e.contains("1 处问题"), "只应算一处：{e}");
     }
 }
