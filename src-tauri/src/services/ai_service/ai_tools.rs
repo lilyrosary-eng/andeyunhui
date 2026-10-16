@@ -78,8 +78,13 @@ pub(crate) struct MediaToolCfg {
     pub(crate) base_url: String,
     /// openai 档的直接 api key（前端一般不传，改走 profile_id 由 Rust 解析）。
     pub(crate) api_key: String,
-    /// ComfyUI：checkpoint 模型文件名。
+    /// ComfyUI：checkpoint 模型文件名。**空串是正常值** = 让后端自动挑一个
+    /// （见 `multimodal_service::resolve_checkpoint_choice`）。
     pub(crate) ckpt: String,
+    /// ComfyUI 内置流程的采样参数（采样器/调度器/步数/CFG/尺寸）。
+    /// 来源是「本地生图」面板那一处配置，与面板上手动「生成」用的是同一套 ——
+    /// 否则同一个内建流程会出现"面板里选 dpmpp、让 AI 画却还是 euler"的错位。
+    pub(crate) txt2img: Option<crate::services::multimodal_service::Txt2imgOptions>,
     /// ComfyUI：蓝图工作流文件路径（解析用，传给 Rust 后已转成 workflow）。
     pub(crate) workflow_path: String,
     /// ComfyUI：蓝图指定的 API 工作流（完整节点图）。
@@ -3197,6 +3202,7 @@ async fn generate_via_comfy(
             None,
             Some(wf),
             None, // 工作流自带上面的正负提示词，不在这里覆盖
+            None, // 采样参数也在工作流里
         )
         .await
     } else {
@@ -3221,6 +3227,9 @@ async fn generate_via_comfy(
             Some(ckpt),
             None,
             negative.map(str::to_string),
+            // 采样参数用**设置页配的那套**（AI 生图走的是内置流程，就该跟用户在面板里选的一致）。
+            // 这里没有单独给 AI 开放采样参数 —— 需要精细控制时它该用 comfyui_build_workflow 自己搭图。
+            cfg.txt2img.clone(),
         )
         .await
     }
@@ -4008,7 +4017,7 @@ impl AiTool for ComfyuiBuildWorkflowTool {
         // 提交执行
         // 自建工作流里正负提示词都是模型自己写的 CLIPTextEncode 节点，这里不额外传负向词
         let data_url = crate::services::multimodal_service::comfyui_generate_media(
-            None, base, None, Some(workflow), None,
+            None, base, None, Some(workflow), None, None,
         )
             .await?;
         let (card, kind) = media_card_for(&data_url);

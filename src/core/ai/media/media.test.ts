@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { createStorage, type Storage, type StorageBackend } from '@/core/storage';
-import { isBackendReady, loadBackends, saveBackends, findBackend, BACKENDS_KEY, type MediaBackend } from './backends';
+import { isBackendReady, loadBackends, saveBackends, findBackend, BACKENDS_KEY, effectiveCkpt, effectiveTxt2img, type MediaBackend } from './backends';
 import { KEYS } from '@/core/storage/keys';
 import { resolveBackend, routeFor, loadRoutes, saveRoutes, toMediaToolCfg, defaultRoutes, type MediaRoutes } from './routing';
 
@@ -146,7 +146,10 @@ describe('toMediaToolCfg —— 传给 Rust 的最小配置', () => {
     expect(cfg.backendKind).toBe('comfyui');
     expect(cfg.workflowPath).toBe('D:/w.json');
     expect(cfg.skillSlug).toBe('krea');
-    expect(cfg.ckpt).toBeUndefined();
+    // ⚠️ 语义已变：comfyui 档的 ckpt **恒存在**（来自「本地生图」面板，见 effectiveCkpt），
+    //    空串表示"自动挑一个" —— 所以这里不再是 undefined，而是空串。
+    //    不这么传的话，后端无法区分"没配"与"配了空"。
+    expect(cfg.ckpt).toBe('');
   })
 })
 
@@ -255,3 +258,54 @@ describe('vision 能力位 —— 与 image 是两个方向', () => {
     expect(isBackendReady(b({ id: 's', caps: ['speech'], extras: { profileId: 'p1' } }), 'speech')).toBe(false);
   })
 })
+
+/**
+ * 补充不变量：**内置流程的两组参数都统一取「本地生图」面板那一处**。
+ *
+ * 背景：checkpoint 原先能两处配（媒体后端条目的 `extras.ckpt` 与面板的 `ai.comfyuiCkpt`），
+ * 端点已经统一过、checkpoint 是漏掉的另一半 —— 症状就是「面板里换了模型，
+ * 让 AI 画却还是老模型」。采样参数同理（面板改 dpmpp，AI 那边还是 euler）。
+ */
+describe('effectiveCkpt / effectiveTxt2img —— 统一取「本地生图」面板那一处', () => {
+  const comfy = () => b({ id: 'c', kind: 'comfyui', caps: ['image'], extras: { ckpt: '条目里的.safetensors' } });
+
+  it('comfyui 读面板（不是条目 extras）；其它后端仍读条目', () => {
+    const s = memoryStorage();
+    s.setString(KEYS.ai.comfyuiCkpt.key, '面板里的.safetensors');
+    expect(effectiveCkpt(comfy(), s)).toBe('面板里的.safetensors');
+    expect(effectiveCkpt(b({ id: 'o', extras: { ckpt: '云端条目.safetensors' } }), s)).toBe('云端条目.safetensors');
+  });
+
+  it('checkpoint 为空是**正常值**（= 后端自动挑一个），不该被当成"没配"丢掉', () => {
+    const s = memoryStorage();
+    expect(effectiveCkpt(comfy(), s)).toBe('');
+    // 而 toMediaToolCfg 必须把它照传下去 —— 不传的话后端分不清"没配"与"配了空"
+    const cfg = toMediaToolCfg({ kind: 'image', backend: comfy() } as never);
+    expect('ckpt' in cfg).toBe(true);
+  });
+
+  it('采样参数：解析面板存的 JSON，只带真填了值的键', () => {
+    const s = memoryStorage();
+    s.setString(KEYS.ai.comfyuiBuiltinParams.key, JSON.stringify({ sampler: 'dpmpp_2m', steps: 30 }));
+    expect(effectiveTxt2img(comfy(), s)).toEqual({ sampler: 'dpmpp_2m', steps: 30 });
+  });
+
+  it('采样参数：空 / 坏 JSON / 全空值 一律返回 undefined（= 用后端默认）', () => {
+    const empty = memoryStorage();
+    expect(effectiveTxt2img(comfy(), empty)).toBeUndefined();
+
+    const broken = memoryStorage();
+    broken.setString(KEYS.ai.comfyuiBuiltinParams.key, '{坏掉的 JSON');
+    expect(effectiveTxt2img(comfy(), broken)).toBeUndefined();
+
+    const blanks = memoryStorage();
+    blanks.setString(KEYS.ai.comfyuiBuiltinParams.key, JSON.stringify({ sampler: '  ', steps: null, cfg: '' }));
+    expect(effectiveTxt2img(comfy(), blanks)).toBeUndefined();
+  });
+
+  it('采样参数：非 comfyui 后端不适用', () => {
+    const s = memoryStorage();
+    s.setString(KEYS.ai.comfyuiBuiltinParams.key, JSON.stringify({ steps: 30 }));
+    expect(effectiveTxt2img(b({ id: 'o' }), s)).toBeUndefined();
+  });
+});

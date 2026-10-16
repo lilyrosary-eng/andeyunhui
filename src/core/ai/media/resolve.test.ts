@@ -59,15 +59,18 @@ describe('resolveMediaConfig', () => {
           baseUrl: 'http://127.0.0.1:8188',
           apiKey: '',
           caps: ['image'],
-          extras: { ckpt: 'sd_xl.safetensors', skillSlug: 'krea' },
+          // 条目里**故意留一个不同的 ckpt**：用来证明最终取的是「本地生图」面板那一处，
+          // 而不是这个条目字段（端点也早已统一，见 effectiveBaseUrl / effectiveCkpt）。
+          extras: { ckpt: '条目里的.safetensors', skillSlug: 'krea' },
         },
       ],
       { image: ['comfyui-local'] },
     );
+    mem.set(KEYS.ai.comfyuiCkpt.key, '面板里的.safetensors');
     const m = await resolveMediaConfig();
     expect(m?.image?.backendKind).toBe('comfyui');
     expect(m?.image?.baseUrl).toBe('http://127.0.0.1:8188');
-    expect(m?.image?.ckpt).toBe('sd_xl.safetensors');
+    expect(m?.image?.ckpt).toBe('面板里的.safetensors');
     expect(m?.image?.skillSlug).toBe('krea');
     expect(m?.speech).toBeUndefined(); // 未配置的能力不带键
   });

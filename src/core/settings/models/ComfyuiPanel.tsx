@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText, ShieldAlert, Activity, Square } from 'lucide-react';
+import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText, ShieldAlert, Activity, Square, ChevronDown } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { convertGraphToApi } from '@/core/ai/comfyui/convert';
@@ -57,6 +57,16 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
   // 本机 ComfyUI 实际装了哪些 checkpoint。拉不到就退回**自由文本输入** ——
   // ComfyUI 没开时也要能填/保留一个名字，不能因为拿不到列表就让人没法配置。
   const [ckptList, setCkptList] = useState<string[]>([]);
+
+  // ── 高级参数（可选）──────────────────────────────────────────────
+  // 内建流程原先把这些**全部写死**（euler / normal / 20 步 / CFG 8.0 / 512×512），
+  // 用户一样都改不了 —— 与"负向词写死""checkpoint 只能手打"是同一类问题的三个面。
+  // 各项留空 = 用后端默认（不落盘空值，避免把"没填"和"填了空"混在一起）。
+  const [advOpen, setAdvOpen] = useState(false);
+  const [tiParams, setTiParams] = useState<Record<string, string>>({});
+  // 采样器/调度器的候选值来自运行中的 ComfyUI（object_info 的 KSampler）。
+  // null = 还没拉；空数组 = 拉了但拿不到（退化成自由输入）。
+  const [enums, setEnums] = useState<{ sampler: string[]; scheduler: string[] } | null>(null);
   const [cmfyPrompt, setCmfyPrompt] = useState('');
   // 负向提示词。空 = 用后端内置质量词（见 Rust `DEFAULT_NEGATIVE_PROMPT`）——
   // 刻意不在这里复制那份文案：留空即默认，两边不会漂移。
@@ -94,6 +104,20 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
       const info = await getObjectInfo(comfyuiUrl.trim());
       setConnMsg({ ok: true, text: t('modelSettings.comfyui.connOk', { n: Object.keys(info).length }) });
       void loadCkpts();
+    try {
+      const raw = storage.getString(KEYS.ai.comfyuiBuiltinParams.key, '');
+      if (raw.trim()) {
+        const o = JSON.parse(raw) as Record<string, unknown>;
+        const out: Record<string, string> = {};
+        for (const k of ['sampler', 'scheduler', 'steps', 'cfg', 'width', 'height']) {
+          const v = o?.[k];
+          if (typeof v === 'string' || typeof v === 'number') out[k] = String(v);
+        }
+        setTiParams(out);
+      }
+    } catch {
+      /* 存坏了就当没配 —— 不该因为一个 JSON 解析失败让面板崩掉 */
+    }
     } catch (e) {
       setConnMsg({ ok: false, text: String(e) });
     } finally {
@@ -146,6 +170,50 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
 
   const saveUrl = (v: string) => { setComfyuiUrl(v); storage.setString(KEYS.ai.comfyuiUrl.key, v); };
   const saveCkpt = (v: string) => { setComfyuiCkpt(v); storage.setString(KEYS.ai.comfyuiCkpt.key, v); };
+  /** 存高级参数。空值不落盘 —— 留空的语义是"用后端默认"，落空串会把它变成"填了个空值"。 */
+  const saveParam = (k: string, v: string) => {
+    const next = { ...tiParams, [k]: v };
+    setTiParams(next);
+    const clean: Record<string, string | number> = {};
+    for (const [key, val] of Object.entries(next)) {
+      const s = (val ?? '').trim();
+      if (!s) continue;
+      if (key === 'sampler' || key === 'scheduler') clean[key] = s;
+      else {
+        const n = Number(s);
+        clean[key] = Number.isFinite(n) ? n : s;
+      }
+    }
+    storage.setString(KEYS.ai.comfyuiBuiltinParams.key, Object.keys(clean).length ? JSON.stringify(clean) : '');
+  };
+
+  /**
+   * 展开「高级参数」时**才**拉 object_info 取采样器/调度器枚举。
+   *
+   * 为什么懒加载：那份响应 6MB（3581 个节点）。打开设置页就拉一次是白白浪费，
+   * 而真正需要它的人会点开这个区块。失败就退化成自由输入，不影响主流程。
+   */
+  const toggleAdvanced = async () => {
+    const next = !advOpen;
+    setAdvOpen(next);
+    if (!next || enums) return;
+    try {
+      const info = (await getObjectInfo(comfyuiUrl.trim())) as Record<string, unknown>;
+      const ksampler = info?.KSampler as Record<string, unknown> | undefined;
+      const required = (ksampler?.input as Record<string, unknown> | undefined)?.required as
+        | Record<string, unknown>
+        | undefined;
+      const listOf = (key: string): string[] => {
+        const spec = required?.[key];
+        const first = Array.isArray(spec) ? spec[0] : undefined;
+        return Array.isArray(first) ? first.filter((x): x is string => typeof x === 'string') : [];
+      };
+      setEnums({ sampler: listOf('sampler_name'), scheduler: listOf('scheduler') });
+    } catch {
+      setEnums({ sampler: [], scheduler: [] });
+    }
+  };
+
   /** 拉 checkpoints 列表（失败静默 → 退回自由文本输入）。测试连接成功后也会重新拉一次。 */
   const loadCkpts = useCallback(async () => {
     try {
@@ -181,7 +249,18 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     if (!p) { setErr(t('modelSettings.comfyui.needPrompt')); return; }
     setBusy(true); setErr(''); setImg('');
     try {
-      const dataUrl = await invoke<string>('comfyui_generate_media', { prompt: p, comfyuiUrl, checkpoint: comfyuiCkpt, negativePrompt: cmfyNegative });
+      // 高级参数只在真填了值时下发（留空 = 后端默认）
+      const opts: Record<string, string | number> = {};
+      for (const [k, v] of Object.entries(tiParams)) {
+        const s = (v ?? '').trim();
+        if (!s) continue;
+        const n = Number(s);
+        opts[k] = (k === 'sampler' || k === 'scheduler') ? s : (Number.isFinite(n) ? n : s);
+      }
+      const dataUrl = await invoke<string>('comfyui_generate_media', {
+        prompt: p, comfyuiUrl, checkpoint: comfyuiCkpt, negativePrompt: cmfyNegative,
+        ...(Object.keys(opts).length ? { options: opts } : {}),
+      });
       setImg(dataUrl);
     } catch (e) { setErr(errText(e)); }
     finally { setBusy(false); }
@@ -367,6 +446,60 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
       <input className={inputCls} value={cmfyNegative}
         placeholder={t('modelSettings.comfyui.negativePlaceholder')}
         onChange={(e) => saveNegative(e.target.value)} />
+
+      {/* 高级参数。默认折叠 —— 大多数人不用动，但"动不了"和"能改但收着"是两回事。
+          ⚠️ 采样器/调度器的候选值来自运行中的 ComfyUI（展开时才拉，那份 object_info 有 6MB）。
+          拉不到就退化成自由输入，不挡流程。 */}
+      <button
+        onClick={() => void toggleAdvanced()}
+        className="flex items-center gap-1 text-[11px] text-neutral-500 dark:text-stone-400 hover:text-neutral-700 dark:hover:text-stone-200"
+      >
+        <ChevronDown size={12} className={`transition-transform ${advOpen ? 'rotate-180' : ''}`} />
+        {t('modelSettings.comfyui.advTitle')}
+      </button>
+      {advOpen && (
+        <div className="grid grid-cols-3 gap-2">
+          {(['sampler', 'scheduler'] as const).map((k) => {
+            const list = enums?.[k] ?? [];
+            const label = t(`modelSettings.comfyui.adv${k === 'sampler' ? 'Sampler' : 'Scheduler'}`);
+            return (
+              <div key={k}>
+                <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">{label}</label>
+                {list.length > 0 ? (
+                  <InlineSelect
+                    value={tiParams[k] ?? ''}
+                    onChange={(v) => saveParam(k, v)}
+                    onClear={() => saveParam(k, '')}
+                    clearTitle={t('modelSettings.comfyui.advDefault')}
+                    placeholder={t('modelSettings.comfyui.advDefault')}
+                    searchThreshold={8}
+                    groups={[{ label: '', options: list.map((n) => ({ value: n, label: n })) }]}
+                  />
+                ) : (
+                  <input className={inputCls} value={tiParams[k] ?? ''}
+                    placeholder={t('modelSettings.comfyui.advDefault')}
+                    onChange={(e) => saveParam(k, e.target.value)} />
+                )}
+              </div>
+            );
+          })}
+          {([
+            ['steps', 'advSteps', '1'],
+            ['cfg', 'advCfg', '0.1'],
+            ['width', 'advWidth', '8'],
+            ['height', 'advHeight', '8'],
+          ] as const).map(([k, labelKey, step]) => (
+            <div key={k}>
+              <label className="block text-[11px] text-neutral-500 dark:text-stone-400 mb-1.5 font-medium">
+                {t(`modelSettings.comfyui.${labelKey}`)}
+              </label>
+              <input className={inputCls} type="number" step={step} value={tiParams[k] ?? ''}
+                placeholder={t('modelSettings.comfyui.advDefault')}
+                onChange={(e) => saveParam(k, e.target.value)} />
+            </div>
+          ))}
+        </div>
+      )}
       {err && <div className="text-[11px] text-red-500 whitespace-pre-wrap break-all">{err}</div>}
       {img && <MediaOutput src={img} alt={t('modelSettings.comfyui.resultAlt')} className="max-h-64 rounded-lg border border-neutral-200 dark:border-stone-700" />}
 

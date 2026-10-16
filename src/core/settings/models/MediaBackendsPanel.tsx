@@ -26,7 +26,7 @@ import {
   type MediaKind,
 } from '@/core/ai/media/backends';
 import { loadRoutes, saveRoutes, routeFor, defaultRoutes, type MediaRoutes } from '@/core/ai/media/routing';
-import { effectiveBaseUrl } from '@/core/ai/media/backends';
+import { effectiveBaseUrl, effectiveCkpt } from '@/core/ai/media/backends';
 import { InlineSelect } from '@/components/ui/inline-select';
 import { resetMediaConfig } from '@/core/ai/media/migrate';
 import type { MediaModelsUi, ProviderUi } from '../aiConfigCodec';
@@ -368,13 +368,17 @@ export function MediaBackendsPanel({
                   </div>
                 </div>
                 <div>
-                  <label className={labelCls}>Checkpoint（内置流用）</label>
-                  <input
-                    className={inputCls}
-                    value={b.extras.ckpt ?? ''}
-                    onChange={(e) => updateExtras(b.id, { ckpt: e.target.value })}
-                    placeholder="sd_xl_base_1.0.safetensors"
-                  />
+                  {/* ★ checkpoint **不在这里配** —— 统一取「本地生图」面板那一处（`ai.comfyuiCkpt`）。
+                      以前两处都能填，改了其中一个另一个不跟着变 → 「面板里换了模型、让 AI 画却还是老模型」。
+                      端点已经统一过，这里是漏掉的另一半（见 effectiveCkpt）。
+                      空 = 自动（后端会挑列表第一个），所以空态也要显示成一句人话而不是空白。 */}
+                  <label className={labelCls}>{t('modelSettings.mediaBackends.comfyCkptFrom')}</label>
+                  <div
+                    className="px-3 py-2 rounded-lg text-xs font-mono truncate bg-neutral-50 dark:bg-stone-800/60 border border-dashed border-neutral-200 dark:border-stone-700 text-neutral-500 dark:text-stone-400"
+                    title={effectiveCkpt(b) || t('modelSettings.mediaBackends.ckptAuto')}
+                  >
+                    {effectiveCkpt(b) || t('modelSettings.mediaBackends.ckptAuto')}
+                  </div>
                 </div>
                 <div>
                   <label className={labelCls}>蓝图工作流路径（可选）</label>

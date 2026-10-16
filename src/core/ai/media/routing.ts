@@ -11,7 +11,7 @@
  * 纯函数，Storage 注入可测。
  */
 import { storage, type Storage } from '@/core/storage';
-import { ROUTES_KEY, loadBackends, isBackendReady, effectiveBaseUrl, type MediaBackend, type MediaKind, ALL_KINDS } from './backends';
+import { ROUTES_KEY, loadBackends, isBackendReady, effectiveBaseUrl, effectiveCkpt, effectiveTxt2img, type MediaBackend, type MediaKind, ALL_KINDS } from './backends';
 
 /** 路由表：能力 → 有序后端 id 列表。未列出的能力视为「无后端」。 */
 export type MediaRoutes = Partial<Record<MediaKind, string[]>>;
@@ -103,7 +103,11 @@ export function toMediaToolCfg(r: ResolvedBackend): MediaToolCfg {
     // ComfyUI 统一取「本地生图」面板的端点（见 effectiveBaseUrl）；其它后端用条目自己的。
     baseUrl: effectiveBaseUrl(b),
     apiKey: b.apiKey.trim(),
-    ...(b.extras.ckpt?.trim() ? { ckpt: b.extras.ckpt.trim() } : {}),
+    // checkpoint 与采样参数同样统一取「本地生图」面板那一处（见 effectiveCkpt / effectiveTxt2img）。
+    // ⚠️ comfyui 档**总是**带上 ckpt（哪怕是空串）：空串是"自动挑一个"的正常值，
+    //    不传的话后端分不清"没配"与"配了空"。其它后端沿用旧口径 —— 空就不带。
+    ...(b.kind === 'comfyui' || effectiveCkpt(b) ? { ckpt: effectiveCkpt(b) } : {}),
+    ...(effectiveTxt2img(b) ? { txt2img: effectiveTxt2img(b) } : {}),
     ...(b.extras.workflowPath?.trim() ? { workflowPath: b.extras.workflowPath.trim() } : {}),
     ...(b.extras.skillSlug?.trim() ? { skillSlug: b.extras.skillSlug.trim() } : {}),
     ...(b.extras.models?.[r.kind]?.trim() ? { model: b.extras.models[r.kind]!.trim() } : {}),

@@ -56,6 +56,7 @@ export const KEYS = {
     comfyuiUrl:        { key: 'ai.comfyuiUrl', kind: 'string', scope: 'desktop', default: 'http://127.0.0.1:8188', note: 'ComfyUI 本地生图端点' },
     comfyuiCkpt:       { key: 'ai.comfyuiCkpt', kind: 'string', scope: 'desktop', default: '', note: 'ComfyUI checkpoint 模型文件名（models/checkpoints 下）' },
     comfyuiNegative:   { key: 'ai.comfyuiNegative', kind: 'string', scope: 'desktop', default: '', note: 'ComfyUI 内置流程的负向提示词（空＝用后端内置质量词）' },
+    comfyuiBuiltinParams: { key: 'ai.comfyuiBuiltinParams', kind: 'string', scope: 'desktop', default: '', note: 'ComfyUI 内置流程的采样参数（JSON：sampler/scheduler/steps/cfg/width/height；留空的项用后端默认）' },
     comfyuiWorkflowsDir: { key: 'ai.comfyuiWorkflowsDir', kind: 'string', scope: 'desktop', default: '', note: 'ComfyUI 工作流目录（user/default/workflows 或 userdata/workflows）' },
     comfyuiBlueprintWf: { key: 'ai.comfyuiBlueprintWf', kind: 'string', scope: 'desktop', default: '', note: '蓝图生图节点使用的 ComfyUI 工作流文件路径（空=用内置最小流/云端）' },
     comfyuiBlueprintWfSlug: { key: 'ai.comfyuiBlueprintWfSlug', kind: 'string', scope: 'desktop', default: '', note: '蓝图工作流的技能包 slug（备注键，随 comfyuiBlueprintWf 一起设置）' },

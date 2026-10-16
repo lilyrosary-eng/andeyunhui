@@ -73,6 +73,53 @@ export interface MediaBackend {
  * 自用是单机单实例（已与用户确认「就一台」），不需要两处各配一个，所以合并到面板。
  * 条目自己的 `baseUrl` 对 ComfyUI **不再生效**（字段保留以兼容旧数据，不读它）。
  */
+/**
+ * 某个后端**实际使用的 checkpoint** —— ComfyUI 统一取「本地生图」面板那一处。
+ *
+ * 与 `effectiveBaseUrl` 同一个理由、同一个病：checkpoint 原先也能两处配
+ * （媒体后端条目的 `extras.ckpt` 与 ComfyUI 面板的 `ai.comfyuiCkpt`），
+ * 改了其中一个另一个不跟着变 → 「面板里改了模型，让 AI 画却还是老模型」。
+ * 端点已经统一过，这一处是漏掉的那半。
+ *
+ * 返回空串是**正常值**：语义是"自动挑一个"（见 Rust `resolve_checkpoint_choice`）。
+ */
+export function effectiveCkpt(b: MediaBackend, s: Storage = storage): string {
+  if (b.kind === 'comfyui') {
+    return s.getString(KEYS.ai.comfyuiCkpt.key, KEYS.ai.comfyuiCkpt.default).trim();
+  }
+  return (b.extras.ckpt ?? '').trim();
+}
+
+/** 内置流程可调参数的键（与 Rust `Txt2imgOptions` 的字段一一对应）。 */
+const TXT2IMG_KEYS = ['sampler', 'scheduler', 'steps', 'cfg', 'width', 'height'] as const;
+
+/**
+ * ComfyUI 内置流程的采样参数（存在「本地生图」面板那一处）。非 comfyui 或没配 → undefined。
+ *
+ * 解析失败一律返回 undefined（= 用后端默认）：**坏 JSON 不该让整条生图链挂掉**。
+ */
+export function effectiveTxt2img(
+  b: MediaBackend,
+  s: Storage = storage,
+): Record<string, string | number> | undefined {
+  if (b.kind !== 'comfyui') return undefined;
+  const raw = s.getString(KEYS.ai.comfyuiBuiltinParams.key, '').trim();
+  if (!raw) return undefined;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const out: Record<string, string | number> = {};
+    for (const k of TXT2IMG_KEYS) {
+      const v = o?.[k];
+      // 只带"真的填了值"的键；留空 = 后端用默认（与面板上留空的语义一致）
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+      else if (typeof v === 'string' && v.trim()) out[k] = v.trim();
+    }
+    return Object.keys(out).length ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function effectiveBaseUrl(b: MediaBackend, s: Storage = storage): string {
   if (b.kind === 'comfyui') {
     return s.getString(KEYS.ai.comfyuiUrl.key, KEYS.ai.comfyuiUrl.default).trim();

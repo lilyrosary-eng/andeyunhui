@@ -202,6 +202,36 @@ pub async fn tts_inner(
 /// 而"忘了填"不该等于"没有负向提示"。
 pub const DEFAULT_NEGATIVE_PROMPT: &str = "text, watermark, worst quality, low quality, blurry";
 
+/// 内置 txt2img 的**默认采样参数**（也作为设置页的初始/回退值）。
+///
+/// 这些值原先全部**写死在 json! 里**，用户与 AI 都改不了 —— 与"负向词写死"、
+/// "checkpoint 只能手打"是同一类问题的三个面。现在它们都能被调用方覆盖。
+pub const DEFAULT_STEPS: u32 = 20;
+pub const DEFAULT_CFG: f64 = 8.0;
+pub const DEFAULT_SAMPLER: &str = "euler";
+pub const DEFAULT_SCHEDULER: &str = "normal";
+pub const DEFAULT_WIDTH: u32 = 512;
+pub const DEFAULT_HEIGHT: u32 = 512;
+
+/// 内置 txt2img 的**可调采样参数**。全部 `Option`：`None`/空白 = 用上面的默认值。
+///
+/// `serde(rename_all = "camelCase")`：Tauri 的命令参数一律按 camelCase 收
+/// （`tauri-macros` 的默认 `ArgumentCase::Camel`），嵌套结构体也一样，
+/// 所以前端传 `{ sampler, scheduler, steps, cfg, width, height }`。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Txt2imgOptions {
+    pub sampler: Option<String>,
+    pub scheduler: Option<String>,
+    /// 采样步数。越界会被**收敛**而不是报错（见 `build_default_txt2img`）。
+    pub steps: Option<u32>,
+    pub cfg: Option<f64>,
+    /// 尺寸。同样会被收敛并**对齐到 8 的倍数** —— SD 系要求 latent 尺寸可被 8 整除，
+    /// 不给对齐的话用户填个 513 就会拿到一个看不懂的失败。
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
 /// 决定内置流程用哪个 checkpoint。优先级：**显式指定 > 面板配置 > 自动（列表第一个）**。
 ///
 /// - `explicit` —— 本次调用的显式指定（AI 通过 `generate_image.checkpoint` 给的）
@@ -271,19 +301,46 @@ pub fn build_default_txt2img(
     negative: Option<&str>,
     ckpt: &str,
     seed: u64,
+    opts: &Txt2imgOptions,
 ) -> serde_json::Value {
     let neg = negative
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_NEGATIVE_PROMPT);
+
+    // 采样参数：空白用默认；数值做**收敛**而不是报错 —— 填个 0 步或 9999 像素，
+    // 让它在提交前变成合法值，比让 ComfyUI 回一句 "Prompt outputs failed validation" 有用得多。
+    let sampler = opts
+        .sampler
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_SAMPLER);
+    let scheduler = opts
+        .scheduler
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_SCHEDULER);
+    let steps = opts.steps.unwrap_or(DEFAULT_STEPS).clamp(1, 150);
+    // CFG 允许 0（等价于关闭引导，某些蒸馏/LCM 模型确实这么用），上界给到 30 够用。
+    let cfg = opts.cfg.unwrap_or(DEFAULT_CFG).clamp(0.0, 30.0);
+    let align8 = |v: u32| {
+        let v = v.clamp(64, 4096);
+        // 就近对齐到 8 的倍数（SD 系对 latent 尺寸的这个要求是硬性的）
+        ((v + 4) / 8 * 8).clamp(64, 4096)
+    };
+    let width = align8(opts.width.unwrap_or(DEFAULT_WIDTH));
+    let height = align8(opts.height.unwrap_or(DEFAULT_HEIGHT));
+
     serde_json::json!({
         "1": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": ckpt } },
         "2": { "class_type": "CLIPTextEncode", "inputs": { "text": prompt, "clip": ["1", 1] } },
         "3": { "class_type": "CLIPTextEncode", "inputs": { "text": neg, "clip": ["1", 1] } },
-        "4": { "class_type": "EmptyLatentImage", "inputs": { "width": 512, "height": 512, "batch_size": 1 } },
+        "4": { "class_type": "EmptyLatentImage", "inputs": { "width": width, "height": height, "batch_size": 1 } },
         "5": { "class_type": "KSampler", "inputs": {
-            "seed": seed, "steps": 20, "cfg": 8.0,
-            "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0,
+            "seed": seed, "steps": steps, "cfg": cfg,
+            "sampler_name": sampler, "scheduler": scheduler, "denoise": 1.0,
             "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["4", 0]
         } },
         "6": { "class_type": "VAEDecode", "inputs": { "samples": ["5", 0], "vae": ["1", 2] } },
@@ -702,6 +759,10 @@ pub async fn comfyui_generate_media(
     checkpoint: Option<String>,
     workflow: Option<serde_json::Value>,
     negative_prompt: Option<String>,
+    // 采样参数（采样器/调度器/步数/CFG/尺寸）。缺省或各项留空 = 用内置默认。
+    // 只对**用法①（内置最小 txt2img）**生效 —— 用法②提交的是完整工作流，参数在里面。
+    // （用 // 而不是 ///：doc 注释不允许出现在函数参数上。）
+    options: Option<Txt2imgOptions>,
 ) -> Result<String, String> {
     let base = comfyui_url.trim().trim_end_matches('/').to_string();
     if base.is_empty() {
@@ -755,7 +816,8 @@ pub async fn comfyui_generate_media(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let wf = build_default_txt2img(&prompt, negative_prompt.as_deref(), &ckpt, seed);
+    let opts = options.unwrap_or_default();
+    let wf = build_default_txt2img(&prompt, negative_prompt.as_deref(), &ckpt, seed, &opts);
     run_comfy_workflow(&client, &base, &wf).await
 }
 
@@ -900,7 +962,7 @@ mod tests {
 
     #[test]
     fn default_txt2img_shape() {
-        let wf = build_default_txt2img("a cat", None, "sd_xl_base.safetensors", 42);
+        let wf = build_default_txt2img("a cat", None, "sd_xl_base.safetensors", 42, &Txt2imgOptions::default());
         let obj = wf.as_object().unwrap();
         assert_eq!(obj.len(), 7);
         assert_eq!(obj["1"]["class_type"], "CheckpointLoaderSimple");
@@ -928,7 +990,7 @@ mod tests {
     /// 并额外校验"被引用的节点 id 真实存在"。
     #[test]
     fn default_txt2img_all_link_slots_are_type_correct() {
-        let wf = build_default_txt2img("p", None, "ckpt.safetensors", 1);
+        let wf = build_default_txt2img("p", None, "ckpt.safetensors", 1, &Txt2imgOptions::default());
         let link = |node: &str, input: &str| wf[node]["inputs"][input].clone();
 
         // CheckpointLoaderSimple 输出 0=MODEL / 1=CLIP / 2=VAE
@@ -1069,19 +1131,19 @@ mod tests {
     #[test]
     fn 正负提示词都由调用方决定_留空才用默认() {
         // 给了就用给的，并落到**各自**的节点（2=正向 / 3=负向）
-        let wf = build_default_txt2img("a red cat", Some("blurry, lowres"), "c.safetensors", 1);
+        let wf = build_default_txt2img("a red cat", Some("blurry, lowres"), "c.safetensors", 1, &Txt2imgOptions::default());
         assert_eq!(wf["2"]["inputs"]["text"], "a red cat", "正向应落节点 2");
         assert_eq!(wf["3"]["inputs"]["text"], "blurry, lowres", "负向应落节点 3");
 
         // 不传 / 传空白 → 内置默认（且默认本身非空，别退化成"没有负向提示"）
         assert!(!DEFAULT_NEGATIVE_PROMPT.trim().is_empty());
         for empty in [None, Some(""), Some("   ")] {
-            let wf = build_default_txt2img("x", empty, "c.safetensors", 1);
+            let wf = build_default_txt2img("x", empty, "c.safetensors", 1, &Txt2imgOptions::default());
             assert_eq!(wf["3"]["inputs"]["text"], DEFAULT_NEGATIVE_PROMPT);
         }
 
         // 两侧都 trim（用户/模型常见尾随空白）
-        let wf = build_default_txt2img("  x  ", Some("  ugly  "), "c.safetensors", 1);
+        let wf = build_default_txt2img("  x  ", Some("  ugly  "), "c.safetensors", 1, &Txt2imgOptions::default());
         assert_eq!(wf["2"]["inputs"]["text"], "  x  ", "正向原样保留（不擅自 trim 用户正文）");
         assert_eq!(wf["3"]["inputs"]["text"], "ugly");
     }
@@ -1120,5 +1182,71 @@ mod tests {
         // 非 2xx 且无 node_errors → 给结论但不宣称是"节点错误"
         let s = format_comfy_submit_error(&serde_json::json!({ "error": { "message": "boom" } }), None);
         assert_eq!(s, "ComfyUI 拒绝了该工作流（boom）");
+    }
+
+    /// 采样参数可被调用方覆盖；空白按"没给"处理（前端常传 `''`）。
+    /// 这些值原先**全部写死在 json! 里**，用户与 AI 一样都改不了。
+    #[test]
+    fn 采样参数可覆盖_空白用默认() {
+        let wf = build_default_txt2img("p", None, "c.safetensors", 1, &Txt2imgOptions::default());
+        assert_eq!(wf["5"]["inputs"]["steps"], DEFAULT_STEPS);
+        assert_eq!(wf["5"]["inputs"]["cfg"], DEFAULT_CFG);
+        assert_eq!(wf["5"]["inputs"]["sampler_name"], DEFAULT_SAMPLER);
+        assert_eq!(wf["5"]["inputs"]["scheduler"], DEFAULT_SCHEDULER);
+        assert_eq!(wf["4"]["inputs"]["width"], DEFAULT_WIDTH);
+        assert_eq!(wf["4"]["inputs"]["height"], DEFAULT_HEIGHT);
+
+        let opts = Txt2imgOptions {
+            sampler: Some("dpmpp_2m".into()),
+            scheduler: Some("karras".into()),
+            steps: Some(30),
+            cfg: Some(6.0),
+            width: Some(832),
+            height: Some(1216),
+        };
+        let wf = build_default_txt2img("p", None, "c.safetensors", 1, &opts);
+        assert_eq!(wf["5"]["inputs"]["sampler_name"], "dpmpp_2m");
+        assert_eq!(wf["5"]["inputs"]["scheduler"], "karras");
+        assert_eq!(wf["5"]["inputs"]["steps"], 30);
+        assert_eq!(wf["5"]["inputs"]["cfg"], 6.0);
+        assert_eq!(wf["4"]["inputs"]["width"], 832);
+        assert_eq!(wf["4"]["inputs"]["height"], 1216);
+
+        // 空白 = 没给
+        let opts = Txt2imgOptions {
+            sampler: Some("   ".into()),
+            scheduler: Some("".into()),
+            ..Default::default()
+        };
+        let wf = build_default_txt2img("p", None, "c.safetensors", 1, &opts);
+        assert_eq!(wf["5"]["inputs"]["sampler_name"], DEFAULT_SAMPLER);
+        assert_eq!(wf["5"]["inputs"]["scheduler"], DEFAULT_SCHEDULER);
+    }
+
+    /// 越界值**收敛**而不是报错；尺寸还要**就近对齐到 8 的倍数** ——
+    /// SD 系对 latent 尺寸的这个要求是硬性的，用户填 513 不该拿到一个看不懂的服务端失败。
+    #[test]
+    fn 越界参数被收敛且尺寸对齐到8() {
+        let opts = Txt2imgOptions {
+            steps: Some(0),
+            cfg: Some(999.0),
+            width: Some(1),
+            height: Some(100_000),
+            ..Default::default()
+        };
+        let wf = build_default_txt2img("p", None, "c.safetensors", 1, &opts);
+        assert_eq!(wf["5"]["inputs"]["steps"], 1, "0 步应被抬到 1");
+        assert_eq!(wf["5"]["inputs"]["cfg"], 30.0, "CFG 上界 30");
+        assert_eq!(wf["4"]["inputs"]["width"], 64, "下界 64（且仍是 8 的倍数）");
+        assert_eq!(wf["4"]["inputs"]["height"], 4096, "上界 4096");
+
+        let opts = Txt2imgOptions { width: Some(513), height: Some(517), ..Default::default() };
+        let wf = build_default_txt2img("p", None, "c.safetensors", 1, &opts);
+        assert_eq!(wf["4"]["inputs"]["width"], 512);
+        assert_eq!(wf["4"]["inputs"]["height"], 520);
+        for k in ["width", "height"] {
+            let v = wf["4"]["inputs"][k].as_u64().unwrap();
+            assert_eq!(v % 8, 0, "尺寸必须是 8 的倍数，实际 {v}");
+        }
     }
 }
