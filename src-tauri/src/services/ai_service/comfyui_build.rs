@@ -208,20 +208,89 @@ fn missing_required(schema: &Value, inputs: &Map<String, Value>) -> Option<Strin
     None
 }
 
+/// 解析「源节点第 `idx` 个输出」的**声明类型**。
+///
+/// ComfyUI 是**强类型图**：把某节点第 N 个输出接到「期望另一种类型」的输入，整单会被
+/// 拒为 400（`Return type mismatch between linked nodes`）。而 LLM 最容易犯的正是这类
+/// 位置式错误 —— 典型是 `CheckpointLoaderSimple` 的 `0=MODEL / 1=CLIP / 2=VAE` 记错一位。
+///
+/// 返回三态，**判据刻意保守**（宁可漏判也不误拒，误拒会直接堵死 AI 建图）：
+///   - `Ok(Some(t))`：明确知道类型 → 参与比较
+///   - `Ok(None)`：信息不全 → **放行**。包含三种情况：没有 object_info（调用方没传）、
+///     该节点没声明 `output`、`output` 是空数组、某个槽位不是字符串类型
+///     （少数自定义节点的声明不规范，一律不判）
+///   - `Err`：槽位**越界** —— `output` 数组非空却查不到这一号，这是明确的错误
+fn resolve_output_type(schema: Option<&Value>, idx: u64) -> Result<Option<String>, String> {
+    let Some(outs) = schema.and_then(|s| s.get("output")).and_then(|v| v.as_array()) else {
+        return Ok(None);
+    };
+    if outs.is_empty() {
+        return Ok(None); // 声明不规范（空数组），宁可不判
+    }
+    match outs.get(idx as usize) {
+        Some(Value::String(t)) => Ok(Some(t.clone())),
+        Some(_) => Ok(None), // 非字符串声明 → 不判
+        None => Err(format!(
+            "该节点只声明了 {} 个输出槽，取不到第 {} 个",
+            outs.len(),
+            idx
+        )),
+    }
+}
+
+/// 解析「目标节点某输入」的**声明类型**。
+///
+/// ## 声明形状（拉运行中的 ComfyUI 核对过 19909 条输入声明）
+///   - `[<类型或候选数组>, <选项对象>]` —— 14567 条
+///   - `[<类型或候选数组>]` —— **5341 条**（无选项时就是单元素）
+///   - `[<类型>, <选项>, "说明"]` —— 1 条
+///
+/// ⇒ **判据只看 `spec[0]`**，不要加「必须长度 2 且第 2 项是对象」这类约束 ——
+/// 那会白白跳过 5341 条合法声明（其中就有 `CLIP` 这种要判断的类型）。
+///
+/// - `Some(t)`：第 0 项是字符串 → 可比较
+/// - `None`：**不判**。输入名不在声明里（模型自己编的输入名，交给 ComfyUI 去报），
+///   或第 0 项是数组 —— 那是 COMBO（下拉框），本来就不接连线
+fn resolve_input_type(schema: Option<&Value>, name: &str) -> Option<String> {
+    let input = schema?.get("input")?;
+    for sec in ["required", "optional"] {
+        if let Some(spec) = input.get(sec).and_then(|v| v.get(name)) {
+            return match spec.get(0) {
+                Some(Value::String(t)) => Some(t.clone()),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// 通配类型：ComfyUI 里 `"*"` 表示「接受任意类型」（`AnyType`）。
+/// 另外把 `"any"` 也当通配 —— 少数自定义节点这么写。两侧任一为通配即不做类型比较。
+fn is_wildcard_type(t: &str) -> bool {
+    let t = t.trim();
+    t == "*" || t.eq_ignore_ascii_case("any")
+}
+
 /// 中间表示 → ComfyUI 原生 API 格式。
 ///
 /// 输入里 `inputs` 的值有两种：
 ///   - **字面量**（字符串/数字/对象…）→ 原样保留
 ///   - **连线** `["<节点 key>", <输出序号>]` → 编译成 `["<数字 id>", 序号]`
 ///
-/// 出错**不静默**：key 重复、连线指向不存在的 key、自环、缺必填输入都明确报错。
-/// 这些正是模型最容易犯的错，静默放行只会换来一次看不懂的执行失败。
+/// 出错**不静默**：key 重复、连线指向不存在的 key、自环、缺必填输入、**连线类型不匹配**
+/// 都明确报错。这些正是模型最容易犯的错，静默放行只会换来一次看不懂的执行失败。
+///
+/// `object_info` 传 `Some` 时会多做一项**软校验**：把「源节点第 N 个输出声明的类型」
+/// 与「目标输入的声明类型」比一比，明确不匹配就报错并指出是第几个输出
+/// （判据保守，信息不全一律放行 —— 见 `resolve_output_type` / `resolve_input_type`）。
 pub fn compile_graph(ir: &IrGraph, object_info: Option<&Value>) -> Result<Value, String> {
     if ir.nodes.is_empty() {
         return Err("图上没有任何节点".to_string());
     }
     // ① key 唯一且非空
     let mut id_of: HashMap<&str, usize> = HashMap::new();
+    // key → class_type：连线类型校验要用它查「源节点声明的输出槽」
+    let mut class_of: HashMap<&str, &str> = HashMap::new();
     for (i, n) in ir.nodes.iter().enumerate() {
         let key = n.key.trim();
         if key.is_empty() {
@@ -233,6 +302,7 @@ pub fn compile_graph(ir: &IrGraph, object_info: Option<&Value>) -> Result<Value,
         if id_of.insert(key, i + 1).is_some() {
             return Err(format!("节点 key 重复：{}（key 必须唯一）", key));
         }
+        class_of.insert(key, n.class_type.trim());
     }
     // ② 组装 + 解析连线 + 必填校验
     let mut out = Map::new();
@@ -248,6 +318,55 @@ pub fn compile_graph(ir: &IrGraph, object_info: Option<&Value>) -> Result<Value,
                     })?;
                     if *tid == id {
                         return Err(format!("节点 {} 的输入 {} 连到了自己", n.key, name));
+                    }
+                    // ★ 连线**类型**校验（软校验，见两个 resolve_* 的文档）。
+                    //
+                    // 为什么必须在提交前做：类型不匹配时 ComfyUI 只回一句
+                    // `Return type mismatch between linked nodes: <输入名>, received_type(A)
+                    // mismatch input_type(B)`，而 `node_errors` 里**没有槽位序号**信息 ——
+                    // 模型很难从这句话反推"该把第几个输出改掉"，于是反复试错。
+                    // 在这里挡下并直接给出「第几个输出 / 是什么类型 / 需要什么类型」，一次就能改对。
+                    //
+                    // 判据刻意保守：任一侧信息不全（无 object_info、没声明 output、
+                    // 输入名不在声明里、COMBO 下拉）就**放行**。宁可漏判，不可误拒 ——
+                    // 误拒会把合法的自定义节点图直接堵死，比漏判糟得多。
+                    if let Some(oi) = object_info {
+                        let src_schema = class_of.get(target).and_then(|c| oi.get(*c));
+                        let dst_schema = oi.get(n.class_type.trim());
+                        let actual = resolve_output_type(src_schema, idx).map_err(|why| {
+                            format!(
+                                "节点 {}（{}）的输入 {} 连到了节点 {}（{}）的第 {} 个输出，但{}",
+                                n.key,
+                                n.class_type,
+                                name,
+                                target,
+                                class_of.get(target).copied().unwrap_or("?"),
+                                idx,
+                                why
+                            )
+                        })?;
+                        let expected = resolve_input_type(dst_schema, name);
+                        if let (Some(actual), Some(expected)) = (actual, expected) {
+                            if !is_wildcard_type(&actual)
+                                && !is_wildcard_type(&expected)
+                                && actual != expected
+                            {
+                                return Err(format!(
+                                    "连线类型不匹配：节点 {}（{}）的输入 {} 需要 {}，\
+                                     但它接到了节点 {}（{}）的第 {} 个输出，那个输出是 {}。\
+                                     请改接该节点提供 {} 的那个输出（槽位序号见 comfyui_node_info 的 output）",
+                                    n.key,
+                                    n.class_type,
+                                    name,
+                                    expected,
+                                    target,
+                                    class_of.get(target).copied().unwrap_or("?"),
+                                    idx,
+                                    actual,
+                                    expected
+                                ));
+                            }
+                        }
                     }
                     json!([tid.to_string(), idx])
                 }
@@ -455,5 +574,151 @@ mod tests {
         let v = audit_graph(&graph, None, &[]);
         assert_eq!(v.needs_approval.len(), 1);
         assert!(v.needs_approval[0].module.is_empty());
+    }
+
+    // ===== 编译：连线**类型**软校验 =====
+
+    /// 最小 object_info：只声明本组用例需要的几个节点。
+    ///
+    /// ⚠️ **声明形状按真实服务逐条核对过**（拉了运行中 ComfyUI 的 19909 条输入声明）：
+    ///   - `[<类型或候选数组>, <选项对象>]` —— 14567 条，如 `["CLIP", {"tooltip": …}]`
+    ///   - `[<类型或候选数组>]` —— 5341 条，**单元素**（无选项时 ComfyUI 就这么序列化），
+    ///     如 `CLIPSetLastLayer.clip = ["CLIP"]`
+    ///   - `[<类型>, <选项>, "说明"]` —— 1 条
+    /// 三种形状的第 0 项都是「类型或候选数组」，所以判据只看 `spec[0]`。
+    /// 本夹具**同时覆盖这两种主要形状**，避免"只按一种写"导致实现悄悄失配。
+    fn oi() -> Value {
+        json!({
+            "CheckpointLoaderSimple": {
+                "input": { "required": { "ckpt_name": [["a.safetensors"], {"tooltip": "t"}] } },
+                "output": ["MODEL", "CLIP", "VAE"]
+            },
+            "CLIPTextEncode": {
+                // clip 用**单元素**形状（真实服务里 5341 条是这种）
+                "input": { "required": { "text": ["STRING", {"multiline": true}], "clip": ["CLIP"] } },
+                "output": ["CONDITIONING"]
+            },
+            "KSampler": {
+                "input": { "required": {
+                    "model": ["MODEL", {}], "positive": ["CONDITIONING"], "negative": ["CONDITIONING"],
+                    "sampler_name": [["euler", "ddim"], {}]
+                } },
+                "output": ["LATENT"]
+            },
+            "AnyNode": { "input": { "required": { "anything": ["*", {}] } }, "output": ["*"] },
+            // 声明不规范：完全没有 output 字段 → 必须"不判"
+            "LooseNode": { "input": { "required": { "x": ["STRING"] } } }
+        })
+    }
+
+    fn ckpt_node() -> Value {
+        json!({ "key": "ckpt", "class_type": "CheckpointLoaderSimple",
+                "inputs": { "ckpt_name": "a.safetensors" } })
+    }
+
+    /// 把 MODEL 接进 CLIPTextEncode.clip —— 这正是本地生图曾经"每次都 400"的那处错法
+    /// （`CheckpointLoaderSimple` 的 0=MODEL / 1=CLIP 记错一位）。
+    /// 要求报错**指明是第几个输出**、源类型、目标类型 —— 否则模型没法据此改对。
+    #[test]
+    fn 编译_连线类型不匹配要报错并指出第几个输出() {
+        let g = ir(json!({ "nodes": [
+            ckpt_node(),
+            { "key": "pos", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "a cat", "clip": ["ckpt", 0] } }
+        ]}));
+        let e = compile_graph(&g, Some(&oi())).unwrap_err();
+        assert!(e.contains("类型不匹配"), "err={}", e);
+        assert!(e.contains("第 0 个输出"), "必须指明是第几个输出：{}", e);
+        assert!(e.contains("MODEL"), "必须给出源输出类型：{}", e);
+        assert!(e.contains("CLIP"), "必须给出目标需要的类型：{}", e);
+    }
+
+    #[test]
+    fn 编译_槽位正确时放行() {
+        let g = ir(json!({ "nodes": [
+            ckpt_node(),
+            { "key": "pos", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "a cat", "clip": ["ckpt", 1] } }
+        ]}));
+        let out = compile_graph(&g, Some(&oi())).expect("槽 1 = CLIP，应通过");
+        assert_eq!(out["2"]["inputs"]["clip"], json!(["1", 1]));
+    }
+
+    /// 软校验的**保守边界**：任一环节信息不全就必须放行。
+    /// 这条比正例更重要 —— 误拒会把合法的自定义节点图直接堵死。
+    #[test]
+    fn 编译_类型信息不全时一律放行() {
+        let mismatched = json!([
+            ckpt_node(),
+            { "key": "pos", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": ["ckpt", 0] } }
+        ]);
+
+        // ① 调用方没传 object_info → 不判
+        assert!(compile_graph(&ir(json!({ "nodes": mismatched })), None).is_ok());
+
+        // ② 源节点没有 output 声明（自定义节点常见）→ 不判
+        let g = ir(json!({ "nodes": [
+            { "key": "loose", "class_type": "LooseNode", "inputs": { "x": "v" } },
+            { "key": "pos", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": ["loose", 0] } }
+        ]}));
+        assert!(compile_graph(&g, Some(&oi())).is_ok(), "源没有 output 声明应放行");
+
+        // ③ 源输出是通配 "*"（AnyType）→ 不判
+        let g = ir(json!({ "nodes": [
+            { "key": "any", "class_type": "AnyNode", "inputs": { "anything": "v" } },
+            { "key": "pos", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": ["any", 0] } }
+        ]}));
+        assert!(compile_graph(&g, Some(&oi())).is_ok(), "通配输出应放行");
+
+        // ④ 目标输入声明是数组（COMBO 下拉框，本来就不该接连线）→ 不判
+        let g = ir(json!({ "nodes": [
+            ckpt_node(),
+            { "key": "ks", "class_type": "KSampler", "inputs": {
+                "model": ["ckpt", 0], "positive": "p", "negative": "n",
+                "sampler_name": ["ckpt", 0] } }
+        ]}));
+        assert!(compile_graph(&g, Some(&oi())).is_ok(), "COMBO 输入应放行");
+
+        // ⑤ 输入名不在声明里（模型自己编的）→ 不判，交给 ComfyUI 去报
+        let g = ir(json!({ "nodes": [
+            ckpt_node(),
+            { "key": "pos", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": ["ckpt", 1], "编造的输入": ["ckpt", 0] } }
+        ]}));
+        assert!(compile_graph(&g, Some(&oi())).is_ok(), "未知输入名应放行");
+    }
+
+    /// 槽位越界是**明确**错误（object_info 里 output 数组非空却查不到这一号），
+    /// 与"信息不全"不同 —— 后者放行，前者报错。
+    #[test]
+    fn 编译_输出槽位越界要报错() {
+        let g = ir(json!({ "nodes": [
+            ckpt_node(),
+            { "key": "pos", "class_type": "CLIPTextEncode",
+              "inputs": { "text": "x", "clip": ["ckpt", 9] } }
+        ]}));
+        let e = compile_graph(&g, Some(&oi())).unwrap_err();
+        assert!(e.contains("3 个输出槽"), "err={}", e);
+    }
+
+    #[test]
+    fn 类型解析三态() {
+        let oi = oi();
+        let ckpt = &oi["CheckpointLoaderSimple"];
+        assert_eq!(resolve_output_type(Some(ckpt), 1).unwrap(), Some("CLIP".to_string()));
+        assert!(resolve_output_type(Some(ckpt), 9).is_err(), "越界应报错而不是静默 None");
+        assert_eq!(resolve_output_type(None, 0).unwrap(), None, "没传 object_info → 不判");
+        assert_eq!(resolve_output_type(Some(&oi["LooseNode"]), 0).unwrap(), None, "没声明 output → 不判");
+
+        assert_eq!(resolve_input_type(Some(&oi["CLIPTextEncode"]), "clip"), Some("CLIP".to_string()));
+        assert_eq!(resolve_input_type(Some(&oi["KSampler"]), "sampler_name"), None, "COMBO 不判");
+        assert_eq!(resolve_input_type(Some(&oi["CLIPTextEncode"]), "不存在"), None);
+
+        assert!(is_wildcard_type("*"));
+        assert!(is_wildcard_type(" ANY "));
+        assert!(!is_wildcard_type("MODEL"));
     }
 }
