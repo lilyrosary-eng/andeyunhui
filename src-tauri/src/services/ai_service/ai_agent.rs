@@ -40,7 +40,12 @@ async fn run_agent(
     // 请求级档位覆盖（对话页选的）。留空 = 用配置。见 `effort_with_override`。
     effort: Option<String>,
 ) -> Result<(), String> {
-    let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 12u32);
+    // 轮数上限 20：默认 4，但前端会传实际设置（默认 8）。
+    // 之所以把上限从 12 抬到 20 —— "自己搭一张 ComfyUI 工作流"天然要多轮：
+    // 查节点（1~4 次，可能并发）+ 查模型 + 建图 + 按报错重试 + 视觉自检，
+    // 8 轮到 12 轮是紧的，撞上限时模型只会被硬停（"已达单次请求最大工具轮数"）。
+    // 每次都是一次真实模型调用，20 仍然有界，不会失控。
+    let max_rounds = max_rounds.unwrap_or(4).clamp(1u32, 20u32);
     let config = load_config(&app);
     let cfg = resolve_target(&config, profile_id.as_deref());
     ensure_api_key(&app, &request_id, &cfg)?;

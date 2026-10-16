@@ -1195,6 +1195,8 @@ export const jaJP: Record<string, string> = {
   'modelSettings.comfyui.advScheduler': 'スケジューラ',
   'modelSettings.comfyui.advSampler': 'サンプラー',
   'modelSettings.comfyui.advTitle': '詳細設定（サンプラー / スケジューラ / ステップ / CFG / サイズ）',
+  'modelSettings.agentRoundsHint': '（1〜{max}）大きいほど多段タスクをこなせますが遅くなります。ComfyUI のワークフロー構築は 10 以上を推奨',
+  'modelSettings.agentRounds': 'AI ツールの最大ラウンド数',
   'modelSettings.comfyui.ckptHint': '空欄＝自動（一覧の先頭）、選択＝指定して使用。AI に特定のモデルを明示した場合はそちらが優先されます。',
   'modelSettings.comfyui.ckptBackToAuto': '自動に戻す',
   'modelSettings.comfyui.ckptAutoNamed': '自動：{name}',

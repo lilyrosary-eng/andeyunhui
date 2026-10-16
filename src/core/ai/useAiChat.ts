@@ -15,6 +15,23 @@ import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { retrieveChatContext, ingestChatTurn } from '@/core/stores/semanticMemory';
 import { useCompanionStore, buildPersonaContext } from '@/core/stores/companionStore';
 
+/**
+ * agent 单次请求的**最大工具轮数**上限/默认值。
+ *
+ * 与 Rust `ai_agent::run_agent` 的 `clamp(1, 20)` 是**同一个界**，改一处要改两处。
+ * 默认 8：够普通问答与一次查询；"自己搭 ComfyUI 工作流"这类要查节点+查模型+建图+
+ * 按报错重试+自检，8 轮偏紧，所以做成可调而不是写死。
+ */
+export const AGENT_ROUNDS_MAX = 20;
+export const AGENT_ROUNDS_DEFAULT = 8;
+
+/** 读当前设置（非法值回落到默认 —— 存储被手改坏不该让请求发不出去）。 */
+export function agentMaxRounds(): number {
+  const raw = Number(storage.getString(KEYS.ai.agentMaxRounds.key, String(AGENT_ROUNDS_DEFAULT)));
+  if (!Number.isFinite(raw)) return AGENT_ROUNDS_DEFAULT;
+  return Math.min(AGENT_ROUNDS_MAX, Math.max(1, Math.trunc(raw)));
+}
+
 export const DEFAULT_PERSIST_KEY = AI_CHAT_CONVERSATIONS_KEY;
 
 /** 永久对话记忆开关（localStorage，默认开）。与 AiChatMemorySettings 共用同一 key。 */
@@ -512,7 +529,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
           messages: (payload as { messages: Array<{ role: string; content: string }> }).messages,
           profileId: profileIdRef.current || null,
           ...(finalSystem ? { system: finalSystem } : {}),
-          maxRounds: 8,
+          // 轮数上限从设置读（不再是写死的 8）—— "自己搭 ComfyUI 工作流"这类链路天然要吃更多轮
+          maxRounds: agentMaxRounds(),
           projectRoot: null,
           ...(media ? { media } : {}),
           // 本轮图片随请求带入：模型不直接持有 base64，由 analyze_image 工具按序号取用。

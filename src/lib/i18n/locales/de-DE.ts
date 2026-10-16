@@ -1195,6 +1195,8 @@ export const deDE: Record<string, string> = {
   'modelSettings.comfyui.advScheduler': 'Scheduler',
   'modelSettings.comfyui.advSampler': 'Sampler',
   'modelSettings.comfyui.advTitle': 'Erweitert (Sampler / Scheduler / Schritte / CFG / Groesse)',
+  'modelSettings.agentRoundsHint': '(1-{max}) hoeher = mehr mehrstufige Aufgaben, aber langsamer. Zum Bauen von ComfyUI-Workflows 10 oder mehr',
+  'modelSettings.agentRounds': 'Max. Agent-Tool-Runden',
   'modelSettings.comfyui.ckptHint': 'Leer = automatisch (erster Eintrag); ausgewaehlt = dieses Modell. Wenn du die KI ausdruecklich ein Modell nennst, hat das Vorrang.',
   'modelSettings.comfyui.ckptBackToAuto': 'Zurueck zu Automatisch',
   'modelSettings.comfyui.ckptAutoNamed': 'Auto: {name}',

@@ -1194,6 +1194,8 @@ export const frFR: Record<string, string> = {
   'modelSettings.comfyui.advScheduler': 'Scheduler',
   'modelSettings.comfyui.advSampler': 'Sampler',
   'modelSettings.comfyui.advTitle': 'Avance (sampler / scheduler / etapes / CFG / taille)',
+  'modelSettings.agentRoundsHint': '(1-{max}) plus grand = plus de taches multi-etapes, mais plus lent. Pour batir des workflows ComfyUI, 10 ou plus',
+  'modelSettings.agentRounds': 'Rounds outils max (agent)',
   'modelSettings.comfyui.ckptHint': 'Vide = auto (premier de la liste) ; choisi = ce modele. Si vous demandez un modele precis a l IA, cela prime.',
   'modelSettings.comfyui.ckptBackToAuto': 'Revenir en auto',
   'modelSettings.comfyui.ckptAutoNamed': 'Auto : {name}',

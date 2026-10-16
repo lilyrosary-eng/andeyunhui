@@ -1198,6 +1198,8 @@ export const zhTW: Record<string, string> = {
   'modelSettings.comfyui.advScheduler': '排程器',
   'modelSettings.comfyui.advSampler': '取樣器',
   'modelSettings.comfyui.advTitle': '進階參數（取樣器 / 排程器 / 步數 / CFG / 尺寸）',
+  'modelSettings.agentRoundsHint': '（1–{max}）越大能完成的多步任務越多，但更慢、更耗呼叫。自行搭建 ComfyUI 工作流建議 ≥10',
+  'modelSettings.agentRounds': 'AI 工具輪數上限',
   'modelSettings.comfyui.ckptHint': '留空＝自動（用列表第一個）；選中＝指定使用。若你直接要求 AI 用某個模型，該指定會覆寫這裡的設定。',
   'modelSettings.comfyui.ckptBackToAuto': '改回自動選擇',
   'modelSettings.comfyui.ckptAutoNamed': '自動：{name}',

@@ -7,6 +7,7 @@ import { KEYS } from '@/core/storage/keys';
 import { emptyMediaModels, emptyReasoning, fromConfig, toConfig, type ConfigUi, type ModelUi, type ProviderUi } from '../aiConfigCodec';
 import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
+import { AGENT_ROUNDS_DEFAULT, AGENT_ROUNDS_MAX } from '@/core/ai/useAiChat';
 import { ComfyuiPanel } from './ComfyuiPanel';
 import { MediaBackendsPanel } from './MediaBackendsPanel';
 import { inferProviderName, mergeModels, newModelKey, refillCapacity, refillCaps, sameBaseUrl } from './providerMatch';
@@ -39,6 +40,20 @@ const TOAST_MS = 3600;
 export function ModelSettingsPage() {
   const { t } = useI18n();
   const [cfg, setCfg] = useState<ConfigUi>({ providers: [], selected_provider_id: null, selected_model_id: null, media_models: emptyMediaModels() });
+
+  // agent 单次请求的最大工具轮数（存 localStorage；真正用它的地方是 useAiChat 发请求时）。
+  // 惰性初始化直接读存储：比"先给默认值、再在 effect 里同步"少一次渲染，
+  // 也避开 react-hooks/set-state-in-effect（同步 setState in effect 会引发级联渲染）。
+  const [agentRounds, setAgentRounds] = useState(() =>
+    storage.getString(KEYS.ai.agentMaxRounds.key, String(AGENT_ROUNDS_DEFAULT)),
+  );
+  /** 存轮数。空/非法一律落回默认值 —— 允许"填了个乱七八糟"却不允许存进去。 */
+  const saveAgentRounds = (v: string) => {
+    setAgentRounds(v);
+    const n = Number(v);
+    const val = Number.isFinite(n) ? String(Math.min(AGENT_ROUNDS_MAX, Math.max(1, Math.trunc(n)))) : String(AGENT_ROUNDS_DEFAULT);
+    storage.setString(KEYS.ai.agentMaxRounds.key, val);
+  };
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState('');
   // 打开发现弹窗时冻结一份目标：已有供应商用当前值，新建用空白。
@@ -405,6 +420,27 @@ export function ModelSettingsPage() {
           {toast}
         </div>
       )}
+
+      {/* AI 行为：工具轮数上限。放在这里而不是别处 —— 它影响**所有** agent 对话
+          （画图、查文件、跑命令…），不只是 ComfyUI。
+          为什么做成可调：默认 8 够普通问答，但"自己搭一张 ComfyUI 工作流"天然要多轮
+          （查节点 + 查模型 + 建图 + 按报错重试 + 自检），撞上限时模型只会被硬停。 */}
+      <div className="flex items-center gap-2 flex-wrap rounded-lg border border-neutral-200 dark:border-stone-700 px-3 py-2">
+        <label className="text-[11px] text-neutral-600 dark:text-stone-300">
+          {t('modelSettings.agentRounds')}
+        </label>
+        <input
+          type="number"
+          min={1}
+          max={AGENT_ROUNDS_MAX}
+          value={agentRounds}
+          onChange={(e) => saveAgentRounds(e.target.value)}
+          className="w-16 px-2 py-1 rounded border border-neutral-200 dark:border-stone-700 bg-transparent text-xs text-neutral-800 dark:text-stone-100 outline-none focus:ring-1 focus:ring-[var(--element-border)]"
+        />
+        <span className="text-[10px] text-neutral-400 dark:text-stone-500">
+          {t('modelSettings.agentRoundsHint', { max: AGENT_ROUNDS_MAX })}
+        </span>
+      </div>
 
       {/* 本地生图（ComfyUI）：端点/checkpoint 快速通道 + 工作流库（扫目录→转换→参数化生成）
           + 蓝图生图节点挂钩。与供应商云端 image_model 并列的另一条生图后端。 */}

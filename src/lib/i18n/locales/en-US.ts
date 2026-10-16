@@ -1267,6 +1267,8 @@ export const enUS: Record<string, string> = {
   'modelSettings.comfyui.advScheduler': 'Scheduler',
   'modelSettings.comfyui.advSampler': 'Sampler',
   'modelSettings.comfyui.advTitle': 'Advanced (sampler / scheduler / steps / CFG / size)',
+  'modelSettings.agentRoundsHint': '(1-{max}) higher = more multi-step tasks, but slower and uses more calls. For building ComfyUI workflows use 10 or more',
+  'modelSettings.agentRounds': 'Max agent tool rounds',
   'modelSettings.comfyui.ckptHint': 'Empty = auto (first in list); chosen = use that one. If you explicitly ask the AI to use a specific model, that overrides this setting.',
   'modelSettings.comfyui.ckptBackToAuto': 'Back to auto',
   'modelSettings.comfyui.ckptAutoNamed': 'Auto: {name}',

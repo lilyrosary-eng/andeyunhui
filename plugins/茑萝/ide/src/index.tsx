@@ -2737,7 +2737,9 @@ function IdeAgent({
         messages,
         profileId: activeProfileId,
         projectRoot: projectRoot || undefined,
-        max_rounds: 8,
+        // ⚠️ 必须是 camelCase：Tauri 生成的命令参数结构体用 rename_all = "camelCase"
+        //    （tauri-macros 的默认 ArgumentCase::Camel），写 max_rounds 会直接"invalid args"。
+        maxRounds: 8,
       })
         .catch((e: any) => { handlersRef.current = null; resolveRef.current = null; errRef.current = String(e); bufRef.current += '\n⚠ ' + String(e); resolve(); });
     });
