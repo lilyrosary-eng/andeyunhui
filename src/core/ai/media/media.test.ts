@@ -4,9 +4,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { createStorage, type Storage, type StorageBackend } from '@/core/storage';
-import { isBackendReady, loadBackends, saveBackends, findBackend, BACKENDS_KEY, effectiveCkpt, effectiveTxt2img, type MediaBackend } from './backends';
+import { isBackendReady, loadBackends, saveBackends, findBackend, BACKENDS_KEY, effectiveCkpt, effectiveTxt2img, effectiveOnFail, isLocalEndpoint, type MediaBackend } from './backends';
 import { KEYS } from '@/core/storage/keys';
-import { resolveBackend, routeFor, loadRoutes, saveRoutes, toMediaToolCfg, defaultRoutes, type MediaRoutes } from './routing';
+import { resolveBackend, resolveChain, routeFor, loadRoutes, saveRoutes, toMediaToolCfg, defaultRoutes, type MediaRoutes } from './routing';
 
 function memoryStorage(): Storage {
   const map = new Map<string, string>();
@@ -135,6 +135,9 @@ describe('toMediaToolCfg —— 传给 Rust 的最小配置', () => {
       // 图像能力上会带「生成后自动自检」开关（默认开）—— 自检只发生在出图之后，
       // 所以它跟着 image 档下发，而不是 vision 档（见 effectiveSelfCheck）。
       selfcheck: true,
+      // 显示名（运行期提示里指认"是哪一站"）与失败策略（openai 默认 fallback）。
+      name: 'cloud',
+      onFail: 'fallback',
     });
     expect('speech' in cfg).toBe(false);
   })
@@ -310,5 +313,38 @@ describe('effectiveCkpt / effectiveTxt2img —— 统一取「本地生图」面
     const s = memoryStorage();
     s.setString(KEYS.ai.comfyuiBuiltinParams.key, JSON.stringify({ steps: 30 }));
     expect(effectiveTxt2img(b({ id: 'o' }), s)).toBeUndefined();
+  });
+});
+
+describe('失败策略与链（2026-10-17 用户定：每站策略）', () => {
+  it('onFail 默认值：comfyui 停、openai 转', () => {
+    expect(effectiveOnFail(b({ id: 'c', kind: 'comfyui' }))).toBe('stop');
+    expect(effectiveOnFail(b({ id: 'o' }))).toBe('fallback');
+    // 显式设置优先
+    expect(effectiveOnFail(b({ id: 'c2', kind: 'comfyui', extras: { onFail: 'fallback' } }))).toBe('fallback');
+    expect(effectiveOnFail(b({ id: 'o2', extras: { onFail: 'stop' } }))).toBe('stop');
+  });
+
+  it('本地/云端按**地址**判，不按协议类型（LM Studio 是本地）', () => {
+    expect(isLocalEndpoint('http://127.0.0.1:1234/v1')).toBe(true);
+    expect(isLocalEndpoint('http://localhost:8188')).toBe(true);
+    expect(isLocalEndpoint('127.0.0.1:1234')).toBe(true);
+    expect(isLocalEndpoint('https://api.example.com/v1')).toBe(false);
+    // 认不出的一律按远程（宁可把本地误标成远程，也别让人以为没出网）
+    expect(isLocalEndpoint('')).toBe(false);
+  });
+
+  it('resolveChain 与 resolveBackend 的首站必须一致', () => {
+    const list = [
+      b({ id: 'a', kind: 'comfyui', baseUrl: 'http://127.0.0.1:8188', caps: ['image'] }),
+      b({ id: 'z', caps: ['image'], extras: { models: { image: 'flux' } } }),
+    ];
+    const routes: MediaRoutes = { image: ['a', 'z'] };
+    const s = memoryStorage();
+    const one = resolveBackend('image', list, routes, s);
+    const chain = resolveChain('image', list, routes, s);
+    expect(one?.backend.id).toBe('a');
+    expect(chain.map((x) => x.id)).toEqual(['a', 'z']);
+    expect(chain[0].id).toBe(one!.backend.id);
   });
 });

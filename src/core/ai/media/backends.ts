@@ -49,6 +49,8 @@ export interface MediaBackend {
   extras: {
     /** comfyui：checkpoint 模型文件名。 */
     ckpt?: string;
+    /** 链里失败后的策略（缺省按 kind 推：comfyui→stop / openai→fallback）。 */
+    onFail?: OnFail;
     /** comfyui：蓝图指定工作流文件路径。 */
     workflowPath?: string;
     /** comfyui：该工作流的技能包 slug（失败写回用）。 */
@@ -128,6 +130,42 @@ export function effectiveTxt2img(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * 端点是否是**本机**地址。
+ *
+ * 为什么需要它：`BackendKind` 只有 `comfyui | openai` 两种，而面板把 `openai` 一律标成
+ * 「云端」—— 但 **LM Studio 就是本地的 OpenAI 兼容服务**（`http://127.0.0.1:1234/v1`）。
+ * 于是"本地服务"被标成"云端"，用户会以为花的钱在云上。
+ *
+ * 判据刻意保守：**认不出的按远程**（宁可把本地误标成远程，也别把远程误标成本地 ——
+ * 后者会让人以为没出网）。只认回环地址的这几种写法。
+ */
+export function isLocalEndpoint(url: string): boolean {
+  const raw = url.trim().toLowerCase();
+  if (!raw) return false;
+  const m = /^(?:[a-z][a-z0-9+.-]*:\/\/)?([^/:?#]+)/.exec(raw);
+  const host = m?.[1] ?? '';
+  return host === 'localhost' || host === '127.0.0.1' || host.startsWith('127.') || host === '::1' || host === '[::1]';
+}
+
+/** 这条后端在链里失败后怎么办。`stop` 立刻报错；`fallback` 转下一站。 */
+export type OnFail = 'stop' | 'fallback';
+
+/**
+ * 某后端的**失败策略**（显式配置优先）。
+ *
+ * 默认值就是"用户几乎一定想要的"那个：
+ *   - `comfyui` → **stop**（本地后端，静默转云端等于越权，还可能花钱）
+ *   - `openai`  → **fallback**（云端偶发 429/503 太常见，不转就整次失败）
+ * ⚠️ LM Studio 这种"本地但走 openai 协议"的会落到 fallback 默认 —— 所以面板上
+ * **必须把这个值显示出来**（带一句"如果这是本地服务建议改成停"），让人一眼能改。
+ */
+export function effectiveOnFail(b: MediaBackend): OnFail {
+  const v = b.extras.onFail;
+  if (v === 'stop' || v === 'fallback') return v;
+  return b.kind === 'comfyui' ? 'stop' : 'fallback';
 }
 
 export function effectiveBaseUrl(b: MediaBackend, s: Storage = storage): string {

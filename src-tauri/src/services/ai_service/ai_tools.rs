@@ -49,6 +49,129 @@ pub struct MediaPayload {
     pub(crate) image: Option<MediaToolCfg>,
     pub(crate) speech: Option<MediaToolCfg>,
     pub(crate) vision: Option<MediaToolCfg>,
+    /// 每个能力的**后备站**（不含首选，按链顺序）。
+    ///
+    /// ## 为什么兜底必须在 Rust 侧做
+    /// 前端只负责"选谁"，它在发请求时就退场了 —— **只有 Rust 知道这一站成没成**。
+    /// 所以"每站策略"的执行点只能在这里。
+    #[serde(default)]
+    pub(crate) fallbacks: MediaFallbacks,
+}
+
+/// 各能力的后备站列表（`MediaPayload.fallbacks` 的形状）。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct MediaFallbacks {
+    pub(crate) image: Vec<MediaToolCfg>,
+    pub(crate) speech: Vec<MediaToolCfg>,
+    pub(crate) vision: Vec<MediaToolCfg>,
+}
+
+/// 提示里指认某站用哪个名字。
+fn station_label(cfg: &MediaToolCfg) -> String {
+    if !cfg.name.trim().is_empty() {
+        return cfg.name.trim().to_string();
+    }
+    if cfg.base_url.trim().is_empty() {
+        format!("{}（档案自带端点）", cfg.backend_kind)
+    } else {
+        format!("{}·{}", cfg.backend_kind, cfg.base_url.trim())
+    }
+}
+
+/// 错误文本压成一行短句（提示里塞完整堆栈既难读又浪费 token）。
+fn brief_err(e: &str) -> String {
+    let one = e.split_whitespace().collect::<Vec<_>>().join(" ");
+    let s: String = one.chars().take(140).collect();
+    if one.chars().count() > 140 {
+        format!("{s}…")
+    } else {
+        s
+    }
+}
+
+/// 按链执行一次媒体调用，并把**每一次兜底/放弃都记成提示**。
+///
+/// 规则（每站策略）：
+/// - 成功 → 返回；若不在第一站，记一条"已兜底到 X"
+/// - 失败 + 该站 `on_fail == "fallback"` + 还有下一站 → 记一条并继续
+/// - 失败 + 否则 → 记一条并返回错误
+///
+/// ⚠️ **提示必须随结果一起交回**（由工具文本呈现给用户 + 打日志）。
+/// 静默兜底是最坏的一种：用户以为走的是他配的第一站，实际在花另一家的钱。
+async fn run_media_chain<T, F, Fut>(
+    kind_label: &str,
+    primary: &MediaToolCfg,
+    alts: &[MediaToolCfg],
+    mut call: F,
+) -> (Result<T, String>, Vec<String>)
+where
+    F: FnMut(MediaToolCfg) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut stations: Vec<MediaToolCfg> = Vec::with_capacity(1 + alts.len());
+    stations.push(primary.clone());
+    stations.extend_from_slice(alts);
+    let total = stations.len();
+    let mut notices: Vec<String> = Vec::new();
+    for (i, cfg) in stations.iter().enumerate() {
+        let label = station_label(cfg);
+        match call(cfg.clone()).await {
+            Ok(v) => {
+                if i > 0 {
+                    notices.push(format!("{kind_label}：已兜底到「{label}」（第 {}/{} 站）", i + 1, total));
+                }
+                return (Ok(v), notices);
+            }
+            Err(e) => {
+                let policy_fallback = cfg.on_fail.as_deref() == Some("fallback");
+                if policy_fallback && i + 1 < total {
+                    notices.push(format!(
+                        "{kind_label}：「{label}」失败（{}）；按策略转下一站",
+                        brief_err(&e)
+                    ));
+                    continue;
+                }
+                let why = if policy_fallback { "已是最后一站" } else { "策略为「立刻报错」" };
+                notices.push(format!("{kind_label}：「{label}」失败（{}）；{why}", brief_err(&e)));
+                return (Err(e), notices);
+            }
+        }
+    }
+    (Err(format!("{kind_label}：链里没有任何可用后端")), notices)
+}
+
+/// 把运行期提示拼进工具文本 —— **有就呈现，同时打日志**。
+///
+/// 这是"所有兜底/降级/警告都必须显式"的统一出口（用户 2026-10-17 明确要求）。
+/// 不要在各处自己拼字符串：拼法一散，就会有人漏。
+/// 失败时把提示一并塞进错误文本 —— 兜底过程本身也是信息（"试过哪两站、各自为什么失败"）。
+fn err_with_notices(e: String, notices: &[String]) -> String {
+    if notices.is_empty() {
+        return e;
+    }
+    for n in notices {
+        eprintln!("[media] {n}");
+    }
+    format!(
+        "{}\n\n{}",
+        e,
+        notices.iter().map(|n| format!("⚠️ {n}")).collect::<Vec<_>>().join("\n")
+    )
+}
+
+fn with_notices(text: String, notices: &[String]) -> String {
+    if notices.is_empty() {
+        return text;
+    }
+    for n in notices {
+        eprintln!("[media] {n}");
+    }
+    format!(
+        "{}\n\n{}",
+        text,
+        notices.iter().map(|n| format!("⚠️ {n}")).collect::<Vec<_>>().join("\n")
+    )
 }
 
 /// 工作流里一个「输入端」的定位（node_id + input_key）。
@@ -79,6 +202,14 @@ pub(crate) struct MediaToolCfg {
     pub(crate) base_url: String,
     /// openai 档的直接 api key（前端一般不传，改走 profile_id 由 Rust 解析）。
     pub(crate) api_key: String,
+    /// 后端的**显示名**（前端条目的 name）。只用于运行期提示里指认是哪一站 ——
+    /// 报"本地 ComfyUI 失败"比报"comfyui·http://127.0.0.1:8188 失败"有用得多。
+    #[serde(default)]
+    pub(crate) name: String,
+    /// 链里执行失败后怎么办：`"stop"` = 立刻报错（默认给本地后端），
+    /// `"fallback"` = 转下一站（默认给云端）。兜底决策只能在 Rust 侧做 ——
+    /// 前端在发请求时就退场了，它不知道这一站到底成没成。
+    pub(crate) on_fail: Option<String>,
     /// ComfyUI：checkpoint 模型文件名。**空串是正常值** = 让后端自动挑一个
     /// （见 `multimodal_service::resolve_checkpoint_choice`）。
     pub(crate) ckpt: String,
@@ -3319,51 +3450,66 @@ impl AiTool for GenerateImageTool {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         let cfg = ctx.media.image.as_ref().filter(|c| c.is_ready());
-        let (data_url, source) = match cfg {
-            // comfyui 档：本地工作流 / 内置最小 txt2img
-            Some(c) if c.backend_kind == "comfyui" => {
-                match generate_via_comfy(
-                    c,
-                    &prompt,
-                    image_data.as_deref(),
-                    negative.as_deref(),
-                    ckpt_override.as_deref(),
-                )
-                .await
-                {
-                    Ok(u) => (u, "comfyui"),
+
+        // ── 按链执行（每站策略）──────────────────────────────────────────────
+        // 一次尝试：按这一站的类型分派。抽成闭包是为了让链执行器在失败后能换下一站 ——
+        // **兜底决策只能在 Rust 做**：前端在发请求时就退场了，它不知道这一站成没成。
+        let prompt_c = prompt.clone();
+        let img_c = image_data.clone();
+        let neg_c = negative.clone();
+        let cko_c = ckpt_override.clone();
+        let app_c = ctx.app.clone();
+        let profile_fallback = ctx.profile_id.clone();
+        let attempt = move |c: MediaToolCfg| {
+            let prompt = prompt_c.clone();
+            let img = img_c.clone();
+            let neg = neg_c.clone();
+            let cko = cko_c.clone();
+            let app = app_c.clone();
+            let pf = profile_fallback.clone();
+            async move {
+                if c.backend_kind == "comfyui" {
                     // 失败原因带上技能包 slug 前缀（前端据此 append 进该工作流备注）
-                    Err(e) => return Err(tag_skill_fail(Some(c), e)),
-                }
-            }
-            // 云端档（或未配置 → 回退当前档案）。云端失败与工作流技能包无关，不加前缀。
-            cloud => {
-                // 云端 /images/generations 是纯文生图，没有图片输入位：明确拒绝，
-                // 别静默把附图丢掉让用户以为「照图生成」成功了。
-                if image_data.is_some() {
-                    return Err(
-                        "当前图片后端是云端模型，不支持「以图生图」。要改图请改用 ComfyUI 并指定一个带图片输入（LoadImage）的工作流；或改为纯文字描述重新生成"
-                            .to_string(),
-                    );
-                }
-                // ★ 尊重媒体后端配置：优先用后端自带的档案与图像模型名，都没有才回落当前对话档案。
-                //   早先直接传 ctx.profile_id，媒体后端里配的 openai 生图条目**完全不生效**。
-                let profile = cloud
-                    .and_then(|c| c.profile_id.clone())
-                    .or_else(|| ctx.profile_id.clone());
-                let model = cloud.and_then(|c| c.model.clone());
-                (
+                    generate_via_comfy(&c, &prompt, img.as_deref(), neg.as_deref(), cko.as_deref())
+                        .await
+                        .map(|u| (u, "comfyui".to_string()))
+                        .map_err(|e| tag_skill_fail(Some(&c), e))
+                } else {
+                    // 云端 /images/generations 是纯文生图，没有图片输入位：明确拒绝，
+                    // 别静默把附图丢掉让用户以为「照图生成」成功了。
+                    if img.is_some() {
+                        return Err(
+                            "当前图片后端是云端模型，不支持「以图生图」。要改图请改用 ComfyUI 并指定一个带图片输入（LoadImage）的工作流；或改为纯文字描述重新生成"
+                                .to_string(),
+                        );
+                    }
+                    // ★ 尊重媒体后端配置：优先用后端自带的档案与图像模型名，都没有才回落当前对话档案。
+                    let profile = c.profile_id.clone().or_else(|| pf);
                     crate::services::multimodal_service::generate_image_inner(
-                        &ctx.app,
+                        &app,
                         &prompt,
                         profile.as_deref(),
-                        model.as_deref(),
+                        c.model.as_deref(),
                     )
-                    .await?,
-                    "cloud",
-                )
+                    .await
+                    .map(|u| (u, "cloud".to_string()))
+                }
             }
         };
+
+        // 未配置图片后端 → 沿用既有语义：走**当前对话档案**（合成一站，交给链执行器统一处理）。
+        let primary = cfg.cloned().unwrap_or_else(|| MediaToolCfg {
+            kind: "image".to_string(),
+            backend_kind: "openai".to_string(),
+            name: "当前对话档案".to_string(),
+            ..Default::default()
+        });
+        let (res, notices) = run_media_chain("图像", &primary, &ctx.media.fallbacks.image, attempt).await;
+        let (data_url, source) = match res {
+            Ok(v) => v,
+            Err(e) => return Err(err_with_notices(e, &notices)),
+        };
+        let source = source.as_str();
         let used_workflow = cfg.map(|c| c.workflow.is_some()).unwrap_or(false);
         // 传了负向词、但走的是**用户自己的工作流** → 那个词没有被使用。
         // 必须说出来：静默忽略会让模型以为"改负向词没用"，从而反复重试同一件事。
@@ -3404,6 +3550,8 @@ impl AiTool for GenerateImageTool {
         let auto = explicit_check.is_none();
         let check = explicit_check.or_else(|| if auto_on { last_user_ask(ctx) } else { None });
         let text = append_critique(ctx, text, &data_url, check.as_deref(), auto).await;
+        // 兜底/降级/警告一律显式呈现（用户 2026-10-17 明确要求：不允许只进日志）
+        let text = with_notices(text, &notices);
         let title: String = prompt.chars().take(60).collect();
         let mut meta = serde_json::json!({
             "card": card,
@@ -3474,23 +3622,38 @@ impl AiTool for GenerateSpeechTool {
             );
         };
         // 目前只有 openai 兼容 /audio/speech 一种实现；其余后端类型暂未支持。
-        let data_url = match c.backend_kind.as_str() {
-            "openai" => {
-                // ★ 尊重媒体后端配置：档案优先用后端自带的，其次当前对话档案；
-                //   模型名用后端声明的（早先被忽略，导致后端的「语音模型名」只当就绪判据用）。
-                let profile = c.profile_id.clone().or_else(|| ctx.profile_id.clone());
-                crate::services::multimodal_service::tts_inner(
-                    &ctx.app,
-                    &text,
-                    profile.as_deref(),
-                    c.model.as_deref(),
-                )
-                .await?
+        let app_c = ctx.app.clone();
+        let text_c = text.clone();
+        let pf = ctx.profile_id.clone();
+        let attempt = move |cc: MediaToolCfg| {
+            let (app, t, pf) = (app_c.clone(), text_c.clone(), pf.clone());
+            async move {
+                match cc.backend_kind.as_str() {
+                    "openai" => {
+                        // ★ 尊重媒体后端配置：档案优先用后端自带的，其次当前对话档案；
+                        //   模型名用后端声明的（早先被忽略，导致它只当就绪判据用）。
+                        let profile = cc.profile_id.clone().or_else(|| pf);
+                        crate::services::multimodal_service::tts_inner(
+                            &app,
+                            &t,
+                            profile.as_deref(),
+                            cc.model.as_deref(),
+                        )
+                        .await
+                    }
+                    other => Err(format!("暂不支持的语音后端类型：{}", other)),
+                }
             }
-            other => return Err(format!("暂不支持的语音后端类型：{}", other)),
         };
-        let text_out =
-            "语音已生成，已直接展示给用户供播放，无需转述内容。".to_string();
+        let (res, notices) = run_media_chain("语音", c, &ctx.media.fallbacks.speech, attempt).await;
+        let data_url = match res {
+            Ok(v) => v,
+            Err(e) => return Err(err_with_notices(e, &notices)),
+        };
+        let text_out = with_notices(
+            "语音已生成，已直接展示给用户供播放，无需转述内容。".to_string(),
+            &notices,
+        );
         let title: String = text.chars().take(60).collect();
         let mut meta = serde_json::json!({
             "card": "audio",
@@ -3579,23 +3742,68 @@ fn vision_target(
 ///
 /// ⚠️ 自检失败**不算生成失败**：它是增强，拿不到就如实说明，绝不能把已经生成好的图丢掉。
 async fn critique_output(ctx: &ToolContext, data_url: &str, request: &str) -> Result<String, String> {
-    let (pid, model, url, key) = vision_target(ctx)?;
     let (mime, b64) = split_data_url(data_url);
     let prompt = format!(
         "这是刚刚生成的图。用户最初的要求是：「{}」。\n请判断它是否满足要求，并指出**最该改的 1-3 点**，每点给出具体可执行的调整（提示词 / 采样步数 / 尺寸 / 模型 / 节点参数）。若已完全满足要求，只回复「符合」。",
         request
     );
-    super::ai_ocr::vision_ask(
-        &ctx.app,
-        &b64,
-        &mime,
-        Some(&prompt),
-        pid.as_deref(),
-        model.as_deref(),
-        url.as_deref(),
-        key.as_deref(),
-    )
-    .await
+    let app_level = crate::services::ai_service::ai_profile::load_config(&ctx.app)
+        .media_models
+        .get("vision")
+        .is_some();
+
+    // 视觉链：配好的视觉后端优先，按链兜底；一个都没配 → 回落到当前对话档案（既有语义）。
+    let mut stations: Vec<MediaToolCfg> = Vec::new();
+    if let Some(v) = ctx.media.vision.as_ref().filter(|c| c.is_ready()) {
+        stations.push(v.clone());
+        stations.extend(ctx.media.fallbacks.vision.iter().filter(|c| c.is_ready()).cloned());
+    }
+    if stations.is_empty() {
+        let (pid, model, url, key) =
+            resolve_vision_target(None, ctx.profile_id.as_deref(), app_level)?;
+        return super::ai_ocr::vision_ask(
+            &ctx.app,
+            &b64,
+            &mime,
+            Some(&prompt),
+            pid.as_deref(),
+            model.as_deref(),
+            url.as_deref(),
+            key.as_deref(),
+        )
+        .await;
+    }
+
+    let primary = stations.remove(0);
+    let app_c = ctx.app.clone();
+    let b64_c = b64.clone();
+    let mime_c = mime.clone();
+    let prompt_c = prompt.clone();
+    let pf = ctx.profile_id.clone();
+    let attempt = move |c: MediaToolCfg| {
+        let (app, b64, mime, prompt, pf) =
+            (app_c.clone(), b64_c.clone(), mime_c.clone(), prompt_c.clone(), pf.clone());
+        async move {
+            // 每一站各自解析（app 级视觉模型名会覆盖站里的 model，规则与真实自检一致）
+            let (pid, model, url, key) = resolve_vision_target(Some(&c), pf.as_deref(), app_level)?;
+            super::ai_ocr::vision_ask(
+                &app,
+                &b64,
+                &mime,
+                Some(&prompt),
+                pid.as_deref(),
+                model.as_deref(),
+                url.as_deref(),
+                key.as_deref(),
+            )
+            .await
+        }
+    };
+    let (res, notices) = run_media_chain("自检", &primary, &stations, attempt).await;
+    match res {
+        Ok(text) => Ok(with_notices(text, &notices)),
+        Err(e) => Err(err_with_notices(e, &notices)),
+    }
 }
 
 /// 取出工具的可选自检参数（用户最初的画面要求原文）。

@@ -11,7 +11,7 @@
  * 纯函数，Storage 注入可测。
  */
 import { storage, type Storage } from '@/core/storage';
-import { ROUTES_KEY, loadBackends, isBackendReady, effectiveBaseUrl, effectiveCkpt, effectiveTxt2img, effectiveSelfCheck, type MediaBackend, type MediaKind, ALL_KINDS } from './backends';
+import { ROUTES_KEY, loadBackends, isBackendReady, effectiveBaseUrl, effectiveCkpt, effectiveTxt2img, effectiveSelfCheck, effectiveOnFail, type MediaBackend, type MediaKind, ALL_KINDS } from './backends';
 
 /** 路由表：能力 → 有序后端 id 列表。未列出的能力视为「无后端」。 */
 export type MediaRoutes = Partial<Record<MediaKind, string[]>>;
@@ -58,6 +58,28 @@ export function resolveBackend(
   return null;
 }
 
+/**
+ * 为某能力解析出**整条可用链**（按顺序，只含"配置完整"的站）。
+ *
+ * 判据必须与 `resolveBackend` **完全一致**（同一顺序、同一就绪规则），
+ * 否则"首选"与"链首"会不是同一个后端 —— 那种错最难查。
+ * 区别只是取全部而非首个：**兜底需要后面的站**。
+ */
+export function resolveChain(
+  kind: MediaKind,
+  backends: MediaBackend[],
+  routes: MediaRoutes,
+  s: Storage = storage,
+): MediaBackend[] {
+  const byId = new Map(backends.map((b) => [b.id, b]));
+  const out: MediaBackend[] = [];
+  for (const id of routeFor(kind, routes)) {
+    const b = byId.get(id);
+    if (b && isBackendReady(b, kind, s)) out.push(b);
+  }
+  return out;
+}
+
 /** 便捷封装：直接从 Storage 读清单与路由并解析。 */
 export function resolveBackendFromStorage(kind: MediaKind, s: Storage = storage): ResolvedBackend | null {
   return resolveBackend(kind, loadBackends(s), loadRoutes(s), s);
@@ -75,6 +97,10 @@ export interface MediaToolCfg {
   ckpt?: string;
   workflowPath?: string;
   skillSlug?: string;
+  /** 后端显示名 —— 运行期提示里指认"是哪一站"用（"本地 ComfyUI 失败"比报端点有用）。 */
+  name: string;
+  /** 失败策略：`stop` 立刻报错 / `fallback` 转下一站。兜底决策在 Rust 侧做。 */
+  onFail?: 'stop' | 'fallback';
   /** openai 档：该能力的模型名。 */
   model?: string;
   /** openai 档：引用哪个档案取凭证（Rust 侧据此解析，避免前端传 key）。 */
@@ -99,6 +125,7 @@ export function toMediaToolCfg(r: ResolvedBackend): MediaToolCfg {
   const b = r.backend;
   return {
     kind: r.kind,
+    name: b.name.trim() || (b.kind === 'comfyui' ? 'ComfyUI' : 'OpenAI 兼容'),
     backendKind: b.kind,
     // ComfyUI 统一取「本地生图」面板的端点（见 effectiveBaseUrl）；其它后端用条目自己的。
     baseUrl: effectiveBaseUrl(b),
@@ -111,6 +138,8 @@ export function toMediaToolCfg(r: ResolvedBackend): MediaToolCfg {
     // 自动自检开关：只在**图像**能力上下发（自检发生在出图之后），
     // 与后端类型无关 —— 云端出图同样该自检。
     ...(r.kind === 'image' ? { selfcheck: effectiveSelfCheck() } : {}),
+    // 失败策略随条目下发 —— 兜底决策在 Rust 侧做（只有它知道失败）
+    onFail: effectiveOnFail(b),
     ...(b.extras.workflowPath?.trim() ? { workflowPath: b.extras.workflowPath.trim() } : {}),
     ...(b.extras.skillSlug?.trim() ? { skillSlug: b.extras.skillSlug.trim() } : {}),
     ...(b.extras.models?.[r.kind]?.trim() ? { model: b.extras.models[r.kind]!.trim() } : {}),

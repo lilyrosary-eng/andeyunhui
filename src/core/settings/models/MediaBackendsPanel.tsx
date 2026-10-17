@@ -26,7 +26,7 @@ import {
   type MediaKind,
 } from '@/core/ai/media/backends';
 import { loadRoutes, saveRoutes, routeFor, defaultRoutes, type MediaRoutes } from '@/core/ai/media/routing';
-import { effectiveBaseUrl, effectiveCkpt } from '@/core/ai/media/backends';
+import { effectiveBaseUrl, effectiveCkpt, effectiveOnFail, isLocalEndpoint } from '@/core/ai/media/backends';
 import { InlineSelect } from '@/components/ui/inline-select';
 import { resetMediaConfig } from '@/core/ai/media/migrate';
 import type { MediaModelsUi, ProviderUi } from '../aiConfigCodec';
@@ -120,6 +120,22 @@ export function MediaBackendsPanel({
     if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
     highlightTimer.current = window.setTimeout(() => setHighlightId(null), 1600);
   }, []);
+
+  /**
+   * 这个后端**实际**落在本机还是远端 —— **按地址判，不按协议类型**。
+   *
+   * `kind` 只有 comfyui/openai 两种，而 openai 既能是云端也能是本地（LM Studio）。
+   * 端点为空（靠 profileId 走档案）时，去档案里取 base_url 再判；都取不到 → unknown。
+   */
+  const localityOf = (b: MediaBackend): 'local' | 'remote' | 'unknown' => {
+    if (b.kind === 'comfyui') return isLocalEndpoint(effectiveBaseUrl(b)) ? 'local' : 'remote';
+    const direct = b.baseUrl.trim();
+    if (direct) return isLocalEndpoint(direct) ? 'local' : 'remote';
+    const pid = b.extras.profileId?.trim();
+    const url = (pid ? (providers.find((p) => p.id === pid)?.base_url ?? '') : '').trim();
+    if (!url) return 'unknown';
+    return isLocalEndpoint(url) ? 'local' : 'remote';
+  };
 
   /** 模型名 → 所属供应商名。口径与 Rust `find_provider_of_model` 一致：**全等**匹配。
    *  找不到就返回 null，UI 上要明确警示（而不是让用户以为配好了）。 */
@@ -508,9 +524,29 @@ export function MediaBackendsPanel({
             }`}
           >
             <div className="flex items-center gap-2 mb-2">
+              {/* 两枚徽章：**协议类型** 与 **本地/云端**。原先只有前者，且把 openai 一律写成
+                  「云端」—— LM Studio 是本地服务却显示成"云端"，让人以为花的钱在云上。 */}
               <span className="text-[11px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400">
-                {b.kind === 'comfyui' ? 'ComfyUI' : '云端'}
+                {b.kind === 'comfyui' ? 'ComfyUI' : 'OpenAI 兼容'}
               </span>
+              {(() => {
+                const loc = localityOf(b);
+                return (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded ${
+                      loc === 'local'
+                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                        : loc === 'remote'
+                          ? 'bg-neutral-500/10 text-neutral-500 dark:text-stone-400'
+                          : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                    }`}
+                    title={loc === 'unknown' ? '端点为空且取不到档案的地址 —— 无法判断在本机还是远端' : ''}
+                  >
+                    {loc === 'local' ? '本地' : loc === 'remote' ? '云端' : '端点未知'}
+                  </span>
+                );
+              })()}
+
               <input
                 className={`${inputCls} flex-1`}
                 value={b.name}
@@ -666,6 +702,24 @@ export function MediaBackendsPanel({
                       ? '已配置'
                       : '缺端点'
                     : '已配置'}
+              </span>
+            </div>
+            {/* 失败策略：链里这一站失败之后怎么办。兜底只能由 Rust 决定（它才知道失败），
+                这里配的是**该后端的策略**（对它出现的所有能力链生效）。
+                本地服务若走 openai 协议（LM Studio），默认会落到"转下一站" ——
+                所以把当前值和"是默认还是你设的"都显示出来，别让人猜。 */}
+            <div className="flex items-center gap-2 flex-wrap mt-2">
+              <span className="text-[11px] text-neutral-500 dark:text-stone-400">失败时：</span>
+              <select
+                className="text-[11px] px-1.5 py-0.5 rounded border border-neutral-300 dark:border-stone-600 bg-transparent text-neutral-700 dark:text-stone-300"
+                value={effectiveOnFail(b)}
+                onChange={(e) => updateExtras(b.id, { onFail: e.target.value as 'stop' | 'fallback' })}
+              >
+                <option value="stop">立刻报错</option>
+                <option value="fallback">转下一站</option>
+              </select>
+              <span className="text-[10px] text-neutral-400 dark:text-stone-500">
+                {b.extras.onFail ? '（你设的，对所有能力链生效）' : '（默认值：ComfyUI 停、云端转）'}
               </span>
             </div>
           </div>
