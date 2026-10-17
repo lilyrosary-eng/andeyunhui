@@ -8,6 +8,7 @@ import { emptyMediaModels, emptyReasoning, fromConfig, toConfig, type ConfigUi, 
 import { ProviderCard } from './ProviderCard';
 import { DiscoverModelsDialog, type AdoptedModel } from './DiscoverModelsDialog';
 import { AGENT_ROUNDS_DEFAULT, AGENT_ROUNDS_MAX } from '@/core/ai/useAiChat';
+import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { ComfyuiPanel } from './ComfyuiPanel';
 import { MediaBackendsPanel } from './MediaBackendsPanel';
 import { inferProviderName, mergeModels, newModelKey, refillCapacity, refillCaps, sameBaseUrl } from './providerMatch';
@@ -48,6 +49,43 @@ export function ModelSettingsPage() {
     storage.getString(KEYS.ai.agentMaxRounds.key, String(AGENT_ROUNDS_DEFAULT)),
   );
   /** 存轮数。空/非法一律落回默认值 —— 允许"填了个乱七八糟"却不允许存进去。 */
+  // 「生成后自动自检」开关 + 测试按钮。
+  const [selfcheckOn, setSelfcheckOn] = useState(() => storage.getString(KEYS.ai.autoSelfCheck.key, '1') === '1');
+  const toggleSelfcheck = (v: boolean) => {
+    setSelfcheckOn(v);
+    storage.setString(KEYS.ai.autoSelfCheck.key, v ? '1' : '0');
+  };
+  const [scBusy, setScBusy] = useState(false);
+  const [scMsg, setScMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  /**
+   * 「测试自检通道」：**真发一次请求**，走与自检**完全相同**的解析与请求路径
+   * （Rust 侧 `ai_test_selfcheck` 与工具共用 `resolve_vision_target` + `vision_ask`）。
+   *
+   * 为什么需要它：自检走的**不是**能力链里选的那个模型 —— 它优先用「视觉」后端、
+   * 没配才回落到当前对话档案。所以后端卡片上那个「测试」按钮**测不到自检这条路**。
+   * `profileId: null` 是与 agent 那条路一致的选择（`vision_ask` 会解析出当前档案）。
+   */
+  const testSelfCheck = async () => {
+    setScBusy(true);
+    setScMsg(null);
+    try {
+      const media = await resolveMediaConfig().catch(() => null);
+      const out = await invoke<{ ok: boolean; stage: string; detail: string; via: string }>(
+        'ai_test_selfcheck',
+        { profileId: null, vision: media?.vision ?? null },
+      );
+      setScMsg({
+        ok: out.ok,
+        text: `${out.via ? `${out.via}\n` : ''}${out.ok ? out.detail : `[${out.stage}] ${out.detail}`}`,
+      });
+    } catch (e) {
+      setScMsg({ ok: false, text: String(e) });
+    } finally {
+      setScBusy(false);
+    }
+  };
+
   const saveAgentRounds = (v: string) => {
     setAgentRounds(v);
     const n = Number(v);
@@ -440,6 +478,42 @@ export function ModelSettingsPage() {
         <span className="text-[10px] text-neutral-400 dark:text-stone-500">
           {t('modelSettings.agentRoundsHint', { max: AGENT_ROUNDS_MAX })}
         </span>
+      </div>
+
+      {/* 自动自检：开关解决"要不要花那次视觉调用"，测试按钮解决"配了到底通不通"。
+          失败一律显示**原始错误 + 走的通道**，不做分类改写 —— 分类会把 502 糊成
+          "网络问题"，那还是让人猜。 */}
+      <div className="flex flex-col gap-1.5 rounded-lg border border-neutral-200 dark:border-stone-700 px-3 py-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            type="checkbox"
+            id="auto-selfcheck"
+            checked={selfcheckOn}
+            onChange={(e) => toggleSelfcheck(e.target.checked)}
+          />
+          <label htmlFor="auto-selfcheck" className="text-[11px] text-neutral-600 dark:text-stone-300">
+            {t('modelSettings.autoSelfCheck')}
+          </label>
+          <button
+            onClick={() => void testSelfCheck()}
+            disabled={scBusy}
+            className="ml-1 text-[11px] px-2 py-0.5 rounded border border-neutral-300 dark:border-stone-600 text-neutral-600 dark:text-stone-300 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+          >
+            {scBusy ? t('modelSettings.testing') : t('modelSettings.testSelfCheck')}
+          </button>
+        </div>
+        <p className="text-[10px] text-neutral-400 dark:text-stone-500">
+          {t('modelSettings.autoSelfCheckHint')}
+        </p>
+        {scMsg && (
+          <pre
+            className={`text-[10px] whitespace-pre-wrap break-all m-0 ${
+              scMsg.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'
+            }`}
+          >
+            {scMsg.text}
+          </pre>
+        )}
       </div>
 
       {/* 本地生图（ComfyUI）：端点/checkpoint 快速通道 + 工作流库（扫目录→转换→参数化生成）

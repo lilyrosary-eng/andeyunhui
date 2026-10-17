@@ -11,7 +11,7 @@
  * 纯函数，Storage 注入可测。
  */
 import { storage, type Storage } from '@/core/storage';
-import { ROUTES_KEY, loadBackends, isBackendReady, effectiveBaseUrl, effectiveCkpt, effectiveTxt2img, type MediaBackend, type MediaKind, ALL_KINDS } from './backends';
+import { ROUTES_KEY, loadBackends, isBackendReady, effectiveBaseUrl, effectiveCkpt, effectiveTxt2img, effectiveSelfCheck, type MediaBackend, type MediaKind, ALL_KINDS } from './backends';
 
 /** 路由表：能力 → 有序后端 id 列表。未列出的能力视为「无后端」。 */
 export type MediaRoutes = Partial<Record<MediaKind, string[]>>;
@@ -108,6 +108,9 @@ export function toMediaToolCfg(r: ResolvedBackend): MediaToolCfg {
     //    不传的话后端分不清"没配"与"配了空"。其它后端沿用旧口径 —— 空就不带。
     ...(b.kind === 'comfyui' || effectiveCkpt(b) ? { ckpt: effectiveCkpt(b) } : {}),
     ...(effectiveTxt2img(b) ? { txt2img: effectiveTxt2img(b) } : {}),
+    // 自动自检开关：只在**图像**能力上下发（自检发生在出图之后），
+    // 与后端类型无关 —— 云端出图同样该自检。
+    ...(r.kind === 'image' ? { selfcheck: effectiveSelfCheck() } : {}),
     ...(b.extras.workflowPath?.trim() ? { workflowPath: b.extras.workflowPath.trim() } : {}),
     ...(b.extras.skillSlug?.trim() ? { skillSlug: b.extras.skillSlug.trim() } : {}),
     ...(b.extras.models?.[r.kind]?.trim() ? { model: b.extras.models[r.kind]!.trim() } : {}),

@@ -90,6 +90,16 @@ export function effectiveCkpt(b: MediaBackend, s: Storage = storage): string {
   return (b.extras.ckpt ?? '').trim();
 }
 
+/**
+ * 「生成后自动自检」是否开启（设置页那一处，默认开）。
+ *
+ * 挂在 `image` 档下发（见 `toMediaToolCfg`）：自检只发生在**出图之后**，
+ * 两条出图路径读的都是 `ctx.media.image`。语义是"关掉 = 连那次视觉调用都不发"。
+ */
+export function effectiveSelfCheck(s: Storage = storage): boolean {
+  return s.getString(KEYS.ai.autoSelfCheck.key, '1') === '1';
+}
+
 /** 内置流程可调参数的键（与 Rust `Txt2imgOptions` 的字段一一对应）。 */
 const TXT2IMG_KEYS = ['sampler', 'scheduler', 'steps', 'cfg', 'width', 'height'] as const;
 

@@ -132,6 +132,9 @@ describe('toMediaToolCfg —— 传给 Rust 的最小配置', () => {
       apiKey: 'sk-x',
       model: 'flux',
       profileId: 'p1',
+      // 图像能力上会带「生成后自动自检」开关（默认开）—— 自检只发生在出图之后，
+      // 所以它跟着 image 档下发，而不是 vision 档（见 effectiveSelfCheck）。
+      selfcheck: true,
     });
     expect('speech' in cfg).toBe(false);
   })

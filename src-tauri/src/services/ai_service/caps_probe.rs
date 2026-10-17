@@ -24,7 +24,10 @@
 // 探测会**真发一次外部请求**（可能计费）。所以不做静默自动探测：
 // 必须用户在设置里开启该开关，且每次探测都是用户显式点出来的。
 
+use serde_json::json;
 use tauri::AppHandle;
+
+use super::ai_tools::{resolve_vision_target, MediaToolCfg};
 
 /// 1×1 透明 PNG（68 字节）。硬编码为常量而非运行时编码：
 /// 这是探测用的固定素材，不该依赖图像库，也不该有任何随机性。
@@ -189,6 +192,76 @@ pub async fn ai_probe_vision(
         &model,
     )
     .await)
+}
+
+/// 「测试自检通道」：用**与真实自检完全相同**的解析与请求路径，真发一次请求。
+///
+/// ## 为什么单独做这个按钮
+/// 自检走的通道**不是**能力链里选的那个模型 —— 它优先用「**视觉**」后端，
+/// 没配视觉后端才回落到**当前对话档案**（见 `ai_tools::resolve_vision_target`）。
+/// 所以每个后端卡片上那个「测试」按钮**测不到自检这条路**。
+/// 没有它，用户遇到「自检没动静」只能猜：没配？模型不支持看图？key 不对？被限流？
+///
+/// ## 返回为什么这么设计
+/// `{ ok, stage, detail, via }`：
+///   - `stage`：`resolution` = 连"走哪条通道"都没定下来；`request` = 请求发出去了但失败
+///   - `detail`：**原始错误文本，不做分类改写** —— 把 502 糊成"网络问题"还是让人猜
+///   - `via`：这次实际走的通道（档案 / 模型 / 端点），让用户**看见路径**
+///
+/// 与自检同一条 `vision_ask`（不是探测用的 `vision_ask_raw`）—— 测的就是那条路。
+/// 图用 1×1 PNG（成本可忽略）。
+#[tauri::command]
+pub async fn ai_test_selfcheck(
+    app: AppHandle,
+    profile_id: Option<String>,
+    // 前端用 `resolveMediaConfig()` 解析出的 **vision 档**（可为空）。
+    // 刻意收原始 JSON 再由这里反序列化，而不是让前端拆成散字段 ——
+    // 散字段就意味着前端在做一次"解析"，两套解析迟早会漂移。
+    vision: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let cfg: Option<MediaToolCfg> = vision.and_then(|v| serde_json::from_value(v).ok());
+    let app_level = crate::services::ai_service::ai_profile::load_config(&app)
+        .media_models
+        .get("vision")
+        .is_some();
+
+    let (pid, model, url, key) =
+        match resolve_vision_target(cfg.as_ref(), profile_id.as_deref(), app_level) {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(json!({
+                    "ok": false, "stage": "resolution", "detail": e, "via": "",
+                }))
+            }
+        };
+
+    let via = format!(
+        "档案 {} ｜ 模型 {} ｜ 端点 {}",
+        pid.as_deref().unwrap_or("（跟随当前对话档案）"),
+        model.as_deref().unwrap_or("（用档案里配的）"),
+        url.as_deref().unwrap_or("（档案自带）"),
+    );
+
+    let q = "这是一张 1×1 的测试图。请确认你能看到图片，只回复「看到」两个字。";
+    match crate::services::ai_service::ai_ocr::vision_ask(
+        &app,
+        PROBE_PNG_B64,
+        "image/png",
+        Some(q),
+        pid.as_deref(),
+        model.as_deref(),
+        url.as_deref(),
+        key.as_deref(),
+    )
+    .await
+    {
+        Ok(text) => Ok(json!({
+            "ok": true, "stage": "ok",
+            "detail": text.chars().take(300).collect::<String>(),
+            "via": via,
+        })),
+        Err(e) => Ok(json!({ "ok": false, "stage": "request", "detail": e, "via": via })),
+    }
 }
 
 // ========== 批次探测（一键把所有未知模型扫一遍）==========

@@ -82,6 +82,12 @@ pub(crate) struct MediaToolCfg {
     /// ComfyUI：checkpoint 模型文件名。**空串是正常值** = 让后端自动挑一个
     /// （见 `multimodal_service::resolve_checkpoint_choice`）。
     pub(crate) ckpt: String,
+    /// 「生成后自动自检」开关（设置页那一处；`None` = 用默认，**默认开**）。
+    ///
+    /// 为什么挂在 cfg 上：Rust 读不到前端 localStorage，媒体配置本来就走参数通道下发。
+    /// 挂在 image 档是因为自检只发生在**出图之后**，两条出图路径（`generate_image` /
+    /// `comfyui_build_workflow`）读的都是 `ctx.media.image`。
+    pub(crate) selfcheck: Option<bool>,
     /// ComfyUI 内置流程的采样参数（采样器/调度器/步数/CFG/尺寸）。
     /// 来源是「本地生图」面板那一处配置，与面板上手动「生成」用的是同一套 ——
     /// 否则同一个内建流程会出现"面板里选 dpmpp、让 AI 画却还是 euler"的错位。
@@ -3391,9 +3397,12 @@ impl AiTool for GenerateImageTool {
         // 自检在组装 meta 之前做（data_url 之后要被移动进 meta）
         // 自检：模型显式给的 `check` 优先；**没给就回落到用户最近一条原话** ——
         // 让这一步默认发生，而不是指望模型想起来填（实测本地 9B 从不填）。
+        // 显式 check 一定跑；否则看设置里的「生成后自动自检」（默认开）。
+        // 关掉 = 连"回落用户原话"也不做 —— 省掉那次视觉调用。
         let explicit_check = check_request_of(args);
+        let auto_on = cfg.and_then(|c| c.selfcheck).unwrap_or(true);
         let auto = explicit_check.is_none();
-        let check = explicit_check.or_else(|| last_user_ask(ctx));
+        let check = explicit_check.or_else(|| if auto_on { last_user_ask(ctx) } else { None });
         let text = append_critique(ctx, text, &data_url, check.as_deref(), auto).await;
         let title: String = prompt.chars().take(60).collect();
         let mut meta = serde_json::json!({
@@ -3526,25 +3535,40 @@ impl AiTool for GenerateSpeechTool {
 ///
 /// 所以：**应用级配了就以应用级为准**；应用级为空时才用旧字段兜底（不丢老配置）。
 /// 媒体后端始终只提供**端点与凭证**这一件事。
-fn vision_target(
-    ctx: &ToolContext,
+/// 解析自检要走的视觉通道，返回 `(profileId, model, baseUrl, apiKey)`。
+///
+/// 优先级：**配好的视觉后端** → 否则**回落到当前对话档案**（多模态已是主流，
+/// 对话模型本身往往就能看图，没配视觉后端不该等于没有自检）。
+///
+/// ★ 抽成独立函数**是为了让"测试自检通道"按钮走同一段逻辑**。
+/// 如果测试与真实路径各写一套，测通了不代表能用 —— 那正是"让用户猜"。
+pub(crate) fn resolve_vision_target(
+    vision: Option<&MediaToolCfg>,
+    profile_id: Option<&str>,
+    app_level_vision_configured: bool,
 ) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>), String> {
-    if let Some(v) = ctx.media.vision.as_ref().filter(|c| c.is_ready()) {
+    if let Some(v) = vision.filter(|c| c.is_ready()) {
         if v.backend_kind != "openai" {
             return Err(format!("暂不支持的视觉后端类型：{}", v.backend_kind));
         }
-        let app_level_configured = crate::services::ai_service::ai_profile::load_config(&ctx.app)
-            .media_models
-            .get("vision")
-            .is_some();
         return Ok((
             v.profile_id.clone(),
-            if app_level_configured { None } else { v.model.clone() },
+            if app_level_vision_configured { None } else { v.model.clone() },
             Some(v.base_url.clone()).filter(|s| !s.is_empty()),
             Some(v.api_key.clone()).filter(|s| !s.is_empty()),
         ));
     }
-    Ok((ctx.profile_id.clone(), None, None, None))
+    Ok((profile_id.map(str::to_string), None, None, None))
+}
+
+fn vision_target(
+    ctx: &ToolContext,
+) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>), String> {
+    let app_level = crate::services::ai_service::ai_profile::load_config(&ctx.app)
+        .media_models
+        .get("vision")
+        .is_some();
+    resolve_vision_target(ctx.media.vision.as_ref(), ctx.profile_id.as_deref(), app_level)
 }
 
 /// 让视觉模型看一眼刚生成的媒体，按用户的原始要求指出最该改的点。
@@ -3585,9 +3609,13 @@ fn check_request_of(args: &serde_json::Value) -> Option<String> {
 
 /// 把自检结论追加到工具文本上。失败只附一句说明，不影响已生成的结果。
 ///
-/// `auto` = 这次自检是**系统自动补的**（模型没显式要求，见 `last_user_ask`）：
-/// 失败时**静默跳过**。理由：没配视觉后端时每张图都会带一句"未能自检"，
-/// 而模型并没要求过 —— 那是噪音。显式要求的失败仍然如实报告（模型要知道它没成）。
+/// `auto` = 这次自检是**系统自动补的**（模型没显式要求，见 `last_user_ask`），
+/// 只影响措辞：自动补的那次会带上"可在哪里关掉"的指引。
+///
+/// ⚠️ **两种失败都如实报告，不静默**。我最初把自动补的那次做成了静默，
+/// 理由是"没配视觉后端时每张图都带一句用户没要过的噪音"——但那是**让用户猜**：
+/// 图看着不对、自检又没动静，人根本不知道该去检查什么。用户明确要求显性化。
+/// 噪音问题改由**开关**解决（设置里可关掉自动自检），而不是靠隐藏失败。
 async fn append_critique(
     ctx: &ToolContext,
     text: String,
@@ -3598,7 +3626,11 @@ async fn append_critique(
     let Some(req) = check else { return text };
     match critique_output(ctx, data_url, req).await {
         Ok(c) => format!("{}\n\n自检（视觉模型对成图的评价，据此可再调整重试）：{}", text, c),
-        Err(_) if auto => text,
+        Err(e) if auto => format!(
+            "{}\n\n（自动自检未完成：{}｜可在 设置 → 模型 关掉「生成后自动自检」，或用「测试自检通道」看完整错误）",
+            text,
+            e.chars().take(160).collect::<String>()
+        ),
         Err(e) => format!("{}\n\n（未能自检：{}）", text, e),
     }
 }
@@ -4081,9 +4113,11 @@ impl AiTool for ComfyuiBuildWorkflowTool {
             ir.nodes.len()
         );
         // 同 comfyui_build_workflow：显式 check 优先，没给就回落到用户最近一条原话。
+        // 显式 check 一定跑；否则看设置里的「生成后自动自检」（默认开）。
         let explicit_check = check_request_of(args);
+        let auto_on = cfg.selfcheck.unwrap_or(true);
         let auto = explicit_check.is_none();
-        let check = explicit_check.or_else(|| last_user_ask(ctx));
+        let check = explicit_check.or_else(|| if auto_on { last_user_ask(ctx) } else { None });
         let text = append_critique(ctx, text, &data_url, check.as_deref(), auto).await;
         let mut meta = serde_json::json!({
             "card": card,

@@ -41,7 +41,7 @@ pub use ai_agent::{ai_chat_agent, ai_agent_approve, ai_agent_apply_edits, ai_age
 pub use ai_ocr::{ai_test_connection, ai_vision_ocr, translate_text, ai_ocr_enhance, ocr_export_pdf};
 pub use ai_conversations::{ai_get_conversations, ai_save_conversations};
 pub use image_store::{ai_media_usage, ai_media_cleanup};
-pub use caps_probe::ai_probe_vision;
+pub use caps_probe::{ai_probe_vision, ai_test_selfcheck};
 
 // Tauri command 宏在各子模块生成 __cmd__<name> / __tauri_command_name_<name> 符号，
 // main.rs 的 generate_handler 通过 ai_service::__cmd__* 路径引用，需一并重导出以保持路径不变。
@@ -52,5 +52,5 @@ pub use ai_agent::{__cmd__ai_chat_agent, __cmd__ai_agent_approve, __cmd__ai_agen
 pub use ai_ocr::{__cmd__ai_test_connection, __cmd__ai_vision_ocr, __cmd__translate_text, __cmd__ai_ocr_enhance, __cmd__ocr_export_pdf, __tauri_command_name_ai_test_connection, __tauri_command_name_ai_vision_ocr, __tauri_command_name_translate_text, __tauri_command_name_ai_ocr_enhance, __tauri_command_name_ocr_export_pdf};
 pub use ai_conversations::{__cmd__ai_get_conversations, __cmd__ai_save_conversations, __tauri_command_name_ai_get_conversations, __tauri_command_name_ai_save_conversations};
 pub use image_store::{__cmd__ai_media_usage, __cmd__ai_media_cleanup, __tauri_command_name_ai_media_usage, __tauri_command_name_ai_media_cleanup};
-pub use caps_probe::{__cmd__ai_probe_vision, __tauri_command_name_ai_probe_vision};
+pub use caps_probe::{__cmd__ai_probe_vision, __cmd__ai_test_selfcheck, __tauri_command_name_ai_probe_vision, __tauri_command_name_ai_test_selfcheck};
 
