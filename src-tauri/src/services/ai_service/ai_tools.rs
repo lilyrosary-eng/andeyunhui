@@ -116,6 +116,11 @@ where
     let mut notices: Vec<String> = Vec::new();
     for (i, cfg) in stations.iter().enumerate() {
         let label = station_label(cfg);
+        // 配置期降级（"工作流读不出来，退回内置流程"）**必须随结果呈现**，
+        // 否则用户会以为用的是他配好的流程 —— 这类误解比报错更难发现。
+        for n in &cfg.notes {
+            notices.push(format!("{kind_label}：「{label}」{n}"));
+        }
         match call(cfg.clone()).await {
             Ok(v) => {
                 if i > 0 {
@@ -206,6 +211,11 @@ pub(crate) struct MediaToolCfg {
     /// 报"本地 ComfyUI 失败"比报"comfyui·http://127.0.0.1:8188 失败"有用得多。
     #[serde(default)]
     pub(crate) name: String,
+    /// **配置期**的降级说明（前端在发请求之前就已经降级了，如"蓝图工作流读不出来，
+    /// 退回内置流程"）。前端没有面向用户的通道，所以带过来由这里并进运行期提示 ——
+    /// 否则用户会以为画出来的是他配好的工作流。
+    #[serde(default)]
+    pub(crate) notes: Vec<String>,
     /// 链里执行失败后怎么办：`"stop"` = 立刻报错（默认给本地后端），
     /// `"fallback"` = 转下一站（默认给云端）。兜底决策只能在 Rust 侧做 ——
     /// 前端在发请求时就退场了，它不知道这一站到底成没成。
@@ -4681,6 +4691,76 @@ mod tests {
         assert_eq!(v.profile_id.as_deref(), Some("p1"));
         assert!(v.is_ready());
         assert!(p.image.is_none(), "视觉不应落到 image 键上");
+    }
+
+    /// 链执行器：**每站策略**与**每次尝试都留痕**是这套兜底的两条命脉，
+    /// 以前完全没测（新增兜底时没有任何回归网）。
+    #[tokio::test]
+    async fn 兜底按每站策略执行且每次尝试都留提示() {
+        let mk = |name: &str, policy: &str| MediaToolCfg {
+            name: name.to_string(),
+            on_fail: Some(policy.to_string()),
+            ..Default::default()
+        };
+
+        // ① 首选 fallback + 第二站成功 → 转到第二站，两条提示都在
+        let primary = mk("本地", "fallback");
+        let alts = vec![mk("云端", "stop")];
+        let (res, notices) = run_media_chain("图像", &primary, &alts, |c| async move {
+            if c.name == "本地" {
+                Err("连接被拒绝".to_string())
+            } else {
+                Ok("图".to_string())
+            }
+        })
+        .await;
+        assert_eq!(res.unwrap(), "图");
+        assert!(
+            notices.iter().any(|n| n.contains("本地") && n.contains("连接被拒绝")),
+            "首站失败要留痕：{notices:?}"
+        );
+        assert!(
+            notices.iter().any(|n| n.contains("已兜底到「云端」")),
+            "兜底到哪一站必须说出来：{notices:?}"
+        );
+
+        // ② 策略 stop → **不转下一站**，错误原样返回
+        let primary = mk("本地", "stop");
+        let (res, notices) = run_media_chain("图像", &primary, &alts, |_c| async move {
+            Err::<String, String>("boom".to_string())
+        })
+        .await;
+        assert!(res.is_err());
+        assert!(notices.iter().any(|n| n.contains("策略为「立刻报错」")), "{notices:?}");
+        assert!(!notices.iter().any(|n| n.contains("已兜底到")), "不该转站：{notices:?}");
+
+        // ③ 全部失败 → 最后一条提示说"已是最后一站"，错误仍返回
+        let primary = mk("A", "fallback");
+        let alts = vec![mk("B", "fallback")];
+        let (res, notices) = run_media_chain("语音", &primary, &alts, |_c| async move {
+            Err::<String, String>("都挂了".to_string())
+        })
+        .await;
+        assert!(res.is_err());
+        assert!(notices.iter().any(|n| n.contains("已是最后一站")), "{notices:?}");
+        assert_eq!(notices.iter().filter(|n| n.contains("都挂了")).count(), 2, "两站都要留痕");
+
+        // ④ 配置期降级（notes）也要随结果出来
+        let primary = MediaToolCfg {
+            name: "本地".to_string(),
+            on_fail: Some("stop".to_string()),
+            notes: vec!["蓝图工作流不可用，本次退回内置流程".to_string()],
+            ..Default::default()
+        };
+        let (res, notices) = run_media_chain("图像", &primary, &[], |_c| async move {
+            Ok("图".to_string())
+        })
+        .await;
+        assert_eq!(res.unwrap(), "图");
+        assert!(
+            notices.iter().any(|n| n.contains("退回内置流程")),
+            "配置期降级不许静默：{notices:?}"
+        );
     }
 
     /// 自检回落要取"用户**最近**一条原话" —— 取最后一条而不是第一条：

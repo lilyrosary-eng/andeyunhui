@@ -38,6 +38,9 @@ export type MediaPayload = Partial<Record<MediaKind, MediaToolCfg>> & {
  * comfyui 档额外解析蓝图工作流（workflow + promptAt）；其余情况直接用路由结果。
  */
 async function cfgFor(r: ResolvedBackend): Promise<MediaToolCfg> {
+  // 配置期降级**一律记下来**（用户 2026-10-17 定的原则：不许静默）。
+  // 这些都会随请求下发，由 Rust 并进运行期提示呈现 + 落日志。
+  const notes: string[] = [];
   let cfg = toMediaToolCfg(r);
   // ComfyUI 档带上「已放行的自定义节点模块」：AI 自建工作流的安全审计要它。
   // 来源是用户设置（customNodes.ts），模型无法自行放行。
@@ -51,12 +54,18 @@ async function cfgFor(r: ResolvedBackend): Promise<MediaToolCfg> {
     try {
       const json = await invoke<unknown>('comfyui_read_workflow', { path: cfg.workflowPath });
       const k = detectWorkflow(json);
-      if (k !== 'unknown') {
+      if (k === 'unknown') {
+        notes.push(`蓝图工作流认不出格式（既非 UI 画布图也非 API 工作流），本次退回内置流程`);
+      } else {
         const info = await getObjectInfo(cfg.baseUrl).catch(() => undefined);
+        if (k === 'ui' && !info) {
+          notes.push('取不到 ComfyUI 节点定义（object_info），UI 画布图无法转换，本次退回内置流程');
+        }
         let apiWf: ApiWorkflow;
         if (k === 'ui') {
           if (info) {
             const res = convertGraphToApi(json, info);
+            if (!res.ok) notes.push(`工作流转换失败（${res.error}），本次退回内置流程`);
             apiWf = res.ok ? res.workflow : ({} as ApiWorkflow);
           } else {
             apiWf = {} as ApiWorkflow;
@@ -69,15 +78,23 @@ async function cfgFor(r: ResolvedBackend): Promise<MediaToolCfg> {
           const promptAt = pickPromptAt(params);
           const imageAt = pickImageAt(params);
           if (promptAt) {
-            return { ...cfg, workflow: apiWf, promptAt, ...(imageAt ? { imageAt } : {}) } as MediaToolCfg;
+            return {
+              ...cfg,
+              workflow: apiWf,
+              promptAt,
+              ...(imageAt ? { imageAt } : {}),
+              ...(notes.length ? { notes } : {}),
+            } as MediaToolCfg;
           }
+          notes.push('工作流里找不到提示词输入位（text），本次退回内置流程');
         }
       }
-    } catch {
-      /* 蓝图工作流不可用 → 落到 ckpt / 内置档 */
+    } catch (e) {
+      // 以前这里是空 catch —— 用户配了工作流、实际用的是内置流程，**他自己不可能知道**
+      notes.push(`蓝图工作流不可用（${String(e).slice(0, 120)}），本次退回内置流程`);
     }
   }
-  return cfg;
+  return notes.length ? { ...cfg, notes } : cfg;
 }
 
 /**
