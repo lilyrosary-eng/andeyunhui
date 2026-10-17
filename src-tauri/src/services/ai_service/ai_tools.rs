@@ -3641,6 +3641,21 @@ impl AiTool for GenerateSpeechTool {
                         )
                         .await
                     }
+                    // ComfyUI：跑用户的 **TTS 工作流**（文本经 `comfyui_prompt_slot` 写进
+                    // 工作流里的 text 输入；产出由 `pick_first_media` 按 audio 键取回）。
+                    //
+                    // ⚠️ **必须显式要求工作流**：不要求的话会落到内置 txt2img ——
+                    // 那个只会生成一张图，然后用"语音"的名义交出去。
+                    "comfyui" => {
+                        if cc.workflow.is_none() {
+                            return Err(
+                                "语音后端配的是 ComfyUI，但没有指定工作流。请在「本地生图」里选一个 \
+                                 TTS 工作流（内置 txt2img 只能出图，不能合成语音）"
+                                    .to_string(),
+                            );
+                        }
+                        generate_via_comfy(&cc, &t, None, None, None).await
+                    }
                     other => Err(format!("暂不支持的语音后端类型：{}", other)),
                 }
             }

@@ -64,8 +64,10 @@ describe('isBackendReady —— 降级判定的唯一依据', () => {
     expect(isBackendReady(b({ ...base, extras: {} }), 'image', noEp)).toBe(false);
     // 反向断言：条目自己填了 baseUrl 也**不再**让它变成就绪（这正是这次合并要钉住的）
     expect(isBackendReady(b({ ...base, baseUrl: 'http://127.0.0.1:9999', extras: {} }), 'image', noEp)).toBe(false);
-    // ComfyUI 首期只做 image
-    expect(isBackendReady(b({ ...base, caps: ['speech'], extras: {} }), 'speech')).toBe(false);
+    // ComfyUI 现在也能做**语音**（2026-10-17 用户批准：跑 TTS 工作流）。
+    // 仍然**不做视觉** —— 出图/合成是"生成"，看图回答才是它没有的能力。
+    expect(isBackendReady(b({ ...base, caps: ['speech'], extras: {} }), 'speech')).toBe(true);
+    expect(isBackendReady(b({ ...base, caps: ['vision'], extras: {} }), 'vision')).toBe(false);
   })
 
   it('openai：有 profileId 即可（凭证从档案解析），端点为可选', () => {
@@ -234,10 +236,13 @@ describe('vision 能力位 —— 与 image 是两个方向', () => {
   it('comfyui 是生图后端，vision 恒不就绪', () => {
     const comfy = b({
       id: 'c', kind: 'comfyui', apiKey: '', baseUrl: 'http://127.0.0.1:8188',
-      caps: ['image', 'vision'], extras: { ckpt: 'sd.safetensors' },
+      caps: ['image', 'vision', 'speech'], extras: { ckpt: 'sd.safetensors' },
     });
     expect(isBackendReady(comfy, 'image')).toBe(true);
     expect(isBackendReady(comfy, 'vision')).toBe(false);
+    // 语音**可以**（跑用户的 TTS 工作流）—— 与 vision 的区别是：
+    // 出图/合成都是"生成"，看图回答才是 ComfyUI 没有的能力。
+    expect(isBackendReady(comfy, 'speech')).toBe(true);
   })
 
   it('vision 与 image 不可互替', () => {

@@ -176,21 +176,34 @@ export function effectiveBaseUrl(b: MediaBackend, s: Storage = storage): string 
 }
 
 /**
- * 一条后端是否「配置完整」（可用于该能力）。
- * 这是**降级判定的唯一依据**：路由只跳过「未配置」的后端，不因执行失败而转下一个
- * （用户显式配了本地后端就是想用本地——可能为隐私或额度，静默转云端属越权且可能花钱）。
+ * 一条后端是否「配置完整」（可用于该能力）。**跳过"未配置"的依据就是它。**
+ *
+ * ⚠️ 别把它和"执行失败之后怎么办"混为一谈 —— 那是两件事：
+ *   - **未配置** → 路由直接跳过（本函数）
+ *   - **执行失败** → 看该站的 `onFail`（2026-10-17 起）：comfyui 默认 `stop`、
+ *     openai 默认 `fallback`，且**兜底一定显式提示**。
+ *
+ * 早期版本是"一律不转"，理由是"用户配了本地就是想用本地（隐私/额度），静默转云端属越权"。
+ * 那条理由**现在由 `onFail: 'stop'` 这个默认值承载**，而不是写死 —— 需要兜底的场合
+ * （云端偶发 429/503）不该跟着一起殉葬。
  */
 export function isBackendReady(b: MediaBackend, kind: MediaKind, s: Storage = storage): boolean {
   if (!b.caps.includes(kind)) return false;
   if (b.kind === 'comfyui') {
-    // ComfyUI 是**生图**后端，只做 image，不理解图片（vision 恒不就绪）。
+    // ComfyUI 能做两件：**出图** 与 **语音合成**（跑用户的 TTS 工作流）。
+    //
+    // ⚠️ **视觉仍然不做**，这是刻意的：ComfyUI 是"生成"侧，它没有"看图并回答"的能力。
+    // 想要本地视觉请用**本地的 OpenAI 兼容**视觉模型（LM Studio 之类）——
+    // 那条路已经通了，不需要绕 ComfyUI。
+    const comfyKinds: MediaKind[] = ['image', 'speech'];
+    if (!comfyKinds.includes(kind)) return false;
     //
     // 端点判据**仍然保留**（端点为空 = 连不上 = 未配置），只是端点的**来源**换成了
     // 「本地生图」面板那一处（见 effectiveBaseUrl）—— 条目自己的 baseUrl 不再生效。
     // 那一处带默认值（127.0.0.1:8188），所以加了条目通常就直接就绪；
     // 用户把面板端点清空时，这里仍能如实判为「未配置」。
     // ㊟ 刻意不简化成恒 true：那会连带失去「跳过未配置后端」这个语义的载体。
-    return kind === 'image' && effectiveBaseUrl(b, s) !== '';
+    return effectiveBaseUrl(b, s) !== '';
   }
   // openai 兼容：需能取到凭证与模型名。端点为可选（凭证经 profileId 从档案解析，
   // 或后端自带 apiKey + baseUrl）。
