@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use crate::services::ai_service::ai_profile::{ResolvedTarget, load_config, resolve_target};
+use crate::services::ai_service::ai_session::SessionEvent;
 use crate::services::mcp_service;
 use crate::services::{git_service, lsp_service, rag_service, skill_service};
 use crate::services::sandbox_service;
@@ -3255,7 +3256,7 @@ impl AiTool for GenerateImageTool {
                         "image": { "type": "integer", "description": "（可选）以用户发来的第几张图为底稿做图生图，从 1 开始。仅当用户明确要求「基于/参照/修改」某张附图时使用；纯文字作画时不要传。" },
                         "checkpoint": { "type": "string", "description": "（可选）指定用哪个 checkpoint 模型文件。**只在用户明确点名了某个模型时**填（如「用 waiIllustriousSDXL 画」），名字必须来自 comfyui_list_models 的返回值原文。留空则由系统按「设置页配置 > 列表第一个」自行选择；用你自己搭图的能力（comfyui_build_workflow）时不需要它。" },
                         "negative": { "type": "string", "description": "（可选）负向提示词——不希望出现的元素/质量缺陷，如「blurry, extra fingers, watermark」。留空则用内置默认质量词（text, watermark, worst quality, low quality, blurry）。当用户抱怨「画崩了/多手指/糊」时，把对应缺陷写进这里再重画，比只改正向提示词有效得多。仅对内置流程有效；若已启用用户自己的 ComfyUI 工作流，工作流内部的负向词不会被覆盖（功能会明确告知）。" },
-                        "check": { "type": "string", "description": "（可选）填用户最初的画面要求原文，系统会让视觉模型看一眼成图并指出最该改的 1-3 点。当用户要求「改到满意 / 反复调整」时用它来判断下一步改什么；普通一次成图不要传（会多花一次视觉调用）。" }
+                        "check": { "type": "string", "description": "（可选）要拿来对照的画面要求原文。**留空即可**：系统会自动用你最近收到的那条用户消息做自检（视觉模型看一眼成图并指出最该改的 1-3 点）。用户要求「改到满意 / 反复调整」时，直接照自检结论改就行，不必自己回想原文。" }
                     },
                     "required": ["prompt"]
                 }
@@ -3388,7 +3389,12 @@ impl AiTool for GenerateImageTool {
             format!("{}已生成（云端图片模型），已直接展示给用户，无需转述画面内容。", noun)
         };
         // 自检在组装 meta 之前做（data_url 之后要被移动进 meta）
-        let text = append_critique(ctx, text, &data_url, check_request_of(args).as_deref()).await;
+        // 自检：模型显式给的 `check` 优先；**没给就回落到用户最近一条原话** ——
+        // 让这一步默认发生，而不是指望模型想起来填（实测本地 9B 从不填）。
+        let explicit_check = check_request_of(args);
+        let auto = explicit_check.is_none();
+        let check = explicit_check.or_else(|| last_user_ask(ctx));
+        let text = append_critique(ctx, text, &data_url, check.as_deref(), auto).await;
         let title: String = prompt.chars().take(60).collect();
         let mut meta = serde_json::json!({
             "card": card,
@@ -3578,12 +3584,55 @@ fn check_request_of(args: &serde_json::Value) -> Option<String> {
 }
 
 /// 把自检结论追加到工具文本上。失败只附一句说明，不影响已生成的结果。
-async fn append_critique(ctx: &ToolContext, text: String, data_url: &str, check: Option<&str>) -> String {
+///
+/// `auto` = 这次自检是**系统自动补的**（模型没显式要求，见 `last_user_ask`）：
+/// 失败时**静默跳过**。理由：没配视觉后端时每张图都会带一句"未能自检"，
+/// 而模型并没要求过 —— 那是噪音。显式要求的失败仍然如实报告（模型要知道它没成）。
+async fn append_critique(
+    ctx: &ToolContext,
+    text: String,
+    data_url: &str,
+    check: Option<&str>,
+    auto: bool,
+) -> String {
     let Some(req) = check else { return text };
     match critique_output(ctx, data_url, req).await {
         Ok(c) => format!("{}\n\n自检（视觉模型对成图的评价，据此可再调整重试）：{}", text, c),
+        Err(_) if auto => text,
         Err(e) => format!("{}\n\n（未能自检：{}）", text, e),
     }
+}
+
+/// 从事件日志里取**最后一条非空用户发言**（纯函数，便于测试）。
+fn last_user_ask_in(events: &[SessionEvent]) -> Option<String> {
+    events.iter().rev().find_map(|e| match e {
+        SessionEvent::User { content, .. } => {
+            let s = content.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        }
+        _ => None,
+    })
+}
+
+/// 用户**最近一条原话**（当前会话的最后一条 User 事件）。
+///
+/// ## 为什么工具要自己去会话里捞
+/// 自检要的是"用户最初的画面要求原文"，而那个文本**不在工具参数里** —— 模型得主动填
+/// `check`。实测本地 9B **从不填**（它连"该不该迭代"都判断不好），于是这一整条
+/// "把能跑出图变成画得对"的机制形同不存在。
+///
+/// 工具手里有 `app` + `request_id`，而**会话文件就是按 request_id 命名的**
+/// （`run_agent` 也是这么 `load_agent_session` 的）⇒ 直接读会话日志的最后一条用户发言即可。
+/// 取"最后一条"而不是"第一条"：多轮追问（「再亮点」）时，最近那条才是要对照的要求。
+///
+/// 拿不到一律返回 `None`（就当没有自检，不是错误）。
+fn last_user_ask(ctx: &ToolContext) -> Option<String> {
+    let s = crate::services::ai_service::ai_session::load_agent_session(&ctx.app, &ctx.request_id)?;
+    last_user_ask_in(s.events())
 }
 
 /// 按 data URL 的**实际 MIME** 判定媒体卡片类型，返回 `(card, kind)`。
@@ -3958,7 +4007,7 @@ impl AiTool for ComfyuiBuildWorkflowTool {
                                 "required": ["key", "class_type"]
                             }
                         },
-                        "check": { "type": "string", "description": "（可选）填用户最初的画面要求原文。填了之后系统会让视觉模型看一眼成图并指出最该改的 1-3 点，你可以据此调整节点参数再跑一次——这是把「能跑出图」变成「画得对」的关键一步。仅在你准备迭代时填（会多花一次视觉调用）。" }
+                        "check": { "type": "string", "description": "（可选）要拿来对照的画面要求原文。**留空即可**：系统会**自动用你最近收到的那条用户消息**做自检，让视觉模型看一眼成图并指出最该改的 1-3 点，你据此调整参数再跑一次 —— 这是把「能跑出图」变成「画得对」的关键一步。只有当这次要对照的不是用户最近那句话时（例如中途换了要求），才需要显式填。" }
                     },
                     "required": ["nodes"]
                 }
@@ -4031,7 +4080,11 @@ impl AiTool for ComfyuiBuildWorkflowTool {
             noun,
             ir.nodes.len()
         );
-        let text = append_critique(ctx, text, &data_url, check_request_of(args).as_deref()).await;
+        // 同 comfyui_build_workflow：显式 check 优先，没给就回落到用户最近一条原话。
+        let explicit_check = check_request_of(args);
+        let auto = explicit_check.is_none();
+        let check = explicit_check.or_else(|| last_user_ask(ctx));
+        let text = append_critique(ctx, text, &data_url, check.as_deref(), auto).await;
         let mut meta = serde_json::json!({
             "card": card,
             "kind": kind,
@@ -4371,6 +4424,36 @@ mod tests {
         assert_eq!(v.profile_id.as_deref(), Some("p1"));
         assert!(v.is_ready());
         assert!(p.image.is_none(), "视觉不应落到 image 键上");
+    }
+
+    /// 自检回落要取"用户**最近**一条原话" —— 取最后一条而不是第一条：
+    /// 多轮追问（「再亮点」）时，最近那条才是这次成图要对照的要求。
+    /// 空白条目要跳过：它不该被当成"用户要求"。
+    #[test]
+    fn 取会话里最后一条用户原话() {
+        let mk = |content: &str| SessionEvent::User {
+            seq: 0,
+            content: content.to_string(),
+            image_refs: vec![],
+            resolved_images: vec![],
+        };
+
+        assert_eq!(last_user_ask_in(&[]), None);
+        // 只有助手事件 → 没得对照
+        assert_eq!(
+            last_user_ask_in(&[SessionEvent::Assistant {
+                seq: 0,
+                content: "好的".into(),
+                tool_calls: vec![],
+            }]),
+            None
+        );
+        // 多条 → 取最后一条
+        assert_eq!(last_user_ask_in(&[mk("画个猫"), mk("再亮点")]).as_deref(), Some("再亮点"));
+        // 末尾是空白 → 往前找
+        assert_eq!(last_user_ask_in(&[mk("画个猫"), mk("   ")]).as_deref(), Some("画个猫"));
+        // 两侧空白要裁掉
+        assert_eq!(last_user_ask_in(&[mk("  画个猫  ")]).as_deref(), Some("画个猫"));
     }
 
     #[test]
