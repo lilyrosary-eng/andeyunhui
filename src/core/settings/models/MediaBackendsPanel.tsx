@@ -12,7 +12,7 @@
 //
 // 本面板只负责「编辑清单 + 排序路由」，不承载 ComfyUI 工作流库 / 供应商档案的编辑
 // （那些仍在各自面板里），避免职责重复。
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, Eye, RotateCcw, Activity, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -84,6 +84,241 @@ function fmtBytes(n: number): string {
   return `${n} B`;
 }
 
+/**
+ * 一个后端的**完整配置**（名称 / 端点 / 凭证 / 提供能力 / 失败策略）。
+ *
+ * 为什么抽成组件：这套字段要在**两个地方**出现 —— 「所有后端」的卡片，以及
+ * **能力链行内展开**（B 方案的核心：不用在"链"和"清单"之间来回滚动）。
+ * 抽出来只有一份编辑界面；两处渲染的是**同一个对象**，改哪处都一样。
+ */
+function BackendDetail({
+  b,
+  t,
+  providers,
+  updateBackend,
+  updateExtras,
+  removeBackend,
+  toggleCap,
+  localityOf,
+}: {
+  b: MediaBackend;
+  t: TFunc;
+  providers: ProviderUi[];
+  updateBackend: (id: string, patch: Partial<MediaBackend>) => void;
+  updateExtras: (id: string, patch: Partial<MediaBackend['extras']>) => void;
+  removeBackend: (id: string) => void;
+  toggleCap: (id: string, kind: MediaKind) => void;
+  localityOf: (x: MediaBackend) => 'local' | 'remote' | 'unknown';
+}) {
+  return (
+    <>
+      <div className="flex items-center gap-2 mb-2">
+        {/* 两枚徽章：**协议类型** 与 **本地/云端**。原先只有前者，且把 openai 一律写成
+            「云端」—— LM Studio 是本地服务却显示成"云端"，让人以为花的钱在云上。 */}
+        <span className="text-[11px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400">
+          {b.kind === 'comfyui' ? 'ComfyUI' : 'OpenAI 兼容'}
+        </span>
+        {(() => {
+          const loc = localityOf(b);
+          return (
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded ${
+                loc === 'local'
+                  ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                  : loc === 'remote'
+                    ? 'bg-neutral-500/10 text-neutral-500 dark:text-stone-400'
+                    : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+              }`}
+              title={loc === 'unknown' ? '端点为空且取不到档案的地址 —— 无法判断在本机还是远端' : ''}
+            >
+              {loc === 'local' ? '本地' : loc === 'remote' ? '云端' : '端点未知'}
+            </span>
+          );
+        })()}
+
+        <input
+          className={`${inputCls} flex-1`}
+          value={b.name}
+          onChange={(e) => updateBackend(b.id, { name: e.target.value })}
+          placeholder="后端名称"
+        />
+        <button
+          onClick={() => removeBackend(b.id)}
+          className="text-neutral-400 hover:text-red-500 shrink-0"
+          title="删除此后端"
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+
+      {b.kind === 'comfyui' && (
+        <div className="grid grid-cols-2 gap-2 mb-2">
+          <div>
+            {/* ★ 端点**不在这里配** —— 统一取「本地生图」面板那一处（`ai.comfyuiUrl`）。
+                以前这里能各配一个，结果「手动生图能用、让 AI 画却连不上」（或反过来）
+                且完全看不出原因。自用单机单实例，一处就够（见 effectiveBaseUrl）。 */}
+            <label className={labelCls}>{t('modelSettings.mediaBackends.comfyEndpointFrom')}</label>
+            <div
+              className="px-3 py-2 rounded-lg text-xs font-mono truncate bg-neutral-50 dark:bg-stone-800/60 border border-dashed border-neutral-200 dark:border-stone-700 text-neutral-500 dark:text-stone-400"
+              title={effectiveBaseUrl(b)}
+            >
+              {effectiveBaseUrl(b) || '—'}
+            </div>
+          </div>
+          <div>
+            {/* ★ checkpoint **不在这里配** —— 统一取「本地生图」面板那一处（`ai.comfyuiCkpt`）。
+                以前两处都能填，改了其中一个另一个不跟着变 → 「面板里换了模型、让 AI 画却还是老模型」。
+                端点已经统一过，这里是漏掉的另一半（见 effectiveCkpt）。
+                空 = 自动（后端会挑列表第一个），所以空态也要显示成一句人话而不是空白。 */}
+            <label className={labelCls}>{t('modelSettings.mediaBackends.comfyCkptFrom')}</label>
+            <div
+              className="px-3 py-2 rounded-lg text-xs font-mono truncate bg-neutral-50 dark:bg-stone-800/60 border border-dashed border-neutral-200 dark:border-stone-700 text-neutral-500 dark:text-stone-400"
+              title={effectiveCkpt(b) || t('modelSettings.mediaBackends.ckptAuto')}
+            >
+              {effectiveCkpt(b) || t('modelSettings.mediaBackends.ckptAuto')}
+            </div>
+          </div>
+          <div>
+            <label className={labelCls}>蓝图工作流路径（可选）</label>
+            <input
+              className={inputCls}
+              value={b.extras.workflowPath ?? ''}
+              onChange={(e) => updateExtras(b.id, { workflowPath: e.target.value })}
+              placeholder="留空则用内置最小 txt2img"
+            />
+          </div>
+          <div>
+            <label className={labelCls}>技能包 slug（可选，失败写回）</label>
+            <input
+              className={inputCls}
+              value={b.extras.skillSlug ?? ''}
+              onChange={(e) => updateExtras(b.id, { skillSlug: e.target.value })}
+              placeholder="工作流技能包标识"
+            />
+          </div>
+        </div>
+      )}
+
+      {b.kind === 'openai' && (
+        <div className="space-y-2 mb-2">
+          {/* 「云端后端」到底是什么：**不另配端点与密钥**，而是直接借用某个
+              「算力来源档案」（供应商）的端点 + API Key 去调它的图片/语音模型。
+              所以这里要选的是"借谁的档案"，不是一个需要手打的 id。 */}
+          <p className="text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">
+            云端后端不自带端点与密钥 —— 它借用所选「算力来源档案」的端点 + API Key，
+            去调那家供应商的图片 / 语音模型。图片、语音两个能力可从不同的云端后端降级。
+          </p>
+          <div>
+            <label className={labelCls}>使用哪个算力来源档案</label>
+            {/* 原来是**自由文本输入 id** —— 用户既不知道有哪些 id 可用，打错也没提示。
+                现在改成从配置里已有的供应商中选，并在下方回显它解析到哪个端点。 */}
+            <InlineSelect
+              value={b.extras.profileId ?? ''}
+              onChange={(v) => updateExtras(b.id, { profileId: v })}
+              placeholder="跟随当前对话档案"
+              title="留空＝用当前对话正在用的那个档案"
+              searchThreshold={12}
+              groups={[
+                {
+                  label: '',
+                  options: [{ value: '', label: '跟随当前对话档案', hint: '默认' }],
+                },
+                {
+                  label: '算力来源档案',
+                  options: providers.map((p) => ({
+                    value: p.id,
+                    label: p.name || p.base_url || p.id,
+                    hint: p.base_url || undefined,
+                  })),
+                },
+              ]}
+            />
+            {(() => {
+              const pid = (b.extras.profileId ?? '').trim();
+              if (!pid) return null;
+              const hit = providers.find((x) => x.id === pid);
+              return hit ? (
+                <div className="mt-1 text-[10px] text-neutral-400 dark:text-stone-500 truncate" title={hit.base_url}>
+                  → {hit.name || hit.id} · {hit.base_url}
+                </div>
+              ) : (
+                <div className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
+                  ⚠ 配置里找不到这个档案（可能是旧值），调用时会失败
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+      {/* 模型名**不在**这里配：统一到**上方**「能力路由链」的对应行内联配置。
+          同一个后端可能同时提供图像/视觉/语音，各能力用的模型名不同 ——
+          放在后端卡片里会让用户按「后端」的思路填，而实际决策是按「能力」的；
+          而且会出现「卡片里填了、链上又填一处」的双入口歧义。 */}
+
+      {/* 能力声明 */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] text-neutral-500 dark:text-stone-400">提供能力：</span>
+        {ALL_KINDS.map((k) => {
+          const enabled = ENABLED_KINDS.includes(k);
+          const on = b.caps.includes(k);
+          return (
+            <button
+              key={k}
+              disabled={!enabled}
+              onClick={() => toggleCap(b.id, k)}
+              title={enabled ? '' : '首期暂未开放'}
+              className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                on
+                  ? 'border-sky-400 text-sky-600 dark:text-sky-400 bg-sky-500/10'
+                  : 'border-black/10 dark:border-white/10 text-neutral-400 dark:text-stone-500'
+              } ${enabled ? '' : 'opacity-40 cursor-not-allowed'}`}
+            >
+              {KIND_LABEL[k]}
+            </button>
+          );
+        })}
+        <span
+          className={`ml-auto text-[11px] ${
+            isBackendReady(b, b.caps[0] ?? 'image')
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : 'text-amber-600 dark:text-amber-400'
+          }`}
+        >
+          {b.caps.length === 0
+            ? '未声明能力'
+            : b.kind === 'comfyui'
+              ? b.baseUrl.trim()
+                ? '已配置'
+                : '缺端点'
+              : '已配置'}
+        </span>
+      </div>
+      {/* 失败策略：链里这一站失败之后怎么办。兜底只能由 Rust 决定（它才知道失败），
+          这里配的是**该后端的策略**（对它出现的所有能力链生效）。
+          本地服务若走 openai 协议（LM Studio），默认会落到"转下一站" ——
+          所以把当前值和"是默认还是你设的"都显示出来，别让人猜。 */}
+      <div className="flex items-center gap-2 flex-wrap mt-2">
+        <span className="text-[11px] text-neutral-500 dark:text-stone-400">失败时：</span>
+        <select
+          className="text-[11px] px-1.5 py-0.5 rounded border border-neutral-300 dark:border-stone-600 bg-transparent text-neutral-700 dark:text-stone-300"
+          value={effectiveOnFail(b)}
+          onChange={(e) => updateExtras(b.id, { onFail: e.target.value as 'stop' | 'fallback' })}
+        >
+          <option value="stop">立刻报错</option>
+          <option value="fallback">转下一站</option>
+        </select>
+        <span className="text-[10px] text-neutral-400 dark:text-stone-500">
+          {b.extras.onFail ? '（你设的，对所有能力链生效）' : '（默认值：ComfyUI 停、云端转）'}
+        </span>
+      </div>
+    </>
+  );
+}
+
+const inputCls =
+  'w-full rounded-lg border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5 px-2.5 py-1.5 text-[12px] outline-none focus:border-sky-400';
+const labelCls = 'text-[11px] text-neutral-500 dark:text-stone-400 mb-1 block';
+
 export function MediaBackendsPanel({
   t: _t,
   mediaModels,
@@ -110,16 +345,12 @@ export function MediaBackendsPanel({
     return gs;
   }, [providers]);
 
-  // 链与清单是**两块内容**：点链上的后端名要能跳到它的卡片并高亮。
-  // 没有这条对应关系时，两块只能靠名字自己对照 —— 用户说的"很乱"正是这里。
-  const [highlightId, setHighlightId] = useState<string | null>(null);
-  const highlightTimer = useRef<number | null>(null);
-  const jumpToBackend = useCallback((id: string) => {
-    document.getElementById(`mb-card-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    setHighlightId(id);
-    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
-    highlightTimer.current = window.setTimeout(() => setHighlightId(null), 1600);
-  }, []);
+  // 能力链行**就地展开配置**（B 方案的核心）：不用再滚到下面的清单去对照。
+  // 上一版是"点名字跳到卡片 + 高亮"—— 那还是要跨屏对照；就地展开把这一步省掉了，
+  // 所以跳转与高亮一并撤掉（同类能力留两个入口只会让人犹豫点哪个）。
+  // key 形如 `image:abc` —— 同一个后端可能在多条链里，各行的展开互不干扰。
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const toggleExpand = (key: string) => setExpandedKey((cur) => (cur === key ? null : key));
 
   /**
    * 这个后端**实际**落在本机还是远端 —— **按地址判，不按协议类型**。
@@ -328,9 +559,6 @@ export function MediaBackendsPanel({
     setRoutes({});
   };
 
-  const inputCls =
-    'w-full rounded-lg border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5 px-2.5 py-1.5 text-[12px] outline-none focus:border-sky-400';
-  const labelCls = 'text-[11px] text-neutral-500 dark:text-stone-400 mb-1 block';
 
   return (
     <div className="mt-6 rounded-2xl border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.02] p-4">
@@ -442,14 +670,19 @@ export function MediaBackendsPanel({
                   {rows.map((b, i) => {
                     const ready = isBackendReady(b, k);
                     return (
-                      <li key={b.id} className="flex items-center gap-2">
+                      <li key={b.id}>
+                        <div className="flex items-center gap-2">
                         <span className="text-[11px] text-neutral-400 dark:text-stone-500 w-4 shrink-0">{i + 1}.</span>
                         <button
-                          onClick={() => jumpToBackend(b.id)}
-                          className="text-[11px] text-left text-neutral-700 dark:text-stone-300 w-24 shrink-0 truncate hover:text-sky-500 hover:underline"
-                          title={`${b.name} —— 点击跳到它的端点与凭证`}
+                          onClick={() => toggleExpand(`${k}:${b.id}`)}
+                          className="flex items-center gap-0.5 text-[11px] text-left text-neutral-700 dark:text-stone-300 w-24 shrink-0 hover:text-sky-500"
+                          title="展开/收起它的配置（端点、凭证、能力、失败策略）"
                         >
-                          {b.name}
+                          <ChevronDown
+                            size={12}
+                            className={`shrink-0 transition-transform ${expandedKey === `${k}:${b.id}` ? 'rotate-180' : ''}`}
+                          />
+                          <span className="truncate">{b.name}</span>
                         </button>
                         {/* 模型名**不在这里** —— 统一在 AI 页的「媒体模型」区块配置（一处）。
                             能力链只管**路由**：走哪些后端、按什么顺序。
@@ -484,6 +717,23 @@ export function MediaBackendsPanel({
                         >
                           <ChevronDown size={12} />
                         </button>
+                        </div>
+                        {/* 就地展开配置：与「所有后端」里那张卡片**是同一个组件、同一个对象**，
+                            改哪处都一样 —— 不会再出现"两处都能配、不知道谁生效"。 */}
+                        {expandedKey === `${k}:${b.id}` && (
+                          <div className="mt-2 ml-5 rounded-lg border border-dashed border-neutral-200 dark:border-stone-700 p-2">
+                            <BackendDetail
+                              b={b}
+                              t={t}
+                              providers={providers}
+                              updateBackend={updateBackend}
+                              updateExtras={updateExtras}
+                              removeBackend={removeBackend}
+                              toggleCap={toggleCap}
+                              localityOf={localityOf}
+                            />
+                          </div>
+                        )}
                       </li>
                     );
                   })}
@@ -504,6 +754,8 @@ export function MediaBackendsPanel({
         </span>
         <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1">
           {t('modelSettings.mediaBackends.listHint')}
+          {' '}这里列**所有**后端（含没进任何能力链的）；上面的能力链里点后端名也能就地展开**同一份**配置 ——
+          同一个后端，改哪处都一样。
         </p>
       </div>
       {/* 后端清单 */}
@@ -514,214 +766,17 @@ export function MediaBackendsPanel({
           </div>
         )}
         {backends.map((b) => (
-          <div
-            key={b.id}
-            id={`mb-card-${b.id}`}
-            className={`rounded-xl border p-3 transition-shadow ${
-              highlightId === b.id
-                ? 'border-sky-400 ring-2 ring-sky-400/40'
-                : 'border-black/10 dark:border-white/10'
-            }`}
-          >
-            <div className="flex items-center gap-2 mb-2">
-              {/* 两枚徽章：**协议类型** 与 **本地/云端**。原先只有前者，且把 openai 一律写成
-                  「云端」—— LM Studio 是本地服务却显示成"云端"，让人以为花的钱在云上。 */}
-              <span className="text-[11px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400">
-                {b.kind === 'comfyui' ? 'ComfyUI' : 'OpenAI 兼容'}
-              </span>
-              {(() => {
-                const loc = localityOf(b);
-                return (
-                  <span
-                    className={`text-[10px] px-1.5 py-0.5 rounded ${
-                      loc === 'local'
-                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                        : loc === 'remote'
-                          ? 'bg-neutral-500/10 text-neutral-500 dark:text-stone-400'
-                          : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
-                    }`}
-                    title={loc === 'unknown' ? '端点为空且取不到档案的地址 —— 无法判断在本机还是远端' : ''}
-                  >
-                    {loc === 'local' ? '本地' : loc === 'remote' ? '云端' : '端点未知'}
-                  </span>
-                );
-              })()}
-
-              <input
-                className={`${inputCls} flex-1`}
-                value={b.name}
-                onChange={(e) => updateBackend(b.id, { name: e.target.value })}
-                placeholder="后端名称"
-              />
-              <button
-                onClick={() => removeBackend(b.id)}
-                className="text-neutral-400 hover:text-red-500 shrink-0"
-                title="删除此后端"
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-
-            {b.kind === 'comfyui' && (
-              <div className="grid grid-cols-2 gap-2 mb-2">
-                <div>
-                  {/* ★ 端点**不在这里配** —— 统一取「本地生图」面板那一处（`ai.comfyuiUrl`）。
-                      以前这里能各配一个，结果「手动生图能用、让 AI 画却连不上」（或反过来）
-                      且完全看不出原因。自用单机单实例，一处就够（见 effectiveBaseUrl）。 */}
-                  <label className={labelCls}>{t('modelSettings.mediaBackends.comfyEndpointFrom')}</label>
-                  <div
-                    className="px-3 py-2 rounded-lg text-xs font-mono truncate bg-neutral-50 dark:bg-stone-800/60 border border-dashed border-neutral-200 dark:border-stone-700 text-neutral-500 dark:text-stone-400"
-                    title={effectiveBaseUrl(b)}
-                  >
-                    {effectiveBaseUrl(b) || '—'}
-                  </div>
-                </div>
-                <div>
-                  {/* ★ checkpoint **不在这里配** —— 统一取「本地生图」面板那一处（`ai.comfyuiCkpt`）。
-                      以前两处都能填，改了其中一个另一个不跟着变 → 「面板里换了模型、让 AI 画却还是老模型」。
-                      端点已经统一过，这里是漏掉的另一半（见 effectiveCkpt）。
-                      空 = 自动（后端会挑列表第一个），所以空态也要显示成一句人话而不是空白。 */}
-                  <label className={labelCls}>{t('modelSettings.mediaBackends.comfyCkptFrom')}</label>
-                  <div
-                    className="px-3 py-2 rounded-lg text-xs font-mono truncate bg-neutral-50 dark:bg-stone-800/60 border border-dashed border-neutral-200 dark:border-stone-700 text-neutral-500 dark:text-stone-400"
-                    title={effectiveCkpt(b) || t('modelSettings.mediaBackends.ckptAuto')}
-                  >
-                    {effectiveCkpt(b) || t('modelSettings.mediaBackends.ckptAuto')}
-                  </div>
-                </div>
-                <div>
-                  <label className={labelCls}>蓝图工作流路径（可选）</label>
-                  <input
-                    className={inputCls}
-                    value={b.extras.workflowPath ?? ''}
-                    onChange={(e) => updateExtras(b.id, { workflowPath: e.target.value })}
-                    placeholder="留空则用内置最小 txt2img"
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>技能包 slug（可选，失败写回）</label>
-                  <input
-                    className={inputCls}
-                    value={b.extras.skillSlug ?? ''}
-                    onChange={(e) => updateExtras(b.id, { skillSlug: e.target.value })}
-                    placeholder="工作流技能包标识"
-                  />
-                </div>
-              </div>
-            )}
-
-            {b.kind === 'openai' && (
-              <div className="space-y-2 mb-2">
-                {/* 「云端后端」到底是什么：**不另配端点与密钥**，而是直接借用某个
-                    「算力来源档案」（供应商）的端点 + API Key 去调它的图片/语音模型。
-                    所以这里要选的是"借谁的档案"，不是一个需要手打的 id。 */}
-                <p className="text-[10px] leading-relaxed text-neutral-400 dark:text-stone-500">
-                  云端后端不自带端点与密钥 —— 它借用所选「算力来源档案」的端点 + API Key，
-                  去调那家供应商的图片 / 语音模型。图片、语音两个能力可从不同的云端后端降级。
-                </p>
-                <div>
-                  <label className={labelCls}>使用哪个算力来源档案</label>
-                  {/* 原来是**自由文本输入 id** —— 用户既不知道有哪些 id 可用，打错也没提示。
-                      现在改成从配置里已有的供应商中选，并在下方回显它解析到哪个端点。 */}
-                  <InlineSelect
-                    value={b.extras.profileId ?? ''}
-                    onChange={(v) => updateExtras(b.id, { profileId: v })}
-                    placeholder="跟随当前对话档案"
-                    title="留空＝用当前对话正在用的那个档案"
-                    searchThreshold={12}
-                    groups={[
-                      {
-                        label: '',
-                        options: [{ value: '', label: '跟随当前对话档案', hint: '默认' }],
-                      },
-                      {
-                        label: '算力来源档案',
-                        options: providers.map((p) => ({
-                          value: p.id,
-                          label: p.name || p.base_url || p.id,
-                          hint: p.base_url || undefined,
-                        })),
-                      },
-                    ]}
-                  />
-                  {(() => {
-                    const pid = (b.extras.profileId ?? '').trim();
-                    if (!pid) return null;
-                    const hit = providers.find((x) => x.id === pid);
-                    return hit ? (
-                      <div className="mt-1 text-[10px] text-neutral-400 dark:text-stone-500 truncate" title={hit.base_url}>
-                        → {hit.name || hit.id} · {hit.base_url}
-                      </div>
-                    ) : (
-                      <div className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
-                        ⚠ 配置里找不到这个档案（可能是旧值），调用时会失败
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-            )}
-            {/* 模型名**不在**这里配：统一到**上方**「能力路由链」的对应行内联配置。
-                同一个后端可能同时提供图像/视觉/语音，各能力用的模型名不同 ——
-                放在后端卡片里会让用户按「后端」的思路填，而实际决策是按「能力」的；
-                而且会出现「卡片里填了、链上又填一处」的双入口歧义。 */}
-
-            {/* 能力声明 */}
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[11px] text-neutral-500 dark:text-stone-400">提供能力：</span>
-              {ALL_KINDS.map((k) => {
-                const enabled = ENABLED_KINDS.includes(k);
-                const on = b.caps.includes(k);
-                return (
-                  <button
-                    key={k}
-                    disabled={!enabled}
-                    onClick={() => toggleCap(b.id, k)}
-                    title={enabled ? '' : '首期暂未开放'}
-                    className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
-                      on
-                        ? 'border-sky-400 text-sky-600 dark:text-sky-400 bg-sky-500/10'
-                        : 'border-black/10 dark:border-white/10 text-neutral-400 dark:text-stone-500'
-                    } ${enabled ? '' : 'opacity-40 cursor-not-allowed'}`}
-                  >
-                    {KIND_LABEL[k]}
-                  </button>
-                );
-              })}
-              <span
-                className={`ml-auto text-[11px] ${
-                  isBackendReady(b, b.caps[0] ?? 'image')
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : 'text-amber-600 dark:text-amber-400'
-                }`}
-              >
-                {b.caps.length === 0
-                  ? '未声明能力'
-                  : b.kind === 'comfyui'
-                    ? b.baseUrl.trim()
-                      ? '已配置'
-                      : '缺端点'
-                    : '已配置'}
-              </span>
-            </div>
-            {/* 失败策略：链里这一站失败之后怎么办。兜底只能由 Rust 决定（它才知道失败），
-                这里配的是**该后端的策略**（对它出现的所有能力链生效）。
-                本地服务若走 openai 协议（LM Studio），默认会落到"转下一站" ——
-                所以把当前值和"是默认还是你设的"都显示出来，别让人猜。 */}
-            <div className="flex items-center gap-2 flex-wrap mt-2">
-              <span className="text-[11px] text-neutral-500 dark:text-stone-400">失败时：</span>
-              <select
-                className="text-[11px] px-1.5 py-0.5 rounded border border-neutral-300 dark:border-stone-600 bg-transparent text-neutral-700 dark:text-stone-300"
-                value={effectiveOnFail(b)}
-                onChange={(e) => updateExtras(b.id, { onFail: e.target.value as 'stop' | 'fallback' })}
-              >
-                <option value="stop">立刻报错</option>
-                <option value="fallback">转下一站</option>
-              </select>
-              <span className="text-[10px] text-neutral-400 dark:text-stone-500">
-                {b.extras.onFail ? '（你设的，对所有能力链生效）' : '（默认值：ComfyUI 停、云端转）'}
-              </span>
-            </div>
+          <div key={b.id} className="rounded-xl border border-black/10 dark:border-white/10 p-3">
+            <BackendDetail
+              b={b}
+              t={t}
+              providers={providers}
+              updateBackend={updateBackend}
+              updateExtras={updateExtras}
+              removeBackend={removeBackend}
+              toggleCap={toggleCap}
+              localityOf={localityOf}
+            />
           </div>
         ))}
       </div>
