@@ -1212,6 +1212,8 @@ export const jaJP: Record<string, string> = {
   'modelSettings.mediaBackends.confirmClean': '{n} 日以前のメディアファイルを削除しますか？元に戻せません。',
   'modelSettings.mediaBackends.confirmCleanAll': 'すべてのメディアファイルを削除しますか？元に戻せません。',
   'modelSettings.mediaBackends.cleaned': '{n} 件削除 · {size} 解放',
+  'modelSettings.mediaBackends.listHint': 'ここでは各バックエンドの**接続方法**を決めます。「どれを・どの順で」は上の能力チェーンで決まります。',
+  'modelSettings.mediaBackends.listTitle': '演算バックエンド（エンドポイントと認証情報）',
   'modelSettings.mediaBackends.ckptAuto': '自動（一覧の先頭）',
   'modelSettings.mediaBackends.comfyCkptFrom': 'Checkpoint（「ローカル画像生成」パネルより）',
   'modelSettings.mediaBackends.comfyEndpointFrom': 'エンドポイント（「ローカル画像生成」パネルより）',

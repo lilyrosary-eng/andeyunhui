@@ -1215,6 +1215,8 @@ export const zhTW: Record<string, string> = {
   'modelSettings.mediaBackends.confirmClean': '清理 {n} 天前的媒體檔案？此操作不可復原。',
   'modelSettings.mediaBackends.confirmCleanAll': '清空全部媒體檔案？此操作不可復原。',
   'modelSettings.mediaBackends.cleaned': '已清理 {n} 個 · 釋放 {size}',
+  'modelSettings.mediaBackends.listHint': '這裡決定每個後端**怎麼連**；「走誰、什麼順序」由上面的能力鏈決定。',
+  'modelSettings.mediaBackends.listTitle': '算力後端（端點與憑證）',
   'modelSettings.mediaBackends.ckptAuto': '自動（列表第一個）',
   'modelSettings.mediaBackends.comfyCkptFrom': 'Checkpoint（取自「本機生圖」面板）',
   'modelSettings.mediaBackends.comfyEndpointFrom': '端點（取自「本機生圖」面板）',

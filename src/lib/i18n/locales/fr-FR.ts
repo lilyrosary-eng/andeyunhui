@@ -1211,6 +1211,8 @@ export const frFR: Record<string, string> = {
   'modelSettings.mediaBackends.confirmClean': 'Supprimer les médias de plus de {n} jours ? Irréversible.',
   'modelSettings.mediaBackends.confirmCleanAll': 'Supprimer TOUS les médias ? Irréversible.',
   'modelSettings.mediaBackends.cleaned': '{n} supprimés · {size} libérés',
+  'modelSettings.mediaBackends.listHint': 'Ici on definit **comment** chaque backend se connecte ; **lequel** et dans quel ordre est decide par les chaines de capacites ci-dessus.',
+  'modelSettings.mediaBackends.listTitle': 'Backends de calcul (endpoint et identifiants)',
   'modelSettings.mediaBackends.ckptAuto': 'Auto (premier de la liste)',
   'modelSettings.mediaBackends.comfyCkptFrom': 'Checkpoint (depuis le panneau Generation locale)',
   'modelSettings.mediaBackends.comfyEndpointFrom': 'Point de terminaison (depuis le panneau Génération locale)',

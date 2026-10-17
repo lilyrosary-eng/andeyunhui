@@ -12,7 +12,7 @@
 //
 // 本面板只负责「编辑清单 + 排序路由」，不承载 ComfyUI 工作流库 / 供应商档案的编辑
 // （那些仍在各自面板里），避免职责重复。
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, Eye, RotateCcw, Activity, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -109,6 +109,17 @@ export function MediaBackendsPanel({
     }
     return gs;
   }, [providers]);
+
+  // 链与清单是**两块内容**：点链上的后端名要能跳到它的卡片并高亮。
+  // 没有这条对应关系时，两块只能靠名字自己对照 —— 用户说的"很乱"正是这里。
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const highlightTimer = useRef<number | null>(null);
+  const jumpToBackend = useCallback((id: string) => {
+    document.getElementById(`mb-card-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightId(id);
+    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
+    highlightTimer.current = window.setTimeout(() => setHighlightId(null), 1600);
+  }, []);
 
   /** 模型名 → 所属供应商名。口径与 Rust `find_provider_of_model` 一致：**全等**匹配。
    *  找不到就返回 null，UI 上要明确警示（而不是让用户以为配好了）。 */
@@ -325,6 +336,160 @@ export function MediaBackendsPanel({
         </span>
       </p>
 
+
+      {/* 能力路由链 */}
+      <div className="space-y-3">
+        {ENABLED_KINDS.map((k) => {
+          const Icon = KIND_ICON[k];
+          const chain = routeFor(k, routes);
+          const rows = chain
+            .map((id) => backends.find((b) => b.id === id))
+            .filter((b): b is MediaBackend => !!b);
+          return (
+            <div key={k}>
+              <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+                <Icon size={13} className="text-neutral-500 dark:text-stone-400" />
+                <span className="text-[12px] text-neutral-700 dark:text-stone-300">{KIND_LABEL[k]}能力链</span>
+                {/* ★ 「这个能力用哪个模型」的**唯一**入口。语义：
+                    留空 = **走模型自己的原生能力**（这是默认路径，多模态已是主流，
+                    对话模型本身往往就能看图）；选一个模型 = **兜底**，只在原生不可用时才走它。
+                    ## 为什么列表里**没有**「模型原生能力 / 跟随对话模型」这一项
+                    因为默认路径**永远先走**，它不是一个"可选项"。把它做成列表项会让人误以为
+                    "不选就不生效"，而列表本身表达的是**兜底候选**（用户明确要求过这一点）。
+                    要取消兜底用触发按钮右侧的 ×。
+                    ## 为什么不是自由输入
+                    后端按模型名**全等**找所属供应商，手打等于盲填（错一个字符就找不到，
+                    界面还看不出来）。所以只列配置里真实存在的模型，并在右侧标出它属于谁。 */}
+                {hasMediaModel(k) && (
+                  <InlineSelect
+                    className="ml-1"
+                    value={mediaModels[k as MediaModelKind] ?? ''}
+                    onChange={(v) => onChangeMediaModel(k as MediaModelKind, v)}
+                    onClear={() => onChangeMediaModel(k as MediaModelKind, '')}
+                    clearTitle={t('modelSettings.mediaModels.clearFallback')}
+                    title={t('modelSettings.mediaModels.pickHint')}
+                    placeholder={t('modelSettings.mediaModels.noFallback')}
+                    groups={modelGroups.map((g) => ({
+                      label: g.provider,
+                      options: g.models.map((name) => ({ value: name, label: name })),
+                    }))}
+                  />
+                )}
+                {/* 归属提示：让「能不能找到」这件事在界面上可见。
+                    下拉选项必然可解析，但历史手填值可能不在配置里 —— 那种情况必须警示。 */}
+                {hasMediaModel(k) &&
+                  (() => {
+                    const cur = mediaModels[k] ?? '';
+                    if (!cur.trim()) return null;
+                    const owner = ownerOf(cur);
+                    const r = testMsg?.kind === k ? testMsg : null;
+                    return (
+                      <>
+                        {owner ? (
+                          <span className="text-[10px] text-neutral-400 dark:text-stone-500">
+                            {t('modelSettings.mediaModels.via')} {owner}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-amber-600 dark:text-amber-400">
+                            {t('modelSettings.mediaModels.notFound')}
+                          </span>
+                        )}
+                        {/* 测试：真发一次最小请求。找不到归属时禁用 —— 连端点都定位不到，
+                            测也是白测。三种能力的代价不同，见 testKind 的说明。 */}
+                        <button
+                          onClick={() => void testKind(k)}
+                          disabled={testing !== null || !owner}
+                          className="px-1.5 py-0.5 rounded text-[10px] border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40 flex items-center gap-1 shrink-0"
+                          title={t('modelSettings.mediaModels.testHint')}
+                        >
+                          {testing === k ? <Loader2 size={10} className="animate-spin" /> : <Activity size={10} />}
+                          {testing === k ? t('modelSettings.mediaModels.testing') : t('modelSettings.mediaModels.test')}
+                        </button>
+                        {r && (
+                          <span
+                            className={`text-[10px] max-w-[260px] truncate ${r.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}
+                            title={r.text}
+                          >
+                            {r.ok ? '✓' : '✗'} {r.text}
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
+              </div>
+              {rows.length === 0 ? (
+                <div className="text-[11px] text-neutral-400 dark:text-stone-500 pl-4">
+                  未配置——对话里调用「{KIND_LABEL[k]}」相关工具会提示未配置。
+                </div>
+              ) : (
+                <ol className="pl-4 space-y-1">
+                  {rows.map((b, i) => {
+                    const ready = isBackendReady(b, k);
+                    return (
+                      <li key={b.id} className="flex items-center gap-2">
+                        <span className="text-[11px] text-neutral-400 dark:text-stone-500 w-4 shrink-0">{i + 1}.</span>
+                        <button
+                          onClick={() => jumpToBackend(b.id)}
+                          className="text-[11px] text-left text-neutral-700 dark:text-stone-300 w-24 shrink-0 truncate hover:text-sky-500 hover:underline"
+                          title={`${b.name} —— 点击跳到它的端点与凭证`}
+                        >
+                          {b.name}
+                        </button>
+                        {/* 模型名**不在这里** —— 统一在 AI 页的「媒体模型」区块配置（一处）。
+                            能力链只管**路由**：走哪些后端、按什么顺序。
+                            行内再放一个输入框会立刻变成双入口（上一版就是这么做的，
+                            用户随即反馈"两处都能配，不知道谁生效"）。 */}
+                        <span
+                          className="flex-1 min-w-0 text-[11px] text-neutral-400 dark:text-stone-500 truncate"
+                          title={b.kind === 'comfyui' ? b.baseUrl : b.name}
+                        >
+                          {b.kind === 'comfyui' ? (b.baseUrl || '未填端点') : ''}
+                        </span>
+                        <span
+                          className={`shrink-0 text-[10px] ${
+                            ready ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
+                          }`}
+                        >
+                          {ready ? '就绪' : '未配置（会跳过）'}
+                        </span>
+                        <button
+                          onClick={() => moveInRoute(k, b.id, -1)}
+                          disabled={i === 0}
+                          className="shrink-0 text-neutral-400 hover:text-sky-500 disabled:opacity-30"
+                          title="上移"
+                        >
+                          <ChevronUp size={12} />
+                        </button>
+                        <button
+                          onClick={() => moveInRoute(k, b.id, 1)}
+                          disabled={i === rows.length - 1}
+                          className="shrink-0 text-neutral-400 hover:text-sky-500 disabled:opacity-30"
+                          title="下移"
+                        >
+                          <ChevronDown size={12} />
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* 算力后端（端点与凭证）：这里决定**每个后端怎么连**；
+          「走谁、什么顺序」由**上方**的能力链决定。两块合起来才是完整路由。
+          （原来是清单在前、能力链在后，而顶部那句提示写的是「会按下列能力链…」——
+            指的东西排在再下面一块，第一眼就错位。） */}
+      <div className="mt-5 mb-2">
+        <span className="text-[12px] font-medium text-neutral-600 dark:text-stone-300">
+          {t('modelSettings.mediaBackends.listTitle')}
+        </span>
+        <p className="text-[11px] text-neutral-400 dark:text-stone-500 mt-1">
+          {t('modelSettings.mediaBackends.listHint')}
+        </p>
+      </div>
       {/* 后端清单 */}
       <div className="space-y-2 mb-4">
         {backends.length === 0 && (
@@ -333,7 +498,15 @@ export function MediaBackendsPanel({
           </div>
         )}
         {backends.map((b) => (
-          <div key={b.id} className="rounded-xl border border-black/10 dark:border-white/10 p-3">
+          <div
+            key={b.id}
+            id={`mb-card-${b.id}`}
+            className={`rounded-xl border p-3 transition-shadow ${
+              highlightId === b.id
+                ? 'border-sky-400 ring-2 ring-sky-400/40'
+                : 'border-black/10 dark:border-white/10'
+            }`}
+          >
             <div className="flex items-center gap-2 mb-2">
               <span className="text-[11px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400">
                 {b.kind === 'comfyui' ? 'ComfyUI' : '云端'}
@@ -452,7 +625,7 @@ export function MediaBackendsPanel({
                 </div>
               </div>
             )}
-            {/* 模型名**不在**这里配：统一到下方「能力路由链」的对应行内联配置。
+            {/* 模型名**不在**这里配：统一到**上方**「能力路由链」的对应行内联配置。
                 同一个后端可能同时提供图像/视觉/语音，各能力用的模型名不同 ——
                 放在后端卡片里会让用户按「后端」的思路填，而实际决策是按「能力」的；
                 而且会出现「卡片里填了、链上又填一处」的双入口歧义。 */}
@@ -512,146 +685,6 @@ export function MediaBackendsPanel({
         >
           <Plus size={12} /> 云端后端
         </button>
-      </div>
-
-      {/* 能力路由链 */}
-      <div className="space-y-3">
-        {ENABLED_KINDS.map((k) => {
-          const Icon = KIND_ICON[k];
-          const chain = routeFor(k, routes);
-          const rows = chain
-            .map((id) => backends.find((b) => b.id === id))
-            .filter((b): b is MediaBackend => !!b);
-          return (
-            <div key={k}>
-              <div className="flex items-center gap-1.5 mb-1 flex-wrap">
-                <Icon size={13} className="text-neutral-500 dark:text-stone-400" />
-                <span className="text-[12px] text-neutral-700 dark:text-stone-300">{KIND_LABEL[k]}能力链</span>
-                {/* ★ 「这个能力用哪个模型」的**唯一**入口。语义：
-                    留空 = **走模型自己的原生能力**（这是默认路径，多模态已是主流，
-                    对话模型本身往往就能看图）；选一个模型 = **兜底**，只在原生不可用时才走它。
-                    ## 为什么列表里**没有**「模型原生能力 / 跟随对话模型」这一项
-                    因为默认路径**永远先走**，它不是一个"可选项"。把它做成列表项会让人误以为
-                    "不选就不生效"，而列表本身表达的是**兜底候选**（用户明确要求过这一点）。
-                    要取消兜底用触发按钮右侧的 ×。
-                    ## 为什么不是自由输入
-                    后端按模型名**全等**找所属供应商，手打等于盲填（错一个字符就找不到，
-                    界面还看不出来）。所以只列配置里真实存在的模型，并在右侧标出它属于谁。 */}
-                {hasMediaModel(k) && (
-                  <InlineSelect
-                    className="ml-1"
-                    value={mediaModels[k as MediaModelKind] ?? ''}
-                    onChange={(v) => onChangeMediaModel(k as MediaModelKind, v)}
-                    onClear={() => onChangeMediaModel(k as MediaModelKind, '')}
-                    clearTitle={t('modelSettings.mediaModels.clearFallback')}
-                    title={t('modelSettings.mediaModels.pickHint')}
-                    placeholder={t('modelSettings.mediaModels.noFallback')}
-                    groups={modelGroups.map((g) => ({
-                      label: g.provider,
-                      options: g.models.map((name) => ({ value: name, label: name })),
-                    }))}
-                  />
-                )}
-                {/* 归属提示：让「能不能找到」这件事在界面上可见。
-                    下拉选项必然可解析，但历史手填值可能不在配置里 —— 那种情况必须警示。 */}
-                {hasMediaModel(k) &&
-                  (() => {
-                    const cur = mediaModels[k] ?? '';
-                    if (!cur.trim()) return null;
-                    const owner = ownerOf(cur);
-                    const r = testMsg?.kind === k ? testMsg : null;
-                    return (
-                      <>
-                        {owner ? (
-                          <span className="text-[10px] text-neutral-400 dark:text-stone-500">
-                            {t('modelSettings.mediaModels.via')} {owner}
-                          </span>
-                        ) : (
-                          <span className="text-[10px] text-amber-600 dark:text-amber-400">
-                            {t('modelSettings.mediaModels.notFound')}
-                          </span>
-                        )}
-                        {/* 测试：真发一次最小请求。找不到归属时禁用 —— 连端点都定位不到，
-                            测也是白测。三种能力的代价不同，见 testKind 的说明。 */}
-                        <button
-                          onClick={() => void testKind(k)}
-                          disabled={testing !== null || !owner}
-                          className="px-1.5 py-0.5 rounded text-[10px] border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40 flex items-center gap-1 shrink-0"
-                          title={t('modelSettings.mediaModels.testHint')}
-                        >
-                          {testing === k ? <Loader2 size={10} className="animate-spin" /> : <Activity size={10} />}
-                          {testing === k ? t('modelSettings.mediaModels.testing') : t('modelSettings.mediaModels.test')}
-                        </button>
-                        {r && (
-                          <span
-                            className={`text-[10px] max-w-[260px] truncate ${r.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}
-                            title={r.text}
-                          >
-                            {r.ok ? '✓' : '✗'} {r.text}
-                          </span>
-                        )}
-                      </>
-                    );
-                  })()}
-              </div>
-              {rows.length === 0 ? (
-                <div className="text-[11px] text-neutral-400 dark:text-stone-500 pl-4">
-                  未配置——对话里调用「{KIND_LABEL[k]}」相关工具会提示未配置。
-                </div>
-              ) : (
-                <ol className="pl-4 space-y-1">
-                  {rows.map((b, i) => {
-                    const ready = isBackendReady(b, k);
-                    return (
-                      <li key={b.id} className="flex items-center gap-2">
-                        <span className="text-[11px] text-neutral-400 dark:text-stone-500 w-4 shrink-0">{i + 1}.</span>
-                        <span
-                          className="text-[11px] text-neutral-700 dark:text-stone-300 w-24 shrink-0 truncate"
-                          title={b.name}
-                        >
-                          {b.name}
-                        </span>
-                        {/* 模型名**不在这里** —— 统一在 AI 页的「媒体模型」区块配置（一处）。
-                            能力链只管**路由**：走哪些后端、按什么顺序。
-                            行内再放一个输入框会立刻变成双入口（上一版就是这么做的，
-                            用户随即反馈"两处都能配，不知道谁生效"）。 */}
-                        <span
-                          className="flex-1 min-w-0 text-[11px] text-neutral-400 dark:text-stone-500 truncate"
-                          title={b.kind === 'comfyui' ? b.baseUrl : b.name}
-                        >
-                          {b.kind === 'comfyui' ? (b.baseUrl || '未填端点') : ''}
-                        </span>
-                        <span
-                          className={`shrink-0 text-[10px] ${
-                            ready ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
-                          }`}
-                        >
-                          {ready ? '就绪' : '未配置（会跳过）'}
-                        </span>
-                        <button
-                          onClick={() => moveInRoute(k, b.id, -1)}
-                          disabled={i === 0}
-                          className="shrink-0 text-neutral-400 hover:text-sky-500 disabled:opacity-30"
-                          title="上移"
-                        >
-                          <ChevronUp size={12} />
-                        </button>
-                        <button
-                          onClick={() => moveInRoute(k, b.id, 1)}
-                          disabled={i === rows.length - 1}
-                          className="shrink-0 text-neutral-400 hover:text-sky-500 disabled:opacity-30"
-                          title="下移"
-                        >
-                          <ChevronDown size={12} />
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ol>
-              )}
-            </div>
-          );
-        })}
       </div>
 
       {/* 媒体缓存占用与清理。放在这里而不是别处：它和上方的媒体后端/能力链同属

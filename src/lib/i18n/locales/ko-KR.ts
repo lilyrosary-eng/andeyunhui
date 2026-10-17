@@ -1212,6 +1212,8 @@ export const koKR: Record<string, string> = {
   'modelSettings.mediaBackends.confirmClean': '{n}일 이전 미디어 파일을 삭제할까요? 되돌릴 수 없습니다.',
   'modelSettings.mediaBackends.confirmCleanAll': '모든 미디어 파일을 삭제할까요? 되돌릴 수 없습니다.',
   'modelSettings.mediaBackends.cleaned': '{n}개 정리 · {size} 확보',
+  'modelSettings.mediaBackends.listHint': '여기서는 각 백엔드의 **연결 방식**을 정합니다. 무엇을 어떤 순서로 쓸지는 위의 능력 체인에서 결정됩니다.',
+  'modelSettings.mediaBackends.listTitle': '연산 백엔드(엔드포인트 및 자격 증명)',
   'modelSettings.mediaBackends.ckptAuto': '자동(목록 첫 번째)',
   'modelSettings.mediaBackends.comfyCkptFrom': 'Checkpoint(로컬 이미지 생성 패널에서)',
   'modelSettings.mediaBackends.comfyEndpointFrom': '엔드포인트(로컬 이미지 생성 패널에서)',

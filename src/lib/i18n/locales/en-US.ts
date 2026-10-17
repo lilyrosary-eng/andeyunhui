@@ -1284,6 +1284,8 @@ export const enUS: Record<string, string> = {
   'modelSettings.mediaBackends.confirmClean': 'Delete media files older than {n} days? This cannot be undone.',
   'modelSettings.mediaBackends.confirmCleanAll': 'Delete ALL media files? This cannot be undone.',
   'modelSettings.mediaBackends.cleaned': 'Removed {n} · freed {size}',
+  'modelSettings.mediaBackends.listHint': 'This defines **how** each backend connects; **which** one, in what order, is decided by the capability chains above.',
+  'modelSettings.mediaBackends.listTitle': 'Compute backends (endpoint & credentials)',
   'modelSettings.mediaBackends.ckptAuto': 'Auto (first in list)',
   'modelSettings.mediaBackends.comfyCkptFrom': 'Checkpoint (from the Local image panel)',
   'modelSettings.mediaBackends.comfyEndpointFrom': 'Endpoint (from the Local image panel)',

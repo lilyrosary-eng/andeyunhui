@@ -1212,6 +1212,8 @@ export const deDE: Record<string, string> = {
   'modelSettings.mediaBackends.confirmClean': 'Mediendateien älter als {n} Tage löschen? Nicht rückgängig zu machen.',
   'modelSettings.mediaBackends.confirmCleanAll': 'ALLE Mediendateien löschen? Nicht rückgängig zu machen.',
   'modelSettings.mediaBackends.cleaned': '{n} entfernt · {size} freigegeben',
+  'modelSettings.mediaBackends.listHint': 'Hier wird festgelegt, **wie** sich jeder Backend verbindet; **welcher** und in welcher Reihenfolge bestimmen die Faehigkeitsketten oben.',
+  'modelSettings.mediaBackends.listTitle': 'Compute-Backends (Endpunkt & Zugangsdaten)',
   'modelSettings.mediaBackends.ckptAuto': 'Automatisch (erster Eintrag)',
   'modelSettings.mediaBackends.comfyCkptFrom': 'Checkpoint (aus dem Panel Lokale Bilderzeugung)',
   'modelSettings.mediaBackends.comfyEndpointFrom': 'Endpunkt (aus dem Panel Lokale Bilderzeugung)',
