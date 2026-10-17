@@ -5,7 +5,7 @@
 //      复用用户在 ComfyUI 里调好的工作流（convert/params 为移植自 dsh-comfyui 的纯函数层）；
 //   ③ 把一个工作流标记为「蓝图生图节点使用」（存路径，蓝图 image 节点运行时读取）。
 // object_info 按端点做会话级缓存（数 MB，拉一次就够）。
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Image as ImageIcon, FolderOpen, RefreshCw, FileJson, Wand2, Loader2, GitBranch, X, ScrollText, ShieldAlert, Activity, Square, ChevronDown } from 'lucide-react';
@@ -214,10 +214,24 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     }
   };
 
+  /**
+   * 当前端点（ref 镜像）。`loadCkpts` 需要它，但**不能**把 `comfyuiUrl` 写进依赖数组：
+   * 那会让 loadCkpts 每次改 URL 都换引用 → 挂载 effect（依赖 loadCkpts）重跑 →
+   * 把用户正在输入的 URL 用存储里的旧值**重置掉**。用 ref 读就不产生响应式依赖。
+   */
+  const comfyuiUrlRef = useRef(comfyuiUrl);
+  useEffect(() => { comfyuiUrlRef.current = comfyuiUrl; }, [comfyuiUrl]);
+
   /** 拉 checkpoints 列表（失败静默 → 退回自由文本输入）。测试连接成功后也会重新拉一次。 */
   const loadCkpts = useCallback(async () => {
     try {
-      const names = await invoke<string[]>('comfyui_list_models', { folder: 'checkpoints' });
+      // ⚠️ comfyuiUrl 是**必填**（Rust 侧 `comfyui_url: String`）——
+      //    漏了它会直接 "invalid args"，下拉永远拉不到列表而静默退化成自由输入。
+      //    （这条是我自己写漏的，被本轮新增的参数名防线当场抓住。）
+      const names = await invoke<string[]>('comfyui_list_models', {
+        comfyuiUrl: comfyuiUrlRef.current.trim(),
+        folder: 'checkpoints',
+      });
       setCkptList(Array.isArray(names) ? names.filter((x) => typeof x === 'string' && x.trim()) : []);
     } catch {
       setCkptList([]);

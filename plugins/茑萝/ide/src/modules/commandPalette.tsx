@@ -102,7 +102,7 @@ export function CommandPalette({ open, onOpenChange, root, onOpenFile, commands,
     if (searchTimer.current) clearTimeout(searchTimer.current);
     searchTimer.current = window.setTimeout(async () => {
       try {
-        const hits = await hostApi.invoke<SearchHit[]>('search_content', { root, pattern: term, max_results: 100 });
+        const hits = await hostApi.invoke<SearchHit[]>('search_content', { root, pattern: term, maxResults: 100 });
         setSearchHits(hits);
       } catch (e) {
         setSearchHits([]);

@@ -233,7 +233,7 @@ function SheetEditorImpl({ activeId, title, onPersist }: SheetEditorProps) {
     try {
       const selected = await open({ multiple: false, filters: [{ name: 'Excel 文件', extensions: ['xlsx', 'xls'] }] });
       if (typeof selected !== 'string' || !selected) return;
-      const b64 = await hostApi.invoke<string>('read_file_base64', { path: selected });
+      const b64 = await hostApi.invoke<string>('read_file_base64', { filePath: selected });
       if (!b64) return;
       const wb = XLSX.read(b64, { type: 'base64' });
       const first = wb.SheetNames[0];
