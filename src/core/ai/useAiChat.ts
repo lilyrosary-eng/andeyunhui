@@ -663,7 +663,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         requestId: reqId,
         profileId: profileIdRef.current,
         messages: [{ role: 'user', content: userText }],
-        stream: true,
+        // 不传 stream：`ai_chat` 本身就是流式（它只推 ai-delta 事件），
+        // 原先这个键在 Rust 签名里不存在、被 serde 静默忽略 —— 是噪音，删掉。
         system,
       });
       return await done;

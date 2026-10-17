@@ -339,7 +339,8 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
     try {
       await invoke('ai_chat', {
         requestId: reqId, profileId: profileIdRef.current,
-        messages: [{ role: 'user', content: userText }], stream: true, system,
+        // 同 useAiChat：ai_chat 恒流式，没有 stream 参数，这个键只会被静默忽略。
+        messages: [{ role: 'user', content: userText }], system,
       });
       return await done;
     } catch (err) {

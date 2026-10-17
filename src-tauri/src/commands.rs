@@ -2847,16 +2847,33 @@ pub struct FileDialogFilter {
 
 /// 打开文件选择对话框，返回选中的文件路径列表
 #[tauri::command]
-pub async fn pick_file(app: tauri::AppHandle, filters: Option<Vec<FileDialogFilter>>) -> Result<Vec<String>, String> {
+pub async fn pick_file(
+    app: tauri::AppHandle,
+    filters: Option<Vec<FileDialogFilter>>,
+    // 对话框标题（可选）。
+    // ⚠️ 这两个参数**原先根本没有**，而三处调用方都在传 `title` / `multiple` ——
+    // serde 默认忽略未知字段，所以调用成功、参数**静默失效**（标题是系统默认、只能单选）。
+    // 是 `tauriCommands.test.ts` 的参数名防线把这三处翻出来的。
+    title: Option<String>,
+    // 是否允许多选（可选，默认 false = 单选）。
+    multiple: Option<bool>,
+) -> Result<Vec<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let mut builder = app.dialog().file();
+    if let Some(t) = title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        builder = builder.set_title(t);
+    }
     if let Some(filter_list) = &filters {
         for f in filter_list {
             let exts: Vec<&str> = f.extensions.iter().map(|s| s.as_str()).collect();
             builder = builder.add_filter(&f.name, &exts);
         }
     }
-    let files = builder.blocking_pick_files();
+    let files = if multiple.unwrap_or(false) {
+        builder.blocking_pick_files()
+    } else {
+        builder.blocking_pick_file().map(|p| vec![p])
+    };
     let paths: Vec<String> = files.unwrap_or_default().into_iter().map(|p| p.to_string()).collect();
     // 运行时把所选文件的父目录加入 asset scope，便于后续 convertFileSrc 加载
     for p in &paths {

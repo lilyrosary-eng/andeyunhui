@@ -446,25 +446,16 @@ function invokeCalls(): InvokeCall[] {
 }
 
 /**
- * 已核实、**暂不修**的参数名不匹配（每条写明理由与后果）。
+ * 参数名不匹配的**显式登记表**（每条必须写明理由与后果）。
  *
- * 这些都是"键名对不上 Rust 签名" —— 而 serde 默认**忽略未知字段**，所以调用**会成功**，
- * 只是那个参数**静默不起作用**。比"报错"更难发现，所以必须显式登记而不是悄悄放过。
- * 修它们要么改 Rust 签名（加参数 = 加功能），要么改调用点语义 —— 都不是机械改名，
- * 已单独报告给用户决定。
+ * ⚠️ **现在是空的** —— 2026-10-17 用户批准"需要就加"，原先登记的 4 类全部落地：
+ *   - `pick_file` 补了 `title` / `multiple`（原先调用方在传、Rust 没这两个参数、静默失效）
+ *   - `run_shell_command` 补了 `cwd`（同上）
+ *   - `ai_chat({stream})` 的键**直接删掉**（该命令恒流式，那个键只会被静默忽略）
+ * 空表意味着这条防线**全量拦截**：任何新的参数名不匹配都会被立刻打红。
+ * 日后若确实需要临时放过某条，**必须**在这里写清理由 —— 不允许悄悄放过。
  */
-const KNOWN_ARG_MISMATCH: Record<string, string> = {
-  // Rust: `pick_file(app: AppHandle, filters: Option<Vec<FileDialogFilter>>)` —— 没有 title 参数。
-  // 调用方想给对话框设标题，实际被忽略（对话框用系统默认标题）。
-  "pick_file({ title })": 'Rust 无 title 参数；要支持得给 pick_file 加参数（加功能，未做）',
-  // 同上：`pick_file` 也没有 multiple 参数 —— 调用方想多选，实际仍是单选。
-  "pick_file({ multiple })": 'Rust 无 multiple 参数；"多选"静默失效（要加参数，未做）',
-  // Rust: `run_shell_command(command: String)` —— 没有 cwd。
-  // 调用方想在指定目录执行，实际仍在默认 cwd 下执行。
-  "run_shell_command({ cwd })": 'Rust 无 cwd 参数；"在指定目录执行"静默失效（要加参数，未做）',
-  // Rust: `ai_chat` 没有 stream 参数（该命令本身恒为流式）。多余的键被忽略，无实际后果。
-  "ai_chat({ stream })": 'Rust 无 stream 参数（恒流式）；多余键被忽略，无害，但该删',
-};
+const KNOWN_ARG_MISMATCH: Record<string, string> = {};
 
 describe('前后端命令参数名契约', () => {
   // 只校验**桌面注册表里真实注册的**命令：别的名字（插件自定义、非命令函数）

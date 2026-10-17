@@ -15,7 +15,13 @@ use super::sandbox_service::{
 /// 在本地 shell 中执行命令（Windows 走 cmd /C，其它走 sh -c），返回合并后的 stdout/stderr。
 /// 用于 IDE 底部「终端」面板。注意：这是本地开发工具，命令以当前用户权限执行，无额外限制。
 #[tauri::command]
-pub fn run_shell_command(command: String) -> Result<String, String> {
+pub fn run_shell_command(
+    command: String,
+    // 工作目录（可选）。
+    // ⚠️ 原先没有这个参数，而调用方在传 `cwd` —— 静默失效，命令仍在默认目录执行。
+    // 目录不存在时由 `spawn` 直接报错（比"假装成功但在别处跑"好）。
+    cwd: Option<String>,
+) -> Result<String, String> {
     if command.trim().is_empty() {
         return Ok(String::new());
     }
@@ -26,6 +32,9 @@ pub fn run_shell_command(command: String) -> Result<String, String> {
 
     let mut c = Command::new(shell);
     c.args([flag, &command]);
+    if let Some(dir) = cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        c.current_dir(dir);
+    }
     #[cfg(windows)]
     c.creation_flags(0x08000000);
     let output = c.output()
