@@ -85,8 +85,7 @@ export class OnnxEmbedder implements Embedder {
   private async ensureInit(): Promise<void> {
     if (this.initPromise) return this.initPromise;
     this.initPromise = (async () => {
-      const worker = this.ensureWorker();
-      // 读取模型 + tokenizer 权重（经 Rust 代理，避免沙箱 fetch 限制）
+            // 读取模型 + tokenizer 权重（经 Rust 代理，避免沙箱 fetch 限制）
       const [modelBytes, tokBytes] = await Promise.all([
         readExternalDepBytes(this.modelPath),
         readExternalDepBytes(this.tokenizerPath),

@@ -1,0 +1,19 @@
+{
+  "build": {
+    "beforeDevCommand": ""
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "安得云荟 · 笔记",
+        "width": 1300,
+        "height": 740,
+        "center": true,
+        "decorations": false,
+        "dragDropEnabled": false,
+        "backgroundColor": "#f5f5f0",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaSession,HardwareMediaKeyHandling --remote-debugging-port=9223"
+      }
+    ]
+  }
+}

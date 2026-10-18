@@ -1,8 +1,13 @@
 // 摄取管线：文档 → Markdown → 分块 → 嵌入 → 入库。
 //
 // 首步复用 Rust 命令 convert_to_markdown（原生解析 docx/pptx/xlsx/pdf 等）；
-// 分块复用 chunkText 4000/200；嵌入默认走 ApiEmbedder（rag_embed_api 代理 Ollama/OpenAI），
-// 也可注入 OnnxEmbedder（全本地）；最后调用 rag_ingest 入库。
+// 分块复用 chunkText 4000/200；嵌入默认走 ApiEmbedder（rag_embed_api 代理），
+// 端点由 embed-config 三级解析决定（显式配置 → 复用算力来源 → Ollama 兜底）；
+// 也可注入 OnnxEmbedder（全本地）。最后调用 rag_ingest 入库。
+//
+// 2026-10-18 修复：
+//   - source 的 namespace 以前在接口里没有声明（TS excess property），补上 `namespace?: string`；
+//   - 默认嵌入器改为 createDefaultEmbedder()，失败时抛「带端点/模型」的可读错误。
 
 import {
   convertBytesToMarkdown,
@@ -12,8 +17,12 @@ import {
   type RagSourceInput,
 } from '../api/host';
 import { ApiEmbedder, type ApiEmbedderOptions } from '../embed/api-embedder';
+import { createDefaultEmbedder, describeEmbedError, type EmbedConfig } from '../embed/embed-config';
 import type { Embedder } from '../embed/embedder';
-import { chunkText } from './chunker';
+import { chunkDocument } from './chunker';
+
+/** 手动知识库的命名空间（与 AI 对话/IDE/攻防的记忆物理隔离）。 */
+export const RAG_NS_GENERAL = 'general';
 
 export interface IngestInput {
   /** 来源标题（展示用）。 */
@@ -22,6 +31,8 @@ export interface IngestInput {
   uri: string;
   /** 来源类型（默认 file）。 */
   type?: string;
+  /** 目标命名空间（默认 general：手动知识库）。 */
+  namespace?: string;
   /** 直接文本（已转换，优先于 base64/uri）。 */
   text?: string;
   /** 已转换的 Markdown（同 text）。 */
@@ -34,13 +45,14 @@ export interface IngestInput {
   originalName?: string;
   /** 本地文件路径（走 convert_to_markdown）。 */
   filePath?: string;
-  /** 嵌入器（默认 ApiEmbedder）。 */
+  /** 嵌入器（默认按 embed-config 解析）。 */
   embedder?: Embedder;
-  /** ApiEmbedder 选项（默认 Ollama + nomic-embed-text）。 */
+  /** ApiEmbedder 选项（显式指定端点时用，优先于 embed-config）。 */
   embedderOptions?: ApiEmbedderOptions;
-  /** 分块大小 / 重叠（默认 4000 / 200）。 */
-  chunkSize?: number;
-  chunkOverlap?: number;
+  /** 子块最大字符数（向量单元，默认 800）。 */
+  childSize?: number;
+  /** 父块最大字符数（上下文单元，默认 3000）。 */
+  parentSize?: number;
 }
 
 /**
@@ -66,31 +78,68 @@ export async function ingestDocument(
     throw new Error('文档转换结果为空，无法摄取');
   }
 
-  // 2) 分块
-  const chunks = chunkText(md, input.chunkSize, input.chunkOverlap);
-
-  // 3) 嵌入
-  const embedder = input.embedder ?? new ApiEmbedder(input.embedderOptions ?? {});
-  const texts = chunks.map((c) => c.text);
-  const vecs = await embedder.embed(texts);
-  if (vecs.length !== chunks.length) {
-    throw new Error(`嵌入数量不匹配：期望 ${chunks.length}，实际 ${vecs.length}`);
+  // 2) 分块（结构感知 + 小-大：父块只存文本，子块做向量）
+  const chunks = chunkDocument(md, input.childSize, input.parentSize);
+  const childs = chunks.filter((c) => !c.isParent);
+  const parents = chunks.length - childs.length;
+  console.info(`[rag] 分块完成：${childs.length} 个子块 / ${parents} 个父块（原文 ${md.length} 字符）`);
+  if (childs.length === 0) {
+    throw new Error('文档分块结果为空，无法摄取');
   }
+
+  // 3) 嵌入（只算子块；父块不参与向量检索）
+  let embedder: Embedder;
+  let cfg: EmbedConfig | null = null;
+  if (input.embedder) {
+    embedder = input.embedder;
+  } else if (input.embedderOptions) {
+    embedder = new ApiEmbedder(input.embedderOptions);
+  } else {
+    const picked = await createDefaultEmbedder();
+    embedder = picked.embedder;
+    cfg = picked.cfg;
+  }
+
+  let vecs: number[][];
+  try {
+    vecs = await embedder.embed(childs.map((c) => c.text));
+  } catch (e) {
+    const msg = describeEmbedError(cfg, e);
+    console.error('[rag] 摄取嵌入失败:', msg);
+    throw new Error(msg);
+  }
+  if (vecs.length !== childs.length) {
+    throw new Error(`嵌入数量不匹配：期望 ${childs.length}，实际 ${vecs.length}`);
+  }
+  const vecByChildIdx = new Map<number, number[]>();
+  childs.forEach((c, i) => vecByChildIdx.set(c.idx, vecs[i] ?? []));
 
   // 4) 入库
   const source: RagSourceInput = {
     title: input.title,
     uri: input.uri,
     type: input.type ?? 'file',
-    namespace: 'general', // 手动知识库与三 AI 子模块隔离
+    namespace: input.namespace ?? RAG_NS_GENERAL,
   };
-  const payload: RagChunkInput[] = chunks.map((c, i) => ({
+  const payload: RagChunkInput[] = chunks.map((c) => ({
     idx: c.idx,
     text: c.text,
     char_start: c.charStart,
     char_end: c.charEnd,
-    vec: vecs[i] ?? [],
-    meta: { char_start: c.charStart, char_end: c.charEnd },
+    // 父块 vec 为空数组：后端据此跳过向量检索、只在命中子块后回填上下文
+    vec: c.isParent ? [] : (vecByChildIdx.get(c.idx) ?? []),
+    parent_idx: c.parentIdx,
+    meta: {
+      char_start: c.charStart,
+      char_end: c.charEnd,
+      is_parent: c.isParent,
+      embed_model: cfg?.model ?? null,
+      embed_dim: c.isParent ? 0 : (vecByChildIdx.get(c.idx)?.length ?? 0),
+    },
   }));
-  return ragIngest(source, payload);
+  const res = await ragIngest(source, payload);
+  console.info(
+    `[rag] 入库完成：source=${res.source_id} 子块=${res.chunk_count} 父块=${parents} ns=${source.namespace}`,
+  );
+  return res;
 }

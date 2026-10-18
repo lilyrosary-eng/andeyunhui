@@ -2,15 +2,22 @@
 //
 // 与摄取对称：查询文本先经同一嵌入器向量化，再调后端 rag_query 做暴力余弦 top-k。
 // 后端「嵌入无关」，支持 ApiEmbedder（API）与 OnnxEmbedder（本地）无缝切换。
+//
+// 2026-10-18：默认嵌入器改为走 embed-config 的三级解析（显式配置 → 复用算力来源 →
+// Ollama 兜底），并在失败时抛出「带端点/模型」的可读错误，不再让 UI 只剩一句
+// 「嵌入请求失败」。
 
 import { ragQuery, type RagQueryResponse } from '../api/host';
 import { ApiEmbedder, type ApiEmbedderOptions } from '../embed/api-embedder';
+import { createDefaultEmbedder, describeEmbedError, type EmbedConfig } from '../embed/embed-config';
 import type { Embedder } from '../embed/embedder';
 
 export interface RetrieveOptions {
   topK?: number;
   embedder?: Embedder;
   embedderOptions?: ApiEmbedderOptions;
+  /** 最低相似度（后端可选参数，默认 0 = 不过滤）。 */
+  minScore?: number;
 }
 
 /**
@@ -21,10 +28,32 @@ export async function retrieve(
   opts: RetrieveOptions = {},
 ): Promise<RagQueryResponse> {
   if (!query.trim()) return { results: [], total: 0 };
-  const embedder = opts.embedder ?? new ApiEmbedder(opts.embedderOptions ?? {});
-  const [vec] = await embedder.embed([query]);
-  if (!vec || vec.length === 0) return { results: [], total: 0 };
-  return ragQuery(vec, opts.topK ?? 6, 'general');
+
+  let embedder: Embedder;
+  let cfg: EmbedConfig | null = null;
+  if (opts.embedder) {
+    embedder = opts.embedder;
+  } else if (opts.embedderOptions) {
+    embedder = new ApiEmbedder(opts.embedderOptions);
+  } else {
+    const picked = await createDefaultEmbedder();
+    embedder = picked.embedder;
+    cfg = picked.cfg;
+  }
+
+  let vec: number[] | undefined;
+  try {
+    [vec] = await embedder.embed([query]);
+  } catch (e) {
+    const msg = describeEmbedError(cfg, e);
+    console.error('[rag] 查询嵌入失败:', msg);
+    throw new Error(msg);
+  }
+  if (!vec || vec.length === 0) {
+    console.warn('[rag] 嵌入返回空向量，检索跳过');
+    return { results: [], total: 0 };
+  }
+  return ragQuery(vec, opts.topK ?? 6, 'general', opts.minScore);
 }
 
 /**

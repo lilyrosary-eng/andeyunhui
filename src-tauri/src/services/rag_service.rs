@@ -23,9 +23,39 @@ pub mod rag_namespace {
     pub const GENERAL: &str = "general"; // 通用（手动导入的知识库）
 }
 
+/// 按调用方身份推导命名空间（2026-10-18 新增，硬隔离）。
+///
+/// 背景：namespace 隔离此前是**靠调用方自觉**——插件可以从沙箱里传 `namespace: "ai-chat"`
+/// 直接读用户与 AI 伴侣的私人记忆，后端照单全收。`__HOST_API__.invoke` 会把 `pluginId`
+/// 注入每个命令参数（见 pluginSandbox.ts `invoke(command, {...args, pluginId})`），
+/// 所以后端可以据此**强制**限制：
+///   - 来自插件（plugin_id 非空）→ 一律落到 `general`（插件共用同一个手动知识库），
+///     传入其它 namespace 会被改写并打 warning；
+///   - 来自主应用（无 plugin_id，如 semanticMemory 的伴侣记忆）→ 沿用入参，缺省 ai-chat。
+///
+/// 残余风险：插件若绕过 __HOST_API__ 直接摸 __TAURI_INTERNALS__，就没有 plugin_id 了。
+/// 真正硬的边界需要 per-namespace 加密或按 webview 分窗，当前先堵住主路径。
+pub fn resolve_plugin_namespace(plugin_id: Option<&str>, requested: Option<String>) -> String {
+    if let Some(pid) = plugin_id {
+        let req = requested.unwrap_or_default();
+        if !req.is_empty() && req != rag_namespace::GENERAL {
+            log::warn!(
+                "[rag] 插件 {} 请求命名空间 '{}'，已强制改写为 '{}'（插件只能访问手动知识库）",
+                pid,
+                req,
+                rag_namespace::GENERAL
+            );
+        }
+        return rag_namespace::GENERAL.to_string();
+    }
+    requested
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| RAG_NS_DEFAULT.to_string())
+}
+
 use std::path::PathBuf;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri::Manager;
@@ -82,6 +112,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             vec         BLOB NOT NULL,
             meta        TEXT NOT NULL DEFAULT '{}',
             namespace   TEXT NOT NULL DEFAULT 'ai-chat',
+            parent_idx  INTEGER,
             FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
@@ -92,15 +123,46 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
 
     // 向后兼容：历史库（旧表无 namespace 列）幂等补列，统一回落默认命名空间。
     // 已存在的行 namespace 保持 DEFAULT 'ai-chat'，使旧伴侣记忆不丢失。
+    //
+    // 2026-10-18：改为先查 PRAGMA 再 ALTER。此前是「无条件 ALTER + `let _ =` 吞错」——
+    // 列已存在时每次 open_db 都以错误收场，而错误被丢掉，真正需要关注的 ALTER 失败也看不见。
     for tbl in ["sources", "chunks"] {
-        let _ = conn.execute(
-            &format!(
-                "ALTER TABLE {tbl} ADD COLUMN namespace TEXT NOT NULL DEFAULT 'ai-chat'"
-            ),
-            [],
-        );
+        if !has_column(conn, tbl, "namespace")? {
+            conn.execute(
+                &format!(
+                    "ALTER TABLE {tbl} ADD COLUMN namespace TEXT NOT NULL DEFAULT 'ai-chat'"
+                ),
+                [],
+            )
+            .map_err(|e| format!("为表 {tbl} 补 namespace 列失败: {}", e))?;
+            log::info!("[rag] 已为表 {tbl} 补 namespace 列（默认 ai-chat）");
+        }
+    }
+    // 小-大分块（2026-10-18）：chunks 增加 parent_idx，指向同 source 内的父块。
+    // 老数据没有该列值（NULL）⇒ 检索时按"无父块"处理，行为与旧版一致。
+    if !has_column(conn, "chunks", "parent_idx")? {
+        conn.execute("ALTER TABLE chunks ADD COLUMN parent_idx INTEGER", [])
+            .map_err(|e| format!("为表 chunks 补 parent_idx 列失败: {}", e))?;
+        log::info!("[rag] 已为表 chunks 补 parent_idx 列（小-大分块）");
     }
     Ok(())
+}
+
+/// 判断表是否存在某列（PRAGMA table_info）。
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({})", table))
+        .map_err(|e| format!("读取表 {table} 结构失败: {}", e))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询表 {table} 结构失败: {}", e))?;
+    while let Some(row) = rows.next().map_err(|e| format!("遍历表 {table} 结构失败: {}", e))? {
+        let name: String = row.get(1).map_err(|e| format!("读取列名失败: {}", e))?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // ============ 向量序列化 ============
@@ -173,7 +235,11 @@ pub struct RagChunkInput {
     pub char_start: i64,
     #[serde(default)]
     pub char_end: i64,
+    /// 向量。**空数组表示父块**：不参与向量检索，只在命中其子块后回填上下文。
     pub vec: Vec<f32>,
+    /// 父块 idx（小-大分块）。子块指向父块；父块自身为 None。
+    #[serde(default)]
+    pub parent_idx: Option<i64>,
     #[serde(default)]
     pub meta: Option<serde_json::Value>,
 }
@@ -247,6 +313,7 @@ pub fn rag_ingest(
     app: &AppHandle,
     source: RagSourceInput,
     chunks: Vec<RagChunkInput>,
+    plugin_id: Option<String>,
 ) -> Result<RagIngestResult, String> {
     if chunks.is_empty() {
         return Err("摄取失败：分块为空（请先分块并嵌入）".to_string());
@@ -254,17 +321,56 @@ pub fn rag_ingest(
     let mut conn = open_db(app)?;
     let source_id = uuid::Uuid::new_v4().to_string();
     let created_at = chrono::Local::now().to_rfc3339();
-    let chunk_count = chunks.len();
-    // 命名空间：优先用调用方显式指定，否则回落默认（保证历史/未声明方不串味）
-    let namespace = if source.namespace.is_empty() {
-        RAG_NS_DEFAULT.to_string()
+    // 命名空间：插件一律强制 general（见 resolve_plugin_namespace）；主应用按入参 / 默认。
+    let requested_ns = if source.namespace.trim().is_empty() {
+        None
     } else {
-        source.namespace.clone()
+        Some(source.namespace.clone())
     };
+    let namespace = resolve_plugin_namespace(plugin_id.as_deref(), requested_ns);
 
     let tx = conn
         .transaction()
         .map_err(|e| format!("开启事务失败: {}", e))?;
+
+    // 维度一致性校验（2026-10-18）：
+    // 余弦相似度要求两个向量同维，cosine() 对长度不等直接返回 0.0 —— 也就是说
+    // 「换了个嵌入模型」在旧实现里表现为**检索静默失效**（永远 0 分、top-k 变成随机 6 条），
+    // 而不是报错。这里在写入前拦下，并明确告知需要重建命名空间。
+    //
+    // 只校验**带向量的块**（子块）：父块 vec 为空是设计如此，不参与检索。
+    let vectorized: Vec<&RagChunkInput> = chunks.iter().filter(|c| !c.vec.is_empty()).collect();
+    let chunk_count = vectorized.len();
+    if chunk_count == 0 {
+        return Err("摄取失败：没有任何分块带向量（子块为空，检查分块/嵌入环节）".to_string());
+    }
+    let first_dim = vectorized[0].vec.len();
+    if let Some(bad) = vectorized.iter().find(|c| c.vec.len() != first_dim) {
+        return Err(format!(
+            "摄取失败：分块 #{} 向量维度 {} 与本批其他分块 {} 不一致",
+            bad.idx,
+            bad.vec.len(),
+            first_dim
+        ));
+    }
+    let existing_bytes: Option<i64> = tx
+        .query_row(
+            "SELECT length(vec) FROM chunks WHERE namespace = ?1 LIMIT 1",
+            params![namespace],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("查询命名空间既有向量维度失败: {}", e))?;
+    if let Some(bytes) = existing_bytes {
+        let existing_dim = (bytes.max(0) as usize) / 4;
+        if existing_dim != first_dim {
+            return Err(format!(
+                "摄取失败：命名空间 '{}' 已有向量是 {} 维，本次是 {} 维。\
+                 换嵌入模型后必须清空该命名空间的旧数据再重建，否则相似度恒为 0。",
+                namespace, existing_dim, first_dim
+            ));
+        }
+    }
 
     tx.execute(
         "INSERT INTO sources (id, title, uri, type, created_at, chunk_count, status, namespace)
@@ -282,8 +388,9 @@ pub fn rag_ingest(
     .map_err(|e| format!("写入来源失败: {}", e))?;
 
     for ch in &chunks {
-        // 维度校验：非 768 时给出明确警告但仍入库（兼容后续其他维度模型）
-        if ch.vec.len() != RAG_VECTOR_DIM {
+        // 维度校验：非 768 时给出明确警告但仍入库（兼容后续其他维度模型）。
+        // 父块（vec 为空）不参与检索，跳过该警告。
+        if !ch.vec.is_empty() && ch.vec.len() != RAG_VECTOR_DIM {
             log::warn!(
                 "[rag] chunk #{} 向量维度 {} ≠ RAG_VECTOR_DIM {}，检索相似度可能失真",
                 ch.idx,
@@ -299,8 +406,8 @@ pub fn rag_ingest(
             .map(|m| m.to_string())
             .unwrap_or_else(|| "{}".to_string());
         tx.execute(
-            "INSERT INTO chunks (id, source_id, idx, text, char_start, char_end, vec, meta, namespace)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO chunks (id, source_id, idx, text, char_start, char_end, vec, meta, namespace, parent_idx)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 chunk_id,
                 source_id,
@@ -310,7 +417,8 @@ pub fn rag_ingest(
                 ch.char_end,
                 blob,
                 meta,
-                namespace
+                namespace,
+                ch.parent_idx
             ],
         )
         .map_err(|e| format!("写入分块失败: {}", e))?;
@@ -325,25 +433,33 @@ pub fn rag_ingest(
 
 /// 语义检索：对 query_vec 做暴力余弦 top-k，返回命中（含来源标题）。
 /// `namespace` 限定检索范围（杜绝跨模块串味）；缺省回落默认命名空间。
+/// `min_score` 非空时丢弃低于阈值的命中（避免把无关块塞进 prompt 造成"被上下文带偏"）。
 pub fn rag_query(
     app: &AppHandle,
     query_vec: Vec<f32>,
     top_k: Option<usize>,
     namespace: Option<String>,
+    min_score: Option<f32>,
+    plugin_id: Option<String>,
 ) -> Result<RagQueryResult, String> {
     if query_vec.is_empty() {
         return Err("检索失败：查询向量为空".to_string());
     }
     let k = top_k.unwrap_or(6).max(1);
-    let ns = namespace.unwrap_or_else(|| RAG_NS_DEFAULT.to_string());
+    let ns = resolve_plugin_namespace(plugin_id.as_deref(), namespace);
     let conn = open_db(app)?;
 
-    // 一次性取出同一命名空间下所有分块向量 + 来源标题（JOIN sources 拿标题 + 命名空间过滤）
+    // 一次性取出同一命名空间下所有**带向量**的子块 + 来源标题 + 父块文本。
+    // 小-大分块：向量算在子块上（精准定位），返回给调用方的是父块（上下文完整）。
+    // `length(c.vec) > 0` 排除父块自身（父块 vec 为空，只作上下文载体）。
     let mut stmt = conn
         .prepare(
-            "SELECT c.text, c.char_start, c.char_end, c.vec, c.source_id, s.title
-             FROM chunks c JOIN sources s ON s.id = c.source_id
-             WHERE c.namespace = ?1 AND s.namespace = ?1
+            "SELECT c.text, c.char_start, c.char_end, c.vec, c.source_id, s.title,
+                    p.text, p.char_start, p.char_end
+             FROM chunks c
+             JOIN sources s ON s.id = c.source_id
+             LEFT JOIN chunks p ON p.source_id = c.source_id AND p.idx = c.parent_idx
+             WHERE c.namespace = ?1 AND s.namespace = ?1 AND length(c.vec) > 0
              ORDER BY c.source_id, c.idx",
         )
         .map_err(|e| format!("准备检索语句失败: {}", e))?;
@@ -351,22 +467,48 @@ pub fn rag_query(
     let rows = stmt
         .query_map(params![ns], |row| {
             Ok((
-                row.get::<_, String>(0)?,      // text
-                row.get::<_, i64>(1)?,         // char_start
-                row.get::<_, i64>(2)?,         // char_end
-                row.get::<_, Vec<u8>>(3)?,     // vec blob
-                row.get::<_, String>(4)?,      // source_id
-                row.get::<_, String>(5)?,      // source_title
+                row.get::<_, String>(0)?,          // text（子块）
+                row.get::<_, i64>(1)?,             // char_start（子块）
+                row.get::<_, i64>(2)?,             // char_end（子块）
+                row.get::<_, Vec<u8>>(3)?,         // vec blob
+                row.get::<_, String>(4)?,          // source_id
+                row.get::<_, String>(5)?,          // source_title
+                row.get::<_, Option<String>>(6)?,  // parent text
+                row.get::<_, Option<i64>>(7)?,     // parent char_start
+                row.get::<_, Option<i64>>(8)?,     // parent char_end
             ))
         })
         .map_err(|e| format!("执行检索失败: {}", e))?;
 
     let mut hits: Vec<RagHit> = Vec::new();
+    let mut dim_skipped = 0usize;
+    let mut score_filtered = 0usize;
+    let mut parent_filled = 0usize;
     for r in rows {
-        let (text, char_start, char_end, blob, source_id, source_title) =
+        let (child_text, c_cs, c_ce, blob, source_id, source_title, p_text, p_cs, p_ce) =
             r.map_err(|e| format!("读取分块失败: {}", e))?;
         let vec = blob_to_vec(&blob);
+        // 维度不一致说明该块来自另一个嵌入模型 —— cosine 会返回 0（静默失效），
+        // 这里显式跳过并统计，宁可少返回也不要给 LLM 一堆 0 分噪声。
+        if vec.len() != query_vec.len() {
+            dim_skipped += 1;
+            continue;
+        }
         let score = cosine(&query_vec, &vec);
+        if let Some(min) = min_score {
+            if score < min {
+                score_filtered += 1;
+                continue;
+            }
+        }
+        // 命中子块 → 用父块文本与区间（父块缺失时回落到子块，兼容老数据）
+        let (text, char_start, char_end) = match p_text {
+            Some(t) if !t.trim().is_empty() => {
+                parent_filled += 1;
+                (t, p_cs.unwrap_or(c_cs), p_ce.unwrap_or(c_ce))
+            }
+            _ => (child_text, c_cs, c_ce),
+        };
         hits.push(RagHit {
             source_id,
             source_title,
@@ -375,6 +517,25 @@ pub fn rag_query(
             char_start,
             char_end,
         });
+    }
+    if parent_filled > 0 {
+        log::info!("[rag] ns={} 有 {} 条命中已回填父块上下文", ns, parent_filled);
+    }
+    if dim_skipped > 0 {
+        log::warn!(
+            "[rag] ns={} 有 {} 个分块向量维度与查询向量（{} 维）不一致，已跳过",
+            ns,
+            dim_skipped,
+            query_vec.len()
+        );
+    }
+    if score_filtered > 0 {
+        log::info!(
+            "[rag] ns={} 有 {} 个命中低于阈值 {:?}，已过滤",
+            ns,
+            score_filtered,
+            min_score
+        );
     }
 
     // 按相似度降序，取 top-k
@@ -401,11 +562,17 @@ fn source_from_row(row: &rusqlite::Row) -> RagSourceInfo {
 }
 
 /// 列出来源（按创建时间倒序）。`namespace` 非空时只返回该命名空间来源，否则全部。
+/// 插件调用（plugin_id 非空）一律只看 general。
 pub fn rag_list_sources(
     app: &AppHandle,
     namespace: Option<String>,
+    plugin_id: Option<String>,
 ) -> Result<Vec<RagSourceInfo>, String> {
     let conn = open_db(app)?;
+    let effective: Option<String> = match plugin_id.as_deref() {
+        Some(_) => Some(rag_namespace::GENERAL.to_string()),
+        None => namespace.filter(|s| !s.is_empty()),
+    };
     // 单条 SQL + 单闭包：namespace 为 NULL 时（?1 IS NULL）匹配全部，否则只返回该命名空间。
     let mut stmt = conn
         .prepare(
@@ -413,7 +580,7 @@ pub fn rag_list_sources(
              FROM sources WHERE (?1 IS NULL OR namespace = ?1) ORDER BY created_at DESC",
         )
         .map_err(|e| format!("准备列表语句失败: {}", e))?;
-    let ns_param: Option<&str> = namespace.as_deref().filter(|s| !s.is_empty());
+    let ns_param: Option<&str> = effective.as_deref();
     let rows = stmt
         .query_map(params![ns_param], |row| Ok(source_from_row(row)))
         .map_err(|e| format!("列出来源失败: {}", e))?;
@@ -425,10 +592,45 @@ pub fn rag_list_sources(
 }
 
 /// 删除来源及其全部分块（外键 CASCADE）。
-pub fn rag_delete_source(app: &AppHandle, source_id: String) -> Result<(), String> {
+///
+/// `namespace` 非空时**校验归属**：只能删本命名空间下的来源。
+/// 2026-10-18 前该命令只按 id 删 —— 任何调用方拿到别人的 source_id 就能删掉
+/// AI 对话的伴侣记忆，命名空间隔离在「写/查」是成立的、在「删」上是漏的。
+pub fn rag_delete_source(
+    app: &AppHandle,
+    source_id: String,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+) -> Result<(), String> {
     let conn = open_db(app)?;
-    conn.execute("DELETE FROM sources WHERE id = ?1", params![source_id])
-        .map_err(|e| format!("删除来源失败: {}", e))?;
+    let ns_owned: Option<String> = match plugin_id.as_deref() {
+        // 插件：强制只删 general，即使它传了别的 namespace
+        Some(_) => Some(rag_namespace::GENERAL.to_string()),
+        None => namespace.filter(|s| !s.is_empty()),
+    };
+    let ns = ns_owned.as_deref();
+    let changed = match ns {
+        Some(ns) => conn.execute(
+            "DELETE FROM sources WHERE id = ?1 AND namespace = ?2",
+            params![source_id, ns],
+        ),
+        None => {
+            log::warn!(
+                "[rag] rag_delete_source 未指定 namespace，按旧行为直接删除 source={}",
+                source_id
+            );
+            conn.execute("DELETE FROM sources WHERE id = ?1", params![source_id])
+        }
+    }
+    .map_err(|e| format!("删除来源失败: {}", e))?;
+    if changed == 0 {
+        return Err(format!(
+            "删除失败：来源 {} 不存在，或不属于命名空间 {}",
+            source_id,
+            ns.unwrap_or("<未指定>")
+        ));
+    }
+    log::info!("[rag] 已删除 source={} ns={:?}", source_id, ns);
     Ok(())
 }
 
@@ -535,5 +737,84 @@ pub async fn rag_embed_api(req: RagEmbedRequest) -> Result<RagEmbedResponse, Str
         }
         let dim = embeddings.first().map(|v| v.len()).unwrap_or(0);
         Ok(RagEmbedResponse { embeddings, dim })
+    }
+}
+
+// ============ 隔离逻辑单测 ============
+// 命名空间强制改写是 RAG 的安全边界（插件不得读 ai-chat 伴侣记忆），
+// 纯函数，可直接单测，不依赖 AppHandle / SQLite。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 插件请求_ai_chat_被改写为_general() {
+        assert_eq!(
+            resolve_plugin_namespace(Some("rag"), Some("ai-chat".to_string())),
+            "general"
+        );
+        assert_eq!(
+            resolve_plugin_namespace(Some("ide"), Some("ai-gongfang".to_string())),
+            "general"
+        );
+    }
+
+    #[test]
+    fn 插件不传命名空间时落到_general() {
+        assert_eq!(resolve_plugin_namespace(Some("rag"), None), "general");
+        assert_eq!(
+            resolve_plugin_namespace(Some("rag"), Some(String::new())),
+            "general"
+        );
+    }
+
+    #[test]
+    fn 主应用保留显式命名空间() {
+        assert_eq!(
+            resolve_plugin_namespace(None, Some("ai-chat".to_string())),
+            "ai-chat"
+        );
+        assert_eq!(
+            resolve_plugin_namespace(None, Some("ai-ide".to_string())),
+            "ai-ide"
+        );
+    }
+
+    #[test]
+    fn 主应用缺省回落_ai_chat() {
+        assert_eq!(resolve_plugin_namespace(None, None), RAG_NS_DEFAULT);
+        assert_eq!(
+            resolve_plugin_namespace(None, Some(String::new())),
+            RAG_NS_DEFAULT
+        );
+    }
+
+    /// P1-2 前置探测：确认 bundled rusqlite 带 FTS5 + trigram 分词器。
+    /// trigram 是中文关键词检索的前提（`unicode61` 对中文整段不分词）。
+    /// 注意：trigram 的查询串**至少 3 个字符**才会命中（按 3-gram 建索引）。
+    #[test]
+    fn fts5_trigram_可用() {
+        let conn =
+            Connection::open_in_memory().expect("打开内存库失败（内存分配异常？）");
+        if let Err(e) = conn.execute_batch(
+            "CREATE VIRTUAL TABLE t USING fts5(body, tokenize='trigram');",
+        ) {
+            panic!("bundled rusqlite 未启用 FTS5 或 trigram 分词器: {e}");
+        }
+        conn.execute(
+            "INSERT INTO t(body) VALUES ('内存泄漏排查方法与堆栈采样步骤')",
+            [],
+        )
+        .expect("写入 fts 表失败");
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM t WHERE t MATCH '内存泄漏'", [], |r| {
+                r.get(0)
+            })
+            .expect("MATCH 查询失败");
+        assert_eq!(n, 1, "trigram 中文子串匹配未生效");
+        // bm25 排序函数也应可用（混合检索要用它给关键词通道打分）
+        let _rank: f64 = conn
+            .query_row("SELECT bm25(t) FROM t WHERE t MATCH '泄漏'", [], |r| r.get(0))
+            .unwrap_or(0.0);
     }
 }

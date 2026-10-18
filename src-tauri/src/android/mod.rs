@@ -121,8 +121,9 @@ pub fn rag_ingest(
     app: tauri::AppHandle,
     source: RagSourceInput,
     chunks: Vec<RagChunkInput>,
+    plugin_id: Option<String>,
 ) -> Result<RagIngestResult, String> {
-    crate::services::rag_service::rag_ingest(&app, source, chunks)
+    crate::services::rag_service::rag_ingest(&app, source, chunks, plugin_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -131,21 +132,29 @@ pub fn rag_query(
     query_vec: Vec<f32>,
     top_k: Option<usize>,
     namespace: Option<String>,
+    min_score: Option<f32>,
+    plugin_id: Option<String>,
 ) -> Result<RagQueryResult, String> {
-    crate::services::rag_service::rag_query(&app, query_vec, top_k, namespace)
+    crate::services::rag_service::rag_query(&app, query_vec, top_k, namespace, min_score, plugin_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn rag_list_sources(
     app: tauri::AppHandle,
     namespace: Option<String>,
+    plugin_id: Option<String>,
 ) -> Result<Vec<RagSourceInfo>, String> {
-    crate::services::rag_service::rag_list_sources(&app, namespace)
+    crate::services::rag_service::rag_list_sources(&app, namespace, plugin_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn rag_delete_source(app: tauri::AppHandle, source_id: String) -> Result<(), String> {
-    crate::services::rag_service::rag_delete_source(&app, source_id)
+pub fn rag_delete_source(
+    app: tauri::AppHandle,
+    source_id: String,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+) -> Result<(), String> {
+    crate::services::rag_service::rag_delete_source(&app, source_id, namespace, plugin_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]

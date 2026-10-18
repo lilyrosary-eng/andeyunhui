@@ -35,7 +35,10 @@ export interface RagChunkInput {
   text: string;
   char_start: number;
   char_end: number;
+  /** 向量：子块非空；父块传空数组（后端据此跳过向量检索，只用于命中后回填上下文）。 */
   vec: number[];
+  /** 父块 idx（小-大分块）：命中子块后由后端回填父块文本；父块自身为 null/undefined。 */
+  parent_idx?: number | null;
   meta?: Record<string, unknown>;
 }
 
@@ -44,6 +47,9 @@ export interface RagSourceInput {
   title: string;
   uri: string;
   type?: string;
+  /** 命名空间（默认 general）。后端缺省回落 ai-chat，所以手动知识库必须显式传 general，
+   *  否则会和 AI 对话的伴侣记忆混在一起。 */
+  namespace?: string;
 }
 
 /** rag_ingest 响应。 */
@@ -67,6 +73,8 @@ export interface RagSourceInfo {
   created_at: string;
   chunk_count: number;
   status: string;
+  /** 后端从 1.0.0 起就返回该字段，前端此前漏声明。 */
+  namespace?: string;
 }
 
 /** 嵌入代理选项：端点/key/模型，复用现有 ai profiles / ModelSettings Ollama 预设。 */
@@ -93,16 +101,19 @@ export function ragQuery(
   queryVec: number[],
   topK = 6,
   namespace?: string,
+  minScore?: number,
 ): Promise<RagQueryResponse> {
-  return hostApi.invoke<RagQueryResponse>('rag_query', { queryVec, topK, namespace });
+  return hostApi.invoke<RagQueryResponse>('rag_query', { queryVec, topK, namespace, minScore });
 }
 
 export function ragListSources(namespace?: string): Promise<RagSourceInfo[]> {
   return hostApi.invoke<RagSourceInfo[]>('rag_list_sources', { namespace });
 }
 
-export function ragDeleteSource(sourceId: string): Promise<void> {
-  return hostApi.invoke<void>('rag_delete_source', { sourceId });
+/** 删除来源。必须带 namespace：后端会校验「该 source 属于这个命名空间」，
+ *  防止拿到别人的 source_id 就跨模块删记忆。 */
+export function ragDeleteSource(sourceId: string, namespace?: string): Promise<void> {
+  return hostApi.invoke<void>('rag_delete_source', { sourceId, namespace });
 }
 
 export function ragEmbedApi(texts: string[], opts: EmbedOptions = {}): Promise<RagEmbedResponse> {

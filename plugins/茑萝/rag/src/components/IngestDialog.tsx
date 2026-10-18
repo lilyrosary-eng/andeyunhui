@@ -37,7 +37,8 @@ export function IngestDialog({ onIngested }: IngestDialogProps) {
         if (!title.trim()) setTitle(fileNameFromPath(files[0]));
       }
     } catch {
-      /* 用户取消 */
+      // 用户取消选择：不打错误（pick_file 取消属于正常路径）
+      console.info('[rag] 已取消选择文件');
     }
   }
 
@@ -88,7 +89,11 @@ export function IngestDialog({ onIngested }: IngestDialogProps) {
       setTitle('');
       setFilePath('');
     } catch (e) {
-      setMsg({ kind: 'err', text: e instanceof Error ? e.message : String(e) });
+      const msg = e instanceof Error ? e.message : String(e);
+      // 显式打印：摄取失败最常见的两类原因是「嵌入端点不可用」和「沙箱命令未放行」，
+      // 两者都必须能在控制台看到原始错误。
+      console.error('[rag] 摄取失败:', msg);
+      setMsg({ kind: 'err', text: msg });
     } finally {
       setBusy(false);
     }

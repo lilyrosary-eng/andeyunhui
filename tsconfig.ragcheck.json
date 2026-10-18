@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["plugins/global.d.ts", "plugins/茑萝/rag/src/**/*.ts", "plugins/茑萝/rag/src/**/*.tsx"],
+  "exclude": ["node_modules", "bundled-plugins", "got-it"]
+}
