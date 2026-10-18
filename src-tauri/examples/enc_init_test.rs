@@ -101,6 +101,17 @@ fn main() {
         fnp!(&avcodec, b"av_packet_free\0", unsafe extern "C" fn(*mut *mut c_void));
     flush("symbols resolved");
 
+    // swresample / av_opt_* / avio_close 在本段不被调用，但「能不能解析」本身就是诊断结论：
+    // 缺 swresample = external-deps 里 ffmpeg 目录少文件；av_opt / avio 解析失败 = DLL 与符号表版本不匹配。
+    // 所以把地址打出来，而不是留成未使用绑定。
+    flush(&format!(
+        "extra symbols: swresample={:p} av_opt_set_int=0x{:x} av_opt_find=0x{:x} avio_close=0x{:x}",
+        &swresample as *const _,
+        av_opt_set_int as usize,
+        av_opt_find as usize,
+        avio_close as usize
+    ));
+
     let fps = 60i64;
     let width = 1920u32;
     let height = 1020u32;
@@ -211,8 +222,8 @@ fn main() {
                 *p = pb;
                 flush("fmt_ctx->pb set at fallback +32");
             }
-            // 读回确认
-            let rb = unsafe { *(fmt_ctx as *const usize).add(4) };
+            // 读回确认（裸指针读取，无需 unsafe 块）
+            let rb = *(fmt_ctx as *const usize).add(4);
             flush(&format!("pb readback@32 = {:p}", rb as *const c_void));
         }
     }

@@ -83,14 +83,6 @@ impl AiProfile {
         }
         self.base_url.trim().to_string()
     }
-
-    /// Agent 上下文估算上限（token）。未配置时默认 200k —— 兼容旧行为、对多数模型都留足余量。
-    pub(crate) fn context_cap(&self) -> usize {
-        self.max_context_tokens
-            .filter(|v| *v > 0)
-            .and_then(|v| usize::try_from(v).ok())
-            .unwrap_or(200_000)
-    }
 }
 
 /// 全部模型档案集合 + 当前默认激活的档案 id
@@ -698,23 +690,26 @@ fn write_config(app: &AppHandle, cfg: &AiConfig) -> Result<(), String> {
         }
     }
     let mut out = cfg.clone();
-    // 复用「明文→密文」缓存，避免 api_key 未变时全量重跑 scrypt
-    let mut enc_guard = enc_cache().lock().unwrap_or_else(|e| e.into_inner());
+    // 复用「明文→密文」缓存，避免 api_key 未变时全量重跑 scrypt。
+    // guard 只读，所以不写 mut；读完立刻收进花括号作用域释放锁——
+    // 下面第 720 行要重新 lock enc_cache()，std::sync::Mutex 不可重入，攥着不放会自死锁。
     let mut next_enc: HashMap<String, String> = HashMap::with_capacity(out.providers.len());
-    for p in out.providers.iter_mut() {
-        if p.api_key.is_empty() {
-            continue;
+    {
+        let enc_guard = enc_cache().lock().unwrap_or_else(|e| e.into_inner());
+        for p in out.providers.iter_mut() {
+            if p.api_key.is_empty() {
+                continue;
+            }
+            let enc = match enc_guard.get(&p.api_key) {
+                Some(e) => e.clone(),
+                None => encrypt_secret(&p.api_key)?,
+            };
+            next_enc.insert(p.api_key.clone(), enc.clone());
+            p.api_key = enc;
         }
-        let enc = match enc_guard.get(&p.api_key) {
-            Some(e) => e.clone(),
-            None => encrypt_secret(&p.api_key)?,
-        };
-        next_enc.insert(p.api_key.clone(), enc.clone());
-        p.api_key = enc;
     }
     let text = serde_json::to_string_pretty(&out).map_err(|e| format!("序列化配置失败: {}", e))?;
     fs::write(&path, text).map_err(|e| format!("写入配置失败: {}", e))?;
-    drop(enc_guard);
     *enc_cache().lock().unwrap_or_else(|e| e.into_inner()) = next_enc;
     *config_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(cfg.clone());
     Ok(())
@@ -831,6 +826,11 @@ impl ResolvedTarget {
     }
 
     /// 是否「关闭推理」。"off" = 不发 reasoning_effort，走普通采样参数并恢复 temperature 等。
+    ///
+    /// 生产路径目前都在读 `effort()`，这个谓词只有下面的单测在用，
+    /// 所以 `cargo check`（不编译 test cfg）会报 dead_code —— 保留它是因为
+    /// 「是不是 off」这句话在测试里比裸字符串比较更说人话。
+    #[allow(dead_code)]
     pub(crate) fn reasoning_off(&self) -> bool {
         self.effort() == "off"
     }

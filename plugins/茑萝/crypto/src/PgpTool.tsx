@@ -12,14 +12,6 @@
 const React = window.__HOST_REACT__;
 const { useState } = React;
 
-function abToPem(label: string, buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let bin = '';
-  for (const b of bytes) bin += String.fromCharCode(b);
-  const b64 = btoa(bin);
-  const lines = b64.match(/.{1,64}/g) || [b64];
-  return `-----BEGIN ${label}-----\n${lines.join('\n')}\n-----END ${label}-----\n`;
-}
 function pemToAb(pem: string): ArrayBuffer {
   const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
   const bin = atob(b64);

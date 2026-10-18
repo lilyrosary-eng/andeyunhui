@@ -238,21 +238,26 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
 
   const [nodes, setNodes, onNodesChange] = useNodesState<WfRfNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  // ref 镜像统一在 effect 里同步（渲染期写 ref 违反 react-hooks/refs）。
+  // 这些 ref 只被 RF 回调 / IPC 回调 / 用户事件读取，都在 commit 之后发生，effect 已跑完，不会读到陈旧值。
   const edgesRef = useRef(edges);
-  edgesRef.current = edges;
   const docRef = useRef(doc);
-  docRef.current = doc;
+  useEffect(() => { edgesRef.current = edges; });
+  useEffect(() => { docRef.current = doc; });
 
   // RF 内部状态先改、再推 doc 时置位，让 doc→RF 同步跳过一轮（否则会用旧 doc 覆盖刚拖好的位置）
   const skipSync = useRef(false);
-  // 撤销/重做栈 + 版本号（refs 不触发重渲染，用 histV 驱动工具栏可用态）
+  // 撤销/重做栈本身仍是 refs（避免每次提交都重建大数组），但「栈深度」进 state，
+  // 工具栏可用态由 state 驱动——渲染期读 ref.length 违反 react-hooks/refs。
   const past = useRef<{ nodes: WfNode[]; edges: WfEdge[] }[]>([]);
   const future = useRef<{ nodes: WfNode[]; edges: WfEdge[] }[]>([]);
-  const [, setHistV] = useState(0);
-  const bumpHist = useCallback(() => setHistV((v) => v + 1), []);
+  const [histDepth, setHistDepth] = useState({ past: 0, future: 0 });
+  const bumpHist = useCallback(() => {
+    setHistDepth({ past: past.current.length, future: future.current.length });
+  }, []);
 
   const profileIdRef = useRef(profileId);
-  profileIdRef.current = profileId;
+  useEffect(() => { profileIdRef.current = profileId; });
   const { screenToFlowPosition, fitView } = useReactFlow();
   const didFit = useRef(false);
 
@@ -708,11 +713,11 @@ function AiWorkflowCanvas({ profileId, doc, onUpdate }: AiWorkflowViewProps) {
           </div>
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          <button onClick={undo} disabled={past.current.length === 0} title="撤销 (Ctrl+Z)"
+          <button onClick={undo} disabled={histDepth.past === 0} title="撤销 (Ctrl+Z)"
             className="btn-press rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-black/5 hover:text-neutral-600 disabled:opacity-30 dark:hover:bg-white/5 dark:hover:text-stone-300">
             <Undo2 size={15} />
           </button>
-          <button onClick={redo} disabled={future.current.length === 0} title="重做 (Ctrl+Shift+Z)"
+          <button onClick={redo} disabled={histDepth.future === 0} title="重做 (Ctrl+Shift+Z)"
             className="btn-press rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-black/5 hover:text-neutral-600 disabled:opacity-30 dark:hover:bg-white/5 dark:hover:text-stone-300">
             <Redo2 size={15} />
           </button>

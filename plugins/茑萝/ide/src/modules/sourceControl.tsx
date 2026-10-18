@@ -6,7 +6,7 @@ const React = window.__HOST_REACT__;
 const hostApi = window.__HOST_API__;
 const { useState, useEffect, useCallback } = React;
 import { ideShared } from './shared';
-import { GitBranch, RefreshCw, Plus, Minus, Check, FileEdit, Trash2, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
+import { GitBranch, RefreshCw, Plus, Minus, Check, FileEdit, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
 
 // ===== 与 git_service.rs serde 输出对齐的类型 =====
 type GitStatusKind =

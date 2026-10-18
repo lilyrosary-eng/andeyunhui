@@ -7,6 +7,12 @@
   "entry": "index.js",
   "iconName": "Paintbrush",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "add_bytes_to_dropzone",
+      "clipboard_write_image"
+    ]
+  },
   "parent": "niaoluo",
   "codename": "茑萝"
 }

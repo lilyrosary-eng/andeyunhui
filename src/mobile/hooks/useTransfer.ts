@@ -113,9 +113,10 @@ export function useTransfer() {
   const [startError, setStartError] = useState('');
   const [alias, setAlias] = useState('安得云荟');
   const [staged, setStagedState] = useState<string[]>([]);
-  // ref 镜像：避免闭包捕获陈旧 staged（真机上 confirmSend 时序竞争导致「选文件后发送无效」）
+  // ref 镜像：避免闭包捕获陈旧 staged（真机上 confirmSend 时序竞争导致「选文件后发送无效」）。
+  // 不在这行做渲染期同步（违反 react-hooks/refs）；改为由 setStaged 在变更点同步写 ref，
+  // 这样「addFiles 后立即点对端」时 ref 已是新值，比等 effect 更早也更可靠。
   const stagedRef = useRef<string[]>([]);
-  stagedRef.current = staged;
   const [autoAccept, setAutoAcceptState] = useState(false);
   const [saveDir, setSaveDir] = useState('');
   const [receiveRequests, setReceiveRequests] = useState<ReceiveRequest[]>([]);
@@ -200,7 +201,8 @@ export function useTransfer() {
       const sd = (await invoke('transfer_get_save_dir').catch(() => '')) as string;
       if (!mountedRef.current) return;
       setPeers(list);
-      setStagedState(s);
+      // 走 setStaged 而非 setStagedState：让 stagedRef 与 state 同步更新
+      setStaged(s);
       setAutoAcceptState(aa);
       setSaveDir(sd);
     })();

@@ -35,19 +35,43 @@ const outputDir = join(rootDir, 'dist-dlc', 'external-deps');
 //   BUILD_LITE=1 时跳过这些依赖，用于 Android 等轻量构建（手机系统自带媒体播放/截图，
 //   无需 ffmpeg；OCR/桌面宠物非移动端核心功能）。桌面构建不设 BUILD_LITE，全量打包。
 //   未来移动端需要某依赖时，从该条移除 heavy 标记即可。
+//
+// excludeWin / excludeOther —— 平台专属排除（glob，按 basename 或相对路径匹配）。
+//   背景：external-deps/全局/ffmpeg/ 同时放着两套二进制——
+//     · Windows：ffmpeg.exe + avcodec-62/avformat-62/avutil-60/swresample-6 四个共享 DLL
+//     · Linux：  fetch-ffmpeg-linux.mjs 落的**无扩展名**静态 ffmpeg（见
+//               services/recording_service_linux.rs:147 的 get_ffmpeg_path）
+//   原实现只在非 Windows 侧排除 *.exe/*.dll，Windows 侧一个字节都不排，
+//   于是 76MB 的 Linux 静态 ffmpeg 被打进每个 Windows 安装包（安装包 101.6MB，
+//   约 25~30MB 是它）。现在两侧对称：各排掉对方平台的那一套。
+//   注意：Windows 侧的排除早先**静默失效**——zipDir 的 exclude 在 Windows 分支被丢掉
+//   （CreateFromDirectory 不支持过滤），已修，见 scripts/lib/zip.mjs。
 const TARGETS = [
   // 茑萝子模块（茑萝/ide/、茑萝/wps/ 母文件夹结构）
   { src: '茑萝/ide/codemirror', out: '茑萝/ide/codemirror.mujin' },
   { src: '茑萝/wps/tiptap',     out: '茑萝/wps/tiptap.mujin' },
   // 全局模块（全局/ 母文件夹结构）
-  { src: '全局/ffmpeg',            out: '全局/ffmpeg.mujin', heavy: true },
+  {
+    src: '全局/ffmpeg',
+    out: '全局/ffmpeg.mujin',
+    heavy: true,
+    // Windows 包只留 ffmpeg.exe + 四个共享 DLL；Linux 包只留无扩展名的 ffmpeg
+    excludeWin: ['ffmpeg'],
+    excludeOther: ['*.exe', '*.dll'],
+  },
   { src: '全局/basic-pitch',       out: '全局/basic-pitch.mujin', heavy: true },
   // 本地 OCR 依赖包（引擎 + ONNX 模型 + 字符表，用户自行下载放入「依赖」目录）
   { src: '全局/paddleocr',         out: '全局/paddleocr.mujin', heavy: true },
   { src: 'deskpet-assets',         out: 'deskpet-assets.mujin', heavy: true },
   // 攻防模块真实 TLS 指纹通道（curl-impersonate，MIT，Windows x86_64 预编译二进制）。
   // heavy：移动端无此需求（且该二进制为 Windows 专属），Android/BUILD_LITE 构建应跳过。
-  { src: '全局/curl-impersonate',  out: '全局/curl-impersonate.mujin', heavy: true },
+  // excludeOther：Linux/macOS 包排除 curl-impersonate.exe（Windows x86_64 二进制，跑了也没用）。
+  {
+    src: '全局/curl-impersonate',
+    out: '全局/curl-impersonate.mujin',
+    heavy: true,
+    excludeOther: ['*.exe', '*.dll'],
+  },
 ];
 
 // 轻量构建模式：跳过 heavy 依赖。
@@ -61,11 +85,21 @@ const BUILD_LITE = process.env.BUILD_LITE === '1' || IS_ANDROID;
 
 // 用跨平台助手打包目录为 .mujin（ZIP 格式，不自动添加 .zip 后缀）
 // Windows 走 PowerShell .NET；其它平台走 Info-ZIP（见 scripts/lib/zip.mjs）。
-// 非 Windows 构建排除 *.exe/*.dll（Windows 专属二进制，如 ffmpeg.exe 及共享 DLL、
-// curl-impersonate.exe）——避免把 200MB+ 的 Windows 二进制塞进 Linux 包。
-const PLATFORM_EXCLUDE = process.platform === 'win32' ? [] : ['*.exe', '*.dll'];
-function packToMujin(srcDir, destFile) {
-  zipDir(srcDir, destFile, { exclude: PLATFORM_EXCLUDE });
+//
+// 平台排除按 target 逐个声明（excludeWin / excludeOther），兜底再用
+// PLATFORM_DEFAULT_EXCLUDE 补一条全局默认——早先「只在非 Windows 排 *.exe/*.dll」
+// 是单向的，导致 Windows 安装包打进 76MB 的 Linux 静态 ffmpeg（见 TARGETS 注释）。
+const IS_WIN = process.platform === 'win32';
+const PLATFORM_DEFAULT_EXCLUDE = IS_WIN ? [] : ['*.exe', '*.dll'];
+
+/** 取该 target 在当前平台下的排除模式（声明值 + 全局默认，去重） */
+function excludeFor(target) {
+  const declared = IS_WIN ? (target.excludeWin ?? []) : (target.excludeOther ?? []);
+  return [...new Set([...declared, ...PLATFORM_DEFAULT_EXCLUDE])];
+}
+
+function packToMujin(srcDir, destFile, exclude) {
+  zipDir(srcDir, destFile, { exclude });
 }
 
 // ========== 主流程 ==========
@@ -100,10 +134,12 @@ for (const target of TARGETS) {
     continue;
   }
   try {
-    packToMujin(srcDir, destFile);
+    const exclude = excludeFor(target);
+    packToMujin(srcDir, destFile, exclude);
     packed++;
     packedList.push(out);
-    console.log(`[PackMujin] ✓ ${src} -> ${relative(rootDir, destFile)}`);
+    const exNote = exclude.length ? `（排除 ${exclude.join(' ')}）` : '';
+    console.log(`[PackMujin] ✓ ${src} -> ${relative(rootDir, destFile)}${exNote}`);
   } catch (e) {
     console.error(`[PackMujin] ✗ ${src} 打包失败: ${e.message}`);
     failedDeps.push(src);

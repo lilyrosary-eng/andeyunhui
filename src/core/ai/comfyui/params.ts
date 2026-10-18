@@ -732,7 +732,7 @@ export function applyWorkflowParameters(
       if (group === undefined) groups.set(groupKey, [param])
       else group.push(param)
     }
-    for (const [groupKey, group] of groups) {
+    for (const [, group] of groups) {
       const first = group[0]
       if (first === undefined) continue
       const node = copy[first.nodeId]

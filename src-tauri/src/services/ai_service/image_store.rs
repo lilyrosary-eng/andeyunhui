@@ -323,6 +323,8 @@ pub fn ai_media_cleanup(app: AppHandle, days: Option<u64>) -> serde_json::Value 
 
 #[cfg(test)]
 mod tests {
+    // 测试名写中文是故意的（见 caps_infer.rs 同处说明），关掉 non_snake_case。
+    #![allow(non_snake_case)]
     use super::*;
 
     #[test]

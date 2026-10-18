@@ -1,15 +1,14 @@
 // 桌面版伴侣管理 + 人设编辑面板。由安卓 companionStore 驱动，桌面走 Tauri invoke 真后端，
 // 浏览器预览降级时自动走本地缓存。所有数据读写经 useCompanionStore，不依赖安卓 var(--*) 变量。
 import { useState } from 'react';
-import { Plus, Check, Trash2, Heart, ImageIcon } from 'lucide-react';
+import { Plus, Check, Trash2, ImageIcon } from 'lucide-react';
 import {
   useCompanionStore,
-  type Companion,
-  type Relationship,
 } from '@/core/stores/companionStore';
 import { Section } from '@/components/bricks/Section';
 import { Field, inputCls } from '@/components/bricks/formui';
 import { affinityOf } from '@/lib/affinity';
+import { daysSince } from '@/core/clock';
 
 function AvatarView({ avatar, name }: { avatar: string; name: string }) {
   const isImg = avatar.startsWith('data:image/');
@@ -61,9 +60,7 @@ export function AiChatCompanionSettings() {
           {collection.companions.map((c) => {
             const active = c.id === collection.active_id;
             const rel = affinityOf(c.relationship);
-            const days = c.relationship.first_met_at
-              ? Math.floor((Date.now() / 1000 - c.relationship.first_met_at) / 86400)
-              : 0;
+            const days = daysSince(c.relationship.first_met_at);
             return (
               <div
                 key={c.id}

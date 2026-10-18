@@ -124,9 +124,11 @@ pub fn deobfuscate_cfg(
     let mut real_blocks: Vec<BasicBlock> = Vec::new();
     let mut real_edge_count = 0;
 
-    for mut block in blocks {
+    for block in blocks {
         if dispatcher_ids.contains(&block.id) {
-            block.is_dispatcher = true;
+            // 分发块不进 real_blocks，所以在这里写 block.is_dispatcher = true 没有任何读者
+            // （写完就随着 block 一起被 drop）。识别结果只通过 dispatcher_count 暴露。
+            // 若将来要把分发块也返回给上层，记得同时把它们 push 进某个新字段。
         } else {
             real_blocks.push(block);
         }

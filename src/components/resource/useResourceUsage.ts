@@ -4,7 +4,7 @@
 // 抽到这里后，字段口径与曲线缓冲只有一处定义。
 //
 // 历史曲线按**显卡 id 分桶**：多卡时各自的曲线必须独立，不能混成一条。
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { HISTORY, vramPercent, type ResourceUsage } from './model';
 
@@ -48,15 +48,15 @@ export function useResourceUsage(paused = false): ResourceUsageState {
   const [error, setError] = useState('');
   const [updatedAt, setUpdatedAt] = useState(0);
 
-  // 历史缓冲放 ref，避免每次采样都触发一次额外的状态更新
-  const hist = useRef<ResourceHistory>({ cpu: [], mem: [], up: [], down: [], gpu: {} });
-  const pausedRef = useRef(paused);
-  pausedRef.current = paused;
+  // 历史缓冲用 state 的初始值承载：push() 是原地改数组，不触发渲染，
+  // 真正的重渲染由下面的 setData 负责；缓冲对象身份恒定，消费者每次渲染读到的都是最新曲线。
+  // （早先这里是 ref + 渲染期 return hist.current，会被 react-hooks/refs 判为"渲染期读 ref"。）
+  const [hist] = useState<ResourceHistory>(() => ({ cpu: [], mem: [], up: [], down: [], gpu: {} }));
 
   const refresh = useCallback(async () => {
     try {
       const r = await invoke<ResourceUsage>('get_resource_usage');
-      const h = hist.current;
+      const h = hist;
       push(h.cpu, r.cpu_percent);
       push(h.mem, r.mem_percent);
       push(h.up, r.net_up_bps);
@@ -76,15 +76,16 @@ export function useResourceUsage(paused = false): ResourceUsageState {
     } catch (e) {
       setError((e as Error)?.message || String(e));
     }
-  }, []);
+  }, [hist]);
 
+  // paused 直接进依赖：暂停时连定时器都不建（空闲零开销），恢复时立即补一次采样。
+  // 不再需要 pausedRef 镜像——渲染期写 ref 同样违反 react-hooks/refs。
   useEffect(() => {
     void refresh();
-    const id = window.setInterval(() => {
-      if (!pausedRef.current) void refresh();
-    }, 1000);
+    if (paused) return;
+    const id = window.setInterval(() => { void refresh(); }, 1000);
     return () => window.clearInterval(id);
-  }, [refresh]);
+  }, [refresh, paused]);
 
-  return { data, error, updatedAt, hist: hist.current, refresh };
+  return { data, error, updatedAt, hist, refresh };
 }

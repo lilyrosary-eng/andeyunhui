@@ -45,7 +45,6 @@ const DISK_BAD = '#ff6b6b';
 const DISK_OK = '#4ade80';
 // 深底上的网络配色（比主窗口浅底版更亮，保证 10.5px 小字可读）
 const NET_DOWN_COLOR = '#38bdf8';
-const NET_UP_COLOR = '#2dd4bf';
 
 function MiniBar({ percent, color }: { percent: number; color: string }) {
   return (

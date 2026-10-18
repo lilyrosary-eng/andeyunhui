@@ -450,7 +450,7 @@ export async function getSongUrl(
   hash: string,
   albumId?: number,
   auth?: KugouAuth | null,
-  quality: 'standard' | 'high' | 'lossless' = 'standard',
+  _quality: 'standard' | 'high' | 'lossless' = 'standard',
   freeListen = false,
 ): Promise<{ url: string; br: number; freeListen?: boolean }> {
   const body = await kugouLegacyRequest('/app/i/getSongInfo.php', {
@@ -804,7 +804,7 @@ export async function getRecommendPlaylists(page = 1, pagesize = 20): Promise<Ku
 // 每日推荐：gateway 不稳定（500），改为 mobilecdn 排行榜热门歌曲作为推荐
 // 游客态下取 TOP500 前若干首作为个性化推荐替代
 export async function getEverydayRecommend(
-  auth?: KugouAuth | null,
+  _auth?: KugouAuth | null,
   page = 1,
   pagesize = 20,
 ): Promise<KugouTrack[]> {

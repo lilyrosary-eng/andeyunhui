@@ -6,7 +6,7 @@ import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, No
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
 const React = window.__HOST_REACT__;
-const { useState, useEffect, useCallback, useRef, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
 
 const STORAGE_KEY_ROOT = 'video_plugin_root_paths';
@@ -246,7 +246,7 @@ function VideoModule() {
   // 共享运行时：根目录管理（localStorage 持久化）
   const { rootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   // 共享运行时：黑名单管理（Rust 集中管理）
-  const { hidden: hiddenFolders, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('video');
+  const { hidden: hiddenFolders, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('video');
   const [folders, setFolders] = useState<VideoFolder[]>([]);
   const [loading, setLoading] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
@@ -472,14 +472,7 @@ function VideoModule() {
   }, [rootPaths, removeAllBlacklist, clearBlacklist]);
   
   // 屏蔽视频文件夹
-  const handleHideFolder = useCallback((folder: VideoFolder) => {
-    addToBlacklist(folder.folderPath, folder.folderName);
-    if (selectedFolder?.folderPath === folder.folderPath) {
-      setSelectedFolder(null);
-    }
-  }, [selectedFolder, addToBlacklist]);
-  
-  // 过滤黑名单的文件夹
+    // 过滤黑名单的文件夹
   const visibleFolders = useMemo(() => 
     folders.filter(f => !hiddenFolders.has(f.folderPath)),
     [folders, hiddenFolders]

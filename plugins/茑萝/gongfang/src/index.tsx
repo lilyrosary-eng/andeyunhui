@@ -3,7 +3,6 @@
 // 四大框架：网络爬虫 / 逆向工程 / 渗透测试 / 自动化测试
 // 设计原则：攻防一体、专业合法、极致高效、稳定防追踪
 // 当前为 UI 骨架占位，后续按框架逐步填充能力。
-const React = window.__HOST_REACT__;
 
 import { GongfangModule, GongfangSidebar } from './GongfangModule';
 

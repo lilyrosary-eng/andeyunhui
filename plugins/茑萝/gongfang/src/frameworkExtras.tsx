@@ -19,36 +19,6 @@ import { CollapsibleSection, useKernelRunning } from './ui';
 const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
   (hostApi as { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> }).invoke(cmd, args) as Promise<T>;
 
-// ============ 通用：监听 gongfang_event 中的特定 kind ============
-function useEventFilter<T extends { kind: string; ts: number }>(
-  kindFilter: string | string[],
-  max = 100,
-): T[] {
-  const [events, setEvents] = useState<T[]>([]);
-  const kinds = Array.isArray(kindFilter) ? new Set(kindFilter) : new Set([kindFilter]);
-
-  useEffect(() => {
-    let unsub: (() => void) | null = null;
-    hostApi
-      .listen<T>('gongfang_event', (e) => {
-        if (!kinds.has(e.payload.kind)) return;
-        setEvents((prev) => {
-          const next = [...prev, e.payload];
-          if (next.length > max) next.splice(0, next.length - max);
-          return next;
-        });
-      })
-      .then((u) => (unsub = u))
-      .catch(() => {});
-    return () => {
-      if (unsub) unsub();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  return events;
-}
-
 // ============ 通用：相对时间 ============
 function fmtRel(ts: number): string {
   const diff = Date.now() - ts;

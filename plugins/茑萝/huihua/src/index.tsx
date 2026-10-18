@@ -168,7 +168,7 @@ function HuihuaBoard() {
   const [opacity, setOpacity] = useState<number>(1);
   const [hardness, setHardness] = useState<number>(1);
   const [zoom, setZoom] = useState<number>(1);
-  const [status, setStatus] = useState<string>('图层化画板：选择工具开始绘制');
+  const [_status, setStatus] = useState<string>('图层化画板：选择工具开始绘制');
   const [canUndo, setCanUndo] = useState<boolean>(false);
   const [canRedo, setCanRedo] = useState<boolean>(false);
   const [transparent, setTransparent] = useState<boolean>(false);
@@ -182,7 +182,6 @@ function HuihuaBoard() {
   const drawRef = useRef<{ active: boolean; x: number; y: number; pressure: number; space: boolean }>(
     { active: false, x: 0, y: 0, pressure: 0, space: false },
   );
-  const baseRef = useRef<ImageData | null>(null);
   const layerSnapRef = useRef<HTMLCanvasElement | null>(null);
   const undoRef = useRef<Layer[][]>([]);
   const redoRef = useRef<Layer[][]>([]);

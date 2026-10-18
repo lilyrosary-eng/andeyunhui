@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { X, Save, Undo2, Eraser, Pen, Square, ArrowUpRight, Type, Trash2, StretchVertical } from "lucide-react";
 import { emitDropzoneChange } from "@/components/TransferStationPanel";
 import { EVENTS } from "@/core/events/schema";
@@ -107,6 +106,9 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   const fullCanvasRef = useRef<HTMLCanvasElement | null>(null); // 整屏预览绘制画布
   const editBaseRef = useRef<HTMLCanvasElement | null>(null); // 编辑态整屏底图画布
   const offRef = useRef<HTMLCanvasElement | null>(null); // 放大镜源（预览原图）
+  // 渲染期需要判断「放大镜源是否就位」，因此除 ref 外再存一份 state：
+  // 渲染期读 ref.current 违反 react-hooks/refs，读 state 则完全合法。
+  const [offCanvas, setOffCanvas] = useState<HTMLCanvasElement | null>(null);
   const captureRef = useRef<HTMLDivElement | null>(null);
 
   // 选择态拖拽矩形（CSS 像素，== 图像像素）
@@ -135,6 +137,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
 
   // 编辑态
   const baseRef = useRef<HTMLCanvasElement | null>(null);           // 预览分辨率底图（用于 UI 显示/编辑）
+  const [baseCanvas, setBaseCanvas] = useState<HTMLCanvasElement | null>(null); // 同上：渲染期分支判断用 state
   const baseNativeRef = useRef<HTMLCanvasElement | null>(null);     // 原生分辨率底图（用于保存时合成，消除标注分辨率降级）
   const drawRef = useRef<HTMLCanvasElement | null>(null);
   const [tool, setTool] = useState<Tool>("pen");
@@ -179,6 +182,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     const octx = off.getContext("2d");
     if (octx) octx.drawImage(image, 0, 0);
     offRef.current = off;
+    setOffCanvas(off);
     fullImgRef.current = canvas;
     setReady(true);
     // 冻结图已在上方（useLayoutEffect，浏览器首次 paint 前）同步绘制到 fullCanvasRef；
@@ -420,6 +424,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
       // 按缩放比用「物理坐标」从原图截取该区域（canvas 物理像素 → 显示 CSS 像素 1:1，清晰且无放大）
       ctx.drawImage(img, -rect.x * ps, -rect.y * ps);
       baseRef.current = c;
+      setBaseCanvas(c);
       undoRef.current = [];
       setSelRect(rect);
       dragRef.current = null;
@@ -514,6 +519,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
           const ctx = c.getContext("2d");
           if (ctx) ctx.drawImage(img, 0, 0);
           baseRef.current = c;
+          setBaseCanvas(c);
           undoRef.current = [];
           longImgRef.current = { url, w: img.naturalWidth, h: img.naturalHeight };
           dirtyRef.current = false;
@@ -1036,8 +1042,8 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
         })()}
 
         {/* 放大镜（像素级对齐辅助） */}
-        {mag.show && offRef.current && !selRect && (
-          <Magnifier off={offRef.current} x={mag.x} y={mag.y} zoom={4} size={132} />
+        {mag.show && offCanvas && !selRect && (
+          <Magnifier off={offCanvas} x={mag.x} y={mag.y} zoom={4} size={132} />
         )}
 
         {/* 统一捕获层 */}
@@ -1075,7 +1081,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   }
 
   // ====== 编辑态（微信式「保持状态」）======
-  const base = baseRef.current;
+  const base = baseCanvas;
   const toolbar = (
     <div className="flex items-center gap-1.5 px-2 py-1.5 rounded-xl bg-white/95 shadow-lg text-neutral-700 ring-1 ring-black/5">
       <ToolBtn active={tool === "pen"} onClick={() => setTool("pen")} title="画笔"><Pen size={16} /></ToolBtn>

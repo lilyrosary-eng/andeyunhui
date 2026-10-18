@@ -1,6 +1,6 @@
 /// <reference path="../../../global.d.ts" />
 const React = window.__HOST_REACT__;
-const { useState, useMemo, useRef } = React;
+const { useState, useMemo } = React;
 
 import {
   scanFixes,
@@ -14,7 +14,7 @@ import {
   type ScanMode,
   type FixCandidate,
 } from './garbled';
-import { decodeBytes, autoDecode } from './codec';
+import { decodeBytes } from './codec';
 
 function copyText(text: string): void {
   try {

@@ -1,7 +1,54 @@
 # 更新日志 / Changelog
 
 > 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本（SemVer）。
-> 本文件记录主要版本的演进。当前可构建版本为 2.4.0（Windows 桌面端，NSIS 安装包）；Android 端仍在 `feat/android-v1` 分支开发中，尚未正式发布。稳定性与覆盖面仍在持续打磨，升级前请备份个人数据。
+> 本文件记录主要版本的演进。当前可构建版本为 2.4.0（Windows 桌面端，NSIS 安装包）；Android 端代码与桌面端同在 `main` 维护，仍是规划目标，尚未正式发布。稳定性与覆盖面仍在持续打磨，升级前请备份个人数据。
+> **版本号唯一真源**：`src-tauri/tauri.conf.json` 的 `version`。`package.json` 与 `src-tauri/Cargo.toml` 的 `version` 必须同步为同一值（历史上后两者长期停留在 `0.1.0`，2026-10-18 已对齐到 2.4.0）。
+
+## [Unreleased] - 工程化加固（未发布）
+
+> 以下改动不改变用户可见功能，全部是「地基」类工作。每一条都实跑了质量门（`tsc` ×2 / `vitest` / `cargo check` / `cargo test` / `eslint`）。
+
+### 新增
+- **CI**：`.github/workflows/ci.yml`——前端 job（`tsc --noEmit` + `tsc -p tsconfig.plugins.json` + `vitest`）与 Rust job（`cargo check` + `clippy --all-targets` + `cargo test`，`windows-latest`，因 windows-sys / WinRT / NVML 仅 Windows 可编译），push/PR 到 `main` 触发。此前仓库只有一条落地页部署 workflow，质量门全靠人肉。
+- **`src/core/clock.ts`**：把「今天是第几天」收敛成模块级缓存 + 跨天定时刷新，替掉 4 处渲染期 `Date.now()`（React 渲染期 impure）。
+
+### 修复
+- **插件类型检查长期不可见**：`tsconfig.plugins.json` 原本只纳入攻防插件，其余插件（ai-chat / web-interface / rag / wps / 莲花 / 薄荷 …）共 16 处类型错误无人发现。已扩为 `plugins/**` 全量纳入并逐个清零。
+  - 其中 `plugins/ai-chat` 的伴侣人设注入是**静默失效的真 bug**：`personaPrompt` / `systemPrompt` / `excludeGlobalPersona` 在 `useAiChat` 里从来是 hook 级 options，插件却按 per-send 参数传，导致人设完全没生效、消息对象还被塞了个假的 `images` 字段。修法是在 `send()` 上加第 4 个可选参 `SendOptions`（不改第 2 参语义，既有调用方零影响）。
+  - `plugins/web-interface/src/Terminal.tsx`：`/// <reference path>` 多写了一级目录；`fb` 声明在 async IIFE 内而 cleanup 在外层引用，清理逻辑根本看不到它。
+- **安装包每个都多带 76MB**：`scripts/lib/zip.mjs` 的 `zipDir` Windows 分支用 `ZipFile.CreateFromDirectory`，**完全忽略 `exclude` 参数**；`scripts/pack-mujin.mjs` 的 `PLATFORM_EXCLUDE` 又是单向的（Windows 侧为空数组）。两者叠加导致 Linux 版 ffmpeg 静态二进制被打进每个 Windows 安装包。已改为双向过滤 + 临时副本方案，`全局/ffmpeg.mujin` 302MB → 79MB。
+- **13 条命令被静默拦截**：`ai_agent_approve` / `ai_agent_apply_edits` / `mcp_save_server` / `mcp_remove_server` / `wps_export_docx` / `wps_export_pptx` / `cleanup_thumbnail_cache` / `get_lyrics_widget_visible` / `music_create_playlist` / `music_get_all_mv_paths` / `music_set_mv_path` / `music_set_cover_url` / `read_external_dep_path` 被插件真实调用却从未进入沙箱白名单（白名单 236 → 249 条）。
+- **`git add -u` 会炸干净 clone**：`commands.rs` 拆出的 15 个子模块与 `ci.yml` 一直没入库，而 `commands.rs` 本身已跟踪且被改成 95 行 re-export 文件。任何全量暂存都会只提交这 95 行，干净 clone 后 `cargo check` 直接 `file not found for module`，而本地有文件所以一直不报错。已暂存。
+- **`.gitignore` 的 `*.mjs` 地雷**：所有新建 `.mjs` 脚本被静默忽略，`scripts/lib/zip.mjs` 因此漏出仓库，而 `scripts/pack-mujin.mjs` 等 3 个已跟踪脚本 import 它——干净 clone 后打包脚本直接 `MODULE_NOT_FOUND`。已改为只忽略 `scripts/_*`。
+- **`scripts/prepare-bundled-dlc.mjs` 注释与实际不符**：注释写「essentials_build 或 full_build」，实测 `avcodec-62.dll` 92.9MB 说明取的是 full_build。换 essentials 预计再省 60–100MB，待实测。
+
+### 重构
+- **`commands.rs` 4638 行 → 95 行**：拆成 `src-tauri/src/commands/` 下 15 个领域模块（bootstrap 803 / plugins 775 / dropzone 707 / download 505 / notes 368 / storage_misc 217 / music 216 / wps 201 / transfer 297 / fs_dialog 136 / images 125 / install 156 / video_reading 89 / rag_commands 96 / archive 56 / dev 53）。`cargo test` 322 passed 不变。
+- **`eslint src` 42 errors → 0**：重灾区是 `react-hooks/refs`（33 条「渲染期同步 ref 镜像」）。统一改成 `useEffect` 同步；撤销/重做栈与 ScreenshotOverlay 的画布引用改为 state；`useResourceUsage` 的 `hist` 从 ref 改为 state 持有的恒定对象；`useAiChat` 的 `groupSend` 去掉 `useCallback`（本项目未启用 React Compiler，手写 memo 保留不住）。
+- **Rust warning 全清**：`cargo check` 13 条 + `--all-targets` 16 条。每条都判过「删」还是「留」——例如 `gpu_nv12.rs` 的 8 个 ID3D11 句柄字段看着没人读，但它们是 COM 接口、Drop 即 Release，删了 shader/纹理会被销毁而 nv12 缓冲区仍在用同一份 GPU 资源；`reverse/protocol.rs` 的 `is_closed` 是 Angluin L* 闭合判据，只因没有驱动循环才没调用方。这类都保留并写清「为什么不能删」。
+- **manifest 声明式权限**：新增 `permissions.commands` 段，规则为「声明 ∩ 全局白名单」，清单不能比全局白名单更宽；未声明则回退全局白名单。15 个插件已填。宿主 alias 型插件（ai-chat）绕过沙箱直连，已用 `HOST_ALIASED_PLUGINS` 明确标注不参与告警。
+- **i18n 补齐**：en-US +132 keys，zh-TW / ja-JP / ko-KR / de-DE / fr-FR 各 +195 keys，6 语言均对齐 zh-CN 的 1381 keys。`src/lib/i18n/locales.test.ts` 提供三道断言（不许多出 zh-CN 没有的 key / 新缺失必须落在基线内 / 缺失总数只许收敛）。
+- **`frameworks.tsx` 4632 行 → 10 行壳**（全项目最大文件）：拆出 `frameworksShared.tsx` 563 行 + 五个面板（crawler 498 / reverse 779 / pentest 1145 / automation 771 / gateway 874）。切点踩过一个坑：`crawlerMeta` 与 `StatusCard` 原本落在爬虫段内却被渗透/网关两个面板引用，只能上移到 shared 段。
+- **`ai_tools.rs` 5245 行 → 856 行父模块 + 10 个子模块**（core / basic / plan / fs_shell / search_web / subagent / devtools / media_gen / vision / comfyui）。`SafeEval` 定义在 fs_shell 却被 basic 用，整段搬到 basic；`SubWorker` 的 8 个字段提权到 `pub(crate)` 供父模块测试访问。
+- **`noUnusedLocals` / `noUnusedParameters` 打开并全量清零**（src 41 处 + plugins 全量）。其中 4 处不是死代码而是真 bug：
+  - `src/App.tsx` 的 `activeReloadKey`：setter 在 `plugin-registered` 事件里被调，value 从未被读，「插件热重载强制重挂组件」一直是静默空转。改为按插件 id 计数的 `reloadKeys`（全局计数会让每次切模块都重挂、把已保活模块的状态全丢）。
+  - `src/core/ai/useAiChat.ts` 的 `CHAT_HISTORY_LIMIT = 40`：从未被使用，注释承诺的「条数上限」没生效，只有字符级硬切在跑（`HARD_MSG_CAP` / `HARD_TOTAL_CAP`）。
+  - `src/overlay-recorder.ts` 的 `stopPolling()`：从未被调用，1s 状态轮询永不停。改为跟随录制 started/stopped 事件启停。
+  - `src/core/settings/models/ComfyuiPanel.tsx` 的 `blueprintSlug`：只写不读，真实读取方全走 storage，是双状态源。
+- **`capabilities` 死字段移除**：manifest 有这个字段、Rust 与 TS 也解析它，但全仓库没有任何读取方，只有 gongfang 声明了 `["network","process-spawn"]`——自述标签会给人「已生效」的错觉。已从结构体、类型与两份 manifest 中一并删除（serde 默认忽略未知键，旧清单不会解析失败）。
+
+### 有意不做（记录决策，避免反复提起）
+- `main.rs` 2135 行不拆：内含 428 个命令的 invoke_handler 注册表，拆它收益低风险高。
+- `src-tauri/src/screenshot.rs` 3228 行不拆：Win32 捕获 + GDI/DXGI 双路径的单一职责单元，拆开只会把 `unsafe` FFI 句柄生命周期打散。
+- 17 份插件 `vite.config.ts` 不收敛：经核实全部已是 2 行壳，真配置集中在 `plugins/_shared/vite.shared.config.ts`。
+- `avcodec-62.dll` 92.9MB（full_build → essentials 可再省 60–100MB）不换：属二进制资产替换，需重跑录制/转码全链路验证。
+- 版本号统一为 `tauri.conf.json` 的 2.4.0 单一真源，另两处已对齐。
+
+### 文档
+- `README.md`「截图 / 演示」节：原文引用 `docs/screenshots/*.png|gif` 五张图，但 `docs/` 整目录被 `.gitignore`，GitHub 上全是裂图。已改为诚实说明 + 约定路径表格，并放行 `docs/screenshots/**`。
+- `README.md` / `CHANGELOG.md`：订正 Android 分支说法——`feat/android-v1` 分支在本地与远程均不存在，移动端代码一直与桌面端同在 `main` 维护。
+- `ROADMAP.md`：上一版冻结于 2026-07-09，与实际进度严重脱节，已按 2026-10-18 实测重写；同时从 `.gitignore` 放行（路线图不进库等于没有）。
+- `docs/PERFORMANCE_REPORT.md` 从 `.gitignore` 放行（`docs/*` 仍忽略，只放行这一个文件）。
 
 ## [2.4.0] - 当前构建版本（Windows 桌面端）
 

@@ -126,7 +126,8 @@ fn migrate_root_extras(root: &Path, to_data: &Path) -> u64 {
                 let (c, f) = copy_tree_tolerant(&src, &to_data.join(&name), total, None);
                 let _ = std::fs::remove_dir_all(&src);
                 log_msg(&format!(
-                    "migrate_root_extras 拷贝补搬 {} -> {}：{} 字节，{} 失败",
+                    "migrate_root_extras rename 失败({})，降级拷贝补搬 {} -> {}：{} 字节，{} 失败",
+                    e,
                     src.display(),
                     dst.display(),
                     c,

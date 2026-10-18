@@ -990,7 +990,6 @@ function buildPdf(pages: { jpeg: Uint8Array; w: number; h: number }[]): Uint8Arr
     pageIds.push(0); // 占位，下面回填
   }
   // pages 树与 catalog
-  const pagesId = objects.length + 1;
   // 先写 image/content，再写 pages 与 page（page 需引用 content/image）
   // 重排：objects 已含 image(1..) 与 content。现在追加 pages 节点、page 节点、catalog。
   // 为简单起见，page 节点 id = 当前 objects.length + 1 起。

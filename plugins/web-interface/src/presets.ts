@@ -365,7 +365,7 @@ export async function scanAndRecognize(
   return { candidates, appName, url };
 }
 
-function fileAppHint(known: { appName: string; entry?: string } | null, name: string): string | undefined {
+function fileAppHint(known: { appName: string; entry?: string } | null, _name: string): string | undefined {
   if (!known) return undefined;
   // 入口文件在软件内：名用软件名（不带后缀涉及，由上层决定）；此处仅给辅助提示
   return known.appName;

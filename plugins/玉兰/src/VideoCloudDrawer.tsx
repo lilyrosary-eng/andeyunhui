@@ -82,7 +82,7 @@ interface DrawerModuleItemProps {
 
 // 通用模块切换项：本地视频 / 云端视频 共用同一套布局与交互（对齐音乐 DrawerModuleItem）
 function DrawerModuleItem({
-  active, expanded, onToggleExpand, onSelect, icon, title, desc, accent, children,
+  active, expanded, onToggleExpand, onSelect, icon, title, accent, children,
 }: DrawerModuleItemProps) {
   const hasChildren = React.Children.count(children) > 0;
   const handleClick = () => {

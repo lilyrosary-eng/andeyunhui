@@ -6,7 +6,7 @@
 //   3. 排列模式：从给定字符集生成所有不重复排列（nPr）
 // 自动限制输出条数（默认 10000，防止内存爆炸）
 const React = window.__HOST_REACT__;
-const { useState, useMemo } = React;
+const { useState } = React;
 
 const MASK_SETS: Record<string, string> = {
   '?l': 'abcdefghijklmnopqrstuvwxyz',

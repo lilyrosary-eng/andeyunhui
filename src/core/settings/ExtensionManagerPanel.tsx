@@ -160,7 +160,7 @@ export function ExtensionManagerPanel() {
         if (!registry.get(m.id) && m.visible !== false) {
           try {
             const scriptText = await api.readPluginFile(m.id, m.entry);
-            const sandbox = createSandboxGlobals(m.id, registry, m.deps);
+            const sandbox = createSandboxGlobals(m.id, registry, m);
             executeInSandbox(scriptText, sandbox, m.id);
             logger.plugins.newPluginLoaded(m.id);
           } catch (err) {

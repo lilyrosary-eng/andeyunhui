@@ -4,7 +4,7 @@ import { ImageSidebar, albumCoverKey } from './ImageSidebar';
 import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 const React = window.__HOST_REACT__;
-const { useState, useEffect, useCallback, useRef, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
 
 const STORAGE_KEY_ROOT = 'image_plugin_root_path';
@@ -22,11 +22,13 @@ interface ImageFolder {
   imageCount: number;
 }
 
+// 与 _shared/pluginRuntime.tsx 的 ScanProgressLite 对齐：skipped 由后端按需下发，
+// 不是每帧都有，故为可选。若改成必填，useScanStream 的 onProgress 将无法直接赋值。
 interface ScanProgress {
   found: number;
   total: number;
   done: boolean;
-  skipped: number;
+  skipped?: number;
 }
 
 interface CustomAlbum {
@@ -39,7 +41,7 @@ interface CustomAlbum {
 function ImageModule() {
   useLang();
   // 共享运行时：根目录管理（localStorage 持久化）
-  const { rootPaths, setRootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   const [folders, setFolders] = useState<ImageFolder[]>([]);
   const [loading, setLoading] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
@@ -109,8 +111,9 @@ function ImageModule() {
     ]),
     onProgress: (p) => {
       setScanProgress(p);
-      if (p.skipped && p.skipped > 0) {
-        setSkippedCount(p.skipped);
+      const skipped = p.skipped ?? 0;
+      if (skipped > 0) {
+        setSkippedCount(skipped);
       }
     },
     onDone: () => setLoading(false),

@@ -13,10 +13,6 @@ import { loadDoc } from './docStore';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import * as XLSX from 'xlsx';
 
-function isDarkMode(): boolean {
-  return typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
-}
-
 interface SheetEditorProps {
   activeId: string;
   title: string;
@@ -171,7 +167,7 @@ function SheetEditorImpl({ activeId, title, onPersist }: SheetEditorProps) {
     });
   };
 
-  const onCellKeyDown = (e: React.KeyboardEvent, r: number, c: number) => {
+  const onCellKeyDown = (e: React.KeyboardEvent, _r: number, _c: number) => {
     if (e.key === 'ArrowUp') { e.preventDefault(); moveSel(-1, 0); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); moveSel(1, 0); }
     else if (e.key === 'Enter') { e.preventDefault(); moveSel(1, 0); }

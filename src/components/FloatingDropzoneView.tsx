@@ -253,9 +253,10 @@ export function FloatingDropzoneView() {
       /* 非致命：窗口尺寸调整失败时忽略，内容仍可滚动 */
     }
   };
-  // 每次渲染同步给 window 级 dragover 兜底监听使用（避免闭包拿到陈旧值）
-  modeRef.current = mode;
-  switchModeRef.current = switchMode;
+  // window 级 dragover 兜底监听需要最新值（避免闭包陈旧）；下沉到 effect，
+  // 监听在 commit 之后才可能触发，effect 已同步。渲染期写 ref 违反 react-hooks/refs。
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+  useEffect(() => { switchModeRef.current = switchMode; }, [switchMode]);
 
   return (
     <div

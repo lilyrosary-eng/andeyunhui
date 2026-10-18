@@ -229,7 +229,7 @@ async function reloadSinglePlugin(id: string, registry: PluginRegistry): Promise
     // 先调用 destroy 释放旧实例资源，再注销（register 有重复 id 守卫，必须先清）
     safeDestroyPlugin(id, registry);
     registry.unregister(id);
-    const sandbox = createSandboxGlobals(id, registry, manifest.deps);
+    const sandbox = createSandboxGlobals(id, registry, manifest);
     executeInSandbox(scriptText, sandbox, id);
     const def = registry.get(id);
     if (def) {
@@ -291,7 +291,7 @@ async function loadSinglePlugin(
 
     // 所有插件均为 IIFE 格式，直接沙箱中执行（使用 new Function 替代 eval）
     // CSP 不允许 blob: URL import，统一走 executeInSandbox
-    const sandbox = createSandboxGlobals(manifest.id, registry, manifest.deps);
+    const sandbox = createSandboxGlobals(manifest.id, registry, manifest);
     executeInSandbox(scriptText, sandbox, manifest.id);
 
     pluginPerformanceMonitor.endMeasure(manifest.id, 'load');

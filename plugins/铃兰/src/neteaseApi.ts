@@ -64,7 +64,6 @@ export function setLoginCookieFromApi(cookieStr: string): void {
   const parts = cookieStr.split(';').map((s) => s.trim()).filter(Boolean);
   const hasMusicU = parts.some((p) => p.startsWith('MUSIC_U='));
   const csrfPart = parts.find((p) => p.startsWith('__csrf='));
-  const musicAPart = parts.find((p) => p.startsWith('MUSIC_A='));
   // 情况二：已登录，但只回吐了 __csrf（如登录后 weapi 请求的 Set-Cookie），需把配对的 __csrf 合并进 loginCookie。
   // 关键：weapi 写操作要求 csrf_token 与 cookie 里的 MUSIC_U 同源，否则服务端静默返回空 body 不落库（红心假成功根因）。
   if (!hasMusicU && loginCookie && loginCookie.includes('MUSIC_U=') && csrfPart) {

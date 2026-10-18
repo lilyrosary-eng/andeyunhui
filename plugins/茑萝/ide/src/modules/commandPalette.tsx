@@ -6,7 +6,7 @@ const hostApi = window.__HOST_API__;
 const { useState, useEffect, useMemo, useRef, useCallback } = React;
 import { Command } from 'cmdk';
 import { ideShared } from './shared';
-import { File as FileIcon, Search, ChevronRight, Hash } from 'lucide-react';
+import { File as FileIcon, Search, ChevronRight } from 'lucide-react';
 
 export interface PaletteCommand {
   id: string;
@@ -38,7 +38,6 @@ async function enumerateFiles(root: string): Promise<FileItem[]> {
   const cached = fileCache.get(root);
   if (cached && Date.now() - cached.ts < FILE_CACHE_TTL) return cached.files;
   const files: FileItem[] = [];
-  const sep = /\\/.test(root) ? '\\' : '/';
   const queue: { dir: string; depth: number }[] = [{ dir: root, depth: 0 }];
   while (queue.length && files.length < MAX_FILES) {
     const { dir, depth } = queue.shift()!;

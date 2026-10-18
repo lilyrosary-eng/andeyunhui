@@ -201,6 +201,12 @@ impl<O: ProbeOracle> Learner<O> {
     }
 
     /// 检查观察表闭合性：每个 (prefix, a) 的响应行是否与某现有 prefix 相同
+    ///
+    /// 这是 Angluin L* 的闭合判据。当前 `Learner` 只有成员查询、没有驱动循环
+    /// （没有 learn()/close_table() 去反复调它），所以它暂时没有调用方。
+    /// 保留而非删除：判据本身是对的，等补驱动循环时直接接上即可；
+    /// `#[allow(dead_code)]` 是为了让 cargo check 不因为「没人调」而年年报警。
+    #[allow(dead_code)]
     fn is_closed(&self) -> bool {
         for prefix in &self.prefixes {
             for &a in &self.alphabet {

@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { Plus, Check, Trash2, Heart } from 'lucide-react';
 import { useCompanionStore, type Companion } from '@/core/stores/companionStore';
 import { affinityOf } from '../../lib/affinity';
+import { daysSince } from '@/core/clock';
 
 function Avatar({ value, size }: { value: string; size: number }) {
   if (value.startsWith('data:image/')) {
@@ -37,10 +38,7 @@ export function CompanionManageScreen() {
     setName('');
   };
 
-  const days = (c: Companion) =>
-    c.relationship.first_met_at
-      ? Math.max(1, Math.floor((Date.now() / 1000 - c.relationship.first_met_at) / 86400))
-      : 0;
+  const days = (c: Companion) => daysSince(c.relationship.first_met_at, 1);
 
   return (
     <div className="px-4 py-5 flex flex-col gap-4">

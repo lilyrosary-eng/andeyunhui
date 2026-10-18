@@ -7,5 +7,19 @@
   "entry": "index.js",
   "iconName": "BookOpen",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "add_to_blacklist",
+      "cancel_open_book",
+      "cancel_scan",
+      "get_blacklist_paths",
+      "import_to_openwith_dir",
+      "load_reading_cache",
+      "open_book",
+      "pick_directory",
+      "remove_from_blacklist",
+      "scan_reading_root"
+    ]
+  },
   "codename": "三色堇"
 }

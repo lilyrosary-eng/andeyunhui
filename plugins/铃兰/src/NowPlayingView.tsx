@@ -716,8 +716,9 @@ export function NowPlayingView({
               console.error('[music] 歌词渲染异常，已降级为纯文本兜底:', err && err.message);
               lyricsRenderGuard.reportFailure(err && err.message);
             },
-          },
-            React.createElement(LyricsList, {
+            // children 走 props 而不是 createElement 第三个参数：LyricsBoundary 的 props
+            // 把 children 声明为必填，第三种重载（DOM 属性）不会补 rest children，会报缺参。
+            children: React.createElement(LyricsList, {
               lyricsLines,
               currentLyricIdx,
               focusIdx: focusLyricIdx,
@@ -726,7 +727,7 @@ export function NowPlayingView({
               subMode: lyricMode,
               degrade,
             }),
-          ),
+          }),
         ),
       ),
     ),

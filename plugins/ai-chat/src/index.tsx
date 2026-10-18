@@ -117,7 +117,7 @@ const Root = memo(function Root() {
       if (!(companionEnabled && companion)) return send(text);
       const personaPrompt = buildPersonaContext(companion);
       const corePrompt = buildCoreContext(companion);
-      return send(text, {
+      return send(text, undefined, undefined, {
         ...(personaPrompt ? { personaPrompt } : {}),
         ...(corePrompt ? { systemPrompt: corePrompt } : {}),
         excludeGlobalPersona: true,

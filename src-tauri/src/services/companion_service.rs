@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use crate::services::ai_service::{self, ChatMessage, load_config, resolve_target};
+use crate::services::ai_service::{self, ChatMessage};
 
 /// 伴侣档案
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

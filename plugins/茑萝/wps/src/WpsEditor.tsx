@@ -289,22 +289,8 @@ export function WpsSidebar() {
   );
 }
 
-// P0 占位：演示文件 / 表格 正式编辑器在后续阶段实现（P1 / P3）。
-function ComingSoon({ kind }: { kind: FileKind }) {
-  const label = kind === 'ppt' ? '演示文件' : kind === 'sheet' ? '表格' : '文档';
-  const tip =
-    kind === 'ppt'
-      ? '演示文件编辑器将在 P1 阶段实现：幻灯片缩略图、中央画布（拖拽 / 缩放 / 文本 / 图片 / 形状）与右侧属性面板。'
-      : '表格编辑器将在 P3 阶段实现。';
-  return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-3 h-full bg-[#f5f5f0] dark:bg-[#1c1917] text-center px-8">
-      <div className="text-neutral-400 dark:text-stone-500 text-sm font-medium">{label}编辑器</div>
-      <div className="text-neutral-400 dark:text-stone-500 text-[13px] max-w-xs leading-relaxed">{tip}</div>
-      <div className="text-[12px] text-neutral-300 dark:text-stone-600">暂可新建与重命名，正式编辑即将推出</div>
-    </div>
-  );
-}
-
+// 说明：曾经的 ComingSoon 占位组件已删除——演示文件（PptEditor）与表格（SheetEditor）
+// 的正式编辑器均已落地，这里只保留文档编辑器本体。
 export function WpsEditor() {
   const [t, setT] = useState<TiptapApi | null>(null);
   const [tErr, setTErr] = useState<string>('');

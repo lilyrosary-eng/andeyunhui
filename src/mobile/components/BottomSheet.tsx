@@ -11,7 +11,7 @@
  * 用于替代桌面端的右键上下文菜单/下拉浮层。
  */
 
-import { type ReactNode, useEffect, useRef } from 'react';
+import { type ReactNode, useEffect } from 'react';
 import { motion, type PanInfo, AnimatePresence } from 'framer-motion';
 
 export interface BottomSheetItem {

@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest'
 // 真实工作流 fixture（API 格式，Qwen-Image 12 节点），同源移植自 dsh-comfyui 仓库 krea-wf.json（MIT）
 import kreaWorkflow from './__fixtures__/krea-wf.fixture.json'
-import { normalizeLinks, resolveVirtualLinks } from './graph'
+import { normalizeLinks } from './graph'
 import { convertGraphToApi, flattenDynamicCombos } from './convert'
 import {
   analyzeWorkflowParameters,

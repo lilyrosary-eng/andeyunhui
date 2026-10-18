@@ -124,7 +124,6 @@ function buildTree(books: BookSummary[]): { rootBooks: BookSummary[]; rootDirs: 
 
   for (const dp of dirPaths) {
     const parts = dp.split(/[/\\]/).filter(Boolean);
-    let currentLevel = rootDirs;
     let currentPath = '';
     for (let i = 0; i < parts.length; i++) {
       const seg = parts[i];

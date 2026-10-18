@@ -10,7 +10,6 @@ import {
   unifiedDiff,
   splitDiffContent,
   generateHtmlDiff,
-  type DiffLine,
   type CharSeg,
   type DiffOptions,
 } from './diff';

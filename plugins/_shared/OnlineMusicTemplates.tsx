@@ -158,7 +158,6 @@ export const PlaylistGridRow: React.FC<PlaylistGridRowProps> = ({
   items,
   onOpen,
   emptyText = '暂无内容',
-  loadingText = '加载中…',
   accent = '#f44336',
 }) => {
   const scrollRef = React.useRef<HTMLDivElement>(null);

@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { Heart } from 'lucide-react';
 import { useCompanionStore, type Companion } from '@/core/stores/companionStore';
 import { affinityOf } from '@/lib/affinity';
+import { daysSince, useToday } from '@/core/clock';
 
 interface Props {
   onEdit: () => void;
@@ -31,9 +32,8 @@ export function AiChatCompanionAvatar({ companion, size = 32 }: { companion: Com
 function useCurrentStats() {
   const companion = useCompanionStore((s) => s.companion);
   const affinity = affinityOf(companion.relationship);
-  const days = companion.relationship.first_met_at
-    ? Math.floor((Date.now() / 1000 - companion.relationship.first_met_at) / 86400)
-    : 0;
+  useToday();
+  const days = daysSince(companion.relationship.first_met_at);
   return { companion, affinity, days };
 }
 

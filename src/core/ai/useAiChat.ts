@@ -60,17 +60,22 @@ const HARD_MSG_CAP = 8_000; // 单条 content 硬切（字符）
 const HARD_TOTAL_CAP = 200_000; // 总 token 硬切（远低于模型上限 1048576）
 
 function estTokens(s: string): number {
-  const cjk = (s.match(/[　-鿿＀-￯]/g) || []).length;
+  // 注意：这里必须用 \u 转义写 CJK 区间，不能直接粘贴全角空格（U+3000），否则 no-irregular-whitespace 报错。
+  const cjk = (s.match(/[\u3000-\u9fff\uff00-\uffef]/g) || []).length;
   const other = s.length - cjk;
   return cjk + Math.ceil(other / 4);
 }
 
-function safeMessages(msgs: Array<{ role: string; content: string }>): Array<{ role: string; content: string }> {
+function safeMessages(msgs: Array<{ role: string; content: string }>, limit: number = CHAT_HISTORY_LIMIT): Array<{ role: string; content: string }> {
   let total = 0;
   let maxLen = 0;
   const rawTotalChars = msgs.reduce((s, m) => s + (m.content?.length || 0), 0);
+  // 条数上限（尾部截断）：与后端 truncate_messages_for_safety 双保险。
+  // 只在此处统计"原始条数"用于诊断，日志里要与裁剪后条数对照才能看出是条数失控还是单条巨 content。
+  const rawCount = msgs.length;
+  const recent = rawCount > limit ? msgs.slice(rawCount - limit) : msgs;
   const out: Array<{ role: string; content: string }> = [];
-  for (const m of [...msgs].reverse()) {
+  for (const m of [...recent].reverse()) {
     let content = typeof m.content === 'string' ? m.content : '';
     if (content.length > maxLen) maxLen = content.length;
     if (content.length > HARD_MSG_CAP) content = content.slice(0, HARD_MSG_CAP) + '…（超长已截断）';
@@ -81,12 +86,12 @@ function safeMessages(msgs: Array<{ role: string; content: string }>): Array<{ r
   }
   // 始终打印一次（即便未截断）：用于排查 messages 总规模是否真的进入上游。
   console.log(
-    `[ai-chat] safeMessages: 原始条数=${msgs.length} 原始总字符=${rawTotalChars} 裁剪后=${out.length} 最大单条字符=${maxLen} 估算总token≈${total}`,
+    `[ai-chat] safeMessages: 原始条数=${rawCount}(上限${limit}) 原始总字符=${rawTotalChars} 裁剪后=${out.length} 最大单条字符=${maxLen} 估算总token≈${total}`,
   );
-  if (msgs.length > out.length || maxLen > HARD_MSG_CAP) {
+  if (rawCount > out.length || maxLen > HARD_MSG_CAP) {
     console.error(
-      `[ai-chat] 请求前硬截断生效：原始条数=${msgs.length} 裁剪后=${out.length} 最大单条字符=${maxLen} 估算总token≈${total}。`
-      + `若原始条数远大于 ${GROUP_HISTORY_LIMIT} 或最大单条接近 ${HARD_MSG_CAP}，说明存在重复拼接/旧bundle未重建。`,
+      `[ai-chat] 请求前硬截断生效：原始条数=${rawCount}(上限${limit}) 裁剪后=${out.length} 最大单条字符=${maxLen} 估算总token≈${total}。`
+      + `若原始条数远大于 ${limit} 或最大单条接近 ${HARD_MSG_CAP}，说明存在重复拼接/旧bundle未重建。`,
     );
   }
   return out;
@@ -122,6 +127,17 @@ export interface UseAiChatOptions {
   allowEmpty?: boolean;
 }
 
+/**
+ * 单次发送的 system 覆盖项。用于「同一条 hook、不同轮次需要不同人设」的场景：
+ * 典型如 AI 对话开启伴侣模式后，仅这一轮要走伴侣人设、跳过全局 AI 人设。
+ * 未传的字段回落到 hook 级 options 的同名值。
+ */
+export interface SendOptions {
+  personaPrompt?: string;
+  systemPrompt?: string;
+  excludeGlobalPersona?: boolean;
+}
+
 export interface UseAiChatResult {
   conversations: Conversation[];
   activeId: string;
@@ -144,8 +160,9 @@ export interface UseAiChatResult {
   /** 改当前会话的思考档位覆盖（对话页的选择器）。 */
   setEffort: (v: string) => void;
   clearAll: () => void;
-  /** 发送一条消息。images 为可选的多模态图片（data URL），后端 ai_vision_ocr 生成描述后注入 system。 */
-  send: (text: string, images?: string[], attachments?: SendAttachment[]) => Promise<void>;
+  /** 发送一条消息。images 为可选的多模态图片（data URL），后端 ai_vision_ocr 生成描述后注入 system。
+   *  sendOpts 可覆盖本轮的人设/system 注入（见 SendOptions）。 */
+  send: (text: string, images?: string[], attachments?: SendAttachment[], sendOpts?: SendOptions) => Promise<void>;
   /**
    * 停止本轮生成。agent 模式走 `ai_agent_cancel`，纯对话走 `ai_chat_cancel`。
    * 已收到的部分文本会保留，并补一句「（已停止）」。
@@ -166,8 +183,10 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   const syncReqEvent = syncReqEventFor(persistKey);
   // Agent 模式需随回调读取最新值（避免闭包陈旧）
   const [agentOn, setAgentOn] = useState<boolean>(agent);
+  // ref 镜像移到 effect：渲染期写 ref 违反 react-hooks/refs。
+  // agentRef 只被流式回调读取（都在 commit 之后），effect 已同步，不会读到旧值。
   const agentRef = useRef(agentOn);
-  agentRef.current = agentOn;
+  useEffect(() => { agentRef.current = agentOn; }, [agentOn]);
   const setAgent = useCallback((on: boolean) => {
     setAgentOn(on);
     agentRef.current = on;
@@ -188,9 +207,10 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   const busyRef = useRef(false);
   const profileIdRef = useRef<string>('');
 
-  // 会话状态镜像（流式闭包读取用，避免把 conversations 塞进 effect 依赖）
+  // 会话状态镜像（流式闭包读取用，避免把 conversations 塞进 effect 依赖）。
+  // 同样下沉到 effect：groupSend 的串行 await 之间会触发渲染，续体读到的已是最新快照。
   const stateRef = useRef({ conversations, activeId });
-  stateRef.current = { conversations, activeId };
+  useEffect(() => { stateRef.current = { conversations, activeId }; }, [conversations, activeId]);
 
   // 安全更新某会话消息
   const updateMessages = useCallback((convId: string, updater: (prev: ChatMsg[]) => ChatMsg[]) => {
@@ -387,9 +407,15 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     activeIdRef.current = fresh.id;
   }, []);
 
-  const send = useCallback(async (text: string, images?: string[], attachments?: SendAttachment[]) => {
+  const send = async (text: string, images?: string[], attachments?: SendAttachment[], sendOpts?: SendOptions) => {
     const content = text.trim();
     const hasImages = !!images?.length;
+    // 本轮生效的人设口径：sendOpts 覆盖 hook 级 options。
+    // 之所以支持覆盖而不是只在 hook 级配：伴侣模式是运行时可切的，
+    // 而 hook 级 options 属于「整个会话一份」，切一次就要重建 hook，代价过大。
+    const effPersona = sendOpts?.personaPrompt ?? personaPrompt;
+    const effSystem = sendOpts?.systemPrompt ?? systemPrompt;
+    const effExcludeGlobalPersona = sendOpts?.excludeGlobalPersona ?? excludeGlobalPersona;
     const atx: SendAttachment[] = attachments ?? [];
     if (!content && !hasImages && atx.length === 0) return;
     if (busyRef.current) return;
@@ -445,8 +471,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     //   [2] systemPrompt（调用方指令，如 L2 core 档案）
     //   [3] ragContext（L3 检索到的长期对话记忆）
     const systemParts: string[] = [];
-    if (personaPrompt) systemParts.push(personaPrompt);
-    if (systemPrompt) systemParts.push(systemPrompt);
+    if (effPersona) systemParts.push(effPersona);
+    if (effSystem) systemParts.push(effSystem);
     if (ragContext) systemParts.push(ragContext);
     const finalSystem = systemParts.length ? systemParts.join('\n\n') : undefined;
 
@@ -496,7 +522,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       ),
       stream: true,
       ...(finalSystem ? { system: finalSystem } : {}),
-      ...(excludeGlobalPersona ? { exclude_global_persona: true } : {}),
+      ...(effExcludeGlobalPersona ? { exclude_global_persona: true } : {}),
       // 档位覆盖：读**这条会话**上存的（对话页选的）。留空不带该键 = 后端用配置。
       ...(conv?.effort?.trim() ? { effort: conv.effort.trim() } : {}),
     };
@@ -553,7 +579,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         : `请求失败：${raw.slice(0, 120)}`;
       updateMessages(cid, (prev) => prev.map((m) => (m.id === asstId ? { ...m, error: true, content: '⚠ ' + short } : m)));
     }
-  }, [systemPrompt, updateMessages]);
+  };
 
   // 群聊发言：单个发言者（伴侣）基于给定历史说一句，注入其独立人设 system。
   // intro 为编排者（router）给的本轮台词引导（接梗/补刀/旁观提示），增强「活人感」。
@@ -608,8 +634,9 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       // 群聊：每位伴侣按其绑定的 AI 档案（profile_id）选模型；未绑定则回落全局默认档案
       profileId: companion.profile_id || profileIdRef.current,
       ...(convEffort ? { effort: convEffort } : {}),
-      // 请求前硬防御：真实 token 估算尾部截断 + 单条硬切（双保险，坐实重复拼接真因）
-      messages: safeMessages(history.map((m) => ({ role: m.role, content: m.content }))),
+      // 请求前硬防御：真实 token 估算尾部截断 + 单条硬切 + 条数上限（双保险，坐实重复拼接真因）。
+      // 群聊历史每条都含所有伴侣回复，膨胀更快，用更紧的条数窗口。
+      messages: safeMessages(history.map((m) => ({ role: m.role, content: m.content })), GROUP_HISTORY_LIMIT),
       stream: true,
       system,
       // 伴侣发言 → 伴侣人设优先：排斥后端「模型级全局人设」（compose_persona_system）。
@@ -712,7 +739,9 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
 
   // 群聊发送：用户一句 → 编排者决定本轮谁说、按什么基调 → 串行上屏（活人感）。
   // 不暴露 severity/cost，仅内部累加 groupCost.calls 供信息条展示「本次已调用 N 次 AI」。
-  const groupSend = useCallback(async (text: string) => {
+  // 不用 useCallback：函数体读 ref（busyRef/stateRef），React Compiler 无法保留手写 memo
+  // （preserve-manual-memoization 报错）。本项目未启用 React Compiler，交由编译器自行决定。
+  const groupSend = async (text: string) => {
     const content = text.trim();
     if (!content || busyRef.current) return;
     const cid = activeIdRef.current;
@@ -761,7 +790,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     if (calls > 0) {
       setConversations((prev) => prev.map((c) => (c.id === cid ? { ...c, groupCost: { calls: (c.groupCost?.calls ?? 0) + calls }, updatedAt: Date.now() } : c)));
     }
-  }, [sendOne, planGroupRound]);
+  };
 
   const activeConv = conversations.find((c) => c.id === activeId) ?? null;
   const activeConvEffort = activeConv?.effort?.trim() ?? '';

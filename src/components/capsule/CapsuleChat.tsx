@@ -16,7 +16,6 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
 
   const {
     conversations,
-    activeId,
     activeConv,
     busy,
     profileId,

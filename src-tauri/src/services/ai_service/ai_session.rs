@@ -596,6 +596,8 @@ pub(crate) fn split_deltas(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    // 测试名写中文是故意的（见 caps_infer.rs 同处说明），关掉 non_snake_case。
+    #![allow(non_snake_case)]
     use super::*;
 
     /// 造一条带图的 User 事件（refs 与 resolved 都填，模拟 hydrate 之后的状态）。

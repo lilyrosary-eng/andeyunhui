@@ -65,14 +65,19 @@ _diff_light.txt
 build_err.txt
 
 #记录 / 研究计划 / 路线图（本地设计笔记，不随仓库发布）
-ROADMAP.md
+# ROADMAP.md 已放行入库（2026-10 重新校准后随仓库维护，贡献者需要看到真实路线图）
 research_plan_*.md
 research_report_*.md
 截图功能.md
 
-# docs/ 全部为本地研究/计划/报告/设计工作笔记（含对外门面文档、截图、图表），整目录不入库
-# 如需恢复某文档入库，请用 !docs/<相对路径> 显式放行
-docs/
+# docs/ 默认为本地设计笔记/调研/计划，不随仓库发布。
+# 注意：必须写成 docs/* 而不是 docs/ —— 若排除的是目录本身，git 无法再 re-include 其中的文件
+# （同 .vscode/* + !.vscode/extensions.json 的写法）。需要公开的文档用 !docs/<路径> 显式放行。
+docs/*
+!docs/PERFORMANCE_REPORT.md
+# README「截图 / 演示」节按约定路径引用这些图，必须能入库（否则 GitHub 上全是裂图）
+!docs/screenshots/
+!docs/screenshots/**
 
 # ---- 安全：环境变量 / 密钥（避免误提交） ----
 .env
@@ -99,6 +104,8 @@ devdiag.txt
 deploy_out.txt
 checklog2.txt
 build_err.txt
+# 注意：*.txt 是宽泛规则，会静默漏掉任何新建 .txt（含 LICENSE 之类）。
+# 确有需要入库的 .txt 用 !<路径> 显式放行；根目录的 checklog*/tsc_*/diag* 等临时输出即依赖此规则保持不可见。
 *.txt
 *.pptx
 sign.ps1
@@ -148,4 +155,16 @@ src-tauri/gen/android/app/tauri.properties
 src-tauri/gen/android/buildSrc/
 src-tauri/gen/android/local.properties
 src-tauri/gen/android/tauri.settings.gradle
-*.mjs
+# 构建/工具脚本必须入库：干净克隆后 pnpm predev / build 依赖 scripts/*.mjs。
+# 历史上这里是一条 *.mjs 全量忽略，导致 scripts/verify-build.mjs、fetch-ffmpeg-linux.mjs、
+# verify_netease_crypto.mjs 被静默漏出仓库（git status 不可见，别人 clone 下来直接缺文件）。
+# 现在只忽略明确的临时脚本/产物（下划线前缀 / tmp_ 前缀），其余 .mjs 一律可见、可入库。
+# 注意 scripts/lib/zip.mjs：被 pack-mujin.mjs / pack-mufurong.mjs import，
+# 曾因 *.mjs 全量忽略而漏出仓库（2026-10-18 已补 git add）。
+scripts/_*
+tmp_*
+
+# AI 协作工作目录：只存在于 .git/info/exclude（本地私有），换机/协作者 clone 下来
+# 不会被忽略，一不留神就 `git add -A` 提交进去。这里补成仓库级规则。
+.codebuddy/
+.superpowers/

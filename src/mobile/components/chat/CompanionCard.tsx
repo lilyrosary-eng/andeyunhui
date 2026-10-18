@@ -5,10 +5,11 @@
 // 编辑面板：编辑人格字段（名字 / 头像 emoji / 性格 / 背景 / 口头禅）+ 查看长期记忆列表。
 
 import { useRef, useState } from 'react';
-import { Heart, Brain, Sparkles, Check, X, ImagePlus } from 'lucide-react';
+import { Heart, Brain, Sparkles, ImagePlus } from 'lucide-react';
 import { BottomSheet } from '../BottomSheet';
 import { useCompanionStore, type Companion } from '@/core/stores/companionStore';
 import { affinityOf } from '../../../lib/affinity';
+import { daysSince } from '@/core/clock';
 
 /** 把选中的图片文件读成 data URL（限制 3MB，避免 JSON 膨胀） */
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -183,7 +184,7 @@ export function CompanionEditSheet({
               关系亲密度
             </span>
             <span className="ml-auto text-[var(--muted-foreground)]" style={{ fontSize: 'var(--m-text-overline)' }}>
-              认识 {r.first_met_at ? Math.max(1, Math.floor((Date.now() / 1000 - r.first_met_at) / 86400)) : 0} 天
+              认识 {daysSince(r.first_met_at, 1)} 天
             </span>
           </div>
           <div className="flex items-center gap-2">

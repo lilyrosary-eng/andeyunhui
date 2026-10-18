@@ -11,7 +11,6 @@ import { musicPlayer } from './musicPlayer';
 import { HEAVY_FX } from '@/platform/isLinux';
 import {
   getRoamSourceApi,
-  clearRoamCache,
   type RoamSource,
   type RoamSeedTrack,
   type RoamHistoryEntry,
@@ -127,10 +126,6 @@ interface RoamViewProps {
 }
 
 const ROAM_WINDOW_SIZE = 3;
-const sourceLabel: Record<RoamSource, string> = {
-  linglan: '铃兰', netease: '网易云', kugou: '酷狗', qishui: '汽水',
-  temp1: '临时1', temp2: '临时2', temp3: '临时3',
-};
 
 // EQ bars 数量
 const EQ_BARS = 32;
@@ -331,11 +326,11 @@ const RoamPlayBar = memo(function RoamPlayBar({
   );
 });
 
-export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersive, onHistoryUpdate, initialHistory }: RoamViewProps) {
+export function RoamView({ source, onPlay, onTempPlaylist, onOpenImmersive, onHistoryUpdate, initialHistory }: RoamViewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [nowPlaying, setNowPlaying] = useState<{ track: any; isPlaying: boolean }>({ track: null, isPlaying: false });
-  const [roamReloadKey, setRoamReloadKey] = useState(0);
+  const [_roamReloadKey] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [isDark, setIsDark] = useState(document.documentElement.classList.contains('dark'));
@@ -369,7 +364,7 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
   const roamReservoir = useRef<RoamSeedTrack[]>([]);
   const roamExtending = useRef(false);
   const roamTrackListRef = useRef<RoamSeedTrack[]>([]);
-  const [roamCurrentId, setRoamCurrentId] = useState<string | null>(null);
+  const [_roamCurrentId, setRoamCurrentId] = useState<string | null>(null);
   const roamStartedRef = useRef(false);
   const roamForceReloadRef = useRef(false);
   const reqRef = useRef(0);
@@ -559,7 +554,9 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
         if (req === reqRef.current) { setError(String(e?.message || e)); setLoading(false); }
       }
     })();
-  }, [roamReloadKey, source]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [_roamReloadKey, source]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 注：_roamReloadKey 是预留的「手动刷新漫游」句柄——refreshRoam 曾通过 bump 它重跑本 effect，
+  // 该函数已随调用方一起移除，故当前只写不读；保留 state 是为了让重新接回刷新入口时无需改依赖数组。
 
   // 播放器事件
   useEffect(() => {
@@ -662,12 +659,6 @@ export function RoamView({ source, onBack, onPlay, onTempPlaylist, onOpenImmersi
     const off = musicPlayer.on('progress', sync);
     return off;
   }, [lyricLines, lyricMode]);
-
-  const refreshRoam = useCallback(() => {
-    roamReservoir.current = []; roamStartedRef.current = false; roamForceReloadRef.current = true;
-    clearRoamCache(); lyricCacheRef.current.clear(); setLyricLines([]);
-    setRoamReloadKey((k) => k + 1);
-  }, []);
 
   // 翻转动画（防抖 200ms）
   const scheduleFlip = useCallback(() => {

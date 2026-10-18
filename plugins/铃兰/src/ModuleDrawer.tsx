@@ -2,7 +2,7 @@
 import React from "react";
 const { useState, useEffect } = React;
 import { X, Sparkles } from 'lucide-react';
-import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon, ListenNowIcon, LibraryIcon, RadioIcon, SearchIcon, UserIcon, DownloadIcon } from '../../_shared/icons';
+import { CloudIcon, CheckIcon, MusicIcon, ChevronDownIcon, ChevronRightIcon, ListenNowIcon, RadioIcon, SearchIcon, UserIcon, DownloadIcon } from '../../_shared/icons';
 import { T, useLang } from '../../_shared/pluginRuntime';
 import type { NeteaseProfile } from './neteaseApi';
 
@@ -141,7 +141,6 @@ function DrawerModuleItem({
   onSelect,
   icon,
   title,
-  desc,
   accent,
   children,
 }: DrawerModuleItemProps) {

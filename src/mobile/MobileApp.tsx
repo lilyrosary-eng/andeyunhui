@@ -23,7 +23,7 @@
  *   当前 Tab 是中转站根 → 退出 App
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useNavStore } from './stores/navStore';
 import { AppBar } from './components/AppBar';
@@ -36,7 +36,7 @@ import { DiscoverHome } from './screens/DiscoverHome';
 import { ProfileHome } from './screens/ProfileHome';
 import { useChatStore } from './stores/chatStore';
 import { useDrawerSwipe } from './hooks/useDrawerSwipe';
-import { Plus, MoreVertical, Send, Inbox, Sparkles, Book, Puzzle, Settings2, MessageSquarePlus, MessageSquare, Trash2, type LucideIcon } from 'lucide-react';
+import { Plus, MoreVertical, Send, Sparkles, Book, Puzzle, Settings2, MessageSquare, Trash2, type LucideIcon } from 'lucide-react';
 import { NiaoluoScreen } from './screens/NiaoluoScreen';
 import { TransferScreen } from './screens/TransferScreen';
 import { storage } from '../core/storage';
@@ -44,10 +44,10 @@ import { KEYS } from '../core/storage/keys';
 
 export default function MobileApp() {
   // 一次性初始化各 Tab 根 Screen。
-  // 用 ref 守卫 + 渲染期初始化模式（React 官方推荐），避免 useEffect 二次渲染闪烁。
-  const initialized = useRef(false);
-  if (!initialized.current) {
-    initialized.current = true;
+  // 用 useState 惰性初始化器（React 官方「仅首帧执行一次」的写法）代替渲染期 ref 守卫：
+  // 渲染期读写 ref 违反 react-hooks/refs，且 StrictMode 下会被执行两次。
+  // 仍然是首帧同步完成，不会像 useEffect 那样多一跳渲染造成闪烁。
+  const [,] = useState(() => {
     useNavStore.getState().initRoots({
       transfer: {
         id: 'station-home',
@@ -84,7 +84,7 @@ export default function MobileApp() {
         render: () => <ProfileHome />,
       },
     });
-  }
+  });
 
   const activeTab = useNavStore((s) => s.activeTab);
   const tabs = useNavStore((s) => s.tabs);
@@ -224,7 +224,6 @@ function DrawerContent() {
   const push = useNavStore((s) => s.push);
   const setDrawerOpen = useNavStore((s) => s.setDrawerOpen);
   const activeTab = useNavStore((s) => s.activeTab);
-  const openOverflow = useChatStore((s) => s.openOverflow);
   const conversations = useChatStore((s) => s.conversations);
   const activeConvId = useChatStore((s) => s.activeConvId);
   const selectConversation = useChatStore((s) => s.selectConversation);

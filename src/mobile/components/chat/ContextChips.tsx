@@ -6,7 +6,7 @@
 // L6 预留：组件接口已抽象为 { items, onRemove }，未来接入跨模块上下文注入时，
 // 只需让上游往 items 里追加来源不同的芯片，本组件无需改动。
 
-import { X, FileText, Image as ImageIcon } from 'lucide-react';
+import { X, FileText } from 'lucide-react';
 
 export interface ContextChipItem {
   id: string;

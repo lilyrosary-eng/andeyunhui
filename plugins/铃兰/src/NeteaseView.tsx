@@ -17,18 +17,16 @@ import {
   type NeteaseVipInfo, type NeteaseAdFreeTab,
   type NeteaseTrack, type NeteaseProfile, type NeteasePlaylistItem,
   type NeteaseArtist, type NeteaseArtistAlbum, type NeteaseMvItem, type NeteaseSimilarArtist,
-  type NeteaseAlbum, type AlbumDetailResult,
+  type NeteaseAlbum,
 } from './neteaseApi';
 import { musicPlayer, type Track } from './musicPlayer';
 import { MusicHeader } from './MusicHeader';
-import { PlaylistDetailHeader } from '@shared/OnlineMusicTemplates';
 import {
   neteaseDownloadManager,
   NETEASE_DOWNLOAD_DIR_KEY,
   type NeteaseDownloadItem,
 } from './NeteaseDownloadManager';
 
-const hostApi = window.__HOST_API__;
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 // 网易云歌曲行内「下载」按钮：点击弹出音质档位（128k/192k/320k/无损），选中即按该音质下载。
@@ -289,7 +287,7 @@ function formatDuration(ms: number): string {
 }
 
 export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>(function NeteaseView(
-  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist, onProfileChange, likedSongs: likedSongsProp, onLikedSongsChange, onToggleFavorite, onPlayMv, onOpenImmersive },
+  { initialTab, onBack, onPlay, onTempPlaylist, onUserPlaylists, onActivePlaylist, onProfileChange, likedSongs: likedSongsProp, onLikedSongsChange, onPlayMv, onOpenImmersive },
   ref,
 ) {
   const [tab, setTab] = useState<NeteaseTab>(initialTab);
@@ -305,7 +303,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
     isPlaying: musicPlayer.getIsPlaying(),
   });
   // 流式漫游队列（musicPlayer 当前队列的镜像，用于陈列），append 时同步刷新。
-  const [roamQueue, setRoamQueue] = useState<Track[]>(musicPlayer.getTracks());
+  const [_roamQueue, setRoamQueue] = useState<Track[]>(musicPlayer.getTracks());
   // 受控：父组件持有网易云红心状态，这里仅做兜底默认值
   const likedSongs = likedSongsProp ?? new Set<number>();
   const reqRef = useRef(0);
@@ -629,7 +627,7 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const roamReservoir = useRef<NeteaseTrack[]>([]); // 游客态一次性取回的推荐池，按需切片续推
   const roamExtending = useRef(false);
   const roamTrackListRef = useRef<NeteaseTrack[]>([]); // 镜像漫游队列的 NeteaseTrack（含 artistId/albumId），供单曲展示查抽屉
-  const [roamCurrentId, setRoamCurrentId] = useState<string | null>(null); // 当前展示的单曲 id（netease-${id}）
+  const [_roamCurrentId, setRoamCurrentId] = useState<string | null>(null); // 当前展示的单曲 id（netease-${id}）
   const [roamWiki, setRoamWiki] = useState<import('./neteaseApi').SongWiki | null>(null); // 当前单曲的歌曲百科（懒加载）
   const   roamWikiMap = useRef<Record<number, import('./neteaseApi').SongWiki | null>>({}); // 按歌曲 id 缓存百科，避免重复请求
   const roamWikiLoading = useRef(false); // 防止并发重复拉取
@@ -801,7 +799,6 @@ export const NeteaseView = React.forwardRef<NeteaseViewHandle, NeteaseViewProps>
   const startRoamWithFirst = useCallback(async (first: NeteaseTrack[], req: number) => {
     // 第一首完整地址（同步取，确保出声即完整，无 0:00 空转）
     const firstRes = await getSongUrl(first[0].id).catch(() => null);
-    const firstQuality = qualityLabelFromBr(firstRes?.br ?? 0);
     const playlist: PlayableTrack[] = [trackToPlayable(first[0], firstRes?.url ?? '')];
     slideRoamWindow(first, first[0].id);
     setTotal(first.length);

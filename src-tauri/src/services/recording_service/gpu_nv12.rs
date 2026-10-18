@@ -152,13 +152,26 @@ pub struct GpuNv12Converter {
     /// 跨设备共享的 WGC 帧纹理（按需映射，按来源指针缓存）。
     shared: Option<SharedFrame>,
     // ── NV12 直接输出（R8 Y + R8G8 UV，替代 RGBA 渲染）──
+    //
+    // 下面这 8 个 D3D11 句柄「从不被读」是**故意的**：它们存在的意义就是被这个 struct 持有。
+    // ID3D11* 是 COM 接口，Drop 即 Release，句柄一掉对应的 shader / 纹理 / RTV 就被销毁，
+    // 而 nv12_buf 与 staging_* 仍在使用同一份 GPU 资源 → 轻则渲染全零，重则 device removed。
+    // 所以这里显式 allow(dead_code)，别让「没人读」的告警诱导后来人把它们删掉。
+    #[allow(dead_code)]
     ps_y: ID3D11PixelShader,
+    #[allow(dead_code)]
     ps_uv: ID3D11PixelShader,
+    #[allow(dead_code)]
     rt_y: ID3D11Texture2D,
+    #[allow(dead_code)]
     rtv_y: ID3D11RenderTargetView,
+    #[allow(dead_code)]
     staging_y: Vec<ID3D11Texture2D>,
+    #[allow(dead_code)]
     rt_uv: ID3D11Texture2D,
+    #[allow(dead_code)]
     rtv_uv: ID3D11RenderTargetView,
+    #[allow(dead_code)]
     staging_uv: Vec<ID3D11Texture2D>,
     pub nv12_buf: Vec<u8>,
 }
@@ -730,6 +743,11 @@ impl GpuNv12Converter {
 
     /// 把 WGC 帧渲染为 NV12（Y R8 + UV R8G8 half-res），GPU 转换，读回 ~3MB（含 RGB→YUV）。
     /// 返回 `Ok(true)`=nv12 已写入 out_buf；`Ok(false)`=GPU 未就绪。与 `convert` 互斥单帧调用。
+    ///
+    /// 当前没有任何调用方（录制主路径走的是 CPU 侧 NV12 或 RGBA 直出），保留它是为了
+    /// 这条已经调通的 GPU NV12 链路不至于烂掉——真要删，请连同上面的 8 个 NV12 句柄字段
+    /// 与 create_nv12_targets 一起删，并确认录制路径确实不再需要它。
+    #[allow(dead_code)]
     pub fn convert_to_nv12(&mut self, src: &ID3D11Texture2D) -> Result<bool> {
         if self.broken {
             return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));

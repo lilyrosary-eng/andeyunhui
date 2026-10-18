@@ -161,6 +161,9 @@ pub fn infer_capacity(model_name: &str) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    // 本项目测试名一律写中文（失败信息直接能读懂在测什么），
+    // 因此显式关掉 non_snake_case，别让 rustc 年年劝改成拼音。
+    #![allow(non_snake_case)]
     use super::*;
 
     #[test]

@@ -27,7 +27,7 @@ import { WebSidebarShell, GlobeIcon, type WebSidebarItem } from './WebSidebarShe
 import {
   loadPresets, savePresets, newPresetId, validatePreset,
   suggestFromFile, scanAndRecognize, recognitionToPreset, baseName, dirName, extOf, RUNNABLE_EXTS,
-  type WebPreset, type WebRun, type WebRunStatus,
+  type WebPreset, type WebRun,
 } from './presets';
 
 // ---------- 模块设置（持久化到 localStorage）----------
@@ -228,7 +228,7 @@ function RunPane({
 }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [probeReady, setProbeReady] = useState(false);
-  const [autoReload, setAutoReload] = useState(true);
+  const [autoReload] = useState(true);
   const [reloadCount, setReloadCount] = useState(0);
   const [reloadGaveUp, setReloadGaveUp] = useState(false);
   // serving：预览端口已真正可达（服务在监听）；仅在此之后才挂载 iframe
@@ -975,9 +975,12 @@ function WebInterfaceModule() {
       name: p.name,
       desc: p.desc,
       hint: p.args,
-      runStatus: run?.presetId === p.id ? run.status : undefined,
+      // 走到这里 serviceRunning 必为 false，即 run 必为 null，故 runStatus 恒为 undefined。
+      // 显式写 undefined 而不是把字段删掉：WebSidebarItem.runStatus 本来就是为
+      // 「运行中也列出当前预设」预留的，真要那么做时把上面的 guard 去掉即可。
+      runStatus: undefined,
     }));
-  }, [filtered, run, serviceRunning]);
+  }, [filtered, serviceRunning]);
 
   return (
     <>

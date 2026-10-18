@@ -22,7 +22,9 @@ import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
 import { ensureOverlayWindow, type OverlayProfile } from '@/core/overlayWindow';
 import { PluginRegistry, type PluginDef } from '@/core/pluginRegistry';
-import { logger } from '@/lib/logger';
+import type { PluginPermissions } from '@/lib/api';
+// 沙箱里刻意不走 @/lib/logger：它经 tauri invoke 落盘，而沙箱/控制台要在任何宿主服务
+// 缺失时也能报错（拦截未授权命令必须让开发者看见），故此处直接用 console.*。
 import { createFrameBuffer } from '@/lib/frameBuffer';
 
 // 合并 react-dom（legacy: render / flushSync）+ react-dom/client（React 18: createRoot / hydrateRoot）
@@ -199,6 +201,19 @@ const ALLOWED_COMMANDS = new Set([
   'ai_get_profiles',
   'ai_set_profiles',
   'ai_chat',
+  // RAG 共享后台服务（茑萝 · RAG 知识库子插件）。
+  // ⚠️ 这 6 条此前**从未**进过白名单（`git log -S rag_query -- src/core/pluginSandbox.ts` 无记录），
+  // 于是插件侧 rag_init_db / rag_list_sources / rag_embed_api 全被拦截，而插件里
+  // catch {} 兜底 → 面板只显示「暂无来源」、摄取报「嵌入请求失败」，看起来像「功能没做」。
+  // 后端 src-tauri/src/commands/rag_commands.rs 六个命令一直是实现完整并注册过的。
+  'rag_init_db',
+  'rag_ingest',
+  'rag_query',
+  'rag_list_sources',
+  'rag_delete_source',
+  'rag_embed_api',
+  // base64 文档 → Markdown（摄取对话框粘贴/拖入二进制时走这条；按路径那条已在上方 convert_to_markdown）
+  'convert_bytes_to_markdown',
   // 一期 AI 办公 / 工作流：读取与写入笔记（成果物 → 笔记闭环）。
   // 此前漏加白名单已被沙箱拦截，导致 AI 办公无法把产出物落地到笔记。
   'get_all_notes',
@@ -330,7 +345,95 @@ const ALLOWED_COMMANDS = new Set([
   'gongfang_target_activate',
   'gongfang_target_get',
   'gongfang_target_set_metadata',
+  // ↓ 2026-10 补漏：scripts/_scan_perms.mjs 扫出这些命令已被插件实际调用，
+  // 却从未进白名单 → 过去一直被静默拦截（正是本文件反复记录的"漏加白名单→
+  // .catch 吞错→功能静默失败"事故）。均已确认在 main.rs invoke_handler 注册。
+  // AI 智能体审批/应用编辑（茑萝/ai、茑萝/ide）
+  'ai_agent_approve',
+  'ai_agent_apply_edits',
+  // MCP 服务器增删（茑萝/ide）
+  'mcp_save_server',
+  'mcp_remove_server',
+  // WPS 导出（茑萝/wps）
+  'wps_export_docx',
+  'wps_export_pptx',
+  // 缩略图缓存清理（莲花）
+  'cleanup_thumbnail_cache',
+  // 桌面歌词可见性（铃兰）
+  'get_lyrics_widget_visible',
+  // 音乐播放列表 / MV / 封面（铃兰）
+  'music_create_playlist',
+  'music_get_all_mv_paths',
+  'music_set_mv_path',
+  'music_set_cover_url',
+  // 外部依赖路径解析（茑萝/deskpet）
+  'read_external_dep_path',
 ]);
+
+// ========== 声明式权限：manifest.permissions.commands 的解析 ==========
+
+/** 某插件的命令调用策略：实际放行集合 + 是否显式声明过（决定拒绝时给哪种修复提示） */
+interface PluginCommandPolicy {
+  allowed: Set<string>;
+  declared: boolean;
+}
+
+/** 已就"未声明权限"告警过的插件（DEV 下去重，避免每次加载都刷屏） */
+const warnedUndeclared = new Set<string>();
+
+/**
+ * 宿主 alias 直连型插件：其 IIFE 经 `vite.shared.config` 的 `resolve.alias '@' → 仓库 src/`
+ * 把宿主代码整个编进去，invoke 走 `@tauri-apps/api/core` 直连
+ * （`window.__TAURI_INTERNALS__.invoke`），不经过 `__HOST_API__.invoke`，
+ * 因此 permissions.commands 对它们是"假声明"，填了也不会被强制执行。
+ * 这些插件的真实边界在 Tauri capability/ACL（src-tauri/capabilities/default.json），
+ * 故不参与"未声明权限"告警——告警对它们没有可执行的修复动作。
+ */
+const HOST_ALIASED_PLUGINS = new Set<string>([
+  'ai-chat', // src/index.tsx 直接 import @/components/ai-chat/*、@/core/ai/useAiChat
+]);
+
+/**
+ * 解析某插件实际可用的命令集合。
+ *
+ * 三层语义（按优先级）：
+ *   1. manifest 声明了 `permissions.commands`（非空数组）→ 取「声明 ∩ 全局白名单」。
+ *      manifest 可以比全局白名单**更严**，但不能更宽：ALLOWED_COMMANDS 仍是最终安全底线，
+ *      声明一个全局未放行的命令只会在加载时收到显式告警（通常是拼写错误），不会因此放行。
+ *   2. 未声明 → 回退全局白名单（兼容存量插件），DEV 下按插件去重地提示补齐。
+ *      迁移路径由此变得机械：照控制台里实际出现的命令名抄进 manifest 即可。
+ *   3. 声明的命令不在全局白名单 → 显式告警（拼写错误 / 想越权），不放行。
+ */
+function resolveCommandPolicy(
+  pluginId: string,
+  permissions?: PluginPermissions,
+): PluginCommandPolicy {
+  const declared = permissions?.commands;
+  if (!Array.isArray(declared) || declared.length === 0) {
+    if (import.meta.env.DEV && !warnedUndeclared.has(pluginId) && !HOST_ALIASED_PLUGINS.has(pluginId)) {
+      warnedUndeclared.add(pluginId);
+      console.warn(
+        `[pluginSandbox] 插件 "${pluginId}" 未在 manifest 声明 permissions.commands，` +
+          `暂时回退全局白名单。建议把运行期实际调用到的命令补进 ` +
+          `plugins/${pluginId}/manifest.json 的 permissions.commands（未声明的命令随时可能被拒绝）。`,
+      );
+    }
+    return { allowed: ALLOWED_COMMANDS, declared: false };
+  }
+  const allowed = new Set<string>();
+  for (const cmd of declared) {
+    if (typeof cmd !== 'string' || cmd.length === 0) continue;
+    if (ALLOWED_COMMANDS.has(cmd)) {
+      allowed.add(cmd);
+    } else {
+      console.error(
+        `[pluginSandbox] 插件 "${pluginId}" 声明了全局白名单未放行的命令: ${cmd}` +
+          `（拼写错误？或需先评审并加入 pluginSandbox.ts 的 ALLOWED_COMMANDS）`,
+      );
+    }
+  }
+  return { allowed, declared: true };
+}
 
 // ========== 安全 Console：所有输出带插件前缀 ==========
 // 生产环境静默 log/info/debug/count/trace，保留 warn/error，避免高频日志拖慢主线程
@@ -372,12 +475,22 @@ function createSafeConsole(pluginId: string): Console {
 //   1) 未授权命令 → console.error（红色，明确提示漏加白名单）
 //   2) 命令执行失败 → console.error（暴露被插件 .catch 吞掉的真正错误，如权限拒绝）
 //   3) 放行命令 → 仅开发环境 console.warn（确认调用确实发出了，便于对照 Rust 侧是否收到）
-function createSafeApi(pluginId: string) {
+//
+// 声明式权限（manifest.permissions.commands）落地后，第 1 类的报错进一步细分成两种原因，
+// 并给出**可直接复制**的修复提示 —— 此前只有一句"未授权命令"，插件侧 .catch 吞掉后
+// 根本无法判断是 manifest 漏声明还是全局白名单漏加，只能靠猜。
+function createSafeApi(pluginId: string, policy: PluginCommandPolicy) {
   return {
     invoke: async (command: string, args?: Record<string, unknown>) => {
-      if (!ALLOWED_COMMANDS.has(command)) {
-        const msg = `插件 "${pluginId}" 尝试调用未授权命令: ${command}`;
-        console.error(`[pluginSandbox] 拦截未授权命令: ${command} (插件:${pluginId}) —— 若需放开请在 ALLOWED_COMMANDS 白名单追加`);
+      if (!policy.allowed.has(command)) {
+        // 提示按"插件是否声明过权限"分流：声明过 → 就是这条命令漏了；
+        // 没声明过 → 顺手把整份权限清单补上（这是存量插件的迁移路径）。
+        const fix = policy.declared
+          ? `把 "${command}" 加进 plugins/${pluginId}/manifest.json 的 permissions.commands`
+          : `在 plugins/${pluginId}/manifest.json 增加 permissions.commands 并列入 "${command}"` +
+            `（若该命令本就不该放行，说明插件在越权，请直接改插件代码）`;
+        const msg = `插件 "${pluginId}" 尝试调用未授权命令: ${command} —— 修复：${fix}`;
+        console.error(`[pluginSandbox] 拦截未授权命令: ${command} (插件:${pluginId}) —— 修复：${fix}`);
         throw new Error(msg);
       }
       if (import.meta.env.DEV) {
@@ -565,20 +678,99 @@ const sandboxedFunction = new Proxy(Function, {
   },
 });
 
+/** createSandboxGlobals 需要的 manifest 子集（只取沙箱关心的两个字段） */
+export interface SandboxManifestInput {
+  deps?: string[];
+  permissions?: PluginPermissions;
+}
+
 export function createSandboxGlobals(
   pluginId: string,
   registry: PluginRegistry,
-  deps?: string[],
+  manifest?: SandboxManifestInput,
 ): SandboxGlobals {
+  const deps = manifest?.deps;
   // 声明了 external-deps 的插件必须能 new Function 加载依赖；白名单为保底。
   const exposeFunction = TRUSTED_FUNCTION_PLUGINS.has(pluginId) || (deps?.length ?? 0) > 0;
+  // 命令调用策略：manifest 声明式权限 ∩ 全局白名单（见 resolveCommandPolicy）
+  const policy = resolveCommandPolicy(pluginId, manifest?.permissions);
+  // 受限 window：优先返回宿主注入变量，未知属性透传真实 window
+  // （get 陷阱需要自引用沙箱 proxy 本身，故先声明再构造，末尾以 window: sandboxWindow 注入）
+  const sandboxWindow: SafeWindow = new Proxy<SafeWindow>(
+    {
+      __HOST_REACT__: React,
+      __HOST_REACT_DOM__: ReactDOM,
+      __HOST_API__: createSafeApi(pluginId, policy),
+      __PLUGIN_REGISTRY__: registry,
+      __HOST_UI__: window.__HOST_UI__ || {},
+      __HOST_I18N__: window.__HOST_I18N__ || {},
+    },
+    {
+      get(target, prop) {
+        if (prop in target) return (target as Record<string, unknown>)[prop as string];
+        // 危险网络 API 强制遮蔽：即便插件改用 window.fetch / window.XMLHttpRequest /
+        // window.WebSocket 也拿不到真身，所有出站网络必须走 hostApi.invoke → Rust 命令，
+        // 统一受 truncate_messages_for_safety + HARD_CHAR_CAP 兜底（根治沙箱内直连 LLM 导致的
+        // 208 万 token HTTP 400 报错）。
+        if (prop === 'fetch' || prop === 'XMLHttpRequest' || prop === 'WebSocket') {
+          return undefined;
+        }
+        // Tauri IPC 全局遮蔽：capabilities 未开 withGlobalTauri，正常情况下不存在；
+        // 但一旦将来开启（或某个窗口单独开启），插件即可绕过 __HOST_API__ 的
+        // ALLOWED_COMMANDS 白名单直接 invoke 任意命令。此处按"永不存在"处理，
+        // 使沙箱的调用审计假设不依赖远端配置。
+        // ⚠️ 例外：__TAURI_INTERNALS__ 不能遮蔽。@tauri-apps/api/core 的 invoke 实现是
+        // `window.__TAURI_INTERNALS__.invoke(...)`，而 ai-chat / 薄荷 等插件走 vite.shared.config
+        // 的 resolve.alias `'@' → 仓库 src/`，把宿主代码（src/lib/api.ts 等）整个编进插件 IIFE，
+        // 它们的 invoke 是直连接口、根本不经过 __HOST_API__。遮蔽 __TAURI_INTERNALS__ 会让这类
+        // 插件一启动就 TypeError。这同时说明沙箱从来不是安全边界（真正的边界是 Tauri
+        // capability/ACL），ALLOWED_COMMANDS 只是"规范插件入口"的工程约束。
+        if (
+          prop === '__TAURI__' ||
+          prop === '__TAURI_INVOKE__' ||
+          prop === '__TAURI_OS__'
+        ) {
+          return undefined;
+        }
+        // 自引用窗口属性：顶层窗口里 parent/top/self/frames/globalThis 都指向真实 window，
+        // 透传出去等于把上面所有遮蔽原样绕开放手（window.parent.fetch 即真身）。
+        // 返回沙箱 proxy 本身：语义不变（顶层窗口 parent===window），遮蔽继续生效。
+        if (
+          prop === 'parent' ||
+          prop === 'top' ||
+          prop === 'self' ||
+          prop === 'frames' ||
+          prop === 'globalThis'
+        ) {
+          return sandboxWindow;
+        }
+        // 未知属性透传真实 window（addEventListener、removeEventListener 等）
+        const val = (window as unknown as Record<string, unknown>)[prop as string];
+        // 绑定原生函数到真实 window，防止 "Illegal invocation" 错误
+        // 原生 DOM API（addEventListener、setTimeout 等）要求 this 为 EventTarget/Window，
+        // 若直接返回函数引用，调用时 this 指向 sandbox proxy 就会抛错
+        if (typeof val === 'function') {
+          return val.bind(window);
+        }
+        return val;
+      },
+      set(target, prop, value) {
+        // 写入 proxy target（与 get 的「先 target 后 window」读取顺序一致）。
+        // 曾尝试改写真实 window 以追求「读写都透传」，但 get 对 target 已有 key
+        // （__HOST_API__/__PLUGIN_REGISTRY__ 等）始终优先返回 target，导致 set 透传后
+        // 插件拿到的仍是 target 旧值，重载后功能失效。故保留原「写 target」语义。
+        (target as Record<string, unknown>)[prop as string] = value;
+        return true;
+      },
+    },
+  );
   return {
     React,
     ReactDOM,
     register: (def: PluginDef) => {
       registry.register(def);
     },
-    api: createSafeApi(pluginId),
+    api: createSafeApi(pluginId, policy),
     console: createSafeConsole(pluginId),
     setTimeout: setTimeout.bind(window),
     setInterval: setInterval.bind(window),
@@ -601,69 +793,30 @@ export function createSandboxGlobals(
     parseFloat,
     isNaN,
     isFinite,
-    // 受限 window：优先返回宿主注入变量，未知属性透传真实 window
-    window: new Proxy<SafeWindow>(
-      {
-        __HOST_REACT__: React,
-        __HOST_REACT_DOM__: ReactDOM,
-        __HOST_API__: createSafeApi(pluginId),
-        __PLUGIN_REGISTRY__: registry,
-        __HOST_UI__: window.__HOST_UI__ || {},
-        __HOST_I18N__: window.__HOST_I18N__ || {},
-      },
-      {
-        get(target, prop) {
-          if (prop in target) return (target as Record<string, unknown>)[prop as string];
-          // 危险网络 API 强制遮蔽：即便插件改用 window.fetch / window.XMLHttpRequest /
-          // window.WebSocket 也拿不到真身，所有出站网络必须走 hostApi.invoke → Rust 命令，
-          // 统一受 truncate_messages_for_safety + HARD_CHAR_CAP 兜底（根治沙箱内直连 LLM 导致的
-          // 208 万 token HTTP 400 报错）。
-          if (prop === 'fetch' || prop === 'XMLHttpRequest' || prop === 'WebSocket') {
-            return undefined;
-          }
-          // 未知属性透传真实 window（addEventListener、removeEventListener 等）
-          const val = (window as unknown as Record<string, unknown>)[prop as string];
-          // 绑定原生函数到真实 window，防止 "Illegal invocation" 错误
-          // 原生 DOM API（addEventListener、setTimeout 等）要求 this 为 EventTarget/Window，
-          // 若直接返回函数引用，调用时 this 指向 sandbox proxy 就会抛错
-          if (typeof val === 'function') {
-            return val.bind(window);
-          }
-          return val;
-        },
-        set(target, prop, value) {
-          // 写入 proxy target（与 get 的「先 target 后 window」读取顺序一致）。
-          // 曾尝试改写真实 window 以追求「读写都透传」，但 get 对 target 已有 key
-          // （__HOST_API__/__PLUGIN_REGISTRY__ 等）始终优先返回 target，导致 set 透传后
-          // 插件拿到的仍是 target 旧值，重载后功能失效。故保留原「写 target」语义。
-          (target as Record<string, unknown>)[prop as string] = value;
-          return true;
-        },
-      },
-    ),
+    window: sandboxWindow,
     // 危险全局变量遮蔽
-  // 注意: document/location/navigator 不遮蔽，React 插件需要它们渲染 DOM
-  // 注意: localStorage/sessionStorage 不遮蔽，插件需要用于持久化
-  // 注意: alert/prompt/confirm 遮蔽的是「裸调用」形式，强制插件改用 window.alert 等
-  //       （经 proxy 透传，可被宿主审计/拦截）。这降低恶意插件社会工程攻击面。
-  fetch: undefined,
-  XMLHttpRequest: undefined,
-  indexedDB: undefined,
-  alert: undefined,
-  prompt: undefined,
-  confirm: undefined,
-  // ⚠️ 这一条**实际不生效**：`executeInSandbox` 会把 `eval` 从形参列表里过滤掉
-  //    （strict mode 不允许 `eval` 作形参名），所以插件里的裸 `eval` 仍解析到全局 eval。
-  //    保留字段只为让 `SandboxGlobals` 的类型与意图完整；**不要据此认为 eval 已被堵住**。
-  //    （有测试 assert 了现状；真要堵住需改整体包装方式，属独立任务。）
-  eval: undefined,
-  Function: exposeFunction ? Function : sandboxedFunction,
-  WebSocket: undefined,
-  Worker: undefined,
-  // 宿主注入的全局变量
+    // 注意: document/location/navigator 不遮蔽，React 插件需要它们渲染 DOM
+    // 注意: localStorage/sessionStorage 不遮蔽，插件需要用于持久化
+    // 注意: alert/prompt/confirm 遮蔽的是「裸调用」形式，强制插件改用 window.alert 等
+    //       （经 proxy 透传，可被宿主审计/拦截）。这降低恶意插件社会工程攻击面。
+    fetch: undefined,
+    XMLHttpRequest: undefined,
+    indexedDB: undefined,
+    alert: undefined,
+    prompt: undefined,
+    confirm: undefined,
+    // ⚠️ 这一条**实际不生效**：`executeInSandbox` 会把 `eval` 从形参列表里过滤掉
+    //    （strict mode 不允许 `eval` 作形参名），所以插件里的裸 `eval` 仍解析到全局 eval。
+    //    保留字段只为让 `SandboxGlobals` 的类型与意图完整；**不要据此认为 eval 已被堵住**。
+    //    （有测试 assert 了现状；真要堵住需改整体包装方式，属独立任务。）
+    eval: undefined,
+    Function: exposeFunction ? Function : sandboxedFunction,
+    WebSocket: undefined,
+    Worker: undefined,
+    // 宿主注入的全局变量
     __HOST_REACT__: React,
     __HOST_REACT_DOM__: ReactDOM,
-    __HOST_API__: createSafeApi(pluginId),
+    __HOST_API__: createSafeApi(pluginId, policy),
     __PLUGIN_REGISTRY__: registry,
     __HOST_UI__: window.__HOST_UI__ || {},
     __HOST_I18N__: window.__HOST_I18N__ || {},

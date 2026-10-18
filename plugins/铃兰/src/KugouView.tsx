@@ -7,8 +7,7 @@
 
 import React from 'react';
 const { useState, useEffect, useRef } = React;
-import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon, HeartIcon, VideoIcon, DownloadIcon } from 'lucide-react';
-import { ArrowLeftIcon } from '../../_shared/icons';
+import { MusicIcon, PlayIcon, SearchIcon, Sparkles, UserIcon, LibraryIcon } from 'lucide-react';
 import { T } from '../../_shared/pluginRuntime';
 import {
   type KugouAuth,
@@ -16,7 +15,6 @@ import {
   type KugouTrack,
   type KugouPlaylistCard,
   getFavorites,
-  getUserPlaylists,
   getKugouVipInfo,
   type KugouVipInfo,
   safeImg,
@@ -24,7 +22,6 @@ import {
   getSongUrl,
   downloadKugouTrack,
   getTopList,
-  getPlaylist,
   getPlaylistByGid,
   getPlaylistBySpecialId,
   getEverydayRecommend,
@@ -43,11 +40,11 @@ import {
   logoutKugou,
   fetchKugouProfile,
 } from './kugouAuth';
-import { musicPlayer, Track } from './musicPlayer';
+import { musicPlayer } from './musicPlayer';
 import { PlayableTrack, TempPlaylist, NeteaseViewHandle } from './NeteaseView';
 import { MusicHeader } from './MusicHeader';
 import { PlaylistDetailHeader } from '@shared/OnlineMusicTemplates';
-import { TrackRow, type TrackBadge } from './_shared/TrackRow';
+import { TrackRow } from './_shared/TrackRow';
 import { DetailDrawer, type SharedDrawerType, type SharedArtistData, type SharedAlbumData } from './_shared/DetailDrawer';
 
 type KugouTab = 'home' | 'roam' | 'search' | 'mine';
@@ -166,7 +163,7 @@ function HeroCard({ rank, onClick, onPlayAll }: { rank: KugouPlaylistCard; onCli
 
 // 我的：游客态提示页（对齐网易云"我的"登录态；登录后可看收藏 / 歌单）
 // 我的：真实扫码登录 + 登录态（收藏 / 歌单 / 退出）
-function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?: (auth: KugouAuth | null) => void }) {
+function MineView({ onAuthChange }: { onBack: () => void; onAuthChange?: (auth: KugouAuth | null) => void }) {
   const [auth, setAuth] = useState<KugouAuth | null>(() => readKugouAuth());
   const [profile, setProfile] = useState<KugouProfile | null>(null);
   const [qrImg, setQrImg] = useState('');
@@ -175,11 +172,9 @@ function MineView({ onBack, onAuthChange }: { onBack: () => void; onAuthChange?:
   const [favs, setFavs] = useState<KugouTrack[]>([]);
   const [playlists, setPlaylists] = useState<KugouPlaylistCard[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
-  const [dataError, setDataError] = useState('');
+  const [_dataError, setDataError] = useState('');
   const [vipInfo, setVipInfo] = useState<KugouVipInfo | null>(null);
   const pollRef = useRef<number | null>(null);
-  const reqRef = useRef(0);
-
   // 已登录：拉取用户资料 + 收藏 + 歌单。
   // 依赖用 auth?.userid（而非 auth 引用）：fetchKugouProfile 每次返回新对象，
   // 若依赖 auth 引用会无限自循环重跑，导致每秒几百次 onAuthChange 回调把 Rust/代理打爆。
@@ -452,7 +447,7 @@ export const KugouView = React.forwardRef<NeteaseViewHandle, KugouViewProps>(fun
   const [activeRankId, setActiveRankId] = useState<number | null>(null);
   const [playlistMode, setPlaylistMode] = useState<{ id: string; name: string; cover?: string | null } | null>(null);
   const [homeHeroTracks, setHomeHeroTracks] = useState<KugouTrack[]>([]);
-  const [homeHeroLoading, setHomeHeroLoading] = useState(false);
+  const [_homeHeroLoading, setHomeHeroLoading] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const pageRef = useRef(1);

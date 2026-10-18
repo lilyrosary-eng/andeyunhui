@@ -7,6 +7,24 @@
   "entry": "index.js",
   "iconName": "Bot",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "ai_agent_apply_edits",
+      "ai_agent_approve",
+      "ai_chat",
+      "ai_chat_agent",
+      "ai_get_conversations",
+      "ai_get_profiles",
+      "ai_save_conversations",
+      "ai_set_profile_thinking",
+      "clipboard_write",
+      "list_directory",
+      "pick_file",
+      "pick_save_file",
+      "read_text_file",
+      "write_text_file"
+    ]
+  },
   "parent": "global",
   "codename": "global"
 }

@@ -4,7 +4,7 @@
 // Tab 结构对齐网易云：listen（现在就听） / library（漫游） / search（搜索） / about（关于）
 // 由右侧滑出的 ModuleDrawer 控制切换，而非页内 tab 按钮。
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Loader2, AlertCircle, Music2, Play, Sparkles } from 'lucide-react';
+import { Loader2, AlertCircle, Music2, Play, Sparkles } from 'lucide-react';
 import {
   qishuiSearch,
   qishuiGetRecommendPlaylists,
@@ -69,13 +69,6 @@ function trackToPlayable(t: QishuiTrack, url: string, quality = ''): PlayableTra
     coverPath: t.cover,
     quality,
   };
-}
-
-function formatDuration(sec: number): string {
-  const total = Math.round(sec);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 export const QishuiView = React.forwardRef<QishuiViewHandle, QishuiViewProps>(function QishuiView(

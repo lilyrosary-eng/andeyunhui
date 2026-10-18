@@ -7,6 +7,22 @@
   "entry": "index.js",
   "iconName": "BookOpen",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "ai_chat",
+      "ai_get_profiles",
+      "convert_bytes_to_markdown",
+      "convert_to_markdown",
+      "pick_file",
+      "rag_delete_source",
+      "rag_embed_api",
+      "rag_ingest",
+      "rag_init_db",
+      "rag_list_sources",
+      "rag_query",
+      "read_external_dep_bytes"
+    ]
+  },
   "parent": "niaoluo",
   "codename": "茑萝",
   "desc": "本地知识库检索增强（RAG）：文档摄取、语义检索、带引用对话"

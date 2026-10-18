@@ -7,10 +7,28 @@
   "entry": "index.js",
   "iconName": "FileText",
   "hostApiVersion": 1,
-  "deps": ["tiptap"],
+  "permissions": {
+    "commands": [
+      "convert_to_markdown",
+      "read_external_dep_file",
+      "read_file_base64",
+      "read_text_file",
+      "wps_export_docx",
+      "wps_export_pptx",
+      "wps_import_pptx",
+      "wps_import_pptx_diagnose",
+      "write_file_bytes",
+      "write_text_file"
+    ]
+  },
+  "deps": [
+    "tiptap"
+  ],
   "parent": "niaoluo",
   "codename": "茑萝",
-  "requiredAssets": ["茑萝/wps/tiptap/index.js"],
+  "requiredAssets": [
+    "茑萝/wps/tiptap/index.js"
+  ],
   "category": "办公",
   "desc": "办公套件：文档、演示文件、表格"
 }

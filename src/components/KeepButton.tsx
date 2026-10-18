@@ -1,4 +1,5 @@
-import React from 'react';
+// 注意：本文件用 jsx: react-jsx，无需 import React（tsconfig 开了 noUnusedLocals，
+// 旧的无用 React 默认导入会被判死，故不保留）。
 
 interface KeepButtonProps {
   pinned: boolean;

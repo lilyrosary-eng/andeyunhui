@@ -86,11 +86,12 @@ export function FloatingNoteView() {
 
   // 加载完成后才允许自动保存（避免首次渲染触发保存）
   const loadedRef = useRef(false);
-  // 持有最新标题/内容，供 onCloseRequested（任意关闭路径）读取，避免闭包拿到旧值
+  // 持有最新标题/内容，供 onCloseRequested（任意关闭路径）读取，避免闭包拿到旧值。
+  // 下沉到 effect：关闭事件必然发生在 commit 之后。渲染期写 ref 违反 react-hooks/refs。
   const titleRef = useRef(title);
   const contentRef = useRef(content);
-  titleRef.current = title;
-  contentRef.current = content;
+  useEffect(() => { titleRef.current = title; }, [title]);
+  useEffect(() => { contentRef.current = content; }, [content]);
 
   // 预览所需的 Markdown 样式（代码块底色/折行/复制按钮）：复用主编辑器同一套注入函数。
   useEffect(() => {

@@ -14,7 +14,6 @@ export interface AiWorkDirs {
 }
 
 const DIRS_KEY = 'andeyunhui.aiwork.productDirs';
-const DEFAULT_DIRS: AiWorkDirs = { saveDir: '', favDir: '', pendingDir: '' };
 
 export function loadProductDirs(): AiWorkDirs {
   const got = storage.getJSON<Partial<AiWorkDirs>>(DIRS_KEY, {});

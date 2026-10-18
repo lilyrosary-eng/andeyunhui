@@ -79,7 +79,6 @@ export function useAiStream(): UseAiStreamResult {
   const activeConvId = useChatStore((s) => s.activeConvId);
   const activeConv = conversations.find((c) => c.id === activeConvId);
   const timeline = activeConv?.timeline ?? [];
-  const convCount = conversations.length;
 
   // refs：流式写入需在事件回调中读取最新值，避免闭包陈旧
   const reqRef = useRef<string | null>(null);

@@ -35,9 +35,10 @@ export function NotesEditor() {
 
   // 编辑区指令句柄（插入 Markdown 标记 / 回填润色结果）
   const editorRef = useRef<MarkdownSourceEditorHandle | null>(null);
-  // content 的最新值镜像（拖拽/导入等异步流程中直接追加文本，避免闭包读到旧值）
+  // content 的最新值镜像（拖拽/导入等异步流程中直接追加文本，避免闭包读到旧值）。
+  // 下沉到 effect：拖拽/导入都是 commit 之后的用户事件。渲染期写 ref 违反 react-hooks/refs。
   const contentRef = useRef(content);
-  contentRef.current = content;
+  useEffect(() => { contentRef.current = content; }, [content]);
 
   const [editorMode, setEditorMode] = useState<EditorMode>(() => {
     // 校验持久化值，避免历史脏数据导致三栏全不渲染

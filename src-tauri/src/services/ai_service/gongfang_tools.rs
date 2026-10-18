@@ -28,9 +28,6 @@ fn fk(v: &Value, keys: &[&str], d: f64) -> f64 {
 fn arr_str(v: &Value, key: &str) -> Vec<String> {
     v.get(key).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }
-fn arr_num<T: From<f64>>(v: &Value, key: &str) -> Vec<T> {
-    v.get(key).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|e| e.as_f64().map(|f| T::from(f))).collect()).unwrap_or_default()
-}
 fn json(v: &Value, key: &str) -> Option<Value> {
     v.get(key).cloned()
 }

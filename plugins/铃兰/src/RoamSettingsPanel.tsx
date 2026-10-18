@@ -7,7 +7,7 @@
 import React from "react";
 const { useState, useEffect } = React;
 import { ChevronLeft } from 'lucide-react';
-import { T, useLang } from '../../_shared/pluginRuntime';
+import { useLang } from '../../_shared/pluginRuntime';
 
 const STORAGE_KEY_AUTO_EXTEND = 'roam_auto_extend';
 const STORAGE_KEY_HISTORY_LIMIT = 'roam_history_limit';

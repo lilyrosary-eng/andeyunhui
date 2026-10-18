@@ -36,7 +36,6 @@ export default function KugouSidebar({
   statsActive,
   searchQuery,
   onSearchChange,
-  onOpenMine,
   onSelectUserPlaylist,
 }: KugouSidebarProps) {
   const [auth, setAuth] = useState<KugouAuth | null>(() => getKugouAuth());

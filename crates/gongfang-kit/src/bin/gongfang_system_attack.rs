@@ -84,18 +84,19 @@ async fn ip_echo(c: &reqwest::Client, base: &str, xff: Option<&str>) -> (u16, Va
 async fn main() {
     let base = std::env::args().nth(1).unwrap_or_else(|| "http://127.0.0.1:8787".to_string());
     let c_direct = client(None);
-    let c_proxyA = client(Some("http://127.0.0.2:8798"));
-    let c_proxyB = client(Some("http://127.0.0.3:8799"));
+    // 代理 A/B 走两个不同的 loopback 别名，用来验证「同一进程多出口」是否真的分开
+    let c_proxy_a = client(Some("http://127.0.0.2:8798"));
+    let c_proxy_b = client(Some("http://127.0.0.3:8799"));
 
     println!("===== A) 反追踪真实能力：出口 IP 观测 =====");
     let (_, v0) = ip_echo(&c_direct, &base, None).await;
-    let (_, vA) = ip_echo(&c_proxyA, &base, None).await;
-    let (_, vB) = ip_echo(&c_proxyB, &base, None).await;
-    let (_, vX) = ip_echo(&c_direct, &base, Some("203.0.113.7, 198.51.100.4")).await;
+    let (_, v_a) = ip_echo(&c_proxy_a, &base, None).await;
+    let (_, v_b) = ip_echo(&c_proxy_b, &base, None).await;
+    let (_, v_x) = ip_echo(&c_direct, &base, Some("203.0.113.7, 198.51.100.4")).await;
     println!(" 直连   -> 目标看到的出口: {}", v0["remote"].as_str().unwrap_or("") );
-    println!(" 代理A  -> 目标看到的出口: {}   (已替换真实IP)", vA["remote"].as_str().unwrap_or(""));
-    println!(" 代理B  -> 目标看到的出口: {}   (轮换,防一致性追踪)", vB["remote"].as_str().unwrap_or(""));
-    println!(" XFF混淆-> 目标看到的出口: {}, XFF: {}", vX["remote"].as_str().unwrap_or(""), vX["xff"].as_str().unwrap_or(""));
+    println!(" 代理A  -> 目标看到的出口: {}   (已替换真实IP)", v_a["remote"].as_str().unwrap_or(""));
+    println!(" 代理B  -> 目标看到的出口: {}   (轮换,防一致性追踪)", v_b["remote"].as_str().unwrap_or(""));
+    println!(" XFF混淆-> 目标看到的出口: {}, XFF: {}", v_x["remote"].as_str().unwrap_or(""), v_x["xff"].as_str().unwrap_or(""));
 
     println!("\n===== B) 体系攻击 /api/system（要求 IP 隐藏） =====");
     // B1: 直连(未隐藏) → 应在 L2 被 403
@@ -111,7 +112,7 @@ async fn main() {
     println!("  B2 经代理(IP已隐藏):");
     // 等频控冷却
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    let (_, va) = post(&c_proxyA, &format!("{base}/api/system/begin"), None, None, "{}").await;
+    let (_, va) = post(&c_proxy_a, &format!("{base}/api/system/begin"), None, None, "{}").await;
     let atoken = va["token"].as_str().unwrap_or("").to_string();
     println!("    begin -> hidden_seen={}", va["hidden_seen"].as_bool().unwrap_or(false));
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
@@ -121,7 +122,7 @@ async fn main() {
         if claim >= 3 { body.push_str(r#","behavior":0.38"#); }
         if claim >= 4 { body.push_str(",\"fp\":\"fp-ABCDEFGHIJKLMNOP\""); }
         body.push('}');
-        let (code, v) = post(&c_proxyA, &format!("{base}/api/system/step"), Some(&sign), None, &body).await;
+        let (code, v) = post(&c_proxy_a, &format!("{base}/api/system/step"), Some(&sign), None, &body).await;
         let flag = v["flag"].as_str().unwrap_or("");
         let err = v["error"].as_str().unwrap_or("");
         println!("    L{claim} -> {code} {}{}", if !flag.is_empty() { format!("FLAG={flag}") } else if !err.is_empty() { format!("ERR={err}") } else { String::new() }, "");
@@ -132,7 +133,7 @@ async fn main() {
     println!("\n===== C) 体系识破能力：IP 变化一致性计数 =====");
     // 攻击者：保持同一身份(cid=fp)但轮换出口 → distinct 应被体系数出并判"识破"
     let cid = "fp-ATTACKER-ROTATE";
-    let probes = [("直连(.1)", &c_direct), ("代理A(.2)", &c_proxyA), ("代理B(.3)", &c_proxyB)];
+    let probes = [("直连(.1)", &c_direct), ("代理A(.2)", &c_proxy_a), ("代理B(.3)", &c_proxy_b)];
     for (label, c) in probes {
         let (_, v) = post(c, &format!("{base}/api/system/churn"), None, None, &format!(r#"{{"cid":"{cid}"}}"#)).await;
         println!("  [轮换攻击者] {label} -> distinct_ips={} 出口={} → {}", v["distinct_ips"], v["seen_ip"].as_str().unwrap_or(""), v["verdict"].as_str().unwrap_or(""));

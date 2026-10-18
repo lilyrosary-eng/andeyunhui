@@ -265,7 +265,6 @@ function VideoCanvas({
     canvas.height = Math.round(size * dpr);
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return;
-    const urlType = src.startsWith("blob:") ? "blob" : src.startsWith("asset:") ? "asset" : "其它";
     // 部分 WebView2 下对新插入的 <video> 不触发 autoplay，需显式 play()；
     // muted 用属性设置（React 的 muted JSX 属性有时不落到 DOM property，导致被浏览器拦截）。
     video.muted = true;
@@ -492,21 +491,23 @@ export function DeskpetPet() {
   } | null>(null);
   const memPercentRef = useRef(0);
   const workPhaseRef = useRef<"start" | "loop" | "end" | null>(null);
-  assetsRef.current = assets;
-  settingsRef.current = settings;
-  stateIndexRef.current = stateIndex;
-  manifestRef.current = manifest;
-  memPercentRef.current = memPercent;
-  workPhaseRef.current = workPhase;
   const frameIndexRef = useRef(frameIndex);
-  frameIndexRef.current = frameIndex;
+  // ref 镜像下沉到 effect：这些 ref 只被 device-changed 回调 / rAF / 定时器读取，
+  // 全发生在 commit 之后，effect 已同步；渲染期写 ref 违反 react-hooks/refs。
+  useEffect(() => { assetsRef.current = assets; }, [assets]);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => { stateIndexRef.current = stateIndex; }, [stateIndex]);
+  useEffect(() => { manifestRef.current = manifest; }, [manifest]);
+  useEffect(() => { memPercentRef.current = memPercent; }, [memPercent]);
+  useEffect(() => { workPhaseRef.current = workPhase; }, [workPhase]);
+  useEffect(() => { frameIndexRef.current = frameIndex; }, [frameIndex]);
   const winPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 }); // 浮窗逻辑屏幕坐标（供光标跟随算 pet 中心）
   const cursorRef = useRef<{ x: number; y: number }>({ x: -99999, y: -99999 }); // 全局光标逻辑坐标（rdev 物理像素 / DPR）
   const dprRef = useRef(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1); // 屏幕缩放比（rdev 物理→逻辑）。用 webview 自身 devicePixelRatio 初始化，避免启动期 dpr=1 造成的物理/逻辑坐标错位
   const keyTimersRef = useRef<Record<string, number | undefined>>({}); // 按键松开后保留 2s 的移除计时器
   const repaintRef = useRef<HTMLDivElement>(null); // 失焦时周期性强制重绘用的透明 1px 元素
   const heldModsRef = useRef<Set<string>>(new Set()); // 当前「按住未松开」的修饰键（用于判定同时按下）
-  const keyLabelsRef = useRef<Record<string, string>>({}); // 每键显示标签：按下时按「当时按住的修饰键」计算，避免按时间序误合并
+  const [keyLabels, setKeyLabels] = useState<Record<string, string>>({}); // 每键显示标签：按下时按「当时按住的修饰键」计算，避免按时间序误合并
 
   // 应用设置：缩放 → resize 窗口 + 外层 scale；透明度 → 容器 opacity；点击穿透 → setIgnoreCursorEvents
   const applySettings = (s: DeskpetSettings) => {
@@ -829,22 +830,27 @@ export function DeskpetPet() {
     if (isModifier(label)) {
       // 修饰键按下：记入「当前按住」集合；独立显示（如 Ctrl），待普通键按下时再合成和弦
       heldModsRef.current.add(label);
-      keyLabelsRef.current[raw] = label;
+      setKeyLabels((m) => ({ ...m, [raw]: label }));
     } else if (heldModsRef.current.size > 0) {
       // 普通键按下且修饰键正按住 → 合并为和弦（如 Ctrl+C）；
       // 同时移除已显示的独立修饰键 chip，避免既显示 "Ctrl" 又显示 "Ctrl+C"
       const chord = [...heldModsRef.current].join("+") + "+" + label;
-      for (const m of heldModsRef.current) {
-        const rawM = Object.keys(keyLabelsRef.current).find((k) => keyLabelsRef.current[k] === m);
-        if (rawM) {
-          delete keyLabelsRef.current[rawM];
-          setKeys((prev) => prev.filter((k) => k !== rawM));
+      const mods = [...heldModsRef.current];
+      setKeyLabels((m) => {
+        const next = { ...m };
+        for (const mod of mods) {
+          const rawM = Object.keys(next).find((k) => next[k] === mod);
+          if (rawM) {
+            delete next[rawM];
+            setKeys((prev) => prev.filter((k) => k !== rawM));
+          }
         }
-      }
-      keyLabelsRef.current[raw] = chord;
+        next[raw] = chord;
+        return next;
+      });
     } else {
       // 无修饰键按住：普通键独立显示
-      keyLabelsRef.current[raw] = label;
+      setKeyLabels((m) => ({ ...m, [raw]: label }));
     }
     setKeys((prev) => {
       const next = prev.filter((k) => k !== raw);
@@ -859,7 +865,12 @@ export function DeskpetPet() {
     if (keyTimersRef.current[raw]) clearTimeout(keyTimersRef.current[raw]);
     keyTimersRef.current[raw] = window.setTimeout(() => {
       keyTimersRef.current[raw] = undefined;
-      delete keyLabelsRef.current[raw];
+      setKeyLabels((m) => {
+        if (!(raw in m)) return m;
+        const next = { ...m };
+        delete next[raw];
+        return next;
+      });
       setKeys((prev) => prev.filter((k) => k !== raw));
     }, 2000);
   };
@@ -1197,7 +1208,7 @@ export function DeskpetPet() {
                   whiteSpace: "nowrap",
                 }}
               >
-                {keyLabelsRef.current[raw] ?? friendlyKey(raw)}
+                {keyLabels[raw] ?? friendlyKey(raw)}
               </span>
             ))}
           </div>

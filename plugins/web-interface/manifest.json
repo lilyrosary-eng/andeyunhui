@@ -6,5 +6,18 @@
   "visible": true,
   "entry": "index.js",
   "iconName": "Globe",
-  "hostApiVersion": 1
+  "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "clipboard_read",
+      "list_directory",
+      "pick_directory",
+      "pick_file",
+      "pty_create",
+      "pty_kill",
+      "pty_resize",
+      "pty_write",
+      "read_text_file"
+    ]
+  }
 }

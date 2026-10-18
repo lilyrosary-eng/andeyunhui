@@ -7,5 +7,24 @@
   "entry": "index.js",
   "iconName": "Image",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "add_to_blacklist",
+      "cancel_open_book",
+      "cancel_scan",
+      "cleanup_thumbnail_cache",
+      "delete_image_cache",
+      "generate_thumbnail",
+      "get_blacklist_paths",
+      "get_folder_images",
+      "import_to_openwith_dir",
+      "load_image_cache",
+      "pick_directory",
+      "pick_file",
+      "read_file_base64",
+      "remove_from_blacklist",
+      "scan_image_root"
+    ]
+  },
   "codename": "莲花"
 }

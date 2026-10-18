@@ -25,7 +25,6 @@ import { KeepButton } from '@/components/KeepButton';
 import { useI18n } from '@/lib/i18n';
 import { useTransfer } from '@/core/transfer/useTransfer';
 import { useCapsuleStore } from '@/stores/capsuleStore';
-import { useNotesStore } from '@/stores/notesStore';
 import { api } from '@/lib/api';
 import CapsuleChat from '@/components/capsule/CapsuleChat';
 import CapsuleAide from '@/components/capsule/CapsuleAide';
@@ -315,11 +314,8 @@ export default function Capsule() {
   const panelReady = useCapsuleStore((s) => s.panelReady);
   const keepOpen = useCapsuleStore((s) => s.keepOpen);
   const setExpanded = useCapsuleStore((s) => s.setExpanded);
-  const setChatOpen = useCapsuleStore((s) => s.setChatOpen);
-  const setAideOpen = useCapsuleStore((s) => s.setAideOpen);
   const setSearchOpen = useCapsuleStore((s) => s.setSearchOpen);
   const setTransferOpen = useCapsuleStore((s) => s.setTransferOpen);
-  const setResourceOpen = useCapsuleStore((s) => s.setResourceOpen);
   const setKeepOpen = useCapsuleStore((s) => s.setKeepOpen);
   // 浮岛「常用笔记」轮转：记录后端收藏列表 + 局部召唤索引。
   // 浮岛是独立 webview，其 notesStore 收藏队列可能未初始化/为空（与主窗口 localStorage 不同步），
@@ -385,9 +381,12 @@ export default function Capsule() {
     }
   }, [expanded, refreshSessionList]);
 
+  // 依赖写成 [play] 而非 [play?.cover_path]：React Compiler 推断出的依赖是整个 play 对象，
+  // 手写更细的属性依赖反而让它无法保留既有 memo（preserve-manual-memoization 报错）。
+  // convertFileSrc 极廉价，play 变化时多算一次无感。
   const coverUrl = useMemo(
     () => (play?.cover_path ? convertFileSrc(play.cover_path) : null),
-    [play?.cover_path],
+    [play],
   );
   // 多会话堆叠：合并外部会话与本应用会话；当前展示之外的会话作为背景卡营造层次质感
   const allSessions = useMemo(() => {

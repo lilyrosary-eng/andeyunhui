@@ -18,40 +18,57 @@ pub fn rag_init_db(app: AppHandle) -> Result<(), String> {
 }
 
 /// 摄取一条来源及其全部分块（分块与向量由前端算好传入）。
+///
+/// `plugin_id` 由调用方（插件）显式传入：非空即强制落 `general` 命名空间
+/// （见 rag_service::resolve_plugin_namespace），为空按 `source.namespace`/默认。
+/// 当前宿主（semanticMemory.ts）与 rag 插件都还没传该字段 → None，语义等同旧版；
+/// 待插件侧补传后即可实现按插件隔离。
 #[tauri::command]
 pub fn rag_ingest(
     app: AppHandle,
     source: RagSourceInput,
     chunks: Vec<RagChunkInput>,
+    plugin_id: Option<String>,
 ) -> Result<RagIngestResult, String> {
-    svc_rag_ingest(&app, source, chunks)
+    svc_rag_ingest(&app, source, chunks, plugin_id)
 }
 
 /// 语义检索：对查询向量做暴力余弦 top-k。仅返回 `namespace` 命名空间下的记忆。
 /// `namespace` 为 Option，前端不传时回落服务层默认（'ai-chat'）。
+/// `min_score` 为相似度下限（0~1），不传则用服务层默认。
 #[tauri::command]
 pub fn rag_query(
     app: AppHandle,
     query_vec: Vec<f32>,
     top_k: Option<usize>,
     namespace: Option<String>,
+    min_score: Option<f32>,
+    plugin_id: Option<String>,
 ) -> Result<RagQueryResult, String> {
-    svc_rag_query(&app, query_vec, top_k, namespace)
+    svc_rag_query(&app, query_vec, top_k, namespace, min_score, plugin_id)
 }
 
 /// 列出知识库来源。`namespace` 非空时只返回该命名空间来源，否则全部（用于管理页总览）。
+/// `plugin_id` 非空时强制只看 `general`（插件视角）。
 #[tauri::command]
 pub fn rag_list_sources(
     app: AppHandle,
     namespace: Option<String>,
+    plugin_id: Option<String>,
 ) -> Result<Vec<RagSourceInfo>, String> {
-    svc_rag_list_sources(&app, namespace)
+    svc_rag_list_sources(&app, namespace, plugin_id)
 }
 
-/// 删除一条来源及其全部分块。
+/// 删除一条来源及其全部分块。`namespace` 非空时只在该命名空间内删（删不到即报错），
+/// 为空则全局删；`plugin_id` 非空时强制只在 `general` 内删。
 #[tauri::command]
-pub fn rag_delete_source(app: AppHandle, source_id: String) -> Result<(), String> {
-    svc_rag_delete_source(&app, source_id)
+pub fn rag_delete_source(
+    app: AppHandle,
+    source_id: String,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+) -> Result<(), String> {
+    svc_rag_delete_source(&app, source_id, namespace, plugin_id)
 }
 
 /// 嵌入代理：把文本发给配置的嵌入端点（Ollama / OpenAI 兼容），返回向量。

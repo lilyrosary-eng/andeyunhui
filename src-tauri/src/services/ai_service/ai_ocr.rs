@@ -558,6 +558,8 @@ pub fn ocr_export_pdf(path: String, image_base64: String, mime: String) -> Resul
 
 #[cfg(test)]
 mod tests {
+    // 测试名写中文是故意的（见 caps_infer.rs 同处说明），关掉 non_snake_case。
+    #![allow(non_snake_case)]
     use super::*;
     use crate::services::ai_service::ai_profile::MediaModels;
 

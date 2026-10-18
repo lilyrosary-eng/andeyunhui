@@ -7,6 +7,12 @@
   "entry": "index.js",
   "iconName": "Sparkles",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "overlay_window_destroy",
+      "read_external_dep_path"
+    ]
+  },
   "parent": "niaoluo",
   "codename": "茑萝",
   "category": "趣味",

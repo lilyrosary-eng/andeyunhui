@@ -49,8 +49,12 @@ interface NotesState {
   clearCurrent: () => void;
   /** 外部设置内容时同步标题（如中转站打开可读文件） */
   openExternalContent: (newTitle: string, newContent: string) => void;
-  /** 刷新标签映射与所有标签 */
-  refreshTags: () => void;
+  /**
+   * 刷新标签映射与所有标签。
+   * force=true 跳过 TTL 去重（确实需要看到最新数据时用，如保存标签失败后的重试）。
+   * 重复调用会被 in-flight 合并 + TTL 去重，不会每次打穿后端全目录扫描。
+   */
+  refreshTags: (force?: boolean) => void;
   /** 标签变更（保存到后端并刷新映射） */
   saveTags: (newTags: string[]) => Promise<void>;
   /** 初始化：加载笔记列表 + 标签映射 */
@@ -78,6 +82,56 @@ let renderFrame: number | undefined;
 // 输入未变时跳过 marked.parse（大笔记连续输入场景下，避免每次按键重复全量解析）。
 let mdRenderCacheSource: string | undefined;
 let mdRenderCacheHtml: string | undefined;
+
+/**
+ * 标签数据拉取的治理：in-flight 合并 + TTL 去重。
+ *
+ * 背景（P1-7「有界缓存 + 轮询治理」）：
+ * - refreshTags() 每次调用会打两次后端全目录扫描（getAllNoteTagsMap + getAllTags）。
+ *   saveTags() 保存后旧实现直接 refreshTags()，连续改几次标签就重复扫几遍；
+ *   init() 也会拉一轮。高频保存时后端被同一份数据反复全量读取。
+ * - 轮询治理结论：notesStore 本身**没有任何 setInterval 轮询**（全仓 16 处 setInterval
+ *   分别在 Capsule.tsx / FileSearchPanel.tsx / DeskpetPet.tsx / AgentTracePanel.tsx 等
+ *   其他模块），所以这里治理的是「事件驱动的重复全量拉取」，不是定时器。
+ *
+ * 规则：
+ * - 同一时刻只允许一次在途请求，后来的调用复用同一个 Promise（in-flight 合并）；
+ * - 距上次成功不足 TAGS_TTL_MS 的非 force 调用直接跳过（TTL 去重）；
+ * - 失败不清掉 lastDoneAt，让下一次调用仍然放行（避免失败后被 TTL 静默吞掉）。
+ */
+const TAGS_TTL_MS = 1500;
+let tagsInflight: Promise<void> | null = null;
+let tagsLastDoneAt = 0;
+// allTags 单独一份 TTL：loadNoteContent 每次切笔记都会读它（编辑器要算"未使用的标签"），
+// 旧实现下每切一次笔记就触发一次后端全目录扫描，加 TTL 后同一次会话内只拉一次。
+let allTagsInflight: Promise<unknown> | null = null;
+let allTagsLastDoneAt = 0;
+
+/** 带 TTL + in-flight 合并的 allTags 拉取（见 TAGS_TTL_MS 注释） */
+function loadAllTagsCached(
+  set: (partial: Partial<NotesState>) => void,
+  force = false,
+) {
+  if (!force && (Date.now() - allTagsLastDoneAt < TAGS_TTL_MS || allTagsInflight)) return;
+  allTagsInflight = api.getAllTags()
+    .then((tags) => { set({ allTags: tags }); allTagsLastDoneAt = Date.now(); })
+    .catch((err) => logger.notes.loadError('加载所有标签', err))
+    .finally(() => { allTagsInflight = null; });
+}
+
+/**
+ * noteTagsMap 修剪：只保留「当前 notes 列表里存在的笔记」。
+ * notes 未加载（length===0）时不修剪——init() 里标签映射可能比笔记列表先返回，
+ * 此时求交会把整张表清空。
+ */
+function pruneTagsMapToLiveNotes(map: Record<string, string[]>, liveIds: Set<string>): Record<string, string[]> {
+  if (liveIds.size === 0) return map;
+  const pruned: Record<string, string[]> = {};
+  for (const [id, tags] of Object.entries(map)) {
+    if (liveIds.has(id)) pruned[id] = tags;
+  }
+  return pruned;
+}
 
 export const useNotesStore = create<NotesState>((set, get) => ({
   notes: [],
@@ -127,7 +181,8 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       logger.notes.loadError('加载笔记标签', err);
       set({ currentNoteTags: [] });
     });
-    api.getAllTags().then(tags => set({ allTags: tags })).catch((err) => logger.notes.loadError('加载所有标签', err));
+    // 带 TTL 的 allTags（编辑器要算"未使用的标签"），不要每切一次笔记就打一次全目录扫描
+    loadAllTagsCached(set);
   },
 
   clearCurrent: () => {
@@ -140,11 +195,27 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     scheduleMarkdownRender(set, get);
   },
 
-  refreshTags: () => {
-    api.getAllNoteTagsMap().then(map => set({ noteTagsMap: map }))
-      .catch((err) => logger.notes.loadError('刷新标签映射', err));
-    api.getAllTags().then(tags => set({ allTags: tags }))
-      .catch((err) => logger.notes.loadError('刷新所有标签', err));
+  refreshTags: (force = false) => {
+    // TTL 去重：非 force 且刚拉过 → 直接复用上次结果
+    if (!force && Date.now() - tagsLastDoneAt < TAGS_TTL_MS) return;
+    // in-flight 合并：已有在途请求 → 复用，不再发起第二次全目录扫描
+    if (tagsInflight) return;
+    const p = (async () => {
+      const [map, tags] = await Promise.all([
+        api.getAllNoteTagsMap(),
+        api.getAllTags(),
+      ]);
+      // 有界化：删掉的笔记不要永久留在映射里（refreshTags 只覆盖不清除，
+      // 旧实现下已删除笔记的标签条目会一直残留到进程结束）
+      const liveIds = new Set(get().notes.map(n => n.id));
+      set({ noteTagsMap: pruneTagsMapToLiveNotes(map, liveIds), allTags: tags });
+      tagsLastDoneAt = Date.now();
+    })().catch((err) => {
+      logger.notes.loadError('刷新标签映射', err);
+    }).finally(() => {
+      tagsInflight = null;
+    });
+    tagsInflight = p;
   },
 
   saveTags: async (newTags) => {
@@ -153,9 +224,20 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     if (currentNoteId) {
       try {
         await api.setNoteTags(currentNoteId, newTags);
-        get().refreshTags();
+        // 本地增量修补，而不是 refreshTags()：保存一次标签只需要改这一条映射，
+        // 旧实现会为此触发两次后端全目录扫描（高频编辑标签时重复打）。
+        // allTags 是「所有笔记标签的并集」，本地合并新标签即可保持正确。
+        const { noteTagsMap, allTags } = get();
+        const nextMap = { ...noteTagsMap, [currentNoteId]: newTags };
+        const nextAllTags = [...allTags];
+        for (const t of newTags) {
+          if (t && !nextAllTags.includes(t)) nextAllTags.push(t);
+        }
+        set({ noteTagsMap: nextMap, allTags: nextAllTags });
       } catch (err) {
         logger.notes.loadError('保存标签', err);
+        // 保存失败才回退到全量刷新（force 跳过 TTL，确保拿到真实状态）
+        get().refreshTags(true);
       }
     }
   },
@@ -172,15 +254,20 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       }
     }).catch(err => logger.notes.loadError('加载笔记列表', err));
 
-    api.getAllNoteTagsMap().then(map => set({ noteTagsMap: map }))
-      .catch((err) => logger.notes.loadError('加载标签映射', err));
+    // 走 refreshTags() 而不是直接 invoke：让 TTL/in-flight 治理覆盖初始化路径
+    // （init 与后续 refreshTags 若撞车，旧实现会并发打两次全目录扫描）
+    get().refreshTags(true);
 
     get().loadFavorites();
   },
 
   refreshNotes: (data) => {
     logger.notes.refreshList(data?.length);
-    set({ notes: data });
+    // 同步修剪标签映射：删除笔记后映射里残留的条目只靠 refreshTags 覆盖，
+    // 在两次 refreshTags 之间会一直占内存（有界化到活笔记集合）。
+    const { noteTagsMap } = get();
+    const pruned = pruneTagsMapToLiveNotes(noteTagsMap, new Set((data ?? []).map(n => n.id)));
+    set({ notes: data, noteTagsMap: pruned });
   },
 
   createNote: async () => {

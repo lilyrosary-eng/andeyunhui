@@ -123,7 +123,6 @@ export const TrackRow: React.FC<TrackRowProps> = ({
   onOpenArtist,
   onOpenAlbum,
   compact = false,
-  accentColor = '#f44336',
 }) => {
   const coverUrl = getCoverUrl(track);
   const isPlayingThis = isPlaying || playIndex === index;

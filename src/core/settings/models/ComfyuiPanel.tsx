@@ -86,8 +86,10 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
   const [params, setParams] = useState<WorkflowParameter[]>([]);
   const [values, setValues] = useState<Record<string, unknown>>({});
   // ③ 蓝图挂钩
+  // 注意：只保留 blueprintWf 一份 state。slug（技能包备注）的真实读取方是
+  // comfyuiConfig.ts / AiWorkflowView.tsx，都直接读 storage，不经过这里；
+  // 曾经的 blueprintSlug state 是"只写不读"的镜像，已删除（单一来源=storage）。
   const [blueprintWf, setBlueprintWf] = useState('');
-  const [blueprintSlug, setBlueprintSlug] = useState('');
 
   // ── 自定义节点放行 ──────────────────────────────────────────────
   // 自定义节点可执行任意 Python。AI 自建工作流时，Rust 侧安全审计会把
@@ -247,7 +249,6 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     void loadCkpts();
     setWfDir(storage.getString(KEYS.ai.comfyuiWorkflowsDir.key, ''));
     setBlueprintWf(storage.getString(KEYS.ai.comfyuiBlueprintWf.key, ''));
-    setBlueprintSlug(storage.getString(KEYS.ai.comfyuiBlueprintWfSlug.key, ''));
     // loadCkpts 是 useCallback(…, []) 的稳定引用，进依赖数组不会造成重复执行
   }, [loadCkpts]);
 
@@ -354,13 +355,12 @@ export function ComfyuiPanel({ t }: { t: TFunc }) {
     storage.setString(KEYS.ai.comfyuiBlueprintWf.key, selPath);
     storage.setString(KEYS.ai.comfyuiBlueprintWfSlug.key, notesSlug);
     setBlueprintWf(selPath);
-    setBlueprintSlug(notesSlug);
+    // slug 不落 state：读取方（comfyuiConfig / AiWorkflowView）都直接读 storage
   };
   const clearBlueprint = () => {
     storage.setString(KEYS.ai.comfyuiBlueprintWf.key, '');
     storage.setString(KEYS.ai.comfyuiBlueprintWfSlug.key, '');
     setBlueprintWf('');
-    setBlueprintSlug('');
   };
 
   // L1 披露：列表行展示各工作流备注摘要（扫完后算一次）

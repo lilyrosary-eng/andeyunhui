@@ -1,5 +1,4 @@
 import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react';
-import type { LucideIcon } from 'lucide-react';
 import { FileText, File, Trash2, Inbox, ExternalLink, Download, Save, ScanText, Languages, Loader2, X, FileDown } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -784,10 +783,14 @@ function OcrWorkspace({ prefillDataUrl, onClose }: { prefillDataUrl: string | nu
             else throw apiErr;
           } catch (localErr) {
             if (noApi || visionUnsupported) {
-              throw new Error(
-                noApi
-                  ? tr('transfer.noApiKeyLocalEmpty')
-                  : tr('transfer.visionUnsupportedLocalEmpty'),
+              // tsconfig lib 是 ES2020，没有 ErrorOptions；用 Object.assign 挂 cause
+              throw Object.assign(
+                new Error(
+                  noApi
+                    ? tr('transfer.noApiKeyLocalEmpty')
+                    : tr('transfer.visionUnsupportedLocalEmpty'),
+                ),
+                { cause: apiErr },
               );
             }
             throw apiErr;

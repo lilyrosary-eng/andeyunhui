@@ -531,6 +531,9 @@ listen<string>(EVENTS.recorder.started, async () => {
 // 只要录制结束就会带 output_path 触发。失败分支会 emit 空路径 → 弹错误面板。
 listen<string>(EVENTS.recorder.stopped, async (e) => {
   const p = e.payload;
+  // 录制已结束：停掉状态轮询（isRecording 此后恒为 false，UI 不再需要刷新）。
+  // 下一次录屏由 started 事件重新拉起。
+  stopPolling();
   if (p) {
     // 校验文件确实存在，避免 ffmpeg 静默产出 0 字节时仍显示保存选项
     try {
@@ -571,6 +574,16 @@ listen<string>(EVENTS.recorder.error, (e) => {
 // 监听「唤出控制台」事件（热键在控制台已隐藏时触发）：重新显示并安排自动隐藏
 listen(EVENTS.recorder.reveal, () => {
   scheduleAutoHide(3000);
+});
+
+// 录屏启动事件：立即刷新状态并复位到「录制中」视图。
+// 轮询的生命周期跟着录制走：started 时确保在跑，stopped 时停掉
+// （录制结束后状态不再变化，没必要每秒打一次 get_recording_status）。
+listen<string>(EVENTS.recorder.started, async () => {
+  backToRecording();
+  await refreshStatus(); // 必须先拿到 isRecording=true，否则 scheduleAutoHide 会直接 return
+  scheduleAutoHide(3000); // 录制开始后短暂显示，随后自动隐藏
+  startPolling();
 });
 
 // 闪烁动画（走构造样式表注入：打包版 CSP 给 style-src 追加 nonce 后动态 <style> 会被拦掉，回退见 injectCssOnce）

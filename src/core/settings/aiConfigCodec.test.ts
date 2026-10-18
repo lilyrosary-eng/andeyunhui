@@ -99,7 +99,6 @@ describe('toConfig', () => {
 
   it('空白字段转 null（temperature 除外：空回落 0.3）', () => {
     const c = fromConfig(PAYLOAD);
-    const m = c.providers[0].models[1];
     const out = toConfig(c);
     // temperature 是特例：空 → 0.3 默认（与 ledger #3 / 实现注释一致，Test 12 覆盖）。
     // 这里只校验真正「空白→null」的字段，避免与 Test 12 互相否决。

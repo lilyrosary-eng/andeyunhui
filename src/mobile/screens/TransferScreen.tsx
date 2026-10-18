@@ -27,7 +27,6 @@ import {
   FileText,
   Check,
   X,
-  Trash2,
   Inbox,
   Wifi,
   WifiOff,

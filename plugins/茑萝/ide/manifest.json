@@ -7,7 +7,45 @@
   "entry": "index.js",
   "iconName": "Code",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "ai_agent_approve",
+      "ai_agent_cancel",
+      "ai_chat",
+      "ai_chat_agent",
+      "ai_get_profiles",
+      "ai_set_profile_thinking",
+      "delete_file",
+      "ensure_directory",
+      "git_commit",
+      "git_diff",
+      "git_log",
+      "git_stage",
+      "git_status",
+      "git_unstage",
+      "list_directory",
+      "lsp_diagnostics",
+      "mcp_list_all_tools",
+      "mcp_list_servers",
+      "mcp_list_tools",
+      "mcp_remove_server",
+      "mcp_save_server",
+      "pick_directory",
+      "pick_file",
+      "pick_save_file",
+      "pty_create",
+      "pty_kill",
+      "pty_resize",
+      "pty_write",
+      "read_text_file",
+      "run_shell_command",
+      "search_content",
+      "write_text_file"
+    ]
+  },
   "parent": "niaoluo",
   "codename": "茑萝",
-  "requiredAssets": ["茑萝/ide/codemirror/index.js"]
+  "requiredAssets": [
+    "茑萝/ide/codemirror/index.js"
+  ]
 }

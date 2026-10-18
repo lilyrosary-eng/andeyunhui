@@ -98,22 +98,6 @@ function TabButton({ active, onClick, icon, label, badge, badgeTone, disabled, d
   );
 }
 
-// ============ 防追踪状态指示灯 ============
-function StatusDot({ label, tone }: { label: string; tone: 'ok' | 'warn' | 'idle' }) {
-  const toneCls = tone === 'ok'
-    ? 'bg-emerald-500'
-    : tone === 'warn'
-    ? 'bg-amber-500'
-    : 'bg-neutral-400';
-  const dotCls = tone === 'ok' ? 'shadow-[0_0_6px] shadow-emerald-500/60' : '';
-  return (
-    <div className="flex items-center gap-1.5 text-xs">
-      <span className={`inline-block w-2 h-2 rounded-full ${toneCls} ${dotCls}`} />
-      <span className="text-neutral-500 dark:text-stone-400">{label}</span>
-    </div>
-  );
-}
-
 // ============ 主模块 ============
 // 顶部态势感知条用的轻量 status 类型（仅取展示字段）
 interface TopSituation {

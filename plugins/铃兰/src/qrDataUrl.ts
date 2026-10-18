@@ -2,9 +2,6 @@
 // https://github.com/chillerlan/php-qrcode / https://github.com/kazuhikoarase/qrcode-generator
 // 这是 TypeScript 移植版，无外部依赖，仅用于客户端生成登录二维码图片。
 
-const PAD0 = 0xEC;
-const PAD1 = 0x11;
-
 const QRMODE_NAME = 'byte';
 
 export function qrTextToDataUrl(text: string, typeNumber = 0, errorCorrectionLevel = 'H'): string {
@@ -381,9 +378,9 @@ const QRUtil = {
       case QRMaskPattern.PATTERN000:
         return (i: number, j: number) => (i + j) % 2 === 0;
       case QRMaskPattern.PATTERN001:
-        return (i: number, j: number) => i % 2 === 0;
+        return (i: number, _j: number) => i % 2 === 0;
       case QRMaskPattern.PATTERN010:
-        return (i: number, j: number) => j % 3 === 0;
+        return (_i: number, j: number) => j % 3 === 0;
       case QRMaskPattern.PATTERN011:
         return (i: number, j: number) => (i + j) % 3 === 0;
       case QRMaskPattern.PATTERN100:

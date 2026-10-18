@@ -4,7 +4,7 @@
 // 对齐 learn-coding-agent 计划模式 + terax-ai TodoStrip/PlanDiffReview 设计。
 
 const React = window.__HOST_REACT__;
-const { useState, useCallback, useEffect } = React;
+const { useState } = React;
 import { CheckCircle2, Circle, Loader2, SkipForward, ListTodo, ChevronDown, ChevronRight } from 'lucide-react';
 
 // ===== 计划步骤类型 =====
@@ -59,7 +59,7 @@ interface PlanModePanelProps {
   currentActivity?: string;
 }
 
-export function PlanModePanel({ plan, onUpdate, onConfirm, onReject, onStepActive, currentActivity }: PlanModePanelProps) {
+export function PlanModePanel({ plan, onUpdate, onConfirm, onReject, currentActivity }: PlanModePanelProps) {
   const [expanded, setExpanded] = useState(true);
 
   if (plan.steps.length === 0) return null;
@@ -75,13 +75,6 @@ export function PlanModePanel({ plan, onUpdate, onConfirm, onReject, onStepActiv
     onUpdate({
       ...plan,
       steps: plan.steps.map((s) => s.id === stepId ? { ...s, status: 'skipped' } : s),
-    });
-  };
-
-  const editStep = (stepId: string, text: string) => {
-    onUpdate({
-      ...plan,
-      steps: plan.steps.map((s) => s.id === stepId ? { ...s, text } : s),
     });
   };
 
@@ -114,7 +107,7 @@ export function PlanModePanel({ plan, onUpdate, onConfirm, onReject, onStepActiv
       {expanded && (
         <div className="px-2 pb-2 space-y-0.5">
           {/* 步骤列表 */}
-          {plan.steps.map((step, i) => (
+          {plan.steps.map((step, _i) => (
             <div
               key={step.id}
               className={`flex items-start gap-1.5 px-1.5 py-1 rounded transition-colors ${

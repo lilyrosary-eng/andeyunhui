@@ -169,7 +169,9 @@ function ComingSoon({ tool }: { tool: LiteTool }) {
 }
 
 // ========== 后端调用辅助 ==========
-function hostInvoke(cmd: string, args: Record<string, unknown> = {}): Promise<any> {
+// 带类型参数是为了让调用点写 hostInvoke<ClipItem[]>('...') 时拿到具体返回类型；
+// 未显式指定时回落到 any（历史调用点大量依赖这个宽松行为，逐个收敛收益低）。
+function hostInvoke<T = any>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   return window.__HOST_API__.invoke(cmd, args);
 }
 
@@ -597,12 +599,6 @@ function formatTime(ts: number): string {
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
 function ClipboardHistory() {

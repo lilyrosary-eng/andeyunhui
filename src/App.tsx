@@ -52,8 +52,10 @@ function App() {
     return cleanup;
   }, []);
 
-  // 热重载生效：当前活动模块被重新注册时，强制重挂其组件（画布重新初始化，给出可见反馈）
-  const [activeReloadKey, setActiveReloadKey] = useState(0);
+  // 热重载生效：当前活动模块被重新注册时，强制重挂其组件（画布重新初始化，给出可见反馈）。
+  // 用「按插件 id 记录的重载计数」而不是全局计数：全局计数会让每次切模块都改变 key，
+  // 把已保活的模块重挂一遍（状态全丢）。只有该插件真的被重新注册时它的 key 才变。
+  const [reloadKeys, setReloadKeys] = useState<Record<string, number>>({});
 
   // ====== 微信式截图 ======
   // 不隐藏主窗口：软件运行（含最小化/托盘）时随时可截图；主窗口可见时会被截入画面
@@ -198,7 +200,9 @@ function App() {
   // 托盘菜单窗：由前端 new WebviewWindow 创建（与浮窗同款安全路径）。
   // Rust 侧 open_tray_menu 仅在右键时 emit 光标位置（open-tray-menu），避免 Rust 同步 build() 死锁/异常。
   const openTrayMenu = useCallback(async (x: number, y: number) => {
-    let w: WebviewWindow | null = null;
+    // 不初始化为 null：catch 分支必 return，TS 的 CFG 能推断出到这里一定已赋值
+    // （写 `= null` 会被 no-useless-assignment 判为死赋值）。
+    let w: WebviewWindow | null;
     try {
       // 透明窗不能 visible:false 创建（会 0x8007139F 变坏窗）；改离屏坐标创建后定位到托盘附近再 show。
       // 统一走 window_manager 引擎：主线程安全创建 + 重试 + 坏窗自愈。
@@ -456,12 +460,12 @@ function App() {
     return () => window.removeEventListener('plugin-visibility-changed', handler);
   }, [bumpVisibility]);
 
-  // 热重载生效：活动模块被重新注册时，递增 key 以重挂组件（画布重初始化=可见反馈）
+  // 热重载生效：活动模块被重新注册时，递增该插件的 key 以重挂组件（画布重初始化=可见反馈）
   useEffect(() => {
     const onReg = (e: Event) => {
       const detail = (e as CustomEvent<{ id?: string }>).detail;
-      if (detail && detail.id === activeModule) {
-        setActiveReloadKey((k) => k + 1);
+      if (detail && detail.id) {
+        setReloadKeys((prev) => ({ ...prev, [detail.id as string]: (prev[detail.id as string] ?? 0) + 1 }));
       }
     };
     window.addEventListener('plugin-registered', onReg as EventListener);
@@ -653,7 +657,9 @@ function App() {
       // 插件模块改为「保活挂载（keep-alive）」：所有插件组件常驻、仅用 display 切换显隐。
       // 修复：此前按 activeModule 只在激活时渲染单实例 → 切走即卸载 web-interface 组件，
       // 其 PTY 终端被 pty_kill、运行状态/日志/滚动全部丢失，切回被迫重跑脚本。
-      // 常驻后这些状态全部保留。key 恒为插件 id（稳定），避免 active 切换导致重挂。
+      // 常驻后这些状态全部保留。key 恒为插件 id（稳定），避免 active 切换导致重挂；
+      // 唯一例外是该插件被热重载重新注册（plugin-registered 带同 id）——此时 key 追加
+      // 重载计数，强制重挂以重初始化画布，给出"改动已生效"的可见反馈。
       logger.app.mainPluginRenderStart(activeModule, !!pluginRegistry);
       const defs = pluginRegistry
         .getAll()
@@ -675,7 +681,7 @@ function App() {
             if (show) logger.app.mainPluginRendering(def.id, typeof def.component, def.name);
             return (
               <div
-                key={def.id}
+                key={reloadKeys[def.id] ? `${def.id}#${reloadKeys[def.id]}` : def.id}
                 // 这里刻意不加 immersive-safe-top：本外壳是透明的，加内缩只会让顶部 38px 露出
                 // 窗口底色，与插件自己的表面色撞成色差条。让位标记统一放在"自带表面底色、
                 // 且顶部有工具栏"的具体视图容器上（见 index.css 的规则说明）。

@@ -19,9 +19,6 @@ const {
   ContextMenuTrigger,
   ContextMenuContent,
   ContextMenuItem,
-  BarChart3,
-  ModuleSidebarShell,
-  SecondaryNavShell,
 } = window.__HOST_UI__ || {};
 
 function HeartIcon() {

@@ -7,5 +7,29 @@
   "entry": "index.js",
   "iconName": "Video",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "add_to_blacklist",
+      "bilibili_request",
+      "browser_close",
+      "browser_open",
+      "browser_set_bounds",
+      "browser_sniff",
+      "cancel_open_book",
+      "cancel_scan",
+      "debug_log",
+      "delete_video_cache",
+      "download_hls",
+      "download_video",
+      "get_blacklist_paths",
+      "get_folder_videos",
+      "import_to_openwith_dir",
+      "load_video_cache",
+      "pick_directory",
+      "remove_from_blacklist",
+      "scan_video_root",
+      "smtc_update"
+    ]
+  },
   "codename": "玉兰"
 }

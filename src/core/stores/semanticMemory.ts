@@ -26,8 +26,6 @@ import { KEYS } from '@/core/storage/keys';
 // 此处仅用于 ai_get_profiles 返回值的类型标注，不引入任何移动端逻辑/运行时依赖。
 import type { AiProfile } from '@/mobile/types/chat';
 
-const SOURCE_PREFIX = 'companion-';
-
 /** 是否已初始化 RAG（幂等） */
 let initPromise: Promise<boolean> | null = null;
 function ensureInit(): Promise<boolean> {

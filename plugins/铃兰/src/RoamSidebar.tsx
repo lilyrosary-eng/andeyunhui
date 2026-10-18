@@ -5,10 +5,10 @@
 // 内容区：四个折叠菜单（铃兰/网易云/酷狗/汽水），每个菜单下有默认歌曲或漫游历史。
 
 import React from "react";
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect } = React;
 import { ChevronDown, ChevronRight, Sparkles, Music as MusicIcon, Play, Trash2, Cloud } from 'lucide-react';
-import { T, useLang } from '../../_shared/pluginRuntime';
-import { musicPlayer, type Track } from './musicPlayer';
+import { useLang } from '../../_shared/pluginRuntime';
+import { musicPlayer } from './musicPlayer';
 import { OnlineSidebarShell } from '@shared/OnlineSidebarShell';
 import { TEMP_SLOT_LABEL, type TempSlotId, type TempSlotView } from './roamTempSlots';
 
@@ -81,7 +81,7 @@ function getCoverUrl(path?: string): string | null {
 
 export function RoamSidebar(props: RoamSidebarProps) {
   useLang();
-  const { activeSource, histories, seedTracks, tempSlots, onSelectSource, onSelectTrack, onClearHistory, onClearTempSlots, onBack, onClose, onOpenSettings, settingsActive, onOpenStats, statsActive } = props;
+  const { activeSource, histories, seedTracks, tempSlots, onSelectSource, onSelectTrack, onClearHistory, onClearTempSlots, onBack, onClose, onOpenSettings, onOpenStats, statsActive } = props;
   const [expandedMenus, setExpandedMenus] = useState<Set<RoamSource>>(new Set(activeSource ? [activeSource] : []));
 
   useEffect(() => {

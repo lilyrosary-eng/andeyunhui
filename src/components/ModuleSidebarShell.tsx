@@ -5,7 +5,7 @@ import { LogoButton } from '@/components/LogoButton';
 import { Ripple } from '@/components/motion/Ripple';
 import { useI18n } from '@/lib/i18n';
 import { storage } from '@/core/storage';
-import { KEYS, moduleToggleKey } from '@/core/storage/keys';
+import { moduleToggleKey } from '@/core/storage/keys';
 
 const SIDEBAR_EXPANDED_WIDTH = 260;
 const SIDEBAR_COLLAPSED_WIDTH = 48;

@@ -52,7 +52,6 @@ interface MusicScanProgress {
 
 const STORAGE_KEY_ROOT = 'music_plugin_root_paths';
 const STORAGE_KEY_PLAYLISTS = 'music_playlists';
-const STORAGE_KEY_HIDDEN = 'music_plugin_hidden_playlists'; // 兼容旧版
 
 // 从 localStorage 读取已持久化的自定义歌单（与保存逻辑共用同一 key）
 function getCustomPlaylistsFromStorage(): Playlist[] {
@@ -1042,7 +1041,7 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
 function MusicModule() {
   useLang();
   // 共享运行时：根目录管理（localStorage 持久化）
-  const { rootPaths, setRootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
+  const { rootPaths, addRoot, addRootPathEphemeral, removeRoot } = useRootPaths(STORAGE_KEY_ROOT);
   // 共享运行时：黑名单管理（Rust 集中管理，必须在 filteredPlaylists useMemo 之前声明）
   const { hidden: hiddenPlaylists, add: addToBlacklist, removeAll: removeAllBlacklist, clear: clearBlacklist } = useBlacklist('music');
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -1144,8 +1143,9 @@ function MusicModule() {
   const qishuiViewRef = useRef<QishuiViewHandle | null>(null);
 // 漫游电台：从网易云漫游抽离的独立模块，作为第五个卡片
 const [roamOpen, setRoamOpen] = useState(false);
-const [roamSource, setRoamSource] = useState<RoamSource>('netease');
-const [roamHistories, setRoamHistories] = useState<Record<RoamSource, RoamHistoryEntry[]>>({
+// 漫游历史清零的工厂：RoamSource 含 3 个临时播放栏（temp1~3），
+// 直接写 { linglan: [], netease: [], kugou: [], qishui: [] } 会漏键导致类型不匹配。
+const emptyRoamHistories = (): Record<RoamSource, RoamHistoryEntry[]> => ({
   linglan: [],
   netease: [],
   kugou: [],
@@ -1154,6 +1154,9 @@ const [roamHistories, setRoamHistories] = useState<Record<RoamSource, RoamHistor
   temp2: [],
   temp3: [],
 });
+
+const [roamSource, setRoamSource] = useState<RoamSource>('netease');
+const [roamHistories, setRoamHistories] = useState<Record<RoamSource, RoamHistoryEntry[]>>(emptyRoamHistories);
 // 临时播放栏：自动记录「非漫游电台来源」的播放队列（最多 3 栏，满则覆盖最旧，仅本次会话）
 const [tempSlots, setTempSlots] = useState<TempSlotView[]>(() => getTempSlots());
 useEffect(() => {
@@ -1431,7 +1434,6 @@ useEffect(() => {
   // 依赖 rootPaths 变化（addRootPathEphemeral 会更新它）从而进入上面的扫描流程。
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-    let canceled = false;
     (async () => {
       if (!hostApi || typeof hostApi.listen !== 'function') return;
       unlisten = await hostApi.listen('netease-download-done', (event: { payload: { savePath: string; libraryDir: string } }) => {
@@ -1444,7 +1446,6 @@ useEffect(() => {
       });
     })();
     return () => {
-      canceled = true;
       if (unlisten) unlisten();
     };
   }, [rootPaths, addRootPathEphemeral]);
@@ -1610,7 +1611,7 @@ useEffect(() => {
 
   // 播放列表面板选曲：直接用「该曲所属歌单」的 tracks 播放，
   // 不依赖侧栏选中态，避免从其它歌单点歌时索引错位。
-  const handlePopupSelectTrack = useCallback((playlistId: string, track: Track, index: number) => {
+  const handlePopupSelectTrack = useCallback((playlistId: string, _track: Track, index: number) => {
     const pl = playlists.find(p => p.id === playlistId);
     const list = pl?.tracks ?? [];
     if (list.length === 0) return;
@@ -2500,7 +2501,7 @@ useEffect(() => {
             // 切换漫游路径时清空旧路径缓存（临时播放栏额外注入该栏队列快照）
             if (src !== roamSource) enterRoamSource(src);
           }}
-          onSelectTrack={(src, track, fromHistory) => {
+          onSelectTrack={(src, track, _fromHistory) => {
             if (src !== roamSource) enterRoamSource(src);
             // 播放选中的歌曲
             const api = getRoamSourceApi(src);
@@ -2783,7 +2784,7 @@ setQishuiOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
 clearAllRoamCache();
-setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
+setRoamHistories(emptyRoamHistories());
 setShowModuleDrawer(false);
 }}
 onSelectNetease={(key: 'listen' | 'radio' | 'search' | 'downloads' | 'login') => {
@@ -2794,7 +2795,7 @@ setQishuiOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
 clearAllRoamCache();
-setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
+setRoamHistories(emptyRoamHistories());
 }}
 onSelectKugou={(key: 'home' | 'search' | 'mine') => {
 setKugouTab(key);
@@ -2804,7 +2805,7 @@ setQishuiOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
 clearAllRoamCache();
-setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
+setRoamHistories(emptyRoamHistories());
 // 切换折叠菜单子项时，清理榜单详情 / 收藏夹等内层级状态，避免覆盖漫游 / 我的
 setKugouActiveRankId(null);
 setSelectedPlaylist(null);
@@ -2821,7 +2822,7 @@ setKugouOpen(false);
 setRoamOpen(false);
 setRoamSettingsOpen(false);
 clearAllRoamCache();
-setRoamHistories({ linglan: [], netease: [], kugou: [], qishui: [] });
+setRoamHistories(emptyRoamHistories());
 setQishuiActivePlaylistId(null);
 setSelectedPlaylist(null);
 setSearchQuery('');

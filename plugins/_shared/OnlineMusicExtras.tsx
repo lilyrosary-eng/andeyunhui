@@ -30,7 +30,6 @@ export const VipInfoCard: React.FC<VipInfoCardProps> = ({
   expireTime,
   toLabel = (t) => new Date(t).toLocaleDateString(),
   extras = [],
-  accent = '#f44336',
 }) => (
   <div className="p-4 rounded-2xl bg-neutral-100/70 dark:bg-stone-800/60 border border-neutral-200/60 dark:border-stone-700/60">
     <h3 className="text-sm font-semibold text-neutral-800 dark:text-stone-100 mb-2">会员状态</h3>

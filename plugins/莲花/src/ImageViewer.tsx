@@ -41,8 +41,6 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const fullImageRef = useRef<HTMLDivElement>(null);
   const viewAreaRef = useRef<HTMLDivElement>(null);
-  const wheelLock = useRef(0);
-
   // 随机模式 + 幻灯片模式
   const [isRandomMode, setIsRandomMode] = useState(false);
   const [isSlideshow, setIsSlideshow] = useState(false);

@@ -7,5 +7,27 @@
   "entry": "index.js",
   "iconName": "Briefcase",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "audio_to_midi",
+      "check_ffmpeg",
+      "clipboard_clear",
+      "clipboard_poll_image",
+      "clipboard_read",
+      "clipboard_write",
+      "clipboard_write_image_from_path",
+      "convert_document",
+      "convert_image",
+      "get_env_vars",
+      "get_system_memory",
+      "list_processes",
+      "pick_file",
+      "pick_save_file",
+      "scan_ports",
+      "set_env_var",
+      "transcode_media",
+      "write_file_bytes"
+    ]
+  },
   "codename": "薄荷"
 }

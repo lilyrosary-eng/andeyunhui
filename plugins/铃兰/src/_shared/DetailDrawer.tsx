@@ -23,8 +23,8 @@
 // 酷狗接入时只需传入格式化的 singerDetail / albumDetail，API 层由 KugouView 负责。
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { PlayIcon, HeartIcon, VideoIcon, DownloadIcon, ChevronLeft, ChevronRight } from 'lucide-react';
-import { TrackRow, type PlayableTrack, type TrackBadge } from './TrackRow';
+import { PlayIcon, HeartIcon, ChevronLeft, ChevronRight } from 'lucide-react';
+import { TrackRow, type PlayableTrack } from './TrackRow';
 
 // ============ 数据接口（共享层） ============
 
@@ -124,13 +124,6 @@ export interface DetailDrawerProps {
 
 // ============ 工具函数 ============
 
-function formatDuration(sec: number): string {
-  const total = Math.round(sec);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${s.toString().padStart(2, '0')}`;
-}
-
 function fmtCount(n: number): string {
   if (!n) return '0';
   if (n >= 10000) return `${(n / 10000).toFixed(1)} 万`;
@@ -149,7 +142,6 @@ function getCoverUrl(path?: string): string | null {
 
 function ArtistHeader({
   artist,
-  onPlayHot,
 }: {
   artist: SharedArtistData;
   onPlayHot: () => void;
@@ -276,7 +268,7 @@ export const DetailDrawer: React.FC<DetailDrawerProps> = ({
   const [allSongsOpen, setAllSongsOpen] = useState(false);
 
   // ===== 歌手全部歌曲加载状态 =====
-  const [allSongsLoaded, setAllSongsLoaded] = useState(false);
+  const [_allSongsLoaded, setAllSongsLoaded] = useState(false);
 
   // 当切换到歌手时重置折叠状态
   useEffect(() => {

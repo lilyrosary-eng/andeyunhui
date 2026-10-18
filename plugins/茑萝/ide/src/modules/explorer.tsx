@@ -2,7 +2,7 @@
 // 由宿主作为 sidebar 独立渲染，通过 ideShared + 'ide-project-changed' 事件与 IdeEditor 通信。
 const React = window.__HOST_REACT__;
 const hostApi = window.__HOST_API__;
-const { useState, useCallback, useEffect, useMemo } = React;
+const { useState, useCallback } = React;
 import { ideShared, isWindows } from './shared';
 import {
   Folder,

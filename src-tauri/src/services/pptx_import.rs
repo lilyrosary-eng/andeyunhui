@@ -1642,6 +1642,12 @@ mod tests {
             )
             .into()
         });
+        // 样例文件不在 external-deps（未执行 build-external-deps / 干净 checkout）时跳过而非失败：
+        // 本测试是「实证」而非契约，缺样例时没有可验证的对象，硬失败会让 CI 无故变红。
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[TEST][SKIP] 样例 pptx 不存在，跳过：{}", path);
+            return;
+        }
         let bytes = std::fs::read(&path).expect("read pptx");
         let dir = std::env::temp_dir().join("pptx_media_test");
         let _ = std::fs::create_dir_all(&dir);

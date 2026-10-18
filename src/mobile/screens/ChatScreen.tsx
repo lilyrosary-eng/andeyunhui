@@ -16,11 +16,11 @@
 // overflow-y-auto 外壳与本屏内部滚动冲突（MessageList 自管滚动）。
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Plus, MoreVertical, Trash2, Cpu, Cloud, MonitorSmartphone, Settings2, History, Heart } from 'lucide-react';
+import { Plus, Trash2, Cpu, Cloud, MonitorSmartphone, Settings2, History, Heart } from 'lucide-react';
 
 import { useAiStream } from '../hooks/useAiStream';
 import { useProactiveMessage } from '../hooks/useProactiveMessage';
-import { classifyProfile, type ComputeSource, type AiProfile } from '../types/chat';
+import { classifyProfile, type ComputeSource } from '../types/chat';
 import { ComputeChip, type ComputeKind } from '../components/ComputeChip';
 import { BottomSheet } from '../components/BottomSheet';
 import { MessageList } from '../components/chat/MessageList';

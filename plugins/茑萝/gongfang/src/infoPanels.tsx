@@ -17,7 +17,6 @@ const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): 
 type Phase = 'Idle' | 'Recon' | 'Exploit' | 'Pivot' | 'Clean';
 type EventKind = 'Credential' | 'Success' | 'Rejected' | 'WafAlert' | 'Timeout' | 'ValidationError';
 type ReasoningLevel = 'L0' | 'L1' | 'L2' | 'L0_FALLBACK';
-type LogLevel = 'info' | 'warn' | 'error';
 
 interface StrategyDelta {
   qps?: number | null;

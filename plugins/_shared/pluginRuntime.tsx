@@ -149,7 +149,9 @@ export function useBlacklist(module: string) {
 // createFrameBuffer 机制同源，避免每个模块重复造轮子。
 // 阅读模块已率先落地：open_book 按章推送 chunk，前端用本 Hook 合并渲染。
 
-export interface StreamingOpenEvents<TMeta, TItem> {
+// 注意：事件名清单与泛型无关（TMeta/TItem 只出现在 handlers 上），
+// 故这里不带类型参数——曾经写了两个用不上的泛型，被 noUnusedLocals 判死。
+export interface StreamingOpenEvents {
   metaEvent: string;
   itemEvent: string;
   progressEvent: string;
@@ -169,7 +171,7 @@ export interface StreamingOpenOptions {
 }
 
 export function useStreamingOpen<TMeta, TItem>(
-  events: StreamingOpenEvents<TMeta, TItem>,
+  events: StreamingOpenEvents,
   handlers: StreamingOpenHandlers<TMeta, TItem>,
   options?: StreamingOpenOptions,
 ) {
@@ -274,6 +276,9 @@ export interface ScanProgressLite {
   found: number;
   total: number;
   done: boolean;
+  /** 被跳过的条目数（如图片扫描里跳过隐藏目录）。后端多数实现会带，
+   *  但并非所有模块都统计，故为可选；读取方用 `?? 0` 兜底。 */
+  skipped?: number;
 }
 
 export interface ScanStreamConfig<TItem> {

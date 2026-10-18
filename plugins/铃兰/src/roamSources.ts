@@ -42,7 +42,7 @@ import {
 } from './qishuiApi';
 
 // ---- 铃兰（本地音乐）----
-import { musicPlayer, type Track } from './musicPlayer';
+import { type Track } from './musicPlayer';
 
 // 铃兰漫游用：外部注入的本地 tracks 池（合并所有歌单后打乱）
 // 由 index.tsx 在进入漫游时设置

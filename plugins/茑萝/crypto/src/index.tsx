@@ -2,7 +2,6 @@
 // 茑萝 · 加密解密（crypto）子插件 — 专业级加密套件
 // 四大工具：RSA 密钥对 / PGP 信封 / 密码强度审计 / 字典生成
 // 设计原则：零外部依赖，全用浏览器原生 Web Crypto API + 纯 JS
-const React = window.__HOST_REACT__;
 
 import { CryptoModule, CryptoSidebar } from './CryptoModule';
 

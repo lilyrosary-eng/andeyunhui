@@ -1,4 +1,4 @@
-/// <reference path="../../../global.d.ts" />
+/// <reference path="../../global.d.ts" />
 // ============================================================
 // Web 接口模块 · 真 PTY 终端（复用 pty_service + xterm.js）
 //
@@ -16,6 +16,14 @@ import { injectCss } from '@shared/injectCss';
 interface XtermBundle {
   Terminal: any;
   FitAddon: any;
+}
+
+/** 帧缓冲句柄（结构上等同 plugins/global.d.ts 的 FrameBuffer<T>；
+ *  那个文件末尾有 `export {}` 成了模块，类型不外泄，故此处本地声明一份同构形状）。 */
+interface TerminalFrameBuffer {
+  push: (s: string) => void;
+  flush: () => void;
+  destroy: () => void;
 }
 let xtermPromise: Promise<XtermBundle> | null = null;
 let xtermCssInjected = false;
@@ -119,6 +127,10 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError, onOutput
     // 命令兜底下发定时器：即便 shell 始终无输出，到点也会把命令写进去。
     // 声明在 try 之外，保证 pty_create 失败时 cleanup 仍能安全清理它。
     let sendFallbackTimer = 0;
+    // 输出批缓冲：同样声明在 async IIFE 之外。
+    // 它是在 pty_create 成功之后才创建的，而 cleanup 需要在最外层冲刷并销毁它，
+    // 放在里面会让 cleanup 的作用域根本看不到 fb（原代码正是如此，属编译期错误）。
+    let fb: TerminalFrameBuffer | null = null;
     const disposers: Array<() => void> = [];
 
     (async () => {
@@ -212,7 +224,6 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError, onOutput
         // 输出批处理：高频 pty-output 事件（尤其大日志）经 rAF 合并到一帧内一次 term.write，
         // 避免每次事件都触发 WebView2 回调和 xterm 渲染，缓解主线程堆积、防止日志被截断/卡顿。
         // 落后帧最多 ~16ms，实时性可接受；本地无可用的 createFrameBuffer 时退化为直接 write。
-        let fb: { push: (s: string) => void; flush: () => void; destroy: () => void } | null = null;
         if (typeof hostApi.createFrameBuffer === 'function') {
           fb = hostApi.createFrameBuffer((items: string[]) => {
             if (!disposed && term) term.write(items.join(''));
@@ -290,7 +301,7 @@ export function WebTerminal({ command, cwd, env, hint, onExit, onError, onOutput
         });
         resizeObserver.observe(container);
 
-        const [uo, ue, uerr] = await Promise.all([outUnlistenP, exitUnlistenP, errUnlistenP]);
+        const [ue, uerr] = await Promise.all([outUnlistenP, exitUnlistenP, errUnlistenP]);
         unlistenExit = typeof ue === 'function' ? ue : (ue as any)?.unsubscribe ?? null;
         unlistenErr = typeof uerr === 'function' ? uerr : (uerr as any)?.unsubscribe ?? null;
         disposers.push(() => { try { unlistenErr?.(); } catch { /* */ } });

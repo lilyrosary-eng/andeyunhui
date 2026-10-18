@@ -11,8 +11,9 @@
  * ② 安全：`new Function` / `Function(...)` 仍然被拒绝。
  * 少了任何一条这个修复都不成立（只满足 ① = 沙箱被架空；只满足 ② = 原来的崩溃）。
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createSandboxGlobals, executeInSandbox } from './pluginSandbox';
+import type { PluginPermissions } from '@/lib/api';
 
 type Registry = Parameters<typeof createSandboxGlobals>[1];
 
@@ -32,13 +33,36 @@ beforeAll(() => {
 const registry = { register: () => {} } as unknown as Registry;
 
 /** 在指定插件的沙箱里求值一个表达式，返回它的值。 */
-function evalIn(pluginId: string, expr: string, deps?: string[]): unknown {
+function evalIn(
+  pluginId: string,
+  expr: string,
+  opts?: { deps?: string[]; permissions?: PluginPermissions },
+): unknown {
   const w = (globalThis as unknown as { window: Record<string, unknown> }).window;
   const holder: Record<string, unknown> = {};
   w.__HOST_UI__ = holder;
-  const globals = createSandboxGlobals(pluginId, registry, deps);
+  const globals = createSandboxGlobals(pluginId, registry, opts);
   executeInSandbox(`__HOST_UI__.result = (${expr});`, globals, pluginId);
   return holder.result;
+}
+
+/** 求值一个返回 Promise 的表达式，把 rejection 原样抛出（便于断言错误信息）。 */
+function evalPromiseIn(
+  pluginId: string,
+  expr: string,
+  opts?: { deps?: string[]; permissions?: PluginPermissions },
+): Promise<unknown> {
+  return evalIn(pluginId, expr, opts) as Promise<unknown>;
+}
+
+/** 取一个被拒绝的 Promise 的错误信息（不让它变成 unhandled rejection）。 */
+async function rejectionOf(p: Promise<unknown>): Promise<string> {
+  try {
+    await p;
+    return '<未拒绝>';
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
 }
 
 describe('插件沙箱 · Function 遮蔽', () => {
@@ -66,7 +90,7 @@ describe('插件沙箱 · Function 遮蔽', () => {
 
   it('放行的插件仍能用 Function（白名单 / 声明了 deps）', () => {
     expect(evalIn('ide', 'Function("return 7")()')).toBe(7);
-    expect(evalIn('随便一个插件', 'Function("return 8")()', ['codemirror'])).toBe(8);
+    expect(evalIn('随便一个插件', 'Function("return 8")()', { deps: ['codemirror'] })).toBe(8);
   });
 
   it('遮蔽列表里的其它全局仍是 undefined（未被这次改动波及）', () => {
@@ -84,5 +108,121 @@ describe('插件沙箱 · Function 遮蔽', () => {
     // 拿到的仍是全局 eval。这条断言记录**现状**，不是期望行为；
     // 要真正堵住得换实现（例如整体包一层非严格模式的 IIFE），属独立任务，未在本轮处理。
     expect(evalIn('ai-chat', 'typeof eval')).toBe('function');
+  });
+});
+
+describe('插件沙箱 · window 受限代理（防止遮蔽被 alias 绕开）', () => {
+  it('window.fetch / XMLHttpRequest / WebSocket 也拿不到真身', () => {
+    // 顶层只遮蔽裸 fetch 是不够的：插件完全可以写 window.fetch。
+    expect(evalIn('ai-chat', 'typeof window.fetch')).toBe('undefined');
+    expect(evalIn('ai-chat', 'typeof window.XMLHttpRequest')).toBe('undefined');
+    expect(evalIn('ai-chat', 'typeof window.WebSocket')).toBe('undefined');
+  });
+
+  it('window.parent / top / self / frames / globalThis 返回沙箱自身', () => {
+    // 顶层窗口里这些属性都指向**真实** window。若原样透传，
+    // `window.parent.fetch` 就能拿回上面刚被遮蔽的真身 —— 等于没屏蔽。
+    expect(evalIn('ai-chat', 'window.parent === window')).toBe(true);
+    expect(evalIn('ai-chat', 'window.top === window')).toBe(true);
+    expect(evalIn('ai-chat', 'window.self === window')).toBe(true);
+    expect(evalIn('ai-chat', 'window.frames === window')).toBe(true);
+    expect(evalIn('ai-chat', 'window.globalThis === window')).toBe(true);
+    // 经由这些别名同样拿不到网络 API
+    expect(evalIn('ai-chat', 'typeof window.parent.fetch')).toBe('undefined');
+    expect(evalIn('ai-chat', 'typeof window.top.fetch')).toBe('undefined');
+    expect(evalIn('ai-chat', 'typeof window.self.fetch')).toBe('undefined');
+    expect(evalIn('ai-chat', 'typeof window.globalThis.fetch')).toBe('undefined');
+  });
+
+  it('Tauri IPC 全局在沙箱里永不存在（即便将来开 withGlobalTauri）', () => {
+    expect(evalIn('ai-chat', 'typeof window.__TAURI__')).toBe('undefined');
+    expect(evalIn('ai-chat', 'typeof window.__TAURI_INVOKE__')).toBe('undefined');
+    expect(evalIn('ai-chat', 'typeof window.__TAURI_OS__')).toBe('undefined');
+  });
+
+  it('__TAURI_INTERNALS__ 故意不遮蔽（宿主直连插件需要它，见 pluginSandbox.ts 注释）', () => {
+    // ai-chat / 薄荷 等插件经 vite.shared.config 的 alias 把宿主 src 编进 IIFE，
+    // 其 invoke 是 @tauri-apps/api/core 直连（实现即 window.__TAURI_INTERNALS__.invoke）。
+    // 遮蔽它会直接 TypeError 挂掉这类插件——沙箱不是安全边界，边界在 Tauri capability/ACL。
+    // 在 node 测试环境里真实 window 上本来就没有该属性，故用"读取不抛错且可写透传"来锁定语义。
+    const w = (globalThis as unknown as { window: Record<string, unknown> }).window;
+    w.__TAURI_INTERNALS__ = { invoke: () => undefined };
+    expect(evalIn('ai-chat', 'typeof window.__TAURI_INTERNALS__')).toBe('object');
+    expect(evalIn('ai-chat', 'typeof window.__TAURI_INTERNALS__.invoke')).toBe('function');
+    delete w.__TAURI_INTERNALS__;
+  });
+
+  it('未知属性仍透传真实 window，函数被 bind 到真实 window', () => {
+    const w = (globalThis as unknown as { window: Record<string, unknown> }).window;
+    w.__SENTINEL__ = 42;
+    // 函数返回 `this === 真实 window`：若透传的是未 bind 的裸函数，this 会变成沙箱 proxy，
+    // 真实 DOM API（addEventListener 等）就会抛 "Illegal invocation"。
+    w.__PROBE_FN__ = function (this: unknown) {
+      return this === (globalThis as unknown as { window: unknown }).window;
+    };
+    expect(evalIn('ai-chat', 'window.__SENTINEL__')).toBe(42);
+    expect(evalIn('ai-chat', 'typeof window.__PROBE_FN__')).toBe('function');
+    expect(evalIn('ai-chat', 'window.__PROBE_FN__()')).toBe(true);
+  });
+
+  it('宿主注入优先于真实 window，写入落在 proxy target（读写一致）', () => {
+    // 读：target 已有 key 优先返回注入值
+    expect(evalIn('ai-chat', 'typeof window.__HOST_API__')).toBe('object');
+    expect(evalIn('ai-chat', 'typeof window.__HOST_REACT__')).toBe('object');
+    // 写：写 target，随后从 target 读回 —— 保持一致（曾因"写真实 window / 读 target"而丢值）
+    expect(evalIn('ai-chat', '(window.__PERSIST__ = 1, window.__PERSIST__)')).toBe(1);
+  });
+});
+
+describe('插件沙箱 · manifest 声明式权限（permissions.commands）', () => {
+  const READ = { commands: ['plugin_storage_get', 'load_image_cache'] };
+
+  it('未声明权限的存量插件：回退全局白名单（不因这次改造立刻全挂）', async () => {
+    // netease_http_post 在全局白名单里。这里只断言"没被权限层拒绝"——
+    // 它仍会因测试环境没有 Tauri 运行时而失败，但错误信息不是"未授权命令"。
+    const msg = await rejectionOf(evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")'));
+    expect(msg).not.toMatch(/未授权命令/);
+  });
+
+  it('声明了权限的插件：未声明的命令被拒绝，且错误信息可直接复制去修', async () => {
+    const msg = await rejectionOf(
+      evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")', { permissions: READ }),
+    );
+    expect(msg).toMatch(/未授权命令/);
+    // 修复提示必须点名 manifest 路径和具体命令，否则"显式报错"等于没报
+    expect(msg).toMatch(/plugins\/ai-chat\/manifest\.json/);
+    expect(msg).toMatch(/netease_http_post/);
+  });
+
+  it('声明了权限的插件：声明过的命令不被权限层拦截', async () => {
+    const msg = await rejectionOf(
+      evalPromiseIn('ai-chat', 'api.invoke("plugin_storage_get", { key: "k" })', {
+        permissions: READ,
+      }),
+    );
+    expect(msg).not.toMatch(/未授权命令/);
+  });
+
+  it('manifest 不能比全局白名单更宽：声明未放行的命令 → 告警且不放行', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const msg = await rejectionOf(
+        evalPromiseIn('ai-chat', 'api.invoke("delete_all_notes")', {
+          permissions: { commands: ['delete_all_notes'] },
+        }),
+      );
+      expect(msg).toMatch(/未授权命令/);
+      // 加载期就要显式指出"这条声明无效"，而不是等运行期才神秘失败
+      expect(spy.mock.calls.flat().join('\n')).toMatch(/delete_all_notes/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('permissions.commands 为空数组 = 未声明（避免"想收紧却写成空"把插件锁死）', async () => {
+    const msg = await rejectionOf(
+      evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")', { permissions: { commands: [] } }),
+    );
+    expect(msg).not.toMatch(/未授权命令/);
   });
 });

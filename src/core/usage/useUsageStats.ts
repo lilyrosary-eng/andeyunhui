@@ -1,7 +1,7 @@
 // AI 用量 / 成本统计 Hook（对接后端 usage_stats / usage_reset）。
 // 纯逻辑层：拉取月内用量汇总，供小圆环 + 悬停面板使用。不渲染 UI。
 // 跨模块通用能力：任何模块都可展示用量（用量环）。
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 export interface UsageModelStat {
@@ -55,12 +55,10 @@ export interface UseUsageStatsResult {
 export function useUsageStats(days: number = 30): UseUsageStatsResult {
   const [stats, setStats] = useState<UsageSummary>(EMPTY);
   const [loaded, setLoaded] = useState(false);
-  const daysRef = useRef(days);
-  daysRef.current = days;
-
+  // days 进 refresh 依赖即可，不需要 ref 镜像（渲染期写 ref 违反 react-hooks/refs）。
   const refresh = useCallback(async () => {
     try {
-      const data = (await invoke<Partial<UsageSummary> | null>('usage_stats', { days: daysRef.current })) ?? {};
+      const data = (await invoke<Partial<UsageSummary> | null>('usage_stats', { days })) ?? {};
       // 归一化：后端可能缺返回 byModel / byDay，确保两个数组字段恒存在，
       // 否则 UI 直接访问 .length / .slice 会抛 "Cannot read properties of undefined"
       setStats({
@@ -75,7 +73,7 @@ export function useUsageStats(days: number = 30): UseUsageStatsResult {
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [days]);
 
   const reset = useCallback(async () => {
     try {

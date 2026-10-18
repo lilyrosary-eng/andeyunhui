@@ -7,7 +7,6 @@ import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import { InlineSelect } from '@/components/ui/inline-select';
 import type { Conversation, SendAttachment, AttachmentKind, ChatMsg } from '@/components/capsule/types';
 import { AgentTracePanel } from './AgentTracePanel';
-import type { UseAiChatResult } from '@/core/ai/useAiChat';
 import { AiChatCompanionAvatar } from './AiChatCompanionCard';
 import { useCompanionStore } from '@/core/stores/companionStore';
 import { useUserAvatar } from '@/core/avatar/userAvatar';

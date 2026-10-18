@@ -262,7 +262,7 @@ const AIDE_REQ_GUARD = new Set<string>();
 let AIDE_INFLIGHT: string | null = null;
 let AIDE_WATCHDOG: ReturnType<typeof setTimeout> | null = null;
 
-function AiPanel({ docked, onClose, projectRoot }: { docked?: boolean; onClose?: () => void; projectRoot?: string | null }) {
+function AiPanel({ onClose, projectRoot }: { docked?: boolean; onClose?: () => void; projectRoot?: string | null }) {
   const [profiles, setProfiles] = useState<AiProfile[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   // 多份对话：每条对话独立保存消息列表（#10）。首条对话 id 与 activeConvId 必须一致。

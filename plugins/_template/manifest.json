@@ -7,6 +7,18 @@
   "entry": "index.js",
   "iconName": "Puzzle",
   "hostApiVersion": 1,
+  "permissions": {
+    "commands": [
+      "add_to_blacklist",
+      "cancel_open_book",
+      "cancel_scan",
+      "get_blacklist_paths",
+      "import_to_openwith_dir",
+      "pick_directory",
+      "read_external_dep_file",
+      "remove_from_blacklist"
+    ]
+  },
   "category": "示例",
   "desc": "插件模板：演示宿主 API / 共享运行时 / 注册。",
   "deps": [],

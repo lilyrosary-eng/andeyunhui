@@ -27,7 +27,19 @@ export interface PluginManifest {
   minAppVersion?: string;   // 要求的最低应用版本
   codename?: string;        // 模块代号（如 "铃兰"、"莲花"），空表示无代号
   requiredAssets?: string[];// 需要的外部依赖资源路径（如 "茑萝/ide/codemirror/index.js"）
-  capabilities?: string[];  // 插件能力声明（如 "file-system"、"network"）
+  // 注：曾经的 `capabilities?: string[]`（"file-system"/"network" 之类的自述标签）
+  // 已于 2026-10-18 删除——全仓库没有任何读取方，插件能力由下面的 permissions.commands
+  // 与 Tauri capability/ACL 共同约束，自述标签只会给人"已生效"的错觉。
+  // 声明式权限：显式列出本插件允许调用的 Tauri 命令。
+  // 与 Rust 端 PluginManifest.permissions 对应；沙箱按「声明 ∩ 全局白名单」强制。
+  // 缺省 = 未声明：回退全局白名单（兼容存量插件），DEV 下会告警提示补齐。
+  permissions?: PluginPermissions;
+}
+
+/** 插件声明式权限（manifest.json 的 `permissions` 段） */
+export interface PluginPermissions {
+  /** 允许调用的 Tauri 命令名（如 "plugin_storage_get"） */
+  commands?: string[];
 }
 
 // 扫描结果（A.1 改造后）
@@ -108,7 +120,10 @@ export const api = {
   // 主线程「重入死锁」（build 等待的创建完成回调需要被同一消息循环派发，而
   // 该闭包正占用着消息循环）→ 整个应用卡死。Tauri 官方运行时建窗路径由
   // 框架内部正确在主线程创建窗口，不会重入死锁。
-  createFloatingNoteWindow: async (noteId: string, title: string, x: number, y: number) => {
+  // 注意：_title 保留在签名里只为兼容既有调用方（拖拽创建浮窗时一直带着标题）。
+  // 当前 URL 不带标题——浮窗标题由 FloatingNoteView 自己按 noteId 加载后设置；
+  // 若将来要把标题预填进窗口，直接把这个参数用起来即可。
+  createFloatingNoteWindow: async (noteId: string, _title: string, x: number, y: number) => {
     const label = `floating-note-${noteId}`;
     // 把主窗口当前生效字体作为 URL 参数带给浮窗：浮窗 webview 的 localStorage 可能与主窗隔离，
     // 单靠事件只覆盖"设置变更"时刻；创建时直接带过去可保证浮窗打开即用应用内统一字体。

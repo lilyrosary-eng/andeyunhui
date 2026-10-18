@@ -10,7 +10,6 @@
   "parent": "niaoluo",
   "codename": "茑萝",
   "requiredAssets": [],
-  "capabilities": [],
   "category": "加密安全",
   "desc": "茑萝加密套件：RSA 密钥对 / PGP 信封 / 密码强度审计 / 字典生成"
 }

@@ -57,17 +57,21 @@ React + Rust，基于 Tauri v2 构建，同一套代码同时产出 Windows 桌�
 
 ## 截图 / 演示
 
-> 敬请期待
-
-| 主界面 | 阅读 · 三色堇 |
-| --- | --- |
-| ![主界面](docs/screenshots/main.png) | ![阅读界面](docs/screenshots/reader.png) |
-
-- 全局截图（Ctrl+Shift+S）：![截图演示](docs/screenshots/screenshot.gif)
-- 插件热插拔：![热插拔](docs/screenshots/plugins.gif)
-- 桌宠互动：![桌宠](docs/screenshots/deskpet.gif)
-- 哥特风莲花启动动画（浅色）：![启动动画](docs/screenshots/boot-light.gif)
-- 哥特风莲花启动动画（深色）：![启动动画](docs/screenshots/boot.gif)
+> 仓库内暂未提交截图资源（`docs/screenshots/` 历史上被 `.gitignore` 排除，导致这里引用的
+> 五张图在 GitHub 上全是裂图）。已改为**按约定路径占位**：把截图放到下表路径并提交，
+> 本节即自动生效，无需再改 README。
+>
+> | 内容 | 约定路径 |
+> | --- | --- |
+> | 主界面 | `docs/screenshots/main.png` |
+> | 阅读 · 三色堇 | `docs/screenshots/reader.png` |
+> | 全局截图（Ctrl+Shift+S） | `docs/screenshots/screenshot.gif` |
+> | 插件热插拔 | `docs/screenshots/plugins.gif` |
+> | 桌宠互动 | `docs/screenshots/deskpet.gif` |
+> | 莲花启动动画（浅色 / 深色） | `docs/screenshots/boot-light.gif` / `docs/screenshots/boot.gif` |
+>
+> 想要最快看到实际效果：`pnpm tauri dev` 后按 `Ctrl+Shift+S` 试全局截图，在设置里开启桌宠与悬浮歌词。
+> （另可运行 `pnpm test` 与 `cargo test`，CI 已覆盖两条链路。）
 
 ## 技术栈
 
@@ -124,7 +128,7 @@ andeyunhui/
 ## 当前开发状态
 
 - **当前版本**：Windows 桌面端持续推进，最新可构建版本为 2.4.0（NSIS 安装包 `安得云荟_2.4.0_x64-setup.exe`）；版本号以 `src-tauri/tauri.conf.json` 与设置页「关于软件」为准。
-- **Android 端**：在 `feat/android-v1` 分支迭代（与 `main` 并行），复用同一套 React 前端代码；Tauri Android 产物（APK/AAB）仍在开发中，尚未正式发布。本 README 中涉及 Android 的描述为规划目标，安装与使用请以 Windows 桌面端为准。
+- **Android 端**：移动端代码与桌面端同仓库同在 `main` 上维护（`src/mobile/**` 复用同一套 React 前端，`src-tauri/gen/android` 为 Tauri Android 生成工程）。目前仍是规划目标：4 个占位 `onActivate`、设置页版本号硬编码，APK/AAB 尚未正式发布。本 README 中涉及 Android 的描述均为规划目标，安装与使用请以 Windows 桌面端为准。（历史备注：曾有 `feat/android-v1` 的说法，该分支在本地与远程均不存在，实际只有 `backup/android-v1-preclean2` / `backup/android-v1-prefilter` 两个死分支。）
 - **近期重点模块**：Web 接口模块（本地网页服务调试）、AI 办公工作台（AIWork / AIWorkflow，AIGC 产物落地与对话式蓝图），以及阅读 · 三色堇的排版与页码稳定性修复。
 - 版本演进与已知问题详见 [`CHANGELOG.md`](./CHANGELOG.md)，设计与诊断文档见 `docs/`。
 
@@ -188,7 +192,7 @@ CI / 干净克隆上缺这组文件时，打包会明确报错并中止；不影
 欢迎参与贡献。开始前请先阅读本指南。
 
 - **环境**：参见「快速开始」。请使用 `pnpm` 与 Rust 稳定工具链，Node >= 20。
-- **分支**：从 `main` 切出功能分支（如 `feat/xxx`、`fix/xxx`），完成后再提 PR 回 `main`。移动端相关在 `feat/android-v1` 等分支迭代。
+- **分支**：从 `main` 切出功能分支（如 `feat/xxx`、`fix/xxx`），完成后再提 PR 回 `main`。移动端代码与桌面端同在 `main` 维护，不单独拉长期分支。
 - **提交信息**：建议采用 Conventional Commits（`feat:`、`fix:`、`docs:`、`refactor:`、`chore:` 等）。
 - **代码风格**：`pnpm lint:fix` 可自动修复 ESLint 问题；Rust 侧请保持 `cargo fmt` 一致。
 - **插件开发**：新增插件请放在 `plugins/`，并通过 `manifest.json` 声明元数据；重依赖走 `external-deps/`，不要直接打进插件本体。

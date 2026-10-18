@@ -97,7 +97,6 @@ function CapsuleAide() {
   // 共享状态（订阅切片）
   const aiProfiles = useCapsuleStore((s) => s.aiProfiles);
   const aideProfileId = useCapsuleStore((s) => s.aideProfileId);
-  const aiHint = useCapsuleStore((s) => s.aiHint);
   const keepOpen = useCapsuleStore((s) => s.keepOpen);
   const setAideOpen = useCapsuleStore((s) => s.setAideOpen);
   const setKeepOpen = useCapsuleStore((s) => s.setKeepOpen);

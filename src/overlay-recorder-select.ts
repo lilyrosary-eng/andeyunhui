@@ -256,9 +256,6 @@ let downX = 0;
 let downY = 0;
 let titleCache: Record<number, string> = {};
 
-// 最近一次悬停坐标（用于列表刷新后用新列表重算高亮）
-let hoverLast: { x: number; y: number } | null = null;
-
 // 倒计时状态：选择窗口/区域后、正式开录前的 2 秒醒目倒计时期间为 true，
 // 此时忽略所有指针交互，避免误触重新选择。
 let countingDown = false;
@@ -310,7 +307,10 @@ let osLastDispatch = 0;      // OS 调用节流时间戳（>=80ms 才再派发�
 const OS_THROTTLE_MS = 80;
 let lastHit: Win | null = null; // 每帧静态命中快照：OS 返回 null/失败时回退
 function requestHover(cx: number, cy: number) {
-  hoverLast = { x: cx, y: cy };
+  // 注意：这里只保留 hoverPending（当前帧待处理坐标）。曾经还有一份 hoverLast
+  // 「最近一次悬停坐标」想用于列表刷新后重算高亮，但窗口列表只在开启前由 Rust
+  // 预取一次、前端没有刷新路径（刻意不轮询 list_windows，见上方注释），
+  // 那份缓存从来读不到，已删除。
   hoverPending = { x: cx, y: cy };
   if (hoverRaf === null) {
     hoverRaf = requestAnimationFrame(() => {

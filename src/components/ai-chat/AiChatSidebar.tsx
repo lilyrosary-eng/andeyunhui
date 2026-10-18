@@ -77,7 +77,6 @@ export const AiChatSidebar = memo(function AiChatSidebar({
   const isWork = submodule?.id === 'work';
   const isWorkflow = submodule?.id === 'workflow';
   const showArea = isWork || isWorkflow;
-  const inTask = !showArea || area === 'task';
   const inProduct = showArea && area === 'product';
 
   const filtered = conversations.filter((c) => {

@@ -142,7 +142,9 @@ pub fn sample(low: u32, high: i32) -> Option<Sample> {
             return None;
         }
         let h = open.h_adapter;
-        let out = collect(g, h, low, high);
+        // 注意 collect 不收 h：D3DKMT 的查询统计接口一律按 adapter LUID 定位，
+        // 句柄只在「打开」和「关闭」时有用，传下去反而会让人以为节点/段查询要靠它。
+        let out = collect(g, low, high);
         // 无论成功与否都要收起句柄，避免每次轮询泄漏一个内核对象
         let mut close = CloseAdapter { h_adapter: h };
         let _ = (g.close)(&mut close);
@@ -150,7 +152,7 @@ pub fn sample(low: u32, high: i32) -> Option<Sample> {
     }
 }
 
-unsafe fn collect(g: &Gdi, h: u32, low: u32, high: i32) -> Option<Sample> {
+unsafe fn collect(g: &Gdi, low: u32, high: i32) -> Option<Sample> {
     // ① 适配器：拿段数与节点数
     let mut q = QueryStatistics {
         ty: QT_ADAPTER,

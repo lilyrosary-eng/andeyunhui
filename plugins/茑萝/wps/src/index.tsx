@@ -1,5 +1,4 @@
 /// <reference path="../../../global.d.ts" />
-const React = window.__HOST_REACT__;
 
 import { WpsEditor, WpsSidebar } from './WpsEditor';
 
