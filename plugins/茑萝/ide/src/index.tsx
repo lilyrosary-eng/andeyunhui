@@ -2154,28 +2154,10 @@ function IdeSettings({
         </div>
       </section>
 
-      <section>
-        <h3 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">AI 模式</h3>
-        <div className={card}>
-          <div className="p-4">
-            <div className="flex gap-2">
-              <button onClick={() => onChange({ mode: 'normal' })}
-                className={`btn-press flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${settings.mode === 'normal' ? 'element-primary text-white' : 'bg-neutral-200/70 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-300 dark:hover:bg-stone-600'}`}>
-                普通对话
-              </button>
-              <button onClick={() => onChange({ mode: 'agent' })}
-                className={`btn-press flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${settings.mode === 'agent' ? 'element-primary text-white' : 'bg-neutral-200/70 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-300 dark:hover:bg-stone-600'}`}>
-                自主编辑
-              </button>
-            </div>
-            <p className={subCls + ' mt-2'}>
-              {settings.mode === 'agent'
-                ? '自主编辑：AI 会自行读取并修改项目文件，结束后列出改动供你逐文件保留或撤销。建议先在左侧打开项目文件夹。'
-                : '普通对话：AI 作为结对编程助手，仅回复建议，不直接改动文件。'}
-            </p>
-          </div>
-        </div>
-      </section>
+      {/* 2026-10-19：原「AI 模式（普通对话 / 自主编辑）」开关已移除 ——
+          它唯一的作用是切换右侧 AI 面板的形态（常驻列 vs 浮出窗），而那个面板已删。
+          留着只会让用户以为还能切。AI 现在统一在黄金棋盘浮岛里选「编程」标签，
+          对话/代理两种模式由浮岛自己提供。 */}
 
       <McpSettingsSection />
     </div>
