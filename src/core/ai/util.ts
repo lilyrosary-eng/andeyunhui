@@ -79,6 +79,17 @@ const MEDIA_MAX_CHARS = 300_000;
  * 宁可少存几张图，也不能悄悄丢会话。
  */
 const MEDIA_BUDGET_CHARS = 1_500_000;
+/**
+ * **整个持久化列表**（最多 50 个会话共享）的字符上限。
+ *
+ * 血案（2026-10-19）：MEDIA_BUDGET_CHARS 是**每个会话各一份**，50 个会话理论上能写
+ * 50 × 1.5M = 7500 万字符；localStorage 配额只有 5MB（UTF-16 约 260 万字符），
+ * 而且还要和 IDE 设置 / 办公文档 / 桌宠设置共用。一旦撞满，`setJSON` 抛
+ * QuotaExceededError → 用户看到的是"历史记录莫名丢失"。
+ * 这里给**整个列表**设 120 万字符（≈2.4MB）硬上限，超出就整体降级为纯文本再写一次：
+ * 宁可少存几张图，也不能让整份历史写不进去。
+ */
+const TOTAL_PERSIST_CHARS = 1_200_000;
 /** 需要按预算瘦身的媒体字段（与后端 card 词汇一致）。 */
 const MEDIA_KEYS = ['image', 'audio', 'video'] as const;
 
@@ -146,9 +157,13 @@ function slimWorkOutput(c: unknown, budget: { left: number }): unknown {
   return touched ? { ...(c as Record<string, unknown>), aiWork: { ...work, nodes } } : c;
 }
 
-export function sanitizeConv(c: Conversation): Conversation {
+export function sanitizeConv(
+  c: Conversation,
+  sharedBudget?: { left: number },
+): Conversation {
   if (!c || !Array.isArray(c.messages)) return { ...c, updatedAt: c?.updatedAt ?? Date.now(), messages: [] };
-  const budget = { left: MEDIA_BUDGET_CHARS };
+  // 传了共享预算就复用（persistConversations 用一份预算跨全部会话），否则单会话一份
+  const budget = sharedBudget ?? { left: MEDIA_BUDGET_CHARS };
   const trimmed = {
     ...c,
     updatedAt: c.updatedAt ?? Date.now(),
@@ -166,9 +181,34 @@ export function sanitizeConv(c: Conversation): Conversation {
 export function loadConversations(key: string): Conversation[] {
   const arr = storage.getJSON<Conversation[]>(key, []);
   if (!Array.isArray(arr)) return [];
-  return arr.map(sanitizeConv).filter(Boolean);
+  // 注意：不能写成 `.map(sanitizeConv)` —— map 会把 index 作为第二个实参传进去，
+  // 而第二个形参现在是 sharedBudget（对象），类型不兼容且运行期会把 index 当预算用。
+  return arr.map((c) => sanitizeConv(c)).filter(Boolean);
 }
 
 export function persistConversations(key: string, list: Conversation[]): void {
-  storage.setJSON(key, list.slice(0, 50).map(sanitizeConv));
+  const top = list.slice(0, 50);
+  // 一份预算跨全部会话：否则"每会话 1.5M 字符"的累计值远超 localStorage 配额
+  const budget = { left: MEDIA_BUDGET_CHARS };
+  const prepared = top.map((c) => sanitizeConv(c, budget));
+  const json = JSON.stringify(prepared);
+  if (json.length <= TOTAL_PERSIST_CHARS) {
+    storage.setJSON(key, prepared);
+    if (budget.left < MEDIA_BUDGET_CHARS) {
+      console.info(
+        `[ai-chat] 会话持久化：${prepared.length} 个，媒体占用 ${MEDIA_BUDGET_CHARS - budget.left} 字符`,
+      );
+    }
+    return;
+  }
+  // 仍然超限 → 整体去掉媒体再写一次（正文与结构保留），并显式告警具体数字
+  const textOnly = JSON.parse(json, (_k, v) =>
+    typeof v === 'string' && v.startsWith('data:') ? '' : v,
+  ) as Conversation[];
+  const retry = JSON.stringify(textOnly);
+  console.warn(
+    `[ai-chat] 会话持久化超限（${json.length} > ${TOTAL_PERSIST_CHARS} 字符），` +
+      `已丢弃全部内嵌媒体后重写（${retry.length} 字符）；图片/音频不再随历史保存`,
+  );
+  storage.setJSON(key, textOnly);
 }

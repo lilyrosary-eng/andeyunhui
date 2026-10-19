@@ -150,11 +150,21 @@ export function loadIndex(): DocMeta[] {
   }
 }
 
-export function saveIndex(list: DocMeta[]): void {
+/**
+ * 单文档持久化上限（字符数）。localStorage 总配额约 5MB（UTF-16 ≈ 260 万字符），
+ * 还要和 AI 对话历史、IDE 设置共用；单文档超过 1.2M 字符（≈2.4MB）就已经把配额的
+ * 一半吃掉了。超限时**明确拒绝并打印**，而不是让它把配额写满、连别的模块一起丢数据。
+ */
+const DOC_MAX_CHARS = 1_200_000;
+
+export function saveIndex(list: DocMeta[]): boolean {
   try {
     localStorage.setItem(INDEX_KEY, JSON.stringify(list));
-  } catch {
-    /* 配额溢出时静默失败，UI 仍可用 */
+    return true;
+  } catch (e) {
+    // 旧实现是静默 catch —— 配额满时表现为"文档列表空了"，且现场没有线索
+    console.error('[wps] 保存文档索引失败（localStorage 配额可能已满）:', e);
+    return false;
   }
 }
 
@@ -168,11 +178,26 @@ export function loadDoc(id: string): DocData | null {
   }
 }
 
-export function saveDoc(doc: DocData): void {
+export function saveDoc(doc: DocData): boolean {
+  const json = JSON.stringify(doc);
+  if (json.length > DOC_MAX_CHARS) {
+    console.error(
+      `[wps] 文档过大，未保存：${doc.title || doc.id} 序列化后 ${(json.length / 1024).toFixed(0)} KB，` +
+        `超过单文档上限 ${(DOC_MAX_CHARS / 1024).toFixed(0)} KB。` +
+        `内嵌图片（base64）是主要来源，请先压缩或改用外链。`,
+    );
+    return false;
+  }
   try {
-    localStorage.setItem(PREFIX + doc.id, JSON.stringify(doc));
-  } catch {
-    /* 配额溢出（如超大内嵌图片）时静默，避免阻塞编辑 */
+    localStorage.setItem(PREFIX + doc.id, json);
+    return true;
+  } catch (e) {
+    console.error(
+      `[wps] 保存文档失败（localStorage 配额已满）：${doc.title || doc.id}，` +
+        `${(json.length / 1024).toFixed(0)} KB。请删除一些旧文档后重试。`,
+      e,
+    );
+    return false;
   }
 }
 
