@@ -473,6 +473,14 @@ interface QuickAction {
 }
 
 // ============ 主组件 ============
+
+/** 会话持久化 key（plugin_storage 命名空间内，按插件隔离）。 */
+const AI_HISTORY_KEY = 'ai_sidebar_history_v1';
+/** 模型上下文保留条数（发回模型的 history）。 */
+const AI_HISTORY_MAX = 40;
+/** 界面显示保留条数。 */
+const AI_CONV_MAX = 60;
+
 export function GongfangAiSidebar() {
   const [conv, setConv] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
@@ -493,7 +501,54 @@ export function GongfangAiSidebar() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
+  // ===== 会话持久化（2026-10-19）=====
+  // 此前 historyRef / conv 全是内存，侧栏一关（或切走模块）就全丢 —— 攻防的排查线索
+  // 往往就在前半段对话里。这里用 plugin_storage_*（按 plugin_id 隔离，不会串到别的插件）
+  // 存一份**截断后的**最近对话：模型上下文用 history，显示用 conv，各自限长防无限增长。
+  const hydratedRef = useRef(false);
+
   const SYSTEM_PROMPT = useMemo(() => buildSystemPrompt(), []);
+
+  // 恢复：挂载时读一次（读失败只告警，不影响使用）
+  useEffect(() => {
+    let cancelled = false;
+    void hostApi
+      .invoke<{ history?: unknown; conv?: unknown } | null>('plugin_storage_get', {
+        key: AI_HISTORY_KEY,
+      })
+      .then((doc) => {
+        if (cancelled || !doc) return;
+        const h = Array.isArray(doc.history) ? (doc.history as { role: string; content: string }[]) : [];
+        const c = Array.isArray(doc.conv) ? (doc.conv as ChatMsg[]) : [];
+        if (h.length || c.length) {
+          historyRef.current = h;
+          setConv(c);
+          console.info(`[攻防AI] 已恢复上次对话（模型侧 ${h.length} 条 / 显示 ${c.length} 条）`);
+        }
+      })
+      .catch((e: unknown) => console.error('[攻防AI] 读取会话历史失败:', e))
+      .finally(() => {
+        hydratedRef.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 保存：conv 变化后防抖 500ms 写回；hydrate 之前不写（否则初始空态会覆盖磁盘历史）
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    const timer = setTimeout(() => {
+      const payload = {
+        history: historyRef.current.slice(-AI_HISTORY_MAX),
+        conv: conv.slice(-AI_CONV_MAX),
+      };
+      void hostApi
+        .invoke('plugin_storage_set', { key: AI_HISTORY_KEY, value: payload })
+        .catch((e: unknown) => console.error('[攻防AI] 保存会话历史失败:', e));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [conv]);
 
   const configuredProfiles = profiles.filter((p) => p.api_key && p.api_key.trim());
   const activeProfile = configuredProfiles.find((p) => p.id === activeProfileId) || null;

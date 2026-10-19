@@ -80,7 +80,9 @@
       "gongfang_waf_detect",
       "gongfang_wellknown_probe",
       "pick_file",
-      "read_file_base64"
+      "read_file_base64",
+      "plugin_storage_get",
+      "plugin_storage_set"
     ]
   },
   "parent": "niaoluo",
