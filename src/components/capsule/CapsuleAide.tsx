@@ -20,6 +20,7 @@ import { btnBase, GOLD } from './constants';
 import { IconClose, IconSend, IconStop } from './icons';
 import type { Conversation, ChatMsg } from './types';
 import { EVENTS } from '@/core/events/schema';
+import { attachMarkdownCopyHandler, injectMarkdownStyles, renderMarkdown } from '@/lib/markdown';
 import { mergeConversations } from '@/core/ai/util';
 
 const AIDE_STORE_KEY = 'andeyunhui.capsule.aide.conversations.v2'; // 升版本清空历史浮岛 AI 编程对话（与 IDE 对齐）
@@ -74,7 +75,6 @@ const AideBubble = memo(function AideBubble({
         padding: '8px 10px',
         fontSize: 12.5,
         lineHeight: 1.5,
-        whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
       }}
     >
@@ -93,13 +93,24 @@ const AideBubble = memo(function AideBubble({
           )}
         </div>
       ) : null}
-      {content || (isAssistant && busy ? '思考中…' : '')}
+      {content ? (
+        // 模型产出是 markdown（代码块/表格/列表），此前当纯文本 pre-wrap 直接显示，
+        // 于是 **加粗**、```代码块``` 全都原样露出 —— 与主窗 AI 对话的观感差一截。
+        <div className="md-message" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+      ) : (
+        isAssistant && busy ? '思考中…' : ''
+      )}
     </div>
   );
 });
 
 function CapsuleAide() {
   const { t } = useI18n();
+  // 浮岛窗是独立 webview：markdown 样式与「复制代码」事件代理必须在这里各挂一次
+  useEffect(() => {
+    injectMarkdownStyles();
+    return attachMarkdownCopyHandler();
+  }, []);
   // 共享状态（订阅切片）
   const aiProfiles = useCapsuleStore((s) => s.aiProfiles);
   const aideProfileId = useCapsuleStore((s) => s.aideProfileId);

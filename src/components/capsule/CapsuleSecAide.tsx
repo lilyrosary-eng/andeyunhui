@@ -18,9 +18,11 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import { invoke } from '@tauri-apps/api/core';
 import { useAiStream } from './useAiStream';
 import { btnBase, GOLD } from './constants';
-import { IconSend, IconStop } from './icons';
+import { IconClose, IconSend, IconStop } from './icons';
+import { useCapsuleStore } from '@/stores/capsuleStore';
 import type { Conversation, ChatMsg } from './types';
 import { EVENTS } from '@/core/events/schema';
+import { attachMarkdownCopyHandler, injectMarkdownStyles, renderMarkdown } from '@/lib/markdown';
 
 const SEC_STORE_KEY = 'andeyunhui.capsule.sec.conversations.v1';
 const CONV_TITLE_MAX = 20;
@@ -94,7 +96,8 @@ const SecBubble = memo(function SecBubble({ role, content, toolNote, error }: { 
           border: isUser ? 'none' : '1px solid rgba(255,255,255,0.10)',
         }}
       >
-        {content}
+        {/* 模型产出按 markdown 渲染（表格/列表/代码块）；用户气泡同样处理，保持一致 */}
+        <div className="md-message" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
       </div>
     </div>
   );
@@ -114,6 +117,13 @@ function loadConvs(): Conversation[] {
 }
 
 export default function CapsuleSecAide() {
+  const setSecOpen = useCapsuleStore((s) => s.setSecOpen);
+
+  useEffect(() => {
+    injectMarkdownStyles();
+    return attachMarkdownCopyHandler();
+  }, []);
+
   const [convs, setConvs] = useState<Conversation[]>(() => {
     const list = loadConvs();
     return list.length ? list : [{ id: 'sc' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
@@ -253,6 +263,10 @@ export default function CapsuleSecAide() {
         </select>
         <button onClick={newConv} title="新建对话" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: GOLD, background: 'rgba(230,195,92,0.14)', fontSize: 16, lineHeight: 1 }}>+</button>
         <button onClick={clearAll} title="清空全部攻防对话" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: 'rgba(244,244,246,0.8)', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', fontSize: 11 }}>清</button>
+        {/* 返回：AI 编程面板一直有这个 ×，攻防迁来时漏了（用户 2026-10-19 反馈） */}
+        <button onClick={() => setSecOpen(false)} title="收起（回到播放器）" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
+          <IconClose />
+        </button>
       </div>
 
       {/* 消息区 */}

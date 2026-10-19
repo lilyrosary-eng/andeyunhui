@@ -3,17 +3,36 @@
 //
 // 设计要点：
 //   - marked 配置：gfm=true（表格/任务列表/删除线）、breaks=true（单换行→<br>，便于流式增量渲染）
-//   - 安全：marked 默认转义 HTML；我们不在自定义 renderer 里再拼原始 HTML
+//   - 安全（2026-10-19 修正）：marked **不会**转义原始 HTML —— 此前注释写反了。
+//     实测 `marked.parse('<img src=x onerror=alert(1)>')` 原样输出，`[x](javascript:alert(1))`
+//     也原样保留 href。模型输出 / 笔记内容都可能被提示注入，因此这里做两道处理：
+//       ① renderer.html 覆盖 → 原始 HTML 一律**转义成文本**（不渲染）；
+//       ② 解析后把 href/src 里的 javascript:/vbscript:/data:text/html 协议改成 "#"。
+//     这是止血级防护，不是边界：要对抗更复杂的变异（SVG/MathML、属性名混淆）应上 DOMPurify。
 //   - 代码块复制按钮：纯字符串注入，复制逻辑由调用方组件监听 .md-copy-btn click 触发
 //   - 样式：注入一次到 <head>（幂等），dark/light 模式通用（前景用 currentColor 继承父级）
 
 import { marked } from 'marked';
 
-marked.setOptions({
+marked.use({
   gfm: true,
   breaks: true,
   async: false,
+  renderer: {
+    // 原始 HTML 不渲染，只作为文本显示（保留可见性，丢掉执行能力）
+    html(token: { text: string }) {
+      return escapeHtml(token.text);
+    },
+  },
 });
+
+/** 把 href/src 里的可执行协议换成 #（marked 不做协议过滤）。 */
+function neutralizeDangerousProtocols(html: string): string {
+  return html.replace(
+    /(href|src)(\s*=\s*)(["'])\s*(?:javascript|vbscript|data:text\/html)[^"']*\3/gi,
+    '$1$2$3#$3',
+  );
+}
 
 /** HTML 实体转义（用于把代码块原文塞进 data-* 属性）。 */
 export function escapeHtml(s: string): string {
@@ -31,7 +50,7 @@ export function renderMarkdown(content: string): string {
   if (hit !== undefined) return hit;
   let result: string;
   try {
-    const html = marked.parse(content, { async: false }) as string;
+    const html = neutralizeDangerousProtocols(marked.parse(content, { async: false }) as string);
     // 给每个 <pre> 包一层 + 追加复制按钮
     result = html.replace(
       /<pre><code[^>]*>([\s\S]*?)<\/code><\/pre>/g,
