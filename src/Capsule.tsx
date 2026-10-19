@@ -30,7 +30,7 @@ import CapsuleChat from '@/components/capsule/CapsuleChat';
 import CapsuleAide from '@/components/capsule/CapsuleAide';
 import CapsuleResource from '@/components/capsule/CapsuleResource';
 import {
-  CAPSULE_W, CAPSULE_H, EXPANDED_W, EXPANDED_H, CHAT_H, SEARCH_H, TRANSFER_H, RESOURCE_H, TOP_Y, GOLD,
+  CAPSULE_W, CAPSULE_H, EXPANDED_W, EXPANDED_H, CHAT_H, AIDE_W, AIDE_H, SEARCH_H, TRANSFER_H, RESOURCE_H, TOP_Y, GOLD,
   btnBase, DECO_LAYERS,
 } from '@/components/capsule/constants';
 import {
@@ -551,14 +551,16 @@ export default function Capsule() {
 
   // 展开/收起/对话模式/搜索模式：重新定位（居中）+ 改尺寸 + 上报热区（窗口向左右与向下延展）
   useEffect(() => {
-    const w = EXPANDED_W;
-    const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
+    // AI 编程（aide）独占 2 倍宽 × 2 倍高；其余模式宽度不变（用户 2026-10-19 指定）
+    // 优先级必须与下方 h 的三元链一致：chatOpen 优先于 aideOpen。
+    const aideActive = expanded && aideOpen && !chatOpen;
+    const w = aideActive ? AIDE_W : EXPANDED_W;
+    const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? AIDE_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
     // [修复] 用 getCurrentWebviewWindow 取胶囊窗自身（见挂载 effect 注释）：
     // getCurrentWindow() 会误返回主窗；WebviewWindow.getByLabel 是 async 且胶囊内注册表无自身。
     const win = getCurrentWebviewWindow();
     if (!win) return;
     const sx = window.screen.availWidth;
-    const x = Math.round((sx - w) / 2);
     const t0 = __DEV ? Date.now() : 0;
     // 窗口高度同步门控：从收起态展开且子面板打开时，暂不渲染子面板，等 setSize 完成后
     // 再放开渲染。否则 36→470 高度过渡期间，React 已渲染的子面板内容被旧窗高裁剪。
@@ -577,6 +579,17 @@ export default function Capsule() {
         )
         .catch(() => {});
     }
+    // 夹取：AI 编程放大到 920×920 后，在 768/900 高度的屏上会超出可用区
+    // （窗口超出屏幕部分不可见，且热区按物理矩形算会错位）。这里按可用屏幕尺寸收敛。
+    const maxW = Math.max(320, window.screen.availWidth - 16);
+    const maxH = Math.max(200, window.screen.availHeight - TOP_Y - 8);
+    const wf = Math.min(w, maxW);
+    const hf = Math.min(h, maxH);
+    // 居中必须用夹取后的宽度算，否则夹取时窗口会偏右
+    const x = Math.round((sx - wf) / 2);
+    if (__DEV && (wf !== w || hf !== h)) {
+      console.log('[CAPSULE-PROBE] 尺寸被屏幕夹取', { want: [w, h], got: [wf, hf] });
+    }
     win.setPosition(new LogicalPosition(x, TOP_Y)).catch(() => {});
     // 穿透/点击切换：收起态 ignore=true（点击穿透桌面），展开态 ignore=false（接收点击）。
     // 原由 Rust 侧 set_ignore_cursor_events 负责，但 Rust 用 get_webview_window 克隆全局窗表里的
@@ -584,9 +597,9 @@ export default function Capsule() {
     // 收起态不再设为鼠标穿透：改为可点击，用户点击胶囊即可展开（悬停自动展开仍由 hoverLockRef 阻止）
     win.setIgnoreCursorEvents(false).catch(() => {});
     win
-      .setSize(new LogicalSize(w, h))
+      .setSize(new LogicalSize(wf, hf))
       .then(() => {
-        reportRect(w, h);
+        reportRect(wf, hf);
         // 门控复位：expanding && subPanelOpen 时用 setTimeout(0) 跳出 React 18 批处理，
         // 其余情况直接复位——因为 listener 在展开时无条件置 panelReady=false，但子面板可能
         // 尚未打开（首次悬停），需要在此清门控，否则后续点开搜索/AI/传输全显示空白。
