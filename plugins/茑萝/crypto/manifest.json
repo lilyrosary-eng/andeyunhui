@@ -11,5 +11,9 @@
   "codename": "茑萝",
   "requiredAssets": [],
   "category": "加密安全",
-  "desc": "茑萝加密套件：RSA 密钥对 / PGP 信封 / 密码强度审计 / 字典生成"
+  "desc": "茑萝加密套件：RSA 密钥对 / PGP 信封 / 密码强度审计 / 字典生成",
+  "permissions": {
+    "commands": [],
+    "note": "纯前端（Web Crypto）+ navigator.clipboard，不调任何后端命令"
+  }
 }

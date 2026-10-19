@@ -403,14 +403,29 @@ const HOST_ALIASED_PLUGINS = new Set<string>([
 ]);
 
 /**
+ * 「未声明 permissions.commands」时的兜底集合 —— **空集**。
+ *
+ * ## 为什么从「整个全局白名单」改成空（2026-10-19 审计）
+ * 原来的语义是：没声明 → 回退到 ALLOWED_COMMANDS（全量）。这条"兼容存量插件"的宽容，
+ * 实际后果是：`crypto` / `gongjuxiang` / `screen-recorder` 三个 manifest **整段没有 permissions**，
+ * 于是它们各自握着 `delete_file` / `write_text_file` / `read_text_file` / `read_file_base64` /
+ * `scan_ports` / `clipboard_read` 等全盘能力 —— 而实测这三个插件**一条后端命令都不调**
+ * （`grep -rn "invoke\|__HOST_API__" plugins/茑萝/crypto/src` 零命中）。即"没要求的权力白给"。
+ *
+ * 现在：未声明 = 不知道要什么 = 不给，并显式报错告知怎么修（把实际用到的命令写进 manifest）。
+ * 确实不需要后端命令的插件，请**显式**写 `"commands": []` —— 空数组与"缺失"语义不同：
+ * 空数组 = 我明确不要任何命令（不告警）；缺失 = 没交代（报错 + 零权限）。
+ */
+const UNDECLARED_FALLBACK_COMMANDS = new Set<string>();
+
+/**
  * 解析某插件实际可用的命令集合。
  *
  * 三层语义（按优先级）：
- *   1. manifest 声明了 `permissions.commands`（非空数组）→ 取「声明 ∩ 全局白名单」。
+ *   1. manifest 声明了 `permissions.commands`（**数组，允许为空**）→ 取「声明 ∩ 全局白名单」。
  *      manifest 可以比全局白名单**更严**，但不能更宽：ALLOWED_COMMANDS 仍是最终安全底线，
  *      声明一个全局未放行的命令只会在加载时收到显式告警（通常是拼写错误），不会因此放行。
- *   2. 未声明 → 回退全局白名单（兼容存量插件），DEV 下按插件去重地提示补齐。
- *      迁移路径由此变得机械：照控制台里实际出现的命令名抄进 manifest 即可。
+ *   2. **未声明** → 零命令 + 显式 error（见 UNDECLARED_FALLBACK_COMMANDS 的说明）。
  *   3. 声明的命令不在全局白名单 → 显式告警（拼写错误 / 想越权），不放行。
  */
 function resolveCommandPolicy(
@@ -418,16 +433,24 @@ function resolveCommandPolicy(
   permissions?: PluginPermissions,
 ): PluginCommandPolicy {
   const declared = permissions?.commands;
-  if (!Array.isArray(declared) || declared.length === 0) {
-    if (import.meta.env.DEV && !warnedUndeclared.has(pluginId) && !HOST_ALIASED_PLUGINS.has(pluginId)) {
+  if (!Array.isArray(declared)) {
+    // 每个插件只刷一次，避免热重载时刷屏；但**生产环境也打**（这是能力边界，不是调试噪音）
+    if (!warnedUndeclared.has(pluginId)) {
       warnedUndeclared.add(pluginId);
-      console.warn(
-        `[pluginSandbox] 插件 "${pluginId}" 未在 manifest 声明 permissions.commands，` +
-          `暂时回退全局白名单。建议把运行期实际调用到的命令补进 ` +
-          `plugins/${pluginId}/manifest.json 的 permissions.commands（未声明的命令随时可能被拒绝）。`,
+      console.error(
+        `[pluginSandbox] 插件 "${pluginId}" 未声明 permissions.commands —— 已按「零后端命令」处理。` +
+          `修复：把运行期实际用到的命令写进 plugins/${pluginId}/manifest.json 的 ` +
+          `permissions.commands；确实不需要后端命令的插件请显式写 "commands": []。` +
+          (HOST_ALIASED_PLUGINS.has(pluginId)
+            ? `（该插件是宿主 alias 直连型，真实边界在 Tauri ACL，此告警仅供参考）`
+            : ''),
       );
     }
-    return { allowed: ALLOWED_COMMANDS, declared: false };
+    return { allowed: UNDECLARED_FALLBACK_COMMANDS, declared: false };
+  }
+  // 显式空数组：开发者明确表示"本插件不需要任何后端命令"，静默通过
+  if (declared.length === 0) {
+    return { allowed: new Set<string>(), declared: true };
   }
   const allowed = new Set<string>();
   for (const cmd of declared) {

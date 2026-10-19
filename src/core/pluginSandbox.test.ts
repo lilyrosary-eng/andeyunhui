@@ -177,11 +177,24 @@ describe('插件沙箱 · window 受限代理（防止遮蔽被 alias 绕开）'
 describe('插件沙箱 · manifest 声明式权限（permissions.commands）', () => {
   const READ = { commands: ['plugin_storage_get', 'load_image_cache'] };
 
-  it('未声明权限的存量插件：回退全局白名单（不因这次改造立刻全挂）', async () => {
-    // netease_http_post 在全局白名单里。这里只断言"没被权限层拒绝"——
-    // 它仍会因测试环境没有 Tauri 运行时而失败，但错误信息不是"未授权命令"。
+  it('未声明权限：零命令 + 显式报错（不再白送整个白名单）', async () => {
+    // 2026-10-19 改：旧语义是「未声明 → 回退 ALLOWED_COMMANDS」，等于让 crypto / gongjuxiang /
+    // screen-recorder（manifest 整段没有 permissions，实测一条命令都不调）白拿
+    // delete_file / write_text_file / scan_ports / clipboard_read 等全盘能力。
+    // 这条测试原本把那个洞**钉成了预期行为**，现在反过来钉住「未声明就必须被拒」。
     const msg = await rejectionOf(evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")'));
-    expect(msg).not.toMatch(/未授权命令/);
+    expect(msg).toMatch(/未授权命令/);
+    // 报错必须点名"要么列命令、要么显式写空数组"，否则使用者不知道该怎么修
+    expect(msg).toMatch(/manifest\.json/);
+  });
+
+  it('显式空数组 = 我明确不要任何后端命令（同样被拒，但不按配置遗漏给提示）', async () => {
+    const msg = await rejectionOf(
+      evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")', { permissions: { commands: [] } }),
+    );
+    expect(msg).toMatch(/未授权命令/);
+    // 与"缺失"的区别在于修复提示：空数组是主动选择，不该被当成配置遗漏
+    expect(msg).not.toMatch(/permissions\.commands 并列入/);
   });
 
   it('声明了权限的插件：未声明的命令被拒绝，且错误信息可直接复制去修', async () => {
@@ -219,10 +232,13 @@ describe('插件沙箱 · manifest 声明式权限（permissions.commands）', (
     }
   });
 
-  it('permissions.commands 为空数组 = 未声明（避免"想收紧却写成空"把插件锁死）', async () => {
-    const msg = await rejectionOf(
+  it('空数组与缺失语义不同：空 = 显式零权限，缺失 = 配置遗漏（两者都拒，但提示不同）', async () => {
+    const empty = await rejectionOf(
       evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")', { permissions: { commands: [] } }),
     );
-    expect(msg).not.toMatch(/未授权命令/);
+    const missing = await rejectionOf(evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")'));
+    expect(empty).toMatch(/未授权命令/);
+    expect(missing).toMatch(/未授权命令/);
+    expect(empty).not.toEqual(missing);
   });
 });

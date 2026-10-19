@@ -7,5 +7,9 @@
   "entry": "index.js",
   "iconName": "Bot",
   "hostApiVersion": 1,
-  "codename": "ai-chat"
+  "codename": "ai-chat",
+  "permissions": {
+    "commands": [],
+    "note": "宿主 alias 直连型（直接 import @/core/*，绕过 __HOST_API__），边界在 Tauri ACL"
+  }
 }

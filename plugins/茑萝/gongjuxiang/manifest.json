@@ -8,5 +8,9 @@
   "iconName": "Wrench",
   "hostApiVersion": 1,
   "parent": "niaoluo",
-  "codename": "茑萝"
+  "codename": "茑萝",
+  "permissions": {
+    "commands": [],
+    "note": "纯前端文本处理 + navigator.clipboard，不调任何后端命令"
+  }
 }

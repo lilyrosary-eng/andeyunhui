@@ -7,5 +7,9 @@
   "entry": "index.js",
   "iconName": "Video",
   "hostApiVersion": 1,
-  "desc": "屏幕录制（Ctrl+Alt+R 开始/停止）"
+  "desc": "屏幕录制（Ctrl+Alt+R 开始/停止）",
+  "permissions": {
+    "commands": [],
+    "note": "仅注册 service，录屏控制台由 Rust 独立窗口承载，本插件不调命令"
+  }
 }
