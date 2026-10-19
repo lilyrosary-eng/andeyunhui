@@ -5,30 +5,6 @@
     <link rel="icon" type="image/png" href="/src-tauri/icons/32x32.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>安得云荟</title>
-    <script>
-      // TEMP-DIAG（临时诊断，验证后删除）：把运行期错误直接显示在页面上。
-      // 白屏时 WebView 的 console 拿不到，只能靠这个把错误"画"出来。
-      (function () {
-        function show(tag, msg, color, pos) {
-          try {
-            var d = document.createElement('pre');
-            d.style.cssText =
-              'position:fixed;z-index:2147483647;left:0;right:0;' + pos +
-              ';background:' + color + ';color:#111;font:12px/1.4 monospace;padding:8px;' +
-              'white-space:pre-wrap;max-height:40vh;overflow:auto';
-            d.textContent = '[' + tag + '] ' + msg;
-            (document.body || document.documentElement).appendChild(d);
-          } catch (e) {}
-        }
-        window.addEventListener('error', function (e) {
-          show('onerror', (e.message || '') + '\n' + (e.filename || '') + ':' + (e.lineno || ''), '#ffd9d9', 'top:0');
-        });
-        window.addEventListener('unhandledrejection', function (e) {
-          var r = e.reason;
-          show('rejection', (r && (r.stack || r.message)) || String(r), '#d9e8ff', 'bottom:0');
-        });
-      })();
-    </script>
     <style>
       /* 防白屏：脚本执行前先给页面一个底色（浅色默认，深色由预加载脚本切换） */
       html, body { margin: 0; height: 100%; background: #f4f2ec; }
