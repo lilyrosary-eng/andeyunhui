@@ -5,7 +5,7 @@
 // 当前为 UI 骨架占位，后续按框架逐步填充能力。
 
 import { GongfangModule } from './GongfangModule';
-import { GongfangStatusSidebar } from './GongfangStatusSidebar';
+import { GongfangNavSidebar } from './GongfangNavSidebar';
 
 window.__PLUGIN_REGISTRY__.register({
   id: 'gongfang',
@@ -17,7 +17,7 @@ window.__PLUGIN_REGISTRY__.register({
   category: '安全攻防',
   desc: '安全攻防套件：爬虫 / 逆向 / 渗透 / 自动化',
   component: GongfangModule,
-  // 2026-10-19：AI 对话已迁到黄金棋盘浮岛的「AI 攻防」按钮；侧栏改放**状态/功能块**
-  // （内核状态 + 事件流 + 指标曲线 + 目标工作区），与浮岛职责分离。
-  sidebar: GongfangStatusSidebar,
+  // 2026-10-20：AI 对话在黄金棋盘浮岛的「AI 攻防」；侧栏只放五大**功能块**导航
+  // （爬虫/逆向/渗透/自动化/网关）。状态显示不再放侧栏 —— 主信息台已有完整一份。
+  sidebar: GongfangNavSidebar,
 });
