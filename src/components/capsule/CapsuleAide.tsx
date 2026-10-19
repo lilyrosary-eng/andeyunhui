@@ -16,7 +16,6 @@ import { useCapsuleStore } from '@/stores/capsuleStore';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import { KeepButton } from '@/components/KeepButton';
 import { useAiStream } from './useAiStream';
-import CapsuleSecAide from './CapsuleSecAide';
 import { btnBase, GOLD } from './constants';
 import { IconClose, IconSend, IconStop } from './icons';
 import type { Conversation, ChatMsg } from './types';
@@ -163,21 +162,8 @@ function CapsuleAide() {
   const aideReqRef = useRef<string | null>(null);
   const aideAsstRef = useRef<string | null>(null);
   const aideScrollRef = useRef<HTMLDivElement | null>(null);
-  const [aideMode, setAideMode] = useState<'chat' | 'agent'>('chat'); // AI 编程：对话 / 代理（agent）
-
-  // 目标模块：编程（原 IDE 对话）/ 攻防（原攻防侧栏，2026-10-19 从主窗口迁入）。
-  // 两者共用浮岛这一个入口，但**各自独立的历史与提示词**，不混在一起。
-  const TARGET_KEY = 'andeyunhui.capsule.aide.target';
-  const [aideTarget, setAideTarget] = useState<'code' | 'sec'>(() => {
-    try {
-      return localStorage.getItem(TARGET_KEY) === 'sec' ? 'sec' : 'code';
-    } catch {
-      return 'code';
-    }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(TARGET_KEY, aideTarget); } catch { /* 忽略 */ }
-  }, [aideTarget]);
+  // 2026-10-19：只保留「智能体（agent）」模式 —— 对话模式已删除，普通聊天由「AI 对话」模块负责。
+  // 原来这里还有个「编程 / 攻防」标签切换，攻防改成浮岛独立按钮后也不再需要。
 
   // 项目根：agent 模式的 <file>/<grep>/<glob> 都要它，否则 agent 只会说"没拿到项目路径"。
   // 默认值来源优先级：浮岛自己上次选的 > IDE 最后打开的项目（IDE 会写 localStorage）。
@@ -287,9 +273,10 @@ function CapsuleAide() {
   useAiStream(
     {
       prefix: EVENTS.chatStream.prefix,
-      deltaMode: aideMode === 'agent' ? 'replace' : 'append',
-      hasReasoning: aideMode === 'chat',
-      hasAgentStep: aideMode === 'agent',
+      // agent 回合是「整段已清洗文本」替换 + 工具步骤流；没有 reasoning 增量
+      deltaMode: 'replace',
+      hasReasoning: false,
+      hasAgentStep: true,
     },
     { reqRef: aideReqRef, asstRef: aideAsstRef, streamConvIdRef: aideStreamConvIdRef, updateMessages: updateAideStreamMessages, setBusy: setAideBusy },
   );
@@ -309,17 +296,12 @@ function CapsuleAide() {
     if (!text || aideBusy) return;
     if (aideReqRef.current) return; // 同步防重入：已有请求在飞时忽略
 
-    if (aideMode === 'chat' && !aideProfileId) {
-      setAiHint(t('capsule.noModelHint'));
-      return;
-    }
-
     const convId = aideActiveConvId;
     const uid = 'u' + Date.now().toString(36);
     const aid = 'a' + Date.now().toString(36);
     aideStreamConvIdRef.current = convId;
     const history = cleanAideHistory(aideMessages.filter((m) => !m.error));
-    const reqId = (aideMode === 'agent' ? 'cag_' : 'cid_') + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const reqId = 'cag_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
     updateAideStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '' }]);
     setAideConversations((prev) => prev.map((c) => (c.id === convId && (c.title === '新对话' || !c.title.trim())) ? { ...c, title: text.slice(0, CONV_TITLE_MAX) } : c));
@@ -348,30 +330,21 @@ function CapsuleAide() {
     };
 
     try {
-      if (aideMode === 'agent') {
-        await invoke('ai_chat_agent', {
-          requestId: reqId,
-          messages: [...history, { role: 'user', content: text }],
-          profileId: aideProfileId ?? null,
-          // 轮数上限与主对话一致（8）：浮岛面板小，不追求 20 轮的 ComfyUI 长链
-          maxRounds: 8,
-          // 项目根决定 file/grep/glob 能否落地；为空时 agent 会明确报"未指定项目根"
-          projectRoot: aideProjectRoot || null,
-          // 浮岛没有"联网"开关，默认允许（与工具常开的策略一致）
-          webSearch: true,
-        });
-      } else {
-        // 注意：ai_chat 恒流式，Rust 签名里**没有** stream 参数（传了只会被忽略/报 invalid args）
-        await invoke('ai_chat', {
-          requestId: reqId,
-          profileId: aideProfileId,
-          messages: [...history, { role: 'user', content: text }],
-        });
-      }
+      await invoke('ai_chat_agent', {
+        requestId: reqId,
+        messages: [...history, { role: 'user', content: text }],
+        profileId: aideProfileId ?? null,
+        // 轮数上限 8：浮岛面板小，不追求 20 轮的 ComfyUI 长链
+        maxRounds: 8,
+        // 项目根决定 file/grep/glob 能否落地；为空时 agent 会明确报"未指定项目根"
+        projectRoot: aideProjectRoot || null,
+        // 浮岛没有独立的联网开关，默认允许（与「工具常开」策略一致）
+        webSearch: true,
+      });
     } catch (e) {
       fail(String(e));
     }
-  }, [aideInput, aideBusy, aideProfileId, aideMessages, aideMode, aideActiveConvId, aideProjectRoot, t, updateAideStreamMessages, setAiHint]);
+  }, [aideInput, aideBusy, aideProfileId, aideMessages, aideActiveConvId, aideProjectRoot, updateAideStreamMessages]);
 
   /**
    * 停止浮岛当前回合。
@@ -398,45 +371,13 @@ function CapsuleAide() {
       }));
     }
     setAideBusy(false);
-    void invoke(aideMode === 'agent' ? 'ai_agent_cancel' : 'ai_chat_cancel', { requestId: rid }).catch(() => {});
-  }, [aideMode, updateAideStreamMessages]);
-
-  // 目标切换：两枚胶囊按钮，放在两条分支共用的顶部。
-  const targetSwitch = (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 2, background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: 2, flex: '0 0 auto' }}>
-      <button
-        onClick={() => setAideTarget('code')}
-        title="AI 编程（原 IDE 右侧对话列）"
-        style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideTarget === 'code' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideTarget === 'code' ? GOLD : 'transparent' }}
-      >编程</button>
-      <button
-        onClick={() => setAideTarget('sec')}
-        title="AI 攻防（原攻防模块侧栏）"
-        style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideTarget === 'sec' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideTarget === 'sec' ? GOLD : 'transparent' }}
-      >攻防</button>
-    </div>
-  );
-
-  if (aideTarget === 'sec') {
-    return (
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }} onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px 0' }}>
-          {targetSwitch}
-          <span style={{ flex: 1 }} />
-          <button onClick={() => setAideOpen(false)} title={t('capsule.backToPlayer')} style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
-            <IconClose />
-          </button>
-        </div>
-        <CapsuleSecAide />
-      </div>
-    );
-  }
+    void invoke('ai_agent_cancel', { requestId: rid }).catch(() => {});
+  }, [updateAideStreamMessages]);
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px' }} onClick={(e) => e.stopPropagation()}>
       {/* 顶部细条：返回 + 标题 + 对话切换 + 新建 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        {targetSwitch}
         <span style={{ fontSize: 13, fontWeight: 600, color: '#f2f2f4' }}>{t('capsule.aideTitle')}</span>
         {/* 对话切换：下拉选择 / 新建 */}
         <select
@@ -477,17 +418,11 @@ function CapsuleAide() {
       </div>
       {/* 第二行：模式切换（对话 / 代理）+ 模型下拉 + 思考开关 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
-        {/* 模式切换：对话 = chat 桥；代理 = agent 桥（走 IDE 自主编辑面板） */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 2, background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: 2, flex: '0 0 auto' }}>
-          <button onClick={() => setAideMode('chat')} title={t('capsule.modeChatTitle')} style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideMode === 'chat' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideMode === 'chat' ? GOLD : 'transparent' }}>{t('capsule.modeChat')}</button>
-          <button onClick={() => setAideMode('agent')} title={t('capsule.modeAgentTitle')} style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideMode === 'agent' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideMode === 'agent' ? GOLD : 'transparent' }}>{t('capsule.modeAgent')}</button>
-        </div>
         <select
           value={aideProfileId ?? ''}
           onChange={(e) => setAideProfileId(e.target.value || null)}
-          title={aideMode === 'agent' ? t('capsule.agentModelTitle') : t('capsule.selectModel')}
-          disabled={aideMode === 'agent'}
-          style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: '#f6f6f8', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: '4px 6px', outline: 'none', opacity: aideMode === 'agent' ? 0.5 : 1 }}
+          title={t('capsule.agentModelTitle')}
+          style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: '#f6f6f8', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: '4px 6px', outline: 'none' }}
         >
           {configuredAideProfiles.length === 0 && <option value="" style={{ background: '#1c1c1e', color: '#f6f6f8' }}>{t('capsule.noModel')}</option>}
           {configuredAideProfiles.map((p) => (
@@ -502,7 +437,7 @@ function CapsuleAide() {
           compact
           disabled={!aideProfileId || aideBusy}
         />
-        {aideBusy && <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.6)' }}>{aideMode === 'agent' ? t('capsule.executing') : t('capsule.thinking')}</span>}
+        {aideBusy && <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.6)' }}>{t('capsule.executing')}</span>}
       </div>
 
       {/* 消息列表 */}
@@ -537,8 +472,7 @@ function CapsuleAide() {
             }
           }}
           rows={1}
-          placeholder={aideMode === 'agent' ? t('capsule.agentPlaceholder') : (aideProfileId ? t('capsule.inputMsg') : t('capsule.noModel'))}
-          disabled={aideMode === 'chat' && !aideProfileId}
+          placeholder={t('capsule.agentPlaceholder')}
           style={{ width: '100%', display: 'block', resize: 'none', maxHeight: 90, minHeight: 34, height: 34, border: 'none', background: 'transparent', color: '#f4f4f6', padding: '4px 4px', fontSize: 12.5, lineHeight: 1.4, outline: 'none', fontFamily: 'inherit' }}
         />
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginTop: 4 }}>
@@ -546,9 +480,9 @@ function CapsuleAide() {
               等于用户完全没法叫停（IDE 侧跑长回答时只能干等）。 */}
           <button
             onClick={() => (aideBusy ? stopAide() : void sendAide())}
-            disabled={!aideBusy && (!aideInput.trim() || (aideMode === 'chat' && !aideProfileId))}
+            disabled={!aideBusy && !aideInput.trim()}
             title={aideBusy ? t('capsule.stop') : t('capsule.send')}
-            style={{ ...btnBase, width: 34, height: 34, background: aideBusy ? 'rgba(244,244,246,0.16)' : 'rgba(230,195,92,0.18)', opacity: !aideBusy && (!aideInput.trim() || (aideMode === 'chat' && !aideProfileId)) ? 0.45 : 1 }}
+            style={{ ...btnBase, width: 34, height: 34, background: aideBusy ? 'rgba(244,244,246,0.16)' : 'rgba(230,195,92,0.18)', opacity: !aideBusy && !aideInput.trim() ? 0.45 : 1 }}
           >
             {aideBusy ? <IconStop /> : <IconSend />}
           </button>

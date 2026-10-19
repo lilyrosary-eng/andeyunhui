@@ -53,47 +53,6 @@ const SEC_SYSTEM = [
   '5. 收尾用 3-5 行中文总结（做了什么、结果、建议下一步），不要贴大段 JSON。',
 ].join('\n');
 
-/** 快捷指令：直接 invoke 命令，结果作为一条 tool 消息写进对话（不走模型，零 token）。 */
-interface QuickCmd {
-  label: string;
-  run: () => Promise<string>;
-}
-
-const QUICK_CMDS: QuickCmd[] = [
-  {
-    label: '启动内核',
-    run: async () => {
-      const st = await invoke<{ running?: boolean }>('gongfang_status');
-      if (st?.running) return '内核已在运行';
-      await invoke('gongfang_start', { profileId: null });
-      return '内核已启动（双轨制：控制面 AI 推理 + 数据面 Tick 执行）';
-    },
-  },
-  {
-    label: '状态',
-    run: async () => JSON.stringify(await invoke('gongfang_status'), null, 2),
-  },
-  {
-    label: '事件',
-    run: async () => JSON.stringify(await invoke('gongfang_events_recent', { n: 10 }), null, 2),
-  },
-  {
-    label: '指标',
-    run: async () => JSON.stringify(await invoke('gongfang_metrics_history', { seconds: 300 }), null, 2),
-  },
-  {
-    label: '网关',
-    run: async () => JSON.stringify(await invoke('gongfang_gateway_status'), null, 2),
-  },
-  {
-    label: '停止',
-    run: async () => {
-      await invoke('gongfang_stop');
-      return '内核已停止';
-    },
-  },
-];
-
 const SecBubble = memo(function SecBubble({ role, content, toolNote, error }: { role: string; content: string; toolNote?: boolean; error?: boolean }) {
   // toolNote：快捷指令的本地执行结果 —— 灰底等宽、不冒充用户发言
   if (toolNote) {
@@ -162,7 +121,6 @@ export default function CapsuleSecAide() {
   const [activeId, setActiveId] = useState<string>(() => loadConvs()[0]?.id ?? '');
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string>('');
 
   const reqRef = useRef<string | null>(null);
   const asstRef = useRef<string | null>(null);
@@ -193,26 +151,6 @@ export default function CapsuleSecAide() {
     { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy },
   );
 
-  // 内核状态（每 10s 刷一次；失败只写状态栏，不弹错）
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const st = await invoke<{ running?: boolean; reward?: number; err_rate?: number }>('gongfang_status');
-        if (!alive) return;
-        setStatus(st?.running ? `运行中 · reward ${st.reward ?? '-'} · 错误率 ${st.err_rate ?? '-'}` : '未启动');
-      } catch {
-        if (alive) setStatus('状态不可用');
-      }
-    };
-    void tick();
-    const iv = setInterval(() => void tick(), 10_000);
-    return () => {
-      alive = false;
-      clearInterval(iv);
-    };
-  }, []);
-
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -239,21 +177,6 @@ export default function CapsuleSecAide() {
     setBusy(false);
     try { localStorage.removeItem(SEC_STORE_KEY); } catch { /* 忽略 */ }
   }, []);
-
-  // 快捷指令：直接执行并把结果作为一条 tool 消息落到对话里（让模型下一轮能看见）
-  const runQuick = useCallback(async (q: QuickCmd) => {
-    if (busy) return;
-    const cid = activeId;
-    const id = 'q' + Date.now().toString(36);
-    updateMessages(cid, (prev) => [...prev, { id, role: 'user', content: `▶ ${q.label} …`, toolNote: true }]);
-    try {
-      const out = await q.run();
-      const text = typeof out === 'string' ? out : JSON.stringify(out, null, 2);
-      updateMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, content: `▶ ${q.label}\n${text}` } : m)));
-    } catch (e) {
-      updateMessages(cid, (prev) => prev.map((m) => (m.id === id ? { ...m, content: `▶ ${q.label}\n⚠ 失败：${String(e)}`, error: true } : m)));
-    }
-  }, [activeId, busy, updateMessages]);
 
   const send = useCallback(async () => {
     const text = input.trim();
@@ -306,15 +229,11 @@ export default function CapsuleSecAide() {
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px' }} onClick={(e) => e.stopPropagation()}>
-      {/* 顶部：状态 + 会话切换 + 新建 + 清空（与旧侧栏同构） */}
+      {/* 顶部：会话切换 + 新建 + 清空。
+          内核状态/指标/事件等「功能块」已迁到攻防模块自己的侧栏（2026-10-19），
+          浮岛这边只负责对话，不再重复显示。 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: '#f2f2f4' }}>攻防</span>
-        <span
-          title="攻防内核状态（每 10s 刷新）"
-          style={{ fontSize: 11, color: status.startsWith('运行中') ? '#7dd3a0' : 'rgba(244,244,246,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}
-        >
-          {status}
-        </span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: '#f2f2f4' }}>AI 攻防</span>
         <select
           value={activeId}
           onChange={(e) => {
@@ -334,25 +253,6 @@ export default function CapsuleSecAide() {
         </select>
         <button onClick={newConv} title="新建对话" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: GOLD, background: 'rgba(230,195,92,0.14)', fontSize: 16, lineHeight: 1 }}>+</button>
         <button onClick={clearAll} title="清空全部攻防对话" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: 'rgba(244,244,246,0.8)', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', fontSize: 11 }}>清</button>
-      </div>
-
-      {/* 快捷指令行（旧侧栏的「启动/爬取/扫描…」等价物；直接执行，不花 token） */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-        {QUICK_CMDS.map((q) => (
-          <button
-            key={q.label}
-            onClick={() => void runQuick(q)}
-            disabled={busy}
-            title={`直接执行：${q.label}（结果写入对话，供后续追问）`}
-            style={{
-              ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 999,
-              color: busy ? 'rgba(244,244,246,0.4)' : 'rgba(244,244,246,0.85)',
-              background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)',
-            }}
-          >
-            {q.label}
-          </button>
-        ))}
       </div>
 
       {/* 消息区 */}

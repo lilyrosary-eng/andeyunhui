@@ -628,6 +628,8 @@ export const deDE: Record<string, string> = {
   'capsule.confirmSend': 'Senden bestätigen',
   'capsule.action.ai': 'KI',
   'capsule.action.aide': 'KI-Codierung',
+
+  'capsule.action.sec': 'KI-Sicherheit',
   'capsule.action.search': 'Suche',
   'capsule.action.screenshot': 'Screenshot',
   'capsule.action.record': 'Bildschirmaufnahme',

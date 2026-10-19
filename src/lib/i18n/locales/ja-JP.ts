@@ -628,6 +628,8 @@ export const jaJP: Record<string, string> = {
   'capsule.confirmSend': '送信を確認',
   'capsule.action.ai': 'AI',
   'capsule.action.aide': 'AI コーディング',
+
+  'capsule.action.sec': 'AI セキュリティ',
   'capsule.action.search': '検索',
   'capsule.action.screenshot': 'スクリーンショット',
   'capsule.action.record': '録画',

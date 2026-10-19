@@ -626,6 +626,8 @@ export const zhCN: Record<string, string> = {
   'capsule.confirmSend': '确认发送',
   'capsule.action.ai': 'AI',
   'capsule.action.aide': 'AI 编程',
+
+  'capsule.action.sec': 'AI 攻防',
   'capsule.action.search': '搜索',
   'capsule.action.screenshot': '截图',
   'capsule.action.record': '录屏',

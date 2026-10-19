@@ -626,6 +626,8 @@ export const enUS: Record<string, string> = {
   'capsule.confirmSend': 'Confirm send',
   'capsule.action.ai': 'AI',
   'capsule.action.aide': 'AI Coding',
+
+  'capsule.action.sec': 'AI Security',
   'capsule.action.search': 'Search',
   'capsule.action.screenshot': 'Screenshot',
   'capsule.action.record': 'Record',

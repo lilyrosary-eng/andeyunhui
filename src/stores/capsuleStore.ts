@@ -20,6 +20,8 @@ interface CapsuleState {
   expanded: boolean;
   chatOpen: boolean;
   aideOpen: boolean;
+  /** AI 攻防面板（2026-10-19 从攻防模块侧栏迁入，与 aide 平级、互斥） */
+  secOpen: boolean;
   searchOpen: boolean;
   transferOpen: boolean;
   /** 资源监视面板（独属于浮岛，主窗口资源监视走 GoldChessboardHub 的 resource tab） */
@@ -45,6 +47,7 @@ interface CapsuleState {
   setExpanded: (v: boolean) => void;
   setChatOpen: (v: boolean) => void;
   setAideOpen: (v: boolean) => void;
+  setSecOpen: (v: boolean) => void;
   setSearchOpen: (v: boolean) => void;
   setTransferOpen: (v: boolean) => void;
   setResourceOpen: (v: boolean) => void;
@@ -129,6 +132,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
   expanded: false,
   chatOpen: false,
   aideOpen: false,
+  secOpen: false,
   searchOpen: false,
   transferOpen: false,
   resourceOpen: false,
@@ -152,6 +156,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
   setExpanded: (expanded) => set({ expanded }),
   setChatOpen: (chatOpen) => set({ chatOpen }),
   setAideOpen: (aideOpen) => set({ aideOpen }),
+  setSecOpen: (secOpen) => set({ secOpen }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
   setTransferOpen: (transferOpen) => set({ transferOpen }),
   setResourceOpen: (resourceOpen) => set({ resourceOpen }),
@@ -163,6 +168,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
       expanded: false,
       searchOpen: false,
       chatOpen: false,
+      secOpen: false,
       transferOpen: false,
       resourceOpen: false,
       keepOpen: false,

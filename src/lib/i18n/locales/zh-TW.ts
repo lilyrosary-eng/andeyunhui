@@ -628,6 +628,8 @@ export const zhTW: Record<string, string> = {
   'capsule.confirmSend': '確認傳送',
   'capsule.action.ai': 'AI',
   'capsule.action.aide': 'AI 程式設計',
+
+  'capsule.action.sec': 'AI 攻防',
   'capsule.action.search': '搜尋',
   'capsule.action.screenshot': '截圖',
   'capsule.action.record': '錄影',

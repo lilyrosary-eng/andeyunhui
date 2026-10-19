@@ -28,6 +28,7 @@ import { useCapsuleStore } from '@/stores/capsuleStore';
 import { api } from '@/lib/api';
 import CapsuleChat from '@/components/capsule/CapsuleChat';
 import CapsuleAide from '@/components/capsule/CapsuleAide';
+import CapsuleSecAide from '@/components/capsule/CapsuleSecAide';
 import CapsuleResource from '@/components/capsule/CapsuleResource';
 import {
   CAPSULE_W, CAPSULE_H, EXPANDED_W, EXPANDED_H, CHAT_H, AIDE_W, AIDE_H, SEARCH_H, TRANSFER_H, RESOURCE_H, TOP_Y, GOLD,
@@ -308,6 +309,7 @@ export default function Capsule() {
   const expanded = useCapsuleStore((s) => s.expanded);
   const chatOpen = useCapsuleStore((s) => s.chatOpen);
   const aideOpen = useCapsuleStore((s) => s.aideOpen);
+  const secOpen = useCapsuleStore((s) => s.secOpen);
   const searchOpen = useCapsuleStore((s) => s.searchOpen);
   const transferOpen = useCapsuleStore((s) => s.transferOpen);
   const resourceOpen = useCapsuleStore((s) => s.resourceOpen);
@@ -551,11 +553,12 @@ export default function Capsule() {
 
   // 展开/收起/对话模式/搜索模式：重新定位（居中）+ 改尺寸 + 上报热区（窗口向左右与向下延展）
   useEffect(() => {
-    // AI 编程（aide）独占 2 倍宽 × 2 倍高；其余模式宽度不变（用户 2026-10-19 指定）
-    // 优先级必须与下方 h 的三元链一致：chatOpen 优先于 aideOpen。
+    // AI 编程 / AI 攻防 独占 2 倍宽 × 2 倍高；其余模式宽度不变（用户 2026-10-19 指定）。
+    // 优先级必须与下方 h 的三元链一致：chatOpen 优先，其次 aide，再 sec。
     const aideActive = expanded && aideOpen && !chatOpen;
-    const w = aideActive ? AIDE_W : EXPANDED_W;
-    const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? AIDE_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
+    const secActive = expanded && secOpen && !chatOpen && !aideOpen;
+    const w = (aideActive || secActive) ? AIDE_W : EXPANDED_W;
+    const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? AIDE_H : secOpen ? AIDE_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
     // [修复] 用 getCurrentWebviewWindow 取胶囊窗自身（见挂载 effect 注释）：
     // getCurrentWindow() 会误返回主窗；WebviewWindow.getByLabel 是 async 且胶囊内注册表无自身。
     const win = getCurrentWebviewWindow();
@@ -625,7 +628,7 @@ export default function Capsule() {
         window.setTimeout(presentOverlayNow, 160);
       })
       .catch(() => {});
-  }, [expanded, chatOpen, aideOpen, searchOpen, transferOpen, resourceOpen, presentOverlayNow]);
+  }, [expanded, chatOpen, aideOpen, secOpen, searchOpen, transferOpen, resourceOpen, presentOverlayNow]);
 
   async function onAction(kind: string) {
     // 闭包内读 store 最新值做互斥切换（click 同步执行，无竞态）
@@ -637,12 +640,21 @@ export default function Capsule() {
         s.setAideOpen(false);
         s.setChatOpen(!s.chatOpen);
       } else if (kind === 'aide') {
-        // 浮岛「AI 编程」：接管 IDE 对话，由 IDE 模块处理；与内置 AI/搜索/传输互斥
+        // 浮岛「AI 编程」：直接调后端 ai_chat_agent（独立执行器）；与其它面板互斥
         s.setExpanded(true);
         s.setChatOpen(false);
         s.setSearchOpen(false);
         s.setTransferOpen(false);
+        s.setSecOpen(false);
         s.setAideOpen(!s.aideOpen);
+      } else if (kind === 'sec') {
+        // 浮岛「AI 攻防」：与 AI 编程平级、互斥（2026-10-19 从攻防模块侧栏迁入）
+        s.setExpanded(true);
+        s.setChatOpen(false);
+        s.setSearchOpen(false);
+        s.setTransferOpen(false);
+        s.setAideOpen(false);
+        s.setSecOpen(!s.secOpen);
       } else if (kind === 'search') {
         // 切换内置 Everything 风格搜索模式；与对话互斥
         s.setChatOpen(false);
@@ -660,6 +672,7 @@ export default function Capsule() {
         s.setSearchOpen(false);
         s.setTransferOpen(false);
         s.setAideOpen(false);
+        s.setSecOpen(false);
         s.setResourceOpen(!s.resourceOpen);
       } else if (kind === 'screenshot') {
         await emit(EVENTS.screenshot.open);
@@ -827,7 +840,14 @@ export default function Capsule() {
     smtcControl('volume', v);
   };
 
-  const pillH = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? CHAT_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
+  const pillH = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? AIDE_H : secOpen ? AIDE_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
+
+  // 可见区（金色 pill）必须与窗口同尺寸，否则窗口多出来的部分就是「透明区域」：
+  // 窗口 920、内容仍 460 时，用户看到的是「变宽了但什么都没变」。
+  // 这里用与窗口侧（setSize 的 wf/hf）完全一致的夹取规则，保证内外一致。
+  const bodyWantW = expanded ? ((aideOpen || secOpen) && !chatOpen ? AIDE_W : EXPANDED_W) : CAPSULE_W;
+  const bodyW = Math.min(bodyWantW, Math.max(320, window.screen.availWidth - 16));
+  const bodyH = Math.min(pillH, Math.max(200, window.screen.availHeight - TOP_Y - 8));
 
   // 浮岛动作按钮分两排渲染（第一排高频，第二排其余），按钮 JSX 仅在内部出现一次
   const renderActionRow = (kinds: readonly string[]) => (
@@ -848,7 +868,7 @@ export default function Capsule() {
               fontSize: 11,
               color: '#f2f2f4',
               background:
-                (a.kind === 'ai' && chatOpen) || (a.kind === 'aide' && aideOpen) || (a.kind === 'search' && searchOpen) || (a.kind === 'transfer' && transferOpen) || (a.kind === 'resource' && resourceOpen)
+                (a.kind === 'ai' && chatOpen) || (a.kind === 'aide' && aideOpen) || (a.kind === 'sec' && secOpen) || (a.kind === 'search' && searchOpen) || (a.kind === 'transfer' && transferOpen) || (a.kind === 'resource' && resourceOpen)
                   ? 'rgba(230,195,92,0.18)'
                   : 'rgba(255,255,255,0.06)',
             }}
@@ -909,8 +929,8 @@ export default function Capsule() {
           }
         }}
         style={{
-          width: expanded ? EXPANDED_W : CAPSULE_W,
-          height: pillH,
+          width: bodyW,
+          height: bodyH,
           borderRadius: expanded ? 22 : CAPSULE_H / 2,
           border: '1px solid rgba(230,195,92,0.55)',
           boxShadow: '0 6px 24px rgba(0,0,0,0.4), 0 0 18px rgba(230,195,92,0.18)',
@@ -959,7 +979,7 @@ export default function Capsule() {
           )}
 
           {/* 展开态 · 播放器模式（多会话可堆叠 / 下拉切换） */}
-          {expanded && !chatOpen && !searchOpen && !transferOpen && !aideOpen && !resourceOpen && (
+          {expanded && !chatOpen && !searchOpen && !transferOpen && !aideOpen && !secOpen && !resourceOpen && (
             // 滚动契约：外层胶囊本体是 `overflow: hidden` 的定高窗口（EXPANDED_H = 340），
             // 本容器是它唯一的滚动出口。此前缺 overflowY，内容一旦超出就被直接裁掉、
             // 滚轮完全无效（窗口/显示器缩放变化、系统字体放大、多会话下拉增多时必现）。
@@ -1124,6 +1144,9 @@ export default function Capsule() {
 
           {/* 展开态 · 浮岛「AI 编程」多对话 —— 已拆为 CapsuleAide 子组件 */}
           {expanded && aideOpen && panelReady && <CapsuleAide />}
+
+          {/* 展开态 · 浮岛「AI 攻防」—— 与 AI 编程平级、互斥 */}
+          {expanded && secOpen && panelReady && <CapsuleSecAide />}
 
           {/* 展开态 · 文件搜索（复用 FileSearchPanel，与主窗口黄金棋盘共享） */}
           {expanded && searchOpen && panelReady && (

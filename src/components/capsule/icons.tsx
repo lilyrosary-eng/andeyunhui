@@ -153,6 +153,13 @@ export const IconCode = () => (
   </svg>
 );
 
+export const IconShield = () => (
+  <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    <path d="m9 12 2 2 4-4" />
+  </svg>
+);
+
 export const IconFavorite = () => (
   <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
     <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
@@ -195,6 +202,7 @@ export const Clock = memo(function Clock() {
 export const ACTIONS = [
   { kind: 'ai', labelKey: 'capsule.action.ai', Icon: IconBot },
   { kind: 'aide', labelKey: 'capsule.action.aide', Icon: IconCode },
+  { kind: 'sec', labelKey: 'capsule.action.sec', Icon: IconShield },
   { kind: 'search', labelKey: 'capsule.action.search', Icon: IconSearchGlass },
   { kind: 'screenshot', labelKey: 'capsule.action.screenshot', Icon: IconScreenshot },
   { kind: 'record', labelKey: 'capsule.action.record', Icon: IconRecord },
@@ -208,4 +216,5 @@ export const ACTIONS = [
 
 // 动作分两层：第一排=高频（用户指定）；第二排=其余，后续排满再加「更多」二级入口
 export const ACTION_LAYER1 = ['ai', 'screenshot', 'record', 'transfer', 'dropzone', 'clipboard'] as const;
-export const ACTION_LAYER2 = ['aide', 'search', 'favorite', 'deskpet', 'resource'] as const;
+// 第二排：AI 攻防紧跟 AI 编程（用户 2026-10-19 指定「放 ai 编程右边一格」）
+export const ACTION_LAYER2 = ['aide', 'sec', 'search', 'favorite', 'deskpet', 'resource'] as const;

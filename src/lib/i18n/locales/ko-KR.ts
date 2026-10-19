@@ -628,6 +628,8 @@ export const koKR: Record<string, string> = {
   'capsule.confirmSend': '전송 확인',
   'capsule.action.ai': 'AI',
   'capsule.action.aide': 'AI 코딩',
+
+  'capsule.action.sec': 'AI 보안',
   'capsule.action.search': '검색',
   'capsule.action.screenshot': '스크린샷',
   'capsule.action.record': '녹화',
