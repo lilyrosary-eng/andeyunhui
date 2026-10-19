@@ -770,8 +770,20 @@ function saveSessionIndex(idx: SessionIndexEntry[]): void {
   try { localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(idx)); } catch { /* 忽略 */ }
 }
 
-// 保存单个会话（写 localStorage + 更新索引 + 轮转）
+// 保存单个会话（完整内容写后端 + localStorage 只当缓存 + 更新索引 + 轮转）
 function savePersistedSession(sess: PersistedSession): void {
+  // ① 权威副本：完整内容（不截断）写 app_data/ide-sessions/<id>.json（Rust 原子写）
+  try {
+    void hostApi
+      .invoke('ide_session_save', { id: sess.id, body: JSON.stringify(sess) })
+      .catch((e: unknown) => {
+        // 这里**不能**静默：落盘失败意味着"关掉应用就丢会话"，必须留痕
+        console.error('[IDE] 会话完整落盘失败（localStorage 缓存仍在，但截断版可能丢内容）:', e);
+      });
+  } catch (e) {
+    console.error('[IDE] 会话落盘调用异常:', e);
+  }
+  // ② 秒开缓存：截断版写 localStorage（列表/切换不依赖异步读盘）
   try {
     const truncatedMsgs = truncateSessionMessages(sess.messages);
     const body: PersistedSession = { ...sess, messages: truncatedMsgs };
@@ -785,26 +797,64 @@ function savePersistedSession(sess: PersistedSession): void {
     });
     // 轮转：保留最近 SESSION_MAX_COUNT 个
     const trimmed = idx.slice(0, SESSION_MAX_COUNT);
-    // 删除被裁掉的会话 body
+    // 删除被裁掉的会话 body（缓存与后端一起删，否则后端会无限增长）
     for (const e of idx.slice(SESSION_MAX_COUNT)) {
-      try { localStorage.removeItem(SESSION_KEY_PREFIX + e.id); } catch { /* 忽略 */ }
+      try { localStorage.removeItem(SESSION_KEY_PREFIX + e.id); } catch (err) {
+        console.warn('[IDE] 清理旧会话缓存失败:', err);
+      }
+      void hostApi
+        .invoke('ide_session_delete', { id: e.id })
+        .catch((err: unknown) => console.warn('[IDE] 清理旧会话落盘失败:', e.id, err));
     }
     saveSessionIndex(trimmed);
-  } catch { /* localStorage 满 */ }
+  } catch (e) {
+    // 旧实现是 `catch { /* localStorage 满 */ }` —— 配额满时整条会话静默丢失。
+    console.error('[IDE] 会话缓存写入失败（localStorage 可能已满，完整内容仍已落盘）:', e);
+  }
 }
 
-// 加载单个会话完整数据
+// 加载单个会话（localStorage 缓存版，同步；内容可能被截断）
 function loadPersistedSession(id: string): PersistedSession | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY_PREFIX + id);
     if (!raw) return null;
     return JSON.parse(raw) as PersistedSession;
-  } catch { return null; }
+  } catch (e) {
+    console.warn('[IDE] 会话缓存解析失败（将回落后端完整副本）:', id, e);
+    return null;
+  }
 }
 
-// 删除单个会话
+// 加载单个会话（**完整版**：优先后端落盘副本，无截断）。
+// 后端读不到（老会话/首次运行）→ 回落到 localStorage 缓存，并顺手把缓存版推上后端做迁移。
+async function loadPersistedSessionFull(id: string): Promise<PersistedSession | null> {
+  try {
+    const raw = await hostApi.invoke<string | null>('ide_session_load', { id });
+    if (raw) {
+      return JSON.parse(raw) as PersistedSession;
+    }
+    const cached = loadPersistedSession(id);
+    if (cached) {
+      void hostApi
+        .invoke('ide_session_save', { id: cached.id, body: JSON.stringify(cached) })
+        .catch((e: unknown) => console.warn('[IDE] 迁移旧会话到后端失败:', id, e));
+    }
+    return cached;
+  } catch (e) {
+    // 命令未注册/权限未放行/IO 失败：不能让用户打不开会话，回落缓存并显式留痕
+    console.error('[IDE] 读取后端会话失败，回落到 localStorage 缓存:', id, e);
+    return loadPersistedSession(id);
+  }
+}
+
+// 删除单个会话（缓存 + 后端副本）
 function deletePersistedSession(id: string): void {
-  try { localStorage.removeItem(SESSION_KEY_PREFIX + id); } catch { /* 忽略 */ }
+  try { localStorage.removeItem(SESSION_KEY_PREFIX + id); } catch (e) {
+    console.warn('[IDE] 删除会话缓存失败:', id, e);
+  }
+  void hostApi
+    .invoke('ide_session_delete', { id })
+    .catch((e: unknown) => console.error('[IDE] 删除会话落盘副本失败:', id, e));
   saveSessionIndex(loadSessionIndex().filter((e) => e.id !== id));
 }
 
@@ -2337,9 +2387,13 @@ function IdeAgent({
     refreshSessions();
   }, [projectRoot, refreshSessions]);
   // 恢复会话：载入 historyRef + conv + pendingEdits + stats
-  const restoreSession = useCallback((id: string) => {
-    const sess = loadPersistedSession(id);
-    if (!sess) return;
+  const restoreSession = useCallback(async (id: string) => {
+    // 优先读后端完整副本（localStorage 那份是截断缓存，长会话会缺中间内容）
+    const sess = await loadPersistedSessionFull(id);
+    if (!sess) {
+      console.error('[IDE] 恢复会话失败：缓存与后端副本都不存在或无权限', id);
+      return;
+    }
     historyRef.current = sess.messages.slice();
     convRef.current = sess.conv.slice();
     pendingEditsRef.current = sess.edits.slice();
@@ -2368,9 +2422,12 @@ function IdeAgent({
     setConv((prev) => [...prev, { id: 'r_' + Date.now().toString(36), role: 'tool', content: `📚 已恢复会话（${new Date(sess.ts).toLocaleString()}，${sess.messages.length} 条消息，${sess.edits.length} 条改动）` }]);
   }, []);
   // 分叉会话：载入父会话 history，但生成新 sessionId + parentSessionId
-  const forkSession = useCallback((id: string) => {
-    const sess = loadPersistedSession(id);
-    if (!sess) return;
+  const forkSession = useCallback(async (id: string) => {
+    const sess = await loadPersistedSessionFull(id);
+    if (!sess) {
+      console.error('[IDE] 分叉会话失败：缓存与后端副本都不存在或无权限', id);
+      return;
+    }
     historyRef.current = sess.messages.slice();
     convRef.current = sess.conv.slice();
     pendingEditsRef.current = sess.edits.slice();
@@ -2869,7 +2926,7 @@ const runAgent = useCallback(async (overrideText?: string, seed?: ChatMessage[])
     return () => { cancelled = true; unsub?.(); };
   }, [busy, runAgent, activeProfileId, onProfileChange, configuredProfiles]);
 
-  // 浮岛「清空对话」：清除 IDE 代理历史会话（localStorage）并存盘重置
+  // 浮岛「清空对话」：清除 IDE 代理历史会话（localStorage 缓存 + 后端完整副本）并存盘重置
   useEffect(() => {
     let unsub: (() => void) | undefined;
     hostApi.listen<{}>('capsule-ide-clear-conversations', () => {
@@ -2880,7 +2937,22 @@ const runAgent = useCallback(async (overrideText?: string, seed?: ChatMessage[])
           if (k && (k === SESSION_INDEX_KEY || k.startsWith('ide_session_'))) keys.push(k);
         }
         keys.forEach((k) => localStorage.removeItem(k));
-      } catch { /* 忽略 */ }
+      } catch (e) {
+        console.error('[IDE] 清空会话缓存失败:', e);
+      }
+      // 后端副本必须一起清：只清缓存的话，下次"恢复会话"会把完整副本又读回来
+      void hostApi
+        .invoke<string[]>('ide_session_list')
+        .then((ids) =>
+          Promise.all(
+            (ids || []).map((id) =>
+              hostApi
+                .invoke('ide_session_delete', { id })
+                .catch((e: unknown) => console.error('[IDE] 清空后端会话失败:', id, e)),
+            ),
+          ),
+        )
+        .catch((e: unknown) => console.error('[IDE] 枚举后端会话失败（缓存已清，磁盘副本可能残留）:', e));
       setSessions([]);
       setCurrentSessionId(null);
       if (typeof newSession === 'function') newSession();

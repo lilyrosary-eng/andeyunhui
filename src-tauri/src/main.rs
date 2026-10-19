@@ -1694,6 +1694,11 @@ fn main() {
             get_blacklist_paths,
             plugin_storage_get,
             plugin_storage_set,
+            // IDE Agent 会话：完整内容落盘（localStorage 只当缓存），见 commands/storage_misc.rs
+            ide_session_save,
+            ide_session_load,
+            ide_session_list,
+            ide_session_delete,
             tray_summon_main,
             tray_quit,
             capsule_ip_location,

@@ -215,3 +215,102 @@ pub fn plugin_storage_set(
     std::fs::rename(&tmp, &path).map_err(|e| format!("写入插件存储失败: {e}"))?;
     Ok(())
 }
+
+// ================= IDE 会话持久化（ide_session_*，2026-10-19） =================
+//
+// ## 为什么要搬出 localStorage
+// IDE 的 Agent 会话此前存在 `localStorage['ide_session_<id>']`，为此定了三条硬限制：
+//   - 单条 content 超 8KB 截断（长回答 / 代码 diff 直接被砍）
+//   - 单会话超过 256KB 只保留首尾各 20 条（中间对话永久丢失）
+//   - 最多 20 个会话，超出按时间删最旧的 body
+// 且写入失败是 `catch { /* localStorage 满 */ }` —— 静默丢，用户看不到。
+// 现在把**完整会话**落到 app_data/ide-sessions/<id>.json（原子写），localStorage 只留
+// 截断版当"秒开缓存"：列表与轮转逻辑不变，打开会话时优先读后端拿到完整内容。
+//
+// 安全：id 只允许 [A-Za-z0-9_-]，杜绝 `../` 之类路径穿越；单文件上限 64MB。
+
+/// 会话文件目录（不存在则创建）。
+fn ide_session_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("ide-sessions");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 IDE 会话目录失败: {e}"))?;
+    Ok(dir)
+}
+
+/// 校验会话 id 并返回文件名。非法 id 直接拒绝（不替换成下划线——那会让两个不同 id 撞同一文件）。
+fn ide_session_path(app: &tauri::AppHandle, id: &str) -> Result<std::path::PathBuf, String> {
+    if id.is_empty() || id.len() > 128 {
+        return Err(format!("会话 id 非法（长度 {}）", id.len()));
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("会话 id 含非法字符（只允许 [A-Za-z0-9_-]）: {id}"));
+    }
+    Ok(ide_session_dir(app)?.join(format!("{id}.json")))
+}
+
+/// 单文件上限：64MB。超出说明调用方把整份会话反复拼接了，宁可直接报错也不要写爆磁盘。
+const IDE_SESSION_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// 保存一个会话的完整 JSON（原子写：临时文件 + rename）。
+#[tauri::command]
+pub fn ide_session_save(app: tauri::AppHandle, id: String, body: String) -> Result<(), String> {
+    if body.len() > IDE_SESSION_MAX_BYTES {
+        let msg = format!(
+            "IDE 会话过大：{} MB 超过 {} MB 上限（id={}）",
+            body.len() / (1024 * 1024),
+            IDE_SESSION_MAX_BYTES / (1024 * 1024),
+            id
+        );
+        log::error!("[ide-session] {msg}");
+        return Err(msg);
+    }
+    let path = ide_session_path(&app, &id)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body.as_bytes()).map_err(|e| format!("写入会话临时文件失败: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("重命名会话文件失败: {e}"))?;
+    Ok(())
+}
+
+/// 读取会话完整 JSON；不存在返回 None（前端据此回落到 localStorage 缓存）。
+#[tauri::command]
+pub fn ide_session_load(app: tauri::AppHandle, id: String) -> Result<Option<String>, String> {
+    let path = ide_session_path(&app, &id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    std::fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|e| format!("读取会话文件失败: {e}"))
+}
+
+/// 列出磁盘上所有会话 id（用于迁移与"清空全部"）。
+#[tauri::command]
+pub fn ide_session_list(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let dir = ide_session_dir(&app)?;
+    let mut ids = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("枚举会话目录失败: {e}"))?;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if let Some(id) = name.strip_suffix(".json") {
+            ids.push(id.to_string());
+        }
+    }
+    Ok(ids)
+}
+
+/// 删除一个会话文件（不存在视为成功）。
+#[tauri::command]
+pub fn ide_session_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let path = ide_session_path(&app, &id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            log::warn!("[ide-session] 删除失败 id={} path={:?}: {}", id, path, e);
+            Err(format!("删除会话文件失败: {e}"))
+        }
+    }
+}

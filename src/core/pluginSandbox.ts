@@ -185,6 +185,13 @@ const ALLOWED_COMMANDS = new Set([
   // IDE 子插件：读取文本文件 / 目录列表
   'read_text_file',
   'list_directory',
+  // IDE 子插件：Agent 会话完整内容落盘（localStorage 只当秒开缓存）。
+  // 原先会话全塞 localStorage，被迫做 8KB/条截断 + 256KB 首尾各 20 条 + 最多 20 个会话，
+  // 且写失败 `catch { /* 满 */ }` 静默丢数据。改为写 app_data/ide-sessions/<id>.json（原子写）。
+  'ide_session_save',
+  'ide_session_load',
+  'ide_session_list',
+  'ide_session_delete',
   'ensure_directory',
   // IDE 子插件：保存 / 另存为（Rust 端已实现并注册，此前漏加白名单导致被沙箱拦截）
   'write_text_file',

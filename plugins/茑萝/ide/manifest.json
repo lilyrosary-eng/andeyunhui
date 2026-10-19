@@ -40,7 +40,11 @@
       "read_text_file",
       "run_shell_command",
       "search_content",
-      "write_text_file"
+      "write_text_file",
+      "ide_session_save",
+      "ide_session_load",
+      "ide_session_list",
+      "ide_session_delete"
     ]
   },
   "parent": "niaoluo",
