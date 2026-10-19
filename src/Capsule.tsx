@@ -310,8 +310,19 @@ export default function Capsule() {
   const chatOpen = useCapsuleStore((s) => s.chatOpen);
   const aideOpen = useCapsuleStore((s) => s.aideOpen);
   const secOpen = useCapsuleStore((s) => s.secOpen);
-  // 只有真的在流式输出时才值得 60fps
-  const streaming = useCapsuleStore((s) => Object.keys(s.activeStreams).length > 0);
+  // 只有真的在流式输出时才值得 60fps。
+  // 用 for...in 而不是 Object.keys().length：后者每次 store 更新都新建一个数组
+  // （zustand 对**每一个** selector 在每次 set 后都会重新求值），纯属白给 GC 压力。
+  const streaming = useCapsuleStore((s) => {
+    for (const k in s.activeStreams) if (s.activeStreams[k]) return true;
+    return false;
+  });
+
+  // —— 重绘频率的两个附加信号（见下方 set_overlay_repaint_rate effect）——
+  // transiting：刚刚发生尺寸/模式切换，260ms 的 width/height 过渡正在跑
+  const [transiting, setTransiting] = useState(false);
+  // pointerIn：指针在浮岛内（滚动/悬停/输入时最需要跟手）
+  const [pointerIn, setPointerIn] = useState(false);
   const searchOpen = useCapsuleStore((s) => s.searchOpen);
   const transferOpen = useCapsuleStore((s) => s.transferOpen);
   const resourceOpen = useCapsuleStore((s) => s.resourceOpen);
@@ -809,18 +820,39 @@ export default function Capsule() {
     // 收起态（!expanded）已静态化 → 暂停轮询（0）：屏幕停在最后一帧，内容变化由
     // MutationObserver 调 present_overlay_now 按需上屏，从而不与外部媒体抢 DWM 重定向呈现。
     //
-    // 展开态分两档（2026-10-19 调整）：
-    //   · 有动效（媒体在播 / 面板正在流式输出）→ 16ms（60fps）
-    //   · 纯静态（看文档、读回复、打字）→ 33ms（30fps）
-    // 为什么不再一律 60fps：每帧要做 SetIsVisible + NotifyParentWindowPositionChanged，
-    // 让 DWM 重合成整块透明窗。AI 编程/攻防面板放大到 920×920 后面积是原来的 4 倍，
-    // 60fps 常驻会持续挤占合成器时间 —— 这是"浮岛变卡"的直接来源。
-    // 30fps 对文字/光标完全够用；只有动画与流式增量需要 60。
-    const animating = expanded;
-    const ms = !animating ? 0 : ((isPlaying || streaming) ? 16 : 33);
-    if (__DEV) console.log('[CAPSULE-PROBE] request_repaint_rate', ms, { expanded, isPlaying, streaming });
-    invoke('set_overlay_repaint_rate', { intervalMs: ms }).catch(() => {});
-  }, [expanded, isPlaying, streaming]);
+    // 展开态按需分两档（2026-10-19 起，2026-10-20 补两个信号）：
+    //   · 16ms（60fps）—— 有东西真的在动：媒体在播 / 面板流式输出 / 正在做尺寸过渡 / 指针在岛内
+    //   · 33ms（30fps）—— 纯静态阅读
+    // 为什么不是一律 60fps：每帧要做 SetIsVisible + NotifyParentWindowPositionChanged，
+    // 让 DWM 重合成整块透明窗；面板放大到 920×920 后单帧面积是原来 4 倍，常驻 60fps
+    // 会持续挤占合成器时间。
+    //
+    // 为什么必须补这两个信号（用户反馈"不够丝滑"的真正原因）：
+    //   · 金色 pill 的 width/height 过渡是 260ms，只有重绘到 60fps 才跑得顺；
+    //     旧规则在"没在播歌、没在流式"时给 33ms，等于把过渡强行压成 30fps 的台阶感。
+    //   · 用户在面板里滚动/拖动/打字时，输入事件的反馈同样受这条重绘节奏约束，
+    //     30fps 下滚动会明显发涩 —— 指针在岛内就给 60fps，移开立刻回落，成本只在交互期间。
+    // 过渡期（transiting，340ms）**即使已经收起也给 60fps**：收起时 expanded 立刻变 false，
+    // 但 pill 的 260ms 缩回过渡才刚开始 —— 按旧规则这时会回到 0（停止 presents），
+    // 表现为收起过程卡住再跳一下。只在这 340ms 内牺牲一点节流收益，换取过渡顺滑。
+    const ms = transiting ? 16 : !expanded ? 0 : (isPlaying || streaming || pointerIn ? 16 : 33);
+    if (__DEV) {
+      console.log('[CAPSULE-PROBE] request_repaint_rate', ms, { expanded, isPlaying, streaming, transiting, pointerIn });
+    }
+    invoke('set_overlay_repaint_rate', { intervalMs: ms }).catch((e: unknown) => {
+      console.warn('[Capsule] 设置重绘频率失败（浮岛可能被降频节流）:', ms, e);
+    });
+  }, [expanded, isPlaying, streaming, transiting, pointerIn]);
+
+  // 尺寸/模式切换后的 340ms 内提到 60fps：pill 的 width/height 过渡是 260ms
+  // （见下方 borderRadius/transition），留 80ms 余量给最后一帧收口。
+  // 依赖里必须包含所有会改变体积的开关，否则「对话→AI 编程」这种同展开态内的
+  // 尺寸变化不会触发脉冲。
+  useEffect(() => {
+    setTransiting(true);
+    const timer = window.setTimeout(() => setTransiting(false), 340);
+    return () => window.clearTimeout(timer);
+  }, [expanded, chatOpen, aideOpen, secOpen, searchOpen, transferOpen, resourceOpen]);
 
   // 收起态（暂停轮询）下按需上屏：监听内容实际变化（正在播放的歌名、时钟跳动等）才 present
   // 一帧，不再每 10fps 轮询 Notify，从而不与外部媒体抢 DWM 重定向呈现（根除「仅外部媒体下卡顿」）。
@@ -935,6 +967,11 @@ export default function Capsule() {
             else { hoverLockRef.current = false; setExpanded(true); }
           }
         }}
+        // 指针在岛内 = 正在交互（滚动/拖动/点按/输入），这段时间给 60fps；
+        // 移出即回落 30fps。onPointerEnter/Leave 在 React 里按子树语义触发，
+        // 指针在内部子元素间移动不会反复触发（不会抖动切档）。
+        onPointerEnter={() => setPointerIn(true)}
+        onPointerLeave={() => setPointerIn(false)}
         style={{
           width: bodyW,
           height: bodyH,

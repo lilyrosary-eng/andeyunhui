@@ -70,7 +70,18 @@ export function renderMarkdown(content: string): string {
   }
   // 内容级缓存：长对话/笔记在流式增量重渲染时，历史消息的 marked 解析结果直接命中，
   // 避免每次 setState 都把全部历史消息重新 parse（同步 marked 是长对话卡顿的主要来源）。
-  if (mdCache.size >= MD_CACHE_MAX) mdCache.clear();
+  //
+  // 淘汰策略（2026-10-20 改）：满了按插入顺序淘汰最旧的 10%，而不是 clear() 整表。
+  // 原因：流式输出时每个增量都是**新字符串**，缓存必然不命中且会快速把表撑满；
+  // 旧实现在第 2000 条时整表清空，连历史消息（那些真正还能命中的）一起丢掉，
+  // 下一次重渲染又要全量重新解析 —— 表现为「长对话越聊越卡」，且卡顿是周期性的。
+  if (mdCache.size >= MD_CACHE_MAX) {
+    let drop = Math.ceil(MD_CACHE_MAX * 0.1);
+    for (const key of mdCache.keys()) {
+      mdCache.delete(key);
+      if (--drop <= 0) break;
+    }
+  }
   mdCache.set(content, result);
   return result;
 }

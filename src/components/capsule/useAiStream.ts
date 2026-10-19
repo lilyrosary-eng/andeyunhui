@@ -43,6 +43,49 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
   useEffect(() => {
     let cancelled = false;
     const un: Array<() => void> = [];
+
+    // ===== 增量合并（2026-10-20）=====
+    // 后端每个 token 发一个 delta 事件，原实现是「一条 delta → 一次 setState → 整棵面板重渲染」。
+    // 面板里每条助手消息都要过一次 marked 解析（内容越长越贵，且流式期间**永远缓存不命中**，
+    // 因为每次内容都是新字符串）—— 于是单条回复的总解析量是 O(n²)：
+    // 20KB 的回复按 1000 个增量算，相当于把 10MB 文本重新解析了一遍，外加 1000 次 DOM 重建。
+    // 现在把增量先收进缓冲，每 50ms 合并提交一次：
+    //   · React 渲染次数从「每 token 一次」降到 ≤20 次/秒
+    //   · markdown 解析与 innerHTML 重建同比减少（对快模型是 5~10 倍）
+    //   · 50ms 仍在单帧可感知范围外，观感与逐字输出一致
+    // append 模式累加，replace 模式取最后一段（agent 回传的是整段已清洗文本）。
+    const DELTA_BATCH_MS = 50;
+    let buf = '';
+    let bufRid: string | null = null;
+    let flushTimer: number | null = null;
+
+    const flushDelta = () => {
+      if (flushTimer !== null) {
+        window.clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (!buf || !bufRid) return;
+      // 请求已经换人（用户点了新的发送 / 取消后重发）：这段残留属于上一条，直接丢弃，
+      // 否则会串到新的助手消息开头。
+      if (bufRid !== reqRef.current) {
+        buf = '';
+        bufRid = null;
+        return;
+      }
+      const pending = buf;
+      buf = '';
+      bufRid = null;
+      const id = asstRef.current;
+      const cid = streamConvIdRef.current;
+      if (!id) {
+        console.warn('[ai-stream] 增量缓冲有内容但助手消息 id 已清空，丢弃', pending.length, '字');
+        return;
+      }
+      updateMessages(cid, (prev) => prev.map((m) => {
+        if (m.id !== id) return m;
+        return deltaMode === 'append' ? { ...m, content: m.content + pending } : { ...m, content: pending };
+      }));
+    };
     // 防孤儿监听器：每个 listen 注册成功后立即入列（cleanup 可即时清理），
     // 且各 handler 首行做 cancelled 守卫——异步注册期间到达的事件被丢弃。
     // 此前「全部注册完才统一入列」+ effect 渲染期重建，会让旧监听器在
@@ -52,20 +95,22 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
       const u1 = await listen<{ requestId: string; delta?: string; text?: string }>(`${prefix}-delta`, (e) => {
         if (cancelled) return;
         if (e.payload.requestId !== reqRef.current) return;
-        const id = asstRef.current;
-        const cid = streamConvIdRef.current;
-        if (!id) return;
+        // 只做「入缓冲 + 起定时器」，真正的 setState 在 flushDelta 里，见上方说明。
+        // 这里不再直接读 asstRef/streamConvIdRef —— 它们在 50ms 后可能已经变了，
+        // 交给 flushDelta 在提交那一刻再取才是准确的值。
         const chunk = deltaMode === 'append' ? (e.payload.delta ?? '') : (e.payload.text ?? '');
-        updateMessages(cid, (prev) => prev.map((m) => {
-          if (m.id !== id) return m;
-          return deltaMode === 'append' ? { ...m, content: m.content + chunk } : { ...m, content: chunk };
-        }));
+        if (!chunk) return;
+        buf = deltaMode === 'append' ? buf + chunk : chunk;
+        bufRid = e.payload.requestId;
+        if (flushTimer === null) flushTimer = window.setTimeout(flushDelta, DELTA_BATCH_MS);
       });
       if (cancelled) { u1(); return; }
       un.push(u1);
 
       // finish：done / error 共用，清理请求态并定稿助手消息
       const finish = (err?: string) => {
+        // 先提交缓冲里还没上屏的最后一段（通常只有几个字，丢了会显得回复被截尾）
+        flushDelta();
         setBusy(false);
         const aid = asstRef.current;
         const cid = streamConvIdRef.current;
@@ -126,6 +171,15 @@ export function useAiStream(config: AiStreamConfig, refs: AiStreamRefs) {
         un.push(u5);
       }
     })();
-    return () => { cancelled = true; un.forEach((f) => f()); };
+    return () => {
+      cancelled = true;
+      if (flushTimer !== null) {
+        window.clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      // 卸载前把缓冲刷掉：切面板/关浮岛时最后一段不该丢
+      flushDelta();
+      un.forEach((f) => f());
+    };
   }, [prefix, deltaMode, hasReasoning, hasAgentStep, updateMessages, setBusy]);
 }
