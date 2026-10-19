@@ -46,6 +46,14 @@ export interface ChatMsg {
   attachments?: AttachmentMeta[];
   reasoning?: string; // 思考模式下的思维链（reasoning_content），可折叠遮罩展示
   error?: boolean;
+  /**
+   * 工具/命令产出的本地记录（非模型发言）。
+   *
+   * 用途：浮岛「攻防」面板的快捷指令（启动/状态/扫描…）是**直接 invoke** 的，
+   * 结果要留在对话里供用户回看，但它既不是 user 也不是 assistant 的话。
+   * 渲染成灰底等宽样式，且**不进模型历史**（发请求前按此标记过滤）。
+   */
+  toolNote?: boolean;
   /** 群聊模式：哪条消息由哪个伴侣说的（companion.id）。单聊模式隐含为当前 active companion。 */
   speakerId?: string;
   /**

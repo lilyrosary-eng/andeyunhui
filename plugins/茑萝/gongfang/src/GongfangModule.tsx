@@ -16,7 +16,6 @@ const tauriInvoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): 
 import { CrawlerPanel, ReversePanel, PentestPanel, AutomationPanel, GatewayPanel } from './frameworks';
 import { useAuditLog, AuditLogDrawer, type AuditInput } from './audit';
 import { RiskConfirm, isDisclaimerAccepted, revokeDisclaimer } from './RiskConfirm';
-import { GongfangAiSidebar } from './GongfangAiSidebar';
 import { EventStream, MetricsChart, AiReasoningPanel, TargetWorkspace, AiReasoningLab } from './infoPanels';
 import { ExportButton } from './professionalExtras';
 import { useHotkeys, SituationalBar, useKernelRunning } from './ui';
@@ -370,6 +369,5 @@ function GongfangModule() {
 
 // ============ 侧边栏（AI 指挥官控制枢纽，复用宿主 ModuleSidebarShell 渲染） ============
 // 侧边栏组件无 props（宿主以 <PluginContent /> 渲染），通过全局事件与主模块通信
-const GongfangSidebar = GongfangAiSidebar;
 
-export { GongfangModule, GongfangSidebar };
+export { GongfangModule };

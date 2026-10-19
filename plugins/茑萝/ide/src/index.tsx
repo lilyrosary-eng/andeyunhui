@@ -26,7 +26,6 @@ const hostApi = window.__HOST_API__ as unknown as {
   createFrameBuffer: <T>(onFlush: (items: T[]) => void) => any;
   createFloatingWindow: (label: string, url: string, options: Record<string, unknown>) => Promise<void>;
 };
-const registry = (window as any).__PLUGIN_REGISTRY__;
 const { useState, useRef, useCallback, useEffect, useMemo } = React;
 
 // Markdown 渲染：AI 与用户消息中的 # 标题、**加粗**、*斜体*、`代码`、列表、引用、链接等字符
@@ -1134,11 +1133,9 @@ function IdeEditor() {
   const [recentOpen, setRecentOpen] = useState(false);
   const [cursor, setCursor] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
 
-  // 多级嵌套：AI 编程（ai）是 IDE 的子插件，由 IDE 内部以「右侧对话抽屉」形式呈现，
-  // 与编辑器并排（Cursor / Codex / Claude Code 风格），而非整面板切换。
-  const [aiOpen, setAiOpen] = useState(true);
-  const [aiWidth, setAiWidth] = useState(420);
-  const [hasAi, setHasAi] = useState(false);
+  // 2026-10-19：IDE 主窗口的 AI 面板（右侧常驻列 + 浮出窗）已**移除**，
+  // AI 统一走黄金棋盘浮岛的「编程」标签页（浮岛已是独立执行器，不依赖本模块加载）。
+  // 保留的 aiProfiles / aiActiveId 只服务编辑器内的行内补全（tabUseAi → aiCompleteText）。
 
   // 当前打开的项目根（供 AI 编程关联，#12）
   const [projRoot, setProjRoot] = useState<string | null>(ideShared.projectRoot);
@@ -1149,7 +1146,8 @@ function IdeEditor() {
 
   // 自主编辑（agent）模式的待审阅改动列表（由 IdeAgent 产出，IDE 主组件渲染审阅面板）
   const [agentReview, setAgentReview] = useState<AgentEdit[] | null>(null);
-  const [agentOriginals, setAgentOriginals] = useState<Record<string, string>>({});
+  // 只读：AI 面板移除后没有写入方（原 setAgentOriginals 只在 onAgentChanges 里调用）
+  const [agentOriginals] = useState<Record<string, string>>({});
   const [agentVerdict, setAgentVerdict] = useState<string | null>(null);
 
   // 检测「用户部署的 AI」：读取全局模型档案，存在已填 Key 的档案即视为已部署
@@ -1186,23 +1184,6 @@ function IdeEditor() {
       .then((api) => { if (alive) { setCm(api); setEngine('cm'); } })
       .catch((e: Error) => { if (alive) { setErrorMsg(e.message); setEngine('error'); } });
     return () => { alive = false; };
-  }, []);
-
-  // 同步「AI 编程」子插件（ai）是否就绪：插件并行加载存在竞态，
-  // 故初次检查 + 监听 plugin-registered/unregistered 动态更新。
-  useEffect(() => {
-    const sync = () => {
-      const kids = registry && registry.getChildren ? registry.getChildren('ide') : [];
-      setHasAi(kids.some((c: any) => c.id === 'ai'));
-    };
-    sync();
-    const handler = () => sync();
-    window.addEventListener('plugin-registered', handler);
-    window.addEventListener('plugin-unregistered', handler);
-    return () => {
-      window.removeEventListener('plugin-registered', handler);
-      window.removeEventListener('plugin-unregistered', handler);
-    };
   }, []);
 
   // 监听「打开项目」事件，同步当前项目根（#12）
@@ -1308,26 +1289,10 @@ function IdeEditor() {
     }
   }, [applyTabByPath]);
 
-  // 收到 agent 产出的编辑列表：读取各文件原始内容（用于定位与回滚）
-  const onAgentChanges = useCallback(async (edits: AgentEdit[], verdict?: string | null) => {
-    const orig: Record<string, string> = {};
-    for (const e of edits) {
-      if (e.isNew) { orig[e.path] = ''; continue; }
-      try { orig[e.path] = (await hostApi.invoke<string>('read_text_file', { path: e.path })).replace(/\r\n/g, '\n'); }
-      catch { orig[e.path] = ''; }
-    }
-    agentOriginalsRef.current = orig;
-    setAgentOriginals(orig);
-    // 改动直接保留并即时落盘（用户要求：agent 改动应自动保存，而非弹窗待审阅后再手动「保留」）。
-    // 被策略/信任/保护拦截（status: blocked）或定位失败（failed）的保留原状态，不误写。
-    const applied = edits.map((e) =>
-      e.status === 'blocked' || e.status === 'failed' ? e : { ...e, status: 'kept' as const },
-    );
-    agentReviewRef.current = applied;
-    setAgentReview(applied);
-    setAgentVerdict(verdict || null);
-    await commitEdits(applied);
-  }, [commitEdits]);
+  // 2026-10-19：`onAgentChanges`（接收 IdeAgent 产出的编辑列表）已删除 ——
+  // AI 面板从 IDE 主窗口移除后它没有调用方（IdeAgent 不再挂载）。
+  // 下方的 agentKeep / agentUndo / commitEdits 与改动审阅面板先保留（回退储备），
+  // 但它们同样只会收到空列表；确认无需回退后一并删除。
 
   // 保留=应用该处改动（删除红区）；撤销=放弃该处改动（保留原红区）。每次切换都即时重算写盘，支持来回切换
   const agentKeep = useCallback((e: AgentEdit) => {
@@ -1513,27 +1478,6 @@ function IdeEditor() {
     setSavedFlash(true);
   }, []);
 
-  // AI 编程右侧常驻列拖拽调宽（所有 hook 之后、任何提前返回之前，保持 hooks 顺序稳定）
-  const startAiResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = aiWidth;
-    const onMove = (ev: MouseEvent) => {
-      const next = Math.min(760, Math.max(320, startW + (startX - ev.clientX)));
-      setAiWidth(next);
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }, [aiWidth]);
-
   // 底部面板拖拽调高
   const startBottomResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1596,11 +1540,6 @@ function IdeEditor() {
   }, [cm, save, saveAs]);
 
 
-
-  const aiChild = registry && registry.getChildren
-    ? registry.getChildren('ide').find((c: any) => c.id === 'ai')
-    : null;
-  const AiComp = aiChild?.component as React.ComponentType<any> | undefined;
 
   const effectiveLang = activeTab ? (activeTab.lang === 'auto' ? (activeTab.path ? langFromPath(activeTab.path) : 'plaintext') : activeTab.lang) : 'plaintext';
 
@@ -1695,7 +1634,6 @@ function IdeEditor() {
     { id: 'theme-light', label: '主题：浅色', run: () => setTheme('light') },
     { id: 'theme-dark', label: '主题：深色', run: () => setTheme('dark') },
     { id: 'wrap', label: '切换自动换行', run: () => setWrap((w) => !w) },
-    { id: 'ai', label: '切换 AI 编程面板', run: () => setAiOpen((o) => !o) },
     { id: 'panel-problems', label: '面板：问题', run: () => setBottomView('problems') },
     { id: 'panel-output', label: '面板：输出', run: () => setBottomView('output') },
     { id: 'panel-debug', label: '面板：调试控制台', run: () => setBottomView('debug') },
@@ -1738,9 +1676,6 @@ function IdeEditor() {
       <button onClick={() => setTheme((t) => (t === 'auto' ? 'dark' : t === 'dark' ? 'light' : 'auto'))} className="btn-press px-2.5 py-1 rounded-lg bg-neutral-200/70 dark:bg-stone-700 text-neutral-700 dark:text-stone-200 hover:bg-neutral-300 dark:hover:bg-stone-600 transition-colors text-xs">
         {theme === 'auto' ? '跟随' : theme === 'dark' ? '深色' : '浅色'}
       </button>
-      {hasAi && (
-        <button onClick={() => setAiOpen((o) => !o)} className={`btn-press px-2.5 py-1 rounded-lg text-white text-xs font-medium ${aiOpen ? 'element-primary' : 'bg-neutral-700 dark:bg-stone-600 hover:bg-neutral-600 dark:hover:bg-stone-500'} transition-colors`} title="AI 编程（右侧常驻对话列，点击收起/展开）">{ideSettings.mode === 'agent' ? 'AI 代理' : 'AI 编程'}</button>
-      )}
       <span className="flex-1" />
       <span className={`text-xs ${savedFlash ? 'text-emerald-500' : 'text-amber-500'}`}>{status}</span>
     </div>
@@ -1835,41 +1770,8 @@ function IdeEditor() {
             <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500 text-sm">打开文件或新建文档开始编辑</div>
           )}
         </div>
-        {/* agent 模式：保持侧边 docked 列（需贴着编辑器上下文） */}
-        {hasAi && aiOpen && ideSettings.mode === 'agent' && (
-          <div
-            className="relative shrink-0 h-full flex flex-col border-l border-neutral-200 dark:border-stone-700 bg-white dark:bg-stone-900"
-            style={{ width: aiWidth, minWidth: 320 }}
-          >
-            {/* 拖拽调宽手柄 */}
-            <div
-              onMouseDown={startAiResize}
-              title="拖动调整宽度"
-              className="absolute left-0 top-0 h-full w-1.5 -ml-0.5 cursor-col-resize z-20 hover:bg-[var(--element-bg)]/40 transition-colors"
-            />
-            <div className="flex-1 min-h-0 overflow-hidden">
-              {AiComp ? (
-                <IdeAgent projectRoot={projRoot} activeProfileId={aiActiveId} onProfileChange={setAiActiveId} onChanges={onAgentChanges} />
-              ) : (
-                <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500 text-sm">AI 编程模块未加载</div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* chat 模式（normal）：非覆盖式弹窗，从 IDE 窗口右下角浮出，不遮挡编辑器 */}
-        {hasAi && aiOpen && ideSettings.mode !== 'agent' && (
-          <div
-            className="absolute bottom-4 right-4 z-30 flex flex-col bg-white dark:bg-stone-900 border border-neutral-200 dark:border-stone-700 rounded-2xl shadow-2xl overflow-hidden"
-            style={{ width: 420, height: 460, maxHeight: 'calc(100% - 32px)' }}
-          >
-            {AiComp ? (
-              <AiComp docked onClose={() => setAiOpen(false)} projectRoot={projRoot} />
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500 text-sm">AI 编程模块未加载</div>
-            )}
-          </div>
-        )}
+        {/* 2026-10-19：AI 面板已移除 —— 编程对话统一走黄金棋盘浮岛的「编程」标签页。
+            编辑器仍保留行内补全（tabUseAi），那部分不依赖这块 UI。 */}
       </div>
       {/* 底部面板：问题 / 输出 / 调试 / 终端（点击状态栏按钮展开，可拖拽调高、可关闭，#2） */}
       {bottomView && (
@@ -2307,7 +2209,10 @@ type AgentMsg = { id: string; role: 'user' | 'assistant' | 'tool'; content: stri
 // 浮岛转发来的对话消息（与浮岛 aideMessages 对齐：仅 user/assistant，无 system/tool）
 type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
-function IdeAgent({
+// 2026-10-19：IDE 主窗口的 AI 面板已移除，本组件**不再被挂载**。
+// 保留并导出（导出后 TS 不会报 noUnusedLocals），作为回退储备；确认无需回退后整段删除
+// （约 1150 行，含会话保存/恢复/分叉与改动审阅）。
+export function IdeAgent({
   projectRoot, activeProfileId, onProfileChange, onChanges,
 }: {
   projectRoot?: string | null;

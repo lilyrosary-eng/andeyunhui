@@ -16,6 +16,7 @@ import { useCapsuleStore } from '@/stores/capsuleStore';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import { KeepButton } from '@/components/KeepButton';
 import { useAiStream } from './useAiStream';
+import CapsuleSecAide from './CapsuleSecAide';
 import { btnBase, GOLD } from './constants';
 import { IconClose, IconSend, IconStop } from './icons';
 import type { Conversation, ChatMsg } from './types';
@@ -163,6 +164,20 @@ function CapsuleAide() {
   const aideAsstRef = useRef<string | null>(null);
   const aideScrollRef = useRef<HTMLDivElement | null>(null);
   const [aideMode, setAideMode] = useState<'chat' | 'agent'>('chat'); // AI 编程：对话 / 代理（agent）
+
+  // 目标模块：编程（原 IDE 对话）/ 攻防（原攻防侧栏，2026-10-19 从主窗口迁入）。
+  // 两者共用浮岛这一个入口，但**各自独立的历史与提示词**，不混在一起。
+  const TARGET_KEY = 'andeyunhui.capsule.aide.target';
+  const [aideTarget, setAideTarget] = useState<'code' | 'sec'>(() => {
+    try {
+      return localStorage.getItem(TARGET_KEY) === 'sec' ? 'sec' : 'code';
+    } catch {
+      return 'code';
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(TARGET_KEY, aideTarget); } catch { /* 忽略 */ }
+  }, [aideTarget]);
 
   // 项目根：agent 模式的 <file>/<grep>/<glob> 都要它，否则 agent 只会说"没拿到项目路径"。
   // 默认值来源优先级：浮岛自己上次选的 > IDE 最后打开的项目（IDE 会写 localStorage）。
@@ -386,10 +401,42 @@ function CapsuleAide() {
     void invoke(aideMode === 'agent' ? 'ai_agent_cancel' : 'ai_chat_cancel', { requestId: rid }).catch(() => {});
   }, [aideMode, updateAideStreamMessages]);
 
+  // 目标切换：两枚胶囊按钮，放在两条分支共用的顶部。
+  const targetSwitch = (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2, background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: 2, flex: '0 0 auto' }}>
+      <button
+        onClick={() => setAideTarget('code')}
+        title="AI 编程（原 IDE 右侧对话列）"
+        style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideTarget === 'code' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideTarget === 'code' ? GOLD : 'transparent' }}
+      >编程</button>
+      <button
+        onClick={() => setAideTarget('sec')}
+        title="AI 攻防（原攻防模块侧栏）"
+        style={{ ...btnBase, padding: '3px 9px', fontSize: 11, borderRadius: 6, color: aideTarget === 'sec' ? '#1c1c1e' : 'rgba(244,244,246,0.8)', background: aideTarget === 'sec' ? GOLD : 'transparent' }}
+      >攻防</button>
+    </div>
+  );
+
+  if (aideTarget === 'sec') {
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px 0' }}>
+          {targetSwitch}
+          <span style={{ flex: 1 }} />
+          <button onClick={() => setAideOpen(false)} title={t('capsule.backToPlayer')} style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
+            <IconClose />
+          </button>
+        </div>
+        <CapsuleSecAide />
+      </div>
+    );
+  }
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px' }} onClick={(e) => e.stopPropagation()}>
       {/* 顶部细条：返回 + 标题 + 对话切换 + 新建 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {targetSwitch}
         <span style={{ fontSize: 13, fontWeight: 600, color: '#f2f2f4' }}>{t('capsule.aideTitle')}</span>
         {/* 对话切换：下拉选择 / 新建 */}
         <select
