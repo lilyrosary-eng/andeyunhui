@@ -457,6 +457,20 @@ function invokeCalls(): InvokeCall[] {
  */
 const KNOWN_ARG_MISMATCH: Record<string, string> = {};
 
+/**
+ * 由插件沙箱**自动注入**的参数（调用方不传是正确的，不是"漏传"）。
+ *
+ * `pluginSandbox.createSafeApi` 的转发是 `invoke(command, { ...args, pluginId })`——
+ * 注入值在展开之后，插件传什么都覆盖不了它。所以插件源码里写
+ * `invoke('plugin_storage_get', { key })` 完全正确；而 Rust 签名里
+ * `plugin_id: String` 是必填。不登记这张表，契约测试就会把每条插件侧调用
+ * 误判成"缺少必填参数 pluginId"（2026-10-19 加攻防会话持久化时撞到）。
+ */
+const SANDBOX_INJECTED_ARGS: Record<string, string[]> = {
+  plugin_storage_get: ['pluginId'],
+  plugin_storage_set: ['pluginId'],
+};
+
 describe('前后端命令参数名契约', () => {
   // 只校验**桌面注册表里真实注册的**命令：别的名字（插件自定义、非命令函数）
   // 没有权威签名可比，硬比只会产出假阳性。
@@ -502,11 +516,15 @@ describe('前后端命令参数名契约', () => {
       if (c.cmd in KNOWN_BROKEN || c.hasSpread || !desktop.has(c.cmd)) continue;
       const sigs = findSignatures(c.cmd);
       if (sigs.length === 0) continue;
+      // 沙箱注入的参数不算调用方的责任（见 SANDBOX_INJECTED_ARGS）
+      const injected = new Set(SANDBOX_INJECTED_ARGS[c.cmd] ?? []);
       // 只要**存在一个变体被完全满足**就算通过（同名桌面/移动包装的参数不同）
-      const satisfied = sigs.some((s) => [...s.required].every((r) => c.keys.includes(r)));
+      const satisfied = sigs.some((s) =>
+        [...s.required].every((r) => injected.has(r) || c.keys.includes(r)),
+      );
       if (!satisfied) {
         const best = sigs.reduce((a, b) => (a.required.size <= b.required.size ? a : b));
-        const miss = [...best.required].filter((r) => !c.keys.includes(r));
+        const miss = [...best.required].filter((r) => !injected.has(r) && !c.keys.includes(r));
         bad.push(`${c.cmd} 缺少必填参数 ${miss.join(', ')}  <- ${c.file}`);
       }
     }
