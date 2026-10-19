@@ -346,11 +346,11 @@ function CapsuleAide() {
           webSearch: true,
         });
       } else {
+        // 注意：ai_chat 恒流式，Rust 签名里**没有** stream 参数（传了只会被忽略/报 invalid args）
         await invoke('ai_chat', {
           requestId: reqId,
           profileId: aideProfileId,
           messages: [...history, { role: 'user', content: text }],
-          stream: true,
         });
       }
     } catch (e) {
