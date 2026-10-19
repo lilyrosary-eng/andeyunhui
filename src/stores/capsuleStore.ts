@@ -28,6 +28,14 @@ interface CapsuleState {
   resourceOpen: boolean;
   /** 子面板渲染门控：从收起态展开且子面板打开时，先等 setSize 完成再渲染子面板 */
   panelReady: boolean;
+  /**
+   * 正在流式输出的子面板（键名任意，如 "aide" / "sec"）。
+   *
+   * 用途：透明浮窗的重绘频率由 Capsule 壳统一下发 —— 只有真的在流式输出（或媒体在播）时
+   * 才需要 60fps，纯静态阅读时降到 30fps 就够。此前一律 60fps，面板放大到 920×920 后
+   * 每帧要重合成的面积翻了 4 倍，是「浮岛变卡」的直接原因。
+   */
+  activeStreams: Record<string, true>;
   /** 保持态：鼠标离开不自动收起 */
   keepOpen: boolean;
 
@@ -52,6 +60,8 @@ interface CapsuleState {
   setTransferOpen: (v: boolean) => void;
   setResourceOpen: (v: boolean) => void;
   setPanelReady: (v: boolean) => void;
+  /** 标记某面板是否在流式输出（同一 key 反复设置不会触发额外渲染） */
+  setStream: (key: string, on: boolean) => void;
   setKeepOpen: (v: boolean) => void;
   /** 收起即「回到主页」：关闭搜索/对话/传输并清除保持态（aide 不在此关闭，行为同改前） */
   collapse: () => void;
@@ -137,6 +147,7 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
   transferOpen: false,
   resourceOpen: false,
   panelReady: true,
+  activeStreams: {},
   keepOpen: false,
 
   receiveReq: null,
@@ -161,6 +172,15 @@ export const useCapsuleStore = create<CapsuleState>((set, get) => ({
   setTransferOpen: (transferOpen) => set({ transferOpen }),
   setResourceOpen: (resourceOpen) => set({ resourceOpen }),
   setPanelReady: (panelReady) => set({ panelReady }),
+  setStream: (key, on) =>
+    set((st) => {
+      const has = st.activeStreams[key] === true;
+      if (on === has) return st; // 状态未变 → 返回同一个 state，不触发重渲染
+      const next = { ...st.activeStreams };
+      if (on) next[key] = true;
+      else delete next[key];
+      return { activeStreams: next };
+    }),
   setKeepOpen: (keepOpen) => set({ keepOpen }),
 
   collapse: () =>

@@ -106,6 +106,8 @@ const AideBubble = memo(function AideBubble({
 
 function CapsuleAide() {
   const { t } = useI18n();
+  // 流式输出期间才把透明浮窗提到 60fps（静止时 30fps），见 Capsule.tsx 的 repaint rate effect
+  const setStream = useCapsuleStore((s) => s.setStream);
   // 浮岛窗是独立 webview：markdown 样式与「复制代码」事件代理必须在这里各挂一次
   useEffect(() => {
     injectMarkdownStyles();
@@ -165,6 +167,12 @@ function CapsuleAide() {
 
   const [aideInput, setAideInput] = useState('');
   const [aideBusy, setAideBusy] = useState(false);
+  // 上报「正在流式输出」给壳，用于把透明浮窗重绘提到 60fps；空闲时回落 30fps。
+  // 卸载时显式清零，避免面板关掉后仍占着高刷档。
+  useEffect(() => {
+    setStream('aide', aideBusy);
+    return () => setStream('aide', false);
+  }, [aideBusy, setStream]);
   const [aideReasoningOpen, setAideReasoningOpen] = useState<Record<string, boolean>>({});
   // 参考回调稳定化：memo 气泡的 onToggleReasoning 必须引用稳定，否则每渲染变新引用直接打破 memo
   const toggleAideReasoning = useCallback((id: string) => {

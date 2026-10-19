@@ -116,8 +116,9 @@ function loadConvs(): Conversation[] {
   }
 }
 
-export default function CapsuleSecAide() {
+function CapsuleSecAideInner() {
   const setSecOpen = useCapsuleStore((s) => s.setSecOpen);
+  const setStream = useCapsuleStore((s) => s.setStream);
 
   useEffect(() => {
     injectMarkdownStyles();
@@ -131,6 +132,12 @@ export default function CapsuleSecAide() {
   const [activeId, setActiveId] = useState<string>(() => loadConvs()[0]?.id ?? '');
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  // 流式期间上报，壳据此把透明浮窗重绘提到 60fps；空闲回落 30fps。
+  // 必须放在 busy 声明之后 —— 依赖数组在渲染期求值，提前引用会 TDZ。
+  useEffect(() => {
+    setStream('sec', busy);
+    return () => setStream('sec', false);
+  }, [busy, setStream]);
 
   const reqRef = useRef<string | null>(null);
   const asstRef = useRef<string | null>(null);
@@ -315,3 +322,6 @@ export default function CapsuleSecAide() {
     </div>
   );
 }
+
+// 壳会在播放进度等状态变化时重渲染；面板自己是 memo 的，避免整块 920×920 面板跟着重绘。
+export default memo(CapsuleSecAideInner);

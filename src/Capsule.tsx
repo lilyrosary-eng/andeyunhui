@@ -310,6 +310,8 @@ export default function Capsule() {
   const chatOpen = useCapsuleStore((s) => s.chatOpen);
   const aideOpen = useCapsuleStore((s) => s.aideOpen);
   const secOpen = useCapsuleStore((s) => s.secOpen);
+  // 只有真的在流式输出时才值得 60fps
+  const streaming = useCapsuleStore((s) => Object.keys(s.activeStreams).length > 0);
   const searchOpen = useCapsuleStore((s) => s.searchOpen);
   const transferOpen = useCapsuleStore((s) => s.transferOpen);
   const resourceOpen = useCapsuleStore((s) => s.resourceOpen);
@@ -806,14 +808,19 @@ export default function Capsule() {
   useEffect(() => {
     // 收起态（!expanded）已静态化 → 暂停轮询（0）：屏幕停在最后一帧，内容变化由
     // MutationObserver 调 present_overlay_now 按需上屏，从而不与外部媒体抢 DWM 重定向呈现。
-    // 展开态需连续上屏 → 16ms（60fps，极致丝滑；screenshot.rs 注释亦推荐此值）。
-    // animating 只需 expanded：子面板仅在展开时渲染，收起时 searchOpen 等残留值不应驱动轮询
-    // （会与 DWM 合成时序冲突致布局偏移/空白）。DComp 开启时 Notify 被跳过，此处仅影响 layered 兜底。
+    //
+    // 展开态分两档（2026-10-19 调整）：
+    //   · 有动效（媒体在播 / 面板正在流式输出）→ 16ms（60fps）
+    //   · 纯静态（看文档、读回复、打字）→ 33ms（30fps）
+    // 为什么不再一律 60fps：每帧要做 SetIsVisible + NotifyParentWindowPositionChanged，
+    // 让 DWM 重合成整块透明窗。AI 编程/攻防面板放大到 920×920 后面积是原来的 4 倍，
+    // 60fps 常驻会持续挤占合成器时间 —— 这是"浮岛变卡"的直接来源。
+    // 30fps 对文字/光标完全够用；只有动画与流式增量需要 60。
     const animating = expanded;
-    const ms = animating ? 16 : 0;
-    if (__DEV) console.log('[CAPSULE-PROBE] request_repaint_rate', ms, { expanded });
+    const ms = !animating ? 0 : ((isPlaying || streaming) ? 16 : 33);
+    if (__DEV) console.log('[CAPSULE-PROBE] request_repaint_rate', ms, { expanded, isPlaying, streaming });
     invoke('set_overlay_repaint_rate', { intervalMs: ms }).catch(() => {});
-  }, [expanded]);
+  }, [expanded, isPlaying, streaming]);
 
   // 收起态（暂停轮询）下按需上屏：监听内容实际变化（正在播放的歌名、时钟跳动等）才 present
   // 一帧，不再每 10fps 轮询 Notify，从而不与外部媒体抢 DWM 重定向呈现（根除「仅外部媒体下卡顿」）。
