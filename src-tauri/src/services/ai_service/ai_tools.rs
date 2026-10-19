@@ -160,11 +160,24 @@ pub(crate) fn normalize_tool_schema(mut v: serde_json::Value) -> Option<serde_js
 /// **所有**请求体里的 `"tools"` 都必须走这里，不要各自 `.map(|t| t.function_schema())` ——
 /// 三处各写一遍正是这次 400 能长期潜伏的原因（只有一处会踩，其他两处各自以为没问题）。
 pub(crate) fn tool_schemas_for_api() -> Vec<serde_json::Value> {
+    tool_schemas_for_api_without(&[])
+}
+
+/// 同 [`tool_schemas_for_api`]，但**排除指定工具**。
+///
+/// 用途：对话页的「联网」开关只控制 `web_search`，其余工具常开。
+/// 排除发生在**发送前**（模型收不到该工具定义），而不是执行时拒绝 ——
+/// 后者会让模型反复尝试并浪费轮次。
+pub(crate) fn tool_schemas_for_api_without(exclude: &[&str]) -> Vec<serde_json::Value> {
     let reg = registered_tools();
     let mut out = Vec::with_capacity(reg.len());
     let mut dropped: Vec<String> = Vec::new();
     for t in reg.iter() {
         let name = t.name().to_string();
+        if exclude.contains(&name.as_str()) {
+            log::info!("[ai-tools] 按请求排除工具: {}", name);
+            continue;
+        }
         match normalize_tool_schema(t.function_schema()) {
             Some(v) => out.push(v),
             None => dropped.push(name),

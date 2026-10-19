@@ -25,8 +25,8 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
     renameConversation,
     send,
     abort,
-    agent,
-    setAgent,
+    webSearch,
+    setWebSearch,
   } = useAiChat({ persistKey: CAPSULE_CONV_KEY });
 
   return (
@@ -38,8 +38,8 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
       profileId={profileId}
       send={send}
       onStop={abort}
-      agent={agent}
-      onToggleAgent={setAgent}
+      webSearch={webSearch}
+      onToggleWebSearch={setWebSearch}
       onSelectConv={selectConv}
       onNewConv={newConversation}
       onDeleteConv={deleteConversation}

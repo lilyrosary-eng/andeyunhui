@@ -541,10 +541,209 @@ pub(crate) fn html_to_text(html: &str) -> String {
         .join("\n")
 }
 
-/// web_search：通过 DuckDuckGo Instant Answer API 检索网页（免 key、无配置），返回结构化来源。
-/// 来源对齐 dsh WebSearchResultView：sources（url/title/snippet）+ truncated + 可选 answer。
-/// 结果做纯文本 + 结构化 meta 双视图；网络请求整体限时 15s 防挂起。
+/// web_search：联网检索（Bing RSS 优先，DDG 兜底）。
+///
+/// ## 为什么不再只用 DuckDuckGo Instant Answer（2026-10-19 实测）
+/// 老实现打的是 DDG 的 **Instant Answer** 接口 —— 它不是搜索引擎，只对"实体/名词"
+/// 返回一段 `AbstractText` + 相关词条；对「Tauri v2 listen event 官方文档」这类真实查询，
+/// `RelatedTopics` 直接为空，等于**逻辑上永远搜不到**。
+/// 更糟的是本机实测 **DDG 两个端点全部 15s 超时**（api.duckduckgo.com 与 html.duckduckgo.com
+/// 都是 HTTP 000），所以它同时具备"搜不到内容"和"连不上"两个毛病。
+///
+/// 现在：首选 `cn.bing.com/search?...&format=rss` —— 免 key、返回干净 XML、不用解析 HTML，
+/// 本机实测 HTTP 200 / 10 条真实结果（标题 + 链接 + 描述）。DDG 仅作兜底。
+///
+/// 为什么用 RSS 而不是抓网页：Bing/百度的结果页都有反爬与 A/B 结构，正则解析极其脆弱；
+/// RSS 是它自己给的稳定接口，字段固定。项目已有 quick-xml 依赖，不新增任何东西。
 pub(crate) struct WebSearchTool;
+
+/// 一条检索结果（url, title, snippet）。
+type SearchHit = (String, String, String);
+
+/// 去掉描述里的 HTML 标签并压缩空白（Bing RSS 的 description 常含 `<b>` 高亮）。
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 解一层 XML 实体（不引入额外依赖：RSS 里出现的基本就这几个）。
+fn decode_entities(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// 解析 RSS 里的 `<item>`（title / link / description）。用事件流而非正则，
+/// 避免描述里出现换行或嵌套标签时切错。
+fn parse_rss_items(xml: &str, max: usize) -> Vec<SearchHit> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out: Vec<SearchHit> = Vec::new();
+    let mut in_item = false;
+    let mut cur: SearchHit = (String::new(), String::new(), String::new());
+    let mut cur_tag: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "item" {
+                    in_item = true;
+                    cur = (String::new(), String::new(), String::new());
+                } else if in_item {
+                    cur_tag = Some(name);
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if let (true, Some(tag)) = (in_item, cur_tag.clone()) {
+                    let txt = t.decode().map(|c| c.into_owned()).unwrap_or_default();
+                    match tag.as_str() {
+                        "title" => cur.0.push_str(&txt),
+                        "link" => cur.1.push_str(txt.trim()),
+                        "description" => cur.2.push_str(&txt),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::CData(c)) => {
+                if let (true, Some(tag)) = (in_item, cur_tag.clone()) {
+                    let txt = String::from_utf8_lossy(c.as_ref()).to_string();
+                    match tag.as_str() {
+                        "title" => cur.0.push_str(&txt),
+                        "description" => cur.2.push_str(&txt),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "item" {
+                    in_item = false;
+                    let url = cur.1.trim().to_string();
+                    if !url.is_empty() {
+                        out.push((
+                            url,
+                            decode_entities(cur.0.trim()),
+                            strip_html(&decode_entities(cur.2.trim())),
+                        ));
+                    }
+                    if out.len() >= max {
+                        break;
+                    }
+                } else if cur_tag.as_deref() == Some(name.as_str()) {
+                    cur_tag = None;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                log::warn!("[web_search] RSS 解析中断（已取到 {} 条）: {}", out.len(), e);
+                break;
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// Bing RSS 检索。失败/空结果都由调用方决定是否回落。
+async fn fetch_bing_rss(
+    client: &reqwest::Client,
+    query: &str,
+    max: usize,
+) -> Result<Vec<SearchHit>, String> {
+    let url = format!(
+        "https://cn.bing.com/search?q={}&format=rss&count={}",
+        url_escape_component(query),
+        max
+    );
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {}", status.as_u16()));
+    }
+    let body = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    let items = parse_rss_items(&body, max);
+    log::info!(
+        "[web_search] Bing RSS: query={:?} 命中 {} 条（响应 {} 字节）",
+        query,
+        items.len(),
+        body.len()
+    );
+    Ok(items)
+}
+
+/// DuckDuckGo Instant Answer 兜底（只对实体类查询有效，保留是为了别把老路径一次性删掉）。
+async fn fetch_ddg_instant(
+    client: &reqwest::Client,
+    query: &str,
+    max: usize,
+) -> Result<(Vec<SearchHit>, Option<String>), String> {
+    let url = format!(
+        "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
+        url_escape_component(query)
+    );
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析失败: {e}"))?;
+    let mut leaves: Vec<SearchHit> = Vec::new();
+    if let Some(topics) = json.get("RelatedTopics").and_then(|v| v.as_array()) {
+        fn walk(v: &serde_json::Value, out: &mut Vec<SearchHit>) {
+            if let Some(url) = v.get("FirstURL").and_then(|u| u.as_str()) {
+                let text = v.get("Text").and_then(|t| t.as_str()).unwrap_or("");
+                if !url.is_empty() {
+                    let (title, snippet) = match text.split_once(" - ") {
+                        Some((t, sn)) => (t.trim().to_string(), sn.trim().to_string()),
+                        None => (text.to_string(), String::new()),
+                    };
+                    out.push((url.to_string(), title, snippet));
+                }
+            } else if let Some(sub) = v.get("Topics").and_then(|t| t.as_array()) {
+                for s in sub {
+                    walk(s, out);
+                }
+            }
+        }
+        for t in topics {
+            walk(t, &mut leaves);
+        }
+    }
+    leaves.truncate(max);
+    let answer = json
+        .get("AbstractText")
+        .and_then(|a| a.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    Ok((leaves, answer))
+}
+
 #[async_trait::async_trait]
 impl AiTool for WebSearchTool {
     fn name(&self) -> &'static str {
@@ -555,7 +754,7 @@ impl AiTool for WebSearchTool {
             "type": "function",
             "function": {
                 "name": self.name(),
-                "description": "联网搜索网页，返回相关来源列表（标题/摘要/URL）。查询会实时检索（DuckDuckGo Instant Answer），无法联网时返回空结果。用于获取外部实时信息、文档、最新动态。",
+                "description": "联网搜索网页，返回真实来源列表（标题/摘要/URL）。用 Bing RSS 检索（免 key，国内可达），失败时回落到 DuckDuckGo。用于获取外部实时信息、官方文档、最新动态。搜到链接后可用 web_fetch 读正文。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -572,65 +771,56 @@ impl AiTool for WebSearchTool {
         if query.is_empty() {
             return Err("web_search 缺少 query 参数".to_string());
         }
-        let max_results: usize = args.get("max_results").and_then(|v| v.as_u64()).map(|n| (n as usize).clamp(1, 10)).unwrap_or(5);
-        let url = format!(
-            "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
-            url_escape_component(&query)
-        );
-        // 限时 15s；沙箱/断网环境静默降级为空结果，不让 Agent 卡死
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            reqwest::Client::new().get(&url).header("User-Agent", "Mozilla/5.0").send(),
-        )
-        .await
-        .map_err(|_| "web_search 超时（>15s，已中止）".to_string())?
-        .map_err(|e| format!("web_search 请求失败: {}", e))?;
-        if !resp.status().is_success() {
-            return Ok(ToolExecResult::plain(format!("web_search 返回状态 {}", resp.status().as_u16())));
-        }
-        let json: serde_json::Value = resp.json().await.map_err(|e| format!("web_search 响应解析失败: {}", e))?;
+        let max_results: usize = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as usize).clamp(1, 10))
+            .unwrap_or(5);
 
-        // 结构化来源：递归把 RelatedTopics 拍成叶节点 {FirstURL, Text}
-        let mut leaves: Vec<(String, String)> = Vec::new();
-        if let Some(topics) = json.get("RelatedTopics").and_then(|v| v.as_array()) {
-            fn walk(v: &serde_json::Value, out: &mut Vec<(String, String)>) {
-                if let Some(url) = v.get("FirstURL").and_then(|u| u.as_str()) {
-                    let text = v.get("Text").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                    if !url.is_empty() {
-                        out.push((url.to_string(), text));
-                    }
-                } else if let Some(sub) = v.get("Topics").and_then(|t| t.as_array()) {
-                    for s in sub {
-                        walk(s, out);
-                    }
+        // 整体 15s 上限：断网/被墙时不让 Agent 卡死
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| format!("web_search 构造 HTTP 客户端失败: {e}"))?;
+
+        let mut hits: Vec<SearchHit> = Vec::new();
+        let mut answer: Option<String> = None;
+        match fetch_bing_rss(&client, &query, max_results).await {
+            Ok(v) if !v.is_empty() => hits = v,
+            Ok(_) => log::warn!("[web_search] Bing RSS 返回 0 条，回落 DDG 兜底"),
+            Err(e) => log::warn!("[web_search] Bing RSS 失败（{}），回落 DDG 兜底", e),
+        }
+        if hits.is_empty() {
+            match fetch_ddg_instant(&client, &query, max_results).await {
+                Ok((v, a)) => {
+                    hits = v;
+                    answer = a;
+                    log::info!("[web_search] DDG 兜底命中 {} 条", hits.len());
                 }
-            }
-            for t in topics {
-                walk(t, &mut leaves);
+                Err(e) => log::warn!("[web_search] DDG 兜底也失败: {}", e),
             }
         }
-        let answer = json.get("AbstractText").and_then(|a| a.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
 
-        let total = leaves.len();
-        let truncated = total > max_results;
-        let sliced: Vec<(String, String)> = leaves.into_iter().take(max_results).collect();
-        if sliced.is_empty() {
-            return Ok(ToolExecResult::plain(format!("web_search 无结果（query: {}）", query)));
+        if hits.is_empty() {
+            return Ok(ToolExecResult::plain(format!(
+                "web_search 没有拿到任何结果（query: {}）。可能是网络不可达或查询过于生僻；\
+                 可改用更通用的关键词，或直接用 web_fetch 打开已知 URL。",
+                query
+            )));
         }
-        // 纯文本视图（回填 role:"tool" 消息用）
+
+        let total = hits.len();
+        let truncated = total > max_results;
+        let sliced: Vec<SearchHit> = hits.into_iter().take(max_results).collect();
+
         let mut lines: Vec<String> = Vec::new();
         if let Some(a) = &answer {
             lines.push(format!("摘要：{}", a));
         }
-        for (i, (url, text)) in sliced.iter().enumerate() {
-            // Text 通常形如「Title - description」，拆出标题与摘要
-            let (title, snippet) = match text.split_once(" - ") {
-                Some((t, s)) => (t.trim().to_string(), Some(s.trim().to_string())),
-                None => (text.clone(), None),
-            };
+        for (i, (url, title, snippet)) in sliced.iter().enumerate() {
             let mut entry = format!("{}. {}", i + 1, title);
-            if let Some(s) = &snippet {
-                entry.push_str(&format!(" — {}", s));
+            if !snippet.is_empty() {
+                entry.push_str(&format!(" — {}", snippet));
             }
             entry.push_str(&format!("\n   {}", url));
             lines.push(entry);
@@ -641,18 +831,17 @@ impl AiTool for WebSearchTool {
         }
         s.push('\n');
         s.push_str(&lines.join("\n"));
-        // web_search 呈现 meta（对齐 dsh WebSearchResultView 'search' 变体：可引用的来源列表卡片）
-        let sources: Vec<serde_json::Value> = sliced.into_iter().map(|(url, text)| {
-            let (title, snippet) = match text.split_once(" - ") {
-                Some((t, sn)) => (t.trim().to_string(), Some(sn.trim().to_string())),
-                None => (text, None),
-            };
-            let mut src = serde_json::json!({ "url": url, "title": title });
-            if let Some(sn) = snippet {
-                src["snippet"] = serde_json::Value::String(sn);
-            }
-            src
-        }).collect();
+
+        let sources: Vec<serde_json::Value> = sliced
+            .into_iter()
+            .map(|(url, title, snippet)| {
+                let mut src = serde_json::json!({ "url": url, "title": title });
+                if !snippet.is_empty() {
+                    src["snippet"] = serde_json::Value::String(snippet);
+                }
+                src
+            })
+            .collect();
         let meta = serde_json::json!({
             "card": "web",
             "kind": "search",

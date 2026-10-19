@@ -102,9 +102,9 @@ export interface AiChatConversationProps {
   onKeepToggle?: (pinned: boolean) => void;
   onClose?: () => void;
   emptyHint?: string;
-  /** Agent 工具模式（联网/工具）。true=走 ai_chat_agent，false=纯对话。 */
-  agent?: boolean;
-  onToggleAgent?: (on: boolean) => void;
+  /** 是否允许联网检索（只影响 web_search；其余工具始终可用）。 */
+  webSearch?: boolean;
+  onToggleWebSearch?: (on: boolean) => void;
 }
 
 export const AiChatConversation = memo(function AiChatConversation({
@@ -130,8 +130,8 @@ export const AiChatConversation = memo(function AiChatConversation({
   onStop,
   effort = '',
   onEffortChange,
-  agent = false,
-  onToggleAgent,
+  webSearch = true,
+  onToggleWebSearch,
 }: AiChatConversationProps) {
   const [input, setInput] = useState('');
   // 待发送附件（图片 / 文本 / 其它文件），仅在点击发送前暂存，发送后清空。
@@ -773,28 +773,27 @@ export const AiChatConversation = memo(function AiChatConversation({
                       />
                     </span>
                   )}
-                  {onToggleAgent && (
-                    /* ⚠️ 这个开关控制的是**整个工具系统**的开关，不只是联网 ——
-                       关着的时候模型**根本收不到任何工具定义**（联网搜索、读写文件、
-                       执行命令、生成图片/语音全都用不了），于是它只会回一句"我做不到"。
-                       原来按钮上写的是「联网」，用户想让它画张图时完全没理由去点它，
-                       现象就是"模型明明支持工具却什么都不做"。所以改名为「工具」，
-                       并在悬停提示里把"到底能开什么"列清楚。 */
+                  {onToggleWebSearch && (
+                    /* 2026-10-19 改语义：工具**常开**，这个按钮只控制联网检索。
+                       原来它是"整个工具系统"的总闸 —— 关掉时模型收不到任何工具定义
+                       （画图/读写文件/执行命令全废），却长着"工具"这个名字，
+                       用户想画图时根本没有理由去点它。现在它只切 web_search：
+                       关掉后模型收不到 web_search 定义，其余工具照常可用。 */
                     <button
-                      onClick={() => onToggleAgent(!agent)}
+                      onClick={() => onToggleWebSearch(!webSearch)}
                       title={
-                        agent
-                          ? '工具已开启：模型可联网搜索、读写文件、执行命令、生成图片/语音等'
-                          : '开启后模型才能调用工具（联网搜索 / 读写文件 / 执行命令 / 生成图片语音等）。关着时模型收不到任何工具定义'
+                        webSearch
+                          ? '联网检索已开启：模型可调用 web_search 搜外部信息（其余工具始终可用）'
+                          : '联网检索已关闭：模型不会再搜网页（其余工具照常可用，如读写文件/执行命令/生成图片）'
                       }
                       className={`flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-md transition-colors ${
-                        agent
+                        webSearch
                           ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300'
                           : `${capsuleMode ? 'text-white/50 hover:text-white/80' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600'}`
                       }`}
                     >
                       <Sparkles size={13} />
-                      {!capsuleMode && <span>工具</span>}
+                      {!capsuleMode && <span>联网</span>}
                     </button>
                   )}
                   <label title="导入图片 / 文件（也可直接粘贴）" className={`flex items-center gap-1 text-[11px] cursor-pointer px-1.5 py-0.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 ${capsuleMode ? 'text-white/50 hover:text-white/80' : 'text-neutral-400 dark:text-stone-500 hover:text-neutral-600'}`}>

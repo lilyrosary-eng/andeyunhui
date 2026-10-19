@@ -31,8 +31,8 @@ export interface AiWorkViewProps {
   /** 思考档位覆盖（透传）。''= 跟随配置。 */
   effort?: string;
   onEffortChange?: (v: string) => void;
-  agent?: boolean;
-  onToggleAgent?: (on: boolean) => void;
+  webSearch?: boolean;
+  onToggleWebSearch?: (on: boolean) => void;
   conversations: Conversation[];
   onSelectConv: (id: string) => void;
   onNewConv: () => void;
@@ -50,8 +50,8 @@ export const AiWorkView = memo(function AiWorkView({
   onStop,
   effort,
   onEffortChange,
-  agent,
-  onToggleAgent,
+  webSearch,
+  onToggleWebSearch,
   conversations,
   onSelectConv,
   onNewConv,
@@ -106,8 +106,8 @@ export const AiWorkView = memo(function AiWorkView({
           onStop={onStop}
           effort={effort}
           onEffortChange={onEffortChange}
-          agent={agent}
-          onToggleAgent={onToggleAgent}
+          webSearch={webSearch}
+          onToggleWebSearch={onToggleWebSearch}
           conversations={conversations}
           onSelectConv={onSelectConv}
           onNewConv={onNewConv}

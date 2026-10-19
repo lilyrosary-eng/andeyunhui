@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, tool_schemas_for_api, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
+use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, tool_schemas_for_api, tool_schemas_for_api_without, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text, hydrate_images, persist_images};
 
 /// Agent 对话：原生 tool_calls + 循环。
@@ -39,6 +39,8 @@ async fn run_agent(
     cancel: Arc<AtomicBool>,
     // 请求级档位覆盖（对话页选的）。留空 = 用配置。见 `effort_with_override`。
     effort: Option<String>,
+    // 是否把 web_search 放进 tools（其余工具始终在）。false 时模型根本收不到该定义。
+    web_search: bool,
 ) -> Result<(), String> {
     // 轮数上限 20：默认 4，但前端会传实际设置（默认 8）。
     // 之所以把上限从 12 抬到 20 —— "自己搭一张 ComfyUI 工作流"天然要多轮：
@@ -71,10 +73,15 @@ async fn run_agent(
     let skill_guide = skills_guide(project_root_pb.as_deref());
     let system_final = format!("{}{}{}{}", base_system, mcp_guide, skill_guide, mem_ctx);
 
-    // 统一走 tool_schemas_for_api()：内部会补齐/校验每个 schema 的 "type": "function"。
+    // 统一走 tool_schemas_for_api*()：内部会补齐/校验每个 schema 的 "type": "function"。
     // 这正是 2026-10-19「HTTP 400 invalid tool type」的根因——tools 是整批发送的，
     // 一个工具 schema 缺 type，整个 agent 模式全废。不要改回各自 map。
-    let tools: Vec<serde_json::Value> = tool_schemas_for_api();
+    // 联网开关只影响 web_search；其余工具常开（用户 2026-10-19 决定）。
+    let tools: Vec<serde_json::Value> = if web_search {
+        tool_schemas_for_api()
+    } else {
+        tool_schemas_for_api_without(&["web_search"])
+    };
     let client = reqwest::Client::new();
 
     // ── 图片路由：对话模型能不能「原生看图」 ────────────────────────────────
@@ -649,6 +656,9 @@ pub async fn ai_chat_agent(
     images: Option<Vec<String>>,
     // 请求级档位覆盖（对话页里临时选的思考档位）。留空 = 用配置。
     effort: Option<String>,
+    // 是否允许联网检索（对话页「联网」开关）。缺省 true。
+    // 其它工具一律常开 —— 这里只过滤 web_search，见 ai_tools::tool_schemas_for_api_without。
+    web_search: Option<bool>,
 ) -> Result<(), String> {
     // 同步预检：无 API Key 直接拒绝（对齐原契约），无需开后台任务。
     let config = load_config(&app);
@@ -677,6 +687,7 @@ pub async fn ai_chat_agent(
             images.unwrap_or_default(),
             cancel_cl,
             effort,
+            web_search.unwrap_or(true),
         )
         .await;
         // 自然结束（非取消）→ 登记 DONE 后从注册表移除；取消走 cancel_worker 的 abort 路径。

@@ -146,9 +146,18 @@ export interface UseAiChatResult {
   busy: boolean;
   ready: boolean;
   profileId: string;
-  /** 是否 Agent 工具模式（联网/工具）。开=走 ai_chat_agent；关=纯对话。 */
+  /**
+   * 工具模式（恒为 true）。
+   *
+   * 2026-10-19 起不再提供"关掉全部工具"的入口：那个开关事实上让模型"什么都做不到"，
+   * 而用户想要的只是控制**联网**。保留字段是为了不破坏既有调用方（值恒为 true）。
+   */
   agent: boolean;
+  /** @deprecated 工具已常开；传 false 只会在控制台告警，不生效。 */
   setAgent: (on: boolean) => void;
+  /** 是否允许模型联网检索（只影响 web_search 工具，其余工具始终可用）。 */
+  webSearch: boolean;
+  setWebSearch: (on: boolean) => void;
   selectConv: (id: string) => void;
   newConversation: (seed?: Partial<Conversation>) => string;
   newGroup: (participantIds: string[], groupName?: string) => string;
@@ -179,18 +188,33 @@ export interface UseAiChatResult {
  * 共用 AI 对话逻辑。状态、持久化、流式、发送全在此，调用方只负责把数据画出来。
  */
 export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
-  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, agent = false, allowEmpty = false, excludeGlobalPersona = false } = options;
+  // 注意：options.agent 已废弃（工具常开），故意不解构，避免"看起来还能关"。
+  const { persistKey = DEFAULT_PERSIST_KEY, personaPrompt, systemPrompt, allowEmpty = false, excludeGlobalPersona = false } = options;
   const syncEvent = syncEventFor(persistKey);
   const syncReqEvent = syncReqEventFor(persistKey);
-  // Agent 模式需随回调读取最新值（避免闭包陈旧）
-  const [agentOn, setAgentOn] = useState<boolean>(agent);
+  // 工具常开：不再允许从 UI 关闭（用户 2026-10-19 决定）。
+  // 保留 setAgent 仅为兼容既有调用方，传 false 只告警、不生效。
+  const [agentOn, setAgentOn] = useState<boolean>(true);
+
+  // 联网开关（只影响 web_search）。持久化，免得每次重启都要重新点。
+  const WEB_SEARCH_KEY = 'andeyunhui.ai.webSearch';
+  const [webSearchOn, setWebSearchOn] = useState<boolean>(() => storage.getString(WEB_SEARCH_KEY, '1') !== '0');
+  const webSearchRef = useRef(webSearchOn);
+  useEffect(() => {
+    webSearchRef.current = webSearchOn;
+    storage.setString(WEB_SEARCH_KEY, webSearchOn ? '1' : '0');
+  }, [webSearchOn]);
+  const setWebSearch = useCallback((on: boolean) => setWebSearchOn(on), []);
   // ref 镜像移到 effect：渲染期写 ref 违反 react-hooks/refs。
   // agentRef 只被流式回调读取（都在 commit 之后），effect 已同步，不会读到旧值。
   const agentRef = useRef(agentOn);
   useEffect(() => { agentRef.current = agentOn; }, [agentOn]);
   const setAgent = useCallback((on: boolean) => {
-    setAgentOn(on);
-    agentRef.current = on;
+    if (!on) {
+      console.warn('[ai-chat] 工具已常开，setAgent(false) 不生效；如需禁用联网请用 setWebSearch(false)');
+    }
+    setAgentOn(true);
+    agentRef.current = true;
   }, []);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -571,6 +595,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
           // 只走参数通道、不进 messages —— 避免数 MB base64 落进会话日志与模型上下文。
           ...(hasImages && images ? { images } : {}),
           ...(conv?.effort?.trim() ? { effort: conv.effort.trim() } : {}),
+          // 联网开关：只决定 web_search 是否随 tools 下发（后端 tool_schemas_for_api_without）
+          webSearch: webSearchRef.current,
         });
       } else {
         await invoke('ai_chat', payload);
@@ -812,6 +838,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     profileId,
     agent: agentOn,
     setAgent,
+    webSearch: webSearchOn,
+    setWebSearch,
     selectConv,
     newConversation,
     newGroup,
