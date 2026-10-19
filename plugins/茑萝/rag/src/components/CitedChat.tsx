@@ -7,14 +7,30 @@
 //   - 检索/嵌入失败不再只显示一句原始错误，会带上端点信息（由 retriever 包装）。
 
 const React = window.__HOST_REACT__;
-const { useState, useRef } = React;
+const { useState, useEffect, useRef } = React;
 
 import { retrieve } from '../retrieve/retriever';
 import { RagPromptBuilder } from '../prompt/rag-prompt';
 import { streamAiChat, type RagHit } from '../api/host';
+import { ragStore } from '../store/rag-store';
 
-/** 最低相似度阈值：低于它的命中视为无关，不进上下文。 */
+/** 相似度「绝对底线」：低于它的命中一律视为噪声。
+ *  注意这只是兜底 —— 本机实测 nomic-embed-text-v1.5 连「今天天气不错」都能到 0.68，
+ *  所以单靠绝对阈值筛不掉无关内容（见下方相对窗口）。 */
 const MIN_SCORE = 0.2;
+/** 相对窗口：只保留与 top1 相差不超过这个量的命中。
+ *  实测（nomic-embed-text-v1.5，2026-10-19）：相关 0.84~0.91，无关 0.68 ⇒ 0.10 的窗口能干净切开；
+ *  固定阈值做不到这件事，因为不同模型的分数分布完全不可比。 */
+const REL_WINDOW = 0.1;
+
+/** 按「绝对底线 + 相对 top1 窗口」筛命中。返回保留项与被丢弃数量。 */
+function selectHits(hits: RagHit[]): { kept: RagHit[]; dropped: number } {
+  const base = hits.filter((h) => h.score >= MIN_SCORE);
+  if (base.length === 0) return { kept: [], dropped: hits.length };
+  const top1 = Math.max(...base.map((h) => h.score));
+  const kept = base.filter((h) => h.score >= top1 - REL_WINDOW);
+  return { kept, dropped: hits.length - kept.length };
+}
 
 function genRequestId(): string {
   return 'rag_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -25,11 +41,21 @@ export function CitedChat() {
   const [answer, setAnswer] = useState('');
   const [hits, setHits] = useState<RagHit[]>([]);
   const [dropped, setDropped] = useState(0);
+  const [dimSkipped, setDimSkipped] = useState(0);
   const [openIdx, setOpenIdx] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [noHit, setNoHit] = useState(false);
   const stopRef = useRef<null | (() => void)>(null);
+
+  useEffect(() => {
+    // 侧栏「再问一次」：把问题填进输入框（不自动发，避免误触耗 token）
+    const un = ragStore.onAsk((q) => {
+      setQuestion(q);
+      console.info('[rag] 从侧栏回填问题:', q);
+    });
+    return un;
+  }, []);
 
   async function ask() {
     const q = question.trim();
@@ -38,14 +64,18 @@ export function CitedChat() {
     setAnswer('');
     setHits([]);
     setDropped(0);
+    setDimSkipped(0);
     setOpenIdx(null);
     setError('');
     setNoHit(false);
     try {
       const res = await retrieve(q, { topK: 6, minScore: MIN_SCORE });
-      const kept = res.results.filter((r) => r.score >= MIN_SCORE);
-      setDropped(res.results.length - kept.length);
+      const { kept, dropped: droppedCount } = selectHits(res.results);
+      setDropped(droppedCount);
+      setDimSkipped(res.skipped_dim ?? 0);
       setHits(kept);
+      // 同步给「图谱」视图（避免用户切过去还要再问一次）
+      ragStore.setLastResult({ query: q, hits: kept, dropped: droppedCount, at: Date.now() });
 
       const builder = new RagPromptBuilder();
       builder.set(
@@ -135,13 +165,21 @@ export function CitedChat() {
 
       {dropped > 0 && (
         <div className="text-[11px] text-neutral-400 dark:text-stone-500">
-          已过滤 {dropped} 段相似度低于 {MIN_SCORE.toFixed(2)} 的命中（未计入上下文）
+          已过滤 {dropped} 段（相似度低于 {MIN_SCORE.toFixed(2)}，或比最高分低超过{' '}
+          {REL_WINDOW.toFixed(2)}）——未计入上下文
         </div>
       )}
 
       {noHit && (
         <div className="text-xs text-neutral-400 dark:text-stone-500">
           知识库中未找到相关信息，以下回答由模型通用知识生成（可能不准确）。
+        </div>
+      )}
+
+      {dimSkipped > 0 && (
+        <div className="text-[11px] text-amber-600 dark:text-amber-400">
+          有 {dimSkipped} 块是用别的嵌入模型建的（向量维度不同），本次未参与检索。
+          换了模型后旧块需要按原文重建向量，才能被新模型检索到。
         </div>
       )}
 

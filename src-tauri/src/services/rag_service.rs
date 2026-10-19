@@ -79,14 +79,76 @@ fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// 打开连接并初始化表结构（幂等）。每次调用独立打开连接，SQLite 文件级锁可承受
 /// 桌面级并发；写操作天然串行化，读操作可并发。
+///
+/// 2026-10-19 健壮性：
+/// - `busy_timeout=5s`：并发写（摄取 + 重建 + 伴侣记忆同时写）时不再立刻 SQLITE_BUSY 失败
+/// - `journal_mode=WAL`：读写不互斥，查询不会再被写事务卡住（失败不阻断，只 warn）
+/// - `synchronous=NORMAL`：WAL 下的常规选择，掉电最多丢最后一个事务，不会坏库
 fn open_db(app: &AppHandle) -> Result<Connection, String> {
     let path = db_path(app)?;
     let conn = Connection::open(&path).map_err(|e| format!("打开 RAG 数据库失败: {}", e))?;
-    // 启用外键约束（连接级，每次打开需重新设置）
-    conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|e| format!("设置外键失败: {}", e))?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))
+        .map_err(|e| format!("设置 busy_timeout 失败: {}", e))?;
+    // journal_mode 是「有返回值」的 pragma，用 query_row 读回实际模式；
+    // 某些文件系统（网络盘/只读）上可能失败，不阻断（退回默认 journal）。
+    match conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0)) {
+        Ok(mode) => log::debug!("[rag] journal_mode={mode}"),
+        Err(e) => log::warn!("[rag] 切换 WAL 失败（继续用默认 journal）: {e}"),
+    }
+    conn.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys = ON;")
+        .map_err(|e| format!("设置连接 pragma 失败: {}", e))?;
     init_schema(&conn)?;
     Ok(conn)
+}
+
+/// 写操作前的自动备份（数据第一）。
+///
+/// 用 `VACUUM INTO` 而不是 `fs::copy`：WAL 模式下直接拷主库文件可能拿到不一致的快照，
+/// VACUUM INTO 产出的是一致性快照且天然紧凑。
+/// 保留最近 `KEEP_BACKUPS` 份，按文件名时间戳排序删除更旧的。
+pub fn rag_backup(app: &AppHandle, reason: &str) -> Result<Option<PathBuf>, String> {
+    const KEEP_BACKUPS: usize = 3;
+    let src = db_path(app)?;
+    if !src.exists() {
+        return Ok(None); // 还没有库，无需备份
+    }
+    let dir = src
+        .parent()
+        .ok_or_else(|| "无法确定备份目录".to_string())?
+        .join("rag-backups");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建备份目录失败: {}", e))?;
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let safe_reason: String = reason
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let dst = dir.join(format!("rag-{safe_reason}-{ts}.sqlite"));
+
+    let conn = Connection::open(&src).map_err(|e| format!("备份时打开数据库失败: {}", e))?;
+    // VACUUM INTO 的目标是字面量，不能绑定参数 → 转义单引号
+    let target = dst.to_string_lossy().replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{target}'"))
+        .map_err(|e| format!("备份失败（VACUUM INTO）: {}", e))?;
+    drop(conn);
+    log::info!("[rag] 已备份数据库 -> {}", dst.display());
+
+    // 只保留最近 KEEP_BACKUPS 份
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        let mut files: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sqlite"))
+            .collect();
+        files.sort();
+        if files.len() > KEEP_BACKUPS {
+            for old in &files[..files.len() - KEEP_BACKUPS] {
+                if std::fs::remove_file(old).is_ok() {
+                    log::info!("[rag] 清理旧备份 {}", old.display());
+                }
+            }
+        }
+    }
+    Ok(Some(dst))
 }
 
 /// 建表（IF NOT EXISTS），保证幂等。
@@ -100,7 +162,9 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             created_at  TEXT NOT NULL,
             chunk_count INTEGER NOT NULL DEFAULT 0,
             status      TEXT NOT NULL DEFAULT 'ready',
-            namespace   TEXT NOT NULL DEFAULT 'ai-chat'
+            namespace   TEXT NOT NULL DEFAULT 'ai-chat',
+            embed_model TEXT NOT NULL DEFAULT '',
+            embed_dim   INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS chunks (
             id          TEXT PRIMARY KEY,
@@ -113,11 +177,21 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             meta        TEXT NOT NULL DEFAULT '{}',
             namespace   TEXT NOT NULL DEFAULT 'ai-chat',
             parent_idx  INTEGER,
+            embed_model TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_order  ON chunks(source_id, idx);
-        CREATE INDEX IF NOT EXISTS idx_chunks_ns     ON chunks(namespace);",
+        CREATE INDEX IF NOT EXISTS idx_chunks_ns     ON chunks(namespace);
+        -- 命名空间级状态（2026-10-19）：记录「这个库上次是用哪个模型/多少维写的」。
+        -- 用途：换模型后 UI 能明确告诉用户「库里是 1024 维（qwen3），你现在配的是 768 维」，
+        -- 而不是只给一堆块数让人猜。sources 上的 embed_* 是**每条来源**的，这里记**最近一次**。
+        CREATE TABLE IF NOT EXISTS namespace_state (
+            namespace   TEXT PRIMARY KEY,
+            embed_model TEXT NOT NULL DEFAULT '',
+            embed_dim   INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL
+        );",
     )
     .map_err(|e| format!("初始化 RAG 表结构失败: {}", e))?;
 
@@ -145,6 +219,49 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("为表 chunks 补 parent_idx 列失败: {}", e))?;
         log::info!("[rag] 已为表 chunks 补 parent_idx 列（小-大分块）");
     }
+    // 自适应维度（2026-10-19）：记录每块/每来源是哪个模型、多少维产出的。
+    // 这样换嵌入模型时**不需要清库**：旧块保留、检索按维度分流，需要时再按文本重建向量。
+    // 为什么必须自适应：嵌入模型维度五花八门（768 / 1024 / 2560 / 4096），
+    // 把维度写死等于让"换模型"变成不可用功能。
+    for (tbl, col, ddl) in [
+        ("sources", "embed_model", "TEXT NOT NULL DEFAULT ''"),
+        ("sources", "embed_dim", "INTEGER NOT NULL DEFAULT 0"),
+        ("chunks", "embed_model", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !has_column(conn, tbl, col)? {
+            conn.execute(&format!("ALTER TABLE {tbl} ADD COLUMN {col} {ddl}"), [])
+                .map_err(|e| format!("为表 {tbl} 补 {col} 列失败: {}", e))?;
+            log::info!("[rag] 已为表 {tbl} 补 {col} 列（自适应维度）");
+        }
+    }
+    Ok(())
+}
+
+/// 记录命名空间最近一次写入用的模型/维度（幂等 upsert）。
+///
+/// 为什么要单独存一份：`sources.embed_model/embed_dim` 是**每条来源**的元数据，
+/// 而 UI 需要回答的是「这个库现在是什么模型写的」——多来源时前者无法直接回答。
+fn upsert_namespace_state(
+    conn: &Connection,
+    ns: &str,
+    model: &str,
+    dim: usize,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO namespace_state (namespace, embed_model, embed_dim, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(namespace) DO UPDATE SET
+           embed_model = excluded.embed_model,
+           embed_dim   = excluded.embed_dim,
+           updated_at  = excluded.updated_at",
+        params![
+            ns,
+            model,
+            dim as i64,
+            chrono::Local::now().to_rfc3339()
+        ],
+    )
+    .map_err(|e| format!("更新命名空间状态失败: {}", e))?;
     Ok(())
 }
 
@@ -216,6 +333,13 @@ pub struct RagSourceInput {
     /// 命名空间（隔离各 AI 子模块记忆）。缺省回落 'ai-chat'。
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// 按 `uri` 替换同命名空间下的旧来源（先删后写，级联删旧块）。
+    ///
+    /// 用于「重写式沉淀」：伴侣 persona / core 档案的 uri 是固定的，
+    /// 每同步一次就新增一条会让库里堆满同一份数据的历史版本（检索被重复内容占满）。
+    /// 对话记录这类 uri 天然唯一，不需要打开它。
+    #[serde(default)]
+    pub replace: bool,
 }
 
 fn default_namespace() -> String {
@@ -240,6 +364,10 @@ pub struct RagChunkInput {
     /// 父块 idx（小-大分块）。子块指向父块；父块自身为 None。
     #[serde(default)]
     pub parent_idx: Option<i64>,
+    /// 产出该向量的嵌入模型名（如 `Qwen3-Embedding-0.6B`）。
+    /// 换模型后旧块不会失效，只是**维度不同**——检索按维度分流，UI 可据此提示"这些块要重建"。
+    #[serde(default)]
+    pub embed_model: Option<String>,
     #[serde(default)]
     pub meta: Option<serde_json::Value>,
 }
@@ -262,6 +390,12 @@ pub struct RagSourceInfo {
     pub chunk_count: i64,
     pub status: String,
     pub namespace: String,
+    /// 嵌入模型名（该来源建库时用的）。老数据为空串。
+    #[serde(default)]
+    pub embed_model: String,
+    /// 向量维度（768 / 1024 / 2560 / 4096 …）。老数据为 0。
+    #[serde(default)]
+    pub embed_dim: i64,
 }
 
 /// 单条检索命中。
@@ -276,10 +410,17 @@ pub struct RagHit {
 }
 
 /// 检索结果。
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct RagQueryResult {
     pub results: Vec<RagHit>,
     pub total: usize,
+    /// 因维度与查询向量不一致而跳过的块数（换过嵌入模型时会 > 0）。
+    /// 前端据此提示"有 N 块来自旧模型，未参与本次检索"。
+    #[serde(default)]
+    pub skipped_dim: usize,
+    /// 同命名空间下实际参与比较的块数。
+    #[serde(default)]
+    pub compared: usize,
 }
 
 /// rag_embed_api 请求：文本 + 端点/模型（复用现有 ai profiles / ModelSettings 预设）。
@@ -333,6 +474,25 @@ pub fn rag_ingest(
         .transaction()
         .map_err(|e| format!("开启事务失败: {}", e))?;
 
+    // 重写式沉淀：同一 uri 先删旧来源（CASCADE 删旧块），避免历史版本堆积。
+    // 必须在事务里、且在维度校验之前 —— 否则旧数据的维度会影响本次判断。
+    if source.replace {
+        let old = tx
+            .execute(
+                "DELETE FROM sources WHERE uri = ?1 AND namespace = ?2",
+                params![source.uri, namespace],
+            )
+            .map_err(|e| format!("替换旧来源失败（已回滚）: {}", e))?;
+        if old > 0 {
+            log::info!(
+                "[rag] replace 模式：已删除旧来源 uri={} ns={} 条数={}",
+                source.uri,
+                namespace,
+                old
+            );
+        }
+    }
+
     // 维度一致性校验（2026-10-18）：
     // 余弦相似度要求两个向量同维，cosine() 对长度不等直接返回 0.0 —— 也就是说
     // 「换了个嵌入模型」在旧实现里表现为**检索静默失效**（永远 0 分、top-k 变成随机 6 条），
@@ -355,7 +515,7 @@ pub fn rag_ingest(
     }
     let existing_bytes: Option<i64> = tx
         .query_row(
-            "SELECT length(vec) FROM chunks WHERE namespace = ?1 LIMIT 1",
+            "SELECT length(vec) FROM chunks WHERE namespace = ?1 AND length(vec) > 0 LIMIT 1",
             params![namespace],
             |row| row.get(0),
         )
@@ -364,17 +524,26 @@ pub fn rag_ingest(
     if let Some(bytes) = existing_bytes {
         let existing_dim = (bytes.max(0) as usize) / 4;
         if existing_dim != first_dim {
-            return Err(format!(
-                "摄取失败：命名空间 '{}' 已有向量是 {} 维，本次是 {} 维。\
-                 换嵌入模型后必须清空该命名空间的旧数据再重建，否则相似度恒为 0。",
-                namespace, existing_dim, first_dim
-            ));
+            // 自适应维度：**不再拒绝**。旧块保留、检索按维度分流，
+            // 需要时用现有文本重建向量即可（不需要重新上传文件）。
+            log::warn!(
+                "[rag] ns={} 已有向量 {} 维，本批 {} 维 —— 允许混存（检索时按维度分流）；\
+                 旧块需要重建向量才能被新模型检索到",
+                namespace,
+                existing_dim,
+                first_dim
+            );
         }
     }
+    let batch_model = chunks
+        .iter()
+        .find_map(|c| c.embed_model.clone().filter(|m| !m.trim().is_empty()))
+        .unwrap_or_default();
 
     tx.execute(
-        "INSERT INTO sources (id, title, uri, type, created_at, chunk_count, status, namespace)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready', ?7)",
+        "INSERT INTO sources
+           (id, title, uri, type, created_at, chunk_count, status, namespace, embed_model, embed_dim)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready', ?7, ?8, ?9)",
         params![
             source_id,
             source.title,
@@ -382,7 +551,9 @@ pub fn rag_ingest(
             source.r#type,
             created_at,
             chunk_count as i64,
-            namespace
+            namespace,
+            batch_model,
+            first_dim as i64
         ],
     )
     .map_err(|e| format!("写入来源失败: {}", e))?;
@@ -406,8 +577,8 @@ pub fn rag_ingest(
             .map(|m| m.to_string())
             .unwrap_or_else(|| "{}".to_string());
         tx.execute(
-            "INSERT INTO chunks (id, source_id, idx, text, char_start, char_end, vec, meta, namespace, parent_idx)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO chunks (id, source_id, idx, text, char_start, char_end, vec, meta, namespace, parent_idx, embed_model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 chunk_id,
                 source_id,
@@ -418,11 +589,15 @@ pub fn rag_ingest(
                 blob,
                 meta,
                 namespace,
-                ch.parent_idx
+                ch.parent_idx,
+                ch.embed_model.clone().unwrap_or_else(|| batch_model.clone())
             ],
         )
         .map_err(|e| format!("写入分块失败: {}", e))?;
     }
+
+    // 记录命名空间状态（最近一次写入用的模型/维度）
+    upsert_namespace_state(&tx, &namespace, &batch_model, first_dim)?;
 
     tx.commit().map_err(|e| format!("提交事务失败: {}", e))?;
     Ok(RagIngestResult {
@@ -430,7 +605,6 @@ pub fn rag_ingest(
         chunk_count,
     })
 }
-
 /// 语义检索：对 query_vec 做暴力余弦 top-k，返回命中（含来源标题）。
 /// `namespace` 限定检索范围（杜绝跨模块串味）；缺省回落默认命名空间。
 /// `min_score` 非空时丢弃低于阈值的命中（避免把无关块塞进 prompt 造成"被上下文带偏"）。
@@ -540,11 +714,17 @@ pub fn rag_query(
 
     // 按相似度降序，取 top-k
     hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let compared = hits.len() + score_filtered;
     if hits.len() > k {
         hits.truncate(k);
     }
     let total = hits.len();
-    Ok(RagQueryResult { results: hits, total })
+    Ok(RagQueryResult {
+        results: hits,
+        total,
+        skipped_dim: dim_skipped,
+        compared,
+    })
 }
 
 /// 从行构造 RagSourceInfo（含命名空间字段）。
@@ -558,6 +738,8 @@ fn source_from_row(row: &rusqlite::Row) -> RagSourceInfo {
         chunk_count: row.get(5).unwrap_or_default(),
         status: row.get(6).unwrap_or_default(),
         namespace: row.get(7).unwrap_or_else(|_| RAG_NS_DEFAULT.to_string()),
+        embed_model: row.get(8).unwrap_or_default(),
+        embed_dim: row.get(9).unwrap_or_default(),
     }
 }
 
@@ -576,7 +758,7 @@ pub fn rag_list_sources(
     // 单条 SQL + 单闭包：namespace 为 NULL 时（?1 IS NULL）匹配全部，否则只返回该命名空间。
     let mut stmt = conn
         .prepare(
-            "SELECT id, title, uri, type, created_at, chunk_count, status, namespace
+            "SELECT id, title, uri, type, created_at, chunk_count, status, namespace, embed_model, embed_dim
              FROM sources WHERE (?1 IS NULL OR namespace = ?1) ORDER BY created_at DESC",
         )
         .map_err(|e| format!("准备列表语句失败: {}", e))?;
@@ -602,6 +784,8 @@ pub fn rag_delete_source(
     namespace: Option<String>,
     plugin_id: Option<String>,
 ) -> Result<(), String> {
+    // 数据第一：删任何东西之前先备份（保留最近 3 份）。备份失败就中止删除。
+    rag_backup(app, "delete")?;
     let conn = open_db(app)?;
     let ns_owned: Option<String> = match plugin_id.as_deref() {
         // 插件：强制只删 general，即使它传了别的 namespace
@@ -632,6 +816,367 @@ pub fn rag_delete_source(
     }
     log::info!("[rag] 已删除 source={} ns={:?}", source_id, ns);
     Ok(())
+}
+
+// ============ 重建向量（reembed）：换嵌入模型后按原文重算，不需要重传文件 ============
+//
+// 为什么需要它：自适应维度让「换模型」不再是死功能，但换完之后旧块的维度不同，
+// 检索会按维度分流跳过它们 —— 数据还在，只是搜不到。这时候唯一正确的动作是
+// **用库里已有的 chunk 文本重新算一遍向量**（原文在 chunks.text，不需要用户重新上传文件）。
+//
+// 数据安全约定：
+// - 一次重建 = 全有或全无：前端把所有批次算完才回调一次 update_vectors，
+//   任一 id 不属于该来源就整批回滚，原数据不动。
+// - 覆盖之前自动备份（rag_backup），保留最近 3 份。
+
+/// 待重建的块（只有带向量的子块；父块没有向量，不参与）。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RagChunkRow {
+    pub id: String,
+    pub idx: i64,
+    pub text: String,
+    pub char_start: i64,
+    pub char_end: i64,
+    pub parent_idx: Option<i64>,
+    /// 当前向量维度（length(vec)/4）。
+    pub dim: i64,
+    /// 当前向量由哪个模型产出（老数据为空串）。
+    pub embed_model: String,
+}
+
+/// 列出某个来源下**带向量**的块（供前端重新嵌入）。只读。
+pub fn rag_list_chunks(
+    app: &AppHandle,
+    source_id: String,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+) -> Result<Vec<RagChunkRow>, String> {
+    let ns = resolve_plugin_namespace(plugin_id.as_deref(), namespace);
+    let conn = open_db(app)?;
+    let owned: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM sources WHERE id = ?1 AND namespace = ?2",
+            params![source_id, ns],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("校验来源归属失败: {}", e))?;
+    if owned.is_none() {
+        return Err(format!("来源 {source_id} 不存在或不属于命名空间 {ns}"));
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, idx, text, char_start, char_end, parent_idx, length(vec)/4, embed_model
+             FROM chunks WHERE source_id = ?1 AND namespace = ?2 AND length(vec) > 0
+             ORDER BY idx",
+        )
+        .map_err(|e| format!("准备查询失败: {}", e))?;
+    let rows = stmt
+        .query_map(params![source_id, ns], |row| {
+            Ok(RagChunkRow {
+                id: row.get(0)?,
+                idx: row.get(1)?,
+                text: row.get(2)?,
+                char_start: row.get(3)?,
+                char_end: row.get(4)?,
+                parent_idx: row.get(5)?,
+                dim: row.get(6)?,
+                embed_model: row.get(7)?,
+            })
+        })
+        .map_err(|e| format!("执行查询失败: {}", e))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| format!("读取块失败: {}", e))?);
+    }
+    Ok(out)
+}
+
+/// 单块向量更新。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RagVecUpdate {
+    pub id: String,
+    pub vec: Vec<f32>,
+    #[serde(default)]
+    pub embed_model: Option<String>,
+}
+
+/// 批量写回新向量。**全有或全无**。
+pub fn rag_update_vectors(
+    app: &AppHandle,
+    source_id: String,
+    updates: Vec<RagVecUpdate>,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+) -> Result<usize, String> {
+    if updates.is_empty() {
+        return Err("重建失败：没有要写回的向量".to_string());
+    }
+    let dim = updates[0].vec.len();
+    if dim == 0 {
+        return Err("重建失败：向量为空（嵌入未产出结果）".to_string());
+    }
+    if let Some(bad) = updates.iter().find(|u| u.vec.len() != dim) {
+        return Err(format!(
+            "重建失败：块 {} 维度 {} 与本批 {} 不一致",
+            bad.id,
+            bad.vec.len(),
+            dim
+        ));
+    }
+    let ns = resolve_plugin_namespace(plugin_id.as_deref(), namespace);
+
+    // 数据第一：覆盖任何向量之前先备份
+    rag_backup(app, "reembed")?;
+
+    let mut conn = open_db(app)?;
+    let batch_model = updates
+        .iter()
+        .find_map(|u| u.embed_model.clone().filter(|m| !m.trim().is_empty()))
+        .unwrap_or_default();
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("开启事务失败: {}", e))?;
+
+    // 归属校验：来源必须属于该命名空间（防跨模块覆盖别人的记忆）
+    let owned: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM sources WHERE id = ?1 AND namespace = ?2",
+            params![source_id, ns],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("校验来源归属失败: {}", e))?;
+    if owned.is_none() {
+        return Err(format!("重建中止：来源 {source_id} 不存在或不属于命名空间 {ns}"));
+    }
+
+    let mut written = 0usize;
+    for u in &updates {
+        let model = u
+            .embed_model
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| batch_model.clone());
+        let changed = tx
+            .execute(
+                "UPDATE chunks SET vec = ?1, embed_model = ?2
+                 WHERE id = ?3 AND source_id = ?4 AND namespace = ?5",
+                params![vec_to_blob(&u.vec), model, u.id, source_id, ns],
+            )
+            .map_err(|e| format!("写入向量失败（已回滚）: {}", e))?;
+        if changed == 0 {
+            return Err(format!(
+                "重建中止：块 {} 不属于来源 {}（已回滚，原数据未改动）",
+                u.id, source_id
+            ));
+        }
+        written += 1;
+    }
+
+    tx.execute(
+        "UPDATE sources SET embed_model = ?1, embed_dim = ?2, status = 'ready' WHERE id = ?3",
+        params![batch_model, dim as i64, source_id],
+    )
+    .map_err(|e| format!("更新来源元数据失败（已回滚）: {}", e))?;
+
+    upsert_namespace_state(&tx, &ns, &batch_model, dim)?;
+
+    tx.commit().map_err(|e| format!("提交失败（已回滚）: {}", e))?;
+    log::info!(
+        "[rag] 重建完成：source={} 块数={} 维度={} 模型={}",
+        source_id,
+        written,
+        dim,
+        batch_model
+    );
+    Ok(written)
+}
+
+// ============ 统计（给 UI 判断"要不要重建"） ============
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DimStat {
+    pub dim: i64,
+    pub chunks: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ModelStat {
+    pub model: String,
+    pub chunks: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct RagStats {
+    pub sources: i64,
+    pub chunks: i64,
+    pub dims: Vec<DimStat>,
+    pub models: Vec<ModelStat>,
+    /// 最近一次写入用的模型名（namespace_state；未写过的库为空）。
+    #[serde(default)]
+    pub current_model: String,
+    /// 最近一次写入用的维度。
+    #[serde(default)]
+    pub current_dim: i64,
+    /// 最近一次写入时间（RFC3339）。
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// 命名空间内的维度/模型分布。换模型后 UI 据此提示"库里有 N 块是旧维度"。
+pub fn rag_stats(
+    app: &AppHandle,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+) -> Result<RagStats, String> {
+    let ns = resolve_plugin_namespace(plugin_id.as_deref(), namespace);
+    let conn = open_db(app)?;
+
+    let sources: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sources WHERE namespace = ?1",
+            params![ns],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let chunks: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM chunks WHERE namespace = ?1 AND length(vec) > 0",
+            params![ns],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    let mut dims = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT length(vec)/4 AS dim, count(*) FROM chunks
+         WHERE namespace = ?1 AND length(vec) > 0 GROUP BY dim ORDER BY count(*) DESC",
+    ) {
+        if let Ok(rows) = stmt.query_map(params![ns], |row| {
+            Ok(DimStat {
+                dim: row.get(0)?,
+                chunks: row.get(1)?,
+            })
+        }) {
+            for r in rows.flatten() {
+                dims.push(r);
+            }
+        }
+    }
+
+    let mut models = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT COALESCE(NULLIF(embed_model, ''), '(未知)') AS m, count(*) FROM chunks
+         WHERE namespace = ?1 AND length(vec) > 0 GROUP BY m ORDER BY count(*) DESC",
+    ) {
+        if let Ok(rows) = stmt.query_map(params![ns], |row| {
+            Ok(ModelStat {
+                model: row.get(0)?,
+                chunks: row.get(1)?,
+            })
+        }) {
+            for r in rows.flatten() {
+                models.push(r);
+            }
+        }
+    }
+
+    // 最近一次写入的模型/维度（可能还没有记录 —— 老库第一次启动时为空）
+    let state: Option<(String, i64, String)> = conn
+        .query_row(
+            "SELECT embed_model, embed_dim, updated_at FROM namespace_state WHERE namespace = ?1",
+            params![ns],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("读取命名空间状态失败: {}", e))?;
+    let (current_model, current_dim, updated_at) = state.unwrap_or_default();
+
+    Ok(RagStats {
+        sources,
+        chunks,
+        dims,
+        models,
+        current_model,
+        current_dim,
+        updated_at,
+    })
+}
+
+/// 清理「对话记录」类来源，只保留最近 `keep_recent` 条。
+///
+/// 为什么只清 `type='chat'`：persona / core / memory 是用户资产的浓缩，不能自动删。
+/// 安全策略：
+/// - 只在总数超过 `keep_recent * 1.5` 时才动手（避免每次启动都删一遍）
+/// - `keep_recent < 10` 直接拒绝（防手滑把库清空）
+/// - 删除前自动备份
+pub fn rag_prune(
+    app: &AppHandle,
+    namespace: Option<String>,
+    keep_recent: Option<usize>,
+    plugin_id: Option<String>,
+) -> Result<usize, String> {
+    let keep = keep_recent.unwrap_or(200);
+    if keep < 10 {
+        return Err("keep_recent 至少 10（防误删）".to_string());
+    }
+    let ns = resolve_plugin_namespace(plugin_id.as_deref(), namespace);
+    let mut conn = open_db(app)?;
+
+    let total: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sources WHERE namespace = ?1 AND type = 'chat'",
+            params![ns],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if (total.max(0) as usize) <= keep * 3 / 2 {
+        return Ok(0); // 没超过 1.5 倍，不动
+    }
+
+    let ids: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM sources WHERE namespace = ?1 AND type = 'chat'
+                 ORDER BY created_at DESC LIMIT -1 OFFSET ?2",
+            )
+            .map_err(|e| format!("准备清理语句失败: {}", e))?;
+        let rows = stmt
+            .query_map(params![ns, keep as i64], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("查询待清理来源失败: {}", e))?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(r.map_err(|e| format!("读取待清理来源失败: {}", e))?);
+        }
+        v
+    };
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    rag_backup(app, "prune")?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("开启事务失败: {}", e))?;
+    let mut deleted = 0usize;
+    for id in &ids {
+        deleted += tx
+            .execute(
+                "DELETE FROM sources WHERE id = ?1 AND namespace = ?2",
+                params![id, ns],
+            )
+            .map_err(|e| format!("删除旧对话记录失败（已回滚）: {}", e))?;
+    }
+    tx.commit().map_err(|e| format!("提交失败（已回滚）: {}", e))?;
+    log::info!(
+        "[rag] prune：ns={} 原有 {} 条对话记录，保留 {} 条，删除 {} 条",
+        ns,
+        total,
+        keep,
+        deleted
+    );
+    Ok(deleted)
 }
 
 // ============ 嵌入代理（rag_embed_api） ============
@@ -713,6 +1258,18 @@ pub async fn rag_embed_api(req: RagEmbedRequest) -> Result<RagEmbedResponse, Str
         if !resp.status().is_success() {
             let status = resp.status();
             let txt = resp.text().await.unwrap_or_default();
+            // 显式打印请求形状：嵌入 400 最常见的原因是「模型不支持 /v1/embeddings」
+            // 或「input 条数超过端点上限」，不打印就只能看到一行上游文案。
+            eprintln!(
+                "[rag-embed] 上游拒绝 HTTP {} · endpoint={} · model={} · 本批 {} 条 · 最长 {} 字
+  响应体={}",
+                status,
+                endpoint,
+                model,
+                req.texts.len(),
+                req.texts.iter().map(|t| t.chars().count()).max().unwrap_or(0),
+                txt.chars().take(400).collect::<String>()
+            );
             return Err(format!(
                 "嵌入 HTTP {}: {}",
                 status,

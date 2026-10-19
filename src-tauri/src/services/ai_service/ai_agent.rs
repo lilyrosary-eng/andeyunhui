@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
-use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
+use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, tool_schemas_for_api, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
 use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text, hydrate_images, persist_images};
 
 /// Agent 对话：原生 tool_calls + 循环。
@@ -71,7 +71,10 @@ async fn run_agent(
     let skill_guide = skills_guide(project_root_pb.as_deref());
     let system_final = format!("{}{}{}{}", base_system, mcp_guide, skill_guide, mem_ctx);
 
-    let tools: Vec<serde_json::Value> = registered_tools().iter().map(|t| t.function_schema()).collect();
+    // 统一走 tool_schemas_for_api()：内部会补齐/校验每个 schema 的 "type": "function"。
+    // 这正是 2026-10-19「HTTP 400 invalid tool type」的根因——tools 是整批发送的，
+    // 一个工具 schema 缺 type，整个 agent 模式全废。不要改回各自 map。
+    let tools: Vec<serde_json::Value> = tool_schemas_for_api();
     let client = reqwest::Client::new();
 
     // ── 图片路由：对话模型能不能「原生看图」 ────────────────────────────────
@@ -264,6 +267,9 @@ async fn run_agent(
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            // 上游 4xx：把请求形状打出来（模型/工具数/缺 type 的工具/effort）。
+            // 2026-10-19 的「invalid tool type 400」就是靠这类信息才能一眼定位。
+            crate::services::ai_service::log_rejected_request("ai_chat_agent", &url, &body, status.as_u16(), &text);
             let msg = format!("HTTP {}: {}", status, text);
             emit_agent_error(&app, &request_id, &msg);
             return Err(msg);

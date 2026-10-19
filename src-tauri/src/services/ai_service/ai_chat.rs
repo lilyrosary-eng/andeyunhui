@@ -425,6 +425,8 @@ pub async fn ai_chat(
             );
             continue;
         }
+        // 4xx 一律打印请求形状（模型/工具清单/缺 type 的工具），否则只剩一行上游文案无从定位
+        crate::services::ai_service::log_rejected_request("ai_chat", &url, &body, status.as_u16(), &text);
         let msg = format!("HTTP {}: {}", status, text);
         let _ = app.emit(
             "ai-error",
@@ -436,6 +438,8 @@ pub async fn ai_chat(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        // 4xx 一律打印请求形状（模型/工具清单/缺 type 的工具），否则只剩一行上游文案无从定位
+        crate::services::ai_service::log_rejected_request("ai_chat", &url, &body, status.as_u16(), &text);
         let msg = format!("HTTP {}: {}", status, text);
         let _ = app.emit(
             "ai-error",

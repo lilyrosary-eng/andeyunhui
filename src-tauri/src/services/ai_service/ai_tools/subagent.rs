@@ -185,10 +185,18 @@ pub(crate) async fn run_subagent_once(
     }
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let reg = registered_tools();
+    // 子代理只带最小工具族；同样必须过 normalize（一个坏 schema = 整批 400）
     let tools: Vec<serde_json::Value> = reg
         .iter()
         .filter(|t| matches!(t.name(), "file" | "grep" | "glob"))
-        .map(|t| t.function_schema())
+        .filter_map(|t| {
+            let name = t.name();
+            let r = normalize_tool_schema(t.function_schema());
+            if r.is_none() {
+                log::error!("[ai-tools] 子代理工具 schema 非法，已剔除: {}", name);
+            }
+            r
+        })
         .collect();
     let root_hint = project_root.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
     let system = format!(
@@ -243,10 +251,18 @@ pub(crate) async fn run_subagent_worker(
 ) {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let reg = registered_tools();
+    // 子代理只带最小工具族；同样必须过 normalize（一个坏 schema = 整批 400）
     let tools: Vec<serde_json::Value> = reg
         .iter()
         .filter(|t| matches!(t.name(), "file" | "grep" | "glob"))
-        .map(|t| t.function_schema())
+        .filter_map(|t| {
+            let name = t.name();
+            let r = normalize_tool_schema(t.function_schema());
+            if r.is_none() {
+                log::error!("[ai-tools] 子代理工具 schema 非法，已剔除: {}", name);
+            }
+            r
+        })
         .collect();
     let root_hint = project_root.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
     let system = format!(
@@ -541,6 +557,7 @@ impl AiTool for SubagentTool {
     }
     fn function_schema(&self) -> serde_json::Value {
         serde_json::json!({
+            "type": "function",
             "function": {
                 "name": "subagent",
                 "description": "把一段独立子任务委派给一个独立的子助手执行并回收其最终结论。适合代码调研、读文件、搜索等可独立完成的小步骤。子助手有独立目标，不继承当前对话上下文。用 task 写清要它做什么并请直接给结论；role 可选，指明其身份定位（如 代码审阅员 / 调研员）。设 run_in_background=true 时子助手将后台持续运行并返回 child_id，你可用 send_message 追问、interrupt_agent 中断、list_agents 聚合查看其状态。",
@@ -613,6 +630,7 @@ impl AiTool for SendMessageTool {
     }
     fn function_schema(&self) -> serde_json::Value {
         serde_json::json!({
+            "type": "function",
             "function": {
                 "name": "send_message",
                 "description": "向指定的后台子代理（subagent run_in_background=true 返回的 child_id）投递一条补充指令，使其继续处理或唤醒已暂存的子代理。child_id 来自 subagent 调用的返回。",
@@ -655,6 +673,7 @@ impl AiTool for InterruptAgentTool {
     }
     fn function_schema(&self) -> serde_json::Value {
         serde_json::json!({
+            "type": "function",
             "function": {
                 "name": "interrupt_agent",
                 "description": "中断并清理一个后台子代理（subagent run_in_background=true 返回的 child_id）。其已产出结论会作为中断原因回填给主 agent。",
@@ -694,6 +713,7 @@ impl AiTool for ListAgentsTool {
     }
     fn function_schema(&self) -> serde_json::Value {
         serde_json::json!({
+            "type": "function",
             "function": {
                 "name": "list_agents",
                 "description": "列出当前会话名下所有后台子代理（subagent run_in_background=true）的 id、角色、运行状态与已产出结论，便于你汇总并行 sibling 的最新进展。",

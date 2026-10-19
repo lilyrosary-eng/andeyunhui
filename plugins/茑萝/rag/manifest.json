@@ -18,9 +18,11 @@
       "rag_embed_api",
       "rag_ingest",
       "rag_init_db",
+      "rag_list_chunks",
       "rag_list_sources",
       "rag_query",
-      "read_external_dep_bytes"
+      "rag_stats",
+      "rag_update_vectors"
     ]
   },
   "parent": "niaoluo",

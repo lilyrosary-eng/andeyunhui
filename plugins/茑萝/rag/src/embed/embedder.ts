@@ -1,9 +1,11 @@
 // 嵌入抽象层接口。
 //
-// 设计决策（用户敲定）：
-// 同时支持「全本地」（OnnxEmbedder，wasm，无网络）与「全 API」（ApiEmbedder，Ollama / OpenAI 兼容），
-// 不强制混合。v1 默认走 ApiEmbedder（零模型下载、本体最轻）；OnnxEmbedder 接口与 worker 就绪，
-// 模型权重作为后续资源落地。
+// 现状（2026-10-19）：只有一种实现 —— ApiEmbedder（LM Studio / Ollama / 任意 OpenAI 兼容端点）。
+// 原本还有 OnnxEmbedder（onnxruntime-web 本地推理），但它的 tokenizer 是占位实现
+// （按空白切分、把下标当 token id），产出的向量是噪声 —— 已整体删除，不保留"半可用"的路径。
+// 本地嵌入请用 LM Studio 加载 GGUF 嵌入模型（见 embed-config 的三级端点解析）。
+//
+// 保留这个接口的意义：嵌入器是可替换的（测试里可以塞假实现；将来接真 tokenizer 也只加一个类）。
 
 /** 嵌入器统一接口。 */
 export interface Embedder {

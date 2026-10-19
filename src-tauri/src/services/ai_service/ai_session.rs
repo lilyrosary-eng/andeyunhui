@@ -3,6 +3,7 @@
 // （由 ai_service.rs 机械拆分而来，逻辑零改动）
 
 use std::fs;
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use crate::services::ai_service::ai_tools::{estimate_tokens, plan_store};
@@ -252,6 +253,16 @@ pub(crate) fn derive_messages(session: &EventSession, system: &str, extra_repair
 
     let mut out = vec![serde_json::json!({ "role": "system", "content": system })];
     let mut inserted_summary = false;
+    // 「当前 assistant 回合声明的 tool_call_id」。
+    //
+    // 为什么必须校验：OpenAI 兼容端点要求**每条 `role:"tool"` 消息都必须回应前面某条
+    // assistant 的 tool_calls**，且 id 必须对应上。一旦出现「没有归属的 tool 结果」，
+    // 端点直接 400（Anthropic/DeepSeek/qwen 各家文案不同，但都是拒绝）。
+    // 成因真实存在：压缩的 keep_tail 是按**事件条数**截断的，若截断点正好落在
+    // assistant(tool_calls) 与它的 Tool 结果之间，尾部就会以孤立的 Tool 事件开头。
+    // 修法有两层：① `maybe_compress_session` 把截断点吸附到安全边界（见那里）；
+    // ② 这里再兜一层 —— 归属不明的 tool 消息**丢弃并告警**，绝不让它毒化整批请求。
+    let mut pending_call_ids: HashSet<String> = HashSet::new();
     for ev in all {
         match &ev {
             // 用户回合直接派生为 role:"user"（遮蔽时同样跳过并插入摘要）。
@@ -267,6 +278,8 @@ pub(crate) fn derive_messages(session: &EventSession, system: &str, extra_repair
                 }
                 // 带图且未被上限截掉 → 组多模态 content 数组（文本块 + 若干 image_url 块）。
                 // 形状与 ai_ocr::vision_ask 一致，便于同一端点复用。
+                // 新的用户回合开始：之前 assistant 声明的 tool_calls 不应再有结果回流
+                pending_call_ids.clear();
                 if resolved_images.is_empty() || *seq < image_floor {
                     out.push(serde_json::json!({ "role": "user", "content": content }));
                 } else {
@@ -292,6 +305,11 @@ pub(crate) fn derive_messages(session: &EventSession, system: &str, extra_repair
                     }
                     continue;
                 }
+                // 本回合声明的 tool_call_id 集合（后续 role:"tool" 必须能对得上）
+                pending_call_ids = tool_calls
+                    .iter()
+                    .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    .collect();
                 let mut m = serde_json::json!({ "role": "assistant", "content": content });
                 if !tool_calls.is_empty() {
                     m["tool_calls"] = serde_json::Value::Array(tool_calls.clone());
@@ -302,6 +320,14 @@ pub(crate) fn derive_messages(session: &EventSession, system: &str, extra_repair
                 if is_shadowed(*seq) {
                     continue;
                 }
+                // 归属校验：没有对应 assistant.tool_calls 的结果会让端点直接 400（见上方注释）
+                if !pending_call_ids.contains(call_id) {
+                    log::warn!(
+                        "[ai_session] 丢弃归属不明的 tool 结果（call_id={}，seq={}）—— 通常是压缩截断点落在工具序列中间",
+                        call_id, seq
+                    );
+                    continue;
+                }
                 // 失败时前置 "Error: "（对齐 Claude Code 工具错误回填约定）让模型感知失败
                 let c = if *ok { content.clone() } else { format!("Error: {}", content) };
                 out.push(serde_json::json!({ "role": "tool", "tool_call_id": call_id, "content": c }));
@@ -309,6 +335,13 @@ pub(crate) fn derive_messages(session: &EventSession, system: &str, extra_repair
             SessionEvent::Compact { .. } => { /* 压缩检查点本身不产生消息，仅作为遮蔽边界 */ }
             SessionEvent::Interrupted { seq, call_id, content, .. } => {
                 if is_shadowed(*seq) {
+                    continue;
+                }
+                if !pending_call_ids.contains(call_id) {
+                    log::warn!(
+                        "[ai_session] 丢弃归属不明的中断补洞消息（call_id={}，seq={}）",
+                        call_id, seq
+                    );
                     continue;
                 }
                 out.push(serde_json::json!({ "role": "tool", "tool_call_id": call_id, "content": content }));
@@ -332,7 +365,21 @@ pub(crate) fn maybe_compress_session(session: &mut EventSession, high: usize, ke
     if n <= keep_tail + 2 {
         return false; // 事件太少，无需压缩
     }
-    let end = n - keep_tail;
+    let mut end = n - keep_tail;
+    // ★ 截断点必须落在「工具序列边界」上。
+    // keep_tail 按**事件条数**截断，若截断点恰好落在 assistant(tool_calls) 与其 Tool 结果之间，
+    // 尾部就会以孤立的 role:"tool" 开头 —— OpenAI 兼容端点会直接 400
+    // （"tool message must be a response to a preceding message with tool_calls"）。
+    // 这里把截断点向前吸附到该 assistant 之前：宁可多留几条，也不产生孤儿消息。
+    while end > 0 && end < n && matches!(
+        session.events[end],
+        SessionEvent::Tool { .. } | SessionEvent::Interrupted { .. }
+    ) {
+        end -= 1;
+    }
+    if end == 0 {
+        return false; // 吸附后没有可压缩的前缀，放弃本轮压缩（下一轮事件更多时再试）
+    }
     let mut sum = String::from("【早期上下文已压缩为以下已完成工具回合的摘要，供你在此基础上延续任务】");
     let mut shadow_until = 0u64;
     for ev in &session.events[..end] {

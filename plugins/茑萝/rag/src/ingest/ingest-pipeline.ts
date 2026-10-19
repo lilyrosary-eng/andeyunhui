@@ -1,9 +1,9 @@
 // 摄取管线：文档 → Markdown → 分块 → 嵌入 → 入库。
 //
 // 首步复用 Rust 命令 convert_to_markdown（原生解析 docx/pptx/xlsx/pdf 等）；
-// 分块复用 chunkText 4000/200；嵌入默认走 ApiEmbedder（rag_embed_api 代理），
-// 端点由 embed-config 三级解析决定（显式配置 → 复用算力来源 → Ollama 兜底）；
-// 也可注入 OnnxEmbedder（全本地）。最后调用 rag_ingest 入库。
+// 分块复用 chunkDocument（结构感知 + 小-大）；嵌入默认走 ApiEmbedder（rag_embed_api 代理），
+// 端点由 embed-config 三级解析决定（显式配置 → 复用算力来源 → Ollama 兜底）。
+// （2026-10-19：本地 ONNX 嵌入因 tokenizer 是假实现已删除。）
 //
 // 2026-10-18 修复：
 //   - source 的 namespace 以前在接口里没有声明（TS excess property），补上 `namespace?: string`；
@@ -18,6 +18,7 @@ import {
 } from '../api/host';
 import { ApiEmbedder, type ApiEmbedderOptions } from '../embed/api-embedder';
 import { createDefaultEmbedder, describeEmbedError, type EmbedConfig } from '../embed/embed-config';
+import { CachedEmbedder } from '../embed/cache';
 import type { Embedder } from '../embed/embedder';
 import { chunkDocument } from './chunker';
 
@@ -88,6 +89,11 @@ export async function ingestDocument(
   }
 
   // 3) 嵌入（只算子块；父块不参与向量检索）
+  //
+  // 分批（2026-10-19 健壮性）：此前一次性把所有子块发给端点 —— 一份 100 页 PDF 可能有
+  // 200+ 块，单请求体过大导致端点 400/超时，而且失败时完全没有进度可看。
+  // 现在按 EMBED_BATCH 分批，每批打一行进度日志；再外套一层进程内缓存（重复文本不重复请求）。
+  const EMBED_BATCH = 16;
   let embedder: Embedder;
   let cfg: EmbedConfig | null = null;
   if (input.embedder) {
@@ -99,10 +105,20 @@ export async function ingestDocument(
     embedder = picked.embedder;
     cfg = picked.cfg;
   }
+  const cached = new CachedEmbedder(embedder);
 
-  let vecs: number[][];
+  const vecs: number[][] = [];
   try {
-    vecs = await embedder.embed(childs.map((c) => c.text));
+    for (let i = 0; i < childs.length; i += EMBED_BATCH) {
+      const slice = childs.slice(i, i + EMBED_BATCH);
+      // document 侧**不加** query 指令前缀（Qwen3 只要求 query 侧加）
+      const part = await cached.embed(slice.map((c) => c.text));
+      if (part.length !== slice.length) {
+        throw new Error(`嵌入数量不匹配：本批期望 ${slice.length}，实际 ${part.length}`);
+      }
+      vecs.push(...part);
+      console.info(`[rag] 嵌入进度 ${Math.min(i + EMBED_BATCH, childs.length)}/${childs.length}`);
+    }
   } catch (e) {
     const msg = describeEmbedError(cfg, e);
     console.error('[rag] 摄取嵌入失败:', msg);
@@ -129,6 +145,7 @@ export async function ingestDocument(
     // 父块 vec 为空数组：后端据此跳过向量检索、只在命中子块后回填上下文
     vec: c.isParent ? [] : (vecByChildIdx.get(c.idx) ?? []),
     parent_idx: c.parentIdx,
+    embed_model: cfg?.model,
     meta: {
       char_start: c.charStart,
       char_end: c.charEnd,

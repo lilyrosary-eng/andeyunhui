@@ -212,6 +212,15 @@ const ALLOWED_COMMANDS = new Set([
   'rag_list_sources',
   'rag_delete_source',
   'rag_embed_api',
+  // 重建向量 / 统计（换嵌入模型后按原文重算；数据安全相关）
+  'rag_list_chunks',
+  'rag_update_vectors',
+  'rag_stats',
+  // 刻意**不放行**给插件：
+  //   rag_backup_db —— 应用级运维（后端破坏性写入前已自动备份 3 份），插件无此需求，
+  //                    放开等于允许「反复导出一份完整库」；
+  //   rag_prune     —— 会删数据（只清 type='chat'），归主应用启动时自管。
+  // 主应用（semanticMemory）不经沙箱，照常可调。
   // base64 文档 → Markdown（摄取对话框粘贴/拖入二进制时走这条；按路径那条已在上方 convert_to_markdown）
   'convert_bytes_to_markdown',
   // 一期 AI 办公 / 工作流：读取与写入笔记（成果物 → 笔记闭环）。

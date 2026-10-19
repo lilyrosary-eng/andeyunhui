@@ -77,6 +77,110 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
     ]
 }
 
+/// 把单个工具 schema 规整成 OpenAI 兼容端点要求的最小合法形状。
+///
+/// ## 为什么需要（2026-10-19 血案：HTTP 400）
+/// 端点返回 `Toolcall params are invalid, detail: invalid tool type`。
+/// 根因：`subagent` / `send_message` / `interrupt_agent` / `list_agents` 四个 schema 写成了
+/// `{"function": {...}}`，**漏了外层的 `"type": "function"`**。OpenAI 兼容端点会逐个校验
+/// tools 数组元素，缺 type（或 type 不是 "function"）就直接 400 —— 而 `tools` 是**整个数组**
+/// 一起发的，所以**一个工具写错，整个 agent 模式全废**（连不相关的 file/grep 都用不了）。
+///
+/// ## 为什么做成运行时兜底而不是只改那 4 个
+/// 工具族是分文件拆开的（10 个文件、26 个 schema），任何新工具都可能再漏一次；而漏一次的表现
+/// 是"整个 agent 400"，离出错点极远。这里在**发送前**统一补 type 并显式告警，把"静默 400"
+/// 变成"日志里点名哪个工具"，同时让缺 name/parameters 的工具**被剔除而不是毒化整批**。
+pub(crate) fn normalize_tool_schema(mut v: serde_json::Value) -> Option<serde_json::Value> {
+    let obj = match v.as_object_mut() {
+        Some(o) => o,
+        None => {
+            log::error!("[ai-tools] 工具 schema 不是 JSON 对象，已剔除：{}", v);
+            return None;
+        }
+    };
+    // 1) type 缺失 → 补上（唯一被允许自动修复的字段，因为语义无歧义）
+    match obj.get("type").and_then(|t| t.as_str()) {
+        Some("function") => {}
+        Some(other) => {
+            log::error!(
+                "[ai-tools] 工具 schema 的 type 非法（{}），已剔除 —— 只支持 function",
+                other
+            );
+            return None;
+        }
+        None => {
+            let name = obj
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("<未知>");
+            log::warn!(
+                "[ai-tools] 工具 {} 的 schema 缺少 \"type\": \"function\"，已自动补齐（请修正源头，否则每次请求都会告警）",
+                name
+            );
+            obj.insert("type".to_string(), serde_json::json!("function"));
+        }
+    }
+    // 2) function.name 必须有；缺失的工具发出去只会换来 400，直接剔除并点名
+    let name_ok = obj
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|n| !n.trim().is_empty())
+        .unwrap_or(false);
+    if !name_ok {
+        log::error!("[ai-tools] 工具 schema 缺少 function.name，已剔除：{}", v);
+        return None;
+    }
+    // 3) parameters 缺省补成空对象 schema（部分端点对 null 直接 400）
+    //    先取出名字再取可变借用，否则 obj 会被同时可变/不可变借用。
+    let tool_name = obj
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("?")
+        .to_string();
+    if let Some(func) = obj.get_mut("function").and_then(|f| f.as_object_mut()) {
+        if func.get("parameters").map(|p| p.is_null()).unwrap_or(true) {
+            log::warn!(
+                "[ai-tools] 工具 {} 未声明 parameters，已补 type=object 的空 schema",
+                tool_name
+            );
+            func.insert(
+                "parameters".to_string(),
+                serde_json::json!({ "type": "object", "properties": {} }),
+            );
+        }
+    }
+    Some(v)
+}
+
+/// 组装发给模型的 tools 数组：统一过 [`normalize_tool_schema`]，并记录数量。
+///
+/// **所有**请求体里的 `"tools"` 都必须走这里，不要各自 `.map(|t| t.function_schema())` ——
+/// 三处各写一遍正是这次 400 能长期潜伏的原因（只有一处会踩，其他两处各自以为没问题）。
+pub(crate) fn tool_schemas_for_api() -> Vec<serde_json::Value> {
+    let reg = registered_tools();
+    let mut out = Vec::with_capacity(reg.len());
+    let mut dropped: Vec<String> = Vec::new();
+    for t in reg.iter() {
+        let name = t.name().to_string();
+        match normalize_tool_schema(t.function_schema()) {
+            Some(v) => out.push(v),
+            None => dropped.push(name),
+        }
+    }
+    if !dropped.is_empty() {
+        log::error!(
+            "[ai-tools] 本次请求有 {} 个工具 schema 非法被剔除：{:?}",
+            dropped.len(),
+            dropped
+        );
+    }
+    log::debug!("[ai-tools] tools 组装完成：{} 个（原始 {} 个）", out.len(), reg.len());
+    out
+}
+
 /// 聚合已启用 MCP 服务器的工具清单，作为 guide 注入 agent 系统提示，让模型知道 mcp 工具可调用什么。
 /// 任一个服务器 list_tools 失败都静默降级（mcp_list_all_tools 内部已捕获）；整体限时 5s 防挂起。
 pub(crate) async fn mcp_tools_guide(app: &AppHandle) -> String {
@@ -211,6 +315,62 @@ pub(crate) fn estimate_tools_tokens(tools: &[serde_json::Value]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 血案回归（2026-10-19）：`invalid tool type` HTTP 400。
+    /// tools 是**整批**发送的，任何一个 schema 缺 `"type": "function"` 都会让整个 agent 请求被拒，
+    /// 所以这里对**全部已注册工具**逐个断言，而不是抽查。
+    #[test]
+    fn every_registered_tool_schema_is_openai_compatible() {
+        let reg = registered_tools();
+        assert!(!reg.is_empty(), "工具注册表不应为空");
+        let mut bad: Vec<String> = Vec::new();
+        for t in reg.iter() {
+            let name = t.name().to_string();
+            let s = t.function_schema();
+            let ty = s.get("type").and_then(|v| v.as_str());
+            let fname = s.pointer("/function/name").and_then(|v| v.as_str());
+            let params_obj = s
+                .pointer("/function/parameters")
+                .and_then(|v| v.as_object())
+                .is_some();
+            if ty != Some("function") {
+                bad.push(format!("{name}: type={ty:?}"));
+            } else if fname != Some(name.as_str()) {
+                bad.push(format!("{name}: function.name={fname:?}"));
+            } else if !params_obj {
+                bad.push(format!("{name}: parameters 不是对象"));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "以下工具 schema 会被 OpenAI 兼容端点判为 400，请修源头：{:#?}",
+            bad
+        );
+    }
+
+    /// 兜底器本身要能把漏 type 的 schema 修好，且不改变已合法的 schema。
+    #[test]
+    fn normalize_tool_schema_fixes_missing_type() {
+        let broken = serde_json::json!({
+            "function": { "name": "x", "parameters": { "type": "object", "properties": {} } }
+        });
+        let fixed = normalize_tool_schema(broken).expect("应能修复");
+        assert_eq!(fixed["type"], "function");
+        assert_eq!(fixed["function"]["name"], "x");
+
+        let ok = serde_json::json!({
+            "type": "function",
+            "function": { "name": "y", "parameters": { "type": "object", "properties": {} } }
+        });
+        assert_eq!(normalize_tool_schema(ok.clone()).unwrap(), ok);
+
+        // 非法 type → 剔除，而不是原样发出去换 400
+        let wrong = serde_json::json!({ "type": "web_search", "function": { "name": "z" } });
+        assert!(normalize_tool_schema(wrong).is_none());
+        // 缺 name → 剔除
+        let no_name = serde_json::json!({ "type": "function", "function": {} });
+        assert!(normalize_tool_schema(no_name).is_none());
+    }
 
     #[test]
     fn comfyui_prompt_slot_prefers_clip_text_encode() {

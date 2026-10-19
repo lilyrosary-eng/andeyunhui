@@ -2089,6 +2089,12 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             rag_commands::rag_list_sources,
             rag_commands::rag_delete_source,
             rag_commands::rag_embed_api,
+            // 重建向量 / 统计 / 备份（换嵌入模型后按原文重算，不需要重传文件）
+            rag_commands::rag_list_chunks,
+            rag_commands::rag_update_vectors,
+            rag_commands::rag_stats,
+            rag_commands::rag_backup_db,
+            rag_commands::rag_prune,
             // ========== 全局：开发者控制台（关于页面 · 联网/依赖安装）==========
             dev_console_http,
             // ========== 模块：局域网传输（黄金棋盘·传输，LocalSend v2 兼容）==========

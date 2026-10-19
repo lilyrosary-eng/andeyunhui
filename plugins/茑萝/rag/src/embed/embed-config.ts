@@ -40,7 +40,20 @@ interface AiProfileLite {
   name?: string;
   base_url?: string;
   api_key?: string;
+  /** 模型 id（v1 形状里叫 model）。 */
+  model?: string;
 }
+
+/**
+ * 「这个模型像嵌入模型吗」——按名字判断。
+ *
+ * 为什么需要：复用算力来源时，用户当前选中的往往是**对话模型**（LM Studio 的 selection
+ * 可能是 hy-mt2-1.8b 这类翻译小模型），拿去打 /v1/embeddings 会 404。
+ * 而同一个 provider 里常常同时挂着一个真正的嵌入模型（如
+ * `text-embedding-nomic-embed-text-v1.5`）。所以优先按名字挑嵌入模型，
+ * 挑不到才退回 active（并明确警告）。
+ */
+const EMBED_NAME_RE = /embed|embedding|bge|gte|m3e|nomic/i;
 
 /** 解析结果缓存（30s）：避免每次提问都 invoke 一次 ai_get_profiles。 */
 let cache: { cfg: EmbedConfig; at: number } | null = null;
@@ -107,22 +120,37 @@ export async function resolveEmbedConfig(force = false): Promise<EmbedConfig> {
     return cfg;
   }
 
-  // 2) 复用宿主当前算力来源
+  // 2) 复用宿主算力来源。优先挑同名 provider 下的「嵌入模型」，而不是用户当前选中的对话模型。
   try {
     const raw = await window.__HOST_API__.invoke<{ profiles?: AiProfileLite[]; active?: string | null }>(
       'ai_get_profiles',
     );
     const list = (raw?.profiles ?? []).filter((p) => p && p.base_url);
+    const embedProfile = list.find(
+      (p) => EMBED_NAME_RE.test(p.model ?? '') || EMBED_NAME_RE.test(p.name ?? ''),
+    );
     const active = list.find((p) => p.id === raw?.active) ?? list[0];
-    if (active?.base_url) {
+    const picked = embedProfile ?? active;
+    if (picked?.base_url) {
+      const usingEmbedModel = !!embedProfile;
+      if (!usingEmbedModel) {
+        console.warn(
+          '[rag] 没找到名字像「嵌入模型」的档案，只能复用当前算力来源的端点。' +
+            '若该端点不提供 /v1/embeddings，摄取会失败 —— 请到面板「修改」里显式指定嵌入模型。',
+        );
+      }
       const cfg: EmbedConfig = {
-        endpoint: toEmbeddingsUrl(active.base_url),
-        apiKey: active.api_key ?? '',
-        model: 'text-embedding-3-small',
+        endpoint: toEmbeddingsUrl(picked.base_url),
+        apiKey: picked.api_key ?? '',
+        model: usingEmbedModel
+          ? (picked.model || picked.name || '')
+          : 'text-embedding-3-small',
         source: 'profile',
-        label: `算力来源「${active.name || active.id || '未命名'}」`,
+        label: usingEmbedModel
+          ? `嵌入模型「${picked.model || picked.name}」`
+          : `算力来源「${picked.name || picked.id || '未命名'}」`,
       };
-      console.info('[rag] 嵌入端点 ← 复用算力来源:', cfg.endpoint, `模型=${cfg.model}`);
+      console.info('[rag] 嵌入端点 ← 复用:', cfg.endpoint, `模型=${cfg.model}`, `(${cfg.label})`);
       cache = { cfg, at: Date.now() };
       return cfg;
     }
@@ -174,5 +202,28 @@ export function describeEmbedError(cfg: EmbedConfig | null, e: unknown): string 
   const msg = e instanceof Error ? e.message : String(e);
   if (!cfg) return `嵌入失败：${msg}`;
   return `嵌入失败（${cfg.label}：${cfg.endpoint} · ${cfg.model}）：${msg}`;
+}
+
+/**
+ * 查询侧任务前缀（**只加给 query，不加给 document**）。
+ *
+ * 实测（2026-10-19，8 文档 / 4 查询，指标用**排序**而不是分数差）：
+ *   qwen3-0.6b 无前缀       Recall@1 4/4 · MRR 1.000
+ *   qwen3-0.6b + Instruct   Recall@1 4/4 · MRR 1.000
+ *   nomic-v1.5 无前缀       Recall@1 2/4 · MRR 0.625
+ *   nomic-v1.5 + Instruct   Recall@1 2/4 · MRR 0.625（加前缀反而让 margin 由 +0.008 变 -0.001）
+ *
+ * ⚠️ 更正：上一版这里写「加前缀区分度 0.284→0.370，提升 30%」是**错的** ——
+ * 那是拿「相关分−无关分」的绝对差比较，而加前缀后所有分数整体下移（尺度变了），
+ * 绝对差不可比（锚点没对齐）。用排序指标看，前缀对 Qwen3 **没有可测收益**。
+ *
+ * 保留前缀的唯一理由：Qwen3 官方要求 instruction（对长查询/多语言任务有帮助），
+ * 且加前缀实测无副作用。**不要再对外宣称它提升了检索质量**。
+ */
+export function queryPrefixFor(model: string): string {
+  if (/qwen3[-_ .]?embed/i.test(model)) {
+    return 'Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ';
+  }
+  return '';
 }
 

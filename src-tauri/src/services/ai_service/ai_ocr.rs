@@ -159,6 +159,19 @@ pub async fn vision_ask(
         .unwrap_or_else(|| "请提取图片中的全部文字，保持原始排版与顺序，仅输出识别结果不要任何说明".to_string());
     let data_url = format!("data:{};base64,{}", image_mime, image_base64);
 
+    // 尺寸前置校验（2026-10-19）：各家视觉模型对单图普遍有 5~10MB 的硬限，
+    // 超限时端点只回一句 400（"image too large" / "invalid image"），前端完全看不出是尺寸问题。
+    // base64 膨胀约 4/3，所以按 12MB 字符（≈9MB 原始）先拦一道，给出可自纠的中文提示。
+    const MAX_DATA_URL_BYTES: usize = 12 * 1024 * 1024;
+    if data_url.len() > MAX_DATA_URL_BYTES {
+        return Err(format!(
+            "图片过大：base64 {} MB（约原始 {:.1} MB），超过视觉端点普遍接受的 9MB 上限。\
+             请先压缩/裁剪后再试（该错误在端点侧只会表现为 HTTP 400，无法自纠）。",
+            data_url.len() / (1024 * 1024),
+            data_url.len() as f64 * 3.0 / 4.0 / (1024.0 * 1024.0)
+        ));
+    }
+
     // 模型优先级：显式覆盖 > 档案的视觉模型 > 对话模型（保留旧配置的回落路径）
     let ocr_model = resolve_vision_model(&config, &cfg, model);
 
@@ -292,6 +305,23 @@ pub async fn vision_ask_raw(
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
     let p = prompt.map(str::to_string).unwrap_or_else(|| "请描述这张图片".to_string());
     let data_url = format!("data:{};base64,{}", image_mime, image_base64);
+
+    // 尺寸前置校验（2026-10-19）：各家视觉模型对单图普遍有 5~10MB 的硬限，
+    // 超限时端点只回一句 400（"image too large" / "invalid image"），前端完全看不出是尺寸问题。
+    // base64 膨胀约 4/3，所以按 12MB 字符（≈9MB 原始）先拦一道，给出可自纠的中文提示。
+    const MAX_DATA_URL_BYTES: usize = 12 * 1024 * 1024;
+    if data_url.len() > MAX_DATA_URL_BYTES {
+        // 这一层返回结构化错误（status 0 = 没发出请求），探测层据此判「未知」而非「模型不支持视觉」
+        return Err(VisionHttpError {
+            status: 0,
+            body: format!(
+                "图片过大：base64 {} MB（约原始 {:.1} MB），超过视觉端点普遍接受的 9MB 上限。\
+                 请先压缩/裁剪后再试（端点侧只会表现为 HTTP 400，无法自纠）。",
+                data_url.len() / (1024 * 1024),
+                data_url.len() as f64 * 3.0 / 4.0 / (1024.0 * 1024.0)
+            ),
+        });
+    }
 
     let ocr_model = resolve_vision_model(&config, &cfg, model);
 

@@ -66,6 +66,11 @@ pub fn run() {
             rag_list_sources,
             rag_delete_source,
             rag_embed_api,
+            rag_list_chunks,
+            rag_update_vectors,
+            rag_stats,
+            rag_backup_db,
+            rag_prune,
             // ========== 多模态（阶段 5 · AI 发图 + 语音）==========
             crate::services::multimodal_service::ai_generate_image,
             crate::services::multimodal_service::ai_tts,
@@ -105,29 +110,50 @@ pub fn run() {
 // rag_service 的同名函数（rag_service 用 &AppHandle，Tauri command 需值参数）。
 
 use crate::services::rag_service::{
-    RagChunkInput, RagEmbedRequest, RagEmbedResponse, RagIngestResult, RagQueryResult,
-    RagSourceInput, RagSourceInfo,
+    RagChunkInput, RagChunkRow, RagEmbedRequest, RagEmbedResponse, RagIngestResult,
+    RagQueryResult, RagSourceInput, RagSourceInfo, RagStats, RagVecUpdate,
 };
 
 /// Android 端命令名与桌面 commands 层一致（`rag_init_db` 等），
 /// 前端无需区分平台。桌面走 commands::rag_commands，Android 走本地包装。
-#[tauri::command(rename_all = "camelCase")]
-pub fn rag_init_db(app: tauri::AppHandle) -> Result<(), String> {
-    crate::services::rag_service::rag_init_db(&app)
+///
+/// 2026-10-19：全部改成 `async` + `spawn_blocking`。Tauri 的**同步命令跑在主线程**，
+/// 而 RAG 每个命令背后都是 SQLite 全表扫描 / 大批量写入 —— 同步执行会卡死 UI，
+/// 移动端尤其明显（表现为界面冻结、被系统判为 ANR）。
+async fn rag_blocking<T, F>(what: &str, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(f).await {
+        Ok(r) => r,
+        Err(e) => Err(format!("{what} 后台任务异常终止（线程 panic/取消）: {e}")),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn rag_ingest(
+pub async fn rag_init_db(app: tauri::AppHandle) -> Result<(), String> {
+    rag_blocking("rag_init_db", move || {
+        crate::services::rag_service::rag_init_db(&app)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rag_ingest(
     app: tauri::AppHandle,
     source: RagSourceInput,
     chunks: Vec<RagChunkInput>,
     plugin_id: Option<String>,
 ) -> Result<RagIngestResult, String> {
-    crate::services::rag_service::rag_ingest(&app, source, chunks, plugin_id)
+    rag_blocking("rag_ingest", move || {
+        crate::services::rag_service::rag_ingest(&app, source, chunks, plugin_id)
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn rag_query(
+pub async fn rag_query(
     app: tauri::AppHandle,
     query_vec: Vec<f32>,
     top_k: Option<usize>,
@@ -135,26 +161,35 @@ pub fn rag_query(
     min_score: Option<f32>,
     plugin_id: Option<String>,
 ) -> Result<RagQueryResult, String> {
-    crate::services::rag_service::rag_query(&app, query_vec, top_k, namespace, min_score, plugin_id)
+    rag_blocking("rag_query", move || {
+        crate::services::rag_service::rag_query(&app, query_vec, top_k, namespace, min_score, plugin_id)
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn rag_list_sources(
+pub async fn rag_list_sources(
     app: tauri::AppHandle,
     namespace: Option<String>,
     plugin_id: Option<String>,
 ) -> Result<Vec<RagSourceInfo>, String> {
-    crate::services::rag_service::rag_list_sources(&app, namespace, plugin_id)
+    rag_blocking("rag_list_sources", move || {
+        crate::services::rag_service::rag_list_sources(&app, namespace, plugin_id)
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn rag_delete_source(
+pub async fn rag_delete_source(
     app: tauri::AppHandle,
     source_id: String,
     namespace: Option<String>,
     plugin_id: Option<String>,
 ) -> Result<(), String> {
-    crate::services::rag_service::rag_delete_source(&app, source_id, namespace, plugin_id)
+    rag_blocking("rag_delete_source", move || {
+        crate::services::rag_service::rag_delete_source(&app, source_id, namespace, plugin_id)
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -162,4 +197,73 @@ pub async fn rag_embed_api(
     req: RagEmbedRequest,
 ) -> Result<RagEmbedResponse, String> {
     crate::services::rag_service::rag_embed_api(req).await
+}
+
+// ============ 重建向量 / 统计 / 备份（与桌面命令同名，前端无需区分平台） ============
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rag_backup_db(
+    app: tauri::AppHandle,
+    reason: Option<String>,
+) -> Result<String, String> {
+    let reason = reason.unwrap_or_else(|| "manual".to_string());
+    rag_blocking("rag_backup_db", move || {
+        match crate::services::rag_service::rag_backup(&app, &reason)? {
+            Some(p) => Ok(p.to_string_lossy().to_string()),
+            None => Ok(String::new()),
+        }
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rag_list_chunks(
+    app: tauri::AppHandle,
+    source_id: String,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+) -> Result<Vec<RagChunkRow>, String> {
+    rag_blocking("rag_list_chunks", move || {
+        crate::services::rag_service::rag_list_chunks(&app, source_id, namespace, plugin_id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rag_update_vectors(
+    app: tauri::AppHandle,
+    source_id: String,
+    updates: Vec<RagVecUpdate>,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+) -> Result<usize, String> {
+    rag_blocking("rag_update_vectors", move || {
+        crate::services::rag_service::rag_update_vectors(&app, source_id, updates, namespace, plugin_id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rag_stats(
+    app: tauri::AppHandle,
+    namespace: Option<String>,
+    plugin_id: Option<String>,
+) -> Result<RagStats, String> {
+    rag_blocking("rag_stats", move || {
+        crate::services::rag_service::rag_stats(&app, namespace, plugin_id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rag_prune(
+    app: tauri::AppHandle,
+    namespace: Option<String>,
+    keep_recent: Option<usize>,
+    plugin_id: Option<String>,
+) -> Result<usize, String> {
+    rag_blocking("rag_prune", move || {
+        crate::services::rag_service::rag_prune(&app, namespace, keep_recent, plugin_id)
+    })
+    .await
 }

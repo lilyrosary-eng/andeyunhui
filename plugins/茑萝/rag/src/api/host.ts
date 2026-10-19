@@ -27,6 +27,10 @@ export interface RagHit {
 export interface RagQueryResponse {
   results: RagHit[];
   total: number;
+  /** 因维度与查询向量不一致被跳过的块数（换过嵌入模型时 > 0）。 */
+  skipped_dim?: number;
+  /** 实际参与余弦比较的块数。 */
+  compared?: number;
 }
 
 /** rag_ingest 的单个分块入参。 */
@@ -39,6 +43,8 @@ export interface RagChunkInput {
   vec: number[];
   /** 父块 idx（小-大分块）：命中子块后由后端回填父块文本；父块自身为 null/undefined。 */
   parent_idx?: number | null;
+  /** 产出该向量的嵌入模型名（用于「这块是哪个模型建的」追溯）。 */
+  embed_model?: string;
   meta?: Record<string, unknown>;
 }
 
@@ -50,6 +56,10 @@ export interface RagSourceInput {
   /** 命名空间（默认 general）。后端缺省回落 ai-chat，所以手动知识库必须显式传 general，
    *  否则会和 AI 对话的伴侣记忆混在一起。 */
   namespace?: string;
+  /** 按 uri 替换同命名空间下的旧来源（先删后写）。
+   *  用于「同一份数据的重写式沉淀」（伴侣 persona / core 档案），避免每次同步都新增一条。
+   *  对话记录这类天然唯一的 uri 不需要打开它。 */
+  replace?: boolean;
 }
 
 /** rag_ingest 响应。 */
@@ -75,6 +85,9 @@ export interface RagSourceInfo {
   status: string;
   /** 后端从 1.0.0 起就返回该字段，前端此前漏声明。 */
   namespace?: string;
+  /** 建库时用的嵌入模型 / 维度（自适应维度）。老数据为空 / 0。 */
+  embed_model?: string;
+  embed_dim?: number;
 }
 
 /** 嵌入代理选项：端点/key/模型，复用现有 ai profiles / ModelSettings Ollama 预设。 */
@@ -83,6 +96,68 @@ export interface EmbedOptions {
   apiKey?: string;
   model?: string;
 }
+
+// ============ 重建向量 / 统计 / 备份（2026-10-19 数据安全） ============
+
+/** 待重建的块（只含带向量的子块）。 */
+export interface RagChunkRow {
+  id: string;
+  idx: number;
+  text: string;
+  char_start: number;
+  char_end: number;
+  parent_idx?: number | null;
+  /** 当前向量维度。 */
+  dim: number;
+  /** 当前向量由哪个模型产出（老数据为空串）。 */
+  embed_model: string;
+}
+
+/** 单块向量更新。 */
+export interface RagVecUpdate {
+  id: string;
+  vec: number[];
+  embed_model?: string;
+}
+
+/** 命名空间内的维度/模型分布。 */
+export interface RagStats {
+  sources: number;
+  chunks: number;
+  dims: { dim: number; chunks: number }[];
+  models: { model: string; chunks: number }[];
+  /** 最近一次写入用的模型（未写过的库为空串）。 */
+  current_model?: string;
+  /** 最近一次写入用的维度。 */
+  current_dim?: number;
+  /** 最近一次写入时间。 */
+  updated_at?: string;
+}
+
+/** 列出某来源下带向量的块（只读）。 */
+export function ragListChunks(sourceId: string, namespace?: string): Promise<RagChunkRow[]> {
+  return hostApi.invoke<RagChunkRow[]>('rag_list_chunks', { sourceId, namespace });
+}
+
+/** 批量写回新向量（后端全有或全无；覆盖前自动备份）。 */
+export function ragUpdateVectors(
+  sourceId: string,
+  updates: RagVecUpdate[],
+  namespace?: string,
+): Promise<number> {
+  return hostApi.invoke<number>('rag_update_vectors', { sourceId, updates, namespace });
+}
+
+/** 命名空间维度/模型分布。 */
+export function ragStats(namespace?: string): Promise<RagStats> {
+  return hostApi.invoke<RagStats>('rag_stats', { namespace });
+}
+
+// 刻意不封装 rag_backup_db / rag_prune：
+// - `rag_backup_db` 是应用级运维操作（后端在每次破坏性写入前已自动 VACUUM INTO 备份 3 份），
+//   插件没有「手动备份」这个需求；放开它等于把「反复导出一份完整库」暴露给插件。
+// - `rag_prune` 会删数据（只清 type='chat'），归主应用启动时自管，插件无权触发。
+// 两者也都**不在** pluginSandbox 的全局白名单里 —— 上层策略 + 这里不封装，双层都堵住。
 
 // ============ RAG 命令 ============
 
@@ -141,19 +216,6 @@ export function convertBytesToMarkdown(
     extension,
     originalName,
   });
-}
-
-/** 读取外部依赖文件的原始字节（如 onnx 模型权重），沙箱内需经 Rust 代理。
- * 后端返回 base64 编码字符串（紧凑传输），此处解码为 number[] 供调用方 toArrayBuffer。 */
-export async function readExternalDepBytes(relativePath: string): Promise<number[]> {
-  const base64 = await hostApi.invoke<string>('read_external_dep_bytes', {
-    relativePath,
-  });
-  if (!base64) return [];
-  const binary = atob(base64);
-  const bytes = new Array<number>(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
 }
 
 // ============ AI 对话（生成答案，流式） ============

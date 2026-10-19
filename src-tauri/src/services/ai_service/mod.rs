@@ -54,3 +54,55 @@ pub use ai_conversations::{__cmd__ai_get_conversations, __cmd__ai_save_conversat
 pub use image_store::{__cmd__ai_media_usage, __cmd__ai_media_cleanup, __tauri_command_name_ai_media_usage, __tauri_command_name_ai_media_cleanup};
 pub use caps_probe::{__cmd__ai_probe_vision, __cmd__ai_test_selfcheck, __tauri_command_name_ai_probe_vision, __tauri_command_name_ai_test_selfcheck};
 
+// ============ 上游 4xx 诊断（2026-10-19） ============
+//
+// 背景：端点只回 `{"error":{"message":"Toolcall params are invalid, detail:invalid tool type"}}`，
+// 前端拿到的就是这一行 —— 但**请求是谁发的、带了几个工具、哪个工具坏了，一概不知道**。
+// 那次 400 的真因是 4 个工具 schema 漏了 `"type": "function"`，而 tools 是整批发送，
+// 于是「一个工具写错 = 整个 agent 模式全废」，排查却只能靠翻代码。
+//
+// 这里统一在 4xx 分支把**请求形状**打出来（不回显 message 正文，避免日志里落隐私）。
+pub(crate) fn log_rejected_request(
+    scope: &str,
+    url: &str,
+    body: &serde_json::Value,
+    status: u16,
+    text: &str,
+) {
+    let msg_n = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let tools = body.get("tools").and_then(|v| v.as_array());
+    let tool_names: Vec<&str> = tools
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let missing_type: Vec<&str> = tools
+        .map(|a| {
+            a.iter()
+                .filter(|t| t.get("type").and_then(|v| v.as_str()) != Some("function"))
+                .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let roles: Vec<&str> = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|m| m.get("role").and_then(|r| r.as_str())).collect())
+        .unwrap_or_default();
+    eprintln!(
+        "[{scope}] 上游拒绝 HTTP {status}\n  url={url}\n  model={}\n  messages={msg_n} roles={roles:?}\n  tools={} 缺type={missing_type:?}\n  工具清单={tool_names:?}\n  effort={:?} thinking={:?} temperature={:?} max_tokens={:?}\n  stream={:?}\n  响应体={text}",
+        body.get("model").and_then(|m| m.as_str()).unwrap_or("?"),
+        tool_names.len(),
+        body.get("reasoning_effort"),
+        body.get("thinking"),
+        body.get("temperature"),
+        body.get("max_tokens"),
+        body.get("stream"),
+    );
+}

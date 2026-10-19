@@ -5,8 +5,13 @@
 //   「全局设置 → 茑萝 → 显示 RAG 知识库模块」里把它从侧栏隐藏，见 HostSidebar 的 ragVisible）。
 // - 真正的语义检索由 Rust 后端 rag_query 提供；IDE(<search>/<rag>)、gongfang 等任意插件
 //   通过 hostApi.invoke('rag_query', ...) 复用，无需本插件加载。
-// - 本插件提供：嵌入抽象层(ApiEmbedder/OnnxEmbedder)、摄取管线、检索管线、Prompt 模板，
+// - 本插件提供：嵌入抽象层(ApiEmbedder)、摄取管线、检索管线、Prompt 模板，
 //   以及主面板 UI（知识库面板：摄取对话框 + 带引用对话）。
+//
+// ⚠️ 本地 ONNX 嵌入（OnnxEmbedder + embed.worker）已于 2026-10-19 **删除**：
+// 它的 tokenizer 是占位实现（按空白分词、把**下标**当 token id），即使把 model.onnx
+// 放进 external-deps 也只会产出无意义向量 —— 是个"看起来能用、实际是噪声"的陷阱。
+// 要用本地嵌入只能走「LM Studio / Ollama 的 /v1/embeddings」，效果与真 tokenizer 等价且零维护。
 //
 // ⚠️ 历史缺陷（2026-10-18 修复）：此前 `component` 是一个 `return null` 的占位组件，
 // 真正的 UI 挂在 `settings` 字段上——而宿主**从未消费过 PluginDef.settings**（全仓无读取点），
@@ -16,10 +21,10 @@
 const registry = (window as unknown as { __PLUGIN_REGISTRY__: any }).__PLUGIN_REGISTRY__;
 
 import { KnowledgeBasePanel } from './components/KnowledgeBasePanel';
+import { RagSidebar } from './components/RagSidebar';
 import { ingestDocument } from './ingest/ingest-pipeline';
 import { retrieve } from './retrieve/retriever';
 import { ApiEmbedder } from './embed/api-embedder';
-import { OnnxEmbedder } from './embed/onnx-embedder';
 import { RagPromptBuilder } from './prompt/rag-prompt';
 import { ragStore } from './store/rag-store';
 
@@ -28,7 +33,6 @@ import { ragStore } from './store/rag-store';
   ingestDocument,
   retrieve,
   ApiEmbedder,
-  OnnxEmbedder,
   RagPromptBuilder,
   ragStore,
 };
@@ -52,7 +56,7 @@ registry.register({
   kind: 'module',
   visible: false, // 不进一级导航栏；只作为「茑萝」子模块（parent）出现
   component: RagModule,
-  sidebar: undefined,
+  sidebar: RagSidebar,
   settings: KnowledgeBasePanel,
   parent: 'niaoluo',
   codename: '茑萝',

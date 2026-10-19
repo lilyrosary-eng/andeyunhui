@@ -12,7 +12,8 @@ import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { uid, persistConversations, loadConversations, genTitle, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
 import { resolveMediaConfig } from '@/core/ai/media/resolve';
-import { retrieveChatContext, ingestChatTurn } from '@/core/stores/semanticMemory';
+import { retrieveChatContext, ingestChatTurn, autoSyncCompanion } from '@/core/stores/semanticMemory';
+import { maybeSummarizeConversation } from '@/core/ai/l4SummaryLoop';
 import { useCompanionStore, buildPersonaContext } from '@/core/stores/companionStore';
 
 /**
@@ -538,6 +539,13 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         const finalAsst = stateRef.current.conversations
           .find((c) => c.id === cid)?.messages.find((m) => m.id === asstId)?.content ?? '';
         void ingestChatTurn(content, finalAsst, 'ai-chat');
+        // 桌面端自动沉淀伴侣档案（L1 persona / L2 core）：指纹比对，变了才写，零 LLM 成本。
+        // 此前桌面完全没有这条链路 —— 档案只有用户手动点「同步」才进向量库。
+        void autoSyncCompanion();
+        // L2 摘要 / L3 摘要向量 / L4 关系快照：每 10 轮一次（唯一会花 LLM 调用的一环）。
+        // 轮次从消息数派生 + 水位线去重，重复进入会话不会重跑；失败只 warn，不影响对话。
+        const convMsgs = stateRef.current.conversations.find((c) => c.id === cid)?.messages ?? [];
+        void maybeSummarizeConversation(cid, convMsgs);
       });
       reg.then((u) => { unlisten = u; });
     }

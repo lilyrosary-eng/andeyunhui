@@ -33,8 +33,21 @@ function ensureInit(): Promise<boolean> {
   initPromise = (async () => {
     try {
       await invoke('rag_init_db');
+      // 启动后延迟 5s 做一次维度自愈（异步、不阻塞对话首轮；见文件末尾注释）
+      setTimeout(() => {
+        void healEmbeddingDimension().catch((e) =>
+          console.warn('[rag-heal] 自愈任务异常:', e),
+        );
+        // 顺手清理过量的对话记录（后端只在超过 1.5 倍阈值时才动手，删除前自动备份）
+        void invoke<number>('rag_prune', { namespace: 'ai-chat', keepRecent: 200 })
+          .then((n) => {
+            if (n > 0) console.info(`[rag-prune] 已清理 ${n} 条旧对话记录（保留最近 200 条）`);
+          })
+          .catch((e) => console.warn('[rag-prune] 清理失败（不影响对话）:', e));
+      }, 5000);
       return true;
-    } catch {
+    } catch (e) {
+      console.warn('[semanticMemory] rag_init_db 失败（记忆功能降级）:', e);
       return false;
     }
   })();
@@ -70,8 +83,14 @@ async function resolveEmbedConfig(): Promise<{ endpoint: string; apiKey: string;
   // 自动复用：当前算力来源的 base_url + api_key（OpenAI 兼容 /v1/embeddings）
   try {
     const raw = await invoke<{ profiles?: AiProfile[]; active?: string | null }>('ai_get_profiles');
-    const list = (raw?.profiles ?? []).filter((p) => p && p.id && p.base_url && p.api_key);
-    const active = list.find((p) => p.id === raw?.active) ?? list[0];
+    // 注意：这里**不能再要求 api_key 非空** —— 本地 LM Studio 的 key 可为空/任意，
+    // 过滤掉它会导致「本地嵌入明明可用却被判定为未配置」。
+    const list = (raw?.profiles ?? []).filter((p) => p && p.id && p.base_url);
+    // 优先挑「名字像嵌入模型」的档案：用户当前选中的往往是对话模型，
+    // 拿去打 /v1/embeddings 会 404（或在 LM Studio 上被静默替换成已加载的嵌入模型）。
+    const EMBED_RE = /embed|embedding|bge|gte|m3e|nomic/i;
+    const embedLike = list.find((p) => EMBED_RE.test(p.model ?? '') || EMBED_RE.test(p.name ?? ''));
+    const active = embedLike ?? list.find((p) => p.id === raw?.active) ?? list[0];
     if (active && active.base_url) {
       // 兼容 base_url 是否已含 /v1：/v1/embeddings 或 /embeddings 都正确拼接
       const base = active.base_url.replace(/\/+$/, '');
@@ -79,8 +98,8 @@ async function resolveEmbedConfig(): Promise<{ endpoint: string; apiKey: string;
       return {
         endpoint,
         apiKey: active.api_key ?? '',
-        // 用户未指定嵌入模型时用常见默认（失败可提示改用显式配置）
-        model: 'text-embedding-3-small',
+        // 找到真嵌入模型就用它；否则才退回常见默认（可能不被该端点支持）
+        model: embedLike ? (active.model || active.name || '') : 'text-embedding-3-small',
       };
     }
   } catch { /* 忽略 */ }
@@ -120,6 +139,18 @@ export async function ingestMemory(
 ): Promise<void> {
   if (isBrowserPreview()) return;
   if (!(await ensureInit())) return;
+  // 摘要去重（2026-10-19 从 syncCompanionToSemantic 迁到这里）：
+  // 增量链路（移动端 summarizeMemory → addMemory → ingestMemory）此前**没有任何去重**，
+  // 同一话题的连续摘要会各写一条 source，检索时被近似内容占满。
+  // 比较对象排除刚写入的最新一条（调用方通常先 addMemory 再 ingestMemory）。
+  if (kind === 'summary') {
+    const c = useCompanionStore.getState().companion;
+    if (c && c.memories.length > 1 && isDupSummary(text, c.memories.slice(1))) {
+      console.info('[semanticMemory] 跳过近似重复的摘要（未写入向量库）');
+      return;
+    }
+  }
+  const cfg = await resolveEmbedConfig();
   const vecs = await embed([text]);
   if (!vecs || !vecs[0]) return;
   try {
@@ -130,12 +161,21 @@ export async function ingestMemory(
       : kind === 'snapshot' ? `[关系脉络 ${new Date(now).toLocaleString('zh-CN')}] ${text}`
       : kind === 'core' ? `[核心记忆] ${text}`
       : text;
+    // URI 策略（2026-10-19 修）：
+    //   persona / core 是「重写式」数据 —— uri 固定 + replace:true，同一份档案永远只有一条 source。
+    //   原来 uri 里带 now，每次同步都新增一条 → 库里堆满同一份档案的历史版本，检索被重复内容占满。
+    //   summary / snapshot 是「增量」数据 —— 必须保持唯一 uri，历史不能互相覆盖。
+    const replace = kind === 'persona' || kind === 'core';
+    const uri = replace
+      ? `companion://${companionId}/${kind}`
+      : `companion://${companionId}/${kind}/${now}`;
     await invoke('rag_ingest', {
       source: {
         title: `伴侣记忆·${kind}·${new Date(now).toLocaleString('zh-CN')}`,
-        uri: `companion://${companionId}/${kind}/${now}`,
+        uri,
         type: 'memory',
         namespace: 'ai-chat',
+        replace,
       },
       chunks: [{
         idx: 0,
@@ -143,10 +183,14 @@ export async function ingestMemory(
         char_start: 0,
         char_end: prefixed.length,
         vec: vecs[0],
+        embed_model: cfg?.model,
         meta: { kind, companionId, ts: now, ...meta },
       }],
     });
-  } catch { /* 静默降级 */ }
+  } catch (e) {
+    // 显式打印：静默降级会让"记忆没进库"永远不可见
+    console.warn(`[semanticMemory] 摄取 ${kind} 记忆失败（不影响对话）:`, e);
+  }
 }
 
 /** 语义检索：按查询文本召回 Top-K 记忆（仅 text + score，RagHit 无 meta）。 */
@@ -168,7 +212,11 @@ export async function queryMemory(
       topK,
       namespace: 'ai-chat',
     });
-    return (res?.results ?? []).map((r) => ({ text: r.text, score: r.score }));
+    const raw = (res?.results ?? []).map((r) => ({ text: r.text, score: r.score }));
+    if (!raw.length) return [];
+    // 同样的相对窗口（分数尺度随模型变化，绝对阈值不可靠）
+    const top1 = Math.max(...raw.map((h) => h.score));
+    return raw.filter((h) => h.score >= top1 - 0.15);
   } catch {
     return keywordFallback(queryText, topK);
   }
@@ -198,26 +246,61 @@ function keywordFallback(queryText: string, topK: number): { text: string; score
   }
 }
 
-/** 把伴侣的摘要记忆批量摄取（补全历史；新摘要由 summarizeMemory 链路增量摄取） */
+/**
+ * 把伴侣的**档案**（persona 人设画像 + core 核心档案）同步进语义库。
+ *
+ * 2026-10-19 修改：
+ * - 只同步 persona / core（两者现在都是 `replace:true` + 固定 uri → 永远只有一条，不会堆历史版本）。
+ * - **不再顺手同步 summary**：摘要由增量链路（summarizeMemory 后逐条 ingestMemory）负责，
+ *   在这里再扫一遍会按"最新 3 条"反复写入 —— 那正是库里同一条摘要出现多次的来源之一。
+ */
 export async function syncCompanionToSemantic(c: Companion): Promise<void> {
   if (isBrowserPreview()) return;
-  // 人设画像摄取（方案 B：persona 语义独立，与 core 分离，永不随摘要漂移）
   const persona = buildPersonaContext(c);
   if (persona) {
     await ingestMemory(c.id, 'persona', persona, { kind: 'persona' });
   }
-  // 核心档案摄取（重写式：每次全量覆盖，保证最新）
   if (c.core_memory?.length) {
     await ingestMemory(c.id, 'core', c.core_memory.join('\n'), { count: c.core_memory.length });
   }
-  // 摘要摄取（增量：只摄取最近几条未摄取过的——简化：取最新 3 条）
-  // 方案 C·去重：跳过与更早 summary 近似重复的条目，避免同话题反复沉淀向量库。
-  const recent = c.memories.slice(0, 3);
-  const older = c.memories.slice(3);
-  for (const m of recent) {
-    if (m.kind !== 'summary') continue;
-    if (isDupSummary(m.content, older)) continue;
-    await ingestMemory(c.id, 'summary', m.content, { created_at: m.created_at });
+}
+
+/** 档案指纹缓存：只有 persona/core 真的变了才重新沉淀（零 LLM 成本）。 */
+const COMPANION_SIG_KEY = 'andeyunhui.rag.companionSig';
+
+function fnv1a32(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(36);
+}
+
+/**
+ * 桌面端自动沉淀伴侣档案（L1 person + L2 core）。
+ *
+ * 背景：桌面此前**完全没有**档案沉淀链路（只有移动端跑摘要），桌面的 persona/core
+ * 只有用户手动点「同步」才会进向量库。这里在每轮对话结束后做一次**指纹比对**，
+ * 变了才写 —— 不调 LLM、零 token 成本。
+ *
+ * 注意：L4 关系快照需要 `summarizeMemory`（一次 LLM 调用），不在本函数里做。
+ */
+export async function autoSyncCompanion(): Promise<void> {
+  try {
+    if (isBrowserPreview()) return;
+    const c = useCompanionStore.getState().companion;
+    if (!c) return;
+    const persona = buildPersonaContext(c);
+    const core = (c.core_memory ?? []).join('\n');
+    if (!persona && !core) return;
+    const sig = `${persona.length}:${core.length}:${fnv1a32(persona + '\u0000' + core)}`;
+    if (localStorage.getItem(COMPANION_SIG_KEY) === sig) return;
+    await syncCompanionToSemantic(c);
+    localStorage.setItem(COMPANION_SIG_KEY, sig);
+    console.info('[semanticMemory] 伴侣档案已自动同步到语义库（persona/core 变化）');
+  } catch (e) {
+    console.warn('[semanticMemory] 自动同步伴侣档案失败（不影响对话）:', e);
   }
 }
 
@@ -291,7 +374,10 @@ export async function ingestChatTurn(
         meta: { kind: 'chat', ts: now },
       }],
     });
-  } catch { /* 静默降级：沉淀失败不影响对话 */ }
+  } catch (e) {
+    // 显式打印：静默吞错会让"沉淀失败"永久不可见（库会悄悄漏掉记忆）
+    console.warn('[semanticMemory] ingestChatTurn 沉淀失败（不影响对话）:', e);
+  }
 }
 
 /** 检索对话记忆，返回可直接注入 system 的上下文文本（命中为空时返回 ''）。 */
@@ -312,9 +398,145 @@ export async function retrieveChatContext(
     });
     const hits = res?.results ?? [];
     if (!hits.length) return '';
-    const lines = hits.map((h) => `- ${h.text}`);
+    // 相对窗口过滤（与知识库面板同一套判据）：不同嵌入模型的分数尺度不可比，
+    // 固定阈值会误杀或放行。只保留与 top1 相差不超过 REL_WINDOW 的命中。
+    const REL_WINDOW = 0.15;
+    const top1 = Math.max(...hits.map((h) => h.score));
+    const kept = hits.filter((h) => h.score >= top1 - REL_WINDOW);
+    if (!kept.length) return '';
+    const lines = kept.map((h) => `- ${h.text}`);
     return '【长期对话记忆（检索到的相关内容）】\n' + lines.join('\n') + '\n（自然融入回答，不要逐条复述或提及"根据记忆"。）';
-  } catch {
+  } catch (e) {
+    // 显式打印：静默 catch 会让「维度不匹配导致 0 命中」看起来像「没有相关记忆」
+    console.warn('[semanticMemory] rag_query 失败（本轮不注入记忆）:', e);
     return '';
   }
+}
+
+// ============ 静默维度自愈（2026-10-19） ============
+//
+// 背景：换嵌入模型后，库里旧块的向量维度与新模型不同。检索按维度分流会**跳过**它们
+// （数据还在，只是搜不到）。AI 对话的伴侣记忆属于 `ai-chat` 命名空间，插件面板看不到
+// 也管不了，所以必须由主应用自己修。
+//
+// 设计约束（用户明确要求：异步、别阻塞主进程）：
+// - 只在 `ensureInit` 成功后 **延迟 5s** 触发，绝不阻塞对话首轮
+// - 分批（16 条/批），每批之间 `setTimeout(0)` 让出主线程
+// - 模块级 `healing` 锁：重入直接返回
+// - 无 mismatch 时按 24h 节流；一旦发现 mismatch 立即处理（维度变了不能等一天）
+// - 任何失败只 console.warn，不影响对话（embed() 自身还有 10 分钟退避）
+
+const HEAL_KEY = 'andeyunhui.rag.healAt';
+const HEAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const HEAL_BATCH = 16;
+let healing = false;
+
+interface RagDimStatLite {
+  dim: number;
+  chunks: number;
+}
+interface RagStatsLite {
+  sources: number;
+  chunks: number;
+  dims: RagDimStatLite[];
+  models: { model: string; chunks: number }[];
+}
+interface RagSourceLite {
+  id: string;
+  title: string;
+  embed_dim?: number;
+  embed_model?: string;
+}
+interface RagChunkLite {
+  id: string;
+  text: string;
+  dim: number;
+  embed_model: string;
+}
+
+const yieldToUi = (): Promise<void> => new Promise((res) => setTimeout(res, 0));
+
+/**
+ * 检查并修复 `ai-chat` 命名空间的向量维度（后台静默执行）。
+ * 返回实际重建的块数（0 = 无需处理或失败）。
+ */
+export async function healEmbeddingDimension(opts: { force?: boolean } = {}): Promise<number> {
+  if (healing) return 0;
+  if (isBrowserPreview()) return 0;
+  healing = true;
+  const t0 = Date.now();
+  let healed = 0;
+  try {
+    // 1) 当前模型能产出的维度（探针）
+    const probe = await embed(['dimension probe']);
+    const curDim = probe?.[0]?.length ?? 0;
+    if (!curDim) {
+      console.warn('[rag-heal] 嵌入端点不可用（或处于退避期），跳过维度自愈');
+      return 0;
+    }
+
+    // 2) 库里的维度分布
+    const stats = await invoke<RagStatsLite>('rag_stats', { namespace: 'ai-chat' });
+    const mismatched = (stats.dims ?? []).filter((d) => d.dim !== curDim);
+    const last = Number(localStorage.getItem(HEAL_KEY) || 0);
+    if (mismatched.length === 0) {
+      if (opts.force || Date.now() - last > HEAL_INTERVAL_MS) {
+        localStorage.setItem(HEAL_KEY, String(Date.now()));
+      }
+      return 0;
+    }
+    console.info(
+      `[rag-heal] 发现维度不一致（${mismatched.map((d) => `${d.dim}维×${d.chunks}`).join(', ')}），` +
+        `当前模型 ${curDim} 维 → 开始后台重建（不阻塞主进程）`,
+    );
+
+    // 3) 逐来源重建；只重算维度不对的块
+    const sources = await invoke<RagSourceLite[]>('rag_list_sources', { namespace: 'ai-chat' });
+    const cfg = await resolveEmbedConfig();
+    const modelName = cfg?.model ?? '';
+    for (const s of sources) {
+      try {
+        const rows = await invoke<RagChunkLite[]>('rag_list_chunks', {
+          sourceId: s.id,
+          namespace: 'ai-chat',
+        });
+        const stale = rows.filter((r) => r.dim !== curDim);
+        if (stale.length === 0) continue;
+
+        const updates: { id: string; vec: number[]; embed_model?: string }[] = [];
+        for (let i = 0; i < stale.length; i += HEAL_BATCH) {
+          const slice = stale.slice(i, i + HEAL_BATCH);
+          const vecs = await embed(slice.map((r) => r.text));
+          if (!vecs || vecs.length !== slice.length) {
+            throw new Error(`嵌入失败或数量不匹配（${vecs?.length ?? 0}/${slice.length}）`);
+          }
+          slice.forEach((r, k) =>
+            updates.push({ id: r.id, vec: vecs[k], embed_model: modelName || undefined }),
+          );
+          await yieldToUi(); // 每批让出主线程
+        }
+        const n = await invoke<number>('rag_update_vectors', {
+          sourceId: s.id,
+          updates,
+          namespace: 'ai-chat',
+        });
+        healed += n;
+        console.info(`[rag-heal] 「${s.title}」重建 ${n} 块 → ${curDim} 维`);
+      } catch (e) {
+        // 单个来源失败不影响其它来源；数据由后端事务保证不被破坏
+        console.warn(`[rag-heal] 「${s.title}」重建失败（已跳过，原数据未改动）:`, e);
+      }
+      await yieldToUi();
+    }
+
+    if (healed > 0) {
+      localStorage.setItem(HEAL_KEY, String(Date.now()));
+      console.info(`[rag-heal] 完成：共重建 ${healed} 块，耗时 ${Date.now() - t0}ms`);
+    }
+  } catch (e) {
+    console.warn('[rag-heal] 维度自愈失败（不影响对话）:', e);
+  } finally {
+    healing = false;
+  }
+  return healed;
 }

@@ -77,7 +77,30 @@ pub fn ai_get_conversations(app: AppHandle) -> AiConversations {
     match serde_json::from_str::<AiConversations>(&text) {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("[ai] 解析对话 JSON 失败（已忽略旧格式）: {}", e);
+            // ⚠️ 数据第一（2026-10-19）：原来这里只是 warn + 返回空集合。
+            // 后果是**双重毁灭**：用户看到"对话全没了" → 前端拿着空集合继续工作 →
+            // 下一次防抖保存把空集合原子写回同一个路径 ⇒ 原文件被彻底覆盖，无法恢复。
+            // 现在先把损坏文件改名为 .corrupt-<时间戳> 留档（rename 不是删除，且不阻塞启动），
+            // 再返回空集合让用户能继续用；同时 error 级打印，日志里能看出"是坏了不是没了"。
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let bad = path.with_extension(format!("json.corrupt-{stamp}"));
+            match fs::rename(&path, &bad) {
+                Ok(()) => log::error!(
+                    "[ai] 对话 JSON 解析失败（{}），已把原文件改名为 {:?} 保留，返回空集合继续启动",
+                    e,
+                    bad
+                ),
+                Err(re) => log::error!(
+                    "[ai] 对话 JSON 解析失败（{}），且改名留档也失败（{}）—— 原文件仍在 {:?}，\
+                     注意下一次保存会覆盖它，请先手动备份",
+                    e,
+                    re,
+                    path
+                ),
+            }
             AiConversations::default()
         }
     }

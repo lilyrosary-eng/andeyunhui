@@ -238,14 +238,28 @@ impl AiTool for RagSearchTool {
             tokio::task::spawn_blocking(move || -> Option<(String, String, String)> {
                 let cfg = crate::services::ai_service::ai_profile::load_config(&app2);
                 let legacy = crate::services::ai_service::legacy_compat::to_legacy_profiles(&cfg);
-                let picked = legacy
-                    .active
-                    .as_ref()
-                    .and_then(|a| {
-                        legacy
-                            .profiles
-                            .iter()
-                            .find(|p| &p.id == a && !p.base_url.trim().is_empty())
+                // 优先挑「名字像嵌入模型」的档案：用户当前选中的往往是对话模型
+                // （例如 LM Studio 里是 hy-mt2-1.8b），拿去打 /v1/embeddings 会 404。
+                // 同一个 provider 下通常另挂着一个真正的嵌入模型（如 nomic-embed-text-v1.5）。
+                let looks_like_embed = |m: &str| {
+                    let m = m.to_lowercase();
+                    m.contains("embed")
+                        || m.contains("bge")
+                        || m.contains("gte")
+                        || m.contains("m3e")
+                        || m.contains("nomic")
+                };
+                let embed_pick = legacy.profiles.iter().find(|p| {
+                    !p.base_url.trim().is_empty() && looks_like_embed(&p.model)
+                });
+                let picked = embed_pick
+                    .or_else(|| {
+                        legacy.active.as_ref().and_then(|a| {
+                            legacy
+                                .profiles
+                                .iter()
+                                .find(|p| &p.id == a && !p.base_url.trim().is_empty())
+                        })
                     })
                     .or_else(|| {
                         legacy
@@ -259,11 +273,15 @@ impl AiTool for RagSearchTool {
                 } else {
                     format!("{base}/v1/embeddings")
                 };
-                Some((
-                    endpoint,
-                    picked.api_key.clone(),
-                    "text-embedding-3-small".to_string(),
-                ))
+                let model = if looks_like_embed(&picked.model) {
+                    picked.model.clone()
+                } else {
+                    log::warn!(
+                        "[rag_search] 没找到名字像嵌入模型的档案，退回 active 端点 + text-embedding-3-small（可能不被该端点支持）"
+                    );
+                    "text-embedding-3-small".to_string()
+                };
+                Some((endpoint, picked.api_key.clone(), model))
             })
             .await
             .unwrap_or(None)

@@ -530,7 +530,13 @@ export async function summarizeMemory(messages: { role: string; content: string 
       milestone: res.milestone ?? '',
       coreFacts: res.coreFacts ?? [],
     };
-  } catch {
+  } catch (e) {
+    // ⚠️ 旧实现在**任何**异常下都会造一条「（预览模式摘要）用户提到：…」返回，
+    // 调用方（移动端每轮 / 桌面每 10 轮）会把它当真实摘要写进 memories 和向量库 ——
+    // 一次网络抖动就永久污染记忆。现在只在**浏览器预览**（没有 Tauri 内核）时降级，
+    // 真实运行环境下失败就返回 null，由调用方跳过本轮。
+    console.warn('[companion] ai_summarize_memory 失败，本轮不写摘要:', e);
+    if (!isBrowserPreview()) return null;
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
     return lastUser
       ? { summary: `（预览模式摘要）用户提到：${lastUser.content.slice(0, 60)}`, deltas: {}, milestone: '', coreFacts: [] }
