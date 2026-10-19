@@ -1212,6 +1212,19 @@ function IdeEditor() {
     return () => window.removeEventListener('ide-project-changed', h);
   }, []);
 
+  // 把当前项目根写进 localStorage，供**黄金棋盘浮岛的 AI 编程**读取。
+  //
+  // 为什么走 localStorage 而不是事件：浮岛已经是独立执行器（2026-10-19 方案 B），
+  // 它不该依赖 IDE 模块是否加载；而 localStorage 同源，IDE 没开时浮岛仍能拿到上次的路径。
+  // 失败只 warn —— 写不进去顶多让浮岛退回"未关联项目"，不影响 IDE 本身。
+  useEffect(() => {
+    try {
+      if (projRoot) localStorage.setItem('ide:lastProjectRoot', projRoot);
+    } catch (e) {
+      console.warn('[IDE] 写入 ide:lastProjectRoot 失败（浮岛将无法自动关联项目）:', e);
+    }
+  }, [projRoot]);
+
   // 启动读取全局模型档案，判断「用户部署的 AI」是否可用（#13）
   useEffect(() => {
     hostApi.invoke<{ profiles: { id: string; api_key?: string }[]; active: string | null }>('ai_get_profiles')
@@ -2894,6 +2907,8 @@ const runAgent = useCallback(async (overrideText?: string, seed?: ChatMessage[])
   };
 
   // 浮岛「AI 编程」agent 桥：接收浮岛转发来的请求，直接驱动本 AgentPane 执行（仅 agent 模式挂载时生效）
+  // ⚠️ 2026-10-19 起浮岛已改为**独立执行器**（直接调 ai_chat_agent），不再 emit 本事件。
+  //    监听保留但永不触发；确认无需回退后再删。
   useEffect(() => {
     let cancelled = false;
     let unsub: (() => void) | undefined;

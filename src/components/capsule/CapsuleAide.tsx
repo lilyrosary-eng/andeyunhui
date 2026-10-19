@@ -1,5 +1,11 @@
 // 黄金棋盘浮岛 · AI 编程子面板（从 Capsule.tsx 拆出）。
-// 接管 IDE 对话执行（chat / agent 双模式），经 capsule-ide-chat-* / capsule-ide-agent-* 事件桥接。
+//
+// ## 2026-10-19 架构调整：浮岛变成**独立执行器**（方案 B）
+// 此前浮岛**不自己发请求**：它 emit `capsule-ide-chat-request` / `agent-request` 交给 IDE 的
+// ai 子插件执行，再由 IDE 把 ai-delta 转成 `capsule-ide-chat-delta` 转发回来。
+// 后果：**IDE 模块没加载时浮岛 AI 直接不可用**（只能等 20s 超时后提示"请确认 IDE 已加载"）。
+// 现在直接调后端 `ai_chat` / `ai_chat_agent`，监听全局 `ai-*` 事件（按 requestId 过滤），
+// 不再依赖任何模块加载。IDE 侧那两个 request 监听保留（无害），但浮岛不再 emit。
 // 自持多会话 state + 流式监听，仅与壳共享 aiProfiles / aideProfileId / aiHint / keepOpen（经 capsuleStore）。
 // 壳仅在 expanded && aideOpen && panelReady 时挂载。
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -158,6 +164,36 @@ function CapsuleAide() {
   const aideScrollRef = useRef<HTMLDivElement | null>(null);
   const [aideMode, setAideMode] = useState<'chat' | 'agent'>('chat'); // AI 编程：对话 / 代理（agent）
 
+  // 项目根：agent 模式的 <file>/<grep>/<glob> 都要它，否则 agent 只会说"没拿到项目路径"。
+  // 默认值来源优先级：浮岛自己上次选的 > IDE 最后打开的项目（IDE 会写 localStorage）。
+  const AIDE_ROOT_KEY = 'andeyunhui.capsule.aide.projectRoot';
+  const [aideProjectRoot, setAideProjectRoot] = useState<string>(() => {
+    try {
+      return localStorage.getItem(AIDE_ROOT_KEY) || localStorage.getItem('ide:lastProjectRoot') || '';
+    } catch {
+      return '';
+    }
+  });
+  useEffect(() => {
+    try {
+      if (aideProjectRoot) localStorage.setItem(AIDE_ROOT_KEY, aideProjectRoot);
+    } catch (e) {
+      console.warn('[capsule-aide] 保存项目根失败:', e);
+    }
+  }, [aideProjectRoot]);
+  const pickAideProjectRoot = useCallback(async () => {
+    try {
+      const dir = await invoke<string | null>('pick_directory');
+      if (dir) {
+        setAideProjectRoot(dir);
+        setAiHint(`已关联项目：${dir}`);
+      }
+    } catch (e) {
+      console.error('[capsule-aide] 选择项目目录失败:', e);
+      setAiHint('选择项目目录失败：' + String(e));
+    }
+  }, [setAiHint]);
+
   // 清空全部对话（浮岛 AI 编程 + 通知 IDE 一并清空 chat/agent），一键回到干净起点
   const clearAideConversations = useCallback(() => {
     const fresh: Conversation[] = [{ id: 'ac' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
@@ -228,14 +264,18 @@ function CapsuleAide() {
     return () => unsub?.();
   }, [setAideProfileId]);
 
-  // 浮岛「AI 编程」流式事件监听（chat / agent 双模式），统一抽到 useAiStream
-  // chat 模式：delta 追加 + reasoning；agent 模式：text 整段替换、无 reasoning
+  // 浮岛「AI 编程」流式事件监听：现在直连后端，监听**全局** `ai-*` 事件（不再是 capsule-ide-*）。
+  // 一个 hook 按模式切换写入语义即可 —— 两个实例同时监听 `ai-delta` 会一个 append 一个 replace，
+  // 互相抵消（hook 的 deltaMode 在 effect 依赖里，模式一变会重新注册）。
+  //   chat 模式：delta 追加 + reasoning 增量
+  //   agent 模式：text 整段替换 + agent-step（工具步骤，供执行轨迹）
   useAiStream(
-    { prefix: EVENTS.chatStream.ideChatPrefix, deltaMode: 'append', hasReasoning: true },
-    { reqRef: aideReqRef, asstRef: aideAsstRef, streamConvIdRef: aideStreamConvIdRef, updateMessages: updateAideStreamMessages, setBusy: setAideBusy },
-  );
-  useAiStream(
-    { prefix: EVENTS.chatStream.ideAgentPrefix, deltaMode: 'replace', hasReasoning: false },
+    {
+      prefix: EVENTS.chatStream.prefix,
+      deltaMode: aideMode === 'agent' ? 'replace' : 'append',
+      hasReasoning: aideMode === 'chat',
+      hasAgentStep: aideMode === 'agent',
+    },
     { reqRef: aideReqRef, asstRef: aideAsstRef, streamConvIdRef: aideStreamConvIdRef, updateMessages: updateAideStreamMessages, setBusy: setAideBusy },
   );
 
@@ -247,86 +287,82 @@ function CapsuleAide() {
     return () => cancelAnimationFrame(id);
   }, [aideMessages, aideActiveConvId]);
 
-  // 浮岛「AI 编程」发送：不调 ai_chat，通知 IDE 接管对话（chat 模式，事件桥接，携带 profile + 历史）
+  // 浮岛「AI 编程」发送：**直连后端**（方案 B），不再经 IDE 事件桥。
+  // chat 模式 → ai_chat（纯对话 + 思考增量）；agent 模式 → ai_chat_agent（工具循环）。
   const sendAide = useCallback(async () => {
     const text = aideInput.trim();
     if (!text || aideBusy) return;
-    // agent（自主编辑）模式：转发给 IDE 的 agent 面板执行，使用 IDE 当前激活档案（无需浮岛侧 profile）
-    if (aideMode === 'agent') {
-      if (aideReqRef.current) return; // 同步防重入：已有请求在飞时忽略
-      const uid = 'u' + Date.now().toString(36);
-      const aid = 'a' + Date.now().toString(36);
-      const convId = aideActiveConvId;
-      aideStreamConvIdRef.current = convId;
-      const history = cleanAideHistory(aideMessages.filter((m) => !m.error));
-      const reqId = 'cage_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      updateAideStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '' }]);
-      setAideConversations((prev) => prev.map((c) => (c.id === convId && (c.title === '新对话' || !c.title.trim())) ? { ...c, title: text.slice(0, CONV_TITLE_MAX) } : c));
-      setAideInput('');
-      setAideBusy(true);
-      aideReqRef.current = reqId;
-      aideAsstRef.current = aid;
-      const timer = setTimeout(() => {
-        if (aideReqRef.current === reqId) {
-          aideReqRef.current = null;
-          aideAsstRef.current = null;
-          updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ IDE 未响应：请确认 IDE 模块已加载且处于「自主编辑（agent）模式」并已打开 AI 面板。' } : m)));
-          setAideBusy(false);
-        }
-      }, 20000);
-      try {
-        await emit(EVENTS.chatStream.agentRequest, { requestId: reqId, text, profileId: aideProfileId ?? undefined, history });
-      } catch (e) {
-        clearTimeout(timer);
-        aideReqRef.current = null;
-        aideAsstRef.current = null;
-        updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: '⚠ 发送失败：' + String(e) } : m)));
-        setAideBusy(false);
-      }
-      return;
-    }
-    if (!aideProfileId) {
+    if (aideReqRef.current) return; // 同步防重入：已有请求在飞时忽略
+
+    if (aideMode === 'chat' && !aideProfileId) {
       setAiHint(t('capsule.noModelHint'));
       return;
     }
+
+    const convId = aideActiveConvId;
     const uid = 'u' + Date.now().toString(36);
     const aid = 'a' + Date.now().toString(36);
-    const convId = aideActiveConvId;
     aideStreamConvIdRef.current = convId;
     const history = cleanAideHistory(aideMessages.filter((m) => !m.error));
-    const reqId = 'cide_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const reqId = (aideMode === 'agent' ? 'cag_' : 'cid_') + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
     updateAideStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '' }]);
     setAideConversations((prev) => prev.map((c) => (c.id === convId && (c.title === '新对话' || !c.title.trim())) ? { ...c, title: text.slice(0, CONV_TITLE_MAX) } : c));
     setAideInput('');
     setAideBusy(true);
     aideReqRef.current = reqId;
     aideAsstRef.current = aid;
-    // 兜底：若 IDE 未响应，避免一直「思考中…」
-    const timer = setTimeout(() => {
-      if (aideReqRef.current === reqId) {
-        aideReqRef.current = null;
-        aideAsstRef.current = null;
-        updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ IDE 未响应：请确认 IDE 模块已加载且处于「对话模式」（非 agent 模式）。' } : m)));
-        setAideBusy(false);
-      }
-    }, 20000);
-    try {
-      await emit(EVENTS.chatStream.chatRequest, { requestId: reqId, text, profileId: aideProfileId, history });
-    } catch (e) {
-      clearTimeout(timer);
+
+    // 兜底看门狗：正常结束由 ai-done / ai-error 收口（useAiStream 的 finish）。
+    // 这里只防"事件彻底没到"（后端 panic / 窗口重建丢监听）导致永久卡在"思考中"。
+    // 5 分钟足够长：agent 多轮工具调用本身就可能跑几分钟。
+    const watchdog = setTimeout(() => {
+      if (aideReqRef.current !== reqId) return;
       aideReqRef.current = null;
       aideAsstRef.current = null;
-      updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: '⚠ 发送失败：' + String(e) } : m)));
+      updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: (m.content ? m.content + '\n\n' : '') + '⚠ 5 分钟未收到结束事件（后台可能仍在跑，或连接已断）。' } : m)));
       setAideBusy(false);
+    }, 5 * 60 * 1000);
+
+    const fail = (msg: string) => {
+      clearTimeout(watchdog);
+      aideReqRef.current = null;
+      aideAsstRef.current = null;
+      updateAideStreamMessages(convId, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: '⚠ 发送失败：' + msg } : m)));
+      setAideBusy(false);
+    };
+
+    try {
+      if (aideMode === 'agent') {
+        await invoke('ai_chat_agent', {
+          requestId: reqId,
+          messages: [...history, { role: 'user', content: text }],
+          profileId: aideProfileId ?? null,
+          // 轮数上限与主对话一致（8）：浮岛面板小，不追求 20 轮的 ComfyUI 长链
+          maxRounds: 8,
+          // 项目根决定 file/grep/glob 能否落地；为空时 agent 会明确报"未指定项目根"
+          projectRoot: aideProjectRoot || null,
+          // 浮岛没有"联网"开关，默认允许（与工具常开的策略一致）
+          webSearch: true,
+        });
+      } else {
+        await invoke('ai_chat', {
+          requestId: reqId,
+          profileId: aideProfileId,
+          messages: [...history, { role: 'user', content: text }],
+          stream: true,
+        });
+      }
+    } catch (e) {
+      fail(String(e));
     }
-  }, [aideInput, aideBusy, aideProfileId, aideMessages, aideMode, t, updateAideStreamMessages, setAiHint]);
+  }, [aideInput, aideBusy, aideProfileId, aideMessages, aideMode, aideActiveConvId, aideProjectRoot, t, updateAideStreamMessages, setAiHint]);
 
   /**
    * 停止浮岛当前回合。
    *
-   * 浮岛**不自己发请求** —— 它 emit `capsule-ide-chat-request` / `agent-request` 交给 IDE，
-   * IDE 用**同一个 requestId** 调 `ai_chat` / `ai_chat_agent`（见 茑萝/ai 与 茑萝/ide）。
-   * 所以这里拿同一个 id 去取消即可：后端取消注册表是**进程级**的，插件与浮岛同进程。
+   * 浮岛直连后端（方案 B），用的是自己的 requestId，直接按模式调对应的取消命令。
+   * 后端取消注册表是**进程级**的，所以 chat/agent 两个 id 空间互不影响。
    *
    * 与 `useAiChat.abort` 同一套做法：先断事件匹配（确定性收口）→ 补「已停止」标记 →
    * 本地复位 busy → 通知后端。置空 `aideReqRef` 同时让那条 20s 超时兜底失效（避免
@@ -373,6 +409,19 @@ function CapsuleAide() {
         </button>
         <button onClick={() => clearAideConversations()} title={t('capsule.clearAllConvs')} style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: 'rgba(244,244,246,0.8)', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', fontSize: 11 }}>
           {t('capsule.clear')}
+        </button>
+        {/* 项目根：agent 模式的 file/grep/glob 依赖它。点一下改选目录。 */}
+        <button
+          onClick={pickAideProjectRoot}
+          title={aideProjectRoot ? `当前项目（点击更换）：${aideProjectRoot}` : '未关联项目：点击选择目录，agent 才能读写文件/搜索代码'}
+          style={{
+            ...btnBase, flex: '0 1 auto', minWidth: 0, maxWidth: 220, height: 28, padding: '0 8px', fontSize: 11,
+            color: aideProjectRoot ? 'rgba(244,244,246,0.85)' : '#e6a23c',
+            background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)',
+            borderRadius: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          }}
+        >
+          {(aideProjectRoot ? aideProjectRoot.split(/[\/]/).filter(Boolean).pop() : '选择项目') || '选择项目'}
         </button>
         <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen(!keepOpen)} size={28} />
         <button onClick={() => setAideOpen(false)} title={t('capsule.backToPlayer')} style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>

@@ -544,6 +544,8 @@ function AiPanel({ onClose, projectRoot }: { docked?: boolean; onClose?: () => v
 
   // 桥接：黄金棋盘浮岛「AI 编程」按钮接管本面板对话（chat 模式）
   // 浮岛 emit('capsule-ide-chat-request', {requestId, text, profileId?, history?}) → 本面板执行并转发回流式事件。
+  // ⚠️ 2026-10-19 起浮岛已改为**独立执行器**（直接调 ai_chat / ai_chat_agent），不再 emit。
+  //    本监听暂时保留（无发送方 = 永不触发），等确认没有回退需求后再删，避免一次性动两处架构。
   // 若浮岛传入 history，则由浮岛自持消息（不写入 IDE 自身对话），IDE 仅执行并转发。
   useEffect(() => {
     let cancelled = false;
