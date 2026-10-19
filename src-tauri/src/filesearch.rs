@@ -100,7 +100,10 @@ fn connect() -> rusqlite::Result<Connection> {
             gram TEXT NOT NULL,
             path TEXT NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS idx_trigram ON trigrams(gram);",
+         CREATE INDEX IF NOT EXISTS idx_trigram ON trigrams(gram);
+         -- 删除路径时要按 path 查（等值 + 前缀区间）。没有这个索引就是 394 万行全表扫，
+         -- 实测每次删除 ~690ms；建索引后 <1ms（见 db_delete_trigrams 的实测注释）。
+         CREATE INDEX IF NOT EXISTS idx_trigrams_path ON trigrams(path);",
     )?;
     Ok(conn)
 }
@@ -459,15 +462,17 @@ fn db_upsert(conn: &Connection, p: &Path) -> bool {
 /// 避免误删同名前缀的其他目录（如 `C:\a\dir` 不会误删 `C:\a\dirXYZ`）。
 fn db_delete(conn: &Connection, p: &Path) -> bool {
     let path = p.to_string_lossy().to_string();
-    let like_prefix = format!("{}\\%", path);
-    let ok = conn
-        .execute(
-            "DELETE FROM files WHERE path = ?1 OR path LIKE ?2",
-            params![path, like_prefix],
-        )
+    // 与 db_delete_trigrams 同理：OR + LIKE 会全表扫，拆成等值 + 前缀区间（走主键索引）。
+    let exact_ok = conn
+        .execute("DELETE FROM files WHERE path = ?1", params![path])
+        .is_ok();
+    let lo = format!("{}\\", path);
+    let hi = prefix_upper(&lo);
+    let sub_ok = conn
+        .execute("DELETE FROM files WHERE path >= ?1 AND path < ?2", params![lo, hi])
         .is_ok();
     db_delete_trigrams(conn, &path);
-    ok
+    exact_ok && sub_ok
 }
 
 /// 增量应用一批变更：仅对「监视范围内」的路径，存在的 upsert、不存在的 delete，整批一个事务提交。
@@ -604,13 +609,37 @@ fn db_insert_trigrams(conn: &Connection, path: &str, name_lower: &str, _path_low
     }
 }
 
+/// 前缀区间上界：`prefix + U+10FFFF`。
+///
+/// SQLite 用 BINARY 排序比较 UTF-8 字节，任何以 `prefix` 开头的字符串都小于这个上界，
+/// 于是 `path >= lo AND path < hi` 等价于「prefix 前缀匹配」，但**能走索引**。
+fn prefix_upper(prefix: &str) -> String {
+    let mut s = prefix.to_string();
+    s.push('\u{10FFFF}');
+    s
+}
+
 /// 删除某路径（及其子孙）对应的三元组。
+///
+/// ## 为什么不用 `path = ?1 OR path LIKE ?2`（2026-10-19 实测）
+/// 那个写法在 SQLite 里退化成**全表扫描**（`EXPLAIN QUERY PLAN` 给出 `SCAN trigrams`）：
+///   files    OR/LIKE: 65.8 ms  →  等值 + 前缀区间: 0.00 ms
+///   trigrams OR/LIKE: 622.7 ms →  等值 + 前缀区间: 0.00 ms
+/// 即每删一个路径要白扫 394 万行三元组，整盘重扫时这一项就是几分钟。
+/// 拆成「等值 + 前缀区间」两句后都能命中索引（`sqlite_autoindex_files_1` / `idx_trigrams_path`）。
+/// `idx_trigrams_path` 是本轮新增的，代价约 287MB（其中 143MB 原本就是空闲页），换的是不再全扫。
 fn db_delete_trigrams(conn: &Connection, path: &str) {
-    let like_prefix = format!("{}\\%", path);
-    let _ = conn.execute(
-        "DELETE FROM trigrams WHERE path = ?1 OR path LIKE ?2",
-        params![path, like_prefix],
-    );
+    if let Err(e) = conn.execute("DELETE FROM trigrams WHERE path = ?1", params![path]) {
+        log::warn!("[filesearch] 删除三元组(等值)失败 path={}: {}", path, e);
+    }
+    let lo = format!("{}\\", path);
+    let hi = prefix_upper(&lo);
+    if let Err(e) = conn.execute(
+        "DELETE FROM trigrams WHERE path >= ?1 AND path < ?2",
+        params![lo, hi],
+    ) {
+        log::warn!("[filesearch] 删除三元组(子项)失败 path={}: {}", path, e);
+    }
 }
 
 /// 缓存的只读连接：搜索高频，避免每次 `connect()` 重开连接 + 重建 PRAGMA/表。
