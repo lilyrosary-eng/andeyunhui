@@ -13,6 +13,84 @@
 //   - 样式：注入一次到 <head>（幂等），dark/light 模式通用（前景用 currentColor 继承父级）
 
 import { marked } from 'marked';
+import { ensureHtmlPreviewHost } from '@/components/HtmlPreviewHost';
+// 高亮：highlight.js **core** + 按需注册语言（2026-10-20 引入）。
+//
+// 为什么不是 shiki（实测体积，单位 KB / min）：
+//   · hljs core 22.7（gzip 8.4），单语言 3~8（typescript 8.1 / rust 3.1），纯同步、无 wasm
+//   · shiki 引擎 oniguruma 内联 wasm **607.9**，语法文件自身也大（rust 16.5 / typescript 186.2），
+//     主题 12.4，且首屏必须异步加载 chunk
+//   10 语言 + 1 主题的实测量级：hljs ≈ 90 KB（gzip ~30），shiki ≈ 1.0~1.2 MB（gzip ~350）。
+//   本应用是离线桌面端、回复里代码块占比高但语言种类有限 ⇒ hljs 的性价比明显更高。
+import hljs from 'highlight.js/lib/core';
+import hljsJs from 'highlight.js/lib/languages/javascript';
+import hljsTs from 'highlight.js/lib/languages/typescript';
+import hljsPy from 'highlight.js/lib/languages/python';
+import hljsRs from 'highlight.js/lib/languages/rust';
+import hljsJson from 'highlight.js/lib/languages/json';
+import hljsBash from 'highlight.js/lib/languages/bash';
+import hljsXml from 'highlight.js/lib/languages/xml';
+import hljsCss from 'highlight.js/lib/languages/css';
+import hljsYaml from 'highlight.js/lib/languages/yaml';
+import hljsSql from 'highlight.js/lib/languages/sql';
+import hljsGo from 'highlight.js/lib/languages/go';
+import hljsJava from 'highlight.js/lib/languages/java';
+import hljsCpp from 'highlight.js/lib/languages/cpp';
+import hljsMd from 'highlight.js/lib/languages/markdown';
+import hljsDiff from 'highlight.js/lib/languages/diff';
+import hljsIni from 'highlight.js/lib/languages/ini';
+import hljsDockerfile from 'highlight.js/lib/languages/dockerfile';
+
+/** 注册的语言（同时是「认得的语言」白名单，未注册的一律不高亮）。 */
+const HLJS_LANGS: Record<string, Parameters<typeof hljs.registerLanguage>[1]> = {
+  javascript: hljsJs,
+  typescript: hljsTs,
+  python: hljsPy,
+  rust: hljsRs,
+  json: hljsJson,
+  bash: hljsBash,
+  xml: hljsXml,
+  css: hljsCss,
+  yaml: hljsYaml,
+  sql: hljsSql,
+  go: hljsGo,
+  java: hljsJava,
+  cpp: hljsCpp,
+  markdown: hljsMd,
+  diff: hljsDiff,
+  ini: hljsIni,
+  dockerfile: hljsDockerfile,
+};
+for (const [name, def] of Object.entries(HLJS_LANGS)) {
+  hljs.registerLanguage(name, def);
+}
+
+/** 模型常用别名 → 已注册语言名。映射不到又没有同名注册 ⇒ 不高亮（不猜）。 */
+const LANG_ALIAS: Record<string, string> = {
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript', node: 'javascript',
+  ts: 'typescript', tsx: 'typescript',
+  py: 'python', python3: 'python',
+  rs: 'rust',
+  sh: 'bash', shell: 'bash', zsh: 'bash', console: 'bash', bash: 'bash',
+  html: 'xml', htm: 'xml', vue: 'xml', svg: 'xml', xhtml: 'xml',
+  yml: 'yaml',
+  md: 'markdown',
+  toml: 'ini', conf: 'ini', properties: 'ini',
+  'c++': 'cpp', cc: 'cpp', h: 'cpp', hpp: 'cpp', hxx: 'cpp',
+  docker: 'dockerfile', dockerfile: 'dockerfile',
+  patch: 'diff', udiff: 'diff',
+};
+
+/** 语言名归一：能高亮就返回 hljs 语言名，否则返回空串。 */
+function normalizeLang(raw?: string): string {
+  const l = (raw || '').trim().toLowerCase().split(/[\s:]/)[0];
+  if (!l) return '';
+  const mapped = LANG_ALIAS[l] ?? l;
+  return Object.prototype.hasOwnProperty.call(HLJS_LANGS, mapped) ? mapped : '';
+}
+
+/** 能直接在沙箱里跑起来预览的语言（HTML 文档）。 */
+const RUNNABLE_LANGS = new Set(['html', 'htm', 'xhtml', 'svg', 'xml']);
 
 marked.use({
   gfm: true,
@@ -22,6 +100,45 @@ marked.use({
     // 原始 HTML 不渲染，只作为文本显示（保留可见性，丢掉执行能力）
     html(token: { text: string }) {
       return escapeHtml(token.text);
+    },
+    // 代码块：语言标签 + 复制 + （HTML 类）预览。
+    // 以前是在 marked 输出的字符串上再跑一条正则给 <pre><code> 套壳，那个做法有两个隐患：
+    // ① 正则会把**行内**代码误伤成块（只要出现 <pre><code> 字样）；② 拿不到 lang 语义
+    //   （要再解析 class），也就没法做「按语言决定按钮」。现在直接在渲染器里生成。
+    code(token: { text: string; lang?: string; escaped?: boolean }) {
+      const rawLang = (token.lang || '').trim().toLowerCase();
+      const hl = normalizeLang(rawLang);
+      let body: string;
+      if (hl) {
+        try {
+          body = hljs.highlight(token.text, { language: hl, ignoreIllegals: true }).value;
+        } catch (e) {
+          // 语法内部炸了不能让整条消息变空白：退回纯文本，并留痕
+          console.warn('[markdown] 高亮失败，退回纯文本:', hl, e);
+          body = escapeHtml(token.text);
+        }
+      } else {
+        body = escapeHtml(token.text);
+      }
+      const label = rawLang || 'text';
+      const dataCode = escapeHtml(token.text);
+      const runnable = RUNNABLE_LANGS.has(rawLang.split(/\s/)[0]);
+      const runBtn = runnable
+        ? `<button type="button" class="md-run-btn" data-code="${dataCode}" data-lang="${escapeHtml(label)}" title="在沙箱 iframe 里运行（与主窗口隔离，可交互）">预览</button>`
+        : '';
+      return `<div class="md-code-block" data-lang="${escapeHtml(label)}">`
+        + `<div class="md-code-head"><span class="md-lang">${escapeHtml(label)}</span>`
+        + `<span class="md-code-actions">${runBtn}`
+        + `<button type="button" class="md-copy-btn" data-code="${dataCode}" aria-label="复制代码">复制</button>`
+        + `</span></div>`
+        + `<pre><code class="hljs">${body}</code></pre></div>`;
+    },
+    // 链接：标出 target/rel（真正打开由全局 click 代理接管）。
+    // 此前 markdown 里的链接是「裸」<a href>，在 Tauri webview 里点一下会**导航整个窗口**，
+    // 应用直接被替换成目标网页、只能重启 —— 这是用户问的「跳转无法交互」的真相。
+    link(token: { href: string; title?: string | null; text: string }) {
+      const title = token.title ? ` title="${escapeHtml(token.title)}"` : '';
+      return `<a href="${escapeHtml(token.href)}"${title} target="_blank" rel="noopener noreferrer" class="md-link">${token.text}</a>`;
     },
   },
 });
@@ -50,21 +167,9 @@ export function renderMarkdown(content: string): string {
   if (hit !== undefined) return hit;
   let result: string;
   try {
-    const html = neutralizeDangerousProtocols(marked.parse(content, { async: false }) as string);
-    // 给每个 <pre> 包一层 + 追加复制按钮
-    result = html.replace(
-      /<pre><code[^>]*>([\s\S]*?)<\/code><\/pre>/g,
-      (_, codeHtml: string) => {
-        const text = codeHtml
-          .replace(/<[^>]+>/g, '')
-          .replace(/&quot;/g, '"')
-          .replace(/&#39;/g, "'")
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&amp;/g, '&');
-        return `<div class="md-code-block"><button type="button" class="md-copy-btn" data-code="${escapeHtml(text)}" aria-label="复制代码">复制</button><pre><code>${codeHtml}</code></pre></div>`;
-      },
-    );
+    // 代码块的外壳与高亮已由 renderer.code 生成，这里只做协议中和（不再跑二道正则：
+    // 旧正则会把已经生成的 .md-code-block 再套一层，复制按钮重复、复制内容被转义两次）
+    result = neutralizeDangerousProtocols(marked.parse(content, { async: false }) as string);
   } catch {
     result = escapeHtml(content);
   }
@@ -112,35 +217,50 @@ const MD_STYLES_TEXT = `
   margin: 0.5em 0;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid currentColor;
-  opacity: 0.96;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  opacity: 0.98;
 }
-.md-copy-btn {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  z-index: 2;
-  background: rgba(127, 127, 127, 0.25);
+/* 代码块头：语言标签在左，按钮在右。以前只有一个绝对定位的复制按钮，
+   没有语言标识，也放不下第二个动作（预览）。 */
+.md-code-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(127, 127, 127, 0.16);
+  border-bottom: 1px solid rgba(127, 127, 127, 0.22);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+.md-lang {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+.md-code-actions { margin-left: auto; display: flex; gap: 6px; }
+.md-copy-btn, .md-run-btn {
+  background: rgba(127, 127, 127, 0.22);
   color: inherit;
-  border: 1px solid currentColor;
+  border: 1px solid rgba(127, 127, 127, 0.4);
   border-radius: 6px;
-  padding: 2px 8px;
+  padding: 1px 8px;
   font-size: 11px;
   line-height: 1.6;
   cursor: pointer;
-  opacity: 0.85;
-  transition: opacity 0.15s;
+  opacity: 0.9;
+  transition: opacity 0.15s, background 0.15s;
 }
-.md-copy-btn:hover { opacity: 1; }
+.md-copy-btn:hover, .md-run-btn:hover { opacity: 1; background: rgba(127, 127, 127, 0.35); }
 .md-copy-btn.copied { color: #16a34a; }
+.md-run-btn { font-weight: 600; }
 .md-code-block pre {
   margin: 0;
-  padding: 12px 14px;
+  padding: 10px 12px;
   overflow-x: auto;
-  background: rgba(127, 127, 127, 0.12);
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 0.88em;
+  background: rgba(127, 127, 127, 0.1);
+  white-space: pre;
+  font-size: 0.86em;
   line-height: 1.55;
 }
 .md-code-block pre code {
@@ -149,6 +269,37 @@ const MD_STYLES_TEXT = `
   display: block;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+/* 语法高亮配色（GitHub 主题的一套最小集合）。
+   不引入 highlight.js 的整份主题 CSS：它按 .hljs 全局生效，会把插件里的代码块也一起改掉。 */
+.md-code-block .hljs-comment, .md-code-block .hljs-quote { color: #6e7781; font-style: italic; }
+.md-code-block .hljs-keyword, .md-code-block .hljs-selector-tag, .md-code-block .hljs-doctag,
+.md-code-block .hljs-formula { color: #cf222e; }
+.md-code-block .hljs-string, .md-code-block .hljs-regexp, .md-code-block .hljs-addition { color: #0a3069; }
+.md-code-block .hljs-number, .md-code-block .hljs-literal, .md-code-block .hljs-link { color: #0550ae; }
+.md-code-block .hljs-title, .md-code-block .hljs-section, .md-code-block .hljs-function .hljs-title { color: #8250df; }
+.md-code-block .hljs-built_in, .md-code-block .hljs-type, .md-code-block .hljs-class .hljs-title { color: #953800; }
+.md-code-block .hljs-attr, .md-code-block .hljs-attribute, .md-code-block .hljs-property,
+.md-code-block .hljs-variable, .md-code-block .hljs-template-variable { color: #0550ae; }
+.md-code-block .hljs-tag, .md-code-block .hljs-name, .md-code-block .hljs-selector-id,
+.md-code-block .hljs-selector-class { color: #116329; }
+.md-code-block .hljs-meta, .md-code-block .hljs-deletion { color: #6e7781; }
+.md-code-block .hljs-emphasis { font-style: italic; }
+.md-code-block .hljs-strong { font-weight: 700; }
+.dark .md-code-block .hljs-comment, .dark .md-code-block .hljs-quote { color: #8b949e; }
+.dark .md-code-block .hljs-keyword, .dark .md-code-block .hljs-selector-tag,
+.dark .md-code-block .hljs-doctag, .dark .md-code-block .hljs-formula { color: #ff7b72; }
+.dark .md-code-block .hljs-string, .dark .md-code-block .hljs-regexp,
+.dark .md-code-block .hljs-addition { color: #a5d6ff; }
+.dark .md-code-block .hljs-number, .dark .md-code-block .hljs-literal,
+.dark .md-code-block .hljs-link { color: #79c0ff; }
+.dark .md-code-block .hljs-title, .dark .md-code-block .hljs-section { color: #d2a8ff; }
+.dark .md-code-block .hljs-built_in, .dark .md-code-block .hljs-type { color: #ffa657; }
+.dark .md-code-block .hljs-attr, .dark .md-code-block .hljs-attribute,
+.dark .md-code-block .hljs-property, .dark .md-code-block .hljs-variable,
+.dark .md-code-block .hljs-template-variable { color: #79c0ff; }
+.dark .md-code-block .hljs-tag, .dark .md-code-block .hljs-name,
+.dark .md-code-block .hljs-selector-id, .dark .md-code-block .hljs-selector-class { color: #7ee787; }
+.dark .md-code-block .hljs-meta, .dark .md-code-block .hljs-deletion { color: #8b949e; }
 .md-message strong { font-weight: 700; }
 .md-message em { font-style: italic; }
 .md-message a { color: #2563eb; text-decoration: underline; }
@@ -221,15 +372,56 @@ export function injectMarkdownStyles(): void {
   mdStylesInjected = true;
 }
 
-/** 全局复制按钮 click 代理（挂在 document，捕获阶段）。
- *  返回卸载函数。调用方在组件 mount 时注册一次即可。
- *  通过事件代理避免每条消息都绑定 React handler，对流式长列表友好。
+/** 全局交互代理（挂在 document，捕获阶段）。返回卸载函数。
+ *
+ *  处理 markdown 渲染结果里的三类可交互元素，全部走事件代理，
+ *  避免每条消息都绑 React handler（对流式长列表友好）：
+ *    1. `.md-copy-btn` —— 复制代码
+ *    2. `.md-run-btn`  —— HTML 代码块「预览」：派发 andy:preview-html，由 HtmlPreviewHost 弹沙箱 iframe
+ *    3. `a[href]`      —— 链接。**必须拦截**：Tauri webview 里裸 `<a href>` 会把整个应用窗口
+ *       导航成目标网页（回不来，只能重启），所以 http(s) 一律交给系统浏览器打开。
  */
-export function attachMarkdownCopyHandler(): () => void {
-  if (typeof document === 'undefined') return () => {};
-  const handler = (e: Event) => {
+function markdownClickHandler(e: Event) {
+  {
     const t = e.target as HTMLElement | null;
-    if (!t || !t.classList?.contains('md-copy-btn')) return;
+    if (!t) return;
+
+    // ---- 3) 链接：阻止默认导航，外链交给系统浏览器 ----
+    const anchor = t.closest?.('a[href]') as HTMLAnchorElement | null;
+    if (anchor) {
+      const href = anchor.getAttribute('href') || '';
+      if (!href) return;
+      // 站内锚点（#section）放行给浏览器原地滚动，不需要外部程序
+      if (href.startsWith('#')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (/^(https?:|mailto:)/i.test(href)) {
+        // 动态 import：移动端/未启用 opener 插件的构建里不会因此炸掉
+        void import('@tauri-apps/plugin-opener')
+          .then((m) => m.openUrl(href))
+          .catch((err: unknown) => {
+            console.warn('[markdown] 系统浏览器打开失败，尝试 window.open:', href, err);
+            window.open(href, '_blank', 'noopener');
+          });
+      } else {
+        // 相对路径 / file: 等：不猜它指向哪，明确告诉用户点了没反应的原因
+        console.warn('[markdown] 非 http(s) 链接不自动打开（避免误导航）：', href);
+        anchor.title = `不自动打开的链接：${href}`;
+      }
+      return;
+    }
+
+    // ---- 2) HTML 代码块预览 ----
+    if (t.classList?.contains('md-run-btn')) {
+      const code = t.getAttribute('data-code') ?? '';
+      const lang = t.getAttribute('data-lang') ?? 'html';
+      if (!code) return;
+      window.dispatchEvent(new CustomEvent('andy:preview-html', { detail: { code, lang } }));
+      return;
+    }
+
+    // ---- 1) 复制 ----
+    if (!t.classList?.contains('md-copy-btn')) return;
     const code = t.getAttribute('data-code') ?? '';
     if (!code) return;
     const finish = (ok: boolean) => {
@@ -265,6 +457,26 @@ export function attachMarkdownCopyHandler(): () => void {
     };
     void copy();
   };
-  document.addEventListener('click', handler, true);
-  return () => document.removeEventListener('click', handler, true);
+}
+
+/**
+ * 幂等安装：AI 对话、浮岛两个面板、笔记、移动端各自都会调一次，
+ * 旧实现是「每调一次就往 document 上再挂一个捕获监听」——同屏有 N 个渲染方
+ * 就会把同一次点击处理 N 遍（复制执行 N 次、预览弹 N 次）。
+ * 现在用引用计数：第一个调用者装、最后一个卸载者摘。
+ */
+let attachedCount = 0;
+export function attachMarkdownCopyHandler(): () => void {
+  if (typeof document === 'undefined') return () => {};
+  // 预览宿主随 markdown 一起就位：任何能渲染 md 的 webview 点「预览」都能用
+  ensureHtmlPreviewHost();
+  attachedCount += 1;
+  if (attachedCount === 1) document.addEventListener('click', markdownClickHandler, true);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    attachedCount = Math.max(0, attachedCount - 1);
+    if (attachedCount === 0) document.removeEventListener('click', markdownClickHandler, true);
+  };
 }
