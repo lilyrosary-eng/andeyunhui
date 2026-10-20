@@ -92,14 +92,87 @@ function normalizeLang(raw?: string): string {
 /** 能直接在沙箱里跑起来预览的语言（HTML 文档）。 */
 const RUNNABLE_LANGS = new Set(['html', 'htm', 'xhtml', 'svg', 'xml']);
 
+/** 渲染选项。 */
+export interface MdOptions {
+  /**
+   * 是否放行原始 HTML。
+   *
+   * - `false`（默认）：原始 HTML 一律转义成文本 —— AI 对话、浮岛面板等**内容来自模型**的地方。
+   *   模型输出可能被提示注入，而主窗有 Tauri IPC 权限，不能直接 innerHTML。
+   * - `true`：渲染 HTML **结构**（div/table/details/svg 等），但剔除可执行部分：
+   *   `<script>/<style>/<iframe>/<object>/<embed>/<form>/<link>/<meta>/<base>` 整块删除，
+   *   `on*=` 事件属性删除，`javascript:` 等协议改写。
+   *   只给**用户自己写的笔记**在「纯预览」模式用 —— 那里是用户自己的内容，不是模型产出。
+   *   注意：这不是「执行任意 HTML」，脚本仍然不会跑；真要跑脚本走代码块的「预览」（沙箱 iframe）。
+   */
+  allowHtml?: boolean;
+}
+
+/** 当前这次 parse 的选项（marked 的 renderer 是模块级单例，只能走这个通道）。 */
+let activeOpts: MdOptions = {};
+
+/** 逐个 parse 递增的标题 id 计数表（同名标题要 id-2 / id-3，否则锚点只会跳到第一个）。 */
+let slugCounts = new Map<string, number>();
+
+/** 标题 → 锚点 id：保留中英文数字，空白转 -，去掉其余标点。 */
+function slugify(text: string): string {
+  const base = text
+    .replace(/<[^>]+>/g, '')
+    .replace(/[`*_~]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^\p{L}\p{N}\-_]/gu, '');
+  return base || 'section';
+}
+
+function uniqueSlug(text: string): string {
+  const base = slugify(text);
+  const n = (slugCounts.get(base) ?? 0) + 1;
+  slugCounts.set(base, n);
+  return n === 1 ? base : `${base}-${n}`;
+}
+
+/**
+ * 原始 HTML 的「结构放行、执行剔除」。
+ *
+ * 为什么不用 DOMPurify：它要多引一个 ~20KB 运行时，而这里只服务「用户自己笔记的纯预览」
+ * 一个场景。正则净化对**可执行面**（脚本/事件属性/危险协议/嵌入对象）够用；
+ * 真正对抗恶意输入的地方（模型产出）根本不走这条路径 —— 那边是纯转义。
+ */
+function sanitizeRawHtml(html: string): string {
+  return html
+    // 成对标签整块删（含内容），先做，避免只删开标签留下脚本正文
+    .replace(/<\s*(script|style|iframe|object|embed|form|link|meta|base)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    // 自闭合/孤立的开标签
+    .replace(/<\s*\/?\s*(script|style|iframe|object|embed|form|link|meta|base)\b[^>]*>/gi, '')
+    // 事件属性（onclick / onerror / onload …），带引号与不带引号两种写法
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
+    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '')
+    // 危险协议
+    .replace(/(href|src|action)\s*=\s*(["'])\s*(?:javascript|vbscript|data:text\/html)[^"']*\2/gi, '$1="#"');
+}
+
 marked.use({
   gfm: true,
   breaks: true,
   async: false,
   renderer: {
-    // 原始 HTML 不渲染，只作为文本显示（保留可见性，丢掉执行能力）
+    // 标题：必须生成 id，否则文档里的「目录」跳不过去。
+    // 血案（2026-10-20 用户实测）：`[安装](#安装)` 的 href 是 #安装，但 marked 默认不给
+    // 标题 id ⇒ 浏览器找不到目标 ⇒ 整个 webview 去导航这个 fragment ⇒ 被系统浏览器（Edge）接走。
+    // this 的类型用 any：marked 的 Renderer 泛型与这里只用到 parser 一处，
+    // 显式写 `this: {parser}` 会与它的 `_Renderer<string,string>` 签名不兼容。
+    /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+    heading(this: any, token: { depth: number; tokens?: unknown[] }) {
+      const inner: string = this.parser.parseInline(token.tokens ?? []);
+      const id = uniqueSlug(inner);
+      return `<h${token.depth} id="${escapeHtml(id)}" class="md-heading">${inner}</h${token.depth}>`;
+    },
+    // 原始 HTML：默认只当文本；允许时（用户自己笔记的纯预览）渲染结构但剔除可执行部分
     html(token: { text: string }) {
-      return escapeHtml(token.text);
+      return activeOpts.allowHtml ? sanitizeRawHtml(token.text) : escapeHtml(token.text);
     },
     // 代码块：语言标签 + 复制 + （HTML 类）预览。
     // 以前是在 marked 输出的字符串上再跑一条正则给 <pre><code> 套壳，那个做法有两个隐患：
@@ -161,11 +234,16 @@ export function escapeHtml(s: string): string {
 }
 
 /** 渲染 markdown 为 HTML（含行内加粗/链接/行内代码/列表/表格/标题/代码块复制按钮）。 */
-export function renderMarkdown(content: string): string {
+export function renderMarkdown(content: string, opts?: MdOptions): string {
   if (!content) return '';
-  const hit = mdCache.get(content);
+  // 缓存键必须带模式：同一段源码在「转义」与「放行 HTML」下产物完全不同，
+  // 只按 content 做键会让第一次的结果污染另一种模式。
+  const cacheKey = (opts?.allowHtml ? 'H:' : 'E:') + content;
+  const hit = mdCache.get(cacheKey);
   if (hit !== undefined) return hit;
   let result: string;
+  activeOpts = opts ?? {};
+  slugCounts = new Map();
   try {
     // 代码块的外壳与高亮已由 renderer.code 生成，这里只做协议中和（不再跑二道正则：
     // 旧正则会把已经生成的 .md-code-block 再套一层，复制按钮重复、复制内容被转义两次）
@@ -187,7 +265,7 @@ export function renderMarkdown(content: string): string {
       if (--drop <= 0) break;
     }
   }
-  mdCache.set(content, result);
+  mdCache.set(cacheKey, result);
   return result;
 }
 
@@ -302,8 +380,17 @@ const MD_STYLES_TEXT = `
 .dark .md-code-block .hljs-meta, .dark .md-code-block .hljs-deletion { color: #8b949e; }
 .md-message strong { font-weight: 700; }
 .md-message em { font-style: italic; }
-.md-message a { color: #2563eb; text-decoration: underline; }
-.dark .md-message a { color: #93c5fd; }
+/* 链接：蓝字 + 下划线。
+   必须同时覆盖 .notes-preview —— 笔记预览的容器类不是 .md-message（它用 tailwind prose），
+   prose 的 --tw-prose-links 是近黑色，所以之前链接看着和正文一样。
+   .notes-preview.prose a 多一级特异性，才能压过 .prose a。 */
+.md-message a, .notes-preview a, .notes-preview.prose a {
+  color: #2563eb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.dark .md-message a, .dark .notes-preview a, .dark .notes-preview.prose a { color: #60a5fa; }
 .md-message blockquote {
   border-left: 3px solid currentColor;
   margin: 0.4em 0;
@@ -386,15 +473,48 @@ function markdownClickHandler(e: Event) {
     const t = e.target as HTMLElement | null;
     if (!t) return;
 
-    // ---- 3) 链接：阻止默认导航，外链交给系统浏览器 ----
+    // ---- 3) 链接 ----
     const anchor = t.closest?.('a[href]') as HTMLAnchorElement | null;
     if (anchor) {
+      // 只接管 markdown 渲染区里的链接。别处的 <a>（设置页、插件 UI）保持原行为，
+      // 否则这个 document 级捕获监听会误伤整个应用。
+      if (!anchor.closest('.md-message, .notes-preview')) return;
       const href = anchor.getAttribute('href') || '';
       if (!href) return;
-      // 站内锚点（#section）放行给浏览器原地滚动，不需要外部程序
-      if (href.startsWith('#')) return;
+      // **所有** markdown 链接一律先拦住默认导航：
+      // webview 一旦自己导航，轻则整窗被目标网页替换，重则交给系统浏览器（Edge）。
       e.preventDefault();
       e.stopPropagation();
+
+      // 站内锚点（目录）：在**软件内部**滚到目标标题，不经过系统浏览器。
+      // 血案（2026-10-20 用户实测）：旧代码对 `#` 直接 return（不 preventDefault），
+      // 而当时的标题没有 id ⇒ 目标找不到 ⇒ webview 拿这个 fragment 去导航 ⇒ 跳到 Edge。
+      if (href.startsWith('#')) {
+        const raw = href.slice(1);
+        let id = raw;
+        try {
+          id = decodeURIComponent(raw);
+        } catch (err) {
+          console.warn('[markdown] 锚点解码失败，按原文查找:', raw, err);
+        }
+        const target = document.getElementById(id) || document.getElementById(raw);
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          // 闪一下描边：目录跳转后用户需要知道"落到哪一行了"
+          const prevOutline = target.style.outline;
+          const prevOffset = target.style.outlineOffset;
+          target.style.outline = '2px solid rgba(59,130,246,0.65)';
+          target.style.outlineOffset = '2px';
+          window.setTimeout(() => {
+            target.style.outline = prevOutline;
+            target.style.outlineOffset = prevOffset;
+          }, 1200);
+        } else {
+          console.warn('[markdown] 目录锚点没有对应标题（标题被改过，或不是标题锚点）:', href);
+        }
+        return;
+      }
+
       if (/^(https?:|mailto:)/i.test(href)) {
         // 动态 import：移动端/未启用 opener 插件的构建里不会因此炸掉
         void import('@tauri-apps/plugin-opener')

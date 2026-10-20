@@ -76,8 +76,11 @@ export function editorHtmlToMd(html: string): string {
   md = md.replace(/<br\s*\/?>/gi, '\n');
 
   // 标题：h1-h6
-  md = md.replace(/<h(\d)>/gi, (_m, level) => '\n' + '#'.repeat(Number(level)) + ' ');
-  md = md.replace(/<\/h\d>/gi, '\n');
+  // 必须允许属性：预览渲染会给标题加 id（目录锚点）与 class。旧正则只匹配 <h1>，
+  // 带属性的标题会被当成普通文本 ⇒ 「编辑器 HTML → markdown」把 # 全丢了
+  // （2026-10-20 由 round-trip 测试抓到）。
+  md = md.replace(/<h([1-6])\b[^>]*>/gi, (_m, level) => '\n' + '#'.repeat(Number(level)) + ' ');
+  md = md.replace(/<\/h[1-6]>/gi, '\n');
 
   // 无序列表
   md = md.replace(/<li>\s*/gi, '- ');

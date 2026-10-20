@@ -101,7 +101,9 @@ export function FloatingNoteView() {
 
   // 仅在预览态才渲染：renderMarkdown 内部有缓存，来回切换不会重复解析。
   const previewHtml = useMemo(
-    () => (mode === 'preview-only' ? renderMarkdown(content) : ''),
+    // 浮窗只有 edit-only / preview-only 两种模式：预览即放行 HTML 结构
+    //（脚本/事件属性仍被 sanitizeRawHtml 剔除，见 lib/markdown.ts）
+    () => (mode === 'preview-only' ? renderMarkdown(content, { allowHtml: true }) : ''),
     [mode, content],
   );
 

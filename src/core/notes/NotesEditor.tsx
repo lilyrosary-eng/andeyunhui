@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState, useEffect } from 'react';
+import { useRef, useCallback, useState, useEffect, useMemo } from 'react';
 import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText, Sparkles, Eye, Square } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -9,7 +9,7 @@ import { useI18n } from '@/lib/i18n';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { MarkdownSourceEditor, type MarkdownSourceEditorHandle } from './MarkdownSourceEditor';
-import { injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
+import { injectMarkdownStyles, attachMarkdownCopyHandler, renderMarkdown } from '@/lib/markdown';
 import { EVENTS } from '@/core/events/schema';
 
 // 编辑区为「原始 Markdown 文本编辑」（受控 textarea），不再加载 TipTap 富文本编辑器，
@@ -45,6 +45,15 @@ export function NotesEditor() {
     const saved = localStorage.getItem(EDITOR_MODE_KEY) as EditorMode | null;
     return saved && EDITOR_MODES.includes(saved) ? saved : 'split';
   });
+
+  // 预览 HTML（2026-10-20）：
+  //   · 双栏 / 仅编辑 → 用 store 里那份**转义版**（原始 HTML 只当文本，不渲染）
+  //   · 仅预览 → 才放行 HTML **结构**（用户自己写的内容；脚本/事件属性/嵌入对象仍被剔除）
+  // 为什么不改 store：htmlContent 还被别处消费，改语义会波及；这里只管"这个视图怎么显示"。
+  const previewHtml = useMemo(
+    () => (editorMode === 'preview-only' ? renderMarkdown(content, { allowHtml: true }) : htmlContent),
+    [editorMode, content, htmlContent],
+  );
 
   const handleSetMode = useCallback((mode: EditorMode) => {
     setEditorMode(mode);
@@ -456,7 +465,7 @@ export function NotesEditor() {
                 故此处不再声明 [&_pre]:overflow-x-auto。 */}
             <div
               className="notes-preview flex-1 w-full h-full p-5 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-neutral-700 leading-7 dark:text-stone-300 [&_p]:my-2 [&_p]:leading-7 [&_img]:max-w-full [&_img]:h-auto [&_table]:max-w-full [&_td]:break-words"
-              dangerouslySetInnerHTML={{ __html: htmlContent }}
+              dangerouslySetInnerHTML={{ __html: previewHtml }}
             />
           </div>
         )}

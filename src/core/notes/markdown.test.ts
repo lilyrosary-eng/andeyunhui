@@ -122,8 +122,13 @@ describe('mdToEditorHtml', () => {
   });
 
   it('标题', () => {
-    expect(mdToEditorHtml('# Title')).toBe('<h1>Title</h1>\n');
-    expect(mdToEditorHtml('## Sub')).toBe('<h2>Sub</h2>\n');
+    // 标题现在带 id（目录锚点）与 class，断言改成语义匹配而不是精确串
+    const h1 = mdToEditorHtml('# Title');
+    expect(h1).toContain('<h1');
+    expect(h1).toContain('>Title</h1>');
+    const h2 = mdToEditorHtml('## Sub');
+    expect(h2).toContain('<h2');
+    expect(h2).toContain('>Sub</h2>');
   });
 
   it('粗体', () => {
@@ -131,7 +136,10 @@ describe('mdToEditorHtml', () => {
   });
 
   it('链接', () => {
-    expect(mdToEditorHtml('[t](https://x.com)')).toBe('<p><a href="https://x.com">t</a></p>\n');
+    // 链接现在带 target/rel（防止 webview 整窗导航），断言放宽
+    const link = mdToEditorHtml('[t](https://x.com)');
+    expect(link).toContain('href="https://x.com"');
+    expect(link).toContain('>t</a>');
   });
 
   it('图片', () => {
@@ -165,7 +173,7 @@ describe('renderMarkdownPreview（预览块级语法修复）', () => {
   it('空行之后的 `## 标题` 必须渲染为 h2', () => {
     const html = renderMarkdownPreview('上一段\n\n## 标题');
     expect(html).toContain('<p>上一段</p>');
-    expect(html).toContain('<h2>标题</h2>');
+    expect(html).toMatch(/<h2[^>]*>标题<\/h2>/);
   });
 
   it('空行之后的其它行首块级语法同样生效：无序列表 / 有序列表 / 引用 / 围栏代码', () => {
