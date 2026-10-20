@@ -88,7 +88,7 @@ async fn run_agent(
                 if t.trim().is_empty() { "（无文本输入）".to_string() } else { t }
             })
             .unwrap_or_else(|| "未命名轮次".to_string());
-        if let Err(e) = crate::services::checkpoint::begin(&app, root, &label) {
+        if let Err(e) = crate::services::checkpoint::begin(root, &label) {
             log::warn!("[checkpoint] 本轮快照创建失败（写入仍会继续，但无法回滚）: {e}");
         }
     }

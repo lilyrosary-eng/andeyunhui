@@ -414,10 +414,15 @@ function CapsuleAide() {
   /** 回滚到某个快照（已二次确认）。 */
   const rollbackSnapshot = useCallback(async (id: string) => {
     if (snapshotBusy) return;
+    if (!aideProjectRoot) {
+      setSnapshotMsg('未关联项目，无法定位快照目录');
+      return;
+    }
     setSnapshotBusy(true);
     setSnapshotMsg(null);
     try {
-      const r = await invoke<{ restored: number; removed: number; skipped: number }>('checkpoint_rollback', { id });
+      // projectRoot 必传：快照就存在 <项目>/.andeyunhui/checkpoints 里
+      const r = await invoke<{ restored: number; removed: number; skipped: number }>('checkpoint_rollback', { projectRoot: aideProjectRoot, id });
       const skipped = r?.skipped ?? 0;
       // 跳过数必须显式说出来：那些文件当初因超限没备份，回滚**没有**恢复它们
       setSnapshotMsg(
@@ -433,7 +438,7 @@ function CapsuleAide() {
       setSnapshotBusy(false);
       setSnapshotConfirmId(null);
     }
-  }, [snapshotBusy, openSnapshots]);
+  }, [snapshotBusy, aideProjectRoot, openSnapshots]);
 
   const stopAide = useCallback(() => {
     const rid = aideReqRef.current;

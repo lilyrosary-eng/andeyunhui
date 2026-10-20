@@ -117,7 +117,12 @@ pub(crate) fn is_protected_path(p: &Path) -> bool {
     for seg in p.components() {
         if let std::path::Component::Normal(s) = seg {
             let seg = s.to_string_lossy().to_lowercase();
-            if seg == ".git" || seg == ".svn" || seg == ".hg" || seg == "node_modules" {
+            // .andeyunhui：本应用的项目内元数据（AI 检查点快照）。
+            // 必须受保护 —— 否则 agent 可以回滚自己的回滚、甚至删掉快照，
+            // 用户手里那条"随时能回退"的保险就没了。
+            if seg == ".git" || seg == ".svn" || seg == ".hg" || seg == "node_modules"
+                || seg == ".andeyunhui"
+            {
                 return true;
             }
         }

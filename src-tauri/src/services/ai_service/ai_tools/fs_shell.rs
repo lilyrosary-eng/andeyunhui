@@ -141,7 +141,7 @@ pub(crate) fn edit_store() -> &'static Mutex<std::collections::HashMap<String, V
 /// 连正常的写文件都会被一个辅助功能拖死。
 fn capture_before_write(ctx: &ToolContext, path: &std::path::Path) {
     if let Some(root) = ctx.project_root.as_ref() {
-        if let Err(e) = crate::services::checkpoint::capture(&ctx.app, root, path) {
+        if let Err(e) = crate::services::checkpoint::capture(root, path) {
             log::warn!("[checkpoint] 捕获失败（继续写入）: {} - {}", path.display(), e);
         }
     }

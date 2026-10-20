@@ -323,21 +323,19 @@ pub fn ide_session_delete(app: tauri::AppHandle, id: String) -> Result<(), Strin
 
 /// 列出快照（前端「历史快照」面板用）。projectRoot 为空则列出全部项目的快照。
 #[tauri::command]
-pub fn checkpoint_list(
-    app: tauri::AppHandle,
-    project_root: Option<String>,
-) -> Vec<crate::services::checkpoint::CheckpointMeta> {
+pub fn checkpoint_list(project_root: Option<String>) -> Vec<crate::services::checkpoint::CheckpointMeta> {
     let pr = project_root
         .filter(|s| !s.trim().is_empty())
         .map(std::path::PathBuf::from);
-    crate::services::checkpoint::list(&app, pr.as_deref())
+    crate::services::checkpoint::list(pr.as_deref())
 }
 
 /// 回滚到指定快照：把该轮改过的文件写回改前内容，该轮新建的文件删除。
 /// 返回 { restored, removed, skipped }（skipped = 当初因超限未备份、无法恢复的文件数）。
 #[tauri::command]
-pub fn checkpoint_rollback(app: tauri::AppHandle, id: String) -> Result<serde_json::Value, String> {
-    let (restored, removed, skipped) = crate::services::checkpoint::rollback(&app, &id)?;
+pub fn checkpoint_rollback(project_root: String, id: String) -> Result<serde_json::Value, String> {
+    let root = std::path::PathBuf::from(&project_root);
+    let (restored, removed, skipped) = crate::services::checkpoint::rollback(&root, &id)?;
     Ok(serde_json::json!({
         "restored": restored,
         "removed": removed,
