@@ -197,8 +197,9 @@ describe('renderMarkdown', () => {
       expect(html).not.toContain('allow-same-origin');
       expect(html).toContain('srcdoc=');
       expect(html).toContain('&lt;style&gt;');
-      // 注入了 <base>（指向目录）
-      expect(html).toContain('&lt;base href=');
+      // 相对资源被改写成 asset 绝对 URL；不再注入 <base>
+      // （<base> 会把 #锚点 变成 http 链接，进而被外链桥送去 Edge）
+      expect(html).not.toContain('&lt;base');
     } finally {
       g.window = prev;
     }
@@ -218,7 +219,8 @@ describe('renderMarkdown', () => {
     expect(html).toMatch(/<h1[^>]*>标题<\/h1>/);
   });
 
-  it('整篇文档 + imageBaseDir：注入 <base> 让相对图片能解析', () => {
+
+  it('整篇文档：相对图片改写成 asset URL，锚点保持纯 fragment', () => {
     const g = globalThis as unknown as { window?: unknown };
     const prev = g.window;
     g.window = {
@@ -227,13 +229,20 @@ describe('renderMarkdown', () => {
       },
     };
     try {
-      const html = renderMarkdown('<!DOCTYPE html><html><body><img src="images/a.png"></body></html>', {
-        imageBaseDir: 'D:/proj',
-      });
-      expect(html).toContain('srcdoc=');
-      // <base> 也要在 srcdoc 里（被转义成 &lt;base），指向目录而不是文件
-      expect(html).toContain('&lt;base href=');
-      expect(html).toContain(encodeURIComponent('D:/proj'));
+      const doc = '<!DOCTYPE html><html><body>'
+        + '<a href="#ch1">目录</a><a href="https://x.com">外链</a>'
+        + '<img src="images/a.png"><img src="https://cdn/x.png">'
+        + '<link href="style/a.css">'
+        + '</body></html>';
+      const html = renderMarkdown(doc, { imageBaseDir: 'D:/proj' });
+      // 相对图片 → asset 绝对 URL（srcdoc 里是转义后的实体）
+      expect(html).toContain('images/a.png');
+      // 相对样式表同样改写
+      expect(html).toContain('style/a.css');
+      // 绝对外链不动
+      expect(html).toContain('https://cdn/x.png');
+      // 锚点保持 #ch1（没有被 base 变成 http://asset.localhost/...#ch1）
+      expect(html).toContain('href=&quot;#ch1&quot;');
     } finally {
       g.window = prev;
     }

@@ -192,8 +192,23 @@ export function NotesEditor() {
       ].includes(fileExt)) {
         try {
           const text = await file.text();
-          const lang = fileExt === 'markdown' ? 'md' : fileExt;
-          newContent += `\n\`\`\`${lang}\n${text}\n\`\`\`\n`;
+          // 2026-10-20 修：以前**不分类型一律套代码围栏**（```md / ```html ...）。
+          // 两个后果：
+          //   1. 拖进来的 .md / .html 本身是文档，被当源码塞进围栏后不再渲染；
+          //   2. 文档内部本来就有 ``` （例如 Markdown 报告里的代码块），
+          //      围栏在**文档内部**就闭合了 ⇒ 后半截全跑到围栏外变成纯文本。
+          //      用户看到的就是"前面多了 md + ```，后面全乱"。
+          const docLike = ['md', 'markdown', 'html', 'htm', 'svg'].includes(fileExt);
+          if (docLike) {
+            // 文档：原样插入，让渲染层按它的类型处理（完整 HTML 文档会被沙箱 iframe 渲染）
+            newContent += `\n\n<!-- ${fileName} -->\n\n${text}\n`;
+          } else {
+            // 源码/配置：保留围栏（否则会被 markdown 解析器吃掉），但围栏长度必须比
+            // 内容里最长的连续反引号更长，否则同样会提前闭合。
+            const longest = (text.match(/`{3,}/g) || []).reduce((m, r) => Math.max(m, r.length), 2);
+            const fence = '`'.repeat(longest + 1);
+            newContent += `\n${fence}${fileExt}\n${text}\n${fence}\n`;
+          }
         } catch {
           const tsPath = `./transfer_station/${fileName}`;
           newContent += `\n[📝 ${fileName}](${tsPath})\n`;

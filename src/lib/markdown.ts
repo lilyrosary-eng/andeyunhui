@@ -205,6 +205,71 @@ export function isFullHtmlDocument(src: string): boolean {
  * iframe + sandbox（无 allow-same-origin）= 它能完整跑起来，但拿不到父窗口与 Tauri IPC。
  * 这与"像浏览器那样显示"是同一件事，只是把越界能力关掉。
  */
+/** 资源类属性里这些开头的值一律不动（已经是绝对/内联/锚点/协议相对）。 */
+const ABSOLUTE_RES = /^(?:[a-z][a-z0-9+.-]*:|#|\/\/|\/)/i;
+
+/** 把相对资源拼到目录的 asset URL 上，并就地折叠 ./ 与 ../。 */
+function joinAssetUrl(dirUrl: string, rel: string): string {
+  const parts = rel.replace(/\\/g, '/').split('/');
+  const stack: string[] = [];
+  for (const p of parts) {
+    if (!p || p === '.') continue;
+    if (p === '..') {
+      stack.pop();
+      continue;
+    }
+    stack.push(p);
+  }
+  return dirUrl + stack.map((seg) => encodeURIComponent(seg)).join('/');
+}
+
+/** srcset 是逗号分隔的候选列表，每个候选 `url [descriptor]`。 */
+function rewriteSrcset(value: string, dirUrl: string): string {
+  return value
+    .split(',')
+    .map((item) => {
+      const trimmed = item.trim();
+      if (!trimmed) return trimmed;
+      const [url, ...desc] = trimmed.split(/\s+/);
+      if (ABSOLUTE_RES.test(url)) return trimmed;
+      return [joinAssetUrl(dirUrl, url), ...desc].join(' ');
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+/**
+ * 把文档里的**相对资源 URL** 改写成 asset 绝对 URL。
+ *
+ * 为什么不再注入 `<base>`（2026-10-20 修，用户实测）：
+ * `<base href="http://asset.localhost/D%3A/…/">` 会让文档里所有 `href="#ch1"` 解析成
+ * **绝对 http URL**（`http://asset.localhost/…/#ch1`）。而外链拦截桥看到 `^https?`
+ * 就把点击交给系统浏览器 —— 于是**内联目录锚点全被送去 Edge**。
+ * 改成逐属性重写：锚点保持纯 fragment（在 iframe 内滚动），资源正常加载，两件事不互相污染。
+ */
+function rewriteDocResources(doc: string, dirUrl: string): string {
+  let out = doc;
+  // src / poster / data-src
+  out = out.replace(
+    /(\s(?:src|poster|data-src)\s*=\s*)(["'])([^"']+)\2/gi,
+    (full, pre: string, q: string, url: string) =>
+      ABSOLUTE_RES.test(url.trim()) ? full : `${pre}${q}${joinAssetUrl(dirUrl, url.trim())}${q}`,
+  );
+  // srcset
+  out = out.replace(
+    /(\ssrcset\s*=\s*)(["'])([^"']+)\2/gi,
+    (full, pre: string, q: string, url: string) =>
+      ABSOLUTE_RES.test(url.trim()) ? full : `${pre}${q}${rewriteSrcset(url, dirUrl)}${q}`,
+  );
+  // <link href>（样式表/字体/图标）；<a href> 不动 —— 锚点与外链都由浏览器/桥各自处理
+  out = out.replace(
+    /(<link\b[^>]*?\shref\s*=\s*)(["'])([^"']+)\2/gi,
+    (full, pre: string, q: string, url: string) =>
+      ABSOLUTE_RES.test(url.trim()) ? full : `${pre}${q}${joinAssetUrl(dirUrl, url.trim())}${q}`,
+  );
+  return out;
+}
+
 export function buildDocIframeHtml(doc: string, dirUrlBase?: string): string {
   let body = doc;
 
@@ -213,18 +278,16 @@ export function buildDocIframeHtml(doc: string, dirUrlBase?: string): string {
   const linkBridge =
     '<script>(function(){document.addEventListener("click",function(e){'
     + 'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;if(!a)return;'
+    // 站内锚点交给 iframe 自己滚动（不 preventDefault）；只有真正的外部链接才转给父级
+    + 'var h=a.getAttribute("href")||"";if(!h||h.charAt(0)==="#")return;'
     + 'e.preventDefault();try{parent.postMessage({__andy:"open",href:a.href},"*");}catch(err){}},true);})();</script>';
   body = /<\/body>/i.test(body)
     ? body.replace(/<\/body>/i, linkBridge + '</body>')
     : body + linkBridge;
 
-  // dirUrlBase 已经是「目录的 asset URL」（末尾带 /）。文档里的 images/a.png 会以它为基准解析。
-  if (dirUrlBase) {
-    const baseTag = `<base href="${escapeHtml(dirUrlBase)}">`;
-    body = /<head[^>]*>/i.test(body)
-      ? body.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`)
-      : baseTag + body;
-  }
+  // dirUrlBase 是「目录的 asset URL」（末尾带 /）。把文档里的相对资源逐个改写成绝对 URL，
+  // **不注入 <base>** —— 原因见 rewriteDocResources 的注释（会让 #锚点变成 http 链接）。
+  if (dirUrlBase) body = rewriteDocResources(body, dirUrlBase);
   return (
     '<div class="md-html-doc">'
     + `<iframe class="md-html-frame" title="html-document" loading="lazy"`
@@ -619,6 +682,30 @@ const MD_STYLES_TEXT = `
   overflow: hidden;
   background: #fff;
 }
+/* 找不到相对图片时的占位（内联 SVG 自带文字）：可点击指定目录 */
+.md-message img.md-img-missing, .notes-preview img.md-img-missing { cursor: pointer; }
+/* 文档内有相对图片但没定位到来源目录时的提示条 */
+.md-doc-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #8a5b1a;
+  background: rgba(230, 195, 92, 0.14);
+  border-bottom: 1px solid rgba(127, 127, 127, 0.3);
+}
+.md-doc-pick {
+  margin-left: auto;
+  font-size: 11.5px;
+  padding: 2px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.45);
+  background: rgba(127, 127, 127, 0.16);
+  color: inherit;
+  cursor: pointer;
+}
+.md-doc-pick:hover { background: rgba(127, 127, 127, 0.3); }
 .md-html-doc.md-html-pending {
   min-height: 120px;
   background: rgba(127, 127, 127, 0.08);

@@ -200,6 +200,9 @@ function rememberRel(rel: string, abs: string | null): void {
   relPathCache.set(rel, abs);
 }
 
+/** 文档容器 → 原始文档文本。用于"用户指定目录后按新基准重渲染"，避免把 100KB 文本塞回属性里。 */
+const docSources = new Map<HTMLElement, string>();
+
 const pendingImgs = new Map<HTMLImageElement, string>();
 const pendingDocs = new Map<HTMLElement, string>();
 let pendingTimer: number | undefined;
@@ -244,6 +247,33 @@ function deriveBaseDir(abs: string, rel: string): string | null {
   if (a.endsWith('/' + r)) return a.slice(0, a.length - r.length - 1);
   const idx = a.lastIndexOf('/');
   return idx > 0 ? a.slice(0, idx) : null;
+}
+
+/** 找不到图片时显示的占位（内联 SVG，不依赖网络；点击可指定目录）。 */
+function missingPlaceholder(rel: string): string {
+  const label = rel.length > 52 ? '…' + rel.slice(-50) : rel;
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="440" height="58">'
+    + '<rect x="1" y="1" width="438" height="56" rx="6" fill="#f6f7f9" stroke="#c9ced6" stroke-dasharray="6 4"/>'
+    + `<text x="12" y="24" font-family="system-ui,sans-serif" font-size="12" fill="#5b6472">找不到图片：${label}</text>`
+    + '<text x="12" y="43" font-family="system-ui,sans-serif" font-size="11" fill="#8b94a3">点击此处选择图片所在目录</text>'
+    + '</svg>';
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+/** 把用户手选的目录追加进 imageRoots（去重、最多 8 个）。 */
+function addImageRoot(dir: string): void {
+  try {
+    const raw = localStorage.getItem('andeyunhui.imageRoots') || '';
+    const list = raw.split(/[;\n]/).map((x) => x.trim()).filter(Boolean);
+    const norm = dir.replace(/\//g, '\\').toLowerCase();
+    if (list.some((x) => x.replace(/\//g, '\\').toLowerCase() === norm)) return;
+    list.push(dir);
+    localStorage.setItem('andeyunhui.imageRoots', list.slice(-8).join(';'));
+    console.info('[image] 已加入图片检索目录:', dir);
+  } catch (e) {
+    console.warn('[image] 保存图片检索目录失败:', e);
+  }
 }
 
 function scheduleResolve(): void {
@@ -308,24 +338,65 @@ async function flushPending(): Promise<void> {
         console.warn('[image] 转换本地图片地址失败:', abs, e);
       }
     } else {
+      // 保留 data-andy-rel：用户点选目录后要能重新解析这一批
       el.classList.add('md-img-missing');
-      el.setAttribute('title', `找不到这张图：${rel}`);
-      el.removeAttribute('data-andy-rel'); // 别再反复尝试
-      console.warn('[image] 未找到相对图片（可在设置里指定图片根目录）:', rel);
+      el.setAttribute('src', missingPlaceholder(rel));
+      el.setAttribute('title', `找不到这张图：${rel}（点击选择它所在的目录）`);
+      console.warn('[image] 未找到相对图片，已显示占位（可点击占位指定目录）:', rel);
     }
   }
 
-  // 回填 HTML 文档占位：反推目录 → 带 <base> 渲染 iframe
+  // 回填 HTML 文档占位：反推目录 → 重写文档内相对资源 → 渲染 iframe
   for (const { el, doc, probe } of docProbes) {
+    docSources.set(el, doc);
     const abs = probe ? map[probe] ?? null : null;
     const baseDir = abs && probe ? deriveBaseDir(abs, probe) : null;
     const dirUrl = baseDir ? dirToAssetUrl(baseDir) : undefined;
     if (!dirUrl && probe) {
-      console.warn('[image] 文档内相对图片未找到，iframe 将不带 base（图片可能加载不出来）:', probe);
+      console.warn('[image] 文档内相对图片未找到，iframe 不带基准目录（图片可能加载不出来）:', probe);
+    }
+    // 没解析出目录时给一条**可点击**的提示：点一下选目录，然后按新基准重渲染这份文档
+    const hint = !dirUrl && probe
+      ? '<div class="md-doc-hint">这份文档里有相对图片，但没找到它的来源目录 —— '
+        + '<button type="button" class="md-doc-pick">选择图片目录</button></div>'
+      : '';
+    el.innerHTML = hint + buildDocIframeHtml(doc, dirUrl);
+    el.classList.remove('md-html-pending');
+    el.removeAttribute('data-andy-doc');
+  }
+}
+
+/** 按当前 imageRoots 重新给已渲染的文档推导基准目录并重渲染。 */
+async function rerenderDocs(): Promise<void> {
+  const entries = [...docSources.entries()];
+  if (!entries.length) return;
+  const probes = entries
+    .map(([el, doc]) => ({ el, doc, probe: firstRelativeImageSrc(doc) }))
+    .filter((x): x is { el: HTMLElement; doc: string; probe: string } => !!x.probe);
+  if (!probes.length) return;
+  const need = [...new Set(probes.map((p) => p.probe))];
+  let map: Record<string, string | null> = {};
+  try {
+    const roots = imageRoots();
+    map = await invoke<Record<string, string | null>>('resolve_local_images', {
+      paths: need,
+      roots: roots.length ? roots : null,
+    });
+  } catch (e) {
+    console.error('[image] 文档重渲染检索失败:', e);
+    return;
+  }
+  for (const { el, doc, probe } of probes) {
+    const abs = map[probe] ?? null;
+    if (abs) rememberRel(probe, abs);
+    const baseDir = abs ? deriveBaseDir(abs, probe) : null;
+    const dirUrl = baseDir ? dirToAssetUrl(baseDir) : undefined;
+    if (!dirUrl) {
+      console.warn('[image] 仍未定位到文档目录，保持原样:', probe);
+      continue;
     }
     el.innerHTML = buildDocIframeHtml(doc, dirUrl);
     el.classList.remove('md-html-pending');
-    el.removeAttribute('data-andy-doc');
   }
 }
 
@@ -366,6 +437,58 @@ function installPendingAssetResolver(): void {
   });
 
   observer.observe(document.body, { childList: true, subtree: true });
+
+  // 点占位图 → 选一个目录 → 把它加入检索根 → 重新解析所有还缺图的占位。
+  // 为什么不弹"设置面板"：问题现场就在这张图上，让用户就地指路最快。
+  document.addEventListener(
+    'click',
+    (ev) => {
+      const t = ev.target as Element | null;
+
+      // 文档提示条上的「选择图片目录」：选完按新基准把这份文档重渲染一次
+      const pickBtn = t?.closest?.('.md-doc-pick') as HTMLElement | null;
+      if (pickBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        void (async () => {
+          try {
+            const dir = await invoke<string | null>('pick_directory');
+            if (!dir) return;
+            addImageRoot(dir);
+            relPathCache.clear();
+            await rerenderDocs();
+          } catch (e) {
+            console.error('[image] 文档目录选择失败:', e);
+          }
+        })();
+        return;
+      }
+
+      const img = t?.closest?.('img.md-img-missing') as HTMLImageElement | null;
+      if (!img) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      void (async () => {
+        try {
+          const dir = await invoke<string | null>('pick_directory');
+          if (!dir) return;
+          addImageRoot(dir);
+          // 根变了 ⇒ 之前"没找到"的结论作废
+          relPathCache.clear();
+          // 把所有缺图占位重置回待解析（保留 data-andy-rel，src 换成透明像素避免再次显示破图）
+          document.querySelectorAll<HTMLImageElement>('img.md-img-missing[data-andy-rel]').forEach((el) => {
+            el.classList.remove('md-img-missing');
+            el.setAttribute('src', TRANSPARENT_PX);
+            pendingImgs.set(el, el.getAttribute('data-andy-rel') || '');
+          });
+          scheduleResolve();
+        } catch (e) {
+          console.error('[image] 选择图片目录失败:', e);
+        }
+      })();
+    },
+    true,
+  );
 
   // 首屏已有内容（安装晚于首次渲染时）补一遍
   document.querySelectorAll('img[data-andy-rel], [data-andy-doc]').forEach(pick);
