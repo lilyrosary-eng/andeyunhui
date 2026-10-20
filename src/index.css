@@ -756,6 +756,26 @@ html.is-linux *::after {
    em 相对于 pre 自身字号，故 9.6em = 6 行 × 1.6 行高，与字号实际取值无关；
    +24px 为上下 padding 12px×2（Tailwind preflight 为 border-box，
    max-height 含内边距，必须补上）。 */
+/* 长文档（10 万字符级）的渲染成本控制（2026-10-20）。
+   实测：100k 文本 → 45 万字符 HTML、上千个节点，一次性布局/绘制是滚动卡顿的主因。
+   content-visibility: auto 让**屏幕外**的块直接跳过 layout 与 paint，
+   contain-intrinsic-size 给未渲染块一个估计高度，避免滚动条跳动（auto 关键字会记住实际高度）。
+   注意只作用于预览容器：AI 气泡里的块通常很短，加这层反而多一次判断。 */
+.notes-preview > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 24px;
+}
+
+/* 长文档（10 万字符级）的渲染成本控制（2026-10-20）。
+   实测：100k 文本 → 45 万字符 HTML、上千个节点，一次性布局/绘制是滚动卡顿的主因。
+   content-visibility: auto 让**屏幕外**的块直接跳过 layout 与 paint，
+   contain-intrinsic-size 给未渲染块一个估计高度，避免滚动条跳动（auto 关键字会记住实际高度）。
+   注意只作用于预览容器：AI 气泡里的块通常很短，加这层反而多一次判断。 */
+.notes-preview > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 24px;
+}
+
 .notes-preview .md-code-block pre {
   line-height: 1.6;
   padding: 12px 14px;

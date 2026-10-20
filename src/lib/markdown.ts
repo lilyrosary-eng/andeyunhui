@@ -170,6 +170,73 @@ function resolveImageSrc(raw: string, baseDir?: string): string {
   }
 }
 
+/**
+ * 剥掉外层 harness 的长文本包裹。
+ *
+ * 例：`@long-text:"# 模型架构…" <long_text_quote>正文</long_text_quote>`
+ * 这是「文本太长，界面上折叠成引用」的标注格式，不是给最终用户看的语法。
+ * 本项目不产生它，但模型输出/粘贴内容里会出现 —— 原样渲染的话，用户看到的是
+ * 一大段 `<long_text_quote>` 标签和被截断的标题预览，正文反而被当成普通文本。
+ * 这里只把信封去掉，正文原样交回渲染流程（是否渲染 HTML 仍由 allowHtml 决定）。
+ */
+function unwrapLongTextQuote(src: string): string {
+  if (!src.includes('long_text_quote') && !src.includes('@long-text')) return src;
+  const m = src.match(/<long_text_quote>([\s\S]*?)<\/long_text_quote>/i);
+  if (m) return m[1].trim();
+  // 没有闭合标签（流式过程中）：至少去掉起始标注，避免露出半截信封
+  return src.replace(/@long-text(?::"[^"]*")?\s*/gi, '').replace(/<\/?long_text_quote>/gi, '');
+}
+
+/** 内容本身就是一份完整 HTML 文档（而不是"markdown 里夹了点 HTML"）。 */
+export function isFullHtmlDocument(src: string): boolean {
+  const head = src.trimStart().slice(0, 300).toLowerCase();
+  return head.startsWith('<!doctype') || head.startsWith('<html');
+}
+
+/**
+ * 整篇 HTML 文档用**沙箱 iframe** 渲染（2026-10-20）。
+ *
+ * 为什么不能像 markdown 那样内联塞进当前 DOM：
+ *   · 文档自带 <style>（本项目笔记预览会剔除 style/script，否则一个笔记能改掉全应用样式）
+ *   · 文档自带 <script>（交互演示要真跑）
+ *   · 文档自带 <html>/<body>/<meta viewport>，内联会污染宿主页
+ * iframe + sandbox（无 allow-same-origin）= 它能完整跑起来，但拿不到父窗口与 Tauri IPC。
+ * 这与"像浏览器那样显示"是同一件事，只是把越界能力关掉。
+ */
+function renderHtmlDocument(doc: string, baseDir?: string): string {
+  let body = doc;
+
+  // 沙箱里点链接默认是死的（没有 allow-popups）。注入一个极小的拦截器，把链接交给父级，
+  // 复用的是 HtmlPreviewHost 已经注册的 `__andy:'open'` 消息通道（系统浏览器打开）。
+  const linkBridge =
+    '<script>(function(){document.addEventListener("click",function(e){'
+    + 'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;if(!a)return;'
+    + 'e.preventDefault();try{parent.postMessage({__andy:"open",href:a.href},"*");}catch(err){}},true);})();</script>';
+  body = /<\/body>/i.test(body)
+    ? body.replace(/<\/body>/i, linkBridge + '</body>')
+    : body + linkBridge;
+
+  if (baseDir) {
+    try {
+      // 文档里的 images/a.png 这类相对路径要能解析：注入 <base> 指向文档所在目录的 asset 地址
+      const dirUrl = convertFileSrc(baseDir.replace(/\\/g, '/')).replace(/\/?$/, '/');
+      const baseTag = `<base href="${escapeHtml(dirUrl)}">`;
+      body = /<head[^>]*>/i.test(body)
+        ? body.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`)
+        : baseTag + body;
+    } catch (e) {
+      console.warn('[markdown] 注入 <base> 失败（文档内相对图片可能加载不出来）:', baseDir, e);
+    }
+  }
+  return (
+    '<div class="md-html-doc">'
+    + `<iframe class="md-html-frame" title="html-document" loading="lazy"`
+    + ' sandbox="allow-scripts allow-forms allow-modals allow-downloads"'
+    + ` srcdoc="${escapeHtml(body)}"></iframe>`
+    + '</div>'
+  );
+}
+
 /** 渲染选项。 */
 export interface MdOptions {
   /**
@@ -325,14 +392,32 @@ export function escapeHtml(s: string): string {
 }
 
 /** 渲染 markdown 为 HTML（含行内加粗/链接/行内代码/列表/表格/标题/代码块复制按钮）。 */
-export function renderMarkdown(content: string, opts?: MdOptions): string {
-  if (!content) return '';
+export function renderMarkdown(rawContent: string, opts?: MdOptions): string {
+  if (!rawContent) return '';
+  // 先剥长文本信封：否则用户看到的是 <long_text_quote> 标签 + 被截断的标题预览
+  const content = unwrapLongTextQuote(rawContent);
   // 缓存键必须带模式：同一段源码在「转义」与「放行 HTML」下产物完全不同，
   // 只按 content 做键会让第一次的结果污染另一种模式。
   // 键里必须带 imageBaseDir：同一个 `![](a.png)` 在不同项目下解析出的 asset URL 不同
   const cacheKey = (opts?.allowHtml ? 'H:' : 'E:') + (opts?.imageBaseDir ?? '-') + '|' + content;
   const hit = mdCache.get(cacheKey);
   if (hit !== undefined) return hit;
+
+  // 整篇 HTML 文档（例如 AI 产出的独立页面 / 粘贴进来的报告）：走沙箱 iframe。
+  // 放在缓存查询之后、marked 之前 —— 它不需要 markdown 解析，也不需要 allowHtml 开关
+  //（iframe 的 sandbox 本身就是隔离边界，比"转义成文本"更符合用户预期）。
+  if (isFullHtmlDocument(content)) {
+    const html = renderHtmlDocument(content, opts?.imageBaseDir);
+    if (mdCache.size >= MD_CACHE_MAX) {
+      let drop = Math.ceil(MD_CACHE_MAX * 0.1);
+      for (const key of mdCache.keys()) {
+        mdCache.delete(key);
+        if (--drop <= 0) break;
+      }
+    }
+    mdCache.set(cacheKey, html);
+    return html;
+  }
   let result: string;
   activeOpts = opts ?? {};
   slugCounts = new Map();
@@ -471,6 +556,22 @@ const MD_STYLES_TEXT = `
 .dark .md-code-block .hljs-selector-id, .dark .md-code-block .hljs-selector-class { color: #7ee787; }
 .dark .md-code-block .hljs-meta, .dark .md-code-block .hljs-deletion { color: #8b949e; }
 .md-message strong { font-weight: 700; }
+/* 整篇 HTML 文档的沙箱容器：给它一个像浏览器的画布，高度按视口给，内容自己滚动 */
+.md-html-doc {
+  margin: 0.4em 0;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+.md-html-frame {
+  display: block;
+  width: 100%;
+  height: 78vh;
+  min-height: 320px;
+  border: 0;
+  background: #fff;
+}
 /* 图片：限制最大宽度，避免 4K 截图把气泡撑破 */
 .md-message img.md-img, .notes-preview img.md-img {
   max-width: 100%;

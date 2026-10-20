@@ -154,4 +154,58 @@ describe('renderMarkdown', () => {
       g.window = prev;
     }
   });
+
+  // ===== 2026-10-20：长文本信封 + 整篇 HTML 文档 =====
+  it('剥掉 @long-text / <long_text_quote> 信封，只渲染正文', () => {
+    const src = '@long-text:"# 标题预览…" <long_text_quote>## 真标题' + NL + NL + '正文内容</long_text_quote>';
+    const html = renderMarkdown(src);
+    expect(html).not.toContain('long_text_quote');
+    expect(html).not.toContain('@long-text');
+    // 正文里的 markdown 要正常解析
+    expect(html).toMatch(/<h2[^>]*>真标题<\/h2>/);
+    expect(html).toContain('正文内容');
+  });
+
+  it('整篇 HTML 文档走沙箱 iframe（保留 style/script，而不是转义成文本）', () => {
+    const doc = '<!DOCTYPE html>' + NL + '<html><head><style>body{color:red}</style></head>'
+      + '<body><h1>报告</h1><script>var a=1;</script></body></html>';
+    const html = renderMarkdown(doc);
+    expect(html).toContain('<iframe');
+    expect(html).toContain('md-html-frame');
+    // 沙箱必须有 allow-scripts（否则交互演示跑不了），且绝不能有 allow-same-origin
+    expect(html).toContain('allow-scripts');
+    expect(html).not.toContain('allow-same-origin');
+    // style/script 原样在 srcdoc 里（转义成实体，浏览器解码后仍执行）
+    expect(html).toContain('srcdoc=');
+    expect(html).toContain('&lt;style&gt;');
+    // 不能把整篇文档当普通文本输出到外层
+    expect(html).not.toContain('<p>&lt;!DOCTYPE');
+  });
+
+  it('markdown 里夹一段 HTML 不算"整篇文档"，仍走正常渲染', () => {
+    const html = renderMarkdown('# 标题' + NL + NL + '<div>x</div>');
+    expect(html).not.toContain('<iframe');
+    expect(html).toMatch(/<h1[^>]*>标题<\/h1>/);
+  });
+
+  it('整篇文档 + imageBaseDir：注入 <base> 让相对图片能解析', () => {
+    const g = globalThis as unknown as { window?: unknown };
+    const prev = g.window;
+    g.window = {
+      __TAURI_INTERNALS__: {
+        convertFileSrc: (p: string) => `http://asset.localhost/${encodeURIComponent(p)}`,
+      },
+    };
+    try {
+      const html = renderMarkdown('<!DOCTYPE html><html><body><img src="images/a.png"></body></html>', {
+        imageBaseDir: 'D:/proj',
+      });
+      expect(html).toContain('srcdoc=');
+      // <base> 也要在 srcdoc 里（被转义成 &lt;base），指向目录而不是文件
+      expect(html).toContain('&lt;base href=');
+      expect(html).toContain(encodeURIComponent('D:/proj'));
+    } finally {
+      g.window = prev;
+    }
+  });
 });
