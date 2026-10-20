@@ -1,5 +1,5 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-import { buildDocIframeHtml, dirToAssetUrl } from './markdown';
+import { buildDocIframeHtml, escapeHtml, listDocResources } from './markdown';
 
 /**
  * localimg://<percent-encoded-path> → data URL 缓存，避免重复读盘。
@@ -227,26 +227,40 @@ function imageRoots(): string[] {
   return out;
 }
 
-/** 从 HTML 文档里取第一张相对图片的 src（用于反推文档所在目录）。 */
-function firstRelativeImageSrc(doc: string): string | null {
-  const re = /<img[^>]*\ssrc\s*=\s*["']([^"']+)["']/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(doc))) {
-    const src = m[1].trim();
-    if (!src) continue;
-    if (/^(https?:|data:|blob:|asset:|localimg:|about:|#)/i.test(src)) continue;
-    return src;
-  }
-  return null;
-}
-
-/** 由「探针绝对路径 + 探针相对路径」反推文档目录。 */
+/** 由「绝对路径 + 相对路径」反推这份内容所在的目录。 */
 function deriveBaseDir(abs: string, rel: string): string | null {
   const a = abs.replace(/\\/g, '/');
   const r = rel.replace(/\\/g, '/').replace(/^\.\//, '');
   if (a.endsWith('/' + r)) return a.slice(0, a.length - r.length - 1);
   const idx = a.lastIndexOf('/');
   return idx > 0 ? a.slice(0, idx) : null;
+}
+
+/**
+ * 从已解析出的结果里**学会**这批内容的来源目录，写进 imageRoots。
+ *
+ * 目的：下一次粘贴同一份文档（或同目录的另一份）时，"根目录直接拼"就能命中 ——
+ * 不再需要索引反查，更不需要用户再点一次目录。只在 rel 带目录层级时学
+ * （`images/a.png` 的 base 有意义；裸文件名 `a.png` 的 base 全是噪声）。
+ */
+function learnBases(resolved: Record<string, string>): void {
+  for (const [rel, abs] of Object.entries(resolved)) {
+    if (!rel.includes('/')) continue;
+    const base = deriveBaseDir(abs, rel);
+    if (base) addImageRoot(base);
+  }
+}
+
+/** 文档里有资源没解析出来时的提示条（可点击选目录）。 */
+function docMissingHint(missing: string[]): string {
+  const first = missing[0] ?? '';
+  const label = first.length > 46 ? '…' + first.slice(-44) : first;
+  const more = missing.length > 1 ? ` 等 ${missing.length} 个` : '';
+  return (
+    '<div class="md-doc-hint">这份文档有资源没找到：'
+    + `<span class="md-doc-miss">${escapeHtml(label)}</span>${more} —— `
+    + '<button type="button" class="md-doc-pick">选择图片目录</button></div>'
+  );
 }
 
 /** 找不到图片时显示的占位（内联 SVG，不依赖网络；点击可指定目录）。 */
@@ -291,8 +305,9 @@ async function flushPending(): Promise<void> {
   pendingDocs.clear();
   if (!imgs.length && !docs.length) return;
 
-  // 文档探针：只为"还不知道目录"的文档取一张相对图片
-  const docProbes = docs.map(([el, doc]) => ({ el, doc, probe: firstRelativeImageSrc(doc) }));
+  // 文档：把**每个**相对资源都拿去解析（旧实现只取第一张反推目录，
+  // 文档里图片分处多个子目录时其余全部 404）
+  const docProbes = docs.map(([el, doc]) => ({ el, doc, rels: listDocResources(doc) }));
 
   // 先吃缓存，减少一次 invoke 的路径数
   const need: string[] = [];
@@ -302,9 +317,10 @@ async function flushPending(): Promise<void> {
     else if (!need.includes(rel)) need.push(rel);
   }
   for (const d of docProbes) {
-    if (!d.probe) continue;
-    if (relPathCache.has(d.probe)) map[d.probe] = relPathCache.get(d.probe) ?? null;
-    else if (!need.includes(d.probe)) need.push(d.probe);
+    for (const rel of d.rels) {
+      if (relPathCache.has(rel)) map[rel] = relPathCache.get(rel) ?? null;
+      else if (!need.includes(rel)) need.push(rel);
+    }
   }
 
   if (need.length) {
@@ -325,7 +341,7 @@ async function flushPending(): Promise<void> {
     }
   }
 
-  // 回填 <img>
+  // 回填 <img>（顺带把"这批内容所在目录"记住，下次同目录内容直接命中）
   for (const [el, rel] of imgs) {
     const abs = map[rel] ?? null;
     if (abs) {
@@ -334,6 +350,10 @@ async function flushPending(): Promise<void> {
         el.setAttribute('title', abs);
         el.classList.remove('md-img-pending');
         el.removeAttribute('data-andy-rel');
+        if (rel.includes('/')) {
+          const base = deriveBaseDir(abs, rel);
+          if (base) addImageRoot(base);
+        }
       } catch (e) {
         console.warn('[image] 转换本地图片地址失败:', abs, e);
       }
@@ -346,35 +366,37 @@ async function flushPending(): Promise<void> {
     }
   }
 
-  // 回填 HTML 文档占位：反推目录 → 重写文档内相对资源 → 渲染 iframe
-  for (const { el, doc, probe } of docProbes) {
+  // 回填 HTML 文档占位：逐路径重写文档内相对资源 → 渲染 iframe
+  for (const { el, doc, rels } of docProbes) {
     docSources.set(el, doc);
-    const abs = probe ? map[probe] ?? null : null;
-    const baseDir = abs && probe ? deriveBaseDir(abs, probe) : null;
-    const dirUrl = baseDir ? dirToAssetUrl(baseDir) : undefined;
-    if (!dirUrl && probe) {
-      console.warn('[image] 文档内相对图片未找到，iframe 不带基准目录（图片可能加载不出来）:', probe);
+    const resolved: Record<string, string> = {};
+    const missing: string[] = [];
+    for (const rel of rels) {
+      const abs = map[rel] ?? null;
+      if (abs) resolved[rel] = abs;
+      else missing.push(rel);
     }
-    // 没解析出目录时给一条**可点击**的提示：点一下选目录，然后按新基准重渲染这份文档
-    const hint = !dirUrl && probe
-      ? '<div class="md-doc-hint">这份文档里有相对图片，但没找到它的来源目录 —— '
-        + '<button type="button" class="md-doc-pick">选择图片目录</button></div>'
-      : '';
-    el.innerHTML = hint + buildDocIframeHtml(doc, dirUrl);
+    learnBases(resolved);
+    if (missing.length) {
+      console.warn(
+        `[image] 文档内 ${missing.length}/${rels.length} 个资源未找到（可点提示条选目录）:`,
+        missing.slice(0, 5),
+      );
+    }
+    const hint = missing.length ? docMissingHint(missing) : '';
+    el.innerHTML = hint + buildDocIframeHtml(doc, undefined, resolved);
     el.classList.remove('md-html-pending');
     el.removeAttribute('data-andy-doc');
   }
 }
 
-/** 按当前 imageRoots 重新给已渲染的文档推导基准目录并重渲染。 */
+/** 按当前 imageRoots 重新给已渲染的文档解析资源并重渲染。 */
 async function rerenderDocs(): Promise<void> {
   const entries = [...docSources.entries()];
   if (!entries.length) return;
-  const probes = entries
-    .map(([el, doc]) => ({ el, doc, probe: firstRelativeImageSrc(doc) }))
-    .filter((x): x is { el: HTMLElement; doc: string; probe: string } => !!x.probe);
-  if (!probes.length) return;
-  const need = [...new Set(probes.map((p) => p.probe))];
+  const jobs = entries.map(([el, doc]) => ({ el, doc, rels: listDocResources(doc) }));
+  const need = [...new Set(jobs.flatMap((j) => j.rels))];
+  if (!need.length) return;
   let map: Record<string, string | null> = {};
   try {
     const roots = imageRoots();
@@ -386,18 +408,31 @@ async function rerenderDocs(): Promise<void> {
     console.error('[image] 文档重渲染检索失败:', e);
     return;
   }
-  for (const { el, doc, probe } of probes) {
-    const abs = map[probe] ?? null;
-    if (abs) rememberRel(probe, abs);
-    const baseDir = abs ? deriveBaseDir(abs, probe) : null;
-    const dirUrl = baseDir ? dirToAssetUrl(baseDir) : undefined;
-    if (!dirUrl) {
-      console.warn('[image] 仍未定位到文档目录，保持原样:', probe);
+  let recovered = 0;
+  for (const { el, doc, rels } of jobs) {
+    const resolved: Record<string, string> = {};
+    const missing: string[] = [];
+    for (const rel of rels) {
+      const abs = map[rel] ?? null;
+      if (abs) {
+        resolved[rel] = abs;
+        rememberRel(rel, abs);
+      } else {
+        missing.push(rel);
+      }
+    }
+    recovered += Object.keys(resolved).length;
+    if (!Object.keys(resolved).length) {
+      console.warn('[image] 仍未定位到文档资源，保持原样:', missing.slice(0, 5));
       continue;
     }
-    el.innerHTML = buildDocIframeHtml(doc, dirUrl);
+    learnBases(resolved);
+    const hint = missing.length ? docMissingHint(missing) : '';
+    el.innerHTML = hint + buildDocIframeHtml(doc, undefined, resolved);
     el.classList.remove('md-html-pending');
   }
+  // 所有文档都没进展时也要告诉用户"点目录没用"，而不是静默
+  if (!recovered) console.warn('[image] 新目录里没有这批文档引用的资源，请确认目录选对了');
 }
 
 function installPendingAssetResolver(): void {

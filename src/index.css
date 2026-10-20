@@ -766,14 +766,11 @@ html.is-linux *::after {
   contain-intrinsic-size: auto 24px;
 }
 
-/* 长文档（10 万字符级）的渲染成本控制（2026-10-20）。
-   实测：100k 文本 → 45 万字符 HTML、上千个节点，一次性布局/绘制是滚动卡顿的主因。
-   content-visibility: auto 让**屏幕外**的块直接跳过 layout 与 paint，
-   contain-intrinsic-size 给未渲染块一个估计高度，避免滚动条跳动（auto 关键字会记住实际高度）。
-   注意只作用于预览容器：AI 气泡里的块通常很短，加这层反而多一次判断。 */
-.notes-preview > * {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 24px;
+/* HTML 文档块（沙箱 iframe）例外：它本身已经固定高度（78vh），再套 size containment
+   会在滚入视口前把高度压成 24px，滚到时突然撑开（页面跳动）。 */
+.notes-preview > .md-html-doc {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
 }
 
 .notes-preview .md-code-block pre {

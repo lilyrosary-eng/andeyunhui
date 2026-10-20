@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown } from './markdown';
+import { renderMarkdown, buildDocIframeHtml, listDocResources } from './markdown';
 
 // markdown 渲染契约（2026-10-20 高亮/交互改造后新增）
 // 这些断言钉的是「渲染产物里必须有什么」，不是像素级样式 —— 目的是防止
@@ -166,16 +166,76 @@ describe('renderMarkdown', () => {
     expect(html).toContain('正文内容');
   });
 
-  it('整篇 HTML 文档：无基准目录时先出占位（异步检索后再生成 iframe）', () => {
+  it('整篇 HTML 文档（无相对资源）：直接出 iframe，不必等占位', () => {
     const doc = '<!DOCTYPE html>' + NL + '<html><head><style>body{color:red}</style></head>'
       + '<body><h1>报告</h1><script>var a=1;</script></body></html>';
     const html = renderMarkdown(doc);
-    // 没有来源目录 ⇒ 不能同步出 iframe（否则文档内相对图片先 404 一遍）
+    expect(html).toContain('<iframe');
+    expect(html).toContain('&lt;style&gt;');
+    expect(html).not.toContain('md-html-pending');
+    // 不能把整篇文档当普通文本输出
+    expect(html).not.toContain('<p>&lt;!DOCTYPE');
+  });
+
+  it('整篇 HTML 文档 + 相对图片、无基准目录：先出占位（异步检索后再生成 iframe）', () => {
+    const doc = '<!DOCTYPE html>' + NL + '<html><head><style>body{color:red}</style></head>'
+      + '<body><img src="images/a.png"></body></html>';
+    const html = renderMarkdown(doc);
     expect(html).toContain('data-andy-doc=');
     expect(html).toContain('md-html-pending');
     expect(html).not.toContain('<iframe');
-    // 但不能把整篇文档当普通文本输出
-    expect(html).not.toContain('<p>&lt;!DOCTYPE');
+  });
+
+  it('文档前面还有文字时仍然识别为文档（旧实现会把 style 剔掉、img 变破图）', () => {
+    const doc = '<!DOCTYPE html>' + NL + '<html><head><style>body{background:#f2f6fa}</style></head>'
+      + '<body><h1>报告</h1></body></html>';
+    const html = renderMarkdown('## 我的笔记' + NL + NL + doc);
+    // 前导文字照常渲染成 markdown
+    expect(html).toMatch(/<h2[^>]*>我的笔记<\/h2>/);
+    // 文档走 iframe，样式完整保留（这是用户实测的回归点）
+    expect(html).toContain('<iframe');
+    expect(html).toContain('&lt;style&gt;');
+    expect(html).toContain('background:#f2f6fa');
+  });
+
+  it('代码围栏里的 <!DOCTYPE 不算文档（笔记里教人写 HTML 时不渲染成 iframe）', () => {
+    const src = '示例：' + NL + NL + '```html' + NL + '<!DOCTYPE html>' + NL
+      + '<html><body><h1>x</h1></body></html>' + NL + '```';
+    const html = renderMarkdown(src);
+    expect(html).not.toContain('<iframe');
+    expect(html).toContain('md-code-block');
+  });
+
+  it('listDocResources：只列相对资源，去重且包含 srcset / link', () => {
+    const doc = '<img src="images/a.png"><img src="https://cdn/x.png">'
+      + '<img srcset="i/b.png 1x, i/b@2x.png 2x"><link href="css/a.css">'
+      + '<a href="#ch1">x</a><script src="js/app.js"></script>';
+    const rels = listDocResources(doc);
+    expect(rels).toEqual(['images/a.png', 'js/app.js', 'i/b.png', 'i/b@2x.png', 'css/a.css']);
+    expect(rels).not.toContain('https://cdn/x.png');
+    expect(rels).not.toContain('#ch1');
+  });
+
+  it('逐路径结果表：不同目录的图片各自改写（不再依赖单一基准）', () => {
+    const g = globalThis as unknown as { window?: unknown };
+    const prev = g.window;
+    g.window = {
+      __TAURI_INTERNALS__: {
+        convertFileSrc: (p: string) => `http://asset.localhost/${encodeURIComponent(p)}`,
+      },
+    };
+    try {
+      const doc = '<!DOCTYPE html><html><body>'
+        + '<img src="images/a.png"><img src="figs/b.png"></body></html>';
+      const html = buildDocIframeHtml(doc, undefined, {
+        'images/a.png': 'D:/项目A/images/a.png',
+        'figs/b.png': 'D:/项目B/figs/b.png',
+      });
+      expect(html).toContain(encodeURIComponent('D:/项目A/images/a.png'));
+      expect(html).toContain(encodeURIComponent('D:/项目B/figs/b.png'));
+    } finally {
+      g.window = prev;
+    }
   });
 
   it('整篇 HTML 文档 + 基准目录：沙箱 iframe，保留 style/script', () => {
@@ -246,5 +306,24 @@ describe('renderMarkdown', () => {
     } finally {
       g.window = prev;
     }
+  });
+
+  it('一页里有两份文档 + 中间说明：各自渲染 iframe，文字照常', () => {
+    const d1 = '<!DOCTYPE html><html><head><style>body{color:red}</style></head><body><h1>A</h1></body></html>';
+    const d2 = '<!DOCTYPE html><html><head><style>body{color:blue}</style></head><body><h1>B</h1></body></html>';
+    const html = renderMarkdown('前置说明' + NL + NL + d1 + NL + NL + '中间说明' + NL + NL + d2);
+    expect(html.match(/<iframe/g)?.length).toBe(2);
+    expect(html).toContain('前置说明');
+    expect(html).toContain('中间说明');
+    expect(html).toContain('color:red');
+    expect(html).toContain('color:blue');
+  });
+
+  it('以 <!DOCTYPE 开头但不带 <html>/<body> 的文档也算文档', () => {
+    const doc = '<!DOCTYPE html>' + NL + '<style>body{margin:0}</style>'
+      + '<div class="wrap">内容</div>' + NL + '<script>console.log(1)</script>';
+    const html = renderMarkdown(doc);
+    expect(html).toContain('<iframe');
+    expect(html).toContain('&lt;style&gt;');
   });
 });

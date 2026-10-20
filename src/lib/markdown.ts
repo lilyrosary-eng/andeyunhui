@@ -223,21 +223,6 @@ function joinAssetUrl(dirUrl: string, rel: string): string {
   return dirUrl + stack.map((seg) => encodeURIComponent(seg)).join('/');
 }
 
-/** srcset 是逗号分隔的候选列表，每个候选 `url [descriptor]`。 */
-function rewriteSrcset(value: string, dirUrl: string): string {
-  return value
-    .split(',')
-    .map((item) => {
-      const trimmed = item.trim();
-      if (!trimmed) return trimmed;
-      const [url, ...desc] = trimmed.split(/\s+/);
-      if (ABSOLUTE_RES.test(url)) return trimmed;
-      return [joinAssetUrl(dirUrl, url), ...desc].join(' ');
-    })
-    .filter(Boolean)
-    .join(', ');
-}
-
 /**
  * 把文档里的**相对资源 URL** 改写成 asset 绝对 URL。
  *
@@ -247,30 +232,74 @@ function rewriteSrcset(value: string, dirUrl: string): string {
  * 就把点击交给系统浏览器 —— 于是**内联目录锚点全被送去 Edge**。
  * 改成逐属性重写：锚点保持纯 fragment（在 iframe 内滚动），资源正常加载，两件事不互相污染。
  */
-function rewriteDocResources(doc: string, dirUrl: string): string {
+/** 绝对路径 → asset URL（Tauri 的 convertFileSrc；Windows 反斜杠先转正斜杠）。 */
+export function fileToAssetUrl(abs: string): string {
+  return convertFileSrc(abs.replace(/\\/g, '/'));
+}
+
+/**
+ * 单个资源 URL 的改写结果（null = 不改）。
+ *
+ * 两种模式：
+ *   · `resolved` 逐路径表（首选）—— 每张图各自解析到真实文件，**不要求同一目录**。
+ *     粘贴文档里 `images/a.png` 与 `figs/b.png` 分处两个目录时，单一基准目录会失败。
+ *   · `dirUrl` 单一基准目录 —— 项目内相对路径（浮岛 AI 编程）用，O(1) 拼出 URL。
+ */
+function resolveDocUrl(
+  url: string,
+  dirUrl: string | undefined,
+  resolved: Record<string, string> | undefined,
+): string | null {
+  const t = url.trim();
+  if (!t || ABSOLUTE_RES.test(t)) return null;
+  if (resolved) {
+    const key = t.replace(/^\.\//, '');
+    const abs = resolved[key] ?? resolved[t];
+    return abs ? fileToAssetUrl(abs) : null;
+  }
+  return dirUrl ? joinAssetUrl(dirUrl, t) : null;
+}
+
+function rewriteDocResources(
+  doc: string,
+  dirUrl?: string,
+  resolved?: Record<string, string>,
+): string {
+  const one = (full: string, pre: string, q: string, url: string) => {
+    const next = resolveDocUrl(url, dirUrl, resolved);
+    return next === null ? full : `${pre}${q}${next}${q}`;
+  };
   let out = doc;
   // src / poster / data-src
-  out = out.replace(
-    /(\s(?:src|poster|data-src)\s*=\s*)(["'])([^"']+)\2/gi,
-    (full, pre: string, q: string, url: string) =>
-      ABSOLUTE_RES.test(url.trim()) ? full : `${pre}${q}${joinAssetUrl(dirUrl, url.trim())}${q}`,
-  );
-  // srcset
+  out = out.replace(/(\s(?:src|poster|data-src)\s*=\s*)(["'])([^"']+)\2/gi, one);
+  // srcset（逗号分隔的候选列表，逐项改写）
   out = out.replace(
     /(\ssrcset\s*=\s*)(["'])([^"']+)\2/gi,
-    (full, pre: string, q: string, url: string) =>
-      ABSOLUTE_RES.test(url.trim()) ? full : `${pre}${q}${rewriteSrcset(url, dirUrl)}${q}`,
+    (_full, pre: string, q: string, url: string) => {
+      const next = url
+        .split(',')
+        .map((item) => {
+          const trimmed = item.trim();
+          if (!trimmed) return trimmed;
+          const [u, ...desc] = trimmed.split(/\s+/);
+          const nu = resolveDocUrl(u, dirUrl, resolved);
+          return [nu === null ? u : nu, ...desc].join(' ');
+        })
+        .filter(Boolean)
+        .join(', ');
+      return `${pre}${q}${next}${q}`;
+    },
   );
   // <link href>（样式表/字体/图标）；<a href> 不动 —— 锚点与外链都由浏览器/桥各自处理
-  out = out.replace(
-    /(<link\b[^>]*?\shref\s*=\s*)(["'])([^"']+)\2/gi,
-    (full, pre: string, q: string, url: string) =>
-      ABSOLUTE_RES.test(url.trim()) ? full : `${pre}${q}${joinAssetUrl(dirUrl, url.trim())}${q}`,
-  );
+  out = out.replace(/(<link\b[^>]*?\shref\s*=\s*)(["'])([^"']+)\2/gi, one);
   return out;
 }
 
-export function buildDocIframeHtml(doc: string, dirUrlBase?: string): string {
+export function buildDocIframeHtml(
+  doc: string,
+  dirUrlBase?: string,
+  resolved?: Record<string, string>,
+): string {
   let body = doc;
 
   // 沙箱里点链接默认是死的（没有 allow-popups）。注入一个极小的拦截器，把链接交给父级，
@@ -285,9 +314,13 @@ export function buildDocIframeHtml(doc: string, dirUrlBase?: string): string {
     ? body.replace(/<\/body>/i, linkBridge + '</body>')
     : body + linkBridge;
 
-  // dirUrlBase 是「目录的 asset URL」（末尾带 /）。把文档里的相对资源逐个改写成绝对 URL，
+  // 逐路径结果表优先（每张图各自定位，不要求同一目录）；否则退回单一基准目录。
   // **不注入 <base>** —— 原因见 rewriteDocResources 的注释（会让 #锚点变成 http 链接）。
-  if (dirUrlBase) body = rewriteDocResources(body, dirUrlBase);
+  if (resolved && Object.keys(resolved).length) {
+    body = rewriteDocResources(body, undefined, resolved);
+  } else if (dirUrlBase) {
+    body = rewriteDocResources(body, dirUrlBase);
+  }
   return (
     '<div class="md-html-doc">'
     + `<iframe class="md-html-frame" title="html-document" loading="lazy"`
@@ -308,18 +341,98 @@ export function dirToAssetUrl(dir: string): string | undefined {
 }
 
 /**
- * 整篇 HTML 文档：有基准目录就直接出 iframe；没有就先出**占位 div**，
- * 由 localImage 的解析器从文档里的相对图片反推目录、再回填 iframe。
+ * 整篇 HTML 文档：有逐路径结果表 / 基准目录就直接出 iframe；都没有就先出**占位 div**，
+ * 由 localImage 的解析器把文档里所有相对资源解析出真实路径、再回填 iframe。
  *
- * 为什么不能同步出 iframe：粘贴进来的文档没有来源目录，只能先解析一张相对图片的
- * 真实位置，才能推出 `<base>`。占位期间不渲染 iframe，避免"先把 404 跑一遍再换"。
+ * 为什么不能同步出 iframe：粘贴进来的文档没有来源目录，先渲染 iframe 会把每张图
+ * 的 404 都跑一遍（白闪破图），而且拿不到真实位置 —— 只能先占位、解析、再重建。
  */
-function renderHtmlDocument(doc: string, baseDir?: string): string {
+function renderHtmlDocument(
+  doc: string,
+  baseDir?: string,
+  resolved?: Record<string, string>,
+): string {
+  if (resolved && Object.keys(resolved).length) {
+    return buildDocIframeHtml(doc, undefined, resolved);
+  }
   if (baseDir) {
     const dirUrl = dirToAssetUrl(baseDir);
     if (dirUrl) return buildDocIframeHtml(doc, dirUrl);
   }
+  // 没有相对资源要解析 ⇒ 没必要等占位，直接出 iframe（纯文本文档立刻可见）
+  if (listDocResources(doc).length === 0) return buildDocIframeHtml(doc);
   return `<div class="md-html-doc md-html-pending" data-andy-doc="${escapeHtml(doc)}"></div>`;
+}
+
+/**
+ * 找出内容里的**整篇 HTML 文档**（允许前后还有 markdown 文字）。
+ *
+ * ## 为什么必须"允许前后有文字"
+ * 用户实测（2026-10-20）：笔记里粘进来的 HTML 前面往往还有一行标题/说明，
+ * 旧实现只看首 300 字符是否以 `<!doctype`/`<html` 开头 —— 一旦前面有字就判定失败，
+ * 于是整份文档掉进 markdown 解析：`<style>` 被净化剔除（**UI 全丢**）、
+ * `<img src="images/a.png">` 原样输出（**只剩一个破图图标**）。
+ *
+ * ## 为什么排除代码围栏里的内容
+ * 笔记里教人写 HTML 时，代码块里会有 `<!DOCTYPE html>`。那不是文档，
+ * 抽出来渲染会毁掉这一节 —— 所以按行扫，跳过 ``` / ~~~ 围栏内部。
+ */
+export function extractHtmlDocument(
+  content: string,
+): { before: string; doc: string; after: string } | null {
+  let fence: string | null = null;
+  let cursor = 0;
+  let start = -1;
+  for (const line of content.split('\n')) {
+    const t = line.trim();
+    const fenceMark = t.match(/^(`{3,}|~{3,})/);
+    if (fenceMark) {
+      const marker = fenceMark[1][0];
+      if (!fence) fence = marker;
+      else if (fence === marker) fence = null;
+      cursor += line.length + 1;
+      continue;
+    }
+    if (!fence) {
+      const head = t.toLowerCase();
+      if (head.startsWith('<!doctype') || head.startsWith('<html')) {
+        start = cursor + (line.length - line.trimStart().length);
+        break;
+      }
+    }
+    cursor += line.length + 1;
+  }
+  if (start < 0) return null;
+
+  const lower = content.toLowerCase();
+  const endIdx = lower.indexOf('</html>', start);
+  const closed = endIdx >= 0;
+  const end = closed ? endIdx + '</html>'.length : content.length;
+  const doc = content.slice(start, end).trim();
+  // 判定要分两档，否则会两头出错：
+  //   · 有 `<!DOCTYPE` ⇒ 强信号，短也认（作者没写 <html>/<body> 时浏览器自己补全）
+  //   · 只有 `<html` ⇒ 弱信号（可能是笔记里教人写 HTML 的一句话），要求够长或已闭合
+  const startsDoctype = /^<!doctype/i.test(doc);
+  if (doc.length < 60) return null;
+  if (!closed && !startsDoctype && doc.length < 400) return null;
+  if (!startsDoctype && !/<(?:html|body|head)\b/i.test(doc)) return null;
+  return { before: content.slice(0, start), doc, after: content.slice(end) };
+}
+
+/** 文档里所有**相对资源 URL**（去重，保持出现顺序）—— 供批量解析。 */
+export function listDocResources(doc: string): string[] {
+  const out: string[] = [];
+  const push = (u: string) => {
+    const t = u.trim();
+    if (!t || ABSOLUTE_RES.test(t)) return;
+    if (!out.includes(t)) out.push(t);
+  };
+  for (const m of doc.matchAll(/\s(?:src|poster|data-src)\s*=\s*(["'])([^"']+)\1/gi)) push(m[2]);
+  for (const m of doc.matchAll(/\ssrcset\s*=\s*(["'])([^"']+)\1/gi)) {
+    for (const item of m[2].split(',')) push(item.trim().split(/\s+/)[0] ?? '');
+  }
+  for (const m of doc.matchAll(/<link\b[^>]*?\shref\s*=\s*(["'])([^"']+)\1/gi)) push(m[2]);
+  return out;
 }
 
 /** 渲染选项。 */
@@ -509,6 +622,41 @@ export function renderMarkdownForEditor(md: string): string {
   return marked.parse(md, { async: false }) as string;
 }
 
+/** 纯 markdown 片段 → HTML（文档分段渲染时复用，避免递归走缓存键）。 */
+function renderMdBody(content: string, opts?: MdOptions): string {
+  activeOpts = opts ?? {};
+  slugCounts = new Map();
+  try {
+    // 代码块的外壳与高亮已由 renderer.code 生成，这里只做协议中和（不再跑二道正则：
+    // 旧正则会把已经生成的 .md-code-block 再套一层，复制按钮重复、复制内容被转义两次）
+    return neutralizeDangerousProtocols(marked.parse(content, { async: false }) as string);
+  } catch {
+    return escapeHtml(content);
+  }
+}
+
+/**
+ * 把一段混排内容按「markdown 段 / HTML 文档段」交替渲染。
+ *
+ * 为什么不是"只取第一份文档"：用户实测的笔记里常常是
+ * 标题 + 文档1 + 说明 + 文档2 —— 只处理第一份，后面那份仍会退化成
+ * "style 被剔除 + 破图"，等于同一页里两种观感。
+ * guard 上限 20：极端内容（几百个 doctype）不该把渲染拖死。
+ */
+function renderWithDocuments(content: string, opts?: MdOptions): string {
+  let rest = content;
+  let out = '';
+  for (let guard = 0; guard < 20; guard++) {
+    const parts = extractHtmlDocument(rest);
+    if (!parts) break;
+    if (parts.before.trim()) out += renderMdBody(parts.before, opts);
+    out += renderHtmlDocument(parts.doc, opts?.imageBaseDir);
+    rest = parts.after;
+  }
+  if (rest.trim()) out += renderMdBody(rest, opts);
+  return out;
+}
+
 /** 渲染 markdown 为 HTML（含行内加粗/链接/行内代码/列表/表格/标题/代码块复制按钮）。 */
 export function renderMarkdown(rawContent: string, opts?: MdOptions): string {
   if (!rawContent) return '';
@@ -524,8 +672,11 @@ export function renderMarkdown(rawContent: string, opts?: MdOptions): string {
   // 整篇 HTML 文档（例如 AI 产出的独立页面 / 粘贴进来的报告）：走沙箱 iframe。
   // 放在缓存查询之后、marked 之前 —— 它不需要 markdown 解析，也不需要 allowHtml 开关
   //（iframe 的 sandbox 本身就是隔离边界，比"转义成文本"更符合用户预期）。
-  if (isFullHtmlDocument(content)) {
-    const html = renderHtmlDocument(content, opts?.imageBaseDir);
+  //
+  // 注意用 extractHtmlDocument 而不是 isFullHtmlDocument：文档前面带一行标题时，
+  // 旧判定会失败并把整份文档当 markdown 解析（style 被剔除、img 变破图）。
+  if (extractHtmlDocument(content)) {
+    const html = renderWithDocuments(content, opts);
     if (mdCache.size >= MD_CACHE_MAX) {
       let drop = Math.ceil(MD_CACHE_MAX * 0.1);
       for (const key of mdCache.keys()) {
@@ -536,16 +687,7 @@ export function renderMarkdown(rawContent: string, opts?: MdOptions): string {
     mdCache.set(cacheKey, html);
     return html;
   }
-  let result: string;
-  activeOpts = opts ?? {};
-  slugCounts = new Map();
-  try {
-    // 代码块的外壳与高亮已由 renderer.code 生成，这里只做协议中和（不再跑二道正则：
-    // 旧正则会把已经生成的 .md-code-block 再套一层，复制按钮重复、复制内容被转义两次）
-    result = neutralizeDangerousProtocols(marked.parse(content, { async: false }) as string);
-  } catch {
-    result = escapeHtml(content);
-  }
+  const result = renderMdBody(content, opts);
   // 内容级缓存：长对话/笔记在流式增量重渲染时，历史消息的 marked 解析结果直接命中，
   // 避免每次 setState 都把全部历史消息重新 parse（同步 marked 是长对话卡顿的主要来源）。
   //
@@ -694,6 +836,15 @@ const MD_STYLES_TEXT = `
   color: #8a5b1a;
   background: rgba(230, 195, 92, 0.14);
   border-bottom: 1px solid rgba(127, 127, 127, 0.3);
+}
+/* 提示条里的具体路径：等宽 + 可截断，长路径不把按钮挤出去 */
+.md-doc-miss {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .md-doc-pick {
   margin-left: auto;
