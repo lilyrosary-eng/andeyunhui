@@ -52,10 +52,13 @@ const AideBubble = memo(function AideBubble({
   reasoningOpen,
   busy,
   onToggleReasoning,
+  imageBase,
 }: {
   messageId: string;
   role: string;
   content: string;
+  /** 相对路径图片的基准目录（项目根）；没有就不解析相对路径 */
+  imageBase?: string;
   error?: boolean;
   reasoning?: string;
   reasoningOpen: boolean;
@@ -96,7 +99,11 @@ const AideBubble = memo(function AideBubble({
       {content ? (
         // 模型产出是 markdown（代码块/表格/列表），此前当纯文本 pre-wrap 直接显示，
         // 于是 **加粗**、```代码块``` 全都原样露出 —— 与主窗 AI 对话的观感差一截。
-        <div className="md-message" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+        <div
+          className="md-message"
+          // imageBase：AI 常写 ![](docs/a.png) 这类相对路径，没有基准目录就加载不出来
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(content, { imageBaseDir: imageBase }) }}
+        />
       ) : (
         isAssistant && busy ? '思考中…' : ''
       )}
@@ -552,6 +559,7 @@ function CapsuleAide() {
             reasoningOpen={!!aideReasoningOpen[m.id]}
             busy={aideBusy}
             onToggleReasoning={toggleAideReasoning}
+            imageBase={aideProjectRoot ?? undefined}
           />
         ))}
       </div>

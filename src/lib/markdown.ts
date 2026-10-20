@@ -14,6 +14,8 @@
 
 import { marked } from 'marked';
 import { ensureHtmlPreviewHost } from '@/components/HtmlPreviewHost';
+// 本地图片必须走 asset 协议；convertFileSrc 是同步的，可以在渲染器里直接算
+import { convertFileSrc } from '@tauri-apps/api/core';
 // 高亮：highlight.js **core** + 按需注册语言（2026-10-20 引入）。
 //
 // 为什么不是 shiki（实测体积，单位 KB / min）：
@@ -92,6 +94,82 @@ function normalizeLang(raw?: string): string {
 /** 能直接在沙箱里跑起来预览的语言（HTML 文档）。 */
 const RUNNABLE_LANGS = new Set(['html', 'htm', 'xhtml', 'svg', 'xml']);
 
+/**
+ * 图片 src 解析（2026-10-20）。
+ *
+ * 血案：`![](C:\Users\me\a.png)` 和 `![](./shot.png)` 在 webview 里**永远加载不出来** ——
+ * webview 的文档源是 `tauri://localhost`（打包版）或 dev server，`C:\...` 不是合法 URL，
+ * `./shot.png` 会去请求 dev server 根目录。所以模型/笔记里写的本地路径必须换成 asset 协议。
+ *
+ * 处理规则：
+ *   · http(s)/data:/blob:/asset:/localimg:/tauri: → 原样（这些是"已经能用的"）
+ *   · file:// 或 Windows 盘符 / UNC / 以 / 开头的绝对路径 → convertFileSrc（asset 协议）
+ *   · 相对路径 → 有 imageBaseDir 就拼接再转换；没有就原样保留并 warn 一次
+ *     （不知道基准目录时猜路径只会更糟，宁可显式说出来）
+ */
+const IMAGE_OK_PREFIX = /^(https?:|data:|blob:|asset:|localimg:|tauri:|ionic:|capacitor:|\/\/)/i;
+
+/** 已经警告过的图片路径：避免每次重渲染都刷一屏同样的 warn。 */
+const warnedImageSrc = new Set<string>();
+
+function isAbsoluteLocalPath(p: string): boolean {
+  // C:\x  C:/x  \\server\share  /home/x
+  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\') || (p.startsWith('/') && !p.startsWith('//'));
+}
+
+/** 只处理 ./ 与 ../ 的规范化，不做符号链接解析。 */
+function joinAndNormalize(base: string, rel: string): string {
+  const sep = base.includes('\\') ? '\\' : '/';
+  const stack = base.replace(/[\\/]+$/, '').split(/[\\/]/);
+  for (const part of rel.split(/[\\/]/)) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (stack.length > 1) stack.pop();
+      continue;
+    }
+    stack.push(part);
+  }
+  return stack.join(sep);
+}
+
+function resolveImageSrc(raw: string, baseDir?: string): string {
+  const src = (raw || '').trim();
+  if (!src) return '';
+  if (IMAGE_OK_PREFIX.test(src)) return src;
+
+  let local = src;
+  if (/^file:\/\//i.test(local)) {
+    local = decodeURIComponent(local.replace(/^file:\/\/\/?/i, ''));
+  }
+
+  if (!isAbsoluteLocalPath(local)) {
+    if (baseDir) {
+      local = joinAndNormalize(baseDir, local);
+    } else {
+      if (!warnedImageSrc.has(src)) {
+        warnedImageSrc.add(src);
+        console.warn(
+          '[markdown] 相对路径图片无法解析（缺少基准目录）:',
+          src,
+          '—— 需要绝对路径，或由上层传入 imageBaseDir',
+        );
+      }
+      return src;
+    }
+  }
+
+  try {
+    // Windows 路径在 URL 里必须用正斜杠，否则 asset 协议拼出来的 URL 会被当转义序列
+    return convertFileSrc(local.replace(/\\/g, '/'));
+  } catch (e) {
+    if (!warnedImageSrc.has(src)) {
+      warnedImageSrc.add(src);
+      console.warn('[markdown] convertFileSrc 失败，图片保持原样（大概率加载不出来）:', src, e);
+    }
+    return src;
+  }
+}
+
 /** 渲染选项。 */
 export interface MdOptions {
   /**
@@ -106,6 +184,11 @@ export interface MdOptions {
    *   注意：这不是「执行任意 HTML」，脚本仍然不会跑；真要跑脚本走代码块的「预览」（沙箱 iframe）。
    */
   allowHtml?: boolean;
+  /**
+   * 相对路径图片的基准目录（绝对路径）。AI 编程面板传项目根，
+   * 这样 `![](docs/a.png)` 这类相对引用能解析到项目里的真实文件。
+   */
+  imageBaseDir?: string;
 }
 
 /** 当前这次 parse 的选项（marked 的 renderer 是模块级单例，只能走这个通道）。 */
@@ -206,6 +289,14 @@ marked.use({
         + `</span></div>`
         + `<pre><code class="hljs">${body}</code></pre></div>`;
     },
+    // 图片：把本地路径换成 asset 协议（webview 里 C:\... 和 ./x.png 都加载不出来）。
+    image(token: { href: string; title?: string | null; text?: string }) {
+      const src = resolveImageSrc(token.href, activeOpts.imageBaseDir);
+      const alt = escapeHtml(token.text || '');
+      const title = token.title ? ` title="${escapeHtml(token.title)}"` : '';
+      // loading=lazy：长对话/长笔记里的图片不必一次性全解码
+      return `<img src="${escapeHtml(src)}" alt="${alt}"${title} loading="lazy" decoding="async" class="md-img">`;
+    },
     // 链接：标出 target/rel（真正打开由全局 click 代理接管）。
     // 此前 markdown 里的链接是「裸」<a href>，在 Tauri webview 里点一下会**导航整个窗口**，
     // 应用直接被替换成目标网页、只能重启 —— 这是用户问的「跳转无法交互」的真相。
@@ -238,7 +329,8 @@ export function renderMarkdown(content: string, opts?: MdOptions): string {
   if (!content) return '';
   // 缓存键必须带模式：同一段源码在「转义」与「放行 HTML」下产物完全不同，
   // 只按 content 做键会让第一次的结果污染另一种模式。
-  const cacheKey = (opts?.allowHtml ? 'H:' : 'E:') + content;
+  // 键里必须带 imageBaseDir：同一个 `![](a.png)` 在不同项目下解析出的 asset URL 不同
+  const cacheKey = (opts?.allowHtml ? 'H:' : 'E:') + (opts?.imageBaseDir ?? '-') + '|' + content;
   const hit = mdCache.get(cacheKey);
   if (hit !== undefined) return hit;
   let result: string;
@@ -379,6 +471,14 @@ const MD_STYLES_TEXT = `
 .dark .md-code-block .hljs-selector-id, .dark .md-code-block .hljs-selector-class { color: #7ee787; }
 .dark .md-code-block .hljs-meta, .dark .md-code-block .hljs-deletion { color: #8b949e; }
 .md-message strong { font-weight: 700; }
+/* 图片：限制最大宽度，避免 4K 截图把气泡撑破 */
+.md-message img.md-img, .notes-preview img.md-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  display: block;
+  margin: 0.35em 0;
+}
 .md-message em { font-style: italic; }
 /* 链接：蓝字 + 下划线。
    必须同时覆盖 .notes-preview —— 笔记预览的容器类不是 .md-message（它用 tailwind prose），

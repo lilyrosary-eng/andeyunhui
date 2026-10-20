@@ -103,4 +103,55 @@ describe('renderMarkdown', () => {
     expect(escaped).not.toContain('<b>');
     expect(rendered).toContain('<b>');
   });
+
+  // ===== 2026-10-20：图片路径（webview 里 C:\... 与 ./x.png 天然加载不出来） =====
+  it('图片：外链 / localimg 原样保留，且带上 md-img 与懒加载属性', () => {
+    const remote = renderMarkdown('![](https://x.com/a.png)');
+    expect(remote).toContain('src="https://x.com/a.png"');
+    expect(remote).toContain('class="md-img"');
+    expect(remote).toContain('loading="lazy"');
+
+    // 笔记里的本地图片是 localimg:// 占位，交给 localImage 模块解析，这里不能改写
+    const local = renderMarkdown('![](localimg://abc%2Fdef)');
+    expect(local).toContain('src="localimg://abc%2Fdef"');
+  });
+
+  it('图片：绝对路径走 asset 协议（用 stub 模拟 Tauri 的 convertFileSrc）', () => {
+    const g = globalThis as unknown as { window?: unknown };
+    const prev = g.window;
+    g.window = {
+      __TAURI_INTERNALS__: {
+        convertFileSrc: (p: string) => `http://asset.localhost/${encodeURIComponent(p)}`,
+      },
+    };
+    try {
+      // 注意：markdown 的转义规则会把路径里的反斜杠吃掉（C:\shots.png → C:shotsa.png），
+      // 所以图片路径必须用正斜杠。这条测试钉的就是"正斜杠形式能正确转成 asset URL"。
+      const html = renderMarkdown('![](C:/shots/a.png)');
+      expect(html).toContain('asset.localhost');
+      expect(html).toContain(encodeURIComponent('C:/shots/a.png'));
+
+    } finally {
+      g.window = prev;
+    }
+  });
+
+  it('图片：相对路径按 imageBaseDir 拼接（不同项目缓存不能串）', () => {
+    const g = globalThis as unknown as { window?: unknown };
+    const prev = g.window;
+    g.window = {
+      __TAURI_INTERNALS__: {
+        convertFileSrc: (p: string) => `http://asset.localhost/${encodeURIComponent(p)}`,
+      },
+    };
+    try {
+      const html = renderMarkdown('![](docs/a.png)', { imageBaseDir: 'D:/proj' });
+      expect(html).toContain(encodeURIComponent('D:/proj/docs/a.png'));
+      // 另一个项目同一个相对路径必须解析出不同结果（缓存键含 base）
+      const other = renderMarkdown('![](docs/a.png)', { imageBaseDir: 'D:/other' });
+      expect(other).toContain(encodeURIComponent('D:/other/docs/a.png'));
+    } finally {
+      g.window = prev;
+    }
+  });
 });

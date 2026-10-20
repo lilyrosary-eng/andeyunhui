@@ -143,7 +143,10 @@ describe('mdToEditorHtml', () => {
   });
 
   it('图片', () => {
-    expect(mdToEditorHtml('![alt](a.png)')).toBe('<p><img src="a.png" alt="alt"></p>\n');
+    // 图片现在带 class/loading（懒加载 + 限宽），断言放宽到 src 与 alt
+    const img = mdToEditorHtml('![alt](a.png)');
+    expect(img).toContain('src="a.png"');
+    expect(img).toContain('alt="alt"');
   });
 
   it('内联代码', () => {
