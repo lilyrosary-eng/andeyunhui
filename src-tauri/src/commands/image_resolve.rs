@@ -99,7 +99,7 @@ fn roots_sig(roots: &[PathBuf]) -> u64 {
     h.finish()
 }
 
-fn index_db_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+fn index_conn(app: &tauri::AppHandle) -> Option<rusqlite::Connection> {
     use tauri::Manager;
     // 数据根可以被用户迁移（data_location），索引库跟着数据根走：
     // 两个候选都试一遍，取真实存在的那个。
@@ -110,21 +110,22 @@ fn index_db_path(app: &tauri::AppHandle) -> Option<PathBuf> {
             .map(|d| d.join("filesearch.db"))
             .unwrap_or_default(),
     ];
-    candidates.into_iter().find(|p| p.is_file())
-}
-
-fn index_lookup(app: &tauri::AppHandle, rel_norm: &str) -> Option<String> {
-    let db = index_db_path(app)?;
-    let conn = match rusqlite::Connection::open_with_flags(
+    let db = candidates.into_iter().find(|p| p.is_file())?;
+    match rusqlite::Connection::open_with_flags(
         &db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
-        Ok(c) => c,
+        Ok(c) => Some(c),
         Err(e) => {
             log::warn!("[image-resolve] 打开文件索引失败（回落到目录遍历）: {e}");
-            return None;
+            None
         }
-    };
+    }
+}
+
+/// 一次请求内**复用同一个连接**：一份文档可能有几十个资源，
+/// 每个都新开 sqlite 连接会白付几十次 open+prepare 的开销。
+fn index_lookup(conn: &rusqlite::Connection, rel_norm: &str) -> Option<String> {
     let name = rel_norm.rsplit('/').next()?.to_ascii_lowercase();
     if name.is_empty() {
         return None;
@@ -254,6 +255,8 @@ pub fn resolve_local_images(
     let mut out: HashMap<String, Option<String>> = HashMap::new();
     let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
     let sig = roots_sig(&uniq);
+    // 索引连接只开一次（没有索引库时为 None，走盲扫）
+    let idx = index_conn(&app);
 
     for raw in paths {
         if raw.trim().is_empty() || out.contains_key(&raw) {
@@ -292,7 +295,9 @@ pub fn resolve_local_images(
                 .find(|c| c.is_file());
             match direct {
                 Some(p) => Some(p.to_string_lossy().to_string()),
-                None => index_lookup(&app, &rel_norm)
+                None => idx
+                    .as_ref()
+                    .and_then(|c| index_lookup(c, &rel_norm))
                     .or_else(|| search_roots(&uniq, &rel_norm, deadline)),
             }
         };
