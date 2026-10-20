@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState, useEffect, useMemo } from 'react';
+import { useRef, useCallback, useState, useEffect } from 'react';
 import { Bold, Italic, Link2, Code, List, Columns2, Maximize2, FileText, Sparkles, Eye, Square } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -10,6 +10,7 @@ import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { MarkdownSourceEditor, type MarkdownSourceEditorHandle } from './MarkdownSourceEditor';
 import { injectMarkdownStyles, attachMarkdownCopyHandler, renderMarkdown } from '@/lib/markdown';
+import { resolveLocalImagesInHtml } from '@/lib/localImage';
 import { EVENTS } from '@/core/events/schema';
 
 // 编辑区为「原始 Markdown 文本编辑」（受控 textarea），不再加载 TipTap 富文本编辑器，
@@ -47,13 +48,33 @@ export function NotesEditor() {
   });
 
   // 预览 HTML（2026-10-20）：
-  //   · 双栏 / 仅编辑 → 用 store 里那份**转义版**（原始 HTML 只当文本，不渲染）
+  //   · 双栏 / 仅编辑 → 用 store 里那份已经过「转义 + localimg 解析」的版本
   //   · 仅预览 → 才放行 HTML **结构**（用户自己写的内容；脚本/事件属性/嵌入对象仍被剔除）
-  // 为什么不改 store：htmlContent 还被别处消费，改语义会波及；这里只管"这个视图怎么显示"。
-  const previewHtml = useMemo(
-    () => (editorMode === 'preview-only' ? renderMarkdown(content, { allowHtml: true }) : htmlContent),
-    [editorMode, content, htmlContent],
-  );
+  //
+  // 为什么「仅预览」这条要单独走 state + effect：`localimg://` 必须换成 data URL 才能显示，
+  // 而那个解析是异步的（读盘 + base64）。store 那份是解析过的，直接调 renderMarkdown
+  // 会绕过它 —— 表现就是"双栏能看到图、切到仅预览图没了"。
+  const [previewHtml, setPreviewHtml] = useState(htmlContent);
+  useEffect(() => {
+    if (editorMode !== 'preview-only') {
+      setPreviewHtml(htmlContent);
+      return;
+    }
+    let alive = true;
+    const raw = renderMarkdown(content, { allowHtml: true });
+    void resolveLocalImagesInHtml(raw)
+      .then((resolved) => {
+        if (alive) setPreviewHtml(resolved);
+      })
+      .catch((e: unknown) => {
+        // 解析失败不能让预览变空白：退回未解析版本（图会破，但文字还在），并留痕
+        console.error('[notes] 预览图片解析失败，退回未解析 HTML:', e);
+        if (alive) setPreviewHtml(raw);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [editorMode, content, htmlContent]);
 
   const handleSetMode = useCallback((mode: EditorMode) => {
     setEditorMode(mode);
