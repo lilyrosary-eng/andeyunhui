@@ -1702,6 +1702,8 @@ fn main() {
             // 工程快照：AI 每轮请求自动建点，用户可整轮回滚（services/checkpoint.rs）
             checkpoint_list,
             checkpoint_rollback,
+            // 粘贴进来的相对图片路径：多目录有界检索（commands/image_resolve.rs）
+            resolve_local_images,
             tray_summon_main,
             tray_quit,
             capsule_ip_location,

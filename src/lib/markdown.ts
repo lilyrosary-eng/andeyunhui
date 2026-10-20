@@ -132,6 +132,13 @@ function joinAndNormalize(base: string, rel: string): string {
   return stack.join(sep);
 }
 
+/** 1×1 透明 GIF：占位用。直接写相对路径会让浏览器立刻发一个必然 404 的请求。 */
+const ANDY_PLACEHOLDER_PX =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+/** 相对路径且无基准目录时的标记：由 localImage 的解析器异步回填（多目录兜底检索）。 */
+const PENDING_REL_ATTR = 'data-andy-rel';
+
 function resolveImageSrc(raw: string, baseDir?: string): string {
   const src = (raw || '').trim();
   if (!src) return '';
@@ -146,14 +153,9 @@ function resolveImageSrc(raw: string, baseDir?: string): string {
     if (baseDir) {
       local = joinAndNormalize(baseDir, local);
     } else {
-      if (!warnedImageSrc.has(src)) {
-        warnedImageSrc.add(src);
-        console.warn(
-          '[markdown] 相对路径图片无法解析（缺少基准目录）:',
-          src,
-          '—— 需要绝对路径，或由上层传入 imageBaseDir',
-        );
-      }
+      // 不在这里告警：相对路径现在**有兜底**（渲染器出占位 → localImage 的解析器
+      // 调后端多目录检索 → 回填 src）。真正找不到时由解析器打一条 warn，
+      // 那条才带"候选目录"信息，对排查有用；这里再喊一遍只会淹没它。
       return src;
     }
   }
@@ -203,7 +205,7 @@ export function isFullHtmlDocument(src: string): boolean {
  * iframe + sandbox（无 allow-same-origin）= 它能完整跑起来，但拿不到父窗口与 Tauri IPC。
  * 这与"像浏览器那样显示"是同一件事，只是把越界能力关掉。
  */
-function renderHtmlDocument(doc: string, baseDir?: string): string {
+export function buildDocIframeHtml(doc: string, dirUrlBase?: string): string {
   let body = doc;
 
   // 沙箱里点链接默认是死的（没有 allow-popups）。注入一个极小的拦截器，把链接交给父级，
@@ -216,17 +218,12 @@ function renderHtmlDocument(doc: string, baseDir?: string): string {
     ? body.replace(/<\/body>/i, linkBridge + '</body>')
     : body + linkBridge;
 
-  if (baseDir) {
-    try {
-      // 文档里的 images/a.png 这类相对路径要能解析：注入 <base> 指向文档所在目录的 asset 地址
-      const dirUrl = convertFileSrc(baseDir.replace(/\\/g, '/')).replace(/\/?$/, '/');
-      const baseTag = `<base href="${escapeHtml(dirUrl)}">`;
-      body = /<head[^>]*>/i.test(body)
-        ? body.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`)
-        : baseTag + body;
-    } catch (e) {
-      console.warn('[markdown] 注入 <base> 失败（文档内相对图片可能加载不出来）:', baseDir, e);
-    }
+  // dirUrlBase 已经是「目录的 asset URL」（末尾带 /）。文档里的 images/a.png 会以它为基准解析。
+  if (dirUrlBase) {
+    const baseTag = `<base href="${escapeHtml(dirUrlBase)}">`;
+    body = /<head[^>]*>/i.test(body)
+      ? body.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`)
+      : baseTag + body;
   }
   return (
     '<div class="md-html-doc">'
@@ -235,6 +232,31 @@ function renderHtmlDocument(doc: string, baseDir?: string): string {
     + ` srcdoc="${escapeHtml(body)}"></iframe>`
     + '</div>'
   );
+}
+
+/** 把目录路径转成 asset URL（末尾带 /），失败返回 undefined。 */
+export function dirToAssetUrl(dir: string): string | undefined {
+  try {
+    return convertFileSrc(dir.replace(/\\/g, '/')).replace(/\/?$/, '/');
+  } catch (e) {
+    console.warn('[markdown] 目录转 asset URL 失败:', dir, e);
+    return undefined;
+  }
+}
+
+/**
+ * 整篇 HTML 文档：有基准目录就直接出 iframe；没有就先出**占位 div**，
+ * 由 localImage 的解析器从文档里的相对图片反推目录、再回填 iframe。
+ *
+ * 为什么不能同步出 iframe：粘贴进来的文档没有来源目录，只能先解析一张相对图片的
+ * 真实位置，才能推出 `<base>`。占位期间不渲染 iframe，避免"先把 404 跑一遍再换"。
+ */
+function renderHtmlDocument(doc: string, baseDir?: string): string {
+  if (baseDir) {
+    const dirUrl = dirToAssetUrl(baseDir);
+    if (dirUrl) return buildDocIframeHtml(doc, dirUrl);
+  }
+  return `<div class="md-html-doc md-html-pending" data-andy-doc="${escapeHtml(doc)}"></div>`;
 }
 
 /** 渲染选项。 */
@@ -256,6 +278,11 @@ export interface MdOptions {
    * 这样 `![](docs/a.png)` 这类相对引用能解析到项目里的真实文件。
    */
   imageBaseDir?: string;
+  /**
+   * 编辑器模式（contenteditable）：图片保留**原始 src**。
+   * 那里是"源码视图"，做 asset 转换/占位会破坏编辑与保存的往返（md→html→md 会改写路径）。
+   */
+  rawImageSrc?: boolean;
 }
 
 /** 当前这次 parse 的选项（marked 的 renderer 是模块级单例，只能走这个通道）。 */
@@ -358,9 +385,24 @@ marked.use({
     },
     // 图片：把本地路径换成 asset 协议（webview 里 C:\... 和 ./x.png 都加载不出来）。
     image(token: { href: string; title?: string | null; text?: string }) {
+      const alt0 = escapeHtml(token.text || '');
+      const title0 = token.title ? ` title="${escapeHtml(token.title)}"` : '';
+      if (activeOpts.rawImageSrc) {
+        return `<img src="${escapeHtml(token.href)}" alt="${alt0}"${title0} class="md-img">`;
+      }
       const src = resolveImageSrc(token.href, activeOpts.imageBaseDir);
       const alt = escapeHtml(token.text || '');
       const title = token.title ? ` title="${escapeHtml(token.title)}"` : '';
+      // 相对路径 + 没有基准目录 ⇒ 先出透明占位并打标记，交给 localImage 的解析器
+      // 去候选目录里找（后端有界检索 + 缓存），找到后回填 src。
+      // 为什么不在渲染时同步失败：粘贴进来的文档根本不知道来自哪个目录，
+      // 只能"事后检索"；直接写相对路径会立刻发一个必然 404 的请求并显示破图。
+      if (!src || src === token.href) {
+        if (!/^(https?:|data:|blob:|asset:|localimg:)/i.test(token.href)) {
+          return `<img src="${ANDY_PLACEHOLDER_PX}" ${PENDING_REL_ATTR}="${escapeHtml(token.href)}"`
+            + ` alt="${alt}"${title} loading="lazy" decoding="async" class="md-img md-img-pending">`;
+        }
+      }
       // loading=lazy：长对话/长笔记里的图片不必一次性全解码
       return `<img src="${escapeHtml(src)}" alt="${alt}"${title} loading="lazy" decoding="async" class="md-img">`;
     },
@@ -389,6 +431,19 @@ export function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+/**
+ * 供**编辑器**（contenteditable / 源码视图）使用：图片保留原始 src，不做 asset 转换与占位。
+ *
+ * 为什么单独开一个入口而不是加参数：`marked` 的 renderer 是全局单例，
+ * `mdToEditorHtml` 直接调 `marked.parse`，会继承预览路径的 renderer。
+ * 这里显式把模式切成"原样"，避免编辑往返时把 `a.png` 改写成 asset URL。
+ */
+export function renderMarkdownForEditor(md: string): string {
+  activeOpts = { rawImageSrc: true };
+  slugCounts = new Map();
+  return marked.parse(md, { async: false }) as string;
 }
 
 /** 渲染 markdown 为 HTML（含行内加粗/链接/行内代码/列表/表格/标题/代码块复制按钮）。 */
@@ -563,6 +618,10 @@ const MD_STYLES_TEXT = `
   border-radius: 8px;
   overflow: hidden;
   background: #fff;
+}
+.md-html-doc.md-html-pending {
+  min-height: 120px;
+  background: rgba(127, 127, 127, 0.08);
 }
 .md-html-frame {
   display: block;

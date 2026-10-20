@@ -48,6 +48,8 @@ mod archive;
 pub use archive::*;
 mod storage_misc;
 pub use storage_misc::*;
+mod image_resolve;
+pub use image_resolve::*;
 mod wps;
 pub use wps::*;
 mod install;

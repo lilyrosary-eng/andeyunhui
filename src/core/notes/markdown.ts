@@ -1,5 +1,4 @@
-import { marked } from 'marked';
-import { renderMarkdown } from '@/lib/markdown';
+import { renderMarkdown, renderMarkdownForEditor } from '@/lib/markdown';
 
 /**
  * Markdown 源码 → 预览 HTML（纯函数，可单测）。
@@ -37,8 +36,8 @@ export function renderMarkdownPreview(md: string): string {
  */
 export function mdToEditorHtml(md: string): string {
   if (!md.trim()) return '';
-  // marked 解析 markdown 为 HTML
-  const raw = marked.parse(md, { async: false }) as string;
+  // 用"编辑器模式"渲染：图片保留原始 src（asset 转换/占位只属于预览路径）
+  const raw = renderMarkdownForEditor(md);
   // 移除 wrapping <p> 的自动换行（保留结构）
   return raw;
 }

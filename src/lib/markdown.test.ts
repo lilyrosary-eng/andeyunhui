@@ -166,20 +166,50 @@ describe('renderMarkdown', () => {
     expect(html).toContain('正文内容');
   });
 
-  it('整篇 HTML 文档走沙箱 iframe（保留 style/script，而不是转义成文本）', () => {
+  it('整篇 HTML 文档：无基准目录时先出占位（异步检索后再生成 iframe）', () => {
     const doc = '<!DOCTYPE html>' + NL + '<html><head><style>body{color:red}</style></head>'
       + '<body><h1>报告</h1><script>var a=1;</script></body></html>';
     const html = renderMarkdown(doc);
-    expect(html).toContain('<iframe');
-    expect(html).toContain('md-html-frame');
-    // 沙箱必须有 allow-scripts（否则交互演示跑不了），且绝不能有 allow-same-origin
-    expect(html).toContain('allow-scripts');
-    expect(html).not.toContain('allow-same-origin');
-    // style/script 原样在 srcdoc 里（转义成实体，浏览器解码后仍执行）
-    expect(html).toContain('srcdoc=');
-    expect(html).toContain('&lt;style&gt;');
-    // 不能把整篇文档当普通文本输出到外层
+    // 没有来源目录 ⇒ 不能同步出 iframe（否则文档内相对图片先 404 一遍）
+    expect(html).toContain('data-andy-doc=');
+    expect(html).toContain('md-html-pending');
+    expect(html).not.toContain('<iframe');
+    // 但不能把整篇文档当普通文本输出
     expect(html).not.toContain('<p>&lt;!DOCTYPE');
+  });
+
+  it('整篇 HTML 文档 + 基准目录：沙箱 iframe，保留 style/script', () => {
+    const g = globalThis as unknown as { window?: unknown };
+    const prev = g.window;
+    g.window = {
+      __TAURI_INTERNALS__: {
+        convertFileSrc: (p: string) => `http://asset.localhost/${encodeURIComponent(p)}`,
+      },
+    };
+    try {
+      const doc = '<!DOCTYPE html>' + NL + '<html><head><style>body{color:red}</style></head>'
+        + '<body><h1>报告</h1><script>var a=1;</script></body></html>';
+      const html = renderMarkdown(doc, { imageBaseDir: 'D:/proj' });
+      expect(html).toContain('<iframe');
+      expect(html).toContain('md-html-frame');
+      // 沙箱必须有 allow-scripts（否则交互演示跑不了），且绝不能有 allow-same-origin
+      expect(html).toContain('allow-scripts');
+      expect(html).not.toContain('allow-same-origin');
+      expect(html).toContain('srcdoc=');
+      expect(html).toContain('&lt;style&gt;');
+      // 注入了 <base>（指向目录）
+      expect(html).toContain('&lt;base href=');
+    } finally {
+      g.window = prev;
+    }
+  });
+
+  it('相对路径图片：无基准时出透明占位 + data-andy-rel（交给兜底检索回填）', () => {
+    const html = renderMarkdown('![](images/a.png)');
+    expect(html).toContain('data-andy-rel="images/a.png"');
+    expect(html).toContain('md-img-pending');
+    // 不能把相对路径直接写进 src（会立刻发一个必然 404 的请求）
+    expect(html).not.toContain('src="images/a.png"');
   });
 
   it('markdown 里夹一段 HTML 不算"整篇文档"，仍走正常渲染', () => {
