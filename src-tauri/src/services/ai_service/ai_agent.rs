@@ -58,11 +58,40 @@ async fn run_agent(
     // system：人设 + 前端 per-call（与 ai_chat 同规则），并追加 agent 工具使用提示。
     let persona = compose_persona_system(&cfg);
     let effective_system = compose_effective_system(&system, &persona);
-    let agent_hint = "你被允许并且应当在合适时调用下方提供的工具来获取实时信息或完成计算。需要时先调用工具，拿到结果后再组织最终回答；不要编造工具返回的数据。";
+    let agent_hint = "你被允许并且应当在合适时调用下方提供的工具来获取实时信息或完成计算。需要时先调用工具，拿到结果后再组织最终回答；不要编造工具返回的数据。\n\n\
+【工程硬约束 · 修改代码时必须遵守】\n\
+1. 动手前先跑 git status / git diff 看清当前状态；这是判断\"哪些是我的改动\"的唯一依据。\n\
+2. 在开始一批改动前建立可回滚基线（commit / 分支 / stash 任选），不要在没有基线的情况下直接改。\n\
+3. 每完成一个可独立验证的点就提交一次；提交信息写清\"改了什么、为什么改、影响范围\"，一次提交只做一件事。\n\
+4. 提交前确认改动范围（git diff --stat），不要把无关文件混进提交。\n\
+5. 未经用户明确要求，绝不 push、不重写共享历史（rebase/amend 已推送的提交）、不删除用户已有的正式提交。\n\
+6. 排查性改动（临时探针/错误版本）在排查结束后删掉，只保留真正属于产品的改动。\n\
+7. 本应用会在每轮请求开始时自动快照、并在每次写文件前备份改前内容，用户可随时整轮回滚 ——\n\
+   但这不是\"可以随便大改\"的理由：回滚是用户的权利，不是你的安全网。\n\
+8. 写文件工具**写入即落盘**（没有\"审阅后落盘\"这一步），所以每写完一批就要自己确认结果（读回/编译/跑测试）。";
     // 注入已启用 MCP 服务器的工具清单，让模型的 mcp 工具可正确填写 server/tool
     let mcp_guide = mcp_tools_guide(&app).await;
     // 注入项目级记忆/原则/工程契约（对齐 IDE 约定），仅读、限长
     let project_root_pb = project_root.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+
+    // 每轮 agent 请求开一个快照点（2026-10-20）。
+    // 写文件工具在**落盘前**把改前内容 copy 进这个快照，用户随时可整轮回滚。
+    // 只备份真正被改到的文件（copy-on-write），不复制整棵树 —— 对 node_modules / target 免疫。
+    // 失败只告警：快照是保险，不能因为它挡住本轮任务。
+    if let Some(root) = project_root_pb.as_ref() {
+        let label = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| {
+                let t: String = m.content.chars().take(32).collect();
+                if t.trim().is_empty() { "（无文本输入）".to_string() } else { t }
+            })
+            .unwrap_or_else(|| "未命名轮次".to_string());
+        if let Err(e) = crate::services::checkpoint::begin(&app, root, &label) {
+            log::warn!("[checkpoint] 本轮快照创建失败（写入仍会继续，但无法回滚）: {e}");
+        }
+    }
     let mem_ctx = agent_memory_context(project_root_pb.as_deref()).await;
     let base_system = if effective_system.trim().is_empty() {
         agent_hint.to_string()

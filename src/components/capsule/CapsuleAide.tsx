@@ -167,6 +167,23 @@ function CapsuleAide() {
 
   const [aideInput, setAideInput] = useState('');
   const [aideBusy, setAideBusy] = useState(false);
+
+  // ===== 工程快照（2026-10-20）=====
+  // 后端每轮 agent 请求开始时会自动建一个快照点，写文件工具在落盘前把「改前内容」塞进去。
+  // 这里只是把它列出来 / 让用户点回滚。snapshots === null 表示面板关闭。
+  interface SnapshotMeta {
+    id: string;
+    label: string;
+    created_at: number;
+    files: number;
+    bytes: number;
+    project_root: string;
+  }
+  const [snapshots, setSnapshots] = useState<SnapshotMeta[] | null>(null);
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
+  // 二次确认：回滚会覆盖磁盘文件，不允许一点就动
+  const [snapshotConfirmId, setSnapshotConfirmId] = useState<string | null>(null);
+  const [snapshotMsg, setSnapshotMsg] = useState<string | null>(null);
   // 上报「正在流式输出」给壳，用于把透明浮窗重绘提到 60fps；空闲时回落 30fps。
   // 卸载时显式清零，避免面板关掉后仍占着高刷档。
   useEffect(() => {
@@ -375,6 +392,49 @@ function CapsuleAide() {
    * 本地复位 busy → 通知后端。置空 `aideReqRef` 同时让那条 20s 超时兜底失效（避免
    * 停止之后再弹一句「IDE 未响应」）。
    */
+  /** 打开快照列表（按当前项目过滤）。 */
+  const openSnapshots = useCallback(async () => {
+    if (!aideProjectRoot) {
+      setSnapshotMsg('先选择项目：快照按项目隔离');
+      setSnapshots([]);
+      return;
+    }
+    setSnapshotMsg(null);
+    setSnapshots([]); // 立即开面板（列表为空 = 加载中）
+    try {
+      const list = await invoke<SnapshotMeta[]>('checkpoint_list', { projectRoot: aideProjectRoot });
+      setSnapshots(Array.isArray(list) ? list : []);
+    } catch (e) {
+      console.error('[aide] 读取快照列表失败:', e);
+      setSnapshotMsg(`读取失败：${String(e)}`);
+      setSnapshots([]);
+    }
+  }, [aideProjectRoot]);
+
+  /** 回滚到某个快照（已二次确认）。 */
+  const rollbackSnapshot = useCallback(async (id: string) => {
+    if (snapshotBusy) return;
+    setSnapshotBusy(true);
+    setSnapshotMsg(null);
+    try {
+      const r = await invoke<{ restored: number; removed: number; skipped: number }>('checkpoint_rollback', { id });
+      const skipped = r?.skipped ?? 0;
+      // 跳过数必须显式说出来：那些文件当初因超限没备份，回滚**没有**恢复它们
+      setSnapshotMsg(
+        `已回滚：恢复 ${r?.restored ?? 0} 个文件，删除 ${r?.removed ?? 0} 个新建文件` +
+          (skipped > 0 ? `，${skipped} 个因超过 8MB 未备份而跳过` : ''),
+      );
+      console.info('[aide] 回滚完成', r);
+      await openSnapshots();
+    } catch (e) {
+      console.error('[aide] 回滚失败:', e);
+      setSnapshotMsg(`回滚失败：${String(e)}`);
+    } finally {
+      setSnapshotBusy(false);
+      setSnapshotConfirmId(null);
+    }
+  }, [snapshotBusy, openSnapshots]);
+
   const stopAide = useCallback(() => {
     const rid = aideReqRef.current;
     if (!rid) return;
@@ -394,7 +454,7 @@ function CapsuleAide() {
   }, [updateAideStreamMessages]);
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px' }} onClick={(e) => e.stopPropagation()}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px', position: 'relative' }} onClick={(e) => e.stopPropagation()}>
       {/* 顶部细条：返回 + 标题 + 对话切换 + 新建 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: '#f2f2f4' }}>{t('capsule.aideTitle')}</span>
@@ -429,6 +489,18 @@ function CapsuleAide() {
           }}
         >
           {(aideProjectRoot ? aideProjectRoot.split(/[\/]/).filter(Boolean).pop() : '选择项目') || '选择项目'}
+        </button>
+        <button
+          onClick={() => (snapshots === null ? void openSnapshots() : setSnapshots(null))}
+          title="历史快照：AI 每轮请求自动建点，可整轮回滚（按项目隔离，最多保留 10 轮）"
+          style={{
+            ...btnBase, width: 'auto', height: 28, padding: '0 8px', fontSize: 11, flex: '0 0 auto',
+            color: snapshots === null ? 'rgba(244,244,246,0.8)' : GOLD,
+            background: snapshots === null ? 'rgba(0,0,0,0.28)' : 'rgba(230,195,92,0.16)',
+            border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8,
+          }}
+        >
+          快照
         </button>
         <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen(!keepOpen)} size={28} />
         <button onClick={() => setAideOpen(false)} title={t('capsule.backToPlayer')} style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
@@ -507,6 +579,90 @@ function CapsuleAide() {
           </button>
         </div>
       </div>
+
+      {/* 快照浮层：盖住面板（不改窗口尺寸，避免触发浮岛的尺寸过渡重绘） */}
+      {snapshots !== null && (
+        <div
+          style={{
+            position: 'absolute', inset: 0, zIndex: 20,
+            background: 'rgba(18,18,20,0.97)',
+            display: 'flex', flexDirection: 'column', gap: 8,
+            padding: '10px 12px', borderRadius: 10,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: '#f2f2f4' }}>历史快照</span>
+            <span style={{ fontSize: 10.5, color: 'rgba(244,244,246,0.5)' }}>
+              {aideProjectRoot ? aideProjectRoot.split(/[\/]/).filter(Boolean).pop() : '未选择项目'} · 最多 10 轮
+            </span>
+            <span style={{ flex: 1 }} />
+            <button onClick={() => { void openSnapshots(); }} title="刷新" style={{ ...btnBase, width: 26, height: 26, fontSize: 11 }}>刷新</button>
+            <button onClick={() => { setSnapshots(null); setSnapshotConfirmId(null); }} title="关闭" style={{ ...btnBase, width: 26, height: 26 }}><IconClose /></button>
+          </div>
+
+          {snapshotMsg && (
+            <div style={{ fontSize: 11, lineHeight: 1.5, color: 'rgba(244,244,246,0.75)', background: 'rgba(255,255,255,0.06)', borderRadius: 7, padding: '5px 8px' }}>
+              {snapshotMsg}
+            </div>
+          )}
+
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {snapshots.length === 0 && (
+              <div style={{ fontSize: 11.5, color: 'rgba(244,244,246,0.55)', padding: '10px 2px', lineHeight: 1.6 }}>
+                暂无快照。每次发送任务（agent 轮次）会自动建点，只有真正改到文件时才会占用空间。
+              </div>
+            )}
+            {snapshots.map((sn) => {
+              const t = new Date(sn.created_at);
+              const hhmm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+              const confirming = snapshotConfirmId === sn.id;
+              return (
+                <div
+                  key={sn.id}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: 8, padding: '6px 8px',
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11.5, color: '#f2f2f4', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {sn.label || '（无文本输入）'}
+                    </div>
+                    <div style={{ fontSize: 10, color: 'rgba(244,244,246,0.45)', marginTop: 2 }}>
+                      {`${t.getMonth() + 1}/${t.getDate()} ${hhmm} · ${sn.files} 个文件 · ${(sn.bytes / 1024).toFixed(0)} KB`}
+                    </div>
+                  </div>
+                  {confirming ? (
+                    <>
+                      <button
+                        onClick={() => { void rollbackSnapshot(sn.id); }}
+                        disabled={snapshotBusy}
+                        style={{ ...btnBase, height: 24, width: 'auto', padding: '0 8px', fontSize: 11, color: '#ffb4b4', background: 'rgba(240,120,120,0.18)', border: '1px solid rgba(240,120,120,0.4)', borderRadius: 6 }}
+                      >
+                        {snapshotBusy ? '回滚中…' : '确认回滚'}
+                      </button>
+                      <button onClick={() => setSnapshotConfirmId(null)} style={{ ...btnBase, height: 24, width: 'auto', padding: '0 8px', fontSize: 11, borderRadius: 6 }}>
+                        取消
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => setSnapshotConfirmId(sn.id)}
+                      disabled={sn.files === 0}
+                      title={sn.files === 0 ? '这一轮没有改动任何文件' : '把这一轮改过的文件恢复成本轮开始前的内容'}
+                      style={{ ...btnBase, height: 24, width: 'auto', padding: '0 8px', fontSize: 11, borderRadius: 6, opacity: sn.files === 0 ? 0.4 : 1 }}
+                    >
+                      回滚
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

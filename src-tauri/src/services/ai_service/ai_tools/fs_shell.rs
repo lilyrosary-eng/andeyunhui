@@ -135,6 +135,46 @@ pub(crate) fn edit_store() -> &'static Mutex<std::collections::HashMap<String, V
 }
 
 /// 记录一次暂存编辑；order 为追加序号，read overlay 与最终落盘都按此顺序重放。
+/// 落盘前把「改前内容」备份进本轮快照（2026-10-20）。
+///
+/// 快照是保险，不是前置条件：备份失败只告警，不阻止写入 —— 否则磁盘满/权限异常时
+/// 连正常的写文件都会被一个辅助功能拖死。
+fn capture_before_write(ctx: &ToolContext, path: &std::path::Path) {
+    if let Some(root) = ctx.project_root.as_ref() {
+        if let Err(e) = crate::services::checkpoint::capture(&ctx.app, root, path) {
+            log::warn!("[checkpoint] 捕获失败（继续写入）: {} - {}", path.display(), e);
+        }
+    }
+}
+
+/// 写入内容（建父目录 + 写盘）。改前快照由调用方先做。
+fn write_disk(path: &std::path::Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    std::fs::write(path, content.as_bytes()).map_err(|e| format!("写入失败: {e}"))
+}
+
+/// edit 的替换语义（与旧落盘实现保持一致）：出现多次则全替换，否则只替换首个。
+fn apply_edit_text(text: &str, old: &str, new: &str) -> Option<String> {
+    if old.is_empty() {
+        return None;
+    }
+    let count = text.matches(old).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(text.replace(old, new));
+    }
+    let idx = text.find(old)?;
+    let mut out = String::with_capacity(text.len() + new.len().saturating_sub(old.len()));
+    out.push_str(&text[..idx]);
+    out.push_str(new);
+    out.push_str(&text[idx + old.len()..]);
+    Some(out)
+}
+
 pub(crate) fn record_edit(request_id: &str, mut e: PendingEdit) {
     let mut store = edit_store().lock().unwrap_or_else(|_| {
         // 锁中毒兜底：清空重建，极罕见
@@ -383,7 +423,17 @@ impl AiTool for FileTool {
                     new_text: Some(content.clone()),
                     order: 0,
                 });
-                Ok(ToolExecResult::plain(format!("已暂存写入 {}（内容 {} 字符，等用户审阅确认后落盘；可用 read_file 查看改后视图）", p.display(), content.chars().count())))
+                // 2026-10-20：**写入即落盘**。
+                // 旧流程是 record_edit 暂存 → 前端审阅面板逐个确认 → ai_agent_apply_edits 落盘；
+                // 审阅面板随 IDE AI 列一起删除后，没有任何代码再调落盘命令，
+                // 工具却仍回「已暂存，等用户审阅」—— 文件其实一个字节没变（真实 P0）。
+                // 现在改为：改前快照 → 立即写盘。用户随时可用快照回滚。
+                capture_before_write(ctx, &p);
+                write_disk(&p, &content)?;
+                Ok(ToolExecResult::plain(format!(
+                    "已写入 {}（{} 字符；本轮已自动快照，可用「历史快照」回滚）",
+                    p.display(), content.chars().count()
+                )))
             }
             "edit" => {
                 let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -426,14 +476,27 @@ impl AiTool for FileTool {
                     action: "edit".to_string(),
                     path: p.to_string_lossy().to_string(),
                     new_content: None,
-                    old_string: Some(old_string),
-                    new_string: Some(new_string),
+                    // clone：下面落盘还要用（record_edit 会 move 走）
+                    old_string: Some(old_string.clone()),
+                    new_string: Some(new_string.clone()),
                     // diff：行级 old→new（old_text 为完整行、new_text 为替换后行，供前端 diff 渲染）
                     old_text: Some(preview_ok.1),
                     new_text: Some(preview_ok.2),
                     order: 0,
                 });
-                Ok(ToolExecResult::plain(format!("已暂存编辑 {}（等用户审阅确认后落盘）", p.display())))
+                // 同 write_file：改为即时落盘 + 改前快照。
+                // 替换基于**磁盘当前内容**（不是 pending overlay）—— 前一次 edit 已经写盘了，
+                // 再用叠加视图会把同一处改动算两遍。
+                let p_edit = p.clone();
+                let cur = std::fs::read_to_string(&p_edit).unwrap_or_default();
+                let next = apply_edit_text(&cur, &old_string, &new_string).ok_or_else(|| {
+                    format!("old_string 在当前文件不存在，无法定位：{old_string}")
+                })?;
+                capture_before_write(ctx, &p_edit);
+                write_disk(&p_edit, &next)?;
+                Ok(ToolExecResult::plain(format!(
+                    "已修改 {}（本轮已自动快照，可用「历史快照」回滚）", p.display()
+                )))
             }
             "delete" => {
                 let under = ctx.project_root.as_ref().map(|r| is_under_path(&p, r)).unwrap_or(false);
@@ -473,7 +536,16 @@ impl AiTool for FileTool {
                     new_text: None,
                     order: 0,
                 });
-                Ok(ToolExecResult::plain(format!("已暂存删除 {}（等用户审阅确认后落盘）", p.display())))
+                // 同 write_file：即时删除 + 改前快照（回滚会把内容写回来）
+                capture_before_write(ctx, &p);
+                match std::fs::remove_file(&p) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(format!("删除失败: {e}")),
+                }
+                Ok(ToolExecResult::plain(format!(
+                    "已删除 {}（本轮已自动快照，可用「历史快照」回滚）", p.display()
+                )))
             }
             _ => Err(format!("未知 action: '{}'（可选 read_file/write_file/edit/delete）", action)),
         }

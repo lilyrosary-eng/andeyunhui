@@ -31,6 +31,7 @@ pub mod recording_service;
 #[path = "../pal/recording_service.rs"]
 pub mod recording_service;
 pub mod window_manager;
+pub mod checkpoint;
 // 诊断模块依赖 Windows 捕获后端（windows_capture），仅 Windows 编译；非 Windows 走同名桩。
 #[cfg(windows)]
 pub mod diagnostics;

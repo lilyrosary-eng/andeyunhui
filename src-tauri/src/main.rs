@@ -1699,6 +1699,9 @@ fn main() {
             ide_session_load,
             ide_session_list,
             ide_session_delete,
+            // 工程快照：AI 每轮请求自动建点，用户可整轮回滚（services/checkpoint.rs）
+            checkpoint_list,
+            checkpoint_rollback,
             tray_summon_main,
             tray_quit,
             capsule_ip_location,

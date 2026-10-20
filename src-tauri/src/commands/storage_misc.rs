@@ -314,3 +314,33 @@ pub fn ide_session_delete(app: tauri::AppHandle, id: String) -> Result<(), Strin
         }
     }
 }
+
+// ================= 工程快照（checkpoint_*，2026-10-20） =================
+//
+// 实现都在 services/checkpoint.rs（快照的存储布局、捕获、回滚、滚动淘汰）。
+// 这里只做命令外壳 —— `#[tauri::command]` 生成的 `__cmd__*` 宏必须在 main.rs 能 glob 到的
+// 模块里展开，写在 services 里 re-export 过不来（编译期会报 cannot find macro）。
+
+/// 列出快照（前端「历史快照」面板用）。projectRoot 为空则列出全部项目的快照。
+#[tauri::command]
+pub fn checkpoint_list(
+    app: tauri::AppHandle,
+    project_root: Option<String>,
+) -> Vec<crate::services::checkpoint::CheckpointMeta> {
+    let pr = project_root
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from);
+    crate::services::checkpoint::list(&app, pr.as_deref())
+}
+
+/// 回滚到指定快照：把该轮改过的文件写回改前内容，该轮新建的文件删除。
+/// 返回 { restored, removed, skipped }（skipped = 当初因超限未备份、无法恢复的文件数）。
+#[tauri::command]
+pub fn checkpoint_rollback(app: tauri::AppHandle, id: String) -> Result<serde_json::Value, String> {
+    let (restored, removed, skipped) = crate::services::checkpoint::rollback(&app, &id)?;
+    Ok(serde_json::json!({
+        "restored": restored,
+        "removed": removed,
+        "skipped": skipped,
+    }))
+}
