@@ -751,6 +751,33 @@ fn main() {
         eprintln!("[W2V] 被 ANDY_W2V=0 显式关闭，保持 Windowed hosting");
     }
 
+    // === Linux(WebKitGTK)：默认关闭 DMA-BUF 渲染器 ===
+    // 必须在 WebKit 初始化（创建 WebView）之前设置，迟于此点无效。
+    //
+    // 背景（2026-10-20 本机实测，Intel UHD 770 / i915 + Wayland 4K@144Hz，WebKitGTK 2.52.6）：
+    // 同一页面、同样只动一个 200×200 的方块——
+    //   DMA-BUF 开（默认）：26.6 fps / p95 41ms / 100% 掉帧
+    //   DMA-BUF 关        ：144 fps / p95 7ms  / 0 掉帧
+    // ⇒ 开着时**任何逐帧脏区都会退化成整块 4K surface 重传**，帧率与改动面积无关地锁死在 26fps；
+    //   关掉后改按脏区做软件拷贝，小面积动画恢复满帧（大面积重绘变慢，见下）。
+    // 这条与「Windows 流畅、Linux 卡」的观测完全吻合：Windows 走 D3D 合成，没有这一步。
+    //
+    // 代价（同样实测）：关掉后**大面积**每帧重绘会掉到 16fps，`filter: blur()` 叠在动画上更是 2.8fps
+    // ⇒ 关它必须配合「动画层保持小面积」（沉浸页歌词容器 contain: strict / 只渲染可视行），
+    //   静态模糊本身是免费的（无动画时 144fps）。
+    //
+    // 逃生开关：ANDY_DMABUF=1 强制保留 DMA-BUF（例如换 AMD/NVIDIA 桌面栈后想回退）。
+    #[cfg(target_os = "linux")]
+    {
+        let want = std::env::var("ANDY_DMABUF").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        if want {
+            eprintln!("[WEBKIT] ANDY_DMABUF=1 —— 保留 DMA-BUF 渲染器（默认是关闭）");
+        } else if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            eprintln!("[WEBKIT] 已关闭 DMA-BUF 渲染器（24fps→144fps，见 main.rs 注释；ANDY_DMABUF=1 可回退）");
+        }
+    }
+
     // 尽早设置本进程 AUMID + 注册表显示名「安得云荟」，使随后创建的主窗口继承该 AUMID，
     // 任务栏媒体浮窗据此显示「安得云荟」而非「未知应用」。（早于窗口创建，故窗口可继承）
     andeyunhui_lib::smtc::ensure_app_identity();

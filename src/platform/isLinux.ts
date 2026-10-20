@@ -51,3 +51,20 @@ export function isLinux(): boolean {
  * （如 `filter: blur()` 的封面/背景、`will-change`、`mask-image`）。
  */
 export const HEAVY_FX = !isLinux();
+
+/**
+ * 是否启用「大面静态模糊」（封面铺底 blur(30px)、主题背景 blur）。
+ *
+ * 与 HEAVY_FX 分开的原因（2026-10-20 实测，Intel UHD 770 + Wayland 4K@144，WebKitGTK 2.52.6，
+ * 4K 全屏、rAF 采样）：
+ *   - 静态模糊**不花钱**：全屏 blur(30px) + 8 行逐行 blur、画面不动 ⇒ 143 fps（与不模糊同）
+ *   - 花钱的是「**动画层上的** filter」：40 行歌词边滚边模糊 ⇒ 2.9 fps
+ * 而此前 Linux 掉帧的真凶根本不是 blur，是 WebKitGTK 的 DMA-BUF 渲染器（见 main.rs 注释）：
+ * 它把**任意逐帧脏区**退化成整块 4K surface 重传，令一切动画锁死 26 fps；关掉后，
+ *   - 同场景只动一个小方块：26 → 144 fps
+ *   - 全屏模糊 + 小面积动画（12 行歌词）：25.5 → **144 fps**
+ * 所以：静态模糊在 Linux 上可以开（观感回到 Windows 水平）；
+ * 逐行文本 blur 仍等「歌词列表虚拟化」落地后再开（40 行 ⇒ 2.9 fps 的实测值还挂着）。
+ */
+export const STATIC_BLUR = true;
+

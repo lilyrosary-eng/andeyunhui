@@ -13,7 +13,7 @@ import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, MusicIcon,
   RepeatIcon, Repeat1Icon, ShuffleIcon, ArrowLeftIcon, HeartIcon,
 } from '../../_shared/icons';
-import { HEAVY_FX } from '@/platform/isLinux';
+import { HEAVY_FX, STATIC_BLUR } from '@/platform/isLinux';
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
 const { IconButton } = window.__HOST_UI__ || {};
@@ -531,8 +531,9 @@ export function NowPlayingView({
     },
   },
     // 背景层：专辑封面模糊放大渐变铺底
-    // 全屏 blur(30px) 同属重合成滤镜：Linux 一律不启用（HEAVY_FX=false），直接铺图；
-    // 熔断降级到 >=1 时同样去掉，避免大面积高斯模糊吃核显缓冲。
+    // 全屏 blur(30px) 属**静态**模糊：实测（4K 全屏、WebKitGTK 2.52.6 + i915）静态模糊不掉帧，
+    // 143fps ≈ 不模糊；掉帧的真凶是 DMA-BUF 渲染器（已在 main.rs 关掉）。故 Linux 也开，
+    // 观感与 Windows 对齐。熔断降级到 >=1 时仍去掉，避免极端情况下大面积重绘吃核显。
     prevCoverUrl && coverUrl && React.createElement('div', {
       key: 'bg-cover',
       className: 'absolute inset-0',
@@ -540,10 +541,10 @@ export function NowPlayingView({
         backgroundImage: `url(${prevCoverUrl})`,
         backgroundSize: 'cover',
         backgroundPosition: 'center',
-        filter: HEAVY_FX && degrade === 0 ? 'blur(30px) saturate(1.2)' : 'none',
+        filter: STATIC_BLUR && degrade === 0 ? 'blur(30px) saturate(1.2)' : 'none',
         opacity: bgVisible ? 0.35 : 0,
         transition: 'opacity 1.2s ease',
-        transform: HEAVY_FX && degrade === 0 ? 'scale(1.15)' : 'none',
+        transform: STATIC_BLUR && degrade === 0 ? 'scale(1.15)' : 'none',
       },
     }),
     // 背景遮罩渐变
@@ -694,9 +695,13 @@ export function NowPlayingView({
           className: 'flex-1 overflow-y-auto overflow-x-hidden',
           style: {
             scrollBehavior: 'smooth',
+            // 把滚动造成的重绘**限制在本容器内**（contain: content = layout+paint+style）。
+            // 实测依据：DMA-BUF 渲染器关掉后，脏区面积直接决定帧率——12 行容器 144fps，
+            // 40 行大容器 16fps（同样的动画）。这条把歌词区的重绘边界钉死，是开逐行 blur 的前置条件。
+            contain: 'content',
             // 平台分流（同 HEAVY_FX）：`will-change: scroll-position` 与 `mask-image` 在
             // WebKitGTK 上各自会额外提升一个合成层；与逐行 blur 叠加会放大 GPU 压力。
-            // Linux 下这两处均不启用 —— 歌词退化为「纯 overflow 裁剪」，阅读不受影响
+            // Linux 下这两处仍不启用 —— 歌词退化为「纯 overflow 裁剪」，阅读不受影响
             // （下方仍有约半屏的 padding，首尾行照样能滚到正中）。
             willChange: HEAVY_FX ? 'scroll-position' : undefined,
             maskImage: HEAVY_FX ? 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)' : undefined,
