@@ -73,4 +73,7 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        # --features test-manifest：把 comctl32 v6 清单链进测试二进制，
+        # 否则测试进程启动即 0xc0000139（muda 静态导入 TaskDialogIndirect，见 build.rs）。
+        # --lib：只跑单元测试；不带 feature 时 bin 目标链接会与 tauri 内嵌清单冲突。
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --features test-manifest

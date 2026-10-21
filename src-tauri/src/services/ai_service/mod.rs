@@ -22,6 +22,10 @@ pub mod ai_discover;
 pub mod ai_chat;
 pub mod ai_tools;
 pub mod gongfang_tools;
+// codemode：模型写的 JS 跑在 QuickJS（rquickjs）里，工具调用不进模型上下文。
+// 仅桌面编译（rquickjs 需要 cc 编译 QuickJS 源码；移动端不注册该工具）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) mod codemode;
 pub mod ai_session;
 pub mod ai_agent;
 pub mod ai_ocr;

@@ -34,7 +34,8 @@
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
     "typecheck:plugins": "tsc -p tsconfig.plugins.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib --features test-manifest"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.2.0",

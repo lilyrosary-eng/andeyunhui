@@ -9,6 +9,14 @@
 > 以下改动不改变用户可见功能，全部是「地基」类工作。每一条都实跑了质量门（`tsc` ×2 / `vitest` / `cargo check` / `cargo test` / `eslint`）。
 
 ### 新增
+- **`codemode` 工具（模型写脚本循环调工具，复刻 pi-codemode）**：agent 需要连续调同一批工具时（批量读多个文件、换几种模式搜索、按列表逐个处理），模型可以给出**一段 JavaScript**，在进程内的 QuickJS 沙箱里跑完：`await tools.<名字>({...})` 调工具、`text()/return` 交出结果，**中间结果全部留在沙箱**，不进上下文。
+  - 引擎：`src-tauri/src/services/ai_service/codemode.rs`（rquickjs 0.9，QuickJS 源码随 crate 编译，增量约 1.5MB）。VM 跑在独立线程（16MB 栈），工具调用以 Promise 挂起、由宿主按 id 回投，所以 `Promise.all` 是真并发。
+  - 护栏：96MB 堆上限、2MB QuickJS 栈护栏（深递归变成可 catch 的 RangeError）、90s 墙钟（**等工具的时间不计入**，因为里面可能包含等用户点批准）、20 万字符输出上限、单个工具调用 10 分钟兜底；`while(true){}` 与 `while(true) await null` 都能被中断。
+  - 安全边界：脚本只能调工具 + `text/console/exit`，没有 `fetch/require/setTimeout`；每个嵌套调用都走 `execute_tool_once`，**参数校验、审批 hook、写入即落盘、快照备份一条不少**；脚本里拿不到 `codemode` 自己（不套娃）。
+  - 可读性：报错栈的行号还原到脚本自己的行（QuickJS 里 prelude 与脚本共用 `eval_script`，靠前置空行对齐后回算）；工具名拼错给「你是不是想用 X」（编辑距离 ≤2，能抓 `alpah`→`alpha`）。
+  - 测试：13 项（含真跑 VM 的 6 项：调用链路、工具抛错可 catch、死循环中断、空等 promise 判卡住、拼错提示、行号还原）。
+- **Rust 测试地基真的修好了（上一版是假修）**：`cargo test --lib` 的测试进程启动即 `0xc0000139`（`muda` 静态导入 `comctl32.dll!TaskDialogIndirect`，该导出只在 Common-Controls v6 side-by-side 程序集里）。上一版用 `cargo:rustc-link-arg-tests` 注入清单，**本机 cargo 1.96 直接报 `error: invalid instruction`，那条指令从没生效**；改用全目标 `rustc-link-arg` 又会让 app 二进制撞 `duplicate resource: type MANIFEST`（tauri-build 已内嵌一份）。
+  - 现方案：新增 `test-manifest` feature 门控，只在开 feature 时注入；测试统一走 `pnpm test:rust`（= `cargo test --lib --features test-manifest`），`ci.yml` 同步。**339 项全绿**；不带 feature 时 `cargo build --bin` 完全不受影响。
 - **CI**：`.github/workflows/ci.yml`——前端 job（`tsc --noEmit` + `tsc -p tsconfig.plugins.json` + `vitest`）与 Rust job（`cargo check` + `clippy --all-targets` + `cargo test`，`windows-latest`，因 windows-sys / WinRT / NVML 仅 Windows 可编译），push/PR 到 `main` 触发。此前仓库只有一条落地页部署 workflow，质量门全靠人肉。
 - **`src/core/clock.ts`**：把「今天是第几天」收敛成模块级缓存 + 跨天定时刷新，替掉 4 处渲染期 `Date.now()`（React 渲染期 impure）。
 

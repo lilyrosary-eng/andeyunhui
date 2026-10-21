@@ -196,6 +196,13 @@ rdev = "0.5"
 # 其 4 个 #[tauri::command] 仅在桌面二进制 main.rs 注册，移动端不经过该路径。
 # Windows/桌面 Linux/macOS 构建行为完全不变。
 portable-pty = "0.8"
+# codemode（AI 工具「写一段 JS 循环调工具」）的 JS 引擎：QuickJS 源码随 crate 内置、用 cc 就地编译，
+# 零系统依赖、零运行时下载。选它而不是 quickjs-wasi / deno_core 的原因：
+#   - 同步解释器 + interrupt handler + 内存/栈上限，正好对上「脚本自己算的时候能被中断」；
+#   - 增量约 1MB，deno_core（V8）是 30MB 量级；
+#   - 纯 C、MIT，Android 交叉编译只需 NDK 的 clang（cc crate 自动找）。
+# 仅桌面编译：AI agent 的 codemode 工具在移动端不注册（见 ai_tools.rs 的 cfg）。
+rquickjs = "0.9"
 
 # === Android v1 目标专属依赖（§9.7.2）===
 # 仅在 target_os = "android" 下编译；Windows / 桌面 Linux / macOS 构建零影响。
@@ -229,6 +236,18 @@ gongfang-pentest = ["gongfang-kit/pentest"]
 gongfang-automation = ["gongfang-kit/automation"]
 gongfang-gateway = ["gongfang-kit/gateway"]
 gongfang-tls-impersonate = ["gongfang-kit/tls-impersonate"]
+# 仅供 `cargo test`：把 comctl32 v6 清单链进测试二进制。
+#
+# 为什么需要：单元测试二进制没有清单，而依赖链里 muda（tauri 菜单）**静态导入**了
+# `comctl32.dll!TaskDialogIndirect`——这个导出只存在于 Common-Controls **v6** side-by-side
+# 程序集。没有清单 ⇒ 加载器拿 System32 的 v5 ⇒ 进程启动即 0xc0000139，一个测试都跑不了。
+#
+# 为什么做成 feature 而不是无条件链接：app 二进制已被 tauri-build 内嵌清单，再链一次
+# lld 会报 `duplicate resource: type MANIFEST`。cargo 的 `rustc-link-arg-tests` 本机不认
+# （见 build.rs 注释），所以只能显式开关。
+#
+# 用法：`pnpm test:rust`（= cargo test --lib --test smoke --features test-manifest）
+test-manifest = []
 
 [profile.dev]
 # dev（pnpm tauri dev）默认 opt-level = 0，对录屏这类逐像素/逐帧热点代码慢一个数量级，

@@ -35,6 +35,10 @@ mod devtools;
 mod media_gen;
 mod vision;
 mod comfyui;
+// codemode：让模型写一段 JS 在 QuickJS 沙箱里循环调工具（中间结果不进上下文）。
+// 仅桌面：rquickjs 要 cc 编 QuickJS 源码，移动端不注册该工具（见下方 push 的 cfg）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod codemode;
 pub(crate) use core::*;
 pub(crate) use basic::*;
 pub(crate) use plan::*;
@@ -45,9 +49,11 @@ pub(crate) use devtools::*;
 pub(crate) use media_gen::*;
 pub(crate) use vision::*;
 pub(crate) use comfyui::*;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) use codemode::*;
 
 pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
-    vec![
+    let mut tools: Vec<Box<dyn AiTool>> = vec![
         Box::new(NowTool),
         Box::new(CalculatorTool),
         Box::new(PlanTool),
@@ -74,7 +80,11 @@ pub(crate) fn registered_tools() -> Vec<Box<dyn AiTool>> {
         Box::new(ComfyuiListModelsTool),
         Box::new(ComfyuiBuildWorkflowTool),
         Box::new(crate::services::ai_service::gongfang_tools::GongfangFullTool),
-    ]
+    ];
+    // codemode 只依赖桌面侧的 JS 引擎；移动端注册了也没法跑，直接不给模型看到
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    tools.push(Box::new(CodemodeTool));
+    tools
 }
 
 /// 把单个工具 schema 规整成 OpenAI 兼容端点要求的最小合法形状。
