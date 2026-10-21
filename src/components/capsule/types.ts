@@ -45,6 +45,13 @@ export interface ChatMsg {
   /** 非图片附件（文本/二进制）陈列元数据：文本内容已注入请求、二进制仅展示文件名。 */
   attachments?: AttachmentMeta[];
   reasoning?: string; // 思考模式下的思维链（reasoning_content），可折叠遮罩展示
+  /**
+   * 用户对这条回复的评价（点赞/点踩）。
+   *
+   * 挂在消息上而不是单独存文件：评价天然属于"这一条回复"，跟着会话一起持久化，
+   * 删会话即一起消失，不需要额外的生命周期管理。
+   */
+  feedback?: 'up' | 'down';
   error?: boolean;
   /**
    * 工具/命令产出的本地记录（非模型发言）。
@@ -131,6 +138,13 @@ export interface Conversation {
   participants?: string[];
   /** 群聊显示名（用于侧栏/标题） */
   groupName?: string;
+  /**
+   * 标题是否已被用户手动改过（或由程序显式命名，如「xxx · 分支」）。
+   *
+   * 自动命名只在**标题为空**时发生；这个标记是额外的保险 ——
+   * 用户起的名字不该被任何"自动"逻辑覆盖。
+   */
+  titleLocked?: boolean;
   /**
    * 群聊成本计量（内部用，不对用户暴露 severity/成本明细，仅汇总成轻量提示）。
    * calls = 本轮群聊累计触发的 AI 调用次数；用户可见的提示是"本次群聊已调用 N 次 AI"。

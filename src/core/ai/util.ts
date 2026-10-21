@@ -33,6 +33,36 @@ export function genTitle(text: string): string {
   return t.length > 18 ? t.slice(0, 18) + '…' : t || '新对话';
 }
 
+/**
+ * 这些标题是"还没起名"的占位，不是用户的选择。
+ *
+ * `makeConv()` 给的默认标题是「新对话」——如果自动命名只判"标题是否为空"，
+ * 新建的会话会永远叫「新对话」（2026-10-21 修正命名逻辑时差点踩到）。
+ */
+const PLACEHOLDER_TITLES = new Set(['新对话', '新会话', '新聊天', '群聊']);
+
+export function isPlaceholderTitle(title: string): boolean {
+  const t = title.trim();
+  return !t || PLACEHOLDER_TITLES.has(t);
+}
+
+/**
+ * 这一轮该用什么标题 —— **只在占位标题上生成一次**，之后永不改动。
+ *
+ * 为什么要抽成纯函数：原来的实现写成
+ * `c.title || c.messages.length === 0 ? genTitle(content) : c.title`，
+ * `||` 优先级高于 `?:`，整个前项被当成条件 ⇒ **每轮都重新命名**
+ * （用户实测"每轮对话都被改名"）。这种优先级 bug 写在 hook 里没人测得到，
+ * 抽出来才能用单测钉住"第二次调用必须原样返回"。
+ */
+export function resolveTitle(
+  conv: { title: string; titleLocked?: boolean },
+  firstUserText: string,
+): string {
+  if (conv.titleLocked) return conv.title;
+  return isPlaceholderTitle(conv.title) ? genTitle(firstUserText) : conv.title;
+}
+
 export function makeConv(): Conversation {
   return {
     id: uid(),

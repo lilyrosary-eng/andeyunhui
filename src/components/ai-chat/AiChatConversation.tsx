@@ -2,7 +2,7 @@
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
 import { memo, useEffect, useState, useRef, useLayoutEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square } from 'lucide-react';
+import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square, Copy, Check, GitBranch, RefreshCw, ThumbsUp, ThumbsDown, Volume2, VolumeX } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import { InlineSelect } from '@/components/ui/inline-select';
 import type { Conversation, SendAttachment, AttachmentKind, ChatMsg } from '@/components/capsule/types';
@@ -12,6 +12,139 @@ import { useCompanionStore } from '@/core/stores/companionStore';
 import { useUserAvatar } from '@/core/avatar/userAvatar';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
 import { UsageMeter } from '@/components/bricks/UsageMeter';
+
+/**
+ * markdown → 可朗读的纯文本。
+ *
+ * 直接念 `**加粗**` / ``` 代码 ``` 会非常难听：代码块整段念出来没有意义，
+ * 所以代码块替换成「代码块」，图片替换成「图片」，其余只去标记留文字。
+ */
+function toSpeechText(md: string): string {
+  return md
+    .replace(/```[\s\S]*?```/g, '（代码块）')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '（图片）')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    .replace(/[*_~]/g, '')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
+/**
+ * 消息底部操作行（复制 / 分支 / 重新生成 / 点赞 / 点踩 / 朗读）。
+ *
+ * 为什么常显而不是 hover 才出现：这些是"看完想动手"的入口，藏起来等于没有；
+ * 用低透明度常显、hover 提升到全不透明，兼顾可发现性与安静。
+ */
+const MessageActions = memo(function MessageActions({
+  msg,
+  isLastAssistant,
+  busy,
+  onRegenerate,
+  onBranch,
+  onRate,
+  speaking,
+  onSpeak,
+  muted,
+}: {
+  msg: ChatMsg;
+  isLastAssistant: boolean;
+  busy: boolean;
+  onRegenerate?: (id: string) => void;
+  onBranch?: (id: string) => void;
+  onRate?: (id: string, v: 'up' | 'down') => void;
+  speaking: boolean;
+  onSpeak: (id: string, text: string) => void;
+  muted: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const isAsst = msg.role === 'assistant';
+  const btn = `p-1 rounded-md transition-colors hover:bg-black/10 dark:hover:bg-white/10 ${muted}`;
+
+  const copy = () => {
+    void navigator.clipboard
+      .writeText(msg.content)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      })
+      .catch((e: unknown) => console.error('[ai-chat] 复制失败:', e));
+  };
+
+  return (
+    <div className="flex items-center gap-0.5 mt-1.5 -mb-0.5 opacity-45 hover:opacity-100 transition-opacity">
+      <button type="button" className={btn} title="复制这条消息" onClick={copy}>
+        {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+      </button>
+
+      {onBranch && (
+        <button
+          type="button"
+          className={btn}
+          title="从这里分支出一条新会话（原会话不变）"
+          onClick={() => onBranch(msg.id)}
+        >
+          <GitBranch size={13} />
+        </button>
+      )}
+
+      {isAsst && onRegenerate && (
+        <button
+          type="button"
+          className={`${btn} ${isLastAssistant && !busy ? '' : 'opacity-35 cursor-not-allowed'}`}
+          title={
+            isLastAssistant
+              ? '重新生成这条回复'
+              : '只有最后一条回复能重新生成；中间轮次请用「分支」'
+          }
+          onClick={() => {
+            if (!isLastAssistant || busy) {
+              console.warn('[ai-chat] 重新生成：仅支持最后一条回复且不在生成中');
+              return;
+            }
+            onRegenerate(msg.id);
+          }}
+        >
+          <RefreshCw size={13} />
+        </button>
+      )}
+
+      {isAsst && onRate && (
+        <>
+          <button
+            type="button"
+            className={`${btn} ${msg.feedback === 'up' ? 'text-emerald-500' : ''}`}
+            title={msg.feedback === 'up' ? '取消点赞' : '这条回复有帮助'}
+            onClick={() => onRate(msg.id, 'up')}
+          >
+            <ThumbsUp size={13} />
+          </button>
+          <button
+            type="button"
+            className={`${btn} ${msg.feedback === 'down' ? 'text-rose-500' : ''}`}
+            title={msg.feedback === 'down' ? '取消点踩' : '这条回复不好'}
+            onClick={() => onRate(msg.id, 'down')}
+          >
+            <ThumbsDown size={13} />
+          </button>
+        </>
+      )}
+
+      {isAsst && msg.content && (
+        <button
+          type="button"
+          className={`${btn} ${speaking ? 'text-sky-500' : ''}`}
+          title={speaking ? '停止朗读' : '朗读这条回复'}
+          onClick={() => onSpeak(msg.id, msg.content)}
+        >
+          {speaking ? <VolumeX size={13} /> : <Volume2 size={13} />}
+        </button>
+      )}
+    </div>
+  );
+});
 
 /** 渲染用户头像：emoji 单字符居中；data:image/* 走 object-cover；其他用项目符号 */
 function UserAvatarView({ value, size = 32 }: { value: string; size?: number }) {
@@ -105,6 +238,13 @@ export interface AiChatConversationProps {
   /** 是否允许联网检索（只影响 web_search；其余工具始终可用）。 */
   webSearch?: boolean;
   onToggleWebSearch?: (on: boolean) => void;
+  /**
+   * 消息气泡底部的操作（复制 / 分支 / 重新生成 / 点赞 / 点踩 / 朗读）。
+   * 三个回调都不传时整行不渲染 —— 胶囊、工作台等入口可以只要"看"不要"操作"。
+   */
+  onRegenerate?: (msgId: string) => void;
+  onBranch?: (msgId: string) => void;
+  onRate?: (msgId: string, value: 'up' | 'down') => void;
 }
 
 export const AiChatConversation = memo(function AiChatConversation({
@@ -132,6 +272,9 @@ export const AiChatConversation = memo(function AiChatConversation({
   onEffortChange,
   webSearch = true,
   onToggleWebSearch,
+  onRegenerate,
+  onBranch,
+  onRate,
 }: AiChatConversationProps) {
   const [input, setInput] = useState('');
   // 待发送附件（图片 / 文本 / 其它文件），仅在点击发送前暂存，发送后清空。
@@ -145,6 +288,51 @@ export const AiChatConversation = memo(function AiChatConversation({
   const [truncateWarn, setTruncateWarn] = useState<{ kept: number } | null>(null);
   // 执行轨迹面板：点开某条 assistant 消息的 agent 事件日志（工具调用/压缩/中断修复）
   const [traceMsg, setTraceMsg] = useState<ChatMsg | null>(null);
+
+  // ---- 朗读（Web Speech API）----
+  // 用浏览器自带引擎：不花 token、不依赖后端，WebView2 走的是系统语音。
+  // 不支持时只告警一次并让按钮点了没反应 —— 明确留痕，不静默假装在念。
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      console.warn('[ai-chat] 当前运行环境不支持 speechSynthesis，朗读按钮不可用');
+      return;
+    }
+    const synth = window.speechSynthesis;
+    return () => {
+      // 卸载时必须停：否则关掉模块还在后台念
+      synth.cancel();
+    };
+  }, []);
+
+  const speak = (id: string, text: string) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      console.warn('[ai-chat] 朗读不可用：speechSynthesis 缺失');
+      return;
+    }
+    const synth = window.speechSynthesis;
+    if (speakingId === id) {
+      synth.cancel();
+      setSpeakingId(null);
+      return;
+    }
+    synth.cancel();
+    const plain = toSpeechText(text);
+    if (!plain) {
+      console.warn('[ai-chat] 朗读跳过：这条消息没有可朗读的文字（纯代码/图片）');
+      return;
+    }
+    const u = new SpeechSynthesisUtterance(plain);
+    // 中文内容用 zh-CN 发音；系统没有中文语音时浏览器会回落到默认语音（不报错）
+    u.lang = /[\u4e00-\u9fa5]/.test(plain) ? 'zh-CN' : 'en-US';
+    u.onend = () => setSpeakingId(null);
+    u.onerror = (e) => {
+      console.warn('[ai-chat] 朗读中断:', e.error);
+      setSpeakingId(null);
+    };
+    setSpeakingId(id);
+    synth.speak(u);
+  };
   const messages = activeConv?.messages ?? [];
   const companion = useCompanionStore((s) => s.companion);
   const userAvatar = useUserAvatar();
@@ -509,7 +697,7 @@ export const AiChatConversation = memo(function AiChatConversation({
                     </div>
                   )}
                 </div>
-                <div className={`min-w-0 max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed break-words ${bubbleCls(m.role)}`}>
+                <div className={`group min-w-0 max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed break-words ${bubbleCls(m.role)}`}>
                   {m.role === 'assistant' && activeConv?.mode === 'group' && m.speakerId && (() => {
                     const speaker = useCompanionStore.getState().collection.companions.find((c) => c.id === m.speakerId);
                     return speaker ? (
@@ -681,6 +869,21 @@ export const AiChatConversation = memo(function AiChatConversation({
                     <div className="md-message" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }} />
                   ) : (
                     busy && m.role === 'assistant' ? <span className="inline-flex gap-1 text-neutral-400"><span className="animate-pulse">●</span><span className="animate-pulse delay-150">●</span><span className="animate-pulse delay-300">●</span></span> : ''
+                  )}
+                  {/* 操作行：只要有一个回调就渲染（胶囊等只读入口不传 = 不渲染）。
+                      错误气泡不渲染：复制一条报错没有意义，重新生成也没有原文可依赖。 */}
+                  {(onRegenerate || onBranch || onRate) && !m.error && !!m.content && !m.toolNote && (
+                    <MessageActions
+                      msg={m}
+                      isLastAssistant={m.role === 'assistant' && vi.index === messages.length - 1}
+                      busy={busy}
+                      onRegenerate={onRegenerate}
+                      onBranch={onBranch}
+                      onRate={onRate}
+                      speaking={speakingId === m.id}
+                      onSpeak={speak}
+                      muted={mutedCls}
+                    />
                   )}
                 </div>
               </div>

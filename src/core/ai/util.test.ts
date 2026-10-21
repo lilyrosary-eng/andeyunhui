@@ -7,7 +7,7 @@
  * 这条链路的错误代价是数据丢失，所以把口径钉住。
  */
 import { describe, it, expect } from 'vitest';
-import { makeConv, sanitizeConv, mergeConversations } from './util';
+import { makeConv, sanitizeConv, mergeConversations, resolveTitle, isPlaceholderTitle } from './util';
 
 /** 造一个指定长度的假 data URL（字符数 = prefix + n）。 */
 const fakeMedia = (mime: string, n: number) => `data:${mime};base64,` + 'A'.repeat(n);
@@ -144,5 +144,47 @@ describe('mergeConversations', () => {
   it('任一侧为空时原样返回另一侧', () => {
     expect(mergeConversations([], [conv('a', 1)]).map((c) => c.id)).toEqual(['a']);
     expect(mergeConversations([conv('a', 1)], []).map((c) => c.id)).toEqual(['a']);
+  });
+});
+
+/**
+ * 会话命名：**只在占位标题上生成一次**。
+ *
+ * 血案（2026-10-21 用户实测）：旧实现是
+ * `const title = c.title || c.messages.length === 0 ? genTitle(content) : c.title;`
+ * `||` 优先级高于 `?:`，整个 `c.title || ...` 被当成条件 ⇒ 只要已有标题就每轮重新生成，
+ * 表现为「每轮对话会话名都变一次」。
+ */
+describe('resolveTitle（会话命名只做一次）', () => {
+  it('占位标题「新对话」→ 用首轮输入生成', () => {
+    expect(resolveTitle({ title: '新对话' }, '帮我写一个排序算法')).toBe('帮我写一个排序算法');
+  });
+
+  it('空标题 → 生成', () => {
+    expect(resolveTitle({ title: '   ' }, '你好')).toBe('你好');
+  });
+
+  it('已有自定义标题 → 第二次、第三次都原样返回（这是那个 bug 的回归卡口）', () => {
+    const conv = { title: '排序算法讨论' };
+    expect(resolveTitle(conv, '那我换个问法')).toBe('排序算法讨论');
+    expect(resolveTitle(conv, '再问一次')).toBe('排序算法讨论');
+  });
+
+  it('用户手动改名后上锁 → 即使标题恰好是占位词也保留用户选择', () => {
+    expect(resolveTitle({ title: '新对话', titleLocked: true }, '随便说点')).toBe('新对话');
+  });
+
+  it('标题上限 18 字并加省略号（沿用 genTitle 口径）', () => {
+    const long = '这是一段特别特别长的用户输入用来验证标题截断行为';
+    const t = resolveTitle({ title: '新对话' }, long);
+    expect(t.length).toBe(19);
+    expect(t.endsWith('…')).toBe(true);
+  });
+
+  it('isPlaceholderTitle：只有空与内置占位词为真', () => {
+    expect(isPlaceholderTitle('')).toBe(true);
+    expect(isPlaceholderTitle('新对话')).toBe(true);
+    expect(isPlaceholderTitle('群聊')).toBe(true);
+    expect(isPlaceholderTitle('新对话记录')).toBe(false);
   });
 });

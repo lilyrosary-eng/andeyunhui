@@ -10,7 +10,7 @@ import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
-import { uid, persistConversations, loadConversations, genTitle, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
+import { uid, persistConversations, loadConversations, resolveTitle, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
 import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { retrieveChatContext, ingestChatTurn, autoSyncCompanion } from '@/core/stores/semanticMemory';
 import { maybeSummarizeConversation } from '@/core/ai/l4SummaryLoop';
@@ -137,6 +137,14 @@ export interface SendOptions {
   personaPrompt?: string;
   systemPrompt?: string;
   excludeGlobalPersona?: boolean;
+  /**
+   * 覆盖本轮发给模型的**历史**（不含本轮 user 消息，send 会自己追加最后一条）。
+   *
+   * 为什么需要：`stateRef` 由 useEffect 同步，`setConversations` 之后**同一 tick 读到的
+   * 还是旧值**。重新生成必须保证"历史里没有那条被丢弃的回复"，否则模型会看到自己上一版
+   * 答案并顺着它写 —— 那不是重新生成，是续写。
+   */
+  historyOverride?: ChatMsg[];
 }
 
 export interface UseAiChatResult {
@@ -173,6 +181,15 @@ export interface UseAiChatResult {
   /** 发送一条消息。images 为可选的多模态图片（data URL），后端 ai_vision_ocr 生成描述后注入 system。
    *  sendOpts 可覆盖本轮的人设/system 注入（见 SendOptions）。 */
   send: (text: string, images?: string[], attachments?: SendAttachment[], sendOpts?: SendOptions) => Promise<void>;
+  /**
+   * 重新生成**最后一条**助手回复：丢弃它，沿用同一份历史重发。
+   * 中间轮次不开放（那需要连带丢弃后续轮次，属于「分支」的语义）。
+   */
+  regenerate: (msgId: string) => Promise<void>;
+  /** 从某条消息分叉出新会话（历史复制到该条为止，原会话不动）。返回新会话 id。 */
+  branchFrom: (msgId: string) => string | null;
+  /** 点赞/点踩（同值再点一次 = 取消）。 */
+  rateMessage: (msgId: string, value: 'up' | 'down') => void;
   /**
    * 停止本轮生成。agent 模式走 `ai_agent_cancel`，纯对话走 `ai_chat_cancel`。
    * 已收到的部分文本会保留，并补一句「（已停止）」。
@@ -413,7 +430,10 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   }, []);
 
   const renameConversation = useCallback((id: string, title: string) => {
-    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title: title.trim() || c.title } : c)));
+    setConversations((prev) => prev.map((c) => (
+      // 改名即上锁：之后任何自动命名逻辑都不许覆盖用户起的名字
+      c.id === id ? { ...c, title: title.trim() || c.title, titleLocked: true } : c
+    )));
   }, []);
 
   /** 改**当前会话**的思考档位覆盖（对话页那个档位选择器）。空串 = 清除覆盖、跟随配置。 */
@@ -471,8 +491,10 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setConversations((prev) => prev.map((c) => {
       if (c.id !== cid) return c;
       const messages = [...c.messages, userMsg, asstMsg];
-      // 首条用户消息生成会话标题
-      const title = c.title || c.messages.length === 0 ? genTitle(content) : c.title;
+      // 会话标题：**只在占位标题（空 / 「新对话」）上生成一次**，之后永不改动。
+      // 旧实现有运算符优先级 bug（详见 util.ts 的 resolveTitle 注释），会每轮重命名；
+      // 判定逻辑已抽成纯函数并有单测钉住，别再写回内联表达式。
+      const title = resolveTitle(c, content);
       return { ...c, messages, title, updatedAt: Date.now() };
     }));
     asstRef.current = asstId;
@@ -480,7 +502,10 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setBusy(true);
     void isFirst;
 
-    const history = stateRef.current.conversations.find((c) => c.id === cid)?.messages ?? [];
+    // historyOverride 优先（重新生成时用），其余场景照旧读最新会话状态
+    const history = sendOpts?.historyOverride
+      ?? stateRef.current.conversations.find((c) => c.id === cid)?.messages
+      ?? [];
 
     // 永久对话记忆：发送前检索 L3（namespace='ai-chat'），命中则注入 system 的语义记忆段。
     // 失败/未开启/无嵌入端点都静默降级，不影响正常对话。
@@ -787,7 +812,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setConversations((prev) => prev.map((c) => {
       if (c.id !== cid) return c;
       const messages = [...c.messages, userMsg];
-      const title = c.title || genTitle(content);
+      const title = resolveTitle(c, content);
       return { ...c, messages, title, updatedAt: Date.now() };
     }));
 
@@ -826,6 +851,109 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     }
   };
 
+  /**
+   * 重新生成某条助手回复。
+   *
+   * 只允许"最后一条"：中间某轮重生成要连带丢弃它之后的所有轮次，
+   * 那是用户该自己决定的事（真要这么做，用「分支」）。
+   */
+  const regenerate = useCallback(
+    async (msgId: string) => {
+      const cid = activeIdRef.current;
+      if (!cid) return;
+      if (busyRef.current) {
+        console.warn('[ai-chat] 正在生成中，忽略重新生成请求');
+        return;
+      }
+      const conv = stateRef.current.conversations.find((c) => c.id === cid);
+      if (!conv) return;
+      const idx = conv.messages.findIndex((m) => m.id === msgId);
+      if (idx < 0) {
+        console.warn('[ai-chat] 重新生成：找不到消息', msgId);
+        return;
+      }
+      const target = conv.messages[idx];
+      if (target.role !== 'assistant') {
+        console.warn('[ai-chat] 重新生成只对助手回复有效，当前是:', target.role);
+        return;
+      }
+      if (idx !== conv.messages.length - 1) {
+        console.warn('[ai-chat] 重新生成只支持最后一条回复；中间轮次请用「分支」');
+        return;
+      }
+      let u = idx - 1;
+      while (u >= 0 && conv.messages[u].role !== 'user') u -= 1;
+      if (u < 0) {
+        console.warn('[ai-chat] 重新生成：这条回复之前没有用户消息');
+        return;
+      }
+      const userMsg = conv.messages[u];
+      if (userMsg.attachments?.length) {
+        // 附件原文没落盘（只存名字/大小），重发只能重发文字与图片 —— 说清楚，别假装完整
+        console.warn(
+          '[ai-chat] 重新生成：原消息含附件，附件内容未保存，本轮只重发文字与图片:',
+          userMsg.attachments.map((a) => a.name),
+        );
+      }
+      // 截断到 user 消息之前；send 会把 user + assistant 重新追加
+      const trimmed = conv.messages.slice(0, u);
+      patchConv(cid, (c) => ({ ...c, messages: trimmed }));
+      await send(userMsg.content, userMsg.images, undefined, { historyOverride: trimmed });
+    },
+    [patchConv, send],
+  );
+
+  /** 从某条消息分叉一条新会话（历史复制到该条为止；原会话完全不动）。 */
+  const branchFrom = useCallback(
+    (msgId: string): string | null => {
+      const cid = activeIdRef.current;
+      if (!cid) return null;
+      const conv = stateRef.current.conversations.find((c) => c.id === cid);
+      if (!conv) return null;
+      const idx = conv.messages.findIndex((m) => m.id === msgId);
+      if (idx < 0) {
+        console.warn('[ai-chat] 分支：找不到消息', msgId);
+        return null;
+      }
+      // 从 user 消息分叉时把紧随其后的助手回复也带上，否则新会话里只有问没有答
+      const after = conv.messages[idx + 1];
+      const end = conv.messages[idx].role === 'user' && after?.role === 'assistant' ? idx + 1 : idx;
+      const id = uid();
+      const branch: Conversation = {
+        ...conv,
+        id,
+        title: `${conv.title} · 分支`,
+        // 分支标题由程序命名 ⇒ 立刻上锁，别被首轮自动命名覆盖
+        titleLocked: true,
+        // 消息重新发 id：两条会话共享同一个 message id 会让「按 id 定位」的逻辑串台
+        messages: conv.messages.slice(0, end + 1).map((m) => ({ ...m, id: uid() })),
+        updatedAt: Date.now(),
+        groupCost: undefined,
+      };
+      setConversations((prev) => [branch, ...prev]);
+      activeIdRef.current = id;
+      setActiveId(id);
+      console.info('[ai-chat] 已从消息分叉会话:', id, `（带 ${branch.messages.length} 条历史）`);
+      return id;
+    },
+    [],
+  );
+
+  /** 给某条回复点赞/点踩（同值再点一次 = 取消）。 */
+  const rateMessage = useCallback(
+    (msgId: string, value: 'up' | 'down') => {
+      const cid = activeIdRef.current;
+      if (!cid) return;
+      patchConv(cid, (c) => ({
+        ...c,
+        messages: c.messages.map((m) => (
+          m.id === msgId ? { ...m, feedback: m.feedback === value ? undefined : value } : m
+        )),
+      }));
+    },
+    [patchConv],
+  );
+
   const activeConv = conversations.find((c) => c.id === activeId) ?? null;
   const activeConvEffort = activeConv?.effort?.trim() ?? '';
 
@@ -850,6 +978,12 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     setEffort,
     clearAll,
     send,
+    /** 重新生成最后一条助手回复（丢弃它、沿用同一份历史重发）。 */
+    regenerate,
+    /** 从某条消息分叉出新会话（原会话不动）。 */
+    branchFrom,
+    /** 给某条回复点赞/点踩（同值再点 = 取消）。 */
+    rateMessage,
     /** 停止本轮生成（点「停止」时调用）。已收到部分保留，并补「（已停止）」标记。 */
     abort,
     groupSend,
