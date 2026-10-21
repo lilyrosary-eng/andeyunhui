@@ -64,13 +64,39 @@ const MessageActions = memo(function MessageActions({
   const btn = `p-1 rounded-md transition-colors hover:bg-black/10 dark:hover:bg-white/10 ${muted}`;
 
   const copy = () => {
+    const done = () => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    };
+    // 兜底：Tauri 打包版里 navigator.clipboard 需要安全上下文，
+    // 某些 webview 配置下会直接 reject（表现为"点了没反应"）。此时退到 execCommand。
+    const legacy = () => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = msg.content;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (ok) done();
+        else console.error('[ai-chat] 复制失败：剪贴板接口与 execCommand 均不可用');
+      } catch (e) {
+        console.error('[ai-chat] 复制失败（兜底路径）:', e);
+      }
+    };
+    if (!navigator.clipboard?.writeText) {
+      legacy();
+      return;
+    }
     void navigator.clipboard
       .writeText(msg.content)
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
-      })
-      .catch((e: unknown) => console.error('[ai-chat] 复制失败:', e));
+      .then(done)
+      .catch((e: unknown) => {
+        console.warn('[ai-chat] navigator.clipboard 不可用，回落到 execCommand:', e);
+        legacy();
+      });
   };
 
   return (
