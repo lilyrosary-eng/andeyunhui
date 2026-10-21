@@ -10,7 +10,7 @@ import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
-import { uid, persistConversations, loadConversations, resolveTitle, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
+import { uid, persistConversations, loadConversations, resolveTitle, freezeVersions, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
 import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { retrieveChatContext, ingestChatTurn, autoSyncCompanion } from '@/core/stores/semanticMemory';
 import { maybeSummarizeConversation } from '@/core/ai/l4SummaryLoop';
@@ -145,6 +145,10 @@ export interface SendOptions {
    * 答案并顺着它写 —— 那不是重新生成，是续写。
    */
   historyOverride?: ChatMsg[];
+  /** 不追加用户消息（历史里已经包含它）。重新生成时用。 */
+  skipUserAppend?: boolean;
+  /** 复用一条已存在的助手消息来承接流式输出（重新生成时用，避免多出一条回复）。 */
+  reuseAssistantId?: string;
 }
 
 export interface UseAiChatResult {
@@ -186,8 +190,8 @@ export interface UseAiChatResult {
    * 中间轮次不开放（那需要连带丢弃后续轮次，属于「分支」的语义）。
    */
   regenerate: (msgId: string) => Promise<void>;
-  /** 从某条消息分叉出新会话（历史复制到该条为止，原会话不动）。返回新会话 id。 */
-  branchFrom: (msgId: string) => string | null;
+  /** 切到上/下一版回复（重新生成留下的多版本；只换文本，不发请求）。 */
+  switchVersion: (msgId: string, dir: -1 | 1) => void;
   /** 点赞/点踩（同值再点一次 = 取消）。 */
   rateMessage: (msgId: string, value: 'up' | 'down') => void;
   /**
@@ -482,7 +486,11 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       id: uid(), role: 'user', content: content || '（附件）', images,
       attachments: atxMeta.length ? atxMeta : undefined,
     };
-    const asstId = uid();
+    // 重新生成时复用已有助手消息（见 SendOptions.reuseAssistantId）：
+    // 不新建消息、也不追加 user（历史里已有），否则同一轮会出现两条回复，
+    // 下一轮请求会把两版答案一起喂给模型。
+    const reuseId = sendOpts?.reuseAssistantId;
+    const asstId = reuseId ?? uid();
     // traceId = 本次请求 id，同时是 agent 事件日志的落盘会话 id（ai_sessions/<id>.json）；
     // 消息上带此 id 后，「执行轨迹」面板才能关联到后端事件日志。
     const asstMsg: ChatMsg = { id: asstId, role: 'assistant', content: '', reasoning: '', traceId: reqId };
@@ -490,7 +498,11 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     let isFirst = true;
     setConversations((prev) => prev.map((c) => {
       if (c.id !== cid) return c;
-      const messages = [...c.messages, userMsg, asstMsg];
+      const messages = reuseId
+        ? c.messages.map((mm) => (mm.id === reuseId
+          ? { ...mm, content: '', reasoning: '', traceId: reqId, error: undefined, agentSteps: undefined }
+          : mm))
+        : [...c.messages, ...(sendOpts?.skipUserAppend ? [] : [userMsg]), asstMsg];
       // 会话标题：**只在占位标题（空 / 「新对话」）上生成一次**，之后永不改动。
       // 旧实现有运算符优先级 bug（详见 util.ts 的 resolveTitle 注释），会每轮重命名；
       // 判定逻辑已抽成纯函数并有单测钉住，别再写回内联表达式。
@@ -566,8 +578,9 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       // 请求前硬防御：真实 token 估算尾部截断 + 单条硬切（双保险，坐实重复拼接真因）
       // 最后一条 user 内容若带图/带附件，把 OCR 描述与文件内容拼接在原文后（本地显示保持原图/原文不变）。
       messages: safeMessages(
-        history
-          .concat([shouldInject ? { ...userMsg, content: content + imageNote + attachNote } : userMsg])
+        (sendOpts?.skipUserAppend
+          ? history
+          : history.concat([shouldInject ? { ...userMsg, content: content + imageNote + attachNote } : userMsg]))
           .map((m) => ({ role: m.role, content: m.content })),
       ),
       stream: true,
@@ -852,10 +865,15 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   };
 
   /**
-   * 重新生成某条助手回复。
+   * 重新生成**最后一条**助手回复，旧版本保留下来（DeepSeek 那种 1/2 分页）。
    *
-   * 只允许"最后一条"：中间某轮重生成要连带丢弃它之后的所有轮次，
-   * 那是用户该自己决定的事（真要这么做，用「分支」）。
+   * 三个关键决定：
+   *   · **复用同一条助手消息**（`reuseAssistantId`）而不是再追加一条：
+   *     否则历史里会有两条回复，模型下一轮会同时看到自己两版答案。
+   *   · 旧文本先冻结进 `versions`，新文本流式写进 `content`；
+   *     切版本只换文本、不重新请求（只有重新生成才花 token）。
+   *   · 只允许最后一条：中间某轮重生成要连带丢弃它之后的所有轮次，
+   *     那是另一个决定，不能替用户做。
    */
   const regenerate = useCallback(
     async (msgId: string) => {
@@ -878,7 +896,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         return;
       }
       if (idx !== conv.messages.length - 1) {
-        console.warn('[ai-chat] 重新生成只支持最后一条回复；中间轮次请用「分支」');
+        console.warn('[ai-chat] 重新生成只支持最后一条回复（中间轮次会连带丢弃后续对话）');
         return;
       }
       let u = idx - 1;
@@ -889,57 +907,77 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       }
       const userMsg = conv.messages[u];
       if (userMsg.attachments?.length) {
-        // 附件原文没落盘（只存名字/大小），重发只能重发文字与图片 —— 说清楚，别假装完整
+        // 附件原文没有落盘（只存了名字/大小），只能重发文字与图片 —— 说清楚，别假装完整
         console.warn(
           '[ai-chat] 重新生成：原消息含附件，附件内容未保存，本轮只重发文字与图片:',
           userMsg.attachments.map((a) => a.name),
         );
       }
-      // 截断到 user 消息之前；send 会把 user + assistant 重新追加
-      const trimmed = conv.messages.slice(0, u);
-      patchConv(cid, (c) => ({ ...c, messages: trimmed }));
-      await send(userMsg.content, userMsg.images, undefined, { historyOverride: trimmed });
+
+      // 冻结当前版本 + 为即将流式写入的新版本占位
+      const versions = freezeVersions(target);
+      versions.push('');
+      patchConv(cid, (c) => ({
+        ...c,
+        messages: c.messages.map((mm) => (mm.id === msgId
+          ? {
+            ...mm,
+            content: '',
+            reasoning: '',
+            error: undefined,
+            agentSteps: undefined,
+            versions,
+            versionIndex: versions.length - 1,
+          }
+          : mm)),
+      }));
+
+      // 用「这条助手消息之前的历史」重发：历史里已含本轮 user 消息 ⇒ skipUserAppend
+      await send(userMsg.content, userMsg.images, undefined, {
+        historyOverride: conv.messages.slice(0, idx),
+        skipUserAppend: true,
+        reuseAssistantId: msgId,
+      });
     },
     [patchConv, send],
   );
 
-  /** 从某条消息分叉一条新会话（历史复制到该条为止；原会话完全不动）。 */
-  const branchFrom = useCallback(
-    (msgId: string): string | null => {
+  /**
+   * 切到上/下一版（dir = -1 / +1）。只换文本，不发请求。
+   *
+   * 生成中不允许切：那时 `content` 还在长，切走会把半截文本固化成一个版本。
+   */
+  const switchVersion = useCallback(
+    (msgId: string, dir: -1 | 1) => {
       const cid = activeIdRef.current;
-      if (!cid) return null;
-      const conv = stateRef.current.conversations.find((c) => c.id === cid);
-      if (!conv) return null;
-      const idx = conv.messages.findIndex((m) => m.id === msgId);
-      if (idx < 0) {
-        console.warn('[ai-chat] 分支：找不到消息', msgId);
-        return null;
+      if (!cid) return;
+      if (busyRef.current) {
+        console.warn('[ai-chat] 生成中不能切换版本');
+        return;
       }
-      // 从 user 消息分叉时把紧随其后的助手回复也带上，否则新会话里只有问没有答
-      const after = conv.messages[idx + 1];
-      const end = conv.messages[idx].role === 'user' && after?.role === 'assistant' ? idx + 1 : idx;
-      const id = uid();
-      const branch: Conversation = {
-        ...conv,
-        id,
-        title: `${conv.title} · 分支`,
-        // 分支标题由程序命名 ⇒ 立刻上锁，别被首轮自动命名覆盖
-        titleLocked: true,
-        // 消息重新发 id：两条会话共享同一个 message id 会让「按 id 定位」的逻辑串台
-        messages: conv.messages.slice(0, end + 1).map((m) => ({ ...m, id: uid() })),
-        updatedAt: Date.now(),
-        groupCost: undefined,
-      };
-      setConversations((prev) => [branch, ...prev]);
-      activeIdRef.current = id;
-      setActiveId(id);
-      console.info('[ai-chat] 已从消息分叉会话:', id, `（带 ${branch.messages.length} 条历史）`);
-      return id;
+      const conv = stateRef.current.conversations.find((c) => c.id === cid);
+      const msg = conv?.messages.find((m) => m.id === msgId);
+      if (!conv || !msg) {
+        console.warn('[ai-chat] 切换版本：找不到消息', msgId);
+        return;
+      }
+      if ((msg.versions?.length ?? 0) < 2) return;
+      const vs = freezeVersions(msg);
+      const cur = Math.min(Math.max(msg.versionIndex ?? 0, 0), vs.length - 1);
+      const next = (cur + dir + vs.length) % vs.length;
+      if (next === cur) return;
+      patchConv(cid, (c) => ({
+        ...c,
+        messages: c.messages.map((mm) => (mm.id === msgId
+          ? { ...mm, versions: vs, versionIndex: next, content: vs[next] }
+          : mm)),
+      }));
+      console.info(`[ai-chat] 切换回复版本：${next + 1}/${vs.length}`);
     },
-    [],
+    [patchConv],
   );
 
-  /** 给某条回复点赞/点踩（同值再点一次 = 取消）。 */
+  /** 给某条回复点赞/点踩（同值再点一次 = 取消）。反馈随会话持久化。 */
   const rateMessage = useCallback(
     (msgId: string, value: 'up' | 'down') => {
       const cid = activeIdRef.current;
@@ -980,8 +1018,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     send,
     /** 重新生成最后一条助手回复（丢弃它、沿用同一份历史重发）。 */
     regenerate,
-    /** 从某条消息分叉出新会话（原会话不动）。 */
-    branchFrom,
+    /** 切到上/下一版回复（重新生成留下的多版本）。 */
+    switchVersion,
     /** 给某条回复点赞/点踩（同值再点 = 取消）。 */
     rateMessage,
     /** 停止本轮生成（点「停止」时调用）。已收到部分保留，并补「（已停止）」标记。 */

@@ -2,7 +2,7 @@
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
 import { memo, useEffect, useState, useRef, useLayoutEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Send, Sparkles, Brain, ChevronDown, ChevronRight, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square, Copy, Check, GitBranch, RefreshCw, ThumbsUp, ThumbsDown, Volume2, VolumeX } from 'lucide-react';
+import { Send, Sparkles, Brain, ChevronDown, ChevronRight, ChevronLeft, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown, Volume2, VolumeX } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import { InlineSelect } from '@/components/ui/inline-select';
 import type { Conversation, SendAttachment, AttachmentKind, ChatMsg } from '@/components/capsule/types';
@@ -33,7 +33,7 @@ function toSpeechText(md: string): string {
 }
 
 /**
- * 消息底部操作行（复制 / 分支 / 重新生成 / 点赞 / 点踩 / 朗读）。
+ * 消息底部操作行（复制 / 重新生成 / 版本分页 / 点赞 / 点踩 / 朗读）。
  *
  * 为什么常显而不是 hover 才出现：这些是"看完想动手"的入口，藏起来等于没有；
  * 用低透明度常显、hover 提升到全不透明，兼顾可发现性与安静。
@@ -43,7 +43,7 @@ const MessageActions = memo(function MessageActions({
   isLastAssistant,
   busy,
   onRegenerate,
-  onBranch,
+  onSwitchVersion,
   onRate,
   speaking,
   onSpeak,
@@ -53,7 +53,7 @@ const MessageActions = memo(function MessageActions({
   isLastAssistant: boolean;
   busy: boolean;
   onRegenerate?: (id: string) => void;
-  onBranch?: (id: string) => void;
+  onSwitchVersion?: (id: string, dir: -1 | 1) => void;
   onRate?: (id: string, v: 'up' | 'down') => void;
   speaking: boolean;
   onSpeak: (id: string, text: string) => void;
@@ -105,16 +105,48 @@ const MessageActions = memo(function MessageActions({
         {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
       </button>
 
-      {onBranch && (
-        <button
-          type="button"
-          className={btn}
-          title="从这里分支出一条新会话（原会话不变）"
-          onClick={() => onBranch(msg.id)}
-        >
-          <GitBranch size={13} />
-        </button>
-      )}
+      {/* 版本分页：重新生成过后才出现（DeepSeek 那种 1/2）。
+          生成中禁用：那时 content 还在长，切走会把半截文本固化成一个版本。 */}
+      {isAsst && onSwitchVersion && (msg.versions?.length ?? 0) > 1 && (() => {
+        const count = msg.versions!.length;
+        const cur = Math.min(Math.max(msg.versionIndex ?? count - 1, 0), count - 1);
+        const navBtn = `${btn} ${busy ? 'opacity-35 cursor-not-allowed' : ''}`;
+        return (
+          <span className="flex items-center gap-0.5 mx-0.5 select-none">
+            <button
+              type="button"
+              className={navBtn}
+              title="上一版"
+              onClick={() => {
+                if (busy) {
+                  console.warn('[ai-chat] 生成中不能切换版本');
+                  return;
+                }
+                onSwitchVersion(msg.id, -1);
+              }}
+            >
+              <ChevronLeft size={13} />
+            </button>
+            <span className="text-[11px] tabular-nums opacity-80" title="当前第几版 / 共几版">
+              {cur + 1}/{count}
+            </span>
+            <button
+              type="button"
+              className={navBtn}
+              title="下一版"
+              onClick={() => {
+                if (busy) {
+                  console.warn('[ai-chat] 生成中不能切换版本');
+                  return;
+                }
+                onSwitchVersion(msg.id, 1);
+              }}
+            >
+              <ChevronRight size={13} />
+            </button>
+          </span>
+        );
+      })()}
 
       {isAsst && onRegenerate && (
         <button
@@ -123,7 +155,7 @@ const MessageActions = memo(function MessageActions({
           title={
             isLastAssistant
               ? '重新生成这条回复'
-              : '只有最后一条回复能重新生成；中间轮次请用「分支」'
+              : '只有最后一条回复能重新生成'
           }
           onClick={() => {
             if (!isLastAssistant || busy) {
@@ -269,7 +301,8 @@ export interface AiChatConversationProps {
    * 三个回调都不传时整行不渲染 —— 胶囊、工作台等入口可以只要"看"不要"操作"。
    */
   onRegenerate?: (msgId: string) => void;
-  onBranch?: (msgId: string) => void;
+  /** 切换重新生成留下的多个版本（1/2 · 2/2）。 */
+  onSwitchVersion?: (msgId: string, dir: -1 | 1) => void;
   onRate?: (msgId: string, value: 'up' | 'down') => void;
 }
 
@@ -299,7 +332,7 @@ export const AiChatConversation = memo(function AiChatConversation({
   webSearch = true,
   onToggleWebSearch,
   onRegenerate,
-  onBranch,
+  onSwitchVersion,
   onRate,
 }: AiChatConversationProps) {
   const [input, setInput] = useState('');
@@ -898,13 +931,13 @@ export const AiChatConversation = memo(function AiChatConversation({
                   )}
                   {/* 操作行：只要有一个回调就渲染（胶囊等只读入口不传 = 不渲染）。
                       错误气泡不渲染：复制一条报错没有意义，重新生成也没有原文可依赖。 */}
-                  {(onRegenerate || onBranch || onRate) && !m.error && !!m.content && !m.toolNote && (
+                  {(onRegenerate || onSwitchVersion || onRate) && !m.error && !!m.content && !m.toolNote && (
                     <MessageActions
                       msg={m}
                       isLastAssistant={m.role === 'assistant' && vi.index === messages.length - 1}
                       busy={busy}
                       onRegenerate={onRegenerate}
-                      onBranch={onBranch}
+                      onSwitchVersion={onSwitchVersion}
                       onRate={onRate}
                       speaking={speakingId === m.id}
                       onSpeak={speak}

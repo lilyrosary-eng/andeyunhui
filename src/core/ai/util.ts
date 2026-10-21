@@ -1,5 +1,5 @@
 // AI 对话共用工具函数：id 生成、标题推断、会话工厂、localStorage 持久化。
-import type { Conversation } from '@/components/capsule/types';
+import type { ChatMsg, Conversation } from '@/components/capsule/types';
 import { storage } from '@/core/storage';
 
 export function uid(): string {
@@ -55,6 +55,20 @@ export function isPlaceholderTitle(title: string): boolean {
  * （用户实测"每轮对话都被改名"）。这种优先级 bug 写在 hook 里没人测得到，
  * 抽出来才能用单测钉住"第二次调用必须原样返回"。
  */
+/**
+ * 把"当前显示的文本"回填到它自己的版本槽位（重新生成的多版本）。
+ *
+ * 版本模型：`versions[i]` 是第 i 版的定稿文本，`content` 永远等于 `versions[versionIndex]`。
+ * 流式期间 `content` 是活的、`versions[最后一位]` 是空占位 —— 所以任何动版本的操作
+ * （切版本 / 再次重新生成）都必须先做这一步，否则会把空串固化、或把旧文本写错槽位。
+ */
+export function freezeVersions(m: Pick<ChatMsg, 'content' | 'versions' | 'versionIndex'>): string[] {
+  const vs = m.versions?.length ? m.versions.slice() : [m.content];
+  const vi = Math.min(Math.max(m.versionIndex ?? 0, 0), vs.length - 1);
+  vs[vi] = m.content;
+  return vs;
+}
+
 export function resolveTitle(
   conv: { title: string; titleLocked?: boolean },
   firstUserText: string,
@@ -96,6 +110,8 @@ export function makeGroupConv(participantIds: string[], groupName?: string): Con
 // 被持久化后无限回灌，导致群聊把巨 message 带进 history 触发上游 1048576 token 超限）。
 // 该上限与后端 truncate_messages_for_safety 的 PER_MSG_TOKEN_CAP(30k) 对齐。
 const MSG_CONTENT_MAX = 30_000;
+/** 单条回复最多保留的历史版本数（重新生成产生）。超出按最旧丢弃。 */
+const MAX_VERSIONS = 5;
 
 /** 单条媒体 data URL 的持久化上限（字符数；≈220KB 二进制）。超过的一律不进历史。 */
 const MEDIA_MAX_CHARS = 300_000;
@@ -198,10 +214,26 @@ export function sanitizeConv(
     ...c,
     updatedAt: c.updatedAt ?? Date.now(),
     messages: c.messages.map((m) => {
-      if (m && typeof m.content === 'string' && m.content.length > MSG_CONTENT_MAX) {
-        return { ...m, content: m.content.slice(0, MSG_CONTENT_MAX) + '…（内容过长已截断）' };
+      if (!m) return m;
+      let out = m;
+      if (typeof m.content === 'string' && m.content.length > MSG_CONTENT_MAX) {
+        out = { ...out, content: m.content.slice(0, MSG_CONTENT_MAX) + '…（内容过长已截断）' };
       }
-      return m;
+      // 多版本（重新生成）：只留最近 MAX_VERSIONS 版，且每版同样截断。
+      // 不截断的话 10 次重新生成 × 20KB 就是 200KB/条，配额很快见底。
+      if (out.versions?.length) {
+        const all = out.versions;
+        const dropped = Math.max(0, all.length - MAX_VERSIONS);
+        const kept = all.slice(dropped).map((v) => (
+          typeof v === 'string' && v.length > MSG_CONTENT_MAX
+            ? v.slice(0, MSG_CONTENT_MAX) + '…（内容过长已截断）'
+            : v
+        ));
+        const rawIdx = out.versionIndex ?? all.length - 1;
+        const idx = Math.min(Math.max(rawIdx - dropped, 0), kept.length - 1);
+        out = { ...out, versions: kept, versionIndex: idx };
+      }
+      return out;
     }),
   };
   const withSlimMedia = { ...trimmed, messages: trimmed.messages.map((m) => slimMessageMedia(m, budget)) };

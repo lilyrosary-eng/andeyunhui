@@ -35,7 +35,7 @@ export interface AiWorkViewProps {
   onToggleWebSearch?: (on: boolean) => void;
   /** 消息操作（与 AiChatConversation 同名 prop 一一对应，纯透传）。 */
   onRegenerate?: (id: string) => void;
-  onBranch?: (id: string) => void;
+  onSwitchVersion?: (id: string, dir: -1 | 1) => void;
   onRate?: (id: string, v: 'up' | 'down') => void;
   conversations: Conversation[];
   onSelectConv: (id: string) => void;
@@ -57,7 +57,7 @@ export const AiWorkView = memo(function AiWorkView({
   webSearch,
   onToggleWebSearch,
   onRegenerate,
-  onBranch,
+  onSwitchVersion,
   onRate,
   conversations,
   onSelectConv,
@@ -116,7 +116,7 @@ export const AiWorkView = memo(function AiWorkView({
           webSearch={webSearch}
           onToggleWebSearch={onToggleWebSearch}
           onRegenerate={onRegenerate}
-          onBranch={onBranch}
+          onSwitchVersion={onSwitchVersion}
           onRate={onRate}
           conversations={conversations}
           onSelectConv={onSelectConv}

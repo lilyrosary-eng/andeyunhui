@@ -7,7 +7,7 @@
  * 这条链路的错误代价是数据丢失，所以把口径钉住。
  */
 import { describe, it, expect } from 'vitest';
-import { makeConv, sanitizeConv, mergeConversations, resolveTitle, isPlaceholderTitle } from './util';
+import { makeConv, sanitizeConv, mergeConversations, resolveTitle, isPlaceholderTitle, freezeVersions } from './util';
 
 /** 造一个指定长度的假 data URL（字符数 = prefix + n）。 */
 const fakeMedia = (mime: string, n: number) => `data:${mime};base64,` + 'A'.repeat(n);
@@ -186,5 +186,44 @@ describe('resolveTitle（会话命名只做一次）', () => {
     expect(isPlaceholderTitle('新对话')).toBe(true);
     expect(isPlaceholderTitle('群聊')).toBe(true);
     expect(isPlaceholderTitle('新对话记录')).toBe(false);
+  });
+});
+
+/**
+ * 重新生成的多版本（1/2 分页）。
+ *
+ * 这套模型的要害是"content 永远等于 versions[versionIndex]"：
+ * 流式期间 content 是活的、versions 末位是空占位 —— 一旦回填写错槽位，
+ * 用户切回去就会看到空字符串或上一版的错位文本。
+ */
+describe('freezeVersions（多版本回填）', () => {
+  it('没重新生成过 → 只有当前这一版', () => {
+    expect(freezeVersions({ content: '只有一版' })).toEqual(['只有一版']);
+  });
+
+  it('流式刚结束（末位是空占位）→ 把 content 写进末位', () => {
+    expect(freezeVersions({ content: '第二版', versions: ['第一版', ''], versionIndex: 1 }))
+      .toEqual(['第一版', '第二版']);
+  });
+
+  it('当前显示的是旧版 → 回填自己那一格，不动别的版本', () => {
+    expect(freezeVersions({ content: '第一版', versions: ['第一版', '第二版'], versionIndex: 0 }))
+      .toEqual(['第一版', '第二版']);
+  });
+
+  it('index 越界时收敛到合法槽位，不抛错', () => {
+    expect(freezeVersions({ content: 'x', versions: ['a', 'b'], versionIndex: 99 })).toEqual(['a', 'x']);
+    expect(freezeVersions({ content: 'x', versions: ['a', 'b'], versionIndex: -3 })).toEqual(['x', 'b']);
+  });
+
+  it('持久化：多版本只留最近 5 版，versionIndex 跟着平移', () => {
+    const c = makeConv();
+    const versions = ['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'];
+    c.messages.push({ id: 'm1', role: 'assistant', content: 'v7', versions, versionIndex: 6 });
+    const out = sanitizeConv(c);
+    const m = out.messages[0];
+    expect(m.versions).toEqual(['v3', 'v4', 'v5', 'v6', 'v7']);
+    // 原来 index=6（最后一版）⇒ 丢掉 2 条后应为 4
+    expect(m.versionIndex).toBe(4);
   });
 });
