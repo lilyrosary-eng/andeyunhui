@@ -44,9 +44,12 @@ impl AiTool for GitTool {
         if action.is_empty() {
             return Err("git 缺少 action 参数（status/diff/stage/unstage/commit/log/current_branch/branch）".to_string());
         }
-        let repo = args.get("repo").and_then(|v| v.as_str()).map(|s| s.to_string())
-            .or_else(|| ctx.project_root.as_ref().map(|p| p.to_string_lossy().to_string()))
-            .ok_or_else(|| "git 需要 repo（仓库根路径），且未检测到项目根".to_string())?;
+        // 根目录回退链：显式 repo > 会话项目根 > 进程 cwd（否则对话页里 git 永远用不了）
+        let repo = match resolve_root(args.get("repo").and_then(|v| v.as_str()), ctx, "git") {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => return Err("git 需要 repo（仓库根路径），且当前环境无法确定任何目录".to_string()),
+        };
+        log::debug!("[ai-tools] git 使用仓库路径: {repo}");
         let path = args.get("path").and_then(|v| v.as_str()).map(|s| s.to_string());
         let message = args.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
         let staged = args.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);

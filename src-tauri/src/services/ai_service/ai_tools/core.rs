@@ -6,6 +6,36 @@
 #![allow(unused_imports)] //  glob 取父模块导入，按族切分后必有剩余，逐个删只会漏
 use super::*;
 
+/// 解析「这次操作从哪个目录开始」：显式 path > 会话项目根 > 进程 cwd。
+///
+/// ## 为什么要有 cwd 兜底（2026-10-21 实测）
+/// AI 对话页 / 浮岛对话没有 IDE 的「项目根」，于是 grep/glob 直接回
+/// 「未提供项目根目录」、git 回「未检测到项目根」—— 模型看不懂为什么，
+/// 只能换个工具一遍遍试（用户贴的轨迹里连续浪费了 3~4 轮）。
+/// 进程 cwd 就是应用启动目录（dev 下正是仓库），对「看代码/查状态」够用；
+/// 真不是仓库时，git 自己的报错比我们这条更准确。
+pub(crate) fn resolve_root(explicit: Option<&str>, ctx: &ToolContext, tool: &str) -> Option<PathBuf> {
+    if let Some(p) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    if let Some(root) = ctx.project_root.as_ref() {
+        return Some(root.clone());
+    }
+    match std::env::current_dir() {
+        Ok(d) => {
+            log::warn!(
+                "[ai-tools] {tool} 未拿到项目根（对话页/浮岛没有 IDE 的项目上下文），回退到进程 cwd: {}",
+                d.display()
+            );
+            Some(d)
+        }
+        Err(e) => {
+            log::error!("[ai-tools] {tool} 无法确定根目录：project_root 为空且 current_dir 失败（{e}）");
+            None
+        }
+    }
+}
+
 /// 工具执行时的上下文（前端/本轮请求相关），随每一次调用传入 execute。
 #[derive(Clone)]
 pub(crate) struct ToolContext {

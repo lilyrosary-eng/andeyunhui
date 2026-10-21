@@ -605,6 +605,72 @@ impl AiTool for FileTool {
     }
 }
 
+/// 把模型最常写错的几个 **Unix 习惯命令** 改写成 Windows cmd 等价物。
+///
+/// ## 为什么要有（2026-10-21 实测）
+/// 模型反复写 `pwd` / `ls` / `head` / `cat`，在 cmd /C 下每条都是一次
+/// 「不是内部或外部命令」，白费一轮往返（用户贴的轨迹里连续撞了三次）。
+/// 工具描述里写了「这里是 cmd 不是 bash」，但模型照样先按肌肉记忆写 ——
+/// **描述约束不了习惯，改写才管用**。
+///
+/// ## 边界（宁可不改，也不猜错）
+/// 只改**单条简单命令**：含管道 / 重定向 / `&&` / `;` / 变量展开的一律原样交给 shell，
+/// 因为那些组合的 Unix 到 cmd 语义不是一一对应，猜错等于把用户命令改成别的意思。
+/// 每次改写都打 info 日志，并在结果文本里显式写「环境适配：…」（所有兜底都要可见）。
+pub(crate) fn adapt_unix_command(cmd: &str) -> Option<(String, String)> {
+    let t = cmd.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if t.contains('|') || t.contains('&') || t.contains('>') || t.contains('<') || t.contains(';') || t.contains('$') {
+        return None;
+    }
+    let mut it = t.splitn(2, char::is_whitespace);
+    let prog = it.next()?.trim();
+    let rest = it.next().unwrap_or("").trim();
+    match prog {
+        "pwd" => Some(("cd".to_string(), "pwd → cd".to_string())),
+        "ls" => {
+            let target = if rest.is_empty() || rest.starts_with('-') {
+                String::new()
+            } else {
+                format!(" {rest}")
+            };
+            Some((format!("dir /b{target}"), "ls → dir /b".to_string()))
+        }
+        "cat" if !rest.is_empty() => Some((format!("type {rest}"), "cat → type".to_string())),
+        "which" if !rest.is_empty() => Some((format!("where {rest}"), "which → where".to_string())),
+        "head" | "tail" => {
+            let mut n: u32 = 10;
+            let mut file = String::new();
+            let mut args = rest.split_whitespace();
+            while let Some(a) = args.next() {
+                if a == "-n" {
+                    n = args.next()?.parse().ok()?;
+                } else if let Some(v) = a.strip_prefix('-') {
+                    if v.is_empty() || !v.chars().all(|c| c.is_ascii_digit()) {
+                        return None; // 例如 -f / -c：语义对不上，别乱改
+                    }
+                    n = v.parse().ok()?;
+                } else {
+                    file = a.to_string();
+                }
+            }
+            if file.is_empty() {
+                return None;
+            }
+            let flag = if prog == "head" { "TotalCount" } else { "Tail" };
+            let escaped = file.replace('\'', "''");
+            let q = '"';
+            Some((
+                format!("powershell -NoProfile -Command {q}Get-Content -LiteralPath '{escaped}' -{flag} {n}{q}"),
+                format!("{prog} → powershell Get-Content -{flag}"),
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// 命令工具：运行 shell 命令，限时 15s、非交互，返回 stdout/stderr（截断）。
 pub(crate) struct CommandTool;
 #[async_trait::async_trait]
@@ -658,10 +724,23 @@ impl AiTool for CommandTool {
             .map(std::path::PathBuf::from)
             .or_else(|| ctx.project_root.clone());
 
+        // Unix 习惯命令先适配（仅 Windows；单条简单命令才改，复杂组合原样交给 shell）
+        #[cfg(target_os = "windows")]
+        let adapted = adapt_unix_command(&command);
+        #[cfg(not(target_os = "windows"))]
+        let adapted: Option<(String, String)> = None;
+        let (exec_command, adapt_note) = match adapted {
+            Some((c, note)) => {
+                log::info!("[ai-tools] run_command 改写 Unix 习惯命令：{} → {}", command, c);
+                (c, Some(note))
+            }
+            None => (command.clone(), None),
+        };
+
         // 复用受限 shell 的统一执行器（run_captured）：Windows 走 cmd /C，含 Job Object 防 conhost 悬挂、
         // 按流上限截断、看门狗超时强制终止。策略上仍走本工具的「宽松黑名单兜底」命令，不套受限 shell 的弱白名单。
         let r = crate::services::shell_service::run_captured_async(
-            &command,
+            &exec_command,
             cwd.clone(),
             timeout_secs,
             8000,
@@ -675,9 +754,15 @@ impl AiTool for CommandTool {
             return Err(r.message);
         }
         if r.timed_out {
-            return Err(format!("命令执行超时（>{}s，已中止）", timeout_secs));
+            return Err(format!(
+                "命令执行超时（>{}s，已中止）。可用 timeout 参数调大（1~120 秒）；长时间任务请拆小或改用后台方式。",
+                timeout_secs
+            ));
         }
         let mut text = String::new();
+        if let Some(note) = adapt_note.as_ref() {
+            text.push_str(&format!("（环境适配：{note}）\n"));
+        }
         if !r.stdout.is_empty() {
             text.push_str(&r.stdout);
         }
@@ -723,4 +808,52 @@ impl AiTool for CommandTool {
         m
     }
 }
-
+
+
+#[cfg(test)]
+mod adapt_tests {
+    use super::adapt_unix_command;
+
+    /// 模型最常撞的四个命令：必须能改写，且改写结果要真的是 cmd 能跑的。
+    #[test]
+    fn rewrites_common_unix_commands() {
+        assert_eq!(adapt_unix_command("pwd").unwrap().0, "cd");
+        assert_eq!(adapt_unix_command("  ls  ").unwrap().0, "dir /b");
+        assert_eq!(adapt_unix_command("ls src").unwrap().0, "dir /b src");
+        assert_eq!(adapt_unix_command("cat a.txt").unwrap().0, "type a.txt");
+        assert_eq!(adapt_unix_command("which node").unwrap().0, "where node");
+    }
+
+    /// head/tail 带不带 -n 都要对；默认 10 行。
+    #[test]
+    fn rewrites_head_and_tail() {
+        let (cmd, note) = adapt_unix_command("head -n 5 log.txt").unwrap();
+        assert!(cmd.contains("-TotalCount 5"), "{cmd}");
+        assert!(cmd.contains("log.txt"), "{cmd}");
+        assert!(note.contains("TotalCount"), "{note}");
+
+        let (cmd, _) = adapt_unix_command("head log.txt").unwrap();
+        assert!(cmd.contains("-TotalCount 10"), "{cmd}");
+
+        let (cmd, _) = adapt_unix_command("tail -3 log.txt").unwrap();
+        assert!(cmd.contains("-Tail 3"), "{cmd}");
+    }
+
+    /// 复杂命令一律不动：管道/重定向/串联的语义不是一一对应，改错等于换了用户的命令。
+    #[test]
+    fn leaves_complex_commands_alone() {
+        for c in [
+            "cat a.txt | head -n 5",
+            "ls > out.txt",
+            "pwd && ls",
+            "cat a.txt; pwd",
+            "echo $HOME",
+            "git status",
+            "head -f x.log",
+            "cat",
+            "",
+        ] {
+            assert!(adapt_unix_command(c).is_none(), "不该改写: {c}");
+        }
+    }
+}

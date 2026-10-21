@@ -66,11 +66,8 @@ impl AiTool for GrepTool {
         }
         // 提前校验正则合法性
         regex::Regex::new(&pattern).map_err(|e| format!("正则无效: {}", e))?;
-        let root = args
-            .get("path").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| ctx.project_root.clone())
-            .ok_or_else(|| "grep 缺少 path，且未提供项目根目录".to_string())?;
+        let root = resolve_root(args.get("path").and_then(|v| v.as_str()), ctx, "grep")
+            .ok_or_else(|| "grep 需要 path（且当前环境无法确定任何根目录）".to_string())?;
         let include = args
             .get("include").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let matcher = match &include {
@@ -223,11 +220,8 @@ impl AiTool for GlobTool {
         }
         let matcher = globset::GlobBuilder::new(&pattern).literal_separator(false).build()
             .map_err(|e| format!("glob 模式无效: {}", e))?.compile_matcher();
-        let root = args
-            .get("path").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| ctx.project_root.clone())
-            .ok_or_else(|| "glob 缺少 path，且未提供项目根目录".to_string())?;
+        let root = resolve_root(args.get("path").and_then(|v| v.as_str()), ctx, "glob")
+            .ok_or_else(|| "glob 需要 path（且当前环境无法确定任何根目录）".to_string())?;
 
         // 遍历收集命中文件及其修改时间，最后按 mtime 由新到旧排序、取前 N
         let hit: Vec<(PathBuf, std::time::SystemTime)> = tokio::task::spawn_blocking(move || -> Result<Vec<(PathBuf, std::time::SystemTime)>, String> {
