@@ -40,8 +40,9 @@ pub fn run_shell_command(
     let output = c.output()
         .map_err(|e| format!("命令执行失败: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // 解码口径与 read_capped 保持一致（GBK 系统的中文输出不再变问号）
+    let stdout = decode_console(&output.stdout);
+    let stderr = decode_console(&output.stderr);
     let mut result = stdout;
     if !stderr.is_empty() {
         result.push_str(&stderr);
@@ -364,32 +365,77 @@ pub(crate) async fn run_captured_async(
             hint: None,
         })
 }
+/// 把子进程输出字节解码成字符串。
+///
+/// ## 为什么不能只 `from_utf8_lossy`
+/// Windows 中文系统的控制台代码页是 **CP936（GBK）**，`ipconfig` / `dir` / 中文报错
+/// 都是 GBK 字节。直接按 UTF-8 lossy 解，每个汉字变成 1~3 个 `�`，
+/// 模型看到的是乱码，用户看到的是"工具坏了"（实测：一次 `dir` 的中文目录名全成乱码）。
+///
+/// 顺序：UTF-8 → GBK → lossy 兜底。
+/// 先试 UTF-8 是对的：现代 CLI（node / ripgrep / git for windows）普遍输出 UTF-8，
+/// 而 GBK 字节几乎不可能恰好是合法 UTF-8 序列（汉字首字节 0xB0-0xF7 后跟 0x40-0xFE，
+/// 组合出合法多字节序列的概率极低）。
+fn decode_console(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    // 去 UTF-8 BOM（PowerShell 重定向常见），否则首行会带一个不可见的 \u{feff}
+    let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    if let Ok(s) = std::str::from_utf8(body) {
+        return s.to_string();
+    }
+    let (cow, _, had_errors) = encoding_rs::GBK.decode(body);
+    if !had_errors {
+        return cow.into_owned();
+    }
+    // 两种都不干净（混合编码/被 cap 截断在多字节中间）：保留可读部分，别整段丢掉
+    String::from_utf8_lossy(body).to_string()
+}
+
 fn read_capped<R: Read>(mut r: R, cap: usize) -> String {
     let mut buf = [0u8; 4096];
-    let mut acc = String::with_capacity(cap.min(8192));
+    // 先按**字节**累积，最后一次性解码：按 4KB 分块解码会把多字节字符切在边界上，
+    // 表现为"每 4096 字节出现一个 �"（旧实现除了 GBK 问题还有这个隐性缺陷）。
+    let mut acc: Vec<u8> = Vec::with_capacity(cap.min(8192));
     loop {
         match r.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 if acc.len() < cap {
-                    let s = String::from_utf8_lossy(&buf[..n]);
                     let room = cap - acc.len();
-                    if s.len() <= room {
-                        acc.push_str(&s);
-                    } else {
-                        acc.push_str(&s[..room]);
-                    }
+                    acc.extend_from_slice(&buf[..n.min(room)]);
                 }
             }
             Err(_) => break,
         }
     }
-    acc
+    decode_console(&acc)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- 输出解码（2026-10-21）----
+    #[test]
+    fn decode_console_handles_gbk_and_utf8() {
+        // Windows 中文控制台的 `dir` / `ipconfig` / 中文报错都是 GBK 字节：
+        // 0xD6D0 0xCEC4 = "中文"。旧实现按 UTF-8 lossy 解，会得到 4 个 '�'。
+        let gbk = [0xD6u8, 0xD0, 0xCE, 0xC4];
+        assert_eq!(decode_console(&gbk), "中文");
+
+        // UTF-8 必须原样通过（现代 CLI 的输出）
+        assert_eq!(decode_console("中文 utf8".as_bytes()), "中文 utf8");
+
+        // BOM 必须剥掉，否则首行会带不可见字符、模型会把它当成内容的一部分
+        let mut bom = vec![0xEFu8, 0xBB, 0xBF];
+        bom.extend_from_slice(b"hello");
+        assert_eq!(decode_console(&bom), "hello");
+
+        // 空输入不能 panic
+        assert_eq!(decode_console(&[]), "");
+    }
 
     // ---- 端到端（run_agent_shell） ----
     #[test]

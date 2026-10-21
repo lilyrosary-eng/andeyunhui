@@ -613,11 +613,22 @@ impl AiTool for CommandTool {
         "run_command"
     }
     fn function_schema(&self) -> serde_json::Value {
+        // 把"这层壳是什么"直接写进描述：
+        // 实测模型会反复用 bash 语法（pwd / ls / head / cat）打在这层壳上，
+        // 每条都要浪费一轮往返才明白"这里没有那些命令"。写清楚比事后纠错便宜。
+        #[cfg(target_os = "windows")]
+        let shell_hint = "【执行环境】Windows cmd /C（不是 bash）：用 cd / dir / type / more，没有 pwd、ls、head、cat；管道可用但规则不同，避免 bash 专有写法。输出会按 UTF-8/GBK 自动解码。";
+        #[cfg(not(target_os = "windows"))]
+        let shell_hint = "【执行环境】sh -c，支持 POSIX shell 语法。";
+        let description = format!(
+            "执行 shell 命令并返回输出。非交互。{}参数：command(必填，要执行的命令)；cwd(可选，工作目录，默认项目根)；timeout(可选，超时秒数，默认15，上限120)。用于运行 git/npm/pnpm/node/脚本等。",
+            shell_hint
+        );
         serde_json::json!({
             "type": "function",
             "function": {
                 "name": self.name(),
-                "description": "执行 shell 命令并返回输出。非交互。参数：command(必填，要执行的命令)；cwd(可选，工作目录，默认项目根)；timeout(可选，超时秒数，默认15，上限120)。用于运行 git/npm/pnpm/node/脚本等。",
+                "description": description,
                 "parameters": {
                     "type": "object",
                     "properties": {
