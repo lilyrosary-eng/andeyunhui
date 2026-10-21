@@ -11,13 +11,28 @@
  * 避免改一句注释就红一片。
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 
-const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), 'utf-8');
+/**
+ * 读 Rust 源码用 vite 的 `?raw` glob，**不用 node:fs**：
+ * 本项目 tsconfig 把 `types` 清空成 `[]`（浏览器端不该有 node 全局），
+ * 直接 import `node:fs` 会让根 `tsc --noEmit` 报 TS2307/TS2591。
+ * 与 `src/core/tauriCommands.test.ts` 保持同一套读法。
+ */
+const RAW = import.meta.glob('../../../src-tauri/src/**/*.rs', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>;
+
+/** 按「相对 src-tauri/src」的后缀取源文件（glob 的键是相对本文件的路径，不做精确索引）。 */
+function read(rel: string): string {
+  const found = Object.entries(RAW).find(([k]) => k.replace(/\\/g, '/').endsWith(rel));
+  if (!found) throw new Error(`找不到源码 ${rel}（glob 命中 ${Object.keys(RAW).length} 个文件）`);
+  return found[1];
+}
 
 describe('agent 组装（ai_agent.rs）', () => {
-  const src = read('src-tauri/src/services/ai_service/ai_agent.rs');
+  const src = read('ai_service/ai_agent.rs');
 
   it('工具列表统一走 tool_schemas_for_api*（各自 map 会导致某个 schema 缺 type ⇒ 整批 400）', () => {
     expect(src).toContain('tool_schemas_for_api()');
@@ -48,7 +63,7 @@ describe('agent 组装（ai_agent.rs）', () => {
 });
 
 describe('工具层契约（ai_tools.rs）', () => {
-  const src = read('src-tauri/src/services/ai_service/ai_tools.rs');
+  const src = read('ai_service/ai_tools.rs');
 
   it('存在 normalize_tool_schema：补齐每个工具的 type=function', () => {
     expect(src).toContain('fn normalize_tool_schema');
@@ -62,7 +77,7 @@ describe('工具层契约（ai_tools.rs）', () => {
 });
 
 describe('工具实现契约（fs_shell.rs）', () => {
-  const src = read('src-tauri/src/services/ai_service/ai_tools/fs_shell.rs');
+  const src = read('ai_service/ai_tools/fs_shell.rs');
 
   it('写文件是"写入即落盘 + 落盘前快照"，不是只暂存等审阅', () => {
     expect(src).toContain('checkpoint::capture');
