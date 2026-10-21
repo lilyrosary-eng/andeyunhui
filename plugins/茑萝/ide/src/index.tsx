@@ -162,50 +162,6 @@ function localComplete(view: any): boolean {
   return true;
 }
 
-// AI 补全：调用全局 ai_chat（流式）续写光标处代码，返回补全文本（无 AI 时由调用方降级）。
-function completionPrompt(ctx: string): string {
-  return [
-    '你是一个代码补全器。下面是光标之前的源代码：',
-    '```',
-    ctx,
-    '```',
-    '请直接从光标位置续写代码：只输出新增代码片段，不要重复已有内容，不要解释，不要使用 Markdown 代码块围栏。若无需补全，输出空字符串。',
-  ].join('\n');
-}
-
-async function aiCompleteText(ctx: string, activeId: string): Promise<string> {
-  if (!activeId) return '';
-  const reqId = 'tc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  let acc = '';
-  let done = false;
-  let errMsg: string | null = null;
-  const u1 = await hostApi.listen<{ requestId: string; delta: string }>('ai-delta', (e) => {
-    if (e.payload.requestId === reqId) acc += e.payload.delta;
-  });
-  const u2 = await hostApi.listen<{ requestId: string }>('ai-done', (e) => {
-    if (e.payload.requestId === reqId) done = true;
-  });
-  const u3 = await hostApi.listen<{ requestId: string; error: string }>('ai-error', (e) => {
-    if (e.payload.requestId === reqId) { errMsg = e.payload.error; done = true; }
-  });
-  try {
-    await hostApi.invoke('ai_chat', {
-      requestId: reqId,
-      messages: [{ role: 'user', content: completionPrompt(ctx) }],
-      profileId: activeId,
-    });
-    await new Promise<void>((res) => {
-      const t = setInterval(() => { if (done) { clearInterval(t); res(); } }, 60);
-      setTimeout(() => { clearInterval(t); res(); }, 25000);
-    });
-  } catch (e) {
-    errMsg = String(e);
-  } finally {
-    u1(); u2(); u3();
-  }
-  return errMsg ? '' : acc;
-}
-
 // ============ 语言映射 ============
 const EXT_LANG: Record<string, string> = {
   js: 'javascript', jsx: 'javascript', ts: 'javascript', tsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
@@ -441,7 +397,6 @@ w0.__IDE_AGENT_HOOKS__ = {
 // ============ 主编辑器（命令式 view 引用，标签页切换时整体替换文档） ============
 function CmEditor({
   cm, tab, theme, wrap, onViewReady, onChange, onCursor, suppressDirtyRef,
-  tabUseAi, aiAvailable, aiActiveId, onDegrade,
 }: {
   cm: CM;
   tab: Tab;
@@ -451,10 +406,6 @@ function CmEditor({
   onChange: (doc: string) => void;
   onCursor: (line: number, col: number) => void;
   suppressDirtyRef: React.MutableRefObject<boolean>;
-  tabUseAi: boolean;
-  aiAvailable: boolean;
-  aiActiveId: string | null;
-  onDegrade: () => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<any>(null);
@@ -466,17 +417,6 @@ function CmEditor({
   const onCursorRef = useRef(onCursor);
   onChangeRef.current = onChange;
   onCursorRef.current = onCursor;
-
-  // Tab 补全：用 ref 透传最新开关/状态，使一次性挂载的 keymap 始终读到最新值（#13）
-  const tabUseAiRef = useRef(tabUseAi);
-  const aiAvailableRef = useRef(aiAvailable);
-  const aiActiveIdRef = useRef(aiActiveId);
-  const onDegradeRef = useRef(onDegrade);
-  tabUseAiRef.current = tabUseAi;
-  aiAvailableRef.current = aiAvailable;
-  aiActiveIdRef.current = aiActiveId;
-  onDegradeRef.current = onDegrade;
-  const aiBusyRef = useRef(false);
 
   // 显式定义选区背景，避免浅色主题下鼠标拖动选择无可见高亮。
   // 关键：CM6 核心 baseTheme 的 "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground"
@@ -542,38 +482,11 @@ function CmEditor({
     wrapCpt.current = new cm.Compartment();
     selCpt.current = new cm.Compartment();
 
-    // Tab 补全（#13）：优先用用户部署的 AI 续写；无 AI 或关闭时降级本地补全；均不可时退化为缩进。
-    const doAiComplete = async (view: any) => {
-      if (aiBusyRef.current) return;
-      aiBusyRef.current = true;
-      try {
-        const doc = view.state.doc;
-        const head = view.state.selection.main.head;
-        const before = doc.sliceString(0, head);
-        const ctx = before.length > 6000 ? '...' + before.slice(-6000) : before;
-        const text = await aiCompleteText(ctx, aiActiveIdRef.current || '');
-        if (text && text.trim()) {
-          const clean = text.replace(/^[\r\n]+/, '');
-          view.dispatch({
-            changes: { from: head, insert: clean },
-            selection: { anchor: head + clean.length },
-          });
-        }
-      } catch {
-        /* 忽略补全失败 */
-      } finally {
-        aiBusyRef.current = false;
-      }
-    };
+    // Tab 补全：只做本地补全（同前缀候选 + 单候选自己补全），补不动就退化成缩进。
+    // 编辑器内**不再调用任何 AI** —— 编程对话统一走浮岛「编程」标签页（那边是独立执行器）。
     const tabHandler = (view: any): boolean => {
-      if (tabUseAiRef.current && aiAvailableRef.current) {
-        doAiComplete(view);
-        return true;
-      }
-      // 本地补全（效果稍差）
       const didLocal = localComplete(view);
       if (!didLocal) {
-        if (tabUseAiRef.current && !aiAvailableRef.current) onDegradeRef.current();
         const r = cm.indentWithTab.run ? cm.indentWithTab.run(view) : false;
         return typeof r === 'boolean' ? r : true;
       }
@@ -682,9 +595,9 @@ function IdeEditor() {
   const [recentOpen, setRecentOpen] = useState(false);
   const [cursor, setCursor] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
 
-  // 2026-10-19：IDE 主窗口的 AI 面板（右侧常驻列 + 浮出窗）已**移除**，
-  // AI 统一走黄金棋盘浮岛的「编程」标签页（浮岛已是独立执行器，不依赖本模块加载）。
-  // 保留的 aiProfiles / aiActiveId 只服务编辑器内的行内补全（tabUseAi → aiCompleteText）。
+  // 2026-10-19：IDE 主窗口的 AI 面板（右侧常驻列 + 浮出窗）已**移除**。
+  // 2026-10-21：编辑器内的「AI 续写补全」也一并移除 ⇒ IDE 模块**完全不调 AI**，
+  // 只负责编辑器本分（打开/编辑/保存/终端/Git/命令面板）；AI 编程走浮岛「编程」标签页。
 
   // 当前打开的项目根（供 AI 编程关联，#12）
   const [projRoot, setProjRoot] = useState<string | null>(ideShared.projectRoot);
@@ -693,10 +606,6 @@ function IdeEditor() {
   const [ideSettings, setIdeSettings] = useState<IdeSettingsData>(loadIdeSettings);
   const [showIdeSettings, setShowIdeSettings] = useState(false);
 
-  // 检测「用户部署的 AI」：读取全局模型档案，存在已填 Key 的档案即视为已部署
-  const [aiProfiles, setAiProfiles] = useState<{ id: string; api_key?: string }[]>([]);
-  const [aiActiveId, setAiActiveId] = useState<string | null>(null);
-  const aiAvailable = aiProfiles.some((p) => p.api_key && p.api_key.trim());
 
   // 底部面板（问题/输出/调试/终端）：默认关闭，点击状态栏按钮展开
   const [bottomView, setBottomView] = useState<null | 'problems' | 'output' | 'debug' | 'terminal'>(null);
@@ -749,21 +658,6 @@ function IdeEditor() {
     }
   }, [projRoot]);
 
-  // 启动读取全局模型档案，判断「用户部署的 AI」是否可用（#13）
-  useEffect(() => {
-    hostApi.invoke<{ profiles: { id: string; api_key?: string }[]; active: string | null }>('ai_get_profiles')
-      .then((data) => {
-        const list = data.profiles || [];
-        setAiProfiles(list);
-        const usable = list.filter((p) => p.api_key && p.api_key.trim());
-        const act = (data.active && usable.some((p) => p.id === data.active))
-          ? data.active
-          : (usable[0] ? usable[0].id : null);
-        setAiActiveId(act);
-      })
-      .catch(() => {});
-  }, []);
-
   // 应用 IDE 模块设置（默认主题/自动换行）于加载时生效（#13）
   useEffect(() => {
     setTheme(ideSettings.defaultTheme);
@@ -780,14 +674,6 @@ function IdeEditor() {
       if ('autoWrap' in patch) setWrap(next.autoWrap);
       return next;
     });
-  }, []);
-
-  // 降级提醒（仅提示一次/会话）：开启 AI 补全但无 AI 时（#13）
-  const degradeReminded = useRef(false);
-  const onTabDegrade = useCallback(() => {
-    if (degradeReminded.current) return;
-    degradeReminded.current = true;
-    setStatus('⚠ 未检测到已部署的 AI：Tab 补全已降级为本地补全（可在 IDE 设置中关闭该选项）');
   }, []);
 
   // 复用侧边栏模块设置齿轮（#13）：宿主侧边栏齿轮点击会派发 module-settings-toggle 事件，
@@ -1126,7 +1012,6 @@ function IdeEditor() {
           settings={ideSettings}
           onChange={updateIdeSettings}
           onClose={() => setShowIdeSettings(false)}
-          aiAvailable={aiAvailable}
         />
       </div>
     );
@@ -1197,17 +1082,13 @@ function IdeEditor() {
               onChange={onChange}
               onCursor={(line, col) => setCursor({ line, col })}
               suppressDirtyRef={suppressDirty}
-              tabUseAi={ideSettings.tabUseAi}
-              aiAvailable={aiAvailable}
-              aiActiveId={aiActiveId}
-              onDegrade={onTabDegrade}
             />
           ) : (
             <div className="flex-1 flex items-center justify-center text-neutral-400 dark:text-stone-500 text-sm">打开文件或新建文档开始编辑</div>
           )}
         </div>
-        {/* 2026-10-19：AI 面板已移除 —— 编程对话统一走黄金棋盘浮岛的「编程」标签页。
-            编辑器仍保留行内补全（tabUseAi），那部分不依赖这块 UI。 */}
+        {/* 2026-10-19：AI 面板已移除；2026-10-21：行内 AI 补全也移除。
+            IDE 模块不再有任何 AI 入口，编程对话统一走黄金棋盘浮岛的「编程」标签页。 */}
       </div>
       {/* 底部面板：问题 / 输出 / 调试 / 终端（点击状态栏按钮展开，可拖拽调高、可关闭，#2） */}
       {bottomView && (
@@ -1309,13 +1190,12 @@ function IdeEditor() {
 
 // ============ IDE 模块设置（#13）：每个子模块各自独立设置，区别于全局「茑萝」 ============
 interface IdeSettingsData {
-  tabUseAi: boolean;                          // Tab 补全是否使用用户部署的 AI
   autoWrap: boolean;                          // 默认自动换行
   defaultTheme: 'auto' | 'light' | 'dark';    // 默认主题
-  mode: 'normal' | 'agent';                   // AI 模式：普通对话 / 自主编辑
 }
 const IDE_SETTINGS_KEY = 'ide_settings';
-const defaultIdeSettings: IdeSettingsData = { tabUseAi: false, autoWrap: false, defaultTheme: 'auto', mode: 'normal' };
+// 旧字段（tabUseAi / mode）已随 AI 入口一起删除；loadIdeSettings 用展开合并，旧 localStorage 的多余键自然被忽略。
+const defaultIdeSettings: IdeSettingsData = { autoWrap: false, defaultTheme: 'auto' };
 function loadIdeSettings(): IdeSettingsData {
   try {
     const raw = localStorage.getItem(IDE_SETTINGS_KEY);
@@ -1518,36 +1398,17 @@ function McpSettingsSection() {
 }
 
 function IdeSettings({
-  settings, onChange, onClose, aiAvailable,
+  settings, onChange, onClose,
 }: {
   settings: IdeSettingsData;
   onChange: (patch: Partial<IdeSettingsData>) => void;
   onClose: () => void;
-  aiAvailable: boolean;
 }) {
   const card = 'bg-white dark:bg-stone-800/70 backdrop-blur rounded-xl border border-white/80 dark:border-stone-700/50 divide-y divide-neutral-200/50 dark:divide-stone-700/50 overflow-hidden';
   const labelCls = 'text-sm font-medium text-neutral-700 dark:text-stone-200 block';
   const subCls = 'text-xs text-neutral-500 dark:text-stone-400 mt-0.5';
   const body = (
     <div className="space-y-5">
-      <section>
-        <h3 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">Tab 补全</h3>
-        <div className={card}>
-          <div className="flex justify-between items-center p-4">
-            <div>
-              <span className={labelCls}>用 AI 补全</span>
-              <p className={subCls}>Tab 键使用你部署的 AI 续写代码；未部署 AI 时自动降级为本地补全。</p>
-            </div>
-            <Toggle checked={settings.tabUseAi} onChange={(v) => onChange({ tabUseAi: v })} />
-          </div>
-          {settings.tabUseAi && !aiAvailable && (
-            <div className="p-4 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400 bg-amber-500/10">
-              ⚠ 未检测到已部署的 AI（请到「全局设置 → 模型」添加模型档案并填写 API Key）。Tab 补全将自动降级为本地补全。
-            </div>
-          )}
-        </div>
-      </section>
-
       <section>
         <h3 className="text-sm font-medium text-neutral-500 dark:text-stone-400 mb-3">编辑器默认</h3>
         <div className={card}>
