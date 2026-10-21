@@ -361,6 +361,59 @@ mod tests {
         );
     }
 
+    /// 工具名唯一 + 描述非空（模型靠描述决定"什么时候用哪个工具"，空描述等于没有）。
+    ///
+    /// 为什么值得断言：加新工具时最容易犯的错是复制粘贴后忘改 name（重名会让模型
+    /// 永远只调到其中一个），或只写 name 不写 description（模型只能靠名字猜）。
+    #[test]
+    fn tool_names_are_unique_and_descriptions_present() {
+        let reg = registered_tools();
+        let mut seen = std::collections::HashSet::new();
+        let mut dup = Vec::new();
+        let mut no_desc = Vec::new();
+        for t in reg.iter() {
+            let name = t.name().to_string();
+            if !seen.insert(name.clone()) {
+                dup.push(name.clone());
+            }
+            let desc = t
+                .function_schema()
+                .pointer("/function/description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if desc.len() < 8 {
+                no_desc.push(format!("{name}: {desc:?}"));
+            }
+        }
+        assert!(dup.is_empty(), "工具重名（模型只会调到其中一个）：{dup:?}");
+        assert!(no_desc.is_empty(), "工具描述缺失或过短：{no_desc:?}");
+    }
+
+    /// 联网开关只摘掉 web_search，其余工具一个不少（否则"关联网"会变成"关工具"，
+    /// 那正是 2026-10-19 那个按钮语义 bug 的形态）。
+    #[test]
+    fn tool_schemas_without_only_removes_named_tools() {
+        let all = tool_schemas_for_api();
+        let names: Vec<String> = all
+            .iter()
+            .filter_map(|s| s.pointer("/function/name").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        assert!(names.iter().any(|n| n == "web_search"), "注册表里应有 web_search: {names:?}");
+
+        let without = tool_schemas_for_api_without(&["web_search"]);
+        assert_eq!(without.len(), all.len() - 1, "只应少一个工具");
+        let left: Vec<String> = without
+            .iter()
+            .filter_map(|s| s.pointer("/function/name").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        assert!(!left.iter().any(|n| n == "web_search"), "web_search 应被摘掉");
+        for n in names.iter().filter(|n| *n != "web_search") {
+            assert!(left.contains(n), "其余工具不应受影响，缺了 {n}");
+        }
+    }
+
     /// 兜底器本身要能把漏 type 的 schema 修好，且不改变已合法的 schema。
     #[test]
     fn normalize_tool_schema_fixes_missing_type() {

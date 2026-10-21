@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  测试二进制的应用清单（2026-10-21）。
+
+  为什么需要它：`muda`（Tauri 的菜单 crate）静态导入了 comctl32 的 `TaskDialogIndirect`，
+  而这个导出只存在于 **Common-Controls v6**（side-by-side 程序集）。普通 cargo 测试
+  二进制没有带 v6 依赖的清单，于是加载器拿到 System32 下的 v5 → 缺导出 →
+  进程直接 STATUS_ENTRYPOINT_NOT_FOUND，一个测试都跑不起来。
+
+  这个清单只通过 `cargo:rustc-link-arg-tests` 作用在**测试目标**上（见 build.rs），
+  不参与 app/release 构建，避免影响安装包与正常运行。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+    type="win32"
+    name="andeyunhui.tests"
+    version="1.0.0.0"
+    processorArchitecture="*" />
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*" />
+    </dependentAssembly>
+  </dependency>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>
