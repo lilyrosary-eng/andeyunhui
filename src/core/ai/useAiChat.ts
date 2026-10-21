@@ -10,6 +10,7 @@ import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
+import { GROUP_HISTORY_LIMIT, safeMessages, buildRequestMessages } from '@/core/ai/chatPayload';
 import { uid, persistConversations, loadConversations, resolveTitle, freezeVersions, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
 import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { retrieveChatContext, ingestChatTurn, autoSyncCompanion } from '@/core/stores/semanticMemory';
@@ -47,56 +48,6 @@ export function setAiChatMemoryEnabled(on: boolean) {
 // （chat 与 AIWork 独立实例）监听同一全局事件互相 merge 串号。
 const syncEventFor = (key: string) => `ai-chat:conv-sync:${key.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 const syncReqEventFor = (key: string) => `ai-chat:conv-req:${key.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-
-// 每次请求携带的历史消息上限（尾部截断），防止长对话 / 群聊累计历史超出模型上下文上限
-// （曾因群聊全量历史塞入单请求导致 209 万 token 触发 HTTP 400）。system 人设单独传，不受此限。
-const CHAT_HISTORY_LIMIT = 40; // 单对单：轮次线性增长，可放宽
-const GROUP_HISTORY_LIMIT = 16; // 群聊：每轮历史含所有伴侣回复，膨胀更快，收紧窗口
-
-// 请求前硬防御：与后端 truncate_messages_for_safety 双保险。
-// 旧 bundle（未重建）可能未走 GROUP_HISTORY_LIMIT 条数截断，或某条 content 被重复
-// 拼接撑到百万字符；此处按"真实字符估算 token"兜底，确保绝不可能把 >HARD_TOTAL_CAP
-// 的请求送出去。诊断日志用于坐实真实条数 / 最大单条长度（区分「条数失控」还是「单条巨 content」）。
-const HARD_MSG_CAP = 8_000; // 单条 content 硬切（字符）
-const HARD_TOTAL_CAP = 200_000; // 总 token 硬切（远低于模型上限 1048576）
-
-function estTokens(s: string): number {
-  // 注意：这里必须用 \u 转义写 CJK 区间，不能直接粘贴全角空格（U+3000），否则 no-irregular-whitespace 报错。
-  const cjk = (s.match(/[\u3000-\u9fff\uff00-\uffef]/g) || []).length;
-  const other = s.length - cjk;
-  return cjk + Math.ceil(other / 4);
-}
-
-function safeMessages(msgs: Array<{ role: string; content: string }>, limit: number = CHAT_HISTORY_LIMIT): Array<{ role: string; content: string }> {
-  let total = 0;
-  let maxLen = 0;
-  const rawTotalChars = msgs.reduce((s, m) => s + (m.content?.length || 0), 0);
-  // 条数上限（尾部截断）：与后端 truncate_messages_for_safety 双保险。
-  // 只在此处统计"原始条数"用于诊断，日志里要与裁剪后条数对照才能看出是条数失控还是单条巨 content。
-  const rawCount = msgs.length;
-  const recent = rawCount > limit ? msgs.slice(rawCount - limit) : msgs;
-  const out: Array<{ role: string; content: string }> = [];
-  for (const m of [...recent].reverse()) {
-    let content = typeof m.content === 'string' ? m.content : '';
-    if (content.length > maxLen) maxLen = content.length;
-    if (content.length > HARD_MSG_CAP) content = content.slice(0, HARD_MSG_CAP) + '…（超长已截断）';
-    const t = estTokens(content);
-    if (total + t > HARD_TOTAL_CAP) break; // 从尾部取，总超则停止（保留最近若干条）
-    out.unshift({ role: m.role, content });
-    total += t;
-  }
-  // 始终打印一次（即便未截断）：用于排查 messages 总规模是否真的进入上游。
-  console.log(
-    `[ai-chat] safeMessages: 原始条数=${rawCount}(上限${limit}) 原始总字符=${rawTotalChars} 裁剪后=${out.length} 最大单条字符=${maxLen} 估算总token≈${total}`,
-  );
-  if (rawCount > out.length || maxLen > HARD_MSG_CAP) {
-    console.error(
-      `[ai-chat] 请求前硬截断生效：原始条数=${rawCount}(上限${limit}) 裁剪后=${out.length} 最大单条字符=${maxLen} 估算总token≈${total}。`
-      + `若原始条数远大于 ${limit} 或最大单条接近 ${HARD_MSG_CAP}，说明存在重复拼接/旧bundle未重建。`,
-    );
-  }
-  return out;
-}
 
 export interface UseAiChatOptions {
   /** localStorage 持久化键，不同入口用不同键避免串号（胶囊 / AI 对话模块 / 其他浮窗） */
@@ -577,12 +528,12 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
       profileId: profileIdRef.current,
       // 请求前硬防御：真实 token 估算尾部截断 + 单条硬切（双保险，坐实重复拼接真因）
       // 最后一条 user 内容若带图/带附件，把 OCR 描述与文件内容拼接在原文后（本地显示保持原图/原文不变）。
-      messages: safeMessages(
-        (sendOpts?.skipUserAppend
-          ? history
-          : history.concat([shouldInject ? { ...userMsg, content: content + imageNote + attachNote } : userMsg]))
-          .map((m) => ({ role: m.role, content: m.content })),
-      ),
+      // 统一走 buildRequestMessages：toolNote/error 过滤、重新生成不重复追加 user、
+      // 三重截断都在那里（有单测钉住形状）。图片 OCR 描述与附件正文只拼在最后一条 user 上。
+      messages: buildRequestMessages(history, userMsg, {
+        inject: shouldInject ? imageNote + attachNote : '',
+        skipUserAppend: !!sendOpts?.skipUserAppend,
+      }),
       stream: true,
       ...(finalSystem ? { system: finalSystem } : {}),
       ...(effExcludeGlobalPersona ? { exclude_global_persona: true } : {}),
