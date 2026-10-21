@@ -532,6 +532,23 @@ pub struct OverlayProfile {
 ///   `maybe_clear_gpu_cache_on_runtime_change_early()` 会清 GPU 缓存自救。原实现不调用 mark_boot_failure，
 ///   导致运行时浮窗失败时下次启动也不清缓存，自愈循环断链。
 /// - **绝不用 `visible:false`** 创建透明(layered)窗（否则 WebView2 初始化失败 → 0x8007139F 坏窗）。
+/// 浮窗标题（供窗口管理器识别身份，形如「安得云荟 · 浮岛」）。
+///
+/// 为什么需要：Linux（尤其 Wayland）下没有可用的 WM_CLASS 细分，GNOME Shell 扩展要按窗口
+/// 决定「钉到哪个位置 / 是否置顶」时只有 title 可读。以前所有浮窗都叫 "Tauri App"，
+/// 扩展无法分辨浮岛与桌宠（2026-10-21 实测：两个浮窗被塞到同一个角）。
+/// 后缀是**稳定标识**，扩展按它配对规则；改文案时要同步改扩展里的映射。
+fn overlay_window_title(label: &str) -> String {
+    let name = match label {
+        "capsule" => "浮岛",
+        "deskpet" => "桌宠",
+        "floating-dropzone" => "中转站",
+        "floating-clipboard" => "剪贴板",
+        other => other,
+    };
+    format!("安得云荟 · {}", name)
+}
+
 // 桌面专属：Tauri v2 的 `WebviewWindowBuilder::decorations()`/`.transparent()`/`.shadow()`/
 // `.skip_taskbar()`/`.always_on_top()`/`.resizable()` 等建窗方法仅在桌面平台(windows/macos/linux)
 // 存在；Android/iOS 上窗口由 Tauri 移动端 Activity 创建，不应手动建桌面窗。故整函数仅在桌面编译
@@ -646,6 +663,8 @@ pub async fn overlay_window_get_or_create(
         // 直接 run_on_main_thread 是非阻塞的（闭包排队到事件循环稍后执行），立刻读共享变量只会拿到
         // 空值——这正是初版「未返回构建结果」的根因；现用 Condvar 等闭包真正跑完再返回。
         let built: Result<(), String> = run_on_main_thread_result(&app, move || {
+            // 先按 label 算出窗口标题（借用 build_label，随后 build_label 被移进 builder）
+            let build_title = overlay_window_title(&build_label);
             let mut b = WebviewWindowBuilder::new(
                 &build_app,
                 build_label,
@@ -659,6 +678,11 @@ pub async fn overlay_window_get_or_create(
             .resizable(resizable)
             .position(x, y)
             .inner_size(inner_w, inner_h)
+            // 标题给窗口管理器一个**可识别的身份**：Linux 下没有 WM_CLASS 之外的信息，
+            // 而 GNOME Shell 扩展（钉住浮窗位置/置顶）只能靠 title 区分「浮岛 / 桌宠 / 中转站」。
+            // 之前全部是 Tauri 默认的 "Tauri App"，扩展无法分辨（2026-10-21 实测）。
+            // 这些窗都是 skip_taskbar + 透明浮窗，标题不出现在任务栏，改它没有副作用。
+            .title(build_title)
             .visible(true) // 透明(layered)窗绝不用 visible:false，否则 WebView2 报 0x8007139F 坏窗
             .data_directory(per_win_dd)
             // 独立环境不继承主窗 flag：必须显式禁用遮挡检测/后台化，否则透明浮窗失焦即停渲染

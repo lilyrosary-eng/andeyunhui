@@ -774,7 +774,10 @@ export default function Capsule() {
       if (t - last >= 1000) {
         const fps = Math.round((frames * 1000) / (t - last));
         // eslint-disable-next-line no-console
-        console.log(
+        // 走 console.error 而非 log：宿主只把 error 转发进会话日志（file-logger.ts），
+        // 否则这条探针只在 DevTools 里可见，真机取证拿不到（2026-10-20）。
+        // eslint-disable-next-line no-console
+        console.error(
           '[CAPSULE-PROBE] fps=' + fps +
           ' visibility=' + document.visibilityState +
           ' hidden=' + document.hidden
@@ -787,7 +790,7 @@ export default function Capsule() {
     raf = requestAnimationFrame(loop);
     const onVis = () =>
       // eslint-disable-next-line no-console
-      console.log('[CAPSULE-PROBE] visibilitychange -> ' + document.visibilityState);
+      console.error('[CAPSULE-PROBE] visibilitychange -> ' + document.visibilityState);
     document.addEventListener('visibilitychange', onVis);
     return () => {
       cancelAnimationFrame(raf);
