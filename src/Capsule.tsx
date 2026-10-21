@@ -748,8 +748,20 @@ export default function Capsule() {
               await existing.setFocus();
             }
           } else {
-            // 首次打开：创建桌宠窗口
-            await invoke('show_deskpet');
+            // 首次打开：走统一浮窗引擎（ensureOverlayWindow → overlay_window_get_or_create）。
+            // 这里原来调的是后端并不存在的 show_deskpet 命令（全仓 .rs 零命中），
+            // 所以「第一次点桌宠」必然失败并被下面的 catch 吞成一行 console.error（2026-10-21 修）。
+            // 注意：注释里不要出现「invoke 紧跟括号」的写法——契约测试按文本扫描，
+            // 注释里的示例也会被当成真实调用（我刚踩过：它把下一行的 'deskpet' 认成了命令名）。
+            // profile 与「茑萝/deskpet」插件保持同一份，避免两处漂移。
+            await ensureOverlayWindow('deskpet', 'deskpet.html', {
+              transparent: true,
+              decorations: false,
+              shadow: false,
+              skipTaskbar: true,
+              alwaysOnTop: true,
+              resizable: false,
+            });
           }
         } catch (err) {
           console.error('[Capsule] 桌宠操作失败:', err);

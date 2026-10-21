@@ -13,7 +13,7 @@ import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, MusicIcon,
   RepeatIcon, Repeat1Icon, ShuffleIcon, ArrowLeftIcon, HeartIcon,
 } from '../../_shared/icons';
-import { HEAVY_FX, STATIC_BLUR } from '@/platform/isLinux';
+import { HEAVY_FX, STATIC_BLUR, isLinux } from '@/platform/isLinux';
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
 const hostApi = window.__HOST_API__;
 const { IconButton } = window.__HOST_UI__ || {};
@@ -698,7 +698,9 @@ export function NowPlayingView({
             // 把滚动造成的重绘**限制在本容器内**（contain: content = layout+paint+style）。
             // 实测依据：DMA-BUF 渲染器关掉后，脏区面积直接决定帧率——12 行容器 144fps，
             // 40 行大容器 16fps（同样的动画）。这条把歌词区的重绘边界钉死，是开逐行 blur 的前置条件。
-            contain: 'content',
+            // 只在 Linux 开：DMA-BUF 渲染器关掉后，重绘代价与脏区面积成正比（12 行 144fps vs
+            // 40 行 16fps，实测）。Windows 侧保持原样——那边本来就没这个问题，迁移不动 Windows 行为。
+            contain: isLinux() ? 'content' : undefined,
             // 平台分流（同 HEAVY_FX）：`will-change: scroll-position` 与 `mask-image` 在
             // WebKitGTK 上各自会额外提升一个合成层；与逐行 blur 叠加会放大 GPU 压力。
             // Linux 下这两处仍不启用 —— 歌词退化为「纯 overflow 裁剪」，阅读不受影响

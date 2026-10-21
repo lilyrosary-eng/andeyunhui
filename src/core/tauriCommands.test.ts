@@ -127,7 +127,12 @@ function invokedIn(onlyMobile: boolean): Map<string, string[]> {
   // 匹配 invoke 之后到第一个 ( 之间的任意内容 —— **不能**写成 (?:<[^>]*>)?：
     // 泛型可能嵌套（invoke<Record<string, unknown>>(...)），[^>]* 会在第一个 > 处失配，
     // 于是整条调用被漏掉、命令被误报成未调用。这个坑我踩过一次（2026-10-15）。
-    const re = /invoke\s*[^(]*\(\s*'([A-Za-z0-9_]+)'/g;
+    // 只认「invoke 后紧跟（可选 ?. / 泛型 / 空白）+ 左括号 + 引号命令名」。
+    // 不能用 [^(]* 通配：注释里出现 invoke 字样时会一路吃到下一行的括号，
+    // 把无关字符串当成命令名（2026-10-21 实测：注释里提到 invoke，它把下面
+    // ensureOverlayWindow('deskpet') 的 'deskpet' 报成未注册命令；
+    // 另有个用例里的 'function' 也是同一类误报）。
+    const re = /invoke\s*(?:\?\.)?\s*(?:<[^()]*?>)?\s*\(\s*'([A-Za-z0-9_]+)'/g;
   for (const [path, text] of Object.entries(FRONTEND)) {
     // glob 键是相对本测试文件的路径（形如 ../mobile/screens/x.tsx），
     // 所以不能按 '/src/mobile/' 判断。
@@ -147,10 +152,8 @@ function invokedIn(onlyMobile: boolean): Map<string, string[]> {
  * 加进来等于承认"这里有一条断链"，所以每一条都该有对应的待办。
  */
 const KNOWN_BROKEN: Record<string, string> = {
-  // 后端确实没有这个命令（只有 import_deskpet_asset 用于导入素材）。
-  // 即「首次打开桌宠」这条路是坏的（Capsule.tsx:714）。属 Capsule 模块、非 AI 模块，
-  // 修它要碰桌宠窗口的创建逻辑，已单独报告待用户决定。
-  show_deskpet: 'Capsule 桌宠窗口：后端缺该命令，已单独报告（非 AI 模块）',
+  // 2026-10-21 已修：Capsule 首次打开桌宠改用 ensureOverlayWindow('deskpet','deskpet.html')
+  // （后端确实没有 show_deskpet 命令，前端不再调它）⇒ 豁免表清空，恢复全量拦截。
 };
 
 describe('前后端命令契约', () => {

@@ -24,7 +24,9 @@ describe('renderMd', () => {
     expect(out).toContain('md-code-block');
     expect(out).toContain('md-copy-btn');
     expect(out).toContain('data-code="const a = 1;');
-    expect(out).toContain('<pre><code>');
+    // 断言到 <code 为止：语法高亮（hljs）会给它加 class="hljs"，
+    // 写死 '<pre><code>' 会在接入高亮后永久红（2026-10-20 的 hljs 改动，本例直到 10-21 才被发现）。
+    expect(out).toContain('<pre><code');
   });
 
   it('代码含 HTML 实体：data-code 反解码后二次转义', () => {
