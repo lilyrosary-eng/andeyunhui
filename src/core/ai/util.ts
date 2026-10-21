@@ -1,5 +1,5 @@
 // AI 对话共用工具函数：id 生成、标题推断、会话工厂、localStorage 持久化。
-import type { ChatMsg, Conversation } from '@/components/capsule/types';
+import type { ChatMsg, Conversation, MsgVersion } from '@/components/capsule/types';
 import { storage } from '@/core/storage';
 
 export function uid(): string {
@@ -62,11 +62,35 @@ export function isPlaceholderTitle(title: string): boolean {
  * 流式期间 `content` 是活的、`versions[最后一位]` 是空占位 —— 所以任何动版本的操作
  * （切版本 / 再次重新生成）都必须先做这一步，否则会把空串固化、或把旧文本写错槽位。
  */
-export function freezeVersions(m: Pick<ChatMsg, 'content' | 'versions' | 'versionIndex'>): string[] {
-  const vs = m.versions?.length ? m.versions.slice() : [m.content];
+export function freezeVersions(m: Pick<ChatMsg, 'content' | 'versions' | 'versionIndex'>): MsgVersion[] {
+  // 老数据（2026-10-21 之前）里 versions 是 string[]，统一成 { text } 形状
+  const raw = (m.versions ?? []) as (MsgVersion | string)[];
+  const vs: MsgVersion[] = raw.length
+    ? raw.map((v) => (typeof v === 'string' ? { text: v } : { ...v }))
+    : [{ text: m.content }];
   const vi = Math.min(Math.max(m.versionIndex ?? 0, 0), vs.length - 1);
-  vs[vi] = m.content;
+  vs[vi] = { ...vs[vi], text: m.content };
   return vs;
+}
+
+/**
+ * 把「当前这条消息之后还活着的对话」压回它当前所在的版本槽位。
+ *
+ * 切版本、重新生成之前都必须先做：否则活跃尾巴会跟着新版本走丢，
+ * 用户切回旧版就永远看不到那段后续了。空尾巴要显式写成 `undefined`，
+ * 不能保留旧值 —— 否则「这一版之后本来没有对话」会被上一版的尾巴污染。
+ */
+export function stashTail(vs: MsgVersion[], index: number, tail: ChatMsg[]): MsgVersion[] {
+  const i = Math.min(Math.max(index, 0), vs.length - 1);
+  const out = vs.slice();
+  out[i] = { ...out[i], tail: tail.length ? tail : undefined };
+  return out;
+}
+
+/** 取出某一版要装回消息列表的东西（正文 + 该版本的后续）。 */
+export function pickVersion(vs: MsgVersion[], index: number): { text: string; tail: ChatMsg[] } {
+  const i = Math.min(Math.max(index, 0), vs.length - 1);
+  return { text: vs[i]?.text ?? '', tail: vs[i]?.tail ?? [] };
 }
 
 export function resolveTitle(
@@ -75,6 +99,42 @@ export function resolveTitle(
 ): string {
   if (conv.titleLocked) return conv.title;
   return isPlaceholderTitle(conv.title) ? genTitle(firstUserText) : conv.title;
+}
+
+/** DOM 节点 / React 合成事件的辨识特征。 */
+function looksLikeDomOrEvent(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  if (typeof o.nodeType === 'number' && typeof o.nodeName === 'string') return true;
+  if ('nativeEvent' in o || '_reactName' in o || 'isPersistent' in o) return true;
+  return false;
+}
+
+/**
+ * 校验 `newConversation(seed)` 的种子：**只接受普通对象**。
+ *
+ * ## 血案（2026-10-21，用户实测"新建对话就报错"）
+ * `ModuleSidebarShell` 的 `onClick={primaryAction.onClick}` 把 MouseEvent 当第一参传了出去，
+ * 而 AI 对话的 `newConversation(seed?: Partial<Conversation>)` 正好收下并
+ * `{ ...makeConv(), ...seed }` —— 事件对象自己的 `target`（HTMLButtonElement）
+ * 就这样进了会话，持久化时 `JSON.stringify` 撞上 `__reactFiber$… → FiberNode → stateNode`
+ * 的循环引用，整份历史写不进去。
+ *
+ * 修法分三层：shell 不再传事件（根因）、插件显式 `() => newConversation()`（意图）、
+ * 这里拒绝非普通对象（兜住这一类：往后谁再写 `onClick={someFactory}` 也不会污染数据）。
+ */
+export function sanitizeSeed(seed: unknown): Partial<Conversation> | undefined {
+  if (!seed || typeof seed !== 'object' || Array.isArray(seed)) return undefined;
+  if (looksLikeDomOrEvent(seed)) {
+    console.warn('[ai-chat] newConversation 收到 DOM 节点/React 事件当 seed，已忽略（检查传入方的 onClick 是否多传了事件）');
+    return undefined;
+  }
+  const proto = Object.getPrototypeOf(seed);
+  if (proto !== Object.prototype && proto !== null) {
+    console.warn('[ai-chat] newConversation 的 seed 不是普通对象，已忽略：', proto?.constructor?.name ?? '<null prototype>');
+    return undefined;
+  }
+  return seed as Partial<Conversation>;
 }
 
 export function makeConv(): Conversation {
@@ -112,6 +172,10 @@ export function makeGroupConv(participantIds: string[], groupName?: string): Con
 const MSG_CONTENT_MAX = 30_000;
 /** 单条回复最多保留的历史版本数（重新生成产生）。超出按最旧丢弃。 */
 const MAX_VERSIONS = 5;
+/** 每个版本尾巴最多留多少条消息（重新生成中间某条时，旧分支的后续）。 */
+const MAX_TAIL_MESSAGES = 40;
+/** 分支嵌套深度上限：尾巴里还能再分支，但不许无限套。 */
+const MAX_TAIL_DEPTH = 3;
 
 /** 单条媒体 data URL 的持久化上限（字符数；≈220KB 二进制）。超过的一律不进历史。 */
 const MEDIA_MAX_CHARS = 300_000;
@@ -203,41 +267,54 @@ function slimWorkOutput(c: unknown, budget: { left: number }): unknown {
   return touched ? { ...(c as Record<string, unknown>), aiWork: { ...work, nodes } } : c;
 }
 
+/**
+ * 单条消息的瘦身（内容截断 + 多版本裁剪 + 媒体预算），**递归**处理版本尾巴。
+ *
+ * depth 用于兜住"分支里再分支"的递归：超过 MAX_TAIL_DEPTH 就把尾巴丢掉，
+ * 宁可丢极端嵌套的历史，也不能让持久化递归到爆栈或把配额吃光。
+ */
+function sanitizeMessage(m: ChatMsg, budget: { left: number }, depth: number): ChatMsg {
+  if (!m) return m;
+  let out = m;
+  if (typeof m.content === 'string' && m.content.length > MSG_CONTENT_MAX) {
+    out = { ...out, content: m.content.slice(0, MSG_CONTENT_MAX) + '…（内容过长已截断）' };
+  }
+  const rawVersions = (m.versions ?? []) as (MsgVersion | string)[];
+  if (rawVersions.length) {
+    const dropped = Math.max(0, rawVersions.length - MAX_VERSIONS);
+    const kept = rawVersions.slice(dropped).map((v) => {
+      const mv: MsgVersion = typeof v === 'string' ? { text: v } : v;
+      const text = typeof mv.text === 'string' && mv.text.length > MSG_CONTENT_MAX
+        ? mv.text.slice(0, MSG_CONTENT_MAX) + '…（内容过长已截断）'
+        : mv.text;
+      if (!mv.tail?.length || depth >= MAX_TAIL_DEPTH) return { text } as MsgVersion;
+      const cut = mv.tail.length > MAX_TAIL_MESSAGES ? mv.tail.slice(-MAX_TAIL_MESSAGES) : mv.tail;
+      return { text, tail: cut.map((tm) => sanitizeMessage(tm, budget, depth + 1)) } as MsgVersion;
+    });
+    const rawIdx = out.versionIndex ?? rawVersions.length - 1;
+    const idx = Math.min(Math.max(rawIdx - dropped, 0), kept.length - 1);
+    out = { ...out, versions: kept, versionIndex: idx };
+  }
+  return slimMessageMedia(out, budget) as ChatMsg;
+}
+
+/**
+ * 会话持久化前的瘦身：内容截断、版本裁剪（含分支尾巴）、媒体按预算丢弃。
+ *
+ * 传了共享预算就复用（persistConversations 用一份预算跨全部会话），否则单会话一份。
+ */
 export function sanitizeConv(
   c: Conversation,
   sharedBudget?: { left: number },
 ): Conversation {
   if (!c || !Array.isArray(c.messages)) return { ...c, updatedAt: c?.updatedAt ?? Date.now(), messages: [] };
-  // 传了共享预算就复用（persistConversations 用一份预算跨全部会话），否则单会话一份
   const budget = sharedBudget ?? { left: MEDIA_BUDGET_CHARS };
-  const trimmed = {
+  const trimmed: Conversation = {
     ...c,
     updatedAt: c.updatedAt ?? Date.now(),
-    messages: c.messages.map((m) => {
-      if (!m) return m;
-      let out = m;
-      if (typeof m.content === 'string' && m.content.length > MSG_CONTENT_MAX) {
-        out = { ...out, content: m.content.slice(0, MSG_CONTENT_MAX) + '…（内容过长已截断）' };
-      }
-      // 多版本（重新生成）：只留最近 MAX_VERSIONS 版，且每版同样截断。
-      // 不截断的话 10 次重新生成 × 20KB 就是 200KB/条，配额很快见底。
-      if (out.versions?.length) {
-        const all = out.versions;
-        const dropped = Math.max(0, all.length - MAX_VERSIONS);
-        const kept = all.slice(dropped).map((v) => (
-          typeof v === 'string' && v.length > MSG_CONTENT_MAX
-            ? v.slice(0, MSG_CONTENT_MAX) + '…（内容过长已截断）'
-            : v
-        ));
-        const rawIdx = out.versionIndex ?? all.length - 1;
-        const idx = Math.min(Math.max(rawIdx - dropped, 0), kept.length - 1);
-        out = { ...out, versions: kept, versionIndex: idx };
-      }
-      return out;
-    }),
+    messages: c.messages.map((m) => sanitizeMessage(m, budget, 0)),
   };
-  const withSlimMedia = { ...trimmed, messages: trimmed.messages.map((m) => slimMessageMedia(m, budget)) };
-  return slimWorkOutput(withSlimMedia, budget) as Conversation;
+  return slimWorkOutput(trimmed, budget) as Conversation;
 }
 
 export function loadConversations(key: string): Conversation[] {
@@ -248,14 +325,55 @@ export function loadConversations(key: string): Conversation[] {
   return arr.map((c) => sanitizeConv(c)).filter(Boolean);
 }
 
+/**
+ * 序列化会话：正常路径就是 `JSON.stringify`；只有数据结构坏掉时（混进 DOM 节点/事件/循环引用）
+ * 才走兜底，并且**大声说清**发生了什么。
+ *
+ * 为什么要有：2026-10-21 那次 `JSON.stringify` 抛 "Converting circular structure to JSON"，
+ * 直接让新建对话整个失败。任何一条脏数据都不该让整份历史写不进去。
+ */
+function serializeConversations(list: Conversation[]): string {
+  try {
+    return JSON.stringify(list);
+  } catch (e) {
+    console.error('[ai-chat] 会话序列化失败（有 DOM 节点 / 事件对象 / 循环引用混进来了），尝试剔除可疑字段重试：', e);
+  }
+  const strip = (v: unknown, depth = 0): unknown => {
+    if (depth > 12) return undefined;
+    if (Array.isArray(v)) return v.map((x) => strip(x, depth + 1));
+    if (!v || typeof v !== 'object') return typeof v === 'function' ? undefined : v;
+    if (looksLikeDomOrEvent(v)) return undefined;
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      const s = strip(val, depth + 1);
+      if (s !== undefined) out[k] = s;
+    }
+    return out;
+  };
+  try {
+    const cleaned = strip(list) as Conversation[];
+    const json = JSON.stringify(cleaned);
+    console.warn('[ai-chat] 已剔除不可序列化字段后写入；请按上面的报错去找污染源');
+    return json;
+  } catch (e2) {
+    console.error('[ai-chat] 剔除后仍无法序列化，本次只保留每条的骨架（id/role/content）：', e2);
+    return JSON.stringify(
+      list.map((c) => ({
+        ...c,
+        messages: (c.messages ?? []).map((m) => ({ id: m.id, role: m.role, content: m.content })),
+      })),
+    );
+  }
+}
+
 export function persistConversations(key: string, list: Conversation[]): void {
   const top = list.slice(0, 50);
   // 一份预算跨全部会话：否则"每会话 1.5M 字符"的累计值远超 localStorage 配额
   const budget = { left: MEDIA_BUDGET_CHARS };
   const prepared = top.map((c) => sanitizeConv(c, budget));
-  const json = JSON.stringify(prepared);
+  const json = serializeConversations(prepared);
   if (json.length <= TOTAL_PERSIST_CHARS) {
-    storage.setJSON(key, prepared);
+    storage.setString(key, json);
     if (budget.left < MEDIA_BUDGET_CHARS) {
       console.info(
         `[ai-chat] 会话持久化：${prepared.length} 个，媒体占用 ${MEDIA_BUDGET_CHARS - budget.left} 字符`,
@@ -272,5 +390,5 @@ export function persistConversations(key: string, list: Conversation[]): void {
     `[ai-chat] 会话持久化超限（${json.length} > ${TOTAL_PERSIST_CHARS} 字符），` +
       `已丢弃全部内嵌媒体后重写（${retry.length} 字符）；图片/音频不再随历史保存`,
   );
-  storage.setJSON(key, textOnly);
+  storage.setString(key, retry);
 }

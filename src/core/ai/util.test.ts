@@ -7,7 +7,7 @@
  * 这条链路的错误代价是数据丢失，所以把口径钉住。
  */
 import { describe, it, expect } from 'vitest';
-import { makeConv, sanitizeConv, mergeConversations, resolveTitle, isPlaceholderTitle, freezeVersions } from './util';
+import { makeConv, sanitizeConv, mergeConversations, resolveTitle, isPlaceholderTitle, freezeVersions, stashTail, pickVersion, sanitizeSeed } from './util';
 
 /** 造一个指定长度的假 data URL（字符数 = prefix + n）。 */
 const fakeMedia = (mime: string, n: number) => `data:${mime};base64,` + 'A'.repeat(n);
@@ -190,40 +190,144 @@ describe('resolveTitle（会话命名只做一次）', () => {
 });
 
 /**
- * 重新生成的多版本（1/2 分页）。
+ * 重新生成的多版本（1/2 分页）+ 每版自带的分支尾巴。
  *
- * 这套模型的要害是"content 永远等于 versions[versionIndex]"：
- * 流式期间 content 是活的、versions 末位是空占位 —— 一旦回填写错槽位，
- * 用户切回去就会看到空字符串或上一版的错位文本。
+ * 要害一：`content` 永远等于 `versions[versionIndex].text`。流式期间 content 是活的、
+ * 末位是空占位 —— 回填写错槽位，用户切回去就看到空串或错位文本。
+ *
+ * 要害二：版本切走时**活跃后续要压回旧版本**，切回来要**原样装回去**。
+ * 压漏了 = 旧分支的后续永久丢失；不装回 = 切了版本却看不到那一段对话。
  */
+/**
+ * 新建对话的 seed 校验。
+ *
+ * 血案（2026-10-21，用户实测"新建对话就报错"）：侧栏 `onClick={primaryAction.onClick}`
+ * 把 MouseEvent 当第一参传给了 `newConversation(seed)`，`{ ...makeConv(), ...seed }`
+ * 于是把事件的 `target`（HTMLButtonElement）摊进了会话，持久化时 JSON.stringify
+ * 撞上 `__reactFiber$… → FiberNode → stateNode` 的循环引用，整份历史写不进去。
+ */
+describe('sanitizeSeed（新建对话的种子）', () => {
+  it('普通对象原样接受', () => {
+    expect(sanitizeSeed({ title: '自定义标题' })).toEqual({ title: '自定义标题' });
+  });
+
+  it('空值 / 数组 / 原始值一律拒绝', () => {
+    expect(sanitizeSeed(undefined)).toBeUndefined();
+    expect(sanitizeSeed(null)).toBeUndefined();
+    expect(sanitizeSeed([])).toBeUndefined();
+    expect(sanitizeSeed('x')).toBeUndefined();
+    expect(sanitizeSeed(3)).toBeUndefined();
+  });
+
+  it('React 合成事件被拒绝（就是那次崩溃的输入）', () => {
+    const fakeEvent = {
+      nativeEvent: { type: 'click' },
+      _reactName: 'onClick',
+      target: { nodeType: 1, nodeName: 'BUTTON' },
+    };
+    expect(sanitizeSeed(fakeEvent)).toBeUndefined();
+  });
+
+  it('DOM 节点被拒绝', () => {
+    expect(sanitizeSeed({ nodeType: 1, nodeName: 'BUTTON' })).toBeUndefined();
+  });
+
+  it('非普通对象（类实例）被拒绝，避免把自带原型的东西写进会话', () => {
+    class Weird { x = 1; }
+    expect(sanitizeSeed(new Weird())).toBeUndefined();
+  });
+});
+
 describe('freezeVersions（多版本回填）', () => {
   it('没重新生成过 → 只有当前这一版', () => {
-    expect(freezeVersions({ content: '只有一版' })).toEqual(['只有一版']);
+    expect(freezeVersions({ content: '只有一版' })).toEqual([{ text: '只有一版' }]);
   });
 
   it('流式刚结束（末位是空占位）→ 把 content 写进末位', () => {
-    expect(freezeVersions({ content: '第二版', versions: ['第一版', ''], versionIndex: 1 }))
-      .toEqual(['第一版', '第二版']);
+    expect(freezeVersions({ content: '第二版', versions: [{ text: '第一版' }, { text: '' }], versionIndex: 1 }))
+      .toEqual([{ text: '第一版' }, { text: '第二版' }]);
   });
 
-  it('当前显示的是旧版 → 回填自己那一格，不动别的版本', () => {
-    expect(freezeVersions({ content: '第一版', versions: ['第一版', '第二版'], versionIndex: 0 }))
-      .toEqual(['第一版', '第二版']);
+  it('当前显示的是旧版 → 回填自己那一格，不动别的版本（含尾巴）', () => {
+    const tail = [{ id: 't1', role: 'user' as const, content: '后续' }];
+    expect(freezeVersions({
+      content: '第一版',
+      versions: [{ text: '第一版', tail }, { text: '第二版' }],
+      versionIndex: 0,
+    })).toEqual([{ text: '第一版', tail }, { text: '第二版' }]);
   });
 
   it('index 越界时收敛到合法槽位，不抛错', () => {
-    expect(freezeVersions({ content: 'x', versions: ['a', 'b'], versionIndex: 99 })).toEqual(['a', 'x']);
-    expect(freezeVersions({ content: 'x', versions: ['a', 'b'], versionIndex: -3 })).toEqual(['x', 'b']);
+    expect(freezeVersions({ content: 'x', versions: [{ text: 'a' }, { text: 'b' }], versionIndex: 99 }))
+      .toEqual([{ text: 'a' }, { text: 'x' }]);
+    expect(freezeVersions({ content: 'x', versions: [{ text: 'a' }, { text: 'b' }], versionIndex: -3 }))
+      .toEqual([{ text: 'x' }, { text: 'b' }]);
   });
 
-  it('持久化：多版本只留最近 5 版，versionIndex 跟着平移', () => {
+  it('老数据是 string[]（2026-10-21 之前）→ 自动升级成 { text }', () => {
+    const legacy = ['旧一', '旧二'] as unknown as { text: string }[];
+    expect(freezeVersions({ content: '旧二', versions: legacy, versionIndex: 1 }))
+      .toEqual([{ text: '旧一' }, { text: '旧二' }]);
+  });
+});
+
+describe('stashTail / pickVersion（分支尾巴）', () => {
+  const tail = [
+    { id: 'b1', role: 'user' as const, content: '继续' },
+    { id: 'b2', role: 'assistant' as const, content: '续写' },
+  ];
+
+  it('切走时把活跃后续压进当前版本', () => {
+    const vs = stashTail([{ text: 'A' }, { text: 'B' }], 0, tail);
+    expect(vs[0].tail).toEqual(tail);
+    expect(vs[1].tail).toBeUndefined();
+  });
+
+  it('空后续要清掉旧尾巴，不能保留上一版的分支', () => {
+    const vs = stashTail([{ text: 'A', tail }, { text: 'B' }], 0, []);
+    expect(vs[0].tail).toBeUndefined();
+  });
+
+  it('取版本：正文 + 该版本的后续（没有后续就是空数组）', () => {
+    const vs = [{ text: 'A', tail }, { text: 'B' }];
+    expect(pickVersion(vs, 0)).toEqual({ text: 'A', tail });
+    expect(pickVersion(vs, 1)).toEqual({ text: 'B', tail: [] });
+  });
+
+  it('index 越界收敛，不抛错', () => {
+    const vs = [{ text: 'A' }];
+    expect(pickVersion(vs, 9)).toEqual({ text: 'A', tail: [] });
+    expect(stashTail(vs, -1, tail)[0].tail).toEqual(tail);
+  });
+});
+
+describe('sanitizeConv —— 版本与分支的持久化', () => {
+  it('多版本只留最近 5 版，versionIndex 跟着平移', () => {
     const c = makeConv();
-    const versions = ['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'];
+    const versions = ['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'].map((t) => ({ text: t }));
     c.messages.push({ id: 'm1', role: 'assistant', content: 'v7', versions, versionIndex: 6 });
     const out = sanitizeConv(c);
     const m = out.messages[0];
-    expect(m.versions).toEqual(['v3', 'v4', 'v5', 'v6', 'v7']);
-    // 原来 index=6（最后一版）⇒ 丢掉 2 条后应为 4
+    expect(m.versions!.map((v) => v.text)).toEqual(['v3', 'v4', 'v5', 'v6', 'v7']);
     expect(m.versionIndex).toBe(4);
+  });
+
+  it('分支尾巴也参与瘦身（正文截断 + 媒体丢弃），不是原样写进 localStorage', () => {
+    const huge = 'x'.repeat(40_000);
+    const c = makeConv();
+    c.messages.push({
+      id: 'm1',
+      role: 'assistant',
+      content: '当前',
+      versions: [{
+        text: '旧版',
+        tail: [{ id: 't1', role: 'assistant' as const, content: huge }],
+      }],
+      versionIndex: 0,
+    });
+    const out = sanitizeConv(c);
+    const t = out.messages[0].versions![0].tail![0];
+    expect(t.content.length).toBeLessThan(huge.length);
+    expect(t.content.endsWith('…（内容过长已截断）')).toBe(true);
   });
 });

@@ -494,6 +494,8 @@ describe('前后端命令参数名契约', () => {
     expect(calls.some((c) => c.cmd === 'ai_chat_agent')).toBe(true);
   });
 
+  // 30s：这个用例要遍历全仓 ~3000 个源文件（含 plugins/ 与 src-tauri/src），
+  // 默认 5s 在机器忙（同时编译 Rust / 跑 tsc）时会假红。超时不是逻辑问题，是负载问题。
   it('所有 invoke 的对象键都是该命令的真实参数（Tauri 只认 camelCase）', () => {
     const bad: string[] = [];
     for (const c of invokeCalls()) {
@@ -511,7 +513,7 @@ describe('前后端命令参数名契约', () => {
       `以下调用的参数名与 Rust 签名对不上（Tauri 默认 rename_all = "camelCase"，\n` +
         `把 snake_case 写在 invoke 里会直接 "invalid args"）：\n${bad.join('\n')}`,
     ).toEqual([]);
-  });
+  }, 30_000);
 
   it('非 Option 参数必须都传（没有展开时才判）', () => {
     const bad: string[] = [];
@@ -532,7 +534,7 @@ describe('前后端命令参数名契约', () => {
       }
     }
     expect(bad, `以下调用缺少 Rust 侧的必填参数：\n${bad.join('\n')}`).toEqual([]);
-  });
+  }, 30_000);
 });
 
 });

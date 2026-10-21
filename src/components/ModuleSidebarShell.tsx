@@ -169,8 +169,13 @@ export function ModuleSidebarShell({
           {/* 主操作按钮（可选） */}
           {primaryAction && (
             <div className="shrink-0 px-4 pb-2">
+              {/* 类型是 () => void ⇒ 调用时**不带参**。曾经直接写 onClick={primaryAction.onClick}，
+                  于是 MouseEvent 被当成第一参交给业务回调（AI 对话的 newConversation(seed)
+                  把它摊进了会话对象，持久化时 JSON.stringify 撞上
+                  HTMLButtonElement.__reactFiber → FiberNode → stateNode 的循环引用，
+                  表现为"点新建对话就报错"）。 */}
               <button
-                onClick={primaryAction.onClick}
+                onClick={() => primaryAction.onClick()}
                 className="btn-press w-full element-muted hover:element-hover transition-all py-2.5 rounded-xl font-medium"
               >
                 {primaryAction.label}

@@ -139,7 +139,7 @@ const Root = memo(function Root() {
         conversations={conversations}
         activeId={activeId}
         onSelect={selectConv}
-        onNew={newConversation}
+        onNew={() => newConversation()}
         onNewGroup={newGroup}
         onDelete={deleteConversation}
         onRename={renameConversation}

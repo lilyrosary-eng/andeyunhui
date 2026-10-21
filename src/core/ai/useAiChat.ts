@@ -11,7 +11,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { GROUP_HISTORY_LIMIT, safeMessages, buildRequestMessages } from '@/core/ai/chatPayload';
-import { uid, persistConversations, loadConversations, resolveTitle, freezeVersions, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
+import { uid, persistConversations, loadConversations, resolveTitle, freezeVersions, stashTail, pickVersion, sanitizeSeed, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
 import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { retrieveChatContext, ingestChatTurn, autoSyncCompanion } from '@/core/stores/semanticMemory';
 import { maybeSummarizeConversation } from '@/core/ai/l4SummaryLoop';
@@ -342,7 +342,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   }, []);
 
   const newConversation = useCallback((seed?: Partial<Conversation>) => {
-    const conv: Conversation = { ...makeConv(), ...seed };
+    // 只剩普通对象才当种子（事件对象/DOM 节点会被摊进会话，持久化时循环引用炸掉）
+    const conv: Conversation = { ...makeConv(), ...(sanitizeSeed(seed) ?? {}) };
     setConversations((prev) => [conv, ...prev]);
     setActiveId(conv.id);
     activeIdRef.current = conv.id;
@@ -816,15 +817,16 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   };
 
   /**
-   * 重新生成**最后一条**助手回复，旧版本保留下来（DeepSeek 那种 1/2 分页）。
+   * 重新生成任意一条助手回复，旧版本（含其后续对话）保留下来（DeepSeek 那种 1/2 分页）。
    *
    * 三个关键决定：
    *   · **复用同一条助手消息**（`reuseAssistantId`）而不是再追加一条：
    *     否则历史里会有两条回复，模型下一轮会同时看到自己两版答案。
    *   · 旧文本先冻结进 `versions`，新文本流式写进 `content`；
    *     切版本只换文本、不重新请求（只有重新生成才花 token）。
-   *   · 只允许最后一条：中间某轮重生成要连带丢弃它之后的所有轮次，
-   *     那是另一个决定，不能替用户做。
+   *   · 2026-10-21 起**任意一条**都能重新生成：这条之后的活跃对话会被冻结进
+   *     旧版本的 `tail`（不是丢掉）。切回旧版时那段后续原样装回来 ——
+   *     所以"中间轮次重生成"不再需要替用户做丢弃决定。
    */
   const regenerate = useCallback(
     async (msgId: string) => {
@@ -847,8 +849,8 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         return;
       }
       if (idx !== conv.messages.length - 1) {
-        console.warn('[ai-chat] 重新生成只支持最后一条回复（中间轮次会连带丢弃后续对话）');
-        return;
+        const n = conv.messages.length - idx - 1;
+        console.info(`[ai-chat] 重新生成中间轮次：其后 ${n} 条会收进旧版本（切回旧版可见）`);
       }
       let u = idx - 1;
       while (u >= 0 && conv.messages[u].role !== 'user') u -= 1;
@@ -865,22 +867,27 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         );
       }
 
-      // 冻结当前版本 + 为即将流式写入的新版本占位
-      const versions = freezeVersions(target);
-      versions.push('');
+      // 冻结：当前正文写进当前版，紧随其后的活跃对话也压进当前版（分支尾巴）。
+      // 不压的话，这段后续会跟着新版本一起走丢 —— 用户切回旧版就永远看不到它了。
+      const cur = Math.min(Math.max(target.versionIndex ?? ((target.versions?.length ?? 1) - 1), 0), Math.max((target.versions?.length ?? 1) - 1, 0));
+      const versions = stashTail(freezeVersions(target), cur, conv.messages.slice(idx + 1));
+      versions.push({ text: '' });
       patchConv(cid, (c) => ({
         ...c,
-        messages: c.messages.map((mm) => (mm.id === msgId
-          ? {
-            ...mm,
+        // 截断到这条消息：后续已存进旧版本的 tail，不再留在活跃列表里
+        messages: [
+          ...c.messages.slice(0, idx),
+          {
+            ...target,
             content: '',
             reasoning: '',
             error: undefined,
             agentSteps: undefined,
+            feedback: undefined,
             versions,
             versionIndex: versions.length - 1,
-          }
-          : mm)),
+          },
+        ],
       }));
 
       // 用「这条助手消息之前的历史」重发：历史里已含本轮 user 消息 ⇒ skipUserAppend
@@ -894,7 +901,7 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
   );
 
   /**
-   * 切到上/下一版（dir = -1 / +1）。只换文本，不发请求。
+   * 切到上/下一版（dir = -1 / +1）。只换文本**和它的分支尾巴**，不发请求。
    *
    * 生成中不允许切：那时 `content` 还在长，切走会把半截文本固化成一个版本。
    */
@@ -907,23 +914,28 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         return;
       }
       const conv = stateRef.current.conversations.find((c) => c.id === cid);
-      const msg = conv?.messages.find((m) => m.id === msgId);
-      if (!conv || !msg) {
+      const idx = conv ? conv.messages.findIndex((m) => m.id === msgId) : -1;
+      if (!conv || idx < 0) {
         console.warn('[ai-chat] 切换版本：找不到消息', msgId);
         return;
       }
+      const msg = conv.messages[idx];
       if ((msg.versions?.length ?? 0) < 2) return;
-      const vs = freezeVersions(msg);
-      const cur = Math.min(Math.max(msg.versionIndex ?? 0, 0), vs.length - 1);
+      const cur = Math.min(Math.max(msg.versionIndex ?? 0, 0), msg.versions!.length - 1);
+      // 先把「这条之后还活着的对话」压回当前版本，再取目标版本的正文 + 尾巴
+      const vs = stashTail(freezeVersions(msg), cur, conv.messages.slice(idx + 1));
       const next = (cur + dir + vs.length) % vs.length;
       if (next === cur) return;
+      const picked = pickVersion(vs, next);
       patchConv(cid, (c) => ({
         ...c,
-        messages: c.messages.map((mm) => (mm.id === msgId
-          ? { ...mm, versions: vs, versionIndex: next, content: vs[next] }
-          : mm)),
+        messages: [
+          ...c.messages.slice(0, idx),
+          { ...msg, versions: vs, versionIndex: next, content: picked.text },
+          ...picked.tail,
+        ],
       }));
-      console.info(`[ai-chat] 切换回复版本：${next + 1}/${vs.length}`);
+      console.info(`[ai-chat] 切换回复版本：${next + 1}/${vs.length}（该分支后续 ${picked.tail.length} 条）`);
     },
     [patchConv],
   );

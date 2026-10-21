@@ -61,7 +61,7 @@ const MessageActions = memo(function MessageActions({
 }) {
   const [copied, setCopied] = useState(false);
   const isAsst = msg.role === 'assistant';
-  const btn = `p-1 rounded-md transition-colors hover:bg-black/10 dark:hover:bg-white/10 ${muted}`;
+  const btn = `p-1.5 rounded-lg transition-colors hover:bg-black/10 dark:hover:bg-white/10 ${muted}`;
 
   const copy = () => {
     const done = () => {
@@ -100,9 +100,9 @@ const MessageActions = memo(function MessageActions({
   };
 
   return (
-    <div className="flex items-center gap-0.5 mt-1.5 -mb-0.5 opacity-45 hover:opacity-100 transition-opacity">
+    <div className={`flex items-center gap-1 mt-1 px-0.5 opacity-45 hover:opacity-100 transition-opacity ${msg.role === 'user' ? 'justify-end' : ''}`}>
       <button type="button" className={btn} title="复制这条消息" onClick={copy}>
-        {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+        {copied ? <Check size={17} className="text-emerald-500" /> : <Copy size={17} />}
       </button>
 
       {/* 版本分页：重新生成过后才出现（DeepSeek 那种 1/2）。
@@ -125,9 +125,9 @@ const MessageActions = memo(function MessageActions({
                 onSwitchVersion(msg.id, -1);
               }}
             >
-              <ChevronLeft size={13} />
+              <ChevronLeft size={16} />
             </button>
-            <span className="text-[11px] tabular-nums opacity-80" title="当前第几版 / 共几版">
+            <span className="text-[12px] tabular-nums opacity-80" title="当前第几版 / 共几版">
               {cur + 1}/{count}
             </span>
             <button
@@ -142,7 +142,7 @@ const MessageActions = memo(function MessageActions({
                 onSwitchVersion(msg.id, 1);
               }}
             >
-              <ChevronRight size={13} />
+              <ChevronRight size={16} />
             </button>
           </span>
         );
@@ -151,21 +151,23 @@ const MessageActions = memo(function MessageActions({
       {isAsst && onRegenerate && (
         <button
           type="button"
-          className={`${btn} ${isLastAssistant && !busy ? '' : 'opacity-35 cursor-not-allowed'}`}
+          className={`${btn} ${busy ? 'opacity-35 cursor-not-allowed' : ''}`}
           title={
-            isLastAssistant
-              ? '重新生成这条回复'
-              : '只有最后一条回复能重新生成'
+            busy
+              ? '生成中…'
+              : isLastAssistant
+                ? '重新生成这条回复'
+                : '从这里重新生成：当前后续会收进旧分支，切回旧版可见'
           }
           onClick={() => {
-            if (!isLastAssistant || busy) {
-              console.warn('[ai-chat] 重新生成：仅支持最后一条回复且不在生成中');
+            if (busy) {
+              console.warn('[ai-chat] 重新生成：正在生成中');
               return;
             }
             onRegenerate(msg.id);
           }}
         >
-          <RefreshCw size={13} />
+          <RefreshCw size={17} />
         </button>
       )}
 
@@ -177,7 +179,7 @@ const MessageActions = memo(function MessageActions({
             title={msg.feedback === 'up' ? '取消点赞' : '这条回复有帮助'}
             onClick={() => onRate(msg.id, 'up')}
           >
-            <ThumbsUp size={13} />
+            <ThumbsUp size={17} />
           </button>
           <button
             type="button"
@@ -185,7 +187,7 @@ const MessageActions = memo(function MessageActions({
             title={msg.feedback === 'down' ? '取消点踩' : '这条回复不好'}
             onClick={() => onRate(msg.id, 'down')}
           >
-            <ThumbsDown size={13} />
+            <ThumbsDown size={17} />
           </button>
         </>
       )}
@@ -197,7 +199,7 @@ const MessageActions = memo(function MessageActions({
           title={speaking ? '停止朗读' : '朗读这条回复'}
           onClick={() => onSpeak(msg.id, msg.content)}
         >
-          {speaking ? <VolumeX size={13} /> : <Volume2 size={13} />}
+          {speaking ? <VolumeX size={17} /> : <Volume2 size={17} />}
         </button>
       )}
     </div>
@@ -756,7 +758,10 @@ export const AiChatConversation = memo(function AiChatConversation({
                     </div>
                   )}
                 </div>
-                <div className={`group min-w-0 max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed break-words ${bubbleCls(m.role)}`}>
+                {/* 列容器：气泡 + 操作行。操作行**在气泡外面**（用户要求：别被气泡包着），
+                    图标也放大一档（13 → 17），仍保持"平时半透明、hover 全亮"的克制感。 */}
+                <div className={`group min-w-0 max-w-[78%] flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+                <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed break-words ${bubbleCls(m.role)}`}>
                   {m.role === 'assistant' && activeConv?.mode === 'group' && m.speakerId && (() => {
                     const speaker = useCompanionStore.getState().collection.companions.find((c) => c.id === m.speakerId);
                     return speaker ? (
@@ -929,8 +934,9 @@ export const AiChatConversation = memo(function AiChatConversation({
                   ) : (
                     busy && m.role === 'assistant' ? <span className="inline-flex gap-1 text-neutral-400"><span className="animate-pulse">●</span><span className="animate-pulse delay-150">●</span><span className="animate-pulse delay-300">●</span></span> : ''
                   )}
-                  {/* 操作行：只要有一个回调就渲染（胶囊等只读入口不传 = 不渲染）。
-                      错误气泡不渲染：复制一条报错没有意义，重新生成也没有原文可依赖。 */}
+                </div>
+                  {/* 操作行：气泡**外面**（用户要求：别被气泡包着）。只要有一个回调就渲染
+                      （胶囊等只读入口不传 = 不渲染）；错误气泡不渲染：复制报错没意义。 */}
                   {(onRegenerate || onSwitchVersion || onRate) && !m.error && !!m.content && !m.toolNote && (
                     <MessageActions
                       msg={m}

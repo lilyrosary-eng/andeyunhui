@@ -36,6 +36,21 @@ export interface SendAttachment {
   text?: string;
 }
 
+/**
+ * 一条回复的**一个版本**（重新生成产生）。
+ *
+ * `text` 是这一版的正文；`tail` 是「从这一版继续往下聊的整段对话」。
+ *
+ * 为什么要 tail：用户要的是"任意一条都能重新生成，但旧分支的后续不丢，
+ * 只有切回那一版才看到"。同一格塞不下两条后续，所以后续必须跟着版本走 ——
+ * 切版本时把活跃尾巴压回旧版本、再把新版本的尾巴装进消息列表。
+ */
+export interface MsgVersion {
+  text: string;
+  /** 这一版之后的对话（含 user/assistant 全部）。缺省 = 这一版之后没有后续。 */
+  tail?: ChatMsg[];
+}
+
 export interface ChatMsg {
   id: string;
   role: 'user' | 'assistant';
@@ -56,11 +71,15 @@ export interface ChatMsg {
    * 同一轮回复的**历史版本**（重新生成产生）。
    *
    * 语义：`versions` 长度 = 版本数，最后一个槽位就是"当前这版"；
-   * `content` 永远等于 `versions[versionIndex]`（流式期间是正在生成的那一版）。
+   * `content` 永远等于 `versions[versionIndex].text`（流式期间是正在生成的那一版）。
    * 为什么不用"新消息"表示新版本：那会把两条回复都塞进历史，模型下一轮会同时
    * 看到自己两版答案。同一条消息内换文本，历史只有一条，语义才对。
+   *
+   * 2026-10-21：每一版还带 `tail` —— 从这一版**往下聊的后续整段**。
+   * 重新生成中间某条时，旧分支的后续不会被丢弃，而是冻结进旧版本的 tail；
+   * 切回那一版时原样装回消息列表（"只有回到那一页才看得到"）。
    */
-  versions?: string[];
+  versions?: MsgVersion[];
   /** 当前显示的是第几版（0 起）。缺省 = 最后一版。 */
   versionIndex?: number;
   error?: boolean;
