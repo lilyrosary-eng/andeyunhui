@@ -27,6 +27,11 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
     abort,
     webSearch,
     setWebSearch,
+    // 重新生成 / 版本分页（2026-10-21）：浮岛对话和 AI 对话页共用同一套会话数据，
+    // 这里不传回调的话，浮岛里就看不到那一排操作图标（以前是"只读入口不渲染"）。
+    regenerate,
+    switchVersion,
+    rateMessage,
   } = useAiChat({ persistKey: CAPSULE_CONV_KEY });
 
   return (
@@ -44,6 +49,9 @@ function CapsuleChat({ coverUrl }: { coverUrl: string | null }) {
       onNewConv={newConversation}
       onDeleteConv={deleteConversation}
       onRenameConv={renameConversation}
+      onRegenerate={(id) => void regenerate(id)}
+      onSwitchVersion={switchVersion}
+      onRate={rateMessage}
       coverUrl={coverUrl}
       showKeepButton
       keepPinned={keepOpen}
