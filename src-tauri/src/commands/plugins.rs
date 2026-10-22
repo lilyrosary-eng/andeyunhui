@@ -132,42 +132,72 @@ pub(crate) fn validate_required_assets(app: &tauri::AppHandle, manifest: &Plugin
     }
 }
 
-/// 获取两个插件目录中最近修改时间（秒），用于缓存失效判断
-pub(crate) fn plugins_max_mtime(app: &AppHandle) -> u64 {
-    let dirs: Vec<PathBuf> = [
-        get_bundled_plugins_dir(app),
-        get_user_plugins_dir(app),
-    ].into_iter().flatten().collect();
-    let mut max = 0u64;
-    for d in &dirs {
-        if let Ok(meta) = std::fs::metadata(d) {
+/// 插件目录指纹（毫秒精度）：任何可能改变扫描结果的文件系统变化都必须让它变化。
+///
+/// ## 为什么要换掉旧的「最近修改时间（秒）+ 扫描时刻比较」（2026-10-22 血案）
+/// 旧实现只取 `bundled-plugins/` 与**一级**子目录的 mtime，秒精度，且用
+/// 「扫描时刻 >= mtime」判断新鲜。两个漏洞叠起来会让一个插件**永久消失**：
+///   1. `scripts/deploy-plugins.mjs` 复制时是「先清空目标目录，再写 manifest.json」，
+///      中间那几毫秒里 `manifest.json` 不存在；
+///   2. 应用恰好此刻扫描 → 读失败 → 该插件进 `rejected` → 结果被缓存。
+///      而 manifest.json 是**文件**，改写它不动父目录 mtime ⇒ 缓存永远判新鲜，
+///      插件在「拓展管理」里一直显示待安装、导航栏入口消失，**直到重启进程**。
+/// （用户实测：音乐模块就是这么没的；重新部署也没用，因为部署同样只改文件。）
+///
+/// 现在：目录 + 每个 `manifest.json` 的 mtime 一起纳入；深度上限 3
+/// （`bundled-plugins/茑萝/ide/manifest.json` 正好在第 3 层）；
+/// 碰到插件根（有 manifest.json）就停止下潜 —— 插件内部资产变化不影响扫描结果。
+pub(crate) fn plugins_fingerprint(app: &AppHandle) -> u64 {
+    let dirs: Vec<PathBuf> = [get_bundled_plugins_dir(app), get_user_plugins_dir(app)]
+        .into_iter()
+        .flatten()
+        .collect();
+    fingerprint_dirs(&dirs)
+}
+
+/// [`plugins_fingerprint`] 的纯目录实现（便于单测；不依赖 AppHandle）。
+pub(crate) fn fingerprint_dirs(dirs: &[PathBuf]) -> u64 {
+    fn stamp(path: &std::path::Path, acc: &mut u64) {
+        if let Ok(meta) = std::fs::metadata(path) {
             if let Ok(modified) = meta.modified() {
                 if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    max = max.max(dur.as_secs());
+                    *acc = (*acc).max(dur.as_millis() as u64);
                 }
             }
         }
     }
-    // 递归子目录的 mtime（新增/删除插件子目录会更新父目录 mtime）
-    for d in &dirs {
-        if let Ok(entries) = std::fs::read_dir(d) {
+    fn walk(dir: &std::path::Path, depth: usize, acc: &mut u64) {
+        let manifest = dir.join("manifest.json");
+        if manifest.is_file() {
+            // 插件根：只认 manifest.json 的 mtime。
+            // 不 stamp 目录本身 —— 新增/覆盖 index.js 等内部资产会改目录 mtime，
+            // 但那不影响扫描结果（只影响加载），不该逼着每次都全量重扫。
+            stamp(&manifest, acc);
+            return;
+        }
+        stamp(dir, acc);
+        if depth >= 3 {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                if let Ok(meta) = entry.metadata() {
-                    if let Ok(modified) = meta.modified() {
-                        if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                            max = max.max(dur.as_secs());
-                        }
-                    }
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    walk(&entry.path(), depth + 1, acc);
                 }
             }
         }
     }
-    max
+
+    let mut acc = 0u64;
+    for d in dirs {
+        walk(d, 0, &mut acc);
+    }
+    acc
 }
 
 /// 扫描 bundled-plugins/ 与 user_plugins/ 下所有子目录，校验 manifest.json 并返回有效 + 被拒绝的插件列表
 /// 阶段 0：Rust 端完成 manifest 存在性、解析、必填字段、版本与依赖校验
-/// 结果会被缓存，仅当插件目录 mtime 变化时重新扫描
+/// 结果会被缓存，仅当 [`plugins_fingerprint`]（目录 + 每个 manifest.json 的 mtime）变化时重扫
 #[tauri::command]
 pub async fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanResult, String> {
     let app2 = app.clone();
@@ -177,17 +207,26 @@ pub async fn get_installed_plugins(app: tauri::AppHandle) -> Result<PluginScanRe
 }
 
 /// 插件扫描/解压的同步主体（放到 spawn_blocking 线程执行，避免占死 UI/IPC 线程）。
-/// 快路径：插件目录 mtime 未变且已有缓存 → 直接命中，不触发解压开销。
+/// 快路径：指纹未变且已有缓存 → 直接命中，不触发解压开销。
 /// 慢路径：缓存失效/未初始化 → 先补齐 .mufurong/.mujin 解压，再全量扫描重建缓存。
 pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResult, String> {
-    let current_mtime = plugins_max_mtime(&app);
+    let fingerprint = plugins_fingerprint(&app);
 
-    // 快路径命中缓存则直接返回（解压放慢路径，避免热路径白白做 sha256+解压）
+    // 快路径命中缓存则直接返回（解压放慢路径，避免热路径白白做 sha256+解压）。
+    // 缓存键是**指纹**而不是「扫描时刻」：同一毫秒内的改写用时刻比较会误判成新鲜。
     if let Ok(cache) = PLUGIN_SCAN_CACHE.lock() {
-        if let Some((ref cached, ref cached_time)) = *cache {
-            if *cached_time >= SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(current_mtime) {
+        if let Some((ref cached, ref cached_fp)) = *cache {
+            if *cached_fp == fingerprint {
+                log::debug!(
+                    "[plugins] 扫描缓存命中（指纹 {fingerprint}）：{} 个有效 / {} 个拒绝",
+                    cached.valid.len(),
+                    cached.rejected.len()
+                );
                 return Ok(cached.clone());
             }
+            log::info!(
+                "[plugins] 扫描缓存失效（指纹 {cached_fp} → {fingerprint}），重新扫描插件目录"
+            );
         }
     }
 
@@ -211,6 +250,9 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
     let mut valid = Vec::new();
     let mut rejected = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
+    // 「可重试」失败：manifest 读不到 / 解析不了。几乎都是部署脚本写入的瞬时窗口，
+    // 缓存它等于把一次坏运气钉死到进程结束（音乐模块消失就是这么来的）⇒ 出现即不写缓存。
+    let mut transient_reject = false;
 
     // 加载用户可见性覆盖（AppData/plugin_visibility.json）：仅「用户显式开关过」的插件才有记录；
     // 新机首次运行该文件不存在 → 返回空 map（不写任何种子数据），后续解析回落到「默认开启」。
@@ -266,6 +308,8 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
         let content = match std::fs::read_to_string(&manifest_path) {
             Ok(c) => c,
             Err(e) => {
+                log::warn!("[plugins] manifest 读取失败（视为可重试，不写缓存）: {} — {e}", manifest_path.display());
+                transient_reject = true;
                 rejected.push(RejectedPlugin {
                     folder_name,
                     reason: format!("manifest.json 读取失败: {}", e),
@@ -278,6 +322,8 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
         let mut manifest: PluginManifest = match serde_json::from_str(&content) {
             Ok(m) => m,
             Err(e) => {
+                log::warn!("[plugins] manifest 解析失败（视为可重试，不写缓存）: {} — {e}", manifest_path.display());
+                transient_reject = true;
                 rejected.push(RejectedPlugin {
                     folder_name,
                     reason: format!("manifest.json JSON 解析失败: {}", e),
@@ -356,8 +402,25 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
     }
 
     let result = PluginScanResult { valid, rejected };
-    if let Ok(mut cache) = PLUGIN_SCAN_CACHE.lock() {
-        *cache = Some((result.clone(), SystemTime::now()));
+    log::info!(
+        "[plugins] 扫描完成：{} 个有效 / {} 个拒绝{}",
+        result.valid.len(),
+        result.rejected.len(),
+        if transient_reject { "（含可重试失败）" } else { "" }
+    );
+    for r in &result.rejected {
+        log::warn!("[plugins] 拒绝 {} — {}", r.folder_name, r.reason);
+    }
+    if transient_reject {
+        // 不写缓存：下一次 get_installed_plugins 会重扫。部署脚本正在改写目录时就是这种情况，
+        // 缓存它会让插件在「拓展管理」里一直显示待安装（2026-10-22 音乐模块消失事故）。
+        log::warn!("[plugins] 本次结果含可重试失败，跳过缓存写入（下次调用会重新扫描）");
+    } else if let Ok(mut cache) = PLUGIN_SCAN_CACHE.lock() {
+        // 指纹在解压之后重算：extract_mufurong_plugins 会新增目录，用扫描开始时的旧指纹
+        // 会让下一次调用立刻判失效、白扫一遍。
+        let fp_after = plugins_fingerprint(&app);
+        *cache = Some((result.clone(), fp_after));
+        log::debug!("[plugins] 已写入扫描缓存（指纹 {fp_after}）");
     }
     Ok(result)
 }
@@ -775,4 +838,93 @@ pub fn open_plugin_folder(app: tauri::AppHandle, plugin_id: String) -> Result<()
     app.opener()
         .open_path(path_str, None::<&str>)
         .map_err(|e| format!("打开文件夹失败: {}", e))
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::fingerprint_dirs;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// 造一个临时插件根：root/<name>/manifest.json
+    fn make_root(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("andy-plugin-fp-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(p.join("铃兰")).unwrap();
+        fs::write(p.join("铃兰").join("manifest.json"), r#"{"id":"music"}"#).unwrap();
+        p
+    }
+
+    fn fp(root: &Path) -> u64 {
+        fingerprint_dirs(&[root.to_path_buf()])
+    }
+
+    /// **血案本体**：改写 manifest.json 必须让指纹变化。
+    ///
+    /// 旧实现只取目录 mtime，而改文件不动目录 mtime ⇒ 缓存永远判新鲜，
+    /// 于是「部署窗口期扫到一个半成品」会被永久缓存，插件在导航栏消失、
+    /// 拓展管理显示待安装（2026-10-22 音乐模块事故）。
+    #[test]
+    fn rewriting_manifest_invalidates_fingerprint() {
+        let root = make_root("rewrite");
+        let before = fp(&root);
+        // 确保落到不同的毫秒（NTFS 精度 100ns，但指纹截到毫秒）
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(root.join("铃兰").join("manifest.json"), r#"{"id":"music","v":2}"#).unwrap();
+        let after = fp(&root);
+        assert_ne!(before, after, "改写 manifest.json 后指纹没变 —— 缓存会永久判新鲜");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 部署的原子替换（tmp + rename）同样要触发失效：rename 会更新文件 mtime。
+    #[test]
+    fn atomic_replace_invalidates_fingerprint() {
+        let root = make_root("rename");
+        let before = fp(&root);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let tmp = root.join("铃兰").join("manifest.json.tmp");
+        fs::write(&tmp, r#"{"id":"music","v":3}"#).unwrap();
+        fs::rename(&tmp, root.join("铃兰").join("manifest.json")).unwrap();
+        assert_ne!(before, fp(&root), "tmp+rename 替换后指纹没变");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 新增/删除插件目录必须让指纹变化（缓存失效的最基本要求）。
+    #[test]
+    fn adding_and_removing_plugin_dir_invalidates_fingerprint() {
+        let root = make_root("addrm");
+        let before = fp(&root);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::create_dir_all(root.join("玉兰")).unwrap();
+        fs::write(root.join("玉兰").join("manifest.json"), r#"{"id":"video"}"#).unwrap();
+        let added = fp(&root);
+        assert_ne!(before, added, "新增插件目录后指纹没变");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::remove_dir_all(root.join("玉兰")).unwrap();
+        assert_ne!(added, fp(&root), "删除插件目录后指纹没变");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 没有任何变化时指纹必须稳定 —— 否则每次调用都全量重扫，缓存形同虚设。
+    #[test]
+    fn fingerprint_is_stable_without_changes() {
+        let root = make_root("stable");
+        assert_eq!(fp(&root), fp(&root));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(fp(&root), fp(&root), "没改任何文件，指纹却变了");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 插件根之下的内部资产（index.js / assets）变化**不该**让指纹变：
+    /// 那不影响扫描结果，只影响加载，每次构建都重扫没有意义。
+    #[test]
+    fn plugin_internal_assets_do_not_invalidate_fingerprint() {
+        let root = make_root("inner");
+        let before = fp(&root);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(root.join("铃兰").join("index.js"), "// rebuilt").unwrap();
+        assert_eq!(before, fp(&root), "插件内部资产不该触发重扫");
+        let _ = fs::remove_dir_all(&root);
+    }
 }

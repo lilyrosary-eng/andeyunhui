@@ -21,6 +21,12 @@
 - **`src/core/clock.ts`**：把「今天是第几天」收敛成模块级缓存 + 跨天定时刷新，替掉 4 处渲染期 `Date.now()`（React 渲染期 impure）。
 
 ### 修复
+- **插件会「凭空消失」，直到重启进程**（用户实测：音乐模块入口不见了，拓展管理里显示成待安装）：`scan_plugins_sync` 的缓存用「扫描时刻 ≥ 目录 mtime（秒）」判新鲜，而 `deploy-plugins.mjs` 复制插件时是「先清空目标目录 → 再写 manifest.json」。若应用恰在那几毫秒里扫描，`manifest.json` 读不到 ⇒ 该插件进 `rejected` ⇒ 结果被缓存；但 manifest 是**文件**，改写它不动父目录 mtime ⇒ 缓存永远判新鲜，重新部署也没用。
+  - 缓存键换成**目录指纹**（`plugins_fingerprint`）：目录 mtime + 每个 `manifest.json` 的 mtime，毫秒精度，深度 ≤3，碰到插件根就停（内部资产变更不逼着重扫）。
+  - **可重试失败不写缓存**：`manifest.json` 读取/解析失败时跳过缓存写入，下次调用重扫。
+  - 部署脚本改为「不清 manifest → 写 `manifest.json.tmp` → `renameSync` 原子替换」，扫描侧要么看到旧的完整文件、要么看到新的完整文件，从源头缩小窗口。
+  - 5 项单测钉住指纹语义（改写 manifest / 原子替换 / 增删插件目录必须失效；无变化必须稳定；内部资产不该触发重扫）。
+- **陈旧影子插件每次启动刷 5 条「插件 id 重复」**：`user_plugins/niaoluo/{crypto,gongfang,gongjuxiang,huihua,ide}`（+ `.mufurong` 归档）与内置版 id 重复。只删目录不够——扫描慢路径会用 `extract_mufurong_plugins` 把归档重新解出来。部署脚本的影子清理改为**按 id 递归匹配目录与归档文件**，两边一起删。
 - **插件类型检查长期不可见**：`tsconfig.plugins.json` 原本只纳入攻防插件，其余插件（ai-chat / web-interface / rag / wps / 莲花 / 薄荷 …）共 16 处类型错误无人发现。已扩为 `plugins/**` 全量纳入并逐个清零。
   - 其中 `plugins/ai-chat` 的伴侣人设注入是**静默失效的真 bug**：`personaPrompt` / `systemPrompt` / `excludeGlobalPersona` 在 `useAiChat` 里从来是 hook 级 options，插件却按 per-send 参数传，导致人设完全没生效、消息对象还被塞了个假的 `images` 字段。修法是在 `send()` 上加第 4 个可选参 `SendOptions`（不改第 2 参语义，既有调用方零影响）。
   - `plugins/web-interface/src/Terminal.tsx`：`/// <reference path>` 多写了一级目录；`fb` 声明在 async IIFE 内而 cleanup 在外层引用，清理逻辑根本看不到它。

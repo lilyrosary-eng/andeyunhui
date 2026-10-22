@@ -23,7 +23,7 @@
 // BUILD_CLEAN=1 环境变量：跳过所有插件构建和部署，只保留空模块文件夹 + .gitkeep。
 // 用于 build_clean.bat 打包精简版安装包（不含插件代码，用户后续导入 .mufurong）。
 import { execSync, spawn } from 'node:child_process';
-import { mkdirSync, cpSync, readFileSync, existsSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, cpSync, readFileSync, existsSync, rmSync, readdirSync, statSync, writeFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cpus } from 'node:os';
@@ -257,12 +257,22 @@ for (const { relPath, id, manifest } of plugins) {
   const bundleTarget = join(bundledDir, relPath);
   if (existsSync(bundleTarget)) {
     for (const entry of readdirSync(bundleTarget)) {
+      // manifest.json 不清空：下面用「临时文件 + rename」原子替换。
+      // 旧写法先删 manifest 再写，中间几毫秒里应用若正好扫描，会把该插件判成
+      // 「manifest.json 读取失败」→ 进 rejected → 导航栏入口消失、拓展管理显示待安装
+      // （2026-10-22 音乐模块消失事故；Rust 侧已补指纹与不缓存可重试失败，这里是源头减窗）。
+      if (entry === 'manifest.json' || entry === 'manifest.json.tmp') continue;
       rmSync(join(bundleTarget, entry), { recursive: true, force: true });
     }
   } else {
     mkdirSync(bundleTarget, { recursive: true });
   }
-  cpSync(manifestSrc, join(bundleTarget, 'manifest.json'));
+  {
+    const tmpManifest = join(bundleTarget, 'manifest.json.tmp');
+    cpSync(manifestSrc, tmpManifest);
+    // rename 在同一分区上是原子的：扫描侧要么看到旧的完整文件，要么看到新的完整文件。
+    renameSync(tmpManifest, join(bundleTarget, 'manifest.json'));
+  }
   if (existsSync(distDir)) {
     cpSync(distDir, bundleTarget, { recursive: true });
   } else if (existsSync(entryFile)) {
@@ -286,6 +296,46 @@ function clearUserPluginShadow(relPath, id) {
       console.log(`  ✓ 清理陈旧影子: user_plugins/${key}`);
     }
   }
+  // 再按 id 递归找一遍：历史遗留的母目录名与现在不同（如 user_plugins/niaoluo/<id>），
+  // 只按 relPath/id 平铺匹配会漏，于是每次启动都刷一条「插件 id 重复，已跳过」。
+  // 内置 plugins/bundled-plugins 是权威副本，同 id 的用户态残缺影子一律删除。
+  //
+  // ⚠ 目录和 `.mufurong` **归档文件**都要删：扫描的慢路径会调用
+  // extract_mufurong_plugins 把 user_plugins 下的归档解成目录，只删目录的话
+  // 下一次扫描立刻又解出来（2026-10-22 实测：删完 mtime 当场变回现在）。
+  for (const shadow of findShadowEntriesByName(userPlugins, id, 3)) {
+    rmSync(shadow.full, { recursive: true, force: true });
+    console.log(`  ✓ 清理陈旧影子(按 id): user_plugins/${shadow.rel}`);
+  }
+  for (const shadow of findShadowEntriesByName(userPlugins, `${id}.mufurong`, 3)) {
+    rmSync(shadow.full, { recursive: true, force: true });
+    console.log(`  ✓ 清理陈旧影子(按 id): user_plugins/${shadow.rel}`);
+  }
+}
+
+/** 在 user_plugins 下递归找名字等于 name 的**目录或文件**，最多下潜 maxDepth 层 */
+function findShadowEntriesByName(root, name, maxDepth) {
+  const out = [];
+  const walk = (dir, depth) => {
+    if (depth > maxDepth) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      const rel = full.slice(root.length + 1).replace(/\\/g, '/');
+      if (e.name === name) {
+        out.push({ full, rel });
+        continue; // 命中即删，不再往里找
+      }
+      if (e.isDirectory()) walk(full, depth + 1);
+    }
+  };
+  walk(root, 1);
+  return out;
 }
 
 console.log('\n[Deploy] 所有插件部署完成');

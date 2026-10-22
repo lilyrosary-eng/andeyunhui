@@ -8,7 +8,9 @@
 
 use super::*;
 // ========== 插件扫描缓存（避免每次启动/刷新都重扫文件系统） ==========
-pub(crate) static PLUGIN_SCAN_CACHE: once_cell::sync::Lazy<Mutex<Option<(PluginScanResult, SystemTime)>>> =
+// 值 = (扫描结果, 目录指纹)。用指纹而不是「扫描时刻」做缓存键：旧写法在同一毫秒内
+// 改写、或只改文件不改目录时会把坏结果判成新鲜，导致插件永久消失（见 plugins_fingerprint 注释）。
+pub(crate) static PLUGIN_SCAN_CACHE: once_cell::sync::Lazy<Mutex<Option<(PluginScanResult, u64)>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
 
 // ========== 路径解析：统一开发期与打包后的插件/依赖目录 ==========

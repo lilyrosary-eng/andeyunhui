@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::SystemTime;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use serde_json::Value;
