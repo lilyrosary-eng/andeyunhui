@@ -152,6 +152,28 @@ function daysBetween(a: number | null, now: number): number {
   return Math.max(0, Math.floor((now - a) / 86400));
 }
 
+/**
+ * 头像在**提示词**里的表示。
+ *
+ * ## 为什么必须过滤（2026-10-22 血案）
+ * `avatar` 允许用户上传图片，存的是 `data:image/...;base64,...`，实测一条 **2.98MB**。
+ * 原来这里直接 `${c.avatar}` 拼进人设文本，后果是三连击：
+ *   1. 伴侣每轮 system 就带 3MB；
+ *   2. 这段人设被沉淀成 `companion://<id>/persona` 记忆块（库里两条 2,984,551 字符的 chunk）；
+ *   3. 普通 AI 对话发「你好」，长期记忆检索 top-5 把这块捞回 system
+ *      ⇒ 估算 token 直接超熔断线，报「上下文超限（估算 >32768 token）」，
+ *      表现是**新建对话发一句话就废**。
+ * 提示词里头像最多只需要一个短标记（emoji / 单字）；图片本体是给 UI 显示的，
+ * 模型既看不了也存不下。
+ */
+export function avatarForPrompt(avatar: string | null | undefined): string {
+  const a = (avatar ?? '').trim();
+  if (!a) return '';
+  // 图片 / 任意长文本一律不进提示词（8 字符内才当作 emoji 或单字）
+  if (a.startsWith('data:') || /^https?:\/\//i.test(a) || a.length > 8) return '';
+  return `（${a}）`;
+}
+
 /** 构造「伴侣上下文」文本（拼在系统提示词末尾） */
 /**
  * 人设画像（persona）语义块 —— 方案 B：把"人设"从 L2 核心档案中独立出来，
@@ -162,7 +184,7 @@ function daysBetween(a: number | null, now: number): number {
 export function buildPersonaContext(c: Companion, now = Date.now() / 1000): string {
   const r = c.relationship;
   const lines: string[] = [];
-  lines.push(`【人设画像·你的身份】你是「${c.name}」${c.avatar}`);
+  lines.push(`【人设画像·你的身份】你是「${c.name}」${avatarForPrompt(c.avatar)}`);
   if (c.personality.trim()) lines.push(`性格：${c.personality.trim()}`);
   if (c.background.trim()) lines.push(`背景：${c.background.trim()}`);
   // 口头禅：像真人一样有概率性，且位置随机（句首/句中/句尾都可能出现，不是固定句首）

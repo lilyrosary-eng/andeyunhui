@@ -21,6 +21,13 @@
 - **`src/core/clock.ts`**：把「今天是第几天」收敛成模块级缓存 + 跨天定时刷新，替掉 4 处渲染期 `Date.now()`（React 渲染期 impure）。
 
 ### 修复
+- **安装版「新建对话发一句你好就报上下文超限」**：伴侣头像存的是 `data:image/...;base64`（实测 2.98MB），`buildPersonaContext` 把它直接拼进人设文本 ⇒ ① 伴侣每轮 system 就带 3MB；② 这段人设被沉淀成 `companion://<id>/persona` 记忆块（库里两条 2,984,551 字符）；③ 普通 AI 对话发「你好」时，长期记忆检索 top-5 把它捞回 system ⇒ 估算 token 撞上熔断线（`>32768`），整轮被终止。
+  - 源头：新增 `avatarForPrompt()`，头像只在提示词里保留**短字符**（emoji/单字，≤8 字符），data URL / http URL / 长文本一律不进提示词（图片仍正常显示在 UI）。
+  - 写入端：`stripDataUrls()` + `sanitizeMemoryText()`，摄取任何记忆前先摘掉内嵌 base64、再截断到 8000 字符，变化时显式告警（embedding 之前就净化，不再拿 3MB 去算向量）。
+  - 读取端：`retrieveChatContext` 按分数装预算——单条 ≤800 字符、总量 ≤3000 字符，超出丢弃并显式告警；命中文本也再摘一次二进制（兜住历史脏数据）。
+  - Rust 兜底：超限时**先裁 system**（`shrink_system_to_fit`）再判死，裁剪会发 `ai-agent-step` 事件让用户在轨迹里看到；错误信息改成三段分解（消息 / 工具 / 上限 / 熔断线）并写 `log::error`，每轮还会 `log::info` 打印完整预算。
+  - 数据：已备份并清理库中两条 2.98MB 脏块（`rag.sqlite` 9.0MB → 76KB，最大块 297 字符）。
+  - 测试：TS 7 项（摘二进制 / 限长 / 3MB 头像净化）+ Rust 4 项（3MB system 必须被裁到能发、正常 system 不动、工具吃满 cap 时放弃、无 system 不 panic）。
 - **插件会「凭空消失」，直到重启进程**（用户实测：音乐模块入口不见了，拓展管理里显示成待安装）：`scan_plugins_sync` 的缓存用「扫描时刻 ≥ 目录 mtime（秒）」判新鲜，而 `deploy-plugins.mjs` 复制插件时是「先清空目标目录 → 再写 manifest.json」。若应用恰在那几毫秒里扫描，`manifest.json` 读不到 ⇒ 该插件进 `rejected` ⇒ 结果被缓存；但 manifest 是**文件**，改写它不动父目录 mtime ⇒ 缓存永远判新鲜，重新部署也没用。
   - 缓存键换成**目录指纹**（`plugins_fingerprint`）：目录 mtime + 每个 `manifest.json` 的 mtime，毫秒精度，深度 ≤3，碰到插件根就停（内部资产变更不逼着重扫）。
   - **可重试失败不写缓存**：`manifest.json` 读取/解析失败时跳过缓存写入，下次调用重扫。

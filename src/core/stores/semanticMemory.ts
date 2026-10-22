@@ -57,6 +57,46 @@ function ensureInit(): Promise<boolean> {
 /** 嵌入端点配置（localStorage；用户可在设置里配云端 OpenAI 兼容嵌入端点） */
 const EMBED_KEY = KEYS.companion.ragEmbed.key;
 
+// ============ 记忆文本的体积护栏（2026-10-22 血案） ============
+//
+// 伴侣 `avatar` 允许上传图片，存的是 data URL（实测 2.98MB）。它被拼进人设文本后：
+//   人设 → 沉淀成 persona 记忆块（库里两条 2,984,551 字符）→ 普通 AI 对话检索 top-5
+//   把它捞回 system ⇒ 「新建对话发一句你好」就报上下文超限。
+// 所以在**写入**和**注入**两端都设上限：记忆是给模型读的短文，不是二进制仓库。
+
+/** 单条记忆允许的最大字符数（写入端）。超了截断并显式告警。 */
+const MEMORY_TEXT_MAX = 8_000;
+/** 单条检索命中注入 system 时的最大字符数。 */
+const RAG_HIT_CHAR_MAX = 800;
+/** 一次注入的记忆总字符预算（5 条 × 800 也就 4000，留点余量）。 */
+const RAG_INJECT_CHAR_MAX = 3_000;
+
+/** 去掉文本里的 base64 data URL（图片/音视频本体），替换成一行占位。 */
+export function stripDataUrls(text: string): string {
+  return text.replace(/data:[\w.+-]+\/[\w.+-]+;base64,[A-Za-z0-9+/=\s]+/gi, '［已移除内嵌二进制数据］');
+}
+
+/**
+ * 记忆文本净化：去二进制 → 截断到 [`MEMORY_TEXT_MAX`]。
+ * 仅在内容真的变了时打日志（否则正常对话会刷屏）。
+ */
+export function sanitizeMemoryText(text: string, tag: string): string {
+  const raw = text ?? '';
+  let out = stripDataUrls(raw);
+  if (out.length !== raw.length) {
+    console.warn(
+      `[semanticMemory] ${tag}: 移除了内嵌二进制数据（${raw.length} → ${out.length} 字符）`,
+    );
+  }
+  if (out.length > MEMORY_TEXT_MAX) {
+    console.warn(
+      `[semanticMemory] ${tag}: 文本过长，截断到 ${MEMORY_TEXT_MAX} 字符（原 ${out.length}）`,
+    );
+    out = out.slice(0, MEMORY_TEXT_MAX) + '…（内容过长已截断）';
+  }
+  return out;
+}
+
 /** 嵌入失败退避：失败后一段时间内不再尝试（避免每轮对话都打一次注定失败的请求）。
  *  典型场景：算力来源是 LM Studio 且只加载了聊天模型，/v1/embeddings 必然 404/报错。 */
 let embedBackoffUntil = 0;
@@ -138,6 +178,12 @@ export async function ingestMemory(
   meta: Record<string, unknown> = {},
 ): Promise<void> {
   if (isBrowserPreview()) return;
+  // 净化在 embed 之前：拿 3MB 去算嵌入既浪费请求又可能整条失败（见图里那两条 2.9M 的脏块）
+  const clean = sanitizeMemoryText(text, `ingestMemory/${kind}`);
+  if (!clean.trim()) {
+    console.warn(`[semanticMemory] ingestMemory/${kind}: 净化后为空，跳过写入`);
+    return;
+  }
   if (!(await ensureInit())) return;
   // 摘要去重（2026-10-19 从 syncCompanionToSemantic 迁到这里）：
   // 增量链路（移动端 summarizeMemory → addMemory → ingestMemory）此前**没有任何去重**，
@@ -145,22 +191,22 @@ export async function ingestMemory(
   // 比较对象排除刚写入的最新一条（调用方通常先 addMemory 再 ingestMemory）。
   if (kind === 'summary') {
     const c = useCompanionStore.getState().companion;
-    if (c && c.memories.length > 1 && isDupSummary(text, c.memories.slice(1))) {
+    if (c && c.memories.length > 1 && isDupSummary(clean, c.memories.slice(1))) {
       console.info('[semanticMemory] 跳过近似重复的摘要（未写入向量库）');
       return;
     }
   }
   const cfg = await resolveEmbedConfig();
-  const vecs = await embed([text]);
+  const vecs = await embed([clean]);
   if (!vecs || !vecs[0]) return;
   try {
     const now = Date.now();
     // 注入 kind 到文本首行：检索结果不含 meta（RagHit 无 meta 字段），
     // 用文本前缀区分类型，注入 system 时更可读。
-    const prefixed = kind === 'persona' ? `[人设画像] ${text}`
-      : kind === 'snapshot' ? `[关系脉络 ${new Date(now).toLocaleString('zh-CN')}] ${text}`
-      : kind === 'core' ? `[核心记忆] ${text}`
-      : text;
+    const prefixed = kind === 'persona' ? `[人设画像] ${clean}`
+      : kind === 'snapshot' ? `[关系脉络 ${new Date(now).toLocaleString('zh-CN')}] ${clean}`
+      : kind === 'core' ? `[核心记忆] ${clean}`
+      : clean;
     // URI 策略（2026-10-19 修）：
     //   persona / core 是「重写式」数据 —— uri 固定 + replace:true，同一份档案永远只有一条 source。
     //   原来 uri 里带 now，每次同步都新增一条 → 库里堆满同一份档案的历史版本，检索被重复内容占满。
@@ -352,8 +398,13 @@ export async function ingestChatTurn(
 ): Promise<void> {
   if (isBrowserPreview()) return;
   if (!userText.trim() && !assistantText.trim()) return;
+  // 同一套净化：用户可能把截图/文件 content 直接塞进消息，助手也可能复述大段粘贴
+  const combined = sanitizeMemoryText(
+    `用户：${userText.trim()}\n助手：${assistantText.trim()}`,
+    'ingestChatTurn',
+  );
+  if (!combined.trim()) return;
   if (!(await ensureInit())) return;
-  const combined = `用户：${userText.trim()}\n助手：${assistantText.trim()}`;
   const vecs = await embed([combined]);
   if (!vecs || !vecs[0]) return; // 无嵌入端点 → 静默跳过沉淀（不阻塞对话）
   try {
@@ -404,7 +455,32 @@ export async function retrieveChatContext(
     const top1 = Math.max(...hits.map((h) => h.score));
     const kept = hits.filter((h) => h.score >= top1 - REL_WINDOW);
     if (!kept.length) return '';
-    const lines = kept.map((h) => `- ${h.text}`);
+    // 注入预算（2026-10-22）：命中块来自历史数据，可能很长（甚至是脏块）。
+    // 这里按分数从高到低装，单条截断 + 总预算封顶，超出的**丢弃并显式告警**，
+    // 不允许多检索几条就把 system 撑爆（那会直接触发 Rust 侧的上下文熔断）。
+    const lines: string[] = [];
+    let used = 0;
+    let dropped = 0;
+    let truncated = 0;
+    for (const h of [...kept].sort((a, b) => b.score - a.score)) {
+      const text = stripDataUrls(h.text ?? '').trim();
+      if (!text) continue;
+      const room = RAG_INJECT_CHAR_MAX - used;
+      if (room <= 40) { dropped += 1; continue; }
+      const cut = text.length > RAG_HIT_CHAR_MAX ? text.slice(0, RAG_HIT_CHAR_MAX) : text;
+      if (text.length > RAG_HIT_CHAR_MAX) truncated += 1;
+      const line = `- ${cut}`;
+      if (line.length > room) { dropped += 1; continue; }
+      lines.push(line);
+      used += line.length;
+    }
+    if (truncated || dropped) {
+      console.warn(
+        `[semanticMemory] 记忆注入已按预算裁剪：截断 ${truncated} 条 / 丢弃 ${dropped} 条` +
+          `（单条≤${RAG_HIT_CHAR_MAX}，总量≤${RAG_INJECT_CHAR_MAX}，实际 ${used} 字符）`,
+      );
+    }
+    if (!lines.length) return '';
     return '【长期对话记忆（检索到的相关内容）】\n' + lines.join('\n') + '\n（自然融入回答，不要逐条复述或提及"根据记忆"。）';
   } catch (e) {
     // 显式打印：静默 catch 会让「维度不匹配导致 0 命中」看起来像「没有相关记忆」

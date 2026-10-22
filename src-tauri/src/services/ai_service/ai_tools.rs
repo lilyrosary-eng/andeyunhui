@@ -1113,3 +1113,35 @@ fn spawn_test_worker(
     Ok(child_id)
 }
 
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    /// 打印并守护「每请求固定开销」：tools 数组里的 schema 每个请求都发送，
+    /// 一旦某个工具的 description 写成小作文，就会把所有模型的可用上下文吃掉。
+    #[test]
+    fn tools_fixed_overhead_is_bounded() {
+        let tools = tool_schemas_for_api();
+        let chars: usize = tools
+            .iter()
+            .map(|t| serde_json::to_string(t).map(|s| s.chars().count()).unwrap_or(0))
+            .sum();
+        let est = estimate_tools_tokens(&tools);
+        println!("[budget] tools: {} 个 / {} 字符 / 估算 {} token", tools.len(), chars, est);
+
+        let mut per: Vec<(String, usize)> = tools
+            .iter()
+            .map(|t| {
+                let name = t.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                let c = serde_json::to_string(t).map(|s| s.chars().count()).unwrap_or(0);
+                (name, c)
+            })
+            .collect();
+        per.sort_by(|a, b| b.1.cmp(&a.1));
+        for (n, c) in per.iter().take(8) {
+            println!("[budget]   {n}: {c} 字符");
+        }
+        println!("[budget] skills_guide(None): {} 字符", skills_guide(None).chars().count());
+    }
+}

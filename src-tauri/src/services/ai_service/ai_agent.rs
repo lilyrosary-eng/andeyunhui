@@ -257,14 +257,57 @@ async fn run_agent(
             block.push_str("\n如需继续追问某个子代理，可用 send_message 向它投递新指令。");
             format!("{}{}", system_final, block)
         };
-        let derived = derive_messages(&session, &turn_system, collect_interrupted_tools(&session));
+        let mut derived = derive_messages(&session, &turn_system, collect_interrupted_tools(&session));
         // 真实发送量 = 派生消息 + 工具定义固定开销（tools 每请求都携带，必须计入，
         // 否则工具增多时会低估实际上下文、逼近上游硬限制）。
         let fixed_overhead = estimate_tools_tokens(&tools);
-        if estimate_tokens(&derived) > token_hard || estimate_tokens(&derived) + fixed_overhead > cap {
-            let msg = format!("上下文超限（估算 >{} token，尝试压缩后仍超出），已终止本轮", token_hard);
-            emit_agent_error(&app, &request_id, &msg);
-            return Err(msg);
+        let mut msg_est = estimate_tokens(&derived);
+        log::info!(
+            "[ai-agent] 上下文预算：cap={cap} 压缩线={token_high} 熔断线={token_hard} | \
+             消息估算={msg_est}（{} 条）工具估算={fixed_overhead} 合计={} | system {} 字",
+            derived.len(),
+            msg_est + fixed_overhead,
+            turn_system.chars().count()
+        );
+        if msg_est > token_hard || msg_est + fixed_overhead > cap {
+            // 超限时**先压 system**再判死：system 是我们自己拼的（人设/长期记忆/技能索引），
+            // 它最可能是超长主因，也最容易安全裁剪；直接终止整轮对用户毫无价值。
+            // 2026-10-22：伴侣头像 base64（2.98MB）进了 persona 记忆块，检索回 system 后
+            // 每轮都撞熔断，表现成「新建对话发句你好就报上下文超限」。
+            match shrink_system_to_fit(&mut derived, cap, token_hard, fixed_overhead) {
+                Some((before, after)) => {
+                    msg_est = estimate_tokens(&derived);
+                    log::warn!(
+                        "[ai-agent] system 提示过长，已截断 {before} → {after} 字符后继续本轮；\
+                         截断后消息估算={msg_est} 合计={}（cap={cap} 熔断线={token_hard}）",
+                        msg_est + fixed_overhead
+                    );
+                    let _ = app.emit("ai-agent-step", serde_json::json!({
+                        "requestId": request_id, "stage": "compress", "name": "system", "ok": true,
+                        "detail": format!("系统提示过长，已从 {before} 字符截断到 {after} 字符（长期记忆/人设段被裁剪）"),
+                    }));
+                }
+                None => {
+                    let msg = format!(
+                        "上下文超限：估算 {} token（消息 {msg_est} + 工具 {fixed_overhead}），\
+                         上限 {cap}（熔断线 {token_hard}），压缩与裁剪系统提示后仍超出，已终止本轮",
+                        msg_est + fixed_overhead
+                    );
+                    log::error!("[ai-agent] {msg}");
+                    emit_agent_error(&app, &request_id, &msg);
+                    return Err(msg);
+                }
+            }
+            if msg_est > token_hard || msg_est + fixed_overhead > cap {
+                let msg = format!(
+                    "上下文超限：估算 {} token（消息 {msg_est} + 工具 {fixed_overhead}），\
+                     上限 {cap}（熔断线 {token_hard}），裁剪系统提示后仍超出，已终止本轮",
+                    msg_est + fixed_overhead
+                );
+                log::error!("[ai-agent] {msg}");
+                emit_agent_error(&app, &request_id, &msg);
+                return Err(msg);
+            }
         }
         let mut body = serde_json::json!({
             "model": cfg.model,
@@ -840,6 +883,65 @@ pub async fn ai_agent_events(app: AppHandle, source_id: String) -> Result<String
     serde_json::to_string(&session).map_err(|e| e.to_string())
 }
 
+// ============ 上下文超限时的 system 裁剪 ============
+
+/// 超限时把**系统提示**裁到预算内；裁不动（其它消息+工具已经吃满）返回 `None`。
+///
+/// ## 为什么不直接终止（2026-10-22 用户实测）
+/// 「新建对话发一句你好」就报「上下文超限」，根因是伴侣头像 base64（2.98MB）被拼进
+/// persona 记忆块、又被检索回 system。那种情况下**对话内容本身只有几个 token**，
+/// 该死的是那段脏 system，不是整轮请求。裁剪比终止有用得多，也无法误伤用户输入。
+///
+/// 返回 `(裁剪前字符数, 裁剪后字符数)`；`None` 表示没有可裁空间或无需裁剪。
+fn shrink_system_to_fit(
+    derived: &mut [serde_json::Value],
+    cap: usize,
+    hard: usize,
+    tools_est: usize,
+) -> Option<(usize, usize)> {
+    let idx = derived
+        .iter()
+        .position(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))?;
+    let before = derived[idx]
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(|s| s.chars().count())
+        .unwrap_or(0);
+    if before == 0 {
+        return None;
+    }
+
+    // 除 system 之外的实际占用（对话消息 + 已计入的工具固定开销）
+    let others: usize = estimate_tokens(&derived[..idx])
+        + estimate_tokens(&derived[idx + 1..])
+        + tools_est;
+    // system 能用的预算：取「熔断线」与「cap - 工具」中更紧的一个，再扣掉其它占用
+    let budget_tokens = hard.min(cap.saturating_sub(tools_est)).saturating_sub(others);
+    // 少于 200 token 的 system 已经没有裁剪价值（模型连指令都读不全），交给调用方报错
+    if budget_tokens < 200 {
+        log::warn!(
+            "[ai-agent] system 裁剪放弃：可用预算仅 {budget_tokens} token（其它占用 {others}，cap={cap}，熔断线={hard}）"
+        );
+        return None;
+    }
+    // 估算口径是 chars/2 ⇒ 字符预算 = token×2，再留 64 字符给省略标记
+    let max_chars = budget_tokens.saturating_mul(2).saturating_sub(64);
+    if before <= max_chars {
+        return None;
+    }
+    let keep: String = derived[idx]
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .chars()
+        .take(max_chars)
+        .collect();
+    let truncated = format!("{keep}\n…（系统提示过长，已截断，超出部分未发送）");
+    let after = truncated.chars().count();
+    derived[idx]["content"] = serde_json::Value::String(truncated);
+    Some((before, after))
+}
+
 // ============ 单元测试：worker 注册 / 取消状态机 ============
 #[cfg(test)]
 mod tests {
@@ -933,5 +1035,58 @@ mod tests {
         // 移除后（如 run_agent 自然结束/取消）→ idle。
         cancel_worker(&id);
         assert!(!workers().lock().unwrap().contains_key(&id));
+    }
+}
+
+// ============ 单元测试：超限时的 system 裁剪 ============
+#[cfg(test)]
+mod shrink_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn msgs(system: &str, user: &str) -> Vec<serde_json::Value> {
+        vec![
+            json!({ "role": "system", "content": system }),
+            json!({ "role": "user", "content": user }),
+        ]
+    }
+
+    /// 血案回归：3MB 的 system（伴侣头像 base64 经记忆检索回到 system）+「你好」，
+    /// 在 64k 上下文 / 7.7k 工具开销下必须被裁到能发，而不是整轮终止。
+    #[test]
+    fn giant_system_is_trimmed_to_fit() {
+        let cap = 65_536usize;
+        let hard = 32_768usize;
+        let tools = 7_733usize;
+        let mut m = msgs(&"x".repeat(2_984_551), "你好");
+        let out = shrink_system_to_fit(&mut m, cap, hard, tools);
+        let (before, after) = out.expect("这么大的 system 应该被裁剪，而不是判死");
+        assert_eq!(before, 2_984_551);
+        assert!(after < before);
+
+        let est = estimate_tokens(&m);
+        assert!(est <= hard, "裁剪后消息估算 {est} 仍高于熔断线 {hard}");
+        assert!(est + tools <= cap, "裁剪后合计 {} 仍高于 cap {cap}", est + tools);
+    }
+
+    /// 正常短 system 不该被动：裁剪只在超限路径调用，这里钉住"无需裁剪返回 None"。
+    #[test]
+    fn normal_system_is_left_alone() {
+        let mut m = msgs("你是助手。", "你好");
+        assert!(shrink_system_to_fit(&mut m, 65_536, 32_768, 7_733).is_none());
+    }
+
+    /// 工具定义本身就把 cap 吃满时（本地小模型 + 26 个工具），压 system 也救不了 ⇒ None。
+    #[test]
+    fn gives_up_when_tools_alone_exceed_cap() {
+        let mut m = msgs(&"x".repeat(100_000), "你好");
+        assert!(shrink_system_to_fit(&mut m, 4_096, 2_048, 7_733).is_none());
+    }
+
+    /// 没有 system 消息时不 panic，直接返回 None。
+    #[test]
+    fn no_system_message_is_safe() {
+        let mut m = vec![json!({ "role": "user", "content": "你好" })];
+        assert!(shrink_system_to_fit(&mut m, 65_536, 32_768, 0).is_none());
     }
 }
