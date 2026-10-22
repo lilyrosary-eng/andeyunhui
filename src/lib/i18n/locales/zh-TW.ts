@@ -1454,7 +1454,7 @@ export const zhTW: Record<string, string> = {
   'modelSettings.caps.sourceProvider': '實測/上報',
   'modelSettings.caps.sourceInferred': '名稱推斷',
   'modelSettings.caps.sourceManual': '手動',
-  'modelSettings.capsProbe.probe': '探測視覺',
+  'modelSettings.capsProbe.probe': '探測能力',
   'modelSettings.capsProbe.probeSelected': '探測選取（{n}）',
   'modelSettings.capsProbe.stop': '停止',
   'modelSettings.capsProbe.probing': '探測中…',

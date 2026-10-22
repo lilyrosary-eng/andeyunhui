@@ -94,7 +94,7 @@ export function ProviderCard(props: ProviderCardProps) {
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  // ── 视觉能力探测 ────────────────────────────────────────────────
+  // ── 能力探测（视觉 / 工具 / 向量）────────────────────────────────
   // 给单个模型发一张 1×1 测试图，看端点接不接受图片输入。
   // 结论的**落盘规则**与后端 `caps_probe` 的判据一致：
   //   supported / unsupported → 可确证，写回 caps.vision 并把来源标 provider
@@ -103,7 +103,10 @@ export function ProviderCard(props: ProviderCardProps) {
   const [probingId, setProbingId] = useState<string | null>(null);
   const [probeMsg, setProbeMsg] = useState<{ id: string; ok: boolean; text: string } | null>(null);
 
-  const probeVision = async (m: ModelUi, opts?: { quiet?: boolean }) => {
+  // 一次探三项（视觉 / 工具 / 向量）：每项一个极短请求，命令会返回实际请求数。
+  // 后端判定哲学见 caps_probe / caps_probe_ext：只有确证（supported/unsupported）才落盘，
+  // unknown 一律不动 —— 把限流写成"不支持"就是一条永久脏记忆。
+  const probeCaps = async (m: ModelUi, opts?: { quiet?: boolean }) => {
     const apiKey = p.api_key.trim();
     const baseUrl = p.base_url.trim();
     if (!apiKey) { setProbeMsg({ id: m.id, ok: false, text: t('modelSettings.needApiKey') }); return; }
@@ -113,18 +116,36 @@ export function ProviderCard(props: ProviderCardProps) {
     // 进度改由工具栏的 done/total 表达。
     if (!opts?.quiet) setProbeMsg(null);
     try {
-      const out = await invoke<{ verdict: 'supported' | 'unsupported' | 'unknown'; detail: string }>('ai_probe_vision', {
+      type Verdict = 'supported' | 'unsupported' | 'unknown';
+      type Outcome = { verdict: Verdict; detail: string };
+      const out = await invoke<{ results: Record<string, Outcome>; requests: number }>('ai_probe_caps', {
         profileId: m.id,
         baseUrl,
         apiKey,
         model: m.model,
+        // 向量模型探视觉/工具没意义，反之亦然；两者都探最多少发一次请求
+        caps: ['vision', 'tools', 'embedding'],
       });
-      if (out.verdict === 'supported' || out.verdict === 'unsupported') {
-        props.onPatchModel(m.id, {
-          caps: { ...m.caps, vision: out.verdict === 'supported', vision_source: 'provider' },
+      const nextCaps = { ...m.caps };
+      const lines: string[] = [];
+      let anySupported = false;
+      for (const [key, o] of Object.entries(out.results ?? {})) {
+        lines.push(`${key}: ${o.detail}`);
+        if (o.verdict === 'supported') anySupported = true;
+        if (o.verdict === 'unknown') continue; // 未知不落盘
+        const supported = o.verdict === 'supported';
+        if (key === 'vision') { nextCaps.vision = supported; nextCaps.vision_source = 'provider'; }
+        if (key === 'tools') { nextCaps.tools = supported; nextCaps.tools_source = 'provider'; }
+        if (key === 'embedding') { nextCaps.embedding = supported; nextCaps.embedding_source = 'provider'; }
+      }
+      props.onPatchModel(m.id, { caps: nextCaps });
+      if (!opts?.quiet) {
+        setProbeMsg({
+          id: m.id,
+          ok: anySupported,
+          text: `（${out.requests} 次请求）${lines.join('；')}`,
         });
       }
-      if (!opts?.quiet) setProbeMsg({ id: m.id, ok: out.verdict === 'supported', text: out.detail });
     } catch (e) {
       if (!opts?.quiet) setProbeMsg({ id: m.id, ok: false, text: String(e) });
     } finally {
@@ -157,7 +178,7 @@ export function ProviderCard(props: ProviderCardProps) {
       if (batchCancel.current) break;
       // 串行而非并发：每发一次都是真实计费/占额，并发既省不了多少时间，
       // 又容易触发端点限流（那会把「不确定」写进结果，等于白跑）。
-      await probeVision(targets[i], { quiet: true });
+      await probeCaps(targets[i], { quiet: true });
       setBatch({ done: i + 1, total: targets.length });
     }
     setBatch(null);
@@ -396,10 +417,11 @@ export function ProviderCard(props: ProviderCardProps) {
                             </span>
                           ))}
                         </span>
-                        {/* 探测视觉（= 测试这个模型能不能看图）。会真发一次最小请求
-                            （1×1 PNG，成本可忽略），点击本身即用户显式同意。 */}
+                        {/* 探测能力：一次测视觉 / 工具 / 向量，各发一个极短请求
+                            （1×1 PNG、一个假工具、一个词；成本可忽略），
+                            点击本身即用户显式同意。unknown 的结果不落盘。 */}
                         <button
-                          onClick={(e) => { e.stopPropagation(); void probeVision(m); }}
+                          onClick={(e) => { e.stopPropagation(); void probeCaps(m); }}
                           disabled={probingId !== null}
                           className={`shrink-0 p-1 rounded hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-40 ${
                             probeMsg?.id === m.id ? (probeMsg.ok ? 'text-emerald-600' : 'text-amber-600') : ''

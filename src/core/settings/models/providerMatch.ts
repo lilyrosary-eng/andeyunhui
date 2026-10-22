@@ -204,7 +204,14 @@ export function refillCapacity<T extends CapacityFields>(current: T[], incoming:
 /** 能力回填所需的最小形状（ModelUi / AdoptedModel 都满足）。 */
 export interface CapsFields {
   model: string;
-  caps: { vision: boolean; vision_source: CapsSourceUi | '' };
+  caps: {
+    vision: boolean;
+    vision_source: CapsSourceUi | '';
+    tools: boolean;
+    tools_source: CapsSourceUi | '';
+    embedding: boolean;
+    embedding_source: CapsSourceUi | '';
+  };
 }
 
 /**
@@ -242,8 +249,24 @@ export function refillCaps<T extends CapsFields>(current: T[], incoming: T[]): T
   return current.map((m) => {
     const src = byName.get(m.model);
     if (!src) return m;
-    if (!capsRefreshable(m.caps.vision_source, src.caps.vision_source)) return m;
-    if (m.caps.vision === src.caps.vision && m.caps.vision_source === src.caps.vision_source) return m;
-    return { ...m, caps: { ...m.caps, vision: src.caps.vision, vision_source: src.caps.vision_source } };
+    const nextCaps = { ...m.caps };
+    let changed = false;
+    // 三份能力位各自按"来源能否被覆盖"判定，互不影响：
+    // 视觉手填冻结、工具推断可刷新，这种组合必须能成立（否则一处手改会冻掉全部）。
+    const pairs: Array<['vision' | 'tools' | 'embedding', 'vision_source' | 'tools_source' | 'embedding_source']> = [
+      ['vision', 'vision_source'],
+      ['tools', 'tools_source'],
+      ['embedding', 'embedding_source'],
+    ];
+    for (const [cap, srcKey] of pairs) {
+      if (!capsRefreshable(m.caps[srcKey], src.caps[srcKey])) continue;
+      // 新数据没有来源标注（老数据/端点没报）= 没信息，不动
+      if (!src.caps[srcKey]) continue;
+      if (nextCaps[cap] === src.caps[cap] && nextCaps[srcKey] === src.caps[srcKey]) continue;
+      nextCaps[cap] = src.caps[cap];
+      nextCaps[srcKey] = src.caps[srcKey];
+      changed = true;
+    }
+    return changed ? { ...m, caps: nextCaps } : m;
   });
 }

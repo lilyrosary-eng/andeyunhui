@@ -251,9 +251,20 @@ describe('refillCapacity —— 回填老条目的容量列', () => {
   });
 });
 
-describe('refillCaps —— 回填老条目的视觉能力位', () => {
-  const row = (model: string, vision: boolean, src: CapsSourceUi | '') => ({
-    model, caps: { vision, vision_source: src },
+describe('refillCaps —— 回填老条目的能力位', () => {
+  // 构造一行能力档案：三个能力位都带上，未测的位给 false + 空来源（= 未知）
+  const row = (
+    model: string,
+    vision: boolean,
+    src: CapsSourceUi | '',
+    extra: { tools?: boolean; tools_source?: CapsSourceUi | ''; embedding?: boolean; embedding_source?: CapsSourceUi | '' } = {},
+  ) => ({
+    model,
+    caps: {
+      vision, vision_source: src,
+      tools: extra.tools ?? false, tools_source: extra.tools_source ?? '',
+      embedding: extra.embedding ?? false, embedding_source: extra.embedding_source ?? '',
+    },
   });
 
   it('老数据（来源未标注）能被新推断填上', () => {
@@ -286,6 +297,34 @@ describe('refillCaps —— 回填老条目的视觉能力位', () => {
   it('无变化时返回原对象引用', () => {
     const cur = [row('m', true, 'inferred')];
     const out = refillCaps(cur, [row('m', true, 'inferred')]);
+    expect(out[0]).toBe(cur[0]);
+  });
+
+  it('三项能力各自独立判定：视觉手填冻结、工具推断可刷新', () => {
+    // 用户手改过视觉（manual），但工具位还是推断 —— 重扫时工具位应更新，视觉位不动
+    const cur = [row('x', true, 'manual', { tools: false, tools_source: 'inferred' })];
+    const inc = [row('x', false, 'inferred', { tools: true, tools_source: 'inferred' })];
+    const out = refillCaps(cur, inc);
+    expect(out[0].caps.vision).toBe(true);
+    expect(out[0].caps.vision_source).toBe('manual');
+    expect(out[0].caps.tools).toBe(true);
+    expect(out[0].caps.tools_source).toBe('inferred');
+  });
+
+  it('探测确证（provider）不会被名字推断回退', () => {
+    const cur = [row('x', false, 'inferred', { tools: true, tools_source: 'provider' })];
+    const inc = [row('x', false, 'inferred', { tools: false, tools_source: 'inferred' })];
+    const out = refillCaps(cur, inc);
+    expect(out[0].caps.tools).toBe(true);
+    expect(out[0].caps.tools_source).toBe('provider');
+  });
+
+  it('新数据没来源标注时不改动（老数据/端点没报 = 没信息）', () => {
+    const cur = [row('x', true, 'provider', { embedding: true, embedding_source: 'provider' })];
+    const inc = [row('x', false, '', { embedding: false, embedding_source: '' })];
+    const out = refillCaps(cur, inc);
+    expect(out[0].caps.vision).toBe(true);
+    expect(out[0].caps.embedding).toBe(true);
     expect(out[0]).toBe(cur[0]);
   });
 

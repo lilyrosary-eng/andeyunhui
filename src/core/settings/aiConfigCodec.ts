@@ -27,6 +27,10 @@ export interface CapsUi {
   tools: boolean;
   /** 视觉位来源。`''` = 未标注（老数据）。见 `CapsSourceUi`。 */
   vision_source: CapsSourceUi | '';
+  /** 工具位来源。`inferred` = 名字猜的；`provider` = 探测确证/端点上报。 */
+  tools_source: CapsSourceUi | '';
+  /** 向量位来源。同上。 */
+  embedding_source: CapsSourceUi | '';
 }
 
 /** 一个推理档位（与 Rust reasoning::EffortOption 对齐）。 */
@@ -144,6 +148,10 @@ const numOrNull = (v: unknown): number | null => {
 function capsFrom(raw: any): CapsUi {
   const c = raw || {};
   const vs = c.vision_source;
+  const ts = c.tools_source;
+  const es = c.embedding_source;
+  const src = (v: unknown): CapsSourceUi | '' =>
+    typeof v === 'string' && capsSources.includes(v) ? (v as CapsSourceUi) : '';
   return {
     text: c.text !== false,
     vision: c.vision === true,
@@ -152,7 +160,9 @@ function capsFrom(raw: any): CapsUi {
     tools: c.tools === true,
     // 非白名单值一律当「未标注」——比原样透传安全：Rust 侧只认那三个枚举值，
     // 传个别的进去会被 serde 拒绝，导致整份配置保存失败。
-    vision_source: typeof vs === 'string' && capsSources.includes(vs) ? (vs as CapsSourceUi) : '',
+    vision_source: src(vs),
+    tools_source: src(ts),
+    embedding_source: src(es),
   };
 }
 
@@ -277,6 +287,8 @@ function toModel(m: ModelUi) {
       // '' → null：Rust 侧是 `Option<CapsSource>`，空串会让 serde 反序列化失败
       // （那样整份配置都保存不了，比丢一个标签严重得多）。
       vision_source: m.caps.vision_source || null,
+      tools_source: m.caps.tools_source || null,
+      embedding_source: m.caps.embedding_source || null,
     },
     context_tokens: ctx === null ? null : Math.trunc(ctx),
     max_output_tokens: mot === null ? null : Math.max(1, Math.trunc(mot)),

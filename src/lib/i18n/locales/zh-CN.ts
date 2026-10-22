@@ -1440,7 +1440,7 @@ export const zhCN: Record<string, string> = {
   'modelSettings.caps.sourceProvider': '实测/上报',
   'modelSettings.caps.sourceInferred': '名称推断',
   'modelSettings.caps.sourceManual': '手动',
-  'modelSettings.capsProbe.probe': '探测视觉',
+  'modelSettings.capsProbe.probe': '探测能力',
   'modelSettings.capsProbe.probeSelected': '探测选中（{n}）',
   'modelSettings.capsProbe.stop': '停止',
   'modelSettings.capsProbe.probing': '探测中…',

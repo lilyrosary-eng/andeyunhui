@@ -127,6 +127,7 @@ fn caps_from_entry(e: &serde_json::Value) -> Option<Caps> {
             embedding,
             // 供应商上报 = 权威。视觉这一位标 Provider，重扫时不会被名字启发式冲掉。
             vision_source: Some(CapsSource::Provider),
+            ..Default::default()
         });
     }
 
@@ -146,6 +147,7 @@ fn caps_from_entry(e: &serde_json::Value) -> Option<Caps> {
             tools: has_in(&params, "tools"),
             embedding,
             vision_source: Some(CapsSource::Provider),
+            ..Default::default()
         });
     }
 

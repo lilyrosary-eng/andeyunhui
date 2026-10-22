@@ -33,6 +33,8 @@ pub mod ai_conversations;
 pub mod comfyui_build;
 pub mod image_store;
 pub mod caps_probe;
+// 能力探测扩展：工具 / 向量 / 一次探多项（见模块注释）
+pub mod caps_probe_ext;
 // 从上游「上下文超限」报错里学真值并回写模型档案（覆盖率闭环，见模块注释）
 pub mod ctx_learn;
 

@@ -126,6 +126,13 @@ pub struct Caps {
     /// 与 `CapacitySource` 同一口径，理由也一样（见其文档）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_source: Option<CapsSource>,
+    /// **工具调用**这一位的来源。理由同 `vision_source`：
+    /// 没有它，探测出来的"确证支持"会被下一次重扫的名字启发式覆盖掉（反之亦然）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_source: Option<CapsSource>,
+    /// **向量/嵌入**这一位的来源。理由同上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_source: Option<CapsSource>,
 }
 
 /// 能力位的**来源**。与 `CapacitySource` 分开是因为语义不同：
@@ -194,6 +201,8 @@ impl Default for Caps {
             embedding: false,
             tools: false,
             vision_source: None,
+            tools_source: None,
+            embedding_source: None,
         }
     }
 }

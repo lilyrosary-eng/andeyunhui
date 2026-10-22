@@ -66,7 +66,9 @@ pub fn infer_caps(model_name: &str) -> Caps {
         return Caps {
             text: false,
             embedding: true,
-            vision_source: Some(super::ai_profile::CapsSource::Inferred),
+            // 向量位同样是"猜的"：名字里有 embed 就一定是嵌入模型，这条准确性很高，
+            // 但仍标 Inferred —— 一旦用户探测确证，来源会升级成 Provider，重扫不再覆盖。
+            embedding_source: Some(super::ai_profile::CapsSource::Inferred),
             ..Default::default()
         };
     }
@@ -79,7 +81,12 @@ pub fn infer_caps(model_name: &str) -> Caps {
         reasoning,
         tools,
         embedding: false,
+        // 三份来源都标 Inferred：UI 据此显示「推断」，探测确证后升级成 Provider。
+        // 没有这个标记的话，"点过探测的模型"和"完全没点过的模型"在界面上长得一样，
+        // 用户无法判断哪个标签可信 —— 那正是「所有模型都长一个样」的根源。
         vision_source: Some(super::ai_profile::CapsSource::Inferred),
+        tools_source: Some(super::ai_profile::CapsSource::Inferred),
+        ..Default::default()
     }
 }
 

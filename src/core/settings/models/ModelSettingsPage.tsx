@@ -19,7 +19,7 @@ const newId = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(
 function blankModel(id?: string): ModelUi {
   return {
     id: id || newId('m'), model: '', label: '',
-    caps: { text: true, vision: false, reasoning: false, embedding: false, tools: false, vision_source: '' },
+    caps: { text: true, vision: false, reasoning: false, embedding: false, tools: false, vision_source: '', tools_source: '', embedding_source: '' },
     context_tokens: '', max_output_tokens: '', context_source: '', max_output_source: '',
     temperature: '', max_tokens: '', top_p: '', system_prompt: '',
     thinking: false, reasoning_effort: '', reasoning: emptyReasoning(),

@@ -1460,7 +1460,7 @@ export const enUS: Record<string, string> = {
   'modelSettings.caps.sourceProvider': 'Probed/reported',
   'modelSettings.caps.sourceInferred': 'Inferred from name',
   'modelSettings.caps.sourceManual': 'Manual',
-  'modelSettings.capsProbe.probe': 'Probe vision',
+  'modelSettings.capsProbe.probe': 'Probe capabilities',
   'modelSettings.capsProbe.probeSelected': 'Probe selected ({n})',
   'modelSettings.capsProbe.stop': 'Stop',
   'modelSettings.capsProbe.probing': 'Probing...',

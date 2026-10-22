@@ -220,11 +220,13 @@ export function ModelEditorDrawer(props: ModelEditorDrawerProps) {
                       caps: {
                         ...m.caps,
                         [k]: e.target.checked,
-                        // 手改视觉位 → 标 manual（重扫/探测都不得覆盖），与容量字段
-                        // 的手改口径一致。不标的话下次重扫会用名字启发式把它冲掉 ——
+                        // 手改能力位 → 标 manual（重扫/探测都不得覆盖），与容量字段的
+                        // 手改口径一致。不标的话下次重扫会用名字启发式把它冲掉 ——
                         // 而用户改它，往往正是因为他不信我们的推断
                         // （比如某个名字里没有线索、但实际支持视觉的模型）。
                         ...(k === 'vision' ? { vision_source: 'manual' as const } : {}),
+                        ...(k === 'tools' ? { tools_source: 'manual' as const } : {}),
+                        ...(k === 'embedding' ? { embedding_source: 'manual' as const } : {}),
                       },
                     })} />
                   {t(`modelSettings.caps.${k}`)}
