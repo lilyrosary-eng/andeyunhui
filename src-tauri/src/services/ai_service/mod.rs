@@ -33,6 +33,8 @@ pub mod ai_conversations;
 pub mod comfyui_build;
 pub mod image_store;
 pub mod caps_probe;
+// 从上游「上下文超限」报错里学真值并回写模型档案（覆盖率闭环，见模块注释）
+pub mod ctx_learn;
 
 // 对外重导出：保持 crate::services::ai_service::xxx 路径不变
 // resolve_profile 与 ResolvedTarget / resolve_target 并存：11 个调用点改到 resolve_target

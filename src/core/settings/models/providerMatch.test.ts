@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CapsSourceUi } from '../aiConfigCodec';
-import { capacityRefreshable, capsRefreshable, inferProviderName, mergeModels, newModelKey, normalizeBaseUrl, refillCapacity, refillCaps, sameBaseUrl } from './providerMatch';
+import { capacityOutranks, capacityRefreshable, capsRefreshable, inferProviderName, mergeModels, newModelKey, normalizeBaseUrl, refillCapacity, refillCaps, sameBaseUrl } from './providerMatch';
 
 describe('normalizeBaseUrl', () => {
   it('去空白与尾部斜杠', () => {
@@ -139,6 +139,43 @@ describe('capacityRefreshable —— 与后端 CapacitySource::refreshable 同�
   it('有值但来源未知按手填冻结（老数据保守处理）', () => {
     expect(capacityRefreshable('8192', '')).toBe(false);
   });
+
+  it('新增的两种来源（已加载窗口 / 报错学到）同样可刷新', () => {
+    expect(capacityRefreshable('8192', 'loaded')).toBe(true);
+    expect(capacityRefreshable('8192', 'learned')).toBe(true);
+  });
+});
+
+/**
+ * 来源优先级（2026-10-22）：`table` 是猜的，绝不允许盖掉任何自报值。
+ *
+ * 场景：本地端点没启动时重扫一次，所有模型都只剩表值；
+ * 若没有这道闸门，"已加载 8192"会被降级成"表猜 65536"，压缩阈值跟着虚高，
+ * 下一次请求就被上游 400 —— 正是这次要根治的那类问题。
+ */
+describe('capacityOutranks —— 来源优先级（与 Rust 同序）', () => {
+  it('loaded 压过 provider / learned / table', () => {
+    expect(capacityOutranks('loaded', 'provider')).toBe(true);
+    expect(capacityOutranks('loaded', 'learned')).toBe(true);
+    expect(capacityOutranks('loaded', 'table')).toBe(true);
+  });
+
+  it('table 谁都压不过（除了空来源）', () => {
+    expect(capacityOutranks('table', 'loaded')).toBe(false);
+    expect(capacityOutranks('table', 'provider')).toBe(false);
+    expect(capacityOutranks('table', 'learned')).toBe(false);
+    expect(capacityOutranks('table', '')).toBe(true);
+  });
+
+  it('同源可刷新（重扫时值会变）', () => {
+    expect(capacityOutranks('table', 'table')).toBe(true);
+    expect(capacityOutranks('loaded', 'loaded')).toBe(true);
+  });
+
+  it('学到值压过表值，但压不过手填', () => {
+    expect(capacityOutranks('learned', 'table')).toBe(true);
+    expect(capacityOutranks('learned', 'manual')).toBe(false);
+  });
 });
 
 describe('refillCapacity —— 回填老条目的容量列', () => {
@@ -183,6 +220,28 @@ describe('refillCapacity —— 回填老条目的容量列', () => {
     const out = refillCapacity(cur, [row('a', '999', 'provider')]);
     expect(out).toHaveLength(2);
     expect(out[1]).toBe(cur[1]);
+  });
+
+  it('本次端点没报值 → 不清空已有值（离线重扫不该丢数据）', () => {
+    const cur = [row('a', '8192', 'loaded', '2048', 'loaded')];
+    const out = refillCapacity(cur, [row('a', '', '', '', '')]);
+    expect(out[0].context_tokens).toBe('8192');
+    expect(out[0].max_output_tokens).toBe('2048');
+    expect(out[0]).toBe(cur[0]);
+  });
+
+  it('表值不覆盖已加载窗口（来源更弱）', () => {
+    const cur = [row('a', '8192', 'loaded')];
+    const out = refillCapacity(cur, [row('a', '65536', 'table')]);
+    expect(out[0].context_tokens).toBe('8192');
+    expect(out[0].context_source).toBe('loaded');
+  });
+
+  it('已加载窗口覆盖表值（来源更强）', () => {
+    const cur = [row('a', '65536', 'table')];
+    const out = refillCapacity(cur, [row('a', '262144', 'loaded')]);
+    expect(out[0].context_tokens).toBe('262144');
+    expect(out[0].context_source).toBe('loaded');
   });
 
   it('无变化时返回原对象引用（避免无谓重渲染）', () => {

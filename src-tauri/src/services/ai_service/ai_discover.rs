@@ -60,19 +60,38 @@ fn pos_u64(v: Option<&serde_json::Value>) -> Option<u64> {
 ///
 /// 实测教训：只认 `context_window` / `context_length` 时，59 个模型里只认出 4 个上下文。
 /// Ollama 的 `details.context_length`（0.30+ 才有）在 `details` 子对象里，同样要读。
+/// 上下文长度的**方言键**，按「对本次发送最有约束力」排序。
+///
+/// ⚠️ 顺序有实质影响：`loaded_context_length`（服务端**当前已加载**的窗口）必须排在
+/// `max_context_length`（模型理论上限）**前面**。LM Studio 里同一个模型可以
+/// 「最大 131072、当前只加载 4096」，按最大值放行 ⇒ 请求必被 400；
+/// 按已加载窗口算压缩阈值才是"这次真能发多少"。
+const CONTEXT_KEYS: &[&str] = &[
+    "loaded_context_length",    // LM Studio / llama.cpp server：当前已加载窗口（最贴近真实）
+    "max_context_length",       // LM Studio：模型最大
+    "context_window",           // 部分中转站
+    "context_length",           // OpenRouter、Ollama /v1/models
+    "max_model_len",            // vLLM
+    "max_input_tokens",         // 若干中转站
+    "n_ctx",                    // llama.cpp
+];
+
+/// 取上下文长度 + **命中的键名**（键名决定来源标 `provider` 还是 `loaded`）。
+fn context_of_with_key(e: &serde_json::Value) -> Option<(u64, &'static str)> {
+    CONTEXT_KEYS
+        .iter()
+        .find_map(|k| pos_u64(e.get(*k)).map(|v| (v, *k)))
+        .or_else(|| {
+            pos_u64(e.get("details").and_then(|d| d.get("context_length")))
+                .map(|v| (v, "details.context_length"))
+        })
+}
+
+/// 仅测试用：只要值不要键名（生产路径统一走 [`context_of_with_key`]，因为来源要区分
+/// `loaded`（当前已加载窗口）与 `provider`（模型最大））。
+#[cfg(test)]
 fn context_of(e: &serde_json::Value) -> Option<u64> {
-    const KEYS: &[&str] = &[
-        "context_window",           // 部分中转站
-        "context_length",           // OpenRouter、Ollama /v1/models
-        "max_context_length",       // LM Studio
-        "loaded_context_length",    // LM Studio（当前已加载的窗口）
-        "max_model_len",            // vLLM
-        "max_input_tokens",         // 若干中转站
-        "n_ctx",                    // llama.cpp
-    ];
-    KEYS.iter()
-        .find_map(|k| pos_u64(e.get(*k)))
-        .or_else(|| pos_u64(e.get("details").and_then(|d| d.get("context_length"))))
+    context_of_with_key(e).map(|(v, _)| v)
 }
 
 /// 单次最大输出。`max_tokens` 语义最含糊（有的端点拿它当上下文），故排在最后。
@@ -137,12 +156,21 @@ fn caps_from_entry(e: &serde_json::Value) -> Option<Caps> {
 fn parse_openai_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
     let model = nonempty_str(e.get("id"))?;
     let reported = caps_from_entry(e);
+    // 同一个读法，但把"命中的是哪个键"一起记下来：`loaded_context_length` 是
+    // 当前已加载窗口（来源标 loaded），其余都是模型自报上限（来源标 provider）。
+    let ctx = context_of_with_key(e);
     Some(DiscoveredModel {
         model,
         label: nonempty_str(e.get("name")).or_else(|| nonempty_str(e.get("display_name"))),
-        context_tokens: context_of(e),
+        context_tokens: ctx.map(|(v, _)| v),
         max_tokens: max_output_of(e),
-        ctx_source: None,
+        ctx_source: ctx.map(|(_, k)| {
+            if k == "loaded_context_length" {
+                CapacitySource::Loaded
+            } else {
+                CapacitySource::Provider
+            }
+        }),
         out_source: None,
         caps: reported.clone().unwrap_or_default(),
         caps_reported: reported.is_some(),
@@ -158,12 +186,19 @@ fn parse_openai_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
 fn parse_ollama_entry(e: &serde_json::Value) -> Option<DiscoveredModel> {
     let model = nonempty_str(e.get("model")).or_else(|| nonempty_str(e.get("name")))?;
     let reported = caps_from_entry(e);
+    let ctx = context_of_with_key(e);
     Some(DiscoveredModel {
         model,
         label: nonempty_str(e.get("name")),
-        context_tokens: context_of(e),
+        context_tokens: ctx.map(|(v, _)| v),
         max_tokens: max_output_of(e),
-        ctx_source: None,
+        ctx_source: ctx.map(|(_, k)| {
+            if k == "loaded_context_length" {
+                CapacitySource::Loaded
+            } else {
+                CapacitySource::Provider
+            }
+        }),
         out_source: None,
         caps: reported.clone().unwrap_or_default(),
         caps_reported: reported.is_some(),
@@ -205,7 +240,8 @@ fn with_caps(mut models: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
 
         // 容量：端点自报优先，缺的用兜底表补；并**如实记录来源**，
         // 供重扫时判断该字段能否覆盖（见 CapacitySource::refreshable）。
-        let ctx_from_endpoint = m.context_tokens.is_some();
+        // 来源由解析阶段就写好（loaded / provider），这里只负责"没自报时用表补"。
+        let ctx_from_endpoint = m.ctx_source.is_some() || m.context_tokens.is_some();
         let out_from_endpoint = m.max_tokens.is_some();
         if let Some((ctx, out)) = infer_capacity(&m.model) {
             if m.context_tokens.is_none() {
@@ -215,13 +251,15 @@ fn with_caps(mut models: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
                 m.max_tokens = Some(out);
             }
         }
-        m.ctx_source = if ctx_from_endpoint {
-            Some(CapacitySource::Provider)
-        } else if m.context_tokens.is_some() {
-            Some(CapacitySource::Table)
-        } else {
-            None
-        };
+        if m.ctx_source.is_none() {
+            m.ctx_source = if ctx_from_endpoint {
+                Some(CapacitySource::Provider)
+            } else if m.context_tokens.is_some() {
+                Some(CapacitySource::Table)
+            } else {
+                None
+            };
+        }
         m.out_source = if out_from_endpoint {
             Some(CapacitySource::Provider)
         } else if m.max_tokens.is_some() {
@@ -638,6 +676,29 @@ mod tests {
         // 远端只打 /v1/models 与 /models，避免多等超时；且不含曾经写错的 /api/models
         let u = candidate_urls("example.com:8000");
         assert_eq!(u, vec!["http://example.com:8000/v1/models", "http://example.com:8000/models"]);
+    }
+
+    /// **已加载窗口优先于模型最大**（2026-10-22）。
+    ///
+    /// LM Studio 同一个模型可以「最大 131072 / 当前只加载 4096」。按最大值放行 ⇒ 上游必 400；
+    /// 按已加载窗口算压缩阈值才是"这次真能发多少"。这条顺序错了，压缩阈值就整体虚高。
+    #[test]
+    fn 容量_已加载窗口优先于模型最大() {
+        let both = serde_json::json!({
+            "id": "qwen2.5-1.5b-instruct",
+            "max_context_length": 131072,
+            "loaded_context_length": 4096,
+            "state": "loaded"
+        });
+        let m = parse_openai_entry(&both).expect("应能解析");
+        assert_eq!(m.context_tokens, Some(4096), "应取已加载窗口，而不是模型最大");
+        assert_eq!(m.ctx_source, Some(CapacitySource::Loaded), "来源要标 loaded");
+
+        // 没加载（只有最大）时退回最大值，来源标 provider
+        let max_only = serde_json::json!({ "id": "x", "max_context_length": 131072, "state": "not-loaded" });
+        let m2 = parse_openai_entry(&max_only).expect("应能解析");
+        assert_eq!(m2.context_tokens, Some(131072));
+        assert_eq!(m2.ctx_source, Some(CapacitySource::Provider));
     }
 
     #[test]

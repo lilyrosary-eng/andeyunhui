@@ -352,7 +352,17 @@ async fn run_agent(
             // 上游 4xx：把请求形状打出来（模型/工具数/缺 type 的工具/effort）。
             // 2026-10-19 的「invalid tool type 400」就是靠这类信息才能一眼定位。
             crate::services::ai_service::log_rejected_request("ai_chat_agent", &url, &body, status.as_u16(), &text);
-            let msg = format!("HTTP {}: {}", status, text);
+            // 上下文超限的报错正文通常带真值（"maximum context length is N tokens"）：
+            // 顺手学到并回写模型档案，下一轮压缩阈值直接按真值算。
+            // 放在消息格式化之前、失败不影响报错本身（learn_from_error 内部只打日志）。
+            let learned = crate::services::ai_service::ctx_learn::learn_from_error(&app, &cfg, &text);
+            let msg = match learned {
+                Some(n) => format!(
+                    "HTTP {}: {}\n（已记录该模型上下文上限 = {} token，下一轮起按它压缩）",
+                    status, text, n
+                ),
+                None => format!("HTTP {}: {}", status, text),
+            };
             emit_agent_error(&app, &request_id, &msg);
             return Err(msg);
         }

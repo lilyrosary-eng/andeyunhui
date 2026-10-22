@@ -21,6 +21,13 @@
 - **`src/core/clock.ts`**：把「今天是第几天」收敛成模块级缓存 + 跨天定时刷新，替掉 4 处渲染期 `Date.now()`（React 渲染期 impure）。
 
 ### 修复
+- **上下文长度：从"猜表"改成"分层取证 + 报错学习"**（压缩阈值直接由它决定，所以这是压缩精度的地基）：
+  - **顺序修正**：`loaded_context_length`（服务端**当前已加载窗口**）现在优先于 `max_context_length`（模型理论上限）。实测用户本地 4B 模型档案里是表猜的 65536，端点上真实值是 **262144**；而嵌入模型是 `max=32768 / loaded=2048` —— 按最大值算压缩阈值会整体虚高，直到被上游 400。
+  - **来源扩到五种**：`provider`（模型自报）/ `loaded`（当前窗口）/ `learned`（报错学到）/ `table`（内置推断）/ `manual`（手填）。UI 会显示具体来源，不再只有一个"内置推断"。
+  - **新增 `ctx_learn`**：上游报错正文里带真值时（`This model's maximum context length is 65536 tokens` 等 6 类句式）解析出来、回写模型档案（来源 `learned`），下一轮压缩线直接按真值算。认不出就**不猜**（3 项单测钉住"只认带数字的句式"与"数量级不合理当噪声"）。
+  - **合并闸门**：`table` 不许覆盖 `loaded`/`provider`/`learned`；新数据没值不清空旧值（离线重扫不再丢容量）。Rust 与 TS 两侧同序（`CapacitySource::priority` / `capacityOutranks`）。
+  - **未知兜底从 200k 改成 32k**：未知就保守——32k 只是多点一次摘要，200k 会让请求直接失败。`contextAuto` 提示同步。
+  - 测试：Rust +4（含 ctx_learn 3 项、已加载窗口优先）、TS +8（来源优先级 / 不回退 / 不清空）。
 - **安装版「新建对话发一句你好就报上下文超限」**：伴侣头像存的是 `data:image/...;base64`（实测 2.98MB），`buildPersonaContext` 把它直接拼进人设文本 ⇒ ① 伴侣每轮 system 就带 3MB；② 这段人设被沉淀成 `companion://<id>/persona` 记忆块（库里两条 2,984,551 字符）；③ 普通 AI 对话发「你好」时，长期记忆检索 top-5 把它捞回 system ⇒ 估算 token 撞上熔断线（`>32768`），整轮被终止。
   - 源头：新增 `avatarForPrompt()`，头像只在提示词里保留**短字符**（emoji/单字，≤8 字符），data URL / http URL / 长文本一律不进提示词（图片仍正常显示在 UI）。
   - 写入端：`stripDataUrls()` + `sanitizeMemoryText()`，摄取任何记忆前先摘掉内嵌 base64、再截断到 8000 字符，变化时显式告警（embedding 之前就净化，不再拿 3MB 去算向量）。

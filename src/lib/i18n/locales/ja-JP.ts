@@ -1460,6 +1460,8 @@ export const jaJP: Record<string, string> = {
   'modelSettings.effortFromBuiltin': '組み込み既定',
   'modelSettings.srcProvider': 'エンドポイント',
   'modelSettings.srcTable': '内蔵推定',
+  'modelSettings.srcLoaded': '読み込み済みウィンドウ',
+  'modelSettings.srcLearned': 'エラーから学習',
   'modelSettings.srcManual': '手入力',
   'modelSettings.srcUnknown': '出所不明',
   'modelSettings.comfyui.allowTitle': 'AI 自動構築ワークフローのカスタムノード許可',

@@ -53,9 +53,12 @@ export function emptyReasoning(): ReasoningSpecUi {
 }
 
 /** 容量值来源（与 Rust `CapacitySource` 对齐）。 */
-export type CapacitySourceUi = 'provider' | 'table' | 'manual';
+export type CapacitySourceUi = 'provider' | 'loaded' | 'learned' | 'table' | 'manual';
 
-const capacitySources: readonly string[] = ['provider', 'table', 'manual'];
+// 顺序无意义，取值必须与 Rust `CapacitySource` 的 serde 名一致：
+// provider=模型自报最大 / loaded=服务端当前已加载窗口 / learned=从上游报错学到 /
+// table=内置推断 / manual=用户手填
+const capacitySources: readonly string[] = ['provider', 'loaded', 'learned', 'table', 'manual'];
 
 /** 非法/缺失 → ''（未标注）。 */
 function sourceFrom(v: unknown): CapacitySourceUi | '' {

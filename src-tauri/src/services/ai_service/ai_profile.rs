@@ -206,8 +206,19 @@ impl Default for Caps {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CapacitySource {
-    /// 端点自报（最可信）
+    /// 端点自报（最可信）：模型的**最大**上下文 / 最大输出
     Provider,
+    /// 端点自报的**当前已加载窗口**（LM Studio `loaded_context_length`）。
+    ///
+    /// 与 `Provider` 分开记，因为它比"模型最大"更贴近"这次真能发多少"：
+    /// 同一个模型，服务端可能只加载了 4096 的窗口，而 `max_context_length` 写着 131072。
+    /// 按最大值放行 ⇒ 请求必然被上游 400。压缩阈值也该按这个值算。
+    Loaded,
+    /// **从上游报错里学到的真值**（`This model's maximum context length is 8192 tokens`）。
+    ///
+    /// 这是覆盖率的关键补齐：能力/容量探测做不到全覆盖，但"真跑一次失败"一定能拿到真值。
+    /// 学到之后立即回写配置，下一轮压缩阈值就按真值算，不用用户手动改。
+    Learned,
     /// 内置兜底表推断（近似值）
     Table,
     /// 用户手填（**永不覆盖**）
@@ -217,7 +228,7 @@ pub enum CapacitySource {
 impl CapacitySource {
     /// 重扫时能否用新值覆盖本字段。
     ///
-    /// - `Provider` / `Table` → 可以刷新（推断值本该跟着数据源更新）
+    /// - `Provider` / `Loaded` / `Learned` / `Table` → 可以刷新（推断/自报值本就该跟着数据源更新）
     /// - `Manual` → 冻结
     /// - **`None` 且有值 → 视为手填**：这是改造前的老数据，无法区分来源，
     ///   按保守处理冻结（宁可不更新，也不能冲掉用户填的值）。
@@ -226,7 +237,25 @@ impl CapacitySource {
         if value.is_none() {
             return true;
         }
-        matches!(source, Some(Self::Provider) | Some(Self::Table))
+        matches!(
+            source,
+            Some(Self::Provider) | Some(Self::Loaded) | Some(Self::Learned) | Some(Self::Table)
+        )
+    }
+
+    /// 新值是否应该覆盖旧值（重扫合并用）。数值越大越可信。
+    ///
+    /// 规则：`Manual` 永远第一；`Loaded`（当前窗口）> `Provider`（模型最大）>
+    /// `Learned`（报错真值）> `Table`（猜的）> `None`（来历不明）。
+    /// `Loaded` 排最前是因为它直接决定"这次请求会不会被拒"。
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::Manual => 5,
+            Self::Loaded => 4,
+            Self::Provider => 3,
+            Self::Learned => 2,
+            Self::Table => 1,
+        }
     }
 }
 
@@ -835,15 +864,34 @@ impl ResolvedTarget {
         self.effort() == "off"
     }
 
-    /// Agent 上下文估算上限（token）。未配置时默认 200k —— 兼容 v1 行为，
-    /// 对多数模型都留足余量。优先取用户手工设的值，其次端点自报的，最后 200k。
+    /// Agent 上下文估算上限（token）。
+    ///
+    /// 优先级：用户手填 > 端点自报（含已加载窗口/报错学到）> 兜底表 > **保守默认 32k**。
+    ///
+    /// ## 为什么默认值从 200k 改成 32k（2026-10-22）
+    /// 旧默认 200k 是"乐观兜底"：对认不出来的模型，我们假装它有 200k，
+    /// 于是压缩阈值（cap/5=40k）永远不触发，一路发到上游 400 才失败 ——
+    /// 报错还是上游的生硬文案。**未知就应该保守**：32k 是绝大多数本地/小模型的常见窗口，
+    /// 按它压缩只是多发一次摘要，按 200k 放行则会直接失败。
+    /// 认出来的模型走表/端点，不受影响；被学过真值的会自动回填（见 `CapacitySource::Learned`）。
     pub(crate) fn context_cap(&self) -> usize {
-        self.max_context_tokens
-            .filter(|v| *v > 0)
-            .and_then(|v| usize::try_from(v).ok())
-            .unwrap_or(200_000)
+        if let Some(v) = self.max_context_tokens.filter(|v| *v > 0) {
+            if let Ok(n) = usize::try_from(v) {
+                return n;
+            }
+        }
+        log::warn!(
+            "[ai-agent] 模型 {} 没有可用的上下文长度（端点未报、表里也没有），按保守默认 {} token 计算压缩阈值；\
+             真实上限会在首次被上游拒绝时学到并回写",
+            self.model,
+            DEFAULT_CONTEXT_CAP
+        );
+        DEFAULT_CONTEXT_CAP
     }
 }
+
+/// 未知模型的保守上下文默认值（见 `context_cap` 注释）。
+pub(crate) const DEFAULT_CONTEXT_CAP: usize = 32_768;
 
 /// 内置 DeepSeek 占位：配置为空时用它，引导用户去设置。
 pub fn placeholder_target() -> ResolvedTarget {
@@ -983,6 +1031,58 @@ pub async fn ai_set_profiles(app: AppHandle, payload: AiProfiles) -> Result<(), 
     let existing = load_config(&app);
     let cfg = super::legacy_compat::from_legacy_profiles(&existing, &payload);
     write_config(&app, &cfg)
+}
+
+/// 把「从上游报错学到的上下文上限」写回配置（按 model id 定位）。
+///
+/// 返回 `true` 表示值有变化并已落盘。`Manual` / 用户手填的值不会被覆盖 ——
+/// 用户明确填过的就是他的判断，我们只补空缺和纠正我们自己的推断。
+pub(crate) fn update_model_context_tokens(
+    app: &AppHandle,
+    model_id: &str,
+    tokens: u64,
+    source: CapacitySource,
+) -> Result<bool, String> {
+    if tokens == 0 {
+        return Ok(false);
+    }
+    let before = load_config(app);
+    let mut cfg = before.clone();
+    let mut hit = None;
+    for prov in cfg.providers.iter_mut() {
+        if let Some(m) = prov.models.iter_mut().find(|m| m.id == model_id) {
+            let usable = CapacitySource::refreshable(m.context_tokens, m.context_source)
+                && match m.context_source {
+                    Some(CapacitySource::Manual) => false,
+                    Some(cur) => source.priority() >= cur.priority(),
+                    None => true,
+                };
+            if !usable {
+                log::info!(
+                    "[ctx-learn] {model_id} 现有上下文 {:?}（来源 {:?}）优先于新值 {tokens}（来源 {source:?}），不覆盖",
+                    m.context_tokens,
+                    m.context_source
+                );
+                return Ok(false);
+            }
+            if m.context_tokens == Some(tokens) && m.context_source == Some(source) {
+                return Ok(false);
+            }
+            hit = Some((m.context_tokens, m.context_source));
+            m.context_tokens = Some(tokens);
+            m.context_source = Some(source);
+            break;
+        }
+    }
+    let Some((old_tokens, old_source)) = hit else {
+        log::warn!("[ctx-learn] 未找到模型 {model_id}，学到的上下文 {tokens} 无法回写");
+        return Ok(false);
+    };
+    write_config(app, &cfg)?;
+    log::warn!(
+        "[ctx-learn] 已回写上下文上限：{model_id} {old_tokens:?}（{old_source:?}）→ {tokens}（{source:?}）"
+    );
+    Ok(true)
 }
 
 /// 思考模式开关：按 model id 定位 ModelEntry，写入 overrides.thinking。
@@ -1347,10 +1447,16 @@ mod v2_tests {
         assert_eq!(t.vision_model.as_deref(), Some("qwen-vl-max"));
     }
 
+    /// 上下文缺省值：**保守 32k，不是 200k**（2026-10-22 改）。
+    ///
+    /// 旧默认 200k 意味着"认不出来的模型也按 200k 放行"：压缩线 = cap/5 = 40k，
+    /// 于是永远不触发压缩，一路发到上游 400。未知就保守：32k 只是多点一次摘要，
+    /// 200k 会让请求直接失败。真实上限会在首次被上游拒绝时学到并回写（ctx_learn）。
     #[test]
-    fn 解析_上下文上限缺省20万() {
+    fn 解析_上下文上限未知时保守取32k() {
         let cfg = cfg_with();
-        assert_eq!(resolve_target(&cfg, Some("p_aaa")).context_cap(), 200_000);
+        assert_eq!(resolve_target(&cfg, Some("p_aaa")).context_cap(), DEFAULT_CONTEXT_CAP);
+        assert_eq!(DEFAULT_CONTEXT_CAP, 32_768);
     }
 
     // ---------- 最老单份格式（整份文件即单个 AiProfile，无 profiles 包装） ----------

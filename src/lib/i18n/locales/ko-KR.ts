@@ -1460,6 +1460,8 @@ export const koKR: Record<string, string> = {
   'modelSettings.effortFromBuiltin': '내장 기본값',
   'modelSettings.srcProvider': '엔드포인트',
   'modelSettings.srcTable': '내장 추정',
+  'modelSettings.srcLoaded': '로드된 창',
+  'modelSettings.srcLearned': '오류에서 학습',
   'modelSettings.srcManual': '직접 입력',
   'modelSettings.srcUnknown': '출처 불명',
   'modelSettings.comfyui.allowTitle': 'AI 자동 구축 워크플로의 커스텀 노드 허용',

@@ -427,7 +427,13 @@ pub async fn ai_chat(
         }
         // 4xx 一律打印请求形状（模型/工具清单/缺 type 的工具），否则只剩一行上游文案无从定位
         crate::services::ai_service::log_rejected_request("ai_chat", &url, &body, status.as_u16(), &text);
-        let msg = format!("HTTP {}: {}", status, text);
+        // 上下文超限的正文常带真值，顺手学到并回写（见 ctx_learn 模块注释）
+        let learned = crate::services::ai_service::ctx_learn::learn_from_error(&app, &cfg, &text);
+        let msg = match learned {
+            Some(n) => format!("HTTP {}: {}
+（已记录该模型上下文上限 = {} token，下一轮起按它压缩）", status, text, n),
+            None => format!("HTTP {}: {}", status, text),
+        };
         let _ = app.emit(
             "ai-error",
             serde_json::json!({ "requestId": request_id, "error": msg }),
@@ -440,7 +446,13 @@ pub async fn ai_chat(
         let text = resp.text().await.unwrap_or_default();
         // 4xx 一律打印请求形状（模型/工具清单/缺 type 的工具），否则只剩一行上游文案无从定位
         crate::services::ai_service::log_rejected_request("ai_chat", &url, &body, status.as_u16(), &text);
-        let msg = format!("HTTP {}: {}", status, text);
+        // 上下文超限的正文常带真值，顺手学到并回写（见 ctx_learn 模块注释）
+        let learned = crate::services::ai_service::ctx_learn::learn_from_error(&app, &cfg, &text);
+        let msg = match learned {
+            Some(n) => format!("HTTP {}: {}
+（已记录该模型上下文上限 = {} token，下一轮起按它压缩）", status, text, n),
+            None => format!("HTTP {}: {}", status, text),
+        };
         let _ = app.emit(
             "ai-error",
             serde_json::json!({ "requestId": request_id, "error": msg }),

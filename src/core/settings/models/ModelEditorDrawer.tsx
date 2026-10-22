@@ -17,6 +17,8 @@ export function capacitySourceLabel(
   if (!value.trim()) return '';
   switch (source) {
     case 'provider': return t('modelSettings.srcProvider');
+    case 'loaded': return t('modelSettings.srcLoaded');
+    case 'learned': return t('modelSettings.srcLearned');
     case 'table': return t('modelSettings.srcTable');
     case 'manual': return t('modelSettings.srcManual');
     default: return t('modelSettings.srcUnknown');

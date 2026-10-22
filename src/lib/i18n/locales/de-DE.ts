@@ -1460,6 +1460,8 @@ export const deDE: Record<string, string> = {
   'modelSettings.effortFromBuiltin': 'Integrierter Standard',
   'modelSettings.srcProvider': 'Vom Anbieter',
   'modelSettings.srcTable': 'Integrierte Schätzung',
+  'modelSettings.srcLoaded': 'geladenes Fenster',
+  'modelSettings.srcLearned': 'aus Fehler gelernt',
   'modelSettings.srcManual': 'Manuell',
   'modelSettings.srcUnknown': 'Quelle unbekannt',
   'modelSettings.comfyui.allowTitle': 'Erlaubte Custom-Nodes für KI-Workflows',

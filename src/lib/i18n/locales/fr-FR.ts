@@ -1459,6 +1459,8 @@ export const frFR: Record<string, string> = {
   'modelSettings.effortFromBuiltin': 'Par défaut intégré',
   'modelSettings.srcProvider': 'Fourni par l’API',
   'modelSettings.srcTable': 'Estimation intégrée',
+  'modelSettings.srcLoaded': 'fenêtre chargée',
+  'modelSettings.srcLearned': 'appris par erreur',
   'modelSettings.srcManual': 'Manuel',
   'modelSettings.srcUnknown': 'Source inconnue',
   'modelSettings.comfyui.allowTitle': 'Nœuds personnalisés autorisés pour les workflows IA',

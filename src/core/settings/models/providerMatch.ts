@@ -132,7 +132,32 @@ export interface CapacityFields {
  */
 export function capacityRefreshable(value: string, source: string): boolean {
   if (!value.trim()) return true;
-  return source === 'provider' || source === 'table';
+  return CAPACITY_REFRESHABLE_SOURCES.includes(source);
+}
+
+/** 与 Rust `CapacitySource::refreshable` 的集合一致：手填冻结，其余可刷新。 */
+const CAPACITY_REFRESHABLE_SOURCES = ['provider', 'loaded', 'learned', 'table'];
+
+/**
+ * 容量来源的可信度（与 Rust `CapacitySource::priority` 完全同序）。
+ *
+ * `loaded`（服务端当前已加载窗口）排最前，因为它直接决定"这次请求会不会被拒"；
+ * `table` 是猜的，不能盖掉任何自报值 —— 否则本地端点没启动时重扫一次，
+ * 就把"已加载 8192"降级成"表猜 65536"，压缩阈值跟着虚高。
+ */
+const CAPACITY_PRIORITY: Record<string, number> = {
+  manual: 5,
+  loaded: 4,
+  provider: 3,
+  learned: 2,
+  table: 1,
+};
+
+/** 新来源是否不比旧来源差（相等也算，便于"同源刷新"）。 */
+export function capacityOutranks(incomingSource: string, currentSource: string): boolean {
+  const inc = CAPACITY_PRIORITY[incomingSource] ?? 0;
+  const cur = CAPACITY_PRIORITY[currentSource] ?? 0;
+  return inc >= cur;
 }
 
 /**
@@ -151,12 +176,23 @@ export function refillCapacity<T extends CapacityFields>(current: T[], incoming:
     if (!src) return m;
     const next = { ...m };
     let changed = false;
-    if (capacityRefreshable(m.context_tokens, m.context_source)) {
+    // 两道闸门，缺一不可：
+    // ① 新值必须有值 —— 端点这次没报（离线/没加载）不该把已知值清空；
+    // ② 新来源不能更弱 —— `table`（猜的）不许盖掉 `loaded`/`provider`/`learned`。
+    if (
+      src.context_tokens.trim() &&
+      capacityRefreshable(m.context_tokens, m.context_source) &&
+      capacityOutranks(src.context_source, m.context_source)
+    ) {
       if (next.context_tokens !== src.context_tokens || next.context_source !== src.context_source) changed = true;
       next.context_tokens = src.context_tokens;
       next.context_source = src.context_source;
     }
-    if (capacityRefreshable(m.max_output_tokens, m.max_output_source)) {
+    if (
+      src.max_output_tokens.trim() &&
+      capacityRefreshable(m.max_output_tokens, m.max_output_source) &&
+      capacityOutranks(src.max_output_source, m.max_output_source)
+    ) {
       if (next.max_output_tokens !== src.max_output_tokens || next.max_output_source !== src.max_output_source) changed = true;
       next.max_output_tokens = src.max_output_tokens;
       next.max_output_source = src.max_output_source;
