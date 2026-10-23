@@ -35,7 +35,8 @@
     "typecheck:plugins": "tsc -p tsconfig.plugins.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib --features test-manifest"
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib --features test-manifest",
+    "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.2.0",
