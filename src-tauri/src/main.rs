@@ -2050,6 +2050,8 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // 与 tsc（不校验 invoke 字符串）都发现不了。见 `tauriCommands.test.ts` 那道防线。
             ai_service::ai_probe_vision,
             ai_service::caps_probe_ext::ai_probe_caps,
+            ai_service::local_runtime::ai_local_runtime_status,
+            ai_service::local_runtime::ai_local_runtime_release,
             ai_service::ai_test_selfcheck,
             ai_service::ai_media_usage,
             ai_service::ai_media_cleanup,

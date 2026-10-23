@@ -21,7 +21,13 @@
 - **`src/core/clock.ts`**：把「今天是第几天」收敛成模块级缓存 + 跨天定时刷新，替掉 4 处渲染期 `Date.now()`（React 渲染期 impure）。
 
 ### 修复
-- **能力标签「所有模型都是文本+工具」**：标签本身不算错（多数 OpenAI 兼容对话模型确实支持 function calling），错在**没有区分"猜的"和"测过的"**。现在每个能力位都带来源后缀：
+- **本地模型的显存/驻留只能靠猜**：新增 `local_runtime` 观测与释放（**只观测 + 引导，不做调度器**）。
+  - `ai_local_runtime_status(baseUrl)`：先问 Ollama `GET /api/ps`（给 `size_vram` / `expires_at`），再问 LM Studio `GET /api/v0/models`（给 `state` / `loaded_context_length`）。
+  - `ai_local_runtime_release(baseUrl, model)`：只对 Ollama 生效（`keep_alive: 0` 是官方卸载语义）；LM Studio 的 HTTP 接口没有卸载端点，**如实说明**而不是假装成功。
+  - 设置页供应商卡片上，回环地址才显示「查看驻留/显存」：列出已加载模型、窗口、显存占用，并给逐条「释放」。
+  - **实测抓到一个会误判的形状问题**：LM Studio 对 `/api/ps` 返回的是 **HTTP 200 + `{"error":"Unexpected endpoint or method"}`**。只判状态码会把它认成 Ollama 并显示"没有驻留模型"。判定改为按**响应形状**（必须真有 `models`/`data` 数组），并配 4 项测试用真实响应体钉住。
+  - 为什么不做自动卸载：驻留是服务端职责（JIT 加载 + 空闲 TTL 驱逐 + 显存守卫），外面再排一遍会打架；且我们拿不到可靠显存数据（NVML 只管 NVIDIA）。
+- **能力标签「所有模型都是文本+工具」**：标签本身不算错（多数 OpenAI 兼容对话模型确实支持 function calling），错在**没有区分"猜的"和"测过的"**。现在每个能力位都带来源后缀：- **能力标签「所有模型都是文本+工具」**：标签本身不算错（多数 OpenAI 兼容对话模型确实支持 function calling），错在**没有区分"猜的"和"测过的"**。现在每个能力位都带来源后缀：
   - `provider`（端点上报 / 探测确证）→「工具·实测」；`inferred`（名字启发式）→「工具·推断」；`manual`（用户手改）→「工具·手填」；来源不明（老数据）不加后缀。
   - 新增 `Caps.tools_source` / `embedding_source`（此前只有 vision 有位来源），三点独立判定，互不牵连：视觉手填冻结、工具推断仍可由重扫刷新。
   - `infer_caps` 给工具/向量位也打 `inferred`；用户手改任一能力位即标 `manual`，重扫/探测都不得覆盖（此前手改视觉会连带冻掉其它位）。

@@ -153,6 +153,48 @@ export function ProviderCard(props: ProviderCardProps) {
     }
   };
 
+  // ── 本地运行时（显存 / 驻留 / 释放）────────────────────────────
+  // 只对回环地址显示。文案直接用中文：这是诊断面板，与后端返回的 note 同语言，
+  // 走 i18n 反而会出现"半句中文半句原文"的割裂（后端 note 是动态拼接的）。
+  type Resident = {
+    model: string; loaded: boolean; context_tokens: number | null;
+    vram_bytes: number | null; expires_at: string | null;
+  };
+  type RuntimeStatus = {
+    kind: string; reachable: boolean; models: Resident[]; note: string; can_release: boolean;
+  };
+  const [rt, setRt] = useState<RuntimeStatus | null>(null);
+  const [rtBusy, setRtBusy] = useState(false);
+  const [rtMsg, setRtMsg] = useState<string>('');
+
+  const loadRuntime = async () => {
+    setRtBusy(true);
+    setRtMsg('');
+    try {
+      const out = await invoke<RuntimeStatus>('ai_local_runtime_status', { baseUrl: p.base_url.trim() });
+      setRt(out);
+      if (!out.reachable) setRtMsg(out.note);
+    } catch (e) {
+      setRtMsg(String(e));
+    } finally {
+      setRtBusy(false);
+    }
+  };
+
+  const releaseModel = async (model: string) => {
+    setRtBusy(true);
+    setRtMsg('');
+    try {
+      const msg = await invoke<string>('ai_local_runtime_release', { baseUrl: p.base_url.trim(), model });
+      setRtMsg(msg);
+      await loadRuntime();
+    } catch (e) {
+      setRtMsg(String(e));
+    } finally {
+      setRtBusy(false);
+    }
+  };
+
   // ── 批量探测：只测用户勾选的 ────────────────────────────────────
   // 为什么不做「一键全测」：一个供应商几十上百个模型，全测就产生同样次数的外部请求，
   // 成本与耗时都不可控，且中途无法叫停。改为「用户勾选 → 串行执行 → 可随时停止」。
@@ -320,6 +362,57 @@ export function ProviderCard(props: ProviderCardProps) {
               )}
             </div>
           </div>
+
+          {/* 本地运行时：显存/驻留观测 + 释放（只对回环地址显示）。
+              不做自动卸载调度 —— 驻留是服务端的职责（见 Rust local_runtime 注释）。 */}
+          {isLocal(p.base_url) && (
+            <div className="px-4 pb-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => void loadRuntime()}
+                  disabled={rtBusy}
+                  className="shrink-0 px-2 py-1 rounded-lg text-[11px] border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-50"
+                  title="读取本地运行时的驻留模型与显存占用（只读，不会改动任何东西）"
+                >
+                  {rtBusy ? '读取中…' : rt ? '刷新驻留/显存' : '查看驻留/显存'}
+                </button>
+                {rt && (
+                  <span className="text-[11px] text-neutral-500 dark:text-stone-400 break-all">{rt.note}</span>
+                )}
+                {!rt && rtMsg && (
+                  <span className="text-[11px] text-red-500 break-all">{rtMsg}</span>
+                )}
+              </div>
+              {rt && rt.models.length > 0 && (
+                <ul className="mt-1.5 space-y-1">
+                  {rt.models.map((m) => (
+                    <li key={m.model} className="flex items-center gap-2 text-[11px] text-neutral-600 dark:text-stone-300">
+                      <span className={`w-1.5 h-1.5 rounded-full ${m.loaded ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-stone-600'}`} />
+                      <span className="font-mono truncate max-w-[42%]" title={m.model}>{m.model}</span>
+                      <span className="text-neutral-400">{m.loaded ? '已加载' : '未加载'}</span>
+                      {m.context_tokens ? <span className="text-neutral-400">窗口 {m.context_tokens}</span> : null}
+                      {m.vram_bytes ? (
+                        <span className="text-neutral-400">{(m.vram_bytes / 1024 / 1024 / 1024).toFixed(2)} GB</span>
+                      ) : null}
+                      {rt.can_release && m.loaded && (
+                        <button
+                          onClick={() => void releaseModel(m.model)}
+                          disabled={rtBusy}
+                          className="ml-auto shrink-0 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-stone-700 hover:bg-neutral-100 dark:hover:bg-stone-800 disabled:opacity-50"
+                          title="让本地服务端立刻卸载这个模型（Ollama: keep_alive=0）"
+                        >
+                          释放
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {rtMsg && rt && (
+                <div className="mt-1 text-[11px] text-neutral-500 dark:text-stone-400 break-all">{rtMsg}</div>
+              )}
+            </div>
+          )}
 
           {/* 模型表 */}
           <div className="px-4 pb-3">
