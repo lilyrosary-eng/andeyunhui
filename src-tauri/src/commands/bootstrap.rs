@@ -307,8 +307,13 @@ pub(crate) fn extract_one_mufurong(mufurong_path: &std::path::Path) -> Result<()
                 if let Some(parent) = outpath.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
-                std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+                let mode = entry.unix_mode();
+                {
+                    let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
+                    std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+                }
+                #[cfg(unix)]
+                maybe_make_executable(&outpath, mode);
             }
         }
 
@@ -401,6 +406,9 @@ pub fn extract_mujin_deps(app: &AppHandle) {
         return;
     }
     walk_and_extract_mujin(&user_dir);
+    // 老版本解出来的二进制没有执行位，marker 匹配不会重新解压 ⇒ 每次启动就地补一遍
+    #[cfg(unix)]
+    repair_executables_in(&user_dir);
 }
 
 /// 递归扫描目录下的 .mujin 文件并解压
@@ -418,6 +426,46 @@ pub(crate) fn walk_and_extract_mujin(dir: &std::path::Path) {
             if let Err(e) = extract_one_mujin(&path) {
                 eprintln!("[mujin] 解压失败 {}: {}", path.display(), e);
             }
+        }
+    }
+}
+
+
+/// 给解包出的文件补可执行位。
+///
+/// 为什么：`File::create` + `io::copy` 写出的是 0644。Windows 不看执行位，但 Linux 上
+/// `external-deps/全局/ffmpeg/ffmpeg` 会变成“不可执行”，`ffmpeg -version` 直接 EACCES
+/// ⇒ 薄荷的 check_ffmpeg 判 false、录像/转码全废。
+/// 实测（2026-10-24）：解出的 ffmpeg 是 `-rw-rw-r--`，手跑报“权限不够”。
+///
+/// 判据：zip 条目带 exec 位就尊重它；**无扩展名的文件一律补 755**（ffmpeg /
+/// curl-impersonate 这类 Linux 二进制都没有扩展名）。
+#[cfg(unix)]
+fn maybe_make_executable(outpath: &std::path::Path, unix_mode: Option<u32>) {
+    use std::os::unix::fs::PermissionsExt;
+    let want = unix_mode.map(|m| m & 0o111 != 0).unwrap_or(false)
+        || outpath.extension().is_none();
+    if !want {
+        return;
+    }
+    if let Ok(md) = std::fs::metadata(outpath) {
+        let mut perms = md.permissions();
+        perms.set_mode(perms.mode() | 0o755);
+        let _ = std::fs::set_permissions(outpath, perms);
+    }
+}
+
+/// 历史遗留修复：把已经解压出来的“无扩展名”文件补上执行位。
+/// （老版本解包没设权限，marker 匹配后不会重新解压，只能就地修。）
+#[cfg(unix)]
+fn repair_executables_in(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            repair_executables_in(&p);
+        } else if p.extension().is_none() {
+            maybe_make_executable(&p, None);
         }
     }
 }
@@ -505,8 +553,13 @@ pub(crate) fn extract_one_mujin(mujin_path: &std::path::Path) -> Result<(), Stri
                 if let Some(parent) = outpath.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
-                std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+                let mode = entry.unix_mode();
+                {
+                    let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
+                    std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+                }
+                #[cfg(unix)]
+                maybe_make_executable(&outpath, mode);
             }
         }
 

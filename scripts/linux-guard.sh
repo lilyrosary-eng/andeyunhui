@@ -65,9 +65,11 @@ fi
 
 MEM_MB=$(parse_mb "$MEM")
 AVAIL_MB=$(awk '/MemAvailable/{printf "%d", $2/1024}' /proc/meminfo)
-NEED_MB=$(( MEM_MB * 2 ))
+# 余量取「上限 + 固定 2G」而不是「上限×2」：上限由 cgroup 硬保证，额外只需要给系统留一点，
+# 否掉 ×2 会在机器本来就忙时无谓拒绝（2026-10-24 实测被拒了一次）。
+NEED_MB=$(( MEM_MB + 2048 ))
 if [ "$AVAIL_MB" -lt "$NEED_MB" ]; then
-  echo "[guard] 拒绝运行：当前可用 ${AVAIL_MB}MB < 需要的 ${NEED_MB}MB（上限 ${MEM} + 等量缓冲）" >&2
+  echo "[guard] 拒绝运行：当前可用 ${AVAIL_MB}MB < 需要的 ${NEED_MB}MB（上限 ${MEM} + 2G 余量）" >&2
   exit 4
 fi
 

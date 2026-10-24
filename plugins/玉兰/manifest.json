@@ -28,7 +28,8 @@
       "pick_directory",
       "remove_from_blacklist",
       "scan_video_root",
-      "smtc_update"
+      "smtc_update",
+      "media_http_url"
     ]
   },
   "codename": "玉兰"
