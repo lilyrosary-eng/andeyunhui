@@ -292,6 +292,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mobile)', 'cfg(desktop)'] 
 # 放在 target_os = "linux" 段：不参与 Windows / Android 构建，对既有平台零影响。
 [target.'cfg(target_os = "linux")'.dependencies]
 mpris = "2.1"
+# 发布端自研 MPRIS（替代 souvlaki）：souvlaki 0.8 无法设置 DesktopEntry / Capabilities，
+# 也不给 Seek·SetPosition ⇒ GNOME 媒体卡片缺图标、不能拖进度。tokio feature 让底层 zbus
+# 复用本应用已有的 tokio 运行时。
+mpris-server = { version = "0.10", features = ["tokio"] }
+# souvlaki 仅保留给非 Linux 平台（macOS 后端）使用
 souvlaki = "0.8"
 x11 = { version = "2.21.0", features = ["xlib", "xinerama"] }
 

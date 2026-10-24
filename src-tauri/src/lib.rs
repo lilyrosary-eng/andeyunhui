@@ -64,6 +64,11 @@ pub mod services;
 // 媒体中继（bimedia:// 自定义协议）：为 <video> 补上 CDN 要求的 Referer，绕开防盗链 403。
 pub mod media_relay;
 
+/// Linux 原生 MPRIS 播放器（替代 souvlaki 的发布端：DesktopEntry/Capabilities/Seek 都要）
+#[cfg(target_os = "linux")]
+#[path = "pal/mpris_player.rs"]
+pub mod mpris_player;
+
 /// Linux 本地媒体 HTTP 服务（带 Range），解决 WebKitGTK 媒体加载器
 /// 不接管 asset:// 自定义 scheme、而整首读成 blob 又会撑爆 page cache 的问题。
 #[cfg(target_os = "linux")]

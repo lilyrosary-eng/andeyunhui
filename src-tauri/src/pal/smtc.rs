@@ -102,10 +102,10 @@ pub struct SmtcDiag {
 
 /// 与 Windows 侧 `smtc_control` 里 emit 出去的私有载荷形状一致。
 #[derive(serde::Serialize, Clone, Debug)]
-struct ControlPayload {
-    action: String,
-    target: String,
-    value: Option<f64>,
+pub(crate) struct ControlPayload {
+    pub(crate) action: String,
+    pub(crate) target: String,
+    pub(crate) value: Option<f64>,
 }
 
 // ============================================================================
@@ -113,7 +113,7 @@ struct ControlPayload {
 // ============================================================================
 
 /// 发布端命令（provider 线程独占 `MediaControls`，经通道接收指令）。
-enum ProviderCmd {
+pub(crate) enum ProviderCmd {
     Update(Box<SmtcUpdate>),
     Volume(f64),
 }
@@ -156,7 +156,7 @@ fn file_url_to_path(url: &str) -> Option<String> {
 ///
 /// MPRIS 规范要求本地封面以 `file://` 开头且是 UTF-8 字符串。中文路径必须编码，
 /// 否则桌面侧的 URI 解析会失败（表现为「封面永远不显示」）。
-fn path_to_file_url(path: &str) -> String {
+pub(crate) fn path_to_file_url(path: &str) -> String {
     let mut out = String::with_capacity(path.len() + 8);
     out.push_str("file://");
     for &b in path.as_bytes() {
@@ -235,6 +235,20 @@ pub fn init_smtc(app: AppHandle) {
 
 /// 发布端主循环：独占 `MediaControls`，串行处理来自命令线程的指令。
 fn provider_loop(app: AppHandle, rx: mpsc::Receiver<ProviderCmd>) {
+    // Linux 走自研 MPRIS（mpris-server）：souvlaki 给不了 DesktopEntry / Capabilities /
+    // Seek·SetPosition，媒体卡片会缺图标且不能拖进度（2026-10-24）。
+    #[cfg(target_os = "linux")]
+    {
+        crate::mpris_player::run_provider(app, rx);
+        return;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    provider_loop_souvlaki(app, rx);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn provider_loop_souvlaki(app: AppHandle, rx: mpsc::Receiver<ProviderCmd>) {
     use souvlaki::{MediaControlEvent, MediaControls, PlatformConfig};
 
     let config = PlatformConfig {
