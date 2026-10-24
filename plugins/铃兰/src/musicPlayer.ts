@@ -176,6 +176,8 @@ class MusicPlayer {
       }
       this.lastTickTime = now;
       this.updateMediaSessionPosition();
+      // 让系统媒体卡片的进度条跟着走（节流 ~1s，见 pushSmtcProgress）
+      this.pushSmtcProgress();
       this.emit('progress', {
         currentTime: this.audio.currentTime,
         duration: this.audio.duration || 0,
@@ -237,6 +239,47 @@ class MusicPlayer {
   // ===== 本进程 SMTC 会话（Rust 端）=====
   // 与 JS mediaSession 不同：该会话运行在 .exe 进程内，任务栏显示「安得云荟」并回传
   // 系统媒体键（键盘/触摸板/任务栏浮窗）。前端只负责推送状态 + 接收控制事件。
+  /** 组装媒体卡片载荷。**必须带 duration_ms / position_ms**：
+   *  缺了它们 MPRIS 就没有 mpris:length、Position 恒 0 ⇒ GNOME 媒体卡片没有进度条
+   *  （2026-10-24 用 busctl 对照确认；此前一直传 None）。 */
+  private smtcPayload(): { title: string; info: Record<string, unknown> } {
+    const track = this.getCurrentTrack();
+    const has = !!track && this.tracks.length > 0;
+    const title = track?.title?.trim()
+      ? track.title
+      : (track?.filePath ? track.filePath.split(/[\\/]/).pop()! : T('music.unknownTrack'));
+    const d = this.audio?.duration;
+    const pos = this.audio?.currentTime;
+    return {
+      title,
+      info: {
+        title,
+        artist: track?.artist ?? '',
+        album: track?.album ?? '',
+        cover_path: track?.coverPath ?? null,
+        media_type: 'music',
+        is_playing: this.isPlaying,
+        can_prev: has,
+        can_next: has,
+        duration_ms: Number.isFinite(d) && d > 0 ? Math.round(d * 1000) : null,
+        position_ms: Number.isFinite(pos) && pos >= 0 ? Math.round(pos * 1000) : null,
+      },
+    };
+  }
+
+  /** 播放中每秒推一次进度（只推 smtc_update，不打 debug_log —— 否则每秒两条噪音日志）。 */
+  private lastSmtcProgressMs = 0;
+  private pushSmtcProgress(): void {
+    if (!this.isPlaying) return;
+    const d = this.audio?.duration;
+    if (!Number.isFinite(d) || d <= 0) return;
+    const now = Date.now();
+    if (now - this.lastSmtcProgressMs < 900) return;
+    this.lastSmtcProgressMs = now;
+    const api = window.__HOST_API__;
+    api?.invoke?.('smtc_update', { info: this.smtcPayload().info }).catch(() => {});
+  }
+
   private pushSmtc(): void {
     const track = this.getCurrentTrack();
     const has = !!track && this.tracks.length > 0;
@@ -254,18 +297,7 @@ class MusicPlayer {
     // debug_log 以 [FE] 前缀必定出现在 Rust 终端，作为"推送是否真发出"的不可抵赖证据。
     api.invoke('debug_log', { msg: `MUSIC_PUSH title=${fallbackTitle} playing=${this.isPlaying} can_prev=${has} can_next=${has}` }).catch(() => {});
     api
-      .invoke('smtc_update', {
-        info: {
-          title: fallbackTitle,
-          artist: track?.artist ?? '',
-          album: track?.album ?? '',
-          cover_path: track?.coverPath ?? null,
-          media_type: 'music',
-          is_playing: this.isPlaying,
-          can_prev: has,
-          can_next: has,
-        },
-      })
+      .invoke('smtc_update', { info: this.smtcPayload().info })
       .then(() => {
         api.invoke('debug_log', { msg: 'MUSIC_PUSH_OK' }).catch(() => {});
         // 浏览器控制台可见：确认 sMTc_update 是否真正送达 Rust（决定任务栏卡片是否出现）。

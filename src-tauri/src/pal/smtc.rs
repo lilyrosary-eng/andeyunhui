@@ -66,6 +66,12 @@ pub struct SmtcUpdate {
     pub can_next: bool,
     pub source: Option<String>,
     pub key: Option<String>,
+    /// 总时长（毫秒）。Some 时 MPRIS 才有 `mpris:length`——GNOME 媒体卡片的进度条靠它。
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// 当前播放位置（毫秒）。Some 时 Playing 带 progress，卡片才会显示已播/可拖。
+    #[serde(default)]
+    pub position_ms: Option<u64>,
 }
 
 /// 诊断用：Rust 端 SMTC 会话的真实运行状态（与 Windows 实现同名字段）。
@@ -302,23 +308,33 @@ fn apply_update(controls: &mut souvlaki::MediaControls, info: &SmtcUpdate) {
         .filter(|p| !p.is_empty())
         .map(path_to_file_url);
 
+    // 时长/进度：souvlaki 的 MediaMetadata.duration 与 Playing{progress} 都支持，
+    // 之前一律传 None ⇒ MPRIS 里没有 mpris:length、Position 恒 0，GNOME 媒体卡片于是没有进度条
+    // （2026-10-24 与 busctl introspect 对照确认）。
+    let duration = info.duration_ms.map(std::time::Duration::from_millis);
+    // souvlaki 0.8 的 Playing{progress} 只吃「位置」（MediaPosition 是个 newtype），
+    // 时长走 MediaMetadata.duration，两者分开传。
+    let progress = info
+        .position_ms
+        .map(|pos| souvlaki::MediaPosition(std::time::Duration::from_millis(pos)));
+
     let metadata = MediaMetadata {
         title: non_empty(&info.title),
         artist: non_empty(&info.artist),
         album: non_empty(&info.album),
         cover_url: cover_owned.as_deref(),
-        duration: None,
+        duration,
     };
     if let Err(e) = controls.set_metadata(metadata) {
         eprintln!("[smtc/mpris] set_metadata 失败: {e}");
     }
 
     let playback = if info.is_playing {
-        MediaPlayback::Playing { progress: None }
+        MediaPlayback::Playing { progress }
     } else if info.title.is_empty() {
         MediaPlayback::Stopped
     } else {
-        MediaPlayback::Paused { progress: None }
+        MediaPlayback::Paused { progress }
     };
     if let Err(e) = controls.set_playback(playback) {
         eprintln!("[smtc/mpris] set_playback 失败: {e}");
@@ -396,7 +412,10 @@ fn list_system_players() -> Vec<SmtcUpdate> {
         let is_playing =
             matches!(player.get_playback_status(), Ok(PlaybackStatus::Playing));
 
+        // 这是「读系统其它播放器」的那条路（轮询），没有可靠的时长/位置信息，置空。
         out.push(SmtcUpdate {
+            duration_ms: None,
+            position_ms: None,
             title,
             artist,
             album,

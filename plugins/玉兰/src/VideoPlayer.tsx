@@ -251,6 +251,15 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
           is_playing: playing,
           can_prev: !nav.isFirst,
           can_next: !nav.isLast,
+          // 时长/位置：媒体卡片进度条靠这两个字段（2026-10-24 补）
+          duration_ms: (() => {
+            const v = videoRef.current;
+            return v && Number.isFinite(v.duration) && v.duration > 0 ? Math.round(v.duration * 1000) : null;
+          })(),
+          position_ms: (() => {
+            const v = videoRef.current;
+            return v && Number.isFinite(v.currentTime) ? Math.round(v.currentTime * 1000) : null;
+          })(),
         },
       })
       .then(() => {
@@ -427,6 +436,14 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
         album: '',
         media_type: 'video',
         is_playing: isPlaying,
+        duration_ms: (() => {
+          const v = videoRef.current;
+          return v && Number.isFinite(v.duration) && v.duration > 0 ? Math.round(v.duration * 1000) : null;
+        })(),
+        position_ms: (() => {
+          const v = videoRef.current;
+          return v && Number.isFinite(v.currentTime) ? Math.round(v.currentTime * 1000) : null;
+        })(),
         can_prev: !isFirst,
         can_next: !isLast,
       },
