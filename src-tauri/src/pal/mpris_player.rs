@@ -137,8 +137,15 @@ async fn apply(player: &Player, cmd: ProviderCmd) {
             if !info.album.trim().is_empty() {
                 md = md.album(info.album.clone());
             }
-            if let Some(path) = info.cover_path.as_deref().filter(|p| !p.is_empty()) {
-                md = md.art_url(crate::smtc::path_to_file_url(path));
+            if let Some(cover) = info.cover_path.as_deref().filter(|p| !p.is_empty()) {
+                // 本地封面要转 file://；在线曲目的封面本身就是 URL —— 直接给 MPRIS，
+                // 否则在线播放时卡片永远是音符占位（2026-10-24 用户实测）。
+                let url = if cover.starts_with("http://") || cover.starts_with("https://") {
+                    cover.to_string()
+                } else {
+                    crate::smtc::path_to_file_url(cover)
+                };
+                md = md.art_url(url);
             }
             if let Some(ms) = info.duration_ms {
                 md = md.length(Time::from_millis(ms as i64));

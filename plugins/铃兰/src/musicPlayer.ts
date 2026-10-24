@@ -248,7 +248,9 @@ class MusicPlayer {
    *  （2026-10-24 用 busctl 对照确认；此前一直传 None）。 */
   private smtcPayload(): { title: string; info: Record<string, unknown> } {
     const track = this.getCurrentTrack();
-    const has = !!track && this.tracks.length > 0;
+    // 只要当前有曲目就允许上一首/下一首：原来绑 `tracks.length > 0`，
+    // 在线播放（网易云）时本地曲库为空 ⇒ 卡片上的切歌按钮直接不出现（2026-10-24 用户实测）。
+    const has = !!track;
     const title = track?.title?.trim()
       ? track.title
       : (track?.filePath ? track.filePath.split(/[\\/]/).pop()! : T('music.unknownTrack'));
