@@ -464,10 +464,11 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
     let unsub: (() => void) | null = null;
     debugLog('video: smtc listener registering (always-on)');
     hostApi
-      .listen<{ action?: string; target?: string } | string>('smtc-control', (e) => {
-        const raw = e.payload as { action?: string; target?: string } | string;
+      .listen<{ action?: string; target?: string; value?: number } | string>('smtc-control', (e) => {
+        const raw = e.payload as { action?: string; target?: string; value?: number } | string;
         const b = typeof raw === 'string' ? raw : raw?.action;
         const t = typeof raw === 'string' ? '' : raw?.target;
+        const seekValue = typeof raw === 'object' ? raw?.value : undefined;
         if (t && t !== 'video') {
           debugLog(`video BTN ignored action=${b} target=${t}`);
           return;
@@ -483,6 +484,13 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
         else if (b === 'stop') { if (video) { video.pause(); video.currentTime = 0; } }
         else if (b === 'seekforward') { if (video) video.currentTime = Math.min(video.duration || 0, video.currentTime + 10); }
         else if (b === 'seekbackward') { if (video) video.currentTime = Math.max(0, video.currentTime - 10); }
+        // 来自 MPRIS 的拖动：value 是绝对毫秒
+        else if (b === 'seek' && typeof seekValue === 'number' && isFinite(seekValue)) {
+          if (video) {
+            const t2 = Math.max(0, seekValue / 1000);
+            video.currentTime = Number.isFinite(video.duration) ? Math.min(t2, video.duration) : t2;
+          }
+        }
       })
       .then((u) => { if (cleaned) u(); else { unsub = u; debugLog('video: smtc listener registered'); } })
       .catch((e) => { console.warn('[video] smtc-control 监听注册失败（媒体键将失效）', e); debugLog('video: smtc listener register FAILED ' + String(e)); });

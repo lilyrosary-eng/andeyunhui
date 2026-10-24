@@ -184,7 +184,9 @@ fn emit(app: &AppHandle, action: &str, value: Option<f64>) {
         "smtc-control",
         ControlPayload {
             action: action.to_string(),
-            target: "app".to_string(),
+            // 与 Windows 侧一致：target 是当前活动模块（music/video），
+            // 前端据此决定谁来响应（否则会两个播放器同时动作）。
+            target: crate::smtc::active_module_or_music(),
             value,
         },
     );

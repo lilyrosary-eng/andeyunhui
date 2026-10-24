@@ -358,6 +358,17 @@ class MusicPlayer {
           case 'volume':
             if (typeof value === 'number' && isFinite(value)) this.setVolume(value);
             break;
+          case 'seek': {
+            // 来自 MPRIS 的拖动：value 是**绝对毫秒**（Seek 偏移已在 Rust 侧叠加）。
+            if (typeof value === 'number' && isFinite(value)) {
+              const dur = this.audio.duration;
+              const t = Math.max(0, value / 1000);
+              this.audio.currentTime = Number.isFinite(dur) ? Math.min(t, dur) : t;
+              this.updateMediaSessionPosition();
+              this.pushSmtcProgress();
+            }
+            break;
+          }
           case 'seekforward':
             this.seek(this.audio.currentTime + 10);
             break;

@@ -607,6 +607,17 @@ pub fn set_active_module(module: String) {
     }
 }
 
+/// 当前活动模块，缺省按 "music"（与 Windows SMTC 按键载荷的 target 契约一致）。
+/// MPRIS 侧发事件时用它做 target，前端据此只在对应模块里响应。
+pub(crate) fn active_module_or_music() -> String {
+    ACTIVE_MODULE
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "music".to_string())
+}
+
 /// 主窗口显隐（Windows 用它决定媒体键分发目标；Linux 仅记录）。
 #[tauri::command]
 pub fn set_window_hidden(hidden: bool) {
