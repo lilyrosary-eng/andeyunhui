@@ -47,9 +47,17 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-/// 允许读取的音频扩展名（与前端白名单保持一致）。
+/// 允许读取的媒体扩展名（音频 + 视频；与前端白名单保持一致）。
+///
+/// 为什么要有视频：WebKitGTK 的媒体加载器**不接管 `asset://`**（音频侧 2026-10-06 已因此
+/// 改走本服务），而视频模块（玉兰）仍然用 `convertFileSrc()` ⇒ Linux 下本地视频
+/// 无法播放（`NETWORK_NO_SOURCE`）。把视频扩进来，视频才能走同一条带 Range 的本地流。
+/// 注意：本模块整体 `#[cfg(target_os = "linux")]`，所以白名单放宽**只影响 Linux**。
 const ALLOWED_EXT: &[&str] = &[
+    // 音频
     "mp3", "flac", "wav", "m4a", "aac", "ogg", "oga", "opus", "wma", "aiff", "ape", "alac",
+    // 视频
+    "mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv", "flv", "ts", "m2ts", "mpg", "mpeg", "3gp",
 ];
 
 /// 读写循环的固定缓冲大小。**这是本服务内存占用的上界**（每连接 64KB）。
@@ -68,6 +76,17 @@ fn content_type(path: &str) -> &'static str {
         "aiff" | "aif" => "audio/aiff",
         "ape" => "audio/x-ape",
         "alac" => "audio/mp4",
+        // 视频：MIME 必须给对，否则 WebKit 的媒体加载器会按 octet-stream 拒绝播放
+        "mp4" | "m4v" => "video/mp4",
+        "mkv" => "video/x-matroska",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "avi" => "video/x-msvideo",
+        "wmv" => "video/x-ms-wmv",
+        "flv" => "video/x-flv",
+        "ts" | "m2ts" => "video/mp2t",
+        "mpg" | "mpeg" => "video/mpeg",
+        "3gp" => "video/3gpp",
         _ => "application/octet-stream",
     }
 }
@@ -341,7 +360,7 @@ pub fn ensure_started() -> Result<u16, String> {
 #[tauri::command]
 pub fn media_http_url(path: String) -> Result<String, String> {
     if !allowed(&path) {
-        return Err("media_http_url: 路径不被允许（需绝对路径 + 音频扩展名）".into());
+        return Err("media_http_url: 路径不被允许（需绝对路径 + 音频/视频扩展名）".into());
     }
     let port = ensure_started()?;
     // 路径本身已是绝对路径且不含 '..'，再做一次最小编码即可安全放进查询串
@@ -394,6 +413,11 @@ mod tests {
     fn allowlist_and_traversal() {
         assert!(allowed("/mnt/win_d/Music/a.flac"));
         assert!(allowed("/home/x/a.mp3"));
+        // 视频也要放行：Linux 下视频模块必须走本服务（asset:// 不被媒体加载器接管）
+        assert!(allowed("/home/x/movie.mp4"));
+        assert!(allowed("/home/x/movie.mkv"));
+        assert_eq!(content_type("/home/x/movie.mp4"), "video/mp4");
+        assert_eq!(content_type("/home/x/movie.mkv"), "video/x-matroska");
         // 目录穿越必须拒绝
         assert!(!allowed("/home/x/../../etc/passwd"));
         assert!(!allowed("relative/path.flac"));

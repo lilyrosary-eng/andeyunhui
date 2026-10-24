@@ -2,6 +2,7 @@
 // 视频播放器 — 自定义控制条 + 上一集/下一集 + 双击全屏
 import { formatTime } from '../../_shared/utils';
 import { T, useLang } from '../../_shared/pluginRuntime';
+import { isLinux } from '@/platform/isLinux';
 import {
   PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon,
   VolumeIcon, VolumeMuteIcon, FullscreenIcon, MinimizeIcon, ArrowLeftIcon,
@@ -183,10 +184,35 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
     continuePlayRef.current = false;
   }, [file.filePath, file.url]);
 
-  // 网络流（如网易云 MV / 网络视频）直接用 url；本地文件经 convertFileSrc 转成可访问地址。
+  // 本地文件地址：Linux 走**本地媒体 HTTP 服务**（带 Range），其它平台仍走 asset://。
+  //
+  // 背景（2026-10-24）：WebKitGTK 的媒体加载器**不接管 `asset://` 自定义 scheme**
+  // ⇒ 本地视频直接 `NETWORK_NO_SOURCE`，表现就是"视频模块放不了视频"。
+  // 音频侧 2026-10-06 就因此改成了 `media_http_url`（见 src-tauri/src/media_http.rs 文件头），
+  // 视频侧漏了这一改。服务端白名单已同步放开视频扩展名（本模块只在 Linux 编译）。
+  const [resolvedLocal, setResolvedLocal] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setResolvedLocal(null);
+    const p = file.filePath;
+    if (!p || file.url) return undefined;
+    if (!isLinux()) {
+      setResolvedLocal(hostApi.convertFileSrc(p));
+      return undefined;
+    }
+    hostApi.invoke('media_http_url', { path: p })
+      .then((u: string) => { if (!cancelled) setResolvedLocal(u); })
+      .catch((e: unknown) => {
+        console.warn('[video] media_http_url 失败，回退 asset://（大概率仍放不了）:', e);
+        if (!cancelled) setResolvedLocal(hostApi.convertFileSrc(p));
+      });
+    return () => { cancelled = true; };
+  }, [file.filePath, file.url]);
+
+  // 网络流（如网易云 MV / 网络视频）直接用 url；本地文件用上面解析出的地址。
   const videoUrl = segments
     ? segments[Math.min(segIndex, segments.length - 1)]
-    : file.url ?? hostApi.convertFileSrc(file.filePath);
+    : file.url ?? resolvedLocal ?? '';
 
   // 当前视频在列表中的位置（本地文件用 filePath，网络流 MV 用 url 作为定位 key）
   const currentIndex = useMemo(() =>
