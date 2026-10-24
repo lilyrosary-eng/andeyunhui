@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isLinux } from '@/platform/isLinux';
 import { LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { invoke } from '@tauri-apps/api/core';
 import { storage } from '@/core/storage';
@@ -74,7 +75,12 @@ export function LyricsWidget() {
   // 避免 Rust 侧克隆 WebviewWindow 在销毁竞态下崩溃）。锁定后整个浮窗不接收鼠标，
   // 解锁只能从主面板 PlayerBar 的锁按钮操作。
   useEffect(() => {
-    getCurrentWindow().setIgnoreCursorEvents(locked).catch(() => {});
+    const lw = getCurrentWindow();
+    lw.setIgnoreCursorEvents(locked).catch(() => {});
+    // Linux：Wayland 下 tao 的接口无效，走 GdkWindow pass_through（整窗穿透）
+    if (isLinux()) {
+      invoke('overlay_set_click_through', { label: lw.label, ignore: locked }).catch(() => {});
+    }
   }, [locked]);
 
   // 拖拽：mousedown 开始拖拽，mousemove 更新位置，mouseup 结束并保存

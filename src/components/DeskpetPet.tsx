@@ -523,6 +523,11 @@ export function DeskpetPet() {
       new LogicalSize(Math.round(WIN_W * scale), Math.round(WIN_H * scale)),
     ).catch(() => {});
     w.setIgnoreCursorEvents(s.clickThrough).catch(() => {});
+    // Linux：tao 的 setIgnoreCursorEvents 在 Wayland 下不生效（X11-only 的输入形状），
+    // 改走 GdkWindow::set_pass_through（整窗穿透，被遮住的地方才真能点到）。
+    if (isLinux()) {
+      invoke('overlay_set_click_through', { label: w.label, ignore: s.clickThrough }).catch(() => {});
+    }
   };
 
   // 统一：asset:// URL → 状态（主路 / 兜底通道共用）。key 用于去重，素材真实身份由 rel 决定。

@@ -562,6 +562,20 @@ pub fn overlay_drag_move(label: String, x: i32, y: i32) {
     }
 }
 
+/// 整窗点击穿透开关。Linux 走 GdkWindow::set_pass_through（Wayland 下 tao 的旧接口无效）。
+#[tauri::command]
+pub fn overlay_set_click_through(app: tauri::AppHandle, label: String, ignore: bool) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        return crate::click_through::apply(&app, &label, ignore);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, label, ignore);
+        Ok(())
+    }
+}
+
 /// 全局光标位置（逻辑像素）。Linux 走扩展（合成器才知道）；其它平台返回 None。
 #[tauri::command]
 pub fn overlay_pointer() -> Option<(i32, i32)> {
