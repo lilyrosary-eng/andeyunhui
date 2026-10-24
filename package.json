@@ -1,7 +1,7 @@
 {
   "name": "andeyunhui",
   "private": true,
-  "version": "2.4.0",
+  "version": "2.4.1",
   "_versionSource": "唯一真源是 src-tauri/tauri.conf.json 的 version（Tauri 打包读它）；此处与 src-tauri/Cargo.toml 必须与其一致，改版本只改 tauri.conf.json 再同步这两处",
   "type": "module",
   "engines": {

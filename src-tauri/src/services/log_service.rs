@@ -39,7 +39,17 @@ struct FileLogger;
 
 impl Log for FileLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Trace
+        if metadata.level() > Level::Trace {
+            return false;
+        }
+        // zbus / tracing 的 INFO 会把每条 D-Bus 调用的完整消息结构 dump 出来：
+        // 桌面媒体控件每秒查询一次属性 ⇒ 一个 session 日志 5.9MB（2026-10-24 实测）。
+        // 它们只在 Warn 及以上才有诊断价值。
+        let target = metadata.target();
+        if target.starts_with("zbus") || target.starts_with("tracing") || target.starts_with("mio") {
+            return metadata.level() <= Level::Warn;
+        }
+        true
     }
 
     fn log(&self, record: &Record) {
@@ -135,6 +145,24 @@ pub fn init_logger(app_data: &std::path::Path) -> Result<(), String> {
         .append(true)
         .open(&session_path)
         .map_err(|e| format!("重新打开日志文件失败: {}", e))?;
+
+    // panic hook：release profile 用 panic="abort"，默认只有 stderr 输出（桌面启动时基本丢失）。
+    // 装上钩子先把消息 + 位置写进会话日志，再让 abort 继续 —— 否则崩溃现场永远查不到。
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic>".to_string()
+        };
+        log::error!("[panic] {msg} @ {loc}");
+        eprintln!("[panic] {msg} @ {loc}");
+    }));
 
     // 设置全局状态
     {

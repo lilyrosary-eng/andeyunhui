@@ -652,7 +652,9 @@ fn recording_lock() -> std::sync::MutexGuard<'static, Option<RecordingHandle>> {
 /// 2. 回退到系统 PATH 中的 ffmpeg（用户自行安装）
 pub fn get_ffmpeg_path(app: &AppHandle) -> String {
     if let Some(dir) = crate::commands::get_ffmpeg_dir(app) {
-        let ffmpeg = dir.join("ffmpeg.exe");
+        // 平台对应名：Linux 的二进制叫 `ffmpeg`，写死 .exe 会命中 Windows 版本（ENOEXEC）
+        let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+        let ffmpeg = dir.join(name);
         if ffmpeg.exists() {
             return ffmpeg.to_string_lossy().to_string();
         }

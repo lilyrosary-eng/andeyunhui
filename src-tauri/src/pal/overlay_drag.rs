@@ -1,78 +1,141 @@
 //! Linux 浮窗拖动通道：应用 → GNOME Shell 扩展（合成器）的 D-Bus 客户端。
 //!
 //! # 为什么必须这样绕
-//! tao 0.35 的 `drag_window()` 实现是
-//! `window.begin_move_drag(1, x, y, 0)`
+//! tao 0.35 的 `drag_window()` 实现是 `window.begin_move_drag(1, x, y, 0)`
 //! （`tao/src/platform_impl/linux/event_loop.rs:343`）——**时间戳恒为 0**。
 //! Wayland 的 `xdg_toplevel.move(seat, serial)` 必须带「当前输入事件的 serial」，
-//! 传 0 会被合成器直接忽略 ⇒ `startDragging()` 与 `data-tauri-drag-region`
+//! 传 0 会被合成器忽略 ⇒ `startDragging()` 与 `data-tauri-drag-region`
 //! （后者也只是 JS 转调 `plugin:window|start_dragging`，
 //! `tauri-2.11.5/src/window/scripts/drag.js:105`）在原生 Wayland 上都不可能生效。
 //!
-//! 只有合成器能搬窗口。所以链路由三段组成：
-//!   前端指针事件 → 本模块（zbus 调用）→ 扩展 `org.andeyunhui.Pin` → `Meta.Window.move_frame`
+//! 只有合成器能搬窗口：前端指针事件 → 本模块（zbus）→ 扩展 `org.andeyunhui.Pin`
+//! → `Meta.Window.move_frame`。扩展优先用 `begin_grab_op(MOVING)` 让 mutter 自己跟随指针。
 //!
-//! 扩展侧优先用 `begin_grab_op(MOVING)` 让 mutter 自己跟随指针（手感最好）；
-//! 若该 API 不可用则返回 false，前端回退到「累积 movementX/Y + MoveTo」。
-//!
-//! 非 Linux 平台：`begin` 恒返回 false、其余是空操作 —— Windows 继续走原生 `startDragging()`。
+//! # 线程模型（踩过的坑）
+//! **不能在 Tauri 的 tokio 工作线程里用 zbus 的 `blocking` API**：那会在已有 runtime 里
+//! 再起一个 runtime ⇒ panic；而 release 是 `panic = "abort"`，一次 panic 直接整进程退出。
+//! 所以这里自建一条 `overlay-drag` 线程，用它自己的 current_thread runtime 持有一条
+//! **复用的** async 连接；命令经 std mpsc 送进来，需要返回值的调用用一次性 channel 等最多 300ms。
 
-/// 扩展导出的总线名（通过 Gio.bus_own_name 占用）。
+use std::sync::mpsc;
+use std::sync::OnceLock;
+
 const DEST: &str = "org.andeyunhui.Pin";
 const PATH: &str = "/org/andeyunhui/Pin";
 const IFACE: &str = "org.andeyunhui.Pin";
 
-#[cfg(target_os = "linux")]
-fn conn() -> Result<zbus::blocking::Connection, String> {
-    zbus::blocking::Connection::session().map_err(|e| e.to_string())
+enum Call {
+    Begin(String, mpsc::Sender<bool>),
+    Move { title: String, x: i32, y: i32 },
+    Place { title: String, x: i32, y: i32 },
+    End(String),
+}
+
+fn tx() -> Option<&'static mpsc::Sender<Call>> {
+    static TX: OnceLock<mpsc::Sender<Call>> = OnceLock::new();
+    if let Some(t) = TX.get() {
+        return Some(t);
+    }
+    let (tx, rx) = mpsc::channel::<Call>();
+    let spawned = std::thread::Builder::new()
+        .name("overlay-drag".into())
+        .spawn(move || worker(rx))
+        .is_ok();
+    if !spawned {
+        return None;
+    }
+    let _ = TX.set(tx);
+    TX.get()
+}
+
+fn worker(rx: mpsc::Receiver<Call>) {
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[overlay-drag] 建 runtime 失败: {e}");
+            return;
+        }
+    };
+    rt.block_on(async move {
+        // 连接建失败就退化成 no-op（扩展没加载时不至于刷屏报错）
+        let conn = match zbus::Connection::session().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[overlay-drag] 连接会话总线失败: {e}");
+                return;
+            }
+        };
+        // std mpsc → async 通道的桥（复用 mpris 那套做法）
+        let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel::<Call>();
+        std::thread::Builder::new()
+            .name("overlay-drag-bridge".into())
+            .spawn(move || {
+                for c in rx {
+                    if atx.send(c).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
+
+        while let Some(call) = arx.recv().await {
+            match call {
+                Call::Begin(title, reply) => {
+                    let r = conn
+                        .call_method(Some(DEST), PATH, Some(IFACE), "BeginDrag", &(title.as_str(),))
+                        .await
+                        .map(|m| m.body().deserialize::<bool>().unwrap_or(false))
+                        .unwrap_or(false);
+                    let _ = reply.send(r);
+                }
+                Call::Move { title, x, y } => {
+                    let _ = conn
+                        .call_method(Some(DEST), PATH, Some(IFACE), "MoveTo", &(title.as_str(), x, y))
+                        .await;
+                }
+                Call::Place { title, x, y } => {
+                    let _ = conn
+                        .call_method(Some(DEST), PATH, Some(IFACE), "Place", &(title.as_str(), x, y))
+                        .await;
+                }
+                Call::End(title) => {
+                    let _ = conn
+                        .call_method(Some(DEST), PATH, Some(IFACE), "EndDrag", &(title.as_str(),))
+                        .await;
+                }
+            }
+        }
+    });
 }
 
 /// 开始拖动。返回 true 表示**合成器已接管**（前端不用再算位移）。
 pub fn begin(title: &str) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        let Ok(c) = conn() else { return false };
-        match c.call_method(Some(DEST), PATH, Some(IFACE), "BeginDrag", &(title,)) {
-            Ok(reply) => reply.body().deserialize::<bool>().unwrap_or(false),
-            Err(e) => {
-                eprintln!("[overlay-drag] BeginDrag 失败（扩展未加载？）: {e}");
-                false
-            }
-        }
+    let Some(tx) = tx() else { return false };
+    let (rtx, rrx) = mpsc::channel::<bool>();
+    if tx.send(Call::Begin(title.to_string(), rtx)).is_err() {
+        return false;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = title;
-        false
-    }
+    // 最多等 300ms：扩展没装/卡住时不拖住 UI 线程
+    rrx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or(false)
 }
 
-/// 把窗口移动到目标逻辑坐标（Wayland 下唯一可行的移动方式）。
+/// 把窗口移动到目标逻辑坐标。
 pub fn move_to(title: &str, x: i32, y: i32) {
-    #[cfg(target_os = "linux")]
-    {
-        let Ok(c) = conn() else { return };
-        if let Err(e) = c.call_method(Some(DEST), PATH, Some(IFACE), "MoveTo", &(title, x, y)) {
-            eprintln!("[overlay-drag] MoveTo 失败: {e}");
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (title, x, y);
+    if let Some(tx) = tx() {
+        let _ = tx.send(Call::Move { title: title.to_string(), x, y });
     }
 }
 
-/// 结束拖动（扩展侧保持"用户已手动移动"的状态，本次会话不再钉住该窗口）。
-pub fn end(title: &str) {
-    #[cfg(target_os = "linux")]
-    {
-        let Ok(c) = conn() else { return };
-        if let Err(e) = c.call_method(Some(DEST), PATH, Some(IFACE), "EndDrag", &(title,)) {
-            eprintln!("[overlay-drag] EndDrag 失败: {e}");
-        }
+/// 放置并**记为已释放**（启动时恢复用户上次拖到的位置用）。
+pub fn place(title: &str, x: i32, y: i32) {
+    if let Some(tx) = tx() {
+        let _ = tx.send(Call::Place { title: title.to_string(), x, y });
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = title;
+}
+
+/// 结束拖动。
+pub fn end(title: &str) {
+    if let Some(tx) = tx() {
+        let _ = tx.send(Call::End(title.to_string()));
     }
 }

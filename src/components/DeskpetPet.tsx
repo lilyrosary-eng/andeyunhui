@@ -1045,11 +1045,46 @@ export function DeskpetPet() {
     }
   };
 
+  // 位置记忆：用户拖到哪，下次就在哪（2026-10-24 用户要求；桌宠不再做"吸附到右下"那套）
+  const POS_KEY = 'deskpet:pos';
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = localStorage.getItem(POS_KEY);
+        if (!raw) return;
+        const p = JSON.parse(raw) as { x?: number; y?: number };
+        if (typeof p?.x !== 'number' || typeof p?.y !== 'number') return;
+        const x = Math.round(p.x);
+        const y = Math.round(p.y);
+        if (isLinux()) {
+          // Wayland 下应用不能自己定位：交给扩展（同时标记为"已释放"，不再钉回原位）
+          await invoke('overlay_place', { label: 'deskpet', x, y });
+        } else {
+          await getCurrentWindow().setPosition(new LogicalPosition(x, y));
+        }
+      } catch {
+        /* 记忆位置失败不影响启动 */
+      }
+    })();
+  }, []);
+
   // 拖拽终点：松开（本地 pointerup 或全局 mouse_up 都会调用）。未移动且短时按下 = 单击/双击判定。
   const endDrag = () => {
     const d = dragRef.current;
     if (!d || !d.active) return;
     overlayDragEnd('deskpet');
+    // 记住这次拖到的位置（逻辑像素，供下次启动 overlay_place 还原）
+    try {
+      const w = getCurrentWindow();
+      Promise.all([w.outerPosition(), w.scaleFactor()])
+        .then(([p, sf]) => {
+          const s = sf || 1;
+          localStorage.setItem(POS_KEY, JSON.stringify({ x: p.x / s, y: p.y / s }));
+        })
+        .catch(() => {});
+    } catch {
+      /* ignore */
+    }
     if (!d.moved && Date.now() - d.down < CLICK_MS) handleClick();
     dragRef.current = null;
   };

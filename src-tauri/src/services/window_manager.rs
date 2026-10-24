@@ -562,6 +562,19 @@ pub fn overlay_drag_move(label: String, x: i32, y: i32) {
     }
 }
 
+/// 把浮窗放到指定逻辑坐标，并让扩展**记为已释放**（启动时恢复用户上次位置用）。
+#[tauri::command]
+pub fn overlay_place(label: String, x: i32, y: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        crate::overlay_drag::place(&overlay_window_title(&label), x, y);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (label, x, y);
+    }
+}
+
 /// 浮窗拖动 · 结束。扩展会记住"用户手动移动过"，本次会话不再把窗口钉回原位。
 #[tauri::command]
 pub fn overlay_drag_end(label: String) {

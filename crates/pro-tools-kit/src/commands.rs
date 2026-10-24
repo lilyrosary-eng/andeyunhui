@@ -321,6 +321,19 @@ pub fn convert_document(text: String, from: String, to: String) -> Result<String
 // 独立 crate，无法调用主 crate 的 get_external_deps_dir，故在此独立实现。
 use tauri::Manager;
 
+/// 平台对应的 ffmpeg 可执行名。
+///
+/// 为什么必须区分：仓库/打包里 `external-deps/全局/ffmpeg/` 同时存在 Windows 的
+/// `ffmpeg.exe` 与 Linux 的 `ffmpeg`；写死 `.exe` 会在 Linux 上命中 Windows 二进制，
+/// `Command::status()` 直接 ENOEXEC ⇒ 薄荷误报"未检测到 ffmpeg"（2026-10-24 实测）。
+fn ffmpeg_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    }
+}
+
 fn get_ffmpeg_path(app: &tauri::AppHandle) -> String {
     // 1. 打包后：resource_dir/external-deps/全局/ffmpeg/ffmpeg.exe
     if let Ok(resource_dir) = app.path().resource_dir() {
@@ -328,7 +341,7 @@ fn get_ffmpeg_path(app: &tauri::AppHandle) -> String {
             .join("external-deps")
             .join("全局")
             .join("ffmpeg")
-            .join("ffmpeg.exe");
+            .join(ffmpeg_bin_name());
         if ffmpeg.exists() {
             return ffmpeg.to_string_lossy().to_string();
         }
@@ -338,7 +351,7 @@ fn get_ffmpeg_path(app: &tauri::AppHandle) -> String {
             .join("external-deps")
             .join("全局")
             .join("ffmpeg")
-            .join("ffmpeg.exe");
+            .join(ffmpeg_bin_name());
         if ffmpeg_up.exists() {
             return ffmpeg_up.to_string_lossy().to_string();
         }
@@ -351,7 +364,7 @@ fn get_ffmpeg_path(app: &tauri::AppHandle) -> String {
         .join("external-deps")
         .join("全局")
         .join("ffmpeg")
-        .join("ffmpeg.exe");
+        .join(ffmpeg_bin_name());
     if dev_ffmpeg.exists() {
         return dev_ffmpeg.to_string_lossy().to_string();
     }
