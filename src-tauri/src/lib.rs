@@ -64,6 +64,11 @@ pub mod services;
 // 媒体中继（bimedia:// 自定义协议）：为 <video> 补上 CDN 要求的 Referer，绕开防盗链 403。
 pub mod media_relay;
 
+/// Linux 浮窗拖动通道（应用 → GNOME Shell 扩展的 D-Bus 调用）
+#[cfg(target_os = "linux")]
+#[path = "pal/overlay_drag.rs"]
+pub mod overlay_drag;
+
 /// Linux 原生 MPRIS 播放器（替代 souvlaki 的发布端：DesktopEntry/Capabilities/Seek 都要）
 #[cfg(target_os = "linux")]
 #[path = "pal/mpris_player.rs"]

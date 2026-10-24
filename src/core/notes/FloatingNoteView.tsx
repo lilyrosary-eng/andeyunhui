@@ -1,3 +1,4 @@
+import { beginOverlayDrag } from '@/lib/overlayDrag';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { emit, listen } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -253,6 +254,7 @@ export function FloatingNoteView() {
       {/* ====== 自定义标题栏（拖拽区；固定时移除拖拽属性，不可拖动）====== */}
       <div
         data-tauri-drag-region={isFixed ? undefined : ''}
+        onPointerDown={(e) => { if (!isFixed) void beginOverlayDrag(e.nativeEvent); }}
         style={isFixed ? undefined : DRAG_STYLE}
         className="flex items-center justify-between gap-2 px-3 py-2.5 bg-white/25 text-neutral-800 border-b border-black/5 select-none"
       >

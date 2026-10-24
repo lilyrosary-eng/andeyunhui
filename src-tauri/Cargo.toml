@@ -296,6 +296,8 @@ mpris = "2.1"
 # 也不给 Seek·SetPosition ⇒ GNOME 媒体卡片缺图标、不能拖进度。tokio feature 让底层 zbus
 # 复用本应用已有的 tokio 运行时。
 mpris-server = { version = "0.10", features = ["tokio"] }
+# 拖动通道：应用 → GNOME 扩展（合成器）的 D-Bus 调用
+zbus = { version = "5", default-features = false, features = ["blocking-api"] }
 # souvlaki 仅保留给非 Linux 平台（macOS 后端）使用
 souvlaki = "0.8"
 x11 = { version = "2.21.0", features = ["xlib", "xinerama"] }

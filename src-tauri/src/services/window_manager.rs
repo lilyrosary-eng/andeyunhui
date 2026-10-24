@@ -532,13 +532,56 @@ pub struct OverlayProfile {
 ///   `maybe_clear_gpu_cache_on_runtime_change_early()` 会清 GPU 缓存自救。原实现不调用 mark_boot_failure，
 ///   导致运行时浮窗失败时下次启动也不清缓存，自愈循环断链。
 /// - **绝不用 `visible:false`** 创建透明(layered)窗（否则 WebView2 初始化失败 → 0x8007139F 坏窗）。
+/// 浮窗拖动 · 开始。返回 true 表示**合成器已接管**（前端不用再算位移）。
+///
+/// Linux：经 D-Bus 让 GNOME Shell 扩展 `begin_grab_op(MOVING)` 或进入位移模式；
+/// 其它平台：恒 false，前端照旧用原生 `startDragging()`（Windows 上它是好的）。
+#[tauri::command]
+pub fn overlay_drag_begin(label: String) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return crate::overlay_drag::begin(&overlay_window_title(&label));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = label;
+        false
+    }
+}
+
+/// 浮窗拖动 · 位移（仅 Linux 回退路径用；坐标是**逻辑像素**，与扩展的 frame_rect 同系）。
+#[tauri::command]
+pub fn overlay_drag_move(label: String, x: i32, y: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        crate::overlay_drag::move_to(&overlay_window_title(&label), x, y);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (label, x, y);
+    }
+}
+
+/// 浮窗拖动 · 结束。扩展会记住"用户手动移动过"，本次会话不再把窗口钉回原位。
+#[tauri::command]
+pub fn overlay_drag_end(label: String) {
+    #[cfg(target_os = "linux")]
+    {
+        crate::overlay_drag::end(&overlay_window_title(&label));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = label;
+    }
+}
+
 /// 浮窗标题（供窗口管理器识别身份，形如「安得云荟 · 浮岛」）。
 ///
 /// 为什么需要：Linux（尤其 Wayland）下没有可用的 WM_CLASS 细分，GNOME Shell 扩展要按窗口
 /// 决定「钉到哪个位置 / 是否置顶」时只有 title 可读。以前所有浮窗都叫 "Tauri App"，
 /// 扩展无法分辨浮岛与桌宠（2026-10-21 实测：两个浮窗被塞到同一个角）。
 /// 后缀是**稳定标识**，扩展按它配对规则；改文案时要同步改扩展里的映射。
-fn overlay_window_title(label: &str) -> String {
+pub(crate) fn overlay_window_title(label: &str) -> String {
     let name = match label {
         "capsule" => "浮岛",
         "deskpet" => "桌宠",

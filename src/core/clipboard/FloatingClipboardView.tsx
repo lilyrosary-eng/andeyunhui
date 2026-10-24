@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { beginOverlayDrag } from '@/lib/overlayDrag';
 import { Pin, X, Clipboard, Search, Lock, ImageIcon } from 'lucide-react';
 import { injectCssOnce } from '../../lib/injectCss';
 
@@ -145,7 +146,10 @@ export function FloatingClipboardView() {
     // 按钮/输入框不触发拖拽
     if ((e.target as HTMLElement).closest('button, input, [data-no-drag]')) return;
     if (isFixed) return;
-    void win.startDragging();
+    // 原生 Wayland：startDragging 无效 ⇒ 走合成器通道
+    void beginOverlayDrag(e.nativeEvent).then((handled) => {
+      if (!handled) void win.startDragging();
+    });
   }, [isFixed]);
 
   // 复制到剪贴板

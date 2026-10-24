@@ -10,6 +10,9 @@ import { storage } from "../core/storage";
 import { KEYS } from "../core/storage/keys";
 import { EVENTS } from "../core/events/schema";
 import { injectCssOnce } from "../lib/injectCss";
+// 原生 Wayland 不能由应用自己搬窗口（tao 传 serial=0），拖动统一走合成器通道
+import { overlayDragBegin, overlayDragMove, overlayDragEnd } from "../lib/overlayDrag";
+import { isLinux } from "../platform/isLinux";
 
 // 轻跳反馈动画 @keyframes pet-bounce。
 // 走构造样式表注入：打包版 CSP 给 style-src 追加 nonce 后，JSX 渲染出的 <style> 会被整块拦掉
@@ -974,7 +977,12 @@ export function DeskpetPet() {
         const ny = c.y + d.grabOffsetY;
         // 移动判定必须在同一坐标系：屏幕光标 vs 按下时的屏幕光标
         if (Math.hypot(c.x - d.startScreenX, c.y - d.startScreenY) > DRAG_THRESHOLD) d.moved = true;
-        w.setPosition(new LogicalPosition(nx, ny)).catch(() => {});
+        if (isLinux()) {
+          // 由 GNOME 扩展在合成器侧移动（Wayland 下 setPosition 会被忽略）
+          overlayDragMove('deskpet', nx, ny);
+        } else {
+          w.setPosition(new LogicalPosition(nx, ny)).catch(() => {});
+        }
         winPosRef.current = { x: nx, y: ny };
       }
       raf = requestAnimationFrame(tick);
@@ -1041,6 +1049,7 @@ export function DeskpetPet() {
   const endDrag = () => {
     const d = dragRef.current;
     if (!d || !d.active) return;
+    overlayDragEnd('deskpet');
     if (!d.moved && Date.now() - d.down < CLICK_MS) handleClick();
     dragRef.current = null;
   };
@@ -1052,6 +1061,8 @@ export function DeskpetPet() {
     e.preventDefault();
     if (settingsRef.current.clickThrough) return; // 点击穿透模式不响应拖拽
     if (e.button !== 0) return; // 仅左键参与拖拽 / 点击（右键交由 onContextMenu）
+    // Linux：告诉合成器扩展"用户开始拖这个窗"，并让它本次会话别再钉住
+    overlayDragBegin('deskpet');
     const cx = e.clientX; // 窗口内相对坐标（CSS 逻辑像素）
     const cy = e.clientY;
     const w = getCurrentWindow();

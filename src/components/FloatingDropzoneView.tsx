@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, type CSSProperties } from 'react';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import { beginOverlayDrag } from '@/lib/overlayDrag';
 import { listen } from '@tauri-apps/api/event';
 import { openPath } from '@tauri-apps/plugin-opener';
 import { X, Inbox, ScanText, Languages, Loader2, FileDown } from 'lucide-react';
@@ -224,7 +225,10 @@ export function FloatingDropzoneView() {
   const handleTitleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest('button')) return;
-    void win.startDragging();
+    // 原生 Wayland：startDragging 无效（tao 传 serial=0）⇒ 走合成器通道
+    void beginOverlayDrag(e.nativeEvent).then((handled) => {
+      if (!handled) void win.startDragging();
+    });
   };
 
   // 浮窗环境无笔记编辑器，文本文件「打开」直接用系统默认应用打开
