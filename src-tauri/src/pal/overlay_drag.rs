@@ -29,6 +29,7 @@ enum Call {
     Move { title: String, x: i32, y: i32 },
     Place { title: String, x: i32, y: i32 },
     End(String),
+    Pointer(mpsc::Sender<Option<(i32, i32)>>),
 }
 
 fn tx() -> Option<&'static mpsc::Sender<Call>> {
@@ -98,6 +99,14 @@ fn worker(rx: mpsc::Receiver<Call>) {
                         .call_method(Some(DEST), PATH, Some(IFACE), "Place", &(title.as_str(), x, y))
                         .await;
                 }
+                Call::Pointer(reply) => {
+                    let r = conn
+                        .call_method(Some(DEST), PATH, Some(IFACE), "Pointer", &())
+                        .await
+                        .ok()
+                        .and_then(|m| m.body().deserialize::<(i32, i32)>().ok());
+                    let _ = reply.send(r);
+                }
                 Call::End(title) => {
                     let _ = conn
                         .call_method(Some(DEST), PATH, Some(IFACE), "EndDrag", &(title.as_str(),))
@@ -131,6 +140,14 @@ pub fn place(title: &str, x: i32, y: i32) {
     if let Some(tx) = tx() {
         let _ = tx.send(Call::Place { title: title.to_string(), x, y });
     }
+}
+
+/// 读全局光标位置（逻辑像素）。Wayland 下客户端拿不到，只能问合成器。
+pub fn pointer() -> Option<(i32, i32)> {
+    let tx = tx()?;
+    let (rtx, rrx) = mpsc::channel();
+    tx.send(Call::Pointer(rtx)).ok()?;
+    rrx.recv_timeout(std::time::Duration::from_millis(200)).ok().flatten()
 }
 
 /// 结束拖动。

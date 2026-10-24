@@ -562,6 +562,19 @@ pub fn overlay_drag_move(label: String, x: i32, y: i32) {
     }
 }
 
+/// 全局光标位置（逻辑像素）。Linux 走扩展（合成器才知道）；其它平台返回 None。
+#[tauri::command]
+pub fn overlay_pointer() -> Option<(i32, i32)> {
+    #[cfg(target_os = "linux")]
+    {
+        return crate::overlay_drag::pointer();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// 把浮窗放到指定逻辑坐标，并让扩展**记为已释放**（启动时恢复用户上次位置用）。
 #[tauri::command]
 pub fn overlay_place(label: String, x: i32, y: i32) {

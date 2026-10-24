@@ -196,6 +196,9 @@ class MusicPlayer {
   // WebView2/Chromium 会把 mediaSession 元信息推送到 Windows 任务栏媒体浮窗，
   // 显示歌曲标题/艺术家/专辑/封面，并响应系统媒体按键（播放/暂停/上一首/下一首）。
   private setMediaSessionState(state: 'playing' | 'paused' | 'none'): void {
+    // Linux：媒体卡片由我们自己的 MPRIS 发布；WebKitGTK 内置 MPRIS 会再出第二张卡。
+    // 这里不写 playbackState，作为"能否压掉 WebKit 那张"的最小实验。
+    if (isLinux()) return;
     try {
       const ms = (navigator as unknown as { mediaSession?: { playbackState?: string } }).mediaSession;
       if (ms) ms.playbackState = state;
@@ -215,7 +218,8 @@ class MusicPlayer {
 
   private updateMediaSessionPosition(): void {
     try {
-      const ms = navigator as unknown as { mediaSession?: { setPositionState?: (s: { duration: number; position: number; playbackRate: number }) => void } };
+      if (isLinux()) return; // 同上：位置由 MPRIS 的 Position 属性提供
+    const ms = navigator as unknown as { mediaSession?: { setPositionState?: (s: { duration: number; position: number; playbackRate: number }) => void } };
       if (!ms.mediaSession || !ms.mediaSession.setPositionState) return;
       const d = this.audio.duration;
       if (!d || !isFinite(d) || d <= 0) return;

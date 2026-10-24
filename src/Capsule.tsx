@@ -361,42 +361,54 @@ export default function Capsule() {
   const refreshSessionList = useCapsuleStore((s) => s.refreshSessionList);
   const hoverLockRef = useRef(false);
 
-  // Linux 悬停展开：Rust 侧用 X11 `XQueryPointer` 轮询，原生 Wayland 下拿不到可靠的光标坐标
-  // ⇒ 悬停完全失效（2026-10-24 用户反馈）。这里改用 DOM 的进入/离开驱动，与 Rust 那条路互不干扰
-  // （Windows 仍走轮询的 ±40px 宽容区，行为不变）。
+  // Linux 悬停展开：Rust 那条路用 X11 `XQueryPointer` 轮询，原生 Wayland 下客户端拿不到
+  // 可靠的全局光标坐标（2026-10-24 实测：既不展开也不收起）。改为**向合成器要坐标**：
+  // 扩展 D-Bus `Pointer()` → Rust `overlay_pointer` → 这里按与 Windows 相同的 ±40/-70 宽容区判定。
   useEffect(() => {
     if (!isLinux()) return undefined;
-    let timer: number | null = null;
+    let stopped = false;
+    let timer: number | undefined;
+    const win = getCurrentWebviewWindow();
 
-    const onEnter = () => {
-      if (timer !== null) {
-        window.clearTimeout(timer);
-        timer = null;
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const pt = await invoke<[number, number] | null>('overlay_pointer');
+        if (pt) {
+          const [sf, pos, size] = await Promise.all([
+            win.scaleFactor(),
+            win.outerPosition(),
+            win.outerSize(),
+          ]);
+          const x = pos.x / sf;
+          const y = pos.y / sf;
+          const w = size.width / sf;
+          const h = size.height / sf;
+          const [px, py] = pt;
+          // 与 Rust 侧（Windows 路径）逐字一致的宽容区：左右 40、下方 70
+          const near = px >= x - 40 && px <= x + w + 40 && py >= y - 70 && py <= y + h + 70;
+          const s = useCapsuleStore.getState();
+          if (near) {
+            if (!s.expanded && !hoverLockRef.current) {
+              s.setPanelReady(false);
+              s.setExpanded(true);
+            }
+          } else {
+            // 离开后解除"收起锁定"：否则手动收一次就再也悬停不展开（用户实测的顽固点）
+            hoverLockRef.current = false;
+            if (s.expanded && !s.keepOpen) s.setExpanded(false);
+          }
+        }
+      } catch {
+        /* 扩展未加载：静默降级为"只能点击展开" */
       }
-      const s = useCapsuleStore.getState();
-      if (s.expanded || hoverLockRef.current) return;
-      s.setPanelReady(false); // 与 Rust 路径同一套"先关面板再展开"的门控
-      s.setExpanded(true);
+      if (!stopped) timer = window.setTimeout(tick, 120);
     };
 
-    const onLeave = () => {
-      const s = useCapsuleStore.getState();
-      if (!s.expanded || s.keepOpen || hoverLockRef.current) return;
-      // 延时收：从胶囊移到展开面板的瞬间不应被判为离开
-      timer = window.setTimeout(() => {
-        timer = null;
-        const cur = useCapsuleStore.getState();
-        if (!cur.keepOpen && !hoverLockRef.current) cur.setExpanded(false);
-      }, 260);
-    };
-
-    const body = document.body;
-    body.addEventListener('mouseenter', onEnter);
-    body.addEventListener('mouseleave', onLeave);
+    timer = window.setTimeout(tick, 300);
     return () => {
-      if (timer !== null) window.clearTimeout(timer);
-      body.removeEventListener('mouseenter', onEnter);
-      body.removeEventListener('mouseleave', onLeave);
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
     };
   }, []); // 收起后锁定悬停自动展开，需点击胶囊才恢复（不触发渲染，保留为 ref）
   const prevExpandedRef = useRef(false); // 尺寸 effect：检测「从收起态展开」过渡
