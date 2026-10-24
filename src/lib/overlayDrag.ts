@@ -95,6 +95,16 @@ export async function beginOverlayDrag(ev: {
   return true;
 }
 
+/** 只要布尔结果：合成器是否接管了这次拖动（桌宠用它与自绘拖动互斥）。 */
+export async function overlayDragBeginAsync(label: string): Promise<boolean> {
+  if (!isLinux()) return false;
+  try {
+    return await invoke<boolean>('overlay_drag_begin', { label });
+  } catch {
+    return false;
+  }
+}
+
 /** 只发"开始/移动/结束"三个原语，供已有自绘拖动逻辑的组件（如桌宠）复用。 */
 export function overlayDragBegin(label: string): void {
   if (!isLinux()) return;

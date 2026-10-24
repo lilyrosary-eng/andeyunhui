@@ -20,6 +20,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
 import { ensureOverlayWindow, type OverlayProfile } from '@/core/overlayWindow';
+import { isLinux } from '@/platform/isLinux';
 import { FileSearchPanel } from '@/components/FileSearchPanel';
 import { KeepButton } from '@/components/KeepButton';
 import { useI18n } from '@/lib/i18n';
@@ -358,7 +359,46 @@ export default function Capsule() {
   const selectSession = useCapsuleStore((s) => s.selectSession);
   const smtcControl = useCapsuleStore((s) => s.smtcControl);
   const refreshSessionList = useCapsuleStore((s) => s.refreshSessionList);
-  const hoverLockRef = useRef(false); // 收起后锁定悬停自动展开，需点击胶囊才恢复（不触发渲染，保留为 ref）
+  const hoverLockRef = useRef(false);
+
+  // Linux 悬停展开：Rust 侧用 X11 `XQueryPointer` 轮询，原生 Wayland 下拿不到可靠的光标坐标
+  // ⇒ 悬停完全失效（2026-10-24 用户反馈）。这里改用 DOM 的进入/离开驱动，与 Rust 那条路互不干扰
+  // （Windows 仍走轮询的 ±40px 宽容区，行为不变）。
+  useEffect(() => {
+    if (!isLinux()) return undefined;
+    let timer: number | null = null;
+
+    const onEnter = () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      const s = useCapsuleStore.getState();
+      if (s.expanded || hoverLockRef.current) return;
+      s.setPanelReady(false); // 与 Rust 路径同一套"先关面板再展开"的门控
+      s.setExpanded(true);
+    };
+
+    const onLeave = () => {
+      const s = useCapsuleStore.getState();
+      if (!s.expanded || s.keepOpen || hoverLockRef.current) return;
+      // 延时收：从胶囊移到展开面板的瞬间不应被判为离开
+      timer = window.setTimeout(() => {
+        timer = null;
+        const cur = useCapsuleStore.getState();
+        if (!cur.keepOpen && !hoverLockRef.current) cur.setExpanded(false);
+      }, 260);
+    };
+
+    const body = document.body;
+    body.addEventListener('mouseenter', onEnter);
+    body.addEventListener('mouseleave', onLeave);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      body.removeEventListener('mouseenter', onEnter);
+      body.removeEventListener('mouseleave', onLeave);
+    };
+  }, []); // 收起后锁定悬停自动展开，需点击胶囊才恢复（不触发渲染，保留为 ref）
   const prevExpandedRef = useRef(false); // 尺寸 effect：检测「从收起态展开」过渡
   const [volume, setVolume] = useState(0.7);
   const [weather, setWeather] = useState<{ temp: number | null; code: number | null; city: string | null }>({ temp: null, code: null, city: null });

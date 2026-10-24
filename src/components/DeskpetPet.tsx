@@ -11,7 +11,7 @@ import { KEYS } from "../core/storage/keys";
 import { EVENTS } from "../core/events/schema";
 import { injectCssOnce } from "../lib/injectCss";
 // 原生 Wayland 不能由应用自己搬窗口（tao 传 serial=0），拖动统一走合成器通道
-import { overlayDragBegin, overlayDragMove, overlayDragEnd } from "../lib/overlayDrag";
+import { overlayDragBeginAsync, overlayDragMove, overlayDragEnd } from "../lib/overlayDrag";
 import { isLinux } from "../platform/isLinux";
 
 // 轻跳反馈动画 @keyframes pet-bounce。
@@ -483,6 +483,9 @@ export function DeskpetPet() {
   const lastClickRef = useRef(0); // 上次单击时间戳，用于双击判定
   const lastSleepHourRef = useRef(-1); // 上次播放 sleep 的小时，避免同一小时重复
   const sunsetHoursRef = useRef(18); // 今日日落时间（小时，浮点），由睡眠调度器计算
+  // 合成器是否接管了本次拖动（true 时禁用手绘位移，避免双重移动）
+  const compositorDragRef = useRef(false);
+
   const dragRef = useRef<{
     startScreenX: number; // 按下瞬间的光标「屏幕逻辑坐标」（与 cursorRef 同空间，用于移动判定）
     startScreenY: number;
@@ -978,7 +981,8 @@ export function DeskpetPet() {
         // 移动判定必须在同一坐标系：屏幕光标 vs 按下时的屏幕光标
         if (Math.hypot(c.x - d.startScreenX, c.y - d.startScreenY) > DRAG_THRESHOLD) d.moved = true;
         if (isLinux()) {
-          // 由 GNOME 扩展在合成器侧移动（Wayland 下 setPosition 会被忽略）
+          if (compositorDragRef.current) return; // 合成器已在跟随指针，别再插手
+          // 合成器没接管时的回退：由扩展按我们算出的坐标移动
           overlayDragMove('deskpet', nx, ny);
         } else {
           w.setPosition(new LogicalPosition(nx, ny)).catch(() => {});
@@ -1096,8 +1100,12 @@ export function DeskpetPet() {
     e.preventDefault();
     if (settingsRef.current.clickThrough) return; // 点击穿透模式不响应拖拽
     if (e.button !== 0) return; // 仅左键参与拖拽 / 点击（右键交由 onContextMenu）
-    // Linux：告诉合成器扩展"用户开始拖这个窗"，并让它本次会话别再钉住
-    overlayDragBegin('deskpet');
+    // Linux：告诉合成器扩展"用户开始拖这个窗"。**若合成器接管了，就绝不能再自己 setPosition**
+    // —— 否则窗口被两个来源同时移动，表现为"一动两倍速、按住/松开都很怪"（2026-10-24 用户反馈）。
+    compositorDragRef.current = false;
+    void overlayDragBeginAsync('deskpet').then((handled) => {
+      compositorDragRef.current = handled;
+    });
     const cx = e.clientX; // 窗口内相对坐标（CSS 逻辑像素）
     const cy = e.clientY;
     const w = getCurrentWindow();
