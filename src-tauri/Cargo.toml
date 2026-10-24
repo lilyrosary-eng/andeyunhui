@@ -2,7 +2,7 @@
 name = "andeyunhui"
 # 版本号唯一真源是 src-tauri/tauri.conf.json（Tauri 打包读它）；此处与 package.json 必须与其保持一致，
 # 否则 cargo metadata / 关于页 / 安装包三方对不上。历史包袱：这里长期停在 0.1.0。
-version = "2.4.1"
+version = "2.4.2"
 description = "安得云荟 · 笔记"
 authors = ["Rosary"]
 edition = "2021"
