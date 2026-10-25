@@ -43,6 +43,27 @@ pub fn apply(app: &AppHandle, label: &str, ignore: bool) -> Result<(), String> {
         // （用户实测"设了穿透，被遮住处还是点不到"）。递归整棵子树。
         apply_recursive(&gdk_win, ignore);
         eprintln!("[click-through] {label} pass_through={ignore}");
+        // 打开穿透后再补几次：WebKit 的渲染子窗口/子 surface 有时在开关之后才创建或重建，
+        // 只在开关瞬间设一次会漏掉它们（用户实测：光标变了但下面仍点不到）。
+        if ignore {
+            let label_owned = label.to_string();
+            let app2 = app.clone();
+            // 回到主线程再定时（GDK 调用必须在主线程）
+            let _ = app.run_on_main_thread(move || {
+                use gtk::glib;
+                let app3 = app2.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
+                    if let Some(w) = app3.get_webview_window(&label_owned) {
+                        if let Ok(g) = w.gtk_window() {
+                            if let Some(gd) = g.window() {
+                                apply_recursive(&gd, true);
+                            }
+                        }
+                    }
+                    glib::ControlFlow::Break
+                });
+            });
+        }
         return Ok(());
     }
     #[cfg(not(target_os = "linux"))]

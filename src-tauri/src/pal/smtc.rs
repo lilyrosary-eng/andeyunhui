@@ -239,7 +239,16 @@ fn provider_loop(app: AppHandle, rx: mpsc::Receiver<ProviderCmd>) {
     // Seek·SetPosition，媒体卡片会缺图标且不能拖进度（2026-10-24）。
     #[cfg(target_os = "linux")]
     {
-        crate::mpris_player::run_provider(app, rx);
+        // Linux 改为**只用 WebKitGTK 内置的 MPRIS**：WebKit 每播放一次媒体就会发布一个播放器，
+        // 我们再发一个 ⇒ GNOME 显示两张卡（用户实测，且 WebKit 4.1 没有开关能关掉它）。
+        // 所以这里默认不再启动自定义发布端；需要对比时设 ANDY_OWN_MPRIS=1 打开。
+        if std::env::var("ANDY_OWN_MPRIS").ok().as_deref() == Some("1") {
+            crate::mpris_player::run_provider(app, rx);
+        } else {
+            eprintln!("[smtc/mpris] Linux 使用 WebKit 内置 MPRIS（自有发布端已关闭；ANDY_OWN_MPRIS=1 可打开）");
+            // 保持通道不阻塞：丢弃命令即可
+            std::thread::spawn(move || for _ in rx {});
+        }
         return;
     }
 

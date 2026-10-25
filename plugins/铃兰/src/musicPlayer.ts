@@ -237,7 +237,46 @@ class MusicPlayer {
   // 见 setupSmtc() 中监听的 "smtc-control"。若此处再用 JS 注册媒体键处理器，会与 Rust 路径
   // 重复触发（同一按键执行两次），故刻意留空。
   private setupMediaSessionHandlers(): void {
-    /* 故意留空：媒体键由 Rust SMTC 回传处理 */
+    // Windows / 其它平台：媒体键由 Rust SMTC 回传（smtc-control），这里必须留空，
+    // 否则同一次按键会被处理两次。
+    //
+    // Linux：**反过来**。WebKitGTK 自己就会发布一个 MPRIS 播放器（除了我们那个，
+    // 于是 GNOME 显示两张卡）。为了让「一张卡 + 功能齐全」，Linux 上关掉我们自己的
+    // 发布端、只用 WebKit 这张 ⇒ 卡片上的按钮全靠 navigator.mediaSession 动作。
+    if (!isLinux()) return;
+    type MS = {
+      mediaSession?: {
+        setActionHandler?: (a: string, h: ((d?: { seekTime?: number; seekOffset?: number }) => void) | null) => void;
+      };
+    };
+    const ms = (navigator as unknown as MS).mediaSession;
+    if (!ms?.setActionHandler) return;
+    const bind = (action: string, fn: (d?: { seekTime?: number; seekOffset?: number }) => void) => {
+      try {
+        ms.setActionHandler!(action, fn);
+      } catch {
+        /* 该动作不被支持，忽略 */
+      }
+    };
+    bind('play', () => this.play());
+    bind('pause', () => this.pause());
+    bind('stop', () => {
+      this.pause();
+      this.audio.currentTime = 0;
+    });
+    bind('nexttrack', () => this.next());
+    bind('previoustrack', () => this.prev());
+    bind('seekto', (d) => {
+      if (typeof d?.seekTime === 'number' && isFinite(d.seekTime)) this.audio.currentTime = d.seekTime;
+    });
+    bind('seekbackward', (d) => {
+      this.audio.currentTime = Math.max(0, this.audio.currentTime - (d?.seekOffset ?? 10));
+    });
+    bind('seekforward', (d) => {
+      const dur = this.audio.duration;
+      const t = this.audio.currentTime + (d?.seekOffset ?? 10);
+      this.audio.currentTime = Number.isFinite(dur) ? Math.min(t, dur) : t;
+    });
   }
 
   // ===== 本进程 SMTC 会话（Rust 端）=====

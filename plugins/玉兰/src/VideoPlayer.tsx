@@ -500,6 +500,26 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
     };
   }, []);
 
+  // Linux：我们自己的 MPRIS 发布端已关闭（改用 WebKit 内置那张），媒体卡片的按钮
+  // 走 navigator.mediaSession 动作 —— 视频这块也要注册，否则卡片上是死按钮。
+  useEffect(() => {
+    if (!isLinux()) return undefined;
+    const ms = (navigator as unknown as { mediaSession?: { setActionHandler?: (a: string, h: ((d?: { seekTime?: number; seekOffset?: number }) => void) | null) => void } }).mediaSession;
+    if (!ms?.setActionHandler) return undefined;
+    const bind = (a: string, fn: (d?: { seekTime?: number; seekOffset?: number }) => void) => { try { ms.setActionHandler!(a, fn); } catch { /* 不支持则忽略 */ } };
+    const v = () => videoRef.current;
+    bind('play', () => { void v()?.play().catch(() => {}); });
+    bind('pause', () => { v()?.pause(); });
+    bind('nexttrack', () => { const n = navRef.current; if (n && !n.isLast) { const nx = n.videoList[n.currentIndex + 1]; if (nx) n.onFileChange(nx); } });
+    bind('previoustrack', () => { const n = navRef.current; if (n && !n.isFirst) { const pv = n.videoList[n.currentIndex - 1]; if (pv) n.onFileChange(pv); } });
+    bind('seekto', (d) => { const el = v(); if (el && typeof d?.seekTime === 'number') el.currentTime = d.seekTime; });
+    return () => {
+      for (const a of ['play', 'pause', 'nexttrack', 'previoustrack', 'seekto']) {
+        try { ms.setActionHandler!(a, null); } catch { /* ignore */ }
+      }
+    };
+  }, []);
+
   // 音量/播放速度变动同步到 video
   useEffect(() => {
     if (videoRef.current) {
