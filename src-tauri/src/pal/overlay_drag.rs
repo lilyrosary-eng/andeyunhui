@@ -30,6 +30,7 @@ enum Call {
     Place { title: String, x: i32, y: i32 },
     End(String),
     Pointer(mpsc::Sender<Option<(i32, i32)>>),
+    Near(String, mpsc::Sender<bool>),
 }
 
 fn tx() -> Option<&'static mpsc::Sender<Call>> {
@@ -107,6 +108,15 @@ fn worker(rx: mpsc::Receiver<Call>) {
                         .and_then(|m| m.body().deserialize::<(i32, i32)>().ok());
                     let _ = reply.send(r);
                 }
+                Call::Near(title, reply) => {
+                    let r = conn
+                        .call_method(Some(DEST), PATH, Some(IFACE), "Near", &(title.as_str(),))
+                        .await
+                        .ok()
+                        .and_then(|m| m.body().deserialize::<bool>().ok())
+                        .unwrap_or(false);
+                    let _ = reply.send(r);
+                }
                 Call::End(title) => {
                     let _ = conn
                         .call_method(Some(DEST), PATH, Some(IFACE), "EndDrag", &(title.as_str(),))
@@ -148,6 +158,16 @@ pub fn pointer() -> Option<(i32, i32)> {
     let (rtx, rrx) = mpsc::channel();
     tx.send(Call::Pointer(rtx)).ok()?;
     rrx.recv_timeout(std::time::Duration::from_millis(200)).ok().flatten()
+}
+
+/// 光标是否贴近某窗口（判定在合成器侧做，因为 Wayland 下应用拿不到可靠的窗口坐标）。
+pub fn near(title: &str) -> bool {
+    let Some(tx) = tx() else { return false };
+    let (rtx, rrx) = mpsc::channel();
+    if tx.send(Call::Near(title.to_string(), rtx)).is_err() {
+        return false;
+    }
+    rrx.recv_timeout(std::time::Duration::from_millis(200)).unwrap_or(false)
 }
 
 /// 结束拖动。

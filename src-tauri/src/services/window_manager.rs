@@ -562,6 +562,20 @@ pub fn overlay_drag_move(label: String, x: i32, y: i32) {
     }
 }
 
+/// 光标是否贴近该浮窗（Linux 由合成器判定；其它平台恒 false）。
+#[tauri::command]
+pub fn overlay_near(label: String) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return crate::overlay_drag::near(&overlay_window_title(&label));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = label;
+        false
+    }
+}
+
 /// 整窗点击穿透开关。Linux 走 GdkWindow::set_pass_through（Wayland 下 tao 的旧接口无效）。
 #[tauri::command]
 pub fn overlay_set_click_through(app: tauri::AppHandle, label: String, ignore: bool) -> Result<(), String> {

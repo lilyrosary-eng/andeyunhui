@@ -15,6 +15,14 @@
 
 use tauri::{AppHandle, Manager};
 
+#[cfg(target_os = "linux")]
+fn apply_recursive(win: &gdk::Window, ignore: bool) {
+    win.set_pass_through(ignore);
+    for child in win.children() {
+        apply_recursive(&child, ignore);
+    }
+}
+
 /// 给指定 label 的浮窗设置/取消整窗穿透。返回 Err 时调用方可回退到 tao 的旧接口。
 pub fn apply(app: &AppHandle, label: &str, ignore: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
@@ -31,7 +39,9 @@ pub fn apply(app: &AppHandle, label: &str, ignore: bool) -> Result<(), String> {
         if !gdk_win.display().supports_input_shapes() {
             return Err("当前后端不支持 input shapes".to_string());
         }
-        gdk_win.set_pass_through(ignore);
+        // 只设顶层不够：WebKit 的渲染用到子 GdkWindow，子窗口仍会吞事件
+        // （用户实测"设了穿透，被遮住处还是点不到"）。递归整棵子树。
+        apply_recursive(&gdk_win, ignore);
         eprintln!("[click-through] {label} pass_through={ignore}");
         return Ok(());
     }
