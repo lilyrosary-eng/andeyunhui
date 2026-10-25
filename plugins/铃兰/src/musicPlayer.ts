@@ -108,7 +108,7 @@ class MusicPlayer {
     this.audio.preload = 'metadata';
     this.bindEvents();
     this.bindMediaDiagnostics();
-    this.setupMediaSessionHandlers();
+    void this.setupMediaSessionHandlers();
     this.setupSmtc();
     this.setupSpectrumListener();
   }
@@ -236,7 +236,7 @@ class MusicPlayer {
   // 注意：媒体键（键盘/触摸板/任务栏）统一由 Rust SMTC 的 ButtonPressed 事件回传前端处理，
   // 见 setupSmtc() 中监听的 "smtc-control"。若此处再用 JS 注册媒体键处理器，会与 Rust 路径
   // 重复触发（同一按键执行两次），故刻意留空。
-  private setupMediaSessionHandlers(): void {
+  private async setupMediaSessionHandlers(): Promise<void> {
     // Windows / 其它平台：媒体键由 Rust SMTC 回传（smtc-control），这里必须留空，
     // 否则同一次按键会被处理两次。
     //
@@ -244,11 +244,18 @@ class MusicPlayer {
     // 于是 GNOME 显示两张卡）。为了让「一张卡 + 功能齐全」，Linux 上关掉我们自己的
     // 发布端、只用 WebKit 这张 ⇒ 卡片上的按钮全靠 navigator.mediaSession 动作。
     if (!isLinux()) return;
-    // 二分开关：若注册这些动作与音乐模块崩溃有关，设 ANDY_NO_MEDIASESSION=1 即可关掉
+    // 二分开关：写 `~/.config/andeyunhui/debug.json` 为 `{"noMediasession":true}`
+    // 即可跳过注册（用于判断 MediaSession 是否与音乐模块崩溃有关）。
+    let skipped = false;
     try {
-      const p = new URLSearchParams(location.search);
-      if (p.get('no_ms') === '1') return;
+      const f = await invoke<{ noMediasession?: boolean }>('debug_flags');
+      skipped = !!f?.noMediasession;
     } catch { /* ignore */ }
+    if (skipped) {
+      this.msSkipped = true;
+      debugLog('music: MediaSession 动作被 debug.json 关闭（noMediasession）');
+      return;
+    }
     type MS = {
       mediaSession?: {
         setActionHandler?: (a: string, h: ((d?: { seekTime?: number; seekOffset?: number }) => void) | null) => void;
