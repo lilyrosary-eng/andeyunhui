@@ -244,6 +244,11 @@ class MusicPlayer {
     // 于是 GNOME 显示两张卡）。为了让「一张卡 + 功能齐全」，Linux 上关掉我们自己的
     // 发布端、只用 WebKit 这张 ⇒ 卡片上的按钮全靠 navigator.mediaSession 动作。
     if (!isLinux()) return;
+    // 二分开关：若注册这些动作与音乐模块崩溃有关，设 ANDY_NO_MEDIASESSION=1 即可关掉
+    try {
+      const p = new URLSearchParams(location.search);
+      if (p.get('no_ms') === '1') return;
+    } catch { /* ignore */ }
     type MS = {
       mediaSession?: {
         setActionHandler?: (a: string, h: ((d?: { seekTime?: number; seekOffset?: number }) => void) | null) => void;
@@ -316,6 +321,9 @@ class MusicPlayer {
   private lastSmtcProgressMs = 0;
   private pushSmtcProgress(): void {
     if (!this.isPlaying) return;
+    // Linux：自有 MPRIS 发布端已关闭，这条每秒推送没有消费者（且是一条可疑的崩溃路径），
+    // 直接跳过。Windows 仍需要。
+    if (isLinux()) return;
     const d = this.audio?.duration;
     if (!Number.isFinite(d) || d <= 0) return;
     const now = Date.now();

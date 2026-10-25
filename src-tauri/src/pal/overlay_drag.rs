@@ -30,7 +30,8 @@ enum Call {
     Place { title: String, x: i32, y: i32 },
     End(String),
     Pointer(mpsc::Sender<Option<(i32, i32)>>),
-    Near(String, mpsc::Sender<bool>),
+    Near(String, i32, i32, mpsc::Sender<bool>),
+    Rect(String, mpsc::Sender<Option<(i32, i32, i32, i32)>>),
 }
 
 fn tx() -> Option<&'static mpsc::Sender<Call>> {
@@ -100,6 +101,14 @@ fn worker(rx: mpsc::Receiver<Call>) {
                         .call_method(Some(DEST), PATH, Some(IFACE), "Place", &(title.as_str(), x, y))
                         .await;
                 }
+                Call::Rect(title, reply) => {
+                    let r = conn
+                        .call_method(Some(DEST), PATH, Some(IFACE), "Rect", &(title.as_str(),))
+                        .await
+                        .ok()
+                        .and_then(|m| m.body().deserialize::<(i32, i32, i32, i32)>().ok());
+                    let _ = reply.send(r);
+                }
                 Call::Pointer(reply) => {
                     let r = conn
                         .call_method(Some(DEST), PATH, Some(IFACE), "Pointer", &())
@@ -108,9 +117,9 @@ fn worker(rx: mpsc::Receiver<Call>) {
                         .and_then(|m| m.body().deserialize::<(i32, i32)>().ok());
                     let _ = reply.send(r);
                 }
-                Call::Near(title, reply) => {
+                Call::Near(title, w, h, reply) => {
                     let r = conn
-                        .call_method(Some(DEST), PATH, Some(IFACE), "Near", &(title.as_str(),))
+                        .call_method(Some(DEST), PATH, Some(IFACE), "Near", &(title.as_str(), w, h))
                         .await
                         .ok()
                         .and_then(|m| m.body().deserialize::<bool>().ok())
@@ -161,13 +170,21 @@ pub fn pointer() -> Option<(i32, i32)> {
 }
 
 /// 光标是否贴近某窗口（判定在合成器侧做，因为 Wayland 下应用拿不到可靠的窗口坐标）。
-pub fn near(title: &str) -> bool {
+pub fn near(title: &str, w: i32, h: i32) -> bool {
     let Some(tx) = tx() else { return false };
     let (rtx, rrx) = mpsc::channel();
-    if tx.send(Call::Near(title.to_string(), rtx)).is_err() {
+    if tx.send(Call::Near(title.to_string(), w, h, rtx)).is_err() {
         return false;
     }
     rrx.recv_timeout(std::time::Duration::from_millis(200)).unwrap_or(false)
+}
+
+/// 窗口真实矩形（x, y, w, h，逻辑像素）。应用侧 outerPosition 在 Wayland 下不可信，只能问合成器。
+pub fn rect(title: &str) -> Option<(i32, i32, i32, i32)> {
+    let tx = tx()?;
+    let (rtx, rrx) = mpsc::channel();
+    tx.send(Call::Rect(title.to_string(), rtx)).ok()?;
+    rrx.recv_timeout(std::time::Duration::from_millis(200)).ok().flatten()
 }
 
 /// 结束拖动。

@@ -375,7 +375,9 @@ export default function Capsule() {
     const tick = async () => {
       if (stopped) return;
       try {
-        const near = await invoke<boolean>('overlay_near', { label: win.label });
+        // 传收缩态尺寸：否则收缩态也按展开后的窗口矩形判定，触发区会大到整块面板
+        // （2026-10-25 用户实测"判定太严"）。CAPSULE_W/H 即收缩态尺寸。
+        const near = await invoke<boolean>('overlay_near', { label: win.label, w: CAPSULE_W, h: CAPSULE_H });
         const s = useCapsuleStore.getState();
         if (near) {
           if (!s.expanded && !hoverLockRef.current) {

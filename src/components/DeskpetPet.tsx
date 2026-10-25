@@ -1066,8 +1066,12 @@ export function DeskpetPet() {
         const x = Math.round(p.x);
         const y = Math.round(p.y);
         if (isLinux()) {
-          // Wayland 下应用不能自己定位：交给扩展（同时标记为"已释放"，不再钉回原位）
-          await invoke('overlay_place', { label: 'deskpet', x, y });
+          // Wayland 下应用不能自己定位：交给扩展（同时标记为"已释放"，不再钉回原位）。
+          // 试几次：窗口刚创建时合成器可能还不认识它，move_frame 会扑空。
+          for (let i = 0; i < 5; i++) {
+            await invoke('overlay_place', { label: 'deskpet', x, y }).catch(() => {});
+            await new Promise((r) => setTimeout(r, 250));
+          }
         } else {
           await getCurrentWindow().setPosition(new LogicalPosition(x, y));
         }
@@ -1082,18 +1086,15 @@ export function DeskpetPet() {
     const d = dragRef.current;
     if (!d || !d.active) return;
     overlayDragEnd('deskpet');
-    // 记住这次拖到的位置（逻辑像素，供下次启动 overlay_place 还原）
-    try {
-      const w = getCurrentWindow();
-      Promise.all([w.outerPosition(), w.scaleFactor()])
-        .then(([p, sf]) => {
-          const s = sf || 1;
-          localStorage.setItem(POS_KEY, JSON.stringify({ x: p.x / s, y: p.y / s }));
-        })
-        .catch(() => {});
-    } catch {
-      /* ignore */
-    }
+    // 记住这次拖到的位置。**不能**用 outerPosition：Wayland 下它恒返回 0,0
+    // （用户实测存下来的总是 {x:0,y:0} ⇒ 记忆等于没有）。改用扩展给出的真实矩形。
+    invoke<[number, number, number, number] | null>('overlay_rect', { label: 'deskpet' })
+      .then((r) => {
+        if (r && (r[0] !== 0 || r[1] !== 0)) {
+          localStorage.setItem(POS_KEY, JSON.stringify({ x: r[0], y: r[1] }));
+        }
+      })
+      .catch(() => {});
     if (!d.moved && Date.now() - d.down < CLICK_MS) handleClick();
     dragRef.current = null;
   };

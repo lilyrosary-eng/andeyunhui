@@ -564,10 +564,11 @@ pub fn overlay_drag_move(label: String, x: i32, y: i32) {
 
 /// 光标是否贴近该浮窗（Linux 由合成器判定；其它平台恒 false）。
 #[tauri::command]
-pub fn overlay_near(label: String) -> bool {
+pub fn overlay_near(label: String, w: i32, h: i32) -> bool {
     #[cfg(target_os = "linux")]
     {
-        return crate::overlay_drag::near(&overlay_window_title(&label));
+        // w/h <= 0 表示用窗口当前矩形；收缩态请传收缩尺寸，否则按展开态判定
+        return crate::overlay_drag::near(&overlay_window_title(&label), w, h);
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -587,6 +588,20 @@ pub fn overlay_set_click_through(app: tauri::AppHandle, label: String, ignore: b
     {
         let _ = (app, label, ignore);
         Ok(())
+    }
+}
+
+/// 窗口真实矩形 (x, y, w, h)。Linux 由合成器提供；其它平台返回 None。
+#[tauri::command]
+pub fn overlay_rect(label: String) -> Option<(i32, i32, i32, i32)> {
+    #[cfg(target_os = "linux")]
+    {
+        return crate::overlay_drag::rect(&overlay_window_title(&label));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = label;
+        None
     }
 }
 
