@@ -108,7 +108,7 @@ class MusicPlayer {
     this.audio.preload = 'metadata';
     this.bindEvents();
     this.bindMediaDiagnostics();
-    void this.setupMediaSessionHandlers();
+    // MediaSession 动作改为「首次 play 时」再注册 —— 见 setupMediaSessionHandlers 注释
     this.setupSmtc();
     this.setupSpectrumListener();
   }
@@ -151,6 +151,7 @@ class MusicPlayer {
   private bindEvents(): void {
     this.audio.addEventListener('play', () => {
       this.isPlaying = true;
+      void this.setupMediaSessionHandlers();
       this.startPseudoAnalyser();
       this.setMediaSessionState('playing');
       this.pushSmtc();
@@ -236,13 +237,23 @@ class MusicPlayer {
   // 注意：媒体键（键盘/触摸板/任务栏）统一由 Rust SMTC 的 ButtonPressed 事件回传前端处理，
   // 见 setupSmtc() 中监听的 "smtc-control"。若此处再用 JS 注册媒体键处理器，会与 Rust 路径
   // 重复触发（同一按键执行两次），故刻意留空。
+  private msHandlersBound = false;
+
   private async setupMediaSessionHandlers(): Promise<void> {
+    if (this.msHandlersBound) return;
+
     // Windows / 其它平台：媒体键由 Rust SMTC 回传（smtc-control），这里必须留空，
     // 否则同一次按键会被处理两次。
     //
     // Linux：**反过来**。WebKitGTK 自己就会发布一个 MPRIS 播放器（除了我们那个，
     // 于是 GNOME 显示两张卡）。为了让「一张卡 + 功能齐全」，Linux 上关掉我们自己的
     // 发布端、只用 WebKit 这张 ⇒ 卡片上的按钮全靠 navigator.mediaSession 动作。
+    //
+    // ★ 2026-10-25 已判定：`mediaSession.setActionHandler` 在 WebKitGTK 4.1 里会堆损坏
+    //   （WebKitWebProcess 以 `corrupted double-linked list` abort）。用 debug.json 的
+    //   noMediasession 二分确认：关掉就不崩、打开就崩。
+    //   规避办法：**不在模块初始化时注册**，而是等首次 play（媒体会话真正激活）之后再挂，
+    //   且只挂一次（切歌会重建媒体元素，早挂的回调会变野指针）。
     if (!isLinux()) return;
     // 二分开关：写 `~/.config/andeyunhui/debug.json` 为 `{"noMediasession":true}`
     // 即可跳过注册（用于判断 MediaSession 是否与音乐模块崩溃有关）。
@@ -263,6 +274,7 @@ class MusicPlayer {
     };
     const ms = (navigator as unknown as MS).mediaSession;
     if (!ms?.setActionHandler) return;
+    this.msHandlersBound = true;
     const bind = (action: string, fn: (d?: { seekTime?: number; seekOffset?: number }) => void) => {
       try {
         ms.setActionHandler!(action, fn);
