@@ -375,9 +375,16 @@ export default function Capsule() {
     const tick = async () => {
       if (stopped) return;
       try {
-        // 传收缩态尺寸：否则收缩态也按展开后的窗口矩形判定，触发区会大到整块面板
-        // （2026-10-25 用户实测"判定太严"）。CAPSULE_W/H 即收缩态尺寸。
-        const near = await invoke<boolean>('overlay_near', { label: win.label, w: CAPSULE_W, h: CAPSULE_H });
+        // 判定的宽高：
+        //   收缩态 → 传收缩尺寸（窗口实际尺寸可能还是展开态，不传就会把触发区放大到整块面板）
+        //   展开态 → 传 0（用真实窗口矩形），否则展开面板上的按钮会落在判定区外，
+        //            被当成"不贴近"而整窗穿透 ⇒ 按钮点不到（2026-10-26 用户实测）
+        const expandedNow = useCapsuleStore.getState().expanded;
+        const near = await invoke<boolean>('overlay_near', {
+          label: win.label,
+          w: expandedNow ? 0 : CAPSULE_W,
+          h: expandedNow ? 0 : CAPSULE_H,
+        });
         const s = useCapsuleStore.getState();
         if (near) {
           if (!s.expanded && !hoverLockRef.current) {
@@ -388,8 +395,8 @@ export default function Capsule() {
           hoverLockRef.current = false; // 离开即解锁：否则手动收一次后悬停再也打不开
           if (s.expanded && !s.keepOpen) s.setExpanded(false);
         }
-        // 不贴近就整窗穿透（收起态的透明边距不该吃掉桌面点击）
-        const through = !near;
+        // 只在**收起且不贴近**时整窗穿透：展开态必须能点按钮。
+        const through = !near && !useCapsuleStore.getState().expanded;
         if (through !== lastThrough) {
           lastThrough = through;
           invoke('overlay_set_click_through', { label: win.label, ignore: through }).catch(() => {});

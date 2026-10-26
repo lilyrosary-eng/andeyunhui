@@ -58,6 +58,8 @@ const ALLOWED_EXT: &[&str] = &[
     "mp3", "flac", "wav", "m4a", "aac", "ogg", "oga", "opus", "wma", "aiff", "ape", "alac",
     // 视频
     "mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv", "flv", "ts", "m2ts", "mpg", "mpeg", "3gp",
+    // 图片（媒体卡封面：WebKit 的 MPRIS 卡片只认 URL，本地封面必须走这个服务）
+    "jpg", "jpeg", "png", "webp", "gif", "bmp", "avif",
 ];
 
 /// 读写循环的固定缓冲大小。**这是本服务内存占用的上界**（每连接 64KB）。
@@ -87,6 +89,12 @@ fn content_type(path: &str) -> &'static str {
         "ts" | "m2ts" => "video/mp2t",
         "mpg" | "mpeg" => "video/mpeg",
         "3gp" => "video/3gpp",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
         _ => "application/octet-stream",
     }
 }

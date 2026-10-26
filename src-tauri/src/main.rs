@@ -714,10 +714,9 @@ fn spectrum_set_listener(active: bool) {
 }
 
 fn main() {
-    // Linux：WebKitGTK 内置 MPRIS 的 Identity 取 GLib 应用名。设成中文名，
-    // 媒体卡片上就不会显示 "andeyunhui"（2026-10-25 采用"只用 WebKit 一张卡"方案）。
-    #[cfg(target_os = "linux")]
-    gtk::glib::set_application_name("安得云荟");
+    // 注意：不要用 set_application_name 设中文名 —— 经 GLib 传给 WebKit 的 MPRIS
+    // Identity 会变成一串 ??????（编码问题，2026-10-26 用户截图实证）。
+    // 卡片上的标题/封面应由 navigator.mediaSession.metadata 提供，不靠应用名。
 
     // === WebView2「Window to Visual」托管模式（根治外部媒体下胶囊浮岛卡顿）===
     // 必须在【任何 WebView2 环境创建之前】（即 tauri::Builder 之前）设置，迟于此时点无效。

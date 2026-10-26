@@ -352,7 +352,34 @@ class MusicPlayer {
     api?.invoke?.('smtc_update', { info: this.smtcPayload().info }).catch(() => {});
   }
 
+  /** 把当前曲目写进 navigator.mediaSession.metadata。
+   *  WebKitGTK 内置的 MPRIS 卡片只认这份元数据；不写的话卡片标题会退化成应用名
+   *  （2026-10-26 用户截图：卡片显示"安得云荟"而不是歌名）。 */
+  private syncMediaSessionMetadata(): void {
+    if (!isLinux() || !this.msHandlersBound) return;
+    try {
+      const MM = (window as unknown as { MediaMetadata?: new (i: Record<string, unknown>) => unknown }).MediaMetadata;
+      const ms = navigator as unknown as { mediaSession?: { metadata?: unknown } };
+      if (!MM || !ms.mediaSession) return;
+      const track = this.getCurrentTrack();
+      if (!track) return;
+      const title = track.title?.trim() || (track.filePath ? track.filePath.split(/[\\/]/).pop()! : '');
+      const art = track.coverPath
+        ? (track.coverPath.startsWith('http') ? track.coverPath : convertFileSrc(track.coverPath))
+        : undefined;
+      ms.mediaSession.metadata = new MM({
+        title,
+        artist: track.artist ?? '',
+        album: track.album ?? '',
+        artwork: art ? [{ src: art, sizes: '512x512' }] : [],
+      });
+    } catch {
+      /* 元数据失败不影响播放 */
+    }
+  }
+
   private pushSmtc(): void {
+    this.syncMediaSessionMetadata();
     const track = this.getCurrentTrack();
     const has = !!track && this.tracks.length > 0;
     // 标题兜底：很多音频文件没有标题元数据，空标题会让任务栏回退显示 AUMID；
