@@ -143,6 +143,47 @@ fn list_drives() -> Vec<PathBuf> {
 /// 注意：系统盘（C:）只索引用户媒体库、不扫系统盘根，以免扫入 Windows/Program Files 等巨型目录。
 fn scan_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
+
+    // ---- Linux ----
+    // 原实现只读 USERPROFILE + 枚举盘符（Windows 概念）：Linux 上 USERPROFILE 不存在、
+    // list_drives 返回的又不是家目录 ⇒ 索引里 13.8 万条**全在 /snap 下**，
+    // 用户搜自己的文件当然"s效果很差"（2026-10-26 实测）。
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            // 中英文目录名都覆盖（中文桌面环境下 XDG 目录是中文名）
+            for name in [
+                "Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos",
+                "桌面", "文档", "下载", "图片", "音乐", "视频",
+            ] {
+                let p = Path::new(&home).join(name);
+                if p.is_dir() {
+                    roots.push(p);
+                }
+            }
+            // 家目录本身也纳入：用户常见的工作目录就在 ~ 下
+            let hp = Path::new(&home).to_path_buf();
+            if hp.is_dir() {
+                roots.push(hp);
+            }
+        }
+        // 挂载的其它磁盘（/mnt、/media 下的挂载点）
+        for base in ["/mnt", "/media"] {
+            if let Ok(entries) = std::fs::read_dir(base) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        roots.push(p);
+                    }
+                }
+            }
+        }
+        roots.sort();
+        roots.dedup();
+        return roots;
+    }
+
+    #[cfg(windows)]
     if let Ok(home) = std::env::var("USERPROFILE") {
         for name in [
             "Desktop",
@@ -363,6 +404,37 @@ pub fn start_indexing(app: &AppHandle) {
     capture_usn_start();
     // 仅首次启动才全量建索引；若索引库已存在（非首启），跳过全盘重建，
     // 直接走 USN 增量 + notify 监听维护，避免「每次启动都全盘重扫」导致磁盘持续满载。
+    // Linux：老索引可能只覆盖了 /snap（旧 roots 逻辑的后果）。检测家目录覆盖为 0 就重建，
+    // 否则"修好了 roots 但索引没更新"，用户仍搜不到自己的文件。
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let stale = if home.is_empty() {
+            false
+        } else {
+            search_conn()
+                .and_then(|g| {
+                    let g = g;
+                    g.query_row(
+                        "SELECT count(*) FROM files WHERE path_lower LIKE ?1 LIMIT 1",
+                        [format!("{}%", home.to_lowercase())],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .ok()
+                })
+                .map(|n| n == 0)
+                .unwrap_or(true)
+        };
+        if stale {
+            log::warn!("[FILESEARCH] 索引未覆盖家目录，触发重建（build_index 会先清空再写入）");
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                build_index();
+            });
+            return;
+        }
+    }
+
     if !index_exists() {
         std::thread::spawn(|| {
             // 延迟 2s，避免与启动其余初始化争抢 IO
