@@ -526,6 +526,21 @@ pub fn smtc_update(app: AppHandle, info: SmtcUpdate) {
         *last = Some(info.clone());
     }
 
+    // Linux：把本应用自己的播放状态**直接广播**给前端（浮岛播放卡）。
+    //
+    // 为什么必须广播：Windows 上浮岛的数据来自「系统 SMTC 监视」读我们自己的会话；
+    // Linux 上我们自己的 MPRIS 发布端已关闭（改用 WebKit 那张），而 WebKit **不导出
+    // mpris:artUrl** ⇒ 轮询端只能拿到标题/时长，**拿不到封面**，浮岛卡片于是没有封面。
+    // 这里直接把前端推上来的 payload（含 cover_path / duration_ms / position_ms）发给前端，
+    // 浮岛就能显示封面。source="app" 走 appPlay 分支，不与外部会话混。
+    #[cfg(target_os = "linux")]
+    {
+        let mut payload = info.clone();
+        payload.source = Some("app".to_string());
+        payload.key = Some("app".to_string());
+        let _ = app.emit("now-playing", payload);
+    }
+
     // 首次推送时若发布端还没建起来，补一次 init
     // （与 Windows 的「session not ready 则重试 init」一致）
     if !PROVIDER_READY.load(Ordering::SeqCst) {

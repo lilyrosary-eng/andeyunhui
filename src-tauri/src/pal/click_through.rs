@@ -9,9 +9,16 @@
 //! # 正确做法
 //! GTK3 为这件事有专门 API：`gdk_window_set_pass_through(win, TRUE)`
 //! （Wayland 后端 `gdk_display_supports_input_shapes()` 返回 true，实测已确认）。
-//! 它对整个 GdkWindow 生效，比"设一块 1×1 输入形状"语义更明确，也不依赖 X11。
 //!
-//! 注意：Wayland 没有"逐像素输入区域"以外的自由——这就是能做到的最细粒度（整窗）。
+//! # 为什么要"持续维持"而不是设一次
+//! WebKit 的渲染用的是**子 GdkWindow**，它们在 resize / 页面重绘 / 视频起播时会被销毁重建；
+//! 新建出来的子窗口默认**不穿透**，于是"设了穿透，过一会儿又开始吃点击"
+//! （2026-10-27 用户实测：浮岛透明区、桌宠、歌词都有这个现象）。
+//! ⇒ 这里保存"期望状态"，并按秒级重放，重建出来的子窗口会被重新压平。
+//! 用户明确表示：桌宠/歌词的开关都在主窗里，这两个窗口**整窗无视鼠标**即可，所以可以放心重放。
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use tauri::{AppHandle, Manager};
 
@@ -23,46 +30,80 @@ fn apply_recursive(win: &gdk::Window, ignore: bool) {
     }
 }
 
+/// label → 期望的穿透状态。只有 true 的会被周期性重放。
+fn desired() -> &'static Mutex<HashMap<String, bool>> {
+    static D: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    D.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn enforcer_started() -> &'static Mutex<bool> {
+    static S: OnceLock<Mutex<bool>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(false))
+}
+
+/// 在主线程上对某个窗口立即应用一次穿透。
+#[cfg(target_os = "linux")]
+fn apply_now(app: &AppHandle, label: &str, ignore: bool) {
+    use gtk::prelude::*;
+
+    let Some(win) = app.get_webview_window(label) else {
+        return;
+    };
+    let Ok(gtk_win) = win.gtk_window() else { return };
+    let Some(gdk_win) = gtk_win.window() else { return };
+    if !gdk_win.display().supports_input_shapes() {
+        return;
+    }
+    apply_recursive(&gdk_win, ignore);
+}
+
+/// 每秒重放一次所有"期望穿透"的窗口（子 GdkWindow 重建后会被重新压平）。
+fn ensure_enforcer(app: &AppHandle) {
+    let mut started = match enforcer_started().lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if *started {
+        return;
+    }
+    *started = true;
+    drop(started);
+
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let labels: Vec<String> = match desired().lock() {
+            Ok(m) => m.iter().filter(|(_, v)| **v).map(|(k, _)| k.clone()).collect(),
+            Err(_) => continue,
+        };
+        if labels.is_empty() {
+            continue;
+        }
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            for l in labels {
+                apply_now(&app2, &l, true);
+            }
+        });
+    });
+}
+
 /// 给指定 label 的浮窗设置/取消整窗穿透。返回 Err 时调用方可回退到 tao 的旧接口。
 pub fn apply(app: &AppHandle, label: &str, ignore: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        use gtk::prelude::*;
-
-        let win = app
-            .get_webview_window(label)
-            .ok_or_else(|| format!("找不到窗口 {label}"))?;
-        let gtk_win = win.gtk_window().map_err(|e| format!("取 GTK 窗口失败: {e}"))?;
-        let gdk_win = gtk_win
-            .window()
-            .ok_or_else(|| "GdkWindow 尚未创建".to_string())?;
-        if !gdk_win.display().supports_input_shapes() {
-            return Err("当前后端不支持 input shapes".to_string());
+        if let Ok(mut m) = desired().lock() {
+            m.insert(label.to_string(), ignore);
         }
-        // 只设顶层不够：WebKit 的渲染用到子 GdkWindow，子窗口仍会吞事件
-        // （用户实测"设了穿透，被遮住处还是点不到"）。递归整棵子树。
-        apply_recursive(&gdk_win, ignore);
-        eprintln!("[click-through] {label} pass_through={ignore}");
-        // 打开穿透后再补几次：WebKit 的渲染子窗口/子 surface 有时在开关之后才创建或重建，
-        // 只在开关瞬间设一次会漏掉它们（用户实测：光标变了但下面仍点不到）。
+        // 立即在主线程应用一次（GDK 调用必须在主线程），然后交给重放线程维持。
+        let app2 = app.clone();
+        let label2 = label.to_string();
+        let _ = app.run_on_main_thread(move || {
+            apply_now(&app2, &label2, ignore);
+            eprintln!("[click-through] {label2} pass_through={ignore}（持续维持）");
+        });
         if ignore {
-            let label_owned = label.to_string();
-            let app2 = app.clone();
-            // 回到主线程再定时（GDK 调用必须在主线程）
-            let _ = app.run_on_main_thread(move || {
-                use gtk::glib;
-                let app3 = app2.clone();
-                glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
-                    if let Some(w) = app3.get_webview_window(&label_owned) {
-                        if let Ok(g) = w.gtk_window() {
-                            if let Some(gd) = g.window() {
-                                apply_recursive(&gd, true);
-                            }
-                        }
-                    }
-                    glib::ControlFlow::Break
-                });
-            });
+            ensure_enforcer(app);
         }
         return Ok(());
     }
@@ -70,5 +111,12 @@ pub fn apply(app: &AppHandle, label: &str, ignore: bool) -> Result<(), String> {
     {
         let _ = (app, label, ignore);
         Err("仅 Linux 需要该路径".to_string())
+    }
+}
+
+/// 关闭时清理（窗口销毁前调用，避免重放线程继续找已销毁的窗口）。
+pub fn forget(label: &str) {
+    if let Ok(mut m) = desired().lock() {
+        m.remove(label);
     }
 }

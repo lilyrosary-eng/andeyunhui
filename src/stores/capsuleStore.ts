@@ -124,6 +124,12 @@ function computePlayFrom(
     if (appPlay) all.push(appPlay);
     return all.find((s) => s.key === selectedKey) ?? sysPlay ?? appPlay ?? null;
   }
+  // 同一首曲目同时被「本应用」和「系统播放器」上报时，用本应用的 ——
+  // Linux 上系统那一份就是 WebKit 内置 MPRIS（**不导出 artUrl/DesktopEntry**），
+  // 而本应用那份来自我们自己的 payload（含 cover_path/duration/position）。
+  // 不这么做的话，播放中 sysPlay 永远优先 ⇒ 浮岛卡片永远没封面（2026-10-27 用户实测）。
+  if (appPlay?.title && sysPlay?.title && appPlay.title === sysPlay.title) return appPlay;
+
   // 跟随实时：优先「正在播放」的源（system > app），都没有在播才回退到任意非空源
   // （暂停态仍可见、可控）。修复「暂停的外部媒体遮蔽正在播放的本应用媒体」→ 显示错源 + 控制错源。
   if (sysPlay?.is_playing) return sysPlay;

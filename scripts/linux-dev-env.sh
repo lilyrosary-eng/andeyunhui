@@ -19,9 +19,25 @@ _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPS_PREFIX="${LINUX_DEPS_PREFIX:-$_REPO_ROOT/.linux-deps}"
 
 # 1) sccache：未安装则关闭 rustc wrapper（否则 cargo 直接报错）
-if ! command -v sccache >/dev/null 2>&1; then
+if command -v sccache >/dev/null 2>&1; then
+  # 服务端常驻，跨构建复用产物；未启动时 sccache 会自己拉起
+  sccache --start-server >/dev/null 2>&1 || true
+  echo "[linux-dev-env] sccache 就绪（$(sccache --version 2>/dev/null | head -1)）"
+else
   export RUSTC_WRAPPER=""
   echo "[linux-dev-env] 未检测到 sccache —— 已关闭 rustc-wrapper（RUSTC_WRAPPER=）"
+fi
+
+# 1b) 快链接器：装了 lld/mold 就用（GNU ld 是单线程，release 链接能占掉几分钟）
+#     有则以 -fuse-ld 方式交给现有 cc 驱动，不改 .cargo/config.toml（Windows 段不受影响）。
+if command -v ld.lld >/dev/null 2>&1; then
+  export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=lld"
+  echo "[linux-dev-env] 使用 lld 链接（-fuse-ld=lld）"
+elif command -v mold >/dev/null 2>&1; then
+  export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=mold"
+  echo "[linux-dev-env] 使用 mold 链接（-fuse-ld=mold）"
+else
+  echo "[linux-dev-env] 未装 lld/mold —— 仍用 GNU ld（慢）。建议：sudo apt install -y lld"
 fi
 
 # 2) 本地解包前缀（无 root 安装的构建依赖）
