@@ -380,6 +380,7 @@ export default function Capsule() {
     let timer: number | undefined;
     const win = getCurrentWebviewWindow();
     let lastThrough: boolean | null = null;
+    let dwellTimer: number | null = null;
 
     const tick = async () => {
       if (stopped) return;
@@ -396,11 +397,25 @@ export default function Capsule() {
         });
         const s = useCapsuleStore.getState();
         if (near) {
-          if (!s.expanded && !hoverLockRef.current) {
-            s.setPanelReady(false);
-            s.setExpanded(true);
+          // **驻留展开**：指针只是"路过"胶囊那条带（比如要去点它正下方的模块工具栏）
+          // 时不该弹面板 —— 一旦弹开，460×340 的面板就把下面的按钮盖住，
+          // 这正是"图片模块按钮点不动"的成因（2026-10-27 用户实测）。
+          // 所以要连续停留 350ms 才展开；中途离开就取消。
+          if (!s.expanded && !hoverLockRef.current && dwellTimer === null) {
+            dwellTimer = window.setTimeout(() => {
+              dwellTimer = null;
+              const cur = useCapsuleStore.getState();
+              if (!cur.expanded && !hoverLockRef.current) {
+                cur.setPanelReady(false);
+                cur.setExpanded(true);
+              }
+            }, 350);
           }
         } else {
+          if (dwellTimer !== null) {
+            window.clearTimeout(dwellTimer);
+            dwellTimer = null;
+          }
           hoverLockRef.current = false; // 离开即解锁：否则手动收一次后悬停再也打不开
           if (s.expanded && !s.keepOpen) s.setExpanded(false);
         }
@@ -429,6 +444,7 @@ export default function Capsule() {
     return () => {
       stopped = true;
       if (timer) window.clearTimeout(timer);
+      if (dwellTimer !== null) window.clearTimeout(dwellTimer);
       invoke('overlay_set_click_through', { label: win.label, ignore: false }).catch(() => {});
     };
   }, []); // 收起后锁定悬停自动展开，需点击胶囊才恢复（不触发渲染，保留为 ref）
