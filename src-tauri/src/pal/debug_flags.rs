@@ -15,6 +15,13 @@ pub struct DebugFlags {
     /// 不注册 navigator.mediaSession 动作（用于判断 MediaSession 是否与 WebKit 崩溃有关）
     #[serde(default)]
     pub no_mediasession: bool,
+    /// 命中测试探针：记录鼠标落在窗口顶部区域时，命中的到底是哪个 DOM 元素
+    /// （用于排查"按钮既不高亮也点不动"到底被什么盖住）。
+    #[serde(default)]
+    pub hit_probe: bool,
+    /// 帧率探针：每 2 秒把主窗 rAF 帧率写进日志（含当前模块 id），用于性能对比。
+    #[serde(default)]
+    pub fps_probe: bool,
 }
 
 static FLAGS: OnceLock<DebugFlags> = OnceLock::new();

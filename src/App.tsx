@@ -7,6 +7,7 @@ import { ExtensionsHub } from '@/core/extensions/ExtensionsHub';
 import { NotesModule } from '@/core/notes/NotesModule';
 import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferStationPanel';
 import { Titlebar } from '@/components/Titlebar';
+import { LinuxProbes } from '@/core/probes/LinuxProbes';
 import { AppNav } from '@/components/AppNav';
 import { HostSidebar } from '@/components/HostSidebar';
 import { ImmersiveChrome } from '@/components/ImmersiveChrome';
@@ -717,6 +718,7 @@ function App() {
             而模块内嵌侧栏（笔记/AI 对话）本身就在内容树里，两者行为天然对不上。
             顶部 38px 归悬浮层，模块内容与侧栏用 .immersive-safe-top 让位。 */}
         <Titlebar hidden={immersive} />
+        <LinuxProbes />
         <div className="flex flex-1 min-w-0 overflow-hidden">
           <AppNav mainPluginIds={mainPluginIds} hidden={immersive} />
           <HostSidebar />

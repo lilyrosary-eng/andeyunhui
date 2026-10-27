@@ -86,7 +86,11 @@ pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::E
     // 带 floating=lyrics 查询参数：让 index.html 预载脚本跳过哥特加载页，
     // 与 floating-note/clipboard/dropzone 同款「即点即用」，毫秒级响应。
     let window = WebviewWindowBuilder::new(app, LYRICS_WINDOW_LABEL, WebviewUrl::App("index.html?floating=lyrics".into()))
-        .title("歌词")
+        // 标题带「安得云荟 · 」前缀：GNOME 扩展按 "· " 之后的部分做配置键（见 extension.js
+        // _keyOf），叫「歌词」才能命中 ~/.config/andeyunhui-pin.json 里 "歌词": {mode:"none"}，
+        // 由合成器做 make_above —— Wayland 下 GTK 的 always_on_top 是空操作，
+        // 窗口失焦就沉下去，表现为"点一下锁定歌词就消失"（2026-10-27 用户定位）。
+        .title("安得云荟 · 歌词")
         .inner_size(400.0, 80.0)
         .resizable(true)
         .decorations(false)

@@ -361,6 +361,15 @@ export default function Capsule() {
   const refreshSessionList = useCapsuleStore((s) => s.refreshSessionList);
   const hoverLockRef = useRef(false);
 
+  // 展开/收起瞬间立刻切换整窗穿透，不等下面 120ms 的轮询 ——
+  // 否则刚展开的头一百多毫秒里窗口仍是穿透态，按钮点了没反应（"有时点不动"）。
+  useEffect(() => {
+    if (!isLinux()) return;
+    const lw = getCurrentWebviewWindow();
+    if (!lw) return;
+    invoke('overlay_set_click_through', { label: lw.label, ignore: !expanded }).catch(() => {});
+  }, [expanded]);
+
   // Linux 悬停展开：判定**在合成器侧做**（扩展 Near()）。
   // 为什么不让这里算：Wayland 下 `outerPosition()` 不可靠，按它算出来的矩形会整体偏移
   // ——用户实测触发区跑到屏幕左半边（2026-10-25）。
