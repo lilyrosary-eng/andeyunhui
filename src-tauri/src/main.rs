@@ -713,7 +713,37 @@ fn spectrum_set_listener(active: bool) {
     audio_spectrum::set_listener(active);
 }
 
+/// 调试标记文件：~/.config/andeyunhui/<name>（或 $XDG_CONFIG_HOME 下）。
+#[cfg(target_os = "linux")]
+fn marker_exists(name: &str) -> bool {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")));
+    base.map(|b| b.join("andeyunhui").join(name).exists())
+        .unwrap_or(false)
+}
+
 fn main() {
+    // Linux：关掉 WebKitGTK 的 DMA-BUF 渲染器。
+    //
+    // 实测（2026-10-27，同一台机器、6G cgroup 上限、启动后 ~20s 静置）：
+    //   默认                ：cgroup 3.5~3.9GB，其中 shmem 2.4~2.7GB
+    //   WEBKIT_DISABLE_DMABUF_RENDERER=1：cgroup 0.6~0.8GB，其中 shmem 42~60MB
+    // 差额几乎全部来自 WebKit 为**每个 webview**分配的 GPU/共享缓冲（主窗+浮岛+桌宠+歌词
+    // 共 4 个），这也是用户会话出现 5.3G 峰值、以及"音乐模块一开就被 OOM 杀"的直接原因。
+    //
+    // 想对照/回退：设环境变量 WEBKIT_DISABLE_DMABUF_RENDERER=0，或创建标记文件
+    //   ~/.config/andeyunhui/keep-dmabuf
+    #[cfg(target_os = "linux")]
+    {
+        let opted_out = std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_ok()
+            || marker_exists("keep-dmabuf");
+        if !opted_out {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            eprintln!("[webkit] 已关闭 DMA-BUF 渲染器（省 ~2.5GB 共享内存；keep-dmabuf 可回退）");
+        }
+    }
+
     // 注意：不要用 set_application_name 设中文名 —— 经 GLib 传给 WebKit 的 MPRIS
     // Identity 会变成一串 ??????（编码问题，2026-10-26 用户截图实证）。
     // 卡片上的标题/封面应由 navigator.mediaSession.metadata 提供，不靠应用名。

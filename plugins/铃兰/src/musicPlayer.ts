@@ -197,9 +197,8 @@ class MusicPlayer {
   // WebView2/Chromium 会把 mediaSession 元信息推送到 Windows 任务栏媒体浮窗，
   // 显示歌曲标题/艺术家/专辑/封面，并响应系统媒体按键（播放/暂停/上一首/下一首）。
   private setMediaSessionState(state: 'playing' | 'paused' | 'none'): void {
-    // Linux：媒体卡片由我们自己的 MPRIS 发布；WebKitGTK 内置 MPRIS 会再出第二张卡。
-    // 这里不写 playbackState，作为"能否压掉 WebKit 那张"的最小实验。
-    if (isLinux()) return;
+    // Linux 现在**只**用 WebKit 内置的那张卡（自有发布端默认关闭），所以必须写 playbackState，
+    // 否则卡片上永远是"已停止"、暂停键不反映真实状态（2026-10-27）。
     try {
       const ms = (navigator as unknown as { mediaSession?: { playbackState?: string } }).mediaSession;
       if (ms) ms.playbackState = state;
@@ -214,13 +213,16 @@ class MusicPlayer {
   // 互相打架的诡异现象）。任务栏「正在播放」卡片统一由 Rust 进程内的 SystemMediaTransportControls
   // 会话（smtc.rs）负责，它使用正确的 AUMID + 显示名「安得云荟」。故此处不再设置 metadata。
   private updateMediaSessionMeta(_track: Track): void {
-    /* 故意留空：OS 媒体卡片由 Rust SMTC 接管 */
+    // Windows：OS 卡片由 Rust SMTC 接管，这里留空。
+    // Linux：卡片就是 WebKit 内置 MPRIS，元数据只能从这里写进去。
+    this.syncMediaSessionMetadata();
   }
 
   private updateMediaSessionPosition(): void {
     try {
-      if (isLinux()) return; // 同上：位置由 MPRIS 的 Position 属性提供
-    const ms = navigator as unknown as { mediaSession?: { setPositionState?: (s: { duration: number; position: number; playbackRate: number }) => void } };
+      // Linux 也要写：WebKit 的 MPRIS `Position` / `mpris:length` 就来自 setPositionState，
+      // 不写的话卡片没有进度条、时长恒 0（2026-10-27 用户实测）。
+      const ms = navigator as unknown as { mediaSession?: { setPositionState?: (s: { duration: number; position: number; playbackRate: number }) => void } };
       if (!ms.mediaSession || !ms.mediaSession.setPositionState) return;
       const d = this.audio.duration;
       if (!d || !isFinite(d) || d <= 0) return;
@@ -356,7 +358,8 @@ class MusicPlayer {
    *  WebKitGTK 内置的 MPRIS 卡片只认这份元数据；不写的话卡片标题会退化成应用名
    *  （2026-10-26 用户截图：卡片显示"安得云荟"而不是歌名）。 */
   private syncMediaSessionMetadata(): void {
-    if (!isLinux() || !this.msHandlersBound) return;
+    // 不能等 msHandlersBound：MediaSession 动作是首次 play 才注册的，而元数据要**立刻**可见。
+    if (!isLinux()) return;
     try {
       const MM = (window as unknown as { MediaMetadata?: new (i: Record<string, unknown>) => unknown }).MediaMetadata;
       const ms = navigator as unknown as { mediaSession?: { metadata?: unknown } };
@@ -364,8 +367,13 @@ class MusicPlayer {
       const track = this.getCurrentTrack();
       if (!track) return;
       const title = track.title?.trim() || (track.filePath ? track.filePath.split(/[\\/]/).pop()! : '');
-      const art = track.coverPath
-        ? (track.coverPath.startsWith('http') ? track.coverPath : convertFileSrc(track.coverPath))
+      // 封面：桌面壳（GNOME Shell）用自己的加载器读 artUrl，只认 http(s)/file://，
+      // asset:// 它读不了 ⇒ 本地封面拼 file://，在线封面直传。
+      const cp = track.coverPath;
+      const art = cp
+        ? (cp.startsWith('http://') || cp.startsWith('https://')
+            ? cp
+            : `file://${encodeURI(cp)}`)
         : undefined;
       ms.mediaSession.metadata = new MM({
         title,

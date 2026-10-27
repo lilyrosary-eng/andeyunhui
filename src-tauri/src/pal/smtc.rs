@@ -435,10 +435,21 @@ fn list_system_players() -> Vec<SmtcUpdate> {
         let is_playing =
             matches!(player.get_playback_status(), Ok(PlaybackStatus::Playing));
 
-        // 这是「读系统其它播放器」的那条路（轮询），没有可靠的时长/位置信息，置空。
+        // 时长/位置：MPRIS 本来就给了（mpris:length + Position），之前一律置空，
+        // 导致浮岛的播放卡没有进度条（2026-10-27）。这里读出来，读不到才留空。
+        let duration_ms = meta
+            .as_ref()
+            .and_then(|m| m.length())
+            .map(|d| d.as_millis() as u64);
+        let position_ms = if duration_ms.is_some() {
+            player.get_position().ok().map(|d| d.as_millis() as u64)
+        } else {
+            None
+        };
+
         out.push(SmtcUpdate {
-            duration_ms: None,
-            position_ms: None,
+            duration_ms,
+            position_ms,
             title,
             artist,
             album,

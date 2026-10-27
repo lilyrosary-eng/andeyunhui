@@ -240,13 +240,50 @@ export function LyricsWidget() {
       try {
         const sf = await win.scaleFactor();
         const curSize = await win.innerSize();      // 物理像素
-        const curPos = await win.outerPosition();   // 物理像素
-        const cx = curPos.x + curSize.width / 2;
-        const cy = curPos.y + curSize.height / 2;
-        const newLeft = Math.round(cx - (w * sf) / 2);
-        const newTop = Math.round(cy - (finalH * sf) / 2);
-        await win.setSize(new LogicalSize(w, finalH));
-        await win.setPosition(new PhysicalPosition(newLeft, newTop));
+        // 窗口位置：Windows 用 outerPosition()；**Linux/Wayland 下它恒返回 (0,0)**
+        // （已在桌宠位置记忆上实测过），按它算锚点会把窗口搬到屏幕左上角甚至负坐标
+        // ⇒ 表现为"点一下锁定/切歌，歌词窗就消失了"（2026-10-27 用户实测）。
+        // 这里改成问合成器要真实矩形（扩展 Rect），拿不到就**完全不动位置**，只改尺寸。
+        let curLeftPhys: number | null = null;
+        let curTopPhys: number | null = null;
+        if (isLinux()) {
+          try {
+            const r = await invoke<[number, number, number, number] | null>('overlay_rect', {
+              label: win.label,
+            });
+            if (r && (r[0] !== 0 || r[1] !== 0)) {
+              curLeftPhys = Math.round(r[0] * sf); // 扩展给的是逻辑像素
+              curTopPhys = Math.round(r[1] * sf);
+            }
+          } catch {
+            /* 扩展未加载：保持位置不变 */
+          }
+        } else {
+          const curPos = await win.outerPosition();   // 物理像素
+          curLeftPhys = curPos.x;
+          curTopPhys = curPos.y;
+        }
+
+        if (curLeftPhys === null || curTopPhys === null) {
+          // 读不到真实位置：只改尺寸，绝不动位置（宁可中心不锚定，也不能把窗口搬走）
+          await win.setSize(new LogicalSize(w, finalH));
+        } else {
+          const cx = curLeftPhys + curSize.width / 2;
+          const cy = curTopPhys + curSize.height / 2;
+          const newLeft = Math.round(cx - (w * sf) / 2);
+          const newTop = Math.round(cy - (finalH * sf) / 2);
+          await win.setSize(new LogicalSize(w, finalH));
+          if (isLinux()) {
+            // Wayland 里应用无权移动自己的窗口，交给合成器（扩展 Place）
+            await invoke('overlay_place', {
+              label: win.label,
+              x: Math.round(newLeft / sf),
+              y: Math.round(newTop / sf),
+            }).catch(() => {});
+          } else {
+            await win.setPosition(new PhysicalPosition(newLeft, newTop));
+          }
+        }
       } catch {
         // 极端情况（首次无位置信息）退化为仅 setSize，不移动位置
         try { await win.setSize(new LogicalSize(w, finalH)); } catch { /* ignore */ }

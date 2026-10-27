@@ -296,6 +296,8 @@ mpris = "2.1"
 # 也不给 Seek·SetPosition ⇒ GNOME 媒体卡片缺图标、不能拖进度。tokio feature 让底层 zbus
 # 复用本应用已有的 tokio 运行时。
 mpris-server = { version = "0.10", features = ["tokio"] }
+# 组播发现要枚举网卡前缀长度（挑有广播域的地址，避开 WARP/VPN 的 /32）
+libc = "0.2"
 # 拖动通道：应用 → GNOME 扩展（合成器）的 D-Bus 调用
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 # 点击穿透：tao 的 set_ignore_cursor_events 在 Wayland 上不生效，需直接对 GdkWindow 用

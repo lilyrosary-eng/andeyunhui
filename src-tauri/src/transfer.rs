@@ -565,17 +565,23 @@ impl TransferManager {
                 return;
             }
         };
-        let local = local_ip();
+        let local = match discovery_ipv4() {
+            Some(ip) => {
+                log::info!("[transfer] 组播使用网卡地址 {ip}（本地路由地址 {}", local_ip());
+                ip
+            }
+            None => local_ip(),
+        };
         if let Err(e) = socket.join_multicast_v4(group, local) {
             let msg = format!("加入组播组失败 {group}/{local}: {e}（Android 需 MulticastLock）");
             log::warn!("[transfer] {msg}");
             *self.start_error.lock().unwrap() = Some(msg);
         }
 
-        let send_socket = match UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("[transfer] UDP 发送套接字绑定失败: {e}");
+        let send_socket = match bind_send_socket().await {
+            Some(s) => s,
+            None => {
+                log::warn!("[transfer] UDP 发送套接字绑定失败");
                 return;
             }
         };
@@ -634,9 +640,9 @@ impl TransferManager {
     /// 立即向组播组发送公告（面板打开时调用）。
     /// 连发 3 次（间隔 300ms），大幅加快首次发现——对端收报到后立刻回 register。
     pub async fn announce_now(&self) {
-        let send_socket = match UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
-            Err(_) => return,
+        let send_socket = match bind_send_socket().await {
+            Some(s) => s,
+            None => return,
         };
         // 组播 + 定向广播双发：WARP/VPN、部分路由器屏蔽组播时广播可兜底
         let _ = send_socket.set_broadcast(true);
@@ -1455,6 +1461,75 @@ fn classify_send_error(e: &reqwest::Error, ip: &str, port: u16, scheme: &str) ->
         s.push_str(&format!("\n底层原因：{src}"));
     }
     s
+}
+
+/// 组播发现该用哪张网卡的地址。
+///
+/// 原实现取「默认路由的源地址」（connect 8.8.8.8 再读 local_addr）。装了 CloudflareWARP /
+/// 其它 VPN 的机器上会拿到 VPN 地址 —— 本机实测 **172.16.0.2/32**：
+/// `join_multicast_v4(group, 172.16.0.2)` 只把组加入加在 WARP 那张 /32 网卡上，
+/// 于是**收不到局域网里手机的组播公告**，表现为"传输功能用不了"（2026-10-27 用户反馈）。
+///
+/// 判据：只认**有广播域**的地址（前缀 < 31），循环/链路本地排除。这是纯属性判断，
+/// 不认网卡名（WARP 的网卡名各个版本都不一样）。
+#[cfg(target_os = "linux")]
+fn discovery_ipv4() -> Option<Ipv4Addr> {
+    use std::ffi::CStr;
+    unsafe {
+        let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifap) != 0 {
+            return None;
+        }
+        let mut best: Option<Ipv4Addr> = None;
+        let mut cur = ifap;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            if ifa.ifa_addr.is_null() || ifa.ifa_netmask.is_null() {
+                continue;
+            }
+            let sa = &*ifa.ifa_addr;
+            if sa.sa_family as i32 != libc::AF_INET {
+                continue;
+            }
+            let ip = Ipv4Addr::from(u32::from_be(
+                (*(ifa.ifa_addr as *const libc::sockaddr_in)).sin_addr.s_addr,
+            ));
+            let mask = u32::from_be((*(ifa.ifa_netmask as *const libc::sockaddr_in)).sin_addr.s_addr);
+            let prefix = mask.count_ones();
+            let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy().to_string();
+            if ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() {
+                continue;
+            }
+            // /32、/31 没有可用广播域（VPN 隧道、点对点），组播发不出去
+            if prefix >= 31 {
+                log::debug!("[transfer] 跳过 {name} {ip}/{prefix}（无广播域）");
+                continue;
+            }
+            log::debug!("[transfer] 发现候选网卡 {name} {ip}/{prefix}");
+            if best.is_none() {
+                best = Some(ip);
+            }
+        }
+        libc::freeifaddrs(ifap);
+        best
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn discovery_ipv4() -> Option<Ipv4Addr> {
+    None // 其它平台沿用 local_ip()（行为与之前完全一致）
+}
+
+/// 绑一个「从局域网网卡发出」的 UDP 套接字。
+/// 绑定源地址能让组播/广播确定从那张网卡出去，不受 VPN 默认路由影响。
+async fn bind_send_socket() -> Option<UdpSocket> {
+    let bind_ip = discovery_ipv4();
+    let addr = match bind_ip {
+        Some(ip) => SocketAddr::V4(SocketAddrV4::new(ip, 0)),
+        None => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
+    };
+    UdpSocket::bind(addr).await.ok()
 }
 
 fn local_ip() -> Ipv4Addr {

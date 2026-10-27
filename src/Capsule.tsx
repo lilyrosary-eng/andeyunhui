@@ -395,14 +395,23 @@ export default function Capsule() {
           hoverLockRef.current = false; // 离开即解锁：否则手动收一次后悬停再也打不开
           if (s.expanded && !s.keepOpen) s.setExpanded(false);
         }
-        // 只在**收起且不贴近**时整窗穿透：展开态必须能点按钮。
-        const through = !near && !useCapsuleStore.getState().expanded;
+        // 收起态**一律**整窗穿透：浮岛窗口是一块 460×340 的透明矩形（合成器实测
+        // x=730 y=38 w=460 h=340），即使只显示一颗胶囊，这块矩形也会吃掉它覆盖的所有
+        // hover/click —— 表现为"正下方的模块按钮既不高亮也点不动"（2026-10-27 用户实测
+        // 图片模块工具栏中段正好在它下面）。
+        // 悬停判定不依赖 DOM 事件（走扩展的 global.get_pointer），所以穿透态照样能感知悬停、
+        // 照样能自动展开；展开后必须收回输入，否则面板上的按钮点不了。
+        const through = !useCapsuleStore.getState().expanded;
         if (through !== lastThrough) {
           lastThrough = through;
           invoke('overlay_set_click_through', { label: win.label, ignore: through }).catch(() => {});
         }
       } catch {
-        /* 扩展未加载：降级为只能点击展开 */
+        // 扩展未加载（拿不到 near）：不能靠穿透，否则胶囊永远点不动 ⇒ 恢复输入
+        if (lastThrough !== false) {
+          lastThrough = false;
+          invoke('overlay_set_click_through', { label: win.label, ignore: false }).catch(() => {});
+        }
       }
       if (!stopped) timer = window.setTimeout(tick, 120);
     };
