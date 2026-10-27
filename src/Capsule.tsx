@@ -460,13 +460,37 @@ export default function Capsule() {
     }
   }, [expanded, refreshSessionList]);
 
-  // 依赖写成 [play] 而非 [play?.cover_path]：React Compiler 推断出的依赖是整个 play 对象，
-  // 手写更细的属性依赖反而让它无法保留既有 memo（preserve-manual-memoization 报错）。
-  // convertFileSrc 极廉价，play 变化时多算一次无感。
-  const coverUrl = useMemo(
-    () => (play?.cover_path ? convertFileSrc(play.cover_path) : null),
-    [play],
-  );
+  // 封面 URL：
+  //  - http(s) 封面（在线曲目）：直接透传（此前一律 convertFileSrc ⇒ 变成垃圾 asset:// 地址）；
+  //  - Linux 本地封面：走 media_http（WebKitGTK 不接 asset://，媒体卡/浮岛都会变空图）；
+  //  - 其它平台：convertFileSrc。
+  const [coverUrl, setCoverUrl] = useState<string | null>(null);
+  useEffect(() => {
+    const cp = play?.cover_path;
+    if (!cp) {
+      setCoverUrl(null);
+      return undefined;
+    }
+    if (/^https?:/i.test(cp)) {
+      setCoverUrl(cp);
+      return undefined;
+    }
+    if (!isLinux()) {
+      setCoverUrl(convertFileSrc(cp));
+      return undefined;
+    }
+    let alive = true;
+    invoke<string>('media_http_url', { path: cp })
+      .then((u) => {
+        if (alive) setCoverUrl(u);
+      })
+      .catch(() => {
+        if (alive) setCoverUrl(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [play]);
   // 多会话堆叠：合并外部会话与本应用会话；当前展示之外的会话作为背景卡营造层次质感
   const allSessions = useMemo(() => {
     const a = [...sessionList];

@@ -240,6 +240,8 @@ class MusicPlayer {
   // 见 setupSmtc() 中监听的 "smtc-control"。若此处再用 JS 注册媒体键处理器，会与 Rust 路径
   // 重复触发（同一按键执行两次），故刻意留空。
   private msHandlersBound = false;
+  /** 媒体元数据诊断（每首只打一次日志） */
+  private lastMsDiagKey = '';
 
   private async setupMediaSessionHandlers(): Promise<void> {
     if (this.msHandlersBound) return;
@@ -381,6 +383,16 @@ class MusicPlayer {
         album: track.album ?? '',
         artwork: art ? [{ src: art, sizes: '512x512' }] : [],
       });
+      // 诊断（每首一次）：确认 WebKit 真的收下了这份元数据 —— 系统卡没有封面时，
+      // 日志能分清「JS 没写进去」还是「写进去了但 WebKit/桌面壳没显示」。
+      const diagKey = `${title}|${art ?? ''}`;
+      if (this.lastMsDiagKey !== diagKey) {
+        this.lastMsDiagKey = diagKey;
+        const back = (ms.mediaSession.metadata as { title?: string; artwork?: { src?: string }[] } | null);
+        window.__HOST_API__?.invoke?.('debug_log', {
+          msg: `MS_META set title=${back?.title ?? '<null>'} art=${back?.artwork?.[0]?.src ?? '<none>'}`,
+        }).catch(() => {});
+      }
     } catch {
       /* 元数据失败不影响播放 */
     }

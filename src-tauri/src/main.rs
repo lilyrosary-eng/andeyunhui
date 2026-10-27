@@ -724,23 +724,20 @@ fn marker_exists(name: &str) -> bool {
 }
 
 fn main() {
-    // Linux：关掉 WebKitGTK 的 DMA-BUF 渲染器。
+    // Linux：DMA-BUF 渲染器**默认保持开启**。
     //
-    // 实测（2026-10-27，同一台机器、6G cgroup 上限、启动后 ~20s 静置）：
-    //   默认                ：cgroup 3.5~3.9GB，其中 shmem 2.4~2.7GB
-    //   WEBKIT_DISABLE_DMABUF_RENDERER=1：cgroup 0.6~0.8GB，其中 shmem 42~60MB
-    // 差额几乎全部来自 WebKit 为**每个 webview**分配的 GPU/共享缓冲（主窗+浮岛+桌宠+歌词
-    // 共 4 个），这也是用户会话出现 5.3G 峰值、以及"音乐模块一开就被 OOM 杀"的直接原因。
+    // 2026-10-27 实测过两次，结论是个硬取舍：
+    //   默认（DMA-BUF 开）   ：cgroup 3.5~3.9GB（shmem 2.4~2.7GB），流畅
+    //   WEBKIT_DISABLE_DMABUF_RENDERER=1：cgroup 0.6~0.9GB（shmem 41~60MB），**明显卡顿**
+    // ⇒ 省内存的代价是全局变卡（用户实测"非常非常卡"），所以默认取流畅，内存问题另行处理。
     //
-    // 想对照/回退：设环境变量 WEBKIT_DISABLE_DMABUF_RENDERER=0，或创建标记文件
-    //   ~/.config/andeyunhui/keep-dmabuf
+    // 低内存机器/需要压制共享内存时，用标记文件显式开启：
+    //   touch ~/.config/andeyunhui/force-shm
     #[cfg(target_os = "linux")]
     {
-        let opted_out = std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_ok()
-            || marker_exists("keep-dmabuf");
-        if !opted_out {
+        if marker_exists("force-shm") && std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-            eprintln!("[webkit] 已关闭 DMA-BUF 渲染器（省 ~2.5GB 共享内存；keep-dmabuf 可回退）");
+            eprintln!("[webkit] force-shm 生效：已关闭 DMA-BUF 渲染器（省 ~2.5GB，但会明显变卡）");
         }
     }
 

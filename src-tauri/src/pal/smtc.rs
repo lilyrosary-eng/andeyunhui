@@ -567,13 +567,17 @@ pub fn smtc_control(app: AppHandle, action: String, value: Option<f64>, target: 
                 }
             }
         }
-        // play/pause/previous/next 由播放器插件自己执行，这里只需回环给前端，
-        // 保持与 Windows 一致的行为（Windows 同样 emit smtc-control）。
+        // play/pause/previous/next 由播放器插件自己执行，这里只需回环给前端。
+        //
+        // ★ target 不能用 "app"：前端两个消费者（铃兰/玉兰）的过滤条件是
+        //   `if (target && target !== 'music'/'video') return;` —— 传 "app" 会被**双双忽略**，
+        //   表现为"浮岛媒体卡上除了桌面歌词，其它按钮全都没反应"（2026-10-27 用户实测）。
+        //   "app" 只是浮岛里**展示用的会话 key**，不是控制路由。
         let _ = app.emit(
             "smtc-control",
             ControlPayload {
                 action,
-                target: "app".to_string(),
+                target: active_module_or_music(),
                 value,
             },
         );
