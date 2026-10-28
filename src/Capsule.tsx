@@ -848,7 +848,17 @@ export default function Capsule() {
       } else if (kind === 'screenshot') {
         await emit(EVENTS.screenshot.open);
       } else if (kind === 'record') {
-        await invoke('show_recorder_select');
+        if (isLinux()) {
+          // 录屏后端（ScreenCast + PipeWire + gst）下一轮接入；这里先给明确反馈，
+          // 不再让 show_recorder_select（Windows 专属）抛未处理异常、点了毫无反应。
+          try {
+            useCapsuleStore.getState().showToast('录屏接入中：将走系统 ScreenCast 授权');
+          } catch {
+            /* 忽略 */
+          }
+        } else {
+          await invoke('show_recorder_select');
+        }
       } else if (kind === 'dropzone' || kind === 'clipboard') {
         const label = kind === 'dropzone' ? 'floating-dropzone' : 'floating-clipboard';
         const profile: OverlayProfile = {

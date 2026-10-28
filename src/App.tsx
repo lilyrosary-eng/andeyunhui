@@ -7,6 +7,7 @@ import { ExtensionsHub } from '@/core/extensions/ExtensionsHub';
 import { NotesModule } from '@/core/notes/NotesModule';
 import { TransferStationPanel, emitDropzoneChange } from '@/components/TransferStationPanel';
 import { Titlebar } from '@/components/Titlebar';
+import { isLinux } from '@/platform/isLinux';
 import { LinuxProbes } from '@/core/probes/LinuxProbes';
 import { AppNav } from '@/components/AppNav';
 import { HostSidebar } from '@/components/HostSidebar';
@@ -98,6 +99,13 @@ function App() {
 
   const startScreenshot = useCallback(async () => {
     try {
+      // Linux/Wayland：**不自己画覆盖层**，直接叫系统截图界面（GNOME 自带选区/窗口/全屏 + 存图 + 复制）。
+      // 用户 2026-10-28 定调：只做"系统截图的可替换快捷键 + 浮岛入口"，不重写第二套 UI。
+      // 覆盖层那套（冻结图/标注/窗口吸附/长截图）在 Wayland 上要重做一遍，收益低、成本高。
+      if (isLinux()) {
+        await invoke('system_screenshot');
+        return;
+      }
       // 记录当前笔记页 id（非阻塞：与截图启动并行，减少一次 IPC 往返延迟）
       const noteId = useNotesStore.getState().currentNoteId ?? '';
       invoke('store_screenshot_note_id', { noteId }).catch(() => {});

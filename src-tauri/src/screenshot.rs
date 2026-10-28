@@ -1230,6 +1230,13 @@ pub fn store_screenshot_note_id(
 // 注意：本命令为 `async fn`，Tauri v2 会把 async 命令调度到独立异步任务线程，
 // 不再占用主（UI）线程。捕获与窗口操作期间主线程仍可正常泵消息，
 // 杜绝「保存/捕获时主线程被阻塞 → Windows 显示（无响应）幽灵窗口 / 界面卡死」。
+/// 非 Linux 平台不需要"调系统截图"这条路（Windows 侧自带完整截图流程）。
+/// 保留同名命令只为让 `invoke_handler` 的注册表两端一致。
+#[tauri::command]
+pub async fn system_screenshot() -> Result<(), String> {
+    Err("Windows 使用内置截图流程（start_screenshot）".into())
+}
+
 #[tauri::command]
 pub async fn start_screenshot(
     app: tauri::AppHandle,

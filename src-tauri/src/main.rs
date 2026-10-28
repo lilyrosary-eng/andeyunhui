@@ -1991,6 +1991,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             // ========== 模块：截图系统（全局热键 / 多屏 / 标注）==========
 
             start_screenshot,
+            system_screenshot,
             read_screenshot,
             read_recorder_snapshot,
             peek_screenshot,

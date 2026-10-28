@@ -1070,6 +1070,28 @@ pub async fn save_screenshot(
 }
 
 /// 对应 Windows 版：`start_screenshot(app, _state)`
+/// 直接调**系统截图 UI**（xdg-desktop-portal `interactive: true`）。
+///
+/// 为什么不做自己的覆盖层：Windows 那套（冻结图 + 框选 + 标注 + 窗口吸附 + 长截图）在这边
+/// 等于重写一遍，而 GNOME 已经有一套成熟的截图界面（选区/窗口/全屏/延时、自动存图+复制）。
+/// 用户 2026-10-28 明确：**只做"系统截图的可替换快捷键 + 浮岛入口"**，不做第二套 UI。
+/// ⇒ 这里只负责"把系统的截图界面叫出来"，其余交给系统。
+#[tauri::command]
+pub async fn system_screenshot() -> Result<(), String> {
+    match super::portal_shot::capture_png(true).await {
+        Ok(shot) => {
+            eprintln!(
+                "[截图] 系统截图完成 {}x{}（{} KB）",
+                shot.width,
+                shot.height,
+                shot.png.len() / 1024
+            );
+            Ok(())
+        }
+        Err(e) => Err(format!("系统截图失败: {e}")),
+    }
+}
+
 #[tauri::command]
 pub async fn start_screenshot(
     _app: tauri::AppHandle,
