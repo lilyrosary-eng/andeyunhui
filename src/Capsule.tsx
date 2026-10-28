@@ -849,12 +849,23 @@ export default function Capsule() {
         await emit(EVENTS.screenshot.open);
       } else if (kind === 'record') {
         if (isLinux()) {
-          // 录屏后端（ScreenCast + PipeWire + gst）下一轮接入；这里先给明确反馈，
-          // 不再让 show_recorder_select（Windows 专属）抛未处理异常、点了毫无反应。
+          // Linux/Wayland：不弹我们自己的选区覆盖层（那套要冻结图 + 框选，在 Wayland 上等于重写），
+          // 而是走 portal ScreenCast —— 用户在**系统对话框**里选「整个屏幕 / 某个窗口」。
+          // 同一个按钮做开/关切换（没有独立控制条，避免再造一套 UI）。
+          const store = useCapsuleStore.getState();
           try {
-            useCapsuleStore.getState().showToast('录屏接入中：将走系统 ScreenCast 授权');
-          } catch {
-            /* 忽略 */
+            const st = await invoke<{ isRecording?: boolean }>('get_recording_status');
+            if (st?.isRecording) {
+              const path = await invoke<string>('stop_recording');
+              store.showToast(`录屏已保存：${path.split('/').pop()}`);
+            } else {
+              store.showToast('请在系统对话框里选择要共享的屏幕');
+              // fps 给 30：本机只有软件 VP8 编码（没有 x264enc / 硬件编码器），4K 下 60fps 必卡。
+              await invoke('start_recording', { outputPath: '', fps: 30 });
+              store.showToast('已开始录屏（再点一次停止）');
+            }
+          } catch (e) {
+            store.showToast(`录屏失败：${e}`);
           }
         } else {
           await invoke('show_recorder_select');
