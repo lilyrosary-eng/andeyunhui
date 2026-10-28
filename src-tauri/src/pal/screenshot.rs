@@ -39,40 +39,6 @@ pub const SELF_OVERLAY_LABELS: &[&str] = &[
     "capsule",
 ];
 
-/// 最近一次截屏的**原生 RGBA 字节**（与 Windows 侧同结构）。
-/// 裁剪/保存全部在 Rust 侧基于它完成，不走「整图过 IPC 再回传」。
-static SHOT: Mutex<Option<Shot>> = Mutex::new(None);
-
-/// 取当前笔记 id（把 State 绑到局部变量 —— `app.state::<T>().lock()` 直接链式会在
-/// 语句结束时 drop 掉临时 State，导致 E0716）。
-fn note_id_of(app: &tauri::AppHandle) -> String {
-    use tauri::Manager;
-    let st = app.state::<Mutex<ScreenshotData>>();
-    st.lock().map(|s| s.note_id.clone()).unwrap_or_default()
-}
-
-/// 逻辑桌面尺寸（物理 ÷ 窗口 DPR）。Wayland 的 Xinerama 给的是物理像素，必须除。
-fn logical_desktop(app: &tauri::AppHandle) -> Result<(f64, f64, f64), String> {
-    use tauri::Manager;
-    let rect = get_screenshot_desktop_rect()?;
-    let w = rect["width"].as_f64().unwrap_or(0.0);
-    let h = rect["height"].as_f64().unwrap_or(0.0);
-    let rs = rect["scale"].as_f64().unwrap_or(1.0).max(0.0001);
-    // DPR 优先取覆盖窗自己的（Wayland 下它就是实际缩放），拿不到再退回 rect.scale
-    let dpr = app
-        .get_webview_window("screenshot-overlay")
-        .and_then(|w| w.scale_factor().ok())
-        .unwrap_or(rs)
-        .max(0.0001);
-    if w <= 0.0 || h <= 0.0 {
-        return Err("取不到桌面尺寸".to_string());
-    }
-    // rect 可能是物理（Wayland/XWayland）也可能是逻辑（Windows 语义），按数值判断：
-    // 若 rect.scale 已经是真实 DPR（>1）则 width 是逻辑值，否则 width 是物理值。
-    let (lw, lh) = if rs > 1.01 { (w, h) } else { (w / dpr, h / dpr) };
-    Ok((lw, lh, dpr))
-}
-
 /// 当前截图数据（跨平台占位，字段与 Windows 实现保持一致）。
 #[derive(Debug, Clone, Default)]
 pub struct ScreenshotData {
@@ -128,31 +94,10 @@ pub use tauri_plugin_global_shortcut::Shortcut;
 pub fn mark_overlay_destroyed(_label: &str) {}
 
 #[tauri::command]
-pub fn hide_overlay_window(app: AppHandle) {
-    // 截图结束（保存/取消）必须把覆盖层收起来，否则它会一直挡在整个屏幕上。
-    // 同时复位 showing，避免下一次「按下热键被当成重复触发」。
-    use tauri::Manager;
-    if let Some(w) = app.get_webview_window("screenshot-overlay") {
-        let _ = w.hide();
-    }
-    // 同样必须把 guard 绑成命名变量（if-let 的临时值会活到块尾，与 st 析构冲突）。
-    let st = app.state::<Mutex<ScreenshotData>>();
-    let mut guard = match st.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    guard.showing = false;
-    guard.capturing = false;
-}
+pub fn hide_overlay_window(_app: AppHandle) {}
 
 #[tauri::command]
-pub fn reveal_screenshot_overlay(app: AppHandle) {
-    use tauri::Manager;
-    if let Some(w) = app.get_webview_window("screenshot-overlay") {
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
-}
+pub fn reveal_screenshot_overlay(_app: AppHandle) {}
 
 /// 透明覆盖窗背景透明化（Linux / WebKitGTK 实现，对齐 Windows 的同名命令）。
 ///
@@ -809,17 +754,9 @@ pub fn get_screenshot_note_id(
 ///   ⇒ **桩的签名必须与 Windows 侧逐字一致**（参数、返回类型、async 性），这是本文件最易踩的坑。
 #[tauri::command]
 pub fn peek_screenshot(
-    state: tauri::State<'_, Mutex<ScreenshotData>>,
+    _state: tauri::State<'_, Mutex<ScreenshotData>>,
 ) -> Result<serde_json::Value, String> {
-    let s = state.lock().map_err(|e| format!("锁失败: {e}"))?;
-    Ok(serde_json::json!({
-        "ox": s.last_ox,
-        "oy": s.last_oy,
-        "scale": s.last_scale,
-        "windows": s.last_windows,
-        "noteId": s.note_id,
-        "session": s.session,
-    }))
+    Err("截图预览仅在 Windows 上可用（GDI 内存 DC）".into())
 }
 
 // ============ 剪贴板写图（Linux：arboard 真实实现）============
@@ -1060,29 +997,12 @@ pub async fn clipboard_poll_image(
 /// 对应 Windows 版：`crop_native_rgba(x, y, w, h) -> Result<tauri::ipc::Response, String>`
 #[tauri::command]
 pub async fn crop_native_rgba(
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
+    _x: i32,
+    _y: i32,
+    _w: i32,
+    _h: i32,
 ) -> Result<tauri::ipc::Response, String> {
-    // 与 Windows 同逻辑：入参是**捕获取原点坐标系**的物理像素矩形，先减 native_ox/oy 再夹取。
-    let slot = SHOT.lock().map_err(|e| format!("锁失败: {e}"))?;
-    let shot = slot
-        .as_ref()
-        .ok_or_else(|| "尚无截屏数据，请先触发截图".to_string())?;
-    let iw = shot.native_w as i32;
-    let ih = shot.native_h as i32;
-    let x0 = (x - shot.native_ox).max(0).min(iw - 1);
-    let y0 = (y - shot.native_oy).max(0).min(ih - 1);
-    let ww = ((w as u32).min((iw - x0) as u32)).max(1);
-    let hh = ((h as u32).min((ih - y0) as u32)).max(1);
-    let row_bytes = iw as usize * 4;
-    let mut out: Vec<u8> = Vec::with_capacity((ww as usize) * (hh as usize) * 4);
-    for yy in 0..(hh as usize) {
-        let start = ((y0 as usize + yy) * row_bytes) + (x0 as usize * 4);
-        out.extend_from_slice(&shot.raw[start..start + (ww as usize) * 4]);
-    }
-    Ok(tauri::ipc::Response::new(out))
+    Err("原生裁剪仅在 Windows 上可用（依赖 GDI 内存 DC 拷贝）".into())
 }
 
 /// 对应 Windows 版：`dcomp_is_active(label: String) -> bool`
@@ -1103,17 +1023,7 @@ pub async fn read_recorder_snapshot() -> Result<tauri::ipc::Response, String> {
 /// 对应 Windows 版：`read_screenshot(scale: f64) -> Result<tauri::ipc::Response, String>`
 #[tauri::command]
 pub async fn read_screenshot(_scale: f64) -> Result<tauri::ipc::Response, String> {
-    // 契约与 Windows 逐字一致：`[w_le32][h_le32][RGBA…]`，原生物理分辨率直传，
-    // 前端用 object-fit 铺满覆盖窗做 GPU 降采样显示（不在 Rust 侧降采样，见 Windows 侧注释）。
-    let slot = SHOT.lock().map_err(|e| format!("锁失败: {e}"))?;
-    let shot = slot
-        .as_ref()
-        .ok_or_else(|| "尚无截屏数据，请先触发截图".to_string())?;
-    let mut out: Vec<u8> = Vec::with_capacity(8 + shot.raw.len());
-    out.extend_from_slice(&shot.native_w.to_le_bytes());
-    out.extend_from_slice(&shot.native_h.to_le_bytes());
-    out.extend_from_slice(&shot.raw);
-    Ok(tauri::ipc::Response::new(out))
+    Err("截图捕获仅在 Windows 上可用（GDI / WGC）".into())
 }
 
 /// 对应 Windows 版：`save_annotated(app, x, y, w, h, annotation_png, name)`
@@ -1150,175 +1060,22 @@ pub async fn save_cropped(
 ///   且前端在 Linux 上根本不会走到这里（截图入口已不可用）。故返回不支持，不做半截实现。
 #[tauri::command]
 pub async fn save_screenshot(
-    app: tauri::AppHandle,
-    bytes: Vec<u8>,
-    width: u32,
-    height: u32,
-    name: String,
+    _app: tauri::AppHandle,
+    _bytes: Vec<u8>,
+    _width: u32,
+    _height: u32,
+    _name: String,
 ) -> Result<String, String> {
-    // 与 Windows 同语义：`bytes` 可能是 PNG（已编码）或裸 RGBA（crop_native_rgba 的原样输出）。
-    let (png, w, h) = if bytes.starts_with(b"\x89PNG") {
-        let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解码失败: {e}"))?;
-        let (w, h) = (img.width(), img.height());
-        (bytes.clone(), w, h)
-    } else {
-        let img = image::RgbaImage::from_raw(width, height, bytes)
-            .ok_or_else(|| "图像尺寸与字节长度不匹配，保存失败".to_string())?;
-        let (w, h) = (img.width(), img.height());
-        let mut out: Vec<u8> = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-            .map_err(|e| format!("PNG 编码失败: {e}"))?;
-        (out, w, h)
-    };
-
-    // 顺带写系统剪贴板（Linux 侧已有 arboard 实现；失败不影响落盘）
-    let clip_err = linux_write_image_to_clipboard(&png).err();
-
-    // 落盘：优先 图片目录/andeyunhui-screenshots，退回应用数据目录
-    use tauri::Manager;
-    let base = app
-        .path()
-        .picture_dir()
-        .ok()
-        .map(|p| p.join("andeyunhui-screenshots"))
-        .or_else(|| app.path().app_data_dir().ok().map(|p| p.join("screenshots")))
-        .ok_or_else(|| "取不到保存目录".to_string())?;
-    std::fs::create_dir_all(&base).map_err(|e| format!("创建目录失败: {e}"))?;
-    let safe: String = name
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let file = base.join(format!(
-        "{}-{}-{}x{}.png",
-        if safe.is_empty() { "screenshot" } else { safe.as_str() },
-        stamp,
-        w,
-        h
-    ));
-    std::fs::write(&file, &png).map_err(|e| format!("写入截图失败: {e}"))?;
-    if let Some(e) = clip_err {
-        eprintln!("[截图] 写剪贴板失败（已落盘）: {e}");
-    }
-    Ok(file.to_string_lossy().to_string())
+    Err("截图保存仅在 Windows 上可用".into())
 }
 
 /// 对应 Windows 版：`start_screenshot(app, _state)`
-/// Linux 版截图启动：**先让覆盖层上屏，再在后台走 portal 抓图**。
-///
-/// 顺序理由（与 Windows 一致）：覆盖层先显示，用户立刻能看到十字光标与框选；
-/// 抓图在后台完成后再发 `screenshot-ready` 把冻结图注进去。若反过来，用户要等 portal 往返
-/// （实测 200~600ms）才有反应，体感是"按了没反应"。
 #[tauri::command]
 pub async fn start_screenshot(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     _state: tauri::State<'_, Mutex<ScreenshotData>>,
 ) -> Result<(), String> {
-    use tauri::{Emitter, Manager};
-
-    let overlay = app
-        .get_webview_window("screenshot-overlay")
-        .ok_or_else(|| "截图覆盖窗未创建（前端应先 ensureOverlayWindow）".to_string())?;
-
-    let (lw, lh, dpr) = logical_desktop(&app)?;
-    // 覆盖窗按「逻辑全屏」铺满，位置归零（前端创建时是离屏 -4000,-4000）
-    let _ = overlay.set_position(tauri::LogicalPosition::new(0.0, 0.0));
-    let _ = overlay.set_size(tauri::LogicalSize::new(lw, lh));
-    let _ = overlay.show();
-    let _ = overlay.set_focus();
-
-    let note_id = note_id_of(&app);
-    {
-        let st = app.state::<Mutex<ScreenshotData>>();
-        let mut s = st.lock().map_err(|e| format!("锁失败: {e}"))?;
-        s.showing = true;
-        s.capturing = true;
-        s.last_ox = 0.0;
-        s.last_oy = 0.0;
-        s.last_scale = dpr;
-        s.last_windows = Vec::new();
-        s.session = s.session.wrapping_add(1);
-    }
-    let _ = overlay.emit(
-        "screenshot-start",
-        serde_json::json!({
-            "ox": 0.0, "oy": 0.0, "scale": dpr, "windows": [], "noteId": note_id,
-        }),
-    );
-
-    // 后台抓图：portal 往返 + PNG 解码都很短，但不能占 async 线程（解码是同步 CPU 活）。
-    let app2 = app.clone();
-    std::thread::spawn(move || {
-        use tauri::{Emitter, Manager};
-        let res = tauri::async_runtime::block_on(super::portal_shot::capture_png(false));
-        let shot = match res {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[截图] portal 抓图失败: {e}");
-                if let Some(w) = app2.get_webview_window("screenshot-overlay") {
-                    let _ = w.emit("screenshot-error", serde_json::json!({ "message": e }));
-                }
-                {
-                    // 注意：`if let Ok(s) = st.lock()` 会让 MutexGuard 的临时值活到块尾，
-                    // 与 `st` 的析构顺序冲突（E0597）。必须先把 guard 绑成命名变量。
-                    let st = app2.state::<Mutex<ScreenshotData>>();
-                    let mut guard = match st.lock() {
-                        Ok(g) => g,
-                        Err(_) => return,
-                    };
-                    guard.capturing = false;
-                }
-                return;
-            }
-        };
-        // PNG → RGBA（后续裁剪/保存都用这份字节）
-        let img = match image::load_from_memory(&shot.png) {
-            Ok(i) => i.into_rgba8(),
-            Err(e) => {
-                eprintln!("[截图] PNG 解码失败: {e}");
-                return;
-            }
-        };
-        let (iw, ih) = (img.width(), img.height());
-        {
-            let mut slot = match SHOT.lock() {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            *slot = Some(Shot {
-                raw: img.into_raw(),
-                native_w: iw,
-                native_h: ih,
-                native_ox: 0,
-                native_oy: 0,
-            });
-        }
-        // 图是物理像素，覆盖层是逻辑像素 ⇒ 用实际比例回报，前端据此把选区换算成物理坐标
-        let scale = iw as f64 / lw.max(1.0);
-        {
-            let st = app2.state::<Mutex<ScreenshotData>>();
-            let mut guard = match st.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            guard.capturing = false;
-            guard.last_scale = scale;
-        }
-        let note_id = note_id_of(&app2);
-        if let Some(w) = app2.get_webview_window("screenshot-overlay") {
-            let _ = w.emit(
-                "screenshot-ready",
-                serde_json::json!({
-                    "ox": 0.0, "oy": 0.0, "scale": scale, "windows": [], "noteId": note_id,
-                }),
-            );
-        }
-    });
-
-    Ok(())
+    Err("截图功能仅在 Windows 上可用".into())
 }
 
 // ============================================================================
