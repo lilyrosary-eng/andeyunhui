@@ -16,10 +16,9 @@
 //   核对方法：`grep -n 'pub fn <名字>\|pub async fn <名字>' src/services/recording_service.rs`
 //
 // 能力边界（诚实说明，不要在这些函数里编造数据）：
-//   · 录屏：**已接入**（2026-10-28）。Wayland 走 xdg-desktop-portal `ScreenCast` +
-//     PipeWire + `gst-launch-1.0`（见 `pal/portal_screencast.rs`）。与 Windows 的差别：
-//     用户必须先在**系统对话框**里选录制来源（我们无法指定 monitor/region），输出为 WebM。
-//     暂停/恢复仍未实现（gst 侧要发事件，不是改状态位）。
+//   · 录屏：Linux 下**不提供**。不是「还没接」，而是捕获后端是 WGC（Windows 专属 API），
+//     等价方案在 Linux 上要么走 X11 的 XScreenSaver、要么走 Wayland 的 pipewire + 权限 portals，
+//     两者都不是 `windows-capture` 的调用方式，需另起一个后端实现。
 //   · 快捷键：Linux **可以**实现（global-shortcut crate 跨平台），此处返回默认值即可，
 //     因为录屏面板本身不存在，快捷键无意义。
 #![allow(dead_code)]
@@ -62,30 +61,21 @@ const UNSUPPORTED: &str = "录屏功能仅在 Windows 上可用（捕获后端�
 #[tauri::command]
 pub async fn start_recording(
     _app: AppHandle,
-    output_path: String,
-    fps: Option<u32>,
+    _output_path: String,
+    _fps: Option<u32>,
     _monitor_index: Option<usize>,
     _region_x: Option<i32>,
     _region_y: Option<i32>,
     _region_w: Option<i32>,
     _region_h: Option<i32>,
 ) -> Result<(), String> {
-    // Linux：走 portal ScreenCast（**会弹一次系统"共享屏幕"对话框**，用户在那里选
-    // 整个屏幕还是某个窗口），拿到 PipeWire 节点后由 gst 子进程写成 WebM。
-    //
-    // 与 Windows 的差别（诚实说明，不假装等价）：
-    // · `region_*` / `monitor_index` 在 Wayland 下**无法由我们指定** —— 只能让用户在
-    //   系统对话框里选来源。硬要裁区域可以在 gst 里加 videocrop，但"哪个区域"得用户先选；
-    // · 输出强制 .webm（本机 gstreamer 没有 x264enc ⇒ H.264/MP4 出不来）；
-    // · 没有自己的选区覆盖层（那套在 Wayland 上要重写，用户已明确不做）。
-    let _ = crate::portal_screencast::start(&output_path, fps.unwrap_or(30)).await?;
-    Ok(())
+    Err(UNSUPPORTED.into())
 }
 
 /// 对应 Windows 版：`pub async fn stop_recording(app: AppHandle) -> Result<String, String>`
 #[tauri::command]
 pub async fn stop_recording(_app: AppHandle) -> Result<String, String> {
-    crate::portal_screencast::stop().await
+    Err(UNSUPPORTED.into())
 }
 
 #[tauri::command]
@@ -101,16 +91,7 @@ pub fn resume_recording() -> Result<(), String> {
 /// 空闲状态：前端据此把录屏面板显示为「未在录制」，而不是报未知错误。
 #[tauri::command]
 pub fn get_recording_status() -> RecordingStatus {
-    let (rec, secs) = crate::portal_screencast::status();
-    if !rec {
-        return RecordingStatus::default();
-    }
-    RecordingStatus {
-        is_recording: true,
-        is_paused: false,
-        elapsed_secs: secs,
-        output_path: String::new(),
-    }
+    RecordingStatus::default()
 }
 
 #[tauri::command]

@@ -73,11 +73,6 @@ pub mod click_through;
 #[path = "pal/debug_flags.rs"]
 pub mod debug_flags;
 
-/// Linux 录屏后端（Wayland：xdg-desktop-portal ScreenCast + PipeWire + gstreamer）
-#[cfg(target_os = "linux")]
-#[path = "pal/portal_screencast.rs"]
-pub mod portal_screencast;
-
 /// Linux 截图后端（Wayland：xdg-desktop-portal Screenshot）
 #[cfg(target_os = "linux")]
 #[path = "pal/portal_shot.rs"]
