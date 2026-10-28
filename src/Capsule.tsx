@@ -725,7 +725,10 @@ export default function Capsule() {
     // 优先级必须与下方 h 的三元链一致：chatOpen 优先，其次 aide，再 sec。
     const aideActive = expanded && aideOpen && !chatOpen;
     const secActive = expanded && secOpen && !chatOpen && !aideOpen;
-    const w = (aideActive || secActive) ? AIDE_W : EXPANDED_W;
+    // 收起态窗口宽度必须跟着收（原来这里没有 !expanded 分支 ⇒ 窗口永远是 460 宽，
+    // 胶囊只有 240 宽居中，左右各 110px 透明带一直压在主窗顶部：
+    // 合成器实测「收起态 460×36」就是这么来的（2026-10-28）。
+    const w = !expanded ? CAPSULE_W : (aideActive || secActive) ? AIDE_W : EXPANDED_W;
     const h = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? AIDE_H : secOpen ? AIDE_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
     // [修复] 用 getCurrentWebviewWindow 取胶囊窗自身（见挂载 effect 注释）：
     // getCurrentWindow() 会误返回主窗；WebviewWindow.getByLabel 是 async 且胶囊内注册表无自身。
