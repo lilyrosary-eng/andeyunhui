@@ -73,6 +73,11 @@ pub mod click_through;
 #[path = "pal/debug_flags.rs"]
 pub mod debug_flags;
 
+/// Linux 截图后端（Wayland：xdg-desktop-portal Screenshot）
+#[cfg(target_os = "linux")]
+#[path = "pal/portal_shot.rs"]
+pub mod portal_shot;
+
 /// Linux 浮窗拖动通道（应用 → GNOME Shell 扩展的 D-Bus 调用）
 #[cfg(target_os = "linux")]
 #[path = "pal/overlay_drag.rs"]
