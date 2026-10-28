@@ -18,6 +18,7 @@
 // - 失败降级：任何 RAG 调用失败都静默降级为无语义记忆（不影响对话）。
 
 import { invoke } from '@tauri-apps/api/core';
+import { normalizeEmbeddingEndpoint } from '@/core/settings/embedUrl';
 import { useCompanionStore, buildPersonaContext, type Companion, type MemoryEntry } from './companionStore';
 import { isBrowserPreview } from './companionStore';
 import { storage } from '@/core/storage';
@@ -119,7 +120,12 @@ export function setEmbedConfig(c: EmbedConfig) {
 /** 解析嵌入配置：显式配置优先；否则自动复用当前算力来源（降门槛）。 */
 async function resolveEmbedConfig(): Promise<{ endpoint: string; apiKey: string; model: string } | null> {
   const explicit = getEmbedConfig();
-  if (explicit?.endpoint) return explicit;
+  // 用户可能只填了 `.../v1`（甚至只填域名）——这里统一补后缀。
+  // 不补的话 rag_embed_api 会 POST 到不存在的路径（404），而 404 只会表现成
+  // 「RAG 静默走关键词兜底」，用户根本看不出是配置问题（2026-10-28 用户提的）。
+  if (explicit?.endpoint) {
+    return { ...explicit, endpoint: normalizeEmbeddingEndpoint(explicit.endpoint) };
+  }
   // 自动复用：当前算力来源的 base_url + api_key（OpenAI 兼容 /v1/embeddings）
   try {
     const raw = await invoke<{ profiles?: AiProfile[]; active?: string | null }>('ai_get_profiles');
@@ -133,8 +139,7 @@ async function resolveEmbedConfig(): Promise<{ endpoint: string; apiKey: string;
     const active = embedLike ?? list.find((p) => p.id === raw?.active) ?? list[0];
     if (active && active.base_url) {
       // 兼容 base_url 是否已含 /v1：/v1/embeddings 或 /embeddings 都正确拼接
-      const base = active.base_url.replace(/\/+$/, '');
-      const endpoint = base.endsWith('/v1') || base.includes('/v1/') ? `${base}/embeddings` : `${base}/v1/embeddings`;
+      const endpoint = normalizeEmbeddingEndpoint(active.base_url);
       return {
         endpoint,
         apiKey: active.api_key ?? '',

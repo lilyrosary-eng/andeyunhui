@@ -104,7 +104,7 @@ export function ModelEditorDrawer(props: ModelEditorDrawerProps) {
                   {capacitySourceLabel(m.context_tokens, m.context_source, t)}
                 </span>
               </label>
-              <input className={inputCls} value={m.context_tokens} placeholder={t('modelSettings.contextAuto')}
+              <input className={inputCls} value={m.context_tokens} placeholder={`${t('modelSettings.contextAuto')} · 128k / 1m`}
                 onChange={(e) => set({
                   context_tokens: e.target.value,
                   // 手改即标 manual → 重扫永不覆盖；清空则撤标，让下次重扫能自动填
@@ -118,7 +118,7 @@ export function ModelEditorDrawer(props: ModelEditorDrawerProps) {
                   {capacitySourceLabel(m.max_output_tokens, m.max_output_source, t)}
                 </span>
               </label>
-              <input className={inputCls} value={m.max_output_tokens} placeholder={t('modelSettings.contextAuto')}
+              <input className={inputCls} value={m.max_output_tokens} placeholder={`${t('modelSettings.contextAuto')} · 8k`}
                 onChange={(e) => set({
                   max_output_tokens: e.target.value,
                   max_output_source: e.target.value.trim() ? 'manual' : '',

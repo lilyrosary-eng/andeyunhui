@@ -9,6 +9,7 @@ import { useCompanionStore } from '@/core/stores/companionStore';
 import { getEmbedConfig, setEmbedConfig, syncCompanionToSemantic, type EmbedConfig } from '@/core/stores/semanticMemory';
 import { getAiChatMemoryEnabled, setAiChatMemoryEnabled } from '@/core/ai/useAiChat';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
+import { normalizeEmbeddingEndpoint } from '@/core/settings/embedUrl';
 import { Section } from '@/components/bricks/Section';
 import { inputCls } from '@/components/bricks/formui';
 
@@ -64,7 +65,8 @@ export function AiChatMemorySettings() {
     try {
       const res = await invoke<{ embeddings: number[][]; dim?: number }>('rag_embed_api', {
         texts: ['hi'],
-        endpoint: cfg.endpoint?.trim() || null,
+        // 与真实请求同一条归一化规则（只填 .../v1 也能测通）
+        endpoint: cfg.endpoint?.trim() ? normalizeEmbeddingEndpoint(cfg.endpoint) : null,
         apiKey: cfg.apiKey || null,
         model: cfg.model?.trim() || null,
       });
@@ -151,12 +153,21 @@ export function AiChatMemorySettings() {
           ].join('\n')}
         />
         <label className="block">
-          <div className="mb-1 text-xs text-neutral-500 dark:text-stone-400">Endpoint（含 /embeddings）</div>
+          <div className="mb-1 text-xs text-neutral-500 dark:text-stone-400">
+            Endpoint
+            <span className="ml-1.5 text-[11px] text-neutral-400 dark:text-stone-500">
+              只填到 <code>/v1</code> 也行，失焦会自动补 <code>/embeddings</code>
+            </span>
+          </div>
           <input
             className={inputCls}
-            placeholder="https://api.openai.com/v1/embeddings"
+            placeholder="https://api.openai.com/v1"
             value={cfg.endpoint}
             onChange={(e) => setCfg({ ...cfg, endpoint: e.target.value })}
+            onBlur={(e) => {
+              const fixed = normalizeEmbeddingEndpoint(e.target.value);
+              if (fixed !== e.target.value) setCfg({ ...cfg, endpoint: fixed });
+            }}
           />
         </label>
         <label className="block">

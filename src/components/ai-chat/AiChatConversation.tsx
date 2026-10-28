@@ -1,6 +1,7 @@
 // 独立「AI 对话」模块 · 主区对话流 —— 大屏 UI，受控于上层共享的 useAiChat 实例。
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
 import { memo, useEffect, useState, useRef, useLayoutEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Send, Sparkles, Brain, ChevronDown, ChevronRight, ChevronLeft, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown, Volume2, VolumeX } from 'lucide-react';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
@@ -452,7 +453,11 @@ export const AiChatConversation = memo(function AiChatConversation({
     const text = input.trim();
     if ((!text && picked.length === 0) || busy) return;
     // 图片单独走 images（发送时 OCR 注入）；非图片走 attachments（文本注入/文件陈列）
-    const images = picked.filter((p) => p.kind === 'image').map((p) => p.dataUrl || '');
+    // 丢掉空 dataUrl：曾经会得到一个 `['']`，m.images 长度 >0 但 <img src=""> 什么也不显示
+    const images = picked
+      .filter((p) => p.kind === 'image')
+      .map((p) => p.dataUrl)
+      .filter((u): u is string => !!u);
     const attachments: SendAttachment[] = picked
       .filter((p) => p.kind !== 'image')
       .map(({ kind, name, mime, size, text }) => ({ kind, name, mime, size, text }));
@@ -470,16 +475,60 @@ export const AiChatConversation = memo(function AiChatConversation({
     });
   };
 
-  // 解析一批 File 进附件列表：图片(限 3 张)转 dataUrl、文本(限大小)读内容、其它仅陈列
+  /** 视觉模型的经济尺寸上限：超过这个长边，服务端一般也会自己再缩一遍，白烧上传流量。 */
+const MAX_IMG_SIDE = 1568;
+/** 小于这个体积的原图直接沿用，不做重编码（避免无谓的画质损失）。 */
+const IMG_KEEP_BYTES = 400 * 1024;
+
+/**
+ * File → 可用于气泡展示 + OCR 的 dataUrl。
+ *
+ * 为什么要缩放：截图/照片动辄 4K，PNG data URL 会到 5~10MB：
+ *   · 整个会话是存 localStorage 的，一张大图就能把配额顶爆（写入失败 ⇒ 历史丢失）；
+ *   · 发去做 OCR 的 payload 也是这份 base64，越大越慢。
+ * 1568px 长边 + JPEG 0.92 对截图文字仍然清晰，体积通常降到原来的 1/5~1/10。
+ */
+async function fileToChatDataUrl(f: File): Promise<string> {
+  const raw = await new Promise<string>((resolve) => {
+    const r = new FileReader();
+    r.onload = () => resolve(typeof r.result === 'string' ? r.result : '');
+    r.onerror = () => resolve('');
+    r.readAsDataURL(f);
+  });
+  if (!raw || f.size <= IMG_KEEP_BYTES) return raw;
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = reject;
+      el.src = raw;
+    });
+    const scale = Math.min(1, MAX_IMG_SIDE / Math.max(img.width, img.height));
+    if (!(scale < 1)) return raw;
+    const cw = Math.max(1, Math.round(img.width * scale));
+    const ch = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return raw;
+    // JPEG 没有 alpha：先铺白底，否则透明区域会变黑（截图边缘常见）
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.drawImage(img, 0, 0, cw, ch);
+    return canvas.toDataURL('image/jpeg', 0.92);
+  } catch {
+    return raw;
+  }
+}
+
+// 解析一批 File 进附件列表：图片(限 3 张)转 dataUrl、文本(限大小)读内容、其它仅陈列
   const intoPicked = (files: File[]) => {
     for (const f of files) {
       if (f.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const url = typeof reader.result === 'string' ? reader.result : '';
+        void fileToChatDataUrl(f).then((url) => {
           if (url) addPicked({ kind: 'image', name: f.name, mime: f.type, size: f.size, dataUrl: url });
-        };
-        reader.readAsDataURL(f);
+        });
       } else if (isTextLike(f) && (f.size ?? 0) <= MAX_TEXT_BYTES) {
         const reader = new FileReader();
         reader.onload = () => {
@@ -501,6 +550,38 @@ export const AiChatConversation = memo(function AiChatConversation({
     const items = Array.from(cd.items || []);
     const imgItem = items.find((i) => i.kind === 'file' && i.type && i.type.startsWith('image/'));
     const files = Array.from(cd.files || []);
+    // Linux/WebKitGTK 的常见情况：剪贴板里是 `text/uri-list`（file:// 路径）而**没有** File 对象，
+    // 于是旧逻辑走默认粘贴 ⇒ 输入框里出现一串路径、图片根本不进附件（用户看到"只有文字"）。
+    if (!imgItem && files.length === 0) {
+      const uriList = (cd.getData && cd.getData('text/uri-list')) || '';
+      const paths = uriList
+        .split(/\r?\n/)
+        .map((x) => x.trim())
+        .filter((x) => x.startsWith('file://'))
+        .map((x) => decodeURIComponent(x.replace('file://', '')));
+      if (paths.length) {
+        e.preventDefault();
+        void (async () => {
+          for (const filePath of paths) {
+            try {
+              const dataUrl = await invoke<string>('read_file_base64', { filePath });
+              const mime = dataUrl.startsWith('data:') ? dataUrl.slice(5, dataUrl.indexOf(';')) : '';
+              if (mime.startsWith('image/')) {
+                addPicked({
+                  kind: 'image',
+                  name: filePath.split('/').pop() || 'image',
+                  mime,
+                  dataUrl,
+                });
+              }
+            } catch {
+              /* 读不到就忽略这一条，不打断粘贴 */
+            }
+          }
+        })();
+        return;
+      }
+    }
     // 有图片或文件时阻止默认（避免把图片/文件二进制文本塞进输入框）
     if (imgItem || files.length) {
       e.preventDefault();
@@ -546,7 +627,19 @@ export const AiChatConversation = memo(function AiChatConversation({
     : 'bg-neutral-800 dark:bg-stone-200 text-white dark:text-stone-900 hover:opacity-90';
 
   return (
-    <div className={shellClass}>
+    <div
+      className={shellClass}
+      onDragOver={(e) => {
+        // 只在拖文件时接管：拖文本进来仍交给浏览器默认行为
+        if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
+      }}
+      onDrop={(e) => {
+        const dropped = Array.from(e.dataTransfer?.files ?? []);
+        if (!dropped.length) return;
+        e.preventDefault();
+        intoPicked(dropped);
+      }}
+    >
       {/* 后端安全截断提示：messages 过长被自动裁剪时短暂显示 */}
       {truncateWarn && (
         <div className="flex items-center gap-2 px-6 py-2 text-[12px] bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-b border-amber-200 dark:border-amber-800/50 flex-shrink-0">

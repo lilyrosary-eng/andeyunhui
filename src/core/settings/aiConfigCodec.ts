@@ -167,6 +167,24 @@ function capsFrom(raw: any): CapsUi {
 }
 
 /** 数值字段 → 输入框字符串（空/无效 → ''）。 */
+/** 解析 token 数量：支持 131072 / "128k" / "1m" / "1.5m" / "128_000" / "128,000"。
+ *
+ * 为什么加：这几个框原先只吃纯数字（`Number('128k')` = NaN ⇒ null ⇒ 被当成"未填"），
+ * 而模型上下文动辄 128k/1m，逼用户数零既容易错、也看不出自己填错了
+ * （NULL 会静默退回"自动探测"）。2026-10-28 用户提出。
+ */
+const parseTokenCount = (v: unknown): number | null => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const raw = String(v ?? '').trim().toLowerCase().replace(/[_,\s]/g, '');
+  if (!raw) return null;
+  const m = raw.match(/^(\d+(?:\.\d+)?)([kmg]?)$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return null;
+  const mult = m[2] === 'k' ? 1000 : m[2] === 'm' ? 1_000_000 : m[2] === 'g' ? 1_000_000_000 : 1;
+  return Math.trunc(n * mult);
+};
+
 const numStr = (v: unknown): string => {
   const n = numOrNull(v);
   return n === null ? '' : String(n);
@@ -274,10 +292,10 @@ export function fromConfig(payload: any): ConfigUi {
 
 function toModel(m: ModelUi) {
   const t = numOrNull(m.temperature);
-  const mt = numOrNull(m.max_tokens);
+  const mt = parseTokenCount(m.max_tokens);
   const tp = numOrNull(m.top_p);
-  const ctx = numOrNull(m.context_tokens);
-  const mot = numOrNull(m.max_output_tokens);
+  const ctx = parseTokenCount(m.context_tokens);
+  const mot = parseTokenCount(m.max_output_tokens);
   return {
     id: m.id,
     model: m.model,
