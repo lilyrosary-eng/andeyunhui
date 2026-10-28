@@ -53,6 +53,17 @@ pub async fn start(path: &str, fps: u32) -> Result<String, String> {
     if let Some(dir) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
     }
+    // ★ shell 会**再补一次**扩展名：传 `x.mp4` 得到 `x.mp4.mp4`（实测）。
+    //   所以传之前把已知的视频扩展名剥掉，让它自己加。
+    let stem = {
+        let p = std::path::Path::new(path);
+        match p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()) {
+            Some(ext) if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov" | "avi") => {
+                p.with_extension("").to_string_lossy().to_string()
+            }
+            _ => path.to_string(),
+        }
+    };
 
     let conn = zbus::Connection::session()
         .await
@@ -64,7 +75,7 @@ pub async fn start(path: &str, fps: u32) -> Result<String, String> {
     opts.insert("draw-cursor", Value::from(true));
 
     let reply = conn
-        .call_method(Some(DEST), PATH, Some(IFACE), "Screencast", &(path, opts))
+        .call_method(Some(DEST), PATH, Some(IFACE), "Screencast", &(stem.as_str(), opts))
         .await
         .map_err(|e| format!("调用系统录屏失败: {e}"))?;
 
