@@ -740,7 +740,14 @@ pub async fn overlay_window_get_or_create(
     let shadow = p.shadow.unwrap_or(false);
     let skip_taskbar = p.skip_taskbar.unwrap_or(false);
     let always_on_top = p.always_on_top.unwrap_or(true);
-    let resizable = p.resizable.unwrap_or(false);
+    let resizable = if cfg!(target_os = "linux") && label == "capsule" {
+        // 浮岛必须能自由改尺寸：GTK 对**不可缩放**的窗口会把 min=max 塞进 geometry hints，
+        // 合成器于是拒绝任何 resize（实测 setSize(240,36) 恒被顶回 460×200）。
+        // 这个窗无边框 + skip_taskbar，用户不会去拖它的边，risk 可忽略。
+        true
+    } else {
+        p.resizable.unwrap_or(false)
+    };
     // 中转站浮窗 / 剪贴板浮窗必须关闭原生拖放，改由前端 HTML5 dragover/drop 处理：
     // 否则原生拖放 handler 会拦截 DOM 拖放事件，导致文件拖入浮窗无法导入/同步主站，
     // 且“拖拽悬停 OCR 按钮自动进入 OCR 页”也不会触发（DOM 收不到 dragenter/dragover）。
@@ -753,8 +760,19 @@ pub async fn overlay_window_get_or_create(
     let hidden = p.hidden.unwrap_or(false);
     let x = p.x.unwrap_or(-4000.0);
     let y = p.y.unwrap_or(-4000.0);
-    let inner_w = p.width.unwrap_or(480.0);
-    let inner_h = p.height.unwrap_or(400.0);
+    // 浮岛：**建窗时就用收起态尺寸**，别先建 480×400 再缩。
+    // 实测（0.18）：合成器允许 532×452 → 460×200 的收缩，却缩不到 240×36 ——
+    // 初始尺寸会变成事实上的下限。所以把初值直接给成胶囊尺寸（前端 constants.tsx 的
+    // CAPSULE_W / CAPSULE_H），之后"长大"到 460×340 是没问题的（增长不受限）。
+    let (inner_w, inner_h) = if cfg!(target_os = "linux")
+        && label == "capsule"
+        && p.width.is_none()
+        && p.height.is_none()
+    {
+        (240.0, 36.0)
+    } else {
+        (p.width.unwrap_or(480.0), p.height.unwrap_or(400.0))
+    };
     let min_w = p.min_width;
     let min_h = p.min_height;
 

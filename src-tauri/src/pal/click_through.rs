@@ -211,6 +211,11 @@ pub fn relax_min_size(app: &AppHandle, label: &str) -> Result<String, String> {
         }
     }
 
+    // 同时用 Tauri 的公开 API 把**合成器侧的** min 提示也清掉：tao 对不可缩放窗口会写
+    // min=max 的 geometry hints，只压 GTK 的 size request 不够（两层约束都要清）。
+    let _ = win.set_min_size(Some(tauri::LogicalSize::new(1.0, 1.0)));
+    let _ = win.set_max_size(None::<tauri::LogicalSize<f64>>);
+
     let mut info = format!("[gtk-min] {label} 尺寸下限已解除：");
     relax(&gtk_win, 0, &mut info);
     if let Some(gdk_win) = gtk_win.window() {

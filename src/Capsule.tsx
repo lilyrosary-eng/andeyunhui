@@ -660,6 +660,10 @@ export default function Capsule() {
         try {
           await win.setSize(new LogicalSize(CAPSULE_W, CAPSULE_H));
           await reportRect(CAPSULE_W, CAPSULE_H);
+          // 诊断：setSize 之后窗口"真实"是多少（Tauri 读回来的值）。
+          // 460×200 这类"顶回"只有在这里才看得出来 —— 日志里 type=inner 的那行就是。
+          const isz = await win.innerSize();
+          console.log(`[capsule] setSize(${CAPSULE_W}x${CAPSULE_H}) 后 innerSize=${isz.width}x${isz.height}`);
         } catch {
           /* 忽略：尺寸会在下次展开/收起时再同步 */
         }
