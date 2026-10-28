@@ -373,7 +373,8 @@ export default function Capsule() {
       if (cancelled) return;
       if (expanded) {
         // 展开态：整窗可交互（面板按钮要能点）
-        invoke('overlay_set_input_rect', { label: lw.label, x: 0, y: 0, w: 0, h: 0 }).catch(() => {});
+        // 展开态：给一个远大于窗口的矩形 = 整窗可交互（不传 0，避免受 Rust 分支实现影响）
+        invoke('overlay_set_input_rect', { label: lw.label, x: 0, y: 0, w: 8192, h: 8192 }).catch(() => {});
         return;
       }
       const el = pillRef.current;

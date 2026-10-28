@@ -131,11 +131,10 @@ pub fn forget(label: &str) {
 #[cfg(target_os = "linux")]
 fn apply_input_rect(win: &gdk::Window, x: i32, y: i32, w: i32, h: i32) {
     // 注意：gdk 的签名只接受 `&Region`（没有 Option 版本）。"整窗可交互"用
-    // **全窗口矩形**表达，而不是传 None —— 传空 region 会变成"整窗都不接受输入"。
+    // **超大矩形**表达，不要用 geometry()（GDK3 文档明说 Wayland 下不可靠，
+    // 可能返回 0×0 ⇒ 整窗都不接受输入），也不要传空 region（同样导致点不到）。
     let region = if w <= 0 || h <= 0 {
-        // GdkWindow 没有 size()；用几何信息（含边框）取整窗尺寸。
-        let (_gx, _gy, gw, gh) = win.geometry();
-        cairo::Region::create_rectangle(&cairo::RectangleInt::new(0, 0, gw, gh))
+        cairo::Region::create_rectangle(&cairo::RectangleInt::new(0, 0, 32767, 32767))
     } else {
         cairo::Region::create_rectangle(&cairo::RectangleInt::new(x, y, w, h))
     };
