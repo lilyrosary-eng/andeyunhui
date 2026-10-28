@@ -12,7 +12,10 @@ import { useAppStore } from '@/stores/appStore';
 import { useCapsuleStore } from '@/stores/capsuleStore';
 import { isLinux } from '@/platform/isLinux';
 
-type Flags = { hitProbe?: boolean; fpsProbe?: boolean };
+// 注意：Rust 侧 DebugFlags 是**没有** rename_all 的结构体，serde 输出的 JSON 是 snake_case
+// （`hit_probe` / `fps_probe`）。这里必须按 snake_case 读，否则永远是 undefined ⇒ 探针不启动
+// （2026-10-28 血案：我写了 camelCase，探针一次都没跑过）。
+type Flags = { hit_probe?: boolean; fps_probe?: boolean };
 
 const log = (msg: string) => {
   void invoke('debug_log', { msg }).catch(() => {});
@@ -89,7 +92,7 @@ export function LinuxProbes() {
       .then((f) => setFlags(f ?? null))
       .catch(() => setFlags(null));
   }, []);
-  useHitProbe(!!flags?.hitProbe);
-  useFpsProbe(!!flags?.fpsProbe);
+  useHitProbe(!!flags?.hit_probe);
+  useFpsProbe(!!flags?.fps_probe);
   return null;
 }
