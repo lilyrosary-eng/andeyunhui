@@ -119,24 +119,58 @@ pub fn forget(label: &str) {
     if let Ok(mut m) = desired().lock() {
         m.remove(label);
     }
+    if let Ok(mut m) = desired_rects().lock() {
+        m.remove(label);
+    }
 }
 
-/// 把窗口的**输入区域**限制成给定矩形（逻辑像素，窗口坐标）。
+/// label → 期望的输入区域（**逻辑**像素，窗口坐标）。
+#[cfg(target_os = "linux")]
+fn desired_rects() -> &'static Mutex<HashMap<String, (i32, i32, i32, i32)>> {
+    static D: OnceLock<Mutex<HashMap<String, (i32, i32, i32, i32)>>> = OnceLock::new();
+    D.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(target_os = "linux")]
+fn rect_enforcer_started() -> &'static Mutex<bool> {
+    static S: OnceLock<Mutex<bool>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(false))
+}
+
+#[cfg(target_os = "linux")]
+fn rect_dumped() -> &'static Mutex<std::collections::HashSet<String>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 把窗口的**输入区域**限制成给定矩形（**逻辑像素**，窗口坐标）。
 /// `w <= 0 || h <= 0` 表示恢复整窗可交互。
 ///
-/// 为什么需要它：浮岛窗在 Wayland 上不总是能缩到胶囊大小（实测稳定停在 460×200），
-/// 而整窗穿透又会把胶囊本身也变成点不到。于是"透明边距挡点击"只有一个解：
+/// 为什么需要它：浮岛窗在 Wayland 上缩不到胶囊大小（实测停在 460×200 逻辑像素），
+/// 而整窗穿透又会把胶囊本身变成点不到。于是"透明边距挡点击"只有一个解：
 /// 让**输入区域**等于可见胶囊的矩形，矩形外一律不吃事件。
-/// 矩形由前端用 `getBoundingClientRect()` 实测传入，不靠任何尺寸假设。
+/// 矩形由前端用 `getBoundingClientRect()` 实测传入（CSS/逻辑像素），设备像素换算在这里做。
+///
+/// # ★ 单位（2026-10-28 血案）
+/// GDK 的 `GdkWindow` 坐标是**设备像素**，而 `getBoundingClientRect()` 是 CSS/逻辑像素。
+/// 这台机器 3840×2160 @ 缩放 2.0，直接拿逻辑矩形去设区域，等于只裁到胶囊左上角的
+/// 1/4 大小 ⇒ 胶囊右半边和下方 164px 的透明区照样吃点击（用户实测"还是点不到"）。
+/// ⇒ **必须乘 scale_factor**。调用方只传逻辑像素，别在 JS 里乘。
 #[cfg(target_os = "linux")]
 fn apply_input_rect(win: &gdk::Window, x: i32, y: i32, w: i32, h: i32) {
+    let sf = win.scale_factor().max(1);
     // 注意：gdk 的签名只接受 `&Region`（没有 Option 版本）。"整窗可交互"用
     // **超大矩形**表达，不要用 geometry()（GDK3 文档明说 Wayland 下不可靠，
     // 可能返回 0×0 ⇒ 整窗都不接受输入），也不要传空 region（同样导致点不到）。
     let region = if w <= 0 || h <= 0 {
         cairo::Region::create_rectangle(&cairo::RectangleInt::new(0, 0, 32767, 32767))
     } else {
-        cairo::Region::create_rectangle(&cairo::RectangleInt::new(x, y, w, h))
+        cairo::Region::create_rectangle(&cairo::RectangleInt::new(
+            x * sf,
+            y * sf,
+            w * sf,
+            h * sf,
+        ))
     };
     win.input_shape_combine_region(&region, 0, 0);
     for child in win.children() {
@@ -144,22 +178,152 @@ fn apply_input_rect(win: &gdk::Window, x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-/// 设置输入区域（仅 Linux）。见 [`apply_input_rect`]。
+/// 解除 GTK 的**尺寸下限**，让浮岛窗能真正缩到胶囊大小。
+///
+/// # 为什么窗口一直停在 460×200
+/// GTK3 官方文档（`gtk_window_resize`）：*"windows may not be smaller than their
+/// size request; to override this constraint, call gtk_widget_set_size_request()"*。
+/// 而 tao 的 `min_inner_size` 走的是 `gdk` 的 geometry hints（合成器侧），**不会**降低
+/// GTK 内部的 size request ⇒ `setSize(240,36)` 被顶回来，透明区永远是 460×200。
+/// 这带来两个后果：① 透明区挡点击；② GNOME 扩展按窗口矩形判悬停 ⇒ 触发范围过大。
+///
+/// 这里把窗口与整条子控件链的 size request 设成 1×1（只是**下限**，控件仍会被拉伸填满），
+/// 之后 `setSize` 才真正生效。返回一条诊断串供日志留痕。
+#[cfg(target_os = "linux")]
+pub fn relax_min_size(app: &AppHandle, label: &str) -> Result<String, String> {
+    use gtk::prelude::*;
+
+    let win = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("找不到窗口 {label}"))?;
+    let gtk_win = win.gtk_window().map_err(|e| format!("取 GTK 窗口失败: {e}"))?;
+
+    fn relax<W: IsA<gtk::Widget>>(w: &W, depth: usize, out: &mut String) {
+        if depth > 4 {
+            return;
+        }
+        let (rw, rh) = w.size_request();
+        let (mw, mh) = w.preferred_width();
+        out.push_str(&format!(
+            "\n{}[{} req={rw}x{rh} min={mw}x{mh}]",
+            "  ".repeat(depth),
+            w.type_().name()
+        ));
+        w.set_size_request(1, 1);
+        if let Some(c) = w.dynamic_cast_ref::<gtk::Container>() {
+            for ch in c.children() {
+                relax(&ch, depth + 1, out);
+            }
+        }
+    }
+
+    let mut info = format!("[gtk-min] {label} 尺寸下限已解除：");
+    relax(&gtk_win, 0, &mut info);
+    if let Some(gdk_win) = gtk_win.window() {
+        info.push_str(&format!(
+            "\n[gtk-min] gdk 当前={}x{} sf={}",
+            gdk_win.width(),
+            gdk_win.height(),
+            gdk_win.scale_factor()
+        ));
+    }
+    Ok(info)
+}
+#[cfg(target_os = "linux")]
+fn apply_rect_now(app: &AppHandle, label: &str, rect: (i32, i32, i32, i32)) {
+    use gtk::prelude::*;
+
+    let Some(win) = app.get_webview_window(label) else {
+        return;
+    };
+    let Ok(gtk_win) = win.gtk_window() else { return };
+    let Some(gdk_win) = gtk_win.window() else { return };
+    if !gdk_win.display().supports_input_shapes() {
+        return;
+    }
+    apply_input_rect(&gdk_win, rect.0, rect.1, rect.2, rect.3);
+
+    // 一次性诊断：把 GTK 的尺寸请求链打出来，回答"窗口为什么缩不到 240×36"。
+    // `gtk_window_resize` 的官方文档明说**不能小于 size request**；这里把 window / 子控件的
+    // request 与 preferred(min,natural) 都记下来，下一次就不用再猜。
+    let should_dump = rect_dumped()
+        .lock()
+        .map(|mut s| s.insert(label.to_string()))
+        .unwrap_or(false);
+    if should_dump {
+        let (rw, rh) = gtk_win.size_request();
+        let (minw, natw) = gtk_win.preferred_width();
+        let (minh, nath) = gtk_win.preferred_height();
+        let (sw, sh) = gtk_win.size();
+        let (gw, gh) = (gdk_win.width(), gdk_win.height());
+        let sf = gdk_win.scale_factor();
+        eprintln!(
+            "[gtk-size] {label} gdk={gw}x{gh} gtk_size={sw}x{sh} size_request={rw}x{rh} \
+             preferred_min={minw}x{minh} preferred_nat={natw}x{nath} sf={sf}"
+        );
+        // 子控件（WebKit 的 webview 就在里面）的 request 可能才是真正的下限。
+        if let Some(child) = gtk_win.child() {
+            let (crw, crh) = child.size_request();
+            let (cminw, cnatw) = child.preferred_width();
+            let (cminh, cnath) = child.preferred_height();
+            eprintln!(
+                "[gtk-size] {label} child={} size_request={crw}x{crh} \
+                 preferred_min={cminw}x{cminh} preferred_nat={cnatw}x{cnath}",
+                child.type_().name()
+            );
+        }
+    }
+}
+
+/// 每秒重放一次所有已保存的输入区域。
+///
+#[cfg(target_os = "linux")]
+/// 和整窗穿透同理：WebKit 的渲染用子 GdkWindow，resize/重绘时会销毁重建，
+/// 新建出来的默认是**整窗吃事件** ⇒ 只设一次的话，过一会儿透明区又开始挡点击。
+fn ensure_rect_enforcer(app: &AppHandle) {
+    let mut started = match rect_enforcer_started().lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if *started {
+        return;
+    }
+    *started = true;
+    drop(started);
+
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let snapshot: Vec<(String, (i32, i32, i32, i32))> = match desired_rects().lock() {
+            Ok(m) => m.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            Err(_) => continue,
+        };
+        if snapshot.is_empty() {
+            continue;
+        }
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            for (l, r) in snapshot {
+                apply_rect_now(&app2, &l, r);
+            }
+        });
+    });
+}
+
+/// 设置输入区域（仅 Linux）。入参是**逻辑像素**（见 [`apply_input_rect`] 的单位说明）。
 pub fn set_input_rect(app: &AppHandle, label: &str, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        use gtk::prelude::*;
-        let win = app
-            .get_webview_window(label)
-            .ok_or_else(|| format!("找不到窗口 {label}"))?;
-        let gtk_win = win.gtk_window().map_err(|e| format!("取 GTK 窗口失败: {e}"))?;
-        let gdk_win = gtk_win
-            .window()
-            .ok_or_else(|| "GdkWindow 尚未创建".to_string())?;
-        if !gdk_win.display().supports_input_shapes() {
-            return Err("当前后端不支持 input shapes".to_string());
+        if let Ok(mut m) = desired_rects().lock() {
+            m.insert(label.to_string(), (x, y, w, h));
         }
-        apply_input_rect(&gdk_win, x, y, w, h);
+        // 立即应用一次，然后交给重放线程维持（子 GdkWindow 重建后会被重新裁平）。
+        let app2 = app.clone();
+        let label2 = label.to_string();
+        let _ = app.run_on_main_thread(move || {
+            apply_rect_now(&app2, &label2, (x, y, w, h));
+        });
+        ensure_rect_enforcer(app);
         // 只在矩形变化时打日志（每次展开都会调用，避免刷屏）
         {
             static LAST: OnceLock<Mutex<(i32, i32, i32, i32)>> = OnceLock::new();
@@ -167,7 +331,7 @@ pub fn set_input_rect(app: &AppHandle, label: &str, x: i32, y: i32, w: i32, h: i
             if let Ok(mut last) = holder.lock() {
                 if *last != (x, y, w, h) {
                     *last = (x, y, w, h);
-                    eprintln!("[input-region] {label} = ({x},{y},{w},{h})");
+                    eprintln!("[input-region] {label} = ({x},{y},{w},{h}) 逻辑像素");
                 }
             }
         }

@@ -599,6 +599,22 @@ pub fn overlay_set_input_rect(
     }
 }
 
+/// 解除浮岛窗的 GTK 尺寸下限（仅 Linux）。见 `click_through::relax_min_size`。
+///
+/// 必须在主线程做（GTK 不是线程安全的）；与 `overlay_set_input_rect` 同一条同步命令路径。
+#[tauri::command]
+pub fn overlay_relax_min_size(app: tauri::AppHandle, label: String) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return crate::click_through::relax_min_size(&app, &label);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (&app, label);
+        Ok(String::new())
+    }
+}
+
 /// 整窗点击穿透开关。Linux 走 GdkWindow::set_pass_through（Wayland 下 tao 的旧接口无效）。
 #[tauri::command]
 pub fn overlay_set_click_through(app: tauri::AppHandle, label: String, ignore: bool) -> Result<(), String> {

@@ -392,11 +392,23 @@ export default function Capsule() {
     const id = requestAnimationFrame(apply);
     const t1 = window.setTimeout(apply, 320);
     const t2 = window.setTimeout(apply, 800);
+    // 之后**持续跟随**：窗口被 setSize 改变后 viewport 宽度变了、胶囊会重新居中，
+    // 矩形必须跟着改，否则输入区域会停在旧坐标（旧版只补两次，之后永远不同步）。
+    // ResizeObserver 盯胶囊本体，window resize 盯 viewport（setSize 生效时触发）。
+    let ro: ResizeObserver | null = null;
+    const el = pillRef.current;
+    if (el && typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => apply());
+      ro.observe(el);
+    }
+    window.addEventListener('resize', apply);
     return () => {
       cancelled = true;
       cancelAnimationFrame(id);
       window.clearTimeout(t1);
       window.clearTimeout(t2);
+      ro?.disconnect();
+      window.removeEventListener('resize', apply);
     };
   }, [expanded]);
 
@@ -631,6 +643,17 @@ export default function Capsule() {
         await invoke('capsule_start_monitor');
       } catch {
         /* 忽略 */
+      }
+      if (isLinux()) {
+        // GTK 的 gtk_window_resize **不能小于 size request**（官方文档明说），
+        // 所以 setSize(240,36) 一直被顶回 460×200：透明区挡点击、扩展按窗口矩形判悬停
+        // ⇒ 触发范围过大。这里先把窗口与子控件链的 request 压到 1×1，setSize 才真正生效。
+        try {
+          const info = await invoke<string>('overlay_relax_min_size', { label: win.label });
+          if (info) console.log('[capsule] 尺寸下限已解除:', info);
+        } catch (e) {
+          console.warn('[capsule] 解除尺寸下限失败（窗口可能仍缩不下去）:', e);
+        }
       }
       await reportRect(CAPSULE_W, CAPSULE_H);
     })();
