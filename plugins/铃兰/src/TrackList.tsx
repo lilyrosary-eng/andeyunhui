@@ -3,6 +3,7 @@ import React from "react";
 // 歌曲列表 — 二级导航：详细歌曲列表
 const { useState, useEffect, useCallback, useRef } = React;
 const hostApi = window.__HOST_API__;
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { musicPlayer } from './musicPlayer';
 import { formatTime } from '../../_shared/utils';
 import { PlusIcon, CheckIcon, MoreIcon, MusicIcon, HeartIcon, CloudIcon, VideoIcon } from '../../_shared/icons';
@@ -128,6 +129,8 @@ export function TrackList({
   const [menuPos, setMenuPos] = useState<{ top: number; right?: number; left?: number } | null>(null);
   // 保存每个「...」按钮的 ref，用于定位
   const moreBtnRefs = useRef<Map<number, HTMLButtonElement | null>>(new Map());
+  // 歌曲列表滚动容器：真·虚拟化要用它算可视区间。
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   // 自定义「编辑曲目信息」弹窗状态
@@ -174,7 +177,7 @@ export function TrackList({
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+  return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [openMenuIndex]);
 
   // 滚动/窗口大小变化时关闭菜单（fixed 定位需要重新计算）
@@ -604,6 +607,18 @@ export function TrackList({
   // 当前打开的菜单对应的 track（供 JSX 末尾渲染使用）
   const openTrack = openMenuIndex !== null ? tracks[openMenuIndex] : null;
 
+  // 真·虚拟化：原先只有 CSS `content-visibility`（行内注释"大歌单渲染减负"），
+  // 但 DOM 仍是 947 行 + 945 个 <img>，且该属性在 WebKitGTK 上的收益远小于 Chromium。
+  // 实测：单个 Web 进程在首次打开音乐模块时冲到 4.2GB → glibc 报
+  // `corrupted double-linked list` 而崩（2026-10-28）。改为只渲染可视区 ± overscan。
+  // 行高 52px 是固定值（py-2 + 两行文本/32px 封面，见行内样式），无需逐行测量。
+  const virtualizer = useVirtualizer({
+    count: tracks.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 52,
+    overscan: 10,
+  });
+
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden immersive-safe-top">
       <div className="flex items-center justify-between p-4 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-sm">
@@ -721,15 +736,18 @@ export function TrackList({
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto" ref={scrollRef}>
         {tracks.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-neutral-400 dark:text-stone-500">
             <MusicIcon />
             <p className="text-sm">{T('music.track.empty')}</p>
           </div>
         ) : (
-          <div className="divide-y divide-neutral-200/20 dark:divide-stone-700/20">
-            {tracks.map((track, index) => {
+          <div style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative', width: '100%' }}>
+            {virtualizer.getVirtualItems().map((vRow) => {
+              const index = vRow.index;
+              const track = tracks[index];
+              if (!track) return null;
               const isSelected = selectedIndices.has(index);
               const isCurrent = currentTrack?.filePath === track.filePath;
               const coverIsRemote = !!track.coverPath && /^https?:\/\//i.test(track.coverPath);
@@ -742,15 +760,22 @@ export function TrackList({
                 key: track.id,
                 onClick: (e: React.MouseEvent) => handleTrackClick(track, index, e),
                 onContextMenu: (e: React.MouseEvent) => handleRowContextMenu(index, e),
-                className: `flex items-center gap-3 px-3 py-2 mx-1 cursor-pointer transition-colors rounded-lg relative ${
+                className: `flex items-center gap-3 px-3 py-2 mx-1 cursor-pointer transition-colors rounded-lg relative border-b border-neutral-200/20 dark:border-stone-700/20 ${
                   isCurrent
                     ? 'bg-[var(--element-muted)]'
                     : isSelected
                       ? 'bg-black/5 dark:bg-white/5'
                       : 'hover:bg-[var(--element-muted)]'
                 }`,
-                // 大歌单（数百行）渲染减负：视口外的行跳过渲染布局，估计行高 ~52px
-                style: { contentVisibility: 'auto', containIntrinsicSize: 'auto 52px' },
+                // 虚拟化：按 virtualizer 算出的位置绝对定位（不再是 contentVisibility）。
+                style: {
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  height: `${vRow.size}px`,
+                  transform: `translateY(${vRow.start}px)`,
+                },
                 children: [
                   // 复选框：仅在选择模式下显示
                   selectionMode
