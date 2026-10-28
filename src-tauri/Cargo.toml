@@ -304,6 +304,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # gdk_window_set_pass_through（GTK3 官方为"整窗穿透"提供的专用 API）
 gtk = "0.18"
 gdk = "0.18"
+cairo-rs = "0.18"
 # souvlaki 仅保留给非 Linux 平台（macOS 后端）使用
 souvlaki = "0.8"
 x11 = { version = "2.21.0", features = ["xlib", "xinerama"] }

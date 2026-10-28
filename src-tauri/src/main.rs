@@ -44,6 +44,7 @@ use andeyunhui_lib::device;
 use andeyunhui_lib::transfer;
 use andeyunhui_lib::services::window_manager::overlay_window_destroy;
 mod filesearch;
+mod system_fonts;
 use filesearch::*;
 // 资源占用实时监控（CPU/GPU/显存/内存/硬盘/网络）：Windows 原生采集，仅 Windows 编译；
 // 其他平台这些模块整体不参与编译，命令行跨平台可用。
@@ -1852,6 +1853,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             set_window_hidden,
             smtc_status,
             debug_log,
+            system_fonts::list_system_fonts,
             // ========== 模块：内置 Everything 风格文件搜索 ==========
             fs_search,
             fs_index_status,
@@ -2012,6 +2014,7 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             window_manager::overlay_near,
             window_manager::overlay_rect,
             window_manager::overlay_set_click_through,
+            window_manager::overlay_set_input_rect,
             window_manager::overlay_window_destroy,
             window_manager::overlay_window_health,
             window_manager::overlay_window_diag,

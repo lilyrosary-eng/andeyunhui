@@ -577,6 +577,28 @@ pub fn overlay_near(label: String, w: i32, h: i32) -> bool {
     }
 }
 
+/// 设定浮窗的**输入区域**（逻辑像素、窗口坐标）；w/h <= 0 表示恢复整窗可交互。
+/// 浮岛用它做到"只有可见胶囊吃点击，透明边距一律穿透"。
+#[tauri::command]
+pub fn overlay_set_input_rect(
+    app: tauri::AppHandle,
+    label: String,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        return crate::click_through::set_input_rect(&app, &label, x, y, w, h);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (&app, label, x, y, w, h);
+        Ok(())
+    }
+}
+
 /// 整窗点击穿透开关。Linux 走 GdkWindow::set_pass_through（Wayland 下 tao 的旧接口无效）。
 #[tauri::command]
 pub fn overlay_set_click_through(app: tauri::AppHandle, label: String, ignore: bool) -> Result<(), String> {

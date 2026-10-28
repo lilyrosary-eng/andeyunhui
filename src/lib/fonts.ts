@@ -4,6 +4,7 @@
  */
 
 import { logger } from '@/lib/logger';
+import { isLinux } from '@/platform/isLinux';
 
 export interface FontInfo {
   family: string;
@@ -138,6 +139,24 @@ async function detectViaDocumentFonts(): Promise<FontInfo[]> {
 
 // ========== 主检测函数 ==========
 export async function detectSystemFonts(): Promise<FontInfo[]> {
+  // 0. Linux：直接问 fontconfig（`fc-list`）。
+  // 为什么单独一条：`queryLocalFonts()` 是 Chromium/WebView2 的私有 API，WebKitGTK 没有；
+  // 而下面那条回退是用**硬编码候选表**去 document.fonts 里验证 —— 用户自己装的字体
+  // （~/.local/share/fonts 里的任意 .ttf）不在候选表里就永远选不到（2026-10-28 用户反馈）。
+  if (isLinux()) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const families = await invoke<string[]>('list_system_fonts');
+      if (families && families.length > 0) {
+        return sortFonts(
+          families.map((f) => ({ family: f, ...getDisplayName(f) })),
+        );
+      }
+    } catch (e) {
+      logger.log('[Fonts] fc-list 枚举失败，回退原路径:', e);
+    }
+  }
+
   // 1. 优先 queryLocalFonts
   const localFonts = await detectViaQueryLocalFonts();
   if (localFonts.length >= 10) {

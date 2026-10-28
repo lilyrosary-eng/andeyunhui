@@ -361,13 +361,42 @@ export default function Capsule() {
   const refreshSessionList = useCapsuleStore((s) => s.refreshSessionList);
   const hoverLockRef = useRef(false);
 
-  // 展开/收起瞬间立刻切换整窗穿透，不等下面 120ms 的轮询 ——
-  // 否则刚展开的头一百多毫秒里窗口仍是穿透态，按钮点了没反应（"有时点不动"）。
+  // 输入区域 = 可见胶囊（Linux）：透明边距一律不吃点击。
+  // 用 DOM 实测矩形（getBoundingClientRect）下发，因此不依赖窗口尺寸是否缩到胶囊大小。
+  const pillRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (!isLinux()) return;
+    if (!isLinux()) return undefined;
     const lw = getCurrentWebviewWindow();
-    if (!lw) return;
-    invoke('overlay_set_click_through', { label: lw.label, ignore: !expanded }).catch(() => {});
+    if (!lw) return undefined;
+    let cancelled = false;
+    const apply = () => {
+      if (cancelled) return;
+      if (expanded) {
+        // 展开态：整窗可交互（面板按钮要能点）
+        invoke('overlay_set_input_rect', { label: lw.label, x: 0, y: 0, w: 0, h: 0 }).catch(() => {});
+        return;
+      }
+      const el = pillRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      invoke('overlay_set_input_rect', {
+        label: lw.label,
+        x: Math.round(r.left),
+        y: Math.round(r.top),
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+      }).catch(() => {});
+    };
+    // 立即一次 + 尺寸过渡结束后再一次（setSize 有 260ms 过渡）
+    const id = requestAnimationFrame(apply);
+    const t1 = window.setTimeout(apply, 320);
+    const t2 = window.setTimeout(apply, 800);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(id);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
   }, [expanded]);
 
   // Linux 悬停展开：判定**在合成器侧做**（扩展 Near()）。
@@ -379,8 +408,6 @@ export default function Capsule() {
     let stopped = false;
     let timer: number | undefined;
     const win = getCurrentWebviewWindow();
-    let lastThrough: boolean | null = null;
-    let dwellTimer: number | null = null;
 
     const tick = async () => {
       if (stopped) return;
@@ -397,45 +424,20 @@ export default function Capsule() {
         });
         const s = useCapsuleStore.getState();
         if (near) {
-          // **驻留展开**：指针只是"路过"胶囊那条带（比如要去点它正下方的模块工具栏）
-          // 时不该弹面板 —— 一旦弹开，460×340 的面板就把下面的按钮盖住，
-          // 这正是"图片模块按钮点不动"的成因（2026-10-27 用户实测）。
-          // 所以要连续停留 350ms 才展开；中途离开就取消。
-          if (!s.expanded && !hoverLockRef.current && dwellTimer === null) {
-            dwellTimer = window.setTimeout(() => {
-              dwellTimer = null;
-              const cur = useCapsuleStore.getState();
-              if (!cur.expanded && !hoverLockRef.current) {
-                cur.setPanelReady(false);
-                cur.setExpanded(true);
-              }
-            }, 350);
+          if (!s.expanded && !hoverLockRef.current) {
+            s.setPanelReady(false);
+            s.setExpanded(true);
           }
         } else {
-          if (dwellTimer !== null) {
-            window.clearTimeout(dwellTimer);
-            dwellTimer = null;
-          }
           hoverLockRef.current = false; // 离开即解锁：否则手动收一次后悬停再也打不开
           if (s.expanded && !s.keepOpen) s.setExpanded(false);
         }
-        // 收起态**一律**整窗穿透：浮岛窗口是一块 460×340 的透明矩形（合成器实测
-        // x=730 y=38 w=460 h=340），即使只显示一颗胶囊，这块矩形也会吃掉它覆盖的所有
-        // hover/click —— 表现为"正下方的模块按钮既不高亮也点不动"（2026-10-27 用户实测
-        // 图片模块工具栏中段正好在它下面）。
-        // 悬停判定不依赖 DOM 事件（走扩展的 global.get_pointer），所以穿透态照样能感知悬停、
-        // 照样能自动展开；展开后必须收回输入，否则面板上的按钮点不了。
-        const through = !useCapsuleStore.getState().expanded;
-        if (through !== lastThrough) {
-          lastThrough = through;
-          invoke('overlay_set_click_through', { label: win.label, ignore: through }).catch(() => {});
-        }
+        // 透明边距不挡点击：**不再整窗穿透**，而是把输入区域限制成"可见胶囊矩形"。
+        // 整窗穿透会把胶囊自己也变成点不到的；而窗口在 Wayland 上不总能缩到胶囊大小
+        // （实测稳定停在 460×200），所以只有"输入区域=胶囊"这一个解。
+        // 具体由 PillRegion 用 getBoundingClientRect 实测后下发。
       } catch {
-        // 扩展未加载（拿不到 near）：不能靠穿透，否则胶囊永远点不动 ⇒ 恢复输入
-        if (lastThrough !== false) {
-          lastThrough = false;
-          invoke('overlay_set_click_through', { label: win.label, ignore: false }).catch(() => {});
-        }
+        /* 扩展未加载（拿不到 near）：只能点击展开，输入区域仍由 PillRegion 控制 */
       }
       if (!stopped) timer = window.setTimeout(tick, 120);
     };
@@ -444,7 +446,6 @@ export default function Capsule() {
     return () => {
       stopped = true;
       if (timer) window.clearTimeout(timer);
-      if (dwellTimer !== null) window.clearTimeout(dwellTimer);
       invoke('overlay_set_click_through', { label: win.label, ignore: false }).catch(() => {});
     };
   }, []); // 收起后锁定悬停自动展开，需点击胶囊才恢复（不触发渲染，保留为 ref）
@@ -518,7 +519,11 @@ export default function Capsule() {
   }, [play]);
   // 多会话堆叠：合并外部会话与本应用会话；当前展示之外的会话作为背景卡营造层次质感
   const allSessions = useMemo(() => {
-    const a = [...sessionList];
+    // 同一首曲目只留一张卡：本应用那份（带封面/时长/进度）优先，
+    // 系统那份在 Linux 上就是 WebKit 内置 MPRIS 的同一首歌（无 artUrl），
+    // 不去重会出现两张一模一样的卡（2026-10-28 用户实测）。
+    const dup = appPlay?.title;
+    const a = sessionList.filter((x) => !(dup && x.title === dup));
     if (appPlay) a.unshift(appPlay);
     return a;
   }, [sessionList, appPlay]);
@@ -1089,6 +1094,7 @@ export default function Capsule() {
         </div>
       )}
       <div
+        ref={pillRef}
         onClick={() => {
           if (!chatOpen) {
             if (expanded) collapse();
