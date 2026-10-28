@@ -171,18 +171,27 @@ fn default_output() -> String {
 fn spawn_gst(node_id: u32, pw_fd: Option<i32>, output: &str, fps: u32) -> Result<std::process::Child, String> {
     // 有 fd 就用 fd（走 portal 给的私有 remote，权限最稳）；没有才退回 path（node id）。
     // fd 用 dup2 固定到 3，避免和子进程里其它 fd 撞号。
+    // ★ gst-launch 把**每个 argv 当成一个 token**（parse_launchv 语义）：
+    //   元素名与它的属性必须**分开**传（`"vp8enc deadline=1"` 一个 argv ⇒ "语法错误"，
+    //   而 `"video/x-raw,framerate=30/1"` 这种不含空格的单 token 可以整段传）。
+    //   这两种写法我都实测过，注释留着免得下次再踩。
     let mut cmd = std::process::Command::new("gst-launch-1.0");
-    cmd.arg("-e")
-        .arg(if pw_fd.is_some() {
-            format!("pipewiresrc fd=3 do-timestamp=true")
-        } else {
-            format!("pipewiresrc path={node_id} do-timestamp=true")
-        })
-        .args(["!", "videoconvert", "!", "videorate", "!", "video/x-raw,framerate="])
-        .arg(format!("{fps}/1"))
-        .args(["!", "vp8enc", "deadline=1", "cpu-used=8", "!", "webmmux", "!", "filesink"])
-        .arg(format!("location={output}"))
-        .stdout(std::process::Stdio::null());
+    cmd.arg("-e");
+    if pw_fd.is_some() {
+        // fd 已在 pre_exec 里 dup2 到 3
+        cmd.args(["pipewiresrc", "fd=3", "do-timestamp=true"]);
+    } else {
+        cmd.args(["pipewiresrc", "do-timestamp=true"]);
+        cmd.arg(format!("path={node_id}"));
+    }
+    cmd.args(["!", "videoconvert", "!", "videorate", "!"]);
+    cmd.arg(format!("video/x-raw,framerate={fps}/1"));
+    cmd.args([
+        "!", "vp8enc", "deadline=1", "cpu-used=8", "!", "webmmux", "!", "filesink",
+    ]);
+    // 路径用内层双引号包住：含空格/中文的路径否则会被解析器当成分隔符（实测 valid）。
+    cmd.arg(format!("location=\"{output}\""));
+    cmd.stdout(std::process::Stdio::null());
     if let Ok(f) = std::fs::File::create(format!("{output}.gst.log")) {
         cmd.stderr(std::process::Stdio::from(f));
     } else {
