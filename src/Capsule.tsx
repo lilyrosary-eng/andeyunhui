@@ -654,6 +654,15 @@ export default function Capsule() {
         } catch (e) {
           console.warn('[capsule] 解除尺寸下限失败（窗口可能仍缩不下去）:', e);
         }
+        // ★ 解除下限之后必须**重新下一次尺寸**：setSize 只在 expanded 变化时执行，
+        // 而「首次 setSize」发生在上限解除之前，被 GTK 的 old size request 顶回去了
+        // （实测日志：解除后 size_request=1x1，但 gdk 仍是 460x200）。
+        try {
+          await win.setSize(new LogicalSize(CAPSULE_W, CAPSULE_H));
+          await reportRect(CAPSULE_W, CAPSULE_H);
+        } catch {
+          /* 忽略：尺寸会在下次展开/收起时再同步 */
+        }
       }
       await reportRect(CAPSULE_W, CAPSULE_H);
     })();

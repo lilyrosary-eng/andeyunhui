@@ -151,26 +151,20 @@ fn rect_dumped() -> &'static Mutex<std::collections::HashSet<String>> {
 /// 让**输入区域**等于可见胶囊的矩形，矩形外一律不吃事件。
 /// 矩形由前端用 `getBoundingClientRect()` 实测传入（CSS/逻辑像素），设备像素换算在这里做。
 ///
-/// # ★ 单位（2026-10-28 血案）
-/// GDK 的 `GdkWindow` 坐标是**设备像素**，而 `getBoundingClientRect()` 是 CSS/逻辑像素。
-/// 这台机器 3840×2160 @ 缩放 2.0，直接拿逻辑矩形去设区域，等于只裁到胶囊左上角的
-/// 1/4 大小 ⇒ 胶囊右半边和下方 164px 的透明区照样吃点击（用户实测"还是点不到"）。
-/// ⇒ **必须乘 scale_factor**。调用方只传逻辑像素，别在 JS 里乘。
+/// # 单位（2026-10-28 核实）
+/// `gdk_window_get_scale_factor` 的文档写的是「maps from **window coordinates** to the actual
+/// device pixels」⇒ **窗口坐标就是逻辑/CSS 像素**，GDK 自己在内部换算成设备像素。
+/// 所以这里**不要再乘 scale_factor**（我一度乘了，那会把区域放大成 2 倍，
+/// 变成"更多地方吃点击"——反而更糟）。调用方传 `getBoundingClientRect()` 的原值即可。
 #[cfg(target_os = "linux")]
 fn apply_input_rect(win: &gdk::Window, x: i32, y: i32, w: i32, h: i32) {
-    let sf = win.scale_factor().max(1);
     // 注意：gdk 的签名只接受 `&Region`（没有 Option 版本）。"整窗可交互"用
     // **超大矩形**表达，不要用 geometry()（GDK3 文档明说 Wayland 下不可靠，
     // 可能返回 0×0 ⇒ 整窗都不接受输入），也不要传空 region（同样导致点不到）。
     let region = if w <= 0 || h <= 0 {
         cairo::Region::create_rectangle(&cairo::RectangleInt::new(0, 0, 32767, 32767))
     } else {
-        cairo::Region::create_rectangle(&cairo::RectangleInt::new(
-            x * sf,
-            y * sf,
-            w * sf,
-            h * sf,
-        ))
+        cairo::Region::create_rectangle(&cairo::RectangleInt::new(x, y, w, h))
     };
     win.input_shape_combine_region(&region, 0, 0);
     for child in win.children() {
@@ -246,9 +240,11 @@ fn apply_rect_now(app: &AppHandle, label: &str, rect: (i32, i32, i32, i32)) {
     // 一次性诊断：把 GTK 的尺寸请求链打出来，回答"窗口为什么缩不到 240×36"。
     // `gtk_window_resize` 的官方文档明说**不能小于 size request**；这里把 window / 子控件的
     // request 与 preferred(min,natural) 都记下来，下一次就不用再猜。
+    // 每次窗口尺寸变化都打一条（不只是首次）：正好用来验证"解除下限 + 重设尺寸"是否真的生效。
+    let gdk_now = (gdk_win.width(), gdk_win.height());
     let should_dump = rect_dumped()
         .lock()
-        .map(|mut s| s.insert(label.to_string()))
+        .map(|mut s| s.insert(format!("{label}:{}x{}", gdk_now.0, gdk_now.1)))
         .unwrap_or(false);
     if should_dump {
         let (rw, rh) = gtk_win.size_request();
