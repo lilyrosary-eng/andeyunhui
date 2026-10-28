@@ -1233,7 +1233,7 @@ pub fn store_screenshot_note_id(
 /// 非 Linux 平台不需要"调系统截图"这条路（Windows 侧自带完整截图流程）。
 /// 保留同名命令只为让 `invoke_handler` 的注册表两端一致。
 #[tauri::command]
-pub async fn system_screenshot() -> Result<(), String> {
+pub async fn system_screenshot() -> Result<Option<String>, String> {
     Err("Windows 使用内置截图流程（start_screenshot）".into())
 }
 

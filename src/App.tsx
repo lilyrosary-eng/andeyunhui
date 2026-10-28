@@ -103,7 +103,15 @@ function App() {
       // 用户 2026-10-28 定调：只做"系统截图的可替换快捷键 + 浮岛入口"，不重写第二套 UI。
       // 覆盖层那套（冻结图/标注/窗口吸附/长截图）在 Wayland 上要重做一遍，收益低、成本高。
       if (isLinux()) {
-        await invoke('system_screenshot');
+        // GNOME 的截图界面已经把图存进 `~/图片/截图/`，我们只负责把路径回给用户看一眼
+        // （之前 Rust 侧读完就删，导致"能截图但找不到文件"；已修）。
+        // 返回 null = 用户按 Esc 取消，不提示。
+        const path = await invoke<string | null>('system_screenshot');
+        if (path) {
+          // 与下方笔记提示同一手法：动态 import，避免主窗启动期把浮岛 store 一起拉进来
+          const { useCapsuleStore } = await import('@/stores/capsuleStore');
+          useCapsuleStore.getState().showToast(`已截图：${path.split('/').pop()}`);
+        }
         return;
       }
       // 记录当前笔记页 id（非阻塞：与截图启动并行，减少一次 IPC 往返延迟）

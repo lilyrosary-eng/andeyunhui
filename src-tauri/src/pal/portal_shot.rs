@@ -11,8 +11,9 @@
 //! # 为什么走 portal
 //! 2026-10-28 实测（GNOME Shell 50.1 / 本机 4K@2x）：
 //! - `interactive: false` **静默可用**，连做 3 次都在 6 秒内产出 PNG，**没有对话框**；
-//! - 输出是全屏**物理像素**（3840×2160），文件落在 XDG Pictures（本机 `~/图片/`），
-//!   名字形如 `Screenshot-N.png` —— 所以我们读完要**自己删**，否则用户目录会被塞满；
+//! - 输出是全屏**物理像素**（3840×2160）。静默模式文件落在 XDG Pictures（`~/图片/Screenshot-N.png`），
+//!   读完要自己删；**交互模式**由 GNOME 存在 `~/图片/截图/截图 <时间>.png`，那是用户的交付物，
+//!   **绝不能删**（2026-10-28 血案：删了 ⇒ 用户"能截图但找不到文件"）；
 //! - `handle_token` 只用于预测请求路径，可给可不给；**但 `ScreenCast` 的
 //!   `session_handle_token` 必须给**，否则 xdg-desktop-portal 会 assert 崩溃
 //!   （`xdp-session.c:300`）。那条经验不适用于 Screenshot，但记在项目记忆里。
@@ -28,11 +29,13 @@ const DEST: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
 const IFACE: &str = "org.freedesktop.portal.Screenshot";
 
-/// 一次 portal 截图的结果（PNG 字节 + 物理像素尺寸）。
+/// 一次 portal 截图的结果（PNG 字节 + 物理像素尺寸 + 落盘路径）。
 pub struct PortalShot {
     pub png: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// portal 实际落盘的位置。**交互式截图时这就是用户要的那份文件**，不能删。
+    pub path: Option<String>,
 }
 
 /// `file://` URI → 本地路径，并还原 percent-encoding（本机中文目录 `~/图片` 就是靠这一步）。
@@ -54,8 +57,16 @@ fn uri_to_path(uri: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// 截一张全屏图。`interactive` 为 true 时 portal 会弹它自己的选区界面（我们不用，走自己的覆盖层）。
-pub async fn capture_png(interactive: bool) -> Result<PortalShot, String> {
+/// 截一张全屏图。
+///
+/// - `interactive = true`：叫出 **GNOME 自己的截图界面**（选区/窗口/全屏/延时）。
+///   这时 `keep_file` 必须是 true —— portal 已经替用户把图存进 `~/图片/截图/`，
+///   那是**交付物**，删掉就等于把用户的截图吞了。
+/// - `interactive = false`：静默全屏抓一张，`keep_file` 一般给 false（读完即删临时文件）。
+///
+/// 返回 `Ok(None)` 表示**用户取消**（portal 的 Response code = 1）。这不是错误，
+/// 调用方不该弹报错（2026-10-28 用户实测：取消一次会看到"portal 拒绝了截图请求"）。
+pub async fn capture_png(interactive: bool, keep_file: bool) -> Result<Option<PortalShot>, String> {
     use futures_util::StreamExt;
     use zbus::zvariant::{OwnedObjectPath, Value};
 
@@ -115,11 +126,13 @@ pub async fn capture_png(interactive: bool) -> Result<PortalShot, String> {
             .deserialize()
             .map_err(|e| format!("解析 Response 失败: {e}"))?;
         if code != 0 {
-            return Err(match code {
-                1 => "用户取消了截图".to_string(),
-                2 => "portal 拒绝了截图请求".to_string(),
-                c => format!("portal 返回错误码 {c}"),
-            });
+            // 1 = 用户取消（正常操作，不是失败）；2 = 其它错误（含 GNOME 日志里的
+            // `InteractiveScreenshot didn't return a file`，通常是应用没拿到焦点/界面被抢）。
+            return match code {
+                1 => Ok(None),
+                2 => Err("portal 拒绝了截图请求".to_string()),
+                c => Err(format!("portal 返回错误码 {c}")),
+            };
         }
         let uri = results
             .get("uri")
@@ -127,14 +140,20 @@ pub async fn capture_png(interactive: bool) -> Result<PortalShot, String> {
             .ok_or_else(|| "Response 里没有 uri".to_string())?;
         let path = uri_to_path(&uri).ok_or_else(|| format!("无法解析 uri: {uri}"))?;
         let png = std::fs::read(&path).map_err(|e| format!("读取截图文件失败({path}): {e}"))?;
-        // portal 自己落盘在用户的图片目录里，必须清掉（否则每截一张就多一个文件）。
-        let _ = std::fs::remove_file(&path);
+        // ★ 只在**静默**模式删临时文件。
+        // 交互模式这个文件是 GNOME 刚存进 `~/图片/截图/` 的**用户截图**，删了用户就找不到了
+        // （2026-10-28 血案：用户报告"能截图但找不到文件"，GNOME 日志
+        //  `Error opening screenshot: 没有那个文件或目录` 就是被这里删掉的）。
+        if !keep_file {
+            let _ = std::fs::remove_file(&path);
+        }
         let img = image::load_from_memory(&png).map_err(|e| format!("PNG 解码失败: {e}"))?;
-        return Ok(PortalShot {
+        return Ok(Some(PortalShot {
             png,
             width: img.width(),
             height: img.height(),
-        });
+            path: Some(path),
+        }));
     }
 }
 
@@ -150,7 +169,7 @@ mod tests {
             eprintln!("[skip] 非 Wayland 会话，跳过");
             return;
         }
-        match capture_png(false).await {
+        match capture_png(false, false).await {
             Ok(shot) => {
                 println!("portal PNG {} bytes, {}x{}", shot.png.len(), shot.width, shot.height);
                 assert_eq!(&shot.png[1..4], b"PNG", "应是 PNG");

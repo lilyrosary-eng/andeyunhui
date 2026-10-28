@@ -1077,16 +1077,25 @@ pub async fn save_screenshot(
 /// 用户 2026-10-28 明确：**只做"系统截图的可替换快捷键 + 浮岛入口"**，不做第二套 UI。
 /// ⇒ 这里只负责"把系统的截图界面叫出来"，其余交给系统。
 #[tauri::command]
-pub async fn system_screenshot() -> Result<(), String> {
-    match super::portal_shot::capture_png(true).await {
-        Ok(shot) => {
+pub async fn system_screenshot() -> Result<Option<String>, String> {
+    // keep_file = true：GNOME 已经把图存进 `~/图片/截图/`，那是用户的交付物。
+    // 之前无条件删掉，用户就变成"能截图但找不到文件"（2026-10-28 实测，GNOME 日志也报了
+    // `Error opening screenshot: 没有那个文件或目录`，因为它自己也要去打开那张图）。
+    match super::portal_shot::capture_png(true, true).await {
+        Ok(Some(shot)) => {
             eprintln!(
-                "[截图] 系统截图完成 {}x{}（{} KB）",
+                "[截图] 系统截图完成 {}x{}（{} KB）→ {}",
                 shot.width,
                 shot.height,
-                shot.png.len() / 1024
+                shot.png.len() / 1024,
+                shot.path.as_deref().unwrap_or("(未知路径)")
             );
-            Ok(())
+            Ok(shot.path)
+        }
+        // 用户按 Esc 取消：正常操作，不报错、不弹提示。
+        Ok(None) => {
+            eprintln!("[截图] 用户取消");
+            Ok(None)
         }
         Err(e) => Err(format!("系统截图失败: {e}")),
     }
