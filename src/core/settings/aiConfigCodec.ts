@@ -122,6 +122,8 @@ export interface ProviderUi {
 /// 放供应商级必然变成「每个供应商配一套」（这里就有 9 个供应商）。见 Rust 侧
 /// `MediaModels` 的文档。
 export interface MediaModelsUi {
+  /** 嵌入模型（RAG）：只填模型名，端点/凭证由所属供应商档案提供 */
+  embedding: string;
   vision: string;
   speech: string;
   image: string;
@@ -262,12 +264,13 @@ export function effectiveEffort(m: Pick<ModelUi, 'reasoning_effort' | 'thinking'
 
 /** 空白的媒体模型集合（新建配置 / 缺字段时的默认）。 */
 export function emptyMediaModels(): MediaModelsUi {
-  return { vision: '', speech: '', image: '', music: '', video: '' };
+  return { embedding: '', vision: '', speech: '', image: '', music: '', video: '' };
 }
 
 function mediaModelsFrom(raw: any): MediaModelsUi {
   const m = raw || {};
   return {
+    embedding: s(m.embedding),
     vision: s(m.vision),
     speech: s(m.speech),
     image: s(m.image),
@@ -278,7 +281,7 @@ function mediaModelsFrom(raw: any): MediaModelsUi {
 
 /** 媒体模型集合是否全空（全空则不落盘，与 Rust 侧 `is_empty` 同口径）。 */
 function mediaModelsEmpty(m: MediaModelsUi): boolean {
-  return !m.vision && !m.speech && !m.image && !m.music && !m.video;
+  return !m.embedding && !m.vision && !m.speech && !m.image && !m.music && !m.video;
 }
 
 export function fromConfig(payload: any): ConfigUi {
@@ -337,6 +340,7 @@ export function toConfig(ui: ConfigUi): any {
   // （不是 Option），收到 null 会直接反序列化失败 —— 那样整份配置都保存不了。
   const mm = mediaModelsEmpty(ui.media_models) ? null : {
     // '' → null：Rust 侧各字段是 Option<String>，空串会被当成"配了一个名字为空的模型"
+    embedding: ui.media_models.embedding || null,
     vision: ui.media_models.vision || null,
     speech: ui.media_models.speech || null,
     image: ui.media_models.image || null,

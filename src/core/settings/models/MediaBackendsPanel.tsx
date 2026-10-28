@@ -13,7 +13,7 @@
 // 本面板只负责「编辑清单 + 排序路由」，不承载 ComfyUI 工作流库 / 供应商档案的编辑
 // （那些仍在各自面板里），避免职责重复。
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, Eye, RotateCcw, Activity, Loader2 } from 'lucide-react';
+import { Plus, Trash2, ChevronUp, ChevronDown, Image as ImageIcon, Volume2, Eye, RotateCcw, Activity, Loader2, Layers } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   ALL_KINDS,
@@ -30,6 +30,7 @@ import { effectiveBaseUrl, effectiveCkpt, effectiveOnFail, isLocalEndpoint } fro
 import { InlineSelect } from '@/components/ui/inline-select';
 import { resetMediaConfig } from '@/core/ai/media/migrate';
 import type { MediaModelsUi, ProviderUi } from '../aiConfigCodec';
+import { normalizeEmbeddingEndpoint } from '../embedUrl';
 
 /**
  * 已有「应用级模型名」配置项的能力 —— 与 `ENABLED_KINDS` 保持一致。
@@ -37,7 +38,7 @@ import type { MediaModelsUi, ProviderUi } from '../aiConfigCodec';
  * media_models 结构里还留了 music/video 两个字段（枚举留位），但它们**没有 UI 入口**
  * 也没有消费点。刻意不在界面上渲染：摆一个填了不生效的框，比不摆更糟。
  */
-const MEDIA_MODEL_KINDS = ['image', 'vision', 'speech'] as const;
+const MEDIA_MODEL_KINDS = ['image', 'vision', 'speech', 'embedding'] as const;
 type MediaModelKind = (typeof MEDIA_MODEL_KINDS)[number];
 const hasMediaModel = (k: string): k is MediaModelKind =>
   (MEDIA_MODEL_KINDS as readonly string[]).includes(k);
@@ -49,6 +50,7 @@ const KIND_LABEL: Record<MediaKind, string> = {
   image: '图像',
   vision: '视觉',
   speech: '语音',
+  embedding: '嵌入',
   video: '视频',
   music: '音乐',
 };
@@ -57,6 +59,8 @@ const KIND_ICON: Record<MediaKind, typeof ImageIcon> = {
   image: ImageIcon,
   vision: Eye,
   speech: Volume2,
+  // 嵌入：用 Layers（分层向量）示意，避免和"图像"混淆
+  embedding: Layers,
   video: ImageIcon,
   music: Volume2,
 };
@@ -408,6 +412,28 @@ export function MediaBackendsPanel({
           profileId: entry.id, baseUrl: null, apiKey: null, model: name,
         });
         setTestMsg({ kind, ok: out.verdict === 'supported', text: out.detail });
+      } else if (kind === 'embedding') {
+        // 嵌入模型只填模型名，端点/凭证从它所属供应商档案推 —— 与 RAG 运行时同一条规则
+        // （normalizeEmbeddingEndpoint：`…/v1` 自动补 `/embeddings`）。
+        const hit = providers
+          .flatMap((pv) => pv.models.map((mm) => ({ pv, mm })))
+          .find((x) => x.mm.model.trim() === name);
+        if (!hit) {
+          setTestMsg({ kind, ok: false, text: t('modelSettings.mediaModels.notFound') });
+          return;
+        }
+        const res = await invoke<{ embeddings: number[][]; dim?: number }>('rag_embed_api', {
+          texts: ['hi'],
+          endpoint: normalizeEmbeddingEndpoint(hit.pv.base_url),
+          apiKey: hit.pv.api_key || null,
+          model: name,
+        });
+        const dim = res.dim ?? res.embeddings?.[0]?.length ?? 0;
+        setTestMsg({
+          kind,
+          ok: dim > 0,
+          text: dim > 0 ? `✓ 连接成功 · 向量维度 ${dim}` : '端点返回空向量，可能不是嵌入模型',
+        });
       } else if (kind === 'speech') {
         await invoke<string>('ai_tts', { text: t('modelSettings.mediaModels.testSpeechText'), profileId: entry.id });
         setTestMsg({ kind, ok: true, text: t('modelSettings.mediaModels.testOk') });

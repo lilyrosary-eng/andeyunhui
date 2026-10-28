@@ -18,7 +18,6 @@ import { LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-import { videoDir } from '@tauri-apps/api/path';
 import { listen, emit } from '@tauri-apps/api/event';
 import { ensureOverlayWindow, type OverlayProfile } from '@/core/overlayWindow';
 import { isLinux } from '@/platform/isLinux';
@@ -853,35 +852,27 @@ export default function Capsule() {
           // Linux/Wayland：不弹我们自己的选区覆盖层（那套要冻结图 + 框选，在 Wayland 上等于重写），
           // 而是走 portal ScreenCast —— 用户在**系统对话框**里选「整个屏幕 / 某个窗口」。
           // 同一个按钮做开/关切换（没有独立控制条，避免再造一套 UI）。
-          // ★ 复用**既有**的 Linux 录屏后端（services/recording_service_linux.rs：
-          //   portal → pipewire 取帧 → 随包 ffmpeg 编 MP4），这里只补入口，不另开后端。
+          // Linux：**走系统自己的录屏**（org.gnome.Shell.Screencast）。
+          // 不用我们的控制台、不自己编码 —— GNOME 自己录，自己的红点提示，
+          // 我们只负责"开始/停止/把文件拿进中转站"。
+          // 为什么不走截图 UI 里的"录屏"页：那条录完**不返回路径**，产物就进不了中转站。
           const store = useCapsuleStore.getState();
           try {
-            const st = await invoke<{ isRecording?: boolean }>('get_recording_status');
-            if (st?.isRecording) {
-              const path = await invoke<string>('stop_recording');
-              invoke('hide_recorder_widget').catch(() => {});
-              store.showToast(`录屏已保存：${path.split('/').pop()}`);
+            const running = await invoke<string | null>('system_screencast_status');
+            if (running) {
+              const path = await invoke<string>('system_screencast_stop');
+              let dest = '';
+              try {
+                dest = await invoke<string>('add_file_to_transfer_station', { path });
+              } catch {
+                dest = '';
+              }
+              store.showToast(
+                dest ? `录屏已保存并放入中转站：${path.split('/').pop()}` : `录屏已保存：${path.split('/').pop()}`,
+              );
             } else {
-              // 输出路径必须由前端给：后端把这串路径直接交给 ffmpeg。
-              const dir = await videoDir();
-              const d = new Date();
-              const p2 = (n: number) => String(n).padStart(2, '0');
-              const ts = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
-              const outputPath = `${dir.replace(/\\/g, '/')}/录屏_${ts}.mp4`;
-              store.showToast('请在系统对话框里选择要共享的屏幕');
-              // 控制台（计时 + 停止）：跨平台那套，Linux 也能用。
-              await invoke('show_recorder_widget').catch(() => {});
-              // fps 30：软编码（本机无 x264enc/硬件编码器）下 4K 60fps 必掉帧。
-              await invoke('start_recording', {
-                outputPath,
-                fps: 30,
-                monitorIndex: null,
-                regionX: null,
-                regionY: null,
-                regionW: null,
-                regionH: null,
-              });
+              const path = await invoke<string>('system_screencast_start', { path: null, fps: 30 });
+              store.showToast(`系统录屏已开始：${path.split('/').pop()}（再点一次停止）`);
             }
           } catch (e) {
             store.showToast(`录屏失败：${e}`);

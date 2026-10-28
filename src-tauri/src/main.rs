@@ -1721,6 +1721,7 @@ fn main() {
             open_plugin_folder,
             // ========== 核心：中转站 / 原生拖拽 ==========
             list_transfer_station_files,
+            add_file_to_transfer_station,
             restore_transfer_station_file,
             delete_transfer_station_file,
             clear_transfer_station,
@@ -1992,6 +1993,9 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
 
             start_screenshot,
             system_screenshot,
+            system_screencast_start,
+            system_screencast_stop,
+            system_screencast_status,
             read_screenshot,
             read_recorder_snapshot,
             peek_screenshot,

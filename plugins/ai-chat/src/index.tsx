@@ -1,5 +1,6 @@
 import { memo, useState, useEffect, useCallback, useMemo } from 'react';
 import { Bot, Trash2 } from 'lucide-react';
+import type { SendAttachment } from '@/components/capsule/types';
 import { AiChatSidebar } from '@/components/ai-chat/AiChatSidebar';
 import { AiChatConversation } from '@/components/ai-chat/AiChatConversation';
 import { AiChatCompanionCard } from '@/components/ai-chat/AiChatCompanionCard';
@@ -113,12 +114,15 @@ const Root = memo(function Root() {
   // 方案 B：人设画像(persona) 作为最高优先级记忆置顶，L2 核心档案(core) 列于其后。
   // excludeGlobalPersona=true：伴侣模式下跳过「全局 AI 人设」，只走伴侣人设，
   // 逻辑上「ai 对话启动伴侣模式后仅遵循伴侣设定、不受全局人设控制」。
+  // ★ 必须转发 images / attachments：这个包装原先签名只有 `(text)`，
+  //   AiChatConversation 调的是 send(text, images, attachments) ⇒ **图片与附件被静默丢掉**，
+  //   表现就是"对话框里有图，发出去只剩文字，模型也说没收到图"（2026-10-28 用户实测）。
   const sendWithCompanion = useCallback(
-    (text: string) => {
-      if (!(companionEnabled && companion)) return send(text);
+    (text: string, images?: string[], attachments?: SendAttachment[]) => {
+      if (!(companionEnabled && companion)) return send(text, images, attachments);
       const personaPrompt = buildPersonaContext(companion);
       const corePrompt = buildCoreContext(companion);
-      return send(text, undefined, undefined, {
+      return send(text, images, attachments, {
         ...(personaPrompt ? { personaPrompt } : {}),
         ...(corePrompt ? { systemPrompt: corePrompt } : {}),
         excludeGlobalPersona: true,

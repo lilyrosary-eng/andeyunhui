@@ -22,7 +22,7 @@ export const ROUTES_KEY = 'andeyunhui.media.routes';
  * `vision`（图片理解/识图）与 `image`（图片生成）是**两个方向**的能力，分开列：
  * 用户可能想用云端视觉模型看图、同时用本地 ComfyUI 出图，混成一个就没法分别配置。
  */
-export type MediaKind = 'image' | 'vision' | 'speech' | 'video' | 'music';
+export type MediaKind = 'image' | 'vision' | 'speech' | 'video' | 'music' | 'embedding';
 
 /** 首期只启用 image/vision/speech；video/music 枚举留位（后端可声明，路由表暂不配）。 */
 export const ENABLED_KINDS: MediaKind[] = ['image', 'vision', 'speech'];

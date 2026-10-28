@@ -139,7 +139,13 @@ export function AiChatMemorySettings() {
         )}
       </Section>
 
-      <Section title="L3 / L4 语义嵌入端点">
+      <Section title="L3 / L4 语义嵌入">
+        {/* 一处配置原则（2026-10-28 用户定调）：嵌入模型的端点/凭证属于"供应商"，
+            应该在 AI 路由页统一配；这里只保留"选哪个嵌入模型"的钩子 + 自定义兜底。 */}
+        <div className="mb-3 rounded-lg border border-emerald-200/60 bg-emerald-50/60 px-3 py-2 text-[12px] leading-relaxed text-emerald-800 dark:border-emerald-800/40 dark:bg-emerald-950/30 dark:text-emerald-300">
+          推荐在 <b>设置 → 模型 → 媒体模型 → 嵌入</b> 里选一个嵌入模型：端点与凭证会跟随该模型所属的供应商，
+          <b>下面这组字段只在没配路由时才作为自定义覆盖</b>。
+        </div>
         <LongDesc
           md={[
             '**Windows 与手机的关键差异**：桌面端嵌入走 Rust 代理 `rag_embed_api`，**本地 Ollama 完全免费、离线可用**，不像手机受沙箱限制只能走云端。',

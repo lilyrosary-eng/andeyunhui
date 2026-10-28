@@ -108,9 +108,20 @@ function App() {
         // 返回 null = 用户按 Esc 取消，不提示。
         const path = await invoke<string | null>('system_screenshot');
         if (path) {
+          // 截图产物顺手放进中转站（用户 2026-10-28：产物没走中转站，得修）。
+          // 复制而不是移动：原位置仍是用户的，中转站只是多一份可用副本。
+          let inStation = false;
+          try {
+            await invoke<string>('add_file_to_transfer_station', { path });
+            inStation = true;
+          } catch (e) {
+            console.warn('[截图] 放入中转站失败（不影响截图本身）:', e);
+          }
           // 与下方笔记提示同一手法：动态 import，避免主窗启动期把浮岛 store 一起拉进来
           const { useCapsuleStore } = await import('@/stores/capsuleStore');
-          useCapsuleStore.getState().showToast(`已截图：${path.split('/').pop()}`);
+          useCapsuleStore
+            .getState()
+            .showToast(`已截图：${path.split('/').pop()}${inStation ? ' · 已放入中转站' : ''}`);
         }
         return;
       }

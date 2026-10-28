@@ -20,6 +20,52 @@ pub struct TransferStationFile {
     pub is_backup: bool,
 }
 
+/// 把一个已有文件放进中转站（截图 / 录屏产物用）。
+///
+/// 中转站本体就是 `<app_data>/transfer_station/` 目录（见 `list_transfer_station_files`），
+/// 所以"入库"= 复制进去；同名时自动加 `-1/-2` 后缀，不覆盖用户已有的文件。
+/// 为什么是复制而不是移动：产物原位置（`~/图片/截图`、`~/视频`）是用户自己也会翻的地方，
+/// 我们无权把它搬走。
+#[tauri::command]
+pub fn add_file_to_transfer_station(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<String, String> {
+    let src = std::path::PathBuf::from(&path);
+    if !src.is_file() {
+        return Err(format!("文件不存在: {path}"));
+    }
+    let root = notes_root_dir(&app)?;
+    let ts_dir = root.join("transfer_station");
+    std::fs::create_dir_all(&ts_dir).map_err(|e| format!("创建中转站目录失败: {e}"))?;
+
+    let name = src
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .ok_or_else(|| "取不到文件名".to_string())?;
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let ext = src
+        .extension()
+        .map(|s| format!(".{}", s.to_string_lossy()))
+        .unwrap_or_default();
+
+    let mut target = ts_dir.join(&name);
+    let mut n = 1;
+    while target.exists() {
+        target = ts_dir.join(format!("{stem}-{n}{ext}"));
+        n += 1;
+        if n > 999 {
+            return Err("中转站里同名文件过多".to_string());
+        }
+    }
+    std::fs::copy(&src, &target).map_err(|e| format!("复制到中转站失败: {e}"))?;
+    eprintln!("[中转站] 已入库 {} → {}", path, target.display());
+    Ok(target.to_string_lossy().to_string())
+}
+
 /// 列出中转站所有文件（当前版本 + 备份）
 #[tauri::command]
 pub fn list_transfer_station_files(app: tauri::AppHandle) -> Result<Vec<TransferStationFile>, String> {

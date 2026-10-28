@@ -433,6 +433,10 @@ pub struct AiConfig {
 /// （先回落供应商三件套，再回落对话模型）。
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct MediaModels {
+    /// **嵌入模型**（RAG 用）：填一个**模型名**即可，端点与凭证从它所属的供应商档案解析。
+    /// 这样 AI 路由页与 RAG 只有一份配置，不再各自维护 base_url/key（2026-10-28 用户定调）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<String>,
     /// 看图用（识图 / 图片理解）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<String>,

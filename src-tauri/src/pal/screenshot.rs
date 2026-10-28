@@ -1076,6 +1076,27 @@ pub async fn save_screenshot(
 /// 等于重写一遍，而 GNOME 已经有一套成熟的截图界面（选区/窗口/全屏/延时、自动存图+复制）。
 /// 用户 2026-10-28 明确：**只做"系统截图的可替换快捷键 + 浮岛入口"**，不做第二套 UI。
 /// ⇒ 这里只负责"把系统的截图界面叫出来"，其余交给系统。
+/// 开始系统录屏（GNOME 自带）。返回**实际**输出路径（shell 可能改扩展名）。
+#[tauri::command]
+pub async fn system_screencast_start(path: Option<String>, fps: Option<u32>) -> Result<String, String> {
+    let target = path
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(super::gnome_screencast::default_output);
+    super::gnome_screencast::start(&target, fps.unwrap_or(30)).await
+}
+
+/// 停止系统录屏，返回文件路径。
+#[tauri::command]
+pub async fn system_screencast_stop() -> Result<String, String> {
+    super::gnome_screencast::stop().await
+}
+
+/// 当前是否在录（返回目标文件；None = 没在录）。
+#[tauri::command]
+pub fn system_screencast_status() -> Option<String> {
+    super::gnome_screencast::status()
+}
+
 #[tauri::command]
 pub async fn system_screenshot() -> Result<Option<String>, String> {
     // keep_file = true：GNOME 已经把图存进 `~/图片/截图/`，那是用户的交付物。

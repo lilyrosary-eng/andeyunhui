@@ -1237,6 +1237,25 @@ pub async fn system_screenshot() -> Result<Option<String>, String> {
     Err("Windows 使用内置截图流程（start_screenshot）".into())
 }
 
+/// Windows 用自研录屏（WGC + ffmpeg，见 services/recording_service.rs），不走系统接口。
+#[tauri::command]
+pub async fn system_screencast_start(
+    _path: Option<String>,
+    _fps: Option<u32>,
+) -> Result<String, String> {
+    Err("Windows 使用内置录屏（start_recording）".into())
+}
+
+#[tauri::command]
+pub async fn system_screencast_stop() -> Result<String, String> {
+    Err("Windows 使用内置录屏（stop_recording）".into())
+}
+
+#[tauri::command]
+pub fn system_screencast_status() -> Option<String> {
+    None
+}
+
 #[tauri::command]
 pub async fn start_screenshot(
     app: tauri::AppHandle,

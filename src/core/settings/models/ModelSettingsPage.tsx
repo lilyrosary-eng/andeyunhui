@@ -120,7 +120,7 @@ export function ModelSettingsPage() {
   // 开关带来的实际问题是概念重复（媒体能力链那三个「测试」按钮做的是同一件事）、
   // 以及"想测时开关是关的" —— 用户会以为按钮坏了。按钮点击本身即用户显式同意。
   /** 改「某能力用哪个模型」。写进配置档案（不是本地库），所以插件与移动端也读得到。 */
-  const setMediaModel = useCallback((kind: 'image' | 'vision' | 'speech', value: string) => {
+  const setMediaModel = useCallback((kind: 'image' | 'vision' | 'speech' | 'embedding', value: string) => {
     setCfg((prev) => ({ ...prev, media_models: { ...prev.media_models, [kind]: value } }));
   }, []);
 

@@ -119,6 +119,30 @@ export function setEmbedConfig(c: EmbedConfig) {
 
 /** 解析嵌入配置：显式配置优先；否则自动复用当前算力来源（降门槛）。 */
 async function resolveEmbedConfig(): Promise<{ endpoint: string; apiKey: string; model: string } | null> {
+  // ① 首选：AI 路由页「媒体模型 → 嵌入」选的那个模型名（2026-10-28 用户定调：
+  //   配置只放一处，RAG 这边只留"选哪个 embedding 模型"的钩子）。
+  //   端点与凭证从该模型所属的供应商档案推，不再单独维护 base_url/key。
+  try {
+    const cfg = await invoke<{ media_models?: { embedding?: string | null } }>('ai_get_config');
+    const want = (cfg?.media_models?.embedding ?? '').trim();
+    if (want) {
+      const raw = await invoke<{ profiles?: AiProfile[] }>('ai_get_profiles');
+      const hit = (raw?.profiles ?? []).find(
+        (p) => p && (p.model ?? '').trim() === want && (p.base_url ?? '').trim(),
+      );
+      if (hit?.base_url) {
+        return {
+          endpoint: normalizeEmbeddingEndpoint(hit.base_url),
+          apiKey: hit.api_key ?? '',
+          model: want,
+        };
+      }
+      console.warn('[RAG] 路由里配的嵌入模型找不到对应供应商档案，回退其它来源:', want);
+    }
+  } catch {
+    /* 读配置失败：继续走下面的回退链 */
+  }
+
   const explicit = getEmbedConfig();
   // 用户可能只填了 `.../v1`（甚至只填域名）——这里统一补后缀。
   // 不补的话 rag_embed_api 会 POST 到不存在的路径（404），而 404 只会表现成

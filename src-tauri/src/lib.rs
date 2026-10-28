@@ -73,6 +73,11 @@ pub mod click_through;
 #[path = "pal/debug_flags.rs"]
 pub mod debug_flags;
 
+/// Linux 录屏：GNOME 自带录屏（org.gnome.Shell.Screencast，无需授权框）
+#[cfg(target_os = "linux")]
+#[path = "pal/gnome_screencast.rs"]
+pub mod gnome_screencast;
+
 /// Linux 截图后端（Wayland：xdg-desktop-portal Screenshot）
 #[cfg(target_os = "linux")]
 #[path = "pal/portal_shot.rs"]
