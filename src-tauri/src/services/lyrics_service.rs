@@ -92,7 +92,12 @@ pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::E
         // 窗口失焦就沉下去，表现为"点一下锁定歌词就消失"（2026-10-27 用户定位）。
         .title("安得云荟 · 歌词")
         .inner_size(400.0, 80.0)
-        .resizable(true)
+        // 歌词窗的尺寸由前端按歌词长度自动设定（每次换行都会 setSize），
+        // 所以它**不该**给用户拖边缩放：Wayland 下 GNOME 会在可缩放窗口的边框显示
+        // 调节大小光标，用户实测「锁定后还能在透明区域边缘调节窗口大小」（2026-10-28）。
+        // 影响面：resizable(false) 不会阻止程序调用 setSize —— 胶囊窗就是反例
+        // （0.17 里 capsule 是 resizable=false，照样从 460×200 长到 460×340）。
+        .resizable(false)
         .decorations(false)
         .always_on_top(true)
         .visible(true) // 透明(layered)子窗绝不能用 visible:false 创建，否则 WebView2 报 0x8007139F 坏窗
