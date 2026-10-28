@@ -109,6 +109,15 @@ pub fn create_lyrics_widget(app: &AppHandle) -> Result<(), Box<dyn std::error::E
     let _ = window.hide();
     let _ = window.set_position(tauri::PhysicalPosition::new(config.x as i32, config.y as i32));
 
+    // 用户要求「桌面歌词应该直接无视鼠标」（开关在主窗/播放栏里）。
+    // Linux 走 GdkWindow::set_pass_through + 每秒重放；其它平台 no-op。
+    // ★ 代价：歌词窗上的「锁定/解锁」按钮与拖动会因此失效（整窗不吃事件）。
+    //   若要保留，改成"只让透明区穿透"（需按 DOM 矩形裁输入区域）。
+    #[cfg(target_os = "linux")]
+    {
+        let _ = crate::click_through::apply(app, LYRICS_WINDOW_LABEL, true);
+    }
+
     eprintln!("[Lyrics] 悬浮歌词窗口已创建（初始隐藏）位置: ({}, {})", config.x, config.y);
 
     Ok(())

@@ -890,6 +890,14 @@ pub async fn overlay_window_get_or_create(
 
                 if healthy {
                     capsule_mark_alive(&label);
+                    // 桌宠：用户明确要求「这两个窗口应该直接无视鼠标」——
+                    // 它的开关在「全局设置 · 茑萝」与主窗里，浮窗本身不需要接收任何点击。
+                    // Linux 走 GdkWindow::set_pass_through（并每秒重放，见 click_through.rs）；
+                    // 其它平台 no-op。
+                    #[cfg(target_os = "linux")]
+                    if label == "deskpet" || label == "lyrics-widget" {
+                        let _ = crate::click_through::apply(&app, &label, true);
+                    }
                     return Ok(label);
                 }
 
