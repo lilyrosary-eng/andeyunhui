@@ -87,6 +87,12 @@ zip = "3"
 quick-xml = "0.39"
 # 原生 PDF 解析（文字 + 图片提取），替代 markitdown
 pdf-extract = "0.12"
+# 表格公式引擎（spike）：gridcraft 的纯数据层 + 计算层 + xlsx 读写（MIT OR Apache-2.0）。
+# 这些 crate 不依赖 egui，可直接在 Tauri 后端调用；SheetJS 仍然负责导出。
+gridcraft-core = { path = "../got-it/storytold/02-表格/gridcraft/crates/core" }
+gridcraft-model = { path = "../got-it/storytold/02-表格/gridcraft/crates/model" }
+gridcraft-calc = { path = "../got-it/storytold/02-表格/gridcraft/crates/calc" }
+gridcraft-xlsx = { path = "../got-it/storytold/02-表格/gridcraft/crates/xlsx" }
 # pdf-extract 内部使用 lopdf 抽取图片，但对其为私有依赖，这里显式声明以便直接使用
 # embed_image 特性提供 xobject::image_from，用于把 OCR 源图写入 PDF
 lopdf = { version = "0.42", features = ["embed_image"] }

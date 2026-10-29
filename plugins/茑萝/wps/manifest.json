@@ -13,6 +13,8 @@
       "read_external_dep_file",
       "read_file_base64",
       "read_text_file",
+      "sheet_calc",
+      "sheet_read_xlsx",
       "wps_export_docx",
       "wps_export_pptx",
       "wps_import_pptx",

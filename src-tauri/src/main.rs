@@ -1890,6 +1890,9 @@ andeyunhui_lib::services::qishui_proxy::qishui_save_temp_audio,
             wps_import_pptx,
             diagnostics::wps_import_pptx_diagnose,
             read_file_base64,
+            // 表格公式（spike）：无状态求值 + 带公式的 xlsx 导入
+            sheet_calc,
+            sheet_read_xlsx,
             // ========== 模块：薄荷（专业工具 16 合 1）==========
             get_env_vars,
             set_env_var,

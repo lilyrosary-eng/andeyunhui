@@ -51,6 +51,9 @@ mod image_resolve;
 pub use image_resolve::*;
 mod wps;
 pub use wps::*;
+// spike：表格公式求值（gridcraft）
+mod sheet;
+pub use sheet::*;
 mod install;
 pub use install::*;
 mod dev;

@@ -144,6 +144,9 @@ const ALLOWED_COMMANDS = new Set([
   'convert_to_markdown',
   'wps_import_pptx',
   'wps_import_pptx_diagnose',
+  // 办公（wps）插件 · 表格公式（spike）：无状态求值 + 带公式的 xlsx 导入（gridcraft）
+  'sheet_calc',
+  'sheet_read_xlsx',
   // 黑名单管理
   'get_blacklist_paths',
   'add_to_blacklist',

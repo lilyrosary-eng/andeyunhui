@@ -90,6 +90,8 @@ function SheetEditorImpl({ activeId, title, onPersist }: SheetEditorProps) {
   const [sel, setSel] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  // 公式计算结果（key = `${r}-${c}`），由 Rust 端 gridcraft 计算；raw 仍以 data 为准
+  const [computed, setComputed] = useState<Record<string, string>>({});
 
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
@@ -123,6 +125,33 @@ function SheetEditorImpl({ activeId, title, onPersist }: SheetEditorProps) {
     });
     scheduleSave();
   }, [scheduleSave]);
+
+  // ===== 公式求值（spike）=====
+  // 整表原文（数字 / 文本 / =公式）发给 Rust，拿回每个非空单元格的计算值。
+  // 无状态命令 + 180ms 防抖：编辑期间不阻塞输入框。
+  useEffect(() => {
+    const cells: { row: number; col: number; text: string }[] = [];
+    for (let r = 0; r < data.length; r++) {
+      const row = data[r] || [];
+      for (let c = 0; c < row.length; c++) {
+        const t = row[c];
+        if (t) cells.push({ row: r, col: c, text: t });
+      }
+    }
+    if (cells.length === 0) { setComputed({}); return; }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      hostApi.invoke<{ row: number; col: number; display: string }[]>('sheet_calc', { cells })
+        .then((res) => {
+          if (cancelled) return;
+          const map: Record<string, string> = {};
+          for (const c of res) map[`${c.row}-${c.col}`] = c.display;
+          setComputed(map);
+        })
+        .catch((e) => { console.warn('[Sheet] 公式计算失败:', e); });
+    }, 180);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [data]);
 
   const usedRange = useCallback(() => {
     const d = dataRef.current;
@@ -229,6 +258,29 @@ function SheetEditorImpl({ activeId, title, onPersist }: SheetEditorProps) {
     try {
       const selected = await open({ multiple: false, filters: [{ name: 'Excel 文件', extensions: ['xlsx', 'xls'] }] });
       if (typeof selected !== 'string' || !selected) return;
+      // .xlsx 走 Rust（gridcraft）：保留公式原文并重算；.xls 或失败时回退 SheetJS
+      if (selected.toLowerCase().endsWith('.xlsx')) {
+        try {
+          type ImportCell = { row: number; col: number; text?: string; display: string };
+          const sheets = await hostApi.invoke<{ name: string; cells: ImportCell[] }[]>(
+            'sheet_read_xlsx', { filePath: selected });
+          const first = sheets?.[0];
+          if (first) {
+            let lr = 0, lc = 0;
+            for (const c of first.cells) { if (c.row > lr) lr = c.row; if (c.col > lc) lc = c.col; }
+            const needRows = Math.max(DEF_ROWS, lr + 1);
+            const needCols = Math.max(DEF_COLS, lc + 1);
+            const rows: string[][] = [];
+            for (let r = 0; r < needRows; r++) rows.push(new Array(needCols).fill(''));
+            for (const c of first.cells) rows[c.row][c.col] = c.text ?? c.display;
+            setData(normalizeData(rows));
+            scheduleSave();
+            return;
+          }
+        } catch (e) {
+          console.warn('[Sheet] Rust 导入失败，回退 SheetJS:', e);
+        }
+      }
       const b64 = await hostApi.invoke<string>('read_file_base64', { filePath: selected });
       if (!b64) return;
       const wb = XLSX.read(b64, { type: 'base64' });
@@ -245,11 +297,30 @@ function SheetEditorImpl({ activeId, title, onPersist }: SheetEditorProps) {
       const aoa: string[][] = [];
       for (let r = 0; r <= lastRow; r++) {
         const row: string[] = [];
-        for (let c = 0; c <= lastCol; c++) row.push(String(dataRef.current[r]?.[c] ?? ''));
+        for (let c = 0; c <= lastCol; c++) {
+          const raw = String(dataRef.current[r]?.[c] ?? '');
+          // 公式格导出计算值，公式本体在下面写回 cell.f
+          row.push(raw.trimStart().startsWith('=') ? (computed[`${r}-${c}`] ?? '') : raw);
+        }
         aoa.push(row);
       }
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      // 把 =公式 还原成真正的 Excel 公式格（f），v 用当前计算值
+      for (let r = 0; r <= lastRow; r++) {
+        for (let c = 0; c <= lastCol; c++) {
+          const raw = String(dataRef.current[r]?.[c] ?? '');
+          if (!raw.trimStart().startsWith('=')) continue;
+          const addr = XLSX.utils.encode_cell({ r, c });
+          const shown = aoa[r]?.[c] ?? '';
+          const num = shown === '' ? NaN : Number(shown);
+          const cell: XLSX.CellObject = ws[addr] ?? {};
+          cell.f = raw.trim().replace(/^=/, '');
+          if (Number.isFinite(num)) { cell.t = 'n'; cell.v = num; } else { cell.t = 's'; cell.v = shown; }
+          ws[addr] = cell;
+        }
+      }
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Sheet1');
+      XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
       const b64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
       const p = await save({ defaultPath: (title || '表格') + '.xlsx', filters: [{ name: 'Excel 文件', extensions: ['xlsx'] }] });
       if (!p) return;
@@ -303,6 +374,11 @@ function SheetEditorImpl({ activeId, title, onPersist }: SheetEditorProps) {
                 <th className={thCls + ' sticky left-0 z-10'}>{r + 1}</th>
                 {row.map((val, c) => {
                   const isSel = sel.r === r && sel.c === c;
+                  const raw = val ?? '';
+                  const isFormula = raw.trimStart().startsWith('=');
+                  // 聚焦时显示原文（便于改公式），失焦时显示计算结果
+                  const shown = isFormula && !isSel ? (computed[`${r}-${c}`] ?? '') : raw;
+                  const isErr = isFormula && !isSel && shown.startsWith('#');
                   return (
                     <td key={c} className="p-0 border border-black/10 dark:border-white/10">
                       <input
@@ -310,12 +386,15 @@ function SheetEditorImpl({ activeId, title, onPersist }: SheetEditorProps) {
                           if (el) cellRefs.current.set(`${r}-${c}`, el);
                           else cellRefs.current.delete(`${r}-${c}`);
                         }}
-                        value={val}
+                        value={shown}
+                        title={isFormula ? raw : undefined}
                         onChange={(e) => setCell(r, c, e.target.value)}
                         onFocus={() => setSel({ r, c })}
                         onKeyDown={(e) => onCellKeyDown(e, r, c)}
                         className={
-                          'w-[120px] h-[28px] px-1.5 outline-none bg-transparent text-[13px] text-neutral-800 dark:text-stone-200 ' +
+                          'w-[120px] h-[28px] px-1.5 outline-none bg-transparent text-[13px] ' +
+                          (isErr ? 'text-red-500 font-medium ' : 'text-neutral-800 dark:text-stone-200 ') +
+                          (isFormula && !isSel ? 'text-right ' : '') +
                           (isSel ? 'ring-2 ring-inset ring-blue-500' : '')
                         }
                       />
