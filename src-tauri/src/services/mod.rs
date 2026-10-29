@@ -32,6 +32,8 @@ pub mod recording_service;
 pub mod recording_service;
 pub mod window_manager;
 pub mod checkpoint;
+// 项目工作区 .adyh / 跨 harness 通道 .Talk：规则、记忆、会话、媒体、消息总线。
+pub mod adyh_service;
 // 诊断模块依赖 Windows 捕获后端（windows_capture），仅 Windows 编译；非 Windows 走同名桩。
 #[cfg(windows)]
 pub mod diagnostics;

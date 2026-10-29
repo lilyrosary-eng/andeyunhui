@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::collections::HashSet;
+use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use crate::services::ai_service::ai_tools::{estimate_tokens, plan_store};
@@ -181,7 +182,10 @@ const MAX_IMAGE_TURNS: usize = 3;
 ///
 /// 幂等 + 安全降级：已解析过的跳过；读不出来的引用**直接跳过**（图被清理掉是正常情况，
 /// 不该让整轮对话失败，更不该把 `image://xxx` 当 URL 发出去）。
-pub(crate) fn hydrate_images(app: &AppHandle, session: &mut EventSession) {
+/// 项目优先的图片回填：`.adyh/media` 命中就用项目内的，找不到再回落全局 `ai_media`
+/// （旧日志/旧媒体仍然可读）。
+pub(crate) fn hydrate_images_in(app: &AppHandle, session: &mut EventSession, project_root: Option<&Path>) {
+    let project_media = project_root.map(crate::services::adyh_service::media_dir);
     for ev in session.events.iter_mut() {
         if let SessionEvent::User { image_refs, resolved_images, .. } = ev {
             if image_refs.is_empty() || !resolved_images.is_empty() {
@@ -189,7 +193,12 @@ pub(crate) fn hydrate_images(app: &AppHandle, session: &mut EventSession) {
             }
             *resolved_images = image_refs
                 .iter()
-                .filter_map(|r| super::image_store::load_data_url(app, r))
+                .filter_map(|r| {
+                    project_media
+                        .as_deref()
+                        .and_then(|d| super::image_store::load_data_url_from(d, r))
+                        .or_else(|| super::image_store::load_data_url(app, r))
+                })
                 .collect();
         }
     }
@@ -198,10 +207,16 @@ pub(crate) fn hydrate_images(app: &AppHandle, session: &mut EventSession) {
 /// 把一批 data URL 图片存盘，返回引用键列表（供写进 `SessionEvent::User`）。
 ///
 /// 存不进去的图**跳过**（不阻断对话）：图是增强，不是主链路。
-pub(crate) fn persist_images(app: &AppHandle, data_urls: &[String]) -> Vec<String> {
+/// 项目优先的图片落盘：项目已绑定时写 `.adyh/media`（随项目迁移），否则写全局媒体目录。
+pub(crate) fn persist_images_in(app: &AppHandle, data_urls: &[String], project_root: Option<&Path>) -> Vec<String> {
+    let project_media = project_root.map(crate::services::adyh_service::media_dir);
     data_urls
         .iter()
-        .filter_map(|u| super::image_store::store_data_url(app, u))
+        .filter_map(|u| match project_media.as_deref() {
+            Some(dir) => super::image_store::store_data_url_in(dir, u)
+                .or_else(|| super::image_store::store_data_url(app, u)),
+            None => super::image_store::store_data_url(app, u),
+        })
         .collect()
 }
 
@@ -485,20 +500,34 @@ pub(crate) fn trim_tool_result(content: &str) -> String {
     format!("{}…[中间 {} 字已省略以实现上下文控制]…{}", head, total - TOOL_RESULT_HEAD - TOOL_RESULT_TAIL, tail)
 }
 
-/// 把一次 Agent 会话的事件日志落盘到 app_data_dir/ai_sessions/<request_id>.json。
-/// append-only 快照：既做审计、也供 crash-resume 精确重放。
-pub(crate) fn persist_agent_session(app: &AppHandle, session: &EventSession) {
-    let dir = app.path().app_data_dir();
-    let Ok(dir) = dir else { return };
-    let sessions_dir = dir.join("ai_sessions");
-    let _ = fs::create_dir_all(&sessions_dir);
-    let file = sessions_dir.join(format!("{}.json", session.id));
-    // 落盘前瘦身：媒体工具的 meta 里挂着 data URL（可达数 MB base64），
-    // 若原样写入会让会话日志线性膨胀（每张图/每段音频一条）。落盘只保留占位标记，
-    // 前端渲染走实时事件的 meta（内存），日志仅作审计与 replay 卡片骨架。
-    //
-    // ⚠️ 必须覆盖**全部**媒体键。早先只处理了 image，漏了 audio，
-    //    导致每做一次 TTS 就往会话 JSON 里写一整段音频 base64。
+/// 把一次 Agent 会话的事件日志落盘。
+/// 本机 `app_data_dir/ai_sessions/<request_id>.json` 始终写一份（fork/replay 的本地兜底）；
+/// 项目已绑定时再写一份到 `.adyh/sessions/<request_id>.json`，让记录随项目迁移。
+pub(crate) fn persist_agent_session_in(
+    app: &AppHandle,
+    session: &EventSession,
+    project_root: Option<&Path>,
+) {
+    let Some(json) = session_json_for_disk(session) else { return };
+    if let Ok(dir) = app.path().app_data_dir() {
+        let sessions_dir = dir.join("ai_sessions");
+        let _ = fs::create_dir_all(&sessions_dir);
+        let _ = fs::write(sessions_dir.join(format!("{}.json", session.id)), &json);
+    }
+    if let Some(root) = project_root {
+        let dir = crate::services::adyh_service::sessions_dir(root);
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(dir.join(format!("{}.json", session.id)), &json);
+    }
+}
+
+/// 落盘前瘦身：媒体工具的 meta 里挂着 data URL（可达数 MB base64），
+/// 若原样写入会让会话日志线性膨胀（每张图/每段音频一条）。落盘只保留占位标记，
+/// 前端渲染走实时事件的 meta（内存），日志仅作审计与 replay 卡片骨架。
+///
+/// ⚠️ 必须覆盖**全部**媒体键。早先只处理了 image，漏了 audio，
+///    导致每做一次 TTS 就往会话 JSON 里写一整段音频 base64。
+fn session_json_for_disk(session: &EventSession) -> Option<String> {
     const MEDIA_KEYS: [&str; 3] = ["image", "audio", "video"];
     let mut slim = session.clone();
     for ev in &mut slim.events {
@@ -511,18 +540,35 @@ pub(crate) fn persist_agent_session(app: &AppHandle, session: &EventSession) {
             }
         }
     }
-    if let Ok(json) = serde_json::to_string_pretty(&slim) {
-        let _ = fs::write(file, json);
-    }
+    serde_json::to_string_pretty(&slim).ok()
 }
 
 /// 若磁盘上已有同名 request_id 的事件日志（此前崩溃或上一轮正常结束），加载它作为续接基础；
-/// 否则返回一个全新的空会话。这样前端只需沿用同一会话 id 再次请求，即可自动“续聊”。
+/// 否则返回一个全新的空会话。项目绑定时优先读 `.adyh/sessions`，再回落本机 app_data。
 pub(crate) fn load_agent_session(app: &AppHandle, id: &str) -> Option<EventSession> {
-    let dir = app.path().app_data_dir().ok()?;
-    let file = dir.join("ai_sessions").join(format!("{}.json", id));
-    let Ok(text) = fs::read_to_string(file) else { return None };
-    serde_json::from_str(&text).ok()
+    load_agent_session_in(app, id, None)
+}
+
+pub(crate) fn load_agent_session_in(
+    app: &AppHandle,
+    id: &str,
+    project_root: Option<&Path>,
+) -> Option<EventSession> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(root) = project_root {
+        candidates.push(crate::services::adyh_service::sessions_dir(root).join(format!("{}.json", id)));
+    }
+    if let Ok(dir) = app.path().app_data_dir() {
+        candidates.push(dir.join("ai_sessions").join(format!("{}.json", id)));
+    }
+    for file in candidates {
+        if let Ok(text) = fs::read_to_string(file) {
+            if let Ok(s) = serde_json::from_str(&text) {
+                return Some(s);
+            }
+        }
+    }
+    None
 }
 
 // ============ 事件溯源 replay / fork（对齐 dsh SessionStore.fork 语义） ============

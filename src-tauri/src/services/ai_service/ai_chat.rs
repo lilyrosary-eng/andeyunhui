@@ -337,7 +337,17 @@ pub async fn ai_chat(
         compose_persona_system(&cfg)
     };
     // 前端 per-call system（群聊各伴侣人设 / 单聊注入）前置，全局 persona 紧随其后。
-    let effective_system = compose_effective_system(&system, &persona);
+    let mut effective_system = compose_effective_system(&system, &persona);
+    // 主机级 ADYH 默认规则：所有聊天共用。用户自定义注入层只在 AI 编程（agent）里生效，
+    // 避免把项目级编码约束带进普通聊天。
+    let builtin = crate::services::adyh_service::base_rules(&app);
+    if !builtin.trim().is_empty() {
+        effective_system = if effective_system.trim().is_empty() {
+            builtin
+        } else {
+            format!("{}\n\n{}", builtin.trim_end(), effective_system)
+        };
+    }
     let mut messages_json = messages_json;
     if !effective_system.is_empty() {
         if let Some(first) = messages_json.first_mut() {

@@ -26,6 +26,17 @@ import { mergeConversations } from '@/core/ai/util';
 const AIDE_STORE_KEY = 'andeyunhui.capsule.aide.conversations.v2'; // 升版本清空历史浮岛 AI 编程对话（与 IDE 对齐）
 const CONV_TITLE_MAX = 20;
 
+/** 后端 .adyh 工作区状态（adyh_status 返回）。 */
+interface AdyhStatus {
+  initialized: boolean;
+  dir: string;
+  talkDir: string;
+  harnessCode: string;
+  conversations: number;
+  projectId?: string | null;
+  schema?: number;
+}
+
 // 清洗发给 IDE 的历史：丢弃空助手占位 / 连续重复消息 / 超长截断，阻断退化乱码被反复回灌形成循环
 function cleanAideHistory(msgs: Array<{ role?: string; content?: unknown }>): Array<{ role: string; content: string }> {
   const out: Array<{ role: string; content: string }> = [];
@@ -148,23 +159,9 @@ function CapsuleAide() {
   const aideActiveConvIdRef = useRef<string>(aideActiveConvId);
   useEffect(() => { aideActiveConvIdRef.current = aideActiveConvId; }, [aideActiveConvId]);
   // 持久化防抖（debounce 600ms）：流式输出时每 tick 都变 aideConversations，直接写会
-  // 在 JS 主线程反复做全量 JSON.stringify + localStorage 写入（阻塞渲染）。
-  // 静默期（流式结束后 600ms）只写最后一次，杜绝写放大。
-  const aidePersistTimerRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (aidePersistTimerRef.current !== null) window.clearTimeout(aidePersistTimerRef.current);
-    aidePersistTimerRef.current = window.setTimeout(() => {
-      aidePersistTimerRef.current = null;
-      try { localStorage.setItem(AIDE_STORE_KEY, JSON.stringify(aideConversations)); } catch { /* 忽略 */ }
-    }, 600);
-    return () => {
-      if (aidePersistTimerRef.current !== null) {
-        window.clearTimeout(aidePersistTimerRef.current);
-        // 卸载时立即冲刷（防抖窗口内的变更也不能丢，关闭面板/切走保住最后状态）
-        try { localStorage.setItem(AIDE_STORE_KEY, JSON.stringify(aideConversations)); } catch { /* 忽略 */ }
-      }
-    };
-  }, [aideConversations]);
+  // 在 JS 主线程反复做全量 JSON.stringify。项目绑定后写 `.adyh/conversations`（后端），
+  // 未绑定项目时才回落到 localStorage（无项目就没有可携带的容器）。
+  // 具体实现放在项目根 state 声明之后（依赖 aideProjectRoot）。
   const aideStreamConvIdRef = useRef<string>(aideActiveConvId);
   const updateAideStreamMessages = useCallback((convId: string, updater: (prev: ChatMsg[]) => ChatMsg[]) => {
     setAideConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, messages: updater(c.messages), updatedAt: Date.now() } : c)));
@@ -238,16 +235,171 @@ function CapsuleAide() {
     }
   }, [setAiHint]);
 
+  // ===== 项目工作区 .adyh / .Talk 与注入层设置 =====
+  const [aideSettingsOpen, setAideSettingsOpen] = useState(false);
+  const [adyhStatus, setAdyhStatus] = useState<AdyhStatus | null>(null);
+  const [adyhMsg, setAdyhMsg] = useState<string | null>(null);
+  const [promptDefault, setPromptDefault] = useState('');
+  const [promptCustom, setPromptCustom] = useState('');
+  const [promptMsg, setPromptMsg] = useState<string | null>(null);
+  // 记录「当前对话列表已经属于哪个项目根」：加载完成前不写盘，避免用上一个项目/本地缓存覆盖。
+  const aideLoadedRootRef = useRef<string>('');
+  const aidePersistTimerRef = useRef<number | null>(null);
+  const freshConversation = useCallback((): Conversation => ({
+    id: 'ac' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    title: '新对话',
+    messages: [],
+    updatedAt: Date.now(),
+  }), []);
+
+  // 注入层提示词：每次打开设置时重新读取，避免与全局设置页的修改不同步。
+  useEffect(() => {
+    if (!aideSettingsOpen) return;
+    invoke<{ default?: string; custom?: string }>('adyh_prompt_get')
+      .then((d) => {
+        setPromptDefault(d?.default || '');
+        setPromptCustom(d?.custom || '');
+      })
+      .catch((e) => console.warn('[aide] 读取注入层提示词失败:', e));
+  }, [aideSettingsOpen]);
+
+  // 项目变化：bootstrap（幂等）+ 读取状态 + 加载项目会话。
+  // 首次建立时把浮岛已有的本地对话迁进项目，之后以 .adyh 为准（不跨项目混用）。
+  useEffect(() => {
+    if (!aideProjectRoot) {
+      aideLoadedRootRef.current = '';
+      setAdyhStatus(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = await invoke<{ created: boolean; dir: string; talkDir: string; projectId: string; schema: number; harnessCode: string }>(
+          'adyh_bootstrap',
+          { projectRoot: aideProjectRoot },
+        );
+        if (cancelled) return;
+        setAiHint(info.created ? '已建立项目工作区 .adyh / .Talk' : '已加载项目工作区 .adyh');
+        const st = await invoke<AdyhStatus>('adyh_status', { projectRoot: aideProjectRoot });
+        if (cancelled) return;
+        setAdyhStatus(st);
+        const data = await invoke<{ conversations?: Conversation[]; active_id?: string | null }>(
+          'adyh_conversations_load',
+          { projectRoot: aideProjectRoot },
+        );
+        if (cancelled) return;
+        const remote = (data?.conversations || []).filter((c) => c && Array.isArray(c.messages));
+        if (info.created) {
+          // 只在此项目第一次建立时迁移；迁移失败也不覆盖本地状态。
+          setAideConversations((local) => {
+            const keep = local.length ? local : [freshConversation()];
+            void invoke('adyh_conversations_save', {
+              projectRoot: aideProjectRoot,
+              payload: { conversations: keep, active_id: aideActiveConvIdRef.current },
+            }).catch((e) => console.warn('[aide] 迁移对话到 .adyh 失败:', e));
+            return keep;
+          });
+        } else if (remote.length) {
+          setAideConversations(remote);
+          const aid = data.active_id && remote.some((c) => c.id === data.active_id) ? data.active_id : remote[0].id;
+          setAideActiveConvId(aid);
+          aideActiveConvIdRef.current = aid;
+          aideStreamConvIdRef.current = aid;
+        } else {
+          const fresh = freshConversation();
+          setAideConversations([fresh]);
+          setAideActiveConvId(fresh.id);
+          aideActiveConvIdRef.current = fresh.id;
+          aideStreamConvIdRef.current = fresh.id;
+        }
+        aideLoadedRootRef.current = aideProjectRoot;
+      } catch (e) {
+        console.error('[aide] 加载 .adyh 工作区失败:', e);
+        setAdyhMsg('加载 .adyh 失败：' + String(e));
+        aideLoadedRootRef.current = aideProjectRoot;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [aideProjectRoot, setAiHint, freshConversation]);
+
+  // 持久化：项目绑定 → .adyh（后端，防抖）；未绑定 → localStorage。
+  useEffect(() => {
+    if (aidePersistTimerRef.current !== null) window.clearTimeout(aidePersistTimerRef.current);
+    const flush = () => {
+      if (aideProjectRoot) {
+        if (aideLoadedRootRef.current !== aideProjectRoot) return; // 加载未完成，不写
+        void invoke('adyh_conversations_save', {
+          projectRoot: aideProjectRoot,
+          payload: { conversations: aideConversations, active_id: aideActiveConvId },
+        }).catch((e) => console.warn('[aide] 保存会话到 .adyh 失败:', e));
+      } else {
+        try { localStorage.setItem(AIDE_STORE_KEY, JSON.stringify(aideConversations)); } catch { /* 忽略 */ }
+      }
+    };
+    aidePersistTimerRef.current = window.setTimeout(() => {
+      aidePersistTimerRef.current = null;
+      flush();
+    }, 600);
+    return () => {
+      if (aidePersistTimerRef.current !== null) {
+        window.clearTimeout(aidePersistTimerRef.current);
+        // 卸载时立即冲刷（防抖窗口内的变更也不能丢）
+        flush();
+      }
+    };
+  }, [aideConversations, aideActiveConvId, aideProjectRoot]);
+
+  const saveAidePrompt = useCallback(async () => {
+    try {
+      await invoke('adyh_prompt_set', { custom: promptCustom });
+      setPromptMsg('已保存，新会话立即生效');
+    } catch (e) {
+      console.error('[aide] 保存注入层提示词失败:', e);
+      setPromptMsg('保存失败：' + String(e));
+    }
+  }, [promptCustom]);
+
+  const resetAidePrompt = useCallback(async () => {
+    setPromptCustom('');
+    try {
+      await invoke('adyh_prompt_set', { custom: '' });
+      setPromptMsg('已清空，只使用内置默认提示词');
+    } catch (e) {
+      setPromptMsg('清空失败：' + String(e));
+    }
+  }, []);
+
+  const rebuildAdyh = useCallback(async () => {
+    if (!aideProjectRoot) {
+      setAdyhMsg('先选择项目：工作区按项目建立');
+      return;
+    }
+    try {
+      const info = await invoke<{ created: boolean }>('adyh_bootstrap', { projectRoot: aideProjectRoot });
+      const st = await invoke<AdyhStatus>('adyh_status', { projectRoot: aideProjectRoot });
+      setAdyhStatus(st);
+      setAdyhMsg(info.created ? '已建立项目工作区' : '工作区已就绪（缺失文件已补齐）');
+    } catch (e) {
+      console.error('[aide] 重建 .adyh 失败:', e);
+      setAdyhMsg('重建失败：' + String(e));
+    }
+  }, [aideProjectRoot]);
+
   // 清空全部对话（浮岛 AI 编程 + 通知 IDE 一并清空 chat/agent），一键回到干净起点
   const clearAideConversations = useCallback(() => {
-    const fresh: Conversation[] = [{ id: 'ac' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
+    const fresh: Conversation[] = [freshConversation()];
     setAideConversations(fresh);
     setAideActiveConvId(fresh[0].id);
     aideActiveConvIdRef.current = fresh[0].id;
     aideStreamConvIdRef.current = fresh[0].id;
+    // 项目绑定时清空 .adyh/conversations；否则只清本地缓存。
+    if (aideProjectRoot) {
+      void invoke('adyh_conversations_clear', { projectRoot: aideProjectRoot })
+        .catch((e) => console.warn('[aide] 清空项目会话失败:', e));
+    }
     try { localStorage.removeItem(AIDE_STORE_KEY); } catch { /* 忽略 */ }
     emit(EVENTS.chatStream.clearConversations).catch(() => {});
-  }, []);
+  }, [aideProjectRoot, freshConversation]);
   const newAideConversation = useCallback(() => {
     const id = 'ac' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
     setAideConversations((prev) => [{ id, title: '新对话', messages: [], updatedAt: Date.now() }, ...prev]);
@@ -266,19 +418,18 @@ function CapsuleAide() {
     aideAsstRef.current = null;
   }, []);
 
-  // 挂载即加载模型档案 + 反向同步 IDE 当前对话（壳仅在 aideOpen 时挂载本组件）
+  // 挂载即加载模型档案；未绑定项目时再反向同步全局 IDE 对话
   //
   // ★ 用 **merge 而不是整体替换**（原实现是 `setAideConversations(list)`）。
   //   原因：本组件「壳仅在 expanded && aideOpen && panelReady 时挂载」⇒ 收起浮岛再打开
-  //   就会重跑这段。而它**只读不写**后端文件（浮岛本地变更只落 localStorage 的
-  //   AIDE_STORE_KEY，从不调 ai_save_conversations）。于是只要文件里有旧内容，
-  //   重挂载就会把浮岛这边更新的会话**整个覆盖掉** —— 用户现象正是「切一下就消失」。
-  //
-  //   merge 的语义与 `useAiChat` 的跨 webview 合并一致：按 id 去重、远端较新则采用、
-  //   本地独有的一律保留。两侧 id 空间本来就不同（浮岛 `ac…` / IDE `c_…`），
-  //   合并能同时容下，不会互相顶掉。
+  //   就会重跑这段。未绑定项目时浮岛只写 localStorage，若不 merge 就会把本地更新的
+  //   会话整个覆盖掉（用户现象正是「切一下就消失」）。
+  //   项目绑定时事实源是 `.adyh/conversations`，这段直接跳过，避免跨项目串台。
   useEffect(() => {
     ensureProfiles();
+    // 项目已绑定时会话事实源是 `.adyh`，不再合并全局 IDE 对话 —— 否则会把别的项目/
+    // 普通聊天的历史串进来，也和「一律进项目」的语义冲突。
+    if (aideProjectRoot) return;
     invoke<{ conversations?: Array<Conversation>; active_id?: string | null }>('ai_get_conversations')
       .then((d) => {
         const remote = (d?.conversations || []).filter((c) => c && Array.isArray(c.messages));
@@ -296,7 +447,7 @@ function CapsuleAide() {
         });
       })
       .catch(() => {});
-  }, [ensureProfiles]);
+  }, [ensureProfiles, aideProjectRoot]);
 
   // 跟随 IDE 当前激活模型：IDE 切换模型时广播，浮岛 AI 编程用同一模型
   useEffect(() => {
@@ -346,7 +497,7 @@ function CapsuleAide() {
     const history = cleanAideHistory(aideMessages.filter((m) => !m.error));
     const reqId = 'cag_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
-    updateAideStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '' }]);
+    updateAideStreamMessages(convId, (prev) => [...prev, { id: uid, role: 'user', content: text }, { id: aid, role: 'assistant', content: '', traceId: reqId }]);
     setAideConversations((prev) => prev.map((c) => (c.id === convId && (c.title === '新对话' || !c.title.trim())) ? { ...c, title: text.slice(0, CONV_TITLE_MAX) } : c));
     setAideInput('');
     setAideBusy(true);
@@ -428,7 +579,7 @@ function CapsuleAide() {
     setSnapshotBusy(true);
     setSnapshotMsg(null);
     try {
-      // projectRoot 必传：快照就存在 <项目>/.andeyunhui/checkpoints 里
+      // projectRoot 必传：快照就存在 <项目>/.adyh/checkpoints 里
       const r = await invoke<{ restored: number; removed: number; skipped: number }>('checkpoint_rollback', { projectRoot: aideProjectRoot, id });
       const skipped = r?.skipped ?? 0;
       // 跳过数必须显式说出来：那些文件当初因超限没备份，回滚**没有**恢复它们
@@ -503,7 +654,7 @@ function CapsuleAide() {
           {(aideProjectRoot ? aideProjectRoot.split(/[\/]/).filter(Boolean).pop() : '选择项目') || '选择项目'}
         </button>
         <button
-          onClick={() => (snapshots === null ? void openSnapshots() : setSnapshots(null))}
+          onClick={() => { setAideSettingsOpen(false); void (snapshots === null ? openSnapshots() : setSnapshots(null)); }}
           title="历史快照：AI 每轮请求自动建点，可整轮回滚（按项目隔离，最多保留 10 轮）"
           style={{
             ...btnBase, width: 'auto', height: 28, padding: '0 8px', fontSize: 11, flex: '0 0 auto',
@@ -513,6 +664,18 @@ function CapsuleAide() {
           }}
         >
           快照
+        </button>
+        <button
+          onClick={() => { setSnapshots(null); setSnapshotConfirmId(null); setAideSettingsOpen(true); }}
+          title="AI 编程设置：注入层提示词 / 项目工作区 .adyh"
+          style={{
+            ...btnBase, width: 'auto', height: 28, padding: '0 8px', fontSize: 11, flex: '0 0 auto',
+            color: aideSettingsOpen ? GOLD : 'rgba(244,244,246,0.8)',
+            background: aideSettingsOpen ? 'rgba(230,195,92,0.16)' : 'rgba(0,0,0,0.28)',
+            border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8,
+          }}
+        >
+          设置
         </button>
         <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen(!keepOpen)} size={28} />
         <button onClick={() => setAideOpen(false)} title={t('capsule.backToPlayer')} style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
@@ -592,6 +755,89 @@ function CapsuleAide() {
           </button>
         </div>
       </div>
+
+      {/* 设置浮层：注入层提示词 + 项目工作区状态（与快照互斥） */}
+      {aideSettingsOpen && (
+        <div
+          style={{
+            position: 'absolute', inset: 0, zIndex: 21,
+            background: 'rgba(18,18,20,0.98)',
+            display: 'flex', flexDirection: 'column', gap: 10,
+            padding: '10px 12px', borderRadius: 10, overflowY: 'auto',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: '#f2f2f4' }}>AI 编程设置</span>
+            <span style={{ flex: 1 }} />
+            <button onClick={() => setAideSettingsOpen(false)} title="关闭" style={{ ...btnBase, width: 26, height: 26 }}>
+              <IconClose />
+            </button>
+          </div>
+
+          <div style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '8px 10px' }}>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: '#f2f2f4', marginBottom: 4 }}>项目工作区</div>
+            {aideProjectRoot ? (
+              <div style={{ fontSize: 10.5, lineHeight: 1.6, color: 'rgba(244,244,246,0.62)', wordBreak: 'break-all' }}>
+                <div>项目：{aideProjectRoot}</div>
+                <div>.adyh：{adyhStatus?.dir || '加载中…'}</div>
+                <div>.Talk：{adyhStatus?.talkDir || '加载中…'}</div>
+                <div>代号：{adyhStatus?.harnessCode || 'Y'} · 会话 {adyhStatus?.conversations ?? 0} 个</div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 10.5, lineHeight: 1.6, color: 'rgba(244,244,246,0.62)' }}>
+                未绑定项目。对话暂存本机；选择项目后会在首次任务自动建立 `.adyh` / `.Talk`，
+                之后对话、记忆、快照都随项目目录走。
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <button onClick={() => void pickAideProjectRoot()} style={{ ...btnBase, width: 'auto', height: 24, padding: '0 8px', fontSize: 11, borderRadius: 6 }}>
+                {aideProjectRoot ? '更换项目' : '选择项目'}
+              </button>
+              <button onClick={() => void rebuildAdyh()} style={{ ...btnBase, width: 'auto', height: 24, padding: '0 8px', fontSize: 11, borderRadius: 6 }}>
+                补齐工作区
+              </button>
+            </div>
+            {adyhMsg && <div style={{ fontSize: 10.5, color: 'rgba(244,244,246,0.75)', marginTop: 6 }}>{adyhMsg}</div>}
+          </div>
+
+          <div style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '8px 10px' }}>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: '#f2f2f4', marginBottom: 4 }}>注入层提示词</div>
+            <div style={{ fontSize: 10, lineHeight: 1.55, color: 'rgba(244,244,246,0.5)', marginBottom: 6 }}>
+              留空 = 只使用内置默认规则。填写后与内置规则共同生效；**两者冲突时，以这里填写的为准**。
+              保存后新会话立即生效。
+            </div>
+            <textarea
+              value={promptCustom}
+              onChange={(e) => setPromptCustom(e.target.value)}
+              rows={7}
+              placeholder="例如：本项目的提交信息用中文；不要改 docs/ 下的设计稿；测试一律先跑 pnpm test。"
+              style={{
+                width: '100%', boxSizing: 'border-box', resize: 'vertical', minHeight: 110, maxHeight: 220,
+                background: 'rgba(0,0,0,0.3)', color: '#f4f4f6', border: '1px solid rgba(255,255,255,0.16)',
+                borderRadius: 8, padding: '6px 8px', fontSize: 11.5, lineHeight: 1.5, outline: 'none', fontFamily: 'inherit',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <button onClick={() => void saveAidePrompt()} style={{ ...btnBase, width: 'auto', height: 26, padding: '0 10px', fontSize: 11, borderRadius: 6, color: GOLD, background: 'rgba(230,195,92,0.16)' }}>
+                保存并生效
+              </button>
+              <button onClick={() => void resetAidePrompt()} style={{ ...btnBase, width: 'auto', height: 26, padding: '0 10px', fontSize: 11, borderRadius: 6 }}>
+                只使用内置
+              </button>
+            </div>
+            {promptMsg && <div style={{ fontSize: 10.5, color: 'rgba(244,244,246,0.75)', marginTop: 6 }}>{promptMsg}</div>}
+            <details style={{ marginTop: 8 }}>
+              <summary style={{ fontSize: 10.5, color: 'rgba(244,244,246,0.55)', cursor: 'pointer' }}>查看内置默认规则</summary>
+              <pre style={{
+                marginTop: 6, maxHeight: 180, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                fontSize: 10, lineHeight: 1.5, color: 'rgba(244,244,246,0.6)', background: 'rgba(0,0,0,0.25)',
+                borderRadius: 6, padding: '6px 8px',
+              }}>{promptDefault || '（加载中…）'}</pre>
+            </details>
+          </div>
+        </div>
+      )}
 
       {/* 快照浮层：盖住面板（不改窗口尺寸，避免触发浮岛的尺寸过渡重绘） */}
       {snapshots !== null && (

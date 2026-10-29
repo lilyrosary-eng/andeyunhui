@@ -10,7 +10,7 @@
 //! 磁盘扫上几十秒。所以：
 //!   · 每个根目录最多走 `MAX_ENTRIES` 个条目、最深 `MAX_DEPTH` 层
 //!   · 全局时间预算 `BUDGET`（超时即返回已找到的结果）
-//!   · 跳过 `.git` / `node_modules` / `target` / `dist` / `.andeyunhui` 等重目录
+//!   · 跳过 `.git` / `node_modules` / `target` / `dist` / `.adyh` / `.Talk` 等重目录
 //!   · 只看图片扩展名
 //!
 //! ## 缓存
@@ -33,7 +33,7 @@ const MISS_TTL: Duration = Duration::from_secs(30);
 
 const SKIP_DIRS: &[&str] = &[
     ".git", ".svn", ".hg", "node_modules", "target", "dist", "build",
-    ".andeyunhui", ".next", ".cache", "__pycache__", "venv", ".venv",
+    ".adyh", ".Talk", ".andeyunhui", ".next", ".cache", "__pycache__", "venv", ".venv",
     "$RECYCLE.BIN", "System Volume Information",
 ];
 

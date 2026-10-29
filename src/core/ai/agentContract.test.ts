@@ -45,7 +45,8 @@ describe('agent 组装（ai_agent.rs）', () => {
     expect(src).toMatch(/tool_schemas_for_api_without\(&\["web_search"\]\)/);
   });
 
-  it('工程硬约束还在（这些是"模型乱改代码"的唯一防线）', () => {
+  it('工程硬约束还在（2026-10-29 上移到主机级默认规则 adyh_service.rs）', () => {
+    const rules = read('services/adyh_service.rs');
     const required = [
       'git status', // 动手前看清状态
       '写入即落盘', // 写完必须自己验证，没有"审阅后落盘"
@@ -53,8 +54,10 @@ describe('agent 组装（ai_agent.rs）', () => {
       '提交', // 每个可验证点提交一次
     ];
     for (const k of required) {
-      expect(src, `提示词缺少关键约束：${k}`).toContain(k);
+      expect(rules, `默认规则缺少关键约束：${k}`).toContain(k);
     }
+    // agent 必须真的注入这层，而不是规则放在文件里没人用
+    expect(src).toContain('builtin_prompt');
   });
 
   it('请求前有 token 估算（后端截断是兜底，不是唯一防线）', () => {

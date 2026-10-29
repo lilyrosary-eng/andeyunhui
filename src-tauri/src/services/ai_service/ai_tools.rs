@@ -253,61 +253,18 @@ pub(crate) fn skills_guide(project_root: Option<&std::path::Path>) -> String {
 /// - 原则/原则.md
 /// - 工程契约：AGENTS.md / CLAUDE.md / .cursorrules / GEMINI.md（取首个存在者）
 /// 仅读、仅在项目根内、各段有长度裁剪，避免上下文膨胀。
-pub(crate) async fn agent_memory_context(project_root: Option<&std::path::Path>) -> String {
-    use std::path::Path;
+pub(crate) async fn agent_memory_context(
+    project_root: Option<&std::path::Path>,
+    query: &str,
+) -> String {
     let Some(root) = project_root else { return String::new(); };
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let root_c = root.to_path_buf();
-    let (mem, prin, contract) = tokio::task::spawn_blocking(move || {
-        let read_top = |p: &Path, cap: usize| -> Option<String> {
-            std::fs::read_to_string(p).ok().map(|s| truncate_str(s, cap))
-        };
-        // 今日记忆；不存在则取目录下最近一份 .md（文件名升序取末个）
-        let mem = read_top(&root_c.join("记忆").join(format!("{}.md", today)), 9000).or_else(|| {
-            let mem_dir = root_c.join("记忆");
-            let mut names: Vec<String> = Vec::new();
-            if let Ok(rd) = std::fs::read_dir(&mem_dir) {
-                for e in rd.flatten() {
-                    let p = e.path();
-                    if p.extension().map(|x| x == "md").unwrap_or(false) {
-                        if let Some(n) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
-                            names.push(n);
-                        }
-                    }
-                }
-            }
-            names.sort();
-            names.last().and_then(|n| read_top(&mem_dir.join(n), 9000))
-        });
-        let prin = read_top(&root_c.join("原则").join("原则.md"), 6000);
-        let contract = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "GEMINI.md"]
-            .iter()
-            .find_map(|c| read_top(&root_c.join(c), 8000));
-        (mem, prin, contract)
+    let root = root.to_path_buf();
+    let query = query.to_string();
+    tokio::task::spawn_blocking(move || {
+        crate::services::adyh_service::memory_context(&root, &query)
     })
     .await
-    .unwrap_or_default();
-    let mut s = String::new();
-    if let Some(m) = mem {
-        s.push_str(&format!("\n\n【今日/最近项目记忆】\n{}\n", m));
-    }
-    if let Some(p) = prin {
-        s.push_str(&format!("\n【项目原则】\n{}\n", p));
-    }
-    if let Some(c) = contract {
-        s.push_str(&format!("\n【项目工程契约】\n{}\n", c));
-    }
-    s
-}
-
-/// 按字符数截断到上限（UTF-8 安全），过长加省略标记。
-pub(crate) fn truncate_str(s: String, cap: usize) -> String {
-    if s.chars().count() <= cap {
-        s
-    } else {
-        let t: String = s.chars().take(cap).collect();
-        format!("{}…（过长已截断）", t)
-    }
+    .unwrap_or_default()
 }
 
 /// 粗估一组消息的 token 用量（启发式：字符数/2 + 每条消息固定开销）。仅用于触发/熔断阈值，无需精确。

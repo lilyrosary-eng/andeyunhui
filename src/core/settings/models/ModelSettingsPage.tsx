@@ -11,6 +11,7 @@ import { AGENT_ROUNDS_DEFAULT, AGENT_ROUNDS_MAX } from '@/core/ai/useAiChat';
 import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { ComfyuiPanel } from './ComfyuiPanel';
 import { MediaBackendsPanel } from './MediaBackendsPanel';
+import { InjectionPromptPanel } from './InjectionPromptPanel';
 import { inferProviderName, mergeModels, newModelKey, refillCapacity, refillCaps, sameBaseUrl } from './providerMatch';
 import { bestScore } from '@/lib/fuzzy';
 
@@ -531,6 +532,9 @@ export function ModelSettingsPage() {
         providers={cfg.providers}
         onChangeMediaModel={setMediaModel}
       />
+
+      {/* 注入层提示词：AI 编程使用的系统规则。空白 = 只用内置；冲突时用户填写优先。 */}
+      <InjectionPromptPanel />
 
     </div>
   );

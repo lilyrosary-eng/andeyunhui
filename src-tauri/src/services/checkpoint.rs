@@ -19,7 +19,7 @@
 //! 里只有本程序知道，等于把协作信息锁进了私有目录。
 //!
 //! ```text
-//! <项目根>/.andeyunhui/checkpoints/
+//! <项目根>/.adyh/checkpoints/
 //!   README.md           目录说明（给其它 harness/人看的，写明格式与回滚语义）
 //!   .gitignore          内容 `*` + 例外 ⇒ 快照不进版本库（否则污染项目的 git status）
 //!   index.json          快照清单（最多 10 条，滚动淘汰）
@@ -33,7 +33,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 /// 项目内的快照根目录名（放在项目里，方便多 harness 看见）。
-pub const CHECKPOINT_DIRNAME: &str = ".andeyunhui";
+/// 2026-10-29 起并入统一工作区 `.adyh`；旧 `.andeyunhui/checkpoints` 由 adyh_service 迁移。
+pub const CHECKPOINT_DIRNAME: &str = ".adyh";
 
 /// 每个项目保留的快照数量（用户要求：最多前十轮，滚动淘汰）。
 pub const MAX_PER_PROJECT: usize = 10;
@@ -78,8 +79,10 @@ fn open_map() -> std::sync::MutexGuard<'static, Option<HashMap<String, String>>>
     OPEN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 项目内的快照根：`<项目根>/.andeyunhui/checkpoints`。
+/// 项目内的快照根：`<项目根>/.adyh/checkpoints`。
 fn proj_dir(project_root: &Path) -> Result<PathBuf, String> {
+    // 懒迁移：用户可能先点「快照」再发任务，这时 bootstrap 还没跑过。
+    crate::services::adyh_service::migrate_legacy_checkpoints(project_root);
     let dir = project_root
         .join(CHECKPOINT_DIRNAME)
         .join("checkpoints");
@@ -314,11 +317,13 @@ pub fn list(project_root: Option<&Path>) -> Vec<CheckpointMeta> {
 pub fn rollback(project_root: &Path, id: &str) -> Result<(usize, usize, usize), String> {
     let dir = proj_dir(project_root)?;
     let list = read_index(&dir);
-    let Some(meta) = list.iter().find(|m| m.id == id).cloned() else {
+    let Some(_meta) = list.iter().find(|m| m.id == id).cloned() else {
         return Err(format!("快照不存在: {id}（目录 {}）", dir.display()));
     };
     let m = read_manifest(&dir, id);
-    let proj = PathBuf::from(&meta.project_root);
+    // 回滚目标用**当前项目根**：项目目录可能被改名/移动，meta 里记录的是快照创建时的
+    // 绝对路径，不能作为解析依据（否则迁移后回滚会写到旧路径）。
+    let proj = project_root.to_path_buf();
     let mut restored = 0usize;
     let mut removed = 0usize;
     let mut skipped = 0usize;
@@ -356,5 +361,20 @@ pub fn close(project_root: &Path) {
     let key = project_key(project_root);
     if let Some(map) = open_map().as_mut() {
         map.remove(&key);
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoints_live_under_adyh() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        begin(root, "test").unwrap();
+        assert!(root.join(".adyh/checkpoints/index.json").exists());
+        assert!(!root.join(".andeyunhui").exists());
+        close(root);
     }
 }

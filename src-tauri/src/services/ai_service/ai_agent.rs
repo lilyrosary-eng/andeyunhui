@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use crate::services::ai_service::ai_profile::{load_config, resolve_target, compose_persona_system, compose_effective_system, ensure_api_key};
 use crate::services::ai_service::ai_chat::{ChatMessage, is_deepseek_provider, truncate_messages_for_safety};
 use crate::services::ai_service::ai_tools::{ToolContext, ToolConcurrency, ToolExecResult, execute_tool_once, PendingEdit, registered_tools, tool_schemas_for_api, tool_schemas_for_api_without, mcp_tools_guide, skills_guide, agent_memory_context, estimate_tokens, estimate_tools_tokens, edit_store, approval_store, take_subagent_settles};
-use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session, persist_agent_session, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text, hydrate_images, persist_images};
+use crate::services::ai_service::ai_session::{SessionEvent, EventSession, derive_messages, maybe_compress_session, collect_interrupted_tools, load_agent_session_in, persist_agent_session_in, emit_agent_error, trim_tool_result, split_deltas, plan_snapshot_json, fork_session, replay_derived_messages, fork_err_text, hydrate_images_in, persist_images_in};
 
 /// Agent 对话：原生 tool_calls + 循环。
 /// 流程：非流式请求（带 tools）→ 若返回 message.tool_calls →
@@ -59,24 +59,23 @@ async fn run_agent(
     let persona = compose_persona_system(&cfg);
     let effective_system = compose_effective_system(&system, &persona);
     let agent_hint = "你被允许并且应当在合适时调用下方提供的工具来获取实时信息或完成计算。需要时先调用工具，拿到结果后再组织最终回答；不要编造工具返回的数据。\n\n\
-【工程硬约束 · 修改代码时必须遵守】\n\
-1. 动手前先跑 git status / git diff 看清当前状态；这是判断\"哪些是我的改动\"的唯一依据。\n\
-2. 在开始一批改动前建立可回滚基线（commit / 分支 / stash 任选），不要在没有基线的情况下直接改。\n\
-3. 每完成一个可独立验证的点就提交一次；提交信息写清\"改了什么、为什么改、影响范围\"，一次提交只做一件事。\n\
-4. 提交前确认改动范围（git diff --stat），不要把无关文件混进提交。\n\
-5. 未经用户明确要求，绝不 push、不重写共享历史（rebase/amend 已推送的提交）、不删除用户已有的正式提交。\n\
-6. 排查性改动（临时探针/错误版本）在排查结束后删掉，只保留真正属于产品的改动。\n\
-7. 本应用会在每轮请求开始时自动快照、并在每次写文件前备份改前内容，用户可随时整轮回滚 ——\n\
-   但这不是\"可以随便大改\"的理由：回滚是用户的权利，不是你的安全网。\n\
-8. 写文件工具**写入即落盘**（没有\"审阅后落盘\"这一步），所以每写完一批就要自己确认结果（读回/编译/跑测试）。\n\n\
+写文件工具**写入即落盘**（没有\"审阅后落盘\"这一步），所以每写完一批就要自己确认结果（读回/编译/跑测试）。\n\n\
 【省钱提示 · codemode】需要**连续调用**同一批工具时（批量读多个文件、换几种模式搜索、按列表逐个处理），\n\
 用 codemode 写一段 JS 一次跑完：中间结果留在沙箱，只有 text()/return 回到对话，能省几十倍 token。\n\
 只调一次工具时不要用它。";
     // 注入已启用 MCP 服务器的工具清单，让模型的 mcp 工具可正确填写 server/tool
     let mcp_guide = mcp_tools_guide(&app).await;
-    // 注入项目级记忆/原则/工程契约（对齐 IDE 约定），仅读、限长
+    // 注入项目级 .adyh 规则 / agent 定义 / 记忆索引（只读、限长）
     let project_root_pb = project_root.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
 
+    // 首次任务建立项目工作区 .adyh / .Talk（幂等）。必须放在快照与 system 组装之前：
+    // 本轮就要能读到新建的规则/记忆，且检查点要落到 .adyh/checkpoints。
+    // 失败只告警 —— 工作区是增强，不能挡住任务本身。
+    if let Some(root) = project_root_pb.as_ref() {
+        if let Err(e) = crate::services::adyh_service::bootstrap(root) {
+            log::warn!("[adyh] 项目工作区初始化失败（任务继续）: {e}");
+        }
+    }
     // 每轮 agent 请求开一个快照点（2026-10-20）。
     // 写文件工具在**落盘前**把改前内容 copy 进这个快照，用户随时可整轮回滚。
     // 只备份真正被改到的文件（copy-on-write），不复制整棵树 —— 对 node_modules / target 免疫。
@@ -95,12 +94,33 @@ async fn run_agent(
             log::warn!("[checkpoint] 本轮快照创建失败（写入仍会继续，但无法回滚）: {e}");
         }
     }
-    let mem_ctx = agent_memory_context(project_root_pb.as_deref()).await;
-    let base_system = if effective_system.trim().is_empty() {
-        agent_hint.to_string()
-    } else {
-        format!("{}\n\n{}", effective_system, agent_hint)
-    };
+    let query = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let mut mem_ctx = agent_memory_context(project_root_pb.as_deref(), &query).await;
+    // .Talk 未读：把其它 harness 的消息带进本轮上下文，并推进自己的游标。
+    // 消息内容一律标记为不可信（提示词里已有总则，这里再显式标注一次）。
+    if let Some(root) = project_root_pb.as_deref() {
+        let code = crate::services::adyh_service::harness_code(root);
+        let (talk_text, latest) = crate::services::adyh_service::talk_unread(root, &code);
+        if !talk_text.is_empty() {
+            mem_ctx.push_str(&talk_text);
+            if let Some(last) = latest {
+                if let Err(e) = crate::services::adyh_service::talk_mark_read(root, &code, &last) {
+                    log::warn!("[adyh] 标记 .Talk 已读失败: {e}");
+                }
+            }
+        }
+    }
+    // 主机级默认规则 + 前端 per-call system + 工具提示。项目规则随后由 mem_ctx 追加，
+    // 越具体越靠后；冲突时默认规则里已写明「先停下提问」。
+    let builtin = crate::services::adyh_service::builtin_prompt(&app);
+    let mut sys_parts: Vec<&str> = vec![builtin.trim(), effective_system.trim(), agent_hint.trim()];
+    sys_parts.retain(|s| !s.is_empty());
+    let base_system = sys_parts.join("\n\n");
     // 注入项目技能索引（progressive disclosure）：只带名称+关键词，详情用 skill 工具按需加载
     let skill_guide = skills_guide(project_root_pb.as_deref());
     let system_final = format!("{}{}{}{}", base_system, mcp_guide, skill_guide, mem_ctx);
@@ -131,11 +151,13 @@ async fn run_agent(
         .map(|m| m.vision_native_trusted())
         .unwrap_or(false);
 
+    // 项目根稍后会被 move 进 ToolContext；会话/媒体落盘还要用它，先留一份。
+    let project_root_store = project_root_pb.clone();
     // 必须在把 images move 进 ToolContext **之前**存盘：事件日志只留引用（不留 base64），
     // 所以这一步会产生 `image://<id>`（供 derive 时读回）。非直发时不存，
     // 省一次磁盘写，也让「没走直发」在日志上看得出来（事件里没有 image_refs）。
     let image_refs = if native_vision && !images.is_empty() {
-        persist_images(&app, &images)
+        persist_images_in(&app, &images, project_root_store.as_deref())
     } else {
         Vec::new()
     };
@@ -158,7 +180,7 @@ async fn run_agent(
     //   - 若磁盘已有同名日志（崩溃恢复 / 上一轮续聊）→ 加载为续接基础，仅把本轮新消息（不含 system）追加；
     //   - 否则全新会话 → 把前端传入的环境之外历史（user/assistant 文本）作为初始事件灌入。
     // 此后每一轮模型回合 / 工具结果都以事件追加，LLM 消息每次由 derive 派生。
-    let mut session = match load_agent_session(&app, &request_id) {
+    let mut session = match load_agent_session_in(&app, &request_id, project_root_store.as_deref()) {
         Some(mut old) => {
             // 续接：追加新 user 指令即可；旧历史已在日志里，无需也不可能重复灌入。
             for m in &messages {
@@ -211,7 +233,7 @@ async fn run_agent(
         //    image_url → 整个请求 400。只在确证支持时才把引用读回成 data URL。
         //
         // 幂等，循环外一次即可（循环内只追加 assistant/tool 事件，不带图）。
-        hydrate_images(&app, &mut session);
+        hydrate_images_in(&app, &mut session, project_root_store.as_deref());
     }
 
     for _round in 0..max_rounds {
@@ -523,7 +545,7 @@ async fn run_agent(
                 active = seg_end;
             }
             // 崩溃恢复：每轮工具结果落地即持久化一次，进程在中途被杀也能从那轮续拉。
-            persist_agent_session(&app, &session);
+            persist_agent_session_in(&app, &session, project_root_store.as_deref());
             continue;
         }
 
@@ -566,7 +588,7 @@ async fn run_agent(
         }));
     }
     // 事件日志落盘（审计 + 精确重放；append-only 快照）。
-    persist_agent_session(&app, &session);
+    persist_agent_session_in(&app, &session, project_root_store.as_deref());
     let _ = app.emit("ai-done", serde_json::json!({ "requestId": request_id }));
     Ok(())
 }
@@ -670,11 +692,13 @@ pub async fn ai_agent_fork(
     source_id: String,
     child_id: String,
     boundary: Option<usize>,
+    project_root: Option<String>,
 ) -> Result<String, String> {
-    let source = load_agent_session(&app, &source_id)
+    let root = project_root.filter(|s| !s.trim().is_empty()).map(std::path::PathBuf::from);
+    let source = load_agent_session_in(&app, &source_id, root.as_deref())
         .ok_or_else(|| format!("源会话 {source_id} 不存在（尚未持久化）"))?;
     let child = fork_session(&source, &child_id, boundary).map_err(|e| fork_err_text(&e))?;
-    persist_agent_session(&app, &child);
+    persist_agent_session_in(&app, &child, root.as_deref());
     Ok(serde_json::to_string(&serde_json::json!({
         "childId": child.id(),
         "parentId": child.parent(),
@@ -691,8 +715,10 @@ pub async fn ai_agent_replay(
     app: AppHandle,
     source_id: String,
     boundary: Option<usize>,
+    project_root: Option<String>,
 ) -> Result<String, String> {
-    let source = load_agent_session(&app, &source_id)
+    let root = project_root.filter(|s| !s.trim().is_empty()).map(std::path::PathBuf::from);
+    let source = load_agent_session_in(&app, &source_id, root.as_deref())
         .ok_or_else(|| format!("会话 {source_id} 不存在（尚未持久化）"))?;
     let msgs = replay_derived_messages(&source, boundary, "")
         .map_err(|e| fork_err_text(&e))?;
@@ -831,31 +857,39 @@ pub async fn ai_agent_status(_app: AppHandle, request_id: String) -> Result<Stri
 
 /// 列出磁盘上已持久化的 agent 会话元数据，按创建时间倒序：
 /// `[{ id, createdAt, parent, eventCount, userPreview, toolCount }]`
+/// 项目绑定时合并 `.adyh/sessions`（随项目迁移的那一份优先）。
 #[tauri::command]
-pub async fn ai_agent_sessions(app: AppHandle) -> Result<String, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("ai_sessions");
+pub async fn ai_agent_sessions(app: AppHandle, project_root: Option<String>) -> Result<String, String> {
     let mut out: Vec<serde_json::Value> = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok("[]".to_string()); // 目录不存在 = 尚无 agent 会话
-    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(dir) = app.path().app_data_dir() {
+        collect_session_metas(&dir.join("ai_sessions"), &mut seen, &mut out);
+    }
+    if let Some(root) = project_root.filter(|s| !s.trim().is_empty()) {
+        let dir = crate::services::adyh_service::sessions_dir(std::path::Path::new(&root));
+        collect_session_metas(&dir, &mut seen, &mut out);
+    }
+    out.sort_by(|a, b| {
+        b["createdAt"].as_str().unwrap_or("").cmp(a["createdAt"].as_str().unwrap_or(""))
+    });
+    serde_json::to_string(&out).map_err(|e| e.to_string())
+}
+
+fn collect_session_metas(
+    dir: &std::path::Path,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<serde_json::Value>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let p = e.path();
         if p.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Some(id) = p.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(&p) else {
-            continue;
-        };
-        let Ok(session) = serde_json::from_str::<EventSession>(&text) else {
-            continue;
-        };
+        let Some(id) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+        if !seen.insert(id.to_string()) { continue; }
+        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+        let Ok(session) = serde_json::from_str::<EventSession>(&text) else { continue };
         let mut user_preview = String::new();
         let mut tool_count = 0usize;
         for ev in session.events() {
@@ -876,19 +910,17 @@ pub async fn ai_agent_sessions(app: AppHandle) -> Result<String, String> {
             "toolCount": tool_count,
         }));
     }
-    out.sort_by(|a, b| {
-        b["createdAt"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(a["createdAt"].as_str().unwrap_or(""))
-    });
-    serde_json::to_string(&out).map_err(|e| e.to_string())
 }
 
 /// 读取单个 agent 会话的完整事件日志（append-only 原始事件，供轨迹面板 / 审计渲染）。
 #[tauri::command]
-pub async fn ai_agent_events(app: AppHandle, source_id: String) -> Result<String, String> {
-    let session = load_agent_session(&app, &source_id)
+pub async fn ai_agent_events(
+    app: AppHandle,
+    source_id: String,
+    project_root: Option<String>,
+) -> Result<String, String> {
+    let root = project_root.filter(|s| !s.trim().is_empty()).map(std::path::PathBuf::from);
+    let session = load_agent_session_in(&app, &source_id, root.as_deref())
         .ok_or_else(|| format!("会话 {source_id} 不存在（尚未持久化）"))?;
     serde_json::to_string(&session).map_err(|e| e.to_string())
 }

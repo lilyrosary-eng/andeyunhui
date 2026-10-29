@@ -1763,6 +1763,17 @@ fn main() {
             // 工程快照：AI 每轮请求自动建点，用户可整轮回滚（services/checkpoint.rs）
             checkpoint_list,
             checkpoint_rollback,
+            // 项目工作区 .adyh / .Talk（services/adyh_service.rs）
+            adyh_bootstrap,
+            adyh_status,
+            adyh_prompt_get,
+            adyh_prompt_set,
+            adyh_conversations_load,
+            adyh_conversations_save,
+            adyh_conversations_clear,
+            adyh_talk_unread,
+            adyh_talk_mark_read,
+            adyh_talk_post,
             // 粘贴进来的相对图片路径：多目录有界检索（commands/image_resolve.rs）
             resolve_local_images,
             tray_summon_main,

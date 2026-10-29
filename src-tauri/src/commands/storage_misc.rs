@@ -342,3 +342,92 @@ pub fn checkpoint_rollback(project_root: String, id: String) -> Result<serde_jso
         "skipped": skipped,
     }))
 }
+
+// ================= 项目工作区 .adyh / .Talk =================
+//
+// 实现见 services/adyh_service.rs。这里只做命令外壳（命令宏必须在 main.rs 能 glob
+// 到的模块里展开，services 里的 re-export 不参与宏解析）。
+
+/// 首次任务建立 .adyh / .Talk。幂等，只补缺失文件。
+#[tauri::command]
+pub fn adyh_bootstrap(project_root: String) -> Result<serde_json::Value, String> {
+    crate::services::adyh_service::bootstrap(std::path::Path::new(&project_root))
+}
+
+/// 工作区状态（是否已初始化、代号、会话数）。
+#[tauri::command]
+pub fn adyh_status(project_root: String) -> serde_json::Value {
+    crate::services::adyh_service::status(std::path::Path::new(&project_root))
+}
+
+/// 读取内置默认提示词与用户自定义注入。
+#[tauri::command]
+pub fn adyh_prompt_get(app: tauri::AppHandle) -> serde_json::Value {
+    crate::services::adyh_service::prompt_payload(&app)
+}
+
+/// 保存用户自定义注入（空串 = 只用内置默认）。新会话立即生效。
+#[tauri::command]
+pub fn adyh_prompt_set(app: tauri::AppHandle, custom: String) -> Result<(), String> {
+    let mut g = crate::services::adyh_service::load_global(&app);
+    g.custom_injection = custom;
+    crate::services::adyh_service::save_global(&app, &g)
+}
+
+/// 读取项目会话库（.adyh/conversations）。
+#[tauri::command]
+pub fn adyh_conversations_load(project_root: String) -> serde_json::Value {
+    crate::services::adyh_service::load_conversations(std::path::Path::new(&project_root))
+}
+
+/// 写入项目会话库（按会话目录 upsert，不删除未出现的会话）。
+#[tauri::command]
+pub fn adyh_conversations_save(
+    project_root: String,
+    payload: serde_json::Value,
+) -> Result<usize, String> {
+    crate::services::adyh_service::save_conversations(std::path::Path::new(&project_root), &payload)
+}
+
+/// 清空项目会话库（用户点「清空全部对话」）。
+#[tauri::command]
+pub fn adyh_conversations_clear(project_root: String) -> Result<usize, String> {
+    crate::services::adyh_service::clear_conversations(std::path::Path::new(&project_root))
+}
+
+/// 读取 .Talk 未读消息（不自动标记已读）。
+#[tauri::command]
+pub fn adyh_talk_unread(project_root: String, code: Option<String>) -> serde_json::Value {
+    let root = std::path::Path::new(&project_root);
+    let code = code.unwrap_or_else(|| crate::services::adyh_service::harness_code(root));
+    let (text, latest) = crate::services::adyh_service::talk_unread(root, &code);
+    serde_json::json!({ "text": text, "latest": latest })
+}
+
+/// 把游标推进到指定消息（只写自己的 _routing/<code>.json）。
+#[tauri::command]
+pub fn adyh_talk_mark_read(
+    project_root: String,
+    code: Option<String>,
+    last_read: String,
+) -> Result<(), String> {
+    let root = std::path::Path::new(&project_root);
+    let code = code.unwrap_or_else(|| crate::services::adyh_service::harness_code(root));
+    crate::services::adyh_service::talk_mark_read(root, &code, &last_read)
+}
+
+/// 发一条 .Talk 消息（不可变文件）。
+#[tauri::command]
+pub fn adyh_talk_post(
+    project_root: String,
+    to: String,
+    body: String,
+    thread: Option<String>,
+) -> Result<String, String> {
+    crate::services::adyh_service::talk_post(
+        std::path::Path::new(&project_root),
+        &to,
+        &body,
+        thread.as_deref(),
+    )
+}

@@ -114,17 +114,26 @@ pub(crate) fn command_is_dangerous(cmd: &str) -> bool {
 /// 受保护路径判定：命中即禁止写/编辑/删除（读取不受限）。命名大小写不敏感（Windows 友好）。
 /// 用于 agent 文件工具的「硬拦截」：不可碰版本控制元数据、依赖目录与密钥文件。
 pub(crate) fn is_protected_path(p: &Path) -> bool {
-    for seg in p.components() {
-        if let std::path::Component::Normal(s) = seg {
-            let seg = s.to_string_lossy().to_lowercase();
-            // .andeyunhui：本应用的项目内元数据（AI 检查点快照）。
-            // 必须受保护 —— 否则 agent 可以回滚自己的回滚、甚至删掉快照，
-            // 用户手里那条"随时能回退"的保险就没了。
-            if seg == ".git" || seg == ".svn" || seg == ".hg" || seg == "node_modules"
-                || seg == ".andeyunhui"
-            {
-                return true;
-            }
+    // 先收集规范化后的路径段：有些保护是**两段组合**（.adyh/checkpoints），
+    // 只看单段会把整个 .adyh 都封死 —— 那样 agent 连自己的记忆都写不了。
+    let segs: Vec<String> = p
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    for (i, seg) in segs.iter().enumerate() {
+        // .andeyunhui：旧版项目元数据目录（迁移期继续保护）。
+        // .adyh/checkpoints：本应用的项目内检查点。必须受保护 —— 否则 agent 可以回滚
+        // 自己的回滚、甚至删掉快照，用户手里那条"随时能回退"的保险就没了。
+        // .Talk/_routing：每个 harness 只能改自己的游标，通用文件工具一律禁写。
+        if seg == ".git" || seg == ".svn" || seg == ".hg" || seg == "node_modules"
+            || seg == ".andeyunhui"
+            || (seg == ".adyh" && segs.get(i + 1).map(|s| s == "checkpoints").unwrap_or(false))
+            || (seg == ".talk" && segs.get(i + 1).map(|s| s == "_routing").unwrap_or(false))
+        {
+            return true;
         }
     }
     let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();

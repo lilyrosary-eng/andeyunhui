@@ -149,13 +149,19 @@ fn decode_base64(s: &str) -> Option<Vec<u8>> {
 /// 失败返回 None —— 调用方应回落「不存，走原占位串」，
 /// **不能让存储失败阻断对话**（图是增强，不是主链路）。
 pub fn store_data_url(app: &AppHandle, data_url: &str) -> Option<String> {
+    let dir = media_dir(app)?;
+    store_data_url_in(&dir, data_url)
+}
+
+/// 把 data URL 存进指定目录（项目内 `.adyh/media` 复用同一条内容寻址逻辑）。
+pub fn store_data_url_in(dir: &Path, data_url: &str) -> Option<String> {
     let parsed = parse_data_url(data_url)?;
     let bytes = decode_base64(&parsed.base64)?;
     if bytes.is_empty() {
         return None;
     }
     let id = content_id(&bytes);
-    let dir = media_dir(app)?;
+    std::fs::create_dir_all(dir).ok()?;
     let file = dir.join(format!("{}.{}", id, ext_of(&parsed.mime)));
     // 已存在就跳过写入（去重）。仍然比对长度，避免极端情况下同 id 不同内容。
     if file.exists() {
@@ -185,13 +191,18 @@ pub fn test_decode(s: &str) -> Option<Vec<u8>> {
 /// 找不到/读不出返回 None —— 调用方应**跳过该图**而不是报错中断：
 /// 图被用户清理掉是正常情况，不该让整轮对话失败。
 pub fn load_data_url(app: &AppHandle, r: &str) -> Option<String> {
+    let dir = crate::data_location::resolve_data_root(app).join("ai_media");
+    load_data_url_from(&dir, r)
+}
+
+/// 从指定目录按引用键读回 data URL（项目内 `.adyh/media` 优先）。
+pub fn load_data_url_from(dir: &Path, r: &str) -> Option<String> {
     let id = r.strip_prefix(REF_SCHEME)?;
     if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
         // 防目录穿越：id 是我们自己生成的十六进制串，不该含分隔符
         return None;
     }
-    let dir = crate::data_location::resolve_data_root(app).join("ai_media");
-    let entries = std::fs::read_dir(&dir).ok()?;
+    let entries = std::fs::read_dir(dir).ok()?;
     // 扩展名在存的时候才决定，这里按 id 前缀找
     for e in entries.flatten() {
         let name = e.file_name();
