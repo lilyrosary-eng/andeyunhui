@@ -173,6 +173,45 @@ fn build_anthropic_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> 
         .collect()
 }
 
+/// 把原生图片挂到最后一条 user 消息上（OpenAI Vision 的 content block 形状）。
+///
+/// 只处理最后一条 user：本轮用户新发的内容在末尾，历史里的旧图不在这里重复发送
+/// （历史图片目前仍以当时的文本描述/记录形式存在）。
+fn inject_native_images(messages: &mut [serde_json::Value], images: &[String]) {
+    let Some(pos) = messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+    else {
+        return;
+    };
+    let text = messages[pos]
+        .get("content")
+        .map(|c| match c {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("
+"),
+            _ => String::new(),
+        })
+        .unwrap_or_default();
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    if !text.is_empty() {
+        blocks.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+    for url in images.iter().take(8) {
+        blocks.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": url },
+        }));
+    }
+    if !blocks.is_empty() {
+        messages[pos]["content"] = serde_json::Value::Array(blocks);
+    }
+}
+
 /// 保险性 messages 截断：估算总 token 上界，超过阈值时按「保留首条 system + 最近 N 条」策略裁剪。
 ///
 /// 背景：2026-08 用户截图复现群聊/插件沙箱内 `useAiChat` 上游调用把累计历史全量塞入单请求，
@@ -256,6 +295,9 @@ pub async fn ai_chat(
     // 只影响本次请求、不改配置 —— 见 `ResolvedTarget::effort_with_override` 的文档。
     // （用 // 而不是 ///：doc 注释不允许出现在函数参数上。）
     effort: Option<String>,
+    // 原生多模态图片（data URL）：仅当当前模型被确证支持视觉时由前端传入。
+    // 非视觉模型不应传（前端会改走 ai_vision_ocr 兜底），这里也会再校验一次。
+    images: Option<Vec<String>>,
 ) -> Result<(), String> {
     // 取消标志：先登记再干活，保证用户在首个 token 到达前就能停（否则「点了没反应」）。
     // guard 持有期间标志常驻表中；函数返回（无论哪条路径）即自动摘除。
@@ -359,6 +401,25 @@ pub async fn ai_chat(
             }
         } else {
             messages_json.insert(0, serde_json::json!({ "role": "system", "content": effective_system }));
+        }
+    }
+    // 原生多模态：当前模型确证支持视觉时，图片直接随本轮 user 消息发给模型；
+    // 否则忽略（前端应已走 ai_vision_ocr 兜底，把描述拼进文本）。
+    if let Some(imgs) = images.as_ref().filter(|v| !v.is_empty()) {
+        let native_vision = config
+            .providers
+            .iter()
+            .flat_map(|p| p.models.iter())
+            .find(|m| m.id == cfg.id)
+            .map(|m| m.vision_native_trusted())
+            .unwrap_or(false);
+        if native_vision {
+            inject_native_images(&mut messages_json, imgs);
+        } else {
+            log::warn!(
+                "[ai_chat] 当前模型未确证支持原生视觉，忽略 {} 张图片（应由前端走 ai_vision_ocr 兜底）",
+                imgs.len()
+            );
         }
     }
     let mut body = serde_json::json!({

@@ -1021,6 +1021,31 @@ pub async fn ai_set_config(app: AppHandle, payload: AiConfig) -> Result<(), Stri
     write_config(&app, &payload)
 }
 
+/// 当前档案的模型是否被**确证**支持原生视觉（供应商上报或实测探测）。
+///
+/// 前端发图前用它做路由：
+/// - true  → 图片直接随请求发给当前模型，**不**调用 ai_vision_ocr 兜底；
+/// - false → 才走 ai_vision_ocr（用单独配置的视觉模型）兜底。
+///
+/// 与 agent 的 `native_vision` 同口径（`vision_native_trusted`）：名字启发式/用户手改
+/// 都不算，避免把图片发给实际不支持的端点导致 400。
+#[tauri::command]
+pub async fn ai_model_vision_native(app: AppHandle, profile_id: Option<String>) -> bool {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config(&app);
+        let cfg = resolve_target(&config, profile_id.as_deref());
+        config
+            .providers
+            .iter()
+            .flat_map(|p| p.models.iter())
+            .find(|m| m.id == cfg.id)
+            .map(|m| m.vision_native_trusted())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 // ========== 以下三个是兼容命令，签名与语义保持 v1 不变 ==========
 //
 // 保留理由：它们被 13 处前端调用，其中 4 处在插件里（走 pluginSandbox.ts:199-200,219

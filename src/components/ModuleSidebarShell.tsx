@@ -83,9 +83,10 @@ export function ModuleSidebarShell({
   }, []);
 
   const toggleCollapse = useCallback(() => {
+    const next = !collapsed;
     if (timerRef.current) clearTimeout(timerRef.current);
 
-    if (collapsed) {
+    if (next === false) {
       // 展开：宽度先展开，内容再出现（"壳打开→内容出来"）
       setCollapsed(false);
       storage.setString(storageKey, 'false');
@@ -101,6 +102,24 @@ export function ModuleSidebarShell({
       }, COLLAPSE_FADE_MS);
     }
   }, [collapsed, storageKey]);
+
+  // 外部「强制收起」：例如 AI 对话打开右侧执行轨迹时，需要让出宽度。
+  // 事件带上 moduleId，避免影响其它模块的侧栏。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ moduleId?: string }>).detail;
+      if (detail?.moduleId && detail.moduleId !== moduleId) return;
+      if (collapsed) return;
+      if (timerRef.current) clearTimeout(timerRef.current);
+      setContentVisible(false);
+      timerRef.current = setTimeout(() => {
+        setCollapsed(true);
+        storage.setString(storageKey, 'true');
+      }, COLLAPSE_FADE_MS);
+    };
+    window.addEventListener('module-sidebar-collapse', handler as EventListener);
+    return () => window.removeEventListener('module-sidebar-collapse', handler as EventListener);
+  }, [collapsed, moduleId, storageKey]);
 
   return (
     <div

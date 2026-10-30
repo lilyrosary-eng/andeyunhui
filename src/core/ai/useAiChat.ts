@@ -11,7 +11,10 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
 import { GROUP_HISTORY_LIMIT, safeMessages, buildRequestMessages } from '@/core/ai/chatPayload';
-import { uid, persistConversations, loadConversations, resolveTitle, freezeVersions, stashTail, pickVersion, sanitizeSeed, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
+import { uid, resolveTitle, freezeVersions, stashTail, pickVersion, sanitizeSeed, makeConv, makeGroupConv, mergeConversations, AI_CHAT_CONVERSATIONS_KEY } from '@/core/ai/util';
+// 媒体（图片/音频/视频）持久化：localStorage 只存 image:// 短引用，本体落本地媒体库，
+// 避免配额瘦身把图片变成「未随历史保存」的文字。
+import { loadConversationsWithMedia, persistConversationsWithMedia } from '@/core/ai/mediaPersistence';
 import { resolveMediaConfig } from '@/core/ai/media/resolve';
 import { retrieveChatContext, ingestChatTurn, autoSyncCompanion } from '@/core/stores/semanticMemory';
 import { maybeSummarizeConversation } from '@/core/ai/l4SummaryLoop';
@@ -287,24 +290,44 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     }
   }, []);
 
-  // 初始化：加载持久化会话 + 档案
+  // 初始化：加载持久化会话（含图片回填）+ 档案
   useEffect(() => {
-    const loaded = loadConversations(persistKey);
-    const initial = loaded.length ? loaded : allowEmpty ? [] : [makeConv()];
-    setConversations(initial);
-    setActiveId(initial[0]?.id ?? '');
-    activeIdRef.current = initial[0]?.id ?? '';
-    // 持久化链路即刻就绪：ready 曾绑在 loadProfile（网络 invoke）上，导致 profile
-    // 加载期间的会话变更（如刚点「新对话」）不被持久化——切模块后新对话丢失。
-    setReady(true);
-    void loadProfile();
+    let cancelled = false;
+    setReady(false); // 加载期间不要用旧会话写新 key
+    void (async () => {
+      const loaded = await loadConversationsWithMedia(persistKey);
+      if (cancelled) return;
+      const initial = loaded.length ? loaded : allowEmpty ? [] : [makeConv()];
+      // 恢复上次选中的会话：浮岛收起/展开会卸载组件，不记 active 就会退回第一条。
+      // key 按 persistKey 隔离（主窗口/胶囊/工作台各一份）。
+      const activeKey = `${persistKey}.active`;
+      const savedActive = storage.getString(activeKey, '');
+      const initialActive = initial.some((c) => c.id === savedActive) ? savedActive : (initial[0]?.id ?? '');
+      setConversations(initial);
+      setActiveId(initialActive);
+      activeIdRef.current = initialActive;
+      // 持久化链路即刻就绪：ready 曾绑在 loadProfile（网络 invoke）上，导致 profile
+      // 加载期间的会话变更（如刚点「新对话」）不被持久化——切模块后新对话丢失。
+      setReady(true);
+      void loadProfile();
+    })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [persistKey, allowEmpty]);
+
+  // 当前会话 id 持久化（与消息分开存）：组件卸载重挂时恢复上次选中项。
+  useEffect(() => {
+    if (!ready) return;
+    const activeKey = `${persistKey}.active`;
+    if (activeId) storage.setString(activeKey, activeId);
+    else storage.remove(activeKey);
+  }, [activeId, persistKey, ready]);
 
   // 持久化（会话变化即写本地）；且向其它窗口广播合并（应用远端时不重复广播）
   useEffect(() => {
     if (!ready) return;
-    persistConversations(persistKey, conversations);
+    // 先异步把媒体转存成短引用，再写 localStorage；并发写只保留最后一次。
+    void persistConversationsWithMedia(persistKey, conversations);
     if (!applyingRemote.current) {
       void emit(syncEvent, { src: myLabel, conversations }).catch(() => {});
     }
@@ -490,10 +513,22 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
     if (ragContext) systemParts.push(ragContext);
     const finalSystem = systemParts.length ? systemParts.join('\n\n') : undefined;
 
-    // 多模态·发图（对齐移动端阶段 5）：逐张调用 ai_vision_ocr 生成描述，追加到发给模型的 user 消息，
-    // 让 AI「看见」图片（图片本体不发给后端，只发描述，兼容不支持视觉的模型）。失败静默标记不中断。
-    let imageNote = '';
+    // 多模态路由：先问后端「当前模型是否被确证支持原生视觉」。
+    //   - 支持 → 图片直接随请求发给模型，**不**激活视觉兜底模型；
+    //   - 不支持 → 才逐张调用 ai_vision_ocr 生成描述，拼进 user 文本（兜底）。
+    // 检查失败按「不支持」处理，宁可走兜底也不把图片发给可能不支持的端点。
+    let nativeVision = false;
     if (hasImages) {
+      try {
+        nativeVision = await invoke<boolean>('ai_model_vision_native', {
+          profileId: profileIdRef.current || null,
+        });
+      } catch {
+        nativeVision = false;
+      }
+    }
+    let imageNote = '';
+    if (hasImages && !nativeVision) {
       for (let i = 0; i < images!.length; i++) {
         const img = images![i];
         const mime = img.startsWith('data:image/') ? img.slice(11, img.indexOf(';')) : 'image/png';
@@ -535,6 +570,9 @@ export function useAiChat(options: UseAiChatOptions = {}): UseAiChatResult {
         inject: shouldInject ? imageNote + attachNote : '',
         skipUserAppend: !!sendOpts?.skipUserAppend,
       }),
+      // 原生多模态：仅当前模型确证支持视觉时把图片随请求发给 ai_chat；
+      // 否则图片已被 OCR 描述替代，不发原图。
+      ...(nativeVision && hasImages && images ? { images } : {}),
       stream: true,
       ...(finalSystem ? { system: finalSystem } : {}),
       ...(effExcludeGlobalPersona ? { exclude_global_persona: true } : {}),

@@ -333,10 +333,17 @@ export function useAiStream(): UseAiStreamResult {
     if (semantic) {
       system += '\n\n' + semantic;
     }
-    // 多模态·用户发图（阶段 5）：调用 ai_vision_ocr 生成图片描述注入 system，
-    // 让 AI「看见」用户发的图（图片本身不发给后端，只发描述，兼容不支持视觉的模型）。
-    let imageNote = '';
+    // 多模态路由：当前模型确证支持原生视觉就直发原图；否则才调用 ai_vision_ocr 兜底。
+    let nativeVision = false;
     if (images?.length) {
+      try {
+        nativeVision = await invoke<boolean>('ai_model_vision_native', { profileId: src.profileId });
+      } catch {
+        nativeVision = false;
+      }
+    }
+    let imageNote = '';
+    if (images?.length && !nativeVision) {
       for (let i = 0; i < images.length; i++) {
         const img = images[i];
         const mime = img.startsWith('data:image/') ? img.slice(11, img.indexOf(';')) : 'image/png';
@@ -373,7 +380,12 @@ export function useAiStream(): UseAiStreamResult {
 
     try {
       log('ai_chat 发送', { reqId, profileId: src.profileId, msgs: payload.length });
-      await invoke('ai_chat', { requestId: reqId, messages: payload, profileId: src.profileId });
+      await invoke('ai_chat', {
+        requestId: reqId,
+        messages: payload,
+        profileId: src.profileId,
+        ...(nativeVision && images?.length ? { images } : {}),
+      });
     } catch (e) {
       if (reqRef.current === reqId) {
         const err = String(e);

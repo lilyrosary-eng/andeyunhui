@@ -9,13 +9,13 @@ export const EXPANDED_W = 460;
 export const EXPANDED_H = 340; // 播放器模式
 export const CHAT_H = 460; // 对话模式（更高，容纳消息列表）
 /**
- * AI 编程（aide）面板展开尺寸 = 对话模式的 **2 倍宽 × 2 倍高**（2026-10-19 用户指定）。
+ * AI 编程 / AI 攻防面板展开尺寸 = 对话模式的 **2 倍宽 × 1.6 倍高**（2026-10-29 用户调整）。
  *
- * 为什么单独开一份常量而不是改 EXPANDED_W/CHAT_H：用户要求"仅 AI 编程这一个变，
- * 其他模式尺寸全不动"。对话/搜索/传输/资源四种模式仍用 EXPANDED_W × 各自高度。
+ * 为什么单独开一份常量而不是改 EXPANDED_W/CHAT_H：用户要求"仅 AI 编程/攻防变，
+ * 其他模式尺寸全不动"。高度从 2 倍降到 1.6 倍，是为了让浮岛覆盖范围不要顶到屏幕底部。
  */
 export const AIDE_W = EXPANDED_W * 2; // 920
-export const AIDE_H = CHAT_H * 2; // 920
+export const AIDE_H = Math.round(CHAT_H * 1.6); // 736（原 920，缩短约 20%）
 export const SEARCH_H = 470;
 export const TRANSFER_H = 470; // 搜索模式（容纳结果列表）
 export const RESOURCE_H = 344; // 资源监视模式（4 张指标卡 2×2，每张含「主数值 + 频率/功耗副行」）

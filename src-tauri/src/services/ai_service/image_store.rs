@@ -325,6 +325,20 @@ pub fn ai_media_usage(app: AppHandle) -> serde_json::Value {
     serde_json::json!({ "bytes": bytes, "count": count })
 }
 
+/// 把一条 data URL 落到本地媒体库，返回 `image://<id>` 引用。
+/// 前端用它把会话里的图片从 localStorage 挪到磁盘：localStorage 只存短引用，
+/// 重进对话时再用 `ai_media_load` 读回，图片就不会因为配额瘦身变成文字。
+#[tauri::command]
+pub fn ai_media_store(app: AppHandle, data_url: String) -> Option<String> {
+    store_data_url(&app, &data_url)
+}
+
+/// 按 `image://<id>` 引用读回 data URL（供会话加载时回填图片）。
+#[tauri::command]
+pub fn ai_media_load(app: AppHandle, r: String) -> Option<String> {
+    load_data_url(&app, &r)
+}
+
 /// 清理媒体目录。`days` 为 None 时清空全部；Some(n) 只清 n 天前的。
 #[tauri::command]
 pub fn ai_media_cleanup(app: AppHandle, days: Option<u64>) -> serde_json::Value {

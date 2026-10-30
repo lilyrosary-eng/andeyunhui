@@ -416,6 +416,25 @@ pub fn adyh_talk_mark_read(
     crate::services::adyh_service::talk_mark_read(root, &code, &last_read)
 }
 
+// ================= 导轨读者标记（跨窗口共享） =================
+
+/// 读取一个会话作用域的全部标记：`{ messageId: "mark" | "star" }`。
+#[tauri::command]
+pub fn turn_marks_get(app: tauri::AppHandle, scope: String) -> serde_json::Value {
+    crate::services::turn_marks::get(&app, &scope)
+}
+
+/// 设置/清除一条标记（`mark` 为空 = 取消）。后端 JSON 是跨窗口事实源。
+#[tauri::command]
+pub fn turn_marks_put(
+    app: tauri::AppHandle,
+    scope: String,
+    id: String,
+    mark: Option<String>,
+) -> Result<(), String> {
+    crate::services::turn_marks::put(&app, &scope, &id, mark.as_deref())
+}
+
 /// 发一条 .Talk 消息（不可变文件）。
 #[tauri::command]
 pub fn adyh_talk_post(

@@ -11,10 +11,15 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useI18n } from '@/lib/i18n';
 import { useCapsuleStore } from '@/stores/capsuleStore';
 import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
 import { KeepButton } from '@/components/KeepButton';
+import { TurnRail } from '@/components/chat/TurnRail';
+import { jumpToMessageIndex } from '@/components/chat/jumpToMessage';
+import { estimateMessageHeight } from '@/components/chat/estimateMessageHeight';
+import { activeTurnMessageIndex } from '@/components/chat/activeTurn';
 import { useAiStream } from './useAiStream';
 import { btnBase, GOLD } from './constants';
 import { IconClose, IconSend, IconStop } from './icons';
@@ -24,6 +29,7 @@ import { attachMarkdownCopyHandler, injectMarkdownStyles, renderMarkdown } from 
 import { mergeConversations } from '@/core/ai/util';
 
 const AIDE_STORE_KEY = 'andeyunhui.capsule.aide.conversations.v2'; // 升版本清空历史浮岛 AI 编程对话（与 IDE 对齐）
+const AIDE_ACTIVE_KEY = 'andeyunhui.capsule.aide.activeConv'; // 上次选中的会话 id（收起/展开后恢复）
 const CONV_TITLE_MAX = 20;
 
 /** 后端 .adyh 工作区状态（adyh_status 返回）。 */
@@ -155,9 +161,19 @@ function CapsuleAide() {
     return [{ id: 'ac' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
   }, []);
   const [aideConversations, setAideConversations] = useState<Conversation[]>(initialAideConvs);
-  const [aideActiveConvId, setAideActiveConvId] = useState<string>(initialAideConvs[0].id);
+  const [aideActiveConvId, setAideActiveConvId] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(AIDE_ACTIVE_KEY);
+      if (saved && initialAideConvs.some((c) => c.id === saved)) return saved;
+    } catch { /* 忽略 */ }
+    return initialAideConvs[0].id;
+  });
   const aideActiveConvIdRef = useRef<string>(aideActiveConvId);
   useEffect(() => { aideActiveConvIdRef.current = aideActiveConvId; }, [aideActiveConvId]);
+  // 收起浮岛会卸载本组件：把当前会话 id 记下来，重新展开时继续同一会话。
+  useEffect(() => {
+    try { localStorage.setItem(AIDE_ACTIVE_KEY, aideActiveConvId); } catch { /* 忽略 */ }
+  }, [aideActiveConvId]);
   // 持久化防抖（debounce 600ms）：流式输出时每 tick 都变 aideConversations，直接写会
   // 在 JS 主线程反复做全量 JSON.stringify。项目绑定后写 `.adyh/conversations`（后端），
   // 未绑定项目时才回落到 localStorage（无项目就没有可携带的容器）。
@@ -202,6 +218,33 @@ function CapsuleAide() {
   const aideReqRef = useRef<string | null>(null);
   const aideAsstRef = useRef<string | null>(null);
   const aideScrollRef = useRef<HTMLDivElement | null>(null);
+  // 消息虚拟化：长对话只渲染可视区；动态高度测量 + 流式跟随底部。
+  const aideVirtualizer = useVirtualizer({
+    count: aideMessages.length,
+    getScrollElement: () => aideScrollRef.current,
+    estimateSize: (i) => estimateMessageHeight(aideMessages[i]),
+    overscan: 6,
+    measureElement: (el) => el.getBoundingClientRect().height,
+  });
+  // 导轨：每条 user 消息算一轮（只做舒缓模式：22px 间距 + 导轨自身滚动）。
+  const aideRailItems = useMemo(
+    () => aideMessages.flatMap((m, index) => (m.role === 'user'
+      ? [{ id: m.id, messageIndex: index, label: m.content || '（附件）' }]
+      : [])),
+    [aideMessages],
+  );
+  const [aidePinnedTurn, setAidePinnedTurn] = useState<number | null>(null);
+  const aidePinUntilRef = useRef(0);
+  const aideStickBottomRef = useRef(true);
+  const aideRailActive = aidePinnedTurn ?? activeTurnMessageIndex(aideVirtualizer, aideRailItems);
+  const jumpAideToMessage = useCallback((messageIndex: number) => {
+    aidePinUntilRef.current = Date.now() + 1500;
+    setAidePinnedTurn(messageIndex);
+    jumpToMessageIndex(aideVirtualizer, aideScrollRef.current, messageIndex);
+  }, [aideVirtualizer]);
+  useEffect(() => {
+    setAidePinnedTurn(null);
+  }, [aideActiveConvId, aideMessages.length]);
   // 2026-10-19：只保留「智能体（agent）」模式 —— 对话模式已删除，普通聊天由「AI 对话」模块负责。
   // 原来这里还有个「编程 / 攻防」标签切换，攻防改成浮岛独立按钮后也不再需要。
 
@@ -387,6 +430,7 @@ function CapsuleAide() {
 
   // 清空全部对话（浮岛 AI 编程 + 通知 IDE 一并清空 chat/agent），一键回到干净起点
   const clearAideConversations = useCallback(() => {
+    aideStickBottomRef.current = true;
     const fresh: Conversation[] = [freshConversation()];
     setAideConversations(fresh);
     setAideActiveConvId(fresh[0].id);
@@ -401,6 +445,7 @@ function CapsuleAide() {
     emit(EVENTS.chatStream.clearConversations).catch(() => {});
   }, [aideProjectRoot, freshConversation]);
   const newAideConversation = useCallback(() => {
+    aideStickBottomRef.current = true;
     const id = 'ac' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
     setAideConversations((prev) => [{ id, title: '新对话', messages: [], updatedAt: Date.now() }, ...prev]);
     setAideActiveConvId(id);
@@ -411,6 +456,7 @@ function CapsuleAide() {
     aideStreamConvIdRef.current = id;
   }, []);
   const selectAideConversation = useCallback((id: string) => {
+    aideStickBottomRef.current = true;
     setAideActiveConvId(id);
     setAideInput('');
     setAideBusy(false);
@@ -467,16 +513,20 @@ function CapsuleAide() {
   useAiStream(
     {
       prefix: EVENTS.chatStream.prefix,
-      // agent 回合是「整段已清洗文本」替换 + 工具步骤流；没有 reasoning 增量
+      // agent 回合：正文整段替换 + 工具步骤；思考过程由后端 ai-reasoning-delta 追加
       deltaMode: 'replace',
-      hasReasoning: false,
+      hasReasoning: true,
       hasAgentStep: true,
     },
     { reqRef: aideReqRef, asstRef: aideAsstRef, streamConvIdRef: aideStreamConvIdRef, updateMessages: updateAideStreamMessages, setBusy: setAideBusy },
   );
 
   // 自动滚动到底部
-  const scrollAideToBottom = () => { const el = aideScrollRef.current; if (el) el.scrollTop = el.scrollHeight; };
+  const scrollAideToBottom = () => {
+    if (!aideStickBottomRef.current) return;
+    const el = aideScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  };
   useLayoutEffect(() => {
     scrollAideToBottom();
     const id = requestAnimationFrame(scrollAideToBottom);
@@ -494,6 +544,7 @@ function CapsuleAide() {
     const uid = 'u' + Date.now().toString(36);
     const aid = 'a' + Date.now().toString(36);
     aideStreamConvIdRef.current = convId;
+    aideStickBottomRef.current = true;
     const history = cleanAideHistory(aideMessages.filter((m) => !m.error));
     const reqId = 'cag_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -617,7 +668,7 @@ function CapsuleAide() {
   }, [updateAideStreamMessages]);
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px', position: 'relative' }} onClick={(e) => e.stopPropagation()}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px 10px', position: 'relative', background: 'rgba(0,0,0,0.2)', backdropFilter: 'blur(24px)', WebkitBackdropFilter: 'blur(24px)' }} onClick={(e) => e.stopPropagation()}>
       {/* 顶部细条：返回 + 标题 + 对话切换 + 新建 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: '#f2f2f4' }}>{t('capsule.aideTitle')}</span>
@@ -706,25 +757,59 @@ function CapsuleAide() {
         {aideBusy && <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.6)' }}>{t('capsule.executing')}</span>}
       </div>
 
-      {/* 消息列表 */}
-      <div ref={aideScrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8, paddingRight: 2 }}>
-        {aideMessages.length === 0 && (
-          <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.55)', textAlign: 'center', marginTop: 12 }}>{t('capsule.aideHint')}</div>
-        )}
-        {aideMessages.map((m) => (
-          <AideBubble
-            key={m.id}
-            messageId={m.id}
-            role={m.role}
-            content={m.content}
-            error={m.error}
-            reasoning={m.reasoning}
-            reasoningOpen={!!aideReasoningOpen[m.id]}
-            busy={aideBusy}
-            onToggleReasoning={toggleAideReasoning}
-            imageBase={aideProjectRoot ?? undefined}
-          />
-        ))}
+      {/* 消息列表：虚拟化 + 右侧轮次导轨 */}
+      <div style={{ flex: 1, minHeight: 0, position: 'relative', marginTop: 8 }}>
+        <div
+          ref={aideScrollRef}
+          style={{ height: '100%', overflowY: 'auto', paddingRight: 40 }}
+          onScroll={() => {
+            const el = aideScrollRef.current;
+            if (el) aideStickBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            if (Date.now() > aidePinUntilRef.current) setAidePinnedTurn(null);
+          }}
+        >
+          {aideMessages.length === 0 && (
+            <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.55)', textAlign: 'center', marginTop: 12 }}>{t('capsule.aideHint')}</div>
+          )}
+          <div style={{ position: 'relative', height: aideVirtualizer.getTotalSize() }}>
+            {aideVirtualizer.getVirtualItems().map((vi) => {
+              const m = aideMessages[vi.index];
+              if (!m) return null;
+              return (
+                <div
+                  key={m.id}
+                  data-index={vi.index}
+                  data-msg-index={vi.index}
+                  ref={aideVirtualizer.measureElement}
+                  style={{
+                    position: 'absolute', top: 0, left: 0, width: '100%',
+                    transform: `translateY(${vi.start}px)`,
+                    display: 'flex', flexDirection: 'column', paddingBottom: 8,
+                  }}
+                >
+                  <AideBubble
+                    messageId={m.id}
+                    role={m.role}
+                    content={m.content}
+                    error={m.error}
+                    reasoning={m.reasoning}
+                    reasoningOpen={!!aideReasoningOpen[m.id]}
+                    busy={aideBusy}
+                    onToggleReasoning={toggleAideReasoning}
+                    imageBase={aideProjectRoot ?? undefined}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <TurnRail
+          items={aideRailItems}
+          activeMessageIndex={aideRailActive}
+          onJump={jumpAideToMessage}
+          accent={GOLD}
+          markScope={`aide:${aideActiveConvId}`}
+        />
       </div>
 
       {/* 输入区 */}

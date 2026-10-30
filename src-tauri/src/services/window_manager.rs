@@ -1382,7 +1382,9 @@ fn capsule_mark_alive(label: &str) {
 }
 
 /// 标记胶囊已失效（销毁或渲染崩溃），停止一切后续 COM 调用与监视。
-fn capsule_mark_dead() {
+/// `pub(crate)`：`WindowEvent::Destroyed` 也要调用它 —— 外部销毁（dev 重启/关窗）
+/// 时必须停掉监视线程，否则它会在下一拍对已销毁窗口 emit/clone，触发 Rc UAF 中止。
+pub(crate) fn capsule_mark_dead() {
     CAPSULE_ALIVE.store(false, Ordering::SeqCst);
     CAPSULE_MONITOR_CANCEL.store(true, Ordering::SeqCst);
     CAPSULE_MONITOR_STARTED.store(false, Ordering::SeqCst);

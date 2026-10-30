@@ -1,6 +1,6 @@
 // 独立「AI 对话」模块 · 主区对话流 —— 大屏 UI，受控于上层共享的 useAiChat 实例。
 // 不持有状态，仅负责把 messages + busy + send 渲染成对话界面（与浮窗紧凑版 UI 解耦）。
-import { memo, useEffect, useState, useRef, useLayoutEffect } from 'react';
+import { memo, useEffect, useState, useRef, useLayoutEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Send, Sparkles, Brain, ChevronDown, ChevronRight, ChevronLeft, MessageSquare, Pencil, Trash2, Plus, X, Pin, Paperclip, FileText, File as FileIcon, Activity, Square, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown, Volume2, VolumeX } from 'lucide-react';
@@ -13,6 +13,10 @@ import { useCompanionStore } from '@/core/stores/companionStore';
 import { useUserAvatar } from '@/core/avatar/userAvatar';
 import { renderMarkdown, injectMarkdownStyles, attachMarkdownCopyHandler } from '@/lib/markdown';
 import { UsageMeter } from '@/components/bricks/UsageMeter';
+import { TurnRail } from '@/components/chat/TurnRail';
+import { jumpToMessageIndex } from '@/components/chat/jumpToMessage';
+import { estimateMessageHeight } from '@/components/chat/estimateMessageHeight';
+import { activeTurnMessageIndex } from '@/components/chat/activeTurn';
 
 /**
  * markdown → 可朗读的纯文本。
@@ -350,6 +354,10 @@ export const AiChatConversation = memo(function AiChatConversation({
   const [truncateWarn, setTruncateWarn] = useState<{ kept: number } | null>(null);
   // 执行轨迹面板：点开某条 assistant 消息的 agent 事件日志（工具调用/压缩/中断修复）
   const [traceMsg, setTraceMsg] = useState<ChatMsg | null>(null);
+  // 主窗口轨迹面板占右侧宽度：给对话让出同宽，导轨不会被盖住。
+  // 胶囊形态没有左侧栏，也不做让位（面板本来就是浮层）。
+  const traceOpen = !capsuleMode && !!traceMsg?.traceId;
+  const tracePanelWidth = 'min(440px, 45vw)';
 
   // ---- 朗读（Web Speech API）----
   // 用浏览器自带引擎：不花 token、不依赖后端，WebView2 走的是系统语音。
@@ -404,10 +412,30 @@ export const AiChatConversation = memo(function AiChatConversation({
   const virtualizer = useVirtualizer({
     count: messages.length,
     getScrollElement: () => listScrollRef.current,
-    estimateSize: (i) => (messages[i]?.role === 'user' ? 60 : 240),
+    estimateSize: (i) => estimateMessageHeight(messages[i]),
     overscan: 6,
     measureElement: (el) => el.getBoundingClientRect().height,
   });
+
+  // 导轨：每条 user 消息算一轮。只做 deepseek 的 adaptive（舒缓）模式：
+  // 22px 间距、导轨自身滚动，不做密集梯子 / 悬停面板。
+  const railItems = useMemo(
+    () => messages.flatMap((m, index) => (m.role === 'user'
+      ? [{ id: m.id, messageIndex: index, label: m.content || '（图片/附件）' }]
+      : [])),
+    [messages],
+  );
+  // 点击后先钉住被点的轮次：短对话全部可见时内容不需要滚，高亮也必须跟着走。
+  // 用户真正滚动（或新消息进来）后自动退回“按阅读线计算”。
+  const [pinnedTurn, setPinnedTurn] = useState<number | null>(null);
+  const pinUntilRef = useRef(0);
+  const scrollRailActive = activeTurnMessageIndex(virtualizer, railItems);
+  const railActive = pinnedTurn ?? scrollRailActive;
+  const jumpToMessage = (messageIndex: number) => {
+    pinUntilRef.current = Date.now() + 1500;
+    setPinnedTurn(messageIndex);
+    jumpToMessageIndex(virtualizer, listScrollRef.current, messageIndex);
+  };
   // 用户接近底部才自动跟随（流式追加/发送新消息滚动到底），上滑查看历史时不强拉
   const stickBottomRef = useRef(true);
   const lastMsg = messages[messages.length - 1];
@@ -420,7 +448,12 @@ export const AiChatConversation = memo(function AiChatConversation({
     const el = listScrollRef.current;
     if (!el) return;
     stickBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    // 程序化平滑滚动期间不清 pin；用户自己Roll（或 1.5s 后再滚）才退回阅读线。
+    if (Date.now() > pinUntilRef.current) setPinnedTurn(null);
   };
+  useEffect(() => {
+    setPinnedTurn(null);
+  }, [activeConv?.id, messages.length]);
 
   // 共享 markdown 样式 + 代码块复制按钮（幂等挂一次）
   useEffect(() => {
@@ -629,6 +662,10 @@ async function fileToChatDataUrl(f: File): Promise<string> {
   return (
     <div
       className={shellClass}
+      style={{
+        paddingRight: traceOpen ? tracePanelWidth : 0,
+        transition: 'padding-right 220ms cubic-bezier(0.4, 0, 0.2, 1)',
+      }}
       onDragOver={(e) => {
         // 只在拖文件时接管：拖文本进来仍交给浏览器默认行为
         if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
@@ -796,8 +833,10 @@ async function fileToChatDataUrl(f: File): Promise<string> {
         </div>
       )}
 
-      {/* 对话流（胶囊形态可选封面 coverUrl） */}
-      <div className="flex-1 min-h-0 overflow-y-auto relative" ref={listScrollRef} onScroll={handleListScroll}>
+      {/* 对话流（胶囊形态可选封面 coverUrl）。外层只负责定位，内层独占滚动；
+          导轨固定在外层右侧，不跟消息一起滚走。 */}
+      <div className="flex-1 min-h-0 relative">
+        <div className="absolute inset-0 overflow-y-auto" ref={listScrollRef} onScroll={handleListScroll}>
         {capsuleMode && coverUrl ? (
           <>
             <img src={coverUrl} alt="" className="absolute inset-0 w-full h-full object-cover opacity-30 pointer-events-none" />
@@ -823,6 +862,7 @@ async function fileToChatDataUrl(f: File): Promise<string> {
               <div
                 key={m.id}
                 data-index={vi.index}
+                data-msg-index={vi.index}
                 ref={virtualizer.measureElement}
                 style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
               >
@@ -865,7 +905,13 @@ async function fileToChatDataUrl(f: File): Promise<string> {
                   {m.role === 'assistant' && (m.traceId || (m.agentSteps?.length ?? 0) > 0) && (
                     <button
                       type="button"
-                      onClick={() => setTraceMsg(m)}
+                      onClick={() => {
+                        setTraceMsg(m);
+                        // 轨迹面板打开时自动收起左侧会话侧栏；只在主窗口做（胶囊没有侧栏）。
+                        if (!capsuleMode) {
+                          window.dispatchEvent(new CustomEvent('module-sidebar-collapse', { detail: { moduleId: 'ai-chat' } }));
+                        }
+                      }}
                       className={`flex items-center gap-1 text-[11px] ${mutedCls} hover:opacity-80 transition-colors mb-1`}
                       title="查看 agent 执行轨迹（工具调用 / 上下文压缩 / 中断修复）"
                     >
@@ -1051,6 +1097,14 @@ async function fileToChatDataUrl(f: File): Promise<string> {
           </div>
         )}
         </div>
+        </div>
+        <TurnRail
+          items={railItems}
+          activeMessageIndex={railActive}
+          onJump={jumpToMessage}
+          accent={capsuleMode ? '#e6c35c' : '#0ea5e9'}
+          markScope={`chat:${activeConv?.id ?? 'none'}`}
+        />
       </div>
 
       {/* 输入区 */}

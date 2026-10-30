@@ -63,6 +63,12 @@ pub fn mark_overlay_destroyed(label: &str) {
         REPAINT_STOP.lock().unwrap().insert(label.to_string());
         crate::dcomp_overlay::on_destroy(label);
     }
+    // 胶囊的监视线程必须同步停掉：窗口销毁后它还会每 16ms 醒来，一旦 emit_to 失败
+    // 就会走崩溃处理去 get_webview_window 克隆已销毁窗口 —— 正是 rc.rs assert_unchecked
+    // 中止（STATUS_STACK_BUFFER_OVERRUN）的来源。这里只停监视，不动自动重建标志。
+    if label == "capsule" {
+        crate::services::window_manager::capsule_mark_dead();
+    }
     // P1 内存：截图覆盖窗销毁 = 截图流程结束，释放整屏 RGBA 快照（4K ≈ 33MB）
     // 否则驻留到下一次截图才被覆盖；窗已销毁则无人再读，安全清空。
     if label == "screenshot-overlay" {
@@ -229,10 +235,9 @@ pub fn set_overlay_transparent(webview: tauri::Webview, app: tauri::AppHandle) {
         // webview2-com-sys 的 ICoreWebView2Controller（与 wry 内部同版本 0.38）。
         let repaint_webview = wv.clone();
         // 取本窗 HWND（裸指针 isize，规避调用方与本 crate 的 windows 版本差异），供 DComp 绑定。
-        let hwnd = app
-            .get_webview_window(&label)
-            .and_then(|w| w.hwnd().ok())
-            .map(|h| h.0 as isize);
+        // 用持有中的 Webview 取 Window，而不是 app.get_webview_window：后者在窗口销毁
+        // 竞态下会克隆已经损坏的 Rc（rc.rs assert_unchecked → abort）。
+        let hwnd = wv.window().hwnd().ok().map(|h| h.0 as isize);
         let _ = wv.with_webview(move |raw| {
             // DComp 根治：把胶囊/歌词从 WS_EX_LAYERED 重定向改为 DirectComposition swapchain，
             // 走 DWM 常规合成、不被外部媒体 overlay 抢占（详见 dcomp_overlay.rs）。仅 ANDY_DCOMP=1 生效。

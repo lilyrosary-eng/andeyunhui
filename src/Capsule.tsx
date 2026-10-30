@@ -721,7 +721,7 @@ export default function Capsule() {
 
   // 展开/收起/对话模式/搜索模式：重新定位（居中）+ 改尺寸 + 上报热区（窗口向左右与向下延展）
   useEffect(() => {
-    // AI 编程 / AI 攻防 独占 2 倍宽 × 2 倍高；其余模式宽度不变（用户 2026-10-19 指定）。
+    // AI 编程 / AI 攻防 独占 2 倍宽 × 1.6 倍高；其余模式宽度不变（用户 2026-10-19 指定）。
     // 优先级必须与下方 h 的三元链一致：chatOpen 优先，其次 aide，再 sec。
     const aideActive = expanded && aideOpen && !chatOpen;
     const secActive = expanded && secOpen && !chatOpen && !aideOpen;
@@ -753,7 +753,7 @@ export default function Capsule() {
         )
         .catch(() => {});
     }
-    // 夹取：AI 编程放大到 920×920 后，在 768/900 高度的屏上会超出可用区
+    // 夹取：AI 编程放大到 920×736 后，在 768/900 高度的屏上会超出可用区
     // （窗口超出屏幕部分不可见，且热区按物理矩形算会错位）。这里按可用屏幕尺寸收敛。
     const maxW = Math.max(320, window.screen.availWidth - 16);
     const maxH = Math.max(200, window.screen.availHeight - TOP_Y - 8);
@@ -1028,7 +1028,7 @@ export default function Capsule() {
     //   · 16ms（60fps）—— 有东西真的在动：媒体在播 / 面板流式输出 / 正在做尺寸过渡 / 指针在岛内
     //   · 33ms（30fps）—— 纯静态阅读
     // 为什么不是一律 60fps：每帧要做 SetIsVisible + NotifyParentWindowPositionChanged，
-    // 让 DWM 重合成整块透明窗；面板放大到 920×920 后单帧面积是原来 4 倍，常驻 60fps
+    // 让 DWM 重合成整块透明窗；面板放大后单帧面积约是原来的 3 倍，常驻 60fps
     // 会持续挤占合成器时间。
     //
     // 为什么必须补这两个信号（用户反馈"不够丝滑"的真正原因）：
@@ -1086,7 +1086,7 @@ export default function Capsule() {
   const pillH = !expanded ? CAPSULE_H : chatOpen ? CHAT_H : aideOpen ? AIDE_H : secOpen ? AIDE_H : searchOpen ? SEARCH_H : transferOpen ? TRANSFER_H : resourceOpen ? RESOURCE_H : EXPANDED_H;
 
   // 可见区（金色 pill）必须与窗口同尺寸，否则窗口多出来的部分就是「透明区域」：
-  // 窗口 920、内容仍 460 时，用户看到的是「变宽了但什么都没变」。
+  // 窗口 920 宽、内容仍 460 时，用户看到的是「变宽了但什么都没变」。
   // 这里用与窗口侧（setSize 的 wf/hf）完全一致的夹取规则，保证内外一致。
   const bodyWantW = expanded ? ((aideOpen || secOpen) && !chatOpen ? AIDE_W : EXPANDED_W) : CAPSULE_W;
   const bodyW = Math.min(bodyWantW, Math.max(320, window.screen.availWidth - 16));

@@ -779,3 +779,108 @@ html.is-linux *::after {
   max-height: calc(9.6em + 24px);
   overflow-y: auto;
 }
+
+/* ============ 对话轮次导轨（全局）============
+   必须放在全局 CSS 而不是组件旁的 CSS 文件：TurnRail 同时被主窗口 AI 对话和浮岛
+   AI 对话/编程/攻防引用，组件级 CSS 会被 Vite 打进 Capsule 的 CSS chunk，
+   导致主窗口根本没加载样式（表现为「主窗口没有导轨」）。 */
+.turn-rail {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  width: 28px;
+  height: 62%;
+  max-height: 420px;
+  z-index: 6;
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+.turn-rail-scroller {
+  scrollbar-width: none;
+}
+.turn-rail-scroller::-webkit-scrollbar {
+  display: none;
+}
+.turn-rail-mark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+.turn-rail-mark:focus-visible span {
+  outline: 1px solid currentColor;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* 读者标记：琥珀圆点 = 标记，品红菱形 = 重点标记（对齐 dsh）。 */
+.turn-rail-glyph {
+  position: absolute;
+  top: 50%;
+  right: 20px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f5a623;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.turn-rail-glyph.is-star {
+  border-radius: 1px;
+  background: #f759ab;
+  transform: translateY(-50%) rotate(45deg);
+}
+
+/* 右键菜单：portal 到 body，避免被导轨的 transform/overflow 裁剪。 */
+.turn-rail-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 132px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  background: rgba(24, 24, 26, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+.turn-rail-menu button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #f2f2f4;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 6px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.turn-rail-menu button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.turn-rail-preview {
+  position: absolute;
+  right: 28px;
+  max-width: 280px;
+  transform: translateY(-50%);
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: rgba(24, 24, 26, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f2f2f4;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  z-index: 1;
+}

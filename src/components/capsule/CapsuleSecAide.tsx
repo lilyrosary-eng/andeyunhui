@@ -14,17 +14,23 @@
 // ## 布局
 // 刻意与旧侧栏一致：顶部「内核状态 + 新建 + 清空」→ 快捷指令行 → 消息区 → 输入框。
 // 这样用户从主窗口迁过来不用重新学一遍位置。
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useAiStream } from './useAiStream';
 import { btnBase, GOLD } from './constants';
 import { IconClose, IconSend, IconStop } from './icons';
+import { TurnRail } from '@/components/chat/TurnRail';
+import { jumpToMessageIndex } from '@/components/chat/jumpToMessage';
+import { estimateMessageHeight } from '@/components/chat/estimateMessageHeight';
+import { activeTurnMessageIndex } from '@/components/chat/activeTurn';
 import { useCapsuleStore } from '@/stores/capsuleStore';
 import type { Conversation, ChatMsg } from './types';
 import { EVENTS } from '@/core/events/schema';
 import { attachMarkdownCopyHandler, injectMarkdownStyles, renderMarkdown } from '@/lib/markdown';
 
 const SEC_STORE_KEY = 'andeyunhui.capsule.sec.conversations.v1';
+const SEC_ACTIVE_KEY = 'andeyunhui.capsule.sec.activeConv'; // 上次选中的会话 id（收起/展开后恢复）
 const CONV_TITLE_MAX = 20;
 const SEC_MAX_ROUNDS = 10;
 
@@ -55,7 +61,7 @@ const SEC_SYSTEM = [
   '5. 收尾用 3-5 行中文总结（做了什么、结果、建议下一步），不要贴大段 JSON。',
 ].join('\n');
 
-const SecBubble = memo(function SecBubble({ role, content, toolNote, error }: { role: string; content: string; toolNote?: boolean; error?: boolean }) {
+const SecBubble = memo(function SecBubble({ role, content, toolNote, error, reasoning }: { role: string; content: string; toolNote?: boolean; error?: boolean; reasoning?: string }) {
   // toolNote：快捷指令的本地执行结果 —— 灰底等宽、不冒充用户发言
   if (toolNote) {
     return (
@@ -96,6 +102,20 @@ const SecBubble = memo(function SecBubble({ role, content, toolNote, error }: { 
           border: isUser ? 'none' : '1px solid rgba(255,255,255,0.10)',
         }}
       >
+        {reasoning ? (
+          <details style={{ marginBottom: 6 }}>
+            <summary style={{ cursor: 'pointer', fontSize: 10.5, fontStyle: 'italic', color: 'rgba(244,244,246,0.55)', listStyle: 'none' }}>
+              思考过程（{reasoning.length} 字 · 点击展开）
+            </summary>
+            <div style={{
+              marginTop: 4, fontSize: 10.5, lineHeight: 1.55, fontStyle: 'italic',
+              color: 'rgba(244,244,246,0.5)', background: 'rgba(0,0,0,0.18)',
+              borderRadius: 6, padding: '5px 7px', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            }}>
+              {reasoning}
+            </div>
+          </details>
+        ) : null}
         {/* 模型产出按 markdown 渲染（表格/列表/代码块）；用户气泡同样处理，保持一致 */}
         <div className="md-message" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
       </div>
@@ -125,11 +145,22 @@ function CapsuleSecAideInner() {
     return attachMarkdownCopyHandler();
   }, []);
 
-  const [convs, setConvs] = useState<Conversation[]>(() => {
+  const initialSecConvs = useMemo(() => {
     const list = loadConvs();
     return list.length ? list : [{ id: 'sc' + Date.now().toString(36), title: '新对话', messages: [], updatedAt: Date.now() }];
+  }, []);
+  const [convs, setConvs] = useState<Conversation[]>(initialSecConvs);
+  const [activeId, setActiveId] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(SEC_ACTIVE_KEY);
+      if (saved && initialSecConvs.some((c) => c.id === saved)) return saved;
+    } catch { /* 忽略 */ }
+    return initialSecConvs[0]?.id ?? '';
   });
-  const [activeId, setActiveId] = useState<string>(() => loadConvs()[0]?.id ?? '');
+  // 收起浮岛会卸载本组件：记住当前会话，重新展开时继续同一会话。
+  useEffect(() => {
+    try { localStorage.setItem(SEC_ACTIVE_KEY, activeId); } catch { /* 忽略 */ }
+  }, [activeId]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   // 流式期间上报，壳据此把透明浮窗重绘提到 60fps；空闲回落 30fps。
@@ -146,6 +177,34 @@ function CapsuleSecAideInner() {
 
   const conv = convs.find((c) => c.id === activeId) ?? convs[0];
   const messages = conv?.messages ?? [];
+
+  // 消息虚拟化：只渲染可视区；动态高度测量 + 流式跟随底部。
+  const secVirtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (i) => estimateMessageHeight(messages[i]),
+    overscan: 6,
+    measureElement: (el) => el.getBoundingClientRect().height,
+  });
+  // 导轨：每条 user 消息算一轮（只做舒缓模式：22px 间距 + 导轨自身滚动）。
+  const secRailItems = useMemo(
+    () => messages.flatMap((m, index) => (m.role === 'user'
+      ? [{ id: m.id, messageIndex: index, label: m.content || '（本地指令）' }]
+      : [])),
+    [messages],
+  );
+  const [secPinnedTurn, setSecPinnedTurn] = useState<number | null>(null);
+  const secPinUntilRef = useRef(0);
+  const secStickBottomRef = useRef(true);
+  const secRailActive = secPinnedTurn ?? activeTurnMessageIndex(secVirtualizer, secRailItems);
+  const jumpSecToMessage = useCallback((messageIndex: number) => {
+    secPinUntilRef.current = Date.now() + 1500;
+    setSecPinnedTurn(messageIndex);
+    jumpToMessageIndex(secVirtualizer, scrollRef.current, messageIndex);
+  }, [secVirtualizer]);
+  useEffect(() => {
+    setSecPinnedTurn(null);
+  }, [activeId, messages.length]);
 
   // 持久化（防抖 400ms，避免流式每 tick 写 localStorage）
   useEffect(() => {
@@ -164,16 +223,18 @@ function CapsuleSecAideInner() {
   }, []);
 
   useAiStream(
-    { prefix: EVENTS.chatStream.prefix, deltaMode: 'replace', hasReasoning: false, hasAgentStep: false },
+    { prefix: EVENTS.chatStream.prefix, deltaMode: 'replace', hasReasoning: true, hasAgentStep: false },
     { reqRef, asstRef, streamConvIdRef, updateMessages, setBusy },
   );
 
   useLayoutEffect(() => {
+    if (!secStickBottomRef.current) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
   const newConv = useCallback(() => {
+    secStickBottomRef.current = true;
     const id = 'sc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
     setConvs((prev) => [{ id, title: '新对话', messages: [], updatedAt: Date.now() }, ...prev]);
     setActiveId(id);
@@ -185,6 +246,7 @@ function CapsuleSecAideInner() {
   }, []);
 
   const clearAll = useCallback(() => {
+    secStickBottomRef.current = true;
     const id = 'sc' + Date.now().toString(36);
     setConvs([{ id, title: '新对话', messages: [], updatedAt: Date.now() }]);
     setActiveId(id);
@@ -203,6 +265,7 @@ function CapsuleSecAideInner() {
     const aid = 'sa' + Date.now().toString(36);
     const reqId = 'sec_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     streamConvIdRef.current = cid;
+    secStickBottomRef.current = true;
 
     const history = messages
       .filter((m) => !m.error && !m.toolNote && m.content.trim())
@@ -245,7 +308,7 @@ function CapsuleSecAideInner() {
   }, []);
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px' }} onClick={(e) => e.stopPropagation()}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '10px 12px', background: 'rgba(0,0,0,0.2)', backdropFilter: 'blur(24px)', WebkitBackdropFilter: 'blur(24px)' }} onClick={(e) => e.stopPropagation()}>
       {/* 顶部：会话切换 + 新建 + 清空。
           内核状态/指标/事件等「功能块」已迁到攻防模块自己的侧栏（2026-10-19），
           浮岛这边只负责对话，不再重复显示。 */}
@@ -254,6 +317,7 @@ function CapsuleSecAideInner() {
         <select
           value={activeId}
           onChange={(e) => {
+            secStickBottomRef.current = true;
             setActiveId(e.target.value);
             streamConvIdRef.current = e.target.value;
             setBusy(false);
@@ -276,19 +340,54 @@ function CapsuleSecAideInner() {
         </button>
       </div>
 
-      {/* 消息区 */}
-      <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8, paddingRight: 2 }}>
-        {messages.length === 0 && (
-          <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.45)', lineHeight: 1.7 }}>
-            用自然语言下达意图，例如：<br />
-            · 「扫一下 192.168.1.1 开了哪些端口」<br />
-            · 「爬 https://example.com 看有什么」<br />
-            · 「内核跑得怎么样？看下最近指标」
+      {/* 消息区：虚拟化 + 右侧轮次导轨 */}
+      <div style={{ flex: 1, minHeight: 0, position: 'relative', marginTop: 8 }}>
+        <div
+          ref={scrollRef}
+          style={{ height: '100%', overflowY: 'auto', paddingRight: 40 }}
+          onScroll={() => {
+            const el = scrollRef.current;
+            if (el) secStickBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            if (Date.now() > secPinUntilRef.current) setSecPinnedTurn(null);
+          }}
+        >
+          {messages.length === 0 && (
+            <div style={{ fontSize: 12, color: 'rgba(244,244,246,0.45)', lineHeight: 1.7 }}>
+              用自然语言下达意图，例如：<br />
+              · 「扫一下 192.168.1.1 开了哪些端口」<br />
+              · 「爬 https://example.com 看有什么」<br />
+              · 「内核跑得怎么样？看下最近指标」
+            </div>
+          )}
+          <div style={{ position: 'relative', height: secVirtualizer.getTotalSize() }}>
+            {secVirtualizer.getVirtualItems().map((vi) => {
+              const m = messages[vi.index];
+              if (!m) return null;
+              return (
+                <div
+                  key={m.id}
+                  data-index={vi.index}
+                  data-msg-index={vi.index}
+                  ref={secVirtualizer.measureElement}
+                  style={{
+                    position: 'absolute', top: 0, left: 0, width: '100%',
+                    transform: `translateY(${vi.start}px)`,
+                    paddingBottom: 8,
+                  }}
+                >
+                  <SecBubble role={m.role} content={m.content} toolNote={m.toolNote} error={m.error} reasoning={m.reasoning} />
+                </div>
+              );
+            })}
           </div>
-        )}
-        {messages.map((m) => (
-          <SecBubble key={m.id} role={m.role} content={m.content} toolNote={m.toolNote} error={m.error} />
-        ))}
+        </div>
+        <TurnRail
+          items={secRailItems}
+          activeMessageIndex={secRailActive}
+          onJump={jumpSecToMessage}
+          accent={GOLD}
+          markScope={`sec:${activeId}`}
+        />
       </div>
 
       {/* 输入区 */}
@@ -323,5 +422,5 @@ function CapsuleSecAideInner() {
   );
 }
 
-// 壳会在播放进度等状态变化时重渲染；面板自己是 memo 的，避免整块 920×920 面板跟着重绘。
+// 壳会在播放进度等状态变化时重渲染；面板自己是 memo 的，避免整块 920×736 面板跟着重绘。
 export default memo(CapsuleSecAideInner);

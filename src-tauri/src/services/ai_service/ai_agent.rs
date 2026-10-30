@@ -236,6 +236,10 @@ async fn run_agent(
         hydrate_images_in(&app, &mut session, project_root_store.as_deref());
     }
 
+    // Agent 多轮之间累计思考过程：每轮响应里的 reasoning_content 都转发给前端，
+    // 气泡里的「思考过程」折叠块才有内容。此前这条链完全没转发，等于 agent 模式下
+    // 思考过程凭空消失（执行轨迹里也没有它——轨迹只存工具事件）。
+    let mut reasoning_acc = String::new();
     for _round in 0..max_rounds {
         // 协作式取消检查点一：每轮开跑前。
         if cancel.load(Ordering::SeqCst) {
@@ -395,6 +399,26 @@ async fn run_agent(
             return Err(msg);
         }
         let msg_obj = payload["choices"][0]["message"].clone();
+        // 思考过程（reasoning_content）：非流式响应里与 content 同级。
+        // 严格跟随 thinking 开关：关思考时即使端点返回也不显示。
+        if thinking {
+            if let Some(rc) = msg_obj.get("reasoning_content").and_then(|v| v.as_str()) {
+                if !rc.is_empty() {
+                    let delta = if reasoning_acc.is_empty() {
+                        rc.to_string()
+                    } else {
+                        format!("
+
+{}", rc)
+                    };
+                    reasoning_acc.push_str(&delta);
+                    let _ = app.emit(
+                        "ai-reasoning-delta",
+                        serde_json::json!({ "requestId": request_id, "delta": delta }),
+                    );
+                }
+            }
+        }
         let content = msg_obj
             .get("content")
             .and_then(|c| c.as_str())

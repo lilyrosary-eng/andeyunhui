@@ -99,7 +99,7 @@ export function AgentTracePanel({
   const stepCount = useMemo(() => events.filter((e) => eventKind(e) === 'Tool').length, [events]);
 
   return (
-    <div className="fixed inset-y-0 right-0 z-50 w-[440px] max-w-[92vw] flex flex-col bg-white dark:bg-stone-900 border-l border-black/10 dark:border-white/10 shadow-2xl">
+    <div className="fixed inset-y-0 right-0 z-50 w-[440px] max-w-[45vw] flex flex-col bg-white dark:bg-stone-900 border-l border-black/10 dark:border-white/10 shadow-2xl">
       {/* 头部 */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-black/5 dark:border-white/10 shrink-0">
         <Activity size={16} className="text-[var(--element-color-raw)]" />
