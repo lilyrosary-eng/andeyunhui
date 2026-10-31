@@ -212,7 +212,7 @@ export const koKR: Record<string, string> = {
   'notesEditor.addTagPlaceholder': '태그 추가...',
   'notesEditor.bold': '굵게 (Ctrl+B)',
   'notesEditor.italic': '기울임 (Ctrl+I)',
-  'notesEditor.link': '링크 (Ctrl+K)',
+  'notesEditor.link': '링크 (Ctrl+Shift+K)',
   'notesEditor.inlineCode': '인라인 코드',
   'notesEditor.bulletList': '글머리 기호 목록',
   'notesEditor.aiPolish': 'AI 다듬기 (텍스트 선택 후 클릭, 스타일/길이는 노트 설정에서 조절)',

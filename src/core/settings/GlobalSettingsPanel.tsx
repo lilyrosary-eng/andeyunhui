@@ -36,6 +36,7 @@ import { SlidingTabs } from '@/components/motion/SlidingTabs';
 import { useI18n, LANGUAGES, type Language } from '@/lib/i18n';
 import { useAppStore } from '@/stores/appStore';
 import { consumePendingSettingsTab } from '@/core/settings/settingsNav';
+import { SHORTCUTS_CHANGED_EVENT } from '@/lib/shortcuts';
 
 type TabId = 'general' | 'themes' | 'extensions' | 'transfer' | 'model' | 'blacklist' | 'about';
 
@@ -51,6 +52,7 @@ const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   { id: 'clipboard', label: '剪贴板浮窗', keys: 'Ctrl + Alt + C' },
   { id: 'dropzone', label: '中转站浮窗', keys: 'Ctrl + Alt + V' },
   { id: 'favorite', label: '常用笔记', keys: 'Ctrl + Shift + N' },
+  { id: 'command-palette', label: '命令面板', keys: 'Ctrl + K' },
 ];
 
 function loadShortcuts(): ShortcutDef[] {
@@ -59,13 +61,17 @@ function loadShortcuts(): ShortcutDef[] {
     // 合并：确保新增的快捷键条目不丢失
     const merged = [...DEFAULT_SHORTCUTS];
     for (const s of parsed) {
+      // 迁移：笔记「链接」此前占用了命令面板的 Ctrl+K，现改为 Ctrl+Shift+K
+      const keys = s.id === 'link' && s.keys.replace(/\s+/g, '').toLowerCase() === 'ctrl+k'
+        ? 'Ctrl + Shift + K'
+        : s.keys;
       const idx = merged.findIndex(m => m.id === s.id);
       if (idx >= 0) {
         // 已有条目：保留用户自定义的 keys
-        merged[idx] = { ...merged[idx], keys: s.keys };
+        merged[idx] = { ...merged[idx], keys };
       } else {
         // 旧版本遗留条目（如 bold/italic/link），保留
-        merged.push(s);
+        merged.push({ ...s, keys });
       }
     }
     logger.shortcuts.configLoaded(merged.length);
@@ -76,6 +82,8 @@ function loadShortcuts(): ShortcutDef[] {
 
 function saveShortcuts(shortcuts: ShortcutDef[]) {
   storage.setJSON(KEYS.desktop.shortcuts.key, shortcuts);
+  // 命令面板 / 笔记编辑器等监听者需要立即应用新键位
+  window.dispatchEvent(new CustomEvent(SHORTCUTS_CHANGED_EVENT));
 }
 
 

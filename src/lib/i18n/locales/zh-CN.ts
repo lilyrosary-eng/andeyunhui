@@ -229,7 +229,7 @@ export const zhCN: Record<string, string> = {
   'notesEditor.addTagPlaceholder': '添加标签...',
   'notesEditor.bold': '加粗 (Ctrl+B)',
   'notesEditor.italic': '斜体 (Ctrl+I)',
-  'notesEditor.link': '链接 (Ctrl+K)',
+  'notesEditor.link': '链接 (Ctrl+Shift+K)',
   'notesEditor.inlineCode': '内联代码',
   'notesEditor.bulletList': '无序列表',
   'notesEditor.aiPolish': 'AI 润色（选中文字后点击，风格/篇幅可在笔记设置中调节）',

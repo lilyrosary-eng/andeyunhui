@@ -212,7 +212,7 @@ export const jaJP: Record<string, string> = {
   'notesEditor.addTagPlaceholder': 'タグを追加...',
   'notesEditor.bold': '太字 (Ctrl+B)',
   'notesEditor.italic': '斜体 (Ctrl+I)',
-  'notesEditor.link': 'リンク (Ctrl+K)',
+  'notesEditor.link': 'リンク (Ctrl+Shift+K)',
   'notesEditor.inlineCode': 'インラインコード',
   'notesEditor.bulletList': '箇条書き',
   'notesEditor.aiPolish': 'AI 推敲（文章を選択後クリック。スタイル/長さはノート設定で調整可能）',

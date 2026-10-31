@@ -212,7 +212,7 @@ export const deDE: Record<string, string> = {
   'notesEditor.addTagPlaceholder': 'Tag hinzufügen...',
   'notesEditor.bold': 'Fett (Strg+B)',
   'notesEditor.italic': 'Kursiv (Strg+I)',
-  'notesEditor.link': 'Link (Strg+K)',
+  'notesEditor.link': 'Link (Strg+Shift+K)',
   'notesEditor.inlineCode': 'Inline-Code',
   'notesEditor.bulletList': 'Aufzählung',
   'notesEditor.aiPolish': 'KI-Feinschliff (Text markieren und klicken; Stil/Länge in den Notizeinstellungen anpassbar)',

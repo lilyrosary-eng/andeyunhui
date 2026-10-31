@@ -230,7 +230,7 @@ export const enUS: Record<string, string> = {
   'notesEditor.addTagPlaceholder': 'Add tag...',
   'notesEditor.bold': 'Bold (Ctrl+B)',
   'notesEditor.italic': 'Italic (Ctrl+I)',
-  'notesEditor.link': 'Link (Ctrl+K)',
+  'notesEditor.link': 'Link (Ctrl+Shift+K)',
   'notesEditor.inlineCode': 'Inline code',
   'notesEditor.bulletList': 'Bullet list',
   'notesEditor.aiPolish': 'AI polish (select text first; style/length adjustable in note settings)',

@@ -12,6 +12,7 @@ import { MarkdownSourceEditor, type MarkdownSourceEditorHandle } from './Markdow
 import { injectMarkdownStyles, attachMarkdownCopyHandler, renderMarkdown } from '@/lib/markdown';
 import { resolveLocalImagesInHtml } from '@/lib/localImage';
 import { EVENTS } from '@/core/events/schema';
+import { loadShortcutKeys, matchesShortcut, SHORTCUTS_CHANGED_EVENT } from '@/lib/shortcuts';
 
 // 编辑区为「原始 Markdown 文本编辑」（受控 textarea），不再加载 TipTap 富文本编辑器，
 // 因此原先 300KB+ 的懒加载 chunk 已随 RichTextEditor 一并移除。
@@ -33,6 +34,18 @@ export function NotesEditor() {
   const allTags = useNotesStore(s => s.allTags);
   const onTagsChange = useNotesStore(s => s.saveTags);
   const wordWrap = useAppStore(s => s.wordWrap);
+
+  // 链接快捷键：默认 Ctrl+Shift+K（Ctrl+K 让给全局命令面板），可在设「设置 → 快捷键」修改
+  const [linkKeys, setLinkKeys] = useState(() => loadShortcutKeys('link', 'Ctrl + Shift + K'));
+  useEffect(() => {
+    const refresh = () => setLinkKeys(loadShortcutKeys('link', 'Ctrl + Shift + K'));
+    window.addEventListener(SHORTCUTS_CHANGED_EVENT, refresh);
+    window.addEventListener('storage', refresh);
+    return () => {
+      window.removeEventListener(SHORTCUTS_CHANGED_EVENT, refresh);
+      window.removeEventListener('storage', refresh);
+    };
+  }, []);
 
   // 编辑区指令句柄（插入 Markdown 标记 / 回填润色结果）
   const editorRef = useRef<MarkdownSourceEditorHandle | null>(null);
@@ -94,24 +107,28 @@ export function NotesEditor() {
     editorRef.current?.wrapSelection('[', `](${url})`, url);
   }, [tr]);
 
-  // 键盘快捷键（Ctrl+B/I/K）：仅在标题输入框或 Markdown 编辑区内生效
+  // 键盘快捷键（加粗/斜体/链接）：仅在标题输入框或 Markdown 编辑区内生效。
+  // 链接默认 Ctrl+Shift+K：Ctrl+K 已注册给全局命令面板。
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const isCtrl = e.ctrlKey || e.metaKey;
       if (!isCtrl) return;
       const target = e.target as HTMLElement;
-      if (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') {
-        if (e.key === 'b' || e.key === 'i' || e.key === 'k') {
-          e.preventDefault();
-          if (e.key === 'b') handleBold();
-          else if (e.key === 'i') handleItalic();
-          else if (e.key === 'k') handleLink();
-        }
+      if (target.tagName !== 'TEXTAREA' && target.tagName !== 'INPUT') return;
+      if (matchesShortcut(linkKeys, e)) {
+        e.preventDefault();
+        handleLink();
+        return;
+      }
+      if (!e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'b' || e.key === 'i')) {
+        e.preventDefault();
+        if (e.key === 'b') handleBold();
+        else handleItalic();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [handleBold, handleItalic, handleLink]);
+  }, [handleBold, handleItalic, handleLink, linkKeys]);
 
   // 预览区代码块：注入共享 markdown 样式（.md-code-block / .md-copy-btn）并注册复制事件代理。
   // 预览 HTML 由 dangerouslySetInnerHTML 注入，复制按钮是字符串拼出来的，挂不了 React onClick；

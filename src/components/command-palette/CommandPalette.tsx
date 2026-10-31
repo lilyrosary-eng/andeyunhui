@@ -1,18 +1,16 @@
 // 全局命令面板（Ctrl+K）
 //
 // 设计：Provider 只产出「可执行项」，面板负责搜索/键盘/分组/最近使用。
-// 当前内置 4 个 provider：模块、动作、笔记、文件（fs_search）。
-// 后续接入中转站、设置子页、AI 会话等只需再产出一组 CommandItem。
+// 内置 provider：模块、动作、笔记；业务模块（音乐…）通过 registry 注册实体搜索。
+// 后续接入中转站、AI 会话等只需再注册一个 provider。
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { invoke } from '@tauri-apps/api/core';
 import {
   ArrowDown,
   ArrowUp,
   Camera,
   CornerDownLeft,
   FileText,
-  Folder,
   Inbox,
   Maximize2,
   Minimize2,
@@ -26,24 +24,22 @@ import {
 import { PluginIcon } from '@/components/PluginIcon';
 import { useAppStore } from '@/stores/appStore';
 import { useNotesStore } from '@/stores/notesStore';
+import {
+  getCommandProviders,
+  subscribeCommandProviders,
+  type PaletteProvider,
+} from '@/core/commandPalette/registry';
+import { loadShortcutKeys, matchesShortcut, SHORTCUTS_CHANGED_EVENT } from '@/lib/shortcuts';
 import { requestSettingsTab } from '@/core/settings/settingsNav';
 
 interface CommandItem {
   id: string;
   title: string;
   subtitle?: string;
-  group: '模块' | '动作' | '笔记' | '文件';
+  group: string;
   icon?: ReactNode;
   keywords?: string;
   run: () => void | Promise<void>;
-}
-
-interface SearchResult {
-  path: string;
-  name: string;
-  size: number;
-  modified: number;
-  is_dir: boolean;
 }
 
 const RECENT_KEY = 'andy.cmdk.recent';
@@ -99,7 +95,9 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
-  const [fileItems, setFileItems] = useState<CommandItem[]>([]);
+  const [providerItems, setProviderItems] = useState<CommandItem[]>([]);
+  const [providers, setProviders] = useState<PaletteProvider[]>(() => getCommandProviders());
+  const [paletteKeys, setPaletteKeys] = useState(() => loadShortcutKeys('command-palette', 'Ctrl + K'));
   const [recent, setRecent] = useState<string[]>(() => loadRecent());
   const openRef = useRef(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -117,36 +115,38 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
   const openPalette = useCallback(() => {
     if (openRef.current) return;
     setQuery('');
-    setFileItems([]);
+    setProviderItems([]);
     setActiveIndex(0);
     setOpen(true);
   }, []);
 
   const closePalette = useCallback(() => {
     setOpen(false);
-    setFileItems([]);
+    setProviderItems([]);
   }, []);
 
   useEffect(() => { openRef.current = open; }, [open]);
 
-  // 全局快捷键：Ctrl/Cmd+K；在输入框/可编辑区里默认让位（笔记的 Ctrl+K 是插入链接），
-  // 需要强制打开时用 Ctrl/Cmd+Shift+K。
+  // 快捷键可配置（设置 → 快捷键 → 命令面板），默认 Ctrl/Cmd+K。
+  // 笔记的「链接」已改为 Ctrl+Shift+K，因此这里不再对输入框让位。
+  useEffect(() => {
+    const refreshKeys = () => setPaletteKeys(loadShortcutKeys('command-palette', 'Ctrl + K'));
+    window.addEventListener(SHORTCUTS_CHANGED_EVENT, refreshKeys);
+    window.addEventListener('storage', refreshKeys);
+    return () => {
+      window.removeEventListener(SHORTCUTS_CHANGED_EVENT, refreshKeys);
+      window.removeEventListener('storage', refreshKeys);
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const mod = e.ctrlKey || e.metaKey;
-      if (!mod || e.key.toLowerCase() !== 'k') return;
+      if (!matchesShortcut(paletteKeys, e)) return;
       if (openRef.current) {
         e.preventDefault();
         inputRef.current?.select();
         return;
       }
-      const target = e.target as HTMLElement | null;
-      const editable = !!target && (
-        target.tagName === 'INPUT' ||
-        target.tagName === 'TEXTAREA' ||
-        target.isContentEditable
-      );
-      if (editable && !e.shiftKey) return;
       e.preventDefault();
       openPalette();
     };
@@ -157,7 +157,10 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('open-command-palette', onOpenEvent);
     };
-  }, [openPalette]);
+  }, [openPalette, paletteKeys]);
+
+  // 模块 provider 注册表（音乐/阅读等模块在加载时自己注册）
+  useEffect(() => subscribeCommandProviders(() => setProviders(getCommandProviders())), []);
 
   const recordRecent = useCallback((id: string) => {
     setRecent((prev) => {
@@ -259,41 +262,55 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
     return items;
   }, [pluginRegistry, notes, immersive, setActiveModule, toggleImmersive, createNote, loadNoteContent, onScreenshot]);
 
-  // 文件搜索（fs_search）：查询 ≥2 字时防抖调用；结果作为独立 provider
+  // 模块 provider：把各模块自己的实体搜索接进来（音乐、阅读、AI 会话…）。
+  // provider 结果带「模块 › 子集 › 实体」层级，执行走模块自己的能力。
   useEffect(() => {
-    if (!open) return;
+    if (!open) { setProviderItems([]); return; }
     const q = query.trim();
-    if (q.length < 2) {
-      setFileItems([]);
-      return;
-    }
+    if (!q || providers.length === 0) { setProviderItems([]); return; }
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      invoke<SearchResult[]>('fs_search', { query: q, limit: 20 })
-        .then((rows) => {
-          if (cancelled) return;
-          setFileItems((rows || []).map((r) => ({
-            id: `file:${r.path}`,
-            title: r.name || r.path,
-            subtitle: r.path,
-            group: '文件' as const,
-            icon: r.is_dir ? <Folder size={16} /> : <FileText size={16} />,
-            keywords: r.path,
-            run: () => { void invoke('fs_open_path', { path: r.path }); },
-          })));
-        })
-        .catch(() => { if (!cancelled) setFileItems([]); });
-    }, 150);
+      void (async () => {
+        const collected: CommandItem[] = [];
+        await Promise.all(providers.map(async (provider) => {
+          try {
+            const results = await provider.search(q);
+            if (cancelled) return;
+            for (const r of (results ?? []).slice(0, 12)) {
+              collected.push({
+                id: `prov:${provider.id}:${r.id}`,
+                title: r.title,
+                subtitle: [...(r.path ?? []), r.subtitle].filter(Boolean).join(' › '),
+                group: provider.label,
+                icon: r.iconName
+                  ? <PluginIcon name={r.iconName} size={16} fallback={<Sparkles size={16} />} />
+                  : <Sparkles size={16} />,
+                keywords: r.subtitle,
+                run: async () => {
+                  if (provider.moduleId) setActiveModule(provider.moduleId);
+                  // 给被激活的模块一个挂载/注册监听的机会，再执行具体动作
+                  await new Promise((resolve) => setTimeout(resolve, 40));
+                  await r.run();
+                },
+              });
+            }
+          } catch (err) {
+            console.warn('[command-palette] provider 搜索失败:', provider.id, err);
+          }
+        }));
+        if (!cancelled) setProviderItems(collected);
+      })();
+    }, 120);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [open, query]);
+  }, [open, query, providers, setActiveModule]);
 
   const visibleItems = useMemo(() => {
     const q = query.trim();
     const recentSet = new Set(recent);
-    const all = q ? [...staticItems, ...fileItems] : staticItems;
+    const all = q ? [...staticItems, ...providerItems] : staticItems;
     const scored = all
       .map((item) => {
         const base = q ? scoreItem(item, q) : 1;
@@ -303,16 +320,21 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
       .filter((x): x is { item: CommandItem; score: number } => !!x)
       .sort((a, b) => b.score - a.score || Number(recentSet.has(b.item.id)) - Number(recentSet.has(a.item.id)))
       .slice(0, MAX_RESULTS);
-    // 分组顺序固定：模块 → 动作 → 笔记 → 文件
-    const order: CommandItem['group'][] = ['模块', '动作', '笔记', '文件'];
-    const groups = new Map<CommandItem['group'], CommandItem[]>();
+    // 分组顺序：模块 → 动作 → 笔记 → 各模块 provider（音乐/阅读…）
+    const order = ['模块', '动作', '笔记', ...providers.map((p) => p.label)];
+    const known = new Set(order);
+    const groups = new Map<string, CommandItem[]>();
     for (const { item } of scored) {
       const list = groups.get(item.group) ?? [];
       list.push(item);
       groups.set(item.group, list);
     }
-    return order.flatMap((g) => groups.get(g) ?? []);
-  }, [query, staticItems, fileItems, recent]);
+    const ordered = order.flatMap((g) => groups.get(g) ?? []);
+    for (const [group, list] of groups) {
+      if (!known.has(group)) ordered.push(...list);
+    }
+    return ordered;
+  }, [query, staticItems, providerItems, providers, recent]);
 
   useEffect(() => {
     setActiveIndex((i) => (visibleItems.length === 0 ? 0 : Math.min(i, visibleItems.length - 1)));
@@ -386,11 +408,11 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
             value={query}
             onChange={(e) => { setQuery(e.target.value); setActiveIndex(0); }}
             onKeyDown={onInputKeyDown}
-            placeholder="搜索模块、笔记、文件或动作…"
+            placeholder="搜索模块、笔记、动作或音乐…"
             className="flex-1 bg-transparent outline-none text-sm text-neutral-700 dark:text-stone-100 placeholder:text-neutral-400 dark:placeholder:text-stone-500"
             spellCheck={false}
           />
-          <kbd className="px-1.5 py-0.5 rounded border border-neutral-200/70 dark:border-stone-600/60 text-[10px] text-neutral-400 dark:text-stone-500">Ctrl K</kbd>
+          <kbd className="px-1.5 py-0.5 rounded border border-neutral-200/70 dark:border-stone-600/60 text-[10px] text-neutral-400 dark:text-stone-500">{paletteKeys}</kbd>
         </div>
 
         <div ref={listRef} className="flex-1 overflow-y-auto py-1">

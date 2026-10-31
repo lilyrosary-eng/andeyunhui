@@ -38,6 +38,7 @@ const ReactDOM = { ...ReactDOMNS, ...ReactDOMClient } as unknown as typeof React
 import type { SandboxPolicy } from '@/core/pluginAccess';
 import { denyAllPolicy, policyAllows, policyDenyReason } from '@/core/pluginAccess';
 import { pluginDiagnostics } from '@/core/pluginDiagnostics';
+import { registerCommandProvider } from '@/core/commandPalette/registry';
 
 // ========== 命令调用策略（能力制） ==========
 // 实际放行由 SandboxPolicy 决定：能力规则 ∩ 已授权能力 ∩（旧式 commands 收紧）。
@@ -178,6 +179,22 @@ function createSafeApi(pluginId: string, policy: SandboxPolicy) {
     },
     revokeObjectUrl: (url: string) => {
       try { URL.revokeObjectURL(url); } catch { /* 忽略 */ }
+    },
+    // 命令面板 provider：模块把自己的实体搜索/执行能力注册进来（音乐、阅读等）
+    registerCommandProvider: (provider: {
+      id: string;
+      label: string;
+      moduleId?: string;
+      search: (query: string) => unknown;
+    }) => {
+      if (!provider || typeof provider.id !== 'string' || typeof provider.label !== 'string' || typeof provider.search !== 'function') {
+        throw new Error('registerCommandProvider: 需要 { id, label, search }');
+      }
+      return registerCommandProvider({
+        ...provider,
+        id: `${pluginId}:${provider.id}`,
+        moduleId: provider.moduleId ?? pluginId,
+      } as never);
     },
     // 帧缓冲工具：高频数据推送批处理，避免渲染风暴
     createFrameBuffer: createFrameBuffer,

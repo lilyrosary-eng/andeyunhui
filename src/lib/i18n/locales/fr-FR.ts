@@ -211,7 +211,7 @@ export const frFR: Record<string, string> = {
   'notesEditor.addTagPlaceholder': 'Ajouter une étiquette...',
   'notesEditor.bold': 'Gras (Ctrl+B)',
   'notesEditor.italic': 'Italique (Ctrl+I)',
-  'notesEditor.link': 'Lien (Ctrl+K)',
+  'notesEditor.link': 'Lien (Ctrl+Shift+K)',
   'notesEditor.inlineCode': 'Code en ligne',
   'notesEditor.bulletList': 'Liste à puces',
   'notesEditor.aiPolish': 'Polissage IA (sélectionnez d\'abord du texte ; style/longueur ajustables dans les paramètres de note)',

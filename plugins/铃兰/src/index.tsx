@@ -1038,6 +1038,76 @@ function dedupePlaylistsById(playlists: Playlist[]): Playlist[] {
 try { console.error('[music-diag] index.tsx 模块开始求值; __HOST_API__=' + typeof window.__HOST_API__); } catch {}
 try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).catch(()=>{}); } catch {}
 
+// ===== 命令面板 provider：把「音乐 → 歌单 → 歌曲」接给 Ctrl+K =====
+// 快照优先从扫描缓存构建（不依赖音乐模块是否被打开过）；模块挂载后由真实 playlists 覆盖。
+let palettePlaylists: Playlist[] = [];
+let paletteSnapshotPromise: Promise<void> | null = null;
+let palettePendingPlay: { playlistId: string; trackId: string } | null = null;
+
+async function ensurePaletteSnapshot(): Promise<void> {
+  if (paletteSnapshotPromise) return paletteSnapshotPromise;
+  paletteSnapshotPromise = (async () => {
+    try {
+      let roots: string[] = [];
+      try { roots = JSON.parse(localStorage.getItem(STORAGE_KEY_ROOT) || '[]'); } catch { roots = []; }
+      const tracks: Track[] = [];
+      for (const root of roots) {
+        try {
+          const cached = await hostApi.invoke<{ tracks: Track[] } | null>('load_music_cache', { rootPath: root });
+          if (cached?.tracks?.length) tracks.push(...cached.tracks);
+        } catch { /* 单个根目录缓存缺失时忽略 */ }
+      }
+      const dirs = groupTracksIntoPlaylists(tracks, roots);
+      const custom = getCustomPlaylistsFromStorage();
+      palettePlaylists = dedupePlaylistsById([...dedupDirectoryPlaylists(dirs), ...custom]);
+    } catch (err) {
+      console.warn('[music] 命令面板索引构建失败:', err);
+    }
+  })().finally(() => { paletteSnapshotPromise = null; });
+  return paletteSnapshotPromise;
+}
+
+try {
+  hostApi.registerCommandProvider?.({
+    id: 'music',
+    label: '音乐',
+    moduleId: 'music',
+    search: async (query) => {
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      await ensurePaletteSnapshot();
+      const results: Array<{
+        id: string;
+        title: string;
+        subtitle?: string;
+        path?: string[];
+        iconName?: string;
+        run: () => void;
+      }> = [];
+      for (const playlist of palettePlaylists) {
+        for (const track of playlist.tracks) {
+          if (!track.filePath) continue;
+          const haystack = `${track.title} ${track.artist} ${track.album} ${track.filePath}`.toLowerCase();
+          if (!haystack.includes(q)) continue;
+          results.push({
+            id: `${playlist.id}:${track.id}`,
+            title: track.title || track.filePath.split(/[\\/]/).pop() || '未知曲目',
+            subtitle: [track.artist, track.album].filter(Boolean).join(' · '),
+            path: [playlist.name],
+            iconName: 'Music2',
+            run: () => {
+              palettePendingPlay = { playlistId: playlist.id, trackId: track.id };
+              window.dispatchEvent(new CustomEvent('andy:music-palette-play', { detail: palettePendingPlay }));
+            },
+          });
+          if (results.length >= 40) return results;
+        }
+      }
+      return results;
+    },
+  });
+} catch { /* 旧宿主没有 provider API 时静默跳过 */ }
+
 function MusicModule() {
   useLang();
   // 共享运行时：根目录管理（localStorage 持久化）
@@ -1055,6 +1125,11 @@ function MusicModule() {
   // 当前网易云侧栏高亮：歌单 id（临时列表高亮走 online.activeId）
   const [activeNeteasePlaylistId, setActiveNeteasePlaylistId] = useState<number | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
+  // 命令面板索引：模块挂载后用真实歌单覆盖启动时的缓存快照
+  useEffect(() => {
+    // 只索引本地/自建歌单：在线临时歌单需要额外的取址流程，不能直接 setTracks 播放
+    palettePlaylists = dedupePlaylistsById(playlists.filter((p) => p.type === 'directory' || p.type === 'custom'));
+  }, [playlists]);
   // 收藏集合（track_id set），真源为 SQLite favorite 表；localStorage 作兜底镜像
   const [favorites, setFavorites] = useState<Set<string>>(() => {
     try {
@@ -1585,6 +1660,37 @@ useEffect(() => {
     // 这样播放栏与沉浸页的「播放列表」按钮才能正确显示实际在播放的歌单，
     // 而不是侧栏点开的那一个；浏览/切换歌单只是改变显示，不会中断或改变播放归属。
   }, []);
+
+  // 命令面板点歌：切到对应歌单并播放；模块尚未挂载完成时保留 pending，等歌单加载后再消费
+  useEffect(() => {
+    const playFromPalette = (detail: { playlistId: string; trackId: string }): boolean => {
+      const playlist = playlists.find((p) => p.id === detail.playlistId);
+      if (!playlist) return false;
+      const index = playlist.tracks.findIndex((t) => t.id === detail.trackId);
+      if (index < 0) return false;
+      online.setActivePlaylist(null);
+      handleSelectPlaylist(playlist);
+      musicPlayer.currentPlaylistId = playlist.id;
+      musicPlayer.setTracks(playlist.tracks, index);
+      musicPlayer.play();
+      return true;
+    };
+    const onEvent = (e: Event) => {
+      const detail = (e as CustomEvent<{ playlistId: string; trackId: string }>).detail;
+      if (!detail) return;
+      // 歌单还没加载完：先留着，等 playlists 变化后的 effect 再消费
+      if (playlists.length === 0) { palettePendingPlay = detail; return; }
+      palettePendingPlay = null;
+      playFromPalette(detail);
+    };
+    window.addEventListener('andy:music-palette-play', onEvent);
+    if (palettePendingPlay && playlists.length > 0) {
+      const pending = palettePendingPlay;
+      palettePendingPlay = null;
+      playFromPalette(pending);
+    }
+    return () => window.removeEventListener('andy:music-palette-play', onEvent);
+  }, [playlists, online, handleSelectPlaylist]);
 
   const handleSelectTrack = useCallback((track: Track, index: number) => {
     // 切到本地播放时，清掉在线源临时歌单，避免播放列表浮窗仍显示在线来源

@@ -19,6 +19,26 @@ declare global {
       emit: (event: string, payload?: unknown) => Promise<void>;
       createFrameBuffer: <T>(onFlush: (items: T[]) => void) => FrameBuffer<T>;
       createFloatingWindow: (label: string, url: string, options: Record<string, unknown>) => Promise<void>;
+      registerCommandProvider?: (provider: {
+        id: string;
+        label: string;
+        moduleId?: string;
+        search: (query: string) => Array<{
+          id: string;
+          title: string;
+          subtitle?: string;
+          path?: string[];
+          iconName?: string;
+          run: () => void | Promise<void>;
+        }> | Promise<Array<{
+          id: string;
+          title: string;
+          subtitle?: string;
+          path?: string[];
+          iconName?: string;
+          run: () => void | Promise<void>;
+        }>>;
+      }) => () => void;
     };
     __PLUGIN_REGISTRY__: {
       register: (def: {

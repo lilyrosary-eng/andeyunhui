@@ -212,7 +212,7 @@ export const zhTW: Record<string, string> = {
   'notesEditor.addTagPlaceholder': '新增標籤...',
   'notesEditor.bold': '粗體 (Ctrl+B)',
   'notesEditor.italic': '斜體 (Ctrl+I)',
-  'notesEditor.link': '連結 (Ctrl+K)',
+  'notesEditor.link': '連結 (Ctrl+Shift+K)',
   'notesEditor.inlineCode': '行內程式碼',
   'notesEditor.bulletList': '無序清單',
   'notesEditor.aiPolish': 'AI 潤飾（選取文字後點擊，風格/篇幅可在筆記設定中調整）',
