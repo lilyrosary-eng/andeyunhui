@@ -52,6 +52,44 @@ async fn run_agent(
     let cfg = resolve_target(&config, profile_id.as_deref());
     ensure_api_key(&app, &request_id, &cfg)?;
 
+    // ── 图片路由：对话模型能不能「原生看图」 ────────────────────────────────
+    //
+    // 判据在 `ModelEntry::vision_native_trusted`：必须 vision==true **且**来源为
+    // Provider（供应商权威上报或用户显式探测确证）。名字启发式（Inferred）与用户
+    // 手改（Manual）都**不算** —— 见那里的文档：靠猜开分支等于用错数据做路由。
+    //
+    // 默认不直发 ⇒ 行为与改造前一致（零回归）；只有被确证的模型才走新分支。
+    let native_vision = config
+        .providers
+        .iter()
+        .flat_map(|p| p.models.iter())
+        .find(|m| m.id == cfg.id)
+        .map(|m| m.vision_native_trusted())
+        .unwrap_or(false);
+
+    // 统一走 tool_schemas_for_api*()：内部会补齐/校验每个 schema 的 "type": "function"。
+    // 这正是 2026-10-19「HTTP 400 invalid tool type」的根因——tools 是整批发送的，
+    // 一个工具 schema 缺 type，整个 agent 模式全废。不要改回各自 map。
+    // 联网开关只影响 web_search；其余工具常开（用户 2026-10-19 决定）。
+    // 原生视觉模型不需要 analyze_image：用户图片已经随请求直接发给模型，
+    // 再把这个工具暴露出去，模型会习惯性调用它，结果又绕回视觉兜底模型。
+    let mut excluded_tools: Vec<String> = Vec::new();
+    if !web_search {
+        excluded_tools.push("web_search".into());
+    }
+    if native_vision || media.vision.is_none() {
+        excluded_tools.push("analyze_image".into());
+    }
+    // 没配对应媒体后端就别把工具发出去：否则模型会反复调用并收到「未配置」，
+    // 一路重试到轮数上限（实测一次会话连打 6 次 generate_speech）。
+    if media.speech.is_none() {
+        excluded_tools.push("generate_speech".into());
+    }
+    if media.image.is_none() {
+        excluded_tools.push("generate_image".into());
+    }
+    let client = reqwest::Client::new();
+
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let (messages, _truncated) = truncate_messages_for_safety(messages);
 
@@ -118,38 +156,18 @@ async fn run_agent(
     // 主机级默认规则 + 前端 per-call system + 工具提示。项目规则随后由 mem_ctx 追加，
     // 越具体越靠后；冲突时默认规则里已写明「先停下提问」。
     let builtin = crate::services::adyh_service::builtin_prompt(&app);
-    let mut sys_parts: Vec<&str> = vec![builtin.trim(), effective_system.trim(), agent_hint.trim()];
+    // 原生图片已经随请求直接提供，别再让模型用 file 去猜 /tmp/... 图片路径。
+    let image_hint = if native_vision && !images.is_empty() {
+        "【本轮图片】用户图片已经作为多模态内容直接提供；不要用 file 工具读取 /tmp/... 或猜测图片路径。"
+    } else {
+        ""
+    };
+    let mut sys_parts: Vec<&str> = vec![builtin.trim(), effective_system.trim(), agent_hint.trim(), image_hint];
     sys_parts.retain(|s| !s.is_empty());
     let base_system = sys_parts.join("\n\n");
     // 注入项目技能索引（progressive disclosure）：只带名称+关键词，详情用 skill 工具按需加载
     let skill_guide = skills_guide(project_root_pb.as_deref());
     let system_final = format!("{}{}{}{}", base_system, mcp_guide, skill_guide, mem_ctx);
-
-    // 统一走 tool_schemas_for_api*()：内部会补齐/校验每个 schema 的 "type": "function"。
-    // 这正是 2026-10-19「HTTP 400 invalid tool type」的根因——tools 是整批发送的，
-    // 一个工具 schema 缺 type，整个 agent 模式全废。不要改回各自 map。
-    // 联网开关只影响 web_search；其余工具常开（用户 2026-10-19 决定）。
-    let tools: Vec<serde_json::Value> = if web_search {
-        tool_schemas_for_api()
-    } else {
-        tool_schemas_for_api_without(&["web_search"])
-    };
-    let client = reqwest::Client::new();
-
-    // ── 图片路由：对话模型能不能「原生看图」 ────────────────────────────────
-    //
-    // 判据在 `ModelEntry::vision_native_trusted`：必须 vision==true **且**来源为
-    // Provider（供应商权威上报或用户显式探测确证）。名字启发式（Inferred）与用户
-    // 手改（Manual）都**不算** —— 见那里的文档：靠猜开分支等于用错数据做路由。
-    //
-    // 默认不直发 ⇒ 行为与改造前一致（零回归）；只有被确证的模型才走新分支。
-    let native_vision = config
-        .providers
-        .iter()
-        .flat_map(|p| p.models.iter())
-        .find(|m| m.id == cfg.id)
-        .map(|m| m.vision_native_trusted())
-        .unwrap_or(false);
 
     // 项目根稍后会被 move 进 ToolContext；会话/媒体落盘还要用它，先留一份。
     let project_root_store = project_root_pb.clone();
@@ -224,6 +242,7 @@ async fn run_agent(
     };
 
     // 把上文存好的图片引用挂到最后一条 user 事件，再读回成 data URL 供 derive 组图。
+    let image_refs_count = image_refs.len();
     if !image_refs.is_empty() {
         session.attach_images_to_last_user(image_refs);
     }
@@ -234,6 +253,17 @@ async fn run_agent(
         //
         // 幂等，循环外一次即可（循环内只追加 assistant/tool 事件，不带图）。
         hydrate_images_in(&app, &mut session, project_root_store.as_deref());
+        // 诊断：本轮图片是否真的回填进了请求体。若这里是 0，模型等于没收到图，
+        // 它就会去猜文件路径（实测出现过 file /tmp/user_image_1.png）。
+        let resolved: usize = session
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::User { resolved_images, .. } => Some(resolved_images.len()),
+                _ => None,
+            })
+            .sum();
+        log::info!("[ai-agent] 图片路由：本轮 {} 张，已回填 {} 张（native_vision=true）", image_refs_count, resolved);
     }
 
     // Agent 多轮之间累计思考过程：每轮响应里的 reasoning_content 都转发给前端，
@@ -241,6 +271,16 @@ async fn run_agent(
     // 思考过程凭空消失（执行轨迹里也没有它——轨迹只存工具事件）。
     let mut reasoning_acc = String::new();
     for _round in 0..max_rounds {
+        // 每轮按「静态排除 + 运行时失败禁用」重建工具列表：
+        // 某个后端不可达/未配置时，该工具下一轮不再下发，避免模型反复重试。
+        let tools: Vec<serde_json::Value> = {
+            let excluded: Vec<&str> = excluded_tools.iter().map(|s| s.as_str()).collect();
+            if excluded.is_empty() {
+                tool_schemas_for_api()
+            } else {
+                tool_schemas_for_api_without(&excluded)
+            }
+        };
         // 协作式取消检查点一：每轮开跑前。
         if cancel.load(Ordering::SeqCst) {
             let _ = app.emit("ai-done", serde_json::json!({
@@ -520,6 +560,13 @@ async fn run_agent(
                     let fname = prepared[p].1.clone();
                     let (ok, res) = slots[k].as_ref().expect("滚动缓冲 slot 必有结果");
                     let detail = &res.text;
+                    // 后端不可达/未配置：本轮后续不再下发该工具，防止模型反复重试。
+                    if !*ok && (detail.contains("未配置") || detail.contains("不可达") || detail.contains("探测失败")) {
+                        if !excluded_tools.iter().any(|n| n == &fname) {
+                            excluded_tools.push(fname.clone());
+                            log::warn!("[ai-agent] 工具 {fname} 后端不可用，本轮后续不再下发");
+                        }
+                    }
                     // 结构化呈现 meta（对齐 dsh presentResult → ToolResultView）：优先用 execute 自带 meta，
                     // 缺省再尝试工具的 present_result 二次结构化；都不提供则前端回退渲染 detail。
                     let meta = res.meta.clone().or_else(|| {

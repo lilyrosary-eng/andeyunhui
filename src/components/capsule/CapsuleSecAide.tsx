@@ -25,6 +25,8 @@ import { jumpToMessageIndex } from '@/components/chat/jumpToMessage';
 import { estimateMessageHeight } from '@/components/chat/estimateMessageHeight';
 import { activeTurnMessageIndex } from '@/components/chat/activeTurn';
 import { useCapsuleStore } from '@/stores/capsuleStore';
+import { ThinkingToggle } from '@/core/ai/ThinkingToggle';
+import { KeepButton } from '@/components/KeepButton';
 import type { Conversation, ChatMsg } from './types';
 import { EVENTS } from '@/core/events/schema';
 import { attachMarkdownCopyHandler, injectMarkdownStyles, renderMarkdown } from '@/lib/markdown';
@@ -139,11 +141,20 @@ function loadConvs(): Conversation[] {
 function CapsuleSecAideInner() {
   const setSecOpen = useCapsuleStore((s) => s.setSecOpen);
   const setStream = useCapsuleStore((s) => s.setStream);
+  const aiProfiles = useCapsuleStore((s) => s.aiProfiles);
+  const aideProfileId = useCapsuleStore((s) => s.aideProfileId);
+  const setAideProfileId = useCapsuleStore((s) => s.setAideProfileId);
+  const ensureProfiles = useCapsuleStore((s) => s.ensureProfiles);
+  const keepOpen = useCapsuleStore((s) => s.keepOpen);
+  const setKeepOpen = useCapsuleStore((s) => s.setKeepOpen);
+  const configuredAideProfiles = aiProfiles.filter((p) => p.api_key && p.api_key.trim());
 
   useEffect(() => {
     injectMarkdownStyles();
     return attachMarkdownCopyHandler();
   }, []);
+  // 与 AI 编程共用同一个模型档案与思考开关（后端暴露的通用能力，攻防不另起一套）。
+  useEffect(() => { ensureProfiles(); }, [ensureProfiles]);
 
   const initialSecConvs = useMemo(() => {
     const list = loadConvs();
@@ -284,11 +295,12 @@ function CapsuleSecAideInner() {
         requestId: reqId,
         messages: [...history, { role: 'user', content: text }],
         system: SEC_SYSTEM,
+        profileId: aideProfileId ?? null,
         maxRounds: SEC_MAX_ROUNDS,
         // 攻防工具不需要项目根；给 null 让 file/grep 明确报"未指定项目根"而不是乱猜目录
         projectRoot: null,
-        // 攻防场景用不上网页搜索，关掉省一轮可能的无意义调用
-        webSearch: false,
+        // 与 AI 编程对齐：联网工具由后端暴露，攻防侦察也能用
+        webSearch: true,
       });
     } catch (e) {
       reqRef.current = null;
@@ -296,7 +308,7 @@ function CapsuleSecAideInner() {
       updateMessages(cid, (prev) => prev.map((m) => (m.id === aid ? { ...m, error: true, content: '⚠ 发送失败：' + String(e) } : m)));
       setBusy(false);
     }
-  }, [activeId, busy, input, messages, updateMessages]);
+  }, [activeId, aideProfileId, busy, input, messages, updateMessages]);
 
   const stop = useCallback(() => {
     const rid = reqRef.current;
@@ -334,10 +346,30 @@ function CapsuleSecAideInner() {
         </select>
         <button onClick={newConv} title="新建对话" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: GOLD, background: 'rgba(230,195,92,0.14)', fontSize: 16, lineHeight: 1 }}>+</button>
         <button onClick={clearAll} title="清空全部攻防对话" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto', color: 'rgba(244,244,246,0.8)', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', fontSize: 11 }}>清</button>
+        <KeepButton pinned={keepOpen} onToggle={() => setKeepOpen(!keepOpen)} size={28} />
         {/* 返回：AI 编程面板一直有这个 ×，攻防迁来时漏了（用户 2026-10-19 反馈） */}
         <button onClick={() => setSecOpen(false)} title="收起（回到播放器）" style={{ ...btnBase, width: 28, height: 28, flex: '0 0 auto' }}>
           <IconClose />
         </button>
+      </div>
+
+      {/* 第二行：模型档案 + 思考开关（与 AI 编程对齐；后端 ai_chat_agent 支持 profileId） */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+        <select
+          value={aideProfileId ?? ''}
+          onChange={(e) => setAideProfileId(e.target.value || null)}
+          title="攻防使用哪个模型档案"
+          style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: '#f6f6f8', background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: '4px 6px', outline: 'none' }}
+        >
+          {configuredAideProfiles.length === 0 && <option value="" style={{ background: '#1c1c1e', color: '#f6f6f8' }}>未配置模型</option>}
+          {configuredAideProfiles.map((p) => (
+            <option key={p.id} value={p.id} style={{ background: '#1c1c1e', color: '#f6f6f8' }}>
+              {p.name || p.model || '未命名'}
+            </option>
+          ))}
+        </select>
+        <ThinkingToggle profileId={aideProfileId} compact disabled={!aideProfileId || busy} />
+        {busy && <span style={{ fontSize: 11, color: 'rgba(244,244,246,0.6)' }}>执行中</span>}
       </div>
 
       {/* 消息区：虚拟化 + 右侧轮次导轨 */}

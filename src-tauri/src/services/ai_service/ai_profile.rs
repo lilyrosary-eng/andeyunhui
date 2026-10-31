@@ -1034,13 +1034,22 @@ pub async fn ai_model_vision_native(app: AppHandle, profile_id: Option<String>) 
     tauri::async_runtime::spawn_blocking(move || {
         let config = load_config(&app);
         let cfg = resolve_target(&config, profile_id.as_deref());
-        config
+        let entry = config
             .providers
             .iter()
             .flat_map(|p| p.models.iter())
-            .find(|m| m.id == cfg.id)
-            .map(|m| m.vision_native_trusted())
-            .unwrap_or(false)
+            .find(|m| m.id == cfg.id);
+        let native = entry.map(|m| m.vision_native_trusted()).unwrap_or(false);
+        // 诊断：发图路由为什么走原生/兜底，日志里能直接看到模型与来源。
+        log::info!(
+            "[vision] profile={:?} model={} vision={:?} source={:?} native={}",
+            profile_id,
+            cfg.model,
+            entry.map(|m| m.caps.vision),
+            entry.and_then(|m| m.caps.vision_source),
+            native
+        );
+        native
     })
     .await
     .unwrap_or(false)
