@@ -2,6 +2,7 @@
 /// <reference path="../../global.d.ts" />
 import React from "react";
 import { T, useLang } from '../../_shared/pluginRuntime';
+import { useZoomPan } from '../../_shared/useZoomPan';
 // 图片查看器 — 四种查看模式
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const hostApi = window.__HOST_API__;
@@ -28,6 +29,9 @@ const ModeLabels: Record<ViewMode, string> = {
 };
 
 const MODES: ViewMode[] = ['full', 'vertical', 'horizontal-forward', 'horizontal-reverse'];
+/** 完整模式滚轮缩放范围。 */
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 16;
 /** 幻灯片间隔预设（秒） */
 const PRESET_INTERVALS = [0.1, 0.5, 1, 2, 3, 5, 10];
 
@@ -38,9 +42,48 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('full');
   const [currentIndex, setCurrentIndex] = useState(0);
+  // ===== 中心点击（full=沉浸切换上下条框；滚动模式=唤出跳转菜单）=====
+  const [menuOpen, setMenuOpen] = useState(false);
+  // 完整模式沉浸：隐藏顶部工具栏与缩略图条（点击中心切换）
+  const [chromeHidden, setChromeHidden] = useState(false);
+
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const fullImageRef = useRef<HTMLDivElement>(null);
+  const fullImgRef = useRef<HTMLImageElement | null>(null);
   const viewAreaRef = useRef<HTMLDivElement>(null);
+  // 完整模式：滚轮缩放、右键/中键拖动平移。相机模型与缓动抽在 _shared/useZoomPan（绘画模块可复用）。
+  // 渲染走浏览器原生 <img> + transform：始终清晰，缩放/平移交给合成器（分层/瓦片方案已回退）。
+  // 几何不再依赖 img 的 DOM transform（大图每帧变形会拖垮合成器）：按容器 + 原图尺寸直接算。
+  const getBaseRect = useCallback(() => {
+    const view = fullImageRef.current;
+    const img = fullImgRef.current;
+    if (!view || !img) return null;
+    const nw = img.naturalWidth, nh = img.naturalHeight;
+    if (!nw || !nh) return null;
+    const vr = view.getBoundingClientRect();
+    if (vr.width <= 0 || vr.height <= 0) return null;
+    const fit = Math.min(1, vr.width / nw, vr.height / nh);
+    const w = nw * fit, h = nh * fit;
+    return {
+      left: vr.left + (vr.width - w) / 2,
+      top: vr.top + (vr.height - h) / 2,
+      width: w,
+      height: h,
+      view: vr,
+    };
+  }, []);
+  const {
+    camera: zoomCamera,
+    transformStyle: zoomTransformStyle,
+    zoomByWheel,
+    panBy: panZoomBy,
+    reset: resetZoom,
+  } = useZoomPan(fullImageRef, fullImgRef, {
+    min: ZOOM_MIN,
+    max: ZOOM_MAX,
+    zoomOutAnchor: 'viewport',
+    getBaseRect,
+  });
   // 随机模式 + 幻灯片模式
   const [isRandomMode, setIsRandomMode] = useState(false);
   const [isSlideshow, setIsSlideshow] = useState(false);
@@ -59,6 +102,27 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
     }
     return arr;
   }, [images, isRandomMode]);
+  // 翻页卡顿主要来自“下一张图首次解码”。提前在后台给相邻图片做 decode，
+  // 用户翻过去时浏览器直接命中已解码缓存；保持少量引用，避免被立刻回收。
+  const preloadedRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  useEffect(() => {
+    const neighbors = [currentIndex + 1, currentIndex - 1];
+    for (const i of neighbors) {
+      const url = shuffledImages[i];
+      if (!url || isGif(url) || preloadedRef.current.has(url)) continue;
+      const im = new Image();
+      im.decoding = 'async';
+      im.src = url;
+      preloadedRef.current.set(url, im);
+      void im.decode?.().catch(() => {});
+    }
+    while (preloadedRef.current.size > 6) {
+      const first = preloadedRef.current.keys().next().value;
+      if (first === undefined) break;
+      preloadedRef.current.delete(first);
+    }
+  }, [currentIndex, shuffledImages]);
+
 
   const getNextIndex = useCallback((current: number, total: number, random: boolean) => {
     if (random) {
@@ -188,13 +252,44 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
     return () => window.removeEventListener('keydown', onKey);
   }, [viewMode, goToNext, goToPrev]);
 
-  // 滚轮导航（完整模式）— 仅过滤触摸板微滚动，保持滚轮一次一张
-  const handleWheelFull = useCallback((e: React.WheelEvent) => {
+  // 完整模式滚轮：
+  //   - 顶/底栏显示（chromeHidden=false）→ 上一张/下一张；
+  //   - 顶/底栏隐藏（chromeHidden=true）→ 缩放。
+  // React onWheel 是 passive，必须原生监听才能 preventDefault；
+  // 依赖里必须带 loading / images.length / chromeHidden —— 首次挂载时图还没加载完，
+  // fullImageRef 是 null，只在 viewMode 变化时挂会永远挂不上（滚轮无反应的根因）。
+  useEffect(() => {
     if (viewMode !== 'full') return;
-    if (Math.abs(e.deltaY) < 10) return;
-    if (e.deltaY > 0) goToNext();
-    else goToPrev();
-  }, [viewMode, goToNext, goToPrev]);
+    const el = fullImageRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (!chromeHidden) {
+        if (Math.abs(e.deltaY) < 10) return;
+        if (e.deltaY > 0) goToNext();
+        else goToPrev();
+        return;
+      }
+      // 放大锚光标；缩小锚视口中心（useZoomPan 的 zoomOutAnchor=viewport），
+      // 避免缩小时镜头追着光标跑。锚点还会被夹到图片范围内。
+      // 每档 ×1.1（与 photocraft 一致）：deltaY 归一化后按 100px 一档换算。
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1;
+      const dy = e.deltaY * unit;
+      zoomByWheel(e.clientX, e.clientY, dy, dy < 0 ? 'in' : 'out');
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [viewMode, chromeHidden, loading, shuffledImages.length, goToNext, goToPrev, zoomByWheel]);
+
+  // 重新显示顶/底栏时回到 100%：此时滚轮语义是翻页，不应带着上一张的缩放。
+  useEffect(() => {
+    if (!chromeHidden) resetZoom();
+  }, [chromeHidden, resetZoom]);
+
+  // 切图/切模式/换文件夹：缩放复位，避免带着上一张的缩放看下一张。
+  useEffect(() => {
+    resetZoom();
+  }, [currentIndex, viewMode, folderPath, resetZoom]);
 
   // 滚轮驱动滚动（横版/竖版）：即时滚动保证每帧位移与滚轮量成正比
   const scrollByWheel = useCallback((deltaY: number) => {
@@ -259,10 +354,6 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
     preload(currentIndex + 2);
   }, [currentIndex, images, viewMode]);
 
-  // ===== 中心点击（full=沉浸切换上下条框；滚动模式=唤出跳转菜单）=====
-  const [menuOpen, setMenuOpen] = useState(false);
-  // 完整模式沉浸：隐藏顶部工具栏与缩略图条（点击中心切换）
-  const [chromeHidden, setChromeHidden] = useState(false);
 
   // 滚动比例（0~1）：按相对位置映射，图片加载把内容撑大后比例自动保持同步
   const readScrollRatio = useCallback((): number => {
@@ -389,7 +480,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top">
+    <div className={`flex-1 flex flex-col h-full overflow-hidden bg-[#f5f5f0] dark:bg-[#1c1917] immersive-safe-top image-viewer-root${viewMode === 'full' && chromeHidden ? ' image-viewer-full-bleed' : ''}`}>
       {/* 顶部工具栏（完整模式可点击图片中心隐藏，沉浸阅读） */}
       {!(viewMode === 'full' && chromeHidden) && (
       <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-200/30 dark:border-stone-700/30 flex-shrink-0 bg-white/60 dark:bg-stone-800/60 backdrop-blur-sm">
@@ -507,7 +598,16 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
           </select>
         </div>
 
-        {/* 右侧：序号（点击可输入页码跳转） */}
+        {/* 右侧：缩放比例（点击复位）+ 序号（点击可输入页码跳转） */}
+        {viewMode === 'full' && Math.abs(zoomCamera.scale - 1) > 0.001 && (
+          <button
+            onClick={() => resetZoom()}
+            title="重置缩放"
+            className="mr-2 px-2 py-0.5 rounded-md text-[11px] tabular-nums text-neutral-500 dark:text-stone-400 bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+          >
+            {Math.round(zoomCamera.scale * 100)}%
+          </button>
+        )}
         {viewMode === 'full' && (
           <PageIndicator index={currentIndex} total={shuffledImages.length} onJump={(i) => setCurrentIndex(i)} />
         )}
@@ -522,7 +622,11 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
             imgPaths={shuffledImages}
             currentIndex={currentIndex}
             setCurrentIndex={setCurrentIndex}
-            onWheel={handleWheelFull}
+            imgRef={fullImgRef}
+            zoomStyle={zoomTransformStyle}
+            zoomed={zoomCamera.scale > 1}
+            onPanBy={panZoomBy}
+            onResetZoom={() => resetZoom()}
             containerRef={fullImageRef}
             onToggleChrome={() => setChromeHidden(v => !v)}
           />
@@ -623,7 +727,11 @@ function FullView({
   imgPaths,
   currentIndex,
   setCurrentIndex,
-  onWheel,
+  imgRef,
+  zoomStyle,
+  zoomed,
+  onPanBy,
+  onResetZoom,
   containerRef,
   onToggleChrome,
 }: {
@@ -631,11 +739,35 @@ function FullView({
   imgPaths: string[];
   currentIndex: number;
   setCurrentIndex: (i: number) => void;
-  onWheel: (e: any) => void;
+  imgRef: React.RefObject<HTMLImageElement>;
+  zoomStyle: React.CSSProperties;
+  zoomed: boolean;
+  onPanBy: (dx: number, dy: number) => void;
+  onResetZoom: () => void;
   containerRef: React.RefObject<HTMLDivElement>;
   onToggleChrome: () => void;
 }) {
+  const dragRef = useRef<{ x: number; y: number; button: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [imgError, setImgError] = useState(false);
+  // 结束拖动必须幂等且不依赖 pointerup 一定落在覆盖层上：
+  // WebView2 里右键/中键的 pointerup 偶尔会被系统吞掉，只清状态不够，会在松开后继续拖。
+  const endDrag = useCallback(() => {
+    dragRef.current = null;
+    setDragging(false);
+  }, []);
+  useEffect(() => {
+    if (!dragging) return;
+    const stop = () => endDrag();
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+    window.addEventListener('blur', stop);
+    return () => {
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      window.removeEventListener('blur', stop);
+    };
+  }, [dragging, endDrag]);
   // GIF 读取为 data URL 渲染（绕过 WebView asset: 协议下动图不播放的问题）
   // 沙箱屏蔽了 fetch，改用后端 read_file_base64 读取原始文件路径为 data URI。
   const [gifDataUrl, setGifDataUrl] = useState<string | null>(null);
@@ -662,7 +794,6 @@ function FullView({
     <div
       ref={containerRef}
       className="w-full h-full flex items-center justify-center relative overflow-hidden"
-      onWheel={onWheel}
     >
       {/* 点击左半区 */}
       {currentIndex > 0 && (
@@ -675,17 +806,54 @@ function FullView({
         <div className="absolute right-0 top-0 w-1/3 h-full cursor-pointer z-10" onClick={goNext} />
       )}
 
+      {/* 放大后：整层可拖动平移 + 双击复位。覆盖在点击区之上，避免拖动时误触翻页/显隐。
+          只认右键(2)/中键(1)：左键留给双击复位，且左键拖在 WebView2 里会出禁止光标。
+          右键的默认菜单在这里拦掉，拖完松手也不会弹。 */}
+      {zoomed && (
+        <div
+          className="absolute inset-0 z-20"
+          style={{ cursor: dragging ? 'grabbing' : 'default', touchAction: 'none' }}
+          onDoubleClick={onResetZoom}
+          onContextMenu={(e) => e.preventDefault()}
+          onAuxClick={(e) => e.preventDefault()}
+          onPointerDown={(e) => {
+            if (e.button !== 1 && e.button !== 2) return;
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            dragRef.current = { x: e.clientX, y: e.clientY, button: e.button };
+            setDragging(true);
+          }}
+          onPointerMove={(e) => {
+            const d = dragRef.current;
+            if (!d) return;
+            // 按键已经松开但 pointerup 丢了（右键菜单/窗口失焦）：以 buttons 位为准停拖。
+            const mask = d.button === 2 ? 2 : 4;
+            if ((e.buttons & mask) === 0) {
+              endDrag();
+              return;
+            }
+            onPanBy(e.clientX - d.x, e.clientY - d.y);
+            d.x = e.clientX;
+            d.y = e.clientY;
+          }}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          onLostPointerCapture={endDrag}
+        />
+      )}
+
       {imgError ? (
         <div className="text-neutral-300 dark:text-stone-600 text-sm">{T('image.viewer.loadFailed')}</div>
       ) : (
         <img
+          ref={imgRef}
           src={isCurrentGif ? (gifDataUrl || currentUrl) : currentUrl}
           alt={`${currentIndex + 1}/${imgUrls.length}`}
           key={currentIndex}
           onError={() => setImgError(true)}
           onLoad={(e) => { e.currentTarget.style.opacity = '1'; }}
-          style={{ opacity: 0, transition: 'opacity 0.15s ease' }}
           className="max-w-full max-h-full object-contain select-none"
+          style={{ opacity: 0, transition: 'opacity 0.15s ease', ...zoomStyle }}
           decoding="async"
           draggable={false}
         />
@@ -934,6 +1102,8 @@ export function ThumbImg({ path }: { path: string }) {
   useEffect(() => {
     let cancelled = false;
     scheduleThumb(() => {
+      // 快速滚动时缩略图可能已经离开窗口：不再发起后端生成，省掉无用的排队与磁盘扫描
+      if (cancelled) { thumbSettled(); return; }
       hostApi.invoke<string>('generate_thumbnail', { imagePath: path, width: 200 })
         .then((p) => {
           if (!cancelled && p) {
@@ -960,20 +1130,67 @@ function ThumbnailStrip({
   onSelect: (i: number) => void;
 }) {
   const stripRef = useRef<HTMLDivElement>(null);
+  const PITCH = THUMB_ITEM_W + THUMB_GAP;
+  const OVERSCAN = 8;
+  // 窗口按“滚动位置”算，而不是按 currentIndex：滚轮可以自由浏览，不改变当前大图
+  const [win, setWin] = useState(() => ({
+    start: Math.max(0, currentIndex - THUMB_WINDOW),
+    end: Math.min(paths.length, currentIndex + THUMB_WINDOW + 1),
+  }));
 
-  // 当前缩略图滚动到可见区域（窗口化渲染后按 data-i 定位）
+  const syncWindow = useCallback(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const start = Math.max(0, Math.floor(el.scrollLeft / PITCH) - OVERSCAN);
+    const end = Math.min(paths.length, Math.ceil((el.scrollLeft + el.clientWidth) / PITCH) + OVERSCAN + 1);
+    setWin((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
+  }, [paths.length]);
+
+  useEffect(() => { syncWindow(); }, [syncWindow, currentIndex, paths.length]);
+
+  // 滚轮：自由横向滚动（纵向滚轮也映射为横向，触控板横向优先）
   useEffect(() => {
-    const thumb = stripRef.current?.querySelector<HTMLElement>(`[data-i="${currentIndex}"]`);
-    thumb?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-  }, [currentIndex]);
+    const el = stripRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1;
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (!delta) return;
+      e.preventDefault();
+      el.scrollLeft += delta * unit;
+      syncWindow();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [syncWindow]);
 
-  const start = Math.max(0, currentIndex - THUMB_WINDOW);
-  const end = Math.min(paths.length, currentIndex + THUMB_WINDOW + 1);
+  // 普通滚动/拖动滚动条：rAF 合并更新窗口
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    let raf = 0;
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; syncWindow(); });
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => { el.removeEventListener('scroll', onScroll); if (raf) cancelAnimationFrame(raf); };
+  }, [syncWindow]);
+
+  // 当前项变化：把对应缩略图滚到可见区域中心（只滚条自身，不动外层页面）
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const target = currentIndex * PITCH + THUMB_ITEM_W / 2 - el.clientWidth / 2;
+    const max = Math.max(0, el.scrollWidth - el.clientWidth);
+    el.scrollTo({ left: Math.max(0, Math.min(max, target)), behavior: 'smooth' });
+  }, [currentIndex, PITCH]);
+
   const items: React.ReactNode[] = [];
-  if (start > 0) {
-    items.push(<div key="head" style={{ width: start * (THUMB_ITEM_W + THUMB_GAP), flex: '0 0 auto' }} />);
+  if (win.start > 0) {
+    items.push(<div key="head" style={{ width: win.start * PITCH, flex: '0 0 auto' }} />);
   }
-  for (let i = start; i < end; i++) {
+  for (let i = win.start; i < win.end; i++) {
     items.push(
       <button
         key={i}
@@ -989,8 +1206,8 @@ function ThumbnailStrip({
       </button>
     );
   }
-  if (end < paths.length) {
-    items.push(<div key="tail" style={{ width: (paths.length - end) * (THUMB_ITEM_W + THUMB_GAP), flex: '0 0 auto' }} />);
+  if (win.end < paths.length) {
+    items.push(<div key="tail" style={{ width: (paths.length - win.end) * PITCH, flex: '0 0 auto' }} />);
   }
 
   return (

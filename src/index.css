@@ -298,6 +298,13 @@
   html.immersive-mode .immersive-safe-top .immersive-safe-top {
     padding-top: 0;
   }
+  /* 图片模块专属的极致沉浸：完整模式隐藏上下工具栏时，查看区顶到窗口最上沿。
+     只作用于图片查看器；侧栏（ImageSidebar）仍保留 38px 安全区，
+     因此侧栏收起后的模块 logo 不会和左上全局 logo 重合。
+     取舍：顶部 38px 的全局拖拽条/窗口键会浮在图片上方。 */
+  html.immersive-mode .image-viewer-root.image-viewer-full-bleed {
+    padding-top: 0;
+  }
   /* 中转站 OCR 工作区是绝对定位面板（absolute left-6 top-6，不参与父级文档流）：
      父级的 .immersive-safe-top 只加了 padding-top，对绝对定位子元素不生效，
      沉浸态下它仍从窗口顶部 24px 起算、顶部约 14px 落进悬浮层拖拽条（0~38px）里。

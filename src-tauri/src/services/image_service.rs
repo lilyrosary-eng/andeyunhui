@@ -250,6 +250,23 @@ pub fn get_folder_images(folder_path: &str) -> Result<Vec<String>, String> {
     Ok(images.iter().map(|n| folder.join(n).to_string_lossy().to_string()).collect())
 }
 
+// 查看器显示层（width ≥ 1024）的解码很重：串行化，避免快速翻页时多个大图同时解码抢 CPU。
+static BIG_THUMB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 快速 PNG 编码：默认压缩在 debug 构建里会把 3072² 显示层拖到数秒；
+/// Fast 压缩体积略大但生成快一个数量级。
+fn save_png_fast(img: &image::DynamicImage, path: &std::path::Path) -> Result<(), String> {
+    use image::ImageEncoder;
+    let file = std::fs::File::create(path).map_err(|e| format!("创建 PNG 失败: {}", e))?;
+    let enc = image::codecs::png::PngEncoder::new_with_quality(
+        std::io::BufWriter::new(file),
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    enc.write_image(img.as_bytes(), img.width(), img.height(), img.color().into())
+        .map_err(|e| format!("保存 PNG 失败: {}", e))
+}
+
 pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) -> Result<String, String> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -264,18 +281,82 @@ pub fn generate_thumbnail(app: &tauri::AppHandle, image_path: &str, width: u32) 
     let mut hasher = DefaultHasher::new();
     image_path.hash(&mut hasher);
     let hash = hasher.finish();
-    let thumb_path = cache_dir.join(format!("{:016x}.jpg", hash));
+    // 缓存必须按宽度区分：底栏 200、查看器 3072 是不同产物。
+    // width=200 沿用旧文件名，避免把已有缩略图缓存全部作废。
+    // v2：显示层改为“接近原尺寸时用高质量重采样 + 无损来源输出 PNG”，
+    // 用版本后缀让旧的 fast-thumbnail/JPEG 缓存失效一次。
+    let stem = if width == 200 {
+        format!("{:016x}", hash)
+    } else {
+        format!("{:016x}_{}_v2", hash, width)
+    };
+    let jpg_path = cache_dir.join(format!("{}.jpg", stem));
+    let png_path = cache_dir.join(format!("{}.png", stem));
+    if jpg_path.exists() {
+        return Ok(jpg_path.to_string_lossy().to_string());
+    }
+    if png_path.exists() {
+        return Ok(png_path.to_string_lossy().to_string());
+    }
 
-    if thumb_path.exists() {
-        return Ok(thumb_path.to_string_lossy().to_string());
+    let _guard = if width >= 1024 {
+        Some(BIG_THUMB_LOCK.lock().unwrap_or_else(|e| e.into_inner()))
+    } else {
+        None
+    };
+    // 等锁期间可能已被别的请求生成
+    if jpg_path.exists() {
+        return Ok(jpg_path.to_string_lossy().to_string());
+    }
+    if png_path.exists() {
+        return Ok(png_path.to_string_lossy().to_string());
     }
 
     let img = image::open(&image_path)
         .map_err(|e| format!("打开图片失败: {}", e))?;
-    let thumb = img.thumbnail(width, width * 10);
-    thumb.save(&thumb_path)
-        .map_err(|e| format!("保存缩略图失败: {}", e))?;
-    Ok(thumb_path.to_string_lossy().to_string())
+    let has_alpha = img.color().has_alpha();
+    // 无损来源（PNG/BMP）保持 PNG，避免 JPEG 4:2:0 在截图/文字上产生块状发糊。
+    let lossless_src = std::path::Path::new(image_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "bmp" | "gif"))
+        .unwrap_or(false);
+    let use_png = has_alpha || lossless_src;
+    let t_gen = std::time::Instant::now();
+    // 统一用快速盒式缩小：debug 构建下 Triangle/PNG 默认压缩会把 3072² 显示层
+    // 拖到 5~10 秒，用户体验上等同于“永远糊”。质量靠 PNG/JPEG q92 + 原图兜底保证。
+    let thumb = img.thumbnail(width, width.saturating_mul(10));
+    if width >= 1024 {
+        log::info!(
+            "[image] display layer {}x{} from {}x{} in {}ms ({})",
+            thumb.width(),
+            thumb.height(),
+            img.width(),
+            img.height(),
+            t_gen.elapsed().as_millis(),
+            if has_alpha || lossless_src { "png" } else { "jpg" }
+        );
+    }
+    if use_png {
+        // 透明 / 无损来源走 PNG，避免 JPEG 丢掉 alpha 或给截图带来块状 artifacts
+        save_png_fast(&thumb, &png_path)?;
+        Ok(png_path.to_string_lossy().to_string())
+    } else if width >= 1024 {
+        // 查看器显示层质量高一点，避免 1× 浏览时看到 JPEG 块
+        let file = std::fs::File::create(&jpg_path)
+            .map_err(|e| format!("创建缩略图文件失败: {}", e))?;
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            std::io::BufWriter::new(file),
+            92,
+        );
+        enc.encode_image(&thumb)
+            .map_err(|e| format!("保存缩略图失败: {}", e))?;
+        Ok(jpg_path.to_string_lossy().to_string())
+    } else {
+        thumb.save(&jpg_path)
+            .map_err(|e| format!("保存缩略图失败: {}", e))?;
+        Ok(jpg_path.to_string_lossy().to_string())
+    }
 }
 
 pub fn cleanup_thumbnail_cache(app: &tauri::AppHandle) -> Result<usize, String> {
@@ -294,7 +375,8 @@ pub fn cleanup_thumbnail_cache(app: &tauri::AppHandle) -> Result<usize, String> 
     for entry in std::fs::read_dir(&cache_dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("jpg") {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if ext == Some("jpg") || ext == Some("png") {
             let meta = entry.metadata().map_err(|e| e.to_string())?;
             let mtime = meta.modified().map_err(|e| e.to_string())?;
             total_size += meta.len();
