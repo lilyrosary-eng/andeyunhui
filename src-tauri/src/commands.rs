@@ -27,7 +27,7 @@ mod bootstrap;
 pub use bootstrap::*;
 mod notes;
 pub use notes::*;
-mod plugins;
+pub(crate) mod plugins;
 pub use plugins::*;
 mod transfer;
 pub use transfer::*;

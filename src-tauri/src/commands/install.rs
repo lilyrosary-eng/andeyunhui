@@ -111,6 +111,7 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::
 #[tauri::command]
 pub fn install_dep_file(
     app: tauri::AppHandle,
+    plugin_id: Option<String>,
     target_subpath: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
@@ -122,6 +123,7 @@ pub fn install_dep_file(
     let user_deps_dir = get_user_external_deps_dir(&app)
         .ok_or_else(|| "无法解析 user_external_deps 目录".to_string())?;
     let path = user_deps_dir.join(trimmed);
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &path.to_string_lossy())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
     }
@@ -137,6 +139,7 @@ pub fn install_dep_file(
 #[tauri::command]
 pub fn install_user_plugin_file(
     app: tauri::AppHandle,
+    plugin_id: Option<String>,
     target_subpath: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
@@ -147,6 +150,7 @@ pub fn install_user_plugin_file(
     let user_plugins_dir = get_user_plugins_dir(&app)
         .ok_or_else(|| "无法解析 user_plugins 目录".to_string())?;
     let path = user_plugins_dir.join(trimmed);
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &path.to_string_lossy())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
     }

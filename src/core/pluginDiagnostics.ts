@@ -3,7 +3,7 @@
 
 export interface DiagnosticEntry {
   pluginId: string;
-  stage: 'scan' | 'version' | 'load' | 'register' | 'conflict' | 'runtime';
+  stage: 'scan' | 'version' | 'permission' | 'load' | 'register' | 'conflict' | 'runtime';
   reason: string;
   timestamp: number;
 }

@@ -31,6 +31,8 @@ pub mod recording_service;
 #[path = "../pal/recording_service.rs"]
 pub mod recording_service;
 pub mod window_manager;
+// 插件能力模型：命令→能力规则、授权账本、效果层写入范围校验。
+pub mod plugin_access;
 pub mod checkpoint;
 // 项目工作区 .adyh / 跨 harness 通道 .Talk：规则、记忆、会话、媒体、消息总线。
 pub mod adyh_service;

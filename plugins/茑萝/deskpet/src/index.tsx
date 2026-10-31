@@ -89,7 +89,7 @@ hostApi
     for (const it of items) {
       if (!it?.rel) continue;
       hostApi
-        .invoke('read-external-dep-path', { relativePath: it.rel })
+        .invoke('read_external_dep_path', { relativePath: it.rel })
         .then((absPath: string) => {
           if (absPath) {
             const url = hostApi.convertFileSrc(absPath);

@@ -32,450 +32,15 @@ import { createFrameBuffer } from '@/lib/frameBuffer';
 // 故此对象需同时承载两套 API
 const ReactDOM = { ...ReactDOMNS, ...ReactDOMClient } as unknown as typeof ReactDOMNS;
 
-// ========== 插件可调用的 Tauri 命令白名单 ==========
-// 内置插件（图片、音乐等）需要的所有命令
-const ALLOWED_COMMANDS = new Set([
-  // 存储
-  'plugin_storage_get',
-  'plugin_storage_set',
-  // 图片模块
-  'load_image_cache',
-  'cancel_scan',
-  'scan_image_root',
-  'delete_image_cache',
-  'pick_directory',
-  'pick_file',
-  'get_folder_images',
-  // 图片模块：缩略图生成（200px JPEG，磁盘缓存复用）。漏加会导致缩略图条全白（invoke 被拦截且被 .catch 吞错）
-  'generate_thumbnail',
-  // 音乐模块
-  'load_music_cache',
-  'get_dir_mtime',
-  'scan_music_root',
-  'delete_music_cache',
-  'read_track_metadata',
-  'get_lyrics',
-  'show_lyrics_widget',
-  'hide_lyrics_widget',
-  'set_lyrics_widget_locked',
-  'get_lyrics_widget_locked',
-  // 音乐模块 —— 铃兰（收藏 / 播放状态 / 听歌统计 / 封面覆盖 / 标签写回 / 歌单管理）
-  // 注意：Phase 1~2 移植新增的 music_* 命令此前漏加白名单，导致沙箱内 invoke 被拦截
-  // （"未授权命令"被插件侧 .catch 静默吞掉），表现为收藏/封面/播放状态/听歌统计/重扫全部失败。
-  // 频谱订阅/退订：铃兰 musicPlayer 驱动 Rust「无监听即休眠」，漏加会拦截→采集暂停→降级为伪律动。
-  'spectrum_set_listener',
-  'music_replace_playlist_tracks',
-  'music_set_favorite',
-  'music_list_favorites',
-  'music_save_player_state',
-  'music_get_player_state',
-  'music_record_play_session',
-  'music_get_listen_stats',
-  'music_get_listen_ranking',
-  'music_set_cover',
-  'music_rescan_metadata',
-  'music_edit_track',
-  'music_get_all_cover_overrides',
-  'music_delete_cover_override',
-  'music_clean_cover_cache',
-  'get_lyrics_text',
-  'save_track_lyrics',
-  'music_rename_playlist',
-  'music_delete_playlist',
-  'music_list_playlists',
-  'music_list_playlist_tracks',
-  'music_add_track_to_playlist',
-  'music_remove_track_from_playlist',
-  'music_reorder_playlist_track',
-  // 网易云 WebAPI 代理（Phase 3）：TS 加密 + Rust 无 CORS 转发
-  'netease_http_post',
-  'netease_register_guest',
-  // 酷狗 WebAPI 代理（音乐模块）：TS 端 MD5 盐签名 + Rust 无 CORS 转发
-  'kugou_http_post',
-  // 汽水音乐 WebAPI 代理（音乐模块）：TS 端字节系签名 + Rust 无 CORS 转发
-  'qishui_http_post',
-'qishui_download_audio',
-'qishui_save_temp_audio',
-  // 音乐下载：前端取链后由 Rust 落地到本地文件
-  'download_file',
-  // 保存文件对话框（tauri-plugin-dialog）：下载时选择保存路径。沙箱仅放行 save。
-  'plugin:dialog|save',
-  // SMTC（任务栏「正在播放」）：前端推送播放状态 + 上报激活模块 + 诊断日志。
-  // 注意：这些命令此前漏加白名单，导致沙箱内 music/video 插件的 invoke 被静默拦截
-  // （插件侧 .catch 吞错），元信息永远到不了 Rust，任务栏卡片不显示。
-  'smtc_update',
-  'smtc_status',
-  'set_active_module',
-  'set_window_hidden',
-  'debug_log',
-  // 视频模块
-  'load_video_cache',
-  'scan_video_root',
-  'delete_video_cache',
-  'get_folder_videos',
-  // 视频模块 —— 网络视频（纯 API 架构）
-  // ⚠️ 这四个命令此前全部漏加白名单，导致沙箱内 invoke 被拦截，而插件侧有 .catch 兜底，
-  // 于是「搜索/取流/下载」全部静默失败 —— 表现为「B 站还是用不了」，
-  // 但后端代理、白名单、签名链路其实都是通的（排查时极易误判为后端问题）。
-  // 教训：新增任何走 __HOST_API__.invoke 的插件命令，必须同步加到这里。
-  'bilibili_request', // B 站代理：wbi 签名在 TS 端完成，Rust 仅无 CORS 转发
-  'download_video', // 视频下载：多段按序下载 + ffmpeg concat 拼接（8GB 上限、无总超时）
-  'download_hls', // m3u8 转封装 mp4（网址直连面板粘贴 .m3u8 时走这条）
-  // 内嵌浏览器（网络视频·「面板区当浏览器」）：子 webview 生命周期 + 资源嗅探
-  // ⚠️ 同前：漏加会被沙箱拦截且插件侧 .catch 吞错 → 静默失败
-  'browser_open',
-  'browser_set_bounds',
-  'browser_navigate',
-  'browser_sniff',
-  'browser_current_url',
-  'browser_close',
-  // 阅读模块
-  'scan_reading_root',
-  'load_reading_cache',
-  'delete_reading_cache',
-  'open_book',
-  'cancel_open_book',
-  // 通用
-  'check_file_exists',
-  // 「以安得云荟打开」/ 拖入主窗口：复制进固定临时目录 <app_data>/openwith/<module>/
-  // 四个媒体模块（图片/音乐/视频/阅读）的 processOpenWith 都会调用此命令，漏加会被白名单拦截
-  'import_to_openwith_dir',
-  // 办公（wps）插件：文档导入（docx→markdown）、演示导入（pptx→json）
-  'convert_to_markdown',
-  'wps_import_pptx',
-  'wps_import_pptx_diagnose',
-  // 办公（wps）插件 · 表格公式（spike）：无状态求值 + 带公式的 xlsx 导入（gridcraft）
-  'sheet_calc',
-  'sheet_read_xlsx',
-  // 黑名单管理
-  'get_blacklist_paths',
-  'add_to_blacklist',
-  'remove_from_blacklist',
-  // 专业模块「薄荷」工具
-  'get_env_vars',
-  'set_env_var',
-  'scan_ports',
-  'list_processes',
-  'get_system_memory',
-  'clipboard_read',
-  'clipboard_write',
-  'clipboard_read_image',
-  'clipboard_clear',
-  'clipboard_poll_image',
-  'convert_image',
-  'convert_document',
-  'check_ffmpeg',
-  'transcode_media',
-  // 薄荷音频转换：音频 → MIDI 转写（basic-pitch，MIT）
-  'audio_to_midi',
-  // 通用：插件按需读取自身入口脚本与文件
-  'read_plugin_file',
-  // IDE 子插件：按需加载 CodeMirror 等外部依赖
-  'read_external_dep_file',
-  // 本地 OCR 引擎（PaddleOCR 依赖包）：按相对路径读取二进制资产（ONNX 模型 / 权重）为 base64
-  'read_external_dep_bytes',
-  // Linux 本地媒体 HTTP 服务：返回一条 http://127.0.0.1:PORT/... URL，
-  // 由本地服务流式按需读取（含 Range），**不把整首歌读进内存**。
-  'media_http_url',
-  // 桌宠：按相对路径读取外部依赖绝对路径，供前端 convertFileSrc 走 asset 协议加载（避免大图 base64 超 IPC 载荷）
-  'read-external-dep-path',
-  // 桌宠：把用户本地图片/视频导入到 user_external_deps/deskpet-assets/pet/
-  'import_deskpet_asset',
-  // 绘画子插件：导出到剪贴板 / 中转站
-  'clipboard_write_image',
-  'clipboard_write_image_from_path',
-  'add_bytes_to_dropzone',
-  // IDE 子插件：读取文本文件 / 目录列表
-  'read_text_file',
-  'list_directory',
-  // IDE 子插件：Agent 会话完整内容落盘（localStorage 只当秒开缓存）。
-  // 原先会话全塞 localStorage，被迫做 8KB/条截断 + 256KB 首尾各 20 条 + 最多 20 个会话，
-  // 且写失败 `catch { /* 满 */ }` 静默丢数据。改为写 app_data/ide-sessions/<id>.json（原子写）。
-  'ide_session_save',
-  'ide_session_load',
-  'ide_session_list',
-  'ide_session_delete',
-  'ensure_directory',
-  // IDE 子插件：保存 / 另存为（Rust 端已实现并注册，此前漏加白名单导致被沙箱拦截）
-  'write_text_file',
-  // IDE 子插件：删除文件（重命名 / 删除 diff 用到，与 write_text_file 同一文件操作族）
-  'delete_file',
-  // 通用：插件导出二进制文件（XLSX / 图片等），base64 解码后原子写盘
-  'write_file_bytes',
-  'pick_save_file',
-  // 图片模块：读取文件为 data URI（GIF 绕过 asset: 协议动画限制）
-  'read_file_base64',
-  // 视觉模型 OCR（攻防插件用于验证码识别 / 滑块定位；复用主应用既有命令，不引入本地 OCR 依赖）
-  'ai_vision_ocr',
-  // 全局 AI 能力：茑萝 · AI 编程 子插件调用（LLM 走后端，规避沙箱屏蔽 fetch）
-  'ai_get_profiles',
-  'ai_set_profiles',
-  'ai_chat',
-  // RAG 共享后台服务（茑萝 · RAG 知识库子插件）。
-  // ⚠️ 这 6 条此前**从未**进过白名单（`git log -S rag_query -- src/core/pluginSandbox.ts` 无记录），
-  // 于是插件侧 rag_init_db / rag_list_sources / rag_embed_api 全被拦截，而插件里
-  // catch {} 兜底 → 面板只显示「暂无来源」、摄取报「嵌入请求失败」，看起来像「功能没做」。
-  // 后端 src-tauri/src/commands/rag_commands.rs 六个命令一直是实现完整并注册过的。
-  'rag_init_db',
-  'rag_ingest',
-  'rag_query',
-  'rag_list_sources',
-  'rag_delete_source',
-  'rag_embed_api',
-  // 重建向量 / 统计（换嵌入模型后按原文重算；数据安全相关）
-  'rag_list_chunks',
-  'rag_update_vectors',
-  'rag_stats',
-  // 刻意**不放行**给插件：
-  //   rag_backup_db —— 应用级运维（后端破坏性写入前已自动备份 3 份），插件无此需求，
-  //                    放开等于允许「反复导出一份完整库」；
-  //   rag_prune     —— 会删数据（只清 type='chat'），归主应用启动时自管。
-  // 主应用（semanticMemory）不经沙箱，照常可调。
-  // base64 文档 → Markdown（摄取对话框粘贴/拖入二进制时走这条；按路径那条已在上方 convert_to_markdown）
-  'convert_bytes_to_markdown',
-  // 一期 AI 办公 / 工作流：读取与写入笔记（成果物 → 笔记闭环）。
-  // 此前漏加白名单已被沙箱拦截，导致 AI 办公无法把产出物落地到笔记。
-  'get_all_notes',
-  'get_note_content',
-  'save_note',
-  'search_notes_content',
-  // 一期 AIWork / AIWorkflow 后端编排命令：成果物落地 / 上下文聚合 / 蓝图持久化 / 执行日志
-  'aiwork_create_note',
-  'aiwork_context_aggregate',
-  'workflow_save',
-  'workflow_get',
-  'workflow_list',
-  'workflow_delete',
-  'workflow_log_append',
-  'workflow_log_list',
-  // 思考模式开关：ide / gongfang 子插件内联 toggle 调用此命令写回 profile.thinking
-  // （此前漏加白名单，导致沙箱拦截 ai_set_profile_thinking，思考按钮「点了没反应」）
-  'ai_set_profile_thinking',
-  // ⚠️ agent 模式与执行轨迹：此前漏加，导致 ai-chat 插件内 agent 模式 invoke 被静默拦截
-  // （表现为「agent 开关无效/报错」），以及执行轨迹面板无法读取会话日志。
-  'ai_chat_agent',
-  'ai_agent_cancel',
-  'ai_agent_status',
-  'ai_agent_sessions',
-  'ai_agent_events',
-  // 对话持久化：ai 子插件读取/保存多会话（ai_conversations.json），漏加会被沙箱拦截导致「已降级为新对话」
-  'ai_get_conversations',
-  'ai_save_conversations',
-  // IDE 终端：本地 shell 命令执行（沙箱屏蔽了 child_process，需走 Rust）
-  'run_shell_command',
-  // AI agent 受限 shell：白名单 + Dry-Run 黑名单 + 超时（仅 agent 自主编辑模式使用）
-  'run_agent_shell',
-  // IDE · AI 编程（agent 自主编辑）：MCP 工具发现与 LSP 诊断（此前被沙箱拦截，
-  // 导致 agent 看不到可用工具/报错，改动无法落地）
-  'mcp_list_servers',
-  'mcp_list_tools',
-  'mcp_list_all_tools',
-  'lsp_diagnostics',
-  // IDE 内容搜索（命令面板 `#` 模式 / agent grep 工具）：gitignore 感知并行遍历
-  'search_content',
-  // IDE 源码管理（git CLI 封装）：status/diff/stage/unstage/commit/branch/log
-  // sourceControl / gitHistory 前端调用，此前漏加会被沙箱拦截
-  'git_status',
-  'git_diff',
-  'git_stage',
-  'git_unstage',
-  'git_commit',
-  'git_current_branch',
-  'git_branch_list',
-  'git_log',
-  // IDE 真 PTY 终端（portable-pty）：create/write/resize/kill
-  // 输出走 Tauri 事件 pty-output:<id>（沙箱允许 listen），前端 xterm.js 监听写入
-  'pty_create',
-  'pty_write',
-  'pty_resize',
-  'pty_kill',
-  // 薄荷·网络测速：用系统默认浏览器打开外链（test.ustc.edu.cn）
-  'plugin:opener|open_url',
-  // 桌宠引擎：销毁其常驻浮窗（与 overlay_window_get_or_create 配对）
-  'overlay_window_destroy',
-  // 攻防模块（gongfang）：内核双轨制 / 爬虫 / 逆向 / 渗透 / 自动化 / 网关 / 目标工作区
-  // 此前插件直连 __TAURI_INTERNALS__.invoke 绕过白名单，现收编至沙箱统一治理
-  'gongfang_status',
-  'gongfang_start',
-  'gongfang_stop',
-  'gongfang_inject',
-  'gongfang_fetch',
-  'gongfang_crawler_stats',
-  'gongfang_proxy_add',
-  'gongfang_proxy_list',
-  'gongfang_proxy_reset',
-  'gongfang_crypto_identify',
-  'gongfang_encode_analyze',
-  'gongfang_encode_chain',
-  'gongfang_symbols',
-  'gongfang_symbol_add',
-  'gongfang_protocol_graph',
-  'gongfang_binary_analyze',
-  'gongfang_scan',
-  'gongfang_waf_detect',
-  'gongfang_tech_fingerprint',
-  'gongfang_openapi_analyze',
-  'gongfang_mutation_select',
-  'gongfang_mutation_reward',
-  'gongfang_mutation_stats',
-  'gongfang_http_methods',
-  'gongfang_path_probe',
-  'gongfang_wellknown_probe',
-  'gongfang_error_page',
-  'gongfang_simulate_waf',
-  'gongfang_payloads',
-  'gongfang_hpp_analyze',
-  'gongfang_db_payloads',
-  'gongfang_humanize',
-  'gongfang_fitness',
-  'gongfang_fitness_migrate',
-  'gongfang_fitness_reset',
-  'gongfang_automation_templates',
-  'gongfang_automation_trajectory',
-  'gongfang_automation_divergence',
-  'gongfang_automation_probe',
-  'gongfang_automation_target',
-  'gongfang_automation_target_clear',
-  'gongfang_gateway_status',
-  'gongfang_gateway_rotate',
-  'gongfang_gateway_throttle',
-  'gongfang_gateway_pool',
-  'gongfang_gateway_score',
-  'gongfang_gateway_traffic',
-  'gongfang_gateway_route_sim',
-  'gongfang_gateway_strategy_sim',
-  'gongfang_gateway_shaping_demo',
-  'gongfang_gateway_obfuscate',
-  'gongfang_gateway_entropy_demo',
-  'gongfang_gateway_curl',
-  'gongfang_events_recent',
-  'gongfang_metrics_history',
-  'gongfang_ai_reasoning_recent',
-  'gongfang_ai_knowledge_search',
-  'gongfang_ai_knowledge_stats',
-  'gongfang_ai_knowledge_add',
-  'gongfang_ai_knowledge_remove',
-  'gongfang_ai_router_sim',
-  'gongfang_ai_reasoning_stats',
-  'gongfang_set_emit_tick',
-  'gongfang_target_list',
-  'gongfang_target_save',
-  'gongfang_target_delete',
-  'gongfang_target_activate',
-  'gongfang_target_get',
-  'gongfang_target_set_metadata',
-  // ↓ 2026-10 补漏：scripts/_scan_perms.mjs 扫出这些命令已被插件实际调用，
-  // 却从未进白名单 → 过去一直被静默拦截（正是本文件反复记录的"漏加白名单→
-  // .catch 吞错→功能静默失败"事故）。均已确认在 main.rs invoke_handler 注册。
-  // AI 智能体审批/应用编辑（茑萝/ai、茑萝/ide）
-  'ai_agent_approve',
-  'ai_agent_apply_edits',
-  // MCP 服务器增删（茑萝/ide）
-  'mcp_save_server',
-  'mcp_remove_server',
-  // WPS 导出（茑萝/wps）
-  'wps_export_docx',
-  'wps_export_pptx',
-  // 缩略图缓存清理（莲花）
-  'cleanup_thumbnail_cache',
-  // 桌面歌词可见性（铃兰）
-  'get_lyrics_widget_visible',
-  // 音乐播放列表 / MV / 封面（铃兰）
-  'music_create_playlist',
-  'music_get_all_mv_paths',
-  'music_set_mv_path',
-  'music_set_cover_url',
-  // 外部依赖路径解析（茑萝/deskpet）
-  'read_external_dep_path',
-]);
+// ========== 插件能力模型 ==========
+// 命令 → 能力的规则由 Rust 下发（plugin_capability_rules），授权账本由 Rust 保存；
+// 前端不再维护逐命令白名单。见 src/core/pluginAccess.ts。
+import type { SandboxPolicy } from '@/core/pluginAccess';
+import { denyAllPolicy, policyAllows, policyDenyReason } from '@/core/pluginAccess';
+import { pluginDiagnostics } from '@/core/pluginDiagnostics';
 
-// ========== 声明式权限：manifest.permissions.commands 的解析 ==========
-
-/** 某插件的命令调用策略：实际放行集合 + 是否显式声明过（决定拒绝时给哪种修复提示） */
-interface PluginCommandPolicy {
-  allowed: Set<string>;
-  declared: boolean;
-}
-
-/** 已就"未声明权限"告警过的插件（DEV 下去重，避免每次加载都刷屏） */
-const warnedUndeclared = new Set<string>();
-
-/**
- * 宿主 alias 直连型插件：其 IIFE 经 `vite.shared.config` 的 `resolve.alias '@' → 仓库 src/`
- * 把宿主代码整个编进去，invoke 走 `@tauri-apps/api/core` 直连
- * （`window.__TAURI_INTERNALS__.invoke`），不经过 `__HOST_API__.invoke`，
- * 因此 permissions.commands 对它们是"假声明"，填了也不会被强制执行。
- * 这些插件的真实边界在 Tauri capability/ACL（src-tauri/capabilities/default.json），
- * 故不参与"未声明权限"告警——告警对它们没有可执行的修复动作。
- */
-const HOST_ALIASED_PLUGINS = new Set<string>([
-  'ai-chat', // src/index.tsx 直接 import @/components/ai-chat/*、@/core/ai/useAiChat
-]);
-
-/**
- * 「未声明 permissions.commands」时的兜底集合 —— **空集**。
- *
- * ## 为什么从「整个全局白名单」改成空（2026-10-19 审计）
- * 原来的语义是：没声明 → 回退到 ALLOWED_COMMANDS（全量）。这条"兼容存量插件"的宽容，
- * 实际后果是：`crypto` / `gongjuxiang` / `screen-recorder` 三个 manifest **整段没有 permissions**，
- * 于是它们各自握着 `delete_file` / `write_text_file` / `read_text_file` / `read_file_base64` /
- * `scan_ports` / `clipboard_read` 等全盘能力 —— 而实测这三个插件**一条后端命令都不调**
- * （`grep -rn "invoke\|__HOST_API__" plugins/茑萝/crypto/src` 零命中）。即"没要求的权力白给"。
- *
- * 现在：未声明 = 不知道要什么 = 不给，并显式报错告知怎么修（把实际用到的命令写进 manifest）。
- * 确实不需要后端命令的插件，请**显式**写 `"commands": []` —— 空数组与"缺失"语义不同：
- * 空数组 = 我明确不要任何命令（不告警）；缺失 = 没交代（报错 + 零权限）。
- */
-const UNDECLARED_FALLBACK_COMMANDS = new Set<string>();
-
-/**
- * 解析某插件实际可用的命令集合。
- *
- * 三层语义（按优先级）：
- *   1. manifest 声明了 `permissions.commands`（**数组，允许为空**）→ 取「声明 ∩ 全局白名单」。
- *      manifest 可以比全局白名单**更严**，但不能更宽：ALLOWED_COMMANDS 仍是最终安全底线，
- *      声明一个全局未放行的命令只会在加载时收到显式告警（通常是拼写错误），不会因此放行。
- *   2. **未声明** → 零命令 + 显式 error（见 UNDECLARED_FALLBACK_COMMANDS 的说明）。
- *   3. 声明的命令不在全局白名单 → 显式告警（拼写错误 / 想越权），不放行。
- */
-function resolveCommandPolicy(
-  pluginId: string,
-  permissions?: PluginPermissions,
-): PluginCommandPolicy {
-  const declared = permissions?.commands;
-  if (!Array.isArray(declared)) {
-    // 每个插件只刷一次，避免热重载时刷屏；但**生产环境也打**（这是能力边界，不是调试噪音）
-    if (!warnedUndeclared.has(pluginId)) {
-      warnedUndeclared.add(pluginId);
-      console.error(
-        `[pluginSandbox] 插件 "${pluginId}" 未声明 permissions.commands —— 已按「零后端命令」处理。` +
-          `修复：把运行期实际用到的命令写进 plugins/${pluginId}/manifest.json 的 ` +
-          `permissions.commands；确实不需要后端命令的插件请显式写 "commands": []。` +
-          (HOST_ALIASED_PLUGINS.has(pluginId)
-            ? `（该插件是宿主 alias 直连型，真实边界在 Tauri ACL，此告警仅供参考）`
-            : ''),
-      );
-    }
-    return { allowed: UNDECLARED_FALLBACK_COMMANDS, declared: false };
-  }
-  // 显式空数组：开发者明确表示"本插件不需要任何后端命令"，静默通过
-  if (declared.length === 0) {
-    return { allowed: new Set<string>(), declared: true };
-  }
-  const allowed = new Set<string>();
-  for (const cmd of declared) {
-    if (typeof cmd !== 'string' || cmd.length === 0) continue;
-    if (ALLOWED_COMMANDS.has(cmd)) {
-      allowed.add(cmd);
-    } else {
-      console.error(
-        `[pluginSandbox] 插件 "${pluginId}" 声明了全局白名单未放行的命令: ${cmd}` +
-          `（拼写错误？或需先评审并加入 pluginSandbox.ts 的 ALLOWED_COMMANDS）`,
-      );
-    }
-  }
-  return { allowed, declared: true };
-}
+// ========== 命令调用策略（能力制） ==========
+// 实际放行由 SandboxPolicy 决定：能力规则 ∩ 已授权能力 ∩（旧式 commands 收紧）。
 
 // ========== 安全 Console：所有输出带插件前缀 ==========
 // 生产环境静默 log/info/debug/count/trace，保留 warn/error，避免高频日志拖慢主线程
@@ -521,18 +86,30 @@ function createSafeConsole(pluginId: string): Console {
 // 声明式权限（manifest.permissions.commands）落地后，第 1 类的报错进一步细分成两种原因，
 // 并给出**可直接复制**的修复提示 —— 此前只有一句"未授权命令"，插件侧 .catch 吞掉后
 // 根本无法判断是 manifest 漏声明还是全局白名单漏加，只能靠猜。
-function createSafeApi(pluginId: string, policy: PluginCommandPolicy) {
+// 未授权命令的诊断节流：同一插件+命令 5 秒内只记一条，避免刷屏
+const deniedAt = new Map<string, number>();
+
+function createSafeApi(pluginId: string, policy: SandboxPolicy) {
   return {
     invoke: async (command: string, args?: Record<string, unknown>) => {
-      if (!policy.allowed.has(command)) {
-        // 提示按"插件是否声明过权限"分流：声明过 → 就是这条命令漏了；
-        // 没声明过 → 顺手把整份权限清单补上（这是存量插件的迁移路径）。
-        const fix = policy.declared
-          ? `把 "${command}" 加进 plugins/${pluginId}/manifest.json 的 permissions.commands`
-          : `在 plugins/${pluginId}/manifest.json 增加 permissions.commands 并列入 "${command}"` +
-            `（若该命令本就不该放行，说明插件在越权，请直接改插件代码）`;
-        const msg = `插件 "${pluginId}" 尝试调用未授权命令: ${command} —— 修复：${fix}`;
-        console.error(`[pluginSandbox] 拦截未授权命令: ${command} (插件:${pluginId}) —— 修复：${fix}`);
+      if (!policyAllows(policy, command)) {
+        const fix = policyDenyReason(policy, command);
+        const msg = `插件 "${pluginId}" 尝试调用未授权命令: ${command} —— ${fix}`;
+        console.error(`[pluginSandbox] 拦截未授权命令: ${command} (插件:${pluginId}) —— ${fix}`);
+        const key = `${pluginId}:${command}`;
+        const now = Date.now();
+        const last = deniedAt.get(key) ?? 0;
+        if (now - last > 5000) {
+          deniedAt.set(key, now);
+          try {
+            pluginDiagnostics.addEntry({
+              pluginId,
+              stage: 'permission',
+              reason: `拒绝命令 ${command}：${fix}`,
+              timestamp: now,
+            });
+          } catch { /* 诊断不可用时不影响拦截 */ }
+        }
         throw new Error(msg);
       }
       if (import.meta.env.DEV) {
@@ -559,9 +136,12 @@ function createSafeApi(pluginId: string, policy: PluginCommandPolicy) {
     // **同源** ⇒ 在宿主里创建的 blob: URL 插件侧可直接用于 <audio>。
     //
     // ⚠ 安全：这是**放宽**了插件能读的文件范围，因此按扩展名白名单收紧 ——
-    //   只允许音频/媒体文件。插件若需要读别的类型，应走既有的 ALLOWED_COMMANDS
-    //   逐个评审放行，而不是把任意文件读取能力一次性给出去。
+    //   只允许音频/媒体文件。插件若需要读别的类型，应走能力授权 + 文件命令，
+    //   而不是把任意文件读取能力一次性给出去。
     readFileAsObjectUrl: async (path: string, maxBytes?: number): Promise<string> => {
+      if (!policy.bundled && !policyAllows(policy, 'read_file_base64')) {
+        throw new Error('readFileAsObjectUrl: 插件缺少 fs.read 能力（请在 设置 → 扩展 中授权）');
+      }
       const ext = (path.split('?')[0].split('#')[0].split('.').pop() || '').toLowerCase();
       const ALLOW = new Set([
         'mp3', 'flac', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'wma', 'aiff', 'ape', 'alac',
@@ -604,6 +184,9 @@ function createSafeApi(pluginId: string, policy: PluginCommandPolicy) {
     // 创建浮窗窗口（前端 WebviewWindow API，规避 sync 命令中 build 导致的主线程重入死锁）
     // 用于剪贴板浮窗等场景，label 由插件指定（如 'floating-clipboard'）
     createFloatingWindow: async (label: string, url: string, options: Record<string, unknown>) => {
+      if (!policy.bundled && !policyAllows(policy, 'browser_open')) {
+        throw new Error('createFloatingWindow: 插件缺少 window 能力（请在 设置 → 扩展 中授权）');
+      }
       // 统一走 window_manager 引擎；options 即 OverlayProfile（camelCase 字段已由 Rust 端解析）
       const win = await ensureOverlayWindow(label, url, options as OverlayProfile);
       if (win) {
@@ -730,12 +313,13 @@ export function createSandboxGlobals(
   pluginId: string,
   registry: PluginRegistry,
   manifest?: SandboxManifestInput,
+  accessPolicy?: SandboxPolicy,
 ): SandboxGlobals {
   const deps = manifest?.deps;
   // 声明了 external-deps 的插件必须能 new Function 加载依赖；白名单为保底。
   const exposeFunction = TRUSTED_FUNCTION_PLUGINS.has(pluginId) || (deps?.length ?? 0) > 0;
-  // 命令调用策略：manifest 声明式权限 ∩ 全局白名单（见 resolveCommandPolicy）
-  const policy = resolveCommandPolicy(pluginId, manifest?.permissions);
+  // 命令调用策略：Rust 规则 + 授权账本算出的能力集合；缺省一律拒绝。
+  const policy = accessPolicy ?? denyAllPolicy();
   // 受限 window：优先返回宿主注入变量，未知属性透传真实 window
   // （get 陷阱需要自引用沙箱 proxy 本身，故先声明再构造，末尾以 window: sandboxWindow 注入）
   const sandboxWindow: SafeWindow = new Proxy<SafeWindow>(
@@ -758,15 +342,15 @@ export function createSandboxGlobals(
           return undefined;
         }
         // Tauri IPC 全局遮蔽：capabilities 未开 withGlobalTauri，正常情况下不存在；
-        // 但一旦将来开启（或某个窗口单独开启），插件即可绕过 __HOST_API__ 的
-        // ALLOWED_COMMANDS 白名单直接 invoke 任意命令。此处按"永不存在"处理，
+        // 但一旦将来开启（或某个窗口单独开启），插件即可绕过 __HOST_API__ 的能力检查
+        // 直接 invoke 任意命令。此处按"永不存在"处理，
         // 使沙箱的调用审计假设不依赖远端配置。
         // ⚠️ 例外：__TAURI_INTERNALS__ 不能遮蔽。@tauri-apps/api/core 的 invoke 实现是
         // `window.__TAURI_INTERNALS__.invoke(...)`，而 ai-chat / 薄荷 等插件走 vite.shared.config
         // 的 resolve.alias `'@' → 仓库 src/`，把宿主代码（src/lib/api.ts 等）整个编进插件 IIFE，
         // 它们的 invoke 是直连接口、根本不经过 __HOST_API__。遮蔽 __TAURI_INTERNALS__ 会让这类
         // 插件一启动就 TypeError。这同时说明沙箱从来不是安全边界（真正的边界是 Tauri
-        // capability/ACL），ALLOWED_COMMANDS 只是"规范插件入口"的工程约束。
+        // capability/ACL），能力检查只是"规范插件入口"的工程约束。
         if (
           prop === '__TAURI__' ||
           prop === '__TAURI_INVOKE__' ||

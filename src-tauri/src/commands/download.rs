@@ -14,10 +14,12 @@ use super::*;
 #[tauri::command]
 pub async fn download_file(
     app: tauri::AppHandle,
+    plugin_id: Option<String>,
     url: String,
     save_path: String,
     progress_event: Option<String>,
 ) -> Result<(), String> {
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &save_path)?;
     use std::io::Write;
     use futures_util::StreamExt;
     // 安全上限：单曲一般不超 100MB，超限直接拒绝，避免异常大文件写爆磁盘。
@@ -278,12 +280,14 @@ pub(crate) fn ffmpeg_concat_segments(
 #[tauri::command]
 pub async fn download_video(
     app: tauri::AppHandle,
+    plugin_id: Option<String>,
     urls: Vec<String>,
     save_path: String,
     referer: Option<String>,
     cookie: Option<String>,
     progress_event: Option<String>,
 ) -> Result<(), String> {
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &save_path)?;
     const MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
     let urls: Vec<String> = urls
         .into_iter()
@@ -401,12 +405,14 @@ pub async fn download_video(
 #[tauri::command]
 pub async fn download_hls(
     app: tauri::AppHandle,
+    plugin_id: Option<String>,
     m3u8_url: String,
     save_path: String,
     referer: Option<String>,
     cookie: Option<String>,
     progress_event: Option<String>,
 ) -> Result<(), String> {
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &save_path)?;
     let app2 = app.clone();
     let progress = progress_event.clone();
     tauri::async_runtime::spawn_blocking(move || {

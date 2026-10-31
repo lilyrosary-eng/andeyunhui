@@ -16,6 +16,7 @@ import {
   executeInSandbox,
 } from '@/core/pluginSandbox';
 import { pluginPerformanceMonitor } from '@/core/pluginPerformanceMonitor';
+import { preparePluginAccess } from '@/core/pluginAccess';
 import { t, translate, getLanguage, LANGUAGES } from '@/lib/i18n';
 import { ModuleSidebarShell } from '@/components/ModuleSidebarShell';
 import { SecondaryNavShell } from '@/components/SecondaryNavShell';
@@ -224,12 +225,36 @@ async function reloadSinglePlugin(id: string, registry: PluginRegistry): Promise
   try {
     const manifestText = await api.readPluginFile(id, 'manifest.json');
     const manifest = JSON.parse(manifestText) as PluginManifest;
+    // read_plugin_file 只给文件原文，不带扫描阶段补的 origin / 权限归一化信息；
+    // 从扫描结果里合并，避免把内置插件误判成第三方而卡在授权上。
+    try {
+      const installed = await api.getInstalledPlugins();
+      const scanned = installed.valid.find((m) => m.id === id);
+      if (scanned) {
+        manifest.origin = scanned.origin;
+        manifest.permissions = scanned.permissions ?? manifest.permissions;
+        manifest.codename = scanned.codename ?? manifest.codename;
+      }
+    } catch { /* 扫描失败就按原 manifest 处理 */ }
     const entry = manifest.entry || 'index.js';
+    const { state, policy } = await preparePluginAccess(manifest);
+    if (state.needsConsent) {
+      window.dispatchEvent(new CustomEvent('plugin-consent-needed', { detail: { id, missing: state.missing } }));
+      pluginDiagnostics.addEntry({
+        pluginId: id,
+        stage: 'permission',
+        reason: `等待授权：${state.missing.join(', ') || '未知能力'}`,
+        timestamp: Date.now(),
+      });
+      safeDestroyPlugin(id, registry);
+      registry.unregister(id);
+      return;
+    }
     const scriptText = await api.readPluginFile(id, entry);
     // 先调用 destroy 释放旧实例资源，再注销（register 有重复 id 守卫，必须先清）
     safeDestroyPlugin(id, registry);
     registry.unregister(id);
-    const sandbox = createSandboxGlobals(id, registry, manifest);
+    const sandbox = createSandboxGlobals(id, registry, manifest, policy);
     executeInSandbox(scriptText, sandbox, id);
     const def = registry.get(id);
     if (def) {
@@ -282,6 +307,22 @@ async function loadSinglePlugin(
   pluginPerformanceMonitor.startMeasure(manifest.id, 'load');
 
   try {
+    // 能力授权：内置插件自动批准；第三方缺少授权时不执行脚本，等用户在扩展页确认。
+    const { state, policy } = await preparePluginAccess(manifest);
+    if (state.needsConsent) {
+      window.dispatchEvent(
+        new CustomEvent('plugin-consent-needed', { detail: { id: manifest.id, missing: state.missing } }),
+      );
+      pluginDiagnostics.addEntry({
+        pluginId: manifest.id,
+        stage: 'permission',
+        reason: `等待授权：${state.missing.join(', ') || '未知能力'}`,
+        timestamp: Date.now(),
+      });
+      pluginPerformanceMonitor.endMeasure(manifest.id, 'load');
+      return;
+    }
+
     // 嵌套子插件由 Rust 端按 id 递归定位真实路径，前端只需传入干净 id
     const scriptText = await withTimeout(
       api.readPluginFile(manifest.id, manifest.entry),
@@ -291,7 +332,7 @@ async function loadSinglePlugin(
 
     // 所有插件均为 IIFE 格式，直接沙箱中执行（使用 new Function 替代 eval）
     // CSP 不允许 blob: URL import，统一走 executeInSandbox
-    const sandbox = createSandboxGlobals(manifest.id, registry, manifest);
+    const sandbox = createSandboxGlobals(manifest.id, registry, manifest, policy);
     executeInSandbox(scriptText, sandbox, manifest.id);
 
     pluginPerformanceMonitor.endMeasure(manifest.id, 'load');

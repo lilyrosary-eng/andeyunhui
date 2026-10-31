@@ -11,9 +11,10 @@
  * ② 安全：`new Function` / `Function(...)` 仍然被拒绝。
  * 少了任何一条这个修复都不成立（只满足 ① = 沙箱被架空；只满足 ② = 原来的崩溃）。
  */
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createSandboxGlobals, executeInSandbox } from './pluginSandbox';
-import type { PluginPermissions } from '@/lib/api';
+import type { PluginPermissions, CapabilityRules } from '@/lib/api';
+import type { SandboxPolicy } from './pluginAccess';
 
 type Registry = Parameters<typeof createSandboxGlobals>[1];
 
@@ -36,12 +37,12 @@ const registry = { register: () => {} } as unknown as Registry;
 function evalIn(
   pluginId: string,
   expr: string,
-  opts?: { deps?: string[]; permissions?: PluginPermissions },
+  opts?: { deps?: string[]; permissions?: PluginPermissions; policy?: SandboxPolicy },
 ): unknown {
   const w = (globalThis as unknown as { window: Record<string, unknown> }).window;
   const holder: Record<string, unknown> = {};
   w.__HOST_UI__ = holder;
-  const globals = createSandboxGlobals(pluginId, registry, opts);
+  const globals = createSandboxGlobals(pluginId, registry, opts, opts?.policy);
   executeInSandbox(`__HOST_UI__.result = (${expr});`, globals, pluginId);
   return holder.result;
 }
@@ -50,7 +51,7 @@ function evalIn(
 function evalPromiseIn(
   pluginId: string,
   expr: string,
-  opts?: { deps?: string[]; permissions?: PluginPermissions },
+  opts?: { deps?: string[]; permissions?: PluginPermissions; policy?: SandboxPolicy },
 ): Promise<unknown> {
   return evalIn(pluginId, expr, opts) as Promise<unknown>;
 }
@@ -174,71 +175,94 @@ describe('插件沙箱 · window 受限代理（防止遮蔽被 alias 绕开）'
   });
 });
 
-describe('插件沙箱 · manifest 声明式权限（permissions.commands）', () => {
-  const READ = { commands: ['plugin_storage_get', 'load_image_cache'] };
+describe('插件沙箱 · 能力授权（capability policy）', () => {
+  const TEST_RULES: CapabilityRules = {
+    exact: [
+      ['plugin_storage_get', 'storage'],
+      ['load_image_cache', 'fs.read'],
+      ['netease_http_post', 'net'],
+    ],
+    prefix: [
+      ['read_', 'fs.read'],
+      ['write_', 'fs.write'],
+    ],
+    capabilities: ['storage', 'fs.read', 'fs.write', 'net'],
+  };
 
-  it('未声明权限：零命令 + 显式报错（不再白送整个白名单）', async () => {
-    // 2026-10-19 改：旧语义是「未声明 → 回退 ALLOWED_COMMANDS」，等于让 crypto / gongjuxiang /
-    // screen-recorder（manifest 整段没有 permissions，实测一条命令都不调）白拿
-    // delete_file / write_text_file / scan_ports / clipboard_read 等全盘能力。
-    // 这条测试原本把那个洞**钉成了预期行为**，现在反过来钉住「未声明就必须被拒」。
-    const msg = await rejectionOf(evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")'));
-    expect(msg).toMatch(/未授权命令/);
-    // 报错必须点名"要么列命令、要么显式写空数组"，否则使用者不知道该怎么修
-    expect(msg).toMatch(/manifest\.json/);
-  });
+  function policy(opts: {
+    capabilities?: string[];
+    commands?: string[];
+    trustedDev?: boolean;
+  } = {}): SandboxPolicy {
+    return {
+      rules: TEST_RULES,
+      granted: new Set(opts.capabilities ?? []),
+      declaredCommands: opts.commands ? new Set(opts.commands) : null,
+      trustedDev: !!opts.trustedDev,
+      hasGrant: true,
+      bundled: false,
+    };
+  }
 
-  it('显式空数组 = 我明确不要任何后端命令（同样被拒，但不按配置遗漏给提示）', async () => {
+  it('未授权任何能力：拒绝，并点名缺少的能力', async () => {
     const msg = await rejectionOf(
-      evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")', { permissions: { commands: [] } }),
+      evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")', { policy: policy() }),
     );
     expect(msg).toMatch(/未授权命令/);
-    // 与"缺失"的区别在于修复提示：空数组是主动选择，不该被当成配置遗漏
-    expect(msg).not.toMatch(/permissions\.commands 并列入/);
+    expect(msg).toMatch(/缺少能力 "net"/);
   });
 
-  it('声明了权限的插件：未声明的命令被拒绝，且错误信息可直接复制去修', async () => {
+  it('已授权对应能力：放行', async () => {
     const msg = await rejectionOf(
-      evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")', { permissions: READ }),
-    );
-    expect(msg).toMatch(/未授权命令/);
-    // 修复提示必须点名 manifest 路径和具体命令，否则"显式报错"等于没报
-    expect(msg).toMatch(/plugins\/ai-chat\/manifest\.json/);
-    expect(msg).toMatch(/netease_http_post/);
-  });
-
-  it('声明了权限的插件：声明过的命令不被权限层拦截', async () => {
-    const msg = await rejectionOf(
-      evalPromiseIn('ai-chat', 'api.invoke("plugin_storage_get", { key: "k" })', {
-        permissions: READ,
+      evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")', {
+        policy: policy({ capabilities: ['net'] }),
       }),
     );
     expect(msg).not.toMatch(/未授权命令/);
   });
 
-  it('manifest 不能比全局白名单更宽：声明未放行的命令 → 告警且不放行', async () => {
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      const msg = await rejectionOf(
-        evalPromiseIn('ai-chat', 'api.invoke("delete_all_notes")', {
-          permissions: { commands: ['delete_all_notes'] },
-        }),
-      );
-      expect(msg).toMatch(/未授权命令/);
-      // 加载期就要显式指出"这条声明无效"，而不是等运行期才神秘失败
-      expect(spy.mock.calls.flat().join('\n')).toMatch(/delete_all_notes/);
-    } finally {
-      spy.mockRestore();
-    }
+  it('旧式 permissions.commands 在能力之上收紧：能力够但命令没列，仍拒绝', async () => {
+    const msg = await rejectionOf(
+      evalPromiseIn('ai-chat', 'api.invoke("load_image_cache")', {
+        policy: policy({ capabilities: ['fs.read'], commands: ['plugin_storage_get'] }),
+      }),
+    );
+    expect(msg).toMatch(/permissions\.commands 未列出/);
+    expect(msg).toMatch(/load_image_cache/);
   });
 
-  it('空数组与缺失语义不同：空 = 显式零权限，缺失 = 配置遗漏（两者都拒，但提示不同）', async () => {
-    const empty = await rejectionOf(
-      evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")', { permissions: { commands: [] } }),
+  it('命令没有能力归类：拒绝并提示宿主补规则', async () => {
+    const msg = await rejectionOf(
+      evalPromiseIn('ai-chat', 'api.invoke("delete_all_notes")', {
+        policy: policy({ capabilities: ['fs.read', 'fs.write', 'net'] }),
+      }),
     );
-    const missing = await rejectionOf(evalPromiseIn('ai-chat', 'api.invoke("netease_http_post")'));
-    expect(empty).toMatch(/未授权命令/);
-    expect(missing).toMatch(/未授权命令/);
-    expect(empty).not.toEqual(missing);
+    expect(msg).toMatch(/尚未给命令/);
+    expect(msg).toMatch(/delete_all_notes/);
+  });
+
+  it('开发信任：跳过能力检查（仍只允许已归类命令）', async () => {
+    const allowed = await rejectionOf(
+      evalPromiseIn('ai-chat', 'api.invoke("read_file_base64", { filePath: "x" })', {
+        policy: policy({ trustedDev: true }),
+      }),
+    );
+    expect(allowed).not.toMatch(/未授权命令/);
+    // 未归类的命令即便开发信任也不放行
+    const unknown = await rejectionOf(
+      evalPromiseIn('ai-chat', 'api.invoke("delete_all_notes")', {
+        policy: policy({ trustedDev: true }),
+      }),
+    );
+    expect(unknown).toMatch(/尚未给命令/);
+  });
+
+  it('能力规则按前缀生效：read_* 都属于 fs.read', async () => {
+    const msg = await rejectionOf(
+      evalPromiseIn('ai-chat', 'api.invoke("read_text_file", { path: "x" })', {
+        policy: policy({ capabilities: ['fs.read'] }),
+      }),
+    );
+    expect(msg).not.toMatch(/未授权命令/);
   });
 });

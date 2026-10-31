@@ -1800,6 +1800,10 @@ fn main() {
             delete_image_cache,
             get_folder_images,
             generate_thumbnail,
+            andeyunhui_lib::services::plugin_access::plugin_capability_rules,
+            andeyunhui_lib::services::plugin_access::plugin_grants_all,
+            andeyunhui_lib::services::plugin_access::plugin_grant_set,
+            andeyunhui_lib::services::plugin_access::plugin_grant_clear,
             cleanup_thumbnail_cache,
             cleanup_old_caches,
             // ========== 模块：音乐 / 铃兰 ==========

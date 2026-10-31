@@ -27,19 +27,44 @@ export interface PluginManifest {
   minAppVersion?: string;   // 要求的最低应用版本
   codename?: string;        // 模块代号（如 "铃兰"、"莲花"），空表示无代号
   requiredAssets?: string[];// 需要的外部依赖资源路径（如 "茑萝/ide/codemirror/index.js"）
-  // 注：曾经的 `capabilities?: string[]`（"file-system"/"network" 之类的自述标签）
-  // 已于 2026-10-18 删除——全仓库没有任何读取方，插件能力由下面的 permissions.commands
-  // 与 Tauri capability/ACL 共同约束，自述标签只会给人"已生效"的错觉。
-  // 声明式权限：显式列出本插件允许调用的 Tauri 命令。
-  // 与 Rust 端 PluginManifest.permissions 对应；沙箱按「声明 ∩ 全局白名单」强制。
-  // 缺省 = 未声明：回退全局白名单（兼容存量插件），DEV 下会告警提示补齐。
+  // 声明式权限：能力优先（permissions.capabilities）；commands 为旧式逐命令声明，
+  // 保留兼容并在能力集合之上进一步收紧。
+  // 与 Rust 端 PluginManifest.permissions 对应；沙箱按「能力规则 + 已授权能力」强制。
   permissions?: PluginPermissions;
+  /** 来源："bundled"（随包出厂，能力自动批准）| "user"（第三方，需要用户授权） */
+  origin?: 'bundled' | 'user' | string;
 }
 
 /** 插件声明式权限（manifest.json 的 `permissions` 段） */
 export interface PluginPermissions {
-  /** 允许调用的 Tauri 命令名（如 "plugin_storage_get"） */
+  /** 推荐：能力清单（storage / fs.read / fs.write / fs.pick / media / net /
+   *  clipboard.read / clipboard.write / window / system / ai / data / attack）。 */
+  capabilities?: string[];
+  /** 旧式：允许调用的 Tauri 命令名（存在时在能力集合上再收紧）。 */
   commands?: string[];
+}
+
+/** 命令 → 能力规则（Rust 端数据驱动下发） */
+export interface CapabilityRules {
+  exact: [string, string][];
+  prefix: [string, string][];
+  capabilities: string[];
+}
+
+/** 授权范围（目前用于写入校验；读范围预留） */
+export interface GrantScopes {
+  fsRead?: string[];
+  fsWrite?: string[];
+  net?: string[];
+}
+
+/** 插件授权账本条目 */
+export interface PluginGrant {
+  capabilities: string[];
+  trustedDev?: boolean;
+  manifestHash?: string;
+  updatedAt?: number;
+  scopes?: GrantScopes;
 }
 
 // 扫描结果（A.1 改造后）
@@ -178,6 +203,21 @@ export const api = {
   // 在系统文件管理器中打开插件所在目录
   openPluginFolder: (pluginId: string) =>
     invoke<void>('open_plugin_folder', { pluginId }),
+
+  // 插件能力规则（数据驱动，前端不再维护命令白名单）
+  pluginCapabilityRules: () => invoke<CapabilityRules>('plugin_capability_rules'),
+  // 全部插件授权账本
+  pluginGrantsAll: () => invoke<Record<string, PluginGrant>>('plugin_grants_all'),
+  // 写入/更新单个插件授权；返回落盘后的 grant
+  pluginGrantSet: (args: {
+    pluginId: string;
+    capabilities: string[];
+    trustedDev: boolean;
+    manifestHash: string;
+    scopes?: GrantScopes;
+  }) => invoke<PluginGrant>('plugin_grant_set', args),
+  // 撤销授权（删除插件时后端也会自动清）
+  pluginGrantClear: (pluginId: string) => invoke<void>('plugin_grant_clear', { pluginId }),
 
   // AI 视觉 OCR：传入图片 base64（不含 data: 前缀）+ mime + 可选 prompt，返回识别文本
   // 失败时抛错（含 HTTP 状态码 + 响应体片段），调用方需 try/catch 并展示降级提示

@@ -7,6 +7,16 @@ import { api, type PluginManifest } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import type { PluginRegistry } from '@/core/pluginRegistry';
 import { createSandboxGlobals, executeInSandbox } from '@/core/pluginSandbox';
+import {
+  CAPABILITY_LABELS,
+  approvePluginAccess,
+  evaluateAccess,
+  getCapabilityRules,
+  getPluginGrants,
+  preparePluginAccess,
+  revokePluginAccess,
+  type AccessState,
+} from '@/core/pluginAccess';
 import { useI18n } from '@/lib/i18n';
 
 export function ExtensionManagerPanel() {
@@ -37,6 +47,10 @@ export function ExtensionManagerPanel() {
   // 列表来源：从 getInstalledPlugins 获取所有已安装插件（包括 visible=false 的已禁用插件），
   // 而非仅从 registry.getAll() 获取已加载的。这样已禁用的插件也显示在列表中，用户可重新启用。
   const [installedPlugins, setInstalledPlugins] = useState<PluginManifest[]>([]);
+  // 能力授权视图：declared / granted / missing / trustedDev
+  const [accessMap, setAccessMap] = useState<Record<string, AccessState>>({});
+  const [consentTarget, setConsentTarget] = useState<PluginManifest | null>(null);
+  const [devTrust, setDevTrust] = useState(false);
   const refreshInstalledList = useCallback(async () => {
     try {
       const result = await api.getInstalledPlugins();
@@ -46,6 +60,63 @@ export function ExtensionManagerPanel() {
     }
   }, []);
   useEffect(() => { void refreshInstalledList(); }, [refreshInstalledList, tick]);
+
+  const refreshAccess = useCallback(async (list: PluginManifest[]) => {
+    try {
+      const rules = await getCapabilityRules();
+      const grants = await getPluginGrants(true);
+      const next: Record<string, AccessState> = {};
+      for (const m of list) next[m.id] = evaluateAccess(m, rules, grants[m.id]);
+      setAccessMap(next);
+    } catch (err) {
+      logger.log('[ExtManager] 读取能力授权失败:', err);
+    }
+  }, []);
+
+  useEffect(() => { void refreshAccess(installedPlugins); }, [installedPlugins, tick, refreshAccess]);
+  useEffect(() => {
+    const onChange = () => { void refreshAccess(installedPlugins); };
+    window.addEventListener('plugin-access-changed', onChange);
+    window.addEventListener('plugin-consent-needed', onChange);
+    return () => {
+      window.removeEventListener('plugin-access-changed', onChange);
+      window.removeEventListener('plugin-consent-needed', onChange);
+    };
+  }, [installedPlugins, refreshAccess]);
+
+  const handleRevokeAccess = useCallback(async () => {
+    const target = consentTarget;
+    if (!target) return;
+    const ok = window.confirm(`撤销「${target.name}」的全部能力授权？插件会立即卸载，直到重新授权。`);
+    if (!ok) return;
+    setConsentTarget(null);
+    try {
+      await revokePluginAccess(target.id);
+      pluginHot?.unload(target.id);
+      window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id: target.id, visible: false } }));
+      setRefreshMsg(`已撤销 ${target.name} 的授权`);
+      await refreshAccess(installedPlugins);
+    } catch (err) {
+      setRefreshMsg(`撤销失败: ${String(err)}`);
+    }
+  }, [consentTarget, pluginHot, installedPlugins, refreshAccess]);
+
+  const handleApproveConsent = useCallback(async () => {
+    const target = consentTarget;
+    if (!target) return;
+    setConsentTarget(null);
+    try {
+      await approvePluginAccess(target, devTrust);
+      await api.setPluginVisibility(target.id, true);
+      await pluginHot?.load(target);
+      setInstalledPlugins((prev) => prev.map((p) => (p.id === target.id ? { ...p, visible: true } : p)));
+      window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id: target.id, visible: true } }));
+      setRefreshMsg(`已授权并启用 ${target.name}`);
+      await refreshAccess(installedPlugins);
+    } catch (err) {
+      setRefreshMsg(`授权失败: ${String(err)}`);
+    }
+  }, [consentTarget, devTrust, pluginHot, installedPlugins, refreshAccess]);
 
   // plugins = 所有已安装插件（包括 visible=false），用 registry.get(id) 判断是否"运行中"
   const plugins = installedPlugins;
@@ -94,6 +165,14 @@ export function ExtensionManagerPanel() {
   // 启用 → set_plugin_visibility(true) + loadSinglePlugin
   const handleTogglePlugin = useCallback(async (manifest: PluginManifest, visible: boolean) => {
     try {
+      if (visible) {
+        const { state } = await preparePluginAccess(manifest);
+        if (state.needsConsent) {
+          setDevTrust(false);
+          setConsentTarget(manifest);
+          return;
+        }
+      }
       await api.setPluginVisibility(manifest.id, visible);
       if (visible) {
         // 启用：加载插件到内存
@@ -128,8 +207,10 @@ export function ExtensionManagerPanel() {
       // 调用后端删除命令
       await api.deletePlugin(pluginId);
       // 从本地列表移除
-      setInstalledPlugins(prev => prev.filter(p => p.id !== pluginId));
+      const nextList = installedPlugins.filter(p => p.id !== pluginId);
+      setInstalledPlugins(nextList);
       window.dispatchEvent(new CustomEvent('plugin-visibility-changed', { detail: { id: pluginId, visible: false } }));
+      await refreshAccess(nextList);
       setRefreshMsg(t('ext.deletedDone', { name }));
       logger.log(`[ExtManager] 彻底删除 ${pluginId}`);
     } catch (err) {
@@ -159,8 +240,13 @@ export function ExtensionManagerPanel() {
         // 只加载 visible=true 且未在 registry 中的插件
         if (!registry.get(m.id) && m.visible !== false) {
           try {
+            const { state, policy } = await preparePluginAccess(m);
+            if (state.needsConsent) {
+              window.dispatchEvent(new CustomEvent('plugin-consent-needed', { detail: { id: m.id, missing: state.missing } }));
+              continue;
+            }
             const scriptText = await api.readPluginFile(m.id, m.entry);
-            const sandbox = createSandboxGlobals(m.id, registry, m);
+            const sandbox = createSandboxGlobals(m.id, registry, m, policy);
             executeInSandbox(scriptText, sandbox, m.id);
             logger.plugins.newPluginLoaded(m.id);
           } catch (err) {
@@ -231,6 +317,7 @@ export function ExtensionManagerPanel() {
             plugins.map((p) => {
               const isLoaded = loadedIds.has(p.id);
               const isVisible = p.visible !== false;
+              const acc = accessMap[p.id];
               return (
                 <div key={p.id} className={`flex items-center justify-between p-4 ${!isVisible ? 'opacity-50' : ''}`}>
                   <div className="flex items-center gap-3">
@@ -238,15 +325,54 @@ export function ExtensionManagerPanel() {
                       <PluginIcon name={p.iconName} size={18} fallback={<Package size={18} />} />
                     </div>
                     <div>
-                      <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">{p.name}</div>
+                      <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">
+                        {p.name}
+                        {acc?.bundled && (
+                          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">官方内置 · 默认信任</span>
+                        )}
+                        {acc?.trustedDev && !acc?.bundled && (
+                          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">开发信任</span>
+                        )}
+                        {acc?.needsConsent && (
+                          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-300">待授权</span>
+                        )}
+                      </div>
                       <div className="text-xs text-neutral-400 dark:text-stone-500">{p.id} · {p.kind}{p.codename ? ` · ${p.codename}` : ''}</div>
+                      {acc && acc.declared.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {acc.declared.map((cap) => (
+                            <span
+                              key={cap}
+                              title={CAPABILITY_LABELS[cap] ?? cap}
+                              className={`px-1.5 py-0.5 rounded text-[10px] ${
+                                acc.missing.includes(cap)
+                                  ? 'bg-red-50 text-red-500 dark:bg-red-900/20 dark:text-red-300'
+                                  : 'bg-black/5 text-neutral-500 dark:bg-white/10 dark:text-stone-400'
+                              }`}
+                            >
+                              {cap}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`flex items-center gap-1 text-xs ${isLoaded ? 'text-emerald-600' : 'text-neutral-400 dark:text-stone-500'}`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${isLoaded ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-stone-600'}`} />
-                      {isLoaded ? t('ext.running') : t('ext.disabled')}
+                    <span className={`flex items-center gap-1 text-xs ${isLoaded ? 'text-emerald-600' : acc?.needsConsent ? 'text-red-500' : 'text-neutral-400 dark:text-stone-500'}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${isLoaded ? 'bg-emerald-500' : acc?.needsConsent ? 'bg-red-400' : 'bg-neutral-300 dark:bg-stone-600'}`} />
+                      {isLoaded ? t('ext.running') : acc?.needsConsent ? '待授权' : t('ext.disabled')}
                     </span>
+                    <button
+                      onClick={() => { setDevTrust(!!acc?.trustedDev); setConsentTarget(p); }}
+                      className={`btn-press px-2 py-1 rounded-lg text-[11px] border transition-colors ${
+                        acc?.needsConsent
+                          ? 'border-red-200 text-red-500 hover:bg-red-50 dark:border-red-900/40 dark:hover:bg-red-900/20'
+                          : 'border-neutral-200/60 text-neutral-500 hover:bg-black/5 dark:border-stone-600/50 dark:text-stone-400 dark:hover:bg-white/5'
+                      }`}
+                      title="查看 / 授权插件能力"
+                    >
+                      {acc?.bundled ? '详情' : acc?.needsConsent ? '授权…' : '能力'}
+                    </button>
                     <Switch
                       checked={isVisible}
                       onCheckedChange={(val: boolean) => handleTogglePlugin(p, val)}
@@ -310,6 +436,85 @@ export function ExtensionManagerPanel() {
             })}
           </div>
         </section>
+      )}
+
+      {/* 能力授权弹窗 */}
+      {consentTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6"
+          onClick={() => setConsentTarget(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white dark:bg-stone-800 shadow-xl p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div>
+              <div className="text-sm font-medium text-neutral-800 dark:text-stone-100">
+                授权「{consentTarget.name}」
+              </div>
+              <p className="text-xs text-neutral-500 dark:text-stone-400 mt-1">
+                该插件声明了以下能力。授权后它才能调用对应的宿主命令；写入仍只能落在授权目录与用户亲手选过的路径。
+              </p>
+            </div>
+            <div className="space-y-1.5 max-h-60 overflow-y-auto">
+              {(accessMap[consentTarget.id]?.declared ?? []).map((cap) => (
+                <div key={cap} className="flex items-center justify-between gap-3 text-xs px-2 py-1.5 rounded-lg bg-black/[0.03] dark:bg-white/5">
+                  <span className="font-mono text-neutral-700 dark:text-stone-200">{cap}</span>
+                  <span className="text-neutral-500 dark:text-stone-400 text-right">{CAPABILITY_LABELS[cap] ?? cap}</span>
+                </div>
+              ))}
+              {(accessMap[consentTarget.id]?.declared ?? []).length === 0 && (
+                <div className="text-xs text-neutral-400 dark:text-stone-500">该插件未声明任何能力，将不调用后端命令。</div>
+              )}
+            </div>
+            {accessMap[consentTarget.id]?.bundled ? (
+              <div className="text-xs text-emerald-600 dark:text-emerald-400">
+                官方内置插件随应用签名发布，默认信任；无需逐项授权。
+              </div>
+            ) : (
+            <label className="flex items-start gap-2 text-xs text-neutral-600 dark:text-stone-300 select-none">
+              <input
+                type="checkbox"
+                checked={devTrust}
+                onChange={(e) => setDevTrust(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                开发信任：跳过逐项能力确认（适合自己开发的插件）。
+                <span className="block text-[11px] text-neutral-400 dark:text-stone-500">
+                  仍受写入范围限制；换机器/重装后需重新确认。
+                </span>
+              </span>
+            </label>
+            )}
+            <div className="flex items-center justify-between gap-2 pt-1">
+              {!accessMap[consentTarget.id]?.bundled && accessMap[consentTarget.id]?.hasGrant ? (
+                <button
+                  onClick={() => void handleRevokeAccess()}
+                  className="btn-press px-3 py-1.5 rounded-lg text-xs text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
+                >
+                  撤销授权
+                </button>
+              ) : <span />}
+              <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConsentTarget(null)}
+                className="btn-press px-3 py-1.5 rounded-lg text-xs text-neutral-500 dark:text-stone-400 hover:bg-black/5 dark:hover:bg-white/5"
+              >
+                取消
+              </button>
+              {!accessMap[consentTarget.id]?.bundled && (
+                <button
+                  onClick={() => void handleApproveConsent()}
+                  className="btn-press px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--element-bg)] text-white hover:opacity-90"
+                >
+                  授权并启用
+                </button>
+              )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 未成功加载（诊断） */}

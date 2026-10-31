@@ -28,7 +28,8 @@ pub async fn convert_to_markdown(app: tauri::AppHandle, file_path: String) -> Re
 
 /// wps 文档编辑器：将 TipTap 文档 JSON 导出为 .docx 文件。
 #[tauri::command]
-pub fn wps_export_docx(path: String, json: String) -> Result<(), String> {
+pub fn wps_export_docx(app: tauri::AppHandle, plugin_id: Option<String>, path: String, json: String) -> Result<(), String> {
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &path)?;
     let bytes = crate::services::docx_wps::json_to_docx(&json)?;
     std::fs::write(&path, &bytes).map_err(|e| format!("写入 {} 失败: {}", path, e))?;
     Ok(())
@@ -36,7 +37,8 @@ pub fn wps_export_docx(path: String, json: String) -> Result<(), String> {
 
 /// wps 演示文件编辑器：将幻灯片 JSON 导出为 .pptx 文件（PresentationML）。
 #[tauri::command]
-pub fn wps_export_pptx(path: String, json: String) -> Result<(), String> {
+pub fn wps_export_pptx(app: tauri::AppHandle, plugin_id: Option<String>, path: String, json: String) -> Result<(), String> {
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &path)?;
     let bytes = crate::services::pptx_wps::json_to_pptx(&json)?;
     std::fs::write(&path, &bytes).map_err(|e| format!("写入 {} 失败: {}", path, e))?;
     Ok(())

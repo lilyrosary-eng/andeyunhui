@@ -9,10 +9,11 @@
 use super::*;
 /// 打开目录选择对话框，返回选中的路径（用户取消时返回 None）
 #[tauri::command]
-pub async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+pub async fn pick_directory(app: tauri::AppHandle, plugin_id: Option<String>) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let folder = app.dialog().file().blocking_pick_folder();
     if let Some(ref p) = folder {
+        crate::services::plugin_access::record_picked_path(&app, plugin_id.as_deref(), &p.to_string());
         // 运行时把用户选定目录加入 asset 协议 scope（递归），
         // 这样静态 scope 可保持最小（仅 $APPDATA），降低攻击面。
         let s = p.to_string();
@@ -32,6 +33,7 @@ pub struct FileDialogFilter {
 #[tauri::command]
 pub async fn pick_file(
     app: tauri::AppHandle,
+    plugin_id: Option<String>,
     filters: Option<Vec<FileDialogFilter>>,
     // 对话框标题（可选）。
     // ⚠️ 这两个参数**原先根本没有**，而三处调用方都在传 `title` / `multiple` ——
@@ -63,26 +65,37 @@ pub async fn pick_file(
         if let Some(parent) = std::path::Path::new(p).parent() {
             let _ = app.asset_protocol_scope().allow_directory(parent, false);
         }
+        crate::services::plugin_access::record_picked_path(&app, plugin_id.as_deref(), p);
     }
     Ok(paths)
 }
 
 // 另存为：打开「保存文件」对话框，返回选中的路径（取消时 None）
 #[tauri::command]
-pub async fn pick_save_file(app: tauri::AppHandle, default_name: String) -> Result<Option<String>, String> {
+pub async fn pick_save_file(app: tauri::AppHandle, plugin_id: Option<String>, default_name: String) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let path = app
         .dialog()
         .file()
         .set_file_name(&default_name)
         .blocking_save_file();
-    Ok(path.map(|p| p.to_string()))
+    let out = path.map(|p| p.to_string());
+    if let Some(ref p) = out {
+        crate::services::plugin_access::record_picked_path(&app, plugin_id.as_deref(), p);
+    }
+    Ok(out)
 }
 
 // 写入纯文本文件（IDE 子插件「保存」用）。原子写入：先写同目录临时文件，再 rename 替换，
 // 避免 AI 生成到一半断网/崩溃导致原文件被截断为 0 字节（写前锁定 / 原子替换）。
 #[tauri::command]
-pub fn write_text_file(path: String, content: String) -> Result<(), String> {
+pub fn write_text_file(
+    app: tauri::AppHandle,
+    plugin_id: Option<String>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &path)?;
     let p = std::path::Path::new(&path);
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() {
@@ -100,7 +113,13 @@ pub fn write_text_file(path: String, content: String) -> Result<(), String> {
 /// 写入二进制文件（base64 解码）。供前端导出 XLSX / 图片等二进制产物到磁盘。
 /// 采用与 `write_text_file` 一致的原子写（临时文件 + rename），避免写一半被读取导致损坏。
 #[tauri::command]
-pub fn write_file_bytes(path: String, content_base64: String) -> Result<(), String> {
+pub fn write_file_bytes(
+    app: tauri::AppHandle,
+    plugin_id: Option<String>,
+    path: String,
+    content_base64: String,
+) -> Result<(), String> {
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &path)?;
     use base64::Engine as _;
     let p = std::path::Path::new(&path);
     if let Some(parent) = p.parent() {
@@ -128,7 +147,12 @@ pub fn read_text_file(path: String) -> Result<String, String> {
 
 // 删除文件（IDE 自主编辑「撤销新建文件」用；不存在时视为成功）
 #[tauri::command]
-pub fn delete_file(path: String) -> Result<(), String> {
+pub fn delete_file(
+    app: tauri::AppHandle,
+    plugin_id: Option<String>,
+    path: String,
+) -> Result<(), String> {
+    crate::services::plugin_access::ensure_plugin_write(&app, plugin_id.as_deref(), &path)?;
     if !std::path::Path::new(&path).exists() {
         return Ok(());
     }

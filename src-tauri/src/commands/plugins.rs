@@ -36,28 +36,29 @@ pub struct PluginManifest {
     pub codename: String,       // 模块代号（如 "铃兰"、"莲花"），为空表示无代号
     #[serde(default)]
     pub required_assets: Vec<String>, // 需要的外部依赖资源路径（如 "茑萝/ide/codemirror/index.js"）
-    // 注：曾经的 `capabilities: Vec<String>`（"file-system"/"network" 自述标签）
-    // 已于 2026-10-18 删除——全仓库没有任何读取方。插件能力由 permissions.commands
-    // （下面那段）与 Tauri capability/ACL 共同约束，自述标签只会造成
-    // "声明了就像被强制执行"的错觉。serde 默认忽略未知键，故旧 manifest 里的
-    // 同名字段不会导致解析失败，只是被静默跳过。
-    /// 声明式命令权限：manifest 的 permissions.commands 列出插件要调用的命令，
-    /// 沙箱按「声明 ∩ ALLOWED_COMMANDS 全局白名单」强制（见 src/core/pluginSandbox.ts）。
-    /// 已知边界（有意为之，勿在此处加固）：
-    /// 1. 只约束 __HOST_API__.invoke；经 vite alias 把宿主 src 编进 IIFE 的插件
-    ///    （如 ai-chat）直连 invoke，绕过本清单——安全边界在 Tauri capability/ACL，不在这里。
-    /// 2. 清单由 scripts/_scan_perms.mjs 以「源码里出现过的命令」保守超集生成
-    ///    （宁可宽不可漏），要收紧要人工核对，别指望脚本自动收紧。
+    /// 声明式权限：能力制（见 services/plugin_access.rs）。
+    /// - 推荐在 manifest 写 `permissions.capabilities`（storage/fs.read/...）；
+    /// - 旧式 `permissions.commands` 继续兼容：自动推导能力，并在能力集合之上收紧；
+    /// - 沙箱按「命令→能力规则 + 授权账本」放行，不再有全局命令白名单。
+    /// 已知边界（有意为之）：只约束 __HOST_API__.invoke；经 vite alias 直连 invoke 的
+    /// 宿主内置插件不走这里（其边界在 Tauri capability/ACL）。
     #[serde(default)]
     pub permissions: PluginPermissions,
+    /// 来源："bundled"（随包出厂）或 "user"（第三方/用户侧载）。
+    /// 内置插件的能力自动批准；用户插件需要用户在扩展页确认。
+    #[serde(default)]
+    pub origin: String,
 }
 
 /// manifest 的 `permissions` 段：声明式权限
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct PluginPermissions {
-    /// 插件声明要调用的命令名列表；空/未声明 = 回退全局白名单
+    /// 旧式逐命令声明（保留兼容）：若存在，会在能力集合之上再收紧。
     pub commands: Vec<String>,
+    /// 新式能力声明（推荐）：storage / fs.read / fs.write / fs.pick / media / net /
+    /// clipboard.read / clipboard.write / window / system / ai / data / attack。
+    pub capabilities: Vec<String>,
 }
 
 /// 扫描结果：有效插件 + 被拒绝的插件
@@ -260,11 +261,13 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
 
     // 递归收集 bundled-plugins/ 与 user_plugins/ 下所有 manifest.json
     // （user_plugins 用于第三方插件，不会被版本更新清空）
-    let mut manifest_files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    // (manifest 路径, 相对路径, 是否内置)
+    let mut manifest_files: Vec<(std::path::PathBuf, String, bool)> = Vec::new();
     fn walk(
         dir: &std::path::Path,
         base: &std::path::Path,
-        out: &mut Vec<(std::path::PathBuf, String)>,
+        bundled: bool,
+        out: &mut Vec<(std::path::PathBuf, String, bool)>,
     ) {
         // 根目录（dir == base）下的 manifest.json 是插件清单（bundled-plugins 清单副本），
         // 不是单个插件的 manifest，必须跳过，否则会用 PluginManifest（version: String）
@@ -280,7 +283,7 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
                         .map(|c| c.as_os_str().to_string_lossy().to_string())
                         .collect::<Vec<_>>()
                         .join("/");
-                    out.push((self_manifest, rel_str));
+                    out.push((self_manifest, rel_str, bundled));
                 }
                 return;
             }
@@ -288,16 +291,16 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    walk(&entry.path(), base, out);
+                    walk(&entry.path(), base, bundled, out);
                 }
             }
         }
     }
     // bundled-plugins 优先（内置权威，且不会被安装版污染）；再扫 user_plugins（第三方/用户态插件）
-    if let Some(ref ext) = ext { walk(ext, ext, &mut manifest_files); }
-    if let Some(ref usr) = usr { walk(usr, usr, &mut manifest_files); }
+    if let Some(ref ext) = ext { walk(ext, ext, true, &mut manifest_files); }
+    if let Some(ref usr) = usr { walk(usr, usr, false, &mut manifest_files); }
 
-    for (manifest_path, rel_path) in manifest_files {
+    for (manifest_path, rel_path, bundled) in manifest_files {
         let folder_name = manifest_path
             .parent()
             .and_then(|p| p.file_name())
@@ -333,6 +336,7 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
         };
         // 记录相对路径（嵌套子插件如 "茑萝/gongjuxiang"），供 read_plugin_file 使用
         manifest.path = rel_path;
+        manifest.origin = if bundled { "bundled".into() } else { "user".into() };
 
         // 必填字段校验
         let mut missing = Vec::new();
@@ -427,6 +431,13 @@ pub(crate) fn scan_plugins_sync(app: tauri::AppHandle) -> Result<PluginScanResul
 
 /// 根据插件 id 在 bundled-plugins/ 与 user_plugins/ 下递归查找其所在目录。
 /// 前端只需传入 manifest 中的干净 id，Rust 端自动定位真实路径。
+/// 插件目录是否来自 bundled-plugins（内置随包，视为可信）。
+pub(crate) fn is_bundled_plugin_dir(app: &tauri::AppHandle, dir: &std::path::Path) -> bool {
+    get_bundled_plugins_dir(app)
+        .map(|b| dir.starts_with(&b))
+        .unwrap_or(false)
+}
+
 pub(crate) fn find_plugin_root(app: &tauri::AppHandle, plugin_id: &str) -> Result<std::path::PathBuf, String> {
     // 搜索顺序：bundled-plugins（内置，权威且版本匹配）优先，user_plugins（第三方/用户态）兜底。
     // 关键：user_plugins 位于 AppData，被 dev / release / 安装版 多实例共享；若让 user_plugins 优先，
@@ -810,7 +821,10 @@ pub fn delete_plugin(app: tauri::AppHandle, plugin_id: String) -> Result<(), Str
     // 3) 从 plugin_visibility.json 中移除该 id 的记录
     remove_plugin_visibility(&app, &plugin_id)?;
 
-    // 4) 清除扫描缓存，让下次 get_installed_plugins 反映删除后的状态
+    // 4) 清除授权账本与授权路径（否则重装后仍带着旧授权）
+    crate::services::plugin_access::clear_plugin_access(&app, &plugin_id);
+
+    // 5) 清除扫描缓存，让下次 get_installed_plugins 反映删除后的状态
     if let Ok(mut cache) = PLUGIN_SCAN_CACHE.lock() {
         *cache = None;
     }
