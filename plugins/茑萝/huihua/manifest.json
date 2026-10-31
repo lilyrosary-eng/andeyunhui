@@ -10,7 +10,11 @@
   "permissions": {
     "commands": [
       "add_bytes_to_dropzone",
-      "clipboard_write_image"
+      "clipboard_write_image",
+      "pick_file",
+      "pick_save_file",
+      "read_text_file",
+      "write_text_file"
     ]
   },
   "parent": "niaoluo",
