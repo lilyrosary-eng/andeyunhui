@@ -55,6 +55,19 @@ export const jaJP: Record<string, string> = {
   'settings.general.shortcuts.resetDefault': 'デフォルトに戻す',
   'settings.general.shortcuts.pressKey': 'キーを押してください...',
   'settings.general.shortcuts.editTip': 'クリックしてショートカットを変更',
+  'settings.general.shortcuts.duplicate': '「{name}」と競合しています',
+
+  // コマンドパレット
+  'commandPalette.placeholder': 'モジュール、ノート、アクション、音楽を検索…（例：「音楽: 夜想曲」）',
+  'commandPalette.hint': 'キーワードを入力して検索',
+  'commandPalette.noMatch': '一致なし',
+  'commandPalette.select': '選択',
+  'commandPalette.open': '開く',
+  'commandPalette.close': 'Esc で閉じる',
+  'commandPalette.count': '{n} 件',
+  'commandPalette.group.modules': 'モジュール',
+  'commandPalette.group.actions': 'アクション',
+  'commandPalette.group.notes': 'ノート',
 
   // ショートカット項目
   'shortcut.bold': '太字',
@@ -65,6 +78,7 @@ export const jaJP: Record<string, string> = {
   'shortcut.clipboard': 'クリップボードウィジェット',
   'shortcut.dropzone': 'トランスファーウィジェット',
   'shortcut.favorite': 'お気に入りノート',
+  'shortcut.command-palette': 'コマンドパレット',
 
   // 設定 - 一般 - 通用
   'settings.general.common.title': '一般',

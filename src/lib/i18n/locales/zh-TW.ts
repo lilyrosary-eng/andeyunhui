@@ -55,6 +55,19 @@ export const zhTW: Record<string, string> = {
   'settings.general.shortcuts.resetDefault': '還原預設',
   'settings.general.shortcuts.pressKey': '請按鍵...',
   'settings.general.shortcuts.editTip': '點擊修改快捷鍵',
+  'settings.general.shortcuts.duplicate': '與「{name}」快捷鍵衝突',
+
+  // 命令面板
+  'commandPalette.placeholder': '搜尋模組、筆記、動作或音樂…（試試「音樂:夜曲」）',
+  'commandPalette.hint': '輸入關鍵字開始搜尋',
+  'commandPalette.noMatch': '沒有符合項目',
+  'commandPalette.select': '選擇',
+  'commandPalette.open': '開啟',
+  'commandPalette.close': 'Esc 關閉',
+  'commandPalette.count': '{n} 項',
+  'commandPalette.group.modules': '模組',
+  'commandPalette.group.actions': '動作',
+  'commandPalette.group.notes': '筆記',
 
   // 快捷鍵項目
   'shortcut.bold': '粗體',
@@ -65,6 +78,7 @@ export const zhTW: Record<string, string> = {
   'shortcut.clipboard': '剪貼簿浮動視窗',
   'shortcut.dropzone': '中轉站浮動視窗',
   'shortcut.favorite': '常用筆記',
+  'shortcut.command-palette': '命令面板',
 
   // 設定 - 一般 - 通用
   'settings.general.common.title': '通用',

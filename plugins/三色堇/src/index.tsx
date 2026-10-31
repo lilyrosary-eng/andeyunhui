@@ -74,9 +74,79 @@ function dedupBooks(books: BookSummary[], rootPaths: string[] = []): BookSummary
   return Array.from(map.values());
 }
 
+// ===== 命令面板 provider：阅读 › 书库/子目录 › 书名 =====
+// 直接读扫描缓存（不依赖模块是否打开过），带 TTL；面板打开时触发 refresh。
+const PALETTE_TTL = 60_000;
+let paletteBooks: BookSummary[] = [];
+let paletteBooksAt = 0;
+let paletteBooksPromise: Promise<void> | null = null;
+
+async function ensurePaletteBooks(force = false): Promise<void> {
+  if (!force && paletteBooksAt > 0 && Date.now() - paletteBooksAt < PALETTE_TTL) return;
+  if (paletteBooksPromise) return paletteBooksPromise;
+  paletteBooksPromise = (async () => {
+    try {
+      let roots: string[] = [];
+      try { roots = JSON.parse(localStorage.getItem(STORAGE_KEY_ROOT) || '[]'); } catch { roots = []; }
+      const all: BookSummary[] = [];
+      for (const root of roots) {
+        try {
+          const cached = await hostApi.invoke<BookSummary[] | null>('load_reading_cache', { rootPath: root });
+          if (Array.isArray(cached) && cached.length) all.push(...cached);
+        } catch { /* 单个根目录缓存缺失时忽略 */ }
+      }
+      paletteBooks = dedupBooks(all, roots).sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN'));
+      paletteBooksAt = Date.now();
+    } catch (err) {
+      console.warn('[reading] 命令面板索引构建失败:', err);
+    }
+  })().finally(() => { paletteBooksPromise = null; });
+  return paletteBooksPromise;
+}
+
+try {
+  hostApi.registerCommandProvider?.({
+    id: 'reading',
+    label: '阅读',
+    moduleId: 'reading',
+    priority: 25,
+    refresh: () => ensurePaletteBooks(true),
+    search: async (query) => {
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      await ensurePaletteBooks();
+      const results: Array<{
+        id: string;
+        title: string;
+        subtitle?: string;
+        path?: string[];
+        iconName?: string;
+        rank?: number;
+        navigate?: NavigationTarget;
+        run?: () => void;
+      }> = [];
+      for (const book of paletteBooks) {
+        const haystack = `${book.title} ${book.parentDir} ${book.filePath}`.toLowerCase();
+        if (!haystack.includes(q)) continue;
+        results.push({
+          id: book.filePath,
+          title: book.title,
+          subtitle: [book.format?.toUpperCase(), book.parentDir].filter(Boolean).join(' · '),
+          path: [book.parentDir || '书库'],
+          iconName: 'BookOpen',
+          rank: book.title.toLowerCase().includes(q) ? 8 : 0,
+          navigate: { module: 'reading', tabs: [book.parentDir || '书库'], entity: book.filePath, props: { filePath: book.filePath } },
+          run: () => window.dispatchEvent(new CustomEvent('andy:reading-open', { detail: { filePath: book.filePath } })),
+        });
+        if (results.length >= 40) break;
+      }
+      return results;
+    },
+  });
+} catch { /* 旧宿主没有 provider API 时静默跳过 */ }
+
 // ========== 图标 ==========
-function BookIcon() {
-  return (
+function BookIcon() {  return (
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
       <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
@@ -297,6 +367,44 @@ function ReadingModule() {
       console.error('[Reading] openBook 异常:', err);
     }
   }, [openingFilePath, openBook]);
+
+  // 命令面板/其它模块跳转：按路径打开书籍（书单尚未加载时也可直接 open_book）
+  const openByPath = useCallback(async (filePath: string) => {
+    const book = books.find((b) => b.filePath.replace(/\\/g, '/').toLowerCase() === filePath.replace(/\\/g, '/').toLowerCase());
+    if (book) {
+      await handleBookClick(book);
+      return;
+    }
+    loadedPathRef.current = null;
+    try {
+      await openBook('open_book', { filePath });
+      setCurrentBookPath(filePath);
+    } catch (err) {
+      console.error('[Reading] 导航打开失败:', filePath, err);
+    }
+  }, [books, handleBookClick, openBook]);
+  const openByPathRef = useRef(openByPath);
+  openByPathRef.current = openByPath;
+
+  useEffect(() => {
+    const off = hostApi.registerNavigator?.((target) => {
+      const filePath = (target.props?.filePath as string | undefined) || target.entity;
+      if (!filePath) return false;
+      void openByPathRef.current(filePath);
+      return true;
+    });
+    const onEvent = (e: Event) => {
+      const filePath = (e as CustomEvent<{ filePath?: string }>).detail?.filePath;
+      if (filePath) void openByPathRef.current(filePath);
+    };
+    window.addEventListener('andy:reading-open', onEvent);
+    return () => {
+      try { off?.(); } catch { /* 忽略 */ }
+      window.removeEventListener('andy:reading-open', onEvent);
+    };
+    // 处理器通过 ref 读取最新 state；只注册一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 以安得云荟打开 / 拖入主窗口：复制进固定临时目录 → 注册为常驻库文件夹 → 打开目标书籍
   const processOpenWith = useCallback(async (items: OpenWithItem[]) => {

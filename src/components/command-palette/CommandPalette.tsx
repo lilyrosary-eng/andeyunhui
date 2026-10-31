@@ -1,8 +1,8 @@
 // 全局命令面板（Ctrl+K）
 //
 // 设计：Provider 只产出「可执行项」，面板负责搜索/键盘/分组/最近使用。
-// 内置 provider：模块、动作、笔记；业务模块（音乐…）通过 registry 注册实体搜索。
-// 后续接入中转站、AI 会话等只需再注册一个 provider。
+// 内置 provider：模块、动作、笔记；业务模块（音乐/阅读/AI 会话…）通过 registry 注册实体搜索。
+// 结果优先走统一导航契约（module + tabs + entity），模块自己决定如何落到 tab/子 tab。
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -29,22 +29,33 @@ import {
   subscribeCommandProviders,
   type PaletteProvider,
 } from '@/core/commandPalette/registry';
+import type { NavigationTarget } from '@/core/navigation/navigation';
+import { navigateTo } from '@/core/navigation/navigation';
 import { loadShortcutKeys, matchesShortcut, SHORTCUTS_CHANGED_EVENT } from '@/lib/shortcuts';
 import { requestSettingsTab } from '@/core/settings/settingsNav';
+import { parseScope, scoreFields } from '@/components/command-palette/scoring';
+import { useI18n } from '@/lib/i18n';
 
 interface CommandItem {
   id: string;
   title: string;
   subtitle?: string;
   group: string;
+  groupKey: string;
   icon?: ReactNode;
   keywords?: string;
+  /** provider 自带命中权重（收藏/最近播放等） */
+  rank?: number;
+  navigate?: NavigationTarget;
   run: () => void | Promise<void>;
 }
 
 const RECENT_KEY = 'andy.cmdk.recent';
+const USAGE_KEY = 'andy.cmdk.usage';
 const RECENT_MAX = 12;
 const MAX_RESULTS = 60;
+const PROVIDER_RESULT_CAP = 12;
+const SCOPED_PROVIDER_RESULT_CAP = 40;
 
 function loadRecent(): string[] {
   try {
@@ -62,28 +73,23 @@ function saveRecent(ids: string[]): void {
   } catch { /* 忽略配额/隐私模式 */ }
 }
 
-function scoreText(text: string, query: string): number {
-  if (!query) return 1;
-  const t = text.toLowerCase();
-  const q = query.toLowerCase();
-  if (t === q) return 120;
-  if (t.startsWith(q)) return 100;
-  if (t.includes(q)) return 70;
-  // 子序列匹配（"dsm" → "Dev Settings Model"）
-  let i = 0;
-  for (const ch of t) {
-    if (ch === q[i]) i += 1;
-    if (i >= q.length) return 35;
+function loadUsage(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(USAGE_KEY);
+    const obj = raw ? JSON.parse(raw) : {};
+    if (!obj || typeof obj !== 'object') return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
   }
-  return 0;
 }
 
-function scoreItem(item: CommandItem, query: string): number {
-  return Math.max(
-    scoreText(item.title, query),
-    item.subtitle ? scoreText(item.subtitle, query) : 0,
-    item.keywords ? scoreText(item.keywords, query) : 0,
-  );
+function saveUsage(map: Record<string, number>): void {
+  try { localStorage.setItem(USAGE_KEY, JSON.stringify(map)); } catch { /* 忽略 */ }
 }
 
 export interface CommandPaletteProps {
@@ -92,6 +98,7 @@ export interface CommandPaletteProps {
 }
 
 export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
@@ -99,6 +106,7 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
   const [providers, setProviders] = useState<PaletteProvider[]>(() => getCommandProviders());
   const [paletteKeys, setPaletteKeys] = useState(() => loadShortcutKeys('command-palette', 'Ctrl + K'));
   const [recent, setRecent] = useState<string[]>(() => loadRecent());
+  const [usage, setUsage] = useState<Record<string, number>>(() => loadUsage());
   const openRef = useRef(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -162,24 +170,53 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
   // 模块 provider 注册表（音乐/阅读等模块在加载时自己注册）
   useEffect(() => subscribeCommandProviders(() => setProviders(getCommandProviders())), []);
 
-  const recordRecent = useCallback((id: string) => {
+  // 打开面板时让各 provider 刷新快照（provider 自行 TTL 节流，避免每次打开都全量重读）
+  useEffect(() => {
+    if (!open) return;
+    for (const provider of providers) {
+      try {
+        void Promise.resolve(provider.refresh?.()).catch((err) =>
+          console.warn('[command-palette] provider 刷新失败:', provider.id, err),
+        );
+      } catch (err) {
+        console.warn('[command-palette] provider 刷新异常:', provider.id, err);
+      }
+    }
+    // providers 数量变化（热插拔）时也刷新一次；不依赖整个数组避免每次注册重刷
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, providers.length]);
+
+  const recordUse = useCallback((id: string) => {
     setRecent((prev) => {
       const next = [id, ...prev.filter((x) => x !== id)].slice(0, RECENT_MAX);
       saveRecent(next);
       return next;
     });
+    setUsage((prev) => {
+      const next = { ...prev, [id]: (prev[id] ?? 0) + 1 };
+      saveUsage(next);
+      return next;
+    });
   }, []);
+
+  const staticGroups = useMemo(() => ([
+    { key: 'modules', label: t('commandPalette.group.modules') },
+    { key: 'actions', label: t('commandPalette.group.actions') },
+    { key: 'notes', label: t('commandPalette.group.notes') },
+  ]), [t]);
 
   // 静态 provider：模块 / 动作 / 笔记
   const staticItems = useMemo<CommandItem[]>(() => {
     const items: CommandItem[] = [];
     const seen = new Set<string>();
+    const groupLabel = (key: string) => staticGroups.find((g) => g.key === key)?.label ?? key;
 
     const moduleItem = (id: string, title: string, subtitle: string, iconName?: string): CommandItem => ({
       id: `module:${id}`,
       title,
       subtitle,
-      group: '模块',
+      group: groupLabel('modules'),
+      groupKey: 'modules',
       icon: iconName ? <PluginIcon name={iconName} size={16} fallback={<Puzzle size={16} />} /> : <Puzzle size={16} />,
       keywords: `${id} ${subtitle}`,
       run: () => setActiveModule(id),
@@ -212,7 +249,16 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
       icon: ReactNode,
       run: () => void | Promise<void>,
       keywords = '',
-    ) => items.push({ id: `action:${id}`, title, subtitle, group: '动作', icon, run, keywords });
+    ) => items.push({
+      id: `action:${id}`,
+      title,
+      subtitle,
+      group: groupLabel('actions'),
+      groupKey: 'actions',
+      icon,
+      run,
+      keywords,
+    });
 
     action('new-note', '新建笔记', '笔记', <Plus size={16} />, async () => {
       setActiveModule('notes');
@@ -249,10 +295,13 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
         id: `note:${n.id}`,
         title: n.title || '未命名',
         subtitle: n.date ? `笔记 · ${n.date}` : '笔记',
-        group: '笔记',
+        group: groupLabel('notes'),
+        groupKey: 'notes',
         icon: <StickyNote size={16} />,
         keywords: `${n.id} ${n.date ?? ''}`,
+        navigate: { module: 'notes', entity: n.id },
         run: () => {
+          // 导航处理器未注册时的兜底（老版本 / 笔记模块尚未挂载）
           setActiveModule('notes');
           loadNoteContent(n.id);
         },
@@ -260,37 +309,52 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
     items.push(...noteItems);
 
     return items;
-  }, [pluginRegistry, notes, immersive, setActiveModule, toggleImmersive, createNote, loadNoteContent, onScreenshot]);
+  }, [pluginRegistry, notes, immersive, setActiveModule, toggleImmersive, createNote, loadNoteContent, onScreenshot, staticGroups]);
+
+  const scoped = useMemo(
+    () => parseScope(query.trim(), providers, staticGroups),
+    [query, providers, staticGroups],
+  );
+  const effectiveQuery = scoped.query.trim();
 
   // 模块 provider：把各模块自己的实体搜索接进来（音乐、阅读、AI 会话…）。
-  // provider 结果带「模块 › 子集 › 实体」层级，执行走模块自己的能力。
+  // 作用域命中某个 provider 时只查它；否则并行查全部。
   useEffect(() => {
     if (!open) { setProviderItems([]); return; }
-    const q = query.trim();
-    if (!q || providers.length === 0) { setProviderItems([]); return; }
+    if (!effectiveQuery) { setProviderItems([]); return; }
+    const providerPool = scoped.scope?.kind === 'provider'
+      ? providers.filter((p) => p.id === scoped.scope!.key)
+      : scoped.scope?.kind === 'static'
+        ? []
+        : providers;
+    if (providerPool.length === 0) { setProviderItems([]); return; }
     let cancelled = false;
+    const cap = scoped.scope?.kind === 'provider' ? SCOPED_PROVIDER_RESULT_CAP : PROVIDER_RESULT_CAP;
     const timer = window.setTimeout(() => {
       void (async () => {
         const collected: CommandItem[] = [];
-        await Promise.all(providers.map(async (provider) => {
+        await Promise.all(providerPool.map(async (provider) => {
           try {
-            const results = await provider.search(q);
+            const results = await provider.search(effectiveQuery);
             if (cancelled) return;
-            for (const r of (results ?? []).slice(0, 12)) {
+            for (const r of (results ?? []).slice(0, cap)) {
               collected.push({
                 id: `prov:${provider.id}:${r.id}`,
                 title: r.title,
                 subtitle: [...(r.path ?? []), r.subtitle].filter(Boolean).join(' › '),
                 group: provider.label,
+                groupKey: `prov:${provider.id}`,
                 icon: r.iconName
                   ? <PluginIcon name={r.iconName} size={16} fallback={<Sparkles size={16} />} />
                   : <Sparkles size={16} />,
                 keywords: r.subtitle,
+                rank: r.rank,
+                navigate: r.navigate,
                 run: async () => {
                   if (provider.moduleId) setActiveModule(provider.moduleId);
                   // 给被激活的模块一个挂载/注册监听的机会，再执行具体动作
                   await new Promise((resolve) => setTimeout(resolve, 40));
-                  await r.run();
+                  if (r.run) await r.run();
                 },
               });
             }
@@ -305,36 +369,51 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [open, query, providers, setActiveModule]);
+  }, [open, effectiveQuery, providers, scoped.scope, setActiveModule]);
 
   const visibleItems = useMemo(() => {
-    const q = query.trim();
+    const q = effectiveQuery;
     const recentSet = new Set(recent);
-    const all = q ? [...staticItems, ...providerItems] : staticItems;
-    const scored = all
+    let pool: CommandItem[];
+    if (scoped.scope?.kind === 'static') {
+      pool = staticItems.filter((item) => item.groupKey === scoped.scope!.key);
+    } else if (scoped.scope?.kind === 'provider') {
+      pool = providerItems;
+    } else {
+      pool = q ? [...staticItems, ...providerItems] : staticItems;
+    }
+    const scored = pool
       .map((item) => {
-        const base = q ? scoreItem(item, q) : 1;
+        const base = q ? scoreFields(item.title, item.subtitle, item.keywords, q) : 1;
         if (base <= 0) return null;
-        return { item, score: base + (recentSet.has(item.id) ? 20 : 0) };
+        const usageBoost = Math.min(usage[item.id] ?? 0, 12) * 2;
+        return {
+          item,
+          score: base + (recentSet.has(item.id) ? 18 : 0) + usageBoost + (item.rank ?? 0),
+        };
       })
       .filter((x): x is { item: CommandItem; score: number } => !!x)
       .sort((a, b) => b.score - a.score || Number(recentSet.has(b.item.id)) - Number(recentSet.has(a.item.id)))
       .slice(0, MAX_RESULTS);
-    // 分组顺序：模块 → 动作 → 笔记 → 各模块 provider（音乐/阅读…）
-    const order = ['模块', '动作', '笔记', ...providers.map((p) => p.label)];
-    const known = new Set(order);
+
+    // 分组顺序：模块 → 动作 → 笔记 → 各模块 provider（按 priority 降序）
+    const providerOrder = [...providers]
+      .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))
+      .map((p) => ({ key: `prov:${p.id}`, label: p.label }));
+    const order = [...staticGroups.map((g) => ({ key: g.key, label: g.label })), ...providerOrder];
+    const known = new Set(order.map((g) => g.key));
     const groups = new Map<string, CommandItem[]>();
     for (const { item } of scored) {
-      const list = groups.get(item.group) ?? [];
+      const list = groups.get(item.groupKey) ?? [];
       list.push(item);
-      groups.set(item.group, list);
+      groups.set(item.groupKey, list);
     }
-    const ordered = order.flatMap((g) => groups.get(g) ?? []);
-    for (const [group, list] of groups) {
-      if (!known.has(group)) ordered.push(...list);
+    const ordered = order.flatMap((g) => groups.get(g.key) ?? []);
+    for (const [key, list] of groups) {
+      if (!known.has(key)) ordered.push(...list);
     }
     return ordered;
-  }, [query, staticItems, providerItems, providers, recent]);
+  }, [effectiveQuery, scoped.scope, staticItems, providerItems, providers, recent, usage, staticGroups]);
 
   useEffect(() => {
     setActiveIndex((i) => (visibleItems.length === 0 ? 0 : Math.min(i, visibleItems.length - 1)));
@@ -364,14 +443,19 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
 
   const runItem = useCallback(async (item: CommandItem | undefined) => {
     if (!item) return;
-    recordRecent(item.id);
+    recordUse(item.id);
     closePalette();
     try {
+      // 统一导航契约优先；处理器超时/失败再走旧式直接执行。
+      if (item.navigate) {
+        const handled = await navigateTo(item.navigate);
+        if (handled) return;
+      }
       await item.run();
     } catch (err) {
       console.error('[command-palette] 执行失败:', item.id, err);
     }
-  }, [closePalette, recordRecent]);
+  }, [closePalette, recordUse]);
 
   const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown') {
@@ -403,12 +487,17 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
       >
         <div className="flex items-center gap-2 px-4 py-3 border-b border-neutral-200/60 dark:border-stone-700/60">
           <Search size={16} className="text-neutral-400 dark:text-stone-500" />
+          {scoped.scope && (
+            <span className="shrink-0 rounded-full bg-[var(--element-bg)]/12 px-2 py-0.5 text-[11px] text-[var(--element-color-raw)]">
+              {scoped.scope.label}
+            </span>
+          )}
           <input
             ref={inputRef}
             value={query}
             onChange={(e) => { setQuery(e.target.value); setActiveIndex(0); }}
             onKeyDown={onInputKeyDown}
-            placeholder="搜索模块、笔记、动作或音乐…"
+            placeholder={t('commandPalette.placeholder')}
             className="flex-1 bg-transparent outline-none text-sm text-neutral-700 dark:text-stone-100 placeholder:text-neutral-400 dark:placeholder:text-stone-500"
             spellCheck={false}
           />
@@ -418,7 +507,7 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
         <div ref={listRef} className="flex-1 overflow-y-auto py-1">
           {visibleItems.length === 0 ? (
             <div className="px-4 py-10 text-center text-xs text-neutral-400 dark:text-stone-500">
-              {query.trim().length >= 2 ? '没有匹配项' : '输入关键字开始搜索'}
+              {query.trim().length >= 1 ? t('commandPalette.noMatch') : t('commandPalette.hint')}
             </div>
           ) : (
             visibleItems.map((item, index) => {
@@ -463,11 +552,11 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
 
         <div className="flex items-center justify-between px-4 py-2 border-t border-neutral-200/60 dark:border-stone-700/60 text-[10px] text-neutral-400 dark:text-stone-500">
           <span className="flex items-center gap-3">
-            <span className="flex items-center gap-1"><ArrowUp size={11} /><ArrowDown size={11} /> 选择</span>
-            <span className="flex items-center gap-1"><CornerDownLeft size={11} /> 打开</span>
-            <span>Esc 关闭</span>
+            <span className="flex items-center gap-1"><ArrowUp size={11} /><ArrowDown size={11} /> {t('commandPalette.select')}</span>
+            <span className="flex items-center gap-1"><CornerDownLeft size={11} /> {t('commandPalette.open')}</span>
+            <span>{t('commandPalette.close')}</span>
           </span>
-          <span>{visibleItems.length} 项</span>
+          <span>{t('commandPalette.count', { n: visibleItems.length })}</span>
         </div>
       </div>
     </div>,

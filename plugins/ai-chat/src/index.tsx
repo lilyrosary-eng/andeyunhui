@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useCallback, useMemo } from 'react';
+import { memo, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Bot, Trash2 } from 'lucide-react';
 import type { SendAttachment } from '@/components/capsule/types';
 import { AiChatSidebar } from '@/components/ai-chat/AiChatSidebar';
@@ -27,6 +27,100 @@ import { AiWorkProductSettings } from './AiWorkProductSettings';
 const COMPANION_ENABLED_KEY = 'andeyunhui.aichat.companion.enabled';
 function readCompanionEnabled(): boolean {
   try { return localStorage.getItem(COMPANION_ENABLED_KEY) === '1'; } catch { return false; }
+}
+
+// ===== 命令面板 provider：AI 对话 › 会话；AI 办公 › 任务 =====
+// 直接读持久化历史（与主窗口同键），带 TTL；面板打开时 refresh。
+const AI_CHAT_KEY = 'andeyunhui.capsule.conversations';
+const AI_WORK_KEY = 'andeyunhui.aiwork.conversations';
+const AI_PALETTE_TTL = 10_000;
+
+interface PaletteConv {
+  id: string;
+  title?: string;
+  updatedAt?: number;
+  messages?: Array<{ role?: string; content?: string }>;
+}
+interface PaletteConvEntry {
+  conv: PaletteConv;
+  submodule: 'chat' | 'work';
+  label: string;
+}
+
+let paletteConvs: PaletteConvEntry[] = [];
+let paletteConvsAt = 0;
+
+function readConvList(key: string): PaletteConv[] {
+  try {
+    const raw = localStorage.getItem(key);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((c): c is PaletteConv => !!c && typeof c.id === 'string') : [];
+  } catch { return []; }
+}
+
+function ensurePaletteConvs(force = false): void {
+  if (!force && paletteConvsAt > 0 && Date.now() - paletteConvsAt < AI_PALETTE_TTL) return;
+  const chat = readConvList(AI_CHAT_KEY).map((conv) => ({ conv, submodule: 'chat' as const, label: '对话' }));
+  const work = readConvList(AI_WORK_KEY).map((conv) => ({ conv, submodule: 'work' as const, label: '任务' }));
+  paletteConvs = [...chat, ...work];
+  paletteConvsAt = Date.now();
+}
+
+try {
+  window.__HOST_API__?.registerCommandProvider?.({
+    id: 'ai-chat',
+    label: 'AI 对话',
+    moduleId: 'ai-chat',
+    priority: 20,
+    refresh: () => ensurePaletteConvs(true),
+    search: (query) => {
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      ensurePaletteConvs();
+      const out: Array<{
+        id: string;
+        title: string;
+        subtitle?: string;
+        path?: string[];
+        iconName?: string;
+        rank?: number;
+        navigate?: NavigationTarget;
+        run?: () => void;
+      }> = [];
+      for (const entry of paletteConvs) {
+        const { conv, submodule, label } = entry;
+        const recentText = (conv.messages ?? [])
+          .slice(-6)
+          .map((m) => m.content ?? '')
+          .join('\n')
+          .slice(0, 600);
+        const title = conv.title || '新对话';
+        const haystack = `${title}\n${recentText}`.toLowerCase();
+        if (!haystack.includes(q)) continue;
+        out.push({
+          id: `${submodule}:${conv.id}`,
+          title,
+          subtitle: submodule === 'work' ? 'AI 办公 · 任务' : 'AI 对话',
+          path: submodule === 'work' ? ['AI 办公', label] : ['对话'],
+          iconName: 'Bot',
+          rank: title.toLowerCase().includes(q) ? 8 : 0,
+          navigate: {
+            module: 'ai-chat',
+            tabs: submodule === 'work' ? ['AI 办公', label] : ['对话'],
+            entity: conv.id,
+            props: { submodule, conversationId: conv.id },
+          },
+          run: () => window.dispatchEvent(new CustomEvent('andy:ai-chat-open', {
+            detail: { submodule, conversationId: conv.id },
+          })),
+        });
+        if (out.length >= 40) break;
+      }
+      return out;
+    },
+  });
+} catch (err) {
+  console.warn('[ai-chat] 命令面板 provider 注册失败:', err);
 }
 
 declare const window: Window & { __PLUGIN_REGISTRY__?: { register: (p: Record<string, unknown>) => void } };
@@ -64,6 +158,36 @@ const Root = memo(function Root() {
     setArea('task'); // 切换子模块时回到任务区
     try { localStorage.setItem(SUBMODULE_STORAGE_KEY, id); } catch { /* 忽略 */ }
   };
+
+  // 统一导航契约：命令面板/其它模块可直达「AI 对话 › 某会话」或「AI 办公 › 任务」。
+  // 处理器通过 ref 读取最新闭包，只注册一次；旧宿主仍可用 DOM 事件兜底。
+  const navRef = useRef<(target: NavigationTarget) => boolean>(() => false);
+  navRef.current = (target) => {
+    const props = (target.props ?? {}) as { submodule?: AISubmoduleId; conversationId?: string };
+    const rawSub = props.submodule ?? (target.tabs?.[0] === 'AI 办公' ? 'work' : 'chat');
+    const subTarget: AISubmoduleId = rawSub === 'work' || rawSub === 'workflow' ? rawSub : 'chat';
+    const convId = props.conversationId ?? target.entity;
+    switchSub(subTarget);
+    if (convId) {
+      if (subTarget === 'chat') selectConv(convId);
+      else aiWorkChat.selectConv(convId);
+    }
+    return true;
+  };
+  useEffect(() => {
+    const off = window.__HOST_API__?.registerNavigator?.((target) => navRef.current(target));
+    const onEvent = (e: Event) => {
+      const detail = (e as CustomEvent<{ submodule?: AISubmoduleId; conversationId?: string }>).detail;
+      if (detail) navRef.current({ module: 'ai-chat', props: detail });
+    };
+    window.addEventListener('andy:ai-chat-open', onEvent);
+    return () => {
+      try { off?.(); } catch { /* 忽略 */ }
+      window.removeEventListener('andy:ai-chat-open', onEvent);
+    };
+    // 处理器走 ref，只注册一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // work / workflow 子模块状态：产物库 + 统一任务（AIWork 对话 与 AIWorkflow 蓝图共用的同一条任务）托管于此，
   // 复用的共享侧栏（AiChatSidebar）与各视图共用同一份数据，不再自建第二层侧栏。

@@ -172,6 +172,7 @@ export function GlobalSettingsPanel() {
   // 快捷键状态
   const [shortcuts, setShortcuts] = useState<ShortcutDef[]>(loadShortcuts);
   const [shortcutsOpen, setShortcutsOpen] = useState(true);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [editingShortcutId, setEditingShortcutId] = useState<string | null>(null);
 
   // 启动时加载托盘模式配置
@@ -228,6 +229,18 @@ export function GlobalSettingsPanel() {
       }
       const shortcut = eventToShortcut(e);
       if (shortcut) {
+        // 同一列表内不允许重复键位：展示冲突项并保持原值，避免「两个功能抢同一个键」。
+        const norm = (s: string) => s.replace(/\s+/g, '').toLowerCase();
+        const conflict = shortcuts.find((s) => s.id !== editingShortcutId && norm(s.keys) === norm(shortcut));
+        if (conflict) {
+          setShortcutError(
+            t('settings.general.shortcuts.duplicate', { name: t('shortcut.' + conflict.id) }),
+          );
+          logger.shortcuts.editCancel(editingShortcutId);
+          setEditingShortcutId(null);
+          return;
+        }
+        setShortcutError(null);
         setShortcuts(prev => {
           const updated = prev.map(s => s.id === editingShortcutId ? { ...s, keys: shortcut } : s);
           saveShortcuts(updated);
@@ -261,7 +274,7 @@ export function GlobalSettingsPanel() {
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [editingShortcutId]);
+  }, [editingShortcutId, shortcuts, t]);
 
   const handleResetShortcuts = () => {
     setShortcuts(DEFAULT_SHORTCUTS);
@@ -282,6 +295,7 @@ export function GlobalSettingsPanel() {
 
   const handleStartEditShortcut = (id: string) => {
     logger.shortcuts.editStart(id);
+    setShortcutError(null);
     setEditingShortcutId(id);
   };
 
@@ -540,6 +554,11 @@ export function GlobalSettingsPanel() {
                   {/* 折叠内容 */}
                   {shortcutsOpen && (
                     <div className="divide-y divide-neutral-200/50 dark:divide-stone-700/50">
+                      {shortcutError && (
+                        <div className="px-4 py-2 text-xs text-red-500 dark:text-red-400 bg-red-500/5">
+                          {shortcutError}
+                        </div>
+                      )}
                       {shortcuts.map((shortcut) => (
                         <div key={shortcut.id} className="flex justify-between items-center p-4">
                           <span className="text-sm text-neutral-600 dark:text-stone-300">{t('shortcut.' + shortcut.id)}</span>

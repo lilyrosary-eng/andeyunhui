@@ -55,6 +55,19 @@ export const deDE: Record<string, string> = {
   'settings.general.shortcuts.resetDefault': 'Auf Standard zurücksetzen',
   'settings.general.shortcuts.pressKey': 'Taste drücken...',
   'settings.general.shortcuts.editTip': 'Zum Bearbeiten des Kürzels klicken',
+  'settings.general.shortcuts.duplicate': 'Konflikt mit „{name}“',
+
+  // Befehlspalette
+  'commandPalette.placeholder': 'Module, Notizen, Aktionen oder Musik suchen… (z. B. „musik: nachtstück“)',
+  'commandPalette.hint': 'Zum Suchen tippen',
+  'commandPalette.noMatch': 'Keine Treffer',
+  'commandPalette.select': 'Auswählen',
+  'commandPalette.open': 'Öffnen',
+  'commandPalette.close': 'Esc zum Schließen',
+  'commandPalette.count': '{n} Einträge',
+  'commandPalette.group.modules': 'Module',
+  'commandPalette.group.actions': 'Aktionen',
+  'commandPalette.group.notes': 'Notizen',
 
   // Tastenkürzel
   'shortcut.bold': 'Fett',
@@ -65,6 +78,7 @@ export const deDE: Record<string, string> = {
   'shortcut.clipboard': 'Zwischenablage-Widget',
   'shortcut.dropzone': 'Transferstation-Widget',
   'shortcut.favorite': 'Favoriten-Notizen',
+  'shortcut.command-palette': 'Befehlspalette',
 
   // Einstellungen - Allgemein - Allgemein
   'settings.general.common.title': 'Allgemein',

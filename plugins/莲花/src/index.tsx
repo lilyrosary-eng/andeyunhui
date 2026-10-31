@@ -4,7 +4,7 @@ import { ImageSidebar, albumCoverKey } from './ImageSidebar';
 import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, NoResultsState, T, useLang } from '../../_shared/pluginRuntime';
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 const React = window.__HOST_REACT__;
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
 const hostApi = window.__HOST_API__;
 
 const STORAGE_KEY_ROOT = 'image_plugin_root_path';
@@ -37,6 +37,88 @@ interface CustomAlbum {
   images: string[];  // 文件路径列表（仅引用，不修改原文件）
   createdAt: string;
 }
+
+// ===== 命令面板 provider：图片 › 相册/文件夹 =====
+// 图片库缓存只有文件夹层级；搜索结果定位到相册，进入后按原有浏览逻辑查看。
+const IMAGE_PALETTE_TTL = 60_000;
+let paletteFolders: ImageFolder[] = [];
+let paletteRenames: Record<string, string> = {};
+let paletteFoldersAt = 0;
+let paletteFoldersPromise: Promise<void> | null = null;
+
+async function ensurePaletteFolders(force = false): Promise<void> {
+  if (!force && paletteFoldersAt > 0 && Date.now() - paletteFoldersAt < IMAGE_PALETTE_TTL) return;
+  if (paletteFoldersPromise) return paletteFoldersPromise;
+  paletteFoldersPromise = (async () => {
+    try {
+      let roots: string[] = [];
+      try {
+        const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_ROOT) || '[]');
+        roots = Array.isArray(parsed) ? parsed : (typeof parsed === 'string' ? [parsed] : []);
+      } catch { roots = []; }
+      try { paletteRenames = JSON.parse(localStorage.getItem(STORAGE_KEY_RENAMES) || '{}'); } catch { paletteRenames = {}; }
+      const all: ImageFolder[] = [];
+      for (const root of roots) {
+        try {
+          const cached = await hostApi.invoke<ImageFolder[] | null>('load_image_cache', { rootPath: root });
+          if (Array.isArray(cached) && cached.length) all.push(...cached);
+        } catch { /* 单个根目录缓存缺失时忽略 */ }
+      }
+      const seen = new Set<string>();
+      paletteFolders = all.filter((f) => {
+        const key = f.folderPath.replace(/\\/g, '/').toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      paletteFoldersAt = Date.now();
+    } catch (err) {
+      console.warn('[image] 命令面板索引构建失败:', err);
+    }
+  })().finally(() => { paletteFoldersPromise = null; });
+  return paletteFoldersPromise;
+}
+
+try {
+  hostApi.registerCommandProvider?.({
+    id: 'image',
+    label: '图片',
+    moduleId: 'image',
+    priority: 10,
+    refresh: () => ensurePaletteFolders(true),
+    search: async (query) => {
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      await ensurePaletteFolders();
+      const out: Array<{
+        id: string;
+        title: string;
+        subtitle?: string;
+        path?: string[];
+        iconName?: string;
+        rank?: number;
+        navigate?: NavigationTarget;
+        run?: () => void;
+      }> = [];
+      for (const folder of paletteFolders) {
+        const name = paletteRenames[folder.folderPath] || folder.folderName;
+        if (!`${name} ${folder.folderPath}`.toLowerCase().includes(q)) continue;
+        out.push({
+          id: folder.folderPath,
+          title: name || folder.folderPath.split(/[\\/]/).pop() || '未命名相册',
+          subtitle: `${folder.imageCount} 张图片`,
+          path: ['图库'],
+          iconName: 'Image',
+          rank: name.toLowerCase().includes(q) ? 8 : 0,
+          navigate: { module: 'image', tabs: ['图库', name], entity: folder.folderPath, props: { folderPath: folder.folderPath } },
+          run: () => window.dispatchEvent(new CustomEvent('andy:image-open-folder', { detail: { folderPath: folder.folderPath } })),
+        });
+        if (out.length >= 40) break;
+      }
+      return out;
+    },
+  });
+} catch { /* 旧宿主没有 provider API 时静默跳过 */ }
 
 function ImageModule() {
   useLang();
@@ -156,6 +238,40 @@ function ImageModule() {
   const handleFolderClick = useCallback((folder: ImageFolder) => {
     setSelectedFolder(folder);
     setShowSettings(false);
+  }, []);
+
+  // 统一导航契约：命令面板可直接打开某个相册/文件夹
+  const openFolderByPath = useCallback((folderPath: string) => {
+    const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+    const folder = folders.find((f) => norm(f.folderPath) === norm(folderPath)) ?? {
+      folderPath,
+      folderName: paletteRenames[folderPath] || folderPath.split(/[\\/]/).pop() || '图片',
+      coverImage: '',
+      imageCount: 0,
+    };
+    handleFolderClick(folder);
+  }, [folders, handleFolderClick]);
+  const openFolderRef = useRef(openFolderByPath);
+  openFolderRef.current = openFolderByPath;
+
+  useEffect(() => {
+    const off = hostApi.registerNavigator?.((target) => {
+      const folderPath = (target.props?.folderPath as string | undefined) || target.entity;
+      if (!folderPath) return false;
+      openFolderRef.current(folderPath);
+      return true;
+    });
+    const onEvent = (e: Event) => {
+      const folderPath = (e as CustomEvent<{ folderPath?: string }>).detail?.folderPath;
+      if (folderPath) openFolderRef.current(folderPath);
+    };
+    window.addEventListener('andy:image-open-folder', onEvent);
+    return () => {
+      try { off?.(); } catch { /* 忽略 */ }
+      window.removeEventListener('andy:image-open-folder', onEvent);
+    };
+    // 处理器走 ref，只注册一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleBack = useCallback(() => {

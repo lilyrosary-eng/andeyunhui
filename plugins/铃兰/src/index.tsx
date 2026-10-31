@@ -1040,11 +1040,15 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
 
 // ===== 命令面板 provider：把「音乐 → 歌单 → 歌曲」接给 Ctrl+K =====
 // 快照优先从扫描缓存构建（不依赖音乐模块是否被打开过）；模块挂载后由真实 playlists 覆盖。
+// 快照带 TTL：面板每次打开触发 refresh，过期才重新读缓存，避免歌单改动后一直搜旧数据。
+const PALETTE_SNAPSHOT_TTL = 30_000;
 let palettePlaylists: Playlist[] = [];
 let paletteSnapshotPromise: Promise<void> | null = null;
+let paletteSnapshotAt = 0;
 let palettePendingPlay: { playlistId: string; trackId: string } | null = null;
 
-async function ensurePaletteSnapshot(): Promise<void> {
+async function ensurePaletteSnapshot(force = false): Promise<void> {
+  if (!force && paletteSnapshotAt > 0 && Date.now() - paletteSnapshotAt < PALETTE_SNAPSHOT_TTL) return;
   if (paletteSnapshotPromise) return paletteSnapshotPromise;
   paletteSnapshotPromise = (async () => {
     try {
@@ -1060,6 +1064,7 @@ async function ensurePaletteSnapshot(): Promise<void> {
       const dirs = groupTracksIntoPlaylists(tracks, roots);
       const custom = getCustomPlaylistsFromStorage();
       palettePlaylists = dedupePlaylistsById([...dedupDirectoryPlaylists(dirs), ...custom]);
+      paletteSnapshotAt = Date.now();
     } catch (err) {
       console.warn('[music] 命令面板索引构建失败:', err);
     }
@@ -1072,6 +1077,8 @@ try {
     id: 'music',
     label: '音乐',
     moduleId: 'music',
+    priority: 30,
+    refresh: () => ensurePaletteSnapshot(true),
     search: async (query) => {
       const q = query.trim().toLowerCase();
       if (!q) return [];
@@ -1082,22 +1089,34 @@ try {
         subtitle?: string;
         path?: string[];
         iconName?: string;
-        run: () => void;
+        rank?: number;
+        navigate?: NavigationTarget;
+        run?: () => void;
       }> = [];
       for (const playlist of palettePlaylists) {
         for (const track of playlist.tracks) {
           if (!track.filePath) continue;
           const haystack = `${track.title} ${track.artist} ${track.album} ${track.filePath}`.toLowerCase();
           if (!haystack.includes(q)) continue;
+          const target = { playlistId: playlist.id, trackId: track.id };
           results.push({
             id: `${playlist.id}:${track.id}`,
             title: track.title || track.filePath.split(/[\\/]/).pop() || '未知曲目',
             subtitle: [track.artist, track.album].filter(Boolean).join(' · '),
             path: [playlist.name],
             iconName: 'Music2',
+            // 标题命中优先于仅路径命中
+            rank: track.title?.toLowerCase().includes(q) ? 8 : 0,
+            navigate: {
+              module: 'music',
+              tabs: [playlist.name],
+              entity: String(track.id),
+              props: target,
+            },
+            // 老宿主不认识 navigate 时的兜底
             run: () => {
-              palettePendingPlay = { playlistId: playlist.id, trackId: track.id };
-              window.dispatchEvent(new CustomEvent('andy:music-palette-play', { detail: palettePendingPlay }));
+              palettePendingPlay = target;
+              window.dispatchEvent(new CustomEvent('andy:music-palette-play', { detail: target }));
             },
           });
           if (results.length >= 40) return results;
@@ -1662,35 +1681,56 @@ useEffect(() => {
   }, []);
 
   // 命令面板点歌：切到对应歌单并播放；模块尚未挂载完成时保留 pending，等歌单加载后再消费
+  // 主路径走统一导航契约（registerNavigator），旧宿主仍可由 DOM 事件触发。
+  const playPaletteTarget = useCallback((detail: { playlistId: string; trackId: string }): boolean => {
+    const playlist = playlists.find((p) => p.id === detail.playlistId);
+    if (!playlist) return false;
+    const index = playlist.tracks.findIndex((t) => t.id === detail.trackId);
+    if (index < 0) return false;
+    online.setActivePlaylist(null);
+    handleSelectPlaylist(playlist);
+    musicPlayer.currentPlaylistId = playlist.id;
+    musicPlayer.setTracks(playlist.tracks, index);
+    musicPlayer.play();
+    return true;
+  }, [playlists, online, handleSelectPlaylist]);
+  const playPaletteTargetRef = useRef(playPaletteTarget);
+  playPaletteTargetRef.current = playPaletteTarget;
+
   useEffect(() => {
-    const playFromPalette = (detail: { playlistId: string; trackId: string }): boolean => {
-      const playlist = playlists.find((p) => p.id === detail.playlistId);
-      if (!playlist) return false;
-      const index = playlist.tracks.findIndex((t) => t.id === detail.trackId);
-      if (index < 0) return false;
-      online.setActivePlaylist(null);
-      handleSelectPlaylist(playlist);
-      musicPlayer.currentPlaylistId = playlist.id;
-      musicPlayer.setTracks(playlist.tracks, index);
-      musicPlayer.play();
-      return true;
-    };
+    const off = hostApi.registerNavigator?.((target) => {
+      const props = target.props as { playlistId?: string; trackId?: string } | undefined;
+      const playlistId = props?.playlistId;
+      const trackId = props?.trackId ?? target.entity;
+      if (!playlistId || !trackId) return false;
+      const detail = { playlistId, trackId };
+      // 歌单还没加载完：先留着，等 playlists 变化后的 effect 再消费（视为已受理）
+      if (playlists.length === 0) { palettePendingPlay = detail; return true; }
+      palettePendingPlay = null;
+      return playPaletteTargetRef.current(detail);
+    });
+    return () => { try { off?.(); } catch { /* 忽略 */ } };
+    // 处理器内部通过 ref 读取最新状态；只在模块挂载时注册一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
     const onEvent = (e: Event) => {
       const detail = (e as CustomEvent<{ playlistId: string; trackId: string }>).detail;
       if (!detail) return;
       // 歌单还没加载完：先留着，等 playlists 变化后的 effect 再消费
       if (playlists.length === 0) { palettePendingPlay = detail; return; }
       palettePendingPlay = null;
-      playFromPalette(detail);
+      playPaletteTargetRef.current(detail);
     };
     window.addEventListener('andy:music-palette-play', onEvent);
     if (palettePendingPlay && playlists.length > 0) {
       const pending = palettePendingPlay;
       palettePendingPlay = null;
-      playFromPalette(pending);
+      playPaletteTargetRef.current(pending);
     }
     return () => window.removeEventListener('andy:music-palette-play', onEvent);
-  }, [playlists, online, handleSelectPlaylist]);
+  }, [playlists]);
 
   const handleSelectTrack = useCallback((track: Track, index: number) => {
     // 切到本地播放时，清掉在线源临时歌单，避免播放列表浮窗仍显示在线来源

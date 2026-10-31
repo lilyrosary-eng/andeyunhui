@@ -20,6 +20,7 @@
 
 const registry = (window as unknown as { __PLUGIN_REGISTRY__: any }).__PLUGIN_REGISTRY__;
 
+import { useEffect } from 'react';
 import { KnowledgeBasePanel } from './components/KnowledgeBasePanel';
 import { RagSidebar } from './components/RagSidebar';
 import { ingestDocument } from './ingest/ingest-pipeline';
@@ -27,6 +28,74 @@ import { retrieve } from './retrieve/retriever';
 import { ApiEmbedder } from './embed/api-embedder';
 import { RagPromptBuilder } from './prompt/rag-prompt';
 import { ragStore } from './store/rag-store';
+import type { RagSourceInfo } from './api/host';
+
+// ===== 命令面板 provider：知识库 › 来源 =====
+// 来源列表来自后端（rag_list_sources），带 TTL；面板打开时 refresh。
+const RAG_PALETTE_TTL = 20_000;
+let paletteSources: RagSourceInfo[] = [];
+let paletteSourcesAt = 0;
+let paletteSourcesPromise: Promise<void> | null = null;
+
+async function ensurePaletteSources(force = false): Promise<void> {
+  if (!force && paletteSourcesAt > 0 && Date.now() - paletteSourcesAt < RAG_PALETTE_TTL) return;
+  if (paletteSourcesPromise) return paletteSourcesPromise;
+  paletteSourcesPromise = (async () => {
+    try {
+      const list = await window.__HOST_API__.invoke<RagSourceInfo[]>('rag_list_sources', { namespace: 'general' });
+      if (Array.isArray(list)) {
+        paletteSources = list;
+        paletteSourcesAt = Date.now();
+      }
+    } catch (err) {
+      console.warn('[rag] 命令面板索引构建失败:', err);
+    }
+  })().finally(() => { paletteSourcesPromise = null; });
+  return paletteSourcesPromise;
+}
+
+try {
+  window.__HOST_API__?.registerCommandProvider?.({
+    id: 'rag',
+    label: '知识库',
+    moduleId: 'rag',
+    priority: 15,
+    refresh: () => ensurePaletteSources(true),
+    search: async (query) => {
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      await ensurePaletteSources();
+      const out: Array<{
+        id: string;
+        title: string;
+        subtitle?: string;
+        path?: string[];
+        iconName?: string;
+        rank?: number;
+        navigate?: NavigationTarget;
+        run?: () => void;
+      }> = [];
+      for (const source of paletteSources) {
+        const haystack = `${source.title} ${source.uri} ${source.type}`.toLowerCase();
+        if (!haystack.includes(q)) continue;
+        out.push({
+          id: source.id,
+          title: source.title || source.uri || '未命名来源',
+          subtitle: `${source.type} · ${source.chunk_count} 块`,
+          path: ['来源'],
+          iconName: 'BookOpen',
+          rank: (source.title || '').toLowerCase().includes(q) ? 8 : 0,
+          navigate: { module: 'rag', tabs: ['知识库', '来源'], entity: source.id, props: { view: 'manage', sourceId: source.id } },
+          run: () => window.dispatchEvent(new CustomEvent('andy:rag-focus', { detail: { sourceId: source.id } })),
+        });
+        if (out.length >= 40) break;
+      }
+      return out;
+    },
+  });
+} catch (err) {
+  console.warn('[rag] 命令面板 provider 注册失败:', err);
+}
 
 // 把库能力挂到 window，方便其他插件（或调试）复用（可选，不影响 rag_query 直连）。
 (window as unknown as { __RAG_LIB__?: unknown }).__RAG_LIB__ = {
@@ -40,6 +109,22 @@ import { ragStore } from './store/rag-store';
 /** 主模块外壳：与 ModuleSettingsPanel 一致的表面色 / 内缩 / 滚动容器。
  *  宿主外层（App.tsx）只提供 h-full w-full overflow-hidden，内边距与背景由模块自己负责。 */
 function RagModule() {
+  useEffect(() => {
+    const off = window.__HOST_API__?.registerNavigator?.((target) => {
+      const sourceId = (target.props?.sourceId as string | undefined) || target.entity || null;
+      ragStore.focusSource(sourceId);
+      return true;
+    });
+    const onEvent = (e: Event) => {
+      const id = (e as CustomEvent<{ sourceId?: string }>).detail?.sourceId ?? null;
+      ragStore.focusSource(id);
+    };
+    window.addEventListener('andy:rag-focus', onEvent);
+    return () => {
+      try { off?.(); } catch { /* 忽略 */ }
+      window.removeEventListener('andy:rag-focus', onEvent);
+    };
+  }, []);
   return (
     <div className="h-full w-full overflow-y-auto main-panel-bg p-6 fade-in immersive-safe-top">
       <div className="max-w-3xl mx-auto min-h-full">

@@ -55,6 +55,19 @@ export const koKR: Record<string, string> = {
   'settings.general.shortcuts.resetDefault': '기본값으로 복원',
   'settings.general.shortcuts.pressKey': '키를 누르세요...',
   'settings.general.shortcuts.editTip': '클릭하여 단축키 수정',
+  'settings.general.shortcuts.duplicate': '「{name}」와(과) 충돌합니다',
+
+  // 명령 팔레트
+  'commandPalette.placeholder': '모듈, 노트, 작업 또는 음악 검색… (예: "음악: 야상곡")',
+  'commandPalette.hint': '검색어를 입력하세요',
+  'commandPalette.noMatch': '일치 항목 없음',
+  'commandPalette.select': '선택',
+  'commandPalette.open': '열기',
+  'commandPalette.close': 'Esc로 닫기',
+  'commandPalette.count': '{n}개 항목',
+  'commandPalette.group.modules': '모듈',
+  'commandPalette.group.actions': '작업',
+  'commandPalette.group.notes': '노트',
 
   // 단축키 항목
   'shortcut.bold': '굵게',
@@ -65,6 +78,7 @@ export const koKR: Record<string, string> = {
   'shortcut.clipboard': '클립보드 위젯',
   'shortcut.dropzone': '전송함 위젯',
   'shortcut.favorite': '즐겨찾기 노트',
+  'shortcut.command-palette': '명령 팔레트',
 
   // 설정 - 일반 - 일반
   'settings.general.common.title': '일반',

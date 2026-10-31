@@ -9,6 +9,17 @@ interface FrameBuffer<T> {
 
 /** 插件全局类型声明 — 所有插件共享 */
 declare global {
+  /** 跨模块导航目标 */
+  interface NavigationTarget {
+    module: string;
+    /** 层级路径：一级 tab → 二级 sub tab */
+    tabs?: string[];
+    /** 末级实体 id（歌曲、书籍路径、会话 id…） */
+    entity?: string;
+    /** 模块自定义参数 */
+    props?: Record<string, unknown>;
+  }
+
   interface Window {
     __HOST_REACT__: typeof import('react');
     __HOST_REACT_DOM__: typeof import('react-dom/client');
@@ -23,22 +34,34 @@ declare global {
         id: string;
         label: string;
         moduleId?: string;
+        /** 同组排序权重，越大越靠前（可选） */
+        priority?: number;
+        /** 面板打开时刷新快照（可选，自行节流） */
+        refresh?: () => void | Promise<void>;
         search: (query: string) => Array<{
           id: string;
           title: string;
           subtitle?: string;
           path?: string[];
           iconName?: string;
-          run: () => void | Promise<void>;
+          rank?: number;
+          navigate?: NavigationTarget;
+          run?: () => void | Promise<void>;
         }> | Promise<Array<{
           id: string;
           title: string;
           subtitle?: string;
           path?: string[];
           iconName?: string;
-          run: () => void | Promise<void>;
+          rank?: number;
+          navigate?: NavigationTarget;
+          run?: () => void | Promise<void>;
         }>>;
       }) => () => void;
+      /** 注册本模块的导航处理器（命令面板/其它模块跳转时调用） */
+      registerNavigator?: (handler: (target: NavigationTarget) => boolean | void | Promise<boolean | void>) => () => void;
+      /** 跳到任意模块的 tab / 实体 */
+      navigate?: (target: NavigationTarget) => Promise<boolean>;
     };
     __PLUGIN_REGISTRY__: {
       register: (def: {

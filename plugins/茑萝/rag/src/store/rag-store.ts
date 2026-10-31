@@ -27,6 +27,8 @@ export type RagView = 'chat' | 'graph' | 'manage';
 type ViewListener = (v: RagView) => void;
 /** 侧栏「再问一次」把问题投递给对话面板。 */
 type AskListener = (q: string) => void;
+/** 导航聚焦：从命令面板/其它模块跳转到某个来源。 */
+type FocusListener = (id: string | null) => void;
 
 class RagStore {
   private sources: RagSourceInfo[] = [];
@@ -38,6 +40,8 @@ class RagStore {
   private view: RagView = 'chat';
   private viewListeners = new Set<ViewListener>();
   private askListeners = new Set<AskListener>();
+  private focusId: string | null = null;
+  private focusListeners = new Set<FocusListener>();
 
   getView(): RagView {
     return this.view;
@@ -53,6 +57,24 @@ class RagStore {
     this.viewListeners.add(l);
     return () => {
       this.viewListeners.delete(l);
+    };
+  }
+
+  /** 导航聚焦某条来源：切到管理视图并高亮。 */
+  focusSource(id: string | null): void {
+    this.focusId = id;
+    this.setView('manage');
+    for (const l of this.focusListeners) l(id);
+  }
+
+  getFocusId(): string | null {
+    return this.focusId;
+  }
+
+  subscribeFocus(l: FocusListener): () => void {
+    this.focusListeners.add(l);
+    return () => {
+      this.focusListeners.delete(l);
     };
   }
 

@@ -1,4 +1,7 @@
+import { useEffect } from 'react';
 import { useAppStore } from '@/stores/appStore';
+import { useNotesStore } from '@/stores/notesStore';
+import { registerNavigator } from '@/core/navigation/navigation';
 import { NotesEditor } from '@/core/notes/NotesEditor';
 import { NotesSidebar } from '@/core/notes/NotesSidebar';
 import { NoteSettingsPanel } from '@/core/notes/NoteSettingsPanel';
@@ -9,6 +12,15 @@ import { NoteSettingsPanel } from '@/core/notes/NoteSettingsPanel';
  */
 export function NotesModule() {
   const showNoteSettings = useAppStore(s => s.showNoteSettings);
+
+  // 命令面板「笔记 › 某篇」直达：统一走导航契约，不再依赖面板硬编码打开逻辑。
+  useEffect(() => registerNavigator('notes', (target) => {
+    const noteId = (target.props?.noteId as string | undefined) || target.entity;
+    if (!noteId) return false;
+    // setActiveModule 已在导航前执行，它会顺带把笔记设置页关掉
+    void useNotesStore.getState().loadNoteContent(noteId);
+    return true;
+  }), []);
 
   return (
     <div className="flex flex-1 h-full overflow-hidden">

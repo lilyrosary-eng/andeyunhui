@@ -15,6 +15,7 @@ import {
   saveTargetLang,
 } from '@/lib/translateLanguages';
 import { EVENTS } from '@/core/events/schema';
+import { registerNavigator } from '@/core/navigation/navigation';
 
 // 本地 PaddleOCR 引擎懒加载（与 CodeMirror/TipTap 同模式：read_external_dep_file + new Function，
 // 在真实 window 全局作用域执行，挂载到 window.__EXT_PADDLEOCR__）。
@@ -145,6 +146,50 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
       const latestImg = [...files].reverse().find((f) => isImageFile(f.extension));
       return latestImg ? latestImg.storedPath : null;
     });
+  }, [files]);
+
+  // 统一导航契约：命令面板可直接选中并滚到某个中转站文件
+  const pendingFocusRef = useRef<string | null>(null);
+  const focusFileRef = useRef<(storedPath: string) => boolean>(() => false);
+  focusFileRef.current = (storedPath: string) => {
+    const file = files.find((f) => f.storedPath === storedPath);
+    if (!file) {
+      pendingFocusRef.current = storedPath;
+      return true;
+    }
+    pendingFocusRef.current = null;
+    setSelectedPath(storedPath);
+    requestAnimationFrame(() => {
+      document.getElementById(`transfer-file-${file.fileId}`)?.scrollIntoView({ block: 'center' });
+    });
+    return true;
+  };
+
+  useEffect(() => {
+    const unregister = registerNavigator('transfer', (target) => {
+      const storedPath = (target.props?.storedPath as string | undefined) || target.entity;
+      if (!storedPath) return false;
+      return focusFileRef.current(storedPath);
+    });
+    const onEvent = (e: Event) => {
+      const storedPath = (e as CustomEvent<{ storedPath?: string }>).detail?.storedPath;
+      if (storedPath) focusFileRef.current(storedPath);
+    };
+    window.addEventListener('andy:transfer-focus', onEvent);
+    return () => {
+      unregister();
+      window.removeEventListener('andy:transfer-focus', onEvent);
+    };
+    // 处理器走 ref，只注册一次
+  }, []);
+
+  // 列表加载完成后消费挂起的定位请求
+  useEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (pending && files.some((f) => f.storedPath === pending)) {
+      pendingFocusRef.current = null;
+      focusFileRef.current(pending);
+    }
   }, [files]);
 
   // 悬停预取图片字节仅用于渲染缩略图（data URL 直接作 <img> src）
@@ -604,6 +649,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
                 return (
                   <div
                     key={file.storedPath}
+                    id={`transfer-file-${file.fileId}`}
                     onClick={() => (selectionMode ? toggleSelect(file.storedPath) : setSelectedPath(file.storedPath))}
                     className={`glass-panel p-3 flex flex-col gap-2 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer ${file.storedPath === selectedPath ? 'ring-2 ring-[var(--element-bg)]' : ''}${selectionMode && selectedIds.has(file.storedPath) ? ' outline outline-2 outline-[var(--element-bg)] bg-black/[0.04] dark:bg-white/[0.06]' : ''}`}
                   >
@@ -662,6 +708,7 @@ export function TransferStationPanel({ onOpenReadableFile, variant = 'main' }: T
               return (
                 <div
                   key={file.storedPath}
+                  id={`transfer-file-${file.fileId}`}
                   onMouseEnter={() => prefetch(file)}
                   onMouseDown={(e) => startNativeDrag(e, file)}
                   onClick={() => (selectionMode ? toggleSelect(file.storedPath) : setSelectedPath(file.storedPath))}

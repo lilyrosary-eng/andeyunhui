@@ -55,6 +55,19 @@ export const enUS: Record<string, string> = {
   'settings.general.shortcuts.resetDefault': 'Reset to default',
   'settings.general.shortcuts.pressKey': 'Press a key...',
   'settings.general.shortcuts.editTip': 'Click to edit shortcut',
+  'settings.general.shortcuts.duplicate': 'Conflicts with “{name}”',
+
+  // Command palette
+  'commandPalette.placeholder': 'Search modules, notes, actions or music… (try “music: nocturne”)',
+  'commandPalette.hint': 'Type to search',
+  'commandPalette.noMatch': 'No matches',
+  'commandPalette.select': 'Select',
+  'commandPalette.open': 'Open',
+  'commandPalette.close': 'Esc to close',
+  'commandPalette.count': '{n} items',
+  'commandPalette.group.modules': 'Modules',
+  'commandPalette.group.actions': 'Actions',
+  'commandPalette.group.notes': 'Notes',
 
   // Shortcut items
   'shortcut.bold': 'Bold',
@@ -65,6 +78,7 @@ export const enUS: Record<string, string> = {
   'shortcut.clipboard': 'Clipboard widget',
   'shortcut.dropzone': 'Transfer station widget',
   'shortcut.favorite': 'Favorites',
+  'shortcut.command-palette': 'Command palette',
 
   // Settings - General - Common
   'settings.general.common.title': 'General',

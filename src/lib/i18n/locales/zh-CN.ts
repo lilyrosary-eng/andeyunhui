@@ -55,6 +55,19 @@ export const zhCN: Record<string, string> = {
   'settings.general.shortcuts.resetDefault': '恢复默认',
   'settings.general.shortcuts.pressKey': '请按键...',
   'settings.general.shortcuts.editTip': '点击修改快捷键',
+  'settings.general.shortcuts.duplicate': '与「{name}」快捷键冲突',
+
+  // 命令面板
+  'commandPalette.placeholder': '搜索模块、笔记、动作或音乐…（试试“音乐:夜曲”）',
+  'commandPalette.hint': '输入关键字开始搜索',
+  'commandPalette.noMatch': '没有匹配项',
+  'commandPalette.select': '选择',
+  'commandPalette.open': '打开',
+  'commandPalette.close': 'Esc 关闭',
+  'commandPalette.count': '{n} 项',
+  'commandPalette.group.modules': '模块',
+  'commandPalette.group.actions': '动作',
+  'commandPalette.group.notes': '笔记',
 
   // 快捷键项
   'shortcut.bold': '加粗',
@@ -65,6 +78,7 @@ export const zhCN: Record<string, string> = {
   'shortcut.clipboard': '剪贴板浮窗',
   'shortcut.dropzone': '中转站浮窗',
   'shortcut.favorite': '常用笔记',
+  'shortcut.command-palette': '命令面板',
 
   // 设置 - 常规 - 通用
   'settings.general.common.title': '通用',

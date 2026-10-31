@@ -6,7 +6,7 @@ import { useRootPaths, useBlacklist, useScanStream, EmptyState, LoadingState, No
 import { registerOpenWithListener, getPendingOpenWith, importToOpenWithDir, type OpenWithItem } from '../../_shared/openWithFiles';
 
 const React = window.__HOST_REACT__;
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
 const hostApi = window.__HOST_API__;
 
 const STORAGE_KEY_ROOT = 'video_plugin_root_paths';
@@ -35,6 +35,82 @@ interface ScanProgress {
   total: number;
   done: boolean;
 }
+
+// ===== 命令面板 provider：视频 › 文件夹 =====
+// 视频库缓存只有文件夹层级；文件级索引需要逐目录读盘，交给模块内搜索更合适。
+const VIDEO_PALETTE_TTL = 60_000;
+let paletteFolders: VideoFolder[] = [];
+let paletteFoldersAt = 0;
+let paletteFoldersPromise: Promise<void> | null = null;
+
+async function ensurePaletteFolders(force = false): Promise<void> {
+  if (!force && paletteFoldersAt > 0 && Date.now() - paletteFoldersAt < VIDEO_PALETTE_TTL) return;
+  if (paletteFoldersPromise) return paletteFoldersPromise;
+  paletteFoldersPromise = (async () => {
+    try {
+      let roots: string[] = [];
+      try { roots = JSON.parse(localStorage.getItem(STORAGE_KEY_ROOT) || '[]'); } catch { roots = []; }
+      const all: VideoFolder[] = [];
+      for (const root of roots) {
+        try {
+          const cached = await hostApi.invoke<VideoFolder[] | null>('load_video_cache', { rootPath: root });
+          if (Array.isArray(cached) && cached.length) all.push(...cached);
+        } catch { /* 单个根目录缓存缺失时忽略 */ }
+      }
+      const seen = new Set<string>();
+      paletteFolders = all.filter((f) => {
+        const key = f.folderPath.replace(/\\/g, '/').toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      paletteFoldersAt = Date.now();
+    } catch (err) {
+      console.warn('[video] 命令面板索引构建失败:', err);
+    }
+  })().finally(() => { paletteFoldersPromise = null; });
+  return paletteFoldersPromise;
+}
+
+try {
+  hostApi.registerCommandProvider?.({
+    id: 'video',
+    label: '视频',
+    moduleId: 'video',
+    priority: 12,
+    refresh: () => ensurePaletteFolders(true),
+    search: async (query) => {
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      await ensurePaletteFolders();
+      const out: Array<{
+        id: string;
+        title: string;
+        subtitle?: string;
+        path?: string[];
+        iconName?: string;
+        rank?: number;
+        navigate?: NavigationTarget;
+        run?: () => void;
+      }> = [];
+      for (const folder of paletteFolders) {
+        if (!`${folder.folderName} ${folder.folderPath}`.toLowerCase().includes(q)) continue;
+        out.push({
+          id: folder.folderPath,
+          title: folder.folderName || folder.folderPath.split(/[\\/]/).pop() || '未命名文件夹',
+          subtitle: `${folder.videoCount} 个视频`,
+          path: ['视频库'],
+          iconName: 'Video',
+          rank: folder.folderName.toLowerCase().includes(q) ? 8 : 0,
+          navigate: { module: 'video', tabs: ['视频库', folder.folderName], entity: folder.folderPath, props: { folderPath: folder.folderPath, folderName: folder.folderName } },
+          run: () => window.dispatchEvent(new CustomEvent('andy:video-open-folder', { detail: { folderPath: folder.folderPath, folderName: folder.folderName } })),
+        });
+        if (out.length >= 40) break;
+      }
+      return out;
+    },
+  });
+} catch { /* 旧宿主没有 provider API 时静默跳过 */ }
 
 interface VideoSettings {
   rememberProgress: boolean;
@@ -342,6 +418,40 @@ function VideoModule() {
       setVideos([]);
     }
     setVideosLoading(false);
+  }, []);
+
+  // 统一导航契约：命令面板可直接打开某个视频文件夹（无需等库列表加载）
+  const openFolderByPath = useCallback((folderPath: string, folderName?: string) => {
+    const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+    const folder = folders.find((f) => norm(f.folderPath) === norm(folderPath)) ?? {
+      folderPath,
+      folderName: folderName || folderPath.split(/[\\/]/).pop() || '视频',
+      videoCount: 0,
+    };
+    void handleFolderClick(folder);
+  }, [folders, handleFolderClick]);
+  const openFolderRef = useRef(openFolderByPath);
+  openFolderRef.current = openFolderByPath;
+
+  useEffect(() => {
+    const off = hostApi.registerNavigator?.((target) => {
+      const props = target.props as { folderPath?: string; folderName?: string } | undefined;
+      const folderPath = props?.folderPath || target.entity;
+      if (!folderPath) return false;
+      openFolderRef.current(folderPath, props?.folderName);
+      return true;
+    });
+    const onEvent = (e: Event) => {
+      const detail = (e as CustomEvent<{ folderPath?: string; folderName?: string }>).detail;
+      if (detail?.folderPath) openFolderRef.current(detail.folderPath, detail.folderName);
+    };
+    window.addEventListener('andy:video-open-folder', onEvent);
+    return () => {
+      try { off?.(); } catch { /* 忽略 */ }
+      window.removeEventListener('andy:video-open-folder', onEvent);
+    };
+    // 处理器走 ref，只注册一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 点击视频文件 → 播放（状态 B → 播放器）

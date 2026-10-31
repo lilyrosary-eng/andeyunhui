@@ -14,6 +14,8 @@ import { HostSidebar } from '@/components/HostSidebar';
 import { ImmersiveChrome } from '@/components/ImmersiveChrome';
 import { GoldChessboardHub } from '@/components/GoldChessboardHub';
 import { CommandPalette } from '@/components/command-palette/CommandPalette';
+import { initHostCommandProviders } from '@/core/commandPalette/hostProviders';
+import { setModuleActivator } from '@/core/navigation/navigation';
 import TransferReceiveModal from '@/components/TransferReceiveModal';
 import { logger } from '@/lib/logger';
 import { api } from '@/lib/api';
@@ -53,6 +55,17 @@ function App() {
   useEffect(() => {
     const cleanup = initOpenWith();
     return cleanup;
+  }, []);
+
+  // 命令面板的宿主内置 provider（中转站等）
+  useEffect(() => {
+    const unregister = initHostCommandProviders();
+    return unregister;
+  }, []);
+
+  // 统一导航契约需要宿主提供「切模块」能力
+  useEffect(() => {
+    setModuleActivator((moduleId) => useAppStore.getState().setActiveModule(moduleId));
   }, []);
 
   // 热重载生效：当前活动模块被重新注册时，强制重挂其组件（画布重新初始化，给出可见反馈）。

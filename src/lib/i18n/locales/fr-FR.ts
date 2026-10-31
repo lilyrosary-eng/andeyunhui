@@ -55,6 +55,19 @@ export const frFR: Record<string, string> = {
   'settings.general.shortcuts.resetDefault': 'Réinitialiser',
   'settings.general.shortcuts.pressKey': 'Appuyez sur une touche...',
   'settings.general.shortcuts.editTip': 'Cliquez pour modifier le raccourci',
+  'settings.general.shortcuts.duplicate': 'Conflit avec « {name} »',
+
+  // Palette de commandes
+  'commandPalette.placeholder': 'Rechercher modules, notes, actions ou musique… (essayez « musique : nocturne »)',
+  'commandPalette.hint': 'Saisissez pour rechercher',
+  'commandPalette.noMatch': 'Aucun résultat',
+  'commandPalette.select': 'Sélectionner',
+  'commandPalette.open': 'Ouvrir',
+  'commandPalette.close': 'Échap pour fermer',
+  'commandPalette.count': '{n} éléments',
+  'commandPalette.group.modules': 'Modules',
+  'commandPalette.group.actions': 'Actions',
+  'commandPalette.group.notes': 'Notes',
 
   // Raccourcis
   'shortcut.bold': 'Gras',
@@ -65,6 +78,7 @@ export const frFR: Record<string, string> = {
   'shortcut.clipboard': 'Widget presse-papiers',
   'shortcut.dropzone': 'Widget station de transfert',
   'shortcut.favorite': 'Notes favorites',
+  'shortcut.command-palette': 'Palette de commandes',
 
   // Paramètres - Général - Général
   'settings.general.common.title': 'Général',

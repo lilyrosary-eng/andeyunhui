@@ -35,12 +35,19 @@ function phaseText(p: ReembedProgress): string {
 export function KnowledgeBasePanel() {
   const [sources, setSources] = useState<RagSourceInfo[]>([]);
   const [view, setViewLocal] = useState<RagView>(() => ragStore.getView());
+  const [focusId, setFocusId] = useState<string | null>(() => ragStore.getFocusId());
   // 切换视图统一走 store：侧栏与主面板共享同一个 view
   const setView = useCallback((v: RagView) => ragStore.setView(v), []);
   useEffect(() => {
     const un = ragStore.subscribeView((v) => setViewLocal(v));
     return un;
   }, []);
+  useEffect(() => ragStore.subscribeFocus((id) => setFocusId(id)), []);
+  // 从命令面板跳转过来时把目标来源滚到视野内
+  useEffect(() => {
+    if (!focusId) return;
+    document.getElementById(`rag-source-${focusId}`)?.scrollIntoView({ block: 'center' });
+  }, [focusId, sources]);
   const [ready, setReady] = useState(false);
   const [storeError, setStoreError] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
@@ -267,7 +274,12 @@ export function KnowledgeBasePanel() {
                 {sources.map((s) => (
                   <div
                     key={s.id}
-                    className="flex items-center justify-between rounded-lg border border-neutral-200/60 dark:border-stone-600/60 bg-white/60 dark:bg-stone-800/50 px-3 py-2"
+                    id={`rag-source-${s.id}`}
+                    className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
+                      focusId === s.id
+                        ? 'border-[var(--element-border)] ring-1 ring-[var(--element-border)] bg-[var(--element-muted)]'
+                        : 'border-neutral-200/60 dark:border-stone-600/60 bg-white/60 dark:bg-stone-800/50'
+                    }`}
                   >
                     <div className="min-w-0">
                       <div className="text-sm text-neutral-700 dark:text-stone-200 truncate">{s.title}</div>
