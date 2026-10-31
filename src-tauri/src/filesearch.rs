@@ -65,10 +65,6 @@ static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 /// 全量 build_index 时填充（仅目录，开销远低于文件），USN 增量时按 FRN 反查父目录路径。
 static DIR_FRN: LazyLock<Mutex<HashMap<u64, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// 各数据盘在「应用启动时刻」的 USN 检查点（NextUsn）。USN 增量线程从该点开始重放，
-/// 以覆盖「全量索引进行期间」发生的变更（全量索引本身已含当时状态，重放为幂等 upsert/delete）。
-static USN_START: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
 fn db_path() -> PathBuf {
     DB_PATH
         .get()
@@ -103,7 +99,16 @@ fn connect() -> rusqlite::Result<Connection> {
          CREATE INDEX IF NOT EXISTS idx_trigram ON trigrams(gram);
          -- 删除路径时要按 path 查（等值 + 前缀区间）。没有这个索引就是 394 万行全表扫，
          -- 实测每次删除 ~690ms；建索引后 <1ms（见 db_delete_trigrams 的实测注释）。
-         CREATE INDEX IF NOT EXISTS idx_trigrams_path ON trigrams(path);",
+         CREATE INDEX IF NOT EXISTS idx_trigrams_path ON trigrams(path);
+         -- USN 增量检查点：记录每块数据盘上次处理到的 journal 位置。
+         -- 此前每次启动都把「本次启动时刻」当成起点，应用关闭期间新增/删除的文件永远不会重放，
+         -- 又因为索引库已存在而不再全量重建——这正是「文件搜不全」的根因。
+         CREATE TABLE IF NOT EXISTS usn_state (
+            drive TEXT PRIMARY KEY,
+            journal_id INTEGER NOT NULL,
+            next_usn INTEGER NOT NULL,
+            lowest_valid_usn INTEGER NOT NULL
+         );",
     )?;
     Ok(conn)
 }
@@ -400,8 +405,7 @@ pub fn start_indexing(app: &AppHandle) {
         }
         st.indexing = true;
     }
-    // 记录各数据盘启动时刻的 USN 检查点（NTFS），供 USN 增量线程从该点重放
-    capture_usn_start();
+    // USN 增量从数据库里的持久化检查点续读（见 usn_thread），因此能补回应用关闭期间的变更。
     // 仅首次启动才全量建索引；若索引库已存在（非首启），跳过全盘重建，
     // 直接走 USN 增量 + notify 监听维护，避免「每次启动都全盘重扫」导致磁盘持续满载。
     // Linux：老索引可能只覆盖了 /snap（旧 roots 逻辑的后果）。检测家目录覆盖为 0 就重建，
@@ -974,7 +978,7 @@ fn open_volume(letter: &str) -> Option<HANDLE> {
 }
 
 #[cfg(windows)]
-fn query_journal(h: HANDLE) -> Option<(u64, i64)> {
+fn query_journal(h: HANDLE) -> Option<(u64, i64, i64)> {
     use windows::Win32::System::Ioctl::USN_JOURNAL_DATA_V0;
     let mut data = USN_JOURNAL_DATA_V0::default();
     let mut ret = 0u32;
@@ -991,10 +995,37 @@ fn query_journal(h: HANDLE) -> Option<(u64, i64)> {
         )
     };
     if res.is_ok() {
-        Some((data.UsnJournalID, data.NextUsn))
+        Some((data.UsnJournalID, data.NextUsn, data.LowestValidUsn))
     } else {
         None
     }
+}
+
+/// 读取上次持久化的 USN 检查点（journal id + 已处理到的 next + 当时的 lowest valid）。
+#[cfg(windows)]
+fn load_usn_state(drive: &str) -> Option<(u64, i64, i64)> {
+    let conn = connect().ok()?;
+    conn.query_row(
+        "SELECT journal_id, next_usn, lowest_valid_usn FROM usn_state WHERE drive = ?1",
+        params![drive],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .ok()
+}
+
+/// 每次成功消费一段 journal 后落盘。重启时从这里续读，而不是从「本次启动时刻」重新开始。
+#[cfg(windows)]
+fn save_usn_state(drive: &str, journal_id: u64, next_usn: i64, lowest_valid_usn: i64) {
+    let Ok(conn) = connect() else { return };
+    let _ = conn.execute(
+        "INSERT INTO usn_state (drive, journal_id, next_usn, lowest_valid_usn)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(drive) DO UPDATE SET
+            journal_id=excluded.journal_id,
+            next_usn=excluded.next_usn,
+            lowest_valid_usn=excluded.lowest_valid_usn",
+        params![drive, journal_id as i64, next_usn, lowest_valid_usn],
+    );
 }
 
 #[cfg(windows)]
@@ -1144,7 +1175,7 @@ fn usn_thread(letter: String) {
             return;
         }
     };
-    let (mut journal_id, mut next) = match query_journal(h) {
+    let (mut journal_id, current_next, mut lowest_valid) = match query_journal(h) {
         Some(x) => x,
         None => {
             unsafe {
@@ -1154,47 +1185,70 @@ fn usn_thread(letter: String) {
             return;
         }
     };
-    // 从该盘「应用启动时刻」的检查点开始重放，覆盖全量索引期间的变更
-    if let Some(s) = USN_START.lock().unwrap().get(&letter).copied() {
-        next = s;
-    }
+    // 从上次持久化位置续读；没有可用检查点时，从 journal 仍保留的最老记录开始，
+    // 这样才能补回「应用关闭期间」的变更。全量索引只在首次建库时跑，之后靠这里持续增量。
+    let mut next = match load_usn_state(&letter) {
+        Some((saved_id, saved_next, saved_lowest))
+            if saved_id == journal_id
+                && saved_next >= saved_lowest
+                && saved_next <= current_next =>
+        {
+            saved_next
+        }
+        _ => lowest_valid.min(current_next),
+    };
     let mut buf = vec![0u8; 256 * 1024];
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(15));
-        {
-            let st = STATE.lock().unwrap();
-            if st.indexing {
-                continue; // 全量构建中，跳过（构建完成后下一轮继续）
-            }
-        }
-        // 重新查询，检测日志是否被重置（卷被 chkdsk / 手动清空）
-        match query_journal(h) {
-            Some((id, _n)) if id == journal_id => {}
-            Some((id, n)) => {
-                journal_id = id;
-                next = n;
-                continue; // 日志已重建，从新起点跟，不重放旧历史
-            }
-            None => {
-                unsafe {
-                    let _ = CloseHandle(h);
-                }
-                build_index(); // 日志不可用，退回全量重建
-                return;
-            }
-        }
-        let Some(new_next) = read_usn_range(h, journal_id, next, &mut buf) else {
+        let Some((id, target_next, lv)) = query_journal(h) else {
             unsafe {
                 let _ = CloseHandle(h);
             }
             build_index();
             return;
         };
-        let records = parse_usn(&buf);
-        if !records.is_empty() {
-            apply_usn_records(&records);
+        if id != journal_id {
+            journal_id = id;
+            next = target_next;
+            lowest_valid = lv;
+        } else {
+            lowest_valid = lv;
+            if next < lv {
+                // 检查点已被 journal 回收，继续从最老保留记录重放（幂等 upsert/delete）。
+                next = lv;
+            }
         }
-        next = new_next;
+
+        // 排空本次可读到的日志。旧实现每 15 秒只取一批，大量改名/复制时会持续落后。
+        let mut batches = 0usize;
+        let mut progress = false;
+        while next < target_next && batches < 200 {
+            if STATE.lock().unwrap().indexing {
+                break; // 全量构建中，稍后再续
+            }
+            let Some(new_next) = read_usn_range(h, journal_id, next, &mut buf) else {
+                unsafe {
+                    let _ = CloseHandle(h);
+                }
+                build_index();
+                return;
+            };
+            if new_next <= next {
+                break;
+            }
+            let records = parse_usn(&buf);
+            if !records.is_empty() {
+                apply_usn_records(&records);
+            }
+            next = new_next;
+            save_usn_state(&letter, journal_id, next, lowest_valid);
+            batches += 1;
+            progress = true;
+        }
+        if progress {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        } else {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+        }
     }
 }
 
@@ -1225,26 +1279,6 @@ fn start_usn_sync() {
                 }
                 build_index();
             });
-        }
-    }
-}
-
-/// 记录各 NTFS 数据盘启动时刻的 USN 检查点（NextUsn），供 USN 增量线程从该点重放。
-fn capture_usn_start() {
-    #[cfg(windows)]
-    {
-        for letter in data_drive_letters() {
-            if !is_ntfs(&letter) {
-                continue;
-            }
-            if let Some(h) = open_volume(&letter) {
-                if let Some((_, next)) = query_journal(h) {
-                    USN_START.lock().unwrap().insert(letter, next);
-                }
-                unsafe {
-                    let _ = CloseHandle(h);
-                }
-            }
         }
     }
 }
