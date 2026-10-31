@@ -13,6 +13,7 @@ import { AppNav } from '@/components/AppNav';
 import { HostSidebar } from '@/components/HostSidebar';
 import { ImmersiveChrome } from '@/components/ImmersiveChrome';
 import { GoldChessboardHub } from '@/components/GoldChessboardHub';
+import { CommandPalette } from '@/components/command-palette/CommandPalette';
 import TransferReceiveModal from '@/components/TransferReceiveModal';
 import { logger } from '@/lib/logger';
 import { api } from '@/lib/api';
@@ -758,6 +759,8 @@ function App() {
       {immersive && <ImmersiveChrome />}
       {/* 全局局域网传输接收确认弹窗：独立于任何传输面板，确保任意界面下收到请求都弹确认框 */}
       <TransferReceiveModal />
+      {/* 全局命令面板：Ctrl+K（输入框内用 Ctrl+Shift+K 强制打开） */}
+      <CommandPalette onScreenshot={startScreenshot} />
       {/* 数据迁移进度遮罩：迁移进行中叠加在加载页之上，避免用户以为卡死 */}
       {migrationPct !== null && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm">

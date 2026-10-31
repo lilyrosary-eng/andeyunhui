@@ -35,6 +35,7 @@ const NIAOLUO_MODULES: Array<{ id: string; name: string }> = [
 import { SlidingTabs } from '@/components/motion/SlidingTabs';
 import { useI18n, LANGUAGES, type Language } from '@/lib/i18n';
 import { useAppStore } from '@/stores/appStore';
+import { consumePendingSettingsTab } from '@/core/settings/settingsNav';
 
 type TabId = 'general' | 'themes' | 'extensions' | 'transfer' | 'model' | 'blacklist' | 'about';
 
@@ -106,7 +107,23 @@ function formatArchiveTime(modified: string): string {
 }
 
 export function GlobalSettingsPanel() {
-  const [activeTab, setActiveTab] = useState<TabId>('general');
+  const [activeTab, setActiveTab] = useState<TabId>(() => {
+    // 命令面板等入口可能在组件挂载前就请求了 tab：挂载时消费一次
+    const pending = consumePendingSettingsTab();
+    return (pending as TabId | null) ?? 'general';
+  });
+
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const tab = (e as CustomEvent<{ tab?: TabId }>).detail?.tab;
+      const valid: TabId[] = ['general', 'themes', 'extensions', 'transfer', 'model', 'blacklist', 'about'];
+      if (tab && valid.includes(tab)) setActiveTab(tab);
+      // 已挂载时也要清掉 pending，避免下次重新挂载时误用旧 tab
+      consumePendingSettingsTab();
+    };
+    window.addEventListener('open-global-settings', onOpen as EventListener);
+    return () => window.removeEventListener('open-global-settings', onOpen as EventListener);
+  }, []);
   const { t, lang, setLang } = useI18n();
   const { theme, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgVideo, setBgVideo, bgVideoPersist, setBgVideoPersist, bgBlur, setBgBlur, setBgAngle, setBgFlip, bgScrub, setBgScrub } = useTheme();
   const [autoSave, setAutoSave] = useState(true);

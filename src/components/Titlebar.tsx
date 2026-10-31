@@ -1,4 +1,4 @@
-import { Minus, Square, X } from 'lucide-react';
+import { Minus, Search, Square, X } from 'lucide-react';
 import { useI18n } from '@/lib/i18n';
 import { appWindow } from '@/lib/appWindow';
 import { LogoButton } from '@/components/LogoButton';
@@ -18,8 +18,16 @@ export function Titlebar({ hidden = false }: { hidden?: boolean }) {
         <span className="text-xs text-neutral-400 dark:text-stone-500 font-medium tracking-wide">{t('common.appName')}</span>
       </div>
 
-      {/* 右侧：窗口控制按钮 */}
+      {/* 右侧：命令面板入口 + 窗口控制按钮 */}
       <div className="flex h-full">
+        <button
+          onClick={() => window.dispatchEvent(new CustomEvent('open-command-palette'))}
+          className="btn-press w-[46px] h-full flex items-center justify-center text-neutral-400 hover:text-neutral-700 hover:bg-black/5 dark:text-stone-500 dark:hover:text-stone-300 dark:hover:bg-white/5 transition-colors"
+          title="搜索与命令（Ctrl+K）"
+          aria-label="搜索与命令"
+        >
+          <Search size={15} />
+        </button>
         <button
           onClick={() => appWindow?.minimize()}
           className="btn-press w-[46px] h-full flex items-center justify-center text-neutral-400 hover:text-neutral-700 hover:bg-black/5 dark:text-stone-500 dark:hover:text-stone-300 dark:hover:bg-white/5 transition-colors"
