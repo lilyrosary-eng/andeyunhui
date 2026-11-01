@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { fuzzyScore, bestScore } from './fuzzy';
+import {
+  fuzzyScore,
+  bestScore,
+  matchQuery,
+  makeScorer,
+  prepareQuery,
+  splitMatches,
+} from './fuzzy';
 
 describe('fuzzyScore', () => {
   it('空查询命中一切并给正分', () => {
@@ -92,5 +99,70 @@ describe('bestScore', () => {
 
   it('空字段列表返回负数', () => {
     expect(bestScore('a', [])).toBeLessThan(0);
+  });
+});
+
+describe('prepareQuery', () => {
+  it('按分隔符切 token，分隔符自成一个 token', () => {
+    const p = prepareQuery('qwen-vl 72b');
+    expect(p.tokens).toEqual(['qwen', '-', 'vl', '72b']);
+  });
+
+  it('CJK 逐字成 token（中文没有大小写边界可切）', () => {
+    expect(prepareQuery('智谱').tokens).toEqual(['智', '谱']);
+  });
+
+  it('fuzzy 序列去掉空白，且 emoji 不被劈成两半', () => {
+    expect(prepareQuery('a b').fuzzy).toEqual(['a', 'b']);
+    expect(prepareQuery('🧠x').fuzzy).toEqual(['🧠', 'x']);
+  });
+});
+
+describe('cx 五项惩罚（Obsidian 移植的行为钉）', () => {
+  it('token 能整段命中时，不该退化到逐字符去拿更差的匹配', () => {
+    expect(fuzzyScore('ab', 'abx')).toBeGreaterThan(fuzzyScore('ab', 'axb'));
+  });
+
+  it('命中被切成更多段要罚', () => {
+    const one = fuzzyScore('ds', 'dsk');
+    const two = fuzzyScore('ds', 'dxs');
+    expect(one).toBeGreaterThan(two);
+  });
+
+  it('词内命中要罚，词首要奖', () => {
+    expect(fuzzyScore('vl', 'vl-model')).toBeGreaterThan(fuzzyScore('vl', 'myvlmodel'));
+  });
+
+  it('中文：空格后的命中优于嵌在词里的命中（这条 Obsidian 不罚，我们补罚）', () => {
+    expect(fuzzyScore('夜曲', '伴奏 夜曲')).toBeGreaterThan(fuzzyScore('夜曲', '某夜曲某'));
+  });
+
+  it('靠前的命中优于靠后的命中', () => {
+    expect(fuzzyScore('pro', 'pro-net')).toBeGreaterThan(fuzzyScore('pro', 'qwen-pro'));
+  });
+});
+
+describe('matchQuery / splitMatches', () => {
+  it('给出命中区间，供高亮使用', () => {
+    const m = matchQuery(prepareQuery('vl'), 'qwen-vl-72b');
+    expect(m).not.toBeNull();
+    expect(m!.ranges).toEqual([[5, 7]]);
+    expect(splitMatches('qwen-vl-72b', m!.ranges)).toEqual([
+      ['qwen-', false],
+      ['vl', true],
+      ['-72b', false],
+    ]);
+  });
+
+  it('不匹配返回 null，空查询给正分且无区间', () => {
+    expect(matchQuery(prepareQuery('zzz'), 'gpt-4o')).toBeNull();
+    const empty = matchQuery(prepareQuery('   '), 'anything');
+    expect(empty!.score).toBeGreaterThan(0);
+    expect(empty!.ranges).toEqual([]);
+  });
+
+  it('makeScorer 与 fuzzyScore 结果一致（预绑定查询不改变手感）', () => {
+    const scorer = makeScorer('deep');
+    expect(scorer('DeepSeek 官方')).toBe(fuzzyScore('deep', 'DeepSeek 官方'));
   });
 });

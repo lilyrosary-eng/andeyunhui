@@ -1065,6 +1065,9 @@ try { window.__HOST_API__?.invoke('debug_log', { msg: 'MUSIC_PLUGIN_LOADED' }).c
 // 快照优先从扫描缓存构建（不依赖音乐模块是否被打开过）；模块挂载后由真实 playlists 覆盖。
 // 快照带 TTL：面板每次打开触发 refresh，过期才重新读缓存，避免歌单改动后一直搜旧数据。
 const PALETTE_SNAPSHOT_TTL = 30_000;
+/** 命令面板用的摊平行：一首曲目 + 它所属的列表 + 预算好的小写匹配串 */
+interface PaletteRow { playlist: Playlist; track: Track; hay: string }
+let paletteRows: PaletteRow[] = [];
 let palettePlaylists: Playlist[] = [];
 let paletteSnapshotPromise: Promise<void> | null = null;
 let paletteSnapshotAt = 0;
@@ -1087,6 +1090,15 @@ async function ensurePaletteSnapshot(force = false): Promise<void> {
       const dirs = groupTracksIntoPlaylists(tracks, roots);
       const custom = getCustomPlaylistsFromStorage();
       palettePlaylists = dedupePlaylistsById([...dedupDirectoryPlaylists(dirs), ...custom]);
+      // 摊平成一维 + 预算好小写匹配串：原来每次按键都要嵌套遍历 playlists×tracks
+      // 并给每首曲目重算一条四字段串再 toLowerCase，几千曲目的库打字就卡。
+      paletteRows = palettePlaylists.flatMap((playlist) => playlist.tracks
+        .filter((track) => !!track.filePath)
+        .map((track) => ({
+          playlist,
+          track,
+          hay: `${track.title} ${track.artist} ${track.album} ${track.filePath}`.toLowerCase(),
+        })));
       paletteSnapshotAt = Date.now();
     } catch (err) {
       console.warn('[music] 命令面板索引构建失败:', err);
@@ -1101,7 +1113,7 @@ try {
     label: '音乐',
     moduleId: 'music',
     priority: 30,
-    refresh: () => ensurePaletteSnapshot(true),
+    refresh: () => ensurePaletteSnapshot(),
     search: async (query) => {
       const q = query.trim().toLowerCase();
       if (!q) return [];
@@ -1116,34 +1128,40 @@ try {
         navigate?: NavigationTarget;
         run?: () => void;
       }> = [];
-      for (const playlist of palettePlaylists) {
-        for (const track of playlist.tracks) {
-          if (!track.filePath) continue;
-          const haystack = `${track.title} ${track.artist} ${track.album} ${track.filePath}`.toLowerCase();
-          if (!haystack.includes(q)) continue;
-          const target = { playlistId: playlist.id, trackId: track.id };
-          results.push({
-            id: `${playlist.id}:${track.id}`,
-            title: track.title || track.filePath.split(/[\\/]/).pop() || '未知曲目',
-            subtitle: [track.artist, track.album].filter(Boolean).join(' · '),
-            path: [playlist.name],
-            iconName: 'Music2',
-            // 标题命中优先于仅路径命中
-            rank: track.title?.toLowerCase().includes(q) ? 8 : 0,
-            navigate: {
-              module: 'music',
-              tabs: [playlist.name],
-              entity: String(track.id),
-              props: target,
-            },
-            // 老宿主不认识 navigate 时的兜底
-            run: () => {
-              palettePendingPlay = target;
-              window.dispatchEvent(new CustomEvent('andy:music-palette-play', { detail: target }));
-            },
-          });
-          if (results.length >= 40) return results;
-        }
+      // 按分取「最好的 40 条」。原来返回的是播放列表顺序里前 40 个命中，
+      // 库一大，真正想要的曲目根本挤不进结果里。
+      const score = window.__HOST_API__.makeScorer(query);
+      const ranked: Array<{ row: PaletteRow; s: number; titleHit: boolean }> = [];
+      for (const row of paletteRows) {
+        const titleScore = score(row.track.title || '');
+        const s = Math.max(titleScore, score(row.hay) * 0.6);
+        if (s <= 0) continue;
+        ranked.push({ row, s, titleHit: titleScore > 150 });
+      }
+      ranked.sort((a, b) => b.s - a.s);
+      for (const { row, titleHit } of ranked.slice(0, 40)) {
+        const { playlist, track } = row;
+        const target = { playlistId: playlist.id, trackId: track.id };
+        results.push({
+          id: `${playlist.id}:${track.id}`,
+          title: track.title || track.filePath.split(/[\\/]/).pop() || '未知曲目',
+          subtitle: [track.artist, track.album].filter(Boolean).join(' · '),
+          path: [playlist.name],
+          iconName: 'Music2',
+          // 标题命中优先于仅路径命中
+          rank: titleHit ? 8 : 0,
+          navigate: {
+            module: 'music',
+            tabs: [playlist.name],
+            entity: String(track.id),
+            props: target,
+          },
+          // 老宿主不认识 navigate 时的兜底
+          run: () => {
+            palettePendingPlay = target;
+            window.dispatchEvent(new CustomEvent('andy:music-palette-play', { detail: target }));
+          },
+        });
       }
       return results;
     },

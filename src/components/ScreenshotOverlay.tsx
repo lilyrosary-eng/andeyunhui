@@ -979,14 +979,14 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     // 关键：一旦 image 已注入（预览帧就绪），即便 ready 尚未翻转也要渲染选区 UI 并挂载 fullCanvasRef，
     // 以便下方 useLayoutEffect 同步 drawImage 之后再 reveal——否则 canvas 未挂载会落到 `if(!canvas)` 分支、
     // reveal 在绘帧前触发、露出下方 #000 形成黑闪。
-    return <div className="fixed inset-0 z-[9999]" style={{ background: "#000" }} />;
+    return <div className="fixed inset-0 z-[var(--layer-fullscreen)]" style={{ background: "#000" }} />;
   }
 
   // ====== 选择态 ======
   if (mode === "select") {
     return (
       <div
-        className="fixed inset-0 z-[9999] select-none"
+        className="fixed inset-0 z-[var(--layer-fullscreen)] select-none"
         // 与录屏 overlay-recorder-select.ts 对齐：root 始终 #000 兜底，冻结图 fullCanvas 不透明铺在其上。
         // 任意时刻整窗 alpha>0（命中稳），即便 fullCanvas 偶发未绘制也绝不透明穿透（黑闪/识别卡死同源问题）。
         style={{ background: "#000" }}
@@ -1113,7 +1113,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
   if (isLong) {
     return (
       <div
-        className="fixed inset-0 z-[9999] bg-black/80 flex flex-col items-center justify-center gap-3 p-4 overflow-auto"
+        className="fixed inset-0 z-[var(--layer-fullscreen)] bg-black/80 flex flex-col items-center justify-center gap-3 p-4 overflow-auto"
         onContextMenu={(e) => { e.preventDefault(); onClose(); }}
       >
         <div className="fixed top-3 z-10">{toolbar}</div>
@@ -1169,11 +1169,11 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     labelTop = Math.max(margin, Math.min(labelTop, vh - 20));
     return (
       <div
-        className="fixed inset-0 z-[9999] select-none"
+        className="fixed inset-0 z-[var(--layer-fullscreen)] select-none"
         onContextMenu={(e) => { e.preventDefault(); onClose(); }}
       >
         {copyTip && (
-          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[10001] px-3 py-1.5 rounded-md bg-black/80 text-white text-sm shadow-lg pointer-events-none">
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[var(--layer-fullscreen-toast)] px-3 py-1.5 rounded-md bg-black/80 text-white text-sm shadow-lg pointer-events-none">
             {copyTip}
           </div>
         )}
@@ -1214,7 +1214,7 @@ export function ScreenshotOverlay({ image, ox, oy, scale, windows, noteId, onClo
     );
   }
 
-  return <div className="fixed inset-0 z-[9999] bg-transparent" />;
+  return <div className="fixed inset-0 z-[var(--layer-fullscreen)] bg-transparent" />;
 }
 
 function ToolBtn({ active, onClick, title, children }: { active?: boolean; onClick: () => void; title: string; children: React.ReactNode }) {
@@ -1264,7 +1264,7 @@ function Magnifier({ off, x, y, zoom, size }: { off: HTMLCanvasElement; x: numbe
     ctx.stroke();
   }, [off, x, y, zoom, size]);
   return (
-    <div className="absolute z-[10000] pointer-events-none" style={{ left: x + 16, top: y + 16 }}>
+    <div className="absolute z-[var(--layer-fullscreen-above)] pointer-events-none" style={{ left: x + 16, top: y + 16 }}>
       <canvas ref={ref} width={size} height={size} />
     </div>
   );

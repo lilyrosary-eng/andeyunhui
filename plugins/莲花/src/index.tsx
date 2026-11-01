@@ -85,7 +85,7 @@ try {
     label: '图片',
     moduleId: 'image',
     priority: 10,
-    refresh: () => ensurePaletteFolders(true),
+    refresh: () => ensurePaletteFolders(),
     search: async (query) => {
       const q = query.trim().toLowerCase();
       if (!q) return [];
@@ -383,20 +383,17 @@ function ImageModule() {
 
   const displayFolderList = displayFolders();
 
-  // 根据搜索词过滤文件夹列表（大小写不敏感 + 模糊匹配）
+  // 搜索词过滤文件夹列表：打分统一走宿主实现（src/lib/fuzzy.ts 的 cx() 移植）。
+  // 原来这里是本地一份「子串或子序列」的布尔过滤，既与命令面板手感不一致，
+  // 也不会把更好的匹配排到前面 —— 现在顺带按分排序。
   const filteredFolders = useMemo(() => {
     if (!searchQuery.trim()) return displayFolderList;
-    const q = searchQuery.trim().toLowerCase();
-    return displayFolderList.filter(f => {
-      const name = f.folderName.toLowerCase();
-      if (name.includes(q)) return true;
-      // 模糊匹配：按字符顺序匹配
-      let qi = 0;
-      for (let i = 0; i < name.length && qi < q.length; i++) {
-        if (name[i] === q[qi]) qi++;
-      }
-      return qi === q.length;
-    });
+    const score = hostApi.makeScorer(searchQuery);
+    return displayFolderList
+      .map((f) => ({ f, s: score(f.folderName) }))
+      .filter((x) => x.s > 0)
+      .sort((a, b) => b.s - a.s)
+      .map((x) => x.f);
   }, [displayFolderList, searchQuery]);
 
   if (rootPaths.length === 0) {

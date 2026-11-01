@@ -1791,6 +1791,7 @@ fn main() {
             read_text_file,
             delete_file,
             list_directory,
+            save_wallpaper,
             ensure_directory,
             check_file_exists,
             cancel_scan,

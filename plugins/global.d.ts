@@ -67,6 +67,15 @@ declare global {
        * 与 navigate 的分工：navigate 是一次性动作，深链是可持久化的文本。
        */
       buildDeepLink?: (target: NavigationTarget) => string;
+      /**
+       * 全站唯一的模糊打分（宿主 src/lib/fuzzy.ts，Obsidian cx() 移植）。
+       * 返回值 > 0 为命中（越大越靠前），< 0 为不匹配。
+       * 模块自己的搜索框/过滤列表一律用它，别再留一份本地实现，
+       * 否则同一个查询在命令面板里和在模块里排序不一样。
+       */
+      fuzzyScore: (query: string, target: string) => number;
+      /** 预绑定查询的打分器：一次切分、对一批候选反复打分（provider 遍历大列表时用这个） */
+      makeScorer: (query: string) => (target: string) => number;
     };
     __PLUGIN_REGISTRY__: {
       register: (def: {

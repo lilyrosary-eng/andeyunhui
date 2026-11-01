@@ -26,6 +26,7 @@ import type { PluginPermissions } from '@/lib/api';
 // 沙箱里刻意不走 @/lib/logger：它经 tauri invoke 落盘，而沙箱/控制台要在任何宿主服务
 // 缺失时也能报错（拦截未授权命令必须让开发者看见），故此处直接用 console.*。
 import { createFrameBuffer } from '@/lib/frameBuffer';
+import { fuzzyScore, makeScorer } from '@/lib/fuzzy';
 
 // 合并 react-dom（legacy: render / flushSync）+ react-dom/client（React 18: createRoot / hydrateRoot）
 // esbuild 的 hostExternals 将 'react-dom' 和 'react-dom/client' 都映射到 __HOST_REACT_DOM__，
@@ -221,6 +222,11 @@ function createSafeApi(pluginId: string, policy: SandboxPolicy) {
     buildDeepLink: (target: NavigationTarget) => buildDeepLink(target),
     // 帧缓冲工具：高频数据推送批处理，避免渲染风暴
     createFrameBuffer: createFrameBuffer,
+    // 全站唯一的模糊打分：面板与各模块 provider 共用同一套排序手感，
+    // 避免「同一个查询在命令面板里和在模块搜索里排序不一样」。
+    // makeScorer 预绑定查询（一次切分、多次打分），provider 遍历大列表时用它。
+    fuzzyScore: (query: string, target: string) => fuzzyScore(query, target),
+    makeScorer: (query: string) => makeScorer(query),
     // 创建浮窗窗口（前端 WebviewWindow API，规避 sync 命令中 build 导致的主线程重入死锁）
     // 用于剪贴板浮窗等场景，label 由插件指定（如 'floating-clipboard'）
     createFloatingWindow: async (label: string, url: string, options: Record<string, unknown>) => {

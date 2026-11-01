@@ -1,25 +1,16 @@
 // 命令面板排序与作用域解析（纯函数，便于单测钉住手感）
 import type { PaletteProvider } from '@/core/commandPalette/registry';
+import { fuzzyScore } from '@/lib/fuzzy';
 
-/** 位置感知打分：完全匹配 > 前缀 > 词首 > 包含（越靠前越高）> 子序列。 */
+/**
+ * 位置感知打分：委托给全站唯一的 fuzzy 实现（src/lib/fuzzy.ts，Obsidian cx() 移植）。
+ * 这里只保留面板的契约：**0 = 不匹配**（调用方按 `<= 0` 过滤），命中为 1~200。
+ * 原先本文件自带一套 200/170/150/120/30 阶梯打分，且子序列一律给 30 分不罚跳字，
+ * 与 src/lib/fuzzy 的排序手感不一致，故收敛。
+ */
 export function scoreText(text: string, query: string): number {
   if (!query) return 1;
-  const t = text.toLowerCase();
-  const q = query.toLowerCase();
-  if (t === q) return 200;
-  if (t.startsWith(q)) return 170;
-  const idx = t.indexOf(q);
-  if (idx >= 0) {
-    const prev = idx > 0 ? t[idx - 1] : '';
-    const wordStart = !prev || /[\s\-_/·:：.()[\]（）]/.test(prev);
-    return (wordStart ? 150 : 120) - Math.min(idx, 30) * 0.5;
-  }
-  let i = 0;
-  for (const ch of t) {
-    if (ch === q[i]) i += 1;
-    if (i >= q.length) return 30;
-  }
-  return 0;
+  return Math.max(0, fuzzyScore(query, text));
 }
 
 export function scoreFields(

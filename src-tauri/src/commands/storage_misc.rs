@@ -450,3 +450,51 @@ pub fn adyh_talk_post(
         thread.as_deref(),
     )
 }
+
+// ================= 壁纸落盘 =================
+
+/// 把壁纸（`data:image/...;base64,...`）写到 `<appdata>/wallpapers/current.<ext>`，返回文件路径。
+///
+/// 为什么要落盘：壁纸原先直接以 data URL 存进 localStorage 键 `appBgImage`。同一 origin 的
+/// 配额是和会话/记忆等键共用的，实测一个 235KB 的壁纸值都会抛 QuotaExceededError
+/// （2026-11-01 日志），表现成「选张图当壁纸，弹窗却说对话记录可能丢了」。
+/// 改成只存路径，前端用 `read_file_base64` 读回来（视频背景一直是这个路子，无体积上限）。
+#[tauri::command]
+pub fn save_wallpaper(app: AppHandle, data_url: String) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("取 appdata 目录失败: {}", e))?
+        .join("wallpapers");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建壁纸目录失败: {}", e))?;
+
+    let (meta, b64) = data_url.split_once(',').ok_or("不是合法的 data URL")?;
+    let mime = meta.split(':').nth(1).unwrap_or("image/jpeg");
+    let ext = match mime.split(';').next().unwrap_or("image/jpeg") {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "jpg",
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    if bytes.is_empty() {
+        return Err("壁纸内容为空".to_string());
+    }
+
+    // 目录里只留当前这张：换壁纸不累积垃圾文件
+    let keep = format!("current.{}", ext);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.path().file_name().and_then(|n| n.to_str()) != Some(keep.as_str()) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let path = dir.join(&keep);
+    std::fs::write(&path, bytes).map_err(|e| format!("写入壁纸失败: {}", e))?;
+    Ok(path.to_string_lossy().into_owned())
+}

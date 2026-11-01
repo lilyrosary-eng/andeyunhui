@@ -45,6 +45,13 @@ interface PaletteConvEntry {
   conv: PaletteConv;
   submodule: 'chat' | 'work';
   label: string;
+  /**
+   * 快照期就摊平好的匹配素材（小写）。
+   * 原来每次按键都要对每个会话 slice(-6) + join + slice(600) + toLowerCase，
+   * 会话一多就是 ctrl+k 打字卡顿的主项之一；挪到 TTL 到点重建时才算一次。
+   */
+  title: string;
+  recent: string;
 }
 
 let paletteConvs: PaletteConvEntry[] = [];
@@ -58,11 +65,27 @@ function readConvList(key: string): PaletteConv[] {
   } catch { return []; }
 }
 
+function toPaletteEntry(conv: PaletteConv, submodule: 'chat' | 'work', label: string): PaletteConvEntry {
+  return {
+    conv,
+    submodule,
+    label,
+    title: conv.title || '新对话',
+    recent: (conv.messages ?? [])
+      .slice(-6)
+      .map((m) => m.content ?? '')
+      .join('\n')
+      .slice(0, 600)
+      .toLowerCase(),
+  };
+}
+
 function ensurePaletteConvs(force = false): void {
   if (!force && paletteConvsAt > 0 && Date.now() - paletteConvsAt < AI_PALETTE_TTL) return;
-  const chat = readConvList(AI_CHAT_KEY).map((conv) => ({ conv, submodule: 'chat' as const, label: '对话' }));
-  const work = readConvList(AI_WORK_KEY).map((conv) => ({ conv, submodule: 'work' as const, label: '任务' }));
-  paletteConvs = [...chat, ...work];
+  paletteConvs = [
+    ...readConvList(AI_CHAT_KEY).map((conv) => toPaletteEntry(conv, 'chat', '对话')),
+    ...readConvList(AI_WORK_KEY).map((conv) => toPaletteEntry(conv, 'work', '任务')),
+  ];
   paletteConvsAt = Date.now();
 }
 
@@ -72,7 +95,7 @@ try {
     label: 'AI 对话',
     moduleId: 'ai-chat',
     priority: 20,
-    refresh: () => ensurePaletteConvs(true),
+    refresh: () => ensurePaletteConvs(),
     search: (query) => {
       const q = query.trim().toLowerCase();
       if (!q) return [];
@@ -87,23 +110,27 @@ try {
         navigate?: NavigationTarget;
         run?: () => void;
       }> = [];
-      for (const entry of paletteConvs) {
+      // 用全站统一的打分器挑「最好的 40 条」，而不是「遍历到的前 40 条命中」；
+      // 正文命中打 5 折，让标题命中的排在前面（正文素材已在快照期摊平好）。
+      const score = window.__HOST_API__.makeScorer(query);
+      const ranked = paletteConvs
+        .map((e) => {
+          const titleScore = score(e.title);
+          return { e, s: Math.max(titleScore, score(e.recent) * 0.5), titleHit: titleScore > 150 };
+        })
+        .filter((x) => x.s > 0)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 40);
+      for (const { e: entry, titleHit } of ranked) {
         const { conv, submodule, label } = entry;
-        const recentText = (conv.messages ?? [])
-          .slice(-6)
-          .map((m) => m.content ?? '')
-          .join('\n')
-          .slice(0, 600);
-        const title = conv.title || '新对话';
-        const haystack = `${title}\n${recentText}`.toLowerCase();
-        if (!haystack.includes(q)) continue;
+        const title = entry.title;
         out.push({
           id: `${submodule}:${conv.id}`,
           title,
           subtitle: submodule === 'work' ? 'AI 办公 · 任务' : 'AI 对话',
           path: submodule === 'work' ? ['AI 办公', label] : ['对话'],
           iconName: 'Bot',
-          rank: title.toLowerCase().includes(q) ? 8 : 0,
+          rank: titleHit ? 8 : 0,
           navigate: {
             module: 'ai-chat',
             tabs: submodule === 'work' ? ['AI 办公', label] : ['对话'],
@@ -114,7 +141,6 @@ try {
             detail: { submodule, conversationId: conv.id },
           })),
         });
-        if (out.length >= 40) break;
       }
       return out;
     },

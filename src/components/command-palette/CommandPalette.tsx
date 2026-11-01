@@ -34,6 +34,7 @@ import { navigateTo } from '@/core/navigation/navigation';
 import { loadShortcutKeys, matchesShortcut, SHORTCUTS_CHANGED_EVENT } from '@/lib/shortcuts';
 import { requestSettingsTab } from '@/core/settings/settingsNav';
 import { parseScope, scoreFields } from '@/components/command-palette/scoring';
+import { matchQuery, prepareQuery, splitMatches } from '@/lib/fuzzy';
 import { useI18n } from '@/lib/i18n';
 
 interface CommandItem {
@@ -56,6 +57,27 @@ const RECENT_MAX = 12;
 const MAX_RESULTS = 60;
 const PROVIDER_RESULT_CAP = 12;
 const SCOPED_PROVIDER_RESULT_CAP = 40;
+
+/**
+ * 命中高亮。区间取自 matchQuery —— 与排序同一套匹配逻辑，
+ * 所以不会出现「高亮了一段却没排上来」或「排上来了却不高亮」两套手感打架。
+ * 只命中正文（标题里没有查询词）的 provider 结果自然没有区间，退化为纯文本。
+ */
+function Highlighted({ text, query }: { text: string; query: string }) {
+  const m = query.trim() ? matchQuery(prepareQuery(query), text) : null;
+  if (!m || m.ranges.length === 0) return <>{text}</>;
+  return (
+    <>
+      {splitMatches(text, m.ranges).map(([seg, hit], i) =>
+        hit ? (
+          <mark key={i} className="bg-transparent font-medium text-[var(--element-color-raw)]">{seg}</mark>
+        ) : (
+          <span key={i}>{seg}</span>
+        ),
+      )}
+    </>
+  );
+}
 
 function loadRecent(): string[] {
   try {
@@ -337,7 +359,7 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
           try {
             const results = await provider.search(effectiveQuery);
             if (cancelled) return;
-            for (const r of (results ?? []).slice(0, cap)) {
+            for (const [idx, r] of (results ?? []).slice(0, cap).entries()) {
               collected.push({
                 id: `prov:${provider.id}:${r.id}`,
                 title: r.title,
@@ -348,7 +370,9 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
                   ? <PluginIcon name={r.iconName} size={16} fallback={<Sparkles size={16} />} />
                   : <Sparkles size={16} />,
                 keywords: r.subtitle,
-                rank: r.rank,
+                // provider 自己已按分排过序：把名次编进 rank，既保住模块内部顺序，
+                // 也让「只命中正文」（标题不含查询）的结果不至于被下面的再打分静默丢掉。
+                rank: (r.rank ?? 0) + (cap - idx),
                 navigate: r.navigate,
                 run: async () => {
                   if (provider.moduleId) setActiveModule(provider.moduleId);
@@ -385,7 +409,9 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
     const scored = pool
       .map((item) => {
         const base = q ? scoreFields(item.title, item.subtitle, item.keywords, q) : 1;
-        if (base <= 0) return null;
+        // 模块 provider 的结果是它自己搜过一遍的：正文命中（标题里没有查询词）
+        // 不该在这里被 base<=0 静默丢弃，否则「按会话内容搜」这类能力名义上有、实际是哑的。
+        if (base <= 0 && !((item.rank ?? 0) > 0 && item.groupKey?.startsWith('prov:'))) return null;
         const usageBoost = Math.min(usage[item.id] ?? 0, 12) * 2;
         return {
           item,
@@ -478,7 +504,7 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
   let lastGroup: CommandItem['group'] | null = null;
   return createPortal(
     <div
-      className="fixed inset-0 z-[9998] flex items-start justify-center pt-[12vh] px-4 bg-black/35 backdrop-blur-[2px] fade-in"
+      className="fixed inset-0 z-[var(--layer-palette)] flex items-start justify-center pt-[12vh] px-4 bg-black/35 fade-in"
       onMouseDown={(e) => { if (e.target === e.currentTarget) closePalette(); }}
     >
       <div
@@ -536,10 +562,10 @@ export function CommandPalette({ onScreenshot }: CommandPaletteProps) {
                       {item.icon ?? <FileText size={16} />}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block text-sm truncate">{item.title}</span>
+                      <span className="block text-sm truncate"><Highlighted text={item.title} query={effectiveQuery} /></span>
                       {item.subtitle && (
                         <span className="block text-[11px] text-neutral-400 dark:text-stone-500 truncate">
-                          {item.subtitle}
+                          <Highlighted text={item.subtitle} query={effectiveQuery} />
                         </span>
                       )}
                     </span>

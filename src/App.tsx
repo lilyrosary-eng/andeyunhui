@@ -778,7 +778,7 @@ function App() {
       <CommandPalette onScreenshot={startScreenshot} />
       {/* 数据迁移进度遮罩：迁移进行中叠加在加载页之上，避免用户以为卡死 */}
       {migrationPct !== null && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[var(--layer-fullscreen)] flex items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="bg-white dark:bg-stone-800 rounded-2xl px-8 py-6 w-80 shadow-2xl text-center">
             <div className="text-sm text-neutral-600 dark:text-stone-300 mb-3">正在迁移数据，请稍候…</div>
             <div className="h-2 rounded-full bg-neutral-200 dark:bg-stone-700 overflow-hidden">

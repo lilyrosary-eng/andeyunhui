@@ -55,18 +55,9 @@ async function enumerateFiles(root: string): Promise<FileItem[]> {
   return files;
 }
 
-// 简单模糊匹配：子串优先，再按路径长度（短=近根=优先）
-function fuzzyScore(query: string, target: string): number {
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  const idx = t.indexOf(q);
-  if (idx < 0) return -1;
-  // 完整词匹配加分，路径短加分
-  let score = 100 - idx;
-  if (idx === 0 || t[idx - 1] === '/' || t[idx - 1] === '\\') score += 50;
-  score -= t.length * 0.1;
-  return score;
-}
+// 模糊打分统一走宿主（src/lib/fuzzy.ts 的 cx() 移植），别再留一份本地实现：
+// 原来这里是「子串优先 + 短路径加分」，与命令面板、模型搜索的排序手感不一致。
+const fuzzyScore: (query: string, target: string) => number = hostApi.fuzzyScore;
 
 export function CommandPalette({ open, onOpenChange, root, onOpenFile, commands, initialMode }: CommandPaletteProps) {
   const [query, setQuery] = useState('');

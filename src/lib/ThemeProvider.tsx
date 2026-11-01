@@ -1,8 +1,9 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode, type RefObject } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { isAndroid } from '../platform/isMobile';
 import { HEAVY_FX } from '../platform/isLinux';
+import { sampleWallpaper, scrimPctFor, type WallpaperSample } from './wallpaperProbe';
 import { storage } from '../core/storage';
 import { KEYS } from '../core/storage/keys';
 
@@ -147,8 +148,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [fontFamily, setFontFamilyState] = useState<string>(() => {
     return storage.getString(KEYS.theme.fontFamily.key, '') || '系统默认';
   });
+  // appBgImage 现在存的是**文件路径**（Rust 命令 save_wallpaper 落盘）；旧版本存的是 data URL。
+  // data URL 可以直接当 src 用（挂载时顺手迁成文件，配额立刻回血）；路径要异步读回来。
   const [bgImage, setBgImageState] = useState<string | null>(() => {
-    return storage.getString(KEYS.theme.appBgImage.key, '') || null;
+    const v = storage.getString(KEYS.theme.appBgImage.key, '');
+    return v.startsWith('data:') ? v : null;
   });
   const [bgBlur, setBgBlurState] = useState<number>(() => {
     return Number(storage.getString(KEYS.theme.appBgBlur.key, '')) || 0;
@@ -168,6 +172,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [bgVideoPersist, setBgVideoPersistState] = useState<boolean>(() => {
     return storage.getString(KEYS.theme.appBgVideoPersist.key, '') === '1';
   });
+  // 壁纸取样结果（见 lib/wallpaperProbe）：lum 决定交互叠色的墨向，
+  // blurUrl 是被全局关掉 backdrop-filter 的引擎（Linux）替代运行时模糊用的预糊图。
+  const [wallpaperFx, setWallpaperFx] = useState<WallpaperSample>({ lum: null, blurUrl: null });
 
   // resolved 的 ref，供 useCallback 内读取最新值而不触发依赖变化
   const resolvedRef = useRef(resolved);
@@ -228,9 +235,40 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const setBgImage = useCallback((val: string | null) => {
     setBgImageState(val);
-    if (val) storage.setString(KEYS.theme.appBgImage.key, val);
-    else storage.remove(KEYS.theme.appBgImage.key);
+    if (!val) {
+      storage.remove(KEYS.theme.appBgImage.key);
+      return;
+    }
+    // 只往 localStorage 写路径：data URL 挤的是和会话/记忆共用的那份配额，实测 235KB
+    // 就能抛 QuotaExceededError，而且失败时提示的还是「对话记录可能丢了」。
+    // 落盘失败 → 本次仍可用、重启不保留，只在日志留痕，不再误报丢会话。
+    if (!val.startsWith('data:')) {
+      storage.setString(KEYS.theme.appBgImage.key, val);
+      return;
+    }
+    invoke<string>('save_wallpaper', { dataUrl: val })
+      .then((p) => storage.setString(KEYS.theme.appBgImage.key, p))
+      .catch((err) => console.error('[theme] 壁纸落盘失败（本次仍可用，重启后不保留）:', err));
   }, []);
+
+  // 启动时恢复壁纸：路径 → 读回 data URL 供背景层与亮度取样使用；
+  // 读到旧的 data URL 直接迁成文件。
+  const bgRestoredRef = useRef(false);
+  useEffect(() => {
+    if (bgRestoredRef.current) return;
+    bgRestoredRef.current = true;
+    const raw = storage.getString(KEYS.theme.appBgImage.key, '');
+    if (!raw) return;
+    if (raw.startsWith('data:')) {
+      setBgImage(raw);
+      return;
+    }
+    void invoke<string>('read_file_base64', { filePath: raw })
+      .then((url) => {
+        if (url) setBgImageState(url);
+      })
+      .catch((err) => console.error('[theme] 壁纸文件读取失败:', err));
+  }, [setBgImage]);
 
   const setBgBlur = useCallback((val: number) => {
     setBgBlurState(val);
@@ -283,10 +321,48 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (p) setBgVideo(convertFileSrc(p));
   }, [bgVideoPersist, setBgVideo]);
 
-  // 切换自定义背景时，标记 <html> 以便 CSS 让主面板背景透明，露出背景层
+  // 切换自定义背景时，标记 <html> 以便 CSS 把表面涂层降档（见 index.css 的分层令牌）
   useEffect(() => {
     document.documentElement.classList.toggle('has-custom-bg', !!(bgImage || bgVideo));
   }, [bgImage, bgVideo]);
+
+  // 唯一旋钮 --scrim-pct：纯色态 100%（分层不改变任何像素），壁纸态用固定衬底强度。
+  // 刻意不跟 panelOpacity 联动：那个滑杆管的是 glass 面板，接到壁纸衬底上会变成 80% 的
+  // 奶白幕（2026-11-01 用户实测否决）。要出「壁纸衬底」独立滑杆时再接。
+  useEffect(() => {
+    document.documentElement.style.setProperty('--scrim-pct', scrimPctFor(!!(bgImage || bgVideo)));
+  }, [bgImage, bgVideo]);
+
+  // 壁纸取样：只在背景源/模糊度变化时跑一次（逐帧取样在本项目有过的内存事故）
+  useEffect(() => {
+    const src = bgImage || bgVideo;
+    if (!src) {
+      setWallpaperFx({ lum: null, blurUrl: null });
+      return;
+    }
+    // 预糊图只在「引擎跑不动 backdrop-filter + 背景是图片 + 用户要模糊」时才生成：
+    // Windows/macOS 走 filter: blur 效果更好，不必多花一次画布成本。
+    const wantBlur = !HEAVY_FX && !bgVideo && bgBlur > 0;
+    let alive = true;
+    sampleWallpaper(src, bgVideo ? 'video' : 'image', { blurPx: bgBlur, wantBlur }).then((fx) => {
+      if (alive) setWallpaperFx(fx);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [bgImage, bgVideo, bgBlur]);
+
+  // 把取样结果写成 CSS 变量。无背景时必须 remove：内联变量比 .dark 类规则优先级高，
+  // 留着会让纯色态继续吃上一张图的亮度，主题切换就失效了。
+  useEffect(() => {
+    const root = document.documentElement;
+    const hasWallpaper = !!(bgImage || bgVideo);
+    if (!hasWallpaper || wallpaperFx.lum === null) {
+      root.style.removeProperty('--surface-lum');
+      return;
+    }
+    root.style.setProperty('--surface-lum', String(wallpaperFx.lum));
+  }, [bgImage, bgVideo, wallpaperFx]);
 
   // 背景层 DOM 引用 + 是否“超高图”（高度比大于视口，cover 下纵向溢出被截断）
   const bgLayerRef = useRef<HTMLElement | null>(null);
@@ -407,6 +483,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const coverScale = 1 / Math.max(Math.cos(angleRad), Math.SQRT1_2);
   const layerScale = Math.max(1.08, coverScale);
   const layerTransform = `rotate(${bgAngle}deg) scaleX(${bgFlip ? -1 : 1}) scale(${layerScale})`;
+  // 跑不动重特效的引擎（Linux WebKitGTK）用预糊图替代 filter: blur ——
+  // 之前 bgBlur 滑杆在这些平台上是静默失效的（HEAVY_FX=false 直接把 filter 关掉）。
+  const wallpaperSrc = !HEAVY_FX && wallpaperFx.blurUrl ? wallpaperFx.blurUrl : bgImage;
 
   return (
     <ThemeContext.Provider value={{ theme, resolved, setTheme, themeColor, setThemeColor, elementColor, setElementColor, reverseColor, setReverseColor, zoom, setZoom, panelOpacity, setPanelOpacity, fontFamily, setFontFamily, bgImage, setBgImage, bgVideo, setBgVideo, bgVideoPersist, setBgVideoPersist, bgBlur, setBgBlur, bgAngle, setBgAngle, bgFlip, setBgFlip, bgScrub, setBgScrub }}>
@@ -422,7 +501,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
           style={{
             position: 'fixed',
             inset: 0,
-            zIndex: 0,
+            zIndex: 'var(--layer-wallpaper, 0)',
             width: '100%',
             height: '100%',
             display: 'block',
@@ -441,8 +520,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
           style={{
             position: 'fixed',
             inset: 0,
-            zIndex: 0,
-            backgroundImage: `url("${bgImage}")`,
+            zIndex: 'var(--layer-wallpaper, 0)',
+            backgroundImage: `url("${wallpaperSrc}")`,
             backgroundSize: 'cover',
             backgroundPosition: 'center',
             backgroundRepeat: 'no-repeat',
@@ -460,8 +539,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         ref={zoomRef}
         style={
           isAndroid()
-            ? { position: 'relative', zIndex: 1 }
-            : { zoom: `${zoom}%`, position: 'relative', zIndex: 1 }
+            ? { position: 'relative', zIndex: 'var(--layer-content, 1)' }
+            : { zoom: `${zoom}%`, position: 'relative', zIndex: 'var(--layer-content, 1)' }
         }
       >
         {children}

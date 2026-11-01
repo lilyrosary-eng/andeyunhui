@@ -60,7 +60,7 @@ try {
     label: '知识库',
     moduleId: 'rag',
     priority: 15,
-    refresh: () => ensurePaletteSources(true),
+    refresh: () => ensurePaletteSources(),
     search: async (query) => {
       const q = query.trim().toLowerCase();
       if (!q) return [];
@@ -75,20 +75,28 @@ try {
         navigate?: NavigationTarget;
         run?: () => void;
       }> = [];
-      for (const source of paletteSources) {
-        const haystack = `${source.title} ${source.uri} ${source.type}`.toLowerCase();
-        if (!haystack.includes(q)) continue;
+      // 按分取最好的 40 条，而不是遍历顺序里前 40 个命中
+      const score = window.__HOST_API__.makeScorer(query);
+      const ranked = paletteSources
+        .map((source) => {
+          const titleScore = score(source.title || '');
+          const hayScore = score(`${source.title} ${source.uri} ${source.type}`.toLowerCase());
+          return { source, titleHit: titleScore > 150, s: Math.max(titleScore, hayScore * 0.6) };
+        })
+        .filter((x) => x.s > 0)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 40);
+      for (const { source, titleHit } of ranked) {
         out.push({
           id: source.id,
           title: source.title || source.uri || '未命名来源',
           subtitle: `${source.type} · ${source.chunk_count} 块`,
           path: ['来源'],
           iconName: 'BookOpen',
-          rank: (source.title || '').toLowerCase().includes(q) ? 8 : 0,
+          rank: titleHit ? 8 : 0,
           navigate: { module: 'rag', tabs: ['知识库', '来源'], entity: source.id, props: { view: 'manage', sourceId: source.id } },
           run: () => window.dispatchEvent(new CustomEvent('andy:rag-focus', { detail: { sourceId: source.id } })),
         });
-        if (out.length >= 40) break;
       }
       return out;
     },

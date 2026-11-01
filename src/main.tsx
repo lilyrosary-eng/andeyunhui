@@ -17,17 +17,21 @@ if (isLinux()) document.documentElement.classList.add('is-linux');
 
 // 尽早初始化前端全局错误捕获：把 window.onerror / unhandledrejection / console.error 写入会话日志文件
 initFileLogger();
-// 存储写入失败（几乎只可能是 localStorage 配额已满）→ 留痕 + **一次性**可见告警。
+// 存储写入失败（几乎只可能是 localStorage 配额已满）→ 留痕 + **每种告警各一次**可见提示。
 // 之前是静默 catch：用户看到的是「历史记录莫名丢失」，现场毫无线索。
-// 告警只弹一次（本会话），避免持续写入失败时反复打断。
+// 话术必须按键分：壁纸写不进去却提示「对话记录可能丢了」，会把人引去清会话，
+// 而真正该做的是换张小图（2026-11-01 用户实测就是这个弹窗）。
 {
-  let warned = false;
+  const warned = new Set<string>();
   setStorageWriteFailureHandler((key, err) => {
     console.error("[storage] 写入失败 key=", key, err);
-    if (warned) return;
-    warned = true;
+    const msg = key === KEYS.theme.appBgImage.key
+      ? "壁纸体积太大，本地存储空间放不下：本次仍可使用，但重启后不会保留。\n建议换一张小一点的图，或先清理一些历史会话腾出空间。"
+      : "本地存储空间已满，最近的对话记录可能没有保存成功。\n建议清理一些历史会话后重试。";
+    if (warned.has(msg)) return;
+    warned.add(msg);
     try {
-      window.alert("本地存储空间已满，最近的对话记录可能没有保存成功。\n建议清理一些历史会话后重试。");
+      window.alert(msg);
     } catch {
       /* 非浏览器环境忽略 */
     }

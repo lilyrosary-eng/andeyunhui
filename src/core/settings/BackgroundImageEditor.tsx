@@ -19,7 +19,18 @@ interface HistoryEntry {
 
 const BOX_W = 320;
 const BOX_H = 200;
-const MAX_OUTPUT = 1600;
+/**
+ * 壁纸最终要写进 localStorage（键 appBgImage），base64 还会再膨胀约 1.33 倍，
+ * 而这份配额是和会话记录共用的。超过约 2M 字符就别再往上摞了：
+ * 代价不是"壁纸糊一点"，而是配额爆掉、写入静默失败、用户以为丢的是聊天记录。
+ */
+const MAX_STORE_CHARS = 2_000_000;
+/** 静态导出降档阶梯：[最长边, JPEG 质量]，从最清晰开始，超预算就降一档 */
+const STATIC_EXPORT_LADDER: ReadonlyArray<readonly [number, number]> = [
+  [1600, 0.85],
+  [1280, 0.7],
+  [1024, 0.55],
+];
 
 /** 图片按角度旋转后的外接矩形尺寸 */
 function rotatedBox(w: number, h: number, deg: number): { w: number; h: number } {
@@ -130,35 +141,53 @@ export function BackgroundImageEditor({ src, file, onCancel, onDone }: Props) {
       onDone(src, angle, flipH);
       return;
     }
-    const img = imgRef.current;
-    if (!img) return;
+    // 导出原图（最长边限制），旋转/翻转交由背景层以 CSS transform 应用，
+    // 避免裁掉内容或导出后四角透出底色。超预算就沿阶梯降档，直到落进存储预算。
+    const exportStatic = () => {
+      const img = imgRef.current;
+      if (!img) return;
+      const m = Math.max(img.width, img.height);
+      if (!m) return;
+      let fallback = '';
+      for (const [edge, quality] of STATIC_EXPORT_LADDER) {
+        const k = Math.min(1, edge / m);
+        const ow = Math.max(1, Math.round(img.width * k));
+        const oh = Math.max(1, Math.round(img.height * k));
+        const canvas = document.createElement('canvas');
+        canvas.width = ow;
+        canvas.height = oh;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, ow, oh);
+        const url = canvas.toDataURL('image/jpeg', quality);
+        if (url.length <= MAX_STORE_CHARS) {
+          onDone(url, angle, flipH);
+          return;
+        }
+        fallback = url;
+      }
+      // 一路降到底仍超预算（极端长图）：仍交出去，由 storage 层的写入失败告警兜底
+      if (fallback) onDone(fallback, angle, flipH);
+    };
     // GIF / 动态 WebP 且未旋转/翻转：直接透传原图 dataURL，保留动图。
-    // 若用户旋转/翻转了动图，则必须走下方静态导出（动图无法靠 CSS transform 逐帧旋转）。
+    // 若用户旋转/翻转了动图，则必须走静态导出（动图无法靠 CSS transform 逐帧旋转）。
+    // 透传前先看体积：动图动辄十几 MB，塞进 localStorage 会挤爆配额，
+    // 表现就是「选张图当壁纸，弹窗说对话记录可能丢了」——所以超预算宁可退化成静态。
     if (file && (file.type === 'image/gif' || file.type === 'image/webp') && angle === 0 && !flipH) {
       const reader = new FileReader();
       reader.onload = () => {
-        if (typeof reader.result === 'string') onDone(reader.result, 0, false);
+        const raw = reader.result;
+        if (typeof raw === 'string' && raw.length <= MAX_STORE_CHARS) {
+          onDone(raw, 0, false);
+          return;
+        }
+        exportStatic();
       };
+      reader.onerror = () => exportStatic();
       reader.readAsDataURL(file);
       return;
     }
-    // 导出原图（最长边限制），旋转/翻转交由背景层以 CSS transform 应用，
-    // 避免裁掉内容或导出后四角透出底色。
-    let ow = img.width;
-    let oh = img.height;
-    const m = Math.max(ow, oh);
-    if (m > MAX_OUTPUT) {
-      const k = MAX_OUTPUT / m;
-      ow = Math.round(ow * k);
-      oh = Math.round(oh * k);
-    }
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, ow);
-    canvas.height = Math.max(1, oh);
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(img, 0, 0, ow, oh);
-    onDone(canvas.toDataURL('image/jpeg', 0.85), angle, flipH);
+    exportStatic();
   }, [angle, flipH, onDone, file, isVideo, src]);
 
   return (

@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { storage } from '@/core/storage';
 import { KEYS } from '@/core/storage/keys';
+import { auditStorage, formatBytes, storageWarning } from '@/lib/storageAudit';
 
 // ========== 类型 ==========
 type OutputKind = 'in' | 'out' | 'err' | 'sys';
@@ -36,7 +37,7 @@ interface LogFileInfo {
 // ========== 开发者控制台：开发调试工具，不设命令白名单/黑名单限制 ==========
 const COMMAND_NAMES = [
   'help', 'clear', 'echo', 'pwd', 'ls',
-  'logs', 'log', 'backup', 'install', 'refresh', 'reload', 'http',
+  'logs', 'log', 'storage', 'backup', 'install', 'refresh', 'reload', 'http',
 ];
 
 // ========== 帮助文本 ==========
@@ -49,6 +50,7 @@ const HELP_TEXT = `开发者控制台 · 热指令列表
 :ls <path>                    列出指定目录内容
 :logs                         列出会话日志文件
 :log <name>                  读取指定日志内容（如 :log session_20250101_120000.log）
+:storage                     localStorage 占用排行（排查配额被谁占满）
 :backup                       导出数据备份（弹出保存对话框）
 :install                      安装 .mufurong / .mujin 文件（弹出文件选择）
 :refresh                      刷新插件列表（重新扫描 user_plugins / user_external_deps）
@@ -161,6 +163,20 @@ export function DevConsole() {
             );
             pushOutput('out', lines.join('\n'));
           }
+          break;
+        }
+
+        case 'storage': {
+          const audit = await auditStorage();
+          const top = audit.items.slice(0, 20);
+          const rows = top.map((it) => `${formatBytes(it.bytes).padStart(10)}  ${it.key}`);
+          const head = `localStorage：${audit.items.length} 个键，合计 ${formatBytes(audit.totalBytes)}` +
+            (audit.quotaBytes
+              ? ` / 配额 ${formatBytes(audit.quotaBytes)}（已用 ${((audit.usedRatio ?? 0) * 100).toFixed(1)}%）`
+              : '（配额未知：引擎未暴露 StorageManager.estimate）');
+          pushOutput('out', `${head}\n按占用降序（前 ${top.length} 条）：\n${rows.join('\n') || '(空)'}`);
+          const warn = storageWarning(audit);
+          if (warn) pushOutput('err', warn);
           break;
         }
 

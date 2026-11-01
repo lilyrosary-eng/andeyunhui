@@ -83,6 +83,63 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
   const [fileInfoLoading, setFileInfoLoading] = useState(false);
   const [fileInfoError, setFileInfoError] = useState(false);
   const [loadedSize, setLoadedSize] = useState<{ width: number; height: number } | null>(null);
+  // 图片信息浮层位置：null = 默认右下角；拖动过之后改由 left/top 决定（钳在查看区内）。
+  // 刻意不持久化：跨图片/跨主题都保留同一位置已够用，存盘要引入插件侧 storage key 与迁移，不值。
+  const [infoPos, setInfoPos] = useState<{ x: number; y: number } | null>(null);
+
+  const infoCardRef = useRef<HTMLDivElement>(null);
+  const infoDragRef = useRef<{
+    dx: number; dy: number;   // 指针落在卡片内的偏移（未缩放布局像素）
+    ax: number; ay: number;   // 查看区的视口原点（client 像素）
+    w: number; h: number;     // 卡片尺寸（布局像素）
+    aw: number; ah: number;   // 查看区尺寸（布局像素）
+    scale: number;            // 整站 zoom：client 像素 / 布局像素
+  } | null>(null);
+
+  const startInfoDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    const card = infoCardRef.current;
+    const area = viewAreaRef.current;
+    if (!card || !area) return;
+    const c = card.getBoundingClientRect();
+    const a = area.getBoundingClientRect();
+    // 应用整体套在 ThemeProvider 的 zoom 包裹层里：getBoundingClientRect 给的是缩放后的
+    // 视觉像素，而 style.left/top 写的是未缩放的布局像素。不换算就会「起手跳位 + 不跟手」，
+    // 不减掉查看区原点（ax/ay）就会整体偏一个状态栏+侧栏的距离。
+    const scale = area.clientWidth > 0 ? a.width / area.clientWidth : 1;
+    setInfoPos({ x: (c.left - a.left) / scale, y: (c.top - a.top) / scale });
+    infoDragRef.current = {
+      dx: (e.clientX - c.left) / scale,
+      dy: (e.clientY - c.top) / scale,
+      ax: a.left,
+      ay: a.top,
+      w: card.offsetWidth,
+      h: card.offsetHeight,
+      aw: area.clientWidth,
+      ah: area.clientHeight,
+      scale,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const moveInfoDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = infoDragRef.current;
+    if (!d) return;
+    // 键已松但 pointerup 丢了（失焦/触摸板）：以 buttons 位为准停拖
+    if (e.buttons === 0) {
+      infoDragRef.current = null;
+      return;
+    }
+    const x = (e.clientX - d.ax) / d.scale - d.dx;
+    const y = (e.clientY - d.ay) / d.scale - d.dy;
+    setInfoPos({
+      x: Math.min(Math.max(x, 0), Math.max(0, d.aw - d.w)),
+      y: Math.min(Math.max(y, 0), Math.max(0, d.ah - d.h)),
+    });
+  };
+
+  const endInfoDrag = () => {
+    infoDragRef.current = null;
+  };
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const fullImageRef = useRef<HTMLDivElement>(null);
@@ -785,10 +842,21 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
           return (
             <div className="absolute inset-0 z-40 pointer-events-none" onClick={() => setInfoOpen(false)}>
               <div
-                className="pointer-events-auto absolute right-4 bottom-4 w-[min(340px,calc(100%-32px))] rounded-2xl border border-white/70 dark:border-stone-600/50 bg-white/92 dark:bg-stone-800/92 backdrop-blur-sm shadow-2xl shadow-black/20 p-4"
+                ref={infoCardRef}
+                className={`pointer-events-auto absolute ${infoPos ? '' : 'right-4 bottom-4'} w-[min(340px,calc(100%-32px))] rounded-2xl border border-white/70 dark:border-stone-600/50 bg-white/92 dark:bg-stone-800/92 backdrop-blur-sm shadow-2xl shadow-black/20 p-4`}
+                style={infoPos ? { left: infoPos.x, top: infoPos.y } : undefined}
                 onClick={(e) => e.stopPropagation()}
               >
-                <div className="flex items-start justify-between gap-3 mb-3">
+                {/* 标题行是拖拽把手：按住它可在查看区内移动，松手即停（不持久化、不越界） */}
+                <div
+                  className="flex items-start justify-between gap-3 mb-3 cursor-grab select-none"
+                  style={{ touchAction: 'none' }}
+                  onPointerDown={startInfoDrag}
+                  onPointerMove={moveInfoDrag}
+                  onPointerUp={endInfoDrag}
+                  onPointerCancel={endInfoDrag}
+                  onLostPointerCapture={endInfoDrag}
+                >
                   <div className="min-w-0">
                     <h3 className="text-sm font-medium text-neutral-700 dark:text-stone-200 truncate">{T('image.viewer.info.title')}</h3>
                     <p className="mt-1 text-[11px] text-neutral-500 dark:text-stone-400 break-all leading-relaxed" title={currentPath}>{currentPath}</p>
@@ -796,7 +864,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
                   <button
                     type="button"
                     onClick={() => setInfoOpen(false)}
-                    className="shrink-0 p-1 rounded-md text-neutral-400 hover:bg-black/5 hover:text-neutral-700 dark:text-stone-500 dark:hover:bg-white/5 dark:hover:text-stone-200"
+                    className="shrink-0 p-1 rounded-md cursor-pointer text-neutral-400 hover:bg-black/5 hover:text-neutral-700 dark:text-stone-500 dark:hover:bg-white/5 dark:hover:text-stone-200"
                     title={T('common.close')}
                     aria-label={T('common.close')}
                   >

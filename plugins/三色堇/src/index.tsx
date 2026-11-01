@@ -111,7 +111,7 @@ try {
     label: '阅读',
     moduleId: 'reading',
     priority: 25,
-    refresh: () => ensurePaletteBooks(true),
+    refresh: () => ensurePaletteBooks(),
     search: async (query) => {
       const q = query.trim().toLowerCase();
       if (!q) return [];
@@ -126,20 +126,29 @@ try {
         navigate?: NavigationTarget;
         run?: () => void;
       }> = [];
-      for (const book of paletteBooks) {
-        const haystack = `${book.title} ${book.parentDir} ${book.filePath}`.toLowerCase();
-        if (!haystack.includes(q)) continue;
+      // 按分取最好的 40 条。paletteBooks 是按书名排序的，原来「遍历到前 40 个命中就停」
+      // 等于书名靠后的书基本搜不到。
+      const score = hostApi.makeScorer(query);
+      const ranked = paletteBooks
+        .map((book) => {
+          const titleScore = score(book.title);
+          const hayScore = score(`${book.title} ${book.parentDir} ${book.filePath}`.toLowerCase());
+          return { book, titleHit: titleScore > 150, s: Math.max(titleScore, hayScore * 0.6) };
+        })
+        .filter((x) => x.s > 0)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 40);
+      for (const { book, titleHit } of ranked) {
         results.push({
           id: book.filePath,
           title: book.title,
           subtitle: [book.format?.toUpperCase(), book.parentDir].filter(Boolean).join(' · '),
           path: [book.parentDir || '书库'],
           iconName: 'BookOpen',
-          rank: book.title.toLowerCase().includes(q) ? 8 : 0,
+          rank: titleHit ? 8 : 0,
           navigate: { module: 'reading', tabs: [book.parentDir || '书库'], entity: book.filePath, props: { filePath: book.filePath } },
           run: () => window.dispatchEvent(new CustomEvent('andy:reading-open', { detail: { filePath: book.filePath } })),
         });
-        if (results.length >= 40) break;
       }
       // 高亮/批注条目：navigate 携带 props {chapterIndex, highlightId}，
       // 阅读导航处理器据此「打开书 → 定位章节 → 滚动到该高亮」

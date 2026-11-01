@@ -64,11 +64,78 @@
     --element-border: rgba(90, 127, 93, 0.3);
     --panel-opacity: 0.8;
 
-    /* 主题面板色：改变面板/导航栏背景（通过 color-mix 混合白色） */
+    /* ========================================================================
+     * 表面分层（方案A）：壁纸 → 衬底 → 表面 → 叠色 四层
+     * ----------------------------------------------------------------------------
+     * 要解决的问题：自定义背景（图片/视频）过去靠 index.css 里近百行
+     * `html.has-custom-bg .xxx { background: rgba(...)!important }` 逐类压透明度，
+     * 每个数都是手调的，且「叠色」直接落在壁纸上 —— 于是一张亮天空图就能让
+     * hover/selected 消失、让正文对比度不可控。这里改成分层：
+     *
+     *   1. 交互叠色**永远落在衬底上，永远不接触壁纸**；
+     *   2. 衬底强度是**一个常数**：lib/wallpaperProbe.ts 的 WALLPAPER_SCRIM_PCT（当前 32%），
+     *      取值回到旧补丁的实际强度。2026-11-01 曾把它接到「面板透明度」滑杆（默认 80）上
+     *      并设 55% 保底，用户实测判定"太淡了，不如原来的"→ 退回原观感。
+     *      以后要"更实"请加独立滑杆，别再改这里、也别往下面那段补字面 rgba；
+     *   3. `--surface-lum` = 「衬底之下实际有多亮」的估计值：纯色态由主题给定，
+     *      壁纸态由 lib/wallpaperProbe 采样写入；`--state-ink` 据此**反向取墨**，
+     *      于是同一条 hover 规则在白壁纸与黑壁纸上都可辨
+     *      （Obsidian `--mono-100` 双主题反转的壁纸版）。
+     *
+     * 不变量：纯色态 `--scrim-pct: 100%` → 下面所有 surface 都是实色，且本层的
+     * 消费方全部只写在 `html.has-custom-bg` 选择器内 → 未选背景图时零像素变化。
+     * ======================================================================== */
+
+    /* L0 原始色板：把原先散在 color-mix / rgba 字面量里的「底」收进来 */
+    --base-surface: #ffffff; /* 主面板 / 导航底 */
+    --base-paper: #f5f5f0;   /* 插件"纸面"底，与 bg-[#f5f5f0] 同源 */
+
+    /* L1.5 表面涂层 —— 唯一旋钮 --scrim-pct 由 ThemeProvider 写。
+       取色源用「已混过主题面板色」的 --main-panel-bg / --nav-*-bg，而不是中性底：
+       否则一开壁纸，整站就丢了用户选的色调身份（只剩一层纯白/纯黑薄膜）。 */
+    --scrim-pct: 100%;
+    --surface-1: color-mix(in oklab, var(--main-panel-bg) var(--scrim-pct), transparent);
+    /* 比 --surface-1 实一档：在其之上再压 30% 本色。
+       绕开「color-mix 百分比里套 calc()」这条引擎兼容性差的写法。 */
+    --surface-2: color-mix(in oklab, var(--main-panel-bg) 30%, var(--surface-1));
+    --surface-paper: color-mix(in oklab, var(--base-paper) var(--scrim-pct), transparent);
+    /* 纯 chrome（上栏 / 图标栏 / 侧栏）常态全透：它们不承载正文 */
+    --surface-chrome: transparent;
+    --surface-chrome-hover: color-mix(in oklab, var(--nav-primary-bg) 25%, var(--surface-chrome));
+    /* 二级侧栏是内容面板（要读列表文字），悬停比图标栏实一档 */
+    --surface-chrome-solid: color-mix(in oklab, var(--nav-secondary-bg) 45%, var(--surface-chrome));
+    /* 装饰内层：坐在衬底之上，只做方向自适应的薄染（不再写死 white / stone）。
+       档位对齐旧值：inner-1≈0.06~0.14，inner-2≈0.16~0.22，inner-3≈0.2~0.24（抽屉顶栏要压住滚动内容） */
+    --surface-inner-1: color-mix(in oklab, var(--state-ink) 5%, transparent);
+    --surface-inner-2: color-mix(in oklab, var(--state-ink) 9%, transparent);
+    --surface-inner-3: color-mix(in oklab, var(--state-ink) 20%, transparent);
+
+    /* L2 交互叠色 */
+    --surface-lum: 0.96; /* 纯色态：浅色主题底下就是亮的 → 墨取黑 */
+    --state-ink: hsl(0, 0%, calc((1 - var(--surface-lum)) * 100%));
+    --state-hover: color-mix(in oklab, var(--state-ink) 12%, transparent);
+    /* 壁纸上唯一稳定的反馈是**边缘与位移**，不是亮度膜：hover 三件套一起给 */
+    --state-ring: inset 0 0 0 1px color-mix(in oklab, var(--theme-panel-color) 45%, transparent);
+    --state-lift: translateY(-1px);
+
+    /* 主题面板色：改变面板/导航栏背景（通过 color-mix 混合底色） */
     --theme-panel-color: #5a7f5d;
-    --nav-primary-bg: color-mix(in srgb, #ffffff 95%, var(--theme-panel-color) 5%);
-    --nav-secondary-bg: color-mix(in srgb, #ffffff 90%, var(--theme-panel-color) 10%);
-    --main-panel-bg: color-mix(in srgb, #ffffff 85%, var(--theme-panel-color) 15%);
+    --nav-primary-bg: color-mix(in srgb, var(--base-surface) 95%, var(--theme-panel-color) 5%);
+    --nav-secondary-bg: color-mix(in srgb, var(--base-surface) 90%, var(--theme-panel-color) 10%);
+    --main-panel-bg: color-mix(in srgb, var(--base-surface) 85%, var(--theme-panel-color) 15%);
+
+    /* ========== 设计令牌：层级（z-index）枚举 ==========
+       取"现有实际值"而不是照搬 Obsidian 的 5/10/30/45/50/60/65/70 —— 后者会和仓库里
+       已有的 10~100 段（模块内浮层、下拉、卡片）整片撞车，那一段还没收进来。
+       顶端这一坨才是真病灶：9998/9999/10000/10001 散在命令面板、截图覆盖层与宿主遮罩里，
+       谁压谁全凭字面数字大小。新增全屏级浮层请从这里取，别再手写大数。 */
+    --layer-wallpaper: 0;        /* 自定义背景层（图片/视频） */
+    --layer-content: 1;          /* 应用内容（zoom 包裹层） */
+    --layer-modal: 1000;         /* 应用内弹窗 */
+    --layer-palette: 9998;       /* 命令面板：低于全屏覆盖层，让截图流程能盖住它 */
+    --layer-fullscreen: 9999;    /* 截图/全屏遮罩 */
+    --layer-fullscreen-above: 10000;  /* 遮罩内的跟随层（如取色预览） */
+    --layer-fullscreen-toast: 10001;  /* 遮罩内的提示条，必须在最上 */
 
     /* ========== 设计令牌：间距（供插件内联 style 与 host 统一引用）========== */
     --space-1: 0.25rem;
@@ -189,10 +256,35 @@
     --element-muted: rgba(90, 127, 93, 0.15);
     --element-border: rgba(90, 127, 93, 0.4);
 
-    /* 主题面板色（深色模式，混合深色背景） */
-    --nav-primary-bg: color-mix(in srgb, #1c1917 95%, var(--theme-panel-color) 5%);
-    --nav-secondary-bg: color-mix(in srgb, #1c1917 90%, var(--theme-panel-color) 10%);
-    --main-panel-bg: color-mix(in srgb, #1c1917 85%, var(--theme-panel-color) 15%);
+    /* L0 原始色板（深色）：只换这一层，L1.5/L2 全是 var() 引用，自动跟随 */
+    --base-surface: #1c1917;
+    --base-paper: #1c1917;
+    /* 纯色态：深色主题底下就是暗的 → 墨取白，hover 是"提亮" */
+    --surface-lum: 0.1;
+
+    /* 主题面板色（深色模式，混合深色底） */
+    --nav-primary-bg: color-mix(in srgb, var(--base-surface) 95%, var(--theme-panel-color) 5%);
+    --nav-secondary-bg: color-mix(in srgb, var(--base-surface) 90%, var(--theme-panel-color) 10%);
+    --main-panel-bg: color-mix(in srgb, var(--base-surface) 85%, var(--theme-panel-color) 15%);
+  }
+
+  /* 引擎级兜底（对引擎不对单设备）：不支持 color-mix 时表面退回实色，
+     自定义背景只是"透不出来"，不会出现整片面板变透明的可读性事故。
+     叠色退回中性灰：黑/白实色墨在未混色的状态下会把 hover 变成补丁。 */
+  @supports not (color: color-mix(in oklab, black, white)) {
+    :root,
+    .dark {
+      --surface-1: var(--main-panel-bg);
+      --surface-2: var(--main-panel-bg);
+      --surface-paper: var(--base-paper);
+      --surface-chrome-hover: var(--nav-primary-bg);
+      --surface-chrome-solid: var(--nav-secondary-bg);
+      --surface-inner-1: rgba(128, 128, 128, 0.06);
+      --surface-inner-2: rgba(128, 128, 128, 0.1);
+      --surface-inner-3: rgba(128, 128, 128, 0.14);
+      --state-hover: rgba(128, 128, 128, 0.16);
+      --state-ring: inset 0 0 0 1px rgba(128, 128, 128, 0.5);
+    }
   }
   .reverse-color {
     --element-bg: white;
@@ -312,96 +404,110 @@
   html.immersive-mode .immersive-ocr-panel {
     top: 62px;
   }
-  /* 启用自定义背景图时，主面板背景透明，露出底部的模糊背景层 */
+  /* ------------------------------------------------------------------------
+   * 自定义背景（图片 / 视频）—— 方案A：分层，不再逐类手调 rgba
+   * ------------------------------------------------------------------------
+   * 这一段的每个选择器都**必须保留**：插件（莲花/玉兰/三色堇/铃兰/薄荷/茑萝…）是独立
+   * bundle，宿主拿不到它们的 store 实例，DOM 类名 + 这段全局 CSS 是跨 bundle 唯一通道。
+   * 改的是「右边写什么」：字面 rgba → 分层令牌，于是
+   *   · 承载正文的纸面吃 --scrim-pct 保底（可读性不再赌图片偏暗）；
+   *   · 装饰内层改为 --state-ink 方向自适应（浅色压暗 / 深色提亮，同一条规则双主题成立）；
+   *   · hover 除亮度膜外，一律带 ring + 1px 位移 —— 壁纸上唯一稳定的反馈是边缘与位移。
+   * 未选背景图时这整段不生效，外观零变化。 */
   html.has-custom-bg .main-panel-bg {
-    background-color: transparent !important;
+    /* 宿主主面板：与旧行为一致，整层透出壁纸（真正扛正文的是插件纸面 --surface-paper） */
+    background-color: var(--surface-chrome) !important;
   }
-  /* 启用自定义背景图时，插件模块统一的“纸面”底色（bg-[#f5f5f0] / dark:bg-[#1c1917]）
-     改为半透明磨砂，让背景图也能透进莲花/三色堇/玉兰/薄荷/铃兰/茑萝等插件主面板，
-     同时保留一层浅色衬底保证文字可读性。IDE（bg-white/bg-stone-900）刻意不透，保证代码可读。 */
+  /* 插件模块统一的“纸面”底色（bg-[#f5f5f0] / dark:bg-[#1c1917]）：正文所在层 */
   html.has-custom-bg .bg-\[\#f5f5f0\] {
-    background-color: rgba(245, 245, 240, 0.3) !important;
+    background-color: var(--surface-paper) !important;
   }
   html.has-custom-bg.dark .dark\:bg-\[\#1c1917\] {
-    background-color: rgba(28, 25, 23, 0.3) !important;
+    background-color: var(--surface-paper) !important;
   }
-  /* 上栏、一级图标栏、二级侧栏统一改为「常态全透、悬停才浮出衬底」：
-     常态把底色、分隔线与毛玻璃一起撤掉，背景图完整透出；鼠标移入才恢复磨砂衬底。
-     未开启自定义背景时这些规则不生效，外观零变化。 */
+  /* 上栏、一级图标栏、二级侧栏：纯 chrome，不承载正文 → 常态仍全透（不吃保底），
+     悬停才浮出衬底。 */
   html.has-custom-bg .titlebar-surface,
   html.has-custom-bg .nav-primary-bg,
   html.has-custom-bg .nav-secondary-bg {
-    background-color: transparent !important;
+    background-color: var(--surface-chrome) !important;
     border-color: transparent !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
+    transition: background-color var(--dur-base) var(--ease-standard),
+      box-shadow var(--dur-fast) var(--ease-standard),
+      transform var(--dur-fast) var(--ease-standard);
   }
+  /* 重特效引擎（Windows/macOS）：悬停叠加真实局部模糊 */
   html.has-custom-bg:not(.is-linux) .titlebar-surface:hover,
   html.has-custom-bg:not(.is-linux) .nav-primary-bg:hover,
   html.has-custom-bg:not(.is-linux) .nav-secondary-bg:hover {
     backdrop-filter: blur(12px) !important;
     -webkit-backdrop-filter: blur(12px) !important;
   }
-  html.has-custom-bg .titlebar-surface:hover {
-    background-color: rgba(245, 245, 240, 0.3) !important;
-    border-color: rgba(229, 229, 229, 0.5) !important;
-  }
+  /* 悬停衬底：一级图标栏与上栏同档；二级侧栏要读列表文字，实一档。
+     边线走 --state-ring（由 --state-ink 驱动）→ 原先「浅色一套 / 深色一套」6 条合并为 3 条。 */
+  html.has-custom-bg .titlebar-surface:hover,
   html.has-custom-bg .nav-primary-bg:hover {
-    background-color: rgba(255, 255, 255, 0.2) !important;
-    border-color: rgba(255, 255, 255, 0.8) !important;
+    background-color: var(--surface-chrome-hover) !important;
+    border-color: transparent !important;
+    box-shadow: var(--state-ring) !important;
   }
-  /* 二级侧栏是内容面板（要读列表文字），悬停衬底比图标栏更实一档 */
   html.has-custom-bg .nav-secondary-bg:hover {
-    background-color: rgba(255, 255, 255, 0.4) !important;
-    border-color: rgba(255, 255, 255, 0.8) !important;
-  }
-  html.has-custom-bg.dark .titlebar-surface:hover {
-    background-color: rgba(28, 25, 23, 0.3) !important;
-    border-color: rgba(68, 64, 60, 0.5) !important;
-  }
-  html.has-custom-bg.dark .nav-primary-bg:hover {
-    background-color: rgba(28, 25, 23, 0.2) !important;
-    border-color: rgba(68, 64, 60, 0.5) !important;
-  }
-  html.has-custom-bg.dark .nav-secondary-bg:hover {
-    background-color: rgba(28, 25, 23, 0.4) !important;
-    border-color: rgba(68, 64, 60, 0.5) !important;
+    background-color: var(--surface-chrome-solid) !important;
+    border-color: transparent !important;
+    box-shadow: var(--state-ring) !important;
   }
   /* 全局设置面板：浅色模式卡片原用纯白 bg-white（不透），与其深色模式
      bg-stone-800/70（70% 透）的磨砂观感不对齐。仅在该面板（.settings-surface）下、
-     且仅浅色模式（:not(.dark)）自定义背景图时把 bg-white 降为 0.6 半透明白，与深色对齐。
+     且仅浅色模式（:not(.dark)）自定义背景图时把 bg-white 降为半透明。
      注意：不可去掉 :not(.dark) —— 否则本规则（含 !important 且特异性更高）会盖掉
      深色模式的 dark:bg-stone-800/70，使深色卡片变成半透明白而发空（只剩边框）。
-     深色模式继续走原 bg-stone-800/70。卡片本就带 backdrop-blur，底数变透即呈磨砂。
-     未选背景图时不生效。 */
+     深色模式继续走原 bg-stone-800/70。未选背景图时不生效。 */
   html.has-custom-bg:not(.dark) .settings-surface .bg-white {
-    background-color: rgba(255, 255, 255, 0.6) !important;
+    background-color: var(--surface-2) !important;
   }
-  /* 铃兰（音乐）/ 三色堇（阅读）等模块内部卡片、播放栏本身偏不透明，会遮挡自定义背景；
-     开启自定义背景时一并弱化，让背景透出（与玉兰/莲花等模块一致）。 */
-  html.has-custom-bg .bg-white\/60 { background-color: rgba(255, 255, 255, 0.12) !important; }
-  html.has-custom-bg .dark\:bg-stone-800\/60 { background-color: rgba(28, 25, 23, 0.16) !important; }
-  html.has-custom-bg .bg-white\/70 { background-color: rgba(255, 255, 255, 0.16) !important; }
-  html.has-custom-bg .dark\:bg-stone-800\/70 { background-color: rgba(28, 25, 23, 0.22) !important; }
-  /* 进一步弱化音乐/阅读模块在列表/目录视图中的更浅半透明卡片（搜索框、侧栏、浅色卡片等），
-     使其与玉兰/莲花一致地透出背景。 */
-  html.has-custom-bg .bg-white\/50 { background-color: rgba(255, 255, 255, 0.1) !important; }
-  html.has-custom-bg .dark\:bg-stone-700\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
-  html.has-custom-bg .bg-white\/40 { background-color: rgba(255, 255, 255, 0.08) !important; }
-  html.has-custom-bg .dark\:bg-stone-700\/60 { background-color: rgba(28, 25, 23, 0.14) !important; }
-  html.has-custom-bg .bg-white\/30 { background-color: rgba(255, 255, 255, 0.06) !important; }
-  html.has-custom-bg .dark\:bg-stone-800\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
-  html.has-custom-bg .bg-stone-700\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
-  html.has-custom-bg .bg-stone-800\/50 { background-color: rgba(28, 25, 23, 0.12) !important; }
+  /* 铃兰（音乐）/ 三色堇（阅读）等模块内部卡片、播放栏：坐在纸面衬底之上的装饰内层。
+     它们不需要自己扛可读性（下面已有保底衬底），所以保持“薄”，但染的方向交给
+     --state-ink：浅色主题压暗、深色主题提亮 —— 原先固定用 6%~22% 的白膜，
+     在奶白衬底上等于看不见，这是壁纸态的一处真实修复。 */
+  html.has-custom-bg .bg-white\/30,
+  html.has-custom-bg .bg-white\/40,
+  html.has-custom-bg .bg-white\/50,
+  html.has-custom-bg .dark\:bg-stone-700\/50,
+  html.has-custom-bg .dark\:bg-stone-700\/60,
+  html.has-custom-bg .dark\:bg-stone-800\/50,
+  html.has-custom-bg .bg-stone-700\/50,
+  html.has-custom-bg .bg-stone-800\/50 {
+    background-color: var(--surface-inner-1) !important;
+  }
+  html.has-custom-bg .bg-white\/60,
+  html.has-custom-bg .bg-white\/70,
+  html.has-custom-bg .dark\:bg-stone-800\/60,
+  html.has-custom-bg .dark\:bg-stone-800\/70 {
+    background-color: var(--surface-inner-2) !important;
+  }
+  /* 抽屉顶栏 bg-white/90、dark:bg-[#232323]/90：需要压住滚动内容，比卡片再实一档 */
+  html.has-custom-bg .bg-white\/90,
+  html.has-custom-bg.dark .dark\:bg-\[\#232323\]\/90 {
+    background-color: var(--surface-inner-3) !important;
+  }
   /* 铃兰（网易云）漫游页 / 抽屉根节点写死 bg-white / dark:bg-[#1e1e1e] / dark:bg-[#232323]，
-     未沿用插件统一纸面色，导致自定义背景透不进来。此处统一降为半透明磨砂（与玉兰/莲花一致），
-     保留浅色衬底保证文字可读。注意 .settings-surface .bg-white 特异性更高，仍走 0.6 白不被覆盖。 */
-  html.has-custom-bg .bg-white { background-color: rgba(255, 255, 255, 0.3) !important; }
-  html.has-custom-bg.dark .dark\:bg-\[\#1e1e1e\] { background-color: rgba(30, 30, 30, 0.3) !important; }
-  html.has-custom-bg.dark .dark\:bg-\[\#232323\] { background-color: rgba(35, 35, 35, 0.3) !important; }
-  /* 抽屉顶栏 bg-white/90、dark:bg-[#232323]/90 等带透明度变体，同样弱化以透出背景 */
-  html.has-custom-bg .bg-white\/90 { background-color: rgba(255, 255, 255, 0.2) !important; }
-  html.has-custom-bg.dark .dark\:bg-\[\#232323\]\/90 { background-color: rgba(35, 35, 35, 0.24) !important; }
+     未沿用插件统一纸面色 → 按“纸面”处理（吃保底）。注意 .settings-surface .bg-white
+     特异性更高，仍走 --surface-2 不被覆盖。 */
+  html.has-custom-bg .bg-white,
+  html.has-custom-bg.dark .dark\:bg-\[\#1e1e1e\],
+  html.has-custom-bg.dark .dark\:bg-\[\#232323\] {
+    background-color: var(--surface-paper) !important;
+  }
+  /* 交互态统一入口：列表项在壁纸态的 hover 不再各写一套透明度。
+     不用 !important —— html.has-custom-bg .element-hover:hover 的特异性本就高于
+     同层的 .element-hover:hover。 */
+  html.has-custom-bg .element-hover:hover {
+    background-color: var(--state-hover);
+    box-shadow: var(--state-ring);
+    transform: var(--state-lift);
+  }
   /* ========== 中转站浮窗：低饱和度浅绿整体配色（仅作用于浮窗，不影响主窗图标栏的中转站）========== */
   .floating-dropzone-root .main-panel-bg {
     background-color: rgba(224, 240, 228, 0.42) !important;

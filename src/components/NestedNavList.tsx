@@ -1,4 +1,5 @@
-import { type ReactNode, useMemo, Fragment } from 'react';
+import { type ReactNode, useEffect, useRef, useState, Fragment } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent } from '@/components/ui/context-menu';
 import { useI18n } from '@/lib/i18n';
 
@@ -113,7 +114,30 @@ export function NestedNavList({ layers, onBack, onItemClick }: NestedNavListProp
   );
 }
 
-// ========== 标准列表渲染（内部组件，用 memo 优化） ==========
+// ========== 标准列表渲染（内部组件） ==========
+
+/**
+ * 超过这个条数才进虚拟化。
+ * 实测书库里只有《天启预报》一本到 1649 章，其余 ≤15；视频/相册/RAG 等模块的层级列表也都在几十条内。
+ * 留这个门槛是为了让绝大多数调用路径**一行 DOM 都不变**，只给真出问题的长列表换渲染方式。
+ */
+const VIRTUAL_THRESHOLD = 100;
+/** 行高估算：py-2(16) + text-sm 行高(20) = 36；带副标题再加 ~18 */
+const ROW_H = 36;
+const ROW_H_WITH_SUBTITLE = 54;
+/** 与旧 `space-y-0.5` 等价的行间距（虚拟化时折进每行的下内边距） */
+const ROW_GAP = 2;
+
+/** 向上找第一个真正可滚的祖先：滚动容器归 ModuleSidebarShell 的列表区，不在本组件手里。 */
+function findScrollParent(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null;
+  while (node && node !== document.body) {
+    const oy = getComputedStyle(node).overflowY;
+    if (oy === 'auto' || oy === 'scroll') return node;
+    node = node.parentElement;
+  }
+  return null;
+}
 
 function ItemList({
   items,
@@ -125,59 +149,103 @@ function ItemList({
   onItemClick?: (item: NavLayerItem) => void;
 }) {
   const { t } = useI18n();
-  const content = useMemo(() => {
-    if (items.length === 0) {
-      return (
-        <div className="flex-1 flex items-center justify-center text-xs text-neutral-400 dark:text-stone-500 py-8">
-          {emptyText || t('common.noData')}
-        </div>
-      );
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // 默认就虚拟化：若等 effect 探测到滚动容器再切换，**首帧仍会把 1649 行全渲染一遍**，
+  // 那正是这次要省掉的开销。只有确认「被放进了没有滚动容器的上下文」时才退回原渲染。
+  const [noScroller, setNoScroller] = useState(false);
+
+  useEffect(() => {
+    if (items.length <= VIRTUAL_THRESHOLD) {
+      setNoScroller(false);
+      return;
     }
+    setNoScroller(findScrollParent(listRef.current) === null);
+  }, [items.length]);
 
+  const virtualize = items.length > VIRTUAL_THRESHOLD && !noScroller;
+
+  // 钩子必须无条件调用：不虚拟化时把 count 给 0，virtualizer 就是个惰物
+  const rowVirtualizer = useVirtualizer({
+    count: virtualize ? items.length : 0,
+    getScrollElement: () => findScrollParent(listRef.current),
+    estimateSize: (index) => (items[index]?.subtitle ? ROW_H_WITH_SUBTITLE : ROW_H) + ROW_GAP,
+    overscan: 10,
+    getItemKey: (index) => items[index]?.id ?? index,
+  });
+
+  if (items.length === 0) {
     return (
-      <div className="space-y-0.5">
-        {items.map((item) => {
-          const button = (
-            <button
-              key={item.id}
-              onClick={() => onItemClick?.(item)}
-              disabled={item.disabled}
-              className={`w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center gap-2.5 disabled:opacity-50 ${
-                item.active
-                  ? 'bg-[var(--element-bg)]/10 text-[var(--element-bg)]'
-                  : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
-              }`}
-            >
-              {item.icon && <span className="flex-shrink-0 opacity-60">{item.icon}</span>}
-              <div className="min-w-0 flex-1">
-                <div className="text-sm truncate">{item.title}</div>
-                {item.subtitle && <div className="text-[11px] opacity-50 mt-0.5">{item.subtitle}</div>}
-              </div>
-              {item.badge !== undefined && (
-                <span className="text-xs opacity-50 flex-shrink-0">{item.badge}</span>
-              )}
-              {item.active && (
-                <span className="w-1.5 h-1.5 rounded-full bg-[var(--element-bg)] flex-shrink-0" />
-              )}
-            </button>
-          );
-
-          // 若提供 contextMenu，用 ContextMenu 包裹
-          if (item.contextMenu) {
-            return (
-              <ContextMenu key={item.id}>
-                <ContextMenuTrigger className="w-full">{button}</ContextMenuTrigger>
-                <ContextMenuContent>{item.contextMenu}</ContextMenuContent>
-              </ContextMenu>
-            );
-          }
-          return button;
-        })}
+      <div ref={listRef} className="flex-1 flex items-center justify-center text-xs text-neutral-400 dark:text-stone-500 py-8">
+        {emptyText || t('common.noData')}
       </div>
     );
-  }, [items, emptyText, onItemClick, t]);
+  }
 
-  return content;
+  const renderRow = (item: NavLayerItem) => {
+    const button = (
+      <button
+        onClick={() => onItemClick?.(item)}
+        disabled={item.disabled}
+        className={`w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center gap-2.5 disabled:opacity-50 ${
+          item.active
+            ? 'bg-[var(--element-bg)]/10 text-[var(--element-bg)]'
+            : 'hover:bg-black/5 dark:hover:bg-white/5 text-neutral-600 dark:text-stone-400'
+        }`}
+      >
+        {item.icon && <span className="flex-shrink-0 opacity-60">{item.icon}</span>}
+        <div className="min-w-0 flex-1">
+          <div className="text-sm truncate">{item.title}</div>
+          {item.subtitle && <div className="text-[11px] opacity-50 mt-0.5">{item.subtitle}</div>}
+        </div>
+        {item.badge !== undefined && (
+          <span className="text-xs opacity-50 flex-shrink-0">{item.badge}</span>
+        )}
+        {item.active && (
+          <span className="w-1.5 h-1.5 rounded-full bg-[var(--element-bg)] flex-shrink-0" />
+        )}
+      </button>
+    );
+
+    // 若提供 contextMenu，用 ContextMenu 包裹
+    if (item.contextMenu) {
+      return (
+        <ContextMenu>
+          <ContextMenuTrigger className="w-full">{button}</ContextMenuTrigger>
+          <ContextMenuContent>{item.contextMenu}</ContextMenuContent>
+        </ContextMenu>
+      );
+    }
+    return button;
+  };
+
+  if (!virtualize) {
+    return (
+      <div ref={listRef} className="space-y-0.5">
+        {items.map((item) => <Fragment key={item.id}>{renderRow(item)}</Fragment>)}
+      </div>
+    );
+  }
+
+  return (
+    <div ref={listRef}>
+      <div className="relative" style={{ height: rowVirtualizer.getTotalSize() }}>
+        {rowVirtualizer.getVirtualItems().map((row) => {
+          const item = items[row.index];
+          return (
+            <div
+              key={row.key}
+              data-index={row.index}
+              ref={rowVirtualizer.measureElement}
+              className="absolute left-0 right-0"
+              style={{ top: 0, transform: `translateY(${row.start}px)`, paddingBottom: ROW_GAP }}
+            >
+              {renderRow(item)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 export default NestedNavList;

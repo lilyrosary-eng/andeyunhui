@@ -78,7 +78,7 @@ try {
     label: '视频',
     moduleId: 'video',
     priority: 12,
-    refresh: () => ensurePaletteFolders(true),
+    refresh: () => ensurePaletteFolders(),
     search: async (query) => {
       const q = query.trim().toLowerCase();
       if (!q) return [];
@@ -93,19 +93,28 @@ try {
         navigate?: NavigationTarget;
         run?: () => void;
       }> = [];
-      for (const folder of paletteFolders) {
-        if (!`${folder.folderName} ${folder.folderPath}`.toLowerCase().includes(q)) continue;
+      // 按分取最好的 40 条，而不是遍历顺序里前 40 个命中
+      const score = hostApi.makeScorer(query);
+      const ranked = paletteFolders
+        .map((folder) => {
+          const titleScore = score(folder.folderName);
+          const hayScore = score(`${folder.folderName} ${folder.folderPath}`.toLowerCase());
+          return { folder, titleHit: titleScore > 150, s: Math.max(titleScore, hayScore * 0.6) };
+        })
+        .filter((x) => x.s > 0)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 40);
+      for (const { folder, titleHit } of ranked) {
         out.push({
           id: folder.folderPath,
           title: folder.folderName || folder.folderPath.split(/[\\/]/).pop() || '未命名文件夹',
           subtitle: `${folder.videoCount} 个视频`,
           path: ['视频库'],
           iconName: 'Video',
-          rank: folder.folderName.toLowerCase().includes(q) ? 8 : 0,
+          rank: titleHit ? 8 : 0,
           navigate: { module: 'video', tabs: ['视频库', folder.folderName], entity: folder.folderPath, props: { folderPath: folder.folderPath, folderName: folder.folderName } },
           run: () => window.dispatchEvent(new CustomEvent('andy:video-open-folder', { detail: { folderPath: folder.folderPath, folderName: folder.folderName } })),
         });
-        if (out.length >= 40) break;
       }
       return out;
     },
