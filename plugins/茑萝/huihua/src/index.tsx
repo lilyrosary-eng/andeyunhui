@@ -1,6 +1,6 @@
 /// <reference path="../../../global.d.ts" />
 // 茑萝 · 绘画子插件
-// 前端按 SAI2 的组分对齐：DocBar / QuickBar / StatusBar / 图层+导航器（宿主侧栏）/ 颜色+工具+笔刷（右侧 Dock）。
+// 前端按专业画板组分组织：DocBar / QuickBar / StatusBar / 图层+导航器（宿主侧栏）/ 颜色+工具+笔刷（右侧 Dock）。
 import { EditorShell } from './ui/EditorShell';
 import { HuihuaSidebar } from './ui/Sidebar';
 import { editor } from './store';

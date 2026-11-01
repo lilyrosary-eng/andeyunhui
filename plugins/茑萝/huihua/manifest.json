@@ -13,8 +13,8 @@
       "clipboard_write_image",
       "pick_file",
       "pick_save_file",
-      "read_text_file",
-      "write_text_file"
+      "read_file_base64",
+      "write_file_bytes"
     ]
   },
   "parent": "niaoluo",

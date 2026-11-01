@@ -21,6 +21,12 @@ export function StatusBar() {
       <span>{Math.round(s.zoom * 100)}%</span>
       <span className="text-neutral-300 dark:text-stone-600">|</span>
       <span>{s.layers.length} 层 · {memory < 1 ? '<1' : Math.round(memory)} MB</span>
+      {s.hasSelection && (
+        <>
+          <span className="text-neutral-300 dark:text-stone-600">|</span>
+          <span>选区 {s.selectionW} × {s.selectionH}{s.feather > 0 ? ` · 羽化 ${s.feather}px` : ''}</span>
+        </>
+      )}
       {cursor.pressure > 0 && (
         <span className="flex items-center gap-1" title={`压感 ${Math.round(cursor.pressure * 100)}%`}>
           <span className="text-neutral-300 dark:text-stone-600">|</span>

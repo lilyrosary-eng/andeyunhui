@@ -19,7 +19,7 @@ export function ContextMenu() {
 
   if (!s.contextMenu) return null;
   const width = 188;
-  const height = 340;
+  const height = 500;
   const left = Math.max(8, Math.min(s.contextMenu.x, window.innerWidth - width - 8));
   const top = Math.max(8, Math.min(s.contextMenu.y, window.innerHeight - height - 8));
 
@@ -51,6 +51,28 @@ export function ContextMenu() {
         </button>
         <button className={item} onClick={() => run(() => void editor.saveProject())}>
           <span>保存项目</span><span className="text-[10px] text-neutral-400">Ctrl+S</span>
+        </button>
+        <div className="my-1 h-px bg-black/10 dark:bg-white/10" />
+        <button className={item} onClick={() => run(() => editor.selectAll())}>
+          <span>全选</span><span className="text-[10px] text-neutral-400">Ctrl+A</span>
+        </button>
+        <button className={item} onClick={() => run(() => editor.invertSelection())}>
+          <span>反选</span><span className="text-[10px] text-neutral-400">Ctrl+Shift+I</span>
+        </button>
+        <button className={item} disabled={!s.hasSelection} onClick={() => run(() => editor.clearSelection())}>
+          <span>取消选区</span><span className="text-[10px] text-neutral-400">Ctrl+D</span>
+        </button>
+        <button className={item} disabled={!s.hasSelection} onClick={() => run(() => editor.deleteSelection())}>
+          <span>删除选区内容</span><span className="text-[10px] text-neutral-400">Delete</span>
+        </button>
+        <button className={item} disabled={!s.hasSelection} onClick={() => run(() => editor.cutSelection())}>
+          <span>剪切</span><span className="text-[10px] text-neutral-400">Ctrl+X</span>
+        </button>
+        <button className={item} onClick={() => run(() => editor.copySelection())}>
+          <span>复制</span><span className="text-[10px] text-neutral-400">Ctrl+C</span>
+        </button>
+        <button className={item} disabled={!s.hasClipboard} onClick={() => run(() => editor.pasteClipboard())}>
+          <span>粘贴</span><span className="text-[10px] text-neutral-400">Ctrl+V</span>
         </button>
         <div className="my-1 h-px bg-black/10 dark:bg-white/10" />
         <button className={item} onClick={() => run(() => editor.clearLayer())}>

@@ -1,6 +1,9 @@
 import { hexToRgb, rgbToHex } from './color';
+import { normalizeBezier, sampleBezier } from './curve';
+import type { Bezier4 } from './curve';
 import type {
   BlendMode,
+  BrushPreset,
   ColorMode,
   ColorTarget,
   CursorInfo,
@@ -10,8 +13,8 @@ import type {
   Tool,
 } from './types';
 import { BLEND_MODES } from './types';
-import { loadAutosave, saveAutosave, clearAutosave, loadImage } from './project';
-import type { HuihuaProject } from './project';
+import { loadAutosave, saveAutosave, clearAutosave, loadImage, bytesToBase64, base64ToBytes, PROJECT_MAGIC, PROJECT_HEADER_OFFSET } from './project';
+import type { HuihuaProject, HuihuaProjectV2, HuihuaProjectV2Layer } from './project';
 
 const UNDO_LIMIT = 20;
 const RECENT_MAX = 10;
@@ -24,7 +27,60 @@ const LS = {
   dockWidth: 'huihua.dock.width',
   dockCollapsed: 'huihua.dock.collapsed',
   quickbar: 'huihua.quickbar',
+  size: 'huihua.brush.size',
+  opacity: 'huihua.brush.opacity',
+  hardness: 'huihua.brush.hardness',
+  flow: 'huihua.brush.flow',
+  spacing: 'huihua.brush.spacing',
+  curve: 'huihua.brush.curve',
+  bezier: 'huihua.brush.curveBezier',
+  stabilizer: 'huihua.brush.stabilizer',
+  presets: 'huihua.brush.presets',
+  feather: 'huihua.selection.feather',
 } as const;
+
+function clampNum(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+const DEFAULT_PRESETS: BrushPreset[] = [
+  { name: '硬圆', size: 8, opacity: 1, hardness: 1, flow: 1, spacing: 0.15, pressureCurve: 1, pressureBezier: null, stabilizer: 0 },
+  { name: '软笔', size: 24, opacity: 0.75, hardness: 0.15, flow: 0.8, spacing: 0.1, pressureCurve: 1, pressureBezier: null, stabilizer: 0.2 },
+  { name: '铅笔', size: 3, opacity: 0.9, hardness: 0.85, flow: 0.7, spacing: 0.12, pressureCurve: 1.4, pressureBezier: null, stabilizer: 0.3 },
+];
+
+function loadPresets(): BrushPreset[] {
+  try {
+    const raw = localStorage.getItem(LS.presets);
+    if (raw == null) return DEFAULT_PRESETS.map((p) => ({ ...p }));
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEFAULT_PRESETS.map((p) => ({ ...p }));
+    const out: BrushPreset[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const v = item as Record<string, unknown>;
+      if (typeof v.name !== 'string' || !v.name.trim()) continue;
+      out.push({
+        name: v.name.trim(),
+        size: Math.round(clampNum(Number(v.size), 1, 60)),
+        opacity: clampNum(Number(v.opacity), 0.05, 1),
+        hardness: clampNum(Number(v.hardness), 0, 1),
+        flow: clampNum(Number(v.flow), 0.02, 1),
+        spacing: clampNum(Number(v.spacing), 0.05, 2),
+        pressureCurve: clampNum(Number(v.pressureCurve), 0.3, 2.5),
+        pressureBezier: normalizeBezier(v.pressureBezier),
+        stabilizer: clampNum(Number(v.stabilizer), 0, 1),
+      });
+    }
+    return out;
+  } catch {
+    return DEFAULT_PRESETS.map((p) => ({ ...p }));
+  }
+}
+
+function storeJson(key: string, value: unknown): void {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* 忽略存储失败 */ }
+}
 
 function storedNum(key: string, fallback: number): number {
   try {
@@ -51,6 +107,16 @@ function storeBool(key: string, value: boolean): void {
 
 function storeNum(key: string, value: number): void {
   try { localStorage.setItem(key, String(value)); } catch { /* 忽略存储失败 */ }
+}
+
+function storedBezier(key: string): Bezier4 | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw == null) return null;
+    return normalizeBezier(JSON.parse(raw));
+  } catch {
+    return null;
+  }
 }
 
 function makeLayer(id: string, name: string, w: number, h: number, white: boolean): Layer {
@@ -83,6 +149,11 @@ interface DrawState {
   lastClientY: number;
   panning: boolean;
   touched: boolean;
+  isPen: boolean;
+  smoothX: number;
+  smoothY: number;
+  targetX: number;
+  targetY: number;
 }
 
 interface Rect {
@@ -92,7 +163,50 @@ interface Rect {
   h: number;
 }
 
+type Point = { x: number; y: number };
+
+interface SelectionState {
+  path: Path2D;
+  maskCanvas: HTMLCanvasElement;
+  maskData: Uint8Array;
+  bounds: Rect;
+  evenodd: boolean;
+  feather: number;
+}
+
+interface SelectionDraft {
+  tool: 'selectRect' | 'selectLasso';
+  start: Point;
+  points: Point[];
+}
+
+interface MoveState {
+  layerId: string;
+  preview: HTMLCanvasElement;
+  floating: HTMLCanvasElement;
+  sourceBounds: Rect;
+  startX: number;
+  startY: number;
+  offsetX: number;
+  offsetY: number;
+  moved: boolean;
+  mode: 'move' | 'scale' | 'rotate';
+  scale: number;
+  rotation: number;
+  startDist: number;
+  startAngle: number;
+  pivotX: number;
+  pivotY: number;
+}
+
 type TileMap = Map<string, ImageData>;
+
+interface SelectionSnapshot {
+  path: Path2D;
+  bounds: Rect;
+  evenodd: boolean;
+  feather: number;
+}
 
 type HistoryEntry =
   | {
@@ -101,6 +215,15 @@ type HistoryEntry =
       before: TileMap;
       after?: TileMap;
       bounds: Rect;
+    }
+  | {
+      kind: 'moveSelection';
+      layerId: string;
+      before: TileMap;
+      after?: TileMap;
+      bounds: Rect;
+      selBefore: SelectionSnapshot | null;
+      selAfter: SelectionSnapshot | null;
     }
   | {
       kind: 'addLayer';
@@ -162,11 +285,14 @@ class EditorStore {
     tool: 'pen',
     color: '#111827',
     bgColor: '#ffffff',
-    size: 4,
-    opacity: 1,
-    hardness: 1,
-    flow: 1,
-    spacing: 0.15,
+    size: Math.round(clampNum(storedNum(LS.size, 4), 1, 60)),
+    opacity: clampNum(storedNum(LS.opacity, 1), 0.05, 1),
+    hardness: clampNum(storedNum(LS.hardness, 1), 0, 1),
+    flow: clampNum(storedNum(LS.flow, 1), 0.02, 1),
+    spacing: clampNum(storedNum(LS.spacing, 0.15), 0.05, 2),
+    pressureCurve: clampNum(storedNum(LS.curve, 1), 0.3, 2.5),
+    pressureBezier: storedBezier(LS.bezier),
+    stabilizer: clampNum(storedNum(LS.stabilizer, 0), 0, 1),
     zoom: 1,
     transparent: false,
     colorMode: 'wheel',
@@ -180,6 +306,13 @@ class EditorStore {
     quickbarVisible: storedBool(LS.quickbar, true),
     chromeVisible: true,
     contextMenu: null,
+    selectionVersion: 0,
+    hasSelection: false,
+    selectionW: 0,
+    selectionH: 0,
+    hasClipboard: false,
+    presets: loadPresets(),
+    feather: clampNum(storedNum(LS.feather, 0), 0, 50),
   };
 
   private listeners = new Set<() => void>();
@@ -201,8 +334,9 @@ class EditorStore {
   private draw: DrawState = {
     active: false, tool: 'pen', x: 0, y: 0, pressure: 1,
     lastClientX: 0, lastClientY: 0, panning: false, touched: false,
+    isPen: false, smoothX: 0, smoothY: 0, targetX: 0, targetY: 0,
   };
-  private layerSnap: HTMLCanvasElement | null = null;
+  private strokeMasked: HTMLCanvasElement | null = null;
   private undoStack: HistoryEntry[] = [];
   private redoStack: HistoryEntry[] = [];
   private strokePreview: HTMLCanvasElement | null = null;
@@ -211,6 +345,11 @@ class EditorStore {
   private strokeBounds: Rect | null = null;
   private strokeResidual = 0;
   private lastMoveRect: Rect | null = null;
+  private selection: SelectionState | null = null;
+  private selectionDraft: SelectionDraft | null = null;
+  private selectionVersion = 0;
+  private moveState: MoveState | null = null;
+  private clipboard: HTMLCanvasElement | null = null;
   private display: HTMLCanvasElement | null = null;
   private wrap: HTMLElement | null = null;
   private dctx: CanvasRenderingContext2D | null = null;
@@ -341,7 +480,7 @@ class EditorStore {
     this.wrap = null;
     this.dctx = null;
     this.draw.active = false;
-    this.layerSnap = null;
+    this.strokeMasked = null;
   }
 
   private onVisibilityChange = (): void => {
@@ -381,6 +520,10 @@ class EditorStore {
     this.undoStack = [];
     this.redoStack = [];
     this.revision += 1;
+    this.selection = null;
+    this.selectionDraft = null;
+    this.moveState = null;
+    this.selectionVersion += 1;
     this.emit({
       ready: true,
       doc: { w, h, name: `未命名-${this.docSeq}`, dirty: false },
@@ -390,6 +533,10 @@ class EditorStore {
       canUndo: false,
       canRedo: false,
       revision: this.revision,
+      selectionVersion: this.selectionVersion,
+      hasSelection: false,
+      selectionW: 0,
+      selectionH: 0,
       status: '新建画布',
     });
     this.render();
@@ -453,8 +600,20 @@ class EditorStore {
       if (!layer.visible) continue;
       ctx.globalCompositeOperation = layer.blend;
       ctx.globalAlpha = layer.opacity;
-      const src = previewActive && layer.id === this.strokeLayerId ? this.strokePreview! : layer.canvas;
+      const moving = this.moveState && this.moveState.layerId === layer.id ? this.moveState : null;
+      const src = moving
+        ? moving.preview
+        : previewActive && layer.id === this.strokeLayerId
+          ? this.strokePreview!
+          : layer.canvas;
       ctx.drawImage(src, 0, 0);
+      if (moving && moving.moved) {
+        const mm = this.stateMatrix(moving);
+        ctx.save();
+        ctx.transform(mm.a, mm.b, mm.c, mm.d, mm.e, mm.f);
+        ctx.drawImage(moving.floating, moving.sourceBounds.x, moving.sourceBounds.y);
+        ctx.restore();
+      }
     }
     ctx.globalCompositeOperation = 'source-over';
     ctx.restore();
@@ -558,14 +717,596 @@ class EditorStore {
     this.notifyCursor();
   };
 
+  // ---------- 选区 ----------
+  getSelectionPath = (): Path2D | null => this.selection?.path ?? null;
+
+  getSelectionDraft = (): SelectionDraft | null => this.selectionDraft;
+
+  getSelectionTransform = (): {
+    dx: number;
+    dy: number;
+    scale: number;
+    rotation: number;
+    pivotX: number;
+    pivotY: number;
+    active: boolean;
+  } => {
+    const m = this.moveState;
+    if (!m) return { dx: 0, dy: 0, scale: 1, rotation: 0, pivotX: 0, pivotY: 0, active: false };
+    if (m.mode === 'move') {
+      return { dx: m.offsetX, dy: m.offsetY, scale: 1, rotation: 0, pivotX: 0, pivotY: 0, active: true };
+    }
+    return {
+      dx: 0,
+      dy: 0,
+      scale: m.scale,
+      rotation: m.rotation,
+      pivotX: m.pivotX,
+      pivotY: m.pivotY,
+      active: true,
+    };
+  };
+
+  getSelectionDisplayBounds = (): Rect | null => {
+    const sel = this.selection;
+    if (!sel) return null;
+    const t = this.getSelectionTransform();
+    if (!t.active) return { ...sel.bounds };
+    return this.transformBounds(sel.bounds, this.matrixFor(t.dx, t.dy, t.scale, t.rotation, t.pivotX, t.pivotY));
+  };
+
+  private syncSelection(status?: string): void {
+    this.selectionVersion += 1;
+    const b = this.selection?.bounds;
+    this.emit({
+      selectionVersion: this.selectionVersion,
+      hasSelection: !!this.selection,
+      selectionW: b ? Math.round(b.w) : 0,
+      selectionH: b ? Math.round(b.h) : 0,
+    });
+    if (status) this.setStatus(status);
+  }
+
+  private buildSelection(
+    path: Path2D,
+    bounds: Rect,
+    evenodd = false,
+    feather = this.state.feather,
+  ): SelectionState {
+    const radius = Math.max(0, Math.min(50, Math.round(feather)));
+    const mask = document.createElement('canvas');
+    mask.width = this.docW;
+    mask.height = this.docH;
+    const mctx = mask.getContext('2d', { willReadFrequently: true })!;
+    const rule = evenodd ? 'evenodd' : 'nonzero';
+    if (radius > 0) {
+      const tmp = document.createElement('canvas');
+      tmp.width = this.docW;
+      tmp.height = this.docH;
+      const tctx = tmp.getContext('2d')!;
+      tctx.fillStyle = '#ffffff';
+      tctx.fill(path, rule);
+      // blur 的参数是高斯 σ，可见过渡带约 ±3σ；滑杆按「边界两侧各 N 像素」标称，故 σ = N/3。
+      mctx.filter = `blur(${(radius / 3).toFixed(2)}px)`;
+      mctx.drawImage(tmp, 0, 0);
+      mctx.filter = 'none';
+    } else {
+      mctx.fillStyle = '#ffffff';
+      mctx.fill(path, rule);
+    }
+    const img = mctx.getImageData(0, 0, this.docW, this.docH).data;
+    const maskData = new Uint8Array(this.docW * this.docH);
+    const total = this.docW * this.docH;
+    for (let i = 0; i < total; i++) maskData[i] = img[i * 4 + 3] >= 128 ? 1 : 0;
+    return { path, maskCanvas: mask, maskData, bounds, evenodd, feather: radius };
+  }
+
+  private clipSelection(ctx: CanvasRenderingContext2D): void {
+    if (!this.selection) return;
+    ctx.clip(this.selection.path, this.selection.evenodd ? 'evenodd' : 'nonzero');
+  }
+
+  private selectionContains(x: number, y: number): boolean {
+    if (!this.selection) return true;
+    const px = Math.floor(x);
+    const py = Math.floor(y);
+    if (px < 0 || py < 0 || px >= this.docW || py >= this.docH) return false;
+    return this.selection.maskData[py * this.docW + px] === 1;
+  }
+
+  selectionDown = (x: number, y: number, tool: 'selectRect' | 'selectLasso'): void => {
+    const px = Math.max(0, Math.min(this.docW, x));
+    const py = Math.max(0, Math.min(this.docH, y));
+    this.selectionDraft = { tool, start: { x: px, y: py }, points: [{ x: px, y: py }] };
+  };
+
+  selectionMove = (x: number, y: number): void => {
+    const draft = this.selectionDraft;
+    if (!draft) return;
+    const px = Math.max(0, Math.min(this.docW, x));
+    const py = Math.max(0, Math.min(this.docH, y));
+    if (draft.tool === 'selectRect') {
+      draft.points[1] = { x: px, y: py };
+    } else {
+      const last = draft.points[draft.points.length - 1];
+      if (Math.hypot(px - last.x, py - last.y) >= 1.5) draft.points.push({ x: px, y: py });
+    }
+  };
+
+  selectionUp = (): void => {
+    const draft = this.selectionDraft;
+    this.selectionDraft = null;
+    if (!draft) return;
+    let path: Path2D | null = null;
+    let bounds: Rect | null = null;
+    if (draft.tool === 'selectRect') {
+      const end = draft.points[1] ?? draft.points[0];
+      const x = Math.min(draft.start.x, end.x);
+      const y = Math.min(draft.start.y, end.y);
+      const w = Math.abs(end.x - draft.start.x);
+      const h = Math.abs(end.y - draft.start.y);
+      if (w >= 2 && h >= 2) {
+        path = new Path2D();
+        path.rect(x, y, w, h);
+        bounds = { x, y, w, h };
+      }
+    } else if (draft.points.length >= 3) {
+      const p = new Path2D();
+      p.moveTo(draft.points[0].x, draft.points[0].y);
+      for (let i = 1; i < draft.points.length; i++) {
+        p.lineTo(draft.points[i].x, draft.points[i].y);
+      }
+      p.closePath();
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const pt of draft.points) {
+        minX = Math.min(minX, pt.x); minY = Math.min(minY, pt.y);
+        maxX = Math.max(maxX, pt.x); maxY = Math.max(maxY, pt.y);
+      }
+      path = p;
+      bounds = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    }
+    if (!path || !bounds) {
+      this.selection = null;
+      this.syncSelection('已取消选区');
+      return;
+    }
+    this.selection = this.buildSelection(path, bounds);
+    this.syncSelection(`选区 ${Math.round(bounds.w)} × ${Math.round(bounds.h)}`);
+  };
+
+  clearSelection = (): void => {
+    if (!this.selection && !this.selectionDraft) return;
+    this.selection = null;
+    this.selectionDraft = null;
+    this.syncSelection('已取消选区');
+  };
+
+  selectAll = (): void => {
+    const path = new Path2D();
+    path.rect(0, 0, this.docW, this.docH);
+    const bounds = { x: 0, y: 0, w: this.docW, h: this.docH };
+    this.selection = this.buildSelection(path, bounds);
+    this.syncSelection('已全选');
+  };
+
+  invertSelection = (): void => {
+    if (!this.selection) {
+      this.selectAll();
+      return;
+    }
+    const path = new Path2D();
+    path.rect(0, 0, this.docW, this.docH);
+    path.addPath(this.selection.path);
+    const bounds = { x: 0, y: 0, w: this.docW, h: this.docH };
+    this.selection = this.buildSelection(path, bounds, true);
+    this.syncSelection('已反选');
+  };
+
+  deleteSelection = (): void => {
+    const layer = this.activeLayer();
+    if (!layer || !this.selection) return;
+    const sel = this.selection;
+    const pad = sel.feather;
+    const bounds = this.clampRect({
+      x: sel.bounds.x - pad,
+      y: sel.bounds.y - pad,
+      w: sel.bounds.w + pad * 2,
+      h: sel.bounds.h + pad * 2,
+    });
+    if (bounds.w <= 0 || bounds.h <= 0) return;
+    const before = this.captureTiles(layer.canvas, bounds);
+    const ctx = layer.canvas.getContext('2d')!;
+    ctx.save();
+    if (sel.feather > 0) {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.drawImage(sel.maskCanvas, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+    } else {
+      this.clipSelection(ctx);
+      ctx.clearRect(bounds.x, bounds.y, bounds.w, bounds.h);
+    }
+    ctx.restore();
+    this.pushTileHistory(layer.id, before, bounds);
+    this.revision += 1;
+    this.syncLayers({ doc: { ...this.state.doc, dirty: true }, revision: this.revision });
+    this.render();
+    this.notifyView();
+    this.scheduleAutosave();
+    this.setStatus('已删除选区内容');
+  };
+
+  cutSelection = (): void => {
+    if (!this.selection) return;
+    this.copySelection();
+    this.deleteSelection();
+    this.setStatus('已剪切选区内容');
+  };
+
+  copySelection = (): void => {
+    const layer = this.activeLayer();
+    if (!layer) return;
+    const sel = this.selection;
+    const pad = sel ? sel.feather : 0;
+    const raw = sel
+      ? { x: sel.bounds.x - pad, y: sel.bounds.y - pad, w: sel.bounds.w + pad * 2, h: sel.bounds.h + pad * 2 }
+      : { x: 0, y: 0, w: this.docW, h: this.docH };
+    const bounds = this.clampRect(raw);
+    if (bounds.w <= 0 || bounds.h <= 0) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bounds.w));
+    canvas.height = Math.max(1, Math.round(bounds.h));
+    const ctx = canvas.getContext('2d')!;
+    ctx.save();
+    if (sel) {
+      ctx.translate(-bounds.x, -bounds.y);
+      if (sel.feather > 0) {
+        ctx.drawImage(layer.canvas, 0, 0);
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.drawImage(sel.maskCanvas, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
+      } else {
+        ctx.clip(sel.path, sel.evenodd ? 'evenodd' : 'nonzero');
+        ctx.drawImage(layer.canvas, 0, 0);
+      }
+    } else {
+      ctx.drawImage(layer.canvas, 0, 0);
+    }
+    ctx.restore();
+    this.clipboard = canvas;
+    this.emit({ hasClipboard: true });
+    this.setStatus(sel ? `已复制选区 ${Math.round(bounds.w)} × ${Math.round(bounds.h)}` : '已复制当前图层');
+  };
+
+  pasteClipboard = (): void => {
+    const clip = this.clipboard;
+    const layer = this.activeLayer();
+    if (!clip || !layer) {
+      this.setStatus('剪贴板为空');
+      return;
+    }
+    const v = this.getView();
+    const z = v.zoom || 1;
+    const cx = (v.stageW / 2 - v.panX) / z;
+    const cy = (v.stageH / 2 - v.panY) / z;
+    const x = Math.max(0, Math.min(Math.max(0, this.docW - clip.width), Math.round(cx - clip.width / 2)));
+    const y = Math.max(0, Math.min(Math.max(0, this.docH - clip.height), Math.round(cy - clip.height / 2)));
+    const dest = { x, y, w: clip.width, h: clip.height };
+    const destClip = this.clampRect(dest);
+    if (destClip.w <= 0 || destClip.h <= 0) return;
+    const selBefore = this.snapshotSelection();
+    const before = this.captureTiles(layer.canvas, destClip);
+    const ctx = layer.canvas.getContext('2d')!;
+    ctx.drawImage(clip, dest.x, dest.y);
+    const path = new Path2D();
+    path.rect(destClip.x, destClip.y, destClip.w, destClip.h);
+    this.selection = this.buildSelection(path, destClip);
+    const selAfter = this.snapshotSelection();
+    this.pushCommand({
+      kind: 'moveSelection',
+      layerId: layer.id,
+      before,
+      bounds: destClip,
+      selBefore,
+      selAfter,
+    });
+    this.syncSelection();
+    this.revision += 1;
+    this.syncLayers({ doc: { ...this.state.doc, dirty: true }, revision: this.revision });
+    this.render();
+    this.notifyView();
+    this.scheduleAutosave();
+    this.setStatus('已粘贴');
+  };
+
+  private matrixFor(
+    dx: number, dy: number, scale: number, rotation: number, pivotX: number, pivotY: number,
+  ): DOMMatrix {
+    const m = new DOMMatrix();
+    if (scale !== 1 || rotation !== 0) {
+      m.translateSelf(pivotX, pivotY);
+      m.rotateSelf((rotation * 180) / Math.PI);
+      m.scaleSelf(scale, scale);
+      m.translateSelf(-pivotX, -pivotY);
+    }
+    m.translateSelf(dx, dy);
+    return m;
+  }
+
+  private transformBounds(bounds: Rect, matrix: DOMMatrix): Rect {
+    const pts = [
+      [bounds.x, bounds.y],
+      [bounds.x + bounds.w, bounds.y],
+      [bounds.x + bounds.w, bounds.y + bounds.h],
+      [bounds.x, bounds.y + bounds.h],
+    ].map(([px, py]) => matrix.transformPoint(new DOMPoint(px, py)));
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    return { x: minX, y: minY, w: Math.max(...xs) - minX, h: Math.max(...ys) - minY };
+  }
+
+  private stateMatrix(m: MoveState): DOMMatrix {
+    if (m.mode === 'move') return this.matrixFor(m.offsetX, m.offsetY, 1, 0, 0, 0);
+    return this.matrixFor(0, 0, m.scale, m.rotation, m.pivotX, m.pivotY);
+  }
+
+  private snapshotSelection(): SelectionSnapshot | null {
+    return this.selection
+      ? {
+          path: this.selection.path,
+          bounds: { ...this.selection.bounds },
+          evenodd: this.selection.evenodd,
+          feather: this.selection.feather,
+        }
+      : null;
+  }
+
+  private applySelectionSnapshot(snap: SelectionSnapshot | null): void {
+    if (!snap) {
+      if (this.selection) {
+        this.selection = null;
+        this.syncSelection();
+      }
+      return;
+    }
+    this.state = { ...this.state, feather: snap.feather };
+    this.selection = this.buildSelection(snap.path, snap.bounds, snap.evenodd, snap.feather);
+    this.syncSelection();
+    this.emit({ feather: snap.feather });
+  }
+
+  setFeather = (value: number): void => {
+    const next = Math.max(0, Math.min(50, Math.round(value)));
+    storeNum(LS.feather, next);
+    this.emit({ feather: next });
+    if (this.selection) {
+      const s = this.selection;
+      this.selection = this.buildSelection(s.path, s.bounds, s.evenodd, next);
+      this.syncSelection();
+    }
+  };
+
+  // ---------- 移动 / 缩放 / 旋转 ----------
+  private createFloating(layer: Layer): {
+    preview: HTMLCanvasElement;
+    floating: HTMLCanvasElement;
+    sourceBounds: Rect;
+  } | null {
+    const sel = this.selection;
+    const pad = sel ? sel.feather : 0;
+    const sourceBounds = sel
+      ? this.clampRect({
+          x: sel.bounds.x - pad,
+          y: sel.bounds.y - pad,
+          w: sel.bounds.w + pad * 2,
+          h: sel.bounds.h + pad * 2,
+        })
+      : { x: 0, y: 0, w: this.docW, h: this.docH };
+    if (sourceBounds.w < 1 || sourceBounds.h < 1) return null;
+    const floating = document.createElement('canvas');
+    floating.width = Math.max(1, Math.round(sourceBounds.w));
+    floating.height = Math.max(1, Math.round(sourceBounds.h));
+    const fctx = floating.getContext('2d')!;
+    fctx.save();
+    if (sel) {
+      fctx.translate(-sourceBounds.x, -sourceBounds.y);
+      if (sel.feather > 0) {
+        fctx.drawImage(layer.canvas, 0, 0);
+        fctx.globalCompositeOperation = 'destination-in';
+        fctx.drawImage(sel.maskCanvas, 0, 0);
+        fctx.globalCompositeOperation = 'source-over';
+      } else {
+        fctx.clip(sel.path, sel.evenodd ? 'evenodd' : 'nonzero');
+        fctx.drawImage(layer.canvas, 0, 0);
+      }
+    } else {
+      fctx.drawImage(layer.canvas, 0, 0);
+    }
+    fctx.restore();
+
+    const preview = cloneCanvas(layer.canvas);
+    const pctx = preview.getContext('2d')!;
+    pctx.save();
+    if (sel && sel.feather > 0) {
+      pctx.globalCompositeOperation = 'destination-out';
+      pctx.drawImage(sel.maskCanvas, 0, 0);
+      pctx.globalCompositeOperation = 'source-over';
+    } else {
+      if (sel) pctx.clip(sel.path, sel.evenodd ? 'evenodd' : 'nonzero');
+      pctx.clearRect(sourceBounds.x, sourceBounds.y, sourceBounds.w, sourceBounds.h);
+    }
+    pctx.restore();
+    return { preview, floating, sourceBounds };
+  }
+
+  private beginMove(layer: Layer, x: number, y: number): void {
+    const f = this.createFloating(layer);
+    if (!f) return;
+    const pivotX = f.sourceBounds.x + f.sourceBounds.w / 2;
+    const pivotY = f.sourceBounds.y + f.sourceBounds.h / 2;
+    this.moveState = {
+      layerId: layer.id,
+      preview: f.preview,
+      floating: f.floating,
+      sourceBounds: f.sourceBounds,
+      startX: x,
+      startY: y,
+      offsetX: 0,
+      offsetY: 0,
+      moved: false,
+      mode: 'move',
+      scale: 1,
+      rotation: 0,
+      startDist: 0,
+      startAngle: 0,
+      pivotX,
+      pivotY,
+    };
+    this.render();
+  }
+
+  private hitTransformHandle(x: number, y: number): 'scale' | 'rotate' | null {
+    if (!this.selection) return null;
+    const b = this.selection.bounds;
+    const z = this.state.zoom || 1;
+    const th = 9 / z;
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    const rot = { x: cx, y: b.y - 24 / z };
+    if (Math.hypot(x - rot.x, y - rot.y) <= th) return 'rotate';
+    const handles: Array<[number, number]> = [
+      [b.x, b.y], [cx, b.y], [b.x + b.w, b.y],
+      [b.x, cy], [b.x + b.w, cy],
+      [b.x, b.y + b.h], [cx, b.y + b.h], [b.x + b.w, b.y + b.h],
+    ];
+    for (const [hx, hy] of handles) {
+      if (Math.hypot(x - hx, y - hy) <= th) return 'scale';
+    }
+    return null;
+  }
+
+  private beginTransform(layer: Layer, mode: 'scale' | 'rotate', x: number, y: number): void {
+    const f = this.createFloating(layer);
+    if (!f) return;
+    const pivotX = f.sourceBounds.x + f.sourceBounds.w / 2;
+    const pivotY = f.sourceBounds.y + f.sourceBounds.h / 2;
+    this.moveState = {
+      layerId: layer.id,
+      preview: f.preview,
+      floating: f.floating,
+      sourceBounds: f.sourceBounds,
+      startX: x,
+      startY: y,
+      offsetX: 0,
+      offsetY: 0,
+      moved: false,
+      mode,
+      scale: 1,
+      rotation: 0,
+      startDist: Math.max(1, Math.hypot(x - pivotX, y - pivotY)),
+      startAngle: Math.atan2(y - pivotY, x - pivotX),
+      pivotX,
+      pivotY,
+    };
+    this.render();
+  }
+
+  private moveTo(x: number, y: number): void {
+    const m = this.moveState;
+    if (!m) return;
+    m.offsetX = x - m.startX;
+    m.offsetY = y - m.startY;
+    m.moved = Math.hypot(m.offsetX, m.offsetY) > 0.5;
+    this.render();
+  }
+
+  private transformTo(x: number, y: number, shiftKey: boolean): void {
+    const m = this.moveState;
+    if (!m) return;
+    if (m.mode === 'scale') {
+      const dist = Math.hypot(x - m.pivotX, y - m.pivotY);
+      m.scale = Math.max(0.05, Math.min(20, dist / m.startDist));
+      m.moved = Math.abs(m.scale - 1) > 0.01;
+    } else if (m.mode === 'rotate') {
+      let rotation = Math.atan2(y - m.pivotY, x - m.pivotX) - m.startAngle;
+      if (shiftKey) rotation = Math.round(rotation / (Math.PI / 12)) * (Math.PI / 12);
+      m.rotation = rotation;
+      m.moved = Math.abs(rotation) > 0.001;
+    }
+    this.render();
+  }
+
+  private endMove(): void {
+    const m = this.moveState;
+    if (!m) {
+      this.render();
+      return;
+    }
+    if (!m.moved) {
+      this.moveState = null;
+      this.render();
+      return;
+    }
+    const layer = this.layers.find((l) => l.id === m.layerId);
+    if (!layer) {
+      this.moveState = null;
+      this.render();
+      return;
+    }
+    const matrix = this.stateMatrix(m);
+    const dest = this.transformBounds(m.sourceBounds, matrix);
+    const union = this.clampRect(this.unionRect(m.sourceBounds, dest));
+    if (union.w <= 0 || union.h <= 0) {
+      this.moveState = null;
+      this.render();
+      return;
+    }
+    const selBefore = this.snapshotSelection();
+    const before = this.captureTiles(layer.canvas, union);
+    const ctx = layer.canvas.getContext('2d')!;
+    ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+    ctx.drawImage(m.preview, 0, 0);
+    ctx.save();
+    ctx.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
+    ctx.drawImage(m.floating, m.sourceBounds.x, m.sourceBounds.y);
+    ctx.restore();
+    if (selBefore) {
+      const selBounds = this.transformBounds(selBefore.bounds, matrix);
+      const path = new Path2D();
+      path.addPath(selBefore.path, matrix);
+      this.selection = this.buildSelection(path, selBounds, selBefore.evenodd, selBefore.feather);
+      this.syncSelection();
+    }
+    const selAfter = this.snapshotSelection();
+    this.moveState = null;
+    this.pushCommand({
+      kind: 'moveSelection',
+      layerId: layer.id,
+      before,
+      bounds: union,
+      selBefore,
+      selAfter,
+    });
+    this.revision += 1;
+    this.syncLayers({ doc: { ...this.state.doc, dirty: true }, revision: this.revision });
+    this.render();
+    this.notifyView();
+    this.scheduleAutosave();
+    this.setStatus(m.mode === 'move' ? '已移动' : '已变换');
+  };
+
   // ---------- 绘制 ----------
   private activeLayer(): Layer | null {
     return this.layers.find((l) => l.id === this.activeId) ?? null;
   }
 
   private dabWidth(pressure: number, isPen: boolean): number {
-    const scale = isPen && pressure > 0 ? Math.max(0.05, Math.min(1, pressure)) : 1;
-    return Math.max(0.5, this.state.size * scale);
+    const raw = isPen && pressure > 0 ? Math.min(1, pressure) : 1;
+    const curved = this.state.pressureBezier
+      ? sampleBezier(this.state.pressureBezier, raw)
+      : Math.pow(raw, this.state.pressureCurve);
+    return Math.max(0.5, this.state.size * curved);
   }
 
   private applyStroke(ctx: CanvasRenderingContext2D, width: number): void {
@@ -598,10 +1339,14 @@ class EditorStore {
     return { x, y, w: Math.max(0, x2 - x), h: Math.max(0, y2 - y) };
   }
 
+  private clipForPaint(ctx: CanvasRenderingContext2D): void {
+    if (this.selection && this.selection.feather === 0) this.clipSelection(ctx);
+  }
+
   private stampDab(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, eraser: boolean): void {
     const alpha = eraser ? this.state.flow * this.state.opacity : this.state.flow;
     const color = eraser ? '#000000' : this.state.color;
-    ctx.globalCompositeOperation = eraser ? 'destination-out' : 'source-over';
+    ctx.globalCompositeOperation = 'source-over';
     const r = Math.max(0.5, width / 2);
     if (this.state.hardness >= 1) {
       ctx.globalAlpha = alpha;
@@ -621,7 +1366,6 @@ class EditorStore {
       ctx.fill();
     }
     ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
   }
 
   private stampSegment(
@@ -635,6 +1379,8 @@ class EditorStore {
     if (t <= 0) t = step;
     let last = 0;
     let bounds: Rect | null = null;
+    ctx.save();
+    this.clipForPaint(ctx);
     while (t <= dist) {
       const ratio = t / dist;
       const x = x0 + (x1 - x0) * ratio;
@@ -644,12 +1390,13 @@ class EditorStore {
       last = t;
       t += step;
     }
+    ctx.restore();
     this.strokeResidual = last > 0 ? dist - last : this.strokeResidual + dist;
     if (this.strokeResidual > step) this.strokeResidual = step;
     return bounds;
   }
 
-  private refreshPenPreview(layer: Layer, rect: Rect): void {
+  private refreshStrokePreview(layer: Layer, rect: Rect): void {
     if (!this.strokePreview || !this.strokeBuf) return;
     const r = this.clampRect(rect);
     if (r.w <= 0 || r.h <= 0) return;
@@ -660,9 +1407,30 @@ class EditorStore {
     pctx.clip();
     pctx.clearRect(r.x, r.y, r.w, r.h);
     pctx.drawImage(layer.canvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
-    pctx.globalAlpha = this.state.opacity;
-    pctx.drawImage(this.strokeBuf, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
-    pctx.globalAlpha = 1;
+
+    let source = this.strokeBuf;
+    if (this.selection && this.selection.feather > 0) {
+      if (!this.strokeMasked) {
+        this.strokeMasked = makeLayer('masked', 'masked', this.docW, this.docH, false).canvas;
+      }
+      const mctx = this.strokeMasked.getContext('2d')!;
+      mctx.clearRect(r.x, r.y, r.w, r.h);
+      mctx.drawImage(this.strokeBuf, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+      mctx.globalCompositeOperation = 'destination-in';
+      mctx.drawImage(this.selection.maskCanvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+      mctx.globalCompositeOperation = 'source-over';
+      source = this.strokeMasked;
+    }
+
+    if (this.draw.tool === 'eraser') {
+      pctx.globalCompositeOperation = 'destination-out';
+      pctx.drawImage(source, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+      pctx.globalCompositeOperation = 'source-over';
+    } else {
+      pctx.globalAlpha = this.state.opacity;
+      pctx.drawImage(source, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+      pctx.globalAlpha = 1;
+    }
     pctx.restore();
   }
 
@@ -670,21 +1438,89 @@ class EditorStore {
     this.draw.touched = true;
     this.strokeLayerId = layer.id;
     this.strokePreview = cloneCanvas(layer.canvas);
-    this.strokeBuf = eraser ? null : makeLayer('buf', 'buf', this.docW, this.docH, false).canvas;
+    this.strokeBuf = makeLayer('buf', 'buf', this.docW, this.docH, false).canvas;
+    this.strokeMasked = null;
     this.strokeBounds = null;
     this.strokeResidual = 0;
     this.lastMoveRect = null;
-    const target = eraser ? this.strokePreview.getContext('2d')! : this.strokeBuf!.getContext('2d')!;
+    const target = this.strokeBuf.getContext('2d')!;
+    target.save();
+    this.clipForPaint(target);
     this.stampDab(target, x, y, width, eraser);
+    target.restore();
     this.lastMoveRect = this.dabRect(x, y, width);
     this.strokeBounds = this.lastMoveRect;
-    if (!eraser) this.refreshPenPreview(layer, this.lastMoveRect);
+    this.refreshStrokePreview(layer, this.lastMoveRect);
     this.render(this.lastMoveRect);
   }
 
-  private endStroke(): void {
+  private finishStabilizedStroke(): void {
     const d = this.draw;
-    if ((d.tool === 'pen' || d.tool === 'eraser') && this.strokeBounds && this.strokePreview) {
+    if ((d.tool !== 'pen' && d.tool !== 'eraser') || this.state.stabilizer <= 0) return;
+    const layer = this.activeLayer();
+    if (!layer) return;
+    const eraser = d.tool === 'eraser';
+    const target = this.strokeBuf?.getContext('2d') ?? null;
+    if (!target) return;
+    const width = this.dabWidth(d.pressure, d.isPen);
+    for (let i = 0; i < 16; i++) {
+      const dx = d.targetX - d.smoothX;
+      const dy = d.targetY - d.smoothY;
+      if (Math.hypot(dx, dy) < 0.5) break;
+      d.smoothX += dx * 0.35;
+      d.smoothY += dy * 0.35;
+      const move = this.stampSegment(target, eraser, d.x, d.y, d.smoothX, d.smoothY, width);
+      d.x = d.smoothX;
+      d.y = d.smoothY;
+      if (move) {
+        this.refreshStrokePreview(layer, move);
+        this.strokeBounds = this.unionRect(this.strokeBounds, move);
+        this.render(move);
+      }
+    }
+  }
+
+  private beginShape(layer: Layer, x: number, y: number, width: number): void {
+    this.draw.touched = true;
+    this.strokeLayerId = layer.id;
+    this.strokePreview = cloneCanvas(layer.canvas);
+    this.strokeBuf = makeLayer('buf', 'buf', this.docW, this.docH, false).canvas;
+    this.strokeMasked = null;
+    this.strokeBounds = null;
+    this.lastMoveRect = null;
+    this.renderShape(layer, x, y, x, y, width);
+  }
+
+  private renderShape(
+    layer: Layer, x0: number, y0: number, x1: number, y1: number, width: number,
+  ): void {
+    if (!this.strokeBuf) return;
+    const buf = this.strokeBuf.getContext('2d')!;
+    const prev = this.lastMoveRect;
+    if (prev) {
+      const p = this.clampRect(prev);
+      buf.clearRect(p.x, p.y, p.w, p.h);
+    }
+    const pad = Math.max(width * 3, 8) + 2;
+    const bounds = this.clampRect({
+      x: Math.min(x0, x1) - pad,
+      y: Math.min(y0, y1) - pad,
+      w: Math.abs(x1 - x0) + pad * 2,
+      h: Math.abs(y1 - y0) + pad * 2,
+    });
+    buf.save();
+    this.clipForPaint(buf);
+    this.drawShapeRaw(buf, this.draw.tool, x0, y0, x1, y1, width);
+    buf.restore();
+    this.lastMoveRect = bounds;
+    this.strokeBounds = this.unionRect(this.strokeBounds, bounds);
+    const dirty = prev ? this.unionRect(prev, bounds) : bounds;
+    this.refreshStrokePreview(layer, dirty);
+    this.render(dirty);
+  }
+
+  private endStroke(): void {
+    if (this.strokeBounds && this.strokePreview && this.strokeLayerId) {
       const layer = this.layers.find((l) => l.id === this.strokeLayerId) ?? null;
       if (layer) {
         const bounds = this.strokeBounds;
@@ -697,6 +1533,7 @@ class EditorStore {
     }
     this.strokePreview = null;
     this.strokeBuf = null;
+    this.strokeMasked = null;
     this.strokeLayerId = '';
     this.strokeBounds = null;
     this.strokeResidual = 0;
@@ -717,6 +1554,11 @@ class EditorStore {
       lastClientY: clientY,
       panning: false,
       touched: false,
+      isPen,
+      smoothX: p.x,
+      smoothY: p.y,
+      targetX: p.x,
+      targetY: p.y,
     };
     if (this.space || button === 1) {
       this.draw.panning = true;
@@ -724,6 +1566,21 @@ class EditorStore {
     }
     const layer = this.activeLayer();
     if (!layer) return;
+
+    if (this.state.tool === 'selectRect' || this.state.tool === 'selectLasso') {
+      this.selectionDown(p.x, p.y, this.state.tool);
+      return;
+    }
+
+    if (this.state.tool === 'move') {
+      const handle = this.hitTransformHandle(p.x, p.y);
+      if (handle) {
+        this.beginTransform(layer, handle, p.x, p.y);
+      } else if (!this.selection || this.selectionContains(p.x, p.y)) {
+        this.beginMove(layer, p.x, p.y);
+      }
+      return;
+    }
 
     if (this.state.tool === 'pick') {
       const picked = this.sampleComposite(p.x, p.y);
@@ -752,12 +1609,10 @@ class EditorStore {
       return;
     }
 
-    this.draw.touched = true;
-    this.layerSnap = cloneCanvas(layer.canvas);
-    this.strokeBounds = null;
+    this.beginShape(layer, p.x, p.y, this.dabWidth(pressure, isPen));
   };
 
-  pointerMove = (clientX: number, clientY: number, pressure: number, isPen: boolean): void => {
+  pointerMove = (clientX: number, clientY: number, pressure: number, isPen: boolean, shiftKey = false): void => {
     this.updateCursor(clientX, clientY, pressure);
     const d = this.draw;
     if (!d.active) return;
@@ -777,17 +1632,40 @@ class EditorStore {
     if (!layer || !ctx) return;
     const p = this.toDoc(clientX, clientY);
 
+    if (d.tool === 'selectRect' || d.tool === 'selectLasso') {
+      this.selectionMove(p.x, p.y);
+      return;
+    }
+
+    if (d.tool === 'move') {
+      const m = this.moveState;
+      if (!m) return;
+      if (m.mode === 'move') this.moveTo(p.x, p.y);
+      else this.transformTo(p.x, p.y, shiftKey);
+      return;
+    }
+
     if (d.tool === 'pen' || d.tool === 'eraser') {
       const eraser = d.tool === 'eraser';
-      const target = eraser
-        ? this.strokePreview?.getContext('2d') ?? null
-        : this.strokeBuf?.getContext('2d') ?? null;
+      const target = this.strokeBuf?.getContext('2d') ?? null;
       if (!target) return;
-      const move = this.stampSegment(target, eraser, d.x, d.y, p.x, p.y, this.dabWidth(pressure, isPen));
-      d.x = p.x;
-      d.y = p.y;
+      d.isPen = isPen;
+      d.pressure = pressure;
+      d.targetX = p.x;
+      d.targetY = p.y;
+      const factor = 1 - Math.min(0.95, this.state.stabilizer * 0.95);
+      if (factor >= 1) {
+        d.smoothX = p.x;
+        d.smoothY = p.y;
+      } else {
+        d.smoothX += (p.x - d.smoothX) * factor;
+        d.smoothY += (p.y - d.smoothY) * factor;
+      }
+      const move = this.stampSegment(target, eraser, d.x, d.y, d.smoothX, d.smoothY, this.dabWidth(pressure, isPen));
+      d.x = d.smoothX;
+      d.y = d.smoothY;
       if (move) {
-        if (!eraser) this.refreshPenPreview(layer, move);
+        this.refreshStrokePreview(layer, move);
         this.strokeBounds = this.unionRect(this.strokeBounds, move);
         this.lastMoveRect = move;
         this.render(move);
@@ -795,43 +1673,32 @@ class EditorStore {
       return;
     }
 
-    if (this.layerSnap) {
-      const width = this.dabWidth(pressure, isPen);
-      ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
-      ctx.drawImage(this.layerSnap, 0, 0);
-      this.drawShape(ctx, d.tool, d.x, d.y, p.x, p.y, width);
-      const pad = Math.max(width * 3, 8) + 2;
-      const bx = Math.min(d.x, p.x) - pad;
-      const by = Math.min(d.y, p.y) - pad;
-      const bw = Math.abs(p.x - d.x) + pad * 2;
-      const bh = Math.abs(p.y - d.y) + pad * 2;
-      this.strokeBounds = this.unionRect(this.strokeBounds, { x: bx, y: by, w: bw, h: bh });
-      this.render();
-    }
+    this.renderShape(layer, d.x, d.y, p.x, p.y, this.dabWidth(pressure, isPen));
   };
 
   pointerUp = (): void => {
     const d = this.draw;
     if (!d.active) return;
+    if (d.tool === 'selectRect' || d.tool === 'selectLasso') {
+      d.active = false;
+      this.selectionUp();
+      return;
+    }
+    if (d.tool === 'move') {
+      d.active = false;
+      this.endMove();
+      return;
+    }
     d.active = false;
     if (d.touched) {
-      if (d.tool === 'pen' || d.tool === 'eraser') {
-        this.endStroke();
-      } else if (d.tool !== 'fill' && d.tool !== 'pick' && this.layerSnap && this.strokeBounds) {
-        const layer = this.activeLayer();
-        if (layer) {
-          const before = this.captureTiles(this.layerSnap, this.strokeBounds);
-          this.pushTileHistory(layer.id, before, this.strokeBounds);
-        }
-      }
+      if (d.tool === 'pen' || d.tool === 'eraser') this.finishStabilizedStroke();
+      if (d.tool !== 'fill' && d.tool !== 'pick') this.endStroke();
       this.revision += 1;
       this.syncLayers({ doc: { ...this.state.doc, dirty: true }, revision: this.revision });
       this.render();
       this.notifyView();
       this.scheduleAutosave();
     }
-    this.layerSnap = null;
-    this.strokeBounds = null;
   };
 
   private markDirty(status?: string): void {
@@ -843,12 +1710,12 @@ class EditorStore {
     if (status) this.setStatus(status);
   }
 
-  private drawShape(
+  private drawShapeRaw(
     ctx: CanvasRenderingContext2D, t: Tool,
     x0: number, y0: number, x1: number, y1: number, width: number,
   ): void {
     ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = this.state.opacity;
+    ctx.globalAlpha = 1;
     this.applyStroke(ctx, width);
     if (t === 'rect') {
       ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
@@ -968,6 +1835,15 @@ class EditorStore {
         }
         break;
       }
+      case 'moveSelection': {
+        const layer = this.layers.find((l) => l.id === entry.layerId);
+        if (layer) {
+          entry.after = this.captureCurrentTiles(layer, entry.before);
+          this.restoreTiles(layer, entry.before);
+        }
+        this.applySelectionSnapshot(entry.selBefore);
+        break;
+      }
       case 'addLayer': {
         this.layers = this.layers.filter((l) => l !== entry.layer);
         this.setActiveIfExists(entry.activeBefore);
@@ -1022,6 +1898,12 @@ class EditorStore {
       case 'tiles': {
         const layer = this.layers.find((l) => l.id === entry.layerId);
         if (layer && entry.after) this.restoreTiles(layer, entry.after);
+        break;
+      }
+      case 'moveSelection': {
+        const layer = this.layers.find((l) => l.id === entry.layerId);
+        if (layer && entry.after) this.restoreTiles(layer, entry.after);
+        this.applySelectionSnapshot(entry.selAfter);
         break;
       }
       case 'addLayer': {
@@ -1089,23 +1971,116 @@ class EditorStore {
   };
 
   setSize = (size: number): void => {
-    this.emit({ size: Math.max(1, Math.min(60, Math.round(size))) });
+    const next = Math.max(1, Math.min(60, Math.round(size)));
+    storeNum(LS.size, next);
+    this.emit({ size: next });
   };
 
   setOpacity = (opacity: number): void => {
-    this.emit({ opacity: Math.max(0.05, Math.min(1, opacity)) });
+    const next = Math.max(0.05, Math.min(1, opacity));
+    storeNum(LS.opacity, next);
+    this.emit({ opacity: next });
   };
 
   setHardness = (hardness: number): void => {
-    this.emit({ hardness: Math.max(0, Math.min(1, hardness)) });
+    const next = Math.max(0, Math.min(1, hardness));
+    storeNum(LS.hardness, next);
+    this.emit({ hardness: next });
   };
 
   setFlow = (flow: number): void => {
-    this.emit({ flow: Math.max(0.02, Math.min(1, flow)) });
+    const next = Math.max(0.02, Math.min(1, flow));
+    storeNum(LS.flow, next);
+    this.emit({ flow: next });
   };
 
   setSpacing = (spacing: number): void => {
-    this.emit({ spacing: Math.max(0.05, Math.min(2, spacing)) });
+    const next = Math.max(0.05, Math.min(2, spacing));
+    storeNum(LS.spacing, next);
+    this.emit({ spacing: next });
+  };
+
+  setPressureCurve = (curve: number): void => {
+    const next = Math.max(0.3, Math.min(2.5, curve));
+    storeNum(LS.curve, next);
+    if (this.state.pressureBezier) {
+      storeJson(LS.bezier, null);
+      this.emit({ pressureCurve: next, pressureBezier: null });
+    } else {
+      this.emit({ pressureCurve: next });
+    }
+  };
+
+  /** 传入 null 回到 gamma 简单模式（UI 的「线性」预设即走这条） */
+  setPressureBezier = (bezier: Bezier4 | null): void => {
+    const next = bezier ? normalizeBezier(bezier) : null;
+    storeJson(LS.bezier, next);
+    this.emit({ pressureBezier: next });
+  };
+
+  setStabilizer = (stabilizer: number): void => {
+    const next = Math.max(0, Math.min(1, stabilizer));
+    storeNum(LS.stabilizer, next);
+    this.emit({ stabilizer: next });
+  };
+
+  private persistPresets(presets: BrushPreset[]): void {
+    storeJson(LS.presets, presets);
+  }
+
+  savePreset = (name: string): void => {
+    const n = name.trim();
+    if (!n) return;
+    const preset: BrushPreset = {
+      name: n,
+      size: this.state.size,
+      opacity: this.state.opacity,
+      hardness: this.state.hardness,
+      flow: this.state.flow,
+      spacing: this.state.spacing,
+      pressureCurve: this.state.pressureCurve,
+      pressureBezier: this.state.pressureBezier,
+      stabilizer: this.state.stabilizer,
+    };
+    const exists = this.state.presets.some((p) => p.name === n);
+    const presets = exists
+      ? this.state.presets.map((p) => (p.name === n ? preset : p))
+      : [...this.state.presets, preset];
+    this.persistPresets(presets);
+    this.emit({ presets });
+    this.setStatus(`已保存预设「${n}」`);
+  };
+
+  applyPreset = (name: string): void => {
+    const p = this.state.presets.find((item) => item.name === name);
+    if (!p) return;
+    storeNum(LS.size, p.size);
+    storeNum(LS.opacity, p.opacity);
+    storeNum(LS.hardness, p.hardness);
+    storeNum(LS.flow, p.flow);
+    storeNum(LS.spacing, p.spacing);
+    storeNum(LS.curve, p.pressureCurve);
+    storeJson(LS.bezier, p.pressureBezier);
+    storeNum(LS.stabilizer, p.stabilizer);
+    this.emit({
+      size: p.size,
+      opacity: p.opacity,
+      hardness: p.hardness,
+      flow: p.flow,
+      spacing: p.spacing,
+      pressureCurve: p.pressureCurve,
+      pressureBezier: p.pressureBezier,
+      stabilizer: p.stabilizer,
+    });
+    this.setStatus(`已应用预设「${name}」`);
+  };
+
+  deletePreset = (name: string): void => {
+    const presets = this.state.presets.filter((p) => p.name !== name);
+    if (presets.length === this.state.presets.length) return;
+    this.persistPresets(presets);
+    this.emit({ presets });
+    this.setStatus(`已删除预设「${name}」`);
   };
 
   setTransparent = (transparent: boolean): void => { this.emit({ transparent }); };
@@ -1283,6 +2258,7 @@ class EditorStore {
     const x0 = Math.floor(cx);
     const y0 = Math.floor(cy);
     if (x0 < 0 || y0 < 0 || x0 >= w || y0 >= h) return false;
+    if (!this.selectionContains(x0 + 0.5, y0 + 0.5)) return false;
     const idx = (y0 * w + x0) * 4;
     const tr = d[idx], tg = d[idx + 1], tb = d[idx + 2], ta = d[idx + 3];
     const [fr, fg, fb] = hexToRgb(this.state.color);
@@ -1294,10 +2270,11 @@ class EditorStore {
     while (stack.length) {
       const p = stack.pop()!;
       if (!match(p)) continue;
-      d[p] = fr; d[p + 1] = fg; d[p + 2] = fb; d[p + 3] = fa;
-      painted += 1;
       const px = (p / 4) % w;
       const py = Math.floor(p / 4 / w);
+      if (!this.selectionContains(px + 0.5, py + 0.5)) continue;
+      d[p] = fr; d[p + 1] = fg; d[p + 2] = fb; d[p + 3] = fa;
+      painted += 1;
       if (px > 0) stack.push(p - 4);
       if (px < w - 1) stack.push(p + 4);
       if (py > 0) stack.push(p - w * 4);
@@ -1371,22 +2348,62 @@ class EditorStore {
   };
 
   // ---------- 项目 / 自动保存 ----------
-  private toProject(): HuihuaProject {
-    return {
-      format: 'huihua-project',
-      version: 1,
-      doc: { w: this.docW, h: this.docH, name: this.state.doc.name },
-      activeId: this.activeId,
-      layers: this.layers.map((l) => ({
+  private canvasToPng(canvas: HTMLCanvasElement): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          reject(new Error('PNG 编码失败'));
+          return;
+        }
+        void blob.arrayBuffer().then(
+          (buf) => resolve(new Uint8Array(buf)),
+          (err) => reject(err),
+        );
+      }, 'image/png');
+    });
+  }
+
+  private async projectToBinary(): Promise<ArrayBuffer> {
+    const layerList = this.layers.slice();
+    const doc = { w: this.docW, h: this.docH, name: this.state.doc.name };
+    const activeId = this.activeId;
+    const blobs: Uint8Array[] = [];
+    const metas: HuihuaProjectV2Layer[] = [];
+    let offset = 0;
+    for (const l of layerList) {
+      const png = await this.canvasToPng(l.canvas);
+      metas.push({
         id: l.id,
         name: l.name,
         visible: l.visible,
         opacity: l.opacity,
         blend: l.blend,
-        dataUrl: l.canvas.toDataURL('image/png'),
-      })),
+        offset,
+        length: png.length,
+      });
+      blobs.push(png);
+      offset += png.length;
+    }
+    const header: HuihuaProjectV2 = {
+      format: 'huihua-project-binary',
+      version: 2,
+      doc,
+      activeId,
+      layers: metas,
       savedAt: Date.now(),
     };
+    const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+    const total = PROJECT_HEADER_OFFSET + headerBytes.length + offset;
+    const out = new Uint8Array(total);
+    out.set(new TextEncoder().encode(PROJECT_MAGIC), 0);
+    new DataView(out.buffer).setUint32(8, headerBytes.length, true);
+    out.set(headerBytes, PROJECT_HEADER_OFFSET);
+    let p = PROJECT_HEADER_OFFSET + headerBytes.length;
+    for (const b of blobs) {
+      out.set(b, p);
+      p += b.length;
+    }
+    return out.buffer;
   }
 
   private scheduleAutosave(): void {
@@ -1402,7 +2419,10 @@ class EditorStore {
     if (this.autosaveBusy || !this.state.ready || this.layers.length === 0) return;
     this.autosaveBusy = true;
     try {
-      await saveAutosave(JSON.stringify(this.toProject()));
+      const bytes = await this.projectToBinary();
+      await saveAutosave(bytes);
+    } catch {
+      /* 自动保存失败不打断绘制 */
     } finally {
       this.autosaveBusy = false;
     }
@@ -1412,11 +2432,11 @@ class EditorStore {
     if (this.restoreAttempted) return;
     this.restoreAttempted = true;
     if (!this.state.ready || this.state.doc.dirty || this.undoStack.length > 0) return;
-    const json = await loadAutosave();
-    if (!json) return;
+    const buf = await loadAutosave();
+    if (!buf) return;
     if (this.state.doc.dirty || this.undoStack.length > 0) return;
     try {
-      await this.loadProjectJson(json);
+      await this.loadProjectBytes(new Uint8Array(buf));
       this.setStatus('已恢复自动保存');
     } catch {
       this.setStatus('自动保存恢复失败');
@@ -1427,16 +2447,53 @@ class EditorStore {
     return BLEND_MODES.some((m) => m.id === blend) ? (blend as BlendMode) : 'source-over';
   }
 
-  private async loadProjectJson(json: string): Promise<void> {
-    const p = JSON.parse(json) as HuihuaProject;
-    if (!p || p.format !== 'huihua-project' || p.version !== 1) {
-      throw new Error('不是有效的绘画项目');
-    }
-    const w = Math.floor(Number(p.doc?.w));
-    const h = Math.floor(Number(p.doc?.h));
+  private applyLoadedProject(w: number, h: number, name: string, activeId: string, layers: Layer[]): void {
+    this.docW = w;
+    this.docH = h;
+    this.layers = layers;
+    this.activeId = layers.some((l) => l.id === activeId) ? activeId : layers[layers.length - 1].id;
+    this.pan = { x: 0, y: 0 };
+    this.undoStack = [];
+    this.redoStack = [];
+    this.revision += 1;
+    this.selection = null;
+    this.selectionDraft = null;
+    this.moveState = null;
+    this.selectionVersion += 1;
+    this.emit({
+      ready: true,
+      doc: { w, h, name: (name || '未命名').trim() || '未命名', dirty: false },
+      layers: this.layerMeta(),
+      activeId: this.activeId,
+      zoom: 1,
+      canUndo: false,
+      canRedo: false,
+      revision: this.revision,
+      selectionVersion: this.selectionVersion,
+      hasSelection: false,
+      selectionW: 0,
+      selectionH: 0,
+      contextMenu: null,
+    });
+    this.render();
+    this.notifyView();
+  }
+
+  private validateDocSize(p: { w?: unknown; h?: unknown }): { w: number; h: number } {
+    const w = Math.floor(Number(p.w));
+    const h = Math.floor(Number(p.h));
     if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1 || w > 8192 || h > 8192) {
       throw new Error('画布尺寸不支持');
     }
+    return { w, h };
+  }
+
+  private async loadProjectJson(json: string): Promise<void> {
+    const p = JSON.parse(json.replace(/^\uFEFF/, '')) as HuihuaProject;
+    if (!p || p.format !== 'huihua-project' || p.version !== 1) {
+      throw new Error('不是有效的绘画项目');
+    }
+    const { w, h } = this.validateDocSize(p.doc ?? {});
     if (!Array.isArray(p.layers) || p.layers.length === 0) {
       throw new Error('项目中没有图层');
     }
@@ -1453,27 +2510,72 @@ class EditorStore {
       layer.blend = this.normalizeBlend(src.blend);
       layers.push(layer);
     }
-    this.docW = w;
-    this.docH = h;
-    this.layers = layers;
-    this.activeId = layers.some((l) => l.id === p.activeId) ? p.activeId : layers[layers.length - 1].id;
-    this.pan = { x: 0, y: 0 };
-    this.undoStack = [];
-    this.redoStack = [];
-    this.revision += 1;
-    this.emit({
-      ready: true,
-      doc: { w, h, name: (p.doc?.name || '未命名').trim() || '未命名', dirty: false },
-      layers: this.layerMeta(),
-      activeId: this.activeId,
-      zoom: 1,
-      canUndo: false,
-      canRedo: false,
-      revision: this.revision,
-      contextMenu: null,
-    });
-    this.render();
-    this.notifyView();
+    this.applyLoadedProject(w, h, p.doc?.name || '未命名', p.activeId, layers);
+  }
+
+  private async loadProjectBinary(bytes: Uint8Array): Promise<void> {
+    if (bytes.length < PROJECT_HEADER_OFFSET) throw new Error('项目文件过短');
+    const magic = new TextDecoder().decode(bytes.subarray(0, 8));
+    if (magic !== PROJECT_MAGIC) throw new Error('不是有效的绘画项目');
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const headerLen = view.getUint32(8, true);
+    const headerEnd = PROJECT_HEADER_OFFSET + headerLen;
+    if (headerLen <= 0 || headerEnd > bytes.length) throw new Error('项目头损坏');
+    const header = JSON.parse(new TextDecoder().decode(bytes.subarray(PROJECT_HEADER_OFFSET, headerEnd))) as HuihuaProjectV2;
+    if (!header || header.format !== 'huihua-project-binary' || header.version !== 2) {
+      throw new Error('项目版本不支持');
+    }
+    const { w, h } = this.validateDocSize(header.doc ?? {});
+    if (!Array.isArray(header.layers) || header.layers.length === 0) {
+      throw new Error('项目中没有图层');
+    }
+    const layers: Layer[] = [];
+    for (let i = 0; i < header.layers.length; i++) {
+      const meta = header.layers[i];
+      const start = headerEnd + meta.offset;
+      const end = start + meta.length;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < headerEnd || end > bytes.length || end <= start) {
+        throw new Error('图层数据损坏');
+      }
+      const blob = new Blob([bytes.slice(start, end)], { type: 'image/png' });
+      let source: CanvasImageSource;
+      let bitmap: ImageBitmap | null = null;
+      if (typeof createImageBitmap === 'function') {
+        bitmap = await createImageBitmap(blob);
+        source = bitmap;
+      } else {
+        const url = URL.createObjectURL(blob);
+        source = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+          img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图层图片解码失败')); };
+          img.src = url;
+        });
+      }
+      const layer = makeLayer(
+        meta.id || `L${Date.now().toString(36)}${i}`,
+        meta.name || `图层 ${i + 1}`,
+        w,
+        h,
+        false,
+      );
+      layer.canvas.getContext('2d')!.drawImage(source, 0, 0, w, h);
+      if (bitmap) bitmap.close();
+      layer.visible = meta.visible !== false;
+      const opacity = Number(meta.opacity);
+      layer.opacity = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+      layer.blend = this.normalizeBlend(meta.blend);
+      layers.push(layer);
+    }
+    this.applyLoadedProject(w, h, header.doc?.name || '未命名', header.activeId, layers);
+  }
+
+  private async loadProjectBytes(bytes: Uint8Array): Promise<void> {
+    if (bytes.length >= 8 && new TextDecoder().decode(bytes.subarray(0, 8)) === PROJECT_MAGIC) {
+      await this.loadProjectBinary(bytes);
+      return;
+    }
+    await this.loadProjectJson(new TextDecoder().decode(bytes));
   }
 
   saveProject = async (): Promise<void> => {
@@ -1486,8 +2588,11 @@ class EditorStore {
       if (!picked) return;
       const target = /\.[^\\/]+$/.test(picked) ? picked : `${picked}.huihua`;
       this.setStatus('正在保存…');
-      const json = JSON.stringify(this.toProject());
-      await window.__HOST_API__.invoke('write_text_file', { path: target, content: json });
+      const bytes = await this.projectToBinary();
+      await window.__HOST_API__.invoke('write_file_bytes', {
+        path: target,
+        contentBase64: bytesToBase64(new Uint8Array(bytes)),
+      });
       this.emit({ doc: { ...this.state.doc, dirty: false } });
       this.setStatus('已保存：' + target);
     } catch (err) {
@@ -1504,8 +2609,8 @@ class EditorStore {
         filters: [{ name: '绘画项目', extensions: ['huihua', 'json'] }],
       });
       if (!files || files.length === 0) return;
-      const json = await window.__HOST_API__.invoke<string>('read_text_file', { path: files[0] });
-      await this.loadProjectJson(json);
+      const dataUrl = await window.__HOST_API__.invoke<string>('read_file_base64', { filePath: files[0] });
+      await this.loadProjectBytes(base64ToBytes(dataUrl));
       this.restoreAttempted = true;
       this.setStatus('已打开：' + files[0]);
       this.scheduleAutosave();
@@ -1552,7 +2657,7 @@ class EditorStore {
     for (const layer of this.layers) canvases.add(layer.canvas);
     let tileBytes = 0;
     for (const entry of [...this.undoStack, ...this.redoStack]) {
-      if (entry.kind === 'tiles') {
+      if (entry.kind === 'tiles' || entry.kind === 'moveSelection') {
         for (const data of entry.before.values()) tileBytes += data.data.byteLength;
         if (entry.after) {
           for (const data of entry.after.values()) tileBytes += data.data.byteLength;

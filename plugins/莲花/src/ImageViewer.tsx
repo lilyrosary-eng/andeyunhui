@@ -272,7 +272,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
       }
       // 放大锚光标；缩小锚视口中心（useZoomPan 的 zoomOutAnchor=viewport），
       // 避免缩小时镜头追着光标跑。锚点还会被夹到图片范围内。
-      // 每档 ×1.1（与 photocraft 一致）：deltaY 归一化后按 100px 一档换算。
+      // 每档 ×1.1（专业画布常用档位）：deltaY 归一化后按 100px 一档换算。
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1;
       const dy = e.deltaY * unit;
       zoomByWheel(e.clientX, e.clientY, dy, dy < 0 ? 'in' : 'out');

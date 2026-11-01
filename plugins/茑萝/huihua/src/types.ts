@@ -1,4 +1,17 @@
-export type Tool = 'pen' | 'eraser' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'fill' | 'pick';
+import type { Bezier4 } from './curve';
+
+export type Tool =
+  | 'pen'
+  | 'eraser'
+  | 'rect'
+  | 'ellipse'
+  | 'line'
+  | 'arrow'
+  | 'fill'
+  | 'pick'
+  | 'selectRect'
+  | 'selectLasso'
+  | 'move';
 export type ColorMode = 'wheel' | 'rgb' | 'hsv' | 'palette';
 export type ColorTarget = 'fg' | 'bg';
 export type BlendMode =
@@ -62,6 +75,19 @@ export interface DocInfo {
   dirty: boolean;
 }
 
+export interface BrushPreset {
+  name: string;
+  size: number;
+  opacity: number;
+  hardness: number;
+  flow: number;
+  spacing: number;
+  pressureCurve: number;
+  /** 拖拽精调的压感曲线；null 表示用 pressureCurve 的 gamma 模式 */
+  pressureBezier: Bezier4 | null;
+  stabilizer: number;
+}
+
 export interface EditorState {
   ready: boolean;
   doc: DocInfo;
@@ -75,6 +101,10 @@ export interface EditorState {
   hardness: number;
   flow: number;
   spacing: number;
+  pressureCurve: number;
+  /** 拖拽精调的压感曲线；null 表示用 pressureCurve 的 gamma 模式 */
+  pressureBezier: Bezier4 | null;
+  stabilizer: number;
   zoom: number;
   transparent: boolean;
   colorMode: ColorMode;
@@ -89,6 +119,13 @@ export interface EditorState {
   quickbarVisible: boolean;
   chromeVisible: boolean;
   contextMenu: { x: number; y: number } | null;
+  selectionVersion: number;
+  hasSelection: boolean;
+  selectionW: number;
+  selectionH: number;
+  hasClipboard: boolean;
+  presets: BrushPreset[];
+  feather: number;
 }
 
 export interface CursorInfo {
@@ -107,4 +144,7 @@ export const TOOLS: { id: Tool; label: string; key: string }[] = [
   { id: 'arrow', label: '箭头', key: '⇧A' },
   { id: 'fill', label: '填充', key: 'G' },
   { id: 'pick', label: '吸管', key: 'I' },
+  { id: 'selectRect', label: '选框', key: 'M' },
+  { id: 'selectLasso', label: '套索', key: 'Q' },
+  { id: 'move', label: '移动', key: 'V' },
 ];

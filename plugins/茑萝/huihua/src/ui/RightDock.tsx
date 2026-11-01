@@ -34,7 +34,7 @@ function Section({
 
 export function RightDock() {
   const s = useEditorState();
-  const [open, setOpen] = useState({ color: true, tools: true, brush: true });
+  const [open, setOpen] = useState({ selection: true, color: true, tools: true, brush: true });
 
   if (s.rightDockCollapsed) {
     return (
@@ -86,6 +86,47 @@ export function RightDock() {
         </button>
       </div>
       <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-1.5">
+        <Section title="选区" open={open.selection} onToggle={() => setOpen((v) => ({ ...v, selection: !v.selection }))}>
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <span className="w-8 shrink-0 text-[10px] text-neutral-500 dark:text-stone-400">羽化</span>
+              <input
+                type="range"
+                min={0}
+                max={50}
+                step={1}
+                value={s.feather}
+                onChange={(e) => editor.setFeather(parseInt(e.target.value, 10))}
+                className="flex-1 accent-emerald-500"
+              />
+              <span className="w-8 text-right text-[10px] tabular-nums text-neutral-400 dark:text-stone-500">{s.feather}px</span>
+            </div>
+            <div className="flex gap-1">
+              <button
+                className="flex-1 rounded border border-black/10 px-1 py-0.5 text-[10px] text-neutral-500 hover:bg-black/5 dark:border-white/10 dark:text-stone-400 dark:hover:bg-white/10"
+                onClick={() => editor.selectAll()}
+              >
+                全选
+              </button>
+              <button
+                className="flex-1 rounded border border-black/10 px-1 py-0.5 text-[10px] text-neutral-500 hover:bg-black/5 dark:border-white/10 dark:text-stone-400 dark:hover:bg-white/10"
+                onClick={() => editor.invertSelection()}
+              >
+                反选
+              </button>
+              <button
+                className="flex-1 rounded border border-black/10 px-1 py-0.5 text-[10px] text-neutral-500 hover:bg-black/5 disabled:opacity-30 dark:border-white/10 dark:text-stone-400 dark:hover:bg-white/10"
+                disabled={!s.hasSelection}
+                onClick={() => editor.clearSelection()}
+              >
+                取消
+              </button>
+            </div>
+            <div className="text-[10px] text-neutral-400 dark:text-stone-500">
+              {s.hasSelection ? `选区 ${s.selectionW} × ${s.selectionH}` : '无选区'}
+            </div>
+          </div>
+        </Section>
         <Section title="颜色" open={open.color} onToggle={() => setOpen((v) => ({ ...v, color: !v.color }))}>
           <ColorPanel />
         </Section>

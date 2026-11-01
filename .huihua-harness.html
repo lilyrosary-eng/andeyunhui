@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>huihua harness</title>
+<style>
+  :root { --element-bg: #5a7f5d; --element-border: #4a6b4d; --main-panel-bg: #f5f5f0; --element-color-raw: #4a6b4d; }
+  html, body { width: 1440px; height: 900px; margin: 0; }
+  body { font-family: system-ui, "Microsoft YaHei", "Segoe UI", sans-serif; background: #f5f5f0; color: #333; }
+  #app { display: flex; height: 900px; width: 1440px; }
+  #sb { width: 260px; flex: none; height: 900px; overflow: hidden; border-right: 1px solid rgba(0,0,0,.08); background: #faf9f5; }
+  #main { position: relative; flex: 1; min-width: 0; height: 900px; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="app"><div id="sb"></div><div id="main"></div></div>
+<script src="/node_modules/react/umd/react.development.js"></script>
+<script src="/node_modules/react-dom/umd/react-dom.development.js"></script>
+<script>
+  window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 16);
+  window.cancelAnimationFrame = (id) => clearTimeout(id);
+  HTMLElement.prototype.setPointerCapture = function () {};
+  HTMLElement.prototype.releasePointerCapture = function () {};
+  HTMLElement.prototype.hasPointerCapture = function () { return false; };
+  window.confirm = () => true;
+  window.prompt = (msg, def) => def || '预设';
+  window.__HOST_REACT__ = window.React;
+  window.__HOST_REACT_DOM__ = window.ReactDOM;
+  window.__HOST_API__ = {
+    invoke: async (cmd, args) => {
+      (window.__invoked = window.__invoked || []).push({ cmd, args });
+      if (cmd === 'pick_save_file') return 'C:/tmp/huihua-test.huihua';
+      if (cmd === 'write_file_bytes') { window.__savedB64 = args.contentBase64; return null; }
+      if (cmd === 'pick_file') return ['C:/tmp/huihua-test.huihua'];
+      if (cmd === 'add_bytes_to_dropzone') { window.__drop = { cmd, args }; return null; }
+      if (cmd === 'clipboard_write_image') { window.__clip = { cmd, args }; return null; }
+      if (cmd === 'read_file_base64') return 'data:application/octet-stream;base64,' + (window.__savedB64 || '');
+      return null;
+    },
+    convertFileSrc: (p) => p,
+    listen: async () => () => {},
+    emit: async () => {},
+    createFrameBuffer: () => ({ push() {}, flush() {}, destroy() {} }),
+    createFloatingWindow: async () => {},
+  };
+  window.__PLUGIN_REGISTRY__ = {
+    register(def) { window.__def = def; },
+    get() { return undefined; },
+    getAll() { return []; },
+    getChildren() { return []; },
+    unregister() {},
+    setVisible() { return false; },
+  };
+</script>
+<script src="/bundled-plugins/%E8%8C%91%E8%90%9D/huihua/index.js?v=s1"></script>
+<script>
+  (function () {
+    const d = window.__def;
+    if (!d) { document.body.innerHTML = '<pre style="padding:20px;color:#b00">plugin not registered</pre>'; return; }
+    ReactDOM.createRoot(document.getElementById('sb')).render(React.createElement(d.sidebar));
+    ReactDOM.createRoot(document.getElementById('main')).render(React.createElement(d.component));
+  })();
+</script>
+</body>
+</html>

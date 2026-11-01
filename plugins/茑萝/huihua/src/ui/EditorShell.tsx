@@ -29,6 +29,7 @@ export function EditorShell() {
       if (!visible()) return;
       if (e.key === 'Escape') {
         editor.closeContextMenu();
+        editor.clearSelection();
         return;
       }
       if (isTypingTarget(e.target)) return;
@@ -60,6 +61,12 @@ export function EditorShell() {
         if (key === '-') { e.preventDefault(); editor.zoomBy(1 / 1.15); return; }
         if (key === 's') { e.preventDefault(); void editor.saveProject(); return; }
         if (key === 'o') { e.preventDefault(); void editor.openProject(); return; }
+        if (key === 'a') { e.preventDefault(); editor.selectAll(); return; }
+        if (key === 'i' && e.shiftKey) { e.preventDefault(); editor.invertSelection(); return; }
+        if (key === 'd') { e.preventDefault(); editor.clearSelection(); return; }
+        if (key === 'c') { e.preventDefault(); editor.copySelection(); return; }
+        if (key === 'v') { e.preventDefault(); editor.pasteClipboard(); return; }
+        if (key === 'x') { e.preventDefault(); editor.cutSelection(); return; }
         return;
       }
 
@@ -72,9 +79,17 @@ export function EditorShell() {
         case 'o': editor.setTool('ellipse'); break;
         case 'l': editor.setTool('line'); break;
         case 'a': if (e.shiftKey) editor.setTool('arrow'); break;
+        case 'm': editor.setTool('selectRect'); break;
+        case 'q': editor.setTool('selectLasso'); break;
+        case 'v': editor.setTool('move'); break;
         case '[': editor.setSize(editor.getState().size - 1); break;
         case ']': editor.setSize(editor.getState().size + 1); break;
         case 'x': editor.swapColors(); break;
+        case 'delete':
+        case 'backspace':
+          e.preventDefault();
+          editor.deleteSelection();
+          break;
         default: break;
       }
     };
