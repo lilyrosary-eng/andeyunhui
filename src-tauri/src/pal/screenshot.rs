@@ -884,14 +884,68 @@ pub fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
     Shortcut::from_str(s).map_err(|e| format!("快捷键字符串无效: {e}"))
 }
 
+/// Linux 统一入口：按会话类型选后端。
+///
+/// · **X11**：`global-hotkey` 插件的 XGrabKey 可用，且不需要用户授权 → 优先它；
+/// · **Wayland**：XGrabKey 抓不到合成器独占的按键 → 只能走 portal（需授权一次）。
+///
+/// 之前四个 `register_*` 在 Linux 上直接 `Ok(())`，等于**两个会话类型都没有热键**。
+#[cfg(target_os = "linux")]
+fn linux_register(
+    app: &AppHandle,
+    which: crate::hotkeys_portal::Which,
+    sc: &str,
+) -> Result<(), String> {
+    if crate::hotkeys_portal::is_x11_session() {
+        linux_register_via_plugin(app, which, sc)
+    } else {
+        crate::hotkeys_portal::set_and_sync(app, which, sc.to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_register_via_plugin(
+    app: &AppHandle,
+    which: crate::hotkeys_portal::Which,
+    sc: &str,
+) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt as _;
+    let new = parse_shortcut(sc)?;
+    let old = crate::hotkeys_portal::get(which);
+    if let Ok(o) = parse_shortcut(&old) {
+        if o != new {
+            let _ = app.global_shortcut().unregister(o);
+        }
+    }
+    app.global_shortcut()
+        .register(new)
+        .map_err(|e| format!("注册全局快捷键失败（{sc}）: {e}"))?;
+
+    // 状态与磁盘同步（`get_*_shortcut` 从这里读）
+    crate::hotkeys_portal::update(which, sc.to_string());
+    crate::hotkeys_portal::save(app);
+
+    // main.rs 的热键回调是用 `*_shortcut_state()` 里的值跟事件比较的：
+    // 不同步这里的话，用户改键后插件注册了新键、回调却按旧值比较 ⇒ 动作不触发。
+    let slot = match which {
+        crate::hotkeys_portal::Which::Clipboard => Some(clipboard_shortcut_state()),
+        crate::hotkeys_portal::Which::Dropzone => Some(dropzone_shortcut_state()),
+        crate::hotkeys_portal::Which::Favorite => Some(favorite_shortcut_state()),
+        // 截图在回调里是「都不匹配」的兜底分支，不参与比较
+        crate::hotkeys_portal::Which::Screenshot => None,
+    };
+    if let Some(m) = slot {
+        if let Ok(mut g) = m.lock() {
+            *g = sc.to_string();
+        }
+    }
+    Ok(())
+}
+
 pub fn register_screenshot_shortcut(app: &AppHandle, sc: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        crate::hotkeys_portal::set_and_sync(
-            app,
-            crate::hotkeys_portal::Which::Screenshot,
-            sc.to_string(),
-        )
+        linux_register(app, crate::hotkeys_portal::Which::Screenshot, sc)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -933,11 +987,7 @@ pub fn read_clipboard_shortcut(app: &AppHandle) -> String {
 pub fn register_clipboard_shortcut(app: &AppHandle, sc: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        crate::hotkeys_portal::set_and_sync(
-            app,
-            crate::hotkeys_portal::Which::Clipboard,
-            sc.to_string(),
-        )
+        linux_register(app, crate::hotkeys_portal::Which::Clipboard, sc)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -979,11 +1029,7 @@ pub fn read_dropzone_shortcut(app: &AppHandle) -> String {
 pub fn register_dropzone_shortcut(app: &AppHandle, sc: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        crate::hotkeys_portal::set_and_sync(
-            app,
-            crate::hotkeys_portal::Which::Dropzone,
-            sc.to_string(),
-        )
+        linux_register(app, crate::hotkeys_portal::Which::Dropzone, sc)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1025,11 +1071,7 @@ pub fn read_favorite_shortcut(app: &AppHandle) -> String {
 pub fn register_favorite_shortcut(app: &AppHandle, sc: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        crate::hotkeys_portal::set_and_sync(
-            app,
-            crate::hotkeys_portal::Which::Favorite,
-            sc.to_string(),
-        )
+        linux_register(app, crate::hotkeys_portal::Which::Favorite, sc)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1076,13 +1118,142 @@ pub async fn window_at_point(
 // 签名逐字取自 `src/screenshot.rs`（生成方式：括号配平提取，避免手抄多行签名出错）。
 
 /// 对应 Windows 版：`clipboard_poll_image(last_hash: Option<String>)`
+///
+/// Linux：用 arboard 读图（文本路径早就在用 arboard，`pro-tools-kit/commands.rs:107`），
+/// 补齐「复制图片 → 进入剪贴板历史」这条。原来这里恒返回 `Ok(None)`，
+/// 前端的 1.5s 轮询永远拿不到图，等于图片历史在 Linux 上完全不可用。
+///
+/// 失败一律返回 `Ok(None)` 而不是 Err：前端在循环里调用，Err 会每秒刷一条错误；
+/// 读不到图（Wayland 无 data-control、剪贴板里不是图片）本来就是常见状态。
 #[tauri::command]
 pub async fn clipboard_poll_image(
-    _last_hash: Option<String>,
+    last_hash: Option<String>,
 ) -> Result<Option<ClipboardPollResult>, String> {
-    // 剪贴板轮询无内容可报：返回 Ok(None) 而不是 Err，让前端的轮询循环正常继续，
-    // 而不是每次都弹一条错误（Linux 上剪贴板能力同样缺失，但不应制造噪音）。
-    Ok(None)
+    #[cfg(target_os = "linux")]
+    {
+        return linux_poll_clipboard_image(last_hash);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = last_hash;
+        // 其他非 Windows 平台（Android/iOS/macOS）仍无实现：返回 Ok(None) 而不是 Err，
+        // 让前端的轮询循环正常继续，而不是每次都弹一条错误。
+        Ok(None)
+    }
+}
+
+/// 快速 hash：尺寸 + 首/中/尾各 256 字节。与 Windows 版同算法（`src/screenshot.rs` 的
+/// `clip_fast_image_hash`），保证同内容在两端得到同一个字符串，前端 `lastHash` 语义一致。
+#[cfg(target_os = "linux")]
+fn linux_clip_fast_hash(bytes: &[u8], w: u32, h: u32) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    w.hash(&mut hasher);
+    h.hash(&mut hasher);
+    let len = bytes.len();
+    let mid = len / 2;
+    let head = &bytes[..len.min(256)];
+    let middle = &bytes[mid..len.min(mid + 256)];
+    let tail = &bytes[len.saturating_sub(256)..];
+    head.hash(&mut hasher);
+    middle.hash(&mut hasher);
+    tail.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// RGBA → 临时 PNG 文件，返回绝对路径（与 Windows 版同命名规则）。
+#[cfg(target_os = "linux")]
+fn linux_clip_save_temp_png(bytes: &[u8], w: u32, h: u32) -> Result<String, String> {
+    use image::ImageEncoder as _;
+    use std::io::Write as _;
+    let mut buf = Vec::with_capacity(bytes.len() / 2 + 4096);
+    image::codecs::png::PngEncoder::new(&mut buf)
+        .write_image(bytes, w, h, image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("PNG 编码失败: {e}"))?;
+    let name = format!(
+        "andeng_clip_{}.png",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let path = std::env::temp_dir().join(name);
+    let mut f = std::fs::File::create(&path).map_err(|e| format!("创建临时文件失败: {e}"))?;
+    f.write_all(&buf).map_err(|e| format!("写入临时文件失败: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// 缩略图 data URL（JPEG 70%，最长边 120px）。
+#[cfg(target_os = "linux")]
+fn linux_clip_thumbnail(bytes: &[u8], w: u32, h: u32, max_size: u32) -> Result<String, String> {
+    use base64::Engine as _;
+    use image::ImageEncoder as _;
+    let img = image::RgbaImage::from_raw(w, h, bytes.to_vec()).ok_or("图片数据无效")?;
+    let dyn_img = image::DynamicImage::ImageRgba8(img);
+    let scale = (max_size as f32 / w.max(h) as f32).min(1.0);
+    let tw = (w as f32 * scale).round().max(1.0) as u32;
+    let th = (h as f32 * scale).round().max(1.0) as u32;
+    let thumb = dyn_img.resize(tw, th, image::imageops::FilterType::Nearest);
+    let rgba = thumb.to_rgba8();
+    let (tw2, th2) = rgba.dimensions();
+    let mut buf = Vec::with_capacity(8192);
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 70)
+        .write_image(&rgba.into_raw(), tw2, th2, image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("JPEG 编码失败: {e}"))?;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&buf)
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_poll_clipboard_image(
+    last_hash: Option<String>,
+) -> Result<Option<ClipboardPollResult>, String> {
+    // 抢到锁再读：arboard 的 Clipboard 是长驻的（X11 选区所有权模型要求写入方存活），
+    // 轮询与「写图到剪贴板」共用同一个实例，必须串行。
+    let (bytes, w, h) = {
+        let cb = match linux_clipboard() {
+            Ok(c) => c,
+            Err(e) => {
+                log_once_clip_err(&e);
+                return Ok(None);
+            }
+        };
+        let mut guard = match cb.lock() {
+            Ok(g) => g,
+            Err(_) => return Ok(None), // 锁中毒：不把 panic 往上抛
+        };
+        // 没有图片时 arboard 返回 Err(ContentNotAvailable)，属正常状态
+        let img = match guard.get_image() {
+            Ok(i) => i,
+            Err(_) => return Ok(None),
+        };
+        (img.bytes.into_owned(), img.width as u32, img.height as u32)
+    };
+    if w == 0 || h == 0 || bytes.len() < (w as usize * h as usize * 4) {
+        return Ok(None);
+    }
+
+    let hash_str = format!("{:016x}", linux_clip_fast_hash(&bytes, w, h));
+    if last_hash.as_deref() == Some(&hash_str) {
+        return Ok(None); // 没变化
+    }
+    let temp_path = linux_clip_save_temp_png(&bytes, w, h)?;
+    let thumbnail = linux_clip_thumbnail(&bytes, w, h, 120)?;
+    Ok(Some(ClipboardPollResult {
+        hash: hash_str,
+        temp_path,
+        thumbnail,
+    }))
+}
+
+/// 剪贴板读失败只记一次日志：前端每 1.5s 轮询一次，重复打印会淹没日志。
+#[cfg(target_os = "linux")]
+fn log_once_clip_err(msg: &str) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| eprintln!("[剪贴板] 读取图片失败（后续同类错误不再打印）: {msg}"));
 }
 
 /// 对应 Windows 版：`crop_native_rgba(x, y, w, h) -> Result<tauri::ipc::Response, String>`

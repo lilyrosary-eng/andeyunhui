@@ -139,6 +139,27 @@ pub enum Which {
     Favorite,
 }
 
+/// 只更新内存 + 落盘，不碰 portal。
+///
+/// 给 X11 会话用：那边走 `global-hotkey` 插件注册，不需要 portal 授权，
+/// 但状态仍要统一存这里（`get_*_shortcut` 从同一个地方读）。
+pub fn update(which: Which, value: String) {
+    if let Ok(mut g) = state().lock() {
+        match which {
+            Which::Screenshot => g.screenshot = value,
+            Which::Clipboard => g.clipboard = value,
+            Which::Dropzone => g.dropzone = value,
+            Which::Favorite => g.favorite = value,
+        }
+    }
+}
+
+/// X11 会话：`global-hotkey` 插件的 XGrabKey 可用，且不需要用户授权。
+/// Wayland 会话只能走 portal（XGrabKey 抓不到合成器独占的按键）。
+pub fn is_x11_session() -> bool {
+    matches!(std::env::var("XDG_SESSION_TYPE").as_deref(), Ok("x11"))
+}
+
 /// 更新一个字段并整组重新绑定。
 ///
 /// **首次**（启动时 setup 里那几次 register）走后台：否则 portal 的授权框会把主窗口启动
