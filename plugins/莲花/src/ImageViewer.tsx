@@ -761,14 +761,15 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
           const width = fileInfo?.width || loadedSize?.width || 0;
           const height = fileInfo?.height || loadedSize?.height || 0;
           const megapixels = width && height ? (width * height / 1_000_000) : 0;
+          const pendingText = fileInfoLoading ? T('image.viewer.info.loading') : '-';
           const rows = [
             { label: T('image.viewer.info.name'), value: fileNameFromPath(currentPath), title: currentPath },
-            { label: T('image.viewer.info.resolution'), value: width && height ? `${width} × ${height} px` : T('image.viewer.info.loading') },
+            { label: T('image.viewer.info.resolution'), value: width && height ? `${width} × ${height} px` : (fileInfoLoading ? T('image.viewer.info.loading') : '-') },
             { label: T('image.viewer.info.aspect'), value: width && height ? `${(width / height).toFixed(3)} : 1` : '-' },
             { label: T('image.viewer.info.megapixels'), value: megapixels ? megapixels.toFixed(2) + ' MP' : '-' },
-            { label: T('image.viewer.info.format'), value: fileInfo?.format || fileNameFromPath(currentPath).split('.').pop()?.toUpperCase() || '-' },
-            { label: T('image.viewer.info.size'), value: fileInfo ? formatFileSize(fileInfo.size) : '-' },
-            { label: T('image.viewer.info.modified'), value: fileInfo ? formatFileTime(fileInfo.modifiedAt) : '-' },
+            { label: T('image.viewer.info.format'), value: fileInfo?.format || (!fileInfoLoading ? fileNameFromPath(currentPath).split('.').pop()?.toUpperCase() || '-' : pendingText) },
+            { label: T('image.viewer.info.size'), value: fileInfo ? formatFileSize(fileInfo.size) : pendingText },
+            { label: T('image.viewer.info.modified'), value: fileInfo ? formatFileTime(fileInfo.modifiedAt) : pendingText },
             { label: T('image.viewer.info.zoom'), value: `${Math.round(zoomCamera.scale * 100)}%` },
           ];
           return (

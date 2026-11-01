@@ -98,7 +98,7 @@ pub fn get_image_file_info(path_str: &str) -> Result<ImageFileInfo, String> {
     let mut format = image_format_label(None, path);
 
     if let Ok(reader) = image::ImageReader::open(path) {
-        if let Ok(mut reader) = reader.with_guessed_format() {
+        if let Ok(reader) = reader.with_guessed_format() {
             let guessed = reader.format();
             format = image_format_label(guessed, path);
             if let Ok((w, h)) = reader.into_dimensions() {
