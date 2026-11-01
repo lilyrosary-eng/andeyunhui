@@ -336,7 +336,8 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
       .then(() => { if (alive) setNoteExists(true); })
       .catch(() => { if (alive) setNoteExists(false); });
     return () => { alive = false; };
-  }, [bookPath]);
+    // hlTab 进依赖：笔记可能在笔记模块里被删掉/改过，切回「笔记」tab 时按钮文案要重新对齐现实
+  }, [bookPath, hlTab]);
 
   useEffect(() => onHighlightsChanged((fp) => {
     if (bookPath && normPath(fp) === normPath(bookPath)) setHighlights(listHighlights(bookPath));
@@ -381,11 +382,20 @@ export function ReadingSidebar(props: ReadingSidebarProps) {
     const noteId = noteIdForBook(currentBook.filePath);
     try {
       const recs = listHighlights(currentBook.filePath);
+      // 回链用宿主的深链格式（宿主读正文并接管点击），插件只描述导航目标。
+      // 宿主没提供 buildDeepLink 时传 undefined，导出退化为注释标记 —— 不静默拼一条没人认的 URL。
       const md = buildReadingNoteMarkdown(
         currentBook.title,
         currentBook.filePath,
         currentBook.chapters.map((ch, i) => ({ index: i, id: ch.id, title: ch.title })),
         recs,
+        hostApi?.buildDeepLink
+          ? {
+              label: T('reading.notes.backlink'),
+              buildHref: (bookPath: string, highlightId: string) =>
+                hostApi.buildDeepLink!({ module: 'reading', entity: bookPath, props: { highlightId } }),
+            }
+          : undefined,
       );
       await hostApi.invoke('save_note', {
         noteId,

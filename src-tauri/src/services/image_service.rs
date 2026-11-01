@@ -80,7 +80,8 @@ fn image_format_label(format: Option<image::ImageFormat>, path: &Path) -> String
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_uppercase())
-            .unwrap_or_else(|| "未知".to_string()),
+            // 空串交给前端兜底：后端回传的字符串会直接显示在外语界面上
+            .unwrap_or_default(),
     }
 }
 

@@ -45,6 +45,7 @@ import {
   type NavigationTarget,
   type NavigatorHandler,
 } from '@/core/navigation/navigation';
+import { buildDeepLink } from '@/core/navigation/deepLink';
 
 // ========== 命令调用策略（能力制） ==========
 // 实际放行由 SandboxPolicy 决定：能力规则 ∩ 已授权能力 ∩（旧式 commands 收紧）。
@@ -215,6 +216,9 @@ function createSafeApi(pluginId: string, policy: SandboxPolicy) {
       }
       return navigateTo(target);
     },
+    // 深链生成：格式由宿主独占，插件只描述目标。笔记回链这类「要写进正文、明天还要能点」
+    // 的场景不能用 navigate（那是一次性事件），必须拿到一条 URL 字符串。
+    buildDeepLink: (target: NavigationTarget) => buildDeepLink(target),
     // 帧缓冲工具：高频数据推送批处理，避免渲染风暴
     createFrameBuffer: createFrameBuffer,
     // 创建浮窗窗口（前端 WebviewWindow API，规避 sync 命令中 build 导致的主线程重入死锁）

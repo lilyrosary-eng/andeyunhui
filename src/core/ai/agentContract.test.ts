@@ -42,7 +42,11 @@ describe('agent 组装（ai_agent.rs）', () => {
   });
 
   it('联网开关只过滤 web_search，其余工具常开', () => {
-    expect(src).toMatch(/tool_schemas_for_api_without\(&\["web_search"\]\)/);
+    // 排除集自 2026-10-31（fb42caf 原生视觉路由）起改成动态累积：联网开关 + 视觉兜底 +
+    // 未配置的媒体后端 + 运行时失败禁用。断言跟着钉「事实」而不是钉字面调用形式：
+    // 开关只往集合里塞 web_search，组装仍走统一函数。
+    expect(src).toMatch(/if\s*!web_search\s*\{[^}]*excluded_tools\.push\("web_search"\.into\(\)\)/);
+    expect(src).toMatch(/tool_schemas_for_api_without\(&excluded\)/);
   });
 
   it('工程硬约束还在（2026-10-29 上移到主机级默认规则 adyh_service.rs）', () => {

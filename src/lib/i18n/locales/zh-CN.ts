@@ -1264,6 +1264,7 @@ export const zhCN: Record<string, string> = {
   'reading.notes.update': '更新读书笔记',
   'reading.notes.exportFailed': '导出失败，请稍后重试',
   'reading.notes.openNote': '打开笔记',
+  'reading.notes.backlink': '回到原文',
   'reading.notes.stale': '原文已变化',
   'reading.notes.noteTitle': '{title} 读书笔记',
   'reading.notes.notePlaceholder': '写下批注…',
@@ -1347,6 +1348,7 @@ export const zhCN: Record<string, string> = {
   'image.viewer.info.zoom': '显示缩放',
   'image.viewer.info.loading': '读取中…',
   'image.viewer.info.error': '文件信息读取失败',
+  'image.viewer.resetZoom': '重置缩放',
 
   // ============ 玉兰 · 视频模块 ============
   'video.title': '玉兰',

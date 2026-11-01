@@ -201,7 +201,7 @@ export function VideoPlayer({ file, videoList, onFileChange, onBack, settings, o
       return undefined;
     }
     hostApi.invoke('media_http_url', { path: p })
-      .then((u: string) => { if (!cancelled) setResolvedLocal(u); })
+      .then((u) => { if (!cancelled) setResolvedLocal(String(u)); })
       .catch((e: unknown) => {
         console.warn('[video] media_http_url 失败，回退 asset://（大概率仍放不了）:', e);
         if (!cancelled) setResolvedLocal(hostApi.convertFileSrc(p));

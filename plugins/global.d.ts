@@ -62,6 +62,11 @@ declare global {
       registerNavigator?: (handler: (target: NavigationTarget) => boolean | void | Promise<boolean | void>) => () => void;
       /** 跳到任意模块的 tab / 实体 */
       navigate?: (target: NavigationTarget) => Promise<boolean>;
+      /**
+       * 生成宿主深链（`andy-nav:///…`）：把导航目标变成一条能写进正文、明天还能点的 URL。
+       * 与 navigate 的分工：navigate 是一次性动作，深链是可持久化的文本。
+       */
+      buildDeepLink?: (target: NavigationTarget) => string;
     };
     __PLUGIN_REGISTRY__: {
       register: (def: {

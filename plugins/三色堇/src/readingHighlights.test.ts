@@ -166,6 +166,24 @@ describe('读书笔记 Markdown 导出（幂等）', () => {
     expect(md).toContain('第二章批注');
   });
 
+  it('给回链生成器时每条高亮换成可点深链，不再输出注释标记', () => {
+    const recs = records();
+    const seen: Array<[string, string]> = [];
+    const md = buildReadingNoteMarkdown('三体', BOOK, chapters, recs, {
+      label: '回到原文',
+      buildHref: (bookPath, highlightId) => {
+        seen.push([bookPath, highlightId]);
+        return `andy-nav:///reading?e=${encodeURIComponent(bookPath)}&highlightId=${highlightId}`;
+      },
+    });
+    expect(md).not.toContain('<!-- highlight:');
+    expect(seen.length).toBe(3);
+    for (const h of recs) {
+      expect(seen).toContainEqual([BOOK, h.id]);
+      expect(md).toContain(`[回到原文](andy-nav:///reading?e=${encodeURIComponent(BOOK)}&highlightId=${h.id})`);
+    }
+  });
+
   it('stale 高亮不进正文，但空列表仍生成合法笔记', () => {
     const recs = records();
     recs[0] = { ...recs[0], stale: true };

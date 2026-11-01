@@ -37,10 +37,16 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function formatFileTime(seconds: number): string {
+function formatFileTime(seconds: number, locale?: string): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return '-';
   const date = new Date(seconds * 1000);
-  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
+  if (Number.isNaN(date.getTime())) return '-';
+  // 跟随应用语言而不是浏览器语言：否则中文界面里会出现美式日期格式
+  try {
+    return date.toLocaleString(locale || undefined);
+  } catch {
+    return date.toLocaleString();
+  }
 }
 
 function fileNameFromPath(path: string): string {
@@ -685,7 +691,7 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
         {viewMode === 'full' && Math.abs(zoomCamera.scale - 1) > 0.001 && (
           <button
             onClick={() => resetZoom()}
-            title="重置缩放"
+            title={T('image.viewer.resetZoom')}
             className="mr-2 px-2 py-0.5 rounded-md text-[11px] tabular-nums text-neutral-500 dark:text-stone-400 bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
           >
             {Math.round(zoomCamera.scale * 100)}%
@@ -762,14 +768,18 @@ export function ImageViewer({ folderPath, folderName, onBack, initialPath }: Ima
           const height = fileInfo?.height || loadedSize?.height || 0;
           const megapixels = width && height ? (width * height / 1_000_000) : 0;
           const pendingText = fileInfoLoading ? T('image.viewer.info.loading') : '-';
+          const notReady = (v: string) => (width && height ? v : pendingText);
+          const locale = (() => {
+            try { return window.__HOST_I18N__?.getLanguage?.() || undefined; } catch { return undefined; }
+          })();
           const rows = [
             { label: T('image.viewer.info.name'), value: fileNameFromPath(currentPath), title: currentPath },
-            { label: T('image.viewer.info.resolution'), value: width && height ? `${width} × ${height} px` : (fileInfoLoading ? T('image.viewer.info.loading') : '-') },
-            { label: T('image.viewer.info.aspect'), value: width && height ? `${(width / height).toFixed(3)} : 1` : '-' },
-            { label: T('image.viewer.info.megapixels'), value: megapixels ? megapixels.toFixed(2) + ' MP' : '-' },
+            { label: T('image.viewer.info.resolution'), value: width && height ? `${width} × ${height} px` : pendingText },
+            { label: T('image.viewer.info.aspect'), value: notReady(`${(width / height).toFixed(3)} : 1`) },
+            { label: T('image.viewer.info.megapixels'), value: notReady(`${megapixels.toFixed(2)} MP`) },
             { label: T('image.viewer.info.format'), value: fileInfo?.format || (!fileInfoLoading ? fileNameFromPath(currentPath).split('.').pop()?.toUpperCase() || '-' : pendingText) },
             { label: T('image.viewer.info.size'), value: fileInfo ? formatFileSize(fileInfo.size) : pendingText },
-            { label: T('image.viewer.info.modified'), value: fileInfo ? formatFileTime(fileInfo.modifiedAt) : pendingText },
+            { label: T('image.viewer.info.modified'), value: fileInfo ? formatFileTime(fileInfo.modifiedAt, locale) : pendingText },
             { label: T('image.viewer.info.zoom'), value: `${Math.round(zoomCamera.scale * 100)}%` },
           ];
           return (

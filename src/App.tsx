@@ -16,6 +16,7 @@ import { GoldChessboardHub } from '@/components/GoldChessboardHub';
 import { CommandPalette } from '@/components/command-palette/CommandPalette';
 import { initHostCommandProviders } from '@/core/commandPalette/hostProviders';
 import { setModuleActivator } from '@/core/navigation/navigation';
+import { attachDeepLinkClickHandler } from '@/core/navigation/deepLink';
 import TransferReceiveModal from '@/components/TransferReceiveModal';
 import { logger } from '@/lib/logger';
 import { api } from '@/lib/api';
@@ -63,9 +64,10 @@ function App() {
     return unregister;
   }, []);
 
-  // 统一导航契约需要宿主提供「切模块」能力
+  // 统一导航契约需要宿主提供「切模块」能力；正文里的 andy-nav: 深链由同一个入口接管
   useEffect(() => {
     setModuleActivator((moduleId) => useAppStore.getState().setActiveModule(moduleId));
+    return attachDeepLinkClickHandler();
   }, []);
 
   // 热重载生效：当前活动模块被重新注册时，强制重挂其组件（画布重新初始化，给出可见反馈）。

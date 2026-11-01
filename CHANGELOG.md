@@ -1,7 +1,7 @@
 # 更新日志 / Changelog
 
 > 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本（SemVer）。
-> 本文件记录主要版本的演进。当前可构建版本为 2.4.0（Windows 桌面端，NSIS 安装包）；Android 端代码与桌面端同在 `main` 维护，仍是规划目标，尚未正式发布。稳定性与覆盖面仍在持续打磨，升级前请备份个人数据。
+> 本文件记录主要版本的演进。当前可构建版本以 `src-tauri/tauri.conf.json` 为准（现 2.4.2，Windows 桌面端，NSIS 安装包）；Android 端代码与桌面端同在 `main` 维护，仍是规划目标，尚未正式发布。稳定性与覆盖面仍在持续打磨，升级前请备份个人数据。
 > **版本号唯一真源**：`src-tauri/tauri.conf.json` 的 `version`。`package.json` 与 `src-tauri/Cargo.toml` 的 `version` 必须同步为同一值（历史上后两者长期停留在 `0.1.0`，2026-10-18 已对齐到 2.4.0）。
 
 ## [Unreleased] - 工程化加固（未发布）
@@ -92,6 +92,49 @@
 - `README.md` / `CHANGELOG.md`：订正 Android 分支说法——`feat/android-v1` 分支在本地与远程均不存在，移动端代码一直与桌面端同在 `main` 维护。
 - `ROADMAP.md`：上一版冻结于 2026-07-09，与实际进度严重脱节，已按 2026-10-18 实测重写；同时从 `.gitignore` 放行（路线图不进库等于没有）。
 - `docs/PERFORMANCE_REPORT.md` 从 `.gitignore` 放行（`docs/*` 仍忽略，只放行这一个文件）。
+
+## [Unreleased] - 四条功能线补齐与逐线核验（未发布）
+
+> 2026-11-01 把「图片信息 / 音乐无缝 / RAG 重排 / 阅读↔笔记」四条线逐条核验：
+> 做完的给证据，只做一半的补完，顺带修掉两条长期红的质量门（`typecheck:plugins`、agent 契约测试）。
+
+### 新增
+- **笔记 → 原文高亮的回链（跨模块深链）**：`src/core/navigation/deepLink.ts` 定义 `andy-nav:///<module>?e=<entity>&<prop>=<value>`。
+  格式由宿主独占，插件经新增的 `hostApi.buildDeepLink` 生成 —— 两侧各自拼串迟早会漂，所以不给插件手搓 URL 的余地。
+  点击由 `attachDeepLinkClickHandler()`（App 启动挂载）在 document 捕获阶段接管：预览区 HTML 是 `dangerouslySetInnerHTML`
+  注入的挂不了 React onClick，而渲染器给每条链接都加了 `target="_blank"`，不拦就是开新窗口。props 一律是字符串，
+  需要数字的模块自己转（导航处理器本来就要容忍脏值）。
+  - 阅读模块导出读书笔记时，每条高亮下面从「看不见的 HTML 注释」换成一条能点的「回到原文」：点开 → 切到阅读模块
+    → 按 highlightId 反查章节 → 翻页/滚动定位并闪现 1.6s。宿主没提供 `buildDeepLink` 时退回注释，不静默产出一条没人认的 URL。
+  - 这补上了此前只有单向（高亮 → 笔记）的联动。测试：`deepLink.test.ts` 10 项 + 导出回链 1 项（钉住每条高亮都带自己的 id）。
+- **RAG 检索重排补记**（代码本体在 `8bac29f`，此前 CHANGELOG 一直没记这条）：设置卡片 → `rerank-config` → `retriever.applyRerank`
+  → `rag_rerank_api` → Rust `rag_service.rs` 逐环闭合；未开启时不发任何请求，失败/超时/空返回一律降级回向量序并守住 finalK。
+
+### 修复
+- **图片信息面板**（功能本体在 `e330426` / `89f47af`）：宽高比与像素量在元数据返回前不再显示 `-` 而跟着显示「读取中…」；
+  修改时间改用应用语言（原先跟随浏览器语言，中文界面里会冒出美式日期）；Rust 不再回传硬编码中文 `"未知"`
+  （那串会直接显示在外语界面上），改由前端兜底；顶栏「重置缩放」提示补进 7 语 i18n。
+- **音乐无缝 —— 在线曲地址迟到时不再干等**：地址由队列侧异步补全，而 `updateTrackUrl` 补完之后此前只能等
+  下一次 timeupdate 才想起预取 —— 窗口在后台时 timeupdate 会被节流，越过曲尾的预取窗口就等于这首永远走回退链路
+  （体感就是「在线曲不无缝」）。现在地址一到位就重试一次预取（`maybeStartPrefetch` 自带开关/播放中/已在预取判据，重复调用无副作用）。
+- **`typecheck:plugins` 长期红**：`plugins/玉兰/src/VideoPlayer.tsx` 把 `invoke` 的 `unknown` 返回直接标成 `(u: string)`（`8d11d02` 引入）。
+  插件 tsconfig 是 CI 门，它长期红着等于这道门形同虚设。
+- **agent 契约测试假失败**：`fb42caf`（2026-10-31 原生视觉路由）把工具排除集从字面 `&["web_search"]` 改成动态累积集合，
+  测试钉的却是旧字面串 → 改为钉事实：联网开关只往集合里塞 `web_search`，组装仍走统一的 `tool_schemas_for_api*`。
+
+### 有意不做（记录决策）
+- **高亮/批注自动同步到笔记**：笔记是用户可编辑的正文，任何自动重写都会吃掉他们的改动，因此导出保持「更新」按钮手动触发，
+  反向只给「点了回原文」而不是「双向搬内容」。
+- **样本级 gapless（编码器 priming / 尾音补齐）**：需要 Rust 侧解码 + 逐样本排期。音乐无缝仍是
+  「第二元素预缓冲 + 元素交换 + 120ms 交叉淡化」的第一阶段，文件头自注的第二阶段未开工。
+
+### 逐线核验状态
+| 线 | 结论 | 已有证据 | 剩余缺口 |
+|---|---|---|---|
+| 图片信息 | 完成 | 命令注册 `main.rs:1802` / 能力 `plugin_access.rs:50` / manifest 已声明；`tsc ×2`、`vitest`、`cargo check` 全绿 | 无 EXIF 与色彩空间；滚动三模式与沉浸态没有信息入口（设计如此）；这条链路无自动化测试 |
+| 音乐无缝 | 半完成（本轮补了地址迟到） | 逻辑走查 + 编译/单测门；开关、i18n、回退、竞态守卫齐备 | **未实机听过**：120ms 交叉淡化在 WebView2 / WebKitGTK 上是否真的无空白无爆音，只能由人耳验收；样本级 gapless 未做 |
+| RAG 重排 | 完成（链路闭合） | `pnpm test:rust` 重排 8 项单测全绿（Cohere / TEI / Ollama 三种形状、index 越界与重复、超时钳制）；i18n 7 语各 24 个 key 齐全 | **未对真实端点实测**；`auto` 靠供应商档案名含 rerank/ranker，近乎只有手动模式可用；宿主自有检索链路（`semanticMemory`）没接重排 |
+| 阅读 ↔ 笔记 | 反向本轮补完 | 553 项单测（含新增 11 项）；权限链 manifest → `plugin_access.rs` → 沙箱 `policyAllows` 三段都放开 | 定位依赖 chapterId，而宿主 chapterId 实为位置号（`reading_service.rs:635`），重切章节会漂；横版/双栏不能建高亮；导出仍需手动「更新」 |
 
 ## [2.4.0] - 当前构建版本（Windows 桌面端）
 

@@ -1260,6 +1260,7 @@ export const enUS: Record<string, string> = {
   'reading.notes.update': 'Update reading notes',
   'reading.notes.exportFailed': 'Export failed, please try again',
   'reading.notes.openNote': 'Open note',
+  'reading.notes.backlink': 'Back to text',
   'reading.notes.stale': 'Source changed',
   'reading.notes.noteTitle': '{title} Reading Notes',
   'reading.notes.notePlaceholder': 'Write an annotation…',
@@ -1343,6 +1344,7 @@ export const enUS: Record<string, string> = {
   'image.viewer.info.zoom': 'Zoom',
   'image.viewer.info.loading': 'Loading…',
   'image.viewer.info.error': 'File information unavailable',
+  'image.viewer.resetZoom': 'Reset zoom',
 
   // ============ Magnolia · Video Module ============
   'video.title': 'Videos',

@@ -336,15 +336,27 @@ export interface NoteChapter {
   title: string;
 }
 
+/** buildReadingNoteMarkdown 的可选回链参数（不传则退化为纯 HTML 注释标记） */
+export interface NoteBacklinkOptions {
+  /** 链接文案（由调用方经宿主 i18n 取，保持本函数纯文本拼接） */
+  label?: string;
+  /**
+   * 生成「点了就回原文」的深链。格式归宿主所有（hostApi.buildDeepLink），
+   * 插件只描述目标 —— 两侧各自拼串迟早会漂，故这里不接受手写的 href 模板。
+   */
+  buildHref?: (bookPath: string, highlightId: string) => string;
+}
+
 /**
  * 生成「读书笔记」Markdown（纯函数、确定性输出 → 同输入两次导出内容逐字节一致，幂等）。
- * 按章分组；每条高亮：引用原文 + 批注 + HTML 注释（内嵌高亮 id，回链用）。
+ * 按章分组；每条高亮：引用原文 + 批注 + 回链（点了跳回原文那条高亮）。
  */
 export function buildReadingNoteMarkdown(
   bookTitle: string,
   filePath: string,
   chapters: NoteChapter[],
   items: HighlightRecord[],
+  backlink?: NoteBacklinkOptions,
 ): string {
   const noteId = noteIdForBook(filePath);
   const live = items.filter((h) => !h.stale);
@@ -380,6 +392,7 @@ export function buildReadingNoteMarkdown(
     ordered.push({ c: { index: -1, id: '', title: '未归章' }, list: sortRecords(orphans) });
   }
 
+  const label = backlink?.label || '↗';
   for (const g of ordered) {
     lines.push(`## ${g.c.index + 1}. ${g.c.title || `第 ${g.c.index + 1} 章`}`);
     lines.push('');
@@ -390,7 +403,9 @@ export function buildReadingNoteMarkdown(
         lines.push(`> —— ${h.note.trim().replace(/\n/g, '\n> —— ')}`);
       }
       lines.push('');
-      lines.push(`<!-- highlight:${h.id} · ${h.color} -->`);
+      lines.push(backlink?.buildHref
+        ? `[${label}](${backlink.buildHref(filePath, h.id)})`
+        : `<!-- highlight:${h.id} · ${h.color} -->`);
       lines.push('');
     }
   }
